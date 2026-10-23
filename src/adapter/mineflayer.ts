@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Config } from '../config.ts';
 import type { EventBus } from '../events.ts';
-import { AbortedError, raceAbort, shortId, sleep, throwIfAborted } from '../util.ts';
+import { AbortedError, raceAbort, shortId, sleep, throwIfAborted, TimeoutError } from '../util.ts';
 import type {
   ActionResult,
   AgentState,
@@ -574,22 +574,45 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   }
 
   async collectNearbyDrops(signal: AbortSignal, radius: number, timeoutMs: number): Promise<number> {
-    const check = this.actionCheckpoint(signal);
+    let check = this.actionCheckpoint(signal);
+    const bot = this.bot, session = this.sessionId, dimension = this.currentDimension();
     const start = Date.now();
+    const deadline = start + Math.max(0, timeoutMs);
+    const initialScanUntil = Math.min(deadline, start + 300);
     let picked = 0;
     const tried = new Set<number>();
-    while (Date.now() - start < timeoutMs) {
+    while (Date.now() < deadline) {
       throwIfAborted(signal);
       const item = this.nearbyEntities(radius).find((e) => e.kind === 'item' && !tried.has(e.id));
-      if (!item) break;
+      if (!item) {
+        // block_update can arrive before item_spawn; briefly allow that first
+        // drop to become observable without turning collection into a long wait.
+        const graceLeft = initialScanUntil - Date.now();
+        if (!tried.size && graceLeft > 0) {
+          await this.afterAction(() => sleep(Math.min(100, graceLeft), signal), check);
+          continue;
+        }
+        break;
+      }
       tried.add(item.id);
+      const moveEpoch = this.actionEpoch;
       try {
-        await this.afterAction(() => this.moveTo({ kind: 'near', pos: item.pos, range: 1 }, { signal, timeoutMs: Math.max(1000, Math.min(5000, timeoutMs - (Date.now() - start))) }), check);
+        await this.afterAction(() => this.moveTo({ kind: 'near', pos: item.pos, range: 1 }, { signal, timeoutMs: Math.max(1, Math.min(5000, deadline - Date.now())) }), check);
         picked++;
       } catch (e: any) {
         if (e?.name === 'AbortedError') throw e;
+        if (e instanceof TimeoutError && this.actionEpoch === moveEpoch + 1) {
+          // The pickup path's own timeout calls stopAll to block late movement.
+          // Keep this best-effort collection alive, while its old path stays
+          // invalidated and an actual task/session cancellation still exits.
+          throwIfAborted(signal);
+          if (bot !== this.bot || session !== this.sessionId || dimension !== this.currentDimension()) throw new AbortedError('action ownership changed');
+          check = this.actionCheckpoint(signal);
+        }
       }
-      await this.afterAction(() => sleep(200, signal), check);
+      const waitMs = Math.min(200, deadline - Date.now());
+      if (waitMs > 0) await this.afterAction(() => sleep(waitMs, signal), check);
+      else check();
     }
     return picked;
   }

@@ -15,7 +15,7 @@ interface MemoryExtensions {
   currentIntent?: () => { text: string } | undefined;
   lessons?: (limit?: number) => { ts: number; text: string }[];
 }
-const EXPERIENCE_EVENTS = new Set(['discovery', 'death', 'goal_end', 'built']);
+const EXPERIENCE_EVENTS = new Set(['discovery', 'death', 'attempt_end', 'goal_end', 'built']);
 const INFERENCE_EVENTS = new Set(['lesson', 'objective', 'skill_learned']);
 const ARCHIVE_WINDOW = 2000;
 const ARCHIVE_TAIL_BYTES = 8 * 1024 * 1024;

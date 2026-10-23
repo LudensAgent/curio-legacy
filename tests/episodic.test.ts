@@ -52,14 +52,14 @@ test('episodic: only meaningful events are retained and model interpretations re
   };
   x.service.start();
   for (const type of ['tick', 'hurt', 'chat', 'memory_status']) x.bus.publish(type, 'P3', 'irrelevant');
-  for (const type of ['discovery', 'death', 'goal_end', 'built', 'lesson', 'objective', 'skill_learned']) x.bus.publish(type, 'P2', type);
-  await until(() => x.service.snapshot().queued === 0 && x.backend.retained.length === 7);
+  for (const type of ['discovery', 'death', 'attempt_end', 'goal_end', 'built', 'lesson', 'objective', 'skill_learned']) x.bus.publish(type, 'P2', type);
+  await until(() => x.service.snapshot().queued === 0 && x.backend.retained.length === 8);
   assert.deepEqual(x.backend.retained.map((e) => [e.source, e.kind]), [
-    ['discovery', 'experience'], ['death', 'experience'], ['goal_end', 'experience'], ['built', 'experience'],
+    ['discovery', 'experience'], ['death', 'experience'], ['attempt_end', 'experience'], ['goal_end', 'experience'], ['built', 'experience'],
     ['lesson', 'inference'], ['objective', 'inference'], ['skill_learned', 'inference'],
   ]);
   assert.ok(x.backend.retained.every((e) => e.worldId === 'fake-world' && e.dimension === 'overworld'));
-  assert.equal(new Set(x.backend.retained.map((e) => e.id)).size, 7);
+  assert.equal(new Set(x.backend.retained.map((e) => e.id)).size, 8);
   const registry = fs.readFileSync(path.join(x.dataDir, 'memory', 'backends.json'), 'utf8');
   assert.ok(!registry.includes(x.config.apiKey));
 });

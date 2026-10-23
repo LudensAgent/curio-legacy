@@ -172,7 +172,7 @@
   <section>
     <h2>记忆</h2>
     <div class="row"><span>已访问区块 / 已见方块·实体·群系</span><span id="seen" class="mono">-</span></div>
-    <div class="sub">最近目标</div>
+    <div class="sub">最近尝试</div>
     <ul class="plain" id="goals"></ul>
     <div class="sub">地标</div>
     <ul class="plain" id="lms"></ul>
@@ -271,7 +271,7 @@ function render(s) {
   $('stack').innerHTML = seg(w.task, 'var(--grass)') + seg(w.filler, 'var(--blue)') + seg(w.reflex, 'var(--violet)') + seg(w.idle, 'var(--red)') + seg(w.paused + w.offline, '#e6e6e6');
   $('counters').innerHTML = [
     `运行 ${Math.floor(m.uptimeSec / 60)}m · 移动 ${m.distance} 格 · 发现 ${m.discoveries} · 死亡 ${m.deaths}`,
-    `任务 ✓${m.tasks.succeeded} ✗${m.tasks.failed} ⊘${m.tasks.cancelled} · 目标 ✓${m.goals.succeeded} ✗${m.goals.failed}`,
+    `任务 ✓${m.tasks.succeeded} ✗${m.tasks.failed} ⊘${m.tasks.cancelled} · ${ex.mode === 'autonomous' ? `尝试 ✓${m.attempts?.succeeded ?? 0} ✗${m.attempts?.failed ?? 0} · 已验收目标 ${m.goals.succeeded}` : `目标 ✓${m.goals.succeeded} ✗${m.goals.failed}`}`,
     `计划 LLM ${m.plans.llm} / 规则 ${m.plans.rule} · LLM 调用 ${m.llm.calls}（错误 ${m.llm.errors}，无效 ${m.llm.invalid}，近 1h ${m.llm.callsLastHour}/${m.llm.maxCallsPerHour}）`,
     `卡死 ${m.stuck} · 反射触发 ${m.reflexTriggers} · 拦截残留动作 ${m.blockedActions}`,
     Object.keys(m.failCodes).length ? `失败码 ${esc(JSON.stringify(m.failCodes))}` : '',

@@ -28,6 +28,7 @@ export class Metrics {
   counters = {
     tasks: { succeeded: 0, failed: 0, cancelled: 0 },
     failCodes: {} as Record<string, number>,
+    attempts: { succeeded: 0, failed: 0, other: 0 },
     goals: { succeeded: 0, failed: 0, other: 0 },
     discoveries: 0,
     deaths: 0,
@@ -61,6 +62,10 @@ export class Metrics {
       const st = d.status as 'succeeded' | 'failed' | 'cancelled';
       this.counters.tasks[st]++;
       if (d.failureCode) this.counters.failCodes[String(d.failureCode)] = (this.counters.failCodes[String(d.failureCode)] ?? 0) + 1;
+    } else if (ev.type === 'attempt_end') {
+      if (d.status === 'succeeded') this.counters.attempts.succeeded++;
+      else if (d.status === 'failed') this.counters.attempts.failed++;
+      else this.counters.attempts.other++;
     } else if (ev.type === 'goal_end') {
       if (d.status === 'succeeded') this.counters.goals.succeeded++;
       else if (d.status === 'failed') this.counters.goals.failed++;
@@ -107,7 +112,7 @@ export class Metrics {
     const win = this.samples.filter((x) => now - x.t <= 600_000);
     const byCat: Record<Cat, number> = { task: 0, filler: 0, reflex: 0, idle: 0, paused: 0, offline: 0 };
     for (const x of win) byCat[x.cat]++;
-    const llmSamples = this.samples.filter((x) => x.llm && x.cat !== 'offline' && x.cat !== 'paused');
+    const llmSamples = win.filter((x) => x.llm && x.cat !== 'offline' && x.cat !== 'paused');
     const llmActive = llmSamples.filter((x) => x.cat === 'task' || x.cat === 'filler' || x.cat === 'reflex').length;
     const lat = [...this.planner.stats.latencies].sort((a, b) => a - b);
     const t = this.counters.tasks;
@@ -121,6 +126,7 @@ export class Metrics {
       taskSuccessRate: done ? t.succeeded / done : null,
       tasks: t,
       failCodes: this.counters.failCodes,
+      attempts: this.counters.attempts,
       goals: this.counters.goals,
       plans: { llm: this.counters.plansLlm, rule: this.counters.plansRule },
       discoveries: this.counters.discoveries,

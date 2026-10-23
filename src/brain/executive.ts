@@ -8,7 +8,7 @@ import type { Planner } from '../planner/planner.ts';
 import type { PlanContext } from '../planner/prompt.ts';
 import { ProjectCoordinator } from '../projects/coordinator.ts';
 import { observationReady } from '../projects/conditions.ts';
-import type { Binding, PauseReason } from '../projects/types.ts';
+import type { Binding, PauseReason, Project } from '../projects/types.ts';
 import { SKILLS } from '../skills/index.ts';
 import { buildingArchiveFor } from '../skills/build.ts';
 
@@ -45,6 +45,7 @@ export class Executive {
   private attemptStarted = false;
   private crossing = false;
   private results: { skill: string; status: string; summary: string; data?: Record<string, unknown> }[] = [];
+  private completedProjects = new Set<string>();
 
   constructor(private d: ExecutiveDeps) {
     this.d.memory.setWorld(d.adapter.state().worldId);
@@ -79,6 +80,7 @@ export class Executive {
     this.inFlight = false;
     this.inFlightReason = '';
     this.queued = null;
+    if (this.d.arbiter.info()?.source === 'filler') this.d.arbiter.cancel(reason);
   }
 
   private suspend(reason: PauseReason) {
@@ -129,10 +131,22 @@ export class Executive {
       if (this.d.planner.autonomous) this.discardPlan('反射结束，重新观察并决定剩余工作');
     }
     const before = this.projects.currentBinding();
-    this.projects.reconcile(state);
-    if (JSON.stringify(before) !== JSON.stringify(this.projects.currentBinding())) {
+    const project = this.projects.reconcile(state);
+    this.reportProjectCompletion(project);
+    const binding = this.projects.currentBinding();
+    if (JSON.stringify(before) !== JSON.stringify(binding)) {
       this.invalidate('milestone_changed');
-      this.discardPlan('验收检查点已变化，重新决定下一步');
+      if (project?.status === 'active' && before.intentId === binding.intentId && before.projectId === binding.projectId
+        && before.revision === binding.revision && this.plan) {
+        // A checkpoint advancing does not revoke already approved work. Only
+        // speculative choices based on the old checkpoint need to be dropped.
+        this.plan.binding = binding;
+        this.plan.generation = this.generation;
+        this.d.bus.publish('milestone', 'P2', `项目「${project.title}」检查点已推进，继续当前步骤`, { binding });
+      } else if (project?.status === 'completed' && this.plan?.binding?.projectId === project.id) {
+        if (this.d.arbiter.info()?.planId === this.plan.id) this.d.arbiter.cancel('项目已按实际状态验收完成');
+        this.finishPlan('succeeded', '项目已按实际状态验收完成', false);
+      } else this.discardPlan('验收检查点已变化，重新决定下一步');
     }
     this.checkAbort(state.hp, state.isDay);
     const reason = this.requestReason(this.d.arbiter.info());
@@ -145,7 +159,10 @@ export class Executive {
     if (!this.plan) return this.d.memory.activeProject()?.status === 'blocked' ? 'project_blocked' : 'no_goal';
     if (this.plan.index < this.plan.steps.length) return null;
     if (cur?.planId !== this.plan.id) return null;
-    if (this.d.planner.autonomous && !this.plan.binding?.milestoneId) return null;
+    // Start the next autonomous choice while its last approved step is still
+    // running. Skill deadlines are safety limits, not duration estimates, and
+    // waiting for half a deadline often leaves the entire model call idle.
+    if (this.d.planner.autonomous) return 'prefetch';
     const frac = (Date.now() - cur.startedAt) / Math.max(1, cur.deadline - cur.startedAt);
     return cur.progress >= 0.6 || frac >= 0.5 ? 'prefetch' : null;
   }
@@ -195,6 +212,7 @@ export class Executive {
       if (this.d.planner.autonomous) {
         this.projects.pause('model_unavailable');
         this.suspended.add('model_unavailable');
+        if (this.d.arbiter.info()?.source === 'filler') this.d.arbiter.cancel('决策不可用，等待重试');
         this.d.bus.publish('llm_error', 'P1', `决策暂不可用：${error}；保留意图与证据，等待重试`);
       } else {
         this.d.bus.publish('llm_error', 'P1', `兼容模式规划失败：${error}，使用规则目标`);
@@ -271,7 +289,15 @@ export class Executive {
     } else if (!this.d.planner.autonomous) {
       const filler = this.fillerToggle++ % 2 === 0 ? { skill: 'look_around', args: { seconds: 4 } } : { skill: 'wander', args: { radius: 6 } };
       this.d.arbiter.start(filler, 'filler');
-    }
+    } else this.keepThinkingActive();
+  }
+
+  private keepThinkingActive() {
+    if (!this.timer || !this.inFlight || this.paused || this.suspended.size || this.plan || this.queued || this.d.arbiter.info()
+      || !observationReady(this.d.adapter.state())) return;
+    // Observe from the current position without choosing another gameplay goal
+    // or consuming materials. A decision, interruption or error cancels this.
+    this.d.arbiter.start({ skill: 'look_around', args: { seconds: 4 } }, 'filler');
   }
 
   private finishPlan(status: string, summary: string, attempt = true) {
@@ -281,6 +307,8 @@ export class Executive {
     const state = this.d.adapter.state();
     if (attempt && this.attemptStarted && p.binding?.projectId && this.projects.isBindingCurrent(p.binding)) {
       const reconciled = this.projects.recordAttempt({ executed: true, cancelled: ['cancelled', 'replaced', 'aborted'].includes(status), reason: summary }, state);
+      if (reconciled?.status === 'completed') this.invalidate('project_completed');
+      this.reportProjectCompletion(reconciled);
       if (reconciled?.status === 'blocked') {
         this.invalidate('project_blocked');
         this.d.bus.publish('project_blocked', 'P1', '连续三次实际尝试没有进展，保留意图并请求新的选择');
@@ -290,7 +318,16 @@ export class Executive {
     const steps = p.steps.map((st) => { const a = (st.args ?? {}) as Record<string, unknown>; const key = a.block ?? a.item ?? a.blueprint ?? a.crop ?? a.target ?? a.animal ?? a.direction ?? ''; return key ? `${st.skill}:${key}` : st.skill; });
     this.d.memory.recordGoal({ goal: p.goal, goalType: p.goalType, source: p.source, status, summary, durationSec, steps, plan: p.steps, worldId: state.worldId, dimension: state.dim });
     this.d.onGoalEnd?.(status);
-    this.d.bus.publish('goal_end', status === 'succeeded' ? 'P2' : 'P1', `尝试「${p.goal}」→ ${status}：${summary}`, { planId: p.id, status });
+    const type = this.d.planner.autonomous ? 'attempt_end' : 'goal_end';
+    this.d.bus.publish(type, status === 'failed' ? 'P1' : 'P3', `尝试「${p.goal}」→ ${status}：${summary}`, { planId: p.id, status, binding: p.binding });
+  }
+
+  private reportProjectCompletion(project: Project | undefined) {
+    if (project?.status !== 'completed' || this.completedProjects.has(project.id)) return;
+    this.completedProjects.add(project.id);
+    this.d.bus.publish('goal_end', 'P2', `项目「${project.title}」已按实际状态验收完成`, {
+      scope: 'project', projectId: project.id, intentId: project.intentId, status: 'succeeded', evidenceId: project.lastEvidenceId,
+    });
   }
 
   private discardPlan(reason: string) {
@@ -300,13 +337,18 @@ export class Executive {
   }
 
   private onDone(o: TaskOutcome) {
-    if (o.task.source === 'filler' || o.task.source === 'reflex') return;
+    if (o.task.source === 'filler') {
+      if (o.result.status === 'succeeded') this.keepThinkingActive();
+      return;
+    }
+    if (o.task.source === 'reflex') return;
     const p = this.plan;
     if (!p || o.task.planId !== p.id || !this.planCurrent(p)) return;
     this.results.push({ skill: o.task.skill, status: o.result.status, summary: o.result.summary, data: o.result.data });
     if (this.results.length > 3) this.results.shift();
     if (o.result.status === 'succeeded') {
       if (p.index >= p.steps.length) this.finishPlan('succeeded', o.result.summary);
+      this.keepThinkingActive();
       return;
     }
     if (o.result.status === 'cancelled' && o.preemptedBy === 'reflex') {
