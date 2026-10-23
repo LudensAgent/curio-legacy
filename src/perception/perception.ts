@@ -3,7 +3,7 @@ import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { effectiveLight, round1 } from '../util.ts';
 import { torchCount } from '../skills/light.ts';
-import { NOTABLE, type Vision, type VisionSummary } from './vision.ts';
+import { interactiveName, NOTABLE, type Vision, type VisionSummary } from './vision.ts';
 import { computeDrives, type Drive, type Stock } from '../brain/drives.ts';
 import { efficiencyInsights, type EfficiencyInsight } from '../brain/efficiency.ts';
 import { learnCandidates, reflectionDue } from '../brain/habits.ts';
@@ -196,7 +196,12 @@ export class Perception {
           this.bus.publish('discovery', 'P2', `首次看见方块：${b.name}（${Math.round(b.dist)} 格外）`, { category: 'block', name: b.name, pos: b.pos });
         }
         if (DANGER.has(b.name)) this.memory.addLandmark('danger', b.name, s.dim, b.pos);
-        else if (STRUCTURE_HINT.has(b.name)) this.memory.addLandmark('discovery', b.name, s.dim, b.pos);
+        else if (interactiveName(b.name)) {
+          // 看见的功能方块记成地标（自己放下的已记为“我的X”，附近有就不重复记）
+          const zh = interactiveName(b.name)!;
+          const mine = this.memory.landmarks().some((l) => l.label === `我的${zh}` && l.dim === s.dim && Math.hypot(l.pos.x - b.pos.x, l.pos.y - b.pos.y, l.pos.z - b.pos.z) <= 2);
+          if (!mine) this.memory.addLandmark('discovery', zh, s.dim, b.pos, 6);
+        } else if (STRUCTURE_HINT.has(b.name)) this.memory.addLandmark('discovery', b.name, s.dim, b.pos);
         else if (b.name.endsWith('_ore')) this.memory.addLandmark('resource', b.name, s.dim, b.pos);
       }
       for (const e of v.seen) {

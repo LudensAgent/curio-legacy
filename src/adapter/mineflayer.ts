@@ -939,7 +939,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return this.bot.inventory.items().find((i: any) => i.name === name);
   }
 
-  async smelt(input: string, count: number, fuel: string, signal: AbortSignal, opts: { furnacePos?: Vec3Like; onProgress?: (done: number) => void } = {}): Promise<ActionResult & { made: number; output?: string }> {
+  async smelt(input: string, count: number, fuel: string, signal: AbortSignal, opts: { furnacePos?: Vec3Like; onProgress?: (done: number) => void } = {}): Promise<ActionResult & { made: number; output?: string; furnacePos?: Vec3Like }> {
     const check = this.actionCheckpoint(signal);
     throwIfAborted(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', made: 0 };
@@ -965,6 +965,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       this.bus.publish('place', 'P3', '放置了熔炉');
     }
     await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos: block.position }, { signal, timeoutMs: 30000 }), check);
+    const furnacePos = { x: block.position.x, y: block.position.y, z: block.position.z };
     const furnace: any = await this.afterAction(() => raceAbort(b.openFurnace(block), signal, 8000, () => {}), check);
     let made = 0;
     let outputName: string | undefined;
@@ -993,7 +994,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     } finally {
       try { furnace.close(); } catch { /* ignore */ }
     }
-    return made > 0 ? { ok: true, made, output: outputName } : { ok: false, reason: 'NOTHING_SMELTED', made: 0 };
+    return made > 0 ? { ok: true, made, output: outputName, furnacePos } : { ok: false, reason: 'NOTHING_SMELTED', made: 0, furnacePos };
   }
 
   async useChest(pos: Vec3Like, deposits: InvItem[], withdraws: InvItem[], signal: AbortSignal): Promise<ActionResult & { contents: InvItem[]; moved: number }> {
@@ -1146,9 +1147,67 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   }
 
   /** 这个物品是否只能在工作台上合成 */
-  private needsTable(id: number): boolean {
+  private needsTable(id: number, count = 1): boolean {
     const b = this.bot;
-    return b.recipesAll(id, null, null).length === 0 && b.recipesAll(id, null, true).length > 0;
+    // 只有“现在就能在背包 2×2 格里做出来”才不需要工作台。
+    // 不能只看是否存在 2×2 配方：例如床有“染料+别色床”的 2×2 染色配方，但正常做床要 3×3（羊毛+木板）
+    if (b.recipesFor(id, null, count, null)[0]) return false;
+    return b.recipesAll(id, null, true).some((r: any) => r.requiresTable);
+  }
+
+  /**
+   * 原版很多配方接受“任意木板”（床、箱子、工作台、木制工具…），minecraft-data 把它展开成“3 块同种木板”的多个变体，
+   * 混着几种木板时一个变体都对不上。这里按背包里实际的木板拼一个等价配方（带木种名字的物品，如 oak_boat，仍要求同种木板）。
+   */
+  private mixedPlanksRecipe(id: number, count: number, table: any): any | null {
+    const b = this.bot;
+    const result = this.mcData.items[id]?.name ?? '';
+    if (/^(oak|spruce|birch|jungle|acacia|dark_oak|mangrove|cherry|bamboo|crimson|warped)_/.test(result)) return null;
+    const have = new Map<number, number>();
+    for (const it of b.inventory.items()) have.set(it.type, (have.get(it.type) ?? 0) + it.count);
+    const isPlank = (iid: number) => String(this.mcData.items[iid]?.name ?? '').endsWith('_planks');
+    for (const r of b.recipesAll(id, null, table ?? true) as any[]) {
+      if (!r.inShape) continue;
+      const times = Math.max(1, Math.ceil(count / (r.result?.count ?? 1)));
+      const cells: { y: number; x: number; id: number }[] = [];
+      r.inShape.forEach((row: any[], y: number) => row.forEach((ing: any, x: number) => { if (ing && ing.id >= 0) cells.push({ y, x, id: ing.id }); }));
+      const plankCells = cells.filter((c) => isPlank(c.id));
+      if (!plankCells.length) continue;
+      const others = new Map<number, number>();
+      for (const c of cells) if (!isPlank(c.id)) others.set(c.id, (others.get(c.id) ?? 0) + times);
+      if ([...others].some(([oid, n]) => (have.get(oid) ?? 0) < n)) continue;
+      const pool = [...have].filter(([pid]) => isPlank(pid)).map(([pid, n]) => ({ pid, n: Math.floor(n / times) })).filter((p) => p.n > 0).sort((a, c) => c.n - a.n);
+      if (pool.reduce((a, p) => a + p.n, 0) < plankCells.length) continue;
+      const shape = r.inShape.map((row: any[]) => row.map((ing: any) => ing && ing.id >= 0 ? { ...ing } : ing));
+      for (const c of plankCells) {
+        const p = pool.find((q) => q.n > 0)!;
+        p.n--;
+        shape[c.y][c.x] = { ...shape[c.y][c.x], id: p.pid, metadata: null };
+      }
+      const delta = new Map<number, number>([[id, r.result?.count ?? 1]]);
+      for (const row of shape) for (const ing of row) if (ing && ing.id >= 0) delta.set(ing.id, (delta.get(ing.id) ?? 0) - 1);
+      return Object.assign(Object.create(Object.getPrototypeOf(r)), r, { inShape: shape, ingredients: null, delta: [...delta].map(([did, n]) => ({ id: did, metadata: null, count: n })) });
+    }
+    return null;
+  }
+
+  /** 失败时说清楚缺什么：在所有配方变体里找最接近的那个 */
+  private missingReport(id: number, count: number, table: any): string {
+    const b = this.bot;
+    const name = (iid: number) => this.mcData.items[iid]?.name ?? String(iid);
+    let best: { miss: { n: string; need: number; have: number }[]; total: number; table: boolean } | null = null;
+    for (const r of b.recipesAll(id, null, true) as any[]) {
+      const times = Math.max(1, Math.ceil(count / (r.result?.count ?? 1)));
+      const miss = (r.delta ?? []).filter((d: any) => d.count < 0).map((d: any) => ({ n: name(d.id), need: -d.count * times, have: this.invCount(d.id) })).filter((m: any) => m.need > m.have);
+      const total = miss.reduce((a: number, m: any) => a + m.need - m.have, 0);
+      if (!best || total < best.total) best = { miss, total, table: !!r.requiresTable };
+    }
+    if (!best) return '没有已知配方';
+    const planks = b.inventory.items().filter((i: any) => i.name.endsWith('_planks')).map((i: any) => `${i.name}×${i.count}`);
+    const parts = best.miss.map((m) => `${m.n} 还差 ${m.need - m.have}（有 ${m.have}）`);
+    if (best.table && !table) parts.push('需要工作台');
+    return parts.length ? parts.join('，') + (planks.length && best.miss.some((m) => m.n.endsWith('_planks')) ? `；现有木板：${planks.join('、')}` : '')
+      : '材料看起来够，但合成没有成功（可能是界面没响应），可以再试一次';
   }
 
   /** 合成 times 次；超时后先停止并核对真实库存，不能盲目重复扣料。 */
@@ -1234,7 +1293,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   private async craftSimple(id: number, count: number, table: any, signal: AbortSignal, depth: number): Promise<boolean> {
     const check = this.actionCheckpoint(signal);
     const b = this.bot;
-    if (this.needsTable(id) && !table) return false;
+    if (this.needsTable(id, count) && !table) return false;
     if (!(await this.afterAction(() => this.ensureIngredients(id, count, table, signal, depth), check))) return false;
     const name = this.mcData.items[id]?.name ?? String(id);
     const made = await this.afterAction(() => this.craftUpTo(id, count, table, signal), check);
@@ -1270,7 +1329,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return table;
   }
 
-  async craft(item: string, count: number, signal: AbortSignal, opts: { tablePos?: Vec3Like } = {}): Promise<ActionResult & { crafted: number }> {
+  async craft(item: string, count: number, signal: AbortSignal, opts: { tablePos?: Vec3Like } = {}): Promise<ActionResult & { crafted: number; detail?: string; tablePos?: Vec3Like }> {
     const check = this.actionCheckpoint(signal);
     throwIfAborted(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', crafted: 0 };
@@ -1280,15 +1339,27 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (b.recipesAll(data.id, null, true).length === 0) return { ok: false, reason: 'UNKNOWN_ITEM', crafted: 0 };
 
     let table: any = null;
-    if (this.needsTable(data.id)) {
+    if (this.needsTable(data.id, count)) {
       table = await this.afterAction(() => this.ensureTable(signal, opts.tablePos), check);
-      if (!table) return { ok: false, reason: 'NO_CRAFTING_TABLE', crafted: 0 };
+      if (!table) return { ok: false, reason: 'NO_CRAFTING_TABLE', crafted: 0, detail: this.missingReport(data.id, count, null) };
     }
+    const tablePos = table?.position ? { x: table.position.x, y: table.position.y, z: table.position.z } : undefined;
     const before = this.invCount(data.id);
     await this.afterAction(() => this.ensureIngredients(data.id, count, table, signal, 2), check);
     let crafted = await this.afterAction(() => this.craftUpTo(data.id, count, table, signal), check);
     crafted = Math.max(crafted, this.invCount(data.id) - before);
-    return crafted > 0 ? { ok: true, crafted } : { ok: false, reason: 'MISSING_MATERIALS', crafted: 0 };
+    // 同种木板凑不齐但混着几种木板够用：按实际的木板拼配方（原版允许）
+    for (let tries = 0; crafted < count && tries < 8; tries++) {
+      const mixed = this.mixedPlanksRecipe(data.id, 1, table);
+      if (!mixed) break;
+      const was = this.invCount(data.id);
+      await this.afterAction(() => this.craftOnce(mixed, table, signal, 1), check);
+      const made = this.invCount(data.id) - was;
+      if (made <= 0) break;
+      crafted += made;
+    }
+    return crafted > 0 ? { ok: true, crafted, ...(tablePos ? { tablePos } : {}) }
+      : { ok: false, reason: 'MISSING_MATERIALS', crafted: 0, detail: this.missingReport(data.id, count, table), ...(tablePos ? { tablePos } : {}) };
   }
 
   private foodItems(): any[] {

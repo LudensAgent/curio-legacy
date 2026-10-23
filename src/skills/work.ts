@@ -1,4 +1,6 @@
 import { lookAround } from './movement.ts';
+import { findStation, rememberStation } from './stations.ts';
+import { dist3 } from '../util.ts';
 import { codeFromError, clampInt, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
 import { craftReservationConflict } from '../projects/reservations.ts';
 import { config } from '../config.ts';
@@ -217,15 +219,19 @@ export const craft: Skill<{ item: string; count: number }> = {
   async run(ctx, args) {
     args = { ...args, item: pickVariant(args.item, ctx.adapter.state().inventory) };
     try {
-      const table = ctx.senses.knownBlocks(['crafting_table'], 32)[0];
+      // 先用看得见或记得的工作台（自己放过的也算），附近没有才让底层现做一个
+      const table = findStation(ctx, ['crafting_table'], 48);
       const conflict = craftReservationConflict(ctx.memory, ctx.adapter.state(), args.item, args.count, config.mc.version, !!table);
       if (conflict) return fail('MISSING_MATERIALS', `预留保护：${conflict.reason}`, { conflict });
       const r = await ctx.adapter.craft(args.item, args.count, ctx.signal, { tablePos: table?.pos });
+      if (r.tablePos) rememberStation(ctx, 'crafting_table', r.tablePos);
+      const reused = table && r.tablePos && dist3(table.pos, r.tablePos) < 1 && table.dist > 4 ? `（用了 ${table.dist} 格外${table.from === 'memory' ? '记得' : '看到'}的工作台）` : '';
       if (!r.ok) {
         const short = woodShortfall(args.item, args.count, ctx.adapter.state().inventory, !!table);
-        return fail((r.reason as any) ?? 'ERROR', `无法合成 ${args.item}：${r.reason}${short ? `；${short}` : ''}`, short ? { shortfall: short } : undefined);
+        const why = [r.detail, short].filter(Boolean).join('；');
+        return fail((r.reason as any) ?? 'ERROR', `无法合成 ${args.item}：${r.reason}${why ? `（${why}）` : ''}${reused}`, why ? { shortfall: why } : undefined);
       }
-      return ok(`合成了 ${r.crafted} 个 ${args.item}`, { crafted: r.crafted });
+      return ok(`合成了 ${r.crafted} 个 ${args.item}${reused}`, { crafted: r.crafted });
     } catch (e) {
       if (isAbort(e)) throw e;
       return fail(codeFromError(e), `合成 ${args.item} 出错：${(e as Error).message}`);

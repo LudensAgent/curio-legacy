@@ -3,6 +3,7 @@ import { dist3, sleep } from '../util.ts';
 import { sighted, yawOfDir } from './movement.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill } from './types.ts';
 import { resolveItemAlias } from './work.ts';
+import { isStation, rememberStation } from './stations.ts';
 
 /**
  * 通用基础动作：相当于玩家的“右键”和“方向键”。
@@ -63,6 +64,8 @@ export const useItem: Skill<{ item: string; on: string; dir?: string }> = {
       const r = await adapter.useItemOn(args.item, { kind: 'block', pos: target.pos }, signal);
       if (!r.ok) return fail('ERROR', `对着 ${target.name} 使用 ${args.item} 失败：${r.reason}`);
       const after = adapter.state().inventory.find((i) => i.name === args.item)?.count ?? 0;
+      // 自己放下的工作台/熔炉记住位置，下次复用
+      if (isStation(args.item) && after < before) rememberStation(ctx, args.item, { x: target.pos.x, y: target.pos.y + 1, z: target.pos.z });
       return ok(`对着 ${target.name} 使用了 ${args.item}${r.spawned ? `，放出了 ${r.spawned}` : ''}${after < before ? `（背包里的 ${args.item} 少了 ${before - after} 个）` : ''}`,
         { target: target.name, pos: target.pos, ...(r.spawned ? { spawned: r.spawned } : {}) });
     } catch (e) {

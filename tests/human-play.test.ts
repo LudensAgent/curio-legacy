@@ -464,3 +464,59 @@ test('缓存友好：只有实时状态变化时，连续两次请求共享大�
     }
   } finally { memory.close(); }
 });
+
+test('复用自己放过的工作台/熔炉：记得的工作台在附近就去用，不再现做', async () => {
+  const adapter = new FakeAdapter();
+  const ctx = skillCtx(adapter);
+  ctx.memory.setWorld(adapter.worldId);
+  ctx.memory.addLandmark('discovery', '我的工作台', 'overworld', { x: 30, y: 64, z: 0 }, 2);
+  let used: any;
+  adapter.craft = async (_item: string, count: number, _signal: AbortSignal, opts?: any) => { used = opts?.tablePos; return { ok: true, crafted: count, tablePos: opts?.tablePos }; };
+  try {
+    const r = await SKILLS.craft.run(ctx, { item: 'white_bed', count: 1 });
+    assert.equal(r.status, 'succeeded', r.summary);
+    assert.deepEqual(used, { x: 30, y: 64, z: 0 });
+    assert.match(r.summary, /记得的工作台/);
+  } finally { ctx.memory.close(); }
+});
+
+test('放下工作台后记成“我的工作台”', async () => {
+  const adapter = new FakeAdapter();
+  adapter.inv.set('crafting_table', 1);
+  const memory = new WorldMemory(null);
+  const ctx = skillCtx(adapter, new Vision(adapter), memory);
+  adapter.useItemOn = async (item: string) => { adapter.inv.set(item, adapter.inv.get(item)! - 1); return { ok: true }; };
+  try {
+    ctx.senses.refresh();
+    const r = await SKILLS.use_item.run(ctx, { item: 'crafting_table', on: 'grass_block' });
+    assert.equal(r.status, 'succeeded', r.summary);
+    assert.ok(memory.landmarks().some((l) => l.label === '我的工作台'));
+  } finally { memory.close(); }
+});
+
+test('看见的功能方块（比如铁砧）会记成地标；自己放的不重复记', () => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  memory.setWorld(adapter.worldId);
+  adapter.blocks.push({ name: 'anvil', pos: { x: 6, y: 64, z: 0 } }, { name: 'crafting_table', pos: { x: 6, y: 64, z: 2 } });
+  memory.addLandmark('discovery', '我的工作台', 'overworld', { x: 6, y: 64, z: 2 }, 2);
+  const perception = new Perception(adapter, memory, bus, new Vision(adapter));
+  try {
+    perception.update();
+    assert.ok(memory.landmarks().some((l) => l.label === '铁砧'));
+    assert.equal(memory.landmarks().filter((l) => l.label.endsWith('工作台')).length, 1, '自己的工作台不再记一遍');
+  } finally { memory.close(); }
+});
+
+test('睡觉：先走回自己记得的床，不再另放一张', async () => {
+  const adapter = new FakeAdapter();
+  adapter.isDay = false;
+  const ctx = skillCtx(adapter);
+  ctx.memory.setWorld(adapter.worldId);
+  ctx.memory.addLandmark('discovery', '我的床', 'overworld', { x: 25, y: 64, z: 0 }, 2);
+  adapter.sleepInBed = async () => ({ ok: true, bedPos: { x: 25, y: 64, z: 0 } });
+  try {
+    const r = await SKILLS.sleep.run(ctx, {});
+    assert.equal(r.status, 'succeeded', r.summary);
+    assert.ok(adapter.pos.x > 20, `应该走回床边，x=${adapter.pos.x}`);
+  } finally { ctx.memory.close(); }
+});

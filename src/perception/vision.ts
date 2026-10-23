@@ -60,8 +60,20 @@ export function catOf(name: string): Cat {
 const LOGS = ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log'];
 const ORES = ['coal', 'iron', 'copper', 'gold', 'redstone', 'lapis', 'diamond', 'emerald'].flatMap((o) => [`${o}_ore`, `deepslate_${o}_ore`]);
 /** 值得记住位置的方块（资源/结构/危险） */
+/** 可交互的功能方块（中文名）：看见了会记住位置，自己放下的记成“我的X”，用的时候先复用 */
+export const INTERACTIVE_BLOCKS: Record<string, string> = {
+  crafting_table: '工作台', furnace: '熔炉', smoker: '烟熏炉', blast_furnace: '高炉', chest: '箱子', trapped_chest: '陷阱箱', barrel: '木桶',
+  ender_chest: '末影箱', anvil: '铁砧', chipped_anvil: '开裂的铁砧', damaged_anvil: '损坏的铁砧', enchanting_table: '附魔台', smithing_table: '锻造台',
+  stonecutter: '切石机', loom: '织布机', grindstone: '砂轮', brewing_stand: '酿造台', cauldron: '炼药锅', water_cauldron: '炼药锅', composter: '堆肥桶',
+  lectern: '讲台', cartography_table: '制图台', fletching_table: '制箭台', note_block: '音符盒', jukebox: '唱片机', bell: '钟', beacon: '信标',
+  respawn_anchor: '重生锚', lodestone: '磁石', campfire: '营火', soul_campfire: '灵魂营火', hopper: '漏斗', dispenser: '发射器', dropper: '投掷器',
+};
+/** 任意颜色的床都算“床” */
+export const interactiveName = (block: string): string | undefined => INTERACTIVE_BLOCKS[block] ?? (block.endsWith('_bed') ? '床' : undefined);
+
 export const NOTABLE = new Set([
-  ...LOGS, ...ORES, 'crafting_table', 'chest', 'furnace', 'lava', 'spawner', 'bell', 'hay_block', 'sugar_cane',
+  ...LOGS, ...ORES, ...Object.keys(INTERACTIVE_BLOCKS),
+  ...['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black'].map((c) => `${c}_bed`), 'lava', 'spawner', 'hay_block', 'sugar_cane',
   'pumpkin', 'melon', 'obsidian', 'clay', 'sweet_berry_bush', 'nether_portal', 'end_portal', 'end_gateway', 'end_portal_frame', 'stone_bricks', 'mossy_stone_bricks', 'cracked_stone_bricks', 'bookshelf', 'iron_bars',
 ]);
 /** 采集目标常用的地表方块：也记住，但每种限量 */

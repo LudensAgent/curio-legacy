@@ -1,6 +1,7 @@
 import type { InvItem, Vec3Like } from '../adapter/types.ts';
 import { DIRS } from '../perception/perception.ts';
 import { shortId, sleep } from '../util.ts';
+import { findStation, rememberStation } from './stations.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
 
 // ===================================================================== 冶炼
@@ -38,13 +39,14 @@ export const smelt: Skill<{ item: string; count: number }> = {
     if (!have) return fail('MISSING_MATERIALS', `背包里没有 ${args.item}`);
     const fuel = pickFuel(s.inventory, args.item);
     if (!fuel) return fail('MISSING_MATERIALS', '没有燃料（煤、木炭、木板或原木）');
-    const furnace = senses.knownBlocks(['furnace'], 32)[0];
+    const furnace = findStation(ctx, ['furnace'], 64);
     const n = Math.min(have, args.count);
     ctx.progress(0, `烧 ${args.item} ×${n}（燃料 ${fuel}）`);
     try {
       const r = await adapter.smelt(args.item, n, fuel, signal, { furnacePos: furnace?.pos, onProgress: (d) => ctx.progress(d / n, `已烧好 ${d}/${n}`) });
+      if (r.furnacePos) rememberStation(ctx, 'furnace', r.furnacePos);
       if (!r.ok) return fail(r.reason === 'NO_FURNACE' ? 'MISSING_MATERIALS' : 'ERROR', `烧不了：${r.reason}${r.reason === 'NO_FURNACE' ? '（需要 8 个圆石做熔炉）' : ''}`);
-      return ok(`烧好了 ${r.made} 个 ${r.output ?? SMELTABLE[args.item]}`, { made: r.made });
+      return ok(`烧好了 ${r.made} 个 ${r.output ?? SMELTABLE[args.item]}${furnace && furnace.dist > 4 ? `（用了 ${furnace.dist} 格外${furnace.from === 'memory' ? '记得' : '看到'}的熔炉）` : ''}`, { made: r.made });
     } catch (e) {
       if (isAbort(e)) throw e;
       return fail(codeFromError(e), `冶炼出错：${(e as Error).message}`);
@@ -60,7 +62,7 @@ export function isEssential(name: string) {
 const KEEP_SOME: Record<string, number> = { cobblestone: 32, dirt: 16, oak_planks: 16, birch_planks: 16, spruce_planks: 16, stick: 8, coal: 16, charcoal: 16, wheat_seeds: 16 };
 
 async function ensureChest(ctx: SkillCtx): Promise<Vec3Like | null> {
-  const known = ctx.senses.knownBlocks(['chest'], 48)[0];
+  const known = findStation(ctx, ['chest'], 48);
   if (known) return known.pos;
   const s = ctx.adapter.state();
   if (!s.inventory.some((i) => i.name === 'chest')) {

@@ -1,3 +1,4 @@
+import { findStation } from './stations.ts';
 import type { Vec3Like } from '../adapter/types.ts';
 import { BuildingArchive } from '../building/archive.ts';
 import { constructBuilding } from '../building/engine.ts';
@@ -148,6 +149,13 @@ export const sleepSkill: Skill<{}> = {
     if (s.dim !== 'overworld') return fail('WRONG_DIMENSION', '只能在主世界睡床；当前维度的床会爆炸');
     if (s.isDay) return fail('ERROR', '只能在夜里睡觉');
     try {
+      // 先去自己的床或看见过的床（昨晚放下的那张），附近没有才放背包里的床
+      const BEDS = ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black'].map((c) => `${c}_bed`);
+      const bed = findStation(ctx, BEDS, 64);
+      if (bed && bed.dist > 3) {
+        ctx.progress(0.2, `走向 ${bed.dist} 格外${bed.from === 'memory' ? '记得' : '看到'}的床`);
+        await ctx.adapter.moveTo({ kind: 'near', pos: bed.pos, range: 2 }, { signal: ctx.signal, timeoutMs: Math.max(5000, ctx.deadline - Date.now() - 30000) });
+      }
       const r = await ctx.adapter.sleepInBed(ctx.signal);
       if (!r.ok) return fail(r.reason === 'NO_BED' ? 'MISSING_MATERIALS' : 'ERROR', `睡不了：${r.reason}`);
       if (r.bedPos) { ctx.memory.setBase(s.dim, r.bedPos); ctx.memory.addLandmark('discovery', '我的床', s.dim, r.bedPos, 4); }
