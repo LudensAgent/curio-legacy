@@ -7,6 +7,14 @@ import type { LlmProvider } from './llm.ts';
 import { extractJson, ruleProposal, validatePlan, type Plan } from './plan.ts';
 import { buildMessages, type PlanContext } from './prompt.ts';
 
+export interface LlmTokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  /** 用量未返回或字段不完整的调用次数；累计值只包含已知用量。 */
+  unreportedCalls: number;
+}
+
 export interface LlmStats {
   provider: string;
   calls: number;
@@ -20,6 +28,7 @@ export interface LlmStats {
   inFlightSince: number | null;
   callsLastHour: number;
   maxCallsPerHour: number;
+  tokenUsage: LlmTokenUsage;
 }
 
 /**
@@ -51,7 +60,23 @@ export class Planner {
       inFlightSince: null,
       callsLastHour: 0,
       maxCallsPerHour: cfg.llm.maxCallsPerHour,
+      tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, unreportedCalls: 0 },
     };
+  }
+
+  /** 只在本次启动内累计，与每小时预算和最近调用列表的保留窗口无关。 */
+  private recordUsage(usage: unknown) {
+    const u = usage as Record<string, unknown> | null | undefined;
+    const count = (v: unknown): number | undefined =>
+      typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : undefined;
+    const prompt = count(u?.prompt_tokens);
+    const completion = count(u?.completion_tokens);
+    const total = count(u?.total_tokens);
+    const sum = this.stats.tokenUsage;
+    sum.promptTokens += prompt ?? 0;
+    sum.completionTokens += completion ?? 0;
+    sum.totalTokens += total ?? ((prompt ?? 0) + (completion ?? 0));
+    if (prompt == null || completion == null) sum.unreportedCalls++;
   }
 
   private prune() {
@@ -99,11 +124,14 @@ export class Planner {
           const c = await this.provider.complete(messages, AbortSignal.timeout(this.cfg.llm.timeoutMs + this.cfg.llm.fakeDelayMs + 1000), ctx);
           ({ text, latencyMs, usage, finishReason } = c);
         } catch (e: any) {
+          this.stats.tokenUsage.unreportedCalls++;
           this.stats.errors++;
           this.stats.lastError = String(e?.message ?? e);
           this.writer?.write({ ts: Date.now(), reason: ctx.reason, provider: this.provider.name, ok: false, error: this.stats.lastError, promptChars });
           throw e;
         }
+        // 无效输出和重试同样消耗 token，在计划校验之前统计每次返回。
+        this.recordUsage(usage);
         this.stats.lastLatencyMs = latencyMs;
         this.stats.latencies.push(latencyMs);
         if (this.stats.latencies.length > 100) this.stats.latencies.shift();

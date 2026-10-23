@@ -70,6 +70,7 @@
   <h1><b>■</b>Curio / Agent</h1>
   <span id="conn" class="pill off">未连接</span>
   <span id="llm" class="pill">LLM</span>
+  <span id="llmUsage" class="pill" title="本次启动以来接口返回的用量；刷新页面保留，重启程序清零">启动累计 0 tokens · 输入 0 / 输出 0</span>
   <span id="spec" class="pill">旁观</span>
   <span id="ver" class="pill">planVersion 0</span>
   <span class="spacer"></span>
@@ -211,6 +212,10 @@ function render(s) {
   $('conn').textContent = st.connected ? (st.alive ? `${st.username} 在线` : '死亡/重生中') : '未连接';
   $('conn').className = 'pill ' + (st.connected ? 'on' : 'off');
   $('llm').textContent = `${s.config.llm}${s.config.fakeDelayMs ? ` · 注入 ${s.config.fakeDelayMs}ms` : ''}`;
+  const usage = m.llm.tokenUsage;
+  $('llmUsage').textContent = usage
+    ? `启动累计 ${usage.totalTokens.toLocaleString()} tokens · 输入 ${usage.promptTokens.toLocaleString()} / 输出 ${usage.completionTokens.toLocaleString()}${usage.unreportedCalls ? ` · ${usage.unreportedCalls.toLocaleString()} 次用量不完整` : ''}`
+    : '启动累计用量暂不可用';
   $('spec').textContent = s.spectator.enabled ? `旁观 ${s.config.observer} · ${s.spectator.rconOk ? 'RCON ✓' : 'RCON ✗'}` : '旁观未启用';
   $('spec').className = 'pill ' + (!s.spectator.enabled ? 'warn' : s.spectator.rconOk ? 'on' : 'off');
   $('spec').title = s.spectator.reason || s.spectator.lastResult || '';
