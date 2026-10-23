@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { memorySettings } from './memory/settings.ts';
 
 if (fs.existsSync('.env') && typeof (process as any).loadEnvFile === 'function') {
   (process as any).loadEnvFile('.env');
@@ -53,6 +54,7 @@ export const config = {
     'AGENT_PERSONA',
     '你叫 Curio，一个好奇、谨慎、喜欢记录新发现的 Minecraft 探险家。',
   ),
+  memory: memorySettings(),
   dashboard: {
     host: str('DASHBOARD_HOST', '127.0.0.1'),
     port: num('DASHBOARD_PORT', 3000),

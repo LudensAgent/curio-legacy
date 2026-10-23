@@ -70,6 +70,8 @@ RCON_PASSWORD=和 server.properties 一致
 
 默认 `LLM_PROVIDER=mock`，先用它确认游戏、观察、控制台都通了，再接真实模型。
 
+可选的 [Hindsight 情境记忆](docs/memory-hindsight.md)支持长期经历整理、按线索召回和服务故障时的本地回退。配置 `MEMORY_PROVIDER=hindsight` 与服务模型后，运行 `npm run memory:serve`、`npm run check:memory`。`npm run memory:clear` 同时清理已登记的远程专属记忆和本地历史。
+
 ## 4. 从 Agent 视角观察
 
 1. 用 1.20.1 客户端进入 `localhost`（多人游戏 → 直接连接）。

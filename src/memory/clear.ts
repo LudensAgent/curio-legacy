@@ -19,8 +19,8 @@ function validateDirectory(directory: string, projectDir: string) {
   }
 }
 
-/** 离线重置：删除整个数据目录，包括记忆、技能、日志、备份和诊断。Agent 必须先退出。 */
-export function clearMemory(dataDir: string, projectDir: string): { directory: string; cleared: boolean } {
+/** 在接触远程记忆前完成本地目录检查，不修改任何数据。 */
+export function inspectMemoryDirectory(dataDir: string, projectDir: string): { directory: string; exists: boolean } {
   const directory = path.resolve(dataDir);
   const project = fs.realpathSync(projectDir);
   validateDirectory(directory, path.resolve(projectDir));
@@ -30,7 +30,7 @@ export function clearMemory(dataDir: string, projectDir: string): { directory: s
   try {
     stat = fs.lstatSync(directory);
   } catch (e: any) {
-    if (e.code === 'ENOENT') return { directory, cleared: false };
+    if (e.code === 'ENOENT') return { directory, exists: false };
     throw e;
   }
   if (stat.isSymbolicLink()) throw new Error(`DATA_DIR 不能是符号链接或 junction，请使用真实数据目录：${directory}`);
@@ -41,6 +41,12 @@ export function clearMemory(dataDir: string, projectDir: string): { directory: s
   if (['.git', 'package.json', 'server.properties', 'level.dat'].some((name) => fs.existsSync(path.join(realDirectory, name)))) {
     throw new Error(`DATA_DIR 包含项目或 Minecraft 存档文件，拒绝清空：${realDirectory}`);
   }
-  fs.rmSync(realDirectory, { recursive: true });
-  return { directory: realDirectory, cleared: true };
+  return { directory: realDirectory, exists: true };
+}
+
+/** 离线重置：删除整个数据目录，包括记忆、技能、日志、备份和诊断。Agent 必须先退出。 */
+export function clearMemory(dataDir: string, projectDir: string): { directory: string; cleared: boolean } {
+  const result = inspectMemoryDirectory(dataDir, projectDir);
+  if (result.exists) fs.rmSync(result.directory, { recursive: true });
+  return { directory: result.directory, cleared: result.exists };
 }

@@ -13,10 +13,13 @@
     "check:llm": "tsx scripts/check-llm.ts",
     "check:rcon": "tsx scripts/check-rcon.ts",
     "memory:clear": "tsx scripts/clear-memory.ts",
+    "memory:serve": "docker compose -f compose.memory.yaml up -d",
+    "check:memory": "tsx scripts/check-memory.ts",
     "test": "tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@vectorize-io/hindsight-client": "1.1.0",
     "minecraft-data": "^3.60.0",
     "mineflayer": "^4.20.0",
     "mineflayer-pathfinder": "^2.4.5",
