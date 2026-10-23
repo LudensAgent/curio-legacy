@@ -55,12 +55,15 @@ export const config = {
     port: num('DASHBOARD_PORT', 3000),
   },
   vision: {
-    range: num('VISION_RANGE', 64),
+    // 0 或 auto = 跟随服务器 view-distance
+    range: str('VISION_RANGE', 'auto').toLowerCase() === 'auto' ? 0 : num('VISION_RANGE', 0),
     hFov: num('VISION_FOV', 100),
     vFov: num('VISION_VFOV', 60),
     cols: num('VISION_COLS', 40),
     rows: num('VISION_ROWS', 24),
     hearRadius: num('VISION_HEAR', 10),
+    bandCols: num('VISION_BAND_COLS', 160),
+    bandRows: num('VISION_BAND_ROWS', 8),
   },
   viewerPort: num('VIEWER_PORT', 0),
   dataDir: path.resolve(str('DATA_DIR', './data')),

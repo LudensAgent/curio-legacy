@@ -26,9 +26,24 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
     return `${x},${y},${z}`;
   }
   /** 世界里 (x,y,z) 的方块名 */
+  private idx = new Map<string, string>();
+  private secs = new Set<string>();
+  sectionEmpty(x: number, y: number, z: number): boolean {
+    this.nameAt(0, 0, 0); // 确保索引最新
+    if (((y >> 4) << 4) <= this.groundY) return false;
+    return !this.secs.has(`${x >> 4},${y >> 4},${z >> 4}`);
+  }
+  private idxRef: unknown = null;
+  private idxLen = -1;
   nameAt(x: number, y: number, z: number): string {
-    const b = this.blocks.find((bb) => bb.pos.x === x && bb.pos.y === y && bb.pos.z === z);
-    if (b) return b.name;
+    if (this.idxRef !== this.blocks || this.idxLen !== this.blocks.length) {
+      this.idx = new Map(this.blocks.map((bb) => [this.k(bb.pos.x, bb.pos.y, bb.pos.z), bb.name]));
+      this.secs = new Set(this.blocks.map((bb) => `${bb.pos.x >> 4},${bb.pos.y >> 4},${bb.pos.z >> 4}`));
+      this.idxRef = this.blocks;
+      this.idxLen = this.blocks.length;
+    }
+    const b = this.idx.get(this.k(x, y, z));
+    if (b) return b;
     if (this.removed.has(this.k(x, y, z))) return 'air';
     if (y === this.groundY) return 'grass_block';
     if (y < this.groundY) return 'stone';

@@ -37,7 +37,7 @@ export const gather: Skill<{ block: string; count: number }> = {
       }
       senses.refresh();
       const hits = senses
-        .knownBlocks(names, 96)
+        .knownBlocks(names, 256)
         .filter((h) => !skip.has(key(h.pos)))
         .sort((a, b) => a.dist + Math.abs(a.pos.y - s.pos.y) * 0.6 - (b.dist + Math.abs(b.pos.y - s.pos.y) * 0.6));
 
@@ -70,7 +70,7 @@ export const gather: Skill<{ block: string; count: number }> = {
 
       try {
         ctx.progress(dug / args.count, `前往 ${target.name}（${Math.round(target.dist)} 格）`);
-        await adapter.moveTo({ kind: 'reach_block', pos: target.pos }, { signal, timeoutMs: Math.min(45000, Math.max(3000, ctx.deadline - Date.now())) });
+        await adapter.moveTo({ kind: 'reach_block', pos: target.pos }, { signal, timeoutMs: Math.min(90000, Math.max(3000, ctx.deadline - Date.now())) });
         const r = await adapter.dig(target.pos, signal);
         if (!r.ok) throw new Error(r.reason ?? 'DIG_FAILED');
       } catch (e) {

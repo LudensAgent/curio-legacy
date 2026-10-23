@@ -59,7 +59,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const { host, port, username, version } = this.cfg.mc;
     this.bus.publish('connect', 'P3', `连接 ${host}:${port} (${version}) 用户名 ${username}`);
 
-    const bot = mineflayer.createBot({ host, port, username, version, auth: 'offline' });
+    // 向服务器请求尽可能大的视距；服务器会按 view-distance 截断
+    const bot = mineflayer.createBot({ host, port, username, version, auth: 'offline', viewDistance: 32 });
     this.bot = bot;
     bot.loadPlugin(pathfinder);
 
@@ -163,6 +164,27 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (!this.ready) return null;
     const e = this.bot.entity;
     return { x: e.position.x, y: e.position.y + (e.eyeHeight ?? 1.62), z: e.position.z, yaw: e.yaw, pitch: e.pitch };
+  }
+
+  sectionEmpty(x: number, y: number, z: number): boolean {
+    if (!this.ready) return false;
+    try {
+      const col = this.bot.world.getColumnAt(this.tmp(x, y, z));
+      if (!col || !Array.isArray(col.sections)) return false; // 未加载或旧格式：不跳过
+      const sec = col.sections[(y - (col.minY ?? 0)) >> 4];
+      if (sec === undefined) return false;
+      return !sec || (typeof sec.isEmpty === 'function' && sec.isEmpty());
+    } catch {
+      return false;
+    }
+  }
+
+  renderDistance(): number | null {
+    if (!this.ready) return null;
+    const server = Number(this.bot.game?.serverViewDistance);
+    const client = typeof this.bot.settings?.viewDistance === 'number' ? this.bot.settings.viewDistance : 12;
+    const chunks = Number.isFinite(server) && server > 0 ? Math.min(server, client) : null;
+    return chunks ? chunks * 16 : null;
   }
 
   private classifyOptics(b: any): Optics {

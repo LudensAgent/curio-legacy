@@ -14,15 +14,21 @@ import type { BlockHit, EntityInfo, Eye, GameAdapter, Optics, Vec3Like } from '.
  */
 
 export interface VisionConfig {
+  /** 能看多远（格）。0 = 自动：服务器实际下发的渲染距离（view-distance × 16） */
   range: number;
   hFov: number; // 度
   vFov: number; // 度
   cols: number;
   rows: number;
   hearRadius: number;
+  /** 地平线高分辨率带：远处的树/结构都在地平线附近，用更密的射线只做“发现”，不画进画面 */
+  bandCols: number;
+  bandRows: number;
 }
 
-export const DEFAULT_VISION: VisionConfig = { range: 64, hFov: 100, vFov: 60, cols: 40, rows: 24, hearRadius: 10 };
+export const DEFAULT_VISION: VisionConfig = { range: 0, hFov: 100, vFov: 60, cols: 40, rows: 24, hearRadius: 10, bandCols: 160, bandRows: 8 };
+const FALLBACK_RANGE = 160;
+const MAX_RANGE = 256;
 
 export const CATS = ['unknown', 'sky', 'dark', 'water', 'lava', 'leaves', 'wood', 'grass', 'dirt', 'sand', 'stone', 'ore', 'snow', 'plant', 'built', 'other'] as const;
 export type Cat = (typeof CATS)[number];
@@ -111,23 +117,46 @@ export const relOf = (rel: number) => REL_NAMES[((Math.round(norm(rel) / (Math.P
  */
 export function raycast(
   ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, max: number,
-  visit: (x: number, y: number, z: number, t: number) => boolean,
+  visit: (x: number, y: number, z: number, t: number) => boolean | number,
 ) {
-  let x = Math.floor(ox), y = Math.floor(oy), z = Math.floor(oz);
-  const sx = dx > 0 ? 1 : -1, sy = dy > 0 ? 1 : -1, sz = dz > 0 ? 1 : -1;
-  const tdx = dx !== 0 ? Math.abs(1 / dx) : Infinity;
-  const tdy = dy !== 0 ? Math.abs(1 / dy) : Infinity;
-  const tdz = dz !== 0 ? Math.abs(1 / dz) : Infinity;
-  let tmx = dx > 0 ? (x + 1 - ox) * tdx : dx < 0 ? (ox - x) * tdx : Infinity;
-  let tmy = dy > 0 ? (y + 1 - oy) * tdy : dy < 0 ? (oy - y) * tdy : Infinity;
-  let tmz = dz > 0 ? (z + 1 - oz) * tdz : dz < 0 ? (oz - z) * tdz : Infinity;
-  let t = 0;
-  for (let guard = 0; guard < 1000 && t <= max; guard++) {
-    if (visit(x, y, z, t)) return;
-    if (tmx < tmy && tmx < tmz) { x += sx; t = tmx; tmx += tdx; }
-    else if (tmy < tmz) { y += sy; t = tmy; tmy += tdy; }
-    else { z += sz; t = tmz; tmz += tdz; }
+  // visit 返回 true = 停止；返回数字 = 直接跳到该距离继续（用于跳过整段空气区块）
+  let t0 = 0;
+  for (let restart = 0; restart < 64; restart++) {
+    const px = ox + dx * t0, py = oy + dy * t0, pz = oz + dz * t0;
+    let x = Math.floor(px), y = Math.floor(py), z = Math.floor(pz);
+    const sx = dx > 0 ? 1 : -1, sy = dy > 0 ? 1 : -1, sz = dz > 0 ? 1 : -1;
+    const tdx = dx !== 0 ? Math.abs(1 / dx) : Infinity;
+    const tdy = dy !== 0 ? Math.abs(1 / dy) : Infinity;
+    const tdz = dz !== 0 ? Math.abs(1 / dz) : Infinity;
+    let tmx = t0 + (dx > 0 ? (x + 1 - px) * tdx : dx < 0 ? (px - x) * tdx : Infinity);
+    let tmy = t0 + (dy > 0 ? (y + 1 - py) * tdy : dy < 0 ? (py - y) * tdy : Infinity);
+    let tmz = t0 + (dz > 0 ? (z + 1 - pz) * tdz : dz < 0 ? (pz - z) * tdz : Infinity);
+    let t = t0;
+    let jumped = false;
+    for (let guard = 0; guard < 2000 && t <= max; guard++) {
+      const r = visit(x, y, z, t);
+      if (r === true) return;
+      if (typeof r === 'number' && r > t) {
+        t0 = r + 1e-4;
+        jumped = true;
+        break;
+      }
+      if (tmx < tmy && tmx < tmz) { x += sx; t = tmx; tmx += tdx; }
+      else if (tmy < tmz) { y += sy; t = tmy; tmy += tdy; }
+      else { z += sz; t = tmz; tmz += tdz; }
+    }
+    if (!jumped || t0 > max) return;
   }
+}
+
+/** 射线离开 (x,y,z) 所在 16³ 区段时的距离 */
+function sectionExit(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, x: number, y: number, z: number): number {
+  const bx = x & ~15, by = y & ~15, bz = z & ~15;
+  let t = Infinity;
+  if (dx > 0) t = Math.min(t, (bx + 16 - ox) / dx); else if (dx < 0) t = Math.min(t, (bx - ox) / dx);
+  if (dy > 0) t = Math.min(t, (by + 16 - oy) / dy); else if (dy < 0) t = Math.min(t, (by - oy) / dy);
+  if (dz > 0) t = Math.min(t, (bz + 16 - oz) / dz); else if (dz < 0) t = Math.min(t, (bz - oz) / dz);
+  return t;
 }
 
 const keyOf = (x: number, y: number, z: number) => `${x},${y},${z}`;
@@ -147,6 +176,13 @@ export class Vision {
 
   constructor(private adapter: GameAdapter, public cfg: VisionConfig = DEFAULT_VISION) {}
 
+  /** 实际视距：配置值，或服务器下发的渲染距离（区块数 × 16） */
+  effectiveRange(): number {
+    if (this.cfg.range > 0) return Math.min(MAX_RANGE, this.cfg.range);
+    const rd = this.adapter.renderDistance?.();
+    return Math.min(MAX_RANGE, rd && rd > 0 ? rd : FALLBACK_RANGE);
+  }
+
   // ------------------------------------------------------------ 扫描
   scan(): void {
     const t0 = Date.now();
@@ -159,7 +195,8 @@ export class Vision {
       this.visibleNow.clear();
       return;
     }
-    const { range, cols, rows } = this.cfg;
+    const { cols, rows } = this.cfg;
+    const range = this.effectiveRange();
     const hFov = (this.cfg.hFov * Math.PI) / 180;
     const vFov = (this.cfg.vFov * Math.PI) / 180;
     const t = s.timeOfDay;
@@ -168,7 +205,7 @@ export class Vision {
     const optCache = new Map<number, Optics | null>();
     const lightCache = new Map<number, number>();
     const ex = Math.floor(eye.x), ey = Math.floor(eye.y), ez = Math.floor(eye.z);
-    const lk = (x: number, y: number, z: number) => ((x - ex + 128) * 257 + (y - ey + 128)) * 257 + (z - ez + 128);
+    const lk = (x: number, y: number, z: number) => ((x - ex + 512) * 1025 + (y - ey + 512)) * 1025 + (z - ez + 512);
     const opt = (x: number, y: number, z: number): Optics | null => {
       const k = lk(x, y, z);
       let o = optCache.get(k);
@@ -188,6 +225,18 @@ export class Vision {
       }
       return l;
     };
+    const secCache = new Map<number, boolean>();
+    const canSkip = typeof this.adapter.sectionEmpty === 'function';
+    const sectionEmpty = (x: number, y: number, z: number): boolean => {
+      if (!canSkip) return false;
+      const k = (((x >> 4) - (ex >> 4) + 64) * 129 + ((y >> 4) - (ey >> 4) + 64)) * 129 + ((z >> 4) - (ez >> 4) + 64);
+      let e = secCache.get(k);
+      if (e === undefined) {
+        e = this.adapter.sectionEmpty!(x, y, z);
+        secCache.set(k, e);
+      }
+      return e;
+    };
     const seeRange = (l: number) => (l >= 4 ? range : l >= 2 ? 12 : l >= 1 ? 6 : 3);
 
     const cats: number[] = new Array(cols * rows);
@@ -203,42 +252,67 @@ export class Vision {
       this.remember(k, name, { x, y, z }, now);
     };
 
+    /** 一条视线：返回第一眼看到的表面类别与距离；沿途记录值得注意的方块 */
+    const cast = (dx: number, dy: number, dz: number): { cat: Cat; dist: number } => {
+      let hitCat: Cat | null = null;
+      let hitDist = range;
+      let water = 0, leaves = 0;
+      let lx = ex, ly = ey, lz = ez;
+      raycast(eye.x, eye.y, eye.z, dx, dy, dz, range, (x, y, z, d) => {
+        if (y > 320 || y < -64) return true; // 出了世界高度
+        if (sectionEmpty(x, y, z)) {
+          // 整个 16³ 区段都是空气：直接跳到区段出口（远处天空方向的射线因此很便宜）
+          const te = sectionExit(eye.x, eye.y, eye.z, dx, dy, dz, x, y, z);
+          lx = Math.floor(eye.x + dx * (te - 0.01)); ly = Math.floor(eye.y + dy * (te - 0.01)); lz = Math.floor(eye.z + dz * (te - 0.01));
+          return te;
+        }
+        const o = opt(x, y, z);
+        if (!o) { if (!hitCat) { hitCat = 'unknown'; hitDist = d; } return true; }
+        if (o.kind === 'clear') {
+          if (NOTABLE.has(o.name)) note(o.name, x, y, z, d); // 甘蔗等无碰撞箱的植物
+          lx = x; ly = y; lz = z;
+          return false;
+        }
+        if (d > seeRange(light(lx, ly, lz))) { if (!hitCat) { hitCat = 'dark'; hitDist = d; } return true; }
+        if (o.kind === 'water') {
+          if (!hitCat) { hitCat = 'water'; hitDist = d; }
+          return ++water > 6;
+        }
+        if (o.kind === 'foliage') {
+          if (!hitCat) { hitCat = 'leaves'; hitDist = d; }
+          return ++leaves >= 2;
+        }
+        note(o.name, x, y, z, d);
+        if (!hitCat) { hitCat = catOf(o.name); hitDist = d; }
+        return true;
+      });
+      return { cat: hitCat ?? (dy > -0.05 ? 'sky' : 'unknown'), dist: hitDist };
+    };
+
     for (let j = 0; j < rows; j++) {
       const pitch = eye.pitch + (0.5 - (j + 0.5) / rows) * vFov;
       const cp = Math.cos(pitch), sp = Math.sin(pitch);
       for (let i = 0; i < cols; i++) {
         const yaw = eye.yaw + (0.5 - (i + 0.5) / cols) * hFov;
-        const dx = -Math.sin(yaw) * cp, dy = sp, dz = -Math.cos(yaw) * cp;
-        let hitCat: Cat | null = null;
-        let hitDist = range;
-        let water = 0, leaves = 0;
-        let lx = ex, ly = ey, lz = ez;
-        raycast(eye.x, eye.y, eye.z, dx, dy, dz, range, (x, y, z, d) => {
-          const o = opt(x, y, z);
-          if (!o) { hitCat ??= 'unknown'; hitDist = Math.min(hitDist, d); return true; }
-          if (o.kind === 'clear') {
-            if (NOTABLE.has(o.name)) note(o.name, x, y, z, d); // 甘蔗等无碰撞箱的植物
-            lx = x; ly = y; lz = z;
-            return false;
-          }
-          if (d > seeRange(light(lx, ly, lz))) { if (!hitCat) { hitCat = 'dark'; hitDist = d; } return true; }
-          if (o.kind === 'water') {
-            if (!hitCat) { hitCat = 'water'; hitDist = d; }
-            return ++water > 6;
-          }
-          if (o.kind === 'foliage') {
-            if (!hitCat) { hitCat = 'leaves'; hitDist = d; }
-            return ++leaves >= 2;
-          }
-          note(o.name, x, y, z, d);
-          if (!hitCat) { hitCat = catOf(o.name); hitDist = d; }
-          return true;
-        });
-        const c: Cat = hitCat ?? (dy > -0.05 ? 'sky' : 'unknown');
+        const { cat: c, dist } = cast(-Math.sin(yaw) * cp, sp, -Math.cos(yaw) * cp);
         const idx = j * cols + i;
         cats[idx] = CAT_INDEX[c];
-        dists[idx] = Math.round((Math.min(hitDist, range) / range) * 255);
+        dists[idx] = Math.round((Math.min(dist, range) / range) * 255);
         comp[c] = (comp[c] ?? 0) + 1;
+      }
+    }
+
+    // 地平线高分辨率带：只在当前视野内、绝对俯仰角 -14°..+8° 的范围（远处地物都在这里）
+    const bandLo = Math.max(eye.pitch - vFov / 2, -0.25);
+    const bandHi = Math.min(eye.pitch + vFov / 2, 0.14);
+    if (this.cfg.bandRows > 0 && this.cfg.bandCols > 0 && bandHi > bandLo) {
+      for (let j = 0; j < this.cfg.bandRows; j++) {
+        const pitch = bandHi - ((j + 0.5) / this.cfg.bandRows) * (bandHi - bandLo);
+        const cp = Math.cos(pitch), sp = Math.sin(pitch);
+        for (let i = 0; i < this.cfg.bandCols; i++) {
+          const yaw = eye.yaw + (0.5 - (i + 0.5) / this.cfg.bandCols) * hFov;
+          cast(-Math.sin(yaw) * cp, sp, -Math.cos(yaw) * cp);
+        }
       }
     }
     this.composition = comp;
@@ -430,13 +504,13 @@ export class Vision {
     const visibleNames = new Set(visible.map((v) => v.block));
     const now = Date.now();
     const remembered = group([...this.known.values()].filter((b) => NOTABLE.has(b.name) && !this.visibleNow.has(keyOf(b.pos.x, b.pos.y, b.pos.z)) && !visibleNames.has(b.name)))
-      .filter((r) => r.nearest <= 96)
+      .filter((r) => r.nearest <= this.effectiveRange())
       .slice(0, 10);
     const ent = (e: SeenEntity) => ({ name: e.name, dist: Math.round(e.dist), dir: e.dir, rel: e.rel });
     return {
       facing: eye ? dirOfYaw(eye.yaw) : null,
       fov: this.cfg.hFov,
-      range: this.cfg.range,
+      range: this.effectiveRange(),
       view: view || '（什么也看不见）',
       openness: this.openness,
       visible_resources: visible,

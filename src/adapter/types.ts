@@ -96,6 +96,10 @@ export interface GameAdapter {
   /** 返回 null 表示区块未加载 */
   blockOptics(x: number, y: number, z: number): Optics | null;
   lightAt(x: number, y: number, z: number): { block: number; sky: number } | null;
+  /** (x,y,z) 所在的 16³ 区段是否全是空气（视觉射线据此整段跳过；可选优化） */
+  sectionEmpty?(x: number, y: number, z: number): boolean;
+  /** 服务器实际下发的渲染距离（格），未知时返回 null */
+  renderDistance?(): number | null;
 
   /** 原始实体列表（服务端追踪范围内，含墙后的）。上层请用 Vision.perceivedEntities。 */
   nearbyEntities(radius: number): EntityInfo[];
