@@ -50,10 +50,11 @@ ${catalog}
 如果还需要记忆，先输出 {"kind":"recall","query":"要追查的问题","ids":["可选记忆ID"],"filters":{"kinds":["experience"]}}。这是只读查询，不占用游戏动作；最多两轮，返回未知时承认未知。检索排名与读过次数不提高真实性。历史事件不代表库存/设施的当前状态。
 
 否则只输出一个 JSON 对象：
-{"kind":"plan","thought":"想继续观察树冠的形状","decision":{"kind":"continue","reason":"上次只看了一面，还想比较另一侧","context":["上一轮观察"]},"goal":"观察树冠另一侧","goal_type":"investigate","steps":[{"skill":"look_around","args":{"seconds":4}}],"abort_if":{"hp_below":6}}
+thought 会显示在游戏聊天中，请写成简短的第一人称角色独白（建议 1–2 句、60 字以内），表达眼前的感受、好奇、疑惑或偏好；不要写行动计划、步骤清单、技能参数或详细推演。执行安排只放在 goal 和 steps 中。
+{"kind":"plan","thought":"我有点好奇，这棵树另一侧的轮廓是什么样。","decision":{"kind":"continue","reason":"上次只看了一面，还想比较另一侧","context":["上一轮观察"]},"goal":"观察树冠另一侧","goal_type":"investigate","steps":[{"skill":"look_around","args":{"seconds":4}}],"abort_if":{"hp_below":6}}
 若没有当前意图，新意图必须嵌套在 decision.intent 中（不是顶层 intent），例如：
-{"kind":"plan","thought":"好奇眼前的树木","decision":{"kind":"begin","reason":"发现了没见过的树冠","intent":{"text":"观察这种树木的形状","whyNow":"眼前发现了新树种","context":["当前视觉"],"tradeoffs":["暂缓其他想法"]}},"goal":"观察周围树木","goal_type":"investigate","steps":[{"skill":"look_around","args":{"seconds":4}}]}
-decision.intent.context 与 tradeoffs 都是字符串数组。只有 begin/revise 可写 decision.intent，只有新项目或 revise 可写 decision.project（不得在 continue 时重新定义已有工程）。preferences、say、memory_note、lesson、learn_skill 都是可选字段；learn_skill 采用上文的程序格式。
+{"kind":"plan","thought":"我还是头一次见到这种树冠，真特别。","decision":{"kind":"begin","reason":"发现了没见过的树冠","intent":{"text":"观察这种树木的形状","whyNow":"眼前发现了新树种","context":["当前视觉"],"tradeoffs":["暂缓其他想法"]}},"goal":"观察周围树木","goal_type":"investigate","steps":[{"skill":"look_around","args":{"seconds":4}}]}
+decision.intent.context 与 tradeoffs 都是字符串数组。只有 begin/revise 可写 decision.intent，只有新项目或 revise 可写 decision.project（不得在 continue 时重新定义已有工程）。preferences、memory_note、lesson、learn_skill 都是可选字段；learn_skill 采用上文的程序格式。聊天只展示 thought，不另用 say 播报。
 steps 保持 1–5 步；defer/abandon/complete 可以 steps:[]，表示选择等待而非填充无关动作。不要每轮换目标，也不必每轮说话。可用 begin + 已有 intentId 恢复 continuity 中列出的暂缓兴趣及其原项目；新记录的 ID、项目修订、里程碑和请求代次由程序分配，不能伪造或覆盖。`;
 }
 

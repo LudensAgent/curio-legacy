@@ -36,7 +36,6 @@ export class Executive {
   private backoffUntil = 0;
   private timer: NodeJS.Timeout | null = null;
   private fillerToggle = 0;
-  private lastSayAt = 0;
   private activatedAt: number | null = null;
   private suspended = new Set<PauseReason>();
   private lastSession = '';
@@ -256,9 +255,8 @@ export class Executive {
     this.plan = p;
     this.attemptStarted = false;
     this.activatedAt = Date.now();
-    this.d.bus.publish('plan', 'P2', `[${p.source}] ${p.goal} —— ${p.thought}`, { steps: p.steps, planId: p.id, binding: p.binding });
+    this.d.bus.publish('plan', 'P2', `[${p.source}] ${p.goal} —— ${p.thought}`, { thought: p.thought, source: p.source, steps: p.steps, planId: p.id, binding: p.binding });
     this.d.bus.publish('goal', 'P2', `当前尝试：${p.goal}`, { planId: p.id, source: p.source });
-    if (p.say && Date.now() - this.lastSayAt > 60_000) { this.d.adapter.chat(p.say); this.lastSayAt = Date.now(); }
     if (p.steps.length === 0) {
       this.finishPlan('deferred', p.decision?.reason ?? '主观结束本次兴趣', false);
       this.backoffUntil = Date.now() + 30_000;
