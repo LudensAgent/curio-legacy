@@ -17,7 +17,7 @@ const P = (over: Partial<Percept> = {}): Percept => ({
   inventory: [{ name: 'stone_pickaxe', count: 1 }], emptySlots: 30,
   nearby: { hostile: [], passive: [], players: [], resources: [] },
   vision: { facing: 'N', fov: 100, range: 160, view: 'grass 60%', openness: { left: 64, center: 64, right: 64 }, visible_resources: [], remembered_resources: [], seen_entities: [], heard: [], nearest_land: null, last_look_around_s: 10 },
-  death_recovery: null, curiosities: [], objective: null, drives: [], stock: null, efficiency: [],
+  death_recovery: null, curiosities: [], objective: null, drives: [], stock: null, efficiency: [], light: null, storage: null, farms: [], learn_candidates: [], reflection_due: false,
   exploration: { visitedChunks: 3, noveltyByDir: { N: 0.5, NE: 0.5, E: 1, SE: 0.5, S: 0.5, SW: 0.5, W: 0.5, NW: 0.5 }, base: null },
   ...over,
 });
@@ -174,4 +174,33 @@ test('偷懒：空手砍了很多木头且很慢 → 效率洞察建议做斧头
   const r = ruleProposal({ ...p, drives: [eff!] }, memory) as any;
   assert.deepEqual(r.steps[0], { skill: 'craft', args: { item: 'wooden_axe', count: 1 } });
   assert.match(r.thought, /快 2 倍/);
+});
+
+test('亮度：地下很暗时感知到 dark + 会刷怪；有火把就插，插完变亮', async () => {
+  const a = new FakeAdapter();
+  // 一条地下矿道：把角色放到 y=55，周围挖空一条通道
+  a.pos = { x: 0, y: 55, z: 0 };
+  for (let x = -6; x <= 6; x++) for (const y of [55, 56]) a.removed.add(`${x},${y},0`);
+  a.inv.set('torch', 4);
+  const memory = new WorldMemory(null);
+  const perception = new Perception(a, memory, new EventBus(), new Vision(a));
+  const p = perception.update();
+  assert.equal(p.light?.level, 'dark');
+  assert.equal(p.light?.underground, true);
+  assert.equal(p.light?.mob_spawn_risk, true);
+  assert.equal(p.drives[0].drive, 'light');
+  assert.equal((ruleProposal(p, memory) as any).steps[0].skill, 'place_torch');
+  const { o } = await runSkill(a, 'place_torch', { count: 1 }, memory);
+  assert.equal(o.result.status, 'succeeded', o.result.summary);
+  assert.equal(a.inv.get('torch'), 3);
+  assert.ok(perception.update().light!.here >= 10, '插完火把应变亮');
+});
+
+test('亮度：暗处没有火把但有煤 → 先做火把', () => {
+  const p = P({ light: { here: 2, block: 0, sky: 0, level: 'dark', mob_spawn_risk: true, dark_view_pct: 60, underground: true, torches: 0 } });
+  p.inventory.push({ name: 'coal', count: 3 }, { name: 'stick', count: 4 });
+  const m = new WorldMemory(null);
+  const r = ruleProposal({ ...p, drives: computeDrives(p, m).drives }, m) as any;
+  assert.deepEqual(r.steps[0], { skill: 'craft', args: { item: 'torch', count: 8 } });
+  assert.equal(r.steps[1].skill, 'place_torch');
 });

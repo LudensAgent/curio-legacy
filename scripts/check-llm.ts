@@ -40,6 +40,11 @@ const percept: Percept = {
   drives: [{ drive: 'tools', level: 0.7, why: '当前镐子等级：none', suggest: 'gather log → craft wooden_pickaxe' }],
   stock: null,
   efficiency: [{ block: 'oak_log', mined: 6, avg_s: 3, tool: '空手', better: [{ tool: 'wooden_axe', est_s: 1.5, speedup: 2, have: false, materials: '3 木板 + 2 木棍' }] }],
+  light: { here: 15, block: 0, sky: 15, level: 'bright', mob_spawn_risk: false, dark_view_pct: 0, underground: false, torches: 0 },
+  storage: null,
+  farms: [],
+  learn_candidates: [{ steps: 'gather:log → craft:wooden_pickaxe', times: 2 }],
+  reflection_due: true,
   exploration: { visitedChunks: 3, noveltyByDir: { N: 1, NE: 1, E: 0.9, SE: 1, S: 0.6, SW: 1, W: 1, NW: 1 }, base: { dist: 6, dir: 'S' } },
 };
 

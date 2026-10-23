@@ -21,9 +21,10 @@ export interface Plan {
   say?: string;
   abortIf: { hpBelow?: number; night?: boolean };
   memoryNote?: string;
-  lesson?: string;
   /** 长期目标（跨多个计划），LLM 可更新 */
   objective?: string;
+  /** 反思得到的经验（长期保留） */
+  lesson?: string;
   /** LLM 提议学习的新组合技能（原始 JSON，由技能库校验） */
   learnSkill?: unknown;
   createdAt: number;
@@ -84,9 +85,9 @@ export function validatePlan(raw: unknown, adapter: GameAdapter, source: Plan['s
       index: 0,
       say: o.say ? String(o.say).slice(0, 120) : undefined,
       abortIf: { hpBelow: Number.isFinite(hp) ? Math.max(1, Math.min(19, hp)) : undefined, night: ab.night === true },
-      lesson: o.lesson ? String(o.lesson).slice(0, 160) : undefined,
       memoryNote: o.memory_note ? String(o.memory_note).slice(0, 200) : undefined,
       objective: o.objective ? String(o.objective).slice(0, 120) : undefined,
+      lesson: o.lesson ? String(o.lesson).slice(0, 160) : undefined,
       learnSkill: o.learn_skill && typeof o.learn_skill === 'object' ? o.learn_skill : undefined,
       createdAt: Date.now(),
       retries: 0,
@@ -215,6 +216,15 @@ function baseRule(p: Percept, memory?: WorldMemory): Record<string, unknown> {
         if (homeBuilt && p.exploration.base && p.exploration.base.dist > 6) return mk('天要黑了，回小屋待着。', '回家过夜', 'rest', [{ skill: 'goto', args: { target: 'base' } }]);
         if (night && st.blocks >= 1 && !p.self.inWater) return mk('没有床也没房子，挖个坑躲一晚。', '挖坑过夜', 'rest', [{ skill: 'shelter', args: { until: 'day' } }]);
         return null;
+      case 'light': {
+        const L = p.light;
+        const hasCoal = p.inventory.some((i) => i.name === 'coal' || i.name === 'charcoal');
+        if (L && L.torches > 0 && (L.level === 'dark' || L.mob_spawn_risk)) return mk(`这里太暗了（亮度 ${L.here}），插支火把，免得看不清还刷怪。`, '插火把照明', 'survive', [{ skill: 'place_torch', args: { count: 1 } }]);
+        if (hasCoal) return mk('有煤，做一组火把备用。', '制作火把', 'craft', [{ skill: 'craft', args: { item: 'torch', count: 8 } }, ...(L && L.level === 'dark' ? [{ skill: 'place_torch', args: { count: 1 } }] : [])]);
+        const coal = p.nearby.resources.find((r) => r.block.includes('coal_ore'));
+        if (coal && hasWoodPick) return mk(`没有火把，${coal.dir ?? ''} ${coal.nearest} 格外有煤矿，去挖点煤做火把。`, '挖煤做火把', 'gather', [{ skill: 'gather', args: { block: 'coal', count: 4 } }, { skill: 'craft', args: { item: 'torch', count: 8 } }]);
+        return null;
+      }
       case 'tools':
         return toolsChain();
       case 'efficiency': {
@@ -245,6 +255,29 @@ function baseRule(p: Percept, memory?: WorldMemory): Record<string, unknown> {
         if (st.logs < 16 && logNearby) return mk('多囤点木头，省得以后来回跑。', '囤积木材', 'gather', [{ skill: 'gather', args: { block: 'log', count: 12 } }]);
         if (st.cobblestone < 16 && hasWoodPick) return mk('多挖点圆石备用。', '囤积圆石', 'gather', [{ skill: 'gather', args: { block: 'stone', count: 12 } }]);
         return null;
+      case 'storage':
+        return mk(`背包只剩 ${p.emptySlots} 个空位，把不常用的东西存进箱子。`, '整理背包', 'build', [{ skill: 'store_items' }]);
+      case 'smelt': {
+        const m = /smelt \{item:"([a-z_]+)"\}/.exec(d.suggest ?? '');
+        if (!m) return null;
+        return mk(`${d.why}，烧一下。`, `冶炼 ${m[1]}`, 'craft', [{ skill: 'smelt', args: { item: m[1] } }]);
+      }
+      case 'farm': {
+        if ((d.suggest ?? '').startsWith('collect_seeds')) return mk('想种地，先打草收集种子。', '收集种子', 'gather', [{ skill: 'collect_seeds', args: { count: 6 } }]);
+        const m = /crop:"([a-z_]+)"/.exec(d.suggest ?? '');
+        return mk(`${d.why}。`, m ? `开垦农田种 ${m[1]}` : '照看农田', 'build', [{ skill: 'farm', args: m ? { crop: m[1] } : {} }]);
+      }
+      case 'expedition': {
+        if (night || !(d.suggest ?? '').startsWith('expedition')) return null;
+        const [dir] = Object.entries(p.exploration.noveltyByDir).sort((a, b) => b[1] - a[1])[0] ?? ['auto'];
+        return mk(`家里安顿好了，去 ${dir} 方向远行看看，沿途留路标。`, `远征 ${dir}`, 'explore', [{ skill: 'expedition', args: { direction: dir, distance: 240 } }]);
+      }
+      case 'novelty': {
+        const k = /换个玩法：([a-z_]+)/.exec(d.suggest ?? '')?.[1];
+        if (k === 'hunt' && animals.length && !night) return mk('好久没打猎了，去活动活动。', '打猎', 'gather', [{ skill: 'hunt', args: { animal: animals[0].name, count: 1 } }]);
+        if (k === 'place_torch') return mk('给家附近插点火把，省得晚上刷怪。', '照亮家园', 'build', [{ skill: 'place_torch', args: { count: 2 } }]);
+        return null; // 其他玩法由对应的欲望（farm/smelt/expedition）负责
+      }
       case 'explore': {
         if (night) return null;
         const [bestDir] = Object.entries(p.exploration.noveltyByDir).sort((a, b) => b[1] - a[1])[0] ?? ['auto'];

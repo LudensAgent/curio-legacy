@@ -47,7 +47,7 @@ const basePercept = (over: Partial<Percept> = {}): Percept => ({
   nearby: { hostile: [], passive: [], players: [], resources: [] },
   vision: { facing: 'N', fov: 100, range: 64, view: 'sky 50%', openness: { left: 64, center: 64, right: 64 }, visible_resources: [], remembered_resources: [], seen_entities: [], heard: [], nearest_land: null, last_look_around_s: null },
   exploration: { visitedChunks: 1, noveltyByDir: { N: 1, NE: 1, E: 1, SE: 1, S: 1, SW: 1, W: 1, NW: 1 }, base: null },
-  death_recovery: null, curiosities: [], objective: null, drives: [], stock: null, efficiency: [],
+  death_recovery: null, curiosities: [], objective: null, drives: [], stock: null, efficiency: [], light: null, storage: null, farms: [], learn_candidates: [], reflection_due: false,
   ...over,
 });
 

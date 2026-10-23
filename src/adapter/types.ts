@@ -14,6 +14,8 @@ export type EntityKind = 'hostile' | 'passive' | 'player' | 'item' | 'other';
 
 export interface EntityInfo {
   id: number;
+  /** Hearing can orient a search or retreat, but is not a precise firing target. */
+  perception?: 'seen' | 'heard';
   name: string;
   kind: EntityKind;
   pos: Vec3Like;
@@ -40,6 +42,8 @@ export type Opacity = 'clear' | 'water' | 'foliage' | 'solid';
 export interface Optics {
   name: string;
   kind: Opacity;
+  /** State-specific opaque AABBs in block-local coordinates; gaps are optical openings. */
+  shapes?: ReadonlyArray<readonly [number, number, number, number, number, number]>;
 }
 
 /** 眼睛位置与朝向（yaw: 0 = 北(-Z)，正值向左转；pitch: 正值抬头） */
@@ -120,6 +124,12 @@ export interface BlockState {
   properties: Record<string, string | number | boolean>;
 }
 
+export interface UseItemOptions {
+  chargeMs?: number;
+  /** A concrete observed world point; the adapter verifies the clear ray and sends the aim before use. */
+  aim?: Vec3Like;
+}
+
 export interface GameAdapter {
   on(event: AdapterEvent, cb: (...args: any[]) => void): this;
 
@@ -158,7 +168,7 @@ export interface GameAdapter {
   equipItem?(name: string, destination: 'hand' | 'off-hand' | 'head' | 'torso' | 'legs' | 'feet', signal: AbortSignal): Promise<ActionResult>;
   /** item='' performs a legal empty-hand interaction (for example opening an owned door). */
   useBlockAt?(pos: Vec3Like, item: string, signal: AbortSignal): Promise<ActionResult>;
-  useItem?(item: string, signal: AbortSignal, opts?: { chargeMs?: number }): Promise<ActionResult>;
+  useItem?(item: string, signal: AbortSignal, opts?: UseItemOptions): Promise<ActionResult>;
   rangedAttack?(entityId: number, signal: AbortSignal): Promise<ActionResult>;
   enterPortalAt?(pos: Vec3Like, signal: AbortSignal, expectedDim?: string): Promise<ActionResult & { from?: AgentState; to?: AgentState }>;
   bossStatus?(): { dragonDeath: BossDeathObservation | null };
@@ -168,6 +178,16 @@ export interface GameAdapter {
   craft(item: string, count: number, signal: AbortSignal, opts?: { tablePos?: Vec3Like }): Promise<ActionResult & { crafted: number }>;
   /** 睡在身边的床上（没有就把背包里的床放下）；一直睡到醒来 */
   sleepInBed(signal: AbortSignal): Promise<ActionResult & { bedPos?: Vec3Like }>;
+  /** 用熔炉烧东西：furnacePos = 记得的熔炉；没有就用背包里的熔炉放下。返回烧出的数量 */
+  smelt(input: string, count: number, fuel: string, signal: AbortSignal, opts?: { furnacePos?: Vec3Like; onProgress?: (done: number) => void }): Promise<ActionResult & { made: number; output?: string }>;
+  /** 打开箱子：存入 deposits / 取出 withdraws，返回箱子里现在的物品 */
+  useChest(pos: Vec3Like, deposits: InvItem[], withdraws: InvItem[], signal: AbortSignal): Promise<ActionResult & { contents: InvItem[]; moved: number }>;
+  /** 用锄头把泥土/草方块锄成耕地 */
+  till(pos: Vec3Like, signal: AbortSignal): Promise<ActionResult>;
+  /** 在耕地上播种（seed: wheat_seeds / carrot / potato / beetroot_seeds） */
+  plant(pos: Vec3Like, seed: string, signal: AbortSignal): Promise<ActionResult>;
+  /** 作物生长阶段：{age, max}；不是作物返回 null */
+  cropAge(pos: Vec3Like): { age: number; max: number } | null;
   hasFood(): boolean;
   eat(signal: AbortSignal): Promise<boolean>;
   equipWeapon(signal?: AbortSignal): Promise<void>;

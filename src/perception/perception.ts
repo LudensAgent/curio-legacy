@@ -1,10 +1,12 @@
 import type { GameAdapter, InvItem } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
-import { round1 } from '../util.ts';
+import { effectiveLight, round1 } from '../util.ts';
+import { torchCount } from '../skills/light.ts';
 import { NOTABLE, type Vision, type VisionSummary } from './vision.ts';
 import { computeDrives, type Drive, type Stock } from '../brain/drives.ts';
 import { efficiencyInsights, type EfficiencyInsight } from '../brain/efficiency.ts';
+import { learnCandidates, reflectionDue } from '../brain/habits.ts';
 
 export const DIRS: Record<string, [number, number]> = {
   N: [0, -1], NE: [0.707, -0.707], E: [1, 0], SE: [0.707, 0.707],
@@ -39,10 +41,27 @@ export interface Percept {
   /** 游玩欲望（按强度排序） */
   drives: Drive[];
   stock: Stock | null;
+  /** 亮度感知：脚下的实际亮度、是否会刷怪、视野里有多少看不清 */
+  light: {
+    here: number;
+    block: number;
+    sky: number;
+    level: 'bright' | 'dim' | 'dark';
+    mob_spawn_risk: boolean;
+    dark_view_pct: number;
+    underground: boolean;
+    torches: number;
+  } | null;
+  /** 仓储：记得的箱子与里面存了什么 */
+  storage: { chests: number; nearest: number | null; stored: string; source?: 'historical_chest_snapshot'; availability?: 'unconfirmed_until_opened'; oldestObservedAt?: number; ageSeconds?: number } | null;
+  /** 农田：作物、格数、成熟数量（离得近时才能看清） */
+  farms: { crop: string; cells: number; dist: number; mature: number | null; minutes_since_planted: number }[];
+  /** 最近反复成功的同一套步骤（可以 learn_skill 学成技能） */
+  learn_candidates: { steps: string; times: number }[];
+  /** 是否该反思一下（在 lesson 字段写经验） */
+  reflection_due: boolean;
   /** 效率洞察：最近的采集速度，以及换哪把工具能快多少（偷懒的依据） */
   efficiency: EfficiencyInsight[];
-  /** Historical storage snapshots, scoped to the current dimension; not current holdings. */
-  storage?: { chests: number; nearest: number | null; stored: string; source?: 'historical_chest_snapshot'; availability?: 'unconfirmed_until_opened'; oldestObservedAt?: number; ageSeconds?: number } | null;
   exploration: {
     visitedChunks: number;
     noveltyByDir: Record<string, number>;
@@ -94,6 +113,9 @@ export class Perception {
     return this.latest!;
   }
 
+  /** 由 main 注入：已经学会的技能对应的步骤签名（避免重复提示） */
+  knownSkillSigs?: () => Set<string>;
+
   private storageInfo(dim: string, here: { x: number; z: number }): Percept['storage'] {
     const chests = this.memory.chests().filter((c) => c.dim === dim);
     if (!chests.length) return null;
@@ -105,6 +127,44 @@ export class Perception {
     return { chests: chests.length, nearest, stored: totals.slice(0, 14).map(([n, c]) => `${n}×${c}`).join('、') || '（空）',
       source: 'historical_chest_snapshot', availability: 'unconfirmed_until_opened', oldestObservedAt,
       ageSeconds: Math.max(0, Math.round((Date.now() - oldestObservedAt) / 1000)) };
+  }
+
+  private farmInfo(dim: string, here: { x: number; z: number }): Percept['farms'] {
+    return this.memory.farms().filter((f) => f.dim === dim && f.cells.length).map((f) => {
+      const dist = Math.round(Math.hypot(f.cells[0].x - here.x, f.cells[0].z - here.z));
+      let mature: number | null = null;
+      if (dist <= 48) {
+        let observed = 0;
+        mature = 0;
+        for (const c of f.cells) {
+          const a = this.adapter.cropAge({ x: c.x, y: c.y + 1, z: c.z });
+          if (a) observed++;
+          if (a && a.age >= a.max) mature++;
+        }
+        if (observed !== f.cells.length) mature = null;
+      }
+      return { crop: f.crop, cells: f.cells.length, dist, mature, minutes_since_planted: Math.round((Date.now() - f.plantedAt) / 60000) };
+    });
+  }
+
+  private lightInfo(s: ReturnType<GameAdapter['state']>): Percept['light'] {
+    const x = Math.floor(s.pos.x), y = Math.floor(s.pos.y), z = Math.floor(s.pos.z);
+    const l = this.adapter.lightAt(x, y, z) ?? this.adapter.lightAt(x, y + 1, z);
+    if (!l) return null;
+    const here = effectiveLight(l, s.timeOfDay);
+    const comp = this.vision.composition;
+    const total = Object.values(comp).reduce((a, b) => a + b, 0) || 1;
+    return {
+      here,
+      block: l.block,
+      sky: l.sky,
+      level: here >= 10 ? 'bright' : here >= 4 ? 'dim' : 'dark',
+      // 1.18+：方块光为 0 且足够暗时会刷敌对生物
+      mob_spawn_risk: l.block === 0 && here <= 7,
+      dark_view_pct: Math.round(((comp.dark ?? 0) / total) * 100),
+      underground: l.sky <= 4,
+      torches: torchCount(s.inventory),
+    };
   }
 
   update(): Percept {
@@ -224,7 +284,11 @@ export class Perception {
       drives: [],
       stock: null,
       efficiency: s.connected ? efficiencyInsights(this.adapter, this.memory, s.inventory) : [],
+      light: s.observationReady ? this.lightInfo(s) : null,
       storage: this.storageInfo(s.dim, here),
+      farms: s.observationReady ? this.farmInfo(s.dim, here) : [],
+      learn_candidates: learnCandidates(this.memory, this.knownSkillSigs?.() ?? new Set()).map((c) => ({ steps: c.signature, times: c.times })),
+      reflection_due: reflectionDue(this.memory),
       exploration: { visitedChunks: this.memory.visitedChunkCount, noveltyByDir, base: baseInfo },
     };
     const { drives, stock } = computeDrives(this.latest, this.memory);

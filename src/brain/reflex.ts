@@ -3,6 +3,8 @@ import type { Arbiter, Step } from '../arbiter/arbiter.ts';
 import type { EventBus, Severity } from '../events.ts';
 import type { Senses } from '../skills/types.ts';
 import { hasPlaceable } from '../skills/survival.ts';
+import { torchCount } from '../skills/light.ts';
+import { effectiveLight } from '../util.ts';
 
 /**
  * 反射层：不依赖 LLM，按固定频率检查危险并直接抢占动作。
@@ -94,7 +96,29 @@ export class Reflex {
       return this.fire({ skill: 'eat' }, 'P1', `饥饿 ${s.food} / 生命 ${s.hp}`);
     }
 
+    this.autoTorch(s, cur, nearest?.dist ?? Infinity);
     this.checkStuck(s.pos, cur);
+  }
+
+  private lastTorch: { x: number; y: number; z: number } | null = null;
+  torchesPlaced = 0;
+
+  /** 像真人下矿一样：在地下走到暗处就顺手插一支火把（不打断计划，计划会原样继续） */
+  private autoTorch(s: ReturnType<GameAdapter['state']>, cur: ReturnType<Arbiter['info']>, nearestHostile: number) {
+    if (s.inWater || nearestHostile < 5 || torchCount(s.inventory) === 0) return;
+    if (cur && ['place_torch', 'shelter', 'surface', 'flee', 'defend', 'unstuck', 'dragon_fight'].includes(cur.skill)) return;
+    const x = Math.floor(s.pos.x), y = Math.floor(s.pos.y), z = Math.floor(s.pos.z);
+    const l = this.adapter.lightAt(x, y, z);
+    if (!l) return;
+    const here = effectiveLight(l, s.timeOfDay);
+    if (l.sky > 4 || here > 4) return; // 只在地下的暗处
+    if (this.lastTorch && Math.hypot(x - this.lastTorch.x, y - this.lastTorch.y, z - this.lastTorch.z) < 5) return;
+    if (!this.ready('torch', 6000)) return;
+    this.lastTorch = { x, y, z };
+    this.torchesPlaced++;
+    this.triggers++;
+    this.bus.publish('reflex', 'P3', `地下太暗（亮度 ${here}/15）→ 顺手插火把`);
+    this.arbiter.start({ skill: 'place_torch', args: { count: 1 } }, 'reflex', { gentle: true });
   }
 
   /** 移动型任务 20 秒内位移 < 1.5 格且进度没有变化 → 判定卡死，取消任务（计为 STUCK 失败）并执行脱困。 */

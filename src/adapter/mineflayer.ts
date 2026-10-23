@@ -1,10 +1,12 @@
 import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { crystalArrowShot } from '../combat/ballistics.ts';
 import type { Config } from '../config.ts';
 import type { EventBus } from '../events.ts';
 import { AbortedError, raceAbort, shortId, sleep, throwIfAborted, TimeoutError } from '../util.ts';
 import type {
+  InvItem,
   ActionResult,
   AgentState,
   BlockHit,
@@ -18,6 +20,7 @@ import type {
   Vec3Like,
   BossDeathObservation,
   SwimOptions,
+  UseItemOptions,
 } from './types.ts';
 
 const require = createRequire(import.meta.url);
@@ -270,7 +273,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return chunks ? chunks * 16 : null;
   }
 
-  private classifyOptics(b: any): Optics {
+  private classifyOptics(b: any, stateId?: number): Optics {
     const name: string = b?.name ?? 'air';
     let kind: Optics['kind'] = 'solid';
     if (name === 'air' || name === 'cave_air' || name === 'void_air' || name === 'light' || name === 'structure_void' || name === 'barrier') kind = 'clear';
@@ -279,6 +282,17 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     else if (name.endsWith('_leaves')) kind = 'foliage';
     else if (name.includes('glass')) kind = 'clear';
     else if (b?.boundingBox === 'empty') kind = 'clear'; // 草、花、火把、铁轨等
+    if (name === 'iron_bars' && Number.isInteger(stateId)) {
+      const definitions = this.mcData.blockCollisionShapes;
+      const palette = definitions?.blocks?.iron_bars;
+      const offset = stateId! - this.mcData.blocksByName.iron_bars.minStateId;
+      const shapeId = Array.isArray(palette) ? palette[offset] : palette;
+      const boxes = definitions?.shapes?.[shapeId];
+      if (Array.isArray(boxes) && boxes.length && boxes.every((box: unknown) => Array.isArray(box) && box.length === 6
+        && box.every(Number.isFinite) && box[0] < box[3] && box[1] < box[4] && box[2] < box[5])) {
+        return { name, kind, shapes: boxes.map((box: number[]) => [box[0], box[1], box[2], box[3], box[4], box[5]]) };
+      }
+    }
     return { name, kind };
   }
 
@@ -294,7 +308,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (sid === null || sid === undefined) return null;
       let o = this.opticsByState.get(sid);
       if (!o) {
-        o = this.classifyOptics(this.mcData.blocksByStateId?.[sid]);
+        const definition = this.mcData.blocksByStateId?.[sid];
+        if (!definition) return null;
+        o = this.classifyOptics(definition, sid);
         this.opticsByState.set(sid, o);
       }
       return o;
@@ -377,6 +393,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const name = String(ent.name ?? '');
     if (ent.type === 'player') return 'player';
     if (name === 'item') return 'item';
+    if (name === 'enderman') {
+      const keys: string[] = this.mcData?.entitiesByName?.enderman?.metadataKeys ?? [];
+      if (['creepy', 'stared_at'].some((key) => keys.indexOf(key) >= 0 && ent.metadata?.[keys.indexOf(key)] === true)) return 'hostile';
+    }
     if (HOSTILE.has(name)) return 'hostile';
     if (NEUTRAL.has(name)) return 'passive';
     if (ent.type === 'hostile') return 'hostile';
@@ -520,10 +540,19 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       try { b.pathfinder?.setGoal(null); } catch { /* ignore */ }
       try { b.clearControlStates(); } catch { /* ignore */ }
       try { if (b.targetDigBlock) b.stopDigging(); } catch { /* ignore */ }
-      try { b.deactivateItem(); } catch { /* ignore */ }
+      try { this.cancelItemUse(b); } catch { /* ignore */ }
       try { if (b.currentWindow) b.closeWindow(b.currentWindow); } catch { /* ignore */ }
       try { if (b.isSleeping) Promise.resolve(b.wake()).catch(() => {}); } catch { /* ignore */ }
     });
+  }
+
+  private cancelItemUse(b: any) {
+    // release_use_item fires a drawn bow. A held-slot change instead cancels
+    // use synchronously, before the next action owner can take control.
+    if (['bow', 'crossbow', 'trident'].includes(b.heldItem?.name)) {
+      if (typeof b.setQuickBarSlot === 'function') b.setQuickBarSlot(((b.quickBarSlot ?? 0) + 1) % 9);
+      b.usingHeldItem = false;
+    } else b.deactivateItem();
   }
 
   canHarvest(pos: Vec3Like): boolean {
@@ -793,13 +822,27 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return { ok: true };
   }
 
-  async useItem(item: string, signal: AbortSignal, opts: { chargeMs?: number } = {}): Promise<ActionResult> {
+  async useItem(item: string, signal: AbortSignal, opts: UseItemOptions = {}): Promise<ActionResult> {
     const check = this.actionCheckpoint(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
     const b = this.bot;
     const held = this.invItem(item);
     if (!held) return { ok: false, reason: 'NO_ITEM' };
     await this.afterAction(() => b.equip(held, 'hand'), check);
+    if (opts.aim) {
+      if (![opts.aim.x, opts.aim.y, opts.aim.z].every(Number.isFinite)) return { ok: false, reason: 'BAD_AIM' };
+      const point = this.vec(opts.aim), from = b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0), vector = point.minus(from), distance = vector.norm();
+      if (distance < 0.01 || distance > 64) return { ok: false, reason: 'OUT_OF_RANGE' };
+      const direction = vector.normalize();
+      for (let step = 0; step <= distance; step += 0.5) if (!b.blockAt(from.plus(direction.scaled(step)))) return { ok: false, reason: 'NOT_LOADED' };
+      const hit = b.world?.raycast?.(from, direction, distance);
+      if (hit?.position && !hit.position.equals(point.floored())) return { ok: false, reason: 'BLOCKED_AIM' };
+      // Mineflayer's smooth-look promise follows yaw only, so a steep pitch can
+      // still be in flight. Force both axes and wait for their physics packet.
+      await this.afterAction(() => b.lookAt(point, true), check);
+      if (typeof b.waitForTicks === 'function') await this.afterAction(() => raceAbort(b.waitForTicks(1), signal, 2000, () => {}), check);
+      else await this.afterAction(() => sleep(60, signal), check);
+    }
     this.actionContext.run(check, () => b.activateItem());
     if (opts.chargeMs) {
       await this.afterAction(() => sleep(Math.max(0, Math.min(3000, opts.chargeMs!)), signal), check);
@@ -821,16 +864,34 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // Approximate full-draw flight and gravity locally. Read the entity again
     // after charging, so a moving target is not aimed at its old draw-start pose.
     const aim = () => {
+      if (target.name === 'end_crystal') {
+        const camera = b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0);
+        const shot = crystalArrowShot(camera.offset(0, -0.1, 0), target.position, target.height ?? 2, (from, to) => {
+          if (typeof b.world?.raycast !== 'function') return true;
+          const delta = this.vec(to).minus(this.vec(from)), length = delta.norm();
+          return length < 1e-8 || !b.world.raycast(this.vec(from), delta.scaled(1 / length), length);
+        });
+        return shot ? camera.offset(shot.direction.x * 16, shot.direction.y * 16, shot.direction.z * 16) : null;
+      }
       const ticks = b.entity.position.distanceTo(target.position) / 3;
       const velocity = target.velocity ?? { x: 0, y: 0, z: 0 };
       return target.position.offset(velocity.x * ticks, (target.height ?? 1.6) * 0.5 + 0.025 * ticks * ticks + velocity.y * ticks, velocity.z * ticks);
     };
-    await this.afterAction(() => b.lookAt(aim(), true), check);
+    const firstAim = aim();
+    if (!firstAim) return { ok: false, reason: 'BLOCKED_AIM' };
+    await this.afterAction(() => b.lookAt(firstAim, true), check);
     this.actionContext.run(check, () => b.activateItem());
     await this.afterAction(() => sleep(1100, signal), check);
-    if (!target.isValid) { b.deactivateItem(); return { ok: false, reason: 'ENTITY_GONE' }; }
-    if (b.entity.position.distanceTo(target.position) > 48) { b.deactivateItem(); return { ok: false, reason: 'OUT_OF_RANGE' }; }
-    await this.afterAction(() => b.lookAt(aim(), true), check);
+    if (!target.isValid) { this.cancelItemUse(b); return { ok: false, reason: 'ENTITY_GONE' }; }
+    if (b.entity.position.distanceTo(target.position) > 48) { this.cancelItemUse(b); return { ok: false, reason: 'OUT_OF_RANGE' }; }
+    const currentAim = aim();
+    if (!currentAim) {
+      // Changing slots cancels a drawn bow without firing into a newly blocked
+      // path. A normal release here would spend an arrow despite the failure.
+      check(); this.cancelItemUse(b);
+      return { ok: false, reason: 'BLOCKED_AIM' };
+    }
+    await this.afterAction(() => b.lookAt(currentAim, true), check);
     if (typeof b.waitForTicks === 'function') await this.afterAction(() => raceAbort(b.waitForTicks(1), signal, 2000, () => {}), check);
     else await this.afterAction(() => sleep(60, signal), check);
     this.actionContext.run(check, () => b.deactivateItem());
@@ -874,6 +935,149 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
 
   private invItem(name: string) {
     return this.bot.inventory.items().find((i: any) => i.name === name);
+  }
+
+  async smelt(input: string, count: number, fuel: string, signal: AbortSignal, opts: { furnacePos?: Vec3Like; onProgress?: (done: number) => void } = {}): Promise<ActionResult & { made: number; output?: string }> {
+    const check = this.actionCheckpoint(signal);
+    throwIfAborted(signal);
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', made: 0 };
+    const b = this.bot;
+    const inItem = this.invItem(input);
+    const fuelItem = this.invItem(fuel);
+    if (!inItem) return { ok: false, reason: `NO_INPUT:${input}`, made: 0 };
+    if (!fuelItem) return { ok: false, reason: `NO_FUEL:${fuel}`, made: 0 };
+    // 找熔炉：记得的 → 身边的 → 背包里的放下 → 现做一个（8 圆石）
+    const furnaceIds = ['furnace', 'blast_furnace', 'smoker'].map((n) => this.mcData.blocksByName[n]?.id).filter((x: unknown) => x !== undefined);
+    let block: any = null;
+    if (opts.furnacePos && ['furnace'].includes(b.blockAt(this.vec(opts.furnacePos))?.name)) block = b.blockAt(this.vec(opts.furnacePos));
+    block ??= b.findBlock({ matching: furnaceIds, maxDistance: 5 });
+    if (!block) {
+      if (!this.invItem('furnace')) await this.afterAction(() => this.craft('furnace', 1, signal), check);
+      if (!this.invItem('furnace')) return { ok: false, reason: 'NO_FURNACE', made: 0 };
+      const ref = this.findPlaceSpot();
+      if (!ref) return { ok: false, reason: 'NO_SPACE', made: 0 };
+      const Vec3 = require('vec3').Vec3;
+      await this.afterAction(() => b.equip(this.invItem('furnace'), 'hand'), check);
+      await this.afterAction(() => raceAbort(b.placeBlock(ref, new Vec3(0, 1, 0)), signal, 5000, () => {}), check);
+      block = b.blockAt(ref.position.offset(0, 1, 0));
+      this.bus.publish('place', 'P3', '放置了熔炉');
+    }
+    await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos: block.position }, { signal, timeoutMs: 30000 }), check);
+    const furnace: any = await this.afterAction(() => raceAbort(b.openFurnace(block), signal, 8000, () => {}), check);
+    let made = 0;
+    let outputName: string | undefined;
+    try {
+      const n = Math.min(count, inItem.count, 64);
+      // 燃料：煤/木炭一个烧 8 个，木板/原木 1.5 个，木棍 0.5 个
+      const per = /coal$|charcoal/.test(fuel) ? 8 : /_planks$|_log$/.test(fuel) ? 1.5 : fuel === 'stick' ? 0.5 : 1;
+      const fuelN = Math.min(fuelItem.count, Math.ceil(n / per));
+      if (!furnace.fuelItem()) await this.afterAction(() => furnace.putFuel(fuelItem.type, null, fuelN), check);
+      await this.afterAction(() => furnace.putInput(inItem.type, null, n), check);
+      const deadline = Date.now() + n * 11000 + 15000;
+      while (made < n && Date.now() < deadline) {
+        await this.afterAction(() => sleep(1000, signal), check);
+        const out = furnace.outputItem();
+        if (out && out.count > 0) {
+          outputName = out.name;
+          const taken = out.count;
+          await this.afterAction(() => furnace.takeOutput(), check);
+          made += taken;
+          opts.onProgress?.(made);
+        }
+        if (!furnace.inputItem() && !furnace.outputItem()) break;
+      }
+      // 剩下的原料取回来
+      if (furnace.inputItem()) await this.afterAction(() => furnace.takeInput().catch(() => {}), check);
+    } finally {
+      try { furnace.close(); } catch { /* ignore */ }
+    }
+    return made > 0 ? { ok: true, made, output: outputName } : { ok: false, reason: 'NOTHING_SMELTED', made: 0 };
+  }
+
+  async useChest(pos: Vec3Like, deposits: InvItem[], withdraws: InvItem[], signal: AbortSignal): Promise<ActionResult & { contents: InvItem[]; moved: number }> {
+    const check = this.actionCheckpoint(signal);
+    throwIfAborted(signal);
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', contents: [], moved: 0 };
+    const b = this.bot;
+    const block = b.blockAt(this.vec(pos));
+    if (!block || !['chest', 'trapped_chest', 'barrel'].includes(block.name)) return { ok: false, reason: 'NO_CHEST', contents: [], moved: 0 };
+    await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos }, { signal, timeoutMs: 30000 }), check);
+    const chest: any = await this.afterAction(() => raceAbort(b.openContainer(block), signal, 8000, () => {}), check);
+    let moved = 0;
+    try {
+      for (const d of deposits) {
+        check();
+        const it = this.invItem(d.name);
+        if (!it) continue;
+        const n = Math.min(d.count, b.inventory.items().filter((i: any) => i.name === d.name).reduce((a: number, i: any) => a + i.count, 0));
+        try { await this.afterAction(() => chest.deposit(it.type, null, n), check); moved += n; } catch { /* 箱子满了 */ }
+        check();
+      }
+      for (const w of withdraws) {
+        check();
+        const id = this.mcData.itemsByName[w.name]?.id;
+        if (id === undefined) continue;
+        const have = chest.containerItems().filter((i: any) => i.type === id).reduce((a: number, i: any) => a + i.count, 0);
+        const n = Math.min(w.count, have);
+        if (n > 0) { try { await this.afterAction(() => chest.withdraw(id, null, n), check); moved += n; } catch { /* 背包满了 */ } }
+        check();
+      }
+      const m = new Map<string, number>();
+      for (const i of chest.containerItems()) m.set(i.name, (m.get(i.name) ?? 0) + i.count);
+      return { ok: true, contents: [...m].map(([name, count]) => ({ name, count })), moved };
+    } finally {
+      try { chest.close(); } catch { /* ignore */ }
+    }
+  }
+
+  async till(pos: Vec3Like, signal: AbortSignal): Promise<ActionResult> {
+    const check = this.actionCheckpoint(signal);
+    throwIfAborted(signal);
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
+    const b = this.bot;
+    const block = b.blockAt(this.vec(pos));
+    if (!block) return { ok: false, reason: 'NO_BLOCK' };
+    if (block.name === 'farmland') return { ok: true };
+    if (!['dirt', 'grass_block', 'dirt_path', 'coarse_dirt'].includes(block.name)) return { ok: false, reason: `NOT_TILLABLE:${block.name}` };
+    const above = b.blockAt(this.vec({ x: pos.x, y: pos.y + 1, z: pos.z }));
+    if (above && above.boundingBox === 'block') return { ok: false, reason: 'BLOCKED' };
+    if (above && ['short_grass', 'tall_grass', 'fern'].includes(above.name)) await this.afterAction(() => raceAbort(b.dig(above, true), signal, 3000, () => {}), check);
+    const hoe = b.inventory.items().find((i: any) => i.name.endsWith('_hoe'));
+    if (!hoe) return { ok: false, reason: 'NO_HOE' };
+    await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos }, { signal, timeoutMs: 15000 }), check);
+    await this.afterAction(() => b.equip(hoe, 'hand'), check);
+    await this.afterAction(() => raceAbort(b.activateBlock(block), signal, 3000, () => {}), check);
+    await this.afterAction(() => sleep(150, signal), check);
+    return b.blockAt(this.vec(pos))?.name === 'farmland' ? { ok: true } : { ok: false, reason: 'TILL_FAILED' };
+  }
+
+  async plant(pos: Vec3Like, seed: string, signal: AbortSignal): Promise<ActionResult> {
+    const check = this.actionCheckpoint(signal);
+    throwIfAborted(signal);
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
+    const b = this.bot;
+    const soil = b.blockAt(this.vec(pos));
+    if (soil?.name !== 'farmland') return { ok: false, reason: 'NOT_FARMLAND' };
+    const above = b.blockAt(this.vec({ x: pos.x, y: pos.y + 1, z: pos.z }));
+    if (above && above.name !== 'air') return { ok: true }; // 已经种了
+    const it = this.invItem(seed);
+    if (!it) return { ok: false, reason: `NO_SEED:${seed}` };
+    await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos }, { signal, timeoutMs: 15000 }), check);
+    await this.afterAction(() => b.equip(it, 'hand'), check);
+    await this.afterAction(() => raceAbort(b.activateBlock(soil), signal, 3000, () => {}), check);
+    await this.afterAction(() => sleep(150, signal), check);
+    const now = b.blockAt(this.vec({ x: pos.x, y: pos.y + 1, z: pos.z }));
+    return now && now.name !== 'air' ? { ok: true } : { ok: false, reason: 'PLANT_FAILED' };
+  }
+
+  cropAge(pos: Vec3Like): { age: number; max: number } | null {
+    if (!this.ready) return null;
+    const blk = this.bot.blockAt(this.vec(pos));
+    if (!blk) return null;
+    const max = blk.name === 'beetroots' ? 3 : ['wheat', 'carrots', 'potatoes'].includes(blk.name) ? 7 : null;
+    if (max === null) return null;
+    const age = Number(blk.getProperties?.().age ?? blk.metadata ?? 0);
+    return { age, max };
   }
 
   async sleepInBed(signal: AbortSignal): Promise<ActionResult & { bedPos?: Vec3Like }> {

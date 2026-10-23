@@ -85,3 +85,13 @@ export const round1 = (n: number) => Math.round(n * 10) / 10;
 export function shortId(prefix = '') {
   return prefix + Math.random().toString(36).slice(2, 8);
 }
+
+/** 天光随时间变暗：白天 0，黄昏/黎明 5，夜晚 11（与原版大致一致） */
+export function skyDarkness(timeOfDay: number) {
+  return timeOfDay < 12000 ? 0 : timeOfDay < 13800 || timeOfDay >= 22200 ? 5 : 11;
+}
+
+/** 实际亮度 = max(方块光, 天光 - 时间造成的变暗) */
+export function effectiveLight(l: { block: number; sky: number }, timeOfDay: number) {
+  return Math.max(l.block, l.sky - skyDarkness(timeOfDay));
+}

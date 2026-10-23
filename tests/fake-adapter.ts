@@ -69,8 +69,11 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
     const kind = name === 'air' || name.includes('glass') ? 'clear' : name === 'water' ? 'water' : name.endsWith('_leaves') ? 'foliage' : 'solid';
     return { name, kind };
   }
-  lightAt() {
-    return { block: 0, sky: this.light };
+  /** 简化光照：火把 14 级向外每格减 1；地面以上有天光（this.light），地下没有 */
+  lightAt(x: number, y: number, z: number) {
+    let block = 0;
+    for (const b of this.blocks) if (b.name === 'torch') block = Math.max(block, 14 - (Math.abs(b.pos.x - x) + Math.abs(b.pos.y - y) + Math.abs(b.pos.z - z)));
+    return { block, sky: y > this.groundY ? this.light : 0 };
   }
 
   state(): AgentState {
@@ -127,7 +130,6 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
     this.actions.push(`equip:${name}:${destination}`);
     return { ok: true };
   }
-  private take(name: string, count: number) { this.inv.set(name, Math.max(0, (this.inv.get(name) ?? 0) - count)); }
   async useBlockAt(pos: Vec3Like, item: string, signal: AbortSignal) {
     throwIfAborted(signal);
     if (item && !(this.inv.get(item) ?? 0)) return { ok: false, reason: 'NO_ITEM' };
@@ -239,6 +241,12 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
   }
   async dig(pos: Vec3Like, signal: AbortSignal): Promise<ActionResult> {
     await sleep(100, signal);
+    const crop = this.crops.get(this.k(pos.x, pos.y, pos.z));
+    if (crop) {
+      this.crops.delete(this.k(pos.x, pos.y, pos.z));
+      if (crop.age >= 7) { this.inv.set('wheat', (this.inv.get('wheat') ?? 0) + 1); this.inv.set('wheat_seeds', (this.inv.get('wheat_seeds') ?? 0) + 2); }
+      return { ok: true };
+    }
     const name = this.nameAt(pos.x, pos.y, pos.z);
     if (name === 'air') return { ok: false, reason: 'NO_BLOCK' };
     const i = this.blocks.findIndex((b) => b.pos.x === pos.x && b.pos.y === pos.y && b.pos.z === pos.z);
@@ -273,6 +281,59 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
     return { ok: true, crafted: count };
   }
   isDay = true;
+  chests = new Map<string, Map<string, number>>();
+  crops = new Map<string, { age: number; crop: string }>();
+  private take(name: string, n: number) {
+    this.inv.set(name, Math.max(0, (this.inv.get(name) ?? 0) - n));
+  }
+  async smelt(input: string, count: number, fuel: string, signal: AbortSignal) {
+    const SM: Record<string, string> = { raw_iron: 'iron_ingot', beef: 'cooked_beef', oak_log: 'charcoal', sand: 'glass', cobblestone: 'stone' };
+    if (!(this.inv.get(input) ?? 0)) return { ok: false, reason: `NO_INPUT:${input}`, made: 0 };
+    if (!(this.inv.get(fuel) ?? 0)) return { ok: false, reason: `NO_FUEL:${fuel}`, made: 0 };
+    if (!this.blocks.some((b) => b.name === 'furnace') && !(this.inv.get('furnace') ?? 0)) {
+      if ((this.inv.get('cobblestone') ?? 0) < 8) return { ok: false, reason: 'NO_FURNACE', made: 0 };
+      this.take('cobblestone', 8);
+    }
+    const n = Math.min(count, this.inv.get(input)!);
+    await sleep(100, signal);
+    this.take(input, n);
+    this.take(fuel, 1);
+    const out = SM[input] ?? 'unknown';
+    this.inv.set(out, (this.inv.get(out) ?? 0) + n);
+    return { ok: true, made: n, output: out };
+  }
+  async useChest(pos: Vec3Like, deposits: InvItem[], withdraws: InvItem[], signal: AbortSignal) {
+    if (this.nameAt(pos.x, pos.y, pos.z) !== 'chest') return { ok: false, reason: 'NO_CHEST', contents: [], moved: 0 };
+    await sleep(50, signal);
+    const c = this.chests.get(this.k(pos.x, pos.y, pos.z)) ?? new Map<string, number>();
+    let moved = 0;
+    for (const d of deposits) { const n = Math.min(d.count, this.inv.get(d.name) ?? 0); this.take(d.name, n); c.set(d.name, (c.get(d.name) ?? 0) + n); moved += n; }
+    for (const w of withdraws) { const n = Math.min(w.count, c.get(w.name) ?? 0); c.set(w.name, (c.get(w.name) ?? 0) - n); this.inv.set(w.name, (this.inv.get(w.name) ?? 0) + n); moved += n; }
+    this.chests.set(this.k(pos.x, pos.y, pos.z), c);
+    return { ok: true, contents: [...c].filter(([, n]) => n > 0).map(([name, count]) => ({ name, count })), moved };
+  }
+  async till(pos: Vec3Like, signal: AbortSignal) {
+    await sleep(20, signal);
+    if (![...this.inv.keys()].some((n) => n.endsWith('_hoe') && (this.inv.get(n) ?? 0) > 0)) return { ok: false, reason: 'NO_HOE' };
+    const n = this.nameAt(pos.x, pos.y, pos.z);
+    if (n === 'farmland') return { ok: true };
+    if (n !== 'grass_block' && n !== 'dirt') return { ok: false, reason: `NOT_TILLABLE:${n}` };
+    this.blocks = this.blocks.filter((b) => !(b.pos.x === pos.x && b.pos.y === pos.y && b.pos.z === pos.z));
+    this.blocks.push({ name: 'farmland', pos: { ...pos } });
+    return { ok: true };
+  }
+  async plant(pos: Vec3Like, seed: string, signal: AbortSignal) {
+    await sleep(20, signal);
+    if (this.nameAt(pos.x, pos.y, pos.z) !== 'farmland') return { ok: false, reason: 'NOT_FARMLAND' };
+    if (!(this.inv.get(seed) ?? 0)) return { ok: false, reason: `NO_SEED:${seed}` };
+    this.take(seed, 1);
+    this.crops.set(this.k(pos.x, pos.y + 1, pos.z), { age: 0, crop: seed === 'wheat_seeds' ? 'wheat' : seed });
+    return { ok: true };
+  }
+  cropAge(pos: Vec3Like) {
+    const c = this.crops.get(this.k(pos.x, pos.y, pos.z));
+    return c ? { age: c.age, max: 7 } : null;
+  }
   async sleepInBed(signal: AbortSignal) {
     if (this.dim !== 'overworld') return { ok: false, reason: 'WRONG_DIMENSION' };
     if (![...this.inv.keys()].some((n) => n.endsWith('_bed') && (this.inv.get(n) ?? 0) > 0)) return { ok: false, reason: 'NO_BED' };

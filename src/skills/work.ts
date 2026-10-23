@@ -66,9 +66,13 @@ export const gather: Skill<{ block: string; count: number }> = {
             }
           }
         }
+        // 走到了记忆里的资源地标附近却看不到它：地标过时（被挖走 / 记错），从记忆里抹掉
+        const stale = ctx.memory.resourceLandmarksNear(names, s.dim, s.pos, 16);
+        for (const l of stale) ctx.memory.removeLandmark(l.id);
+        const staleNote = stale.length ? `；已把 ${stale.length} 个过时的 ${args.block} 地标从记忆里删除` : '';
         return dug > 0
-          ? ok(`看不到更多 ${args.block}，采集了 ${dug}/${args.count}`)
-          : fail('NOT_FOUND', `视野和记忆里都没有 ${args.block}；尚未定位该资源，不代表其他地点也没有`);
+          ? ok(`看不到更多 ${args.block}，采集了 ${dug}/${args.count}${staleNote}`)
+          : fail('NOT_FOUND', `视野和记忆里都没有 ${args.block}${staleNote}；尚未定位该资源，不代表其他地点也没有`);
       }
       const target = hits.find((h) => adapter.canHarvest(h.pos));
       if (!target) return fail('TOOL_MISSING', `缺少能采集 ${hits[0].name} 的工具`, { block: hits[0].name });
@@ -98,6 +102,37 @@ export const gather: Skill<{ block: string; count: number }> = {
 };
 
 // ------------------------------------------------------------------ craft
+const COLORED = ['bed', 'wool', 'carpet', 'banner', 'concrete', 'terracotta', 'stained_glass', 'candle'];
+const WOODEN = ['planks', 'boat', 'door', 'fence', 'fence_gate', 'slab', 'stairs', 'sign', 'button', 'pressure_plate', 'trapdoor', 'log', 'wood'];
+const WOODS = ['oak', 'spruce', 'birch', 'jungle', 'acacia', 'dark_oak', 'mangrove', 'cherry', 'bamboo'];
+const COLORS = ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black'];
+
+/** LLM 常写泛称（bed、planks、boat）：映射到一个具体物品 ID；无法识别返回 null */
+export function resolveItemAlias(name: string, adapter: { isKnownItem(n: string): boolean }): string | null {
+  const n = name.toLowerCase().replace(/\s+/g, '_');
+  if (adapter.isKnownItem(n)) return n;
+  if (COLORED.includes(n) && adapter.isKnownItem(`white_${n}`)) return `white_${n}`;
+  if (WOODEN.includes(n) && adapter.isKnownItem(`oak_${n}`)) return `oak_${n}`;
+  for (const cut of ['es', 's']) if (n.endsWith(cut) && adapter.isKnownItem(n.slice(0, -cut.length))) return n.slice(0, -cut.length); // torches → torch
+  return null;
+}
+
+/** 按背包里的材料挑颜色/木种：有 3 个红羊毛就做 red_bed，手里是云杉原木就做 spruce_planks */
+export function pickVariant(item: string, inv: { name: string; count: number }[]): string {
+  const count = (n: string) => inv.filter((i) => i.name === n).reduce((a, i) => a + i.count, 0);
+  const color = COLORS.find((c) => item.startsWith(c + '_') && COLORED.includes(item.slice(c.length + 1)));
+  if (color && item.endsWith('_bed') && count(`${color}_wool`) < 3) {
+    const alt = COLORS.find((c) => count(`${c}_wool`) >= 3);
+    if (alt) return `${alt}_bed`;
+  }
+  const wood = WOODS.find((w) => item.startsWith(w + '_') && WOODEN.includes(item.slice(w.length + 1)));
+  if (wood && item.endsWith('_planks') && count(`${wood}_log`) === 0) {
+    const alt = WOODS.map((w) => [w, count(`${w}_log`) + count(`${w}_stem`)] as const).sort((a, b) => b[1] - a[1])[0];
+    if (alt && alt[1] > 0) return `${alt[0]}_planks`;
+  }
+  return item;
+}
+
 export const craft: Skill<{ item: string; count: number }> = {
   name: 'craft',
   description: '合成物品。会自动补做两层以内的前置材料（原木→木板→木棍）、自动使用记得的工作台或现做一个放下，所以直接写最终物品即可。常用：wooden_pickaxe、stone_pickaxe、furnace、torch、crafting_table',
@@ -106,11 +141,13 @@ export const craft: Skill<{ item: string; count: number }> = {
   movement: false,
   validate(raw, adapter) {
     const a = obj(raw);
-    const item = String(a.item ?? '').trim().replace(/^minecraft:/, '');
-    if (!adapter.isKnownItem(item)) return { ok: false, error: `未知物品：${item}` };
+    const raw0 = String(a.item ?? '').trim().replace(/^minecraft:/, '');
+    const item = resolveItemAlias(raw0, adapter);
+    if (!item) return { ok: false, error: `未知物品：${raw0}（请用完整物品 ID，如 white_bed、oak_planks）` };
     return { ok: true, args: { item, count: clampInt(a.count, 1, 64, 1) } };
   },
   async run(ctx, args) {
+    args = { ...args, item: pickVariant(args.item, ctx.adapter.state().inventory) };
     try {
       const table = ctx.senses.knownBlocks(['crafting_table'], 32)[0];
       const conflict = craftReservationConflict(ctx.memory, ctx.adapter.state(), args.item, args.count, config.mc.version, !!table);
