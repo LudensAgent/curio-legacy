@@ -17,6 +17,7 @@ const STRUCTURE_HINT = new Set(['chest', 'bell', 'hay_block', 'spawner', 'furnac
 export interface Percept {
   ts: number;
   connected: boolean;
+  observation?: { ready: boolean; worldId: string; sessionId: string; id: number };
   time: { timeOfDay: number; phase: 'day' | 'dusk' | 'night' | 'dawn' };
   self: { pos: [number, number, number]; dim: string; hp: number; food: number; biome: string | null; inWater: boolean; inLava: boolean; held: string | null };
   inventory: InvItem[];
@@ -40,6 +41,8 @@ export interface Percept {
   stock: Stock | null;
   /** 效率洞察：最近的采集速度，以及换哪把工具能快多少（偷懒的依据） */
   efficiency: EfficiencyInsight[];
+  /** Historical storage snapshots, scoped to the current dimension; not current holdings. */
+  storage?: { chests: number; nearest: number | null; stored: string; source?: 'historical_chest_snapshot'; availability?: 'unconfirmed_until_opened'; oldestObservedAt?: number; ageSeconds?: number } | null;
   exploration: {
     visitedChunks: number;
     noveltyByDir: Record<string, number>;
@@ -85,16 +88,33 @@ export class Perception {
   }
 
   snapshot(): Percept {
-    return this.latest ?? this.update();
+    const state = this.adapter.state();
+    const observation = this.latest?.observation;
+    if (!observation || observation.ready !== state.observationReady || observation.worldId !== state.worldId || observation.sessionId !== state.sessionId || this.latest?.self.dim !== state.dim) return this.update();
+    return this.latest!;
+  }
+
+  private storageInfo(dim: string, here: { x: number; z: number }): Percept['storage'] {
+    const chests = this.memory.chests().filter((c) => c.dim === dim);
+    if (!chests.length) return null;
+    const nearest = Math.min(...chests.map((c) => Math.round(Math.hypot(c.pos.x - here.x, c.pos.z - here.z))));
+    const stored = new Map<string, number>();
+    for (const chest of chests) for (const item of chest.items) stored.set(item.name, (stored.get(item.name) ?? 0) + item.count);
+    const totals = [...stored].filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
+    const oldestObservedAt = Math.min(...chests.map((chest) => chest.ts));
+    return { chests: chests.length, nearest, stored: totals.slice(0, 14).map(([n, c]) => `${n}×${c}`).join('、') || '（空）',
+      source: 'historical_chest_snapshot', availability: 'unconfirmed_until_opened', oldestObservedAt,
+      ageSeconds: Math.max(0, Math.round((Date.now() - oldestObservedAt) / 1000)) };
   }
 
   update(): Percept {
     const s = this.adapter.state();
-    if (s.connected) this.vision.refresh();
+    this.memory.setWorld(s.worldId);
+    this.vision.refresh();
     const v = this.vision;
     const here = s.pos;
 
-    if (s.connected && s.alive) {
+    if (s.connected && s.alive && s.observationReady) {
       if (this.memory.visit(s.dim, s.pos)) this.bus.publish('new_chunk', 'P3', `进入未访问区块（累计 ${this.memory.visitedChunkCount}）`);
       if (s.biome && this.memory.markSeen('biomes', s.biome)) {
         this.bus.publish('discovery', 'P2', `首次进入生物群系：${s.biome}`, { category: 'biome', name: s.biome });
@@ -116,12 +136,12 @@ export class Perception {
       }
     }
 
-    const vs = s.connected ? v.summary(here) : null;
+    const vs = s.connected && s.observationReady ? v.summary(here) : null;
     const noveltyByDir: Record<string, number> = {};
     for (const [d, [dx, dz]] of Object.entries(DIRS)) {
       noveltyByDir[d] = round1(this.memory.novelty(s.dim, s.pos.x + dx * 48, s.pos.z + dz * 48));
     }
-    const base = this.memory.base();
+    const base = this.memory.base(s.dim);
     const baseInfo =
       base && base.dim === s.dim
         ? { dist: Math.round(Math.hypot(base.pos.x - s.pos.x, base.pos.z - s.pos.z)), dir: dirName(base.pos.x - s.pos.x, base.pos.z - s.pos.z) }
@@ -130,7 +150,7 @@ export class Perception {
     // ---- 死亡掉落物：物品在地上 5 分钟后消失
     let deathRecovery: Percept['death_recovery'] = null;
     const d = this.memory.lastDeath();
-    if (d && d.lost.length && s.connected) {
+    if (d && d.lost.length && s.connected && s.observationReady) {
       const left = Math.round((d.ts + 300_000 - Date.now()) / 1000);
       const dist = Math.hypot(d.pos.x - here.x, d.pos.z - here.z);
       if (left <= 0) {
@@ -168,6 +188,7 @@ export class Perception {
     this.latest = {
       ts: Date.now(),
       connected: s.connected,
+      observation: { ready: s.observationReady, worldId: s.worldId, sessionId: s.sessionId, id: s.observationId },
       time: { timeOfDay: s.timeOfDay, phase: phaseOf(s.timeOfDay) },
       self: {
         pos: [Math.round(s.pos.x), Math.round(s.pos.y), Math.round(s.pos.z)],
@@ -203,6 +224,7 @@ export class Perception {
       drives: [],
       stock: null,
       efficiency: s.connected ? efficiencyInsights(this.adapter, this.memory, s.inventory) : [],
+      storage: this.storageInfo(s.dim, here),
       exploration: { visitedChunks: this.memory.visitedChunkCount, noveltyByDir, base: baseInfo },
     };
     const { drives, stock } = computeDrives(this.latest, this.memory);

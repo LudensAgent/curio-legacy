@@ -47,12 +47,12 @@ export class Reflex {
   }
 
   tick() {
-    if (!this.enabled) return;
+    if (!this.enabled || this.arbiter.paused) return;
     const s = this.adapter.state();
-    if (!s.connected || !s.alive) return;
+    if (!s.connected || !s.alive || !s.observationReady) return;
     const cur = this.arbiter.info();
     // 只对看见/听见的威胁做反应（墙后的怪物不会触发反射）
-    const hostiles = this.senses.perceivedEntities(12).filter((e) => e.kind === 'hostile');
+    const hostiles = this.senses.perceivedEntities(12).filter((e) => e.kind === 'hostile' && !(cur?.skill === 'dragon_fight' && e.name === 'ender_dragon'));
     const nearest = hostiles[0];
     const creeper = hostiles.find((e) => e.name === 'creeper' && e.dist < 5);
 
@@ -90,7 +90,7 @@ export class Reflex {
       return this.fire({ skill: 'flee', args: { distance: 18 } }, 'P1', `${nearest.name} 贴近且生命 ${s.hp}`);
     }
     const safe = !nearest || nearest.dist > 8;
-    if (safe && (s.food <= 12 || (s.hp < 14 && s.food < 18)) && this.adapter.hasFood() && this.ready('eat', 15000)) {
+    if (cur?.skill !== 'dragon_fight' && safe && (s.food <= 12 || (s.hp < 14 && s.food < 18)) && this.adapter.hasFood() && this.ready('eat', 15000)) {
       return this.fire({ skill: 'eat' }, 'P1', `饥饿 ${s.food} / 生命 ${s.hp}`);
     }
 

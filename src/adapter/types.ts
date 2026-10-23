@@ -19,6 +19,19 @@ export interface EntityInfo {
   pos: Vec3Like;
   dist: number;
   height?: number;
+  velocity?: Vec3Like;
+  phase?: number;
+  hp?: number;
+}
+
+export interface BossDeathObservation {
+  entityId: number;
+  worldId: string;
+  dim: string;
+  sessionId: string;
+  observedAt: number;
+  pos: Vec3Like;
+  source?: 'entity_dead' | 'zero_health_dying';
 }
 
 /** 方块的“光学”属性：视线能否穿过 */
@@ -52,6 +65,13 @@ export interface InvItem {
 export interface AgentState {
   connected: boolean;
   alive: boolean;
+  /** True only after spawn and the current position's chunk are available. */
+  observationReady: boolean;
+  /** Stable server/world namespace; dimensions are a separate scope. */
+  worldId: string;
+  /** Changes after reconnect, respawn or a dimension transition. */
+  sessionId: string;
+  observationId: number;
   username: string;
   pos: Vec3Like;
   dim: string;
@@ -67,23 +87,37 @@ export interface AgentState {
   inventory: InvItem[];
   emptySlots: number;
   held: string | null;
+  equipment?: { slot: string; name: string; durabilityRemaining?: number }[];
 }
 
 export type MoveTarget =
   | { kind: 'near'; pos: Vec3Like; range: number }
   | { kind: 'xz'; x: number; z: number; range: number }
   | { kind: 'reach_block'; pos: Vec3Like }
+  | { kind: 'place_block'; pos: Vec3Like; facing?: 'north' | 'south' | 'east' | 'west' | 'up' | 'down' }
   | { kind: 'follow_entity'; entityId: number; range: number }
   | { kind: 'away_from'; pos: Vec3Like; distance: number };
 
 export interface MoveOpts {
   signal: AbortSignal;
   timeoutMs: number;
+  constructionSafe?: boolean;
 }
 
 export interface ActionResult {
   ok: boolean;
   reason?: string;
+}
+
+export interface SwimOptions {
+  timeoutMs?: number;
+  /** Refresh only ordinary senses; returning null keeps the swimmer afloat while looking. */
+  observeShore?: () => Vec3Like | null;
+}
+
+export interface BlockState {
+  name: string;
+  properties: Record<string, string | number | boolean>;
 }
 
 export interface GameAdapter {
@@ -106,6 +140,7 @@ export interface GameAdapter {
   /** 原始方块搜索（会穿墙）。上层请用 Vision.knownBlocks；这里只留给调试。 */
   findBlocks(names: string[], maxDist: number, count: number): BlockHit[];
   blockAt(pos: Vec3Like): string | null;
+  blockStateAt?(pos: Vec3Like): BlockState | null;
   /** 'log' → 所有原木；'iron_ore' → iron_ore + deepslate_iron_ore；精确名 → 自身 */
   resolveBlockNames(query: string): string[];
   isKnownItem(name: string): boolean;
@@ -119,6 +154,14 @@ export interface GameAdapter {
   digTimeEstimate(block: string, tool: string | null): number | null;
   /** 用背包里 itemNames 中的第一种方块，放到 pos（需要相邻有实心方块可依附） */
   placeBlockAt(pos: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult>;
+  placeBlockStateAt?(pos: Vec3Like, name: string, properties: BlockState['properties'], signal: AbortSignal): Promise<ActionResult>;
+  equipItem?(name: string, destination: 'hand' | 'off-hand' | 'head' | 'torso' | 'legs' | 'feet', signal: AbortSignal): Promise<ActionResult>;
+  /** item='' performs a legal empty-hand interaction (for example opening an owned door). */
+  useBlockAt?(pos: Vec3Like, item: string, signal: AbortSignal): Promise<ActionResult>;
+  useItem?(item: string, signal: AbortSignal, opts?: { chargeMs?: number }): Promise<ActionResult>;
+  rangedAttack?(entityId: number, signal: AbortSignal): Promise<ActionResult>;
+  enterPortalAt?(pos: Vec3Like, signal: AbortSignal, expectedDim?: string): Promise<ActionResult & { from?: AgentState; to?: AgentState }>;
+  bossStatus?(): { dragonDeath: BossDeathObservation | null };
   dig(pos: Vec3Like, signal: AbortSignal): Promise<ActionResult>;
   collectNearbyDrops(signal: AbortSignal, radius: number, timeoutMs: number): Promise<number>;
   /** 自动补做两层以内的前置材料（木板、木棍、工作台…）；tablePos = 记得的工作台位置 */
@@ -127,10 +170,12 @@ export interface GameAdapter {
   sleepInBed(signal: AbortSignal): Promise<ActionResult & { bedPos?: Vec3Like }>;
   hasFood(): boolean;
   eat(signal: AbortSignal): Promise<boolean>;
-  equipWeapon(): Promise<void>;
-  attack(entityId: number): Promise<boolean>;
-  look(yaw: number, pitch: number): Promise<void>;
+  equipWeapon(signal?: AbortSignal): Promise<void>;
+  attack(entityId: number, signal?: AbortSignal): Promise<boolean>;
+  look(yaw: number, pitch: number, signal?: AbortSignal): Promise<void>;
   jump(ms: number, signal: AbortSignal): Promise<void>;
+  /** Swim toward an observed shore, retaining buoyancy until dry footing is verified. */
+  swimTo?(target: Vec3Like | null, signal: AbortSignal, opts?: SwimOptions): Promise<ActionResult & { landed: boolean; oxygen: number }>;
   chat(text: string): void;
 }
 

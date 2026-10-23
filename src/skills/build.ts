@@ -1,143 +1,157 @@
 import type { Vec3Like } from '../adapter/types.ts';
-import { sleep } from '../util.ts';
-import { PLACEABLE } from './survival.ts';
+import { BuildingArchive } from '../building/archive.ts';
+import { constructBuilding } from '../building/engine.ts';
+import { compileBuilding, DEFAULT_SPEC, materialCost, normalizeSpec, rotatePosition, type BuildingSpec, type Rotation } from '../building/spec.ts';
+import type { WorldMemory } from '../memory/store.ts';
+import { throwIfAborted } from '../util.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill } from './types.ts';
 
-/** 蓝图：相对坐标列表（dx 向右、dz 向前、dy 向上，原点在角色前方） */
-interface Blueprint {
-  name: string;
-  description: string;
-  cells: [number, number, number][];
-  /** 建成后在这里设为基地（相对坐标） */
-  home?: [number, number, number];
-}
-
-function hut(size: number, height: number): Blueprint {
-  const cells: [number, number, number][] = [];
-  const mid = Math.floor(size / 2);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < size; x++) {
-      for (let z = 0; z < size; z++) {
-        const edge = x === 0 || z === 0 || x === size - 1 || z === size - 1;
-        if (!edge) continue;
-        if (z === 0 && x === mid && y < 2) continue; // 门洞（朝向角色的一面）
-        cells.push([x, y, z]);
-      }
-    }
-  }
-  for (let x = 0; x < size; x++) for (let z = 0; z < size; z++) cells.push([x, height, z]); // 屋顶
-  return { name: `hut_${size}x${size}`, description: `${size}×${size} 小屋，墙高 ${height}，正面留门洞`, cells, home: [mid, 0, mid] };
-}
-
-export const BLUEPRINTS: Record<string, Blueprint> = {
-  hut: hut(5, 3),
-  big_hut: hut(7, 3),
-  pillar: { name: 'pillar', description: '3 格高的柱子（做标记/瞭望）', cells: [[0, 0, 0], [0, 1, 0], [0, 2, 0]] },
-  wall: { name: 'wall', description: '5 格长 2 格高的墙（挡怪）', cells: Array.from({ length: 10 }, (_, i) => [i % 5 - 2, Math.floor(i / 5), 0] as [number, number, number]) },
+export const BLUEPRINTS = {
+  hut: { description: '5×5 带木门、玻璃窗和阶梯坡顶的小屋' },
+  big_hut: { description: '7×7 带木门、玻璃窗和阶梯坡顶的小屋' },
+  pillar: { description: '3 格高的柱子' },
+  wall: { description: '5 格宽、2 格高的墙' },
 };
+const archives = new WeakMap<WorldMemory, BuildingArchive>();
+export function buildingArchiveFor(memory: WorldMemory): BuildingArchive {
+  let archive = archives.get(memory);
+  if (!archive) { archive = new BuildingArchive(memory.dataDirectory); archives.set(memory, archive); }
+  return archive;
+}
+interface BuildArgs {
+  blueprint: string;
+  spec?: BuildingSpec;
+  origin?: Vec3Like;
+  rotation?: Rotation;
+  projectId?: string;
+  mode: 'build' | 'inspect' | 'repair';
+  reason?: string;
+  cells?: [number, number, number][];
+}
 
-export const build: Skill<{ blueprint: string; cells?: [number, number, number][] }> = {
+export const build: Skill<BuildArgs> = {
   name: 'build',
-  description: `按蓝图用背包里的方块（木板/圆石/泥土/原木）在面前建造。内置蓝图：${Object.entries(BLUEPRINTS).map(([k, b]) => `${k}=${b.description}（${b.cells.length} 块）`).join('；')}；也可用 "custom" + cells 自定义（最多 150 块）。建好的小屋会成为新基地`,
-  argsDoc: '{"blueprint": "hut|big_hut|pillar|wall|custom", "cells"?: [[dx,dy,dz],...]}',
-  timeoutMs: 300000,
+  description: '参数化施工：可选尺寸、材料、平顶/阶梯坡顶、门窗、工作台/熔炉/箱子/照明。先勘察地基、核算分材料缺口，再分阶段施工；必须逐格及通行验收才算建成。返回 projectId；中断后用该 ID 重新观察并续建，inspect 只检查，repair 修复有档案的建筑。spec.components 支持精确坐标、方块状态、功能标签和施工依赖的组合设计；未提供底层状态能力时明确报错。',
+  argsDoc: '{"blueprint"?:"hut|big_hut|pillar|wall|custom", "spec"?:{"name":"住宅","purpose":"庇护所","width":5,"depth":5,"height":3,"roof":"flat|gable","palette"?:{"foundation":"cobblestone","wall":"oak_planks","roof":"oak_planks","window":"glass","door":"oak_door"},"windows"?:true,"door"?:true,"facilities"?:["crafting_table","furnace","chest","torch"],"budget"?:512,"layout"?:"house|custom","components"?:[{"pos":{"x":0,"y":0,"z":0},"name":"cobblestone","properties"?:{},"phase"?:"frame","tags"?:[],"dependsOn"?:[]}]}, "projectId"?:"已有作品ID", "mode"?:"build|inspect|repair", "origin"?:{"x":0,"y":64,"z":0}, "rotation"?:0|90|180|270, "reason"?:"设计/改造原因", "cells"?:[[0,0,0]]}',
+  timeoutMs: 600000,
   movement: true,
-  validate(raw) {
+  validate(raw, adapter) {
     const a = obj(raw);
-    const bp = String(a.blueprint ?? 'hut');
-    if (bp === 'custom') {
-      if (!Array.isArray(a.cells) || !a.cells.length || a.cells.length > 150) return { ok: false, error: 'custom 需要 1-150 个 [dx,dy,dz]' };
-      const cells: [number, number, number][] = [];
-      for (const c of a.cells) {
-        if (!Array.isArray(c) || c.length !== 3 || c.some((v: unknown) => !Number.isInteger(v) || Math.abs(Number(v)) > 12)) return { ok: false, error: 'cells 每项必须是绝对值 ≤12 的整数三元组' };
-        cells.push([c[0], c[1], c[2]]);
-      }
-      return { ok: true, args: { blueprint: 'custom', cells } };
+    const blueprint = String(a.blueprint ?? 'hut');
+    if (!Object.hasOwn(BLUEPRINTS, blueprint) && blueprint !== 'custom') return { ok: false, error: '未知蓝图；可用 hut/big_hut/pillar/wall/custom' };
+    if (a.projectId !== undefined && (typeof a.projectId !== 'string' || !a.projectId.trim() || a.projectId.length > 100)) return { ok: false, error: 'projectId 需要有效作品 ID' };
+    if (!['build', 'inspect', 'repair'].includes(a.mode ?? 'build')) return { ok: false, error: 'mode 支持 build/inspect/repair' };
+    if (a.rotation !== undefined && ![0, 90, 180, 270].includes(a.rotation)) return { ok: false, error: 'rotation 支持 0/90/180/270' };
+    if (a.origin !== undefined && (!a.origin || typeof a.origin !== 'object' || [a.origin.x, a.origin.y, a.origin.z].some((n) => !Number.isInteger(n) || Math.abs(n) > 30000000))) return { ok: false, error: 'origin 需要合法整数坐标' };
+    if (a.reason !== undefined && (typeof a.reason !== 'string' || a.reason.length > 1000)) return { ok: false, error: 'reason 最多 1000 字符' };
+    let spec: BuildingSpec | undefined;
+    try {
+      if (a.spec !== undefined) { spec = normalizeSpec(a.spec); compileBuilding(spec); }
+      if (spec && adapter && Object.keys(materialCost(compileBuilding(spec).cells)).some((name) => !adapter.isKnownItem(name))) return { ok: false, error: '设计包含当前游戏版本不存在的物品' };
+    } catch (e) { return { ok: false, error: (e as Error).message }; }
+    let cells: [number, number, number][] | undefined;
+    if (blueprint === 'custom' && !spec && !a.projectId) {
+      if (!Array.isArray(a.cells) || !a.cells.length || a.cells.length > 150 || a.cells.some((c: any) => !Array.isArray(c) || c.length !== 3 || c.some((v: any) => !Number.isInteger(v) || Math.abs(v) > 12))) return { ok: false, error: 'custom 需要 1-150 个绝对值 ≤12 的 [dx,dy,dz]，或完整 spec' };
+      cells = a.cells.map((c: number[]) => [c[0], c[1], c[2]]);
+      if (new Set(cells!.map((c) => c.join(','))).size !== cells!.length) return { ok: false, error: 'cells 坐标不能重复' };
     }
-    if (!BLUEPRINTS[bp]) return { ok: false, error: `未知蓝图 ${bp}，可用：${Object.keys(BLUEPRINTS).join('/')}/custom` };
-    return { ok: true, args: { blueprint: bp } };
+    return { ok: true, args: { blueprint, spec, origin: a.origin, rotation: a.rotation, projectId: a.projectId, mode: a.mode ?? 'build', reason: a.reason, cells } };
   },
   async run(ctx, args) {
-    const { adapter, signal, memory } = ctx;
-    const bp: Blueprint = args.blueprint === 'custom' ? { name: 'custom', description: '自定义', cells: args.cells! } : BLUEPRINTS[args.blueprint];
-    const s0 = adapter.state();
-    const eye = adapter.eye();
-    if (!eye) return fail('NOT_CONNECTED', '未连接');
-
-    // 以角色面朝的方向为“前”，把蓝图放在前方 2 格处
-    const yaw = eye.yaw;
-    const fx = Math.round(-Math.sin(yaw)), fz = Math.round(-Math.cos(yaw)); // 前
-    const rx = -fz, rz = fx; // 右（俯视顺时针 90°）
-    const width = Math.max(...bp.cells.map((c) => c[0])) - Math.min(...bp.cells.map((c) => c[0]));
-    const bx = Math.floor(s0.pos.x) + fx * 2 - rx * Math.floor(width / 2);
-    const bz = Math.floor(s0.pos.z) + fz * 2 - rz * Math.floor(width / 2);
-    const by = Math.floor(s0.pos.y);
-    const toWorld = (c: [number, number, number]): Vec3Like => ({ x: bx + rx * c[0] + fx * c[2], y: by + c[1], z: bz + rz * c[0] + fz * c[2] });
-
-    const targets = bp.cells.map(toWorld).filter((p) => (adapter.blockAt(p) ?? 'air') === 'air' || adapter.blockAt(p) === 'short_grass' || adapter.blockAt(p) === 'tall_grass');
-    const have = s0.inventory.filter((i) => PLACEABLE.includes(i.name)).reduce((n, i) => n + i.count, 0);
-    if (have < targets.length) {
-      return fail('MISSING_MATERIALS', `建造 ${bp.name} 还需要 ${targets.length} 个方块，背包里只有 ${have} 个（可以先砍原木再合成木板，1 原木 = 4 木板）`, { need: targets.length, have });
-    }
-    // 自下而上、由近及远
-    targets.sort((a, b) => a.y - b.y || Math.hypot(a.x - s0.pos.x, a.z - s0.pos.z) - Math.hypot(b.x - s0.pos.x, b.z - s0.pos.z));
-    let placed = 0, failed = 0;
-    for (const p of targets) {
-      if (Date.now() > ctx.deadline - 3000) break;
-      try {
-        const st = adapter.state();
-        if (Math.hypot(p.x + 0.5 - st.pos.x, p.y - st.pos.y, p.z + 0.5 - st.pos.z) > 4) {
-          await adapter.moveTo({ kind: 'near', pos: p, range: 3 }, { signal, timeoutMs: 15000 });
-        }
-        const r = await adapter.placeBlockAt(p, PLACEABLE, signal);
-        if (r.ok) placed++;
-        else failed++;
-        if (r.reason === 'NO_ITEM') break;
-      } catch (e) {
-        if (isAbort(e)) throw e;
-        failed++;
-        if (codeFromError(e) === 'NOT_CONNECTED') break;
+    try {
+      throwIfAborted(ctx.signal);
+      const state = ctx.adapter.state();
+      if (!state.connected || !state.alive || !ctx.adapter.eye()) return fail('NOT_CONNECTED', '未连接或尚未存活');
+      const archive = buildingArchiveFor(ctx.memory);
+      const old = args.projectId ? archive.get(args.projectId) : undefined;
+      if (args.projectId && !old) return fail('NOT_FOUND', `没有建筑档案 ${args.projectId}`);
+      if ((args.mode === 'inspect' || args.mode === 'repair') && !old) return fail('BAD_ARGS', `${args.mode} 需要已有 projectId`);
+      if (old && old.dimension !== state.dim) return fail('WRONG_DIMENSION', `建筑位于 ${old.dimension}，当前为 ${state.dim}`);
+      if (old && old.worldId !== state.worldId) return fail('WRONG_DIMENSION', '作品属于另一个世界，当前不能施工或验收');
+      let spec = args.spec ?? old?.versions.at(-1)?.spec;
+      if (!spec) {
+        if (args.blueprint === 'pillar' || args.blueprint === 'wall' || args.blueprint === 'custom') {
+          const positions = args.blueprint === 'pillar' ? [[0, 0, 0], [0, 1, 0], [0, 2, 0]] : args.blueprint === 'wall' ? Array.from({ length: 10 }, (_, i) => [i % 5 - 2, Math.floor(i / 5), 0]) : args.cells!;
+          const material = state.inventory.find((i) => /^(cobblestone|stone|dirt|[a-z_]+_planks)$/.test(i.name) && i.count > 0)?.name ?? 'cobblestone';
+          spec = normalizeSpec({ name: args.blueprint, purpose: '自定义建筑', layout: 'custom', components: positions.map(([x, y, z]) => ({ pos: { x, y, z }, name: material, phase: 'frame' })) });
+        } else spec = normalizeSpec({ ...DEFAULT_SPEC, ...(args.blueprint === 'big_hut' ? { name: 'hut_7x7', width: 7, depth: 7, budget: 1024 } : {}) });
       }
-      ctx.progress((placed + failed) / targets.length, `建造 ${bp.name}：${placed}/${targets.length}`);
-      await sleep(80, signal);
+      const rotation = args.rotation ?? old?.rotation ?? ((Math.round(ctx.adapter.eye()!.yaw / (Math.PI / 2)) * 90 + 360) % 360) as Rotation;
+      const origin = args.origin ?? old?.origin ?? { x: Math.floor(state.pos.x) + 2, y: Math.floor(state.pos.y), z: Math.floor(state.pos.z) + 2 };
+      const blueprint = compileBuilding(spec);
+      const project = archive.design({ id: old?.id, worldId: state.worldId, dimension: state.dim, origin, rotation, spec, materials: materialCost(blueprint.cells), reason: args.reason });
+      const result = await constructBuilding(ctx, archive, project, blueprint, args.mode);
+      throwIfAborted(ctx.signal);
+      const data = { ...result, designVersion: project.versions.at(-1)!.version, origin: project.origin, rotation: project.rotation };
+      if (!result.inspection.complete) {
+        const missing = Object.entries(result.missingMaterials).map(([name, count]) => `${name}×${count}`).join('，');
+        const failureCode = missing ? 'MISSING_MATERIALS' : result.failures.some((f) => f.reason === 'WRONG_DIMENSION') ? 'WRONG_DIMENSION' : 'ERROR';
+        return fail(failureCode, `${spec.name} 尚未验收（${result.inspection.defects.length} 个缺陷）${missing ? `；缺少 ${missing}` : ''}。作品 ID ${project.id}；可补料后续建/repair/inspect。${result.failures[0] ? ` ${result.failures[0].reason}` : ''}`, data);
+      }
+      if (blueprint.home && args.mode !== 'inspect') {
+        const home = rotatePosition(blueprint.home, project.origin, project.rotation);
+        ctx.memory.setBase(state.dim, home, spec.name);
+        ctx.memory.addLandmark('discovery', `我的${spec.name}`, state.dim, home, 4);
+        ctx.bus.publish('built', 'P2', `${spec.name} 逐格及通行检查通过；作品 ${project.id}`);
+      }
+      return ok(`${spec.name} 验收通过；本次放置 ${result.placed} 块。作品 ID ${project.id}`, data);
+    } catch (e) {
+      if (isAbort(e)) throw e;
+      return fail(codeFromError(e), `建筑工程失败：${(e as Error).message}`);
     }
-    const doneRatio = placed / Math.max(1, targets.length);
-    if (bp.home && doneRatio >= 0.8) {
-      const h = toWorld(bp.home);
-      memory.setBase(s0.dim, h);
-      memory.addLandmark('discovery', `我的${bp.name}`, s0.dim, h, 4);
-      ctx.bus.publish('built', 'P2', `建好了 ${bp.name}（${placed} 块），设为新基地 (${h.x}, ${h.y}, ${h.z})`);
-    }
-    return doneRatio >= 0.8
-      ? ok(`建好 ${bp.name}：放置 ${placed} 块${failed ? `，${failed} 块没放上` : ''}`)
-      : fail('ERROR', `${bp.name} 只完成了 ${placed}/${targets.length}（地形不平或缺少依附面）`);
   },
 };
 
-// ------------------------------------------------------------------ sleep
+/** A real archive tool: choices and subjective use feedback remain visible to future planning. */
+export const buildingArchive: Skill<{ operation: string; projectId?: string; otherId?: string; text?: string; version?: number; otherVersion?: number; source?: 'user' | 'agent'; category?: 'appearance' | 'use' | 'pathing' | 'raid' | 'preference' }> = {
+  name: 'building_archive',
+  description: '查询作品、设计版本、逐格缺陷、成本及使用反馈；比较候选的材料差异，记录主观审美/使用感受。改造由 build 指定 projectId 和新 spec 完成，程序不替你决定喜好。',
+  argsDoc: '{"operation":"list|read|compare|compare_versions|rollback|feedback","projectId"?:"作品 ID","otherId"?:"比较作品 ID","version"?:1,"otherVersion"?:2,"text"?:"反馈/回退原因","source"?:"agent","category"?:"appearance|use|pathing|raid|preference"}',
+  timeoutMs: 10000,
+  movement: false,
+  readOnly: true,
+  validate(raw) {
+    const a = obj(raw);
+    if (!['list', 'read', 'compare', 'compare_versions', 'rollback', 'feedback'].includes(a.operation)) return { ok: false, error: 'operation 需要 list/read/compare/compare_versions/rollback/feedback' };
+    if (a.operation !== 'list' && (typeof a.projectId !== 'string' || a.projectId.length > 100)) return { ok: false, error: '需要 projectId' };
+    if (a.operation === 'compare' && (typeof a.otherId !== 'string' || a.otherId.length > 100)) return { ok: false, error: 'compare 需要 otherId' };
+    if (['feedback', 'rollback'].includes(a.operation) && (typeof a.text !== 'string' || !a.text.trim() || a.text.length > 2000)) return { ok: false, error: 'feedback/rollback 需要 1-2000 字符 text' };
+    if (['rollback', 'compare_versions'].includes(a.operation) && (!Number.isInteger(a.version) || a.version < 1)) return { ok: false, error: '需要实际存在的正整数 version' };
+    if (a.operation === 'compare_versions' && (!Number.isInteger(a.otherVersion) || a.otherVersion < 1)) return { ok: false, error: '需要实际存在的正整数 otherVersion' };
+    if (a.source !== undefined && a.source !== 'agent') return { ok: false, error: '模型反馈只能标为 agent；用户明确反馈由用户命令入口记录' };
+    if (a.category !== undefined && !['appearance', 'use', 'pathing', 'raid', 'preference'].includes(a.category)) return { ok: false, error: '无效反馈 category' };
+    return { ok: true, args: { operation: a.operation, projectId: a.projectId, otherId: a.otherId, text: a.text, version: a.version, otherVersion: a.otherVersion, source: 'agent', category: a.category ?? 'use' } };
+  },
+  async run(ctx, args) {
+    try {
+      throwIfAborted(ctx.signal);
+      const archive = buildingArchiveFor(ctx.memory);
+      if (args.operation === 'list') return ok('作品目录', { projects: archive.list().filter((p) => p.worldId === ctx.adapter.state().worldId).map((p) => ({ id: p.id, worldId: p.worldId, dimension: p.dimension, origin: p.origin, status: p.status, name: p.versions.at(-1)?.spec.name, version: p.versions.at(-1)?.version, latestFeedback: p.feedback.slice(-3) })) });
+      if (!archive.get(args.projectId!)) return fail('NOT_FOUND', '作品不存在');
+      if (args.operation === 'read') return ok('作品档案（历史检查不代表当前世界仍然完好）', { project: archive.get(args.projectId!) });
+      if (args.operation === 'compare') return ok('作品候选比较', archive.compare(args.projectId!, args.otherId!));
+      if (args.operation === 'compare_versions') return ok('同一作品的设计版本比较', archive.compareVersions(args.projectId!, args.version!, args.otherVersion!));
+      if (args.operation === 'rollback') return ok('已创建回退设计版本；实际改造需另用 build 的 repair，并重新验收', { project: archive.rollback(args.projectId!, args.version!, args.text!) });
+      archive.feedback(args.projectId!, { source: 'agent', text: args.text!, category: args.category ?? 'use' });
+      return ok('已记录主观反馈；结构事实以 inspect 为准');
+    } catch (e) { if (isAbort(e)) throw e; return fail('ERROR', (e as Error).message); }
+  },
+};
+
 export const sleepSkill: Skill<{}> = {
   name: 'sleep',
-  description: '夜里睡在身边的床上（没有就放下背包里的床），直接跳过黑夜并把重生点设在床边。床 = 3 羊毛 + 3 木板（羊毛来自羊）',
-  argsDoc: '{}',
-  timeoutMs: 120000,
-  movement: false,
-  validate() {
-    return { ok: true, args: {} };
-  },
+  description: '主世界夜里睡在身边的床上（没有就放下背包里的床），跳过黑夜并设置重生点。下界和末地禁止尝试睡床。',
+  argsDoc: '{}', timeoutMs: 120000, movement: false,
+  validate() { return { ok: true, args: {} }; },
   async run(ctx) {
     const s = ctx.adapter.state();
+    if (s.dim !== 'overworld') return fail('WRONG_DIMENSION', '只能在主世界睡床；当前维度的床会爆炸');
     if (s.isDay) return fail('ERROR', '只能在夜里睡觉');
     try {
       const r = await ctx.adapter.sleepInBed(ctx.signal);
       if (!r.ok) return fail(r.reason === 'NO_BED' ? 'MISSING_MATERIALS' : 'ERROR', `睡不了：${r.reason}`);
-      if (r.bedPos) {
-        ctx.memory.setBase(s.dim, r.bedPos);
-        ctx.memory.addLandmark('discovery', '我的床', s.dim, r.bedPos, 4);
-      }
+      if (r.bedPos) { ctx.memory.setBase(s.dim, r.bedPos); ctx.memory.addLandmark('discovery', '我的床', s.dim, r.bedPos, 4); }
       return ok('睡了一觉，天亮了（重生点已设在床边）');
-    } catch (e) {
-      if (isAbort(e)) throw e;
-      return fail(codeFromError(e), `睡觉出错：${(e as Error).message}`);
-    }
+    } catch (e) { if (isAbort(e)) throw e; return fail(codeFromError(e), `睡觉出错：${(e as Error).message}`); }
   },
 };

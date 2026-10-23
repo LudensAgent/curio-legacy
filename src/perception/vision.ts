@@ -62,7 +62,7 @@ const ORES = ['coal', 'iron', 'copper', 'gold', 'redstone', 'lapis', 'diamond', 
 /** 值得记住位置的方块（资源/结构/危险） */
 export const NOTABLE = new Set([
   ...LOGS, ...ORES, 'crafting_table', 'chest', 'furnace', 'lava', 'spawner', 'bell', 'hay_block', 'sugar_cane',
-  'pumpkin', 'melon', 'obsidian', 'clay', 'sweet_berry_bush',
+  'pumpkin', 'melon', 'obsidian', 'clay', 'sweet_berry_bush', 'nether_portal', 'end_portal', 'end_gateway', 'end_portal_frame', 'stone_bricks', 'mossy_stone_bricks', 'cracked_stone_bricks', 'bookshelf',
 ]);
 /** 采集目标常用的地表方块：也记住，但每种限量 */
 export const GROUND = new Set(['stone', 'cobblestone', 'deepslate', 'andesite', 'granite', 'diorite', 'dirt', 'grass_block', 'sand', 'gravel']);
@@ -73,6 +73,10 @@ export interface SeenEntity {
   kind: EntityInfo['kind'];
   pos: Vec3Like;
   dist: number;
+  height?: number;
+  velocity?: Vec3Like;
+  phase?: number;
+  hp?: number;
   dir: string; // 绝对方向 N/NE/...
   rel: string; // 相对方向 正前/右前/...
   how: 'seen' | 'heard';
@@ -160,6 +164,7 @@ function sectionExit(ox: number, oy: number, oz: number, dx: number, dy: number,
 }
 
 const keyOf = (x: number, y: number, z: number) => `${x},${y},${z}`;
+export const RESOURCE_MEMORY_TTL_MS = 15 * 60_000;
 
 export class Vision {
   frame: VisionFrame | null = null;
@@ -173,8 +178,37 @@ export class Vision {
   private known = new Map<string, Known>();
   private perName = new Map<string, number>();
   private lastScanAt = 0;
+  private scope = '';
+  private session = '';
+  private scopes = new Map<string, { known: Map<string, Known>; perName: Map<string, number> }>();
 
   constructor(private adapter: GameAdapter, public cfg: VisionConfig = DEFAULT_VISION) {}
+
+  private syncScope() {
+    const state = this.adapter.state();
+    const scope = `${state.worldId}\u0000${state.dim}`;
+    if (scope !== this.scope || state.sessionId !== this.session || !state.observationReady) {
+      this.frame = null;
+      this.seen = [];
+      this.heard = [];
+      this.visibleNow.clear();
+      this.composition = {};
+      this.openness = { left: 0, center: 0, right: 0 };
+      this.lastScanAt = 0;
+      this.lastSweepAt = 0;
+      if (scope !== this.scope) {
+        this.scopes.set(this.scope, { known: this.known, perName: this.perName });
+        const saved = this.scopes.get(scope);
+        this.known = saved?.known ?? new Map();
+        this.perName = saved?.perName ?? new Map();
+        this.scope = scope;
+      }
+      this.session = state.sessionId;
+    }
+    const now = Date.now();
+    for (const [key, block] of this.known) if (now - block.lastSeen > RESOURCE_MEMORY_TTL_MS) this.forget(key);
+    return state;
+  }
 
   /** 实际视距：配置值，或服务器下发的渲染距离（区块数 × 16） */
   effectiveRange(): number {
@@ -186,9 +220,9 @@ export class Vision {
   // ------------------------------------------------------------ 扫描
   scan(): void {
     const t0 = Date.now();
+    const s = this.syncScope();
     const eye = this.adapter.eye();
-    const s = this.adapter.state();
-    if (!eye || !s.connected) {
+    if (!eye || !s.connected || !s.alive || !s.observationReady) {
       this.frame = null;
       this.seen = [];
       this.heard = [];
@@ -345,7 +379,7 @@ export class Vision {
       const ddx = cx - eye.x, ddz = cz - eye.z;
       const ayaw = yawTo(ddx, ddz);
       const relYaw = norm(ayaw - eye.yaw);
-      const base: SeenEntity = { id: e.id, name: e.name, kind: e.kind, pos: e.pos, dist: e.dist, dir: dirOfYaw(ayaw), rel: relOf(relYaw), how: 'seen' };
+      const base: SeenEntity = { id: e.id, name: e.name, kind: e.kind, pos: e.pos, dist: e.dist, height: e.height, velocity: e.velocity, phase: e.phase, hp: e.hp, dir: dirOfYaw(ayaw), rel: relOf(relYaw), how: 'seen' };
       let visible = false;
       let relPitch = 0;
       for (const ty of targets) {
@@ -366,7 +400,7 @@ export class Vision {
         seen.push({ ...base, u, v });
         if (e.kind !== 'item') ents.push({ name: e.name, kind: e.kind, u, v, dist: Math.round(e.dist) });
       } else if (e.kind !== 'item' && e.kind !== 'other' && e.dist <= (e.kind === 'hostile' ? this.cfg.hearRadius : this.cfg.hearRadius * 0.6)) {
-        heard.push({ ...base, how: 'heard' });
+        heard.push({ ...base, how: 'heard', phase: undefined, hp: undefined, velocity: undefined });
       }
     }
     this.seen = seen.sort((a, b) => a.dist - b.dist);
@@ -419,24 +453,26 @@ export class Vision {
   // ------------------------------------------------------------ 查询（给技能、反射层、感知摘要用）
   /** 看见的 + 听见的实体（反射层/战斗只能对这些做出反应） */
   perceivedEntities(radius = 16): EntityInfo[] {
+    if (!this.syncScope().observationReady) return [];
     return [...this.seen, ...this.heard]
       .filter((e) => e.dist <= radius)
-      .map((e) => ({ id: e.id, name: e.name, kind: e.kind, pos: e.pos, dist: e.dist }))
+      .map((e) => ({ id: e.id, name: e.name, kind: e.kind, pos: e.pos, dist: e.dist, height: e.height, velocity: e.velocity, phase: e.phase, hp: e.hp }))
       .sort((a, b) => a.dist - b.dist);
   }
 
   /**
-   * 已知的方块位置：当前看得见或曾经看见过（30 分钟内）。
+   * 已知的方块位置：当前看得见或曾经看见过（15 分钟内）。
    * 回到记忆位置时会校验方块是否还在（被挖掉/改变则遗忘）。
    */
   knownBlocks(names: string[], maxDist: number): BlockHit[] {
-    const s = this.adapter.state();
+    const s = this.syncScope();
+    if (!s.observationReady) return [];
     const set = new Set(names);
     const now = Date.now();
     const out: BlockHit[] = [];
     for (const [k, v] of this.known) {
       if (!set.has(v.name)) continue;
-      if (now - v.lastSeen > 30 * 60_000) { this.forget(k); continue; }
+      if (now - v.lastSeen > RESOURCE_MEMORY_TTL_MS) { this.forget(k); continue; }
       const d = Math.hypot(v.pos.x - s.pos.x, v.pos.y - s.pos.y, v.pos.z - s.pos.z);
       if (d > maxDist) continue;
       const cur = this.adapter.blockOptics(v.pos.x, v.pos.y, v.pos.z);
@@ -448,6 +484,7 @@ export class Vision {
 
   /** 让最近扫描一次（例如转头之后）。距离上次不足 150ms 则跳过。 */
   refresh() {
+    this.syncScope();
     if (Date.now() - this.lastScanAt >= 150) this.scan();
   }
 
@@ -456,25 +493,34 @@ export class Vision {
   }
 
   /** 最近的“可站立的陆地”（见过的地表方块，且上方是空气，不是海底） */
-  nearestLand(here: Vec3Like): { dir: string; dist: number; pos: Vec3Like } | null {
-    let best: { d: number; pos: Vec3Like } | null = null;
+  nearestLand(here: Vec3Like, excluded: Vec3Like[] = []): { dir: string; dist: number; pos: Vec3Like } | null {
+    if (!this.syncScope().observationReady) return null;
+    let best: { d: number; score: number; pos: Vec3Like } | null = null;
     for (const v of this.known.values()) {
+      if (Date.now() - v.lastSeen > RESOURCE_MEMORY_TTL_MS) continue;
       if (!GROUND.has(v.name) && !v.name.endsWith('_log')) continue;
+      if (['water', 'short_grass', 'tall_grass'].includes(v.name)) continue;
+      if (excluded.some((p) => Math.hypot(p.x - v.pos.x, p.z - v.pos.z) <= 2 && Math.abs(p.y - v.pos.y) <= 2)) continue;
       if (v.pos.y < here.y - 4) continue;
+      const ground = this.adapter.blockOptics(v.pos.x, v.pos.y, v.pos.z);
       const above = this.adapter.blockOptics(v.pos.x, v.pos.y + 1, v.pos.z);
-      if (!above || above.kind !== 'clear') continue;
-      const d = Math.hypot(v.pos.x - here.x, v.pos.z - here.z);
-      if (!best || d < best.d) best = { d, pos: v.pos };
+      const head = this.adapter.blockOptics(v.pos.x, v.pos.y + 2, v.pos.z);
+      if (ground?.kind !== 'solid' || !above || !head || !['air', 'cave_air', 'void_air'].includes(above.name) || !['air', 'cave_air', 'void_air'].includes(head.name)) continue;
+      const d = Math.hypot(v.pos.x + 0.5 - here.x, v.pos.z + 0.5 - here.z);
+      const score = d + Math.max(0, v.pos.y - here.y) * 2;
+      if (!best || score < best.score) best = { d, score, pos: v.pos };
     }
     return best ? { dir: dirOfYaw(yawTo(best.pos.x - here.x, best.pos.z - here.z)), dist: Math.round(best.d), pos: best.pos } : null;
   }
 
   knownCount() {
+    this.syncScope();
     return this.known.size;
   }
 
   /** 给 LLM 的视觉摘要 */
   summary(here: Vec3Like) {
+    this.syncScope();
     const total = Object.values(this.composition).reduce((a, b) => a + b, 0) || 1;
     const view = Object.entries(this.composition)
       .filter(([c]) => c !== 'unknown')

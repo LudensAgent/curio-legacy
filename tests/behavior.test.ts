@@ -77,6 +77,7 @@ test('死亡追踪：感知里出现 death_recovery，回到原地且没有掉�
   const memory = new WorldMemory(null);
   const vision = new Vision(adapter);
   const perception = new Perception(adapter, memory, new EventBus(), vision);
+  memory.setWorld(adapter.worldId);
   memory.setDeath({ ts: Date.now(), dim: 'overworld', pos: { x: 30, y: 64, z: 0 }, lost: [{ name: 'oak_log', count: 5 }] });
   const p = perception.update();
   assert.equal(p.death_recovery?.dir, 'E');
@@ -95,13 +96,15 @@ const runSkill = async (adapter: FakeAdapter, skill: string, args: unknown, memo
   return { o: await done, memory, vision };
 };
 
-test('shelter：往下挖两格并封顶', async () => {
+test('shelter：往下挖三格，在地表封顶并留下两格头部空间', async () => {
   const a = new FakeAdapter();
   a.inv.set('dirt', 3);
   const { o } = await runSkill(a, 'shelter', { until: 'day' });
   assert.equal(o.result.status, 'succeeded', o.result.summary);
-  assert.equal(Math.floor(a.pos.y), 62, '应该在坑底');
-  assert.equal(a.nameAt(0, 64, 0), 'dirt', '头顶应封上');
+  assert.equal(Math.floor(a.pos.y), 61, '应该在坑底');
+  assert.equal(a.nameAt(0, 63, 0), 'dirt', '封顶应与邻接地表同高');
+  assert.equal(a.nameAt(0, 62, 0), 'air', '头部应有空气');
+  assert.equal(a.nameAt(0, 61, 0), 'air', '脚部应有空气');
 });
 
 test('build：材料不够时报出需要多少；够了就建成并设为基地', async () => {
@@ -109,8 +112,13 @@ test('build：材料不够时报出需要多少；够了就建成并设为基地
   a.inv.set('oak_planks', 10);
   let r = await runSkill(a, 'build', { blueprint: 'hut' });
   assert.equal(r.o.result.failureCode, 'MISSING_MATERIALS');
-  assert.match(r.o.result.summary, /还需要 71 个方块/);
-  a.inv.set('oak_planks', 80);
+  assert.match(r.o.result.summary, /缺少/);
+  assert.deepEqual(Object.keys(r.o.result.data!.missingMaterials as object).sort(), ['cobblestone', 'glass', 'oak_door']);
+  assert.ok(r.o.result.data?.projectId, '材料不足也保留可续建的工程档案');
+  a.speed = 100000;
+  a.inv.set('cobblestone', 180);
+  a.inv.set('glass', 3);
+  a.inv.set('oak_door', 1);
   r = await runSkill(a, 'build', { blueprint: 'hut' });
   assert.equal(r.o.result.status, 'succeeded', r.o.result.summary);
   assert.ok(r.memory.landmarks().some((l) => l.label === '我的hut_5x5'));

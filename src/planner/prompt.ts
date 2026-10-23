@@ -1,8 +1,15 @@
+import type { AgentState } from '../adapter/types.ts';
+import fs from 'node:fs';
+import path from 'node:path';
 import type { TaskInfo } from '../arbiter/arbiter.ts';
+import type { MemoryContext } from '../memory/types.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import type { Percept } from '../perception/perception.ts';
-import { skillCatalog } from '../skills/index.ts';
+import type { Binding } from '../projects/types.ts';
+import { LLM_HIDDEN, SKILLS, skillCatalog } from '../skills/index.ts';
 import type { ChatMessage } from './llm.ts';
+import { travelStore } from '../travel/store.ts';
+import { buildingArchiveFor } from '../skills/build.ts';
 
 export interface PlanContext {
   reason: string;
@@ -10,79 +17,194 @@ export interface PlanContext {
   current: TaskInfo | null;
   lastFailure: { skill: string; code?: string; summary: string } | null;
   userSuggestion: string | null;
+  binding?: Binding;
+  continuity?: unknown;
+  worldState?: AgentState;
+  memoryContext?: MemoryContext;
+  memoryAvailable?: boolean;
+  results?: unknown[];
 }
 
-export function systemPrompt(persona: string, fov = 100): string {
+export function systemPrompt(persona: string, fov = 100, catalog = skillCatalog()): string {
   return `${persona}
 
-你是这个 Minecraft Agent 的“高层思考”模块。你不直接操作键盘鼠标；你只根据结构化的游戏状态 JSON 决定“接下来想做什么”，并把它拆成 1-5 个技能步骤，由程序连续执行。
+你是 Minecraft 自主玩家的高层决策模块。根据观察、个人偏好、近期经历与未完成的兴趣，自由选择现在想做的事情。可以建设、研究、整理、探索、休息、继续旧事，也可以基于新情况改变主意。没有必须遵循的科技树、囤货配额或通关主线；长期种田、装修或不去下界都可以。state.drives 只是可权衡的信号，分数最高项不决定你的目标。安全反射由程序执行。
 
-## 你的视觉（state.vision）
-你有一双模拟的眼睛：只能看到面前视锥（约 ${fov}°）内、没有被遮挡、光线足够的东西，看不穿墙壁和地面。
-- view：视野里各类表面的占比（sky/water/grass/stone/wood/leaves/ore…）；facing：你正面朝的方向
-- visible_resources：现在看得见的资源（含方向 dir 和距离）；remembered_resources：之前看见过、记得位置的资源
-- seen_entities：看见的生物；heard：没看见但听到的（只有大致方位）
-- openness：左/中/右视线能看多远（数值小 = 前面被挡住）
-- nearest_land：最近看见过的可站立陆地方向
-- last_look_around_s：距上次环顾一圈多少秒（null = 还没环顾过）
-你不知道没看过的地方有什么。视觉在你移动时会持续更新，所以**不要每个计划都加 look_around**；只有当 visible/remembered 都没有你要的东西、并且 last_look_around_s 为 null 或超过 120 秒时才环顾。gather 只会去挖看见过的方块。
+每次决策是独立请求，当前观察、意图和证据由程序重新组装，不依赖完整聊天历史。需要旧经历时再请求 recall；memory_source=available_on_request 表示记忆服务可按需查询，并非没有记忆。
 
-## 可用技能（只能用这些，参数必须符合格式；【自学】开头的是你以前学会的组合技能）
-${skillCatalog()}
+兴趣需有连续性。每次给出 decision：begin（新事）、continue（继续）、change_method（改法）、revise（改目标）、defer（暂缓）、abandon（放弃）、complete（主观结束）。reason 说明眼前事实或经历为何支持这个选择，context 引用采用的发现/记忆。改意时说明之前的投入与新取舍。用户建议可以采纳，也可以有理由地拒绝。偏好 source 只能是 inferred；用户明确偏好由程序另行记录，模型不得冒充用户。
+新事在 intent 写 text、whyNow；持续多轮且可验证的事情可附 project。简单观察或闲逛无需工程。
+project={title,successCondition,milestones:[{title,condition}]}，同一时间仅一个主动项目，里程碑顺序执行。
+事实条件仅支持 {type:"inventory_min",item:"具体物品注册名",count:16}、{type:"location_near",dimension:"overworld",pos:{x:0,y:64,z:0},radius:3,landmarkId:"已知地标ID"}、{type:"all_of",conditions:[条件...]}。位置必须来自当下观测或已知地标，不能猜测。库存条件读取实际完整背包，技能成功或预计产出不证明事实完成。缺少可证明的条件时保留开放意图，不编造验收。complete 只表示体验结束，不能宣布未验证的材料、房屋或战斗事实。
 
-## 你是一个真正在“玩”的玩家
-像人一样有欲望、有计划，而不是机械地重复同一件事。state.drives 是你此刻的游玩欲望（按强度排序，带原因和建议），state.stock 是库存概况，state.objective 是你自己定下的长期目标。
-- **长期目标**：用 objective 字段写下接下来几个小时想达成的事（例如“建一个带床的小屋，然后去找铁矿做铁镐”），并在完成或改变主意时更新它。每个计划都应该是在推进它，或者在处理更紧急的欲望。
-- **生存**：饥饿值 ≥18 才会自然回血；饿了先吃，没吃的就 hunt 动物（牛/猪/羊/鸡），不要饿着肚子去砍树。夜晚怪物多：有床就 sleep，有小屋就回去，什么都没有就 shelter 挖坑封顶。
-- **死亡**：state.death_recovery 存在时，掉落物 5 分钟后消失，尽快 goto death + pickup_items 捡回来。
-- **安家**：工具到石器后，白天备够方块就 build 一个 hut（会自动成为基地）；有羊就弄 3 羊毛做床（white_bed），以后睡觉跳过夜晚。
-- **磨刀不误砍柴工**：state.efficiency 记录了你最近真实的采集速度，以及换哪把工具能快多少倍（斧头砍木、镐挖石、铲挖土）。如果接下来还要大量采集，先花几十秒做工具更划算；规划时也要估算时间成本，比较不同做法哪个更快。recent_goals 里的 seconds 是每个目标实际花的时间。\n- **偷懒是美德**：同样的步骤做了两三次，就用 learn_skill 把它组合成新技能，以后一步完成；常用材料一次多采一些（例如一次 gather 16 个原木），别一次只拿 3 个反复跑。
-- **够了就停**：库存已经够用的东西（state.stock）不要再去采，转去做更有意思的事：建造、找新材料、去远处探索新的生物群系、调查 state.curiosities 里看见过但没去过的东西。
-- **好奇心**：noveltyByDir 越接近 1 代表那个方向越没去过；白天、状态好时可以走远一点（explore 80-160 格），找村庄、矿洞、新材料。
-- **不要重复失败**：参考 last_failure 和 recent_goals，换一种做法或换个目标。
-- craft 会自动补做两层以内的前置材料（原木→木板→木棍、工作台），直接写最终物品即可。
-- 在水里时优先朝 nearest_land 上岸。被攻击时的紧急躲避/反击由程序自动处理，不需要你规划。
-- 计划一般 1-5 步、几分钟内完成；完成后你会被再次询问。
-- 如果 reason 是 "prefetch"：current_task 即将完成，请假设它会成功，规划它**之后**的下一步，不要重复正在做的事。
-- 用户建议（user_suggestion）可以采纳也可以说明理由后拒绝，但安全规则优先。
-- say 只在真的有话想说时用（有趣的发现、心情变化），大部分计划留空；不要复述计划。
+只组合当前可用技能；缺少能力时记录缺口、尝试相关的现有方法或暂缓。不要把缺材料自动改写为无关囤货。learn_skill 仅为待试验组合，注册名称不等于已学会。lesson 是有来源的推断，memory_note 不得伪造事实。
+learn_skill 的完整格式为 {name,description,parameters:{amount:{type:"integer",default:4,min:1,max:16}},program:{type:"sequence",steps:[{type:"call",skill:"gather",args:{block:"stone",count:{param:"amount"}}}]},postcondition:{type:"inventory_min",item:"cobblestone",count:{param:"amount"}}}。program 还可用 {type:"if",condition,then,else} 或 {type:"repeat",times,body}，循环有界。候选 trial 只在配置的隔离试验世界执行，两个不同情境事实验收后才晋升 method；程序不替你选择要学什么。
 
-## 输出
-只输出一个 JSON 对象，不要输出任何其他文字。thought 不超过 60 字：
-{"thought":"为什么这样做（会显示给观众）","goal":"目标，30 字以内","goal_type":"explore|gather|craft|survive|investigate|rest|build","steps":[{"skill":"技能名","args":{}}],"objective":"可选：更新长期目标","say":"可选","abort_if":{"hp_below":6,"night":false},"memory_note":"可选：值得记住的经验","learn_skill":{"name":"可选：小写下划线名称","description":"做什么","steps":[{"skill":"...","args":{}}]}}`;
+视觉仅约 ${fov}° 面前视锥，遮挡和光照有效。visible_resources 是亲眼所见，remembered_resources 是可能过期的旧观察；未去过的位置未知。gather 只能采已知资源。look_around 只在需要观察且上次环顾较久时使用，无需每计划都扫视。不要用管理指令或种子定位资源。sleep 只在主世界安全。不同维度的位置不能直接 goto。
+若附带建筑图片，它们是作品实地固定机位的射线语义色可视化，只有观测到的轮廓/遮挡/大类色彩，不能由此声称看到了原版材质细节。请结合自己的偏好、版本差异、功能缺陷和使用反馈成对比较；外观判断属于主观评价，不替代结构验收，不用自评分上涨证明进化。
+
+可用技能（参数必须合法；组合技能也通过同一取消与动作守卫）：
+${catalog}
+
+如果还需要记忆，先输出 {"kind":"recall","query":"要追查的问题","ids":["可选记忆ID"],"filters":{"kinds":["experience"]}}。这是只读查询，不占用游戏动作；最多两轮，返回未知时承认未知。检索排名与读过次数不提高真实性。历史事件不代表库存/设施的当前状态。
+
+否则只输出一个 JSON 对象：
+{"kind":"plan","thought":"想继续观察树冠的形状","decision":{"kind":"continue","reason":"上次只看了一面，还想比较另一侧","context":["上一轮观察"]},"goal":"观察树冠另一侧","goal_type":"investigate","steps":[{"skill":"look_around","args":{"seconds":4}}],"abort_if":{"hp_below":6}}
+若没有当前意图，新意图必须嵌套在 decision.intent 中（不是顶层 intent），例如：
+{"kind":"plan","thought":"好奇眼前的树木","decision":{"kind":"begin","reason":"发现了没见过的树冠","intent":{"text":"观察这种树木的形状","whyNow":"眼前发现了新树种","context":["当前视觉"],"tradeoffs":["暂缓其他想法"]}},"goal":"观察周围树木","goal_type":"investigate","steps":[{"skill":"look_around","args":{"seconds":4}}]}
+decision.intent.context 与 tradeoffs 都是字符串数组。只有 begin/revise 可写 decision.intent，只有新项目或 revise 可写 decision.project（不得在 continue 时重新定义已有工程）。preferences、say、memory_note、lesson、learn_skill 都是可选字段；learn_skill 采用上文的程序格式。
+steps 保持 1–5 步；defer/abandon/complete 可以 steps:[]，表示选择等待而非填充无关动作。不要每轮换目标，也不必每轮说话。可用 begin + 已有 intentId 恢复 continuity 中列出的暂缓兴趣及其原项目；新记录的 ID、项目修订、里程碑和请求代次由程序分配，不能伪造或覆盖。`;
 }
 
-export function userPrompt(ctx: PlanContext, memory: WorldMemory): string {
+export function boundedJson(value: unknown, maxBytes: number): string {
+  if (maxBytes <= 0) return '[]';
+  if (!Array.isArray(value)) {
+    const json = JSON.stringify(value);
+    return json && Buffer.byteLength(json, 'utf8') <= maxBytes ? json : '[]';
+  }
+  // Encode each record once; repeated whole-history serialization stalls physics ticks.
+  const rows: string[] = [];
+  let bytes = 2;
+  for (const entry of value) {
+    const json = JSON.stringify(entry) ?? 'null';
+    const next = Buffer.byteLength(json, 'utf8') + (rows.length ? 1 : 0);
+    if (bytes + next > maxBytes) break;
+    rows.push(json); bytes += next;
+  }
+  return `[${rows.join(',')}]`;
+}
+
+export function userPrompt(ctx: PlanContext, memory: WorldMemory, recalled?: unknown[], memoryBytes = 8000, compact = 0): string {
   const p = ctx.percept;
-  const here = { x: p.self.pos[0], y: p.self.pos[1], z: p.self.pos[2] };
-  const landmarks = memory
-    .landmarks()
-    .filter((l) => l.dim === p.self.dim)
-    .map((l) => ({ id: l.id, kind: l.kind, label: l.label, dist: Math.round(Math.hypot(l.pos.x - here.x, l.pos.z - here.z)) }))
-    .sort((a, b) => a.dist - b.dist)
-    .slice(0, 10);
-  const stats = Object.entries(memory.skillStats())
-    .filter(([, s]) => s.fail > 0)
-    .map(([k, s]) => `${k}: 成功 ${s.ok}/${s.runs}，失败原因 ${JSON.stringify(s.failCodes)}`);
-
+  const state = ctx.worldState;
+  const recall = recalled ?? ctx.memoryContext?.memories ?? [];
   const payload = {
-    reason: ctx.reason,
-    state: p,
-    current_task: ctx.current ? { skill: ctx.current.skill, args: ctx.current.args, progress: Math.round(ctx.current.progress * 100) + '%' } : null,
-    last_failure: ctx.lastFailure,
-    recent_goals: memory.recentGoals(10).map((g) => ({ goal: g.goal, status: g.status, summary: g.summary, seconds: g.durationSec })),
-    landmarks,
-    notes: memory.recentNotes(6).map((n) => `[${n.kind}] ${n.text}`),
-    skill_failures: stats,
-    discovered: memory.seenCount(),
-    user_suggestion: ctx.userSuggestion,
+    reason: ctx.reason, state: p, current_task: ctx.current ? { skill: ctx.current.skill, args: ctx.current.args, progress: ctx.current.progress } : null,
+    last_failure: ctx.lastFailure, user_suggestion: ctx.userSuggestion,
+    continuity: ctx.continuity ?? { intent: memory.currentIntent(), project: memory.activeProject() },
+    preferences: memory.preferences().sort((a, b) => Number(b.source === 'user') - Number(a.source === 'user') || b.updatedAt - a.updatedAt).slice(0, 8),
+    recalled_memories: JSON.parse(boundedJson(recall, memoryBytes)),
+    memory_source: ctx.memoryContext?.source ?? (ctx.memoryAvailable ? 'available_on_request' : 'unavailable'),
+    known_portals: state ? travelStore(memory).snapshot(state.worldId).endpoints.slice(-10) : [],
+    recent_attempts: memory.recentGoals(4).map((g) => ({ goal: g.goal, status: g.status, summary: g.summary })),
+    tool_results: JSON.parse(boundedJson(ctx.results ?? [], Math.min(memoryBytes, 6000))),
+    known_locations: memory.landmarks().filter((l) => l.dim === p.self.dim && (!state || l.worldId === state.worldId))
+      .sort((a, b) => Math.hypot(a.pos.x - p.self.pos[0], a.pos.z - p.self.pos[2]) - Math.hypot(b.pos.x - p.self.pos[0], b.pos.z - p.self.pos[2]))
+      .slice(0, 10).map((l) => ({ id: l.id, label: l.label, dimension: l.dim, pos: l.pos, observedAt: l.ts })),
   };
-  return `当前情况（JSON）：\n${JSON.stringify(payload)}\n\n请给出下一个计划。`;
+  return contextMessage(compact ? compactContext(payload, compact) : payload);
 }
 
-export function buildMessages(persona: string, ctx: PlanContext, memory: WorldMemory, fov = 100): ChatMessage[] {
-  return [
-    { role: 'system', content: systemPrompt(persona, fov) },
-    { role: 'user', content: userPrompt(ctx, memory) },
-  ];
+const contextPrefix = '当前观察和选择记录（JSON）：\n';
+const contextSuffix = '\n请选择继续、改法或改意，并给出可执行的短计划。';
+const contextMessage = (payload: unknown) => `${contextPrefix}${JSON.stringify(payload)}${contextSuffix}`;
+
+/** Keep structured identity and present failure while shedding historical detail. */
+function compactContext(value: unknown, level: number, key = '', depth = 0): any {
+  if (value == null || typeof value === 'number' || typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    // IDs, state enums and registered names must remain exact for the decision protocol.
+    const exact = /^(?:id|.*Id|kind|type|status|source|worldId|sessionId|dimension|dim|item|skill|name|code|reason)$/.test(key);
+    const limit = exact ? 2000 : level === 1 ? 240 : 120;
+    return value.length <= limit ? value : `${value.slice(0, limit)}…[上下文已截短]`;
+  }
+  if (Array.isArray(value)) {
+    const limit = /^(?:conditions|pauseReasons)$/.test(key) ? 16
+      : /^(?:inventory|visible_resources|remembered_resources|resources)$/.test(key) ? (level === 1 ? 12 : 6)
+      : key === 'evidence' ? 1 : level === 1 ? 3 : 1;
+    const selected = key === 'evidence' ? value.slice(-limit) : value.slice(0, limit);
+    return selected.map((entry) => compactContext(entry, level, '', depth + 1));
+  }
+  if (typeof value !== 'object' || depth > 16) return '[上下文已省略]';
+  const result: Record<string, unknown> = {};
+  for (const [field, entry] of Object.entries(value)) {
+    // wishes duplicates openInterests; repeated historical details are lower priority.
+    if (field === 'wishes' || level > 1 && ['recent_attempts', 'tool_results', 'recalled_memories', 'farms', 'efficiency', 'learn_candidates'].includes(field)) continue;
+    if (field === 'milestones' && Array.isArray(entry)) {
+      const current = Number((value as Record<string, unknown>).currentMilestone ?? 0);
+      const offset = Number((value as Record<string, unknown>).milestone_offset ?? 0);
+      result.milestones = entry.slice(Math.max(0, current - offset), current - offset + 1).map((m) => compactContext(m, level, '', depth + 1));
+      result.milestone_offset = current;
+    } else result[field] = compactContext(entry, level, field, depth + 1);
+  }
+  if (!depth) result.context_truncated = true;
+  return result;
+}
+
+function briefCatalog(descriptionChars = 60): string {
+  return Object.values(SKILLS).filter((s) => !LLM_HIDDEN.has(s.name))
+    .map((s) => `- ${s.name} ${s.argsDoc}${descriptionChars ? `：${s.description.slice(0, descriptionChars)}` : ''}`).join('\n');
+}
+
+export const promptCost = (messages: ChatMessage[]) => Buffer.byteLength(JSON.stringify(messages), 'utf8') + messages.length * 64
+  + messages.reduce((sum, m) => sum + (m.images?.length ?? 0) * 1024, 0);
+
+/** Conservative byte bound across model tokenizers, including Chinese and tool/retry turns. */
+export function enforcePromptBudget(messages: ChatMessage[], maxTokens: number): ChatMessage[] {
+  if (!Number.isFinite(maxTokens) || maxTokens < 1024) throw new Error('PROMPT_BUDGET_INVALID');
+  // Preserve the newest query/result or validation feedback as a complete exchange.
+  while (messages.length > 4 && promptCost(messages) > maxTokens) {
+    const count = messages[2].role === 'assistant' && messages[3]?.role === 'user' ? 2 : 1;
+    messages.splice(2, count);
+  }
+  if (promptCost(messages) > maxTokens) for (const message of messages) delete message.images;
+  const base = messages[1];
+  if (base?.content.startsWith(contextPrefix) && base.content.endsWith(contextSuffix)) {
+    const payload = JSON.parse(base.content.slice(contextPrefix.length, -contextSuffix.length));
+    for (const level of [1, 2]) {
+      if (promptCost(messages) <= maxTokens) break;
+      base.content = contextMessage(compactContext(payload, level));
+    }
+  }
+  if (promptCost(messages) > maxTokens && messages[0]?.role === 'system') {
+    const system = messages[0].content;
+    const catalogStart = system.indexOf('\n', system.indexOf('\n可用技能（'));
+    const catalogEnd = system.indexOf('\n\n如果还需要记忆', catalogStart);
+    if (catalogStart >= 0 && catalogEnd > catalogStart) {
+      messages[0].content = `${system.slice(0, catalogStart + 1)}${briefCatalog(0)}${system.slice(catalogEnd)}`;
+    }
+  }
+  if (promptCost(messages) > maxTokens) throw new Error(`PROMPT_BUDGET_EXCEEDED: ${promptCost(messages)}/${maxTokens}`);
+  return messages;
+}
+
+export function buildMessages(persona: string, ctx: PlanContext, memory: WorldMemory, fov = 100, maxTokens = 128000, visionInput = false,
+  limits: { contextWindowTokens?: number; compactAtRatio?: number; maxOutputTokens?: number } = {}): ChatMessage[] {
+  const system = systemPrompt(persona, fov);
+  if (!Number.isFinite(maxTokens) || maxTokens < 1024) throw new Error('PROMPT_BUDGET_INVALID');
+  const window = Number.isFinite(limits.contextWindowTokens) ? limits.contextWindowTokens! : 1000000;
+  const output = Number.isFinite(limits.maxOutputTokens) ? Math.max(0, limits.maxOutputTokens!) : 16384;
+  maxTokens = Math.min(maxTokens, window - output);
+  const ratio = Number.isFinite(limits.compactAtRatio) ? Math.max(0.25, Math.min(0.95, limits.compactAtRatio!)) : 0.75;
+  // Recall results and invalid-output feedback must fit without deleting the reason to replan.
+  const initialBudget = Math.min(Math.floor(maxTokens * ratio), maxTokens - Math.min(5000, Math.floor(maxTokens / 4)));
+  const images: NonNullable<ChatMessage['images']> = [];
+  if (visionInput && memory.dataDirectory && ctx.worldState) {
+    const root = path.resolve(memory.dataDirectory, 'building-views');
+    const works = buildingArchiveFor(memory).list().filter((p) => p.worldId === ctx.worldState!.worldId && p.dimension === ctx.worldState!.dim);
+    for (const view of works.flatMap((p) => p.views).slice(-2)) {
+      const file = view.observation?.pixelImage;
+      if (typeof file !== 'string') continue;
+      const resolved = path.resolve(file), relative = path.relative(root, resolved);
+      if (relative.startsWith('..') || path.isAbsolute(relative) || !fs.existsSync(resolved) || fs.statSync(resolved).size > 500_000) continue;
+      const bytes = fs.readFileSync(resolved);
+      if (bytes.subarray(1, 4).toString() === 'PNG') images.push({ url: `data:image/png;base64,${bytes.toString('base64')}`, detail: 'low' });
+    }
+  }
+  for (const memoryBytes of [8000, 4000, 1800, 0]) {
+    const messages: ChatMessage[] = [{ role: 'system', content: system }, { role: 'user', content: userPrompt(ctx, memory, undefined, memoryBytes), ...(images.length ? { images } : {}) }];
+    if (promptCost(messages) <= initialBudget) return messages;
+  }
+  const p = ctx.percept;
+  const compact: PlanContext = { ...ctx, percept: { ...p, inventory: p.inventory.slice(0, 16),
+    curiosities: p.curiosities.slice(0, 4), drives: p.drives.slice(0, 8),
+    nearby: { ...p.nearby, resources: p.nearby.resources.slice(0, 10) }, vision: p.vision ? { ...p.vision,
+      visible_resources: p.vision.visible_resources.slice(0, 10), remembered_resources: p.vision.remembered_resources.slice(0, 10),
+      seen_entities: p.vision.seen_entities.slice(0, 8), heard: p.vision.heard.slice(0, 8) } : null } };
+  for (const catalog of [skillCatalog(), briefCatalog(), briefCatalog(0)]) for (const level of [1, 2]) {
+    const messages: ChatMessage[] = [{ role: 'system', content: systemPrompt(persona, fov, catalog) }, { role: 'user', content: userPrompt(compact, memory, [], 0, level) }];
+    if (promptCost(messages) <= initialBudget) return messages;
+  }
+  return enforcePromptBudget([{ role: 'system', content: systemPrompt(persona, fov, briefCatalog()) },
+    { role: 'user', content: userPrompt(compact, memory, [], 0, 2) }], maxTokens);
 }

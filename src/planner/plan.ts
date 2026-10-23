@@ -5,6 +5,8 @@ import type { Percept } from '../perception/perception.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 import { shortId } from '../util.ts';
 import { computeDrives, stockOf, type Drive } from '../brain/drives.ts';
+import type { Binding } from '../projects/types.ts';
+import type { ValidatedIntentDecision } from '../intentions/decision.ts';
 
 export const GOAL_TYPES = ['explore', 'gather', 'craft', 'survive', 'investigate', 'rest', 'build'] as const;
 
@@ -19,6 +21,7 @@ export interface Plan {
   say?: string;
   abortIf: { hpBelow?: number; night?: boolean };
   memoryNote?: string;
+  lesson?: string;
   /** 长期目标（跨多个计划），LLM 可更新 */
   objective?: string;
   /** LLM 提议学习的新组合技能（原始 JSON，由技能库校验） */
@@ -28,6 +31,10 @@ export interface Plan {
   /** 请求原因（prefetch 表示在上一个任务完成前预先规划） */
   reason?: string;
   requestedAt?: number;
+  /** Assigned by Executive, never accepted from model JSON. */
+  binding?: Binding;
+  generation?: number;
+  decision?: ValidatedIntentDecision;
 }
 
 /** 从模型输出中提取 JSON（容忍 ```json 包裹或前后多余文字）。 */
@@ -52,7 +59,8 @@ export function validatePlan(raw: unknown, adapter: GameAdapter, source: Plan['s
   const o = raw as Record<string, any>;
   const goal = String(o.goal ?? '').trim();
   if (!goal) return { ok: false, error: '缺少 goal' };
-  if (!Array.isArray(o.steps) || o.steps.length < 1 || o.steps.length > 5) return { ok: false, error: 'steps 必须是 1-5 个元素的数组' };
+  const subjectiveEnd = ['defer', 'abandon', 'complete'].includes(o.decision?.kind);
+  if (!Array.isArray(o.steps) || o.steps.length < (subjectiveEnd ? 0 : 1) || o.steps.length > 5) return { ok: false, error: 'steps 必须是 1-5 个元素的数组（暂缓/结束可为空）' };
   const steps: Step[] = [];
   for (const [i, s] of o.steps.entries()) {
     const name = String(s?.skill ?? '');
@@ -76,6 +84,7 @@ export function validatePlan(raw: unknown, adapter: GameAdapter, source: Plan['s
       index: 0,
       say: o.say ? String(o.say).slice(0, 120) : undefined,
       abortIf: { hpBelow: Number.isFinite(hp) ? Math.max(1, Math.min(19, hp)) : undefined, night: ab.night === true },
+      lesson: o.lesson ? String(o.lesson).slice(0, 160) : undefined,
       memoryNote: o.memory_note ? String(o.memory_note).slice(0, 200) : undefined,
       objective: o.objective ? String(o.objective).slice(0, 120) : undefined,
       learnSkill: o.learn_skill && typeof o.learn_skill === 'object' ? o.learn_skill : undefined,

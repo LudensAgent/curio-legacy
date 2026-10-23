@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import type { ActionResult, AgentState, BlockHit, EntityInfo, Eye, GameAdapter, MoveOpts, MoveTarget, Optics, Vec3Like } from '../src/adapter/types.ts';
+import type { ActionResult, AgentState, BlockHit, BossDeathObservation, EntityInfo, Eye, GameAdapter, InvItem, MoveOpts, MoveTarget, Optics, Vec3Like } from '../src/adapter/types.ts';
 import { dist3, raceAbort, sleep, throwIfAborted } from '../src/util.ts';
 
 /** 离线测试用的模拟游戏：没有 Minecraft 也能验证仲裁、反射、规划与连贯性。 */
@@ -8,6 +8,16 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
   hp = 20;
   food = 20;
   connected = true;
+  observationReady = true;
+  worldId = 'fake-world';
+  sessionId = 'fake-session';
+  observationId = 0;
+  dim = 'overworld';
+  inLava = false;
+  blockProperties = new Map<string, Record<string, string | number | boolean>>();
+  equipped = new Map<string, string>();
+  portalDestinations = new Map<string, { dim: string; pos: Vec3Like; arrivalPortal?: boolean }>();
+  dragonDeath: BossDeathObservation | null = null;
   inv = new Map<string, number>();
   blocks: { name: string; pos: Vec3Like }[] = [];
   entities: EntityInfo[] = [];
@@ -65,9 +75,12 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
 
   state(): AgentState {
     return {
-      connected: this.connected, alive: this.hp > 0, username: 'FakeBot', pos: { ...this.pos }, dim: 'overworld',
+      connected: this.connected, alive: this.hp > 0, observationReady: this.observationReady && this.connected && this.hp > 0,
+      worldId: this.worldId, sessionId: this.sessionId, observationId: ++this.observationId,
+      username: 'FakeBot', pos: { ...this.pos }, dim: this.dim,
       hp: this.hp, food: this.food, oxygen: this.oxygen, timeOfDay: this.isDay ? 1000 : 15000, isDay: this.isDay, biome: 'plains', onGround: true,
-      inWater: this.inWater, inLava: false, inventory: [...this.inv].map(([name, count]) => ({ name, count })), emptySlots: 30, held: null,
+      inWater: this.inWater, inLava: this.inLava, inventory: [...this.inv].map(([name, count]) => ({ name, count })), emptySlots: 30, held: null,
+      equipment: [...this.equipped].map(([slot, name]) => ({ slot, name })),
     };
   }
   nearbyEntities(radius: number): EntityInfo[] {
@@ -84,6 +97,89 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
   blockAt(pos: Vec3Like) {
     return this.nameAt(pos.x, pos.y, pos.z);
   }
+  blockStateAt(pos: Vec3Like) {
+    return { name: this.blockAt(pos), properties: this.blockProperties.get(this.k(pos.x, pos.y, pos.z)) ?? {} };
+  }
+  async placeBlockStateAt(pos: Vec3Like, name: string, properties: Record<string, string | number | boolean>, signal: AbortSignal) {
+    throwIfAborted(signal);
+    const door = name.endsWith('_door'), stairs = name.endsWith('_stairs'), slab = name.endsWith('_slab'), bed = name.endsWith('_bed');
+    const direction: Record<string, Vec3Like> = { north: { x: 0, y: 0, z: -1 }, east: { x: 1, y: 0, z: 0 }, south: { x: 0, y: 0, z: 1 }, west: { x: -1, y: 0, z: 0 } };
+    if (!door && !stairs && !slab && !bed || door && properties.half !== 'lower' || stairs && (!['top', 'bottom'].includes(String(properties.half)) || String(properties.shape ?? 'straight') !== 'straight') || slab && !['top', 'bottom'].includes(String(properties.type)) || bed && (properties.part !== 'foot' || !(String(properties.facing) in direction))) return { ok: false, reason: 'UNSUPPORTED_BLOCK_STATE' };
+    const offset = bed ? direction[String(properties.facing)] : { x: 0, y: 1, z: 0 };
+    const paired = { x: pos.x + offset.x, y: pos.y + offset.y, z: pos.z + offset.z };
+    if (this.blockAt(pos) !== 'air' || (door || bed) && this.blockAt(paired) !== 'air') return { ok: false, reason: 'BLOCKED' };
+    if (bed && [pos, paired].some((p) => ['air', 'water', 'lava'].includes(this.blockAt({ ...p, y: p.y - 1 })))) return { ok: false, reason: 'NO_SUPPORT' };
+    const result = await this.placeBlockAt(pos, [name], signal);
+    throwIfAborted(signal);
+    if (result.ok) {
+      this.blockProperties.set(this.k(pos.x, pos.y, pos.z), { ...properties });
+      if (door || bed) {
+        this.blocks.push({ name, pos: paired });
+        this.blockProperties.set(this.k(paired.x, paired.y, paired.z), bed ? { ...properties, part: 'head', occupied: false } : { ...properties, half: 'upper' });
+      }
+    }
+    return result;
+  }
+  async equipItem(name: string, destination: 'hand' | 'off-hand' | 'head' | 'torso' | 'legs' | 'feet', signal: AbortSignal) {
+    throwIfAborted(signal);
+    if (!(this.inv.get(name) ?? 0)) return { ok: false, reason: 'NO_ITEM' };
+    this.equipped.set(destination, name);
+    this.actions.push(`equip:${name}:${destination}`);
+    return { ok: true };
+  }
+  private take(name: string, count: number) { this.inv.set(name, Math.max(0, (this.inv.get(name) ?? 0) - count)); }
+  async useBlockAt(pos: Vec3Like, item: string, signal: AbortSignal) {
+    throwIfAborted(signal);
+    if (item && !(this.inv.get(item) ?? 0)) return { ok: false, reason: 'NO_ITEM' };
+    await sleep(10, signal);
+    if (item === 'flint_and_steel' && this.blockAt(pos) === 'obsidian') {
+      this.blocks.push({ name: 'nether_portal', pos: { ...pos, y: pos.y + 1 } });
+    } else if (item === 'ender_eye' && this.blockAt(pos) === 'end_portal_frame') {
+      this.blockProperties.set(this.k(pos.x, pos.y, pos.z), { ...this.blockStateAt(pos).properties, eye: true });
+      this.take(item, 1);
+    } else if (item === '' && this.blockAt(pos).endsWith('_door')) {
+      const here = this.blockStateAt(pos);
+      const open = here.properties.open !== true;
+      const other = { ...pos, y: pos.y + (here.properties.half === 'upper' ? -1 : 1) };
+      for (const part of [pos, other]) if (this.blockAt(part) === here.name) this.blockProperties.set(this.k(part.x, part.y, part.z), { ...this.blockStateAt(part).properties, open });
+    }
+    this.actions.push(`useBlock:${item}`);
+    return { ok: true };
+  }
+  async useItem(item: string, signal: AbortSignal, opts: { chargeMs?: number } = {}) {
+    throwIfAborted(signal);
+    if (!(this.inv.get(item) ?? 0)) return { ok: false, reason: 'NO_ITEM' };
+    await sleep(opts.chargeMs ?? 0, signal);
+    this.actions.push(`use:${item}`);
+    return { ok: true };
+  }
+  async rangedAttack(entityId: number, signal: AbortSignal) {
+    throwIfAborted(signal);
+    if (!(this.inv.get('bow') ?? 0) || !(this.inv.get('arrow') ?? 0)) return { ok: false, reason: 'NO_BOW_OR_ARROWS' };
+    if (!this.entities.some((e) => e.id === entityId)) return { ok: false, reason: 'ENTITY_GONE' };
+    await sleep(10, signal);
+    this.take('arrow', 1);
+    this.actions.push(`ranged:${entityId}`);
+    return { ok: true };
+  }
+  bossStatus() { return { dragonDeath: this.dragonDeath && this.dragonDeath.worldId === this.worldId && this.dragonDeath.dim === this.dim && this.dragonDeath.sessionId === this.sessionId ? this.dragonDeath : null }; }
+  async enterPortalAt(pos: Vec3Like, signal: AbortSignal, expectedDim?: string) {
+    throwIfAborted(signal);
+    const from = this.state();
+    const kind = this.blockAt(pos);
+    if (!['nether_portal', 'end_portal'].includes(kind)) return { ok: false, reason: 'NO_PORTAL' };
+    const destination = this.portalDestinations.get(`${this.worldId}:${this.dim}:${this.k(pos.x, pos.y, pos.z)}`);
+    if (!destination) return { ok: false, reason: 'PORTAL_TRANSITION_TIMEOUT' };
+    await sleep(20, signal);
+    this.dim = destination.dim;
+    this.pos = { ...destination.pos };
+    this.sessionId = `${this.sessionId}-portal`;
+    this.observationReady = true;
+    if (destination.arrivalPortal !== false && this.blockAt(destination.pos) !== kind) this.blocks.push({ name: kind, pos: { ...destination.pos } });
+    this.actions.push(`portal:${from.dim}->${this.dim}`);
+    const to = this.state();
+    return expectedDim && to.dim !== expectedDim ? { ok: false, reason: 'WRONG_DIMENSION', from, to } : { ok: true, from, to };
+  }
   resolveBlockNames(q: string) {
     if (q === 'log') return ['oak_log'];
     if (q === 'stone') return ['stone'];
@@ -96,7 +192,7 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
     throwIfAborted(o.signal);
     this.actions.push(`moveTo:${t.kind}`);
     let dest: Vec3Like = this.pos;
-    if (t.kind === 'near' || t.kind === 'reach_block') dest = t.pos;
+    if (t.kind === 'near' || t.kind === 'reach_block' || t.kind === 'place_block') dest = t.pos;
     else if (t.kind === 'xz') dest = { x: t.x, y: this.pos.y, z: t.z };
     else if (t.kind === 'away_from') dest = { x: this.pos.x + t.distance, y: this.pos.y, z: this.pos.z };
     else if (t.kind === 'follow_entity') {
@@ -178,6 +274,7 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
   }
   isDay = true;
   async sleepInBed(signal: AbortSignal) {
+    if (this.dim !== 'overworld') return { ok: false, reason: 'WRONG_DIMENSION' };
     if (![...this.inv.keys()].some((n) => n.endsWith('_bed') && (this.inv.get(n) ?? 0) > 0)) return { ok: false, reason: 'NO_BED' };
     if (this.isDay) return { ok: false, reason: "it's not night" };
     await sleep(200, signal);
@@ -205,6 +302,14 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
   async jump(ms: number, signal: AbortSignal) {
     await sleep(ms, signal);
     if (this.inWater) this.oxygen = Math.min(20, this.oxygen + 6); // 浮上水面换气
+  }
+  async swimTo(target: Vec3Like | null, signal: AbortSignal, _opts?: { timeoutMs?: number }) {
+    throwIfAborted(signal);
+    this.actions.push(`swim:${target ? `${target.x},${target.y},${target.z}` : 'up'}`);
+    await sleep(10, signal);
+    this.oxygen = 20;
+    if (target) { this.pos = { ...target }; this.inWater = false; }
+    return { ok: !this.inWater, landed: !this.inWater, oxygen: this.oxygen, ...(!target && this.inWater ? { reason: 'WATER_ESCAPE_TIMEOUT' } : {}) };
   }
   chat(text: string) {
     this.actions.push(`chat:${text}`);

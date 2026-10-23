@@ -1,4 +1,4 @@
-import type { BlockHit, EntityInfo, GameAdapter } from '../adapter/types.ts';
+import type { BlockHit, EntityInfo, GameAdapter, Vec3Like } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
 
@@ -36,6 +36,7 @@ export interface Senses {
   /** 立即重新看一眼（转头之后调用） */
   refresh(): void;
   markSweep(): void;
+  nearestLand?(here: Vec3Like, excluded?: Vec3Like[]): { dir: string; dist: number; pos: Vec3Like } | null;
 }
 
 export interface SkillCtx {
@@ -61,6 +62,8 @@ export interface Skill<A = any> {
   timeoutMs: number;
   /** 是否属于移动型技能（用于卡死检测） */
   movement: boolean;
+  /** Knowledge/archive queries do not count as failed physical project attempts. */
+  readOnly?: boolean;
   validate(raw: unknown, adapter: GameAdapter): Validation<A>;
   run(ctx: SkillCtx, args: A): Promise<SkillResult>;
 }

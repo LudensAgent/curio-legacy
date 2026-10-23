@@ -4,7 +4,7 @@ import { clampInt, fail, isAbort, obj, ok, type Skill } from './types.ts';
 // ------------------------------------------------------------------ flee
 export const flee: Skill<{ distance: number }> = {
   name: 'flee',
-  description: '远离附近的敌对生物',
+  description: '远离附近的敌对生物，或撤离岩浆等环境危险',
   argsDoc: '{"distance"?: 8-32}',
   timeoutMs: 15000,
   movement: true,
@@ -13,6 +13,20 @@ export const flee: Skill<{ distance: number }> = {
   },
   async run(ctx, args) {
     const hostiles = ctx.senses.perceivedEntities(16).filter((e) => e.kind === 'hostile');
+    const state = ctx.adapter.state();
+    if (!hostiles.length && state.inLava) {
+      const land = ctx.senses.nearestLand?.(state.pos);
+      try {
+        if (land) await ctx.adapter.moveTo({ kind: 'near', pos: { ...land.pos, y: land.pos.y + 1 }, range: 1 }, { signal: ctx.signal, timeoutMs: Math.max(1000, ctx.deadline - Date.now()) });
+        else {
+          // With no remembered shore, actively try to climb out and move away
+          // from the hazard origin. Returning success here would strand the bot.
+          await ctx.adapter.jump(500, ctx.signal);
+          await ctx.adapter.moveTo({ kind: 'xz', x: state.pos.x + args.distance, z: state.pos.z, range: 1 }, { signal: ctx.signal, timeoutMs: Math.max(1000, ctx.deadline - Date.now()) });
+        }
+      } catch (e) { if (isAbort(e)) throw e; }
+      return ctx.adapter.state().inLava ? fail('STUCK', '仍在岩浆中，未能脱离环境危险') : ok('已撤离岩浆');
+    }
     if (!hostiles.length) return ok('附近没有威胁');
     const c = hostiles.reduce((a, e) => ({ x: a.x + e.pos.x / hostiles.length, y: a.y + e.pos.y / hostiles.length, z: a.z + e.pos.z / hostiles.length }), { x: 0, y: 0, z: 0 });
     try {
@@ -21,6 +35,7 @@ export const flee: Skill<{ distance: number }> = {
       if (isAbort(e)) throw e;
     }
     ctx.senses.refresh();
+    if (ctx.adapter.state().inLava) return fail('STUCK', '仍在岩浆中，环境危险尚未解除');
     const left = ctx.senses.perceivedEntities(10).filter((e) => e.kind === 'hostile').length;
     return ok(left ? `撤离中，附近仍有 ${left} 个敌对生物` : `已远离 ${hostiles.map((h) => h.name).join('、')}`);
   },

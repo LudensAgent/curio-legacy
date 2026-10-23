@@ -33,6 +33,7 @@ export class Metrics {
     deaths: 0,
     plansLlm: 0,
     plansRule: 0,
+    intentions: { continued: 0, changed: 0, deferred: 0, abandoned: 0, subjectiveEnded: 0 },
   };
 
   constructor(
@@ -65,6 +66,14 @@ export class Metrics {
       else if (d.status === 'failed') this.counters.goals.failed++;
       else this.counters.goals.other++;
     } else if (ev.type === 'discovery') this.counters.discoveries++;
+    else if (ev.type === 'intent_decision') {
+      const kind = (d.decision as { kind?: string } | undefined)?.kind;
+      if (kind === 'continue') this.counters.intentions.continued++;
+      else if (kind === 'revise' || kind === 'change_method') this.counters.intentions.changed++;
+      else if (kind === 'defer') this.counters.intentions.deferred++;
+      else if (kind === 'abandon') this.counters.intentions.abandoned++;
+      else if (kind === 'complete') this.counters.intentions.subjectiveEnded++;
+    }
     else if (ev.type === 'death') this.counters.deaths++;
     else if (ev.type === 'plan') {
       if (String(ev.msg).startsWith('[rule]')) this.counters.plansRule++;
@@ -116,6 +125,8 @@ export class Metrics {
       plans: { llm: this.counters.plansLlm, rule: this.counters.plansRule },
       discoveries: this.counters.discoveries,
       deaths: this.counters.deaths,
+      intentions: this.counters.intentions,
+      staleDecisionsDropped: this.executive.staleDropped,
       distance: Math.round(this.distance),
       stuck: this.reflex.stuckCount,
       reflexTriggers: this.reflex.triggers,

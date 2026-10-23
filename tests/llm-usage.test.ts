@@ -37,7 +37,7 @@ function fixture(responses: (Completion | Error)[], maxCallsPerHour = 1000) {
       return next;
     },
   };
-  const cfg = { ...config, llm: { ...config.llm, maxCallsPerHour, timeoutMs: 1000, fakeDelayMs: 0 } };
+  const cfg = { ...config, llm: { ...config.llm, provider: 'mock' as const, maxCallsPerHour, timeoutMs: 1000, fakeDelayMs: 0 } };
   const planner = new Planner(cfg, provider, new FakeAdapter(), new WorldMemory(null), new EventBus(), null);
   return { planner, pending };
 }

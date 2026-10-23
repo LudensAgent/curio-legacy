@@ -94,15 +94,19 @@
   </section>
 
   <section>
-    <h2>当前目标与思考</h2>
-    <div class="row"><span>长期目标</span><span id="objective" class="mono" style="text-align:right">-</span></div>
+    <h2>兴趣、意图与实际进展</h2>
+    <div class="row"><span>当前意图</span><span id="objective" class="mono" style="text-align:right">-</span></div>
+    <div class="thought" id="intentwhy"></div>
+    <div class="row"><span>最近选择</span><span id="decision" style="text-align:right">-</span></div>
+    <div class="row"><span>事实进展</span><span id="project" class="mono" style="text-align:right">-</span></div>
+    <div class="thought" id="evidence"></div>
     <div class="goal" id="goal">—</div>
     <div class="thought" id="thought"></div>
     <ol class="steps" id="steps"></ol>
     <div class="row" style="margin-top:10px"><span>LLM</span><span id="llmstate" class="mono">-</span></div>
     <div class="row"><span>已排队计划</span><span id="queued" class="mono">-</span></div>
     <div class="row"><span>上次失败</span><span id="lastfail" class="mono">-</span></div>
-    <div class="sub">游玩欲望</div>
+    <div class="sub">可权衡的兴趣信号</div>
     <ul class="plain" id="drives"></ul>
   </section>
 
@@ -239,7 +243,14 @@ function render(s) {
   const since = m.llm.inFlightSince ? ((s.now - m.llm.inFlightSince) / 1000).toFixed(1) + 's' : '';
   $('llmstate').textContent = ex.llmInFlight ? `思考中（${ex.llmReason}）${since}` : ex.backoffMs ? `冷却 ${Math.round(ex.backoffMs / 1000)}s` : '空闲';
   $('queued').textContent = ex.queued ? ex.queued.goal : '-';
-  $('objective').textContent = s.memory.objective?.text ?? '（尚未设定）';
+  const autonomy = ex.autonomy || {}, interest = autonomy.intent, project = autonomy.project;
+  const decision = (s.memory.decisions || []).at(-1);
+  $('objective').textContent = interest?.text ?? '（等待自己的想法）';
+  $('intentwhy').textContent = interest?.whyNow ?? '';
+  $('decision').textContent = decision ? `${decision.kind}：${decision.reason}` : '尚无选择记录';
+  $('project').textContent = project ? `${project.title} · ${project.status} · ${project.currentMilestone}/${project.milestones.length} · 修订 ${project.revision}` : '开放兴趣，无需工程';
+  const latestEvidence = (autonomy.evidence || []).at(-1);
+  $('evidence').textContent = latestEvidence ? `${latestEvidence.status} · ${JSON.stringify(latestEvidence.actual)}${latestEvidence.reason ? ' · ' + latestEvidence.reason : ''}` : '';
   $('drives').innerHTML = (p.drives || []).slice(0, 5).map((d) => `<li title="${esc(d.why)}">${'▮'.repeat(Math.max(1, Math.round(d.level * 10)))} ${d.drive} · ${esc(d.suggest)}</li>`).join('') || '<li>—</li>';
   $('skills').innerHTML = (s.memory.skills || []).map((k) => `<li>macro:${esc(k.name)} · ${esc(k.description)}</li>`).join('') || '<li>—</li>';
   $('lastfail').textContent = ex.lastFailure ? `${ex.lastFailure.skill}: ${ex.lastFailure.code ?? ''} ${ex.lastFailure.summary}` : '-';

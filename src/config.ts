@@ -45,8 +45,16 @@ export const config = {
     model: str('LLM_MODEL', 'gpt-4o-mini'),
     temperature: num('LLM_TEMPERATURE', 0.7),
     jsonMode: bool('LLM_JSON_MODE', true),
-    timeoutMs: num('LLM_TIMEOUT_MS', 45000),
-    maxTokens: num('LLM_MAX_TOKENS', 4096),
+    timeoutMs: num('LLM_TIMEOUT_MS', 120000),
+    maxTokens: num('LLM_MAX_TOKENS', 16384),
+    /** Conservative serialized prompt budget, checked after memory/tool/retry messages. */
+    maxPromptTokens: num('LLM_MAX_PROMPT_TOKENS', 128000),
+    /** Soft compaction starts before either the input budget or model context is full. */
+    contextWindowTokens: num('LLM_CONTEXT_WINDOW_TOKENS', 1000000),
+    compactAtRatio: num('LLM_COMPACT_AT_RATIO', 0.75),
+    maxRecallRounds: num('LLM_MAX_RECALL_ROUNDS', 2),
+    /** Enable only for a configured model that accepts image_url inputs. */
+    visionInput: bool('LLM_VISION_INPUT', false),
     maxCallsPerHour: num('LLM_MAX_CALLS_PER_HOUR', 90),
     fakeDelayMs: num('LLM_FAKE_DELAY_MS', 0),
   },
@@ -55,6 +63,10 @@ export const config = {
     '你叫 Curio，一个好奇、谨慎、喜欢记录新发现的 Minecraft 探险家。',
   ),
   memory: memorySettings(),
+  learning: {
+    /** Only explicitly designated isolated worlds may provide candidate promotion evidence. */
+    testWorldIds: str('LEARNING_TEST_WORLD_IDS').split(',').map((s) => s.trim()).filter(Boolean),
+  },
   dashboard: {
     host: str('DASHBOARD_HOST', '127.0.0.1'),
     port: num('DASHBOARD_PORT', 3000),
@@ -73,6 +85,7 @@ export const config = {
   /** Curio Observer 模组数据流（/api/observer/stream）。合成节奏由 UI_PACING_MS 等环境变量控制 */
   observerFeed: bool('OBSERVER_FEED', true),
   viewerPort: num('VIEWER_PORT', 0),
+  actionChat: { enabled: bool('CHAT_ACTIONS', true), minIntervalMs: num('CHAT_ACTION_INTERVAL_MS', 1800) },
   dataDir: path.resolve(str('DATA_DIR', './data')),
 };
 

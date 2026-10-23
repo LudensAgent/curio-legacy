@@ -4,7 +4,12 @@ import { sleep } from '../util.ts';
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
+  images?: { url: string; detail?: 'low' | 'high' | 'auto' }[];
 }
+
+const apiMessages = (messages: ChatMessage[]) => messages.map((m) => ({ role: m.role, content: m.images?.length
+  ? [{ type: 'text', text: m.content }, ...m.images.map((image) => ({ type: 'image_url', image_url: image }))]
+  : m.content }));
 
 export interface Completion {
   text: string;
@@ -21,7 +26,7 @@ export interface LlmProvider {
 /** 任何 OpenAI 兼容的 /chat/completions 接口：OpenAI、DeepSeek、通义、智谱、Ollama、LM Studio、vLLM… */
 export class OpenAICompatibleProvider implements LlmProvider {
   readonly name: string;
-  constructor(private cfg: Config['llm']) {
+  constructor(private cfg: Omit<Config['llm'], 'maxPromptTokens' | 'maxRecallRounds' | 'visionInput' | 'contextWindowTokens' | 'compactAtRatio'>) {
     this.name = `openai-compatible:${cfg.model}`;
   }
 
@@ -30,7 +35,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
     if (this.cfg.fakeDelayMs > 0) await sleep(this.cfg.fakeDelayMs, signal);
     const body: Record<string, unknown> = {
       model: this.cfg.model,
-      messages,
+      messages: apiMessages(messages),
       temperature: this.cfg.temperature,
       // 推理型模型（如 deepseek-flash）会把思考过程也算进 max_tokens，太小会导致正文为空或被截断
       max_tokens: this.cfg.maxTokens,

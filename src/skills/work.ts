@@ -1,4 +1,6 @@
 import { codeFromError, clampInt, fail, isAbort, obj, ok, type Skill } from './types.ts';
+import { craftReservationConflict } from '../projects/reservations.ts';
+import { config } from '../config.ts';
 
 const key = (p: { x: number; y: number; z: number }) => `${p.x},${p.y},${p.z}`;
 
@@ -111,6 +113,8 @@ export const craft: Skill<{ item: string; count: number }> = {
   async run(ctx, args) {
     try {
       const table = ctx.senses.knownBlocks(['crafting_table'], 32)[0];
+      const conflict = craftReservationConflict(ctx.memory, ctx.adapter.state(), args.item, args.count, config.mc.version, !!table);
+      if (conflict) return fail('MISSING_MATERIALS', `预留保护：${conflict.reason}`, { conflict });
       const r = await ctx.adapter.craft(args.item, args.count, ctx.signal, { tablePos: table?.pos });
       if (!r.ok) return fail((r.reason as any) ?? 'ERROR', `无法合成 ${args.item}：${r.reason}`);
       return ok(`合成了 ${r.crafted} 个 ${args.item}`, { crafted: r.crafted });

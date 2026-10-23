@@ -86,7 +86,7 @@ export const goTo: Skill<{ target: string }> = {
       pos = d.pos;
       label = '死亡地点';
     } else {
-      const lm = memory.findLandmark(args.target);
+      const lm = memory.findLandmark(args.target, s.dim);
       if (!lm) return fail('NOT_FOUND', `找不到地标：${args.target}`);
       if (lm.dim !== s.dim) return fail('WRONG_DIMENSION', `地标 ${lm.label} 在 ${lm.dim}`);
       pos = lm.pos;
@@ -95,7 +95,9 @@ export const goTo: Skill<{ target: string }> = {
     const startDist = dist3(s.pos, pos);
     const prog = setInterval(() => ctx.progress(1 - Math.min(1, dist3(adapter.state().pos, pos!) / Math.max(1, startDist))), 1000);
     try {
+      if (adapter.state().dim !== s.dim || adapter.state().worldId !== s.worldId) return fail('WRONG_DIMENSION', '途中世界或维度已改变，需要重新规划');
       await adapter.moveTo({ kind: 'near', pos, range: 2 }, { signal, timeoutMs: Math.max(5000, ctx.deadline - Date.now()) });
+      if (adapter.state().dim !== s.dim || adapter.state().worldId !== s.worldId) return fail('WRONG_DIMENSION', '途中世界或维度已改变，需要重新规划');
       return ok(`到达 ${label}`);
     } catch (e) {
       if (isAbort(e)) throw e;
@@ -170,8 +172,9 @@ export const unstuck: Skill<{}> = {
     return { ok: true, args: {} };
   },
   async run(ctx) {
-    // 在水里时先长按跳跃浮上水面
-    await ctx.adapter.jump(ctx.adapter.state().inWater ? 1500 : 600, ctx.signal);
+    // Random horizontal pathfinding can sink back into the same water trap.
+    if (ctx.adapter.state().inWater) return surface.run(ctx, {});
+    await ctx.adapter.jump(600, ctx.signal);
     const s = ctx.adapter.state();
     const ang = Math.random() * Math.PI * 2;
     try {
@@ -186,22 +189,45 @@ export const unstuck: Skill<{}> = {
 // ------------------------------------------------------------------ surface（仅反射层使用：防溺水）
 export const surface: Skill<{}> = {
   name: 'surface',
-  description: '溺水风险时长按跳跃浮上水面换气',
+  description: '溺水时持续上浮并朝看见的岸边游动，确认站稳干地后结束',
   argsDoc: '{}',
-  timeoutMs: 15000,
-  movement: false,
+  timeoutMs: 35000,
+  movement: true,
   validate() {
     return { ok: true, args: {} };
   },
   async run(ctx) {
-    const end = Date.now() + 12000;
+    const end = Math.min(ctx.deadline, Date.now() + 32000);
+    const excluded: { x: number; y: number; z: number }[] = [];
+    let attempts = 0, scans = 0;
+    if (!ctx.adapter.swimTo) return fail('STUCK', '当前适配器缺少持续游泳控制，不能确认已安全上岸');
     while (Date.now() < end) {
-      const s = ctx.adapter.state();
-      if (!s.inWater) break; // 已经不在水里
-      if (s.oxygen >= 18) break;
-      await ctx.adapter.jump(500, ctx.signal);
+      ctx.signal.throwIfAborted();
+      ctx.senses.refresh();
+      const before = ctx.adapter.state();
+      let land = ctx.senses.nearestLand?.(before.pos, excluded);
+      const target = land ? { x: land.pos.x + 0.5, y: land.pos.y + 1, z: land.pos.z + 0.5 } : null;
+      ctx.progress(0, land ? `保持上浮，向 ${land.dir} 岸边游动（${land.dist} 格）` : '保持上浮并寻找实际可站立的岸边');
+      const result = await ctx.adapter.swimTo(target, ctx.signal, { timeoutMs: Math.min(land ? 8000 : 10000, end - Date.now()), observeShore: () => {
+        ctx.senses.refresh();
+        land = ctx.senses.nearestLand?.(ctx.adapter.state().pos, excluded);
+        return land ? { x: land.pos.x + 0.5, y: land.pos.y + 1, z: land.pos.z + 0.5 } : null;
+      } });
+      const after = ctx.adapter.state();
+      if (result.ok && result.landed && !after.inWater && after.onGround && after.oxygen >= 18) {
+        return ok(`已游上岸并站稳，氧气 ${after.oxygen}/20`, { attempts, landed: true, pos: after.pos });
+      }
+      if (land) {
+        attempts++;
+        excluded.push(land.pos);
+      } else {
+        // The continuous primitive already turns while afloat. A new bounded
+        // observation period can continue without inventing a destination.
+        scans++;
+      }
+      if (attempts >= 4 || scans >= 8) break;
     }
     const s = ctx.adapter.state();
-    return !s.inWater || s.oxygen >= 15 ? ok(`浮上水面，氧气 ${s.oxygen}/20`) : fail('STUCK', `仍在水下，氧气 ${s.oxygen}/20`);
+    return fail('STUCK', `尚未确认安全上岸，氧气 ${s.oxygen}/20${s.inWater ? '，仍在水中' : '，尚未站稳干地'}`, { attempts, landed: false, pos: s.pos });
   },
 };

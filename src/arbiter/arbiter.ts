@@ -5,6 +5,8 @@ import type { WorldMemory } from '../memory/store.ts';
 import { SKILLS } from '../skills/index.ts';
 import type { FailureCode, Senses, SkillResult } from '../skills/types.ts';
 import { AbortedError, shortId } from '../util.ts';
+import { availableInventoryFor, craftReservationConflict, reservationsFor } from '../projects/reservations.ts';
+import { config } from '../config.ts';
 
 export type TaskSource = 'llm' | 'rule' | 'filler' | 'reflex' | 'user';
 
@@ -42,8 +44,9 @@ interface Running extends TaskInfo {
 
 /** 会修改游戏世界或角色状态的方法：任务被取消后，旧任务再调用这些方法会被拦截。 */
 /** 会“透视”的原始查询：技能必须改用 ctx.senses（看见/听见/记得的东西）。 */
-const XRAY_METHODS = new Set(['findBlocks', 'nearbyEntities', 'blockOptics', 'lightAt']);
-const ACTION_METHODS = new Set(['moveTo', 'dig', 'collectNearbyDrops', 'craft', 'eat', 'equipWeapon', 'attack', 'look', 'jump', 'chat']);
+// lightAt 不在其中：身边的明暗是看得出来的
+const XRAY_METHODS = new Set(['findBlocks', 'nearbyEntities', 'blockOptics']);
+const ACTION_METHODS = new Set(['moveTo', 'dig', 'placeBlockAt', 'placeBlockStateAt', 'equipItem', 'useBlockAt', 'useItem', 'rangedAttack', 'enterPortalAt', 'collectNearbyDrops', 'craft', 'sleepInBed', 'smelt', 'useChest', 'till', 'plant', 'eat', 'equipWeapon', 'attack', 'look', 'jump', 'swimTo', 'chat', 'stopAll']);
 
 /**
  * 动作仲裁器：任意时刻只有一个任务拥有角色控制权。
@@ -55,6 +58,17 @@ export class Arbiter extends EventEmitter {
   current: Running | null = null;
   private version = 0;
   blockedActions = 0;
+  private pausedFlag = false;
+
+  get paused() { return this.pausedFlag; }
+
+  setPaused(paused: boolean) {
+    this.pausedFlag = paused;
+    if (paused) {
+      this.cancel('paused');
+      this.adapter.stopAll();
+    }
+  }
 
   constructor(private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private senses: Senses) {
     super();
@@ -78,6 +92,7 @@ export class Arbiter extends EventEmitter {
 
   private guard(signal: AbortSignal): GameAdapter {
     const target = this.adapter as any;
+    const origin = this.adapter.state();
     return new Proxy(target, {
       get: (t, prop, recv) => {
         const v = Reflect.get(t, prop, recv);
@@ -89,11 +104,52 @@ export class Arbiter extends EventEmitter {
         }
         if (ACTION_METHODS.has(String(prop))) {
           return (...args: unknown[]) => {
-            if (signal.aborted) {
+            const state = this.adapter.state();
+            if (signal.aborted || this.pausedFlag || this.current?.controller.signal !== signal || !state.observationReady || state.worldId !== origin.worldId || state.dim !== origin.dim || state.sessionId !== origin.sessionId) {
               this.blockedActions++;
               this.bus.publish('blocked_action', 'P1', `已取消任务试图调用 ${String(prop)}，已拦截`);
               throw new AbortedError('task cancelled');
             }
+            if (this.current?.source !== 'reflex' && reservationsFor(this.memory).list(state.worldId).length) {
+              const available = new Map(availableInventoryFor(this.memory, state).map((i) => [i.name, i.count]));
+              const requireAvailable = (name: string, count: number) => {
+                if (count > (available.get(name) ?? 0)) throw new Error(`RESERVED_MATERIALS:${name}：该动作会消耗其他项目的预留`);
+              };
+              if (prop === 'craft') {
+                const conflict = craftReservationConflict(this.memory, state, String(args[0]), Number(args[1]), config.mc.version);
+                if (conflict) throw new Error(`RESERVED_MATERIALS:${conflict.item}：${conflict.reason}`);
+              } else if (prop === 'placeBlockAt') {
+                const allowed = (args[1] as string[]).filter((name) => (available.get(name) ?? 0) > 0);
+                if (!allowed.length) throw new Error('RESERVED_MATERIALS:没有可用于放置的未预留方块');
+                args[1] = allowed;
+              } else if (prop === 'placeBlockStateAt' || prop === 'plant') requireAvailable(String(args[1]), 1);
+              else if (prop === 'useChest') for (const item of args[1] as { name: string; count: number }[]) requireAvailable(item.name, item.count);
+              else if (prop === 'smelt') {
+                const input = String(args[0]), amount = Number(args[1]), fuel = String(args[2]);
+                requireAvailable(input, amount);
+                const per = /coal$|charcoal/.test(fuel) ? 8 : /_planks$|_log$/.test(fuel) ? 1.5 : fuel === 'stick' ? 0.5 : 1;
+                const fuelHeld = state.inventory.find((i) => i.name === fuel)?.count ?? 0;
+                requireAvailable(fuel, Math.min(fuelHeld, Math.ceil(amount / per)));
+                const furnaceKnown = this.senses.knownBlocks(['furnace', 'blast_furnace', 'smoker'], 5).length > 0;
+                if (!furnaceKnown) {
+                  if (state.inventory.some((i) => i.name === 'furnace' && i.count > 0)) requireAvailable('furnace', 1);
+                  else {
+                    const conflict = craftReservationConflict(this.memory, state, 'furnace', 1, config.mc.version);
+                    if (conflict) throw new Error(`RESERVED_MATERIALS:${conflict.item}：自动准备熔炉会消耗预留`);
+                  }
+                }
+              } else if (prop === 'sleepInBed') {
+                const beds = state.inventory.filter((i) => i.name.endsWith('_bed') && i.count > 0);
+                const known = this.senses.knownBlocks(beds.map((i) => i.name), 5);
+                if (!known.length && beds.length) requireAvailable(beds[0].name, 1);
+              }
+              else if (prop === 'useItem' && ['ender_pearl', 'ender_eye'].includes(String(args[0]))) requireAvailable(String(args[0]), 1);
+            }
+            // These older primitives did not expose a signal. Bind task ownership
+            // here so their internal post-await checks also observe cancellation.
+              const signalIndex: Record<string, number> = { dig: 1, placeBlockAt: 2, placeBlockStateAt: 3, equipItem: 2, useBlockAt: 2, useItem: 1, rangedAttack: 1, enterPortalAt: 1, collectNearbyDrops: 0, craft: 2, sleepInBed: 0, smelt: 3, useChest: 3, till: 1, plant: 2, eat: 0, equipWeapon: 0, attack: 1, look: 2, jump: 1, swimTo: 1 };
+            if (prop === 'moveTo') args[1] = { ...(args[1] as object), signal };
+            else if (String(prop) in signalIndex) args[signalIndex[String(prop)]] = signal;
             return v.apply(t, args);
           };
         }
@@ -106,7 +162,8 @@ export class Arbiter extends EventEmitter {
    * 启动一个任务。若已有任务在运行，会先抢占（取消）它。
    * 返回 null 表示参数校验失败。
    */
-  start(step: Step, source: TaskSource, meta: { planId?: string } = {}): TaskInfo | { error: string } {
+  start(step: Step, source: TaskSource, meta: { planId?: string; gentle?: boolean } = {}): TaskInfo | { error: string } {
+    if (this.pausedFlag) return { error: 'Agent 已暂停' };
     const v = this.validate(step);
     if (!v.ok) {
       this.bus.publish('task_rejected', 'P1', `${step.skill} 参数无效：${v.error}`, { step, source });
@@ -135,6 +192,9 @@ export class Arbiter extends EventEmitter {
     this.bus.publish('task_start', source === 'filler' ? 'P3' : 'P2', `[${source}] ${skill.name} ${JSON.stringify(v.args)}`, {
       taskId: task.id,
       planVersion: task.planVersion,
+      skill: task.skill,
+      args: task.args,
+      source,
     });
 
     const timeout = setTimeout(() => controller.abort('TIMEOUT'), skill.timeoutMs + 2000);
@@ -182,6 +242,9 @@ export class Arbiter extends EventEmitter {
           durationMs,
           status: result.status,
           failureCode: result.failureCode,
+          skill: task.skill,
+          summary: result.summary,
+          source,
         });
         const { controller: _c, cancelCode: _cc, preemptedBy, ...info } = task;
         this.emit('done', { task: info, result, durationMs, preemptedBy } satisfies TaskOutcome);

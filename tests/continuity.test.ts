@@ -25,7 +25,7 @@ function world(provider: (p: (hint: any) => Record<string, unknown>) => LlmProvi
   const vision = new Vision(adapter);
   const arbiter = new Arbiter(adapter, memory, bus, vision);
   const perception = new Perception(adapter, memory, bus, vision);
-  const cfg = { ...config, llm: { ...config.llm, maxCallsPerHour: 1000, timeoutMs: 10000, fakeDelayMs: 0 } };
+  const cfg = { ...config, llm: { ...config.llm, provider: 'mock' as const, maxCallsPerHour: 1000, timeoutMs: 10000, fakeDelayMs: 0 } };
   const planner = new Planner(cfg, provider((hint: any) => ruleProposal(hint.percept, memory, hint.reason === 'prefetch' ? hint.current : null)), adapter, memory, bus, null);
   const executive = new Executive({ adapter, arbiter, planner, perception, memory, bus });
   const reflex = new Reflex(adapter, arbiter, bus, vision);
