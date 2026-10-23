@@ -280,7 +280,7 @@ function render(s) {
   $('llm').textContent = `${s.config.llm}${s.config.fakeDelayMs ? ` · 注入 ${s.config.fakeDelayMs}ms` : ''}`;
   const usage = m.llm.tokenUsage;
   $('llmUsage').textContent = usage
-    ? `启动累计 ${usage.totalTokens.toLocaleString()} tokens · 输入 ${usage.promptTokens.toLocaleString()} / 输出 ${usage.completionTokens.toLocaleString()}${usage.unreportedCalls ? ` · ${usage.unreportedCalls.toLocaleString()} 次用量不完整` : ''}`
+    ? `启动累计 ${usage.totalTokens.toLocaleString()} tokens · 输入 ${usage.promptTokens.toLocaleString()} / 输出 ${usage.completionTokens.toLocaleString()}${usage.cachedPromptTokens != null && usage.promptTokens ? ` · 缓存命中 ${Math.round(usage.cachedPromptTokens / usage.promptTokens * 100)}%` : ''}${usage.unreportedCalls ? ` · ${usage.unreportedCalls.toLocaleString()} 次用量不完整` : ''}`
     : '启动累计用量暂不可用';
   $('spec').textContent = s.spectator.enabled ? `旁观 ${s.config.observer} · ${s.spectator.rconOk ? 'RCON ✓' : 'RCON ✗'}` : '旁观未启用';
   $('spec').className = 'pill ' + (!s.spectator.enabled ? 'warn' : s.spectator.rconOk ? 'on' : 'off');
@@ -335,6 +335,8 @@ function render(s) {
     `运行 ${Math.floor(m.uptimeSec / 60)}m · 移动 ${m.distance} 格 · 发现 ${m.discoveries} · 死亡 ${m.deaths}`,
     `任务 ✓${m.tasks.succeeded} ✗${m.tasks.failed} ⊘${m.tasks.cancelled} · ${ex.mode === 'autonomous' ? `尝试 ✓${m.attempts?.succeeded ?? 0} ✗${m.attempts?.failed ?? 0} · 已验收目标 ${m.goals.succeeded}` : `目标 ✓${m.goals.succeeded} ✗${m.goals.failed}`}`,
     `计划 LLM ${m.plans.llm} / 规则 ${m.plans.rule} · LLM 调用 ${m.llm.calls}（错误 ${m.llm.errors}，无效 ${m.llm.invalid}，近 1h ${m.llm.callsLastHour}/${m.llm.maxCallsPerHour}）`,
+    m.llm.tiers ? (() => { const avg = (x) => x && x.n ? (x.sum / x.n / 1000).toFixed(1) + 's' : '-'; const L = m.llm.tierLatency || {};
+      return `小决策 ${m.llm.tiers.light}（升级 ${m.llm.tiers.escalated}）平均 ${avg(L.light)} · 完整决策 ${m.llm.tiers.full} 平均 ${avg(L.full)}`; })() : '',
     `卡死 ${m.stuck} · 反射触发 ${m.reflexTriggers} · 拦截残留动作 ${m.blockedActions}`,
     Object.keys(m.failCodes).length ? `失败码 ${esc(JSON.stringify(m.failCodes))}` : '',
   ].filter(Boolean).join('<br>');
@@ -448,7 +450,8 @@ loadScript('/vendor/gridstack/gridstack-all.js')
 // ------------------------------------------------------------ LLM 调用流
 const calls = new Map(); // id → call
 let selected = null;
-const REASON_ZH = { no_goal: '无目标', prefetch: '预规划', stale_prefetch: '预规划过时', user_suggestion: '玩家建议', manual_replan: '手动重规划', check: '检查' };
+const REASON_ZH = { no_goal: '无目标', prefetch: '预规划', stale_prefetch: '预规划过时', user_suggestion: '玩家建议', manual_replan: '手动重规划', failure: '失败后重想', project_blocked: '项目受阻', check: '检查' };
+const reasonLabel = (r) => { const [a, b] = String(r ?? '').split('·'); return (REASON_ZH[a] || a) + (b ? ` · ${b}` : ''); };
 const fmtS = (ms) => (ms == null ? '' : (ms / 1000).toFixed(1) + 's');
 function pretty(text) {
   const t = String(text ?? '');
@@ -458,7 +461,7 @@ function pretty(text) {
 function callRow(c) {
   const u = c.usage || {};
   const tok = u.total_tokens ? ` · ${u.prompt_tokens}+${u.completion_tokens} tok` : '';
-  return `<span class="st-${c.status}"></span><span>${esc(REASON_ZH[c.reason] || c.reason)}${c.attempt ? ' · 重试' : ''}</span><span>${c.status === 'streaming' ? fmtS(Date.now() - c.ts) : fmtS(c.latencyMs)}</span>`
+  return `<span class="st-${c.status}"></span><span>${esc(reasonLabel(c.reason))}${c.attempt ? ' · 重试' : ''}</span><span>${c.status === 'streaming' ? fmtS(Date.now() - c.ts) : fmtS(c.latencyMs)}</span>`
     + `<small>${new Date(c.ts).toLocaleTimeString()}${tok}${c.status === 'invalid' ? ' · 输出无效' : c.status === 'error' ? ' · 调用失败' : ''}</small>`;
 }
 function renderCalls() {
@@ -477,7 +480,7 @@ function renderDetail() {
   const c = calls.get(selected), el = $('llmDetail');
   if (!c) { el.innerHTML = ''; return; }
   const u = c.usage || {};
-  const meta = [c.provider, new Date(c.ts).toLocaleTimeString(), REASON_ZH[c.reason] || c.reason, `第 ${c.attempt + 1} 次`,
+  const meta = [c.provider, new Date(c.ts).toLocaleTimeString(), reasonLabel(c.reason), `第 ${c.attempt + 1} 次`,
     c.firstTokenMs != null ? `首字 ${fmtS(c.firstTokenMs)}` : '', c.latencyMs != null ? `总耗时 ${fmtS(c.latencyMs)}` : '',
     u.total_tokens ? `tokens ${u.prompt_tokens} → ${u.completion_tokens}` : '', c.finishReason ? `finish=${c.finishReason}` : ''].filter(Boolean).join(' · ');
   const msgs = c.messages.map((m, i) => `<details${m.role === 'system' ? '' : i === c.messages.length - 1 ? ' open' : ''}><summary>发送 · ${m.role} · ${m.content.length} 字符</summary><pre>${esc(pretty(m.content))}</pre></details>`).join('');
