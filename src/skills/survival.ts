@@ -1,5 +1,6 @@
 import { sleep, throwIfAborted } from '../util.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill } from './types.ts';
+import { lookAround } from './movement.ts';
 
 /** 可以用来封顶/搭建的方块（不含会下落的沙子沙砾） */
 export const PLACEABLE = [
@@ -93,7 +94,9 @@ export const shelter: Skill<{ until: 'day' | 'healed' }> = {
       const problem = chamberProblem(true);
       if (problem) return fail('ERROR', problem);
       const s = adapter.state();
-      const done = args.until === 'day' ? s.isDay && s.hp >= 10 : s.hp >= 18;
+      // 黄昏时 isDay 仍为真：“躲到天亮”要等到真正的早上（日出后、正午前），否则黄昏躲进去马上就出来了
+      const morning = s.timeOfDay >= 0 && s.timeOfDay < 11500 && s.isDay;
+      const done = args.until === 'day' ? morning && s.hp >= 10 : s.hp >= 18;
       if (done) break;
       if (s.food < 18 && adapter.hasFood()) await adapter.eat(signal).catch((e) => { if (isAbort(e)) throw e; });
       ctx.progress(0.3 + 0.7 * Math.min(1, s.hp / 20), `躲避中（生命 ${Math.round(s.hp)}）`);
@@ -122,15 +125,45 @@ export const hunt: Skill<{ animal?: string; count: number }> = {
   async run(ctx, args) {
     const { adapter, senses, signal } = ctx;
     await adapter.equipWeapon();
-    let kills = 0;
+    let kills = 0, searches = 0, escaped = 0, walks = 0;
+    const findPrey = () => senses.perceivedEntities(48)
+      .find((e) => e.kind === 'passive' && FOOD_ANIMALS.has(e.name) && (!args.animal || e.name === args.animal));
     while (kills < args.count && Date.now() < ctx.deadline) {
       senses.refresh();
-      let target = senses
-        .perceivedEntities(48)
-        .find((e) => e.kind === 'passive' && FOOD_ANIMALS.has(e.name) && (!args.animal || e.name === args.animal));
-      if (!target) return kills ? ok(`猎到 ${kills} 只，附近没有更多猎物`) : fail('NOT_FOUND', '视野里没有可以猎杀的动物');
+      let target = findPrey();
+      // 刚才亲眼看见过（例如探索时远远看到），现在被树/坡挡住了：先走到最后看见它的地方
+      if (!target && senses.lastSighting && walks < 2) {
+        const last = senses.lastSighting((n) => FOOD_ANIMALS.has(n) && (!args.animal || n === args.animal), 120_000);
+        const here = adapter.state().pos;
+        if (last && Math.hypot(last.pos.x - here.x, last.pos.z - here.z) > 3 && Math.hypot(last.pos.x - here.x, last.pos.z - here.z) <= 160) {
+          walks++;
+          ctx.progress(kills / args.count, `走向 ${Math.round(last.ageMs / 1000)} 秒前看见 ${last.name} 的地方`);
+          const stop = new AbortController();
+          const iv = setInterval(() => { senses.refresh(); if (findPrey()) stop.abort('prey_seen'); }, 400);
+          try {
+            await adapter.moveTo({ kind: 'near', pos: last.pos, range: 3 }, { signal: AbortSignal.any([signal, stop.signal]), timeoutMs: 40000 });
+          } catch (e) {
+            if (signal.aborted) throw e;
+          } finally {
+            clearInterval(iv);
+          }
+          continue;
+        }
+      }
+      // 动物刚才还在、一转眼走出视野是常事：先转头找一找再说（最多两次）
+      if (!target && searches < 2 && !adapter.state().inWater) {
+        searches++;
+        ctx.progress(kills / args.count, `四下找找${args.animal ?? '动物'}`);
+        await lookAround.run(ctx, { seconds: 3, ...(args.animal ? { for: args.animal } : {}) });
+        senses.refresh();
+        target = findPrey();
+      }
+      const what = args.animal ?? '可以猎杀的动物';
+      if (!target) return kills ? ok(`猎到 ${kills} 只，附近没有更多猎物`, { kills, searched: true })
+        : fail('NOT_FOUND', `转头找过了，视野里没有${what}${escaped ? `（有 ${escaped} 只跑出了视线）` : ''}`, { searched: true });
       const id = target.id;
       let lastPos = target.pos;
+      let hits = 0, lastDist = target.dist;
       ctx.progress(kills / args.count, `追 ${target.name}（${Math.round(target.dist)} 格）`);
       const huntEnd = Math.min(ctx.deadline, Date.now() + 30000);
       while (Date.now() < huntEnd) {
@@ -138,6 +171,7 @@ export const hunt: Skill<{ animal?: string; count: number }> = {
         target = senses.perceivedEntities(48).find((e) => e.id === id);
         if (!target) break; // 死了或跑出视野
         lastPos = target.pos;
+        lastDist = target.dist;
         if (target.dist > 3) {
           try {
             await adapter.moveTo({ kind: 'follow_entity', entityId: id, range: 2 }, { signal, timeoutMs: 4000 });
@@ -147,9 +181,12 @@ export const hunt: Skill<{ animal?: string; count: number }> = {
           continue;
         }
         await adapter.attack(id);
+        hits++;
         await sleep(600, signal);
       }
       if (target) continue; // 超时没追上，换下一只
+      // 没打到过、或消失时离得很远：是跑出了视线，不是被打死了
+      if (hits === 0 || lastDist > 4.5) { escaped++; continue; }
       kills++;
       try {
         await adapter.moveTo({ kind: 'near', pos: lastPos, range: 1 }, { signal, timeoutMs: 6000 });
@@ -158,7 +195,7 @@ export const hunt: Skill<{ animal?: string; count: number }> = {
       }
       await adapter.collectNearbyDrops(signal, 5, 4000);
     }
-    return kills ? ok(`猎到 ${kills} 只动物`) : fail('TIMEOUT', '没能追上猎物');
+    return kills ? ok(`猎到 ${kills} 只动物`, { kills }) : fail('TIMEOUT', `没能追上猎物${escaped ? `（${escaped} 只跑掉了）` : ''}`);
   },
 };
 

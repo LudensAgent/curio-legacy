@@ -162,7 +162,7 @@ export const collectSeeds: Skill<{ count: number }> = {
     const tried = new Set<string>();
     while (seeds() - start < args.count && Date.now() < ctx.deadline - 2000 && broken < 80) {
       senses.refresh();
-      const g = senses.knownBlocks(['short_grass', 'tall_grass'], 32).find((b) => !tried.has(`${b.pos.x},${b.pos.y},${b.pos.z}`));
+      const g = senses.knownBlocks(['short_grass', 'tall_grass', 'grass', 'fern'], 32).find((b) => !tried.has(`${b.pos.x},${b.pos.y},${b.pos.z}`));
       if (!g) break;
       tried.add(`${g.pos.x},${g.pos.y},${g.pos.z}`);
       try {

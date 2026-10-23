@@ -65,7 +65,7 @@ export const NOTABLE = new Set([
   'pumpkin', 'melon', 'obsidian', 'clay', 'sweet_berry_bush', 'nether_portal', 'end_portal', 'end_gateway', 'end_portal_frame', 'stone_bricks', 'mossy_stone_bricks', 'cracked_stone_bricks', 'bookshelf', 'iron_bars',
 ]);
 /** 采集目标常用的地表方块：也记住，但每种限量 */
-export const GROUND = new Set(['stone', 'cobblestone', 'deepslate', 'andesite', 'granite', 'diorite', 'dirt', 'grass_block', 'sand', 'gravel', 'short_grass', 'tall_grass', 'water', 'netherrack', 'blackstone', 'basalt', 'soul_sand', 'soul_soil', 'end_stone', 'snow_block', 'ice', 'packed_ice', 'blue_ice']);
+export const GROUND = new Set(['stone', 'cobblestone', 'deepslate', 'andesite', 'granite', 'diorite', 'dirt', 'grass_block', 'sand', 'gravel', 'short_grass', 'tall_grass', 'grass', 'fern', 'water', 'netherrack', 'blackstone', 'basalt', 'soul_sand', 'soul_soil', 'end_stone', 'snow_block', 'ice', 'packed_ice', 'blue_ice']);
 
 export interface SeenEntity {
   id: number;
@@ -191,6 +191,8 @@ export class Vision {
   frame: VisionFrame | null = null;
   seen: SeenEntity[] = [];
   heard: SeenEntity[] = [];
+  /** 最近亲眼看见的生物及其最后位置（3 分钟） */
+  sightings = new Map<number, { id: number; name: string; kind: string; pos: Vec3Like; at: number }>();
   /** 本次扫描看到的值得注意的方块 */
   visibleNow = new Map<string, { name: string; pos: Vec3Like; dist: number }>();
   composition: Record<string, number> = {};
@@ -212,6 +214,7 @@ export class Vision {
       this.frame = null;
       this.seen = [];
       this.heard = [];
+      this.sightings.clear();
       this.visibleNow.clear();
       this.composition = {};
       this.openness = { left: 0, center: 0, right: 0 };
@@ -247,6 +250,7 @@ export class Vision {
       this.frame = null;
       this.seen = [];
       this.heard = [];
+      this.sightings.clear();
       this.visibleNow.clear();
       return;
     }
@@ -434,6 +438,9 @@ export class Vision {
     }
     this.seen = seen.sort((a, b) => a.dist - b.dist);
     this.heard = heard.sort((a, b) => a.dist - b.dist);
+    // 记住亲眼看见过的生物在哪（像人一样：“刚才那头牛在坡那边”）；只记看见的，不记听见/墙后的
+    for (const e of seen) if (e.kind !== 'item' && e.kind !== 'other') this.sightings.set(e.id, { id: e.id, name: e.name, kind: e.kind, pos: { ...e.pos }, at: now });
+    for (const [id, x] of this.sightings) if (now - x.at > 180_000) this.sightings.delete(id);
     this.lastScanAt = now;
     this.frame = { cols, rows, cats, dists, facing: dirOfYaw(eye.yaw), range, entities: ents, ts: now, scanMs: Date.now() - t0 };
   }
@@ -517,6 +524,14 @@ export class Vision {
     if (Date.now() - this.lastScanAt >= 150) this.scan();
   }
 
+  /** 最近一次亲眼看见符合条件的生物在哪里（不透视：只来自以往的视觉扫描） */
+  lastSighting(match: (name: string) => boolean, maxAgeMs = 120_000): { id: number; name: string; pos: Vec3Like; ageMs: number } | null {
+    const now = Date.now();
+    let best: { id: number; name: string; pos: Vec3Like; at: number } | null = null;
+    for (const x of this.sightings.values()) if (match(x.name) && now - x.at <= maxAgeMs && (!best || x.at > best.at)) best = x;
+    return best ? { id: best.id, name: best.name, pos: best.pos, ageMs: now - best.at } : null;
+  }
+
   markSweep() {
     this.lastSweepAt = Date.now();
   }
@@ -528,7 +543,7 @@ export class Vision {
     for (const v of this.known.values()) {
       if (Date.now() - v.lastSeen > RESOURCE_MEMORY_TTL_MS) continue;
       if (!GROUND.has(v.name) && !v.name.endsWith('_log')) continue;
-      if (['water', 'short_grass', 'tall_grass'].includes(v.name)) continue;
+      if (['water', 'short_grass', 'tall_grass', 'grass', 'fern'].includes(v.name)) continue;
       if (excluded.some((p) => Math.hypot(p.x - v.pos.x, p.z - v.pos.z) <= 2 && Math.abs(p.y - v.pos.y) <= 2)) continue;
       if (v.pos.y < here.y - 4) continue;
       const ground = this.adapter.blockOptics(v.pos.x, v.pos.y, v.pos.z);
@@ -597,6 +612,14 @@ export class Vision {
         return l ? { dir: l.dir, dist: l.dist } : null;
       })(),
       last_look_around_s: this.lastSweepAt ? Math.round((now - this.lastSweepAt) / 1000) : null,
+      ...(() => {
+        // 刚才看见、现在不在视野里的生物（“半分钟前东北边有头牛”）
+        const visibleIds = new Set(this.seen.map((e) => e.id));
+        const recent = [...this.sightings.values()].filter((x) => !visibleIds.has(x.id) && now - x.at <= 120_000)
+          .sort((a, b) => b.at - a.at).slice(0, 6)
+          .map((x) => ({ name: x.name, dir: dirOfYaw(yawTo(x.pos.x - here.x, x.pos.z - here.z)), dist: Math.round(Math.hypot(x.pos.x - here.x, x.pos.z - here.z)), seconds_ago: Math.round((now - x.at) / 1000) }));
+        return recent.length ? { recent_sightings: recent } : {};
+      })(),
     };
   }
 }

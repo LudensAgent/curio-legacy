@@ -128,15 +128,24 @@ test('技能调用透视接口会被拒绝（必须用 ctx.senses）', async () 
   }
 });
 
-test('gather：看不见的原木不会去挖（NOT_FOUND）；看不见石头时就地向下挖', async () => {
+test('gather：埋在地下的原木不会去挖（NOT_FOUND）；背后的树要转头看见后才去砍；看不见石头时就地向下挖', async () => {
   const { adapter, vision } = setup();
-  adapter.blocks.push({ name: 'oak_log', pos: { x: -15, y: 64, z: 0 } }); // 背后
+  adapter.blocks.push({ name: 'oak_log', pos: { x: 3, y: adapter.groundY - 3, z: 0 } }); // 埋在地下：转头也看不见
   const arbiter = new Arbiter(adapter, new WorldMemory(null), new EventBus(), vision);
   let done = new Promise<TaskOutcome>((r) => arbiter.once('done', r));
   arbiter.start({ skill: 'gather', args: { block: 'log', count: 1 } }, 'llm');
   let o = await done;
   assert.equal(o.result.failureCode, 'NOT_FOUND');
   assert.equal(adapter.inv.get('oak_log') ?? 0, 0);
+
+  adapter.blocks.push({ name: 'oak_log', pos: { x: -15, y: 64, z: 0 } }); // 背后：开始时不在视野里
+  const yaw0 = adapter.yaw;
+  done = new Promise<TaskOutcome>((r) => arbiter.once('done', r));
+  arbiter.start({ skill: 'gather', args: { block: 'log', count: 1 } }, 'llm');
+  o = await done;
+  assert.equal(o.result.status, 'succeeded', o.result.summary);
+  assert.notEqual(adapter.yaw, yaw0, '必须转头看见之后才能去砍');
+  assert.equal(adapter.inv.get('oak_log'), 1);
 
   adapter.pitch = 0.3; // 抬头，看不到地面
   done = new Promise<TaskOutcome>((r) => arbiter.once('done', r));
