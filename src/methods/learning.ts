@@ -135,8 +135,16 @@ export class MethodLibrary {
     }
   }
 
+  /**
+   * 没有配置隔离试验世界时，候选方法可以在正常游玩中试用（就像玩家试一个新办法），
+   * 晋升仍然要求在两个不同情境里由真实观测验收；配置了试验世界则只在这些世界里试验。
+   */
+  private trialAllowed(worldId: string) {
+    return this.trialWorldIds.size === 0 || this.trialWorldIds.has(worldId);
+  }
+
   private hasProof(trials: MethodTrial[]) {
-    return new Set(trials.filter((t) => t.status === 'verified' && t.source === 'adapter.state' && this.trialWorldIds.has(t.worldId)).map((t) => t.contextKey)).size >= 2;
+    return new Set(trials.filter((t) => t.status === 'verified' && t.source === 'adapter.state' && this.trialAllowed(t.worldId)).map((t) => t.contextKey)).size >= 2;
   }
 
   promote(name: string, version: number): boolean {
@@ -145,7 +153,7 @@ export class MethodLibrary {
     definition.status = 'verified';
     this.install(definition);
     this.save();
-    this.bus.publish('method_verified', 'P2', `方法 method:${name} v${version} 在两个隔离情境中通过事实验收`);
+    this.bus.publish('method_verified', 'P2', `方法 method:${name} v${version} 在两个不同情境中通过事实验收`);
     return true;
   }
 
@@ -189,14 +197,14 @@ export class MethodLibrary {
           const parameters = bindParameters(definition.parameters, (raw as any)?.parameters ?? {});
           validateProgram(definition.program, parameters, this.adapter, this.memory, this.adapter.state());
           validateCondition(substitute(definition.postcondition, parameters), this.adapter, this.memory, this.adapter.state());
-          if (trial && !this.trialWorldIds.has(this.adapter.state().worldId)) throw new Error('候选方法只能在配置的隔离测试世界中执行');
+          if (trial && !this.trialAllowed(this.adapter.state().worldId)) throw new Error('候选方法只能在配置的隔离测试世界中执行');
           return { ok: true, args: { parameters } };
         } catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
       },
       run: async (ctx, args) => {
         throwIfAborted(ctx.signal);
         const beforeState = ctx.adapter.state();
-        if (trial && !this.trialWorldIds.has(beforeState.worldId)) return fail('BAD_ARGS', '当前世界没有隔离试验授权');
+        if (trial && !this.trialAllowed(beforeState.worldId)) return fail('BAD_ARGS', '当前世界没有隔离试验授权');
         const postcondition: Condition = validateCondition(substitute(definition.postcondition, args.parameters), ctx.adapter, ctx.memory, beforeState);
         const before = evaluateCondition(postcondition, beforeState);
         if (!observationReady(beforeState)) return fail('NOT_CONNECTED', '方法试验需要有效观测');

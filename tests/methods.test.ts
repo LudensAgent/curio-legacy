@@ -99,11 +99,23 @@ test('partial success and already true postconditions cannot promote a candidate
 });
 
 test('trial isolation is configuration, never a model claim', (t) => {
-  const { library, adapter } = fixture(t, null, false);
+  // 配置了隔离试验世界时，其他世界里不能试验候选方法（模型声称 isolated 也没用）
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  memory.setWorld(adapter.worldId);
+  const library = new MethodLibrary(null, adapter, memory, bus, { trialWorldIds: ['some-other-test-world'] });
+  t.after(() => { library.dispose(); memory.close(); });
   const proposed = library.propose(candidate('world_isolation'));
   if (!proposed.ok) return assert.fail(proposed.error);
   const validation = SKILLS[proposed.name].validate({ isolated: true, parameters: { amount: 4 } }, adapter);
   assert.equal(validation.ok, false);
+  assert.equal(library.list()[0].status, 'candidate');
+});
+
+test('without configured test worlds, candidates may be tried during normal play (still needs two verified contexts)', (t) => {
+  const { library, adapter } = fixture(t, null, false);
+  const proposed = library.propose(candidate('play_trial'));
+  if (!proposed.ok) return assert.fail(proposed.error);
+  assert.equal(SKILLS[proposed.name].validate({ parameters: { amount: 4 } }, adapter).ok, true);
   assert.equal(library.list()[0].status, 'candidate');
 });
 
