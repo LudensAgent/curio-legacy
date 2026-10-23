@@ -1,9 +1,22 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+import path from 'node:path';
 import type { AgentEvent, EventBus } from '../events.ts';
+import type { LlmTrace } from '../planner/llm-trace.ts';
 
 const PUBLIC = fileURLToPath(new URL('../../public/', import.meta.url));
+
+/** 本地 node_modules 里的 gridstack（npm install 后可离线使用；没有时页面回退到 CDN） */
+function gridstackDist(): string | null {
+  try {
+    return path.join(path.dirname(createRequire(import.meta.url).resolve('gridstack/package.json')), 'dist');
+  } catch {
+    return null;
+  }
+}
+const VENDOR_FILES: Record<string, string> = { 'gridstack-all.js': 'application/javascript; charset=utf-8', 'gridstack.min.css': 'text/css; charset=utf-8' };
 
 export interface DashboardHandlers {
   snapshot(): unknown;
@@ -20,8 +33,22 @@ export interface DashboardHandlers {
  * - /api/stream  Server-Sent Events：每秒推送状态 + 实时事件
  */
 /** extraRoutes：在控制台路由之前尝试的处理器（返回 true 表示已处理），用于挂载 Curio Observer 数据流 */
-export function startDashboard(host: string, port: number, bus: EventBus, h: DashboardHandlers, extraRoutes: ((req: http.IncomingMessage, res: http.ServerResponse) => boolean)[] = []) {
+export function startDashboard(
+  host: string,
+  port: number,
+  bus: EventBus,
+  h: DashboardHandlers,
+  extraRoutes: ((req: http.IncomingMessage, res: http.ServerResponse) => boolean)[] = [],
+  opts: { llmTrace?: LlmTrace } = {},
+) {
   const clients = new Set<http.ServerResponse>();
+  const vendorDir = gridstackDist();
+
+  // LLM 调用的实时追踪（请求全文 + 流式增量）
+  opts.llmTrace?.on('llm', (ev: unknown) => {
+    const line = `event: llm\ndata: ${JSON.stringify(ev)}\n\n`;
+    for (const c of clients) c.write(line);
+  });
 
   bus.on('event', (ev: AgentEvent) => {
     if (ev.type === 'tick') return;
@@ -56,12 +83,19 @@ export function startDashboard(host: string, port: number, bus: EventBus, h: Das
     const p = url.pathname;
     if (req.method === 'GET' && p === '/') return file(res, 'dashboard.html');
     if (req.method === 'GET' && p === '/overlay') return file(res, 'overlay.html');
+    if (req.method === 'GET' && p.startsWith('/vendor/gridstack/')) {
+      const name = p.slice('/vendor/gridstack/'.length);
+      if (!vendorDir || !VENDOR_FILES[name]) return send(res, 404, 'not found', 'text/plain');
+      return fs.readFile(path.join(vendorDir, name), (err, data) => (err ? send(res, 404, 'not found', 'text/plain') : send(res, 200, data.toString(), VENDOR_FILES[name])));
+    }
+    if (req.method === 'GET' && p === '/api/llm') return send(res, 200, JSON.stringify(opts.llmTrace?.recent() ?? []));
     if (req.method === 'GET' && p === '/api/state') return send(res, 200, JSON.stringify(h.snapshot()));
     if (req.method === 'GET' && p === '/api/events') return send(res, 200, JSON.stringify(bus.recent(200)));
     if (req.method === 'GET' && p === '/api/stream') {
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
       res.write(`event: state\ndata: ${JSON.stringify(h.snapshot())}\n\n`);
       for (const ev of bus.recent(60)) res.write(`event: ev\ndata: ${JSON.stringify(ev)}\n\n`);
+      if (opts.llmTrace) res.write(`event: llm_init\ndata: ${JSON.stringify(opts.llmTrace.recent())}\n\n`);
       clients.add(res);
       req.on('close', () => clients.delete(res));
       return;

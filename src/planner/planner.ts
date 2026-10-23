@@ -7,6 +7,7 @@ import type { MemoryRecall } from '../memory/types.ts';
 import { validateIntentDecision } from '../intentions/decision.ts';
 import type { LlmProvider } from './llm.ts';
 import { setImmediate } from 'node:timers/promises';
+import type { LlmTrace } from './llm-trace.ts';
 import { extractJson, ruleProposal, validatePlan, type Plan } from './plan.ts';
 import { buildMessages, boundedJson, enforcePromptBudget, type PlanContext } from './prompt.ts';
 
@@ -49,6 +50,7 @@ export class Planner {
     private memory: WorldMemory,
     private bus: EventBus,
     private writer: JsonlWriter | null,
+    private trace: LlmTrace | null = null,
     private memoryRecall?: MemoryRecall,
   ) {
     this.stats = {
@@ -153,14 +155,17 @@ export class Planner {
         let latencyMs = 0;
         let usage: unknown;
         let finishReason: string | undefined;
+        const traceId = this.trace?.begin({ reason: ctx.reason, attempt, provider: this.provider.name }, messages) ?? '';
+        const onDelta = this.trace ? (d: { content?: string; reasoning?: string }) => this.trace!.delta(traceId, d) : undefined;
         try {
           const timeout = AbortSignal.timeout(this.cfg.llm.timeoutMs + this.cfg.llm.fakeDelayMs + 1000);
-          const c = await this.provider.complete(messages, signal ? AbortSignal.any([signal, timeout]) : timeout, ctx);
+          const c = await this.provider.complete(messages, signal ? AbortSignal.any([signal, timeout]) : timeout, ctx, onDelta);
           ({ text, latencyMs, usage, finishReason } = c);
         } catch (e: any) {
           this.stats.tokenUsage.unreportedCalls++;
           this.stats.errors++;
           this.stats.lastError = String(e?.message ?? e);
+          this.trace?.end(traceId, { status: 'error', error: this.stats.lastError });
           this.writer?.write({ ts: Date.now(), reason: ctx.reason, provider: this.provider.name, ok: false, error: this.stats.lastError, promptChars });
           throw e;
         }
@@ -187,6 +192,7 @@ export class Planner {
             for (const record of records) if (recalled.size < 40 || recalled.has(record.id)) recalled.set(record.id, record);
             messages.push({ role: 'assistant', content: text.slice(0, 1200) });
             messages.push({ role: 'user', content: `只读记忆查询结果（历史记录，不代表当前事实）：${boundedJson(records, 4000)}。剩余回想轮数：${maxRecall - recalls}。` });
+            this.trace?.end(traceId, { status: 'ok', text, latencyMs, usage, finishReason });
             this.writer?.write({ ts: Date.now(), reason: 'recall', provider: this.provider.name, ok: true, latencyMs, usage, promptChars, attempt });
             continue;
           }
@@ -200,6 +206,7 @@ export class Planner {
             v.plan.reason = ctx.reason;
             v.plan.requestedAt = this.stats.inFlightSince ?? Date.now();
             this.stats.ok++;
+            this.trace?.end(traceId, { status: 'ok', text, latencyMs, usage, finishReason });
             this.writer?.write({ ts: Date.now(), reason: ctx.reason, provider: this.provider.name, ok: true, latencyMs, usage, finishReason, promptChars, output: text.slice(0, 2000), attempt });
             return v.plan;
           }
@@ -214,6 +221,7 @@ export class Planner {
         this.stats.invalid++;
         invalid++;
         this.stats.lastError = error;
+        this.trace?.end(traceId, { status: 'invalid', text, latencyMs, usage, finishReason, error });
         this.bus.publish('llm_invalid', 'P1', `模型输出无效（第 ${attempt + 1} 次）：${error}`);
         this.writer?.write({ ts: Date.now(), reason: ctx.reason, provider: this.provider.name, ok: false, invalid: true, error, latencyMs, usage, finishReason, output: text.slice(0, 2000), attempt });
         if (truncated || text.trim() === '') {

@@ -55,6 +55,8 @@ export const config = {
     maxRecallRounds: num('LLM_MAX_RECALL_ROUNDS', 2),
     /** Enable only for a configured model that accepts image_url inputs. */
     visionInput: bool('LLM_VISION_INPUT', false),
+    /** 流式请求：控制台能实时看到模型的输出；服务端不支持会自动回退 */
+    stream: bool('LLM_STREAM', true),
     maxCallsPerHour: num('LLM_MAX_CALLS_PER_HOUR', 90),
     fakeDelayMs: num('LLM_FAKE_DELAY_MS', 0),
   },
