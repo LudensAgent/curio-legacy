@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { Arbiter, type TaskOutcome } from '../src/arbiter/arbiter.ts';
 import { EventBus } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
+import { Vision } from '../src/perception/vision.ts';
 import { SKILLS } from '../src/skills/index.ts';
 import { sleep } from '../src/util.ts';
 import { FakeAdapter } from './fake-adapter.ts';
@@ -11,7 +12,7 @@ const setup = () => {
   const adapter = new FakeAdapter();
   const bus = new EventBus();
   const memory = new WorldMemory(null);
-  const arbiter = new Arbiter(adapter, memory, bus);
+  const arbiter = new Arbiter(adapter, memory, bus, new Vision(adapter));
   const next = () => new Promise<TaskOutcome>((r) => arbiter.once('done', r));
   return { adapter, bus, memory, arbiter, next };
 };

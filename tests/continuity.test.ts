@@ -7,6 +7,7 @@ import { config } from '../src/config.ts';
 import { EventBus, type AgentEvent } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { Perception } from '../src/perception/perception.ts';
+import { Vision } from '../src/perception/vision.ts';
 import { MockProvider, type LlmProvider } from '../src/planner/llm.ts';
 import { ruleProposal } from '../src/planner/plan.ts';
 import { Planner } from '../src/planner/planner.ts';
@@ -21,12 +22,13 @@ function world(provider: (p: (hint: any) => Record<string, unknown>) => LlmProvi
   const events: AgentEvent[] = [];
   bus.on('event', (e: AgentEvent) => events.push(e));
   const memory = new WorldMemory(null);
-  const arbiter = new Arbiter(adapter, memory, bus);
-  const perception = new Perception(adapter, memory, bus);
+  const vision = new Vision(adapter);
+  const arbiter = new Arbiter(adapter, memory, bus, vision);
+  const perception = new Perception(adapter, memory, bus, vision);
   const cfg = { ...config, llm: { ...config.llm, maxCallsPerHour: 1000, timeoutMs: 10000, fakeDelayMs: 0 } };
   const planner = new Planner(cfg, provider((hint: any) => ruleProposal(hint.percept, memory, hint.reason === 'prefetch' ? hint.current : null)), adapter, memory, bus, null);
   const executive = new Executive({ adapter, arbiter, planner, perception, memory, bus });
-  const reflex = new Reflex(adapter, arbiter, bus);
+  const reflex = new Reflex(adapter, arbiter, bus, vision);
   perception.start(300);
   executive.start(100);
   const stop = () => {

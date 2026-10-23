@@ -3,6 +3,9 @@ import { dist3, sleep } from '../util.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill } from './types.ts';
 
 // ------------------------------------------------------------------ explore
+/** 最近走不通的方向：2 分钟内降低优先级，避免对着大海/悬崖反复尝试 */
+const failedDirs = new Map<string, number>();
+const dirPenalty = (d: string) => (Date.now() - (failedDirs.get(d) ?? 0) < 120_000 ? 1 : 0);
 export const explore: Skill<{ direction: string; distance: number }> = {
   name: 'explore',
   description: '朝新颖度最高（或指定）的方向前进，进入未访问区块，沿途自动记录新发现',
@@ -20,7 +23,7 @@ export const explore: Skill<{ direction: string; distance: number }> = {
     const s = adapter.state();
     if (!s.connected) return fail('NOT_CONNECTED', '未连接');
     const ranked = Object.entries(DIRS)
-      .map(([d, [dx, dz]]) => ({ d, dx, dz, n: memory.novelty(s.dim, s.pos.x + dx * args.distance, s.pos.z + dz * args.distance) + Math.random() * 0.05 }))
+      .map(([d, [dx, dz]]) => ({ d, dx, dz, n: memory.novelty(s.dim, s.pos.x + dx * args.distance, s.pos.z + dz * args.distance) + Math.random() * 0.05 - dirPenalty(d) }))
       .sort((a, b) => b.n - a.n);
     const order = args.direction === 'AUTO' ? ranked : [ranked.find((r) => r.d === args.direction)!, ...ranked.filter((r) => r.d !== args.direction)];
     const chunksBefore = memory.visitedChunkCount;
@@ -42,6 +45,7 @@ export const explore: Skill<{ direction: string; distance: number }> = {
           if (isAbort(e)) throw e;
           const p = adapter.state().pos;
           const moved = Math.hypot(p.x - start.x, p.z - start.z);
+          if (moved < args.distance * 0.3) failedDirs.set(cand.d, Date.now());
           if (moved >= args.distance * 0.5) {
             return ok(`向 ${cand.d} 探索了 ${Math.round(moved)} 格（未完全到达），新区块 +${memory.visitedChunkCount - chunksBefore}`, { dir: cand.d, moved });
           }
@@ -122,26 +126,32 @@ export const wander: Skill<{ radius: number }> = {
   },
 };
 
-// ------------------------------------------------------------------ look_around（空档填充）
+// ------------------------------------------------------------------ look_around
 export const lookAround: Skill<{ seconds: number }> = {
   name: 'look_around',
-  description: '原地环顾四周几秒',
+  description: '原地环顾一圈（水平转 360°、平视和略低头各看一遍），让视野覆盖四周。不知道附近有什么时先用它',
   argsDoc: '{"seconds"?: 2-20}',
   timeoutMs: 25000,
   movement: false,
   validate(raw) {
-    return { ok: true, args: { seconds: clampInt(obj(raw).seconds, 2, 20, 5) } };
+    return { ok: true, args: { seconds: clampInt(obj(raw).seconds, 2, 20, 4) } };
   },
   async run(ctx, args) {
-    const end = Date.now() + args.seconds * 1000;
-    while (Date.now() < end) {
-      await ctx.adapter.look(Math.random() * Math.PI * 2, (Math.random() - 0.5) * 0.6);
-      await sleep(900 + Math.random() * 600, ctx.signal);
+    const steps = 8;
+    const per = Math.max(250, (args.seconds * 1000) / steps);
+    const start = ctx.adapter.eye()?.yaw ?? 0;
+    for (let k = 0; k < steps; k++) {
+      const yaw = start + ((k + 1) * 2 * Math.PI) / steps;
+      const pitch = k % 2 === 0 ? -0.05 : -0.45; // 平视 / 略低头
+      await ctx.adapter.look(yaw, pitch);
+      await sleep(per, ctx.signal);
+      ctx.senses.refresh();
+      ctx.progress((k + 1) / steps, '环顾四周');
     }
-    return ok(`环顾了 ${args.seconds} 秒`);
+    ctx.senses.markSweep();
+    return ok(`环顾了一圈`);
   },
 };
-
 
 // ------------------------------------------------------------------ unstuck（仅反射层使用）
 export const unstuck: Skill<{}> = {
@@ -154,7 +164,8 @@ export const unstuck: Skill<{}> = {
     return { ok: true, args: {} };
   },
   async run(ctx) {
-    await ctx.adapter.jump(600, ctx.signal);
+    // 在水里时先长按跳跃浮上水面
+    await ctx.adapter.jump(ctx.adapter.state().inWater ? 1500 : 600, ctx.signal);
     const s = ctx.adapter.state();
     const ang = Math.random() * Math.PI * 2;
     try {

@@ -18,6 +18,24 @@ export interface EntityInfo {
   kind: EntityKind;
   pos: Vec3Like;
   dist: number;
+  height?: number;
+}
+
+/** 方块的“光学”属性：视线能否穿过 */
+export type Opacity = 'clear' | 'water' | 'foliage' | 'solid';
+
+export interface Optics {
+  name: string;
+  kind: Opacity;
+}
+
+/** 眼睛位置与朝向（yaw: 0 = 北(-Z)，正值向左转；pitch: 正值抬头） */
+export interface Eye {
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  pitch: number;
 }
 
 export interface BlockHit {
@@ -72,7 +90,16 @@ export interface GameAdapter {
   on(event: AdapterEvent, cb: (...args: any[]) => void): this;
 
   state(): AgentState;
+
+  // ---- 视觉原语（只给 Vision 模块使用；上层只能拿到 Vision 的结果，避免透视）
+  eye(): Eye | null;
+  /** 返回 null 表示区块未加载 */
+  blockOptics(x: number, y: number, z: number): Optics | null;
+  lightAt(x: number, y: number, z: number): { block: number; sky: number } | null;
+
+  /** 原始实体列表（服务端追踪范围内，含墙后的）。上层请用 Vision.perceivedEntities。 */
   nearbyEntities(radius: number): EntityInfo[];
+  /** 原始方块搜索（会穿墙）。上层请用 Vision.knownBlocks；这里只留给调试。 */
   findBlocks(names: string[], maxDist: number, count: number): BlockHit[];
   blockAt(pos: Vec3Like): string | null;
   /** 'log' → 所有原木；'iron_ore' → iron_ore + deepslate_iron_ore；精确名 → 自身 */

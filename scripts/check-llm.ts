@@ -17,7 +17,23 @@ const percept: Percept = {
   self: { pos: [12, 70, -30], dim: 'overworld', hp: 20, food: 18, biome: 'forest', inWater: false, inLava: false, held: null },
   inventory: [{ name: 'oak_log', count: 2 }],
   emptySlots: 34,
-  nearby: { hostile: [], passive: ['cow x2'], players: [], resources: [{ block: 'oak_log', count: 23, nearest: 5 }, { block: 'coal_ore', count: 3, nearest: 17 }] },
+  nearby: {
+    hostile: [],
+    passive: ['cow x2'],
+    players: [],
+    resources: [{ block: 'oak_log', count: 23, nearest: 15, dir: 'NE', seen: 'now' }, { block: 'coal_ore', count: 3, nearest: 17, dir: 'W', seen: 'memory' }],
+  },
+  vision: {
+    facing: 'N', fov: 100, range: 64,
+    view: 'sky 42%、grass 30%、leaves 12%、wood 6%、stone 5%',
+    openness: { left: 40, center: 64, right: 18 },
+    visible_resources: [{ block: 'oak_log', count: 23, nearest: 15, dir: 'NE', rel: '右前' }],
+    remembered_resources: [{ block: 'coal_ore', count: 3, nearest: 17, dir: 'W', rel: '左侧' }],
+    seen_entities: [{ name: 'cow', dist: 9, dir: 'N', rel: '正前' }],
+    heard: [],
+    nearest_land: { dir: 'N', dist: 0 },
+    last_look_around_s: 30,
+  },
   exploration: { visitedChunks: 3, noveltyByDir: { N: 1, NE: 1, E: 0.9, SE: 1, S: 0.6, SW: 1, W: 1, NW: 1 }, base: { dist: 6, dir: 'S' } },
 };
 

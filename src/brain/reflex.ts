@@ -1,10 +1,12 @@
 import type { GameAdapter } from '../adapter/types.ts';
 import type { Arbiter, Step } from '../arbiter/arbiter.ts';
 import type { EventBus, Severity } from '../events.ts';
+import type { Senses } from '../skills/types.ts';
 
 /**
  * 反射层：不依赖 LLM，按固定频率检查危险并直接抢占动作。
  * 同时负责卡死检测（移动型任务长时间没有位移）。
+ * 威胁来自 Vision：看见的，或近距离听见的。
  */
 export class Reflex {
   private timer: NodeJS.Timeout | null = null;
@@ -14,7 +16,7 @@ export class Reflex {
   triggers = 0;
   enabled = true;
 
-  constructor(private adapter: GameAdapter, private arbiter: Arbiter, private bus: EventBus) {}
+  constructor(private adapter: GameAdapter, private arbiter: Arbiter, private bus: EventBus, private senses: Senses) {}
 
   start(intervalMs = 250) {
     this.timer = setInterval(() => {
@@ -48,7 +50,8 @@ export class Reflex {
     const s = this.adapter.state();
     if (!s.connected || !s.alive) return;
     const cur = this.arbiter.info();
-    const hostiles = this.adapter.nearbyEntities(12).filter((e) => e.kind === 'hostile');
+    // 只对看见/听见的威胁做反应（墙后的怪物不会触发反射）
+    const hostiles = this.senses.perceivedEntities(12).filter((e) => e.kind === 'hostile');
     const nearest = hostiles[0];
     const creeper = hostiles.find((e) => e.name === 'creeper' && e.dist < 5);
 

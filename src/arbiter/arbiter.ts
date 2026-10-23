@@ -3,7 +3,7 @@ import type { GameAdapter } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { SKILLS } from '../skills/index.ts';
-import type { FailureCode, SkillResult } from '../skills/types.ts';
+import type { FailureCode, Senses, SkillResult } from '../skills/types.ts';
 import { AbortedError, shortId } from '../util.ts';
 
 export type TaskSource = 'llm' | 'rule' | 'filler' | 'reflex' | 'user';
@@ -41,6 +41,8 @@ interface Running extends TaskInfo {
 }
 
 /** 会修改游戏世界或角色状态的方法：任务被取消后，旧任务再调用这些方法会被拦截。 */
+/** 会“透视”的原始查询：技能必须改用 ctx.senses（看见/听见/记得的东西）。 */
+const XRAY_METHODS = new Set(['findBlocks', 'nearbyEntities', 'blockOptics', 'lightAt']);
 const ACTION_METHODS = new Set(['moveTo', 'dig', 'collectNearbyDrops', 'craft', 'eat', 'equipWeapon', 'attack', 'look', 'jump', 'chat']);
 
 /**
@@ -54,7 +56,7 @@ export class Arbiter extends EventEmitter {
   private version = 0;
   blockedActions = 0;
 
-  constructor(private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus) {
+  constructor(private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private senses: Senses) {
     super();
   }
 
@@ -80,6 +82,11 @@ export class Arbiter extends EventEmitter {
       get: (t, prop, recv) => {
         const v = Reflect.get(t, prop, recv);
         if (typeof v !== 'function') return v;
+        if (XRAY_METHODS.has(String(prop))) {
+          return () => {
+            throw new Error(`NO_XRAY: 技能不能调用 ${String(prop)}，请使用 ctx.senses`);
+          };
+        }
         if (ACTION_METHODS.has(String(prop))) {
           return (...args: unknown[]) => {
             if (signal.aborted) {
@@ -133,6 +140,7 @@ export class Arbiter extends EventEmitter {
     const timeout = setTimeout(() => controller.abort('TIMEOUT'), skill.timeoutMs + 2000);
     const ctx = {
       adapter: this.guard(controller.signal),
+      senses: this.senses,
       memory: this.memory,
       bus: this.bus,
       signal: controller.signal,

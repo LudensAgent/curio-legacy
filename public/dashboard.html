@@ -28,6 +28,11 @@
   section { background: var(--bg); border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 16px 18px; min-width: 0; }
   section h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .14em; color: var(--dim); margin: 0 0 14px; font-weight: 500; }
   .wide { grid-column: 1 / -1; }
+  .span2 { grid-column: span 2; }
+  @media (max-width: 760px) { .span2 { grid-column: auto; } }
+  .vision { display: flex; gap: 18px; flex-wrap: wrap; align-items: flex-start; }
+  canvas#eye { width: 100%; max-width: 560px; aspect-ratio: 5 / 3; image-rendering: pixelated; border: 1px solid var(--ink); background: #fafafa; }
+  .vlist { flex: 1; min-width: 200px; }
   .row { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; }
   .row span:first-child { color: var(--dim); }
   .mono { font-family: var(--mono); font-size: 12px; }
@@ -124,8 +129,29 @@
     <div style="margin-top:10px" class="mono" id="counters"></div>
   </section>
 
+  <section class="span2">
+    <h2>AI 视野（射线模拟 · 不透视 · 非图片输入）</h2>
+    <div class="vision">
+      <div style="flex:1.4;min-width:280px">
+        <canvas id="eye" width="480" height="288"></canvas>
+        <div class="legend" id="vlegend"></div>
+        <div class="row mono" style="margin-top:4px"><span id="vmeta">-</span><span id="vopen">-</span></div>
+      </div>
+      <div class="vlist">
+        <div class="sub" style="margin-top:0">看见</div>
+        <ul class="plain" id="vseen"></ul>
+        <div class="sub">听见</div>
+        <ul class="plain" id="vheard"></ul>
+        <div class="sub">视野构成</div>
+        <div class="mono" id="vview">-</div>
+        <div class="sub">最近陆地 / 上次环顾</div>
+        <div class="mono" id="vland">-</div>
+      </div>
+    </div>
+  </section>
+
   <section>
-    <h2>感知（结构化，无截图）</h2>
+    <h2>感知（只含看见 / 听见 / 记得）</h2>
     <div class="row"><span>敌对</span><span id="hostile" class="mono">-</span></div>
     <div class="row"><span>生物</span><span id="passive" class="mono">-</span></div>
     <div class="row"><span>玩家</span><span id="players" class="mono">-</span></div>
@@ -227,10 +253,11 @@ function render(s) {
     Object.keys(m.failCodes).length ? `失败码 ${esc(JSON.stringify(m.failCodes))}` : '',
   ].filter(Boolean).join('<br>');
 
-  $('hostile').textContent = p.nearby.hostile.map((h) => `${h.name}@${h.dist}`).join(', ') || '无';
+  $('hostile').textContent = p.nearby.hostile.map((h) => `${h.name}@${h.dist}${h.how === 'heard' ? '(听见)' : ''}`).join(', ') || '无';
   $('passive').textContent = p.nearby.passive.join(', ') || '无';
   $('players').textContent = p.nearby.players.join(', ') || '无';
-  $('res').innerHTML = p.nearby.resources.map((r) => `<li>${esc(r.block)} ×${r.count} · 最近 ${r.nearest} 格</li>`).join('') || '<li>—</li>';
+  $('res').innerHTML = p.nearby.resources.map((r) => `<li>${r.seen === 'now' ? '●' : '○'} ${esc(r.block)} ×${r.count} · ${r.dir ?? ''} ${r.nearest} 格</li>`).join('') || '<li>—</li>';
+  drawVision(s.vision, p.vision);
   $('slots').textContent = `（空位 ${p.emptySlots}）`;
   $('inv').innerHTML = p.inventory.map((i) => `<li>${esc(i.name)} ×${i.count}</li>`).join('') || '<li>空</li>';
 
@@ -239,6 +266,40 @@ function render(s) {
   $('goals').innerHTML = mem.goals.slice().reverse().map((g) => `<li title="${esc(g.summary)}">${g.status === 'succeeded' ? '✓' : g.status === 'failed' ? '✗' : '·'} [${g.source}] ${esc(g.goal)} — ${esc(g.summary)}</li>`).join('') || '<li>—</li>';
   $('lms').innerHTML = mem.landmarks.slice().reverse().map((l) => `<li>${l.id} · ${l.kind} · ${esc(l.label)} (${l.pos.x}, ${l.pos.y}, ${l.pos.z})</li>`).join('') || '<li>—</li>';
   $('notes').innerHTML = mem.notes.slice().reverse().map((n) => `<li>[${n.kind}] ${esc(n.text)}</li>`).join('') || '<li>—</li>';
+}
+
+
+const CATS = ['unknown','sky','dark','water','lava','leaves','wood','grass','dirt','sand','stone','ore','snow','plant','built','other'];
+const CAT_ZH = { unknown:'未加载', sky:'天空', dark:'黑暗', water:'水', lava:'岩浆', leaves:'树叶', wood:'木头', grass:'草地', dirt:'泥土', sand:'沙/砾', stone:'石头', ore:'矿石', snow:'雪/冰', plant:'植物', built:'人造', other:'其他' };
+const PAL = { unknown:[236,236,236], sky:[244,247,250], dark:[34,34,34], water:[120,160,205], lava:[225,110,50], leaves:[110,150,90], wood:[130,95,60], grass:[150,185,110], dirt:[150,120,90], sand:[225,212,165], stone:[150,150,150], ore:[215,165,20], snow:[252,252,252], plant:[175,195,95], built:[195,150,105], other:[185,185,185] };
+$('vlegend').innerHTML = CATS.filter((c) => c !== 'unknown').map((c) => `<span style="--c:rgb(${PAL[c].join(',')})">${CAT_ZH[c]}</span>`).join('');
+function drawVision(f, vs) {
+  const cv = $('eye'), g = cv.getContext('2d');
+  if (!f) { g.clearRect(0, 0, cv.width, cv.height); $('vmeta').textContent = '无画面'; return; }
+  if (cv.width !== f.cols * 12) { cv.width = f.cols * 12; cv.height = f.rows * 12; }
+  const img = g.createImageData(f.cols, f.rows);
+  for (let i = 0; i < f.cats.length; i++) {
+    const c = PAL[CATS[f.cats[i]]] || PAL.other;
+    const fog = CATS[f.cats[i]] === 'sky' || CATS[f.cats[i]] === 'dark' ? 0 : (f.dists[i] / 255) * 0.6;
+    img.data[i * 4] = c[0] + (255 - c[0]) * fog; img.data[i * 4 + 1] = c[1] + (255 - c[1]) * fog; img.data[i * 4 + 2] = c[2] + (255 - c[2]) * fog; img.data[i * 4 + 3] = 255;
+  }
+  const tmp = document.createElement('canvas'); tmp.width = f.cols; tmp.height = f.rows; tmp.getContext('2d').putImageData(img, 0, 0);
+  g.imageSmoothingEnabled = false; g.drawImage(tmp, 0, 0, cv.width, cv.height);
+  g.strokeStyle = 'rgba(0,0,0,.25)'; g.beginPath(); g.moveTo(cv.width / 2, cv.height / 2 - 8); g.lineTo(cv.width / 2, cv.height / 2 + 8); g.moveTo(cv.width / 2 - 8, cv.height / 2); g.lineTo(cv.width / 2 + 8, cv.height / 2); g.stroke();
+  g.font = '11px ui-monospace, monospace';
+  for (const e of f.entities) {
+    const x = e.u * cv.width, y = e.v * cv.height;
+    g.fillStyle = e.kind === 'hostile' ? '#d64545' : '#111'; g.fillRect(x - 4, y - 4, 8, 8);
+    g.fillText(`${e.name.replace('player:', '')} ${e.dist}`, x + 7, y + 4);
+  }
+  $('vmeta').textContent = `朝向 ${f.facing} · ${f.cols}×${f.rows} 射线 · ${f.range} 格 · 扫描 ${f.scanMs}ms`;
+  if (vs) {
+    $('vopen').textContent = `视距 左${vs.openness.left} 中${vs.openness.center} 右${vs.openness.right}`;
+    $('vseen').innerHTML = vs.seen_entities.map((e) => `<li>${esc(e.name)} · ${e.rel} ${e.dist} 格</li>`).join('') || '<li>—</li>';
+    $('vheard').innerHTML = vs.heard.map((e) => `<li>${esc(e.name)} · ${esc(e.approx)}</li>`).join('') || '<li>—</li>';
+    $('vview').textContent = vs.view;
+    $('vland').textContent = `${vs.nearest_land ? vs.nearest_land.dir + ' ' + vs.nearest_land.dist + ' 格' : '未知'} / ${vs.last_look_around_s == null ? '未环顾' : vs.last_look_around_s + ' 秒前'}`;
+  }
 }
 
 const log = $('log');

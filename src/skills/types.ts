@@ -1,4 +1,4 @@
-import type { GameAdapter } from '../adapter/types.ts';
+import type { BlockHit, EntityInfo, GameAdapter } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
 
@@ -29,8 +29,18 @@ export interface SkillResult {
   data?: Record<string, unknown>;
 }
 
+/** 技能能用的“感官”：只有看见/听见/记得的东西，没有透视 */
+export interface Senses {
+  perceivedEntities(radius: number): EntityInfo[];
+  knownBlocks(names: string[], maxDist: number): BlockHit[];
+  /** 立即重新看一眼（转头之后调用） */
+  refresh(): void;
+  markSweep(): void;
+}
+
 export interface SkillCtx {
   adapter: GameAdapter;
+  senses: Senses;
   memory: WorldMemory;
   bus: EventBus;
   signal: AbortSignal;

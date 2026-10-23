@@ -9,7 +9,7 @@ export const SKILLS: Record<string, Skill> = Object.fromEntries(
 );
 
 /** 只给反射层/填充行为使用、不让 LLM 主动规划的技能 */
-export const LLM_HIDDEN = new Set(['look_around', 'unstuck']);
+export const LLM_HIDDEN = new Set(['unstuck']);
 
 export function skillCatalog(): string {
   return Object.values(SKILLS)

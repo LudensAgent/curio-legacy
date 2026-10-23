@@ -11,6 +11,7 @@ import { startDashboard } from './observer/dashboard.ts';
 import { Metrics } from './observer/metrics.ts';
 import { Spectator } from './observer/spectator.ts';
 import { Perception } from './perception/perception.ts';
+import { Vision } from './perception/vision.ts';
 import { MockProvider, OpenAICompatibleProvider, type LlmProvider } from './planner/llm.ts';
 import { ruleProposal } from './planner/plan.ts';
 import { Planner } from './planner/planner.ts';
@@ -23,8 +24,9 @@ process.on('uncaughtException', (e: any) => bus.publish('uncaught', 'P0', String
 
 const memory = new WorldMemory(path.join(config.dataDir, 'world-memory.json'));
 const adapter = new MineflayerAdapter(config, bus);
-const arbiter = new Arbiter(adapter, memory, bus);
-const perception = new Perception(adapter, memory, bus);
+const vision = new Vision(adapter, config.vision);
+const arbiter = new Arbiter(adapter, memory, bus, vision);
+const perception = new Perception(adapter, memory, bus, vision);
 
 let provider: LlmProvider;
 if (config.llm.provider === 'openai') {
@@ -37,7 +39,7 @@ if (config.llm.provider === 'openai') {
 }
 const planner = new Planner(config, provider, adapter, memory, bus, new JsonlWriter(path.join(config.dataDir, 'logs'), 'llm'));
 const executive = new Executive({ adapter, arbiter, planner, perception, memory, bus });
-const reflex = new Reflex(adapter, arbiter, bus);
+const reflex = new Reflex(adapter, arbiter, bus, vision);
 const spectator = new Spectator(config, adapter, bus);
 const metrics = new Metrics(adapter, arbiter, executive, planner, reflex, bus);
 
@@ -98,6 +100,7 @@ function snapshot() {
     },
     state: adapter.state(),
     percept: perception.snapshot(),
+    vision: vision.frame,
     task: arbiter.info(),
     planVersion: arbiter.planVersion,
     exec: executive.snapshot(),
@@ -113,7 +116,7 @@ function snapshot() {
   };
 }
 
-bus.publish('boot', 'P2', `Minecraft Curiosity Agent MVP 启动｜LLM=${provider.name}｜延迟注入=${config.llm.fakeDelayMs}ms`);
+bus.publish('boot', 'P2', `Minecraft Curiosity Agent MVP 启动｜LLM=${provider.name}（LLM_PROVIDER=${config.llm.providerLabel}）｜视觉 ${config.vision.hFov}°/${config.vision.range} 格｜延迟注入=${config.llm.fakeDelayMs}ms`);
 adapter.connect();
 perception.start();
 executive.start();

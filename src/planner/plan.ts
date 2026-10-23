@@ -141,17 +141,33 @@ function baseRule(p: Percept): Record<string, unknown> {
   const base = p.exploration.base;
   const night = p.time.phase === 'night';
   const logNearby = p.nearby.resources.some((r) => r.block.endsWith('_log'));
-  const stoneNearby = true; // 石头几乎到处都有（地表以下），由 gather 自己判断
+  const stoneNearby = true; // 看不见石头时 gather 会就地向下挖
 
   const mk = (thought: string, goal: string, goal_type: string, steps: Step[], extra: Record<string, unknown> = {}) => ({ thought, goal, goal_type, steps, ...extra });
+
+  const vis = p.vision;
+  const sweptRecently = vis?.last_look_around_s != null && vis.last_look_around_s < 90;
+  const waterView = /water (\d+)%/.exec(vis?.view ?? '');
+  const mostlyWater = p.self.inWater || (waterView ? Number(waterView[1]) >= 50 : false);
+
+  if (mostlyWater && vis?.nearest_land && vis.nearest_land.dist > 3) {
+    return mk(`周围都是水，${vis.nearest_land.dir} 方向 ${vis.nearest_land.dist} 格外能看到陆地，先上岸。`, '游回陆地', 'survive', [
+      { skill: 'explore', args: { direction: vis.nearest_land.dir, distance: Math.min(160, Math.max(24, vis.nearest_land.dist + 6)) } },
+    ]);
+  }
+  if (mostlyWater && !sweptRecently) return mk('四周都是水，先环顾一圈看看陆地在哪。', '环顾四周寻找陆地', 'investigate', [{ skill: 'look_around' }]);
 
   if (p.self.hp < 8 && p.self.food < 18 && count(p, (n) => FOODS.has(n)) > 0) return mk('生命值偏低，先吃点东西恢复。', '恢复状态', 'survive', [{ skill: 'eat' }]);
   if (night && base && base.dist > 24) return mk('天黑了，离基地有点远，先回去比较安全。', '夜间返回基地', 'survive', [{ skill: 'goto', args: { target: 'base' } }], { abort_if: { hp_below: 5 } });
 
   if (!hasStonePick) {
     if (!hasWoodPick) {
-      if (logs + planks / 4 < 3 && logNearby) return mk('还没有任何工具，先砍几块原木。', '收集原木', 'gather', [{ skill: 'gather', args: { block: 'log', count: 5 } }]);
-      if (logs + planks / 4 < 3) return mk('附近没有树，去别处找找。', '寻找树木', 'explore', [{ skill: 'explore', args: { direction: 'auto', distance: 48 } }]);
+      if (logs + planks / 4 < 3 && logNearby) {
+        const t = p.nearby.resources.find((r) => r.block.endsWith('_log'))!;
+        return mk(`${t.seen === 'now' ? '看到' : '记得'} ${t.dir ?? ''} 方向 ${t.nearest} 格外有树，先去砍几块原木。`, '收集原木', 'gather', [{ skill: 'gather', args: { block: 'log', count: 5 } }]);
+      }
+      if (logs + planks / 4 < 3 && !sweptRecently) return mk('眼前没看到树，先环顾一圈。', '环顾四周寻找树木', 'investigate', [{ skill: 'look_around' }]);
+      if (logs + planks / 4 < 3) return mk('环顾过了，附近看不到树，去别处找找。', '寻找树木', 'explore', [{ skill: 'explore', args: { direction: 'auto', distance: 48 } }]);
       const steps: Step[] = [];
       if (planks < 7) steps.push({ skill: 'craft', args: { item: plankName, count: Math.min(16, 8 - (planks % 4)) } });
       if (!hasTableNearby) steps.push({ skill: 'craft', args: { item: 'crafting_table', count: 1 } });

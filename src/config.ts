@@ -34,7 +34,9 @@ export const config = {
     admins: [observer, ...str('ADMIN_PLAYERS').split(',')].map((s) => s.trim()).filter(Boolean),
   },
   llm: {
-    provider: str('LLM_PROVIDER', 'mock') as 'mock' | 'openai',
+    /** 除 mock 以外的任何值（openai / deepseek / ollama …）都走 OpenAI 兼容接口 */
+    provider: (str('LLM_PROVIDER', 'mock').toLowerCase() === 'mock' ? 'mock' : 'openai') as 'mock' | 'openai',
+    providerLabel: str('LLM_PROVIDER', 'mock'),
     baseUrl: str('LLM_BASE_URL', 'https://api.openai.com/v1').replace(/\/+$/, ''),
     apiKey: str('LLM_API_KEY'),
     model: str('LLM_MODEL', 'gpt-4o-mini'),
@@ -51,6 +53,14 @@ export const config = {
   dashboard: {
     host: str('DASHBOARD_HOST', '127.0.0.1'),
     port: num('DASHBOARD_PORT', 3000),
+  },
+  vision: {
+    range: num('VISION_RANGE', 64),
+    hFov: num('VISION_FOV', 100),
+    vFov: num('VISION_VFOV', 60),
+    cols: num('VISION_COLS', 40),
+    rows: num('VISION_ROWS', 24),
+    hearRadius: num('VISION_HEAR', 10),
   },
   viewerPort: num('VIEWER_PORT', 0),
   dataDir: path.resolve(str('DATA_DIR', './data')),

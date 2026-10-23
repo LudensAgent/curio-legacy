@@ -3,9 +3,13 @@ import { codeFromError, clampInt, fail, isAbort, obj, ok, type Skill } from './t
 const key = (p: { x: number; y: number; z: number }) => `${p.x},${p.y},${p.z}`;
 
 // ------------------------------------------------------------------ gather
+/** 可以“往下挖”找到的地表/地下方块 */
+const DIGGABLE_DOWN = new Set(['stone', 'cobblestone', 'deepslate', 'andesite', 'granite', 'diorite', 'tuff', 'dirt', 'grass_block', 'coarse_dirt', 'sand', 'gravel', 'clay']);
+const UNSAFE_BELOW = new Set(['lava', 'water', 'air', 'cave_air', 'bedrock']);
+
 export const gather: Skill<{ block: string; count: number }> = {
   name: 'gather',
-  description: '寻找并挖掘指定方块，拾取掉落物。block 可用别名：log(任意原木)、stone、dirt、coal、iron、ore 等',
+  description: '前往【看见过或正看见】的指定方块并挖掘、拾取。看不见的不会去挖（没有透视）；stone/dirt/sand 若看不见会就地向下挖。block 可用别名：log(任意原木)、stone、dirt、coal、iron、ore',
   argsDoc: '{"block": "log|stone|coal|iron|<方块名>", "count"?: 1-32}',
   timeoutMs: 180000,
   movement: true,
@@ -17,11 +21,13 @@ export const gather: Skill<{ block: string; count: number }> = {
     return { ok: true, args: { block, count: clampInt(a.count, 1, 32, 4) } };
   },
   async run(ctx, args) {
-    const { adapter, signal } = ctx;
+    const { adapter, senses, signal } = ctx;
     const names = adapter.resolveBlockNames(args.block);
+    const canDigDown = names.some((n) => DIGGABLE_DOWN.has(n));
     const skip = new Set<string>();
     let dug = 0;
     let failsInRow = 0;
+    let dugDown = 0;
     ctx.progress(0, `采集 ${args.block} x${args.count}`);
     while (dug < args.count) {
       const s = adapter.state();
@@ -29,18 +35,42 @@ export const gather: Skill<{ block: string; count: number }> = {
       if (s.emptySlots === 0) {
         return dug > 0 ? ok(`背包已满，采集了 ${dug}/${args.count} 个 ${args.block}`) : fail('INVENTORY_FULL', '背包已满');
       }
-      const hits = adapter
-        .findBlocks(names, 48, 64)
+      senses.refresh();
+      const hits = senses
+        .knownBlocks(names, 96)
         .filter((h) => !skip.has(key(h.pos)))
         .sort((a, b) => a.dist + Math.abs(a.pos.y - s.pos.y) * 0.6 - (b.dist + Math.abs(b.pos.y - s.pos.y) * 0.6));
+
       if (!hits.length) {
-        return dug > 0 ? ok(`附近没有更多 ${args.block}，采集了 ${dug}/${args.count}`) : fail('NOT_FOUND', `48 格内没有找到 ${args.block}`);
+        // 看不见目标：石头/泥土类可以就地往下挖（脚下的方块是“踩着的”，不算透视）
+        if (canDigDown && dugDown < 8) {
+          const below = { x: Math.floor(s.pos.x), y: Math.floor(s.pos.y) - 1, z: Math.floor(s.pos.z) };
+          const under = adapter.blockAt(below);
+          const under2 = adapter.blockAt({ ...below, y: below.y - 1 });
+          if (under && DIGGABLE_DOWN.has(under) && !UNSAFE_BELOW.has(under2 ?? 'air')) {
+            ctx.progress(dug / args.count, `向下挖（${under}）`);
+            const r = await adapter.dig(below, signal);
+            if (r.ok) {
+              dugDown++;
+              if (names.includes(under)) {
+                dug++;
+                ctx.progress(dug / args.count, `采集 ${args.block} ${dug}/${args.count}`);
+              }
+              await adapter.collectNearbyDrops(signal, 3, 1500);
+              continue;
+            }
+          }
+        }
+        return dug > 0
+          ? ok(`看不到更多 ${args.block}，采集了 ${dug}/${args.count}`)
+          : fail('NOT_FOUND', `视野和记忆里都没有 ${args.block}（可以先 look_around 环顾，或 explore 到别处看看）`);
       }
       const target = hits.find((h) => adapter.canHarvest(h.pos));
       if (!target) return fail('TOOL_MISSING', `缺少能采集 ${hits[0].name} 的工具`, { block: hits[0].name });
 
       try {
-        await adapter.moveTo({ kind: 'reach_block', pos: target.pos }, { signal, timeoutMs: Math.min(30000, Math.max(3000, ctx.deadline - Date.now())) });
+        ctx.progress(dug / args.count, `前往 ${target.name}（${Math.round(target.dist)} 格）`);
+        await adapter.moveTo({ kind: 'reach_block', pos: target.pos }, { signal, timeoutMs: Math.min(45000, Math.max(3000, ctx.deadline - Date.now())) });
         const r = await adapter.dig(target.pos, signal);
         if (!r.ok) throw new Error(r.reason ?? 'DIG_FAILED');
       } catch (e) {

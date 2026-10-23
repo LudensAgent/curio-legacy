@@ -12,7 +12,7 @@ export const flee: Skill<{ distance: number }> = {
     return { ok: true, args: { distance: clampInt(obj(raw).distance, 8, 32, 18) } };
   },
   async run(ctx, args) {
-    const hostiles = ctx.adapter.nearbyEntities(16).filter((e) => e.kind === 'hostile');
+    const hostiles = ctx.senses.perceivedEntities(16).filter((e) => e.kind === 'hostile');
     if (!hostiles.length) return ok('附近没有威胁');
     const c = hostiles.reduce((a, e) => ({ x: a.x + e.pos.x / hostiles.length, y: a.y + e.pos.y / hostiles.length, z: a.z + e.pos.z / hostiles.length }), { x: 0, y: 0, z: 0 });
     try {
@@ -20,7 +20,8 @@ export const flee: Skill<{ distance: number }> = {
     } catch (e) {
       if (isAbort(e)) throw e;
     }
-    const left = ctx.adapter.nearbyEntities(10).filter((e) => e.kind === 'hostile').length;
+    ctx.senses.refresh();
+    const left = ctx.senses.perceivedEntities(10).filter((e) => e.kind === 'hostile').length;
     return ok(left ? `撤离中，附近仍有 ${left} 个敌对生物` : `已远离 ${hostiles.map((h) => h.name).join('、')}`);
   },
 };
@@ -37,10 +38,10 @@ export const defend: Skill<{ entityId?: number }> = {
     return { ok: true, args: Number.isFinite(id) ? { entityId: id } : {} };
   },
   async run(ctx, args) {
-    const { adapter, signal } = ctx;
+    const { adapter, signal, senses } = ctx;
     const pick = () =>
-      adapter
-        .nearbyEntities(12)
+      senses
+        .perceivedEntities(12)
         .find((e) => e.kind === 'hostile' && e.name !== 'creeper' && (args.entityId === undefined || e.id === args.entityId));
     let target = pick();
     if (!target) return ok('附近没有可攻击的目标');
@@ -49,7 +50,8 @@ export const defend: Skill<{ entityId?: number }> = {
     let hits = 0;
     while (Date.now() < ctx.deadline) {
       if (adapter.state().hp <= 6) return fail('LOW_HP', `与 ${name} 战斗时生命过低`);
-      target = adapter.nearbyEntities(16).find((e) => e.id === (args.entityId ?? target!.id));
+      senses.refresh();
+      target = senses.perceivedEntities(16).find((e) => e.id === (args.entityId ?? target!.id));
       if (!target) return ok(`${name} 已被击退或消失（攻击 ${hits} 次）`);
       if (target.dist > 3) {
         try {

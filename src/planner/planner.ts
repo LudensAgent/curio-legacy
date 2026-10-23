@@ -84,7 +84,7 @@ export class Planner {
       this.bus.publish('llm_budget', 'P1', `LLM 每小时调用已达上限 ${this.cfg.llm.maxCallsPerHour}，改用规则目标`);
       return this.rulePlan(ctx);
     }
-    const messages = buildMessages(this.cfg.persona, ctx, this.memory);
+    const messages = buildMessages(this.cfg.persona, ctx, this.memory, this.cfg.vision?.hFov ?? 100);
     this.stats.inFlightSince = Date.now();
     try {
       for (let attempt = 0; attempt < 2; attempt++) {

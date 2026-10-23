@@ -162,7 +162,7 @@ export class Executive {
   /** 预规划是在上一个目标完成前做的；若它与刚成功完成的目标相同，说明是基于过期状态做出的重复计划。 */
   private isStale(q: Plan): boolean {
     const f = this.lastFinished;
-    return !!f && q.reason === 'prefetch' && f.status === 'succeeded' && f.goal === q.goal && (q.requestedAt ?? 0) < f.at;
+    return !!f && q.reason === 'prefetch' && q.goalType !== 'explore' && f.status === 'succeeded' && f.goal === q.goal && (q.requestedAt ?? 0) < f.at;
   }
 
   private finishPlan(status: string, summary: string) {

@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import type { ActionResult, AgentState, BlockHit, EntityInfo, GameAdapter, MoveOpts, MoveTarget, Vec3Like } from '../src/adapter/types.ts';
+import type { ActionResult, AgentState, BlockHit, EntityInfo, Eye, GameAdapter, MoveOpts, MoveTarget, Optics, Vec3Like } from '../src/adapter/types.ts';
 import { dist3, raceAbort, sleep, throwIfAborted } from '../src/util.ts';
 
 /** 离线测试用的模拟游戏：没有 Minecraft 也能验证仲裁、反射、规划与连贯性。 */
@@ -14,6 +14,37 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
   speed = 20; // 格/秒（测试加速）
   actions: string[] = [];
   stopAllCount = 0;
+  /** 朝向：默认面朝东（+X）；yaw 约定与 mineflayer 相同 */
+  yaw = -Math.PI / 2;
+  pitch = -0.15;
+  /** 地面：y=63 为草方块，y<63 为石头（被挖掉的记在 removed） */
+  groundY = 63;
+  removed = new Set<string>();
+  light = 15;
+
+  private k(x: number, y: number, z: number) {
+    return `${x},${y},${z}`;
+  }
+  /** 世界里 (x,y,z) 的方块名 */
+  nameAt(x: number, y: number, z: number): string {
+    const b = this.blocks.find((bb) => bb.pos.x === x && bb.pos.y === y && bb.pos.z === z);
+    if (b) return b.name;
+    if (this.removed.has(this.k(x, y, z))) return 'air';
+    if (y === this.groundY) return 'grass_block';
+    if (y < this.groundY) return 'stone';
+    return 'air';
+  }
+  eye(): Eye | null {
+    return this.connected ? { x: this.pos.x, y: this.pos.y + 1.62, z: this.pos.z, yaw: this.yaw, pitch: this.pitch } : null;
+  }
+  blockOptics(x: number, y: number, z: number): Optics | null {
+    const name = this.nameAt(x, y, z);
+    const kind = name === 'air' || name.includes('glass') ? 'clear' : name === 'water' ? 'water' : name.endsWith('_leaves') ? 'foliage' : 'solid';
+    return { name, kind };
+  }
+  lightAt() {
+    return { block: 0, sky: this.light };
+  }
 
   state(): AgentState {
     return {
@@ -34,7 +65,7 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
       .slice(0, count);
   }
   blockAt(pos: Vec3Like) {
-    return this.blocks.find((b) => b.pos.x === pos.x && b.pos.y === pos.y && b.pos.z === pos.z)?.name ?? 'air';
+    return this.nameAt(pos.x, pos.y, pos.z);
   }
   resolveBlockNames(q: string) {
     if (q === 'log') return ['oak_log'];
@@ -52,6 +83,7 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
     else if (t.kind === 'xz') dest = { x: t.x, y: this.pos.y, z: t.z };
     else if (t.kind === 'away_from') dest = { x: this.pos.x + t.distance, y: this.pos.y, z: this.pos.z };
     const d = dist3(dest, this.pos);
+    if (Math.hypot(dest.x - this.pos.x, dest.z - this.pos.z) > 0.5) this.yaw = Math.atan2(-(dest.x - this.pos.x), -(dest.z - this.pos.z));
     const start = { ...this.pos };
     const t0 = Date.now();
     const total = (d / this.speed) * 1000;
@@ -74,10 +106,15 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
   }
   async dig(pos: Vec3Like, signal: AbortSignal): Promise<ActionResult> {
     await sleep(100, signal);
+    const name = this.nameAt(pos.x, pos.y, pos.z);
+    if (name === 'air') return { ok: false, reason: 'NO_BLOCK' };
     const i = this.blocks.findIndex((b) => b.pos.x === pos.x && b.pos.y === pos.y && b.pos.z === pos.z);
-    if (i < 0) return { ok: false, reason: 'NO_BLOCK' };
-    const [b] = this.blocks.splice(i, 1);
-    const drop = b.name === 'stone' ? 'cobblestone' : b.name;
+    if (i >= 0) this.blocks.splice(i, 1);
+    else this.removed.add(this.k(pos.x, pos.y, pos.z));
+    const b = { name };
+    const drop = b.name === 'stone' ? 'cobblestone' : b.name === 'grass_block' ? 'dirt' : b.name;
+    // 挖掉脚下的方块会掉下去
+    if (Math.floor(this.pos.x) === pos.x && Math.floor(this.pos.z) === pos.z && Math.floor(this.pos.y) - 1 === pos.y) this.pos = { ...this.pos, y: this.pos.y - 1 };
     this.inv.set(drop, (this.inv.get(drop) ?? 0) + 1);
     this.actions.push(`dig:${b.name}`);
     return { ok: true };
@@ -105,7 +142,10 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
     this.entities = this.entities.filter((e) => e.id !== id);
     return true;
   }
-  async look() {}
+  async look(yaw: number, pitch: number) {
+    this.yaw = yaw;
+    this.pitch = pitch;
+  }
   async jump(ms: number, signal: AbortSignal) {
     await sleep(ms, signal);
   }

@@ -9,7 +9,9 @@ import type {
   BlockHit,
   EntityInfo,
   EntityKind,
+  Eye,
   GameAdapter,
+  Optics,
   MoveOpts,
   MoveTarget,
   Vec3Like,
@@ -69,6 +71,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         mv.allowSprinting = true;
         mv.allowParkour = true;
         mv.allow1by1towers = true;
+        // 海带/海草等含水植物在物理上就是水：不加进 liquids 的话寻路会以为脚下悬空，在海带丛里原地卡死
+        for (const n of ['kelp', 'kelp_plant', 'seagrass', 'tall_seagrass', 'bubble_column']) {
+          const b = this.mcData.blocksByName[n];
+          if (b) mv.liquids.add(b.id);
+        }
+        mv.liquidCost = 3; // 能走陆路就别游泳
         try {
           for (const n of PROTECTED_BLOCKS) {
             const b = this.mcData.blocksByName[n];
@@ -139,6 +147,72 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return new Vec3(p.x, p.y, p.z);
   }
 
+  // ---------------------------------------------------------------- 视觉原语
+  private opticsByState = new Map<number, Optics>();
+  private tmpVec: any = null;
+
+  private tmp(x: number, y: number, z: number) {
+    if (!this.tmpVec) this.tmpVec = this.vec({ x: 0, y: 0, z: 0 });
+    this.tmpVec.x = x;
+    this.tmpVec.y = y;
+    this.tmpVec.z = z;
+    return this.tmpVec;
+  }
+
+  eye(): Eye | null {
+    if (!this.ready) return null;
+    const e = this.bot.entity;
+    return { x: e.position.x, y: e.position.y + (e.eyeHeight ?? 1.62), z: e.position.z, yaw: e.yaw, pitch: e.pitch };
+  }
+
+  private classifyOptics(b: any): Optics {
+    const name: string = b?.name ?? 'air';
+    let kind: Optics['kind'] = 'solid';
+    if (name === 'air' || name === 'cave_air' || name === 'void_air' || name === 'light' || name === 'structure_void' || name === 'barrier') kind = 'clear';
+    else if (name === 'water' || name === 'bubble_column' || name === 'kelp' || name === 'kelp_plant' || name === 'seagrass' || name === 'tall_seagrass') kind = 'water';
+    else if (name === 'lava') kind = 'solid';
+    else if (name.endsWith('_leaves')) kind = 'foliage';
+    else if (name.includes('glass')) kind = 'clear';
+    else if (b?.boundingBox === 'empty') kind = 'clear'; // 草、花、火把、铁轨等
+    return { name, kind };
+  }
+
+  blockOptics(x: number, y: number, z: number): Optics | null {
+    if (!this.ready) return null;
+    const w = this.bot.world;
+    const v = this.tmp(x, y, z);
+    try {
+      if (typeof w.getColumnAt === 'function' && !w.getColumnAt(v)) return null;
+      let sid: number | null | undefined;
+      if (typeof w.getBlockStateId === 'function') sid = w.getBlockStateId(v);
+      else sid = this.bot.blockAt(v)?.stateId;
+      if (sid === null || sid === undefined) return null;
+      let o = this.opticsByState.get(sid);
+      if (!o) {
+        o = this.classifyOptics(this.mcData.blocksByStateId?.[sid]);
+        this.opticsByState.set(sid, o);
+      }
+      return o;
+    } catch {
+      return null;
+    }
+  }
+
+  lightAt(x: number, y: number, z: number): { block: number; sky: number } | null {
+    if (!this.ready) return null;
+    const w = this.bot.world;
+    const v = this.tmp(x, y, z);
+    try {
+      if (typeof w.getColumnAt === 'function' && !w.getColumnAt(v)) return null;
+      const block = typeof w.getBlockLight === 'function' ? w.getBlockLight(v) : undefined;
+      const sky = typeof w.getSkyLight === 'function' ? w.getSkyLight(v) : undefined;
+      if (block === undefined && sky === undefined) return null;
+      return { block: block ?? 0, sky: sky ?? 15 };
+    } catch {
+      return null;
+    }
+  }
+
   // ---------------------------------------------------------------- 感知（结构化）
   state(): AgentState {
     const b = this.bot;
@@ -197,7 +271,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (d > radius) continue;
       const name = ent.type === 'player' ? `player:${ent.username ?? '?'}` : String(ent.name ?? 'unknown');
       if (name === 'experience_orb') continue;
-      out.push({ id: ent.id, name, kind: this.classify(ent), pos: { x: ent.position.x, y: ent.position.y, z: ent.position.z }, dist: d });
+      out.push({ id: ent.id, name, kind: this.classify(ent), pos: { x: ent.position.x, y: ent.position.y, z: ent.position.z }, dist: d, height: ent.height });
     }
     return out.sort((a, c) => a.dist - c.dist);
   }
@@ -379,7 +453,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     let recipe = b.recipesFor(data.id, null, 1, null)[0];
     if (!recipe) {
       const tableId = this.mcData.blocksByName.crafting_table.id;
-      table = b.findBlock({ matching: tableId, maxDistance: 32 });
+      table = b.findBlock({ matching: tableId, maxDistance: 6 }); // 只用身边的工作台（不透视）
       if (!table) {
         const tableItem = b.inventory.items().find((i: any) => i.name === 'crafting_table');
         const ref = tableItem ? this.findPlaceSpot() : null;
