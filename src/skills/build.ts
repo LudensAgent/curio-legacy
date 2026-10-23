@@ -1,3 +1,4 @@
+import type { ConstructionResult } from '../building/engine.ts';
 import { findStation } from './stations.ts';
 import type { Vec3Like } from '../adapter/types.ts';
 import { BuildingArchive } from '../building/archive.ts';
@@ -30,9 +31,32 @@ interface BuildArgs {
   cells?: [number, number, number][];
 }
 
+const tally = (o: Record<string, number>) => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([n, c]) => `${n}×${c}`).join('、');
+
+/** 把逐格缺陷归成几句人话：整地做了什么、什么东西挡着、地基哪里不行、还差多少块没放 */
+export function describeBuildProblems(result: ConstructionResult): string {
+  const out: string[] = [];
+  const site = result.site;
+  if (site && (Object.keys(site.cleared).length || site.filled)) out.push(`整地清掉了 ${tally(site.cleared) || '0 块'}${site.filled ? `，填了 ${site.filled} 个坑` : ''}`);
+  if (site && Object.keys(site.blocked).length) out.push(`场地里有 ${tally(site.blocked)} 挡着（不是自然方块，没有动它）`);
+  const d = result.inspection.defects;
+  const terrain: Record<string, number> = {}, obstruct: Record<string, number> = {}, unknown = d.filter((x) => x.kind === 'unknown').length;
+  let missingCells = 0;
+  for (const x of d) {
+    if (x.kind === 'terrain') terrain[String(x.actual ?? '?')] = (terrain[String(x.actual ?? '?')] ?? 0) + 1;
+    else if ((x.kind === 'obstruction' || x.kind === 'wrong_block') && x.actual) obstruct[x.actual] = (obstruct[x.actual] ?? 0) + 1;
+    else if (x.kind === 'missing') missingCells++;
+  }
+  if (Object.keys(terrain).length) out.push(`地基不行：${tally(terrain).replace('void_or_unsupported', '下面悬空太深')}——换一块更平、没有水和岩浆的地方（换 origin）`);
+  if (Object.keys(obstruct).length) out.push(`还有 ${tally(obstruct)} 占着房子的位置`);
+  if (unknown) out.push(`${unknown} 处还看不清/区块没加载，走近再来`);
+  if (missingCells) out.push(`还有 ${missingCells} 块没放上`);
+  return out.length ? `${out.join('；')}。` : '';
+}
+
 export const build: Skill<BuildArgs> = {
   name: 'build',
-  description: '参数化施工：可选尺寸、材料、平顶/阶梯坡顶、门窗、工作台/熔炉/箱子/照明。先勘察地基、核算分材料缺口，再分阶段施工；必须逐格及通行验收才算建成。返回 projectId；中断后用该 ID 重新观察并续建，inspect 只检查，repair 修复有档案的建筑。spec.components 支持精确坐标、方块状态、功能标签和施工依赖的组合设计；未提供底层状态能力时明确报错。',
+  description: '参数化施工：可选尺寸、材料、平顶/阶梯坡顶、门窗、工作台/熔炉/箱子/照明。先整地（清掉占地里的草、花、树和凸起的土石，填平小坑），再勘察地基、核算分材料缺口，分阶段施工；必须逐格及通行验收才算建成。返回 projectId；中断后用该 ID 重新观察并续建，inspect 只检查，repair 修复有档案的建筑。spec.components 支持精确坐标、方块状态、功能标签和施工依赖的组合设计；未提供底层状态能力时明确报错。',
   argsDoc: '{"blueprint"?:"hut|big_hut|pillar|wall|custom", "spec"?:{"name":"住宅","purpose":"庇护所","width":5,"depth":5,"height":3,"roof":"flat|gable","palette"?:{"foundation":"cobblestone","wall":"oak_planks","roof":"oak_planks","window":"glass","door":"oak_door"},"windows"?:true,"door"?:true,"facilities"?:["crafting_table","furnace","chest","torch"],"budget"?:512,"layout"?:"house|custom","components"?:[{"pos":{"x":0,"y":0,"z":0},"name":"cobblestone","properties"?:{},"phase"?:"frame","tags"?:[],"dependsOn"?:[]}]}, "projectId"?:"已有作品ID", "mode"?:"build|inspect|repair", "origin"?:{"x":0,"y":64,"z":0}, "rotation"?:0|90|180|270, "reason"?:"设计/改造原因", "cells"?:[[0,0,0]]}',
   timeoutMs: 600000,
   movement: true,
@@ -87,7 +111,7 @@ export const build: Skill<BuildArgs> = {
       if (!result.inspection.complete) {
         const missing = Object.entries(result.missingMaterials).map(([name, count]) => `${name}×${count}`).join('，');
         const failureCode = missing ? 'MISSING_MATERIALS' : result.failures.some((f) => f.reason === 'WRONG_DIMENSION') ? 'WRONG_DIMENSION' : 'ERROR';
-        return fail(failureCode, `${spec.name} 尚未验收（${result.inspection.defects.length} 个缺陷）${missing ? `；缺少 ${missing}` : ''}。作品 ID ${project.id}；可补料后续建/repair/inspect。${result.failures[0] ? ` ${result.failures[0].reason}` : ''}`, data);
+        return fail(failureCode, `${spec.name} 尚未验收（${result.inspection.defects.length} 个缺陷）${missing ? `；缺少 ${missing}` : ''}。${describeBuildProblems(result)}作品 ID ${project.id}；可补料后续建/repair/inspect。${result.failures[0] ? ` ${result.failures[0].reason}` : ''}`, data);
       }
       if (blueprint.home && args.mode !== 'inspect') {
         const home = rotatePosition(blueprint.home, project.origin, project.rotation);
@@ -95,7 +119,7 @@ export const build: Skill<BuildArgs> = {
         ctx.memory.addLandmark('discovery', `我的${spec.name}`, state.dim, home, 4);
         ctx.bus.publish('built', 'P2', `${spec.name} 逐格及通行检查通过；作品 ${project.id}`);
       }
-      return ok(`${spec.name} 验收通过；本次放置 ${result.placed} 块。作品 ID ${project.id}`, data);
+      return ok(`${spec.name} 验收通过；本次放置 ${result.placed} 块。${describeBuildProblems(result)}作品 ID ${project.id}`, data);
     } catch (e) {
       if (isAbort(e)) throw e;
       return fail(codeFromError(e), `建筑工程失败：${(e as Error).message}`);

@@ -403,3 +403,36 @@ test('building skill never creates a home for incomplete work and supports real 
   const fixture = design(archive, custom); supply(world, fixture.blueprint);
   assert.equal((await constructBuilding(ctx(world), archive, fixture.project, fixture.blueprint, 'build')).inspection.complete, true);
 });
+
+test('盖房前先整地：清掉占地里的土坡、草、树叶、树干和自己的火把，填平脚手架下的小坑；箱子不动并在结果里说明', async () => {
+  const adapter = new BuildingWorld(), archive = new BuildingArchive(null);
+  const { blueprint, project } = design(archive);
+  const at = (x: number, y: number, z: number) => rotatePosition({ x, y, z }, project.origin, 0);
+  // 坡地：房子一侧地面高出两格
+  for (let x = 3; x < 5; x++) for (let z = 0; z < 5; z++) { adapter.setBlock(at(x, 0, z), 'grass_block'); adapter.setBlock(at(x, 1, z), 'dirt'); }
+  adapter.setBlock(at(1, 0, 1), 'birch_log'); adapter.setBlock(at(1, 1, 1), 'birch_log'); adapter.setBlock(at(1, 2, 1), 'birch_leaves');
+  adapter.setBlock(at(0, 1, 2), 'birch_leaves'); adapter.setBlock(at(2, 0, 3), 'poppy');
+  const scaffold = planScaffolding(blueprint);
+  const sc = scaffold.find((c) => c.pos.y === 0)!;
+  adapter.setBlock(rotatePosition(sc.pos, project.origin, 0), 'torch');
+  // 脚手架落脚处有个小坑
+  const sc2 = scaffold.filter((c) => c.pos.y === 0)[1];
+  adapter.setBlock(rotatePosition({ ...sc2.pos, y: -1 }, project.origin, 0), 'air');
+  supply(adapter, blueprint, 4);
+  const built = await constructBuilding(ctx(adapter), archive, project, blueprint, 'build');
+  assert.equal(built.inspection.complete, true, JSON.stringify(built.inspection.defects.slice(0, 5)));
+  assert.ok((built.site?.cleared.dirt ?? 0) >= 10, JSON.stringify(built.site));
+  assert.ok(built.site?.cleared.birch_log === 2 && (built.site?.cleared.birch_leaves ?? 0) >= 2);
+  assert.equal(built.site?.filled, 1);
+
+  // 场地里有别人的箱子：不挖，报告里说清楚
+  const adapter2 = new BuildingWorld(), archive2 = new BuildingArchive(null);
+  const d2 = design(archive2);
+  adapter2.setBlock(rotatePosition({ x: 2, y: 0, z: 2 }, d2.project.origin, 0), 'chest');
+  supply(adapter2, d2.blueprint);
+  const r = await constructBuilding(ctx(adapter2), archive2, d2.project, d2.blueprint, 'build');
+  assert.equal(r.inspection.complete, false);
+  const { describeBuildProblems } = await import('../src/skills/build.ts');
+  assert.match(describeBuildProblems(r), /chest×1 挡着/);
+  assert.equal(adapter2.blockAt(rotatePosition({ x: 2, y: 0, z: 2 }, d2.project.origin, 0)), 'chest');
+});

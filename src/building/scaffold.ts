@@ -23,7 +23,7 @@ export function inspectScaffoldSite(adapter: GameAdapter, cells: BuildingCell[],
     if (cell.pos.y !== 0 || seenGround.has(`${pos.x},${pos.z}`)) continue;
     seenGround.add(`${pos.x},${pos.z}`);
     const ground = { ...pos, y: project.origin.y - 1 }, base = adapter.blockAt(ground);
-    if (base === null || !/^(?:grass_block|dirt|stone|cobblestone|deepslate|netherrack|end_stone|[a-z_]+_planks)$/.test(base)) defects.push({ cellId: `${cell.id}:support`, pos: ground, kind: base === null ? 'unknown' : 'terrain', expected: '脚手架下方安全实心地面', actual: base });
+    if (base === null || !/^(?:grass_block|dirt|coarse_dirt|podzol|rooted_dirt|mud|packed_mud|clay|stone|andesite|granite|diorite|tuff|calcite|cobblestone|cobbled_deepslate|deepslate|sandstone|terracotta|netherrack|end_stone|[a-z_]+_planks|[a-z_]+_log)$/.test(base)) defects.push({ cellId: `${cell.id}:support`, pos: ground, kind: base === null ? 'unknown' : 'terrain', expected: '脚手架下方安全实心地面', actual: base });
   }
   return defects;
 }

@@ -16,6 +16,10 @@ const PLANTS = new Set(['short_grass', 'grass', 'tall_grass', 'fern', 'large_fer
 const NATURAL_GROUND = new Set(['grass_block', 'dirt', 'stone', 'cobblestone', 'gravel', 'sand', 'coarse_dirt', 'podzol', 'mycelium', 'rooted_dirt', 'deepslate', 'netherrack', 'end_stone']);
 const HAZARDS = new Set(['water', 'lava', 'fire', 'soul_fire', 'magma_block', 'campfire', 'soul_campfire', 'powder_snow']);
 const replaceable = (name: string) => AIR.has(name) || PLANTS.has(name);
+/** 整地时可以清掉的自然东西：植物、树、雪，以及会被铲平的泥土石头；自己插的火把也可以拿掉 */
+const VEGETATION = /(_leaves|_log|_wood|_stem|_sapling|_flower|_tulip|_mushroom|_carpet|grass|fern|bush|vine|vines|dandelion|poppy|orchid|allium|bluet|daisy|cornflower|lily_of_the_valley|peony|lilac|rose_bush|sunflower|sugar_cane|bamboo|azalea|cactus|snow|cobweb|lily_pad|hanging_roots|spore_blossom|glow_lichen|moss_block)$/;
+const LEVELABLE = new Set([...NATURAL_GROUND, 'sand', 'red_sand', 'clay', 'andesite', 'granite', 'diorite', 'tuff', 'calcite', 'sandstone', 'red_sandstone', 'terracotta', 'snow_block', 'mud', 'packed_mud', 'moss_block', 'dirt_path', 'farmland', 'gravel']);
+export const siteClearable = (name: string) => !name.endsWith('grass_block') && VEGETATION.test(name) || LEVELABLE.has(name) || name === 'torch' || name === 'wall_torch';
 const solidGround = (name: string) => !replaceable(name) && !HAZARDS.has(name) && !/door|torch|flower|sapling|leaves|fence|pane|carpet|bed|rail/.test(name);
 
 function actualState(adapter: StateBuildingAdapter, pos: Vec3Like) {
@@ -51,7 +55,8 @@ export function surveyFoundation(adapter: StateBuildingAdapter, blueprint: Build
         break;
       }
       if (solidGround(name)) { supported = true; break; }
-      if (!replaceable(name)) {
+      // 树叶、草丛这类不承重的自然方块：挖掉换成地基
+      if (!replaceable(name) && !VEGETATION.test(name)) {
         defects.push({ cellId: cellKey(local), pos, kind: 'terrain', expected: '可承重地面或可填补空隙', actual: name });
         break;
       }
@@ -116,6 +121,108 @@ export interface ConstructionResult {
   failures: { cellId: string; reason: string }[];
   scaffoldPlaced?: number;
   scaffoldRemoved?: number;
+  /** 整地：清掉了什么、填了几个坑、有哪些不该动的东西挡在场地里 */
+  site?: { cleared: Record<string, number>; filled: number; blocked: Record<string, number> };
+}
+
+/**
+ * 整地：像玩家盖房子前那样，先把房子占的空间里的草、花、树叶、树、凸起的土石清掉，
+ * 把脚手架落脚处的小坑填上。只动自然方块（和自己插的火把）；箱子、工作台、矿石这类东西不碰，留给验收报告。
+ * 有岩浆/水、未加载区块或地基太深时不整地（那是选址问题，挖了也白挖）。
+ */
+async function prepareSite(ctx: SkillCtx, project: BuildingProject, blueprint: BuildingBlueprint, scaffolding: BuildingCell[], check: () => void) {
+  const adapter = ctx.adapter as StateBuildingAdapter;
+  const spec = blueprint.spec;
+  const local = new Map<string, Vec3Like>();
+  const put = (p: Vec3Like) => local.set(cellKey(p), p);
+  for (const c of blueprint.cells) if (c.phase !== 'foundation') put(c.pos);
+  for (const c of blueprint.clearances) put(c);
+  for (const c of scaffolding) put(c.pos);
+  if (spec.layout === 'house') {
+    const top = Math.max(...blueprint.cells.map((c) => c.pos.y));
+    for (let x = 0; x < spec.width; x++) for (let z = 0; z < spec.depth; z++) for (let y = 0; y <= top; y++) put({ x, y, z });
+  }
+  const temp = new Map((project.temporaryBlocks ?? []).map((b) => [cellKey(b.pos), b.name]));
+  const byId = new Map(blueprint.cells.map((c) => [c.id, c]));
+  const targets: { pos: Vec3Like; name: string }[] = [];
+  const blocked: Record<string, number> = {};
+  for (const [id, l] of local) {
+    const pos = rotatePosition(l, project.origin, project.rotation), name = adapter.blockAt(pos);
+    if (name === null || AIR.has(name)) continue;
+    const cell = byId.get(id);
+    if (cell && !cellDefect(adapter, cell, project)) continue; // 已经是房子的一部分
+    if (temp.get(id) === name) continue; // 自己搭的脚手架
+    if (cell && project.checkpoint.ownedCells.includes(id)) continue; // 自己放过的，交给原有流程
+    if (siteClearable(name)) targets.push({ pos, name });
+    else blocked[name] = (blocked[name] ?? 0) + 1;
+  }
+  const cleared: Record<string, number> = {};
+  let filled = 0;
+  if (targets.length) {
+    // 站在房子外面干活：先离开占地范围，免得挖自己脚下
+    const s = adapter.state();
+    const corners = [{ x: 0, z: 0 }, { x: spec.width - 1, z: spec.depth - 1 }].map((c) => rotatePosition({ ...c, y: 0 }, project.origin, project.rotation));
+    const [minX, maxX] = [Math.min(corners[0].x, corners[1].x), Math.max(corners[0].x, corners[1].x)];
+    const [minZ, maxZ] = [Math.min(corners[0].z, corners[1].z), Math.max(corners[0].z, corners[1].z)];
+    if (s.pos.x >= minX - 0.3 && s.pos.x <= maxX + 1.3 && s.pos.z >= minZ - 0.3 && s.pos.z <= maxZ + 1.3) {
+      const front = rotatePosition({ x: Math.floor(spec.width / 2), y: 0, z: -3 }, project.origin, project.rotation);
+      try { await adapter.moveTo({ kind: 'near', pos: front, range: 1 }, { signal: ctx.signal, timeoutMs: Math.max(1, Math.min(15000, ctx.deadline - Date.now())) }); }
+      catch (e) { if (isAbort(e)) throw e; }
+      check();
+    }
+    // 从上往下清：先树冠树叶，再树干，最后铲平地面（避免沙砾往下掉、避免悬空）
+    targets.sort((a, b) => b.pos.y - a.pos.y);
+    for (const t of targets) {
+      if (Date.now() >= ctx.deadline - 5000) break;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        check();
+        const name = adapter.blockAt(t.pos);
+        if (name === null || AIR.has(name) || !siteClearable(name)) break;
+        const me = adapter.state().pos;
+        if (Math.floor(me.x) === t.pos.x && Math.floor(me.z) === t.pos.z && t.pos.y === Math.floor(me.y) - 1) break; // 脚下不挖
+        if (Math.hypot(t.pos.x + 0.5 - me.x, t.pos.y + 0.5 - me.y, t.pos.z + 0.5 - me.z) > 4) {
+          try { await adapter.moveTo({ kind: 'reach_block', pos: t.pos }, { signal: ctx.signal, timeoutMs: Math.max(1, Math.min(12000, ctx.deadline - Date.now())) }); }
+          catch (e) { if (isAbort(e)) throw e; break; }
+          check();
+        }
+        const r = await adapter.dig(t.pos, ctx.signal);
+        check();
+        if (!r.ok) break;
+        cleared[name] = (cleared[name] ?? 0) + 1;
+        if (AIR.has(adapter.blockAt(t.pos) ?? 'unknown')) break; // 没有沙砾/沙子掉下来补位
+      }
+      ctx.progress(0.05, `整地：清掉 ${Object.values(cleared).reduce((a, b) => a + b, 0)} 块`);
+    }
+    try { await adapter.collectNearbyDrops?.(ctx.signal, 8, 3000); } catch (e) { if (isAbort(e)) throw e; }
+  }
+  // 脚手架落脚处的小坑（3 格以内）用地基材料填上
+  const seen = new Set<string>();
+  for (const c of scaffolding.filter((x) => x.pos.y === 0)) {
+    const top = rotatePosition({ ...c.pos, y: -1 }, project.origin, project.rotation);
+    if (seen.has(`${top.x},${top.z}`)) continue;
+    seen.add(`${top.x},${top.z}`);
+    const holes: Vec3Like[] = [];
+    let ok = false;
+    for (let d = 0; d < 4; d++) {
+      const p = { ...top, y: top.y - d }, n = adapter.blockAt(p);
+      if (n === null || HAZARDS.has(n)) break;
+      if (solidGround(n)) { ok = true; break; }
+      if (!replaceable(n)) break;
+      holes.push(p);
+    }
+    if (!ok || !holes.length) continue;
+    for (const p of holes.reverse()) {
+      check();
+      if (!adapter.state().inventory.some((i) => i.name === spec.palette.foundation && i.count > 0)) break;
+      if (PLANTS.has(adapter.blockAt(p) ?? '')) await adapter.dig(p, ctx.signal);
+      try { await adapter.moveTo({ kind: 'place_block', pos: p }, { signal: ctx.signal, timeoutMs: Math.max(1, Math.min(12000, ctx.deadline - Date.now())), constructionSafe: true }); }
+      catch (e) { if (isAbort(e)) throw e; break; }
+      const r = await adapter.placeBlockAt(p, [spec.palette.foundation], ctx.signal);
+      check();
+      if (r.ok && adapter.blockAt(p) === spec.palette.foundation) filled++; else break;
+    }
+  }
+  return { cleared, filled, blocked };
 }
 
 /** Idempotent construction/repair: every resumed run reconciles the live world first. */
@@ -155,6 +262,15 @@ export async function constructBuilding(ctx: SkillCtx, archive: BuildingArchive,
   const currentIds = new Set(source.cells.map((c) => c.id));
   const retired = project.checkpoint.ownedCells.filter((id) => !currentIds.has(id) && /^-?\d+,-?\d+,-?\d+$/.test(id));
   source = { ...source, clearances: [...source.clearances, ...retired.map((id) => { const [x, y, z] = id.split(',').map(Number); return { x, y, z }; })] };
+  // 先整地，再勘察：坡地、树、草丛本来就该先清掉，而不是直接判“场地有缺陷”
+  let site: ConstructionResult['site'];
+  if (mode !== 'inspect') {
+    const pre = surveyFoundation(adapter, source, project);
+    if (!pre.defects.length) {
+      site = await prepareSite(ctx, project, pre.blueprint, planScaffolding(pre.blueprint), checkSession);
+      project = archive.get(project.id) ?? project;
+    }
+  }
   const survey = surveyFoundation(adapter, source, project);
   const blueprint = survey.blueprint;
   const doors = blueprint.cells.filter((cell) => cell.name.endsWith('_door') && cell.properties.half === 'lower');
@@ -187,7 +303,7 @@ export async function constructBuilding(ctx: SkillCtx, archive: BuildingArchive,
     return false;
   };
   const initial = inspectBuilding(adapter, blueprint, project, survey.defects);
-  const result: ConstructionResult = { projectId: project.id, placed: 0, cleared: 0, inspection: initial, missingMaterials: {}, failures: [] };
+  const result: ConstructionResult = { projectId: project.id, placed: 0, cleared: site ? Object.values(site.cleared).reduce((a, b) => a + b, 0) : 0, inspection: initial, missingMaterials: {}, failures: [], ...(site ? { site } : {}) };
   const finish = async () => {
     checkSession();
     for (const door of doors) if (mode !== 'inspect' && door.properties.open !== undefined && Date.now() < ctx.deadline - 1000 && actualState(adapter, rotatePosition(door.pos, project.origin, project.rotation))?.name === door.name) {
@@ -262,7 +378,7 @@ export async function constructBuilding(ctx: SkillCtx, archive: BuildingArchive,
     const name = adapter.blockAt(pos);
     if (name === null || HAZARDS.has(name)) return false;
     if (AIR.has(name)) return true;
-    if (!PLANTS.has(name) && !(foundation && NATURAL_GROUND.has(name)) && !owned.has(id)) return false;
+    if (!PLANTS.has(name) && !(foundation && NATURAL_GROUND.has(name)) && !siteClearable(name) && !owned.has(id)) return false;
     // Never excavate under the bot; choose a safe standing position through the pathfinder first.
     let s = adapter.state();
     if (Math.floor(s.pos.x) === pos.x && Math.floor(s.pos.z) === pos.z && Math.floor(s.pos.y) - 1 === pos.y) {
