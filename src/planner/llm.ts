@@ -9,6 +9,7 @@ export interface ChatMessage {
 export interface Completion {
   text: string;
   latencyMs: number;
+  finishReason?: string;
   usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
 }
 
@@ -31,7 +32,8 @@ export class OpenAICompatibleProvider implements LlmProvider {
       model: this.cfg.model,
       messages,
       temperature: this.cfg.temperature,
-      max_tokens: 800,
+      // 推理型模型（如 deepseek-flash）会把思考过程也算进 max_tokens，太小会导致正文为空或被截断
+      max_tokens: this.cfg.maxTokens,
     };
     if (this.cfg.jsonMode) body.response_format = { type: 'json_object' };
     const res = await fetch(`${this.cfg.baseUrl}/chat/completions`, {
@@ -46,9 +48,10 @@ export class OpenAICompatibleProvider implements LlmProvider {
     const raw = await res.text();
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${raw.slice(0, 300)}`);
     const json = JSON.parse(raw);
-    const text = json?.choices?.[0]?.message?.content;
+    const choice = json?.choices?.[0];
+    const text = choice?.message?.content;
     if (typeof text !== 'string') throw new Error(`响应中没有 choices[0].message.content：${raw.slice(0, 200)}`);
-    return { text, latencyMs: Date.now() - t0, usage: json.usage };
+    return { text, latencyMs: Date.now() - t0, usage: json.usage, finishReason: choice?.finish_reason };
   }
 }
 

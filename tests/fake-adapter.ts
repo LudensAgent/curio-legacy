@@ -21,6 +21,8 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
   groundY = 63;
   removed = new Set<string>();
   light = 15;
+  oxygen = 20;
+  inWater = false;
 
   private k(x: number, y: number, z: number) {
     return `${x},${y},${z}`;
@@ -64,8 +66,8 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
   state(): AgentState {
     return {
       connected: this.connected, alive: this.hp > 0, username: 'FakeBot', pos: { ...this.pos }, dim: 'overworld',
-      hp: this.hp, food: this.food, oxygen: 20, timeOfDay: 1000, isDay: true, biome: 'plains', onGround: true,
-      inWater: false, inLava: false, inventory: [...this.inv].map(([name, count]) => ({ name, count })), emptySlots: 30, held: null,
+      hp: this.hp, food: this.food, oxygen: this.oxygen, timeOfDay: this.isDay ? 1000 : 15000, isDay: this.isDay, biome: 'plains', onGround: true,
+      inWater: this.inWater, inLava: false, inventory: [...this.inv].map(([name, count]) => ({ name, count })), emptySlots: 30, held: null,
     };
   }
   nearbyEntities(radius: number): EntityInfo[] {
@@ -97,6 +99,13 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
     if (t.kind === 'near' || t.kind === 'reach_block') dest = t.pos;
     else if (t.kind === 'xz') dest = { x: t.x, y: this.pos.y, z: t.z };
     else if (t.kind === 'away_from') dest = { x: this.pos.x + t.distance, y: this.pos.y, z: this.pos.z };
+    else if (t.kind === 'follow_entity') {
+      const e = this.entities.find((en) => en.id === t.entityId);
+      if (!e) throw new Error('ENTITY_GONE');
+      const d0 = dist3(e.pos, this.pos);
+      const k = Math.max(0, (d0 - t.range) / d0);
+      dest = { x: this.pos.x + (e.pos.x - this.pos.x) * k, y: this.pos.y, z: this.pos.z + (e.pos.z - this.pos.z) * k };
+    }
     const d = dist3(dest, this.pos);
     if (Math.hypot(dest.x - this.pos.x, dest.z - this.pos.z) > 0.5) this.yaw = Math.atan2(-(dest.x - this.pos.x), -(dest.z - this.pos.z));
     const start = { ...this.pos };
@@ -109,6 +118,11 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
     try {
       await raceAbort(sleep(total, o.signal), o.signal, o.timeoutMs, () => this.stopAll());
       this.pos = { ...dest };
+      // 走到掉落物旁边就捡起来
+      for (const e of this.entities.filter((en) => en.kind === 'item' && dist3(en.pos, this.pos) < 1.6)) {
+        this.inv.set(e.name.replace(/^item:/, ''), (this.inv.get(e.name.replace(/^item:/, '')) ?? 0) + 1);
+      }
+      this.entities = this.entities.filter((en) => !(en.kind === 'item' && dist3(en.pos, this.pos) < 1.6));
     } finally {
       clearInterval(iv);
     }
@@ -118,6 +132,14 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
   }
   canHarvest() {
     return true;
+  }
+  /** 简化的挖掘时间表：空手砍木 3s，木斧 1.5s，石斧 0.75s */
+  digTimeEstimate(block: string, tool: string | null) {
+    if (!block.endsWith('_log')) return null;
+    if (!tool) return 3000;
+    if (tool === 'wooden_axe') return 1500;
+    if (tool === 'stone_axe') return 750;
+    return 3000;
   }
   async dig(pos: Vec3Like, signal: AbortSignal): Promise<ActionResult> {
     await sleep(100, signal);
@@ -137,11 +159,30 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
   async collectNearbyDrops() {
     return 0;
   }
+  async placeBlockAt(pos: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult> {
+    await sleep(50, signal);
+    const name = itemNames.find((n) => (this.inv.get(n) ?? 0) > 0);
+    if (!name) return { ok: false, reason: 'NO_ITEM' };
+    if (this.nameAt(pos.x, pos.y, pos.z) !== 'air') return { ok: true };
+    this.removed.delete(this.k(pos.x, pos.y, pos.z));
+    this.blocks.push({ name, pos: { ...pos } });
+    this.inv.set(name, (this.inv.get(name) ?? 1) - 1);
+    this.actions.push(`place:${name}`);
+    return { ok: true };
+  }
   async craft(item: string, count: number, signal: AbortSignal) {
     await sleep(50, signal);
     this.inv.set(item, (this.inv.get(item) ?? 0) + count);
     this.actions.push(`craft:${item}`);
     return { ok: true, crafted: count };
+  }
+  isDay = true;
+  async sleepInBed(signal: AbortSignal) {
+    if (![...this.inv.keys()].some((n) => n.endsWith('_bed') && (this.inv.get(n) ?? 0) > 0)) return { ok: false, reason: 'NO_BED' };
+    if (this.isDay) return { ok: false, reason: "it's not night" };
+    await sleep(200, signal);
+    this.isDay = true;
+    return { ok: true, bedPos: { x: Math.floor(this.pos.x) + 2, y: Math.floor(this.pos.y), z: Math.floor(this.pos.z) } };
   }
   hasFood() {
     return (this.inv.get('bread') ?? 0) > 0;
@@ -163,6 +204,7 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
   }
   async jump(ms: number, signal: AbortSignal) {
     await sleep(ms, signal);
+    if (this.inWater) this.oxygen = Math.min(20, this.oxygen + 6); // 浮上水面换气
   }
   chat(text: string) {
     this.actions.push(`chat:${text}`);

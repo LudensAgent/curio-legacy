@@ -6,6 +6,7 @@ const key = (p: { x: number; y: number; z: number }) => `${p.x},${p.y},${p.z}`;
 /** 可以“往下挖”找到的地表/地下方块 */
 const DIGGABLE_DOWN = new Set(['stone', 'cobblestone', 'deepslate', 'andesite', 'granite', 'diorite', 'tuff', 'dirt', 'grass_block', 'coarse_dirt', 'sand', 'gravel', 'clay']);
 const UNSAFE_BELOW = new Set(['lava', 'water', 'air', 'cave_air', 'bedrock']);
+const WATERY = new Set(['water', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass', 'bubble_column', 'lava']);
 
 export const gather: Skill<{ block: string; count: number }> = {
   name: 'gather',
@@ -39,11 +40,13 @@ export const gather: Skill<{ block: string; count: number }> = {
       const hits = senses
         .knownBlocks(names, 256)
         .filter((h) => !skip.has(key(h.pos)))
+        // 水下（上方是水）的方块不去挖：会憋气溺水
+        .filter((h) => !WATERY.has(adapter.blockAt({ x: h.pos.x, y: h.pos.y + 1, z: h.pos.z }) ?? 'air'))
         .sort((a, b) => a.dist + Math.abs(a.pos.y - s.pos.y) * 0.6 - (b.dist + Math.abs(b.pos.y - s.pos.y) * 0.6));
 
       if (!hits.length) {
         // 看不见目标：石头/泥土类可以就地往下挖（脚下的方块是“踩着的”，不算透视）
-        if (canDigDown && dugDown < 8) {
+        if (canDigDown && dugDown < 8 && !s.inWater) {
           const below = { x: Math.floor(s.pos.x), y: Math.floor(s.pos.y) - 1, z: Math.floor(s.pos.z) };
           const under = adapter.blockAt(below);
           const under2 = adapter.blockAt({ ...below, y: below.y - 1 });
@@ -71,8 +74,10 @@ export const gather: Skill<{ block: string; count: number }> = {
       try {
         ctx.progress(dug / args.count, `前往 ${target.name}（${Math.round(target.dist)} 格）`);
         await adapter.moveTo({ kind: 'reach_block', pos: target.pos }, { signal, timeoutMs: Math.min(90000, Math.max(3000, ctx.deadline - Date.now())) });
+        const t0 = Date.now();
         const r = await adapter.dig(target.pos, signal);
         if (!r.ok) throw new Error(r.reason ?? 'DIG_FAILED');
+        ctx.memory.recordDig(target.name, adapter.state().held, Date.now() - t0);
       } catch (e) {
         if (isAbort(e)) throw e;
         skip.add(key(target.pos));
@@ -93,19 +98,20 @@ export const gather: Skill<{ block: string; count: number }> = {
 // ------------------------------------------------------------------ craft
 export const craft: Skill<{ item: string; count: number }> = {
   name: 'craft',
-  description: '合成物品（需要工作台的配方会自动寻找或放置背包里的工作台）。常用：oak_planks、stick、crafting_table、wooden_pickaxe、stone_pickaxe、furnace、torch',
-  argsDoc: '{"item": "<物品名>", "count"?: 1-16}',
+  description: '合成物品。会自动补做两层以内的前置材料（原木→木板→木棍）、自动使用记得的工作台或现做一个放下，所以直接写最终物品即可。常用：wooden_pickaxe、stone_pickaxe、furnace、torch、crafting_table',
+  argsDoc: '{"item": "<物品名>", "count"?: 1-64}',
   timeoutMs: 60000,
   movement: false,
   validate(raw, adapter) {
     const a = obj(raw);
     const item = String(a.item ?? '').trim().replace(/^minecraft:/, '');
     if (!adapter.isKnownItem(item)) return { ok: false, error: `未知物品：${item}` };
-    return { ok: true, args: { item, count: clampInt(a.count, 1, 16, 1) } };
+    return { ok: true, args: { item, count: clampInt(a.count, 1, 64, 1) } };
   },
   async run(ctx, args) {
     try {
-      const r = await ctx.adapter.craft(args.item, args.count, ctx.signal);
+      const table = ctx.senses.knownBlocks(['crafting_table'], 32)[0];
+      const r = await ctx.adapter.craft(args.item, args.count, ctx.signal, { tablePos: table?.pos });
       if (!r.ok) return fail((r.reason as any) ?? 'ERROR', `无法合成 ${args.item}：${r.reason}`);
       return ok(`合成了 ${r.crafted} 个 ${args.item}`, { crafted: r.crafted });
     } catch (e) {

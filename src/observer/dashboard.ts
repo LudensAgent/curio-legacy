@@ -19,7 +19,8 @@ export interface DashboardHandlers {
  * - /overlay   OBS 浏览器源（透明背景的状态叠加）
  * - /api/stream  Server-Sent Events：每秒推送状态 + 实时事件
  */
-export function startDashboard(host: string, port: number, bus: EventBus, h: DashboardHandlers) {
+/** extraRoutes：在控制台路由之前尝试的处理器（返回 true 表示已处理），用于挂载 Curio Observer 数据流 */
+export function startDashboard(host: string, port: number, bus: EventBus, h: DashboardHandlers, extraRoutes: ((req: http.IncomingMessage, res: http.ServerResponse) => boolean)[] = []) {
   const clients = new Set<http.ServerResponse>();
 
   bus.on('event', (ev: AgentEvent) => {
@@ -50,6 +51,7 @@ export function startDashboard(host: string, port: number, bus: EventBus, h: Das
     });
 
   const server = http.createServer(async (req, res) => {
+    for (const route of extraRoutes) if (route(req, res)) return;
     const url = new URL(req.url ?? '/', 'http://x');
     const p = url.pathname;
     if (req.method === 'GET' && p === '/') return file(res, 'dashboard.html');

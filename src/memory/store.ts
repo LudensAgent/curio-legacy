@@ -21,6 +21,15 @@ export interface GoalRecord {
   source: string;
   status: string;
   summary: string;
+  durationSec?: number;
+}
+
+/** 一次挖掘的耗时记录：用来发现“空手砍树太慢，该做斧头了” */
+export interface DigRecord {
+  ts: number;
+  block: string;
+  tool: string | null;
+  ms: number;
 }
 
 export interface SkillStat {
@@ -38,8 +47,21 @@ export interface Note {
   text: string;
 }
 
+export interface DeathRecord {
+  ts: number;
+  dim: string;
+  pos: Vec3Like;
+  /** 死前背包；复活后与当前背包比较得出真正丢失的物品 */
+  lost: { name: string; count: number }[];
+  cause?: string;
+}
+
 interface MemoryData {
   version: 1;
+  lastDeath: DeathRecord | null;
+  /** 跨计划的长期目标（由 LLM 设定/更新） */
+  objective: { text: string; ts: number } | null;
+  digs: DigRecord[];
   visitedChunks: Record<string, number>;
   seen: { blocks: Record<string, number>; entities: Record<string, number>; biomes: Record<string, number> };
   landmarks: Landmark[];
@@ -50,6 +72,9 @@ interface MemoryData {
 
 const empty = (): MemoryData => ({
   version: 1,
+  lastDeath: null,
+  objective: null,
+  digs: [],
   visitedChunks: {},
   seen: { blocks: {}, entities: {}, biomes: {} },
   landmarks: [],
@@ -219,6 +244,52 @@ export class WorldMemory {
 
   recentNotes(n = 10) {
     return this.data.notes.slice(-n);
+  }
+
+  // ------------------------------------------------ 死亡与掉落物
+  setDeath(d: DeathRecord) {
+    this.data.lastDeath = { ...d, pos: { x: Math.round(d.pos.x), y: Math.round(d.pos.y), z: Math.round(d.pos.z) } };
+    this.touch();
+  }
+
+  updateDeathLost(lost: DeathRecord['lost']) {
+    if (!this.data.lastDeath) return;
+    this.data.lastDeath.lost = lost;
+    this.touch();
+  }
+
+  lastDeath(): DeathRecord | null {
+    return this.data.lastDeath;
+  }
+
+  clearDeath() {
+    if (!this.data.lastDeath) return;
+    this.data.lastDeath = null;
+    this.touch();
+  }
+
+  // ------------------------------------------------ 效率统计
+  recordDig(block: string, tool: string | null, ms: number) {
+    this.data.digs.push({ ts: Date.now(), block, tool, ms: Math.round(ms) });
+    if (this.data.digs.length > 300) this.data.digs.splice(0, this.data.digs.length - 300);
+    this.touch();
+  }
+
+  recentDigs(windowMs = 20 * 60_000): DigRecord[] {
+    const cut = Date.now() - windowMs;
+    return (this.data.digs ?? []).filter((d) => d.ts >= cut);
+  }
+
+  // ------------------------------------------------ 长期目标
+  setObjective(text: string) {
+    const t = text.trim().slice(0, 120);
+    if (!t || this.data.objective?.text === t) return;
+    this.data.objective = { text: t, ts: Date.now() };
+    this.touch();
+  }
+
+  objective() {
+    return this.data.objective;
   }
 
   close() {

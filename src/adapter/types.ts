@@ -115,9 +115,16 @@ export interface GameAdapter {
   stopAll(): void;
 
   canHarvest(pos: Vec3Like): boolean;
+  /** 估算用某个工具（null = 空手）挖一个方块需要的毫秒数；未知返回 null */
+  digTimeEstimate(block: string, tool: string | null): number | null;
+  /** 用背包里 itemNames 中的第一种方块，放到 pos（需要相邻有实心方块可依附） */
+  placeBlockAt(pos: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult>;
   dig(pos: Vec3Like, signal: AbortSignal): Promise<ActionResult>;
   collectNearbyDrops(signal: AbortSignal, radius: number, timeoutMs: number): Promise<number>;
-  craft(item: string, count: number, signal: AbortSignal): Promise<ActionResult & { crafted: number }>;
+  /** 自动补做两层以内的前置材料（木板、木棍、工作台…）；tablePos = 记得的工作台位置 */
+  craft(item: string, count: number, signal: AbortSignal, opts?: { tablePos?: Vec3Like }): Promise<ActionResult & { crafted: number }>;
+  /** 睡在身边的床上（没有就把背包里的床放下）；一直睡到醒来 */
+  sleepInBed(signal: AbortSignal): Promise<ActionResult & { bedPos?: Vec3Like }>;
   hasFood(): boolean;
   eat(signal: AbortSignal): Promise<boolean>;
   equipWeapon(): Promise<void>;

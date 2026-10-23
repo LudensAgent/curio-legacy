@@ -449,6 +449,87 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return picked;
   }
 
+  private BlockCls: any = null;
+  digTimeEstimate(block: string, tool: string | null): number | null {
+    if (!this.mcData) return null;
+    try {
+      const bd = this.mcData.blocksByName[block];
+      if (!bd) return null;
+      this.BlockCls ??= require('prismarine-block')(this.bot.registry ?? this.bot.version);
+      const blk = this.BlockCls.fromStateId(bd.defaultState ?? bd.minStateId, 0);
+      const toolId = tool ? this.mcData.itemsByName[tool]?.id ?? null : null;
+      if (blk.harvestTools && (toolId === null || !blk.harvestTools[toolId])) return null; // 这个工具挖不出东西
+      const t = blk.digTime(toolId, false, false, false, [], {});
+      return Number.isFinite(t) ? t : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async placeBlockAt(pos: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult> {
+    throwIfAborted(signal);
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
+    const b = this.bot;
+    const item = b.inventory.items().find((i: any) => itemNames.includes(i.name));
+    if (!item) return { ok: false, reason: 'NO_ITEM' };
+    const target = this.vec(pos);
+    const cur = b.blockAt(target);
+    if (cur && cur.boundingBox === 'block') return { ok: true }; // 已经有方块了
+    const Vec3 = require('vec3').Vec3;
+    const faces = [new Vec3(0, -1, 0), new Vec3(0, 1, 0), new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)];
+    for (const f of faces) {
+      const ref = b.blockAt(target.plus(f));
+      if (!ref || ref.boundingBox !== 'block') continue;
+      try {
+        await b.equip(item, 'hand');
+        await raceAbort(b.placeBlock(ref, f.scaled(-1)), signal, 5000, () => {});
+        return { ok: true };
+      } catch (e: any) {
+        if (e?.name === 'AbortedError') throw e;
+      }
+    }
+    return { ok: false, reason: 'NO_REFERENCE' };
+  }
+
+  async sleepInBed(signal: AbortSignal): Promise<ActionResult & { bedPos?: Vec3Like }> {
+    throwIfAborted(signal);
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
+    const b = this.bot;
+    const bedIds = Object.values<any>(this.mcData.blocksByName).filter((x) => x.name.endsWith('_bed')).map((x) => x.id);
+    let bed = b.findBlock({ matching: bedIds, maxDistance: 4 });
+    if (!bed) {
+      const bedItem = b.inventory.items().find((i: any) => i.name.endsWith('_bed'));
+      if (!bedItem) return { ok: false, reason: 'NO_BED' };
+      const ref = this.findPlaceSpot();
+      if (!ref) return { ok: false, reason: 'NO_SPACE' };
+      const Vec3 = require('vec3').Vec3;
+      try {
+        await b.equip(bedItem, 'hand');
+        await raceAbort(b.placeBlock(ref, new Vec3(0, 1, 0)), signal, 5000, () => {});
+      } catch (e: any) {
+        if (e?.name === 'AbortedError') throw e;
+      }
+      bed = b.findBlock({ matching: bedIds, maxDistance: 4 });
+      if (!bed) return { ok: false, reason: 'PLACE_FAILED' };
+      this.bus.publish('place', 'P2', '放下了床');
+    }
+    await this.moveTo({ kind: 'reach_block', pos: bed.position }, { signal, timeoutMs: 15000 });
+    try {
+      await raceAbort(b.sleep(bed), signal, 5000, () => {});
+    } catch (e: any) {
+      if (e?.name === 'AbortedError') throw e;
+      return { ok: false, reason: String(e?.message ?? e) };
+    }
+    const bedPos = { x: bed.position.x, y: bed.position.y, z: bed.position.z };
+    try {
+      while (b.isSleeping) await sleep(1000, signal);
+    } catch (e: any) {
+      try { await b.wake(); } catch { /* ignore */ }
+      throw e;
+    }
+    return { ok: true, bedPos };
+  }
+
   private findPlaceSpot(): any | null {
     const b = this.bot;
     const base = b.entity.position.floored();
@@ -464,49 +545,133 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return null;
   }
 
-  async craft(item: string, count: number, signal: AbortSignal): Promise<ActionResult & { crafted: number }> {
+  private invCount(id: number): number {
+    return this.bot.inventory.items().filter((i: any) => i.type === id).reduce((n: number, i: any) => n + i.count, 0);
+  }
+
+  /** 这个物品是否只能在工作台上合成 */
+  private needsTable(id: number): boolean {
+    const b = this.bot;
+    return b.recipesAll(id, null, null).length === 0 && b.recipesAll(id, null, true).length > 0;
+  }
+
+  /** 合成 times 次（含超时重试一次：Mineflayer 偶尔会卡在窗口事务上）。观察者模组的合成节奏会拉长耗时，所以时限放宽 */
+  private async craftOnce(recipe: any, table: any, signal: AbortSignal, times = 1) {
+    const b = this.bot;
+    const pace = Number(process.env.UI_PACING_MS ?? 250) || 0;
+    const timeout = 10000 + (pace > 0 ? 3000 + pace * 12 * times : 0);
+    try {
+      await raceAbort(b.craft(recipe, times, table), signal, timeout, () => {});
+    } catch (e: any) {
+      if (e?.name !== 'TimeoutError') throw e;
+      this.bus.publish('craft_retry', 'P1', '合成超时，关闭窗口后重试一次');
+      try { if (b.currentWindow) b.closeWindow(b.currentWindow); } catch { /* ignore */ }
+      await sleep(300, signal);
+      await raceAbort(b.craft(recipe, times, table), signal, timeout + 5000, () => {});
+    }
+  }
+
+  /** 尽量一次合成所需数量（一次打开工作台），不行再逐个合成 */
+  private async craftUpTo(id: number, count: number, table: any, signal: AbortSignal): Promise<number> {
+    const b = this.bot;
+    let made = 0;
+    while (made < count) {
+      throwIfAborted(signal);
+      const any = b.recipesFor(id, null, 1, table)[0];
+      if (!any) break;
+      const per = any.result?.count ?? 1;
+      const times = Math.max(1, Math.ceil((count - made) / per));
+      const bulk = times > 1 ? b.recipesFor(id, null, times * per, table)[0] : null;
+      if (bulk) {
+        await this.craftOnce(bulk, table, signal, times);
+        made += times * per;
+      } else {
+        await this.craftOnce(any, table, signal, 1);
+        made += per;
+      }
+    }
+    return made;
+  }
+
+  /**
+   * 自动补齐前置材料（最多两层）：例如做木镐时缺木棍 → 先用木板做木棍；缺木板 → 先用原木做木板。
+   * 返回 true 表示现在材料足够。
+   */
+  private async ensureIngredients(id: number, count: number, table: any, signal: AbortSignal, depth: number): Promise<boolean> {
+    const b = this.bot;
+    if (b.recipesFor(id, null, 1, table)[0]) return true;
+    if (depth <= 0) return false;
+    const recipes: any[] = b.recipesAll(id, null, table ?? null);
+    for (const r of recipes) {
+      const times = Math.max(1, Math.ceil(count / (r.result?.count ?? 1)));
+      const needs: { id: number; n: number }[] = (r.delta ?? []).filter((d: any) => d.count < 0).map((d: any) => ({ id: d.id, n: -d.count * times }));
+      let ok = true;
+      for (const nd of needs) {
+        const missing = nd.n - this.invCount(nd.id);
+        if (missing <= 0) continue;
+        if (!(await this.craftSimple(nd.id, missing, table, signal, depth - 1))) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok && b.recipesFor(id, null, 1, table)[0]) return true;
+    }
+    return false;
+  }
+
+  /** 合成 count 个（先补前置材料）；返回是否成功做出至少所需数量 */
+  private async craftSimple(id: number, count: number, table: any, signal: AbortSignal, depth: number): Promise<boolean> {
+    const b = this.bot;
+    if (this.needsTable(id) && !table) return false;
+    if (!(await this.ensureIngredients(id, count, table, signal, depth))) return false;
+    const name = this.mcData.items[id]?.name ?? String(id);
+    const made = await this.craftUpTo(id, count, table, signal);
+    if (made > 0) this.bus.publish('craft_auto', 'P3', `自动补做前置材料：${name} ×${made}`);
+    return made >= count;
+  }
+
+  /** 找到可用的工作台：记得的位置 → 身边 → 背包里的 → 现做一个；必要时放下 */
+  private async ensureTable(signal: AbortSignal, knownPos?: Vec3Like): Promise<any | null> {
+    const b = this.bot;
+    const tableId = this.mcData.blocksByName.crafting_table.id;
+    let table: any = null;
+    if (knownPos && b.blockAt(this.vec(knownPos))?.name === 'crafting_table') table = b.blockAt(this.vec(knownPos));
+    table ??= b.findBlock({ matching: tableId, maxDistance: 5 }); // 伸手可及范围内
+    if (!table) {
+      let tableItem = b.inventory.items().find((i: any) => i.name === 'crafting_table');
+      if (!tableItem && (await this.craftSimple(this.mcData.itemsByName.crafting_table.id, 1, null, signal, 2))) {
+        tableItem = b.inventory.items().find((i: any) => i.name === 'crafting_table');
+      }
+      const ref = tableItem ? this.findPlaceSpot() : null;
+      if (tableItem && ref) {
+        const Vec3 = require('vec3').Vec3;
+        await b.equip(tableItem, 'hand');
+        await raceAbort(b.placeBlock(ref, new Vec3(0, 1, 0)), signal, 5000, () => {});
+        table = b.blockAt(ref.position.offset(0, 1, 0));
+        this.bus.publish('place', 'P3', '放置了工作台');
+      }
+    }
+    if (table) await this.moveTo({ kind: 'reach_block', pos: table.position }, { signal, timeoutMs: 30000 });
+    return table;
+  }
+
+  async craft(item: string, count: number, signal: AbortSignal, opts: { tablePos?: Vec3Like } = {}): Promise<ActionResult & { crafted: number }> {
     throwIfAborted(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', crafted: 0 };
     const b = this.bot;
     const data = this.mcData.itemsByName[item];
     if (!data) return { ok: false, reason: 'UNKNOWN_ITEM', crafted: 0 };
+    if (b.recipesAll(data.id, null, true).length === 0) return { ok: false, reason: 'UNKNOWN_ITEM', crafted: 0 };
 
     let table: any = null;
-    let recipe = b.recipesFor(data.id, null, 1, null)[0];
-    if (!recipe) {
-      const tableId = this.mcData.blocksByName.crafting_table.id;
-      table = b.findBlock({ matching: tableId, maxDistance: 6 }); // 只用身边的工作台（不透视）
-      if (!table) {
-        const tableItem = b.inventory.items().find((i: any) => i.name === 'crafting_table');
-        const ref = tableItem ? this.findPlaceSpot() : null;
-        if (tableItem && ref) {
-          const Vec3 = require('vec3').Vec3;
-          await b.equip(tableItem, 'hand');
-          await raceAbort(b.placeBlock(ref, new Vec3(0, 1, 0)), signal, 5000, () => {});
-          table = b.blockAt(ref.position.offset(0, 1, 0));
-          this.bus.publish('place', 'P3', '放置了工作台');
-        }
-      }
-      if (table) {
-        await this.moveTo({ kind: 'reach_block', pos: table.position }, { signal, timeoutMs: 30000 });
-        recipe = b.recipesFor(data.id, null, 1, table)[0];
-      }
-      if (!recipe) {
-        const needsTable = !table && b.recipesAll(data.id, null, true).length > 0;
-        return { ok: false, reason: needsTable ? 'NO_CRAFTING_TABLE' : 'MISSING_MATERIALS', crafted: 0 };
-      }
+    if (this.needsTable(data.id)) {
+      table = await this.ensureTable(signal, opts.tablePos);
+      if (!table) return { ok: false, reason: 'NO_CRAFTING_TABLE', crafted: 0 };
     }
-    const per = recipe.result?.count ?? 1;
-    const times = Math.max(1, Math.ceil(count / per));
-    // 材料可能只够做一部分：逐次合成直到失败
-    let crafted = 0;
-    for (let i = 0; i < times; i++) {
-      throwIfAborted(signal);
-      const r = b.recipesFor(data.id, null, 1, table)[0];
-      if (!r) break;
-      await raceAbort(b.craft(r, 1, table), signal, 10000, () => {});
-      crafted += per;
-    }
+    const before = this.invCount(data.id);
+    await this.ensureIngredients(data.id, count, table, signal, 2);
+    let crafted = await this.craftUpTo(data.id, count, table, signal);
+    crafted = Math.max(crafted, this.invCount(data.id) - before);
     return crafted > 0 ? { ok: true, crafted } : { ok: false, reason: 'MISSING_MATERIALS', crafted: 0 };
   }
 

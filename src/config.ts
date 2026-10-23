@@ -31,6 +31,8 @@ export const config = {
     rconPort: num('RCON_PORT', 25575),
     rconPassword: str('RCON_PASSWORD'),
     setupGamerules: bool('SETUP_GAMERULES', true),
+    /** 死亡不掉落。默认关闭：死了要自己回去捡（更像真人玩） */
+    keepInventory: bool('KEEP_INVENTORY', false),
     admins: [observer, ...str('ADMIN_PLAYERS').split(',')].map((s) => s.trim()).filter(Boolean),
   },
   llm: {
@@ -43,6 +45,7 @@ export const config = {
     temperature: num('LLM_TEMPERATURE', 0.7),
     jsonMode: bool('LLM_JSON_MODE', true),
     timeoutMs: num('LLM_TIMEOUT_MS', 45000),
+    maxTokens: num('LLM_MAX_TOKENS', 4096),
     maxCallsPerHour: num('LLM_MAX_CALLS_PER_HOUR', 90),
     fakeDelayMs: num('LLM_FAKE_DELAY_MS', 0),
   },
@@ -65,6 +68,8 @@ export const config = {
     bandCols: num('VISION_BAND_COLS', 160),
     bandRows: num('VISION_BAND_ROWS', 8),
   },
+  /** Curio Observer 模组数据流（/api/observer/stream）。合成节奏由 UI_PACING_MS 等环境变量控制 */
+  observerFeed: bool('OBSERVER_FEED', true),
   viewerPort: num('VIEWER_PORT', 0),
   dataDir: path.resolve(str('DATA_DIR', './data')),
 };

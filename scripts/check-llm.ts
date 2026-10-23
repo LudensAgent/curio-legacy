@@ -34,6 +34,12 @@ const percept: Percept = {
     nearest_land: { dir: 'N', dist: 0 },
     last_look_around_s: 30,
   },
+  death_recovery: null,
+  curiosities: [{ what: 'pumpkin', dir: 'E', dist: 60 }],
+  objective: '先做出石镐，再建一个小屋',
+  drives: [{ drive: 'tools', level: 0.7, why: '当前镐子等级：none', suggest: 'gather log → craft wooden_pickaxe' }],
+  stock: null,
+  efficiency: [{ block: 'oak_log', mined: 6, avg_s: 3, tool: '空手', better: [{ tool: 'wooden_axe', est_s: 1.5, speedup: 2, have: false, materials: '3 木板 + 2 木棍' }] }],
   exploration: { visitedChunks: 3, noveltyByDir: { N: 1, NE: 1, E: 0.9, SE: 1, S: 0.6, SW: 1, W: 1, NW: 1 }, base: { dist: 6, dir: 'S' } },
 };
 

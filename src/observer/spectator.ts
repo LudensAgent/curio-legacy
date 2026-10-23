@@ -28,22 +28,25 @@ export class Spectator {
     const o = cfg.observer;
     const reason = !o.player ? '未设置 OBSERVER_PLAYER' : !o.rconPassword ? '未设置 RCON_PASSWORD' : '';
     this.status = { enabled: !reason, reason, rconOk: false, lastResult: '', lastAt: null, attempts: 0 };
-    if (!reason) this.rcon = new Rcon(o.rconHost, o.rconPort, o.rconPassword);
+    // 只要有 RCON 密码就建立连接：测试规则（keepInventory 等）不依赖是否开启自动旁观
+    if (o.rconPassword) this.rcon = new Rcon(o.rconHost, o.rconPort, o.rconPassword);
   }
 
   start() {
+    let first = true;
+    if (this.rcon) {
+      this.adapter.on('spawn', () => {
+        if (first) {
+          first = false;
+          void this.setupWorld();
+        }
+      });
+    }
     if (!this.status.enabled) {
       this.bus.publish('spectator', 'P1', `自动旁观未启用：${this.status.reason}`);
       return;
     }
-    let first = true;
-    this.adapter.on('spawn', () => {
-      if (first) {
-        first = false;
-        void this.setupWorld();
-      }
-      this.schedule(1500, 'spawn');
-    });
+    this.adapter.on('spawn', () => this.schedule(1500, 'spawn'));
     this.adapter.on('respawn', () => this.schedule(2000, 'respawn'));
     this.adapter.on('death', () => this.schedule(3500, 'death'));
     this.timer = setInterval(() => void this.attach('health_check'), 20000);
@@ -60,7 +63,7 @@ export class Spectator {
   }
 
   async command(cmd: string): Promise<string> {
-    if (!this.rcon) throw new Error(this.status.reason);
+    if (!this.rcon) throw new Error(this.status.reason || '未设置 RCON_PASSWORD');
     try {
       const r = await this.rcon.send(cmd);
       this.status.rconOk = true;
@@ -73,7 +76,7 @@ export class Spectator {
 
   private async setupWorld() {
     if (!this.cfg.observer.setupGamerules) return;
-    for (const cmd of ['gamerule keepInventory true', 'gamerule doImmediateRespawn true']) {
+    for (const cmd of [`gamerule keepInventory ${this.cfg.observer.keepInventory}`, 'gamerule doImmediateRespawn true']) {
       try {
         await this.command(cmd);
       } catch (e: any) {
@@ -81,7 +84,7 @@ export class Spectator {
         return;
       }
     }
-    this.bus.publish('rcon', 'P3', '已设置测试规则：keepInventory、doImmediateRespawn');
+    this.bus.publish('rcon', 'P3', `已设置规则：keepInventory=${this.cfg.observer.keepInventory}、doImmediateRespawn=true`);
   }
 
   async attach(why: string) {

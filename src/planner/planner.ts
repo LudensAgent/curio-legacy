@@ -94,9 +94,10 @@ export class Planner {
         let text = '';
         let latencyMs = 0;
         let usage: unknown;
+        let finishReason: string | undefined;
         try {
           const c = await this.provider.complete(messages, AbortSignal.timeout(this.cfg.llm.timeoutMs + this.cfg.llm.fakeDelayMs + 1000), ctx);
-          ({ text, latencyMs, usage } = c);
+          ({ text, latencyMs, usage, finishReason } = c);
         } catch (e: any) {
           this.stats.errors++;
           this.stats.lastError = String(e?.message ?? e);
@@ -108,25 +109,35 @@ export class Planner {
         if (this.stats.latencies.length > 100) this.stats.latencies.shift();
 
         let error = '';
+        const truncated = finishReason === 'length';
         try {
           const v = validatePlan(extractJson(text), this.adapter, 'llm');
           if (v.ok) {
             v.plan.reason = ctx.reason;
             v.plan.requestedAt = this.stats.inFlightSince ?? Date.now();
             this.stats.ok++;
-            this.writer?.write({ ts: Date.now(), reason: ctx.reason, provider: this.provider.name, ok: true, latencyMs, usage, promptChars, output: text.slice(0, 2000), attempt });
+            this.writer?.write({ ts: Date.now(), reason: ctx.reason, provider: this.provider.name, ok: true, latencyMs, usage, finishReason, promptChars, output: text.slice(0, 2000), attempt });
             return v.plan;
           }
           error = v.error;
         } catch (e: any) {
-          error = `JSON 解析失败：${e?.message ?? e}`;
+          error = truncated
+            ? `输出被截断（finish_reason=length，已用 ${(usage as any)?.completion_tokens ?? '?'} tokens，可调大 LLM_MAX_TOKENS）`
+            : text.trim() === ''
+              ? '模型返回了空内容'
+              : `JSON 解析失败：${e?.message ?? e}`;
         }
         this.stats.invalid++;
         this.stats.lastError = error;
         this.bus.publish('llm_invalid', 'P1', `模型输出无效（第 ${attempt + 1} 次）：${error}`);
-        this.writer?.write({ ts: Date.now(), reason: ctx.reason, provider: this.provider.name, ok: false, invalid: true, error, latencyMs, output: text.slice(0, 2000), attempt });
-        messages.push({ role: 'assistant', content: text.slice(0, 2000) });
-        messages.push({ role: 'user', content: `上一个输出无效：${error}。请只输出一个符合格式的 JSON 对象。` });
+        this.writer?.write({ ts: Date.now(), reason: ctx.reason, provider: this.provider.name, ok: false, invalid: true, error, latencyMs, usage, finishReason, output: text.slice(0, 2000), attempt });
+        if (truncated || text.trim() === '') {
+          // 截断或空内容：不回填半截输出，直接要求更短的回答
+          messages.push({ role: 'user', content: '刚才的回复为空或被截断。请直接输出一个简短的 JSON 对象（thought 不超过 40 字，steps 不超过 3 步），不要输出其他内容。' });
+        } else {
+          messages.push({ role: 'assistant', content: text.slice(0, 2000) });
+          messages.push({ role: 'user', content: `上一个输出无效：${error}。请只输出一个符合格式的 JSON 对象。` });
+        }
       }
       throw new Error('INVALID_PLAN');
     } finally {

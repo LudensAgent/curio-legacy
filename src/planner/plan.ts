@@ -4,8 +4,9 @@ import type { WorldMemory } from '../memory/store.ts';
 import type { Percept } from '../perception/perception.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 import { shortId } from '../util.ts';
+import { computeDrives, stockOf, type Drive } from '../brain/drives.ts';
 
-export const GOAL_TYPES = ['explore', 'gather', 'craft', 'survive', 'investigate', 'rest'] as const;
+export const GOAL_TYPES = ['explore', 'gather', 'craft', 'survive', 'investigate', 'rest', 'build'] as const;
 
 export interface Plan {
   id: string;
@@ -18,6 +19,10 @@ export interface Plan {
   say?: string;
   abortIf: { hpBelow?: number; night?: boolean };
   memoryNote?: string;
+  /** 长期目标（跨多个计划），LLM 可更新 */
+  objective?: string;
+  /** LLM 提议学习的新组合技能（原始 JSON，由技能库校验） */
+  learnSkill?: unknown;
   createdAt: number;
   retries: number;
   /** 请求原因（prefetch 表示在上一个任务完成前预先规划） */
@@ -72,6 +77,8 @@ export function validatePlan(raw: unknown, adapter: GameAdapter, source: Plan['s
       say: o.say ? String(o.say).slice(0, 120) : undefined,
       abortIf: { hpBelow: Number.isFinite(hp) ? Math.max(1, Math.min(19, hp)) : undefined, night: ab.night === true },
       memoryNote: o.memory_note ? String(o.memory_note).slice(0, 200) : undefined,
+      objective: o.objective ? String(o.objective).slice(0, 120) : undefined,
+      learnSkill: o.learn_skill && typeof o.learn_skill === 'object' ? o.learn_skill : undefined,
       createdAt: Date.now(),
       retries: 0,
     },
@@ -110,7 +117,7 @@ export function projectAfter(p: Percept, current: { skill: string; args: any } |
 }
 
 export function ruleProposal(p0: Percept, memory?: WorldMemory, current?: { skill: string; args: any } | null): Record<string, unknown> {
-  const prop = baseRule(projectAfter(p0, current));
+  const prop = baseRule(projectAfter(p0, current), memory);
   // 失败冷却：3 分钟内同一个目标刚失败过，就先换个方向探索，避免原地反复失败
   if (memory && prop.goal_type !== 'survive') {
     const failed = memory.recentGoals(4).filter((g) => g.goal === prop.goal && (g.status === 'failed' || g.status === 'aborted') && Date.now() - g.ts < 180000);
@@ -127,7 +134,7 @@ export function ruleProposal(p0: Percept, memory?: WorldMemory, current?: { skil
   return prop;
 }
 
-function baseRule(p: Percept): Record<string, unknown> {
+function baseRule(p: Percept, memory?: WorldMemory): Record<string, unknown> {
   const has = (n: string) => count(p, (x) => x === n);
   const logs = count(p, (n) => n.endsWith('_log'));
   const planks = count(p, (n) => n.endsWith('_planks'));
@@ -135,13 +142,15 @@ function baseRule(p: Percept): Record<string, unknown> {
   const cobble = has('cobblestone');
   const logName = p.inventory.find((i) => i.name.endsWith('_log'))?.name ?? 'oak_log';
   const plankName = logName.replace('_log', '_planks');
-  const hasTableNearby = p.nearby.resources.some((r) => r.block === 'crafting_table' && r.nearest < 30) || has('crafting_table') > 0;
   const hasWoodPick = has('wooden_pickaxe') > 0;
   const hasStonePick = has('stone_pickaxe') > 0;
-  const base = p.exploration.base;
   const night = p.time.phase === 'night';
   const logNearby = p.nearby.resources.some((r) => r.block.endsWith('_log'));
-  const stoneNearby = true; // 看不见石头时 gather 会就地向下挖
+  const st = p.stock ?? stockOf(p);
+  const drives = p.drives?.length ? p.drives : memory ? computeDrives(p, memory).drives : [];
+  const homeBuilt = memory?.landmarks().some((l) => l.label.startsWith('我的hut') || l.label.startsWith('我的big_hut')) ?? false;
+  const bedPlaced = memory?.landmarks().some((l) => l.label === '我的床') ?? false;
+  const animals = (p.vision?.seen_entities ?? []).filter((e) => ['cow', 'pig', 'sheep', 'chicken', 'rabbit'].includes(e.name));
 
   const mk = (thought: string, goal: string, goal_type: string, steps: Step[], extra: Record<string, unknown> = {}) => ({ thought, goal, goal_type, steps, ...extra });
 
@@ -157,10 +166,8 @@ function baseRule(p: Percept): Record<string, unknown> {
   }
   if (mostlyWater && !sweptRecently) return mk('四周都是水，先环顾一圈看看陆地在哪。', '环顾四周寻找陆地', 'investigate', [{ skill: 'look_around' }]);
 
-  if (p.self.hp < 8 && p.self.food < 18 && count(p, (n) => FOODS.has(n)) > 0) return mk('生命值偏低，先吃点东西恢复。', '恢复状态', 'survive', [{ skill: 'eat' }]);
-  if (night && base && base.dist > 24) return mk('天黑了，离基地有点远，先回去比较安全。', '夜间返回基地', 'survive', [{ skill: 'goto', args: { target: 'base' } }], { abort_if: { hp_below: 5 } });
-
-  if (!hasStonePick) {
+  const toolsChain = (): Record<string, unknown> | null => {
+    if (hasStonePick) return null;
     if (!hasWoodPick) {
       if (logs + planks / 4 < 3 && logNearby) {
         const t = p.nearby.resources.find((r) => r.block.endsWith('_log'))!;
@@ -168,32 +175,80 @@ function baseRule(p: Percept): Record<string, unknown> {
       }
       if (logs + planks / 4 < 3 && !sweptRecently) return mk('眼前没看到树，先环顾一圈。', '环顾四周寻找树木', 'investigate', [{ skill: 'look_around' }]);
       if (logs + planks / 4 < 3) return mk('环顾过了，附近看不到树，去别处找找。', '寻找树木', 'explore', [{ skill: 'explore', args: { direction: 'auto', distance: 48 } }]);
-      const steps: Step[] = [];
-      if (planks < 7) steps.push({ skill: 'craft', args: { item: plankName, count: Math.min(16, 8 - (planks % 4)) } });
-      if (!hasTableNearby) steps.push({ skill: 'craft', args: { item: 'crafting_table', count: 1 } });
-      if (sticks < 2) steps.push({ skill: 'craft', args: { item: 'stick', count: 4 } });
-      steps.push({ skill: 'craft', args: { item: 'wooden_pickaxe', count: 1 } });
-      return mk('有木头了，按科技树做一把木镐。', '制作木镐', 'craft', steps.slice(0, 5));
+      return mk('有木头了，做一把木镐（木板、木棍、工作台会自动补做）。', '制作木镐', 'craft', [{ skill: 'craft', args: { item: 'wooden_pickaxe', count: 1 } }]);
     }
-    if (cobble < 3 && stoneNearby) return mk('有木镐了，去挖点圆石做石镐。', '收集圆石', 'gather', [{ skill: 'gather', args: { block: 'stone', count: 4 } }]);
-    const steps: Step[] = [];
-    if (sticks < 2) {
-      if (planks < 2) steps.push({ skill: 'craft', args: { item: plankName, count: 4 } });
-      steps.push({ skill: 'craft', args: { item: 'stick', count: 4 } });
+    if (cobble < 3) return mk('有木镐了，去挖点圆石做石镐。', '收集圆石', 'gather', [{ skill: 'gather', args: { block: 'stone', count: 6 } }]);
+    void sticks;
+    return mk('圆石够了，升级成石镐。', '制作石镐', 'craft', [{ skill: 'craft', args: { item: 'stone_pickaxe', count: 1 } }]);
+  };
+
+  const act = (d: Drive): Record<string, unknown> | null => {
+    switch (d.drive) {
+      case 'recover': {
+        const dr = p.death_recovery!;
+        return mk(`死的时候掉的东西（${dr.lost}）还在 ${dr.dir} ${dr.dist} 格外，趁 ${dr.seconds_left} 秒内回去捡。`, '回去捡回掉落物', 'survive', [
+          { skill: 'goto', args: { target: 'death' } },
+          { skill: 'pickup_items', args: { radius: 12 } },
+        ]);
+      }
+      case 'survive':
+        if (night && st.blocks >= 1 && !p.self.inWater) return mk('天黑又受了伤，就地挖个坑躲到天亮。', '挖坑躲避', 'survive', [{ skill: 'shelter', args: { until: 'day' } }]);
+        if (st.food > 0) return mk('血不多了，先吃东西回血。', '进食回血', 'survive', [{ skill: 'eat' }]);
+        if (p.nearby.hostile.length) return mk('血少，先离怪远一点。', '撤离危险', 'survive', [{ skill: 'flee', args: { distance: 24 } }]);
+        return null;
+      case 'eat':
+        if (st.food > 0 && p.self.food < 18) return mk('有点饿了，吃点东西（饱食度高才会回血）。', '进食', 'survive', [{ skill: 'eat' }]);
+        if (animals.length && !night) return mk(`肚子饿，背包没吃的，那边有 ${animals[0].name}，去猎点肉。`, '打猎补充食物', 'gather', [{ skill: 'hunt', args: { animal: animals[0].name, count: 2 } }, { skill: 'eat' }]);
+        if (!night && p.self.food <= 10) return mk('饿了又没看到动物，去开阔的地方找找。', '寻找动物', 'explore', [{ skill: 'explore', args: { direction: 'auto', distance: 64 } }]);
+        return null;
+      case 'rest':
+        if (st.hasBed || bedPlaced) return night ? mk('天黑了，睡一觉跳过夜晚。', '睡觉过夜', 'rest', [{ skill: 'sleep' }]) : null;
+        if (homeBuilt && p.exploration.base && p.exploration.base.dist > 6) return mk('天要黑了，回小屋待着。', '回家过夜', 'rest', [{ skill: 'goto', args: { target: 'base' } }]);
+        if (night && st.blocks >= 1 && !p.self.inWater) return mk('没有床也没房子，挖个坑躲一晚。', '挖坑过夜', 'rest', [{ skill: 'shelter', args: { until: 'day' } }]);
+        return null;
+      case 'tools':
+        return toolsChain();
+      case 'efficiency': {
+        const e = (p.efficiency ?? []).find((x) => x.better.some((b) => !b.have));
+        const b = e?.better.find((x) => !x.have);
+        if (!e || !b) return null;
+        return mk(`用${e.tool}挖 ${e.block} 太慢了（${e.avg_s} 秒/个），做把 ${b.tool} 能快 ${b.speedup} 倍，磨刀不误砍柴工。`, `做 ${b.tool} 提高效率`, 'craft', [{ skill: 'craft', args: { item: b.tool, count: 1 } }]);
+      }
+      case 'home': {
+        const need = 71;
+        if (st.blocks >= need) return mk('材料够了，盖一间小屋当家，晚上就不用挖坑了。', '建造小屋', 'build', [{ skill: 'build', args: { blueprint: 'hut' } }]);
+        if (st.blocks + st.logs * 3 >= need) {
+          const n = Math.min(64, need - (st.blocks - st.logs) + 4);
+          return mk('原木够盖房子了，先做成木板再盖。', '建造小屋', 'build', [{ skill: 'craft', args: { item: plankName, count: n } }, { skill: 'build', args: { blueprint: 'hut' } }]);
+        }
+        if (logNearby) return mk('想盖个小屋，得先多砍点木头。', '为小屋备料', 'gather', [{ skill: 'gather', args: { block: 'log', count: Math.min(24, Math.ceil((need - st.blocks) / 3) + 1) } }]);
+        return null;
+      }
+      case 'bed':
+        if (st.wool >= 3) return mk('羊毛够了，做张床，以后能睡觉跳过夜晚。', '做床', 'craft', [{ skill: 'craft', args: { item: 'white_bed', count: 1 } }]);
+        if (animals.some((a) => a.name === 'sheep') && !night) return mk('看到羊了，弄 3 块羊毛做床。', '收集羊毛', 'gather', [{ skill: 'hunt', args: { animal: 'sheep', count: 3 } }]);
+        return null;
+      case 'curiosity': {
+        const c = p.curiosities[0];
+        return mk(`之前看见 ${c.dir} 方向有 ${c.what}，去看看是什么。`, `调查 ${c.what}`, 'investigate', [{ skill: 'explore', args: { direction: c.dir, distance: Math.min(160, Math.max(24, c.dist)) } }]);
+      }
+      case 'stockpile':
+        if (st.logs < 16 && logNearby) return mk('多囤点木头，省得以后来回跑。', '囤积木材', 'gather', [{ skill: 'gather', args: { block: 'log', count: 12 } }]);
+        if (st.cobblestone < 16 && hasWoodPick) return mk('多挖点圆石备用。', '囤积圆石', 'gather', [{ skill: 'gather', args: { block: 'stone', count: 12 } }]);
+        return null;
+      case 'explore': {
+        if (night) return null;
+        const [bestDir] = Object.entries(p.exploration.noveltyByDir).sort((a, b) => b[1] - a[1])[0] ?? ['auto'];
+        return mk(`去 ${bestDir} 方向看看没去过的地方。`, `向 ${bestDir} 探索`, 'explore', [{ skill: 'explore', args: { direction: bestDir, distance: 80 } }]);
+      }
+      default:
+        return null;
     }
-    steps.push({ skill: 'craft', args: { item: 'stone_pickaxe', count: 1 } });
-    return mk('圆石够了，升级成石镐。', '制作石镐', 'craft', steps);
+  };
+
+  for (const d of drives) {
+    const r = act(d);
+    if (r) return r;
   }
-
-  const coal = p.nearby.resources.find((r) => r.block.includes('coal_ore'));
-  if (coal && has('coal') < 4 && !night) return mk('看到煤矿了，挖一些备用。', '采集煤炭', 'gather', [{ skill: 'gather', args: { block: 'coal', count: 4 } }]);
-  const iron = p.nearby.resources.find((r) => r.block.includes('iron_ore'));
-  if (iron && has('raw_iron') < 6 && !night) return mk('附近有铁矿，值得挖一点。', '采集铁矿', 'gather', [{ skill: 'gather', args: { block: 'iron', count: 3 } }]);
-
-  const dirs = Object.entries(p.exploration.noveltyByDir).sort((a, b) => b[1] - a[1]);
-  const [bestDir] = dirs[0] ?? ['auto'];
-  return mk(`工具齐了，去 ${bestDir} 方向看看没去过的地方。`, `向 ${bestDir} 探索`, 'explore', [
-    { skill: 'explore', args: { direction: bestDir, distance: 64 } },
-    { skill: 'explore', args: { direction: 'auto', distance: 32 } },
-  ]);
+  return toolsChain() ?? mk('四处走走看看。', '闲逛观察', 'explore', [{ skill: 'explore', args: { direction: 'auto', distance: 48 } }]);
 }

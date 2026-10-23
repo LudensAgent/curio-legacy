@@ -1,0 +1,122 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import type { GameAdapter } from '../adapter/types.ts';
+import type { EventBus } from '../events.ts';
+import type { WorldMemory } from '../memory/store.ts';
+import { SKILLS } from './index.ts';
+import { fail, ok, type Skill } from './types.ts';
+
+/**
+ * 技能库（受限的“自我进化”）：
+ * LLM 可以把一串已有技能组合成新技能（learn_skill），例如“砍树做木镐”“回死亡点捡东西”。
+ * - 只能组合内置技能，不能嵌套其他组合技能，不能执行任意代码
+ * - 每一步的参数都要通过对应技能的校验
+ * - 运行统计会被记录；多次失败的组合技能自动淘汰
+ * - 持久化在 data/skill-library.json，重启后保留
+ */
+
+export interface MacroDef {
+  name: string; // 不含 macro: 前缀
+  description: string;
+  steps: { skill: string; args?: unknown }[];
+  createdAt: number;
+  source: 'llm' | 'builtin';
+}
+
+const NAME_RE = /^[a-z][a-z0-9_]{2,31}$/;
+const PREFIX = 'macro:';
+
+export class SkillLibrary {
+  private defs = new Map<string, MacroDef>();
+
+  constructor(private file: string | null, private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus) {
+    if (file && fs.existsSync(file)) {
+      try {
+        for (const d of JSON.parse(fs.readFileSync(file, 'utf8')) as MacroDef[]) this.install(d, false);
+      } catch {
+        /* 文件损坏：忽略，从空库开始 */
+      }
+    }
+  }
+
+  private save() {
+    if (!this.file) return;
+    fs.mkdirSync(path.dirname(this.file), { recursive: true });
+    fs.writeFileSync(this.file, JSON.stringify([...this.defs.values()], null, 1));
+  }
+
+  list(): MacroDef[] {
+    return [...this.defs.values()];
+  }
+
+  /** 校验 LLM 提议的新技能；成功则安装并持久化 */
+  learn(raw: unknown): { ok: true; name: string } | { ok: false; error: string } {
+    const o = raw && typeof raw === 'object' ? (raw as Record<string, any>) : {};
+    const name = String(o.name ?? '').trim().replace(/^macro:/, '');
+    if (!NAME_RE.test(name)) return { ok: false, error: '名称需为 3-32 位小写字母/数字/下划线，且以字母开头' };
+    if (SKILLS[name]) return { ok: false, error: `与内置技能重名：${name}` };
+    if (!Array.isArray(o.steps) || o.steps.length < 2 || o.steps.length > 6) return { ok: false, error: 'steps 需要 2-6 步' };
+    const steps: MacroDef['steps'] = [];
+    for (const [i, st] of o.steps.entries()) {
+      const sk = SKILLS[String(st?.skill ?? '')];
+      if (!sk || sk.name.startsWith(PREFIX) || ['unstuck', 'surface'].includes(sk.name)) return { ok: false, error: `第 ${i + 1} 步使用了不可组合的技能 ${st?.skill}` };
+      const v = sk.validate(st?.args ?? {}, this.adapter);
+      if (!v.ok) return { ok: false, error: `第 ${i + 1} 步参数错误：${v.error}` };
+      steps.push({ skill: sk.name, args: v.args });
+    }
+    const def: MacroDef = { name, description: String(o.description ?? '').slice(0, 120) || steps.map((s) => s.skill).join(' → '), steps, createdAt: Date.now(), source: 'llm' };
+    const existed = this.defs.has(name);
+    this.install(def, true);
+    this.bus.publish('skill_learned', 'P2', `${existed ? '更新' : '学会'}了组合技能 ${PREFIX}${name}：${def.description}`, { steps });
+    return { ok: true, name: PREFIX + name };
+  }
+
+  private install(def: MacroDef, persist: boolean) {
+    this.defs.set(def.name, def);
+    SKILLS[PREFIX + def.name] = this.toSkill(def);
+    if (persist) this.save();
+  }
+
+  forget(name: string, why: string) {
+    const n = name.replace(/^macro:/, '');
+    if (!this.defs.delete(n)) return;
+    delete SKILLS[PREFIX + n];
+    this.save();
+    this.bus.publish('skill_forgotten', 'P1', `淘汰组合技能 ${PREFIX}${n}：${why}`);
+  }
+
+  /** 成功率太低的组合技能自动淘汰（≥3 次运行且成功率 < 1/3） */
+  prune() {
+    const stats = this.memory.skillStats();
+    for (const d of this.defs.values()) {
+      const st = stats[PREFIX + d.name];
+      if (st && st.runs >= 3 && st.ok / st.runs < 1 / 3) this.forget(d.name, `成功 ${st.ok}/${st.runs}`);
+    }
+  }
+
+  private toSkill(def: MacroDef): Skill<{}> {
+    const timeout = def.steps.reduce((a, s) => a + (SKILLS[s.skill]?.timeoutMs ?? 60000), 0);
+    return {
+      name: PREFIX + def.name,
+      description: `【自学】${def.description}`,
+      argsDoc: '{}',
+      timeoutMs: Math.min(timeout, 600_000),
+      movement: def.steps.some((s) => SKILLS[s.skill]?.movement),
+      validate: () => ({ ok: true, args: {} }),
+      run: async (ctx) => {
+        const results: string[] = [];
+        for (const [i, st] of def.steps.entries()) {
+          const sk = SKILLS[st.skill];
+          if (!sk) return fail('ERROR', `组合技能引用的 ${st.skill} 不存在`);
+          const v = sk.validate(st.args ?? {}, ctx.adapter);
+          if (!v.ok) return fail('BAD_ARGS', `第 ${i + 1} 步参数失效：${v.error}`);
+          ctx.progress(i / def.steps.length, `${def.name}：第 ${i + 1}/${def.steps.length} 步 ${st.skill}`);
+          const r = await sk.run({ ...ctx, deadline: Math.min(ctx.deadline, Date.now() + sk.timeoutMs) }, v.args);
+          results.push(`${st.skill}:${r.status}`);
+          if (r.status !== 'succeeded') return { ...r, summary: `${def.name} 在第 ${i + 1} 步失败：${r.summary}` };
+        }
+        return ok(`${def.name} 完成（${results.join('，')}）`);
+      },
+    };
+  }
+}

@@ -63,8 +63,8 @@ export const explore: Skill<{ direction: string; distance: number }> = {
 // ------------------------------------------------------------------ goto
 export const goTo: Skill<{ target: string }> = {
   name: 'goto',
-  description: '前往地标（base、地标 id 或名称）或坐标',
-  argsDoc: '{"target": "base | <地标id或名称> | x,y,z"}',
+  description: '前往地标（base、death=上次死亡地点、地标 id 或名称）或坐标',
+  argsDoc: '{"target": "base | death | <地标id或名称> | x,y,z"}',
   timeoutMs: 120000,
   movement: true,
   validate(raw) {
@@ -79,7 +79,13 @@ export const goTo: Skill<{ target: string }> = {
     let label = args.target;
     const m = args.target.match(/^\s*(-?\d+(?:\.\d+)?)[ ,]+(-?\d+(?:\.\d+)?)[ ,]+(-?\d+(?:\.\d+)?)\s*$/);
     if (m) pos = { x: +m[1], y: +m[2], z: +m[3] };
-    else {
+    else if (args.target.toLowerCase() === 'death') {
+      const d = memory.lastDeath();
+      if (!d) return fail('NOT_FOUND', '没有记录的死亡地点');
+      if (d.dim !== s.dim) return fail('WRONG_DIMENSION', `死亡地点在 ${d.dim}`);
+      pos = d.pos;
+      label = '死亡地点';
+    } else {
       const lm = memory.findLandmark(args.target);
       if (!lm) return fail('NOT_FOUND', `找不到地标：${args.target}`);
       if (lm.dim !== s.dim) return fail('WRONG_DIMENSION', `地标 ${lm.label} 在 ${lm.dim}`);
@@ -174,5 +180,28 @@ export const unstuck: Skill<{}> = {
       if (isAbort(e)) throw e;
     }
     return ok('尝试脱困');
+  },
+};
+
+// ------------------------------------------------------------------ surface（仅反射层使用：防溺水）
+export const surface: Skill<{}> = {
+  name: 'surface',
+  description: '溺水风险时长按跳跃浮上水面换气',
+  argsDoc: '{}',
+  timeoutMs: 15000,
+  movement: false,
+  validate() {
+    return { ok: true, args: {} };
+  },
+  async run(ctx) {
+    const end = Date.now() + 12000;
+    while (Date.now() < end) {
+      const s = ctx.adapter.state();
+      if (!s.inWater) break; // 已经不在水里
+      if (s.oxygen >= 18) break;
+      await ctx.adapter.jump(500, ctx.signal);
+    }
+    const s = ctx.adapter.state();
+    return !s.inWater || s.oxygen >= 15 ? ok(`浮上水面，氧气 ${s.oxygen}/20`) : fail('STUCK', `仍在水下，氧气 ${s.oxygen}/20`);
   },
 };

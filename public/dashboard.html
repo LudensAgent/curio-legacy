@@ -94,12 +94,15 @@
 
   <section>
     <h2>当前目标与思考</h2>
+    <div class="row"><span>长期目标</span><span id="objective" class="mono" style="text-align:right">-</span></div>
     <div class="goal" id="goal">—</div>
     <div class="thought" id="thought"></div>
     <ol class="steps" id="steps"></ol>
     <div class="row" style="margin-top:10px"><span>LLM</span><span id="llmstate" class="mono">-</span></div>
     <div class="row"><span>已排队计划</span><span id="queued" class="mono">-</span></div>
     <div class="row"><span>上次失败</span><span id="lastfail" class="mono">-</span></div>
+    <div class="sub">游玩欲望</div>
+    <ul class="plain" id="drives"></ul>
   </section>
 
   <section>
@@ -168,6 +171,8 @@
     <ul class="plain" id="goals"></ul>
     <div class="sub">地标</div>
     <ul class="plain" id="lms"></ul>
+    <div class="sub">自学技能</div>
+    <ul class="plain" id="skills"></ul>
     <div class="sub">笔记</div>
     <ul class="plain" id="notes"></ul>
   </section>
@@ -229,6 +234,9 @@ function render(s) {
   const since = m.llm.inFlightSince ? ((s.now - m.llm.inFlightSince) / 1000).toFixed(1) + 's' : '';
   $('llmstate').textContent = ex.llmInFlight ? `思考中（${ex.llmReason}）${since}` : ex.backoffMs ? `冷却 ${Math.round(ex.backoffMs / 1000)}s` : '空闲';
   $('queued').textContent = ex.queued ? ex.queued.goal : '-';
+  $('objective').textContent = s.memory.objective?.text ?? '（尚未设定）';
+  $('drives').innerHTML = (p.drives || []).slice(0, 5).map((d) => `<li title="${esc(d.why)}">${'▮'.repeat(Math.max(1, Math.round(d.level * 10)))} ${d.drive} · ${esc(d.suggest)}</li>`).join('') || '<li>—</li>';
+  $('skills').innerHTML = (s.memory.skills || []).map((k) => `<li>macro:${esc(k.name)} · ${esc(k.description)}</li>`).join('') || '<li>—</li>';
   $('lastfail').textContent = ex.lastFailure ? `${ex.lastFailure.skill}: ${ex.lastFailure.code ?? ''} ${ex.lastFailure.summary}` : '-';
 
   $('skill').textContent = t ? t.skill : (st.connected ? '（空闲）' : '—');

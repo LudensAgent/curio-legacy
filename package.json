@@ -1,6 +1,6 @@
 {
   "name": "mc-agent-mvp",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Minecraft Autonomous Curiosity Agent - MVP (Mineflayer + LLM planner + spectator observation)",
   "type": "module",
   "private": true,
@@ -19,7 +19,8 @@
     "minecraft-data": "^3.60.0",
     "mineflayer": "^4.20.0",
     "mineflayer-pathfinder": "^2.4.5",
-    "vec3": "^0.1.10"
+    "vec3": "^0.1.10",
+    "curio-observer": "file:../CurioObserver"
   },
   "optionalDependencies": {
     "prismarine-viewer": "^1.28.0"

@@ -14,6 +14,8 @@ export interface ExecutiveDeps {
   perception: Perception;
   memory: WorldMemory;
   bus: EventBus;
+  /** LLM 在计划里提议学习新技能时调用 */
+  onLearnSkill?: (raw: unknown) => void;
 }
 
 const PREFETCH_PROGRESS = 0.6;
@@ -40,6 +42,8 @@ export class Executive {
   private timer: NodeJS.Timeout | null = null;
   private lastFinished: { goal: string; status: string; at: number } | null = null;
   staleDropped = 0;
+  private lastSayAt = 0;
+  private activatedAt: number | null = null;
 
   constructor(private d: ExecutiveDeps) {}
 
@@ -113,6 +117,12 @@ export class Executive {
     this.replaceOnArrival = false;
     this.d.bus.publish('plan', 'P2', `[${p.source}] ${p.goal} —— ${p.thought}`, { steps: p.steps, planId: p.id });
     if (p.memoryNote) this.d.memory.addNote('inference', p.memoryNote);
+    if (p.objective) {
+      const before = this.d.memory.objective()?.text;
+      this.d.memory.setObjective(p.objective);
+      if (before !== p.objective) this.d.bus.publish('objective', 'P2', `长期目标：${p.objective}`);
+    }
+    if (p.learnSkill && this.d.onLearnSkill) this.d.onLearnSkill(p.learnSkill);
     this.queued = p;
     const cur = this.d.arbiter.info();
     if (replace && this.plan) {
@@ -133,12 +143,18 @@ export class Executive {
     if (!this.plan && this.queued) {
       this.plan = this.queued;
       this.queued = null;
+      this.activatedAt = Date.now();
       this.d.bus.publish('goal', 'P2', `新目标：${this.plan.goal}`, { planId: this.plan.id, source: this.plan.source });
-      if (this.plan.say) this.d.adapter.chat(this.plan.say);
+      // 聊天限流：不要每个计划都说话，显得像复读机
+      if (this.plan.say && Date.now() - this.lastSayAt > 60_000) {
+        this.d.adapter.chat(this.plan.say);
+        this.lastSayAt = Date.now();
+      }
     }
     if (!this.plan && !this.inFlight && Date.now() < this.backoffUntil) {
       // LLM 冷却期：直接用规则目标，避免长时间填充
       this.plan = this.d.planner.rulePlan(this.ctx('llm_backoff'));
+      this.activatedAt = Date.now();
       this.d.bus.publish('goal', 'P2', `新目标（规则）：${this.plan.goal}`, { planId: this.plan.id, source: 'rule' });
     }
     if (this.plan) {
@@ -170,7 +186,8 @@ export class Executive {
     if (!p) return;
     this.plan = null;
     this.lastFinished = { goal: p.goal, status, at: Date.now() };
-    this.d.memory.recordGoal({ goal: p.goal, goalType: p.goalType, source: p.source, status, summary });
+    const durationSec = Math.round((Date.now() - (this.activatedAt ?? p.createdAt)) / 1000);
+    this.d.memory.recordGoal({ goal: p.goal, goalType: p.goalType, source: p.source, status, summary, durationSec });
     this.d.bus.publish('goal_end', status === 'succeeded' ? 'P2' : 'P1', `目标「${p.goal}」→ ${status}：${summary}`, { planId: p.id, status });
   }
 

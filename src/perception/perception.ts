@@ -3,6 +3,8 @@ import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { round1 } from '../util.ts';
 import { NOTABLE, type Vision, type VisionSummary } from './vision.ts';
+import { computeDrives, type Drive, type Stock } from '../brain/drives.ts';
+import { efficiencyInsights, type EfficiencyInsight } from '../brain/efficiency.ts';
 
 export const DIRS: Record<string, [number, number]> = {
   N: [0, -1], NE: [0.707, -0.707], E: [1, 0], SE: [0.707, 0.707],
@@ -28,6 +30,16 @@ export interface Percept {
     resources: { block: string; count: number; nearest: number; dir?: string; seen: 'now' | 'memory' }[];
   };
   vision: VisionSummary | null;
+  /** 死亡后掉落物还在（5 分钟内）时出现：在哪、丢了什么、还剩多少秒消失 */
+  death_recovery: { dir: string; dist: number; lost: string; seconds_left: number } | null;
+  /** 看见过但还没去过的有趣东西（好奇心候选） */
+  curiosities: { what: string; dir: string; dist: number }[];
+  objective: string | null;
+  /** 游玩欲望（按强度排序） */
+  drives: Drive[];
+  stock: Stock | null;
+  /** 效率洞察：最近的采集速度，以及换哪把工具能快多少（偷懒的依据） */
+  efficiency: EfficiencyInsight[];
   exploration: {
     visitedChunks: number;
     noveltyByDir: Record<string, number>;
@@ -115,6 +127,41 @@ export class Perception {
         ? { dist: Math.round(Math.hypot(base.pos.x - s.pos.x, base.pos.z - s.pos.z)), dir: dirName(base.pos.x - s.pos.x, base.pos.z - s.pos.z) }
         : null;
 
+    // ---- 死亡掉落物：物品在地上 5 分钟后消失
+    let deathRecovery: Percept['death_recovery'] = null;
+    const d = this.memory.lastDeath();
+    if (d && d.lost.length && s.connected) {
+      const left = Math.round((d.ts + 300_000 - Date.now()) / 1000);
+      const dist = Math.hypot(d.pos.x - here.x, d.pos.z - here.z);
+      if (left <= 0) {
+        this.memory.clearDeath();
+        this.bus.publish('death_items', 'P1', '死亡掉落物已经消失（超过 5 分钟）');
+      } else if (d.dim === s.dim) {
+        const itemsNear = v.seen.some((e) => e.kind === 'item' && Math.hypot(e.pos.x - d.pos.x, e.pos.z - d.pos.z) < 10);
+        if (dist < 4 && !itemsNear) {
+          this.memory.clearDeath();
+          this.bus.publish('death_items', 'P2', '回到了死亡地点，附近已经没有掉落物（已捡回或被冲走）');
+        } else {
+          deathRecovery = {
+            dir: dirName(d.pos.x - here.x, d.pos.z - here.z),
+            dist: Math.round(dist),
+            lost: d.lost.slice(0, 8).map((i) => `${i.name}×${i.count}`).join('、'),
+            seconds_left: left,
+          };
+        }
+      }
+    }
+
+    // ---- 好奇心候选：记得但没去过的结构/稀有资源
+    const visited = (p: { x: number; z: number }) => this.memory.chunkVisits(s.dim, p.x, p.z) > 0;
+    const curiosities = this.memory
+      .landmarks()
+      .filter((l) => l.dim === s.dim && (l.kind === 'discovery' || l.kind === 'resource') && !l.label.startsWith('biome:') && !visited(l.pos))
+      .map((l) => ({ what: l.label, dir: dirName(l.pos.x - here.x, l.pos.z - here.z), dist: Math.round(Math.hypot(l.pos.x - here.x, l.pos.z - here.z)) }))
+      .filter((c) => c.dist > 8)
+      .sort((a, b) => a.dist - b.dist)
+      .slice(0, 6);
+
     const passiveCount = new Map<string, number>();
     for (const e of v.seen.filter((x) => x.kind === 'passive')) passiveCount.set(e.name, (passiveCount.get(e.name) ?? 0) + 1);
 
@@ -150,8 +197,17 @@ export class Perception {
           : [],
       },
       vision: vs,
+      death_recovery: deathRecovery,
+      curiosities,
+      objective: this.memory.objective()?.text ?? null,
+      drives: [],
+      stock: null,
+      efficiency: s.connected ? efficiencyInsights(this.adapter, this.memory, s.inventory) : [],
       exploration: { visitedChunks: this.memory.visitedChunkCount, noveltyByDir, base: baseInfo },
     };
+    const { drives, stock } = computeDrives(this.latest, this.memory);
+    this.latest.drives = drives;
+    this.latest.stock = stock;
     return this.latest;
   }
 }
