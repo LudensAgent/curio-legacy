@@ -14,7 +14,7 @@ import type { Completion } from '../src/planner/llm.ts';
 import { Planner } from '../src/planner/planner.ts';
 import type { PlanContext } from '../src/planner/prompt.ts';
 import { SKILLS } from '../src/skills/index.ts';
-import { ok } from '../src/skills/types.ts';
+import { fail, ok } from '../src/skills/types.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 
 const flush = async () => { await setImmediate(); await setImmediate(); await setImmediate(); };
@@ -68,7 +68,7 @@ function fixture(t: TestContext) {
     actions: () => actions, learned: () => learned };
 }
 
-test('real autonomous planning keeps observing through 8.4s and 22.4s responses, including repeated fillers', async (t) => {
+test('slow autonomous choices get one useful sweep rather than repeated circles while waiting', async (t) => {
   const w = fixture(t);
   await w.tick();
   assert.equal(w.planner.autonomous, true);
@@ -76,24 +76,27 @@ test('real autonomous planning keeps observing through 8.4s and 22.4s responses,
   assert.equal(w.arbiter.info()?.source, 'filler');
   assert.equal(w.arbiter.info()?.skill, 'look_around');
   await w.advance(8400);
-  assert.ok(w.look.mock.callCount() > 8, 'the real look_around skill should turn the adapter repeatedly');
+  assert.equal(w.look.mock.callCount(), 8, 'one full sweep is enough at the same position');
   w.pending[0].resolve(reply(begin)); await flush(); await w.tick();
   assert.equal(w.arbiter.info()?.source, 'llm', 'the returned model plan must replace background observation');
   const intentId = w.memory.currentIntent()?.id;
   await w.advance(1500);
+  assert.equal(w.pending.length, 1, 'the next choice must wait for the observation result');
+  await w.advance(1000);
   assert.equal(w.pending.length, 2);
-  assert.equal(w.pending[1].ctx.reason, 'prefetch');
+  assert.equal(w.pending[1].ctx.reason, 'no_goal');
+  assert.ok((w.pending[1].ctx.results as { skill: string; status: string }[]).some((r) => r.skill === 'look_around' && r.status === 'succeeded'));
   assert.equal(w.pending[1].ctx.binding?.milestoneId, undefined);
   await w.advance(22400 - (Date.now() - w.pending[1].at));
 
   const metrics = w.metrics.snapshot();
   t.diagnostic(`思考期间行动 ${(100 * (metrics.llmContinuity ?? 0)).toFixed(1)}%，无任务 ${metrics.idle10m}s，思考采样 ${metrics.llmThinkingSec}s`);
   assert.ok(metrics.llmThinkingSec >= 25, 'both slow requests must contribute to the measured interval');
-  assert.ok((metrics.llmContinuity ?? 0) >= 0.95, `autonomous continuity was ${metrics.llmContinuity}`);
-  const activeSeconds = Object.values(metrics.window10m).reduce((sum, value) => sum + value, 0);
-  assert.ok(metrics.idle10m / activeSeconds < 0.1, `idle samples: ${metrics.idle10m}/${activeSeconds}`);
+  assert.ok(metrics.idle10m > 0, 'quiet waiting must remain visible in the metrics');
+  assert.ok((metrics.llmContinuity ?? 1) < 1, 'do not keep spinning just to count waiting as activity');
   const fillers = w.bus.recent().filter((event) => event.type === 'task_start' && event.data?.source === 'filler');
-  assert.ok(fillers.length >= 3, 'background observation must restart while a response is still pending');
+  assert.equal(fillers.length, 1, 'a recent completed model sweep must also suppress redundant background sweeps');
+  assert.equal(w.look.mock.callCount(), 16, 'only the initial sweep and the model-approved sweep should turn the actor');
   assert.ok(fillers.every((event) => event.data?.skill === 'look_around'));
   assert.deepEqual(w.adapter.pos, { x: 0, y: 64, z: 0 });
   assert.deepEqual(w.adapter.actions, [], 'waiting must not invent movement or resource consumption');
@@ -101,6 +104,27 @@ test('real autonomous planning keeps observing through 8.4s and 22.4s responses,
   assert.equal(w.memory.decisions().length, 1, 'thinking and fillers must not create their own intent choices');
   w.pending[1].resolve(reply(continuation)); await flush(); await w.tick();
   assert.equal(w.arbiter.info()?.source, 'llm');
+});
+
+test('elapsed time alone never restarts a completed background sweep', async (t) => {
+  const w = fixture(t);
+  await w.tick(); await w.advance(29_000);
+  assert.equal(w.look.mock.callCount(), 8);
+  assert.equal(w.arbiter.info(), null);
+  assert.equal(w.pending.length, 1);
+  await w.advance(6000);
+  assert.equal(w.bus.recent().filter((event) => event.type === 'task_start' && event.data?.source === 'filler').length, 1);
+  assert.equal(w.look.mock.callCount(), 8);
+});
+
+test('moving to a meaningfully different position permits a fresh background sweep', async (t) => {
+  const w = fixture(t);
+  await w.tick(); await w.advance(5000);
+  w.adapter.pos.x += 2; await w.tick();
+  assert.equal(w.arbiter.info(), null, 'small position jitter does not justify another circle');
+  w.adapter.pos.x += 7; await w.tick();
+  assert.equal(w.arbiter.info()?.skill, 'look_around');
+  assert.equal(w.arbiter.info()?.source, 'filler');
 });
 
 test('an autonomous open intent prefetches without a project and activates its reply only after the current action', async (t) => {
@@ -122,11 +146,47 @@ test('an autonomous open intent prefetches without a project and activates its r
   assert.equal(w.actions(), 1);
 });
 
+test('a read-only query finishes before its result is used to choose the next plan', async (t) => {
+  const w = fixture(t);
+  SKILLS.continuity_action.readOnly = true;
+  await w.tick();
+  w.pending[0].resolve(reply(begin, { steps: [{ skill: 'continuity_action' }] })); await flush(); await w.tick();
+  await w.tick();
+  assert.equal(w.pending.length, 1);
+  w.finishes[0](); await flush(); await w.tick();
+  assert.equal(w.pending.length, 2);
+  assert.ok((w.pending[1].ctx.results as { skill: string }[]).some((r) => r.skill === 'continuity_action'));
+});
+
+test('failed safety reflex outcomes reach the next choice with real water state and clear after recovery', async (t) => {
+  const w = fixture(t), previous = SKILLS.test_water_reflex;
+  let recovered = false;
+  SKILLS.test_water_reflex = { name: 'test_water_reflex', description: 'test water outcome', argsDoc: '{}', timeoutMs: 1000,
+    movement: false, validate: () => ({ ok: true, args: {} }), run: async () => recovered
+      ? ok('已确认上岸', { landed: true }) : fail('STUCK', '氧气已恢复，仍未上岸', { landed: false }) };
+  t.after(() => { if (previous) SKILLS.test_water_reflex = previous; else delete SKILLS.test_water_reflex; });
+  w.adapter.inWater = true;
+  await w.tick();
+  assert.equal(w.arbiter.info(), null, 'water is not a place to fill model waiting with stationary sweeps');
+  w.arbiter.start({ skill: 'test_water_reflex' }, 'reflex');
+  await w.tick(); await flush(); await w.tick();
+  const latest = w.pending.at(-1)!.ctx;
+  assert.equal(latest.lastFailure?.code, 'STUCK');
+  assert.equal(latest.lastFailure?.skill, 'test_water_reflex');
+  assert.equal((latest.results as { data?: { landed?: boolean } }[]).at(-1)?.data?.landed, false);
+  assert.equal((latest.decisionFeedback as { currentState: { inWater: boolean } }).currentState.inWater, true);
+  recovered = true;
+  w.adapter.inWater = false;
+  w.arbiter.start({ skill: 'test_water_reflex' }, 'reflex');
+  await flush(); w.executive.replan(); await flush();
+  assert.equal(w.pending.at(-1)!.ctx.lastFailure, null, 'a later confirmed success clears the earlier failure of that skill');
+});
+
 test('voluntary deferral cancels observation and keeps the chosen waiting period idle', async (t) => {
   const w = fixture(t);
   w.memory.addIntent({ text: '欣赏河岸', whyNow: '喜欢这里', context: [], tradeoffs: [], source: 'model', status: 'active' });
   await w.tick(); await w.advance(1000);
-  assert.ok(w.look.mock.callCount() > 0);
+  assert.equal(w.look.mock.callCount(), 0, 'an existing interest does not require automatic sightseeing');
   w.pending[0].resolve(reply({ kind: 'defer', reason: '先休息一会，观察留到之后' }, { steps: [] }));
   await flush(); await w.tick();
   const lookCount = w.look.mock.callCount();
@@ -142,7 +202,7 @@ test('model failure cancels observation and preserves idle backoff without a sub
   const w = fixture(t);
   const intent = w.memory.addIntent({ text: '欣赏河岸', whyNow: '喜欢这里', context: [], tradeoffs: [], source: 'model', status: 'active' });
   await w.tick(); await w.advance(1000);
-  assert.equal(w.arbiter.info()?.source, 'filler');
+  assert.equal(w.arbiter.info(), null, 'waiting with a current interest is not a reason to sweep');
   w.pending[0].reject(new Error('temporary unavailable')); await flush(); await w.tick();
   const lookCount = w.look.mock.callCount();
   assert.equal(w.arbiter.info(), null);

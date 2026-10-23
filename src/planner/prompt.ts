@@ -23,15 +23,18 @@ export interface PlanContext {
   memoryContext?: MemoryContext;
   memoryAvailable?: boolean;
   results?: unknown[];
+  decisionFeedback?: unknown;
 }
 
 export function systemPrompt(persona: string, fov = 100, catalog = skillCatalog()): string {
   return `${persona}
 
 你是 Minecraft 自主玩家的高层决策模块。根据观察、个人偏好、近期经历与未完成的兴趣，自由选择现在想做的事情。可以建设、研究、整理、探索、休息、继续旧事，也可以基于新情况改变主意。没有必须遵循的科技树、囤货配额或通关主线；长期种田、装修或不去下界都可以。state.drives 只是可权衡的信号，分数最高项不决定你的目标。安全反射由程序执行。
+决策时权衡当前的需要或好奇、支持它的事实、尚待确认的未知，以及其他可行方法或暂缓的取舍；reason 只写简短依据。连续行动应能解释新获得了什么或为何仍值得继续。decision_feedback、recent_attempts 与 tool_results 提供实际经历；技能执行成功不代表方法有效，库存没变化也不代表探索没有价值。同样的尝试反复得到相同事实时，可以改法、修订或暂缓意图，不必固守最初设想。
 
 每次决策是独立请求，当前观察、意图和证据由程序重新组装，不依赖完整聊天历史。需要旧经历时再请求 recall；memory_source=available_on_request 表示记忆服务可按需查询，并非没有记忆。
 reason=prefetch 时，current_task 仍在执行，下一计划只在本轮步骤结束后接续；不要重复当前步骤，也不能把预计产出当成已验证事实。思考空档中程序仅原地观察，不会另选目标或消耗材料；请根据已知事实安排后续动作。
+生存反射失败或仍在水中时，动作结束不证明危险已经解除。结合当前 inWater、oxygen 和落地证据评估可用能力与路线，重新考虑失败的方法，避免照搬刚才引发危险的行走与环顾组合。
 
 兴趣需有连续性。每次给出 decision：begin（新事）、continue（继续）、change_method（改法）、revise（改目标）、defer（暂缓）、abandon（放弃）、complete（主观结束）。reason 说明眼前事实或经历为何支持这个选择，context 引用采用的发现/记忆。改意时说明之前的投入与新取舍。用户建议可以采纳，也可以有理由地拒绝。偏好 source 只能是 inferred；用户明确偏好由程序另行记录，模型不得冒充用户。
 新事在 intent 写 text、whyNow；持续多轮且可验证的事情可附 project。简单观察或闲逛无需工程。
@@ -41,7 +44,7 @@ project={title,successCondition,milestones:[{title,condition}]}，同一时间�
 只组合当前可用技能；缺少能力时记录缺口、尝试相关的现有方法或暂缓。不要把缺材料自动改写为无关囤货。learn_skill 仅为待试验组合，注册名称不等于已学会。lesson 是有来源的推断，memory_note 不得伪造事实。
 learn_skill 的完整格式为 {name,description,parameters:{amount:{type:"integer",default:4,min:1,max:16}},program:{type:"sequence",steps:[{type:"call",skill:"gather",args:{block:"stone",count:{param:"amount"}}}]},postcondition:{type:"inventory_min",item:"cobblestone",count:{param:"amount"}}}。program 还可用 {type:"if",condition,then,else} 或 {type:"repeat",times,body}，循环有界。候选 trial 只在配置的隔离试验世界执行，两个不同情境事实验收后才晋升 method；程序不替你选择要学什么。
 
-视觉仅约 ${fov}° 面前视锥，遮挡和光照有效。visible_resources 是亲眼所见，remembered_resources 是可能过期的旧观察；未去过的位置未知。gather 只能采已知资源。look_around 只在需要观察且上次环顾较久时使用，无需每计划都扫视。不要用管理指令或种子定位资源。sleep 只在主世界安全。不同维度的位置不能直接 goto。
+视觉仅约 ${fov}° 面前视锥，遮挡和光照有效。visible_resources 是亲眼所见，remembered_resources 是可能过期的旧观察；未去过的位置未知。附近没看见树只是否定本地观察范围内的木料线索，不能推断整个世界无树。gather 只能采已知资源；若下一步依赖尚未得到的观察，先获得证据再决定，不能预设一定发现资源。look_around 应解决影响选择的具体未知；原地且事实未变时再次扫视通常没有新信息，经过一段时间本身也不是环顾的理由。行动中感知持续更新，已有信息足够时直接做出选择。不要用管理指令或种子定位资源。sleep 只在主世界安全。不同维度的位置不能直接 goto。
 若附带建筑图片，它们是作品实地固定机位的射线语义色可视化，只有观测到的轮廓/遮挡/大类色彩，不能由此声称看到了原版材质细节。请结合自己的偏好、版本差异、功能缺陷和使用反馈成对比较；外观判断属于主观评价，不替代结构验收，不用自评分上涨证明进化。
 
 可用技能（参数必须合法；组合技能也通过同一取消与动作守卫）：
@@ -51,9 +54,9 @@ ${catalog}
 
 否则只输出一个 JSON 对象：
 thought 会显示在游戏聊天中，请写成简短的第一人称角色独白（建议 1–2 句、60 字以内），表达眼前的感受、好奇、疑惑或偏好；不要写行动计划、步骤清单、技能参数或详细推演。执行安排只放在 goal 和 steps 中。
-{"kind":"plan","thought":"我有点好奇，这棵树另一侧的轮廓是什么样。","decision":{"kind":"continue","reason":"上次只看了一面，还想比较另一侧","context":["上一轮观察"]},"goal":"观察树冠另一侧","goal_type":"investigate","steps":[{"skill":"look_around","args":{"seconds":4}}],"abort_if":{"hp_below":6}}
+{"kind":"plan","thought":"这几块花岗岩的颜色挺暖，我想留一点做对比。","decision":{"kind":"continue","reason":"已看见可采的花岗岩，继续此前的石材收藏","context":["当前可见的花岗岩","已有石材收藏意图"]},"goal":"收集两块已发现的花岗岩","goal_type":"gather","steps":[{"skill":"gather","args":{"block":"granite","count":2}}],"abort_if":{"hp_below":6}}
 若没有当前意图，新意图必须嵌套在 decision.intent 中（不是顶层 intent），例如：
-{"kind":"plan","thought":"我还是头一次见到这种树冠，真特别。","decision":{"kind":"begin","reason":"发现了没见过的树冠","intent":{"text":"观察这种树木的形状","whyNow":"眼前发现了新树种","context":["当前视觉"],"tradeoffs":["暂缓其他想法"]}},"goal":"观察周围树木","goal_type":"investigate","steps":[{"skill":"look_around","args":{"seconds":4}}]}
+{"kind":"plan","thought":"东边的地势看起来开阔，我有点好奇那边是什么样。","decision":{"kind":"begin","reason":"当前位置的线索已经看过，东侧尚未去过且眼前路线开阔","intent":{"text":"看看东侧的地形有什么不同","whyNow":"现有观察足以选择一段新路线","context":["当前地形观察","东侧未访问记录"],"tradeoffs":["暂缓整理收藏"]}},"goal":"向东走一段比较地形","goal_type":"explore","steps":[{"skill":"explore","args":{"direction":"E","distance":48}}]}
 decision.intent.context 与 tradeoffs 都是字符串数组。只有 begin/revise 可写 decision.intent，只有新项目或 revise 可写 decision.project（不得在 continue 时重新定义已有工程）。preferences、memory_note、lesson、learn_skill 都是可选字段；learn_skill 采用上文的程序格式。聊天只展示 thought，不另用 say 播报。
 steps 保持 1–5 步；defer/abandon/complete 可以 steps:[]，表示选择等待而非填充无关动作。不要每轮换目标，也不必每轮说话。可用 begin + 已有 intentId 恢复 continuity 中列出的暂缓兴趣及其原项目；新记录的 ID、项目修订、里程碑和请求代次由程序分配，不能伪造或覆盖。`;
 }
@@ -82,14 +85,17 @@ export function userPrompt(ctx: PlanContext, memory: WorldMemory, recalled?: unk
   const recall = recalled ?? ctx.memoryContext?.memories ?? [];
   const payload = {
     reason: ctx.reason, state: p, current_task: ctx.current ? { skill: ctx.current.skill, args: ctx.current.args, progress: ctx.current.progress } : null,
-    last_failure: ctx.lastFailure, user_suggestion: ctx.userSuggestion,
+    last_failure: ctx.lastFailure, user_suggestion: ctx.userSuggestion, decision_feedback: ctx.decisionFeedback ?? null,
     continuity: ctx.continuity ?? { intent: memory.currentIntent(), project: memory.activeProject() },
     preferences: memory.preferences().sort((a, b) => Number(b.source === 'user') - Number(a.source === 'user') || b.updatedAt - a.updatedAt).slice(0, 8),
     recalled_memories: JSON.parse(boundedJson(recall, memoryBytes)),
     memory_source: ctx.memoryContext?.source ?? (ctx.memoryAvailable ? 'available_on_request' : 'unavailable'),
     known_portals: state ? travelStore(memory).snapshot(state.worldId).endpoints.slice(-10) : [],
-    recent_attempts: memory.recentGoals(4).map((g) => ({ goal: g.goal, status: g.status, summary: g.summary })),
-    tool_results: JSON.parse(boundedJson(ctx.results ?? [], Math.min(memoryBytes, 6000))),
+    recent_attempts: memory.recentGoals(4).map((g) => ({ ts: g.ts, duration_s: g.durationSec, goal: g.goal,
+      status: g.status, summary: g.summary, steps: g.plan ?? g.steps ?? [] })),
+    // Results are chronological; reserve room for the newest real outcome even
+    // when historical recall has been removed to fit a small model context.
+    tool_results: recentResults(ctx.results ?? [], Math.min(Math.max(memoryBytes, 1800), 6000)),
     known_locations: memory.landmarks().filter((l) => l.dim === p.self.dim && (!state || l.worldId === state.worldId))
       .sort((a, b) => Math.hypot(a.pos.x - p.self.pos[0], a.pos.z - p.self.pos[2]) - Math.hypot(b.pos.x - p.self.pos[0], b.pos.z - p.self.pos[2]))
       .slice(0, 10).map((l) => ({ id: l.id, label: l.label, dimension: l.dim, pos: l.pos, observedAt: l.ts })),
@@ -100,6 +106,14 @@ export function userPrompt(ctx: PlanContext, memory: WorldMemory, recalled?: unk
 const contextPrefix = '当前观察和选择记录（JSON）：\n';
 const contextSuffix = '\n请选择继续、改法或改意，并给出可执行的短计划。';
 const contextMessage = (payload: unknown) => `${contextPrefix}${JSON.stringify(payload)}${contextSuffix}`;
+
+function recentResults(results: unknown[], maxBytes: number): unknown[] {
+  const newestFirst = [...results].reverse();
+  let json = boundedJson(newestFirst, maxBytes);
+  // A large data payload must not erase the latest failure or observation.
+  if (json === '[]' && newestFirst.length) json = boundedJson([compactContext(newestFirst[0], 2)], maxBytes);
+  return JSON.parse(json).reverse();
+}
 
 /** Keep structured identity and present failure while shedding historical detail. */
 function compactContext(value: unknown, level: number, key = '', depth = 0): any {
@@ -114,14 +128,14 @@ function compactContext(value: unknown, level: number, key = '', depth = 0): any
     const limit = /^(?:conditions|pauseReasons)$/.test(key) ? 16
       : /^(?:inventory|visible_resources|remembered_resources|resources)$/.test(key) ? (level === 1 ? 12 : 6)
       : key === 'evidence' ? 1 : level === 1 ? 3 : 1;
-    const selected = key === 'evidence' ? value.slice(-limit) : value.slice(0, limit);
+    const selected = /^(?:evidence|recent_attempts|recentAttempts|tool_results)$/.test(key) ? value.slice(-limit) : value.slice(0, limit);
     return selected.map((entry) => compactContext(entry, level, '', depth + 1));
   }
   if (typeof value !== 'object' || depth > 16) return '[上下文已省略]';
   const result: Record<string, unknown> = {};
   for (const [field, entry] of Object.entries(value)) {
     // wishes duplicates openInterests; repeated historical details are lower priority.
-    if (field === 'wishes' || level > 1 && ['recent_attempts', 'tool_results', 'recalled_memories', 'farms', 'efficiency', 'learn_candidates'].includes(field)) continue;
+    if (field === 'wishes' || level > 1 && ['recalled_memories', 'farms', 'efficiency', 'learn_candidates'].includes(field)) continue;
     if (field === 'milestones' && Array.isArray(entry)) {
       const current = Number((value as Record<string, unknown>).currentMilestone ?? 0);
       const offset = Number((value as Record<string, unknown>).milestone_offset ?? 0);

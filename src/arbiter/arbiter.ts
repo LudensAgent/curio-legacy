@@ -36,6 +36,13 @@ export interface TaskOutcome {
   preemptedBy?: TaskSource;
 }
 
+/** Emitted synchronously after control transfers, before either skill can finish. */
+export interface TaskPreemption {
+  task: TaskInfo;
+  replacement: TaskInfo;
+  gentle?: boolean;
+}
+
 interface Running extends TaskInfo {
   controller: AbortController;
   cancelCode?: FailureCode;
@@ -169,6 +176,7 @@ export class Arbiter extends EventEmitter {
       this.bus.publish('task_rejected', 'P1', `${step.skill} 参数无效：${v.error}`, { step, source });
       return { error: v.error };
     }
+    const interrupted = this.info();
     if (this.current) this.cancel(`被 ${source} 抢占`, undefined, source);
 
     const skill = SKILLS[step.skill];
@@ -189,6 +197,7 @@ export class Arbiter extends EventEmitter {
       controller,
     };
     this.current = task;
+    if (interrupted) this.emit('preempt', { task: interrupted, replacement: this.info()!, gentle: meta.gentle } satisfies TaskPreemption);
     this.bus.publish('task_start', source === 'filler' ? 'P3' : 'P2', `[${source}] ${skill.name} ${JSON.stringify(v.args)}`, {
       taskId: task.id,
       planVersion: task.planVersion,

@@ -137,7 +137,7 @@ export const wander: Skill<{ radius: number }> = {
 // ------------------------------------------------------------------ look_around
 export const lookAround: Skill<{ seconds: number }> = {
   name: 'look_around',
-  description: '原地环顾一圈（水平转 360°、平视和略低头各看一遍），让视野覆盖四周。不知道附近有什么时先用它',
+  description: '原地观察四周，补充当前视野外的信息。仅在具体疑问需要周围视野时使用；已有观察足够时直接行动，无需每轮环顾',
   argsDoc: '{"seconds"?: 2-20}',
   timeoutMs: 25000,
   movement: false,

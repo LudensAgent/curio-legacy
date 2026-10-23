@@ -81,7 +81,15 @@ export function computeDrives(p: Percept, memory: WorldMemory): { drives: Drive[
     });
   }
   if (st.toolTier === 'none' || st.toolTier === 'wood') {
-    out.push({ drive: 'tools', level: st.toolTier === 'none' ? 0.7 : 0.55, why: `当前镐子等级：${st.toolTier}`, suggest: st.toolTier === 'none' ? 'gather log → craft wooden_pickaxe' : 'gather stone → craft stone_pickaxe' });
+    const woodKnown = p.nearby.resources.find((r) => LOG(r.block));
+    const woodInPack = st.logs > 0 || st.planks > 0;
+    const available = woodInPack || !!woodKnown;
+    out.push({ drive: 'tools', level: st.toolTier === 'wood' ? 0.55 : available ? 0.7 : 0.35,
+      why: `当前镐子等级：${st.toolTier}；${woodInPack ? '背包已有木料' : woodKnown ? `${woodKnown.seen === 'now' ? '看见' : '记得'} ${woodKnown.dir ?? ''} ${woodKnown.nearest} 格外有木料` : '当前观察和记忆中没有木料线索，其他区域仍未知'}`,
+      suggest: st.toolTier === 'wood' ? '若当前活动需要，可利用已知石材改善工具；也可继续当前兴趣'
+        : available ? '若当前活动需要工具，可评估已有木料或已知资源与制作条件，选择合适工具'
+          : '先判断当前兴趣是否需要工具，并比较获取材料、调整方法或暂缓的代价；缺镐子不指定下一目标',
+    });
   }
   // 偷懒：同一种东西挖得多又慢，换把好工具更划算
   for (const e of p.efficiency ?? []) {

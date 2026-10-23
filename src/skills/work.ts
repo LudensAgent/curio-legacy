@@ -68,7 +68,7 @@ export const gather: Skill<{ block: string; count: number }> = {
         }
         return dug > 0
           ? ok(`看不到更多 ${args.block}，采集了 ${dug}/${args.count}`)
-          : fail('NOT_FOUND', `视野和记忆里都没有 ${args.block}（可以先 look_around 环顾，或 explore 到别处看看）`);
+          : fail('NOT_FOUND', `视野和记忆里都没有 ${args.block}；尚未定位该资源，不代表其他地点也没有`);
       }
       const target = hits.find((h) => adapter.canHarvest(h.pos));
       if (!target) return fail('TOOL_MISSING', `缺少能采集 ${hits[0].name} 的工具`, { block: hits[0].name });

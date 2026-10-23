@@ -1,5 +1,5 @@
 import type { AgentState, GameAdapter } from '../adapter/types.ts';
-import type { Arbiter, TaskInfo, TaskOutcome } from '../arbiter/arbiter.ts';
+import type { Arbiter, TaskInfo, TaskOutcome, TaskPreemption } from '../arbiter/arbiter.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import type { Perception } from '../perception/perception.ts';
@@ -11,6 +11,7 @@ import { observationReady } from '../projects/conditions.ts';
 import type { Binding, PauseReason, Project } from '../projects/types.ts';
 import { SKILLS } from '../skills/index.ts';
 import { buildingArchiveFor } from '../skills/build.ts';
+import { DecisionFeedback } from './decision-feedback.ts';
 
 export interface ExecutiveDeps {
   adapter: GameAdapter; arbiter: Arbiter; planner: Planner; perception: Perception; memory: WorldMemory; bus: EventBus;
@@ -36,6 +37,7 @@ export class Executive {
   private backoffUntil = 0;
   private timer: NodeJS.Timeout | null = null;
   private fillerToggle = 0;
+  private lastLook: { at: number; state: AgentState } | null = null;
   private activatedAt: number | null = null;
   private suspended = new Set<PauseReason>();
   private lastSession = '';
@@ -43,8 +45,12 @@ export class Executive {
   private listening = false;
   private attemptStarted = false;
   private crossing = false;
-  private results: { skill: string; status: string; summary: string; data?: Record<string, unknown> }[] = [];
+  private results: { skill: string; args: unknown; status: string; summary: string; data?: Record<string, unknown>;
+    failureCode?: string; ts: number; worldId: string; dimension: string; sessionId: string; position: AgentState['pos'] }[] = [];
+  private decisionFeedback = new DecisionFeedback();
   private completedProjects = new Set<string>();
+  private gentleResume: { planId: string; reflexTaskId: string; generation: number; succeeded: boolean } | null = null;
+  private gentlyPreemptedTasks = new Set<string>();
 
   constructor(private d: ExecutiveDeps) {
     this.d.memory.setWorld(d.adapter.state().worldId);
@@ -59,8 +65,13 @@ export class Executive {
   }
 
   private doneListener = (o: TaskOutcome) => this.onDone(o);
+  private preemptListener = (o: TaskPreemption) => this.onPreempt(o);
   start(intervalMs = 250) {
-    if (!this.listening) { this.d.arbiter.on('done', this.doneListener); this.listening = true; }
+    if (!this.listening) {
+      this.d.arbiter.on('done', this.doneListener);
+      this.d.arbiter.on('preempt', this.preemptListener);
+      this.listening = true;
+    }
     if (!this.timer) this.timer = setInterval(() => this.tick(), intervalMs);
   }
 
@@ -69,11 +80,13 @@ export class Executive {
     this.timer = null;
     this.invalidate('shutdown');
     this.d.arbiter.off('done', this.doneListener);
+    this.d.arbiter.off('preempt', this.preemptListener);
     this.listening = false;
   }
 
   private invalidate(reason: string) {
     this.generation++;
+    this.gentleResume = null;
     this.controller?.abort(reason);
     this.controller = null;
     this.inFlight = false;
@@ -122,12 +135,20 @@ export class Executive {
     if (this.paused) return;
     const current = this.d.arbiter.info();
     if (current?.source === 'reflex') {
+      if (this.gentleResume && current.id !== this.gentleResume.reflexTaskId) {
+        this.gentleResume = null;
+        this.discardPlan('照明动作被其他生存反射替换，重新决定剩余工作');
+      }
       this.suspend('reflex');
       return;
     }
     if (this.suspended.has('reflex')) {
+      const saved = this.gentleResume;
       this.unsuspend('reflex');
-      if (this.d.planner.autonomous) this.discardPlan('反射结束，重新观察并决定剩余工作');
+      const resume = saved?.succeeded && saved.generation === this.generation && this.plan?.id === saved.planId && this.planCurrent(this.plan);
+      this.gentleResume = null;
+      if (this.d.planner.autonomous && !resume) this.discardPlan('反射结束，重新观察并决定剩余工作');
+      else if (resume) this.d.bus.publish('resume_step', 'P3', '照明完成，继续原计划尚未完成的步骤');
     }
     const before = this.projects.currentBinding();
     const project = this.projects.reconcile(state);
@@ -158,6 +179,9 @@ export class Executive {
     if (!this.plan) return this.d.memory.activeProject()?.status === 'blocked' ? 'project_blocked' : 'no_goal';
     if (this.plan.index < this.plan.steps.length) return null;
     if (cur?.planId !== this.plan.id) return null;
+    // Observation and read-only query results are the evidence for the next
+    // choice. Prefetching before they finish repeats the previous assumptions.
+    if (this.d.planner.autonomous && (cur.skill === 'look_around' || SKILLS[cur.skill]?.readOnly)) return null;
     // Start the next autonomous choice while its last approved step is still
     // running. Skill deadlines are safety limits, not duration estimates, and
     // waiting for half a deadline often leaves the entire model call idle.
@@ -168,7 +192,8 @@ export class Executive {
 
   private ctx(reason: string): PlanContext {
     const worldState = this.d.adapter.state();
-    return { reason, percept: this.d.perception.update(), current: this.d.arbiter.info(), lastFailure: this.lastFailure,
+    const percept = this.d.perception.update();
+    return { reason, percept, current: this.d.arbiter.info(), lastFailure: this.lastFailure,
       userSuggestion: this.userSuggestion, binding: this.projects.currentBinding(), continuity: {
         ...this.projects.context(), wishes: this.d.memory.intents().filter((i) => i.status === 'deferred' || i.status === 'open').slice(-8),
         deferredProjects: this.d.memory.projects().filter((p) => p.status === 'deferred').slice(-6)
@@ -177,7 +202,7 @@ export class Executive {
         works: buildingArchiveFor(this.d.memory).list().filter((p) => p.worldId === worldState.worldId && p.dimension === worldState.dim).slice(-5)
           .map((p) => ({ id: p.id, name: p.versions.at(-1)?.spec.name, version: p.versions.at(-1)?.version, status: p.status,
             defects: p.inspections.at(-1)?.defects.slice(0, 4), feedback: p.feedback.slice(-3) })),
-      }, results: this.results, worldState };
+      }, results: this.results, decisionFeedback: this.decisionFeedback.context(worldState, percept), worldState };
   }
 
   private request(reason: string, replace = false) {
@@ -255,6 +280,7 @@ export class Executive {
     this.plan = p;
     this.attemptStarted = false;
     this.activatedAt = Date.now();
+    this.decisionFeedback.begin(p, this.d.adapter.state(), this.d.perception.update());
     this.d.bus.publish('plan', 'P2', `[${p.source}] ${p.goal} —— ${p.thought}`, { thought: p.thought, source: p.source, steps: p.steps, planId: p.id, binding: p.binding });
     this.d.bus.publish('goal', 'P2', `当前尝试：${p.goal}`, { planId: p.id, source: p.source });
     if (p.steps.length === 0) {
@@ -293,8 +319,21 @@ export class Executive {
   private keepThinkingActive() {
     if (!this.timer || !this.inFlight || this.paused || this.suspended.size || this.plan || this.queued || this.d.arbiter.info()
       || !observationReady(this.d.adapter.state())) return;
-    // Observe from the current position without choosing another gameplay goal
-    // or consuming materials. A decision, interruption or error cancels this.
+    const state = this.d.adapter.state(), last = this.lastLook;
+    if (state.inWater || state.inLava) return;
+    const percept = this.d.perception.snapshot();
+    const latest = this.results.at(-1);
+    const missingTarget = this.lastFailure?.code === 'NOT_FOUND' && latest?.status === 'failed'
+      && latest.skill === this.lastFailure.skill && ['gather', 'hunt'].includes(latest.skill);
+    const surroundingsKnown = percept.nearby.resources.length > 0 || percept.nearby.passive.length > 0
+      || percept.nearby.hostile.length > 0 || percept.nearby.players.length > 0;
+    if (!missingTarget && (this.d.memory.currentIntent() || surroundingsKnown)) return;
+    if (last && last.state.worldId === state.worldId
+      && last.state.sessionId === state.sessionId && last.state.dim === state.dim
+      && Math.hypot(state.pos.x - last.state.pos.x, state.pos.y - last.state.pos.y, state.pos.z - last.state.pos.z) < 8) return;
+    // Survey unfamiliar surroundings or a failed resource search once. Time
+    // passing and a pending model response do not create an information gap.
+    this.lastLook = { at: Date.now(), state };
     this.d.arbiter.start({ skill: 'look_around', args: { seconds: 4 } }, 'filler');
   }
 
@@ -313,6 +352,7 @@ export class Executive {
       }
     }
     const durationSec = Math.round((Date.now() - (this.activatedAt ?? p.createdAt)) / 1000);
+    this.decisionFeedback.end(p, status, summary, state, this.d.perception.update());
     const steps = p.steps.map((st) => { const a = (st.args ?? {}) as Record<string, unknown>; const key = a.block ?? a.item ?? a.blueprint ?? a.crop ?? a.target ?? a.animal ?? a.direction ?? ''; return key ? `${st.skill}:${key}` : st.skill; });
     this.d.memory.recordGoal({ goal: p.goal, goalType: p.goalType, source: p.source, status, summary, durationSec, steps, plan: p.steps, worldId: state.worldId, dimension: state.dim });
     this.d.onGoalEnd?.(status);
@@ -334,16 +374,70 @@ export class Executive {
     if (this.plan) this.finishPlan('interrupted', reason, false);
   }
 
-  private onDone(o: TaskOutcome) {
-    if (o.task.source === 'filler') {
-      if (o.result.status === 'succeeded') this.keepThinkingActive();
+  private onPreempt(o: TaskPreemption) {
+    if (this.gentleResume?.reflexTaskId === o.task.id) {
+      this.invalidate('gentle_reflex_replaced');
+      this.discardPlan('照明动作被抢占，重新决定剩余工作');
+    }
+    const p = this.plan;
+    if (!this.d.planner.autonomous || o.replacement.source !== 'reflex') return;
+    if (!o.gentle || o.replacement.skill !== 'place_torch' || !p || o.task.planId !== p.id || !this.planCurrent(p)
+      || !['gather', 'goto'].includes(o.task.skill)) {
+      this.suspend('reflex');
+      this.discardPlan('被生存反射打断，重新决定剩余尝试');
       return;
     }
-    if (o.task.source === 'reflex') return;
+    // Only replay work with a stable target or an explicit remaining quantity.
+    // Relative exploration and craft/build mutations require a fresh decision.
+    const index = p.index - 1;
+    if (index < 0 || p.steps[index]?.skill !== o.task.skill) {
+      this.suspend('reflex');
+      this.discardPlan('被抢占的步骤已不属于当前计划');
+      return;
+    }
+    if (o.task.skill === 'gather') {
+      const args = o.task.args as { block: string; count: number };
+      if (!Number.isInteger(args.count) || args.count <= 0) {
+        this.suspend('reflex');
+        this.discardPlan('采集数量无法安全恢复，重新决定剩余工作');
+        return;
+      }
+      const remaining = args.count - Math.round(Math.max(0, Math.min(1, o.task.progress)) * args.count);
+      if (remaining > 0) {
+        p.steps[index] = { skill: 'gather', args: { ...args, count: remaining } };
+        p.index = index;
+      }
+    } else p.index = index;
+    // Capture this synchronously: the cancelled task may report its outcome
+    // after the torch has finished and the remaining work has already resumed.
+    this.gentlyPreemptedTasks.add(o.task.id);
+    this.suspend('reflex');
+    p.generation = this.generation;
+    this.gentleResume = { planId: p.id, reflexTaskId: o.replacement.id, generation: this.generation, succeeded: false };
+  }
+
+  private onDone(o: TaskOutcome) {
+    if (o.task.skill === 'look_around' && o.result.status === 'succeeded') {
+      this.lastLook = { at: Date.now(), state: this.d.adapter.state() };
+    }
+    if (o.task.source === 'filler') {
+      return;
+    }
+    if (o.task.source === 'reflex') {
+      this.recordResult(o);
+      if (this.gentleResume?.reflexTaskId === o.task.id) {
+        this.gentleResume.succeeded = o.result.status === 'succeeded';
+        if (!this.gentleResume.succeeded) {
+          this.gentleResume = null;
+          this.discardPlan('照明没有成功，重新决定剩余工作');
+        }
+      }
+      return;
+    }
+    if (this.gentlyPreemptedTasks.delete(o.task.id)) return;
     const p = this.plan;
     if (!p || o.task.planId !== p.id || !this.planCurrent(p)) return;
-    this.results.push({ skill: o.task.skill, status: o.result.status, summary: o.result.summary, data: o.result.data });
-    if (this.results.length > 3) this.results.shift();
+    this.recordResult(o);
     if (o.result.status === 'succeeded') {
       if (p.index >= p.steps.length) this.finishPlan('succeeded', o.result.summary);
       this.keepThinkingActive();
@@ -360,6 +454,16 @@ export class Executive {
     if (o.result.status === 'failed') this.lastFailure = { skill: o.task.skill, code: o.result.failureCode, summary: o.result.summary };
     this.invalidate('task_failed');
     this.finishPlan(o.result.status, o.result.summary);
+  }
+
+  private recordResult(o: TaskOutcome) {
+    const state = this.d.adapter.state();
+    this.results.push({ skill: o.task.skill, args: o.task.args, status: o.result.status, summary: o.result.summary,
+      data: o.result.data, failureCode: o.result.failureCode, ts: Date.now(), worldId: state.worldId,
+      dimension: state.dim, sessionId: state.sessionId, position: { ...state.pos } });
+    if (this.results.length > 12) this.results.shift();
+    if (o.result.status === 'failed') this.lastFailure = { skill: o.task.skill, code: o.result.failureCode, summary: o.result.summary };
+    else if (o.result.status === 'succeeded' && this.lastFailure?.skill === o.task.skill) this.lastFailure = null;
   }
 
   private checkAbort(hp: number, isDay: boolean) {
