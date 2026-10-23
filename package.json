@@ -1,0 +1,32 @@
+{
+  "name": "mc-agent-mvp",
+  "version": "0.1.0",
+  "description": "Minecraft Autonomous Curiosity Agent - MVP (Mineflayer + LLM planner + spectator observation)",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20.12"
+  },
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "dev": "tsx watch src/main.ts",
+    "check:llm": "tsx scripts/check-llm.ts",
+    "check:rcon": "tsx scripts/check-rcon.ts",
+    "test": "tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "minecraft-data": "^3.60.0",
+    "mineflayer": "^4.20.0",
+    "mineflayer-pathfinder": "^2.4.5",
+    "vec3": "^0.1.10"
+  },
+  "optionalDependencies": {
+    "prismarine-viewer": "^1.28.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

@@ -1,0 +1,49 @@
+/**
+ * 单独验证 LLM 接入：用一份假的游戏状态请求一次计划，打印延迟、原始输出和校验结果。
+ * 用法：npm run check:llm
+ */
+import { config } from '../src/config.ts';
+import type { GameAdapter } from '../src/adapter/types.ts';
+import { WorldMemory } from '../src/memory/store.ts';
+import type { Percept } from '../src/perception/perception.ts';
+import { MockProvider, OpenAICompatibleProvider } from '../src/planner/llm.ts';
+import { extractJson, ruleProposal, validatePlan } from '../src/planner/plan.ts';
+import { buildMessages } from '../src/planner/prompt.ts';
+
+const percept: Percept = {
+  ts: Date.now(),
+  connected: true,
+  time: { timeOfDay: 2000, phase: 'day' },
+  self: { pos: [12, 70, -30], dim: 'overworld', hp: 20, food: 18, biome: 'forest', inWater: false, inLava: false, held: null },
+  inventory: [{ name: 'oak_log', count: 2 }],
+  emptySlots: 34,
+  nearby: { hostile: [], passive: ['cow x2'], players: [], resources: [{ block: 'oak_log', count: 23, nearest: 5 }, { block: 'coal_ore', count: 3, nearest: 17 }] },
+  exploration: { visitedChunks: 3, noveltyByDir: { N: 1, NE: 1, E: 0.9, SE: 1, S: 0.6, SW: 1, W: 1, NW: 1 }, base: { dist: 6, dir: 'S' } },
+};
+
+// 离线校验用的最小适配器：只实现名称解析
+const fakeAdapter = {
+  resolveBlockNames: (q: string) => (q ? [q] : []),
+  isKnownItem: (n: string) => /^[a-z_]+$/.test(n),
+} as unknown as GameAdapter;
+
+const memory = new WorldMemory(null);
+const provider = config.llm.provider === 'openai' ? new OpenAICompatibleProvider(config.llm) : new MockProvider(config.llm.fakeDelayMs, () => ruleProposal(percept));
+const messages = buildMessages(config.persona, { reason: 'check', percept, current: null, lastFailure: null, userSuggestion: null }, memory);
+
+console.log(`Provider: ${provider.name}  BaseURL: ${config.llm.baseUrl}  Model: ${config.llm.model}`);
+console.log(`Prompt 长度：${messages.reduce((a, m) => a + m.content.length, 0)} 字符\n`);
+try {
+  const c = await provider.complete(messages, AbortSignal.timeout(config.llm.timeoutMs + config.llm.fakeDelayMs + 1000), { percept });
+  console.log(`延迟：${c.latencyMs} ms  用量：${JSON.stringify(c.usage ?? {})}`);
+  console.log('原始输出：\n' + c.text + '\n');
+  const v = validatePlan(extractJson(c.text), fakeAdapter, 'llm');
+  if (v.ok) console.log('✅ 计划有效：', JSON.stringify({ goal: v.plan.goal, thought: v.plan.thought, steps: v.plan.steps }, null, 2));
+  else {
+    console.log('❌ 计划无效：', v.error);
+    process.exitCode = 1;
+  }
+} catch (e: any) {
+  console.error('❌ 调用失败：', e?.message ?? e);
+  process.exitCode = 1;
+}

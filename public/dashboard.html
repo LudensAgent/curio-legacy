@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Curio · Agent 控制台</title>
+<style>
+  /* 简约 · 线条 · 白色基调 */
+  :root {
+    --bg: #ffffff; --text: #111111; --dim: #8c8c8c; --line: #e6e6e6; --ink: #111111;
+    --grass: #111111; --blue: #9a9a9a; --violet: #5a5a5a; --dirt: #111111; --gold: #111111;
+    --red: #d64545; --good: #2f7d4f;
+    --mono: "JetBrains Mono", "Cascadia Mono", ui-monospace, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.6 "Inter", system-ui, "Microsoft YaHei", sans-serif; -webkit-font-smoothing: antialiased; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; padding: 14px 24px; border-bottom: 1px solid var(--ink); background: var(--bg); position: sticky; top: 0; z-index: 2; }
+  header h1 { font-size: 14px; font-weight: 600; margin: 0; letter-spacing: .08em; text-transform: uppercase; }
+  header h1 b { display: none; }
+  .pill { font: 11px var(--mono); padding: 0 0 0 10px; border-left: 1px solid var(--line); color: var(--dim); }
+  .pill.on { color: var(--text); } .pill.off { color: var(--red); } .pill.warn { color: var(--dim); }
+  .spacer { flex: 1; }
+  button { background: transparent; color: var(--text); border: 1px solid var(--ink); border-radius: 0; padding: 5px 12px; cursor: pointer; font: 12px inherit; }
+  button:hover { background: var(--ink); color: #fff; }
+  input[type=text], input:not([type]) { background: transparent; color: var(--text); border: 0; border-bottom: 1px solid var(--ink); border-radius: 0; padding: 5px 2px; font: inherit; min-width: 260px; outline: none; }
+  input[type=checkbox] { accent-color: var(--ink); vertical-align: -2px; }
+  main { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 0; border-left: 1px solid var(--line); margin: 0 24px 24px; }
+  section { background: var(--bg); border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 16px 18px; min-width: 0; }
+  section h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .14em; color: var(--dim); margin: 0 0 14px; font-weight: 500; }
+  .wide { grid-column: 1 / -1; }
+  .row { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; }
+  .row span:first-child { color: var(--dim); }
+  .mono { font-family: var(--mono); font-size: 12px; }
+  .bar { height: 2px; background: var(--line); margin: 2px 0 10px; }
+  .bar i { display: block; height: 100%; background: var(--ink); transition: width .4s; }
+  .goal { font-size: 18px; font-weight: 600; margin: 0 0 4px; letter-spacing: -.01em; }
+  .thought { color: #555; margin-bottom: 10px; }
+  ol.steps { margin: 6px 0 0; padding-left: 18px; font: 12px var(--mono); }
+  ol.steps li { padding: 2px 0; }
+  ol.steps li.done { color: #c4c4c4; text-decoration: line-through; }
+  ol.steps li.now { font-weight: 600; }
+  ol.steps li.now::marker { content: "→ "; }
+  .kpis { display: grid; grid-template-columns: repeat(2, 1fr); border-top: 1px solid var(--line); border-left: 1px solid var(--line); }
+  .kpi { border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 10px 12px; }
+  .kpi b { display: block; font: 500 22px var(--mono); letter-spacing: -.02em; }
+  .kpi small { color: var(--dim); font-size: 11px; }
+  .kpi.good b { color: var(--good); } .kpi.bad b { color: var(--red); } .kpi.mid b { color: var(--text); }
+  .stack { display: flex; height: 6px; margin-top: 14px; background: var(--line); }
+  .stack i { display: block; height: 100%; }
+  .legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 6px; font-size: 11px; color: var(--dim); }
+  .legend span::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 4px; background: var(--c); vertical-align: -1px; }
+  ul.plain { list-style: none; margin: 0 0 6px; padding: 0; font: 12px var(--mono); }
+  ul.plain li { padding: 3px 0; border-bottom: 1px solid #f2f2f2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sub { color: var(--dim); margin-top: 10px; font-size: 11px; text-transform: uppercase; letter-spacing: .1em; }
+  #log { height: 360px; overflow: auto; font: 12px var(--mono); border-top: 1px solid var(--line); padding: 8px 0; }
+  #log div { white-space: pre-wrap; word-break: break-all; padding: 1px 0; }
+  .P0 { color: var(--red); font-weight: 600; } .P1 { color: #b8860b; } .P2 { color: var(--text); } .P3 { color: #b0b0b0; }
+  .filters { margin-bottom: 8px; }
+  .filters label { margin-right: 14px; font-size: 12px; color: var(--dim); }
+  .tag { font: 10px var(--mono); padding: 0 5px; border: 1px solid var(--line); margin-left: 8px; color: var(--dim); vertical-align: 3px; font-weight: 400; }
+</style>
+</head>
+<body>
+<header>
+  <h1><b>■</b>Curio / Agent</h1>
+  <span id="conn" class="pill off">未连接</span>
+  <span id="llm" class="pill">LLM</span>
+  <span id="spec" class="pill">旁观</span>
+  <span id="ver" class="pill">planVersion 0</span>
+  <span class="spacer"></span>
+  <input id="suggest" placeholder="给 Agent 一个建议，例如：去找村庄" />
+  <button onclick="sendSuggest()">发送建议</button>
+  <button onclick="post('/api/replan')">重新规划</button>
+  <button id="pauseBtn" onclick="togglePause()">暂停</button>
+</header>
+<main>
+  <section>
+    <h2>角色状态</h2>
+    <div class="row"><span>生命</span><span id="hpv" class="mono">-</span></div>
+    <div class="bar"><i id="hp" ></i></div>
+    <div class="row"><span>饥饿</span><span id="foodv" class="mono">-</span></div>
+    <div class="bar"><i id="food" ></i></div>
+    <div class="row"><span>坐标</span><span id="pos" class="mono">-</span></div>
+    <div class="row"><span>维度 / 群系</span><span id="dim" class="mono">-</span></div>
+    <div class="row"><span>时间</span><span id="time" class="mono">-</span></div>
+    <div class="row"><span>手持</span><span id="held" class="mono">-</span></div>
+    <div class="row"><span>基地</span><span id="base" class="mono">-</span></div>
+  </section>
+
+  <section>
+    <h2>当前目标与思考</h2>
+    <div class="goal" id="goal">—</div>
+    <div class="thought" id="thought"></div>
+    <ol class="steps" id="steps"></ol>
+    <div class="row" style="margin-top:10px"><span>LLM</span><span id="llmstate" class="mono">-</span></div>
+    <div class="row"><span>已排队计划</span><span id="queued" class="mono">-</span></div>
+    <div class="row"><span>上次失败</span><span id="lastfail" class="mono">-</span></div>
+  </section>
+
+  <section>
+    <h2>当前动作</h2>
+    <div class="goal mono" id="skill">—</div>
+    <div class="row"><span>来源</span><span id="src" class="mono">-</span></div>
+    <div class="row"><span>进度</span><span id="progv" class="mono">-</span></div>
+    <div class="bar"><i id="prog"></i></div>
+    <div class="row"><span>说明</span><span id="note" class="mono">-</span></div>
+    <div class="row"><span>已运行 / 时限</span><span id="elapsed" class="mono">-</span></div>
+    <div class="row"><span>参数</span><span id="args" class="mono">-</span></div>
+  </section>
+
+  <section>
+    <h2>连贯性指标（最近 10 分钟）</h2>
+    <div class="kpis">
+      <div class="kpi" id="k-idle"><b>-</b><small>无任务秒数（目标 &lt; 60）</small></div>
+      <div class="kpi" id="k-cont"><b>-</b><small>LLM 思考时仍在行动（目标 ≥ 95%）</small></div>
+      <div class="kpi" id="k-succ"><b>-</b><small>技能成功率（目标 ≥ 80%）</small></div>
+      <div class="kpi" id="k-lat"><b>-</b><small>LLM 平均 / P95 延迟</small></div>
+    </div>
+    <div class="stack" id="stack"></div>
+    <div class="legend">
+      <span style="--c:var(--grass)">任务</span><span style="--c:var(--blue)">填充</span><span style="--c:var(--violet)">反射</span>
+      <span style="--c:var(--red)">空闲</span><span style="--c:#e6e6e6">暂停/离线</span>
+    </div>
+    <div style="margin-top:10px" class="mono" id="counters"></div>
+  </section>
+
+  <section>
+    <h2>感知（结构化，无截图）</h2>
+    <div class="row"><span>敌对</span><span id="hostile" class="mono">-</span></div>
+    <div class="row"><span>生物</span><span id="passive" class="mono">-</span></div>
+    <div class="row"><span>玩家</span><span id="players" class="mono">-</span></div>
+    <div class="sub">附近资源</div>
+    <ul class="plain" id="res"></ul>
+    <div class="sub">背包 <span id="slots"></span></div>
+    <ul class="plain" id="inv"></ul>
+  </section>
+
+  <section>
+    <h2>记忆</h2>
+    <div class="row"><span>已访问区块 / 已见方块·实体·群系</span><span id="seen" class="mono">-</span></div>
+    <div class="sub">最近目标</div>
+    <ul class="plain" id="goals"></ul>
+    <div class="sub">地标</div>
+    <ul class="plain" id="lms"></ul>
+    <div class="sub">笔记</div>
+    <ul class="plain" id="notes"></ul>
+  </section>
+
+  <section class="wide">
+    <h2>事件流</h2>
+    <div class="filters">
+      <label><input type="checkbox" class="f" value="P0" checked> P0 紧急</label>
+      <label><input type="checkbox" class="f" value="P1" checked> P1 重要</label>
+      <label><input type="checkbox" class="f" value="P2" checked> P2 机会/决策</label>
+      <label><input type="checkbox" class="f" value="P3"> P3 普通</label>
+    </div>
+    <div id="log"></div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+const pct = (v) => (v == null ? '-' : Math.round(v * 100) + '%');
+let paused = false;
+
+async function post(url, body) {
+  await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) });
+}
+function sendSuggest() {
+  const t = $('suggest').value.trim();
+  if (t) { post('/api/suggest', { text: t }); $('suggest').value = ''; }
+}
+$('suggest').addEventListener('keydown', (e) => e.key === 'Enter' && sendSuggest());
+function togglePause() { post(paused ? '/api/resume' : '/api/pause'); }
+
+function kpi(id, text, cls) { const el = $(id); el.className = 'kpi ' + (cls || ''); el.querySelector('b').textContent = text; }
+
+function render(s) {
+  const st = s.state, p = s.percept, t = s.task, ex = s.exec, m = s.metrics;
+  $('conn').textContent = st.connected ? (st.alive ? `${st.username} 在线` : '死亡/重生中') : '未连接';
+  $('conn').className = 'pill ' + (st.connected ? 'on' : 'off');
+  $('llm').textContent = `${s.config.llm}${s.config.fakeDelayMs ? ` · 注入 ${s.config.fakeDelayMs}ms` : ''}`;
+  $('spec').textContent = s.spectator.enabled ? `旁观 ${s.config.observer} · ${s.spectator.rconOk ? 'RCON ✓' : 'RCON ✗'}` : '旁观未启用';
+  $('spec').className = 'pill ' + (!s.spectator.enabled ? 'warn' : s.spectator.rconOk ? 'on' : 'off');
+  $('spec').title = s.spectator.reason || s.spectator.lastResult || '';
+  $('ver').textContent = `planVersion ${s.planVersion}`;
+  paused = ex.paused; $('pauseBtn').textContent = paused ? '继续' : '暂停';
+
+  $('hpv').textContent = `${st.hp.toFixed?.(1) ?? st.hp} / 20`; $('hp').style.width = (st.hp / 20 * 100) + '%';
+  $('foodv').textContent = `${st.food} / 20`; $('food').style.width = (st.food / 20 * 100) + '%';
+  $('pos').textContent = p.self.pos.join(', ');
+  $('dim').textContent = `${p.self.dim} / ${p.self.biome ?? '-'}`;
+  $('time').textContent = `${p.time.timeOfDay} (${{ day: '白天', dusk: '黄昏', night: '夜晚', dawn: '黎明' }[p.time.phase]})`;
+  $('held').textContent = p.self.held ?? '空手';
+  $('base').textContent = p.exploration.base ? `${p.exploration.base.dist} 格 · ${p.exploration.base.dir}` : '-';
+
+  $('goal').innerHTML = ex.plan ? `${esc(ex.plan.goal)}<span class="tag">${ex.plan.source}</span>` : (ex.paused ? '已暂停' : '—');
+  $('thought').textContent = ex.plan?.thought ?? '';
+  $('steps').innerHTML = (ex.plan?.steps ?? []).map((st2, i) => {
+    const idx = ex.plan.index; const cls = i < idx - 1 ? 'done' : i === idx - 1 ? 'now' : '';
+    return `<li class="${cls}">${esc(st2.skill)} ${esc(JSON.stringify(st2.args ?? {}))}</li>`;
+  }).join('');
+  const since = m.llm.inFlightSince ? ((s.now - m.llm.inFlightSince) / 1000).toFixed(1) + 's' : '';
+  $('llmstate').textContent = ex.llmInFlight ? `思考中（${ex.llmReason}）${since}` : ex.backoffMs ? `冷却 ${Math.round(ex.backoffMs / 1000)}s` : '空闲';
+  $('queued').textContent = ex.queued ? ex.queued.goal : '-';
+  $('lastfail').textContent = ex.lastFailure ? `${ex.lastFailure.skill}: ${ex.lastFailure.code ?? ''} ${ex.lastFailure.summary}` : '-';
+
+  $('skill').textContent = t ? t.skill : (st.connected ? '（空闲）' : '—');
+  $('src').textContent = t ? t.source : '-';
+  $('progv').textContent = t ? pct(t.progress) : '-'; $('prog').style.width = t ? (t.progress * 100) + '%' : '0';
+  $('note').textContent = t?.note || '-';
+  $('elapsed').textContent = t ? `${((s.now - t.startedAt) / 1000).toFixed(0)}s / ${((t.deadline - t.startedAt) / 1000).toFixed(0)}s` : '-';
+  $('args').textContent = t ? JSON.stringify(t.args) : '-';
+
+  kpi('k-idle', `${m.idle10m}s`, m.idle10m < 60 ? 'good' : 'bad');
+  kpi('k-cont', pct(m.llmContinuity), m.llmContinuity == null ? '' : m.llmContinuity >= 0.95 ? 'good' : 'bad');
+  kpi('k-succ', pct(m.taskSuccessRate), m.taskSuccessRate == null ? '' : m.taskSuccessRate >= 0.8 ? 'good' : 'mid');
+  kpi('k-lat', m.llm.avgLatencyMs == null ? '-' : `${(m.llm.avgLatencyMs / 1000).toFixed(1)} / ${(m.llm.p95LatencyMs / 1000).toFixed(1)}s`, '');
+  const w = m.window10m, total = Object.values(w).reduce((a, b) => a + b, 0) || 1;
+  const seg = (v, c) => `<i style="width:${v / total * 100}%;background:${c}"></i>`;
+  $('stack').innerHTML = seg(w.task, 'var(--grass)') + seg(w.filler, 'var(--blue)') + seg(w.reflex, 'var(--violet)') + seg(w.idle, 'var(--red)') + seg(w.paused + w.offline, '#e6e6e6');
+  $('counters').innerHTML = [
+    `运行 ${Math.floor(m.uptimeSec / 60)}m · 移动 ${m.distance} 格 · 发现 ${m.discoveries} · 死亡 ${m.deaths}`,
+    `任务 ✓${m.tasks.succeeded} ✗${m.tasks.failed} ⊘${m.tasks.cancelled} · 目标 ✓${m.goals.succeeded} ✗${m.goals.failed}`,
+    `计划 LLM ${m.plans.llm} / 规则 ${m.plans.rule} · LLM 调用 ${m.llm.calls}（错误 ${m.llm.errors}，无效 ${m.llm.invalid}，近 1h ${m.llm.callsLastHour}/${m.llm.maxCallsPerHour}）`,
+    `卡死 ${m.stuck} · 反射触发 ${m.reflexTriggers} · 拦截残留动作 ${m.blockedActions}`,
+    Object.keys(m.failCodes).length ? `失败码 ${esc(JSON.stringify(m.failCodes))}` : '',
+  ].filter(Boolean).join('<br>');
+
+  $('hostile').textContent = p.nearby.hostile.map((h) => `${h.name}@${h.dist}`).join(', ') || '无';
+  $('passive').textContent = p.nearby.passive.join(', ') || '无';
+  $('players').textContent = p.nearby.players.join(', ') || '无';
+  $('res').innerHTML = p.nearby.resources.map((r) => `<li>${esc(r.block)} ×${r.count} · 最近 ${r.nearest} 格</li>`).join('') || '<li>—</li>';
+  $('slots').textContent = `（空位 ${p.emptySlots}）`;
+  $('inv').innerHTML = p.inventory.map((i) => `<li>${esc(i.name)} ×${i.count}</li>`).join('') || '<li>空</li>';
+
+  const mem = s.memory;
+  $('seen').textContent = `${mem.visitedChunks} / ${mem.seen.blocks}·${mem.seen.entities}·${mem.seen.biomes}`;
+  $('goals').innerHTML = mem.goals.slice().reverse().map((g) => `<li title="${esc(g.summary)}">${g.status === 'succeeded' ? '✓' : g.status === 'failed' ? '✗' : '·'} [${g.source}] ${esc(g.goal)} — ${esc(g.summary)}</li>`).join('') || '<li>—</li>';
+  $('lms').innerHTML = mem.landmarks.slice().reverse().map((l) => `<li>${l.id} · ${l.kind} · ${esc(l.label)} (${l.pos.x}, ${l.pos.y}, ${l.pos.z})</li>`).join('') || '<li>—</li>';
+  $('notes').innerHTML = mem.notes.slice().reverse().map((n) => `<li>[${n.kind}] ${esc(n.text)}</li>`).join('') || '<li>—</li>';
+}
+
+const log = $('log');
+function addEvent(ev) {
+  const div = document.createElement('div');
+  div.className = ev.severity; div.dataset.sev = ev.severity;
+  div.textContent = `${new Date(ev.ts).toLocaleTimeString()} ${ev.severity} ${ev.type}  ${ev.msg}`;
+  div.style.display = active().has(ev.severity) ? '' : 'none';
+  const stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 20;
+  log.appendChild(div);
+  while (log.children.length > 600) log.removeChild(log.firstChild);
+  if (stick) log.scrollTop = log.scrollHeight;
+}
+const active = () => new Set([...document.querySelectorAll('.f:checked')].map((x) => x.value));
+document.querySelectorAll('.f').forEach((cb) => cb.addEventListener('change', () => {
+  const a = active(); for (const d of log.children) d.style.display = a.has(d.dataset.sev) ? '' : 'none';
+}));
+
+const es = new EventSource('/api/stream');
+es.addEventListener('state', (e) => render(JSON.parse(e.data)));
+es.addEventListener('ev', (e) => addEvent(JSON.parse(e.data)));
+es.onerror = () => { $('conn').textContent = '控制台断开'; $('conn').className = 'pill off'; };
+</script>
+</body>
+</html>
