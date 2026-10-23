@@ -26,6 +26,62 @@ function strings(value: unknown, label: string): string[] {
   return value.map((s) => text(s, label, 300));
 }
 
+/**
+ * 模型常见的“格式小错”在这里就地纠正，而不是让整轮决策作废重来：
+ * - 缺少 decision：有当前意图视为 continue，否则以 goal 开始一个新意图
+ * - continue/change_method 附带了 intent 文字：忽略这段文字（不改写已有意图）
+ * - begin 缺少 intent：用 reason/goal 补全
+ * - 不是 begin 却没有可关联的当前意图：改为 begin
+ * 每一处纠正都写进 notes，供日志与控制台显示。
+ */
+export function normalizeDecision(rawDecision: unknown, plan: { goal?: unknown; thought?: unknown; intent?: unknown }, memory: WorldMemory): { decision: Record<string, any>; notes: string[] } {
+  const notes: string[] = [];
+  const goal = typeof plan.goal === 'string' && plan.goal.trim() ? plan.goal.trim().slice(0, 300) : '';
+  const thought = typeof plan.thought === 'string' && plan.thought.trim() ? plan.thought.trim().slice(0, 300) : '';
+  const current = memory.currentIntent();
+  const d: Record<string, any> = object(rawDecision) ? { ...rawDecision } : {};
+  if (!object(rawDecision)) notes.push(current ? '未给出 decision，按 continue 处理' : '未给出 decision，以 goal 开始新意图');
+  const kinds = ['begin', 'continue', 'change_method', 'revise', 'defer', 'abandon', 'complete'];
+  if (!kinds.includes(d.kind)) {
+    if (d.kind !== undefined) notes.push(`未知 decision.kind「${String(d.kind)}」，按${current ? ' continue' : ' begin'}处理`);
+    d.kind = current ? 'continue' : 'begin';
+  }
+  if (typeof d.reason !== 'string' || !d.reason.trim()) d.reason = thought || goal || '顺着眼前的情况继续';
+  else if (d.reason.length > 500) d.reason = d.reason.slice(0, 500);
+  // 误放在顶层的 intent
+  if (d.intent === undefined && object(plan.intent) && ['begin', 'revise'].includes(d.kind)) { d.intent = { ...plan.intent }; notes.push('intent 写在了顶层，已移入 decision'); }
+  if (typeof d.intent === 'string') d.intent = { text: d.intent };
+  if (d.intent !== undefined && !['begin', 'revise'].includes(d.kind)) {
+    notes.push(`${d.kind} 不能改写意图文字，已忽略 decision.intent`);
+    delete d.intent;
+  }
+  if (!['begin'].includes(d.kind) && !current) {
+    notes.push(`当前没有进行中的意图，${d.kind} 改为 begin`);
+    d.kind = 'begin';
+    delete d.intentId;
+  }
+  if (d.kind !== 'begin' && current && d.intentId !== undefined && d.intentId !== current.id) {
+    notes.push('intentId 与当前意图不符，已关联到当前意图');
+    d.intentId = current.id;
+  }
+  if (d.kind === 'begin' && !d.intent && !d.intentId) d.intent = { text: goal || d.reason, whyNow: d.reason };
+  if (object(d.intent)) {
+    const intent = d.intent as Record<string, any>;
+    if (typeof intent.text !== 'string' || !intent.text.trim()) intent.text = goal || d.reason;
+    if (typeof intent.whyNow !== 'string' || !intent.whyNow.trim()) intent.whyNow = d.reason;
+    for (const k of ['context', 'tradeoffs']) {
+      if (typeof intent[k] === 'string') intent[k] = [intent[k]];
+      if (intent[k] !== undefined && !Array.isArray(intent[k])) delete intent[k];
+    }
+    intent.text = String(intent.text).slice(0, 300);
+    intent.whyNow = String(intent.whyNow).slice(0, 500);
+  }
+  if (typeof d.context === 'string') d.context = [d.context];
+  if (d.context !== undefined && !Array.isArray(d.context)) delete d.context;
+  if (d.kind === 'begin' && d.intent && d.intentId) delete d.intentId;
+  return { decision: d, notes };
+}
+
 /** A pure validation boundary: late/invalid model replies must never write memories. */
 export function validateIntentDecision(raw: unknown, memory: WorldMemory, adapter: Pick<GameAdapter, 'state' | 'isKnownItem'>): { ok: true; decision: ValidatedIntentDecision } | { ok: false; error: string } {
   try {

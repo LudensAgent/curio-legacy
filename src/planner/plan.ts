@@ -36,6 +36,15 @@ export interface Plan {
   binding?: Binding;
   generation?: number;
   decision?: ValidatedIntentDecision;
+  /** 被生存反射打断后自动恢复的次数，以及每个步骤被同一反射打断的次数 */
+  resumes?: number;
+  interruptions?: Record<string, number>;
+  /** 模型给出的失败备选：某一步失败时，在重新决策的同时先做这些（1–2 步） */
+  onFail?: Step[];
+  /** 正在执行失败后的补救动作；新决策一到就被替换 */
+  recovering?: { summary: string };
+  /** 模型想做却没有对应能力的事（给观察者看：它还缺什么手脚） */
+  missingAbility?: string;
 }
 
 /** 从模型输出中提取 JSON（容忍 ```json 包裹或前后多余文字）。 */
@@ -61,7 +70,9 @@ export function validatePlan(raw: unknown, adapter: GameAdapter, source: Plan['s
   const goal = String(o.goal ?? '').trim();
   if (!goal) return { ok: false, error: '缺少 goal' };
   const subjectiveEnd = ['defer', 'abandon', 'complete'].includes(o.decision?.kind);
-  if (!Array.isArray(o.steps) || o.steps.length < (subjectiveEnd ? 0 : 1) || o.steps.length > 5) return { ok: false, error: 'steps 必须是 1-5 个元素的数组（暂缓/结束可为空）' };
+  if (!Array.isArray(o.steps) || o.steps.length < (subjectiveEnd ? 0 : 1)) return { ok: false, error: 'steps 必须是 1-6 个元素的数组（暂缓/结束可为空）' };
+  // 多写的步骤不作废整个计划：只执行前 6 步，后面的交给下一次决策
+  if (o.steps.length > 6) o.steps = o.steps.slice(0, 6);
   const steps: Step[] = [];
   for (const [i, s] of o.steps.entries()) {
     const name = String(s?.skill ?? '');
@@ -70,6 +81,14 @@ export function validatePlan(raw: unknown, adapter: GameAdapter, source: Plan['s
     const v = skill.validate(s?.args ?? {}, adapter);
     if (!v.ok) return { ok: false, error: `steps[${i}] ${name} 参数错误：${v.error}` };
     steps.push({ skill: name, args: v.args });
+  }
+  // on_fail 是可选的锦上添花：写错了就忽略，不影响主计划
+  const onFail: Step[] = [];
+  if (Array.isArray(o.on_fail)) for (const s of o.on_fail.slice(0, 2)) {
+    const skill = SKILLS[String(s?.skill ?? '')];
+    if (!skill || LLM_HIDDEN.has(skill.name)) continue;
+    const v = skill.validate(s?.args ?? {}, adapter);
+    if (v.ok) onFail.push({ skill: skill.name, args: v.args });
   }
   const ab = o.abort_if && typeof o.abort_if === 'object' ? o.abort_if : {};
   const hp = Number(ab.hp_below);
@@ -91,6 +110,8 @@ export function validatePlan(raw: unknown, adapter: GameAdapter, source: Plan['s
       learnSkill: o.learn_skill && typeof o.learn_skill === 'object' ? o.learn_skill : undefined,
       createdAt: Date.now(),
       retries: 0,
+      ...(onFail.length ? { onFail } : {}),
+      ...(typeof o.missing_ability === 'string' && o.missing_ability.trim() ? { missingAbility: o.missing_ability.trim().slice(0, 200) } : {}),
     },
   };
 }

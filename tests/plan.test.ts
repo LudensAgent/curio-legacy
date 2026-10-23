@@ -30,11 +30,13 @@ test('不存在的技能、隐藏技能、错误参数、过多步骤都会被�
     { goal: 'x', steps: [{ skill: 'unstuck' }] },
     { goal: 'x', steps: [{ skill: 'explore', args: { direction: 'UP' } }] },
     { goal: 'x', steps: [] },
-    { goal: 'x', steps: Array(6).fill({ skill: 'wander' }) },
     { steps: [{ skill: 'wander' }] },
     'not an object',
   ];
   for (const b of bad) assert.equal(validatePlan(b, adapter, 'llm').ok, false, JSON.stringify(b));
+  // 步骤写多了不作废整个计划：只保留前 6 步
+  const long = validatePlan({ goal: 'x', steps: Array(8).fill({ skill: 'wander' }) }, adapter, 'llm');
+  assert.ok(long.ok && long.plan.steps.length === 6);
 });
 
 import { ruleProposal } from '../src/planner/plan.ts';
