@@ -280,7 +280,7 @@ src/
 ├─ perception/   vision（射线视野、听觉、记忆）+ 感知摘要器（→ 给 LLM 的紧凑 JSON）
 ├─ planner/      LLM 适配、prompt、计划校验、规则目标
 ├─ skills/       explore / gather / goto / craft / eat / flee / defend / wander / look_around / unstuck
-├─ memory/       JSON 世界记忆（下一阶段换成 SQLite）
+├─ memory/       JSON 世界记忆
 └─ observer/     RCON、自动旁观、指标、控制台服务器
 public/          dashboard.html、overlay.html
 tests/           离线测试（FakeAdapter 模拟世界）
@@ -289,8 +289,10 @@ scripts/         check-llm、check-rcon
 
 ## 14. 已知限制与下一步
 
+详细开发顺序、阶段验收和当前首要功能方案见 [好奇心驱动的自主玩家路线](docs/agent-evolution-roadmap.md)。下一项建议先实现“自主意图与兴趣连续性 MVP”：由 LLM 根据好奇心、偏好和经历选择想做的事，记住意图，并根据反馈继续或改意；程序负责动作、事实验证和记忆，不规定必须完成的游戏主线。
+
 - **只支持原版协议内容**：Create 需要走设计文档里的“服务端 Mod 假玩家”路线，只需替换 `GameAdapter`。
-- 技能是 MVP 级别：没有建造、熔炼、夜间庇护所、睡觉，战斗也只是简单近战。下一批建议加 `prepare_for_night`、`smelt`、`place_torch`。
+- 已具备建造、冶炼、夜间庇护、睡觉、照明、农业和仓储；这些仍是 MVP 能力，尚缺精确施工验收、持久化项目、审美反馈、跨维度旅行和 Boss 战斗。
 - 记忆目前是 JSON 文件，没有假设验证循环和兴趣画像（对应设计文档阶段 3）。
 - 规则目标（mock / 兜底）比较简单，主要作用是保证不停顿和验证链路。
 - mineflayer、pathfinder 来自社区维护。如果 `npm install` 安装的最新版本在 1.20.1 上出现问题，在 `package.json` 里锁定到一个可用版本即可。
