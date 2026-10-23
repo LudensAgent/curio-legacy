@@ -13,6 +13,7 @@
     "check:llm": "tsx scripts/check-llm.ts",
     "check:rcon": "tsx scripts/check-rcon.ts",
     "memory:clear": "tsx scripts/clear-memory.ts",
+    "memory:reset": "tsx scripts/clear-memory.ts --full",
     "memory:serve": "docker compose -f compose.memory.yaml up -d",
     "check:memory": "tsx scripts/check-memory.ts",
     "test": "tsx --test tests/*.test.ts",

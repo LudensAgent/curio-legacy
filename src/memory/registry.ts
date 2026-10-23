@@ -1,15 +1,28 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 export interface MemoryBackendRegistration { baseUrl: string; bankId: string }
 
 /** This deliberately stores endpoint identities only; credentials belong in configuration. */
 export function readMemoryRegistry(dataDir: string): MemoryBackendRegistration[] {
+  inspectRegistryPath(dataDir);
   const file = path.join(dataDir, 'memory', 'backends.json');
   if (!fs.existsSync(file)) return [];
   const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
   if (!Array.isArray(parsed)) throw new Error('Invalid memory backend registry');
   return parsed.map(validate);
+}
+
+/** Registry reads/writes must never follow links out of the memory directory. */
+function inspectRegistryPath(dataDir: string): void {
+  for (const [target, directory] of [[path.join(dataDir, 'memory'), true], [path.join(dataDir, 'memory', 'backends.json'), false]] as const) {
+    let stat: fs.Stats;
+    try { stat = fs.lstatSync(target); } catch (e: any) { if (e.code === 'ENOENT') continue; throw e; }
+    if (stat.isSymbolicLink() || (directory ? !stat.isDirectory() : !stat.isFile())) {
+      throw new Error('记忆服务登记目录或文件不能是链接或异常类型，拒绝清理或覆盖。');
+    }
+  }
 }
 
 function validate(value: unknown): MemoryBackendRegistration {
@@ -39,8 +52,14 @@ export function unregisterMemoryBackend(dataDir: string, entry: MemoryBackendReg
 }
 
 function writeRegistry(dataDir: string, entries: MemoryBackendRegistration[]): void {
+  inspectRegistryPath(dataDir);
   const file = path.join(dataDir, 'memory', 'backends.json');
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file + '.tmp', JSON.stringify(entries, null, 2), 'utf8');
-  fs.renameSync(file + '.tmp', file);
+  const temporary = path.join(path.dirname(file), `.backends-${randomUUID()}.tmp`);
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(entries, null, 2), { encoding: 'utf8', flag: 'wx' });
+    fs.renameSync(temporary, file);
+  } finally {
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+  }
 }

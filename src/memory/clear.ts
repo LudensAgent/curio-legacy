@@ -44,9 +44,32 @@ export function inspectMemoryDirectory(dataDir: string, projectDir: string): { d
   return { directory: realDirectory, exists: true };
 }
 
-/** 离线重置：删除整个数据目录，包括记忆、技能、日志、备份和诊断。Agent 必须先退出。 */
+/** 离线重置：清空数据目录，保留可能被终端或监控工具占用的根目录。Agent 必须先退出。 */
 export function clearMemory(dataDir: string, projectDir: string): { directory: string; cleared: boolean } {
   const result = inspectMemoryDirectory(dataDir, projectDir);
-  if (result.exists) fs.rmSync(result.directory, { recursive: true });
-  return { directory: result.directory, cleared: result.exists };
+  if (!result.exists) return { directory: result.directory, cleared: false };
+
+  const entries = fs.readdirSync(result.directory);
+  for (const entry of entries) {
+    const target = path.resolve(result.directory, entry);
+    if (target === result.directory || !contains(result.directory, target)) {
+      throw new Error(`拒绝删除 DATA_DIR 以外的路径：${target}`);
+    }
+    try {
+      // rm 不跟随链接；junction 也只删除入口，保留其指向的外部文件。
+      const stat = fs.lstatSync(target);
+      fs.rmSync(target, { recursive: !stat.isSymbolicLink(), force: true, maxRetries: 5, retryDelay: 100 });
+    } catch (e: any) {
+      // 与 Agent 并发删除同一条目时允许条目已经消失；结束时仍会核实目录为空。
+      if (e.code === 'ENOENT') continue;
+      if (['EPERM', 'EACCES', 'EBUSY', 'ENOTEMPTY'].includes(e.code)) {
+        throw new Error(`无法清空历史记忆（${e.code}）：${target}。请先退出 Agent，并关闭占用该目录中文件的终端、编辑器或监控工具后重试。`, { cause: e });
+      }
+      throw e;
+    }
+  }
+  if (fs.readdirSync(result.directory).length) {
+    throw new Error(`DATA_DIR 清空后仍有文件：${result.directory}。请先退出 Agent，停止写入记忆或日志的程序后重试。`);
+  }
+  return { directory: result.directory, cleared: entries.length > 0 };
 }

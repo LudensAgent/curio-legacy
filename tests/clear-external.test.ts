@@ -30,7 +30,7 @@ test('clear all: remote success is verified before deleting local history; regis
   }));
   assert.deepEqual(cleared, [older.bankId]);
   assert.equal(result.banksCleared, 1);
-  assert.ok(!fs.existsSync(x.data));
+  assert.deepEqual(fs.readdirSync(x.data), []);
 });
 
 test('clear all: remote errors preserve local history and registry for retry', async (t) => {
@@ -75,6 +75,19 @@ test('clear all: multiple endpoints are cleaned without sending the current cred
   assert.deepEqual(readMemoryRegistry(x.data), [old]);
   assert.ok(fs.existsSync(x.data));
   await clearAllMemory(x.data, x.project, { ...x.settings, provider: 'local', baseUrl: old.baseUrl }, factory);
-  assert.ok(!fs.existsSync(x.data));
+  assert.deepEqual(fs.readdirSync(x.data), []);
   assert.deepEqual(calls, [x.settings.baseUrl, old.baseUrl]);
+});
+
+test('clear all: a linked registry is rejected before remote deletion or external writes', async (t) => {
+  const x = setup(t);
+  const outside = path.join(x.project, 'outside');
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(outside, 'backends.json'), '[]');
+  fs.symlinkSync(outside, path.join(x.data, 'memory'), process.platform === 'win32' ? 'junction' : 'dir');
+  let calls = 0;
+  await assert.rejects(clearAllMemory(x.data, x.project, x.settings, () => ({ async clear() { calls++; } })), /不能是链接/);
+  assert.equal(calls, 0);
+  assert.equal(fs.readFileSync(path.join(outside, 'backends.json'), 'utf8'), '[]');
+  assert.deepEqual(fs.readdirSync(outside), ['backends.json']);
 });

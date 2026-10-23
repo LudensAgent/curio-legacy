@@ -270,7 +270,9 @@ LLM_FAKE_DELAY_MS=30000   # 每次思考额外等 30 秒
 npm run memory:clear
 ```
 
-命令会彻底删除 `DATA_DIR` 指定的数据目录（默认 `data/`），包括世界记忆、长期目标、经验教训、死亡记录、技能统计、自学技能、历史日志、临时文件、损坏备份和诊断数据，不保留恢复副本。下次启动会自动创建空数据目录，从零开始；`.env` 和 Minecraft 游戏存档保持不变。不要在 Agent 运行时执行，否则自动保存可能写回旧记忆。
+命令会清空 `DATA_DIR`（默认 `data/`）中的所有内容，包括世界记忆、长期目标、经验教训、死亡记录、自学技能、日志和备份，并删除、核验当前及已登记的 Hindsight 专属 bank。保留空数据目录以避开 Windows 对目录本身的占用；文件仍被锁定时明确报错。`.env` 和 Minecraft 游戏存档保持不变。先退出 Agent 并等待记忆写入结束，保持 Hindsight 可访问。
+
+需要同时重置世界时，先停止 Minecraft 服务器，再运行 `npm run memory:reset`（等价于 `npm run memory:clear -- --full`）。保留 `eula.txt`、配置、mods 和启动组件，清理地图、玩家、日志、录像等运行数据，并清除 `level-seed`，下次启动创建随机种子的新世界。可先运行 `npm run memory:reset -- --dry-run` 预览；完整说明见 [清理与完整重置](docs/memory-hindsight.md#完全清空)。
 
 ## 13. 目录
 

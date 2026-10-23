@@ -3,6 +3,19 @@ import { HindsightBackend } from './hindsight.ts';
 import { readMemoryRegistry, unregisterMemoryBackend, type MemoryBackendRegistration } from './registry.ts';
 import type { MemoryBackend, MemorySettings } from './types.ts';
 
+/** Read-only preview, also used to validate every target before any remote mutation. */
+export function inspectAllMemory(dataDir: string, projectDir: string, settings: MemorySettings) {
+  const local = inspectMemoryDirectory(dataDir, projectDir);
+  const registered = readMemoryRegistry(local.directory);
+  const targets = [...registered];
+  if (settings.provider === 'hindsight') targets.push({ baseUrl: settings.baseUrl, bankId: settings.bankId });
+  const banks = [...new Map(targets.map((target) => [`${target.baseUrl}\n${target.bankId}`, target])).values()];
+  for (const target of banks) {
+    if (!/^mc-[a-f0-9]{32}$/.test(target.bankId)) throw new Error('历史记忆登记包含非本应用的 bank，拒绝清理。');
+  }
+  return { directory: local.directory, exists: local.exists, banks, registered };
+}
+
 /** Stop the Agent first; a remote failure preserves the local registry so cleanup can be retried. */
 export async function clearAllMemory(
   dataDir: string,
@@ -11,15 +24,8 @@ export async function clearAllMemory(
   backendFactory: (registration: MemoryBackendRegistration) => Pick<MemoryBackend, 'clear'> =
     (registration) => new HindsightBackend({ ...registration, apiKey: settings.apiKey }),
 ): Promise<{ directory: string; cleared: boolean; banksCleared: number }> {
-  const local = inspectMemoryDirectory(dataDir, projectDir);
-  const registered = readMemoryRegistry(local.directory);
-  const targets = [...registered];
-  if (settings.provider === 'hindsight') targets.push({ baseUrl: settings.baseUrl, bankId: settings.bankId });
-  const unique = [...new Map(targets.map((target) => [`${target.baseUrl}\n${target.bankId}`, target])).values()];
-  // Preflight every bank before deletion. Never send the configured key to a historical, different endpoint.
-  for (const target of unique) {
-    if (!/^mc-[a-f0-9]{32}$/.test(target.bankId)) throw new Error('历史记忆登记包含非本应用的 bank，拒绝清理。');
-  }
+  const local = inspectAllMemory(dataDir, projectDir, settings);
+  const { registered, banks: unique } = local;
   const matching = unique.filter((target) => target.baseUrl === settings.baseUrl);
   for (const target of matching) {
     await backendFactory(target).clear(AbortSignal.timeout(settings.retainTimeoutMs ?? 60_000));
