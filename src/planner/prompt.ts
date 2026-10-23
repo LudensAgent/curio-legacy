@@ -101,7 +101,7 @@ learn_skill 的完整格式为 {name,description,parameters:{amount:{type:"integ
 视觉仅约 ${fov}° 面前视锥，遮挡和光照有效。visible_resources 是亲眼所见，remembered_resources 是可能过期的旧观察；vision.recent_sightings 是刚走出视野的生物（hunt 会走到最后看见它的地方），vision.visible_drops 是看得见的掉落物（可用 pickup_items 去捡）；未去过的位置未知。附近没看见树只是否定本地观察范围内的木料线索，不能推断整个世界无树。gather 只能采已知资源；若下一步依赖尚未得到的观察，先获得证据再决定，不能预设一定发现资源。观察边走边发生：explore 沿途张望，带 until 一看见就停；gather/hunt 找不到会自己转头找。look_around 只用于专门找某样东西（for）或看某个方向（direction），不要当例行动作或接在 explore 后；原地且事实未变时再次扫视通常没有新信息。行动中感知持续更新，已有信息足够时直接做出选择。不要用管理指令或种子定位资源。sleep 只在主世界安全。不同维度的位置不能直接 goto。
 若附带建筑图片，它们是作品实地固定机位的射线语义色可视化，只有观测到的轮廓/遮挡/大类色彩，不能由此声称看到了原版材质细节。请结合自己的偏好、版本差异、功能缺陷和使用反馈成对比较；外观判断属于主观评价，不替代结构验收，不用自评分上涨证明进化。
 
-配方是玩出来的记忆（拿到过材料才知道）。需要时先查（只读，每次决策最多 3 次）：{"kind":"recipes","category":"<tools|weapons|armor|transport|food|light|workstations|storage|building|redstone|materials|misc>"} 看这类你知道哪些、材料够不够；{"kind":"recipes","item":"物品名"} 看还缺什么、从哪来。
+配方是玩出来的记忆（拿到过材料才知道）。需要时先查（只读，每次决策最多 3 次）：{"kind":"recipes","category":"<tools|weapons|armor|transport|food|light|workstations|storage|building|redstone|materials|misc>"} 看这类你知道哪些、材料够不够；{"kind":"recipes","item":"物品名","count":数量} 看整笔账（account：拿背包抵扣后还差哪些原材料、要先做哪些中间品）。采集要有目的：想好接下来要做什么 → 算出差多少 → 采齐再做；gather 写 for（{"item":"要做的东西","count":数量}）会按缺口算该采几个、够了就不采，不要随手定 8、16 个；build 缺料时会把缺口折算成原材料。
 可用技能（参数必须合法；组合技能也通过同一取消与动作守卫）：
 ${catalog}
 
@@ -325,6 +325,7 @@ export function lightSystemPrompt(persona: string): string {
 - 观察是边走边发生的：explore 带 until（可写 "cow|sheep" 或 "animal"）一看见就停；gather/hunt 找不到会自己转头找、会走到刚才看见的地方。
 - 除了组合动作，还有玩家的“右键/方向键/左键”：use_item、interact、ride、dismount、dig（对着方向挖）、climb_up（垫方块往上爬）。常规做法走不通时，想想真正的玩家会怎么做。
 - self.around 是身边一圈：脚下、头顶、哪边能走。被困（四面走不了、看不见天空、同一个地方接连失败）时先离开这里：往能走的方向走，或 dig 挖开、climb_up 爬上去。
+- 采集要有目的：先想好接下来要做什么，再按缺口采——gather 写 for（{"item":"要做的东西","count":数量}），会按背包缺口算该采几个，够了就不采；不要随手定 8、16 个。想知道整笔账（还差哪些原材料、要先做什么）就查 {"kind":"recipes","item":"物品名","count":数量} 看 account。
 - 不确定能做什么时可以查配方记忆（只读）：{"kind":"recipes","category":"tools|weapons|armor|transport|food|light|workstations|storage|building|redstone|materials|misc"} 或 {"kind":"recipes","item":"物品名"}。
 - 如果你觉得该换个目标/方向，或需要记忆和更多背景才能决定，只输出 {"kind":"need_full_context","reason":"一句话"}。
 - thought 是一句第一人称的感受或念头（40 字以内）。思考简洁，抓住眼前一两个关键事实即可。

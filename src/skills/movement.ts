@@ -1,3 +1,5 @@
+import { buildingArchiveFor } from './build.ts';
+import { findStation, isStation } from './stations.ts';
 import { DIR_OFFSETS, surroundings } from '../perception/surroundings.ts';
 import { climbUp } from './body.ts';
 import { hasPlaceable } from './survival.ts';
@@ -132,8 +134,8 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
 // ------------------------------------------------------------------ goto
 export const goTo: Skill<{ target: string }> = {
   name: 'goto',
-  description: '前往地标（base、death=上次死亡地点、地标 id 或名称）或坐标',
-  argsDoc: '{"target": "base | death | <地标id或名称> | x,y,z"}',
+  description: '前往地标（base、death=上次死亡地点、地标 id 或名称）、坐标、自己的建筑（作品 ID）或记得的功能方块（crafting_table、furnace、chest、床…）',
+  argsDoc: '{"target": "base | death | <地标id或名称> | <作品ID> | crafting_table | x,y,z"}',
   timeoutMs: 600000,
   movement: true,
   validate(raw) {
@@ -146,9 +148,23 @@ export const goTo: Skill<{ target: string }> = {
     const s = adapter.state();
     let pos: { x: number; y: number; z: number } | null = null;
     let label = args.target;
-    const m = args.target.match(/^\s*(-?\d+(?:\.\d+)?)[ ,]+(-?\d+(?:\.\d+)?)[ ,]+(-?\d+(?:\.\d+)?)\s*$/);
-    if (m) pos = { x: +m[1], y: +m[2], z: +m[3] };
-    else if (args.target.toLowerCase() === 'death') {
+    let flat = false; // 只给了 x,z：只管水平到达，高度随地形
+    // 坐标写法很随意：(-3,90,-10)、x=-3 y=90 z=-10、-3 90 -10 都认；只有两个数时当作 x,z
+    // 作品 ID（或前几位）先认：像 3f9a1b2c 这样的 ID 里也有数字，不能当坐标
+    const project = /^[0-9a-f-]{6,36}$/i.test(args.target) ? buildingArchiveFor(memory).list().find((p) => p.worldId === s.worldId && p.id.startsWith(args.target.toLowerCase())) : undefined;
+    const nums = project || /[a-z\u4e00-\u9fa5]{2,}/i.test(args.target.replace(/\b[xyz]\s*[=:]/gi, '')) ? null : args.target.match(/-?\d+(?:\.\d+)?/g);
+    const station = !nums && !project && /^[a-z_]+$/.test(args.target) && args.target !== 'base' && args.target !== 'death' && (isStation(args.target) || args.target === 'bed')
+      ? findStation(ctx, args.target.endsWith('_bed') || args.target === 'bed' ? BED_NAMES : [args.target], 160) : null;
+    if (nums && nums.length === 3) pos = { x: +nums[0], y: +nums[1], z: +nums[2] };
+    else if (nums && nums.length === 2) { pos = { x: +nums[0], y: s.pos.y, z: +nums[1] }; flat = true; }
+    else if (project) {
+      if (project.dimension !== s.dim) return fail('WRONG_DIMENSION', `作品在 ${project.dimension}`);
+      pos = project.origin;
+      label = `作品 ${project.versions.at(-1)?.spec.name ?? project.id.slice(0, 8)}`;
+    } else if (station) {
+      pos = station.pos;
+      label = `${station.from === 'memory' ? '记得的' : '看到的'} ${args.target}`;
+    } else if (args.target.toLowerCase() === 'death') {
       const d = memory.lastDeath();
       if (!d) return fail('NOT_FOUND', '没有记录的死亡地点');
       if (d.dim !== s.dim) return fail('WRONG_DIMENSION', `死亡地点在 ${d.dim}`);
@@ -156,7 +172,10 @@ export const goTo: Skill<{ target: string }> = {
       label = '死亡地点';
     } else {
       const lm = memory.findLandmark(args.target, s.dim);
-      if (!lm) return fail('NOT_FOUND', `找不到地标：${args.target}`);
+      if (!lm) {
+        const known = memory.landmarks().filter((l) => l.dim === s.dim && l.kind !== 'resource').slice(-8).map((l) => l.label);
+        return fail('NOT_FOUND', `找不到地标：${args.target}${known.length ? `（记得的地标：${known.join('、')}；也可以直接写坐标）` : '（可以直接写坐标）'}`);
+      }
       if (lm.dim !== s.dim) return fail('WRONG_DIMENSION', `地标 ${lm.label} 在 ${lm.dim}`);
       pos = lm.pos;
       label = lm.label;
@@ -174,7 +193,7 @@ export const goTo: Skill<{ target: string }> = {
         await adapter.moveTo({ kind: 'xz', x: cur.x + (pos.x - cur.x) * k, z: cur.z + (pos.z - cur.z) * k, range: 6 }, { signal, timeoutMs: 60000 });
       }
       if (adapter.state().dim !== s.dim || adapter.state().worldId !== s.worldId) return fail('WRONG_DIMENSION', '途中世界或维度已改变，需要重新规划');
-      await adapter.moveTo({ kind: 'near', pos, range: 2 }, { signal, timeoutMs: Math.max(5000, ctx.deadline - Date.now()) });
+      await adapter.moveTo(flat ? { kind: 'xz', x: pos.x, z: pos.z, range: 2 } : { kind: 'near', pos, range: 2 }, { signal, timeoutMs: Math.max(5000, ctx.deadline - Date.now()) });
       if (adapter.state().dim !== s.dim || adapter.state().worldId !== s.worldId) return fail('WRONG_DIMENSION', '途中世界或维度已改变，需要重新规划');
       return ok(`到达 ${label}`);
     } catch (e) {
@@ -185,6 +204,8 @@ export const goTo: Skill<{ target: string }> = {
     }
   },
 };
+
+const BED_NAMES = ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black'].map((c) => `${c}_bed`);
 
 // ------------------------------------------------------------------ wander（空档填充）
 export const wander: Skill<{ radius: number }> = {
@@ -281,10 +302,10 @@ export const unstuck: Skill<{}> = {
       const p = adapter.state().pos;
       if (Math.hypot(p.x - before.x, p.z - before.z) + Math.abs(p.y - before.y) >= 1.5) return ok(`往 ${exit} 挪出来了｜${surroundings(adapter).text}`);
     }
-    // 四面都走不了、头顶也看不见天：垫方块往上爬（头顶挡着会先挖开）
-    if (!around.sky && hasPlaceable(adapter.state().inventory)) {
+    // 四面都走不了（坑底、竖井、被封住）：垫方块往上爬（头顶挡着会先挖开），爬到四周有路可走为止
+    if (around.enclosed && hasPlaceable(adapter.state().inventory)) {
       ctx.progress(0.3, '四面被封住，垫方块往上爬');
-      const r = await climbUp.run(ctx, { height: 12, untilSky: true });
+      const r = await climbUp.run(ctx, { height: 12, untilSky: false, untilExit: true });
       if (r.status === 'succeeded' && (r.data as any)?.climbed > 0) return ok(`四面被封住，往上爬出来了：${r.summary}`);
     }
     await adapter.jump(600, signal);

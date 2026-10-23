@@ -4,8 +4,13 @@ import type { EventBus, Severity } from '../events.ts';
 import type { Senses } from '../skills/types.ts';
 import { hasPlaceable } from '../skills/survival.ts';
 import { torchCount } from '../skills/light.ts';
-import { effectiveLight } from '../util.ts';
+import { effectiveLight, lightAround } from '../util.ts';
 import { surroundings } from '../perception/surroundings.ts';
+
+/** 这些动作进行中可以顺手插支火把（插完接着做） */
+const TORCH_OK_DURING = new Set(['explore', 'goto', 'gather', 'wander', 'excavate_path', 'search_structure', 'look_around']);
+/** 熟食、面包等正经食物（不含生肉生鱼） */
+const GOOD_FOOD = /^(cooked_|baked_potato|bread|golden_carrot|golden_apple|pumpkin_pie|cookie|apple|carrot|melon_slice|sweet_berries|glow_berries|beetroot|dried_kelp|mushroom_stew|rabbit_stew|beetroot_soup|suspicious_stew|honey_bottle|cake)/;
 
 /**
  * 反射层：不依赖 LLM，按固定频率检查危险并直接抢占动作。
@@ -93,8 +98,15 @@ export class Reflex {
       return this.fire({ skill: 'flee', args: { distance: 18 } }, 'P1', `${nearest.name} 贴近且生命 ${s.hp}`);
     }
     const safe = !nearest || nearest.dist > 8;
-    if (cur?.skill !== 'dragon_fight' && safe && (s.food <= 12 || (s.hp < 14 && s.food < 18)) && this.adapter.hasFood() && this.ready('eat', 15000)) {
-      return this.fire({ skill: 'eat' }, 'P1', `饥饿 ${s.food} / 生命 ${s.hp}`);
+    // 吃东西的反射分轻重：真饿（≤6）或掉血时饥饿不满，什么都吃、马上吃；
+    // 只是有点饿（7–12）时，只在有熟食/面包这类“正经食物”时顺手吃，并且不打断打猎、战斗——
+    // 手上只有生肉就留给决策去决定（先烤熟更划算），而不是一捡到生肉就吃掉
+    const urgent = s.food <= 6 || (s.hp < 10 && s.food < 18);
+    const peckish = s.food <= 12 || (s.hp < 14 && s.food < 18);
+    const goodFood = s.inventory.some((i) => GOOD_FOOD.test(i.name));
+    const busy = !!cur && ['hunt', 'defend', 'ranged_defend', 'flee', 'dragon_fight', 'craft', 'smelt', 'build', 'climb_up', 'dig', 'store_items', 'take_items', 'ride', 'use_item', 'interact', 'sleep'].includes(cur.skill);
+    if (cur?.skill !== 'dragon_fight' && safe && this.adapter.hasFood() && (urgent || (peckish && goodFood && !busy)) && this.ready('eat', 15000)) {
+      return this.fire({ skill: 'eat' }, 'P1', `饥饿 ${s.food} / 生命 ${s.hp}${urgent ? '（很饿了，有什么吃什么）' : ''}`);
     }
 
     this.autoTorch(s, cur, nearest?.dist ?? Infinity);
@@ -102,19 +114,29 @@ export class Reflex {
   }
 
   private lastTorch: { x: number; y: number; z: number } | null = null;
+  private torchNear(x: number, y: number, z: number, r: number) {
+    for (let dx = -r; dx <= r; dx++) for (let dy = -2; dy <= 2; dy++) for (let dz = -r; dz <= r; dz++) {
+      const n = this.adapter.blockAt({ x: x + dx, y: y + dy, z: z + dz });
+      if (n === 'torch' || n === 'wall_torch') return true;
+    }
+    return false;
+  }
   torchesPlaced = 0;
 
   /** 像真人下矿一样：在地下走到暗处就顺手插一支火把（不打断计划，计划会原样继续） */
   private autoTorch(s: ReturnType<GameAdapter['state']>, cur: ReturnType<Arbiter['info']>, nearestHostile: number) {
     if (s.inWater || nearestHostile < 5 || torchCount(s.inventory) === 0) return;
-    if (cur && ['place_torch', 'shelter', 'surface', 'flee', 'defend', 'unstuck', 'dragon_fight'].includes(cur.skill)) return;
+    // 只在“走路/挖矿”这类可以顺手停一下的动作里插火把；打猎、合成、建造、爬坑这些做到一半被打断会坏事
+    if (cur && !TORCH_OK_DURING.has(cur.skill)) return;
     const x = Math.floor(s.pos.x), y = Math.floor(s.pos.y), z = Math.floor(s.pos.z);
-    const l = this.adapter.lightAt(x, y, z);
+    const l = lightAround(this.adapter, x, y, z);
     if (!l) return;
     const here = effectiveLight(l, s.timeOfDay);
     if (l.sky > 4 || here > 4) return; // 只在地下的暗处
     if (this.lastTorch && Math.hypot(x - this.lastTorch.x, y - this.lastTorch.y, z - this.lastTorch.z) < 5) return;
     if (!this.ready('torch', 6000)) return;
+    // 身边已经有火把了（光照数据还没刷新，或者火把被挡住）：玩家不会紧挨着再插一支
+    if (this.torchNear(x, y, z, 4)) return;
     this.lastTorch = { x, y, z };
     this.torchesPlaced++;
     this.triggers++;

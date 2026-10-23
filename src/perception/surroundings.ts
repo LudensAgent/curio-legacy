@@ -30,7 +30,8 @@ export function surroundings(adapter: GameAdapter, pos: Vec3Like = adapter.state
   const x = Math.floor(pos.x), y = Math.floor(pos.y), z = Math.floor(pos.z);
   const at = (dx: number, dy: number, dz: number) => adapter.blockAt({ x: x + dx, y: y + dy, z: z + dz });
   const below = at(0, -1, 0), above = at(0, 2, 0);
-  const sky = (adapter.lightAt(x, y + 1, z)?.sky ?? 0) >= 15;
+  // 天光 ≥ 12：露天（树冠、草叶只会挡掉一两级）
+  const sky = (adapter.lightAt(x, y + 1, z)?.sky ?? 0) >= 12;
   const exits: string[] = [], blocked: string[] = [];
   for (const [d, [dx, dz]] of Object.entries(DIR_OFFSETS)) {
     const feet = at(dx, 0, dz), head = at(dx, 1, dz);

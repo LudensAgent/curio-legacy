@@ -2,6 +2,7 @@ import minecraftData from 'minecraft-data';
 import type { InvItem } from '../adapter/types.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { ResourceKnowledge } from './knowledge.ts';
+import { describePlan, materialPlan } from './shortfall.ts';
 
 /**
  * 配方记忆：像原版配方书一样，拿到过（进过背包）其中一种材料或成品，才“知道”这个配方。
@@ -114,7 +115,11 @@ export class RecipeBook {
           ...(subQ.methods.some((m) => m.kind === 'gather') ? { gather_from: subQ.methods.filter((m) => m.kind === 'gather').slice(0, 2).map((m) => m.block) } : {}),
         };
       });
-      return { item, count, known: true, ...(craft.length ? { craft } : {}), ...(smelt.length ? { smelt } : {}), ...(gather.length ? { gather } : {}),
+      // 整笔账：拿背包抵扣后，还要去采哪些原材料、要先做哪些中间品
+      const plan = materialPlan(item, count, inventory, this.knowledge);
+      const account = { summary: describePlan(plan), raw_needed: plan.raw.map((r) => ({ item: r.item, count: r.count, from: r.from.slice(0, 3) })),
+        ...(plan.crafts.length > 1 ? { make_first: plan.crafts.slice(0, -1) } : {}), ...(plan.smelts.length ? { smelt_first: plan.smelts } : {}) };
+      return { item, count, known: true, account, ...(craft.length ? { craft } : {}), ...(smelt.length ? { smelt } : {}), ...(gather.length ? { gather } : {}),
         ...(sources.length ? { missing_from: sources } : {}), craftable_now: craft.some((c) => c.needs.every((n) => n.missing === 0)) };
     }
     const category = typeof raw.category === 'string' ? raw.category.trim().toLowerCase() : '';

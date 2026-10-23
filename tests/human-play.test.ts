@@ -644,3 +644,110 @@ test('小决策（边做边想）明确告诉模型手头的步骤会先做完�
   assert.deepEqual(bodies[0].thinking, { type: 'disabled' });
   assert.equal(bodies[1].thinking, undefined, '完整决策照常思考');
 });
+
+test('材料缺口：想做什么 → 背包抵扣 → 还差哪些原材料（有桦木就用桦木，床不走改色配方，铁靠烧）', async () => {
+  const { materialPlan, describePlan } = await import('../src/methods/shortfall.ts');
+  const p1 = materialPlan('stone_pickaxe', 1, [{ name: 'birch_log', count: 1 }, { name: 'cobblestone', count: 1 }] as any);
+  assert.deepEqual(p1.raw.map((r) => [r.item, r.count]), [['cobblestone', 2]], describePlan(p1));
+  const door = materialPlan('birch_door', 1, [{ name: 'birch_log', count: 1 }] as any);
+  assert.deepEqual(door.raw.map((r) => [r.item, r.count]), [['birch_log', 1]], describePlan(door));
+  assert.deepEqual(materialPlan('white_bed', 1, [{ name: 'birch_planks', count: 3 }] as any).raw.map((r) => r.item), ['white_wool']);
+  const pick = materialPlan('iron_pickaxe', 1, [{ name: 'stick', count: 2 }] as any);
+  assert.equal(pick.raw[0].item, 'raw_iron');
+  assert.equal(pick.smelts[0].item, 'iron_ingot');
+  assert.equal(materialPlan('crafting_table', 1, [{ name: 'oak_planks', count: 4 }] as any).enough, true);
+});
+
+test('gather 写 for：按缺口采，够了就不采', async () => {
+  const adapter = new FakeAdapter();
+  adapter.inv.set('birch_log', 1);
+  for (const x of [4, 5, 6]) adapter.blocks.push({ name: 'birch_log', pos: { x, y: 64, z: 0 } });
+  const ctx = skillCtx(adapter);
+  try {
+    const v = SKILLS.gather.validate({ block: 'birch_log', for: { item: 'birch_door', count: 1 } }, adapter) as any;
+    assert.equal(v.ok, true, v.error);
+    const r = await SKILLS.gather.run(ctx, v.args);
+    assert.equal(r.status, 'succeeded', r.summary);
+    assert.equal(r.data?.dug, 1, r.summary);
+    const again = await SKILLS.gather.run(ctx, v.args);
+    assert.match(again.summary, /不用采了/);
+  } finally { ctx.memory.close(); }
+});
+
+test('goto 认得各种坐标写法、作品 ID 和记得的工作台', async () => {
+  const adapter = new FakeAdapter();
+  adapter.speed = 1000;
+  const ctx = skillCtx(adapter);
+  ctx.memory.setWorld(adapter.worldId);
+  try {
+    let r = await SKILLS.goto.run(ctx, { target: '(-3,64,-10)' });
+    assert.equal(r.status, 'succeeded', r.summary);
+    assert.ok(Math.abs(adapter.pos.x + 3) < 3 && Math.abs(adapter.pos.z + 10) < 3);
+    ctx.memory.addLandmark('discovery', '我的工作台', 'overworld', { x: 20, y: 64, z: 5 }, 2);
+    r = await SKILLS.goto.run(ctx, { target: 'crafting_table' });
+    assert.equal(r.status, 'succeeded', r.summary);
+    assert.ok(Math.abs(adapter.pos.x - 20) < 3);
+    const { buildingArchiveFor } = await import('../src/skills/build.ts');
+    const { compileBuilding, materialCost, normalizeSpec } = await import('../src/building/spec.ts');
+    const spec = normalizeSpec({});
+    const proj = buildingArchiveFor(ctx.memory).design({ worldId: adapter.worldId, dimension: 'overworld', origin: { x: -30, y: 64, z: 7 }, rotation: 0, spec, materials: materialCost(compileBuilding(spec).cells) });
+    r = await SKILLS.goto.run(ctx, { target: proj.id.slice(0, 8) });
+    assert.equal(r.status, 'succeeded', r.summary);
+    assert.ok(Math.abs(adapter.pos.x + 30) < 3);
+    r = await SKILLS.goto.run(ctx, { target: '不存在的地方' });
+    assert.match(r.summary, /工作台|坐标/);
+  } finally { ctx.memory.close(); }
+});
+
+test('吃东西的反射：有点饿时不在打猎中途把刚捡到的生肉吃掉；真饿了才有什么吃什么', async () => {
+  const { Reflex } = await import('../src/brain/reflex.ts');
+  const adapter = new FakeAdapter(), bus = new EventBus();
+  const vision = new Vision(adapter);
+  const memory = new WorldMemory(null);
+  const arbiter = new Arbiter(adapter, memory, bus, vision);
+  const reflex = new Reflex(adapter, arbiter, bus, vision);
+  adapter.hasFood = () => adapter.inv.size > 0;
+  adapter.inv.set('beef', 2);
+  adapter.food = 10;
+  reflex.tick();
+  assert.notEqual(arbiter.info()?.skill, 'eat', '有点饿 + 只有生肉：不反射吃');
+  adapter.inv.set('bread', 1);
+  reflex.tick();
+  assert.equal(arbiter.info()?.skill, 'eat', '有面包就顺手吃');
+  arbiter.cancel('test');
+  const adapter2 = new FakeAdapter(), bus2 = new EventBus(), vision2 = new Vision(adapter2), arbiter2 = new Arbiter(adapter2, memory, bus2, vision2);
+  const reflex2 = new Reflex(adapter2, arbiter2, bus2, vision2);
+  adapter2.hasFood = () => true; adapter2.inv.set('beef', 2); adapter2.food = 5;
+  reflex2.tick();
+  assert.equal(arbiter2.info()?.skill, 'eat', '真饿了生肉也吃');
+  arbiter2.cancel('test');
+  memory.close();
+});
+
+test('火把反射：脚下是半砖/草丛读到 0 不算“地下太暗”；打猎、合成中途不插火把，身边已有火把也不插', async () => {
+  const { Reflex } = await import('../src/brain/reflex.ts');
+  const memory = new WorldMemory(null);
+  const adapter = new FakeAdapter(), bus = new EventBus(), vision = new Vision(adapter);
+  const arbiter = new Arbiter(adapter, memory, bus, vision);
+  const reflex = new Reflex(adapter, arbiter, bus, vision);
+  adapter.inv.set('torch', 8);
+  // 林子里：脚那格读成 0，头那格是天光
+  adapter.lightAt = (x: number, y: number) => (y === 64 ? { block: 0, sky: 0 } : { block: 0, sky: 15 });
+  reflex.tick();
+  assert.notEqual(arbiter.info()?.skill, 'place_torch', '露天不插');
+  // 真正在地下：脚和头都暗
+  adapter.lightAt = () => ({ block: 0, sky: 0 });
+  arbiter.start({ skill: 'hunt', args: { animal: 'cow', count: 1 } }, 'llm');
+  reflex.tick();
+  assert.equal(arbiter.info()?.skill, 'hunt', '打猎中途不插');
+  arbiter.cancel('test');
+  adapter.blocks.push({ name: 'torch', pos: { x: 2, y: 64, z: 1 } });
+  reflex.tick();
+  assert.notEqual(arbiter.info()?.skill, 'place_torch', '身边已经有火把');
+  adapter.blocks = adapter.blocks.filter((b) => b.name !== 'torch');
+  (reflex as any).cooldown.clear();
+  reflex.tick();
+  assert.equal(arbiter.info()?.skill, 'place_torch', '空手在地下暗处才插');
+  arbiter.cancel('test');
+  memory.close();
+});

@@ -18,7 +18,8 @@ const HAZARDS = new Set(['water', 'lava', 'fire', 'soul_fire', 'magma_block', 'c
 const replaceable = (name: string) => AIR.has(name) || PLANTS.has(name);
 /** 整地时可以清掉的自然东西：植物、树、雪，以及会被铲平的泥土石头；自己插的火把也可以拿掉 */
 const VEGETATION = /(_leaves|_log|_wood|_stem|_sapling|_flower|_tulip|_mushroom|_carpet|grass|fern|bush|vine|vines|dandelion|poppy|orchid|allium|bluet|daisy|cornflower|lily_of_the_valley|peony|lilac|rose_bush|sunflower|sugar_cane|bamboo|azalea|cactus|snow|cobweb|lily_pad|hanging_roots|spore_blossom|glow_lichen|moss_block)$/;
-const LEVELABLE = new Set([...NATURAL_GROUND, 'sand', 'red_sand', 'clay', 'andesite', 'granite', 'diorite', 'tuff', 'calcite', 'sandstone', 'red_sandstone', 'terracotta', 'snow_block', 'mud', 'packed_mud', 'moss_block', 'dirt_path', 'farmland', 'gravel']);
+// 不含圆石、耕地、土径：那些多半是自己或别人做出来的（墙、农田、小路），留给验收报告
+const LEVELABLE = new Set(['grass_block', 'dirt', 'coarse_dirt', 'podzol', 'mycelium', 'rooted_dirt', 'stone', 'deepslate', 'netherrack', 'end_stone', 'sand', 'red_sand', 'gravel', 'clay', 'andesite', 'granite', 'diorite', 'tuff', 'calcite', 'sandstone', 'red_sandstone', 'terracotta', 'snow_block', 'mud', 'moss_block']);
 export const siteClearable = (name: string) => !name.endsWith('grass_block') && VEGETATION.test(name) || LEVELABLE.has(name) || name === 'torch' || name === 'wall_torch';
 const solidGround = (name: string) => !replaceable(name) && !HAZARDS.has(name) && !/door|torch|flower|sapling|leaves|fence|pane|carpet|bed|rail/.test(name);
 

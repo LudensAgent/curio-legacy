@@ -256,7 +256,9 @@ export class Planner {
                 decision = validateIntentDecision(rest, this.memory, this.adapter);
               }
               if (!decision.ok) throw new Error(decision.error);
-              if (notes.length) this.bus.publish('decision_normalized', 'P3', `已纠正决策格式：${notes.join('；')}`);
+              // 小决策本来就不写 decision（默认接着当前意图），这不是格式错误，不用报
+              const real = ctx.tier === 'light' ? notes.filter((n) => !/未给出 decision/.test(n)) : notes;
+              if (real.length) this.bus.publish('decision_normalized', 'P3', `已纠正决策格式：${real.join('；')}`);
               v.plan.decision = decision.decision;
             }
             v.plan.reason = ctx.reason;

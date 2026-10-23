@@ -1,3 +1,4 @@
+import { describePlan, materialPlan } from '../methods/shortfall.ts';
 import { lookAround } from './movement.ts';
 import { findStation, rememberStation } from './stations.ts';
 import { dist3 } from '../util.ts';
@@ -32,10 +33,10 @@ async function moveWithWatchdog(ctx: SkillCtx, pos: { x: number; y: number; z: n
   }
 }
 
-export const gather: Skill<{ block: string; count: number }> = {
+export const gather: Skill<{ block: string; count: number; for?: { item: string; count: number } }> = {
   name: 'gather',
-  description: '前往【看见过或正看见】的指定方块并挖掘、拾取。看不见的不会去挖（没有透视）；stone/dirt/sand 若看不见会就地向下挖。block 可用别名：log(任意原木)、stone、dirt、coal、iron、ore',
-  argsDoc: '{"block": "log|stone|coal|iron|<方块名>", "count"?: 1-32}',
+  description: '前往【看见过或正看见】的指定方块并挖掘、拾取。写 for（要做的东西和数量）时按背包缺口算该采几个，已经够了就不采；看不见的不会去挖（没有透视）；stone/dirt/sand 若看不见会就地向下挖。block 可用别名：log(任意原木)、stone、dirt、coal、iron、ore',
+  argsDoc: '{"block": "log|stone|coal|iron|<方块名>", "for"?: {"item":"要做的东西","count":1} | "物品名", "count"?: 1-32（不写 for 时用）}',
   timeoutMs: 180000,
   movement: true,
   validate(raw, adapter) {
@@ -43,11 +44,34 @@ export const gather: Skill<{ block: string; count: number }> = {
     const block = String(a.block ?? '').trim();
     if (!block) return { ok: false, error: 'block 不能为空' };
     if (!adapter.resolveBlockNames(block).length) return { ok: false, error: `未知方块：${block}` };
-    return { ok: true, args: { block, count: clampInt(a.count, 1, 32, 4) } };
+    let goal: { item: string; count: number } | undefined;
+    if (a.for !== undefined && a.for !== null && a.for !== '') {
+      const f = typeof a.for === 'string' ? { item: a.for } : obj(a.for);
+      const m = String(f.item ?? '').trim().replace(/^minecraft:/, '').match(/^([a-z0-9_]+)(?:\s*[x×*]\s*(\d+))?$/);
+      const item = m ? resolveItemAlias(m[1], adapter) : null;
+      if (!item) return { ok: false, error: `for 里的物品不认识：${String(f.item ?? a.for)}` };
+      goal = { item, count: clampInt(f.count ?? (m?.[2] ? Number(m[2]) : undefined), 1, 512, 1) };
+    }
+    return { ok: true, args: { block, count: clampInt(a.count, 1, 32, 4), ...(goal ? { for: goal } : {}) } };
   },
   async run(ctx, args) {
     const { adapter, senses, signal } = ctx;
-    const names = adapter.resolveBlockNames(args.block);
+    let names = adapter.resolveBlockNames(args.block);
+    // 先算账：要做的东西还差多少原材料，其中多少要从这种方块里来
+    if (args.for) {
+      const plan = materialPlan(args.for.item, args.for.count, adapter.state().inventory);
+      const mine = plan.raw.filter((r) => names.includes(r.item) || r.from.some((b) => names.includes(b)) || (r.anyWood && names.some((n) => n.endsWith('_log'))));
+      const need = mine.reduce((a, r) => a + r.count, 0);
+      if (!need) {
+        return plan.enough ? ok(`不用采了：${describePlan(plan)}`, { needed: 0, plan })
+          : fail('BAD_ARGS', `做 ${args.for.item}×${args.for.count} 不缺 ${args.block}；${describePlan(plan)}`, { plan });
+      }
+      args = { ...args, count: Math.min(64, need) };
+      // 只采真正缺的那种（做桦木门就砍桦木，别砍橡木）
+      const wanted = names.filter((n) => mine.some((r) => r.item === n || r.from.includes(n) || (r.anyWood && n.endsWith('_log'))));
+      if (wanted.length) names = wanted;
+      ctx.progress(0, `${describePlan(plan)}：先采 ${args.block}×${args.count}`);
+    }
     const canDigDown = names.some((n) => DIGGABLE_DOWN.has(n));
     const skip = new Set<string>();
     let dug = 0;
@@ -147,7 +171,8 @@ export const gather: Skill<{ block: string; count: number }> = {
         continue;
       }
     }
-    return ok(`采集了 ${dug} 个 ${args.block}${lost ? `（另有 ${lost} 块的掉落物没捡到）` : ''}`, { dug, ...(lost ? { lost } : {}) });
+    const after = args.for ? materialPlan(args.for.item, args.for.count, adapter.state().inventory) : null;
+    return ok(`采集了 ${dug} 个 ${args.block}${lost ? `（另有 ${lost} 块的掉落物没捡到）` : ''}${after ? `；${describePlan(after)}` : ''}`, { dug, ...(lost ? { lost } : {}), ...(after ? { plan: after } : {}) });
   },
 };
 

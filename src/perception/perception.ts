@@ -2,7 +2,7 @@ import { surroundings } from './surroundings.ts';
 import type { GameAdapter, InvItem } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
-import { effectiveLight, round1 } from '../util.ts';
+import { effectiveLight, round1, lightAround } from '../util.ts';
 import { torchCount } from '../skills/light.ts';
 import { interactiveName, NOTABLE, type Vision, type VisionSummary } from './vision.ts';
 import { computeDrives, type Drive, type Stock } from '../brain/drives.ts';
@@ -152,7 +152,7 @@ export class Perception {
 
   private lightInfo(s: ReturnType<GameAdapter['state']>): Percept['light'] {
     const x = Math.floor(s.pos.x), y = Math.floor(s.pos.y), z = Math.floor(s.pos.z);
-    const l = this.adapter.lightAt(x, y, z) ?? this.adapter.lightAt(x, y + 1, z);
+    const l = lightAround(this.adapter, x, y, z);
     if (!l) return null;
     const here = effectiveLight(l, s.timeOfDay);
     const comp = this.vision.composition;

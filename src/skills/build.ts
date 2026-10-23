@@ -1,4 +1,5 @@
 import type { ConstructionResult } from '../building/engine.ts';
+import { materialPlan } from '../methods/shortfall.ts';
 import { findStation } from './stations.ts';
 import type { Vec3Like } from '../adapter/types.ts';
 import { BuildingArchive } from '../building/archive.ts';
@@ -88,8 +89,17 @@ export const build: Skill<BuildArgs> = {
       const state = ctx.adapter.state();
       if (!state.connected || !state.alive || !ctx.adapter.eye()) return fail('NOT_CONNECTED', '未连接或尚未存活');
       const archive = buildingArchiveFor(ctx.memory);
-      const old = args.projectId ? archive.get(args.projectId) : undefined;
-      if (args.projectId && !old) return fail('NOT_FOUND', `没有建筑档案 ${args.projectId}`);
+      // 忘了作品 ID 也没关系：附近有没盖完的房子就接着盖（像玩家回到工地），而不是在旁边另起一座
+      const near = (p: Vec3Like) => Math.hypot(p.x - (args.origin ?? state.pos).x, p.z - (args.origin ?? state.pos).z) <= (args.origin ? 6 : 16);
+      const resumed = !args.projectId && args.mode === 'build' ? archive.list()
+        .filter((p) => p.worldId === state.worldId && p.dimension === state.dim && p.status !== 'complete' && near(p.origin)
+          && (!args.origin || (args.origin.x === p.origin.x && args.origin.y === p.origin.y && args.origin.z === p.origin.z))
+          && (args.rotation === undefined || args.rotation === p.rotation))
+        .sort((a, b) => b.updatedAt - a.updatedAt)[0] : undefined;
+      const projectId = args.projectId ?? resumed?.id;
+      const old = projectId ? archive.get(projectId.length < 36 ? archive.list().find((p) => p.id.startsWith(projectId))?.id ?? projectId : projectId) : undefined;
+      if (resumed) ctx.bus.publish('build_resume', 'P3', `附近有没盖完的「${resumed.versions.at(-1)?.spec.name ?? resumed.id.slice(0, 8)}」，接着盖它`);
+      if (projectId && !old) return fail('NOT_FOUND', `没有建筑档案 ${projectId}`);
       if ((args.mode === 'inspect' || args.mode === 'repair') && !old) return fail('BAD_ARGS', `${args.mode} 需要已有 projectId`);
       if (old && old.dimension !== state.dim) return fail('WRONG_DIMENSION', `建筑位于 ${old.dimension}，当前为 ${state.dim}`);
       if (old && old.worldId !== state.worldId) return fail('WRONG_DIMENSION', '作品属于另一个世界，当前不能施工或验收');
@@ -111,7 +121,17 @@ export const build: Skill<BuildArgs> = {
       if (!result.inspection.complete) {
         const missing = Object.entries(result.missingMaterials).map(([name, count]) => `${name}×${count}`).join('，');
         const failureCode = missing ? 'MISSING_MATERIALS' : result.failures.some((f) => f.reason === 'WRONG_DIMENSION') ? 'WRONG_DIMENSION' : 'ERROR';
-        return fail(failureCode, `${spec.name} 尚未验收（${result.inspection.defects.length} 个缺陷）${missing ? `；缺少 ${missing}` : ''}。${describeBuildProblems(result)}作品 ID ${project.id}；可补料后续建/repair/inspect。${result.failures[0] ? ` ${result.failures[0].reason}` : ''}`, data);
+        // 缺料折算成要去采的原材料（像玩家心算：73 块木板 ≈ 19 根原木）
+        const rawNeed = new Map<string, number>();
+        let pool = ctx.adapter.state().inventory;
+        for (const [name, count] of Object.entries(result.missingMaterials)) {
+          const p = materialPlan(name, count, pool);
+          pool = p.leftover; // 同一批原木不能同时算给木板和门
+          for (const r of p.raw) rawNeed.set(r.item, (rawNeed.get(r.item) ?? 0) + r.count);
+        }
+        const sameAsMissing = rawNeed.size === Object.keys(result.missingMaterials).length && [...rawNeed].every(([n, c]) => result.missingMaterials[n] === c);
+        const rawText = sameAsMissing ? '' : [...rawNeed].map(([n, c]) => `${n}×${c}`).join('、');
+        return fail(failureCode, `${spec.name} 尚未验收（${result.inspection.defects.length} 个缺陷）${missing ? `；缺少 ${missing}${rawText ? `（折算成原材料：${rawText}，可用 gather 的 for 按缺口采）` : ''}` : ''}。${describeBuildProblems(result)}作品 ID ${project.id}；可补料后续建/repair/inspect。${result.failures[0] ? ` ${result.failures[0].reason}` : ''}`, data);
       }
       if (blueprint.home && args.mode !== 'inspect') {
         const home = rotatePosition(blueprint.home, project.origin, project.rotation);

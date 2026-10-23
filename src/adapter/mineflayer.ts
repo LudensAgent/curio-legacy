@@ -34,6 +34,7 @@ const HOSTILE = new Set([
 const NEUTRAL = new Set(['enderman', 'zombified_piglin', 'piglin', 'wolf', 'bee', 'iron_golem', 'llama', 'panda', 'polar_bear', 'dolphin', 'goat']);
 const BAD_FOOD = new Set(['rotten_flesh', 'spider_eye', 'poisonous_potato', 'pufferfish', 'suspicious_stew', 'chorus_fruit']);
 const WEAPON_ORDER = ['netherite', 'diamond', 'iron', 'stone', 'golden', 'wooden'];
+const RAW_FOOD = /^(beef|porkchop|chicken|mutton|rabbit|cod|salmon|potato|tropical_fish)$/;
 const PROTECTED_BLOCKS = ['chest', 'trapped_chest', 'crafting_table', 'furnace', 'barrel', 'white_bed', 'red_bed'];
 
 const LOGS = ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log'];
@@ -543,7 +544,65 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         break;
       }
     }
-    await this.afterAction(() => raceAbort(b.pathfinder.goto(goal), opts.signal, opts.timeoutMs, () => this.stopAll()), check);
+    await this.gotoUnstalled(goal, opts, check);
+  }
+
+  /**
+   * 寻路时被身前的方块“顶住”（树叶、半格、拐角）原地踏步：像玩家一样跳一下、挖开挡脸的树叶/草、
+   * 或者退半步换个角度，再接着走；而不是原地顶 20 秒直到被判卡死。
+   */
+  private async gotoUnstalled(goal: any, opts: MoveOpts, check: () => void) {
+    const b = this.bot;
+    const deadline = Date.now() + opts.timeoutMs;
+    for (let nudge = 0; ; nudge++) {
+      let stalled = false;
+      let last = b.entity?.position?.clone?.() ?? null, since = Date.now();
+      const watch = setInterval(() => {
+        const p = b.entity?.position;
+        if (!p?.clone || !last) { last = p?.clone?.() ?? null; return; }
+        if (p.distanceTo(last) >= 0.3 || b.targetDigBlock || !b.pathfinder?.isMoving?.()) { last = p.clone(); since = Date.now(); return; }
+        if (Date.now() - since >= 2500 && nudge < 3) { stalled = true; try { b.pathfinder.stop(); b.pathfinder.setGoal(null); } catch { /* ignore */ } }
+      }, 300);
+      try {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw new Error('TIMEOUT');
+        await this.afterAction(() => raceAbort(b.pathfinder.goto(goal), opts.signal, remaining, () => this.stopAll()), check);
+        if (!stalled) return;
+      } catch (e: any) {
+        if (!stalled || e?.name === 'AbortedError') throw e;
+      } finally {
+        clearInterval(watch);
+      }
+      throwIfAborted(opts.signal);
+      this.bus.publish('path_nudge', 'P3', `走路被挡住，第 ${nudge + 1} 次调整（跳/挖开挡路的叶子/退半步）`);
+      await this.nudge(nudge, opts);
+      check();
+    }
+  }
+
+  private async nudge(n: number, opts: MoveOpts) {
+    const b = this.bot;
+    const yaw = b.entity.yaw;
+    const fx = -Math.sin(yaw), fz = -Math.cos(yaw);
+    const feet = b.entity.position.floored();
+    const front = [feet.offset(Math.round(fx), 0, Math.round(fz)), feet.offset(Math.round(fx), 1, Math.round(fz)), feet.offset(0, 2, 0)];
+    const soft = /(_leaves|grass|fern|vine|bush|_sapling|snow|flower|tulip|dandelion|poppy|azalea|cobweb)$/;
+    const hold = async (keys: string[], ms: number) => {
+      for (const k of keys) b.setControlState(k, true);
+      try { await sleep(ms, opts.signal); } finally { for (const k of keys) b.setControlState(k, false); }
+    };
+    // 施工中（脚手架、屋顶）只原地跳一下，不往前冲也不后退，免得从高处掉下去
+    if (opts.constructionSafe) return hold(['jump'], 350);
+    if (n === 0) return hold(['jump', 'forward'], 450);
+    if (n === 1) {
+      // 挡在脸前/头顶的树叶、草、藤蔓：顺手挖开（不挖别的东西）
+      for (const pos of front) {
+        const blk = b.blockAt(pos);
+        if (blk && soft.test(blk.name) && b.canDigBlock?.(blk)) { try { await raceAbort(b.dig(blk), opts.signal, 3000, () => b.stopDigging?.()); } catch (e: any) { if (e?.name === 'AbortedError') throw e; } }
+      }
+      return hold(['jump', 'forward'], 450);
+    }
+    return hold(['back', Math.random() < 0.5 ? 'left' : 'right'], 500);
   }
 
   stopAll() {
@@ -1212,7 +1271,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     for (const r of b.recipesAll(id, null, true) as any[]) {
       const times = Math.max(1, Math.ceil(count / (r.result?.count ?? 1)));
       const miss = (r.delta ?? []).filter((d: any) => d.count < 0).map((d: any) => ({ n: name(d.id), need: -d.count * times, have: this.invCount(d.id) })).filter((m: any) => m.need > m.have);
-      const total = miss.reduce((a: number, m: any) => a + m.need - m.have, 0);
+      // “染料 + 别色的床 → 白床”这类改色配方需要先有一个同类成品；手上没有时它不是做出第一个的办法
+      const family = (n: string) => n.replace(/^(white|orange|magenta|light_blue|yellow|lime|pink|gray|light_gray|cyan|purple|blue|brown|green|red|black)_/, '');
+      const recolor = miss.some((m: any) => m.n !== name(id) && family(m.n) === family(name(id)));
+      const total = miss.reduce((a: number, m: any) => a + m.need - m.have, 0) + (recolor ? 1000 : 0);
       if (!best || total < best.total) best = { miss, total, table: !!r.requiresTable };
     }
     if (!best) return '没有已知配方';
@@ -1381,7 +1443,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return this.bot.inventory
       .items()
       .filter((i: any) => foods[i.name] && !BAD_FOOD.has(i.name))
-      .sort((a: any, c: any) => (foods[c.name].foodPoints ?? 0) - (foods[a.name].foodPoints ?? 0));
+      // 有熟食先吃熟食（饱和度高），生肉留着烤
+      .sort((a: any, c: any) => Number(RAW_FOOD.test(a.name)) - Number(RAW_FOOD.test(c.name)) || (foods[c.name].foodPoints ?? 0) - (foods[a.name].foodPoints ?? 0));
   }
 
   hasFood(): boolean {

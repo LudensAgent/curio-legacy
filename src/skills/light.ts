@@ -1,4 +1,4 @@
-import { effectiveLight } from '../util.ts';
+import { effectiveLight, lightAround, sleep } from '../util.ts';
 import { clampInt, fail, isAbort, obj, ok, type Skill } from './types.ts';
 
 const AIRISH = new Set(['air', 'cave_air', 'short_grass', 'tall_grass', 'snow']);
@@ -34,7 +34,7 @@ export const placeTorch: Skill<{ count: number }> = {
     }
     const fx = Math.floor(s.pos.x), fy = Math.floor(s.pos.y), fz = Math.floor(s.pos.z);
     const lightOf = (x: number, y: number, z: number) => {
-      const l = adapter.lightAt(x, y, z);
+      const l = lightAround(adapter, x, y, z);
       return l ? effectiveLight(l, s.timeOfDay) : 15;
     };
     // 候选：脚边一圈（含斜角）同高度的空位，下方是实心方块；按亮度从暗到亮
@@ -57,13 +57,16 @@ export const placeTorch: Skill<{ count: number }> = {
     for (const c of cands) {
       if (placed >= args.count) break;
       const r = await adapter.placeBlockAt(c, ['torch'], signal);
-      if (r.ok) {
-        placed++;
-        ctx.memory.addLandmark('discovery', '火把', s.dim, c, 3);
-      }
+      if (r.ok) placed++;
     }
-    if (!placed) return fail('ERROR', '附近没有能插火把的位置');
-    const after = lightOf(fx, fy, fz);
+    if (!placed) {
+      const l = lightAround(adapter, fx, fy, fz);
+      if (l && l.sky >= 12 && s.isDay) return ok(`这里是露天（天光 ${l.sky}/15），白天本来就亮，不用插`);
+      return fail('ERROR', '附近没有能插火把的位置（脚边没有实心地面，也没有能靠的墙）');
+    }
+    // 光照更新要等服务器回包：稍等再读，免得报告“插了火把还是 0”
+    let after = lightOf(fx, fy, fz);
+    for (let i = 0; i < 6 && (lightAround(adapter, fx, fy, fz)?.block ?? 0) === 0; i++) { await sleep(100, signal); after = lightOf(fx, fy, fz); }
     return ok(`插了 ${placed} 支火把，脚下亮度 ${after}/15，剩余火把 ${torchCount(adapter.state().inventory)}`);
   },
 };

@@ -91,6 +91,17 @@ export function skyDarkness(timeOfDay: number) {
   return timeOfDay < 12000 ? 0 : timeOfDay < 13800 || timeOfDay >= 22200 ? 5 : 11;
 }
 
+/**
+ * 身体所在位置的光照：脚下那格可能是半砖、土径、草丛、树叶（读出来是 0），所以取脚和头两格里亮的那个。
+ * 否则站在林子里也会被当成“地下太暗”。
+ */
+export function lightAround(adapter: { lightAt(x: number, y: number, z: number): { block: number; sky: number } | null }, x: number, y: number, z: number) {
+  const a = adapter.lightAt(x, y, z), b = adapter.lightAt(x, y + 1, z);
+  if (!a) return b;
+  if (!b) return a;
+  return { block: Math.max(a.block, b.block), sky: Math.max(a.sky, b.sky) };
+}
+
 /** 实际亮度 = max(方块光, 天光 - 时间造成的变暗) */
 export function effectiveLight(l: { block: number; sky: number }, timeOfDay: number) {
   return Math.max(l.block, l.sky - skyDarkness(timeOfDay));

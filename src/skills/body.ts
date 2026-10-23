@@ -101,16 +101,17 @@ export const dig: Skill<{ dir: string; blocks: number }> = {
 };
 
 // ------------------------------------------------------------------ climb_up
-export const climbUp: Skill<{ height: number; untilSky: boolean }> = {
+export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boolean }> = {
   name: 'climb_up',
-  description: '原地垫方块往上爬（头顶挡着会先挖开），until_sky 为 true 时一直爬到看得见天空；需要背包里有泥土/圆石等方块',
-  argsDoc: '{"height"?: 1-24, "until_sky"?: true}',
+  description: '原地垫方块往上爬（头顶挡着会先挖开）：until_sky 爬到看得见天空，until_exit 爬到四周有路可走（出坑）；需要背包里有泥土/圆石等方块',
+  argsDoc: '{"height"?: 1-24, "until_sky"?: true, "until_exit"?: true}',
   timeoutMs: 90000,
   movement: true,
   validate(raw) {
     const a = obj(raw);
-    const untilSky = a.until_sky === true || a.untilSky === true || a.height === undefined;
-    return { ok: true, args: { height: clampInt(a.height, 1, 24, untilSky ? 16 : 3), untilSky } };
+    const untilExit = a.until_exit === true || a.untilExit === true;
+    const untilSky = a.until_sky === true || a.untilSky === true || (a.height === undefined && !untilExit);
+    return { ok: true, args: { height: clampInt(a.height, 1, 24, untilSky || untilExit ? 16 : 3), untilSky, ...(untilExit ? { untilExit } : {}) } };
   },
   async run(ctx, args) {
     const { adapter, signal } = ctx;
@@ -118,7 +119,9 @@ export const climbUp: Skill<{ height: number; untilSky: boolean }> = {
     const start = adapter.state().pos.y;
     let climbed = 0;
     for (let i = 0; i < args.height && Date.now() < ctx.deadline - 1000; i++) {
-      if (args.untilSky && surroundings(adapter).sky) break;
+      const here = surroundings(adapter);
+      if (args.untilSky && here.sky) break;
+      if (args.untilExit && i > 0 && here.exits.length) break;
       const me = floor(adapter.state().pos);
       try {
         // 头顶的方块先挖开（不挖液体旁边的）
@@ -135,7 +138,7 @@ export const climbUp: Skill<{ height: number; untilSky: boolean }> = {
     }
     climbed = Math.round(adapter.state().pos.y - start);
     const around = surroundings(adapter);
-    return ok(`往上爬了 ${climbed} 格${around.sky ? '，看得见天空了' : ''}｜${around.text}`, { climbed, sky: around.sky });
+    return ok(`往上爬了 ${climbed} 格${around.exits.length && args.untilExit ? '，四周有路了' : around.sky ? '，看得见天空了' : ''}｜${around.text}`, { climbed, sky: around.sky });
   },
 };
 
