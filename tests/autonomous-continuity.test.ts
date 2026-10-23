@@ -117,14 +117,13 @@ test('elapsed time alone never restarts a completed background sweep', async (t)
   assert.equal(w.look.mock.callCount(), 8);
 });
 
-test('moving to a meaningfully different position permits a fresh background sweep', async (t) => {
+test('moving to a different position while thinking does not restart background sweeps', async (t) => {
   const w = fixture(t);
   await w.tick(); await w.advance(5000);
   w.adapter.pos.x += 2; await w.tick();
   assert.equal(w.arbiter.info(), null, 'small position jitter does not justify another circle');
-  w.adapter.pos.x += 7; await w.tick();
-  assert.equal(w.arbiter.info()?.skill, 'look_around');
-  assert.equal(w.arbiter.info()?.source, 'filler');
+  w.adapter.pos.x += 30; await w.tick();
+  assert.equal(w.arbiter.info(), null, 'distance alone is not an information gap');
 });
 
 test('an autonomous open intent prefetches without a project and activates its reply only after the current action', async (t) => {

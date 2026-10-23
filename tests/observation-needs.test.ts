@@ -59,13 +59,12 @@ test('unfamiliar empty surroundings get one useful sweep with no periodic retry 
   assert.equal(w.executive.inFlight, true);
 });
 
-test('eight blocks of displacement refreshes the view, while motion below the boundary stays quiet', async (t) => {
+test('walking somewhere new does not by itself justify another background circle', async (t) => {
   const w = fixture(t);
   await w.tick(); await w.advance(4000);
-  w.adapter.pos = { x: 7.999, y: 64, z: 0 }; await w.tick();
-  assert.equal(w.sweeps().length, 1);
-  w.adapter.pos.x = 8; await w.tick();
-  assert.equal(w.sweeps().length, 2);
+  assert.equal(w.sweeps().length, 1, 'arriving with no knowledge of the surroundings earns one look');
+  for (const x of [8, 30, 90]) { w.adapter.pos = { x, y: 64, z: 0 }; await w.tick(); await w.advance(4000); }
+  assert.equal(w.sweeps().length, 1, 'vision keeps updating while walking; explore glances on its own');
 });
 
 for (const scope of ['worldId', 'sessionId', 'dim'] as const) {
@@ -126,19 +125,22 @@ test('an ongoing intent remains quiet during the next choice without an informat
   assert.equal(w.sweeps().length, 0);
 });
 
-test('a real missing-resource attempt justifies one sweep despite an ongoing intent and unrelated resources', async (t) => {
+test('a missing resource is searched for once by the gather itself, never by extra background circles', async (t) => {
   const w = fixture(t);
   w.memory.addIntent({ text: '找一块木头', whyNow: '缺少木样', context: [], tradeoffs: [], source: 'model', status: 'active' });
   w.adapter.blocks.push({ name: 'coal_ore', pos: { x: 4, y: 64, z: 0 } });
   await w.tick();
   assert.equal(w.sweeps().length, 0);
+  const look = t.mock.method(w.adapter, 'look');
   w.requests[0].resolve(plan([{ skill: 'gather', args: { block: 'log', count: 1 } }]));
-  await flush(); await w.tick(); await w.tick();
+  await flush(); await w.tick(); await w.advance(5000);
+  assert.ok(look.mock.callCount() >= 4, 'gather turns to look for the missing resource before giving up');
   assert.equal(w.executive.snapshot().lastFailure?.code, 'NOT_FOUND');
   assert.equal(w.requests.at(-1)?.ctx.lastFailure?.skill, 'gather');
-  assert.equal(w.sweeps().length, 1);
+  assert.match(w.requests.at(-1)?.ctx.lastFailure?.summary ?? '', /已转头找过/);
+  assert.equal(w.sweeps().length, 0, 'the search already happened inside gather');
   await w.advance(40_000);
-  assert.equal(w.sweeps().length, 1, 'the same information gap cannot trigger repeated circles at one location');
+  assert.equal(w.sweeps().length, 0, 'the same information gap cannot trigger repeated circles at one location');
 });
 
 test('the model may explicitly request a useful look even when background observation is unnecessary', async (t) => {
