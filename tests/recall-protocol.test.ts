@@ -19,7 +19,7 @@ test('read-only recall can search then read the returned ID, counts every model 
   const planner = new Planner(cfg, { name: 'real-protocol-fixture', async complete(messages) {
     if (modelCalls === 2) assert.match(messages.at(-1)!.content, /old-river/);
     return { latencyMs: 1, text: JSON.stringify(outputs[modelCalls++]), usage: { prompt_tokens: 1, completion_tokens: 1 } };
-  } }, adapter, memory, bus, null, { async recall(_context, query) {
+  } }, adapter, memory, bus, null, null, { async recall(_context, query) {
     memoryCalls++;
     return { source: 'local', query: query ?? '', memories: query ? [{ id: 'old-river', text: '以前河边涉水受困，仍想看看景色', source: 'historical event' }] : [] };
   } });
@@ -38,7 +38,7 @@ test('optional visual messages use standard image_url parts without changing tex
     bodies.push(JSON.parse(String(options.body)));
     return new Response(JSON.stringify({ choices: [{ message: { content: '{}' }, finish_reason: 'stop' }] }), { status: 200 });
   });
-  const provider = new OpenAICompatibleProvider({ ...config.llm, apiKey: '', fakeDelayMs: 0 });
+  const provider = new OpenAICompatibleProvider({ ...config.llm, apiKey: '', stream: false, fakeDelayMs: 0 });
   await provider.complete([{ role: 'user', content: '比较实际轮廓', images: [{ url: 'data:image/png;base64,eA==', detail: 'low' }] }], new AbortController().signal);
   assert.deepEqual(bodies[0].messages[0].content, [{ type: 'text', text: '比较实际轮廓' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,eA==', detail: 'low' } }]);
   await provider.complete([{ role: 'user', content: '普通观察' }], new AbortController().signal);

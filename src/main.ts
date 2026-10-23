@@ -17,6 +17,7 @@ import { SKILLS } from './skills/index.ts';
 import { travelStore } from './travel/store.ts';
 import { ActionChat } from './observer/action-chat.ts';
 import { startDashboard } from './observer/dashboard.ts';
+import { LlmTrace } from './planner/llm-trace.ts';
 import { Metrics } from './observer/metrics.ts';
 import { Spectator } from './observer/spectator.ts';
 import { Perception } from './perception/perception.ts';
@@ -25,6 +26,7 @@ import { MockProvider, OpenAICompatibleProvider, type LlmProvider } from './plan
 import { ruleProposal } from './planner/plan.ts';
 import { Planner } from './planner/planner.ts';
 import { SkillLibrary } from './skills/library.ts';
+import { habitName, learnCandidates, signatureOf } from './brain/habits.ts';
 import { ObserverFeed, createObserverHandler, installMineflayerObserver, type MineflayerBotLike, type MineflayerObserver } from 'curio-observer';
 
 const bus = new EventBus();
@@ -51,7 +53,8 @@ if (config.llm.provider === 'openai') {
 } else {
   provider = new MockProvider(config.llm.fakeDelayMs, (hint: any) => ruleProposal(hint.percept, memory, hint.reason === 'prefetch' ? hint.current : null));
 }
-const planner = new Planner(config, provider, adapter, memory, bus, new JsonlWriter(path.join(config.dataDir, 'logs'), 'llm'), episodic);
+const llmTrace = new LlmTrace();
+const planner = new Planner(config, provider, adapter, memory, bus, new JsonlWriter(path.join(config.dataDir, 'logs'), 'llm'), llmTrace, episodic);
 const library = new SkillLibrary(path.join(config.dataDir, 'skill-library.json'), adapter, memory, bus);
 const methods = new MethodLibrary(path.join(config.dataDir, 'method-library.json'), adapter, memory, bus,
   { trialWorldIds: config.learning.testWorldIds });
@@ -63,7 +66,18 @@ const executive = new Executive({
     const r = planner.autonomous ? methods.propose(raw, { intentId: memory.currentIntent()?.id, projectId: memory.activeProject()?.id }) : library.learn(raw);
     if (!r.ok) bus.publish('skill_rejected', 'P1', `没有采纳提议的新技能：${r.error}`);
   },
+  // 习惯化：同一套步骤成功 3 次以上，自动学成技能（不必等 LLM 提议）
+  onGoalEnd: (status) => {
+    if (planner.autonomous) return; // autonomous candidates require measured trial evidence
+    if (status !== 'succeeded') return;
+    const c = learnCandidates(memory, knownSigs()).find((x) => x.times >= 3);
+    if (!c) return;
+    const r = library.learn({ name: habitName(c), description: `习惯：${c.goal}`, steps: c.steps });
+    if (r.ok) bus.publish('habit', 'P2', `「${c.signature}」做了 ${c.times} 次，养成习惯 ${r.name}`);
+  },
 });
+const knownSigs = () => new Set(library.list().map((d) => signatureOf(d.steps)));
+perception.knownSkillSigs = knownSigs;
 const reflex = new Reflex(adapter, arbiter, bus, vision);
 const spectator = new Spectator(config, adapter, bus);
 const metrics = new Metrics(adapter, arbiter, executive, planner, reflex, bus);
@@ -86,6 +100,8 @@ function attachObserver() {
 bus.on('event', (ev: { type: string }) => {
   if (feed && ev.type === 'goal' && executive.plan) feed.thought(executive.plan.goal, executive.plan.thought);
 });
+if (memory.migrated) bus.publish('memory', 'P1', `清理了 ${memory.migrated} 个旧版本留下的地标（当时的矿物位置是穿墙搜到的，不算亲眼所见）`);
+
 
 // ------------------------------------------------------------ 游戏事件
 let lastHurt = 0;
@@ -227,7 +243,7 @@ startDashboard(config.dashboard.host, config.dashboard.port, bus, {
   resume: () => executive.resume(),
   replan: () => executive.replan(),
   suggest: (t) => executive.suggest(t),
-}, feed ? [createObserverHandler(feed)] : []);
+}, feed ? [createObserverHandler(feed)] : [], { llmTrace });
 
 let shuttingDown = false;
 function shutdown() {

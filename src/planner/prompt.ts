@@ -213,7 +213,7 @@ export function buildMessages(persona: string, ctx: PlanContext, memory: WorldMe
   }
   const p = ctx.percept;
   const compact: PlanContext = { ...ctx, percept: { ...p, inventory: p.inventory.slice(0, 16),
-    curiosities: p.curiosities.slice(0, 4), drives: p.drives.slice(0, 8),
+    curiosities: p.curiosities.slice(0, 4), drives: p.drives.slice(0, 8), learn_candidates: p.learn_candidates.slice(0, 4),
     nearby: { ...p.nearby, resources: p.nearby.resources.slice(0, 10) }, vision: p.vision ? { ...p.vision,
       visible_resources: p.vision.visible_resources.slice(0, 10), remembered_resources: p.vision.remembered_resources.slice(0, 10),
       seen_entities: p.vision.seen_entities.slice(0, 8), heard: p.vision.heard.slice(0, 8) } : null } };

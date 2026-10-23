@@ -65,7 +65,7 @@ export const goTo: Skill<{ target: string }> = {
   name: 'goto',
   description: '前往地标（base、death=上次死亡地点、地标 id 或名称）或坐标',
   argsDoc: '{"target": "base | death | <地标id或名称> | x,y,z"}',
-  timeoutMs: 120000,
+  timeoutMs: 600000,
   movement: true,
   validate(raw) {
     const t = String(obj(raw).target ?? '').trim();
@@ -95,6 +95,15 @@ export const goTo: Skill<{ target: string }> = {
     const startDist = dist3(s.pos, pos);
     const prog = setInterval(() => ctx.progress(1 - Math.min(1, dist3(adapter.state().pos, pos!) / Math.max(1, startDist))), 1000);
     try {
+      // 远距离（远征回家）：分段朝目标走，每段 64 格，避免寻路一次算太远
+      for (let hops = 0; hops < 20; hops++) {
+        if (adapter.state().dim !== s.dim || adapter.state().worldId !== s.worldId) return fail('WRONG_DIMENSION', '途中世界或维度已改变，需要重新规划');
+        const cur = adapter.state().pos;
+        const dxz = Math.hypot(pos.x - cur.x, pos.z - cur.z);
+        if (dxz <= 96) break;
+        const k = 64 / dxz;
+        await adapter.moveTo({ kind: 'xz', x: cur.x + (pos.x - cur.x) * k, z: cur.z + (pos.z - cur.z) * k, range: 6 }, { signal, timeoutMs: 60000 });
+      }
       if (adapter.state().dim !== s.dim || adapter.state().worldId !== s.worldId) return fail('WRONG_DIMENSION', '途中世界或维度已改变，需要重新规划');
       await adapter.moveTo({ kind: 'near', pos, range: 2 }, { signal, timeoutMs: Math.max(5000, ctx.deadline - Date.now()) });
       if (adapter.state().dim !== s.dim || adapter.state().worldId !== s.worldId) return fail('WRONG_DIMENSION', '途中世界或维度已改变，需要重新规划');

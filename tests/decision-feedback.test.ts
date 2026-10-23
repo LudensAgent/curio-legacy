@@ -16,8 +16,9 @@ const percept = (over: Partial<Percept> = {}): Percept => ({
   self: { pos: [0, 64, 0], dim: 'overworld', hp: 20, food: 20, biome: 'plains', inWater: false, inLava: false, held: null },
   inventory: [], emptySlots: 36, nearby: { hostile: [], passive: [], players: [], resources: [] },
   vision: { facing: 'N', fov: 100, range: 64, view: 'grass 60%', openness: { left: 64, center: 64, right: 64 }, visible_resources: [], remembered_resources: [], seen_entities: [], heard: [], nearest_land: null, last_look_around_s: 0 },
-  death_recovery: null, curiosities: [], objective: null, drives: [], stock: null, light: null, storage: null, farms: [],
-  learn_candidates: [], reflection_due: false, efficiency: [], exploration: { visitedChunks: 1, noveltyByDir: {}, base: null }, ...over,
+  death_recovery: null, curiosities: [], objective: null, drives: [], stock: null, storage: null,
+  ...{ light: null, farms: [], learn_candidates: [], reflection_due: false },
+  efficiency: [], exploration: { visitedChunks: 1, noveltyByDir: {}, base: null }, ...over,
 });
 const plan = (id = 'p1', steps: Plan['steps'] = [{ skill: 'look_around', args: { seconds: 4 } }]): Plan => ({
   id, source: 'llm', thought: '观察自己感兴趣的环境', goal: '比较附近的环境', goalType: 'investigate', steps,

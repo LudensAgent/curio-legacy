@@ -162,6 +162,7 @@ test('End gateway records actual same-session displacement and only verifies ret
   adapter.dim = 'the_end'; adapter.inv.set('ender_pearl', 2);
   const sourcePos = { x: 3, y: 64, z: 0 }, outerPos = { x: 1011, y: 74, z: -202 };
   adapter.blocks.push({ name: 'end_gateway', pos: sourcePos }, { name: 'end_gateway', pos: outerPos });
+  for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) adapter.blocks.push({ name: 'end_stone', pos: { x: outerPos.x + dx, y: outerPos.y - 1, z: outerPos.z + dz } });
   const source = travelStore(memory).observe(adapter.state(), sourcePos, 'end_gateway');
   adapter.useItem = async (item) => {
     adapter.actions.push(`use:${item}`);

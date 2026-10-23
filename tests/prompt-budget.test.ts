@@ -127,7 +127,7 @@ test('planner recalls on demand and retries within 24000, while the next request
     const outputs = [{ kind: 'recall', query: '上次取样遇到的阻碍' }, { goal: '无效技能输出', steps: [{ skill: 'not_registered', args: {} }], thought: historicalDetail.repeat(60) },
       { goal: '重新观察取样位置', steps: [{ skill: 'look_around', args: { seconds: 2 } }], decision: { kind: 'change_method', reason: '三次没有增量，先观察水流与路线再继续取样' } }];
     return { latencyMs: 1, text: JSON.stringify(outputs[Math.min(calls++, 2)]) };
-  } }, fixture.adapter, fixture.memory, fixture.bus, null, { async recall(_ctx, query) {
+  } }, fixture.adapter, fixture.memory, fixture.bus, null, null, { async recall(_ctx, query) {
     memoryCalls++;
     return query ? { source: 'local', query, memories: [latestMemory] } : fixture.ctx.memoryContext!;
   } });
@@ -191,7 +191,7 @@ test('OpenAI-compatible requests transmit the full 16384 completion allowance', 
     body = JSON.parse(String(options.body));
     return new Response(JSON.stringify({ choices: [{ message: { content: '{}' }, finish_reason: 'stop' }] }), { status: 200 });
   });
-  const provider = new OpenAICompatibleProvider({ ...config.llm, apiKey: '', fakeDelayMs: 0, maxTokens: 16384, timeoutMs: 120000 });
+  const provider = new OpenAICompatibleProvider({ ...config.llm, apiKey: '', stream: false, fakeDelayMs: 0, maxTokens: 16384, timeoutMs: 120000 });
   await provider.complete([{ role: 'user', content: 'current observation only' }], new AbortController().signal);
   assert.equal(body?.max_tokens, 16384);
   assert.deepEqual(body?.messages, [{ role: 'user', content: 'current observation only' }]);

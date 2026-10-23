@@ -62,10 +62,10 @@ const ORES = ['coal', 'iron', 'copper', 'gold', 'redstone', 'lapis', 'diamond', 
 /** 值得记住位置的方块（资源/结构/危险） */
 export const NOTABLE = new Set([
   ...LOGS, ...ORES, 'crafting_table', 'chest', 'furnace', 'lava', 'spawner', 'bell', 'hay_block', 'sugar_cane',
-  'pumpkin', 'melon', 'obsidian', 'clay', 'sweet_berry_bush', 'nether_portal', 'end_portal', 'end_gateway', 'end_portal_frame', 'stone_bricks', 'mossy_stone_bricks', 'cracked_stone_bricks', 'bookshelf',
+  'pumpkin', 'melon', 'obsidian', 'clay', 'sweet_berry_bush', 'nether_portal', 'end_portal', 'end_gateway', 'end_portal_frame', 'stone_bricks', 'mossy_stone_bricks', 'cracked_stone_bricks', 'bookshelf', 'iron_bars',
 ]);
 /** 采集目标常用的地表方块：也记住，但每种限量 */
-export const GROUND = new Set(['stone', 'cobblestone', 'deepslate', 'andesite', 'granite', 'diorite', 'dirt', 'grass_block', 'sand', 'gravel', 'netherrack', 'blackstone', 'basalt', 'soul_sand', 'soul_soil', 'end_stone', 'snow_block', 'ice', 'packed_ice', 'blue_ice']);
+export const GROUND = new Set(['stone', 'cobblestone', 'deepslate', 'andesite', 'granite', 'diorite', 'dirt', 'grass_block', 'sand', 'gravel', 'short_grass', 'tall_grass', 'water', 'netherrack', 'blackstone', 'basalt', 'soul_sand', 'soul_soil', 'end_stone', 'snow_block', 'ice', 'packed_ice', 'blue_ice']);
 
 export interface SeenEntity {
   id: number;
@@ -166,6 +166,27 @@ function sectionExit(ox: number, oy: number, oz: number, dx: number, dy: number,
 const keyOf = (x: number, y: number, z: number) => `${x},${y},${z}`;
 export const RESOURCE_MEMORY_TTL_MS = 15 * 60_000;
 
+/** Nearest opaque shape hit, rather than the boundary of a thin block's voxel. */
+function shapeHitDistance(shapes: NonNullable<Optics['shapes']>, eye: Eye, dx: number, dy: number, dz: number,
+  x: number, y: number, z: number, max: number): number | null {
+  let nearest = Infinity;
+  for (const box of shapes) {
+    let near = 0, far = max;
+    const origin = [eye.x - x, eye.y - y, eye.z - z], direction = [dx, dy, dz];
+    for (let axis = 0; axis < 3; axis++) {
+      if (Math.abs(direction[axis]) < 1e-10) {
+        if (origin[axis] < box[axis] || origin[axis] > box[axis + 3]) { far = -1; break; }
+      } else {
+        const a = (box[axis] - origin[axis]) / direction[axis], b = (box[axis + 3] - origin[axis]) / direction[axis];
+        near = Math.max(near, Math.min(a, b)); far = Math.min(far, Math.max(a, b));
+        if (far < near) break;
+      }
+    }
+    if (far >= near && near < nearest) nearest = near;
+  }
+  return Number.isFinite(nearest) ? nearest : null;
+}
+
 export class Vision {
   frame: VisionFrame | null = null;
   seen: SeenEntity[] = [];
@@ -254,7 +275,10 @@ export class Vision {
       let l = lightCache.get(k);
       if (l === undefined) {
         const r = this.adapter.lightAt(x, y, z);
-        l = r ? Math.max(r.block, r.sky - darkness) : 15;
+        // The End uses a brightened client lightmap even with zero sky/block
+        // light (1.20.1 DimensionEffects.End). This floor belongs only to
+        // visibility; raw light and mob-spawn rules remain unchanged.
+        l = r ? Math.max(r.block, r.sky - darkness, s.dim === 'the_end' ? 4 : 0) : 15;
         lightCache.set(k, l);
       }
       return l;
@@ -303,13 +327,18 @@ export class Vision {
         const o = opt(x, y, z);
         if (!o) { if (!hitCat) { hitCat = 'unknown'; hitDist = d; } return true; }
         if (o.kind === 'clear') {
-          if (NOTABLE.has(o.name)) note(o.name, x, y, z, d); // 甘蔗等无碰撞箱的植物
+          if (NOTABLE.has(o.name) || GROUND.has(o.name)) note(o.name, x, y, z, d); // 甘蔗、草等无碰撞箱的植物
           lx = x; ly = y; lz = z;
           return false;
         }
+        if (o.kind === 'solid' && o.shapes) {
+          const hit = shapeHitDistance(o.shapes, eye, dx, dy, dz, x, y, z, range);
+          if (hit === null) { lx = x; ly = y; lz = z; return false; }
+          d = hit;
+        }
         if (d > seeRange(light(lx, ly, lz))) { if (!hitCat) { hitCat = 'dark'; hitDist = d; } return true; }
         if (o.kind === 'water') {
-          if (!hitCat) { hitCat = 'water'; hitDist = d; }
+          if (!hitCat) { hitCat = 'water'; hitDist = d; if (o.name === 'water') note('water', x, y, z, d); }
           return ++water > 6;
         }
         if (o.kind === 'foliage') {
@@ -413,7 +442,7 @@ export class Vision {
     let ok = true, leaves = 0, water = 0;
     raycast(eye.x, eye.y, eye.z, dx, dy, dz, Math.max(0, max), (x, y, z) => {
       const o = opt(x, y, z);
-      if (!o || o.kind === 'solid') { ok = false; return true; }
+      if (!o || o.kind === 'solid' && (!o.shapes || shapeHitDistance(o.shapes, eye, dx, dy, dz, x, y, z, max) !== null)) { ok = false; return true; }
       if (o.kind === 'foliage' && ++leaves >= 2) { ok = false; return true; }
       if (o.kind === 'water' && ++water > 6) { ok = false; return true; }
       return false;
@@ -456,7 +485,7 @@ export class Vision {
     if (!this.syncScope().observationReady) return [];
     return [...this.seen, ...this.heard]
       .filter((e) => e.dist <= radius)
-      .map((e) => ({ id: e.id, name: e.name, kind: e.kind, pos: e.pos, dist: e.dist, height: e.height, velocity: e.velocity, phase: e.phase, hp: e.hp }))
+      .map((e) => ({ id: e.id, perception: e.how, name: e.name, kind: e.kind, pos: e.pos, dist: e.dist, height: e.height, velocity: e.velocity, phase: e.phase, hp: e.hp }))
       .sort((a, b) => a.dist - b.dist);
   }
 

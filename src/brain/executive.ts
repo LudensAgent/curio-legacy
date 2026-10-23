@@ -444,8 +444,8 @@ export class Executive {
       return;
     }
     if (o.result.status === 'cancelled' && o.preemptedBy === 'reflex') {
-      if (!this.d.planner.autonomous && p.retries < 2) {
-        p.index = Math.max(0, p.index - 1); p.retries++;
+      if (!this.d.planner.autonomous && (o.gentle || p.retries < 2)) {
+        p.index = Math.max(0, p.index - 1); if (!o.gentle) p.retries++;
         this.d.bus.publish('resume_step', 'P3', `反射结束后重新检查步骤：${o.task.skill}`);
       } else this.discardPlan('被生存反射打断，重新决定剩余尝试');
       this.suspend('reflex');

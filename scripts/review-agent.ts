@@ -16,7 +16,8 @@ import { ResourceKnowledge } from '../src/methods/knowledge.ts';
 import { createMethodSkills } from '../src/methods/skills.ts';
 import { Perception } from '../src/perception/perception.ts';
 import { Vision } from '../src/perception/vision.ts';
-import { OpenAICompatibleProvider, type LlmProvider } from '../src/planner/llm.ts';
+import { OpenAICompatibleProvider } from '../src/planner/llm.ts';
+import { LlmTrace } from '../src/planner/llm-trace.ts';
 import { Planner } from '../src/planner/planner.ts';
 import { SKILLS } from '../src/skills/index.ts';
 import { sleep } from '../src/util.ts';
@@ -42,14 +43,8 @@ const vision = new Vision(adapter, cfg.vision);
 const perception = new Perception(adapter, memory, bus, vision);
 const arbiter = new Arbiter(adapter, memory, bus, vision);
 const recall = new EpisodicMemory(cfg.memory, memory, bus, () => adapter.state(), directory);
-const modelTrace: unknown[] = [];
-const underlyingProvider = new OpenAICompatibleProvider(cfg.llm);
-const tracedProvider: LlmProvider = { name: underlyingProvider.name, async complete(messages, signal, hint) {
-  const input = { ts: Date.now(), messages: structuredClone(messages) };
-  try { const completion = await underlyingProvider.complete(messages, signal); modelTrace.push({ ...input, completion }); return completion; }
-  catch (error) { modelTrace.push({ ...input, error: String(error) }); throw error; }
-} };
-const planner = new Planner(cfg, tracedProvider, adapter, memory, bus, new JsonlWriter(directory, 'llm'), recall);
+const trace = new LlmTrace();
+const planner = new Planner(cfg, new OpenAICompatibleProvider(cfg.llm), adapter, memory, bus, new JsonlWriter(directory, 'llm'), trace, recall);
 const methods = new MethodLibrary(path.join(directory, 'method-library.json'), adapter, memory, bus);
 for (const skill of createMethodSkills(methods, new ResourceKnowledge(cfg.mc.version))) SKILLS[skill.name] = skill;
 const executive = new Executive({ adapter, memory, bus, perception, arbiter, planner,
@@ -73,7 +68,7 @@ try {
 } finally {
   executive.pause(); actionChat.stop(); executive.stop(); reflex.stop(); perception.stop(); recall.stop(); methods.dispose();
   memory.flush();
-  fs.writeFileSync(path.join(directory, 'model-trace.json'), JSON.stringify(modelTrace, null, 2));
+  fs.writeFileSync(path.join(directory, 'model-trace.json'), JSON.stringify(trace.recent(), null, 2));
   fs.writeFileSync(path.join(directory, 'review.json'), JSON.stringify({ worldId: cfg.memory.worldId, server: `${cfg.mc.host}:${port}`,
     realServer: true, realLlm: true, specifiedGoal: null, preference: preference ?? null,
     intents: memory.intents(), decisions: memory.decisions(), projects: memory.projects(), goals: memory.recentGoals(100),

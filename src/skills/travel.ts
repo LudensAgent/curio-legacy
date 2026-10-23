@@ -188,6 +188,7 @@ export const useEndGateway: Skill<{ portalId?: string }> = {
   validate(raw) { const id = obj(raw).portalId; return id === undefined || typeof id === 'string' ? { ok: true, args: { portalId: id } } : { ok: false, error: 'portalId 必须为字符串' }; },
   async run(ctx, args) {
     const { adapter, signal, senses } = ctx;
+    throwIfAborted(signal);
     const initial = adapter.state();
     if (initial.dim !== 'the_end') return fail('WRONG_DIMENSION', '末地折跃门只在末地使用');
     if (!adapter.useItem) return fail('ERROR', '适配器没有物品使用能力');
@@ -199,18 +200,42 @@ export const useEndGateway: Skill<{ portalId?: string }> = {
     const endpoint = known ?? (seen ? store.observe(initial, seen.pos, 'end_gateway') : undefined);
     if (!endpoint || endpoint.kind !== 'end_gateway' || !endpoint.portalObserved || endpoint.dim !== initial.dim) return fail('NOT_FOUND', '没有当前维度已观察到的折跃门');
     try {
-      await adapter.moveTo({ kind: 'near', pos: endpoint.pos, range: 3 }, { signal, timeoutMs: 20000 });
       if (adapter.blockAt(endpoint.pos) !== 'end_gateway') return fail('NOT_FOUND', '折跃门已经改变或尚未加载');
-      const from = adapter.state();
-      const dx = endpoint.pos.x + 0.5 - from.pos.x, dz = endpoint.pos.z + 0.5 - from.pos.z, dy = endpoint.pos.y + 0.5 - from.pos.y - 1.62;
-      await adapter.look(Math.atan2(-dx, -dz), Math.atan2(dy, Math.hypot(dx, dz)));
-      const result = await adapter.useItem('ender_pearl', signal);
-      if (!result.ok) return fail('ERROR', `珍珠投掷失败：${result.reason}`);
+      const sameSession = (state: ReturnType<typeof adapter.state>) => state.alive && state.connected && state.worldId === initial.worldId && state.dim === initial.dim && state.sessionId === initial.sessionId;
+      const pearlCount = (state: ReturnType<typeof adapter.state>) => state.inventory.find((item) => item.name === 'ender_pearl')?.count ?? 0;
+      const floorY = Math.floor(initial.pos.y);
+      const stands = [{ x: -3, z: 0 }, { x: 3, z: 0 }, { x: 0, z: -3 }, { x: 0, z: 3 }].map((offset) => ({ x: endpoint.pos.x + offset.x + 0.5, y: floorY, z: endpoint.pos.z + offset.z + 0.5 })).filter((stand) => {
+        const foot = { x: Math.floor(stand.x), y: stand.y, z: Math.floor(stand.z) }, support = adapter.blockAt({ ...foot, y: foot.y - 1 });
+        return !!support && (TERRAIN.has(support) || ['end_stone', 'obsidian', 'bedrock', 'cobbled_deepslate'].includes(support) || support.endsWith('_planks')) && AIR.has(adapter.blockAt(foot) ?? '') && AIR.has(adapter.blockAt({ ...foot, y: foot.y + 1 }) ?? '');
+      }).sort((left, right) => dist3(left, initial.pos) - dist3(right, initial.pos));
+      const aim = { x: endpoint.pos.x + 0.5, y: endpoint.pos.y + 0.5, z: endpoint.pos.z + 0.5 };
+      let from: ReturnType<typeof adapter.state> | null = null;
+      let lastAttemptAt = 0;
+      // A body directly beneath the gateway is not a valid launch proof. Keep
+      // a supported side pose instead of letting a range-3 goal move beneath it.
+      for (const stand of stands) {
+        throwIfAborted(signal);
+        if (Date.now() >= ctx.deadline - 50) break;
+        try { await adapter.moveTo({ kind: 'near', pos: stand, range: 0.3 }, { signal, timeoutMs: Math.max(1, Math.min(12000, ctx.deadline - Date.now())), constructionSafe: true }); }
+        catch (error) { if (isAbort(error)) throw error; continue; }
+        const reached = adapter.state();
+        if (!sameSession(reached)) return fail('ERROR', '投掷站位移动中观察会话中断');
+        if (Math.hypot(reached.pos.x - stand.x, reached.pos.z - stand.z) > 0.9 || Math.abs(reached.pos.y - stand.y) > 0.6) continue;
+        const result = await adapter.useItem('ender_pearl', signal, { aim });
+        throwIfAborted(signal);
+        if (!result.ok && result.reason === 'BLOCKED_AIM') continue;
+        if (!result.ok) return fail('ERROR', `珍珠投掷失败：${result.reason}`);
+        from = reached; lastAttemptAt = Date.now(); break;
+      }
+      if (!from) return fail('NOT_FOUND', '没有可达、有支撑且射线畅通的侧方投掷站位');
+      const pearlsBefore = pearlCount(from);
+      let throwAttempts = 1, pearlConsumed = false;
       const deadline = Math.min(ctx.deadline, Date.now() + 10000);
       for (let tick = 0; tick < 50 && Date.now() < deadline; tick++) {
-        await sleep(200, signal);
+        await sleep(Math.max(1, Math.min(200, deadline - Date.now())), signal);
         const to = adapter.state();
-        if (!to.alive || !to.connected || to.worldId !== from.worldId || to.dim !== from.dim || to.sessionId !== from.sessionId) return fail('ERROR', '折跃过程会话中断，不能确认到达');
+        if (!sameSession(to)) return fail('ERROR', '折跃过程会话中断，不能确认到达');
+        if (pearlCount(to) < pearlsBefore) pearlConsumed = true;
         if (to.observationReady && dist3(from.pos, to.pos) >= 48) {
           let returnPos: Vec3Like | null = null;
           for (let dx = -3; dx <= 3 && !returnPos; dx++) for (let dy = -2; dy <= 2 && !returnPos; dy++) for (let dz = -3; dz <= 3 && !returnPos; dz++) {
@@ -220,10 +245,18 @@ export const useEndGateway: Skill<{ portalId?: string }> = {
           const destination = store.observe(to, returnPos ?? to.pos, 'end_gateway', !!returnPos);
           store.recordGateway(endpoint.id, destination.id, from, to);
           ctx.memory.addLandmark('waypoint', `折跃后实际到达 ${destination.id}`, to.dim, to.pos, 3);
-          return ok('已确认末地折跃后的实际位置并记录返程观察', { fromId: endpoint.id, toId: destination.id, from, to, returnPortalObserved: !!returnPos });
+          return ok('已确认末地折跃后的实际位置并记录返程观察', { fromId: endpoint.id, toId: destination.id, from, to, returnPortalObserved: !!returnPos, throwAttempts, pearlConsumed });
+        }
+        // A use packet during vanilla's item cooldown can be ignored. Retry
+        // only an unconsumed use after >1s; a consumed pearl is never replayed.
+        if (!pearlConsumed && throwAttempts < 3 && Date.now() - lastAttemptAt >= 1200 && Date.now() < deadline - 200) {
+          const retry = await adapter.useItem('ender_pearl', signal, { aim });
+          throwIfAborted(signal);
+          if (!retry.ok) return fail('ERROR', `珍珠重试失败：${retry.reason}`);
+          throwAttempts++; lastAttemptAt = Date.now();
         }
       }
-      return fail('TIMEOUT', '没有观察到折跃的真实远距离位移，不能宣称到达外岛');
+      return fail('TIMEOUT', '没有观察到折跃的真实远距离位移，不能宣称到达外岛', { throwAttempts, pearlConsumed, pearlsBefore, pearlsAfter: pearlCount(adapter.state()) });
     } catch (error) { if (isAbort(error)) throw error; return fail(codeFromError(error), `折跃中断：${(error as Error).message}`); }
   },
 };

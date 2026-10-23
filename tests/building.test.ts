@@ -23,11 +23,6 @@ class BuildingWorld extends FakeAdapter {
   placementCount = 0;
   afterPlacement?: () => void;
   constructor() { super(); this.speed = 100000; }
-  override lightAt(x = 0, y = 64, z = 0) {
-    let block = 0;
-    for (const placed of this.blocks) if (placed.name === 'torch') block = Math.max(block, 14 - Math.abs(placed.pos.x - x) - Math.abs(placed.pos.y - y) - Math.abs(placed.pos.z - z));
-    return { block, sky: y > this.groundY ? this.light : 0 };
-  }
   setBlock(pos: Vec3Like, name: string) {
     this.blocks = this.blocks.filter((b) => b.pos.x !== pos.x || b.pos.y !== pos.y || b.pos.z !== pos.z);
     if (name === 'air') this.removed.add(`${pos.x},${pos.y},${pos.z}`);

@@ -41,8 +41,6 @@ test('pause cancels the active task and gates reflex and all new task sources un
 test('cancelled tasks cannot place, sleep, smelt, transfer, till, plant or stop a newer task', async () => {
   const { adapter, arbiter } = setup();
   const methods = ['placeBlockAt', 'placeBlockStateAt', 'sleepInBed', 'smelt', 'useChest', 'till', 'plant', 'stopAll'];
-  // Optional future primitives still use the same cancellation guard contract.
-  for (const name of methods) if (typeof (adapter as any)[name] !== 'function') (adapter as any)[name] = async () => { throw new Error('A cancelled task must not reach the primitive'); };
   SKILLS.test_late_facilities = {
     name: 'test_late_facilities', description: '', argsDoc: '{}', timeoutMs: 1000, movement: false,
     validate: () => ({ ok: true, args: {} }),

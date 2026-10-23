@@ -34,6 +34,8 @@ export interface TaskOutcome {
   result: SkillResult;
   durationMs: number;
   preemptedBy?: TaskSource;
+  /** 被“顺手”的短动作（如插火把）打断：恢复时不计入重试次数 */
+  gentle?: boolean;
 }
 
 /** Emitted synchronously after control transfers, before either skill can finish. */
@@ -47,6 +49,7 @@ interface Running extends TaskInfo {
   controller: AbortController;
   cancelCode?: FailureCode;
   preemptedBy?: TaskSource;
+  gentle?: boolean;
 }
 
 /** 会修改游戏世界或角色状态的方法：任务被取消后，旧任务再调用这些方法会被拦截。 */
@@ -87,7 +90,7 @@ export class Arbiter extends EventEmitter {
 
   info(): TaskInfo | null {
     if (!this.current) return null;
-    const { controller, cancelCode, preemptedBy, ...info } = this.current;
+    const { controller, cancelCode, preemptedBy, gentle, ...info } = this.current;
     return info;
   }
 
@@ -177,7 +180,7 @@ export class Arbiter extends EventEmitter {
       return { error: v.error };
     }
     const interrupted = this.info();
-    if (this.current) this.cancel(`被 ${source} 抢占`, undefined, source);
+    if (this.current) this.cancel(`被 ${source} 抢占`, undefined, source, meta.gentle);
 
     const skill = SKILLS[step.skill];
     const controller = new AbortController();
@@ -255,20 +258,21 @@ export class Arbiter extends EventEmitter {
           summary: result.summary,
           source,
         });
-        const { controller: _c, cancelCode: _cc, preemptedBy, ...info } = task;
-        this.emit('done', { task: info, result, durationMs, preemptedBy } satisfies TaskOutcome);
+        const { controller: _c, cancelCode: _cc, preemptedBy, gentle, ...info } = task;
+        this.emit('done', { task: info, result, durationMs, preemptedBy, gentle } satisfies TaskOutcome);
       });
 
-    const { controller: _c, ...info } = task;
+    const { controller: _c, gentle: _g, ...info } = task;
     return info;
   }
 
   /** 取消当前任务并立即释放控制。asFailure 让取消计为失败（例如卡死）。 */
-  cancel(reason: string, asFailure?: FailureCode, preemptedBy?: TaskSource) {
+  cancel(reason: string, asFailure?: FailureCode, preemptedBy?: TaskSource, gentle?: boolean) {
     const t = this.current;
     if (!t) return;
     t.cancelCode = asFailure;
     t.preemptedBy = preemptedBy;
+    t.gentle = gentle;
     this.current = null;
     t.controller.abort(reason);
     this.adapter.stopAll();
