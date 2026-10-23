@@ -414,14 +414,19 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (!ent || ent === b.entity || !ent.position) continue;
       const d = ent.position.distanceTo(me);
       if (d > radius) continue;
-      const name = ent.type === 'player' ? `player:${ent.username ?? '?'}` : String(ent.name ?? 'unknown');
+      let name = ent.type === 'player' ? `player:${ent.username ?? '?'}` : String(ent.name ?? 'unknown');
       if (name === 'experience_orb') continue;
+      // 掉落物：看清是什么、几个（item:raw_rabbit），像玩家看地上的东西一样
+      let count: number | undefined;
+      if (name === 'item') {
+        try { const di = ent.getDroppedItem?.(); if (di?.name) { name = `item:${di.name}`; count = di.count; } } catch { /* ignore */ }
+      }
       const keys: string[] = this.mcData.entitiesByName?.[ent.name]?.metadataKeys ?? [];
       const phase = ent.metadata?.[keys.indexOf('phase')];
       const hp = ent.metadata?.[keys.indexOf('health')];
       out.push({ id: ent.id, name, kind: this.classify(ent), pos: { x: ent.position.x, y: ent.position.y, z: ent.position.z }, dist: d, height: ent.height,
         velocity: ent.velocity ? { x: ent.velocity.x, y: ent.velocity.y, z: ent.velocity.z } : undefined,
-        phase: Number.isInteger(phase) ? phase : undefined, hp: Number.isFinite(hp) ? hp : undefined });
+        phase: Number.isInteger(phase) ? phase : undefined, hp: Number.isFinite(hp) ? hp : undefined, ...(count ? { count } : {}) });
     }
     return out.sort((a, c) => a.dist - c.dist);
   }

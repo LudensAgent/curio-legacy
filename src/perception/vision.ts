@@ -89,6 +89,7 @@ export interface SeenEntity {
   velocity?: Vec3Like;
   phase?: number;
   hp?: number;
+  count?: number;
   dir: string; // 绝对方向 N/NE/...
   rel: string; // 相对方向 正前/右前/...
   how: 'seen' | 'heard';
@@ -424,7 +425,7 @@ export class Vision {
       const ddx = cx - eye.x, ddz = cz - eye.z;
       const ayaw = yawTo(ddx, ddz);
       const relYaw = norm(ayaw - eye.yaw);
-      const base: SeenEntity = { id: e.id, name: e.name, kind: e.kind, pos: e.pos, dist: e.dist, height: e.height, velocity: e.velocity, phase: e.phase, hp: e.hp, dir: dirOfYaw(ayaw), rel: relOf(relYaw), how: 'seen' };
+      const base: SeenEntity = { id: e.id, name: e.name, kind: e.kind, pos: e.pos, dist: e.dist, height: e.height, velocity: e.velocity, phase: e.phase, hp: e.hp, ...(e.count ? { count: e.count } : {}), dir: dirOfYaw(ayaw), rel: relOf(relYaw), how: 'seen' };
       let visible = false;
       let relPitch = 0;
       for (const ty of targets) {
@@ -618,6 +619,19 @@ export class Vision {
       visible_resources: visible,
       remembered_resources: remembered,
       seen_entities: this.seen.filter((e) => e.kind !== 'item').slice(0, 8).map(ent),
+      ...(() => {
+        // 看得见的掉落物（按物品合并）：猎物掉的肉、挖掉的方块、死亡掉落……
+        const drops = new Map<string, { item: string; count: number; dist: number; dir: string }>();
+        for (const e of this.seen) {
+          if (e.kind !== 'item') continue;
+          const item = e.name.replace(/^item:/, '') || 'unknown';
+          const cur = drops.get(item);
+          if (!cur) drops.set(item, { item, count: e.count ?? 1, dist: Math.round(e.dist), dir: e.dir });
+          else { cur.count += e.count ?? 1; if (e.dist < cur.dist) { cur.dist = Math.round(e.dist); cur.dir = e.dir; } }
+        }
+        const list = [...drops.values()].sort((a, b) => a.dist - b.dist).slice(0, 8);
+        return list.length ? { visible_drops: list } : {};
+      })(),
       heard: this.heard.slice(0, 5).map((e) => ({ name: e.name, approx: `${e.rel}约 ${Math.max(2, Math.round(e.dist / 2) * 2)} 格`, dir: e.dir })),
       nearest_land: (() => {
         const l = this.nearestLand(here);

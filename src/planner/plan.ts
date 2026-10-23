@@ -45,6 +45,9 @@ export interface Plan {
   recovering?: { summary: string };
   /** 模型想做却没有对应能力的事（给观察者看：它还缺什么手脚） */
   missingAbility?: string;
+  /** 短期工作记忆：做完这些之后打算做什么；接下来几分钟要记住的事 */
+  then?: string;
+  note?: string;
 }
 
 /** 从模型输出中提取 JSON（容忍 ```json 包裹或前后多余文字）。 */
@@ -112,6 +115,8 @@ export function validatePlan(raw: unknown, adapter: GameAdapter, source: Plan['s
       retries: 0,
       ...(onFail.length ? { onFail } : {}),
       ...(typeof o.missing_ability === 'string' && o.missing_ability.trim() ? { missingAbility: o.missing_ability.trim().slice(0, 200) } : {}),
+      ...(typeof o.then === 'string' && o.then.trim() ? { then: o.then.trim().slice(0, 140) } : {}),
+      ...(typeof o.note === 'string' && o.note.trim() ? { note: o.note.trim().slice(0, 140) } : {}),
     },
   };
 }

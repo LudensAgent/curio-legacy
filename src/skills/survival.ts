@@ -200,33 +200,46 @@ export const hunt: Skill<{ animal?: string; count: number }> = {
 };
 
 // ------------------------------------------------------------------ pickup_items
-export const pickupItems: Skill<{ radius: number }> = {
+export const pickupItems: Skill<{ radius: number; item?: string }> = {
   name: 'pickup_items',
-  description: '捡起附近看得见的掉落物（例如死亡后回到死亡地点时使用）',
-  argsDoc: '{"radius"?: 4-24}',
+  description: '捡起附近看得见的掉落物（可只捡某种物品 item），报告实际进了背包的东西',
+  argsDoc: '{"radius"?: 4-24, "item"?: "<物品名>"}',
   timeoutMs: 60000,
   movement: true,
   validate(raw) {
-    return { ok: true, args: { radius: clampInt(obj(raw).radius, 4, 24, 12) } };
+    const a = obj(raw);
+    const item = typeof a.item === 'string' && a.item.trim() ? a.item.trim().replace(/^minecraft:/, '') : undefined;
+    return { ok: true, args: { radius: clampInt(a.radius, 4, 24, 12), ...(item ? { item } : {}) } };
   },
   async run(ctx, args) {
     const { adapter, senses, signal } = ctx;
     const tried = new Set<number>();
-    let picked = 0;
+    const inv = () => {
+      const m = new Map<string, number>();
+      for (const i of adapter.state().inventory) m.set(i.name, (m.get(i.name) ?? 0) + i.count);
+      return m;
+    };
+    const before = inv();
+    const wanted = (name: string) => !args.item || name.replace(/^item:/, '') === args.item;
+    let visits = 0;
     for (let i = 0; i < 30 && Date.now() < ctx.deadline; i++) {
       senses.refresh();
-      const item = senses.perceivedEntities(args.radius).find((e) => e.kind === 'item' && !tried.has(e.id));
+      const item = senses.perceivedEntities(args.radius).find((e) => e.kind === 'item' && !tried.has(e.id) && wanted(e.name));
       if (!item) break;
       tried.add(item.id);
       try {
         await adapter.moveTo({ kind: 'near', pos: item.pos, range: 1 }, { signal, timeoutMs: 8000 });
-        picked++;
-        ctx.progress(Math.min(1, picked / 10), `已拾取 ${picked} 组`);
+        visits++;
+        ctx.progress(Math.min(1, visits / 10), `去捡 ${item.name.replace(/^item:/, '')}`);
       } catch (e) {
         if (isAbort(e)) throw e;
       }
       await sleep(250, signal);
     }
-    return picked ? ok(`拾取了 ${picked} 组掉落物`) : ok('附近没有看得见的掉落物');
+    // 按背包实际变化报告捡到了什么
+    const after = inv();
+    const gained = [...after].filter(([n, c]) => c > (before.get(n) ?? 0)).map(([n, c]) => `${n}×${c - (before.get(n) ?? 0)}`);
+    if (gained.length) return ok(`捡到了 ${gained.join('、')}`, { gained });
+    return visits ? ok(`走过去了 ${visits} 处掉落物，但背包没有变化（可能被捡走了或够不着）`) : ok(`附近没有看得见的${args.item ? ` ${args.item} ` : ''}掉落物`);
   },
 };

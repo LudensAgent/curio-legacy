@@ -108,8 +108,12 @@ export const gather: Skill<{ block: string; count: number }> = {
           ? ok(`看不到更多 ${args.block}${looked}，采集了 ${dug}/${args.count}${staleNote}`, { searched })
           : fail('NOT_FOUND', `视野和记忆里都没有 ${args.block}${looked}${staleNote}；尚未定位该资源，不代表其他地点也没有`, { searched });
       }
-      const target = hits.find((h) => adapter.canHarvest(h.pos));
-      if (!target) return fail('TOOL_MISSING', `缺少能采集 ${hits[0].name} 的工具`, { block: hits[0].name });
+      // 记忆里的方块可能已经被砍掉/不在加载范围：这种目标跳过，不能误报成“缺工具”
+      const present = hits.filter((h) => adapter.blockAt(h.pos) === h.name);
+      for (const h of hits) if (!present.includes(h)) skip.add(key(h.pos));
+      if (!present.length) continue;
+      const target = present.find((h) => adapter.canHarvest(h.pos));
+      if (!target) return fail('TOOL_MISSING', `缺少能采集 ${present[0].name} 的工具`, { block: present[0].name });
 
       const invTotal = () => adapter.state().inventory.reduce((a, i) => a + i.count, 0);
       const before = invTotal();

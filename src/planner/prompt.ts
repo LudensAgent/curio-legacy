@@ -28,6 +28,10 @@ export interface PlanContext {
   pendingSteps?: { skill: string; args?: unknown }[];
   /** light：推进当前意图的小决策，只发精简上下文；full：完整上下文 */
   tier?: 'light' | 'full';
+  /** 短期工作记忆：最近几次决定与结果、给自己的笔记、反复失败的做法 */
+  thread?: unknown[];
+  notes?: string[];
+  repeated?: unknown[];
 }
 
 /** 小上下文模型的预算不够时，按顺序把以这些前缀开头的可选说明行换成一句话版本（完整版给大上下文模型） */
@@ -94,7 +98,7 @@ project={title,successCondition,milestones:[{title,condition}]}，同一时间�
 技能清单不是玩法清单：use_item、interact、ride、dismount 就是玩家的右键和方向键。常规做法走不通（被挡住、够不着、太慢、太危险）时，想想真正的玩家会用什么物品、方块或载具解决，用它们组合出来；程序不替你想。好用的组合可用 learn_skill 记下。确实做不到时在 missing_ability 写一句你想做什么。不要把缺材料自动改写为无关囤货。learn_skill 仅为待试验组合，注册名称不等于已学会。lesson 是有来源的推断，memory_note 不得伪造事实。
 learn_skill 的完整格式为 {name,description,parameters:{amount:{type:"integer",default:4,min:1,max:16}},program:{type:"sequence",steps:[{type:"call",skill:"gather",args:{block:"stone",count:{param:"amount"}}}]},postcondition:{type:"inventory_min",item:"cobblestone",count:{param:"amount"}}}。program 还可用 {type:"if",condition,then,else} 或 {type:"repeat",times,body}，循环有界。候选 trial 可以在游玩中试用（配置了隔离试验世界时只在那里试），在两个不同情境里经真实状态验收后才晋升 method；程序不替你选择要学什么。
 
-视觉仅约 ${fov}° 面前视锥，遮挡和光照有效。visible_resources 是亲眼所见，remembered_resources 是可能过期的旧观察；vision.recent_sightings 是刚走出视野的生物（hunt 会走到最后看见它的地方）；未去过的位置未知。附近没看见树只是否定本地观察范围内的木料线索，不能推断整个世界无树。gather 只能采已知资源；若下一步依赖尚未得到的观察，先获得证据再决定，不能预设一定发现资源。观察边走边发生：explore 沿途张望，带 until 一看见就停；gather/hunt 找不到会自己转头找。look_around 只用于专门找某样东西（for）或看某个方向（direction），不要当例行动作或接在 explore 后；原地且事实未变时再次扫视通常没有新信息。行动中感知持续更新，已有信息足够时直接做出选择。不要用管理指令或种子定位资源。sleep 只在主世界安全。不同维度的位置不能直接 goto。
+视觉仅约 ${fov}° 面前视锥，遮挡和光照有效。visible_resources 是亲眼所见，remembered_resources 是可能过期的旧观察；vision.recent_sightings 是刚走出视野的生物（hunt 会走到最后看见它的地方），vision.visible_drops 是看得见的掉落物（可用 pickup_items 去捡）；未去过的位置未知。附近没看见树只是否定本地观察范围内的木料线索，不能推断整个世界无树。gather 只能采已知资源；若下一步依赖尚未得到的观察，先获得证据再决定，不能预设一定发现资源。观察边走边发生：explore 沿途张望，带 until 一看见就停；gather/hunt 找不到会自己转头找。look_around 只用于专门找某样东西（for）或看某个方向（direction），不要当例行动作或接在 explore 后；原地且事实未变时再次扫视通常没有新信息。行动中感知持续更新，已有信息足够时直接做出选择。不要用管理指令或种子定位资源。sleep 只在主世界安全。不同维度的位置不能直接 goto。
 若附带建筑图片，它们是作品实地固定机位的射线语义色可视化，只有观测到的轮廓/遮挡/大类色彩，不能由此声称看到了原版材质细节。请结合自己的偏好、版本差异、功能缺陷和使用反馈成对比较；外观判断属于主观评价，不替代结构验收，不用自评分上涨证明进化。
 
 配方是玩出来的记忆（拿到过材料才知道）。需要时先查（只读，每次决策最多 3 次）：{"kind":"recipes","category":"<tools|weapons|armor|transport|food|light|workstations|storage|building|redstone|materials|misc>"} 看这类你知道哪些、材料够不够；{"kind":"recipes","item":"物品名"} 看还缺什么、从哪来。
@@ -110,6 +114,7 @@ thought 会显示在游戏聊天中，请写成简短的第一人称角色独白
 {"kind":"plan","thought":"东边的地势看起来开阔，我有点好奇那边是什么样。","decision":{"kind":"begin","reason":"当前位置的线索已经看过，东侧尚未去过且眼前路线开阔","intent":{"text":"看看东侧的地形有什么不同","whyNow":"现有观察足以选择一段新路线","context":["当前地形观察","东侧未访问记录"],"tradeoffs":["暂缓整理收藏"]}},"goal":"向东走一段比较地形","goal_type":"explore","steps":[{"skill":"explore","args":{"direction":"E","distance":48}}]}
 decision.intent.context 与 tradeoffs 都是字符串数组。只有 begin/revise 可写 decision.intent，只有新项目或 revise 可写 decision.project（不得在 continue 时重新定义已有工程）。preferences、memory_note、lesson、learn_skill 都是可选字段；learn_skill 采用上文的程序格式。聊天只展示 thought，不另用 say 播报。
 可选 on_fail（1–2 步）：某步失败时，在你重新考虑的同时先做的事；新决定一到就替换。
+recent_thread/my_notes 是你自己刚才的思路和笔记，接着它走，别每次从头想；可选 note 记下接下来几分钟要记住的事，then 写做完之后的打算。
 steps 保持 1–6 步；defer/abandon/complete 可以 steps:[]，表示选择等待而非填充无关动作。不要每轮换目标，也不必每轮说话。可用 begin + 已有 intentId 恢复 continuity 中列出的暂缓兴趣及其原项目；新记录的 ID、项目修订、里程碑和请求代次由程序分配，不能伪造或覆盖。`;
 }
 
@@ -159,7 +164,10 @@ export function userPrompt(ctx: PlanContext, memory: WorldMemory, recalled?: unk
     recalled_memories: JSON.parse(boundedJson(recall, memoryBytes)),
     recent_attempts: memory.recentGoals(4).map((g) => ({ ts: g.ts, duration_s: g.durationSec, goal: g.goal,
       status: g.status, summary: g.summary, steps: g.plan ?? g.steps ?? [] })),
+    ...(ctx.notes?.length ? { my_notes: ctx.notes } : {}),
+    ...(ctx.thread?.length ? { recent_thread: ctx.thread } : {}),
     decision_feedback: ctx.decisionFeedback ?? null,
+    ...(ctx.repeated?.length ? { repeated_failures: ctx.repeated } : {}),
     user_suggestion: ctx.userSuggestion,
     // Results are chronological; reserve room for the newest real outcome even
     // when historical recall has been removed to fit a small model context.
@@ -311,12 +319,14 @@ export function lightSystemPrompt(persona: string): string {
 你在玩 Minecraft，正在推进一件已经决定要做的事。这是一个“小决策”：手上的动作还在进行，你只需决定接下来几步，像玩家顺手接着干那样。
 - 只安排接下来 1–3 步（最多 6），连贯推进当前意图（continuity.intent）；做的同时会再问你下一步，所以不必一次想得很远。current_task 和 pending_steps 会先做完，不要重复它们。
 - last_failure 是刚才没成功的那一步：换个做法接着来；若这说明整件事该换方向，就请求完整上下文。
+- recent_thread 是你刚才几次的决定、想法和结果，my_notes 是你写给自己的笔记：接着自己的思路走，沿用已经得出的结论和方向（比如目的地），除非新事实推翻它；repeated_failures 里反复失败的做法别再原样重试。
+- 可选 note：写一句接下来几分钟要记住的事（目的地、发现、教训）；可选 then：做完这几步之后打算做什么。
 - 观察是边走边发生的：explore 带 until（可写 "cow|sheep" 或 "animal"）一看见就停；gather/hunt 找不到会自己转头找、会走到刚才看见的地方。
 - 除了组合动作，还有玩家的“右键/方向键”：use_item、interact、ride、dismount。常规做法走不通时，想想真正的玩家会用什么物品或载具解决。
 - 不确定能做什么时可以查配方记忆（只读）：{"kind":"recipes","category":"tools|weapons|armor|transport|food|light|workstations|storage|building|redstone|materials|misc"} 或 {"kind":"recipes","item":"物品名"}。
 - 如果你觉得该换个目标/方向，或需要记忆和更多背景才能决定，只输出 {"kind":"need_full_context","reason":"一句话"}。
 - thought 是一句第一人称的感受或念头（40 字以内）。思考简洁，抓住眼前一两个关键事实即可。
-只输出一个 JSON：{"kind":"plan","thought":"…","goal":"…","steps":[{"skill":"…","args":{}}],"on_fail"?:[…]}
+只输出一个 JSON：{"kind":"plan","thought":"…","goal":"…","steps":[{"skill":"…","args":{}}],"on_fail"?:[…],"note"?:"…","then"?:"…"}
 技能：
 ${briefCatalog(30)}`;
 }
@@ -331,6 +341,9 @@ export function lightUserPrompt(ctx: PlanContext, memory: WorldMemory): string {
   const payload = {
     continuity: { intent: intent ? { text: intent.text, whyNow: intent.whyNow } : null,
       ...(project ? { project: { title: project.title, milestone: (project as any).milestones?.[(project as any).currentMilestone ?? 0]?.title } } : {}) },
+    ...(ctx.notes?.length ? { my_notes: ctx.notes } : {}),
+    ...(ctx.thread?.length ? { recent_thread: ctx.thread } : {}),
+    ...(ctx.repeated?.length ? { repeated_failures: ctx.repeated } : {}),
     last_results: results,
     ...(ctx.lastFailure ? { last_failure: ctx.lastFailure } : {}),
     reason: ctx.reason,
@@ -342,7 +355,8 @@ export function lightUserPrompt(ctx: PlanContext, memory: WorldMemory): string {
       ...(p.light ? { light: { level: (p.light as any).level, torches: (p.light as any).torches } } : {}),
       nearby: { hostile: p.nearby.hostile, passive: p.nearby.passive, resources: p.nearby.resources.slice(0, 8) },
       ...(v ? { vision: { facing: v.facing, view: v.view, visible_resources: v.visible_resources.slice(0, 8), seen_entities: v.seen_entities.slice(0, 6),
-        ...((v as any).recent_sightings ? { recent_sightings: (v as any).recent_sightings } : {}), nearest_land: v.nearest_land } } : {}),
+        ...((v as any).recent_sightings ? { recent_sightings: (v as any).recent_sightings } : {}),
+        ...((v as any).visible_drops ? { visible_drops: (v as any).visible_drops } : {}), nearest_land: v.nearest_land } } : {}),
       ...(p.death_recovery ? { death_recovery: p.death_recovery } : {}),
       self: p.self,
       time: p.time,

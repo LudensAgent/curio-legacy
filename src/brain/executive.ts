@@ -201,6 +201,7 @@ export class Executive {
     const percept = this.d.perception.update();
     return { reason, percept, current: this.d.arbiter.info(), lastFailure: this.lastFailure,
       pendingSteps: this.plan ? this.plan.steps.slice(this.plan.index) : [],
+      ...this.workingMemory(),
       userSuggestion: this.userSuggestion, binding: this.projects.currentBinding(), continuity: {
         ...this.projects.context(), wishes: this.d.memory.intents().filter((i) => i.status === 'deferred' || i.status === 'open').slice(-8),
         deferredProjects: this.d.memory.projects().filter((p) => p.status === 'deferred').slice(-6)
@@ -265,6 +266,24 @@ export class Executive {
     });
   }
 
+  // ---- 短期工作记忆：让一次次小决策连成一条思路
+  private thread: { ts: number; goal: string; thought: string; then?: string; status?: string; summary?: string }[] = [];
+  private notes: { ts: number; text: string }[] = [];
+  private failures: { ts: number; key: string; summary: string }[] = [];
+  private workingMemory() {
+    const now = Date.now();
+    this.notes = this.notes.filter((n) => now - n.ts < 15 * 60_000).slice(-6);
+    this.failures = this.failures.filter((f) => now - f.ts < 10 * 60_000);
+    const counts = new Map<string, { n: number; last: string }>();
+    for (const f of this.failures) counts.set(f.key, { n: (counts.get(f.key)?.n ?? 0) + 1, last: f.summary });
+    return {
+      thread: this.thread.slice(-5).map((t) => ({ seconds_ago: Math.round((now - t.ts) / 1000), goal: t.goal, thought: t.thought.slice(0, 90),
+        ...(t.then ? { then: t.then } : {}), outcome: t.status ? `${t.status}：${(t.summary ?? '').slice(0, 90)}` : '进行中' })),
+      notes: this.notes.map((n) => n.text),
+      repeated: [...counts].filter(([, v]) => v.n >= 2).map(([k, v]) => ({ action: k, failures_10min: v.n, last: v.last.slice(0, 80) })),
+    };
+  }
+
   private lightStreak = 0;
   private lastFullAt = 0;
   /**
@@ -312,6 +331,12 @@ export class Executive {
     // No side effects are accepted before both request and queued-plan ownership checks.
     if (p.memoryNote) this.d.memory.addNote('inference', p.memoryNote, this.d.adapter.state().dim);
     if (p.missingAbility) this.d.bus.publish('capability_gap', 'P2', `想做但还做不到：${p.missingAbility}`, { planId: p.id });
+    this.thread.push({ ts: Date.now(), goal: p.goal, thought: p.thought, ...(p.then ? { then: p.then } : {}) });
+    if (this.thread.length > 8) this.thread.shift();
+    if (p.note && !this.notes.some((n) => n.text === p.note)) {
+      this.notes.push({ ts: Date.now(), text: p.note });
+      this.d.bus.publish('note', 'P3', `记下：${p.note}`);
+    }
     if (p.lesson) this.d.memory.addLesson(p.lesson);
     if (p.objective && !this.d.planner.autonomous) this.d.memory.setObjective(p.objective);
     if (p.learnSkill) this.d.onLearnSkill?.(p.learnSkill);
@@ -441,6 +466,8 @@ export class Executive {
       }
     }
     const durationSec = Math.round((Date.now() - (this.activatedAt ?? p.createdAt)) / 1000);
+    const entry = [...this.thread].reverse().find((t) => t.goal === p.goal && !t.status);
+    if (entry) { entry.status = status; entry.summary = summary; }
     this.decisionFeedback.end(p, status, summary, state, this.d.perception.update());
     const steps = p.steps.map((st) => { const a = (st.args ?? {}) as Record<string, unknown>; const key = a.block ?? a.item ?? a.blueprint ?? a.crop ?? a.target ?? a.animal ?? a.direction ?? ''; return key ? `${st.skill}:${key}` : st.skill; });
     this.d.memory.recordGoal({ goal: p.goal, goalType: p.goalType, source: p.source, status, summary, durationSec, steps, plan: p.steps, worldId: state.worldId, dimension: state.dim });
@@ -577,6 +604,8 @@ export class Executive {
     const steps = p.onFail?.length ? p.onFail : this.repairSteps(o);
     if (!steps?.length) return false;
     p.recovering = { summary: o.result.summary };
+    const entry = [...this.thread].reverse().find((t) => t.goal === p.goal && !t.status);
+    if (entry) { entry.status = 'failed（补救中）'; entry.summary = o.result.summary; }
     p.steps = [...p.steps.slice(0, p.index), ...steps];
     p.generation = this.generation;
     this.d.bus.publish('plan_fallback', 'P2', `「${o.task.skill}」没成功，先${p.onFail?.length ? '按预案' : '顺手'}做：${steps.map((s) => `${s.skill} ${JSON.stringify(s.args ?? {})}`).join(' → ')}，同时重新考虑`);
@@ -610,8 +639,12 @@ export class Executive {
       data: o.result.data, failureCode: o.result.failureCode, ts: Date.now(), worldId: state.worldId,
       dimension: state.dim, sessionId: state.sessionId, position: { ...state.pos } });
     if (this.results.length > 12) this.results.shift();
-    if (o.result.status === 'failed') this.lastFailure = { skill: o.task.skill, code: o.result.failureCode, summary: o.result.summary };
-    else if (o.result.status === 'succeeded' && this.lastFailure?.skill === o.task.skill) this.lastFailure = null;
+    if (o.result.status === 'failed') {
+      this.lastFailure = { skill: o.task.skill, code: o.result.failureCode, summary: o.result.summary };
+      const a = (o.task.args ?? {}) as Record<string, unknown>;
+      const target = a.block ?? a.item ?? a.animal ?? a.for ?? a.target ?? a.entity ?? '';
+      this.failures.push({ ts: Date.now(), key: `${o.task.skill}${target ? ` ${String(target)}` : ''}`, summary: o.result.summary });
+    } else if (o.result.status === 'succeeded' && this.lastFailure?.skill === o.task.skill) this.lastFailure = null;
   }
 
   private checkAbort(hp: number, isDay: boolean) {

@@ -24,6 +24,8 @@ export interface EntityInfo {
   velocity?: Vec3Like;
   phase?: number;
   hp?: number;
+  /** 掉落物的数量（name 形如 item:raw_rabbit） */
+  count?: number;
 }
 
 export interface BossDeathObservation {

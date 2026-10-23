@@ -520,3 +520,54 @@ test('睡觉：先走回自己记得的床，不再另放一张', async () => {
     assert.ok(adapter.pos.x > 20, `应该走回床边，x=${adapter.pos.x}`);
   } finally { ctx.memory.close(); }
 });
+
+test('工作记忆：下一次决策能看到上一次的想法、笔记、打算，以及反复失败的做法', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  w.pending[0].resolve(reply({ goal: '去东北的村子', thought: '东北 60 格有村民和铁傀儡', note: '村子在东北约 60 格', then: '到村子后找干草块和工作台',
+    steps: [{ skill: 'gather', args: { block: 'log', count: 1 } }] }));
+  await flush(); await w.tick();
+  await w.advance(5000); // gather 失败 → 新的决策请求
+  const ctx = (w.executive as any).ctx('failure');
+  assert.deepEqual(ctx.notes, ['村子在东北约 60 格']);
+  assert.equal(ctx.thread.at(-1).goal, '去东北的村子');
+  assert.equal(ctx.thread.at(-1).then, '到村子后找干草块和工作台');
+  assert.match(ctx.thread.at(-1).outcome, /failed/);
+  const { lightUserPrompt } = await import('../src/planner/prompt.ts');
+  const text = lightUserPrompt(ctx, w.memory);
+  assert.match(text, /my_notes/);
+  assert.match(text, /recent_thread/);
+  assert.ok(w.bus.recent().some((e) => e.type === 'note'));
+});
+
+test('采集：记忆里的树已经不在了（被砍/不在加载范围）就跳过，不误报“缺工具”', async () => {
+  const adapter = new FakeAdapter();
+  const vision = new Vision(adapter);
+  adapter.blocks.push({ name: 'oak_log', pos: { x: 6, y: 64, z: 0 } });
+  vision.refresh();
+  adapter.blocks = adapter.blocks.filter((b) => b.name !== 'oak_log'); // 树被别人砍了
+  const ctx = skillCtx(adapter, vision);
+  try {
+    const r = await SKILLS.gather.run(ctx, { block: 'log', count: 1 });
+    assert.notEqual(r.failureCode, 'TOOL_MISSING', r.summary);
+  } finally { ctx.memory.close(); }
+});
+
+test('掉落物：看得见地上是什么、几个，能只捡想要的那种，并报告实际捡到的', async () => {
+  const adapter = new FakeAdapter();
+  const vision = new Vision(adapter);
+  adapter.entities.push(
+    { id: 501, name: 'item:raw_rabbit', kind: 'item', pos: { x: 5, y: 64, z: 0.5 }, dist: 0, height: 0.25, count: 2 },
+    { id: 502, name: 'item:rabbit_hide', kind: 'item', pos: { x: 6, y: 64, z: 2 }, dist: 0, height: 0.25 },
+  );
+  vision.refresh();
+  const drops = (vision.summary(adapter.pos) as any).visible_drops;
+  assert.ok(drops?.some((d: any) => d.item === 'raw_rabbit' && d.count === 2), JSON.stringify(drops));
+  const ctx = skillCtx(adapter, vision);
+  try {
+    const r = await SKILLS.pickup_items.run(ctx, SKILLS.pickup_items.validate({ item: 'raw_rabbit' }, adapter).args as any);
+    assert.equal(r.status, 'succeeded', r.summary);
+    assert.match(r.summary, /raw_rabbit/);
+    assert.ok(adapter.entities.some((e) => e.name === 'item:rabbit_hide'), '没要的不捡');
+  } finally { ctx.memory.close(); }
+});
