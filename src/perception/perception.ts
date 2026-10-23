@@ -1,3 +1,4 @@
+import { surroundings } from './surroundings.ts';
 import type { GameAdapter, InvItem } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
@@ -21,7 +22,7 @@ export interface Percept {
   connected: boolean;
   observation?: { ready: boolean; worldId: string; sessionId: string; id: number };
   time: { timeOfDay: number; phase: 'day' | 'dusk' | 'night' | 'dawn' };
-  self: { pos: [number, number, number]; dim: string; hp: number; food: number; biome: string | null; inWater: boolean; inLava: boolean; held: string | null };
+  self: { pos: [number, number, number]; dim: string; hp: number; food: number; biome: string | null; inWater: boolean; inLava: boolean; held: string | null; around?: string };
   inventory: InvItem[];
   emptySlots: number;
   /** 只包含看见/听见/记得的东西（没有透视） */
@@ -274,6 +275,8 @@ export class Perception {
         inWater: s.inWater,
         inLava: s.inLava,
         held: s.held,
+        // 身边一圈（脚下、头顶、四个方向能不能走）：判断被困、往哪能出去
+        ...(s.connected && s.alive ? { around: surroundings(this.adapter, s.pos).text } : {}),
       },
       inventory: [...s.inventory].sort((a, b) => b.count - a.count).slice(0, 24),
       emptySlots: s.emptySlots,

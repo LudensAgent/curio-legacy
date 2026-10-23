@@ -20,6 +20,8 @@ export interface ExecutiveDeps {
 }
 
 /** 几秒内就能完成、不改变位置的收尾动作 */
+/** 边做边想的决定最多排队这么久，再久就按当前情况重想 */
+const PREFETCH_FRESH_MS = 25_000;
 const QUICK_SKILLS = new Set(['craft', 'eat', 'place_torch', 'pickup_items', 'equip']);
 
 /** Coordinates model choices and measured progress; it never assigns a gameplay theme. */
@@ -178,7 +180,19 @@ export class Executive {
   }
 
   private requestReason(cur: TaskInfo | null): string | null {
-    if (this.inFlight || this.queued || Date.now() < this.backoffUntil) return null;
+    if (this.inFlight || Date.now() < this.backoffUntil) return null;
+    if (this.queued) {
+      // 边做边想的决定在一个长动作开始时就想好了，等动作做完时背包、位置、看见的东西都变了。
+      // 排队太久就按现在的情况重新想一遍（替换掉旧的），让接上去的决定基于新鲜的事实。
+      const q = this.queued;
+      const stale = this.d.planner.autonomous && q.basis?.reason === 'prefetch' && Date.now() - q.basis.at > PREFETCH_FRESH_MS
+        && !!cur && cur.planId === this.plan?.id;
+      if (!stale) return null;
+      this.queued = null;
+      this.staleDropped++;
+      this.d.bus.publish('plan_stale', 'P3', `想好的下一步已经等了 ${Math.round((Date.now() - q.basis!.at) / 1000)} 秒，情况变了，按现在的情况重新想`);
+      return 'prefetch';
+    }
     if (!this.plan) return this.d.memory.activeProject()?.status === 'blocked' ? 'project_blocked' : 'no_goal';
     // 最后只剩一个很快的收尾步骤（合成、吃东西、插火把）时，在倒数第二步就开始想下一步：
     // 模型平均要想 6–10 秒，而收尾步骤往往只有几秒
@@ -221,6 +235,7 @@ export class Executive {
     const sequence = ++this.requestSequence;
     const controller = this.controller = new AbortController();
     const ctx = this.ctx(reason);
+    const requestedAt = Date.now();
     const fresh = () => generation === this.generation && sequence === this.requestSequence && !controller.signal.aborted
       && !this.paused && observationReady(this.d.adapter.state()) && this.sameBinding(ctx.binding ?? {});
     ctx.tier = this.chooseTier(ctx);
@@ -233,6 +248,7 @@ export class Executive {
       if (ctx.userSuggestion === this.userSuggestion) this.userSuggestion = null;
       p.binding = ctx.binding;
       p.generation = generation;
+      p.basis = { at: requestedAt, reason, pending: [...(ctx.current ? [{ skill: ctx.current.skill, args: ctx.current.args }] : []), ...(ctx.pendingSteps ?? [])] };
       this.queued = p;
       // Prefetch choices and all their side effects wait until activation with a second freshness check.
       if (replace) this.discardPlan('收到新决策，替换旧尝试');
@@ -268,8 +284,8 @@ export class Executive {
 
   // ---- 短期工作记忆：让一次次小决策连成一条思路
   private thread: { ts: number; goal: string; thought: string; then?: string; status?: string; summary?: string }[] = [];
-  private notes: { ts: number; text: string }[] = [];
-  private failures: { ts: number; key: string; summary: string }[] = [];
+  private notes: { ts: number; text: string; at?: string }[] = [];
+  private failures: { ts: number; key: string; summary: string; pos?: { x: number; y: number; z: number } }[] = [];
   private workingMemory() {
     const now = Date.now();
     this.notes = this.notes.filter((n) => now - n.ts < 15 * 60_000).slice(-6);
@@ -277,11 +293,21 @@ export class Executive {
     const counts = new Map<string, { n: number; last: string }>();
     for (const f of this.failures) counts.set(f.key, { n: (counts.get(f.key)?.n ?? 0) + 1, last: f.summary });
     return {
-      thread: this.thread.slice(-5).map((t) => ({ seconds_ago: Math.round((now - t.ts) / 1000), goal: t.goal, thought: t.thought.slice(0, 90),
+      // 不带“几秒前”：它每次都变，会让后面整段提示词都无法命中缓存；顺序本身就是时间线
+      thread: this.thread.slice(-5).map((t) => ({ goal: t.goal, thought: t.thought.slice(0, 90),
         ...(t.then ? { then: t.then } : {}), outcome: t.status ? `${t.status}：${(t.summary ?? '').slice(0, 90)}` : '进行中' })),
-      notes: this.notes.map((n) => n.text),
-      repeated: [...counts].filter(([, v]) => v.n >= 2).map(([k, v]) => ({ action: k, failures_10min: v.n, last: v.last.slice(0, 80) })),
+      notes: this.notes.map((n) => n.at ? `${n.text}（写于 ${n.at}）` : n.text),
+      repeated: [...[...counts].filter(([, v]) => v.n >= 2).map(([k, v]) => ({ action: k, failures_10min: v.n, last: v.last.slice(0, 80) })), ...this.samePlace()],
     };
+  }
+
+  /** 不同的事在同一个地方接连失败：多半是这个地方本身有问题（被困、够不着），而不是做法不对 */
+  private samePlace() {
+    const here = this.d.adapter.state().pos;
+    const near = this.failures.filter((f) => f.pos && Math.hypot(f.pos.x - here.x, f.pos.y - here.y, f.pos.z - here.z) <= 4);
+    if (near.length < 3 || new Set(near.map((f) => f.key)).size < 2) return [];
+    return [{ action: `在这附近（${Math.round(here.x)},${Math.round(here.y)},${Math.round(here.z)}）做的各种事`, failures_10min: near.length,
+      last: `${[...new Set(near.map((f) => f.key))].slice(-4).join('、')} 都在这里失败了：问题多半出在这个地方，先离开这里（看 self.around）` }];
   }
 
   private lightStreak = 0;
@@ -313,6 +339,7 @@ export class Executive {
 
   private activate(p: Plan): boolean {
     if (p.generation !== this.generation || !this.sameBinding(p.binding ?? {}) || this.paused) { this.staleDropped++; return false; }
+    if (!this.dropDoneSteps(p)) { this.staleDropped++; return false; }
     if (p.decision) {
       try {
         this.projects.decide(p.decision, this.d.adapter.state());
@@ -334,7 +361,8 @@ export class Executive {
     this.thread.push({ ts: Date.now(), goal: p.goal, thought: p.thought, ...(p.then ? { then: p.then } : {}) });
     if (this.thread.length > 8) this.thread.shift();
     if (p.note && !this.notes.some((n) => n.text === p.note)) {
-      this.notes.push({ ts: Date.now(), text: p.note });
+      const at = this.d.adapter.state().pos;
+      this.notes.push({ ts: Date.now(), text: p.note, at: `${Math.round(at.x)},${Math.round(at.y)},${Math.round(at.z)}` });
       this.d.bus.publish('note', 'P3', `记下：${p.note}`);
     }
     if (p.lesson) this.d.memory.addLesson(p.lesson);
@@ -358,6 +386,32 @@ export class Executive {
    * - 走路找东西时边走边看：explore 之后若要采集/狩猎某样东西，探索途中一看见就停下（until）
    * - 不做没有新信息的环顾：explore 自带沿途张望；刚在附近环顾过时，不带目标的 look_around 直接跳过
    */
+  /**
+   * 边做边想时，决定是在手头步骤做完之前想的。模型有时会把“正在做/排队中”的步骤又安排一遍
+   * （比如刚挖完 8 块石头、做好石剑，又决定“挖 8 块石头、做石剑”）。这些已经做完的开头步骤直接跳过；
+   * 全都做完了就丢掉这份过时的决定，按现在的情况重新想。
+   */
+  private dropDoneSteps(p: Plan): boolean {
+    const basis = p.basis;
+    if (!basis?.pending.length) return true;
+    const key = (st: { skill: string; args?: unknown }) => {
+      const a = (st.args ?? {}) as Record<string, unknown>;
+      return `${st.skill}:${String(a.item ?? a.block ?? a.animal ?? a.target ?? '')}`;
+    };
+    const planned = new Set(basis.pending.map(key));
+    const done = new Set(this.results.filter((r: any) => r.ts >= basis.at && r.status === 'succeeded').map((r: any) => key(r)));
+    let n = 0;
+    while (n < p.steps.length && planned.has(key(p.steps[n])) && done.has(key(p.steps[n]))) n++;
+    if (!n) return true;
+    if (n >= p.steps.length) {
+      this.d.bus.publish('plan_stale', 'P2', `这份决定是在手头步骤做完前想的，里面的事已经都做完了，按现在的情况重新想`);
+      return false;
+    }
+    p.steps = p.steps.slice(n);
+    this.d.bus.publish('plan_refined', 'P3', `跳过 ${n} 个刚刚已经做完的步骤（这份决定是在它们完成前想的）`);
+    return true;
+  }
+
   private refineSteps(p: Plan) {
     for (let i = 0; i < p.steps.length; i++) {
       const st = p.steps[i];
@@ -643,7 +697,7 @@ export class Executive {
       this.lastFailure = { skill: o.task.skill, code: o.result.failureCode, summary: o.result.summary };
       const a = (o.task.args ?? {}) as Record<string, unknown>;
       const target = a.block ?? a.item ?? a.animal ?? a.for ?? a.target ?? a.entity ?? '';
-      this.failures.push({ ts: Date.now(), key: `${o.task.skill}${target ? ` ${String(target)}` : ''}`, summary: o.result.summary });
+      this.failures.push({ ts: Date.now(), key: `${o.task.skill}${target ? ` ${String(target)}` : ''}`, summary: o.result.summary, pos: { ...state.pos } });
     } else if (o.result.status === 'succeeded' && this.lastFailure?.skill === o.task.skill) this.lastFailure = null;
   }
 

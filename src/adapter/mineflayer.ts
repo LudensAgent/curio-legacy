@@ -145,6 +145,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         mv.allowSprinting = true;
         mv.allowParkour = true;
         mv.allow1by1towers = true;
+        // 垫脚/搭路用的方块：除了默认的泥土圆石，也用其他常见石头（不用木板原木，免得烧掉建材）
+        for (const n of ['cobbled_deepslate', 'netherrack', 'andesite', 'granite', 'diorite', 'stone', 'deepslate', 'tuff']) {
+          const it = this.mcData.itemsByName[n];
+          if (it && !mv.scafoldingBlocks.includes(it.id)) mv.scafoldingBlocks.push(it.id);
+        }
         // 海带/海草等含水植物在物理上就是水：不加进 liquids 的话寻路会以为脚下悬空，在海带丛里原地卡死
         for (const n of ['kelp', 'kelp_plant', 'seagrass', 'tall_seagrass', 'bubble_column']) {
           const b = this.mcData.blocksByName[n];
@@ -488,6 +493,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         break;
       case 'xz':
         goal = new goals.GoalNearXZ(target.x, target.z, target.range);
+        break;
+      case 'xyz':
+        goal = new goals.GoalBlock(Math.floor(target.x), Math.floor(target.y), Math.floor(target.z));
         break;
       case 'reach_block':
         goal = goals.GoalLookAtBlock

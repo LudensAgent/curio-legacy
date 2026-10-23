@@ -57,6 +57,8 @@ export const config = {
     visionInput: bool('LLM_VISION_INPUT', false),
     /** 流式请求：控制台能实时看到模型的输出；服务端不支持会自动回退 */
     stream: bool('LLM_STREAM', true),
+    /** 小决策是否让模型先长篇思考：auto = DeepSeek 时关闭（小决策要快，信息才不会过时）；on = 不干预；off = 总是发送关闭思考的参数 */
+    lightThinking: str('LLM_LIGHT_THINKING', 'auto').toLowerCase(),
     maxCallsPerHour: num('LLM_MAX_CALLS_PER_HOUR', 90),
     fakeDelayMs: num('LLM_FAKE_DELAY_MS', 0),
   },

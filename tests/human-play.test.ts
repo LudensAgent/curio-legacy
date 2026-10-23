@@ -529,7 +529,7 @@ test('工作记忆：下一次决策能看到上一次的想法、笔记、打�
   await flush(); await w.tick();
   await w.advance(5000); // gather 失败 → 新的决策请求
   const ctx = (w.executive as any).ctx('failure');
-  assert.deepEqual(ctx.notes, ['村子在东北约 60 格']);
+  assert.match(ctx.notes[0], /^村子在东北约 60 格（写于 -?\d+,-?\d+,-?\d+）$/);
   assert.equal(ctx.thread.at(-1).goal, '去东北的村子');
   assert.equal(ctx.thread.at(-1).then, '到村子后找干草块和工作台');
   assert.match(ctx.thread.at(-1).outcome, /failed/);
@@ -565,9 +565,82 @@ test('掉落物：看得见地上是什么、几个，能只捡想要的那种�
   assert.ok(drops?.some((d: any) => d.item === 'raw_rabbit' && d.count === 2), JSON.stringify(drops));
   const ctx = skillCtx(adapter, vision);
   try {
-    const r = await SKILLS.pickup_items.run(ctx, SKILLS.pickup_items.validate({ item: 'raw_rabbit' }, adapter).args as any);
+    const r = await SKILLS.pickup_items.run(ctx, (SKILLS.pickup_items.validate({ item: 'raw_rabbit' }, adapter) as any).args);
     assert.equal(r.status, 'succeeded', r.summary);
     assert.match(r.summary, /raw_rabbit/);
     assert.ok(adapter.entities.some((e) => e.name === 'item:rabbit_hide'), '没要的不捡');
   } finally { ctx.memory.close(); }
+});
+
+test('身边一圈：困在坑里时 self.around 说清四面走不了、看不见天；climb_up 垫方块爬出去', async () => {
+  const adapter = new FakeAdapter();
+  // 地下 3 格的一个一人高的小洞
+  adapter.pos = { x: 0.5, y: 60, z: 0.5 };
+  adapter.removed.add('0,60,0'); adapter.removed.add('0,61,0');
+  adapter.inv.set('cobblestone', 16);
+  const { surroundings } = await import('../src/perception/surroundings.ts');
+  const s = surroundings(adapter);
+  assert.equal(s.enclosed, true, s.text);
+  assert.equal(s.sky, false);
+  assert.match(s.text, /四面都走不了/);
+  const ctx = skillCtx(adapter);
+  try {
+    const r = await SKILLS.climb_up.run(ctx, { height: 12, untilSky: true });
+    assert.equal(r.status, 'succeeded', r.summary);
+    assert.ok(adapter.pos.y >= 63, `应该爬到地面，y=${adapter.pos.y}`);
+    assert.match(r.summary, /看得见天空/);
+  } finally { ctx.memory.close(); }
+});
+
+test('dig：往一个方向挖出一人高的通道并走进去；旁边有岩浆就停下', async () => {
+  const adapter = new FakeAdapter();
+  adapter.pos = { x: 0.5, y: 60, z: 0.5 };
+  adapter.removed.add('0,60,0'); adapter.removed.add('0,61,0');
+  const ctx = skillCtx(adapter);
+  try {
+    const r = await SKILLS.dig.run(ctx, { dir: 'E', blocks: 2 });
+    assert.equal(r.status, 'succeeded', r.summary);
+    assert.equal(Math.floor(adapter.pos.x), 2);
+    adapter.blocks.push({ name: 'lava', pos: { x: 4, y: 60, z: 0 } });
+    const r2 = await SKILLS.dig.run(ctx, { dir: 'E', blocks: 2 });
+    assert.match(r2.summary, /lava/);
+    assert.equal(adapter.blockAt({ x: 3, y: 60, z: 0 }), 'stone', '岩浆旁边那格不挖');
+  } finally { ctx.memory.close(); }
+});
+
+test('边做边想：决定里重复了思考期间已经做完的步骤 → 跳过；全是做完的 → 丢掉重想', async (t) => {
+  const w = fixture(t);
+  const ex = w.executive as any;
+  const now = Date.now();
+  ex.results.push({ skill: 'gather', args: { block: 'stone', count: 8 }, status: 'succeeded', summary: '采集了 8 个 stone', ts: now + 1 });
+  ex.results.push({ skill: 'craft', args: { item: 'stone_sword', count: 1 }, status: 'succeeded', summary: '合成了 stone_sword', ts: now + 2 });
+  const basis = { at: now, reason: 'prefetch', pending: [{ skill: 'gather', args: { block: 'stone', count: 8 } }, { skill: 'craft', args: { item: 'stone_sword' } }] };
+  const p1: any = { steps: [{ skill: 'gather', args: { block: 'stone', count: 8 } }, { skill: 'craft', args: { item: 'stone_sword', count: 1 } }, { skill: 'gather', args: { block: 'log', count: 4 } }], basis };
+  assert.equal(ex.dropDoneSteps(p1), true);
+  assert.deepEqual(p1.steps.map((s: any) => s.skill), ['gather']);
+  assert.equal(p1.steps[0].args.block, 'log');
+  const p2: any = { steps: [{ skill: 'gather', args: { block: 'stone', count: 8 } }], basis };
+  assert.equal(ex.dropDoneSteps(p2), false);
+});
+
+test('小决策（边做边想）明确告诉模型手头的步骤会先做完；DeepSeek 小决策关闭长篇思考', async () => {
+  const { lightUserPrompt } = await import('../src/planner/prompt.ts');
+  const memory = new WorldMemory(null);
+  try {
+    const percept: any = { inventory: [], emptySlots: 36, nearby: { hostile: [], passive: [], resources: [] }, vision: null, self: { pos: [0, 64, 0] }, time: {} };
+    const text = lightUserPrompt({ reason: 'prefetch', percept, current: { skill: 'gather', args: { block: 'stone', count: 8 }, progress: 0.6 } as any, pendingSteps: [{ skill: 'craft', args: { item: 'stone_sword' } }] } as any, memory);
+    assert.match(text, /把它们当作已经完成/);
+    assert.match(text, /gather .*stone.* → craft/);
+  } finally { memory.close(); }
+  const http = await import('node:http');
+  const bodies: any[] = [];
+  const srv = http.createServer((req, res) => { let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => { bodies.push(JSON.parse(b)); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ choices: [{ message: { content: '{}' } }] })); }); });
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const { OpenAICompatibleProvider } = await import('../src/planner/llm.ts');
+  const p = new OpenAICompatibleProvider({ provider: 'openai', providerLabel: 'x', baseUrl: `http://127.0.0.1:${(srv.address() as any).port}`, apiKey: '', model: 'deepseek-flash', temperature: 0.5, jsonMode: true, timeoutMs: 5000, maxTokens: 100, maxCallsPerHour: 10, fakeDelayMs: 0, stream: false });
+  await p.complete([{ role: 'user', content: 'hi' }], AbortSignal.timeout(5000), { tier: 'light' });
+  await p.complete([{ role: 'user', content: 'hi' }], AbortSignal.timeout(5000), { tier: 'full' });
+  srv.close();
+  assert.deepEqual(bodies[0].thinking, { type: 'disabled' });
+  assert.equal(bodies[1].thinking, undefined, '完整决策照常思考');
 });

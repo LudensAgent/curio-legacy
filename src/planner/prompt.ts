@@ -95,7 +95,7 @@ reason=prefetch 时，current_task 仍在执行，pending_steps 里的步骤也�
 project={title,successCondition,milestones:[{title,condition}]}，同一时间仅一个主动项目，里程碑顺序执行。
 事实条件仅支持 {type:"inventory_min",item:"具体物品注册名",count:16}、{type:"location_near",dimension:"overworld",pos:{x:0,y:64,z:0},radius:3,landmarkId:"已知地标ID"}、{type:"all_of",conditions:[条件...]}。位置必须来自当下观测或已知地标，不能猜测。库存条件读取实际完整背包，技能成功或预计产出不证明事实完成。缺少可证明的条件时保留开放意图，不编造验收。complete 只表示体验结束，不能宣布未验证的材料、房屋或战斗事实。
 
-技能清单不是玩法清单：use_item、interact、ride、dismount 就是玩家的右键和方向键。常规做法走不通（被挡住、够不着、太慢、太危险）时，想想真正的玩家会用什么物品、方块或载具解决，用它们组合出来；程序不替你想。好用的组合可用 learn_skill 记下。确实做不到时在 missing_ability 写一句你想做什么。不要把缺材料自动改写为无关囤货。learn_skill 仅为待试验组合，注册名称不等于已学会。lesson 是有来源的推断，memory_note 不得伪造事实。
+技能清单不是玩法清单：use_item、interact、ride、dismount 就是玩家的右键和方向键，dig、climb_up 是左键挖和垫方块往上爬；self.around 是身边一圈（脚下、头顶、哪边能走），被困时先用它们离开那里。常规做法走不通（被挡住、够不着、太慢、太危险）时，想想真正的玩家会用什么物品、方块或载具解决，用它们组合出来；程序不替你想。好用的组合可用 learn_skill 记下。确实做不到时在 missing_ability 写一句你想做什么。不要把缺材料自动改写为无关囤货。learn_skill 仅为待试验组合，注册名称不等于已学会。lesson 是有来源的推断，memory_note 不得伪造事实。
 learn_skill 的完整格式为 {name,description,parameters:{amount:{type:"integer",default:4,min:1,max:16}},program:{type:"sequence",steps:[{type:"call",skill:"gather",args:{block:"stone",count:{param:"amount"}}}]},postcondition:{type:"inventory_min",item:"cobblestone",count:{param:"amount"}}}。program 还可用 {type:"if",condition,then,else} 或 {type:"repeat",times,body}，循环有界。候选 trial 可以在游玩中试用（配置了隔离试验世界时只在那里试），在两个不同情境里经真实状态验收后才晋升 method；程序不替你选择要学什么。
 
 视觉仅约 ${fov}° 面前视锥，遮挡和光照有效。visible_resources 是亲眼所见，remembered_resources 是可能过期的旧观察；vision.recent_sightings 是刚走出视野的生物（hunt 会走到最后看见它的地方），vision.visible_drops 是看得见的掉落物（可用 pickup_items 去捡）；未去过的位置未知。附近没看见树只是否定本地观察范围内的木料线索，不能推断整个世界无树。gather 只能采已知资源；若下一步依赖尚未得到的观察，先获得证据再决定，不能预设一定发现资源。观察边走边发生：explore 沿途张望，带 until 一看见就停；gather/hunt 找不到会自己转头找。look_around 只用于专门找某样东西（for）或看某个方向（direction），不要当例行动作或接在 explore 后；原地且事实未变时再次扫视通常没有新信息。行动中感知持续更新，已有信息足够时直接做出选择。不要用管理指令或种子定位资源。sleep 只在主世界安全。不同维度的位置不能直接 goto。
@@ -114,7 +114,7 @@ thought 会显示在游戏聊天中，请写成简短的第一人称角色独白
 {"kind":"plan","thought":"东边的地势看起来开阔，我有点好奇那边是什么样。","decision":{"kind":"begin","reason":"当前位置的线索已经看过，东侧尚未去过且眼前路线开阔","intent":{"text":"看看东侧的地形有什么不同","whyNow":"现有观察足以选择一段新路线","context":["当前地形观察","东侧未访问记录"],"tradeoffs":["暂缓整理收藏"]}},"goal":"向东走一段比较地形","goal_type":"explore","steps":[{"skill":"explore","args":{"direction":"E","distance":48}}]}
 decision.intent.context 与 tradeoffs 都是字符串数组。只有 begin/revise 可写 decision.intent，只有新项目或 revise 可写 decision.project（不得在 continue 时重新定义已有工程）。preferences、memory_note、lesson、learn_skill 都是可选字段；learn_skill 采用上文的程序格式。聊天只展示 thought，不另用 say 播报。
 可选 on_fail（1–2 步）：某步失败时，在你重新考虑的同时先做的事；新决定一到就替换。
-recent_thread/my_notes 是你自己刚才的思路和笔记，接着它走，别每次从头想；可选 note 记下接下来几分钟要记住的事，then 写做完之后的打算。
+recent_thread/my_notes 是你自己刚才的思路和笔记，接着它走，别每次从头想；但它们是之前写的，和 state（此刻的真实情况：背包、位置、视野）冲突时以 state 为准。可选 note 记下接下来几分钟要记住的事（位置写坐标，不写“东南3格”这种走两步就失效的说法），then 写做完之后的打算。
 steps 保持 1–6 步；defer/abandon/complete 可以 steps:[]，表示选择等待而非填充无关动作。不要每轮换目标，也不必每轮说话。可用 begin + 已有 intentId 恢复 continuity 中列出的暂缓兴趣及其原项目；新记录的 ID、项目修订、里程碑和请求代次由程序分配，不能伪造或覆盖。`;
 }
 
@@ -320,15 +320,17 @@ export function lightSystemPrompt(persona: string): string {
 - 只安排接下来 1–3 步（最多 6），连贯推进当前意图（continuity.intent）；做的同时会再问你下一步，所以不必一次想得很远。current_task 和 pending_steps 会先做完，不要重复它们。
 - last_failure 是刚才没成功的那一步：换个做法接着来；若这说明整件事该换方向，就请求完整上下文。
 - recent_thread 是你刚才几次的决定、想法和结果，my_notes 是你写给自己的笔记：接着自己的思路走，沿用已经得出的结论和方向（比如目的地），除非新事实推翻它；repeated_failures 里反复失败的做法别再原样重试。
-- 可选 note：写一句接下来几分钟要记住的事（目的地、发现、教训）；可选 then：做完这几步之后打算做什么。
+- state 是此刻的真实情况；笔记和 recent_thread 是之前写的，背包、位置、看见的东西以 state 为准（比如背包里已经有的东西不用再去弄）。
+- 可选 note：写一句接下来几分钟要记住的事（目的地、发现、教训；位置写坐标，不写“东南3格”这种走两步就失效的说法）；可选 then：做完这几步之后打算做什么。
 - 观察是边走边发生的：explore 带 until（可写 "cow|sheep" 或 "animal"）一看见就停；gather/hunt 找不到会自己转头找、会走到刚才看见的地方。
-- 除了组合动作，还有玩家的“右键/方向键”：use_item、interact、ride、dismount。常规做法走不通时，想想真正的玩家会用什么物品或载具解决。
+- 除了组合动作，还有玩家的“右键/方向键/左键”：use_item、interact、ride、dismount、dig（对着方向挖）、climb_up（垫方块往上爬）。常规做法走不通时，想想真正的玩家会怎么做。
+- self.around 是身边一圈：脚下、头顶、哪边能走。被困（四面走不了、看不见天空、同一个地方接连失败）时先离开这里：往能走的方向走，或 dig 挖开、climb_up 爬上去。
 - 不确定能做什么时可以查配方记忆（只读）：{"kind":"recipes","category":"tools|weapons|armor|transport|food|light|workstations|storage|building|redstone|materials|misc"} 或 {"kind":"recipes","item":"物品名"}。
 - 如果你觉得该换个目标/方向，或需要记忆和更多背景才能决定，只输出 {"kind":"need_full_context","reason":"一句话"}。
 - thought 是一句第一人称的感受或念头（40 字以内）。思考简洁，抓住眼前一两个关键事实即可。
 只输出一个 JSON：{"kind":"plan","thought":"…","goal":"…","steps":[{"skill":"…","args":{}}],"on_fail"?:[…],"note"?:"…","then"?:"…"}
 技能：
-${briefCatalog(30)}`;
+${briefCatalog(24)}`;
 }
 
 export function lightUserPrompt(ctx: PlanContext, memory: WorldMemory): string {
@@ -362,7 +364,11 @@ export function lightUserPrompt(ctx: PlanContext, memory: WorldMemory): string {
       time: p.time,
     },
   };
-  return `当前情况（JSON）：\n${JSON.stringify(payload)}\n${ctx.lastFailure && ctx.reason !== 'prefetch' ? '刚才那一步没成功：换个做法，给出接下来几步。' : '接着推进当前的事：给出接下来几步。'}`;
+  const pending = [ctx.current ? `${ctx.current.skill} ${JSON.stringify(ctx.current.args ?? {})}` : '', ...(ctx.pendingSteps ?? []).map((st) => `${st.skill} ${JSON.stringify(st.args ?? {})}`)].filter(Boolean);
+  const tail = ctx.reason === 'prefetch' && pending.length
+    ? `手头正在做、马上就会做完：${pending.join(' → ')}。把它们当作已经完成，给出做完之后的接下来几步，不要重复它们。`
+    : ctx.lastFailure ? '刚才那一步没成功：换个做法，给出接下来几步。' : '接着推进当前的事：给出接下来几步。';
+  return `当前情况（JSON）：\n${JSON.stringify(payload)}\n${tail}`;
 }
 
 export function buildLightMessages(persona: string, ctx: PlanContext, memory: WorldMemory): ChatMessage[] {

@@ -5,6 +5,7 @@ import type { Senses } from '../skills/types.ts';
 import { hasPlaceable } from '../skills/survival.ts';
 import { torchCount } from '../skills/light.ts';
 import { effectiveLight } from '../util.ts';
+import { surroundings } from '../perception/surroundings.ts';
 
 /**
  * 反射层：不依赖 LLM，按固定频率检查危险并直接抢占动作。
@@ -139,8 +140,9 @@ export class Reflex {
     if (moved < 1.5 && !progressed) {
       this.stuckCount++;
       this.trail = [];
-      this.bus.publish('stuck', 'P1', `${cur.skill} 20 秒内几乎没有移动（${moved.toFixed(1)} 格），判定卡死`);
-      this.arbiter.cancel('卡死', 'STUCK');
+      const around = surroundings(this.adapter, pos);
+      this.bus.publish('stuck', 'P1', `${cur.skill} 20 秒内几乎没有移动（${moved.toFixed(1)} 格），判定卡死｜${around.text}`);
+      this.arbiter.cancel(`卡死：20 秒没挪动，在 ${Math.round(pos.x)},${Math.round(pos.y)},${Math.round(pos.z)}｜${around.text}`, 'STUCK');
       this.arbiter.start({ skill: 'unstuck' }, 'reflex');
     }
   }

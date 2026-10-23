@@ -48,6 +48,7 @@ export interface TaskPreemption {
 interface Running extends TaskInfo {
   controller: AbortController;
   cancelCode?: FailureCode;
+  cancelReason?: string;
   preemptedBy?: TaskSource;
   gentle?: boolean;
 }
@@ -90,7 +91,7 @@ export class Arbiter extends EventEmitter {
 
   info(): TaskInfo | null {
     if (!this.current) return null;
-    const { controller, cancelCode, preemptedBy, gentle, ...info } = this.current;
+    const { controller, cancelCode, cancelReason, preemptedBy, gentle, ...info } = this.current;
     return info;
   }
 
@@ -240,7 +241,7 @@ export class Arbiter extends EventEmitter {
           result = { status: 'cancelled', summary: `${skill.name} 已被取消（结果作废）` };
         }
         if (task.cancelCode && result.status !== 'succeeded') {
-          result = { status: 'failed', failureCode: task.cancelCode, summary: `${skill.name} 失败：${task.cancelCode}` };
+          result = { status: 'failed', failureCode: task.cancelCode, summary: `${skill.name} 失败：${task.cancelCode}${task.cancelReason ? `（${task.cancelReason}）` : ''}` };
         }
         if (this.current?.id === task.id) {
           this.current = null;
@@ -258,7 +259,7 @@ export class Arbiter extends EventEmitter {
           summary: result.summary,
           source,
         });
-        const { controller: _c, cancelCode: _cc, preemptedBy, gentle, ...info } = task;
+        const { controller: _c, cancelCode: _cc, cancelReason: _cr, preemptedBy, gentle, ...info } = task;
         this.emit('done', { task: info, result, durationMs, preemptedBy, gentle } satisfies TaskOutcome);
       });
 
@@ -271,6 +272,7 @@ export class Arbiter extends EventEmitter {
     const t = this.current;
     if (!t) return;
     t.cancelCode = asFailure;
+    if (asFailure) t.cancelReason = reason;
     t.preemptedBy = preemptedBy;
     t.gentle = gentle;
     this.current = null;

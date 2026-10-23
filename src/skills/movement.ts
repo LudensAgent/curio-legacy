@@ -1,3 +1,6 @@
+import { DIR_OFFSETS, surroundings } from '../perception/surroundings.ts';
+import { climbUp } from './body.ts';
+import { hasPlaceable } from './survival.ts';
 import { DIRS } from '../perception/perception.ts';
 import { dist3, sleep } from '../util.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
@@ -253,9 +256,9 @@ export const lookAround: Skill<{ seconds: number; for?: string; direction?: stri
 // ------------------------------------------------------------------ unstuck（仅反射层使用）
 export const unstuck: Skill<{}> = {
   name: 'unstuck',
-  description: '脱困：跳跃并向随机方向小范围移动',
+  description: '脱困：看看身边哪边能走就往哪边走；四面都被封住时垫方块往上爬出去',
   argsDoc: '{}',
-  timeoutMs: 12000,
+  timeoutMs: 40000,
   movement: false,
   validate() {
     return { ok: true, args: {} };
@@ -263,15 +266,29 @@ export const unstuck: Skill<{}> = {
   async run(ctx) {
     // Random horizontal pathfinding can sink back into the same water trap.
     if (ctx.adapter.state().inWater) return surface.run(ctx, {});
-    await ctx.adapter.jump(600, ctx.signal);
-    const s = ctx.adapter.state();
-    const ang = Math.random() * Math.PI * 2;
-    try {
-      await ctx.adapter.moveTo({ kind: 'xz', x: s.pos.x + Math.cos(ang) * 5, z: s.pos.z + Math.sin(ang) * 5, range: 1 }, { signal: ctx.signal, timeoutMs: 8000 });
-    } catch (e) {
-      if (isAbort(e)) throw e;
+    const { adapter, signal } = ctx;
+    const s = adapter.state();
+    const around = surroundings(adapter, s.pos);
+    // 先试身边能走的方向（像玩家看一眼往空处走），每个方向走 3 格
+    for (const exit of around.exits) {
+      const [dx, dz] = DIR_OFFSETS[exit.replace('↑', '')];
+      const before = adapter.state().pos;
+      try {
+        await adapter.moveTo({ kind: 'xz', x: s.pos.x + dx * 3, z: s.pos.z + dz * 3, range: 1 }, { signal, timeoutMs: 5000 });
+      } catch (e) {
+        if (isAbort(e)) throw e;
+      }
+      const p = adapter.state().pos;
+      if (Math.hypot(p.x - before.x, p.z - before.z) + Math.abs(p.y - before.y) >= 1.5) return ok(`往 ${exit} 挪出来了｜${surroundings(adapter).text}`);
     }
-    return ok('尝试脱困');
+    // 四面都走不了、头顶也看不见天：垫方块往上爬（头顶挡着会先挖开）
+    if (!around.sky && hasPlaceable(adapter.state().inventory)) {
+      ctx.progress(0.3, '四面被封住，垫方块往上爬');
+      const r = await climbUp.run(ctx, { height: 12, untilSky: true });
+      if (r.status === 'succeeded' && (r.data as any)?.climbed > 0) return ok(`四面被封住，往上爬出来了：${r.summary}`);
+    }
+    await adapter.jump(600, signal);
+    return fail('STUCK', `没能脱困｜${surroundings(adapter).text}`);
   },
 };
 

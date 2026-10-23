@@ -47,6 +47,8 @@ export interface Plan {
   missingAbility?: string;
   /** 短期工作记忆：做完这些之后打算做什么；接下来几分钟要记住的事 */
   then?: string;
+  /** 这份决定是基于什么时候、哪些“正在做/排队”的步骤想的（边做边想时用来剔除已做完的步骤） */
+  basis?: { at: number; reason: string; pending: { skill: string; args?: unknown }[] };
   note?: string;
 }
 

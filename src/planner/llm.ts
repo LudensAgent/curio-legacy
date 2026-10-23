@@ -28,16 +28,39 @@ export interface LlmProvider {
 /** 任何 OpenAI 兼容的 /chat/completions 接口：OpenAI、DeepSeek、通义、智谱、Ollama、LM Studio、vLLM… */
 export class OpenAICompatibleProvider implements LlmProvider {
   readonly name: string;
-  constructor(private cfg: Omit<Config['llm'], 'maxPromptTokens' | 'maxRecallRounds' | 'visionInput' | 'contextWindowTokens' | 'compactAtRatio'>) {
+  constructor(private cfg: Omit<Config['llm'], 'maxPromptTokens' | 'maxRecallRounds' | 'visionInput' | 'contextWindowTokens' | 'compactAtRatio' | 'lightThinking'> & { lightThinking?: string }) {
     this.name = `openai-compatible:${cfg.model}`;
   }
 
-  async complete(messages: ChatMessage[], signal: AbortSignal, _hint?: unknown, onDelta?: OnDelta): Promise<Completion> {
+  /** 服务端不认识 thinking 参数时记住，之后不再发送 */
+  private thinkingParamRejected = false;
+
+  /** 小决策关闭“先长篇思考”：它占了小决策大部分耗时，想得越久，决定落地时信息越旧 */
+  private noThinking(hint: unknown): boolean {
+    if (this.thinkingParamRejected || (hint as any)?.tier !== 'light') return false;
+    const mode = (this.cfg as any).lightThinking ?? 'auto';
+    if (mode === 'off') return true;
+    return mode === 'auto' && /deepseek/i.test(`${this.cfg.model} ${this.cfg.baseUrl}`);
+  }
+
+  async complete(messages: ChatMessage[], signal: AbortSignal, hint?: unknown, onDelta?: OnDelta): Promise<Completion> {
+    try {
+      return await this.completeOnce(messages, signal, hint, onDelta);
+    } catch (e: any) {
+      if (this.noThinking(hint) && /^HTTP 4\d\d/.test(String(e?.message)) && /thinking/i.test(String(e?.message))) {
+        this.thinkingParamRejected = true;
+        return this.completeOnce(messages, signal, hint, onDelta);
+      }
+      throw e;
+    }
+  }
+
+  private async completeOnce(messages: ChatMessage[], signal: AbortSignal, hint: unknown, onDelta?: OnDelta): Promise<Completion> {
     const t0 = Date.now();
     if (this.cfg.fakeDelayMs > 0) await sleep(this.cfg.fakeDelayMs, signal);
     if (this.cfg.stream && onDelta && !this.streamUnsupported) {
       try {
-        return await this.completeStream(messages, signal, onDelta, t0);
+        return await this.completeStream(messages, signal, onDelta, t0, hint);
       } catch (e: any) {
         // 服务端不支持流式（HTTP 400/404/422）：记住，之后都走普通请求
         if (!/^HTTP (400|404|422)/.test(String(e?.message))) throw e;
@@ -52,6 +75,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
       max_tokens: this.cfg.maxTokens,
     };
     if (this.cfg.jsonMode) body.response_format = { type: 'json_object' };
+    if (this.noThinking(hint)) body.thinking = { type: 'disabled' };
     const res = await fetch(`${this.cfg.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -72,15 +96,16 @@ export class OpenAICompatibleProvider implements LlmProvider {
 
   private streamUnsupported = false;
 
-  private body(messages: ChatMessage[], stream: boolean): Record<string, unknown> {
+  private body(messages: ChatMessage[], stream: boolean, hint?: unknown): Record<string, unknown> {
     const body: Record<string, unknown> = { model: this.cfg.model, messages: apiMessages(messages), temperature: this.cfg.temperature, max_tokens: this.cfg.maxTokens };
     if (this.cfg.jsonMode) body.response_format = { type: 'json_object' };
+    if (this.noThinking(hint)) body.thinking = { type: 'disabled' };
     if (stream) Object.assign(body, { stream: true, stream_options: { include_usage: true } });
     return body;
   }
 
   /** SSE 流式：逐块回调 content / reasoning_content（DeepSeek 等推理模型会先输出思考过程） */
-  private async completeStream(messages: ChatMessage[], signal: AbortSignal, onDelta: OnDelta, t0: number): Promise<Completion> {
+  private async completeStream(messages: ChatMessage[], signal: AbortSignal, onDelta: OnDelta, t0: number, hint?: unknown): Promise<Completion> {
     const res = await fetch(`${this.cfg.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -88,7 +113,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
         accept: 'text/event-stream',
         ...(this.cfg.apiKey ? { authorization: `Bearer ${this.cfg.apiKey}` } : {}),
       },
-      body: JSON.stringify(this.body(messages, true)),
+      body: JSON.stringify(this.body(messages, true, hint)),
       signal: AbortSignal.any([signal, AbortSignal.timeout(this.cfg.timeoutMs)]),
     });
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);

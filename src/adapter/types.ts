@@ -101,6 +101,8 @@ export interface AgentState {
 export type MoveTarget =
   | { kind: 'near'; pos: Vec3Like; range: number }
   | { kind: 'xz'; x: number; z: number; range: number }
+  /** 站到这一格（寻路会挖开挡路的方块、必要时垫方块往上爬） */
+  | { kind: 'xyz'; x: number; y: number; z: number }
   | { kind: 'reach_block'; pos: Vec3Like }
   | { kind: 'place_block'; pos: Vec3Like; facing?: 'north' | 'south' | 'east' | 'west' | 'up' | 'down' }
   | { kind: 'follow_entity'; entityId: number; range: number }
