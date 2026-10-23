@@ -87,6 +87,8 @@ export function dirName(dx: number, dz: number): string {
  * 新发现（首次看见的方块/实体/群系）只在真正看见时触发。
  */
 export class Perception {
+  /** 第一次拿到某个物品时回调（heldBefore 是之前拿到过的物品） */
+  onNewItem?: (item: string, heldBefore: Set<string>) => void;
   private latest: Percept | null = null;
   private timer: NodeJS.Timeout | null = null;
 
@@ -179,6 +181,14 @@ export class Perception {
       if (s.biome && this.memory.markSeen('biomes', s.biome)) {
         this.bus.publish('discovery', 'P2', `首次进入生物群系：${s.biome}`, { category: 'biome', name: s.biome });
         this.memory.addLandmark('discovery', `biome:${s.biome}`, s.dim, s.pos);
+      }
+      // 拿到过的物品记进记忆：配方知识由此解锁（原版配方书的规则）
+      let heldBefore: Set<string> | null = null;
+      for (const it of s.inventory) {
+        if (this.memory.hasSeen('items', it.name)) continue;
+        heldBefore ??= this.memory.heldItems();
+        this.memory.markSeen('items', it.name);
+        this.onNewItem?.(it.name, heldBefore);
       }
       for (const b of v.visibleNow.values()) {
         if (!NOTABLE.has(b.name)) continue;

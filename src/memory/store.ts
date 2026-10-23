@@ -101,7 +101,7 @@ interface MemoryData {
   farms: FarmRecord[];
   lessons: { ts: number; text: string }[];
   visitedChunks: Record<string, number>;
-  seen: { blocks: Record<string, number>; entities: Record<string, number>; biomes: Record<string, number> };
+  seen: { blocks: Record<string, number>; entities: Record<string, number>; biomes: Record<string, number>; items?: Record<string, number> };
   landmarks: Landmark[];
   skillStats: Record<string, SkillStat>;
   goals: GoalRecord[];
@@ -128,7 +128,7 @@ const empty = (): MemoryData => ({
   farms: [],
   lessons: [],
   visitedChunks: {},
-  seen: { blocks: {}, entities: {}, biomes: {} },
+  seen: { blocks: {}, entities: {}, biomes: {}, items: {} },
   landmarks: [],
   skillStats: {},
   goals: [],
@@ -299,12 +299,23 @@ export class WorldMemory {
     return s / 9;
   }
 
-  markSeen(cat: 'blocks' | 'entities' | 'biomes', name: string): boolean {
+  markSeen(cat: 'blocks' | 'entities' | 'biomes' | 'items', name: string): boolean {
     const key = `${this.worldId}:${name}`;
-    if (this.data.seen[cat][key]) return false;
-    this.data.seen[cat][key] = Date.now();
+    const bucket = (this.data.seen[cat] ??= {});
+    if (bucket[key]) return false;
+    bucket[key] = Date.now();
     this.touch();
     return true;
+  }
+
+  hasSeen(cat: 'blocks' | 'entities' | 'biomes' | 'items', name: string): boolean {
+    return !!this.data.seen[cat]?.[`${this.worldId}:${name}`];
+  }
+
+  /** 当前世界里拿到过（进过背包）的物品：配方知识由此解锁，像原版配方书一样 */
+  heldItems(): Set<string> {
+    const prefix = `${this.worldId}:`;
+    return new Set(Object.keys(this.data.seen.items ?? {}).filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length)));
   }
 
   seenCount() {

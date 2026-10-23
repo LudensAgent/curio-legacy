@@ -12,6 +12,7 @@ import { HindsightBackend } from './memory/hindsight.ts';
 import { buildingArchiveFor } from './skills/build.ts';
 import { MethodLibrary } from './methods/learning.ts';
 import { ResourceKnowledge } from './methods/knowledge.ts';
+import { RecipeBook } from './methods/recipes.ts';
 import { createMethodSkills } from './methods/skills.ts';
 import { SKILLS } from './skills/index.ts';
 import { travelStore } from './travel/store.ts';
@@ -27,7 +28,7 @@ import { ruleProposal } from './planner/plan.ts';
 import { Planner } from './planner/planner.ts';
 import { SkillLibrary } from './skills/library.ts';
 import { habitName, learnCandidates, signatureOf } from './brain/habits.ts';
-import { ObserverFeed, createObserverHandler, installMineflayerObserver, type MineflayerBotLike, type MineflayerObserver } from 'curio-observer';
+import { ObserverFeed, createObserverHandler, installMineflayerObserver, installTaskObserver, type MineflayerBotLike, type MineflayerObserver } from 'curio-observer';
 
 const bus = new EventBus();
 attachLogger(bus, config.dataDir);
@@ -59,6 +60,13 @@ const library = new SkillLibrary(path.join(config.dataDir, 'skill-library.json')
 const methods = new MethodLibrary(path.join(config.dataDir, 'method-library.json'), adapter, memory, bus,
   { trialWorldIds: config.learning.testWorldIds });
 for (const skill of createMethodSkills(methods, new ResourceKnowledge(config.mc.version))) SKILLS[skill.name] = skill;
+// 配方记忆：拿到过材料才知道配方；LLM 按类别→物品分级查询
+const recipeBook = new RecipeBook(config.mc.version, memory);
+planner.recipeBook = recipeBook;
+perception.onNewItem = (item, heldBefore) => {
+  const unlocked = recipeBook.unlockedBy(item, heldBefore);
+  bus.publish('item_new', 'P2', `第一次拿到 ${item}${unlocked.length ? `，想起了用它能做的东西：${unlocked.join('、')}` : ''}`, { item, unlocked });
+};
 setInterval(() => library.prune(), 60_000).unref();
 const executive = new Executive({
   adapter, arbiter, planner, perception, memory, bus,
@@ -86,6 +94,9 @@ actionChat.start();
 
 // ------------------------------------------------------------ Curio Observer（观察者客户端模组的数据流）
 const feed = config.observerFeed ? new ObserverFeed({ botName: config.mc.username, mcVersion: config.mc.version, agentVersion: '0.3.0' }) : null;
+const observerTasks = feed ? installTaskObserver(feed, arbiter, {
+  interests: () => perception.snapshot()?.drives ?? [],
+}) : null;
 let observedBot: unknown = null;
 let observerInstall: MineflayerObserver | null = null;
 /** 每次创建新的 Mineflayer bot（首次连接、断线重连）时重新挂载；同一个 bot 的重生不重复挂载 */
@@ -256,6 +267,7 @@ function shutdown() {
   episodic.stop();
   methods.dispose();
   observerInstall?.dispose();
+  observerTasks?.dispose();
   feed?.dispose();
   memory.close();
   adapter.quit();
