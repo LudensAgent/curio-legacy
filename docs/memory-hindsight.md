@@ -15,22 +15,18 @@
 
 ## 启动服务
 
-需要 Docker Desktop 的 Linux 容器引擎可用。先在项目 `.env` 中添加以下配置，并填写真实提供方参数。示例中的空 key 需要自行填写；不要将 `.env` 提交到 Git。
+需要 Docker Desktop 的 Linux 容器引擎可用。Hindsight 默认复用项目 `.env` 中现有的 `LLM_BASE_URL`、`LLM_MODEL` 和 `LLM_API_KEY`，无需重复填写模型配置。先确认它们指向可用的模型服务，再添加以下记忆配置；不要将 `.env` 提交到 Git。
 
 ```dotenv
 MEMORY_PROVIDER=hindsight
 MEMORY_WORLD_ID=my-survival-world-01
 HINDSIGHT_URL=http://127.0.0.1:8888
 HINDSIGHT_API_KEY=
-
-# Hindsight 服务自己使用的模型，与 Agent 规划模型分别配置。
-HINDSIGHT_API_LLM_PROVIDER=openai
-HINDSIGHT_API_LLM_BASE_URL=https://api.openai.com/v1
-HINDSIGHT_API_LLM_MODEL=gpt-5-mini
-HINDSIGHT_API_LLM_API_KEY=
 ```
 
-这里的 `openai` 表示 OpenAI 兼容 Chat Completions 接口；使用兼容网关时填写该网关的 URL、模型名和 key。原生提供方需按其实际要求同时修改 provider 与 base URL。Docker 内访问宿主机上的模型服务时，使用 `host.docker.internal`，例如 `http://host.docker.internal:11434/v1`，容器中的 `127.0.0.1` 指向容器自身。
+非空的 `HINDSIGHT_API_LLM_BASE_URL`、`HINDSIGHT_API_LLM_MODEL`、`HINDSIGHT_API_LLM_API_KEY` 可以分别覆盖对应的 `LLM_*` 值；未设置或为空时自动复用。项目把 `LLM_PROVIDER=deepseek/ollama/...` 当作显示名，实际均走 OpenAI 兼容接口，因此 Hindsight 的 provider 默认固定为 `openai`，不直接复制该标签。这里的 `openai` 表示 OpenAI 兼容 Chat Completions 协议。若使用服务端原生提供方，可显式设置 `HINDSIGHT_API_LLM_PROVIDER` 和配套参数。`LLM_PROVIDER=mock` 不会为 Hindsight 提供一个模拟模型；启用 Hindsight 仍需实际可用的模型配置。
+
+Docker 内访问宿主机上的模型服务时，在 `.env` 设置 `HINDSIGHT_API_LLM_BASE_URL=http://host.docker.internal:11434/v1` 等容器可达地址；Agent 可继续使用原来的 `LLM_BASE_URL=http://127.0.0.1:11434/v1`。容器中的 `127.0.0.1` 指向容器自身。
 
 `HINDSIGHT_API_KEY` 是 Agent 访问记忆服务的凭证，`HINDSIGHT_API_LLM_API_KEY` 是记忆服务访问模型的凭证，两者用途不同。示例 compose 仅向本机开放端口，不启用服务访问认证，前者保持为空；连接已有认证服务时才填写前者。变量定义见 [Hindsight 官方配置](https://hindsight.vectorize.io/developer/configuration)。
 

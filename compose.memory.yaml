@@ -11,9 +11,11 @@ services:
       - "127.0.0.1:9999:9999"
     environment:
       HINDSIGHT_API_LLM_PROVIDER: "${HINDSIGHT_API_LLM_PROVIDER:-openai}"
-      HINDSIGHT_API_LLM_API_KEY: "${HINDSIGHT_API_LLM_API_KEY:-}"
-      HINDSIGHT_API_LLM_BASE_URL: "${HINDSIGHT_API_LLM_BASE_URL:-https://api.openai.com/v1}"
-      HINDSIGHT_API_LLM_MODEL: "${HINDSIGHT_API_LLM_MODEL:-gpt-5-mini}"
+      # Reuse the Agent's .env connection settings unless explicitly overridden.
+      # LLM_PROVIDER is a display label; the Agent uses the OpenAI-compatible protocol.
+      HINDSIGHT_API_LLM_API_KEY: "${HINDSIGHT_API_LLM_API_KEY:-${LLM_API_KEY:-}}"
+      HINDSIGHT_API_LLM_BASE_URL: "${HINDSIGHT_API_LLM_BASE_URL:-${LLM_BASE_URL:-https://api.openai.com/v1}}"
+      HINDSIGHT_API_LLM_MODEL: "${HINDSIGHT_API_LLM_MODEL:-${LLM_MODEL:-gpt-4o-mini}}"
       HINDSIGHT_API_WORKER_ID: minecraftllm-memory
       # Chinese gameplay notes require multilingual retrieval models.
       HINDSIGHT_API_EMBEDDINGS_PROVIDER: local
