@@ -33,6 +33,9 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
   light = 15;
   oxygen = 20;
   inWater = false;
+  /** 正在乘坐的东西（boat/horse…） */
+  riding: string | null = null;
+  private ridingId: number | null = null;
 
   private k(x: number, y: number, z: number) {
     return `${x},${y},${z}`;
@@ -82,7 +85,7 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
       worldId: this.worldId, sessionId: this.sessionId, observationId: ++this.observationId,
       username: 'FakeBot', pos: { ...this.pos }, dim: this.dim,
       hp: this.hp, food: this.food, oxygen: this.oxygen, timeOfDay: this.isDay ? 1000 : 15000, isDay: this.isDay, biome: 'plains', onGround: true,
-      inWater: this.inWater, inLava: this.inLava, inventory: [...this.inv].map(([name, count]) => ({ name, count })), emptySlots: 30, held: null,
+      inWater: this.inWater, inLava: this.inLava, inventory: [...this.inv].map(([name, count]) => ({ name, count })), emptySlots: 30, held: null, riding: this.riding,
       equipment: [...this.equipped].map(([slot, name]) => ({ slot, name })),
     };
   }
@@ -371,6 +374,58 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
     this.oxygen = 20;
     if (target) { this.pos = { ...target }; this.inWater = false; }
     return { ok: !this.inWater, landed: !this.inWater, oxygen: this.oxygen, ...(!target && this.inWater ? { reason: 'WATER_ESCAPE_TIMEOUT' } : {}) };
+  }
+  // ---- 通用基础动作（测试用的简化世界：船只能在 water 方块上行驶）
+  async useItemOn(item: string, target: { kind: 'block'; pos: Vec3Like } | { kind: 'self' }, signal: AbortSignal) {
+    await sleep(20, signal);
+    if (!(this.inv.get(item) ?? 0)) return { ok: false, reason: `NO_ITEM:${item}` };
+    this.actions.push(`use:${item}:${target.kind === 'block' ? this.nameAt(target.pos.x, target.pos.y, target.pos.z) : 'self'}`);
+    if (target.kind === 'block' && /_boat$/.test(item)) {
+      this.inv.set(item, this.inv.get(item)! - 1);
+      const id = 9000 + this.entities.length;
+      this.entities.push({ id, name: 'boat', kind: 'other', pos: { x: target.pos.x + 0.5, y: target.pos.y + 1, z: target.pos.z + 0.5 }, dist: 0, height: 0.6 });
+      return { ok: true, spawned: 'boat' };
+    }
+    if (target.kind === 'block' && item === 'bucket' && this.nameAt(target.pos.x, target.pos.y, target.pos.z) === 'water') {
+      this.inv.set('bucket', this.inv.get('bucket')! - 1);
+      this.inv.set('water_bucket', (this.inv.get('water_bucket') ?? 0) + 1);
+    }
+    return { ok: true };
+  }
+  async interactEntity(entityId: number, item: string | null, signal: AbortSignal) {
+    await sleep(20, signal);
+    const e = this.entities.find((x) => x.id === entityId);
+    if (!e) return { ok: false, reason: 'ENTITY_GONE' };
+    this.actions.push(`interact:${e.name}${item ? `:${item}` : ''}`);
+    if (!item && /boat|minecart|horse/.test(e.name)) {
+      this.riding = e.name; this.ridingId = e.id; this.pos = { ...e.pos };
+      return { ok: true, mounted: e.name };
+    }
+    return { ok: true };
+  }
+  async dismount(signal: AbortSignal) {
+    await sleep(20, signal);
+    if (!this.riding) return { ok: false, reason: 'NOT_MOUNTED' };
+    this.riding = null; this.ridingId = null;
+    return { ok: true };
+  }
+  async ride(target: { x: number; z: number }, signal: AbortSignal, opts: { timeoutMs: number; stop?: () => boolean }) {
+    if (!this.riding) return { ok: false, reason: 'NOT_MOUNTED', arrived: false, moved: 0 };
+    const start = { ...this.pos };
+    const boat = this.riding === 'boat';
+    for (let i = 0; i < 400; i++) {
+      throwIfAborted(signal);
+      if (opts.stop?.()) return { ok: true, arrived: false, moved: dist3(start, this.pos) };
+      const dx = target.x - this.pos.x, dz = target.z - this.pos.z, d = Math.hypot(dx, dz);
+      if (d <= 2) return { ok: true, arrived: true, moved: dist3(start, this.pos) };
+      const nx = this.pos.x + (dx / d) * Math.min(1, d), nz = this.pos.z + (dz / d) * Math.min(1, d);
+      if (boat && this.nameAt(Math.floor(nx), Math.floor(this.pos.y) - 1, Math.floor(nz)) !== 'water') return { ok: true, arrived: false, blocked: true, moved: dist3(start, this.pos) };
+      this.pos = { x: nx, y: this.pos.y, z: nz };
+      const e = this.entities.find((x) => x.id === this.ridingId);
+      if (e) e.pos = { ...this.pos };
+      await sleep(5, signal);
+    }
+    return { ok: false, reason: 'TIMEOUT', arrived: false, moved: dist3(start, this.pos) };
   }
   chat(text: string) {
     this.actions.push(`chat:${text}`);

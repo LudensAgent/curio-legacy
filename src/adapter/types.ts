@@ -91,6 +91,8 @@ export interface AgentState {
   inventory: InvItem[];
   emptySlots: number;
   held: string | null;
+  /** 正在乘坐的载具/坐骑（boat、minecart、horse…），没有为 null */
+  riding?: string | null;
   equipment?: { slot: string; name: string; durabilityRemaining?: number }[];
 }
 
@@ -196,6 +198,16 @@ export interface GameAdapter {
   jump(ms: number, signal: AbortSignal): Promise<void>;
   /** Swim toward an observed shore, retaining buoyancy until dry footing is verified. */
   swimTo?(target: Vec3Like | null, signal: AbortSignal, opts?: SwimOptions): Promise<ActionResult & { landed: boolean; oxygen: number }>;
+
+  // ---- 通用基础动作：玩家的“右键”和“方向键”。上层用它们组合出技能清单里没有的玩法
+  /** 手持 item 右键：对着一个方块/水面（block），或对空中/自己（self） */
+  useItemOn?(item: string, target: { kind: 'block'; pos: Vec3Like } | { kind: 'self' }, signal: AbortSignal): Promise<ActionResult & { spawned?: string }>;
+  /** 右键一个实体：船/矿车/马会坐上去，其他生物按手上物品交互（喂食、繁殖、剪毛、交易…） */
+  interactEntity?(entityId: number, item: string | null, signal: AbortSignal): Promise<ActionResult & { mounted?: string }>;
+  /** 从载具/坐骑上下来 */
+  dismount?(signal: AbortSignal): Promise<ActionResult>;
+  /** 操控正在乘坐的载具朝 target 前进；stop() 返回 true 时停下 */
+  ride?(target: { x: number; z: number }, signal: AbortSignal, opts: { timeoutMs: number; stop?: () => boolean }): Promise<ActionResult & { arrived: boolean; blocked?: boolean; moved: number }>;
   chat(text: string): void;
 }
 

@@ -380,6 +380,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       inventory: [...inv.entries()].map(([name, count]) => ({ name, count })),
       emptySlots: b.inventory.emptySlotCount(),
       held: b.heldItem?.name ?? null,
+      riding: b.vehicle ? String(b.vehicle.name ?? 'vehicle') : null,
       equipment: ['head', 'torso', 'legs', 'feet', 'off-hand'].flatMap((slot) => {
         const item = b.inventory.slots?.[b.getEquipmentDestSlot?.(slot)];
         if (!item) return [];
@@ -468,6 +469,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     throwIfAborted(opts.signal);
     if (!this.ready) throw new Error('NOT_CONNECTED');
     const b = this.bot;
+    if (b.vehicle) throw new Error(`RIDING：正在乘坐 ${b.vehicle.name}，走路前先 dismount，或用 ride 操控它前进`);
     if (this.normalMovements && typeof b.pathfinder.setMovements === 'function') {
       const movements = Object.assign(Object.create(Object.getPrototypeOf(this.normalMovements)), this.normalMovements);
       if (opts.constructionSafe) { movements.canDig = false; movements.allow1by1towers = false; movements.allowParkour = false; movements.scafoldingBlocks = []; }
@@ -1041,7 +1043,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (!['dirt', 'grass_block', 'dirt_path', 'coarse_dirt'].includes(block.name)) return { ok: false, reason: `NOT_TILLABLE:${block.name}` };
     const above = b.blockAt(this.vec({ x: pos.x, y: pos.y + 1, z: pos.z }));
     if (above && above.boundingBox === 'block') return { ok: false, reason: 'BLOCKED' };
-    if (above && ['short_grass', 'tall_grass', 'fern'].includes(above.name)) await this.afterAction(() => raceAbort(b.dig(above, true), signal, 3000, () => {}), check);
+    if (above && ['short_grass', 'tall_grass', 'grass', 'fern'].includes(above.name)) await this.afterAction(() => raceAbort(b.dig(above, true), signal, 3000, () => {}), check);
     const hoe = b.inventory.items().find((i: any) => i.name.endsWith('_hoe'));
     if (!hoe) return { ok: false, reason: 'NO_HOE' };
     await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos }, { signal, timeoutMs: 15000 }), check);
@@ -1425,6 +1427,158 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (epoch === this.actionEpoch && b === this.bot) {
         b.setControlState('jump', false); b.setControlState('forward', false); b.setControlState('sprint', false);
       }
+    }
+  }
+
+  // ---------------------------------------------------------------- 通用基础动作
+  private async equipNamed(name: string, check: (() => void) & { signal?: AbortSignal }) {
+    const it = this.bot.inventory.items().find((i: any) => i.name === name);
+    if (!it) return false;
+    if (this.bot.heldItem?.name !== name) await this.afterAction(() => this.bot.equip(it, 'hand'), check);
+    return true;
+  }
+
+  async useItemOn(item: string, target: { kind: 'block'; pos: Vec3Like } | { kind: 'self' }, signal: AbortSignal): Promise<ActionResult & { spawned?: string }> {
+    const check = this.actionCheckpoint(signal);
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
+    const b = this.bot;
+    if (!(await this.equipNamed(item, check))) return { ok: false, reason: `NO_ITEM:${item}` };
+    try {
+      if (target.kind === 'self') {
+        await this.afterAction(async () => { b.activateItem(); await sleep(400, signal); b.deactivateItem(); }, check);
+        return { ok: true };
+      }
+      const block = b.blockAt(this.vec(target.pos));
+      if (!block) return { ok: false, reason: 'NO_BLOCK' };
+      const Vec3 = require('vec3').Vec3;
+      // 放置实体类物品（船、矿车、盔甲架、刷怪蛋）：对着方块顶面放
+      if (/_boat$|_raft$|_spawn_egg$|^armor_stand$|^end_crystal$/.test(item)) {
+        const entity = await this.afterAction(() => raceAbort(b.placeEntity(block, new Vec3(0, 1, 0)), signal, 6000, () => {}), check);
+        return { ok: true, spawned: (entity as any)?.name ?? item };
+      }
+      if (/_minecart$|^minecart$/.test(item)) {
+        await this.afterAction(() => b.activateBlock(block), check);
+        return { ok: true, spawned: 'minecart' };
+      }
+      // 对着液体用（水桶装水/倒水等）：先看向液面再“使用物品”；其他情况按“对方块右键”
+      const fluid = ['water', 'lava'].includes(block.name);
+      await this.afterAction(() => b.lookAt(block.position.offset(0.5, fluid ? 0.9 : 0.5, 0.5), true), check);
+      if (fluid) await this.afterAction(async () => { b.activateItem(); await sleep(250, signal); b.deactivateItem(); }, check);
+      else await this.afterAction(() => b.activateBlock(block), check);
+      return { ok: true };
+    } catch (e: any) {
+      if (e instanceof AbortedError) throw e;
+      return { ok: false, reason: String(e?.message ?? e) };
+    }
+  }
+
+  async interactEntity(entityId: number, item: string | null, signal: AbortSignal): Promise<ActionResult & { mounted?: string }> {
+    const check = this.actionCheckpoint(signal);
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
+    const b = this.bot;
+    const ent = b.entities[entityId];
+    if (!ent) return { ok: false, reason: 'ENTITY_GONE' };
+    if (item && !(await this.equipNamed(item, check))) return { ok: false, reason: `NO_ITEM:${item}` };
+    const rideable = /boat|raft|minecart|horse|donkey|mule|pig|strider|camel|llama/.test(String(ent.name));
+    try {
+      await this.afterAction(() => b.lookAt(ent.position.offset(0, (ent.height ?? 1) * 0.5, 0), true), check);
+      if (rideable && !item) {
+        const mounted = new Promise<boolean>((resolve) => {
+          const t = setTimeout(() => { b.off('mount', on); resolve(false); }, 2500);
+          const on = () => { clearTimeout(t); resolve(true); };
+          b.once('mount', on);
+        });
+        b.mount(ent);
+        const ok = await this.afterAction(() => mounted, check);
+        if (ok && /boat|raft/.test(String(ent.name))) {
+          // 坐在船里时不再模拟玩家自己的重力/碰撞（船的位置由 ride 推进）；下船后恢复
+          b.physicsEnabled = false;
+          b.once('dismount', () => { b.physicsEnabled = true; });
+        }
+        return ok ? { ok: true, mounted: String(ent.name) } : { ok: false, reason: 'MOUNT_FAILED' };
+      }
+      await this.afterAction(() => b.activateEntity(ent), check);
+      return { ok: true };
+    } catch (e: any) {
+      if (e instanceof AbortedError) throw e;
+      return { ok: false, reason: String(e?.message ?? e) };
+    }
+  }
+
+  async dismount(signal: AbortSignal): Promise<ActionResult> {
+    const check = this.actionCheckpoint(signal);
+    const b = this.bot;
+    if (!this.ready || !b.vehicle) return { ok: false, reason: 'NOT_MOUNTED' };
+    const off = new Promise<boolean>((resolve) => {
+      const t = setTimeout(() => { b.off('dismount', on); resolve(false); }, 2500);
+      const on = () => { clearTimeout(t); resolve(true); };
+      b.once('dismount', on);
+    });
+    b.dismount();
+    const ok = await this.afterAction(() => off, check);
+    if (ok) b.physicsEnabled = true;
+    return ok ? { ok: true } : { ok: false, reason: 'DISMOUNT_FAILED' };
+  }
+
+  /**
+   * 操控载具。马、猪等坐骑由服务器计算运动，只需发送方向输入；
+   * 船的运动由客户端计算（原版就是这样），Mineflayer 不模拟，所以这里按简化的船只运动学自己推进并上报位置：
+   * 在水面上加速到约 8 格/秒，前方是陆地/方块就停下（靠岸），离目标 2 格内算到达。
+   */
+  async ride(target: { x: number; z: number }, signal: AbortSignal, opts: { timeoutMs: number; stop?: () => boolean }): Promise<ActionResult & { arrived: boolean; blocked?: boolean; moved: number }> {
+    const check = this.actionCheckpoint(signal);
+    const b = this.bot;
+    if (!this.ready || !b.vehicle) return { ok: false, reason: 'NOT_MOUNTED', arrived: false, moved: 0 };
+    const v = b.vehicle;
+    const start = v.position.clone();
+    const end = Date.now() + Math.max(1000, opts.timeoutMs);
+    const isBoat = /boat|raft/.test(String(v.name));
+    const water = (blk: any) => !!blk && (blk.name === 'water' || blk.name === 'bubble_column' || String(blk.getProperties?.().waterlogged) === 'true');
+    const passable = (blk: any) => !blk || blk.boundingBox === 'empty';
+    let speed = 0;
+    const tick = () => (typeof b.waitForTicks === 'function' ? raceAbort(b.waitForTicks(1), signal, 1000, () => {}) : sleep(50, signal));
+    try {
+      if (isBoat) b.physicsEnabled = false; // 坐船期间不模拟玩家自身的重力/碰撞（下船时恢复）
+      while (Date.now() < end) {
+        check();
+        if (!b.vehicle) return { ok: false, reason: 'DISMOUNTED', arrived: false, moved: v.position.distanceTo(start) };
+        if (opts.stop?.()) return { ok: true, arrived: false, moved: v.position.distanceTo(start) };
+        const p = v.position;
+        const dx = target.x - p.x, dz = target.z - p.z, dist = Math.hypot(dx, dz);
+        if (dist <= 2) return { ok: true, arrived: true, moved: p.distanceTo(start) };
+        const yaw = Math.atan2(-dx, -dz);
+        if (!isBoat) {
+          await this.afterAction(() => b.look(yaw, 0, true), check);
+          b.moveVehicle(0, 1);
+          await this.afterAction(tick, check);
+          continue;
+        }
+        speed = Math.min(0.4, speed + 0.04);
+        const step = Math.min(speed, dist);
+        const nx = p.x + (dx / dist) * step, nz = p.z + (dz / dist) * step;
+        const Vec3 = require('vec3').Vec3;
+        const feet = b.blockAt(new Vec3(nx + (dx / dist) * 0.7, p.y, nz + (dz / dist) * 0.7));
+        const under = b.blockAt(new Vec3(nx, p.y - 0.2, nz));
+        if (!passable(feet) && !water(feet)) return { ok: true, arrived: false, blocked: true, moved: p.distanceTo(start) }; // 前面是岸或障碍：靠岸
+        if (!water(under) && !water(b.blockAt(new Vec3(nx, p.y - 1, nz)))) return { ok: true, arrived: false, blocked: true, moved: p.distanceTo(start) }; // 船不能上岸行驶
+        const deg = ((Math.PI - yaw) * 180) / Math.PI;
+        v.position = new Vec3(nx, p.y, nz);
+        v.yaw = yaw;
+        b.entity.position = new Vec3(nx, p.y + 0.4, nz);
+        b.entity.yaw = yaw;
+        await this.afterAction(async () => {
+          b._client.write('steer_boat', { leftPaddle: true, rightPaddle: true });
+          b._client.write('vehicle_move', { x: nx, y: p.y, z: nz, yaw: deg, pitch: 0 });
+        }, check);
+        await this.afterAction(tick, check);
+      }
+      return { ok: false, reason: 'TIMEOUT', arrived: false, moved: v.position.distanceTo(start) };
+    } finally {
+      if (isBoat) {
+        try { b._client.write('steer_boat', { leftPaddle: false, rightPaddle: false }); } catch { /* ignore */ }
+        if (!b.vehicle) b.physicsEnabled = true;
+      }
+      try { if (b.vehicle && !isBoat) b.moveVehicle(0, 0); } catch { /* ignore */ }
     }
   }
 
