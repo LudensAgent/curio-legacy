@@ -65,7 +65,7 @@ export const NOTABLE = new Set([
   'pumpkin', 'melon', 'obsidian', 'clay', 'sweet_berry_bush', 'nether_portal', 'end_portal', 'end_gateway', 'end_portal_frame', 'stone_bricks', 'mossy_stone_bricks', 'cracked_stone_bricks', 'bookshelf',
 ]);
 /** 采集目标常用的地表方块：也记住，但每种限量 */
-export const GROUND = new Set(['stone', 'cobblestone', 'deepslate', 'andesite', 'granite', 'diorite', 'dirt', 'grass_block', 'sand', 'gravel']);
+export const GROUND = new Set(['stone', 'cobblestone', 'deepslate', 'andesite', 'granite', 'diorite', 'dirt', 'grass_block', 'sand', 'gravel', 'netherrack', 'blackstone', 'basalt', 'soul_sand', 'soul_soil', 'end_stone']);
 
 export interface SeenEntity {
   id: number;
