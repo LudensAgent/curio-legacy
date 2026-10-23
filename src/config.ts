@@ -71,6 +71,30 @@ export const config = {
     /** Only explicitly designated isolated worlds may provide candidate promotion evidence. */
     testWorldIds: str('LEARNING_TEST_WORLD_IDS').split(',').map((s) => s.trim()).filter(Boolean),
   },
+  /** 直播间接入：弹幕作为“观众的声音”给决策参考（不可信的外部信息，不会当作指令） */
+  live: {
+    bilibili: {
+      enabled: bool('BILIBILI_ENABLED', false),
+      /** web：直播间号（免登录可用，昵称会被打码）；open：B 站直播开放平台 + 主播身份码（官方互动玩法接口） */
+      mode: (str('BILIBILI_MODE', 'web').toLowerCase() === 'open' ? 'open' : 'web') as 'web' | 'open',
+      roomId: num('BILIBILI_ROOM_ID', 0),
+      /** 可选：登录 cookie（SESSDATA=…; buvid3=…），能看到观众昵称；不会写进日志 */
+      cookie: str('BILIBILI_COOKIE'),
+      uid: num('BILIBILI_UID', 0),
+      open: {
+        appId: num('BILIBILI_OPEN_APP_ID', 0),
+        accessKey: str('BILIBILI_OPEN_ACCESS_KEY'),
+        accessSecret: str('BILIBILI_OPEN_ACCESS_SECRET'),
+        code: str('BILIBILI_OPEN_CODE'),
+      },
+    },
+    audience: {
+      maxInPrompt: num('AUDIENCE_MAX_IN_PROMPT', 6),
+      windowSec: num('AUDIENCE_WINDOW_SEC', 180),
+      perUserGapSec: num('AUDIENCE_PER_USER_GAP_SEC', 8),
+      blockWords: str('AUDIENCE_BLOCK_WORDS').split(',').map((s) => s.trim()).filter(Boolean),
+    },
+  },
   dashboard: {
     host: str('DASHBOARD_HOST', '127.0.0.1'),
     port: num('DASHBOARD_PORT', 3000),

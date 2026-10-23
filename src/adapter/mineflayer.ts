@@ -34,6 +34,15 @@ const HOSTILE = new Set([
 const NEUTRAL = new Set(['enderman', 'zombified_piglin', 'piglin', 'wolf', 'bee', 'iron_golem', 'llama', 'panda', 'polar_bear', 'dolphin', 'goat']);
 const BAD_FOOD = new Set(['rotten_flesh', 'spider_eye', 'poisonous_potato', 'pufferfish', 'suspicious_stew', 'chorus_fruit']);
 const WEAPON_ORDER = ['netherite', 'diamond', 'iron', 'stone', 'golden', 'wooden'];
+/**
+ * 发到游戏聊天的文字：以 / 开头会被服务器当成命令执行（/op、/give…）。
+ * 机器人说的话可能间接受观众弹幕影响，所以一律不允许以命令开头。
+ */
+export function safeChat(text: string): string {
+  const t = text.normalize('NFKC').replace(/[\u0000-\u001f\u007f\u200b-\u200f\u2060-\u206f\ufeff]/g, '').replace(/\s+/g, ' ').trim().slice(0, 240);
+  return /^[/／\\!]/.test(t) ? `· ${t.replace(/^[/／\\!]+/, '')}` : t;
+}
+
 const RAW_FOOD = /^(beef|porkchop|chicken|mutton|rabbit|cod|salmon|potato|tropical_fish)$/;
 const PROTECTED_BLOCKS = ['chest', 'trapped_chest', 'crafting_table', 'furnace', 'barrel', 'white_bed', 'red_bed'];
 
@@ -1731,6 +1740,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
 
   chat(text: string) {
     if (!this.ready || !text) return;
-    try { this.bot.chat(text.replace(/\s+/g, ' ').slice(0, 240)); } catch { /* ignore */ }
+    try { this.bot.chat(safeChat(text)); } catch { /* ignore */ }
   }
 }

@@ -1,3 +1,4 @@
+import type { AudienceContext } from '../live/audience.ts';
 import type { AgentState, GameAdapter } from '../adapter/types.ts';
 import type { Arbiter, Step, TaskInfo, TaskOutcome, TaskPreemption } from '../arbiter/arbiter.ts';
 import type { EventBus } from '../events.ts';
@@ -17,6 +18,8 @@ export interface ExecutiveDeps {
   adapter: GameAdapter; arbiter: Arbiter; planner: Planner; perception: Perception; memory: WorldMemory; bus: EventBus;
   onLearnSkill?: (raw: unknown) => void;
   onGoalEnd?: (status: string) => void;
+  /** 直播间观众弹幕（外部、不可信，只作参考） */
+  audience?: { context(tier?: 'light' | 'full'): AudienceContext | null };
 }
 
 /** 几秒内就能完成、不改变位置的收尾动作 */
@@ -216,7 +219,7 @@ export class Executive {
     return { reason, percept, current: this.d.arbiter.info(), lastFailure: this.lastFailure,
       pendingSteps: this.plan ? this.plan.steps.slice(this.plan.index) : [],
       ...this.workingMemory(),
-      userSuggestion: this.userSuggestion, binding: this.projects.currentBinding(), continuity: {
+      userSuggestion: this.userSuggestion, audience: this.d.audience?.context('full') ?? null, binding: this.projects.currentBinding(), continuity: {
         ...this.projects.context(), wishes: this.d.memory.intents().filter((i) => i.status === 'deferred' || i.status === 'open').slice(-8),
         deferredProjects: this.d.memory.projects().filter((p) => p.status === 'deferred').slice(-6)
           .map((p) => ({ id: p.id, intentId: p.intentId, worldId: p.worldId, title: p.title, revision: p.revision,

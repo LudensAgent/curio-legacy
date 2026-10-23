@@ -26,6 +26,9 @@ import { Vision } from './perception/vision.ts';
 import { MockProvider, OpenAICompatibleProvider, type LlmProvider } from './planner/llm.ts';
 import { ruleProposal } from './planner/plan.ts';
 import { Planner } from './planner/planner.ts';
+import { liveAudience } from './planner/prompt.ts';
+import { AudienceChannel } from './live/audience.ts';
+import { BilibiliLive, type LiveMessage, type LiveStatus } from './live/bilibili.ts';
 import { SkillLibrary } from './skills/library.ts';
 import { habitName, learnCandidates, signatureOf } from './brain/habits.ts';
 import { ObserverFeed, createObserverHandler, installMineflayerObserver, installTaskObserver, type MineflayerBotLike, type MineflayerObserver } from 'curio-observer';
@@ -68,8 +71,18 @@ perception.onNewItem = (item, heldBefore) => {
   bus.publish('item_new', 'P2', `第一次拿到 ${item}${unlocked.length ? `，想起了用它能做的东西：${unlocked.join('、')}` : ''}`, { item, unlocked });
 };
 setInterval(() => library.prune(), 60_000).unref();
+// ------------------------------------------------------------ 直播间（可选）：弹幕只作参考
+const audience = config.live.bilibili.enabled ? new AudienceChannel(config.live.audience, bus) : null;
+const live = config.live.bilibili.enabled ? new BilibiliLive(config.live.bilibili, { log: (sev, msg) => bus.publish('live', sev, msg) }) : null;
+if (live && audience) {
+  liveAudience.enabled = true;
+  live.on('message', (m: LiveMessage) => audience.ingest(m));
+  live.on('status', (st: LiveStatus) => bus.publish('live_status', st.state === 'error' ? 'P1' : 'P3', `B 站直播间：${st.state}${st.detail ? `（${st.detail}）` : ''}`));
+}
+
 const executive = new Executive({
   adapter, arbiter, planner, perception, memory, bus,
+  ...(audience ? { audience } : {}),
   onLearnSkill: (raw) => {
     const r = planner.autonomous ? methods.propose(raw, { intentId: memory.currentIntent()?.id, projectId: memory.activeProject()?.id }) : library.learn(raw);
     if (!r.ok) bus.publish('skill_rejected', 'P1', `没有采纳提议的新技能：${r.error}`);
@@ -219,6 +232,7 @@ function snapshot() {
     episodicMemory: episodic.snapshot(),
     metrics: metrics.snapshot(),
     spectator: spectator.status,
+    live: live ? { status: live.status(), audience: audience?.stats() } : null,
     memory: {
       landmarks: memory.landmarks().slice(-12),
       notes: memory.recentNotes(6),
@@ -248,6 +262,7 @@ executive.start();
 reflex.start();
 spectator.start();
 metrics.start();
+live?.start();
 startDashboard(config.dashboard.host, config.dashboard.port, bus, {
   snapshot,
   pause: () => executive.pause(),
@@ -264,6 +279,7 @@ function shutdown() {
   arbiter.cancel('退出');
   executive.stop();
   actionChat.stop();
+  void live?.stop();
   episodic.stop();
   methods.dispose();
   observerInstall?.dispose();
