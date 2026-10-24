@@ -94,3 +94,37 @@ test('eat：咬了但饥饿值没变，就报没吃进去，而不是“进食�
     assert.match(r.summary, /没吃进去/);
   } finally { ctx.memory.close(); }
 });
+
+test('已经有床（背包里或放在某处）就不再做第一张以外的床，并告诉它床在哪', async () => {
+  const { craft } = await import('../src/skills/work.ts');
+  const w = new Clock(); w.inv.set('white_wool', 3); w.inv.set('oak_planks', 3);
+  const ctx = makeCtx(w);
+  ctx.memory.setWorld(w.worldId);
+  try {
+    w.inv.set('white_bed', 1);
+    let r = await craft.run(ctx, { item: 'white_bed', count: 1 });
+    assert.equal(r.status, 'failed');
+    assert.match(r.summary, /背包里已经有 white_bed/);
+    w.inv.delete('white_bed');
+    ctx.memory.addLandmark('discovery', '我的床', 'overworld', { x: 40, y: 64, z: 0 }, 2);
+    r = await craft.run(ctx, { item: 'white_bed', count: 1 });
+    assert.equal(r.status, 'failed');
+    assert.match(r.summary, /已经有一张自己的床放在 \(40,64,0\)/);
+    assert.ok(!w.actions.includes('craft:white_bed'));
+  } finally { ctx.memory.close(); }
+});
+
+test('决策上下文里写着我的床在哪（床放下后不在背包里）', async () => {
+  const { lightUserPrompt, userPrompt } = await import('../src/planner/prompt.ts');
+  const m = new (await import('../src/memory/store.ts')).WorldMemory(null);
+  m.setWorld('w');
+  m.addLandmark('discovery', '我的床', 'overworld', { x: 10, y: 64, z: 0 }, 2);
+  const percept: any = { self: { pos: [0, 64, 0], dim: 'overworld', hp: 20, food: 20, inWater: false, inLava: false, held: null }, inventory: [], emptySlots: 36,
+    nearby: { hostile: [], passive: [], players: [], resources: [] }, vision: null, time: { timeOfDay: 13000, phase: 'night' }, curiosities: [], drives: [], learn_candidates: [] };
+  const ctx: any = { reason: 'no_goal', percept, current: null, lastFailure: null, userSuggestion: null, worldState: { worldId: 'w' } };
+  try {
+    const light = lightUserPrompt(ctx, m);
+    assert.match(light, /"my_bed":\{"placed_at":\[10,64,0\],"dist":10,"in_inventory":false\}/);
+    assert.match(userPrompt(ctx, m), /"my_bed":\{"placed_at":\[10,64,0\]/);
+  } finally { m.close(); }
+});

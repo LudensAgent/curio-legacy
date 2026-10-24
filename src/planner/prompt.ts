@@ -11,6 +11,7 @@ import { LLM_HIDDEN, SKILLS, skillCatalog } from '../skills/index.ts';
 import type { ChatMessage } from './llm.ts';
 import { travelStore } from '../travel/store.ts';
 import { buildingArchiveFor } from '../skills/build.ts';
+import { myBed } from '../skills/stations.ts';
 
 export interface PlanContext {
   reason: string;
@@ -172,6 +173,16 @@ ${liveAudience.enabled ? `${AUDIENCE_RULES}\n` : ''}recent_thread/my_notes 是�
 steps 保持 1–6 步；defer/abandon/complete 可以 steps:[]，表示选择等待而非填充无关动作。不要每轮换目标，也不必每轮说话。可用 begin + 已有 intentId 恢复 continuity 中列出的暂缓兴趣及其原项目；新记录的 ID、项目修订、里程碑和请求代次由程序分配，不能伪造或覆盖。`;
 }
 
+/** 我的床在哪：放下后它不在背包里，但还在原地——每次决策都要知道，免得忘了自己有床又去做一张 */
+function bedInfo(ctx: PlanContext, memory: WorldMemory): Record<string, unknown> {
+  const p = ctx.percept;
+  const pos = { x: p.self.pos[0], y: p.self.pos[1], z: p.self.pos[2] };
+  const bed = myBed(memory, { dim: p.self.dim, worldId: ctx.worldState?.worldId ?? memory.worldId, pos });
+  const inInventory = p.inventory.some((i) => i.name.endsWith('_bed') && i.count > 0);
+  if (!bed && !inInventory) return {};
+  return { my_bed: { ...(bed ? { placed_at: [bed.pos.x, bed.pos.y, bed.pos.z], dist: bed.dist } : {}), in_inventory: inInventory } };
+}
+
 export function boundedJson(value: unknown, maxBytes: number): string {
   if (maxBytes <= 0) return '[]';
   if (!Array.isArray(value)) {
@@ -237,6 +248,7 @@ export function userPrompt(ctx: PlanContext, memory: WorldMemory, recalled?: unk
     ...(audienceBlock(ctx.audience, 'full') ?? {}),
     // 程序测得的“自上次决定以来”的变化：比 recent_thread 里的旧判断更新
     ...(ctx.changes ? { since_last_decision: ctx.changes } : {}),
+    ...bedInfo(ctx, memory),
     state: stableState(p),
   };
   return contextMessage(compact ? compactContext(payload, compact) : payload, reflectionTail(ctx));
@@ -404,9 +416,9 @@ export function lightSystemPrompt(persona: string): string {
 - recent_thread 是你刚才几次的决定、想法和结果，my_notes 是你写给自己的笔记：接着自己的思路走，沿用已经得出的结论和方向（比如目的地），除非新事实推翻它；repeated_failures 里反复失败的做法别再原样重试。
 - 末尾“此刻/自上次决定以来”是刚测到的事实，最先看：旧判断（如“还在水里”）与之不符就作废，别照抄；做过的、背包已有的不再做。
 - 可选 note：写一句接下来几分钟要记住的事（目的地、发现、教训；位置写坐标，不写“东南3格”这种走两步就失效的说法）；可选 then：做完这几步之后打算做什么。
-- lessons/danger_zones 是吃过的亏；my_skills 可直接用。有床时黄昏/天黑就 sleep（跳过黑夜、设重生点，胜过挖坑）；take_items 只拿 known_chests 里有的。
+- lessons/danger_zones 是吃过的亏；my_skills 是自己做成过的做法，做同样的事直接用一步 method:…。有床时黄昏/天黑就 sleep（跳过黑夜、设重生点，胜过挖坑）；take_items 只拿 known_chests 里有的。
 - 学到东西写一句 lesson；好用的组合写 learn_skill {"name","description","steps":[…]}；做不到写 missing_ability。
-- 观察是边走边发生的：explore 带 until（可写 "cow|sheep" 或 "animal"）一看见就停；gather/hunt 找不到会自己转头找、会走到刚才看见的地方。
+- explore 带 until（如 "cow|sheep"、"animal"）一看见就停；gather/hunt 找不到会自己转头找、走到刚才看见的地方。
 - 除了组合动作，还有玩家的“右键/方向键/左键”：use_item、interact、ride、dismount、dig（对着方向挖）、climb_up（垫方块往上爬）。常规做法走不通时，想想真正的玩家会怎么做。
 - self.around 是身边一圈：脚下、头顶、哪边能走。被困（四面走不了、看不见天空、同一个地方接连失败）时先离开这里：往能走的方向走，或 dig 挖开、climb_up 爬上去。
 - 采集要有目的：先想好接下来要做什么，再按缺口采——gather 写 for（{"item":"要做的东西","count":数量}），会按背包缺口算该采几个，够了就不采；不要随手定 8、16 个。想知道整笔账（还差哪些原材料、要先做什么）就查 {"kind":"recipes","item":"物品名","count":数量} 看 account。
@@ -444,6 +456,7 @@ export function lightUserPrompt(ctx: PlanContext, memory: WorldMemory): string {
     state: {
       emptySlots: p.emptySlots,
       inventory: p.inventory.slice(0, 24),
+      ...bedInfo(ctx, memory),
       ...(p.light ? { light: { level: (p.light as any).level, torches: (p.light as any).torches } } : {}),
       nearby: { hostile: p.nearby.hostile, passive: p.nearby.passive, resources: p.nearby.resources.slice(0, 8) },
       ...(v ? { vision: { facing: v.facing, view: v.view, visible_resources: v.visible_resources.slice(0, 8), seen_entities: v.seen_entities.slice(0, 6),

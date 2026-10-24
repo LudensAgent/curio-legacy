@@ -16,6 +16,18 @@ export function rememberStation(ctx: SkillCtx, kind: string, pos: Vec3Like | und
   ctx.memory.addLandmark('discovery', `我的${zh}`, ctx.adapter.state().dim, pos, 2);
 }
 
+/** 自己放过/睡过的床（当前世界、当前维度里最近的一张）：放下后床就不在背包里了，但它还在那儿 */
+export function myBed(memory: { landmarks(): { label: string; dim: string; pos: Vec3Like; worldId?: string }[] },
+  state: { dim: string; worldId: string; pos: Vec3Like }): { pos: Vec3Like; dist: number } | null {
+  let best: { pos: Vec3Like; dist: number } | null = null;
+  for (const l of memory.landmarks()) {
+    if (l.label !== '我的床' || l.dim !== state.dim || (l.worldId && l.worldId !== state.worldId)) continue;
+    const d = Math.round(dist3(state.pos, l.pos));
+    if (!best || d < best.dist) best = { pos: { ...l.pos }, dist: d };
+  }
+  return best;
+}
+
 /** 先看视野/近期视觉记忆，再看自己记下的工作站地标；返回最近的一个 */
 export function findStation(ctx: SkillCtx, kinds: string[], maxDist: number): { pos: Vec3Like; dist: number; from: 'seen' | 'memory' } | null {
   const s = ctx.adapter.state();

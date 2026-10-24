@@ -1,6 +1,6 @@
 import { describePlan, materialPlan } from '../methods/shortfall.ts';
 import { lookAround, surface } from './movement.ts';
-import { findStation, rememberStation } from './stations.ts';
+import { findStation, myBed, rememberStation } from './stations.ts';
 import { dist3, sleep } from '../util.ts';
 import { codeFromError, clampInt, fail, isAbort, obj, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 import { craftReservationConflict } from '../projects/reservations.ts';
@@ -386,7 +386,7 @@ export function woodShortfall(item: string, count: number, inv: { name: string; 
   return parts.length ? parts.join('；') : null;
 }
 
-export const craft: Skill<{ item: string; count: number }> = {
+export const craft: Skill<{ item: string; count: number; extra?: boolean }> = {
   name: 'craft',
   description: '合成物品。会自动补做两层以内的前置材料（原木→木板→木棍）、自动使用记得的工作台或现做一个放下，所以直接写最终物品即可。常用：wooden_pickaxe、stone_pickaxe、furnace、torch、crafting_table',
   argsDoc: '{"item": "<物品名>", "count"?: 1-64}',
@@ -397,9 +397,17 @@ export const craft: Skill<{ item: string; count: number }> = {
     const raw0 = String(a.item ?? '').trim().replace(/^minecraft:/, '');
     const item = resolveItemAlias(raw0, adapter);
     if (!item) return { ok: false, error: `未知物品：${raw0}（请用完整物品 ID，如 white_bed、oak_planks）` };
-    return { ok: true, args: { item, count: clampInt(a.count, 1, 64, 1) } };
+    return { ok: true, args: { item, count: clampInt(a.count, 1, 64, 1), ...(a.extra === true ? { extra: true } : {}) } };
   },
   async run(ctx, args) {
+    // 已经有床（背包里，或者放在了某处）还要再做：多半是忘了自己的床。说清楚床在哪；真要第二张写 extra:true
+    if (args.item.endsWith('_bed') && !args.extra) {
+      const s = ctx.adapter.state();
+      const held = s.inventory.find((i) => i.name.endsWith('_bed') && i.count > 0);
+      const placed = myBed(ctx.memory, s);
+      if (held) return fail('BAD_ARGS', `背包里已经有 ${held.name} 了，不用再做：天黑（或黄昏）直接 sleep；真要第二张床写 {"item":"${args.item}","extra":true}`);
+      if (placed) return fail('BAD_ARGS', `已经有一张自己的床放在 (${placed.pos.x},${placed.pos.y},${placed.pos.z})（${placed.dist} 格外），不用再做：天黑时 sleep 会自己走过去睡；真要第二张床写 {"item":"${args.item}","extra":true}`);
+    }
     args = { ...args, item: pickVariant(args.item, ctx.adapter.state().inventory) };
     try {
       // 先用看得见或记得的工作台（自己放过的也算），附近没有才让底层现做一个
