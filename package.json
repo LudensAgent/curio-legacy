@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "tsx src/main.ts",
+    "start:proxy": "node --env-file=.env --use-env-proxy --import tsx src/main.ts",
     "dev": "tsx watch src/main.ts",
     "check:llm": "tsx scripts/check-llm.ts",
     "check:rcon": "tsx scripts/check-rcon.ts",

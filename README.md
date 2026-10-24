@@ -129,6 +129,16 @@ LLM_API_KEY=
 
 如果模型不支持 `response_format`，把 `LLM_JSON_MODE` 设为 `false`。
 
+如果出现 `getaddrinfo ENOTFOUND api.deepseek.com`，说明运行环境没有成功解析目标域名。需要通过已有 HTTP 代理访问时，在 `.env` 中填写以下配置（端口替换为代理软件实际的 HTTP/混合端口）：
+
+```ini
+HTTP_PROXY=http://127.0.0.1:7897
+HTTPS_PROXY=http://127.0.0.1:7897
+NO_PROXY=localhost,127.0.0.1,::1
+```
+
+然后使用 `npm run start:proxy` 启动，需要 Node.js 24.5+（或 22.21+）。该命令在 Node 启动阶段加载 `.env`，并[启用环境变量代理](https://nodejs.org/api/cli.html#--use-env-proxy)，使原生 `fetch` 等 HTTP(S) 请求使用代理；本机 Minecraft、控制台和 Hindsight 地址保留直连。已有进程环境变量优先于 `.env`，请确保启动终端中的代理配置与预期一致。HTTPS 请求的代理地址仍可使用 `http://`，协议取决于代理端口。
+
 模型拿到的是：
 
 - 系统提示：人设、技能白名单和参数格式、安全原则、输出格式。
