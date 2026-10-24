@@ -7,7 +7,7 @@ import { EventBus } from '../src/events.ts';
 import type { Senses } from '../src/skills/types.ts';
 
 // Decision-only fixture: no skill execution, game simulation, timers or real waiting.
-function fixture(t: TestContext) {
+function fixture(t: TestContext, options: { routineCare?: boolean } = {}) {
   let now = 1_700_000_000_000;
   t.mock.method(Date, 'now', () => now);
   const state: AgentState = {
@@ -17,13 +17,14 @@ function fixture(t: TestContext) {
     inventory: [], emptySlots: 36, held: null,
   };
   let current: TaskInfo | null = null;
-  const setTask = (skill: string, source: TaskSource = 'llm', progress = 0, age = 3000) => current = {
+  const setTask = (skill: string, source: TaskSource = 'llm', progress = 0, age = 3000): TaskInfo => current = {
     id: `task-${skill}`, planVersion: 1, skill, args: {}, source, progress, note: '',
     startedAt: now - age, deadline: now + 60_000, movement: false,
   };
   let entities: EntityInfo[] = [];
   const cave = { dark: true };
   const starts: { step: Step; gentle?: boolean }[] = [];
+  const cancellations: { reason: string; code?: string }[] = [];
   const adapter = {
     state: () => state,
     hasFood: () => state.inventory.some((i) => ['bread', 'beef'].includes(i.name) && i.count > 0),
@@ -35,10 +36,11 @@ function fixture(t: TestContext) {
     start: (step: Step, _source: TaskSource, meta: { gentle?: boolean } = {}) => {
       starts.push({ step, ...meta }); setTask(step.skill, 'reflex'); return current;
     },
+    cancel: (reason: string, code?: string) => { cancellations.push({ reason, code }); current = null; },
   } as unknown as Arbiter;
   const senses: Senses = { perceivedEntities: () => entities, knownBlocks: () => [], refresh() {}, markSweep() {} };
-  const reflex = new Reflex(adapter, arbiter, new EventBus(), senses);
-  return { state, cave, starts, setTask, tick: () => reflex.tick(), advance: (ms: number) => { now += ms; },
+  const reflex = new Reflex(adapter, arbiter, new EventBus(), senses, options);
+  return { state, cave, starts, cancellations, setTask, tick: () => reflex.tick(), advance: (ms: number) => { now += ms; },
     hostile: (name: string) => { entities = [{ id: 42, name, kind: 'hostile', dist: 3, pos: { x: 3, y: 64, z: 0 } }]; },
   };
 }
@@ -99,4 +101,32 @@ test('auto lighting ignores transient darkness, airborne movement and a short ob
   assert.equal(w.starts.length, 1, 'a grounded walk through sustained darkness still gets light');
   assert.equal(w.starts[0].step.skill, 'place_torch');
   assert.equal(w.starts[0].gentle, true);
+});
+
+test('autonomous reflexes preserve routine choices and return stuck movement while retaining emergencies', (t) => {
+  const w = fixture(t, { routineCare: false });
+  w.state.inventory = [{ name: 'bread', count: 2 }, { name: 'torch', count: 8 }, { name: 'cobblestone', count: 4 }];
+  w.state.food = 10; w.setTask('goto'); w.tick(); w.advance(1000); w.tick();
+  assert.equal(w.starts.length, 0, 'routine hunger and sustained darkness do not take control');
+  w.state.food = 20; w.state.hp = 7; w.state.isDay = false; w.tick();
+  assert.equal(w.starts.length, 0, 'night and low health without a nearby enemy do not force shelter');
+  w.state.hp = 20;
+  w.setTask('goto', 'llm', 0, 21000).movement = true;
+  w.tick(); w.advance(19000); w.tick();
+  assert.equal(w.cancellations.at(-1)?.code, 'STUCK');
+  assert.equal(w.starts.length, 0, 'stuck movement does not start digging or climbing');
+
+  w.state.food = 6; w.setTask('craft'); w.tick();
+  assert.equal(w.starts.at(-1)?.step.skill, 'eat', 'urgent hunger still interrupts');
+  w.advance(15000); w.state.food = 16; w.state.hp = 7; w.setTask('craft'); w.tick();
+  assert.equal(w.starts.at(-1)?.step.skill, 'eat', 'low health with insufficient food still interrupts');
+  assert.equal(w.starts.length, 2);
+  w.state.inLava = true; w.tick();
+  assert.equal(w.starts.at(-1)?.step.skill, 'flee');
+  w.state.inLava = false; w.state.inWater = true; w.state.oxygen = 8; w.tick();
+  assert.equal(w.starts.at(-1)?.step.skill, 'surface');
+  w.state.inWater = false; w.state.hp = 20; w.setTask('craft'); w.hostile('creeper'); w.tick();
+  assert.equal(w.starts.at(-1)?.step.skill, 'flee');
+  w.setTask('craft'); w.hostile('spider'); w.tick();
+  assert.equal(w.starts.at(-1)?.step.skill, 'defend');
 });

@@ -4,7 +4,7 @@ import type { AgentState, GameAdapter } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { evaluateCondition, observeCondition, observationReady, validateCondition } from '../projects/conditions.ts';
-import type { Condition } from '../projects/types.ts';
+import type { Condition, EvidenceStatus } from '../projects/types.ts';
 import { SKILLS } from '../skills/index.ts';
 import { fail, isAbort, ok, type Skill, type SkillCtx, type SkillResult } from '../skills/types.ts';
 import { shortId, throwIfAborted } from '../util.ts';
@@ -33,6 +33,11 @@ export interface MethodTrial {
   parameters: Record<string, string | number>;
   before: unknown;
   after: unknown;
+  expected?: unknown;
+  beforeStatus?: EvidenceStatus;
+  afterStatus?: EvidenceStatus;
+  executionStatus?: SkillResult['status'];
+  failureCode?: string;
   status: 'verified' | 'failed' | 'uninformative';
   reason: string;
   source: 'adapter.state' | 'adapter.state+vision';
@@ -40,6 +45,9 @@ export interface MethodTrial {
 export interface MethodDefinition {
   name: string;
   description: string;
+  /** Model claims remain hypotheses even when a particular program has passed its tests. */
+  question?: string;
+  hypothesis?: string;
   version: number;
   parameters: Parameters;
   program: Program;
@@ -47,7 +55,58 @@ export interface MethodDefinition {
   status: 'candidate' | 'verified' | 'retired';
   createdAt: number;
   trials: MethodTrial[];
-  scope: { intentId?: string; projectId?: string };
+  scope: { intentId?: string; projectId?: string; worldId?: string; dimension?: string };
+}
+
+export type ResearchOutcome = 'supported' | 'counterexample' | 'unknown';
+export interface ResearchEvidence {
+  trialId: string;
+  version: number;
+  hypothesis?: string;
+  outcome: ResearchOutcome;
+  at: number;
+  worldId: string;
+  dimension: string;
+  source: MethodTrial['source'];
+  parameters: unknown;
+  expected: unknown;
+  before: unknown;
+  actual: unknown;
+  reason: string;
+  failureCode?: string;
+}
+export interface ResearchQuestion {
+  name: string;
+  version: number;
+  question?: string;
+  hypothesis?: string;
+  prediction: unknown;
+  methodStatus: MethodDefinition['status'];
+  outcomes: Record<ResearchOutcome, number>;
+  recentEvidence: ResearchEvidence[];
+  truncated?: boolean;
+}
+export interface ResearchContext {
+  source: 'method_trials';
+  claims: 'model_hypotheses';
+  evidence: 'historical_not_current_state';
+  questions: ResearchQuestion[];
+}
+
+function researchOutcome(trial: MethodTrial): ResearchOutcome {
+  if (trial.status === 'verified') return 'supported';
+  // A broken action or an unobserved result does not refute a mechanism.
+  return trial.executionStatus === 'succeeded' && trial.beforeStatus === 'unsatisfied' && trial.afterStatus === 'unsatisfied'
+    ? 'counterexample' : 'unknown';
+}
+
+/** Keep evidence readable and explicitly mark omissions instead of silently dropping arbitrary fields. */
+function researchFact(value: unknown, maxBytes = 600): unknown {
+  const json = JSON.stringify(value ?? null);
+  if (Buffer.byteLength(json, 'utf8') <= maxBytes) return structuredClone(value ?? null);
+  let preview = json.slice(0, maxBytes);
+  while (Buffer.byteLength(preview, 'utf8') > maxBytes - 100) preview = preview.slice(0, Math.floor(preview.length * .8));
+  return { truncated: true, preview, details: 'method_catalog' };
 }
 
 /** 采集某种方块后背包里会多出的物品（别名与常见掉落物）；拿不准的（log 可能是任何树种）返回 null */
@@ -140,7 +199,9 @@ export function simpleToMethod(raw: unknown, adapter: Pick<GameAdapter, 'isKnown
   if (!postcondition) return options.allowMacro === false
     ? { kind: 'invalid', error: '自动习惯缺少可观测的验收条件，不能把执行成功直接记成已掌握的宏' }
     : { kind: 'macro', macro: { name, description, steps } };
-  return { kind: 'method', method: { name, description, program: { type: 'sequence', steps: steps.map((st) => ({ type: 'call', skill: st.skill, args: st.args ?? {} })) }, postcondition } };
+  return { kind: 'method', method: { name, description, ...(o.question !== undefined ? { question: o.question } : {}),
+    ...(o.hypothesis !== undefined ? { hypothesis: o.hypothesis } : {}),
+    program: { type: 'sequence', steps: steps.map((st) => ({ type: 'call', skill: st.skill, args: st.args ?? {} })) }, postcondition } };
 }
 
 /** 把方法程序展开成线性步骤（用于和习惯候选的签名比对） */
@@ -186,6 +247,43 @@ export class MethodLibrary {
   list(): MethodDefinition[] { return structuredClone(this.definitions); }
   abilityGaps(): AbilityGap[] { return structuredClone(this.gaps.filter((g) => g.worldId === this.memory.worldId)); }
 
+  /** Carry self-chosen questions forward without relying on another explicit catalog query. */
+  researchContext(options: { limit?: number; maxBytes?: number } = {}): ResearchContext {
+    const state = this.adapter.state(), intentId = this.memory.currentIntent()?.id, projectId = this.memory.activeProject()?.id;
+    const limit = Math.max(0, Math.min(5, options.limit ?? 3)), budget = Math.max(256, Math.min(8000, options.maxBytes ?? 4500));
+    const localTrial = (t: MethodTrial) => t.worldId === state.worldId && t.dimension === state.dim;
+    const local = this.definitions.filter((d) => (d.question || d.hypothesis) &&
+      (d.scope.worldId === state.worldId && d.scope.dimension === state.dim || d.trials.some(localTrial)));
+    const latest = new Map<string, MethodDefinition>();
+    for (const d of local) if (!latest.has(d.name) || d.version > latest.get(d.name)!.version) latest.set(d.name, d);
+    const relevance = (d: MethodDefinition) => Number(!!intentId && d.scope.intentId === intentId) + 2 * Number(!!projectId && d.scope.projectId === projectId);
+    const recentAt = (d: MethodDefinition) => Math.max(d.createdAt, ...d.trials.filter(localTrial).map((t) => t.ts));
+    const selected = [...latest.values()].sort((a, b) => relevance(b) - relevance(a) || recentAt(b) - recentAt(a));
+    const context: ResearchContext = { source: 'method_trials', claims: 'model_hypotheses', evidence: 'historical_not_current_state', questions: [] };
+    for (const d of selected) {
+      if (context.questions.length >= limit) break;
+      const trials = local.filter((v) => v.name === d.name && v.version <= d.version)
+        .flatMap((v) => v.trials.filter(localTrial).map((trial) => ({ definition: v, trial })))
+        .sort((a, b) => a.trial.ts - b.trial.ts);
+      const outcomes: ResearchQuestion['outcomes'] = { supported: 0, counterexample: 0, unknown: 0 };
+      for (const trial of d.trials.filter(localTrial)) outcomes[researchOutcome(trial)]++;
+      const evidence = new Map<ResearchOutcome, typeof trials[number]>();
+      for (const t of [...trials].reverse()) if (!evidence.has(researchOutcome(t.trial))) evidence.set(researchOutcome(t.trial), t);
+      const question: ResearchQuestion = { name: d.name, version: d.version, ...(d.question ? { question: d.question } : {}),
+        ...(d.hypothesis ? { hypothesis: d.hypothesis } : {}), prediction: researchFact(d.postcondition, 500), methodStatus: d.status, outcomes,
+        recentEvidence: [...evidence.values()].sort((a, b) => a.trial.ts - b.trial.ts).map(({ definition: v, trial: t }) => ({ trialId: t.id, version: v.version,
+          ...(v.version !== d.version && v.hypothesis ? { hypothesis: v.hypothesis } : {}), outcome: researchOutcome(t), at: t.ts,
+          worldId: t.worldId, dimension: t.dimension, source: t.source, parameters: researchFact(t.parameters, 300), expected: researchFact(t.expected ?? v.postcondition, 400),
+          before: researchFact(t.before, 400), actual: researchFact(t.after, 400), reason: t.reason.slice(0, 160), ...(t.failureCode ? { failureCode: t.failureCode } : {}) })) };
+      // Keep the newest concrete evidence before sacrificing an entire question to the context budget.
+      while (question.recentEvidence.length > 1 && Buffer.byteLength(JSON.stringify({ ...context, questions: [...context.questions, question] }), 'utf8') > budget) {
+        question.recentEvidence.shift(); question.truncated = true;
+      }
+      if (Buffer.byteLength(JSON.stringify({ ...context, questions: [...context.questions, question] }), 'utf8') <= budget) context.questions.push(question);
+    }
+    return context;
+  }
+
   recordGap(description: string, scope: { intentId?: string; projectId?: string; missingPrimitive?: string } = {}): AbilityGap {
     const state = this.adapter.state();
     const existing = this.gaps.find((g) => g.worldId === state.worldId && g.dimension === state.dim && g.description === description && g.intentId === scope.intentId && g.projectId === scope.projectId && g.status === 'open');
@@ -210,26 +308,31 @@ export class MethodLibrary {
   private prepare(raw: any) {
     if (!raw || typeof raw !== 'object' || typeof raw.name !== 'string' || !/^[a-z][a-z0-9_]{2,31}$/.test(raw.name) || SKILLS[raw.name]) throw new Error('方法名称须为 3–32 位小写字母/数字/下划线且不与底层技能重名');
     if (typeof raw.description !== 'string' || !raw.description.trim() || raw.description.length > 240) throw new Error('方法需要简短用途说明');
+    for (const field of ['question', 'hypothesis']) {
+      if (raw[field] !== undefined && (typeof raw[field] !== 'string' || !raw[field].trim() || raw[field].length > 240)) throw new Error(`${field} 须为 1–240 字符的待检验陈述`);
+    }
     const parameters = validateParameters(raw.parameters, this.adapter);
     const bound = bindParameters(parameters, {});
     const program = validateProgram(raw.program, bound, this.adapter, this.memory, this.adapter.state());
     if (flattenProgram(program).some((step) => step.skill === 'experiment_method')) throw new Error('试验入口不能嵌入方法程序；请直接组合底层动作，保留统一的调用与循环上限');
     if (!raw.postcondition) throw new Error('候选方法需要可观测的 postcondition，执行成功文字不能代替验收');
     validateCondition(bindRelative(substitute(raw.postcondition, bound), this.adapter.state()), this.adapter, this.memory, this.adapter.state());
-    return { name: raw.name, description: raw.description.trim(), parameters, program, postcondition: structuredClone(raw.postcondition) };
+    return { name: raw.name, description: raw.description.trim(), ...(raw.question !== undefined ? { question: raw.question.trim() as string } : {}),
+      ...(raw.hypothesis !== undefined ? { hypothesis: raw.hypothesis.trim() as string } : {}), parameters, program, postcondition: structuredClone(raw.postcondition) };
   }
 
   /**
-   * 退役没希望的候选（试了 3 次以上都没验收通过、或很久没人试），并在库快满时清掉已退役的旧版本，
+   * 退役反复出现明确反例且无有效支持的候选，或长期未试的版本；未知和动作失败不否定机制。
+   * 在库快满时清掉已退役的旧版本，
    * 免得容量上限挡住新的学习。
    */
   pruneStale(now = Date.now()) {
     let changed = false;
     for (const d of this.definitions) {
       if (d.status !== 'candidate') continue;
-      const failed = d.trials.filter((t) => t.status === 'failed').length, verified = d.trials.filter((t) => t.status === 'verified').length;
+      const counterexamples = d.trials.filter((t) => researchOutcome(t) === 'counterexample').length, verified = d.trials.filter((t) => t.status === 'verified').length;
       const lastTry = Math.max(d.createdAt, ...d.trials.map((t) => t.ts));
-      if (failed >= 3 && verified === 0) { this.retire(d.name, d.version, `试验 ${failed} 次都没通过事实验收`); changed = true; }
+      if (counterexamples >= 3 && verified === 0) { this.retire(d.name, d.version, `当前方法预测在 ${counterexamples} 次有效观测中不成立`); changed = true; }
       else if (now - lastTry > 3 * 86_400_000) { this.retire(d.name, d.version, '三天没有试用'); changed = true; }
     }
     while (this.definitions.length >= 90) {
@@ -245,16 +348,23 @@ export class MethodLibrary {
     try {
       this.pruneStale();
       const prepared = this.prepare(raw);
+      const previous = this.definitions.filter((d) => d.name === prepared.name).sort((a, b) => b.version - a.version)[0];
+      // Revising the program keeps the same question unless the model explicitly changes it.
+      prepared.question ??= previous?.question;
+      prepared.hypothesis ??= previous?.hypothesis;
       // 同一个程序和验收条件已经在库里（候选或已验证）：不再存一个新版本
       const key = JSON.stringify([prepared.program, prepared.postcondition, prepared.parameters]);
-      const same = this.definitions.find((d) => d.status !== 'retired' && JSON.stringify([d.program, d.postcondition, d.parameters]) === key);
+      const same = this.definitions.find((d) => d.status !== 'retired' && JSON.stringify([d.program, d.postcondition, d.parameters]) === key
+        && (prepared.question === undefined || d.question === prepared.question) && (prepared.hypothesis === undefined || d.hypothesis === prepared.hypothesis));
       if (same) {
         const name = same.status === 'verified' ? `method:${same.name}` : `trial:${same.name}:v${same.version}`;
         return { ok: true, name, version: same.version, status: same.status as 'candidate' | 'verified', existing: true };
       }
       if (this.definitions.length >= 100) throw new Error('方法版本库已满，请先回顾或退役旧版本');
       const version = 1 + Math.max(0, ...this.definitions.filter((d) => d.name === prepared.name).map((d) => d.version));
-      const definition: MethodDefinition = { ...prepared, version, createdAt: Date.now(), trials: [], status: 'candidate', scope };
+      const state = this.adapter.state();
+      const definition: MethodDefinition = { ...prepared, version, createdAt: Date.now(), trials: [], status: 'candidate',
+        scope: { ...scope, worldId: state.worldId, dimension: state.dim } };
       this.definitions.push(definition);
       this.install(definition);
       this.save();
@@ -404,7 +514,9 @@ export class MethodLibrary {
           const status: MethodTrial['status'] = result.status !== 'succeeded' || !satisfied ? 'failed' : before.status === 'unsatisfied' ? 'verified' : 'uninformative';
           definition.trials.push({ id: shortId('trial_'), ts: Date.now(), worldId: afterState.worldId, dimension: afterState.dim, sessionId: afterState.sessionId, observationId: afterState.observationId,
             contextKey: `${beforeState.worldId}:${beforeState.dim}:${Math.floor(beforeState.pos.x / 16)}:${Math.floor(beforeState.pos.z / 16)}:${JSON.stringify(args.parameters)}`,
-            parameters: args.parameters, before: before.actual, after: after.actual, status,
+            parameters: args.parameters, before: before.actual, after: after.actual, expected: postcondition,
+            beforeStatus: before.status, afterStatus: sameSession ? after.status : 'unknown', executionStatus: result.status,
+            ...(result.failureCode ? { failureCode: result.failureCode } : {}), status,
             reason: result.status !== 'succeeded' ? result.summary : satisfied ? before.status === 'satisfied' ? '条件在试验前已成立，不作为学习证据' : before.status === 'unknown' ? '试验前状态未知，不能证明本次动作改变了条件' : '执行后同会话事实条件成立' : after.reason ?? '执行结束但事实条件未成立',
             source: afterObservations.length ? 'adapter.state+vision' : 'adapter.state' });
           if (definition.trials.length > 20) definition.trials.shift();

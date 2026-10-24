@@ -12,15 +12,19 @@ export function createMethodSkills(library: MethodLibrary, knowledge: ResourceKn
     {
       name: 'experiment_method',
       description: '把自己的机制设想写成有界参数程序，立即在当前游戏里试验并保存实际成败；同名修订生成新版本，两种情境验收后才学会。不执行任意代码',
-      argsDoc: '{"name":"<3-32位小写英文/数字/下划线>","description":"用途/设想","parameters"?:{"amount":{"type":"integer","default":1,"min":1,"max":8}},"program":{"type":"sequence","steps":[{"type":"call","skill":"<底层技能>","args":{}}]},"postcondition":{"type":"inventory_gain","item":"<物品>","count":1},"arguments"?:{"amount":1}}；program可用有界if/repeat，修订沿用同名',
+      argsDoc: '{"name":"<3-32位小写英文/数字/下划线>","description":"用途/设想","question"?:"我想弄清什么（最多240字）","hypothesis"?:"在什么条件下，做什么预计发生什么（待检验，最多240字）","parameters"?:{"amount":{"type":"integer","default":1,"min":1,"max":8}},"program":{"type":"sequence","steps":[{"type":"call","skill":"<底层技能>","args":{}}]},"postcondition":{"type":"inventory_gain","item":"<物品>","count":1},"arguments"?:{"amount":1}}；program可用有界if/repeat，修订沿用同名；question/hypothesis 是模型假设，postcondition 是本次可失败的事实预测',
       timeoutMs: 600_000, movement: true,
       validate(raw) {
         const input = obj(raw);
         if (typeof input.name !== 'string' || !/^[a-z][a-z0-9_]{2,31}$/.test(input.name)) return { ok: false, error: 'name 须为 3–32 位小写字母/数字/下划线' };
         if (typeof input.description !== 'string' || !input.description.trim() || input.description.length > 240) return { ok: false, error: '需要简短的试验用途/设想' };
+        for (const field of ['question', 'hypothesis']) {
+          if (input[field] !== undefined && (typeof input[field] !== 'string' || !input[field].trim() || input[field].length > 240)) return { ok: false, error: `${field} 须为 1–240 字符的待检验陈述` };
+        }
         if (!input.program || typeof input.program !== 'object' || Array.isArray(input.program) || !input.postcondition || typeof input.postcondition !== 'object' || Array.isArray(input.postcondition)) return { ok: false, error: '试验需要有界 program 和可观测 postcondition' };
         if (input.arguments !== undefined && (!input.arguments || typeof input.arguments !== 'object' || Array.isArray(input.arguments))) return { ok: false, error: 'arguments 须为本次参数值对象' };
         return { ok: true, args: { name: input.name, description: input.description.trim(), parameters: input.parameters,
+          ...(input.question !== undefined ? { question: input.question.trim() } : {}), ...(input.hypothesis !== undefined ? { hypothesis: input.hypothesis.trim() } : {}),
           program: input.program, postcondition: input.postcondition, arguments: input.arguments ?? {} } };
       },
       async run(ctx, args) {
@@ -70,10 +74,12 @@ export function createMethodSkills(library: MethodLibrary, knowledge: ResourceKn
           const d = args.version ? versions.find((v) => v.version === args.version) : versions[0];
           if (!d) return fail('NOT_FOUND', `找不到方法 ${args.name}${args.version ? ` v${args.version}` : ''}；先用 method_catalog {} 查看目录`);
           const trials = d.trials.slice(-2).map((t) => ({ at: t.ts, status: t.status, parameters: t.parameters, reason: t.reason,
-            before: t.before, actual: t.after, worldId: t.worldId, dimension: t.dimension, source: t.source }));
+            before: t.before, actual: t.after, expected: t.expected, beforeStatus: t.beforeStatus, afterStatus: t.afterStatus,
+            executionStatus: t.executionStatus, failureCode: t.failureCode, worldId: t.worldId, dimension: t.dimension, source: t.source }));
           return ok(`${d.name} v${d.version}（${d.status}）；参数 ${Object.keys(d.parameters).join('、') || '无'}；${trials.length ? `最近试验：${trials.map((t) => `${t.status}：${t.reason}`).join('；')}` : '尚无实际试验'}。记录为历史证据，不能代替当前验收`, {
             source: 'method_catalog',
             method: { name: d.name, callName: callName(d), version: d.version, status: d.status, description: d.description,
+              ...(d.question ? { question: d.question } : {}), ...(d.hypothesis ? { hypothesis: d.hypothesis } : {}), claims: 'model_hypotheses',
               parameters: d.parameters, program: d.program, postcondition: d.postcondition, trials, trialCount: d.trials.length, historical: true },
             versions: versions.slice(0, 8).map((v) => ({ version: v.version, status: v.status })),
           });

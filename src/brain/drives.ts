@@ -3,7 +3,7 @@ import type { Percept } from '../perception/perception.ts';
 import { buildingArchiveFor } from '../skills/build.ts';
 
 /**
- * 游玩欲望（内在动机）：把“像真人一样想玩什么”量化成几个驱动力，交给 LLM 和规则目标使用。
+ * 兼容规则模式的游玩驱动力；自主模型改用 observedNeeds 的事实投影。
  * 每个驱动力 0..1，附带原因和建议，按强度排序。它们不直接控制动作，只影响“想做什么”。
  */
 export interface Drive {
@@ -43,6 +43,48 @@ export function stockOf(p: Percept): Stock {
     hasBed: p.inventory.some((i) => i.name.endsWith('_bed')),
     toolTier,
   };
+}
+
+export interface ObservedNeed {
+  need: 'health' | 'hunger' | 'visibility' | 'carry_space' | 'time' | 'lost_items' | 'effort';
+  facts: string[];
+  unknowns?: string[];
+}
+
+/** Autonomous input describes experienced constraints, never a rule planner's preferred goals or routes. */
+export function observedNeeds(p: Percept): ObservedNeed[] {
+  const needs: ObservedNeed[] = [];
+  if (p.self.hp < 20 || p.self.inWater || p.self.inLava || p.nearby.hostile.length) {
+    needs.push({ need: 'health', facts: [
+      `生命 ${p.self.hp}/20`,
+      ...(p.self.inWater ? ['身体在水中'] : []),
+      ...(p.self.inLava ? ['身体在岩浆中'] : []),
+      ...p.nearby.hostile.slice(0, 4).map((h) => `${h.how === 'seen' ? '看见' : '听见'} ${h.name}，距离 ${h.dist} 格`),
+    ] });
+  }
+  const food = stockOf(p).food;
+  if (p.self.food < 20 || food === 0) {
+    needs.push({ need: 'hunger', facts: [`饥饿值 ${p.self.food}/20`, `背包食物类物品 ${food} 个`],
+      ...(food === 0 ? { unknowns: ['当前观察以外的食物来源尚未确认'] } : {}) });
+  }
+  if (p.time.phase === 'dusk' || p.time.phase === 'night') {
+    needs.push({ need: 'time', facts: [`当前是${p.time.phase === 'night' ? '夜晚' : '黄昏'}`] });
+  }
+  const light = p.light;
+  if (light && (light.level === 'dark' || light.mob_spawn_risk)) {
+    needs.push({ need: 'visibility', facts: [`身边亮度 ${light.here}/15`, `视野 ${light.dark_view_pct}% 看不清`,
+      `背包火把 ${light.torches} 支`, ...(light.mob_spawn_risk ? ['身边光照条件有刷怪风险'] : [])] });
+  }
+  if (p.emptySlots <= 5) needs.push({ need: 'carry_space', facts: [`背包剩余 ${p.emptySlots} 个空位`] });
+  if (p.death_recovery) {
+    const d = p.death_recovery;
+    needs.push({ need: 'lost_items', facts: [`死亡时遗失 ${d.lost}`, `记忆中的掉落位置在 ${d.dir} ${d.dist} 格外`,
+      `预计距掉落物消失还有 ${d.seconds_left} 秒`], unknowns: ['掉落物的当前状态与前往路线尚未确认'] });
+  }
+  for (const e of (p.efficiency ?? []).slice(0, 2)) {
+    needs.push({ need: 'effort', facts: [`最近用${e.tool}挖了 ${e.mined} 个 ${e.block}，实测平均 ${e.avg_s} 秒/个`] });
+  }
+  return needs;
 }
 
 export function computeDrives(p: Percept, memory: WorldMemory): { drives: Drive[]; stock: Stock } {

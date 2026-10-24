@@ -8,6 +8,7 @@ import { normalizeDecision, validateIntentDecision } from '../intentions/decisio
 import type { LlmProvider } from './llm.ts';
 import { setImmediate } from 'node:timers/promises';
 import { queryMechanics } from '../methods/mechanics.ts';
+import { ControlKnowledge } from '../methods/controls.ts';
 import type { LlmTrace } from './llm-trace.ts';
 import type { RecipeBook } from '../methods/recipes.ts';
 import { extractJson, ruleProposal, validatePlan, type Plan } from './plan.ts';
@@ -62,6 +63,7 @@ export class Planner {
     private writer: JsonlWriter | null,
     private trace: LlmTrace | null = null,
     private memoryRecall?: MemoryRecall,
+    private controls = new ControlKnowledge(null),
   ) {
     this.stats = {
       provider: provider.name,
@@ -137,7 +139,7 @@ export class Planner {
       (this.cfg.llm.contextWindowTokens ?? 1000000) - Math.max(0, this.cfg.llm.maxTokens));
     // Each decision starts from current facts, never a growing chat transcript.
     // Historical retrieval runs only when the model asks for a relevant memory.
-    ctx = { ...ctx, memoryAvailable: !!this.memoryRecall };
+    ctx = { ...ctx, memoryAvailable: !!this.memoryRecall, knownControls: this.controls.names(ctx.worldState?.worldId ?? this.memory.worldId) };
     await setImmediate(undefined, { signal });
     let messages;
     const full = () => buildMessages(this.cfg.persona, ctx, this.memory, this.cfg.vision?.hFov ?? 100, maxPrompt, this.cfg.llm.visionInput, {
@@ -233,6 +235,9 @@ export class Planner {
             if (mechanicsQueries >= 2) throw new Error('本次机制/动作接口查询已用完，请依据已知接口选择一个可验证的小尝试');
             mechanicsQueries++;
             const result = queryMechanics(String(raw.query ?? '').slice(0, 300), 6);
+            const worldId = ctx.worldState?.worldId ?? this.memory.worldId;
+            this.controls.expose(worldId, result.mechanics.map((entry) => entry.primitive));
+            ctx.knownControls = this.controls.names(worldId);
             // Novel combinations need deliberate reasoning, even when this
             // request began as the next routine step of an existing intention.
             if (tier === 'light') {

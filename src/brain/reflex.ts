@@ -27,7 +27,9 @@ export class Reflex {
   /** 最近几次 surface 失败的位置：同一处连着失败就换一种脱困打法，而不是重复同一套 */
   private surfaceFails: { t: number; x: number; y: number; z: number }[] = [];
 
-  constructor(private adapter: GameAdapter, private arbiter: Arbiter, private bus: EventBus, private senses: Senses) {
+  /** routineCare=false leaves ordinary care and recovery choices to the autonomous planner. */
+  constructor(private adapter: GameAdapter, private arbiter: Arbiter, private bus: EventBus, private senses: Senses,
+    private options: { routineCare?: boolean } = {}) {
     bus.on('event', (ev: { type: string; data?: Record<string, unknown> }) => {
       if (ev.type !== 'task_end' || ev.data?.skill !== 'surface') return;
       if (ev.data.status === 'succeeded') { this.surfaceFails = []; return; }
@@ -111,7 +113,7 @@ export class Reflex {
     }
     if (cur?.skill === 'surface' || cur?.skill === 'flee') return;
     // 夜里低血量且身上有方块：就地挖坑封顶，比被追着跑更安全
-    if (cur?.source !== 'reflex' && cur?.skill !== 'eat' && !s.isDay && s.hp <= 8 && (!nearest || nearest.dist > 4) && !s.inWater && hasPlaceable(s.inventory) && this.ready('shelter', 90000)) {
+    if (this.options.routineCare !== false && cur?.source !== 'reflex' && cur?.skill !== 'eat' && !s.isDay && s.hp <= 8 && (!nearest || nearest.dist > 4) && !s.inWater && hasPlaceable(s.inventory) && this.ready('shelter', 90000)) {
       return this.fire({ skill: 'shelter', args: { until: 'day' } }, 'P0', `夜里生命只有 ${Math.round(s.hp)}`);
     }
     if (s.hp <= 6 && nearest && nearest.dist < 10 && this.ready('lowhp', 4000)) {
@@ -132,11 +134,11 @@ export class Reflex {
     const goodFood = s.inventory.some((i) => GOOD_FOOD.test(i.name));
     const busy = !!cur && ['hunt', 'defend', 'ranged_defend', 'flee', 'dragon_fight', 'craft', 'smelt', 'build', 'climb_up', 'dig', 'store_items', 'take_items', 'ride', 'use_item', 'interact', 'sleep', 'look_around'].includes(cur.skill);
     const routineWindow = !cur || cur.source === 'filler' || (Date.now() - cur.startedAt >= 1500 && cur.progress < 0.85);
-    if (cur?.skill !== 'dragon_fight' && safe && this.adapter.hasFood() && (urgent || (peckish && goodFood && !busy && routineWindow)) && this.ready('eat', 15000)) {
+    if (cur?.skill !== 'dragon_fight' && safe && this.adapter.hasFood() && (urgent || (this.options.routineCare !== false && peckish && goodFood && !busy && routineWindow)) && this.ready('eat', 15000)) {
       return this.fire({ skill: 'eat' }, 'P1', `饥饿 ${s.food} / 生命 ${s.hp}${urgent ? '（很饿了，有什么吃什么）' : ''}`, !urgent);
     }
 
-    this.autoTorch(s, cur, nearest?.dist ?? Infinity);
+    if (this.options.routineCare !== false) this.autoTorch(s, cur, nearest?.dist ?? Infinity);
     this.checkStuck(s.pos, cur);
   }
 
@@ -175,7 +177,7 @@ export class Reflex {
     this.arbiter.start({ skill: 'place_torch', args: { count: 1, auto: true } }, 'reflex', { gentle: true });
   }
 
-  /** 移动型任务 20 秒内位移 < 1.5 格且进度没有变化 → 判定卡死，取消任务（计为 STUCK 失败）并执行脱困。 */
+  /** 移动型任务 20 秒内位移 < 1.5 格且进度没有变化 → STUCK；自主模式交回决策，兼容模式自动脱困。 */
   private checkStuck(pos: { x: number; y: number; z: number }, cur: ReturnType<Arbiter['info']>) {
     const now = Date.now();
     if (!cur || !cur.movement) {
@@ -196,7 +198,7 @@ export class Reflex {
       const around = surroundings(this.adapter, pos);
       this.bus.publish('stuck', 'P1', `${cur.skill} 20 秒内几乎没有移动（${moved.toFixed(1)} 格），判定卡死｜${around.text}`);
       this.arbiter.cancel(`卡死：20 秒没挪动，在 ${Math.round(pos.x)},${Math.round(pos.y)},${Math.round(pos.z)}｜${around.text}`, 'STUCK');
-      this.arbiter.start({ skill: 'unstuck' }, 'reflex');
+      if (this.options.routineCare !== false) this.arbiter.start({ skill: 'unstuck' }, 'reflex');
     }
   }
 }

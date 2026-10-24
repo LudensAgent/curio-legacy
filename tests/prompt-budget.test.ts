@@ -10,6 +10,7 @@ import { Planner } from '../src/planner/planner.ts';
 import { buildMessages, enforcePromptBudget, promptCost, type PlanContext } from '../src/planner/prompt.ts';
 import { ProjectCoordinator } from '../src/projects/coordinator.ts';
 import { LLM_HIDDEN, SKILLS } from '../src/skills/index.ts';
+import { BASIC_CONTROLS } from '../src/methods/controls.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 
 const budget = 24000;
@@ -63,15 +64,17 @@ function assertCurrentContext(messages: ChatMessage[], fixture: ReturnType<typeo
   assert.equal(latest.actual.count, 12);
 }
 
-test('24000-byte blocked-project prompt retains current failure, binding, acceptance and every available skill schema', () => {
+test('24000-byte blocked-project prompt retains current evidence and disclosed controls without restoring an activity menu', () => {
   const fixture = blockedFixture();
   try {
+    fixture.ctx.knownControls = ['boat'];
     const messages = buildMessages('Curio', fixture.ctx, fixture.memory, 100, budget);
     assert.ok(promptCost(messages) <= budget, `prompt cost ${promptCost(messages)}/${budget}`);
     assertCurrentContext(messages, fixture);
-    for (const skill of Object.values(SKILLS).filter((s) => !LLM_HIDDEN.has(s.name))) {
+    for (const skill of [...BASIC_CONTROLS, 'boat'].flatMap((name) => SKILLS[name] && !LLM_HIDDEN.has(name) ? [SKILLS[name]] : [])) {
       assert.ok(messages[0].content.includes(`- ${skill.name} ${skill.argsDoc}`), `missing skill schema ${skill.name}`);
     }
+    assert.doesNotMatch(messages[0].content, /^- (hunt|farm|expedition|build) /m);
     assert.equal(fixture.memory.activeProject()!.status, 'blocked');
   } finally { fixture.memory.close(); }
 });

@@ -2,9 +2,10 @@ import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 
 // These are general operations exposed by the current registry, not recipes
 // for situations. Specialized workflows remain searchable as composites.
-const PRIMITIVES = ['use_item', 'interact', 'ride', 'dismount', 'dig', 'hit_entity', 'inspect_block', 'craft', 'look_around', 'goto', 'pickup_items', 'climb_up', 'eat', 'wait'];
+const PRIMITIVES = ['use_item', 'interact_block', 'interact', 'ride', 'dismount', 'dig', 'hit_entity', 'inspect_block', 'craft', 'look_around', 'goto', 'pickup_items', 'climb_up', 'eat', 'wait'];
 const ALIASES: Record<string, string[]> = {
   use_item: ['右键', '使用物品', '放置', '放下', 'right click', 'use item', 'place', 'place block'],
+  interact_block: ['空手右键', '方块交互', '开门', '关门', '点击方块', '门', '按钮', '拉杆', 'activate block', 'right click block', 'door', 'button', 'lever'],
   interact: ['交互', '互动', '右键实体', '坐上', '乘坐', '坐船', '上船', '骑马', 'interact', 'mount', 'entity interaction'],
   ride: ['驾驶', '操控载具', '划行', '骑行', '船', '矿车', '马', 'boat', 'minecart', 'horse', 'ride', 'steer', 'drive', 'vehicle control'],
   dismount: ['下船', '下马', '下车', '离开载具', 'dismount', 'unmount', 'get off'],

@@ -13,6 +13,7 @@ import { HindsightBackend } from './memory/hindsight.ts';
 import { buildingArchiveFor } from './skills/build.ts';
 import { flattenProgram, MethodLibrary, simpleToMethod } from './methods/learning.ts';
 import { ResourceKnowledge } from './methods/knowledge.ts';
+import { ControlKnowledge } from './methods/controls.ts';
 import { RecipeBook } from './methods/recipes.ts';
 import { createMethodSkills } from './methods/skills.ts';
 import { SKILLS } from './skills/index.ts';
@@ -62,7 +63,8 @@ if (config.llm.provider === 'openai') {
   provider = new MockProvider(config.llm.fakeDelayMs, (hint: any) => ruleProposal(hint.percept, memory, hint.reason === 'prefetch' ? hint.current : null));
 }
 const llmTrace = new LlmTrace();
-const planner = new Planner(config, provider, adapter, memory, bus, new JsonlWriter(path.join(config.dataDir, 'logs'), 'llm'), llmTrace, episodic);
+const planner = new Planner(config, provider, adapter, memory, bus, new JsonlWriter(path.join(config.dataDir, 'logs'), 'llm'), llmTrace, episodic,
+  new ControlKnowledge(path.join(config.dataDir, 'control-knowledge.json')));
 const library = new SkillLibrary(path.join(config.dataDir, 'skill-library.json'), adapter, memory, bus);
 const methods = new MethodLibrary(path.join(config.dataDir, 'method-library.json'), adapter, memory, bus,
   { trialWorldIds: config.learning.testWorldIds });
@@ -143,6 +145,7 @@ const executive = new Executive({
   adapter, arbiter, planner, perception, memory, bus,
   ...(audience ? { audience } : {}),
   mySkills,
+  researchContext: () => methods.researchContext(),
   onMissingAbility: (text) => { if (planner.autonomous) methods.recordGap(text, { intentId: memory.currentIntent()?.id, projectId: memory.activeProject()?.id }); },
   onLearnSkill: (raw) => {
     const r = learnSkill(raw, 'model');
@@ -162,7 +165,7 @@ const executive = new Executive({
 const knownSigs = () => new Set([...library.list().filter((d) => !d.disabled).map((d) => signatureOf(d.steps)),
   ...methods.list().filter((d) => d.status !== 'retired').map((d) => signatureOf(flattenProgram(d.program))), ...proposedHabits]);
 perception.knownSkillSigs = knownSigs;
-const reflex = new Reflex(adapter, arbiter, bus, vision);
+const reflex = new Reflex(adapter, arbiter, bus, vision, { routineCare: !planner.autonomous });
 const spectator = new Spectator(config, adapter, bus);
 const metrics = new Metrics(adapter, arbiter, executive, planner, reflex, bus);
 const actionChat = new ActionChat(adapter, bus, { ...config.actionChat, canSend: () => !executive.paused });

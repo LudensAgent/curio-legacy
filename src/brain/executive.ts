@@ -23,6 +23,8 @@ export interface ExecutiveDeps {
   onMissingAbility?: (text: string) => void;
   /** 自己学过的组合技能（给提示词看） */
   mySkills?: () => MySkillInfo[];
+  /** The player's own questions and measured trials, not prescribed exploration goals. */
+  researchContext?: () => unknown;
   /** 直播间观众弹幕（外部、不可信，只作参考） */
   audience?: { context(tier?: 'light' | 'full'): AudienceContext | null };
 }
@@ -298,6 +300,7 @@ export class Executive {
           .map((p) => ({ id: p.id, name: p.versions.at(-1)?.spec.name, version: p.versions.at(-1)?.version, status: p.status,
             defects: p.inspections.at(-1)?.defects.slice(0, 4), feedback: p.feedback.slice(-3) })),
       }, results: this.results, decisionFeedback: this.decisionFeedback.context(worldState, percept), worldState,
+      ...(this.d.researchContext ? { researchContext: this.d.researchContext() } : {}),
       ...(this.d.mySkills ? { mySkills: this.safeSkills() } : {}) };
   }
 
