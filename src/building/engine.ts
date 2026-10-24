@@ -6,6 +6,25 @@ import { type BuildingArchive, type BuildingDefect, type BuildingInspection, typ
 import { cellKey, materialCost, PHASES, rotatePosition, rotateProperties, type BlockProperties, type BuildingBlueprint, type BuildingCell } from './spec.ts';
 import { erectScaffolding, inspectScaffoldSite, planScaffolding, removeScaffolding } from './scaffold.ts';
 import { availableInventoryFor } from '../projects/reservations.ts';
+import { STATION_LABEL } from '../skills/stations.ts';
+
+/** 盖房时可以先收起来、盖完再放的自己的功能方块（箱子不动：里面有东西，挖了会撒一地） */
+const STOWABLE = ['crafting_table', 'furnace', 'smoker', 'blast_furnace'];
+/** 记忆里“我的工作台/我的熔炉”这类自己放下的功能方块：位置 → { 方块名, 地标 id } */
+export function ownStationsAt(ctx: SkillCtx): Map<string, { name: string; landmarkId: string }> {
+  const s = ctx.adapter.state();
+  const out = new Map<string, { name: string; landmarkId: string }>();
+  const byLabel = new Map(STOWABLE.filter((k) => STATION_LABEL[k]).map((k) => [STATION_LABEL[k], k]));
+  for (const l of ctx.memory.landmarks?.() ?? []) {
+    const kind = byLabel.get(l.label);
+    if (!kind || l.dim !== s.dim || (l.worldId && l.worldId !== s.worldId)) continue;
+    const p = { x: Math.round(l.pos.x), y: Math.round(l.pos.y), z: Math.round(l.pos.z) };
+    for (const q of [p, { x: Math.floor(l.pos.x), y: Math.floor(l.pos.y), z: Math.floor(l.pos.z) }]) {
+      if (ctx.adapter.blockAt(q) === kind) out.set(cellKey(q), { name: kind, landmarkId: l.id });
+    }
+  }
+  return out;
+}
 
 export interface StateBuildingAdapter extends GameAdapter {
   blockStateAt?(pos: Vec3Like): { name: string; properties: BlockProperties } | null;
@@ -123,7 +142,7 @@ export interface ConstructionResult {
   scaffoldPlaced?: number;
   scaffoldRemoved?: number;
   /** 整地：清掉了什么、填了几个坑、有哪些不该动的东西挡在场地里 */
-  site?: { cleared: Record<string, number>; filled: number; blocked: Record<string, number> };
+  site?: { cleared: Record<string, number>; filled: number; blocked: Record<string, number>; stowed?: string[] };
 }
 
 /**
@@ -145,8 +164,10 @@ async function prepareSite(ctx: SkillCtx, project: BuildingProject, blueprint: B
   }
   const temp = new Map((project.temporaryBlocks ?? []).map((b) => [cellKey(b.pos), b.name]));
   const byId = new Map(blueprint.cells.map((c) => [c.id, c]));
-  const targets: { pos: Vec3Like; name: string }[] = [];
+  const targets: { pos: Vec3Like; name: string; own?: string }[] = [];
   const blocked: Record<string, number> = {};
+  const mine = ownStationsAt(ctx);
+  const stowed: string[] = [];
   for (const [id, l] of local) {
     const pos = rotatePosition(l, project.origin, project.rotation), name = adapter.blockAt(pos);
     if (name === null || AIR.has(name)) continue;
@@ -155,6 +176,7 @@ async function prepareSite(ctx: SkillCtx, project: BuildingProject, blueprint: B
     if (temp.get(id) === name) continue; // 自己搭的脚手架
     if (cell && project.checkpoint.ownedCells.includes(id)) continue; // 自己放过的，交给原有流程
     if (siteClearable(name)) targets.push({ pos, name });
+    else if (mine.get(cellKey(pos))?.name === name) targets.push({ pos, name, own: mine.get(cellKey(pos))!.landmarkId }); // 自己的工作台/熔炉：收起来，盖完再放
     else blocked[name] = (blocked[name] ?? 0) + 1;
   }
   const cleared: Record<string, number> = {};
@@ -178,7 +200,7 @@ async function prepareSite(ctx: SkillCtx, project: BuildingProject, blueprint: B
       for (let attempt = 0; attempt < 3; attempt++) {
         check();
         const name = adapter.blockAt(t.pos);
-        if (name === null || AIR.has(name) || !siteClearable(name)) break;
+        if (name === null || AIR.has(name) || (!siteClearable(name) && !(t.own && name === t.name))) break;
         const me = adapter.state().pos;
         if (Math.floor(me.x) === t.pos.x && Math.floor(me.z) === t.pos.z && t.pos.y === Math.floor(me.y) - 1) break; // 脚下不挖
         if (Math.hypot(t.pos.x + 0.5 - me.x, t.pos.y + 0.5 - me.y, t.pos.z + 0.5 - me.z) > 4) {
@@ -190,6 +212,7 @@ async function prepareSite(ctx: SkillCtx, project: BuildingProject, blueprint: B
         check();
         if (!r.ok) break;
         cleared[name] = (cleared[name] ?? 0) + 1;
+        if (t.own) { stowed.push(name); ctx.memory.removeLandmark?.(t.own); break; }
         if (AIR.has(adapter.blockAt(t.pos) ?? 'unknown')) break; // 没有沙砾/沙子掉下来补位
       }
       ctx.progress(0.05, `整地：清掉 ${Object.values(cleared).reduce((a, b) => a + b, 0)} 块`);
@@ -223,7 +246,7 @@ async function prepareSite(ctx: SkillCtx, project: BuildingProject, blueprint: B
       if (r.ok && adapter.blockAt(p) === spec.palette.foundation) filled++; else break;
     }
   }
-  return { cleared, filled, blocked };
+  return { cleared, filled, blocked, ...(stowed.length ? { stowed } : {}) };
 }
 
 /** Idempotent construction/repair: every resumed run reconciles the live world first. */

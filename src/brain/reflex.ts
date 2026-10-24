@@ -25,7 +25,31 @@ export class Reflex {
   triggers = 0;
   enabled = true;
 
-  constructor(private adapter: GameAdapter, private arbiter: Arbiter, private bus: EventBus, private senses: Senses) {}
+  /** 最近几次 surface 失败的位置：同一处连着失败就换一种脱困打法，而不是重复同一套 */
+  private surfaceFails: { t: number; x: number; y: number; z: number }[] = [];
+
+  constructor(private adapter: GameAdapter, private arbiter: Arbiter, private bus: EventBus, private senses: Senses) {
+    bus.on('event', (ev: { type: string; data?: Record<string, unknown> }) => {
+      if (ev.type !== 'task_end' || ev.data?.skill !== 'surface') return;
+      if (ev.data.status === 'succeeded') { this.surfaceFails = []; return; }
+      if (ev.data.status !== 'failed') return;
+      const p = this.adapter.state().pos;
+      this.surfaceFails = [...this.surfaceFails.filter((f) => Date.now() - f.t < 90_000), { t: Date.now(), x: p.x, y: p.y, z: p.z }].slice(-6);
+    });
+  }
+
+  /** 防溺水：同一处（4 格内、90 秒内）已经失败过就换打法——第 1 次失败后找气穴/往上挖，第 2 次起让寻路带着往岸上走 */
+  drowningStep(): Step {
+    const p = this.adapter.state().pos;
+    const here = this.surfaceFails.filter((f) => Date.now() - f.t < 90_000 && Math.hypot(f.x - p.x, f.y - p.y, f.z - p.z) <= 4).length;
+    if (!here) return { skill: 'surface' };
+    return { skill: 'surface', args: { escape: here === 1 ? 'dig' : here % 2 === 0 ? 'shore' : 'dig' } };
+  }
+
+  private fireDrown(s: { oxygen: number }) {
+    const step = this.drowningStep();
+    this.fire(step, 'P0', `氧气 ${s.oxygen}/20，有溺水风险${step.args ? `（这里上浮失败过，换打法：${(step.args as any).escape === 'dig' ? '找气穴/往上挖' : '让寻路往岸上走'}）` : ''}`);
+  }
 
   start(intervalMs = 250) {
     this.timer = setInterval(() => {
@@ -66,14 +90,14 @@ export class Reflex {
 
     // 躲在避难所里：怪物进不来，不要出去打架/逃跑，只防溺水
     if (cur?.skill === 'shelter') {
-      if (s.inWater && s.oxygen <= 10 && this.ready('drown', 4000)) this.fire({ skill: 'surface' }, 'P0', `氧气 ${s.oxygen}/20，有溺水风险`);
+      if (s.inWater && s.oxygen <= 10 && this.ready('drown', 4000)) this.fireDrown(s);
       return;
     }
 
     // 反射任务进行中：只处理升级（战斗中生命过低 → 撤离；任何反射中快溺水 → 换气）
     if (cur?.source === 'reflex') {
       if (cur.skill !== 'surface' && s.inWater && s.oxygen <= 6 && this.ready('drown', 3000)) {
-        this.fire({ skill: 'surface' }, 'P0', `氧气 ${s.oxygen}/20，有溺水风险`);
+        this.fireDrown(s);
         return;
       }
       if (cur.skill === 'defend' && (s.hp <= 6 || creeper) && this.ready('escalate', 3000)) {
@@ -84,7 +108,7 @@ export class Reflex {
 
     if (s.inLava && this.ready('lava', 1500)) return this.fire({ skill: 'flee', args: { distance: 8 } }, 'P0', '掉进岩浆');
     // 只在水里才检查氧气：Mineflayer 在陆地上偶尔会报出不准的氧气值
-    if (s.inWater && s.oxygen <= 10 && this.ready('drown', 4000)) return this.fire({ skill: 'surface' }, 'P0', `氧气 ${s.oxygen}/20，有溺水风险`);
+    if (s.inWater && s.oxygen <= 10 && this.ready('drown', 4000)) return this.fireDrown(s);
     if (creeper && this.ready('creeper', 3000)) return this.fire({ skill: 'flee', args: { distance: 16 } }, 'P0', `苦力怕距离 ${creeper.dist.toFixed(1)}`);
     // 夜里低血量且身上有方块：就地挖坑封顶，比被追着跑更安全
     if (!s.isDay && s.hp <= 8 && (!nearest || nearest.dist > 4) && !s.inWater && hasPlaceable(s.inventory) && this.ready('shelter', 90000)) {

@@ -23,7 +23,12 @@ export const placeTorch: Skill<{ count: number }> = {
   async run(ctx, args) {
     const { adapter, signal } = ctx;
     let s = adapter.state();
-    if (s.inWater) return fail('ERROR', '在水里插不了火把');
+    const feet = { x: Math.floor(s.pos.x), y: Math.floor(s.pos.y), z: Math.floor(s.pos.z) };
+    const feetBlock = adapter.blockAt(feet) ?? 'air';
+    if (s.inWater || s.inLava || feetBlock === 'water' || feetBlock === 'lava') return fail('ERROR', '人泡在水里（或岩浆里），插不了火把——先上岸站稳再插');
+    // 半空中（掉落、跳跃、悬在梯子/藤蔓上）：脚下没有地，身边也多半靠不上墙，别白找
+    const under = adapter.blockAt({ ...feet, y: feet.y - 1 }) ?? 'air';
+    if (!s.onGround && NOT_SOLID.has(under)) return fail('ERROR', '人在半空中（脚下没站稳），插不了火把——落地站稳后再插');
     if (torchCount(s.inventory) === 0) {
       const r = await adapter.craft('torch', 4, signal).catch((e) => {
         if (isAbort(e)) throw e;

@@ -13,6 +13,38 @@ const key = (p: { x: number; y: number; z: number }) => `${p.x},${p.y},${p.z}`;
 const DIGGABLE_DOWN = new Set(['stone', 'cobblestone', 'deepslate', 'andesite', 'granite', 'diorite', 'tuff', 'dirt', 'grass_block', 'coarse_dirt', 'sand', 'gravel', 'clay']);
 const UNSAFE_BELOW = new Set(['lava', 'water', 'air', 'cave_air', 'bedrock']);
 const WATERY = new Set(['water', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass', 'bubble_column', 'lava']);
+/** 木头/树叶这类长在地面上的东西不怕挨着水；石头矿石这类往往在坑底、洞里，挨着水就容易一路走进水下 */
+const isTreeTarget = (name: string) => /_log$|_stem$|_wood$|_hyphae$|_leaves$|mushroom_block$/.test(name);
+/** 石头、深板岩、矿石：多在坑底/洞里，挨着水就危险。沙子黏土沙砾泥土甘蔗本来就长在水边，不按“挨水”跳过 */
+const isStoneLike = (name: string) => /^(stone|cobblestone|deepslate|cobbled_deepslate|andesite|granite|diorite|tuff|calcite|blackstone|basalt|netherrack|obsidian)$|_ore$|^raw_.*_block$|^ancient_debris$/.test(name);
+
+export type TargetRisk = 'hazard' | 'wet' | 'deep';
+/**
+ * 采集目标的安全检查（只看目标身边的方块：走到跟前就看得见、摸得着，不算透视）：
+ * - hazard：在出过事（淹死/掉岩浆）的危险区域里
+ * - wet：石头类目标贴着水/岩浆，或者站过去挖它的位置泡在水里（要潜到水面以下才挖得到）
+ * - deep：目标比脚下低很多、附近又有水（往下走多半是进了被水淹的洞穴/峡谷）
+ */
+export function gatherTargetRisk(ctx: SkillCtx, target: { name: string; pos: { x: number; y: number; z: number } }, feetY: number): TargetRisk | null {
+  const { adapter, memory } = ctx;
+  const dim = adapter.state().dim;
+  // 树长在水面以上，站在地上就砍得到：不按危险区域/挨水跳过
+  if (isTreeTarget(target.name)) return null;
+  if (memory.hazardAt?.(target.pos, dim, ['drowning', 'lava'])) return 'hazard';
+  if (!isStoneLike(target.name)) return null;
+  const at = (dx: number, dy: number, dz: number) => adapter.blockAt({ x: target.pos.x + dx, y: target.pos.y + dy, z: target.pos.z + dz }) ?? 'air';
+  // 六个面贴着液体：一挖开就灌水/流岩浆
+  for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) if (WATERY.has(at(dx, dy, dz))) return 'wet';
+  // 站位：目标旁边（含上方两层）是水 → 得泡在水里挖
+  let water = 0;
+  for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) for (let dy = -1; dy <= 3; dy++) {
+    if (!WATERY.has(at(dx, dy, dz))) continue;
+    water++;
+    if (Math.abs(dx) <= 1 && Math.abs(dz) <= 1 && dy >= 1 && dy <= 2) return 'wet';
+  }
+  if (water && target.pos.y < feetY - 4) return 'deep';
+  return null;
+}
 
 /** 走向目标方块；8 秒内几乎没挪动就放弃这个目标（换下一个），而不是原地耗到被判卡死 */
 async function moveWithWatchdog(ctx: SkillCtx, pos: { x: number; y: number; z: number }) {
@@ -79,6 +111,12 @@ export const gather: Skill<{ block: string; count: number; for?: { item: string;
     let dugDown = 0;
     let searched = false;
     let lost = 0;
+    const risky: Record<TargetRisk, number> = { hazard: 0, wet: 0, deep: 0 };
+    const riskCache = new Map<string, TargetRisk | null>();
+    const riskNote = () => {
+      const parts = [risky.hazard ? `${risky.hazard} 处在出过事的危险区域` : '', risky.wet ? `${risky.wet} 处挨着水/岩浆或要泡在水里挖` : '', risky.deep ? `${risky.deep} 处在脚下很深、旁边有水的地方` : ''].filter(Boolean);
+      return parts.length ? `；为安全跳过了 ${parts.join('、')} 的 ${args.block}（换个干燥、露天的地方采）` : '';
+    };
     ctx.progress(0, `采集 ${args.block} x${args.count}`);
     while (dug < args.count) {
       const s = adapter.state();
@@ -87,12 +125,29 @@ export const gather: Skill<{ block: string; count: number; for?: { item: string;
         return dug > 0 ? ok(`背包已满，采集了 ${dug}/${args.count} 个 ${args.block}`) : fail('INVENTORY_FULL', '背包已满');
       }
       senses.refresh();
-      const hits = senses
+      const feetY = Math.floor(s.pos.y);
+      const candidates = senses
         .knownBlocks(names, 256)
         .filter((h) => !skip.has(key(h.pos)))
         // 水下（上方是水）的方块不去挖：会憋气溺水
         .filter((h) => !WATERY.has(adapter.blockAt({ x: h.pos.x, y: h.pos.y + 1, z: h.pos.z }) ?? 'air'))
-        .sort((a, b) => a.dist + Math.abs(a.pos.y - s.pos.y) * 0.6 - (b.dist + Math.abs(b.pos.y - s.pos.y) * 0.6));
+        // 比脚下低的目标多扣分：宁可挖身边露天的，也不往坑底/水边钻
+        .sort((a, b) => a.dist + Math.abs(a.pos.y - s.pos.y) * 0.6 + Math.max(0, s.pos.y - a.pos.y - 2) - (b.dist + Math.abs(b.pos.y - s.pos.y) * 0.6 + Math.max(0, s.pos.y - b.pos.y - 2)));
+      // 安全检查按远近逐个做，找到第一个能挖的就停（每轮最多查 24 个；同一位置的结论本次采集内缓存）
+      const safeHits: typeof candidates = [];
+      let evaluated = 0;
+      for (const h of candidates) {
+        if (evaluated >= 24) break;
+        const k = key(h.pos);
+        let risk = riskCache.get(k);
+        if (risk === undefined) { evaluated++; risk = gatherTargetRisk(ctx, h, feetY); riskCache.set(k, risk); }
+        if (risk) { risky[risk]++; skip.add(k); continue; }
+        safeHits.push(h);
+        if (adapter.blockAt(h.pos) === h.name && adapter.canHarvest(h.pos)) break;
+      }
+      // 这一批全不安全，但后面还有没查过的：下一轮接着查，不要当成“看不见”
+      if (!safeHits.length && candidates.some((h) => !skip.has(key(h.pos)))) continue;
+      const hits = safeHits;
 
       if (!hits.length) {
         // 看不见目标：石头/泥土类可以就地往下挖（脚下的方块是“踩着的”，不算透视）
@@ -102,7 +157,9 @@ export const gather: Skill<{ block: string; count: number; for?: { item: string;
           const under2 = adapter.blockAt({ ...below, y: below.y - 1 });
           // 旁边有水就别往下挖：一挖开水就灌进来（脚边的方块是踩着、碰着的，不算透视）
           const wet = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => [below.y, below.y + 1].some((y) => WATERY.has(adapter.blockAt({ x: below.x + dx, y, z: below.z + dz }) ?? 'air')));
-          if (under && DIGGABLE_DOWN.has(under) && !UNSAFE_BELOW.has(under2 ?? 'air') && !wet) {
+          const danger = !!ctx.memory.hazardAt?.(below, s.dim, ['drowning', 'lava']);
+          if (danger) risky.hazard++;
+          if (under && DIGGABLE_DOWN.has(under) && !UNSAFE_BELOW.has(under2 ?? 'air') && !wet && !danger) {
             ctx.progress(dug / args.count, `向下挖（${under}）`);
             const r = await adapter.dig(below, signal);
             if (r.ok) {
@@ -128,9 +185,12 @@ export const gather: Skill<{ block: string; count: number; for?: { item: string;
         for (const l of stale) ctx.memory.removeLandmark(l.id);
         const staleNote = stale.length ? `；已把 ${stale.length} 个过时的 ${args.block} 地标从记忆里删除` : '';
         const looked = searched ? '（已转头找过）' : '';
+        const skipped = risky.hazard + risky.wet + risky.deep;
         return dug > 0
-          ? ok(`看不到更多 ${args.block}${looked}，采集了 ${dug}/${args.count}${staleNote}`, { searched })
-          : fail('NOT_FOUND', `视野和记忆里都没有 ${args.block}${looked}${staleNote}；尚未定位该资源，不代表其他地点也没有`, { searched });
+          ? ok(`看不到更多 ${args.block}${looked}，采集了 ${dug}/${args.count}${staleNote}${riskNote()}`, { searched, ...(skipped ? { skippedUnsafe: { ...risky } } : {}) })
+          : fail('NOT_FOUND', skipped
+            ? `能看见的 ${args.block} 都不安全，没有去挖${riskNote()}${looked}${staleNote}`
+            : `视野和记忆里都没有 ${args.block}${looked}${staleNote}；尚未定位该资源，不代表其他地点也没有`, { searched, ...(skipped ? { skippedUnsafe: { ...risky } } : {}) });
       }
       // 记忆里的方块可能已经被砍掉/不在加载范围：这种目标跳过，不能误报成“缺工具”
       const present = hits.filter((h) => adapter.blockAt(h.pos) === h.name);
@@ -172,7 +232,7 @@ export const gather: Skill<{ block: string; count: number; for?: { item: string;
       }
     }
     const after = args.for ? materialPlan(args.for.item, args.for.count, adapter.state().inventory) : null;
-    return ok(`采集了 ${dug} 个 ${args.block}${lost ? `（另有 ${lost} 块的掉落物没捡到）` : ''}${after ? `；${describePlan(after)}` : ''}`, { dug, ...(lost ? { lost } : {}), ...(after ? { plan: after } : {}) });
+    return ok(`采集了 ${dug} 个 ${args.block}${lost ? `（另有 ${lost} 块的掉落物没捡到）` : ''}${after ? `；${describePlan(after)}` : ''}${riskNote()}`, { dug, ...(lost ? { lost } : {}), ...(after ? { plan: after } : {}) });
   },
 };
 
@@ -279,7 +339,18 @@ export const eat: Skill<{}> = {
     return { ok: true, args: {} };
   },
   async run(ctx) {
-    if (!ctx.adapter.hasFood()) return fail('NO_FOOD', '背包里没有可吃的食物');
+    if (!ctx.adapter.hasFood()) {
+      const inv = ctx.adapter.state().inventory;
+      const has = (re: RegExp) => inv.some((i) => re.test(i.name) && i.count > 0);
+      const alt = [
+        has(/^(beef|porkchop|mutton|chicken|rabbit|cod|salmon)$/) ? 'smelt 背包里的生肉/生鱼' : '',
+        'hunt（看见牛猪羊鸡兔时）',
+        has(/^fishing_rod$/) ? 'fish（有钓竿）' : '',
+        'forage（摘橡树/深色橡树叶里的苹果、浆果、西瓜）',
+        has(/^(wheat_seeds)$/) ? 'farm（种小麦，慢）' : '',
+      ].filter(Boolean);
+      return fail('NO_FOOD', `背包里没有能吃的：可以 ${alt.join('、')}`, { alternatives: alt });
+    }
     try {
       // 像人一样一次吃饱：饱食度到 18 以上（能自然回血）或吃完为止，而不是吃一口就走、过一会儿又被饿意打断
       let bites = 0;

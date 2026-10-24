@@ -53,6 +53,8 @@ export interface BuildingProject {
   temporaryBlocks: { pos: Vec3Like; name: string }[];
   /** A pre-action intention; only a later live observation can turn it into owned evidence. */
   pendingPlacement: { kind: 'temporary' | 'permanent'; pos: Vec3Like; name: string; cellId?: string } | null;
+  /** 连续“动了手（放了/试着放了方块）、不缺料、缺陷却没减少”的施工次数；纯缺料的失败不计 */
+  stalls?: number;
 }
 
 /** One bounded atomic JSON archive, wholly underneath DATA_DIR and memory:clear's scope. */
@@ -160,6 +162,14 @@ export class BuildingArchive {
     const changedFields = Object.keys(left.spec).filter((field) => JSON.stringify((left.spec as any)[field]) !== JSON.stringify((right.spec as any)[field]));
     const materialDelta = Object.fromEntries([...new Set([...Object.keys(left.materials), ...Object.keys(right.materials)])].map((name) => [name, (right.materials[name] ?? 0) - (left.materials[name] ?? 0)]));
     return structuredClone({ projectId: id, left, right, changedFields, materialDelta, feedback: project.feedback.filter((f) => f.designVersion === leftVersion || f.designVersion === rightVersion) });
+  }
+
+  /** 记一次施工结果：stalled=true 计一次停滞，false 清零，null（纯缺料等）不变 */
+  noteAttempt(id: string, stalled: boolean | null) {
+    if (stalled === null) return;
+    const project = this.require(id);
+    project.stalls = stalled ? (project.stalls ?? 0) + 1 : 0;
+    this.save();
   }
 
   inspect(id: string, inspection: BuildingInspection) {

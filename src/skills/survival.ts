@@ -12,6 +12,8 @@ const DIGGABLE = new Set(['dirt', 'grass_block', 'coarse_dirt', 'podzol', 'stone
 const SAFE_FLOOR = new Set([...DIGGABLE, ...PLACEABLE, 'bedrock'].filter((name) => !['sand', 'gravel'].includes(name)));
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 const FOOD_ANIMALS = new Set(['cow', 'pig', 'sheep', 'chicken', 'rabbit', 'mooshroom']);
+/** 鱼只在明确指定时才去打：要贴着水面下手，浅水里才去（不潜进深水） */
+const FISH = new Set(['cod', 'salmon']);
 
 export const hasPlaceable = (inv: { name: string; count: number }[]) => inv.some((i) => PLACEABLE.includes(i.name) && i.count > 0);
 
@@ -112,27 +114,47 @@ export const shelter: Skill<{ until: 'day' | 'healed' }> = {
 // ------------------------------------------------------------------ hunt
 export const hunt: Skill<{ animal?: string; count: number }> = {
   name: 'hunt',
-  description: '猎杀看得见的牛/猪/羊/鸡/兔子获取食物，并捡起掉落物。饥饿值低且背包没有食物时使用',
-  argsDoc: '{"animal"?: "cow|pig|sheep|chicken|rabbit", "count"?: 1-4}',
+  description: '猎杀看得见的牛/猪/羊/鸡/兔子获取食物，并捡起掉落物。饥饿值低且背包没有食物时使用；animal 写 cod/salmon 时在浅水边打鱼（只打离水面近的，不潜深水）',
+  argsDoc: '{"animal"?: "cow|pig|sheep|chicken|rabbit|cod|salmon", "count"?: 1-4}',
   timeoutMs: 90000,
   movement: true,
   validate(raw) {
     const a = obj(raw);
     const animal = a.animal ? String(a.animal) : undefined;
-    if (animal && !FOOD_ANIMALS.has(animal)) return { ok: false, error: `animal 必须是 ${[...FOOD_ANIMALS].join('/')}` };
+    if (animal && !FOOD_ANIMALS.has(animal) && !FISH.has(animal)) return { ok: false, error: `animal 必须是 ${[...FOOD_ANIMALS, ...FISH].join('/')}` };
     return { ok: true, args: { animal, count: clampInt(a.count, 1, 4, 1) } };
   },
   async run(ctx, args) {
     const { adapter, senses, signal } = ctx;
     await adapter.equipWeapon();
     let kills = 0, searches = 0, escaped = 0, walks = 0;
+    const fishing = !!args.animal && FISH.has(args.animal);
+    // 鱼：只打浅水里的（鱼离脚下不超过 2 格深、上面 3 格内就是水面），人站在岸边/浅水里下手
+    const shallow = (p: { x: number; y: number; z: number }) => {
+      if (p.y < adapter.state().pos.y - 2.5) return false;
+      for (let dy = 1; dy <= 3; dy++) {
+        const n = adapter.blockAt({ x: Math.floor(p.x), y: Math.floor(p.y) + dy, z: Math.floor(p.z) }) ?? 'air';
+        if (n === 'air' || n === 'cave_air') return true;
+        if (n !== 'water' && n !== 'seagrass' && n !== 'kelp' && n !== 'kelp_plant') return false;
+      }
+      return false;
+    };
+    let deepFish = 0;
     const findPrey = () => senses.perceivedEntities(48)
-      .find((e) => e.kind === 'passive' && FOOD_ANIMALS.has(e.name) && (!args.animal || e.name === args.animal));
+      .find((e) => {
+        if (e.kind !== 'passive') return false;
+        if (fishing) {
+          if (e.name !== args.animal) return false;
+          if (!shallow(e.pos)) { deepFish++; return false; }
+          return true;
+        }
+        return FOOD_ANIMALS.has(e.name) && (!args.animal || e.name === args.animal);
+      });
     while (kills < args.count && Date.now() < ctx.deadline) {
       senses.refresh();
       let target = findPrey();
       // 刚才亲眼看见过（例如探索时远远看到），现在被树/坡挡住了：先走到最后看见它的地方
-      if (!target && senses.lastSighting && walks < 2) {
+      if (!target && senses.lastSighting && walks < 2 && !fishing) {
         const last = senses.lastSighting((n) => FOOD_ANIMALS.has(n) && (!args.animal || n === args.animal), 120_000);
         const here = adapter.state().pos;
         if (last && Math.hypot(last.pos.x - here.x, last.pos.z - here.z) > 3 && Math.hypot(last.pos.x - here.x, last.pos.z - here.z) <= 160) {
@@ -160,7 +182,7 @@ export const hunt: Skill<{ animal?: string; count: number }> = {
       }
       const what = args.animal ?? '可以猎杀的动物';
       if (!target) return kills ? ok(`猎到 ${kills} 只，附近没有更多猎物`, { kills, searched: true })
-        : fail('NOT_FOUND', `转头找过了，视野里没有${what}${escaped ? `（有 ${escaped} 只跑出了视线）` : ''}`, { searched: true });
+        : fail('NOT_FOUND', `转头找过了，视野里没有${fishing && deepFish ? `能在浅水够到的 ${what}（看见的都在深水里，不潜下去）` : what}${escaped ? `（有 ${escaped} 只跑出了视线）` : ''}；没有动物时可以 forage 摘苹果/浆果`, { searched: true });
       const id = target.id;
       let lastPos = target.pos;
       let hits = 0, lastDist = target.dist;
@@ -172,6 +194,8 @@ export const hunt: Skill<{ animal?: string; count: number }> = {
         if (!target) break; // 死了或跑出视野
         lastPos = target.pos;
         lastDist = target.dist;
+        // 打鱼时鱼游进深水 / 自己氧气不够：不追下去
+        if (fishing && (!shallow(target.pos) || adapter.state().oxygen < 14)) { target = undefined; hits = -1; break; }
         if (target.dist > 3) {
           try {
             await adapter.moveTo({ kind: 'follow_entity', entityId: id, range: 2 }, { signal, timeoutMs: 4000 });
@@ -185,6 +209,7 @@ export const hunt: Skill<{ animal?: string; count: number }> = {
         await sleep(600, signal);
       }
       if (target) continue; // 超时没追上，换下一只
+      if (hits < 0) { escaped++; continue; } // 鱼进了深水，放过它
       // 没打到过、或消失时离得很远：是跑出了视线，不是被打死了
       if (hits === 0 || lastDist > 4.5) { escaped++; continue; }
       kills++;
