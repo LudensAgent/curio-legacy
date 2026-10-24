@@ -78,6 +78,40 @@ export interface Note {
   ts: number;
   kind: 'fact' | 'inference' | 'hypothesis';
   text: string;
+  /** 写下笔记时所在位置（让“这里/附近”有参照） */
+  pos?: Vec3Like;
+}
+
+/**
+ * 危险区域：在这里出过事（淹死、掉岩浆、摔死、被怪打死……）。由程序根据真实死亡/伤害记录，
+ * 不由模型编造；寻路/采集据此绕开，提示词里作为“我在这里吃过亏”的经验。
+ */
+export type HazardKind = 'drowning' | 'lava' | 'fall' | 'mob' | 'starvation' | 'suffocation' | 'unknown';
+export interface Hazard {
+  id: string;
+  worldId?: string;
+  dim: string;
+  pos: Vec3Like;
+  /** 影响半径（格），同一处反复出事会变大 */
+  radius: number;
+  kind: HazardKind;
+  /** 在这里出事的次数 */
+  count: number;
+  /** 出事时在做什么（技能名 + 关键参数），用于“做 X 时别来这里” */
+  during?: string;
+  note?: string;
+  firstTs: number;
+  ts: number;
+}
+
+/** 经验教训：model=模型反思写下的推断；observed=程序根据真实经历（死亡、反复失败）写下的 */
+export interface Lesson {
+  ts: number;
+  text: string;
+  worldId?: string;
+  source?: 'model' | 'observed';
+  /** 程序写的经验按 key 更新（同一处第 3 次淹死时替换“淹死过 2 次”那条） */
+  key?: string;
 }
 
 export interface DeathRecord {
@@ -99,7 +133,8 @@ interface MemoryData {
   digs: DigRecord[];
   chests: Record<string, ChestRecord>;
   farms: FarmRecord[];
-  lessons: { ts: number; text: string }[];
+  lessons: Lesson[];
+  hazards: Hazard[];
   visitedChunks: Record<string, number>;
   seen: { blocks: Record<string, number>; entities: Record<string, number>; biomes: Record<string, number>; items?: Record<string, number> };
   landmarks: Landmark[];
@@ -127,6 +162,7 @@ const empty = (): MemoryData => ({
   chests: {},
   farms: [],
   lessons: [],
+  hazards: [],
   visitedChunks: {},
   seen: { blocks: {}, entities: {}, biomes: {}, items: {} },
   landmarks: [],
@@ -448,16 +484,30 @@ export class WorldMemory {
     return this.data.goals.slice(-n);
   }
 
-  addNote(kind: Note['kind'], text: string, dimension?: string) {
+  addNote(kind: Note['kind'], text: string, dimension?: string, pos?: Vec3Like): Note | null {
     const t = text.trim().slice(0, 200);
-    if (!t || this.data.notes.some((n) => this.inWorld(n) && n.text === t)) return;
-    this.data.notes.push({ id: shortId('note_'), worldId: this.worldId, dimension, ts: Date.now(), kind, text: t });
+    if (!t) return null;
+    const at = pos && [pos.x, pos.y, pos.z].every(Number.isFinite) ? { x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z) } : undefined;
+    // 同一世界、同一维度、写在附近（或没有位置）的同一句话只记一次；换个地方写同一句话是新的观察
+    const same = this.data.notes.find((n) => this.inWorld(n) && n.text === t && (n.dimension ?? dimension) === dimension
+      && (!at || !n.pos || dist3(n.pos, at) <= 16));
+    if (same) return null;
+    const note: Note = { id: shortId('note_'), worldId: this.worldId, dimension, ts: Date.now(), kind, text: t, ...(at ? { pos: at } : {}) };
+    this.data.notes.push(note);
     if (this.data.notes.length > 60) this.data.notes.shift();
     this.touch();
+    return structuredClone(note);
   }
 
   recentNotes(n = 10) {
     return this.data.notes.slice(-n);
+  }
+
+  /** 当前世界（可限定维度、时间窗口）最近的笔记，旧的在前 */
+  notesFor(opts: { dimension?: string; withinMs?: number; n?: number } = {}): Note[] {
+    const cut = opts.withinMs ? Date.now() - opts.withinMs : 0;
+    return this.data.notes.filter((x) => this.inWorld(x) && x.ts >= cut && (!opts.dimension || !x.dimension || x.dimension === opts.dimension))
+      .slice(-(opts.n ?? 10)).map((x) => structuredClone(x));
   }
 
   // ------------------------------------------------ 死亡与掉落物
@@ -483,6 +533,66 @@ export class WorldMemory {
     delete this.data.deaths[this.worldId];
     if (this.data.lastDeath && this.inWorld(this.data.lastDeath)) this.data.lastDeath = null;
     this.touch();
+  }
+
+  // ------------------------------------------------ 危险区域（程序记录的真实出事地点）
+  /**
+   * 危险区域会慢慢淡化：很久没再出事（约 2 个游戏日 = 40 分钟，出事次数多的保留更久，最多 3 倍）之后，
+   * 半径每 20 分钟缩 2 格，缩到 2 格以下就过期（不再出现在提示词里，也不再绕开）。
+   */
+  static readonly HAZARD_FADE_MS = 40 * 60_000;
+  private effectiveHazard(z: Hazard, now = Date.now()): Hazard | null {
+    const fadeStart = WorldMemory.HAZARD_FADE_MS * Math.min(3, Math.max(1, z.count));
+    const over = now - z.ts - fadeStart;
+    if (over <= 0) return z;
+    const radius = z.radius - 2 * Math.ceil(over / (20 * 60_000));
+    return radius < 3 ? null : { ...z, radius };
+  }
+
+  /** 记一次出事：同一世界/维度、同类、6 格内的旧记录合并（次数 +1，半径随次数变大） */
+  addHazard(h: { dim: string; pos: Vec3Like; kind: HazardKind; during?: string; note?: string }): Hazard {
+    const pos = { x: Math.round(h.pos.x), y: Math.round(h.pos.y), z: Math.round(h.pos.z) };
+    const list = (this.data.hazards ??= []);
+    const now = Date.now();
+    // 过期很久（再过一个淡化周期）的记录直接清掉
+    for (let i = list.length - 1; i >= 0; i--) if (!this.effectiveHazard(list[i], now - WorldMemory.HAZARD_FADE_MS)) list.splice(i, 1);
+    const old = list.find((z) => this.inWorld(z) && z.dim === h.dim && z.kind === h.kind && this.effectiveHazard(z, now) && dist3(z.pos, pos) <= Math.max(6, z.radius));
+    if (old) {
+      old.count++;
+      old.ts = now;
+      old.radius = Math.min(12, 4 + old.count * 2);
+      if (h.during) old.during = h.during.slice(0, 120);
+      if (h.note) old.note = h.note.slice(0, 200);
+      this.checkpoint();
+      return structuredClone(old);
+    }
+    const z: Hazard = { id: shortId('hz_'), worldId: this.worldId, dim: h.dim, pos, radius: 6, kind: h.kind, count: 1,
+      ...(h.during ? { during: h.during.slice(0, 120) } : {}), ...(h.note ? { note: h.note.slice(0, 200) } : {}), firstTs: now, ts: now };
+    list.push(z);
+    if (list.length > 40) list.splice(0, list.length - 40);
+    this.checkpoint();
+    return structuredClone(z);
+  }
+
+  /** 当前世界的危险区域（可按维度过滤），最近出事的在后 */
+  hazards(dim?: string): Hazard[] {
+    const now = Date.now();
+    return (this.data.hazards ?? []).filter((z) => this.inWorld(z) && (!dim || z.dim === dim)).sort((a, b) => a.ts - b.ts)
+      .flatMap((z) => { const e = this.effectiveHazard(z, now); return e ? [structuredClone(e)] : []; });
+  }
+
+  /** pos 是否落在某个危险区域里（可限定种类）；返回最严重（出事次数最多）的那个 */
+  hazardAt(pos: Vec3Like, dim: string, kinds?: HazardKind[]): Hazard | null {
+    let best: Hazard | null = null;
+    const now = Date.now();
+    for (const raw of this.data.hazards ?? []) {
+      if (!this.inWorld(raw) || raw.dim !== dim || (kinds && !kinds.includes(raw.kind))) continue;
+      const z = this.effectiveHazard(raw, now);
+      if (!z) continue;
+      if (dist3(z.pos, pos) > z.radius) continue;
+      if (!best || z.count > best.count) best = z;
+    }
+    return best ? structuredClone(best) : null;
   }
 
   // ------------------------------------------------ 效率统计
@@ -531,16 +641,46 @@ export class WorldMemory {
   }
 
   // ------------------------------------------------ 经验教训（反思产出，长期保留）
-  addLesson(text: string) {
+  addLesson(text: string, opts: { source?: 'model' | 'observed'; key?: string } = {}): Lesson | null {
     const t = text.trim().slice(0, 160);
-    if (!t || (this.data.lessons ??= []).some((l) => l.text === t)) return;
-    this.data.lessons.push({ ts: Date.now(), text: t });
-    if (this.data.lessons.length > 40) this.data.lessons.shift();
+    const list = (this.data.lessons ??= []);
+    if (!t) return null;
+    const source = opts.source ?? 'model';
+    if (opts.key) {
+      const old = list.find((l) => l.key === opts.key && this.inWorld(l));
+      if (old) {
+        if (old.text === t) return null;
+        old.text = t; old.ts = Date.now(); old.source = source;
+        this.touch();
+        return structuredClone(old);
+      }
+    }
+    if (list.some((l) => l.text === t && (l.worldId ?? this.worldId) === this.worldId)) return null;
+    const lesson: Lesson = { ts: Date.now(), text: t, worldId: this.worldId, source, ...(opts.key ? { key: opts.key } : {}) };
+    list.push(lesson);
+    if (list.length > 40) {
+      // 先挤掉最旧的模型推断；程序观察到的教训（死亡地点等）更值得留
+      const i = list.findIndex((l) => l.source !== 'observed');
+      list.splice(i >= 0 ? i : 0, 1);
+    }
     this.touch();
+    return structuredClone(lesson);
   }
 
   lessons(n = 10) {
     return (this.data.lessons ?? []).slice(-n);
+  }
+
+  /** 当前世界的经验（旧记录没有 worldId 也算），程序观察到的排在前面，各自按时间先后 */
+  lessonsFor(n = 6): Lesson[] {
+    const mine = (this.data.lessons ?? []).filter((l) => (l.worldId ?? this.worldId) === this.worldId);
+    const observed = mine.filter((l) => l.source === 'observed');
+    const model = mine.filter((l) => l.source !== 'observed');
+    const last = <T>(a: T[], k: number) => k > 0 ? a.slice(-k) : [];
+    // 程序观察到的至少占一半名额（模型推断不够时全给它们）
+    const keepObserved = last(observed, Math.max(n - model.length, Math.ceil(n / 2)));
+    const keepModel = last(model, n - keepObserved.length);
+    return [...keepObserved, ...keepModel].slice(0, n).map((l) => structuredClone(l));
   }
 
   // ------------------------------------------------ 长期目标

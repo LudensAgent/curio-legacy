@@ -143,7 +143,12 @@ test('candidate versions and evidence persist atomically, with verified fallback
   adapter.inv.clear(); adapter.pos.x = 48;
   await run(first.name);
   assert.equal(library.list()[0].status, 'verified');
-  assert.equal(library.propose(candidate('versioned_sample')).ok, true);
+  const same = library.propose(candidate('versioned_sample'));
+  assert.ok(same.ok && same.existing, '同样的程序不重复存版本');
+  assert.equal(library.list().length, 1);
+  const revised = candidate('versioned_sample');
+  revised.parameters.amount.default = 3;
+  assert.equal(library.propose(revised).ok, true);
   assert.equal(library.list()[1].version, 2);
   library.dispose();
   const restored = new MethodLibrary(file, adapter, memory, new EventBus(), { trialWorldIds: [adapter.worldId] });

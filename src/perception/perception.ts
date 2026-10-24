@@ -21,7 +21,8 @@ export interface Percept {
   ts: number;
   connected: boolean;
   observation?: { ready: boolean; worldId: string; sessionId: string; id: number };
-  time: { timeOfDay: number; phase: 'day' | 'dusk' | 'night' | 'dawn' };
+  /** can_sleep：只有夜里（或雷雨）才能上床睡觉，白天 sleep 会失败 */
+  time: { timeOfDay: number; phase: 'day' | 'dusk' | 'night' | 'dawn'; isDay?: boolean; can_sleep?: boolean };
   self: { pos: [number, number, number]; dim: string; hp: number; food: number; biome: string | null; inWater: boolean; inLava: boolean; held: string | null; around?: string };
   inventory: InvItem[];
   emptySlots: number;
@@ -75,6 +76,12 @@ export function phaseOf(t: number): Percept['time']['phase'] {
   if (t < 13800) return 'dusk';
   if (t < 22200) return 'night';
   return 'dawn';
+}
+
+/** 原版：12542–23459 刻之间才能睡觉（不考虑雷雨） */
+export function canSleepAt(timeOfDay: number): boolean {
+  const t = ((timeOfDay % 24000) + 24000) % 24000;
+  return t >= 12542 && t <= 23459;
 }
 
 export function dirName(dx: number, dz: number): string {
@@ -265,7 +272,7 @@ export class Perception {
       ts: Date.now(),
       connected: s.connected,
       observation: { ready: s.observationReady, worldId: s.worldId, sessionId: s.sessionId, id: s.observationId },
-      time: { timeOfDay: s.timeOfDay, phase: phaseOf(s.timeOfDay) },
+      time: { timeOfDay: s.timeOfDay, phase: phaseOf(s.timeOfDay), isDay: s.isDay, can_sleep: canSleepAt(s.timeOfDay) },
       self: {
         pos: [Math.round(s.pos.x), Math.round(s.pos.y), Math.round(s.pos.z)],
         dim: s.dim,

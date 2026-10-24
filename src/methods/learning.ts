@@ -8,6 +8,7 @@ import type { Condition } from '../projects/types.ts';
 import { SKILLS } from '../skills/index.ts';
 import { fail, ok, type Skill } from '../skills/types.ts';
 import { shortId, throwIfAborted } from '../util.ts';
+import { SMELTABLE } from '../skills/economy.ts';
 import { bindParameters, executeProgram, substitute, validateParameters, validateProgram, type Parameters, type Program } from './program.ts';
 
 export interface AbilityGap {
@@ -47,6 +48,105 @@ export interface MethodDefinition {
   createdAt: number;
   trials: MethodTrial[];
   scope: { intentId?: string; projectId?: string };
+}
+
+/** 采集某种方块后背包里会多出的物品（别名与常见掉落物）；拿不准的（log 可能是任何树种）返回 null */
+const GATHER_DROPS: Record<string, string> = {
+  stone: 'cobblestone', cobblestone: 'cobblestone', coal: 'coal', coal_ore: 'coal', deepslate_coal_ore: 'coal',
+  iron: 'raw_iron', iron_ore: 'raw_iron', deepslate_iron_ore: 'raw_iron', copper: 'raw_copper', copper_ore: 'raw_copper',
+  gold: 'raw_gold', gold_ore: 'raw_gold', diamond: 'diamond', diamond_ore: 'diamond', deepslate_diamond_ore: 'diamond',
+  redstone: 'redstone', redstone_ore: 'redstone', lapis: 'lapis_lazuli', lapis_ore: 'lapis_lazuli', emerald_ore: 'emerald',
+  grass_block: 'dirt', dirt: 'dirt', sand: 'sand', gravel: 'gravel', clay: 'clay_ball', deepslate: 'cobbled_deepslate',
+  oak_log: 'oak_log', birch_log: 'birch_log', spruce_log: 'spruce_log', jungle_log: 'jungle_log', acacia_log: 'acacia_log',
+  dark_oak_log: 'dark_oak_log', mangrove_log: 'mangrove_log', cherry_log: 'cherry_log',
+};
+
+export interface SimpleStep { skill: string; args?: unknown }
+
+/**
+ * 从一串步骤推导一个可观测的验收条件（不信任“技能成功”的文字）：
+ * 最后一个合成/采集/冶炼步骤 → 背包里至少有那件东西；去往已知地标/当前位置 → 到了那附近。
+ * 推不出来就返回 null（调用方退回为普通组合技能）。
+ */
+export function derivePostcondition(steps: SimpleStep[], adapter: Pick<GameAdapter, 'isKnownItem' | 'state'>, memory: WorldMemory): Record<string, unknown> | null {
+  const state = adapter.state();
+  for (const st of [...steps].reverse()) {
+    const a = (st.args && typeof st.args === 'object' ? st.args : {}) as Record<string, unknown>;
+    const n = (v: unknown, d: number) => Number.isInteger(v) && (v as number) >= 1 ? Math.min(64, v as number) : d;
+    let item: string | null = null, count = 1;
+    if (st.skill === 'craft' && typeof a.item === 'string') { item = a.item; count = n(a.count, 1); }
+    else if (st.skill === 'smelt' && typeof a.item === 'string') { item = SMELTABLE[a.item] ?? null; count = 1; }
+    else if (st.skill === 'gather' && typeof a.block === 'string') {
+      item = GATHER_DROPS[a.block] ?? (/(_ore|^log|^wood|^logs)$/.test(a.block) ? null : a.block);
+      // 写了 for 时采多少由缺口决定，只要求至少拿到 1 个
+      count = a.for ? 1 : n(a.count, 1);
+    } else if (['goto', 'boat'].includes(st.skill)) {
+      const target = String(a.target ?? a.to ?? '').trim();
+      if (!target) continue;
+      const lm = memory.findLandmark(target, state.dim);
+      if (lm && lm.kind !== 'resource') return { type: 'location_near', dimension: lm.dim, pos: { ...lm.pos }, radius: 4, landmarkId: lm.id };
+      continue;
+    } else continue;
+    // 相对条件：试验开始时背包里已有多少不重要，要求“又多了 count 个”，这样已经有这件东西时试验也有意义
+    if (item && adapter.isKnownItem(item)) return { type: 'inventory_gain', item, count };
+  }
+  return null;
+}
+
+/**
+ * 把相对的 inventory_gain {item,count} 按某一刻的真实背包换成绝对的 inventory_min（当时数量 + count）。
+ * 方法每次试验/执行都在开始时绑定一次，验收仍然只用受支持的事实条件。
+ */
+export function bindRelative(cond: unknown, state: Pick<AgentState, 'inventory'>, depth = 0): unknown {
+  if (!cond || typeof cond !== 'object' || Array.isArray(cond) || depth > 4) return cond;
+  const c = cond as Record<string, any>;
+  if (c.type === 'inventory_gain') {
+    const held = (state.inventory ?? []).filter((i) => i.name === c.item).reduce((n, i) => n + i.count, 0);
+    const gain = Number.isInteger(c.count) && c.count >= 1 ? Math.min(2304, c.count) : 1;
+    return { type: 'inventory_min', item: c.item, count: Math.min(2304, held + gain) };
+  }
+  if (c.type === 'all_of' && Array.isArray(c.conditions)) return { ...c, conditions: c.conditions.map((x: unknown) => bindRelative(x, state, depth + 1)) };
+  return cond;
+}
+
+/** 合法的方法名：小写字母开头，3–32 位，不与已有技能重名 */
+export function methodName(raw: unknown, fallback = 'learned'): string {
+  let name = String(raw ?? '').trim().toLowerCase().replace(/^(macro|trial|method):/, '').replace(/[^a-z0-9_]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+  if (!/^[a-z]/.test(name)) name = `m_${name || fallback}`;
+  name = name.slice(0, 32).replace(/_$/, '');
+  if (name.length < 3) name = `${name}_m`.slice(0, 32);
+  return SKILLS[name] ? `my_${name}`.slice(0, 32) : name;
+}
+
+/**
+ * 简单格式 {name, description, steps:[{skill,args}]} → 方法库候选（顺序程序 + 自动推导的验收条件）。
+ * 已经是完整格式（带 program）的原样返回；推不出验收条件时返回 macro，由调用方退回 SkillLibrary.learn。
+ */
+export function simpleToMethod(raw: unknown, adapter: Pick<GameAdapter, 'isKnownItem' | 'state'>, memory: WorldMemory):
+  { kind: 'method'; method: Record<string, unknown> } | { kind: 'macro'; macro: { name: string; description: string; steps: SimpleStep[] } } | { kind: 'invalid'; error: string } {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { kind: 'invalid', error: 'learn_skill 须为对象' };
+  const o = raw as Record<string, any>;
+  if (o.program) return { kind: 'method', method: o };
+  if (!Array.isArray(o.steps) || !o.steps.length) return { kind: 'invalid', error: 'learn_skill 需要 steps 或 program' };
+  const steps: SimpleStep[] = o.steps.slice(0, 12).map((st: any) => {
+    // 和计划一样容忍参数平铺在步骤上
+    if (!st || typeof st !== 'object') return { skill: String(st ?? '') };
+    const { skill, args, ...rest } = st;
+    return { skill: String(skill ?? ''), args: args && typeof args === 'object' && Object.keys(args).length ? args : Object.keys(rest).length ? rest : args ?? {} };
+  });
+  const name = methodName(o.name);
+  const description = String(o.description ?? '').trim().slice(0, 200) || steps.map((st) => st.skill).join(' → ');
+  const postcondition = derivePostcondition(steps, adapter, memory);
+  if (!postcondition) return { kind: 'macro', macro: { name, description, steps } };
+  return { kind: 'method', method: { name, description, program: { type: 'sequence', steps: steps.map((st) => ({ type: 'call', skill: st.skill, args: st.args ?? {} })) }, postcondition } };
+}
+
+/** 把方法程序展开成线性步骤（用于和习惯候选的签名比对） */
+export function flattenProgram(program: Program): SimpleStep[] {
+  if (program.type === 'call') return [{ skill: program.skill, args: program.args }];
+  if (program.type === 'sequence') return program.steps.flatMap(flattenProgram);
+  if (program.type === 'repeat') return flattenProgram(program.body);
+  return [...flattenProgram(program.then), ...(program.else ? flattenProgram(program.else) : [])];
 }
 
 /** Candidates remain visibly unverified until isolated executions establish their postcondition. */
@@ -112,14 +212,44 @@ export class MethodLibrary {
     const bound = bindParameters(parameters, {});
     const program = validateProgram(raw.program, bound, this.adapter, this.memory, this.adapter.state());
     if (!raw.postcondition) throw new Error('候选方法需要可观测的 postcondition，执行成功文字不能代替验收');
-    validateCondition(substitute(raw.postcondition, bound), this.adapter, this.memory, this.adapter.state());
+    validateCondition(bindRelative(substitute(raw.postcondition, bound), this.adapter.state()), this.adapter, this.memory, this.adapter.state());
     return { name: raw.name, description: raw.description.trim(), parameters, program, postcondition: structuredClone(raw.postcondition) };
   }
 
-  propose(raw: unknown, scope: { intentId?: string; projectId?: string } = {}): { ok: true; name: string; version: number; status: 'candidate' } | { ok: false; error: string } {
+  /**
+   * 退役没希望的候选（试了 3 次以上都没验收通过、或很久没人试），并在库快满时清掉已退役的旧版本，
+   * 免得容量上限挡住新的学习。
+   */
+  pruneStale(now = Date.now()) {
+    let changed = false;
+    for (const d of this.definitions) {
+      if (d.status !== 'candidate') continue;
+      const failed = d.trials.filter((t) => t.status === 'failed').length, verified = d.trials.filter((t) => t.status === 'verified').length;
+      const lastTry = Math.max(d.createdAt, ...d.trials.map((t) => t.ts));
+      if (failed >= 3 && verified === 0) { this.retire(d.name, d.version, `试验 ${failed} 次都没通过事实验收`); changed = true; }
+      else if (now - lastTry > 3 * 86_400_000) { this.retire(d.name, d.version, '三天没有试用'); changed = true; }
+    }
+    while (this.definitions.length >= 90) {
+      const i = this.definitions.findIndex((d) => d.status === 'retired');
+      if (i < 0) break;
+      this.definitions.splice(i, 1);
+      changed = true;
+    }
+    if (changed) this.save();
+  }
+
+  propose(raw: unknown, scope: { intentId?: string; projectId?: string } = {}): { ok: true; name: string; version: number; status: 'candidate' | 'verified'; existing?: boolean } | { ok: false; error: string } {
     try {
-      if (this.definitions.length >= 100) throw new Error('方法版本库已满，请先回顾或退役旧版本');
+      this.pruneStale();
       const prepared = this.prepare(raw);
+      // 同一个程序和验收条件已经在库里（候选或已验证）：不再存一个新版本
+      const key = JSON.stringify([prepared.program, prepared.postcondition, prepared.parameters]);
+      const same = this.definitions.find((d) => d.status !== 'retired' && JSON.stringify([d.program, d.postcondition, d.parameters]) === key);
+      if (same) {
+        const name = same.status === 'verified' ? `method:${same.name}` : `trial:${same.name}:v${same.version}`;
+        return { ok: true, name, version: same.version, status: same.status as 'candidate' | 'verified', existing: true };
+      }
+      if (this.definitions.length >= 100) throw new Error('方法版本库已满，请先回顾或退役旧版本');
       const version = 1 + Math.max(0, ...this.definitions.filter((d) => d.name === prepared.name).map((d) => d.version));
       const definition: MethodDefinition = { ...prepared, version, createdAt: Date.now(), trials: [], status: 'candidate', scope };
       this.definitions.push(definition);
@@ -196,7 +326,7 @@ export class MethodLibrary {
         try {
           const parameters = bindParameters(definition.parameters, (raw as any)?.parameters ?? {});
           validateProgram(definition.program, parameters, this.adapter, this.memory, this.adapter.state());
-          validateCondition(substitute(definition.postcondition, parameters), this.adapter, this.memory, this.adapter.state());
+          validateCondition(bindRelative(substitute(definition.postcondition, parameters), this.adapter.state()), this.adapter, this.memory, this.adapter.state());
           if (trial && !this.trialAllowed(this.adapter.state().worldId)) throw new Error('候选方法只能在配置的隔离测试世界中执行');
           return { ok: true, args: { parameters } };
         } catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
@@ -205,7 +335,7 @@ export class MethodLibrary {
         throwIfAborted(ctx.signal);
         const beforeState = ctx.adapter.state();
         if (trial && !this.trialAllowed(beforeState.worldId)) return fail('BAD_ARGS', '当前世界没有隔离试验授权');
-        const postcondition: Condition = validateCondition(substitute(definition.postcondition, args.parameters), ctx.adapter, ctx.memory, beforeState);
+        const postcondition: Condition = validateCondition(bindRelative(substitute(definition.postcondition, args.parameters), beforeState), ctx.adapter, ctx.memory, beforeState);
         const before = evaluateCondition(postcondition, beforeState);
         if (!observationReady(beforeState)) return fail('NOT_CONNECTED', '方法试验需要有效观测');
         const result = await executeProgram(definition.program, args.parameters, ctx);

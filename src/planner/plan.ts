@@ -48,8 +48,49 @@ export interface Plan {
   /** 短期工作记忆：做完这些之后打算做什么；接下来几分钟要记住的事 */
   then?: string;
   /** 这份决定是基于什么时候、哪些“正在做/排队”的步骤想的（边做边想时用来剔除已做完的步骤） */
-  basis?: { at: number; reason: string; pending: { skill: string; args?: unknown }[] };
+  basis?: { at: number; reason: string; pending: { skill: string; args?: unknown }[]; snapshot?: BasisSnapshot };
   note?: string;
+  /** 这份决定是带着反思请求想的（由 Executive 设置，不接受模型输入） */
+  reflection?: string;
+}
+
+/** 想这份决定时的世界快照：边做边想的决定只在这些“要紧的事”变了时才作废 */
+export interface BasisSnapshot {
+  sessionId: string;
+  dim: string;
+  pos: { x: number; y: number; z: number };
+  hp: number;
+  inventory: Record<string, number>;
+  hostiles: string[];
+}
+
+/** 模型常把“等一会儿/发呆”写成不存在的技能名 */
+const IDLE_ALIASES = new Set(['wait', 'idle', 'rest_a_bit', 'pause', 'stand_still']);
+
+/**
+ * 把模型写歪的步骤扶正（不放宽校验，只纠正常见的格式偏差）：
+ * - 参数平铺在步骤上：{"skill":"gather","block":"stone"} → {"skill":"gather","args":{"block":"stone"}}
+ * - 不存在的 wait/idle：有 wait 技能就用它，否则换成原地环顾
+ */
+export function normalizeStep(raw: unknown): unknown {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+  const { skill, args, ...rest } = raw as Record<string, unknown>;
+  let name = typeof skill === 'string' ? skill.trim() : skill;
+  let a: unknown = args;
+  const noArgs = a === undefined || a === null || typeof a !== 'object' || Array.isArray(a) || !Object.keys(a).length;
+  if (noArgs && Object.keys(rest).length) a = rest;
+  if (typeof name === 'string' && !SKILLS[name] && IDLE_ALIASES.has(name.toLowerCase())) {
+    const o = (a && typeof a === 'object' ? a : {}) as Record<string, unknown>;
+    const seconds = Number(o.seconds ?? o.duration ?? o.time);
+    if (SKILLS.wait && !LLM_HIDDEN.has('wait')) {
+      name = 'wait';
+      a = { ...o, seconds: Number.isFinite(seconds) ? seconds : 5 };
+    } else {
+      name = 'look_around';
+      a = Number.isFinite(seconds) ? { seconds: Math.max(2, Math.min(20, Math.round(seconds))) } : {};
+    }
+  }
+  return { ...(name !== undefined ? { skill: name } : {}), ...(a !== undefined ? { args: a } : {}) };
 }
 
 /** 从模型输出中提取 JSON（容忍 ```json 包裹或前后多余文字）。 */
@@ -79,7 +120,8 @@ export function validatePlan(raw: unknown, adapter: GameAdapter, source: Plan['s
   // 多写的步骤不作废整个计划：只执行前 6 步，后面的交给下一次决策
   if (o.steps.length > 6) o.steps = o.steps.slice(0, 6);
   const steps: Step[] = [];
-  for (const [i, s] of o.steps.entries()) {
+  for (const [i, s0] of o.steps.entries()) {
+    const s = normalizeStep(s0) as any;
     const name = String(s?.skill ?? '');
     const skill = SKILLS[name];
     if (!skill || LLM_HIDDEN.has(name)) return { ok: false, error: `steps[${i}] 使用了不存在的技能 "${name}"，可用：${Object.keys(SKILLS).filter((k) => !LLM_HIDDEN.has(k)).join(', ')}` };
@@ -89,7 +131,8 @@ export function validatePlan(raw: unknown, adapter: GameAdapter, source: Plan['s
   }
   // on_fail 是可选的锦上添花：写错了就忽略，不影响主计划
   const onFail: Step[] = [];
-  if (Array.isArray(o.on_fail)) for (const s of o.on_fail.slice(0, 2)) {
+  if (Array.isArray(o.on_fail)) for (const s0 of o.on_fail.slice(0, 2)) {
+    const s = normalizeStep(s0) as any;
     const skill = SKILLS[String(s?.skill ?? '')];
     if (!skill || LLM_HIDDEN.has(skill.name)) continue;
     const v = skill.validate(s?.args ?? {}, adapter);

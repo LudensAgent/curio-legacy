@@ -10,7 +10,7 @@ import { WorldMemory } from './memory/store.ts';
 import { EpisodicMemory } from './memory/episodic.ts';
 import { HindsightBackend } from './memory/hindsight.ts';
 import { buildingArchiveFor } from './skills/build.ts';
-import { MethodLibrary } from './methods/learning.ts';
+import { flattenProgram, MethodLibrary, simpleToMethod } from './methods/learning.ts';
 import { ResourceKnowledge } from './methods/knowledge.ts';
 import { RecipeBook } from './methods/recipes.ts';
 import { createMethodSkills } from './methods/skills.ts';
@@ -30,7 +30,8 @@ import { liveAudience } from './planner/prompt.ts';
 import { AudienceChannel } from './live/audience.ts';
 import { BilibiliLive, type LiveMessage, type LiveStatus } from './live/bilibili.ts';
 import { SkillLibrary } from './skills/library.ts';
-import { habitName, learnCandidates, signatureOf } from './brain/habits.ts';
+import { deathCause, habitName, hazardLesson, learnCandidates, signatureOf, type LearnCandidate, type VitalSample } from './brain/habits.ts';
+import type { MySkillInfo } from './planner/prompt.ts';
 import { ObserverFeed, createObserverHandler, installMineflayerObserver, installTaskObserver, type MineflayerBotLike, type MineflayerObserver } from 'curio-observer';
 
 const bus = new EventBus();
@@ -80,24 +81,66 @@ if (live && audience) {
   live.on('status', (st: LiveStatus) => bus.publish('live_status', st.state === 'error' ? 'P1' : 'P3', `B 站直播间：${st.state}${st.detail ? `（${st.detail}）` : ''}`));
 }
 
+/**
+ * 学一个新组合：自主模式下进方法库（简单格式自动补上可观测的验收条件，试验两种情境后才算学会）；
+ * 推不出验收条件的退回为普通组合技能（宏）。
+ */
+function learnSkill(raw: unknown, origin: 'model' | 'habit'): { ok: boolean; name?: string; error?: string } {
+  if (!planner.autonomous) return library.learn(raw);
+  const converted = simpleToMethod(raw, adapter, memory);
+  if (converted.kind === 'invalid') return { ok: false, error: converted.error };
+  if (converted.kind === 'macro') {
+    const r = library.learn(converted.macro);
+    if (r.ok) bus.publish('skill_learned', 'P3', `推不出可验收的结果，「${converted.macro.name}」先记成组合技能 ${r.name}`, { origin });
+    return r;
+  }
+  return methods.propose(converted.method, { intentId: memory.currentIntent()?.id, projectId: memory.activeProject()?.id });
+}
+
+/** 自主模式的习惯化：同一套步骤成功 3 次以上，自动提成候选方法（每个签名只提一次） */
+const proposedHabits = new Set<string>();
+function formHabit(c: LearnCandidate) {
+  proposedHabits.add(c.signature);
+  const r = learnSkill({ name: habitName(c), description: `习惯：${c.goal}`.slice(0, 120), steps: c.steps }, 'habit');
+  if (r.ok) bus.publish('habit', 'P2', `「${c.signature}」做了 ${c.times} 次，养成习惯 ${r.name}（候选，试验通过后才算学会）`, { signature: c.signature, times: c.times });
+  else bus.publish('habit', 'P3', `「${c.signature}」做了 ${c.times} 次，但没能固定成习惯：${r.error}`, { signature: c.signature });
+}
+
+function mySkills(): MySkillInfo[] {
+  const stats = memory.skillStats();
+  const fromMethods: MySkillInfo[] = methods.list().filter((d) => d.status !== 'retired').slice(-8).map((d) => ({
+    name: d.status === 'verified' ? `method:${d.name}` : `trial:${d.name}:v${d.version}`, status: d.status as 'candidate' | 'verified',
+    description: d.description.slice(0, 80),
+    trials: { verified: d.trials.filter((t) => t.status === 'verified').length, failed: d.trials.filter((t) => t.status === 'failed').length } }));
+  const fromMacros: MySkillInfo[] = library.list().slice(-6).map((d) => {
+    const st = stats[`macro:${d.name}`];
+    return { name: `macro:${d.name}`, status: 'macro' as const, description: d.description.slice(0, 80), ...(st?.runs ? { success: `${st.ok}/${st.runs}` } : {}) };
+  });
+  return [...fromMethods, ...fromMacros].slice(-10);
+}
+
 const executive = new Executive({
   adapter, arbiter, planner, perception, memory, bus,
   ...(audience ? { audience } : {}),
+  mySkills,
+  onMissingAbility: (text) => { if (planner.autonomous) methods.recordGap(text, { intentId: memory.currentIntent()?.id, projectId: memory.activeProject()?.id }); },
   onLearnSkill: (raw) => {
-    const r = planner.autonomous ? methods.propose(raw, { intentId: memory.currentIntent()?.id, projectId: memory.activeProject()?.id }) : library.learn(raw);
+    const r = learnSkill(raw, 'model');
     if (!r.ok) bus.publish('skill_rejected', 'P1', `没有采纳提议的新技能：${r.error}`);
   },
   // 习惯化：同一套步骤成功 3 次以上，自动学成技能（不必等 LLM 提议）
   onGoalEnd: (status) => {
-    if (planner.autonomous) return; // autonomous candidates require measured trial evidence
     if (status !== 'succeeded') return;
-    const c = learnCandidates(memory, knownSigs()).find((x) => x.times >= 3);
+    const c = learnCandidates(memory, knownSigs()).find((x) => x.times >= 3 && !proposedHabits.has(x.signature));
     if (!c) return;
+    if (planner.autonomous) { formHabit(c); return; }
     const r = library.learn({ name: habitName(c), description: `习惯：${c.goal}`, steps: c.steps });
     if (r.ok) bus.publish('habit', 'P2', `「${c.signature}」做了 ${c.times} 次，养成习惯 ${r.name}`);
   },
 });
-const knownSigs = () => new Set(library.list().map((d) => signatureOf(d.steps)));
+/** 已经学过（宏或方法库里）的步骤签名：不再重复提示/提议 */
+const knownSigs = () => new Set([...library.list().map((d) => signatureOf(d.steps)),
+  ...methods.list().filter((d) => d.status !== 'retired').map((d) => signatureOf(flattenProgram(d.program))), ...proposedHabits]);
 perception.knownSkillSigs = knownSigs;
 const reflex = new Reflex(adapter, arbiter, bus, vision);
 const spectator = new Spectator(config, adapter, bus);
@@ -157,18 +200,52 @@ adapter.on('spawn', () => {
 // 持续记录背包快照：死亡时用来算丢了什么
 let invSnapshot: { name: string; count: number }[] = [];
 let awaitingRespawnLoss = false;
+// 死前几秒的状态（氧气、水、岩浆、饥饿、附近的怪、在做的事）：死亡时据此判断死因
+let vitals: VitalSample[] = [];
+const taskKey = (t: { skill: string; args?: unknown } | null | undefined) => {
+  if (!t) return undefined;
+  const a = (t.args ?? {}) as Record<string, unknown>;
+  const key = a.block ?? a.item ?? a.animal ?? a.target ?? a.to ?? a.direction ?? a.blueprint ?? '';
+  return `${t.skill}${key ? ` ${String(key)}` : ''}`;
+};
+let lastWork: string | undefined;
+function sampleVitals() {
+  const st = adapter.state();
+  if (!st.connected || !st.alive) return;
+  const task = arbiter.info();
+  if (task && task.source !== 'reflex' && task.source !== 'filler') lastWork = taskKey(task);
+  let hostiles: { name: string; dist: number }[] = [];
+  try { hostiles = (perception.snapshot()?.nearby?.hostile ?? []).slice(0, 4).map((h) => ({ name: h.name, dist: h.dist })); } catch { /* 感知暂不可用 */ }
+  vitals.push({ ts: Date.now(), hp: st.hp, food: st.food, oxygen: st.oxygen, inWater: st.inWater, inLava: st.inLava,
+    hostileDist: hostiles[0]?.dist ?? null, hostiles, task: lastWork,
+    pos: { x: Math.round(st.pos.x), y: Math.round(st.pos.y), z: Math.round(st.pos.z) } });
+  if (vitals.length > 15) vitals = vitals.slice(-15);
+}
 setInterval(() => {
   const st = adapter.state();
   if (st.connected && st.alive) invSnapshot = st.inventory.map((i) => ({ ...i }));
+  sampleVitals();
 }, 1000).unref();
 
 adapter.on('death', () => {
   const s = adapter.state();
+  // 死因由程序根据死前的真实状态判断，写成危险区域 + 亲历经验（不靠模型）
+  sampleVitals();
+  const cause = deathCause(vitals, lastHurt);
+  const during = vitals.at(-1)?.task ?? lastWork;
+  vitals = [];
+  let hazard: ReturnType<typeof memory.addHazard> | null = null;
+  try {
+    const h = hazard = memory.addHazard({ dim: s.dim, pos: s.pos, kind: cause, ...(during ? { during } : {}) });
+    const text = hazardLesson(h);
+    memory.addLesson(text, { source: 'observed', key: `hazard:${h.id}` });
+    bus.publish('lesson', 'P2', `亲历经验：${text}`, { source: 'observed', hazard });
+  } catch (e) { bus.publish('memory', 'P1', `记录危险区域失败：${String((e as Error)?.message ?? e)}`); }
   memory.addLandmark('death', '死亡地点', s.dim, s.pos, 4);
-  memory.setDeath({ ts: Date.now(), dim: s.dim, pos: s.pos, lost: invSnapshot });
+  memory.setDeath({ ts: Date.now(), dim: s.dim, pos: s.pos, lost: invSnapshot, cause });
   awaitingRespawnLoss = true;
-  bus.publish('death', 'P0', `死亡 @ (${Math.round(s.pos.x)}, ${Math.round(s.pos.y)}, ${Math.round(s.pos.z)})`);
-  executive.onDeath();
+  bus.publish('death', 'P0', `死亡 @ (${Math.round(s.pos.x)}, ${Math.round(s.pos.y)}, ${Math.round(s.pos.z)})，死因：${cause}${during ? `（在做 ${during}）` : ''}`, { cause, during });
+  executive.onDeath({ cause, hazard, during });
 });
 adapter.on('hurt', () => {
   if (Date.now() - lastHurt < 1000) return;
@@ -235,7 +312,7 @@ function snapshot() {
     live: live ? { status: live.status(), audience: audience?.stats() } : null,
     memory: {
       landmarks: memory.landmarks().slice(-12),
-      notes: memory.recentNotes(6),
+      notes: memory.notesFor({ n: 8 }),
       goals: memory.recentGoals(8),
       objective: memory.objective(),
       intentions: memory.intents().slice(-12),
@@ -245,7 +322,9 @@ function snapshot() {
       artifacts: buildingArchiveFor(memory).list().slice(-8).map((p) => ({ id: p.id, status: p.status,
         name: p.versions.at(-1)?.spec.name, version: p.versions.at(-1)?.version, defects: p.inspections.at(-1)?.defects.length,
         feedback: p.feedback.slice(-3) })),
-      lessons: memory.lessons(6),
+      lessons: memory.lessonsFor(8),
+      hazards: memory.hazards().slice(-10),
+      mySkills: mySkills(),
       farms: memory.farms().map((f) => ({ crop: f.crop, cells: f.cells.length, harvests: f.harvests })),
       chests: memory.chests().map((c) => ({ pos: c.pos, items: c.items.length })),
       skills: library.list().map((d) => ({ name: d.name, description: d.description, steps: d.steps.length })),

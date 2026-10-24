@@ -2,30 +2,40 @@ import type { AudienceContext } from '../live/audience.ts';
 import type { AgentState, GameAdapter } from '../adapter/types.ts';
 import type { Arbiter, Step, TaskInfo, TaskOutcome, TaskPreemption } from '../arbiter/arbiter.ts';
 import type { EventBus } from '../events.ts';
-import type { WorldMemory } from '../memory/store.ts';
+import type { Hazard, WorldMemory } from '../memory/store.ts';
 import type { Perception } from '../perception/perception.ts';
-import type { Plan } from '../planner/plan.ts';
+import type { BasisSnapshot, Plan } from '../planner/plan.ts';
 import type { Planner } from '../planner/planner.ts';
-import type { PlanContext } from '../planner/prompt.ts';
+import type { MySkillInfo, PlanContext } from '../planner/prompt.ts';
 import { ProjectCoordinator } from '../projects/coordinator.ts';
 import { observationReady } from '../projects/conditions.ts';
 import type { Binding, PauseReason, Project } from '../projects/types.ts';
 import { SKILLS } from '../skills/index.ts';
 import { buildingArchiveFor } from '../skills/build.ts';
 import { DecisionFeedback } from './decision-feedback.ts';
+import { causeName, reflectionDue } from './habits.ts';
 
 export interface ExecutiveDeps {
   adapter: GameAdapter; arbiter: Arbiter; planner: Planner; perception: Perception; memory: WorldMemory; bus: EventBus;
   onLearnSkill?: (raw: unknown) => void;
   onGoalEnd?: (status: string) => void;
+  /** 模型说“想做却做不到”的事：交给方法库记成能力缺口 */
+  onMissingAbility?: (text: string) => void;
+  /** 自己学过的组合技能（给提示词看） */
+  mySkills?: () => MySkillInfo[];
   /** 直播间观众弹幕（外部、不可信，只作参考） */
   audience?: { context(tier?: 'light' | 'full'): AudienceContext | null };
 }
 
+/** 边做边想的决定最多排队这么久；在此之前只有要紧的事变了才重想 */
+const PREFETCH_MAX_AGE_MS = 90_000;
+/** 两次反思之间至少隔这么久，别让反思挤掉正常游玩 */
+const REFLECT_MIN_GAP_MS = 4 * 60_000;
 /** 几秒内就能完成、不改变位置的收尾动作 */
-/** 边做边想的决定最多排队这么久，再久就按当前情况重想 */
-const PREFETCH_FRESH_MS = 25_000;
 const QUICK_SKILLS = new Set(['craft', 'eat', 'place_torch', 'pickup_items', 'equip']);
+const FOOD_ITEMS = new Set(['bread', 'cooked_beef', 'cooked_porkchop', 'cooked_chicken', 'cooked_mutton', 'cooked_cod', 'cooked_salmon', 'apple', 'baked_potato',
+  'carrot', 'beef', 'porkchop', 'chicken', 'mutton', 'potato', 'sweet_berries', 'glow_berries', 'melon_slice', 'golden_apple', 'cookie', 'pumpkin_pie', 'beetroot',
+  'dried_kelp', 'cod', 'salmon', 'rabbit', 'cooked_rabbit', 'mushroom_stew', 'rabbit_stew', 'beetroot_soup', 'golden_carrot']);
 
 /** Coordinates model choices and measured progress; it never assigns a gameplay theme. */
 export class Executive {
@@ -59,6 +69,10 @@ export class Executive {
   private completedProjects = new Set<string>();
   private gentleResume: { planId: string; reflexTaskId: string; generation: number; succeeded: boolean } | null = null;
   private gentlyPreemptedTasks = new Set<string>();
+  /** 待做的反思（死亡、反复失败触发）；lastReflectionAt 限制频率 */
+  private reflectPending: string | null = null;
+  private lastReflectionAt = 0;
+  private reflectedSince = 0;
 
   constructor(private d: ExecutiveDeps) {
     this.d.memory.setWorld(d.adapter.state().worldId);
@@ -187,13 +201,15 @@ export class Executive {
     if (this.queued) {
       // 边做边想的决定在一个长动作开始时就想好了，等动作做完时背包、位置、看见的东西都变了。
       // 排队太久就按现在的情况重新想一遍（替换掉旧的），让接上去的决定基于新鲜的事实。
+      // 只有要紧的事变了（换了世界/维度、走远了、背包大变、掉血、来了怪）或等得太久才重想，省掉白白作废的决策。
       const q = this.queued;
-      const stale = this.d.planner.autonomous && q.basis?.reason === 'prefetch' && Date.now() - q.basis.at > PREFETCH_FRESH_MS
-        && !!cur && cur.planId === this.plan?.id;
-      if (!stale) return null;
+      if (!this.d.planner.autonomous || q.basis?.reason !== 'prefetch' || !cur || cur.planId !== this.plan?.id) return null;
+      const age = Date.now() - q.basis.at;
+      const why = age > PREFETCH_MAX_AGE_MS ? `已经等了 ${Math.round(age / 1000)} 秒` : q.basis.snapshot ? this.materialChange(q.basis.snapshot, cur) : null;
+      if (!why) return null;
       this.queued = null;
       this.staleDropped++;
-      this.d.bus.publish('plan_stale', 'P3', `想好的下一步已经等了 ${Math.round((Date.now() - q.basis!.at) / 1000)} 秒，情况变了，按现在的情况重新想`);
+      this.d.bus.publish('plan_stale', 'P3', `想好的下一步${why}，情况变了，按现在的情况重新想`, { ageMs: age });
       return 'prefetch';
     }
     if (!this.plan) return this.d.memory.activeProject()?.status === 'blocked' ? 'project_blocked' : 'no_goal';
@@ -213,6 +229,41 @@ export class Executive {
     return cur.progress >= 0.6 || frac >= 0.5 ? 'prefetch' : null;
   }
 
+  /** 记下想决定时的要紧事实，之后用来判断这份决定是否过时 */
+  private basisSnapshot(): BasisSnapshot {
+    const s = this.d.adapter.state();
+    const inventory: Record<string, number> = {};
+    for (const i of s.inventory) inventory[i.name] = (inventory[i.name] ?? 0) + i.count;
+    let hostiles: string[] = [];
+    try { hostiles = (this.d.perception.snapshot()?.nearby?.hostile ?? []).filter((h) => h.dist <= 16).map((h) => h.name); } catch { /* 感知不可用时不算变化 */ }
+    return { sessionId: s.sessionId, dim: s.dim, pos: { ...s.pos }, hp: s.hp, inventory, hostiles };
+  }
+
+  /** 和想决定时相比，要紧的事变了吗？变了返回原因 */
+  private materialChange(b: BasisSnapshot, cur: TaskInfo): string | null {
+    const now = this.basisSnapshot();
+    if (now.sessionId !== b.sessionId || now.dim !== b.dim) return '是在另一个世界/维度里想的';
+    // 移动类动作本来就会走动（想的时候已经假设它会做完），只有原地动作被推走才算
+    const moved = Math.hypot(now.pos.x - b.pos.x, now.pos.y - b.pos.y, now.pos.z - b.pos.z);
+    if (moved > 12 && !SKILLS[cur.skill]?.movement) return `是在 ${Math.round(moved)} 格外想的`;
+    if (b.hp - now.hp >= 4) return `想好之后掉了 ${Math.round(b.hp - now.hp)} 点血`;
+    const hostile = now.hostiles.find((h) => !b.hostiles.includes(h));
+    if (hostile) return `想好之后附近出现了 ${hostile}`;
+    // 会消耗/搬运背包的动作（建造、冶炼、合成、存取箱子…）本来就会让背包大变：不拿背包判断
+    const consuming = ['craft', 'smelt', 'build', 'place_torch', 'store_items', 'take_items', 'eat', 'farm', 'place', 'pickup_items'].includes(cur.skill)
+      || cur.skill.includes(':');
+    if (consuming) return null;
+    // 其余动作（采集、打猎…）多出东西是预期内的，只看意外的减少：东西没了，或者少了一大堆（被打掉、掉进岩浆）
+    let lost = 0;
+    const gone: string[] = [];
+    for (const k of Object.keys(b.inventory)) {
+      lost += Math.max(0, b.inventory[k] - (now.inventory[k] ?? 0));
+      if (b.inventory[k] > 0 && !now.inventory[k]) gone.push(k);
+    }
+    if (gone.length || lost >= 16) return `想好之后背包少了东西${gone.length ? `（没了 ${gone.slice(0, 3).join('、')}）` : ''}`;
+    return null;
+  }
+
   private ctx(reason: string): PlanContext {
     const worldState = this.d.adapter.state();
     const percept = this.d.perception.update();
@@ -227,7 +278,27 @@ export class Executive {
         works: buildingArchiveFor(this.d.memory).list().filter((p) => p.worldId === worldState.worldId && p.dimension === worldState.dim).slice(-5)
           .map((p) => ({ id: p.id, name: p.versions.at(-1)?.spec.name, version: p.versions.at(-1)?.version, status: p.status,
             defects: p.inspections.at(-1)?.defects.slice(0, 4), feedback: p.feedback.slice(-3) })),
-      }, results: this.results, decisionFeedback: this.decisionFeedback.context(worldState, percept), worldState };
+      }, results: this.results, decisionFeedback: this.decisionFeedback.context(worldState, percept), worldState,
+      ...(this.d.mySkills ? { mySkills: this.safeSkills() } : {}) };
+  }
+
+  private safeSkills(): MySkillInfo[] {
+    try { return this.d.mySkills?.() ?? []; } catch { return []; }
+  }
+
+  /**
+   * 该反思了吗：死亡之后、同一件事反复失败之后，或者又做完了好几件事。
+   * 反思附在下一次完整决策上；两次之间至少隔几分钟，不挤掉正常游玩。
+   */
+  private reflectionFor(ctx: PlanContext): PlanContext['reflection'] {
+    if (!this.d.planner.autonomous) return null;
+    const since = Date.now() - this.lastReflectionAt;
+    // 死亡/反复失败触发的反思间隔短一些（1 分钟），例行反思至少隔 4 分钟
+    const why = this.reflectPending && since >= 60_000 ? this.reflectPending
+      : since >= REFLECT_MIN_GAP_MS && reflectionDue(this.d.memory, 8, this.reflectedSince) ? '又做完了好几件事，回头看看哪些做法好用' : null;
+    if (!why) return null;
+    // 这里只是“想要反思”；等这份决定真正被采用（activate）时才记账，请求作废/出错时下次还会再问
+    return { why, learnCandidate: (ctx.percept.learn_candidates?.length ?? 0) > 0 };
   }
 
   private request(reason: string, replace = false) {
@@ -238,11 +309,15 @@ export class Executive {
     const sequence = ++this.requestSequence;
     const controller = this.controller = new AbortController();
     const ctx = this.ctx(reason);
+    const snapshot = this.basisSnapshot();
+    const reflection = this.reflectionFor(ctx);
+    // 反思是附加在原请求上的标记，不改写 reason（prefetch/user_suggestion/project_blocked 各有语义）
+    if (reflection) ctx.reflection = reflection;
     const requestedAt = Date.now();
     const fresh = () => generation === this.generation && sequence === this.requestSequence && !controller.signal.aborted
       && !this.paused && observationReady(this.d.adapter.state()) && this.sameBinding(ctx.binding ?? {});
     ctx.tier = this.chooseTier(ctx);
-    this.d.bus.publish('llm_request', 'P3', `请求决策（${reason}${ctx.tier === 'light' ? '·小决策' : ''}）`, { tier: ctx.tier });
+    this.d.bus.publish('llm_request', 'P3', `请求决策（${reason}${ctx.tier === 'light' ? '·小决策' : ''}${reflection ? '·反思' : ''}）`, { tier: ctx.tier, ...(reflection ? { reflection: reflection.why } : {}) });
     this.d.planner.propose(ctx, controller.signal).then((p) => {
       if (!fresh()) { this.staleDropped++; return; }
       this.llmErrors = 0;
@@ -251,7 +326,8 @@ export class Executive {
       if (ctx.userSuggestion === this.userSuggestion) this.userSuggestion = null;
       p.binding = ctx.binding;
       p.generation = generation;
-      p.basis = { at: requestedAt, reason, pending: [...(ctx.current ? [{ skill: ctx.current.skill, args: ctx.current.args }] : []), ...(ctx.pendingSteps ?? [])] };
+      if (reflection) p.reflection = reflection.why;
+      p.basis = { at: requestedAt, reason, pending: [...(ctx.current ? [{ skill: ctx.current.skill, args: ctx.current.args }] : []), ...(ctx.pendingSteps ?? [])], snapshot };
       this.queued = p;
       // Prefetch choices and all their side effects wait until activation with a second freshness check.
       if (replace) this.discardPlan('收到新决策，替换旧尝试');
@@ -292,6 +368,19 @@ export class Executive {
   private workingMemory() {
     const now = Date.now();
     this.notes = this.notes.filter((n) => now - n.ts < 15 * 60_000).slice(-6);
+    // 写进世界记忆的笔记（同一世界、同一维度、两小时内）和短期笔记合在一起；几乎一样的话只留最新的一条
+    const st = this.d.adapter.state();
+    const persisted = this.d.memory.notesFor({ dimension: st.dim, withinMs: 2 * 3600_000, n: 8 })
+      .map((n) => ({ ts: n.ts, text: n.text, ...(n.pos ? { at: `${n.pos.x},${n.pos.y},${n.pos.z}` } : {}) }));
+    const norm = (t: string) => t.replace(/[\s，。,.!！?？、:：;；“”"'（）()]/g, '').toLowerCase();
+    const merged: { ts: number; text: string; at?: string }[] = [];
+    for (const n of [...persisted, ...this.notes].sort((a, b) => b.ts - a.ts)) {
+      const k = norm(n.text);
+      if (merged.some((m) => { const o = norm(m.text); return o === k || (Math.min(o.length, k.length) >= 6 && (o.includes(k) || k.includes(o))); })) continue;
+      merged.push(n);
+      if (merged.length >= 8) break;
+    }
+    merged.reverse();
     this.failures = this.failures.filter((f) => now - f.ts < 10 * 60_000);
     const counts = new Map<string, { n: number; last: string }>();
     for (const f of this.failures) counts.set(f.key, { n: (counts.get(f.key)?.n ?? 0) + 1, last: f.summary });
@@ -299,7 +388,7 @@ export class Executive {
       // 不带“几秒前”：它每次都变，会让后面整段提示词都无法命中缓存；顺序本身就是时间线
       thread: this.thread.slice(-5).map((t) => ({ goal: t.goal, thought: t.thought.slice(0, 90),
         ...(t.then ? { then: t.then } : {}), outcome: t.status ? `${t.status}：${(t.summary ?? '').slice(0, 90)}` : '进行中' })),
-      notes: this.notes.map((n) => n.at ? `${n.text}（写于 ${n.at}）` : n.text),
+      notes: merged.map((n) => n.at ? `${n.text}（写于 ${n.at}）` : n.text),
       repeated: [...[...counts].filter(([, v]) => v.n >= 2).map(([k, v]) => ({ action: k, failures_10min: v.n, last: v.last.slice(0, 80) })), ...this.samePlace()],
     };
   }
@@ -324,7 +413,7 @@ export class Executive {
   private chooseTier(ctx: PlanContext): 'light' | 'full' {
     const big = !this.d.memory.currentIntent() || !!this.userSuggestion
       || ['user_suggestion', 'manual_replan', 'project_blocked'].includes(ctx.reason)
-      || this.lastFailure?.code === 'DIED';
+      || this.lastFailure?.code === 'DIED' || !!ctx.reflection;
     const due = this.lightStreak >= 6 || Date.now() - this.lastFullAt > 180_000;
     if (!big && !due) { this.lightStreak++; return 'light'; }
     this.lightStreak = 0;
@@ -358,17 +447,28 @@ export class Executive {
       }
     }
     this.refineSteps(p);
+    if (p.reflection) {
+      // 带反思请求的决定被采用了：这次反思才算做过
+      if (this.reflectPending === p.reflection) this.reflectPending = null;
+      this.lastReflectionAt = this.reflectedSince = Date.now();
+    }
     // No side effects are accepted before both request and queued-plan ownership checks.
     if (p.memoryNote) this.d.memory.addNote('inference', p.memoryNote, this.d.adapter.state().dim);
-    if (p.missingAbility) this.d.bus.publish('capability_gap', 'P2', `想做但还做不到：${p.missingAbility}`, { planId: p.id });
+    if (p.missingAbility) {
+      this.d.bus.publish('capability_gap', 'P2', `想做但还做不到：${p.missingAbility}`, { planId: p.id });
+      try { this.d.onMissingAbility?.(p.missingAbility); } catch { /* 记账失败不影响行动 */ }
+    }
     this.thread.push({ ts: Date.now(), goal: p.goal, thought: p.thought, ...(p.then ? { then: p.then } : {}) });
     if (this.thread.length > 8) this.thread.shift();
     if (p.note && !this.notes.some((n) => n.text === p.note)) {
-      const at = this.d.adapter.state().pos;
+      const here = this.d.adapter.state();
+      const at = here.pos;
       this.notes.push({ ts: Date.now(), text: p.note, at: `${Math.round(at.x)},${Math.round(at.y)},${Math.round(at.z)}` });
+      // 也写进世界记忆：重启后、过了 15 分钟也还记得（带写下时的位置）
+      this.d.memory.addNote('inference', p.note, here.dim, at);
       this.d.bus.publish('note', 'P3', `记下：${p.note}`);
     }
-    if (p.lesson) this.d.memory.addLesson(p.lesson);
+    if (p.lesson && this.d.memory.addLesson(p.lesson, { source: 'model' })) this.d.bus.publish('lesson', 'P2', `经验：${p.lesson}`);
     if (p.objective && !this.d.planner.autonomous) this.d.memory.setObjective(p.objective);
     if (p.learnSkill) this.d.onLearnSkill?.(p.learnSkill);
     this.plan = p;
@@ -674,7 +774,28 @@ export class Executive {
     const a = (o.task.args ?? {}) as Record<string, unknown>;
     const data = (o.result.data ?? {}) as Record<string, unknown>;
     const candidates: Step[] = [];
-    if (o.result.failureCode === 'NOT_FOUND' && ['gather', 'hunt'].includes(o.task.skill)) {
+    const state = this.d.adapter.state();
+    const code = o.result.failureCode;
+    const hasFood = () => state.inventory.some((i) => FOOD_ITEMS.has(i.name));
+    const foodRepair = () => {
+      // 背包没吃的、附近又打不到猎：会钓鱼就钓鱼，否则去摘果子
+      if (SKILLS.fish && state.inventory.some((i) => i.name === 'fishing_rod')) candidates.push({ skill: 'fish', args: { count: 3 } });
+      else if (SKILLS.forage) candidates.push({ skill: 'forage', args: { count: 4 } });
+    };
+    if (['goto', 'explore', 'ride'].includes(o.task.skill) && (code === 'PATH_NOT_FOUND' || code === 'STUCK')
+      && (state.inWater || /水|water|海|河|湖/i.test(o.result.summary)) && SKILLS.boat) {
+      // 走不过去的水面：像玩家一样坐船过去
+      const nums = typeof a.target === 'string' ? a.target.match(/-?\d+(?:\.\d+)?/g) : null;
+      const to = nums && nums.length >= 2 ? `${Math.round(+nums[0])},${Math.round(+nums[nums.length === 3 ? 2 : 1])}` : undefined;
+      const dir = typeof a.direction === 'string' && a.direction !== 'auto' ? a.direction : undefined;
+      if (to) candidates.push({ skill: 'boat', args: { to } });
+      else if (dir) candidates.push({ skill: 'boat', args: { direction: dir, distance: Number(a.distance) || 48 } });
+    } else if (o.task.skill === 'eat' && (code === 'NO_FOOD' || !hasFood())) foodRepair();
+    else if (o.task.skill === 'hunt' && code === 'NOT_FOUND' && state.food <= 14 && !hasFood()) {
+      foodRepair();
+      const target = String(a.animal ?? '');
+      if (!candidates.length && target) candidates.push({ skill: 'explore', args: { direction: 'auto', distance: 40, until: target } });
+    } else if (code === 'NOT_FOUND' && ['gather', 'hunt'].includes(o.task.skill)) {
       const target = String(a.block ?? a.animal ?? '');
       if (target) candidates.push({ skill: 'explore', args: { direction: 'auto', distance: 40, until: target } });
     } else if (o.result.failureCode === 'MISSING_MATERIALS' && typeof data.shortfall === 'string') {
@@ -700,8 +821,23 @@ export class Executive {
       this.lastFailure = { skill: o.task.skill, code: o.result.failureCode, summary: o.result.summary };
       const a = (o.task.args ?? {}) as Record<string, unknown>;
       const target = a.block ?? a.item ?? a.animal ?? a.for ?? a.target ?? a.entity ?? '';
-      this.failures.push({ ts: Date.now(), key: `${o.task.skill}${target ? ` ${String(target)}` : ''}`, summary: o.result.summary, pos: { ...state.pos } });
+      const key = `${o.task.skill}${target ? ` ${String(target)}` : ''}`;
+      this.failures.push({ ts: Date.now(), key, summary: o.result.summary, pos: { ...state.pos } });
+      this.observeRepeatedFailure(key, o.result.summary, state);
     } else if (o.result.status === 'succeeded' && this.lastFailure?.skill === o.task.skill) this.lastFailure = null;
+  }
+
+  /** 同一件事 10 分钟内在同一个地方失败 3 次：程序记一条亲历的经验，并安排一次反思 */
+  private observeRepeatedFailure(key: string, summary: string, state: AgentState) {
+    const now = Date.now();
+    const same = this.failures.filter((f) => f.key === key && now - f.ts < 10 * 60_000 && f.pos
+      && Math.hypot(f.pos.x - state.pos.x, f.pos.y - state.pos.y, f.pos.z - state.pos.z) <= 8);
+    if (same.length < 3) return;
+    const at = { x: Math.round(state.pos.x), y: Math.round(state.pos.y), z: Math.round(state.pos.z) };
+    const text = `在 (${at.x},${at.y},${at.z}) 附近 ${key} 10 分钟内失败了 ${same.length} 次（${summary.slice(0, 50)}）：这里这样做行不通，换个地方或换个做法`;
+    const lesson = this.d.memory.addLesson(text, { source: 'observed', key: `fail:${state.dim}:${key}:${Math.floor(at.x / 16)}:${Math.floor(at.z / 16)}` });
+    if (lesson) this.d.bus.publish('lesson', 'P2', `亲历经验：${text}`, { source: 'observed' });
+    this.reflectPending ??= `「${key}」在同一个地方接连失败了 ${same.length} 次`;
   }
 
   private checkAbort(hp: number, isDay: boolean) {
@@ -741,11 +877,15 @@ export class Executive {
     this.backoffUntil = 0;
     this.d.bus.publish('resumed', 'P1', 'Agent 恢复，等待有效观测后重新决策');
   }
-  onDeath() {
+  onDeath(info: { cause?: string; hazard?: Hazard | null; during?: string } = {}) {
     this.suspend('death');
     this.discardPlan('死亡，保留意图待复活后对账');
     this.d.arbiter.cancel('死亡');
-    this.lastFailure = { skill: 'survival', code: 'DIED', summary: '角色死亡，等待复活背包稳定后决定是否继续' };
+    const h = info.hazard;
+    const cause = info.cause ? `死因：${causeName(info.cause as any) ?? info.cause}${info.during ? `（当时在做 ${info.during}）` : ''}` : '';
+    const zone = h ? `；(${h.pos.x},${h.pos.y},${h.pos.z}) 周围 ${h.radius} 格已记为危险区域（这里出过 ${h.count} 次事），别再用同样的做法靠近` : '';
+    this.lastFailure = { skill: 'survival', code: 'DIED', summary: `角色死亡${cause ? `，${cause}` : ''}${zone}，等待复活背包稳定后决定是否继续` };
+    this.reflectPending = `刚刚${info.cause ? causeName(info.cause as any) : '死'}了一次`;
     this.settleUntil = Date.now() + 1500;
   }
   onSpawn() { if (this.suspended.has('death')) this.settleUntil = Date.now() + 1500; }
