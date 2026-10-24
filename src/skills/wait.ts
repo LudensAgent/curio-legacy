@@ -40,3 +40,33 @@ export const wait: Skill<{ seconds: number; look: boolean }> = {
     return ok(`${landed}原地等了 ${Math.round((Date.now() - t0) / 1000)} 秒（现在${s.isDay ? '白天' : '夜晚'}）`);
   },
 };
+
+/**
+ * 想事情时的“发呆张望”：等模型想下一步的那一两秒里，像人一样慢慢转头看看，而不是僵在原地。
+ * 不走动、不挖不放、不消耗任何东西，所以不会让正在想的决定过时；决定一到就被取消。只给执行层当填充用。
+ */
+export const glance: Skill<{ seconds: number }> = {
+  name: 'glance',
+  description: '想事情时慢慢转头看看四周（不移动、不消耗东西）',
+  argsDoc: '{"seconds"?:2-20}',
+  timeoutMs: 25000,
+  movement: false,
+  readOnly: true,
+  validate(raw) {
+    return { ok: true, args: { seconds: clampInt(obj(raw).seconds, 2, 20, 8) } };
+  },
+  async run(ctx, args) {
+    const { adapter, signal } = ctx;
+    const yaw0 = adapter.eye()?.yaw ?? 0;
+    const t0 = Date.now(), end = Math.min(t0 + args.seconds * 1000, ctx.deadline - 500);
+    let k = 0;
+    while (Date.now() < end) {
+      await sleep(Math.min(1200, Math.max(1, end - Date.now())), signal);
+      const s = adapter.state();
+      if (s.inWater || s.inLava) break;
+      await adapter.look(yaw0 + Math.sin(++k * 0.7) * 0.8, -0.05, signal);
+      ctx.progress(Math.min(1, (Date.now() - t0) / (args.seconds * 1000)), '一边想一边看看四周');
+    }
+    return ok('一边想一边看了看四周');
+  },
+};

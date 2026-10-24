@@ -45,14 +45,15 @@ function fixture(t: TestContext) {
       t.mock.timers.tick(step); await flush(); await tick(); elapsed += step;
     }
   };
-  const sweeps = () => bus.recent().filter((event) => event.type === 'task_start' && event.data?.source === 'filler');
+  // “环顾一圈”才算一次观察（sweep）；想事情时的 glance（慢慢转头、不动不耗）只是不让角色僵住，不算新的观察需求
+  const sweeps = () => bus.recent().filter((event) => event.type === 'task_start' && event.data?.source === 'filler' && event.data?.skill === 'look_around');
   return { adapter, arbiter, executive, memory, perception, vision, bus, requests, tick, advance, sweeps };
 }
 
 test('unfamiliar empty surroundings get one useful sweep with no periodic retry while thinking', async (t) => {
   const w = fixture(t);
   await w.tick(); await w.advance(4000);
-  assert.equal(w.arbiter.info(), null);
+  assert.notEqual(w.arbiter.info()?.skill, 'look_around', 'after the one sweep, waiting is only glancing');
   await w.advance(120_000);
   assert.equal(w.sweeps().length, 1, 'elapsed time alone does not justify observing the same place again');
   assert.equal(w.requests.length, 1);

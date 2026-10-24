@@ -13,7 +13,8 @@ import { WorldMemory } from '../src/memory/store.ts';
  */
 
 const nearlyDone = (Executive.prototype as any).nearlyDone as (this: unknown, cur: unknown) => boolean;
-const self = (full = false) => ({ latency: { light: 2000, full: 8000 }, wouldBeFull: () => full });
+const self = (full = false, durations: [string, number][] = []) => ({ latency: { light: 2000, full: 8000 }, durations: new Map(durations), wouldBeFull: () => full });
+const taskOf = (skill: string, progress: number, elapsedMs: number) => ({ skill, progress, startedAt: Date.now() - elapsedMs });
 const task = (progress: number, elapsedMs: number) => ({ progress, startedAt: Date.now() - elapsedMs });
 
 test('长动作刚开始时不预先想下一步；按进度估计快做完（剩余时间 ≤ 模型响应时间）才想', () => {
@@ -23,6 +24,10 @@ test('长动作刚开始时不预先想下一步；按进度估计快做完（�
   assert.equal(nearlyDone.call(self(), task(0.95, 38000)), true, '还要约 2 秒：现在开始想正好接上');
   assert.equal(nearlyDone.call(self(), task(0.98, 100)), true, '进度报告说马上完成');
   assert.equal(nearlyDone.call(self(true), task(0.8, 20000)), true, '完整决策要想 8 秒：剩 5 秒时就该开始');
+  // 报不出进度的动作（走路、只采一个）：按这个技能平时做一次要多久估计
+  assert.equal(nearlyDone.call(self(false, [['goto', 10000]]), taskOf('goto', 0, 3000)), false, '平时 10 秒的 goto 才走了 3 秒');
+  assert.equal(nearlyDone.call(self(false, [['goto', 10000]]), taskOf('goto', 0, 7000)), true, '还剩约 3 秒：现在想，决定到时正好接上');
+  assert.equal(nearlyDone.call(self(), taskOf('goto', 0, 7000)), false, '没有进度也没有经验时等它做完');
 });
 
 function memory() { const m = new WorldMemory(null); m.setWorld('w'); return m; }

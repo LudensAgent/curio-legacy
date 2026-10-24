@@ -68,6 +68,9 @@ function fixture(t: TestContext) {
     actions: () => actions, learned: () => learned };
 }
 
+const fillerStarts = (w: { bus: { recent(): any[] } }, skill?: string) => w.bus.recent()
+  .filter((event) => event.type === 'task_start' && event.data?.source === 'filler' && (!skill || event.data?.skill === skill));
+
 test('slow autonomous choices get one useful sweep rather than repeated circles while waiting', async (t) => {
   const w = fixture(t);
   await w.tick();
@@ -76,7 +79,7 @@ test('slow autonomous choices get one useful sweep rather than repeated circles 
   assert.equal(w.arbiter.info()?.source, 'filler');
   assert.equal(w.arbiter.info()?.skill, 'look_around');
   await w.advance(8400);
-  assert.equal(w.look.mock.callCount(), 8, 'one full sweep is enough at the same position');
+  assert.equal(fillerStarts(w, 'look_around').length, 1, 'one full sweep is enough at the same position; afterwards only gentle glancing');
   w.pending[0].resolve(reply(begin)); await flush(); await w.tick();
   assert.equal(w.arbiter.info()?.source, 'llm', 'the returned model plan must replace background observation');
   const intentId = w.memory.currentIntent()?.id;
@@ -92,12 +95,11 @@ test('slow autonomous choices get one useful sweep rather than repeated circles 
   const metrics = w.metrics.snapshot();
   t.diagnostic(`思考期间行动 ${(100 * (metrics.llmContinuity ?? 0)).toFixed(1)}%，无任务 ${metrics.idle10m}s，思考采样 ${metrics.llmThinkingSec}s`);
   assert.ok(metrics.llmThinkingSec >= 25, 'both slow requests must contribute to the measured interval');
-  assert.ok(metrics.idle10m > 0, 'quiet waiting must remain visible in the metrics');
-  assert.ok((metrics.llmContinuity ?? 1) < 1, 'do not keep spinning just to count waiting as activity');
-  const fillers = w.bus.recent().filter((event) => event.type === 'task_start' && event.data?.source === 'filler');
-  assert.equal(fillers.length, 1, 'a recent completed model sweep must also suppress redundant background sweeps');
-  assert.equal(w.look.mock.callCount(), 16, 'only the initial sweep and the model-approved sweep should turn the actor');
-  assert.ok(fillers.every((event) => event.data?.skill === 'look_around'));
+  // 想下一步的时候像人一样边想边张望（glance：不走动、不消耗东西），而不是僵在原地
+  assert.ok((metrics.llmContinuity ?? 0) >= 0.9, `思考期间应几乎一直在动：${metrics.llmContinuity}`);
+  const fillers = fillerStarts(w);
+  assert.equal(fillerStarts(w, 'look_around').length, 1, 'a recent completed model sweep must also suppress redundant full background sweeps');
+  assert.ok(fillers.every((event) => ['look_around', 'glance'].includes(event.data?.skill)), 'waiting fillers are only observation');
   assert.deepEqual(w.adapter.pos, { x: 0, y: 64, z: 0 });
   assert.deepEqual(w.adapter.actions, [], 'waiting must not invent movement or resource consumption');
   assert.equal(w.memory.currentIntent()?.id, intentId);
@@ -109,21 +111,22 @@ test('slow autonomous choices get one useful sweep rather than repeated circles 
 test('elapsed time alone never restarts a completed background sweep', async (t) => {
   const w = fixture(t);
   await w.tick(); await w.advance(29_000);
-  assert.equal(w.look.mock.callCount(), 8);
-  assert.equal(w.arbiter.info(), null);
+  assert.equal(fillerStarts(w, 'look_around').length, 1);
+  assert.notEqual(w.arbiter.info()?.skill, 'look_around', 'after the sweep, waiting is only glancing');
   assert.equal(w.pending.length, 1);
   await w.advance(6000);
-  assert.equal(w.bus.recent().filter((event) => event.type === 'task_start' && event.data?.source === 'filler').length, 1);
-  assert.equal(w.look.mock.callCount(), 8);
+  assert.equal(fillerStarts(w, 'look_around').length, 1, 'time alone never restarts a full sweep');
+  assert.deepEqual(w.adapter.actions, [], 'glancing never moves or consumes anything');
 });
 
 test('moving to a different position while thinking does not restart background sweeps', async (t) => {
   const w = fixture(t);
   await w.tick(); await w.advance(5000);
   w.adapter.pos.x += 2; await w.tick();
-  assert.equal(w.arbiter.info(), null, 'small position jitter does not justify another circle');
+  assert.notEqual(w.arbiter.info()?.skill, 'look_around', 'small position jitter does not justify another circle');
   w.adapter.pos.x += 30; await w.tick();
-  assert.equal(w.arbiter.info(), null, 'distance alone is not an information gap');
+  assert.notEqual(w.arbiter.info()?.skill, 'look_around', 'distance alone is not an information gap');
+  assert.equal(fillerStarts(w, 'look_around').length, 1);
 });
 
 test('an autonomous open intent prefetches without a project and activates its reply only after the current action', async (t) => {
@@ -201,12 +204,12 @@ test('model failure cancels observation and preserves idle backoff without a sub
   const w = fixture(t);
   const intent = w.memory.addIntent({ text: '欣赏河岸', whyNow: '喜欢这里', context: [], tradeoffs: [], source: 'model', status: 'active' });
   await w.tick(); await w.advance(1000);
-  assert.equal(w.arbiter.info(), null, 'waiting with a current interest is not a reason to sweep');
+  assert.equal(fillerStarts(w, 'look_around').length, 0, 'waiting with a current interest is not a reason to sweep (glancing is fine)');
   w.pending[0].reject(new Error('temporary unavailable')); await flush(); await w.tick();
+  assert.equal(w.arbiter.info(), null, 'a failed model call cancels the glance');
   const lookCount = w.look.mock.callCount();
-  assert.equal(w.arbiter.info(), null);
   await w.advance(2000);
-  assert.equal(w.look.mock.callCount(), lookCount);
+  assert.equal(w.look.mock.callCount(), lookCount, 'nothing is being thought about during backoff, so no glancing');
   assert.equal(w.pending.length, 1);
   assert.equal(w.memory.currentIntent()?.id, intent.id);
   assert.equal(w.memory.recentGoals().length, 0);

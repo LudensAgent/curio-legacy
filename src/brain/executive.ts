@@ -202,6 +202,7 @@ export class Executive {
     const reason = this.requestReason(this.d.arbiter.info());
     if (reason) this.request(reason);
     if (!this.d.arbiter.info()) this.startNext();
+    else if (this.d.arbiter.info()?.skill === 'glance') this.keepThinkingActive();
   }
 
   private requestReason(cur: TaskInfo | null): string | null {
@@ -429,6 +430,8 @@ export class Executive {
   private lastDecision: { at: number; snap: BasisSnapshot; inWater: boolean } | null = null;
   /** 模型实际响应时间的滚动平均（毫秒），决定提前多久开始想下一步 */
   private latency = { light: 2000, full: 8000 };
+  /** 各技能实际做完一次通常要多久（滚动平均，毫秒）：动作报不出进度时用它估计还剩多久 */
+  private durations = new Map<string, number>();
   private lightStreak = 0;
   private lastFullAt = 0;
   /**
@@ -453,8 +456,11 @@ export class Executive {
     const elapsed = Date.now() - cur.startedAt;
     const p = Math.max(0, Math.min(1, cur.progress ?? 0));
     if (p >= 0.97) return true;
-    if (p <= 0.05 || elapsed < 1000) return false;
-    return (elapsed * (1 - p)) / p <= expected;
+    // 有进度就按进度估；报不出进度（走路、只采一个、探索…）就按这个技能平时做一次要多久估
+    const usual = this.durations.get(cur.skill);
+    const remaining = p > 0.05 && elapsed >= 1000 ? (elapsed * (1 - p)) / p : usual !== undefined ? usual - elapsed : Infinity;
+    // 略微提前一点（约 1 秒）：让新决定在动作结束前到达，角色不必停下来等
+    return remaining <= expected + 1000;
   }
 
   /** 两次决定之间真实发生了什么（位置、背包、生命、进出水）：程序测得，模型据此接上此刻 */
@@ -654,7 +660,10 @@ export class Executive {
   }
 
   private keepThinkingActive() {
-    if (!this.timer || !this.inFlight || this.paused || this.suspended.size || this.plan || this.queued || this.d.arbiter.info()
+    const running = this.d.arbiter.info();
+    // 正在边想边张望（glance）时仍要判断：是否到了一个陌生的地方、需要完整环顾一圈
+    const glancing = running?.source === 'filler' && running.skill === 'glance';
+    if (!this.timer || !this.inFlight || this.paused || this.suspended.size || this.plan || this.queued || (running && !glancing)
       || !observationReady(this.d.adapter.state())) return;
     const state = this.d.adapter.state(), last = this.lastLook;
     if (state.inWater || state.inLava) return;
@@ -665,18 +674,21 @@ export class Executive {
     const surroundingsKnown = percept.nearby.resources.length > 0 || percept.nearby.passive.length > 0
       || percept.nearby.hostile.length > 0 || percept.nearby.players.length > 0;
     const sameScope = !!last && last.state.worldId === state.worldId && last.state.sessionId === state.sessionId && last.state.dim === state.dim;
+    // 想下一步时的默认动作：像人一样边想边慢慢转头看看（不走动、不消耗东西，不会让决定过时）
+    const glance = () => { if (!glancing && SKILLS.glance) this.d.arbiter.start({ skill: 'glance', args: { seconds: 8 } }, 'filler'); };
     if (missingTarget) {
       // 找不到要的东西：换了位置后再看一圈是合理的
-      if (sameScope && Math.hypot(state.pos.x - last!.state.pos.x, state.pos.y - last!.state.pos.y, state.pos.z - last!.state.pos.z) < 8) return;
+      if (sameScope && Math.hypot(state.pos.x - last!.state.pos.x, state.pos.y - last!.state.pos.y, state.pos.z - last!.state.pos.z) < 8) return glance();
     } else {
-      // 只在刚进入一个世界/维度/会话、对周围一无所知时环顾一次。
+      // 只在刚进入一个世界/维度/会话、对周围一无所知时完整环顾一次；其余时候只是边想边张望。
       // 走了一段路不是环顾的理由：explore 沿途会张望，视觉也一直在更新。
-      if (sameScope) return;
-      if (this.d.memory.currentIntent() || surroundingsKnown) return;
+      if (sameScope) return glance();
+      if (this.d.memory.currentIntent() || surroundingsKnown) return glance();
     }
     // Survey unfamiliar surroundings or a failed resource search once. Time
     // passing and a pending model response do not create an information gap.
     this.lastLook = { at: Date.now(), state };
+    if (glancing) this.d.arbiter.cancel('换成完整环顾一圈');
     this.d.arbiter.start({ skill: 'look_around', args: { seconds: 4 } }, 'filler');
   }
 
@@ -784,6 +796,10 @@ export class Executive {
   }
 
   private onDone(o: TaskOutcome) {
+    if (o.task.source === 'llm' && o.result.status === 'succeeded' && o.durationMs > 0) {
+      const old = this.durations.get(o.task.skill);
+      this.durations.set(o.task.skill, Math.round(old === undefined ? o.durationMs : old * 0.7 + o.durationMs * 0.3));
+    }
     // 技能自己已经转头找过（look_around、gather 找不到时的四下张望、explore 沿途张望）：同一地点不再安排背景环顾
     if ((o.task.skill === 'look_around' && o.result.status === 'succeeded') || o.result.data?.searched === true
       || (o.task.skill === 'explore' && o.result.status === 'succeeded')) {
