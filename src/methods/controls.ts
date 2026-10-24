@@ -5,12 +5,15 @@ import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 /** Buttons and queries, rather than a list of activities the player ought to do. */
 export const BASIC_CONTROLS = [
   'look_around', 'goto', 'inspect_block', 'use_item', 'interact_block', 'interact', 'hit_entity',
-  'dig', 'pickup_items', 'craft', 'equip', 'eat', 'ride', 'dismount', 'climb_up', 'wait',
+  'dig', 'pickup_items', 'craft', 'equip', 'eat', 'ride', 'dismount', 'climb_up', 'assess_landings', 'descend', 'wait',
   'query_resource', 'method_catalog', 'experiment_method', 'record_ability_gap',
 ] as const;
 
-export function controlCatalog(disclosed: string[] = [], descriptionChars = 120): string {
-  const names = [...new Set([...BASIC_CONTROLS, ...disclosed])];
+/** Routine choices need buttons and the interfaces in use, not the entire method authoring DSL. */
+export const ROUTINE_CONTROLS = BASIC_CONTROLS.filter((name) => !['method_catalog', 'experiment_method', 'record_ability_gap'].includes(name));
+
+export function controlCatalog(disclosed: string[] = [], descriptionChars = 120, base: readonly string[] = BASIC_CONTROLS): string {
+  const names = [...new Set([...base, ...disclosed])];
   return names.flatMap((name) => {
     const skill = SKILLS[name];
     if (!skill || LLM_HIDDEN.has(name)) return [];

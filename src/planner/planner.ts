@@ -115,14 +115,14 @@ export class Planner {
   get autonomous() { return this.cfg.llm.provider !== 'mock' && this.provider.name !== 'mock'; }
 
   rulePlan(ctx: PlanContext): Plan {
-    const v = validatePlan(ruleProposal(ctx.percept, this.memory, ctx.reason === 'prefetch' ? ctx.current : null), this.adapter, 'rule');
+    const v = validatePlan(ruleProposal(ctx.percept, this.memory, ctx.reason === 'prefetch' ? ctx.current : null), this.adapter, 'rule', this.memory);
     if (v.ok) {
       v.plan.reason = ctx.reason;
       v.plan.requestedAt = Date.now();
       return v.plan;
     }
     // 理论上不会发生；兜底为探索
-    const fb = validatePlan({ goal: '随便走走', steps: [{ skill: 'wander' }] }, this.adapter, 'rule');
+    const fb = validatePlan({ goal: '随便走走', steps: [{ skill: 'wander' }] }, this.adapter, 'rule', this.memory);
     if (fb.ok) return fb.plan;
     throw new Error(`rule plan invalid: ${v.error}`);
   }
@@ -279,7 +279,7 @@ export class Planner {
             this.writer?.write({ ts: Date.now(), reason: 'recall', tier, provider: this.provider.name, ok: true, latencyMs, usage, promptChars, attempt });
             continue;
           }
-          const v = validatePlan(raw, this.adapter, 'llm');
+          const v = validatePlan(raw, this.adapter, 'llm', this.memory);
           if (v.ok) {
             if (this.autonomous) {
               // 意图记账是辅助信息：能纠正的就地纠正；项目条件不合法就只丢掉项目，不让整轮决策作废

@@ -1,20 +1,25 @@
 import type { GameAdapter } from '../adapter/types.ts';
 import type { AgentEvent, EventBus } from '../events.ts';
+import { ExpressionProjection, type ExpressionContext } from './expression.ts';
+
+const EXPRESSION_EVENTS = new Set(['plan', 'task_start', 'task_end', 'attempt_end', 'intent_decision', 'discovery', 'item_new',
+  'paused', 'disconnected', 'death', 'shutdown', 'plan_fallback', 'spawn']);
 
 /** Brief character thoughts for game chat and replay; never owns gameplay controls. */
 export class ActionChat {
-  private queue: { text: string; at: number }[] = [];
+  private projection = new ExpressionProjection();
   private lastSentAt = -Infinity;
-  private lastText = '';
+  private lastSnapshot = '';
   private timer: NodeJS.Timeout | null = null;
   private listening = false;
   private listener = (event: AgentEvent) => this.observe(event);
 
   constructor(private adapter: Pick<GameAdapter, 'state' | 'chat'>, private bus: EventBus,
-    private options: { enabled: boolean; minIntervalMs?: number; canSend?: () => boolean }) {}
+    private options: { enabled: boolean; minIntervalMs?: number; canSend?: () => boolean;
+      context?: () => Omit<ExpressionContext, 'state' | 'allowed'> }) {}
 
   start() {
-    if (!this.options.enabled || this.listening) return;
+    if (this.listening) return;
     this.listening = true;
     this.bus.on('event', this.listener);
     this.timer = setInterval(() => this.flush(), 250);
@@ -26,36 +31,34 @@ export class ActionChat {
     this.timer = null;
     this.bus.off('event', this.listener);
     this.listening = false;
-    this.queue = [];
+    this.projection.clear();
+    this.publishSnapshot();
   }
 
+  private context(): ExpressionContext { return { ...this.options.context?.(), state: this.adapter.state(), allowed: this.options.canSend?.() !== false }; }
+  snapshot() { return this.projection.snapshot(this.context()); }
+  private publishSnapshot() {
+    const snapshot = this.snapshot(), key = JSON.stringify(snapshot);
+    if (key === this.lastSnapshot) return;
+    this.lastSnapshot = key;
+    this.bus.publish('expression_changed', 'P3', '公开表达状态已更新', { ...snapshot });
+  }
   private observe(event: AgentEvent) {
-    if (event.type === 'paused' || event.type === 'disconnected' || event.type === 'death') { this.queue = []; return; }
-    const data = event.data ?? {};
-    if (data.source === 'filler' || event.msg.startsWith('[filler]')) return;
-    // Only activated model plans carry a publishable thought; rule/filler text can still describe actions.
-    if (event.type !== 'plan' || data.source !== 'llm' || typeof data.thought !== 'string') return;
-    const thought = data.thought.replace(/§./g, '').replace(/[\r\n\t]+/g, ' ').trim();
-    if (!thought) return;
-    const text = `[想法] ${thought}`.slice(0, 180);
-    if (text === this.lastText && Date.now() - this.lastSentAt < 10000 || this.queue.at(-1)?.text === text) return;
-    // Bounded pending captions: fresh observations matter more than delayed narration.
-    if (this.queue.length >= 24) this.queue.shift();
-    this.queue.push({ text, at: Date.now() });
+    if (!EXPRESSION_EVENTS.has(event.type)) return;
+    this.projection.observe(event, this.context());
     this.flush();
   }
 
   flush() {
-    const state = this.adapter.state();
-    if (!state.connected || !state.alive || !state.observationReady || this.options.canSend?.() === false) { this.queue = []; return; }
-    this.queue = this.queue.filter((item) => Date.now() - item.at <= 10000);
-    if (!this.queue.length || Date.now() - this.lastSentAt < Math.max(1000, this.options.minIntervalMs ?? 1800)) return;
-    const item = this.queue.shift()!;
-    const delayed = Math.floor((Date.now() - item.at) / 1000);
-    const text = delayed >= 3 ? `${item.text.slice(0, 160)}（${delayed}秒前）` : item.text;
+    this.publishSnapshot();
+    const item = this.projection.pendingSpeech(this.context());
+    if (!this.options.enabled || !item || Date.now() - this.lastSentAt < Math.max(1000, this.options.minIntervalMs ?? 1800)) return;
     try {
-      this.adapter.chat(text);
-      this.lastSentAt = Date.now(); this.lastText = text;
-    } catch { this.queue = []; } // chat transport failure must not stop physical control
+      this.adapter.chat(`[想法] ${item.thought}`.slice(0, 180));
+      this.lastSentAt = Date.now(); this.projection.markSent(item.taskId);
+      this.bus.publish('expression_submitted', 'P3', '已提交当前动作的公开想法', {
+        planId: item.planId, taskId: item.taskId, thought: item.thought, scope: this.snapshot().scope, delivery: 'unconfirmed',
+      });
+    } catch { this.projection.markSent(item.taskId); } // transport failure must not stop physical control
   }
 }

@@ -53,19 +53,20 @@ test('small decisions retain actionable archive defects and pickup facts within 
   assert.doesNotMatch(JSON.stringify(result), /HUGE_DESIGN/);
 });
 
-test('small decisions receive genuine learning candidates and the exact boat and block-removal capabilities', (t) => {
+test('routine decisions keep general inputs and current evidence, with learning and workflow context available on demand', (t) => {
   const memory = new WorldMemory(null); t.after(() => memory.close());
   const ctx = context();
   ctx.mySkills = [{ name: 'trial:wood:v1', status: 'candidate', description: '木料组合' }];
   const body = payload(lightUserPrompt(ctx, memory));
-  assert.deepEqual(body.state.learn_candidates, ctx.percept.learn_candidates);
-  assert.equal(body.my_skills[0].status, 'candidate');
+  assert.equal(body.state.learn_candidates, undefined);
+  assert.equal(body.my_skills, undefined);
   const system = lightSystemPrompt('player');
   assert.match(system, /不会为赶路拆墙、挖地或垫高/);
-  assert.match(system, /可自主用 boat/);
-  assert.match(system, /dig \{"target":"white_bed"\}/);
-  assert.match(system, /反复成功.*learn_skill/);
-  assert.match(system, /不为凑技能数虚构/);
+  assert.match(system, /^- dig .*target/m);
+  assert.match(system, /^- interact_block /m);
+  assert.match(system, /^- ride /m);
+  assert.doesNotMatch(system, /white_bed|^- boat |^- experiment_method /m);
+  assert.match(system, /need_full_context/);
 });
 
 test('targeted pickup requires a real inventory increase; an optional empty sweep remains harmless', async () => {

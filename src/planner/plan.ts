@@ -7,6 +7,8 @@ import { shortId } from '../util.ts';
 import { computeDrives, stockOf, type Drive } from '../brain/drives.ts';
 import type { Binding } from '../projects/types.ts';
 import type { ValidatedIntentDecision } from '../intentions/decision.ts';
+import { validateCondition } from '../projects/conditions.ts';
+import type { Condition } from '../projects/types.ts';
 
 export const GOAL_TYPES = ['explore', 'gather', 'craft', 'survive', 'investigate', 'rest', 'build'] as const;
 
@@ -50,6 +52,10 @@ export interface Plan {
   /** 这份决定是基于什么时候、哪些“正在做/排队”的步骤想的（边做边想时用来剔除已做完的步骤） */
   basis?: { at: number; reason: string; pending: { skill: string; args?: unknown }[]; snapshot?: BasisSnapshot };
   note?: string;
+  /** Model-selected working approach and open question, never observed facts. */
+  focus?: { approach?: string; question?: string | null };
+  /** A short-horizon prediction, independent of project completion or learned methods. */
+  expect?: Condition;
   /** 这份决定是带着反思请求想的（由 Executive 设置，不接受模型输入） */
   reflection?: string;
 }
@@ -135,7 +141,7 @@ export function extractJson(text: string): unknown {
  * 计划校验第 1、2 关：结构 + 技能白名单 + 参数校验。
  * 第 3 关（安全规则）由反射层和 abort_if 在执行期保证。
  */
-export function validatePlan(raw: unknown, adapter: GameAdapter, source: Plan['source']): { ok: true; plan: Plan } | { ok: false; error: string } {
+export function validatePlan(raw: unknown, adapter: GameAdapter, source: Plan['source'], memory?: WorldMemory): { ok: true; plan: Plan } | { ok: false; error: string } {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, error: '顶层必须是 JSON 对象' };
   const o = raw as Record<string, any>;
   const goal = String(o.goal ?? '').trim();
@@ -165,6 +171,23 @@ export function validatePlan(raw: unknown, adapter: GameAdapter, source: Plan['s
   }
   const ab = o.abort_if && typeof o.abort_if === 'object' ? o.abort_if : {};
   const hp = Number(ab.hp_below);
+  let focus: Plan['focus'], expect: Condition | undefined;
+  if (o.focus !== undefined) {
+    if (!o.focus || typeof o.focus !== 'object' || Array.isArray(o.focus)) return { ok: false, error: 'focus 必须是主观办法/问题对象' };
+    focus = {};
+    for (const field of ['approach', 'question'] as const) {
+      const value = o.focus[field];
+      if (value === undefined) continue;
+      if (field === 'question' && value === null) { focus.question = null; continue; }
+      if (typeof value !== 'string' || !value.trim() || value.trim().length > 240) return { ok: false, error: `focus.${field} 须为 1–240 字符${field === 'question' ? '，或 null 表示不再追问' : ''}` };
+      focus[field] = value.trim();
+    }
+  }
+  if (o.expect !== undefined) {
+    if (!memory) return { ok: false, error: 'expect 需要可信世界记忆以验证事实条件' };
+    try { expect = validateCondition(o.expect, adapter, memory, adapter.state()); }
+    catch (e) { return { ok: false, error: `expect 无效：${e instanceof Error ? e.message : String(e)}` }; }
+  }
   return {
     ok: true,
     plan: {
@@ -187,6 +210,7 @@ export function validatePlan(raw: unknown, adapter: GameAdapter, source: Plan['s
       ...(typeof o.missing_ability === 'string' && o.missing_ability.trim() ? { missingAbility: o.missing_ability.trim().slice(0, 200) } : {}),
       ...(typeof o.then === 'string' && o.then.trim() ? { then: o.then.trim().slice(0, 140) } : {}),
       ...(typeof o.note === 'string' && o.note.trim() ? { note: o.note.trim().slice(0, 140) } : {}),
+      ...(focus ? { focus } : {}), ...(expect ? { expect } : {}),
     },
   };
 }

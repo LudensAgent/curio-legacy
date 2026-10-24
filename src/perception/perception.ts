@@ -292,7 +292,8 @@ export class Perception {
         // 身边一圈（脚下、头顶、四个方向能不能走）：判断被困、往哪能出去
         ...(contact ? { around: contact.text, contacts: { support: contact.support, feet: contact.feet, head: contact.head } } : {}),
       },
-      inventory: [...s.inventory].sort((a, b) => b.count - a.count).slice(0, 24),
+      inventory: [...s.inventory.reduce((items, item) => items.set(item.name, (items.get(item.name) ?? 0) + item.count), new Map<string, number>())]
+        .map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count),
       emptySlots: s.emptySlots,
       nearby: {
         hostile: [...v.seen, ...v.heard]

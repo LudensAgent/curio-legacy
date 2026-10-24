@@ -13,6 +13,7 @@ import type { Binding, PauseReason, Project } from '../projects/types.ts';
 import { SKILLS } from '../skills/index.ts';
 import { buildingArchiveFor } from '../skills/build.ts';
 import { DecisionFeedback } from './decision-feedback.ts';
+import { WorkingFocus } from './working-focus.ts';
 import { causeName, reflectionDue } from './habits.ts';
 
 export interface ExecutiveDeps {
@@ -40,9 +41,6 @@ const QUICK_SKILLS = new Set(['craft', 'eat', 'place_torch', 'pickup_items', 'eq
 /** Unknown outcomes and knowledge queries must supply evidence before a next choice. */
 const needsOutcome = (skill: string) => SKILLS[skill]?.outcomeBoundary || SKILLS[skill]?.readOnly
   || skill === 'experiment_method' || skill.startsWith('trial:');
-const FOOD_ITEMS = new Set(['bread', 'cooked_beef', 'cooked_porkchop', 'cooked_chicken', 'cooked_mutton', 'cooked_cod', 'cooked_salmon', 'apple', 'baked_potato',
-  'carrot', 'beef', 'porkchop', 'chicken', 'mutton', 'potato', 'sweet_berries', 'glow_berries', 'melon_slice', 'golden_apple', 'cookie', 'pumpkin_pie', 'beetroot',
-  'dried_kelp', 'cod', 'salmon', 'rabbit', 'cooked_rabbit', 'mushroom_stew', 'rabbit_stew', 'beetroot_soup', 'golden_carrot']);
 
 /** 把一长串失败说明压成一句：取“地基不行：…”这类关键句或第一句，去掉括号残片 */
 export function briefReason(summary: string, max = 48): string {
@@ -81,6 +79,9 @@ export class Executive {
   private results: { skill: string; args: unknown; status: string; summary: string; data?: Record<string, unknown>;
     failureCode?: string; ts: number; worldId: string; dimension: string; sessionId: string; position: AgentState['pos'] }[] = [];
   private decisionFeedback = new DecisionFeedback();
+  private workingFocus = new WorkingFocus();
+  private preparedAgainstFocus = new WeakMap<Plan, string | null>();
+  private handoffQueued = false;
   private planEffects: EffectEvidence[] = [];
   private completedProjects = new Set<string>();
   private gentleResume: { planId: string; reflexTaskId: string; generation: number; succeeded: boolean } | null = null;
@@ -131,6 +132,17 @@ export class Executive {
     this.inFlightReason = '';
     this.queued = null;
     if (this.d.arbiter.info()?.source === 'filler') this.d.arbiter.cancel(reason);
+  }
+
+  /** Hand control over after callbacks settle; never replace an owned action or spin without approved work. */
+  private scheduleHandoff() {
+    if (this.handoffQueued || !this.timer || this.paused || this.suspended.size) return;
+    this.handoffQueued = true;
+    queueMicrotask(() => {
+      this.handoffQueued = false;
+      if (!this.timer || this.paused || this.suspended.size || this.inFlight && !this.queued && !this.plan) return;
+      this.tick();
+    });
   }
 
   private suspend(reason: PauseReason) {
@@ -299,6 +311,7 @@ export class Executive {
           .map((p) => ({ id: p.id, name: p.versions.at(-1)?.spec.name, version: p.versions.at(-1)?.version, status: p.status,
             defects: p.inspections.at(-1)?.defects.slice(0, 4), feedback: p.feedback.slice(-3) })),
       }, results: this.results, decisionFeedback: this.decisionFeedback.context(worldState, percept), worldState,
+      workingFocus: this.workingFocus.context(worldState, this.d.memory.currentIntent()?.id),
       ...(this.d.researchContext ? { researchContext: this.d.researchContext() } : {}),
       ...(this.d.mySkills ? { mySkills: this.safeSkills() } : {}) };
   }
@@ -330,6 +343,8 @@ export class Executive {
     const sequence = ++this.requestSequence;
     const controller = this.controller = new AbortController();
     const ctx = this.ctx(reason);
+    const ownedCurrent = ctx.current && this.plan && ctx.current.planId === this.plan.id
+      && ['llm', 'rule', 'user'].includes(ctx.current.source) ? ctx.current : null;
     const snapshot = this.basisSnapshot();
     ctx.changes = this.changesSince(this.lastDecision);
     // 这次请求的基准：只有决定真被采纳（新鲜、排进队列）才记为“上次决定”，作废/出错的请求不覆盖它
@@ -353,17 +368,14 @@ export class Executive {
       if (ctx.userSuggestion === this.userSuggestion) this.userSuggestion = null;
       p.binding = ctx.binding;
       p.generation = generation;
+      this.preparedAgainstFocus.set(p, (ctx.workingFocus as { pendingMismatch?: { eventId: string } | null } | undefined)?.pendingMismatch?.eventId ?? null);
       if (reflection) p.reflection = reflection.why;
-      p.basis = { at: requestedAt, reason, pending: [...(ctx.current ? [{ skill: ctx.current.skill, args: ctx.current.args }] : []), ...(ctx.pendingSteps ?? [])], snapshot };
+      p.basis = { at: requestedAt, reason, pending: [...(ownedCurrent ? [{ skill: ownedCurrent.skill, args: ownedCurrent.args }] : []), ...(ctx.pendingSteps ?? [])], snapshot };
       this.queued = p;
       // Prefetch choices and all their side effects wait until activation with a second freshness check.
       if (replace) this.discardPlan('收到新决策，替换旧尝试');
-      else if (this.plan?.recovering) {
-        // 补救动作只是等待期间的过渡：新决定到了就换上
-        const old = this.plan;
-        if (this.d.arbiter.info()?.planId === old.id) this.d.arbiter.cancel('新决策已到达，结束补救动作');
-        this.finishPlan('failed', `${old.recovering!.summary}（补救动作已被新决策取代）`);
-      }
+      // A reply waits for the current approved recovery action's boundary.
+      // Cancelling it here can repeatedly suppress the very observation needed to correct the next choice.
       if (this.d.arbiter.info()?.source === 'filler') this.d.arbiter.cancel('决策已到达');
     }).catch((e: any) => {
       if (!fresh()) return;
@@ -385,6 +397,7 @@ export class Executive {
     }).finally(() => {
       if (sequence !== this.requestSequence || generation !== this.generation) return;
       this.controller = null; this.inFlight = false; this.inFlightReason = '';
+      this.scheduleHandoff();
     });
     // Attach observation immediately, including requests issued between ticks.
     // It cannot interrupt approved work or alter the model's selected goal.
@@ -431,13 +444,13 @@ export class Executive {
     };
   }
 
-  /** 不同的事在同一个地方接连失败：多半是这个地方本身有问题（被困、够不着），而不是做法不对 */
+  /** Nearby failures share context, but cannot distinguish missing observations, interface errors or a mismatched method. */
   private samePlace() {
     const here = this.d.adapter.state().pos;
     const near = this.failures.filter((f) => f.pos && Math.hypot(f.pos.x - here.x, f.pos.y - here.y, f.pos.z - here.z) <= 4);
     if (near.length < 3 || new Set(near.map((f) => f.key)).size < 2) return [];
     return [{ action: `在这附近（${Math.round(here.x)},${Math.round(here.y)},${Math.round(here.z)}）做的各种事`, failures_10min: near.length,
-      last: `${[...new Set(near.map((f) => f.key))].slice(-4).join('、')} 都在这里失败了：问题多半出在这个地方，先离开这里（看 self.around）` }];
+      last: `${[...new Set(near.map((f) => f.key))].slice(-4).join('、')} 在这附近都收到失败反馈；可能仍缺观察或做法不匹配，原因尚未确认` }];
   }
 
   /** 上一次发出决策请求时的世界快照：算“自上次决定以来发生了什么” */
@@ -452,6 +465,7 @@ export class Executive {
   private lastDeliberatedFailure: PlanContext['lastFailure'] = null;
   private lastDeliberatedRepeat: { pattern: string; bucket: number; count: number } | null = null;
   private lastDeliberatedIntentProgress: { key: string; bucket: number; count: number } | null = null;
+  private lastDeliberatedMismatch: string | null = null;
   /**
    * 顺利续步、已知缺料或一次没找到东西用小决策；新路径/机制失败和连续无实测变化需要完整推理。
    * 完整决策只用于大转折：开始全新的事、玩家建议、项目受阻、死亡之后，以及每隔一段时间抬头看一眼全局
@@ -472,6 +486,7 @@ export class Executive {
       this.lastDeliberatedFailure = null;
       this.lastDeliberatedRepeat = null;
       this.lastDeliberatedIntentProgress = null;
+      this.lastDeliberatedMismatch = null;
     }
     const feedback = (ctx?.decisionFeedback ?? this.decisionFeedback.context(state)) as {
       repeatedStepPattern?: { steps: unknown; consecutiveUnchangedAttempts: number };
@@ -500,6 +515,9 @@ export class Executive {
       ? { key: progressKey, bucket: progressBucket, count: noProgressCount } : null;
     if (this.lastDeliberatedIntentProgress) this.lastDeliberatedIntentProgress.count = noProgressCount;
     const failure = ctx ? ctx.lastFailure : this.lastFailure;
+    const focus = (ctx?.workingFocus ?? this.workingFocus?.context(state, intentId)) as { pendingMismatch?: { eventId: string } | null } | null | undefined;
+    const mismatch = focus?.pendingMismatch?.eventId;
+    const newMismatch = mismatch && mismatch !== this.lastDeliberatedMismatch ? mismatch : null;
     const newFailure = failure && failure !== this.lastDeliberatedFailure
       && (['PATH_NOT_FOUND', 'STUCK', 'NO_EFFECT', 'EFFECT_NOT_CONFIRMED'].includes(failure.code ?? '')
         || failure.skill === 'experiment_method' || failure.skill.startsWith('trial:')) ? failure : null;
@@ -507,8 +525,8 @@ export class Executive {
     const big = !this.d.memory.currentIntent() || !!this.userSuggestion
       || ['user_suggestion', 'manual_replan', 'project_blocked'].includes(ctx?.reason ?? '')
       || failure?.code === 'DIED' || !!reflection;
-    return { full: big || !!newFailure || !!repeat || !!intentProgress || this.lightStreak >= 6 || Date.now() - this.lastFullAt > 180_000,
-      newFailure, repeat, intentProgress };
+    return { full: big || !!newFailure || !!repeat || !!intentProgress || !!newMismatch || this.lightStreak >= 6 || Date.now() - this.lastFullAt > 180_000,
+      newFailure, repeat, intentProgress, newMismatch };
   }
 
   /**
@@ -559,6 +577,7 @@ export class Executive {
     if (decision.newFailure) this.lastDeliberatedFailure = decision.newFailure;
     if (decision.repeat) this.lastDeliberatedRepeat = decision.repeat;
     if (decision.intentProgress) this.lastDeliberatedIntentProgress = decision.intentProgress;
+    if (decision.newMismatch) this.lastDeliberatedMismatch = decision.newMismatch;
     this.lightStreak = 0;
     this.lastFullAt = Date.now();
     return 'full';
@@ -574,7 +593,14 @@ export class Executive {
 
   private activate(p: Plan): boolean {
     if (p.generation !== this.generation || !this.sameBinding(p.binding ?? {}) || this.paused) { this.staleDropped++; return false; }
-    if (this.d.planner.autonomous && p.basis?.reason === 'prefetch' && p.basis.pending.some((step) => needsOutcome(step.skill))) {
+    const mismatch = this.workingFocus.context(this.d.adapter.state(), this.d.memory.currentIntent()?.id).pendingMismatch;
+    if (mismatch && (this.preparedAgainstFocus.has(p) || p.basis?.reason === 'prefetch') && this.preparedAgainstFocus.get(p) !== mismatch.eventId) {
+      this.staleDropped++;
+      this.d.bus.publish('plan_stale', 'P3', '原先预期已被实际结果修正，按新证据重新决定', { eventId: mismatch.eventId });
+      this.scheduleHandoff();
+      return false;
+    }
+    if (this.d.planner.autonomous && p.basis?.pending.some((step) => needsOutcome(step.skill))) {
       this.staleDropped++;
       this.d.bus.publish('plan_stale', 'P3', '这份预取决定依赖当时尚未确认的结果，按实际发现重新决定');
       return false;
@@ -616,12 +642,12 @@ export class Executive {
       this.d.memory.addNote('inference', p.note, here.dim, at);
       this.d.bus.publish('note', 'P3', `记下：${p.note}`);
     }
-    if (p.lesson && this.d.memory.addLesson(p.lesson, { source: 'model' })) this.d.bus.publish('lesson', 'P2', `经验：${p.lesson}`);
     if (p.objective && !this.d.planner.autonomous) this.d.memory.setObjective(p.objective);
     if (p.learnSkill) this.d.onLearnSkill?.(p.learnSkill);
     this.plan = p;
     this.attemptStarted = false;
     this.activatedAt = Date.now();
+    this.workingFocus.begin(p, this.d.adapter.state(), this.d.perception);
     this.decisionFeedback.begin(p, this.d.adapter.state(), this.d.perception.update());
     this.planEffects = [];
     this.d.bus.publish('plan', 'P2', `[${p.source}] ${p.goal} —— ${p.thought}`, { thought: p.thought, source: p.source, steps: p.steps, planId: p.id, binding: p.binding });
@@ -721,6 +747,7 @@ export class Executive {
       const step = this.plan.steps[this.plan.index++];
       const r = this.d.arbiter.start(step, this.plan.source, { planId: this.plan.id });
       if ('error' in r) {
+        this.plan.index--; // A rejected primitive never became an executed attempt.
         this.lastFailure = { skill: step.skill, code: 'BAD_ARGS', summary: r.error };
         this.finishPlan('failed', r.error);
       } else if (!SKILLS[step.skill]?.readOnly) this.attemptStarted = true;
@@ -791,11 +818,15 @@ export class Executive {
       verified: confirmed.length > 0, changed: confirmed.length > 0,
       reasons: confirmed.flatMap((e) => e.reasons).slice(0, 4),
     });
+    const focusAttempt = this.workingFocus.end(p, status, state, this.d.perception, summary);
+    if (p.lesson && attempt && p.index > 0 && !['cancelled', 'interrupted', 'replaced', 'aborted', 'deferred'].includes(status)
+      && this.d.memory.addLesson(p.lesson, { source: 'model' })) this.d.bus.publish('lesson', 'P2', `自己的推测：${p.lesson}`);
     const steps = p.steps.map((st) => { const a = (st.args ?? {}) as Record<string, unknown>; const key = a.block ?? a.item ?? a.blueprint ?? a.crop ?? a.target ?? a.animal ?? a.direction ?? ''; return key ? `${st.skill}:${key}` : st.skill; });
     this.d.memory.recordGoal({ goal: p.goal, goalType: p.goalType, source: p.source, status, summary, durationSec, steps, plan: p.steps, worldId: state.worldId, dimension: state.dim, ...(effectEvidence ? { effectEvidence } : {}) });
     this.d.onGoalEnd?.(status);
     const type = this.d.planner.autonomous ? 'attempt_end' : 'goal_end';
-    this.d.bus.publish(type, status === 'failed' ? 'P1' : 'P3', `尝试「${p.goal}」→ ${status}：${summary}`, { planId: p.id, status, binding: p.binding, effectEvidence });
+    this.d.bus.publish(type, status === 'failed' ? 'P1' : 'P3', `尝试「${p.goal}」→ ${status}：${summary}`, { planId: p.id, status, binding: p.binding, effectEvidence,
+      ...(focusAttempt?.prediction ? { prediction: { outcome: focusAttempt.prediction.outcome, eventId: focusAttempt.prediction.eventId, reason: focusAttempt.prediction.reason } } : {}) });
   }
 
   private reportProjectCompletion(project: Project | undefined) {
@@ -913,20 +944,23 @@ export class Executive {
     }
     this.recordResult(o);
     if (o.result.status === 'succeeded') {
-      if (this.d.planner.autonomous && o.task.source === 'llm' && needsOutcome(o.task.skill) && p.index < p.steps.length) {
+      if (this.d.planner.autonomous && o.task.source === 'llm' && needsOutcome(o.task.skill)) {
         const remaining = p.steps.length - p.index;
         // Record only work actually done; an unexecuted suffix is not a successful routine to learn.
         p.steps = p.steps.slice(0, p.index);
         this.invalidate('outcome_ready');
         this.d.bus.publish('decision_boundary', 'P3', `${o.task.skill} 的实际结果已返回，余下 ${remaining} 步交回决策`, { skill: o.task.skill, remaining });
-        this.finishPlan(p.recovering ? 'failed' : 'succeeded', `${o.result.summary}；余下步骤需依据实际结果重新选择`);
+        const summary = `${o.result.summary}${remaining ? '；余下步骤需依据实际结果重新选择' : ''}`;
+        this.finishPlan(p.recovering ? 'failed' : 'succeeded', p.recovering ? `${p.recovering.summary}（补救：${summary}）` : summary);
+        this.scheduleHandoff();
         return;
       }
-      if (p.index >= p.steps.length) {
+      if (p.index >= p.steps.length || p.recovering && this.queued) {
         if (p.recovering) this.finishPlan('failed', `${p.recovering.summary}（补救：${o.result.summary}）`);
         else this.finishPlan('succeeded', o.result.summary);
       }
       this.keepThinkingActive();
+      this.scheduleHandoff();
       return;
     }
     if (o.result.status === 'cancelled' && o.preemptedBy === 'reflex') {
@@ -941,67 +975,21 @@ export class Executive {
     this.invalidate('task_failed');
     if (o.result.status === 'failed' && this.d.planner.autonomous && !p.recovering && this.bridge(p, o)) return;
     this.finishPlan(o.result.status, o.result.summary);
+    this.scheduleHandoff();
   }
 
-  /**
-   * 失败后不干站着等新决定：先做模型预留的 on_fail，或从失败本身推出的显而易见的补救
-   * （没看见目标 → 换个方向边走边找；材料不够 → 去弄差的那份），同时立刻请求新决策。
-   * 新决策一到就替换补救动作；补救做完也照样记为这次尝试失败。
-   */
+  /** Only the model's explicit fallback is approved work; its evidence boundary controls the next request. */
   private bridge(p: Plan, o: TaskOutcome): boolean {
-    const steps = p.onFail?.length ? p.onFail : this.repairSteps(o);
+    const steps = p.onFail;
     if (!steps?.length) return false;
     p.recovering = { summary: o.result.summary };
     const entry = [...this.thread].reverse().find((t) => t.goal === p.goal && !t.status);
     if (entry) { entry.status = 'failed（补救中）'; entry.summary = o.result.summary; }
     p.steps = [...p.steps.slice(0, p.index), ...steps];
     p.generation = this.generation;
-    this.d.bus.publish('plan_fallback', 'P2', `「${o.task.skill}」没成功，先${p.onFail?.length ? '按预案' : '顺手'}做：${steps.map((s) => `${s.skill} ${JSON.stringify(s.args ?? {})}`).join(' → ')}，同时重新考虑`);
-    if (!this.paused) this.request('failure');
+    this.d.bus.publish('plan_fallback', 'P2', `「${o.task.skill}」没成功，执行已选预案：${steps.map((s) => `${s.skill} ${JSON.stringify(s.args ?? {})}`).join(' → ')}`);
+    this.scheduleHandoff();
     return true;
-  }
-
-  private repairSteps(o: TaskOutcome): Step[] | null {
-    const a = (o.task.args ?? {}) as Record<string, unknown>;
-    const data = (o.result.data ?? {}) as Record<string, unknown>;
-    const candidates: Step[] = [];
-    const state = this.d.adapter.state();
-    const code = o.result.failureCode;
-    const hasFood = () => state.inventory.some((i) => FOOD_ITEMS.has(i.name));
-    const foodRepair = () => {
-      // 背包没吃的、附近又打不到猎：会钓鱼就钓鱼，否则去摘果子
-      if (SKILLS.fish && state.inventory.some((i) => i.name === 'fishing_rod')) candidates.push({ skill: 'fish', args: { count: 3 } });
-      else if (SKILLS.forage) candidates.push({ skill: 'forage', args: { count: 4 } });
-    };
-    if (['goto', 'explore', 'ride'].includes(o.task.skill) && (code === 'PATH_NOT_FOUND' || code === 'STUCK')
-      && (state.inWater || data.waterAhead === true || /水|water|海|河|湖/i.test(o.result.summary)) && SKILLS.boat) {
-      // 走不过去的水面：像玩家一样坐船过去
-      const nums = typeof a.target === 'string' ? a.target.match(/-?\d+(?:\.\d+)?/g) : null;
-      const target = data.target as { x?: unknown; z?: unknown } | undefined;
-      const to = target && Number.isFinite(target.x) && Number.isFinite(target.z) ? `${Math.round(target.x as number)},${Math.round(target.z as number)}`
-        : nums && nums.length >= 2 ? `${Math.round(+nums[0])},${Math.round(+nums[nums.length === 3 ? 2 : 1])}` : undefined;
-      const dir = typeof a.direction === 'string' && a.direction !== 'auto' ? a.direction : undefined;
-      if (to) candidates.push({ skill: 'boat', args: { to } });
-      else if (dir) candidates.push({ skill: 'boat', args: { direction: dir, distance: Number(a.distance) || 48 } });
-    } else if (o.task.skill === 'eat' && (code === 'NO_FOOD' || !hasFood())) foodRepair();
-    else if (o.task.skill === 'hunt' && code === 'NOT_FOUND' && state.food <= 14 && !hasFood()) {
-      foodRepair();
-      const target = String(a.animal ?? '');
-      if (!candidates.length && target) candidates.push({ skill: 'explore', args: { direction: 'auto', distance: 40, until: target } });
-    } else if (code === 'NOT_FOUND' && ['gather', 'hunt'].includes(o.task.skill)) {
-      const target = String(a.block ?? a.animal ?? '');
-      if (target) candidates.push({ skill: 'explore', args: { direction: 'auto', distance: 40, until: target } });
-    } else if (o.result.failureCode === 'MISSING_MATERIALS' && typeof data.shortfall === 'string') {
-      const logs = /木料还差约 (\d+) 块原木/.exec(data.shortfall), cobble = /圆石还差 (\d+) 块/.exec(data.shortfall);
-      if (logs) candidates.push({ skill: 'gather', args: { block: 'log', count: Number(logs[1]) + 1 } });
-      if (cobble) candidates.push({ skill: 'gather', args: { block: 'stone', count: Number(cobble[1]) + 1 } });
-    }
-    const out: Step[] = [];
-    for (const c of candidates) {
-      const v = SKILLS[c.skill]?.validate(c.args, this.d.adapter);
-      if (v?.ok) out.push({ skill: c.skill, args: v.args });
-    }
-    return out.length ? out : null;
   }
 
   private recordResult(o: TaskOutcome) {
@@ -1027,7 +1015,7 @@ export class Executive {
       && Math.hypot(f.pos.x - state.pos.x, f.pos.y - state.pos.y, f.pos.z - state.pos.z) <= 8);
     if (same.length < 3) return;
     const at = { x: Math.round(state.pos.x), y: Math.round(state.pos.y), z: Math.round(state.pos.z) };
-    const text = `在 (${at.x},${at.y},${at.z}) 附近 ${key} 10 分钟内失败了 ${same.length} 次（${briefReason(summary)}）：这里这样做行不通，换个地方或换个做法`;
+    const text = `失败反馈记录（原因未证实）：在 (${at.x},${at.y},${at.z}) 附近 ${key} 10 分钟内失败 ${same.length} 次。最近反馈：${briefReason(summary)}`;
     const lesson = this.d.memory.addLesson(text, { source: 'observed', key: `fail:${state.dim}:${key}:${Math.floor(at.x / 16)}:${Math.floor(at.z / 16)}` });
     // 记忆里的那条随次数更新；对外只在第一次成形（3 次）和之后每多 5 次时报一声，免得同一秒刷两条
     if (lesson && (same.length === 3 || same.length % 5 === 0)) this.d.bus.publish('lesson', 'P2', `亲历经验：${text}`, { source: 'observed' });
@@ -1094,6 +1082,7 @@ export class Executive {
     return { plan: pl(this.plan), queued: pl(this.queued), paused: this.paused, pauseReasons: [...this.suspended],
       llmInFlight: this.inFlight, llmReason: this.inFlightReason, userSuggestion: this.userSuggestion, lastFailure: this.lastFailure,
       backoffMs: Math.max(0, this.backoffUntil - Date.now()), staleDropped: this.staleDropped, generation: this.generation,
+      workingFocus: this.workingFocus.context(this.d.adapter.state(), this.d.memory.currentIntent()?.id),
       autonomy: this.projects.context(), mode: this.d.planner.autonomous ? 'autonomous' : 'compatibility' };
   }
 }

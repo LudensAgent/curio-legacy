@@ -2,7 +2,7 @@ import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 
 // These are general operations exposed by the current registry, not recipes
 // for situations. Specialized workflows remain searchable as composites.
-const PRIMITIVES = ['use_item', 'interact_block', 'interact', 'ride', 'dismount', 'dig', 'hit_entity', 'inspect_block', 'craft', 'look_around', 'goto', 'pickup_items', 'climb_up', 'eat', 'wait'];
+const PRIMITIVES = ['use_item', 'interact_block', 'interact', 'ride', 'dismount', 'dig', 'hit_entity', 'inspect_block', 'craft', 'look_around', 'goto', 'pickup_items', 'climb_up', 'assess_landings', 'descend', 'eat', 'wait'];
 const ALIASES: Record<string, string[]> = {
   use_item: ['右键', '使用物品', '放置', '放下', 'right click', 'use item', 'place', 'place block'],
   interact_block: ['空手右键', '方块交互', '开门', '关门', '点击方块', '门', '按钮', '拉杆', 'activate block', 'right click block', 'door', 'button', 'lever'],
@@ -17,6 +17,8 @@ const ALIASES: Record<string, string[]> = {
   goto: ['移动', '走路', '步行', '前往', 'goto', 'walk', 'move', 'go to'],
   pickup_items: ['拾取', '捡起', '掉落物', 'pickup', 'pick up', 'collect drops'],
   climb_up: ['爬升', '爬高', '垫脚', 'climb', 'pillar up'],
+  assess_landings: ['落差', '落点', '高度', '摔伤', '水深', '查看下方', 'landing', 'fall risk', 'drop height'],
+  descend: ['下行', '下去', '下落', '跳下', '跳入水', 'descend', 'drop down', 'water landing'],
   eat: ['吃', '进食', 'eat', 'food'],
   wait: ['等待', '等候', 'wait', 'pause'],
 };

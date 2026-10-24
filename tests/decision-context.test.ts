@@ -146,7 +146,7 @@ test('六次完整反馈紧缩及 24000 字节规划预算保留最新经历与�
 test('决策说明支持因事实改法或暂缓，格式示例使用不同玩法而非固定环顾流程', () => {
   const prompt = systemPrompt('Curio', 100, '');
   assert.match(prompt, /其他可行方法或暂缓/);
-  assert.match(prompt, /原地且事实未变时再次扫视通常没有新信息/);
+  assert.match(prompt, /原地且环境未变时重复扫视未必产生新信息/);
   assert.match(prompt, /先获得证据再决定/);
   assert.match(prompt, /reason 只写简短依据/);
   const examples = prompt.split('\n').filter((line) => line.startsWith('{"kind":"plan"')).map((line) => JSON.parse(line));

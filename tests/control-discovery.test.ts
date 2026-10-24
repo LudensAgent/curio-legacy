@@ -30,14 +30,15 @@ test('default controls describe general inputs; consulted workflows persist per 
   assert.doesNotMatch(fs.readFileSync(file, 'utf8'), /verified|learned|success/);
 });
 
-test('real planner inquiry progressively exposes interfaces, while both decision tiers retain self-chosen research evidence', async (t) => {
+test('real planner inquiry exposes interfaces on demand; research stays available to deliberate choices without flooding routine ones', async (t) => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus(), controls = new ControlKnowledge(null);
   t.after(() => memory.close()); memory.setWorld(adapter.worldId);
   const percept = new Perception(adapter, memory, bus, new Vision(adapter)).update();
   const researchContext = { source: 'method_trials', claims: 'model_hypotheses', questions: [{ question: '我还想弄清的现象', hypothesis: '待检验假设', outcomes: { unknown: 1 } }] };
   const ctx: PlanContext = { reason: 'no_goal', percept, current: null, lastFailure: null, userSuggestion: null, worldState: adapter.state(), researchContext };
+  assert.match(buildMessages('player', ctx, memory)[1].content, /research_context.*我还想弄清的现象/);
+  assert.doesNotMatch(buildLightMessages('player', ctx, memory)[1].content, /research_context|我还想弄清的现象/);
   for (const messages of [buildMessages('player', ctx, memory), buildLightMessages('player', ctx, memory)]) {
-    assert.match(messages[1].content, /research_context.*我还想弄清的现象/);
     assert.doesNotMatch(messages[0].content, /^- boat /m);
   }
   let calls = 0;

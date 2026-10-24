@@ -168,7 +168,9 @@ perception.knownSkillSigs = knownSigs;
 const reflex = new Reflex(adapter, arbiter, bus, vision, { routineCare: !planner.autonomous });
 const spectator = new Spectator(config, adapter, bus);
 const metrics = new Metrics(adapter, arbiter, executive, planner, reflex, bus);
-const actionChat = new ActionChat(adapter, bus, { ...config.actionChat, canSend: () => !executive.paused });
+const actionChat = new ActionChat(adapter, bus, { ...config.actionChat, canSend: () => !executive.paused,
+  context: () => ({ plan: executive.plan, task: arbiter.info(), intent: memory.currentIntent() }),
+});
 actionChat.start();
 
 // ------------------------------------------------------------ Curio Observer（观察者客户端模组的数据流）
@@ -186,9 +188,9 @@ function attachObserver() {
   observedBot = adapter.bot;
   bus.publish('observer_feed', 'P3', `Curio Observer 数据流已挂载到 ${config.mc.username}`);
 }
-// 新目标 → 模组里的思考字幕
-bus.on('event', (ev: { type: string }) => {
-  if (feed && ev.type === 'goal' && executive.plan) feed.thought(executive.plan.goal, executive.plan.thought);
+// Chat, the mod and OBS share one action-bound expression lifecycle.
+bus.on('event', (ev: { type: string; data?: Record<string, unknown> }) => {
+  if (feed && ev.type === 'expression_changed') feed.thought(String(ev.data?.goal ?? ''), String(ev.data?.thought ?? ''));
 });
 if (memory.migrated) bus.publish('memory', 'P1', `清理了 ${memory.migrated} 个旧版本留下的地标（当时的矿物位置是穿墙搜到的，不算亲眼所见）`);
 
@@ -328,6 +330,7 @@ function snapshot() {
     task: arbiter.info(),
     planVersion: arbiter.planVersion,
     exec: executive.snapshot(),
+    expression: actionChat.snapshot(),
     travel: travelStore(memory).snapshot(adapter.state().worldId),
     methods: { definitions: methods.list().slice(-12), gaps: methods.abilityGaps().slice(-8) },
     episodicMemory: episodic.snapshot(),
