@@ -3,7 +3,7 @@ import { findStation, isStation } from './stations.ts';
 import { DIR_OFFSETS, surroundings } from '../perception/surroundings.ts';
 import { climbUp } from './body.ts';
 import { hasPlaceable } from './survival.ts';
-import { DIRS } from '../perception/perception.ts';
+import { DIRS, dirName } from '../perception/perception.ts';
 import { dist3, sleep } from '../util.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
 
@@ -52,9 +52,23 @@ export async function glance(ctx: SkillCtx, until?: string): Promise<{ what: str
 const failedDirs = new Map<string, number>();
 const dirPenalty = (d: string) => (Date.now() - (failedDirs.get(d) ?? 0) < 120_000 ? 1 : 0);
 const SEGMENT = 32;
+
+/**
+ * 找东西的“一趟搜寻”：像玩家在沙漠里找树那样，认准一个大方向一直走，而不是走几十格就掉头。
+ * 记下这趟已经走了多远、离开始找的地方多远、朝哪个大方向，用来：不往已经搜过的地方走回头路、
+ * 越找不到走得越远，并在结果里告诉模型进展。找到目标或 10 分钟没再找就结束。
+ */
+interface Search { key: string; worldId: string; dim: string; start: { x: number; z: number }; walked: number; legs: number; heading: string | null; ts: number }
+const searches = new Map<string, Search>();
+const searchKey = (until: string) => [...new Set(until.split('|').map((t) => t.trim()).filter(Boolean).map((t) => /_(log|wood)$|^log$|^wood$/.test(t) ? 'log' : t))].sort().join('|');
+export function resetSearches() { searches.clear(); }
+const ANGLE: Record<string, number> = { N: 0, NE: 45, E: 90, SE: 135, S: 180, SW: 225, W: 270, NW: 315 };
+const turn = (a: string, b: string) => { const d = Math.abs((ANGLE[a] ?? 0) - (ANGLE[b] ?? 0)) % 360; return Math.min(d, 360 - d); };
+/** 树极少的群系：找木头要走很远、一直朝一个方向走到群系边缘 */
+const TREELESS = /desert|badlands|ocean|beach|snowy_plains|ice_spikes|mushroom|stony_shore/;
 export const explore: Skill<{ direction: string; distance: number; until?: string }> = {
   name: 'explore',
-  description: '朝新颖度最高（或指定）方向前进并沿途张望；until 一看见就停（可写 "cow|sheep" 或 "animal"）',
+  description: '朝新颖度最高（或指定）方向前进并沿途张望；until 一看见就停（可写 "cow|sheep" 或 "animal"）。接着找同一样东西时会认准大方向、不走回头路、越找走得越远',
   argsDoc: '{"direction"?: "auto|N|NE|E|SE|S|SW|W|NW", "distance"?: 24-160, "until"?: "<方块/生物，可用 | 分隔多个，或 animal>"}',
   timeoutMs: 90000,
   movement: true,
@@ -70,20 +84,63 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
     const s = adapter.state();
     if (!s.connected) return fail('NOT_CONNECTED', '未连接');
     const already = args.until ? sighted(ctx, args.until) : null;
-    if (already) return ok(`不用走远：${already.what} 就在 ${already.dist} 格外`, { found: already.what, dist: already.dist, moved: 0 });
+    const key = args.until ? searchKey(args.until) : '';
+    if (already) { searches.delete(key); return ok(`不用走远：${already.what} 就在 ${already.dist} 格外`, { found: already.what, dist: already.dist, moved: 0 }); }
+    // 这趟搜寻的进展（同一世界/维度、10 分钟内接着找同一样东西才算同一趟）
+    let search = key ? searches.get(key) : undefined;
+    if (search && (search.worldId !== s.worldId || search.dim !== s.dim || Date.now() - search.ts > 10 * 60_000)) { searches.delete(key); search = undefined; }
+    if (key && !search) { search = { key, worldId: s.worldId, dim: s.dim, start: { x: s.pos.x, z: s.pos.z }, walked: 0, legs: 0, heading: null, ts: Date.now() }; searches.set(key, search); }
+    const wood = key.split('|').includes('log');
+    const notes: string[] = [];
+    // 越找不到走得越远；在几乎没有树的群系里找木头，直接走远
+    let distance = args.distance;
+    if (search && search.legs >= 1) distance = Math.max(distance, Math.min(160, 64 + 32 * search.legs));
+    if (wood && s.biome && TREELESS.test(s.biome)) distance = 160;
+    // 沿整条路线看去过多少（不只看终点）：已经搜过的路线就别再走
+    const visitedAlong = (dx: number, dz: number) => {
+      let seen = 0, n = 0;
+      for (let d = 16; d <= distance; d += 16) { n++; if (memory.chunkVisits(s.dim, s.pos.x + dx * d, s.pos.z + dz * d) > 0) seen++; }
+      return n ? seen / n : 0;
+    };
     const ranked = Object.entries(DIRS)
-      .map(([d, [dx, dz]]) => ({ d, dx, dz, n: memory.novelty(s.dim, s.pos.x + dx * args.distance, s.pos.z + dz * args.distance) + Math.random() * 0.05 - dirPenalty(d) }))
+      .map(([d, [dx, dz]]) => {
+        const visited = visitedAlong(dx, dz);
+        // 认准一个大方向：离上一趟方向越远越扣分，掉头（≥135°）扣得最多
+        const momentum = search?.heading ? -turn(d, search.heading) / 180 * 0.6 : 0;
+        return { d, dx, dz, visited, n: memory.novelty(s.dim, s.pos.x + dx * distance, s.pos.z + dz * distance) * 0.5 + (1 - visited) + momentum + Math.random() * 0.05 - dirPenalty(d) };
+      })
       .sort((a, b) => b.n - a.n);
-    const order = args.direction === 'AUTO' ? ranked : [ranked.find((r) => r.d === args.direction)!, ...ranked.filter((r) => r.d !== args.direction)];
+    let wanted = args.direction;
+    if (wanted !== 'AUTO' && search && search.legs >= 1) {
+      const asked = ranked.find((r) => r.d === wanted)!;
+      if (asked.visited >= 0.6) {
+        // 要去的方向大半都搜过了：换成离它最近、还没怎么去过的方向（别在搜过的地方绕圈）
+        const alt = ranked.filter((r) => r.visited < 0.4).sort((a, b) => turn(a.d, wanted) - turn(b.d, wanted) || b.n - a.n)[0];
+        if (alt) { notes.push(`${wanted} 方向这一路大多已经走过（没看到 ${args.until}），改往 ${alt.d}`); wanted = alt.d; }
+      }
+    }
+    const order = wanted === 'AUTO' ? ranked : [ranked.find((r) => r.d === wanted)!, ...ranked.filter((r) => r.d !== wanted)];
     const chunksBefore = memory.visitedChunkCount;
     const start = s.pos;
     const movedNow = () => Math.round(Math.hypot(adapter.state().pos.x - start.x, adapter.state().pos.z - start.z));
-    const done = (dir: string, partial: boolean) => ok(`向 ${dir} 探索${partial ? '了' : ''} ${movedNow()} 格${partial ? '（未完全到达）' : ''}，新区块 +${memory.visitedChunkCount - chunksBefore}`, { dir, moved: movedNow() });
-    const found = (dir: string, f: { what: string; dist: number }) => ok(`向 ${dir} 走了 ${movedNow()} 格，看见 ${f.what}（${f.dist} 格外），停下`, { dir, moved: movedNow(), found: f.what, dist: f.dist });
+    // 这一趟没找到：记下进展，告诉模型已经找了多远、离起点多远、朝哪个大方向，并给出像玩家那样的建议
+    const progressNote = (dir: string) => {
+      if (!search) return notes.length ? `（${notes.join('；')}）` : '';
+      search.walked += movedNow(); search.legs++; search.heading = dir; search.ts = Date.now();
+      const here = adapter.state().pos;
+      const net = Math.round(Math.hypot(here.x - search.start.x, here.z - search.start.z));
+      const netDir = net >= 16 ? dirName(here.x - search.start.x, here.z - search.start.z) : '';
+      const tips = [...notes, `为找 ${args.until} 这趟已经走了 ${search.walked} 格，离开始找的地方 ${net} 格${netDir ? `（朝 ${netDir}）` : ''}`];
+      if (search.legs >= 2 && net < search.walked * 0.5) tips.push('一直在附近绕：认准一个方向（explore 用 auto 或同一方向）一口气走远');
+      if (wood && s.biome && TREELESS.test(s.biome)) tips.push(`${s.biome} 里几乎没有树：沿同一方向一直走到群系边缘（看见草地、森林或河流）`);
+      return `（${tips.join('；')}）`;
+    };
+    const done = (dir: string, partial: boolean) => ok(`向 ${dir} 探索${partial ? '了' : ''} ${movedNow()} 格${partial ? '（未完全到达）' : ''}，新区块 +${memory.visitedChunkCount - chunksBefore}${progressNote(dir)}`, { dir, moved: movedNow(), ...(search ? { search: { walked: search.walked, legs: search.legs } } : {}) });
+    const found = (dir: string, f: { what: string; dist: number }) => { searches.delete(key); return ok(`向 ${dir} 走了 ${movedNow()} 格，看见 ${f.what}（${f.dist} 格外），停下`, { dir, moved: movedNow(), found: f.what, dist: f.dist }); };
     let seen: { what: string; dist: number } | null = null;
     // 边走边看：每段路上持续检查目标是否进入视野，一旦看见就停下（像人一样看到树就不再往前走）
     const prog = setInterval(() => {
-      ctx.progress(Math.min(1, movedNow() / args.distance));
+      ctx.progress(Math.min(1, movedNow() / distance));
       if (args.until && !seen) {
         ctx.senses.refresh();
         seen = sighted(ctx, args.until);
@@ -93,13 +150,13 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
     let stopWalk: AbortController | null = null;
     try {
       for (const cand of order.slice(0, 2)) {
-        const tx = start.x + cand.dx * args.distance;
-        const tz = start.z + cand.dz * args.distance;
-        ctx.progress(0, `向 ${cand.d} 探索 ${args.distance} 格${args.until ? `，留意 ${args.until}` : ''}`);
+        const tx = start.x + cand.dx * distance;
+        const tz = start.z + cand.dz * distance;
+        ctx.progress(0, `向 ${cand.d} 探索 ${distance} 格${args.until ? `，留意 ${args.until}` : ''}`);
         try {
-          const segments = Math.max(1, Math.ceil(args.distance / SEGMENT));
+          const segments = Math.max(1, Math.ceil(distance / SEGMENT));
           for (let k = 1; k <= segments; k++) {
-            const f = Math.min(1, (k * SEGMENT) / args.distance);
+            const f = Math.min(1, (k * SEGMENT) / distance);
             stopWalk = new AbortController();
             const walk = AbortSignal.any([signal, stopWalk.signal]);
             try {
@@ -118,8 +175,8 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
         } catch (e) {
           if (isAbort(e)) throw e;
           const moved = movedNow();
-          if (moved < args.distance * 0.3) failedDirs.set(cand.d, Date.now());
-          if (moved >= args.distance * 0.5) return done(cand.d, true);
+          if (moved < distance * 0.3) failedDirs.set(cand.d, Date.now());
+          if (moved >= distance * 0.5) return done(cand.d, true);
           if (codeFromError(e) === 'TIMEOUT') return fail('TIMEOUT', `向 ${cand.d} 探索超时，仅前进 ${moved} 格`);
           // 换一个方向再试一次
         }
