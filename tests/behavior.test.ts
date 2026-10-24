@@ -110,7 +110,7 @@ test('shelter：往下挖三格，在地表封顶并留下两格头部空间', a
 test('build：材料不够时报出需要多少；够了就建成并设为基地', async () => {
   const a = new FakeAdapter();
   a.inv.set('oak_planks', 10);
-  let r = await runSkill(a, 'build', { blueprint: 'hut' });
+  let r = await runSkill(a, 'build', { blueprint: 'hut', prefab: true });
   assert.equal(r.o.result.failureCode, 'MISSING_MATERIALS');
   assert.match(r.o.result.summary, /缺少/);
   assert.deepEqual(Object.keys(r.o.result.data!.missingMaterials as object).sort(), ['cobblestone', 'glass', 'oak_door']);
@@ -119,7 +119,7 @@ test('build：材料不够时报出需要多少；够了就建成并设为基地
   a.inv.set('cobblestone', 180);
   a.inv.set('glass', 3);
   a.inv.set('oak_door', 1);
-  r = await runSkill(a, 'build', { blueprint: 'hut' });
+  r = await runSkill(a, 'build', { blueprint: 'hut', prefab: true });
   assert.equal(r.o.result.status, 'succeeded', r.o.result.summary);
   assert.ok(r.memory.landmarks().some((l) => l.label === '我的hut_5x5'));
   assert.ok(r.memory.base());

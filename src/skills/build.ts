@@ -12,6 +12,7 @@ import type { WorldMemory } from '../memory/store.ts';
 import { sleep as delay, throwIfAborted } from '../util.ts';
 import { canSleepAt } from '../perception/perception.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill } from './types.ts';
+import { compileDesign, DESIGN_EXAMPLE } from '../building/design.ts';
 
 export const BLUEPRINTS = {
   hut: { description: '5×5 带木门、玻璃窗和阶梯坡顶的小屋' },
@@ -97,13 +98,16 @@ async function restoreStations(ctx: Parameters<Skill['run']>[0], project: Buildi
 
 export const build: Skill<BuildArgs> = {
   name: 'build',
-  description: 'origin 可省略：会自动在附近找干燥平整的空地（给了 origin 但那块地挨水/是坡地，也会就近换地方）。参数化施工：可选尺寸、材料、平顶/阶梯坡顶、门窗、工作台/熔炉/箱子/照明。先整地（清掉占地里的草、花、树和凸起的土石，填平小坑），再勘察地基、核算分材料缺口，分阶段施工；必须逐格及通行验收才算建成。返回 projectId；中断后用该 ID 重新观察并续建，inspect 只检查，repair 修复有档案的建筑。spec.components 支持精确坐标、方块状态、功能标签和施工依赖的组合设计；未提供底层状态能力时明确报错。',
-  argsDoc: '{"blueprint"?:"hut|big_hut|pillar|wall|custom", "spec"?:{"name":"住宅","purpose":"庇护所","width":5,"depth":5,"height":3,"roof":"flat|gable","palette"?:{"foundation":"cobblestone","wall":"oak_planks","roof":"oak_planks","window":"glass","door":"oak_door"},"windows"?:true,"door"?:true,"facilities"?:["crafting_table","furnace","chest","torch"],"budget"?:512,"layout"?:"house|custom","components"?:[{"pos":{"x":0,"y":0,"z":0},"name":"cobblestone","properties"?:{},"phase"?:"frame","tags"?:[],"dependsOn"?:[]}]}, "projectId"?:"已有作品ID", "mode"?:"build|inspect|repair", "origin"?:{"x":0,"y":64,"z":0}, "rotation"?:0|90|180|270, "reason"?:"设计/改造原因", "cells"?:[[0,0,0]]}',
+  description: '自己设计并建造：spec.design 用字符画分层画出每格放什么（legend 字符→方块，layers 从地板往上，"." 留空，门写下半格），想要什么样就画什么样。程序负责选址（不给 origin 会在附近找干燥平地并整平；给的地方不合适会就近换）、算材料缺口、分阶段施工、逐格验收；返回作品 ID，中断后用 projectId 续建，inspect 检查、repair 修补。',
+  argsDoc: '{"spec":{"name":"林边小屋","design":{"legend":{"C":"cobblestone","P":"oak_planks","G":"glass","D":"oak_door",".":"air"},"layers":[["CCCCC",…],["PPDPP","P...P",…],…]}}, "projectId"?:"已有作品ID", "mode"?:"build|inspect|repair", "origin"?:{"x":0,"y":64,"z":0}, "rotation"?:0|90|180|270, "reason"?:"设计/改造原因"}',
   timeoutMs: 600000,
   movement: true,
   validate(raw, adapter) {
     const a = obj(raw);
-    const blueprint = String(a.blueprint ?? 'hut');
+    const blueprint = String(a.blueprint ?? (a.spec ? 'custom' : 'hut'));
+    // 房子由自己设计（spec.design 字符画），不再从预制蓝图里挑；prefab 只给兼容规则模式和测试用
+    if (!a.spec && !a.projectId && ['hut', 'big_hut'].includes(blueprint) && a.prefab !== true && (a.mode ?? 'build') === 'build')
+      return { ok: false, error: `房子要自己设计：写 spec={"name":"…","design":{legend,layers}}。layers 从下往上（第 0 层地板），每层的行从前（北）到后，一个字符一个方块，"." 留空、空格不管，门只写下半格。例如 spec.design=${DESIGN_EXAMPLE}` };
     if (!Object.hasOwn(BLUEPRINTS, blueprint) && blueprint !== 'custom') return { ok: false, error: '未知蓝图；可用 hut/big_hut/pillar/wall/custom' };
     if (a.projectId !== undefined && (typeof a.projectId !== 'string' || !a.projectId.trim() || a.projectId.length > 100)) return { ok: false, error: 'projectId 需要有效作品 ID' };
     if (!['build', 'inspect', 'repair'].includes(a.mode ?? 'build')) return { ok: false, error: 'mode 支持 build/inspect/repair' };
@@ -228,6 +232,8 @@ export const build: Skill<BuildArgs> = {
         const left = stowed.filter((k) => !back.includes(k));
         notes.push(`占地里自己的 ${stowed.join('、')} 先收进了背包${back.length ? `，盖完放回了房子旁边（${back.join('、')}）` : ''}${left.length ? `，${left.join('、')} 还在背包里，要用时会再放下` : ''}`);
       }
+      // 自己设计的房子：把设计上的问题告诉模型（不影响验收），下一版可以画得更好
+      if (spec.design) { try { const w = compileDesign(spec.design).warnings; if (w.length) notes.push(`设计提示：${w.join('；')}`); } catch { /* 已经编译过，不会到这里 */ } }
       const noteText = notes.length ? `${notes.join('；')}。` : '';
       if (!result.inspection.complete) {
         const missing = Object.entries(result.missingMaterials).map(([name, count]) => `${name}×${count}`).join('，');

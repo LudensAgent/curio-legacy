@@ -331,10 +331,10 @@ function baseRule(p: Percept, memory?: WorldMemory): Record<string, unknown> {
       }
       case 'home': {
         const need = 71;
-        if (st.blocks >= need) return mk('材料够了，盖一间小屋当家，晚上就不用挖坑了。', '建造小屋', 'build', [{ skill: 'build', args: { blueprint: 'hut' } }]);
+        if (st.blocks >= need) return mk('材料够了，盖一间小屋当家，晚上就不用挖坑了。', '建造小屋', 'build', [{ skill: 'build', args: { blueprint: 'hut', prefab: true } }]);
         if (st.blocks + st.logs * 3 >= need) {
           const n = Math.min(64, need - (st.blocks - st.logs) + 4);
-          return mk('原木够盖房子了，先做成木板再盖。', '建造小屋', 'build', [{ skill: 'craft', args: { item: plankName, count: n } }, { skill: 'build', args: { blueprint: 'hut' } }]);
+          return mk('原木够盖房子了，先做成木板再盖。', '建造小屋', 'build', [{ skill: 'craft', args: { item: plankName, count: n } }, { skill: 'build', args: { blueprint: 'hut', prefab: true } }]);
         }
         if (logNearby) return mk('想盖个小屋，得先多砍点木头。', '为小屋备料', 'gather', [{ skill: 'gather', args: { block: 'log', count: Math.min(24, Math.ceil((need - st.blocks) / 3) + 1) } }]);
         return null;

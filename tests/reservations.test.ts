@@ -124,7 +124,7 @@ test('build preflight cannot spend another deferred project reserve and cancelle
   memory.setWorld(adapter.worldId); memory.saveProject(a); memory.saveProject(b);
   adapter.inv.set('cobblestone', 200); adapter.inv.set('glass', 3); adapter.inv.set('oak_door', 1);
   reservationsFor(memory).reserve(owner(a), [{ name: 'cobblestone', count: 190 }], adapter.state(), memory.projects());
-  const validated = build.validate({ blueprint: 'hut', rotation: 0, origin: { x: 3, y: 64, z: 3 } }, adapter);
+  const validated = build.validate({ blueprint: 'hut', prefab: true, rotation: 0, origin: { x: 3, y: 64, z: 3 } }, adapter);
   assert.equal(validated.ok, true);
   if (validated.ok) {
     const result = await build.run(context(adapter, memory), validated.args);

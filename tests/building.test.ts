@@ -307,7 +307,7 @@ test('already cancelled building and archive tools cannot create designs or feed
   const adapter = new BuildingWorld(), memory = new WorldMemory(null), controller = new AbortController();
   controller.abort();
   const context = ctx(adapter, memory, controller.signal), archive = buildingArchiveFor(memory);
-  const args = build.validate({ blueprint: 'hut' }, adapter);
+  const args = build.validate({ blueprint: 'hut', prefab: true }, adapter);
   assert.equal(args.ok, true);
   if (args.ok) await assert.rejects(build.run(context, args.args), AbortedError);
   assert.deepEqual(archive.list(), []);
@@ -385,7 +385,7 @@ test('archive retains version reasons, separate user/agent feedback and comparis
 
 test('building skill never creates a home for incomplete work and supports real custom components', async () => {
   const adapter = new BuildingWorld(), context = ctx(adapter);
-  const validated = build.validate({ blueprint: 'hut', origin: { x: 3, y: 64, z: 3 }, rotation: 0 }, adapter);
+  const validated = build.validate({ blueprint: 'hut', prefab: true, origin: { x: 3, y: 64, z: 3 }, rotation: 0 }, adapter);
   assert.equal(validated.ok, true);
   if (!validated.ok) return;
   let result = await build.run(context, validated.args);

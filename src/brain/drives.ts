@@ -1,5 +1,6 @@
 import type { WorldMemory } from '../memory/store.ts';
 import type { Percept } from '../perception/perception.ts';
+import { buildingArchiveFor } from '../skills/build.ts';
 
 /**
  * 游玩欲望（内在动机）：把“像真人一样想玩什么”量化成几个驱动力，交给 LLM 和规则目标使用。
@@ -51,7 +52,9 @@ export function computeDrives(p: Percept, memory: WorldMemory): { drives: Drive[
   const dusk = p.time.phase === 'dusk';
   const hostiles = p.nearby.hostile.length;
   const animals = (p.vision?.seen_entities ?? []).filter((e) => FOOD_ANIMALS.includes(e.name));
-  const homeBuilt = memory.landmarks().some((l) => l.label.startsWith('我的hut') || l.label.startsWith('我的big_hut'));
+  // 有没有自己的房子：看建筑档案里是否有验收通过的作品（房子是自己设计的，名字不固定）
+  const homeBuilt = (() => { try { return buildingArchiveFor(memory as any).list().some((p) => p.status === 'complete' && (!p.worldId || p.worldId === memory.worldId)); } catch { return false; } })()
+    || memory.landmarks().some((l) => l.label.startsWith('我的hut') || l.label.startsWith('我的big_hut'));
   const bedPlaced = memory.landmarks().some((l) => l.label === '我的床');
   const recent = memory.recentGoals(6);
   const sameTypeStreak = (() => {
@@ -77,7 +80,7 @@ export function computeDrives(p: Percept, memory: WorldMemory): { drives: Drive[
       drive: 'rest',
       level: night ? 0.75 : 0.5,
       why: night ? '天黑了，怪物在外面游荡' : '天快黑了',
-      suggest: st.hasBed || bedPlaced ? 'sleep（有床直接睡过夜）' : homeBuilt ? 'goto base 回小屋' : st.blocks >= 1 ? 'shelter；有材料的话白天先 build 一个 hut' : '尽快收集几个方块以便 shelter',
+      suggest: st.hasBed || bedPlaced ? 'sleep（有床直接睡过夜）' : homeBuilt ? 'goto base 回小屋' : st.blocks >= 1 ? 'shelter；有材料的话白天自己设计一间小屋 build' : '尽快收集几个方块以便 shelter',
     });
   }
   // 亮度：暗处看不清、会刷怪 → 插火把；没有火把就做；没煤就去挖煤
@@ -117,7 +120,7 @@ export function computeDrives(p: Percept, memory: WorldMemory): { drives: Drive[
     const need = 71;
     const enough = st.blocks + st.logs * 3 >= need;
     const woodAround = p.nearby.resources.some((r) => r.block.endsWith('_log'));
-    out.push({ drive: 'home', level: enough ? 0.65 : woodAround ? 0.6 : 0.45, why: '还没有自己的房子，晚上只能挖坑', suggest: st.blocks + st.logs * 3 >= need ? 'build {blueprint:"hut"}' : `先备 ${need} 个方块（约 ${Math.ceil((need - st.blocks) / 4)} 个原木做木板）再 build hut` });
+    out.push({ drive: 'home', level: enough ? 0.65 : woodAround ? 0.6 : 0.45, why: '还没有自己的房子，晚上只能挖坑', suggest: st.blocks + st.logs * 3 >= need ? '自己设计一间小屋：build {spec:{name, design:{legend, layers}}}' : `先备 ${need} 个方块（约 ${Math.ceil((need - st.blocks) / 4)} 个原木做木板）再自己设计一间小屋 build` });
   }
   if (!st.hasBed && !bedPlaced) {
     const sheep = animals.some((a) => a.name === 'sheep');

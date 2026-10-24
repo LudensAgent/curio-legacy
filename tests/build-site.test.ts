@@ -40,7 +40,7 @@ test('build 不给 origin：附近都是水时 NOT_FOUND 并说明原因和方�
   pool(w, 40);
   const ctx = makeCtx(w);
   try {
-    const v = build.validate({ blueprint: 'hut' }, w);
+    const v = build.validate({ blueprint: 'hut', prefab: true }, w);
     assert.ok(v.ok);
     if (!v.ok) return;
     const r = await build.run(ctx, v.args);
@@ -59,7 +59,7 @@ test('build 不自动接着盖地基有问题的工地，换块地另起', async
     const bad = archive.design({ worldId: w.worldId, dimension: 'overworld', origin: { x: 2, y: 64, z: 2 }, rotation: 0, spec, materials: materialCost(compileBuilding(spec).cells) });
     archive.inspect(bad.id, { at: Date.now(), complete: false, checked: 1, defects: [{ cellId: '0,-2,0', pos: { x: 2, y: 62, z: 2 }, kind: 'terrain', expected: '地基', actual: 'water' }], functions: {} });
     assert.match(terrainProblem(archive.get(bad.id)!) ?? '', /water/);
-    const v = build.validate({ blueprint: 'hut' }, w);
+    const v = build.validate({ blueprint: 'hut', prefab: true }, w);
     if (!v.ok) throw new Error(v.error);
     const r = await build.run(ctx, v.args);
     assert.notEqual(r.data?.projectId, bad.id);
@@ -89,7 +89,7 @@ test('占地里自己的工作台：先收进背包，盖完放回房子旁边',
     rememberStation(ctx, 'crafting_table', table);
     const bp = compileBuilding(spec);
     for (const [name, count] of Object.entries(materialCost([...bp.cells, ...planScaffolding(bp)]))) w.inv.set(name, count + 4);
-    const v = build.validate({ blueprint: 'hut', origin, rotation: 0 }, w);
+    const v = build.validate({ blueprint: 'hut', prefab: true, origin, rotation: 0 }, w);
     if (!v.ok) throw new Error(v.error);
     const r = await build.run(ctx, v.args);
     assert.equal(r.status, 'succeeded', r.summary);
@@ -121,7 +121,7 @@ test('给了 origin 但那块地挨水：就近改址并说明；同 origin 的�
     for (let x = 0; x <= 6; x++) for (let z = 0; z <= 6; z++) w.setBlock({ x, y: 63, z }, 'water');
     const bad = archive.design({ worldId: w.worldId, dimension: 'overworld', origin, rotation: 0, spec, materials: materialCost(compileBuilding(spec).cells) });
     archive.inspect(bad.id, { at: Date.now(), complete: false, checked: 1, defects: [{ cellId: 's', pos: origin, kind: 'terrain', expected: '地面', actual: 'air' }], functions: {} });
-    const v = build.validate({ blueprint: 'hut', origin, rotation: 0 }, w);
+    const v = build.validate({ blueprint: 'hut', prefab: true, origin, rotation: 0 }, w);
     if (!v.ok) throw new Error(v.error);
     const r = await build.run(ctx, v.args);
     assert.notEqual(r.data?.projectId, bad.id);
@@ -149,7 +149,7 @@ test('附近没有现成平地：挑整地量最少的坡地，铲平后照样�
     assert.ok(s.best!.cut > 0, JSON.stringify(s.best));
     const bp = compileBuilding(spec);
     for (const [name, count] of Object.entries(materialCost([...bp.cells, ...planScaffolding(bp)]))) w.inv.set(name, count + 8);
-    const v = build.validate({ blueprint: 'hut' }, w);
+    const v = build.validate({ blueprint: 'hut', prefab: true }, w);
     if (!v.ok) throw new Error(v.error);
     const r = await build.run(ctx, v.args);
     assert.equal(r.status, 'succeeded', r.summary);
@@ -180,7 +180,7 @@ test('脚手架位置上有一丛草：顺手清掉照样盖；脚下的草地�
     for (const [name, count] of Object.entries(materialCost([...bp.cells, ...planScaffolding(bp)]))) w.inv.set(name, count + 8);
     const origin = { x: 2, y: 64, z: 2 };
     for (const c of planScaffolding(bp).filter((c) => c.pos.y === 0)) w.setBlock(rotatePosition(c.pos, origin, 0), 'grass');
-    const v = build.validate({ blueprint: 'hut', origin, rotation: 0 }, w);
+    const v = build.validate({ blueprint: 'hut', prefab: true, origin, rotation: 0 }, w);
     if (!v.ok) throw new Error(v.error);
     const r = await build.run(ctx, v.args);
     assert.equal(r.status, 'succeeded', r.summary);

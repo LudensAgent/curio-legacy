@@ -1,4 +1,5 @@
 import type { Vec3Like } from '../adapter/types.ts';
+import { compileDesign, type DesignInput } from './design.ts';
 
 export type Rotation = 0 | 90 | 180 | 270;
 export type BuildingPhase = 'foundation' | 'frame' | 'enclosure' | 'roof' | 'openings' | 'facilities';
@@ -27,6 +28,8 @@ export interface BuildingSpec {
   layout: 'house' | 'custom';
   /** Composable exact parts may extend/replace generated house cells, or define a whole custom layout. */
   components: BuildingComponent[];
+  /** 模型自己画的分层设计（字符画）；有它时 components 由它编译而来 */
+  design?: { legend: Record<string, string>; layers: string[][] };
 }
 export interface BuildingCell {
   id: string;
@@ -67,11 +70,19 @@ export function normalizeSpec(raw: unknown): BuildingSpec {
     const wood = WOOD_TYPES.find((w) => name.startsWith(`${w}_`)); // dark_oak 排在 oak 前面，先匹配
     palette.door = `${wood ?? 'oak'}_door`;
   }
+  // 模型自己画的分层设计：编译成精确的方块清单（自定义布局），尺寸由设计本身决定
+  let fromDesign: ReturnType<typeof compileDesign> | null = null;
+  if (input.design !== undefined) {
+    fromDesign = compileDesign(input.design as DesignInput);
+    input.layout = 'custom';
+    input.width = fromDesign.width; input.depth = fromDesign.depth; input.height = fromDesign.height;
+    input.name ??= '自己设计的房子'; input.purpose ??= '住处';
+  }
   const spec = { ...DEFAULT_SPEC, ...input, palette, facilities: input.facilities ?? [] } as BuildingSpec;
   if (typeof spec.name !== 'string' || !spec.name.trim() || spec.name.length > 100) throw new Error('name 需要 1-100 字符');
   if (typeof spec.purpose !== 'string' || !spec.purpose.trim() || spec.purpose.length > 300) throw new Error('purpose 需要 1-300 字符');
   for (const field of ['width', 'depth', 'height', 'maxFoundationDepth', 'budget'] as const) {
-    const [min, max] = field === 'height' ? [3, 6] : field === 'maxFoundationDepth' ? [1, 8] : field === 'budget' ? [1, 4096] : [5, 11];
+    const [min, max] = field === 'height' ? (fromDesign ? [2, 8] : [3, 6]) : field === 'maxFoundationDepth' ? [1, 8] : field === 'budget' ? [1, 4096] : fromDesign ? [3, 11] : [5, 11];
     if (!Number.isInteger(spec[field]) || spec[field] < min || spec[field] > max) throw new Error(`${field} 需要 ${min}-${max} 的整数`);
   }
   if (!['flat', 'gable'].includes(spec.roof)) throw new Error('roof 只支持 flat/gable');
@@ -82,8 +93,8 @@ export function normalizeSpec(raw: unknown): BuildingSpec {
   if (!DOOR.test(palette.door)) throw new Error('door 必须为可手动打开的木门');
   if (!Array.isArray(spec.facilities) || spec.facilities.length > 4 || new Set(spec.facilities).size !== spec.facilities.length || spec.facilities.some((f) => !['crafting_table', 'furnace', 'chest', 'torch'].includes(f))) throw new Error('facilities 支持不重复的 crafting_table/furnace/chest/torch');
   if (!['house', 'custom'].includes(spec.layout)) throw new Error('layout 支持 house/custom');
-  if (!Array.isArray(spec.components) || spec.components.length > 150 || spec.layout === 'custom' && !spec.components.length) throw new Error('components 最多 150 项；custom 至少需要一项');
-  const components: BuildingComponent[] = spec.components.map((c: any) => {
+  if (!fromDesign && (!Array.isArray(spec.components) || spec.components.length > 150 || spec.layout === 'custom' && !spec.components.length)) throw new Error('components 最多 150 项；custom 至少需要一项');
+  const components: BuildingComponent[] = fromDesign ? fromDesign.components : spec.components.map((c: any) => {
     if (!c || typeof c !== 'object' || !c.pos || [c.pos.x, c.pos.y, c.pos.z].some((v) => !Number.isInteger(v) || Math.abs(v) > 12) || typeof c.name !== 'string' || !BLOCK_NAME.test(c.name)) throw new Error('component 需要合法 name 和绝对值 ≤12 的整数 pos');
     if (c.properties !== undefined && (!c.properties || typeof c.properties !== 'object' || Array.isArray(c.properties) || Object.keys(c.properties).length > 16 || Object.values(c.properties).some((v) => !['string', 'number', 'boolean'].includes(typeof v)))) throw new Error('component.properties 需要简单方块状态对象');
     if (c.phase !== undefined && !PHASES.includes(c.phase)) throw new Error('component.phase 无效');
@@ -93,7 +104,8 @@ export function normalizeSpec(raw: unknown): BuildingSpec {
   });
   if (new Set(components.map((c) => cellKey(c.pos))).size !== components.length) throw new Error('components 坐标不能重复');
   // Keep a canonical shape: unknown input fields never leak into the persisted design.
-  return { name: spec.name.trim(), purpose: spec.purpose.trim(), width: spec.width, depth: spec.depth, height: spec.height, roof: spec.roof, palette, windows: spec.windows, door: spec.door, facilities: [...spec.facilities], maxFoundationDepth: spec.maxFoundationDepth, budget: spec.budget, layout: spec.layout, components };
+  const design = fromDesign ? { legend: Object.fromEntries(Object.entries((input.design as any).legend ?? {}).map(([k, v]) => [k, String(v)])), layers: (input.design as any).layers.map((l: unknown) => Array.isArray(l) ? l.map(String) : String(l).split(/[\n/|]/)) } : undefined;
+  return { name: spec.name.trim(), purpose: spec.purpose.trim(), width: spec.width, depth: spec.depth, height: spec.height, roof: spec.roof, palette, windows: spec.windows, door: spec.door, facilities: [...spec.facilities], maxFoundationDepth: spec.maxFoundationDepth, budget: spec.budget, layout: spec.layout, components, ...(design ? { design } : {}) };
 }
 
 export function rotatePosition(p: Vec3Like, origin: Vec3Like, rotation: Rotation): Vec3Like {
@@ -118,6 +130,13 @@ export function compileBuilding(spec: BuildingSpec): BuildingBlueprint {
     const cells: BuildingCell[] = spec.components.map((c) => ({ ...structuredClone(c), id: cellKey(c.pos) }));
     linkPairedCells(cells);
     validateDependencies(cells);
+    if (spec.design) {
+      // 自己设计的房子：标了 "." 的室内/通道要留空，站在屋里中央算“回到家”
+      const d = compileDesign(spec.design);
+      const taken = new Set(cells.map((c) => c.id));
+      const clearances = d.clearances.filter((p) => !taken.has(cellKey(p)));
+      return { spec, cells, clearances, home: { x: Math.floor(d.width / 2), y: 0, z: Math.floor(d.depth / 2) } };
+    }
     return { spec, cells, clearances: [] };
   }
   const cells: BuildingCell[] = [];

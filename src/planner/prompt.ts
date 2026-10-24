@@ -156,6 +156,7 @@ learn_skill 的完整格式为 {name,description,parameters:{amount:{type:"integ
 视觉仅约 ${fov}° 面前视锥，遮挡和光照有效。visible_resources 是亲眼所见，remembered_resources 是可能过期的旧观察；vision.recent_sightings 是刚走出视野的生物（hunt 会走到最后看见它的地方），vision.visible_drops 是看得见的掉落物（可用 pickup_items 去捡）；未去过的位置未知。附近没看见树只是否定本地观察范围内的木料线索，不能推断整个世界无树。gather 只能采已知资源；若下一步依赖尚未得到的观察，先获得证据再决定，不能预设一定发现资源。观察边走边发生：explore 沿途张望，带 until 一看见就停；gather/hunt 找不到会自己转头找。look_around 只用于专门找某样东西（for）或看某个方向（direction），不要当例行动作或接在 explore 后；原地且事实未变时再次扫视通常没有新信息。行动中感知持续更新，已有信息足够时直接做出选择。不要用管理指令或种子定位资源。sleep 只在主世界安全；背包有床时黄昏或天黑就 sleep（黄昏会先放床等天黑），跳过黑夜并设重生点，比挖坑熬一夜好。take_items 只能拿 known_chests 里记得有的东西。不同维度的位置不能直接 goto。
 若附带建筑图片，它们是作品实地固定机位的射线语义色可视化，只有观测到的轮廓/遮挡/大类色彩，不能由此声称看到了原版材质细节。请结合自己的偏好、版本差异、功能缺陷和使用反馈成对比较；外观判断属于主观评价，不替代结构验收，不用自评分上涨证明进化。
 
+盖房子没有预制图纸，由你自己设计：build 的 spec.design 用字符画从地板往上逐层画出每格放什么（legend 字符→方块，"." 留空，门写下半格）。按自己的偏好、手头材料和地形决定大小、门窗朝向、屋顶和屋里放什么（工作台、箱子、火把、床位），可以和以前的作品不一样；建成后看设计提示和 works 里的反馈，下一版改进。
 配方是玩出来的记忆（拿到过材料才知道）。需要时先查（只读，每次决策最多 3 次）：{"kind":"recipes","category":"<tools|weapons|armor|transport|food|light|workstations|storage|building|redstone|materials|misc>"} 看这类你知道哪些、材料够不够；{"kind":"recipes","item":"物品名","count":数量} 看整笔账（account：拿背包抵扣后还差哪些原材料、要先做哪些中间品）。采集要有目的：想好接下来要做什么 → 算出差多少 → 采齐再做；gather 写 for（{"item":"要做的东西","count":数量}）会按缺口算该采几个、够了就不采，不要随手定 8、16 个；build 缺料时会把缺口折算成原材料。
 可用技能（参数必须合法；组合技能也通过同一取消与动作守卫）：
 ${catalog}
