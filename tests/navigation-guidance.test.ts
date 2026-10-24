@@ -153,3 +153,38 @@ test('goto does not toggle a door again when the native approach has already ope
   assert.equal(use.mock.callCount(), 0);
   assert.equal(adapter.blockStateAt(door).properties.open, true);
 });
+
+test('a visible destination across water remains a dry-walking request and offers a boat after failure', async (t) => {
+  const adapter = start(), water = { x: 3, y: 64, z: 0 };
+  adapter.setBlock(water, 'water');
+  const ctx = makeCtx(adapter, { senses: {
+    navigationWaypoint: () => ({ x: 8.5, y: 64, z: 0.5 }),
+    knownBlocks: (names) => names.includes('water') ? [{ name: 'water', pos: water, dist: 3 }] : [],
+  } });
+  t.after(() => ctx.memory.close());
+  const walk = t.mock.method(adapter, 'moveTo', async (_target, opts) => {
+    assert.equal(opts.allowSwimming, false, 'a dry destination does not authorize swimming across the route');
+    throw new Error('No path on dry land');
+  });
+  const result = await goTo.run(ctx, { target: '8,64,0' });
+  assert.equal(result.status, 'failed');
+  assert.equal(walk.mock.callCount(), 1);
+  assert.equal(result.data?.waterAhead, true);
+  assert.match(result.summary, /boat/);
+  assert.equal(adapter.inWater, false);
+});
+
+test('visual waypoints reject submerged, newly hazardous and waterlogged landing cells', () => {
+  const adapter = start(), vision = new Vision(adapter);
+  vision.knownCount(); // Establish scope without a ray scan or movement simulation.
+  const floor = { x: 4, y: 63, z: 0 }, feet = { x: 4, y: 64, z: 0 };
+  (vision as any).visibleSurfaces.set('4,63,0', { name: 'grass_block', pos: floor, at: Date.now() });
+  const target = { x: 8, y: 64, z: 0 };
+  assert.ok(vision.navigationWaypoint(target, 12, []));
+  adapter.setBlock(feet, 'water');
+  assert.equal(vision.navigationWaypoint(target, 12, []), null, 'submerged ground is not a dry waypoint');
+  adapter.setBlock(feet, 'air'); adapter.setBlock(floor, 'magma_block');
+  assert.equal(vision.navigationWaypoint(target, 12, []), null, 'live floor overrides a stale safe surface name');
+  adapter.setBlock(floor, 'oak_slab'); adapter.blockProperties.set('4,63,0', { waterlogged: true, type: 'top' });
+  assert.equal(vision.navigationWaypoint(target, 12, []), null, 'waterlogged terrain is not certified dry');
+});

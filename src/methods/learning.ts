@@ -6,7 +6,7 @@ import type { WorldMemory } from '../memory/store.ts';
 import { evaluateCondition, observationReady, validateCondition } from '../projects/conditions.ts';
 import type { Condition } from '../projects/types.ts';
 import { SKILLS } from '../skills/index.ts';
-import { fail, ok, type Skill } from '../skills/types.ts';
+import { fail, isAbort, ok, type Skill, type SkillCtx, type SkillResult } from '../skills/types.ts';
 import { shortId, throwIfAborted } from '../util.ts';
 import { SMELTABLE } from '../skills/economy.ts';
 import { bindParameters, executeProgram, substitute, validateParameters, validateProgram, type Parameters, type Program } from './program.ts';
@@ -120,9 +120,9 @@ export function methodName(raw: unknown, fallback = 'learned'): string {
 
 /**
  * 简单格式 {name, description, steps:[{skill,args}]} → 方法库候选（顺序程序 + 自动推导的验收条件）。
- * 已经是完整格式（带 program）的原样返回；推不出验收条件时返回 macro，由调用方退回 SkillLibrary.learn。
+ * 已经是完整格式（带 program）的原样返回；显式组合默认可退回 macro，自动习惯可用 allowMacro=false 要求事实验收。
  */
-export function simpleToMethod(raw: unknown, adapter: Pick<GameAdapter, 'isKnownItem' | 'state'>, memory: WorldMemory):
+export function simpleToMethod(raw: unknown, adapter: Pick<GameAdapter, 'isKnownItem' | 'state'>, memory: WorldMemory, options: { allowMacro?: boolean } = {}):
   { kind: 'method'; method: Record<string, unknown> } | { kind: 'macro'; macro: { name: string; description: string; steps: SimpleStep[] } } | { kind: 'invalid'; error: string } {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { kind: 'invalid', error: 'learn_skill 须为对象' };
   const o = raw as Record<string, any>;
@@ -137,7 +137,9 @@ export function simpleToMethod(raw: unknown, adapter: Pick<GameAdapter, 'isKnown
   const name = methodName(o.name);
   const description = String(o.description ?? '').trim().slice(0, 200) || steps.map((st) => st.skill).join(' → ');
   const postcondition = derivePostcondition(steps, adapter, memory);
-  if (!postcondition) return { kind: 'macro', macro: { name, description, steps } };
+  if (!postcondition) return options.allowMacro === false
+    ? { kind: 'invalid', error: '自动习惯缺少可观测的验收条件，不能把执行成功直接记成已掌握的宏' }
+    : { kind: 'macro', macro: { name, description, steps } };
   return { kind: 'method', method: { name, description, program: { type: 'sequence', steps: steps.map((st) => ({ type: 'call', skill: st.skill, args: st.args ?? {} })) }, postcondition } };
 }
 
@@ -211,6 +213,7 @@ export class MethodLibrary {
     const parameters = validateParameters(raw.parameters, this.adapter);
     const bound = bindParameters(parameters, {});
     const program = validateProgram(raw.program, bound, this.adapter, this.memory, this.adapter.state());
+    if (flattenProgram(program).some((step) => step.skill === 'experiment_method')) throw new Error('试验入口不能嵌入方法程序；请直接组合底层动作，保留统一的调用与循环上限');
     if (!raw.postcondition) throw new Error('候选方法需要可观测的 postcondition，执行成功文字不能代替验收');
     validateCondition(bindRelative(substitute(raw.postcondition, bound), this.adapter.state()), this.adapter, this.memory, this.adapter.state());
     return { name: raw.name, description: raw.description.trim(), parameters, program, postcondition: structuredClone(raw.postcondition) };
@@ -263,6 +266,29 @@ export class MethodLibrary {
       if (message.includes('不可组合的底层技能')) this.recordGap(message, scope);
       return { ok: false, error: message };
     }
+  }
+
+  /** Propose and try one bounded program inside the caller's existing action ownership. */
+  async experiment(raw: unknown, parameters: unknown, ctx: SkillCtx): Promise<SkillResult> {
+    throwIfAborted(ctx.signal);
+    const proposed = this.propose(raw, { intentId: ctx.memory.currentIntent()?.id, projectId: ctx.memory.activeProject()?.id });
+    if (!proposed.ok) return fail('BAD_ARGS', `未保存试验：${proposed.error}`);
+    const definition = this.definitions.find((d) => d.version === proposed.version
+      && (proposed.name === `trial:${d.name}:v${d.version}` || proposed.name === `method:${d.name}`));
+    if (!definition) return fail('NOT_FOUND', '刚保存的方法版本已不可用');
+    const skill = this.toSkill(definition, true);
+    const validation = skill.validate({ parameters: parameters ?? {} }, ctx.adapter);
+    if (!validation.ok) return fail('BAD_ARGS', `候选已保存，但本次不能试验：${validation.error}`, {
+      methodName: skill.name, version: definition.version, methodStatus: definition.status, expected: definition.postcondition,
+    });
+    const result = await skill.run(ctx, validation.args);
+    throwIfAborted(ctx.signal);
+    const latest = definition.trials.at(-1);
+    return { ...result,
+      summary: `${result.summary}；${definition.status === 'verified' ? '该版本已通过两个情境的事实验收' : '该版本仍是候选，尚未晋升为已验证方法'}${result.status === 'failed' ? '；可保留同名并修订 program、参数或 postcondition 后再次试验' : ''}`,
+      data: { ...result.data, methodName: skill.name, version: definition.version, methodStatus: definition.status,
+        expected: result.data?.expected ?? definition.postcondition, trialStatus: latest?.status },
+    };
   }
 
   /**
@@ -365,7 +391,9 @@ export class MethodLibrary {
         const postcondition: Condition = validateCondition(bindRelative(substitute(definition.postcondition, args.parameters), beforeState), ctx.adapter, ctx.memory, beforeState);
         const before = evaluateCondition(postcondition, beforeState);
         if (!observationReady(beforeState)) return fail('NOT_CONNECTED', '方法试验需要有效观测');
-        const result = await executeProgram(definition.program, args.parameters, ctx);
+        let result: SkillResult;
+        try { result = await executeProgram(definition.program, args.parameters, ctx); }
+        catch (error) { if (isAbort(error)) throw error; result = fail('ERROR', error instanceof Error ? error.message : String(error)); }
         throwIfAborted(ctx.signal);
         const afterState: AgentState = ctx.adapter.state();
         const after = evaluateCondition(postcondition, afterState, beforeState.worldId);
@@ -380,9 +408,10 @@ export class MethodLibrary {
           this.save();
           if (status === 'verified') this.promote(definition.name, definition.version);
         }
-        if (result.status !== 'succeeded') return result;
-        if (!satisfied) return fail('MISSING_MATERIALS', '方法步骤结束，但真实观测未满足约定结果', { actual: after.actual });
-        return ok(`${trial ? '候选试验' : '方法'} ${definition.name} v${definition.version} 的当前事实条件成立`, { verified: definition.status === 'verified', actual: after.actual });
+        const facts = { verified: definition.status === 'verified', expected: postcondition, before: before.actual, actual: after.actual };
+        if (result.status !== 'succeeded') return { ...result, data: { ...result.data, ...facts } };
+        if (!satisfied) return fail('MISSING_MATERIALS', '方法步骤结束，但真实观测未满足约定结果', facts);
+        return ok(`${trial ? '候选试验' : '方法'} ${definition.name} v${definition.version} 的当前事实条件成立`, facts);
       },
     };
   }

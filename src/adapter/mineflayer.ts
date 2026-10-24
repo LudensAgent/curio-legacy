@@ -496,6 +496,18 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         movements.canDig = false; movements.allow1by1towers = false; movements.scafoldingBlocks = [];
       }
       if (opts.constructionSafe) movements.allowParkour = false;
+      if (opts.allowSwimming === false) {
+        const water = (block: any) => !!block && (block.liquid || movements.liquids.has(block.type)
+          || String(block.getProperties?.().waterlogged) === 'true');
+        movements.exclusionAreasStep = [...movements.exclusionAreasStep, (block: any) => water(block) ? 100 : 0];
+        movements.infiniteLiquidDropdownDistance = false;
+        const landingBlock = movements.getLandingBlock;
+        movements.getLandingBlock = function (...args: any[]) {
+          const landing = landingBlock.apply(this, args);
+          // Drop-down edges bypass exclusionAreasStep in installed Pathfinder.
+          return landing && !water(landing) && !water(this.getBlock(landing.position, 0, 1, 0)) ? landing : null;
+        };
+      }
       // Installed Pathfinder handles gates, but omits two-block wooden doors.
       // Keep the upper half out of the break list; crossing the closed lower
       // half must issue its ordinary useOne interaction before walking through.
@@ -970,14 +982,55 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (!block) return { ok: false, reason: 'UNLOADED' };
     const held = item ? this.invItem(item) : null;
     if (item && !held) return { ok: false, reason: 'NO_ITEM' };
-    await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos }, { signal, timeoutMs: 15000, constructionSafe: item === '' }), check);
-    if (held) await this.afterAction(() => b.equip(held, 'hand'), check);
-    else if (b.heldItem) {
+    await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos }, { signal, timeoutMs: 15000, constructionSafe: item === '', ...(item === '' ? { allowSwimming: false } : {}) }), check);
+    const current = b.blockAt(this.vec(pos));
+    if (!current || current.name !== block.name) return { ok: false, reason: 'TARGET_CHANGED' };
+    if (held) return this.afterAction(() => this.useItemOn(item, { kind: 'block', pos }, signal), check);
+    if (b.heldItem) {
       if (typeof b.unequip !== 'function' || b.inventory.emptySlotCount?.() === 0) return { ok: false, reason: 'NO_EMPTY_HAND' };
       await this.afterAction(() => b.unequip('hand'), check);
     }
-    await this.afterAction(() => b.activateBlock(block), check);
-    return { ok: true };
+    const changed = this.blockInteractionChange(current);
+    const beforeOpen = current.getProperties?.().open;
+    const toggled = () => {
+      const after = b.blockAt(this.vec(pos));
+      const open = after?.getProperties?.().open;
+      return after?.name === current.name && open !== undefined && String(open) !== String(beforeOpen);
+    };
+    await this.afterAction(() => raceAbort(b.activateBlock(current), signal, 3000, () => {}), check);
+    const confirmed = await this.waitForInteraction(beforeOpen === undefined ? changed : toggled, check);
+    return confirmed ? { ok: true, effectEvidence: { verified: true, changed: true, reasons: beforeOpen === undefined ? changed.reasons() : [`${current.name} 的 open 从 ${beforeOpen} 变为 ${b.blockAt(this.vec(pos))?.getProperties?.().open}`] } }
+      : { ok: false, reason: beforeOpen === undefined ? 'NO_EFFECT:方块和背包均未变化' : 'DOOR_STATE_UNCHANGED:门的开关状态没有变化', effectEvidence: { verified: true, changed: false, reasons: ['右键后没有确认目标状态变化'] } };
+  }
+
+  /** Sending a right-click packet is not evidence that the server accepted it. */
+  private async waitForInteraction(confirmed: () => boolean, check: (() => void) & { signal?: AbortSignal }, timeoutMs = 1200) {
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+      check();
+      if (confirmed()) return true;
+      if (Date.now() >= deadline) return false;
+      await this.afterAction(() => sleep(Math.min(50, deadline - Date.now()), check.signal), check);
+    }
+  }
+
+  private blockInteractionChange(block: any) {
+    const b = this.bot, window = b.currentWindow;
+    const cells = [[0, 0, 0], [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].map(([x, y, z]) => block.position.offset(x, y, z));
+    const blocks = () => JSON.stringify(cells.map((pos) => { const at = b.blockAt(pos); return at ? [at.name, at.stateId, at.getProperties?.()] : null; }));
+    const inventory = () => {
+      const counts = new Map<string, number>();
+      for (const item of b.inventory.items()) counts.set(item.name, (counts.get(item.name) ?? 0) + item.count);
+      return JSON.stringify([...counts].sort(([a], [c]) => a.localeCompare(c)));
+    };
+    const beforeBlocks = blocks(), beforeInventory = inventory(), beforeDamage = b.heldItem?.durabilityUsed;
+    const reasons = () => [
+      ...(blocks() !== beforeBlocks ? ['目标或相邻格的实际方块状态改变'] : []),
+      ...(inventory() !== beforeInventory ? ['背包物品数量改变'] : []),
+      ...(b.heldItem?.durabilityUsed !== beforeDamage ? ['手持工具耐久改变'] : []),
+      ...(b.currentWindow && b.currentWindow !== window ? ['服务器打开了交互窗口'] : []),
+    ];
+    return Object.assign(() => reasons().length > 0, { reasons });
   }
 
   async useItem(item: string, signal: AbortSignal, opts: UseItemOptions = {}): Promise<ActionResult> {
@@ -1669,7 +1722,44 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return true;
   }
 
-  async useItemOn(item: string, target: { kind: 'block'; pos: Vec3Like } | { kind: 'self' }, signal: AbortSignal): Promise<ActionResult & { spawned?: string }> {
+  private async placeItemAgainst(item: string, reference: any, check: (() => void) & { signal?: AbortSignal }): Promise<ActionResult & { placed?: Vec3Like }> {
+    const b = this.bot, count = () => b.inventory.items().filter((it: any) => it.name === item).reduce((sum: number, it: any) => sum + it.count, 0);
+    const empty = (pos: any) => ['air', 'cave_air', 'void_air'].includes(b.blockAt(pos)?.name);
+    const topOnly = /_(bed|door)$/.test(item);
+    const face = (topOnly ? [[0, 1, 0]] : [[0, 1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0]])
+      .map(([x, y, z]) => this.vec({ x, y, z })).find((side) => {
+        const dest = reference.position.plus(side), p = b.entity.position;
+        const overlapsPlayer = dest.x < p.x + 0.3 && dest.x + 1 > p.x - 0.3 && dest.z < p.z + 0.3 && dest.z + 1 > p.z - 0.3 && dest.y < p.y + 1.8 && dest.y + 1 > p.y;
+        return empty(dest) && !overlapsPlayer && (!item.endsWith('_door') || empty(dest.offset(0, 1, 0))) && this.canClickPlacementFace(reference, side);
+      });
+    if (!face) return { ok: false, reason: 'NO_PLACEMENT_FACE:看不见可点击且有空位的放置面，换个站位或目标方块', effectEvidence: { verified: true, changed: false, reasons: ['没有可点击的空置面，未发送放置动作'] } };
+    const dest = reference.position.plus(face), beforeCount = count();
+    const matches = () => {
+      const at = b.blockAt(dest), properties = at?.getProperties?.() ?? {};
+      const aliases = [item, item.replace(/torch$/, 'wall_torch'), item.replace(/_sign$/, '_wall_sign'), item.replace(/_hanging_sign$/, '_wall_hanging_sign')];
+      if (!at || !aliases.includes(at.name)) return false;
+      if (item.endsWith('_door')) {
+        const upper = b.blockAt(dest.offset(0, 1, 0));
+        const upperProperties = upper?.getProperties?.() ?? {};
+        return properties.half === 'lower' && upper?.name === item && upperProperties.half === 'upper'
+          && ['facing', 'hinge', 'open'].every((key) => String(upperProperties[key]) === String(properties[key]));
+      }
+      if (item.endsWith('_bed')) {
+        const offset = ({ north: [0, -1], east: [1, 0], south: [0, 1], west: [-1, 0] } as Record<string, number[]>)[String(properties.facing)];
+        const head = offset && b.blockAt(dest.offset(offset[0], 0, offset[1]));
+        return properties.part === 'foot' && head?.name === item && head.getProperties?.().part === 'head' && head.getProperties?.().facing === properties.facing;
+      }
+      return true;
+    };
+    await this.afterAction(() => raceAbort(b.placeBlock(reference, face), check.signal, 5000, () => {}), check);
+    const confirmed = await this.waitForInteraction(() => matches() && count() < beforeCount, check);
+    const reasons = [...(matches() ? [`${item} 已出现在 ${dest.x},${dest.y},${dest.z}${topOnly ? ' 且两部分完整' : ''}`] : []), ...(count() < beforeCount ? [`背包 ${item} 减少 ${beforeCount - count()}`] : [])];
+    const effectEvidence = { verified: true, changed: reasons.length > 0, reasons: reasons.length ? reasons : ['放置后预期方块与物品消耗均未出现'] };
+    if (!confirmed) return { ok: false, reason: matches() ? 'PLACEMENT_INVENTORY_UNCHANGED:没有确认放置物品的消耗' : 'PLACEMENT_NOT_CONFIRMED:目标位置没有出现完整的预期方块', effectEvidence };
+    return { ok: true, placed: { x: dest.x, y: dest.y, z: dest.z }, effectEvidence };
+  }
+
+  async useItemOn(item: string, target: { kind: 'block'; pos: Vec3Like } | { kind: 'self' }, signal: AbortSignal): Promise<ActionResult & { spawned?: string; placed?: Vec3Like }> {
     const check = this.actionCheckpoint(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
     const b = this.bot;
@@ -1677,32 +1767,37 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     try {
       if (target.kind === 'self') {
         await this.afterAction(async () => { b.activateItem(); await sleep(400, signal); b.deactivateItem(); }, check);
-        return { ok: true };
+        return { ok: true, effectEvidence: { verified: false, changed: false, reasons: ['已执行自用动作，尚未验证最终效果'] } };
       }
       const block = b.blockAt(this.vec(target.pos));
       if (!block) return { ok: false, reason: 'NO_BLOCK' };
       const Vec3 = require('vec3').Vec3;
+      if (this.mcData.blocksByName?.[item]) return await this.placeItemAgainst(item, block, check);
       // 放置实体类物品（船、矿车、盔甲架、刷怪蛋）：对着方块顶面放
       if (/_boat$|_raft$|_spawn_egg$|^armor_stand$|^end_crystal$/.test(item)) {
         // placeEntity 对船用 forceLook:'ignore' 再发 use_item：服务器按“当前视线”射线找水面，所以必须先看向目标水面，
         // 否则船会放到别处或根本放不下
         if (/_boat$|_raft$/.test(item)) await this.afterAction(() => b.lookAt(block.position.offset(0.5, ['water', 'bubble_column'].includes(block.name) ? 0.9 : 1, 0.5), true), check);
         const entity = await this.afterAction(() => raceAbort(b.placeEntity(block, new Vec3(0, 1, 0)), signal, 6000, () => {}), check);
-        return { ok: true, spawned: (entity as any)?.name ?? item };
+        if (typeof (entity as any)?.id !== 'number') return { ok: false, reason: 'ENTITY_NOT_SPAWNED:没有确认放置的实体出现', effectEvidence: { verified: false, changed: false, reasons: ['放置API未返回实际实体'] } };
+        return { ok: true, spawned: (entity as any)?.name ?? item, effectEvidence: { verified: true, changed: true, reasons: [`服务器返回新实体 ${(entity as any)?.name ?? item}`] } };
       }
       if (/_minecart$|^minecart$/.test(item)) {
+        const ids = new Set(Object.keys(b.entities ?? {}));
         await this.afterAction(() => b.activateBlock(block), check);
-        return { ok: true, spawned: 'minecart' };
+        const appeared = await this.waitForInteraction(() => Object.values(b.entities ?? {}).some((entity: any) => !ids.has(String(entity.id)) && /minecart/.test(entity.name) && entity.position.distanceTo(block.position) < 3), check);
+        return appeared ? { ok: true, spawned: 'minecart', effectEvidence: { verified: true, changed: true, reasons: ['目标附近实际出现新矿车'] } } : { ok: false, reason: 'ENTITY_NOT_SPAWNED:没有确认矿车出现', effectEvidence: { verified: true, changed: false, reasons: ['未出现新矿车'] } };
       }
       // 对着液体用（水桶装水/倒水等）：先看向液面再“使用物品”；其他情况按“对方块右键”
       const fluid = ['water', 'lava'].includes(block.name);
+      const changed = this.blockInteractionChange(block);
       await this.afterAction(() => b.lookAt(block.position.offset(0.5, fluid ? 0.9 : 0.5, 0.5), true), check);
       if (fluid) await this.afterAction(async () => { b.activateItem(); await sleep(250, signal); b.deactivateItem(); }, check);
       else await this.afterAction(() => b.activateBlock(block), check);
-      return { ok: true };
+      return await this.waitForInteraction(changed, check) ? { ok: true, effectEvidence: { verified: true, changed: true, reasons: changed.reasons() } } : { ok: false, reason: 'NO_EFFECT:目标方块、邻格和背包均未变化', effectEvidence: { verified: true, changed: false, reasons: ['目标、邻格和背包均未变化'] } };
     } catch (e: any) {
       if (e instanceof AbortedError) throw e;
-      return { ok: false, reason: String(e?.message ?? e) };
+      return { ok: false, reason: String(e?.message ?? e), effectEvidence: { verified: false, changed: false, reasons: ['交互异常，未能确认效果'] } };
     }
   }
 

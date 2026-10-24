@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { runtime } from './runtime.ts';
 import { MineflayerAdapter } from './adapter/mineflayer.ts';
 import { Arbiter } from './arbiter/arbiter.ts';
 import { Executive } from './brain/executive.ts';
@@ -88,11 +89,11 @@ if (live && audience) {
 
 /**
  * 学一个新组合：自主模式下进方法库（简单格式自动补上可观测的验收条件，试验两种情境后才算学会）；
- * 推不出验收条件的退回为普通组合技能（宏）。
+ * 自动习惯必须有可观测验收条件；模型显式提出的组合可另存为宏。
  */
 function learnSkill(raw: unknown, origin: 'model' | 'habit'): { ok: boolean; name?: string; error?: string } {
   if (!planner.autonomous) return library.learn(raw);
-  const converted = simpleToMethod(raw, adapter, memory);
+  const converted = simpleToMethod(raw, adapter, memory, { allowMacro: origin !== 'habit' });
   if (converted.kind === 'invalid') return { ok: false, error: converted.error };
   if (converted.kind === 'macro') {
     const r = library.learn(converted.macro);
@@ -101,6 +102,20 @@ function learnSkill(raw: unknown, origin: 'model' | 'habit'): { ok: boolean; nam
   }
   return methods.propose(converted.method, { intentId: memory.currentIntent()?.id, projectId: memory.activeProject()?.id });
 }
+
+// Preserve old records, but do not keep executing automatic habits whose only
+// evidence was the old right-click acknowledgement. Explicit macros stay intact.
+adapter.on('spawn', () => {
+  if (!planner.autonomous) return;
+  // Item definitions and the current dimension must exist before checking old
+  // craft/gather/landmark habits; startup alone cannot prove them invalid.
+  for (const macro of library.list()) {
+    if (macro.description.startsWith('习惯：') && !macro.disabled
+      && simpleToMethod(macro, adapter, memory, { allowMacro: false }).kind === 'invalid') {
+      library.suspend(macro.name, '旧自动习惯缺少可观测的验收条件，保留记录，等待重新验证');
+    }
+  }
+});
 
 /** 自主模式的习惯化：同一套步骤成功 3 次以上，自动提成候选方法（每个签名只提一次） */
 const proposedHabits = new Set<string>();
@@ -117,7 +132,7 @@ function mySkills(): MySkillInfo[] {
     name: d.status === 'verified' ? `method:${d.name}` : `trial:${d.name}:v${d.version}`, status: d.status as 'candidate' | 'verified',
     description: d.description.slice(0, 80),
     trials: { verified: d.trials.filter((t) => t.status === 'verified').length, failed: d.trials.filter((t) => t.status === 'failed').length } }));
-  const fromMacros: MySkillInfo[] = library.list().slice(-6).map((d) => {
+  const fromMacros: MySkillInfo[] = library.list().filter((d) => !d.disabled).slice(-6).map((d) => {
     const st = stats[`macro:${d.name}`];
     return { name: `macro:${d.name}`, status: 'macro' as const, description: d.description.slice(0, 80), ...(st?.runs ? { success: `${st.ok}/${st.runs}` } : {}) };
   });
@@ -144,7 +159,7 @@ const executive = new Executive({
   },
 });
 /** 已经学过（宏或方法库里）的步骤签名：不再重复提示/提议 */
-const knownSigs = () => new Set([...library.list().map((d) => signatureOf(d.steps)),
+const knownSigs = () => new Set([...library.list().filter((d) => !d.disabled).map((d) => signatureOf(d.steps)),
   ...methods.list().filter((d) => d.status !== 'retired').map((d) => signatureOf(flattenProgram(d.program))), ...proposedHabits]);
 perception.knownSkillSigs = knownSigs;
 const reflex = new Reflex(adapter, arbiter, bus, vision);
@@ -295,6 +310,7 @@ adapter.on('chat', (user: string, message: string) => {
 function snapshot() {
   return {
     now: Date.now(),
+    runtime,
     config: {
       bot: config.mc.username,
       server: `${config.mc.host}:${config.mc.port}`,
@@ -332,7 +348,7 @@ function snapshot() {
       mySkills: mySkills(),
       farms: memory.farms().map((f) => ({ crop: f.crop, cells: f.cells.length, harvests: f.harvests })),
       chests: memory.chests().map((c) => ({ pos: c.pos, items: c.items.length })),
-      skills: library.list().map((d) => ({ name: d.name, description: d.description, steps: d.steps.length })),
+      skills: library.list().map((d) => ({ name: d.name, description: d.description, steps: d.steps.length, ...(d.disabled ? { disabled: d.disabled } : {}) })),
       seen: memory.seenCount(),
       visitedChunks: memory.visitedChunkCount,
     },

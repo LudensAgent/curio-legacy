@@ -21,6 +21,8 @@ export interface MacroDef {
   steps: { skill: string; args?: unknown }[];
   createdAt: number;
   source: 'llm' | 'builtin';
+  /** 保留历史定义供诊断，但不再向执行层注册。显式重新 learn 可激活新定义。 */
+  disabled?: { reason: string; at: number };
 }
 
 const NAME_RE = /^[a-z][a-z0-9_]{2,31}$/;
@@ -73,8 +75,22 @@ export class SkillLibrary {
 
   private install(def: MacroDef, persist: boolean) {
     this.defs.set(def.name, def);
-    SKILLS[PREFIX + def.name] = this.toSkill(def);
+    if (def.disabled) delete SKILLS[PREFIX + def.name];
+    else SKILLS[PREFIX + def.name] = this.toSkill(def);
     if (persist) this.save();
+  }
+
+  /** 停用有问题的旧组合，保留定义与原因；不抹除历史，也不让重启重新装上它。 */
+  suspend(name: string, why: string): boolean {
+    const n = name.replace(/^macro:/, ''), def = this.defs.get(n);
+    if (!def) return false;
+    delete SKILLS[PREFIX + n];
+    const reason = why.slice(0, 500);
+    if (def.disabled?.reason === reason) return false;
+    def.disabled = { reason, at: Date.now() };
+    this.save();
+    this.bus.publish('skill_suspended', 'P2', `停用组合技能 ${PREFIX}${n}（保留记录）：${reason}`);
+    return true;
   }
 
   forget(name: string, why: string) {
@@ -89,6 +105,7 @@ export class SkillLibrary {
   prune() {
     const stats = this.memory.skillStats();
     for (const d of this.defs.values()) {
+      if (d.disabled) continue;
       const st = stats[PREFIX + d.name];
       if (st && st.runs >= 3 && st.ok / st.runs < 1 / 3) this.forget(d.name, `成功 ${st.ok}/${st.runs}`);
     }

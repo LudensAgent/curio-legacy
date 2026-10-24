@@ -114,11 +114,20 @@ export interface MoveOpts {
   constructionSafe?: boolean;
   /** 仅明确的挖掘/爬升动作允许寻路挖块和搭建；日常移动默认绕行。 */
   allowTerrainChanges?: boolean;
+  /** 步行引导可禁止入水；换气、游泳等动作保留自己的移动权限。 */
+  allowSwimming?: boolean;
+}
+
+export interface EffectEvidence {
+  verified: boolean;
+  changed: boolean;
+  reasons: string[];
 }
 
 export interface ActionResult {
   ok: boolean;
   reason?: string;
+  effectEvidence?: EffectEvidence;
 }
 
 export interface SwimOptions {
@@ -208,7 +217,7 @@ export interface GameAdapter {
 
   // ---- 通用基础动作：玩家的“右键”和“方向键”。上层用它们组合出技能清单里没有的玩法
   /** 手持 item 右键：对着一个方块/水面（block），或对空中/自己（self） */
-  useItemOn?(item: string, target: { kind: 'block'; pos: Vec3Like } | { kind: 'self' }, signal: AbortSignal): Promise<ActionResult & { spawned?: string }>;
+  useItemOn?(item: string, target: { kind: 'block'; pos: Vec3Like } | { kind: 'self' }, signal: AbortSignal): Promise<ActionResult & { spawned?: string; placed?: Vec3Like }>;
   /** 右键一个实体：船/矿车/马会坐上去，其他生物按手上物品交互（喂食、繁殖、剪毛、交易…） */
   interactEntity?(entityId: number, item: string | null, signal: AbortSignal): Promise<ActionResult & { mounted?: string }>;
   /** 从载具/坐骑上下来 */

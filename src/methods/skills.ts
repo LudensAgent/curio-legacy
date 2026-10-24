@@ -10,6 +10,25 @@ import { currentReservationOwner, reservationsFor } from '../projects/reservatio
 export function createMethodSkills(library: MethodLibrary, knowledge: ResourceKnowledge): Skill[] {
   return [
     {
+      name: 'experiment_method',
+      description: '把自己的机制设想写成有界参数程序，立即在当前游戏里试验并保存实际成败；同名修订生成新版本，两种情境验收后才学会。不执行任意代码',
+      argsDoc: '{"name":"<3-32位小写英文/数字/下划线>","description":"用途/设想","parameters"?:{"amount":{"type":"integer","default":1,"min":1,"max":8}},"program":{"type":"sequence","steps":[{"type":"call","skill":"<底层技能>","args":{}}]},"postcondition":{"type":"inventory_gain","item":"<物品>","count":1},"arguments"?:{"amount":1}}；program可用有界if/repeat，修订沿用同名',
+      timeoutMs: 600_000, movement: true,
+      validate(raw) {
+        const input = obj(raw);
+        if (typeof input.name !== 'string' || !/^[a-z][a-z0-9_]{2,31}$/.test(input.name)) return { ok: false, error: 'name 须为 3–32 位小写字母/数字/下划线' };
+        if (typeof input.description !== 'string' || !input.description.trim() || input.description.length > 240) return { ok: false, error: '需要简短的试验用途/设想' };
+        if (!input.program || typeof input.program !== 'object' || Array.isArray(input.program) || !input.postcondition || typeof input.postcondition !== 'object' || Array.isArray(input.postcondition)) return { ok: false, error: '试验需要有界 program 和可观测 postcondition' };
+        if (input.arguments !== undefined && (!input.arguments || typeof input.arguments !== 'object' || Array.isArray(input.arguments))) return { ok: false, error: 'arguments 须为本次参数值对象' };
+        return { ok: true, args: { name: input.name, description: input.description.trim(), parameters: input.parameters,
+          program: input.program, postcondition: input.postcondition, arguments: input.arguments ?? {} } };
+      },
+      async run(ctx, args) {
+        const { arguments: values, ...definition } = args;
+        return library.experiment(definition, values, ctx);
+      },
+    },
+    {
       name: 'query_resource', description: '查询版本匹配的物品获取方法、配方、所需设施/工具与真实背包缺口；不查找资源坐标，不自动选择方案',
       argsDoc: '{"item":"<具体物品名>","count"?:1-2304}', timeoutMs: 5000, movement: false, readOnly: true,
       validate(raw, adapter) {

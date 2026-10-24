@@ -44,7 +44,7 @@ export const useItem: Skill<{ item: string; on: string; dir?: string }> = {
     try {
       if (args.on === 'self') {
         const r = await adapter.useItemOn(args.item, { kind: 'self' }, signal);
-        return r.ok ? ok(`使用了 ${args.item}`) : fail('ERROR', `使用 ${args.item} 失败：${r.reason}`);
+        return r.ok ? ok(`使用了 ${args.item}`, { effectEvidence: r.effectEvidence }) : fail('ERROR', `使用 ${args.item} 失败：${r.reason}`, { effectEvidence: r.effectEvidence });
       }
       senses.refresh();
       const names = new Set([args.on, ...adapter.resolveBlockNames(args.on)]);
@@ -62,12 +62,13 @@ export const useItem: Skill<{ item: string; on: string; dir?: string }> = {
       }
       const before = adapter.state().inventory.find((i) => i.name === args.item)?.count ?? 0;
       const r = await adapter.useItemOn(args.item, { kind: 'block', pos: target.pos }, signal);
-      if (!r.ok) return fail('ERROR', `对着 ${target.name} 使用 ${args.item} 失败：${r.reason}`);
+      if (!r.ok) return fail(codeFromError({ message: r.reason }), `对着 ${target.name} 使用 ${args.item} 失败：${r.reason}`, { target: target.name, pos: target.pos, effectEvidence: r.effectEvidence });
       const after = adapter.state().inventory.find((i) => i.name === args.item)?.count ?? 0;
       // 自己放下的工作台/熔炉记住位置，下次复用
-      if (isStation(args.item) && after < before) rememberStation(ctx, args.item, { x: target.pos.x, y: target.pos.y + 1, z: target.pos.z });
-      return ok(`对着 ${target.name} 使用了 ${args.item}${r.spawned ? `，放出了 ${r.spawned}` : ''}${after < before ? `（背包里的 ${args.item} 少了 ${before - after} 个）` : ''}`,
-        { target: target.name, pos: target.pos, ...(r.spawned ? { spawned: r.spawned } : {}) });
+      if (isStation(args.item) && r.placed) rememberStation(ctx, args.item, r.placed);
+      const location = r.placed ? `，确认放置在 ${r.placed.x},${r.placed.y},${r.placed.z}（本次只放置这一块）` : '';
+      return ok(`对着 ${target.name} 使用了 ${args.item}${location}${r.spawned ? `，放出了 ${r.spawned}` : ''}${after < before ? `（背包里的 ${args.item} 少了 ${before - after} 个）` : ''}`,
+        { target: target.name, pos: r.placed ?? target.pos, effectEvidence: r.effectEvidence, ...(r.placed ? { placed: r.placed } : {}), ...(r.spawned ? { spawned: r.spawned } : {}) });
     } catch (e) {
       if (isAbort(e)) throw e;
       return fail(codeFromError(e), `使用 ${args.item} 出错：${(e as Error).message}`);

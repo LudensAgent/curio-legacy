@@ -590,16 +590,19 @@ export class Vision {
     const remaining = Math.hypot(target.x - here.x, target.z - here.z);
     // Optical transparency includes glass and barriers; it is not a collision test.
     const passable = (o: Optics | null) => !!o && /^(air|cave_air|void_air|light|short_grass|grass|tall_grass|fern|large_fern|dead_bush|torch|wall_torch|.*_torch|.*_carpet|.*_flower|.*_tulip|dandelion|poppy|vine|.*_sapling)$/.test(o.name);
+    const hazardousFloor = (name: string) => /water|lava|ice$|magma|campfire|cactus|powder_snow|berry_bush/.test(name);
     let best: { pos: Vec3Like; score: number } | null = null;
     for (const surface of this.visibleSurfaces.values()) {
       if (Date.now() - surface.at > 3000) continue;
-      if (/water|lava|ice$|magma|campfire|cactus|powder_snow|berry_bush/.test(surface.name)) continue;
+      if (hazardousFloor(surface.name)) continue;
       const p = { x: surface.pos.x + 0.5, y: surface.pos.y + 1, z: surface.pos.z + 0.5 };
       const distance = Math.hypot(p.x - here.x, p.z - here.z);
       if (distance < 1.5 || distance > maxDistance || Math.abs(p.y - here.y) > 2) continue;
       if (excluded.some((e) => Math.hypot(e.x - p.x, e.z - p.z) < 1 && Math.abs(e.y - p.y) < 1)) continue;
       const floor = this.adapter.blockOptics(surface.pos.x, surface.pos.y, surface.pos.z);
-      if (floor?.kind !== 'solid') continue;
+      if (floor?.kind !== 'solid' || hazardousFloor(floor.name)) continue;
+      // 短时视觉记忆只提供候选；地表状态变化或含水方块不能继续被当成干燥落脚点。
+      if (String(this.adapter.blockStateAt?.(surface.pos)?.properties.waterlogged) === 'true') continue;
       if (!passable(this.adapter.blockOptics(surface.pos.x, surface.pos.y + 1, surface.pos.z))
         || !passable(this.adapter.blockOptics(surface.pos.x, surface.pos.y + 2, surface.pos.z))) continue;
       const left = Math.hypot(target.x - p.x, target.z - p.z);

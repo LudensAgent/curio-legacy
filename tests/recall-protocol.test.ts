@@ -9,6 +9,49 @@ import { OpenAICompatibleProvider } from '../src/planner/llm.ts';
 import { Planner } from '../src/planner/planner.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 
+test('mechanics inquiry upgrades routine continuation to deliberate reasoning without executing actions or changing intent', async (t) => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  t.after(() => memory.close());
+  const percept = new Perception(adapter, memory, bus, new Vision(adapter)).update();
+  const intent = memory.addIntent({ text: '研究眼前环境', whyNow: '有未知机制', context: [], tradeoffs: [], source: 'model', status: 'active' });
+  const tiers: unknown[] = [];
+  const cfg = { ...config, llm: { ...config.llm, provider: 'openai' as const, maxCallsPerHour: 20, maxPromptTokens: 40000 } };
+  const planner = new Planner(cfg, { name: 'mechanics-protocol-stub', async complete(messages, _signal, ctx) {
+    tiers.push((ctx as any).tier);
+    if (tiers.length === 1) return { latencyMs: 1, text: JSON.stringify({ kind: 'mechanics', query: '右键 放置' }) };
+    assert.match(messages.at(-1)!.content, /registered_skills/);
+    assert.match(messages.at(-1)!.content, /parameters/);
+    assert.match(messages.at(-1)!.content, /experiment_method/);
+    return { latencyMs: 1, text: JSON.stringify({ goal: '先核对可见线索', steps: [{ skill: 'look_around', args: { seconds: 2 } }] }) };
+  } }, adapter, memory, bus, null);
+  const plan = await planner.propose({ reason: 'no_goal', tier: 'light', percept, current: null, lastFailure: null, userSuggestion: null, worldState: adapter.state() });
+  assert.deepEqual(tiers, ['light', 'full']);
+  assert.equal(plan.steps[0].skill, 'look_around');
+  assert.equal(planner.stats.calls, 2);
+  assert.equal(planner.stats.tiers.escalated, 1);
+  assert.deepEqual(adapter.actions, []);
+  assert.equal(memory.currentIntent()?.id, intent.id, 'knowledge retrieval leaves the actual interest to the model');
+});
+
+test('a new experiment proposed in light mode is reconsidered with full facts before any action runs', async (t) => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  t.after(() => memory.close());
+  const percept = new Perception(adapter, memory, bus, new Vision(adapter)).update(), tiers: unknown[] = [];
+  const planner = new Planner({ ...config, llm: { ...config.llm, provider: 'openai' as const, maxCallsPerHour: 20, maxPromptTokens: 40000 } }, {
+    name: 'experiment-deliberation-stub', async complete(messages, _signal, ctx) {
+      tiers.push((ctx as any).tier);
+      if (tiers.length === 1) return { latencyMs: 1, text: JSON.stringify({ goal: '尝试一种组合', steps: [{ skill: 'experiment_method', args: { name: 'unreviewed_idea' } }] }) };
+      assert.match(messages.at(-1)!.content, /尚未执行/);
+      return { latencyMs: 1, text: JSON.stringify({ goal: '先取得缺失的观察', steps: [{ skill: 'look_around', args: { seconds: 2 } }] }) };
+    },
+  }, adapter, memory, bus, null);
+  const plan = await planner.propose({ reason: 'no_goal', tier: 'light', percept, current: null, lastFailure: null, userSuggestion: null, worldState: adapter.state() });
+  assert.deepEqual(tiers, ['light', 'full']);
+  assert.equal(plan.steps[0].skill, 'look_around');
+  assert.deepEqual(adapter.actions, []);
+  assert.equal(memory.intents().length, 0);
+});
+
 test('read-only recall can search then read the returned ID, counts every model call, and never mutates intent before activation', async () => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   const percept = new Perception(adapter, memory, bus, new Vision(adapter)).update();

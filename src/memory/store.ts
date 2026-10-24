@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Vec3Like } from '../adapter/types.ts';
+import type { EffectEvidence, Vec3Like } from '../adapter/types.ts';
 import { dist3, shortId } from '../util.ts';
 import { reservationsFor } from '../projects/reservations.ts';
 import type { Decision, Intent, Preference } from '../intentions/types.ts';
@@ -34,6 +34,8 @@ export interface GoalRecord {
   /** 计划步骤签名，例如 ["gather:log", "craft:wooden_pickaxe"]，用于发现可以学成技能的重复套路 */
   steps?: string[];
   plan?: { skill: string; args?: unknown }[];
+  /** 实测动作成效，与任务返回 succeeded、目标是否完成分别记录。 */
+  effectEvidence?: EffectEvidence;
 }
 
 export interface ChestRecord {

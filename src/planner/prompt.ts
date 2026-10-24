@@ -140,6 +140,8 @@ export function systemPrompt(persona: string, fov = 100, catalog = skillCatalog(
 计划是一段连贯的游玩（2–6 步，一到三分钟的事），把前后依赖的动作串起来。被生存反射打断后程序会接着做被打断的步骤。
 你是 Minecraft 自主玩家的高层决策模块。根据观察、个人偏好、近期经历与未完成的兴趣，自由选择现在想做的事情。可以建设、研究、整理、探索、休息、继续旧事，也可以基于新情况改变主意。没有必须遵循的科技树、囤货配额或通关主线；长期种田、装修或不去下界都可以。state.drives 只是可权衡的信号，分数最高项不决定你的目标。安全反射由程序执行。
 决策时权衡当前的需要或好奇、支持它的事实、尚待确认的未知，以及其他可行方法或暂缓的取舍；reason 只写简短依据。连续行动应能解释新获得了什么或为何仍值得继续。decision_feedback、recent_attempts 与 tool_results 提供实际经历；技能执行成功不代表方法有效，库存没变化也不代表探索没有价值。同样的尝试反复得到相同事实时，可以改法、修订或暂缓意图，不必固守最初设想。
+动作接口是手脚，不是玩法菜单。遇到新的障碍或发现物品的新用途时，联系物品、方块和环境的机制，比较几种可能的组合，自选一个值得验证的假设；不必等已有组合重复成功才允许创新。需要弄清现有动作能做什么，可输出 {"kind":"mechanics","query":"想了解的操作或机制"}，只读返回完整接口并允许你继续思考，不替你制定路线。配方和材料缺口仍用 recipes/query_resource 核实，未观察的地点不能猜。
+新方法可直接使用 experiment_method {name,description,parameters?,program,postcondition,arguments?}：program 用已有动作组合成有界 sequence/if/repeat，postcondition 写真实可观测的结果，本次 arguments 绑定参数；程序会保存候选并立刻试用。先用最小可检验的一段，不用为了“创新”扩大消耗；失败后看 actual/expected，修订同名方法或改变假设。成功一次仅是候选证据，在不同情境事实验收后才复用为已验证方法。learn_candidates 只是经验线索，不是探索白名单；缺少必要原语时记录能力缺口，不伪造技能或声称已经学会。
 
 每次决策是独立请求，当前观察、意图和证据由程序重新组装，不依赖完整聊天历史。需要旧经历时再请求 recall；memory_source=available_on_request 表示记忆服务可按需查询，并非没有记忆。
 reason=prefetch 时，current_task 仍在执行，pending_steps 里的步骤也会在它之后先做完，下一计划只在这些步骤结束后接续；不要重复当前步骤和 pending_steps，也不能把预计产出当成已验证事实。思考空档中程序仅原地观察，不会另选目标或消耗材料；请根据已知事实安排后续动作。
@@ -434,6 +436,8 @@ export function lightSystemPrompt(persona: string): string {
 - last_failure 是刚才没成功的那一步：换个做法接着来；若这说明整件事该换方向，就请求完整上下文。
 - recent_thread 是你刚才几次的决定、想法和结果，my_notes 是你写给自己的笔记：接着自己的思路走，沿用已经得出的结论和方向（比如目的地），除非新事实推翻它；repeated_failures 里反复失败的做法别再原样重试。
 - 末尾“此刻/自上次决定以来”是刚测到的事实，最先看：旧判断（如“还在水里”）与之不符就作废，别照抄；做过的、背包已有的不再做。
+- decision_feedback 是最近实际变化及同一套动作的重复次数；succeeded 只说明动作返回成功，不证明目标已完成。consecutiveUnchangedAttempts 表示连续几次没测到新变化，可以据此重新观察或改法；它不否定观察、等待本身的价值。
+- 动作接口不是玩法菜单。新障碍/新用途可以主动形成假设并组合动作验证，不必等重复成功。要了解完整接口输出 {"kind":"mechanics","query":"需要的操作或机制"}；会转入完整推理并继续同一意图。新组合可用 experiment_method {name,description,parameters?,program,postcondition,arguments?} 保存并立即作一次有事实验收的有限试验，失败据 actual/expected 修订；候选未验收不叫已掌握。
 - 可选 note：写一句接下来几分钟要记住的事（目的地、发现、教训；位置写坐标，不写“东南3格”这种走两步就失效的说法）；可选 then：做完这几步之后打算做什么。
 - lessons/danger_zones 是吃过的亏；my_skills 按列出的 name 调用，status=candidate 仍待实际验收，不能当成已掌握的方法。有床时黄昏/天黑就 sleep（跳过黑夜、设重生点，胜过挖坑）；take_items 只拿 known_chests 里有的。
 - 学到东西写一句 lesson；state.learn_candidates 是真实经历里反复成功的组合，可据此写 learn_skill {"name","description","steps":[{"skill":"…","args":{}}]}，参数与成效须有实际成功证据，不为凑技能数虚构。新组合先是待试验候选，不等于已经掌握；做不到写 missing_ability。
@@ -487,9 +491,37 @@ function lightResultData(raw: unknown): Record<string, unknown> | undefined {
     while (facts.defects && facts.defects.length > 1 && Buffer.byteLength(JSON.stringify({ ...out, inspection: facts }), 'utf8') > 1800) facts.defects.pop();
     add('inspection', facts);
   }
-  for (const key of ['pos', 'position', 'origin', 'target', 'blockTarget', 'found', 'dist', 'gained', 'collected', 'broken', 'waterAhead', 'alreadyHere', 'visits', 'shortfall',
-    'missingMaterials', 'placed', 'cleared', 'moved', 'remaining', 'landed', 'arrived', 'projectId', 'failures']) add(key, trim(data[key]));
+  for (const key of ['effectEvidence', 'pos', 'position', 'origin', 'target', 'blockTarget', 'found', 'dist', 'gained', 'collected', 'broken', 'waterAhead', 'alreadyHere', 'visits', 'shortfall',
+    'missingMaterials', 'placed', 'cleared', 'moved', 'remaining', 'landed', 'arrived', 'projectId', 'failures',
+    'methodName', 'version', 'methodStatus', 'trialStatus', 'expected', 'before', 'actual', 'verified']) add(key, trim(data[key]));
   return Object.keys(out).length ? out : undefined;
+}
+
+/** One latest measured attempt, not six full before/after snapshots or a completion verdict. */
+function lightDecisionFeedback(raw: unknown): Record<string, unknown> | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const feedback = raw as Record<string, any>, latest = feedback.recentAttempts?.at(-1);
+  const repeat = feedback.repeatedStepPattern;
+  const out: Record<string, unknown> = { meaning: 'measured_changes_only_not_goal_completion' };
+  const add = (key: string, value: unknown) => {
+    if (value !== undefined && Buffer.byteLength(JSON.stringify({ ...out, [key]: value }), 'utf8') <= 1800) out[key] = value;
+  };
+  if (repeat) add('repeatedStepPattern', { consecutiveAttempts: repeat.consecutiveAttempts,
+    consecutiveUnchangedAttempts: repeat.consecutiveUnchangedAttempts });
+  if (latest) {
+    add('latestAttempt', { planId: latest.planId, status: latest.status, endedAt: latest.endedAt,
+      summary: String(latest.summary ?? '').slice(0, 100) });
+    if (latest.effectEvidence) add('effectEvidence', { verified: latest.effectEvidence.verified, changed: latest.effectEvidence.changed,
+      reasons: latest.effectEvidence.reasons?.slice(0, 2).map((reason: unknown) => String(reason).slice(0, 80)) });
+    const c = latest.changes;
+    if (c) add('changes', {
+      scopeChanged: c.scopeChanged, movementDistance: c.movement?.distance ?? null,
+      inventoryDelta: c.inventoryDelta?.slice(0, 3).map((item: any) => ({ item: String(item.item).slice(0, 64), delta: item.delta })),
+      newResourceTypes: c.resourceTypeChanges?.known?.added?.slice(0, 3), newChunks: c.newChunks,
+      water: c.water, viewChanged: c.view?.before !== c.view?.after, vitalsChanged: c.vitalsChanged,
+    });
+  }
+  return out;
 }
 
 export function lightUserPrompt(ctx: PlanContext, memory: WorldMemory): string {
@@ -512,6 +544,7 @@ export function lightUserPrompt(ctx: PlanContext, memory: WorldMemory): string {
     ...(ctx.thread?.length ? { recent_thread: (ctx.thread as Record<string, unknown>[]).map(({ thought: _t, ...t }) => t) } : {}),
     ...(ctx.repeated?.length ? { repeated_failures: ctx.repeated } : {}),
     ...learned.nearby,
+    ...(ctx.decisionFeedback ? { decision_feedback: lightDecisionFeedback(ctx.decisionFeedback) } : {}),
     last_results: results,
     ...(ctx.lastFailure ? { last_failure: ctx.lastFailure } : {}),
     reason: ctx.reason,
@@ -539,7 +572,7 @@ export function lightUserPrompt(ctx: PlanContext, memory: WorldMemory): string {
   const now = `此刻（以此为准）：在 (${self.pos.join(',')})${self.inWater ? '，在水里' : self.inLava ? '，在岩浆里' : ''}，生命 ${self.hp}、饥饿 ${self.food}${self.held ? `，手持 ${self.held}` : ''}。`
     + (ctx.changes ? `自上次决定以来（${ctx.changes.seconds} 秒）：${ctx.changes.facts.join('；')}。` : '');
   const tail = now + (ctx.reason === 'prefetch' && pending.length
-    ? `手头正在做、马上就会做完：${pending.join(' → ')}${ctx.current ? `（进度 ${Math.round((ctx.current.progress ?? 0) * 100)}%）` : ''}。把它们当作已经完成，给出做完之后的接下来几步，不要重复它们。`
+    ? `手头正在做、仍待结果确认：${pending.join(' → ')}${ctx.current ? `（进度 ${Math.round((ctx.current.progress ?? 0) * 100)}%）` : ''}。只预备成功后的后续步骤，不重复这些动作；不能把预计产出当成已经发生的事实，若选择依赖未知观察或验收结果，就等结果再决定。`
     : ctx.lastFailure ? '刚才那一步没成功：换个做法，给出接下来几步。' : '接着推进当前的事：给出接下来几步。');
   return `当前情况（JSON）：\n${JSON.stringify(payload)}\n${tail}`;
 }

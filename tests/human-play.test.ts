@@ -491,7 +491,13 @@ test('放下工作台后记成“我的工作台”', async () => {
   adapter.inv.set('crafting_table', 1);
   const memory = new WorldMemory(null);
   const ctx = skillCtx(adapter, new Vision(adapter), memory);
-  adapter.useItemOn = async (item: string) => { adapter.inv.set(item, adapter.inv.get(item)! - 1); return { ok: true }; };
+  adapter.useItemOn = async (item: string, target) => {
+    if (target.kind !== 'block') return { ok: false, reason: 'NO_TARGET' };
+    const placed = { ...target.pos, y: target.pos.y + 1 };
+    adapter.blocks.push({ name: item, pos: placed });
+    adapter.inv.set(item, adapter.inv.get(item)! - 1);
+    return { ok: true, placed };
+  };
   try {
     ctx.senses.refresh();
     const r = await SKILLS.use_item.run(ctx, { item: 'crafting_table', on: 'grass_block' });
@@ -635,7 +641,8 @@ test('小决策（边做边想）明确告诉模型手头的步骤会先做完�
   try {
     const percept: any = { inventory: [], emptySlots: 36, nearby: { hostile: [], passive: [], resources: [] }, vision: null, self: { pos: [0, 64, 0] }, time: {} };
     const text = lightUserPrompt({ reason: 'prefetch', percept, current: { skill: 'gather', args: { block: 'stone', count: 8 }, progress: 0.6 } as any, pendingSteps: [{ skill: 'craft', args: { item: 'stone_sword' } }] } as any, memory);
-    assert.match(text, /把它们当作已经完成/);
+  assert.match(text, /仍待结果确认/);
+  assert.match(text, /不能把预计产出当成已经发生的事实/);
     assert.match(text, /gather .*stone.* → craft/);
   } finally { memory.close(); }
   const http = await import('node:http');

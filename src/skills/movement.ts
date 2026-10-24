@@ -261,6 +261,8 @@ export const goTo: Skill<{ target: string }> = {
       label = lm.label;
     }
     const range = nums ? 1 : 2;
+    const waterNames = ['water', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass'];
+    const waterNear = () => ctx.senses.knownBlocks(waterNames, 12).some((b) => waterNames.includes(adapter.blockAt(b.pos) ?? ''));
     const distance = (p: Vec3Like) => flat ? Math.hypot(p.x - pos!.x, p.z - pos!.z) : dist3(p, pos!);
     // 与 Pathfinder 的整数节点判定一致；明确坐标比“到地标附近”更精确。
     const arrived = (p: Vec3Like) => Math.hypot(Math.floor(p.x) - Math.floor(pos!.x), flat ? 0 : Math.floor(p.y) - Math.floor(pos!.y), Math.floor(p.z) - Math.floor(pos!.z)) <= range;
@@ -296,7 +298,7 @@ export const goTo: Skill<{ target: string }> = {
         if (state?.properties.half === 'upper') continue;
         try {
           ctx.progress(0, `沿门口接近 ${label}，打开 ${door.name}`);
-          await adapter.moveTo({ kind: 'near', pos: door.pos, range: 3 }, { signal, timeoutMs: Math.max(1, Math.min(10000, ctx.deadline - Date.now())), constructionSafe: true });
+          await adapter.moveTo({ kind: 'near', pos: door.pos, range: 3 }, { signal, timeoutMs: Math.max(1, Math.min(10000, ctx.deadline - Date.now())), constructionSafe: true, allowSwimming: false });
           if (!inScope()) return false;
           // 只操作亲眼看过/记得且仍是原来木门的方块，不把门当作采集材料。
           if (adapter.blockAt(door.pos) !== door.name) continue;
@@ -323,7 +325,7 @@ export const goTo: Skill<{ target: string }> = {
           if (await tryDoor()) continue;
           await glance(ctx);
           if (ctx.senses.navigationWaypoint(pos, 12, visited)) continue;
-          const water = ctx.senses.knownBlocks(['water'], 12).length > 0;
+          const water = waterNear();
           return fail('PATH_NOT_FOUND', `前往 ${label}：眼前没有可确认的${water ? '陆地落脚点，附近有水，可考虑 boat 渡河' : '通路，先换个观察位置或寻找入口'}；没有挖墙或搭柱`, { target: pos, position: cur, waterAhead: water });
         }
         const dxz = Math.hypot(pos.x - cur.x, pos.z - cur.z);
@@ -331,7 +333,7 @@ export const goTo: Skill<{ target: string }> = {
           : dxz > 32 ? { kind: 'xz' as const, x: cur.x + (pos.x - cur.x) * 24 / dxz, z: cur.z + (pos.z - cur.z) * 24 / dxz, range: 2 }
           : flat ? { kind: 'xz' as const, x: pos.x, z: pos.z, range } : { kind: 'near' as const, pos, range };
         try {
-          await adapter.moveTo(target, { signal, timeoutMs: Math.max(1, Math.min(20000, ctx.deadline - Date.now())) });
+          await adapter.moveTo(target, { signal, timeoutMs: Math.max(1, Math.min(20000, ctx.deadline - Date.now())), allowSwimming: false });
         } catch (e) {
           if (isAbort(e)) throw e;
           if (await tryDoor()) continue;
@@ -351,8 +353,9 @@ export const goTo: Skill<{ target: string }> = {
       return ok(`${alreadyHere ? '已在' : '到达'} ${label} 附近；实际站在 (${end.x.toFixed(1)},${end.y.toFixed(1)},${end.z.toFixed(1)})，距目标 ${distance(end).toFixed(1)} 格`, { target: pos, position: end, moved: dist3(s.pos, end), alreadyHere });
     } catch (e) {
       if (isAbort(e)) throw e;
-      return fail(codeFromError(e), `前往 ${label} 失败：${(e as Error).message}`, {
-        target: pos, position: adapter.state().pos, waterAhead: ctx.senses.knownBlocks(['water'], 12).length > 0,
+      const water = waterNear();
+      return fail(codeFromError(e), `前往 ${label} 失败：${(e as Error).message}${water ? '；附近有水，尚未确认干燥步行通路，可沿岸绕行或用 boat 渡河' : ''}`, {
+        target: pos, position: adapter.state().pos, waterAhead: water,
       });
     } finally {
       clearInterval(prog);

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { AgentState } from '../adapter/types.ts';
+import type { AgentState, EffectEvidence } from '../adapter/types.ts';
 import type { Step } from '../arbiter/arbiter.ts';
 import type { Percept } from '../perception/perception.ts';
 import type { Plan } from '../planner/plan.ts';
@@ -70,6 +70,8 @@ function compare(before: Snapshot, after: Snapshot) {
     water: { before: before.inWater, after: after.inWater },
     biome: { before: before.biome, after: after.biome },
     view: { before: before.view, after: after.view },
+    newChunks: comparable ? Math.max(0, after.visitedChunks - before.visitedChunks) : null,
+    vitalsChanged: comparable ? JSON.stringify(before.vitals) !== JSON.stringify(after.vitals) : null,
   };
 }
 
@@ -85,6 +87,17 @@ interface Attempt {
   before: Snapshot;
   after: Snapshot;
   changes: ReturnType<typeof compare>;
+  effectEvidence?: EffectEvidence;
+}
+
+/** No measured difference is a bounded observation, not proof that the world never changed. */
+function unchanged(attempt: Attempt): boolean {
+  const c = attempt.changes;
+  return attempt.before.observationReady && attempt.after.observationReady && !c.scopeChanged
+    && !(attempt.effectEvidence?.verified && attempt.effectEvidence.changed)
+    && (c.movement?.distance ?? Infinity) < 0.75 && !c.inventoryDelta.length && c.newChunks === 0 && c.vitalsChanged === false
+    && !c.resourceTypeChanges?.known.added.length && !c.resourceTypeChanges?.known.removed.length
+    && c.water.before === c.water.after && c.biome.before === c.biome.after && c.view.before === c.view.after;
 }
 
 /** Supplies observations about attempts; deciding what to pursue remains the model's job. */
@@ -110,20 +123,29 @@ export class DecisionFeedback {
     this.active = { planId: plan.id, goal: plan.goal.slice(0, 240), before: this.latestObservation };
   }
 
-  end(plan: Plan, status: string, summary: string, state: AgentState, percept: Percept) {
+  end(plan: Plan, status: string, summary: string, state: AgentState, percept: Percept, effectEvidence?: EffectEvidence) {
     this.observeScope(state);
     if (this.active?.planId !== plan.id) return; // Missing baseline is not evidence of no change.
     const before = this.active.before, after = snapshot(state, percept);
     this.latestObservation = after;
+    const changes = compare(before, after);
+    const valid = before.observationReady && after.observationReady && !changes.scopeChanged;
+    const reasons: string[] = [];
+    if (valid && (changes.movement?.distance ?? 0) >= 0.75) reasons.push(`实际移动了 ${changes.movement!.distance.toFixed(1)} 格`);
+    if (valid && changes.inventoryDelta.length) reasons.push(`背包实际变化：${changes.inventoryDelta.slice(0, 3).map((item) => `${item.item} ${item.delta > 0 ? '+' : ''}${item.delta}`).join('、')}`);
+    if (valid && effectEvidence?.verified && effectEvidence.changed) reasons.push(...(effectEvidence.reasons.length ? effectEvidence.reasons : ['技能已通过实际世界观测确认变化']).slice(0, 3).map((reason) => reason.slice(0, 120)));
+    const measuredEffect: EffectEvidence = { verified: reasons.length > 0, changed: reasons.length > 0,
+      reasons: reasons.length ? reasons : [valid ? '本轮未测到位移、库存或已验证的世界变化；这不证明世界没有变化' : '缺少同一会话的有效前后观测，无法验证实际效果'] };
     const steps = plan.steps.slice(0, Math.max(0, Math.min(plan.steps.length, Math.floor(plan.index))));
     const attempt: Attempt = {
       planId: plan.id, goal: this.active.goal, status, summary: summary.slice(0, 500),
       startedAt: before.at, endedAt: after.at, durationMs: Math.max(0, after.at - before.at),
-      stepsStarted: describeSteps(steps), before, after, changes: compare(before, after),
+      stepsStarted: describeSteps(steps), before, after, changes, effectEvidence: measuredEffect,
     };
     this.recent.push({ attempt, pattern: patternKey(steps) });
     if (this.recent.length > 6) this.recent.shift();
     this.active = null;
+    return measuredEffect;
   }
 
   context(state: AgentState, percept?: Percept) {
@@ -139,6 +161,11 @@ export class DecisionFeedback {
         || !sameScope(entry.attempt.after.scope, this.scope!)) break;
       streak++;
     }
+    let unchangedStreak = 0;
+    for (let i = recent.length - 1; latest && i >= recent.length - streak; i--) {
+      if (!unchanged(recent[i].attempt)) break;
+      unchangedStreak++;
+    }
     return structuredClone({
       scope: this.scope,
       scopeChange: this.scopeChange,
@@ -150,7 +177,8 @@ export class DecisionFeedback {
       activeAttempt: this.active && sameScope(this.active.before.scope, this.scope!)
         ? { planId: this.active.planId, goal: this.active.goal, startedAt: this.active.before.at, before: this.active.before } : null,
       recentAttempts: recent.map(({ attempt }) => attempt),
-      repeatedStepPattern: latest && streak > 0 ? { steps: latest.attempt.stepsStarted, consecutiveAttempts: streak } : null,
+      repeatedStepPattern: latest && streak > 0 ? { steps: latest.attempt.stepsStarted, consecutiveAttempts: streak,
+        consecutiveUnchangedAttempts: unchangedStreak } : null,
     });
   }
 }

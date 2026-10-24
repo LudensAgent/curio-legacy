@@ -1,5 +1,5 @@
 import type { AudienceContext } from '../live/audience.ts';
-import type { AgentState, GameAdapter } from '../adapter/types.ts';
+import type { AgentState, EffectEvidence, GameAdapter } from '../adapter/types.ts';
 import type { Arbiter, Step, TaskInfo, TaskOutcome, TaskPreemption } from '../arbiter/arbiter.ts';
 import type { EventBus } from '../events.ts';
 import type { Hazard, WorldMemory } from '../memory/store.ts';
@@ -77,6 +77,7 @@ export class Executive {
   private results: { skill: string; args: unknown; status: string; summary: string; data?: Record<string, unknown>;
     failureCode?: string; ts: number; worldId: string; dimension: string; sessionId: string; position: AgentState['pos'] }[] = [];
   private decisionFeedback = new DecisionFeedback();
+  private planEffects: EffectEvidence[] = [];
   private completedProjects = new Set<string>();
   private gentleResume: { planId: string; reflexTaskId: string; generation: number; succeeded: boolean } | null = null;
   private gentlyPreemptedTasks = new Set<string>();
@@ -232,7 +233,7 @@ export class Executive {
     if (cur?.planId !== this.plan.id) return null;
     // Observation and read-only query results are the evidence for the next
     // choice. Prefetching before they finish repeats the previous assumptions.
-    if (this.d.planner.autonomous && (cur.skill === 'look_around' || SKILLS[cur.skill]?.readOnly)) return null;
+    if (this.d.planner.autonomous && (cur.skill === 'look_around' || cur.skill === 'experiment_method' || cur.skill.startsWith('trial:') || SKILLS[cur.skill]?.readOnly)) return null;
     // Start the next autonomous choice while its last approved step is still
     // running. Skill deadlines are safety limits, not duration estimates, and
     // waiting for half a deadline often leaves the entire model call idle.
@@ -437,16 +438,53 @@ export class Executive {
   private durations = new Map<string, number>();
   private lightStreak = 0;
   private lastFullAt = 0;
+  private deliberationScope = '';
+  private lastDeliberatedFailure: PlanContext['lastFailure'] = null;
+  private lastDeliberatedRepeat: { pattern: string; bucket: number; count: number } | null = null;
   /**
-   * 小决策是常态：只要手头有一件正在做的事（有进行中的意图），无论是边做边想下一步、某一步失败了换个做法，
-   * 还是被打断后接着来，都只发精简的小请求，并尽量和正在进行的动作重叠。
+   * 顺利续步、已知缺料或一次没找到东西用小决策；新路径/机制失败和连续无实测变化需要完整推理。
    * 完整决策只用于大转折：开始全新的事、玩家建议、项目受阻、死亡之后，以及每隔一段时间抬头看一眼全局
    * （连续 6 次小决策或超过 3 分钟）。小决策里模型觉得需要改方向时也会自己升级。
    */
   /** 下一次请求大概会是哪一档（不改计数），用来估计要提前多久开始想 */
   private wouldBeFull(): boolean {
-    return !this.d.memory.currentIntent() || !!this.userSuggestion || this.lastFailure?.code === 'DIED'
-      || this.lightStreak >= 6 || Date.now() - this.lastFullAt > 180_000;
+    return this.tierDecision().full;
+  }
+
+  /** 只识别需要重新推理的证据，不替模型选目标；预取估时和实际发请求使用同一组条件。 */
+  private tierDecision(ctx?: PlanContext) {
+    const state = ctx?.worldState ?? this.d.adapter.state();
+    const scope = JSON.stringify([state.worldId, state.dim, state.sessionId]);
+    if (scope !== this.deliberationScope) {
+      this.deliberationScope = scope;
+      this.lastDeliberatedFailure = null;
+      this.lastDeliberatedRepeat = null;
+    }
+    const feedback = (ctx?.decisionFeedback ?? this.decisionFeedback.context(state)) as {
+      repeatedStepPattern?: { steps: unknown; consecutiveUnchangedAttempts: number };
+      recentAttempts?: { effectEvidence?: EffectEvidence }[];
+    };
+    const repeated = feedback.repeatedStepPattern;
+    const count = repeated?.consecutiveUnchangedAttempts ?? 0;
+    const changed = feedback.recentAttempts?.at(-1)?.effectEvidence;
+    const pattern = repeated ? JSON.stringify(repeated.steps) : '';
+    if (changed?.verified && changed.changed || count < 2 || this.lastDeliberatedRepeat?.pattern !== pattern
+      || count < (this.lastDeliberatedRepeat?.count ?? 0)) this.lastDeliberatedRepeat = null;
+    // 同一份无变化反馈只升级一次；再有两次实际尝试仍无变化，才进入新的推理段。
+    const bucket = Math.floor(count / 2);
+    const repeat = count >= 2 && !(changed?.verified && changed.changed)
+      && (!this.lastDeliberatedRepeat || bucket > this.lastDeliberatedRepeat.bucket) ? { pattern, bucket, count } : null;
+    if (this.lastDeliberatedRepeat) this.lastDeliberatedRepeat.count = count;
+    const failure = ctx ? ctx.lastFailure : this.lastFailure;
+    const newFailure = failure && failure !== this.lastDeliberatedFailure
+      && (['PATH_NOT_FOUND', 'STUCK', 'NO_EFFECT', 'EFFECT_NOT_CONFIRMED'].includes(failure.code ?? '')
+        || failure.skill === 'experiment_method' || failure.skill.startsWith('trial:')) ? failure : null;
+    const reflection = ctx ? ctx.reflection : this.reflectionFor({ percept: { learn_candidates: [] } } as unknown as PlanContext);
+    const big = !this.d.memory.currentIntent() || !!this.userSuggestion
+      || ['user_suggestion', 'manual_replan', 'project_blocked'].includes(ctx?.reason ?? '')
+      || failure?.code === 'DIED' || !!reflection;
+    return { full: big || !!newFailure || !!repeat || this.lightStreak >= 6 || Date.now() - this.lastFullAt > 180_000,
+      newFailure, repeat };
   }
 
   /**
@@ -492,11 +530,10 @@ export class Executive {
   }
 
   private chooseTier(ctx: PlanContext): 'light' | 'full' {
-    const big = !this.d.memory.currentIntent() || !!this.userSuggestion
-      || ['user_suggestion', 'manual_replan', 'project_blocked'].includes(ctx.reason)
-      || this.lastFailure?.code === 'DIED' || !!ctx.reflection;
-    const due = this.lightStreak >= 6 || Date.now() - this.lastFullAt > 180_000;
-    if (!big && !due) { this.lightStreak++; return 'light'; }
+    const decision = this.tierDecision(ctx);
+    if (!decision.full) { this.lightStreak++; return 'light'; }
+    if (decision.newFailure) this.lastDeliberatedFailure = decision.newFailure;
+    if (decision.repeat) this.lastDeliberatedRepeat = decision.repeat;
     this.lightStreak = 0;
     this.lastFullAt = Date.now();
     return 'full';
@@ -556,6 +593,7 @@ export class Executive {
     this.attemptStarted = false;
     this.activatedAt = Date.now();
     this.decisionFeedback.begin(p, this.d.adapter.state(), this.d.perception.update());
+    this.planEffects = [];
     this.d.bus.publish('plan', 'P2', `[${p.source}] ${p.goal} —— ${p.thought}`, { thought: p.thought, source: p.source, steps: p.steps, planId: p.id, binding: p.binding });
     this.d.bus.publish('goal', 'P2', `当前尝试：${p.goal}`, { planId: p.id, source: p.source });
     if (p.steps.length === 0) {
@@ -723,12 +761,16 @@ export class Executive {
     const durationSec = Math.round((Date.now() - (this.activatedAt ?? p.createdAt)) / 1000);
     const entry = [...this.thread].reverse().find((t) => t.goal === p.goal && !t.status);
     if (entry) { entry.status = status; entry.summary = summary; }
-    this.decisionFeedback.end(p, status, summary, state, this.d.perception.update());
+    const confirmed = this.planEffects.filter((e) => e.verified && e.changed);
+    const effectEvidence = this.decisionFeedback.end(p, status, summary, state, this.d.perception.update(), {
+      verified: confirmed.length > 0, changed: confirmed.length > 0,
+      reasons: confirmed.flatMap((e) => e.reasons).slice(0, 4),
+    });
     const steps = p.steps.map((st) => { const a = (st.args ?? {}) as Record<string, unknown>; const key = a.block ?? a.item ?? a.blueprint ?? a.crop ?? a.target ?? a.animal ?? a.direction ?? ''; return key ? `${st.skill}:${key}` : st.skill; });
-    this.d.memory.recordGoal({ goal: p.goal, goalType: p.goalType, source: p.source, status, summary, durationSec, steps, plan: p.steps, worldId: state.worldId, dimension: state.dim });
+    this.d.memory.recordGoal({ goal: p.goal, goalType: p.goalType, source: p.source, status, summary, durationSec, steps, plan: p.steps, worldId: state.worldId, dimension: state.dim, ...(effectEvidence ? { effectEvidence } : {}) });
     this.d.onGoalEnd?.(status);
     const type = this.d.planner.autonomous ? 'attempt_end' : 'goal_end';
-    this.d.bus.publish(type, status === 'failed' ? 'P1' : 'P3', `尝试「${p.goal}」→ ${status}：${summary}`, { planId: p.id, status, binding: p.binding });
+    this.d.bus.publish(type, status === 'failed' ? 'P1' : 'P3', `尝试「${p.goal}」→ ${status}：${summary}`, { planId: p.id, status, binding: p.binding, effectEvidence });
   }
 
   private reportProjectCompletion(project: Project | undefined) {
@@ -838,6 +880,10 @@ export class Executive {
     if (this.gentlyPreemptedTasks.delete(o.task.id)) return;
     const p = this.plan;
     if (!p || o.task.planId !== p.id || !this.planCurrent(p)) return;
+    const effect = o.result.data?.effectEvidence as EffectEvidence | undefined;
+    if (effect && typeof effect.verified === 'boolean' && typeof effect.changed === 'boolean' && Array.isArray(effect.reasons)) {
+      this.planEffects.push({ verified: effect.verified, changed: effect.changed, reasons: effect.reasons.filter((r) => typeof r === 'string').map((r) => r.slice(0, 160)).slice(0, 3) });
+    }
     this.recordResult(o);
     if (o.result.status === 'succeeded') {
       if (p.index >= p.steps.length) {

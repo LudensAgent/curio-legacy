@@ -2,7 +2,7 @@ import type { HazardKind, WorldMemory } from '../memory/store.ts';
 
 /**
  * 习惯与反思（自学技能的数据来源）：
- * - 找出最近反复成功的同一套步骤 → 提示 LLM 学成技能；重复 3 次以上直接自动习惯化
+ * - 找出最近反复产生已验证效果的同一套步骤 → 提示 LLM 学成技能；重复 3 次以上自动提为候选
  * - 每完成若干个目标，提醒 LLM 做一次反思，写下经验教训
  */
 export interface LearnCandidate {
@@ -15,7 +15,7 @@ export interface LearnCandidate {
 export function learnCandidates(memory: WorldMemory, known: Set<string>): LearnCandidate[] {
   const m = new Map<string, LearnCandidate>();
   for (const g of memory.recentGoals(20)) {
-    if (g.status !== 'succeeded' || !g.steps || !g.plan || g.steps.length < 2) continue;
+    if (g.status !== 'succeeded' || !g.effectEvidence?.verified || !g.effectEvidence.changed || !g.steps || !g.plan || g.steps.length < 2) continue;
     if (g.steps.some((s) => /^(macro|trial|method):/.test(s))) continue;
     const sig = g.steps.join(' → ');
     if (known.has(sig)) continue;

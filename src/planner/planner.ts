@@ -7,6 +7,7 @@ import type { MemoryRecall } from '../memory/types.ts';
 import { normalizeDecision, validateIntentDecision } from '../intentions/decision.ts';
 import type { LlmProvider } from './llm.ts';
 import { setImmediate } from 'node:timers/promises';
+import { queryMechanics } from '../methods/mechanics.ts';
 import type { LlmTrace } from './llm-trace.ts';
 import type { RecipeBook } from '../methods/recipes.ts';
 import { extractJson, ruleProposal, validatePlan, type Plan } from './plan.ts';
@@ -158,6 +159,7 @@ export class Planner {
     const maxRecall = Math.max(0, Math.min(2, this.cfg.llm.maxRecallRounds ?? 2));
     let recalls = 0;
     let recipeQueries = 0;
+    let mechanicsQueries = 0;
     let invalid = 0;
     this.stats.inFlightSince = Date.now();
     try {
@@ -225,6 +227,35 @@ export class Planner {
             this.trace?.end(traceId, { status: 'ok', text, latencyMs, usage, finishReason });
             this.writer?.write({ ts: Date.now(), reason: 'recipes', tier, provider: this.provider.name, ok: true, latencyMs, usage, promptChars, attempt, query: { category: raw.category, item: raw.item } });
             this.bus.publish('recipe_query', 'P3', `查配方：${raw.item ? `物品 ${raw.item}` : `类别 ${raw.category ?? '（列出类别）'}`}`);
+            continue;
+          }
+          if (raw?.kind === 'mechanics') {
+            if (mechanicsQueries >= 2) throw new Error('本次机制/动作接口查询已用完，请依据已知接口选择一个可验证的小尝试');
+            mechanicsQueries++;
+            const result = queryMechanics(String(raw.query ?? '').slice(0, 300), 6);
+            // Novel combinations need deliberate reasoning, even when this
+            // request began as the next routine step of an existing intention.
+            if (tier === 'light') {
+              tier = 'full'; ctx.tier = 'full';
+              this.stats.tiers.escalated++; this.stats.tiers.full++;
+              messages = full();
+              this.bus.publish('llm_escalate', 'P3', '查询可用机制后，保留当前意图并思考新的组合方法');
+            }
+            messages.push({ role: 'assistant', content: text.slice(0, 600) });
+            messages.push({ role: 'user', content: `可用动作接口（只读能力说明，不是现场事实，也没有替你选择玩法）：${JSON.stringify(result).slice(0, 6500)}。剩余查询 ${2 - mechanicsQueries} 次。请联系当前障碍、背包和预期效果，自选已有方法或用 experiment_method 提出一个有验收条件的有限组合试验；允许比较替代办法，不能把预计效果当成已经发生。` });
+            this.trace?.end(traceId, { status: 'ok', text, latencyMs, usage, finishReason });
+            this.writer?.write({ ts: Date.now(), reason: 'mechanics', tier, provider: this.provider.name, ok: true, latencyMs, usage, promptChars, query: raw.query });
+            this.bus.publish('mechanics_query', 'P3', `查询可组合的动作机制：${String(raw.query ?? '通用操作').slice(0, 100)}`);
+            continue;
+          }
+          if (tier === 'light' && Array.isArray(raw.steps) && raw.steps.some((step: any) => step?.skill === 'experiment_method' || String(step?.skill ?? '').startsWith('trial:'))) {
+            tier = 'full'; ctx.tier = 'full';
+            this.stats.tiers.escalated++; this.stats.tiers.full++;
+            messages = full();
+            messages.push({ role: 'assistant', content: text.slice(0, 6000) });
+            messages.push({ role: 'user', content: '你提出了候选机制试验，尚未执行。请先基于完整当前事实核对假设、可用动作、材料与可观测验收条件，再给出最终有限试验计划或修订选择；保留原意图，不把候选或预计产出当成已掌握的事实。' });
+            this.trace?.end(traceId, { status: 'ok', text, latencyMs, usage, finishReason });
+            this.bus.publish('llm_escalate', 'P3', '候选机制试验在执行前转入完整推理');
             continue;
           }
           if (raw?.kind === 'recall') {

@@ -142,3 +142,48 @@ test('installed Pathfinder cannot open or break through an iron door during ordi
   assert.equal(selected.getBlock(node, 1, 0, 0).openable, false);
   assert.deepEqual(neighbors, []);
 });
+
+test('installed Pathfinder dry-walking permission blocks water steps and drops without disabling normal swimming', async () => {
+  const registry = require('minecraft-data')('1.20.1'), Block = require('prismarine-block')(registry);
+  const { Vec3 } = require('vec3'), { Movements } = require('mineflayer-pathfinder');
+  const Move = require('mineflayer-pathfinder/lib/move');
+  const selected: any[] = [];
+  let edge: 'level' | 'drop' = 'level';
+  const bot: any = {
+    registry, game: { dimension: 'overworld', minY: -64 }, entity: { position: new Vec3(0.5, 64, 0.5) },
+    inventory: { items: () => [] },
+    blockAt(position: any) {
+      const p = position.floored();
+      const name = p.x === 1 && p.z === 0
+        ? edge === 'level' ? p.y === 64 ? 'water' : p.y < 64 ? 'stone' : 'air'
+          : p.y === 62 ? 'water' : p.y < 62 ? 'stone' : 'air'
+        : p.y < 64 ? 'stone' : 'air';
+      const block = Block.fromStateId(registry.blocksByName[name].defaultState, 0);
+      block.position = p; return block;
+    },
+    pathfinder: { setMovements: (m: any) => selected.push(m), goto: async () => {} },
+  };
+  const original = new Movements(bot), adapter = new MineflayerAdapter(config, new EventBus());
+  adapter.bot = bot; adapter.mcData = registry;
+  (adapter as any).connectedFlag = true; (adapter as any).normalMovements = original;
+  const signal = new AbortController().signal;
+  // Only select the installed movement policies; no path search, walking or game ticks run.
+  await adapter.moveTo({ kind: 'xz', x: 3, z: 0, range: 1 }, { signal, timeoutMs: 1000, allowSwimming: false });
+  await adapter.moveTo({ kind: 'xz', x: 3, z: 0, range: 1 }, { signal, timeoutMs: 1000 });
+  const [dry, ordinary] = selected;
+  const node = new Move(0, 64, 0, 0, 0), dir = { x: 1, z: 0 };
+  for (const policy of [dry, ordinary]) {
+    edge = 'level';
+    const steps: any[] = [];
+    policy.getMoveForward(node, dir, steps);
+    assert.equal(steps.length, policy === dry ? 0 : 1, 'level water entry follows this call’s permission');
+    edge = 'drop';
+    const drops: any[] = [];
+    policy.getMoveDropDown(node, dir, drops);
+    assert.equal(drops.length, policy === dry ? 0 : 1, 'liquid landing cannot bypass the dry-walking restriction');
+    if (drops.length) assert.equal(drops[0].y, 62);
+  }
+  assert.equal(original.exclusionAreasStep.length, 0, 'the dry request does not mutate the shared base policy');
+  assert.equal(original.infiniteLiquidDropdownDistance, true);
+  assert.equal(ordinary.infiniteLiquidDropdownDistance, true);
+});
