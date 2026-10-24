@@ -174,6 +174,7 @@ export class Planner {
         let finishReason: string | undefined;
         const traceId = this.trace?.begin({ reason: tier === 'light' ? `${ctx.reason}·小决策` : ctx.reason, attempt, provider: this.provider.name }, messages) ?? '';
         const onDelta = this.trace ? (d: { content?: string; reasoning?: string }) => this.trace!.delta(traceId, d) : undefined;
+        const requestedAt = Date.now();
         try {
           const timeout = AbortSignal.timeout(this.cfg.llm.timeoutMs + this.cfg.llm.fakeDelayMs + 1000);
           const c = await this.provider.complete(messages, signal ? AbortSignal.any([signal, timeout]) : timeout, ctx, onDelta);
@@ -182,8 +183,9 @@ export class Planner {
           this.stats.tokenUsage.unreportedCalls++;
           this.stats.errors++;
           this.stats.lastError = String(e?.message ?? e);
-          this.trace?.end(traceId, { status: 'error', error: this.stats.lastError });
-          this.writer?.write({ ts: Date.now(), reason: ctx.reason, tier, provider: this.provider.name, ok: false, error: this.stats.lastError, promptChars });
+          const failedLatencyMs = Date.now() - requestedAt;
+          this.trace?.end(traceId, { status: 'error', error: this.stats.lastError, latencyMs: failedLatencyMs });
+          this.writer?.write({ ts: Date.now(), reason: ctx.reason, tier, provider: this.provider.name, ok: false, error: this.stats.lastError, latencyMs: failedLatencyMs, promptChars });
           throw e;
         }
         // 无效输出和重试同样消耗 token，在计划校验之前统计每次返回。

@@ -1,4 +1,5 @@
 import type { Config } from '../config.ts';
+import { describeNetworkError } from '../network-error.ts';
 import { sleep } from '../util.ts';
 
 export interface ChatMessage {
@@ -45,13 +46,20 @@ export class OpenAICompatibleProvider implements LlmProvider {
 
   async complete(messages: ChatMessage[], signal: AbortSignal, hint?: unknown, onDelta?: OnDelta): Promise<Completion> {
     try {
-      return await this.completeOnce(messages, signal, hint, onDelta);
-    } catch (e: any) {
-      if (this.noThinking(hint) && /^HTTP 4\d\d/.test(String(e?.message)) && /thinking/i.test(String(e?.message))) {
+      try {
+        return await this.completeOnce(messages, signal, hint, onDelta);
+      } catch (e: any) {
+        if (!this.noThinking(hint) || !/^HTTP 4\d\d/.test(String(e?.message)) || !/thinking/i.test(String(e?.message))) throw e;
         this.thinkingParamRejected = true;
-        return this.completeOnce(messages, signal, hint, onDelta);
+        return await this.completeOnce(messages, signal, hint, onDelta);
       }
-      throw e;
+    } catch (error: any) {
+      if (signal.aborted || ['AbortError', 'AbortedError', 'TimeoutError'].includes(error?.name)) throw error;
+      const message = describeNetworkError(error, [this.cfg.apiKey]);
+      if (message === String(error?.message ?? error)) throw error;
+      const detailed = new Error(message, { cause: error });
+      detailed.name = error?.name ?? 'Error';
+      throw detailed;
     }
   }
 
