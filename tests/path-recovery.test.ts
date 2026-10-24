@@ -122,3 +122,29 @@ test('failed corrections are bounded at one obstruction and reset after real rou
     assert.equal(corrections, progress ? 5 : 3);
   }
 });
+
+test('standing over an edge, the bot sneaks back onto the block it actually stands on before planning a path', async () => {
+  const w = fixture();
+  w.put(1, 63, 0, 'air');
+  w.bot.entity.position = new Vec3(1.15, 64, 0.5);
+  const events: string[] = [];
+  (w.adapter as any).bus.on('event', (e: any) => events.push(e.type));
+  const sneaked: boolean[] = [];
+  const set = w.bot.setControlState.bind(w.bot);
+  w.bot.setControlState = (key: string, value: boolean) => {
+    set(key, value);
+    if (key === 'forward' && value) { sneaked.push(!!w.controls.sneak); w.bot.entity.position = new Vec3(0.55, 64, 0.5); }
+  };
+  w.bot.look = async () => {};
+  let startedAt: any = null;
+  w.bot.pathfinder = { goto: async () => { startedAt = w.bot.entity.position.clone(); }, isMoving: () => false, stop() {}, setGoal() {} };
+  assert.deepEqual((w.adapter as any).edgeSupport(), { x: 0, z: 0 });
+  await (w.adapter as any).gotoUnstalled({}, w.opts, (w.adapter as any).actionCheckpoint(w.opts.signal));
+  assert.deepEqual(sneaked, [true], 'sneaking cannot walk off the edge');
+  assert.ok(Math.abs(startedAt.x - 0.5) < 0.1, 'the path starts from the supporting block centre');
+  assert.equal(w.controls.forward, false);
+  assert.equal(w.controls.sneak, false);
+  assert.ok(events.includes('path_steady'));
+  w.bot.entity.position = new Vec3(0.5, 64, 0.5);
+  assert.equal((w.adapter as any).edgeSupport(), null, 'a centred stance needs no correction');
+});

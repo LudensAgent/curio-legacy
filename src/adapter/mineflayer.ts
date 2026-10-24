@@ -153,7 +153,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         const mv = new Movements(bot);
         mv.canDig = true;
         mv.allowSprinting = true;
-        mv.allowParkour = true;
+        // 跑酷跳跃对起跳位置极其敏感：起点不在格子中心就跳不上去，人会卡在方块边上来回抖。普通走路只跳一格台阶。
+        mv.allowParkour = false;
         mv.allow1by1towers = true;
         // 垫脚/搭路用的方块：除了默认的泥土圆石，也用其他常见石头（不用木板原木，免得烧掉建材）
         for (const n of ['cobbled_deepslate', 'netherrack', 'andesite', 'granite', 'diorite', 'stone', 'deepslate', 'tuff']) {
@@ -493,10 +494,14 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (opts.maxDropDown !== undefined && (!this.normalMovements || typeof b.pathfinder.setMovements !== 'function')) throw new Error('No path: 当前寻路器不能配置明确下行范围');
     if (this.normalMovements && typeof b.pathfinder.setMovements === 'function') {
       const movements = Object.assign(Object.create(Object.getPrototypeOf(this.normalMovements)), this.normalMovements);
-      if (!opts.allowTerrainChanges || opts.constructionSafe) {
+      if (opts.constructionSafe) {
         movements.canDig = false; movements.allow1by1towers = false; movements.scafoldingBlocks = [];
+      } else if (!opts.allowTerrainChanges) {
+        // 普通走路不挖墙、不搭柱、不架桥；但像真人一样可以随手拨开树叶（站在树冠上、钻过灌木丛时）。
+        movements.canDig = true; movements.allow1by1towers = false; movements.scafoldingBlocks = [];
+        movements.blocksCantBreak = this.allButLeaves(movements.blocksCantBreak);
       }
-      if (opts.constructionSafe) movements.allowParkour = false;
+      movements.allowParkour = false;
       if (opts.maxDropDown !== undefined) {
         if (!Number.isInteger(opts.maxDropDown) || opts.maxDropDown < 1 || opts.maxDropDown > 32 || target.kind !== 'xyz') throw new Error('BAD_ARGS: 明确下行需要相邻 xyz 落点和 1–32 格上限');
         const from = b.entity.position.floored(), to = { x: Math.floor(target.x), y: Math.floor(target.y), z: Math.floor(target.z) };
@@ -610,6 +615,59 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     await this.gotoUnstalled(goal, opts, check);
   }
 
+  private leafOnlyBreakable: Set<number> | null = null;
+  /** 除树叶以外都不能拆：普通走路只允许拨开树叶 */
+  private allButLeaves(base: Set<number>): Set<number> {
+    if (!this.leafOnlyBreakable) {
+      const registry = this.mcData ?? this.bot?.registry;
+      const blocks: any[] = registry?.blocksArray ?? Object.values(registry?.blocks ?? {});
+      this.leafOnlyBreakable = new Set(blocks.filter((b: any) => !/_leaves$/.test(String(b?.name))).map((b: any) => b.id));
+    }
+    return new Set([...base, ...this.leafOnlyBreakable]);
+  }
+
+  /**
+   * 站在方块边缘、身体中心已经悬空时，Pathfinder 会从“脚下中心那一列”（空气）开始规划，
+   * 第一步和真实物理对不上，于是在边上来回抖。先潜行挪回真正踩着的那一格中心（潜行不会掉下去），再寻路。
+   */
+  private edgeSupport(): { x: number; z: number } | null {
+    const b = this.bot, e = b?.entity;
+    if (!e?.onGround || e.isInWater || e.isInLava || b.vehicle || typeof b.blockAt !== 'function' || typeof b.setControlState !== 'function' || !e.position?.offset) return null;
+    const p = e.position;
+    const supports = (dx: number, dz: number) => {
+      const foot = p.offset(dx, -0.05, dz), cell = foot.floored(), block = b.blockAt(foot);
+      if (!block || /water|lava|magma|campfire|cactus|powder_snow/.test(block.name)) return null;
+      const shapes: number[][] = block.shapes ?? (block.boundingBox === 'empty' ? [] : [[0, 0, 0, 1, 1, 1]]);
+      return shapes.some((sh) => Math.abs(cell.y + sh[4] - p.y) < 0.1) ? cell : null;
+    };
+    if (supports(0, 0)) return null;
+    const cells = [[0.3, 0.3], [0.3, -0.3], [-0.3, 0.3], [-0.3, -0.3]].map(([dx, dz]) => supports(dx, dz)).filter((c): c is any => !!c)
+      .sort((a, c) => Math.hypot(a.x + 0.5 - p.x, a.z + 0.5 - p.z) - Math.hypot(c.x + 0.5 - p.x, c.z + 0.5 - p.z));
+    return cells[0] ? { x: cells[0].x, z: cells[0].z } : null;
+  }
+
+  private async steady(cell: { x: number; z: number }, opts: MoveOpts, check: () => void): Promise<void> {
+    const b = this.bot, e = b.entity, p = e.position;
+    const epoch = this.actionEpoch;
+    const ownsControls = () => epoch === this.actionEpoch && b === this.bot;
+    const tx = cell.x + 0.5, tz = cell.z + 0.5;
+    check();
+    if (typeof b.look === 'function') await this.afterAction(() => raceAbort(b.look(Math.atan2(-(tx - p.x), -(tz - p.z)), e.pitch ?? 0, true), opts.signal, 1000, () => {}), check);
+    b.clearControlStates?.();
+    b.setControlState('sneak', true);
+    b.setControlState('forward', true);
+    try {
+      for (let t = 0; t < 900; t += 50) {
+        await this.afterAction(() => sleep(50, opts.signal), check);
+        const q = b.entity.position;
+        if (Math.hypot(tx - q.x, tz - q.z) < 0.22) break;
+      }
+    } finally {
+      if (ownsControls()) { b.setControlState('forward', false); b.setControlState('sneak', false); }
+    }
+    this.bus.publish('path_steady', 'P3', `站在方块边缘，先挪回脚下那一格中心再走`);
+  }
+
   /** Inspect the nearby obstruction before trying a short correction, then replan. */
   private async gotoUnstalled(goal: any, opts: MoveOpts, check: () => void) {
     const b = this.bot;
@@ -620,6 +678,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     let corrections = 0, recoveryOrigin = b.entity?.position?.clone?.() ?? null;
     for (;;) {
       check();
+      const edge = this.edgeSupport();
+      if (edge) { await this.steady(edge, opts, check); check(); }
       let stalled = false;
       let last = b.entity?.position?.clone?.() ?? null, since = Date.now();
       const watch = setInterval(() => {

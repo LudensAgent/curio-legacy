@@ -188,3 +188,18 @@ test('visual waypoints reject submerged, newly hazardous and waterlogged landing
   adapter.setBlock(floor, 'oak_slab'); adapter.blockProperties.set('4,63,0', { waterlogged: true, type: 'top' });
   assert.equal(vision.navigationWaypoint(target, 12, []), null, 'waterlogged terrain is not certified dry');
 });
+
+test('waypoints avoid the last visible block before an unseen drop and treetop leaves', async () => {
+  const { FakeAdapter } = await import('./fake-adapter.ts');
+  const adapter = new FakeAdapter();
+  const vision = new Vision(adapter);
+  vision.scan();
+  const surfaces = (vision as any).visibleSurfaces as Map<string, { name: string; pos: { x: number; y: number; z: number }; at: number }>;
+  surfaces.clear();
+  const now = Date.now();
+  for (let x = 2; x <= 11; x++) surfaces.set(`${x},63,0`, { name: 'grass_block', pos: { x, y: 63, z: 0 }, at: now });
+  const edge = vision.navigationWaypoint({ x: 30, y: 64, z: 0 }, 12, []);
+  assert.equal(edge?.x, 10.5, 'the block before the unseen continuation is preferred over the visible rim');
+  surfaces.set('12,63,0', { name: 'grass_block', pos: { x: 12, y: 63, z: 0 }, at: now });
+  assert.equal(vision.navigationWaypoint({ x: 30, y: 64, z: 0 }, 12, [])?.x, 11.5, 'once ground beyond it is visible, it is no longer an edge');
+});

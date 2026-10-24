@@ -723,6 +723,8 @@ export class Vision {
       const p = { x: surface.pos.x + 0.5, y: surface.pos.y + 1, z: surface.pos.z + 0.5 };
       const distance = Math.hypot(p.x - here.x, p.z - here.z);
       if (distance < 1.5 || distance > maxDistance || Math.abs(p.y - here.y) > 2) continue;
+      // 不挖不垫只能一格一格往上走：近处高出两格的地面是一堵墙，不是落脚点
+      if (p.y - here.y > 1.2 && distance < 3 * (p.y - here.y)) continue;
       if (excluded.some((e) => Math.hypot(e.x - p.x, e.z - p.z) < 1 && Math.abs(e.y - p.y) < 1)) continue;
       const floor = this.adapter.blockOptics(surface.pos.x, surface.pos.y, surface.pos.z);
       if (floor?.kind !== 'solid' || hazardousFloor(floor.name)) continue;
@@ -732,7 +734,14 @@ export class Vision {
         || !passable(this.adapter.blockOptics(surface.pos.x, surface.pos.y + 2, surface.pos.z))) continue;
       const left = Math.hypot(target.x - p.x, target.z - p.z);
       if (left > remaining + 3) continue; // 可以沿墙侧绕，不能无休止地走回头路。
-      const score = left + Math.abs(target.y - p.y) * 0.5 + distance * 0.08;
+      // 视野里最远的那一格可见地面往往就是坡顶、崖边或树冠边（再往前被挡住）。停在那里，下一段就从边上起步。
+      // 前方一格没有看得见的地面（同高或差一格以内）的落脚点算“边缘”，叶子顶上也尽量不选。
+      const ux = (p.x - here.x) / distance, uz = (p.z - here.z) / distance;
+      const nx = Math.floor(surface.pos.x + 0.5 + ux), nz = Math.floor(surface.pos.z + 0.5 + uz);
+      const ahead = [-1, 0, 1].some((dy) => this.visibleSurfaces.has(keyOf(nx, surface.pos.y + dy, nz)));
+      const edge = left > 1.5 && !ahead ? 2.5 : 0;
+      const leaves = /_leaves$/.test(surface.name) ? 4 : 0;
+      const score = left + Math.abs(target.y - p.y) * 0.5 + distance * 0.08 + edge + leaves;
       if (!best || score < best.score) best = { pos: p, score };
     }
     return best?.pos ?? null;
