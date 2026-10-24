@@ -223,7 +223,10 @@ test('construction cancellation persists a checkpoint and restart reobserves ins
   const result = await constructBuilding(ctx(adapter), reopened, saved, blueprint, 'build');
   assert.equal(result.inspection.complete, true, JSON.stringify(result.inspection.defects));
   assert.equal(reopened.get(project.id)!.temporaryBlocks.length, 0, 'completion requires scaffold cleanup');
-  assert.equal(adapter.placementCount, Object.values(materialCost([...blueprint.cells, ...planScaffolding(blueprint)])).reduce((a, b) => a + b, 0));
+  // 续建不重放：每格最多放一次；脚下本来就是结实自然地面的地板格直接当地板，不必再放
+  const total = Object.values(materialCost([...blueprint.cells, ...planScaffolding(blueprint)])).reduce((a, b) => a + b, 0);
+  const floor = blueprint.cells.filter((c) => c.phase === 'foundation' && c.tags.includes('floor')).length;
+  assert.ok(adapter.placementCount <= total && adapter.placementCount >= total - floor, `${adapter.placementCount} / ${total}`);
 });
 
 test('building observations and artifacts are isolated by actual world and current observation session', async () => {

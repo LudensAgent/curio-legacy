@@ -35,6 +35,8 @@ export interface StateBuildingAdapter extends GameAdapter {
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 const PLANTS = new Set(['short_grass', 'grass', 'tall_grass', 'fern', 'large_fern', 'dead_bush', 'snow', 'dandelion', 'poppy']);
 const NATURAL_GROUND = new Set(['grass_block', 'dirt', 'stone', 'cobblestone', 'gravel', 'sand', 'coarse_dirt', 'podzol', 'mycelium', 'rooted_dirt', 'deepslate', 'netherrack', 'end_stone']);
+/** 可以直接当房子地板的自然地面（结实、不会掉落） */
+const NATURAL_FLOOR = new Set(['grass_block', 'dirt', 'coarse_dirt', 'podzol', 'rooted_dirt', 'mycelium', 'stone', 'deepslate', 'cobblestone', 'cobbled_deepslate', 'andesite', 'granite', 'diorite', 'tuff', 'calcite', 'sandstone', 'red_sandstone', 'terracotta', 'mud', 'packed_mud', 'clay', 'netherrack', 'end_stone', 'moss_block']);
 const HAZARDS = new Set(['water', 'lava', 'fire', 'soul_fire', 'magma_block', 'campfire', 'soul_campfire', 'powder_snow']);
 const replaceable = (name: string) => AIR.has(name) || PLANTS.has(name);
 /** 整地时可以清掉的自然东西：植物、树、雪，以及会被铲平的泥土石头；自己插的火把也可以拿掉 */
@@ -55,6 +57,8 @@ function cellDefect(adapter: StateBuildingAdapter, cell: BuildingCell, project: 
   const expected = rotateProperties(cell.properties, project.rotation);
   const actual = actualState(adapter, pos);
   if (!actual) return { cellId: cell.id, pos, kind: 'unknown', expected: cell.name, actual: null };
+  // 房子的地板：脚下本来就是结实的自然地面（草方块、泥土、石头…）就直接当地板用，像玩家一样不必挖掉再铺圆石
+  if (actual.name !== cell.name && cell.phase === 'foundation' && cell.tags.includes('floor') && NATURAL_FLOOR.has(actual.name)) return null;
   if (actual.name !== cell.name) return { cellId: cell.id, pos, kind: AIR.has(actual.name) ? 'missing' : 'wrong_block', expected: cell.name, actual: actual.name };
   if (Object.keys(expected).length && !adapter.blockStateAt) return { cellId: cell.id, pos, kind: 'unsupported', expected: `${cell.name} ${JSON.stringify(expected)}`, actual: actual.name };
   if (Object.entries(expected).some(([key, value]) => String(actual.properties[key]) !== String(value))) return { cellId: cell.id, pos, kind: 'wrong_state', expected: `${cell.name} ${JSON.stringify(expected)}`, actual: `${actual.name} ${JSON.stringify(actual.properties)}` };
@@ -352,9 +356,29 @@ export async function constructBuilding(ctx: SkillCtx, archive: BuildingArchive,
     return finish();
   }
   const scaffolding = planScaffolding(blueprint);
-  const siteDefects = inspectScaffoldSite(adapter, scaffolding, project);
+  let siteDefects = inspectScaffoldSite(adapter, scaffolding, project);
+  // 脚手架位置上的草丛、花、树叶、凸起的自然土石：顺手清掉再看，而不是因为一丛草就整栋不盖
+  const removable = siteDefects.filter((d) => d.kind === 'obstruction' && d.actual && (PLANTS.has(d.actual) || siteClearable(d.actual)));
+  if (removable.length && removable.length === siteDefects.filter((d) => d.kind === 'obstruction').length) {
+    for (const d of removable) {
+      if (Date.now() >= ctx.deadline - 5000) break;
+      try {
+        const me = adapter.state().pos;
+        if (Math.floor(me.x) === d.pos.x && Math.floor(me.z) === d.pos.z && Math.floor(me.y) - 1 === d.pos.y) continue; // 脚下不挖
+        if (Math.hypot(d.pos.x + 0.5 - me.x, d.pos.y + 0.5 - me.y, d.pos.z + 0.5 - me.z) > 4) {
+          await adapter.moveTo({ kind: 'reach_block', pos: d.pos }, { signal: ctx.signal, timeoutMs: Math.max(1, Math.min(10000, ctx.deadline - Date.now())), constructionSafe: true });
+          checkSession();
+        }
+        const r = await adapter.dig(d.pos, ctx.signal);
+        checkSession();
+        if (r.ok && AIR.has(adapter.blockAt(d.pos) ?? 'unknown')) result.cleared++;
+      } catch (error) { if (isAbort(error)) throw error; }
+    }
+    siteDefects = inspectScaffoldSite(adapter, scaffolding, project);
+  }
   if (siteDefects.length) {
     survey.defects.push(...siteDefects);
+    result.failures.push({ cellId: 'scaffolding', reason: `脚手架位置被占：${[...new Set(siteDefects.map((d) => `${d.actual ?? '看不清'}@${d.pos.x},${d.pos.y},${d.pos.z}`))].slice(0, 3).join('、')}` });
     return finish();
   }
   const totalCost = materialCost([...blueprint.cells, ...scaffolding]);

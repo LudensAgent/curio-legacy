@@ -169,3 +169,21 @@ test('选址：要填的坑深度不超过 maxFoundationDepth', async () => {
     assert.equal(checkSiteAt(w, memory, { ...spec, maxFoundationDepth: 1 }, { x: 3, y: 64, z: 3 }, 0).ok, false);
   } finally { memory.close(); }
 });
+
+test('脚手架位置上有一丛草：顺手清掉照样盖；脚下的草地直接当地板', async () => {
+  const w = new InstantBuildWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  for (let x = -12; x <= 12; x++) for (let z = -12; z <= 12; z++) w.setBlock({ x, y: 63, z }, 'grass_block');
+  const ctx = makeCtx(w);
+  try {
+    const bp = compileBuilding(spec);
+    for (const [name, count] of Object.entries(materialCost([...bp.cells, ...planScaffolding(bp)]))) w.inv.set(name, count + 8);
+    const origin = { x: 2, y: 64, z: 2 };
+    for (const c of planScaffolding(bp).filter((c) => c.pos.y === 0)) w.setBlock(rotatePosition(c.pos, origin, 0), 'grass');
+    const v = build.validate({ blueprint: 'hut', origin, rotation: 0 }, w);
+    if (!v.ok) throw new Error(v.error);
+    const r = await build.run(ctx, v.args);
+    assert.equal(r.status, 'succeeded', r.summary);
+    assert.ok(w.actions.filter((a) => a === 'dig:grass_block').length <= 1, '地板直接用草地（最多门口台阶那一格换成圆石），不再挖掉 25 格草地重铺');
+  } finally { ctx.memory.close(); }
+});
