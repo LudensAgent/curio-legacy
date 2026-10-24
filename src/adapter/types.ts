@@ -213,6 +213,11 @@ export interface GameAdapter {
   dismount?(signal: AbortSignal): Promise<ActionResult>;
   /** 操控正在乘坐的载具朝 target 前进；stop() 返回 true 时停下 */
   ride?(target: { x: number; z: number }, signal: AbortSignal, opts: { timeoutMs: number; stop?: () => boolean }): Promise<ActionResult & { arrived: boolean; blocked?: boolean; moved: number }>;
+  /**
+   * 甩一次竿钓鱼：手持 fishing_rod 朝 aim（水面方块）甩出，咬钩自动收竿；timeoutMs 内没咬钩就收竿（reason NO_BITE）。
+   * caught = 实际进了背包的东西（cod、salmon…）；没有钓鱼竿 reason = NO_ROD
+   */
+  fish?(signal: AbortSignal, opts: { aim?: Vec3Like; timeoutMs: number }): Promise<ActionResult & { caught?: string }>;
   chat(text: string): void;
 }
 

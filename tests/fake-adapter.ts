@@ -357,8 +357,27 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
   async equipWeapon() {}
   async attack(id: number) {
     this.actions.push(`attack:${id}`);
+    const hit = this.entities.find((e) => e.id === id);
     this.entities = this.entities.filter((e) => e.id !== id);
+    // 打碎的船掉出船物品（放船时记下的是哪种船）
+    if (hit && /boat|raft/.test(hit.name) && hit.kind !== 'item') {
+      this.entities.push({ id: id + 500, name: `item:${this.boatItems.get(id) ?? 'oak_boat'}`, kind: 'item', pos: { ...hit.pos }, dist: 0, count: 1 });
+    }
     return true;
+  }
+  /** 放下的船实体 id → 船物品名 */
+  boatItems = new Map<number, string>();
+  /** 每一竿钓到什么（用完后默认 cod）；写 null 表示这一竿没咬钩 */
+  fishCatches: (string | null)[] = [];
+  async fish(signal: AbortSignal, opts: { aim?: Vec3Like; timeoutMs: number }) {
+    throwIfAborted(signal);
+    if (!(this.inv.get('fishing_rod') ?? 0)) return { ok: false, reason: 'NO_ROD' };
+    this.actions.push(`fish:${opts.aim ? this.nameAt(opts.aim.x, opts.aim.y, opts.aim.z) : '?'}`);
+    await sleep(10, signal);
+    const c = this.fishCatches.length ? this.fishCatches.shift()! : 'cod';
+    if (!c) return { ok: false, reason: 'NO_BITE' };
+    this.inv.set(c, (this.inv.get(c) ?? 0) + 1);
+    return { ok: true, caught: c };
   }
   async look(yaw: number, pitch: number) {
     this.yaw = yaw;
@@ -384,6 +403,7 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
     if (target.kind === 'block' && /_boat$/.test(item)) {
       this.inv.set(item, this.inv.get(item)! - 1);
       const id = 9000 + this.entities.length;
+      this.boatItems.set(id, item);
       this.entities.push({ id, name: 'boat', kind: 'other', pos: { x: target.pos.x + 0.5, y: target.pos.y + 1, z: target.pos.z + 0.5 }, dist: 0, height: 0.6 });
       return { ok: true, spawned: 'boat' };
     }

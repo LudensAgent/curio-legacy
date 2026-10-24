@@ -1609,6 +1609,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const Vec3 = require('vec3').Vec3;
       // 放置实体类物品（船、矿车、盔甲架、刷怪蛋）：对着方块顶面放
       if (/_boat$|_raft$|_spawn_egg$|^armor_stand$|^end_crystal$/.test(item)) {
+        // placeEntity 对船用 forceLook:'ignore' 再发 use_item：服务器按“当前视线”射线找水面，所以必须先看向目标水面，
+        // 否则船会放到别处或根本放不下
+        if (/_boat$|_raft$/.test(item)) await this.afterAction(() => b.lookAt(block.position.offset(0.5, ['water', 'bubble_column'].includes(block.name) ? 0.9 : 1, 0.5), true), check);
         const entity = await this.afterAction(() => raceAbort(b.placeEntity(block, new Vec3(0, 1, 0)), signal, 6000, () => {}), check);
         return { ok: true, spawned: (entity as any)?.name ?? item };
       }
@@ -1692,6 +1695,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const water = (blk: any) => !!blk && (blk.name === 'water' || blk.name === 'bubble_column' || String(blk.getProperties?.().waterlogged) === 'true');
     const passable = (blk: any) => !blk || blk.boundingBox === 'empty';
     let speed = 0;
+    // 服务器不认可上报的位置（撞到东西 / moved wrongly）时会回发 vehicle_move 把船拉回去：
+    // 以服务器为准重新同步，否则本地以为在前进、服务器那边船其实没动，越错越远
+    const Vec3c = require('vec3').Vec3;
+    const resync = (pk: any) => {
+      if (!isBoat || b.vehicle !== v || !Number.isFinite(pk?.x)) return;
+      v.position = new Vec3c(pk.x, pk.y, pk.z);
+      b.entity.position = new Vec3c(pk.x, pk.y + 0.4, pk.z);
+      speed = 0;
+    };
+    if (isBoat) b._client.on('vehicle_move', resync);
     const tick = () => (typeof b.waitForTicks === 'function' ? raceAbort(b.waitForTicks(1), signal, 1000, () => {}) : sleep(50, signal));
     try {
       if (isBoat) b.physicsEnabled = false; // 坐船期间不模拟玩家自身的重力/碰撞（下船时恢复）
@@ -1731,11 +1744,60 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       return { ok: false, reason: 'TIMEOUT', arrived: false, moved: v.position.distanceTo(start) };
     } finally {
       if (isBoat) {
+        try { b._client.off('vehicle_move', resync); } catch { /* ignore */ }
         try { b._client.write('steer_boat', { leftPaddle: false, rightPaddle: false }); } catch { /* ignore */ }
         if (!b.vehicle) b.physicsEnabled = true;
       }
       try { if (b.vehicle && !isBoat) b.moveVehicle(0, 0); } catch { /* ignore */ }
     }
+  }
+
+  /**
+   * 钓一次鱼：手持钓鱼竿看向 aim（水面方块）甩竿，mineflayer 的 bot.fish() 在浮漂下沉时自动收竿并 resolve。
+   * timeoutMs 内没咬钩就主动收竿（NO_BITE）；浮漂挂到方块/实体上被收回算 CANCELLED。caught = 实际进背包的东西。
+   */
+  async fish(signal: AbortSignal, opts: { aim?: Vec3Like; timeoutMs: number }): Promise<ActionResult & { caught?: string }> {
+    const check = this.actionCheckpoint(signal);
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
+    const b = this.bot;
+    if (typeof b.fish !== 'function') return { ok: false, reason: 'UNSUPPORTED' };
+    if (!(await this.equipNamed('fishing_rod', check))) return { ok: false, reason: 'NO_ROD' };
+    const counts = () => {
+      const m = new Map<string, number>();
+      for (const it of b.inventory.items()) m.set(it.name, (m.get(it.name) ?? 0) + it.count);
+      return m;
+    };
+    const before = counts();
+    if (opts.aim) {
+      const Vec3 = require('vec3').Vec3;
+      // 瞄准水面上方一点，浮漂抛物线落进水里
+      await this.afterAction(() => b.lookAt(new Vec3(opts.aim!.x + 0.5, opts.aim!.y + 1.4, opts.aim!.z + 0.5), true), check);
+    }
+    let pending = true;
+    const reelIn = () => {
+      // 只在手上还是钓鱼竿时收竿：任务已被接管、手上换了东西时右键可能误用别的物品
+      if (pending && b === this.bot && b.heldItem?.name === 'fishing_rod') { try { b.activateItem(); } catch { /* ignore */ } }
+      pending = false;
+    };
+    const cast: Promise<void> = b.fish();
+    cast.then(() => { pending = false; }, () => { pending = false; });
+    try {
+      await this.afterAction(() => raceAbort(cast, signal, Math.max(3000, opts.timeoutMs), () => {}), check);
+    } catch (e: any) {
+      if (e instanceof TimeoutError || e?.name === 'TimeoutError') { reelIn(); return { ok: false, reason: 'NO_BITE' }; }
+      if (e instanceof AbortedError || e?.name === 'AbortedError') { reelIn(); throw e; }
+      return { ok: false, reason: /cancel/i.test(String(e?.message)) ? 'CANCELLED' : String(e?.message ?? e) };
+    }
+    // 收竿后鱼要飞过来一会儿才进背包
+    const until = Date.now() + 2500;
+    let gained: string[] = [];
+    while (Date.now() < until) {
+      await this.afterAction(() => sleep(150, signal), check);
+      const now = counts();
+      gained = [...now].filter(([n, c]) => n !== 'fishing_rod' && c > (before.get(n) ?? 0)).map(([n, c]) => (c - (before.get(n) ?? 0) > 1 ? `${n}×${c - (before.get(n) ?? 0)}` : n));
+      if (gained.length) break;
+    }
+    return gained.length ? { ok: true, caught: gained.join('、') } : { ok: true, reason: 'NOT_COLLECTED' };
   }
 
   chat(text: string) {
