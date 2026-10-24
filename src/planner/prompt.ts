@@ -152,7 +152,7 @@ project={title,successCondition,milestones:[{title,condition}]}，同一时间�
 技能清单不是玩法清单：use_item、interact、ride、dismount 就是玩家的右键和方向键，dig、climb_up 是左键挖和垫方块往上爬；self.around 是身边一圈（脚下、头顶、哪边能走），被困时先用它们离开那里。常规做法走不通（被挡住、够不着、太慢、太危险）时，想想真正的玩家会用什么物品、方块或载具解决，用它们组合出来；程序不替你想。好用的组合可用 learn_skill 记下（简单格式 {name,description,steps:[{skill,args}]} 即可，验收条件由程序按最后一步自动推导）。lessons 里标【亲历】的是程序根据真实经历记下的（在哪死过、什么做法反复失败），danger_zones 是出过事的地点：别在那里重复同样的做法。my_skills 是自己学过的组合，可以直接当技能用。确实做不到时在 missing_ability 写一句你想做什么。不要把缺材料自动改写为无关囤货。learn_skill 仅为待试验组合，注册名称不等于已学会。lesson 是有来源的推断，memory_note 不得伪造事实。
 learn_skill 的完整格式为 {name,description,parameters:{amount:{type:"integer",default:4,min:1,max:16}},program:{type:"sequence",steps:[{type:"call",skill:"gather",args:{block:"stone",count:{param:"amount"}}}]},postcondition:{type:"inventory_min",item:"cobblestone",count:{param:"amount"}}}。program 还可用 {type:"if",condition,then,else} 或 {type:"repeat",times,body}，循环有界。候选 trial 可以在游玩中试用（配置了隔离试验世界时只在那里试），在两个不同情境里经真实状态验收后才晋升 method；程序不替你选择要学什么。
 
-视觉仅约 ${fov}° 面前视锥，遮挡和光照有效。visible_resources 是亲眼所见，remembered_resources 是可能过期的旧观察；vision.recent_sightings 是刚走出视野的生物（hunt 会走到最后看见它的地方），vision.visible_drops 是看得见的掉落物（可用 pickup_items 去捡）；未去过的位置未知。附近没看见树只是否定本地观察范围内的木料线索，不能推断整个世界无树。gather 只能采已知资源；若下一步依赖尚未得到的观察，先获得证据再决定，不能预设一定发现资源。观察边走边发生：explore 沿途张望，带 until 一看见就停；gather/hunt 找不到会自己转头找。look_around 只用于专门找某样东西（for）或看某个方向（direction），不要当例行动作或接在 explore 后；原地且事实未变时再次扫视通常没有新信息。行动中感知持续更新，已有信息足够时直接做出选择。不要用管理指令或种子定位资源。sleep 只在主世界安全，且只有 time.can_sleep 为 true（夜里）才睡得着。take_items 只能拿 known_chests 里记得有的东西。不同维度的位置不能直接 goto。
+视觉仅约 ${fov}° 面前视锥，遮挡和光照有效。visible_resources 是亲眼所见，remembered_resources 是可能过期的旧观察；vision.recent_sightings 是刚走出视野的生物（hunt 会走到最后看见它的地方），vision.visible_drops 是看得见的掉落物（可用 pickup_items 去捡）；未去过的位置未知。附近没看见树只是否定本地观察范围内的木料线索，不能推断整个世界无树。gather 只能采已知资源；若下一步依赖尚未得到的观察，先获得证据再决定，不能预设一定发现资源。观察边走边发生：explore 沿途张望，带 until 一看见就停；gather/hunt 找不到会自己转头找。look_around 只用于专门找某样东西（for）或看某个方向（direction），不要当例行动作或接在 explore 后；原地且事实未变时再次扫视通常没有新信息。行动中感知持续更新，已有信息足够时直接做出选择。不要用管理指令或种子定位资源。sleep 只在主世界安全；背包有床时黄昏或天黑就 sleep（黄昏会先放床等天黑），跳过黑夜并设重生点，比挖坑熬一夜好。take_items 只能拿 known_chests 里记得有的东西。不同维度的位置不能直接 goto。
 若附带建筑图片，它们是作品实地固定机位的射线语义色可视化，只有观测到的轮廓/遮挡/大类色彩，不能由此声称看到了原版材质细节。请结合自己的偏好、版本差异、功能缺陷和使用反馈成对比较；外观判断属于主观评价，不替代结构验收，不用自评分上涨证明进化。
 
 配方是玩出来的记忆（拿到过材料才知道）。需要时先查（只读，每次决策最多 3 次）：{"kind":"recipes","category":"<tools|weapons|armor|transport|food|light|workstations|storage|building|redstone|materials|misc>"} 看这类你知道哪些、材料够不够；{"kind":"recipes","item":"物品名","count":数量} 看整笔账（account：拿背包抵扣后还差哪些原材料、要先做哪些中间品）。采集要有目的：想好接下来要做什么 → 算出差多少 → 采齐再做；gather 写 for（{"item":"要做的东西","count":数量}）会按缺口算该采几个、够了就不采，不要随手定 8、16 个；build 缺料时会把缺口折算成原材料。
@@ -404,7 +404,7 @@ export function lightSystemPrompt(persona: string): string {
 - recent_thread 是你刚才几次的决定、想法和结果，my_notes 是你写给自己的笔记：接着自己的思路走，沿用已经得出的结论和方向（比如目的地），除非新事实推翻它；repeated_failures 里反复失败的做法别再原样重试。
 - 末尾“此刻/自上次决定以来”是刚测到的事实，最先看：旧判断（如“还在水里”）与之不符就作废，别照抄；做过的、背包已有的不再做。
 - 可选 note：写一句接下来几分钟要记住的事（目的地、发现、教训；位置写坐标，不写“东南3格”这种走两步就失效的说法）；可选 then：做完这几步之后打算做什么。
-- lessons/danger_zones 是吃过的亏；my_skills 可直接用。sleep 要 time.can_sleep；take_items 只拿 known_chests 里有的。
+- lessons/danger_zones 是吃过的亏；my_skills 可直接用。有床时黄昏/天黑就 sleep（跳过黑夜、设重生点，胜过挖坑）；take_items 只拿 known_chests 里有的。
 - 学到东西写一句 lesson；好用的组合写 learn_skill {"name","description","steps":[…]}；做不到写 missing_ability。
 - 观察是边走边发生的：explore 带 until（可写 "cow|sheep" 或 "animal"）一看见就停；gather/hunt 找不到会自己转头找、会走到刚才看见的地方。
 - 除了组合动作，还有玩家的“右键/方向键/左键”：use_item、interact、ride、dismount、dig（对着方向挖）、climb_up（垫方块往上爬）。常规做法走不通时，想想真正的玩家会怎么做。

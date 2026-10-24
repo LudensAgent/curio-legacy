@@ -9,7 +9,8 @@ import { BuildingArchive } from '../building/archive.ts';
 import { constructBuilding } from '../building/engine.ts';
 import { compileBuilding, DEFAULT_SPEC, materialCost, normalizeSpec, rotatePosition, type BuildingSpec, type Rotation } from '../building/spec.ts';
 import type { WorldMemory } from '../memory/store.ts';
-import { throwIfAborted } from '../util.ts';
+import { sleep as delay, throwIfAborted } from '../util.ts';
+import { canSleepAt } from '../perception/perception.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill } from './types.ts';
 
 export const BLUEPRINTS = {
@@ -293,15 +294,36 @@ export const buildingArchive: Skill<{ operation: string; projectId?: string; oth
   },
 };
 
+/** 把 mineflayer / 服务器的睡觉失败原因翻成人话，并说明该怎么办 */
+export function sleepReason(reason?: string): string {
+  const r = String(reason ?? '');
+  if (r === 'NO_BED') return '背包里没有床，附近也没有床（3 块羊毛 + 3 块木板可以做一张）';
+  if (r === 'NO_SPACE' || r === 'PLACE_FAILED') return '身边没有能放床的平地（床要两格平整空地）：换块平地再睡';
+  if (/monster/i.test(r)) return '附近有怪物，不能睡：先打掉或躲开它们，或者用 shelter 围起来再睡';
+  if (/not night|day/i.test(r)) return '还没到能睡的时候';
+  if (/occupied/i.test(r)) return '这张床有人在睡';
+  if (/far/i.test(r)) return '离床太远';
+  return r || '未知原因';
+}
+
 export const sleepSkill: Skill<{}> = {
   name: 'sleep',
-  description: '主世界夜里睡在身边的床上（没有就放下背包里的床），跳过黑夜并设置重生点。下界和末地禁止尝试睡床。',
+  description: '主世界天黑后睡在床上（没有就放下背包里的床），跳过黑夜并设重生点；黄昏时会先放好床等天黑再睡。下界和末地禁止。',
   argsDoc: '{}', timeoutMs: 120000, movement: false,
   validate() { return { ok: true, args: {} }; },
   async run(ctx) {
     const s = ctx.adapter.state();
     if (s.dim !== 'overworld') return fail('WRONG_DIMENSION', '只能在主世界睡床；当前维度的床会爆炸');
-    if (s.isDay) return fail('ERROR', '只能在夜里睡觉');
+    // 能不能上床看的是“可睡时段”（12542–23459 刻），不是 isDay：黄昏时 isDay 仍为真但马上就能睡
+    const tod = ((s.timeOfDay % 24000) + 24000) % 24000;
+    if (!canSleepAt(tod)) {
+      const waitTicks = 12542 - tod;
+      // 离天黑还早：说清楚还要多久，别白跑一趟
+      if (waitTicks < 0 || waitTicks > 1600) {
+        const mins = Math.max(1, Math.round(((waitTicks + 24000) % 24000) / 1200));
+        return fail('ERROR', `现在还是白天，大约 ${mins} 分钟后才能睡；先做别的事，天黑（time.can_sleep=true）或黄昏时再 sleep`);
+      }
+    }
     try {
       // 先去自己的床或看见过的床（昨晚放下的那张），附近没有才放背包里的床
       const BEDS = ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black'].map((c) => `${c}_bed`);
@@ -310,10 +332,21 @@ export const sleepSkill: Skill<{}> = {
         ctx.progress(0.2, `走向 ${bed.dist} 格外${bed.from === 'memory' ? '记得' : '看到'}的床`);
         await ctx.adapter.moveTo({ kind: 'near', pos: bed.pos, range: 2 }, { signal: ctx.signal, timeoutMs: Math.max(5000, ctx.deadline - Date.now() - 30000) });
       }
+      // 黄昏：像玩家一样先站在床边（需要时先把床放下），等天黑那一刻躺上去
+      let waited = 0;
+      while (!canSleepAt(ctx.adapter.state().timeOfDay) && Date.now() < ctx.deadline - 15000) {
+        throwIfAborted(ctx.signal);
+        const now = ctx.adapter.state();
+        if (now.hp < s.hp - 2) return fail('ERROR', `等天黑时受到伤害（生命 ${Math.round(now.hp)}），先处理威胁再睡`);
+        ctx.progress(0.4, '在床边等天黑');
+        await delay(1000, ctx.signal);
+        waited++;
+      }
+      if (!canSleepAt(ctx.adapter.state().timeOfDay)) return fail('ERROR', `等了 ${waited} 秒还没到能睡的时候，稍后再 sleep`);
       const r = await ctx.adapter.sleepInBed(ctx.signal);
-      if (!r.ok) return fail(r.reason === 'NO_BED' ? 'MISSING_MATERIALS' : 'ERROR', `睡不了：${r.reason}`);
+      if (!r.ok) return fail(r.reason === 'NO_BED' ? 'MISSING_MATERIALS' : 'ERROR', `睡不了：${sleepReason(r.reason)}`);
       if (r.bedPos) { ctx.memory.setBase(s.dim, r.bedPos); ctx.memory.addLandmark('discovery', '我的床', s.dim, r.bedPos, 4); }
-      return ok('睡了一觉，天亮了（重生点已设在床边）');
+      return ok(`${waited ? `在床边等了 ${waited} 秒天黑，` : ''}睡了一觉，天亮了（重生点已设在床边）`);
     } catch (e) { if (isAbort(e)) throw e; return fail(codeFromError(e), `睡觉出错：${(e as Error).message}`); }
   },
 };

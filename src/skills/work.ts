@@ -1,7 +1,7 @@
 import { describePlan, materialPlan } from '../methods/shortfall.ts';
 import { lookAround, surface } from './movement.ts';
 import { findStation, rememberStation } from './stations.ts';
-import { dist3 } from '../util.ts';
+import { dist3, sleep } from '../util.ts';
 import { codeFromError, clampInt, fail, isAbort, obj, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 import { craftReservationConflict } from '../projects/reservations.ts';
 import { config } from '../config.ts';
@@ -447,14 +447,23 @@ export const eat: Skill<{}> = {
     }
     try {
       // 像人一样一次吃饱：饱食度到 18 以上（能自然回血）或吃完为止，而不是吃一口就走、过一会儿又被饿意打断
-      let bites = 0;
+      // 吃没吃进去以饥饿值为准：服务器的饥饿值更新会晚到一会儿，咬完等它到了再判断，别把“没吃进去”当成吃过了
+      const start = ctx.adapter.state().food;
+      if (start >= 20) return ok('已经饱了，不用吃', { bites: 0 });
+      let bites = 0, eaten = 0;
       do {
         const before = ctx.adapter.state().food;
-        await ctx.adapter.eat(ctx.signal);
+        const used = await ctx.adapter.eat(ctx.signal);
+        if (used === false) break;
         bites++;
-        if (ctx.adapter.state().food <= before) break; // 吃不进去（满了或食物无效）
-      } while (bites < 6 && ctx.adapter.state().food < 18 && ctx.adapter.hasFood() && Date.now() < ctx.deadline - 2500);
-      return ok(`进食完成（吃了 ${bites} 次），饥饿值 ${ctx.adapter.state().food}`, { bites });
+        const until = Date.now() + 1500;
+        while (ctx.adapter.state().food <= before && Date.now() < until) await sleep(100, ctx.signal);
+        if (ctx.adapter.state().food <= before) break; // 吃不进去（满了、被打断或食物无效）
+        eaten++;
+      } while (eaten < 6 && ctx.adapter.state().food < 18 && ctx.adapter.hasFood() && Date.now() < ctx.deadline - 2500);
+      const food = ctx.adapter.state().food;
+      if (!eaten) return fail('ERROR', `没吃进去：试了 ${bites} 口，饥饿值还是 ${food}${food >= 20 ? '（已经饱了）' : '（可能被打断或手上换了东西），稍后再试'}`, { bites });
+      return ok(`吃了 ${eaten} 口，饥饿值 ${start} → ${food}`, { bites: eaten });
     } catch (e) {
       if (isAbort(e)) throw e;
       return fail(codeFromError(e), `进食失败：${(e as Error).message}`);

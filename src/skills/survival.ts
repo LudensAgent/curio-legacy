@@ -1,6 +1,9 @@
 import { sleep, throwIfAborted } from '../util.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 import { lookAround } from './movement.ts';
+import { sleepSkill } from './build.ts';
+import { findStation } from './stations.ts';
+import { canSleepAt } from '../perception/perception.ts';
 
 /** 可以用来封顶/搭建的方块（不含会下落的沙子沙砾） */
 export const PLACEABLE = [
@@ -19,9 +22,11 @@ const FISH = new Set(['cod', 'salmon']);
 export const hasPlaceable = (inv: { name: string; count: number }[]) => inv.some((i) => PLACEABLE.includes(i.name) && i.count > 0);
 
 // ------------------------------------------------------------------ shelter
+const BED_NAMES = ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black'].map((c) => `${c}_bed`);
+
 export const shelter: Skill<{ until: 'day' | 'healed' }> = {
   name: 'shelter',
-  description: '就地挖一个 3 格深的坑钻进去，在地表封顶并留出两格空间，躲到天亮/回血（需要至少 1 个泥土/圆石/木板/原木等方块）。夜晚或低血量时的保命手段',
+  description: '夜里保命：有床且附近没怪就先睡一觉；否则就地挖 3 格深的坑钻进去封顶，躲到天亮/回血（需要 1 个泥土/圆石/木板等方块）',
   argsDoc: '{"until"?: "day|healed"}',
   timeoutMs: 150000,
   movement: false,
@@ -34,7 +39,21 @@ export const shelter: Skill<{ until: 'day' | 'healed' }> = {
     throwIfAborted(signal);
     const s0 = adapter.state();
     if (!s0.connected || !s0.alive || !s0.observationReady) return fail('NOT_CONNECTED', '当前状态无法确认，不能挖避难所');
-    if (s0.inWater || s0.inLava || !s0.onGround) return fail('ERROR', '必须在干燥地面上挖避难所');
+    // 有床又到了（或快到）睡觉的时候：玩家会直接睡一觉跳过黑夜，而不是挖坑熬一整夜
+    let sleepNote = '';
+    if (args.until === 'day' && s0.dim === 'overworld' && !s0.inWater && !s0.inLava) {
+      const tod = ((s0.timeOfDay % 24000) + 24000) % 24000;
+      const night = canSleepAt(tod) || (tod >= 11000 && tod < 12542);
+      const hasBed = s0.inventory.some((i) => i.name.endsWith('_bed') && i.count > 0) || !!findStation(ctx, BED_NAMES, 32);
+      const danger = ctx.senses.perceivedEntities(12).some((e) => e.kind === 'hostile');
+      if (night && hasBed && !danger) {
+        ctx.progress(0.05, '有床：先试着睡一觉');
+        const r = await sleepSkill.run(ctx, {});
+        if (r.status === 'succeeded') return { ...r, summary: `有床就没挖坑：${r.summary}` };
+        sleepNote = `（想先睡觉但没成：${r.summary}）`;
+      }
+    }
+    if (s0.inWater || s0.inLava || !s0.onGround) return fail('ERROR', `必须在干燥地面上挖避难所${sleepNote}`);
     if (!hasPlaceable(s0.inventory)) return fail('MISSING_MATERIALS', '背包里没有可以封顶的方块（泥土/圆石/木板/原木）');
     const here = { x: Math.floor(s0.pos.x), y: Math.floor(s0.pos.y), z: Math.floor(s0.pos.z) };
     if (pitProblem(adapter, here)) {
