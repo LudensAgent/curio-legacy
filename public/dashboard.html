@@ -49,6 +49,13 @@
   .row { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; }
   .row span:first-child { color: var(--dim); }
   .mono { font-family: var(--mono); font-size: 12px; }
+  .mindgrid { display: grid; grid-template-columns: 1.1fr 1.3fr 1fr 1fr; gap: 14px; overflow: auto; }
+  @media (max-width: 1100px) { .mindgrid { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 760px) { .mindgrid { grid-template-columns: 1fr; } }
+  .mindlist li { font-size: 12px; line-height: 1.45; margin-bottom: 4px; }
+  .mindlist .k { color: var(--dim); font-size: 11px; }
+  .moodrow { display: grid; grid-template-columns: 3em 1fr; align-items: center; gap: 6px; font-size: 11px; }
+  .moodrow .bar { margin: 3px 0; }
   .bar { height: 2px; background: var(--line); margin: 2px 0 10px; }
   .bar i { display: block; height: 100%; background: var(--ink); transition: width .4s; }
   .goal { font-size: 18px; font-weight: 600; margin: 0 0 4px; letter-spacing: -.01em; }
@@ -181,7 +188,42 @@
     </section>
   </div>
 
-  <div class="grid-stack-item" gs-id="vision" gs-x="0" gs-y="11" gs-w="6" gs-h="12">
+  <div class="grid-stack-item" gs-id="mind" gs-x="0" gs-y="11" gs-w="12" gs-h="12">
+    <section class="grid-stack-item-content">
+      <h2>心智（念头 · 情绪 · 议程 · 窍门 · 日记）<span class="opts mono" id="mindMode"></span></h2>
+      <div class="fill mindgrid">
+        <div>
+          <div class="sub">此刻的感受</div>
+          <div class="thought" id="mindFeeling">—</div>
+          <div id="mindMood"></div>
+          <div class="sub">手上的活</div>
+          <div class="goal" id="mindActivity">—</div>
+          <div class="thought" id="mindActivityWhy"></div>
+          <div class="row"><span>做完接着</span><span id="mindNext" class="mono" style="text-align:right">-</span></div>
+          <div class="row"><span>等会儿回来做</span><span id="mindSuspended" class="mono" style="text-align:right">-</span></div>
+          <div class="row"><span>擅长 / 苦手</span><span id="mindSelfImage" class="mono" style="text-align:right">-</span></div>
+        </div>
+        <div>
+          <div class="sub">念头流</div>
+          <ul class="plain mindlist" id="mindStream"></ul>
+        </div>
+        <div>
+          <div class="sub">议程（想做的事 / 点子 / 疑问）</div>
+          <ul class="plain mindlist" id="mindAgenda"></ul>
+          <div class="sub">实验</div>
+          <ul class="plain mindlist" id="mindExperiments"></ul>
+        </div>
+        <div>
+          <div class="sub">窍门（实际成败）</div>
+          <ul class="plain mindlist" id="mindKnowHow"></ul>
+          <div class="sub">日记</div>
+          <ul class="plain mindlist" id="mindDiary"></ul>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="grid-stack-item" gs-id="vision" gs-x="0" gs-y="23" gs-w="6" gs-h="12">
     <section class="grid-stack-item-content">
       <h2>AI 视野（射线模拟 · 不透视 · 非图片输入）</h2>
       <div class="vision">
@@ -204,7 +246,7 @@
     </section>
   </div>
 
-  <div class="grid-stack-item" gs-id="percept" gs-x="6" gs-y="11" gs-w="3" gs-h="12">
+  <div class="grid-stack-item" gs-id="percept" gs-x="6" gs-y="23" gs-w="3" gs-h="12">
     <section class="grid-stack-item-content">
       <h2>感知（只含看见 / 听见 / 记得）</h2>
       <div class="row"><span>敌对</span><span id="hostile" class="mono">-</span></div>
@@ -217,7 +259,7 @@
     </section>
   </div>
 
-  <div class="grid-stack-item" gs-id="memory" gs-x="9" gs-y="11" gs-w="3" gs-h="12">
+  <div class="grid-stack-item" gs-id="memory" gs-x="9" gs-y="23" gs-w="3" gs-h="12">
     <section class="grid-stack-item-content">
       <h2>记忆</h2>
       <div class="row"><span>已访问区块 / 已见方块·实体·群系</span><span id="seen" class="mono">-</span></div>
@@ -232,7 +274,7 @@
     </section>
   </div>
 
-  <div class="grid-stack-item" gs-id="events" gs-x="0" gs-y="23" gs-w="12" gs-h="12">
+  <div class="grid-stack-item" gs-id="events" gs-x="0" gs-y="35" gs-w="12" gs-h="12">
     <section class="grid-stack-item-content">
       <h2>事件流</h2>
       <div class="filters">
@@ -245,7 +287,7 @@
     </section>
   </div>
 
-  <div class="grid-stack-item" gs-id="llm" gs-x="0" gs-y="35" gs-w="12" gs-h="16">
+  <div class="grid-stack-item" gs-id="llm" gs-x="0" gs-y="47" gs-w="12" gs-h="16">
     <section class="grid-stack-item-content">
       <h2>LLM 调用（实时：发出的提示词 / 流式返回）<span class="opts"><label><input type="checkbox" id="llmFollow" checked> 跟随最新</label> · <span id="llmCount" class="mono">0</span></span></h2>
       <div class="llm fill">
@@ -273,6 +315,30 @@ $('suggest').addEventListener('keydown', (e) => e.key === 'Enter' && sendSuggest
 function togglePause() { post(paused ? '/api/resume' : '/api/pause'); }
 
 function kpi(id, text, cls) { const el = $(id); el.className = 'kpi ' + (cls || ''); el.querySelector('b').textContent = text; }
+
+
+function renderMind(mind, mode) {
+  if (!mind) { $('mindMode').textContent = mode === 'autonomous' || mode === 'compatibility' ? '旧版逐步决策（AGENT_MIND=legacy）' : ''; return; }
+  $('mindMode').textContent = mode === 'mind' ? '真人式心智' : '真人式心智 · 规则';
+  $('mindFeeling').textContent = (mind.feeling || []).join('，') + (mind.traits?.length ? `　｜性格：${mind.traits.join('、')}` : '');
+  const names = { energy: '精力', boredom: '无聊', frustration: '烦躁', satisfaction: '满足', curiosity: '好奇' };
+  $('mindMood').innerHTML = Object.entries(names).map(([k, n]) => `<div class="moodrow"><span>${n}</span><div class="bar"><i style="width:${Math.round((mind.mood?.[k] ?? 0) * 100)}%"></i></div></div>`).join('');
+  const a = mind.activity;
+  $('mindActivity').textContent = a ? `${a.what}（第 ${a.round} 轮）` : '（在想接下来做什么）';
+  $('mindActivityWhy').textContent = a ? [a.why, a.done_when ? `收工条件：${a.done_when.status}` : '', ...(a.recent || []).slice(-2)].filter(Boolean).join(' · ') : '';
+  $('mindNext').textContent = mind.next || '-';
+  $('mindSuspended').textContent = (mind.suspended || []).join('、') || '-';
+  const si = mind.selfImage || {};
+  $('mindSelfImage').textContent = [(si.goodAt || []).slice(0, 2).join(' '), (si.struggleWith || []).slice(0, 2).join(' ')].filter(Boolean).join(' / ') || '-';
+  const ago = (t) => { const s2 = Math.round((Date.now() - t) / 1000); return s2 < 60 ? `${s2}s` : s2 < 3600 ? `${Math.round(s2 / 60)}m` : `${Math.round(s2 / 3600)}h`; };
+  const tag = { monologue: '想', notice: '注意', outcome: '结果', learned: '学到', feeling: '感受' };
+  $('mindStream').innerHTML = (mind.stream || []).slice().reverse().map((t) => `<li><span class="k">${tag[t.kind] || t.kind} · ${ago(t.at)}</span> ${esc(t.text)}</li>`).join('') || '<li>—</li>';
+  const kind = { goal: '想做', idea: '点子', question: '疑问' };
+  $('mindAgenda').innerHTML = (mind.agenda || []).map((x) => `<li>${x.status === 'active' ? '▶ ' : ''}<span class="k">${kind[x.kind] || x.kind}${x.horizon === 'someday' ? '·以后' : ''}</span> ${esc(x.text)}${x.attempts ? ` <span class="k">×${x.attempts}</span>` : ''}</li>`).join('') || '<li>—</li>';
+  $('mindExperiments').innerHTML = (mind.experiments || []).slice().reverse().map((x) => `<li><span class="k">${x.status}</span> ${esc(x.hypothesis)}</li>`).join('') || '<li>—</li>';
+  $('mindKnowHow').innerHTML = (mind.knowHow || []).map((k) => `<li>${esc(k.text)} <span class="k">成${k.wins}/败${k.losses}</span></li>`).join('') || '<li>—</li>';
+  $('mindDiary').innerHTML = (mind.diary || []).slice().reverse().map((d) => `<li><span class="k">${ago(d.at)}前</span> ${esc(d.text)}</li>`).join('') || '<li>—</li>';
+}
 
 function render(s) {
   const st = s.state, p = s.percept, t = s.task, ex = s.exec, m = s.metrics;
@@ -316,6 +382,7 @@ function render(s) {
   $('evidence').textContent = latestEvidence ? `${latestEvidence.status} · ${JSON.stringify(latestEvidence.actual)}${latestEvidence.reason ? ' · ' + latestEvidence.reason : ''}` : '';
   $('drives').innerHTML = (p.drives || []).slice(0, 5).map((d) => `<li title="${esc(d.why)}">${'▮'.repeat(Math.max(1, Math.round(d.level * 10)))} ${d.drive} · ${esc(d.suggest)}</li>`).join('') || '<li>—</li>';
   $('skills').innerHTML = (s.memory.skills || []).map((k) => `<li>macro:${esc(k.name)} · ${esc(k.description)}</li>`).join('') || '<li>—</li>';
+  renderMind(ex.mind, ex.mode);
   $('lastfail').textContent = ex.lastFailure ? `${ex.lastFailure.skill}: ${ex.lastFailure.code ?? ''} ${ex.lastFailure.summary}` : '-';
 
   $('skill').textContent = t ? t.skill : (st.connected ? '（空闲）' : '—');
@@ -411,7 +478,7 @@ document.querySelectorAll('.f').forEach((cb) => cb.addEventListener('change', ()
 
 
 // ------------------------------------------------------------ 可自定义布局（gridstack）
-const LAYOUT_KEY = 'curio.dashboard.layout.v1';
+const LAYOUT_KEY = 'curio.dashboard.layout.v2';
 const GS_CDN = 'https://cdn.jsdelivr.net/npm/gridstack@12.3.3/dist/gridstack-all.js';
 let grid = null, editing = false;
 const loadScript = (src) => new Promise((ok, bad) => { const el = document.createElement('script'); el.src = src; el.onload = ok; el.onerror = bad; document.head.appendChild(el); });

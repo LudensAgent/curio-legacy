@@ -1,6 +1,7 @@
 import type { GameAdapter } from '../adapter/types.ts';
 import type { Arbiter } from '../arbiter/arbiter.ts';
-import type { Executive } from '../brain/executive.ts';
+/** 指标只读这三个字段：旧 Executive 和新 Mind 都提供 */
+export interface BrainStatus { readonly paused: boolean; readonly inFlight: boolean; readonly staleDropped: number }
 import type { Reflex } from '../brain/reflex.ts';
 import type { AgentEvent, EventBus } from '../events.ts';
 import type { Planner } from '../planner/planner.ts';
@@ -41,7 +42,7 @@ export class Metrics {
   constructor(
     private adapter: GameAdapter,
     private arbiter: Arbiter,
-    private executive: Executive,
+    private executive: BrainStatus,
     private planner: Planner,
     private reflex: Reflex,
     bus: EventBus,

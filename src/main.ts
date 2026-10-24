@@ -4,6 +4,9 @@ import { MineflayerAdapter } from './adapter/mineflayer.ts';
 import { Arbiter } from './arbiter/arbiter.ts';
 import { Executive } from './brain/executive.ts';
 import { Reflex } from './brain/reflex.ts';
+import { Mind } from './mind/mind.ts';
+import { SelfModel } from './mind/self.ts';
+import { Thinker } from './mind/thinker.ts';
 import { config } from './config.ts';
 import { EventBus } from './events.ts';
 import { attachLogger, JsonlWriter } from './log.ts';
@@ -141,35 +144,57 @@ function mySkills(): MySkillInfo[] {
   return [...fromMethods, ...fromMacros].slice(-10);
 }
 
-const executive = new Executive({
+const onLearnSkill = (raw: unknown) => {
+  const r = learnSkill(raw, 'model');
+  if (!r.ok) bus.publish('skill_rejected', 'P1', `没有采纳提议的新技能：${r.error}`);
+};
+// 习惯化：同一套步骤成功 3 次以上，自动学成技能（不必等 LLM 提议）
+const onGoalEnd = (status: string) => {
+  if (status !== 'succeeded') return;
+  const c = learnCandidates(memory, knownSigs()).find((x) => x.times >= 3 && !proposedHabits.has(x.signature));
+  if (!c) return;
+  if (planner.autonomous) { formHabit(c); return; }
+  const r = library.learn({ name: habitName(c), description: `习惯：${c.goal}`, steps: c.steps });
+  if (r.ok) bus.publish('habit', 'P2', `「${c.signature}」做了 ${c.times} 次，养成习惯 ${r.name}`);
+};
+
+/** 大脑：默认是新的心智层（像真人一样一段一段地玩），AGENT_MIND=legacy 用旧的逐步决策 */
+interface Brain {
+  readonly paused: boolean; readonly inFlight: boolean; readonly staleDropped: number;
+  readonly plan: { goal: string; thought?: string; id: string; binding?: { intentId?: string } } | null;
+  start(): void; stop(): void; pause(): void; resume(): void; replan(): void; suggest(text: string): void;
+  onDeath(info: Parameters<Executive['onDeath']>[0]): void; onSpawn(): void; onDisconnected(): void;
+  snapshot(): unknown;
+}
+const selfModel = config.mind.mode === 'human' ? new SelfModel(path.join(config.dataDir, 'mind.json'), config.mind.traits) : null;
+const mind = selfModel ? new Mind({
+  adapter, arbiter, perception, memory, bus, self: selfModel, persona: config.persona,
+  thinker: new Thinker(planner, adapter, memory, bus),
+  ...(audience ? { audience } : {}),
+  mySkills,
+  researchContext: () => methods.researchContext(),
+  onGoalEnd,
+  say: (text) => { if (config.actionChat.enabled) adapter.chat(text); },
+  timing: { checkInMs: config.mind.checkInSec * 1000, deliberateEveryMs: config.mind.deliberateEverySec * 1000 },
+}) : null;
+const executive: Brain = mind ?? new Executive({
   adapter, arbiter, planner, perception, memory, bus,
   ...(audience ? { audience } : {}),
   mySkills,
   researchContext: () => methods.researchContext(),
   onMissingAbility: (text) => { if (planner.autonomous) methods.recordGap(text, { intentId: memory.currentIntent()?.id, projectId: memory.activeProject()?.id }); },
-  onLearnSkill: (raw) => {
-    const r = learnSkill(raw, 'model');
-    if (!r.ok) bus.publish('skill_rejected', 'P1', `没有采纳提议的新技能：${r.error}`);
-  },
-  // 习惯化：同一套步骤成功 3 次以上，自动学成技能（不必等 LLM 提议）
-  onGoalEnd: (status) => {
-    if (status !== 'succeeded') return;
-    const c = learnCandidates(memory, knownSigs()).find((x) => x.times >= 3 && !proposedHabits.has(x.signature));
-    if (!c) return;
-    if (planner.autonomous) { formHabit(c); return; }
-    const r = library.learn({ name: habitName(c), description: `习惯：${c.goal}`, steps: c.steps });
-    if (r.ok) bus.publish('habit', 'P2', `「${c.signature}」做了 ${c.times} 次，养成习惯 ${r.name}`);
-  },
+  onLearnSkill,
+  onGoalEnd,
 });
 /** 已经学过（宏或方法库里）的步骤签名：不再重复提示/提议 */
 const knownSigs = () => new Set([...library.list().filter((d) => !d.disabled).map((d) => signatureOf(d.steps)),
   ...methods.list().filter((d) => d.status !== 'retired').map((d) => signatureOf(flattenProgram(d.program))), ...proposedHabits]);
 perception.knownSkillSigs = knownSigs;
-const reflex = new Reflex(adapter, arbiter, bus, vision, { routineCare: !planner.autonomous });
+const reflex = new Reflex(adapter, arbiter, bus, vision, { routineCare: mind ? config.mind.bodyHabits : !planner.autonomous });
 const spectator = new Spectator(config, adapter, bus);
 const metrics = new Metrics(adapter, arbiter, executive, planner, reflex, bus);
 const actionChat = new ActionChat(adapter, bus, { ...config.actionChat, canSend: () => !executive.paused,
-  context: () => ({ plan: executive.plan, task: arbiter.info(), intent: memory.currentIntent() }),
+  context: () => ({ plan: executive.plan, task: arbiter.info(), intent: mind ? mind.currentIntent() : memory.currentIntent() }),
 });
 actionChat.start();
 
@@ -361,7 +386,7 @@ function snapshot() {
   };
 }
 
-bus.publish('boot', 'P2', `Minecraft Curiosity Agent MVP 启动｜LLM=${provider.name}（LLM_PROVIDER=${config.llm.providerLabel}）｜视觉 ${config.vision.hFov}°/${config.vision.range} 格｜延迟注入=${config.llm.fakeDelayMs}ms`);
+bus.publish('boot', 'P2', `Minecraft Curiosity Agent MVP 启动｜心智=${mind ? (planner.autonomous ? '真人式心智' : '真人式心智（规则）') : '旧版逐步决策'}｜LLM=${provider.name}（LLM_PROVIDER=${config.llm.providerLabel}）｜视觉 ${config.vision.hFov}°/${config.vision.range} 格｜延迟注入=${config.llm.fakeDelayMs}ms`);
 adapter.connect();
 perception.start();
 executive.start();
@@ -388,6 +413,7 @@ function shutdown() {
   void live?.stop();
   episodic.stop();
   methods.dispose();
+  selfModel?.close();
   observerInstall?.dispose();
   observerTasks?.dispose();
   feed?.dispose();

@@ -193,7 +193,47 @@ Mineflayer 本身知道已加载区块里的每一个方块、墙后的每一只
 
 探索、打猎、采集、拾取和只读观察会在实际结果返回后重新决策，停止执行依赖未知产物的旧计划尾部；确定性的合成链仍连续执行。通用 `hit_entity {entity,hits?}` 支持对可见实体有限次左键，分别报告发出的操作、生命变化、掉落及库存实增，不把目标消失当作击败或已经回收。乘坐操控使用独立可取消节拍，不依赖挂载后停止的玩家 `physicsTick`。
 
-## 8. 游玩欲望：让它像真人一样“想玩什么”
+## 8. 心智：像真人玩家一样想、做、学（默认，`AGENT_MIND=human`）
+
+旧的执行层是“每一次决策 = 一串技能调用”，模型被问得很碎，常常在等结果、反复确认。新的心智层（`src/mind/`）换了一条思考/行动链路：
+
+```
+ 感知 ──► 注意力 ──► 思考（瞥一眼 / 认真想）──► 一段活（routine，可重复）──► 回看与学习
+   ▲        │ 天黑/饿了/背包满/新东西…           │ 身体连续执行、自己应变      │ 窍门成败、实验结论、日记
+   └────────┴──────────── 情绪（精力/无聊/烦躁/满足/好奇）◄──────────────────┘
+```
+
+| 概念 | 说明 | 位置 |
+|---|---|---|
+| **一段活 Activity** | 模型按“几分钟的一件事”来安排：`what/why` + 1–6 步 routine + `repeat` 轮数 + `done_when` 收工条件 + `expect` 预想 + `if_stuck` 备选。身体连续执行，没找到会自己换个方向找、偶发失败会再试一次，真卡住（缺材料/工具、反复失败）才叫脑子 | `mind/activity.ts` |
+| **边做边想** | 最后一个动作开始时就“瞥一眼”想下一段，模型可在任何决定里写好 `next`，干完立刻接上；做久了（默认 100 秒）抬头看看；思考期间身体从不停手 | `mind/mind.ts` |
+| **注意力** | 天黑、饿了、掉血、背包满、看见矿/新物品、有人说话、死亡……按显著度分成“记一下 / 边做边重新想 / 立刻认真想” | `mind/attention.ts` |
+| **两档思考** | `glance` 只带此刻要紧的信息，快速给出 continue/adjust/detour/next；需要时模型回 `{"kind":"deliberate"}` 升级为带全部记忆的认真思考。好久没认真想、做完好几段活、情绪到了临界或卡住时自动认真想 | `mind/thinker.ts`、`mind/prompt.ts` |
+| **决定类型** | `continue` 照常做 · `adjust` 改 routine 不打断 · `new` 开始新活 · `detour` 先绕去处理别的事，做完**自动回到**被打断的那一步 · `switch` 放下改做别的 · `experiment` 验证猜想的小活 · `rest` 歇一下 | `mind/types.ts` |
+| **情绪** | 由真实经历推动：失败→烦躁、成功→满足、同类事做多了→无聊、新东西→好奇、干活久了→累，休息/睡觉恢复。以人话（“有点腻了”“很烦躁，这么做行不通”）进入思考，影响它想做什么 | `mind/self.ts` |
+| **议程** | 自己写下的“今天/以后想做的事、冒出来的点子、想弄清的疑问”，可设焦点；太多时最旧的“以后再说”先被忘掉 | `mind/self.ts` |
+| **学习** | 每段活结束都有实测记录（得到/用掉了什么、耗时、和预想比）。模型用 `learned` 总结窍门；之后同一套做法（签名）再成功/失败会**自动修正窍门的成败次数**，可信度随实践变化；按眼下的事挑出相关窍门给模型看 | `mind/self.ts` |
+| **创新** | 无聊或遇到新东西时冒点子；`experiment` 必须写 `hypothesis`，结束后模型看实际结果给出 `experiment_result`（supported/refuted/unclear），结论进入后续思考。底层 `use_item/interact_block/hit_entity/ride…` 与方法库 `experiment_method` 仍可组合新玩法 | `mind/mind.ts` |
+| **连贯与记忆** | 念头流（最近 40 个念头）、日记、议程、窍门、实验、技能手感都保存在 `data/mind.json`，重启后接着原来的心思玩；被反射打断的那一步会在安全后重做，不额外调用模型；模型出错时**凭习惯**（规则目标）继续玩，不发呆 | `mind/mind.ts` |
+| **身体习惯** | `MIND_BODY_HABITS=true`（默认）时，饿了顺手吃、黑了顺手插火把、卡住自己挣脱，模型专心想玩什么 | `brain/reflex.ts` |
+
+模型每次只输出一个 JSON，例如：
+
+```json
+{"monologue":"木头够做工作台了，天还早，先把石镐做出来再去河边看看。",
+ "decision":"new",
+ "activity":{"what":"挖够 3 个圆石做石镐","why":"木镐太慢","kind":"gather",
+   "steps":[{"skill":"gather","args":{"block":"stone","count":3}},{"skill":"craft","args":{"item":"stone_pickaxe"}}],
+   "repeat":1,"done_when":{"type":"inventory_min","item":"stone_pickaxe","count":1},
+   "expect":"一两分钟就能好","if_stuck":"附近没石头就往山坡那边挖"},
+ "next":{"what":"去河边看看","kind":"explore","steps":[{"skill":"explore","args":{"direction":"E","distance":64}}]},
+ "agenda":{"add":[{"text":"在河边盖个小木屋","kind":"goal","horizon":"today"}]},
+ "learned":"木镐挖石头很慢，先做石镐划算"}
+```
+
+控制台新增「心智」面板：此刻的感受与五项情绪、手上的活与收工条件、做完接着做什么、念头流、议程、实验、窍门（实际成败）和日记。`AGENT_MIND=legacy` 可切回旧的逐步决策执行层（下面第 9、10 节描述的机制）。
+
+## 9. 游玩欲望（旧执行层 / 规则模式的参考信号）
 
 决策不再只是“缺什么补什么”，而是由一组**游玩欲望**驱动（`src/brain/drives.ts`），每个欲望有强度、原因和建议，LLM 和规则目标都依据它来选目标：
 
@@ -233,7 +273,7 @@ Mineflayer 本身知道已加载区块里的每一个方块、墙后的每一只
 
 > 记忆文件升级到 v2：旧版本曾用穿墙搜索写入过矿物地标，启动时会自动清掉（事件流里有一条 `memory` 提示）。走到资源地标附近却看不到矿时，该地标也会被删除。
 
-## 9. 它是怎么保证连贯的
+## 10. 它是怎么保证连贯的（旧执行层）
 
 | 机制 | 位置 |
 |---|---|
@@ -250,7 +290,7 @@ Mineflayer 本身知道已加载区块里的每一个方块、墙后的每一只
 | 走不通的探索方向 2 分钟内降低优先级 | `skills/movement.ts` |
 | 失败冷却：同一个目标刚失败过，就先换个方向探索 | `plan.ts` |
 
-## 10. MVP 验收清单
+## 11. MVP 验收清单
 
 在控制台上可以直接看到下面这些指标（数据全部来自 `data/logs/*.jsonl`，也可以事后分析）：
 
@@ -277,7 +317,7 @@ LLM_FAKE_DELAY_MS=30000   # 每次思考额外等 30 秒
 
 运行 10 分钟，观察第 5、6 项指标。预规划和填充行为会让角色一直在动。
 
-## 11. 控制方式
+## 12. 控制方式
 
 - **控制台按钮**：暂停（立即释放所有控制）/ 继续 / 重新规划 / 发送建议。
 - **游戏内聊天**（仅 `OBSERVER_PLAYER` 和 `ADMIN_PLAYERS`）：
@@ -286,7 +326,7 @@ LLM_FAKE_DELAY_MS=30000   # 每次思考额外等 30 秒
 
 建议只是候选目标，不是命令；安全规则和技能白名单始终有效。
 
-## 11.1 接入 B 站直播间：弹幕当作观众的声音
+## 12.1 接入 B 站直播间：弹幕当作观众的声音
 
 在 `.env` 里打开 `BILIBILI_ENABLED=true`，二选一：
 
@@ -301,7 +341,7 @@ LLM_FAKE_DELAY_MS=30000   # 每次思考额外等 30 秒
 - 弹幕不会打断当前动作或直接触发决策，只在下一次决策时作为参考。
 - 机器人在游戏里说的话永远不会以 `/` 开头，防止借它之口执行命令。
 
-## 12. 数据与日志
+## 13. 数据与日志
 
 | 文件 | 内容 |
 |---|---|
@@ -309,6 +349,7 @@ LLM_FAKE_DELAY_MS=30000   # 每次思考额外等 30 秒
 | `data/logs/llm-YYYYMMDD.jsonl` | 每次 LLM 调用的原因、延迟、token 用量、原始输出、是否有效 |
 | `data/world-memory.json` | 已访问区块、首次见到的方块/实体/群系、地标、技能统计、目标历史、笔记、长期目标、最近一次死亡 |
 | `data/skill-library.json` | Agent 自学的组合技能 |
+| `data/mind.json` | 心智：性格、情绪、议程、窍门（成败次数）、实验、日记、念头流、技能手感 |
 
 完全清空历史记忆：先用 **Ctrl+C 退出 Agent**，再执行：
 
@@ -320,13 +361,14 @@ npm run memory:clear
 
 需要同时重置世界时，先停止 Minecraft 服务器，再运行 `npm run memory:reset`（等价于 `npm run memory:clear -- --full`）。保留 `eula.txt`、配置、mods 和启动组件，清理地图、玩家、日志、录像等运行数据，并清除 `level-seed`，下次启动创建随机种子的新世界。可先运行 `npm run memory:reset -- --dry-run` 预览；完整说明见 [清理与完整重置](docs/memory-hindsight.md#完全清空)。
 
-## 13. 目录
+## 14. 目录
 
 ```
 src/
 ├─ adapter/      GameAdapter 接口 + Mineflayer 实现（上层不直接碰 mineflayer）
 ├─ arbiter/      动作仲裁器（planVersion、取消、抢占、动作守卫）
-├─ brain/        executive（异步规划与调度）、reflex（反射层、卡死检测）
+├─ mind/         心智层（默认）：self 自我模型、attention 注意力、activity 一段活、thinker/prompt 思考、mind 主循环
+├─ brain/        reflex（反射层、卡死检测）、executive（旧的逐步决策，AGENT_MIND=legacy）
 ├─ perception/   vision（射线视野、听觉、记忆）+ 感知摘要器（→ 给 LLM 的紧凑 JSON）
 ├─ planner/      LLM 适配、prompt、计划校验、规则目标
 ├─ skills/       explore / gather / goto / craft / eat / flee / defend / wander / look_around / unstuck
@@ -337,7 +379,7 @@ tests/           离线测试（FakeAdapter 模拟世界）
 scripts/         check-llm、check-rcon
 ```
 
-## 14. 已知限制与下一步
+## 15. 已知限制与下一步
 
 详细开发顺序、阶段验收和当前首要功能方案见 [好奇心驱动的自主玩家路线](docs/agent-evolution-roadmap.md)。下一项建议先实现“自主意图与兴趣连续性 MVP”：由 LLM 根据好奇心、偏好和经历选择想做的事，记住意图，并根据反馈继续或改意；程序负责动作、事实验证和记忆，不规定必须完成的游戏主线。
 

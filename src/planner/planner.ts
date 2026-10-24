@@ -5,7 +5,7 @@ import type { JsonlWriter } from '../log.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import type { MemoryRecall } from '../memory/types.ts';
 import { normalizeDecision, validateIntentDecision } from '../intentions/decision.ts';
-import type { LlmProvider } from './llm.ts';
+import type { ChatMessage, LlmProvider } from './llm.ts';
 import { setImmediate } from 'node:timers/promises';
 import { queryMechanics } from '../methods/mechanics.ts';
 import { ControlKnowledge } from '../methods/controls.ts';
@@ -126,6 +126,67 @@ export class Planner {
     if (fb.ok) return fb.plan;
     throw new Error(`rule plan invalid: ${v.error}`);
   }
+
+  /**
+   * 一次通用的模型调用（心智层使用）：共享每小时预算、调用统计、JSONL 日志和控制台的 LLM 调用面板。
+   * 只负责把文字拿回来；解析、校验和重试由调用方决定。
+   */
+  async complete(messages: ChatMessage[], opts: { label: string; tier?: 'light' | 'full'; signal?: AbortSignal; attempt?: number }): Promise<{ text: string; latencyMs: number; finishReason?: string }> {
+    const signal = opts.signal;
+    signal?.throwIfAborted();
+    if (!this.budgetOk()) {
+      this.stats.budgetFallbacks++;
+      this.bus.publish('llm_budget', 'P1', `LLM 每小时调用已达上限 ${this.cfg.llm.maxCallsPerHour}，先凭习惯继续玩`);
+      throw new Error('LLM_BUDGET_EXHAUSTED');
+    }
+    const maxPrompt = Math.min(this.cfg.llm.maxPromptTokens ?? 128000,
+      (this.cfg.llm.contextWindowTokens ?? 1000000) - Math.max(0, this.cfg.llm.maxTokens));
+    enforcePromptBudget(messages, maxPrompt);
+    const tier = opts.tier ?? 'full';
+    this.window.push(Date.now());
+    this.stats.calls++;
+    this.stats.tiers[tier]++;
+    const promptChars = messages.reduce((a, m) => a + m.content.length, 0);
+    const traceId = this.trace?.begin({ reason: opts.label, attempt: opts.attempt ?? 0, provider: this.provider.name }, messages) ?? '';
+    const onDelta = this.trace ? (d: { content?: string; reasoning?: string }) => this.trace!.delta(traceId, d) : undefined;
+    const requestedAt = Date.now();
+    this.stats.inFlightSince = requestedAt;
+    try {
+      const timeout = AbortSignal.timeout(this.cfg.llm.timeoutMs + this.cfg.llm.fakeDelayMs + 1000);
+      const c = await this.provider.complete(messages, signal ? AbortSignal.any([signal, timeout]) : timeout, { tier }, onDelta);
+      this.recordUsage(c.usage);
+      this.stats.lastLatencyMs = c.latencyMs;
+      this.stats.tierLatency[tier].sum += c.latencyMs;
+      this.stats.tierLatency[tier].n++;
+      this.stats.latencies.push(c.latencyMs);
+      if (this.stats.latencies.length > 100) this.stats.latencies.shift();
+      this.trace?.end(traceId, { status: 'ok', text: c.text, latencyMs: c.latencyMs, usage: c.usage, finishReason: c.finishReason });
+      this.writer?.write({ ts: Date.now(), reason: opts.label, tier, provider: this.provider.name, ok: true, latencyMs: c.latencyMs, usage: c.usage, finishReason: c.finishReason, promptChars, output: c.text.slice(0, 2000) });
+      return { text: c.text, latencyMs: c.latencyMs, finishReason: c.finishReason };
+    } catch (e: any) {
+      if (!signal?.aborted) {
+        this.stats.tokenUsage.unreportedCalls++;
+        this.stats.errors++;
+        this.stats.lastError = String(e?.message ?? e);
+      }
+      this.trace?.end(traceId, { status: 'error', error: String(e?.message ?? e), latencyMs: Date.now() - requestedAt });
+      this.writer?.write({ ts: Date.now(), reason: opts.label, tier, provider: this.provider.name, ok: false, error: String(e?.message ?? e), latencyMs: Date.now() - requestedAt, promptChars });
+      throw e;
+    } finally {
+      this.stats.inFlightSince = null;
+    }
+  }
+
+  /** 心智层的输出没通过校验：计入无效输出统计 */
+  noteInvalid(label: string, error: string) {
+    this.stats.invalid++;
+    this.stats.lastError = error;
+    this.bus.publish('llm_invalid', 'P1', `模型输出无效（${label}）：${error}`);
+  }
+
+  /** 心智层的只读查询需要的记忆接口 */
+  get recall(): MemoryRecall | undefined { return this.memoryRecall; }
+  get controlKnowledge(): ControlKnowledge { return this.controls; }
 
   async propose(ctx: PlanContext, signal?: AbortSignal): Promise<Plan> {
     signal?.throwIfAborted();
