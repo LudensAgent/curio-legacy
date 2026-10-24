@@ -1,8 +1,8 @@
 import { describePlan, materialPlan } from '../methods/shortfall.ts';
-import { lookAround } from './movement.ts';
+import { lookAround, surface } from './movement.ts';
 import { findStation, rememberStation } from './stations.ts';
 import { dist3 } from '../util.ts';
-import { codeFromError, clampInt, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
+import { codeFromError, clampInt, fail, isAbort, obj, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 import { craftReservationConflict } from '../projects/reservations.ts';
 import { config } from '../config.ts';
 
@@ -46,11 +46,67 @@ export function gatherTargetRisk(ctx: SkillCtx, target: { name: string; pos: { x
   return null;
 }
 
-/** 走向目标方块；8 秒内几乎没挪动就放弃这个目标（换下一个），而不是原地耗到被判卡死 */
+/**
+ * 走着走着进了水的目标：这次采集里不再去，10 分钟内其他采集也绕开（按世界/维度/坐标记）。
+ * 这是“亲身走过去发现要下水”的经验，不是透视。
+ */
+const wetApproach = new Map<string, number>();
+const WET_TTL_MS = 10 * 60_000;
+const wetKey = (ctx: SkillCtx, p: { x: number; y: number; z: number }) => { const s = ctx.adapter.state(); return `${s.worldId}:${s.dim}:${p.x},${p.y},${p.z}`; };
+function wetRemembered(ctx: SkillCtx, p: { x: number; y: number; z: number }) {
+  const t = wetApproach.get(wetKey(ctx, p));
+  if (t === undefined) return false;
+  if (Date.now() - t > WET_TTL_MS) { wetApproach.delete(wetKey(ctx, p)); return false; }
+  return true;
+}
+/** 把这个目标和它周围 4 格内的同类目标都记成“要下水才挖得到” */
+function rememberWet(ctx: SkillCtx, p: { x: number; y: number; z: number }) {
+  for (let dx = -4; dx <= 4; dx++) for (let dy = -4; dy <= 4; dy++) for (let dz = -4; dz <= 4; dz++) wetApproach.set(wetKey(ctx, { x: p.x + dx, y: p.y + dy, z: p.z + dz }), Date.now());
+  if (wetApproach.size > 20000) for (const [k, t] of wetApproach) if (Date.now() - t > WET_TTL_MS) wetApproach.delete(k);
+}
+
+/** 挖这种方块至少要什么镐子（null = 不需要镐子） */
+export function pickaxeTierFor(block: string): string | null {
+  if (/^(obsidian|crying_obsidian|ancient_debris|netherite_block|respawn_anchor)$/.test(block)) return 'diamond';
+  if (/(gold|diamond|redstone|emerald)_(ore|block)$/.test(block)) return 'iron';
+  if (/(iron|copper|lapis)_(ore|block)$|^raw_(iron|copper)_block$/.test(block)) return 'stone';
+  if (/^(stone|cobblestone|deepslate|cobbled_deepslate|andesite|granite|diorite|tuff|calcite|sandstone|red_sandstone|blackstone|basalt|netherrack|end_stone|terracotta|bricks|furnace|.*_terracotta|.*_concrete)$|coal_(ore|block)$|nether_(gold|quartz)_ore$|^stone_bricks$/.test(block)) return 'wooden';
+  return null;
+}
+
+/**
+ * 挖不动时像玩家一样先想办法：缺的是木镐、背包里木料够 → 先做一把木镐（会用附近的工作台或现做一个）；
+ * 否则说清楚缺哪一级的镐子。ok=true 表示现在能挖了。
+ */
+export async function ensureToolFor(ctx: SkillCtx, pos: { x: number; y: number; z: number }): Promise<{ ok: true; crafted?: string } | { ok: false; message: string }> {
+  const { adapter } = ctx;
+  if (adapter.canHarvest(pos)) return { ok: true };
+  const block = adapter.blockAt(pos) ?? '?';
+  const tier = pickaxeTierFor(block);
+  const inv = adapter.state().inventory;
+  const woodShort = woodShortfall('wooden_pickaxe', 1, inv, !!findStation(ctx, ['crafting_table'], 48));
+  if (tier === 'wooden' && !woodShort) {
+    ctx.progress(0, `挖 ${block} 要镐子：先做一把木镐`);
+    const r = await craft.run(ctx, { item: 'wooden_pickaxe', count: 1 });
+    if (r.status === 'succeeded' && adapter.canHarvest(pos)) return { ok: true, crafted: 'wooden_pickaxe' };
+    return { ok: false, message: `手上没有能挖 ${block} 的镐子（需要 wooden_pickaxe 以上）；试着做木镐没成：${r.summary}` };
+  }
+  if (!tier) return { ok: false, message: `手上的工具挖不了 ${block}` };
+  const hasWood = inv.some((i) => /_(log|planks|stem)$/.test(i.name) && i.count > 0);
+  const hasCobble = inv.some((i) => /^(cobblestone|cobbled_deepslate|blackstone)$/.test(i.name) && i.count >= 3);
+  const hint = tier === 'wooden' ? (hasWood ? `背包有木料但不够（${woodShort}）` : '先砍点木头做 wooden_pickaxe')
+    : tier === 'stone' ? (hasCobble ? '背包有圆石，可以先 craft stone_pickaxe' : '先挖 3 块圆石做 stone_pickaxe')
+    : `先做 ${tier}_pickaxe`;
+  return { ok: false, message: `手上没有能挖 ${block} 的镐子（需要 ${tier}_pickaxe 以上）；${hint}` };
+}
+
+/** 走向目标方块；8 秒内几乎没挪动就放弃这个目标（换下一个），而不是原地耗到被判卡死；走着走着进了水也立刻停（ENTERED_WATER） */
 async function moveWithWatchdog(ctx: SkillCtx, pos: { x: number; y: number; z: number }) {
   const stop = new AbortController();
+  const dryStart = !ctx.adapter.state().inWater;
   let anchor = ctx.adapter.state().pos, since = Date.now();
   const iv = setInterval(() => {
+    if (dryStart && inDeepWater(ctx)) { stop.abort('entered_water'); return; }
     const p = ctx.adapter.state().pos;
     if (Math.hypot(p.x - anchor.x, p.y - anchor.y, p.z - anchor.z) >= 0.6) { anchor = p; since = Date.now(); }
     else if (Date.now() - since >= 8000) stop.abort('no_progress');
@@ -58,17 +114,28 @@ async function moveWithWatchdog(ctx: SkillCtx, pos: { x: number; y: number; z: n
   try {
     await ctx.adapter.moveTo({ kind: 'reach_block', pos }, { signal: AbortSignal.any([ctx.signal, stop.signal]), timeoutMs: Math.min(90000, Math.max(3000, ctx.deadline - Date.now())) });
   } catch (e) {
-    if (stop.signal.aborted && !ctx.signal.aborted) throw new Error('PATH_NO_PROGRESS');
+    if (stop.signal.aborted && !ctx.signal.aborted) throw new Error(stop.signal.reason === 'entered_water' ? 'ENTERED_WATER' : 'PATH_NO_PROGRESS');
     throw e;
   } finally {
     clearInterval(iv);
   }
+  // 路走完了人却在水里（寻路一路游过去的）：同样算“要下水才够得着”
+  if (dryStart && inDeepWater(ctx)) throw new Error('ENTERED_WATER');
 }
 
-export const gather: Skill<{ block: string; count: number; for?: { item: string; count: number } }> = {
+/** 真的“下了水”：头没进水、只是蹚过一格深的小水洼/小溪不算；头在水里、脚下水有两格深、或开始憋气才算 */
+function inDeepWater(ctx: SkillCtx): boolean {
+  const s = ctx.adapter.state();
+  if (!s.inWater) return false;
+  const x = Math.floor(s.pos.x), z = Math.floor(s.pos.z), feet = Math.floor(s.pos.y);
+  const water = (y: number) => WATERY.has(ctx.adapter.blockAt({ x, y, z }) ?? 'air');
+  return water(Math.floor(s.pos.y + 1.62)) || (water(feet) && water(feet - 1)) || s.oxygen < 20;
+}
+
+export const gather: Skill<{ block: string; count: number; for?: { item: string; count: number }; note?: string }> = {
   name: 'gather',
   description: '前往【看见过或正看见】的指定方块并挖掘、拾取。写 for（要做的东西和数量）时按背包缺口算该采几个，已经够了就不采；看不见的不会去挖（没有透视）；stone/dirt/sand 若看不见会就地向下挖。block 可用别名：log(任意原木)、stone、dirt、coal、iron、ore',
-  argsDoc: '{"block": "log|stone|coal|iron|<方块名>", "for"?: {"item":"要做的东西","count":1} | "物品名", "count"?: 1-32（不写 for 时用）}',
+  argsDoc: '{"block": "log|stone|coal|iron|<方块名>", "for"?: {"item":"要做的东西（物品 ID）","count":1} | "物品名", "count"?: 1-32（不写 for 时用）}',
   timeoutMs: 180000,
   movement: true,
   validate(raw, adapter) {
@@ -77,16 +144,25 @@ export const gather: Skill<{ block: string; count: number; for?: { item: string;
     if (!block) return { ok: false, error: 'block 不能为空' };
     if (!adapter.resolveBlockNames(block).length) return { ok: false, error: `未知方块：${block}` };
     let goal: { item: string; count: number } | undefined;
+    let note: string | undefined;
     if (a.for !== undefined && a.for !== null && a.for !== '') {
       const f = typeof a.for === 'string' ? { item: a.for } : obj(a.for);
       const m = String(f.item ?? '').trim().replace(/^minecraft:/, '').match(/^([a-z0-9_]+)(?:\s*[x×*]\s*(\d+))?$/);
       const item = m ? resolveItemAlias(m[1], adapter) : null;
-      if (!item) return { ok: false, error: `for 里的物品不认识：${String(f.item ?? a.for)}` };
-      goal = { item, count: clampInt(f.count ?? (m?.[2] ? Number(m[2]) : undefined), 1, 512, 1) };
+      // 不认识的 for（比如写了中文“小木屋木料”）不让整个计划作废：去掉 for，按 block/count 照常采
+      if (!item) note = `for 里的「${String(f.item ?? a.for).slice(0, 40)}」不是物品 ID，已忽略，按 count 采`;
+      else goal = { item, count: clampInt(f.count ?? (m?.[2] ? Number(m[2]) : undefined), 1, 512, 1) };
     }
-    return { ok: true, args: { block, count: clampInt(a.count, 1, 32, 4), ...(goal ? { for: goal } : {}) } };
+    return { ok: true, args: { block, count: clampInt(a.count, 1, 32, 4), ...(goal ? { for: goal } : {}), ...(note ? { note } : {}) } };
   },
   async run(ctx, args) {
+    const r = await gatherRun(ctx, args);
+    return args.note ? { ...r, summary: `${r.summary}（${args.note}）` } : r;
+  },
+};
+
+async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; for?: { item: string; count: number } }): Promise<SkillResult> {
+  {
     const { adapter, senses, signal } = ctx;
     let names = adapter.resolveBlockNames(args.block);
     // 先算账：要做的东西还差多少原材料，其中多少要从这种方块里来
@@ -113,6 +189,7 @@ export const gather: Skill<{ block: string; count: number; for?: { item: string;
     let lost = 0;
     const risky: Record<TargetRisk, number> = { hazard: 0, wet: 0, deep: 0 };
     const riskCache = new Map<string, TargetRisk | null>();
+    let wetEntries = 0;
     const riskNote = () => {
       const parts = [risky.hazard ? `${risky.hazard} 处在出过事的危险区域` : '', risky.wet ? `${risky.wet} 处挨着水/岩浆或要泡在水里挖` : '', risky.deep ? `${risky.deep} 处在脚下很深、旁边有水的地方` : ''].filter(Boolean);
       return parts.length ? `；为安全跳过了 ${parts.join('、')} 的 ${args.block}（换个干燥、露天的地方采）` : '';
@@ -140,7 +217,7 @@ export const gather: Skill<{ block: string; count: number; for?: { item: string;
         if (evaluated >= 24) break;
         const k = key(h.pos);
         let risk = riskCache.get(k);
-        if (risk === undefined) { evaluated++; risk = gatherTargetRisk(ctx, h, feetY); riskCache.set(k, risk); }
+        if (risk === undefined) { evaluated++; risk = wetRemembered(ctx, h.pos) ? 'wet' : gatherTargetRisk(ctx, h, feetY); riskCache.set(k, risk); }
         if (risk) { risky[risk]++; skip.add(k); continue; }
         safeHits.push(h);
         if (adapter.blockAt(h.pos) === h.name && adapter.canHarvest(h.pos)) break;
@@ -196,8 +273,12 @@ export const gather: Skill<{ block: string; count: number; for?: { item: string;
       const present = hits.filter((h) => adapter.blockAt(h.pos) === h.name);
       for (const h of hits) if (!present.includes(h)) skip.add(key(h.pos));
       if (!present.length) continue;
-      const target = present.find((h) => adapter.canHarvest(h.pos));
-      if (!target) return fail('TOOL_MISSING', `缺少能采集 ${present[0].name} 的工具`, { block: present[0].name });
+      let target = present.find((h) => adapter.canHarvest(h.pos));
+      if (!target) {
+        const tool = await ensureToolFor(ctx, present[0].pos);
+        if (!tool.ok) return fail('TOOL_MISSING', tool.message, { block: present[0].name });
+        target = present[0];
+      }
 
       const invTotal = () => adapter.state().inventory.reduce((a, i) => a + i.count, 0);
       const before = invTotal();
@@ -211,6 +292,19 @@ export const gather: Skill<{ block: string; count: number; for?: { item: string;
       } catch (e) {
         if (isAbort(e)) throw e;
         skip.add(key(target.pos));
+        if ((e as Error).message === 'ENTERED_WATER') {
+          // 走着走着下了水：这一片都别去了，先上岸，再看别的目标
+          rememberWet(ctx, target.pos);
+          risky.wet++;
+          ctx.progress(dug / args.count, `去 ${target.name} 要下水，放弃这一片，先上岸`);
+          adapter.stopAll();
+          const out = await surface.run(ctx, {});
+          if (++wetEntries >= 2 || out.status !== 'succeeded') {
+            const msg = `去挖 ${args.block} 的路上两次进了水（${out.summary}），这一带的 ${args.block} 要下水才够得着，换个干燥的地方采${riskNote()}`;
+            return dug > 0 ? ok(`采集了 ${dug}/${args.count}；${msg}`, { dug }) : fail('NOT_FOUND', msg, { skippedUnsafe: { ...risky } });
+          }
+          continue;
+        }
         if (++failsInRow >= 4) {
           return dug > 0 ? ok(`多次失败后停止，采集了 ${dug}/${args.count}`, { dug }) : fail(codeFromError(e) === 'ERROR' ? 'PATH_NOT_FOUND' : codeFromError(e), `无法到达或挖掘 ${args.block}：${(e as Error).message}`);
         }
@@ -233,8 +327,8 @@ export const gather: Skill<{ block: string; count: number; for?: { item: string;
     }
     const after = args.for ? materialPlan(args.for.item, args.for.count, adapter.state().inventory) : null;
     return ok(`采集了 ${dug} 个 ${args.block}${lost ? `（另有 ${lost} 块的掉落物没捡到）` : ''}${after ? `；${describePlan(after)}` : ''}${riskNote()}`, { dug, ...(lost ? { lost } : {}), ...(after ? { plan: after } : {}) });
-  },
-};
+  }
+}
 
 // ------------------------------------------------------------------ craft
 const COLORED = ['bed', 'wool', 'carpet', 'banner', 'concrete', 'terracotta', 'stained_glass', 'candle'];

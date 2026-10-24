@@ -45,7 +45,7 @@ test('build 不给 origin：附近都是水时 NOT_FOUND 并说明原因和方�
     if (!v.ok) return;
     const r = await build.run(ctx, v.args);
     assert.equal(r.failureCode, 'NOT_FOUND');
-    assert.match(r.summary, /附近 24 格内没有够平又不挨水的 5×5 空地/);
+    assert.match(r.summary, /附近 24 格内没有够平（或整得平）又不挨水的 5×5 空地/);
     assert.ok(!w.actions.some((a) => a.startsWith('place:')));
   } finally { ctx.memory.close(); }
 });
@@ -107,5 +107,65 @@ test('选址：扫描起点就在山体/地下的列不算地表', () => {
     const s = surveyBuildSite(w, memory, spec, { radius: 8 });
     assert.equal(s.best, null);
     assert.ok(s.rejected.unknown > 0);
+  } finally { memory.close(); }
+});
+
+test('给了 origin 但那块地挨水：就近改址并说明；同 origin 的地基坏工地不续建', async () => {
+  const w = new InstantBuildWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  const ctx = makeCtx(w);
+  ctx.memory.setWorld(w.worldId);
+  const archive = buildingArchiveFor(ctx.memory);
+  try {
+    const origin = { x: 3, y: 64, z: 3 };
+    for (let x = 0; x <= 6; x++) for (let z = 0; z <= 6; z++) w.setBlock({ x, y: 63, z }, 'water');
+    const bad = archive.design({ worldId: w.worldId, dimension: 'overworld', origin, rotation: 0, spec, materials: materialCost(compileBuilding(spec).cells) });
+    archive.inspect(bad.id, { at: Date.now(), complete: false, checked: 1, defects: [{ cellId: 's', pos: origin, kind: 'terrain', expected: '地面', actual: 'air' }], functions: {} });
+    const v = build.validate({ blueprint: 'hut', origin, rotation: 0 }, w);
+    if (!v.ok) throw new Error(v.error);
+    const r = await build.run(ctx, v.args);
+    assert.notEqual(r.data?.projectId, bad.id);
+    assert.match(r.summary, /原定位置不合适（挨着水/);
+    const moved = r.data?.origin as { x: number; y: number; z: number };
+    assert.ok(moved && (moved.x !== 3 || moved.z !== 3));
+    for (const c of footprint(moved, r.data?.rotation as 0)) assert.notEqual(w.blockAt({ x: c.x, y: 63, z: c.z }), 'water');
+  } finally { ctx.memory.close(); }
+});
+
+test('附近没有现成平地：挑整地量最少的坡地，铲平后照样盖成', async () => {
+  const w = new InstantBuildWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  // 四周是水，只有一块 9×12 的小岛；岛的东边一列高出两格（坡地）
+  for (let x = -40; x <= 40; x++) for (let z = -40; z <= 40; z++) {
+    const island = x >= -3 && x <= 5 && z >= -6 && z <= 5;
+    if (!island) w.setBlock({ x, y: 63, z }, 'water');
+    else if (x >= 4) { w.setBlock({ x, y: 64, z }, 'dirt'); w.setBlock({ x, y: 65, z }, 'grass_block'); }
+  }
+  const ctx = makeCtx(w);
+  try {
+    const s = surveyBuildSite(w, ctx.memory, spec, { radius: 24 });
+    assert.ok(s.best, JSON.stringify(s.rejected));
+    assert.equal(s.best!.origin.y, 64);
+    assert.ok(s.best!.cut > 0, JSON.stringify(s.best));
+    const bp = compileBuilding(spec);
+    for (const [name, count] of Object.entries(materialCost([...bp.cells, ...planScaffolding(bp)]))) w.inv.set(name, count + 8);
+    const v = build.validate({ blueprint: 'hut' }, w);
+    if (!v.ok) throw new Error(v.error);
+    const r = await build.run(ctx, v.args);
+    assert.equal(r.status, 'succeeded', r.summary);
+    assert.match(r.summary, /没有现成的平地.*铲掉约 \d+ 块/);
+    assert.match(r.summary, /整地清掉了 .*(dirt|grass_block)/);
+  } finally { ctx.memory.close(); }
+});
+
+test('选址：要填的坑深度不超过 maxFoundationDepth', async () => {
+  const { checkSiteAt } = await import('../src/building/site.ts');
+  const w = new InstantBuildWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.setBlock({ x: 5, y: 63, z: 5 }, 'air'); w.setBlock({ x: 5, y: 62, z: 5 }, 'air'); // 低两格的坑
+  const memory = new WorldMemory(null);
+  try {
+    assert.equal(checkSiteAt(w, memory, { ...spec, maxFoundationDepth: 4 }, { x: 3, y: 64, z: 3 }, 0).ok, true);
+    assert.equal(checkSiteAt(w, memory, { ...spec, maxFoundationDepth: 1 }, { x: 3, y: 64, z: 3 }, 0).ok, false);
   } finally { memory.close(); }
 });

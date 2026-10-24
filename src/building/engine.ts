@@ -9,6 +9,8 @@ import { availableInventoryFor } from '../projects/reservations.ts';
 import { STATION_LABEL } from '../skills/stations.ts';
 
 /** 盖房时可以先收起来、盖完再放的自己的功能方块（箱子不动：里面有东西，挖了会撒一地） */
+/** 填坑可用的普通方块（整地挖出来的） */
+const FILLERS = ['dirt', 'cobblestone', 'cobbled_deepslate', 'stone', 'andesite', 'granite', 'diorite'];
 const STOWABLE = ['crafting_table', 'furnace', 'smoker', 'blast_furnace'];
 /** 记忆里“我的工作台/我的熔炉”这类自己放下的功能方块：位置 → { 方块名, 地标 id } */
 export function ownStationsAt(ctx: SkillCtx): Map<string, { name: string; landmarkId: string }> {
@@ -237,13 +239,18 @@ async function prepareSite(ctx: SkillCtx, project: BuildingProject, blueprint: B
     if (!ok || !holes.length) continue;
     for (const p of holes.reverse()) {
       check();
-      if (!adapter.state().inventory.some((i) => i.name === spec.palette.foundation && i.count > 0)) break;
+      // 填坑优先用整地铲下来的泥土等“多余”方块；只用预留之外、扣掉房子还要用的量之后剩下的（不抢墙和地基的料）
+      const avail = new Map<string, number>();
+      for (const i of availableInventoryFor(ctx.memory, adapter.state())) avail.set(i.name, (avail.get(i.name) ?? 0) + i.count);
+      const stillNeeded = materialCost([...blueprint.cells.filter((c) => cellDefect(adapter, c, project)), ...scaffolding]);
+      const filler = [...FILLERS, spec.palette.foundation].find((n) => (avail.get(n) ?? 0) - (stillNeeded[n] ?? 0) > 0);
+      if (!filler) break;
       if (PLANTS.has(adapter.blockAt(p) ?? '')) await adapter.dig(p, ctx.signal);
       try { await adapter.moveTo({ kind: 'place_block', pos: p }, { signal: ctx.signal, timeoutMs: Math.max(1, Math.min(12000, ctx.deadline - Date.now())), constructionSafe: true }); }
       catch (e) { if (isAbort(e)) throw e; break; }
-      const r = await adapter.placeBlockAt(p, [spec.palette.foundation], ctx.signal);
+      const r = await adapter.placeBlockAt(p, [filler], ctx.signal);
       check();
-      if (r.ok && adapter.blockAt(p) === spec.palette.foundation) filled++; else break;
+      if (r.ok && adapter.blockAt(p) === filler) filled++; else break;
     }
   }
   return { cleared, filled, blocked, ...(stowed.length ? { stowed } : {}) };

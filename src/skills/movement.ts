@@ -318,8 +318,8 @@ type Vec = { x: number; y: number; z: number };
 /** escape：同一处上浮失败过时反射层换的打法——dig=优先找气穴/往上挖，shore=让寻路带着往岸上走 */
 export const surface: Skill<{ escape?: 'dig' | 'shore' }> = {
   name: 'surface',
-  description: '溺水时持续上浮并朝看见的岸边游动，确认站稳干地后结束；头顶被封住时找身边的气穴或往上挖开透气',
-  argsDoc: '{"escape"?: "dig|shore"}',
+  description: '被水困住时游上岸站稳',
+  argsDoc: '{}',
   timeoutMs: 35000,
   movement: true,
   validate(raw) {
@@ -340,6 +340,10 @@ export const surface: Skill<{ escape?: 'dig' | 'shore' }> = {
       if (next === 'shore') walks = 0;
     };
     if (!ctx.adapter.swimTo) return fail('STUCK', '当前适配器缺少持续游泳控制，不能确认已安全上岸');
+    {
+      const s0 = ctx.adapter.state();
+      if (!s0.inWater && s0.onGround) return ok('没在水里，已经站在干地上了', { landed: true, pos: s0.pos });
+    }
     let brokeCeiling = 0;
     const stubborn = new Set<string>(); // 挖不动的顶（没合适的工具/基岩）
     const notes: string[] = [];
@@ -350,6 +354,17 @@ export const surface: Skill<{ escape?: 'dig' | 'shore' }> = {
       let sealed = false;
       if (lid) {
         const k = `${lid.pos.x},${lid.pos.y},${lid.pos.z}`;
+        // 水下挖方块慢 5 倍（脚不着地再慢 5 倍）：附近有气穴就先游过去，比憋着气挖顶快
+        const near = pockets < 3 ? findAirPocket(ctx) : null;
+        if (near && near.steps <= 10) {
+          pockets++;
+          ctx.progress(0, `头顶是 ${lid.name}，旁边 ${near.steps} 格有气穴，先游过去换气`);
+          const landed = await swimPath(ctx, near.path, end);
+          if (landed) return ok(`游进气穴后上了岸，氧气 ${ctx.adapter.state().oxygen}/20`, { attempts, landed: true, pocket: near.pos });
+          notes.push(`游向了 ${near.steps} 格外的气穴`);
+          if (headInAir(ctx)) { await ctx.adapter.swimTo(null, ctx.signal, { timeoutMs: Math.max(300, Math.min(3000, end - Date.now())) }); }
+          continue;
+        }
         if (lid.reachable && !lid.unbreakable && !stubborn.has(k) && brokeCeiling < 6) {
           ctx.progress(0, `头顶是 ${lid.name}，挖开透气`);
           try {
@@ -472,14 +487,14 @@ const SWIMMABLE = new Set(['water', 'bubble_column', 'kelp', 'kelp_plant', 'seag
 const AIRS = new Set(['air', 'cave_air', 'void_air']);
 const UNBREAKABLE = new Set(['bedrock', 'barrier', 'end_portal_frame', 'reinforced_deepslate']);
 /**
- * 人在水里时，头顶这一列往上看 8 格：先碰到空气 = 开阔水面（null）；先碰到实心方块 = 被封住，返回那一块
+ * 人在水里时，头顶这一列往上看 24 格：先碰到空气 = 开阔水面（null）；先碰到实心方块 = 被封住，返回那一块
  * （reachable：站在水里伸手够得着，约 4.5 格内）。只看自己头顶这一列，是身边的物理环境，不算透视。
  */
 export function ceilingAbove(ctx: SkillCtx): { name: string; pos: Vec; reachable: boolean; unbreakable: boolean } | null {
   const s = ctx.adapter.state();
   if (!s.inWater) return null;
   const x = Math.floor(s.pos.x), z = Math.floor(s.pos.z), feet = Math.floor(s.pos.y);
-  for (let y = feet + 1; y <= feet + 8; y++) {
+  for (let y = feet + 1; y <= feet + 24; y++) {
     const name = ctx.adapter.blockAt({ x, y, z }) ?? 'air';
     if (AIRS.has(name)) return null; // 头顶是开阔水面
     if (PASSABLE.has(name)) continue;
@@ -492,7 +507,7 @@ export function ceilingAbove(ctx: SkillCtx): { name: string; pos: Vec; reachable
  * 在身边连通的水里找最近的气穴：水面上方是空气的一格（或水道边能把头探进去的空气）。
  * 只沿着身体所在的水往外摸（有限范围的局部环境），不穿墙找。返回路线（水格序列，最后一格是能换气的空气）。
  */
-export function findAirPocket(ctx: SkillCtx, radius = 8, maxNodes = 900): { pos: Vec; steps: number; path: Vec[] } | null {
+export function findAirPocket(ctx: SkillCtx, radius = 8, maxNodes = 2500): { pos: Vec; steps: number; path: Vec[] } | null {
   const s = ctx.adapter.state();
   const ox = Math.floor(s.pos.x), oz = Math.floor(s.pos.z), feet = Math.floor(s.pos.y);
   const k = (p: Vec) => `${p.x},${p.y},${p.z}`;
@@ -513,7 +528,7 @@ export function findAirPocket(ctx: SkillCtx, radius = 8, maxNodes = 900): { pos:
     const cur = queue[i];
     for (const [dx, dy, dz] of [[0, 1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0]]) {
       const n = { x: cur.x + dx, y: cur.y + dy, z: cur.z + dz };
-      if (prev.has(k(n)) || Math.hypot(n.x - ox, n.z - oz) > radius || n.y < feet - 4 || n.y > feet + 10) continue;
+      if (prev.has(k(n)) || Math.hypot(n.x - ox, n.z - oz) > radius || n.y < feet - 4 || n.y > feet + 24) continue;
       const b = name(n);
       if (b === null) continue;
       if (AIRS.has(b)) {

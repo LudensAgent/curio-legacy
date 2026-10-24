@@ -3,6 +3,8 @@ import { DIR_OFFSETS, isSoftBlock, LIQUID_BLOCKS, surroundings } from '../percep
 import { dirOfYaw } from '../perception/vision.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
 import { hasPlaceable } from './survival.ts';
+import { ensureToolFor } from './work.ts';
+import { findStation } from './stations.ts';
 
 /**
  * 身体的基本动作：对着某个方向挖（玩家按住左键）、原地垫方块往上爬（跳起来往脚下放方块）。
@@ -27,6 +29,14 @@ async function breakCell(ctx: SkillCtx, c: { x: number; y: number; z: number }):
   if (name === 'bedrock') throw new Error('BEDROCK');
   const wet = liquidNext(ctx, c);
   if (wet) throw new Error(`LIQUID_NEAR:${wet}`);
+  // 挖不动（没有合适的镐）：像玩家一样有木料就先做一把木镐，没有就说清楚缺什么，而不是只报 TOOL_MISSING
+  // 但 dig/climb_up 是“就地”的动作（可能站在柱子上、坑里），合成时不能走开：只有工作台就在手边时才顺手做
+  if (!ctx.adapter.canHarvest(c)) {
+    const block = ctx.adapter.blockAt(c) ?? '它';
+    if (!findStation(ctx, ['crafting_table'], 4)) throw new Error(`NEED_TOOL:手上没有能挖 ${block} 的镐子（需要 wooden_pickaxe 以上）；先 craft wooden_pickaxe（背包有木料就能做），再来挖`);
+    const tool = await ensureToolFor(ctx, c);
+    if (!tool.ok) throw new Error(`NEED_TOOL:${tool.message}`);
+  }
   const r = await ctx.adapter.dig(c, ctx.signal);
   if (!r.ok) throw new Error(r.reason ?? 'DIG_FAILED');
   return name;
@@ -37,6 +47,8 @@ const why = (e: unknown) => {
   if (m.startsWith('LIQUID_NEAR:')) return `再挖 ${m.slice(12)} 就会流进来，停下了`;
   if (m.startsWith('LIQUID:')) return `那边是 ${m.slice(7)}`;
   if (m === 'BEDROCK') return '碰到基岩，挖不动';
+  if (m.startsWith('NEED_TOOL:')) return m.slice(10);
+  if (m === 'TOOL_MISSING') return '手上没有能挖它的工具（石头类要镐子，先 craft wooden_pickaxe）';
   return m;
 };
 

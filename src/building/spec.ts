@@ -55,10 +55,18 @@ const BLOCK_NAME = /^[a-z][a-z0-9_]{0,63}$/;
 // Structural palette cells must be full, non-falling cubes. Stateful parts are explicit below.
 const STRUCTURAL = /^(?:cobblestone|mossy_cobblestone|stone|stone_bricks|mossy_stone_bricks|bricks|deepslate|cobbled_deepslate|deepslate_bricks|polished_deepslate|blackstone|polished_blackstone|polished_blackstone_bricks|netherrack|nether_bricks|red_nether_bricks|end_stone|end_stone_bricks|quartz_block|smooth_quartz|sandstone|smooth_sandstone|cut_sandstone|red_sandstone|smooth_red_sandstone|cut_red_sandstone|dirt|packed_mud|mud_bricks|terracotta|(?:white|orange|magenta|light_blue|yellow|lime|pink|gray|light_gray|cyan|purple|blue|brown|green|red|black)_(?:concrete|terracotta|wool)|(?:oak|spruce|birch|jungle|acacia|dark_oak|mangrove|cherry|bamboo|crimson|warped)_planks)$/;
 
+const WOOD_TYPES = ['dark_oak', 'oak', 'spruce', 'birch', 'jungle', 'acacia', 'mangrove', 'cherry', 'crimson', 'warped'];
+const DOOR = /^(?:oak|spruce|birch|jungle|acacia|dark_oak|mangrove|cherry|crimson|warped)_door$/;
 export function normalizeSpec(raw: unknown): BuildingSpec {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('spec 必须是对象');
   const input = raw as Record<string, any>;
   const palette = { ...DEFAULT_SPEC.palette, ...(input.palette ?? {}) };
+  // 门写成木料（spruce_planks / spruce_log）时按木种换成对应的木门；认不出就用橡木门，不让整个设计作废
+  if (typeof palette.door === 'string' && !DOOR.test(palette.door)) {
+    const name = palette.door.replace(/^minecraft:/, '');
+    const wood = WOOD_TYPES.find((w) => name.startsWith(`${w}_`)); // dark_oak 排在 oak 前面，先匹配
+    palette.door = `${wood ?? 'oak'}_door`;
+  }
   const spec = { ...DEFAULT_SPEC, ...input, palette, facilities: input.facilities ?? [] } as BuildingSpec;
   if (typeof spec.name !== 'string' || !spec.name.trim() || spec.name.length > 100) throw new Error('name 需要 1-100 字符');
   if (typeof spec.purpose !== 'string' || !spec.purpose.trim() || spec.purpose.length > 300) throw new Error('purpose 需要 1-300 字符');
@@ -71,7 +79,7 @@ export function normalizeSpec(raw: unknown): BuildingSpec {
   if (Object.values(palette).some((v) => typeof v !== 'string' || !BLOCK_NAME.test(v))) throw new Error('palette 需要合法方块名称');
   for (const field of ['foundation', 'wall', 'roof'] as const) if (!STRUCTURAL.test(palette[field])) throw new Error(`${field} 必须是受支持的实心、非重力方块`);
   if (!/^(?:glass|(?:white|orange|magenta|light_blue|yellow|lime|pink|gray|light_gray|cyan|purple|blue|brown|green|red|black)_stained_glass)$/.test(palette.window)) throw new Error('window 必须为完整玻璃方块');
-  if (!/^(?:oak|spruce|birch|jungle|acacia|dark_oak|mangrove|cherry|crimson|warped)_door$/.test(palette.door)) throw new Error('door 必须为可手动打开的木门');
+  if (!DOOR.test(palette.door)) throw new Error('door 必须为可手动打开的木门');
   if (!Array.isArray(spec.facilities) || spec.facilities.length > 4 || new Set(spec.facilities).size !== spec.facilities.length || spec.facilities.some((f) => !['crafting_table', 'furnace', 'chest', 'torch'].includes(f))) throw new Error('facilities 支持不重复的 crafting_table/furnace/chest/torch');
   if (!['house', 'custom'].includes(spec.layout)) throw new Error('layout 支持 house/custom');
   if (!Array.isArray(spec.components) || spec.components.length > 150 || spec.layout === 'custom' && !spec.components.length) throw new Error('components 最多 150 项；custom 至少需要一项');

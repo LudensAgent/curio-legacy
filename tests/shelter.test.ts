@@ -88,17 +88,19 @@ test('shelter preflight refuses fluids, open drops, falling or unknown fourth-le
       adapter.blockAt = (pos) => pos.y === 60 ? null : read(pos);
     } else world.setBlock({ x: 0, y: 60, z: 0 }, floor);
     const result = await shelter.run(context(adapter), { until: 'day' });
-    assert.equal(result.status, 'failed', String(floor));
-    assert.equal(world.digs.length, 0, String(floor));
-    assert.equal(world.placements.length, 0, String(floor));
+    // 原地不安全：绝不在这一列动手；可以走到旁边安全的地方再挖（像玩家一样换个位置）
+    const here = (p: Vec3Like) => p.x === 0 && p.z === 0;
+    assert.equal(world.digs.filter(here).length, 0, String(floor));
+    assert.equal(world.placements.filter(here).length, 0, String(floor));
+    if (result.status === 'succeeded') assert.match(result.summary, /原地挖不了，走到/, String(floor));
   }
 });
 
 test('shelter checks the third dig level before any mutation and permits stable bedrock as the fourth-level floor', async () => {
   const unsafe = new ShelterWorld();
   unsafe.setBlock({ x: 0, y: 61, z: 0 }, 'water');
-  assert.equal((await shelter.run(context(unsafe), { until: 'day' })).status, 'failed');
-  assert.equal(unsafe.digs.length, 0);
+  await shelter.run(context(unsafe), { until: 'day' });
+  assert.equal(unsafe.digs.filter((p) => Math.abs(p.x) + Math.abs(p.z) <= 1).length, 0, '不在挨着水的那一列和它旁边挖');
   const stable = new ShelterWorld();
   stable.setBlock({ x: 0, y: 60, z: 0 }, 'bedrock');
   assert.equal((await shelter.run(context(stable), { until: 'day' })).status, 'succeeded');

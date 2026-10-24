@@ -3,8 +3,7 @@ import type { Arbiter, Step } from '../arbiter/arbiter.ts';
 import type { EventBus, Severity } from '../events.ts';
 import type { Senses } from '../skills/types.ts';
 import { hasPlaceable } from '../skills/survival.ts';
-import { torchCount } from '../skills/light.ts';
-import { effectiveLight, lightAround } from '../util.ts';
+import { measureLight, torchCount } from '../skills/light.ts';
 import { surroundings } from '../perception/surroundings.ts';
 
 /** 这些动作进行中可以顺手插支火把（插完接着做） */
@@ -153,10 +152,10 @@ export class Reflex {
     // 只在“走路/挖矿”这类可以顺手停一下的动作里插火把；打猎、合成、建造、爬坑这些做到一半被打断会坏事
     if (cur && !TORCH_OK_DURING.has(cur.skill)) return;
     const x = Math.floor(s.pos.x), y = Math.floor(s.pos.y), z = Math.floor(s.pos.z);
-    const l = lightAround(this.adapter, x, y, z);
-    if (!l) return;
-    const here = effectiveLight(l, s.timeOfDay);
-    if (l.sky > 4 || here > 4) return; // 只在地下的暗处
+    // 只在地下的暗处：头顶看得见天（尤其白天）不插；光照数据读不到/不可信时也不插
+    const m = measureLight(this.adapter, s.pos, s.timeOfDay, s.isDay);
+    if (m.sky !== false || m.level === null || m.level > 4) return;
+    const here = m.level;
     if (this.lastTorch && Math.hypot(x - this.lastTorch.x, y - this.lastTorch.y, z - this.lastTorch.z) < 5) return;
     if (!this.ready('torch', 6000)) return;
     // 身边已经有火把了（光照数据还没刷新，或者火把被挡住）：玩家不会紧挨着再插一支
@@ -165,7 +164,7 @@ export class Reflex {
     this.torchesPlaced++;
     this.triggers++;
     this.bus.publish('reflex', 'P3', `地下太暗（亮度 ${here}/15）→ 顺手插火把`);
-    this.arbiter.start({ skill: 'place_torch', args: { count: 1 } }, 'reflex', { gentle: true });
+    this.arbiter.start({ skill: 'place_torch', args: { count: 1, auto: true } }, 'reflex', { gentle: true });
   }
 
   /** 移动型任务 20 秒内位移 < 1.5 格且进度没有变化 → 判定卡死，取消任务（计为 STUCK 失败）并执行脱困。 */

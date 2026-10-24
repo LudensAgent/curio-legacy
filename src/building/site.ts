@@ -16,7 +16,14 @@ const TREE = /_log$|_wood$|_stem$/;
 
 export interface Column { y: number; ground: string; wet: boolean; tree: boolean; artificial: string | null }
 
-export interface SiteCandidate { origin: Vec3Like; rotation: Rotation; score: number; dist: number; trees: number; spread: number }
+export interface SiteCandidate {
+  origin: Vec3Like; rotation: Rotation; score: number; dist: number; trees: number; spread: number;
+  /** 整地工作量：要铲掉的高出来的自然方块数、要填的低洼格数（0/0 = 现成平地） */
+  cut: number; fill: number;
+}
+/** 整地上限：铲最多高出 3 格、填最多低 2 格；5×5（含余量）总量不超过约 40 块，按面积放大 */
+const MAX_CUT = 3, MAX_FILL = 2;
+export const levelBudget = (spec: Pick<BuildingSpec, 'width' | 'depth'>) => Math.round(40 * (spec.width * spec.depth) / 25);
 
 export interface SiteSurvey {
   best: SiteCandidate | null;
@@ -52,14 +59,17 @@ export function surfaceColumn(adapter: GameAdapter, x: number, z: number, top: n
   return null;
 }
 
-export function surveyBuildSite(adapter: GameAdapter, memory: WorldMemory | null, spec: Pick<BuildingSpec, 'width' | 'depth' | 'height' | 'layout'>, opts: { radius?: number; rotations?: Rotation[]; ownStations?: Vec3Like[] } = {}): SiteSurvey {
+export function surveyBuildSite(adapter: GameAdapter, memory: WorldMemory | null, spec: Pick<BuildingSpec, 'width' | 'depth' | 'height' | 'layout'> & { maxFoundationDepth?: number }, opts: { radius?: number; rotations?: Rotation[]; ownStations?: Vec3Like[]; center?: Vec3Like } = {}): SiteSurvey {
   const s = adapter.state();
   const radius = opts.radius ?? 24;
   const rotations = opts.rotations ?? [0, 90, 180, 270];
   const own = new Set((opts.ownStations ?? []).map((p) => `${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)}`));
-  const bx = Math.floor(s.pos.x), by = Math.floor(s.pos.y), bz = Math.floor(s.pos.z);
+  // center：围绕某个点（比如模型给的 origin）找；默认围绕自己
+  const c0 = opts.center ?? s.pos;
+  const bx = Math.floor(c0.x), by = Math.floor(c0.y), bz = Math.floor(c0.z);
   const b = footprintBounds(spec);
-  const reach = radius + Math.max(-b.minX, b.maxX, -b.minZ, b.maxZ) + 1;
+  // 候选位置最远 radius，占地的角最远再加上半对角线（按矩形的角算，不是按最长边）
+  const reach = radius + Math.hypot(Math.max(-b.minX, b.maxX), Math.max(-b.minZ, b.maxZ)) + 1;
   const cols = new Map<string, Column | null>();
   const col = (x: number, z: number) => {
     const k = `${x},${z}`;
@@ -69,7 +79,7 @@ export function surveyBuildSite(adapter: GameAdapter, memory: WorldMemory | null
   const rejected = { wet: 0, uneven: 0, hazard: 0, artificial: 0, unknown: 0 };
   const dirScore = new Map<string, { ok: number; n: number; wet: number }>();
   let best: SiteCandidate | null = null, checked = 0;
-  for (let dx = -radius; dx <= radius; dx += 2) for (let dz = -radius; dz <= radius; dz += 2) {
+  for (let dx = -radius; dx <= radius; dx += radius ? 2 : 1) for (let dz = -radius; dz <= radius; dz += radius ? 2 : 1) {
     if (Math.hypot(dx, dz) > radius) continue;
     const ox = bx + dx, oz = bz + dz;
     const dir = Object.entries(DIRS).reduce((acc, [d, [ux, uz]]) => { const dot = ux * dx + uz * dz; return dot > acc.dot ? { d, dot } : acc; }, { d: 'N', dot: -Infinity }).d;
@@ -94,22 +104,27 @@ export function surveyBuildSite(adapter: GameAdapter, memory: WorldMemory | null
       }
       if (!reason) {
         const lo = Math.min(...heights), hi = Math.max(...heights);
-        if (hi - lo > 1) reason = 'uneven';
+        // 地基高度：平地取最常见的地表；坡地取中位数（铲 + 填的总量最少）
+        const freq = new Map<number, number>();
+        for (const h of heights) freq.set(h, (freq.get(h) ?? 0) + 1);
+        const sorted = [...heights].sort((p, q) => p - q);
+        const ground = hi - lo <= 1 ? [...freq].sort((p, q) => q[1] - p[1] || p[0] - q[0])[0][0] : sorted[Math.floor(sorted.length / 2)];
+        const cut = heights.reduce((a, h) => a + Math.max(0, h - ground), 0);
+        const fill = heights.reduce((a, h) => a + Math.max(0, ground - h), 0);
+        if (hi - ground > MAX_CUT || ground - lo > Math.min(MAX_FILL, spec.maxFoundationDepth ?? MAX_FILL) || cut + fill > levelBudget(spec)) reason = 'uneven';
         else {
-          // 地基高度取最常见的地表：高出来的一格整地铲掉，低一格的用地基填
-          const freq = new Map<number, number>();
-          for (const h of heights) freq.set(h, (freq.get(h) ?? 0) + 1);
-          const ground = [...freq].sort((p, q) => q[1] - p[1] || p[0] - q[0])[0][0];
           const origin = { x: ox, y: ground + 1, z: oz };
           const center = rotatePosition({ x: Math.floor(spec.width / 2), y: 0, z: Math.floor(spec.depth / 2) }, origin, rotation);
           if (memory?.hazardAt?.(center, s.dim)) reason = 'hazard';
           else {
-            const dist = Math.hypot(center.x + 0.5 - s.pos.x, center.z + 0.5 - s.pos.z);
+            const dist = Math.hypot(center.x + 0.5 - c0.x, center.z + 0.5 - c0.z);
             const spread = heights.filter((h) => h !== ground).length;
             // 越平、树越少、越近越好；离得太近（站在占地中间）也没关系，整地时会先走开
-            const score = spread * 0.6 + trees * 0.4 + dist * 0.15 + Math.abs(ground + 1 - s.pos.y) * 0.5;
+            // 现成的平地（高低差 ≤1）永远优先；没有才挑整地量最少的坡地
+            const levelling = hi - lo > 1 ? 50 + (cut + fill) : spread * 0.6;
+            const score = levelling + trees * 0.4 + dist * 0.15 + Math.abs(ground + 1 - c0.y) * 0.5;
             ds.ok++;
-            if (!best || score < best.score) best = { origin, rotation, score, dist: Math.round(dist), trees, spread };
+            if (!best || score < best.score) best = { origin, rotation, score, dist: Math.round(dist), trees, spread, cut: hi - lo > 1 ? cut : 0, fill: hi - lo > 1 ? fill : 0 };
           }
         }
       }
@@ -125,6 +140,15 @@ export function surveyBuildSite(adapter: GameAdapter, memory: WorldMemory | null
 /** 失败时的人话说明 */
 export function describeSiteFailure(survey: SiteSurvey, spec: Pick<BuildingSpec, 'width' | 'depth'>, radius = 24): string {
   const r = survey.rejected;
-  const why = [r.wet ? '挨水/岩浆' : '', r.uneven ? '高低差超过 1 格' : '', r.artificial ? '有不是自然地形的方块' : '', r.hazard ? '在出过事的危险区域' : '', r.unknown ? '有区块没加载、或地表被山体/洞顶盖住' : ''].filter(Boolean).join('、');
-  return `附近 ${radius} 格内没有够平又不挨水的 ${spec.width}×${spec.depth} 空地${why ? `（试过的位置主要问题：${why}）` : ''}，换个地方${survey.hint ? `（比如往 ${survey.hint} 走 30 格以上）` : ''}再试，或直接给 origin`;
+  const why = [r.wet ? '挨水/岩浆' : '', r.uneven ? '坡太陡、要铲/填的方块太多' : '', r.artificial ? '有不是自然地形的方块' : '', r.hazard ? '在出过事的危险区域' : '', r.unknown ? '有区块没加载、或地表被山体/洞顶盖住' : ''].filter(Boolean).join('、');
+  return `附近 ${radius} 格内没有够平（或整得平）又不挨水的 ${spec.width}×${spec.depth} 空地${why ? `（试过的位置主要问题：${why}）` : ''}，换个地方${survey.hint ? `（比如往 ${survey.hint} 走 30 格以上）` : ''}再试，或直接给 origin`;
+}
+
+/** 某个指定 origin 能不能盖：能盖返回校正过高度的 origin；不能盖返回原因 */
+export function checkSiteAt(adapter: GameAdapter, memory: WorldMemory | null, spec: Pick<BuildingSpec, 'width' | 'depth' | 'height' | 'layout'> & { maxFoundationDepth?: number }, origin: Vec3Like, rotation: Rotation, ownStations: Vec3Like[] = []): { ok: true; origin: Vec3Like } | { ok: false; why: string } {
+  const r = surveyBuildSite(adapter, memory, spec, { radius: 0, rotations: [rotation], ownStations, center: origin });
+  if (r.best && Math.abs(r.best.origin.y - origin.y) <= 2) return { ok: true, origin: r.best.origin };
+  const x = r.rejected;
+  const why = r.best ? `地面高度是 ${r.best.origin.y - 1}，和给的 y=${origin.y} 差太多` : [x.wet ? '挨着水/岩浆' : '', x.uneven ? '坡太陡（一边要挖进山里超过 3 格或悬空超过 2 格，整地量太大）' : '', x.artificial ? '占地里有不是自然地形的方块' : '', x.hazard ? '在出过事的危险区域' : '', x.unknown ? '地表被山体/洞顶盖住或区块没加载' : ''].filter(Boolean).join('、') || '地形不合适';
+  return { ok: false, why };
 }

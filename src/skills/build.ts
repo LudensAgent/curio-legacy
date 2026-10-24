@@ -1,7 +1,7 @@
 import type { ConstructionResult } from '../building/engine.ts';
 import { materialPlan } from '../methods/shortfall.ts';
 import { findStation, rememberStation } from './stations.ts';
-import { describeSiteFailure, surveyBuildSite } from '../building/site.ts';
+import { checkSiteAt, describeSiteFailure, surveyBuildSite } from '../building/site.ts';
 import { ownStationsAt } from '../building/engine.ts';
 import type { BuildingProject } from '../building/archive.ts';
 import type { Vec3Like } from '../adapter/types.ts';
@@ -96,7 +96,7 @@ async function restoreStations(ctx: Parameters<Skill['run']>[0], project: Buildi
 
 export const build: Skill<BuildArgs> = {
   name: 'build',
-  description: '参数化施工：可选尺寸、材料、平顶/阶梯坡顶、门窗、工作台/熔炉/箱子/照明。先整地（清掉占地里的草、花、树和凸起的土石，填平小坑），再勘察地基、核算分材料缺口，分阶段施工；必须逐格及通行验收才算建成。返回 projectId；中断后用该 ID 重新观察并续建，inspect 只检查，repair 修复有档案的建筑。spec.components 支持精确坐标、方块状态、功能标签和施工依赖的组合设计；未提供底层状态能力时明确报错。',
+  description: 'origin 可省略：会自动在附近找干燥平整的空地（给了 origin 但那块地挨水/是坡地，也会就近换地方）。参数化施工：可选尺寸、材料、平顶/阶梯坡顶、门窗、工作台/熔炉/箱子/照明。先整地（清掉占地里的草、花、树和凸起的土石，填平小坑），再勘察地基、核算分材料缺口，分阶段施工；必须逐格及通行验收才算建成。返回 projectId；中断后用该 ID 重新观察并续建，inspect 只检查，repair 修复有档案的建筑。spec.components 支持精确坐标、方块状态、功能标签和施工依赖的组合设计；未提供底层状态能力时明确报错。',
   argsDoc: '{"blueprint"?:"hut|big_hut|pillar|wall|custom", "spec"?:{"name":"住宅","purpose":"庇护所","width":5,"depth":5,"height":3,"roof":"flat|gable","palette"?:{"foundation":"cobblestone","wall":"oak_planks","roof":"oak_planks","window":"glass","door":"oak_door"},"windows"?:true,"door"?:true,"facilities"?:["crafting_table","furnace","chest","torch"],"budget"?:512,"layout"?:"house|custom","components"?:[{"pos":{"x":0,"y":0,"z":0},"name":"cobblestone","properties"?:{},"phase"?:"frame","tags"?:[],"dependsOn"?:[]}]}, "projectId"?:"已有作品ID", "mode"?:"build|inspect|repair", "origin"?:{"x":0,"y":64,"z":0}, "rotation"?:0|90|180|270, "reason"?:"设计/改造原因", "cells"?:[[0,0,0]]}',
   timeoutMs: 600000,
   movement: true,
@@ -137,10 +137,14 @@ export const build: Skill<BuildArgs> = {
         .sort((a, b) => b.updatedAt - a.updatedAt) : [];
       // 地形不行、或在原地反复失败都没进展的工地不自动接着盖：换地方另起（明确给了 projectId/origin 的除外）
       const notes: string[] = [];
-      const abandoned = nearby.map((p) => ({ p, why: terrainProblem(p) ?? (stalledFailures(p) >= 3 ? `在原地失败了 ${stalledFailures(p)} 次没有进展` : null) }));
-      const resumed = abandoned.find((x) => !x.why || args.origin)?.p;
+      // 地基有地形问题的工地永远不自动续建（给了同一个 origin 也不续）；原地停滞的只在明确给了 origin 时续
+      const abandoned = nearby.map((p) => {
+        const terrain = terrainProblem(p);
+        return { p, terrain: !!terrain, why: terrain ?? (stalledFailures(p) >= 3 ? `在原地失败了 ${stalledFailures(p)} 次没有进展` : null) };
+      });
+      const resumed = abandoned.find((x) => !x.why || (args.origin && !x.terrain))?.p;
       const skippedSite = !resumed ? abandoned.find((x) => x.why) : undefined;
-      if (skippedSite && !args.origin) notes.push(`附近没盖完的「${skippedSite.p.versions.at(-1)?.spec.name ?? skippedSite.p.id.slice(0, 8)}」${skippedSite.why}，不在那里接着盖，换了块地另起`);
+      if (skippedSite) notes.push(`附近没盖完的「${skippedSite.p.versions.at(-1)?.spec.name ?? skippedSite.p.id.slice(0, 8)}」${skippedSite.why}，不在那里接着盖，换了块地另起`);
       const projectId = args.projectId ?? resumed?.id;
       const old = projectId ? archive.get(projectId.length < 36 ? archive.list().find((p) => p.id.startsWith(projectId))?.id ?? projectId : projectId) : undefined;
       if (resumed) ctx.bus.publish('build_resume', 'P3', `附近有没盖完的「${resumed.versions.at(-1)?.spec.name ?? resumed.id.slice(0, 8)}」，接着盖它`);
@@ -158,14 +162,42 @@ export const build: Skill<BuildArgs> = {
       }
       const rotation = args.rotation ?? old?.rotation ?? ((Math.round(ctx.adapter.eye()!.yaw / (Math.PI / 2)) * 90 + 360) % 360) as Rotation;
       let rot = rotation;
-      let origin = args.origin ?? old?.origin;
-      if (!origin) {
-        // 没给 origin：先看看身边 24 格的地形，挑一块平整、干燥、没出过事的空地，再走过去
-        const own = [...ownStationsAt(ctx).keys()].map((k) => { const [x, y, z] = k.split(',').map(Number); return { x, y, z }; });
-        const survey = surveyBuildSite(ctx.adapter, ctx.memory, spec, { radius: 24, rotations: args.rotation !== undefined ? [args.rotation] : [rotation, ...([0, 90, 180, 270] as Rotation[]).filter((r) => r !== rotation)], ownStations: own });
-        if (!survey.best) return fail('NOT_FOUND', describeSiteFailure(survey, spec, 24) + (notes.length ? `；${notes.join('；')}` : ''), { survey: { checked: survey.checked, rejected: survey.rejected, hint: survey.hint } });
+      let origin = old ? old.origin : args.origin;
+      // 已有作品的位置不能改：同时给了 projectId 和不同的 origin 时照原位置施工，并说清楚
+      if (old && args.origin && (args.origin.x !== old.origin.x || args.origin.y !== old.origin.y || args.origin.z !== old.origin.z)) {
+        notes.push(`作品 ${old.id.slice(0, 8)} 的位置固定在 (${old.origin.x},${old.origin.y},${old.origin.z})，忽略了给的 origin (${args.origin.x},${args.origin.y},${args.origin.z})；想换地方就不写 projectId 另起一座`);
+      }
+      // 只勘察站在附近看得见的地形：给的 origin 离得远就先走过去再看（不隔着老远读地形）
+      if (origin && !old && args.mode === 'build' && spec.layout === 'house') {
+        const here = ctx.adapter.state().pos;
+        const far = Math.hypot(origin.x - here.x, origin.z - here.z);
+        if (far > 24) {
+          ctx.progress(0.02, `先走到给的 origin 附近（${Math.round(far)} 格）看看地形`);
+          try { await ctx.adapter.moveTo({ kind: 'near', pos: origin, range: 6 }, { signal: ctx.signal, timeoutMs: Math.max(3000, Math.min(90000, ctx.deadline - Date.now() - 60000)) }); }
+          catch (e) { if (isAbort(e)) throw e; return fail(codeFromError(e), `给的 origin (${origin.x},${origin.y},${origin.z}) 在 ${Math.round(far)} 格外，走不过去：${(e as Error).message}；先 goto 到那附近再 build`); }
+        }
+      }
+      const own = [...ownStationsAt(ctx).keys()].map((k) => { const [x, y, z] = k.split(',').map(Number); return { x, y, z }; });
+      const rotations = args.rotation !== undefined ? [args.rotation] : [rotation, ...([0, 90, 180, 270] as Rotation[]).filter((r) => r !== rotation)];
+      let surveyFrom: { center?: Vec3Like; radius: number; why?: string } | null = origin ? null : { radius: 24 };
+      // 模型给了 origin（新工地）：先按同样的标准看一眼那块地，不合适就在它附近 16 格内另找
+      if (origin && !old && args.mode === 'build' && spec.layout === 'house') {
+        const check = checkSiteAt(ctx.adapter, ctx.memory, spec, origin, rotation, own);
+        if (check.ok) {
+          if (check.origin.y !== origin.y) notes.push(`origin 的 y 按地面校正为 ${check.origin.y}`);
+          origin = check.origin;
+        } else surveyFrom = { center: origin, radius: 16, why: check.why };
+      }
+      if (surveyFrom) {
+        // 先看看附近的地形，挑一块平整、干燥、没出过事的空地，再走过去
+        const survey = surveyBuildSite(ctx.adapter, ctx.memory, spec, { radius: surveyFrom.radius, rotations, ownStations: own, ...(surveyFrom.center ? { center: surveyFrom.center } : {}) });
+        const given = surveyFrom.center;
+        if (!survey.best) return fail('NOT_FOUND', `${given ? `原定位置（${given.x},${given.y},${given.z}）不合适（${surveyFrom.why}）；` : ''}${describeSiteFailure(survey, spec, surveyFrom.radius)}${notes.length ? `；${notes.join('；')}` : ''}`, { survey: { checked: survey.checked, rejected: survey.rejected, hint: survey.hint } });
         origin = survey.best.origin; rot = survey.best.rotation;
-        notes.push(`选了 ${survey.best.dist} 格外一块${survey.best.spread ? '基本' : ''}平整、干燥的空地（${origin.x},${origin.y},${origin.z}）`);
+        const lv = survey.best.cut + survey.best.fill ? `；附近没有现成的平地，这块要先整地：铲掉约 ${survey.best.cut} 块、填约 ${survey.best.fill} 块` : '';
+        notes.push((given
+          ? `原定位置不合适（${surveyFrom.why}），改在 (${origin.x},${origin.y},${origin.z})`
+          : `选了 ${survey.best.dist} 格外一块${survey.best.cut + survey.best.fill ? '坡地' : `${survey.best.spread ? '基本' : ''}平整、干燥的空地`}（${origin.x},${origin.y},${origin.z}）`) + lv);
         ctx.bus.publish('build_site', 'P3', `选址：${origin.x},${origin.y},${origin.z}（旋转 ${rot}°，比较了 ${survey.checked} 个位置）`);
         const center = rotatePosition({ x: Math.floor(spec.width / 2), y: 0, z: Math.floor(spec.depth / 2) }, origin, rot);
         const here = ctx.adapter.state().pos;
@@ -175,6 +207,7 @@ export const build: Skill<BuildArgs> = {
           catch (e) { if (isAbort(e)) throw e; return fail(codeFromError(e), `选好的空地（${origin.x},${origin.y},${origin.z}）走不过去：${(e as Error).message}；换个方向再试或直接给 origin`); }
         }
       }
+      if (!origin) return fail('ERROR', '没有确定施工位置');
       const blueprint = compileBuilding(spec);
       const project = archive.design({ id: old?.id, worldId: state.worldId, dimension: state.dim, origin, rotation: rot, spec, materials: materialCost(blueprint.cells), reason: args.reason });
       const before = project.inspections.at(-1)?.defects.length;

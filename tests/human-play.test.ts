@@ -329,7 +329,7 @@ test('旁边有水时不往下挖（一挖水就灌进来）', async () => {
   } finally { ctx.memory.close(); }
 });
 
-test('最后一步是很快的合成时，在倒数第二步就开始想下一步，并告诉模型还剩哪些步骤', async (t) => {
+test('最后一步是很快的合成时，倒数第二步快做完才开始想下一步（不在动作刚开始就想），并告诉模型还剩哪些步骤', async (t) => {
   const w = fixture(t);
   w.adapter.speed = 4;
   w.adapter.blocks.push({ name: 'oak_log', pos: { x: 8, y: 64, z: 0 } });
@@ -339,9 +339,14 @@ test('最后一步是很快的合成时，在倒数第二步就开始想下一�
   await flush(); await w.tick();
   assert.equal(w.arbiter.info()?.skill, 'gather');
   await w.tick();
-  assert.equal(w.executive.inFlight, true, 'gather 还在进行时就已经在预规划');
+  assert.equal(w.executive.inFlight, false, 'gather 刚开始时不预先想：那时的情况等它做完就过时了');
+  let during = '';
+  for (let i = 0; i < 80 && !w.executive.inFlight; i++) { during = w.arbiter.info()?.skill ?? ''; await w.advance(250); }
+  assert.equal(w.executive.inFlight, true, '快做完时开始想下一步');
+  assert.ok(['gather', 'craft'].includes(during), `应在最后两步进行时就开始想，而不是全部做完后：${during}`);
+  // 假适配器里合成是瞬间完成的，所以请求可能是“合成中预先想”(prefetch)，也可能是刚做完(no_goal)；两者都只比实际晚一两秒
   const msgs = w.bus.recent().filter((e) => e.type === 'llm_request');
-  assert.match(msgs.at(-1)?.msg ?? '', /prefetch/);
+  assert.match(msgs.at(-1)?.msg ?? '', /prefetch|no_goal/);
 });
 
 test('打猎：远远看见过的牛被墙挡住了，先走到最后看见它的地方再打（不透视）', async () => {
@@ -422,7 +427,8 @@ test('执行层：进展顺利时的预规划用小决策，失败后和每隔�
   assert.deepEqual(tiers(), ['full'], '第一次决策是完整的');
   w.pending[0].resolve(reply({ goal: '砍木头', thought: '有树', steps: [{ skill: 'gather', args: { block: 'log', count: 1 } }] }));
   await flush(); await w.tick(); await w.tick();
-  assert.equal(tiers().at(-1), 'light', '有意图、没失败的预规划走小决策');
+  for (let i = 0; i < 80 && tiers().length < 2; i++) await w.advance(250);
+  assert.equal(tiers().at(-1), 'light', '有意图、没失败的下一次决策走小决策');
 });
 
 test('小决策是常态：有进行中的意图时，失败后的换法也走小请求并带上失败原因；没有意图时走完整决策', async (t) => {
@@ -529,7 +535,7 @@ test('工作记忆：下一次决策能看到上一次的想法、笔记、打�
   await flush(); await w.tick();
   await w.advance(5000); // gather 失败 → 新的决策请求
   const ctx = (w.executive as any).ctx('failure');
-  assert.match(ctx.notes[0], /^村子在东北约 60 格（写于 -?\d+,-?\d+,-?\d+）$/);
+  assert.match(ctx.notes[0], /^村子在东北约 60 格（(?:刚才|\d+ 分钟前)写于 -?\d+,-?\d+,-?\d+(?:，离这里 \d+ 格)?）$/);
   assert.equal(ctx.thread.at(-1).goal, '去东北的村子');
   assert.equal(ctx.thread.at(-1).then, '到村子后找干草块和工作台');
   assert.match(ctx.thread.at(-1).outcome, /failed/);
@@ -735,8 +741,9 @@ test('火把反射：脚下是半砖/草丛读到 0 不算“地下太暗”；�
   adapter.lightAt = (x: number, y: number) => (y === 64 ? { block: 0, sky: 0 } : { block: 0, sky: 15 });
   reflex.tick();
   assert.notEqual(arbiter.info()?.skill, 'place_torch', '露天不插');
-  // 真正在地下：脚和头都暗
+  // 真正在地下：脚和头都暗，头顶有石头封顶（露天时读成 0 只是光照数据没下发，不算暗）
   adapter.lightAt = () => ({ block: 0, sky: 0 });
+  adapter.blocks.push({ name: 'stone', pos: { x: 0, y: 67, z: 0 } });
   arbiter.start({ skill: 'hunt', args: { animal: 'cow', count: 1 } }, 'llm');
   reflex.tick();
   assert.equal(arbiter.info()?.skill, 'hunt', '打猎中途不插');

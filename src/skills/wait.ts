@@ -1,4 +1,5 @@
 import { sleep } from '../util.ts';
+import { surface } from './movement.ts';
 import { clampInt, fail, obj, ok, type Skill } from './types.ts';
 
 /** 原地等一会儿：像人一样站着、偶尔慢慢转头看看；受伤或掉进水里就提前结束 */
@@ -14,8 +15,15 @@ export const wait: Skill<{ seconds: number; look: boolean }> = {
   },
   async run(ctx, args) {
     const { adapter, signal } = ctx;
+    // 在水里原地等会淹死：像人一样先游上岸、站稳，再在岸上等
+    let landed = '';
+    if (adapter.state().inWater && !adapter.state().riding) {
+      const v = surface.validate({}, adapter);
+      const r = v.ok ? await surface.run({ ...ctx, deadline: Math.min(ctx.deadline, Date.now() + 30_000) }, v.args) : null;
+      if (!r || r.status !== 'succeeded' || adapter.state().inWater) return fail('ERROR', `在水里不能原地等（会淹死），想先上岸但没成功${r ? `：${r.summary}` : ''}`);
+      landed = '先游上了岸，';
+    }
     const s0 = adapter.state();
-    if (s0.inWater && !s0.riding) return fail('ERROR', '在水里不能原地等（会淹死），先上岸');
     const t0 = Date.now();
     const end = Math.min(t0 + args.seconds * 1000, ctx.deadline - 1000);
     const yaw0 = adapter.eye()?.yaw ?? 0;
@@ -29,6 +37,6 @@ export const wait: Skill<{ seconds: number; look: boolean }> = {
       ctx.progress(Math.min(1, (Date.now() - t0) / (args.seconds * 1000)), '等待中');
     }
     const s = adapter.state();
-    return ok(`原地等了 ${Math.round((Date.now() - t0) / 1000)} 秒（现在${s.isDay ? '白天' : '夜晚'}）`);
+    return ok(`${landed}原地等了 ${Math.round((Date.now() - t0) / 1000)} 秒（现在${s.isDay ? '白天' : '夜晚'}）`);
   },
 };

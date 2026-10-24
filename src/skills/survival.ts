@@ -1,5 +1,5 @@
 import { sleep, throwIfAborted } from '../util.ts';
-import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill } from './types.ts';
+import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 import { lookAround } from './movement.ts';
 
 /** 可以用来封顶/搭建的方块（不含会下落的沙子沙砾） */
@@ -11,6 +11,7 @@ export const PLACEABLE = [
 const DIGGABLE = new Set(['dirt', 'grass_block', 'coarse_dirt', 'podzol', 'stone', 'andesite', 'granite', 'diorite', 'deepslate', 'tuff', 'sand', 'gravel', 'clay', 'sandstone']);
 const SAFE_FLOOR = new Set([...DIGGABLE, ...PLACEABLE, 'bedrock'].filter((name) => !['sand', 'gravel'].includes(name)));
 const AIR = new Set(['air', 'cave_air', 'void_air']);
+const PLANTS = new Set(['short_grass', 'grass', 'tall_grass', 'fern', 'large_fern', 'dead_bush', 'snow', 'dandelion', 'poppy']);
 const FOOD_ANIMALS = new Set(['cow', 'pig', 'sheep', 'chicken', 'rabbit', 'mooshroom']);
 /** 鱼只在明确指定时才去打：要贴着水面下手，浅水里才去（不潜进深水） */
 const FISH = new Set(['cod', 'salmon']);
@@ -35,9 +36,114 @@ export const shelter: Skill<{ until: 'day' | 'healed' }> = {
     if (!s0.connected || !s0.alive || !s0.observationReady) return fail('NOT_CONNECTED', '当前状态无法确认，不能挖避难所');
     if (s0.inWater || s0.inLava || !s0.onGround) return fail('ERROR', '必须在干燥地面上挖避难所');
     if (!hasPlaceable(s0.inventory)) return fail('MISSING_MATERIALS', '背包里没有可以封顶的方块（泥土/圆石/木板/原木）');
+    const here = { x: Math.floor(s0.pos.x), y: Math.floor(s0.pos.y), z: Math.floor(s0.pos.z) };
+    if (pitProblem(adapter, here)) {
+      // 脚下挖不了（沙滩、沙砾、石板上…）：像玩家一样先走到附近能挖的泥土/石头地上
+      const spot = nearestPitSpot(ctx, here, 12);
+      if (spot) {
+        ctx.progress(0.05, `这里 ${pitProblem(adapter, here)}，走到 ${Math.round(Math.hypot(spot.x - here.x, spot.z - here.z))} 格外能挖坑的地方`);
+        try { await adapter.moveTo({ kind: 'xyz', ...spot }, { signal, timeoutMs: Math.max(3000, Math.min(20000, ctx.deadline - Date.now() - 60000)) }); }
+        catch (e) { if (isAbort(e)) throw e; }
+        const now = adapter.state();
+        const at = { x: Math.floor(now.pos.x), y: Math.floor(now.pos.y), z: Math.floor(now.pos.z) };
+        if (!pitProblem(adapter, at) && now.onGround && !now.inWater) {
+          const r = await digPit(ctx, args);
+          return r.status === 'succeeded' ? { ...r, summary: `原地挖不了，走到 (${at.x},${at.y},${at.z}) 挖了坑：${r.summary}` } : r;
+        }
+      }
+      // 附近没有能挖的地：就地用方块把自己围起来（四面两层墙 + 顶）
+      return enclosure(ctx, args, pitProblem(adapter, here)!);
+    }
+    return digPit(ctx, args);
+  },
+};
+
+/** 这一格为什么挖不了避难坑（null = 能挖） */
+function pitProblem(adapter: SkillCtx['adapter'], p: { x: number; y: number; z: number }): string | null {
+  const below = [1, 2, 3, 4].map((dy) => adapter.blockAt({ x: p.x, y: p.y - dy, z: p.z }));
+  if (below.slice(0, 3).some((name) => !name || !DIGGABLE.has(name) || name === 'sand' || name === 'gravel') || !below[3] || !SAFE_FLOOR.has(below[3])) return `脚下（${below.join('/')}）没有三层可挖方块和稳定地板`;
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) for (let dy = 1; dy <= 3; dy++) {
+    const n = adapter.blockAt({ x: p.x + dx, y: p.y - dy, z: p.z + dz });
+    if (n === 'water' || n === 'lava') return '坑壁旁边有水/岩浆';
+  }
+  return null;
+}
+
+/** 12 格内最近的能挖坑的站立点（只看身边地表，站在附近就看得见的地形） */
+function nearestPitSpot(ctx: SkillCtx, from: { x: number; y: number; z: number }, radius: number) {
+  const { adapter } = ctx;
+  const cands: { x: number; y: number; z: number; d: number }[] = [];
+  for (let dx = -radius; dx <= radius; dx++) for (let dz = -radius; dz <= radius; dz++) {
+    const d = Math.hypot(dx, dz);
+    if (d > radius || d < 1) continue;
+    for (let dy = 3; dy >= -3; dy--) {
+      const p = { x: from.x + dx, y: from.y + dy, z: from.z + dz };
+      const feet = adapter.blockAt(p), head = adapter.blockAt({ ...p, y: p.y + 1 }), ground = adapter.blockAt({ ...p, y: p.y - 1 });
+      if (!feet || !head || !ground || !AIR.has(feet) || !AIR.has(head) || !DIGGABLE.has(ground)) continue;
+      if (!pitProblem(adapter, p) && !ctx.memory.hazardAt?.(p, adapter.state().dim)) cands.push({ ...p, d: d + Math.abs(dy) });
+      break;
+    }
+  }
+  const best = cands.sort((a, b) => a.d - b.d)[0];
+  return best ? { x: best.x, y: best.y, z: best.z } : null;
+}
+
+/** 就地围一圈：脚和头两层的四面墙 + 头顶一块，躲到天亮/回血 */
+async function enclosure(ctx: SkillCtx, args: { until: 'day' | 'healed' }, why: string): Promise<SkillResult> {
+  const { adapter, signal } = ctx;
+  const s0 = adapter.state();
+  const x = Math.floor(s0.pos.x), y = Math.floor(s0.pos.y), z = Math.floor(s0.pos.z);
+  // 没走到安全地方（寻路超时等）时人可能站在水里/悬空：这种地方把自己围起来会憋死
+  const wet = (n: string | null) => n === 'water' || n === 'lava' || n === 'bubble_column';
+  if (s0.inWater || s0.inLava || !s0.onGround || wet(adapter.blockAt({ x, y, z })) || wet(adapter.blockAt({ x, y: y + 1, z }))) {
+    return fail('ERROR', `${why}；现在站在水里/岩浆里或没站稳，不能就地围起来——先上岸站到干地上再躲`);
+  }
+  const cells = [...[[1, 0], [-1, 0], [0, 1], [0, -1]].flatMap(([dx, dz]) => [0, 1].map((dy) => ({ x: x + dx, y: y + dy, z: z + dz }))), { x, y: y + 2, z }];
+  const open = (p: { x: number; y: number; z: number }) => { const n = adapter.blockAt(p); return n === null || AIR.has(n) || PLANTS.has(n) || n === 'water'; };
+  const need = cells.filter(open);
+  const blocks = adapter.state().inventory.filter((i) => PLACEABLE.includes(i.name)).reduce((a, i) => a + i.count, 0);
+  if (blocks < need.length) return fail('MISSING_MATERIALS', `${why}；附近 12 格也没有能挖坑的泥土/石头地，就地围起来要 ${need.length} 个方块，背包只有 ${blocks} 个（泥土/圆石/木板/原木）`);
+  ctx.progress(0.1, `${why}，就地用方块围起来（${need.length} 块）`);
+  let placed = 0;
+  for (const p of need.sort((a, b) => a.y - b.y)) {
+    throwIfAborted(signal);
+    const item = PLACEABLE.find((n) => adapter.state().inventory.some((i) => i.name === n && i.count > 0));
+    if (!item) break;
+    if (PLANTS.has(adapter.blockAt(p) ?? '')) await adapter.dig(p, signal).catch((e) => { if (isAbort(e)) throw e; });
+    const r = await adapter.placeBlockAt(p, [item], signal);
+    if (r.ok) placed++;
+  }
+  const sealed = () => cells.every((p) => !open(p));
+  for (let i = 0; i < 10 && !sealed(); i++) await sleep(100, signal); // 等服务器回报方块更新
+  if (!sealed()) return fail('ERROR', `${why}；试着就地围起来，但还有 ${cells.filter(open).length} 面没封住（放了 ${placed} 块）`);
+  ctx.bus.publish('shelter', 'P2', `就地用方块围了个小间 (${x}, ${y}, ${z})，等待${args.until === 'day' ? '天亮' : '回血'}`);
+  const waitEnd = ctx.deadline - 3000;
+  while (Date.now() < waitEnd) {
+    const s = adapter.state();
+    if (Math.floor(s.pos.x) !== x || Math.floor(s.pos.z) !== z) return fail('ERROR', '离开了围起来的小间');
+    // 小间进水 / 开始憋气：马上拆开一面墙出去，不在里面淹死
+    if (s.inWater || s.inLava || s.oxygen < 18) {
+      const side = { x: x + 1, y: y + 1, z };
+      await adapter.dig(side, signal).catch((e) => { if (isAbort(e)) throw e; });
+      await adapter.dig({ ...side, y }, signal).catch((e) => { if (isAbort(e)) throw e; });
+      return fail('ERROR', `小间里进了水/开始憋气（氧气 ${s.oxygen}/20），拆开东面的墙出来了`);
+    }
+    if (!sealed()) return fail('ERROR', '围墙被破开了');
+    const morning = s.timeOfDay >= 0 && s.timeOfDay < 11500 && s.isDay;
+    if (args.until === 'day' ? morning && s.hp >= 10 : s.hp >= 18) break;
+    if (s.food < 18 && adapter.hasFood()) await adapter.eat(signal).catch((e) => { if (isAbort(e)) throw e; });
+    ctx.progress(0.3 + 0.7 * Math.min(1, s.hp / 20), `躲在小间里（生命 ${Math.round(s.hp)}）`);
+    await sleep(2000, signal);
+  }
+  const s = adapter.state();
+  return ok(`${why}，附近也没有能挖坑的地，就地用 ${placed} 个方块围了个小间，待到${s.isDay ? '天亮' : '现在'}，生命 ${Math.round(s.hp)}；出去时挖开一面墙即可`, { enclosure: true, placed });
+}
+
+async function digPit(ctx: SkillCtx, args: { until: 'day' | 'healed' }): Promise<SkillResult> {
+  {
+    const { adapter, signal } = ctx;
+    const s0 = adapter.state();
     const x = Math.floor(s0.pos.x), y = Math.floor(s0.pos.y), z = Math.floor(s0.pos.z);
-    const below = [1, 2, 3, 4].map((dy) => adapter.blockAt({ x, y: y - dy, z }));
-    if (below.slice(0, 3).some((name) => !name || !DIGGABLE.has(name)) || !below[3] || !SAFE_FLOOR.has(below[3])) return fail('ERROR', `脚下（${below.join('/')}）没有三层可挖方块和稳定地板`);
     const stateProblem = (s: ReturnType<typeof adapter.state>) => {
       if (!s.connected || !s.alive || !s.observationReady || s.worldId !== s0.worldId || s.sessionId !== s0.sessionId || s.dim !== s0.dim) return '当前状态或世界已改变';
       if (s.inWater || s.inLava) return '避难坑进水或有岩浆';
@@ -45,6 +151,8 @@ export const shelter: Skill<{ until: 'day' | 'healed' }> = {
       return null;
     };
     let capName: string | undefined;
+    // 封顶方块会变：泥土见光会长成草方块，也算同一块
+    const capOk = (n: string | null) => !!n && (n === capName || (capName === 'dirt' && n === 'grass_block'));
     const chamberProblem = (sealed: boolean) => {
       throwIfAborted(signal);
       const s = adapter.state();
@@ -54,7 +162,7 @@ export const shelter: Skill<{ until: 'day' | 'healed' }> = {
       const floor = adapter.blockAt({ x, y: y - 4, z });
       if (!floor || !SAFE_FLOOR.has(floor)) return '避难坑地板不再稳定';
       if ([y - 3, y - 2].some((level) => !AIR.has(adapter.blockAt({ x, y: level, z }) ?? ''))) return '避难坑没有干燥的两格头部空间';
-      if (sealed && adapter.blockAt({ x, y: y - 1, z }) !== capName) return '没有观测到预期封顶方块';
+      if (sealed && !capOk(adapter.blockAt({ x, y: y - 1, z }))) return '没有观测到预期封顶方块';
       return null;
     };
 
@@ -83,6 +191,8 @@ export const shelter: Skill<{ until: 'day' | 'healed' }> = {
       ctx.progress(0.3, '封顶');
       const cap = await adapter.placeBlockAt({ x, y: y - 1, z }, [capName], signal);
       if (!cap.ok) return fail('ERROR', `封顶失败：${cap.reason}`);
+      // 放下后服务器的方块更新要过一会儿才到：等一下再核对
+      for (let i = 0; i < 10 && !capOk(adapter.blockAt({ x, y: y - 1, z })); i++) await sleep(100, signal);
       const sealedProblem = chamberProblem(true);
       if (sealedProblem) return fail('ERROR', sealedProblem);
     } catch (e) {
@@ -108,8 +218,8 @@ export const shelter: Skill<{ until: 'day' | 'healed' }> = {
     if (problem) return fail('ERROR', problem);
     const s = adapter.state();
     return ok(`在避难所里待到${s.isDay ? '天亮' : '现在'}，生命 ${Math.round(s.hp)}；出去时直接走动即可（会挖开顶上的方块）`);
-  },
-};
+  }
+}
 
 // ------------------------------------------------------------------ hunt
 export const hunt: Skill<{ animal?: string; count: number }> = {
