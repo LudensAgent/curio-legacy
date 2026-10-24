@@ -30,6 +30,8 @@ import { liveAudience } from './planner/prompt.ts';
 import { AudienceChannel } from './live/audience.ts';
 import { BilibiliLive, type LiveMessage, type LiveStatus } from './live/bilibili.ts';
 import { SkillLibrary } from './skills/library.ts';
+import { ExperienceMiner } from './methods/experience.ts';
+import type { TaskOutcome } from './arbiter/arbiter.ts';
 import { deathCause, habitName, hazardLesson, learnCandidates, signatureOf, type LearnCandidate, type VitalSample } from './brain/habits.ts';
 import type { MySkillInfo } from './planner/prompt.ts';
 import { ObserverFeed, createObserverHandler, installMineflayerObserver, installTaskObserver, type MineflayerBotLike, type MineflayerObserver } from 'curio-observer';
@@ -64,6 +66,9 @@ const library = new SkillLibrary(path.join(config.dataDir, 'skill-library.json')
 const methods = new MethodLibrary(path.join(config.dataDir, 'method-library.json'), adapter, memory, bus,
   { trialWorldIds: config.learning.testWorldIds });
 for (const skill of createMethodSkills(methods, new ResourceKnowledge(config.mc.version))) SKILLS[skill.name] = skill;
+// 从经历里学做法：每一步结束都实测背包增减，真的做成一件东西时提炼做法，两处做成过就采纳为已验证方法
+const experience = new ExperienceMiner(path.join(config.dataDir, 'experience.json'), adapter, memory, methods, bus);
+arbiter.on('done', (o: TaskOutcome) => experience.onDone(o));
 // 配方记忆：拿到过材料才知道配方；LLM 按类别→物品分级查询
 const recipeBook = new RecipeBook(config.mc.version, memory);
 planner.recipeBook = recipeBook;
