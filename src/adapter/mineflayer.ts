@@ -297,10 +297,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     else if (name.endsWith('_leaves')) kind = 'foliage';
     else if (name.includes('glass')) kind = 'clear';
     else if (b?.boundingBox === 'empty') kind = 'clear'; // 草、花、火把、铁轨等
-    if (name === 'iron_bars' && Number.isInteger(stateId)) {
+    if ((name === 'iron_bars' || name.endsWith('_door')) && Number.isInteger(stateId)) {
       const definitions = this.mcData.blockCollisionShapes;
-      const palette = definitions?.blocks?.iron_bars;
-      const offset = stateId! - this.mcData.blocksByName.iron_bars.minStateId;
+      const palette = definitions?.blocks?.[name];
+      const offset = stateId! - this.mcData.blocksByName[name].minStateId;
       const shapeId = Array.isArray(palette) ? palette[offset] : palette;
       const boxes = definitions?.shapes?.[shapeId];
       if (Array.isArray(boxes) && boxes.length && boxes.every((box: unknown) => Array.isArray(box) && box.length === 6
@@ -492,7 +492,27 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (b.vehicle) throw new Error(`RIDING：正在乘坐 ${b.vehicle.name}，走路前先 dismount，或用 ride 操控它前进`);
     if (this.normalMovements && typeof b.pathfinder.setMovements === 'function') {
       const movements = Object.assign(Object.create(Object.getPrototypeOf(this.normalMovements)), this.normalMovements);
-      if (opts.constructionSafe) { movements.canDig = false; movements.allow1by1towers = false; movements.allowParkour = false; movements.scafoldingBlocks = []; }
+      if (!opts.allowTerrainChanges || opts.constructionSafe) {
+        movements.canDig = false; movements.allow1by1towers = false; movements.scafoldingBlocks = [];
+      }
+      if (opts.constructionSafe) movements.allowParkour = false;
+      // Installed Pathfinder handles gates, but omits two-block wooden doors.
+      // Keep the upper half out of the break list; crossing the closed lower
+      // half must issue its ordinary useOne interaction before walking through.
+      movements.canOpenDoors = true;
+      const getBlock = movements.getBlock;
+      movements.getBlock = function (...args: any[]) {
+        const block = getBlock.apply(this, args);
+        if (!block?.name?.endsWith('_door') || block.name === 'iron_door') return block;
+        const properties = block.getProperties?.();
+        if (!properties || !['upper', 'lower'].includes(properties.half)) return block;
+        const open = properties.open === true || properties.open === 'true';
+        return Object.assign(Object.create(Object.getPrototypeOf(block)), block, {
+          physical: false, height: block.position.y,
+          safe: open || properties.half === 'upper',
+          openable: !open && properties.half === 'lower',
+        });
+      };
       b.pathfinder.setMovements(movements);
     }
     const { goals } = require('mineflayer-pathfinder');
@@ -556,62 +576,117 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     await this.gotoUnstalled(goal, opts, check);
   }
 
-  /**
-   * 寻路时被身前的方块“顶住”（树叶、半格、拐角）原地踏步：像玩家一样跳一下、挖开挡脸的树叶/草、
-   * 或者退半步换个角度，再接着走；而不是原地顶 20 秒直到被判卡死。
-   */
+  /** Inspect the nearby obstruction before trying a short correction, then replan. */
   private async gotoUnstalled(goal: any, opts: MoveOpts, check: () => void) {
     const b = this.bot;
+    const epoch = this.actionEpoch, dimension = this.currentDimension();
+    const ownsControls = () => epoch === this.actionEpoch && b === this.bot && dimension === this.currentDimension();
     const deadline = Date.now() + opts.timeoutMs;
-    for (let nudge = 0; ; nudge++) {
+    const attempted = new Set<string>();
+    let corrections = 0, recoveryOrigin = b.entity?.position?.clone?.() ?? null;
+    for (;;) {
+      check();
       let stalled = false;
       let last = b.entity?.position?.clone?.() ?? null, since = Date.now();
       const watch = setInterval(() => {
+        try { check(); } catch { clearInterval(watch); return; }
         const p = b.entity?.position;
         if (!p?.clone || !last) { last = p?.clone?.() ?? null; return; }
+        // A long trip may need several successful corrections. Only count
+        // failures around the same obstruction, not across the whole route.
+        if (recoveryOrigin && p.distanceTo(recoveryOrigin) >= 1.5) {
+          corrections = 0; attempted.clear(); recoveryOrigin = p.clone();
+        }
         if (p.distanceTo(last) >= 0.3 || b.targetDigBlock || !b.pathfinder?.isMoving?.()) { last = p.clone(); since = Date.now(); return; }
-        if (Date.now() - since >= 2500 && nudge < 3) { stalled = true; try { b.pathfinder.stop(); b.pathfinder.setGoal(null); } catch { /* ignore */ } }
+        if (Date.now() - since >= 2500 && !stalled) { stalled = true; try { b.pathfinder.stop(); b.pathfinder.setGoal(null); } catch { /* ignore */ } }
       }, 300);
       try {
         const remaining = deadline - Date.now();
         if (remaining <= 0) throw new Error('TIMEOUT');
-        await this.afterAction(() => raceAbort(b.pathfinder.goto(goal), opts.signal, remaining, () => this.stopAll()), check);
+        await this.afterAction(() => raceAbort(b.pathfinder.goto(goal), opts.signal, remaining, () => { if (ownsControls()) this.stopAll(); }), check);
         if (!stalled) return;
       } catch (e: any) {
         if (!stalled || e?.name === 'AbortedError') throw e;
       } finally {
         clearInterval(watch);
       }
-      throwIfAborted(opts.signal);
-      this.bus.publish('path_nudge', 'P3', `走路被挡住，第 ${nudge + 1} 次调整（跳/挖开挡路的叶子/退半步）`);
-      await this.nudge(nudge, opts);
       check();
+      if (corrections >= 3) throw new Error('No path: 附近连续调整后仍无法前进，换条路线');
+      const action = await this.nudge(attempted, opts);
+      check();
+      if (!action) throw new Error('No path: 附近没有可确认安全的调整空间，换条路线');
+      corrections++;
+      this.bus.publish('path_nudge', 'P3', `走路被挡住，第 ${corrections} 次调整：${action}`);
     }
   }
 
-  private async nudge(n: number, opts: MoveOpts) {
-    const b = this.bot;
-    const yaw = b.entity.yaw;
+  private async nudge(attempted: Set<string>, opts: MoveOpts): Promise<string | null> {
+    const check = this.actionCheckpoint(opts.signal);
+    const b = this.bot, epoch = this.actionEpoch;
+    const ownsControls = () => epoch === this.actionEpoch && b === this.bot;
+    const p = b.entity.position, yaw = b.entity.yaw;
+    // Swimming and airborne recovery need their own controls; do not blindly
+    // jump or step backwards before the feet have landed.
+    if (!b.entity.onGround || b.entity.isInWater || b.entity.isInLava) return null;
     const fx = -Math.sin(yaw), fz = -Math.cos(yaw);
-    const feet = b.entity.position.floored();
-    const front = [feet.offset(Math.round(fx), 0, Math.round(fz)), feet.offset(Math.round(fx), 1, Math.round(fz)), feet.offset(0, 2, 0)];
-    const soft = /(_leaves|grass|fern|vine|bush|_sapling|snow|flower|tulip|dandelion|poppy|azalea|cobweb)$/;
-    const hold = async (keys: string[], ms: number) => {
-      for (const k of keys) b.setControlState(k, true);
-      try { await sleep(ms, opts.signal); } finally { for (const k of keys) b.setControlState(k, false); }
+    const hazard = (block: any) => !block || /^(water|lava|bubble_column|fire|soul_fire|cactus|sweet_berry_bush|powder_snow|magma_block|.*campfire)$/.test(block.name)
+      || String(block.getProperties?.().waterlogged) === 'true';
+    const shapes = (block: any): number[][] => block.shapes ?? (block.boundingBox === 'empty' ? [] : [[0, 0, 0, 1, 1, 1]]);
+    const bodyBlocks = (q: any) => {
+      const blocks: any[] = [];
+      for (let x = Math.floor(q.x - 0.3); x <= Math.floor(q.x + 0.3); x++)
+        for (let y = Math.floor(q.y + 0.02); y <= Math.floor(q.y + 1.79); y++)
+          for (let z = Math.floor(q.z - 0.3); z <= Math.floor(q.z + 0.3); z++) {
+            const block = b.blockAt(q.offset(x - q.x, y - q.y, z - q.z));
+            if (hazard(block) || shapes(block).some((s) => x + s[3] > q.x - 0.3 && x + s[0] < q.x + 0.3
+              && y + s[4] > q.y + 0.02 && y + s[1] < q.y + 1.8 && z + s[5] > q.z - 0.3 && z + s[2] < q.z + 0.3)) blocks.push(block);
+          }
+      return blocks;
     };
-    // 施工中（脚手架、屋顶）只原地跳一下，不往前冲也不后退，免得从高处掉下去
-    if (opts.constructionSafe) return hold(['jump'], 350);
-    if (n === 0) return hold(['jump', 'forward'], 450);
-    if (n === 1) {
-      // 挡在脸前/头顶的树叶、草、藤蔓：顺手挖开（不挖别的东西）
-      for (const pos of front) {
-        const blk = b.blockAt(pos);
-        if (blk && soft.test(blk.name) && b.canDigBlock?.(blk)) { try { await raceAbort(b.dig(blk), opts.signal, 3000, () => b.stopDigging?.()); } catch (e: any) { if (e?.name === 'AbortedError') throw e; } }
+    const supported = (q: any) => [-0.25, 0.25].every((x) => [-0.25, 0.25].every((z) => {
+      const foot = q.offset(x, -0.05, z), cell = foot.floored(), block = b.blockAt(foot);
+      return !hazard(block) && shapes(block).some((s) => foot.x >= cell.x + s[0] && foot.x <= cell.x + s[3]
+        && foot.z >= cell.z + s[2] && foot.z <= cell.z + s[5] && Math.abs(cell.y + s[4] - q.y) < 0.1);
+    }));
+    // Include the body's width, the swept route and a little braking distance.
+    // Unknown blocks, fluids and unsupported corners rule out that correction.
+    const safeStep = (dx: number, dz: number) => [0, 0.2, 0.4, 0.6, 0.8].every((d) => {
+      const q = p.offset(dx * d, 0, dz * d);
+      return bodyBlocks(q).length === 0 && supported(q);
+    });
+    const hold = async (keys: string[], ms: number) => {
+      check();
+      b.clearControlStates();
+      for (const k of keys) b.setControlState(k, true);
+      try { await this.afterAction(() => sleep(ms, opts.signal), check); }
+      finally { if (ownsControls()) for (const k of keys) b.setControlState(k, false); }
+    };
+    if (!opts.constructionSafe) {
+      const soft = /(_leaves|grass|fern|vine|bush|_sapling|snow|flower|tulip|dandelion|poppy|azalea|cobweb)$/;
+      for (const block of opts.allowTerrainChanges ? bodyBlocks(p.offset(fx * 0.75, 0, fz * 0.75)) : []) {
+        if (!block || !soft.test(block.name) || !b.canDigBlock?.(block)) continue;
+        const key = `dig:${block.position}`;
+        if (attempted.has(key)) continue;
+        attempted.add(key);
+        await this.afterAction(() => raceAbort(b.dig(block), opts.signal, 2000, () => { if (ownsControls()) b.stopDigging?.(); }), check);
+        return `清开挡路的 ${block.name}`;
       }
-      return hold(['jump', 'forward'], 450);
+      const landing = p.offset(fx * 0.85, 1, fz * 0.85);
+      if (!attempted.has('jump') && bodyBlocks(p.offset(0, 1, 0)).length === 0
+        && [0.3, 0.6, 0.85, 1.1].every((d) => bodyBlocks(p.offset(fx * d, 1, fz * d)).length === 0)
+        && supported(landing) && supported(p.offset(fx * 1.1, 1, fz * 1.1))) {
+        attempted.add('jump');
+        await hold(['jump', 'forward'], 180);
+        return '前面是一格台阶，向前跳上去';
+      }
     }
-    return hold(['back', Math.random() < 0.5 ? 'left' : 'right'], 500);
+    for (const [key, dx, dz, label] of [['left', fz, -fx, '左'], ['right', -fz, fx, '右'], ['back', -fx, -fz, '后']] as const) {
+      if (attempted.has(key) || !safeStep(dx, dz)) continue;
+      attempted.add(key);
+      await hold(opts.constructionSafe ? ['sneak', key] : [key], opts.constructionSafe ? 250 : 150);
+      return `确认脚下有支撑，向${label}挪半步后重新寻路`;
+    }
+    return null;
   }
 
   stopAll() {

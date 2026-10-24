@@ -31,6 +31,8 @@ export interface ExecutiveDeps {
 const PREFETCH_MAX_AGE_MS = 90_000;
 /** 两次反思之间至少隔这么久，别让反思挤掉正常游玩 */
 const REFLECT_MIN_GAP_MS = 4 * 60_000;
+/** 看过周围或刚到达后，先保持注意力；模型还在想时也不必不停转头。 */
+const IDLE_GLANCE_GAP_MS = 12_000;
 /** 几秒内就能完成、不改变位置的收尾动作 */
 const QUICK_SKILLS = new Set(['craft', 'eat', 'place_torch', 'pickup_items', 'equip']);
 const FOOD_ITEMS = new Set(['bread', 'cooked_beef', 'cooked_porkchop', 'cooked_chicken', 'cooked_mutton', 'cooked_cod', 'cooked_salmon', 'apple', 'baked_potato',
@@ -64,6 +66,7 @@ export class Executive {
   private timer: NodeJS.Timeout | null = null;
   private fillerToggle = 0;
   private lastLook: { at: number; state: AgentState } | null = null;
+  private idleAttention: { at: number; state: AgentState } | null = null;
   private activatedAt: number | null = null;
   private suspended = new Set<PauseReason>();
   private lastSession = '';
@@ -667,6 +670,11 @@ export class Executive {
       || !observationReady(this.d.adapter.state())) return;
     const state = this.d.adapter.state(), last = this.lastLook;
     if (state.inWater || state.inLava) return;
+    const attention = this.idleAttention;
+    if (!attention || attention.state.worldId !== state.worldId || attention.state.sessionId !== state.sessionId
+      || attention.state.dim !== state.dim || Math.hypot(state.pos.x - attention.state.pos.x, state.pos.y - attention.state.pos.y, state.pos.z - attention.state.pos.z) >= 8) {
+      this.idleAttention = { at: Date.now(), state };
+    }
     const percept = this.d.perception.snapshot();
     const latest = this.results.at(-1);
     const missingTarget = this.lastFailure?.code === 'NOT_FOUND' && latest?.status === 'failed'
@@ -674,13 +682,19 @@ export class Executive {
     const surroundingsKnown = percept.nearby.resources.length > 0 || percept.nearby.passive.length > 0
       || percept.nearby.hostile.length > 0 || percept.nearby.players.length > 0;
     const sameScope = !!last && last.state.worldId === state.worldId && last.state.sessionId === state.sessionId && last.state.dim === state.dim;
-    // 想下一步时的默认动作：像人一样边想边慢慢转头看看（不走动、不消耗东西，不会让决定过时）
-    const glance = () => { if (!glancing && SKILLS.glance) this.d.arbiter.start({ skill: 'glance', args: { seconds: 8 } }, 'filler'); };
+    // 注意力跨决策请求保留：先安静地看着刚才的方向，等待较久才偶尔扫一眼。
+    // 不给每次短请求都安排 filler，避免刚转头就又被新决定打断。
+    const glance = () => {
+      if (!glancing && SKILLS.glance && Date.now() - this.idleAttention!.at >= IDLE_GLANCE_GAP_MS) {
+        this.idleAttention = { at: Date.now(), state };
+        this.d.arbiter.start({ skill: 'glance', args: { seconds: 2 } }, 'filler');
+      }
+    };
     if (missingTarget) {
       // 找不到要的东西：换了位置后再看一圈是合理的
       if (sameScope && Math.hypot(state.pos.x - last!.state.pos.x, state.pos.y - last!.state.pos.y, state.pos.z - last!.state.pos.z) < 8) return glance();
     } else {
-      // 只在刚进入一个世界/维度/会话、对周围一无所知时完整环顾一次；其余时候只是边想边张望。
+      // 只在刚进入一个世界/维度/会话、对周围一无所知时完整环顾一次；其余时候保留视线、偶尔张望。
       // 走了一段路不是环顾的理由：explore 沿途会张望，视觉也一直在更新。
       if (sameScope) return glance();
       if (this.d.memory.currentIntent() || surroundingsKnown) return glance();
@@ -802,8 +816,9 @@ export class Executive {
     }
     // 技能自己已经转头找过（look_around、gather 找不到时的四下张望、explore 沿途张望）：同一地点不再安排背景环顾
     if ((o.task.skill === 'look_around' && o.result.status === 'succeeded') || o.result.data?.searched === true
-      || (o.task.skill === 'explore' && o.result.status === 'succeeded')) {
+      || (['explore', 'goto'].includes(o.task.skill) && o.result.status === 'succeeded')) {
       this.lastLook = { at: Date.now(), state: this.d.adapter.state() };
+      this.idleAttention = this.lastLook;
     }
     if (o.task.source === 'filler') {
       return;
@@ -877,10 +892,12 @@ export class Executive {
       else if (SKILLS.forage) candidates.push({ skill: 'forage', args: { count: 4 } });
     };
     if (['goto', 'explore', 'ride'].includes(o.task.skill) && (code === 'PATH_NOT_FOUND' || code === 'STUCK')
-      && (state.inWater || /水|water|海|河|湖/i.test(o.result.summary)) && SKILLS.boat) {
+      && (state.inWater || data.waterAhead === true || /水|water|海|河|湖/i.test(o.result.summary)) && SKILLS.boat) {
       // 走不过去的水面：像玩家一样坐船过去
       const nums = typeof a.target === 'string' ? a.target.match(/-?\d+(?:\.\d+)?/g) : null;
-      const to = nums && nums.length >= 2 ? `${Math.round(+nums[0])},${Math.round(+nums[nums.length === 3 ? 2 : 1])}` : undefined;
+      const target = data.target as { x?: unknown; z?: unknown } | undefined;
+      const to = target && Number.isFinite(target.x) && Number.isFinite(target.z) ? `${Math.round(target.x as number)},${Math.round(target.z as number)}`
+        : nums && nums.length >= 2 ? `${Math.round(+nums[0])},${Math.round(+nums[nums.length === 3 ? 2 : 1])}` : undefined;
       const dir = typeof a.direction === 'string' && a.direction !== 'auto' ? a.direction : undefined;
       if (to) candidates.push({ skill: 'boat', args: { to } });
       else if (dir) candidates.push({ skill: 'boat', args: { direction: dir, distance: Number(a.distance) || 48 } });

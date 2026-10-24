@@ -39,11 +39,13 @@ const NATURAL_GROUND = new Set(['grass_block', 'dirt', 'stone', 'cobblestone', '
 const NATURAL_FLOOR = new Set(['grass_block', 'dirt', 'coarse_dirt', 'podzol', 'rooted_dirt', 'mycelium', 'stone', 'deepslate', 'cobblestone', 'cobbled_deepslate', 'andesite', 'granite', 'diorite', 'tuff', 'calcite', 'sandstone', 'red_sandstone', 'terracotta', 'mud', 'packed_mud', 'clay', 'netherrack', 'end_stone', 'moss_block']);
 const HAZARDS = new Set(['water', 'lava', 'fire', 'soul_fire', 'magma_block', 'campfire', 'soul_campfire', 'powder_snow']);
 const replaceable = (name: string) => AIR.has(name) || PLANTS.has(name);
+/** 留空表示能通行，不要求拆掉后来布置的薄设施；门、栅栏、积雪、液体等不在其中。 */
+const clearanceFixture = (name: string) => /^(?:(?:soul_|redstone_)?(?:wall_)?torch|(?:[a-z_]+_)?carpet|(?:powered_|detector_|activator_)?rail|[a-z_]+_button|[a-z_]+_pressure_plate|lever|redstone_wire)$/.test(name);
 /** 整地时可以清掉的自然东西：植物、树、雪，以及会被铲平的泥土石头；自己插的火把也可以拿掉 */
 const VEGETATION = /(_leaves|_log|_wood|_stem|_sapling|_flower|_tulip|_mushroom|_carpet|grass|fern|bush|vine|vines|dandelion|poppy|orchid|allium|bluet|daisy|cornflower|lily_of_the_valley|peony|lilac|rose_bush|sunflower|sugar_cane|bamboo|azalea|cactus|snow|cobweb|lily_pad|hanging_roots|spore_blossom|glow_lichen|moss_block)$/;
 // 不含圆石、耕地、土径：那些多半是自己或别人做出来的（墙、农田、小路），留给验收报告
 const LEVELABLE = new Set(['grass_block', 'dirt', 'coarse_dirt', 'podzol', 'mycelium', 'rooted_dirt', 'stone', 'deepslate', 'netherrack', 'end_stone', 'sand', 'red_sand', 'gravel', 'clay', 'andesite', 'granite', 'diorite', 'tuff', 'calcite', 'sandstone', 'red_sandstone', 'terracotta', 'snow_block', 'mud', 'moss_block']);
-export const siteClearable = (name: string) => !name.endsWith('grass_block') && VEGETATION.test(name) || LEVELABLE.has(name) || name === 'torch' || name === 'wall_torch';
+export const siteClearable = (name: string) => !name.endsWith('grass_block') && VEGETATION.test(name) || LEVELABLE.has(name) || clearanceFixture(name);
 const solidGround = (name: string) => !replaceable(name) && !HAZARDS.has(name) && !/door|torch|flower|sapling|leaves|fence|pane|carpet|bed|rail/.test(name);
 
 function actualState(adapter: StateBuildingAdapter, pos: Vec3Like) {
@@ -114,9 +116,9 @@ export function inspectBuilding(adapter: StateBuildingAdapter, blueprint: Buildi
   for (const local of blueprint.clearances) {
     const pos = rotatePosition(local, project.origin, project.rotation);
     const name = adapter.blockAt(pos);
-    if (name === null || !AIR.has(name)) {
+    if (name === null || !AIR.has(name) && !clearanceFixture(name)) {
       passage = false;
-      defects.push({ cellId: `clear:${cellKey(local)}`, pos, kind: name === null ? 'unknown' : 'obstruction', expected: 'air (室内与入口通行空间)', actual: name });
+      defects.push({ cellId: `clear:${cellKey(local)}`, pos, kind: name === null ? 'unknown' : 'obstruction', expected: 'air 或可通行的薄设施（室内与入口通行空间）', actual: name });
     }
   }
   const defective = new Set(defects.map((d) => d.cellId));
@@ -170,6 +172,7 @@ async function prepareSite(ctx: SkillCtx, project: BuildingProject, blueprint: B
   }
   const temp = new Map((project.temporaryBlocks ?? []).map((b) => [cellKey(b.pos), b.name]));
   const byId = new Map(blueprint.cells.map((c) => [c.id, c]));
+  const clearances = new Set(blueprint.clearances.map(cellKey));
   const targets: { pos: Vec3Like; name: string; own?: string }[] = [];
   const blocked: Record<string, number> = {};
   const mine = ownStationsAt(ctx);
@@ -179,6 +182,7 @@ async function prepareSite(ctx: SkillCtx, project: BuildingProject, blueprint: B
     if (name === null || AIR.has(name)) continue;
     const cell = byId.get(id);
     if (cell && !cellDefect(adapter, cell, project)) continue; // 已经是房子的一部分
+    if (!cell && clearances.has(id) && clearanceFixture(name)) continue; // 后来插的火把/铺的地毯不影响通行，保留
     if (temp.get(id) === name) continue; // 自己搭的脚手架
     if (cell && project.checkpoint.ownedCells.includes(id)) continue; // 自己放过的，交给原有流程
     if (siteClearable(name)) targets.push({ pos, name });
@@ -301,6 +305,14 @@ export async function constructBuilding(ctx: SkillCtx, archive: BuildingArchive,
   let site: ConstructionResult['site'];
   if (mode !== 'inspect') {
     const pre = surveyFoundation(adapter, source, project);
+    if (mode === 'repair') {
+      const inspection = inspectBuilding(adapter, pre.blueprint, project, pre.defects);
+      checkSession();
+      if (inspection.complete) {
+        archive.inspect(project.id, inspection);
+        return { projectId: project.id, placed: 0, cleared: 0, inspection, missingMaterials: {}, failures: [] };
+      }
+    }
     if (!pre.defects.length) {
       site = await prepareSite(ctx, project, pre.blueprint, planScaffolding(pre.blueprint), checkSession);
       project = archive.get(project.id) ?? project;
@@ -451,7 +463,12 @@ export async function constructBuilding(ctx: SkillCtx, archive: BuildingArchive,
   for (const local of blueprint.clearances) {
     if (Date.now() >= ctx.deadline - 1000) break;
     const pos = rotatePosition(local, project.origin, project.rotation);
-    if (!await clear(pos, cellKey(local))) result.failures.push({ cellId: `clear:${cellKey(local)}`, reason: 'OBSTRUCTED_PASSAGE' });
+    const name = adapter.blockAt(pos);
+    if (name !== null && clearanceFixture(name)) {
+      if (retired.includes(cellKey(local))) archive.releaseCell(project.id, cellKey(local));
+      continue;
+    }
+    if (!await clear(pos, cellKey(local))) result.failures.push({ cellId: `clear:${cellKey(local)}`, reason: `OBSTRUCTED_PASSAGE @ (${pos.x},${pos.y},${pos.z}): expected=可通行空间, actual=${name ?? 'unknown'}；先确认该格方块归属再定点处理` });
     else if (retired.includes(cellKey(local))) archive.releaseCell(project.id, cellKey(local));
   }
   const byId = new Map(blueprint.cells.map((c) => [c.id, c]));

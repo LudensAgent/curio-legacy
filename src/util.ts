@@ -92,14 +92,22 @@ export function skyDarkness(timeOfDay: number) {
 }
 
 /**
- * 身体所在位置的光照：脚下那格可能是半砖、土径、草丛、树叶（读出来是 0），所以取脚和头两格里亮的那个。
- * 否则站在林子里也会被当成“地下太暗”。
+ * 取身体附近可透光格的脚/头亮度；床、半砖、土径等非整块方块也可采样。
+ * 实心墙格、未加载格和异常光照值不能替代角色实际所在空隙的亮度。
  */
-export function lightAround(adapter: { lightAt(x: number, y: number, z: number): { block: number; sky: number } | null }, x: number, y: number, z: number) {
-  const a = adapter.lightAt(x, y, z), b = adapter.lightAt(x, y + 1, z);
-  if (!a) return b;
-  if (!b) return a;
-  return { block: Math.max(a.block, b.block), sky: Math.max(a.sky, b.sky) };
+export function lightAround(adapter: { lightAt(x: number, y: number, z: number): { block: number; sky: number } | null; blockAt?(pos: { x: number; y: number; z: number }): string | null }, x: number, y: number, z: number) {
+  let block = 0, sky = 0, sampled = false;
+  const readable = /^(?:air|cave_air|void_air|short_grass|tall_grass|fern|large_fern|dead_bush|snow|dirt_path|farmland|ladder|vine|glow_lichen|lever|redstone_wire|(?:soul_|redstone_)?(?:wall_)?torch|(?:powered_|detector_|activator_)?rail|[a-z_]+_(?:bed|slab|stairs|carpet|button|pressure_plate))$/;
+  for (const yy of [y, y + 1]) {
+    if (adapter.blockAt) {
+      const name = adapter.blockAt({ x, y: yy, z });
+      if (name === null || !readable.test(name)) continue;
+    }
+    const light = adapter.lightAt(x, yy, z);
+    if (!light || ![light.block, light.sky].every((n) => Number.isFinite(n) && n >= 0 && n <= 15)) continue;
+    block = Math.max(block, light.block); sky = Math.max(sky, light.sky); sampled = true;
+  }
+  return sampled ? { block, sky } : null;
 }
 
 /** 实际亮度 = max(方块光, 天光 - 时间造成的变暗) */

@@ -392,8 +392,15 @@ export const pickupItems: Skill<{ radius: number; item?: string }> = {
     }
     // 按背包实际变化报告捡到了什么
     const after = inv();
-    const gained = [...after].filter(([n, c]) => c > (before.get(n) ?? 0)).map(([n, c]) => `${n}×${c - (before.get(n) ?? 0)}`);
-    if (gained.length) return ok(`捡到了 ${gained.join('、')}`, { gained });
-    return visits ? ok(`走过去了 ${visits} 处掉落物，但背包没有变化（可能被捡走了或够不着）`) : ok(`附近没有看得见的${args.item ? ` ${args.item} ` : ''}掉落物`);
+    const increases = [...after].filter(([n, c]) => c > (before.get(n) ?? 0)).map(([name, count]) => ({ name, count: count - (before.get(name) ?? 0) }));
+    const gained = increases.map(({ name, count }) => `${name}×${count}`);
+    const collected = increases.filter(({ name }) => wanted(name)).reduce((sum, item) => sum + item.count, 0);
+    if (args.item && collected === 0) {
+      const block = senses.knownBlocks([args.item], args.radius)[0];
+      return fail('NOT_FOUND', `${visits ? `走过去了 ${visits} 处掉落物，但没有捡到` : '附近没有看得见的'} ${args.item} 掉落物${block ? `；已知放置方块在 (${block.pos.x},${block.pos.y},${block.pos.z})，搬走要先精确挖下该方块，再捡掉落物` : '；不能把已放置的方块当成掉落物，也不要假设已经拿到'}`,
+        { gained, collected, visits, ...(block ? { blockTarget: { name: block.name, pos: block.pos } } : {}) });
+    }
+    if (gained.length) return ok(`捡到了 ${gained.join('、')}`, { gained, collected, visits });
+    return visits ? ok(`走过去了 ${visits} 处掉落物，但背包没有变化（可能被捡走了或够不着）`, { gained, collected, visits }) : ok('附近没有看得见的掉落物', { gained, collected, visits });
   },
 };

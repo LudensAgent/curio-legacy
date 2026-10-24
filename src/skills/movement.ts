@@ -4,7 +4,8 @@ import { DIR_OFFSETS, surroundings } from '../perception/surroundings.ts';
 import { climbUp } from './body.ts';
 import { hasPlaceable } from './survival.ts';
 import { DIRS, dirName } from '../perception/perception.ts';
-import { dist3, sleep } from '../util.ts';
+import { dist3, sleep, throwIfAborted } from '../util.ts';
+import type { Vec3Like } from '../adapter/types.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
 
 // ------------------------------------------------------------------ 寻找与张望（人眼式：不透视，只是转头看）
@@ -213,7 +214,7 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
 // ------------------------------------------------------------------ goto
 export const goTo: Skill<{ target: string }> = {
   name: 'goto',
-  description: '前往地标（base、death=上次死亡地点、地标 id 或名称）、坐标、自己的建筑（作品 ID）或记得的功能方块（crafting_table、furnace、chest、床…）',
+  description: '沿看得见的落脚点步行去地标、坐标、作品或记得的功能方块；绕开墙壁，遇到已观察的木门会开门，不自动挖墙、搭柱或架桥。水路不通时可另选 boat',
   argsDoc: '{"target": "base | death | <地标id或名称> | <作品ID> | crafting_table | x,y,z"}',
   timeoutMs: 600000,
   movement: true,
@@ -259,25 +260,100 @@ export const goTo: Skill<{ target: string }> = {
       pos = lm.pos;
       label = lm.label;
     }
-    const startDist = dist3(s.pos, pos);
-    const prog = setInterval(() => ctx.progress(1 - Math.min(1, dist3(adapter.state().pos, pos!) / Math.max(1, startDist))), 1000);
-    try {
-      // 远距离（远征回家）：分段朝目标走，每段 64 格，避免寻路一次算太远
-      for (let hops = 0; hops < 20; hops++) {
-        if (adapter.state().dim !== s.dim || adapter.state().worldId !== s.worldId) return fail('WRONG_DIMENSION', '途中世界或维度已改变，需要重新规划');
-        const cur = adapter.state().pos;
-        const dxz = Math.hypot(pos.x - cur.x, pos.z - cur.z);
-        if (dxz <= 96) break;
-        const k = 64 / dxz;
-        await adapter.moveTo({ kind: 'xz', x: cur.x + (pos.x - cur.x) * k, z: cur.z + (pos.z - cur.z) * k, range: 6 }, { signal, timeoutMs: 60000 });
+    const range = nums ? 1 : 2;
+    const distance = (p: Vec3Like) => flat ? Math.hypot(p.x - pos!.x, p.z - pos!.z) : dist3(p, pos!);
+    // 与 Pathfinder 的整数节点判定一致；明确坐标比“到地标附近”更精确。
+    const arrived = (p: Vec3Like) => Math.hypot(Math.floor(p.x) - Math.floor(pos!.x), flat ? 0 : Math.floor(p.y) - Math.floor(pos!.y), Math.floor(p.z) - Math.floor(pos!.z)) <= range;
+    const inScope = () => {
+      throwIfAborted(signal);
+      const now = adapter.state();
+      return now.worldId === s.worldId && now.dim === s.dim && now.sessionId === s.sessionId;
+    };
+    const face = async () => {
+      const eye = adapter.eye(), here = adapter.state().pos;
+      const dx = pos!.x + 0.5 - here.x, dz = pos!.z + 0.5 - here.z;
+      if (eye && Math.hypot(dx, dz) >= 0.75) {
+        const yaw = yawOfDir(dx, dz);
+        const turn = Math.abs(Math.atan2(Math.sin(yaw - eye.yaw), Math.cos(yaw - eye.yaw)));
+        if (turn > 0.12 || Math.abs(eye.pitch + 0.18) > 0.15) {
+          await adapter.look(yaw, -0.18, signal);
+          await sleep(160, signal);
+        }
       }
-      if (adapter.state().dim !== s.dim || adapter.state().worldId !== s.worldId) return fail('WRONG_DIMENSION', '途中世界或维度已改变，需要重新规划');
-      await adapter.moveTo(flat ? { kind: 'xz', x: pos.x, z: pos.z, range: 2 } : { kind: 'near', pos, range: 2 }, { signal, timeoutMs: Math.max(5000, ctx.deadline - Date.now()) });
-      if (adapter.state().dim !== s.dim || adapter.state().worldId !== s.worldId) return fail('WRONG_DIMENSION', '途中世界或维度已改变，需要重新规划');
-      return ok(`到达 ${label}`);
+      ctx.senses.refresh();
+    };
+    const opened = new Set<string>();
+    const tryDoor = async () => {
+      if (!adapter.useBlockAt) return false;
+      const names = adapter.resolveBlockNames('door').filter((n) => n.endsWith('_door') && n !== 'iron_door');
+      const doors = ctx.senses.knownBlocks(names, 14).filter((d) => !opened.has(`${d.pos.x},${d.pos.y},${d.pos.z}`)
+        && dist3(d.pos, pos!) < distance(adapter.state().pos) + 4);
+      for (const door of doors.slice(0, 2)) {
+        const key = `${door.pos.x},${door.pos.y},${door.pos.z}`;
+        opened.add(key);
+        const state = adapter.blockStateAt?.(door.pos);
+        if (state?.properties.open === true || state?.properties.open === 'true') continue;
+        if (state?.properties.half === 'upper') continue;
+        try {
+          ctx.progress(0, `沿门口接近 ${label}，打开 ${door.name}`);
+          await adapter.moveTo({ kind: 'near', pos: door.pos, range: 3 }, { signal, timeoutMs: Math.max(1, Math.min(10000, ctx.deadline - Date.now())), constructionSafe: true });
+          if (!inScope()) return false;
+          // 只操作亲眼看过/记得且仍是原来木门的方块，不把门当作采集材料。
+          if (adapter.blockAt(door.pos) !== door.name) continue;
+          const current = adapter.blockStateAt?.(door.pos)?.properties.open;
+          if (current === true || current === 'true') { ctx.senses.refresh(); return true; }
+          const result = await adapter.useBlockAt(door.pos, '', signal);
+          if (result.ok) { await sleep(160, signal); ctx.senses.refresh(); return true; }
+        } catch (e) { if (isAbort(e)) throw e; }
+      }
+      return false;
+    };
+    const startDist = distance(s.pos), alreadyHere = arrived(s.pos);
+    const visited: Vec3Like[] = [s.pos];
+    let bestDistance = startDist, detours = 0;
+    const prog = setInterval(() => ctx.progress(1 - Math.min(1, distance(adapter.state().pos) / Math.max(1, startDist))), 1000);
+    try {
+      for (let hops = 0; !arrived(adapter.state().pos) && hops < 160; hops++) {
+        if (!inScope()) return fail('WRONG_DIMENSION', '途中世界或会话已改变，需要重新规划');
+        if (Date.now() >= ctx.deadline) return fail('TIMEOUT', '步行时间已用完，按当前位置重新选择路线');
+        await face();
+        const cur = adapter.state().pos;
+        const waypoint = ctx.senses.navigationWaypoint?.(pos, 12, visited);
+        if (ctx.senses.navigationWaypoint && !waypoint) {
+          if (await tryDoor()) continue;
+          await glance(ctx);
+          if (ctx.senses.navigationWaypoint(pos, 12, visited)) continue;
+          const water = ctx.senses.knownBlocks(['water'], 12).length > 0;
+          return fail('PATH_NOT_FOUND', `前往 ${label}：眼前没有可确认的${water ? '陆地落脚点，附近有水，可考虑 boat 渡河' : '通路，先换个观察位置或寻找入口'}；没有挖墙或搭柱`, { target: pos, position: cur, waterAhead: water });
+        }
+        const dxz = Math.hypot(pos.x - cur.x, pos.z - cur.z);
+        const target = waypoint ? { kind: 'near' as const, pos: waypoint, range: 0.7 }
+          : dxz > 32 ? { kind: 'xz' as const, x: cur.x + (pos.x - cur.x) * 24 / dxz, z: cur.z + (pos.z - cur.z) * 24 / dxz, range: 2 }
+          : flat ? { kind: 'xz' as const, x: pos.x, z: pos.z, range } : { kind: 'near' as const, pos, range };
+        try {
+          await adapter.moveTo(target, { signal, timeoutMs: Math.max(1, Math.min(20000, ctx.deadline - Date.now())) });
+        } catch (e) {
+          if (isAbort(e)) throw e;
+          if (await tryDoor()) continue;
+          throw e;
+        }
+        if (!inScope()) return fail('WRONG_DIMENSION', '途中世界或会话已改变，需要重新规划');
+        const after = adapter.state().pos;
+        if (dist3(cur, after) < 0.3 && !arrived(after)) return fail('PATH_NOT_FOUND', `前往 ${label} 没有取得进展，需要换入口或路线`, { target: pos, position: after });
+        if (distance(after) < bestDistance - 0.5) { bestDistance = distance(after); detours = 0; }
+        else if (++detours >= 4) return fail('PATH_NOT_FOUND', `绕行后仍未接近 ${label}，需要观察入口或另选路线`, { target: pos, position: after });
+        visited.push(waypoint ?? after);
+      }
+      if (!inScope()) return fail('WRONG_DIMENSION', '途中世界或会话已改变，需要重新规划');
+      const end = adapter.state().pos;
+      if (!arrived(end)) return fail('PATH_NOT_FOUND', `尚未到达 ${label}，需要重新选择路线`, { target: pos, position: end });
+      await face();
+      return ok(`${alreadyHere ? '已在' : '到达'} ${label} 附近；实际站在 (${end.x.toFixed(1)},${end.y.toFixed(1)},${end.z.toFixed(1)})，距目标 ${distance(end).toFixed(1)} 格`, { target: pos, position: end, moved: dist3(s.pos, end), alreadyHere });
     } catch (e) {
       if (isAbort(e)) throw e;
-      return fail(codeFromError(e), `前往 ${label} 失败：${(e as Error).message}`);
+      return fail(codeFromError(e), `前往 ${label} 失败：${(e as Error).message}`, {
+        target: pos, position: adapter.state().pos, waterAhead: ctx.senses.knownBlocks(['water'], 12).length > 0,
+      });
     } finally {
       clearInterval(prog);
     }

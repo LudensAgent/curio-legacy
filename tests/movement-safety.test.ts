@@ -7,7 +7,7 @@ import { EventBus } from '../src/events.ts';
 
 const require = createRequire(import.meta.url);
 
-test('construction-safe movement disables all installed Pathfinder building and the next normal move restores its untouched base', async () => {
+test('walking preserves terrain by default and only explicit terrain work restores the untouched Pathfinder base', async () => {
   const registry = require('minecraft-data')('1.20.1');
   const { Movements } = require('mineflayer-pathfinder');
   const selected: any[] = [];
@@ -34,14 +34,19 @@ test('construction-safe movement disables all installed Pathfinder building and 
   assert.equal(original.canDig, true);
   assert.equal(original.countScaffoldingItems(), 96, 'the base configuration and inventory remain intact');
   await adapter.moveTo({ kind: 'xz', x: 4, z: 0, range: 1 }, { signal, timeoutMs: 1000 });
-  const normal = selected[1];
-  assert.notEqual(normal, safe);
-  assert.equal(normal instanceof Movements, true);
-  assert.equal(normal.canDig, true);
-  assert.equal(normal.allow1by1towers, true);
-  assert.equal(normal.allowParkour, true);
-  assert.deepEqual(normal.scafoldingBlocks, original.scafoldingBlocks);
-  assert.equal(normal.countScaffoldingItems(), 96);
+  const walking = selected[1];
+  assert.notEqual(walking, safe);
+  assert.equal(walking instanceof Movements, true);
+  assert.equal(walking.canDig, false, 'ordinary walking must not tunnel through a wall');
+  assert.equal(walking.allow1by1towers, false, 'ordinary walking must not build pillars');
+  assert.deepEqual(walking.scafoldingBlocks, [], 'ordinary walking must not bridge an unsupported edge');
+  assert.equal(walking.allowParkour, original.allowParkour);
+  await adapter.moveTo({ kind: 'xz', x: 4, z: 0, range: 1 }, { signal, timeoutMs: 1000, allowTerrainChanges: true });
+  const terrainWork = selected[2];
+  assert.equal(terrainWork.canDig, original.canDig);
+  assert.equal(terrainWork.allow1by1towers, original.allow1by1towers);
+  assert.deepEqual(terrainWork.scafoldingBlocks, original.scafoldingBlocks);
+  assert.equal(terrainWork.countScaffoldingItems(), 96);
 });
 
 function placementFixture(move: (goal: any, bot: any) => void) {
@@ -96,4 +101,44 @@ test('placement replans stop immediately when cancellation arrives after nominal
   await assert.rejects(adapter.moveTo({ kind: 'place_block', pos: { x: 30, y: 64, z: 30 } },
     { signal: controller.signal, timeoutMs: 1000, constructionSafe: true }), { name: 'AbortedError' });
   assert.equal(attempts, 1);
+});
+
+async function doorMovements(name: string, open: boolean) {
+  const registry = require('minecraft-data')('1.20.1'), Block = require('prismarine-block')(registry);
+  const { Vec3 } = require('vec3'), { Movements } = require('mineflayer-pathfinder');
+  let selected: any;
+  const bot: any = { registry, game: { dimension: 'overworld' }, entity: { position: new Vec3(0.5, 64, 0.5) }, inventory: { items: () => [] },
+    blockAt(position: any) {
+      const p = position.floored();
+      const block = p.x === 1 && p.z === 0 && [64, 65].includes(p.y)
+        ? Block.fromProperties(name, { facing: 'north', half: p.y === 64 ? 'lower' : 'upper', hinge: 'left', open, powered: false }, 0)
+        : Block.fromStateId(registry.blocksByName[p.y === 63 ? 'stone' : 'air'].defaultState, 0);
+      block.position = p; return block;
+    },
+    pathfinder: { setMovements: (m: any) => { selected = m; }, goto: async () => {} },
+  };
+  const adapter = new MineflayerAdapter(config, new EventBus());
+  adapter.bot = bot; adapter.mcData = registry;
+  (adapter as any).connectedFlag = true; (adapter as any).normalMovements = new Movements(bot);
+  await adapter.moveTo({ kind: 'xz', x: 2, z: 0, range: 1 }, { signal: new AbortController().signal, timeoutMs: 1000 });
+  const node = new (require('mineflayer-pathfinder/lib/move'))(0, 64, 0, 0, 0), neighbors: any[] = [];
+  selected.getMoveForward(node, { x: 1, z: 0 }, neighbors);
+  return { selected, node, neighbors };
+}
+
+test('installed Pathfinder opens a closed wooden door instead of breaking it and leaves an open door alone', async () => {
+  for (const open of [false, true]) {
+    const { selected, node, neighbors } = await doorMovements('birch_door', open);
+    assert.equal(selected.canOpenDoors, true);
+    assert.equal(neighbors.length, 1);
+    assert.deepEqual(neighbors[0].toBreak, []);
+    assert.equal(neighbors[0].toPlace.filter((p: any) => p.useOne).length, open ? 0 : 1);
+    for (const y of [0, 1]) assert.equal(selected.getBlock(node, 1, y, 0).physical, false, 'neither door half can become a floor');
+  }
+});
+
+test('installed Pathfinder cannot open or break through an iron door during ordinary walking', async () => {
+  const { selected, node, neighbors } = await doorMovements('iron_door', false);
+  assert.equal(selected.getBlock(node, 1, 0, 0).openable, false);
+  assert.deepEqual(neighbors, []);
 });

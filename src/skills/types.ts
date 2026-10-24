@@ -37,6 +37,8 @@ export interface Senses {
   refresh(): void;
   markSweep(): void;
   nearestLand?(here: Vec3Like, excluded?: Vec3Like[]): { dir: string; dist: number; pos: Vec3Like } | null;
+  /** 刚亲眼看到的落脚点；只给出短程引导，未观察的地形不能当作已知路。 */
+  navigationWaypoint?(target: Vec3Like, maxDistance: number, excluded: Vec3Like[]): Vec3Like | null;
   /** 最近亲眼看见的某类生物的最后位置 */
   lastSighting?(match: (name: string) => boolean, maxAgeMs?: number): { id: number; name: string; pos: Vec3Like; ageMs: number } | null;
 }

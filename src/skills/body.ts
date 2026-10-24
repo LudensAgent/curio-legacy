@@ -1,10 +1,12 @@
 import { DIRS } from '../perception/perception.ts';
 import { DIR_OFFSETS, isSoftBlock, LIQUID_BLOCKS, surroundings } from '../perception/surroundings.ts';
-import { dirOfYaw } from '../perception/vision.ts';
+import { dirOfYaw, interactiveName } from '../perception/vision.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
 import { hasPlaceable } from './survival.ts';
 import { ensureToolFor } from './work.ts';
 import { findStation } from './stations.ts';
+import type { Vec3Like } from '../adapter/types.ts';
+import { dist3, throwIfAborted } from '../util.ts';
 
 /**
  * 身体的基本动作：对着某个方向挖（玩家按住左键）、原地垫方块往上爬（跳起来往脚下放方块）。
@@ -22,9 +24,9 @@ function liquidNext(ctx: SkillCtx, c: { x: number; y: number; z: number }): stri
   return null;
 }
 
-async function breakCell(ctx: SkillCtx, c: { x: number; y: number; z: number }): Promise<string | null> {
+async function breakCell(ctx: SkillCtx, c: Vec3Like, exact = false): Promise<string | null> {
   const name = ctx.adapter.blockAt(c);
-  if (isSoftBlock(name)) return null;
+  if (!exact && isSoftBlock(name)) return null;
   if (name && LIQUID_BLOCKS.has(name)) throw new Error(`LIQUID:${name}`);
   if (name === 'bedrock') throw new Error('BEDROCK');
   const wet = liquidNext(ctx, c);
@@ -37,6 +39,7 @@ async function breakCell(ctx: SkillCtx, c: { x: number; y: number; z: number }):
     const tool = await ensureToolFor(ctx, c);
     if (!tool.ok) throw new Error(`NEED_TOOL:${tool.message}`);
   }
+  if (exact && ctx.adapter.blockAt(c) !== name) throw new Error('TARGET_CHANGED：目标方块已经改变，停止拆除');
   const r = await ctx.adapter.dig(c, ctx.signal);
   if (!r.ok) throw new Error(r.reason ?? 'DIG_FAILED');
   return name;
@@ -52,21 +55,115 @@ const why = (e: unknown) => {
   return m;
 };
 
+type TargetDigArgs = { target: string | Vec3Like; block?: string; dir?: undefined; blocks?: undefined };
+type DigArgs = { dir: string; blocks: number; target?: undefined; block?: undefined } | TargetDigArgs;
+const AIR = new Set(['air', 'cave_air', 'void_air']);
+const coordinates = (value: unknown): Vec3Like | null => {
+  const parts = typeof value === 'string' ? value.trim().split(/[,， ]+/).map(Number) : null;
+  const p = parts?.length === 3 ? { x: parts[0], y: parts[1], z: parts[2] } : typeof value === 'object' && value ? value as Vec3Like : null;
+  return p && [p.x, p.y, p.z].every((n) => typeof n === 'number' && Number.isFinite(n)) ? floor(p) : null;
+};
+
+/** Explicit targets are single-block work, never directional tunnel excavation. */
+async function recoverBlock(ctx: SkillCtx, args: TargetDigArgs) {
+  const { adapter, senses, memory, signal } = ctx;
+  const start = adapter.state();
+  senses.refresh();
+  let pos = coordinates(args.target), expected = args.block, landmarkLabel: string | undefined;
+  if (!pos && typeof args.target === 'string') {
+    const landmark = memory.landmarks().find((l) => l.id === args.target || l.label === args.target);
+    if (landmark) {
+      if (landmark.dim !== start.dim || landmark.worldId && landmark.worldId !== start.worldId) return fail('WRONG_DIMENSION', '目标地标不在当前世界/维度，未拆除');
+      pos = floor(landmark.pos);
+      landmarkLabel = landmark.label;
+    } else {
+      const names = adapter.resolveBlockNames(args.target);
+      const seen = senses.knownBlocks(names, 64).sort((a, b) => a.dist - b.dist)[0];
+      const station = seen ? null : findStation(ctx, names, 64);
+      pos = seen ? floor(seen.pos) : station ? floor(station.pos) : null;
+      expected ??= seen?.name;
+      if (pos && !expected && names.includes(adapter.blockAt(pos) ?? '')) expected = adapter.blockAt(pos)!;
+      if (pos && !expected && names.length === 1) expected = names[0];
+    }
+  }
+  if (!pos) return fail('NOT_FOUND', `没有看见或记住目标 ${String(args.target)}；先 look_around 确认方块或给出坐标`);
+  const inReach = () => dist3(adapter.eye() ?? { ...adapter.state().pos, y: adapter.state().pos.y + 1.62 }, { x: pos!.x + 0.5, y: pos!.y + 0.5, z: pos!.z + 0.5 }) <= 4.5;
+  try {
+    throwIfAborted(signal);
+    if (!inReach()) await adapter.moveTo({ kind: 'reach_block', pos }, { signal, timeoutMs: Math.min(15000, Math.max(1, ctx.deadline - Date.now() - 4000)), constructionSafe: true });
+    throwIfAborted(signal);
+    if (!inReach()) return fail('PATH_NOT_FOUND', '未能走到目标伸手可及的位置，未拆除');
+    const name = adapter.blockAt(pos);
+    if (!name || AIR.has(name)) return fail('TARGET_GONE', '目标位置已经没有方块，未拆除');
+    if (expected && name !== expected) return fail('TARGET_GONE', `目标应为 ${expected}，当前位置是 ${name}，未拆除`);
+    if (landmarkLabel && !expected && landmarkLabel !== name && landmarkLabel.replace(/^我的/, '') !== interactiveName(name)) return fail('TARGET_GONE', `地标 ${landmarkLabel} 的当前位置是 ${name}；请用 block 明确目标类型，未拆除`);
+    // Multi-part blocks disappear together. Protect support beneath either part.
+    const affected = [pos], properties = adapter.blockStateAt?.(pos)?.properties ?? {};
+    const facing = ({ north: [0, -1], east: [1, 0], south: [0, 1], west: [-1, 0] } as Record<string, number[]>)[String(properties.facing)];
+    if (facing && ['foot', 'head'].includes(String(properties.part))) {
+      const sign = properties.part === 'head' ? -1 : 1;
+      affected.push({ x: pos.x + facing[0] * sign, y: pos.y, z: pos.z + facing[1] * sign });
+    } else if (properties.half === 'lower' || properties.half === 'upper') affected.push({ ...pos, y: pos.y + (properties.half === 'lower' ? 1 : -1) });
+    const supportsMe = () => {
+      const p = adapter.state().pos;
+      return affected.some((c) => c.y >= p.y - 1.05 && c.y <= p.y + 0.01 && c.x < p.x + 0.3 && c.x + 1 > p.x - 0.3 && c.z < p.z + 0.3 && c.z + 1 > p.z - 0.3);
+    };
+    if (supportsMe()) {
+      const me = floor(adapter.state().pos);
+      const landing = Object.values(DIR_OFFSETS).map(([dx, dz]) => ({ x: me.x + dx, y: me.y, z: me.z + dz })).find((c) => {
+        const below = adapter.blockAt({ ...c, y: c.y - 1 });
+        return [c, { ...c, y: c.y + 1 }].every((q) => { const n = adapter.blockAt(q); return n !== null && isSoftBlock(n) && !/sweet_berry_bush|powder_snow|fire/.test(n); })
+          && below !== null && !isSoftBlock(below) && !LIQUID_BLOCKS.has(below) && !/slab|stairs|fence|wall|bed|door|cactus|magma|campfire|powder_snow/.test(below)
+          && !affected.some((q) => q.x === c.x && q.z === c.z && q.y === c.y - 1);
+      });
+      if (!landing) return fail('BAD_ARGS', '目标正在支撑身体，旁边没有可确认安全的落脚处；先离开再拆');
+      await adapter.moveTo({ kind: 'xyz', ...landing }, { signal, timeoutMs: 3000, constructionSafe: true });
+      throwIfAborted(signal);
+      if (supportsMe() || !adapter.state().onGround) return fail('BAD_ARGS', '尚未离开目标并站稳，未拆除脚下支撑');
+    }
+    if (adapter.blockAt(pos) !== name) return fail('TARGET_GONE', '目标方块已经改变，未拆除');
+    const before = new Map(adapter.state().inventory.map((item) => [item.name, item.count]));
+    await breakCell(ctx, pos, true);
+    throwIfAborted(signal);
+    if (!AIR.has(adapter.blockAt(pos) ?? '')) return fail('ERROR', `尚未确认 ${name} 已被拆掉`, { target: name, pos, broken: false });
+    await adapter.collectNearbyDrops(signal, 3, Math.max(1, Math.min(1800, ctx.deadline - Date.now())));
+    throwIfAborted(signal);
+    const gained = adapter.state().inventory.map((item) => ({ name: item.name, count: item.count - (before.get(item.name) ?? 0) })).filter((item) => item.count > 0);
+    const data = { target: name, pos, broken: true, gained };
+    if (!gained.length) return fail('ERROR', `已拆下 ${name}，但背包没有新增物品；掉落物尚未拾取，不能当作已拿到`, data);
+    const dropsItself = /_(bed|door)$/.test(name) || ['crafting_table', 'furnace', 'blast_furnace', 'smoker'].includes(name);
+    if (dropsItself && !gained.some((item) => item.name === name)) return fail('ERROR', `已拆下 ${name}，但背包没有新增 ${name}；顺带拾取了 ${gained.map((item) => `${item.name}×${item.count}`).join('、')}，目标掉落物尚未拿到`, data);
+    return ok(`已拆下 ${name}；背包新增 ${gained.map((item) => `${item.name}×${item.count}`).join('、')}`, data);
+  } catch (error) {
+    if (isAbort(error)) throw error;
+    return fail(codeFromError(error), `拆除目标失败：${why(error)}`);
+  }
+}
+
 // ------------------------------------------------------------------ dig
-export const dig: Skill<{ dir: string; blocks: number }> = {
+export const dig: Skill<DigArgs> = {
   name: 'dig',
-  description: '对着一个方向挖：up 挖开头顶，down 挖脚下，N/E/S/W/forward 挖出一人高的通道并走进去；不会挖进水或岩浆旁边',
-  argsDoc: '{"dir": "up|down|N|E|S|W|forward", "blocks"?: 1-6}',
+  description: '定点拆除并拾取：target 指定已看见/记住的方块ID、坐标或地标，只拆该块并报告背包实增；也可用 dir 挖头顶/脚下或一人高通道；不会挖进水或岩浆旁边',
+  argsDoc: '{"target"?: "<方块ID|x,y,z|地标ID>" | {"x":0,"y":64,"z":0}, "block"?: "<目标方块类型约束>", "dir"?: "up|down|N|E|S|W|forward", "blocks"?: 1-6}（target 与 dir 二选一）',
   timeoutMs: 60000,
   movement: true,
   validate(raw) {
     const a = obj(raw);
+    const target = a.target ?? a.at ?? a.pos;
+    if (target !== undefined) {
+      if (a.dir !== undefined || a.direction !== undefined || a.blocks !== undefined || a.count !== undefined) return { ok: false, error: '定点 target 只拆一个目标，不能同时指定 dir/blocks' };
+      const point = coordinates(target);
+      if (!point && (typeof target !== 'string' || !target.trim() || target.length > 160 || /[,，]/.test(target))) return { ok: false, error: 'target 必须是方块ID、地标ID或有效的 x,y,z 坐标' };
+      const block = typeof a.block === 'string' && a.block.trim() ? a.block.trim().replace(/^minecraft:/, '') : undefined;
+      return { ok: true, args: { target: point ?? String(target).trim().replace(/^minecraft:/, ''), ...(block ? { block } : {}) } };
+    }
     let dir = String(a.dir ?? a.direction ?? '').trim();
     dir = /^(up|down|forward)$/i.test(dir) ? dir.toLowerCase() : dir.toUpperCase();
     if (!['up', 'down', 'forward', ...Object.keys(DIR_OFFSETS)].includes(dir)) return { ok: false, error: 'dir 必须是 up/down/forward/N/E/S/W' };
     return { ok: true, args: { dir, blocks: clampInt(a.blocks ?? a.count, 1, 6, dir === 'up' ? 2 : 1) } };
   },
   async run(ctx, args) {
+    if (args.target !== undefined) return recoverBlock(ctx, args);
     const { adapter, signal } = ctx;
     const dug: string[] = [];
     try {
@@ -138,7 +235,7 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
       try {
         // 头顶的方块先挖开（不挖液体旁边的）
         await breakCell(ctx, { x: me.x, y: me.y + 2, z: me.z });
-        await adapter.moveTo({ kind: 'xyz', x: me.x, y: me.y + 1, z: me.z }, { signal, timeoutMs: 8000 });
+        await adapter.moveTo({ kind: 'xyz', x: me.x, y: me.y + 1, z: me.z }, { signal, timeoutMs: 8000, allowTerrainChanges: true });
       } catch (e) {
         if (isAbort(e)) throw e;
         const msg = why(e);

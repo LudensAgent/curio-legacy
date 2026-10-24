@@ -101,7 +101,7 @@ export interface AgentState {
 export type MoveTarget =
   | { kind: 'near'; pos: Vec3Like; range: number }
   | { kind: 'xz'; x: number; z: number; range: number }
-  /** 站到这一格（寻路会挖开挡路的方块、必要时垫方块往上爬） */
+  /** 站到这一格；普通移动不改地形，明确挖掘/爬升动作可另行授权。 */
   | { kind: 'xyz'; x: number; y: number; z: number }
   | { kind: 'reach_block'; pos: Vec3Like }
   | { kind: 'place_block'; pos: Vec3Like; facing?: 'north' | 'south' | 'east' | 'west' | 'up' | 'down' }
@@ -112,6 +112,8 @@ export interface MoveOpts {
   signal: AbortSignal;
   timeoutMs: number;
   constructionSafe?: boolean;
+  /** 仅明确的挖掘/爬升动作允许寻路挖块和搭建；日常移动默认绕行。 */
+  allowTerrainChanges?: boolean;
 }
 
 export interface ActionResult {

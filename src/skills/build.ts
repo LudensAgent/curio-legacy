@@ -57,6 +57,10 @@ export function describeBuildProblems(result: ConstructionResult): string {
   if (Object.keys(obstruct).length) out.push(`还有 ${tally(obstruct)} 占着房子的位置`);
   if (unknown) out.push(`${unknown} 处还看不清/区块没加载，走近再来`);
   if (missingCells) out.push(`还有 ${missingCells} 块没放上`);
+  if (d.length) out.push(`具体缺陷：${d.slice(0, 3).map((x) => `${x.kind} @ (${x.pos.x},${x.pos.y},${x.pos.z}) expected=${x.expected}, actual=${x.actual ?? 'unknown'}`).join('；')}${d.length > 3 ? `；其余 ${d.length - 3} 处见 inspection.defects` : ''}`);
+  if (d.some((x) => x.kind === 'obstruction')) out.push('占位先按上述绝对坐标确认方块及归属，再定点处理；goto 只到附近，随后按方位 dig 可能挖到别的墙；处理后用 mode:"inspect" 复验');
+  if (d.some((x) => ['missing', 'wrong_block', 'wrong_state'].includes(x.kind))) out.push('缺块/结构错位用 mode:"repair" 按原档案修补；改变布局需同时提交新 spec');
+  if (unknown) out.push('走近上述坐标加载区块后，用 mode:"inspect" 重新检查');
   return out.length ? `${out.join('；')}。` : '';
 }
 
@@ -248,7 +252,7 @@ export const build: Skill<BuildArgs> = {
         }
         const sameAsMissing = rawNeed.size === Object.keys(result.missingMaterials).length && [...rawNeed].every(([n, c]) => result.missingMaterials[n] === c);
         const rawText = sameAsMissing ? '' : [...rawNeed].map(([n, c]) => `${n}×${c}`).join('、');
-        return fail(failureCode, `${noteText}${spec.name} 尚未验收（${result.inspection.defects.length} 个缺陷）${missing ? `；缺少 ${missing}${rawText ? `（折算成原材料：${rawText}，可用 gather 的 for 按缺口采）` : ''}` : ''}。${describeBuildProblems(result)}作品 ID ${project.id}；可补料后续建/repair/inspect。${result.failures[0] ? ` ${result.failures[0].reason}` : ''}`, data);
+        return fail(failureCode, `${noteText}${spec.name} 尚未验收（${result.inspection.defects.length} 个缺陷）${missing ? `；缺少 ${missing}${rawText ? `（折算成原材料：${rawText}，可用 gather 的 for 按缺口采）` : ''}；补齐后用 mode:"repair"` : ''}。${describeBuildProblems(result)}作品 ID ${project.id}。${result.failures[0] ? ` ${result.failures[0].reason}` : ''}`, data);
       }
       if (blueprint.home && args.mode !== 'inspect') {
         const home = rotatePosition(blueprint.home, project.origin, project.rotation);
@@ -290,7 +294,11 @@ export const buildingArchive: Skill<{ operation: string; projectId?: string; oth
       const archive = buildingArchiveFor(ctx.memory);
       if (args.operation === 'list') return ok('作品目录', { projects: archive.list().filter((p) => p.worldId === ctx.adapter.state().worldId).map((p) => ({ id: p.id, worldId: p.worldId, dimension: p.dimension, origin: p.origin, status: p.status, name: p.versions.at(-1)?.spec.name, version: p.versions.at(-1)?.version, latestFeedback: p.feedback.slice(-3) })) });
       if (!archive.get(args.projectId!)) return fail('NOT_FOUND', '作品不存在');
-      if (args.operation === 'read') return ok('作品档案（历史检查不代表当前世界仍然完好）', { project: archive.get(args.projectId!) });
+      if (args.operation === 'read') {
+        const project = archive.get(args.projectId!)!, inspection = project.inspections.at(-1);
+        const details = inspection ? describeBuildProblems({ projectId: project.id, placed: 0, cleared: 0, inspection, missingMaterials: {}, failures: [] }) : '';
+        return ok(`作品 ${project.id}「${project.versions.at(-1)?.spec.name ?? ''}」档案；${inspection ? `上次验收${inspection.complete ? '通过' : `未通过（${inspection.defects.length} 个缺陷）`}` : '尚无验收记录'}。${details}以上是历史记录；现场复查用 build {projectId:"${project.id}",mode:"inspect"}。`, { project });
+      }
       if (args.operation === 'compare') return ok('作品候选比较', archive.compare(args.projectId!, args.otherId!));
       if (args.operation === 'compare_versions') return ok('同一作品的设计版本比较', archive.compareVersions(args.projectId!, args.version!, args.otherVersion!));
       if (args.operation === 'rollback') return ok('已创建回退设计版本；实际改造需另用 build 的 repair，并重新验收', { project: archive.rollback(args.projectId!, args.version!, args.text!) });

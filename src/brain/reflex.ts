@@ -7,7 +7,7 @@ import { measureLight, torchCount } from '../skills/light.ts';
 import { surroundings } from '../perception/surroundings.ts';
 
 /** 这些动作进行中可以顺手插支火把（插完接着做） */
-const TORCH_OK_DURING = new Set(['explore', 'goto', 'gather', 'wander', 'excavate_path', 'search_structure', 'look_around']);
+const TORCH_OK_DURING = new Set(['explore', 'goto', 'gather', 'wander', 'excavate_path', 'search_structure']);
 /** 熟食、面包等正经食物（不含生肉生鱼） */
 const GOOD_FOOD = /^(cooked_|baked_potato|bread|golden_carrot|golden_apple|pumpkin_pie|cookie|apple|carrot|melon_slice|sweet_berries|glow_berries|beetroot|dried_kelp|mushroom_stew|rabbit_stew|beetroot_soup|suspicious_stew|honey_bottle|cake)/;
 
@@ -71,46 +71,47 @@ export class Reflex {
     return true;
   }
 
-  private fire(step: Step, sev: Severity, why: string) {
+  private fire(step: Step, sev: Severity, why: string, gentle = false) {
     this.triggers++;
     this.bus.publish('reflex', sev, `${why} → ${step.skill}`);
-    this.arbiter.start(step, 'reflex');
+    this.arbiter.start(step, 'reflex', gentle ? { gentle: true } : {});
   }
 
   tick() {
     if (!this.enabled || this.arbiter.paused) return;
     const s = this.adapter.state();
-    if (!s.connected || !s.alive || !s.observationReady) return;
+    if (!s.connected || !s.alive || !s.observationReady) { this.darkSince = null; return; }
     const cur = this.arbiter.info();
     // 只对看见/听见的威胁做反应（墙后的怪物不会触发反射）
     const hostiles = this.senses.perceivedEntities(12).filter((e) => e.kind === 'hostile' && !(cur?.skill === 'dragon_fight' && e.name === 'ender_dragon'));
     const nearest = hostiles[0];
     const creeper = hostiles.find((e) => e.name === 'creeper' && e.dist < 5);
+    if (s.inWater || s.inLava || !s.onGround || (nearest && nearest.dist < 5) || (cur && !TORCH_OK_DURING.has(cur.skill))) this.darkSince = null;
 
-    // 躲在避难所里：怪物进不来，不要出去打架/逃跑，只防溺水
-    if (cur?.skill === 'shelter') {
-      if (s.inWater && s.oxygen <= 10 && this.ready('drown', 4000)) this.fireDrown(s);
+    // 先处理真正的险情，吃饭/照明等反射也不能挡住它；已经在脱险就继续，别重新起跑。
+    if (s.inLava) {
+      if (cur?.skill !== 'flee' && this.ready('lava', 1500)) this.fire({ skill: 'flee', args: { distance: 8 } }, 'P0', '掉进岩浆');
       return;
     }
-
-    // 反射任务进行中：只处理升级（战斗中生命过低 → 撤离；任何反射中快溺水 → 换气）
-    if (cur?.source === 'reflex') {
-      if (cur.skill !== 'surface' && s.inWater && s.oxygen <= 6 && this.ready('drown', 3000)) {
-        this.fireDrown(s);
-        return;
-      }
-      if (cur.skill === 'defend' && (s.hp <= 6 || creeper) && this.ready('escalate', 3000)) {
-        this.fire({ skill: 'flee', args: { distance: 20 } }, 'P0', `战斗中生命 ${s.hp}${creeper ? '，苦力怕靠近' : ''}`);
-      }
-      return;
-    }
-
-    if (s.inLava && this.ready('lava', 1500)) return this.fire({ skill: 'flee', args: { distance: 8 } }, 'P0', '掉进岩浆');
     // 只在水里才检查氧气：Mineflayer 在陆地上偶尔会报出不准的氧气值
-    if (s.inWater && s.oxygen <= 10 && this.ready('drown', 4000)) return this.fireDrown(s);
-    if (creeper && this.ready('creeper', 3000)) return this.fire({ skill: 'flee', args: { distance: 16 } }, 'P0', `苦力怕距离 ${creeper.dist.toFixed(1)}`);
+    if (s.inWater && s.oxygen <= 10) {
+      if (cur?.skill !== 'surface' && this.ready('drown', 4000)) this.fireDrown(s);
+      return;
+    }
+    // 躲在避难所里：怪物进不来，不要出去打架/逃跑。
+    if (cur?.skill === 'shelter') return;
+    if (creeper) {
+      if (cur?.skill !== 'flee' && this.ready('creeper', 3000)) this.fire({ skill: 'flee', args: { distance: 16 } }, 'P0', `苦力怕距离 ${creeper.dist.toFixed(1)}`);
+      return;
+    }
+    // 判断正在做什么，而不是谁发起的：主动战斗、换气和撤离同样不需要重启。
+    if (cur?.skill === 'defend' || cur?.skill === 'ranged_defend') {
+      if (s.hp <= 6 && this.ready('escalate', 3000)) this.fire({ skill: 'flee', args: { distance: 20 } }, 'P0', `战斗中生命 ${s.hp}`);
+      return;
+    }
+    if (cur?.skill === 'surface' || cur?.skill === 'flee') return;
     // 夜里低血量且身上有方块：就地挖坑封顶，比被追着跑更安全
-    if (!s.isDay && s.hp <= 8 && (!nearest || nearest.dist > 4) && !s.inWater && hasPlaceable(s.inventory) && this.ready('shelter', 90000)) {
+    if (cur?.source !== 'reflex' && cur?.skill !== 'eat' && !s.isDay && s.hp <= 8 && (!nearest || nearest.dist > 4) && !s.inWater && hasPlaceable(s.inventory) && this.ready('shelter', 90000)) {
       return this.fire({ skill: 'shelter', args: { until: 'day' } }, 'P0', `夜里生命只有 ${Math.round(s.hp)}`);
     }
     if (s.hp <= 6 && nearest && nearest.dist < 10 && this.ready('lowhp', 4000)) {
@@ -120,6 +121,8 @@ export class Reflex {
       if (s.hp > 8) return this.fire({ skill: 'defend', args: { entityId: nearest.id } }, 'P1', `${nearest.name} 贴近（${nearest.dist.toFixed(1)} 格）`);
       return this.fire({ skill: 'flee', args: { distance: 18 } }, 'P1', `${nearest.name} 贴近且生命 ${s.hp}`);
     }
+    // 非紧急动作不互相抢占，尤其不要把已经开始吃的一口掐断，再重新吃同一顿。
+    if (cur?.source === 'reflex' || cur?.skill === 'eat') return;
     const safe = !nearest || nearest.dist > 8;
     // 吃东西的反射分轻重：真饿（≤6）或掉血时饥饿不满，什么都吃、马上吃；
     // 只是有点饿（7–12）时，只在有熟食/面包这类“正经食物”时顺手吃，并且不打断打猎、战斗——
@@ -127,9 +130,10 @@ export class Reflex {
     const urgent = s.food <= 6 || (s.hp < 10 && s.food < 18);
     const peckish = s.food <= 12 || (s.hp < 14 && s.food < 18);
     const goodFood = s.inventory.some((i) => GOOD_FOOD.test(i.name));
-    const busy = !!cur && ['hunt', 'defend', 'ranged_defend', 'flee', 'dragon_fight', 'craft', 'smelt', 'build', 'climb_up', 'dig', 'store_items', 'take_items', 'ride', 'use_item', 'interact', 'sleep'].includes(cur.skill);
-    if (cur?.skill !== 'dragon_fight' && safe && this.adapter.hasFood() && (urgent || (peckish && goodFood && !busy)) && this.ready('eat', 15000)) {
-      return this.fire({ skill: 'eat' }, 'P1', `饥饿 ${s.food} / 生命 ${s.hp}${urgent ? '（很饿了，有什么吃什么）' : ''}`);
+    const busy = !!cur && ['hunt', 'defend', 'ranged_defend', 'flee', 'dragon_fight', 'craft', 'smelt', 'build', 'climb_up', 'dig', 'store_items', 'take_items', 'ride', 'use_item', 'interact', 'sleep', 'look_around'].includes(cur.skill);
+    const routineWindow = !cur || cur.source === 'filler' || (Date.now() - cur.startedAt >= 1500 && cur.progress < 0.85);
+    if (cur?.skill !== 'dragon_fight' && safe && this.adapter.hasFood() && (urgent || (peckish && goodFood && !busy && routineWindow)) && this.ready('eat', 15000)) {
+      return this.fire({ skill: 'eat' }, 'P1', `饥饿 ${s.food} / 生命 ${s.hp}${urgent ? '（很饿了，有什么吃什么）' : ''}`, !urgent);
     }
 
     this.autoTorch(s, cur, nearest?.dist ?? Infinity);
@@ -137,6 +141,7 @@ export class Reflex {
   }
 
   private lastTorch: { x: number; y: number; z: number } | null = null;
+  private darkSince: number | null = null;
   private torchNear(x: number, y: number, z: number, r: number) {
     for (let dx = -r; dx <= r; dx++) for (let dy = -2; dy <= 2; dy++) for (let dz = -r; dz <= r; dz++) {
       const n = this.adapter.blockAt({ x: x + dx, y: y + dy, z: z + dz });
@@ -146,15 +151,18 @@ export class Reflex {
   }
   torchesPlaced = 0;
 
-  /** 像真人下矿一样：在地下走到暗处就顺手插一支火把（不打断计划，计划会原样继续） */
+  /** 走进有遮蔽的暗处就顺手补一支火把（不打断计划，计划会原样继续） */
   private autoTorch(s: ReturnType<GameAdapter['state']>, cur: ReturnType<Arbiter['info']>, nearestHostile: number) {
-    if (s.inWater || nearestHostile < 5 || torchCount(s.inventory) === 0) return;
+    if (s.inWater || !s.onGround || nearestHostile < 5 || torchCount(s.inventory) === 0) { this.darkSince = null; return; }
     // 只在“走路/挖矿”这类可以顺手停一下的动作里插火把；打猎、合成、建造、爬坑这些做到一半被打断会坏事
-    if (cur && !TORCH_OK_DURING.has(cur.skill)) return;
+    if (cur && (!TORCH_OK_DURING.has(cur.skill) || cur.progress >= 0.85)) { this.darkSince = null; return; }
     const x = Math.floor(s.pos.x), y = Math.floor(s.pos.y), z = Math.floor(s.pos.z);
-    // 只在地下的暗处：头顶看得见天（尤其白天）不插；光照数据读不到/不可信时也不插
+    // 只在有遮蔽的暗处：头顶看得见天（尤其白天）不插；光照数据读不到/不可信时也不插
     const m = measureLight(this.adapter, s.pos, s.timeOfDay, s.isDay);
-    if (m.sky !== false || m.level === null || m.level > 4) return;
+    if (m.sky !== false || m.level === null || m.level > 4) { this.darkSince = null; return; }
+    // 从树荫/屋檐或跳跃里一闪而过不值得停下；闲着时可以直接照明，走路时先确认一直很暗。
+    this.darkSince ??= Date.now();
+    if (cur && Date.now() - this.darkSince < 750) return;
     const here = m.level;
     if (this.lastTorch && Math.hypot(x - this.lastTorch.x, y - this.lastTorch.y, z - this.lastTorch.z) < 5) return;
     if (!this.ready('torch', 6000)) return;
@@ -163,7 +171,7 @@ export class Reflex {
     this.lastTorch = { x, y, z };
     this.torchesPlaced++;
     this.triggers++;
-    this.bus.publish('reflex', 'P3', `地下太暗（亮度 ${here}/15）→ 顺手插火把`);
+    this.bus.publish('reflex', 'P3', `周围太暗（亮度 ${here}/15）→ 顺手插火把`);
     this.arbiter.start({ skill: 'place_torch', args: { count: 1, auto: true } }, 'reflex', { gentle: true });
   }
 

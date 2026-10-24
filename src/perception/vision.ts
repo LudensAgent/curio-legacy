@@ -73,6 +73,7 @@ export const interactiveName = (block: string): string | undefined => INTERACTIV
 
 export const NOTABLE = new Set([
   ...LOGS, ...ORES, ...Object.keys(INTERACTIVE_BLOCKS),
+  ...['oak', 'spruce', 'birch', 'jungle', 'acacia', 'dark_oak', 'mangrove', 'cherry', 'bamboo', 'crimson', 'warped', 'iron'].map((wood) => `${wood}_door`),
   ...['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black'].map((c) => `${c}_bed`), 'lava', 'spawner', 'hay_block', 'sugar_cane',
   'pumpkin', 'melon', 'obsidian', 'clay', 'sweet_berry_bush', 'nether_portal', 'end_portal', 'end_gateway', 'end_portal_frame', 'stone_bricks', 'mossy_stone_bricks', 'cracked_stone_bricks', 'bookshelf', 'iron_bars',
 ]);
@@ -208,6 +209,7 @@ export class Vision {
   sightings = new Map<number, { id: number; name: string; kind: string; pos: Vec3Like; at: number }>();
   /** 本次扫描看到的值得注意的方块 */
   visibleNow = new Map<string, { name: string; pos: Vec3Like; dist: number }>();
+  private visibleSurfaces = new Map<string, { name: string; pos: Vec3Like; at: number }>();
   composition: Record<string, number> = {};
   openness = { left: 0, center: 0, right: 0 };
   lastSweepAt = 0;
@@ -229,6 +231,7 @@ export class Vision {
       this.heard = [];
       this.sightings.clear();
       this.visibleNow.clear();
+      this.visibleSurfaces.clear();
       this.composition = {};
       this.openness = { left: 0, center: 0, right: 0 };
       this.lastScanAt = 0;
@@ -265,6 +268,7 @@ export class Vision {
       this.heard = [];
       this.sightings.clear();
       this.visibleNow.clear();
+      this.visibleSurfaces.clear();
       return;
     }
     const { cols, rows } = this.cfg;
@@ -319,8 +323,12 @@ export class Vision {
     const comp: Record<string, number> = {};
     this.visibleNow.clear();
     const now = Date.now();
+    // A quick glance to one side must not erase the floor just seen on the
+    // other side. Keep only a few seconds of local visual working memory.
+    for (const [key, surface] of this.visibleSurfaces) if (now - surface.at > 3000) this.visibleSurfaces.delete(key);
 
     const note = (name: string, x: number, y: number, z: number, dist: number) => {
+      this.visibleSurfaces.set(keyOf(x, y, z), { name, pos: { x, y, z }, at: now });
       if (!NOTABLE.has(name) && !GROUND.has(name)) return;
       const k = keyOf(x, y, z);
       if (!this.visibleNow.has(k)) this.visibleNow.set(k, { name, pos: { x, y, z }, dist });
@@ -573,6 +581,33 @@ export class Vision {
   knownCount() {
     this.syncScope();
     return this.known.size;
+  }
+
+  navigationWaypoint(target: Vec3Like, maxDistance: number, excluded: Vec3Like[]): Vec3Like | null {
+    const state = this.syncScope();
+    if (!state.observationReady) return null;
+    const here = state.pos;
+    const remaining = Math.hypot(target.x - here.x, target.z - here.z);
+    // Optical transparency includes glass and barriers; it is not a collision test.
+    const passable = (o: Optics | null) => !!o && /^(air|cave_air|void_air|light|short_grass|grass|tall_grass|fern|large_fern|dead_bush|torch|wall_torch|.*_torch|.*_carpet|.*_flower|.*_tulip|dandelion|poppy|vine|.*_sapling)$/.test(o.name);
+    let best: { pos: Vec3Like; score: number } | null = null;
+    for (const surface of this.visibleSurfaces.values()) {
+      if (Date.now() - surface.at > 3000) continue;
+      if (/water|lava|ice$|magma|campfire|cactus|powder_snow|berry_bush/.test(surface.name)) continue;
+      const p = { x: surface.pos.x + 0.5, y: surface.pos.y + 1, z: surface.pos.z + 0.5 };
+      const distance = Math.hypot(p.x - here.x, p.z - here.z);
+      if (distance < 1.5 || distance > maxDistance || Math.abs(p.y - here.y) > 2) continue;
+      if (excluded.some((e) => Math.hypot(e.x - p.x, e.z - p.z) < 1 && Math.abs(e.y - p.y) < 1)) continue;
+      const floor = this.adapter.blockOptics(surface.pos.x, surface.pos.y, surface.pos.z);
+      if (floor?.kind !== 'solid') continue;
+      if (!passable(this.adapter.blockOptics(surface.pos.x, surface.pos.y + 1, surface.pos.z))
+        || !passable(this.adapter.blockOptics(surface.pos.x, surface.pos.y + 2, surface.pos.z))) continue;
+      const left = Math.hypot(target.x - p.x, target.z - p.z);
+      if (left > remaining + 3) continue; // 可以沿墙侧绕，不能无休止地走回头路。
+      const score = left + Math.abs(target.y - p.y) * 0.5 + distance * 0.08;
+      if (!best || score < best.score) best = { pos: p, score };
+    }
+    return best?.pos ?? null;
   }
 
   /** 给 LLM 的视觉摘要 */
