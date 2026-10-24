@@ -1,4 +1,5 @@
 import type { BlockHit, BlockObservation, EntityInfo, Eye, GameAdapter, Optics, Vec3Like } from '../adapter/types.ts';
+import type { LandingOption } from '../skills/types.ts';
 
 /**
  * AI 视觉（不使用图片）：用区块数据模拟“人眼能看到的范围”。
@@ -367,6 +368,7 @@ export class Vision {
           return ++water > 6;
         }
         if (o.kind === 'foliage') {
+          note(o.name, x, y, z, d);
           if (!hitCat) { hitCat = 'leaves'; hitDist = d; }
           return ++leaves >= 2;
         }
@@ -531,8 +533,9 @@ export class Vision {
       if (Math.hypot(pos.x + .5 - eye.x, pos.y + .5 - eye.y, pos.z + .5 - eye.z) > this.effectiveRange() + 1) continue;
       const optics = this.adapter.blockOptics(pos.x, pos.y, pos.z);
       if (!optics) continue;
-      const points = optics.kind === 'solid' && optics.shapes
-        ? optics.shapes.slice(0, 16).map(([x0, y0, z0, x1, y1, z1]) => [pos.x + (x0 + x1) / 2, pos.y + (y0 + y1) / 2, pos.z + (z0 + z1) / 2])
+      const boxes = optics.kind === 'solid' || optics.kind === 'foliage' ? optics.shapes ?? [[0, 0, 0, 1, 1, 1] as const] : undefined;
+      const points = boxes
+        ? boxes.slice(0, 16).map(([x0, y0, z0, x1, y1, z1]) => [pos.x + (x0 + x1) / 2, pos.y + (y0 + y1) / 2, pos.z + (z0 + z1) / 2])
         : [[pos.x + .5, pos.y + .5, pos.z + .5]];
       const visible = points.some(([x, y, z]) => {
         const dx = x - eye.x, dy = y - eye.y, dz = z - eye.z, distance = Math.hypot(dx, dy, dz);
@@ -540,7 +543,7 @@ export class Vision {
         if (Math.abs(norm(yawTo(dx, dz) - eye.yaw)) > hFov / 2 || Math.abs(Math.atan2(dy, Math.hypot(dx, dz)) - eye.pitch) > vFov / 2) return false;
         // Thin doors/fences must expose an actual shape, not merely an empty
         // part of their grid cell. Other blocks still occlude the entire ray.
-        const hit = optics.kind === 'solid' && optics.shapes ? shapeHitDistance(optics.shapes, eye, dx / distance, dy / distance, dz / distance, pos.x, pos.y, pos.z, distance) : distance;
+        const hit = boxes ? shapeHitDistance(boxes, eye, dx / distance, dy / distance, dz / distance, pos.x, pos.y, pos.z, distance) : distance;
         if (hit === null || !this.clearLine(eye, dx / distance, dy / distance, dz / distance, hit,
           (bx, by, bz) => bx === pos.x && by === pos.y && bz === pos.z ? { name: 'air', kind: 'clear' } : this.adapter.blockOptics(bx, by, bz))) return false;
         const near = Math.max(0, hit - .1), l = this.adapter.lightAt(Math.floor(eye.x + dx / distance * near), Math.floor(eye.y + dy / distance * near), Math.floor(eye.z + dz / distance * near));
@@ -622,6 +625,87 @@ export class Vision {
   knownCount() {
     this.syncScope();
     return this.known.size;
+  }
+
+  /** Actual visible surfaces, not the remembered terrain behind the camera or a wall. */
+  landingOptions(maxHorizontal = 6): LandingOption[] {
+    const state = this.syncScope(), now = Date.now();
+    if (!state.observationReady || !state.connected || !state.alive || !this.adapter.eye()) return [];
+    const here = state.pos, radius = Number.isFinite(maxHorizontal) ? Math.max(1, Math.min(12, maxHorizontal)) : 6;
+    const water = (name: string) => name === 'water' || name === 'bubble_column';
+    const hazardous = (name: string) => /lava|magma|campfire|cactus|powder_snow|berry_bush|pointed_dripstone/.test(name);
+    const candidates = [...this.visibleSurfaces.values()].filter((v) => now - v.at <= 1000 && v.pos.y < here.y
+      && Math.hypot(v.pos.x + .5 - here.x, v.pos.z + .5 - here.z) <= radius && !hazardous(v.name))
+      .sort((a, b) => Math.hypot(a.pos.x + .5 - here.x, a.pos.z + .5 - here.z) - Math.hypot(b.pos.x + .5 - here.x, b.pos.z + .5 - here.z))
+      .slice(0, 16);
+    const current = new Map(this.observeBlocks(candidates.map((v) => v.pos)).map((v) => [keyOf(v.pos.x, v.pos.y, v.pos.z), v]));
+    const clearNames = /^(air|cave_air|void_air|light|short_grass|grass|tall_grass|fern|large_fern|torch|wall_torch|.*_flower|dandelion|poppy)$/;
+    const inspectSpace = (positions: Vec3Like[], entryWater?: Vec3Like): LandingOption['clearance'] => {
+      const unique = [...new Map(positions.map((p) => { const q = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) }; return [keyOf(q.x, q.y, q.z), q]; })).values()];
+      if (unique.length > 128) return 'unknown';
+      const seen = new Map<string, BlockObservation>();
+      for (let i = 0; i < unique.length; i += 32) for (const b of this.observeBlocks(unique.slice(i, i + 32))) seen.set(keyOf(b.pos.x, b.pos.y, b.pos.z), b);
+      let missing = false;
+      for (const p of unique) {
+        const b = seen.get(keyOf(p.x, p.y, p.z));
+        if (!b) {
+          // The space occupied by our own body is also directly knowable;
+          // looking down cannot put our current head/feet cell into the FOV.
+          const ownBody = state.onGround === true && p.x === Math.floor(here.x) && p.z === Math.floor(here.z)
+            && p.y >= Math.floor(here.y) && p.y <= Math.floor(here.y + 1.79);
+          if (ownBody && clearNames.test(this.adapter.blockOptics(p.x, p.y, p.z)?.name ?? '')) continue;
+          missing = true; continue;
+        }
+        if (entryWater && p.x === entryWater.x && p.z === entryWater.z && p.y === entryWater.y && water(b.name)) continue;
+        if (!clearNames.test(b.name)) return 'blocked';
+      }
+      return missing ? 'unknown' : 'clear';
+    };
+    const out: LandingOption[] = [];
+    for (const v of candidates) {
+      if (out.length >= 8) break;
+      const support = current.get(keyOf(v.pos.x, v.pos.y, v.pos.z));
+      if (!support || support.name !== v.name || hazardous(support.name)) continue;
+      const optics = this.adapter.blockOptics(v.pos.x, v.pos.y, v.pos.z), wet = water(support.name);
+      if (!optics || !wet && optics.kind !== 'solid' && optics.kind !== 'foliage') continue;
+      if (String(support.properties.waterlogged) === 'true') continue;
+      if (!wet && !optics.shapes && /_slab$|_stairs$|_fence$|_wall$|_pane$|_door$|trapdoor|_bed$|carpet$|^snow$|chest|farmland|dirt_path/.test(support.name)) continue;
+      // A center landing needs a full player-width supporting top, not a fence/pane sliver.
+      const tops = optics.shapes?.filter(([x0, , z0, x1, , z1]) => x0 <= .2 && x1 >= .8 && z0 <= .2 && z1 >= .8).map((box) => box[4]);
+      if (!wet && tops && !tops.length) continue;
+      const surfaceY = v.pos.y + (wet ? 1 : tops ? Math.max(...tops) : 1);
+      const target = { x: v.pos.x + .5, y: wet ? v.pos.y : surfaceY, z: v.pos.z + .5 };
+      const horizontalDistance = Math.hypot(target.x - here.x, target.z - here.z), drop = here.y - surfaceY;
+      if (drop < -.05 || drop > 64 || horizontalDistance < .35) continue;
+      const body: Vec3Like[] = [];
+      for (const dx of [-.29, .29]) for (const dz of [-.29, .29]) for (const dy of [.01, 1, 1.79]) body.push({ x: target.x + dx, y: target.y + dy, z: target.z + dz });
+      const clearance = inspectSpace(body, wet ? v.pos : undefined), approach = horizontalDistance <= 1.8 ? 'adjacent' : 'distant';
+      const passage: Vec3Like[] = [];
+      // This only checks a local entry and fall column; it never invents a route to a distant edge.
+      if (approach === 'adjacent') {
+        for (let t = 0; t <= 1.01; t += .25) for (const dx of [-.29, .29]) for (const dz of [-.29, .29]) for (const dy of [.01, 1, 1.79]) {
+          passage.push({ x: here.x + (target.x - here.x) * t + dx, y: here.y + dy, z: here.z + (target.z - here.z) * t + dz });
+        }
+        for (let y = target.y + .01; y <= here.y + 1.8; y += .5) for (const dx of [-.29, .29]) for (const dz of [-.29, .29]) passage.push({ x: target.x + dx, y, z: target.z + dz });
+      }
+      const corridor = approach === 'adjacent' ? inspectSpace(passage, wet ? v.pos : undefined) : 'unknown';
+      let waterDepth: LandingOption['waterDepth'] = 'unknown';
+      if (wet) {
+        const below = this.observeBlocks([{ x: v.pos.x, y: v.pos.y - 1, z: v.pos.z }])[0];
+        if (below && water(below.name)) waterDepth = 2;
+      }
+      const unknowns = [
+        ...(clearance === 'unknown' ? ['落点身体净空没有全部看清'] : []),
+        ...(corridor === 'unknown' ? ['接近入口或下落通道没有全部看清'] : []),
+        ...(approach === 'distant' ? ['尚未观察到前往该落点边缘的完整路线'] : []),
+        ...(wet && waterDepth === 'unknown' ? ['水深尚未看清'] : []),
+        ...(state.onGround !== true ? ['当前未确认站稳，已有下落距离或速度未知'] : []),
+      ];
+      out.push({ target, support: { pos: { ...v.pos }, name: support.name }, surface: wet ? 'water' : 'ground', surfaceY,
+        horizontalDistance, drop, clearance, corridor, approach, waterDepth, unknowns,
+        receipt: { worldId: state.worldId, sessionId: state.sessionId, dimension: state.dim, observationId: state.observationId, at: now, from: { ...here }, onGround: state.onGround === true } });
+    }
+    return out;
   }
 
   navigationWaypoint(target: Vec3Like, maxDistance: number, excluded: Vec3Like[]): Vec3Like | null {

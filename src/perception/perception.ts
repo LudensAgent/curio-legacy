@@ -23,7 +23,8 @@ export interface Percept {
   observation?: { ready: boolean; worldId: string; sessionId: string; id: number };
   /** can_sleep：只有夜里（或雷雨）才能上床睡觉，白天 sleep 会失败 */
   time: { timeOfDay: number; phase: 'day' | 'dusk' | 'night' | 'dawn'; isDay?: boolean; can_sleep?: boolean };
-  self: { pos: [number, number, number]; dim: string; hp: number; food: number; biome: string | null; inWater: boolean; inLava: boolean; held: string | null; onGround?: boolean; riding?: string | null; equipment?: { slot: string; name: string }[]; around?: string };
+  self: { pos: [number, number, number]; dim: string; hp: number; food: number; biome: string | null; inWater: boolean; inLava: boolean; held: string | null; onGround?: boolean; riding?: string | null; equipment?: { slot: string; name: string }[]; around?: string;
+    contacts?: Pick<ReturnType<typeof surroundings>, 'support' | 'feet' | 'head'> };
   inventory: InvItem[];
   emptySlots: number;
   /** 只包含看见/听见/记得的东西（没有透视） */
@@ -270,13 +271,14 @@ export class Perception {
     const passiveCount = new Map<string, number>();
     for (const e of v.seen.filter((x) => x.kind === 'passive')) passiveCount.set(e.name, (passiveCount.get(e.name) ?? 0) + 1);
 
+    const contact = s.connected && s.alive && s.observationReady ? surroundings(this.adapter, s.pos) : null;
     this.latest = {
       ts: Date.now(),
       connected: s.connected,
       observation: { ready: s.observationReady, worldId: s.worldId, sessionId: s.sessionId, id: s.observationId },
       time: { timeOfDay: s.timeOfDay, phase: phaseOf(s.timeOfDay), isDay: s.isDay, can_sleep: canSleepAt(s.timeOfDay) },
       self: {
-        pos: [Math.round(s.pos.x), Math.round(s.pos.y), Math.round(s.pos.z)],
+        pos: [round1(s.pos.x), round1(s.pos.y), round1(s.pos.z)],
         dim: s.dim,
         hp: round1(s.hp),
         food: s.food,
@@ -288,7 +290,7 @@ export class Perception {
         ...(s.riding !== undefined ? { riding: s.riding } : {}),
         ...(s.equipment ? { equipment: s.equipment.map(({ slot, name }) => ({ slot, name })) } : {}),
         // 身边一圈（脚下、头顶、四个方向能不能走）：判断被困、往哪能出去
-        ...(s.connected && s.alive ? { around: surroundings(this.adapter, s.pos).text } : {}),
+        ...(contact ? { around: contact.text, contacts: { support: contact.support, feet: contact.feet, head: contact.head } } : {}),
       },
       inventory: [...s.inventory].sort((a, b) => b.count - a.count).slice(0, 24),
       emptySlots: s.emptySlots,

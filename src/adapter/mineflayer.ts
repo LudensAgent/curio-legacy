@@ -490,12 +490,34 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (!this.ready) throw new Error('NOT_CONNECTED');
     const b = this.bot;
     if (b.vehicle) throw new Error(`RIDING：正在乘坐 ${b.vehicle.name}，走路前先 dismount，或用 ride 操控它前进`);
+    if (opts.maxDropDown !== undefined && (!this.normalMovements || typeof b.pathfinder.setMovements !== 'function')) throw new Error('No path: 当前寻路器不能配置明确下行范围');
     if (this.normalMovements && typeof b.pathfinder.setMovements === 'function') {
       const movements = Object.assign(Object.create(Object.getPrototypeOf(this.normalMovements)), this.normalMovements);
       if (!opts.allowTerrainChanges || opts.constructionSafe) {
         movements.canDig = false; movements.allow1by1towers = false; movements.scafoldingBlocks = [];
       }
       if (opts.constructionSafe) movements.allowParkour = false;
+      if (opts.maxDropDown !== undefined) {
+        if (!Number.isInteger(opts.maxDropDown) || opts.maxDropDown < 1 || opts.maxDropDown > 32 || target.kind !== 'xyz') throw new Error('BAD_ARGS: 明确下行需要相邻 xyz 落点和 1–32 格上限');
+        const from = b.entity.position.floored(), to = { x: Math.floor(target.x), y: Math.floor(target.y), z: Math.floor(target.z) };
+        if (Math.abs(from.x - to.x) + Math.abs(from.z - to.z) !== 1 || to.y >= Math.ceil(b.entity.position.y)) throw new Error('BAD_ARGS: 明确下行只支持相邻一列的较低落点');
+        movements.maxDropDown = opts.maxDropDown;
+        movements.infiniteLiquidDropdownDistance = false;
+        movements.canDig = false; movements.allow1by1towers = false; movements.scafoldingBlocks = [];
+        movements.allowParkour = false; movements.allowSprinting = false; movements.allowFreeMotion = false;
+        const landingBlock = movements.getLandingBlock, neighbors = movements.getNeighbors;
+        movements.getLandingBlock = function (node: any, ...args: any[]) {
+          const landing = landingBlock.call(this, node, ...args);
+          // Native water landings bypass the solid-floor drop bound.
+          return landing && node.y - landing.position.y <= this.maxDropDown ? landing : null;
+        };
+        movements.getNeighbors = function (node: any) {
+          // This is one observed edge, not permission to find another cliff.
+          if (node.x !== from.x || node.z !== from.z) return [];
+          return neighbors.call(this, node).filter((next: any) => next.x === to.x && next.y === to.y && next.z === to.z
+            && !next.toBreak.length && !next.toPlace.length);
+        };
+      }
       if (opts.allowSwimming === false) {
         const water = (block: any) => !!block && (block.liquid || movements.liquids.has(block.type)
           || String(block.getProperties?.().waterlogged) === 'true');
@@ -511,7 +533,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       // Installed Pathfinder handles gates, but omits two-block wooden doors.
       // Keep the upper half out of the break list; crossing the closed lower
       // half must issue its ordinary useOne interaction before walking through.
-      movements.canOpenDoors = true;
+      movements.canOpenDoors = opts.maxDropDown === undefined;
       const getBlock = movements.getBlock;
       movements.getBlock = function (...args: any[]) {
         const block = getBlock.apply(this, args);
@@ -623,6 +645,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         clearInterval(watch);
       }
       check();
+      if (opts.maxDropDown !== undefined) throw new Error('No path: 明确下行未能完成，未改走其他边缘');
       if (corrections >= 3) throw new Error('No path: 附近连续调整后仍无法前进，换条路线');
       const action = await this.nudge(attempted, opts);
       check();

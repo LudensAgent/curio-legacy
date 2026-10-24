@@ -213,41 +213,53 @@ export const dig: Skill<DigArgs> = {
 export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boolean }> = {
   name: 'climb_up',
   description: '原地垫方块往上爬（头顶挡着会先挖开）：until_sky 爬到看得见天空，until_exit 爬到四周有路可走（出坑）；需要背包里有泥土/圆石等方块',
-  argsDoc: '{"height"?: 1-24, "until_sky"?: true, "until_exit"?: true}',
+  argsDoc: '{"height"?: 1-24, "until_sky"?: boolean, "until_exit"?: boolean}；兼容 untilSky/untilExit；两个停止条件同时开启时须同时满足',
   timeoutMs: 90000,
   movement: true,
   validate(raw) {
     const a = obj(raw);
-    const untilExit = a.until_exit === true || a.untilExit === true;
-    const untilSky = a.until_sky === true || a.untilSky === true || (a.height === undefined && !untilExit);
+    const untilExit = a.until_exit ?? a.untilExit ?? false;
+    const untilSky = a.until_sky ?? a.untilSky ?? (a.height === undefined && !untilExit);
+    if (typeof untilExit !== 'boolean' || typeof untilSky !== 'boolean') return { ok: false, error: 'until_sky/until_exit 须为布尔值' };
     return { ok: true, args: { height: clampInt(a.height, 1, 24, untilSky || untilExit ? 16 : 3), untilSky, ...(untilExit ? { untilExit } : {}) } };
   },
   async run(ctx, args) {
     const { adapter, signal } = ctx;
+    throwIfAborted(signal);
     if (!hasPlaceable(adapter.state().inventory)) return fail('MISSING_MATERIALS', '背包里没有能垫脚的方块（泥土/圆石/石头/木板）');
     const start = adapter.state().pos.y;
-    let climbed = 0;
+    const reached = (around: ReturnType<typeof surroundings>) => (!args.untilSky || around.sky) && (!args.untilExit || around.exits.length > 0);
+    const finish = (stopped?: string) => {
+      const state = adapter.state(), around = surroundings(adapter);
+      const climbed = Math.max(0, Math.floor(state.pos.y + 0.05) - Math.floor(start + 0.05));
+      const goalReached = args.untilSky || args.untilExit ? reached(around) : climbed >= args.height;
+      const facts = { climbed, sky: around.sky, exits: around.exits, goalReached, position: { ...state.pos },
+        effectEvidence: { verified: true, changed: state.pos.y > start + 0.05, reasons: [`实际高度 ${start} → ${state.pos.y}`] } };
+      if (!climbed) return fail('STUCK', `未实际爬升${stopped ? `：${stopped}` : '，没有完成垫高'}｜${around.text}`, facts);
+      if (stopped || !goalReached) return fail('STUCK', `往上爬了 ${climbed} 格后停下：${stopped ?? '已到本次高度或时间上限，仍未满足停止条件'}｜${around.text}`, facts);
+      return ok(`往上爬了 ${climbed} 格${args.untilExit ? '，四周有路了' : args.untilSky ? '，看得见天空了' : ''}｜${around.text}`, facts);
+    };
     for (let i = 0; i < args.height && Date.now() < ctx.deadline - 1000; i++) {
+      throwIfAborted(signal);
       const here = surroundings(adapter);
-      if (args.untilSky && here.sky) break;
-      if (args.untilExit && i > 0 && here.exits.length) break;
-      const me = floor(adapter.state().pos);
+      if ((args.untilSky || args.untilExit) && reached(here)) break;
+      const before = adapter.state().pos, me = floor(before);
       try {
         // 头顶的方块先挖开（不挖液体旁边的）
         await breakCell(ctx, { x: me.x, y: me.y + 2, z: me.z });
-        await adapter.moveTo({ kind: 'xyz', x: me.x, y: me.y + 1, z: me.z }, { signal, timeoutMs: 8000, allowTerrainChanges: true });
+        await adapter.moveTo({ kind: 'xyz', x: me.x, y: me.y + 1, z: me.z }, { signal, timeoutMs: Math.max(1, Math.min(8000, ctx.deadline - Date.now())), allowTerrainChanges: true });
+        throwIfAborted(signal);
+        const after = adapter.state().pos;
+        if (Math.floor(after.y + 0.05) <= me.y || after.y <= before.y + 0.05) return finish('移动已结束，但脚下没有实际升到上一格');
       } catch (e) {
         if (isAbort(e)) throw e;
-        const msg = why(e);
-        climbed = Math.round(adapter.state().pos.y - start);
-        return climbed > 0 ? ok(`往上爬了 ${climbed} 格后停下：${msg}｜${surroundings(adapter).text}`, { climbed })
-          : fail('STUCK', `爬不上去：${msg}｜${surroundings(adapter).text}`);
+        return finish(why(e));
       }
+      ctx.senses.refresh();
       if (!hasPlaceable(adapter.state().inventory)) break;
     }
-    climbed = Math.round(adapter.state().pos.y - start);
-    const around = surroundings(adapter);
-    return ok(`往上爬了 ${climbed} 格${around.exits.length && args.untilExit ? '，四周有路了' : around.sky ? '，看得见天空了' : ''}｜${around.text}`, { climbed, sky: around.sky });
+    throwIfAborted(signal);
+    return finish();
   },
 };
 

@@ -17,19 +17,25 @@ export const FOOD_ANIMAL_NAMES = ['cow', 'pig', 'sheep', 'chicken', 'rabbit', 'm
 const CATEGORY: Record<string, string[]> = { animal: FOOD_ANIMAL_NAMES, animals: FOOD_ANIMAL_NAMES, food: FOOD_ANIMAL_NAMES, food_animal: FOOD_ANIMAL_NAMES };
 
 /** target 是否已在视野/近期记忆中：方块（log、iron_ore…）或实体（cow、sheep…）；可写 "cow|sheep" 或类别 "animal" */
-export function sighted(ctx: SkillCtx, target: string): { what: string; dist: number } | null {
+export function sighted(ctx: SkillCtx, target: string, options: { visibleOnly?: boolean; direction?: string } = {}): { what: string; dist: number; key: string } | null {
   const here = ctx.adapter.state().pos;
+  const sector = options.direction ? DIRS[options.direction] : null;
+  const inDirection = (pos: Vec3Like) => !sector || Math.abs(Math.atan2(Math.sin(yawOfDir(pos.x - here.x, pos.z - here.z) - yawOfDir(...sector)),
+    Math.cos(yawOfDir(pos.x - here.x, pos.z - here.z) - yawOfDir(...sector)))) <= 1.3;
   for (const raw of target.toLowerCase().split(/[|,，、/ ]+/).filter(Boolean)) {
     const wanted = CATEGORY[raw] ?? [raw];
     for (const t of wanted) {
       const names = ctx.adapter.resolveBlockNames(t).filter(Boolean);
       if (names.length) {
-        const hit = ctx.senses.knownBlocks(names, 96)[0];
-        if (hit) return { what: hit.name, dist: Math.round(dist3(here, hit.pos)) };
+        const candidates = ctx.senses.knownBlocks(names, 96).filter((b) => inDirection({ x: b.pos.x + .5, y: b.pos.y, z: b.pos.z + .5 }));
+        const hits = options.visibleOnly ? (ctx.senses.observeBlocks?.(candidates.slice(0, 32).map((b) => b.pos)) ?? []) : candidates;
+        const hit = hits.find((b) => names.includes(b.name));
+        if (hit) return { what: hit.name, dist: Math.round(dist3(here, hit.pos)), key: `${hit.name}:${hit.pos.x},${hit.pos.y},${hit.pos.z}` };
       }
     }
-    const e = ctx.senses.perceivedEntities(48).find((x) => wanted.some((t) => x.name === t || x.name.replace(/^player:/, '') === t || x.name.endsWith(`_${t}`)));
-    if (e) return { what: e.name, dist: Math.round(e.dist) };
+    const e = ctx.senses.perceivedEntities(48).find((x) => (!options.visibleOnly || x.perception === 'seen') && inDirection(x.pos)
+      && wanted.some((t) => x.name === t || x.name.replace(/^player:/, '') === t || x.name.endsWith(`_${t}`)));
+    if (e) return { what: e.name, dist: Math.round(e.dist), key: `entity:${e.id}` };
   }
   return null;
 }
@@ -261,12 +267,17 @@ export const goTo: Skill<{ target: string }> = {
       pos = lm.pos;
       label = lm.label;
     }
-    const range = nums ? 1 : 2;
+    const range = nums ? 0 : 2;
     const waterNames = ['water', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass'];
     const waterNear = () => ctx.senses.knownBlocks(waterNames, 12).some((b) => waterNames.includes(adapter.blockAt(b.pos) ?? ''));
     const distance = (p: Vec3Like) => flat ? Math.hypot(p.x - pos!.x, p.z - pos!.z) : dist3(p, pos!);
     // 与 Pathfinder 的整数节点判定一致；明确坐标比“到地标附近”更精确。
     const arrived = (p: Vec3Like) => Math.hypot(Math.floor(p.x) - Math.floor(pos!.x), flat ? 0 : Math.floor(p.y) - Math.floor(pos!.y), Math.floor(p.z) - Math.floor(pos!.z)) <= range;
+    const cell = (p: Vec3Like) => ({ x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) });
+    const measured = (position = adapter.state().pos) => ({ target: pos, position, moved: dist3(s.pos, position),
+      targetCell: cell(pos!), positionCell: cell(position), arrivedCell: Math.floor(position.x) === Math.floor(pos!.x)
+        && Math.floor(position.z) === Math.floor(pos!.z) && (flat || Math.floor(position.y) === Math.floor(pos!.y)),
+      ...(flat ? { horizontalOnly: true } : {}) });
     const inScope = () => {
       throwIfAborted(signal);
       const now = adapter.state();
@@ -327,7 +338,7 @@ export const goTo: Skill<{ target: string }> = {
           await glance(ctx);
           if (ctx.senses.navigationWaypoint(pos, 12, visited)) continue;
           const water = waterNear();
-          return fail('PATH_NOT_FOUND', `前往 ${label}：眼前没有可确认的${water ? '陆地落脚点，附近有水，可考虑 boat 渡河' : '通路，先换个观察位置或寻找入口'}；没有挖墙或搭柱`, { target: pos, position: cur, waterAhead: water });
+          return fail('PATH_NOT_FOUND', `前往 ${label}：眼前没有可确认的${water ? '陆地落脚点，附近有水，可考虑 boat 渡河' : '通路，先换个观察位置或寻找入口'}；没有挖墙或搭柱`, { ...measured(cur), waterAhead: water });
         }
         const dxz = Math.hypot(pos.x - cur.x, pos.z - cur.z);
         const target = waypoint ? { kind: 'near' as const, pos: waypoint, range: 0.7 }
@@ -342,21 +353,21 @@ export const goTo: Skill<{ target: string }> = {
         }
         if (!inScope()) return fail('WRONG_DIMENSION', '途中世界或会话已改变，需要重新规划');
         const after = adapter.state().pos;
-        if (dist3(cur, after) < 0.3 && !arrived(after)) return fail('PATH_NOT_FOUND', `前往 ${label} 没有取得进展，需要换入口或路线`, { target: pos, position: after });
+        if (dist3(cur, after) < 0.3 && !arrived(after)) return fail('PATH_NOT_FOUND', `前往 ${label} 没有取得进展，仍在 (${after.x.toFixed(2)},${after.y.toFixed(2)},${after.z.toFixed(2)})；尚未到达目标位置，需要换入口或路线`, measured(after));
         if (distance(after) < bestDistance - 0.5) { bestDistance = distance(after); detours = 0; }
-        else if (++detours >= 4) return fail('PATH_NOT_FOUND', `绕行后仍未接近 ${label}，需要观察入口或另选路线`, { target: pos, position: after });
+        else if (++detours >= 4) return fail('PATH_NOT_FOUND', `绕行后仍未接近 ${label}，需要观察入口或另选路线`, measured(after));
         visited.push(waypoint ?? after);
       }
       if (!inScope()) return fail('WRONG_DIMENSION', '途中世界或会话已改变，需要重新规划');
       const end = adapter.state().pos;
-      if (!arrived(end)) return fail('PATH_NOT_FOUND', `尚未到达 ${label}，需要重新选择路线`, { target: pos, position: end });
+      if (!arrived(end)) return fail('PATH_NOT_FOUND', `尚未到达 ${label}，需要重新选择路线`, measured(end));
       await face();
-      return ok(`${alreadyHere ? '已在' : '到达'} ${label} 附近；实际站在 (${end.x.toFixed(1)},${end.y.toFixed(1)},${end.z.toFixed(1)})，距目标 ${distance(end).toFixed(1)} 格`, { target: pos, position: end, moved: dist3(s.pos, end), alreadyHere });
+      return ok(`${alreadyHere ? '已在' : '到达'} ${label}${nums ? ' 的目标格' : ' 附近'}；实际站在 (${end.x.toFixed(2)},${end.y.toFixed(2)},${end.z.toFixed(2)})，本次移动 ${dist3(s.pos, end).toFixed(2)} 格，距目标点 ${distance(end).toFixed(2)} 格${alreadyHere ? '；没有执行新的位移' : ''}`, { ...measured(end), alreadyHere });
     } catch (e) {
       if (isAbort(e)) throw e;
       const water = waterNear();
       return fail(codeFromError(e), `前往 ${label} 失败：${(e as Error).message}${water ? '；附近有水，尚未确认干燥步行通路，可沿岸绕行或用 boat 渡河' : ''}`, {
-        target: pos, position: adapter.state().pos, waterAhead: water,
+        ...measured(), waterAhead: water,
       });
     } finally {
       clearInterval(prog);
@@ -408,9 +419,19 @@ export const lookAround: Skill<{ seconds: number; for?: string; direction?: stri
     return { ok: true, args: { seconds: clampInt(a.seconds, 2, 20, 4), ...(target ? { for: target } : {}), ...(dir ? { direction: dir } : {}) } };
   },
   async run(ctx, args) {
+    ctx.senses.refresh();
+    const names = (args.for ?? '').split(/[|,，、/ ]+/).filter(Boolean).flatMap((raw) => CATEGORY[raw] ?? [raw])
+      .flatMap((name) => ctx.adapter.resolveBlockNames(name));
+    const priorKnown = new Set([...ctx.senses.knownBlocks(names, 96).map((b) => `${b.name}:${b.pos.x},${b.pos.y},${b.pos.z}`),
+      ...ctx.senses.perceivedEntities(48).map((e) => `entity:${e.id}`)]);
+    const observed = () => args.for ? sighted(ctx, args.for, { visibleOnly: true, direction: args.direction }) : null;
+    const facts = (views: number, hit: ReturnType<typeof sighted> = null) => ({ searched: views > 0, scanViews: views,
+      ...(args.direction ? { direction: args.direction, directionInspected: views > 0 } : {}),
+      alreadyVisible: views === 0 && !!hit, newlyDiscovered: !!hit && !priorKnown.has(hit.key),
+      ...(hit ? { found: hit.what, dist: hit.dist, source: 'current_vision' } : {}) });
     if (args.for) {
-      const known = sighted(ctx, args.for);
-      if (known) return ok(`${known.what} 就在 ${known.dist} 格外，不用再找`, { found: known.what, dist: known.dist });
+      const known = observed();
+      if (known) return ok(`${args.direction ? `${args.direction} 方向` : '当前视野'}已看见 ${known.what}（${known.dist} 格外）；没有新的搜索发现`, facts(0, known));
     }
     // 定向：在该方向 ±75° 扇形里看 5 个角度；全向：转一圈 8 个角度
     const sector = args.direction ? DIRS[args.direction] : null;
@@ -424,13 +445,13 @@ export const lookAround: Skill<{ seconds: number; for?: string; direction?: stri
       ctx.senses.refresh();
       ctx.progress((k + 1) / yaws.length, args.for ? `寻找 ${args.for}` : '环顾四周');
       if (args.for) {
-        const f = sighted(ctx, args.for);
-        if (f) return ok(`看见 ${f.what}（${f.dist} 格外）`, { found: f.what, dist: f.dist });
+        const f = observed();
+        if (f) return ok(`${args.direction ? `${args.direction} 方向` : '转头后'}看见 ${f.what}（${f.dist} 格外）${priorKnown.has(f.key) ? '，是已知目标的当前观察' : '，本次新发现'}`, facts(k + 1, f));
       }
     }
     if (!sector) ctx.senses.markSweep();
-    if (args.for) return fail('NOT_FOUND', `${args.direction ? `${args.direction} 方向` : '四周'}看不到 ${args.for}（视线被挡住或确实没有），换个地方或方向再找`);
-    return ok(args.direction ? `看了看 ${args.direction} 方向` : '环顾了一圈');
+    if (args.for) return fail('NOT_FOUND', `${args.direction ? `${args.direction} 方向` : '四周'}本次视野未见 ${args.for}；旧记忆不算本次看见，视野外或遮挡后的情况仍未知`, facts(yaws.length));
+    return ok(args.direction ? `看了看 ${args.direction} 方向` : '环顾了一圈', facts(yaws.length));
   },
 };
 

@@ -7,9 +7,10 @@ function scheduler(t: TestContext) {
   const now = 1_700_000_000_000;
   t.mock.method(Date, 'now', () => now);
   const state = { worldId: 'w', dim: 'overworld', sessionId: 's' };
+  const intent = { id: 'intent' };
   const feedback: any = { repeatedStepPattern: null, recentAttempts: [] };
   const executive: any = Object.assign(Object.create(Executive.prototype), {
-    d: { adapter: { state: () => state }, memory: { currentIntent: () => ({ id: 'intent' }) }, planner: { autonomous: true } },
+    d: { adapter: { state: () => state }, memory: { currentIntent: () => intent }, planner: { autonomous: true } },
     decisionFeedback: { context: () => feedback }, lastFailure: null, userSuggestion: null,
     lightStreak: 0, lastFullAt: now, lastReflectionAt: now, reflectPending: null,
     inFlight: false, backoffUntil: 0, queued: null, plan: null,
@@ -19,7 +20,7 @@ function scheduler(t: TestContext) {
     feedback.repeatedStepPattern = { steps: [{ skill: 'use_item', args: { item: 'stone' } }], consecutiveUnchangedAttempts: count };
     feedback.recentAttempts = [{ effectEvidence: { verified: changed, changed, reasons: [] } }];
   };
-  return { executive, state, choose, repeat };
+  return { executive, state, choose, repeat, feedback, intent };
 }
 
 test('new mechanism or path failures deliberate once while ordinary recoverable failures remain light', (t) => {
@@ -56,4 +57,22 @@ test('unchanged attempts deliberate by fresh evidence segment and experiments wa
   assert.equal(w.executive.requestReason(current), null, 'experimental progress is not its verified outcome');
   assert.equal(w.executive.requestReason({ ...current, skill: 'trial:new_method:v1' }), null);
   assert.equal(w.executive.requestReason({ ...current, skill: 'craft' }), 'prefetch', 'ordinary quick continuations retain prefetch');
+});
+
+test('alternating no-progress tactics deliberate once per three fresh attempts and reset with evidence or intent', (t) => {
+  const w = scheduler(t);
+  const stalled = (count: number, since = 1, lastProgressAt: number | null = null) => {
+    w.feedback.repeatedStepPattern = { steps: [{ skill: count % 2 ? 'goto' : 'climb_up' }], consecutiveUnchangedAttempts: 1 };
+    w.feedback.intentProgress = { intentId: w.intent.id, consecutiveNoProgressAttempts: count, since, lastProgressAt };
+  };
+  stalled(2); assert.equal(w.choose(), 'light');
+  stalled(3); assert.equal(w.executive.wouldBeFull(), true); assert.equal(w.executive.wouldBeFull(), true);
+  assert.equal(w.choose(), 'full'); assert.equal(w.executive.wouldBeFull(), false);
+  assert.equal(w.choose(), 'light', 'the same three attempts do not consume repeated full decisions');
+  stalled(4); assert.equal(w.choose(), 'light'); stalled(5); assert.equal(w.choose(), 'light');
+  stalled(6); assert.equal(w.choose(), 'full');
+  stalled(0, 2, 2); assert.equal(w.choose(), 'light');
+  stalled(3, 3, 2); assert.equal(w.choose(), 'full', 'real new evidence begins a fresh segment');
+  w.intent.id = 'different-intent'; stalled(1); assert.equal(w.choose(), 'light');
+  stalled(3); assert.equal(w.choose(), 'full', 'a changed intent has independent deliberation bookkeeping');
 });

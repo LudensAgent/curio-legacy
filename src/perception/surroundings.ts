@@ -24,22 +24,29 @@ export interface Surroundings {
   sky: boolean;
   below: string | null;
   above: string | null;
+  /** Touch-local coordinates, distinct from the body's feet position. */
+  support: { block: string | null; pos: Vec3Like };
+  feet: { block: string | null; pos: Vec3Like };
+  head: { block: string | null; pos: Vec3Like };
 }
 
 export function surroundings(adapter: GameAdapter, pos: Vec3Like = adapter.state().pos): Surroundings {
   const x = Math.floor(pos.x), y = Math.floor(pos.y), z = Math.floor(pos.z);
   const at = (dx: number, dy: number, dz: number) => adapter.blockAt({ x: x + dx, y: y + dy, z: z + dz });
-  const below = at(0, -1, 0), above = at(0, 2, 0);
+  const supportPos = { x, y: Math.floor(pos.y - .01), z };
+  const below = adapter.blockAt(supportPos), above = at(0, 2, 0);
   // 天光 ≥ 12：露天（树冠、草叶只会挡掉一两级）
   const sky = (adapter.lightAt(x, y + 1, z)?.sky ?? 0) >= 12;
   const exits: string[] = [], blocked: string[] = [];
   for (const [d, [dx, dz]] of Object.entries(DIR_OFFSETS)) {
     const feet = at(dx, 0, dz), head = at(dx, 1, dz);
-    if (soft(feet) && soft(head)) {
+    if (feet === null || head === null) blocked.push(`${d} 邻格未加载`);
+    else if (soft(feet) && soft(head)) {
       // 平走；或者往下一格
       if (solidFloor(at(dx, -1, dz)) || solidFloor(at(dx, -2, dz))) exits.push(d);
       else if (LIQUID.has(at(dx, -1, dz) ?? '')) blocked.push(`${d} ${at(dx, -1, dz)}`);
-      else blocked.push(`${d} 断崖`);
+      else if (at(dx, -1, dz) === null || at(dx, -2, dz) === null) blocked.push(`${d} 下方未知`);
+      else blocked.push(`${d} 下方有落差，需观察落点`);
     } else if (!soft(feet) && soft(head) && soft(at(dx, 2, dz)) && soft(above)) exits.push(`${d}↑`); // 跳上一格
     else blocked.push(`${d} ${[feet, head].filter((n) => !soft(n)).join('/')}`);
   }
@@ -47,10 +54,12 @@ export function surroundings(adapter: GameAdapter, pos: Vec3Like = adapter.state
     `脚下 ${below ?? '?'}`,
     soft(above) ? '头顶空着' : `头顶上方 ${above}`,
     sky ? '看得见天空' : '看不见天空',
-    exits.length ? `能走：${exits.join('、')}` : '四面都走不了',
+    exits.length ? `一步内可走：${exits.join('、')}` : '没有平走或一步跳跃出口（下行落点尚未评估）',
     ...(blocked.length ? [`挡住：${blocked.join('，')}`] : []),
   ];
-  return { text: parts.join('｜'), enclosed: exits.length === 0, exits, sky, below, above };
+  return { text: parts.join('｜'), enclosed: exits.length === 0, exits, sky, below, above,
+    support: { block: below, pos: supportPos }, feet: { block: at(0, 0, 0), pos: { x, y, z } },
+    head: { block: at(0, 1, 0), pos: { x, y: y + 1, z } } };
 }
 
 export { AIR as AIR_BLOCKS, LIQUID as LIQUID_BLOCKS, soft as isSoftBlock };

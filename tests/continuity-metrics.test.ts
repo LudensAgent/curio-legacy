@@ -1,22 +1,24 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { AgentState, GameAdapter } from '../src/adapter/types.ts';
 import type { Arbiter, TaskSource } from '../src/arbiter/arbiter.ts';
 import type { Executive } from '../src/brain/executive.ts';
 import type { Reflex } from '../src/brain/reflex.ts';
 import { EventBus } from '../src/events.ts';
 import { Metrics } from '../src/observer/metrics.ts';
 import type { Planner } from '../src/planner/planner.ts';
-import { FakeAdapter } from './fake-adapter.ts';
 
 function fixture() {
-  const adapter = new FakeAdapter();
+  // Read-only status and a mocked clock: no adapter actions or world simulation.
+  const adapter = { connected: true, hp: 20,
+    state() { return { connected: this.connected, alive: this.hp > 0, pos: { x: 0, y: 64, z: 0 } } as AgentState; } };
   const bus = new EventBus();
   let source: TaskSource | null = null;
   const arbiter = { info: () => source ? { source } : null, blockedActions: 0 };
   const executive = { paused: false, inFlight: false, staleDropped: 0 };
   const planner = { stats: { latencies: [] as number[] } };
   const reflex = { stuckCount: 0, triggers: 0 };
-  const metrics = new Metrics(adapter, arbiter as unknown as Arbiter, executive as unknown as Executive,
+  const metrics = new Metrics(adapter as unknown as GameAdapter, arbiter as unknown as Arbiter, executive as unknown as Executive,
     planner as unknown as Planner, reflex as unknown as Reflex, bus);
   return { adapter, bus, executive, metrics, task: (next: TaskSource | null) => { source = next; } };
 }
@@ -29,6 +31,7 @@ test('thinking continuity and thinking seconds expire with the same ten-minute w
   w.metrics.sample(); // Earlier model request was idle.
   now += 600_000;
   assert.equal(w.metrics.snapshot().llmThinkingSec, 1, 'the window includes its exact boundary');
+  assert.equal(w.metrics.snapshot().llmThinkingBreakdown.idleSec, 1);
   now++;
   w.task('llm');
   w.metrics.sample();
@@ -36,9 +39,13 @@ test('thinking continuity and thinking seconds expire with the same ten-minute w
   assert.equal(current.idle10m, 0);
   assert.equal(current.llmThinkingSec, 1);
   assert.equal(current.llmContinuity, 1, 'old idle thinking must not depress current continuity');
+  assert.deepEqual(current.llmThinkingBreakdown, { taskSec: 1, reflexSec: 0, fillerSec: 0, idleSec: 0,
+    taskReflexRatio: 1, fillerRatio: 0, idleRatio: 0 });
   now += 600_001;
   assert.equal(w.metrics.snapshot().llmThinkingSec, 0);
   assert.equal(w.metrics.snapshot().llmContinuity, null, 'expired requests supply no current evidence');
+  assert.deepEqual(w.metrics.snapshot().llmThinkingBreakdown, { taskSec: 0, reflexSec: 0, fillerSec: 0, idleSec: 0,
+    taskReflexRatio: null, fillerRatio: null, idleRatio: null });
 });
 
 test('thinking continuity counts task, filler and reflex activity and excludes paused or offline time', (t) => {
@@ -64,6 +71,11 @@ test('thinking continuity counts task, filler and reflex activity and excludes p
   const snapshot = w.metrics.snapshot();
   assert.equal(snapshot.llmThinkingSec, 4);
   assert.equal(snapshot.llmContinuity, 0.75);
+  assert.deepEqual(snapshot.llmThinkingBreakdown, { taskSec: 1, reflexSec: 1, fillerSec: 1, idleSec: 1,
+    taskReflexRatio: .5, fillerRatio: .25, idleRatio: .25 });
+  const thinking = snapshot.llmThinkingBreakdown;
+  assert.equal(thinking.taskSec + thinking.reflexSec + thinking.fillerSec + thinking.idleSec, snapshot.llmThinkingSec);
+  assert.equal(thinking.taskReflexRatio! + thinking.fillerRatio!, snapshot.llmContinuity, 'the unchanged activity metric still includes filler');
   assert.deepEqual(snapshot.window10m, { task: 1, filler: 1, reflex: 1, idle: 2, paused: 1, offline: 2 });
 });
 

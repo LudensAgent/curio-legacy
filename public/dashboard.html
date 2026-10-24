@@ -171,6 +171,7 @@
         <div class="kpi" id="k-succ"><b>-</b><small>技能成功率（目标 ≥ 80%）</small></div>
         <div class="kpi" id="k-lat"><b>-</b><small>LLM 平均 / P95 延迟</small></div>
       </div>
+      <div class="mono" id="thinking-breakdown" style="margin-top:8px" title="与上方指标使用同一思考窗口；行动包含观察填充，任务执行不代表已有目标产出。">思考期构成：等待采样</div>
       <div class="stack" id="stack"></div>
       <div class="legend">
         <span style="--c:var(--grass)">任务</span><span style="--c:var(--blue)">填充</span><span style="--c:var(--violet)">反射</span>
@@ -326,6 +327,8 @@ function render(s) {
 
   kpi('k-idle', `${m.idle10m}s`, m.idle10m < 60 ? 'good' : 'bad');
   kpi('k-cont', pct(m.llmContinuity), m.llmContinuity == null ? '' : m.llmContinuity >= 0.95 ? 'good' : 'bad');
+  const thinking = m.llmThinkingBreakdown;
+  $('thinking-breakdown').textContent = thinking ? `思考期：任务/反射 ${pct(thinking.taskReflexRatio)}（${thinking.taskSec + thinking.reflexSec}s） · 观察填充 ${pct(thinking.fillerRatio)}（${thinking.fillerSec}s） · 空闲 ${pct(thinking.idleRatio)}（${thinking.idleSec}s）` : '思考期构成：等待采样';
   kpi('k-succ', pct(m.taskSuccessRate), m.taskSuccessRate == null ? '' : m.taskSuccessRate >= 0.8 ? 'good' : 'mid');
   kpi('k-lat', m.llm.avgLatencyMs == null ? '-' : `${(m.llm.avgLatencyMs / 1000).toFixed(1)} / ${(m.llm.p95LatencyMs / 1000).toFixed(1)}s`, '');
   const w = m.window10m, total = Object.values(w).reduce((a, b) => a + b, 0) || 1;

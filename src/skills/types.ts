@@ -30,12 +30,31 @@ export interface SkillResult {
   data?: Record<string, unknown>;
 }
 
+export interface LandingOption {
+  /** Feet/node position; water uses the surface water cell's integer y. */
+  target: Vec3Like;
+  support: { pos: Vec3Like; name: string };
+  surface: 'ground' | 'water';
+  surfaceY: number;
+  horizontalDistance: number;
+  /** Free fall to the surface, before entering water. */
+  drop: number;
+  clearance: 'clear' | 'blocked' | 'unknown';
+  corridor: 'clear' | 'blocked' | 'unknown';
+  approach: 'adjacent' | 'distant';
+  waterDepth: 2 | 'unknown';
+  unknowns: string[];
+  receipt: { worldId: string; sessionId: string; dimension: string; observationId: number; at: number; from: Vec3Like; onGround?: boolean };
+}
+
 /** 技能能用的“感官”：只有看见/听见/记得的东西，没有透视 */
 export interface Senses {
   perceivedEntities(radius: number): EntityInfo[];
   knownBlocks(names: string[], maxDist: number): BlockHit[];
   /** Fresh visible state only; occluded, unloaded and out-of-view targets are absent. */
   observeBlocks?(positions: Vec3Like[]): BlockObservation[];
+  /** Bounded landing geometry from freshly visible surfaces, never hidden map queries. */
+  landingOptions?(maxHorizontal?: number): LandingOption[];
   /** 立即重新看一眼（转头之后调用） */
   refresh(): void;
   markSweep(): void;

@@ -5,6 +5,7 @@ import type { Percept } from '../perception/perception.ts';
 import type { Plan } from '../planner/plan.ts';
 
 type Scope = Pick<AgentState, 'worldId' | 'dim' | 'sessionId'>;
+const INTENT_PROGRESS_WINDOW_MS = 10 * 60_000;
 interface Snapshot {
   at: number;
   scope: Scope;
@@ -104,15 +105,18 @@ function unchanged(attempt: Attempt): boolean {
 export class DecisionFeedback {
   private scope: Scope | null = null;
   private scopeChange: { at: number; from: Scope; to: Scope } | null = null;
-  private active: { planId: string; goal: string; before: Snapshot } | null = null;
+  private active: { planId: string; goal: string; before: Snapshot; progressObserved?: boolean } | null = null;
   private latestObservation: Snapshot | null = null;
   private recent: { attempt: Attempt; pattern: string }[] = [];
+  private intentWindow: { intentId: string; anchor: Snapshot; seenResourceTypes: Set<string>; consecutiveNoProgressAttempts: number;
+    since: number | null; lastAttemptAt: number | null; lastProgressAt: number | null } | null = null;
 
   private observeScope(state: AgentState) {
     const next = scopeOf(state);
     if (this.scope && !sameScope(this.scope, next)) {
       this.scopeChange = { at: Date.now(), from: this.scope, to: next };
       this.recent = [];
+      this.intentWindow = null;
     }
     this.scope = next;
   }
@@ -120,7 +124,39 @@ export class DecisionFeedback {
   begin(plan: Plan, state: AgentState, percept: Percept) {
     this.observeScope(state);
     this.latestObservation = snapshot(state, percept);
+    const intentId = plan.binding?.intentId;
+    if (!intentId) this.intentWindow = null;
+    else if (this.intentWindow?.intentId !== intentId) this.intentWindow = { intentId, anchor: this.latestObservation,
+      seenResourceTypes: new Set(this.latestObservation.knownResourceTypes), consecutiveNoProgressAttempts: 0,
+      since: null, lastAttemptAt: null, lastProgressAt: null };
+    this.observeIntentEvidence(this.latestObservation);
     this.active = { planId: plan.id, goal: plan.goal.slice(0, 240), before: this.latestObservation };
+  }
+
+  /** Turning back toward familiar terrain is not new evidence; discovery is remembered across alternating plans. */
+  private observeIntentEvidence(observation: Snapshot, effect?: EffectEvidence): boolean {
+    const window = this.intentWindow;
+    if (!window) return false;
+    if (window.lastAttemptAt !== null && observation.at - window.lastAttemptAt > INTENT_PROGRESS_WINDOW_MS) {
+      window.consecutiveNoProgressAttempts = 0; window.since = null;
+    }
+    if (!observation.observationReady) return false;
+    if (!window.anchor.observationReady || !sameScope(window.anchor.scope, observation.scope)) {
+      window.anchor = observation; window.seenResourceTypes = new Set(observation.knownResourceTypes);
+      window.consecutiveNoProgressAttempts = 0; window.since = null;
+      return false;
+    }
+    const changes = compare(window.anchor, observation);
+    const discovered = observation.knownResourceTypes.some((name) => !window.seenResourceTypes.has(name));
+    for (const name of observation.knownResourceTypes) window.seenResourceTypes.add(name);
+    const progressed = !!(effect?.verified && effect.changed) || (changes.movement?.distance ?? 0) >= .75
+      || !!changes.inventoryDelta.length || (changes.newChunks ?? 0) > 0 || discovered;
+    if (progressed) {
+      window.consecutiveNoProgressAttempts = 0; window.since = null;
+      window.lastProgressAt = observation.at; window.anchor = observation;
+      if (this.active) this.active.progressObserved = true;
+    }
+    return progressed;
   }
 
   end(plan: Plan, status: string, summary: string, state: AgentState, percept: Percept, effectEvidence?: EffectEvidence) {
@@ -144,13 +180,24 @@ export class DecisionFeedback {
     };
     this.recent.push({ attempt, pattern: patternKey(steps) });
     if (this.recent.length > 6) this.recent.shift();
+    const progressed = this.observeIntentEvidence(after, measuredEffect) || this.active.progressObserved === true;
+    if (this.intentWindow && this.intentWindow.intentId === plan.binding?.intentId && valid && steps.length && ['succeeded', 'failed'].includes(status)) {
+      if (!progressed) {
+        this.intentWindow.consecutiveNoProgressAttempts++;
+        this.intentWindow.since ??= before.at;
+      }
+      this.intentWindow.lastAttemptAt = after.at;
+    }
     this.active = null;
     return measuredEffect;
   }
 
   context(state: AgentState, percept?: Percept) {
     this.observeScope(state);
-    if (percept) this.latestObservation = snapshot(state, percept);
+    if (percept) { this.latestObservation = snapshot(state, percept); this.observeIntentEvidence(this.latestObservation); }
+    if (this.intentWindow?.lastAttemptAt != null && Date.now() - this.intentWindow.lastAttemptAt > INTENT_PROGRESS_WINDOW_MS) {
+      this.intentWindow.consecutiveNoProgressAttempts = 0; this.intentWindow.since = null;
+    }
     const observation = this.latestObservation && sameScope(this.latestObservation.scope, this.scope!) ? this.latestObservation : null;
     const recent = this.recent.filter(({ attempt }) => samePlaceScope(attempt.after.scope, this.scope!));
     const latest = recent.at(-1);
@@ -177,6 +224,9 @@ export class DecisionFeedback {
       activeAttempt: this.active && sameScope(this.active.before.scope, this.scope!)
         ? { planId: this.active.planId, goal: this.active.goal, startedAt: this.active.before.at, before: this.active.before } : null,
       recentAttempts: recent.map(({ attempt }) => attempt),
+      intentProgress: this.intentWindow ? { intentId: this.intentWindow.intentId,
+        consecutiveNoProgressAttempts: this.intentWindow.consecutiveNoProgressAttempts, since: this.intentWindow.since,
+        lastAttemptAt: this.intentWindow.lastAttemptAt, lastProgressAt: this.intentWindow.lastProgressAt, windowMs: INTENT_PROGRESS_WINDOW_MS } : null,
       repeatedStepPattern: latest && streak > 0 ? { steps: latest.attempt.stepsStarted, consecutiveAttempts: streak,
         consecutiveUnchangedAttempts: unchangedStreak } : null,
     });

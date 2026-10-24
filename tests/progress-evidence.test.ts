@@ -40,6 +40,42 @@ test('repeat feedback measures unchanged attempts and returns scoped evidence wi
   assert.equal(feedback.context({ ...end, sessionId: 'new' }).repeatedStepPattern, null);
 });
 
+test('alternating attempts share an intent progress window while familiar views cannot manufacture discovery', (t) => {
+  let now = 1000; t.mock.method(Date, 'now', () => now);
+  const feedback = new DecisionFeedback(), s = state();
+  let v = percept(), serial = 0;
+  v.nearby.resources = [{ block: 'stone', count: 1, nearest: 1, seen: 'now' }];
+  v.vision = { view: 'known stone', visible_resources: [], remembered_resources: [] } as any;
+  const next = (skill: string, intentId = 'same-intent') => ({ ...plan(`mixed-${serial++}`), binding: { intentId }, steps: [{ skill }], index: 1 });
+  const attempt = (skill: string, after = v, intentId = 'same-intent') => {
+    const p = next(skill, intentId); feedback.begin(p, s, v); now += 1000;
+    feedback.end(p, 'succeeded', '步骤已返回', s, after); v = after;
+  };
+  for (const skill of ['goto', 'climb_up', 'look_around']) {
+    const after = structuredClone(v); after.vision!.view = `${skill}: familiar stone from another angle`; attempt(skill, after);
+  }
+  assert.equal(feedback.context(s).repeatedStepPattern?.consecutiveAttempts, 1);
+  assert.equal(feedback.context(s).intentProgress?.consecutiveNoProgressAttempts, 3, 'different step signatures must not hide the same stalled intent');
+  const discovery = next('look_around'); feedback.begin(discovery, s, v); now += 1000;
+  const novel = structuredClone(v); novel.nearby.resources.push({ block: 'coal_ore', count: 1, nearest: 2, seen: 'now' });
+  feedback.context(s, novel); // Discovery can arrive from normal perception before the action ends.
+  feedback.end(discovery, 'succeeded', '发现新线索', s, novel); v = novel;
+  assert.equal(feedback.context(s).intentProgress?.consecutiveNoProgressAttempts, 0);
+  const away = structuredClone(v); away.nearby.resources = away.nearby.resources.filter((r) => r.block !== 'coal_ore');
+  attempt('look_around', away); attempt('goto', novel);
+  assert.equal(feedback.context(s).intentProgress?.consecutiveNoProgressAttempts, 2, 'a familiar resource returning to view is not another discovery');
+  for (const skill of ['dig', 'goto', 'climb_up', 'look_around', 'dig', 'goto']) attempt(skill);
+  assert.equal(feedback.context(s).intentProgress?.consecutiveNoProgressAttempts, 8, 'the counter survives the six-entry display history');
+  const move = next('goto'); feedback.begin(move, s, v); now += 1000;
+  s.pos.x = 2; feedback.end(move, 'succeeded', '实际移动', s, v);
+  assert.equal(feedback.context(s).intentProgress?.consecutiveNoProgressAttempts, 0);
+  attempt('dig', v, 'another-intent');
+  assert.equal(feedback.context(s).intentProgress?.consecutiveNoProgressAttempts, 1);
+  now += 600001;
+  assert.equal(feedback.context(s).intentProgress?.consecutiveNoProgressAttempts, 0);
+  assert.equal(feedback.context({ ...s, sessionId: 'new-session' }).intentProgress, null);
+});
+
 test('light decisions retain the latest measured changes and repetition within a limited feedback budget', (t) => {
   const memory = new WorldMemory(null); t.after(() => memory.close());
   const feedback = new DecisionFeedback(), s = state(), v = percept();

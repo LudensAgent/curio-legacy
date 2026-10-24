@@ -33,8 +33,8 @@ export interface ExecutiveDeps {
 const PREFETCH_MAX_AGE_MS = 90_000;
 /** 两次反思之间至少隔这么久，别让反思挤掉正常游玩 */
 const REFLECT_MIN_GAP_MS = 4 * 60_000;
-/** 看过周围或刚到达后，先保持注意力；模型还在想时也不必不停转头。 */
-const IDLE_GLANCE_GAP_MS = 12_000;
+/** Keep observing during a pending choice; the observation skill controls quiet gaze cadence. */
+const THINKING_ATTENTION_SECONDS = 120;
 /** 几秒内就能完成、不改变位置的收尾动作 */
 const QUICK_SKILLS = new Set(['craft', 'eat', 'place_torch', 'pickup_items', 'equip']);
 /** Unknown outcomes and knowledge queries must supply evidence before a next choice. */
@@ -71,7 +71,6 @@ export class Executive {
   private timer: NodeJS.Timeout | null = null;
   private fillerToggle = 0;
   private lastLook: { at: number; state: AgentState } | null = null;
-  private idleAttention: { at: number; state: AgentState } | null = null;
   private activatedAt: number | null = null;
   private suspended = new Set<PauseReason>();
   private lastSession = '';
@@ -387,6 +386,9 @@ export class Executive {
       if (sequence !== this.requestSequence || generation !== this.generation) return;
       this.controller = null; this.inFlight = false; this.inFlightReason = '';
     });
+    // Attach observation immediately, including requests issued between ticks.
+    // It cannot interrupt approved work or alter the model's selected goal.
+    this.keepThinkingActive();
   }
 
   // ---- 短期工作记忆：让一次次小决策连成一条思路
@@ -449,6 +451,7 @@ export class Executive {
   private deliberationScope = '';
   private lastDeliberatedFailure: PlanContext['lastFailure'] = null;
   private lastDeliberatedRepeat: { pattern: string; bucket: number; count: number } | null = null;
+  private lastDeliberatedIntentProgress: { key: string; bucket: number; count: number } | null = null;
   /**
    * 顺利续步、已知缺料或一次没找到东西用小决策；新路径/机制失败和连续无实测变化需要完整推理。
    * 完整决策只用于大转折：开始全新的事、玩家建议、项目受阻、死亡之后，以及每隔一段时间抬头看一眼全局
@@ -462,15 +465,18 @@ export class Executive {
   /** 只识别需要重新推理的证据，不替模型选目标；预取估时和实际发请求使用同一组条件。 */
   private tierDecision(ctx?: PlanContext) {
     const state = ctx?.worldState ?? this.d.adapter.state();
-    const scope = JSON.stringify([state.worldId, state.dim, state.sessionId]);
+    const intentId = this.d.memory.currentIntent()?.id;
+    const scope = JSON.stringify([state.worldId, state.dim, state.sessionId, intentId]);
     if (scope !== this.deliberationScope) {
       this.deliberationScope = scope;
       this.lastDeliberatedFailure = null;
       this.lastDeliberatedRepeat = null;
+      this.lastDeliberatedIntentProgress = null;
     }
     const feedback = (ctx?.decisionFeedback ?? this.decisionFeedback.context(state)) as {
       repeatedStepPattern?: { steps: unknown; consecutiveUnchangedAttempts: number };
       recentAttempts?: { effectEvidence?: EffectEvidence }[];
+      intentProgress?: { intentId: string; consecutiveNoProgressAttempts: number; since: number | null; lastProgressAt: number | null } | null;
     };
     const repeated = feedback.repeatedStepPattern;
     const count = repeated?.consecutiveUnchangedAttempts ?? 0;
@@ -483,6 +489,16 @@ export class Executive {
     const repeat = count >= 2 && !(changed?.verified && changed.changed)
       && (!this.lastDeliberatedRepeat || bucket > this.lastDeliberatedRepeat.bucket) ? { pattern, bucket, count } : null;
     if (this.lastDeliberatedRepeat) this.lastDeliberatedRepeat.count = count;
+    const progress = feedback.intentProgress?.intentId === intentId ? feedback.intentProgress : null;
+    const noProgressCount = progress?.consecutiveNoProgressAttempts ?? 0;
+    const progressKey = JSON.stringify([intentId, progress?.since, progress?.lastProgressAt]);
+    if (noProgressCount < 3 || this.lastDeliberatedIntentProgress?.key !== progressKey
+      || noProgressCount < (this.lastDeliberatedIntentProgress?.count ?? 0)) this.lastDeliberatedIntentProgress = null;
+    // Alternating tactics do not erase the same intent's missing progress. Reconsider after each three further attempts.
+    const progressBucket = Math.floor(noProgressCount / 3);
+    const intentProgress = noProgressCount >= 3 && (!this.lastDeliberatedIntentProgress || progressBucket > this.lastDeliberatedIntentProgress.bucket)
+      ? { key: progressKey, bucket: progressBucket, count: noProgressCount } : null;
+    if (this.lastDeliberatedIntentProgress) this.lastDeliberatedIntentProgress.count = noProgressCount;
     const failure = ctx ? ctx.lastFailure : this.lastFailure;
     const newFailure = failure && failure !== this.lastDeliberatedFailure
       && (['PATH_NOT_FOUND', 'STUCK', 'NO_EFFECT', 'EFFECT_NOT_CONFIRMED'].includes(failure.code ?? '')
@@ -491,8 +507,8 @@ export class Executive {
     const big = !this.d.memory.currentIntent() || !!this.userSuggestion
       || ['user_suggestion', 'manual_replan', 'project_blocked'].includes(ctx?.reason ?? '')
       || failure?.code === 'DIED' || !!reflection;
-    return { full: big || !!newFailure || !!repeat || this.lightStreak >= 6 || Date.now() - this.lastFullAt > 180_000,
-      newFailure, repeat };
+    return { full: big || !!newFailure || !!repeat || !!intentProgress || this.lightStreak >= 6 || Date.now() - this.lastFullAt > 180_000,
+      newFailure, repeat, intentProgress };
   }
 
   /**
@@ -542,6 +558,7 @@ export class Executive {
     if (!decision.full) { this.lightStreak++; return 'light'; }
     if (decision.newFailure) this.lastDeliberatedFailure = decision.newFailure;
     if (decision.repeat) this.lastDeliberatedRepeat = decision.repeat;
+    if (decision.intentProgress) this.lastDeliberatedIntentProgress = decision.intentProgress;
     this.lightStreak = 0;
     this.lastFullAt = Date.now();
     return 'full';
@@ -715,17 +732,15 @@ export class Executive {
 
   private keepThinkingActive() {
     const running = this.d.arbiter.info();
-    // 正在边想边张望（glance）时仍要判断：是否到了一个陌生的地方、需要完整环顾一圈
     const glancing = running?.source === 'filler' && running.skill === 'glance';
+    if (!this.inFlight) {
+      if (glancing) this.d.arbiter.cancel('思考已结束，交回动作控制');
+      return;
+    }
     if (!this.timer || !this.inFlight || this.paused || this.suspended.size || this.plan || this.queued || (running && !glancing)
       || !observationReady(this.d.adapter.state())) return;
     const state = this.d.adapter.state(), last = this.lastLook;
-    if (state.inWater || state.inLava) return;
-    const attention = this.idleAttention;
-    if (!attention || attention.state.worldId !== state.worldId || attention.state.sessionId !== state.sessionId
-      || attention.state.dim !== state.dim || Math.hypot(state.pos.x - attention.state.pos.x, state.pos.y - attention.state.pos.y, state.pos.z - attention.state.pos.z) >= 8) {
-      this.idleAttention = { at: Date.now(), state };
-    }
+    if (state.inWater || state.inLava || state.onGround === false) return;
     const percept = this.d.perception.snapshot();
     const latest = this.results.at(-1);
     const missingTarget = this.lastFailure?.code === 'NOT_FOUND' && latest?.status === 'failed'
@@ -733,13 +748,10 @@ export class Executive {
     const surroundingsKnown = percept.nearby.resources.length > 0 || percept.nearby.passive.length > 0
       || percept.nearby.hostile.length > 0 || percept.nearby.players.length > 0;
     const sameScope = !!last && last.state.worldId === state.worldId && last.state.sessionId === state.sessionId && last.state.dim === state.dim;
-    // 注意力跨决策请求保留：先安静地看着刚才的方向，等待较久才偶尔扫一眼。
-    // 不给每次短请求都安排 filler，避免刚转头就又被新决定打断。
+    // Maintain current-view perception, rather than two seconds of activity
+    // followed by ten idle seconds. Glance itself holds a quiet, bounded gaze.
     const glance = () => {
-      if (!glancing && SKILLS.glance && Date.now() - this.idleAttention!.at >= IDLE_GLANCE_GAP_MS) {
-        this.idleAttention = { at: Date.now(), state };
-        this.d.arbiter.start({ skill: 'glance', args: { seconds: 2 } }, 'filler');
-      }
+      if (!glancing && SKILLS.glance) this.d.arbiter.start({ skill: 'glance', args: { seconds: THINKING_ATTENTION_SECONDS } }, 'filler');
     };
     if (missingTarget) {
       // 找不到要的东西：换了位置后再看一圈是合理的
@@ -873,9 +885,11 @@ export class Executive {
     if ((o.task.skill === 'look_around' && o.result.status === 'succeeded') || o.result.data?.searched === true
       || (['explore', 'goto'].includes(o.task.skill) && o.result.status === 'succeeded')) {
       this.lastLook = { at: Date.now(), state: this.d.adapter.state() };
-      this.idleAttention = this.lastLook;
     }
     if (o.task.source === 'filler') {
+      // Natural observation completion must not introduce a scheduler-sized
+      // gap. Cancellation for a reply/pause is rejected by the guards above.
+      if (o.result.status === 'succeeded') this.keepThinkingActive();
       return;
     }
     if (o.task.source === 'reflex') {

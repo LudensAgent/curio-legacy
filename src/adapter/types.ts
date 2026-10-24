@@ -116,6 +116,8 @@ export interface MoveOpts {
   allowTerrainChanges?: boolean;
   /** 步行引导可禁止入水；换气、游泳等动作保留自己的移动权限。 */
   allowSwimming?: boolean;
+  /** 明确落点的单步下行上限，含支撑格；仅用于相邻 xyz 目标，禁止改地形和绕行。 */
+  maxDropDown?: number;
 }
 
 export interface EffectEvidence {

@@ -18,6 +18,7 @@ interface Sample {
  * 关键指标：
  * - idle10m：最近 10 分钟“没有任何任务”的秒数（目标 < 60）
  * - llmContinuity：LLM 思考期间角色仍在执行任务/填充/反射的比例（目标 ≥ 95%）
+ * - llmThinkingBreakdown：同一思考窗口内的任务、反射、观察填充与真正空闲；执行占用不代表已产生目标成效。
  */
 export class Metrics {
   private samples: Sample[] = [];
@@ -114,6 +115,14 @@ export class Metrics {
     for (const x of win) byCat[x.cat]++;
     const llmSamples = win.filter((x) => x.llm && x.cat !== 'offline' && x.cat !== 'paused');
     const llmActive = llmSamples.filter((x) => x.cat === 'task' || x.cat === 'filler' || x.cat === 'reflex').length;
+    const thinking = { taskSec: 0, reflexSec: 0, fillerSec: 0, idleSec: 0 };
+    for (const x of llmSamples) {
+      if (x.cat === 'task') thinking.taskSec++;
+      else if (x.cat === 'reflex') thinking.reflexSec++;
+      else if (x.cat === 'filler') thinking.fillerSec++;
+      else if (x.cat === 'idle') thinking.idleSec++;
+    }
+    const thinkingRatio = (seconds: number) => llmSamples.length ? seconds / llmSamples.length : null;
     const lat = [...this.planner.stats.latencies].sort((a, b) => a - b);
     const t = this.counters.tasks;
     const done = t.succeeded + t.failed;
@@ -123,6 +132,8 @@ export class Metrics {
       idle10m: byCat.idle,
       llmContinuity: llmSamples.length ? llmActive / llmSamples.length : null,
       llmThinkingSec: llmSamples.length,
+      llmThinkingBreakdown: { ...thinking, taskReflexRatio: thinkingRatio(thinking.taskSec + thinking.reflexSec),
+        fillerRatio: thinkingRatio(thinking.fillerSec), idleRatio: thinkingRatio(thinking.idleSec) },
       taskSuccessRate: done ? t.succeeded / done : null,
       tasks: t,
       failCodes: this.counters.failCodes,

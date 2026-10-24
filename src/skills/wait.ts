@@ -1,4 +1,4 @@
-import { sleep } from '../util.ts';
+import { raceAbort, sleep, throwIfAborted, TimeoutError } from '../util.ts';
 import { surface } from './movement.ts';
 import { clampInt, fail, obj, ok, type Skill } from './types.ts';
 
@@ -42,31 +42,62 @@ export const wait: Skill<{ seconds: number; look: boolean }> = {
 };
 
 /**
- * 想事情时的“发呆张望”：等模型想下一步的那一两秒里，像人一样慢慢转头看看，而不是僵在原地。
- * 不走动、不挖不放、不消耗任何东西，所以不会让正在想的决定过时；决定一到就被取消。只给执行层当填充用。
+ * 思考期间持续维护当前视野，近处没有可见关注对象时才偶尔轻微扫视。
+ * 不走动、不挖不放、不消耗东西；决定一到立即让出控制，不恢复旧视线。
  */
 export const glance: Skill<{ seconds: number }> = {
   name: 'glance',
-  description: '想事情时慢慢转头看看四周（不移动、不消耗东西）',
-  argsDoc: '{"seconds"?:2-20}',
-  timeoutMs: 25000,
+  description: '想事情时持续留意当前视野，偶尔轻微扫视（不移动、不消耗东西）',
+  argsDoc: '{"seconds"?:2-300}',
+  timeoutMs: 305000,
   movement: false,
   readOnly: true,
   validate(raw) {
-    return { ok: true, args: { seconds: clampInt(obj(raw).seconds, 2, 20, 8) } };
+    return { ok: true, args: { seconds: clampInt(obj(raw).seconds, 2, 300, 120) } };
   },
   async run(ctx, args) {
     const { adapter, signal } = ctx;
-    const yaw0 = adapter.eye()?.yaw ?? 0;
-    const t0 = Date.now(), end = Math.min(t0 + args.seconds * 1000, ctx.deadline - 500);
-    let k = 0;
+    throwIfAborted(signal);
+    const initial = adapter.state(), eye = adapter.eye();
+    const t0 = Date.now(), end = Math.min(t0 + args.seconds * 1000, ctx.deadline);
+    let previousHp = initial.hp, nextScan = t0 + 8000, scan = 0,
+      canScan = !!eye && Number.isFinite(eye.yaw) && Number.isFinite(eye.pitch);
+    const finish = (interrupted?: string) => ok(interrupted ? '观察已让出，等待下一步处理' : '持续留意了当前视野', {
+      seconds: Math.max(0, (Date.now() - t0) / 1000), ...(interrupted ? { interrupted } : {}),
+    });
     while (Date.now() < end) {
-      await sleep(Math.min(1200, Math.max(1, end - Date.now())), signal);
+      throwIfAborted(signal);
       const s = adapter.state();
-      if (s.inWater || s.inLava) break;
-      await adapter.look(yaw0 + Math.sin(++k * 0.7) * 0.8, -0.05, signal);
-      ctx.progress(Math.min(1, (Date.now() - t0) / (args.seconds * 1000)), '一边想一边看看四周');
+      if (!s.connected || !s.alive || !s.observationReady) return finish('observation_lost');
+      if (s.worldId !== initial.worldId || s.dim !== initial.dim || s.sessionId !== initial.sessionId) return finish('session_changed');
+      if (s.inLava || s.inWater && !s.riding) return finish(s.inLava ? 'lava' : 'water');
+      if (!s.onGround && !s.riding) return finish('airborne');
+      if (s.hp < previousHp || s.hp <= 6) return finish(s.hp < previousHp ? 'hurt' : 'low_hp');
+      previousHp = s.hp;
+      ctx.senses.refresh();
+      throwIfAborted(signal);
+      if (ctx.senses.perceivedEntities(8).some((entity) => entity.perception === 'seen')) nextScan = Date.now() + 8000;
+      if (canScan && eye && Date.now() >= nextScan) {
+        // The surrounding arc stays within ten degrees and keeps the current pitch.
+        const offset = [0.16, 0, -0.16, 0][scan++ % 4];
+        const lookController = new AbortController();
+        try {
+          await raceAbort(adapter.look(eye.yaw + offset, eye.pitch, lookController.signal), signal,
+            Math.max(1, Math.min(400, end - Date.now())), () => lookController.abort('observation yielded'));
+        } catch (error) {
+          throwIfAborted(signal);
+          // Missing look acknowledgements must not stall attention or repeated inputs.
+          if (!(error instanceof TimeoutError)) throw error;
+          canScan = false;
+        }
+        throwIfAborted(signal);
+        nextScan = Date.now() + 8000;
+        continue; // Recheck safety and refresh the resulting view before waiting again.
+      }
+      ctx.progress(Math.min(1, (Date.now() - t0) / Math.max(1, end - t0)), '留意当前视野');
+      if (Date.now() < end) await sleep(Math.min(500, end - Date.now()), signal);
     }
-    return ok('一边想一边看了看四周');
+    throwIfAborted(signal);
+    return finish();
   },
 };
