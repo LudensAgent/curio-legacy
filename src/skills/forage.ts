@@ -43,6 +43,7 @@ export const forage: Skill<{ count: number }> = {
   argsDoc: '{"count"?: 1-16（想要几个食物）}',
   timeoutMs: 120000,
   movement: true,
+  outcomeBoundary: true,
   validate(raw) {
     return { ok: true, args: { count: clampInt(obj(raw).count, 1, 16, 4) } };
   },

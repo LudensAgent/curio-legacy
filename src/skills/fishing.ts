@@ -12,6 +12,7 @@ const count = (inv: { name: string; count: number }[], pred: (n: string) => bool
 
 export const fish: Skill<{ count: number }> = {
   name: 'fish',
+  outcomeBoundary: true,
   description: '用钓鱼竿在水边钓鱼（没竿且有木棍+线会先做）。钓鱼是没有动物时稳定的食物来源，钓到的生鱼可烤着吃（smelt）',
   argsDoc: '{"count"?:1-16}',
   timeoutMs: 300000,

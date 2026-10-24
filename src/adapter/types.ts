@@ -141,6 +141,17 @@ export interface BlockState {
   properties: Record<string, string | number | boolean>;
 }
 
+/** A fresh, line-of-sight observation; model supplied coordinates are not evidence. */
+export interface BlockObservation extends BlockState {
+  pos: Vec3Like;
+  worldId: string;
+  sessionId: string;
+  dimension: string;
+  observationId: number;
+  observedAt: number;
+  source: 'vision';
+}
+
 export interface UseItemOptions {
   chargeMs?: number;
   /** A concrete observed world point; the adapter verifies the clear ray and sends the aim before use. */

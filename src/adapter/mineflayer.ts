@@ -1858,9 +1858,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const check = this.actionCheckpoint(signal);
     const b = this.bot;
     if (!this.ready || !b.vehicle) return { ok: false, reason: 'NOT_MOUNTED', arrived: false, moved: 0 };
+    const epoch = this.actionEpoch, dimension = this.currentDimension();
+    const ownsControls = () => epoch === this.actionEpoch && b === this.bot && dimension === this.currentDimension();
     const v = b.vehicle;
     const start = v.position.clone();
-    const end = Date.now() + Math.max(1000, opts.timeoutMs);
+    const end = Date.now() + (Number.isFinite(opts.timeoutMs) ? Math.max(0, opts.timeoutMs) : 0);
     const isBoat = /boat|raft/.test(String(v.name));
     const water = (blk: any) => !!blk && (blk.name === 'water' || blk.name === 'bubble_column' || String(blk.getProperties?.().waterlogged) === 'true');
     const passable = (blk: any) => !blk || blk.boundingBox === 'empty';
@@ -1869,18 +1871,36 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // 以服务器为准重新同步，否则本地以为在前进、服务器那边船其实没动，越错越远
     const Vec3c = require('vec3').Vec3;
     const resync = (pk: any) => {
-      if (!isBoat || b.vehicle !== v || !Number.isFinite(pk?.x)) return;
+      if (!ownsControls() || !isBoat || b.vehicle !== v || !Number.isFinite(pk?.x)) return;
       v.position = new Vec3c(pk.x, pk.y, pk.z);
       b.entity.position = new Vec3c(pk.x, pk.y + 0.4, pk.z);
       speed = 0;
     };
     if (isBoat) b._client.on('vehicle_move', resync);
-    const tick = () => (typeof b.waitForTicks === 'function' ? raceAbort(b.waitForTicks(1), signal, 1000, () => {}) : sleep(50, signal));
+    // Mineflayer stops emitting player physicsTick while mounted, and boats
+    // additionally disable player physics here. Vehicle input needs its own
+    // cancellable cadence rather than waitForTicks, which would never resolve.
+    const tick = () => sleep(Math.max(0, Math.min(50, end - Date.now())), signal);
+    let released = false;
+    const releaseControls = () => {
+      if (released || !ownsControls() || b.vehicle && b.vehicle !== v) return;
+      released = true;
+      this.actionContext.exit(() => {
+        if (isBoat) {
+          try { b._client.write('steer_boat', { leftPaddle: false, rightPaddle: false }); } catch { /* ignore */ }
+          if (!b.vehicle) b.physicsEnabled = true;
+        }
+        try { if (b.vehicle && !isBoat) b.moveVehicle(0, 0); } catch { /* ignore */ }
+      });
+    };
+    // Arbiter aborts before stopAll advances the epoch. Release synchronously
+    // while we still own the input, rather than racing the next task's finally.
+    signal.addEventListener('abort', releaseControls, { once: true });
     try {
       if (isBoat) b.physicsEnabled = false; // 坐船期间不模拟玩家自身的重力/碰撞（下船时恢复）
       while (Date.now() < end) {
         check();
-        if (!b.vehicle) return { ok: false, reason: 'DISMOUNTED', arrived: false, moved: v.position.distanceTo(start) };
+        if (b.vehicle !== v) return { ok: false, reason: 'DISMOUNTED', arrived: false, moved: v.position.distanceTo(start) };
         if (opts.stop?.()) return { ok: true, arrived: false, moved: v.position.distanceTo(start) };
         const p = v.position;
         const dx = target.x - p.x, dz = target.z - p.z, dist = Math.hypot(dx, dz);
@@ -1915,10 +1935,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     } finally {
       if (isBoat) {
         try { b._client.off('vehicle_move', resync); } catch { /* ignore */ }
-        try { b._client.write('steer_boat', { leftPaddle: false, rightPaddle: false }); } catch { /* ignore */ }
-        if (!b.vehicle) b.physicsEnabled = true;
       }
-      try { if (b.vehicle && !isBoat) b.moveVehicle(0, 0); } catch { /* ignore */ }
+      signal.removeEventListener('abort', releaseControls);
+      releaseControls();
     }
   }
 

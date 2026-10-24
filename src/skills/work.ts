@@ -138,6 +138,7 @@ export const gather: Skill<{ block: string; count: number; for?: { item: string;
   argsDoc: '{"block": "log|stone|coal|iron|<方块名>", "for"?: {"item":"要做的东西（物品 ID）","count":1} | "物品名", "count"?: 1-32（不写 for 时用）}',
   timeoutMs: 180000,
   movement: true,
+  outcomeBoundary: true,
   validate(raw, adapter) {
     const a = obj(raw);
     const block = String(a.block ?? '').trim();

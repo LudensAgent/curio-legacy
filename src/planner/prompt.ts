@@ -152,7 +152,7 @@ pickup_items 只收看得见的掉落物；放在地上的床、工作台等仍�
 兴趣需有连续性。decision 可以省略：省略时，有进行中的意图就视为 continue，没有就以 goal 开始一个新意图；只有改变方向、暂缓或结束时才需要明确写出。decision 的类型：begin（新事）、continue（继续）、change_method（改法）、revise（改目标）、defer（暂缓）、abandon（放弃）、complete（主观结束）。reason 说明眼前事实或经历为何支持这个选择，context 引用采用的发现/记忆。改意时说明之前的投入与新取舍。用户建议可以采纳，也可以有理由地拒绝。偏好 source 只能是 inferred；用户明确偏好由程序另行记录，模型不得冒充用户。
 新事在 intent 写 text、whyNow；持续多轮且可验证的事情可附 project。简单观察或闲逛无需工程。
 project={title,successCondition,milestones:[{title,condition}]}，同一时间仅一个主动项目，里程碑顺序执行。
-事实条件仅支持 {type:"inventory_min",item:"具体物品注册名",count:16}、{type:"location_near",dimension:"overworld",pos:{x:0,y:64,z:0},radius:3,landmarkId:"已知地标ID"}、{type:"all_of",conditions:[条件...]}。位置必须来自当下观测或已知地标，不能猜测。库存条件读取实际完整背包，技能成功或预计产出不证明事实完成。缺少可证明的条件时保留开放意图，不编造验收。complete 只表示体验结束，不能宣布未验证的材料、房屋或战斗事实。
+事实条件支持 {type:"inventory_min",item:"具体物品注册名",count:16}、{type:"location_near",dimension:"overworld",pos:{x:0,y:64,z:0},radius:3,landmarkId:"已知地标ID"}、{type:"all_of",conditions:[条件...]}。位置必须来自当下观测或已知地标，不能猜测。还可验证自身：{type:"self_state",field:"riding"或"held",equals:"具体名称"或null}；field 为 inWater/inLava/onGround 时 equals 为布尔值；{type:"equipment",slot:"head|torso|legs|feet|hand|off-hand",item:"具体物品"或null}。方块机制用 {type:"block_state",dimension:"overworld",pos:{x:0,y:64,z:0},name:"oak_door",properties:{open:true}}，name/properties 至少写一项。先用 inspect_block 获取可见目标的实际坐标/属性；验收会重看，遮挡、视野外、未加载或换会话时为 unknown，坐标本身不提供读图权限。方法试验只有试前明确不成立、试后实际成立才增加学习证据；试前未知不证明改进。库存条件读取实际完整背包，技能成功或预计产出不证明事实完成。缺少可证明的条件时保留开放意图，不编造验收。complete 只表示体验结束，不能宣布未验证的材料、房屋或战斗事实。
 
 技能清单不是玩法清单：use_item、interact、ride、dismount 就是玩家的右键和方向键，dig、climb_up 是左键挖和垫方块往上爬；self.around 是身边一圈（脚下、头顶、哪边能走），被困时先用它们离开那里。常规做法走不通（被挡住、够不着、太慢、太危险）时，想想真正的玩家会用什么物品、方块或载具解决，用它们组合出来；程序不替你想。好用的组合可用 learn_skill 记下（简单格式 {name,description,steps:[{skill,args}]} 即可，验收条件由程序按最后一步自动推导）。lessons 里标【亲历】的是程序根据真实经历记下的（在哪死过、什么做法反复失败），danger_zones 是出过事的地点：别在那里重复同样的做法。my_skills 是自己学过的组合，可以直接当技能用。确实做不到时在 missing_ability 写一句你想做什么。不要把缺材料自动改写为无关囤货。learn_skill 仅为待试验组合，注册名称不等于已学会。lesson 是有来源的推断，memory_note 不得伪造事实。
 learn_skill 的完整格式为 {name,description,parameters:{amount:{type:"integer",default:4,min:1,max:16}},program:{type:"sequence",steps:[{type:"call",skill:"gather",args:{block:"stone",count:{param:"amount"}}}]},postcondition:{type:"inventory_min",item:"cobblestone",count:{param:"amount"}}}。program 还可用 {type:"if",condition,then,else} 或 {type:"repeat",times,body}，循环有界。优先提炼 state.learn_candidates 或可复核的反复成功组合，不为凑技能数虚构。候选 trial 可以在游玩中试用（配置了隔离试验世界时只在那里试），在两个不同情境里经真实状态验收后才晋升 method；程序不替你选择要学什么。
@@ -439,10 +439,10 @@ export function lightSystemPrompt(persona: string): string {
 - decision_feedback 是最近实际变化及同一套动作的重复次数；succeeded 只说明动作返回成功，不证明目标已完成。consecutiveUnchangedAttempts 表示连续几次没测到新变化，可以据此重新观察或改法；它不否定观察、等待本身的价值。
 - 动作接口不是玩法菜单。新障碍/新用途可以主动形成假设并组合动作验证，不必等重复成功。要了解完整接口输出 {"kind":"mechanics","query":"需要的操作或机制"}；会转入完整推理并继续同一意图。新组合可用 experiment_method {name,description,parameters?,program,postcondition,arguments?} 保存并立即作一次有事实验收的有限试验，失败据 actual/expected 修订；候选未验收不叫已掌握。
 - 可选 note：写一句接下来几分钟要记住的事（目的地、发现、教训；位置写坐标，不写“东南3格”这种走两步就失效的说法）；可选 then：做完这几步之后打算做什么。
-- lessons/danger_zones 是吃过的亏；my_skills 按列出的 name 调用，status=candidate 仍待实际验收，不能当成已掌握的方法。有床时黄昏/天黑就 sleep（跳过黑夜、设重生点，胜过挖坑）；take_items 只拿 known_chests 里有的。
+- lessons/danger_zones 是吃过的亏；my_skills 按列出的 name 调用，status=candidate 仍待实际验收，不能当成已掌握的方法。method_catalog 可按 name/version 查看完整参数约束、程序和最近试验的实际结果；返回 requiresFullContext=true 时请求 need_full_context 再作决定。有床时黄昏/天黑就 sleep（跳过黑夜、设重生点，胜过挖坑）；take_items 只拿 known_chests 里有的。
 - 学到东西写一句 lesson；state.learn_candidates 是真实经历里反复成功的组合，可据此写 learn_skill {"name","description","steps":[{"skill":"…","args":{}}]}，参数与成效须有实际成功证据，不为凑技能数虚构。新组合先是待试验候选，不等于已经掌握；做不到写 missing_ability。
 - explore 带 until（如 "cow|sheep"）一看见就停；找东西往 explored_around 里“没去过”的方向走远，别回头。
-- 除了组合动作，还有玩家的“右键/方向键/左键”：use_item、interact、ride、dismount、dig（指定 target 精确挖取，dir 用于挖通道）、climb_up（垫方块往上爬）。常规做法走不通时，想想真正的玩家会怎么做。
+- 除了组合动作，还有玩家的“右键/方向键/左键”：use_item、interact、ride、dismount、hit_entity（指定可见实体有限次左键）、dig（指定 target 精确挖取，dir 用于挖通道）、climb_up（垫方块往上爬）。inspect_block 只读检查当前可见方块实际名称/属性。方法可验收自身 riding/held/装备、落地/入水及可见 block_state；需新试验时请求完整推理了解准确条件接口。常规做法走不通时，想想真正的玩家会怎么做。
 - goto 只沿可通行路线走路，不会为赶路拆墙、挖地或垫高。水路受阻或长距离游泳不方便时，可自主用 boat 渡河/湖（会准备船、驾驶并靠岸），或绕路、暂缓。
 - pickup_items 只捡掉落物；拆放置的床用 dig {"target":"white_bed"}，清已知障碍用 dig {"target":{"x":0,"y":64,"z":0},"block":"cobblestone"}（坐标须来自观察），只拆指定目标并收取。拿不到指定物品就不能接着假设背包有它；last_results.data 是实际坐标、缺陷和获得量，优先于旧笔记。
 - self.around 是身边一圈：脚下、头顶、哪边能走。被困（四面走不了、看不见天空、同一个地方接连失败）时先离开这里：往能走的方向走，或 dig 挖开、climb_up 爬上去。
@@ -470,8 +470,36 @@ function lightResultData(raw: unknown): Record<string, unknown> | undefined {
   };
   // Each result gets at most 1800 bytes of selected facts; the result list has its own budget.
   const add = (key: string, value: unknown) => {
-    if (value !== undefined && Buffer.byteLength(JSON.stringify({ ...out, [key]: value }), 'utf8') <= 1800) out[key] = value;
+    if (value !== undefined && Buffer.byteLength(JSON.stringify({ ...out, [key]: value }), 'utf8') <= 1800) { out[key] = value; return true; }
+    return false;
   };
+  if (data.source === 'method_catalog' && data.method && typeof data.method === 'object') {
+    const method = data.method;
+    add('method', { name: method.name, callName: method.callName, version: method.version, status: method.status, historical: true });
+    add('requiresFullContext', false); // Reserve space so omission cannot hide its own marker.
+    // Parameter constraints must stay exact: a partial enum could make an invalid argument look valid.
+    if (!add('parameters', method.parameters)) out.requiresFullContext = true;
+    if (!add('expected', method.postcondition)) out.requiresFullContext = true;
+    const trials = Array.isArray(method.trials) ? method.trials.slice(-2).map((t: any) => ({
+      status: t.status, parameters: trim(t.parameters), reason: String(t.reason ?? '').slice(0, 100),
+      before: trim(t.before), actual: trim(t.actual),
+    })) : [];
+    while (trials.length && !add('trials', trials)) trials.shift();
+    if (Array.isArray(method.trials) && method.trials.length && !trials.length) out.requiresFullContext = true;
+    // Source programs can be large; selected details remain available in a full decision.
+    if (!add('program', method.program)) out.requiresFullContext = true;
+    return out;
+  }
+  if (data.source === 'method_catalog' && Array.isArray(data.methods)) {
+    if (data.totalVersions !== undefined) add('totalVersions', data.totalVersions);
+    if (Array.isArray(data.gaps)) {
+      const gaps = data.gaps.slice(-3).map((g: any) => ({ id: g.id, description: String(g.description ?? '').slice(0, 80), missingPrimitive: g.missingPrimitive }));
+      while (gaps.length && !add('gaps', gaps)) gaps.shift();
+    }
+    const methods = data.methods.slice(0, 8).map((m: any) => ({ name: m.name, callName: m.callName, version: m.version, status: m.status }));
+    while (methods.length && !add('methods', methods)) methods.pop();
+    return out;
+  }
   const project = data.project && typeof data.project === 'object' ? data.project : null;
   const inspection = data.inspection ?? project?.inspections?.at(-1);
   if (project) {

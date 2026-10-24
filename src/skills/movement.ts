@@ -73,6 +73,7 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
   argsDoc: '{"direction"?: "auto|N|NE|E|SE|S|SW|W|NW", "distance"?: 24-160, "until"?: "<方块/生物，可用 | 分隔多个，或 animal>"}',
   timeoutMs: 90000,
   movement: true,
+  outcomeBoundary: true,
   validate(raw) {
     const a = obj(raw);
     const direction = String(a.direction ?? 'auto').toUpperCase();
@@ -398,6 +399,7 @@ export const lookAround: Skill<{ seconds: number; for?: string; direction?: stri
   argsDoc: '{"for"?: "<要找的方块或生物>", "direction"?: "N|NE|E|SE|S|SW|W|NW", "seconds"?: 2-20}',
   timeoutMs: 25000,
   movement: false,
+  outcomeBoundary: true,
   validate(raw) {
     const a = obj(raw);
     const dir = typeof a.direction === 'string' ? a.direction.toUpperCase() : undefined;

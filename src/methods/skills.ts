@@ -50,9 +50,41 @@ export function createMethodSkills(library: MethodLibrary, knowledge: ResourceKn
       },
     },
     {
-      name: 'method_catalog', description: '回顾已验证方法、候选版本的试验结果，以及当前世界仍未解决的能力缺口', argsDoc: '{}', timeoutMs: 5000, movement: false, readOnly: true,
-      validate: () => ({ ok: true, args: {} }),
-      async run() { return ok('方法与能力缺口', { methods: library.list().slice(-20).map((d) => ({ name: d.name, version: d.version, description: d.description, status: d.status, parameters: d.parameters, trials: d.trials.slice(-3) })), gaps: library.abilityGaps().slice(-10) }); },
+      name: 'method_catalog', description: '不传 name 列最近方法概览；按 name/version 查看一个方法的程序、参数约束、验收条件及最近两次实际试验，供修订或复用',
+      argsDoc: '{"name"?:"<方法名或 method:name/trial:name:v1>","version"?:1}；省略 version 查看该方法最新版本', timeoutMs: 5000, movement: false, readOnly: true,
+      validate(raw) {
+        const input = obj(raw);
+        if (input.name !== undefined && typeof input.name !== 'string') return { ok: false, error: 'name 须为具体方法名' };
+        const match = input.name === undefined ? null : /^(?:(?:method|trial):)?([a-z][a-z0-9_]{2,31})(?::v([1-9]\d*))?$/.exec(input.name.trim());
+        if (input.name !== undefined && !match) return { ok: false, error: 'name 须为具体方法名或已注册的 method:/trial: 名称' };
+        const version = input.version ?? (match?.[2] ? Number(match[2]) : undefined);
+        if (version !== undefined && (!match || !Number.isSafeInteger(version) || version < 1)) return { ok: false, error: 'version 须搭配 name 且为正整数' };
+        if (input.version !== undefined && match?.[2] && input.version !== Number(match[2])) return { ok: false, error: 'version 与 trial 名称中的版本不一致' };
+        return { ok: true, args: { ...(match ? { name: match[1] } : {}), ...(version !== undefined ? { version } : {}) } };
+      },
+      async run(_ctx, args) {
+        const definitions = library.list();
+        const callName = (d: typeof definitions[number]) => d.status === 'retired' ? null : d.status === 'verified' ? `method:${d.name}` : `trial:${d.name}:v${d.version}`;
+        if (args.name) {
+          const versions = definitions.filter((d) => d.name === args.name).sort((a, b) => b.version - a.version);
+          const d = args.version ? versions.find((v) => v.version === args.version) : versions[0];
+          if (!d) return fail('NOT_FOUND', `找不到方法 ${args.name}${args.version ? ` v${args.version}` : ''}；先用 method_catalog {} 查看目录`);
+          const trials = d.trials.slice(-2).map((t) => ({ at: t.ts, status: t.status, parameters: t.parameters, reason: t.reason,
+            before: t.before, actual: t.after, worldId: t.worldId, dimension: t.dimension, source: t.source }));
+          return ok(`${d.name} v${d.version}（${d.status}）；参数 ${Object.keys(d.parameters).join('、') || '无'}；${trials.length ? `最近试验：${trials.map((t) => `${t.status}：${t.reason}`).join('；')}` : '尚无实际试验'}。记录为历史证据，不能代替当前验收`, {
+            source: 'method_catalog',
+            method: { name: d.name, callName: callName(d), version: d.version, status: d.status, description: d.description,
+              parameters: d.parameters, program: d.program, postcondition: d.postcondition, trials, trialCount: d.trials.length, historical: true },
+            versions: versions.slice(0, 8).map((v) => ({ version: v.version, status: v.status })),
+          });
+        }
+        return ok('最近方法与能力缺口概览；用 method_catalog {name,version?} 查看选定方法的参数约束和试验证据', {
+          source: 'method_catalog',
+          methods: definitions.slice(-8).reverse().map((d) => ({ name: d.name, callName: callName(d), version: d.version, status: d.status, description: d.description.slice(0, 80) })),
+          gaps: library.abilityGaps().slice(-3).map((g) => ({ id: g.id, description: g.description.slice(0, 120), missingPrimitive: g.missingPrimitive })),
+          totalVersions: definitions.length,
+        });
+      },
     },
     {
       name: 'record_ability_gap', description: '记录当前意图遇到的能力缺口，保留原意图，供后续设计或暂缓；不宣称已掌握技能', argsDoc: '{"description":"<缺少什么能力>","missingPrimitive"?:"<底层动作>"}', timeoutMs: 5000, movement: false, readOnly: true,

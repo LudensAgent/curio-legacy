@@ -26,4 +26,7 @@ test('mechanics search handles bilingual actions and exact names while keeping c
   assert.equal(composite?.primitive, 'boat'); assert.equal(composite?.kind, 'composite');
   assert.deepEqual(queryMechanics('quantum telekinesis 999').mechanics, []);
   assert.equal(queryMechanics('use_item', 1).mechanics[0]?.parameters, SKILLS.use_item.argsDoc);
+  assert.ok(queryMechanics('坐船').mechanics.some((entry) => entry.primitive === 'interact'), 'object language should also reveal general operations');
+  assert.ok(queryMechanics('回收船').mechanics.some((entry) => entry.primitive === 'hit_entity'), 'left-clicking an entity is available without a recovery macro');
+  assert.equal(queryMechanics('查看状态', 1).mechanics[0]?.primitive, 'inspect_block');
 });

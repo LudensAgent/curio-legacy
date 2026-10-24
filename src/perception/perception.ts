@@ -1,5 +1,5 @@
 import { surroundings } from './surroundings.ts';
-import type { GameAdapter, InvItem } from '../adapter/types.ts';
+import type { GameAdapter, InvItem, Vec3Like } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { effectiveLight, round1, lightAround } from '../util.ts';
@@ -23,7 +23,7 @@ export interface Percept {
   observation?: { ready: boolean; worldId: string; sessionId: string; id: number };
   /** can_sleep：只有夜里（或雷雨）才能上床睡觉，白天 sleep 会失败 */
   time: { timeOfDay: number; phase: 'day' | 'dusk' | 'night' | 'dawn'; isDay?: boolean; can_sleep?: boolean };
-  self: { pos: [number, number, number]; dim: string; hp: number; food: number; biome: string | null; inWater: boolean; inLava: boolean; held: string | null; around?: string };
+  self: { pos: [number, number, number]; dim: string; hp: number; food: number; biome: string | null; inWater: boolean; inLava: boolean; held: string | null; onGround?: boolean; riding?: string | null; equipment?: { slot: string; name: string }[]; around?: string };
   inventory: InvItem[];
   emptySlots: number;
   /** 只包含看见/听见/记得的东西（没有透视） */
@@ -101,6 +101,8 @@ export class Perception {
   private timer: NodeJS.Timeout | null = null;
 
   constructor(private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private vision: Vision) {}
+
+  observeBlocks(positions: Vec3Like[]) { return this.vision.observeBlocks(positions); }
 
   start(intervalMs = 700) {
     this.timer = setInterval(() => {
@@ -282,6 +284,9 @@ export class Perception {
         inWater: s.inWater,
         inLava: s.inLava,
         held: s.held,
+        onGround: s.onGround,
+        ...(s.riding !== undefined ? { riding: s.riding } : {}),
+        ...(s.equipment ? { equipment: s.equipment.map(({ slot, name }) => ({ slot, name })) } : {}),
         // 身边一圈（脚下、头顶、四个方向能不能走）：判断被困、往哪能出去
         ...(s.connected && s.alive ? { around: surroundings(this.adapter, s.pos).text } : {}),
       },

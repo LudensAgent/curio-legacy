@@ -1,4 +1,4 @@
-import type { BlockHit, EntityInfo, GameAdapter, Vec3Like } from '../adapter/types.ts';
+import type { BlockHit, BlockObservation, EntityInfo, GameAdapter, Vec3Like } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
 
@@ -34,6 +34,8 @@ export interface SkillResult {
 export interface Senses {
   perceivedEntities(radius: number): EntityInfo[];
   knownBlocks(names: string[], maxDist: number): BlockHit[];
+  /** Fresh visible state only; occluded, unloaded and out-of-view targets are absent. */
+  observeBlocks?(positions: Vec3Like[]): BlockObservation[];
   /** 立即重新看一眼（转头之后调用） */
   refresh(): void;
   markSweep(): void;
@@ -69,6 +71,8 @@ export interface Skill<A = any> {
   movement: boolean;
   /** Knowledge/archive queries do not count as failed physical project attempts. */
   readOnly?: boolean;
+  /** 下一步取决于本次实际发现/产出；自主计划在结果返回后重新选择，不能预设成功后的尾部。 */
+  outcomeBoundary?: boolean;
   validate(raw: unknown, adapter: GameAdapter): Validation<A>;
   run(ctx: SkillCtx, args: A): Promise<SkillResult>;
 }

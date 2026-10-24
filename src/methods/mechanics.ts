@@ -2,13 +2,15 @@ import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 
 // These are general operations exposed by the current registry, not recipes
 // for situations. Specialized workflows remain searchable as composites.
-const PRIMITIVES = ['use_item', 'interact', 'ride', 'dismount', 'dig', 'craft', 'look_around', 'goto', 'pickup_items', 'climb_up', 'eat', 'wait'];
+const PRIMITIVES = ['use_item', 'interact', 'ride', 'dismount', 'dig', 'hit_entity', 'inspect_block', 'craft', 'look_around', 'goto', 'pickup_items', 'climb_up', 'eat', 'wait'];
 const ALIASES: Record<string, string[]> = {
   use_item: ['右键', '使用物品', '放置', '放下', 'right click', 'use item', 'place', 'place block'],
-  interact: ['交互', '互动', '右键实体', '坐上', '乘坐', 'interact', 'mount', 'entity interaction'],
-  ride: ['驾驶', '操控载具', '划行', '骑行', 'ride', 'steer', 'drive', 'vehicle control'],
+  interact: ['交互', '互动', '右键实体', '坐上', '乘坐', '坐船', '上船', '骑马', 'interact', 'mount', 'entity interaction'],
+  ride: ['驾驶', '操控载具', '划行', '骑行', '船', '矿车', '马', 'boat', 'minecart', 'horse', 'ride', 'steer', 'drive', 'vehicle control'],
   dismount: ['下船', '下马', '下车', '离开载具', 'dismount', 'unmount', 'get off'],
   dig: ['拆除', '拆下', '挖掘', '挖', '回收方块', '拿起来', 'dig', 'break', 'mine', 'remove block'],
+  hit_entity: ['左键实体', '击打', '攻击实体', '打碎实体', '船', '矿车', '盔甲架', 'hit entity', 'attack', 'boat', 'minecart', 'armor stand'],
+  inspect_block: ['查看状态', '检查方块', '门', '作物', '属性', 'inspect', 'block state', 'properties', 'door', 'crop'],
   craft: ['合成', '制作', 'craft', 'make', 'recipe'],
   look_around: ['观察', '张望', '寻找', '查看周围', 'look', 'observe', 'search', 'look around'],
   goto: ['移动', '走路', '步行', '前往', 'goto', 'walk', 'move', 'go to'],

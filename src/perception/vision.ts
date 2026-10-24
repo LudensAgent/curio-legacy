@@ -1,4 +1,4 @@
-import type { BlockHit, EntityInfo, Eye, GameAdapter, Optics, Vec3Like } from '../adapter/types.ts';
+import type { BlockHit, BlockObservation, EntityInfo, Eye, GameAdapter, Optics, Vec3Like } from '../adapter/types.ts';
 
 /**
  * AI 视觉（不使用图片）：用区块数据模拟“人眼能看到的范围”。
@@ -515,6 +515,47 @@ export class Vision {
       .filter((e) => e.dist <= radius)
       .map((e) => ({ id: e.id, perception: e.how, name: e.name, kind: e.kind, pos: e.pos, dist: e.dist, height: e.height, velocity: e.velocity, phase: e.phase, hp: e.hp }))
       .sort((a, b) => a.dist - b.dist);
+  }
+
+  /** Inspect a bounded set of actual sight lines, never cached memory behind a wall. */
+  observeBlocks(positions: Vec3Like[]): BlockObservation[] {
+    const state = this.syncScope(), eye = this.adapter.eye();
+    if (!state.connected || !state.alive || !state.observationReady || !eye) return [];
+    const now = Date.now(), seen = new Set<string>(), out: BlockObservation[] = [];
+    const hFov = this.cfg.hFov * Math.PI / 180, vFov = this.cfg.vFov * Math.PI / 180;
+    for (const pos of positions.slice(0, 32)) {
+      if (![pos.x, pos.y, pos.z].every((n) => Number.isFinite(n) && Number.isInteger(n))) continue;
+      const key = keyOf(pos.x, pos.y, pos.z);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (Math.hypot(pos.x + .5 - eye.x, pos.y + .5 - eye.y, pos.z + .5 - eye.z) > this.effectiveRange() + 1) continue;
+      const optics = this.adapter.blockOptics(pos.x, pos.y, pos.z);
+      if (!optics) continue;
+      const points = optics.kind === 'solid' && optics.shapes
+        ? optics.shapes.slice(0, 16).map(([x0, y0, z0, x1, y1, z1]) => [pos.x + (x0 + x1) / 2, pos.y + (y0 + y1) / 2, pos.z + (z0 + z1) / 2])
+        : [[pos.x + .5, pos.y + .5, pos.z + .5]];
+      const visible = points.some(([x, y, z]) => {
+        const dx = x - eye.x, dy = y - eye.y, dz = z - eye.z, distance = Math.hypot(dx, dy, dz);
+        if (distance < .01 || distance > this.effectiveRange()) return false;
+        if (Math.abs(norm(yawTo(dx, dz) - eye.yaw)) > hFov / 2 || Math.abs(Math.atan2(dy, Math.hypot(dx, dz)) - eye.pitch) > vFov / 2) return false;
+        // Thin doors/fences must expose an actual shape, not merely an empty
+        // part of their grid cell. Other blocks still occlude the entire ray.
+        const hit = optics.kind === 'solid' && optics.shapes ? shapeHitDistance(optics.shapes, eye, dx / distance, dy / distance, dz / distance, pos.x, pos.y, pos.z, distance) : distance;
+        if (hit === null || !this.clearLine(eye, dx / distance, dy / distance, dz / distance, hit,
+          (bx, by, bz) => bx === pos.x && by === pos.y && bz === pos.z ? { name: 'air', kind: 'clear' } : this.adapter.blockOptics(bx, by, bz))) return false;
+        const near = Math.max(0, hit - .1), l = this.adapter.lightAt(Math.floor(eye.x + dx / distance * near), Math.floor(eye.y + dy / distance * near), Math.floor(eye.z + dz / distance * near));
+        const t = state.timeOfDay, darkness = t < 12000 ? 0 : t < 13800 || t >= 22200 ? 5 : 11;
+        const light = l ? Math.max(l.block, l.sky - darkness) : 0;
+        return hit <= (light >= 4 ? this.effectiveRange() : light >= 2 ? 12 : light >= 1 ? 6 : 3);
+      });
+      if (!visible) continue;
+      const block = this.adapter.blockStateAt?.(pos);
+      const name = block?.name ?? this.adapter.blockOptics(pos.x, pos.y, pos.z)?.name;
+      if (!name) continue;
+      out.push({ name, properties: { ...block?.properties }, pos: { ...pos }, worldId: state.worldId, sessionId: state.sessionId,
+        dimension: state.dim, observationId: state.observationId, observedAt: now, source: 'vision' });
+    }
+    return out;
   }
 
   /**

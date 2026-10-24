@@ -1,6 +1,6 @@
 import type { AgentState, GameAdapter } from '../adapter/types.ts';
 import type { WorldMemory } from '../memory/store.ts';
-import { evaluateCondition, validateCondition } from '../projects/conditions.ts';
+import { evaluateCondition, observeCondition, validateCondition } from '../projects/conditions.ts';
 import { SKILLS, LLM_HIDDEN } from '../skills/index.ts';
 import type { SkillCtx, SkillResult } from '../skills/types.ts';
 import { fail, ok } from '../skills/types.ts';
@@ -124,7 +124,7 @@ export async function executeProgram(program: Program, parameters: Record<string
     } else {
       const state = ctx.adapter.state();
       const condition = validateCondition(substitute(node.condition, parameters), ctx.adapter, ctx.memory, state);
-      const result = evaluateCondition(condition, state);
+      const result = evaluateCondition(condition, state, state.worldId, observeCondition(condition, ctx.senses));
       if (result.status === 'unknown') return fail('NOT_CONNECTED', '分支条件没有有效观测');
       const branch = result.status === 'satisfied' ? node.then : node.else;
       if (branch) return run(branch);

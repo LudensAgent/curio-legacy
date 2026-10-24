@@ -35,6 +35,9 @@ const REFLECT_MIN_GAP_MS = 4 * 60_000;
 const IDLE_GLANCE_GAP_MS = 12_000;
 /** 几秒内就能完成、不改变位置的收尾动作 */
 const QUICK_SKILLS = new Set(['craft', 'eat', 'place_torch', 'pickup_items', 'equip']);
+/** Unknown outcomes and knowledge queries must supply evidence before a next choice. */
+const needsOutcome = (skill: string) => SKILLS[skill]?.outcomeBoundary || SKILLS[skill]?.readOnly
+  || skill === 'experiment_method' || skill.startsWith('trial:');
 const FOOD_ITEMS = new Set(['bread', 'cooked_beef', 'cooked_porkchop', 'cooked_chicken', 'cooked_mutton', 'cooked_cod', 'cooked_salmon', 'apple', 'baked_potato',
   'carrot', 'beef', 'porkchop', 'chicken', 'mutton', 'potato', 'sweet_berries', 'glow_berries', 'melon_slice', 'golden_apple', 'cookie', 'pumpkin_pie', 'beetroot',
   'dried_kelp', 'cod', 'salmon', 'rabbit', 'cooked_rabbit', 'mushroom_stew', 'rabbit_stew', 'beetroot_soup', 'golden_carrot']);
@@ -88,7 +91,7 @@ export class Executive {
 
   constructor(private d: ExecutiveDeps) {
     this.d.memory.setWorld(d.adapter.state().worldId);
-    this.projects = new ProjectCoordinator(d.memory, d.adapter);
+    this.projects = new ProjectCoordinator(d.memory, d.adapter, d.perception);
     const pauseReasons = new Set([...d.memory.pauseReasons(), ...(d.memory.activeProject()?.pauseReasons ?? [])]);
     if (pauseReasons.has('user')) {
       this.paused = true;
@@ -226,6 +229,8 @@ export class Executive {
       return 'prefetch';
     }
     if (!this.plan) return this.d.memory.activeProject()?.status === 'blocked' ? 'project_blocked' : 'no_goal';
+    // A quick pending action may still reveal an unknown result; do not pre-plan beyond it.
+    if (this.d.planner.autonomous && this.plan.steps.slice(this.plan.index).some((step) => needsOutcome(step.skill))) return null;
     // 最后只剩一个很快的收尾步骤（合成、吃东西、插火把）时，在倒数第二步就开始想下一步：
     // 模型平均要想 6–10 秒，而收尾步骤往往只有几秒
     const quickTail = this.plan.index === this.plan.steps.length - 1 && QUICK_SKILLS.has(this.plan.steps[this.plan.index].skill);
@@ -233,7 +238,7 @@ export class Executive {
     if (cur?.planId !== this.plan.id) return null;
     // Observation and read-only query results are the evidence for the next
     // choice. Prefetching before they finish repeats the previous assumptions.
-    if (this.d.planner.autonomous && (cur.skill === 'look_around' || cur.skill === 'experiment_method' || cur.skill.startsWith('trial:') || SKILLS[cur.skill]?.readOnly)) return null;
+    if (this.d.planner.autonomous && needsOutcome(cur.skill)) return null;
     // Start the next autonomous choice while its last approved step is still
     // running. Skill deadlines are safety limits, not duration estimates, and
     // waiting for half a deadline often leaves the entire model call idle.
@@ -549,6 +554,11 @@ export class Executive {
 
   private activate(p: Plan): boolean {
     if (p.generation !== this.generation || !this.sameBinding(p.binding ?? {}) || this.paused) { this.staleDropped++; return false; }
+    if (this.d.planner.autonomous && p.basis?.reason === 'prefetch' && p.basis.pending.some((step) => needsOutcome(step.skill))) {
+      this.staleDropped++;
+      this.d.bus.publish('plan_stale', 'P3', '这份预取决定依赖当时尚未确认的结果，按实际发现重新决定');
+      return false;
+    }
     if (!this.dropDoneSteps(p)) { this.staleDropped++; return false; }
     if (p.decision) {
       try {
@@ -886,6 +896,15 @@ export class Executive {
     }
     this.recordResult(o);
     if (o.result.status === 'succeeded') {
+      if (this.d.planner.autonomous && o.task.source === 'llm' && needsOutcome(o.task.skill) && p.index < p.steps.length) {
+        const remaining = p.steps.length - p.index;
+        // Record only work actually done; an unexecuted suffix is not a successful routine to learn.
+        p.steps = p.steps.slice(0, p.index);
+        this.invalidate('outcome_ready');
+        this.d.bus.publish('decision_boundary', 'P3', `${o.task.skill} 的实际结果已返回，余下 ${remaining} 步交回决策`, { skill: o.task.skill, remaining });
+        this.finishPlan(p.recovering ? 'failed' : 'succeeded', `${o.result.summary}；余下步骤需依据实际结果重新选择`);
+        return;
+      }
       if (p.index >= p.steps.length) {
         if (p.recovering) this.finishPlan('failed', `${p.recovering.summary}（补救：${o.result.summary}）`);
         else this.finishPlan('succeeded', o.result.summary);

@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { AgentState, GameAdapter } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
-import { evaluateCondition, observationReady, validateCondition } from '../projects/conditions.ts';
+import { evaluateCondition, observeCondition, observationReady, validateCondition } from '../projects/conditions.ts';
 import type { Condition } from '../projects/types.ts';
 import { SKILLS } from '../skills/index.ts';
 import { fail, isAbort, ok, type Skill, type SkillCtx, type SkillResult } from '../skills/types.ts';
@@ -35,7 +35,7 @@ export interface MethodTrial {
   after: unknown;
   status: 'verified' | 'failed' | 'uninformative';
   reason: string;
-  source: 'adapter.state';
+  source: 'adapter.state' | 'adapter.state+vision';
 }
 export interface MethodDefinition {
   name: string;
@@ -327,7 +327,7 @@ export class MethodLibrary {
   }
 
   private hasProof(trials: MethodTrial[]) {
-    return new Set(trials.filter((t) => t.status === 'verified' && t.source === 'adapter.state' && this.trialAllowed(t.worldId)).map((t) => t.contextKey)).size >= 2;
+    return new Set(trials.filter((t) => t.status === 'verified' && ['adapter.state', 'adapter.state+vision'].includes(t.source) && this.trialAllowed(t.worldId)).map((t) => t.contextKey)).size >= 2;
   }
 
   promote(name: string, version: number): boolean {
@@ -372,7 +372,7 @@ export class MethodLibrary {
     return {
       name: trial ? `trial:${definition.name}:v${definition.version}` : `method:${definition.name}`,
       description: `${trial ? '【候选试验，尚未证明】' : '【已验证方法】'}${definition.description}`,
-      argsDoc: JSON.stringify({ parameters: Object.fromEntries(Object.entries(definition.parameters).map(([name, p]) => [name, p.default])) }),
+      argsDoc: `${JSON.stringify({ parameters: Object.fromEntries(Object.entries(definition.parameters).map(([name, p]) => [name, p.default])) })}；参数约束：${JSON.stringify(definition.parameters)}`,
       timeoutMs: 600_000,
       movement: true,
       validate: (raw) => {
@@ -389,28 +389,31 @@ export class MethodLibrary {
         const beforeState = ctx.adapter.state();
         if (trial && !this.trialAllowed(beforeState.worldId)) return fail('BAD_ARGS', '当前世界没有隔离试验授权');
         const postcondition: Condition = validateCondition(bindRelative(substitute(definition.postcondition, args.parameters), beforeState), ctx.adapter, ctx.memory, beforeState);
-        const before = evaluateCondition(postcondition, beforeState);
+        const before = evaluateCondition(postcondition, beforeState, beforeState.worldId, observeCondition(postcondition, ctx.senses));
         if (!observationReady(beforeState)) return fail('NOT_CONNECTED', '方法试验需要有效观测');
         let result: SkillResult;
         try { result = await executeProgram(definition.program, args.parameters, ctx); }
         catch (error) { if (isAbort(error)) throw error; result = fail('ERROR', error instanceof Error ? error.message : String(error)); }
         throwIfAborted(ctx.signal);
         const afterState: AgentState = ctx.adapter.state();
-        const after = evaluateCondition(postcondition, afterState, beforeState.worldId);
+        const afterObservations = observeCondition(postcondition, ctx.senses);
+        const after = evaluateCondition(postcondition, afterState, beforeState.worldId, afterObservations);
         const sameSession = afterState.sessionId === beforeState.sessionId && afterState.dim === beforeState.dim && afterState.observationId !== beforeState.observationId;
         const satisfied = sameSession && after.status === 'satisfied';
         if (trial) {
-          const status: MethodTrial['status'] = result.status !== 'succeeded' || !satisfied ? 'failed' : before.status === 'satisfied' ? 'uninformative' : 'verified';
+          const status: MethodTrial['status'] = result.status !== 'succeeded' || !satisfied ? 'failed' : before.status === 'unsatisfied' ? 'verified' : 'uninformative';
           definition.trials.push({ id: shortId('trial_'), ts: Date.now(), worldId: afterState.worldId, dimension: afterState.dim, sessionId: afterState.sessionId, observationId: afterState.observationId,
             contextKey: `${beforeState.worldId}:${beforeState.dim}:${Math.floor(beforeState.pos.x / 16)}:${Math.floor(beforeState.pos.z / 16)}:${JSON.stringify(args.parameters)}`,
-            parameters: args.parameters, before: before.actual, after: after.actual, status, reason: satisfied ? before.status === 'satisfied' ? '条件在试验前已成立，不作为学习证据' : '执行后同会话事实条件成立' : '执行结束但事实条件未成立', source: 'adapter.state' });
+            parameters: args.parameters, before: before.actual, after: after.actual, status,
+            reason: result.status !== 'succeeded' ? result.summary : satisfied ? before.status === 'satisfied' ? '条件在试验前已成立，不作为学习证据' : before.status === 'unknown' ? '试验前状态未知，不能证明本次动作改变了条件' : '执行后同会话事实条件成立' : after.reason ?? '执行结束但事实条件未成立',
+            source: afterObservations.length ? 'adapter.state+vision' : 'adapter.state' });
           if (definition.trials.length > 20) definition.trials.shift();
           this.save();
           if (status === 'verified') this.promote(definition.name, definition.version);
         }
         const facts = { verified: definition.status === 'verified', expected: postcondition, before: before.actual, actual: after.actual };
         if (result.status !== 'succeeded') return { ...result, data: { ...result.data, ...facts } };
-        if (!satisfied) return fail('MISSING_MATERIALS', '方法步骤结束，但真实观测未满足约定结果', facts);
+        if (!satisfied) return fail('EFFECT_NOT_CONFIRMED', '方法步骤结束，但真实观测未满足约定结果', facts);
         return ok(`${trial ? '候选试验' : '方法'} ${definition.name} v${definition.version} 的当前事实条件成立`, facts);
       },
     };

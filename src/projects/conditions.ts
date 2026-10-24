@@ -1,5 +1,6 @@
-import type { AgentState, GameAdapter, Vec3Like } from '../adapter/types.ts';
+import type { AgentState, BlockObservation, GameAdapter, Vec3Like } from '../adapter/types.ts';
 import type { WorldMemory } from '../memory/store.ts';
+import type { Senses } from '../skills/types.ts';
 import { dist3 } from '../util.ts';
 import type { Condition, ConditionResult } from './types.ts';
 
@@ -12,7 +13,7 @@ export function observationReady(state: AgentState): boolean {
     state.observationId !== undefined && !!state.worldId && validPos(state.pos) && !!state.dim;
 }
 
-/** Validate model specifications using the item registry and observed locations, never model coordinates alone. */
+/** Coordinates in block predicates grant no read access: evaluation requires a fresh Vision receipt. */
 export function validateCondition(raw: unknown, adapter: Pick<GameAdapter, 'isKnownItem'>, memory: WorldMemory, state: AgentState, depth = 0): Condition {
   if (!object(raw) || depth > 4) throw new Error('验收条件必须是受支持的有限条件');
   if (raw.type === 'inventory_min') {
@@ -38,11 +39,42 @@ export function validateCondition(raw: unknown, adapter: Pick<GameAdapter, 'isKn
     if (JSON.stringify(condition).length > 12_000) throw new Error('验收条件过大');
     return condition;
   }
+  if (raw.type === 'self_state') {
+    if (['inWater', 'inLava', 'onGround'].includes(raw.field) && typeof raw.equals === 'boolean') return { type: 'self_state', field: raw.field, equals: raw.equals };
+    if (['held', 'riding'].includes(raw.field) && (raw.equals === null || typeof raw.equals === 'string' && /^[a-z0-9_:-]{1,80}$/.test(raw.equals))) {
+      if (raw.field === 'held' && raw.equals !== null && !adapter.isKnownItem(raw.equals)) throw new Error('手持验收包含未知物品');
+      return { type: 'self_state', field: raw.field, equals: raw.equals };
+    }
+    throw new Error('self_state 只支持 held/riding 的具体名称或 null，及 inWater/inLava/onGround 的布尔值');
+  }
+  if (raw.type === 'equipment') {
+    if (!['hand', 'off-hand', 'head', 'torso', 'legs', 'feet'].includes(raw.slot) || !(raw.item === null || typeof raw.item === 'string' && adapter.isKnownItem(raw.item))) throw new Error('装备验收需要有效槽位和具体物品或 null');
+    return { type: 'equipment', slot: raw.slot, item: raw.item };
+  }
+  if (raw.type === 'block_state') {
+    if (typeof raw.dimension !== 'string' || !raw.dimension || raw.dimension.length > 100 || !validPos(raw.pos) || !Object.values(raw.pos).every(Number.isInteger)) throw new Error('方块验收需要有效维度和整数坐标');
+    if (raw.name !== undefined && (typeof raw.name !== 'string' || !/^[a-z0-9_]{1,80}$/.test(raw.name))) throw new Error('方块名称无效');
+    if (raw.properties !== undefined && (!object(raw.properties) || Object.keys(raw.properties).length > 8 || Object.entries(raw.properties).some(([key, value]) =>
+      !/^[a-z][a-z0-9_]{0,40}$/.test(key) || !(typeof value === 'boolean' || typeof value === 'number' && Number.isFinite(value) || typeof value === 'string' && value.length <= 80)))) throw new Error('方块状态最多 8 个有限的属性');
+    if (!raw.name && (!raw.properties || !Object.keys(raw.properties).length)) throw new Error('方块验收至少指定 name 或 properties');
+    return { type: 'block_state', dimension: raw.dimension, pos: { x: raw.pos.x, y: raw.pos.y, z: raw.pos.z }, ...(raw.name ? { name: raw.name } : {}), ...(raw.properties ? { properties: { ...raw.properties } } : {}) };
+  }
   throw new Error(`不支持的事实验收类型: ${String(raw.type)}`);
 }
 
+/** Collect a bounded synchronous observation set once, shared by all branches. */
+export function observeCondition(condition: Condition, senses?: Pick<Senses, 'observeBlocks'>): BlockObservation[] {
+  const targets = new Map<string, Vec3Like>();
+  const visit = (c: Condition) => {
+    if (c.type === 'all_of') c.conditions.forEach(visit);
+    else if (c.type === 'block_state' && targets.size < 32) targets.set(JSON.stringify(c.pos), c.pos);
+  };
+  visit(condition);
+  return targets.size ? senses?.observeBlocks?.([...targets.values()]) ?? [] : [];
+}
+
 /** Receives one complete adapter snapshot; every branch, including all_of, uses that same snapshot. */
-export function evaluateCondition(condition: Condition, state: AgentState, worldId = state.worldId): ConditionResult {
+export function evaluateCondition(condition: Condition, state: AgentState, worldId = state.worldId, observations: BlockObservation[] = []): ConditionResult {
   if (!observationReady(state) || state.worldId !== worldId) return { status: 'unknown', actual: null, reason: '没有同一世界的有效存活观测' };
   if (condition.type === 'inventory_min') {
     const count = state.inventory.filter((i) => i.name === condition.item).reduce((sum, i) => sum + i.count, 0);
@@ -53,15 +85,37 @@ export function evaluateCondition(condition: Condition, state: AgentState, world
     const distance = dist3(state.pos, condition.pos);
     return { status: state.dim === condition.dimension && distance <= condition.radius ? 'satisfied' : 'unsatisfied', actual: { dimension: state.dim, pos: { ...state.pos }, distance, requiredDimension: condition.dimension, radius: condition.radius } };
   }
-  const children = condition.conditions.map((c) => evaluateCondition(c, state, worldId));
+  if (condition.type === 'self_state') {
+    const actual = state[condition.field];
+    if (actual === undefined) return { status: 'unknown', actual: null, reason: '适配器没有提供该自身状态' };
+    return { status: actual === condition.equals ? 'satisfied' : 'unsatisfied', actual: { field: condition.field, value: actual, expected: condition.equals } };
+  }
+  if (condition.type === 'equipment') {
+    if (condition.slot !== 'hand' && !state.equipment) return { status: 'unknown', actual: null, reason: '适配器没有提供装备栏' };
+    const item = condition.slot === 'hand' ? state.held : state.equipment?.find((e) => e.slot === condition.slot)?.name ?? null;
+    return { status: item === condition.item ? 'satisfied' : 'unsatisfied', actual: { slot: condition.slot, item, expected: condition.item } };
+  }
+  if (condition.type === 'block_state') {
+    const observed = observations.find((o) => o.source === 'vision' && o.worldId === worldId && o.sessionId === state.sessionId && o.dimension === state.dim &&
+      o.dimension === condition.dimension && o.observationId >= state.observationId && Date.now() - o.observedAt >= 0 && Date.now() - o.observedAt <= 1000 && dist3(o.pos, condition.pos) < 0.01);
+    if (!observed) return { status: 'unknown', actual: null, reason: '目标没有同会话、当前视野内的有效方块观测；需靠近或转头确认' };
+    const matches = (!condition.name || observed.name === condition.name) && Object.entries(condition.properties ?? {}).every(([key, value]) =>
+      Object.hasOwn(observed.properties, key) && String(observed.properties[key]) === String(value));
+    return { status: matches ? 'satisfied' : 'unsatisfied', actual: observed };
+  }
+  const children = condition.conditions.map((c) => evaluateCondition(c, state, worldId, observations));
   return { status: children.every((r) => r.status === 'satisfied') ? 'satisfied' : children.some((r) => r.status === 'unknown') ? 'unknown' : 'unsatisfied', actual: children };
 }
 
 /** Measured distance/quantity deficits support progress tracking without trusting skill success strings. */
-export function conditionDeficit(condition: Condition, state: AgentState, worldId = state.worldId): number | null {
+export function conditionDeficit(condition: Condition, state: AgentState, worldId = state.worldId, observations: BlockObservation[] = []): number | null {
   if (!observationReady(state) || state.worldId !== worldId) return null;
   if (condition.type === 'inventory_min') return Math.max(0, condition.count - state.inventory.filter((i) => i.name === condition.item).reduce((n, i) => n + i.count, 0)) / condition.count;
   if (condition.type === 'location_near') return state.dim === condition.dimension ? Math.max(0, dist3(state.pos, condition.pos) - condition.radius) : null;
-  const deficits = condition.conditions.map((c) => conditionDeficit(c, state, worldId));
+  if (condition.type !== 'all_of') {
+    const result = evaluateCondition(condition, state, worldId, observations);
+    return result.status === 'unknown' ? null : result.status === 'satisfied' ? 0 : 1;
+  }
+  const deficits = condition.conditions.map((c) => conditionDeficit(c, state, worldId, observations));
   return deficits.some((n) => n === null) ? null : deficits.reduce<number>((sum, n) => sum + n!, 0);
 }

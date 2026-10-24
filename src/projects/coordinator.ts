@@ -1,8 +1,9 @@
 import type { AgentState, GameAdapter } from '../adapter/types.ts';
 import type { WorldMemory } from '../memory/store.ts';
+import type { Senses } from '../skills/types.ts';
 import { applyDecision, type ValidatedIntentDecision } from '../intentions/decision.ts';
 import { shortId } from '../util.ts';
-import { conditionDeficit, evaluateCondition, observationReady, validateCondition } from './conditions.ts';
+import { conditionDeficit, evaluateCondition, observeCondition, observationReady, validateCondition } from './conditions.ts';
 import type { Binding, Condition, Evidence, PauseReason, Project, ProjectSpec } from './types.ts';
 
 export interface AttemptOutcome {
@@ -18,7 +19,7 @@ export interface AttemptOutcome {
 export class ProjectCoordinator {
   private baseline: { projectId: string; revision: number; milestone: number; deficit: number | null } | null = null;
 
-  constructor(private memory: WorldMemory, private adapter: Pick<GameAdapter, 'state' | 'isKnownItem'>) {}
+  constructor(private memory: WorldMemory, private adapter: Pick<GameAdapter, 'state' | 'isKnownItem'>, private senses?: Pick<Senses, 'observeBlocks'>) {}
 
   decide(decision: ValidatedIntentDecision, state = this.adapter.state()): Binding {
     return applyDecision(this.memory, this, decision, state);
@@ -48,7 +49,7 @@ export class ProjectCoordinator {
       checkpoint: { ts, reason: 'created' }, createdAt: ts, updatedAt: ts,
     };
     this.memory.saveProject(project);
-    this.baseline = { projectId: project.id, revision: project.revision, milestone: project.currentMilestone, deficit: conditionDeficit(this.target(project), state, project.worldId) };
+    this.baseline = { projectId: project.id, revision: project.revision, milestone: project.currentMilestone, deficit: this.deficit(this.target(project), state, project.worldId) };
     return project;
   }
 
@@ -68,7 +69,7 @@ export class ProjectCoordinator {
     project.checkpoint = { ts: Date.now(), reason: 'specification_revised' };
     project.updatedAt = Date.now();
     this.memory.saveProject(project);
-    this.baseline = { projectId: project.id, revision: project.revision, milestone: project.currentMilestone, deficit: conditionDeficit(this.target(project), state, project.worldId) };
+    this.baseline = { projectId: project.id, revision: project.revision, milestone: project.currentMilestone, deficit: this.deficit(this.target(project), state, project.worldId) };
     return project;
   }
 
@@ -87,12 +88,17 @@ export class ProjectCoordinator {
 
   private target(project: Project): Condition { return project.milestones[project.currentMilestone]?.condition ?? project.successCondition; }
 
+  private deficit(condition: Condition, state: AgentState, worldId: string): number | null {
+    return conditionDeficit(condition, state, worldId, observeCondition(condition, this.senses));
+  }
+
   private evidence(project: Project, condition: Condition, state: AgentState, milestoneId?: string): Evidence {
-    const result = evaluateCondition(condition, state, project.worldId);
+    const observations = observeCondition(condition, this.senses);
+    const result = evaluateCondition(condition, state, project.worldId, observations);
     return this.memory.recordEvidence({
       projectId: project.id, revision: project.revision, ...(milestoneId ? { milestoneId } : {}), condition,
       sessionId: state.sessionId ?? 'unavailable', observationId: state.observationId ?? 'unavailable', worldId: state.worldId ?? project.worldId,
-      ts: Date.now(), source: 'adapter.state', actual: result.actual, status: result.status, ...(result.reason ? { reason: result.reason } : {}),
+      ts: Date.now(), source: observations.length ? 'adapter.state+vision' : 'adapter.state', actual: result.actual, status: result.status, ...(result.reason ? { reason: result.reason } : {}),
     });
   }
 
@@ -107,7 +113,7 @@ export class ProjectCoordinator {
       this.memory.saveProject(project);
     }
     if (!this.baseline || this.baseline.projectId !== project.id || this.baseline.revision !== project.revision) {
-      this.baseline = { projectId: project.id, revision: project.revision, milestone: project.currentMilestone, deficit: conditionDeficit(this.target(project), state, project.worldId) };
+      this.baseline = { projectId: project.id, revision: project.revision, milestone: project.currentMilestone, deficit: this.deficit(this.target(project), state, project.worldId) };
     }
     return (() => {
       let changed = false;
@@ -145,16 +151,17 @@ export class ProjectCoordinator {
     if (!project || !outcome.executed || outcome.cancelled || outcome.interrupted || project.pauseReasons.length || project.status !== 'active') return project;
     const after = outcome.after ?? state ?? this.adapter.state();
     if (!observationReady(after) || after.worldId !== project.worldId) return project;
-    const beforeMetric = outcome.before ? conditionDeficit(this.target(project), outcome.before, project.worldId) : this.baseline?.deficit;
+    // Historical snapshots cannot be paired with today's visual receipts.
+    const beforeMetric = (outcome.before ? conditionDeficit(this.target(project), outcome.before, project.worldId) : null) ?? this.baseline?.deficit;
     const beforeMilestone = this.baseline?.milestone ?? project.currentMilestone;
     this.reconcile(after);
     const current = this.memory.projects().find((p) => p.id === project.id)!;
     if (current.status === 'completed') return current;
-    const afterMetric = conditionDeficit(this.target(current), after, current.worldId);
+    const afterMetric = this.deficit(this.target(current), after, current.worldId);
     const progressed = current.currentMilestone > beforeMilestone || (beforeMetric != null && afterMetric != null && afterMetric < beforeMetric - 1e-6);
-    current.noProgressAttempts = progressed ? 0 : current.noProgressAttempts + 1;
+    current.noProgressAttempts = progressed ? 0 : afterMetric === null ? current.noProgressAttempts : current.noProgressAttempts + 1;
     if (current.noProgressAttempts >= 3) current.status = 'blocked';
-    current.checkpoint = { ts: Date.now(), reason: progressed ? 'observed_progress' : current.status === 'blocked' ? 'three_attempts_without_progress' : 'attempt_without_progress', observationId: after.observationId, evidenceId: current.lastEvidenceId };
+    current.checkpoint = { ts: Date.now(), reason: progressed ? 'observed_progress' : afterMetric === null ? 'progress_unknown' : current.status === 'blocked' ? 'three_attempts_without_progress' : 'attempt_without_progress', observationId: after.observationId, evidenceId: current.lastEvidenceId };
     current.updatedAt = Date.now();
     this.memory.saveProject(current);
     this.baseline = { projectId: current.id, revision: current.revision, milestone: current.currentMilestone, deficit: afterMetric };
@@ -212,7 +219,7 @@ export class ProjectCoordinator {
     project.checkpoint = { ...project.checkpoint, ts: Date.now(), reason: 'explicit_resume_deferred' };
     project.updatedAt = Date.now();
     this.memory.saveProject(project);
-    this.baseline = { projectId: project.id, revision: project.revision, milestone: project.currentMilestone, deficit: conditionDeficit(this.target(project), state, project.worldId) };
+    this.baseline = { projectId: project.id, revision: project.revision, milestone: project.currentMilestone, deficit: this.deficit(this.target(project), state, project.worldId) };
     return project;
   }
 }

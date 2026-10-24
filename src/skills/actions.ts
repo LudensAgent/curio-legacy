@@ -1,5 +1,6 @@
 import { DIRS } from '../perception/perception.ts';
-import { dist3, sleep } from '../util.ts';
+import { dist3, sleep, throwIfAborted } from '../util.ts';
+import type { EntityInfo } from '../adapter/types.ts';
 import { sighted, yawOfDir } from './movement.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill } from './types.ts';
 import { resolveItemAlias } from './work.ts';
@@ -120,6 +121,85 @@ export const interact: Skill<{ entity: string; with?: string }> = {
   },
 };
 
+// ------------------------------------------------------------------ hit_entity
+export const hitEntity: Skill<{ entity: string | number; hits: number }> = {
+  name: 'hit_entity',
+  description: '对指定可见实体有限次左键；复核距离与遮挡，报告生命变化、附近掉落及背包实增；离开视野不等于击败或已回收',
+  argsDoc: '{"entity":"<实体名>" | <实体ID>, "hits"?:1-8}',
+  timeoutMs: 25000,
+  movement: true,
+  outcomeBoundary: true,
+  validate(raw) {
+    const a = obj(raw), target = a.entity ?? a.entityId;
+    const entity = typeof target === 'string' ? target.trim().toLowerCase() : target;
+    if (typeof entity !== 'string' && (!Number.isInteger(entity) || entity < 0) || typeof entity === 'string' && (!entity || entity.length > 80)) return { ok: false, error: 'entity 必须是实体名或非负整数ID' };
+    const hits = a.hits ?? 1;
+    if (!Number.isInteger(hits) || hits < 1 || hits > 8) return { ok: false, error: 'hits 必须为 1-8 的整数' };
+    return { ok: true, args: { entity, hits } };
+  },
+  async run(ctx, args) {
+    const { adapter, senses, signal } = ctx;
+    const visible = () => { senses.refresh(); return senses.perceivedEntities(16).filter((e) => e.perception !== 'heard'); };
+    const matches = (e: EntityInfo) => e.kind !== 'item' && (typeof args.entity === 'number' ? e.id === args.entity : e.name.toLowerCase() === args.entity || e.name.toLowerCase().replace(/^player:/, '') === args.entity || e.name.toLowerCase().endsWith(`_${args.entity}`));
+    let target = visible().filter(matches).sort((a, b) => a.dist - b.dist)[0];
+    if (!target) return fail('NOT_FOUND', `当前看不见实体 ${args.entity}；仅听见或记住的位置不能用来左键`);
+    const targetId = target.id, name = target.name;
+    const aim = (e: EntityInfo) => ({ ...e.pos, y: e.pos.y + (e.height ?? 1.6) * 0.85 });
+    const eye = () => adapter.eye() ?? { ...adapter.state().pos, y: adapter.state().pos.y + 1.62 };
+    const withinReach = (e: EntityInfo) => dist3(eye(), aim(e)) <= 3;
+    const clearReach = (e: EntityInfo) => {
+      const from = eye(), to = aim(e), distance = dist3(from, to);
+      // Check only the short segment to an already visible target. Optical
+      // visibility through glass alone does not make a legal melee path.
+      for (let d = 0.1; d < distance; d += 0.2) {
+        const k = d / Math.max(0.01, distance), p = { x: Math.floor(from.x + (to.x - from.x) * k), y: Math.floor(from.y + (to.y - from.y) * k), z: Math.floor(from.z + (to.z - from.z) * k) };
+        const block = adapter.blockAt(p);
+        if (!block || !/^(air|cave_air|void_air|water|bubble_column|short_grass|grass|tall_grass|fern|large_fern|vine|torch|wall_torch)$/.test(block)) return false;
+      }
+      return true;
+    };
+    let sent = 0, healthDrops = 0, lastPos = target.pos, stopped = '';
+    try {
+      throwIfAborted(signal);
+      if (!withinReach(target)) {
+        await adapter.moveTo({ kind: 'follow_entity', entityId: targetId, range: 1.8 }, { signal, timeoutMs: Math.max(1, Math.min(12000, ctx.deadline - Date.now() - 6000)), constructionSafe: true, allowSwimming: false });
+        await sleep(180, signal);
+      }
+      const before = new Map(adapter.state().inventory.map((item) => [item.name, item.count]));
+      const oldDrops = new Set(visible().filter((e) => e.kind === 'item').map((e) => e.id));
+      for (; sent < args.hits && Date.now() < ctx.deadline - 650;) {
+        throwIfAborted(signal);
+        const current = visible().find((e) => e.id === targetId && e.kind !== 'item');
+        if (!current) { stopped = '目标离开视野，是否被破坏尚不确定'; break; }
+        target = current;
+        if (!withinReach(target)) { stopped = '目标超出近身距离'; break; }
+        if (!clearReach(target)) { stopped = '目标与身体之间有遮挡或未知方块'; break; }
+        lastPos = target.pos;
+        const beforeHp = target.hp;
+        if (!(await adapter.attack(targetId, signal))) { stopped = '底层没有发送左键'; break; }
+        sent++;
+        await sleep(650, signal);
+        const after = visible().find((e) => e.id === targetId);
+        if (typeof beforeHp === 'number' && typeof after?.hp === 'number' && after.hp < beforeHp) healthDrops++;
+      }
+      throwIfAborted(signal);
+      const now = visible(), targetVisible = now.some((e) => e.id === targetId);
+      if (!targetVisible && !stopped) stopped = '目标离开视野，是否被破坏尚不确定';
+      if (sent < args.hits && !stopped) stopped = '本次时间预算已用完';
+      const drops = now.filter((e) => e.kind === 'item' && !oldDrops.has(e.id) && dist3(e.pos, lastPos) <= 3).map((e) => ({ id: e.id, name: e.name.replace(/^item:/, ''), count: e.count ?? 1 }));
+      const gained = adapter.state().inventory.map((item) => ({ name: item.name, count: item.count - (before.get(item.name) ?? 0) })).filter((item) => item.count > 0);
+      const reasons = [...(healthDrops ? [`观察到 ${healthDrops} 次生命值下降`] : []), ...(drops.length ? [`目标附近出现掉落物 ${drops.map((e) => e.name).join('、')}`] : []), ...(gained.length ? [`背包实增 ${gained.map((e) => `${e.name}×${e.count}`).join('、')}`] : [])];
+      const data = { targetId, entity: name, sent, healthDrops, targetVisible, drops, gained, defeatVerified: false,
+        effectEvidence: { verified: reasons.length > 0 || sent === 0, changed: reasons.length > 0, reasons: reasons.length ? reasons : [stopped || '只确认发送左键，没有观察到实际效果'] } };
+      const summary = `对 ${name} 发送了 ${sent}/${args.hits} 次左键${reasons.length ? `；${reasons.join('；')}` : '；命中效果未确认'}${stopped ? `；${stopped}` : ''}；没有据此认定已击败或已回收`;
+      return reasons.length ? ok(summary, data) : fail('EFFECT_NOT_CONFIRMED', summary, data);
+    } catch (error) {
+      if (isAbort(error)) throw error;
+      return fail(codeFromError(error), `对 ${name} 左键失败：${(error as Error).message}`, { targetId, sent });
+    }
+  },
+};
+
 // ------------------------------------------------------------------ dismount
 export const dismount: Skill<{}> = {
   name: 'dismount',
@@ -139,6 +219,7 @@ export const dismount: Skill<{}> = {
 // ------------------------------------------------------------------ ride
 export const ride: Skill<{ direction?: string; to?: { x: number; z: number }; distance: number; until?: string }> = {
   name: 'ride',
+  outcomeBoundary: true,
   description: '操控正在乘坐的东西朝方向或坐标前进，靠岸/遇障碍停下，until 看见即停',
   argsDoc: '{"direction"?: "N|NE|E|SE|S|SW|W|NW", "to"?: "x,z", "distance"?: 8-240, "until"?: "<方块/生物>"}',
   timeoutMs: 120000,
@@ -184,4 +265,4 @@ export const ride: Skill<{ direction?: string; to?: { x: number; z: number }; di
   },
 };
 
-export const actionSkills = [useItem, interact, dismount, ride];
+export const actionSkills = [useItem, interact, hitEntity, dismount, ride];

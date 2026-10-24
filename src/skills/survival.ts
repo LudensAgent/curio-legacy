@@ -247,6 +247,7 @@ export const hunt: Skill<{ animal?: string; count: number }> = {
   argsDoc: '{"animal"?: "cow|pig|sheep|chicken|rabbit|cod|salmon", "count"?: 1-4}',
   timeoutMs: 90000,
   movement: true,
+  outcomeBoundary: true,
   validate(raw) {
     const a = obj(raw);
     const animal = a.animal ? String(a.animal) : undefined;
@@ -360,6 +361,7 @@ export const pickupItems: Skill<{ radius: number; item?: string }> = {
   argsDoc: '{"radius"?: 4-24, "item"?: "<物品名>"}',
   timeoutMs: 60000,
   movement: true,
+  outcomeBoundary: true,
   validate(raw) {
     const a = obj(raw);
     const item = typeof a.item === 'string' && a.item.trim() ? a.item.trim().replace(/^minecraft:/, '') : undefined;
