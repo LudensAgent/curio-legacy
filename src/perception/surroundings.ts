@@ -11,6 +11,7 @@ const SOFT = /^(air|cave_air|void_air|short_grass|grass|tall_grass|fern|large_fe
 const LIQUID = new Set(['water', 'lava', 'bubble_column']);
 
 export const DIR_OFFSETS: Record<string, [number, number]> = { N: [0, -1], E: [1, 0], S: [0, 1], W: [-1, 0] };
+export type ExitOptions = Record<string, { walk: boolean | null; step_up: boolean | null }>;
 
 const soft = (n: string | null) => n == null || SOFT.test(n);
 const solidFloor = (n: string | null) => n != null && !SOFT.test(n) && !LIQUID.has(n);
@@ -21,6 +22,7 @@ export interface Surroundings {
   /** 四面都走不了 */
   enclosed: boolean;
   exits: string[];
+  exitOptions: ExitOptions;
   sky: boolean;
   below: string | null;
   above: string | null;
@@ -38,16 +40,23 @@ export function surroundings(adapter: GameAdapter, pos: Vec3Like = adapter.state
   // 天光 ≥ 12：露天（树冠、草叶只会挡掉一两级）
   const sky = (adapter.lightAt(x, y + 1, z)?.sky ?? 0) >= 12;
   const exits: string[] = [], blocked: string[] = [];
+  const exitOptions: ExitOptions = {};
   for (const [d, [dx, dz]] of Object.entries(DIR_OFFSETS)) {
     const feet = at(dx, 0, dz), head = at(dx, 1, dz);
+    const floor = at(dx, -1, dz), lowerFloor = at(dx, -2, dz), upperHead = at(dx, 2, dz);
+    const unknown = feet === null || head === null;
+    exitOptions[d] = {
+      walk: unknown ? null : !soft(feet) || !soft(head) ? false : floor === null ? null : LIQUID.has(floor) ? false : solidFloor(floor) ? true : lowerFloor === null ? null : solidFloor(lowerFloor),
+      step_up: unknown ? null : soft(feet) || !solidFloor(feet) || !soft(head) ? false : upperHead === null || above === null ? null : soft(upperHead) && soft(above),
+    };
     if (feet === null || head === null) blocked.push(`${d} 邻格未加载`);
     else if (soft(feet) && soft(head)) {
       // 平走；或者往下一格
-      if (solidFloor(at(dx, -1, dz)) || solidFloor(at(dx, -2, dz))) exits.push(d);
-      else if (LIQUID.has(at(dx, -1, dz) ?? '')) blocked.push(`${d} ${at(dx, -1, dz)}`);
-      else if (at(dx, -1, dz) === null || at(dx, -2, dz) === null) blocked.push(`${d} 下方未知`);
+      if (exitOptions[d].walk) exits.push(d);
+      else if (LIQUID.has(floor ?? '')) blocked.push(`${d} ${floor}`);
+      else if (exitOptions[d].walk === null) blocked.push(`${d} 下方未知`);
       else blocked.push(`${d} 下方有落差，需观察落点`);
-    } else if (!soft(feet) && soft(head) && soft(at(dx, 2, dz)) && soft(above)) exits.push(`${d}↑`); // 跳上一格
+    } else if (exitOptions[d].step_up) exits.push(`${d}↑`); // 跳上一格
     else blocked.push(`${d} ${[feet, head].filter((n) => !soft(n)).join('/')}`);
   }
   const parts = [
@@ -57,7 +66,7 @@ export function surroundings(adapter: GameAdapter, pos: Vec3Like = adapter.state
     exits.length ? `一步内可走：${exits.join('、')}` : '没有平走或一步跳跃出口（下行落点尚未评估）',
     ...(blocked.length ? [`挡住：${blocked.join('，')}`] : []),
   ];
-  return { text: parts.join('｜'), enclosed: exits.length === 0, exits, sky, below, above,
+  return { text: parts.join('｜'), enclosed: exits.length === 0, exits, exitOptions, sky, below, above,
     support: { block: below, pos: supportPos }, feet: { block: at(0, 0, 0), pos: { x, y, z } },
     head: { block: at(0, 1, 0), pos: { x, y: y + 1, z } } };
 }

@@ -406,6 +406,7 @@ export const wander: Skill<{ radius: number }> = {
 // ------------------------------------------------------------------ look_around
 export const lookAround: Skill<{ seconds: number; for?: string; direction?: string }> = {
   name: 'look_around',
+  readOnly: true,
   description: '停下来专门找东西（for），或只看某个方向（direction）；看见就停',
   argsDoc: '{"for"?: "<要找的方块或生物>", "direction"?: "N|NE|E|SE|S|SW|W|NW", "seconds"?: 2-20}',
   timeoutMs: 25000,

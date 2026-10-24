@@ -3,7 +3,7 @@ import type { WorldMemory } from '../memory/store.ts';
 import type { Senses } from '../skills/types.ts';
 import { applyDecision, type ValidatedIntentDecision } from '../intentions/decision.ts';
 import { shortId } from '../util.ts';
-import { conditionDeficit, evaluateCondition, observeCondition, observationReady, validateCondition } from './conditions.ts';
+import { conditionDeficit, evaluateCondition, observeCondition, observationReady, validateCondition, type ConditionPerception } from './conditions.ts';
 import type { Binding, Condition, Evidence, PauseReason, Project, ProjectSpec } from './types.ts';
 
 export interface AttemptOutcome {
@@ -19,7 +19,7 @@ export interface AttemptOutcome {
 export class ProjectCoordinator {
   private baseline: { projectId: string; revision: number; milestone: number; deficit: number | null } | null = null;
 
-  constructor(private memory: WorldMemory, private adapter: Pick<GameAdapter, 'state' | 'isKnownItem'>, private senses?: Pick<Senses, 'observeBlocks'>) {}
+  constructor(private memory: WorldMemory, private adapter: Pick<GameAdapter, 'state' | 'isKnownItem'>, private senses?: Pick<Senses, 'observeBlocks'> & { snapshot?(): ConditionPerception }) {}
 
   decide(decision: ValidatedIntentDecision, state = this.adapter.state()): Binding {
     return applyDecision(this.memory, this, decision, state);
@@ -88,17 +88,23 @@ export class ProjectCoordinator {
 
   private target(project: Project): Condition { return project.milestones[project.currentMilestone]?.condition ?? project.successCondition; }
 
+  private perceptionFor(condition: Condition): ConditionPerception | undefined {
+    const needsPerception = (c: Condition): boolean => c.type === 'sky_visible' || c.type === 'underground' || c.type === 'all_of' && c.conditions.some(needsPerception);
+    return needsPerception(condition) ? this.senses?.snapshot?.() : undefined;
+  }
+
   private deficit(condition: Condition, state: AgentState, worldId: string): number | null {
-    return conditionDeficit(condition, state, worldId, observeCondition(condition, this.senses));
+    return conditionDeficit(condition, state, worldId, observeCondition(condition, this.senses), this.perceptionFor(condition));
   }
 
   private evidence(project: Project, condition: Condition, state: AgentState, milestoneId?: string): Evidence {
     const observations = observeCondition(condition, this.senses);
-    const result = evaluateCondition(condition, state, project.worldId, observations);
+    const percept = this.perceptionFor(condition);
+    const result = evaluateCondition(condition, state, project.worldId, observations, percept);
     return this.memory.recordEvidence({
       projectId: project.id, revision: project.revision, ...(milestoneId ? { milestoneId } : {}), condition,
       sessionId: state.sessionId ?? 'unavailable', observationId: state.observationId ?? 'unavailable', worldId: state.worldId ?? project.worldId,
-      ts: Date.now(), source: observations.length ? 'adapter.state+vision' : 'adapter.state', actual: result.actual, status: result.status, ...(result.reason ? { reason: result.reason } : {}),
+      ts: Date.now(), source: observations.length || percept ? 'adapter.state+vision' : 'adapter.state', actual: result.actual, status: result.status, ...(result.reason ? { reason: result.reason } : {}),
     });
   }
 

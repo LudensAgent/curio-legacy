@@ -18,7 +18,18 @@ export const ACTIVITY_KINDS: readonly ActivityKind[] = ['gather', 'craft', 'buil
 export type DecisionKind = 'continue' | 'adjust' | 'new' | 'detour' | 'switch' | 'experiment' | 'rest';
 export const DECISION_KINDS: readonly DecisionKind[] = ['continue', 'adjust', 'new', 'detour', 'switch', 'experiment', 'rest'];
 
-export interface StepResult { skill: string; args?: unknown; status: string; failureCode?: string; summary: string; at: number; durationMs: number }
+export interface StepResult { skill: string; args?: unknown; status: string; failureCode?: string; summary: string; at: number; durationMs: number; pos?: { x: number; y: number; z: number }; view?: string }
+
+/** 只保留最近十分钟的结束经历，用来认出在同一带反复失败。 */
+export interface ActivityEnd {
+  pos: { x: number; y: number; z: number };
+  outcome: ActivityOutcome;
+  failureCode?: string;
+  what: string;
+  at: number;
+}
+
+export interface StuckHere { minutes: number; tried: string[]; failureCode: string; lastAt: number }
 
 /** 一段活：模型给出 routine，身体负责连续执行、重复和小范围的应变 */
 export interface Activity {
@@ -48,6 +59,8 @@ export interface Activity {
   adaptations: string[];
   results: StepResult[];
   startInventory: Record<string, number>;
+  /** 上一步开工时的身体/视野；只有环境确实变化才原样重试。 */
+  stepStart?: { pos: { x: number; y: number; z: number }; view?: string };
 }
 
 export type ActivityOutcome = 'done' | 'stuck' | 'abandoned' | 'interrupted' | 'replaced';
@@ -81,6 +94,7 @@ export interface KnowHow {
   signature?: string;
   wins: number;
   losses: number;
+  unverified?: boolean;
   createdAt: number;
   updatedAt: number;
   source: 'reflection' | 'experiment' | 'observed';
@@ -122,7 +136,7 @@ export interface MindDecision {
   activity?: ActivityDraft;
   next?: ActivityDraft;
   agenda?: { add: { text: string; kind: AgendaItem['kind']; horizon: AgendaItem['horizon'] }[]; done: string[]; drop: string[]; focus?: string };
-  learned?: string;
+  learned?: string | { revise: string; text: string };
   hypothesis?: string;
   /** 上一段实验的结论（模型看完实际结果后的判断） */
   verdict?: 'supported' | 'refuted' | 'unclear';

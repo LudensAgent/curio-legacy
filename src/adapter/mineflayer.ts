@@ -570,6 +570,15 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         goal = goals.GoalLookAtBlock
           ? new goals.GoalLookAtBlock(this.vec(target.pos), b.world, { reach: 4 })
           : new goals.GoalNear(target.pos.x, target.pos.y, target.pos.z, 2);
+        // GoalLookAtBlock 的距离判定偏向脚部节点；地下目标还须核对眼睛到方块中心的真实挖掘距离。
+        {
+          const nominalEnd = goal.isEnd.bind(goal);
+          goal.isEnd = (node: any) => nominalEnd(node) && Math.hypot(
+            node.x + 0.5 - target.pos.x - 0.5,
+            node.y + (b.entity.eyeHeight ?? 1.62) - target.pos.y - 0.5,
+            node.z + 0.5 - target.pos.z - 0.5,
+          ) <= 4;
+        }
         break;
       case 'place_block': {
           const excluded = new Set<string>();
@@ -845,6 +854,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const b = this.bot;
     const block = b.blockAt(this.vec(pos));
     if (!block || ['air', 'cave_air', 'void_air', 'water', 'lava'].includes(block.name)) return { ok: false, reason: 'NO_BLOCK' };
+    if (block.diggable === false) return { ok: false, reason: 'UNBREAKABLE_BLOCK' };
     if (!this.canHarvest(pos)) return { ok: false, reason: 'TOOL_MISSING' };
     await this.afterAction(() => this.equipBestTool(block, signal), check);
     throwIfAborted(signal);
@@ -1415,7 +1425,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return { ok: true, bedPos };
   }
 
-  private findPlaceSpots(): any[] {
+  private findPlaceSpots(requireHeadroom = true): any[] {
     const b = this.bot;
     const base = b.entity.position.floored();
     const candidates: any[] = [];
@@ -1425,7 +1435,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (!ref || ref.boundingBox !== 'block' || PROTECTED_BLOCKS.includes(ref.name) || /_bed$|_door$|barrel|shulker_box/.test(ref.name)) continue;
       const above = b.blockAt(base.offset(dx, dy + 1, dz));
       const above2 = b.blockAt(base.offset(dx, dy + 2, dz));
-      if (above?.name === 'air' && above2?.name === 'air') candidates.push(ref);
+      if (['air', 'cave_air', 'void_air'].includes(above?.name) && (!requireHeadroom || ['air', 'cave_air', 'void_air'].includes(above2?.name))) candidates.push(ref);
     }
     return candidates.sort((a, c) => a.position.distanceTo(b.entity.position) - c.position.distanceTo(b.entity.position)).slice(0, 12);
   }
@@ -1603,24 +1613,38 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const tableId = this.mcData.blocksByName.crafting_table.id;
     let table: any = null;
     if (knownPos && b.blockAt(this.vec(knownPos))?.name === 'crafting_table') table = b.blockAt(this.vec(knownPos));
-    table ??= b.findBlock({ matching: tableId, maxDistance: 5 }); // 伸手可及范围内
+    const reachable = (block: any) => block.position.offset(0.5, 0.5, 0.5).distanceTo(b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0)) <= 4.4
+      && (typeof b.canSeeBlock !== 'function' || b.canSeeBlock(block));
+    const nearby = b.findBlock({ matching: tableId, maxDistance: 5 });
+    if (nearby && (!table || reachable(nearby))) table = nearby;
+    if (table && !reachable(table)) {
+      try { await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos: table.position }, { signal, timeoutMs: 30000, constructionSafe: true }), check); }
+      catch (error: any) { if (error?.name === 'AbortedError') throw error; check(); table = null; }
+      if (table && !reachable(table)) table = null;
+    }
     if (!table) {
       let tableItem = b.inventory.items().find((i: any) => i.name === 'crafting_table');
       if (!tableItem && (await this.afterAction(() => this.craftSimple(this.mcData.itemsByName.crafting_table.id, 1, null, signal, 2), check))) {
         tableItem = b.inventory.items().find((i: any) => i.name === 'crafting_table');
       }
-      const candidates = tableItem ? this.findPlaceSpots().slice(0, 6) : [];
+      // 工作台只占一格；狭窄洞穴的壁龛不必再空出一格供人站进去。
+      const candidates = tableItem ? this.findPlaceSpots(false).slice(0, 6) : [];
       for (const ref of candidates) {
         const position = ref.position.offset(0, 1, 0);
         try {
-          await this.afterAction(() => this.moveTo({ kind: 'place_block', pos: position }, { signal, timeoutMs: 8000, constructionSafe: true }), check);
-          const placed = await this.afterAction(() => this.placeBlockAt(position, ['crafting_table'], signal), check);
+          // 已能伸手放下就直接放，避免寻路器在一格宽空间里强行找另一个站位。
+          let placed = await this.afterAction(() => this.placeBlockAt(position, ['crafting_table'], signal), check);
+          if (!placed.ok) {
+            await this.afterAction(() => this.moveTo({ kind: 'place_block', pos: position }, { signal, timeoutMs: 8000, constructionSafe: true }), check);
+            placed = await this.afterAction(() => this.placeBlockAt(position, ['crafting_table'], signal), check);
+          }
           const observed = b.blockAt(position);
           if (placed.ok && observed?.name === 'crafting_table') { table = observed; this.bus.publish('place', 'P3', '放置并核对了工作台'); break; }
         } catch (error: any) { if (error?.name === 'AbortedError') throw error; check(); }
       }
     }
-    if (table) await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos: table.position }, { signal, timeoutMs: 30000 }), check);
+    if (table && !reachable(table)) await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos: table.position }, { signal, timeoutMs: 15000, constructionSafe: true }), check);
+    if (table && !reachable(table)) return null;
     return table;
   }
 
@@ -1660,11 +1684,13 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   private foodItems(): any[] {
     if (!this.ready) return [];
     const foods = this.mcData.foodsByName ?? {};
-    return this.bot.inventory
-      .items()
+    const items = this.bot.inventory.items();
+    const regular = items
       .filter((i: any) => foods[i.name] && !BAD_FOOD.has(i.name))
       // 有熟食先吃熟食（饱和度高），生肉留着烤
       .sort((a: any, c: any) => Number(RAW_FOOD.test(a.name)) - Number(RAW_FOOD.test(c.name)) || (foods[c.name].foodPoints ?? 0) - (foods[a.name].foodPoints ?? 0));
+    // 腐肉只在没有正常食物且濒临饥饿时救急；每一口都重新核对阈值。
+    return regular.length || (this.bot.food ?? 20) > 6 ? regular : items.filter((i: any) => i.name === 'rotten_flesh' && foods[i.name]);
   }
 
   hasFood(): boolean {

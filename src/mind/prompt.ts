@@ -8,8 +8,8 @@ import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 import { myBed } from '../skills/stations.ts';
 import { travelStore } from '../travel/store.ts';
 import { describeActivity } from './activity.ts';
-import { moodWords, type SelfModel } from './self.ts';
-import type { Activity, ActivityRecord, Noticing } from './types.ts';
+import { cleanLesson, moodWords, type SelfModel } from './self.ts';
+import type { Activity, ActivityRecord, Noticing, StuckHere } from './types.ts';
 
 export interface MindContext {
   tier: 'glance' | 'deliberate';
@@ -30,6 +30,8 @@ export interface MindContext {
   mySkills: MySkillInfo[];
   researchContext?: unknown;
   persona: string;
+  stuckHere?: StuckHere | null;
+  repeatedFailures?: string[];
 }
 
 /** 手脚清单：真人玩家会的动作都在这里（便利流程 + 底层右键/方向键），不再刻意藏起来 */
@@ -38,21 +40,30 @@ export function movesCatalog(chars = 60, only?: Set<string>): string {
     .map((s) => `- ${s.name} ${s.argsDoc}${chars ? `：${s.description.replace(/\s+/g, ' ').slice(0, chars)}` : ''}`).join('\n');
 }
 
-const CONDITIONS = `事实条件（done_when 用，可选）：{"type":"inventory_min","item":"oak_log","count":20}、{"type":"location_near","dimension":"overworld","pos":{"x":0,"y":64,"z":0},"radius":4}（坐标必须来自亲眼看到的或已知地标）、{"type":"self_state","field":"inWater","equals":false}、{"type":"equipment","slot":"hand","item":"stone_pickaxe"}、{"type":"all_of","conditions":[…]}。`;
+const CONDITIONS = `事实条件（done_when 用，可选；每种写法如下）：
+- 背包数量：{"type":"inventory_min","item":"oak_log","count":20}
+- 到达位置：{"type":"location_near","dimension":"overworld","pos":{"x":0,"y":64,"z":0},"radius":4}（坐标必须来自亲眼看到的或已知地标，不能照抄示例）
+- 自身状态：{"type":"self_state","field":"inWater","equals":false}；field 仅支持 inWater/inLava/onGround（布尔）或 held/riding（物品/载具名称或 null）
+- 看见天空：{"type":"sky_visible","equals":true}
+- 离开地下：{"type":"underground","equals":false}
+- 装备：{"type":"equipment","slot":"hand","item":"stone_pickaxe"}
+- 亲眼验看方块：{"type":"block_state","dimension":"overworld","pos":{"x":0,"y":64,"z":0},"name":"oak_door","properties":{"open":true}}（坐标同样须有观察依据；遮挡时结果未知）
+- 同时满足：{"type":"all_of","conditions":[{"type":"sky_visible","equals":true},{"type":"underground","equals":false}]}
+不要写 {"self_state":{"inWater":false}} 或 {"type":"self_state","sky_visible":true}，应分别使用标准 self_state/sky_visible 写法。观察动作没找到目标只是信息；爬出地面应验看 sky_visible/underground，不要用“找到树”代替。`;
 
 const OUTPUT = `只输出一个 JSON 对象：
 {"monologue":"第一人称内心独白，接着刚才的念头往下想（20–80 字）",
- "say":"可选：想对观众/聊天里的人说的一句口语（不说就省略）",
+ "say":"可选：仅有新发现、改主意（switch/detour/experiment）、完成一件事或遇到危险才说；不要复述独白，两句至少隔 45 秒",
  "decision":"continue | adjust | new | detour | switch | experiment | rest",
  "activity":{"what":"这段活要干什么（具体）","why":"为什么现在做","kind":"gather|craft|build|explore|survive|rest|experiment|tidy|social|other",
    "steps":[{"skill":"…","args":{}}],"repeat":1,"done_when":事实条件,"expect":"我预计会怎样","if_stuck":"万一卡住打算怎么办"},
  "next":{"what":"…","why":"…","kind":"…","steps":[…],"repeat":1},
  "agenda":{"add":[{"text":"…","kind":"goal|idea|question","horizon":"today|someday"}],"done":["a_…"],"drop":["a_…"],"focus":"a_…"},
- "learned":"可选：根据刚才的实际结果总结的一句窍门（什么情况下、怎么做、会怎样）",
+ "learned":"可选：根据实际结果总结一句窍门；同情境已有经验时按 id 修订；每段活最多一条，失败后猜出的办法尚未验证",
  "hypothesis":"experiment 时必填：我猜……会……",
  "experiment_result":"上一段是实验时：supported | refuted | unclear（看 last_activity 的实际结果判断）",
  "diary":"可选：值得写进日记的一句话（今天的经历、感受、里程碑）"}
-continue 时 activity 可省略；next 可省略（但手上这段活快干完时最好写上，干完就能直接接上，不用停下来发呆）。`;
+continue 时 activity 可省略；next 可省略（但手上这段活快干完时最好写上，干完就能直接接上，不用停下来发呆）。agenda 只放想做的事或想弄明白的问题，像“卡住时先换路”“别往水里挖”的规则写进 learned，不能当成议程。learned 也可直接输出对象，例如 "learned":{"revise":"k_xxx","text":"这次修订的结论"}。`;
 
 export function deliberateSystem(persona: string): string {
   return `${persona}
@@ -63,8 +74,8 @@ export function deliberateSystem(persona: string): string {
 1. 先看此刻：noticed（刚注意到的事）、since_last_thought（这段时间真实发生的变化）、身体状态、手上这段活（current_activity）进展如何。
 2. 再接上刚才的念头（stream）、今天想做的事（agenda）和日记（diary）。人的思路是连续的：没有新情况就顺着做下去，不要每次都换主意，也不要把刚做完的事再做一遍。
 3. 有新情况就权衡：身体的需要（危险、饥饿、天黑、背包满）> 手上正在做的事 > 新冒出来的好奇心。可以先绕个弯处理（detour），处理完会自动回到被打断的活。
-4. 活要按“一段”来安排：真人不会每走一步想一次。一段活是几分钟的事（“砍够 20 个原木”“把小屋墙砌完”“往东边那座山走过去看看”），routine 写 1–6 步，可以 repeat 多轮，用 done_when 说清楚什么时候算干完。身体会自己连续执行，没找到会换个地方找、偶尔失败会再试一次；真卡住了才会叫你。
-5. 学习：know_how 是自己以前总结的窍门（带实际成败次数，次数说明可信度）；last_activity 是刚才那段活的真实结果（得到/失去了什么、和预想比如何）。结果和预想不一样时想想为什么，用 learned 写一句可复用的窍门。连续失败就换办法，别硬磕；某个窍门失败多了就别再信它。
+4. 活要按“一段”来安排：真人不会每走一步想一次。一段活是几分钟的事（“砍够 20 个原木”“把小屋墙砌完”“往东边那座山走过去看看”），routine 写 1–6 步，可以 repeat 多轮，用 done_when 说清楚什么时候算干完。身体会自己连续执行，没找到会换个地方找，失败后只有位置或视野变化才会原样再试；真卡住了才会叫你。
+5. 学习：know_how 是自己以前总结的窍门（id/text/wins/losses 分开显示，unverified=true 表示未验证，可信度较低）；last_activity 是刚才那段活的真实结果（得到/失去了什么、和预想比如何）。结果和预想不一样时想想为什么，用 learned 写一句可复用的窍门；同情境已有经验必须用其 id 修订。连续失败就换办法，别硬磕；某个窍门失败多了就别再信它。出现 stuck_here 时必须选择和 tried 完全不同的思路，例如放弃原目标、就地安家或换区域；参考 repeated_failures，别重复已经失败多次的目标。
 6. 创新：无聊、好奇或者遇到没见过的东西时，可以冒出点子放进 agenda（kind=idea/question），或者开一段 experiment：小、便宜、结果看得见，写清 hypothesis。实验结果会回到 experiments 里，支持或推翻都是收获。手脚清单里的 use_item / interact_block / hit_entity / ride 等底层操作可以组合出新玩法。
 7. 情绪是真实的信号：累了就找个安全的地方歇着或者睡觉；烦躁说明这个办法不行；无聊说明该找点新鲜事；成就感来自做成东西。没有必须完成的科技树或主线，喜欢什么就玩什么，但要像个会过日子的玩家：吃饱、有工具、天黑有地方待。
 8. 视野有限：只知道亲眼看到/记得的东西，远处没看见不等于没有；坐标必须来自观察或地标，不要编。
@@ -96,18 +107,27 @@ export function glanceSystem(persona: string, inUse: Set<string>): string {
 - 手上的活快干完了就顺便写 next（干完直接接上的下一段活）。
 - 需要回想、查配方、做实验或者想得更深，就输出 {"kind":"deliberate","reason":"…"}，会给你完整的信息。
 ${OUTPUT}
+${CONDITIONS}
 常用手脚：
 ${movesCatalog(0, new Set([...inUse, 'gather', 'goto', 'explore', 'craft', 'eat', 'hunt', 'look_around', 'pickup_items', 'wait', 'place_torch', 'sleep', 'shelter', 'build', 'smelt', 'store_items']))}`;
 }
 
 const pos3 = (p: [number, number, number]) => p.map((n) => Math.round(n)).join(',');
 
-function bodyState(p: Percept, s: AgentState) {
+function bodyState(p: Percept, s: AgentState, activity: Activity | null) {
   const inv = new Map<string, number>();
   for (const i of s.inventory) inv.set(i.name, (inv.get(i.name) ?? 0) + i.count);
+  const step = activity?.steps[Math.max(0, activity.index - 1)];
+  const digging = !!step && ['gather', 'dig', 'climb_up'].includes(step.skill);
+  const material = String((step?.args as Record<string, unknown> | undefined)?.block ?? '');
+  const tool = /stone|ore|coal|iron|copper|deepslate/.test(material) ? 'pickaxe' : /dirt|grass|sand|gravel|clay/.test(material) ? 'shovel' : /log|wood/.test(material) ? 'axe' : undefined;
+  const suitable = digging ? !!p.self.held && (tool ? p.self.held.endsWith(`_${tool}`) : /_(pickaxe|shovel|axe)$/.test(p.self.held)) : null;
   return {
     pos: pos3(p.self.pos), dim: p.self.dim, biome: p.self.biome, hp: Math.round(p.self.hp), food: p.self.food,
     held: p.self.held, ...(p.self.inWater ? { inWater: true, oxygen: s.oxygen } : {}), ...(p.self.inLava ? { inLava: true } : {}),
+    sky_visible: p.self.sky_visible ?? null, depth_below_surface: p.self.depth_below_surface ?? null,
+    exits: p.self.exits ?? null,
+    ...(digging ? { held_suitable: suitable, ...(!suitable ? { held_note: `正在挖掘，手持 ${p.self.held ?? '空手'}；${tool ? `更适合用 ${tool}` : '应按目标方块选镐或铲等工具'}` } : {}) } : {}),
     ...(p.self.riding ? { riding: p.self.riding } : {}),
     time: { phase: p.time.phase, timeOfDay: p.time.timeOfDay, ...(p.time.can_sleep !== undefined ? { can_sleep: p.time.can_sleep } : {}) },
     ...(p.light ? { light: { level: p.light.level, underground: p.light.underground, mob_spawn_risk: p.light.mob_spawn_risk } } : {}),
@@ -167,7 +187,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       ...(!glance && (image.goodAt.length || image.struggleWith.length) ? { self_image: image } : {}) },
     agenda: self.agenda().map((a) => ({ id: a.id, text: a.text, kind: a.kind, horizon: a.horizon, ...(a.status === 'active' ? { focus: true } : {}), ...(a.attempts ? { tried: a.attempts } : {}) })),
     ...(!glance && self.diary().length ? { diary: self.diary(5).map((d) => d.text) } : {}),
-    know_how: self.relevantKnowHow(context, ctx.activity?.kind, glance ? 3 : 6).map((k) => `${k.text}（成${k.wins}/败${k.losses}）`),
+    know_how: self.relevantKnowHow(context, ctx.activity?.kind, glance ? 3 : 6).map((k) => ({ id: k.id, text: cleanLesson(k.text), wins: k.wins, losses: k.losses, unverified: k.unverified === true })),
     ...(!glance && self.experiments().length ? { experiments: self.experiments().map((e) => ({ hypothesis: e.hypothesis, status: e.status, ...(e.evidence ? { evidence: e.evidence } : {}) })) } : {}),
     ...(!glance && ctx.mySkills.length ? { my_methods: ctx.mySkills.slice(0, 8).map((m) => `${m.name}：${m.description.slice(0, 50)}（${m.status}）`) } : {}),
     ...(!glance && ctx.researchContext ? { research: ctx.researchContext } : {}),
@@ -175,13 +195,15 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
     stream: self.recentThoughts(glance ? 4 : 8).map((t) => `${t.kind === 'monologue' ? '' : `[${t.kind}] `}${t.text}`),
     ...(!glance ? { world: worldKnowledge(ctx) } : {}),
     ...(ctx.lastRecord ? { last_activity: recordLine(ctx.lastRecord) } : {}),
-    current_activity: ctx.activity ? describeActivity(ctx.activity, s) : null,
+    current_activity: ctx.activity ? describeActivity(ctx.activity, s, p) : null,
+    ...(ctx.stuckHere ? { stuck_here: { minutes: ctx.stuckHere.minutes, tried: ctx.stuckHere.tried } } : {}),
+    ...(ctx.repeatedFailures?.length ? { repeated_failures: ctx.repeatedFailures } : {}),
     ...(ctx.suspended.length ? { will_resume_after: ctx.suspended.map((a) => a.what) } : {}),
     ...(ctx.notes.length ? { last_decision_corrections: ctx.notes } : {}),
     ...(ctx.userSuggestion ? { operator_suggestion: ctx.userSuggestion } : {}),
     ...(audienceBlock(ctx.audience, glance ? 'light' : 'full') ?? {}),
     surroundings: surroundingsOf(p, ctx.tier),
-    body: bodyState(p, s),
+    body: bodyState(p, s, ctx.activity),
     since_last_thought: ctx.changes,
     noticed: ctx.noticed.map((n) => `${n.what}${n.level === 'urgent' ? '（要紧）' : ''}`),
     why_thinking_now: ctx.reason,

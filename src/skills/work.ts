@@ -52,6 +52,9 @@ export function gatherTargetRisk(ctx: SkillCtx, target: { name: string; pos: { x
  */
 const wetApproach = new Map<string, number>();
 const WET_TTL_MS = 10 * 60_000;
+/** 同一站位刚确认够不着的目标，短时间内换别的；走开后可以从新方向再试。 */
+const unreachableTargets = new WeakMap<SkillCtx['adapter'], Map<string, { at: number; from: { x: number; y: number; z: number }; block: string }>>();
+const UNREACHABLE_TTL_MS = 2 * 60_000;
 const wetKey = (ctx: SkillCtx, p: { x: number; y: number; z: number }) => { const s = ctx.adapter.state(); return `${s.worldId}:${s.dim}:${p.x},${p.y},${p.z}`; };
 function wetRemembered(ctx: SkillCtx, p: { x: number; y: number; z: number }) {
   const t = wetApproach.get(wetKey(ctx, p));
@@ -183,6 +186,10 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
     }
     const canDigDown = names.some((n) => DIGGABLE_DOWN.has(n));
     const skip = new Set<string>();
+    let unreachable = unreachableTargets.get(adapter);
+    if (!unreachable) { unreachable = new Map(); unreachableTargets.set(adapter, unreachable); }
+    for (const [k, failed] of unreachable) if (Date.now() - failed.at > UNREACHABLE_TTL_MS) unreachable.delete(k);
+    const skippedUnreachable = new Set<string>();
     let dug = 0;
     let failsInRow = 0;
     let dugDown = 0;
@@ -207,6 +214,12 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
       const candidates = senses
         .knownBlocks(names, 256)
         .filter((h) => !skip.has(key(h.pos)))
+        .filter((h) => {
+          const k = `${s.worldId}:${s.dim}:${key(h.pos)}`, failed = unreachable.get(k);
+          if (!failed || failed.block !== h.name || dist3(failed.from, s.pos) >= 3) return true;
+          skippedUnreachable.add(key(h.pos));
+          return false;
+        })
         // 水下（上方是水）的方块不去挖：会憋气溺水
         .filter((h) => !WATERY.has(adapter.blockAt({ x: h.pos.x, y: h.pos.y + 1, z: h.pos.z }) ?? 'air'))
         // 比脚下低的目标多扣分：宁可挖身边露天的，也不往坑底/水边钻
@@ -228,6 +241,9 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
       const hits = safeHits;
 
       if (!hits.length) {
+        if (skippedUnreachable.size && !candidates.length) return dug > 0
+          ? ok(`采集了 ${dug}/${args.count}；其余 ${skippedUnreachable.size} 处刚确认无法到达或够不着，先换个站位再采`, { dug, skippedUnreachable: skippedUnreachable.size })
+          : fail('PATH_NOT_FOUND', `${skippedUnreachable.size} 处 ${args.block} 刚确认无法到达或够不着，同一站位暂不重复尝试；先换个方向走至少 3 格，或稍后再试`, { skippedUnreachable: skippedUnreachable.size });
         // 看不见目标：石头/泥土类可以就地往下挖（脚下的方块是“踩着的”，不算透视）
         if (canDigDown && dugDown < 8 && !s.inWater) {
           const below = { x: Math.floor(s.pos.x), y: Math.floor(s.pos.y) - 1, z: Math.floor(s.pos.z) };
@@ -293,6 +309,10 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
       } catch (e) {
         if (isAbort(e)) throw e;
         skip.add(key(target.pos));
+        if (String((e as Error).message).includes('OUT_OF_REACH') || codeFromError(e) === 'PATH_NOT_FOUND' || String((e as Error).message) === 'PATH_NO_PROGRESS') {
+          const failedAt = adapter.state();
+          unreachable.set(`${failedAt.worldId}:${failedAt.dim}:${key(target.pos)}`, { at: Date.now(), from: { ...failedAt.pos }, block: target.name });
+        }
         if ((e as Error).message === 'ENTERED_WATER') {
           // 走着走着下了水：这一片都别去了，先上岸，再看别的目标
           rememberWet(ctx, target.pos);
@@ -434,7 +454,7 @@ export const craft: Skill<{ item: string; count: number; extra?: boolean }> = {
 // ------------------------------------------------------------------ eat
 export const eat: Skill<{}> = {
   name: 'eat',
-  description: '吃背包里最好的食物，一直吃到饱（饱食度 18 以上才会自然回血）',
+  description: '吃背包里最好的食物，一直吃到饱（饱食度 18 以上才会自然回血）；没有正常食物且饥饿值不超过 6 时允许吃腐肉救急',
   argsDoc: '{}',
   timeoutMs: 20000,
   movement: false,
@@ -452,7 +472,8 @@ export const eat: Skill<{}> = {
         'forage（摘橡树/深色橡树叶里的苹果、浆果、西瓜）',
         has(/^(wheat_seeds)$/) ? 'farm（种小麦，慢）' : '',
       ].filter(Boolean);
-      return fail('NO_FOOD', `背包里没有能吃的：可以 ${alt.join('、')}`, { alternatives: alt });
+      const rotten = has(/^rotten_flesh$/) ? '（腐肉只在没有正常食物且饥饿值 ≤6 时救急）' : '';
+      return fail('NO_FOOD', `背包里没有当前适合吃的食物${rotten}：可以 ${alt.join('、')}`, { alternatives: alt });
     }
     try {
       // 像人一样一次吃饱：饱食度到 18 以上（能自然回血）或吃完为止，而不是吃一口就走、过一会儿又被饿意打断

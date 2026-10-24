@@ -1,6 +1,28 @@
 import type { AgentEvent } from '../events.ts';
 import type { Percept } from '../perception/perception.ts';
-import type { Noticing } from './types.ts';
+import type { ActivityEnd, Noticing, StuckHere } from './types.ts';
+
+export const EXPERIENCE_MS = 10 * 60_000;
+
+export function stuckHere(records: ActivityEnd[], here: ActivityEnd['pos'], now = Date.now()): StuckHere | null {
+  const local = records.filter((r) => now - r.at >= 0 && now - r.at <= EXPERIENCE_MS &&
+    Math.hypot(r.pos.x - here.x, r.pos.y - here.y, r.pos.z - here.z) <= 8);
+  const failures = new Map<string, ActivityEnd[]>();
+  for (const r of local) {
+    if (r.outcome !== 'stuck') continue;
+    const code = r.failureCode ?? 'STUCK';
+    const group = failures.get(code) ?? [];
+    group.push(r); failures.set(code, group);
+  }
+  const repeated = [...failures.entries()].filter(([, rs]) => rs.length >= 3)
+    .sort((a, b) => b[1].at(-1)!.at - a[1].at(-1)!.at)[0];
+  if (!repeated) return null;
+  return {
+    minutes: Math.max(0.1, Math.round((now - repeated[1][0].at) / 6000) / 10),
+    tried: [...new Set(local.map((r) => r.what))].slice(-10),
+    failureCode: repeated[0], lastAt: repeated[1].at(-1)!.at,
+  };
+}
 
 /** 显著度阈值：≥0.75 立刻放下手上的事去想；≥0.5 边做边重新想一想；更低的只是“注意到了”，留给下一次思考 */
 export const URGENT = 0.75;
@@ -75,6 +97,14 @@ export class Attention {
     }
     if (snap.light === 'dark' && prev.light !== 'dark') out.push(this.notice('dark', '周围很暗', 0.3, 120_000, now));
     return out.filter((n): n is Noticing => !!n);
+  }
+
+  fromLoop(records: ActivityEnd[], here: ActivityEnd['pos'], now = Date.now()): Noticing | null {
+    const stuck = stuckHere(records, here, now);
+    if (!stuck) return null;
+    return this.notice(`loop:${stuck.failureCode}:${stuck.lastAt}`,
+      `在 (${Math.round(here.x)},${Math.round(here.y)},${Math.round(here.z)}) 一带已卡住 ${stuck.minutes} 分钟，试过：${stuck.tried.join('、')}；需要换完全不同的思路`,
+      0.8, EXPERIENCE_MS, now);
   }
 
   /** 取走所有待处理的注意（交给思考），并返回其中最高的显著度 */

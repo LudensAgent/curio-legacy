@@ -1,6 +1,8 @@
 import type { AgentState } from '../adapter/types.ts';
 import type { Step } from '../arbiter/arbiter.ts';
+import type { Percept } from '../perception/perception.ts';
 import { evaluateCondition } from '../projects/conditions.ts';
+import { SKILLS } from '../skills/index.ts';
 import type { SkillResult } from '../skills/types.ts';
 import { shortId } from '../util.ts';
 import type { Activity, ActivityDraft, ActivityOutcome, ActivityRecord } from './types.ts';
@@ -29,6 +31,17 @@ export function signatureOf(steps: Step[]): string {
   }).join('>');
 }
 
+export function targetKeyOf(step: Step): string {
+  const a = (step.args ?? {}) as Record<string, unknown>;
+  const target = a.target ?? a.block ?? a.item ?? a.animal ?? a.projectId ?? a.blueprint ?? a.for ?? a.direction ?? '';
+  return `${step.skill}:${typeof target === 'object' && target ? JSON.stringify(target) : String(target)}`;
+}
+
+/** 不包含时间、背包和朝向，只有实际看见的环境改变才算新的重试依据。 */
+export function viewOf(p?: Percept): string | undefined {
+  return p ? JSON.stringify({ around: p.self.around, view: p.vision?.view, resources: p.nearby.resources.filter((r) => r.seen === 'now') }) : undefined;
+}
+
 export function createActivity(draft: ActivityDraft, monologue: string, source: Activity['source'], state: Pick<AgentState, 'inventory'>): Activity {
   return {
     id: shortId('act_'), what: draft.what, why: draft.why, kind: draft.kind, steps: draft.steps.map((s) => ({ ...s })),
@@ -40,8 +53,8 @@ export function createActivity(draft: ActivityDraft, monologue: string, source: 
   };
 }
 
-export function doneWhenMet(a: Activity, state: AgentState): boolean {
-  return !!a.doneWhen && evaluateCondition(a.doneWhen, state).status === 'satisfied';
+export function doneWhenMet(a: Activity, state: AgentState, percept?: Percept): boolean {
+  return !!a.doneWhen && evaluateCondition(a.doneWhen, state, state.worldId, [], percept).status === 'satisfied';
 }
 
 /** 下一个动作；这一轮做完了就开始下一轮；都做完返回 null */
@@ -74,12 +87,17 @@ export type StepVerdict =
  * 一个动作结束后，身体自己能处理的就自己处理（像真人那样“没找到就换个地方找”“没走过去就再走一次”），
  * 处理不了才交给脑子想。返回这段活接下来怎么办。
  */
-export function afterStep(a: Activity, step: Step, result: SkillResult, durationMs: number, state: AgentState): StepVerdict {
-  a.results.push({ skill: step.skill, args: step.args, status: result.status, failureCode: result.failureCode, summary: result.summary.slice(0, 160), at: Date.now(), durationMs });
+export function afterStep(a: Activity, step: Step, result: SkillResult, durationMs: number, state: AgentState, percept?: Percept): StepVerdict {
+  const previous = [...a.results].reverse().find((r) => r.status === 'failed' && targetKeyOf(r) === targetKeyOf(step));
+  const view = viewOf(percept);
+  const baseline = previous?.pos ? previous : a.stepStart;
+  const changed = !!baseline && (!!baseline.pos && Math.hypot(state.pos.x - baseline.pos.x, state.pos.y - baseline.pos.y, state.pos.z - baseline.pos.z) >= 0.5 ||
+    baseline.view !== undefined && view !== undefined && baseline.view !== view);
+  a.results.push({ skill: step.skill, args: step.args, status: result.status, failureCode: result.failureCode, summary: result.summary.slice(0, 160), at: Date.now(), durationMs, pos: { ...state.pos }, ...(view !== undefined ? { view } : {}) });
   if (a.results.length > 16) a.results = a.results.slice(-16);
   if (result.status === 'succeeded') {
     a.consecutiveFailures = 0;
-    if (doneWhenMet(a, state)) return { kind: 'done', met: true, why: '达到了收工条件' };
+    if (doneWhenMet(a, state, percept)) return { kind: 'done', met: true, why: '达到了收工条件' };
     if (remainingSteps(a) === 0) {
       if (a.doneWhen) return { kind: 'done', met: false, why: `${a.repeat} 轮做完了，但收工条件还没达到` };
       return { kind: 'done', met: true, why: '这段活的步骤都做完了' };
@@ -87,6 +105,13 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     return { kind: 'continue' };
   }
   if (result.status === 'cancelled') return { kind: 'continue' };
+  if (SKILLS[step.skill]?.readOnly && result.failureCode === 'NOT_FOUND') {
+    a.consecutiveFailures = 0;
+    if (doneWhenMet(a, state, percept)) return { kind: 'done', met: true, why: '达到了收工条件' };
+    return remainingSteps(a) === 0
+      ? { kind: 'done', met: false, why: `观察没有找到目标；这段活的步骤都做完了${a.doneWhen ? '，收工条件尚未达到' : ''}` }
+      : { kind: 'continue' };
+  }
   a.failures++;
   a.consecutiveFailures++;
   const code = result.failureCode ?? 'ERROR';
@@ -102,7 +127,7 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     return { kind: 'continue', adapted: `附近没找到 ${target}，换个方向找找` };
   }
   if (NEEDS_THOUGHT.has(code)) return { kind: 'stuck', why: result.summary.slice(0, 160) };
-  if (RETRYABLE.has(code) && a.consecutiveFailures === 1 && !a.adaptations.includes(`retry:${key}`)) {
+  if (RETRYABLE.has(code) && !(step.skill === 'goto' && code === 'PATH_NOT_FOUND') && changed && a.consecutiveFailures === 1 && !a.adaptations.includes(`retry:${key}`)) {
     a.adaptations.push(`retry:${key}`);
     a.index = Math.max(0, a.index - 1);
     return { kind: 'continue', adapted: `${step.skill} 没成，再试一次` };
@@ -122,8 +147,8 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
 }
 
 /** 把一段活压成一行给模型看 */
-export function describeActivity(a: Activity, state: AgentState) {
-  const done = a.doneWhen ? evaluateCondition(a.doneWhen, state) : null;
+export function describeActivity(a: Activity, state: AgentState, percept?: Percept) {
+  const done = a.doneWhen ? evaluateCondition(a.doneWhen, state, state.worldId, [], percept) : null;
   return {
     what: a.what, why: a.why, kind: a.kind,
     routine: a.steps.map((s) => `${s.skill} ${JSON.stringify(s.args ?? {})}`),

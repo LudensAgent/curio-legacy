@@ -5,6 +5,8 @@ export type Condition =
   | { type: 'location_near'; dimension: string; pos: Vec3Like; radius: number; landmarkId?: string }
   | { type: 'self_state'; field: 'held' | 'riding'; equals: string | null }
   | { type: 'self_state'; field: 'inWater' | 'inLava' | 'onGround'; equals: boolean }
+  | { type: 'sky_visible'; equals: boolean }
+  | { type: 'underground'; equals: boolean }
   | { type: 'equipment'; slot: 'hand' | 'off-hand' | 'head' | 'torso' | 'legs' | 'feet'; item: string | null }
   | { type: 'block_state'; dimension: string; pos: Vec3Like; name?: string; properties?: Record<string, string | number | boolean> }
   | { type: 'all_of'; conditions: Condition[] };

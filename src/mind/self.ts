@@ -91,6 +91,28 @@ export function keywords(text: string): Set<string> {
 
 const overlap = (a: Set<string>, b: Set<string>) => { let n = 0; for (const k of a) if (b.has(k)) n++; return n; };
 
+/** 成败统计是独立元数据，不能被模型抄回窍门正文。 */
+export function cleanLesson(text: string): string {
+  return text.trim().replace(/(?:\s*[（(]\s*(?:成|成功)\s*\d+\s*[/／]\s*(?:败|失败)\s*\d+\s*(?:[，,]\s*累计\s*\d+\s*次\s*)?[）)])+\s*$/u, '').trim().slice(0, 160);
+}
+
+/** 议程记愿望和疑问；可反复套用的操作规则属于窍门。 */
+export function isAgendaRule(text: string): boolean {
+  const t = cleanLesson(text);
+  if (/^(?:想|打算|准备|计划|希望|我想|我要|能否|是否|为什么|怎么|如何|弄清|了解)|[？?]$/.test(t)) return false;
+  return /^(?:别|不要|不能|避免|必须|记得|应该|应当)/.test(t)
+    || /(?:时|以后|之后|之前|遇到|卡住|失败|受阻|受困|被困).{0,24}(?:先|应当|应该|要|别)/.test(t)
+    || /要.{1,40}才/.test(t)
+    || /^[^，。！？?]{1,24}(?:需要|必须|应该|应当|要先|得先|要找|要有|要用|要靠|要等)/.test(t)
+    || /^(?:when\b.+\b(?:first|should)|don['’]t\b|never\b)/i.test(t);
+}
+
+/** 明确的条件前缀比整句相似度更能认出结论相反的同一情境。 */
+function lessonContext(text: string): string | undefined {
+  const context = text.match(/^(.{2,40}?)(?:的时候|时|之前|之后|以后)[，,:：\s]?/)?.[1];
+  return context?.replace(/\s+/g, '').toLowerCase();
+}
+
 /** 持久化的“我”：性格、情绪、议程、窍门、实验、日记、最近的念头。重启后接着上次的心思玩。 */
 export class SelfModel {
   data: SelfData;
@@ -145,9 +167,14 @@ export class SelfModel {
 
   // ---------------------------------------------------------------- 议程
   agenda(): AgendaItem[] { return this.data.agenda.filter((a) => a.status === 'open' || a.status === 'active'); }
-  addAgenda(text: string, kind: AgendaItem['kind'], horizon: AgendaItem['horizon']): AgendaItem | null {
+  addAgenda(text: string, kind: AgendaItem['kind'], horizon: AgendaItem['horizon'], onRule?: (text: string) => void): AgendaItem | null {
     const t = text.trim().slice(0, 100);
     if (!t) return null;
+    if (isAgendaRule(t)) {
+      if (onRule) onRule(cleanLesson(t));
+      else this.learn(t, { source: 'reflection' });
+      return null;
+    }
     const k = keywords(t);
     const dup = this.agenda().find((a) => a.text === t || (overlap(keywords(a.text), k) >= Math.max(3, Math.min(k.size, keywords(a.text).size) * 0.8)));
     if (dup) { dup.updatedAt = Date.now(); this.touch(); return dup; }
@@ -182,7 +209,7 @@ export class SelfModel {
     if (this.data.history.length > 60) this.data.history = this.data.history.slice(-60);
     // 同一套做法后来的成败会修正“窍门”的可信度：这就是从实践里学
     for (const k of this.data.knowHow) if (k.signature && k.signature === r.signature) {
-      if (r.outcome === 'done') k.wins++; else if (r.outcome === 'stuck') k.losses++;
+      if (r.outcome === 'done') { k.wins++; k.unverified = false; } else if (r.outcome === 'stuck') k.losses++;
       k.updatedAt = Date.now();
     }
     this.touch();
@@ -193,21 +220,37 @@ export class SelfModel {
     for (const r of [...this.data.history].reverse()) { if (r.kind !== kind) break; n++; }
     return n;
   }
-  learn(text: string, opts: { kind?: ActivityKind; tags?: string[]; signature?: string; source: KnowHow['source']; outcome?: ActivityRecord['outcome'] }): KnowHow | null {
-    const t = text.trim().slice(0, 160);
+  learn(text: string, opts: { kind?: ActivityKind; tags?: string[]; signature?: string; source: KnowHow['source']; outcome?: ActivityRecord['outcome']; revise?: string }): KnowHow | null {
+    const t = cleanLesson(text);
     if (t.length < 4) return null;
     const k = keywords(t);
-    const same = this.data.knowHow.find((h) => h.text === t || overlap(keywords(h.text), k) >= Math.max(4, k.size * 0.7));
+    const context = lessonContext(t);
+    const revised = opts.revise ? this.data.knowHow.find((h) => h.id === opts.revise) : undefined;
+    const same = revised ?? this.data.knowHow.find((h) => {
+      const oldText = cleanLesson(h.text), oldKeys = keywords(oldText);
+      const common = overlap(oldKeys, k);
+      return oldText === t || common >= Math.max(4, Math.max(k.size, oldKeys.size) * 0.7)
+        || !!context && context === lessonContext(oldText) && (!h.kind || !opts.kind || h.kind === opts.kind)
+        || !!opts.signature && h.signature === opts.signature && common >= 3 && common >= Math.min(k.size, oldKeys.size) * 0.4;
+    });
     if (same) {
-      // 同样的结论又得出一次：说明它在不同时候都成立
+      const changed = cleanLesson(same.text) !== t;
+      same.text = t;
+      // 新的说法不能继承旧结论的成功证据，尤其是失败后猜出的替代办法。
+      if (changed) { same.wins = 0; same.losses = 0; same.unverified = opts.outcome !== 'done'; }
       same.updatedAt = Date.now();
-      if (opts.outcome === 'done') same.wins++; else if (opts.outcome === 'stuck') same.losses++;
-      if (!same.signature && opts.signature) same.signature = opts.signature;
+      if (opts.outcome === 'done') { same.wins++; same.unverified = false; }
+      else if (opts.outcome === 'stuck') { same.losses++; if (!same.wins) same.unverified = true; }
+      same.kind = opts.kind ?? same.kind;
+      same.source = opts.source;
+      same.tags = [...new Set([...same.tags, ...(opts.tags ?? []), ...[...k].filter((w) => /^[a-z]/.test(w))])].slice(0, 12);
+      if (opts.signature && (changed || !same.signature)) same.signature = opts.signature;
       this.touch();
       return same;
     }
     const h: KnowHow = { id: shortId('k_'), text: t, kind: opts.kind, tags: [...new Set([...(opts.tags ?? []), ...[...k].filter((w) => /^[a-z]/.test(w))])].slice(0, 12),
       signature: opts.signature, wins: opts.outcome === 'done' ? 1 : 0, losses: opts.outcome === 'stuck' ? 1 : 0,
+      unverified: opts.outcome !== 'done',
       createdAt: Date.now(), updatedAt: Date.now(), source: opts.source };
     this.data.knowHow.push(h);
     // 太多时先忘掉被证明不靠谱、又很久没用的
@@ -224,7 +267,7 @@ export class SelfModel {
     return this.data.knowHow.map((h) => {
       const rel = overlap(keywords(h.text), k) + h.tags.filter((t) => k.has(t)).length * 2 + (kind && h.kind === kind ? 2 : 0);
       const trust = (h.wins + 1) / (h.wins + h.losses + 2);
-      return { h, score: rel * (0.5 + trust) + (Date.now() - h.updatedAt < 20 * 60_000 ? 0.5 : 0) };
+      return { h, score: (rel * (0.5 + trust) + (Date.now() - h.updatedAt < 20 * 60_000 ? 0.5 : 0)) * (h.unverified ? 0.5 : 1) };
     }).filter((e) => e.score > 0.6).sort((a, b) => b.score - a.score).slice(0, n).map((e) => e.h);
   }
 

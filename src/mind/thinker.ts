@@ -9,9 +9,57 @@ import type { Planner } from '../planner/planner.ts';
 import { validateCondition } from '../projects/conditions.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 import { buildMindMessages, type MindContext } from './prompt.ts';
+import { cleanLesson } from './self.ts';
 import { ACTIVITY_KINDS, DECISION_KINDS, type ActivityDraft, type ActivityKind, type DecisionKind, type MindDecision } from './types.ts';
 
 const str = (v: unknown, max: number) => typeof v === 'string' ? v.trim().slice(0, max) : '';
+
+/** 只规范能无歧义识别的写法；位置仍交给事实校验，不能补造可信坐标。 */
+function normalizeDoneWhen(raw: unknown, depth = 0): unknown {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || depth > 4) return raw;
+  const o = { ...raw } as Record<string, any>;
+  const aliases: Record<string, string> = { in_water: 'inWater', in_lava: 'inLava', on_ground: 'onGround', skyVisible: 'sky_visible' };
+  const selfFields = ['held', 'riding', 'inWater', 'inLava', 'onGround', 'sky_visible', 'underground'];
+  const fieldName = (field: unknown) => typeof field === 'string' ? aliases[field] ?? field : undefined;
+  if (o.type === undefined) {
+    if (Array.isArray(o.conditions)) o.type = 'all_of';
+    else if (o.slot !== undefined && o.item !== undefined) o.type = 'equipment';
+    else if (o.item !== undefined && o.count !== undefined) o.type = 'inventory_min';
+    else if (o.pos !== undefined && o.radius !== undefined) o.type = 'location_near';
+    else if (o.pos !== undefined && (o.name !== undefined || o.properties !== undefined)) o.type = 'block_state';
+    else if (fieldName(o.field ?? o.state ?? o.property ?? o.key ?? o.name)
+      || Object.keys(o).some((key) => selfFields.includes(fieldName(key) ?? ''))) o.type = 'self_state';
+  }
+  const direct = fieldName(o.type);
+  if (direct && selfFields.includes(direct) && !['sky_visible', 'underground'].includes(direct)) {
+    o.type = 'self_state'; o.field = direct;
+  }
+  if (o.type === 'self_state') {
+    let field = fieldName(o.field ?? o.state ?? o.property ?? o.key ?? o.name);
+    if (!field) {
+      const fields = Object.keys(o).filter((key) => selfFields.includes(fieldName(key) ?? ''));
+      if (fields.length === 1) field = fieldName(fields[0]);
+    }
+    if (field) {
+      o.field = field;
+      if (o.equals === undefined) {
+        const key = Object.keys(o).find((k) => fieldName(k) === field);
+        if (o.value !== undefined) o.equals = o.value;
+        else if (o.is !== undefined) o.equals = o.is;
+        else if (key) o.equals = o[key];
+      }
+      if (field === 'sky_visible' || field === 'underground') o.type = field;
+    }
+  }
+  if (o.type === 'skyVisible') o.type = 'sky_visible';
+  if (o.type === 'sky_visible' || o.type === 'underground') {
+    if (o.equals === undefined) o.equals = o.value ?? o.is ?? o[o.type];
+  }
+  if ((o.type === 'sky_visible' || o.type === 'underground'
+    || o.type === 'self_state' && ['inWater', 'inLava', 'onGround'].includes(o.field)) && ['true', 'false'].includes(o.equals)) o.equals = o.equals === 'true';
+  if (o.type === 'all_of' && Array.isArray(o.conditions)) o.conditions = o.conditions.map((c: unknown) => normalizeDoneWhen(c, depth + 1));
+  return o;
+}
 
 /** 从步骤猜活动类型（模型没写或写错时） */
 export function inferKind(steps: Step[]): ActivityKind {
@@ -49,7 +97,11 @@ export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldM
   if (o.steps.length > 6) notes.push(`${label} 只保留前 6 步`);
   let doneWhen;
   if (o.done_when !== undefined && o.done_when !== null) {
-    try { doneWhen = validateCondition(o.done_when, adapter, memory, adapter.state()); }
+    try {
+      const normalized = normalizeDoneWhen(o.done_when);
+      doneWhen = validateCondition(normalized, adapter, memory, adapter.state());
+      if (JSON.stringify(normalized) !== JSON.stringify(o.done_when)) notes.push(`${label}.done_when 的写法已规范化`);
+    }
     catch (e) { notes.push(`${label}.done_when 无效已忽略：${e instanceof Error ? e.message : String(e)}`); }
   }
   const repeatRaw = o.repeat === 'until_done' ? (doneWhen ? 8 : 1) : Math.round(Number(o.repeat ?? 1));
@@ -111,13 +163,18 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
     };
   }
   const hypothesis = str(o.hypothesis, 160);
+  const learnedRaw = o.learned ?? o.lesson;
+  const learned = learnedRaw && typeof learnedRaw === 'object' && !Array.isArray(learnedRaw)
+    ? (str(learnedRaw.revise, 80) && typeof learnedRaw.text === 'string' && cleanLesson(learnedRaw.text)
+      ? { revise: str(learnedRaw.revise, 80), text: cleanLesson(learnedRaw.text) } : undefined)
+    : typeof learnedRaw === 'string' ? cleanLesson(learnedRaw) || undefined : undefined;
   const verdict = ['supported', 'refuted', 'unclear'].includes(o.experiment_result) ? o.experiment_result as 'supported' | 'refuted' | 'unclear' : undefined;
   if (kind === 'experiment' && !hypothesis) notes.push('experiment 没写 hypothesis，这次只当普通尝试');
   return {
     kind, monologue, notes,
     ...(str(o.say, 120) && !str(o.say, 120).startsWith('/') ? { say: str(o.say, 120) } : {}),
     ...(activity ? { activity } : {}), ...(next ? { next } : {}), ...(agenda ? { agenda } : {}),
-    ...(str(o.learned ?? o.lesson, 160) ? { learned: str(o.learned ?? o.lesson, 160) } : {}),
+    ...(learned ? { learned } : {}),
     ...(hypothesis ? { hypothesis } : {}),
     ...(verdict ? { verdict } : {}),
     ...(str(o.diary, 160) ? { diary: str(o.diary, 160) } : {}),

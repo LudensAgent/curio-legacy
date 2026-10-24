@@ -1,4 +1,4 @@
-import { surroundings } from './surroundings.ts';
+import { isSoftBlock, surroundings, type ExitOptions, type Surroundings } from './surroundings.ts';
 import type { GameAdapter, InvItem, Vec3Like } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
@@ -24,7 +24,8 @@ export interface Percept {
   /** can_sleep：只有夜里（或雷雨）才能上床睡觉，白天 sleep 会失败 */
   time: { timeOfDay: number; phase: 'day' | 'dusk' | 'night' | 'dawn'; isDay?: boolean; can_sleep?: boolean };
   self: { pos: [number, number, number]; dim: string; hp: number; food: number; biome: string | null; inWater: boolean; inLava: boolean; held: string | null; onGround?: boolean; riding?: string | null; equipment?: { slot: string; name: string }[]; around?: string;
-    contacts?: Pick<ReturnType<typeof surroundings>, 'support' | 'feet' | 'head'> };
+    contacts?: Pick<ReturnType<typeof surroundings>, 'support' | 'feet' | 'head'>;
+    sky_visible?: boolean | null; depth_below_surface?: number | null; exits?: ExitOptions };
   inventory: InvItem[];
   emptySlots: number;
   /** 只包含看见/听见/记得的东西（没有透视） */
@@ -100,6 +101,10 @@ export class Perception {
   onNewItem?: (item: string, heldBefore: Set<string>) => void;
   private latest: Percept | null = null;
   private timer: NodeJS.Timeout | null = null;
+  private lastVisionBody: { scope: string; pos: Vec3Like } | null = null;
+  private surfaceScope = '';
+  /** Only surface heights stood on and observed in this session; never hidden terrain. */
+  private surfaceColumns = new Map<string, { y: number; at: number }>();
 
   constructor(private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private vision: Vision) {}
 
@@ -180,10 +185,41 @@ export class Perception {
     };
   }
 
+  private bodyEnvironment(s: ReturnType<GameAdapter['state']>, contact: Surroundings | null, light: Percept['light']) {
+    const scope = `${s.worldId}:${s.sessionId}:${s.dim}`;
+    if (scope !== this.surfaceScope) { this.surfaceScope = scope; this.surfaceColumns.clear(); }
+    if (!contact) return { sky_visible: null, depth_below_surface: null };
+    const x = Math.floor(s.pos.x), y = Math.floor(s.pos.y), z = Math.floor(s.pos.z), now = Date.now();
+    const opaque = (name: string | null) => name !== null && !isSoftBlock(name) && !/(glass|leaves|ice|water|lava|bubble_column)/.test(name);
+    // A missing sky ray alone says nothing when looking down. A fresh overhead
+    // surface or a touched opaque ceiling can establish that this column is covered.
+    const ceiling = opaque(contact.above) || [...this.vision.visibleNow.values()].some((b) => b.pos.x === x && b.pos.z === z && b.pos.y > y + 1 && opaque(b.name));
+    const observedSky = (this.vision.composition.sky ?? 0) > 0;
+    const confirmedSky = observedSky && (s.dim === 'the_end' || s.dim === 'overworld' && (light?.sky ?? 0) > 0);
+    const skyVisible = s.dim === 'the_nether' ? false : confirmedSky ? true : ceiling ? false : null;
+    for (const [key, surface] of this.surfaceColumns) if (now - surface.at > 10 * 60_000) this.surfaceColumns.delete(key);
+    const key = `${x},${z}`;
+    // Full local skylight plus a visible sky and touched footing is an exposed
+    // surface estimate. Preserve a previously observed higher surface on descent.
+    if (s.dim === 'overworld' && skyVisible && !ceiling && light?.sky === 15 && s.onGround && opaque(contact.below)) {
+      const previous = this.surfaceColumns.get(key);
+      if (!previous || s.pos.y >= previous.y) this.surfaceColumns.set(key, { y: s.pos.y, at: now });
+      if (this.surfaceColumns.size > 256) this.surfaceColumns.delete(this.surfaceColumns.keys().next().value!);
+    }
+    const surface = this.surfaceColumns.get(key);
+    return { sky_visible: skyVisible, depth_below_surface: surface ? round1(Math.max(0, surface.y - s.pos.y)) : null };
+  }
+
   update(): Percept {
     const s = this.adapter.state();
     this.memory.setWorld(s.worldId);
+    const priorFrame = this.vision.frame;
     this.vision.refresh();
+    const scope = `${s.worldId}:${s.sessionId}:${s.dim}`;
+    const previous = this.lastVisionBody;
+    if (this.vision.frame && this.vision.frame === priorFrame && (!previous || previous.scope !== scope ||
+      previous.pos.x !== s.pos.x || previous.pos.y !== s.pos.y || previous.pos.z !== s.pos.z)) this.vision.scan();
+    this.lastVisionBody = { scope, pos: { ...s.pos } };
     const v = this.vision;
     const here = s.pos;
 
@@ -272,6 +308,8 @@ export class Perception {
     for (const e of v.seen.filter((x) => x.kind === 'passive')) passiveCount.set(e.name, (passiveCount.get(e.name) ?? 0) + 1);
 
     const contact = s.connected && s.alive && s.observationReady ? surroundings(this.adapter, s.pos) : null;
+    const light = s.connected && s.alive && s.observationReady ? this.lightInfo(s) : null;
+    const environment = this.bodyEnvironment(s, contact, light);
     this.latest = {
       ts: Date.now(),
       connected: s.connected,
@@ -290,7 +328,10 @@ export class Perception {
         ...(s.riding !== undefined ? { riding: s.riding } : {}),
         ...(s.equipment ? { equipment: s.equipment.map(({ slot, name }) => ({ slot, name })) } : {}),
         // 身边一圈（脚下、头顶、四个方向能不能走）：判断被困、往哪能出去
-        ...(contact ? { around: contact.text, contacts: { support: contact.support, feet: contact.feet, head: contact.head } } : {}),
+        ...(contact ? { around: contact.text.replace(/看得见天空|看不见天空/, environment.sky_visible === true ? '看得见天空' : environment.sky_visible === false ? '当前头顶被遮挡' : '天空可见性尚未确认'),
+          contacts: { support: contact.support, feet: contact.feet, head: contact.head } } : {}),
+        ...environment,
+        ...(contact ? { exits: contact.exitOptions } : {}),
       },
       inventory: [...s.inventory.reduce((items, item) => items.set(item.name, (items.get(item.name) ?? 0) + item.count), new Map<string, number>())]
         .map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count),
@@ -317,7 +358,7 @@ export class Perception {
       drives: [],
       stock: null,
       efficiency: s.connected ? efficiencyInsights(this.adapter, this.memory, s.inventory) : [],
-      light: s.observationReady ? this.lightInfo(s) : null,
+      light,
       storage: this.storageInfo(s.dim, here),
       farms: s.observationReady ? this.farmInfo(s.dim, here) : [],
       learn_candidates: learnCandidates(this.memory, this.knownSkillSigs?.() ?? new Set()).map((c) => ({ steps: c.signature, times: c.times })),

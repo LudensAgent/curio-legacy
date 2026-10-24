@@ -2,18 +2,22 @@ import type { AgentState, GameAdapter } from '../adapter/types.ts';
 import type { Arbiter, Step, TaskOutcome, TaskPreemption } from '../arbiter/arbiter.ts';
 import type { AgentEvent, EventBus } from '../events.ts';
 import type { AudienceContext } from '../live/audience.ts';
+import { compileBuilding, normalizeSpec } from '../building/spec.ts';
 import type { Hazard, WorldMemory } from '../memory/store.ts';
+import { materialPlan } from '../methods/shortfall.ts';
 import type { Perception, Percept } from '../perception/perception.ts';
 import type { MySkillInfo } from '../planner/prompt.ts';
 import { observationReady } from '../projects/conditions.ts';
 import { SKILLS } from '../skills/index.ts';
 import { causeName } from '../brain/habits.ts';
-import { afterStep, createActivity, describeActivity, diffInventory, inventoryOf, nextStep, recordOf, remainingSteps, signatureOf } from './activity.ts';
-import { Attention, RECONSIDER, URGENT } from './attention.ts';
+import { pickFuel } from '../skills/economy.ts';
+import { pickVariant } from '../skills/work.ts';
+import { afterStep, createActivity, describeActivity, diffInventory, inventoryOf, nextStep, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
+import { Attention, EXPERIENCE_MS, RECONSIDER, stuckHere, URGENT } from './attention.ts';
 import type { MindContext } from './prompt.ts';
 import { moodWords, type SelfModel } from './self.ts';
 import type { Thinker } from './thinker.ts';
-import type { Activity, ActivityDraft, ActivityOutcome, ActivityRecord, MindDecision } from './types.ts';
+import type { Activity, ActivityDraft, ActivityEnd, ActivityOutcome, ActivityRecord, MindDecision } from './types.ts';
 
 export interface MindDeps {
   adapter: GameAdapter; arbiter: Arbiter; perception: Perception; memory: WorldMemory; bus: EventBus;
@@ -33,7 +37,7 @@ export const DEFAULT_TIMING = {
   /** 连续只“瞥一眼”这么久，下次就认真想一想全局 */
   deliberateEveryMs: 6 * 60_000,
   /** 两句话之间至少隔这么久 */
-  sayGapMs: 8_000,
+  sayGapMs: 45_000,
   /** 模型出错后的退避上限 */
   maxBackoffMs: 60_000,
   /** 程序记日记的最小间隔 */
@@ -76,6 +80,10 @@ export class Mind {
   private lastSnapshot: Snapshot | null = null;
   private lastPerceptAt = 0;
   private lastRecord: ActivityRecord | null = null;
+  private recentEnds: ActivityEnd[] = [];
+  private failuresByTarget = new Map<string, { n: number; last: number; at: number[] }>();
+  private learnedActivities = new Set<string>();
+  private speechEventAt = 0;
   private notes: string[] = [];
   private userSuggestion: string | null = null;
   private lastFailure: { skill: string; code?: string; summary: string } | null = null;
@@ -133,6 +141,8 @@ export class Mind {
       // 换了世界/维度：手上的活里的坐标都不再适用；心思（议程、念头）还在
       this.dropActivity('interrupted', '换了世界/维度，重新看看周围');
       this.suspended = [];
+      this.recentEnds = [];
+      this.failuresByTarget.clear();
       this.attention.reset();
       this.cancelThinking('session_changed');
       this.requestThink('换了个地方，重新看看周围', 'deliberate');
@@ -156,9 +166,10 @@ export class Mind {
     this.lastPerceptAt = Date.now();
     let p: Percept;
     try { p = this.d.perception.update(); } catch { return; }
-    for (const n of this.attention.fromPercept(p)) {
+    const loop = this.attention.fromLoop(this.recentEnds, this.d.adapter.state().pos);
+    for (const n of [...this.attention.fromPercept(p), ...(loop ? [loop] : [])]) {
       this.d.bus.publish('notice', n.level === 'note' ? 'P3' : 'P2', `注意到：${n.what}`, { salience: n.salience, level: n.level });
-      if (/^(res|disc|item):/.test(n.key)) this.d.self.feel({ type: 'novelty', strength: n.salience });
+      if (/^(res|disc|item):/.test(n.key)) { this.d.self.feel({ type: 'novelty', strength: n.salience }); this.speechEventAt = Date.now(); }
     }
     this.d.self.tickMood(!!this.activity && this.activity.kind !== 'rest');
   }
@@ -206,16 +217,51 @@ export class Mind {
     if (!this.activity && this.queuedNext) {
       const q = this.queuedNext;
       this.queuedNext = null;
+      const problem = this.safe(() => this.queuedProblem(q), '当前无法确认所需物品，重新检查计划');
+      if (problem) {
+        this.requestThink(`提前想好的「${q.draft.what}」需要重新想：${problem}`, 'deliberate');
+        return;
+      }
       this.beginActivity(q.draft, q.monologue || `接着做：${q.draft.what}`, 'llm', 'next');
     }
     if (!this.activity) return this.idle();
     const step = nextStep(this.activity);
     if (!step) return this.finishActivity('done', '这段活的步骤都做完了');
+    const state = this.d.adapter.state();
+    this.activity.stepStart = { pos: { ...state.pos }, view: viewOf(this.safe(() => this.d.perception.snapshot(), undefined)) };
     const r = this.d.arbiter.start(step, this.activity.source === 'rule' ? 'rule' : 'llm', { planId: this.activity.id });
     if ('error' in r) this.handleStepResult(step, { status: 'failed', failureCode: 'BAD_ARGS', summary: r.error }, 0);
     else if (remainingSteps(this.activity) === 0 && !this.queuedNext && !this.thinking && QUICK.has(step.skill)) {
       this.think('手上这段活快干完了，想想接下来', this.needsBigPicture() ? 'deliberate' : 'glance');
     }
+  }
+
+  /** 只检查眼下确实会用的物品；采集等前置动作的产出仍交给实际执行确认。 */
+  private queuedProblem(q: NonNullable<Mind['queuedNext']>): string | null {
+    if (Date.now() - q.at > 90_000) return '已等待超过 90 秒，身体和物品可能变了';
+    const state = this.d.adapter.state();
+    for (const step of q.draft.steps) {
+      const args = (step.args ?? {}) as Record<string, any>;
+      if (step.skill === 'eat') return this.d.adapter.hasFood() ? null : '背包里已经没有当前能吃的食物';
+      if (step.skill === 'craft') {
+        const item = pickVariant(args.item, state.inventory);
+        const plan = materialPlan(item, args.count ?? 1, state.inventory.filter((i) => i.name !== item));
+        return plan.enough ? null : `合成 ${item} 的材料已不齐`;
+      } else if (step.skill === 'smelt') {
+        if (!state.inventory.some((i) => i.name === args.item && i.count > 0)) return `待烧的 ${args.item} 已不在背包里`;
+        const fuel = pickFuel(state.inventory, args.item);
+        if (!fuel) return '冶炼燃料已不在背包里';
+        return null;
+      } else if (step.skill === 'build' && args.mode !== 'inspect') {
+        const materials = args.spec ? [...new Set(compileBuilding(normalizeSpec(structuredClone(args.spec))).cells.filter((c) => !c.placedBy && c.name !== 'air').map((c) => c.name))] : [];
+        if (materials.length && !materials.some((name) => state.inventory.some((i) => i.name === name && i.count > 0))) return '这座建筑需要的建材已不在背包里';
+        return null;
+      } else if (!SKILLS[step.skill]?.readOnly) {
+        // 后续材料可能由这一步采集、取出或消耗，不能当成当前就缺失。
+        break;
+      }
+    }
+    return null;
   }
 
   /** 没有活可干时（正在想事情）：原地看看四周，不乱跑也不消耗东西 */
@@ -240,7 +286,7 @@ export class Mind {
     if (this.d.arbiter.info()?.source === 'filler') this.d.arbiter.cancel('开始干活');
     this.d.bus.publish('plan', 'P2', `[${source === 'rule' ? 'rule' : 'llm'}] ${a.what} —— ${monologue}`, { thought: monologue, source: source === 'rule' ? 'rule' : 'llm', steps: a.steps, planId: a.id, kind: a.kind, how, repeat: a.repeat, ...(hypothesis ? { hypothesis } : {}) });
     this.d.bus.publish('goal', 'P2', `开始一段活：${a.what}`, { planId: a.id, source });
-    this.d.bus.publish('activity_start', 'P2', `${how === 'next' ? '接着' : how === 'habit' ? '凭习惯' : '开始'}：${a.what}${a.why ? `（${a.why}）` : ''}`, { activity: describeActivity(a, state) });
+    this.d.bus.publish('activity_start', 'P2', `${how === 'next' ? '接着' : how === 'habit' ? '凭习惯' : '开始'}：${a.what}${a.why ? `（${a.why}）` : ''}`, { activity: describeActivity(a, state, this.safe(() => this.d.perception.snapshot(), undefined)) });
   }
 
   private finishActivity(outcome: ActivityOutcome, summary: string) {
@@ -249,6 +295,9 @@ export class Mind {
     this.activity = null;
     const state = this.d.adapter.state();
     const record = recordOf(a, outcome, summary, state);
+    const failed = [...a.results].reverse().find((r) => r.status === 'failed' && !(SKILLS[r.skill]?.readOnly && r.failureCode === 'NOT_FOUND'));
+    this.recentEnds = [...this.recentEnds.filter((r) => Date.now() - r.at <= EXPERIENCE_MS),
+      { pos: { ...state.pos }, outcome, failureCode: failed?.failureCode, what: `${a.what}（${signatureOf(a.steps)}）`, at: record.at }].slice(-256);
     this.d.self.record(record);
     this.lastRecord = record;
     this.finishedSinceReflect++;
@@ -273,7 +322,7 @@ export class Mind {
       if (resume) {
         this.activity = resume;
         this.activityThoughtAt = Date.now();
-        this.d.bus.publish('activity_start', 'P2', `回到：${resume.what}`, { activity: describeActivity(resume, state) });
+        this.d.bus.publish('activity_start', 'P2', `回到：${resume.what}`, { activity: describeActivity(resume, state, this.safe(() => this.d.perception.snapshot(), undefined)) });
         this.d.bus.publish('plan', 'P2', `[${resume.source === 'rule' ? 'rule' : 'llm'}] ${resume.what} —— 回到刚才的事`, { thought: `回到刚才的事：${resume.what}`, source: resume.source === 'rule' ? 'rule' : 'llm', steps: resume.steps, planId: resume.id });
         if (outcome === 'stuck') this.requestThink(`绕路去做的「${a.what}」卡住了：${summary}`, 'deliberate');
         return;
@@ -294,7 +343,8 @@ export class Mind {
   // ---------------------------------------------------------------- 动作结果
   private onDone(o: TaskOutcome) {
     if (o.task.source === 'filler') return;
-    if (o.result.status !== 'cancelled') {
+    const observationMiss = SKILLS[o.task.skill]?.readOnly && o.result.failureCode === 'NOT_FOUND';
+    if (o.result.status !== 'cancelled' && !observationMiss) {
       if (o.task.source !== 'reflex') {
         this.d.self.practice(o.task.skill, o.result.status === 'succeeded', o.durationMs);
         this.d.self.feel({ type: 'step', ok: o.result.status === 'succeeded' });
@@ -315,8 +365,17 @@ export class Mind {
   private handleStepResult(step: Step, result: { status: 'succeeded' | 'failed' | 'cancelled'; failureCode?: any; summary: string }, durationMs: number) {
     const a = this.activity;
     if (!a) return;
-    if (result.status === 'failed') this.lastFailure = { skill: step.skill, code: result.failureCode, summary: result.summary };
-    const verdict = afterStep(a, step, result, durationMs, this.d.adapter.state());
+    const observationMiss = SKILLS[step.skill]?.readOnly && result.failureCode === 'NOT_FOUND';
+    if (result.status === 'failed' && !observationMiss) {
+      this.lastFailure = { skill: step.skill, code: result.failureCode, summary: result.summary };
+      this.pruneFailures();
+      const key = targetKeyOf(step);
+      const entry = this.failuresByTarget.get(key) ?? { n: 0, last: 0, at: [] };
+      entry.at.push(Date.now()); entry.n = entry.at.length; entry.last = Date.now();
+      this.failuresByTarget.set(key, entry);
+    }
+    const percept = this.safe(() => this.d.perception.update(), undefined);
+    const verdict = afterStep(a, step, result, durationMs, this.d.adapter.state(), percept);
     if (verdict.kind === 'continue') {
       if (verdict.adapted) {
         this.d.self.think(verdict.adapted, 'outcome');
@@ -325,6 +384,15 @@ export class Mind {
       return;
     }
     this.finishActivity(verdict.kind === 'done' ? 'done' : 'stuck', verdict.why);
+  }
+
+  private pruneFailures() {
+    const cutoff = Date.now() - EXPERIENCE_MS;
+    for (const [key, entry] of this.failuresByTarget) {
+      entry.at = entry.at.filter((at) => at >= cutoff);
+      entry.n = entry.at.length;
+      if (!entry.n) this.failuresByTarget.delete(key);
+    }
   }
 
   private onPreempt(o: TaskPreemption) {
@@ -339,6 +407,7 @@ export class Mind {
     if (n && n.level !== 'note') this.d.bus.publish('notice', 'P2', `注意到：${n.what}`, { salience: n.salience, level: n.level });
     if (ev.type === 'hurt') this.d.self.feel({ type: 'hurt', amount: 2 });
     if (ev.type === 'item_new' || ev.type === 'discovery') {
+      this.speechEventAt = Date.now();
       this.d.self.feel({ type: 'novelty', strength: ev.type === 'item_new' ? 0.6 : 0.4 });
       if (ev.type === 'item_new' && Date.now() - this.lastDiaryAt > this.timing.diaryGapMs / 2) this.diary(ev.msg.slice(0, 80));
     }
@@ -357,6 +426,7 @@ export class Mind {
     this.thinking = { controller, reason, tier, startedAt: Date.now(), generation, activityId };
     const noticed = this.attention.drain();
     const reflect = tier === 'deliberate' && this.finishedSinceReflect >= 4;
+    this.pruneFailures();
     const ctx: MindContext = {
       tier, reason: reflect ? `${reason}；做完了好几段活，顺便回头看看哪些办法好用、哪些该改` : reason,
       percept, state, self: this.d.self, memory: this.d.memory, activity: this.activity, suspended: this.suspended,
@@ -365,6 +435,9 @@ export class Mind {
       mySkills: tier === 'deliberate' ? this.safe(() => this.d.mySkills?.() ?? [], []) : [],
       researchContext: tier === 'deliberate' && reflect ? this.safe(() => this.d.researchContext?.(), undefined) : undefined,
       persona: this.d.persona,
+      stuckHere: stuckHere(this.recentEnds, state.pos),
+      repeatedFailures: [...this.failuresByTarget].filter(([, f]) => f.n >= 2)
+        .sort((a, b) => b[1].n - a[1].n).slice(0, 10).map(([key, f]) => `${key.replace(':', ' ')} ×${f.n}（10 分钟内）`),
     };
     const suggestion = this.userSuggestion;
     this.d.bus.publish('llm_request', 'P3', `${tier === 'glance' ? '抬头看一眼' : '认真想想'}：${reason}`, { tier, reason });
@@ -378,7 +451,7 @@ export class Mind {
       if (decision.tier === 'deliberate') { this.lastDeliberateAt = Date.now(); this.finishedSinceReflect = 0; }
       if (suggestion && suggestion === this.userSuggestion) this.userSuggestion = null;
       this.lastSnapshot = this.snapshotNow();
-      this.apply(decision, activityId);
+      this.apply(decision, activityId, ctx.lastRecord);
       this.kick();
     }).catch((e: any) => {
       if (this.thinking?.controller !== controller) return;
@@ -415,7 +488,7 @@ export class Mind {
   }
 
   /** 把一次决定落到身体和心里 */
-  private apply(decision: MindDecision, thoughtAboutActivity: string | null) {
+  private apply(decision: MindDecision, thoughtAboutActivity: string | null, reflectedRecord: ActivityRecord | null = this.lastRecord) {
     this.lastDecision = decision;
     this.notes = decision.notes;
     if (decision.notes.length) this.d.bus.publish('decision_normalized', 'P3', `决定里有些地方被纠正了：${decision.notes.join('；').slice(0, 200)}`);
@@ -423,27 +496,34 @@ export class Mind {
       this.d.self.think(decision.monologue);
       this.d.bus.publish('thought', 'P2', decision.monologue, { kind: decision.kind, tier: decision.tier, feeling: moodWords(this.d.self.mood) });
     }
-    if (decision.say) this.say(decision.say);
+    if (decision.say) this.say(decision.say, decision);
     if (decision.diary) this.diary(decision.diary);
-    const last = this.lastRecord;
+    const last = reflectedRecord;
+    const learnedText = typeof decision.learned === 'string' ? decision.learned : decision.learned?.text;
     if (decision.verdict && last?.hypothesis) {
       const exp = this.d.self.experimentFor(last.id);
       if (exp) {
-        this.d.self.concludeExperiment(exp.id, decision.verdict, `${last.summary}${decision.learned ? `；${decision.learned}` : ''}`);
+        this.d.self.concludeExperiment(exp.id, decision.verdict, `${last.summary}${learnedText ? `；${learnedText}` : ''}`);
         this.d.bus.publish('experiment', 'P2', `实验「${exp.hypothesis}」→ ${decision.verdict}`, { hypothesis: exp.hypothesis, verdict: decision.verdict });
       }
     }
-    if (decision.learned) {
-      const k = this.d.self.learn(decision.learned, { kind: last?.kind, signature: last?.signature, source: last?.hypothesis ? 'experiment' : 'reflection',
-        outcome: last?.outcome, tags: last ? Object.keys(last.gained) : [] });
+    const learn = (text: string, revise?: string) => {
+      const activityId = last?.id ?? thoughtAboutActivity ?? this.activity?.id ?? `${this.lastSession}:initial`;
+      if (this.learnedActivities.has(activityId)) return;
+      const previousTexts = new Map(this.d.self.data.knowHow.map((k) => [k.id, k.text]));
+      const k = this.d.self.learn(text, { kind: last?.kind, signature: last?.signature, source: last?.hypothesis ? 'experiment' : 'reflection',
+        outcome: last?.outcome, tags: last ? Object.keys(last.gained) : [], revise });
       if (k) {
-        this.d.memory.addLesson(decision.learned, { source: 'model' });
-        this.d.bus.publish('lesson', 'P2', `学到：${decision.learned}`, { source: 'model', knowHowId: k.id });
+        this.learnedActivities.add(activityId);
+        if (this.learnedActivities.size > 256) this.learnedActivities.delete(this.learnedActivities.values().next().value!);
+        this.d.memory.addLesson(k.text, { source: 'model', key: `know_how:${k.id}`, replaces: previousTexts.get(k.id) });
+        this.d.bus.publish('lesson', 'P2', `${k.unverified ? '暂时猜到（未验证）' : '学到'}：${k.text}`, { source: 'model', knowHowId: k.id });
       }
-    }
+    };
+    if (learnedText) learn(learnedText, typeof decision.learned === 'object' ? decision.learned.revise : undefined);
     if (decision.agenda) {
       for (const a of decision.agenda.add) {
-        const item = this.d.self.addAgenda(a.text, a.kind, a.horizon);
+        const item = this.d.self.addAgenda(a.text, a.kind, a.horizon, learn);
         if (item) this.d.bus.publish('agenda', 'P3', `${a.kind === 'idea' ? '冒出个点子' : a.kind === 'question' ? '想弄明白' : '想做'}：${a.text}`, { id: item.id });
       }
       for (const id of decision.agenda.done) this.d.self.setAgendaStatus(id, 'done');
@@ -465,7 +545,7 @@ export class Mind {
       if (draft.expect) a.expect = draft.expect;
       if (draft.ifStuck) a.ifStuck = draft.ifStuck;
       this.activityThoughtAt = Date.now();
-      this.d.bus.publish('activity_adjust', 'P2', `改一改做法：${a.what}`, { activity: describeActivity(a, this.d.adapter.state()) });
+      this.d.bus.publish('activity_adjust', 'P2', `改一改做法：${a.what}`, { activity: describeActivity(a, this.d.adapter.state(), this.safe(() => this.d.perception.snapshot(), undefined)) });
       this.d.bus.publish('plan', 'P2', `[${decision.source}] ${a.what} —— ${decision.monologue}`, { thought: decision.monologue, source: decision.source, steps: a.steps, planId: a.id });
       return;
     }
@@ -484,9 +564,25 @@ export class Mind {
     this.beginActivity(draft, decision.monologue, decision.source, decision.kind, decision.kind === 'experiment' ? decision.hypothesis : undefined);
   }
 
-  private say(text: string) {
+  private say(text: string, decision: MindDecision) {
     const t = text.replace(/[\r\n]+/g, ' ').trim();
     if (!t || t.startsWith('/') || t === this.lastSay.text || Date.now() - this.lastSay.at < this.timing.sayGapMs) return;
+    const state = this.d.adapter.state();
+    const changedMind = ['switch', 'detour', 'experiment'].includes(decision.kind);
+    const discovered = this.speechEventAt > this.lastSay.at && Date.now() - this.speechEventAt <= 60_000;
+    const completed = this.lastRecord?.outcome === 'done' && this.lastRecord.at > this.lastSay.at;
+    const danger = state.inLava || state.hp <= 8 || state.inWater && state.oxygen < 8 || this.safe(() => this.d.perception.snapshot().nearby.hostile.some((h) => h.dist <= 12), false);
+    if (!changedMind && !discovered && !completed && !danger) return;
+    const grams = (s: string) => {
+      const compact = s.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+      return new Set(Array.from({ length: Math.max(0, compact.length - 1) }, (_, i) => compact.slice(i, i + 2)));
+    };
+    const spoken = grams(t);
+    const similar = (other: string) => {
+      const words = grams(other);
+      return spoken.size > 0 && 2 * [...spoken].filter((g) => words.has(g)).length / (spoken.size + words.size) >= 0.65;
+    };
+    if (similar(this.lastSay.text) || this.d.self.recentThoughts(6).some((thought) => thought.kind === 'monologue' && Date.now() - thought.at <= 90_000 && similar(thought.text))) return;
     this.lastSay = { at: Date.now(), text: t };
     this.d.bus.publish('say', 'P2', t);
     try { this.d.say?.(t.slice(0, 200)); } catch { /* 聊天发不出去不影响游玩 */ }
@@ -612,7 +708,7 @@ export class Mind {
       mode: this.autonomous ? 'mind' : 'mind-rules',
       mind: {
         mood: self.mood, feeling: moodWords(self.mood), traits: self.data.traits,
-        activity: this.activity ? describeActivity(this.activity, state) : null,
+        activity: this.activity ? describeActivity(this.activity, state, this.safe(() => this.d.perception.snapshot(), undefined)) : null,
         suspended: this.suspended.map((a) => a.what),
         next: this.queuedNext?.draft.what ?? null,
         stream: self.recentThoughts(10),

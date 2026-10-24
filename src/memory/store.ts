@@ -643,16 +643,17 @@ export class WorldMemory {
   }
 
   // ------------------------------------------------ 经验教训（反思产出，长期保留）
-  addLesson(text: string, opts: { source?: 'model' | 'observed'; key?: string } = {}): Lesson | null {
+  addLesson(text: string, opts: { source?: 'model' | 'observed'; key?: string; replaces?: string } = {}): Lesson | null {
     const t = text.trim().slice(0, 160);
     const list = (this.data.lessons ??= []);
     if (!t) return null;
     const source = opts.source ?? 'model';
     if (opts.key) {
-      const old = list.find((l) => l.key === opts.key && this.inWorld(l));
+      const old = list.find((l) => l.key === opts.key && this.inWorld(l))
+        ?? list.find((l) => !l.key && l.source === source && (l.text === t || opts.replaces !== undefined && l.text === opts.replaces.trim().slice(0, 160)) && this.inWorld(l));
       if (old) {
-        if (old.text === t) return null;
-        old.text = t; old.ts = Date.now(); old.source = source;
+        if (old.text === t && old.key === opts.key) return null;
+        old.text = t; old.key = opts.key; old.ts = Date.now(); old.source = source;
         this.touch();
         return structuredClone(old);
       }

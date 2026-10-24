@@ -1,5 +1,6 @@
 import type { AgentState, BlockObservation, GameAdapter, Vec3Like } from '../adapter/types.ts';
 import type { WorldMemory } from '../memory/store.ts';
+import type { Percept } from '../perception/perception.ts';
 import type { Senses } from '../skills/types.ts';
 import { dist3 } from '../util.ts';
 import type { Condition, ConditionResult } from './types.ts';
@@ -7,6 +8,8 @@ import type { Condition, ConditionResult } from './types.ts';
 const object = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v);
 const finite = (v: unknown, min: number, max: number): v is number => typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max;
 const validPos = (p: unknown): p is Vec3Like => object(p) && finite(p.x, -29_999_984, 29_999_984) && finite(p.z, -29_999_984, 29_999_984) && finite(p.y, -2048, 2048);
+
+export type ConditionPerception = Pick<Percept, 'ts' | 'observation' | 'self' | 'light'>;
 
 export function observationReady(state: AgentState): boolean {
   return state.connected && state.alive && state.observationReady === true && !!state.sessionId &&
@@ -40,12 +43,17 @@ export function validateCondition(raw: unknown, adapter: Pick<GameAdapter, 'isKn
     return condition;
   }
   if (raw.type === 'self_state') {
+    if (raw.field === 'sky_visible' || raw.field === 'underground') return validateCondition({ type: raw.field, equals: raw.equals }, adapter, memory, state, depth);
     if (['inWater', 'inLava', 'onGround'].includes(raw.field) && typeof raw.equals === 'boolean') return { type: 'self_state', field: raw.field, equals: raw.equals };
     if (['held', 'riding'].includes(raw.field) && (raw.equals === null || typeof raw.equals === 'string' && /^[a-z0-9_:-]{1,80}$/.test(raw.equals))) {
       if (raw.field === 'held' && raw.equals !== null && !adapter.isKnownItem(raw.equals)) throw new Error('手持验收包含未知物品');
       return { type: 'self_state', field: raw.field, equals: raw.equals };
     }
     throw new Error('self_state 只支持 held/riding 的具体名称或 null，及 inWater/inLava/onGround 的布尔值');
+  }
+  if (raw.type === 'sky_visible' || raw.type === 'underground') {
+    if (typeof raw.equals !== 'boolean') throw new Error(`${raw.type} 验收条件的 equals 必须是布尔值`);
+    return { type: raw.type, equals: raw.equals };
   }
   if (raw.type === 'equipment') {
     if (!['hand', 'off-hand', 'head', 'torso', 'legs', 'feet'].includes(raw.slot) || !(raw.item === null || typeof raw.item === 'string' && adapter.isKnownItem(raw.item))) throw new Error('装备验收需要有效槽位和具体物品或 null');
@@ -74,7 +82,7 @@ export function observeCondition(condition: Condition, senses?: Pick<Senses, 'ob
 }
 
 /** Receives one complete adapter snapshot; every branch, including all_of, uses that same snapshot. */
-export function evaluateCondition(condition: Condition, state: AgentState, worldId = state.worldId, observations: BlockObservation[] = []): ConditionResult {
+export function evaluateCondition(condition: Condition, state: AgentState, worldId = state.worldId, observations: BlockObservation[] = [], percept?: ConditionPerception): ConditionResult {
   if (!observationReady(state) || state.worldId !== worldId) return { status: 'unknown', actual: null, reason: '没有同一世界的有效存活观测' };
   if (condition.type === 'inventory_min') {
     const count = state.inventory.filter((i) => i.name === condition.item).reduce((sum, i) => sum + i.count, 0);
@@ -90,6 +98,17 @@ export function evaluateCondition(condition: Condition, state: AgentState, world
     if (actual === undefined) return { status: 'unknown', actual: null, reason: '适配器没有提供该自身状态' };
     return { status: actual === condition.equals ? 'satisfied' : 'unsatisfied', actual: { field: condition.field, value: actual, expected: condition.equals } };
   }
+  if (condition.type === 'sky_visible' || condition.type === 'underground') {
+    const age = percept ? Date.now() - percept.ts : Infinity;
+    const p = percept?.observation;
+    if (!percept || !p?.ready || p.worldId !== worldId || p.sessionId !== state.sessionId || percept.self.dim !== state.dim || age < 0 || age > 1000 ||
+      dist3({ x: percept.self.pos[0], y: percept.self.pos[1], z: percept.self.pos[2] }, state.pos) > .25) {
+      return { status: 'unknown', actual: null, reason: '没有当前位置、同会话的新鲜环境感知' };
+    }
+    const value = condition.type === 'sky_visible' ? percept.self.sky_visible : percept.light?.underground;
+    if (typeof value !== 'boolean') return { status: 'unknown', actual: null, reason: '当前感知无法确认天空可见性或地下状态' };
+    return { status: value === condition.equals ? 'satisfied' : 'unsatisfied', actual: { field: condition.type, value, expected: condition.equals } };
+  }
   if (condition.type === 'equipment') {
     if (condition.slot !== 'hand' && !state.equipment) return { status: 'unknown', actual: null, reason: '适配器没有提供装备栏' };
     const item = condition.slot === 'hand' ? state.held : state.equipment?.find((e) => e.slot === condition.slot)?.name ?? null;
@@ -103,19 +122,19 @@ export function evaluateCondition(condition: Condition, state: AgentState, world
       Object.hasOwn(observed.properties, key) && String(observed.properties[key]) === String(value));
     return { status: matches ? 'satisfied' : 'unsatisfied', actual: observed };
   }
-  const children = condition.conditions.map((c) => evaluateCondition(c, state, worldId, observations));
+  const children = condition.conditions.map((c) => evaluateCondition(c, state, worldId, observations, percept));
   return { status: children.every((r) => r.status === 'satisfied') ? 'satisfied' : children.some((r) => r.status === 'unknown') ? 'unknown' : 'unsatisfied', actual: children };
 }
 
 /** Measured distance/quantity deficits support progress tracking without trusting skill success strings. */
-export function conditionDeficit(condition: Condition, state: AgentState, worldId = state.worldId, observations: BlockObservation[] = []): number | null {
+export function conditionDeficit(condition: Condition, state: AgentState, worldId = state.worldId, observations: BlockObservation[] = [], percept?: ConditionPerception): number | null {
   if (!observationReady(state) || state.worldId !== worldId) return null;
   if (condition.type === 'inventory_min') return Math.max(0, condition.count - state.inventory.filter((i) => i.name === condition.item).reduce((n, i) => n + i.count, 0)) / condition.count;
   if (condition.type === 'location_near') return state.dim === condition.dimension ? Math.max(0, dist3(state.pos, condition.pos) - condition.radius) : null;
   if (condition.type !== 'all_of') {
-    const result = evaluateCondition(condition, state, worldId, observations);
+    const result = evaluateCondition(condition, state, worldId, observations, percept);
     return result.status === 'unknown' ? null : result.status === 'satisfied' ? 0 : 1;
   }
-  const deficits = condition.conditions.map((c) => conditionDeficit(c, state, worldId, observations));
+  const deficits = condition.conditions.map((c) => conditionDeficit(c, state, worldId, observations, percept));
   return deficits.some((n) => n === null) ? null : deficits.reduce<number>((sum, n) => sum + n!, 0);
 }
