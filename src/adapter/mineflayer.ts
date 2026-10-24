@@ -165,7 +165,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           const b = this.mcData.blocksByName[n];
           if (b) mv.liquids.add(b.id);
         }
-        mv.liquidCost = 3; // 能走陆路就别游泳
+        mv.liquidCost = 10; // 能走陆路就别游泳：海岸边绕一点陆路也比下水强（游泳慢、会被溺尸打、会淹死）
         try {
           for (const n of PROTECTED_BLOCKS) {
             const b = this.mcData.blocksByName[n];

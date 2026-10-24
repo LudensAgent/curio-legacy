@@ -72,3 +72,30 @@ test('找到目标后这趟搜寻结束，下次重新开始计算', async (t) =
   const r = await explore.run(ctx, { direction: 'N', distance: 48, until: 'log' });
   assert.match(r.summary, /这趟已经走了 \d{2} 格/, '新的一趟从头计');
 });
+
+test('死亡复活/传送后不接着算上一趟搜寻', async (t) => {
+  const { w, ctx } = world(); t.after(() => ctx.memory.close());
+  await explore.run(ctx, { direction: 'E', distance: 48, until: 'log' });
+  w.pos = { x: -300, y: 64, z: 300 }; // 复活到很远的地方
+  const r = await explore.run(ctx, { direction: 'N', distance: 48, until: 'log' });
+  assert.match(r.summary, /这趟已经走了 \d{2} 格，离开始找的地方 \d{2} 格/, `应从新位置重新计：${r.summary}`);
+});
+
+test('眼前一片水：改往旁边的陆路走，而不是下水', async (t) => {
+  const { w, ctx } = world(); t.after(() => ctx.memory.close());
+  for (let x = 10; x <= 70; x++) for (let z = -6; z <= 6; z++) w.setBlock({ x, y: 63, z }, 'water');
+  const r = await explore.run(ctx, { direction: 'E', distance: 48 });
+  assert.match(r.summary, /E 方向眼前是一片水，改往 (NE|SE|N|S) 走陆路/);
+});
+
+test('决策里有身边八个方向去过多少的粗略地图', async () => {
+  const { exploredAround } = await import('../src/planner/prompt.ts');
+  const { WorldMemory } = await import('../src/memory/store.ts');
+  const m = new WorldMemory(null); m.setWorld('w');
+  try {
+    for (let x = 0; x <= 140; x += 8) m.visit('overworld', { x, y: 64, z: 0 });
+    const map = exploredAround(m, 'overworld', [0, 64, 0]);
+    assert.equal(map.E, '大多去过');
+    assert.equal(map.W, '没去过');
+  } finally { m.close(); }
+});

@@ -58,7 +58,7 @@ const SEGMENT = 32;
  * 记下这趟已经走了多远、离开始找的地方多远、朝哪个大方向，用来：不往已经搜过的地方走回头路、
  * 越找不到走得越远，并在结果里告诉模型进展。找到目标或 10 分钟没再找就结束。
  */
-interface Search { key: string; worldId: string; dim: string; start: { x: number; z: number }; walked: number; legs: number; heading: string | null; ts: number }
+interface Search { key: string; worldId: string; dim: string; start: { x: number; z: number }; last: { x: number; z: number }; walked: number; legs: number; heading: string | null; ts: number }
 const searches = new Map<string, Search>();
 const searchKey = (until: string) => [...new Set(until.split('|').map((t) => t.trim()).filter(Boolean).map((t) => /_(log|wood)$|^log$|^wood$/.test(t) ? 'log' : t))].sort().join('|');
 export function resetSearches() { searches.clear(); }
@@ -88,8 +88,10 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
     if (already) { searches.delete(key); return ok(`不用走远：${already.what} 就在 ${already.dist} 格外`, { found: already.what, dist: already.dist, moved: 0 }); }
     // 这趟搜寻的进展（同一世界/维度、10 分钟内接着找同一样东西才算同一趟）
     let search = key ? searches.get(key) : undefined;
-    if (search && (search.worldId !== s.worldId || search.dim !== s.dim || Date.now() - search.ts > 10 * 60_000)) { searches.delete(key); search = undefined; }
-    if (key && !search) { search = { key, worldId: s.worldId, dim: s.dim, start: { x: s.pos.x, z: s.pos.z }, walked: 0, legs: 0, heading: null, ts: Date.now() }; searches.set(key, search); }
+    // 换了世界/维度、太久没接着找、或者人被挪到了别处（死亡复活、传送）：这趟搜寻就算结束了
+    const jumped = search ? Math.hypot(s.pos.x - search.last.x, s.pos.z - search.last.z) > 48 : false;
+    if (search && (search.worldId !== s.worldId || search.dim !== s.dim || Date.now() - search.ts > 10 * 60_000 || jumped)) { searches.delete(key); search = undefined; }
+    if (key && !search) { search = { key, worldId: s.worldId, dim: s.dim, start: { x: s.pos.x, z: s.pos.z }, last: { x: s.pos.x, z: s.pos.z }, walked: 0, legs: 0, heading: null, ts: Date.now() }; searches.set(key, search); }
     const wood = key.split('|').includes('log');
     const notes: string[] = [];
     // 越找不到走得越远；在几乎没有树的群系里找木头，直接走远
@@ -102,21 +104,40 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
       for (let d = 16; d <= distance; d += 16) { n++; if (memory.chunkVisits(s.dim, s.pos.x + dx * d, s.pos.z + dz * d) > 0) seen++; }
       return n ? seen / n : 0;
     };
+    // 看得见的地面是不是水（眼前的海/湖，像人站着就能看到）：只看 64 格内的地表，不透视地下
+    const surfaceWater = (x: number, z: number) => {
+      for (let y = Math.floor(s.pos.y) + 12; y >= Math.floor(s.pos.y) - 12; y--) {
+        const b = adapter.blockAt({ x: Math.floor(x), y, z: Math.floor(z) });
+        if (b === null || b === undefined) return null;
+        if (b === 'air' || b === 'cave_air' || /leaves|grass$|fern|flower/.test(b)) continue;
+        return b === 'water' || b === 'kelp' || b === 'seagrass' || b === 'tall_seagrass';
+      }
+      return null;
+    };
+    const waterAlong = (dx: number, dz: number) => {
+      let wet = 0, n = 0;
+      for (let d = 16; d <= Math.min(64, distance); d += 16) { const w = surfaceWater(s.pos.x + dx * d, s.pos.z + dz * d); if (w === null) continue; n++; if (w) wet++; }
+      return n ? wet / n : 0;
+    };
     const ranked = Object.entries(DIRS)
       .map(([d, [dx, dz]]) => {
-        const visited = visitedAlong(dx, dz);
+        const visited = visitedAlong(dx, dz), wet = waterAlong(dx, dz);
         // 认准一个大方向：离上一趟方向越远越扣分，掉头（≥135°）扣得最多
         const momentum = search?.heading ? -turn(d, search.heading) / 180 * 0.6 : 0;
-        return { d, dx, dz, visited, n: memory.novelty(s.dim, s.pos.x + dx * distance, s.pos.z + dz * distance) * 0.5 + (1 - visited) + momentum + Math.random() * 0.05 - dirPenalty(d) };
+        return { d, dx, dz, visited, wet, n: memory.novelty(s.dim, s.pos.x + dx * distance, s.pos.z + dz * distance) * 0.5 + (1 - visited) - wet * 0.8 + momentum + Math.random() * 0.05 - dirPenalty(d) };
       })
       .sort((a, b) => b.n - a.n);
     let wanted = args.direction;
-    if (wanted !== 'AUTO' && search && search.legs >= 1) {
+    if (wanted !== 'AUTO') {
       const asked = ranked.find((r) => r.d === wanted)!;
-      if (asked.visited >= 0.6) {
-        // 要去的方向大半都搜过了：换成离它最近、还没怎么去过的方向（别在搜过的地方绕圈）
-        const alt = ranked.filter((r) => r.visited < 0.4).sort((a, b) => turn(a.d, wanted) - turn(b.d, wanted) || b.n - a.n)[0];
-        if (alt) { notes.push(`${wanted} 方向这一路大多已经走过（没看到 ${args.until}），改往 ${alt.d}`); wanted = alt.d; }
+      const searched = !!search && search.legs >= 1 && asked.visited >= 0.6;
+      // 要去的方向大半都搜过了，或者眼前一片水：换成离它最近、还没怎么去过、也不是水的方向（别绕圈、别下水）
+      if (searched || asked.wet >= 0.75) {
+        const alt = ranked.filter((r) => r.visited < 0.4 && r.wet < 0.5).sort((a, b) => turn(a.d, wanted) - turn(b.d, wanted) || b.n - a.n)[0];
+        if (alt && turn(alt.d, wanted) <= 90) {
+          notes.push(searched ? `${wanted} 方向这一路大多已经走过（没看到 ${args.until}），改往 ${alt.d}` : `${wanted} 方向眼前是一片水，改往 ${alt.d} 走陆路`);
+          wanted = alt.d;
+        }
       }
     }
     const order = wanted === 'AUTO' ? ranked : [ranked.find((r) => r.d === wanted)!, ...ranked.filter((r) => r.d !== wanted)];
@@ -128,6 +149,7 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
       if (!search) return notes.length ? `（${notes.join('；')}）` : '';
       search.walked += movedNow(); search.legs++; search.heading = dir; search.ts = Date.now();
       const here = adapter.state().pos;
+      search.last = { x: here.x, z: here.z };
       const net = Math.round(Math.hypot(here.x - search.start.x, here.z - search.start.z));
       const netDir = net >= 16 ? dirName(here.x - search.start.x, here.z - search.start.z) : '';
       const tips = [...notes, `为找 ${args.until} 这趟已经走了 ${search.walked} 格，离开始找的地方 ${net} 格${netDir ? `（朝 ${netDir}）` : ''}`];

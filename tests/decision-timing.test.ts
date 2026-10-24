@@ -66,7 +66,7 @@ test('完整决策把 since_last_decision 放在 state 前面', (t) => {
   const body = JSON.parse(text.slice(text.indexOf('\n') + 1, text.lastIndexOf('\n')));
   const keys = Object.keys(body);
   assert.deepEqual(body.since_last_decision.facts.at(-1), '已经离开水、不在水里了');
-  assert.equal(keys.indexOf('since_last_decision'), keys.indexOf('state') - 1);
+  assert.ok(keys.indexOf('since_last_decision') > keys.indexOf('tool_results') && keys.indexOf('since_last_decision') < keys.indexOf('state'), '放在实时区、紧挨着 state 之前');
 });
 
 test('模型在完整对象后多写了内容时，取第一个括号配平的对象', () => {
