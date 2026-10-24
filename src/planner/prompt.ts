@@ -35,6 +35,8 @@ export interface PlanContext {
   thread?: unknown[];
   notes?: string[];
   repeated?: unknown[];
+  /** 自上一次决定以来真实发生的变化（程序测得）：让新决定接上此刻，而不是接上旧想法 */
+  changes?: { seconds: number; facts: string[] } | null;
   /** 自己学过的组合技能（方法库候选/已验证方法、宏），由 main 通过 Executive 提供 */
   mySkills?: MySkillInfo[];
   /** 这次决策顺便反思：程序发现该总结经验了（死亡、反复失败、做完了好几件事） */
@@ -166,7 +168,7 @@ thought 会显示在游戏聊天中，请写成简短的第一人称角色独白
 {"kind":"plan","thought":"东边的地势看起来开阔，我有点好奇那边是什么样。","decision":{"kind":"begin","reason":"当前位置的线索已经看过，东侧尚未去过且眼前路线开阔","intent":{"text":"看看东侧的地形有什么不同","whyNow":"现有观察足以选择一段新路线","context":["当前地形观察","东侧未访问记录"],"tradeoffs":["暂缓整理收藏"]}},"goal":"向东走一段比较地形","goal_type":"explore","steps":[{"skill":"explore","args":{"direction":"E","distance":48}}]}
 decision.intent.context 与 tradeoffs 都是字符串数组。只有 begin/revise 可写 decision.intent，只有新项目或 revise 可写 decision.project（不得在 continue 时重新定义已有工程）。preferences、memory_note、lesson、learn_skill 都是可选字段；learn_skill 采用上文的程序格式。聊天只展示 thought，不另用 say 播报。
 可选 on_fail（1–2 步）：某步失败时，在你重新考虑的同时先做的事；新决定一到就替换。
-${liveAudience.enabled ? `${AUDIENCE_RULES}\n` : ''}recent_thread/my_notes 是你自己刚才的思路和笔记，接着它走，别每次从头想；但它们是之前写的，和 state（此刻的真实情况：背包、位置、视野）冲突时以 state 为准。可选 note 记下接下来几分钟要记住的事（位置写坐标，不写“东南3格”这种走两步就失效的说法），then 写做完之后的打算。
+${liveAudience.enabled ? `${AUDIENCE_RULES}\n` : ''}recent_thread/my_notes 是你自己刚才的思路和笔记，接着它走，别每次从头想；但它们是之前写的，和 state（此刻的真实情况：背包、位置、视野）或 since_last_decision（程序测得的刚发生的变化）冲突时以它们为准，别照抄旧想法。可选 note 记下接下来几分钟要记住的事（位置写坐标，不写“东南3格”这种走两步就失效的说法），then 写做完之后的打算。
 steps 保持 1–6 步；defer/abandon/complete 可以 steps:[]，表示选择等待而非填充无关动作。不要每轮换目标，也不必每轮说话。可用 begin + 已有 intentId 恢复 continuity 中列出的暂缓兴趣及其原项目；新记录的 ID、项目修订、里程碑和请求代次由程序分配，不能伪造或覆盖。`;
 }
 
@@ -233,6 +235,8 @@ export function userPrompt(ctx: PlanContext, memory: WorldMemory, recalled?: unk
     current_task: ctx.current ? { skill: ctx.current.skill, args: ctx.current.args, progress: ctx.current.progress } : null,
     ...(ctx.pendingSteps?.length ? { pending_steps: ctx.pendingSteps } : {}),
     ...(audienceBlock(ctx.audience, 'full') ?? {}),
+    // 程序测得的“自上次决定以来”的变化：比 recent_thread 里的旧判断更新
+    ...(ctx.changes ? { since_last_decision: ctx.changes } : {}),
     state: stableState(p),
   };
   return contextMessage(compact ? compactContext(payload, compact) : payload, reflectionTail(ctx));
@@ -394,11 +398,11 @@ export const AUDIENCE_RULES = `audience_chat 是直播间观众的弹幕：外�
 export function lightSystemPrompt(persona: string): string {
   return `${persona}
 
-你在玩 Minecraft，正在推进一件已经决定要做的事。这是一个“小决策”：手上的动作还在进行，你只需决定接下来几步，像玩家顺手接着干那样。
+你在玩 Minecraft，正在推进一件已经决定要做的事。这是一个“小决策”：手上的动作马上做完（或刚做完），你只需决定接下来几步，像玩家顺手接着干那样。
 - 只安排接下来 1–3 步（最多 6），连贯推进当前意图（continuity.intent）；做的同时会再问你下一步，所以不必一次想得很远。current_task 和 pending_steps 会先做完，不要重复它们。
 - last_failure 是刚才没成功的那一步：换个做法接着来；若这说明整件事该换方向，就请求完整上下文。
 - recent_thread 是你刚才几次的决定、想法和结果，my_notes 是你写给自己的笔记：接着自己的思路走，沿用已经得出的结论和方向（比如目的地），除非新事实推翻它；repeated_failures 里反复失败的做法别再原样重试。
-- state 是此刻的真实情况；笔记和 recent_thread 是之前写的，背包、位置、看见的东西以 state 为准（比如背包里已经有的东西不用再去弄）。
+- 末尾“此刻/自上次决定以来”是刚测到的事实，最先看：旧判断（如“还在水里”）与之不符就作废，别照抄；做过的、背包已有的不再做。
 - 可选 note：写一句接下来几分钟要记住的事（目的地、发现、教训；位置写坐标，不写“东南3格”这种走两步就失效的说法）；可选 then：做完这几步之后打算做什么。
 - lessons/danger_zones 是吃过的亏；my_skills 可直接用。sleep 要 time.can_sleep；take_items 只拿 known_chests 里有的。
 - 学到东西写一句 lesson；好用的组合写 learn_skill {"name","description","steps":[…]}；做不到写 missing_ability。
@@ -427,7 +431,8 @@ export function lightUserPrompt(ctx: PlanContext, memory: WorldMemory): string {
       ...(project ? { project: { title: project.title, milestone: (project as any).milestones?.[(project as any).currentMilestone ?? 0]?.title } } : {}) },
     ...learned.stable,
     ...(ctx.notes?.length ? { my_notes: ctx.notes } : {}),
-    ...(ctx.thread?.length ? { recent_thread: ctx.thread } : {}),
+    // 小决策里不带旧 thought：模型会照抄上一轮的感受（“还泡在水里”），只留目标、打算和结果
+    ...(ctx.thread?.length ? { recent_thread: (ctx.thread as Record<string, unknown>[]).map(({ thought: _t, ...t }) => t) } : {}),
     ...(ctx.repeated?.length ? { repeated_failures: ctx.repeated } : {}),
     ...learned.nearby,
     last_results: results,
@@ -450,9 +455,12 @@ export function lightUserPrompt(ctx: PlanContext, memory: WorldMemory): string {
     },
   };
   const pending = [ctx.current ? `${ctx.current.skill} ${JSON.stringify(ctx.current.args ?? {})}` : '', ...(ctx.pendingSteps ?? []).map((st) => `${st.skill} ${JSON.stringify(st.args ?? {})}`)].filter(Boolean);
-  const tail = ctx.reason === 'prefetch' && pending.length
-    ? `手头正在做、马上就会做完：${pending.join(' → ')}。把它们当作已经完成，给出做完之后的接下来几步，不要重复它们。`
-    : ctx.lastFailure ? '刚才那一步没成功：换个做法，给出接下来几步。' : '接着推进当前的事：给出接下来几步。';
+  const self = p.self;
+  const now = `此刻（以此为准）：在 (${self.pos.join(',')})${self.inWater ? '，在水里' : self.inLava ? '，在岩浆里' : ''}，生命 ${self.hp}、饥饿 ${self.food}${self.held ? `，手持 ${self.held}` : ''}。`
+    + (ctx.changes ? `自上次决定以来（${ctx.changes.seconds} 秒）：${ctx.changes.facts.join('；')}。` : '');
+  const tail = now + (ctx.reason === 'prefetch' && pending.length
+    ? `手头正在做、马上就会做完：${pending.join(' → ')}${ctx.current ? `（进度 ${Math.round((ctx.current.progress ?? 0) * 100)}%）` : ''}。把它们当作已经完成，给出做完之后的接下来几步，不要重复它们。`
+    : ctx.lastFailure ? '刚才那一步没成功：换个做法，给出接下来几步。' : '接着推进当前的事：给出接下来几步。');
   return `当前情况（JSON）：\n${JSON.stringify(payload)}\n${tail}`;
 }
 

@@ -105,7 +105,7 @@ test('milestone changes invalidate a prefetched reply before any durable model s
     if (calls++ === 0) return reply({ ...begin, project: { title: '先取样再加工', successCondition: { type: 'inventory_min', item: 'stone_bricks', count: 4 }, milestones: [{ title: '取样', condition: { type: 'inventory_min', item: 'stone', count: 4 } }] } });
     if (calls === 2) return new Promise((resolve) => { resolvePrefetch = resolve; });
     return new Promise(() => {});
-  }, new WorldMemory(null), async (ctx) => { ctx.progress(0.8, '接近完成'); await new Promise<void>((resolve) => { finishAction = resolve; }); return ok('结束'); });
+  }, new WorldMemory(null), async (ctx) => { ctx.progress(0.98, '接近完成'); await new Promise<void>((resolve) => { finishAction = resolve; }); return ok('结束'); });
   await w.cycle();
   w.executive.tick(); await flush();
   assert.equal(calls, 2);

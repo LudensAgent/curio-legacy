@@ -41,7 +41,7 @@ function fixture(t: TestContext) {
   const previousSkill = SKILLS.continuity_action;
   SKILLS.continuity_action = { name: 'continuity_action', description: '保持当前模型选择的动作', argsDoc: '{}', timeoutMs: 60000, movement: false,
     validate: () => ({ ok: true, args: {} }), run: async (ctx) => {
-      actions++; ctx.progress(0.8, '正在执行模型已经选择的动作');
+      actions++; ctx.progress(0.98, '模型已经选择的动作快做完了');
       await new Promise<void>((resolve) => finishes.push(resolve));
       return ok('当前动作结束');
     } };

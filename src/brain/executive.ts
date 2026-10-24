@@ -37,6 +37,14 @@ const FOOD_ITEMS = new Set(['bread', 'cooked_beef', 'cooked_porkchop', 'cooked_c
   'carrot', 'beef', 'porkchop', 'chicken', 'mutton', 'potato', 'sweet_berries', 'glow_berries', 'melon_slice', 'golden_apple', 'cookie', 'pumpkin_pie', 'beetroot',
   'dried_kelp', 'cod', 'salmon', 'rabbit', 'cooked_rabbit', 'mushroom_stew', 'rabbit_stew', 'beetroot_soup', 'golden_carrot']);
 
+/** 把一长串失败说明压成一句：取“地基不行：…”这类关键句或第一句，去掉括号残片 */
+export function briefReason(summary: string, max = 48): string {
+  const key = summary.match(/(地基不行：[^；。]*|[^；。]*(?:失败|还差|没有|不能|看不到|卡死)[^；。]*)/)?.[1] ?? summary.split(/[；。]/)[0];
+  let t = key.replace(/——.*$/, '').replace(/[（(][^）)]*$/, '').trim();
+  if (t.length > max) t = t.slice(0, max).replace(/[（(][^）)]*$/, '') + '…';
+  return t || summary.slice(0, max);
+}
+
 /** Coordinates model choices and measured progress; it never assigns a gameplay theme. */
 export class Executive {
   plan: Plan | null = null;
@@ -224,7 +232,8 @@ export class Executive {
     // Start the next autonomous choice while its last approved step is still
     // running. Skill deadlines are safety limits, not duration estimates, and
     // waiting for half a deadline often leaves the entire model call idle.
-    if (this.d.planner.autonomous) return 'prefetch';
+    // 正在做的是最后一步、而且是原地很快的收尾（合成、吃、插火把）：它几乎不改变处境，现在就想下一步不会过时
+    if (this.d.planner.autonomous) return (this.plan.index >= this.plan.steps.length && QUICK_SKILLS.has(cur.skill)) || this.nearlyDone(cur) ? 'prefetch' : null;
     const frac = (Date.now() - cur.startedAt) / Math.max(1, cur.deadline - cur.startedAt);
     return cur.progress >= 0.6 || frac >= 0.5 ? 'prefetch' : null;
   }
@@ -310,6 +319,9 @@ export class Executive {
     const controller = this.controller = new AbortController();
     const ctx = this.ctx(reason);
     const snapshot = this.basisSnapshot();
+    ctx.changes = this.changesSince(this.lastDecision);
+    // 这次请求的基准：只有决定真被采纳（新鲜、排进队列）才记为“上次决定”，作废/出错的请求不覆盖它
+    const baseline = { at: Date.now(), snap: snapshot, inWater: this.d.adapter.state().inWater };
     const reflection = this.reflectionFor(ctx);
     // 反思是附加在原请求上的标记，不改写 reason（prefetch/user_suggestion/project_blocked 各有语义）
     if (reflection) ctx.reflection = reflection;
@@ -319,7 +331,10 @@ export class Executive {
     ctx.tier = this.chooseTier(ctx);
     this.d.bus.publish('llm_request', 'P3', `请求决策（${reason}${ctx.tier === 'light' ? '·小决策' : ''}${reflection ? '·反思' : ''}）`, { tier: ctx.tier, ...(reflection ? { reflection: reflection.why } : {}) });
     this.d.planner.propose(ctx, controller.signal).then((p) => {
+      const tier = ctx.tier ?? 'full';
+      this.latency[tier] = Math.round(this.latency[tier] * 0.7 + (Date.now() - requestedAt) * 0.3);
       if (!fresh()) { this.staleDropped++; return; }
+      this.lastDecision = baseline;
       this.llmErrors = 0;
       this.unsuspend('model_unavailable');
       this.backoffUntil = 0;
@@ -388,7 +403,15 @@ export class Executive {
       // 不带“几秒前”：它每次都变，会让后面整段提示词都无法命中缓存；顺序本身就是时间线
       thread: this.thread.slice(-5).map((t) => ({ goal: t.goal, thought: t.thought.slice(0, 90),
         ...(t.then ? { then: t.then } : {}), outcome: t.status ? `${t.status}：${(t.summary ?? '').slice(0, 90)}` : '进行中' })),
-      notes: merged.map((n) => n.at ? `${n.text}（写于 ${n.at}）` : n.text),
+      // 标上多久前、离这里多远写的：模型能自己判断“西南1格的工作台”这种话是否还成立
+      notes: merged.map((n) => {
+        // 粗分档（而不是精确的分钟数/格数）：每分钟都变的数字会让这一段以后的提示词都无法命中缓存
+        const age = now - n.ts, ageText = age < 5 * 60_000 ? '刚才' : age < 30 * 60_000 ? '半小时内' : '更早';
+        const at = n.at?.split(',').map(Number);
+        const far = at && at.length === 3 && at.every(Number.isFinite) ? Math.hypot(at[0] - st.pos.x, at[1] - st.pos.y, at[2] - st.pos.z) : null;
+        const farText = far === null || far < 8 ? '' : far < 32 ? '，离这里十几二十格' : far < 100 ? '，离这里几十格' : '，离这里很远';
+        return `${n.text}（${ageText}${n.at ? `写于 ${n.at}` : ''}${farText}）`;
+      }),
       repeated: [...[...counts].filter(([, v]) => v.n >= 2).map(([k, v]) => ({ action: k, failures_10min: v.n, last: v.last.slice(0, 80) })), ...this.samePlace()],
     };
   }
@@ -402,6 +425,10 @@ export class Executive {
       last: `${[...new Set(near.map((f) => f.key))].slice(-4).join('、')} 都在这里失败了：问题多半出在这个地方，先离开这里（看 self.around）` }];
   }
 
+  /** 上一次发出决策请求时的世界快照：算“自上次决定以来发生了什么” */
+  private lastDecision: { at: number; snap: BasisSnapshot; inWater: boolean } | null = null;
+  /** 模型实际响应时间的滚动平均（毫秒），决定提前多久开始想下一步 */
+  private latency = { light: 2000, full: 8000 };
   private lightStreak = 0;
   private lastFullAt = 0;
   /**
@@ -410,6 +437,51 @@ export class Executive {
    * 完整决策只用于大转折：开始全新的事、玩家建议、项目受阻、死亡之后，以及每隔一段时间抬头看一眼全局
    * （连续 6 次小决策或超过 3 分钟）。小决策里模型觉得需要改方向时也会自己升级。
    */
+  /** 下一次请求大概会是哪一档（不改计数），用来估计要提前多久开始想 */
+  private wouldBeFull(): boolean {
+    return !this.d.memory.currentIntent() || !!this.userSuggestion || this.lastFailure?.code === 'DIED'
+      || this.lightStreak >= 6 || Date.now() - this.lastFullAt > 180_000;
+  }
+
+  /**
+   * 手头最后一步快做完了吗？按它的进度估计剩余时间，和模型实际要想多久（滚动平均）比：
+   * 只在“想完正好接上”的时候才开始想。过早地想（动作一开始就想）会让决定基于十几秒前的情况。
+   * 没有进度信息的动作就等它做完再想——小决策只要一两秒，停顿比用旧情况做决定好。
+   */
+  private nearlyDone(cur: TaskInfo): boolean {
+    const expected = (this.wouldBeFull() ? this.latency.full : this.latency.light) + 400;
+    const elapsed = Date.now() - cur.startedAt;
+    const p = Math.max(0, Math.min(1, cur.progress ?? 0));
+    if (p >= 0.97) return true;
+    if (p <= 0.05 || elapsed < 1000) return false;
+    return (elapsed * (1 - p)) / p <= expected;
+  }
+
+  /** 两次决定之间真实发生了什么（位置、背包、生命、进出水）：程序测得，模型据此接上此刻 */
+  private changesSince(prev: Executive['lastDecision']): PlanContext['changes'] {
+    if (!prev) return null;
+    const now = this.basisSnapshot();
+    const s = this.d.adapter.state();
+    const seconds = Math.round((Date.now() - prev.at) / 1000);
+    if (now.sessionId !== prev.snap.sessionId || now.dim !== prev.snap.dim) return { seconds, facts: ['换了世界/维度，之前的位置判断都不再适用'] };
+    const facts: string[] = [];
+    const moved = Math.hypot(now.pos.x - prev.snap.pos.x, now.pos.y - prev.snap.pos.y, now.pos.z - prev.snap.pos.z);
+    if (moved >= 3) facts.push(`走了约 ${Math.round(moved)} 格，现在在 (${Math.round(now.pos.x)},${Math.round(now.pos.y)},${Math.round(now.pos.z)})`);
+    const gained: string[] = [], lost: string[] = [];
+    for (const k of new Set([...Object.keys(prev.snap.inventory), ...Object.keys(now.inventory)])) {
+      const d = (now.inventory[k] ?? 0) - (prev.snap.inventory[k] ?? 0);
+      if (d > 0) gained.push(`${k}×${d}`); else if (d < 0) lost.push(`${k}×${-d}`);
+    }
+    if (gained.length) facts.push(`背包多了 ${gained.slice(0, 6).join('、')}`);
+    if (lost.length) facts.push(`背包少了 ${lost.slice(0, 6).join('、')}`);
+    if (Math.abs(now.hp - prev.snap.hp) >= 2) facts.push(`生命 ${Math.round(prev.snap.hp)} → ${Math.round(now.hp)}`);
+    if (prev.inWater !== s.inWater) facts.push(s.inWater ? '掉进了水里' : '已经离开水、不在水里了');
+    const newHostile = now.hostiles.filter((h) => !prev.snap.hostiles.includes(h));
+    if (newHostile.length) facts.push(`附近出现了 ${[...new Set(newHostile)].slice(0, 3).join('、')}`);
+    else if (prev.snap.hostiles.length && !now.hostiles.length) facts.push('附近的敌对生物已经不见了');
+    return { seconds, facts: facts.length ? facts : ['没有明显变化'] };
+  }
+
   private chooseTier(ctx: PlanContext): 'light' | 'full' {
     const big = !this.d.memory.currentIntent() || !!this.userSuggestion
       || ['user_suggestion', 'manual_replan', 'project_blocked'].includes(ctx.reason)
@@ -665,6 +737,12 @@ export class Executive {
       this.discardPlan('被生存反射打断，重新决定剩余尝试');
     };
     if (!p || o.task.planId !== p.id || !this.planCurrent(p)) { interrupted('被生存反射打断'); return; }
+    // 快淹死而上浮：是这一步本身把人带进了水里（去挖的东西在水下/要游过去）。上岸后原样接着做只会再走进同一片水——
+    // 实测这样在同一个地方淹死了两次。交回给决策，并明确告诉它原因。
+    if (o.replacement.skill === 'surface') {
+      interrupted(`做这一步时掉进水里、差点淹死（这一步的目标或路线在水里/水下），上岸后不要原样再做：换个不用下水的目标或路线，或用 boat`, 'INTO_WATER');
+      return;
+    }
     // 生存反射（打怪、上浮、逃跑）结束后，有稳定目标的步骤接着做；同一步被同一种反射打断两次就说明这条路/这个做法有危险
     const key = `${p.index - 1}:${o.task.skill}:${o.replacement.skill}`;
     const times = benign ? 0 : (p.interruptions ??= {})[key] = (p.interruptions[key] ?? 0) + 1;
@@ -834,9 +912,10 @@ export class Executive {
       && Math.hypot(f.pos.x - state.pos.x, f.pos.y - state.pos.y, f.pos.z - state.pos.z) <= 8);
     if (same.length < 3) return;
     const at = { x: Math.round(state.pos.x), y: Math.round(state.pos.y), z: Math.round(state.pos.z) };
-    const text = `在 (${at.x},${at.y},${at.z}) 附近 ${key} 10 分钟内失败了 ${same.length} 次（${summary.slice(0, 50)}）：这里这样做行不通，换个地方或换个做法`;
+    const text = `在 (${at.x},${at.y},${at.z}) 附近 ${key} 10 分钟内失败了 ${same.length} 次（${briefReason(summary)}）：这里这样做行不通，换个地方或换个做法`;
     const lesson = this.d.memory.addLesson(text, { source: 'observed', key: `fail:${state.dim}:${key}:${Math.floor(at.x / 16)}:${Math.floor(at.z / 16)}` });
-    if (lesson) this.d.bus.publish('lesson', 'P2', `亲历经验：${text}`, { source: 'observed' });
+    // 记忆里的那条随次数更新；对外只在第一次成形（3 次）和之后每多 5 次时报一声，免得同一秒刷两条
+    if (lesson && (same.length === 3 || same.length % 5 === 0)) this.d.bus.publish('lesson', 'P2', `亲历经验：${text}`, { source: 'observed' });
     this.reflectPending ??= `「${key}」在同一个地方接连失败了 ${same.length} 次`;
   }
 

@@ -226,7 +226,7 @@ test('note 写进世界记忆（带位置），新的执行层（重启后）还
   const ctx = (w.executive as any).ctx('failure');
   assert.equal(ctx.notes.length, 1, '短期笔记和持久笔记去重');
   const fresh = new Executive({ adapter: w.adapter, memory: w.memory, bus: w.bus, arbiter: w.arbiter, perception: w.perception, planner: w.planner });
-  assert.match((fresh as any).ctx('no_goal').notes[0], /^村子在 120,64,-40（写于 -?\d+,-?\d+,-?\d+）$/);
+  assert.match((fresh as any).ctx('no_goal').notes[0], /^村子在 120,64,-40（(?:刚才|\d+ 分钟前)写于 -?\d+,-?\d+,-?\d+(?:，离这里 \d+ 格)?）$/);
 });
 
 test('边做边想的决定：要紧的事没变就不作废；掉血、背包大变或等太久才重想', (t) => {

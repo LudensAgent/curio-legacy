@@ -85,7 +85,8 @@ test('gentle torch resumes only remaining gather work and ignores a late cancell
   await w.advance(225);
   assert.equal(w.adapter.inv.get('oak_log'), 2);
   assert.equal(w.arbiter.info()?.progress, 2 / 5);
-  await w.tick();
+  // 预先决策现在只在动作快做完时才发；这里直接发起一份，验证反射如何处理它
+  (w.executive as any).request('prefetch'); await flush();
   assert.equal(w.pending.length, 2, 'a speculative choice should be in flight');
   const planId = w.executive.plan?.id, intentId = w.memory.currentIntent()?.id;
   w.torch();
@@ -118,7 +119,7 @@ test('gentle torch discards an already queued decision before resuming an absolu
     throwIfAborted(opts.signal);
   });
   const original = await w.begin([{ skill: 'goto', args: { target: '30,64,0' } }]);
-  await w.tick();
+  (w.executive as any).request('prefetch'); await flush();
   w.pending[1].resolve(reply([{ skill: 'craft', args: { item: 'stick', count: 4 } }], { memory_note: '尚未激活的笔记' }));
   await flush();
   assert.ok(w.executive.queued);
@@ -222,4 +223,21 @@ test('gentle torch does not restart relative exploration from a new origin', asy
   await w.advance(75); await w.tick();
   walking.release(); await flush();
   assert.equal(walks, 1, 'relative target must not be extended by replaying the skill');
+});
+
+test('快淹死触发的上浮反射结束后，不再原样接着做把人带进水里的那一步', async (t) => {
+  const w = fixture(t);
+  const prevSurface = SKILLS.surface;
+  SKILLS.surface = { name: 'surface', description: 'test surface', argsDoc: '{}', timeoutMs: 30000, movement: true,
+    validate: () => ({ ok: true, args: {} }), run: async () => ok('已游上岸并站稳') };
+  t.after(() => { if (prevSurface) SKILLS.surface = prevSurface; else delete SKILLS.surface; });
+  const gather = await w.begin([{ skill: 'gather', args: { block: 'oak_log', count: 8 } }]);
+  assert.equal(gather.skill, 'gather');
+  const r = w.arbiter.start({ skill: 'surface', args: {} }, 'reflex');
+  assert.ok(!('error' in r));
+  await w.advance(100); await w.tick(); await w.tick();
+  assert.notEqual(w.arbiter.info()?.skill, 'gather', '上岸后不自动恢复 gather');
+  assert.equal(w.executive.plan, null, '交回给决策');
+  assert.equal((w.executive as any).lastFailure?.code, 'INTO_WATER');
+  assert.match((w.executive as any).lastFailure?.summary ?? '', /掉进水里.*不要原样再做/);
 });

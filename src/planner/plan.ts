@@ -93,6 +93,24 @@ export function normalizeStep(raw: unknown): unknown {
   return { ...(name !== undefined ? { skill: name } : {}), ...(a !== undefined ? { args: a } : {}) };
 }
 
+/** 从 start 处的 { 开始，找到括号配平（忽略字符串内的括号）的第一个完整对象 */
+function firstBalancedObject(t: string, start: number): string | null {
+  let depth = 0, inString = false, escaped = false;
+  for (let i = start; i < t.length; i++) {
+    const c = t[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (c === '\\') escaped = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') inString = true;
+    else if (c === '{') depth++;
+    else if (c === '}' && --depth === 0) return t.slice(start, i + 1);
+  }
+  return null;
+}
+
 /** 从模型输出中提取 JSON（容忍 ```json 包裹或前后多余文字）。 */
 export function extractJson(text: string): unknown {
   const t = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
@@ -101,8 +119,15 @@ export function extractJson(text: string): unknown {
   } catch {
     const a = t.indexOf('{');
     const b = t.lastIndexOf('}');
-    if (a >= 0 && b > a) return JSON.parse(t.slice(a, b + 1));
-    throw new Error('输出中没有 JSON 对象');
+    if (a < 0 || b <= a) throw new Error('输出中没有 JSON 对象');
+    try {
+      return JSON.parse(t.slice(a, b + 1));
+    } catch (error) {
+      // 模型偶尔在完整对象后面多写一个右括号或第二段内容：取第一个括号配平的完整对象
+      const first = firstBalancedObject(t, a);
+      if (first) return JSON.parse(first);
+      throw error;
+    }
   }
 }
 

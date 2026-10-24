@@ -203,6 +203,8 @@ export class Planner {
             // 小决策里模型觉得需要改方向或更多背景：立刻改发完整请求（不算无效输出）
             if (tier !== 'light') throw new Error('已经是完整上下文，请直接给出计划');
             tier = 'full';
+            // 让调用方知道最终是哪一档答的（执行层按档统计响应时间，决定提前多久开始想）
+            ctx.tier = 'full';
             this.stats.tiers.escalated++;
             this.stats.tiers.full++;
             this.trace?.end(traceId, { status: 'ok', text, latencyMs, usage, finishReason });
