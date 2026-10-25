@@ -33,6 +33,7 @@ import { ActionChat } from './observer/action-chat.ts';
 import { startDashboard } from './observer/dashboard.ts';
 import { LlmTrace } from './planner/llm-trace.ts';
 import { Metrics } from './observer/metrics.ts';
+import { RunStats } from './observer/run-stats.ts';
 import { Spectator } from './observer/spectator.ts';
 import { Perception } from './perception/perception.ts';
 import { NOTABLE, Vision } from './perception/vision.ts';
@@ -244,6 +245,9 @@ perception.knownSkillSigs = knownSigs;
 const reflex = new Reflex(adapter, arbiter, bus, vision, { routineCare: config.mind.bodyHabits, habits: () => selfModel.habits(), behaviors, instincts: 'skills' });
 const spectator = new Spectator(config, adapter, bus);
 const metrics = new Metrics(adapter, arbiter, executive, planner, reflex, bus);
+/** 一次测试从头到尾的累计数字（死亡、token、调用次数、任务成败、路程、运行时长）：重启不清零，清空记忆/重置世界才从零开始 */
+const runStats = new RunStats(path.join(config.dataDir, 'run-stats.json'), metrics, { main: planner, coder: coderPlanner !== planner ? coderPlanner : null });
+runStats.start();
 const actionChat = new ActionChat(adapter, bus, { ...config.actionChat, canSend: () => !executive.paused,
   context: () => ({ plan: executive.plan, task: arbiter.info(), intent: mind.currentIntent() }),
 });
@@ -253,7 +257,7 @@ actionChat.start();
 const feed = config.observerFeed ? new ObserverFeed({ botName: config.mc.username, mcVersion: config.mc.version, agentVersion: '0.3.0' }) : null;
 const observerTasks = feed ? installTaskObserver(feed, arbiter, {
   interests: () => perception.snapshot()?.drives ?? [],
-  stats: () => ({ deaths: metrics.counters.deaths, totalTokens: planner.stats.tokenUsage.totalTokens }),
+  stats: () => ({ deaths: metrics.counters.deaths, totalTokens: runStats.totalTokens() }),
 }) : null;
 let observedBot: unknown = null;
 let observerInstall: MineflayerObserver | null = null;
