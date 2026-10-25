@@ -215,3 +215,20 @@ test('build：料不全也先开工，有多少盖多少（墙基先起来），
   assert.match(o.result.summary, /这次先盖了 \d+ 块/);
   assert.ok(Object.keys(o.result.data!.missingMaterials as object).includes('glass'));
 });
+
+test('build：图纸要云杉木板，手上只有橡木木板也照样盖（木头种类可以顶替），验收也认', async () => {
+  const { sameMaterial } = await import('../src/building/engine.ts');
+  assert.ok(sameMaterial('oak_planks', 'spruce_planks'));
+  assert.ok(sameMaterial('birch_stairs', 'spruce_stairs'));
+  assert.ok(!sameMaterial('oak_planks', 'spruce_stairs'));
+  assert.ok(!sameMaterial('cobblestone', 'stone'));
+  const a = new FakeAdapter();
+  a.speed = 100000;
+  a.inv.set('cobblestone', 40);
+  a.inv.set('birch_planks', 64);
+  const spec = { name: '小棚', design: { legend: { C: 'cobblestone', P: 'oak_planks', D: 'oak_door', '.': 'air' }, layers: [['CCCCC', 'CCCCC', 'CCCCC', 'CCCCC', 'CCCCC'], ['PPDPP', 'P...P', 'P...P', 'P...P', 'PPPPP'], ['PPPPP', 'P...P', 'P...P', 'P...P', 'PPPPP']] } };
+  const { o } = await runSkill(a, 'build', { spec });
+  const missing = Object.keys((o.result.data?.missingMaterials ?? {}) as object);
+  assert.ok(!missing.includes('oak_planks'), `橡木木板不该算缺：${missing}`);
+  assert.ok(a.blocks.some((b) => b.name === 'birch_planks'), `用桦木木板顶上了：${o.result.summary}`);
+});

@@ -54,6 +54,11 @@ function actualState(adapter: StateBuildingAdapter, pos: Vec3Like) {
   return name === null ? null : { name, properties: {} };
 }
 
+/** 木头是哪一种不影响能不能住：云杉木板缺了用橡木木板顶上，像玩家一样手边有什么用什么 */
+const WOOD = /^(?:stripped_)?(oak|spruce|birch|jungle|acacia|dark_oak|mangrove|cherry|pale_oak|bamboo|crimson|warped)_(planks|log|wood|stairs|slab|fence|fence_gate|door|trapdoor|pressure_plate|button)$/;
+export const woodShape = (name: string) => { const m = name.match(WOOD); return m ? `${name.startsWith('stripped_') ? 'stripped_' : ''}${m[2] === 'wood' ? 'log' : m[2]}` : null; };
+export const sameMaterial = (a: string, b: string) => a === b || (!!woodShape(a) && woodShape(a) === woodShape(b));
+
 function cellDefect(adapter: StateBuildingAdapter, cell: BuildingCell, project: BuildingProject): BuildingDefect | null {
   const pos = rotatePosition(cell.pos, project.origin, project.rotation);
   const expected = rotateProperties(cell.properties, project.rotation);
@@ -61,7 +66,7 @@ function cellDefect(adapter: StateBuildingAdapter, cell: BuildingCell, project: 
   if (!actual) return { cellId: cell.id, pos, kind: 'unknown', expected: cell.name, actual: null };
   // 房子的地板：脚下本来就是结实的自然地面（草方块、泥土、石头…）就直接当地板用，像玩家一样不必挖掉再铺圆石
   if (actual.name !== cell.name && cell.phase === 'foundation' && cell.tags.includes('floor') && NATURAL_FLOOR.has(actual.name)) return null;
-  if (actual.name !== cell.name) return { cellId: cell.id, pos, kind: AIR.has(actual.name) ? 'missing' : 'wrong_block', expected: cell.name, actual: actual.name };
+  if (!sameMaterial(actual.name, cell.name)) return { cellId: cell.id, pos, kind: AIR.has(actual.name) ? 'missing' : 'wrong_block', expected: cell.name, actual: actual.name };
   if (Object.keys(expected).length && !adapter.blockStateAt) return { cellId: cell.id, pos, kind: 'unsupported', expected: `${cell.name} ${JSON.stringify(expected)}`, actual: actual.name };
   if (Object.entries(expected).some(([key, value]) => String(actual.properties[key]) !== String(value))) return { cellId: cell.id, pos, kind: 'wrong_state', expected: `${cell.name} ${JSON.stringify(expected)}`, actual: `${actual.name} ${JSON.stringify(actual.properties)}` };
   return null;
@@ -411,10 +416,21 @@ export async function constructBuilding(ctx: SkillCtx, archive: BuildingArchive,
   });
   const need = materialCost([...blueprint.cells.filter((c) => !c.placedBy && needsPlacement(c)), ...scaffoldTodo]);
   const inv = new Map(availableInventoryFor(ctx.memory, adapter.state()).map((i) => [i.name, i.count]));
-  for (const [name, count] of Object.entries(need)) if ((inv.get(name) ?? 0) < count) result.missingMaterials[name] = count - (inv.get(name) ?? 0);
+  // 同形状的别种木头也算（缺云杉木板时橡木木板顶得上）；先满足同名的需求，剩下的才拿去顶
+  const spare = new Map(inv);
+  for (const [name, count] of Object.entries(need)) spare.set(name, (spare.get(name) ?? 0) - count);
+  for (const [name, count] of Object.entries(need)) {
+    let short = count - (inv.get(name) ?? 0);
+    if (short > 0 && woodShape(name)) for (const [other, left] of spare) {
+      if (short <= 0) break;
+      if (other === name || left <= 0 || !sameMaterial(other, name)) continue;
+      const take = Math.min(short, left); short -= take; spare.set(other, left - take);
+    }
+    if (short > 0) result.missingMaterials[name] = short;
+  }
   // 像玩家一样有多少料先盖多少：墙基、墙身先起来，缺的那几样（玻璃、灯笼、楼梯……）留着以后补。
   // 只有一块都放不了（手上的料一样都用不上）时才直接收工
-  const placeable = Object.keys(need).some((name) => (inv.get(name) ?? 0) > 0);
+  const placeable = Object.keys(need).some((name) => [...inv].some(([n, c]) => c > 0 && sameMaterial(n, name)));
   if (Object.keys(result.missingMaterials).length && !placeable) return finish();
   // 只用自己能用的料（别的工程预留的不动），边放边扣
   const avail = new Map(inv);
@@ -492,8 +508,14 @@ export async function constructBuilding(ctx: SkillCtx, archive: BuildingArchive,
       if (Date.now() >= ctx.deadline - 1000) return finish();
       if (!needsPlacement(cell) || cell.placedBy) continue;
       if (cell.dependsOn.some((id) => byId.has(id) && workDefect(byId.get(id)!))) continue;
-      // 这一格的料用完了/没有：先跳过，盖别的
-      if (outOf.has(cell.name) || !have(cell.name)) { outOf.add(cell.name); continue; }
+      // 这一格的料用完了/没有：换同形状的别种木头顶上；也没有就先跳过，盖别的
+      let use = cell.name;
+      if (outOf.has(use) || !have(use)) {
+        outOf.add(cell.name);
+        const sub = woodShape(cell.name) ? [...avail.keys()].find((n) => n !== cell.name && sameMaterial(n, cell.name) && have(n)) : undefined;
+        if (!sub) continue;
+        use = sub;
+      }
       const pos = rotatePosition(cell.pos, project.origin, project.rotation);
       try {
         // A damaged two-block door is repaired as one item, including a surviving upper half.
@@ -512,17 +534,17 @@ export async function constructBuilding(ctx: SkillCtx, archive: BuildingArchive,
         await near(pos, true);
         archive.pending(project.id, { kind: 'permanent', pos: cell.pos, name: cell.name, cellId: cell.id });
         const action = Object.keys(cell.properties).length
-          ? await adapter.placeBlockStateAt!(pos, cell.name, rotateProperties(cell.properties, project.rotation), ctx.signal)
-          : await adapter.placeBlockAt(pos, [cell.name], ctx.signal);
+          ? await adapter.placeBlockStateAt!(pos, use, rotateProperties(cell.properties, project.rotation), ctx.signal)
+          : await adapter.placeBlockAt(pos, [use], ctx.signal);
         checkSession();
         if (!action.ok || cellDefect(adapter, cell, project)) {
           result.failures.push({ cellId: cell.id, reason: action.reason ?? 'PLACEMENT_NOT_VERIFIED' });
           archive.pending(project.id, null);
-          if (action.reason === 'NO_ITEM') outOf.add(cell.name);
+          if (action.reason === 'NO_ITEM') outOf.add(use);
           continue;
         }
         result.placed++; progress = true; owned.add(cell.id);
-        avail.set(cell.name, (avail.get(cell.name) ?? 0) - 1);
+        avail.set(use, (avail.get(use) ?? 0) - 1);
         archive.checkpoint(project.id, cell.phase, cell.id, `已核实 ${cell.name} @ ${cell.id}`);
         archive.pending(project.id, null);
         for (const auto of blueprint.cells.filter((c) => c.placedBy === cell.id)) if (!cellDefect(adapter, auto, project)) { owned.add(auto.id); archive.checkpoint(project.id, auto.phase, auto.id, '已核实自动生成的配对方块'); }

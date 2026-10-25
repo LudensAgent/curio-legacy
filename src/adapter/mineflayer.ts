@@ -865,7 +865,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const block = b.blockAt(this.vec(pos));
     if (!block || ['air', 'cave_air', 'void_air', 'water', 'lava'].includes(block.name)) return { ok: false, reason: 'NO_BLOCK' };
     if (block.diggable === false) return { ok: false, reason: 'UNBREAKABLE_BLOCK' };
-    if (!this.canHarvest(pos)) return { ok: false, reason: 'TOOL_MISSING' };
+    // 没有对应工具时只是不掉东西：积雪、草这类一碰就碎的照样能清掉（拆雪层不用铲子）；石头矿石才真要镐
+    const flimsy = typeof block.hardness === 'number' && block.hardness <= 0.5;
+    if (!this.canHarvest(pos) && !flimsy) return { ok: false, reason: 'TOOL_MISSING' };
     await this.afterAction(() => this.equipBestTool(block, signal), check);
     throwIfAborted(signal);
     if (!b.canDigBlock(block)) return { ok: false, reason: 'OUT_OF_REACH' };
