@@ -12,7 +12,7 @@ import { SKILLS } from '../skills/index.ts';
 import { causeName } from '../brain/habits.ts';
 import { pickFuel } from '../skills/economy.ts';
 import { pickVariant } from '../skills/work.ts';
-import { afterStep, softMiss, createActivity, describeActivity, diffInventory, inventoryOf, nextStep, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
+import { afterStep, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, nextStep, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
 import { Attention, EXPERIENCE_MS, RECONSIDER, stuckHere, URGENT } from './attention.ts';
 import { homeOf } from './home.ts';
 import type { ParsedGameMessage } from '../memory/game-messages.ts';
@@ -308,6 +308,12 @@ export class Mind {
   private beginActivity(draft: ActivityDraft, monologue: string, source: Activity['source'], how: string, hypothesis?: string) {
     const state = this.d.adapter.state();
     const a = createActivity(draft, monologue, source, state);
+    // 收工条件开工前就已经成立（比如 onGround=true）：它判断不了这段活做没做完，改成“步骤做完就收工”
+    if (a.doneWhen && doneWhenMet(a, state, this.safe(() => this.d.perception.snapshot(), undefined))) {
+      a.adaptations.push('收工条件开工前就已成立，不能用来判断做完没有，改成步骤做完就收工');
+      this.d.bus.publish('decision_normalized', 'P3', `「${a.what}」的收工条件开工前就已成立，改成步骤做完就收工`, { doneWhen: a.doneWhen });
+      delete a.doneWhen;
+    }
     if (hypothesis) { a.hypothesis = hypothesis; this.d.self.startExperiment(hypothesis, a.id); }
     const agenda = draft.agendaId ? this.d.self.data.agenda.find((x) => x.id === draft.agendaId) : this.d.self.activeAgenda();
     if (agenda) a.agendaId = agenda.id;

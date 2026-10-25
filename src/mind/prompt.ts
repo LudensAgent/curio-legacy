@@ -68,14 +68,15 @@ export function moveDetails(names: string[]): string {
 }
 
 const CONDITIONS = `done_when 的写法（可选，写错会被忽略）：
-{"type":"inventory_min","item":"oak_log","count":20}｜{"type":"location_near","dimension":"overworld","pos":{"x":0,"y":64,"z":0},"radius":4}（坐标要来自观察或地标）｜{"type":"self_state","field":"inWater|inLava|onGround","equals":false}｜{"type":"self_state","field":"held|riding","equals":"物品名或 null"}｜{"type":"sky_visible","equals":true}｜{"type":"underground","equals":false}｜{"type":"equipment","slot":"hand","item":"stone_pickaxe"}｜{"type":"all_of","conditions":[…]}`;
+{"type":"inventory_min","item":"oak_log","count":20}｜{"type":"location_near","dimension":"overworld","pos":{"x":0,"y":64,"z":0},"radius":4}（坐标要来自观察或地标）｜{"type":"self_state","field":"inWater|inLava|onGround","equals":false}｜{"type":"self_state","field":"held|riding","equals":"物品名或 null"}｜{"type":"sky_visible","equals":true}｜{"type":"underground","equals":false}｜{"type":"equipment","slot":"hand","item":"stone_pickaxe"}｜{"type":"all_of","conditions":[…]}
+写开工时还不成立、做完才成立的事（往下躲进地里 → {"type":"underground","equals":true}）；开工前就成立的条件会被当成没写。`;
 
 const OUTPUT = `只输出一个 JSON 对象：
 {"monologue":"第一人称内心独白，接着刚才的念头往下想（20–80 字）",
  "decision":"continue|adjust|new|detour|switch|experiment|rest",
  "activity":{"what":"具体要干什么","why":"为什么现在做","kind":"gather|craft|build|explore|survive|rest|experiment|tidy|social|other","steps":[{"skill":"动作名","args":{}}],"repeat":1,"done_when":{…},"expect":"预计会怎样","if_stuck":"卡住打算怎么办"},
  "next":{同 activity，手上的活快干完时写上，干完直接接上}}
-continue 时可以不写 activity。顺手、碰运气的步骤加 "optional":true（没成也不算失败）。
+continue 时可以不写 activity；要换成别的做法就用 adjust/new，别写 continue。顺手、碰运气的步骤加 "optional":true（没成也不算失败）。
 其他可选字段：say（有新发现、改主意、做成一件事或遇到危险时才说的一句口语）｜agenda（{"add":[{"text":"想做的事或想弄清的问题","kind":"goal|idea|question","horizon":"today|someday"}],"done":["a_…"],"drop":["a_…"],"focus":"a_…"}，规则不要放这里）｜learned（结果出乎意料时的一句窍门，或 {"revise":"k_…","text":"…"} 修订旧窍门）｜hypothesis（experiment 必填）｜experiment_result（上一段是实验时：supported|refuted|unclear）｜diary（值得记住的一句话）｜liked（刚发现自己喜欢的东西）`;
 
 const DECISIONS = `continue 照常做｜adjust 还是这件事、改一改 routine｜new 开始新的一段｜detour 先插一段别的，做完自动回来｜switch 放下手上的改做别的（独白里说清为什么）｜experiment 验证一个猜想的小活｜rest 歇一下`;

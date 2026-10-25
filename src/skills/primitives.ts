@@ -100,7 +100,7 @@ export const stepTo: Skill<CellArgs> = {
     const a = obj(raw);
     const to = parseRel(relValue(a), { f: 1, u: [-1, 1], r: 1 });
     if (typeof to === 'string') return { ok: false, error: to };
-    if (to[0] === 0 && to[2] === 0) return { ok: false, error: '原地上下不是 step：往上用 place_at [0,0,0]（垫一块站上去），往下用 dig_at [0,-1,0]' };
+    if (to[0] === 0 && to[2] === 0) return { ok: false, error: '原地上下不是 step：往上用 place_at [0,0,0]（垫一块站上去），往下用 dig_at [0,-1,0]（脚下挖空人会自己掉下去，不需要再 step）' };
     const facing = facingArg(a.facing, adapter);
     if (!FACINGS.includes(facing as Facing)) return { ok: false, error: facing };
     return { ok: true, args: { at: to, facing: facing as Facing } };
