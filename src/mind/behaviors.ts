@@ -38,6 +38,10 @@ export interface BehaviorStats {
   /** 代码技能：每个版本各自的成败，和最近几次运行的记录（给改进用） */
   byVersion?: Record<string, { ok: number; fail: number }>;
   recent?: RunRecord[];
+  /** 被整理掉的原因（合并进别的技能、长期用不上）；同名重写就恢复 */
+  retired?: string;
+  /** 和别的自动技能同时满足条件的次数（给整理用） */
+  conflicts?: Record<string, number>;
 }
 /** 代码技能某次失败后，看看要不要在后台改进（改进器自己限频） */
 export type ImproveHook = (name: string, why: 'failures' | 'requested', note?: string) => void;
@@ -203,11 +207,20 @@ export class BehaviorEngine {
     // 天生的躲闪正在进行（逃跑、上浮）时，只有更要紧的技能才插手
     const floor = running ? running.priority : cur?.source === 'reflex' ? 60 : 0;
     let s: Sense | null = null;
+    const matches: Behavior[] = [];
     for (const b of auto) {
       if (b.priority <= floor || running?.name === b.name) continue;
       if (now - (this.lastFired.get(b.name) ?? 0) < b.cooldownMs) continue;
       s ??= this.sense(cur);
-      if (!evalPredicate(b.when!, s)) continue;
+      if (evalPredicate(b.when!, s)) matches.push(b);
+    }
+    if (matches.length > 1) {
+      // 几个技能同时想接手：优先级之外也看实际管不管用（成功率高的先上），并记下谁和谁抢（给整理用）
+      for (const b of matches) this.touch(b.name, (st) => { st.conflicts ??= {}; for (const o of matches) if (o.name !== b.name) st.conflicts[o.name] = (st.conflicts[o.name] ?? 0) + 1; });
+      matches.sort((a, b) => this.choiceScore(b) - this.choiceScore(a));
+    }
+    for (const b of matches) {
+      if (!s) break;
       // 触发时的情况交给技能（代码技能里是 args.trigger），也留着给事后评判和改进用
       const trigger = { hp: Math.round(s.state.hp * 10) / 10, food: s.state.food, doing: s.doing, hurtAgoMs: Number.isFinite(s.hurtAgoMs) ? s.hurtAgoMs : null, cover: s.cover,
         hostiles: s.hostiles.slice(0, 4).map((h) => ({ name: h.name, dist: Math.round(h.dist * 10) / 10, ...(h.fusing ? { fusing: true } : {}) })) };
@@ -220,6 +233,31 @@ export class BehaviorEngine {
       return true;
     }
     return false;
+  }
+
+  /** 同时满足条件时的选择分：优先级 + 实际成功率（没用过的按五五开） */
+  choiceScore(b: Behavior): number {
+    const st = this.stats[b.name];
+    const rate = ((st?.ok ?? 0) + 1) / ((st?.ok ?? 0) + (st?.fail ?? 0) + 2);
+    return b.priority + 40 * (rate - 0.5);
+  }
+
+  /** 整理：把技能收起来（停用并写明原因）；同名重写会恢复 */
+  retire(name: string, why: string): boolean {
+    if (!this.behaviors.has(name)) return false;
+    this.touch(name, (st) => { st.disabled = true; st.retired = why.slice(0, 120); });
+    this.bus.publish('skill_retired', 'P2', `整理技能：收起「${name}」（${why.slice(0, 80)}）`, { name, why });
+    return true;
+  }
+
+  /** 整理：调整优先级（同时满足条件时谁先上） */
+  setPriority(name: string, priority: number): boolean {
+    const k = this.book?.get(name);
+    if (!k || !this.book || !k.behavior || typeof k.behavior !== 'object') return false;
+    const p = Math.max(1, Math.min(90, Math.round(priority)));
+    const raw = { ...(k.behavior as Record<string, unknown>), priority: p, code_file: undefined, version: undefined };
+    const w = this.book.write(name, k.description, k.body, raw);
+    return w.ok;
   }
 
   /** 某个本能此刻是否被自己写的技能换掉了（技能正在做，或它的条件正成立） */
@@ -275,7 +313,7 @@ export class BehaviorEngine {
     const b = this.behaviors.get(w.skill.name);
     if (!b) return { ok: false, error: '技能写下了，但格式不对没有生效' };
     // 修订就是重新给它一次机会
-    this.touch(b.name, (st) => { st.disabled = false; st.ok = 0; st.fail = 0; delete st.lastError; });
+    this.touch(b.name, (st) => { st.disabled = false; st.ok = 0; st.fail = 0; delete st.lastError; delete st.retired; });
     return { ok: true, name: b.name, created: w.created, mode: b.mode };
   }
 
@@ -384,7 +422,7 @@ export class BehaviorEngine {
   overview(): string[] {
     return [...this.list().map((b) => {
       const st = this.stats[b.name];
-      return `${b.name}［${b.mode === 'auto' ? '自动' : b.mode === 'recover' ? '失败时先试' : '调用'}${b.code ? `，代码 v${b.version ?? 1}` : ''}${b.overrides.length ? `，代替本能 ${b.overrides.join('/')}` : ''}${b.needs ? `，调用时给 args.${Object.keys(b.needs).join('/')}` : ''}］${st && st.ok + st.fail ? ` 成${st.ok}/败${st.fail}` : ''}${st?.disabled ? ' 已停用' : ''}`;
+      return `${b.name}［${b.mode === 'auto' ? '自动' : b.mode === 'recover' ? '失败时先试' : '调用'}${b.code ? `，代码 v${b.version ?? 1}` : ''}${b.overrides.length ? `，代替本能 ${b.overrides.join('/')}` : ''}${b.needs ? `，调用时给 args.${Object.keys(b.needs).join('/')}` : ''}］${st && st.ok + st.fail ? ` 成${st.ok}/败${st.fail}` : ''}${st?.retired ? ` 已收起（${st.retired.slice(0, 30)}）` : st?.disabled ? ' 已停用' : ''}`;
     }), ...[...this.invalid].map(([n, why]) => `${n}：${why}`)];
   }
 }

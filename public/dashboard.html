@@ -154,6 +154,14 @@
   .slot .n { position: absolute; right: 2px; bottom: 0; font: 700 11px var(--mono); color: #fff; text-shadow: 1px 1px 0 #3f3f3f; pointer-events: none; }
   .slot .txt { font: 9px/1.1 var(--mono); color: #fff; text-align: center; padding: 2px; word-break: break-all; text-shadow: 1px 1px 0 #3f3f3f; }
   .invsep { grid-column: 1 / -1; height: 4px; }
+  .score { display: flex; align-items: baseline; gap: 6px; margin-bottom: 8px; }
+  .score b { font: 700 40px var(--mono); letter-spacing: -.03em; }
+  .chart { position: relative; min-height: 120px; }
+  .chart svg { width: 100%; height: 100%; display: block; overflow: visible; }
+  .chart .axis { stroke: var(--line); stroke-width: 1; }
+  .chart text { fill: var(--dim); font: 10px var(--mono); }
+  .chart .lg { position: absolute; top: 0; right: 0; display: flex; gap: 10px; font-size: 11px; color: var(--dim); }
+  .chart .lg span::before { content: ""; display: inline-block; width: 10px; height: 3px; margin-right: 4px; background: var(--c); vertical-align: 3px; }
   .stack { display: flex; height: 8px; border-radius: 99px; overflow: hidden; background: var(--soft); margin: 8px 0; }
   .stack i { display: block; height: 100%; }
 </style>
@@ -171,6 +179,7 @@
     <input id="suggest" placeholder="给 Agent 一个建议，例如：去找村庄" />
     <button class="primary" onclick="sendSuggest()">发送</button>
   </div>
+  <button id="specBtn" onclick="toggleSpectate()" title="自动旁观：你的客户端跟着 Bot 看；关掉后留在旁观模式自由飞">旁观</button>
   <button onclick="post('/api/replan')" title="让它马上重新想一想">重新想</button>
   <button id="pauseBtn" onclick="togglePause()">暂停</button>
 </header>
@@ -247,6 +256,7 @@
     </div>
 
     <nav class="tabs" id="tabs">
+      <button class="tab" data-tab="learning">学习曲线</button>
       <button class="tab" data-tab="mind">心智</button>
       <button class="tab" data-tab="skills">技能<span class="n" id="nSkills"></span></button>
       <button class="tab" data-tab="vision">视野</button>
@@ -255,6 +265,25 @@
       <button class="tab" data-tab="llm">LLM 调用<span class="n" id="llmCount"></span></button>
       <button class="tab" data-tab="metrics">运行指标</button>
     </nav>
+
+    <section class="pane" id="pane-learning">
+      <div class="board">
+        <div class="card">
+          <h2>评分 <span class="r dim" id="lsDeaths"></span></h2>
+          <div class="body">
+            <div class="score"><b id="lsTotal">-</b><span class="dim">/ 100</span></div>
+            <div class="meter"><span class="dim">进度</span><div class="bar"><i id="lsProgress"></i></div><span class="mono" id="lsProgressV">-</span></div>
+            <div class="meter"><span class="dim">生存</span><div class="bar"><i id="lsSurvival"></i></div><span class="mono" id="lsSurvivalV">-</span></div>
+            <div class="meter"><span class="dim">学习</span><div class="bar info"><i id="lsLearning"></i></div><span class="mono" id="lsLearningV">-</span></div>
+            <div class="meter"><span class="dim">效率</span><div class="bar warn"><i id="lsEfficiency"></i></div><span class="mono" id="lsEfficiencyV">-</span></div>
+            <div class="dim" style="font-size:11px;margin-top:8px">总分 = 进度 40% + 生存 20% + 学习 25% + 效率 15%。进度看里程碑（只增不减）；生存看最近一小时死了几次；学习看用得上的技能和验证过的窍门；效率看最近半小时动作成功率和卡住的比例。</div>
+          </div>
+        </div>
+        <div class="card cols2"><h2>分数曲线 <span class="r dim" id="lsSpan"></span></h2><div class="body chart" id="lsCurve"></div></div>
+        <div class="card"><h2>里程碑</h2><ul class="list body" id="lsMilestones"></ul></div>
+        <div class="card cols2"><h2>每条命到达里程碑的用时（分钟，越来越短 = 学会了）</h2><div class="body"><div class="chart" id="lsLives" style="height:150px"></div><table><thead id="lsLivesHead"></thead><tbody id="lsLivesRows"></tbody></table></div></div>
+      </div>
+    </section>
 
     <section class="pane" id="pane-mind">
       <div class="board">
@@ -348,6 +377,8 @@ async function post(url, body) { await fetch(url, { method: 'POST', headers: { '
 function sendSuggest() { const t = $('suggest').value.trim(); if (t) { post('/api/suggest', { text: t }); $('suggest').value = ''; } }
 $('suggest').addEventListener('keydown', (e) => e.key === 'Enter' && sendSuggest());
 function togglePause() { post(paused ? '/api/resume' : '/api/pause'); }
+let specActive = false;
+async function toggleSpectate() { $('specBtn').textContent = '切换中…'; await post('/api/spectate', { on: !specActive }); }
 
 // 标签页（记住上次看的那一页）
 function showTab(name) {
@@ -356,6 +387,7 @@ function showTab(name) {
   lsSet('curio.dashboard.tab', name);
   if (name === 'events') { unseen = 0; $('nEvents').textContent = ''; $('log').scrollTop = $('log').scrollHeight; }
   if (name === 'vision' && lastState) drawVision(lastState.vision, lastState.percept.vision);
+  if (name === 'learning' && lastState) { learnKey = ''; renderLearning(lastState.learning); }
 }
 document.querySelectorAll('.tab').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.tab)));
 
@@ -412,6 +444,51 @@ function renderInventory(items, empty) {
   $('inv').innerHTML = cells.join('');
 }
 
+// ------------------------------------------------------------ 学习曲线
+function lineChart(el, series, opts = {}) {
+  const w = el.clientWidth || 600, h = el.clientHeight || 180, pad = { l: 30, r: 8, t: 18, b: 18 };
+  const xs = series.flatMap((s) => s.points.map((p) => p.x)), ys = series.flatMap((s) => s.points.map((p) => p.y));
+  if (!xs.length) { el.innerHTML = '<div class="empty">还没有数据（每 30 秒记一次）</div>'; return; }
+  const x0 = Math.min(...xs), x1 = Math.max(...xs, x0 + 1), y0 = opts.yMin ?? 0, y1 = opts.yMax ?? Math.max(1, ...ys) * 1.1;
+  const X = (x) => pad.l + (x - x0) / (x1 - x0) * (w - pad.l - pad.r), Y = (y) => h - pad.b - (y - y0) / (y1 - y0) * (h - pad.t - pad.b);
+  const ticks = [y0, (y0 + y1) / 2, y1].map((v) => `<line class="axis" x1="${pad.l}" x2="${w - pad.r}" y1="${Y(v)}" y2="${Y(v)}"/><text x="2" y="${Y(v) + 3}">${Math.round(v)}</text>`).join('');
+  const xl = opts.xLabel ? `<text x="${pad.l}" y="${h - 3}">${esc(opts.xLabel(x0))}</text><text x="${w - pad.r}" y="${h - 3}" text-anchor="end">${esc(opts.xLabel(x1))}</text>` : '';
+  const lines = series.map((s) => {
+    const pts = s.points.map((p) => `${X(p.x).toFixed(1)},${Y(p.y).toFixed(1)}`).join(' ');
+    const dots = opts.dots ? s.points.map((p) => `<circle cx="${X(p.x)}" cy="${Y(p.y)}" r="3" fill="${s.color}"><title>${esc(s.name)}：${p.y}</title></circle>`).join('') : '';
+    return `<polyline fill="none" stroke="${s.color}" stroke-width="${s.width || 1.5}" stroke-linejoin="round" points="${pts}"/>${dots}`;
+  }).join('');
+  el.innerHTML = `<div class="lg">${series.map((s) => `<span style="--c:${s.color}">${esc(s.name)}</span>`).join('')}</div><svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${ticks}${xl}${lines}</svg>`;
+}
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+let learnKey = '';
+function renderLearning(L) {
+  if (!L) return;
+  const n = L.now;
+  $('lsTotal').textContent = n.total;
+  for (const k of ['progress', 'survival', 'learning', 'efficiency']) { const id = 'ls' + k[0].toUpperCase() + k.slice(1); $(id).style.width = n[k] + '%'; $(id + 'V').textContent = n[k]; }
+  $('lsDeaths').textContent = `最近一小时死了 ${L.deathsLastHour} 次`;
+  $('lsMilestones').innerHTML = L.milestones.map((m) => `<li>${m.at ? '<span class="badge good">✓</span>' : '<span class="badge">　</span>'} ${esc(m.label)} <span class="k">权重 ${m.weight}${m.at ? ` · ${new Date(m.at).toLocaleString()}` : ''}</span></li>`).join('');
+  const key = JSON.stringify([L.curve.length, L.curve.at(-1)?.t, L.lives.length, L.lives.at(-1)?.reached]);
+  if (key === learnKey || !$('pane-learning').classList.contains('on')) return;
+  learnKey = key;
+  const fmt = (t) => new Date(t).toLocaleTimeString().slice(0, 5);
+  $('lsSpan').textContent = L.curve.length ? `${new Date(L.curve[0].t).toLocaleString()} 起，共 ${L.curve.length} 个点` : '';
+  const pick = (k) => L.curve.map((p) => ({ x: p.t, y: p[k] }));
+  lineChart($('lsCurve'), [
+    { name: '总分', color: css('--text'), width: 2.5, points: pick('total') },
+    { name: '进度', color: css('--accent'), points: pick('progress') },
+    { name: '生存', color: css('--bad'), points: pick('survival') },
+    { name: '学习', color: css('--info'), points: pick('learning') },
+    { name: '效率', color: css('--warn'), points: pick('efficiency') },
+  ], { yMin: 0, yMax: 100, xLabel: fmt });
+  const colors = [css('--accent'), css('--info'), css('--warn'), css('--bad'), css('--text'), css('--dim')];
+  lineChart($('lsLives'), L.lifeMilestones.map((m, i) => ({ name: m.label, color: colors[i % colors.length], points: L.lives.filter((l) => l.reached[m.key] != null).map((l) => ({ x: l.n, y: l.reached[m.key] })) })).filter((s) => s.points.length),
+    { dots: true, xLabel: (x) => `第 ${x} 条命` });
+  $('lsLivesHead').innerHTML = `<tr><th>命</th><th>活了</th>${L.lifeMilestones.map((m) => `<th>${esc(m.label)}</th>`).join('')}<th>怎么死的</th></tr>`;
+  $('lsLivesRows').innerHTML = L.lives.slice().reverse().map((l) => `<tr><td class="mono">#${l.n}${l.alive ? ' <span class="badge good">现在</span>' : ''}</td><td class="mono">${l.minutes} 分</td>${L.lifeMilestones.map((m) => `<td class="mono">${l.reached[m.key] ?? '-'}</td>`).join('')}<td class="dim" style="font-size:11px">${esc(l.cause || '')}</td></tr>`).join('') || '<tr><td class="empty" colspan="9">还没有记录</td></tr>';
+}
+
 function renderMind(mind) {
   if (!mind) return;
   const names = { energy: '精力', boredom: '无聊', frustration: '烦躁', satisfaction: '满足', curiosity: '好奇' };
@@ -433,10 +510,15 @@ function renderSkills(sk) {
   if (!sk) return;
   const mode = { auto: ['条件成立自动做', 'info'], recover: ['动作失败时先试', 'warn'], manual: ['use_skill 调用', ''] };
   $('nSkills').textContent = sk.list.length || '';
-  $('improving').innerHTML = sk.improving ? `<div class="notice">正在后台改进代码技能「${esc(sk.improving.name)}」（${sk.improving.sinceSec}s）</div>` : '';
+  const kindZh = { death: '死亡', stuck: '反复卡住', cornered: '被怪追着甩不掉' };
+  $('improving').innerHTML = (sk.improving ? `<div class="notice">正在后台改进代码技能「${esc(sk.improving.name)}」（${sk.improving.sinceSec}s）</div>` : '')
+    + (sk.forging ? `<div class="notice">正在后台从刚才的${kindZh[sk.forging.kind] || sk.forging.kind}里总结技能（${sk.forging.sinceSec}s）</div>` : '')
+    + (sk.curating ? '<div class="notice">正在后台整理技能（合并、调优先级、收起用不上的）</div>' : '')
+    + ((sk.curated || []).length ? `<div class="dim" style="font-size:11px;margin-bottom:4px">最近的整理：${(sk.curated || []).slice().reverse().map((c) => `${ago(c.at)}前 ${esc(c.result)}`).join('　')}</div>` : '')
+    + ((sk.forged || []).length ? `<div class="dim" style="font-size:11px;margin-bottom:8px">最近的总结：${(sk.forged || []).slice().reverse().map((f) => `${ago(f.at)}前 ${kindZh[f.kind] || f.kind} → ${esc(f.result)}`).join('　')}</div>` : '');
   $('skillRows').innerHTML = sk.list.length ? sk.list.map((b) => {
     const st = b.stats; const [m, c] = mode[b.mode] || [b.mode, ''];
-    return `<tr><td><b class="mono">${esc(b.name)}</b>${b.source === 'self' ? ' <span class="badge good">自己写的</span>' : ''}${b.code ? ` <span class="badge info">代码 v${b.version ?? 1}</span>` : ''}${st?.disabled ? ' <span class="badge bad">已停用</span>' : ''}</td>`
+    return `<tr><td><b class="mono">${esc(b.name)}</b>${b.source === 'self' ? ' <span class="badge good">自己写的</span>' : ''}${b.code ? ` <span class="badge info">代码 v${b.version ?? 1}</span>` : ''}${st?.retired ? ` <span class="badge" title="${esc(st.retired)}">已收起</span>` : st?.disabled ? ' <span class="badge bad">已停用</span>' : ''}<div class="dim mono" style="font-size:10px">优先级 ${b.priority ?? '-'}</div></td>`
       + `<td><span class="badge ${c}">${m}</span>${b.overrides?.length ? `<div class="dim" style="font-size:11px">代替本能 ${esc(b.overrides.join('、'))}</div>` : ''}</td>`
       + `<td class="mono">${st ? `${st.ok} / ${st.fail}` : '-'}</td>`
       + `<td>${esc(b.description)}${st?.lastError ? `<div class="err">${esc(st.lastError)}</div>` : ''}</td></tr>`;
@@ -478,6 +560,11 @@ function render(s) {
   renderNow(ex, t, s);
   renderMind(ex.mind);
   renderSkills(s.skills);
+  renderLearning(s.learning);
+  const sp = s.spectator;
+  $('specBtn').textContent = !sp.enabled ? '旁观未启用' : sp.active ? '旁观：跟随中' : '旁观：自由看';
+  $('specBtn').disabled = !sp.enabled; $('specBtn').classList.toggle('primary', !!(sp.enabled && sp.active));
+  specActive = !!sp.active;
 
   kpi('k-idle', `${m.idle10m}s`, m.idle10m < 60 ? 'good' : 'bad');
   kpi('k-cont', pct(m.llmContinuity), m.llmContinuity == null ? '' : m.llmContinuity >= 0.95 ? 'good' : 'bad');

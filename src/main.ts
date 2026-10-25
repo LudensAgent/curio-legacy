@@ -11,6 +11,9 @@ import { BUILTIN_SKILLS_DIR, SkillBook } from './knowledge/skillbook.ts';
 import { BehaviorEngine } from './mind/behaviors.ts';
 import { setBehaviorRegistry } from './skills/use-skill.ts';
 import { CodeImprover } from './codeskills/improver.ts';
+import { SkillSmith } from './codeskills/smith.ts';
+import { SkillCurator } from './codeskills/curator.ts';
+import { Scorecard } from './observer/scorecard.ts';
 import { draftsFor } from './building/drafts.ts';
 import { config } from './config.ts';
 import { EventBus } from './events.ts';
@@ -73,6 +76,19 @@ if (config.llm.provider === 'openai') {
 const llmTrace = new LlmTrace();
 const planner = new Planner(config, provider, adapter, memory, bus, new JsonlWriter(path.join(config.dataDir, 'logs'), 'llm'), llmTrace, episodic,
   new ControlKnowledge(path.join(config.dataDir, 'control-knowledge.json')));
+/**
+ * 后台写代码的“工程师”（造技能、改进代码技能）：配置了 CODER_LLM_MODEL 就用它（通常更强、可以想得久），
+ * 否则就用主心智的模型。单独的每小时预算，不和主心智抢调用次数。
+ */
+const coderCfg = { ...config, llm: { ...config.llm,
+  ...(config.coder.model ? { model: config.coder.model } : {}),
+  ...(config.coder.baseUrl ? { baseUrl: config.coder.baseUrl } : {}),
+  ...(config.coder.apiKey ? { apiKey: config.coder.apiKey } : {}),
+  reasoningEffort: config.coder.reasoningEffort, maxTokens: config.coder.maxTokens, timeoutMs: config.coder.timeoutMs,
+  maxCallsPerHour: config.coder.maxCallsPerHour, jsonMode: true } };
+const coderPlanner = config.llm.provider === 'openai'
+  ? new Planner(coderCfg, new OpenAICompatibleProvider(coderCfg.llm), adapter, memory, bus, new JsonlWriter(path.join(config.dataDir, 'logs'), 'llm-coder'), llmTrace)
+  : planner;
 const library = new SkillLibrary(path.join(config.dataDir, 'skill-library.json'), adapter, memory, bus);
 const methods = new MethodLibrary(path.join(config.dataDir, 'method-library.json'), adapter, memory, bus,
   { trialWorldIds: config.learning.testWorldIds });
@@ -165,7 +181,20 @@ const skillBook = new SkillBook(BUILTIN_SKILLS_DIR, path.join(config.dataDir, 's
 const behaviors = new BehaviorEngine(skillBook, adapter, arbiter, bus, vision, path.join(config.dataDir, 'skill-stats.json'));
 setBehaviorRegistry(behaviors);
 /** 代码技能老失败（或心智要求）时，在后台单独请模型改进代码；限频，不会太频繁 */
-const improver = new CodeImprover(planner, behaviors, bus, { globalGapMs: config.mind.skillImproveGapMin * 60_000 });
+const improver = new CodeImprover(coderPlanner, behaviors, bus, { globalGapMs: config.mind.skillImproveGapMin * 60_000 });
+/** 出了事（死了、反复卡住、甩不掉怪）后在后台总结出新技能 */
+const smith = new SkillSmith(coderPlanner, behaviors, skillBook, bus, () => adapter.state(), { gapMs: config.mind.skillForgeGapMin * 60_000 });
+smith.start();
+/** 技能多了定期整理：收起长期用不上的，后台合并说同一件事的、调整谁先上 */
+const curator = new SkillCurator(coderPlanner, behaviors, skillBook, bus);
+curator.start();
+/** 学习曲线：给玩法打分（进度、生存、学习、效率），按每条命记到达里程碑的用时 */
+const scorecard = new Scorecard(bus, () => adapter.state(), path.join(config.dataDir, 'scorecard.json'), () => ({
+  skills: behaviors.list().map((b) => behaviors.statsOf(b.name) ?? { ok: 0, fail: 0 }),
+  knowHow: selfModel.data.knowHow, // 回调在定时取样时才执行，那时 selfModel 已经建好
+  housesComplete: (() => { try { return buildingArchiveFor(memory).list().filter((p) => p.status === 'complete').length; } catch { return 0; } })(),
+}));
+scorecard.start();
 behaviors.improve = (name, why, note) => { const skipped = improver.consider(name, why, note); if (skipped && why === 'requested') bus.publish('skill_improve_skipped', 'P3', `先不改「${name}」：${skipped}`); };
 draftsFor(memory);
 /** 大脑：像真人一样一段一段地玩的心智层 */
@@ -379,9 +408,13 @@ function snapshot() {
     episodicMemory: episodic.snapshot(),
     metrics: metrics.snapshot(),
     skills: { list: behaviors.list().map((b) => ({ name: b.name, description: b.description, mode: b.mode, source: b.source, code: !!b.code, version: b.version ?? null,
-      overrides: b.overrides, stats: behaviors.statsOf(b.name) ? { ok: behaviors.statsOf(b.name)!.ok, fail: behaviors.statsOf(b.name)!.fail, disabled: !!behaviors.statsOf(b.name)!.disabled, lastError: behaviors.statsOf(b.name)!.lastError ?? null } : null })),
+      overrides: b.overrides, priority: b.priority, stats: behaviors.statsOf(b.name) ? { ok: behaviors.statsOf(b.name)!.ok, fail: behaviors.statsOf(b.name)!.fail, disabled: !!behaviors.statsOf(b.name)!.disabled,
+        retired: behaviors.statsOf(b.name)!.retired ?? null, lastError: behaviors.statsOf(b.name)!.lastError ?? null } : null })),
       knowledge: skillBook.list().filter((k) => k.behavior === undefined).map((k) => ({ name: k.name, description: k.description, source: k.source })),
-      improving: improver.busy ? { name: improver.busy.name, sinceSec: Math.round((Date.now() - improver.busy.startedAt) / 1000) } : null },
+      improving: improver.busy ? { name: improver.busy.name, sinceSec: Math.round((Date.now() - improver.busy.startedAt) / 1000) } : null,
+      forging: smith.busy ? { kind: smith.busy.kind, sinceSec: Math.round((Date.now() - smith.busy.startedAt) / 1000) } : null,
+      forged: smith.history.slice(-6), curating: curator.busy, curated: curator.history.slice(-4) },
+    learning: scorecard.summary(),
     spectator: spectator.status,
     live: live ? { status: live.status(), audience: audience?.stats() } : null,
     memory: {
@@ -422,6 +455,7 @@ startDashboard(config.dashboard.host, config.dashboard.port, bus, {
   resume: () => executive.resume(),
   replan: () => executive.replan(),
   suggest: (t) => executive.suggest(t),
+  spectate: (on) => spectator.setActive(on),
 }, feed ? [createObserverHandler(feed)] : [], { llmTrace, mcVersion: config.mc.version });
 
 let shuttingDown = false;

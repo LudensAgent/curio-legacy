@@ -25,6 +25,8 @@ export interface DashboardHandlers {
   resume(): void;
   replan(): void;
   suggest(text: string): void;
+  /** 切换自动旁观（附着到 Bot / 自由旁观） */
+  spectate?(on: boolean): Promise<unknown> | unknown;
 }
 
 /**
@@ -116,6 +118,12 @@ export function startDashboard(
       if (p === '/api/pause') { h.pause(); return send(res, 200, '{"ok":true}'); }
       if (p === '/api/resume') { h.resume(); return send(res, 200, '{"ok":true}'); }
       if (p === '/api/replan') { h.replan(); return send(res, 200, '{"ok":true}'); }
+      if (p === '/api/spectate') {
+        const body = await readBody(req);
+        if (!h.spectate) return send(res, 404, '{"error":"not supported"}');
+        const r = await h.spectate(body?.on !== false);
+        return send(res, 200, JSON.stringify({ ok: true, status: r }));
+      }
       if (p === '/api/suggest') {
         const body = await readBody(req);
         const text = String(body?.text ?? '').trim();

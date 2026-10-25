@@ -5,6 +5,8 @@ import { Rcon } from './rcon.ts';
 
 export interface SpectatorStatus {
   enabled: boolean;
+  /** 运行中可以在控制台切换：true 自动附着到 Bot；false 解除附着，你在旁观模式里自由看 */
+  active: boolean;
   reason: string;
   rconOk: boolean;
   lastResult: string;
@@ -27,7 +29,7 @@ export class Spectator {
   constructor(private cfg: Config, private adapter: GameAdapter, private bus: EventBus) {
     const o = cfg.observer;
     const reason = !o.player ? '未设置 OBSERVER_PLAYER' : !o.rconPassword ? '未设置 RCON_PASSWORD' : '';
-    this.status = { enabled: !reason, reason, rconOk: false, lastResult: '', lastAt: null, attempts: 0 };
+    this.status = { enabled: !reason, active: !reason, reason, rconOk: false, lastResult: '', lastAt: null, attempts: 0 };
     // 只要有 RCON 密码就建立连接：测试规则（keepInventory 等）不依赖是否开启自动旁观
     if (o.rconPassword) this.rcon = new Rcon(o.rconHost, o.rconPort, o.rconPassword);
   }
@@ -55,6 +57,23 @@ export class Spectator {
   stop() {
     if (this.timer) clearInterval(this.timer);
     this.rcon?.close();
+  }
+
+  /** 控制台的开关：打开就马上附着；关掉就解除附着（留在旁观模式，自由飞着看） */
+  async setActive(on: boolean): Promise<SpectatorStatus> {
+    if (!this.status.enabled) return this.status;
+    this.status.active = on;
+    if (this.pendingT) { clearTimeout(this.pendingT); this.pendingT = null; }
+    if (on) await this.attach('dashboard');
+    else {
+      try {
+        await this.command(`spectate`);
+        this.status.lastResult = '已解除附着，自由旁观';
+        this.bus.publish('spectator', 'P2', `自动旁观已关闭：${this.cfg.observer.player} 可以自由看了`);
+      } catch (e: any) { this.status.lastResult = `RCON 错误：${e?.message ?? e}`; }
+      this.lastPublished = '';
+    }
+    return this.status;
   }
 
   private schedule(ms: number, why: string) {
@@ -89,7 +108,7 @@ export class Spectator {
 
   async attach(why: string) {
     const s = this.adapter.state();
-    if (!s.connected) return;
+    if (!s.connected || !this.status.active) return;
     const player = this.cfg.observer.player;
     this.status.attempts++;
     try {

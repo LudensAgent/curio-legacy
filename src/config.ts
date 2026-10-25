@@ -64,6 +64,19 @@ export const config = {
     maxCallsPerHour: num('LLM_MAX_CALLS_PER_HOUR', 90),
     fakeDelayMs: num('LLM_FAKE_DELAY_MS', 0),
   },
+  /**
+   * 后台写代码用的模型（造技能、改进代码技能）：不赶时间，可以用更强、更慢的模型。
+   * 不设 CODER_LLM_MODEL 就和主心智用同一个模型；没写的项沿用 LLM_*。
+   */
+  coder: {
+    model: str('CODER_LLM_MODEL'),
+    baseUrl: str('CODER_LLM_BASE_URL').replace(/\/+$/, ''),
+    apiKey: str('CODER_LLM_API_KEY'),
+    reasoningEffort: str('CODER_LLM_REASONING_EFFORT', 'high').toLowerCase(),
+    maxTokens: num('CODER_LLM_MAX_TOKENS', 32768),
+    timeoutMs: num('CODER_LLM_TIMEOUT_MS', 300000),
+    maxCallsPerHour: num('CODER_LLM_MAX_CALLS_PER_HOUR', 12),
+  },
   persona: str(
     'AGENT_PERSONA',
     '你叫 Curio，一个好奇、谨慎、喜欢记录新发现的 Minecraft 探险家。',
@@ -81,6 +94,8 @@ export const config = {
     deliberateEverySec: num('MIND_DELIBERATE_EVERY_SEC', 360),
     /** 代码技能后台改进的最小间隔（分钟）：同一时间只改一份，每小时最多两次 */
     skillImproveGapMin: num('SKILL_IMPROVE_GAP_MIN', 20),
+    /** 从死亡/反复卡住里总结新技能的最小间隔（分钟）：同时只造一份，每小时最多三次 */
+    skillForgeGapMin: num('SKILL_FORGE_GAP_MIN', 10),
   },
   learning: {
     /** Only explicitly designated isolated worlds may provide candidate promotion evidence. */
