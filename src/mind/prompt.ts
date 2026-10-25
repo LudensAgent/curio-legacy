@@ -93,6 +93,7 @@ const PRECISE = `【精确操作】身边的事你自己一格一格地做：bod
 - 朝北挖阶梯上到地面（往上迈一级要跳，头顶上方那格也得空）：steps [dig_at {"at":[0,2,0],"facing":"N"}, dig_at {"at":[1,1,0],"facing":"N"}, dig_at {"at":[1,2,0],"facing":"N"}, step {"to":[1,1,0],"facing":"N"}]，repeat 10，done_when {"type":"sky_visible","equals":true}
 - 原地垫高往上爬：steps [dig_at {"at":[0,2,0]}, place_at {"at":[0,0,0],"item":"any"}]，repeat 6
 - 挖一条一人高的平巷：steps [dig_at {"at":[1,0,0]}, dig_at {"at":[1,1,0]}, step {"to":[1,0,0]}]，repeat 8
+repeat 会把整套 steps 每轮重做一遍：火把这种隔七八格才需要的事别写进要重复的 steps——看 body.light（level ≤7 才会刷怪）和附近有没有火把，暗了再单独插一支。
 挖之前先看 local 里那格是什么（沙子、沙砾会往下掉，水和岩浆别挖开），走不通就换个方向或换个做法；每一步的结果都会带回新的 local。`;
 
 const EXAMPLE = `【例子】想有个家时：

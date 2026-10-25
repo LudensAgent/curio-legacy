@@ -72,7 +72,7 @@ export const config = {
     /** 性格关键词（逗号分隔），会进入每次思考，也保存在 data/mind.json */
     traits: str('AGENT_TRAITS', '好奇,谨慎,喜欢记录新发现,有点恋家').split(/[,，]/).map((s) => s.trim()).filter(Boolean),
     /** 身体习惯：饿了顺手吃、黑了顺手插火把、卡住自己挣脱（像真人一样不用过脑子） */
-    bodyHabits: bool('MIND_BODY_HABITS', true),
+    bodyHabits: bool('MIND_BODY_HABITS', false),
     /** 一段活做了多久没抬头，就看一眼（秒） */
     checkInSec: num('MIND_CHECK_IN_SEC', 100),
     /** 只瞥一眼多久之后要认真想想全局（秒） */

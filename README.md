@@ -225,7 +225,7 @@ Mineflayer 本身知道已加载区块里的每一个方块、墙后的每一只
 | **技能书** | 像现在的 agent 一样按需加载：提示词里只放每份技能的一行用途，需要时 `{"kind":"skill","name":"…"}` 翻开全文。内置在 `skills/<名字>/SKILL.md`（可自己添加），回想时也会把琢磨出的整套做法写成自己的技能（`data/skills/`） | `knowledge/skillbook.ts`、`skills/` |
 | **建筑师子代理** | `{"kind":"design","brief":"湖边能住的小家"}` 交给独立上下文的建筑师：带设计手册和参考作品，自查（太小、方盒子、单一材料、没窗没光）后改进，交回图纸 ID 和材料清单；攒够材料后 `build {"draft":"dr_…"}` 照图施工 | `building/architect.ts`、`building/drafts.ts`、`skills/architect/SKILL.md` |
 | **更丰富的建筑** | 图纸可以用台阶（自动朝中间往上爬做坡顶）、半砖、栅栏、玻璃板、活板门、梯子、地毯、灯笼；地板外多画一圈就是屋檐；最大 13×13、12 层 | `building/design.ts` |
-| **身体习惯** | `MIND_BODY_HABITS=true`（默认）时，饿了顺手吃、黑了顺手插火把、卡住自己挣脱，模型专心想玩什么 | `brain/reflex.ts` |
+| **身体习惯** | 默认关闭（`MIND_BODY_HABITS=false`）：吃东西、插火把、躲避、脱困都由模型自己决定；身体只保留保命反射（躲苦力怕、溺水上浮、贴脸自卫、饿到 ≤6 才自动吃）。设为 true 才让身体顺手吃、自动插火把、自己挣脱 | `brain/reflex.ts` |
 
 模型每次只输出一个 JSON，例如：
 
