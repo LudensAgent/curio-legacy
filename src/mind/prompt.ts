@@ -28,6 +28,8 @@ export interface MindContext {
   noticed: Noticing[];
   changes: string[];
   userSuggestion: string | null;
+  /** 操作者的指令（直到做完、做不到或被新指令替换都一直在） */
+  operatorOrder?: { text: string; ageSec: number; status: 'new' | 'doing' } | null;
   audience: AudienceContext | null;
   /** 上次决定里被纠正/丢弃的部分 */
   notes: string[];
@@ -102,10 +104,13 @@ const OUTPUT = `只输出一个 JSON 对象：
  "activity":{"what":"具体要干什么","why":"为什么现在做","kind":"gather|craft|build|explore|survive|rest|experiment|tidy|social|other","steps":[{"skill":"动作名","args":{}}],"repeat":1,"done_when":{…},"expect":"预计会怎样","if_stuck":"卡住打算怎么办"},
  "next":{同 activity，手上的活快干完时写上，干完直接接上}}
 continue 时可以不写 activity；要换成别的做法就用 adjust/new，别写 continue。顺手、碰运气的步骤加 "optional":true（没成也不算失败）。
-plan（主目标清单：定下 {"focus":"a_…或一句话","steps":["…"]}，做完一项 {"done":[0]}）｜skill（见【技能】）｜worth_learning（刚才的事值得练成技能时写：哪里出了问题、想学会什么）
+operator（有【操作者的指令】时必写：{"status":"doing|done|cannot","note":"…"}，照做中 / 做完了 / 做不到及原因）｜plan（主目标清单：定下 {"focus":"a_…或一句话","steps":["…"]}，做完一项 {"done":[0]}）｜skill（见【技能】）｜worth_learning（刚才的事值得练成技能时写：哪里出了问题、想学会什么）
 其他可选字段：say（有新发现、改主意、做成事或遇险时说的一句口语）｜agenda（{"add":[{"text":"想做的事或想弄清的问题","kind":"goal|idea|question","horizon":"today|someday"}],"done":["a_…"],"drop":["a_…"],"focus":"a_…"}，规则不要放这里）｜learned（结果出乎意料时的一句窍门，或 {"revise":"k_…","text":"…"} 修订旧窍门）｜hypothesis（experiment 必填）｜experiment_result（上一段是实验时：supported|refuted|unclear）｜diary（值得记住的一句话）｜liked（刚发现喜欢的东西）｜habits（身体的顺手习惯，一直有效：{"torch_every":8} 暗处每 8 格插火把，{"eat_below":12} 饿到 12 顺手吃，{"pickup":true} 捡掉落物；0 关掉）`;
 
 const DECISIONS = `continue 照常做｜adjust 还是这件事、改一改 routine｜new 开始新的一段｜detour 先插一段别的，做完自动回来｜switch 放下手上的改做别的｜experiment 验证一个猜想的小活｜rest 歇一下`;
+
+/** 操作者：直播的主人，从控制台下指令的人。指令不是“建议”，优先于自己的打算 */
+const OPERATOR = `【操作者】控制台里给你下指令的操作者（直播的主人）说的是指令，不是建议，优先于自己的主目标、手上的活和弹幕：这一念就照做（可以直接 switch），做法自己想，不讨价还价、不拖到以后；只有照做会马上送命才先保命，再回来做。每次都写 operator：doing / done / cannot（附原因）。`;
 
 /** 专注：主目标 + 清单，插曲用 detour */
 const FOCUS = `【专注】主目标（只能是 goal）配清单（plan），每项是动作能完成、能验证的事；看到的资源和地点会自动记住，不用专门记。每段活推进第一项没勾掉的，做完勾掉；天黑、饿了用 detour 插一段。清单久没推进就想想这个目标还值不值得：改写或放下。`;
@@ -160,6 +165,8 @@ export function deliberateSystem(persona: string, skills: string[] = [], advance
 
 你就是这个 Minecraft 角色本人，像真人玩家一样连续地玩，同时在直播。
 
+${OPERATOR}
+
 ${READING}
 
 ${ROUTINE_OF_THINKING}
@@ -191,6 +198,7 @@ export function glanceSystem(persona: string, inUse: Set<string>, skills: string
   return `${persona}
 
 你在连续地玩 Minecraft，这次只是抬头看一眼。
+${OPERATOR}
 ${READING}
 - 先看【此刻】：没什么要紧的、手上的活还顺，就 continue（独白可以很短）。
 - 手上没活：直接 new 一段，接着【最近】的结果和议程往下玩；活快干完时顺便写 next。小改用 adjust，插一件事用 detour，彻底换事用 switch/new。
@@ -413,7 +421,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       noticed: ctx.noticed.map((n) => `${n.what}${n.level === 'urgent' ? '（要紧）' : ''}`),
       since_last_thought: ctx.changes,
       ...(ctx.gameMessages?.length ? { game_messages: ctx.gameMessages } : {}),
-      ...(ctx.userSuggestion ? { operator_suggestion: ctx.userSuggestion } : {}),
+      ...(ctx.userSuggestion && !ctx.operatorOrder ? { operator_suggestion: ctx.userSuggestion } : {}),
       ...(audienceBlock(ctx.audience, glance ? 'light' : 'full') ?? {}),
     }],
   ];
@@ -421,6 +429,12 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
   const inUse = new Set((ctx.activity?.steps ?? []).map((s) => s.skill));
   const system = glance ? glanceSystem(ctx.persona, inUse, ctx.skills ?? []) : deliberateSystem(ctx.persona, ctx.skills ?? [], advanced);
   const reminders = situationalReminders(ctx);
+  // 操作者的指令放在最前面，最后的提醒里再说一遍（开头和结尾模型最不容易忽略）
+  const order = ctx.operatorOrder;
+  if (order) {
+    sections.unshift(['操作者的指令', { order: order.text, received: `${order.ageSec} 秒前`, status: order.status === 'new' ? '刚收到，还没照做' : '照做中', must: '优先于你自己的打算；照做，并在 operator 里回应 doing / done / cannot' }]);
+    reminders.unshift(`操作者的指令「${order.text.slice(0, 80)}」${order.status === 'new' ? '刚收到：这一念就照做（把它变成手上的活）' : '还没做完：手上的活要为它服务'}，并写 operator`);
+  }
   const body = sections.map(([name, data]) => `【${name}】${JSON.stringify(data)}`).join('\n');
   return [{ role: 'system', content: system }, { role: 'user', content: `${body}${reminders.length ? `\n\n【此刻要留意】\n${reminders.map((r) => `- ${r}`).join('\n')}` : ''}\n\n现在你在想什么、打算怎么做？只输出一个 JSON 对象。` }];
 }

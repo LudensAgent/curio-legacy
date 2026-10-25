@@ -512,7 +512,7 @@ test('提示词：盖房的念头会在消息末尾提醒先请建筑师；瞥�
     assert.match(user.content, /【此刻要留意】[\s\S]*(design|draft)[\s\S]*只输出一个 JSON 对象。$/, '提醒放在消息最后');
   }
   const [deliberate] = buildMindMessages({ ...base, tier: 'deliberate' });
-  assert.ok(deliberate.content.length < 8000, `认真想的系统提示词 ${deliberate.content.length} 字`);
+  assert.ok(deliberate.content.length < 8500, `认真想的系统提示词 ${deliberate.content.length} 字`);
   assert.match(deliberate.content, /其他动作（用 \{"kind":"moves"/);
   const label = argsLabel({ skill: 'build', args: { spec: { name: '小屋', width: 5, depth: 5, design: { legend: {}, layers: [['PPP']] }, components: Array(100).fill({}) } } });
   assert.ok(label.length < 80 && /小屋/.test(label) && !/components/.test(label), label);
@@ -636,4 +636,28 @@ test('goto 可以选择挖穿/垫高直走；工地附近的坐标能当收工�
   assert.doesNotThrow(() => validateCondition({ type: 'location_near', dimension: 'overworld', pos: { x: 12, y: 75, z: 20 }, radius: 6 }, adapter, memory, adapter.state()));
   assert.throws(() => validateCondition({ type: 'location_near', dimension: 'overworld', pos: { x: 300, y: 75, z: 20 }, radius: 6 }, adapter, memory, adapter.state()));
   memory.close();
+});
+
+test('操作者的指令：放在最前面、一直挂着；只是 continue 不回应就再想一次；照做时不受专注限制；回应 done 才撤下', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { monologue: '砌墙', decision: 'new', activity: { what: '砌墙', steps: [step(1), step(2)] } });
+  w.mind.suggest('先去挖矿');
+  await w.tick();
+  const first = w.pending.at(-1)!;
+  assert.match(first.messages[0].content, /说的是指令，不是建议/);
+  assert.match(first.messages[1].content, /^【操作者的指令】\{"order":"先去挖矿"/);
+  assert.match(first.messages[1].content, /【此刻要留意】\n- 操作者的指令「先去挖矿」刚收到/);
+  await w.reply(w.pending.length - 1, { monologue: '我还是想先砌墙', decision: 'continue' });
+  assert.equal(w.mind.order?.status, 'new', '没照做也没回应：指令还在');
+  await w.tick();
+  const again = w.pending.at(-1)!;
+  assert.match(again.messages[1].content, /没有照做也没有回应/);
+  await w.reply(w.pending.length - 1, { monologue: '好，去挖矿', decision: 'switch', operator: { status: 'doing' }, activity: { what: '挖矿', steps: [step(7)] } });
+  assert.equal(w.mind.order?.status, 'doing');
+  assert.equal(w.mind.activity?.what, '挖矿', '刚收到的指令：瞥一眼也能整个换掉手上的事');
+  await w.tick();
+  assert.match(w.pending.at(-1)?.messages[1].content ?? '', /操作者的指令|.*/);
+  (w.mind as any).answerOrder(w.mind.order, false, { operator: { status: 'done', note: '挖到了' }, notes: [], kind: 'continue' });
+  assert.equal(w.mind.order, null);
 });

@@ -106,6 +106,12 @@ export class Mind {
   private reflecting: AbortController | null = null;
   private notes: string[] = [];
   private userSuggestion: string | null = null;
+  /**
+   * 操作者的指令：不是一次性的“建议”，而是一直挂着，直到心智回应做完/做不到、来了新指令，或者放了很久。
+   * 每次思考都放在最前面；刚收到时这一念必须照做（不受专注的限制），没回应就再想一次。
+   */
+  order: { text: string; at: number; status: 'new' | 'doing'; nudged: number } | null = null;
+  static readonly ORDER_TTL_MS = 30 * 60_000;
   private lastFailure: { skill: string; code?: string; summary: string } | null = null;
   private lastSay = { at: 0, text: '' };
   private lastDiaryAt = 0;
@@ -240,6 +246,11 @@ export class Mind {
       if (urgentNow && this.thinking.tier === 'glance') { this.cancelThinking('urgent'); this.staleDropped++; }
       else return;
     }
+    if (this.order && Date.now() - this.order.at > Mind.ORDER_TTL_MS) {
+      this.d.bus.publish('operator_order_end', 'P2', `操作者的指令放了半小时还没说做完，先撤下：${this.order.text}`, { status: 'expired' });
+      this.order = null;
+    }
+    if (this.order?.status === 'new') return this.think('操作者下了指令', 'deliberate');
     if (this.userSuggestion) return this.think('操作者给了建议', 'deliberate');
     if (this.pendingReason) { const r = this.pendingReason; this.pendingReason = null; return this.think(r.reason, r.tier); }
     if (urgentNow) return this.think('注意到要紧的事', 'deliberate');
@@ -574,6 +585,7 @@ export class Mind {
       tier, reason: reflect ? `${reason}；做完了好几段活，顺便回头看看哪些办法好用、哪些该改` : reason,
       percept, state, self: this.d.self, memory: this.d.memory, activity: this.activity, suspended: this.suspended,
       lastRecord: this.lastRecord, noticed, changes: this.changesSinceLastThought(), userSuggestion: this.userSuggestion,
+      operatorOrder: this.order ? { text: this.order.text, ageSec: Math.round((Date.now() - this.order.at) / 1000), status: this.order.status } : null,
       audience: this.d.audience?.context(tier === 'glance' ? 'light' : 'full') ?? null, notes: this.notes,
       mySkills: tier === 'deliberate' ? this.safe(() => this.d.mySkills?.() ?? [], []) : [],
       researchContext: tier === 'deliberate' && reflect ? this.safe(() => this.d.researchContext?.(), undefined) : undefined,
@@ -588,6 +600,7 @@ export class Mind {
         .sort((a, b) => b[1].n - a[1].n).slice(0, 10).map(([key, f]) => `${key.replace(':', ' ')} ×${f.n}（10 分钟内）`),
     };
     const suggestion = this.userSuggestion;
+    const order = this.order, orderWasNew = order?.status === 'new';
     this.d.bus.publish('llm_request', 'P3', `${tier === 'glance' ? '抬头看一眼' : '认真想想'}：${reason}`, { tier, reason });
     this.idle();
     this.d.thinker.think(ctx, controller.signal).then((decision) => {
@@ -600,7 +613,9 @@ export class Mind {
       if (suggestion && suggestion === this.userSuggestion) this.userSuggestion = null;
       this.lastSnapshot = this.snapshotNow();
       if (learnFrom && this.learnFrom === learnFrom) this.learnFrom = null; // 提醒过一次就够了
-      this.apply(decision, activityId, ctx.lastRecord, { urgent });
+      if (order && order === this.order) this.answerOrder(order, orderWasNew, decision);
+      // 刚收到的指令：照做时不受“专注”的限制（瞥一眼不能换、刚开工先不改）
+      this.apply(decision, activityId, ctx.lastRecord, { urgent: urgent || (orderWasNew && decision.operator?.status !== 'cannot') });
       this.kick();
     }).catch((e: any) => {
       if (this.thinking?.controller !== controller) return;
@@ -922,10 +937,34 @@ export class Mind {
   }
 
   suggest(text: string) {
-    this.userSuggestion = text.slice(0, 200);
+    const t = text.slice(0, 200);
+    if (this.order) this.d.bus.publish('operator_order_end', 'P3', `新指令替换了旧的：${this.order.text}`, { status: 'replaced' });
+    this.order = { text: t, at: Date.now(), status: 'new', nudged: 0 };
+    this.userSuggestion = null;
     this.backoffUntil = 0;
     if (this.thinking) { this.cancelThinking('new_suggestion'); this.staleDropped++; }
-    this.d.bus.publish('user_suggestion', 'P2', `收到建议：${this.userSuggestion}`);
+    this.d.bus.publish('user_suggestion', 'P2', `收到操作者的指令：${t}`);
+  }
+
+  /**
+   * 心智对指令的回应：done/cannot 就撤下；doing 或者确实换了手上的事就算在照做；
+   * 刚收到却只是 continue、也没回应：记一句纠正，再想一次（最多追两次，免得卡住）。
+   */
+  private answerOrder(order: NonNullable<Mind['order']>, wasNew: boolean, decision: MindDecision) {
+    const r = decision.operator;
+    if (r?.status === 'done' || r?.status === 'cannot') {
+      this.order = null;
+      this.d.bus.publish('operator_order_end', 'P2', `${r.status === 'done' ? '照操作者的指令做完了' : '操作者的指令做不到'}：${order.text}${r.note ? `（${r.note}）` : ''}`, { status: r.status, note: r.note ?? null });
+      return;
+    }
+    const acted = r?.status === 'doing' || (!!decision.activity && decision.kind !== 'continue');
+    if (acted) { order.status = 'doing'; return; }
+    if (!wasNew) return;
+    if (order.nudged >= 2) { order.status = 'doing'; return; }
+    order.nudged++;
+    decision.notes.push(`操作者的指令「${order.text.slice(0, 60)}」没有照做也没有回应：这一念就把它变成手上的活，并写 operator`);
+    this.d.bus.publish('decision_normalized', 'P2', `没回应操作者的指令，再想一次：${order.text.slice(0, 60)}`);
+    this.requestThink('操作者的指令还没照做', 'deliberate');
   }
   replan() {
     this.backoffUntil = 0;
@@ -1019,7 +1058,7 @@ export class Mind {
       queued: this.queuedNext ? { goal: this.queuedNext.draft.what } : null,
       paused: this.paused, pauseReasons: [...this.suspendedBy],
       llmInFlight: !!this.thinking, llmReason: this.thinking ? `${this.thinking.tier === 'glance' ? '瞥一眼' : '认真想'}：${this.thinking.reason}` : '',
-      userSuggestion: this.userSuggestion, lastFailure: this.lastFailure,
+      userSuggestion: this.userSuggestion, operatorOrder: this.order, lastFailure: this.lastFailure,
       backoffMs: Math.max(0, this.backoffUntil - Date.now()), staleDropped: this.staleDropped, generation: this.generation,
       autonomy: { intent: focus ? { id: focus.id, text: focus.text, whyNow: this.activity?.why ?? '' } : this.activity ? { text: this.activity.what, whyNow: this.activity.why } : null, project: null, evidence: [] },
       mode: this.autonomous ? 'mind' : 'mind-rules',
