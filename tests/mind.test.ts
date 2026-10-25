@@ -661,3 +661,35 @@ test('操作者的指令：放在最前面、一直挂着；只是 continue 不�
   (w.mind as any).answerOrder(w.mind.order, false, { operator: { status: 'done', note: '挖到了' }, notes: [], kind: 'continue' });
   assert.equal(w.mind.order, null);
 });
+
+test('同一步原样失败三次就不再原样重试：直接算卡住，让它换做法', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  for (let i = 0; i < 3; i++) {
+    await w.reply(w.pending.length - 1, { monologue: '补屋顶', decision: 'new', activity: { what: '照图纸补屋顶', steps: [step(3)] } });
+    await w.tick();
+    assert.deepEqual(w.arbiter.info()?.args, { n: 3 }, `第 ${i + 1} 次照常做`);
+    await w.finish(fail('ERROR', `尚未验收（还差 ${53 - i} 处）`));
+    await w.tick();
+  }
+  await w.reply(w.pending.length - 1, { monologue: '再试一次', decision: 'new', activity: { what: '照图纸补屋顶', steps: [step(3)] } });
+  await w.tick();
+  assert.notDeepEqual(w.arbiter.info()?.args, { n: 3 }, '第四次不再原样做');
+  assert.match(w.self.history(1)[0].summary, /原样失败 3 次.*换做法/);
+});
+
+test('盖房、走路这类事做着做着挨了打，又没有技能接手：先停下、马上认真想（不边挨打边砌墙）', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { monologue: '砌墙', decision: 'new', activity: { what: '砌墙', steps: [step(1), step(2)] } });
+  await w.tick();
+  assert.deepEqual(w.arbiter.info()?.args, { n: 1 });
+  (w.mind as any).d.perception.snapshot = () => ({ nearby: { hostile: [{ name: 'zombie', dist: 2, how: 'seen' }] } });
+  w.bus.publish('hurt', 'P1', '受到伤害，生命 15');
+  await new Promise((r) => setTimeout(r, 800));
+  await flush();
+  assert.equal(w.arbiter.info()?.source === 'llm', false, '手上的事停了');
+  await w.tick();
+  assert.match(w.pending.at(-1)!.messages[1].content, /挨打了/);
+  assert.notDeepEqual(w.arbiter.info()?.args, { n: 2 }, '想好之前不接着做');
+});

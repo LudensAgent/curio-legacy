@@ -255,6 +255,27 @@ export function coverOf(cell: (rel: [number, number, number]) => string | null):
   return solid([0, 2, 0]) ? 'sealed' : 'pit';
 }
 
+/**
+ * 条件说的是不是“眼下的危险”：近处的怪、刚挨打、血少、岩浆、快憋死。
+ * 只有这种技能可以打断心智手上的事；饿了、天黑、背包缺东西这类“该做某事了”的技能，等手上的事做完再接手。
+ * （not 里的不算：“没有怪的时候”恰恰不是危险）
+ */
+export function isThreat(p: Predicate | undefined): boolean {
+  if (!p) return false;
+  if (p.hostile || p.hurt_within !== undefined || p.hp_below !== undefined || p.in_lava || p.oxygen_below !== undefined) return true;
+  return !!p.any?.some(isThreat) || !!p.all?.some(isThreat);
+}
+
+/** 只留“处境”的部分（去掉正在做什么、刚才哪个动作失败）：用来判断触发它的情况解除了没有 */
+export function situationOf(p: Predicate): Predicate | null {
+  const { doing: _d, not_doing: _n, after_failure: _f, any, all, not, ...rest } = p;
+  const out: Predicate = { ...rest };
+  if (any) { const xs = any.map(situationOf).filter((x): x is Predicate => !!x); if (xs.length) out.any = xs; }
+  if (all) { const xs = all.map(situationOf).filter((x): x is Predicate => !!x); if (xs.length) out.all = xs; }
+  if (not) { const x = situationOf(not); if (x) out.not = x; }
+  return Object.keys(out).length ? out : null;
+}
+
 /** 给模型看的条件说明（一行） */
 export function describePredicate(p: Predicate): string {
   return JSON.stringify(p).slice(0, 220);

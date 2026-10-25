@@ -25,6 +25,7 @@ try {
       const result = outcome.result.memory;
       console.log(result.cleared ? `已完全清空历史记忆：${result.directory}` : `历史记忆已为空：${result.directory}`);
       console.log('世界记忆、自学技能、历史日志及备份均已清空，保留空数据目录。');
+      if ((result as { archived?: string | null }).archived) console.log(`清空前已把这一局的日志、分数和技能统计拷进：${(result as { archived?: string | null }).archived}`);
       if (result.banksCleared) console.log(`已删除并验证 ${result.banksCleared} 个专属 Hindsight bank。`);
       if (outcome.result.world) console.log('已清理世界与运行数据，保留 EULA、配置、mods 和启动组件；下次启动创建随机种子的新世界。');
     }

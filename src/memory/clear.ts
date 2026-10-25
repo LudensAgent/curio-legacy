@@ -44,10 +44,28 @@ export function inspectMemoryDirectory(dataDir: string, projectDir: string): { d
   return { directory: realDirectory, exists: true };
 }
 
-/** 离线重置：清空数据目录，保留可能被终端或监控工具占用的根目录。Agent 必须先退出。 */
-export function clearMemory(dataDir: string, projectDir: string): { directory: string; cleared: boolean } {
+/** 一局的复盘材料：清空前先拷进项目的 archives/（事件和 LLM 日志、分数、累计数字、技能成败、收获账本） */
+const KEEP_FOR_REVIEW = ['logs', 'run-stats.json', 'scorecard.json', 'skill-stats.json', 'ledger.json', 'skills'];
+
+export function archiveForReview(directory: string, projectDir: string, now = new Date()): string | null {
+  const present = KEEP_FOR_REVIEW.filter((name) => fs.existsSync(path.join(directory, name)));
+  if (!present.length) return null;
+  const p = (n: number) => String(n).padStart(2, '0');
+  const stamp = `${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`;
+  const target = path.join(projectDir, 'archives', `run-before-clear-${stamp}`);
+  fs.mkdirSync(target, { recursive: true });
+  for (const name of present) fs.cpSync(path.join(directory, name), path.join(target, name), { recursive: true });
+  return target;
+}
+
+/** 离线重置：清空数据目录，保留可能被终端或监控工具占用的根目录。Agent 必须先退出。清空前把这一局的日志和统计拷进 archives/。 */
+export function clearMemory(dataDir: string, projectDir: string): { directory: string; cleared: boolean; archived?: string | null } {
   const result = inspectMemoryDirectory(dataDir, projectDir);
   if (!result.exists) return { directory: result.directory, cleared: false };
+  let archived: string | null = null;
+  try { archived = archiveForReview(result.directory, path.resolve(projectDir)); } catch (e) {
+    throw new Error(`清空前没能把这一局的日志存进 archives/（${(e as Error).message}）；为了不丢复盘材料，先不清空`, { cause: e });
+  }
 
   const entries = fs.readdirSync(result.directory);
   for (const entry of entries) {
@@ -71,5 +89,5 @@ export function clearMemory(dataDir: string, projectDir: string): { directory: s
   if (fs.readdirSync(result.directory).length) {
     throw new Error(`DATA_DIR 清空后仍有文件：${result.directory}。请先退出 Agent，停止写入记忆或日志的程序后重试。`);
   }
-  return { directory: result.directory, cleared: entries.length > 0 };
+  return { directory: result.directory, cleared: entries.length > 0, archived };
 }

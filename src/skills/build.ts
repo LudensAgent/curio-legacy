@@ -60,7 +60,16 @@ export function describeBuildProblems(result: ConstructionResult): string {
   if (Object.keys(terrain).length) out.push(`地基不行：${tally(terrain).replace('void_or_unsupported', '下面悬空太深')}——换一块更平、没有水和岩浆的地方（换 origin）`);
   if (Object.keys(obstruct).length) out.push(`还有 ${tally(obstruct)} 占着房子的位置`);
   if (unknown) out.push(`${unknown} 处还看不清/区块没加载，走近再来`);
-  if (missingCells) out.push(`还有 ${missingCells} 块没放上`);
+  if (missingCells) {
+    // 缺的块集中在高处：多半是站在地上够不着（施工不会自己搭脚手架），说清楚在哪一层，好让它先垫脚或搭台阶上去
+    const missing = d.filter((x) => x.kind === 'missing');
+    const ys = missing.map((x) => x.pos.y), low = Math.min(...ys), high = Math.max(...ys);
+    const top = missing.filter((x) => x.pos.y >= high - 1).length;
+    const reachNote = high - low >= 3 && top >= missing.length / 2
+      ? `，其中 ${top} 块在最高的 y=${high - 1}~${high}（比最低的缺口高 ${high - low} 格）——站在地上多半够不着：先在墙边垫脚或搭几级台阶上去，站到旁边再 repair`
+      : '';
+    out.push(`还有 ${missingCells} 块没放上${reachNote}`);
+  }
   if (d.length) out.push(`具体缺陷：${d.slice(0, 3).map((x) => `${x.kind} @ (${x.pos.x},${x.pos.y},${x.pos.z}) expected=${x.expected}, actual=${x.actual ?? 'unknown'}`).join('；')}${d.length > 3 ? `；其余 ${d.length - 3} 处见 inspection.defects` : ''}`);
   if (d.some((x) => x.kind === 'obstruction')) out.push('占位先按上述绝对坐标确认方块及归属，再定点处理；goto 只到附近，随后按方位 dig 可能挖到别的墙；处理后用 mode:"inspect" 复验');
   if (d.some((x) => ['missing', 'wrong_block', 'wrong_state'].includes(x.kind))) out.push('缺块/结构错位用 mode:"repair" 按原档案修补；改变布局需同时提交新 spec');

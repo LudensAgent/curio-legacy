@@ -33,6 +33,17 @@ const KIND_LABEL: Record<ForgeKind, string> = { death: '死亡', pain: '一段�
 const ORDER: ForgeKind[] = ['death', 'noted', 'recurring', 'repeated', 'pain', 'efficiency', 'review'];
 /** 重复的动作串：最短几步、重复几遍算“一套做法”，在多长时间里看，学过之后多久再看同一串 */
 export const REPEATED = { minLen: 2, maxLen: 6, times: 3, windowMs: 10 * 60_000, againMs: 20 * 60_000 };
+/** 一次失败说明缺了什么：没吃的、找不到吃的、合成或盖房缺的材料 */
+export function shortageOf(skill: string, code: string, msg: string): { what: string; how: string }[] {
+  if (code === 'NO_FOOD' || ((skill === 'forage' || skill === 'hunt') && code === 'NOT_FOUND')) return [{ what: '食物', how: `${skill} ${code}` }];
+  if (code !== 'MISSING_MATERIALS') return [];
+  const names = new Set<string>();
+  for (const m of msg.matchAll(/([a-z_]+) 还差/g)) names.add(m[1]);
+  const lack = msg.match(/缺少 ([^（。；]+)/);
+  if (lack) for (const m of lack[1].matchAll(/([a-z_]+)×/g)) names.add(m[1]);
+  return [...names].slice(0, 4).map((what) => ({ what, how: `${skill} 缺料` }));
+}
+
 /** 只是看一看、等一等的动作不算一套做法 */
 const IDLE = new Set(['glance', 'look_around', 'wait', 'inspect_block', 'use_skill']);
 
@@ -121,6 +132,8 @@ export class SkillSmith {
   private lastEfficiency = new Map<string, number>();
   private recurring = new Map<string, { at: number[]; examples: string[]; reasons: Map<string, number>; learnedAt: number }>();
   private actions: { at: number; token: string }[] = [];
+  /** 一再缺的东西（没吃的、合成缺料、找不到）：回顾时问能不能变成稳定来源 */
+  private shortages: { at: number; what: string; how: string }[] = [];
   private repeatedAt = new Map<string, number>();
 
   constructor(private planner: Pick<Planner, 'complete' | 'autonomous' | 'noteInvalid'>, private engine: BehaviorEngine, private book: SkillBook | null,
@@ -170,6 +183,8 @@ export class SkillSmith {
     } else if (ev.type === 'task_end' && d.status === 'failed' && d.source !== 'filler') {
       this.pain.add(1, `${d.skill ?? '动作'} 失败`);
       if (d.skill && d.failureCode) this.failedAgain(String(d.skill), String(d.failureCode), ev.msg, ev.ts);
+      for (const s of shortageOf(String(d.skill ?? ''), String(d.failureCode ?? ''), ev.msg)) this.shortages.push({ at: ev.ts, ...s });
+      this.shortages = this.shortages.filter((x) => ev.ts - x.at < 2 * 3600_000).slice(-400);
     } else if (ev.type === 'task_start' && d.source === 'llm' && d.skill) {
       this.didAction(String(d.skill), d.args, ev.ts);
     } else if (ev.type === 'reflect_start') {
@@ -212,6 +227,14 @@ export class SkillSmith {
     r.examples = [];
     r.reasons.clear();
     this.report('recurring', at, `${skill} 半小时内第 ${n} 次因为 ${code} 失败；常见原因：${reasons.slice(0, 3).join('；')}`, 0, undefined, lines);
+  }
+
+  /** 一再缺的东西，按次数排：“食物：缺了 29 次（eat NO_FOOD 9、forage NOT_FOUND 20）” */
+  chronicShortages(n = 5): string[] {
+    const by = new Map<string, Map<string, number>>();
+    for (const x of this.shortages) { const m = by.get(x.what) ?? new Map<string, number>(); m.set(x.how, (m.get(x.how) ?? 0) + 1); by.set(x.what, m); }
+    return [...by].map(([what, m]) => ({ what, total: [...m.values()].reduce((a, b) => a + b, 0), m })).filter((x) => x.total >= 3)
+      .sort((a, b) => b.total - a.total).slice(0, n).map((x) => `${x.what}：缺了 ${x.total} 次（${[...x.m].map(([h, c]) => `${h} ${c}`).join('、')}）`);
   }
 
   /** 心智指挥身体做了一个动作：记下来，看是不是在一遍遍重复同一串 */
@@ -280,6 +303,7 @@ export class SkillSmith {
     const sig = incident.signal;
     const task = review
       ? `下面是它最近一段时间做过的事，和它的收获账本（每样东西拿一个花多少时间、在变省还是变费劲、东西多出现在什么高度和群系、白忙的比例）。
+chronic_shortages 是这两个小时里一再缺的东西：想想能不能把它变成稳定来源（种、养、建一个能持续产出的东西、固定去哪儿补），能写成技能就写，写不了就在 none 的 why 里说清该做什么。
 找两类问题：一是反复出现、费时间、常失败的；二是“能做成但费劲”的——花时间最多、在变费劲、或者比它自己最省的那几次慢很多的事，想想有没有更省的做法（换个地方、换个顺序、换个找法、一次多做些）。
 判断哪些可以靠一个技能解决（身体以后自己处理，或者让心智用 use_skill 调用的一套做法），写出来（最多 2 份）。`
       : incident.kind === 'repeated'
@@ -303,6 +327,7 @@ export class SkillSmith {
 - 针对一类情况，不是只对这一次；触发条件只写身体感觉得到的事（血量、看见的怪、身边的方块、刚失败的动作、是否挨打、是否在坑里）。
 - 需要计算（找路、挑方向、挑落脚点、判断要不要打）就写代码技能（code）；简单固定的几步可以写 steps；也可以不写 when，做成让心智在 routine 里 use_skill 调用的连招。
 - existing_skills 里已经有管这件事的技能、只是没做好：用同一个名字重写它，别重复造。
+- young_skills 里的技能当前版本还没用够几次，看不出好坏：不要改写它们，也不要换个名字另写一份做同一件事；这次的事归它们管就输出 none（经过已经记进它们的成败）。
 - 不是技能能解决的（纯属运气、应该由思考决定的取舍、缺的是材料不是做法）：输出 {"none":true,"why":"…"}。
 
 写技能的说明：
@@ -318,8 +343,10 @@ ${API_DOC}
       [review ? 'recent_activities' : 'episode']: incident.lines,
       now: incident.context,
       existing_skills: this.engine.overview(),
+      young_skills: this.engine.list().filter((b) => this.engine.rewriteGate(b.name)).map((b) => { const c = this.engine.currentStats(b.name); return `${b.name}（这一版成 ${c.ok} 败 ${c.fail}）`; }),
       ...(incident.kind === 'pain' ? { usual_pain: this.pain.baseline() } : {}),
       ...(this.ledger && review ? { harvest_ledger: this.safeLedger(() => this.ledger!.digest(12)) } : {}),
+      ...(review && this.chronicShortages().length ? { chronic_shortages: this.chronicShortages() } : {}),
       ...(this.ledger && sig ? { this_time: { ...sig.episode }, ledger_for_item: this.safeLedger(() => [this.ledger!.describe(sig.item)]) } : {}),
     };
     return [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify(user) }];
@@ -344,15 +371,19 @@ ${API_DOC}
         return `不写：${why}`;
       }
       const drafts = (Array.isArray(raw.skills) ? raw.skills : [raw.skill ?? raw]).slice(0, 2);
-      const done: string[] = [], errors: string[] = [];
+      const done: string[] = [], errors: string[] = [], gated: string[] = [];
       for (const draft of drafts) {
-        const w = this.engine.write(draft);
-        if (!w.ok) { errors.push(w.error); continue; }
+        const w = this.engine.write(draft, { by: 'forge' });
+        if (!w.ok) { if ('gated' in w && w.gated) gated.push(w.error); else errors.push(w.error); continue; }
         const desc = this.engine.get(w.name)?.description ?? '';
         done.push(`${w.created ? '新技能' : '改写'} ${w.name}`);
         this.bus.publish('skill_forged', 'P2', `从${KIND_LABEL[incident.kind]}里${w.created ? '总结出新技能' : '改写了技能'}「${w.name}」：${desc}`, { name: w.name, kind: incident.kind, mode: w.mode, created: w.created });
       }
       if (done.length) return done.join('、');
+      if (gated.length && !errors.length) {
+        this.bus.publish('skill_forge_none', 'P3', `看了${KIND_LABEL[incident.kind]}，想改的技能证据还不够，先不改：${gated[0].slice(0, 120)}`, { kind: incident.kind, gated: true });
+        return `不改：${gated.join('；').slice(0, 200)}`;
+      }
       messages.push({ role: 'assistant', content: c.text.slice(0, 6000) }, { role: 'user', content: `技能存不下：${errors.join('；')}。改正后只输出 JSON。` });
     }
     throw new Error('三次都没写出能存下的技能');

@@ -42,6 +42,18 @@ export interface MindDeps {
   timing?: Partial<typeof DEFAULT_TIMING>;
 }
 
+/** 一步的“原样”：动作 + 参数（朝向不算） */
+const exactSig = (step: { skill: string; args?: unknown }) => {
+  const a = step.args && typeof step.args === 'object' ? { ...(step.args as Record<string, unknown>) } : {};
+  delete a.facing;
+  return `${step.skill} ${JSON.stringify(a)}`;
+};
+/** 失败原因去掉数字（“还差 53 处”和“还差 50 处”算同一种失败） */
+const reasonKey = (summary: string) => summary.replace(/-?\d+(\.\d+)?/g, '#').slice(0, 60);
+
+/** 本来就是在应对怪的动作：挨打时不用叫停 */
+const COMBAT = new Set(['defend', 'flee', 'hunt', 'ranged_defend', 'shelter', 'eat', 'use_skill']);
+
 export const DEFAULT_TIMING = {
   /** 一段活做了这么久还没抬头想过，就看一眼 */
   checkInMs: 100_000,
@@ -95,6 +107,10 @@ export class Mind {
   private lastRecord: ActivityRecord | null = null;
   private recentEnds: ActivityEnd[] = [];
   private failuresByTarget = new Map<string, { n: number; last: number; at: number[] }>();
+  /** 同一个动作、同样的参数、同样的失败：连着来了几次就不让原样再试（得换做法） */
+  private sameFails = new Map<string, { n: number; last: number; code: string; why: string; summary: string }>();
+  static readonly SAME_FAIL_LIMIT = 3;
+  static readonly SAME_FAIL_MS = 10 * 60_000;
   private learnedActivities = new Set<string>();
   private speechEventAt = 0;
   private fillerAt = 0;
@@ -205,7 +221,9 @@ export class Mind {
     if (this.suspendedBy.has('death') || this.suspendedBy.has('disconnected')) {
       const wasDead = this.suspendedBy.has('death');
       this.suspendedBy.delete('death'); this.suspendedBy.delete('disconnected');
-      this.requestThink(wasDead ? '刚复活' : '重新连上了', 'deliberate');
+      // 刚复活：先看看复活点周围有没有怪（不少回是一复活就被同一群怪接着打死）
+      const near = wasDead ? this.safe(() => this.d.perception.snapshot().nearby.hostile.filter((h) => h.dist <= 16).map((h) => `${h.name} ${Math.round(h.dist)}格`), [] as string[]) : [];
+      this.requestThink(wasDead ? `刚复活${near.length ? `；复活点附近就有 ${near.join('、')}，先想好怎么不被它们接着打死，再做别的` : ''}` : '重新连上了', 'deliberate');
     }
     if (this.paused) return;
     if (this.d.arbiter.info()?.source === 'reflex') return; // 身体在自保；已在途的思考不受影响
@@ -311,6 +329,12 @@ export class Mind {
     } else this.resumeCheck = null;
     const step = nextStep(this.activity);
     if (!step) return this.finishActivity('done', '这段活的步骤都做完了');
+    // 原样失败过好几次的那一步：不再原样重试（换参数、换位置、先解决失败的原因、或者换一种动作）
+    const same = this.sameFails.get(exactSig(step));
+    if (same && same.n >= Mind.SAME_FAIL_LIMIT && Date.now() - same.last < Mind.SAME_FAIL_MS) {
+      this.d.bus.publish('decision_normalized', 'P2', `「${step.skill} ${argsLabel(step)}」已经原样失败 ${same.n} 次，不再原样重试`, { skill: step.skill });
+      return this.finishActivity('stuck', `「${step.skill} ${argsLabel(step)}」已经原样失败 ${same.n} 次（${same.summary}），再原样试也一样：换做法——先解决失败的原因、换参数或位置、或者换一种动作`);
+    }
     const state = this.d.adapter.state();
     this.activity.stepStart = { pos: { ...state.pos }, view: viewOf(this.safe(() => this.d.perception.snapshot(), undefined)) };
     const r = this.d.arbiter.start(step, this.activity.source === 'rule' ? 'rule' : 'llm', { planId: this.activity.id });
@@ -491,7 +515,10 @@ export class Mind {
       const entry = this.failuresByTarget.get(key) ?? { n: 0, last: 0, at: [] };
       entry.at.push(Date.now()); entry.n = entry.at.length; entry.last = Date.now();
       this.failuresByTarget.set(key, entry);
-    }
+      const sig = exactSig(step), why = reasonKey(result.summary), prev = this.sameFails.get(sig);
+      const same = prev && prev.code === String(result.failureCode ?? '') && prev.why === why && Date.now() - prev.last < Mind.SAME_FAIL_MS;
+      this.sameFails.set(sig, { n: same ? prev!.n + 1 : 1, last: Date.now(), code: String(result.failureCode ?? ''), why, summary: result.summary.slice(0, 120) });
+    } else if (result.status === 'succeeded') this.sameFails.delete(exactSig(step));
     if (a.awaitingRecovery && step.skill !== 'use_skill') {
       const name = a.awaitingRecovery;
       delete a.awaitingRecovery;
@@ -543,12 +570,38 @@ export class Mind {
     if (ev.type === 'notice') return;
     const n = this.attention.fromEvent(ev);
     if (n && n.level !== 'note') this.d.bus.publish('notice', 'P2', `注意到：${n.what}`, { salience: n.salience, level: n.level });
-    if (ev.type === 'hurt') this.d.self.feel({ type: 'hurt', amount: 2 });
+    if (ev.type === 'hurt') { this.d.self.feel({ type: 'hurt', amount: 2 }); this.hurtWhileBusy(); }
     if (ev.type === 'item_new' || ev.type === 'discovery') {
       this.speechEventAt = Date.now();
       this.d.self.feel({ type: 'novelty', strength: ev.type === 'item_new' ? 0.6 : 0.4 });
       if (ev.type === 'item_new' && Date.now() - this.lastDiaryAt > this.timing.diaryGapMs / 2) this.diary(ev.msg.slice(0, 80));
     }
+  }
+
+  /**
+   * 正在做跟打架无关的事（盖房、挖、走、原地等）时挨了打，而且身边有怪：
+   * 给身体的技能一点时间接手；没有技能接手，就停下手上的事、马上认真想。怎么应对由它自己定，这里只保证它不会边挨打边继续砌墙。
+   */
+  private hurtAt = 0;
+  private hurtWhileBusy() {
+    const now = Date.now();
+    if (now - this.hurtAt < 8000) return;
+    this.hurtAt = now;
+    setTimeout(() => {
+      const cur = this.d.arbiter.info();
+      if (!cur || (cur.source !== 'llm' && cur.source !== 'rule') || COMBAT.has(cur.skill)) return;
+      const hostiles = this.safe(() => this.d.perception.snapshot().nearby.hostile.filter((h) => h.dist <= 8), []);
+      if (!hostiles.length) return;
+      const hp = Math.round(this.d.adapter.state().hp * 10) / 10;
+      // 停下的那一步算没做（想完要是接着做，从这一步重新来）
+      if (this.activity && cur.planId === this.activity.id) this.activity.index = Math.max(0, this.activity.index - 1);
+      this.d.arbiter.cancel('挨打了');
+      // 想好之前别又把刚停下的那一步接着做
+      if (this.activity) this.resumeCheck = this.activity.id;
+      this.requestThink(`正在 ${cur.skill} 时挨打了（血 ${hp}）`, 'deliberate');
+      const n = this.attention.notice('hurt_busy', `正在 ${cur.skill} 时挨打了（血 ${hp}，${hostiles.slice(0, 3).map((h) => `${h.name} ${Math.round(h.dist)}格`).join('、')}），手上的事先停了`, 0.9, 0);
+      if (n) this.d.bus.publish('notice', 'P1', `注意到：${n.what}`, { salience: n.salience, level: n.level });
+    }, 700).unref?.();
   }
 
   // ---------------------------------------------------------------- 思考

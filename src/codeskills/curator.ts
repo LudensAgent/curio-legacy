@@ -144,7 +144,7 @@ export class SkillCurator {
       const done: string[] = [], errors: string[] = [];
       for (const m of Array.isArray(raw.merge) ? raw.merge.slice(0, 4) : []) {
         const from = (Array.isArray(m?.from) ? m.from : []).map(String).filter((n: string) => names.has(n));
-        const w = this.engine.write(m?.skill);
+        const w = this.engine.write(m?.skill, { by: 'curator' });
         if (!w.ok) { errors.push(`合并 ${from.join('+')} 没存下：${w.error}`); continue; }
         for (const n of from) if (n !== w.name) this.engine.retire(n, `合并进 ${w.name}`);
         done.push(`${from.join('+')} → ${w.name}`);

@@ -8,7 +8,7 @@ import { normalizeStep } from '../planner/plan.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 import type { Senses } from '../skills/types.ts';
 import { compileCheck, MAX_CODE } from '../codeskills/sandbox.ts';
-import { evalPredicate, isRecovery, senseNow, validatePredicate, type Predicate, type Sense } from './predicate.ts';
+import { evalPredicate, isRecovery, isThreat, senseNow, situationOf, validatePredicate, type Predicate, type Sense } from './predicate.ts';
 
 /**
  * 行为技能：模型从经历里总结出来、写下就生效的“做法”。
@@ -42,6 +42,10 @@ export interface BehaviorStats {
   retired?: string;
   /** 在各个维度里的成败：到了新环境，看得出哪些技能在这里还没验证过 */
   byDim?: Record<string, { ok: number; fail: number }>;
+  /** 不是代码的技能每改写一次加一（代码技能用自己的版本号）：成败按版本记，改写不清空历史 */
+  rev?: number;
+  /** 拉锯里输掉的一方：条件成立也不自动接手，只提醒心智；改写后恢复 */
+  advisory?: { since: number; why: string };
   /** 和别的技能来回拉锯过（A 做完 B 又把它推回去）：给整理用 */
   loops?: { with: string; at: number; times: number }[];
   /** 和别的自动技能同时满足条件的次数（给整理用） */
@@ -162,6 +166,18 @@ export class BehaviorEngine {
   private loopSaid = new Map<string, number>();
   static readonly LOOP_WINDOW_MS = 5 * 60_000;
   static readonly HOLD_MS = 90_000;
+  static readonly ADVISORY_MS = 20 * 60_000;
+  private waitSaid = new Map<string, number>();
+
+  /** 条件成立了但这次不接手：告诉心智一声（同一个技能两分钟说一次），由它决定要不要现在做 */
+  private waiting(b: Behavior, cur: TaskInfo | null, now: number, why?: string) {
+    if (now - (this.waitSaid.get(b.name) ?? 0) < 120_000) return;
+    let s: Sense;
+    try { s = this.sense(cur); } catch { return; }
+    if (!evalPredicate(b.when!, s)) return;
+    this.waitSaid.set(b.name, now);
+    this.bus.publish('skill_waiting', 'P3', `技能「${b.name}」的条件成立了（${b.description.slice(0, 40)}），${why ? `但它${why}，先不自动做` : `手上在做 ${cur?.skill ?? '别的'}，不打断`}；要做就在 routine 里 use_skill`, { name: b.name, why: why ?? 'busy' });
+  }
   private lastFired = new Map<string, number>();
   private invalid = new Map<string, string>();
   private doneListener = (o: TaskOutcome) => this.onDone(o);
@@ -217,7 +233,11 @@ export class BehaviorEngine {
   /** 自动技能：条件成立就由身体去做（返回 true 表示这一拍已经接手） */
   tick(cur: TaskInfo | null, now = Date.now()): boolean {
     if (!this.arbiter) return false;
-    for (const [name, a] of this.aftermath) if (now - a.at >= BehaviorEngine.AFTERMATH_MS) this.judge(name, false);
+    // 事后评判：至少等 12 秒，而且等它做完（找吃的、挖洞要好一会儿），最多等两分钟
+    for (const [name, a] of this.aftermath) {
+      const busy = this.running(cur)?.name === name;
+      if (now - a.at >= BehaviorEngine.AFTERMATH_MS && (!busy || now - a.at >= 120_000)) this.judge(name, false);
+    }
     const auto = this.list().filter((b) => b.mode === 'auto' && this.enabled(b));
     if (!auto.length) return false;
     const running = this.running(cur);
@@ -228,6 +248,11 @@ export class BehaviorEngine {
     for (const b of auto) {
       if (b.priority <= floor || running?.name === b.name) continue;
       if ((this.holds.get(b.name)?.until ?? 0) > now) continue;
+      // 不是眼下的危险：心智手上有事（包括操作者交代的）就不打断，等做完再接手
+      const threat = isThreat(b.when);
+      if (!threat && cur && (cur.source === 'llm' || cur.source === 'rule')) { this.waiting(b, cur, now); continue; }
+      const adv = this.stats[b.name]?.advisory;
+      if (adv && now - adv.since < BehaviorEngine.ADVISORY_MS) { this.waiting(b, cur, now, adv.why); continue; }
       if (now - (this.lastFired.get(b.name) ?? 0) < b.cooldownMs) continue;
       s ??= this.sense(cur);
       if (evalPredicate(b.when!, s)) matches.push(b);
@@ -285,8 +310,13 @@ export class BehaviorEngine {
       const A = this.behaviors.get(loop.a), B = this.behaviors.get(loop.b);
       const loser = A && B ? (this.choiceScore(A) >= this.choiceScore(B) ? B : A) : (A ?? B);
       record(loop.a, loop.b); record(loop.b, loop.a);
-      if (loser) this.holds.set(loser.name, { until: now + BehaviorEngine.HOLD_MS, why: `和「${loser.name === loop.a ? loop.b : loop.a}」来回拉锯` });
-      this.bus.publish('skill_loop', 'P1', `技能「${loop.a}」和「${loop.b}」在来回拉锯：一个做完另一个又把它推回去（几分钟里 ${loop.times} 回）${loser ? `；先让「${loser.name}」歇 ${BehaviorEngine.HOLD_MS / 1000} 秒` : ''}`,
+      if (loser) {
+        const why = `和「${loser.name === loop.a ? loop.b : loop.a}」来回拉锯`;
+        this.holds.set(loser.name, { until: now + BehaviorEngine.HOLD_MS, why });
+        // 只歇一会儿压不住：降成“只提醒、不接手”，直到它被改写（整理时拆开条件）或者二十分钟后
+        this.touch(loser.name, (st) => { st.advisory = { since: now, why }; });
+      }
+      this.bus.publish('skill_loop', 'P1', `技能「${loop.a}」和「${loop.b}」在来回拉锯：一个做完另一个又把它推回去（几分钟里 ${loop.times} 回）${loser ? `；「${loser.name}」先改成只提醒、不自动接手，直到它被改写` : ''}`,
         { kind: loop.kind, a: loop.a, b: loop.b, times: loop.times, held: loser?.name ?? null });
     } else {
       record(loop.a, `doing:${loop.b}`);
@@ -352,7 +382,7 @@ export class BehaviorEngine {
    * 模型在思考里写下的技能：校验后写进技能书，立刻生效（技能书变更会触发 reload）。
    * {"name":…,"disable":true} 停用；同名再写一次就是修订并重新启用。
    */
-  write(raw: unknown): { ok: true; name: string; created: boolean; mode: SkillMode; disabled?: boolean; improving?: boolean } | { ok: false; error: string } {
+  write(raw: unknown, opts: { by?: 'mind' | 'forge' | 'curator' } = {}): { ok: true; name: string; created: boolean; mode: SkillMode; disabled?: boolean; improving?: boolean } | { ok: false; error: string; gated?: boolean } {
     const o = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
     // {"name":…,"improve":"哪里不好"}：请后台改进这份代码技能（异步，改进器限频）
     if (typeof o.improve === 'string' && !o.code && !o.steps) {
@@ -371,13 +401,22 @@ export class BehaviorEngine {
       return { ok: true, name: v.name, created: false, mode: this.behaviors.get(v.name)?.mode ?? 'manual', disabled: true };
     }
     if (!this.book) return { ok: false, error: '没有技能书，存不下技能' };
+    // 后台总结（每死一次、每吃一次亏都会来一遍）不能推翻一个还没攒够证据的版本：
+    // 否则同一个技能在几种打法之间来回改，没有一个版本用够几次，永远不知道哪个管用
+    if (opts.by === 'forge') {
+      const gate = this.rewriteGate(v.name);
+      if (gate) return { ok: false, error: gate, gated: true };
+    }
     const w = this.book.write(v.name, v.description, v.body, v.behavior);
     if (!w.ok) return w;
     if (!this.behaviors.has(w.skill.name)) this.reload();
     const b = this.behaviors.get(w.skill.name);
     if (!b) return { ok: false, error: '技能写下了，但格式不对没有生效' };
-    // 修订就是重新给它一次机会
-    this.touch(b.name, (st) => { st.disabled = false; st.ok = 0; st.fail = 0; delete st.lastError; delete st.retired; });
+    // 修订就是重新给它一次机会：新版本从零记，旧版本的成败留着（好拿来比）
+    this.touch(b.name, (st) => {
+      st.disabled = false; delete st.lastError; delete st.retired; delete st.advisory;
+      if (!b.code && !w.created) st.rev = (st.rev ?? 1) + 1;
+    });
     return { ok: true, name: b.name, created: w.created, mode: b.mode };
   }
 
@@ -385,6 +424,27 @@ export class BehaviorEngine {
    * 换上一份代码技能的新版本（后台改进的结果，或者退回旧版本）：先校验能编译，再写进技能书，立刻生效。
    * 统计按版本分开记，用来判断新版本是不是真的更好。
    */
+  /** 当前版本的成败 */
+  versionOf(b: Behavior): string { return String(b.version ?? this.stats[b.name]?.rev ?? 1); }
+  currentStats(name: string): { ok: number; fail: number } {
+    const b = this.behaviors.get(name);
+    const st = this.stats[name];
+    return (b && st?.byVersion?.[this.versionOf(b)]) ?? { ok: 0, fail: 0 };
+  }
+  static readonly MIN_EVIDENCE = 3;
+  /** 能不能改写这份技能：当前版本用得太少就先别动（停用了、或者代码本身报错的除外） */
+  rewriteGate(name: string): string | null {
+    const b = this.behaviors.get(name);
+    const st = this.stats[name];
+    if (!b || b.source !== 'self' || !st || st.disabled) return null;
+    const cur = this.currentStats(name);
+    const uses = cur.ok + cur.fail;
+    const codeBroke = /代码技能.*没成|参数错误|SyntaxError|TypeError|ReferenceError/.test(st.recent?.at(-1)?.summary ?? st.lastError ?? '');
+    // 一次都没触发过：说明条件没对上这次的事，改写它不会丢掉什么证据
+    if (uses === 0 || uses >= BehaviorEngine.MIN_EVIDENCE || codeBroke) return null;
+    return `「${name}」当前版本只用了 ${uses} 次（成 ${cur.ok} 败 ${cur.fail}），证据还不够，先不改写它；这次的经过已经记进它的成败，等用够 ${BehaviorEngine.MIN_EVIDENCE} 次再看要不要改`;
+  }
+
   replaceCode(name: string, code: string, note: string): { ok: true; version: number } | { ok: false; error: string } {
     const b = this.behaviors.get(name);
     const k = this.book?.get(name);
@@ -448,8 +508,12 @@ export class BehaviorEngine {
     if (!a || !b) return;
     const hp = this.adapter.state().hp;
     const lost = Math.max(0, a.hp - hp);
-    const worked = !died && lost < 6;
-    const verdict = died ? '做完 12 秒内死了' : lost >= 6 ? `做完后又掉了 ${Math.round(lost)} 点血` : `之后 12 秒平安（血 ${Math.round(hp)}）`;
+    // 管没管用：没死、没再掉一大截血，而且触发它的那个情况解除了（饿了的不饿了、贴脸的怪不在了）
+    const situation = b.when ? situationOf(b.when) : null;
+    let still = false;
+    if (!died && situation) { try { still = evalPredicate(situation, this.sense(null)); } catch { still = false; } }
+    const worked = !died && lost < 6 && !still;
+    const verdict = died ? '做完不久就死了' : lost >= 6 ? `做完后又掉了 ${Math.round(lost)} 点血` : still ? `做完了，但触发它的情况还在（血 ${Math.round(hp)}）` : `触发它的情况解除了（血 ${Math.round(hp)}）`;
     this.record(b, worked, `${a.context}；${a.summary ? `它做了：${a.summary.slice(0, 100)}；` : ''}结果：${verdict}`, a.data ?? {});
   }
 
@@ -462,22 +526,22 @@ export class BehaviorEngine {
       if (okRun) st.ok++; else { st.fail++; st.lastError = summary.slice(0, 120); }
       const pd = (st.byDim ??= {})[dim] ??= { ok: 0, fail: 0 };
       if (okRun) pd.ok++; else pd.fail++;
-      if (b.code) {
-        const v = String(b.version ?? 1);
-        const per = (st.byVersion ??= {})[v] ??= { ok: 0, fail: 0 };
-        if (okRun) per.ok++; else per.fail++;
-        st.recent = [...(st.recent ?? []), { at: Date.now(), ok: okRun, version: b.version, summary: summary.slice(0, 200),
+      const v = this.versionOf(b);
+      const per = (st.byVersion ??= {})[v] ??= { ok: 0, fail: 0 };
+      if (okRun) per.ok++; else per.fail++;
+      st.recent = [...(st.recent ?? []), { at: Date.now(), ok: okRun, version: Number(v), summary: summary.slice(0, 200),
           ...(typeof data.line === 'number' ? { line: data.line } : {}), ...(Array.isArray(data.trace) ? { trace: data.trace.slice(-12) } : {}),
           ...(Array.isArray(data.logs) ? { logs: data.logs.slice(-6) } : {}), ...(data.args ? { args: String(data.args).slice(0, 200) } : {}) }].slice(-6);
+      if (b.code) {
         // 新版本跑了几次明显比上一版差：退回上一版（真人改坏了也会改回去）
         const prev = st.byVersion[String((b.version ?? 1) - 1)];
         const rate = (x: { ok: number; fail: number }) => x.ok / Math.max(1, x.ok + x.fail);
         if (prev && prev.ok + prev.fail >= 2 && per.ok + per.fail >= 3 && rate(per) < rate(prev) - 0.25) rollback = { from: b.version ?? 1, to: (b.version ?? 1) - 1 };
       }
-      // 自己写的技能用了几次大多失败：先停用，让心智回头改（同名重写即可）
-      if (b.source === 'self' && st.ok + st.fail >= 4 && st.ok / (st.ok + st.fail) < 0.25 && !st.disabled) {
+      // 自己写的技能，当前版本用了几次大多失败：先停用，让心智回头改（同名重写即可）
+      if (b.source === 'self' && per.ok + per.fail >= 4 && per.ok / (per.ok + per.fail) < 0.25 && !st.disabled) {
         st.disabled = true;
-        this.bus.publish('skill_disabled', 'P1', `技能「${name}」用了 ${st.ok + st.fail} 次只成了 ${st.ok} 次，先停用；最近一次：${st.lastError ?? ''}`, { name, by: 'stats' });
+        this.bus.publish('skill_disabled', 'P1', `技能「${name}」这一版用了 ${per.ok + per.fail} 次只成了 ${per.ok} 次，先停用；最近一次：${st.lastError ?? ''}`, { name, by: 'stats' });
       }
     });
     if (rollback) {
