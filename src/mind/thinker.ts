@@ -17,6 +17,7 @@ import { homeOf } from './home.ts';
 import { draftsFor } from '../building/drafts.ts';
 import type { SkillBook } from '../knowledge/skillbook.ts';
 import { describeBuild, myBuilds } from './home.ts';
+import type { LedgerView } from './ledger.ts';
 import { recallLocal, RECALL_LABEL } from './recall.ts';
 
 /** 思考时可以先做的只读查询（不占游戏时间） */
@@ -233,6 +234,8 @@ export function parsePlan(raw: unknown): MindDecision['plan'] | null {
 export class Thinker {
   /** 正在后台画的图纸 */
   designing: { brief: string; startedAt: number } | null = null;
+  /** 收获账本：主动回想时也能想起拿某样东西花多少、在哪多 */
+  ledger: LedgerView | null = null;
   constructor(private planner: Planner, private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private book: SkillBook | null = null) {}
 
   get autonomous() { return this.planner.autonomous; }
@@ -384,7 +387,7 @@ export class Thinker {
       if (!recall) {
         const q = String(raw.query ?? '').slice(0, 300);
         if (!q.trim()) return '想回忆什么？写 {"kind":"recall","query":"关键词"}';
-        const found = recallLocal(q, { self: ctx.self, memory: this.memory, book: this.book }, { n: 8 });
+        const found = recallLocal(q, { self: ctx.self, memory: this.memory, book: this.book, ledger: this.ledger }, { n: 8 });
         this.bus.publish('recall_local', 'P3', `回想：${q.slice(0, 60)}（${found.length} 条）`);
         return found.length ? found.map((r) => `[${RECALL_LABEL[r.kind]}] ${r.text}`).join('\n') : '想不起和这些关键词有关的事';
       }

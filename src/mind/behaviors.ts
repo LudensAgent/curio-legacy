@@ -44,7 +44,7 @@ export interface BehaviorStats {
   conflicts?: Record<string, number>;
 }
 /** 代码技能某次失败后，看看要不要在后台改进（改进器自己限频） */
-export type ImproveHook = (name: string, why: 'failures' | 'requested', note?: string) => void;
+export type ImproveHook = (name: string, why: 'failures' | 'requested' | 'slow', note?: string) => void;
 
 /** 天生的本能（代码里的身体反应）：lava/drowning 是底线不能换；其余可以被自己写的技能用 overrides 换掉 */
 export const INSTINCTS: Record<string, { text: string; locked?: boolean }> = {
@@ -149,6 +149,8 @@ function toBehavior(k: KnowSkill, adapter: GameAdapter): Behavior | null {
 export class BehaviorEngine {
   private behaviors = new Map<string, Behavior>();
   private stats: Record<string, BehaviorStats> = {};
+  /** 最近用过哪些技能（名字@版本、什么时候）：收获账本拿它算“用了这个技能拿东西是快了还是慢了” */
+  private usage: { at: number; tag: string }[] = [];
   private lastFired = new Map<string, number>();
   private invalid = new Map<string, string>();
   private doneListener = (o: TaskOutcome) => this.onDone(o);
@@ -359,6 +361,8 @@ export class BehaviorEngine {
     const name = String((o.task.args as any)?.name ?? '');
     const b = this.behaviors.get(name);
     if (!b) return;
+    this.usage.push({ at: Date.now(), tag: `${name}@v${b.version ?? 1}` });
+    if (this.usage.length > 600) this.usage.splice(0, this.usage.length - 600);
     const okRun = o.result.status === 'succeeded';
     // 恢复时用的：做完了先不算成功，等重做的那一步出结果（creditRecovery）；自己就出错了才直接算失败
     if ((o.task.args as any)?.failure && okRun) return;
@@ -417,6 +421,9 @@ export class BehaviorEngine {
       if (r?.ok) this.bus.publish('skill_rollback', 'P2', `代码技能「${name}」的 v${from} 不如 v${to}，退回旧代码（现在是 v${r.version}）`, { name, from, to });
     } else if (b.code && !okRun) this.improve?.(name, 'failures');
   }
+
+  /** 这段时间里用过的技能（名字@版本） */
+  usedBetween(from: number, to: number): string[] { return [...new Set(this.usage.filter((u) => u.at >= from && u.at <= to).map((u) => u.tag))]; }
 
   /** 给模型看的一览（技能书索引之外，带成败和停用状态） */
   overview(): string[] {

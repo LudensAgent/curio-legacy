@@ -2,6 +2,7 @@ import type { AgentState } from '../adapter/types.ts';
 import type { AgentEvent, EventBus } from '../events.ts';
 import type { SkillBook } from '../knowledge/skillbook.ts';
 import type { BehaviorEngine } from '../mind/behaviors.ts';
+import type { LedgerSignal, LedgerView } from '../mind/ledger.ts';
 import type { ChatMessage } from '../planner/llm.ts';
 import { extractJson } from '../planner/plan.ts';
 import type { Planner } from '../planner/planner.ts';
@@ -16,13 +17,18 @@ import { API_DOC } from './bridge.ts';
  * - pain：吃亏的程度——掉血、死亡、丢东西、卡住、失败累加成“痛”，随时间消退；
  *   明显高于它自己平时的水平（跟着它的平均和波动走）才算一次值得学的事；
  * - death：死了一定回头看。
+ * - efficiency：收获账本发现拿某样东西这次比它自己平时明显费劲或明显省事（相对自己的历史离群，不是固定阈值）：
+ *   费劲了就对比最省的那几次哪里不一样；省事了就把这次的做法记下来，下次照做。不针对哪种东西。
+ *
+ * 回顾时整本收获账（花时间最多的东西、在变省还是变费、白忙的比例）也一起给模型，问“有没有更省的做法”。
  *
  * 不限次数（模型便宜）；只是同一时间只写一份，其余排队，挨得很近的同类事合并成一件。
  */
-export type ForgeKind = 'death' | 'pain' | 'noted' | 'review';
-const KIND_LABEL: Record<ForgeKind, string> = { death: '死亡', pain: '一段吃了大亏的经历', noted: '自己觉得值得学的事', review: '这段时间的回顾' };
+export type ForgeKind = 'death' | 'pain' | 'noted' | 'review' | 'efficiency';
+const KIND_LABEL: Record<ForgeKind, string> = { death: '死亡', pain: '一段吃了大亏的经历', noted: '自己觉得值得学的事', review: '这段时间的回顾', efficiency: '一次收获效率明显变化' };
+const ORDER: ForgeKind[] = ['death', 'noted', 'pain', 'efficiency', 'review'];
 
-interface Incident { kind: ForgeKind; at: number; headline: string; lines: string[]; context: Record<string, unknown>; note?: string }
+interface Incident { kind: ForgeKind; at: number; headline: string; lines: string[]; context: Record<string, unknown>; note?: string; signal?: LedgerSignal }
 
 const KEEP = new Set(['task_start', 'task_end', 'hurt', 'notice', 'reflex', 'reflex_gaveup', 'instinct', 'thought', 'attempt_end', 'activity_start', 'activity_adjust',
   'death', 'death_items', 'game_message', 'body_adapt', 'stuck', 'skill_written', 'skill_forged', 'skill_disabled']);
@@ -82,6 +88,9 @@ export class SkillSmith {
   private lastReview = Date.now();
   private listener = (ev: AgentEvent) => this.onEvent(ev);
   history: { at: number; kind: ForgeKind; result: string }[] = [];
+  /** 收获账本（投入产出、东西出现在哪）：回顾和效率信号时给模型看 */
+  ledger: LedgerView | null = null;
+  private lastEfficiency = new Map<string, number>();
 
   constructor(private planner: Pick<Planner, 'complete' | 'autonomous' | 'noteInvalid'>, private engine: BehaviorEngine, private book: SkillBook | null,
     private bus: EventBus, private state: () => AgentState, private journal: () => string[] = () => []) {}
@@ -134,6 +143,18 @@ export class SkillSmith {
     }
   }
 
+  /**
+   * 收获账本报告：拿某样东西这次明显比平时费劲/省事。同一样东西同一个方向十分钟内只看一次（连着几段都偏，说的是同一件事）。
+   */
+  efficiency(sig: LedgerSignal, now = Date.now()) {
+    const key = `${sig.item}:${sig.direction}`;
+    if (now - (this.lastEfficiency.get(key) ?? 0) < 10 * 60_000) return;
+    this.lastEfficiency.set(key, now);
+    const ep = sig.episode;
+    const headline = `拿 ${sig.item} ${sig.direction === 'slow' ? `比平时费劲 ${sig.ratio} 倍` : `只花了平时的 ${Math.round(sig.ratio * 100)}%`}：这次「${ep.what}」每个 ${Math.round(sig.thisSec)} 秒，平时 ${Math.round(sig.usualSec)} 秒`;
+    this.report('efficiency', ep.at, headline, Math.max(60_000, ep.sec * 1000 + 10_000), undefined, undefined, sig);
+  }
+
   /** 心智说“刚才这事值得学” */
   noted(note: string, now = Date.now()) { this.report('noted', now, note.slice(0, 200), 3 * 60_000, note.slice(0, 300)); }
 
@@ -145,12 +166,12 @@ export class SkillSmith {
     this.report('review', now, `${why}，回顾这段时间做过的事`, 0, undefined, lines);
   }
 
-  report(kind: ForgeKind, at: number, headline: string, windowMs: number, note?: string, journal?: string[]) {
+  report(kind: ForgeKind, at: number, headline: string, windowMs: number, note?: string, journal?: string[], signal?: LedgerSignal) {
     const lines = journal ?? this.recent.filter((e) => e.ts >= at - windowMs && e.ts <= at + 5000).slice(-90)
       .map((e) => `[${((e.ts - at) / 1000).toFixed(0)}s] ${e.type} ${e.msg.replace(/\s+/g, ' ').slice(0, 170)}`);
     let st: AgentState | null = null;
     try { st = this.state(); } catch { /* 状态暂不可用 */ }
-    const incident: Incident = { kind, at, headline: headline.slice(0, 300), lines, ...(note ? { note } : {}),
+    const incident: Incident = { kind, at, headline: headline.slice(0, 300), lines, ...(note ? { note } : {}), ...(signal ? { signal } : {}),
       context: st ? { hp: Math.round(st.hp * 10) / 10, food: st.food, isDay: st.isDay, dim: st.dim, inventory: st.inventory.slice(0, 20).map((i) => `${i.name}×${i.count}`) } : {} };
     // 挨得很近的同类事并成一件（比如死亡和它引起的吃亏峰值）
     const near = this.queue.find((q) => Math.abs(q.at - at) < 60_000 && (q.kind === kind || (q.kind === 'death' && kind === 'pain')));
@@ -163,7 +184,7 @@ export class SkillSmith {
   private next() {
     if (this.busy || !this.planner.autonomous || !this.queue.length) return;
     // 死亡和心智点名的先写，回顾最后
-    this.queue.sort((a, b) => ['death', 'noted', 'pain', 'review'].indexOf(a.kind) - ['death', 'noted', 'pain', 'review'].indexOf(b.kind));
+    this.queue.sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind));
     const incident = this.queue.shift()!;
     this.busy = { kind: incident.kind, startedAt: Date.now() };
     this.bus.publish('skill_forge_start', 'P2', `在后台从${KIND_LABEL[incident.kind]}里总结技能`, { kind: incident.kind });
@@ -180,9 +201,18 @@ export class SkillSmith {
   messages(incident: Incident): ChatMessage[] {
     const guide = this.book?.get('writing-skills')?.body ?? '';
     const review = incident.kind === 'review';
-    const system = `你是 Minecraft 机器人 Curio 的“身体技能工程师”。${review
-      ? '下面是它最近一段时间做过的事。找出反复出现、费时间、常失败的问题，判断哪些可以靠一个技能解决（身体以后自己处理），写出来（最多 2 份）。'
-      : `下面是它刚刚经历的一段事（${KIND_LABEL[incident.kind]}）。判断：如果身体当时有一个技能，能不能避免这件事或者处理得更好？能，就写出这个技能。`}
+    const sig = incident.signal;
+    const task = review
+      ? `下面是它最近一段时间做过的事，和它的收获账本（每样东西拿一个花多少时间、在变省还是变费劲、东西多出现在什么高度和群系、白忙的比例）。
+找两类问题：一是反复出现、费时间、常失败的；二是“能做成但费劲”的——花时间最多、在变费劲、或者比它自己最省的那几次慢很多的事，想想有没有更省的做法（换个地方、换个顺序、换个找法、一次多做些）。
+判断哪些可以靠一个技能解决（身体以后自己处理，或者让心智用 use_skill 调用的一套做法），写出来（最多 2 份）。`
+      : sig?.direction === 'slow'
+        ? `收获账本发现：它刚才拿 ${sig.item} 比自己平时明显费劲。下面有这次的经过，和账本里拿这样东西最省的几次是怎么做的、它通常出现在哪。
+对比这次和省的那几次哪里不一样（地方、顺序、找法、走了多少冤枉路、失败了几次），如果有一个技能能让它以后稳定地按省的方式做，写出来；已有技能管这件事却让它变慢了，就用同名改写。`
+        : sig?.direction === 'fast'
+          ? `收获账本发现：它刚才拿 ${sig.item} 比自己平时省事得多。下面有这次的经过。找出这次做对了什么（地方、顺序、找法），把这种做法写成技能（多半是让心智用 use_skill 调用的一套做法或代码），让以后能照着做。纯属运气（东西刚好就在旁边）就不写。`
+          : `下面是它刚刚经历的一段事（${KIND_LABEL[incident.kind]}）。判断：如果身体当时有一个技能，能不能避免这件事或者处理得更好？能，就写出这个技能。`;
+    const system = `你是 Minecraft 机器人 Curio 的“身体技能工程师”。${task}
 写下的技能立刻生效，下次遇到同类情况身体会自己做。
 要求：
 - 针对一类情况，不是只对这一次；触发条件只写身体感觉得到的事（血量、看见的怪、身边的方块、刚失败的动作、是否挨打、是否在坑里）。
@@ -204,9 +234,13 @@ ${API_DOC}
       now: incident.context,
       existing_skills: this.engine.overview(),
       ...(incident.kind === 'pain' ? { usual_pain: this.pain.baseline() } : {}),
+      ...(this.ledger && review ? { harvest_ledger: this.safeLedger(() => this.ledger!.digest(12)) } : {}),
+      ...(this.ledger && sig ? { this_time: { ...sig.episode }, ledger_for_item: this.safeLedger(() => [this.ledger!.describe(sig.item)]) } : {}),
     };
     return [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify(user) }];
   }
+
+  private safeLedger(fn: () => string[]): string[] { try { return fn().filter(Boolean); } catch { return []; } }
 
   private async forge(incident: Incident): Promise<string> {
     const messages = this.messages(incident);

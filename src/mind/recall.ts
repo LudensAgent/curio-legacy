@@ -1,5 +1,6 @@
 import type { SkillBook } from '../knowledge/skillbook.ts';
 import type { WorldMemory } from '../memory/store.ts';
+import type { LedgerView } from './ledger.ts';
 import { cleanLesson, keywords, type SelfModel } from './self.ts';
 
 /**
@@ -7,9 +8,9 @@ import { cleanLesson, keywords, type SelfModel } from './self.ts';
  * 不依赖外部服务：在日记、做过的事、窍门、游戏教训、技能书和记得的地方里，按关键词重叠 + 新近程度挑出最相关的几条。
  * 每次思考前自动想一遍（结果放进提示词）；模型也可以主动 {"kind":"recall","query":"…"} 再想。
  */
-export interface Recalled { kind: 'experience' | 'diary' | 'know_how' | 'lesson' | 'skill' | 'place' | 'note'; text: string; score: number; ref?: string; at?: number }
+export interface Recalled { kind: 'experience' | 'diary' | 'know_how' | 'lesson' | 'skill' | 'place' | 'note' | 'ledger'; text: string; score: number; ref?: string; at?: number }
 
-export interface RecallSources { self: SelfModel; memory: WorldMemory; book?: SkillBook | null; extraSkills?: { name: string; text: string }[] }
+export interface RecallSources { self: SelfModel; memory: WorldMemory; book?: SkillBook | null; extraSkills?: { name: string; text: string }[]; ledger?: LedgerView | null }
 
 const ago = (at: number, now: number) => {
   const m = Math.round((now - at) / 60000);
@@ -60,9 +61,20 @@ export function recallLocal(query: string, src: RecallSources, opts: { n?: numbe
   if (!skip.has('place')) {
     try { for (const l of src.memory.landmarks()) push({ kind: 'place', text: `${l.label} (${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}) ${l.dim}`, ref: l.id }, score(`${l.label} ${l.kind}`), l.ts); } catch { /* 记忆暂不可用 */ }
   }
+  // 收获账：想到某样东西，就想起拿它一般花多少、在哪多、最省的做法是什么（名字或拿到它的那些活沾上关键词）
+  if (!skip.has('ledger') && src.ledger) {
+    try {
+      for (const name of src.ledger.names()) {
+        const base = score(name.replace(/_/g, ' '), src.ledger.aliases(name));
+        if (base < 2) continue;
+        const text = src.ledger.describe(name);
+        if (text) push({ kind: 'ledger', text: text.slice(0, 260), ref: `ledger:${name}` }, base + 0.5);
+      }
+    } catch { /* 账本暂不可用 */ }
+  }
   // 同一句话只留分高的一条
   const seen = new Set<string>();
   return out.sort((a, b) => b.score - a.score).filter((r) => { const k = r.text.slice(0, 40); if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, opts.n ?? 6);
 }
 
-export const RECALL_LABEL: Record<Recalled['kind'], string> = { experience: '经历', diary: '日记', know_how: '窍门', lesson: '教训', skill: '技能', place: '地方', note: '笔记' };
+export const RECALL_LABEL: Record<Recalled['kind'], string> = { experience: '经历', diary: '日记', know_how: '窍门', lesson: '教训', skill: '技能', place: '地方', note: '笔记', ledger: '收获账' };

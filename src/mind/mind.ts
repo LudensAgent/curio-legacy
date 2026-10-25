@@ -20,6 +20,7 @@ import { homeOf } from './home.ts';
 import type { ParsedGameMessage } from '../memory/game-messages.ts';
 import type { MindContext } from './prompt.ts';
 import { moodWords, type SelfModel } from './self.ts';
+import type { LedgerView } from './ledger.ts';
 import type { Thinker } from './thinker.ts';
 import type { Activity, ActivityDraft, ActivityEnd, ActivityOutcome, ActivityRecord, MindDecision } from './types.ts';
 
@@ -34,6 +35,8 @@ export interface MindDeps {
   say?: (text: string) => void;
   /** 后天学会的做法（行为技能）：失败时先试的恢复办法、模型写下就生效的新技能 */
   behaviors?: BehaviorEngine;
+  /** 收获账本：做过的事的投入产出、东西出现在哪（想事时按关键词想起来） */
+  ledger?: LedgerView | null;
   /** 心智觉得刚才的事值得练成技能：交给后台去写 */
   onWorthLearning?: (note: string) => void;
   timing?: Partial<typeof DEFAULT_TIMING>;
@@ -381,7 +384,8 @@ export class Mind {
     this.d.memory.recordGoal({ goal: a.what, goalType, source: a.source === 'rule' ? 'rule' : 'llm', status, summary, durationSec: record.durationSec,
       steps: signatureOf(a.steps).split('>'), plan: a.steps, worldId: state.worldId, dimension: state.dim });
     this.d.bus.publish('attempt_end', outcome === 'stuck' ? 'P1' : 'P3', `一段活「${a.what}」→ ${outcome}：${summary}${gains ? `（得到 ${gains}）` : ''}`,
-      { planId: a.id, status, outcome, gained: record.gained, durationSec: record.durationSec, effectEvidence: { verified: true, changed: !!gains, reasons: gains ? [`背包实增 ${gains}`] : [] } });
+      { planId: a.id, status, outcome, gained: record.gained, durationSec: record.durationSec, what: a.what, kind: a.kind, signature: record.signature,
+        how: a.steps.slice(0, 6).map((st) => `${st.skill} ${argsLabel(st)}`).join(' > ').slice(0, 300), effectEvidence: { verified: true, changed: !!gains, reasons: gains ? [`背包实增 ${gains}`] : [] } });
     try { this.d.onGoalEnd?.(status); } catch { /* 习惯化失败不影响游玩 */ }
     if (outcome === 'done' && (gains || record.durationSec > 90) && Date.now() - this.lastDiaryAt > this.timing.diaryGapMs) this.diary(`${a.what}${gains ? `，得到 ${gains}` : ''}`);
     // 绕路的事做完了：回到被打断的那段活
@@ -526,7 +530,7 @@ export class Mind {
     const query = [plan?.goal, ...(plan?.steps.filter((st) => !st.done).slice(0, 2).map((st) => st.text) ?? []), this.activity?.what, this.activity?.why,
       this.lastRecord?.what, this.lastRecord?.outcome === 'stuck' ? this.lastRecord.summary : '', this.lastFailure?.summary, ...noticed.map((n) => n.what), reason].filter(Boolean).join(' ');
     const book = this.d.thinker.skillBook;
-    const recalled = this.safe(() => recallLocal(query, { self: this.d.self, memory: this.d.memory, book }, { n: tier === 'glance' ? 3 : 6, exclude: ['know_how'], excludeRefs: this.d.self.history(5).map((r) => r.id) }), []);
+    const recalled = this.safe(() => recallLocal(query, { self: this.d.self, memory: this.d.memory, book, ledger: this.d.ledger }, { n: tier === 'glance' ? 3 : 6, exclude: ['know_how'], excludeRefs: this.d.self.history(5).map((r) => r.id) }), []);
     let openedSkill: MindContext['openedSkill'];
     const top = recalled.find((r) => r.kind === 'skill' && r.score >= 4 && r.ref);
     if (tier === 'deliberate' && top && book?.get(top.ref!) && Date.now() - (this.skillOpenedAt.get(top.ref!) ?? 0) > 5 * 60_000) {

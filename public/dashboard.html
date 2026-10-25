@@ -197,7 +197,8 @@
     .tabsarea .pane.on { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; }
     .tabsarea .pane > .card { margin: 0; }
     .tabsarea .pane > .board, .tabsarea .pane > .grid2 { flex: 1; min-height: 0; grid-auto-rows: minmax(0, 1fr); }
-    #pane-mind .board, #pane-memory .board, #pane-learning .board { grid-template-rows: repeat(2, minmax(0, 1fr)); }
+    #pane-mind .board, #pane-memory .board { grid-template-rows: repeat(2, minmax(0, 1fr)); }
+    #pane-learning .board { grid-template-rows: repeat(3, minmax(0, 1fr)); }
     #pane-metrics .board.two { grid-template-rows: minmax(0, 1fr); }
     #pane-skills > .card:first-child { flex: 1; min-height: 0; overflow: auto; }
     #pane-skills > .card:last-child { flex: none; max-height: 32%; overflow: auto; }
@@ -338,8 +339,12 @@
           </div>
         </div>
         <div class="card cols2"><h2>分数曲线 <span class="r dim" id="lsSpan"></span></h2><div class="body chart" id="lsCurve"></div></div>
-        <div class="card"><h2>里程碑</h2><ul class="list body" id="lsMilestones"></ul></div>
+        <div class="card rows2"><h2>里程碑</h2><ul class="list body" id="lsMilestones"></ul></div>
         <div class="card cols2"><h2>每条命到达里程碑的用时（分钟，越来越短 = 学会了）</h2><div class="body"><div class="chart" id="lsLives" style="height:150px"></div><table><thead id="lsLivesHead"></thead><tbody id="lsLivesRows"></tbody></table></div></div>
+        <div class="card cols2"><h2>收获账本 <span class="r dim" id="lgMeta"></span></h2><div class="body">
+          <table><thead><tr><th>东西</th><th>拿到</th><th>每个花</th><th>早先 → 最近</th><th>多在哪</th><th>最省的做法</th></tr></thead><tbody id="lgRows"></tbody></table>
+          <div class="sub">见过的（同一格只记一次）</div><div class="chips" id="lgSeen"></div>
+        </div></div>
       </div>
     </section>
 
@@ -527,6 +532,7 @@ function renderLearning(L) {
   $('lsTotal').textContent = n.total;
   for (const k of ['progress', 'survival', 'learning', 'efficiency']) { const id = 'ls' + k[0].toUpperCase() + k.slice(1); $(id).style.width = n[k] + '%'; $(id + 'V').textContent = n[k]; }
   $('lsDeaths').textContent = `最近一小时死了 ${L.deathsLastHour} 次`;
+  renderLedger(L.ledger);
   // 里程碑按原版成就的路线分组；游戏播报过、但不在表里的成就单独列出
   const groups = [...new Set(L.milestones.map((m) => m.group || ''))];
   const got = L.milestones.filter((m) => m.at).length;
@@ -552,6 +558,19 @@ function renderLearning(L) {
     { dots: true, xLabel: (x) => `第 ${x} 条命` });
   $('lsLivesHead').innerHTML = `<tr><th>命</th><th>活了</th>${L.lifeMilestones.map((m) => `<th>${esc(m.label)}</th>`).join('')}<th>怎么死的</th></tr>`;
   $('lsLivesRows').innerHTML = L.lives.slice().reverse().map((l) => `<tr><td class="mono">#${l.n}${l.alive ? ' <span class="badge good">现在</span>' : ''}</td><td class="mono">${l.minutes} 分</td>${L.lifeMilestones.map((m) => `<td class="mono">${l.reached[m.key] ?? '-'}</td>`).join('')}<td class="dim" style="font-size:11px">${esc(l.cause || '')}</td></tr>`).join('') || '<tr><td class="empty" colspan="9">还没有记录</td></tr>';
+}
+
+/** 收获账本：每样东西拿一个花多少、在变省还是变费、多在哪、最省的做法 */
+function renderLedger(G) {
+  if (!G) return;
+  const sec = (s) => s == null ? '-' : s >= 120 ? `${(s / 60).toFixed(1)} 分` : `${Math.round(s)} 秒`;
+  $('lgMeta').textContent = `${G.episodes} 段活${G.idleShare != null ? ` · 最近白忙 ${G.idleShare}%` : ''}`;
+  const arrow = { better: '<span class="badge good">变省</span>', worse: '<span class="badge bad">变费</span>', flat: '<span class="dim">持平</span>' };
+  $('lgRows').innerHTML = G.items.map((it) => `<tr><td class="mono">${esc(it.item)}</td><td class="mono">${it.units}<span class="dim"> / ${it.episodes} 段</span></td><td class="mono">${sec(it.perUnitSec)}</td>`
+    + `<td class="mono">${it.earlySec != null ? `${sec(it.earlySec)} → ${sec(it.recentSec)} ${arrow[it.trend] || ''}` : '<span class="dim">次数不够</span>'}</td>`
+    + `<td class="dim" style="font-size:11px">${esc(it.where || '')}</td><td class="dim mono" style="font-size:11px">${esc((it.best?.[0]?.signature || '').slice(0, 60))}</td></tr>`).join('')
+    || '<tr><td class="empty" colspan="6">还没有拿到过东西</td></tr>';
+  $('lgSeen').innerHTML = G.seen.map((x) => `<span class="item" title="${esc(x.where)}">${esc(x.name)} ×${x.n}</span>`).join('') || '<span class="dim">—</span>';
 }
 
 function renderMind(mind) {

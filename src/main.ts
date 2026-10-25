@@ -35,7 +35,8 @@ import { LlmTrace } from './planner/llm-trace.ts';
 import { Metrics } from './observer/metrics.ts';
 import { Spectator } from './observer/spectator.ts';
 import { Perception } from './perception/perception.ts';
-import { Vision } from './perception/vision.ts';
+import { NOTABLE, Vision } from './perception/vision.ts';
+import { Ledger } from './mind/ledger.ts';
 import { MockProvider, OpenAICompatibleProvider, type LlmProvider } from './planner/llm.ts';
 import { ruleProposal } from './planner/plan.ts';
 import { Planner } from './planner/planner.ts';
@@ -187,8 +188,17 @@ const smith = new SkillSmith(coderPlanner, behaviors, skillBook, bus, () => adap
   // 回顾用的“这段时间做过的事”（回调执行时 selfModel 已经建好）
   () => selfModel.history(30).map((r) => `${r.what} → ${r.outcome}（${r.durationSec}s${Object.keys(r.gained).length ? `，得到 ${Object.entries(r.gained).map(([k, v]) => `${k}×${v}`).join(' ')}` : ''}）${r.outcome !== 'done' ? `：${r.summary.slice(0, 80)}` : ''}`));
 smith.start();
+/** 收获账本：每段活的投入产出、东西出现在哪（高度、群系、维度），不针对哪种东西；拿某样东西明显比平时费劲/省事就交给造技能的对比 */
+const ledger = new Ledger(path.join(config.dataDir, 'ledger.json'), bus, () => adapter.state(),
+  () => ({ blocks: [...vision.visibleNow.values()].filter((b) => NOTABLE.has(b.name)), entities: vision.perceivedEntities(24) }),
+  (from, to) => behaviors.usedBetween(from, to));
+ledger.onSignal = (sig) => smith.efficiency(sig);
+smith.ledger = ledger;
+improver.ledger = ledger;
+ledger.start();
 /** 技能多了定期整理：收起长期用不上的，后台合并说同一件事的、调整谁先上 */
 const curator = new SkillCurator(coderPlanner, behaviors, skillBook, bus);
+curator.ledger = ledger;
 curator.start();
 /** 学习曲线：给玩法打分（进度、生存、学习、效率），按每条命记到达里程碑的用时 */
 const scorecard = new Scorecard(bus, () => adapter.state(), path.join(config.dataDir, 'scorecard.json'), () => ({
@@ -197,14 +207,15 @@ const scorecard = new Scorecard(bus, () => adapter.state(), path.join(config.dat
   housesComplete: (() => { try { return buildingArchiveFor(memory).list().filter((p) => p.status === 'complete').length; } catch { return 0; } })(),
 }));
 scorecard.start();
-behaviors.improve = (name, why, note) => { const skipped = improver.consider(name, why, note); if (skipped && why === 'requested') bus.publish('skill_improve_skipped', 'P3', `先不改「${name}」：${skipped}`); };
+behaviors.improve = (name, why, note) => { const skipped = improver.consider(name, why, note); if (skipped && why !== 'failures') bus.publish('skill_improve_skipped', 'P3', `先不改「${name}」：${skipped}`); };
 draftsFor(memory);
 /** 大脑：像真人一样一段一段地玩的心智层 */
 const selfModel = new SelfModel(path.join(config.dataDir, 'mind.json'), config.mind.traits);
 const mind = new Mind({
   adapter, arbiter, perception, memory, bus, self: selfModel, persona: config.persona,
-  thinker: new Thinker(planner, adapter, memory, bus, skillBook),
+  thinker: Object.assign(new Thinker(planner, adapter, memory, bus, skillBook), { ledger }),
   behaviors,
+  ledger,
   onWorthLearning: (note: string) => smith.noted(note),
   ...(audience ? { audience } : {}),
   mySkills,
@@ -417,7 +428,7 @@ function snapshot() {
       improving: improver.busy ? { name: improver.busy.name, sinceSec: Math.round((Date.now() - improver.busy.startedAt) / 1000) } : null,
       forging: smith.busy ? { kind: smith.busy.kind, sinceSec: Math.round((Date.now() - smith.busy.startedAt) / 1000) } : null,
       forged: smith.history.slice(-6), curating: curator.busy, curated: curator.history.slice(-4) },
-    learning: scorecard.summary(),
+    learning: { ...scorecard.summary(), ledger: ledger.summary() },
     spectator: spectator.status,
     live: live ? { status: live.status(), audience: audience?.stats() } : null,
     memory: {
@@ -471,6 +482,7 @@ function shutdown() {
   actionChat.stop();
   void live?.stop();
   episodic.stop();
+  ledger.stop();
   methods.dispose();
   selfModel.close();
   observerInstall?.dispose();
