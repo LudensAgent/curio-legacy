@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { AgentEvent, EventBus } from './events.ts';
 
-function day() {
+export function day() {
   const d = new Date();
   const p = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`;

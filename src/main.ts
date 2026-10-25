@@ -74,7 +74,7 @@ if (config.llm.provider === 'openai') {
 } else {
   provider = new MockProvider(config.llm.fakeDelayMs, (hint: any) => ruleProposal(hint.percept, memory, hint.reason === 'prefetch' ? hint.current : null));
 }
-const llmTrace = new LlmTrace();
+const llmTrace = new LlmTrace({ dir: config.llmArchiveDir }); // 每次调用的完整记录存进 archives/，清空记忆也不删
 const planner = new Planner(config, provider, adapter, memory, bus, new JsonlWriter(path.join(config.dataDir, 'logs'), 'llm'), llmTrace, episodic,
   new ControlKnowledge(path.join(config.dataDir, 'control-knowledge.json')));
 /**

@@ -143,6 +143,8 @@ export const config = {
   viewerPort: num('VIEWER_PORT', 0),
   actionChat: { enabled: bool('CHAT_ACTIONS', true), minIntervalMs: num('CHAT_ACTION_INTERVAL_MS', 1800) },
   dataDir: path.resolve(str('DATA_DIR', './data')),
+  /** 每次 LLM 调用的完整记录（提示词、思考过程、完整回复）：放在数据目录外面，清空记忆、重置世界都不会删 */
+  llmArchiveDir: path.resolve(str('LLM_ARCHIVE_DIR', './archives/llm-calls')),
 };
 
 export type Config = typeof config;
