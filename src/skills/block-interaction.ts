@@ -1,6 +1,6 @@
 import type { BlockObservation, Vec3Like } from '../adapter/types.ts';
 import { AbortedError, dist3, sleep, throwIfAborted } from '../util.ts';
-import { inspectBlock } from './observation.ts';
+import { glanceAt, inspectBlock } from './observation.ts';
 import { resolveItemAlias } from './work.ts';
 import { codeFromError, fail, isAbort, obj, ok, type FailureCode, type Skill } from './types.ts';
 
@@ -43,8 +43,11 @@ export const interactBlock: Skill<{ target: string | Vec3Like; item?: string }> 
       if (args.item && !origin.inventory.some((item) => item.name === args.item && item.count > 0)) return refused('MISSING_MATERIALS', `背包没有 ${args.item}`);
       const names = typeof args.target === 'string' ? [args.target, ...adapter.resolveBlockNames(args.target)] : null;
       const positions = names ? senses.knownBlocks(names, 32).slice(0, 16).map((block) => block.pos) : [args.target as Vec3Like];
-      let before = observe(positions).filter((block) => !names || names.includes(block.name)).sort((a, b) => distance(a.pos) - distance(b.pos))[0];
-      if (!before) return refused('NOT_FOUND', '目标当前不可见或未加载；坐标和旧记忆不能替代观察');
+      const pick = () => observe(positions).filter((block) => !names || names.includes(block.name)).sort((a, b) => distance(a.pos) - distance(b.pos))[0];
+      let before = pick();
+      // 目标在身后或头顶：先转头看一眼
+      if (!before && positions[0]) { await glanceAt(ctx, positions[0]); before = pick(); }
+      if (!before) return refused('NOT_FOUND', '转头看过去也没看见目标（被挡住、太暗或没加载）；坐标和旧记忆不能替代观察');
       const pos = before.pos, expected = before.name;
       if (/^(air|cave_air|void_air)$/.test(expected)) return refused('BAD_ARGS', '目标是空气，不能当作可右键方块');
       if (distance(pos) > 4.4) {
@@ -53,6 +56,7 @@ export const interactBlock: Skill<{ target: string | Vec3Like; item?: string }> 
       }
       check();
       before = observe([pos])[0];
+      if (!before) { await glanceAt(ctx, pos); before = observe([pos])[0]; }
       if (!before || before.name !== expected) return refused('TARGET_GONE', '靠近后目标已改变或被遮挡，未执行右键');
       if (distance(pos) > 4.4) return refused('PATH_NOT_FOUND', '尚未真正走到伸手可及的位置，未执行右键');
       const eye = adapter.eye();

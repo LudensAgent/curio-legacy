@@ -1331,12 +1331,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (!block) {
       if (!this.invItem('furnace')) await this.afterAction(() => this.craft('furnace', 1, signal), check);
       if (!this.invItem('furnace')) return { ok: false, reason: 'NO_FURNACE', made: 0 };
-      const ref = this.findPlaceSpot();
-      if (!ref) return { ok: false, reason: 'NO_SPACE', made: 0 };
-      const Vec3 = require('vec3').Vec3;
-      await this.afterAction(() => b.equip(this.invItem('furnace'), 'hand'), check);
-      await this.afterAction(() => raceAbort(b.placeBlock(ref, new Vec3(0, 1, 0)), signal, 5000, () => {}), check);
-      block = b.blockAt(ref.position.offset(0, 1, 0));
+      block = await this.placeNearby('furnace', false, signal, check);
+      if (!block) return { ok: false, reason: 'NO_SPACE', made: 0 };
       this.bus.publish('place', 'P3', '放置了熔炉');
     }
     await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos: block.position }, { signal, timeoutMs: 30000 }), check);
@@ -1469,15 +1465,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (!bed) {
       const bedItem = b.inventory.items().find((i: any) => i.name.endsWith('_bed'));
       if (!bedItem) return { ok: false, reason: 'NO_BED' };
-      const ref = this.findPlaceSpot();
-      if (!ref) return { ok: false, reason: 'NO_SPACE' };
-      const Vec3 = require('vec3').Vec3;
-      try {
-        await this.afterAction(() => b.equip(bedItem, 'hand'), check);
-        await this.afterAction(() => raceAbort(b.placeBlock(ref, new Vec3(0, 1, 0)), signal, 5000, () => {}), check);
-      } catch (e: any) {
-        if (e?.name === 'AbortedError') throw e;
-      }
+      if (!this.findPlaceSpots(true).length) return { ok: false, reason: 'NO_SPACE' };
+      await this.placeNearby(bedItem.name, true, signal, check);
       bed = b.findBlock({ matching: bedIds, maxDistance: 4 });
       if (!bed) return { ok: false, reason: 'PLACE_FAILED' };
       this.bus.publish('place', 'P2', '放下了床');
@@ -1499,6 +1488,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   }
 
   private findPlaceSpots(requireHeadroom = true): any[] {
+    const REPLACEABLE = new Set(['air', 'cave_air', 'void_air', 'water', 'short_grass', 'grass', 'tall_grass', 'fern', 'large_fern', 'snow', 'dead_bush', 'seagrass', 'tall_seagrass']);
     const b = this.bot;
     const base = b.entity.position.floored();
     const candidates: any[] = [];
@@ -1508,9 +1498,33 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (!ref || ref.boundingBox !== 'block' || PROTECTED_BLOCKS.includes(ref.name) || /_bed$|_door$|barrel|shulker_box/.test(ref.name)) continue;
       const above = b.blockAt(base.offset(dx, dy + 1, dz));
       const above2 = b.blockAt(base.offset(dx, dy + 2, dz));
-      if (['air', 'cave_air', 'void_air'].includes(above?.name) && (!requireHeadroom || ['air', 'cave_air', 'void_air'].includes(above2?.name))) candidates.push(ref);
+      // 能放进去的格子：空气，也包括水和矮草、雪层这类一放方块就被顶掉的（人在水里也能把工作台放在水底）
+      if (REPLACEABLE.has(above?.name) && (!requireHeadroom || REPLACEABLE.has(above2?.name))) candidates.push(ref);
     }
     return candidates.sort((a, c) => a.position.distanceTo(b.entity.position) - c.position.distanceTo(b.entity.position)).slice(0, 12);
+  }
+
+  /**
+   * 在身边找个地方把方块放下：先挑伸手就够得着、看得见那一面的位置直接放；都不行再走过去放。
+   * 以前直接对着“最近的空位”发放置包，空位可能在 5、6 格外或被挡着，服务器默默不理，熔炉、床就放不下。
+   */
+  private async placeNearby(item: string, requireHeadroom: boolean, signal: AbortSignal, check: (() => void) & { signal?: AbortSignal }): Promise<any | null> {
+    const b = this.bot, Vec3 = require('vec3').Vec3, up = new Vec3(0, 1, 0);
+    const spots = this.findPlaceSpots(requireHeadroom);
+    const ordered = [...spots.filter((r) => this.canClickPlacementFace(r, up)), ...spots.filter((r) => !this.canClickPlacementFace(r, up))].slice(0, 6);
+    for (const ref of ordered) {
+      const position = ref.position.offset(0, 1, 0);
+      try {
+        let placed = await this.afterAction(() => this.placeBlockAt(position, [item], signal), check);
+        if (!placed.ok || b.blockAt(position)?.name !== item) {
+          await this.afterAction(() => this.moveTo({ kind: 'place_block', pos: position }, { signal, timeoutMs: 8000, constructionSafe: true }), check);
+          placed = await this.afterAction(() => this.placeBlockAt(position, [item], signal), check);
+        }
+        const observed = b.blockAt(position);
+        if (placed.ok && observed?.name === item) return observed;
+      } catch (error: any) { if (error?.name === 'AbortedError') throw error; check(); }
+    }
+    return null;
   }
 
   private findPlaceSpot(): any | null {
@@ -1834,6 +1848,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (!below || below.boundingBox !== 'block') return { ok: false, reason: 'NO_REFERENCE' };
     const here = b.blockAt(feet);
     if (here && here.boundingBox === 'block') return { ok: false, reason: 'OCCUPIED' };
+    // 脚下这格有火把、花、铁轨、按钮这类没碰撞但也不会被顶掉的东西：服务器不让往里放方块
+    if (here && !/^(air|cave_air|void_air|water|short_grass|grass|tall_grass|fern|large_fern|dead_bush|seagrass|tall_seagrass|snow)$/.test(here.name)) return { ok: false, reason: `BLOCKED:${here.name}` };
     const item = b.inventory.items().find((i: any) => itemNames.includes(i.name));
     if (!item) return { ok: false, reason: 'NO_ITEM' };
     await this.afterAction(() => b.equip(item, 'hand'), check);
@@ -2296,6 +2312,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const Vec3 = require('vec3').Vec3;
       // 瞄准水面上方一点，浮漂抛物线落进水里
       await this.afterAction(() => b.lookAt(new Vec3(opts.aim!.x + 0.5, opts.aim!.y + 1.4, opts.aim!.z + 0.5), true), check);
+      // 甩竿是立刻发的，转头要下一刻才到服务器：不等的话浮漂按转头前的方向甩出去（甩到岸上、挂在方块上）
+      await this.afterAction(() => this.lookSynced(), check);
     }
     let pending = true;
     const reelIn = () => {

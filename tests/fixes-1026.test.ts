@@ -156,3 +156,36 @@ test('技能互相拆台：一个放的块被另一个挖掉，两边都记下�
   assert.match(payload, /"work_undone_by":\{"dig-down":1\}/);
   assert.match(curator.messages()[0].content, /互相拆台/);
 });
+
+test('自己站的格子里有火把：dig_at [0,0,0] 照样拿掉（不再说“本来就空着”）；原地垫高被火把挡住时说清楚', async (t) => {
+  const { digAt, placeAt } = await import('../src/skills/primitives.ts');
+  const w = new LostDropWorld(), ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  w.setBlock({ x: 0, y: 63, z: 0 }, 'stone');
+  w.setBlock({ x: 0, y: 64, z: 0 }, 'torch');
+  const r = await digAt.run(ctx, (digAt.validate({ at: [0, 0, 0], facing: 'N' }, w) as any).args);
+  assert.match(r.summary, /挖掉了 \[0,0,0\] 的 torch/);
+  assert.equal(w.blockAt({ x: 0, y: 64, z: 0 }), 'air');
+  w.setBlock({ x: 0, y: 64, z: 0 }, 'air');
+  const empty = await digAt.run(ctx, (digAt.validate({ at: [0, 0, 0], facing: 'N' }, w) as any).args);
+  assert.match(empty.summary, /本来就空着/);
+  // 原地垫高的提示
+  w.inv.set('dirt', 4);
+  (w as any).pillarUp = async () => ({ ok: false, reason: 'BLOCKED:torch' });
+  const p = await placeAt.run(ctx, (placeAt.validate({ at: [0, 0, 0], facing: 'N', item: 'dirt' }, w) as any).args);
+  assert.match(p.summary, /脚下这格有 torch.*dig_at \[0,0,0\]/);
+});
+
+test('inspect_block 看身后的方块会先回头看，而不是直接说看不见', async (t) => {
+  const { inspectBlock } = await import('../src/skills/observation.ts');
+  const w = new LostDropWorld();
+  const target = { x: 0, y: 64, z: 5 }; // 南边（身后，默认面朝北）
+  const looks: number[] = [];
+  w.look = async (yaw: number) => { looks.push(yaw); (w as any).yaw = yaw; };
+  const facingIt = () => Math.abs(Math.atan2(-(target.x + 0.5 - w.pos.x), -(target.z + 0.5 - w.pos.z)) - ((w as any).yaw ?? 0)) < 0.3;
+  const ctx = makeCtx(w, { senses: { observeBlocks: (ps: any[]) => facingIt() ? ps.map((p) => ({ name: 'chest', properties: {}, pos: p })) : [] } as any });
+  t.after(() => ctx.memory.close());
+  const r = await inspectBlock.run(ctx, { target });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(looks.length, 1, '回了一次头');
+});

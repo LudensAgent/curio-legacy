@@ -69,10 +69,11 @@ export const digAt: Skill<CellArgs> = {
   },
   async run(ctx, args) {
     throwIfAborted(ctx.signal);
-    if (args.at[0] === 0 && args.at[2] === 0 && (args.at[1] === 0 || args.at[1] === 1)) return ok(`[${args.at}] 是自己站的地方，本来就空着；往上挖是 [0,2,0]`, after(ctx, args.facing));
     const feet = feetCell(ctx.adapter.state().pos);
     const pos = toWorld(feet, args.facing, args.at);
     const before = ctx.adapter.blockAt(pos);
+    // 自己站的两格通常是空的；但也可能有火把、花、雪层、蜘蛛网这类东西，那就照样拿掉
+    if (args.at[0] === 0 && args.at[2] === 0 && (args.at[1] === 0 || args.at[1] === 1) && (before === null || AIR.has(before))) return ok(`[${args.at}] 是自己站的地方，本来就空着；往上挖是 [0,2,0]`, after(ctx, args.facing));
     if (before === null) return fail('NOT_FOUND', `[${args.at}] 那一格还没加载或看不见`, after(ctx, args.facing));
     if (AIR.has(before)) return ok(`[${args.at}] 本来就是空的，不用挖`, { cell: [...args.at], was: 'air', ...after(ctx, args.facing) });
     if (LIQUID_BLOCKS.has(before)) return fail('BAD_ARGS', `[${args.at}] 是 ${before}，挖不了`, after(ctx, args.facing));
@@ -185,7 +186,8 @@ export const placeAt: Skill<CellArgs & { item: string }> = {
         const r = await a.pillarUp(names, ctx.signal);
         if (!r.ok) {
           const why = r.reason === 'NO_REFERENCE' ? '脚下是空的（悬着、在水里或梯子上），没有能贴着放的面'
-            : r.reason === 'OCCUPIED' ? '脚下这格已经有东西' : r.reason === 'NO_ITEM' ? '背包里没有能垫的方块' : `方块没放上（${r.reason}）`;
+            : r.reason === 'OCCUPIED' ? '脚下这格已经有东西'
+            : String(r.reason).startsWith('BLOCKED:') ? `脚下这格有 ${String(r.reason).slice(8)}，方块放不进去；先 dig_at [0,0,0] 把它拿掉` : r.reason === 'NO_ITEM' ? '背包里没有能垫的方块' : `方块没放上（${r.reason}）`;
           return fail(r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS' : r.reason === 'NO_REFERENCE' ? 'PATH_NOT_FOUND' : 'EFFECT_NOT_CONFIRMED', `原地垫高没成：${why}`, after(ctx, args.facing));
         }
       } else {

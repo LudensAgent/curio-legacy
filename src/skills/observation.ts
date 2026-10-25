@@ -1,7 +1,18 @@
 import type { Vec3Like } from '../adapter/types.ts';
-import { fail, obj, ok, type Skill } from './types.ts';
+import { fail, obj, ok, type Skill, type SkillCtx } from './types.ts';
 
 /** Looking at state is distinct from using or breaking the target. */
+/** 转头看向一格（像人一样：要看身后的东西得先回头）。只转头，不走动 */
+export async function glanceAt(ctx: SkillCtx, pos: Vec3Like) {
+  const eye = ctx.adapter.eye();
+  if (!eye) return;
+  const dx = pos.x + 0.5 - eye.x, dy = pos.y + 0.5 - eye.y, dz = pos.z + 0.5 - eye.z;
+  if (Math.hypot(dx, dy, dz) > 48) return;
+  try { await ctx.adapter.look(Math.atan2(-dx, -dz), Math.atan2(dy, Math.hypot(dx, dz)), ctx.signal); }
+  catch (e) { if ((e as Error)?.name === 'AbortedError') throw e; }
+  ctx.senses.refresh();
+}
+
 export const inspectBlock: Skill<{ target: string | Vec3Like }> = {
   name: 'inspect_block',
   description: '只读查看当前视野内指定方块的实际名称和属性（如门的 open、作物 age）；遮挡或视野外返回未知',
@@ -23,8 +34,10 @@ export const inspectBlock: Skill<{ target: string | Vec3Like }> = {
     const positions = typeof args.target === 'string'
       ? ctx.senses.knownBlocks([args.target, ...ctx.adapter.resolveBlockNames(args.target)], 32).slice(0, 16).map((b) => b.pos)
       : [args.target];
-    const observed = ctx.senses.observeBlocks(positions)[0];
-    if (!observed) return fail('NOT_FOUND', '目标当前不可见或未加载；请靠近或转头观察，状态仍未知');
+    let observed = ctx.senses.observeBlocks(positions)[0];
+    // 不在视野里（在身后、头顶、脚下）：先转头看过去再说，不要直接说看不见
+    if (!observed && positions[0]) { await glanceAt(ctx, positions[0]); observed = ctx.senses.observeBlocks(positions)[0]; }
+    if (!observed) return fail('NOT_FOUND', '转头看过去也没看见：被挡住、太暗、太远或区块没加载；状态仍未知（空气格本身看不见，只能看到它周围）');
     return ok(`看见 ${observed.name} 在 ${observed.pos.x},${observed.pos.y},${observed.pos.z}，属性 ${JSON.stringify(observed.properties)}`,
       { target: observed.name, pos: observed.pos, actual: observed, effectEvidence: { verified: true, changed: false, reasons: ['只读视觉观测'] } });
   },

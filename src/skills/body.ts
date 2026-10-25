@@ -92,7 +92,14 @@ async function recoverBlock(ctx: SkillCtx, args: TargetDigArgs) {
   const inReach = () => dist3(adapter.eye() ?? { ...adapter.state().pos, y: adapter.state().pos.y + 1.62 }, { x: pos!.x + 0.5, y: pos!.y + 0.5, z: pos!.z + 0.5 }) <= 4.5;
   try {
     throwIfAborted(signal);
-    if (!inReach()) await adapter.moveTo({ kind: 'reach_block', pos }, { signal, timeoutMs: Math.min(15000, Math.max(1, ctx.deadline - Date.now() - 4000)), constructionSafe: true });
+    if (!inReach()) {
+      try { await adapter.moveTo({ kind: 'reach_block', pos }, { signal, timeoutMs: Math.min(15000, Math.max(1, ctx.deadline - Date.now() - 4000)), constructionSafe: true }); }
+      catch (e) {
+        if (isAbort(e)) throw e;
+        // 走不到“能看见它一面、伸手够得着”的位置：多半埋在墙里或隔着东西，不是挖得慢
+        if (!inReach()) return fail('PATH_NOT_FOUND', `走不到能够着 (${pos.x},${pos.y},${pos.z}) 的位置（${why(e).slice(0, 60)}）：它可能四面都被别的方块挡着、或在走不过去的地方；先挖开挡在前面的，或者换个看得见它的位置`, { target: expected ?? null, pos });
+      }
+    }
     throwIfAborted(signal);
     if (!inReach()) return fail('PATH_NOT_FOUND', '未能走到目标伸手可及的位置，未拆除');
     const name = adapter.blockAt(pos);
