@@ -255,7 +255,8 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
   const digging = !!step && ['gather', 'dig', 'climb_up'].includes(step.skill);
   const material = String((step?.args as Record<string, unknown> | undefined)?.block ?? '');
   const tool = /stone|ore|coal|iron|copper|deepslate/.test(material) ? 'pickaxe' : /dirt|grass|sand|gravel|clay/.test(material) ? 'shovel' : /log|wood/.test(material) ? 'axe' : undefined;
-  const suitable = digging ? !!p.self.held && (tool ? p.self.held.endsWith(`_${tool}`) : /_(pickaxe|shovel|axe)$/.test(p.self.held)) : null;
+  // 挖的时候身体会自动换上背包里最快的工具；要提醒的是“背包里根本没有合适的工具”
+  const ownsTool = tool ? [...inv.keys()].some((n) => n.endsWith(`_${tool}`)) : true;
   return {
     ...(p.self.where ? { where: p.self.where.text } : p.self.overhead ? { overhead: p.self.overhead.block ? `头顶 ${p.self.overhead.up} 格是 ${p.self.overhead.block}` : '头顶一直空着' } : {}),
     pos: pos3(p.self.pos), dim: p.self.dim, biome: p.self.biome, sky_visible: p.self.sky_visible ?? null,
@@ -264,7 +265,7 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
     time: `${{ day: '白天', dusk: '黄昏', night: '夜里', dawn: '清晨' }[p.time.phase] ?? p.time.phase}（${p.time.timeOfDay}）${p.time.can_sleep ? '，能睡觉' : ''}`,
     ...(p.light ? { light: `${{ bright: '亮', dim: '有点暗', dark: '很暗' }[p.light.level] ?? p.light.level}${p.light.mob_spawn_risk ? '，会刷怪' : ''}` } : {}),
     held: p.self.held,
-    ...(digging ? { held_suitable: suitable, ...(!suitable ? { held_note: `正在挖掘，手持 ${p.self.held ?? '空手'}；${tool ? `更适合用 ${tool}` : '应按目标方块选镐或铲等工具'}` } : {}) } : {}),
+    ...(digging && tool && !ownsTool ? { tool_note: `正在挖 ${material}，背包里没有 ${tool}（身体只能空手挖，很慢）：做一把${tool === 'axe' ? '斧子' : tool === 'pickaxe' ? '镐' : '铲子'}会快很多` } : {}),
     inventory: [...inv].map(([name, count]) => `${name}×${count}`), empty_slots: p.emptySlots,
     habits,
   };

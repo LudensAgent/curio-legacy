@@ -851,6 +851,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       }
     }
     if (best && b.heldItem?.type !== best.type) await this.afterAction(() => b.equip(best, 'hand'), check);
+    // 没有更快的工具：别拿着剑、镐这些会掉耐久又不加速的东西去挖（真人会收起来空手砍，或换斧子）
+    else if (!best && b.heldItem && /_(sword|pickaxe|axe|shovel|hoe)$|^(shears|bow|crossbow|trident|fishing_rod|flint_and_steel)$/.test(b.heldItem.name)) {
+      await this.afterAction(() => b.unequip('hand'), check).catch(() => {});
+    }
   }
 
   async dig(pos: Vec3Like, signal: AbortSignal): Promise<ActionResult> {
