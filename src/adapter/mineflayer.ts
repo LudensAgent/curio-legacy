@@ -587,20 +587,23 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       case 'xyz':
         goal = new goals.GoalBlock(Math.floor(target.x), Math.floor(target.y), Math.floor(target.z));
         break;
-      case 'reach_block':
-        goal = goals.GoalLookAtBlock
+      case 'reach_block': {
+        // 浆果丛、作物、花草、火把这些没有碰撞箱的方块：视线射线会直接穿过去，“看得到这一格”永远不成立，
+        // 寻路就一直在它旁边（甚至丛里）打转到超时，人站在浆果丛里半天不动手。这类方块按距离算够得着。
+        const there = b.blockAt(this.vec(target.pos));
+        const hollow = !!there && Array.isArray(there.shapes) && there.shapes.length === 0;
+        goal = goals.GoalLookAtBlock && !hollow
           ? new goals.GoalLookAtBlock(this.vec(target.pos), b.world, { reach: 4 })
           : new goals.GoalNear(target.pos.x, target.pos.y, target.pos.z, 2);
         // GoalLookAtBlock 的距离判定偏向脚部节点；地下目标还须核对眼睛到方块中心的真实挖掘距离。
-        {
-          const nominalEnd = goal.isEnd.bind(goal);
-          goal.isEnd = (node: any) => nominalEnd(node) && Math.hypot(
-            node.x + 0.5 - target.pos.x - 0.5,
-            node.y + (b.entity.eyeHeight ?? 1.62) - target.pos.y - 0.5,
-            node.z + 0.5 - target.pos.z - 0.5,
-          ) <= 4;
-        }
+        const nominalEnd = goal.isEnd.bind(goal);
+        goal.isEnd = (node: any) => nominalEnd(node) && Math.hypot(
+          node.x + 0.5 - target.pos.x - 0.5,
+          node.y + (b.entity.eyeHeight ?? 1.62) - target.pos.y - 0.5,
+          node.z + 0.5 - target.pos.z - 0.5,
+        ) <= 4;
         break;
+      }
       case 'place_block': {
           const excluded = new Set<string>();
           const nodeKey = (node: any) => `${node.x},${node.y},${node.z}`;
@@ -939,6 +942,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         if (!this.bot.entities[item.id]) picked++;
       } catch (e: any) {
         if (e?.name === 'AbortedError') throw e;
+        // 走不过去（超时、没路）就不再追这一个；只有走到了它却漂走了才按新位置再追
+        tries.set(item.id, 3);
         if (e instanceof TimeoutError && this.actionEpoch === moveEpoch + 1) {
           // The pickup path's own timeout calls stopAll to block late movement.
           // Keep this best-effort collection alive, while its old path stays

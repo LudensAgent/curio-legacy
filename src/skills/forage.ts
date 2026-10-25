@@ -59,6 +59,8 @@ export const forage: Skill<{ count: number }> = {
     const total = () => gained().reduce((a, [, c]) => a + c, 0);
     const tried = new Set<string>();
     const done = { bushes: 0, melons: 0, leaves: 0, failed: 0 };
+    const why: string[] = [];
+    let unripe = 0;
     let looked = false;
     while (total() < args.count && Date.now() < ctx.deadline - 3000) {
       signal.throwIfAborted();
@@ -66,8 +68,11 @@ export const forage: Skill<{ count: number }> = {
       if (s.emptySlots === 0) break;
       senses.refresh();
       const feetY = Math.floor(s.pos.y);
-      const hits = senses.knownBlocks(TARGETS, 32)
-        .filter((h) => !tried.has(key(h.pos)) && (!LEAVES.has(h.name) || done.leaves < MAX_LEAVES) && (!BERRY.has(h.name) || !!adapter.useBlockAt))
+      const seen = senses.knownBlocks(TARGETS, 48)
+        .filter((h) => !tried.has(key(h.pos)) && (!LEAVES.has(h.name) || done.leaves < MAX_LEAVES));
+      // 看得见但还没结果的浆果丛：如实说出来（“视野里没有”会让人以为根本没看见）
+      unripe = Math.max(unripe, seen.filter((h) => BERRY.has(h.name) && adapter.blockAt(h.pos) === h.name && !ripe(ctx, h, feetY)).length);
+      const hits = seen
         .filter((h) => ripe(ctx, h, feetY))
         .sort((a, b) => priority(a.name) - priority(b.name) || a.dist - b.dist);
       const target = hits[0];
@@ -84,10 +89,20 @@ export const forage: Skill<{ count: number }> = {
       try {
         if (BERRY.has(target.name)) {
           ctx.progress(total() / args.count, `去摘 ${target.name === 'sweet_berry_bush' ? '甜浆果' : '发光浆果'}（${Math.round(target.dist)} 格）`);
-          const r = await adapter.useBlockAt!(target.pos, '', signal);
-          if (!r.ok) { done.failed++; continue; }
+          // 站到浆果丛旁边（寻路不会踩进丛里）再动手：空手右键摘；右键没反应就把它打掉，熟了的丛打掉也会掉浆果
+          const before = total();
+          const r = adapter.useBlockAt ? await adapter.useBlockAt(target.pos, '', signal) : { ok: false, reason: '没有右键接口' };
+          if (!r.ok) {
+            why.push(`右键 ${target.name}(${target.pos.x},${target.pos.y},${target.pos.z})：${String(r.reason ?? '没反应').slice(0, 60)}`);
+            if (adapter.blockAt(target.pos) === target.name) {
+              await adapter.moveTo({ kind: 'reach_block', pos: target.pos }, { signal, timeoutMs: Math.max(3000, Math.min(15000, ctx.deadline - Date.now() - 2000)) });
+              const d = await adapter.dig(target.pos, signal);
+              if (!d.ok) { why.push(`打掉也没成：${String(d.reason ?? '').slice(0, 40)}`); done.failed++; continue; }
+            } else { done.failed++; continue; }
+          }
           done.bushes++;
-          await adapter.collectNearbyDrops(signal, 4, 1500);
+          await adapter.collectNearbyDrops(signal, 4, 2000);
+          if (total() === before) why.push(`${target.name} 动过了但浆果没进背包（掉在地上没捡到？）`);
         } else {
           ctx.progress(total() / args.count, `去打 ${target.name}（${Math.round(target.dist)} 格）`);
           await adapter.moveTo({ kind: 'reach_block', pos: target.pos }, { signal, timeoutMs: Math.max(3000, Math.min(20000, ctx.deadline - Date.now() - 2000)) });
@@ -102,6 +117,7 @@ export const forage: Skill<{ count: number }> = {
         }
       } catch (e) {
         if (isAbort(e)) throw e;
+        why.push(`${target.name}(${target.pos.x},${target.pos.y},${target.pos.z})：${String((e as Error)?.message ?? e).slice(0, 60)}`);
         if (++done.failed >= 5) break;
       }
     }
@@ -110,9 +126,12 @@ export const forage: Skill<{ count: number }> = {
     const what = [done.bushes ? `摘了 ${done.bushes} 处浆果` : '', done.melons ? `打了 ${done.melons} 个西瓜` : '', done.leaves ? `打了 ${done.leaves} 片树叶` : ''].filter(Boolean).join('、');
     const food = got.map(([n, c]) => `${n}×${c}`).join('、');
     if (got.length) return ok(`采到 ${food}${what ? `（${what}）` : ''}`, { gained: Object.fromEntries(got), ...done });
+    const tries = why.length ? `；没成的：${[...new Set(why)].slice(0, 4).join('；')}` : '';
     if (done.leaves || done.bushes || done.melons) {
-      return fail('NOT_FOUND', `${what}，但什么吃的都没得到${done.leaves ? '（树叶掉苹果的概率很低，约 1/200）' : ''}；换个地方找浆果丛/西瓜，或去找动物 hunt`, { ...done });
+      return fail('NOT_FOUND', `${what}，但什么吃的都没得到${done.leaves ? '（树叶掉苹果的概率很低，约 1/200）' : ''}${tries}；换个地方找浆果丛/西瓜，或去找动物 hunt`, { ...done, why });
     }
-    return fail('NOT_FOUND', `${looked ? '转头找过了，' : ''}视野里没有能采的野果（熟浆果丛、发光浆果、西瓜、够得着的橡树/深色橡树叶）；可以 explore 找森林/动物，或有钓竿时钓鱼`, { ...done });
+    if (done.failed) return fail('ERROR', `看见了能采的，但 ${done.failed} 次都没采成${tries}`, { ...done, why });
+    const green = unripe ? `看得见 ${unripe} 丛浆果丛，但都还没结果（长熟要几个游戏日，熟了才有红果）；` : '';
+    return fail('NOT_FOUND', `${looked ? '转头找过了，' : ''}${green}视野里没有能采的野果（熟浆果丛、发光浆果、西瓜、够得着的橡树/深色橡树叶）；可以 explore 找森林/动物，或有钓竿时钓鱼`, { ...done, unripe });
   },
 };

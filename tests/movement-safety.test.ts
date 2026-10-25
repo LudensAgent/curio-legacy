@@ -190,3 +190,21 @@ test('installed Pathfinder dry-walking permission blocks water steps and drops w
   assert.equal(original.infiniteLiquidDropdownDistance, true);
   assert.equal(ordinary.infiniteLiquidDropdownDistance, true);
 });
+
+test('够到没有碰撞箱的方块（浆果丛、作物）按距离算：视线射线穿过它，不能用“看得见这一面”判到达', async () => {
+  const { Vec3 } = require('vec3');
+  const goals: any[] = [];
+  const bush = new Vec3(10, 64, 10), stone = new Vec3(20, 64, 20);
+  const bot: any = { entity: { position: new Vec3(0, 64, 0), eyeHeight: 1.62 }, game: { dimension: 'overworld' },
+    world: { raycast: () => null, getBlock: () => null },
+    blockAt: (p: any) => p.equals(bush) ? { name: 'sweet_berry_bush', position: bush, shapes: [] } : { name: 'stone', position: p, shapes: [[0, 0, 0, 1, 1, 1]] },
+    waitForTicks: async () => {}, pathfinder: { goto: async (goal: any) => { goals.push(goal); bot.entity.position = new Vec3(11, 64, 10); } } };
+  const adapter = new MineflayerAdapter(config, new EventBus());
+  adapter.bot = bot; adapter.mcData = require('minecraft-data')('1.20.1'); (adapter as any).connectedFlag = true;
+  const signal = new AbortController().signal;
+  await adapter.moveTo({ kind: 'reach_block', pos: bush }, { signal, timeoutMs: 1000 }).catch(() => {});
+  await adapter.moveTo({ kind: 'reach_block', pos: stone }, { signal, timeoutMs: 1000 }).catch(() => {});
+  assert.equal(goals[0].constructor.name, 'GoalNear', '浆果丛按距离');
+  assert.equal(goals[0].isEnd({ x: 11, y: 64, z: 10 }), true, '站在旁边一格就够得着');
+  assert.equal(goals[1].constructor.name, 'GoalLookAtBlock', '实心方块照旧要看得见一面');
+});
