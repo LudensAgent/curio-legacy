@@ -111,3 +111,18 @@ test('一再缺的东西认得出来；施工缺的块集中在高处会说清�
   assert.ok(!fs.existsSync(path.join(to, 'mind.json')), '只存复盘用的，不存记忆本身');
   assert.match(path.basename(to), /^run-before-clear-\d{8}-\d{6}$/);
 });
+
+test('吃东西：结果里说清吃了什么、每块值多少（生的顺带说烤熟后值多少）；背包里的食物也标上价值', async () => {
+  const { foodNote } = await import('../src/skills/food.ts');
+  assert.equal(foodNote('beef'), '+3 饥饿、饱和 1.8；烤熟成 cooked_beef 是 +8、饱和 12.8');
+  assert.equal(foodNote('cobblestone'), null);
+  const { SKILLS } = await import('../src/skills/index.ts');
+  const adapter = new FakeAdapter();
+  adapter.food = 8;
+  adapter.inv.set('bread', 2);
+  const memory = new WorldMemory(null);
+  const r = await SKILLS.eat.run({ adapter, senses: noSenses as any, memory, bus: new EventBus(), signal: new AbortController().signal, deadline: Date.now() + 10_000, taskId: 't', progress() {} } as any, {});
+  memory.close();
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.match(r.summary, /bread×1（\+5 饥饿、饱和 6）/);
+});

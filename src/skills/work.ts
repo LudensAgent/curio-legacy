@@ -5,6 +5,7 @@ import { dist3, sleep } from '../util.ts';
 import { codeFromError, clampInt, fail, isAbort, obj, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 import { craftReservationConflict } from '../projects/reservations.ts';
 import { config } from '../config.ts';
+import { FOOD_VALUE, foodNote } from './food.ts';
 
 const key = (p: { x: number; y: number; z: number }) => `${p.x},${p.y},${p.z}`;
 
@@ -488,8 +489,11 @@ export const eat: Skill<{}> = {
       const start = ctx.adapter.state().food;
       if (start >= 20) return ok('已经饱了，不用吃', { bites: 0 });
       let bites = 0, eaten = 0;
+      const ate: Record<string, number> = {};
+      const counts = () => { const m = new Map<string, number>(); for (const i of ctx.adapter.state().inventory) m.set(i.name, (m.get(i.name) ?? 0) + i.count); return m; };
       do {
         const before = ctx.adapter.state().food;
+        const invBefore = counts();
         const used = await ctx.adapter.eat(ctx.signal);
         if (used === false) break;
         bites++;
@@ -497,10 +501,14 @@ export const eat: Skill<{}> = {
         while (ctx.adapter.state().food <= before && Date.now() < until) await sleep(100, ctx.signal);
         if (ctx.adapter.state().food <= before) break; // 吃不进去（满了、被打断或食物无效）
         eaten++;
+        const invAfter = counts();
+        for (const [name, n] of invBefore) if ((invAfter.get(name) ?? 0) < n && FOOD_VALUE[name]) ate[name] = (ate[name] ?? 0) + (n - (invAfter.get(name) ?? 0));
       } while (eaten < 6 && ctx.adapter.state().food < 18 && ctx.adapter.hasFood() && Date.now() < ctx.deadline - 2500);
       const food = ctx.adapter.state().food;
       if (!eaten) return fail('ERROR', `没吃进去：试了 ${bites} 口，饥饿值还是 ${food}${food >= 20 ? '（已经饱了）' : '（可能被打断或手上换了东西），稍后再试'}`, { bites });
-      return ok(`吃了 ${eaten} 口，饥饿值 ${start} → ${food}`, { bites: eaten });
+      // 吃了什么、每块值多少（生的顺带说烤熟后值多少）：让它自己看出划不划算
+      const what = Object.entries(ate).map(([name, n]) => `${name}×${n}（${foodNote(name) ?? '?'}）`).join('、');
+      return ok(`吃了 ${eaten} 口${what ? `：${what}` : ''}，饥饿值 ${start} → ${food}`, { bites: eaten, ate });
     } catch (e) {
       if (isAbort(e)) throw e;
       return fail(codeFromError(e), `进食失败：${(e as Error).message}`);

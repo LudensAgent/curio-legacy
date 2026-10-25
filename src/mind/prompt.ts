@@ -14,6 +14,7 @@ import { cleanLesson, moodWords, type SelfModel } from './self.ts';
 import type { Activity, ActivityRecord, Noticing, StuckHere } from './types.ts';
 import type { FocusPlan } from './self.ts';
 import { RECALL_LABEL, type Recalled } from './recall.ts';
+import { foodNote } from '../skills/food.ts';
 
 export interface MindContext {
   tier: 'glance' | 'deliberate';
@@ -322,6 +323,8 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
     held: p.self.held,
     ...(digging && tool && !ownsTool ? { tool_note: `正在挖 ${material}，背包里没有 ${tool}（身体只能空手挖，很慢）：做一把${tool === 'axe' ? '斧子' : tool === 'pickaxe' ? '镐' : '铲子'}会快很多` } : {}),
     inventory: [...inv].map(([name, count]) => `${name}×${count}`), empty_slots: p.emptySlots,
+    // 背包里的食物各值多少（生的顺带说烤熟后值多少）：只给事实，吃不吃、烤不烤由它自己定
+    ...([...inv.keys()].some((n) => foodNote(n)) ? { food_values: Object.fromEntries([...inv.keys()].filter((n) => foodNote(n)).map((n) => [n, foodNote(n)])) } : {}),
     habits,
   };
 }

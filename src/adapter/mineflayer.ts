@@ -516,6 +516,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         movements.blocksCantBreak = this.allButLeaves(movements.blocksCantBreak);
       }
       movements.allowParkour = false;
+      // 平时走路，只有说了要跑（赶路、逃命）才跑：冲刺每格都在消耗饥饿值，走路几乎不耗
+      movements.allowSprinting = opts.sprint ?? target.kind === 'away_from';
       if (opts.maxDropDown !== undefined) {
         if (!Number.isInteger(opts.maxDropDown) || opts.maxDropDown < 1 || opts.maxDropDown > 32 || target.kind !== 'xyz') throw new Error('BAD_ARGS: 明确下行需要相邻 xyz 落点和 1–32 格上限');
         const from = b.entity.position.floored(), to = { x: Math.floor(target.x), y: Math.floor(target.y), z: Math.floor(target.z) };

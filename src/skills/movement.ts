@@ -220,16 +220,16 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
 };
 
 // ------------------------------------------------------------------ goto
-export const goTo: Skill<{ target: string; dig?: boolean }> = {
+export const goTo: Skill<{ target: string; dig?: boolean; sprint?: boolean }> = {
   name: 'goto',
   description: '沿看得见的落脚点步行去地标、坐标、作品或记得的功能方块；绕开墙壁，遇到已观察的木门会开门。默认不挖墙、不搭柱；写 "dig":true 就像人一样挖穿挡路的土石、垫方块爬上坡坎直接过去。水路不通时可另选 boat',
-  argsDoc: '{"target": "base | death | <地标id或名称> | <作品ID> | crafting_table | x,y,z", "dig"?: true（挖穿/垫高直走）}',
+  argsDoc: '{"target": "base | death | <地标id或名称> | <作品ID> | crafting_table | x,y,z", "dig"?: true（挖穿/垫高直走）, "sprint"?: true（跑着去：快，但很耗饥饿；默认走路）}',
   timeoutMs: 600000,
   movement: true,
   validate(raw) {
     const t = String(obj(raw).target ?? '').trim();
     if (!t) return { ok: false, error: 'target 不能为空' };
-    return { ok: true, args: { target: t, ...(obj(raw).dig === true ? { dig: true } : {}) } };
+    return { ok: true, args: { target: t, ...(obj(raw).dig === true ? { dig: true } : {}), ...(obj(raw).sprint === true ? { sprint: true } : {}) } };
   },
   async run(ctx, args) {
     const { adapter, memory, signal } = ctx;
@@ -353,7 +353,7 @@ export const goTo: Skill<{ target: string; dig?: boolean }> = {
           : dxz > 32 ? { kind: 'xz' as const, x: cur.x + (pos.x - cur.x) * 24 / dxz, z: cur.z + (pos.z - cur.z) * 24 / dxz, range: 2 }
           : flat ? { kind: 'xz' as const, x: pos.x, z: pos.z, range } : { kind: 'near' as const, pos, range };
         try {
-          await adapter.moveTo(target, { signal, timeoutMs: Math.max(1, Math.min(20000, ctx.deadline - Date.now())), allowSwimming: false, ...(args.dig ? { allowTerrainChanges: true } : {}) });
+          await adapter.moveTo(target, { signal, timeoutMs: Math.max(1, Math.min(20000, ctx.deadline - Date.now())), allowSwimming: false, ...(args.dig ? { allowTerrainChanges: true } : {}), ...(args.sprint ? { sprint: true } : {}) });
         } catch (e) {
           if (isAbort(e)) throw e;
           if (await tryDoor()) continue;
