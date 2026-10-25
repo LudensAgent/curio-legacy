@@ -6,7 +6,7 @@ import type { WorldMemory } from '../memory/store.ts';
 import type { MemoryRecall } from '../memory/types.ts';
 import type { ChatMessage, LlmProvider } from './llm.ts';
 import { ControlKnowledge } from '../methods/controls.ts';
-import type { LlmTrace } from './llm-trace.ts';
+import { llmCategory, type LlmTrace } from './llm-trace.ts';
 import type { RecipeBook } from '../methods/recipes.ts';
 import { enforcePromptBudget } from './prompt.ts';
 
@@ -145,7 +145,7 @@ export class Planner {
       this.stats.latencies.push(c.latencyMs);
       if (this.stats.latencies.length > 100) this.stats.latencies.shift();
       this.trace?.end(traceId, { status: 'ok', text: c.text, latencyMs: c.latencyMs, usage: c.usage, finishReason: c.finishReason });
-      this.writer?.write({ ts: Date.now(), reason: opts.label, tier, provider: this.provider.name, ok: true, latencyMs: c.latencyMs, usage: c.usage, finishReason: c.finishReason, promptChars, output: c.text.slice(0, 2000) });
+      this.writer?.write({ ts: Date.now(), reason: opts.label, category: llmCategory(opts.label), tier, provider: this.provider.name, ok: true, latencyMs: c.latencyMs, usage: c.usage, finishReason: c.finishReason, promptChars, output: c.text.slice(0, 2000) });
       return { text: c.text, latencyMs: c.latencyMs, finishReason: c.finishReason };
     } catch (e: any) {
       if (!signal?.aborted) {
@@ -154,7 +154,7 @@ export class Planner {
         this.stats.lastError = String(e?.message ?? e);
       }
       this.trace?.end(traceId, { status: 'error', error: String(e?.message ?? e), latencyMs: Date.now() - requestedAt });
-      this.writer?.write({ ts: Date.now(), reason: opts.label, tier, provider: this.provider.name, ok: false, error: String(e?.message ?? e), latencyMs: Date.now() - requestedAt, promptChars });
+      this.writer?.write({ ts: Date.now(), reason: opts.label, category: llmCategory(opts.label), tier, provider: this.provider.name, ok: false, error: String(e?.message ?? e), latencyMs: Date.now() - requestedAt, promptChars });
       throw e;
     } finally {
       this.stats.inFlightSince = null;

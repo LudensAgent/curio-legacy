@@ -162,6 +162,15 @@
   .chart text { fill: var(--dim); font: 10px var(--mono); }
   .chart .lg { position: absolute; top: 0; right: 0; display: flex; gap: 10px; font-size: 11px; color: var(--dim); }
   .chart .lg span::before { content: ""; display: inline-block; width: 10px; height: 3px; margin-right: 4px; background: var(--c); vertical-align: 3px; }
+  .cats { display: flex; flex-wrap: wrap; gap: 6px; }
+  .cats button { padding: 3px 10px; font-size: 12px; border-radius: 999px; }
+  .cats button.on { background: var(--text); color: var(--card); border-color: var(--text); }
+  .cats button .n { font: 10px var(--mono); opacity: .7; margin-left: 4px; }
+  .cat { font: 10px var(--mono); padding: 1px 6px; border-radius: 4px; white-space: nowrap; margin-right: 6px; }
+  .cat.think { background: var(--accent-soft); color: var(--accent); } .cat.glance { background: var(--soft); color: var(--dim); }
+  .cat.reflect { background: var(--info-soft); color: var(--info); } .cat.architect { background: var(--warn-soft); color: var(--warn); }
+  .cat.forge { background: var(--bad-soft); color: var(--bad); } .cat.improve { background: var(--info-soft); color: var(--info); }
+  .cat.curate { background: var(--soft); color: var(--text); } .cat.other { background: var(--soft); color: var(--dim); }
   .stack { display: flex; height: 8px; border-radius: 99px; overflow: hidden; background: var(--soft); margin: 8px 0; }
   .stack i { display: block; height: 100%; }
 </style>
@@ -343,7 +352,7 @@
     </section>
 
     <section class="pane" id="pane-llm">
-      <div class="filters"><label><input type="checkbox" id="llmFollow" checked> 跟随最新</label></div>
+      <div class="filters"><div class="cats" id="llmCats"></div><span class="grow"></span><label><input type="checkbox" id="llmFollow" checked> 跟随最新</label></div>
       <div class="llm">
         <ul class="calls" id="llmCalls"><li class="empty" style="cursor:default;display:block">还没有调用</li></ul>
         <div class="llmDetail" id="llmDetail"></div>
@@ -653,18 +662,33 @@ $('logFilter').addEventListener('input', refilter);
 const calls = new Map();
 let selected = null;
 const fmtS = (ms) => (ms == null ? '' : (ms / 1000).toFixed(1) + 's');
-const reasonLabel = (r) => String(r ?? '').replace(/^mind:/, '');
+// 调用分类（和 src/planner/llm-trace.ts 的 llmCategory 一致）：心智三种、建筑师、技能三种
+const CATS_LLM = { think: '心智 · 认真想', glance: '心智 · 瞥一眼', reflect: '心智 · 回想', architect: '建筑师', forge: '技能 · 总结新技能', improve: '技能 · 改进代码', curate: '技能 · 整理', other: '其他' };
+const categoryOf = (c) => c.category || (() => { const r = String(c.reason ?? '');
+  if (r === 'mind:回想') return 'reflect'; if (r.startsWith('mind:')) return r.endsWith('·瞥一眼') ? 'glance' : 'think'; if (r === 'architect') return 'architect';
+  if (r.startsWith('skill:总结')) return 'forge'; if (r.startsWith('skill:改进')) return 'improve'; if (r.startsWith('skill:整理')) return 'curate'; return 'other'; })();
+const reasonLabel = (r) => String(r ?? '').replace(/^(mind|skill):/, '').replace(/·瞥一眼$/, '').replace(/^architect$/, '设计图纸');
+let llmFilter = 'all';
 function pretty(text) { const t = String(text ?? ''); if (!/^\s*[\[{]/.test(t)) return t; try { return JSON.stringify(JSON.parse(t), null, 2); } catch { return t; } }
 function callRow(c) {
   const u = c.usage || {};
-  return `<span class="st-${c.status}"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(reasonLabel(c.reason))}">${esc(reasonLabel(c.reason))}${c.attempt ? ' · 重试' : ''}</span><span class="mono dim">${c.status === 'streaming' ? fmtS(Date.now() - c.ts) : fmtS(c.latencyMs)}</span>`
+  const cat = categoryOf(c);
+  return `<span class="st-${c.status}"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(CATS_LLM[cat])}：${esc(reasonLabel(c.reason))}"><span class="cat ${cat}">${esc(CATS_LLM[cat].split(' · ').pop())}</span>${esc(reasonLabel(c.reason))}${c.attempt ? ' · 重试' : ''}</span><span class="mono dim">${c.status === 'streaming' ? fmtS(Date.now() - c.ts) : fmtS(c.latencyMs)}</span>`
     + `<small>${new Date(c.ts).toLocaleTimeString()}${u.total_tokens ? ` · ${u.prompt_tokens}+${u.completion_tokens} tok` : ''}${c.status === 'invalid' ? ' · 输出无效' : c.status === 'error' ? ' · 调用失败' : ''}</small>`;
 }
 function renderCalls() {
-  const arr = [...calls.values()].sort((a, b) => b.ts - a.ts);
-  $('llmCount').textContent = arr.length || '';
+  const all = [...calls.values()].sort((a, b) => b.ts - a.ts);
+  $('llmCount').textContent = all.length || '';
+  const counts = {}; for (const c of all) counts[categoryOf(c)] = (counts[categoryOf(c)] || 0) + 1;
+  $('llmCats').innerHTML = `<button data-cat="all" class="${llmFilter === 'all' ? 'on' : ''}">全部<span class="n">${all.length}</span></button>`
+    + Object.keys(CATS_LLM).filter((k) => counts[k]).map((k) => `<button data-cat="${k}" class="${llmFilter === k ? 'on' : ''}">${CATS_LLM[k]}<span class="n">${counts[k]}</span></button>`).join('');
+  const arr = llmFilter === 'all' ? all : all.filter((c) => categoryOf(c) === llmFilter);
   $('llmCalls').innerHTML = arr.map((c) => `<li data-id="${c.id}" class="${c.id === selected ? 'sel' : ''}">${callRow(c)}</li>`).join('') || '<li class="empty" style="cursor:default;display:block">还没有调用</li>';
 }
+$('llmCats').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-cat]'); if (!b) return;
+  llmFilter = b.dataset.cat; renderCalls();
+});
 $('llmCalls').addEventListener('click', (e) => {
   const li = e.target.closest('li[data-id]'); if (!li) return;
   selected = li.dataset.id; $('llmFollow').checked = false; renderCalls(); renderDetail();
@@ -673,7 +697,7 @@ function renderDetail() {
   const c = calls.get(selected), el = $('llmDetail');
   if (!c) { el.innerHTML = ''; return; }
   const u = c.usage || {};
-  const meta = [c.provider, new Date(c.ts).toLocaleTimeString(), reasonLabel(c.reason), `第 ${c.attempt + 1} 次`, c.firstTokenMs != null ? `首字 ${fmtS(c.firstTokenMs)}` : '',
+  const meta = [CATS_LLM[categoryOf(c)], c.provider, new Date(c.ts).toLocaleTimeString(), reasonLabel(c.reason), `第 ${c.attempt + 1} 次`, c.firstTokenMs != null ? `首字 ${fmtS(c.firstTokenMs)}` : '',
     c.latencyMs != null ? `总耗时 ${fmtS(c.latencyMs)}` : '', u.total_tokens ? `tokens ${u.prompt_tokens} → ${u.completion_tokens}` : '', c.finishReason ? `finish=${c.finishReason}` : ''].filter(Boolean).join(' · ');
   const msgs = c.messages.map((m, i) => `<details${m.role !== 'system' && i === c.messages.length - 1 ? ' open' : ''}><summary>发送 · ${m.role} · ${m.content.length} 字符</summary><pre>${esc(pretty(m.content))}</pre></details>`).join('');
   const streaming = c.status === 'streaming';
@@ -688,7 +712,7 @@ function onLlm(ev) {
   if (ev.kind === 'request') {
     calls.set(ev.call.id, { ...ev.call });
     while (calls.size > 30) calls.delete(calls.keys().next().value);
-    if ($('llmFollow').checked || !selected) { selected = ev.call.id; renderDetail(); }
+    if (($('llmFollow').checked && (llmFilter === 'all' || categoryOf(ev.call) === llmFilter)) || !selected) { selected = ev.call.id; renderDetail(); }
     renderCalls();
   } else if (ev.kind === 'delta') {
     const c = calls.get(ev.id); if (!c) return;

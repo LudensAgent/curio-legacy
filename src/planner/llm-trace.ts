@@ -10,10 +10,23 @@ import type { ChatMessage } from './llm.ts';
  *  { kind: 'delta', id, content, reasoning } 增量（约每 120ms 合并一次）
  *  { kind: 'done', id, ...结果 }              结束
  */
+/** 调用分类：按发起调用的模块（label 前缀）认，控制台据此分组和筛选 */
+export type LlmCategory = 'think' | 'glance' | 'reflect' | 'architect' | 'forge' | 'improve' | 'curate' | 'other';
+export function llmCategory(label: string): LlmCategory {
+  if (label === 'mind:回想') return 'reflect';
+  if (label.startsWith('mind:')) return label.endsWith('·瞥一眼') ? 'glance' : 'think';
+  if (label === 'architect') return 'architect';
+  if (label.startsWith('skill:总结')) return 'forge';
+  if (label.startsWith('skill:改进')) return 'improve';
+  if (label.startsWith('skill:整理')) return 'curate';
+  return 'other';
+}
+
 export interface LlmCallRecord {
   id: string;
   ts: number;
   reason: string;
+  category: LlmCategory;
   attempt: number;
   provider: string;
   messages: ChatMessage[];
@@ -38,7 +51,7 @@ export class LlmTrace extends EventEmitter {
 
   begin(meta: { reason: string; attempt: number; provider: string }, messages: ChatMessage[]): string {
     const id = `llm_${Date.now().toString(36)}_${++this.seq}`;
-    const call: LlmCallRecord = { id, ts: Date.now(), ...meta, messages: messages.map((m) => ({ ...m })), reasoning: '', content: '', status: 'streaming' };
+    const call: LlmCallRecord = { id, ts: Date.now(), ...meta, category: llmCategory(meta.reason), messages: messages.map((m) => ({ ...m })), reasoning: '', content: '', status: 'streaming' };
     this.calls.push(call);
     if (this.calls.length > MAX_CALLS) this.calls.shift();
     this.emit('llm', { kind: 'request', call });
