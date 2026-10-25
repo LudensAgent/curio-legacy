@@ -27,11 +27,17 @@ export interface LlmProvider {
 }
 
 /** 任何 OpenAI 兼容的 /chat/completions 接口：OpenAI、DeepSeek、通义、智谱、Ollama、LM Studio、vLLM… */
+/** hint.maxTokensScale：1–8 倍 */
+const scaleOf = (hint: unknown) => { const n = Number((hint as any)?.maxTokensScale); return Number.isFinite(n) && n > 1 ? Math.min(8, n) : 1; };
+
 export class OpenAICompatibleProvider implements LlmProvider {
   readonly name: string;
   constructor(private cfg: Omit<Config['llm'], 'maxPromptTokens' | 'maxRecallRounds' | 'visionInput' | 'contextWindowTokens' | 'compactAtRatio' | 'lightThinking'> & { lightThinking?: string }) {
     this.name = `openai-compatible:${cfg.model}`;
   }
+
+  /** 个别任务（建筑设计）要想得更久：输出上限按 hint.maxTokensScale 放大 */
+  private maxTokens(hint: unknown) { const scale = scaleOf(hint); return scale > 1 ? Math.min(65536, Math.round(this.cfg.maxTokens * scale)) : this.cfg.maxTokens; }
 
   /** 服务端不认识 thinking 参数时记住，之后不再发送 */
   private thinkingParamRejected = false;
@@ -80,7 +86,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
       messages: apiMessages(messages),
       temperature: this.cfg.temperature,
       // 推理型模型（如 deepseek-flash）会把思考过程也算进 max_tokens，太小会导致正文为空或被截断
-      max_tokens: this.cfg.maxTokens,
+      max_tokens: this.maxTokens(hint),
     };
     if (this.cfg.jsonMode) body.response_format = { type: 'json_object' };
     if (this.noThinking(hint)) body.thinking = { type: 'disabled' };
@@ -91,7 +97,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
         ...(this.cfg.apiKey ? { authorization: `Bearer ${this.cfg.apiKey}` } : {}),
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.any([signal, AbortSignal.timeout(this.cfg.timeoutMs)]),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(this.cfg.timeoutMs * scaleOf(hint))]),
     });
     const raw = await res.text();
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${raw.slice(0, 300)}`);
@@ -105,7 +111,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
   private streamUnsupported = false;
 
   private body(messages: ChatMessage[], stream: boolean, hint?: unknown): Record<string, unknown> {
-    const body: Record<string, unknown> = { model: this.cfg.model, messages: apiMessages(messages), temperature: this.cfg.temperature, max_tokens: this.cfg.maxTokens };
+    const body: Record<string, unknown> = { model: this.cfg.model, messages: apiMessages(messages), temperature: this.cfg.temperature, max_tokens: this.maxTokens(hint) };
     if (this.cfg.jsonMode) body.response_format = { type: 'json_object' };
     if (this.noThinking(hint)) body.thinking = { type: 'disabled' };
     if (stream) Object.assign(body, { stream: true, stream_options: { include_usage: true } });
@@ -122,7 +128,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
         ...(this.cfg.apiKey ? { authorization: `Bearer ${this.cfg.apiKey}` } : {}),
       },
       body: JSON.stringify(this.body(messages, true, hint)),
-      signal: AbortSignal.any([signal, AbortSignal.timeout(this.cfg.timeoutMs)]),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(this.cfg.timeoutMs * scaleOf(hint))]),
     });
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
     let text = '';

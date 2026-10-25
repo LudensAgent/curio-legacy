@@ -59,3 +59,22 @@ test('LLM 流式：服务端不支持（HTTP 400）→ 自动回退为普通请�
   assert.equal(c.text, '{"ok":1}');
   assert.equal(n, 3, '第二次直接走普通请求');
 });
+
+test('个别任务可以放大输出上限（建筑设计 4 倍），其余照旧', async () => {
+  const seen: number[] = [];
+  const srv = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      seen.push(JSON.parse(body).max_tokens);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: '{}' }, finish_reason: 'stop' }] }));
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const p = new OpenAICompatibleProvider({ ...cfg(`http://127.0.0.1:${(srv.address() as any).port}`), stream: false });
+  await p.complete([{ role: 'user', content: 'hi' }], AbortSignal.timeout(5000), { tier: 'full', maxTokensScale: 4 });
+  await p.complete([{ role: 'user', content: 'hi' }], AbortSignal.timeout(5000), { tier: 'full' });
+  srv.close();
+  assert.deepEqual(seen, [400, 100]);
+});

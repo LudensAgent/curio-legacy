@@ -324,7 +324,7 @@ export class Thinker {
           likes: ctx.self.tastes(),
           pastWorks: myBuilds(this.memory, { worldId: ctx.state.worldId, dim: p.self.dim, pos: ctx.state.pos }).map(describeBuild),
           terrain: terrainSketch(this.adapter),
-        }, signal ? AbortSignal.any([signal, AbortSignal.timeout(180_000)]) : AbortSignal.timeout(180_000));
+        }, signal ? AbortSignal.any([signal, AbortSignal.timeout(20 * 60_000)]) : AbortSignal.timeout(20 * 60_000));
         if (!res.ok) { this.bus.publish('design_failed', 'P1', res.error); return res.error; }
         this.bus.publish('design', 'P2', res.summary.slice(0, 300), { draftId: res.draft.id, name: res.draft.name, size: res.draft.size });
         return res.summary;

@@ -57,7 +57,7 @@ export function buildDesignMessages(req: DesignRequest, book: SkillBook | null):
   const guide = book?.get('architect')?.body ?? '';
   const system = `${req.persona}
 
-你现在是自己的建筑师：专心设计一座 Minecraft 建筑，交回一张能直接施工的图纸。先定下尺寸、屋顶形式和用料就动笔，别在脑子里逐格推演——画完程序会替你检查，有问题再改。${guide ? `\n\n下面是你的设计手册：\n\n${guide}` : ''}
+你现在是自己的建筑师：专心设计一座 Minecraft 建筑，交回一张能直接施工的图纸。画完程序会替你检查，有问题再改。${guide ? `\n\n下面是你的设计手册：\n\n${guide}` : ''}
 
 只输出一个 JSON 对象：
 {"name":"作品名（简短）","purpose":"用途","style":"一句话说说风格和用料的想法","site":{"x":0,"z":0,"why":"为什么选这儿"},"design":{"legend":{…},"layers":[[…],…]},"notes":"一句话：盖的时候要注意什么"}
@@ -87,7 +87,8 @@ export async function designBuilding(planner: Planner, book: SkillBook | null, d
   let lastError = '';
   for (let round = 0; round < 3; round++) {
     signal.throwIfAborted();
-    const c = await planner.complete(messages, { label: 'architect', tier: quick ? 'light' : 'full', signal, attempt: round });
+    // 设计要想得久：输出上限放大到 4 倍（推理模型的思考也算在里面）
+    const c = await planner.complete(messages, { label: 'architect', tier: quick ? 'light' : 'full', signal, attempt: round, maxTokensScale: quick ? 1 : 4 });
     // 推理模型想太久把输出额度用光（正文为空）：下一轮不再长考，直接画
     if (c.finishReason === 'length' && !c.text.trim()) quick = true;
     let raw: Record<string, any>;
