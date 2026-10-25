@@ -99,7 +99,9 @@ test('一再缺的东西认得出来；施工缺的块集中在高处会说清�
   assert.deepEqual(shortageOf('craft', 'MISSING_MATERIALS', '无法合成 white_bed：MISSING_MATERIALS（white_wool 还差 3（有 0））').map((x) => x.what), ['white_wool']);
   const missing = (y: number) => ({ cellId: 'c', pos: { x: 1, y, z: 1 }, kind: 'missing', expected: 'spruce_planks', actual: 'air' });
   const text = describeBuildProblems({ inspection: { at: 0, complete: false, checked: 10, defects: [missing(67), ...Array.from({ length: 6 }, () => missing(71))], functions: {} } } as any);
-  assert.match(text, /6 块在最高的 y=70~71（比最低的缺口高 4 格）——站在地上多半够不着/);
+  assert.match(text, /6 块在最高的 y=70~71（比最低的缺口高 4 格；施工时人站在地上、不搭柱子）：\(1,71,1\) spruce_planks/);
+  assert.match(text, /自己用 place_at 放/);
+  assert.doesNotMatch(text, /垫脚|搭几级台阶/, '只说事实和能用的动作，不替它定怎么上去');
   const data = tmp(), project = tmp();
   fs.mkdirSync(path.join(data, 'logs'));
   fs.writeFileSync(path.join(data, 'logs', 'events-1.jsonl'), '{}\n');

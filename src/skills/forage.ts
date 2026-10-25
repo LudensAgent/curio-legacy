@@ -89,16 +89,13 @@ export const forage: Skill<{ count: number }> = {
       try {
         if (BERRY.has(target.name)) {
           ctx.progress(total() / args.count, `去摘 ${target.name === 'sweet_berry_bush' ? '甜浆果' : '发光浆果'}（${Math.round(target.dist)} 格）`);
-          // 站到浆果丛旁边（寻路不会踩进丛里）再动手：空手右键摘；右键没反应就把它打掉，熟了的丛打掉也会掉浆果
+          // 空手右键摘；没成就照实记下原因（是否改用打掉、绕开浆果丛走，由它自己定）
           const before = total();
           const r = adapter.useBlockAt ? await adapter.useBlockAt(target.pos, '', signal) : { ok: false, reason: '没有右键接口' };
           if (!r.ok) {
             why.push(`右键 ${target.name}(${target.pos.x},${target.pos.y},${target.pos.z})：${String(r.reason ?? '没反应').slice(0, 60)}`);
-            if (adapter.blockAt(target.pos) === target.name) {
-              await adapter.moveTo({ kind: 'reach_block', pos: target.pos }, { signal, timeoutMs: Math.max(3000, Math.min(15000, ctx.deadline - Date.now() - 2000)) });
-              const d = await adapter.dig(target.pos, signal);
-              if (!d.ok) { why.push(`打掉也没成：${String(d.reason ?? '').slice(0, 40)}`); done.failed++; continue; }
-            } else { done.failed++; continue; }
+            done.failed++;
+            continue;
           }
           done.bushes++;
           await adapter.collectNearbyDrops(signal, 4, 2000);

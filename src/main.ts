@@ -374,13 +374,13 @@ adapter.on('death', () => {
   bus.publish('death', 'P0', `死亡 @ (${Math.round(s.pos.x)}, ${Math.round(s.pos.y)}, ${Math.round(s.pos.z)})，死因：${told ? told.text : cause}${during ? `（在做 ${during}）` : ''}`, { cause, during, ...(told ? { message: told.text } : {}) });
   executive.onDeath({ cause, hazard, during, ...(told ? { message: told.text } : {}) });
 });
-adapter.on('hurt', () => {
+adapter.on('hurt', (cause?: string) => {
   if (Date.now() - lastHurt < 1000) return;
   lastHurt = Date.now();
   // entityHurt 先于生命值更新到达，稍等再读
   setTimeout(() => {
     const st = adapter.state();
-    bus.publish('hurt', 'P1', `受到伤害，生命 ${st.hp.toFixed(1)}${st.inWater ? `，氧气 ${st.oxygen}/20` : ''}`);
+    bus.publish('hurt', 'P1', `受到伤害，生命 ${st.hp.toFixed(1)}${st.inWater ? `，氧气 ${st.oxygen}/20` : ''}${cause ? `（当时：${cause}）` : ''}`, cause ? { around: cause } : undefined);
   }, 150);
 });
 adapter.on('disconnected', (reason: string) => {

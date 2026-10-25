@@ -21,7 +21,7 @@ export const API_DOC = `代码是一个 async 函数体，参数 api 和 args �
 - api.region(x1,y1,z1,x2,y2,z2) → {min, size:[sx,sy,sz], palette:[名字], kinds:[同上], data:[下标]}；第 i 格：i = (y-min.y)*sx*sz + (z-min.z)*sx + (x-min.x)；最多 40000 格
 - api.entities(半径≤32) → 看见/听见的生物 [{id,name,kind,dist,pos,fusing?}]
 - api.stepTo(x,y,z) 迈到相邻一格（平走、上一级、下一级）｜api.digAt(x,y,z)｜api.placeAt(x,y,z,"方块名|any") → {ok,code,summary}
-- api.moveTo(x,y,z,range,{sprint}?) 用寻路走过去（默认走路；sprint:true 跑，快但很耗饥饿）→ {ok,error?,pos}｜api.act("动作名",{参数}) 用已有动作（goto、dig_at、defend…）→ {ok,code,summary}
+- api.moveTo(x,y,z,range,{sprint,avoid}?) 用寻路走过去（默认走路；sprint:true 跑，快但很耗饥饿；avoid:["方块名"] 这一趟绕开这些方块）→ {ok,error?,pos}｜api.act("动作名",{参数}) 用已有动作（goto、dig_at、defend…）→ {ok,code,summary}
 - api.look(yaw,pitch)｜api.lookAt(x,y,z)｜api.sleep(毫秒≤5000)｜api.log(…) 记一句给自己看｜api.progress(0..1)
 身体的细动作（打架、走位、躲闪都靠这些拼，怎么打由你决定）：
 - api.move({forward,back,left,right,jump,sprint,sneak}, 毫秒≤1000, {face: 实体id 或 [x,y,z]}?) 按住这些键一小会儿，期间一直盯着 face → {ok, moved 走了几格, stopped?: "lava"|"cliff"}；
@@ -135,8 +135,10 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
         if (![p.x, p.y, p.z].every(Number.isFinite)) throw new Error('moveTo 要写 x,y,z');
         const range = Math.max(0, Math.min(8, Number(a[3] ?? 1)));
         try {
-          const sprint = !!(a[4] && typeof a[4] === 'object' && (a[4] as Record<string, unknown>).sprint === true);
-          await ctx.adapter.moveTo({ kind: 'near', pos: p, range }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(30_000, ctx.deadline - Date.now())), ...(sprint ? { sprint: true } : {}) });
+          const o = (a[4] && typeof a[4] === 'object' ? a[4] : {}) as Record<string, unknown>;
+          const sprint = o.sprint === true;
+          const avoid = Array.isArray(o.avoid) ? o.avoid.map(String).slice(0, 16) : [];
+          await ctx.adapter.moveTo({ kind: 'near', pos: p, range }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(30_000, ctx.deadline - Date.now())), ...(sprint ? { sprint: true } : {}), ...(avoid.length ? { avoid } : {}) });
         } catch (e) { if ((e as Error)?.name === 'AbortedError') throw e; return { ok: false, error: String((e as Error)?.message ?? e).slice(0, 160), pos: ctx.adapter.state().pos }; }
         return { ok: true, pos: ctx.adapter.state().pos };
       }

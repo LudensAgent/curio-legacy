@@ -122,6 +122,8 @@ export interface MoveOpts {
   sprint?: boolean;
   /** 明确落点的单步下行上限，含支撑格；仅用于相邻 xyz 目标，禁止改地形和绕行。 */
   maxDropDown?: number;
+  /** 这一趟寻路要绕开的方块名（不踩进去、不穿过） */
+  avoid?: string[];
 }
 
 export interface EffectEvidence {

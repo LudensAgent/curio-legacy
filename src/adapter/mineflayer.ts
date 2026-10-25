@@ -158,11 +158,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         const mv = new Movements(bot);
         mv.canDig = true;
         mv.allowSprinting = true;
-        // 会扎人、烫人、让人陷进去的方块：寻路绕开（浆果丛里走一趟就掉好几下血，人不会往里踩）
-        for (const n of ['sweet_berry_bush', 'cactus', 'magma_block', 'campfire', 'soul_campfire', 'fire', 'soul_fire', 'powder_snow', 'wither_rose', 'pointed_dripstone']) {
-          const id = this.mcData.blocksByName?.[n]?.id;
-          if (id !== undefined) mv.blocksToAvoid?.add?.(id);
-        }
         // 跑酷跳跃对起跳位置极其敏感：起点不在格子中心就跳不上去，人会卡在方块边上来回抖。普通走路只跳一格台阶。
         mv.allowParkour = false;
         mv.allow1by1towers = true;
@@ -201,7 +196,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     bot.on('death', () => { this.newSession(); this.emit('death'); });
     bot.on('respawn', () => { this.newSession(); this.emit('respawn'); });
     bot.on('entityHurt', (e: any) => {
-      if (e === bot.entity) this.emit('hurt');
+      if (e === bot.entity) this.emit('hurt', this.hurtCause());
     });
     bot.on('entityDead', (entity: any) => {
       if (entity.name !== 'ender_dragon' || !entity.position || !this.spawned) return;
@@ -504,6 +499,28 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   }
 
   // ---------------------------------------------------------------- 动作
+  /**
+   * 挨打那一刻身上、身边是什么：脚和头所在的格子、脚下踩的、着没着火、贴身的怪、氧气和饥饿。
+   * 只是感觉到的事实（“碰着 sweet_berry_bush”），哪个是原因、以后怎么躲，由它自己判断。
+   */
+  hurtCause(): string {
+    if (!this.ready) return '';
+    const b = this.bot, p = b.entity.position;
+    const out: string[] = [];
+    const at = (dx: number, dy: number, dz: number) => b.blockAt(p.offset(dx, dy, dz))?.name as string | undefined;
+    const touching = new Set([at(0, 0, 0), at(0, 1, 0)].filter((n): n is string => !!n && !/^(air|cave_air|void_air)$/.test(n)));
+    for (const n of touching) out.push(`身体碰着 ${n}`);
+    const under = at(0, -0.2, 0);
+    if (under && /magma|campfire|cactus/.test(under)) out.push(`脚下踩着 ${under}`);
+    for (const [dx, dz] of [[0.35, 0], [-0.35, 0], [0, 0.35], [0, -0.35]]) { const n = at(dx, 0.5, dz); if (n === 'cactus') { out.push('贴着 cactus'); break; } }
+    if (b.entity.onFire || (b.entity.metadata?.[0] & 1)) out.push('身上着火');
+    const near = this.nearbyEntities(5).filter((e) => e.kind === 'hostile' || /arrow|fireball|trident/.test(e.name)).slice(0, 2);
+    for (const e of near) out.push(`${e.name} 在 ${e.dist.toFixed(1)} 格`);
+    if ((b.oxygenLevel ?? 20) <= 0) out.push('没气了');
+    if ((b.food ?? 20) <= 0) out.push('饿着');
+    return out.slice(0, 4).join('、');
+  }
+
   async moveTo(target: MoveTarget, opts: MoveOpts): Promise<void> {
     const check = this.actionCheckpoint(opts.signal);
     throwIfAborted(opts.signal);
@@ -521,6 +538,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         movements.blocksCantBreak = this.allButLeaves(movements.blocksCantBreak);
       }
       movements.allowParkour = false;
+      // 这一趟要绕开的方块（比如吃过亏的浆果丛、仙人掌）：由调用的人决定，身体不替它定
+      if (opts.avoid?.length) {
+        movements.blocksToAvoid = new Set(movements.blocksToAvoid);
+        for (const n of opts.avoid) { const id = this.mcData?.blocksByName?.[n]?.id; if (id !== undefined) movements.blocksToAvoid.add(id); }
+      }
       // 平时走路，只有说了要跑（赶路、逃命）才跑：冲刺每格都在消耗饥饿值，走路几乎不耗
       movements.allowSprinting = opts.sprint ?? target.kind === 'away_from';
       if (opts.maxDropDown !== undefined) {

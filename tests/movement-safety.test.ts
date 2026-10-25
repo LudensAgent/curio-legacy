@@ -208,3 +208,21 @@ test('够到没有碰撞箱的方块（浆果丛、作物）按距离算：视�
   assert.equal(goals[0].isEnd({ x: 11, y: 64, z: 10 }), true, '站在旁边一格就够得着');
   assert.equal(goals[1].constructor.name, 'GoalLookAtBlock', '实心方块照旧要看得见一面');
 });
+
+test('绕开哪些方块由调用的人说（avoid），身体默认不替它定；这一趟的设置不改动基础寻路', async () => {
+  const registry = require('minecraft-data')('1.20.1');
+  const { Movements } = require('mineflayer-pathfinder');
+  const selected: any[] = [];
+  const bot: any = { registry, entity: {}, game: { dimension: 'overworld' }, inventory: { items: () => [] },
+    pathfinder: { setMovements: (m: any) => selected.push(m), goto: async () => {} } };
+  const original = new Movements(bot);
+  const adapter = new MineflayerAdapter(config, new EventBus());
+  adapter.bot = bot; adapter.mcData = registry;
+  (adapter as any).connectedFlag = true; (adapter as any).normalMovements = original;
+  const signal = new AbortController().signal, bush = registry.blocksByName.sweet_berry_bush.id;
+  await adapter.moveTo({ kind: 'xz', x: 2, z: 0, range: 1 }, { signal, timeoutMs: 1000 });
+  assert.equal(selected[0].blocksToAvoid.has(bush), false, '默认不绕');
+  await adapter.moveTo({ kind: 'xz', x: 2, z: 0, range: 1 }, { signal, timeoutMs: 1000, avoid: ['sweet_berry_bush', 'cactus'] });
+  assert.equal(selected[1].blocksToAvoid.has(bush), true);
+  assert.equal(original.blocksToAvoid.has(bush), false, '基础寻路没被改');
+});

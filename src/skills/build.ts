@@ -106,8 +106,12 @@ export function describeBuildProblems(result: ConstructionResult): string {
     const missing = d.filter((x) => x.kind === 'missing');
     const ys = missing.map((x) => x.pos.y), low = Math.min(...ys), high = Math.max(...ys);
     const top = missing.filter((x) => x.pos.y >= high - 1).length;
+    // 只给事实：哪几格、要放什么、施工时为什么没放上（够不着、没路……）。怎么上去由它自己想、自己学
+    const why = new Map((result.failures ?? []).map((f) => [f.cellId, String(f.reason ?? '')]));
+    const highCells = missing.filter((x) => x.pos.y >= high - 1).slice(0, 8)
+      .map((x) => `(${x.pos.x},${x.pos.y},${x.pos.z}) ${x.expected}${why.get(x.cellId) ? `：${why.get(x.cellId)!.slice(0, 40)}` : ''}`);
     const reachNote = high - low >= 3 && top >= missing.length / 2
-      ? `，其中 ${top} 块在最高的 y=${high - 1}~${high}（比最低的缺口高 ${high - low} 格）——站在地上多半够不着：先在墙边垫脚或搭几级台阶上去，站到旁边再 repair`
+      ? `，其中 ${top} 块在最高的 y=${high - 1}~${high}（比最低的缺口高 ${high - low} 格；施工时人站在地上、不搭柱子）：${highCells.join('；')}。这些格子也可以自己用 place_at 放（放的人得站在离它 4 格以内），放好后 mode:"inspect" 验收`
       : '';
     out.push(`还有 ${missingCells} 块没放上${reachNote}`);
   }
