@@ -171,6 +171,40 @@
   .cat.reflect { background: var(--info-soft); color: var(--info); } .cat.architect { background: var(--warn-soft); color: var(--warn); }
   .cat.forge { background: var(--bad-soft); color: var(--bad); } .cat.improve { background: var(--info-soft); color: var(--info); }
   .cat.curate { background: var(--soft); color: var(--text); } .cat.other { background: var(--soft); color: var(--dim); }
+  .streamcard { display: none; }
+  /*
+   * 宽屏（≥1800px，比如 4K 125% 缩放的 3072 宽）：整个界面铺满一屏、不滚动页面——
+   * 左：身体 / 周围 / 背包；中：现在 + 关键数字 + 念头流；右：标签页（每页的格子撑满高度，内容在格子里滚动）。
+   */
+  @media (min-width: 1800px) {
+    html, body { height: 100%; }
+    body { display: flex; flex-direction: column; overflow: hidden; }
+    header { position: static; flex: none; padding: 10px 18px; }
+    .app { flex: 1; min-height: 0; max-width: none; margin: 0; padding: 14px 18px; gap: 14px;
+      grid-template-columns: 380px minmax(0, 1fr) minmax(0, 1.25fr); grid-template-rows: auto auto minmax(0, 1fr); }
+    aside.col { grid-column: 1; grid-row: 1 / -1; position: static; align-self: stretch; max-height: none; min-height: 0; overflow: auto; }
+    aside.col > .card:nth-child(2) { flex: 1; min-height: 0; overflow: auto; }
+    main.col { display: contents; }
+    .nowcard { grid-column: 2; grid-row: 1; margin: 0; }
+    .kpis { grid-column: 2; grid-row: 2; margin: 0; grid-template-columns: repeat(6, minmax(0, 1fr)); }
+    .streamcard { display: flex; flex-direction: column; grid-column: 2; grid-row: 3; margin: 0; min-height: 0; }
+    .streamcard .body { flex: 1; min-height: 0; overflow: auto; }
+    .now { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); }
+    .tabsarea { grid-column: 3; grid-row: 1 / -1; display: flex; flex-direction: column; min-height: 0; }
+    .tabsarea .tabs { margin-top: 0; flex: none; }
+    .tabsarea .pane.on { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; }
+    .tabsarea .pane > .card { margin: 0; }
+    .tabsarea .pane > .board, .tabsarea .pane > .grid2 { flex: 1; min-height: 0; grid-auto-rows: minmax(0, 1fr); }
+    #pane-mind .board, #pane-memory .board, #pane-learning .board { grid-template-rows: repeat(2, minmax(0, 1fr)); }
+    #pane-metrics .board.two { grid-template-rows: minmax(0, 1fr); }
+    #pane-skills > .card:first-child { flex: 1; min-height: 0; overflow: auto; }
+    #pane-skills > .card:last-child { flex: none; max-height: 32%; overflow: auto; }
+    #pane-vision > .card, #pane-events > .card { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+    #pane-events #log { flex: 1; height: auto; min-height: 0; }
+    #pane-llm .llm { flex: 1; height: auto; min-height: 0; }
+    .inv { grid-template-columns: repeat(9, minmax(0, 1fr)); }
+    .scroll { max-height: none; }
+  }
   .stack { display: flex; height: 8px; border-radius: 99px; overflow: hidden; background: var(--soft); margin: 8px 0; }
   .stack i { display: block; height: 100%; }
 </style>
@@ -223,7 +257,7 @@
   </aside>
 
   <main class="col">
-    <div class="card">
+    <div class="card nowcard">
       <h2>现在 <span class="r mono dim" id="llmstate">-</span></h2>
       <div class="now">
         <div>
@@ -264,6 +298,9 @@
       <div class="kpi" id="k-death"><b>-</b><small>死亡</small></div>
     </div>
 
+    <div class="card streamcard"><h2>念头流 <span class="r dim">最近的想法、注意到的事、结果和学到的</span></h2><ul class="list body" id="streamDock"></ul></div>
+
+    <div class="tabsarea">
     <nav class="tabs" id="tabs">
       <button class="tab" data-tab="learning">学习曲线</button>
       <button class="tab" data-tab="mind">心智</button>
@@ -370,6 +407,7 @@
         <div class="card"><h2>计数</h2><div class="mono body" id="counters" style="line-height:1.9"></div></div>
       </div>
     </section>
+    </div>
   </main>
 </div>
 <script>
@@ -514,6 +552,7 @@ function renderMind(mind) {
   $('mindStruggle').textContent = (si.struggleWith || []).slice(0, 3).join(' ') || '-';
   const tag = { monologue: '想', notice: '注意', outcome: '结果', learned: '学到', feeling: '感受' };
   $('mindStream').innerHTML = list((mind.stream || []).slice().reverse(), (x) => `<li><span class="k">${tag[x.kind] || x.kind} · ${ago(x.at)}前</span>${esc(x.text)}</li>`);
+  $('streamDock').innerHTML = $('mindStream').innerHTML;
   const kind = { goal: '想做', idea: '点子', question: '疑问' };
   $('mindAgenda').innerHTML = list(mind.agenda, (x) => `<li>${x.status === 'active' ? '<span class="badge good">主目标</span> ' : ''}<span class="k">${kind[x.kind] || x.kind}${x.horizon === 'someday' ? '·以后' : ''}</span>${esc(x.text)}${x.attempts ? ` <span class="k">×${x.attempts}</span>` : ''}</li>`);
   $('mindExperiments').innerHTML = list((mind.experiments || []).slice().reverse(), (x) => `<li><span class="badge">${esc(x.status)}</span> ${esc(x.hypothesis)}</li>`);
@@ -568,7 +607,7 @@ function render(s) {
   $('hostile').innerHTML = p.nearby.hostile.length ? p.nearby.hostile.map((h) => `<span class="item hostile">${esc(h.name)} ${h.dist}格${h.how === 'heard' ? '·听见' : ''}</span>`).join('') : '<span class="empty">无</span>';
   const others = [...p.nearby.passive, ...p.nearby.players.map((x) => `玩家 ${x}`)];
   $('passive').innerHTML = others.length ? others.map((x) => `<span class="item">${esc(x)}</span>`).join('') : '<span class="empty">无</span>';
-  $('res').innerHTML = list(p.nearby.resources.slice(0, 8), (r) => `<li>${r.seen === 'now' ? '●' : '○'} ${esc(r.block)} ×${r.count} <span class="k">${r.dir ?? ''} ${r.nearest}格</span></li>`);
+  $('res').innerHTML = list(p.nearby.resources.slice(0, innerWidth >= 1800 ? 24 : 8), (r) => `<li>${r.seen === 'now' ? '●' : '○'} ${esc(r.block)} ×${r.count} <span class="k">${r.dir ?? ''} ${r.nearest}格</span></li>`);
   $('slots').textContent = `空位 ${p.emptySlots}`;
   renderInventory(p.inventory, p.emptySlots);
 
@@ -739,6 +778,9 @@ function onLlm(ev) {
 setInterval(() => { if ([...calls.values()].some((c) => c.status === 'streaming')) renderCalls(); }, 500);
 
 showTab(lsGet('curio.dashboard.tab') || 'mind');
+// 窗口大小变了：图表按新尺寸重画
+let resizeT = null;
+window.addEventListener('resize', () => { clearTimeout(resizeT); resizeT = setTimeout(() => { learnKey = ''; if (lastState) renderLearning(lastState.learning); }, 200); });
 const es = new EventSource('/api/stream');
 es.addEventListener('llm', (e) => onLlm(JSON.parse(e.data)));
 es.addEventListener('llm_init', (e) => {
