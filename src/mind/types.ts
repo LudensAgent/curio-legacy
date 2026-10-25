@@ -136,6 +136,8 @@ export interface Consolidation {
   drop: string[];
   add: string[];
   agendaDrop: string[];
+  /** 琢磨出的一整套做法，写成自己的技能 */
+  skill?: { name: string; description: string; body: string };
   diary?: string;
   monologue?: string;
 }
@@ -156,6 +158,8 @@ export interface MindDecision {
   verdict?: 'supported' | 'refuted' | 'unclear';
   /** 想写进日记的一句话（今天发生了什么值得记住的事） */
   diary?: string;
+  /** 刚发现自己喜欢的东西 */
+  liked?: string;
   /** 校验时自动纠正/丢弃的部分（下次思考时告诉模型） */
   notes: string[];
   source: 'llm' | 'rule';

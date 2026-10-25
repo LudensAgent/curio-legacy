@@ -18,6 +18,8 @@ interface SelfData {
   feel: Record<string, { ok: number; fail: number; ms: number }>;
   /** 还没来得及整理的零碎想法：休息/睡前回想时再决定留不留 */
   insights?: { at: number; text: string; outcome?: string }[];
+  /** 自己发现的喜好（风景、方块、玩法）：会影响想做什么 */
+  likes?: { at: number; text: string }[];
   /** 上次回想的时间与当时的窍门数 */
   reflectedAt?: number;
   knowHowAtReflect?: number;
@@ -301,6 +303,21 @@ export class SelfModel {
     this.touch();
   }
   diary(n = 5) { return this.data.diary.slice(-n); }
+
+  // ---------------------------------------------------------------- 喜好
+  like(text: string) {
+    const t = text.trim().slice(0, 60);
+    if (t.length < 2) return false;
+    const list = (this.data.likes ??= []);
+    const k = keywords(t);
+    const same = list.find((l) => l.text === t || overlap(keywords(l.text), k) >= Math.max(2, k.size * 0.7));
+    if (same) { same.at = Date.now(); this.touch(); return false; }
+    list.push({ at: Date.now(), text: t });
+    if (list.length > 20) this.data.likes = list.slice(-20);
+    this.touch();
+    return true;
+  }
+  tastes(n = 8): string[] { return (this.data.likes ?? []).slice(-n).map((l) => l.text); }
 
   // ---------------------------------------------------------------- 回想
   /** 记一条零碎想法，等休息时再整理（人不会每做一件事就立一条规矩） */

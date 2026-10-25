@@ -8,9 +8,16 @@ import { extractJson, normalizeStep, ruleProposal } from '../planner/plan.ts';
 import type { Planner } from '../planner/planner.ts';
 import { validateCondition } from '../projects/conditions.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
-import { buildMindMessages, buildReflectionMessages, type MindContext } from './prompt.ts';
+import { buildMindMessages, buildReflectionMessages, moveDetails, type MindContext } from './prompt.ts';
 import type { SelfModel } from './self.ts';
 import { cleanLesson } from './self.ts';
+import { designBuilding } from '../building/architect.ts';
+import { draftsFor } from '../building/drafts.ts';
+import type { SkillBook } from '../knowledge/skillbook.ts';
+import { describeBuild, myBuilds } from './home.ts';
+
+/** 思考时可以先做的只读查询（不占游戏时间） */
+const QUERY_KINDS = ['recipes', 'recall', 'mechanics', 'skill', 'design', 'moves'];
 import { ACTIVITY_KINDS, DECISION_KINDS, type ActivityDraft, type ActivityKind, type ActivityStep, type Consolidation, type DecisionKind, type MindDecision } from './types.ts';
 
 const str = (v: unknown, max: number) => typeof v === 'string' ? v.trim().slice(0, max) : '';
@@ -180,6 +187,7 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
     ...(hypothesis ? { hypothesis } : {}),
     ...(verdict ? { verdict } : {}),
     ...(str(o.diary, 160) ? { diary: str(o.diary, 160) } : {}),
+    ...(str(o.liked, 60) ? { liked: str(o.liked, 60) } : {}),
   };
 }
 
@@ -188,9 +196,10 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
  * mock 模式下用规则凑出同样形状的决定，整条链路保持一致。
  */
 export class Thinker {
-  constructor(private planner: Planner, private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus) {}
+  constructor(private planner: Planner, private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private book: SkillBook | null = null) {}
 
   get autonomous() { return this.planner.autonomous; }
+  get skillBook(): SkillBook | null { return this.book; }
 
   async think(ctx: MindContext, signal: AbortSignal): Promise<MindDecision> {
     const requestedAt = Date.now();
@@ -212,8 +221,8 @@ export class Thinker {
         continue;
       }
       const ask = String(raw?.kind ?? '');
-      if (ask === 'deliberate' || ask === 'need_full_context' || (tier === 'glance' && ['recipes', 'recall', 'mechanics'].includes(ask))) {
-        if (tier === 'deliberate' && ask !== 'recipes' && ask !== 'recall' && ask !== 'mechanics') {
+      if (ask === 'deliberate' || ask === 'need_full_context' || (tier === 'glance' && QUERY_KINDS.includes(ask))) {
+        if (tier === 'deliberate' && !QUERY_KINDS.includes(ask)) {
           messages.push({ role: 'assistant', content: c.text.slice(0, 400) }, { role: 'user', content: '你已经有完整信息了，请直接给出决定。' });
           continue;
         }
@@ -225,10 +234,10 @@ export class Thinker {
           if (ask === 'deliberate' || ask === 'need_full_context') continue;
         }
       }
-      if (['recipes', 'recall', 'mechanics'].includes(ask)) {
+      if (QUERY_KINDS.includes(ask)) {
         if (queries >= 3) { messages.push({ role: 'assistant', content: c.text.slice(0, 400) }, { role: 'user', content: '这次的查询次数用完了，请根据已知信息给出决定。' }); continue; }
         queries++;
-        const result = await this.query(ask, raw, ctx);
+        const result = await this.query(ask, raw, ctx, signal);
         messages.push({ role: 'assistant', content: c.text.slice(0, 600) }, { role: 'user', content: `查询结果（只读，不是现场事实）：${result}\n剩余查询 ${3 - queries} 次。请继续：可以再查，或给出决定。` });
         continue;
       }
@@ -252,7 +261,7 @@ export class Thinker {
    */
   async reflect(self: SelfModel, persona: string, signal: AbortSignal): Promise<Consolidation | null> {
     if (!this.planner.autonomous) return null;
-    const messages = buildReflectionMessages(self, persona);
+    const messages = buildReflectionMessages(self, persona, this.book?.list().filter((k) => k.source === 'self').map((k) => `${k.name}：${k.description}`) ?? []);
     for (let attempt = 0; attempt < 2; attempt++) {
       const c = await this.planner.complete(messages, { label: 'mind:回想', tier: 'full', signal, attempt });
       try {
@@ -266,8 +275,33 @@ export class Thinker {
     return null;
   }
 
-  private async query(kind: string, raw: Record<string, any>, ctx: MindContext): Promise<string> {
+  private async query(kind: string, raw: Record<string, any>, ctx: MindContext, signal?: AbortSignal): Promise<string> {
     try {
+      if (kind === 'moves') {
+        const names = (Array.isArray(raw.names) ? raw.names : [raw.name ?? raw.names]).map((n: unknown) => String(n ?? '').trim()).filter(Boolean);
+        return names.length ? moveDetails(names) : '要查哪些动作？写 {"kind":"moves","names":["动作名"]}';
+      }
+      if (kind === 'skill') {
+        const skill = this.book?.get(String(raw.name ?? '').trim());
+        if (!skill) return `没有叫「${String(raw.name ?? '')}」的技能；有这些：${this.book?.index().join('；') ?? '（没有技能书）'}`;
+        this.bus.publish('skill_read', 'P3', `翻开技能：${skill.name}`, { name: skill.name, source: skill.source });
+        return `技能「${skill.name}」：\n${skill.body}`.slice(0, 9000);
+      }
+      if (kind === 'design') {
+        const brief = String(raw.brief ?? raw.request ?? '').trim().slice(0, 400);
+        if (!brief) return '要设计什么？写 {"kind":"design","brief":"想要的建筑：用途、大概多大、风格、在哪儿"}';
+        this.bus.publish('design_start', 'P2', `请建筑师设计：${brief.slice(0, 80)}`);
+        const p = ctx.percept;
+        const res = await designBuilding(this.planner, this.book, draftsFor(this.memory), this.adapter, {
+          brief, persona: ctx.persona, inventory: ctx.state.inventory, biome: p.self.biome,
+          nearby: [...new Set(p.nearby.resources.map((r) => r.block))].slice(0, 12),
+          likes: ctx.self.tastes(),
+          pastWorks: myBuilds(this.memory, { worldId: ctx.state.worldId, dim: p.self.dim, pos: ctx.state.pos }).map(describeBuild),
+        }, signal ? AbortSignal.any([signal, AbortSignal.timeout(180_000)]) : AbortSignal.timeout(180_000));
+        if (!res.ok) { this.bus.publish('design_failed', 'P1', res.error); return res.error; }
+        this.bus.publish('design', 'P2', res.summary.slice(0, 300), { draftId: res.draft.id, name: res.draft.name, size: res.draft.size });
+        return res.summary;
+      }
       if (kind === 'recipes') {
         if (!this.planner.recipeBook) return '没有配方记忆';
         this.bus.publish('recipe_query', 'P3', `查配方：${raw.item ? `物品 ${raw.item}` : `类别 ${raw.category ?? '（列出类别）'}`}`);
@@ -316,6 +350,9 @@ export function parseConsolidation(raw: unknown, knowHowIds: Set<string>, agenda
     .filter((r: { id: string; text: string }) => knowHowIds.has(r.id) && !used.has(r.id) && r.text.length >= 4 && (used.add(r.id), true));
   const drop = ids(o.drop, knowHowIds).filter((id) => !used.has(id));
   const add = (Array.isArray(o.add) ? o.add : []).map((t: unknown) => cleanLesson(String(t ?? ''))).filter((t: string) => t.length >= 4).slice(0, 5);
-  return { rewrite, merge, drop, add, agendaDrop: ids(o.agenda_drop, agendaIds),
+  const sk = o.skill && typeof o.skill === 'object' && !Array.isArray(o.skill) ? o.skill as Record<string, unknown> : null;
+  const skill = sk && typeof sk.name === 'string' && typeof sk.description === 'string' && typeof sk.body === 'string' && sk.body.trim().length >= 20
+    ? { name: sk.name.slice(0, 41), description: sk.description.slice(0, 200), body: sk.body.slice(0, 6000) } : undefined;
+  return { rewrite, merge, drop, add, agendaDrop: ids(o.agenda_drop, agendaIds), ...(skill ? { skill } : {}),
     ...(str(o.diary, 160) ? { diary: str(o.diary, 160) } : {}), ...(str(o.monologue, 160) ? { monologue: str(o.monologue, 160) } : {}) };
 }

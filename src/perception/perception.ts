@@ -1,4 +1,5 @@
 import { isSoftBlock, surroundings, type ExitOptions, type Surroundings } from './surroundings.ts';
+import { facingOfYaw, localMap } from './local.ts';
 import type { GameAdapter, InvItem, Vec3Like } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
@@ -25,7 +26,11 @@ export interface Percept {
   time: { timeOfDay: number; phase: 'day' | 'dusk' | 'night' | 'dawn'; isDay?: boolean; can_sleep?: boolean };
   self: { pos: [number, number, number]; dim: string; hp: number; food: number; biome: string | null; inWater: boolean; inLava: boolean; held: string | null; onGround?: boolean; riding?: string | null; equipment?: { slot: string; name: string }[]; around?: string;
     contacts?: Pick<ReturnType<typeof surroundings>, 'support' | 'feet' | 'head'>;
-    sky_visible?: boolean | null; depth_below_surface?: number | null; exits?: ExitOptions };
+    sky_visible?: boolean | null; depth_below_surface?: number | null; exits?: ExitOptions;
+    /** 抬头看到的第一个方块（只看正上方这一列，第一个实心方块之后的看不见）：分清“被树冠遮住”和“在地下” */
+    overhead?: { block: string | null; up: number | null; covered: 'open' | 'canopy' | 'roof' | 'rock' };
+    /** 身边的方块图（以脚为原点的 [前,上,右]，不透视），配合 dig_at/step/place_at 说出确切的格子 */
+    local?: ReturnType<typeof localMap> };
   inventory: InvItem[];
   emptySlots: number;
   /** 只包含看见/听见/记得的东西（没有透视） */
@@ -185,6 +190,20 @@ export class Perception {
     };
   }
 
+  /** 抬头看：正上方这一列从头顶起第一个实心方块（看不穿它，也不推测它上面有什么） */
+  private overheadInfo(s: ReturnType<GameAdapter['state']>): NonNullable<Percept['self']['overhead']> {
+    const x = Math.floor(s.pos.x), y = Math.floor(s.pos.y), z = Math.floor(s.pos.z);
+    for (let up = 2; up <= 24; up++) {
+      const name = this.adapter.blockAt({ x, y: y + up, z });
+      if (name === null) return { block: null, up: null, covered: 'open' };
+      if (isSoftBlock(name)) continue;
+      const covered = /(_leaves|_log|_wood|vine|mushroom_block|azalea|mangrove_roots)$/.test(name) ? 'canopy'
+        : /(planks|glass|_slab|_stairs|wool|terracotta|bricks|concrete|_door|_trapdoor|fence)/.test(name) ? 'roof' : 'rock';
+      return { block: name, up, covered };
+    }
+    return { block: null, up: null, covered: 'open' };
+  }
+
   private bodyEnvironment(s: ReturnType<GameAdapter['state']>, contact: Surroundings | null, light: Percept['light']) {
     const scope = `${s.worldId}:${s.sessionId}:${s.dim}`;
     if (scope !== this.surfaceScope) { this.surfaceScope = scope; this.surfaceColumns.clear(); }
@@ -309,6 +328,9 @@ export class Perception {
 
     const contact = s.connected && s.alive && s.observationReady ? surroundings(this.adapter, s.pos) : null;
     const light = s.connected && s.alive && s.observationReady ? this.lightInfo(s) : null;
+    const overhead = s.connected && s.alive && s.observationReady ? this.overheadInfo(s) : null;
+    // 树冠下天光也会很弱，但人一抬头就知道是树叶，不会以为自己在地下
+    if (light && overhead && (overhead.covered === 'canopy' || overhead.covered === 'open')) light.underground = false;
     const environment = this.bodyEnvironment(s, contact, light);
     this.latest = {
       ts: Date.now(),
@@ -328,9 +350,14 @@ export class Perception {
         ...(s.riding !== undefined ? { riding: s.riding } : {}),
         ...(s.equipment ? { equipment: s.equipment.map(({ slot, name }) => ({ slot, name })) } : {}),
         // 身边一圈（脚下、头顶、四个方向能不能走）：判断被困、往哪能出去
-        ...(contact ? { around: contact.text.replace(/看得见天空|看不见天空/, environment.sky_visible === true ? '看得见天空' : environment.sky_visible === false ? '当前头顶被遮挡' : '天空可见性尚未确认'),
+        ...(contact ? { around: contact.text.replace(/看得见天空|看不见天空/, environment.sky_visible === true ? '看得见天空'
+            : overhead?.covered === 'canopy' ? `头顶 ${overhead.up} 格是 ${overhead.block}（被树冠遮住，人在地表，不是地下）`
+            : overhead?.covered === 'roof' ? `头顶 ${overhead.up} 格是 ${overhead.block}（屋顶/搭出来的遮挡）`
+            : environment.sky_visible === false ? `头顶被 ${overhead?.block ?? '方块'} 遮挡` : '天空可见性尚未确认'),
           contacts: { support: contact.support, feet: contact.feet, head: contact.head } } : {}),
         ...environment,
+        ...(overhead ? { overhead } : {}),
+        ...((() => { const eye = this.adapter.eye(); return contact && eye ? { local: localMap(this.adapter, s.pos, facingOfYaw(eye.yaw)) } : {}; })()),
         ...(contact ? { exits: contact.exitOptions } : {}),
       },
       inventory: [...s.inventory.reduce((items, item) => items.set(item.name, (items.get(item.name) ?? 0) + item.count), new Map<string, number>())]

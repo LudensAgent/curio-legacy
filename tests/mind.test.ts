@@ -22,7 +22,7 @@ import { FakeAdapter } from './fake-adapter.ts';
 
 const flush = async () => { for (let i = 0; i < 6; i++) await setImmediate(); };
 
-function fixture(t: TestContext, opts: { autonomous?: boolean } = {}) {
+function fixture(t: TestContext, opts: { autonomous?: boolean; book?: import('../src/knowledge/skillbook.ts').SkillBook } = {}) {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   const vision = new Vision(adapter), arbiter = new Arbiter(adapter, memory, bus, vision);
   const perception = new Perception(adapter, memory, bus, vision);
@@ -44,7 +44,7 @@ function fixture(t: TestContext, opts: { autonomous?: boolean } = {}) {
       });
     } };
   const said: string[] = [];
-  const mind = new Mind({ adapter, arbiter, perception, memory, bus, self, persona: '你叫 Curio。', thinker: new Thinker(planner, adapter, memory, bus), say: (s) => said.push(s) });
+  const mind = new Mind({ adapter, arbiter, perception, memory, bus, self, persona: '你叫 Curio。', thinker: new Thinker(planner, adapter, memory, bus, opts.book ?? null), say: (s) => said.push(s) });
   mind.start(1_000_000);
   t.after(() => { mind.stop(); arbiter.cancel('test end'); memory.close(); if (previous) SKILLS.mind_step = previous; else delete SKILLS.mind_step; });
   const reply = async (i: number, body: object) => { pending[i].resolve({ text: JSON.stringify(body), latencyMs: 1200 }); await flush(); };
@@ -399,4 +399,119 @@ test('歇下来时在后台回想，整理窍门、写日记，不打断手上�
   assert.ok(w.self.data.knowHow.some((k) => k.text === '夜里在坑里插火把就不刷怪'));
   assert.equal(w.self.insights().length, 0);
   assert.ok(w.self.diary(1)[0].text.includes('桦木林'));
+});
+
+test('思考时可以翻开技能书、请建筑师设计；图纸进入之后的思考，build 只要 draft ID', async (t) => {
+  const { BUILTIN_SKILLS_DIR, SkillBook } = await import('../src/knowledge/skillbook.ts');
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const { draftsFor } = await import('../src/building/drafts.ts');
+  const book = new SkillBook(BUILTIN_SKILLS_DIR, null);
+  const w = fixture(t, { book });
+  draftsFor(w.memory);
+  const md = fs.readFileSync(path.join(BUILTIN_SKILLS_DIR, 'architect', 'SKILL.md'), 'utf8');
+  const cottage = JSON.parse([...md.matchAll(/```json\n([\s\S]*?)\n```/g)][0][1]);
+  await w.tick();
+  assert.match(w.pending[0].messages[0].content, /architect：/, '技能索引在提示词里');
+  await w.reply(0, { kind: 'skill', name: 'homemaking' });
+  assert.match(w.pending[1].messages.at(-1)!.content, /安家/);
+  await w.reply(1, { kind: 'design', brief: '湖边能住的小家，云杉木' });
+  assert.match(w.pending[2].messages[0].content, /建筑师/, '建筑师在独立上下文里设计');
+  await w.reply(2, { name: '湖边小屋', purpose: '住处', design: cottage });
+  const last = w.pending[3].messages.at(-1)!.content;
+  const id = last.match(/dr_[a-z0-9]+/)?.[0];
+  assert.ok(id, last);
+  await w.reply(3, { monologue: '图纸有了，先攒云杉木', decision: 'new', activity: { what: '砍云杉', steps: [step()] } });
+  assert.equal(w.mind.activity?.what, '砍云杉');
+  await w.finish();
+  await w.tick();
+  assert.match(w.pending.at(-1)!.messages[1].content, new RegExp(id!), '没用过的图纸会出现在之后的思考里');
+});
+
+test('发现自己喜欢的东西会记成喜好，之后的思考里能看到', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { monologue: '这片樱花林真好看', decision: 'new', liked: '樱花林', activity: { what: '看看风景', steps: [step()] } });
+  assert.deepEqual(w.self.tastes(), ['樱花林']);
+  await w.tick();
+  assert.match(w.pending.at(-1)!.messages[1].content, /樱花林/);
+});
+
+test('躲在坑里过夜时，一般的事不会把它叫起来重新想', async (t) => {
+  const w = fixture(t);
+  const previous = SKILLS.shelter;
+  t.after(() => { SKILLS.shelter = previous; });
+  SKILLS.shelter = { ...SKILLS.mind_step, name: 'shelter' };
+  await w.tick();
+  await w.reply(0, { monologue: '躲一晚', decision: 'new', activity: { what: '过夜', kind: 'rest', steps: [{ skill: 'shelter', args: {} }], next: undefined } });
+  const n = w.pending.length;
+  w.mind.attention.notice('night', '天黑了', 0.6);
+  await w.tick();
+  await w.tick();
+  assert.ok(w.pending.length <= n + 1, '最多只有“想想接下来”的那一次');
+  assert.ok(!w.pending.slice(n).some((p) => /注意到了一些事/.test(p.messages[1].content)));
+});
+
+test('回想时琢磨出的一整套做法会写成自己的技能', async (t) => {
+  const os = await import('node:os');
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const { BUILTIN_SKILLS_DIR, SkillBook } = await import('../src/knowledge/skillbook.ts');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-self-skills-'));
+  const book = new SkillBook(BUILTIN_SKILLS_DIR, dir);
+  const w = fixture(t, { book });
+  for (const s of ['山坡上先垫平', '墙基做高一层', '门开高的一边', '低的一边加柱子', '屋檐朝坡下']) w.self.jot(s);
+  await w.tick();
+  await w.reply(0, { monologue: '歇会儿', decision: 'rest' });
+  (w.mind as any).maybeReflect('歇下来了');
+  await w.reply(w.pending.length - 1, { skill: { name: 'hillside-house', description: '在山坡上盖房子', body: '1. 低的一边用圆石垫平\n2. 墙基做高一层\n3. 门开在高的一边，屋檐朝坡下' }, diary: '学会了在山坡上盖房' });
+  assert.equal(book.get('hillside-house')?.source, 'self');
+  assert.ok(fs.existsSync(path.join(dir, 'hillside-house', 'SKILL.md')));
+});
+
+test('提示词：盖房的念头会在消息末尾提醒先请建筑师；瞥一眼也知道 design；图纸参数不会被原样展开', async () => {
+  const { argsLabel } = await import('../src/mind/activity.ts');
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  const perception = new Perception(adapter, memory, bus, new Vision(adapter));
+  const self = new SelfModel(null);
+  self.addAgenda('在河边盖一间小屋', 'goal', 'today');
+  const base = { reason: '测试', percept: perception.update(), state: adapter.state(), self, memory, activity: null, suspended: [], lastRecord: null,
+    noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', skills: ['architect：设计建筑'] };
+  for (const tier of ['deliberate', 'glance'] as const) {
+    const [system, user] = buildMindMessages({ ...base, tier });
+    assert.match(system.content, /"kind":"design"/, `${tier} 也知道请建筑师`);
+    assert.match(user.content, /【此刻要留意】[\s\S]*(design|draft)[\s\S]*只输出一个 JSON 对象。$/, '提醒放在消息最后');
+  }
+  const [deliberate] = buildMindMessages({ ...base, tier: 'deliberate' });
+  assert.ok(deliberate.content.length < 8000, `认真想的系统提示词 ${deliberate.content.length} 字`);
+  assert.match(deliberate.content, /其他动作（用 \{"kind":"moves"/);
+  const label = argsLabel({ skill: 'build', args: { spec: { name: '小屋', width: 5, depth: 5, design: { legend: {}, layers: [['PPP']] }, components: Array(100).fill({}) } } });
+  assert.ok(label.length < 80 && /小屋/.test(label) && !/components/.test(label), label);
+  memory.close();
+});
+
+test('思考时可以查动作的完整参数', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { kind: 'moves', names: ['boat', 'ride'] });
+  assert.match(w.pending[1].messages.at(-1)!.content, /- ride /);
+});
+
+test('被困地下时，模型用原子动作写一段挖阶梯的 routine，身体照着一格格执行直到见天', async (t) => {
+  const w = fixture(t);
+  w.adapter.pos = { x: 0.5, y: 60, z: 0.5 };
+  (w.adapter as any).removed.add('0,60,0'); (w.adapter as any).removed.add('0,61,0');
+  await w.tick();
+  const user = w.pending[0].messages[1].content;
+  assert.match(user, /"local":/, '身边方块图在提示词里');
+  assert.match(user, /dig_at/, '被困时提醒自己一格格挖出去');
+  await w.reply(0, { monologue: '四面都是石头，朝北挖阶梯上去', decision: 'new', activity: { what: '朝北挖阶梯回地面', kind: 'survive', repeat: 10,
+    steps: [{ skill: 'dig_at', args: { at: [0, 2, 0], facing: 'N' } }, { skill: 'dig_at', args: { at: [1, 1, 0], facing: 'N' } }, { skill: 'dig_at', args: { at: [1, 2, 0], facing: 'N' } }, { skill: 'step', args: { to: [1, 1, 0], facing: 'N' } }],
+    done_when: { type: 'sky_visible', equals: true } } });
+  const deadline = Date.now() + 15000;
+  while (w.self.history(1).length === 0 && Date.now() < deadline) { await new Promise((r) => setTimeout(r, 30)); await w.tick(); }
+  const rec = w.self.history(1)[0];
+  assert.ok(rec, '这段活结束了');
+  assert.equal(rec.outcome, 'done', rec.summary);
+  assert.ok(w.adapter.pos.y >= 63, `回到了地表、头顶见天（y=${w.adapter.pos.y}）`);
 });

@@ -320,7 +320,7 @@ function kpi(id, text, cls) { const el = $(id); el.className = 'kpi ' + (cls || 
 function renderMind(mind, mode) {
   if (!mind) { $('mindMode').textContent = mode === 'autonomous' || mode === 'compatibility' ? '旧版逐步决策（AGENT_MIND=legacy）' : ''; return; }
   $('mindMode').textContent = mode === 'mind' ? '真人式心智' : '真人式心智 · 规则';
-  $('mindFeeling').textContent = (mind.feeling || []).join('，') + (mind.traits?.length ? `　｜性格：${mind.traits.join('、')}` : '');
+  $('mindFeeling').textContent = (mind.feeling || []).join('，') + (mind.traits?.length ? `　｜性格：${mind.traits.join('、')}` : '') + (mind.likes?.length ? `　｜喜欢：${mind.likes.join('、')}` : '');
   const names = { energy: '精力', boredom: '无聊', frustration: '烦躁', satisfaction: '满足', curiosity: '好奇' };
   $('mindMood').innerHTML = Object.entries(names).map(([k, n]) => `<div class="moodrow"><span>${n}</span><div class="bar"><i style="width:${Math.round((mind.mood?.[k] ?? 0) * 100)}%"></i></div></div>`).join('');
   const a = mind.activity;

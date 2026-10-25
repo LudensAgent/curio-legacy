@@ -163,12 +163,24 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
   };
 }
 
+/** 步骤参数的简短写法：图纸只写名字和尺寸，其余太长的截断（免得撑大提示词、又被模型原样抄回来） */
+export function argsLabel(step: Step): string {
+  const args = (step.args ?? {}) as Record<string, any>;
+  if (args.spec && typeof args.spec === 'object') {
+    const { spec, ...rest } = args;
+    const size = spec.width && spec.depth ? ` ${spec.width}×${spec.depth}` : '';
+    return JSON.stringify({ ...rest, spec: `「${spec.name ?? '设计'}」${size}（图纸已省略）` });
+  }
+  const text = JSON.stringify(args);
+  return text.length > 160 ? `${text.slice(0, 157)}…` : text;
+}
+
 /** 把一段活压成一行给模型看 */
 export function describeActivity(a: Activity, state: AgentState, percept?: Percept) {
   const done = a.doneWhen ? evaluateCondition(a.doneWhen, state, state.worldId, [], percept) : null;
   return {
     what: a.what, why: a.why, kind: a.kind,
-    routine: a.steps.map((s) => `${s.skill} ${JSON.stringify(s.args ?? {})}${s.optional ? '（顺手）' : ''}`),
+    routine: a.steps.map((s) => `${s.skill} ${argsLabel(s)}${s.optional ? '（顺手）' : ''}`),
     round: `${a.iteration + 1}/${a.repeat}`, next_step: a.index,
     elapsed_s: Math.round((Date.now() - a.startedAt) / 1000),
     ...(done ? { done_when: { status: done.status, actual: done.actual } } : {}),

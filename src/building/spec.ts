@@ -82,7 +82,7 @@ export function normalizeSpec(raw: unknown): BuildingSpec {
   if (typeof spec.name !== 'string' || !spec.name.trim() || spec.name.length > 100) throw new Error('name 需要 1-100 字符');
   if (typeof spec.purpose !== 'string' || !spec.purpose.trim() || spec.purpose.length > 300) throw new Error('purpose 需要 1-300 字符');
   for (const field of ['width', 'depth', 'height', 'maxFoundationDepth', 'budget'] as const) {
-    const [min, max] = field === 'height' ? (fromDesign ? [2, 8] : [3, 6]) : field === 'maxFoundationDepth' ? [1, 8] : field === 'budget' ? [1, 4096] : fromDesign ? [3, 11] : [5, 11];
+    const [min, max] = field === 'height' ? (fromDesign ? [2, 11] : [3, 6]) : field === 'maxFoundationDepth' ? [1, 8] : field === 'budget' ? [1, 4096] : fromDesign ? [3, 13] : [5, 11];
     if (!Number.isInteger(spec[field]) || spec[field] < min || spec[field] > max) throw new Error(`${field} 需要 ${min}-${max} 的整数`);
   }
   if (!['flat', 'gable'].includes(spec.roof)) throw new Error('roof 只支持 flat/gable');

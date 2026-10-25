@@ -219,6 +219,12 @@ Mineflayer 本身知道已加载区块里的每一个方块、墙后的每一只
 | **流水线式边做边想** | 一段活的最后一轮一开始就琢磨下一段并写成 `next`，干完直接接上，不再“干 8 秒、站着想 9 秒” | `mind/mind.ts` |
 | **睡前回想** | 平常的小想法先记成零碎想法，只有出乎意料（卡住、实验）才马上立成窍门；睡觉、歇脚或每隔约一小时在后台回想一次：合并重复、丢掉被推翻的、把被证实的想法变成窍门、写一句日记 | `mind/mind.ts`、`mind/self.ts`、`mind/prompt.ts` |
 | **沿来路回家** | 记下自己真正站过的落脚点；眼前看不到通往目标的路时，沿着走过的足迹往回挪（只用亲身到过的位置，不透视） | `perception/vision.ts`、`skills/movement.ts` |
+| **搞清自己在哪** | 抬头看正上方第一个方块：树冠下会说“头顶 3 格是橡树叶，人在地表”，不会以为困在地下；砍树先砍够得着的树干根部 | `perception/perception.ts`、`skills/work.ts` |
+| **家和作品** | 一直记得家在哪（盖好的房子 > 基地 > 床）、哪座房子没盖完（带作品 ID）、哪张图纸还没盖；天黑离家远会惦记回家；野外临时放的工作台用完收回背包 | `mind/home.ts`、`skills/work.ts` |
+| **喜好与闲心** | 会被风景吸引、想把家弄得舒服；发现喜欢的东西用 `liked` 记成喜好；躲坑过夜/睡觉时一般的事不会把它叫起来重新想；想事情时顺手捡脚边的掉落物 | `mind/self.ts`、`mind/mind.ts` |
+| **技能书** | 像现在的 agent 一样按需加载：提示词里只放每份技能的一行用途，需要时 `{"kind":"skill","name":"…"}` 翻开全文。内置在 `skills/<名字>/SKILL.md`（可自己添加），回想时也会把琢磨出的整套做法写成自己的技能（`data/skills/`） | `knowledge/skillbook.ts`、`skills/` |
+| **建筑师子代理** | `{"kind":"design","brief":"湖边能住的小家"}` 交给独立上下文的建筑师：带设计手册和参考作品，自查（太小、方盒子、单一材料、没窗没光）后改进，交回图纸 ID 和材料清单；攒够材料后 `build {"draft":"dr_…"}` 照图施工 | `building/architect.ts`、`building/drafts.ts`、`skills/architect/SKILL.md` |
+| **更丰富的建筑** | 图纸可以用台阶（自动朝中间往上爬做坡顶）、半砖、栅栏、玻璃板、活板门、梯子、地毯、灯笼；地板外多画一圈就是屋檐；最大 13×13、12 层 | `building/design.ts` |
 | **身体习惯** | `MIND_BODY_HABITS=true`（默认）时，饿了顺手吃、黑了顺手插火把、卡住自己挣脱，模型专心想玩什么 | `brain/reflex.ts` |
 
 模型每次只输出一个 JSON，例如：
@@ -371,6 +377,7 @@ npm run memory:clear
 src/
 ├─ adapter/      GameAdapter 接口 + Mineflayer 实现（上层不直接碰 mineflayer）
 ├─ arbiter/      动作仲裁器（planVersion、取消、抢占、动作守卫）
+├─ skills/       （仓库根目录）内置技能书：architect 建筑设计手册、homemaking 安家
 ├─ mind/         心智层（默认）：self 自我模型、attention 注意力、activity 一段活、thinker/prompt 思考、mind 主循环
 ├─ brain/        reflex（反射层、卡死检测）、executive（旧的逐步决策，AGENT_MIND=legacy）
 ├─ perception/   vision（射线视野、听觉、记忆）+ 感知摘要器（→ 给 LLM 的紧凑 JSON）

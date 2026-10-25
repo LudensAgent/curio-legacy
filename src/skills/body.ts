@@ -24,7 +24,7 @@ function liquidNext(ctx: SkillCtx, c: { x: number; y: number; z: number }): stri
   return null;
 }
 
-async function breakCell(ctx: SkillCtx, c: Vec3Like, exact = false): Promise<string | null> {
+export async function breakCell(ctx: SkillCtx, c: Vec3Like, exact = false): Promise<string | null> {
   const name = ctx.adapter.blockAt(c);
   if (!exact && isSoftBlock(name)) return null;
   if (name && LIQUID_BLOCKS.has(name)) throw new Error(`LIQUID:${name}`);
@@ -45,7 +45,7 @@ async function breakCell(ctx: SkillCtx, c: Vec3Like, exact = false): Promise<str
   return name;
 }
 
-const why = (e: unknown) => {
+export const why = (e: unknown) => {
   const m = String((e as Error)?.message ?? e);
   if (m.startsWith('LIQUID_NEAR:')) return `再挖 ${m.slice(12)} 就会流进来，停下了`;
   if (m.startsWith('LIQUID:')) return `那边是 ${m.slice(7)}`;

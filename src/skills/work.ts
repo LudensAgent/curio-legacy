@@ -223,7 +223,11 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
         // 水下（上方是水）的方块不去挖：会憋气溺水
         .filter((h) => !WATERY.has(adapter.blockAt({ x: h.pos.x, y: h.pos.y + 1, z: h.pos.z }) ?? 'air'))
         // 比脚下低的目标多扣分：宁可挖身边露天的，也不往坑底/水边钻
-        .sort((a, b) => a.dist + Math.abs(a.pos.y - s.pos.y) * 0.6 + Math.max(0, s.pos.y - a.pos.y - 2) - (b.dist + Math.abs(b.pos.y - s.pos.y) * 0.6 + Math.max(0, s.pos.y - b.pos.y - 2)));
+        // 高过头顶够不着的（树冠里的原木）也多扣分：像人一样先砍树干根部
+        .sort((a, b) => {
+          const cost = (h: typeof a) => h.dist + Math.abs(h.pos.y - s.pos.y) * 0.6 + Math.max(0, s.pos.y - h.pos.y - 2) + Math.max(0, h.pos.y - s.pos.y - 2) * 2.5;
+          return cost(a) - cost(b);
+        });
       // 安全检查按远近逐个做，找到第一个能挖的就停（每轮最多查 24 个；同一位置的结论本次采集内缓存）
       const safeHits: typeof candidates = [];
       let evaluated = 0;
@@ -436,14 +440,17 @@ export const craft: Skill<{ item: string; count: number; extra?: boolean }> = {
       const conflict = craftReservationConflict(ctx.memory, ctx.adapter.state(), args.item, args.count, config.mc.version, !!table);
       if (conflict) return fail('MISSING_MATERIALS', `预留保护：${conflict.reason}`, { conflict });
       const r = await ctx.adapter.craft(args.item, args.count, ctx.signal, { tablePos: table?.pos });
-      if (r.tablePos) rememberStation(ctx, 'crafting_table', r.tablePos);
+      const placedFresh = !!r.tablePos && (!table || dist3(table.pos, r.tablePos) >= 1);
+      if (r.tablePos && (!placedFresh || nearHome(ctx, r.tablePos))) rememberStation(ctx, 'crafting_table', r.tablePos);
       const reused = table && r.tablePos && dist3(table.pos, r.tablePos) < 1 && table.dist > 4 ? `（用了 ${table.dist} 格外${table.from === 'memory' ? '记得' : '看到'}的工作台）` : '';
       if (!r.ok) {
         const short = woodShortfall(args.item, args.count, ctx.adapter.state().inventory, !!table);
         const why = [r.detail, short].filter(Boolean).join('；');
         return fail((r.reason as any) ?? 'ERROR', `无法合成 ${args.item}：${r.reason}${why ? `（${why}）` : ''}${reused}`, why ? { shortfall: why } : undefined);
       }
-      return ok(`合成了 ${r.crafted} 个 ${args.item}${reused}`, { crafted: r.crafted });
+      // 野外临时放下的工作台用完收回来带着走（真人都这样）；家附近的留着当家具
+      const tookBack = r.ok && placedFresh && r.tablePos && !nearHome(ctx, r.tablePos) ? await takeBackTable(ctx, r.tablePos) : false;
+      return ok(`合成了 ${r.crafted} 个 ${args.item}${reused}${tookBack ? '；临时放下的工作台已收回背包' : ''}`, { crafted: r.crafted, ...(tookBack ? { tableTakenBack: true } : {}) });
     } catch (e) {
       if (isAbort(e)) throw e;
       return fail(codeFromError(e), `合成 ${args.item} 出错：${(e as Error).message}`);
@@ -500,3 +507,24 @@ export const eat: Skill<{}> = {
     }
   },
 };
+
+/** 附近（16 格内）有家、基地或自己的作品：那里的工作台算家具，不收走 */
+function nearHome(ctx: SkillCtx, pos: { x: number; y: number; z: number }): boolean {
+  const dim = ctx.adapter.state().dim;
+  return ctx.memory.landmarks().some((l) => l.dim === dim && (l.kind === 'base' || /家|基地|小屋|房/.test(l.label)) && dist3(l.pos, pos) <= 16);
+}
+
+async function takeBackTable(ctx: SkillCtx, pos: { x: number; y: number; z: number }): Promise<boolean> {
+  try {
+    if (ctx.adapter.blockAt(pos) !== 'crafting_table') return false;
+    const before = ctx.adapter.state().inventory.filter((i) => i.name === 'crafting_table').reduce((n, i) => n + i.count, 0);
+    const r = await ctx.adapter.dig(pos, ctx.signal);
+    if (!r.ok) return false;
+    try { await ctx.adapter.moveTo({ kind: 'near', pos, range: 0.8 }, { signal: ctx.signal, timeoutMs: 4000 }); } catch (e) { if (isAbort(e)) throw e; }
+    const after = ctx.adapter.state().inventory.filter((i) => i.name === 'crafting_table').reduce((n, i) => n + i.count, 0);
+    return after > before;
+  } catch (e) {
+    if (isAbort(e)) throw e;
+    return false;
+  }
+}

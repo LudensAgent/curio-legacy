@@ -7,6 +7,8 @@ import { Reflex } from './brain/reflex.ts';
 import { Mind } from './mind/mind.ts';
 import { SelfModel } from './mind/self.ts';
 import { Thinker } from './mind/thinker.ts';
+import { BUILTIN_SKILLS_DIR, SkillBook } from './knowledge/skillbook.ts';
+import { draftsFor } from './building/drafts.ts';
 import { config } from './config.ts';
 import { EventBus } from './events.ts';
 import { attachLogger, JsonlWriter } from './log.ts';
@@ -166,10 +168,13 @@ interface Brain {
   onDeath(info: Parameters<Executive['onDeath']>[0]): void; onSpawn(): void; onDisconnected(): void;
   snapshot(): unknown;
 }
+// 技能书（内置的 skills/ 和自己写的 data/skills/）与建筑图纸库
+const skillBook = new SkillBook(BUILTIN_SKILLS_DIR, path.join(config.dataDir, 'skills'));
+draftsFor(memory);
 const selfModel = config.mind.mode === 'human' ? new SelfModel(path.join(config.dataDir, 'mind.json'), config.mind.traits) : null;
 const mind = selfModel ? new Mind({
   adapter, arbiter, perception, memory, bus, self: selfModel, persona: config.persona,
-  thinker: new Thinker(planner, adapter, memory, bus),
+  thinker: new Thinker(planner, adapter, memory, bus, skillBook),
   ...(audience ? { audience } : {}),
   mySkills,
   researchContext: () => methods.researchContext(),

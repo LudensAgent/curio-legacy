@@ -6,13 +6,14 @@ import { ownStationsAt } from '../building/engine.ts';
 import type { BuildingProject } from '../building/archive.ts';
 import type { Vec3Like } from '../adapter/types.ts';
 import { BuildingArchive } from '../building/archive.ts';
+import { activeDrafts } from '../building/drafts.ts';
 import { constructBuilding } from '../building/engine.ts';
 import { compileBuilding, DEFAULT_SPEC, materialCost, normalizeSpec, rotatePosition, type BuildingSpec, type Rotation } from '../building/spec.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { sleep as delay, throwIfAborted } from '../util.ts';
 import { canSleepAt } from '../perception/perception.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill } from './types.ts';
-import { compileDesign, DESIGN_EXAMPLE } from '../building/design.ts';
+import { compileDesign, DESIGN_EXAMPLE, DESIGN_EXAMPLE_RICH } from '../building/design.ts';
 
 export const BLUEPRINTS = {
   hut: { description: '5×5 带木门、玻璃窗和阶梯坡顶的小屋' },
@@ -102,16 +103,22 @@ async function restoreStations(ctx: Parameters<Skill['run']>[0], project: Buildi
 
 export const build: Skill<BuildArgs> = {
   name: 'build',
-  description: '自己设计并建造：spec.design 用字符画分层画出每格放什么（legend 字符→方块，layers 从地板往上，"." 留空，门写下半格），想要什么样就画什么样。程序负责选址（不给 origin 会在附近找干燥平地并整平；给的地方不合适会就近换）、算材料缺口、分阶段施工、逐格验收；返回作品 ID，中断后用 projectId 续建，inspect 检查、repair 修补。',
-  argsDoc: '{"spec":{"name":"林边小屋","design":{"legend":{"C":"cobblestone","P":"oak_planks","G":"glass","D":"oak_door",".":"air"},"layers":[["CCCCC",…],["PPDPP","P...P",…],…]}}, "projectId"?:"已有作品ID", "mode"?:"build|inspect|repair", "origin"?:{"x":0,"y":64,"z":0}, "rotation"?:0|90|180|270, "reason"?:"设计/改造原因"}',
+  description: '照图施工：有建筑师画好的图纸就写 draft（推荐）；也可以自己设计：spec.design 用字符画分层画出每格放什么（legend 字符→方块，layers 从地板往上，"." 留空，门写下半格），想要什么样就画什么样。程序负责选址（不给 origin 会在附近找干燥平地并整平；给的地方不合适会就近换）、算材料缺口、分阶段施工、逐格验收；返回作品 ID，中断后用 projectId 续建，inspect 检查、repair 修补。',
+  argsDoc: '{"draft":"dr_…"}（新房子：照建筑师的图纸盖）｜{"projectId":"作品ID","mode"?:"build|inspect|repair"}（接着盖、检查、修补已有作品）；可选 "origin":{"x":0,"y":64,"z":0}、"rotation":0|90|180|270。图纸先用 {"kind":"design"} 请建筑师画，不要自己写 spec',
   timeoutMs: 600000,
   movement: true,
   validate(raw, adapter) {
     const a = obj(raw);
+    // 建筑师画好的图纸：只给 draft ID 就照图施工
+    if (typeof a.draft === 'string' && !a.spec && !a.projectId) {
+      const draft = activeDrafts()?.get(a.draft);
+      if (!draft) return { ok: false, error: `没有图纸 ${a.draft}；先用建筑师设计（{"kind":"design","brief":"…"}），或者直接给 spec` };
+      a.spec = draft.spec; a.reason ??= `按图纸 ${draft.id}（${draft.name}）施工`;
+    }
     const blueprint = String(a.blueprint ?? (a.spec ? 'custom' : 'hut'));
     // 房子由自己设计（spec.design 字符画），不再从预制蓝图里挑；prefab 只给兼容规则模式和测试用
     if (!a.spec && !a.projectId && ['hut', 'big_hut'].includes(blueprint) && a.prefab !== true && (a.mode ?? 'build') === 'build')
-      return { ok: false, error: `房子要自己设计：写 spec={"name":"…","design":{legend,layers}}。layers 从下往上（第 0 层地板），每层的行从前（北）到后，一个字符一个方块，"." 留空、空格不管，门只写下半格。例如 spec.design=${DESIGN_EXAMPLE}` };
+      return { ok: false, error: `房子要自己设计（最好先请建筑师画图纸：思考时输出 {"kind":"design","brief":"…"}，再 build {"draft":"dr_…"}）；或者直接写 spec={"name":"…","design":{legend,layers}}。layers 从下往上（第 0 层地板），每层的行从前（北）到后，一个字符一个方块，"." 留空、空格不管，门只写下半格。例如 spec.design=${DESIGN_EXAMPLE_RICH}` };
     if (!Object.hasOwn(BLUEPRINTS, blueprint) && blueprint !== 'custom') return { ok: false, error: '未知蓝图；可用 hut/big_hut/pillar/wall/custom' };
     if (a.projectId !== undefined && (typeof a.projectId !== 'string' || !a.projectId.trim() || a.projectId.length > 100)) return { ok: false, error: 'projectId 需要有效作品 ID' };
     if (!['build', 'inspect', 'repair'].includes(a.mode ?? 'build')) return { ok: false, error: 'mode 支持 build/inspect/repair' };
@@ -219,6 +226,8 @@ export const build: Skill<BuildArgs> = {
       if (!origin) return fail('ERROR', '没有确定施工位置');
       const blueprint = compileBuilding(spec);
       const project = archive.design({ id: old?.id, worldId: state.worldId, dimension: state.dim, origin, rotation: rot, spec, materials: materialCost(blueprint.cells), reason: args.reason });
+      const draftId = args.reason?.match(/图纸 (dr_[a-z0-9]+)/)?.[1];
+      if (draftId) activeDrafts()?.markUsed(draftId, project.id);
       const before = project.inspections.at(-1)?.defects.length;
       const result = await constructBuilding(ctx, archive, project, blueprint, args.mode);
       throwIfAborted(ctx.signal);

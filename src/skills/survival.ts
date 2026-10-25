@@ -26,7 +26,7 @@ const BED_NAMES = ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime',
 
 export const shelter: Skill<{ until: 'day' | 'healed' }> = {
   name: 'shelter',
-  description: '夜里保命：有床且附近没怪就先睡一觉；否则就地挖 3 格深的坑钻进去封顶，躲到天亮/回血（需要 1 个泥土/圆石/木板等方块）',
+  description: '夜里保命：有床且附近没怪就先睡一觉；否则就地挖 3 格深的坑钻进去封顶，躲到天亮/回血（需要 1 个泥土/圆石/木板等方块）。躲进坑里、四面堵死是正常的，天亮后往上挖 3 格就回到原地',
   argsDoc: '{"until"?: "day|healed"}',
   timeoutMs: 150000,
   movement: false,
@@ -236,7 +236,7 @@ async function digPit(ctx: SkillCtx, args: { until: 'day' | 'healed' }): Promise
     const problem = chamberProblem(true);
     if (problem) return fail('ERROR', problem);
     const s = adapter.state();
-    return ok(`在避难所里待到${s.isDay ? '天亮' : '现在'}，生命 ${Math.round(s.hp)}；出去时直接走动即可（会挖开顶上的方块）`);
+    return ok(`在避难所里待到${s.isDay ? '天亮' : '现在'}，生命 ${Math.round(s.hp)}；人在自己挖的坑底，正上方 3 格就是原来的地面，出去时 dig {"dir":"up","blocks":3} 或直接走动（会挖开顶上的方块）`);
   }
 }
 

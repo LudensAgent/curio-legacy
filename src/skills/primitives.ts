@@ -1,0 +1,178 @@
+import type { Vec3Like } from '../adapter/types.ts';
+import { describeCell, FACINGS, facingOfYaw, feetCell, localMap, toWorld, type Facing } from '../perception/local.ts';
+import { isSoftBlock, LIQUID_BLOCKS, surroundings } from '../perception/surroundings.ts';
+import { throwIfAborted } from '../util.ts';
+import { breakCell, why } from './body.ts';
+import { PLACEABLE } from './survival.ts';
+import { codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
+
+/**
+ * 原子动作：模型说出确切是哪一格，身体只负责准确执行、检查安全、如实回报。
+ * 坐标是以脚为原点的 [前, 上, 右]，前 = facing（不写就按规划时的朝向固定下来）。
+ * 在 routine 里重复时，每一步都按“当时站的位置”重新计算，所以
+ *   dig_at [0,2,0] → dig_at [1,1,0] → dig_at [1,2,0] → step [1,1,0]   重复几轮就是一道往前上方的阶梯。
+ */
+type Rel = [number, number, number];
+interface CellArgs { at: Rel; facing: Facing }
+const AIR = new Set(['air', 'cave_air', 'void_air']);
+
+function parseRel(v: unknown, bounds: { f: number; u: [number, number]; r: number }): Rel | string {
+  if (!Array.isArray(v) || v.length !== 3 || v.some((n) => !Number.isInteger(n))) return 'at/to 需要 [前,上,右] 三个整数，例如 [1,1,0]';
+  const [f, u, r] = v as number[];
+  if (Math.abs(f) > bounds.f || Math.abs(r) > bounds.r || u < bounds.u[0] || u > bounds.u[1]) return `只能是身边的格子：前后 ±${bounds.f}、左右 ±${bounds.r}、上下 ${bounds.u[0]}..${bounds.u[1]}`;
+  return [f, u, r];
+}
+
+function facingArg(raw: unknown, adapter: { eye(): { yaw: number } | null }): Facing | string {
+  if (raw === undefined || raw === null) { const eye = adapter.eye(); return eye ? facingOfYaw(eye.yaw) : 'N'; }
+  const f = String(raw).toUpperCase().slice(0, 1) as Facing;
+  return FACINGS.includes(f) ? f : 'facing 只能是 N/E/S/W';
+}
+
+/** 执行后附上身边的新样子，模型下一步就知道该挖哪格 */
+function after(ctx: SkillCtx, facing: Facing) {
+  const s = ctx.adapter.state();
+  return { position: { ...s.pos }, local: localMap(ctx.adapter, s.pos, facing), around: surroundings(ctx.adapter).text };
+}
+
+const liquidNext = (ctx: SkillCtx, c: Vec3Like) => [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, -1]]
+  .map(([dx, dy, dz]) => ctx.adapter.blockAt({ x: c.x + dx, y: c.y + dy, z: c.z + dz })).find((n) => !!n && LIQUID_BLOCKS.has(n));
+
+export const digAt: Skill<CellArgs> = {
+  name: 'dig_at',
+  description: '挖掉身边指定的那一格（以脚为原点的 [前,上,右]）。自动换合适的工具；那格旁边有水或岩浆、或是基岩时不挖。只挖不走，挖完人还在原地',
+  argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W"}（前后/左右 ±2，上下 -1..3；例：[1,1,0] 前方高一格，[0,2,0] 头顶上方，[0,-1,0] 脚下）',
+  timeoutMs: 30000,
+  movement: false,
+  validate(raw, adapter) {
+    const a = obj(raw);
+    const at = parseRel(a.at ?? a.cell ?? a.rel, { f: 2, u: [-1, 3], r: 2 });
+    if (typeof at === 'string') return { ok: false, error: at };
+    const facing = facingArg(a.facing, adapter);
+    if (!FACINGS.includes(facing as Facing)) return { ok: false, error: facing };
+    if (at[0] === 0 && at[2] === 0 && (at[1] === 0 || at[1] === 1)) return { ok: false, error: '[0,0,0] 和 [0,1,0] 是自己站的地方，本来就是空的' };
+    return { ok: true, args: { at, facing: facing as Facing } };
+  },
+  async run(ctx, args) {
+    throwIfAborted(ctx.signal);
+    const feet = feetCell(ctx.adapter.state().pos);
+    const pos = toWorld(feet, args.facing, args.at);
+    const before = ctx.adapter.blockAt(pos);
+    if (before === null) return fail('NOT_FOUND', `[${args.at}] 那一格还没加载或看不见`, after(ctx, args.facing));
+    if (AIR.has(before)) return ok(`[${args.at}] 本来就是空的，不用挖`, { cell: [...args.at], was: 'air', ...after(ctx, args.facing) });
+    if (LIQUID_BLOCKS.has(before)) return fail('BAD_ARGS', `[${args.at}] 是 ${before}，挖不了`, after(ctx, args.facing));
+    const wet = liquidNext(ctx, pos);
+    if (wet) return fail('BAD_ARGS', `[${args.at}] 旁边就是 ${wet}，挖开会流进来`, { wet, ...after(ctx, args.facing) });
+    try {
+      await breakCell(ctx, pos, true);
+    } catch (e) {
+      if (isAbort(e)) throw e;
+      const m = String((e as Error).message);
+      return fail(m.startsWith('NEED_TOOL') || m === 'TOOL_MISSING' ? 'TOOL_MISSING' : codeFromError(e), `挖 [${args.at}] 的 ${before} 没成：${why(e)}`, after(ctx, args.facing));
+    }
+    const now = ctx.adapter.blockAt(pos);
+    if (now && !AIR.has(now) && !isSoftBlock(now)) {
+      // 沙子、沙砾会从上面掉下来补上
+      return ok(`挖掉了 [${args.at}] 的 ${before}，但上面掉下来的 ${now} 又填上了`, { cell: [...args.at], was: before, now, ...after(ctx, args.facing) });
+    }
+    return ok(`挖掉了 [${args.at}] 的 ${before}`, { cell: [...args.at], was: before, ...after(ctx, args.facing) });
+  },
+};
+
+export const stepTo: Skill<CellArgs> = {
+  name: 'step',
+  description: '迈到身边相邻的一格（[前,上,右]）：可以平走、上一级台阶（上+1，会跳）、下一级（上-1）。目标格和头顶要空、脚下要实；上台阶时自己头顶上方也要空。只走这一格',
+  argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W"}（前后/左右 ±1，上下 -1..1；例：[1,0,0] 往前一格，[1,1,0] 迈上前方台阶）',
+  timeoutMs: 8000,
+  movement: true,
+  validate(raw, adapter) {
+    const a = obj(raw);
+    const to = parseRel(a.to ?? a.at ?? a.cell, { f: 1, u: [-1, 1], r: 1 });
+    if (typeof to === 'string') return { ok: false, error: to };
+    if (to[0] === 0 && to[2] === 0) return { ok: false, error: '原地上下不是 step：往上用 place_at [0,0,0]（垫一块站上去），往下用 dig_at [0,-1,0]' };
+    const facing = facingArg(a.facing, adapter);
+    if (!FACINGS.includes(facing as Facing)) return { ok: false, error: facing };
+    return { ok: true, args: { at: to, facing: facing as Facing } };
+  },
+  async run(ctx, args) {
+    throwIfAborted(ctx.signal);
+    const a = ctx.adapter;
+    const start = a.state().pos, feet = feetCell(start);
+    const target = toWorld(feet, args.facing, args.at);
+    const free = (p: Vec3Like) => { const n = a.blockAt(p); return n !== null && (AIR.has(n) || isSoftBlock(n)); };
+    const head = { ...target, y: target.y + 1 }, floor = { ...target, y: target.y - 1 };
+    const problems: string[] = [];
+    if (!free(target)) problems.push(`目标格是 ${describeCell(a, target)}`);
+    if (!free(head)) problems.push(`目标格上方是 ${describeCell(a, head)}（会碰头）`);
+    const below = a.blockAt(floor);
+    if (below === null || free(floor) || LIQUID_BLOCKS.has(below)) problems.push(`目标格脚下是 ${describeCell(a, floor)}（踩不住）`);
+    if (args.at[1] === 1 && !free({ ...feet, y: feet.y + 2 })) problems.push(`往上跳时自己头顶上方是 ${describeCell(a, { ...feet, y: feet.y + 2 })}`);
+    if (problems.length) return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：${problems.join('；')}`, { problems, ...after(ctx, args.facing) });
+    try {
+      await a.moveTo({ kind: 'xyz', x: target.x, y: target.y, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())) });
+    } catch (e) {
+      if (isAbort(e)) throw e;
+      return fail(codeFromError(e), `迈向 [${args.at}] 没成：${(e as Error).message}`, after(ctx, args.facing));
+    }
+    const end = feetCell(a.state().pos);
+    if (end.x !== target.x || end.y !== target.y || end.z !== target.z) return fail('EFFECT_NOT_CONFIRMED', `没有站到 [${args.at}]，实际在 (${end.x},${end.y},${end.z})`, after(ctx, args.facing));
+    return ok(`站到了 [${args.at}]`, { moved: [...args.at], ...after(ctx, args.facing) });
+  },
+};
+
+export const placeAt: Skill<CellArgs & { item: string }> = {
+  name: 'place_at',
+  description: '在身边指定的空格放一块方块（[前,上,右]）；[0,0,0] 表示原地垫一块站上去（跳起来往脚下放）。item 写方块名，或 "any" 用背包里随便一种能垫的（泥土、圆石、木板…）',
+  argsDoc: '{"at":[前,上,右], "item"?:"<方块名>|any", "facing"?:"N|E|S|W"}（前后/左右 ±2，上下 -1..3；例：[0,0,0] 原地垫高一格，[1,-1,0] 填前方脚下的坑）',
+  timeoutMs: 15000,
+  movement: true,
+  validate(raw, adapter) {
+    const a = obj(raw);
+    const at = parseRel(a.at ?? a.cell ?? a.rel, { f: 2, u: [-1, 3], r: 2 });
+    if (typeof at === 'string') return { ok: false, error: at };
+    if (at[0] === 0 && at[2] === 0 && at[1] === 1) return { ok: false, error: '[0,1,0] 是自己的头，往上垫高用 [0,0,0]' };
+    const facing = facingArg(a.facing, adapter);
+    if (!FACINGS.includes(facing as Facing)) return { ok: false, error: facing };
+    const item = String(a.item ?? 'any').replace(/^minecraft:/, '');
+    if (item !== 'any' && !adapter.isKnownItem(item)) return { ok: false, error: `未知物品：${item}` };
+    return { ok: true, args: { at, facing: facing as Facing, item } };
+  },
+  async run(ctx, args) {
+    throwIfAborted(ctx.signal);
+    const a = ctx.adapter;
+    const inv = a.state().inventory;
+    const names = args.item === 'any' ? PLACEABLE.filter((n) => inv.some((i) => i.name === n && i.count > 0)) : [args.item];
+    if (!names.length || !inv.some((i) => names.includes(i.name) && i.count > 0)) return fail('MISSING_MATERIALS', `背包里没有 ${args.item === 'any' ? '能垫的方块（泥土/圆石/木板…）' : args.item}`, after(ctx, args.facing));
+    const feet = feetCell(a.state().pos);
+    if (args.at[0] === 0 && args.at[1] === 0 && args.at[2] === 0) {
+      // 原地垫高：跳起来往脚下放一块，站上去
+      const above = { ...feet, y: feet.y + 2 };
+      const n = a.blockAt(above);
+      if (n !== null && !AIR.has(n) && !isSoftBlock(n)) return fail('PATH_NOT_FOUND', `头顶上方是 ${n}，跳不起来；先 dig_at [0,2,0]`, after(ctx, args.facing));
+      try {
+        await a.moveTo({ kind: 'xyz', x: feet.x, y: feet.y + 1, z: feet.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(8000, ctx.deadline - Date.now())), allowTerrainChanges: true });
+      } catch (e) {
+        if (isAbort(e)) throw e;
+        return fail(codeFromError(e), `原地垫高没成：${(e as Error).message}`, after(ctx, args.facing));
+      }
+      const end = feetCell(a.state().pos);
+      if (end.y <= feet.y) return fail('EFFECT_NOT_CONFIRMED', '没有站高一格', after(ctx, args.facing));
+      return ok(`原地垫了一块，站高了一格（现在 y=${end.y}）`, after(ctx, args.facing));
+    }
+    const pos = toWorld(feet, args.facing, args.at);
+    const cur = a.blockAt(pos);
+    if (cur !== null && !AIR.has(cur) && !isSoftBlock(cur) && !LIQUID_BLOCKS.has(cur)) return ok(`[${args.at}] 已经有 ${cur} 了`, { already: cur, ...after(ctx, args.facing) });
+    try {
+      const r = await a.placeBlockAt(pos, names, ctx.signal);
+      if (!r.ok) return fail(r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS' : 'PATH_NOT_FOUND', `放不到 [${args.at}]：${r.reason === 'NO_REFERENCE' ? '旁边没有能贴着放的方块（悬空），或者看不见那个面' : r.reason}`, after(ctx, args.facing));
+    } catch (e) {
+      if (isAbort(e)) throw e;
+      return fail(codeFromError(e), `放 [${args.at}] 没成：${(e as Error).message}`, after(ctx, args.facing));
+    }
+    const now = a.blockAt(pos);
+    if (!now || AIR.has(now)) return fail('EFFECT_NOT_CONFIRMED', `[${args.at}] 还是空的`, after(ctx, args.facing));
+    return ok(`在 [${args.at}] 放了 ${now}`, { placed: now, ...after(ctx, args.facing) });
+  },
+};
+
+export const primitiveSkills = [digAt, stepTo, placeAt];
