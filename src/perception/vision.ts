@@ -262,6 +262,7 @@ export class Vision {
   scan(): void {
     const t0 = Date.now();
     const s = this.syncScope();
+    this.recordFootprint(s);
     const eye = this.adapter.eye();
     if (!eye || !s.connected || !s.alive || !s.observationReady) {
       this.frame = null;
@@ -706,6 +707,48 @@ export class Vision {
         receipt: { worldId: state.worldId, sessionId: state.sessionId, dimension: state.dim, observationId: state.observationId, at: now, from: { ...here }, onGround: state.onGround === true } });
     }
     return out;
+  }
+
+  // ------------------------------------------------------------ 足迹（来时的路）
+  /** 自己真正站过的地方：像人记得来时的路，只记脚踏实地、不在水里的位置（是记忆，不是透视） */
+  private footprints = new Map<string, { pos: Vec3Like; at: number }>();
+  private lastFootprint: { scope: string; pos: Vec3Like } | null = null;
+
+  private recordFootprint(s: ReturnType<GameAdapter['state']>) {
+    if (!s.connected || !s.alive || !s.observationReady || s.onGround !== true || s.inWater || s.inLava || s.riding) return;
+    const scope = `${s.worldId}:${s.dim}`;
+    const last = this.lastFootprint;
+    if (last && last.scope === scope && Math.hypot(last.pos.x - s.pos.x, last.pos.y - s.pos.y, last.pos.z - s.pos.z) < 4) return;
+    const pos = { x: Math.floor(s.pos.x) + 0.5, y: Math.floor(s.pos.y + 0.05), z: Math.floor(s.pos.z) + 0.5 };
+    const key = `${scope}:${pos.x},${pos.y},${pos.z}`;
+    this.footprints.delete(key);
+    this.footprints.set(key, { pos, at: Date.now() });
+    this.lastFootprint = { scope, pos: { ...s.pos } };
+    while (this.footprints.size > 4000) this.footprints.delete(this.footprints.keys().next().value!);
+  }
+
+  /**
+   * 眼前看不到通路时，沿着自己走过的地方往目标挪：选一个站过的、更靠近目标的落脚点。
+   * 只用亲身到过的位置，不推测没见过的地形；走不通由调用方换下一个。
+   */
+  rememberedWaypoint(target: Vec3Like, maxDistance: number, excluded: Vec3Like[]): Vec3Like | null {
+    const state = this.syncScope();
+    if (!state.observationReady) return null;
+    const scope = `${state.worldId}:${state.dim}:`, here = state.pos;
+    const d3 = (a: Vec3Like, b: Vec3Like) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+    const left = d3(here, target);
+    let best: { pos: Vec3Like; score: number } | null = null;
+    for (const [key, fp] of this.footprints) {
+      if (!key.startsWith(scope)) continue;
+      const d = d3(here, fp.pos);
+      if (d < 2 || d > maxDistance || Math.abs(fp.pos.y - here.y) > 8) continue;
+      if (excluded.some((e) => d3(e, fp.pos) < 1.5)) continue;
+      const rest = d3(fp.pos, target);
+      if (rest >= left - 1) continue;
+      const score = rest + d * 0.3;
+      if (!best || score < best.score) best = { pos: fp.pos, score };
+    }
+    return best ? { ...best.pos } : null;
   }
 
   navigationWaypoint(target: Vec3Like, maxDistance: number, excluded: Vec3Like[]): Vec3Like | null {

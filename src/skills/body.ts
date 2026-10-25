@@ -239,6 +239,12 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
       if (stopped || !goalReached) return fail('STUCK', `往上爬了 ${climbed} 格后停下：${stopped ?? '已到本次高度或时间上限，仍未满足停止条件'}｜${around.text}`, facts);
       return ok(`往上爬了 ${climbed} 格${args.untilExit ? '，四周有路了' : args.untilSky ? '，看得见天空了' : ''}｜${around.text}`, facts);
     };
+    const initial = surroundings(adapter);
+    if ((args.untilSky || args.untilExit) && reached(initial)) {
+      // 已经满足停止条件：没有垫高是对的，但要说清楚，免得以为“爬不上去”
+      return ok(`${args.untilExit ? '四周已经有路可走' : '已经看得见天空'}，所以没有垫高；如果是想站上坑沿，用 {"height":2} 这样直接指定格数｜${initial.text}`,
+        { climbed: 0, alreadySatisfied: true, sky: initial.sky, exits: initial.exits });
+    }
     for (let i = 0; i < args.height && Date.now() < ctx.deadline - 1000; i++) {
       throwIfAborted(signal);
       const here = surroundings(adapter);

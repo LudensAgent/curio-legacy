@@ -18,6 +18,9 @@ export const ACTIVITY_KINDS: readonly ActivityKind[] = ['gather', 'craft', 'buil
 export type DecisionKind = 'continue' | 'adjust' | 'new' | 'detour' | 'switch' | 'experiment' | 'rest';
 export const DECISION_KINDS: readonly DecisionKind[] = ['continue', 'adjust', 'new', 'detour', 'switch', 'experiment', 'rest'];
 
+/** routine 里的一步；optional = 顺手、碰运气的事（见到动物就打、有果子就摘），失败了这段活照常往下做 */
+export type ActivityStep = Step & { optional?: boolean };
+
 export interface StepResult { skill: string; args?: unknown; status: string; failureCode?: string; summary: string; at: number; durationMs: number; pos?: { x: number; y: number; z: number }; view?: string }
 
 /** 只保留最近十分钟的结束经历，用来认出在同一带反复失败。 */
@@ -37,7 +40,7 @@ export interface Activity {
   what: string;
   why: string;
   kind: ActivityKind;
-  steps: Step[];
+  steps: ActivityStep[];
   /** routine 最多做几轮（done_when 先满足就提前收工） */
   repeat: number;
   iteration: number;
@@ -126,6 +129,17 @@ export interface Thought { at: number; text: string; kind: 'monologue' | 'notice
 
 export interface Noticing { at: number; key: string; what: string; salience: number; level: 'note' | 'reconsider' | 'urgent' }
 
+/** 休息/睡前回想时对窍门的整理（模型输出、校验后） */
+export interface Consolidation {
+  rewrite: { id: string; text: string }[];
+  merge: { ids: string[]; text: string }[];
+  drop: string[];
+  add: string[];
+  agendaDrop: string[];
+  diary?: string;
+  monologue?: string;
+}
+
 export interface DiaryEntry { at: number; text: string; dim: string; pos: [number, number, number] }
 
 /** 模型输出、校验过的一次决定 */
@@ -150,6 +164,6 @@ export interface MindDecision {
 }
 
 export interface ActivityDraft {
-  what: string; why: string; kind: ActivityKind; steps: Step[]; repeat: number;
+  what: string; why: string; kind: ActivityKind; steps: ActivityStep[]; repeat: number;
   doneWhen?: Condition; expect?: string; ifStuck?: string; agendaId?: string;
 }

@@ -12,7 +12,7 @@ import { SKILLS } from '../skills/index.ts';
 import { causeName } from '../brain/habits.ts';
 import { pickFuel } from '../skills/economy.ts';
 import { pickVariant } from '../skills/work.ts';
-import { afterStep, createActivity, describeActivity, diffInventory, inventoryOf, nextStep, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
+import { afterStep, softMiss, createActivity, describeActivity, diffInventory, inventoryOf, nextStep, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
 import { Attention, EXPERIENCE_MS, RECONSIDER, stuckHere, URGENT } from './attention.ts';
 import type { MindContext } from './prompt.ts';
 import { moodWords, type SelfModel } from './self.ts';
@@ -84,6 +84,10 @@ export class Mind {
   private failuresByTarget = new Map<string, { n: number; last: number; at: number[] }>();
   private learnedActivities = new Set<string>();
   private speechEventAt = 0;
+  private fillerAt = 0;
+  private readonly startedAt = Date.now();
+  private lastLessonAt = 0;
+  private reflecting: AbortController | null = null;
   private notes: string[] = [];
   private userSuggestion: string | null = null;
   private lastFailure: { skill: string; code?: string; summary: string } | null = null;
@@ -120,6 +124,8 @@ export class Mind {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.cancelThinking('shutdown');
+    this.reflecting?.abort('shutdown');
+    this.reflecting = null;
     if (this.listening) {
       this.d.arbiter.off('done', this.doneListener);
       this.d.arbiter.off('preempt', this.preemptListener);
@@ -172,6 +178,8 @@ export class Mind {
       if (/^(res|disc|item):/.test(n.key)) { this.d.self.feel({ type: 'novelty', strength: n.salience }); this.speechEventAt = Date.now(); }
     }
     this.d.self.tickMood(!!this.activity && this.activity.kind !== 'rest');
+    if (this.activity?.kind === 'rest') this.maybeReflect('歇下来了');
+    else if (Date.now() - Math.max(this.d.self.reflectedAt, this.startedAt) > 60 * 60_000) this.maybeReflect('玩了好一阵了');
   }
 
   private decideWhetherToThink(current: ReturnType<Arbiter['info']>) {
@@ -191,9 +199,8 @@ export class Mind {
         this.lastRecord?.outcome === 'done' && !this.needsBigPicture() ? 'glance' : 'deliberate');
     }
     if (this.attention.highest() >= RECONSIDER) return this.think('注意到了一些事', 'glance');
-    // 最后一个动作已经开始：趁它还在做，想好下一段活
-    if (!this.queuedNext && remainingSteps(this.activity) === 0 && current?.planId === this.activity.id
-      && (QUICK.has(current.skill) || current.progress >= 0.4 || Date.now() - current.startedAt > 8000)) {
+    // 边做边想：最后一轮一开始就琢磨下一段活（模型想一次要好几秒，等干完再想就会站着发呆）
+    if (!this.queuedNext && current?.planId === this.activity.id && remainingSteps(this.activity) < Math.max(1, this.activity.steps.length)) {
       return this.think('手上这段活快干完了，想想接下来', this.needsBigPicture() ? 'deliberate' : 'glance');
     }
     if (Date.now() - Math.max(this.activityThoughtAt, this.lastThoughtAt) > this.timing.checkInMs) return this.think('做了一会儿了，抬头看看', 'glance');
@@ -267,6 +274,9 @@ export class Mind {
   /** 没有活可干时（正在想事情）：原地看看四周，不乱跑也不消耗东西 */
   private idle() {
     if (this.d.arbiter.info() || !this.thinking) return;
+    // 张望被打断（踩空、受伤）后别每一拍都重新开始，隔几秒再说
+    if (Date.now() - this.fillerAt < 3000) return;
+    this.fillerAt = Date.now();
     const state = this.d.adapter.state();
     if (state.inWater || state.inLava || state.onGround === false) return;
     let knows = false;
@@ -343,13 +353,13 @@ export class Mind {
   // ---------------------------------------------------------------- 动作结果
   private onDone(o: TaskOutcome) {
     if (o.task.source === 'filler') return;
-    const observationMiss = SKILLS[o.task.skill]?.readOnly && o.result.failureCode === 'NOT_FOUND';
+    const observationMiss = softMiss(this.activity?.id === o.task.planId ? this.activity : null, { skill: o.task.skill, args: o.task.args }, o.result);
     if (o.result.status !== 'cancelled' && !observationMiss) {
       if (o.task.source !== 'reflex') {
         this.d.self.practice(o.task.skill, o.result.status === 'succeeded', o.durationMs);
         this.d.self.feel({ type: 'step', ok: o.result.status === 'succeeded' });
       }
-      if (o.task.skill === 'sleep' && o.result.status === 'succeeded') this.d.self.feel({ type: 'sleep' });
+      if (o.task.skill === 'sleep' && o.result.status === 'succeeded') { this.d.self.feel({ type: 'sleep' }); this.maybeReflect('睡了一觉'); }
     }
     if (o.task.source === 'reflex') return;
     const a = this.activity;
@@ -365,7 +375,7 @@ export class Mind {
   private handleStepResult(step: Step, result: { status: 'succeeded' | 'failed' | 'cancelled'; failureCode?: any; summary: string }, durationMs: number) {
     const a = this.activity;
     if (!a) return;
-    const observationMiss = SKILLS[step.skill]?.readOnly && result.failureCode === 'NOT_FOUND';
+    const observationMiss = softMiss(a, step, result);
     if (result.status === 'failed' && !observationMiss) {
       this.lastFailure = { skill: step.skill, code: result.failureCode, summary: result.summary };
       this.pruneFailures();
@@ -478,6 +488,35 @@ export class Mind {
     if ((!running || running.source === 'filler') && (this.activity || this.queuedNext)) this.act();
   }
 
+  /**
+   * 回想（像人睡前或歇脚时回顾一天）：攒够了零碎经验就在后台整理一次，不打断手上的事。
+   * 合并说同一件事的窍门、丢掉被事实推翻的、把被证实的零碎想法变成窍门，再写一句日记。
+   */
+  private maybeReflect(why: string) {
+    if (this.reflecting || this.paused || !this.autonomous) return;
+    if (Date.now() - this.d.self.reflectedAt < 20 * 60_000 || this.d.self.reflectionBacklog() < 5) return;
+    const controller = new AbortController();
+    this.reflecting = controller;
+    this.d.bus.publish('reflect_start', 'P3', `回想一下这段时间（${why}）`);
+    this.d.thinker.reflect(this.d.self, this.d.persona, controller.signal).then((c) => {
+      if (this.reflecting !== controller) return;
+      this.reflecting = null;
+      if (!c) return;
+      const { before, after } = this.d.self.consolidate(c);
+      for (const k of this.d.self.data.knowHow) if (c.add.includes(k.text) || c.merge.some((m) => m.text === k.text) || c.rewrite.some((r) => r.id === k.id)) {
+        this.d.memory.addLesson(k.text, { source: 'model', key: `know_how:${k.id}` });
+      }
+      if (c.diary) this.diary(c.diary);
+      if (c.monologue) this.d.self.think(c.monologue, 'learned');
+      this.d.bus.publish('reflect', 'P2', `回想完了：窍门 ${before} → ${after} 条（合并 ${c.merge.length}、改写 ${c.rewrite.length}、丢掉 ${c.drop.length}、新增 ${c.add.length}）${c.diary ? `；${c.diary}` : ''}`,
+        { merge: c.merge.length, rewrite: c.rewrite.length, drop: c.drop.length, add: c.add.length });
+    }).catch((e: any) => {
+      if (this.reflecting !== controller) return;
+      this.reflecting = null;
+      if (!controller.signal.aborted) this.d.bus.publish('reflect_error', 'P2', `回想没成：${String(e?.message ?? e).slice(0, 120)}`);
+    });
+  }
+
   private safe<T>(fn: () => T, fallback: T): T { try { return fn(); } catch { return fallback; } }
 
   private cancelThinking(reason: string) {
@@ -508,12 +547,16 @@ export class Mind {
       }
     }
     const learn = (text: string, revise?: string) => {
+      // 人不会每做一件事就立一条规矩：出乎意料（卡住、实验）或修订旧经验才马上记下，其余先存着，休息时再回想
+      const notable = !!revise || !!last?.hypothesis || last?.outcome === 'stuck' && Date.now() - this.lastLessonAt > 90_000;
+      if (!notable && Date.now() - this.lastLessonAt < 3 * 60_000) { this.d.self.jot(text, last?.outcome); return; }
       const activityId = last?.id ?? thoughtAboutActivity ?? this.activity?.id ?? `${this.lastSession}:initial`;
       if (this.learnedActivities.has(activityId)) return;
       const previousTexts = new Map(this.d.self.data.knowHow.map((k) => [k.id, k.text]));
       const k = this.d.self.learn(text, { kind: last?.kind, signature: last?.signature, source: last?.hypothesis ? 'experiment' : 'reflection',
         outcome: last?.outcome, tags: last ? Object.keys(last.gained) : [], revise });
       if (k) {
+        this.lastLessonAt = Date.now();
         this.learnedActivities.add(activityId);
         if (this.learnedActivities.size > 256) this.learnedActivities.delete(this.learnedActivities.values().next().value!);
         this.d.memory.addLesson(k.text, { source: 'model', key: `know_how:${k.id}`, replaces: previousTexts.get(k.id) });

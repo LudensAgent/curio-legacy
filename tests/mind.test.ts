@@ -67,6 +67,8 @@ test('身体自己应变：没找到换地方找、偶发失败再试一次、�
   assert.equal(v2.kind, 'continue');
   const s3 = nextStep(a)!;
   assert.equal(s3.skill, 'gather');
+  // explore 之后人已经换了地方：同一目标的失败在新位置值得再试一次
+  for (const r of a.results) if (r.skill === 'gather') r.pos = { x: 99, y: 64, z: 99 };
   const v3 = afterStep(a, s3, fail('PATH_NOT_FOUND', '路被挡住'), 100, adapter.state());
   assert.match((v3 as any).adapted, /再试一次/);
   assert.equal(nextStep(a)!.skill, 'gather');
@@ -278,4 +280,123 @@ test('死亡后放下手上的活，复活后认真想想，并记进日记和�
   assert.equal(w.pending.length, 2);
   assert.equal(w.pending[1].hint.tier, 'full');
   assert.match(w.pending[1].messages[1].content, /刚刚死了/);
+});
+
+test('在原地失败、周围也没变化时不原样重试；goto 找不到路也不重试', () => {
+  const adapter = new FakeAdapter();
+  const here = { ...adapter.state().pos };
+  const a = createActivity({ what: '挖石头', why: '', kind: 'gather', repeat: 1, steps: [{ skill: 'gather', args: { block: 'stone', count: 3 } }] }, '', 'llm', adapter.state());
+  const s1 = nextStep(a)!;
+  a.stepStart = { pos: here };
+  assert.equal(afterStep(a, s1, fail('PATH_NOT_FOUND', '路被挡住'), 100, adapter.state()).kind, 'stuck');
+  const g = createActivity({ what: '回家', why: '', kind: 'explore', repeat: 1, steps: [{ skill: 'goto', args: { target: 'home' } }] }, '', 'llm', adapter.state());
+  const s2 = nextStep(g)!;
+  g.stepStart = { pos: { x: 99, y: 64, z: 99 } };
+  assert.equal(afterStep(g, s2, fail('PATH_NOT_FOUND', '眼前没有可确认的通路'), 100, adapter.state()).kind, 'stuck');
+});
+
+test('顺手的步骤没成不算这段活失败，接着做后面的', () => {
+  const adapter = new FakeAdapter();
+  const a = createActivity({ what: '往西走，路上见到牛就打', why: '', kind: 'explore', repeat: 1,
+    steps: [{ skill: 'hunt', args: { animal: 'cow' }, optional: true }, { skill: 'explore', args: { direction: 'W', distance: 32 } }] }, '', 'llm', adapter.state());
+  const s1 = nextStep(a)!;
+  const v = afterStep(a, s1, fail('NOT_FOUND', '视野里没有 cow'), 100, adapter.state());
+  assert.equal(v.kind, 'continue');
+  assert.match((v as any).adapted, /顺手/);
+  assert.equal(a.failures, 0);
+  assert.equal(nextStep(a)!.skill, 'explore');
+  const v2 = afterStep(a, { skill: 'explore', args: {} }, ok('走了 32 格'), 100, adapter.state());
+  assert.deepEqual(v2, { kind: 'done', met: true, why: '这段活的步骤都做完了' });
+});
+
+test('模型可以把步骤标成 optional，校验时保留', () => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null);
+  const d = parseDecision({ decision: 'new', monologue: '走走', activity: { what: '散步', steps: [{ skill: 'look_around', args: { seconds: 3 }, optional: true }, { skill: 'look_around', args: { seconds: 3 } }] } }, adapter, memory, false);
+  assert.ok(!('error' in d));
+  if ('error' in d) return;
+  assert.equal(d.activity!.steps[0].optional, true);
+  assert.equal(d.activity!.steps[1].optional, undefined);
+  memory.close();
+});
+
+test('边做边想：一段活的最后一轮刚开始就琢磨下一段，干完直接接上', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { monologue: '砍树', decision: 'new', activity: { what: '砍树', steps: [step(1), step(2)] } });
+  await w.tick();
+  assert.equal(w.pending.length, 2, '第一步一开始就在想下一段（模型要想好几秒）');
+  assert.equal(w.pending[1].hint.tier, 'light');
+  await w.reply(1, { monologue: '然后做工作台', decision: 'continue', next: { what: '做工作台', steps: [step(3)] } });
+  await w.finish();
+  await w.tick();
+  await w.finish();
+  await w.tick();
+  assert.equal(w.mind.activity?.what, '做工作台');
+  await w.tick();
+  assert.equal(w.pending.length, 3, '新的一段一开始又在想下一段');
+});
+
+test('零碎经验先存着，出乎意料（卡住）才马上记成窍门', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { monologue: '砍树', decision: 'new', learned: '砍树前先看看周围有没有动物', activity: { what: '砍树', steps: [step()] } });
+  assert.equal(w.self.data.knowHow.length, 1, '第一条直接记下');
+  await w.tick();
+  await w.reply(1, { monologue: '嗯', decision: 'continue', learned: '橡树比白桦好砍一点点', next: { what: '再砍', steps: [step()] } });
+  assert.equal(w.self.data.knowHow.length, 1, '紧接着的平常想法先不立规矩');
+  assert.equal(w.self.insights().length, 1);
+  await w.finish(fail('MISSING_MATERIALS', '缺斧头'));
+  await w.tick();
+  const i = w.pending.length - 1;
+  (w.mind as any).lastLessonAt = Date.now() - 100_000;
+  await w.reply(i, { monologue: '原来要先有斧头', decision: 'new', learned: '没有斧头时砍树会卡住，先做木斧', activity: { what: '做斧头', steps: [step()] } });
+  assert.ok(w.self.data.knowHow.some((k) => /斧头/.test(k.text)), '卡住之后的教训马上记下');
+});
+
+test('回想：合并重复、丢掉被推翻的、证实的零碎想法变成窍门', async () => {
+  const { parseConsolidation } = await import('../src/mind/thinker.ts');
+  const self = new SelfModel(null);
+  const a = self.learn('卡在坑里时先垫方块往上爬', { source: 'reflection', outcome: 'done' })!;
+  const b = self.learn('掉进三格深的坑就往上垫两格出来', { source: 'reflection', outcome: 'done' })!;
+  const c = self.learn('夜里一定要往水里跳躲怪', { source: 'reflection', outcome: 'stuck' })!;
+  self.jot('桦木林边上常有羊');
+  const parsed = parseConsolidation({ merge: [{ ids: [a.id, b.id, 'k_nope'], text: '掉进浅坑时原地垫方块爬出去（成2/败0）' }], drop: [c.id, a.id], add: ['桦木林边上常有羊'], diary: '今天学会了出坑' },
+    new Set(self.data.knowHow.map((k) => k.id)), new Set());
+  assert.deepEqual(parsed.drop, [c.id], '已合并的不能再被丢');
+  const r = self.consolidate(parsed);
+  assert.equal(r.before, 3);
+  assert.ok(self.data.knowHow.some((k) => k.text === '掉进浅坑时原地垫方块爬出去' && k.wins === 2));
+  assert.ok(!self.data.knowHow.some((k) => k.id === c.id));
+  assert.ok(self.data.knowHow.some((k) => k.text === '桦木林边上常有羊'));
+  assert.equal(self.insights().length, 0);
+  assert.equal(self.reflectionBacklog(), 0);
+});
+
+test('打转提醒同一种失败只提一次，几分钟内不反复逼着深想', () => {
+  const att = new Attention();
+  const here = { x: 0, y: 64, z: 0 };
+  const now = Date.now();
+  const recs = [1, 2, 3].map((i) => ({ pos: here, outcome: 'stuck' as const, failureCode: 'PATH_NOT_FOUND', what: `试法${i}`, at: now - 60_000 + i * 1000 }));
+  assert.ok(att.fromLoop(recs, here, now));
+  recs.push({ pos: here, outcome: 'stuck', failureCode: 'PATH_NOT_FOUND', what: '试法4', at: now + 1000 });
+  assert.equal(att.fromLoop(recs, here, now + 2000), null);
+  assert.ok(att.fromLoop(recs, here, now + 5 * 60_000));
+});
+
+test('歇下来时在后台回想，整理窍门、写日记，不打断手上的事', async (t) => {
+  const w = fixture(t);
+  for (const s of ['桦木林边常有羊', '夜里坑里插火把就不刷怪', '石头在山坡露头处多', '腐肉很饿时才吃', '回家沿着来时的路走']) w.self.jot(s);
+  const old = w.self.learn('夜里一定要往水里跳躲怪', { source: 'reflection', outcome: 'stuck' })!;
+  await w.tick();
+  await w.reply(0, { monologue: '歇会儿', decision: 'rest' });
+  const before = w.pending.length;
+  (w.mind as any).maybeReflect('歇下来了');
+  assert.equal(w.pending.length, before + 1, '回想是一次独立的后台思考');
+  assert.match(w.pending.at(-1)!.messages[0].content, /回想一下这段时间/);
+  assert.ok(w.arbiter.info(), '手上的事照常进行');
+  await w.reply(w.pending.length - 1, { drop: [old.id], add: ['夜里在坑里插火把就不刷怪'], diary: '今天在桦木林边过得挺安稳', monologue: '理清楚了' });
+  assert.ok(!w.self.data.knowHow.some((k) => k.id === old.id));
+  assert.ok(w.self.data.knowHow.some((k) => k.text === '夜里在坑里插火把就不刷怪'));
+  assert.equal(w.self.insights().length, 0);
+  assert.ok(w.self.diary(1)[0].text.includes('桦木林'));
 });

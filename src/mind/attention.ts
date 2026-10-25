@@ -102,9 +102,10 @@ export class Attention {
   fromLoop(records: ActivityEnd[], here: ActivityEnd['pos'], now = Date.now()): Noticing | null {
     const stuck = stuckHere(records, here, now);
     if (!stuck) return null;
-    return this.notice(`loop:${stuck.failureCode}:${stuck.lastAt}`,
+    // 同一带、同一种失败只提醒一次（冷却几分钟），否则每多失败一次就逼着重新深想一遍
+    return this.notice(`loop:${stuck.failureCode}`,
       `在 (${Math.round(here.x)},${Math.round(here.y)},${Math.round(here.z)}) 一带已卡住 ${stuck.minutes} 分钟，试过：${stuck.tried.join('、')}；需要换完全不同的思路`,
-      0.8, EXPERIENCE_MS, now);
+      0.8, 4 * 60_000, now);
   }
 
   /** 取走所有待处理的注意（交给思考），并返回其中最高的显著度 */

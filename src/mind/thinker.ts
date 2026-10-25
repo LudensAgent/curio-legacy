@@ -8,9 +8,10 @@ import { extractJson, normalizeStep, ruleProposal } from '../planner/plan.ts';
 import type { Planner } from '../planner/planner.ts';
 import { validateCondition } from '../projects/conditions.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
-import { buildMindMessages, type MindContext } from './prompt.ts';
+import { buildMindMessages, buildReflectionMessages, type MindContext } from './prompt.ts';
+import type { SelfModel } from './self.ts';
 import { cleanLesson } from './self.ts';
-import { ACTIVITY_KINDS, DECISION_KINDS, type ActivityDraft, type ActivityKind, type DecisionKind, type MindDecision } from './types.ts';
+import { ACTIVITY_KINDS, DECISION_KINDS, type ActivityDraft, type ActivityKind, type ActivityStep, type Consolidation, type DecisionKind, type MindDecision } from './types.ts';
 
 const str = (v: unknown, max: number) => typeof v === 'string' ? v.trim().slice(0, max) : '';
 
@@ -81,7 +82,7 @@ export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldM
   const what = str(o.what ?? o.goal, 80);
   if (!what) return { error: `${label}.what 不能为空` };
   if (!Array.isArray(o.steps) || !o.steps.length) return { error: `${label}.steps 需要 1–6 个动作` };
-  const steps: Step[] = [];
+  const steps: ActivityStep[] = [];
   const errors: string[] = [];
   for (const [i, s0] of o.steps.slice(0, 6).entries()) {
     const s = normalizeStep(s0) as Record<string, any>;
@@ -90,7 +91,8 @@ export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldM
     if (!skill || LLM_HIDDEN.has(name)) { errors.push(`steps[${i}] 没有 "${name}" 这个技能`); continue; }
     const v = skill.validate(s?.args ?? {}, adapter);
     if (!v.ok) { errors.push(`steps[${i}] ${name} 参数错误：${v.error}`); continue; }
-    steps.push({ skill: name, args: v.args });
+    const optional = !!s0 && typeof s0 === 'object' && ((s0 as any).optional === true || (s0 as any).opportunistic === true);
+    steps.push({ skill: name, args: v.args, ...(optional ? { optional: true } : {}) });
   }
   if (!steps.length) return { error: `${label} 没有可执行的动作：${errors.join('；')}` };
   if (errors.length) notes.push(`${label} 里丢掉了不能执行的步骤：${errors.join('；')}`.slice(0, 300));
@@ -244,6 +246,26 @@ export class Thinker {
     throw new Error('INVALID_DECISION: 思考轮次用完');
   }
 
+  /**
+   * 休息/睡前回想：把零碎的经验整理成少数几条靠谱的窍门，顺便写一句日记。
+   * 在后台进行，不打断手上的事；mock 模式下不做（规则模式不会写窍门）。
+   */
+  async reflect(self: SelfModel, persona: string, signal: AbortSignal): Promise<Consolidation | null> {
+    if (!this.planner.autonomous) return null;
+    const messages = buildReflectionMessages(self, persona);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const c = await this.planner.complete(messages, { label: 'mind:回想', tier: 'full', signal, attempt });
+      try {
+        const raw = extractJson(c.text) as Record<string, any>;
+        return parseConsolidation(raw, new Set(self.data.knowHow.map((k) => k.id)), new Set(self.agenda().map((a) => a.id)));
+      } catch (e) {
+        this.planner.noteInvalid('回想', (e as Error).message);
+        messages.push({ role: 'user', content: '刚才的回复不是合法 JSON，请只输出一个 JSON 对象。' });
+      }
+    }
+    return null;
+  }
+
   private async query(kind: string, raw: Record<string, any>, ctx: MindContext): Promise<string> {
     try {
       if (kind === 'recipes') {
@@ -280,4 +302,20 @@ export class Thinker {
       : draft;
     return { kind: ctx.activity ? 'switch' : 'new', monologue: str(p.thought, 200), activity, notes, source: 'rule', tier: ctx.tier, requestedAt };
   }
+}
+
+/** 校验回想结果：只接受指向已有窍门/议程的操作，文字统一清洗 */
+export function parseConsolidation(raw: unknown, knowHowIds: Set<string>, agendaIds: Set<string>): Consolidation {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('顶层必须是 JSON 对象');
+  const o = raw as Record<string, any>;
+  const ids = (v: unknown, pool: Set<string>) => (Array.isArray(v) ? v : []).filter((x): x is string => typeof x === 'string' && pool.has(x));
+  const used = new Set<string>();
+  const merge = (Array.isArray(o.merge) ? o.merge : []).map((m: any) => ({ ids: [...new Set(ids(m?.ids, knowHowIds))], text: cleanLesson(String(m?.text ?? '')) }))
+    .filter((m: { ids: string[]; text: string }) => m.ids.length >= 2 && m.text.length >= 4 && m.ids.every((id) => !used.has(id)) && (m.ids.forEach((id) => used.add(id)), true));
+  const rewrite = (Array.isArray(o.rewrite) ? o.rewrite : []).map((r: any) => ({ id: String(r?.id ?? ''), text: cleanLesson(String(r?.text ?? '')) }))
+    .filter((r: { id: string; text: string }) => knowHowIds.has(r.id) && !used.has(r.id) && r.text.length >= 4 && (used.add(r.id), true));
+  const drop = ids(o.drop, knowHowIds).filter((id) => !used.has(id));
+  const add = (Array.isArray(o.add) ? o.add : []).map((t: unknown) => cleanLesson(String(t ?? ''))).filter((t: string) => t.length >= 4).slice(0, 5);
+  return { rewrite, merge, drop, add, agendaDrop: ids(o.agenda_drop, agendaIds),
+    ...(str(o.diary, 160) ? { diary: str(o.diary, 160) } : {}), ...(str(o.monologue, 160) ? { monologue: str(o.monologue, 160) } : {}) };
 }

@@ -56,13 +56,14 @@ const OUTPUT = `只输出一个 JSON 对象：
  "say":"可选：仅有新发现、改主意（switch/detour/experiment）、完成一件事或遇到危险才说；不要复述独白，两句至少隔 45 秒",
  "decision":"continue | adjust | new | detour | switch | experiment | rest",
  "activity":{"what":"这段活要干什么（具体）","why":"为什么现在做","kind":"gather|craft|build|explore|survive|rest|experiment|tidy|social|other",
-   "steps":[{"skill":"…","args":{}}],"repeat":1,"done_when":事实条件,"expect":"我预计会怎样","if_stuck":"万一卡住打算怎么办"},
+   "steps":[{"skill":"…","args":{}},{"skill":"…","args":{},"optional":true}],"repeat":1,"done_when":事实条件,"expect":"我预计会怎样","if_stuck":"万一卡住打算怎么办"},
  "next":{"what":"…","why":"…","kind":"…","steps":[…],"repeat":1},
  "agenda":{"add":[{"text":"…","kind":"goal|idea|question","horizon":"today|someday"}],"done":["a_…"],"drop":["a_…"],"focus":"a_…"},
- "learned":"可选：根据实际结果总结一句窍门；同情境已有经验时按 id 修订；每段活最多一条，失败后猜出的办法尚未验证",
+ "learned":"可选：只在结果出乎意料或做完实验时写一句窍门；同情境已有经验时按 id 修订。平常的小想法不用写，休息时会一起回想整理",
  "hypothesis":"experiment 时必填：我猜……会……",
  "experiment_result":"上一段是实验时：supported | refuted | unclear（看 last_activity 的实际结果判断）",
  "diary":"可选：值得写进日记的一句话（今天的经历、感受、里程碑）"}
+顺手、碰运气的步骤（路上见到动物就打、有果子就摘、顺便看看有没有矿）标 "optional":true：没成也不算这段活失败，身体会接着做后面的步骤。真正要完成的事别标 optional。
 continue 时 activity 可省略；next 可省略（但手上这段活快干完时最好写上，干完就能直接接上，不用停下来发呆）。agenda 只放想做的事或想弄明白的问题，像“卡住时先换路”“别往水里挖”的规则写进 learned，不能当成议程。learned 也可直接输出对象，例如 "learned":{"revise":"k_xxx","text":"这次修订的结论"}。`;
 
 export function deliberateSystem(persona: string): string {
@@ -74,8 +75,8 @@ export function deliberateSystem(persona: string): string {
 1. 先看此刻：noticed（刚注意到的事）、since_last_thought（这段时间真实发生的变化）、身体状态、手上这段活（current_activity）进展如何。
 2. 再接上刚才的念头（stream）、今天想做的事（agenda）和日记（diary）。人的思路是连续的：没有新情况就顺着做下去，不要每次都换主意，也不要把刚做完的事再做一遍。
 3. 有新情况就权衡：身体的需要（危险、饥饿、天黑、背包满）> 手上正在做的事 > 新冒出来的好奇心。可以先绕个弯处理（detour），处理完会自动回到被打断的活。
-4. 活要按“一段”来安排：真人不会每走一步想一次。一段活是几分钟的事（“砍够 20 个原木”“把小屋墙砌完”“往东边那座山走过去看看”），routine 写 1–6 步，可以 repeat 多轮，用 done_when 说清楚什么时候算干完。身体会自己连续执行，没找到会换个地方找，失败后只有位置或视野变化才会原样再试；真卡住了才会叫你。
-5. 学习：know_how 是自己以前总结的窍门（id/text/wins/losses 分开显示，unverified=true 表示未验证，可信度较低）；last_activity 是刚才那段活的真实结果（得到/失去了什么、和预想比如何）。结果和预想不一样时想想为什么，用 learned 写一句可复用的窍门；同情境已有经验必须用其 id 修订。连续失败就换办法，别硬磕；某个窍门失败多了就别再信它。出现 stuck_here 时必须选择和 tried 完全不同的思路，例如放弃原目标、就地安家或换区域；参考 repeated_failures，别重复已经失败多次的目标。
+4. 活要按“一段”来安排：真人不会每走一步想一次。一段活是几分钟的事（“砍够 20 个原木”“把小屋墙砌完”“往东边那座山走过去看看”），routine 写 1–6 步，可以 repeat 多轮，用 done_when 说清楚什么时候算干完。别把一个零碎动作单独当成一段活：同一件事的几步放进同一个 routine，能重复的用 repeat；顺手的事标 optional。身体会自己连续执行，没找到会换个地方找，失败后只有位置或视野变化才会原样再试；真卡住了才会叫你。
+5. 学习：know_how 是自己以前总结的窍门（id/text/wins/losses 分开显示，unverified=true 表示未验证，可信度较低）；last_activity 是刚才那段活的真实结果（得到/失去了什么、和预想比如何）。结果和预想不一样时想想为什么，出乎意料才用 learned 写一句可复用的窍门（平常的小想法留到休息时回想）；同情境已有经验必须用其 id 修订。连续失败就换办法，别硬磕；某个窍门失败多了就别再信它。出现 stuck_here 时必须选择和 tried 完全不同的思路，例如放弃原目标、就地安家或换区域；参考 repeated_failures，别重复已经失败多次的目标。
 6. 创新：无聊、好奇或者遇到没见过的东西时，可以冒出点子放进 agenda（kind=idea/question），或者开一段 experiment：小、便宜、结果看得见，写清 hypothesis。实验结果会回到 experiments 里，支持或推翻都是收获。手脚清单里的 use_item / interact_block / hit_entity / ride 等底层操作可以组合出新玩法。
 7. 情绪是真实的信号：累了就找个安全的地方歇着或者睡觉；烦躁说明这个办法不行；无聊说明该找点新鲜事；成就感来自做成东西。没有必须完成的科技树或主线，喜欢什么就玩什么，但要像个会过日子的玩家：吃饱、有工具、天黑有地方待。
 8. 视野有限：只知道亲眼看到/记得的东西，远处没看见不等于没有；坐标必须来自观察或地标，不要编。
@@ -211,4 +212,36 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
   const inUse = new Set([...(ctx.activity?.steps ?? []).map((s) => s.skill), ...(ctx.lastRecord ? [] : [])]);
   const system = glance ? glanceSystem(ctx.persona, inUse) : deliberateSystem(ctx.persona);
   return [{ role: 'system', content: system }, { role: 'user', content: `${JSON.stringify(payload)}\n现在你在想什么、打算怎么做？` }];
+}
+
+/**
+ * 休息/睡前回想：像人一样把这段时间的零碎经验整理成少数几条靠谱的窍门。
+ * 只依据实际成败次数和最近的真实结果，不发明新的事实。
+ */
+export function buildReflectionMessages(self: SelfModel, persona: string): ChatMessage[] {
+  const now = Date.now();
+  const system = `${persona}
+
+你在 Minecraft 里歇下来了（休息、睡觉或者告一段落），回想一下这段时间：哪些办法真的好用，哪些想法被事实推翻了，哪些说的是同一回事。像人一样把零碎的经验整理成少数几条靠谱的窍门。
+规则：
+- 只依据给出的窍门、成败次数（wins/losses）、零碎想法（insights）和最近的经历（recent），不要编造没发生过的事。
+- 说的是同一件事的合并成一条（merge），措辞含糊或太长的改写（rewrite，60 字以内，写清“什么情况下、怎么做、会怎样”）。
+- 失败明显多于成功、或被后来的经历推翻的丢掉（drop）；只是一次性的流水账也丢掉。
+- 零碎想法里被最近经历证实的，才整理成新的窍门（add，最多 5 条）；没证实的就让它过去。
+- 议程里已经过时、做不成或不再想做的，可以放下（agenda_drop）。
+- 整理后窍门总数最好不超过 25 条。
+- 用一句话写日记（diary）记下这段时间最值得记住的事，再用一句独白（monologue）说说现在的感受。
+只输出一个 JSON 对象：
+{"merge":[{"ids":["k_…","k_…"],"text":"…"}],"rewrite":[{"id":"k_…","text":"…"}],"drop":["k_…"],"add":["…"],"agenda_drop":["a_…"],"diary":"…","monologue":"…"}`;
+  const payload = {
+    know_how: self.data.knowHow.map((k) => ({ id: k.id, text: cleanLesson(k.text), wins: k.wins, losses: k.losses, ...(k.unverified ? { unverified: true } : {}),
+      age_min: Math.round((now - k.createdAt) / 60000) })),
+    insights: self.insights().map((i) => `${i.text}${i.outcome ? `（当时结果：${i.outcome}）` : ''}`),
+    recent: self.history(20).map((r) => `${r.what} → ${r.outcome}${Object.keys(r.gained).length ? `，得到 ${Object.entries(r.gained).map(([k, v]) => `${k}×${v}`).join(' ')}` : ''}${r.outcome !== 'done' ? `：${r.summary.slice(0, 60)}` : ''}`),
+    experiments: self.experiments(6).map((e) => `${e.hypothesis} → ${e.status}${e.evidence ? `（${e.evidence.slice(0, 80)}）` : ''}`),
+    agenda: self.agenda().map((a) => ({ id: a.id, text: a.text, kind: a.kind, tried: a.attempts })),
+    diary: self.diary(5).map((d) => d.text),
+    feeling: moodWords(self.mood),
+  };
+  return [{ role: 'system', content: system }, { role: 'user', content: `${JSON.stringify(payload)}\n回想一下，整理好再告诉我。` }];
 }

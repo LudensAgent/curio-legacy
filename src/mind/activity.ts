@@ -5,7 +5,7 @@ import { evaluateCondition } from '../projects/conditions.ts';
 import { SKILLS } from '../skills/index.ts';
 import type { SkillResult } from '../skills/types.ts';
 import { shortId } from '../util.ts';
-import type { Activity, ActivityDraft, ActivityOutcome, ActivityRecord } from './types.ts';
+import type { Activity, ActivityDraft, ActivityOutcome, ActivityRecord, ActivityStep } from './types.ts';
 
 export const inventoryOf = (s: Pick<AgentState, 'inventory'>): Record<string, number> => {
   const out: Record<string, number> = {};
@@ -57,6 +57,22 @@ export function doneWhenMet(a: Activity, state: AgentState, percept?: Percept): 
   return !!a.doneWhen && evaluateCondition(a.doneWhen, state, state.worldId, [], percept).status === 'satisfied';
 }
 
+/** 刚刚结束的那一步在 routine 里的原样（带 optional 标记） */
+function ownStep(a: Activity, step: Step): ActivityStep | undefined {
+  const own = a.steps[Math.max(0, a.index - 1)];
+  return own && own.skill === step.skill ? own : undefined;
+}
+
+/**
+ * 没做成但不算这段活失败的情况：只读观察没看到目标，或者本来就是“顺手、碰运气”的一步。
+ * 真人“路上见到动物就打一只”，没见到就接着赶路，不会因此觉得整件事搞砸了。
+ */
+export function softMiss(a: Activity | null | undefined, step: Step, result: Pick<SkillResult, 'status' | 'failureCode'>): boolean {
+  if (result.status !== 'failed') return false;
+  if (SKILLS[step.skill]?.readOnly && result.failureCode === 'NOT_FOUND') return true;
+  return !!a && ownStep(a, step)?.optional === true;
+}
+
 /** 下一个动作；这一轮做完了就开始下一轮；都做完返回 null */
 export function nextStep(a: Activity): Step | null {
   if (a.index >= a.steps.length) {
@@ -105,12 +121,13 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     return { kind: 'continue' };
   }
   if (result.status === 'cancelled') return { kind: 'continue' };
-  if (SKILLS[step.skill]?.readOnly && result.failureCode === 'NOT_FOUND') {
+  if (softMiss(a, step, result)) {
     a.consecutiveFailures = 0;
+    const optional = ownStep(a, step)?.optional === true;
     if (doneWhenMet(a, state, percept)) return { kind: 'done', met: true, why: '达到了收工条件' };
     return remainingSteps(a) === 0
-      ? { kind: 'done', met: false, why: `观察没有找到目标；这段活的步骤都做完了${a.doneWhen ? '，收工条件尚未达到' : ''}` }
-      : { kind: 'continue' };
+      ? { kind: 'done', met: !a.doneWhen, why: `${optional ? `顺手的「${step.skill}」没成` : '观察没有找到目标'}；这段活的步骤都做完了${a.doneWhen ? '，收工条件尚未达到' : ''}` }
+      : { kind: 'continue', ...(optional ? { adapted: `顺手的「${step.skill}」没成（${result.failureCode ?? '失败'}），不碍事，接着做` } : {}) };
   }
   a.failures++;
   a.consecutiveFailures++;
@@ -151,7 +168,7 @@ export function describeActivity(a: Activity, state: AgentState, percept?: Perce
   const done = a.doneWhen ? evaluateCondition(a.doneWhen, state, state.worldId, [], percept) : null;
   return {
     what: a.what, why: a.why, kind: a.kind,
-    routine: a.steps.map((s) => `${s.skill} ${JSON.stringify(s.args ?? {})}`),
+    routine: a.steps.map((s) => `${s.skill} ${JSON.stringify(s.args ?? {})}${s.optional ? '（顺手）' : ''}`),
     round: `${a.iteration + 1}/${a.repeat}`, next_step: a.index,
     elapsed_s: Math.round((Date.now() - a.startedAt) / 1000),
     ...(done ? { done_when: { status: done.status, actual: done.actual } } : {}),

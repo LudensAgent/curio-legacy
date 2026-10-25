@@ -27,3 +27,20 @@ test('climb_up preserves explicit false through validation and rejects acknowled
   assert.equal((result.data?.effectEvidence as any).changed, false);
   assert.match(result.summary, /未实际爬升/);
 });
+
+test('climb_up says plainly when its stop condition already holds instead of reporting a failed climb', async () => {
+  let moves = 0;
+  const adapter = {
+    state: () => ({ pos: { x: 0.5, y: 77, z: 0.5 }, inventory: [{ name: 'dirt', count: 8 }] }),
+    blockAt: () => 'air', lightAt: () => ({ block: 0, sky: 15 }),
+    async moveTo() { moves++; },
+  } as unknown as GameAdapter;
+  const parsed = climbUp.validate({ until_sky: true }, adapter);
+  assert.ok(parsed.ok);
+  const ctx = { adapter, signal: new AbortController().signal, deadline: Date.now() + 10_000, senses: { refresh() {} } } as unknown as SkillCtx;
+  const result = await climbUp.run(ctx, parsed.args);
+  assert.equal(result.status, 'succeeded');
+  assert.equal(moves, 0);
+  assert.equal(result.data?.alreadySatisfied, true);
+  assert.match(result.summary, /"height":2/);
+});

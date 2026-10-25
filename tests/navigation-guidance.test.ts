@@ -203,3 +203,33 @@ test('waypoints avoid the last visible block before an unseen drop and treetop l
   surfaces.set('12,63,0', { name: 'grass_block', pos: { x: 12, y: 63, z: 0 }, at: now });
   assert.equal(vision.navigationWaypoint({ x: 30, y: 64, z: 0 }, 12, [])?.x, 11.5, 'once ground beyond it is visible, it is no longer an edge');
 });
+
+test('with no visible way forward, remembered footprints lead back along the path actually walked', async () => {
+  const { FakeAdapter } = await import('./fake-adapter.ts');
+  const adapter = new FakeAdapter();
+  const vision = new Vision(adapter);
+  for (const x of [0, 5, 10, 15, 20, 25]) { adapter.pos = { x, y: 64, z: 0 }; vision.scan(); }
+  adapter.pos = { x: 25, y: 64, z: 0 };
+  const back = vision.rememberedWaypoint({ x: 0, y: 64, z: 0 }, 12, [adapter.pos]);
+  assert.ok(back && back.x < 25 && back.x >= 13, 'a footprint on the way home within reach');
+  assert.equal(vision.rememberedWaypoint({ x: 60, y: 64, z: 0 }, 12, [adapter.pos]), null, 'never invents a path toward unvisited places');
+  const excluded = vision.rememberedWaypoint({ x: 0, y: 64, z: 0 }, 12, [adapter.pos, back!]);
+  assert.notDeepEqual(excluded, back, 'a footprint that failed is skipped');
+});
+
+test('goto falls back to remembered footprints when nothing visible leads toward the target', async (t) => {
+  const adapter = start();
+  adapter.pos = { x: 20.5, y: 64, z: 0.5 };
+  const trail = [{ x: 12.5, y: 64, z: 0.5 }, { x: 4.5, y: 64, z: 0.5 }];
+  const ctx = makeCtx(adapter, { senses: {
+    navigationWaypoint: () => null,
+    rememberedWaypoint: (target: Vec3Like, _max: number, excluded: Vec3Like[]) => trail.find((p) => !excluded.some((e) => Math.hypot(e.x - p.x, e.z - p.z) < 1.5)
+      && Math.hypot(p.x - target.x, p.z - target.z) < Math.hypot(adapter.pos.x - target.x, adapter.pos.z - target.z) - 1) ?? null,
+  } });
+  t.after(() => ctx.memory.close());
+  const moves: MoveTarget[] = [];
+  t.mock.method(adapter, 'moveTo', async (target: MoveTarget) => { moves.push(target); if (target.kind === 'near') adapter.pos = { ...target.pos }; });
+  const result = await goTo.run(ctx, { target: '4,64,0' });
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.deepEqual(moves.map((m) => m.kind === 'near' ? m.pos.x : null), [12.5, 4.5], 'walked back along the remembered trail');
+});

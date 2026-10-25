@@ -16,6 +16,11 @@ interface SelfData {
   stream: Thought[];
   /** 每个技能的手感：做成/失败次数与平均耗时 */
   feel: Record<string, { ok: number; fail: number; ms: number }>;
+  /** 还没来得及整理的零碎想法：休息/睡前回想时再决定留不留 */
+  insights?: { at: number; text: string; outcome?: string }[];
+  /** 上次回想的时间与当时的窍门数 */
+  reflectedAt?: number;
+  knowHowAtReflect?: number;
 }
 
 export const clamp01 = (n: number) => Math.max(0, Math.min(1, Number.isFinite(n) ? n : 0));
@@ -296,6 +301,52 @@ export class SelfModel {
     this.touch();
   }
   diary(n = 5) { return this.data.diary.slice(-n); }
+
+  // ---------------------------------------------------------------- 回想
+  /** 记一条零碎想法，等休息时再整理（人不会每做一件事就立一条规矩） */
+  jot(text: string, outcome?: string) {
+    const t = cleanLesson(text);
+    if (t.length < 4) return;
+    const list = (this.data.insights ??= []);
+    if (list.some((i) => i.text === t)) return;
+    list.push({ at: Date.now(), text: t, ...(outcome ? { outcome } : {}) });
+    if (list.length > 20) this.data.insights = list.slice(-20);
+    this.touch();
+  }
+  insights() { return this.data.insights ?? []; }
+  /** 自上次回想以来攒了多少要整理的东西 */
+  reflectionBacklog(): number {
+    return (this.data.insights?.length ?? 0) + Math.max(0, this.data.knowHow.length - (this.data.knowHowAtReflect ?? 0));
+  }
+  get reflectedAt() { return this.data.reflectedAt ?? 0; }
+
+  /** 应用回想的结果：合并重复、改写含糊的、丢掉被事实推翻的；零碎想法清空 */
+  consolidate(c: import('./types.ts').Consolidation): { before: number; after: number } {
+    const before = this.data.knowHow.length;
+    const byId = new Map(this.data.knowHow.map((k) => [k.id, k]));
+    for (const m of c.merge) {
+      const parts = m.ids.map((id) => byId.get(id)).filter((k): k is KnowHow => !!k);
+      if (parts.length < 2) continue;
+      const [keep, ...rest] = parts;
+      keep.text = m.text;
+      keep.wins = parts.reduce((n, k) => n + k.wins, 0);
+      keep.losses = parts.reduce((n, k) => n + k.losses, 0);
+      keep.unverified = parts.every((k) => k.unverified === true) && keep.wins === 0;
+      keep.tags = [...new Set(parts.flatMap((k) => k.tags))].slice(0, 12);
+      keep.updatedAt = Date.now();
+      const drop = new Set(rest.map((k) => k.id));
+      this.data.knowHow = this.data.knowHow.filter((k) => !drop.has(k.id));
+    }
+    for (const r of c.rewrite) { const k = byId.get(r.id); if (k) { k.text = r.text; k.updatedAt = Date.now(); } }
+    if (c.drop.length) { const drop = new Set(c.drop); this.data.knowHow = this.data.knowHow.filter((k) => !drop.has(k.id)); }
+    for (const t of c.add) this.learn(t, { source: 'reflection' });
+    for (const id of c.agendaDrop) this.setAgendaStatus(id, 'dropped');
+    this.data.insights = [];
+    this.data.reflectedAt = Date.now();
+    this.data.knowHowAtReflect = this.data.knowHow.length;
+    this.touch();
+    return { before, after: this.data.knowHow.length };
+  }
 
   // ---------------------------------------------------------------- 手感
   practice(skill: string, ok: boolean, ms: number) {

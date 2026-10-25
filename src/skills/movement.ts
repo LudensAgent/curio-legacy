@@ -324,7 +324,7 @@ export const goTo: Skill<{ target: string }> = {
     };
     const startDist = distance(s.pos), alreadyHere = arrived(s.pos);
     const visited: Vec3Like[] = [s.pos];
-    let bestDistance = startDist, detours = 0;
+    let bestDistance = startDist, detours = 0, memoryHops = 0;
     const prog = setInterval(() => ctx.progress(1 - Math.min(1, distance(adapter.state().pos) / Math.max(1, startDist))), 1000);
     try {
       for (let hops = 0; !arrived(adapter.state().pos) && hops < 160; hops++) {
@@ -332,16 +332,22 @@ export const goTo: Skill<{ target: string }> = {
         if (Date.now() >= ctx.deadline) return fail('TIMEOUT', '步行时间已用完，按当前位置重新选择路线');
         await face();
         const cur = adapter.state().pos;
-        const waypoint = ctx.senses.navigationWaypoint?.(pos, 12, visited);
+        let waypoint = ctx.senses.navigationWaypoint?.(pos, 12, visited);
+        let fromMemory = false;
         if (ctx.senses.navigationWaypoint && !waypoint) {
           if (await tryDoor()) continue;
           await glance(ctx);
           if (ctx.senses.navigationWaypoint(pos, 12, visited)) continue;
+          // 眼前找不到路：像人一样沿着来时走过的地方往回挪（只用亲身站过的位置）
+          const remembered = memoryHops < 12 ? ctx.senses.rememberedWaypoint?.(pos, 24, visited) : null;
+          if (remembered) { waypoint = remembered; fromMemory = true; memoryHops++; }
+        }
+        if (ctx.senses.navigationWaypoint && !waypoint) {
           const water = waterNear();
           return fail('PATH_NOT_FOUND', `前往 ${label}：眼前没有可确认的${water ? '陆地落脚点，附近有水，可考虑 boat 渡河' : '通路，先换个观察位置或寻找入口'}；没有挖墙或搭柱`, { ...measured(cur), waterAhead: water });
         }
         const dxz = Math.hypot(pos.x - cur.x, pos.z - cur.z);
-        const target = waypoint ? { kind: 'near' as const, pos: waypoint, range: 0.7 }
+        const target = waypoint ? { kind: 'near' as const, pos: waypoint, range: fromMemory ? 1.2 : 0.7 }
           : dxz > 32 ? { kind: 'xz' as const, x: cur.x + (pos.x - cur.x) * 24 / dxz, z: cur.z + (pos.z - cur.z) * 24 / dxz, range: 2 }
           : flat ? { kind: 'xz' as const, x: pos.x, z: pos.z, range } : { kind: 'near' as const, pos, range };
         try {
@@ -349,10 +355,13 @@ export const goTo: Skill<{ target: string }> = {
         } catch (e) {
           if (isAbort(e)) throw e;
           if (await tryDoor()) continue;
+          // 记忆里的落脚点走不过去（被挡住、地形变了）：记下，换下一个
+          if (fromMemory) { visited.push(waypoint!); continue; }
           throw e;
         }
         if (!inScope()) return fail('WRONG_DIMENSION', '途中世界或会话已改变，需要重新规划');
         const after = adapter.state().pos;
+        if (fromMemory && dist3(cur, after) < 0.3 && !arrived(after)) { visited.push(waypoint!); continue; }
         if (dist3(cur, after) < 0.3 && !arrived(after)) return fail('PATH_NOT_FOUND', `前往 ${label} 没有取得进展，仍在 (${after.x.toFixed(2)},${after.y.toFixed(2)},${after.z.toFixed(2)})；尚未到达目标位置，需要换入口或路线`, measured(after));
         if (distance(after) < bestDistance - 0.5) { bestDistance = distance(after); detours = 0; }
         else if (++detours >= 4) return fail('PATH_NOT_FOUND', `绕行后仍未接近 ${label}，需要观察入口或另选路线`, measured(after));
