@@ -378,6 +378,10 @@ function snapshot() {
     methods: { definitions: methods.list().slice(-12), gaps: methods.abilityGaps().slice(-8) },
     episodicMemory: episodic.snapshot(),
     metrics: metrics.snapshot(),
+    skills: { list: behaviors.list().map((b) => ({ name: b.name, description: b.description, mode: b.mode, source: b.source, code: !!b.code, version: b.version ?? null,
+      overrides: b.overrides, stats: behaviors.statsOf(b.name) ? { ok: behaviors.statsOf(b.name)!.ok, fail: behaviors.statsOf(b.name)!.fail, disabled: !!behaviors.statsOf(b.name)!.disabled, lastError: behaviors.statsOf(b.name)!.lastError ?? null } : null })),
+      knowledge: skillBook.list().filter((k) => k.behavior === undefined).map((k) => ({ name: k.name, description: k.description, source: k.source })),
+      improving: improver.busy ? { name: improver.busy.name, sinceSec: Math.round((Date.now() - improver.busy.startedAt) / 1000) } : null },
     spectator: spectator.status,
     live: live ? { status: live.status(), audience: audience?.stats() } : null,
     memory: {

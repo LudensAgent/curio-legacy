@@ -4,434 +4,490 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Curio · Agent 控制台</title>
-<link rel="stylesheet" href="/vendor/gridstack/gridstack.min.css" onerror="this.onerror=null;this.href='https://cdn.jsdelivr.net/npm/gridstack@12.3.3/dist/gridstack.min.css'" />
 <style>
-  /* 简约 · 线条 · 白色基调 */
   :root {
-    --bg: #ffffff; --text: #111111; --dim: #8c8c8c; --line: #e6e6e6; --ink: #111111;
-    --grass: #111111; --blue: #9a9a9a; --violet: #5a5a5a; --dirt: #111111; --gold: #111111;
-    --red: #d64545; --good: #2f7d4f;
+    --bg: #f6f6f4; --card: #ffffff; --text: #18181b; --dim: #8a8a8f; --faint: #b9b9be; --line: #e7e7e4; --soft: #f1f1ee;
+    --accent: #2f6f4f; --accent-soft: #e7f1ea; --warn: #b7791f; --warn-soft: #fbf3e4; --bad: #c43d3d; --bad-soft: #fbecec; --info: #3b5ea8; --info-soft: #eaf0fb;
     --mono: "JetBrains Mono", "Cascadia Mono", ui-monospace, Consolas, monospace;
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111113; --card: #19191c; --text: #ececee; --dim: #8d8d94; --faint: #5b5b62; --line: #2a2a2f; --soft: #222226;
+      --accent: #6fbf8e; --accent-soft: #1c2b22; --warn: #e0a84b; --warn-soft: #2c2416; --bad: #ef6b6b; --bad-soft: #2e1a1a; --info: #86a6ec; --info-soft: #1b2233; }
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.6 "Inter", system-ui, "Microsoft YaHei", sans-serif; -webkit-font-smoothing: antialiased; }
-  header { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; padding: 14px 24px; border-bottom: 1px solid var(--ink); background: var(--bg); position: sticky; top: 0; z-index: 2; }
-  header h1 { font-size: 14px; font-weight: 600; margin: 0; letter-spacing: .08em; text-transform: uppercase; }
-  header h1 b { display: none; }
-  .pill { font: 11px var(--mono); padding: 0 0 0 10px; border-left: 1px solid var(--line); color: var(--dim); }
-  .pill.on { color: var(--text); } .pill.off { color: var(--red); } .pill.warn { color: var(--dim); }
-  .spacer { flex: 1; }
-  button { background: transparent; color: var(--text); border: 1px solid var(--ink); border-radius: 0; padding: 5px 12px; cursor: pointer; font: 12px inherit; }
-  button:hover { background: var(--ink); color: #fff; }
-  input[type=text], input:not([type]) { background: transparent; color: var(--text); border: 0; border-bottom: 1px solid var(--ink); border-radius: 0; padding: 5px 2px; font: inherit; min-width: 260px; outline: none; }
-  input[type=checkbox] { accent-color: var(--ink); vertical-align: -2px; }
-  main { border-left: 1px solid var(--line); margin: 0 24px 24px; }
-  section { background: var(--bg); border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 16px 18px; min-width: 0; }
-  section h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .14em; color: var(--dim); margin: 0 0 14px; font-weight: 500; display: flex; align-items: center; gap: 10px; }
-  section h2 .opts { margin-left: auto; text-transform: none; letter-spacing: 0; font-size: 11px; }
-  /* gridstack：每个面板都是 grid-stack-item，内容区就是 section */
-  .grid-stack-item-content { display: flex; flex-direction: column; inset: 0 !important; }
-  .grid-stack-item-content > .fill { flex: 1; min-height: 0; }
-  .editing .grid-stack-item-content { outline: 1px dashed var(--dim); outline-offset: -4px; }
-  .editing section h2 { cursor: move; color: var(--text); }
-  .editing section h2::before { content: "⠿"; color: var(--dim); }
-  /* gridstack 没加载成功时的回退：保留原来的 CSS 网格 */
-  .grid-stack.nogs { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
-  .nogs > .grid-stack-item[gs-w="6"] { grid-column: span 2; }
-  .nogs > .grid-stack-item[gs-w="12"] { grid-column: 1 / -1; }
-  .nogs > .grid-stack-item > section { height: 100%; }
-  .nogs #log, .nogs .llm { height: 360px; }
-  @media (max-width: 760px) { .nogs > .grid-stack-item[gs-w="6"] { grid-column: auto; } }
-  #layoutBtn.on { background: var(--ink); color: #fff; }
-  .vision { display: flex; gap: 18px; flex-wrap: wrap; align-items: flex-start; }
-  canvas#eye { width: 100%; max-width: 560px; aspect-ratio: 5 / 3; image-rendering: pixelated; border: 1px solid var(--ink); background: #fafafa; }
-  .vlist { flex: 1; min-width: 200px; }
-  .row { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; }
-  .row span:first-child { color: var(--dim); }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.55 "Inter", system-ui, "Microsoft YaHei", sans-serif; -webkit-font-smoothing: antialiased; }
   .mono { font-family: var(--mono); font-size: 12px; }
-  .mindgrid { display: grid; grid-template-columns: 1.1fr 1.3fr 1fr 1fr; gap: 14px; overflow: auto; }
-  @media (max-width: 1100px) { .mindgrid { grid-template-columns: 1fr 1fr; } }
-  @media (max-width: 760px) { .mindgrid { grid-template-columns: 1fr; } }
-  .mindlist li { font-size: 12px; line-height: 1.45; margin-bottom: 4px; }
-  .mindlist .k { color: var(--dim); font-size: 11px; }
-  .moodrow { display: grid; grid-template-columns: 3em 1fr; align-items: center; gap: 6px; font-size: 11px; }
-  .moodrow .bar { margin: 3px 0; }
-  .bar { height: 2px; background: var(--line); margin: 2px 0 10px; }
-  .bar i { display: block; height: 100%; background: var(--ink); transition: width .4s; }
-  .goal { font-size: 18px; font-weight: 600; margin: 0 0 4px; letter-spacing: -.01em; }
-  .thought { color: #555; margin-bottom: 10px; }
-  ol.steps { margin: 6px 0 0; padding-left: 18px; font: 12px var(--mono); }
-  ol.steps li { padding: 2px 0; }
-  ol.steps li.done { color: #c4c4c4; text-decoration: line-through; }
-  ol.steps li.now { font-weight: 600; }
-  ol.steps li.now::marker { content: "→ "; }
-  .kpis { display: grid; grid-template-columns: repeat(2, 1fr); border-top: 1px solid var(--line); border-left: 1px solid var(--line); }
-  .kpi { border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 10px 12px; }
-  .kpi b { display: block; font: 500 22px var(--mono); letter-spacing: -.02em; }
+  .dim { color: var(--dim); }
+  button { background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; cursor: pointer; font: inherit; }
+  button:hover { border-color: var(--text); }
+  button.primary { background: var(--text); color: var(--card); border-color: var(--text); }
+  input { background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font: inherit; outline: none; }
+  input:focus { border-color: var(--text); }
+  header { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 20px; background: var(--card); border-bottom: 1px solid var(--line); }
+  .brand { font-weight: 650; letter-spacing: .02em; }
+  .status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+  .dot.on { background: var(--accent); } .dot.off { background: var(--bad); } .dot.warn { background: var(--warn); }
+  .chip { font: 11px var(--mono); color: var(--dim); padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; white-space: nowrap; }
+  .chip.on { color: var(--accent); border-color: var(--accent-soft); background: var(--accent-soft); }
+  .chip.off { color: var(--bad); border-color: var(--bad-soft); background: var(--bad-soft); }
+  .grow { flex: 1; }
+  .suggest { display: flex; gap: 6px; }
+  .suggest input { width: 260px; }
+  .app { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 16px; padding: 16px 20px 24px; max-width: 1600px; margin: 0 auto; }
+  @media (max-width: 960px) { .app { grid-template-columns: 1fr; padding: 12px; } .suggest input { width: 100%; } .suggest { flex: 1 1 100%; } }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; min-width: 0; }
+  .card + .card { margin-top: 12px; }
+  .card h2 { margin: 0 0 10px; font-size: 11px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); display: flex; align-items: center; gap: 8px; }
+  .card h2 .r { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .col { display: flex; flex-direction: column; min-width: 0; }
+  aside.col { position: sticky; top: 64px; align-self: start; max-height: calc(100vh - 80px); overflow: auto; }
+  @media (max-width: 960px) { aside.col { position: static; max-height: none; } }
+  .row { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; }
+  .row > span:first-child { color: var(--dim); flex: none; }
+  .row > span:last-child { text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sub { margin: 12px 0 6px; font-size: 11px; color: var(--dim); letter-spacing: .06em; }
+  .meter { display: grid; grid-template-columns: 34px 1fr 52px; align-items: center; gap: 8px; margin: 4px 0; font-size: 12px; }
+  .bar { height: 6px; background: var(--soft); border-radius: 99px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 99px; transition: width .4s; }
+  .bar.warn i { background: var(--warn); } .bar.bad i { background: var(--bad); } .bar.info i { background: var(--info); }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; }
+  .item { font: 11px var(--mono); padding: 2px 7px; border-radius: 6px; background: var(--soft); }
+  .item.hostile { background: var(--bad-soft); color: var(--bad); }
+  .now { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 16px; }
+  @media (max-width: 1200px) { .now { grid-template-columns: 1fr; } }
+  .label { font-size: 11px; color: var(--dim); margin-bottom: 2px; }
+  .goal { font-size: 17px; font-weight: 650; line-height: 1.35; margin-bottom: 6px; }
+  .checklist { list-style: none; margin: 4px 0 0; padding: 0; }
+  .checklist li { display: flex; gap: 8px; padding: 3px 0; font-size: 13px; }
+  .checklist li::before { content: "○"; color: var(--faint); }
+  .checklist li.done { color: var(--faint); text-decoration: line-through; }
+  .checklist li.done::before { content: "●"; color: var(--accent); }
+  .checklist li.next { font-weight: 600; }
+  .checklist li.next::before { content: "▶"; color: var(--text); }
+  .activity { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--line); }
+  .activity .what { font-weight: 600; font-size: 14px; }
+  .routine { list-style: none; margin: 8px 0 0; padding: 0; font: 12px var(--mono); }
+  .routine li { padding: 3px 8px; border-radius: 6px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .routine li.now { background: var(--soft); color: var(--text); font-weight: 600; }
+  .thought { font-size: 14px; line-height: 1.6; padding: 10px 12px; background: var(--soft); border-radius: 8px; }
+  .thought .meta { display: block; margin-top: 6px; font-size: 11px; color: var(--dim); }
+  .badge { font: 10px var(--mono); padding: 1px 6px; border-radius: 4px; background: var(--soft); color: var(--dim); vertical-align: 1px; white-space: nowrap; }
+  .badge.bad { background: var(--bad-soft); color: var(--bad); }
+  .badge.good { background: var(--accent-soft); color: var(--accent); }
+  .badge.info { background: var(--info-soft); color: var(--info); }
+  .badge.warn { background: var(--warn-soft); color: var(--warn); }
+  .action { margin-top: 12px; }
+  .action .skill { font: 600 14px var(--mono); }
+  .kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+  @media (max-width: 1200px) { .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  .kpi { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; }
+  .kpi b { display: block; font: 600 18px var(--mono); }
   .kpi small { color: var(--dim); font-size: 11px; }
-  .kpi.good b { color: var(--good); } .kpi.bad b { color: var(--red); } .kpi.mid b { color: var(--text); }
-  .stack { display: flex; height: 6px; margin-top: 14px; background: var(--line); }
-  .stack i { display: block; height: 100%; }
-  .legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 6px; font-size: 11px; color: var(--dim); }
-  .legend span::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 4px; background: var(--c); vertical-align: -1px; }
-  ul.plain { list-style: none; margin: 0 0 6px; padding: 0; font: 12px var(--mono); }
-  ul.plain li { padding: 3px 0; border-bottom: 1px solid #f2f2f2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .sub { color: var(--dim); margin-top: 10px; font-size: 11px; text-transform: uppercase; letter-spacing: .1em; }
-  #log { min-height: 120px; overflow: auto; font: 12px var(--mono); border-top: 1px solid var(--line); padding: 8px 0; }
+  .kpi.good b { color: var(--accent); } .kpi.bad b { color: var(--bad); }
+  .tabs { display: flex; gap: 2px; margin-top: 16px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+  .tab { border: 0; background: transparent; border-radius: 8px 8px 0 0; padding: 8px 14px; color: var(--dim); white-space: nowrap; }
+  .tab:hover { color: var(--text); }
+  .tab.on { color: var(--text); background: var(--card); box-shadow: inset 0 -2px 0 var(--text); }
+  .tab .n { font: 10px var(--mono); color: var(--faint); margin-left: 4px; }
+  .pane { display: none; margin-top: 12px; }
+  .pane.on { display: block; }
+  .grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  @media (max-width: 1100px) { .grid3 { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 760px) { .grid2, .grid3 { grid-template-columns: 1fr; } }
+  .grid2 > .card + .card, .grid3 > .card + .card { margin-top: 0; }
+  ul.list { list-style: none; margin: 0; padding: 0; }
+  ul.list li { padding: 5px 0; border-bottom: 1px solid var(--soft); font-size: 12px; line-height: 1.5; }
+  ul.list li:last-child { border-bottom: 0; }
+  ul.list .k { color: var(--dim); font-size: 11px; margin-right: 4px; }
+  ul.list.mono li { font-family: var(--mono); }
+  .empty { color: var(--faint); font-size: 12px; }
+  .scroll { max-height: 460px; overflow: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; font-weight: 500; color: var(--dim); font-size: 11px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  td { padding: 7px 8px; border-bottom: 1px solid var(--soft); vertical-align: top; }
+  td .err { color: var(--bad); font-size: 11px; margin-top: 2px; }
+  .notice { padding: 8px 12px; border-radius: 8px; background: var(--info-soft); color: var(--info); font-size: 12px; margin-bottom: 10px; }
+  .vision { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 16px; }
+  @media (max-width: 900px) { .vision { grid-template-columns: 1fr; } }
+  canvas#eye { width: 100%; aspect-ratio: 5 / 3; image-rendering: pixelated; border-radius: 8px; background: var(--soft); }
+  .legend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px; font-size: 11px; color: var(--dim); }
+  .legend span::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 4px; border-radius: 2px; background: var(--c); vertical-align: -1px; }
+  .filters { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; font-size: 12px; color: var(--dim); }
+  #log { height: 520px; overflow: auto; font: 12px/1.6 var(--mono); }
   #log div { white-space: pre-wrap; word-break: break-all; padding: 1px 0; }
-  .P0 { color: var(--red); font-weight: 600; } .P1 { color: #b8860b; } .P2 { color: var(--text); } .P3 { color: #b0b0b0; }
-  .filters { margin-bottom: 8px; }
-  .filters label { margin-right: 14px; font-size: 12px; color: var(--dim); }
-  /* LLM 调用流 */
-  .llm { display: flex; min-height: 0; border-top: 1px solid var(--line); }
-  .calls { list-style: none; margin: 0; padding: 0; width: 260px; flex: none; overflow: auto; border-right: 1px solid var(--line); font: 12px var(--mono); }
-  .calls li { padding: 6px 10px 6px 0; border-bottom: 1px solid #f2f2f2; cursor: pointer; display: grid; grid-template-columns: 14px 1fr auto; gap: 6px; }
-  .calls li.sel { background: #f5f5f5; }
-  .calls li small { grid-column: 2 / -1; color: var(--dim); }
-  .st-streaming::before { content: "◌"; animation: blink 1s infinite; } .st-ok::before { content: "✓"; color: var(--good); }
-  .st-invalid::before { content: "!"; color: #b8860b; } .st-error::before { content: "✗"; color: var(--red); }
+  #log .t { color: var(--faint); margin-right: 6px; }
+  .P0 { color: var(--bad); font-weight: 600; } .P1 { color: var(--warn); } .P2 { color: var(--text); } .P3 { color: var(--faint); }
+  .llm { display: grid; grid-template-columns: 280px minmax(0, 1fr); height: 600px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); overflow: hidden; }
+  @media (max-width: 760px) { .llm { grid-template-columns: 1fr; height: auto; } .calls { max-height: 200px; } }
+  .calls { list-style: none; margin: 0; padding: 0; overflow: auto; border-right: 1px solid var(--line); font-size: 12px; }
+  .calls li { padding: 8px 12px; border-bottom: 1px solid var(--soft); cursor: pointer; display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; gap: 6px; }
+  .calls li:hover { background: var(--soft); }
+  .calls li.sel { background: var(--soft); box-shadow: inset 3px 0 0 var(--text); }
+  .calls li small { grid-column: 2 / -1; color: var(--dim); font-family: var(--mono); font-size: 11px; }
+  .st-streaming::before { content: "◌"; animation: blink 1s infinite; } .st-ok::before { content: "✓"; color: var(--accent); }
+  .st-invalid::before { content: "!"; color: var(--warn); } .st-error::before { content: "✗"; color: var(--bad); }
   @keyframes blink { 50% { opacity: .2; } }
-  .llmDetail { flex: 1; min-width: 0; overflow: auto; padding: 8px 0 8px 14px; }
+  .llmDetail { overflow: auto; padding: 12px 16px; }
   .llmDetail .meta { font: 11px var(--mono); color: var(--dim); margin-bottom: 8px; }
-  .llmDetail details { border-bottom: 1px solid #f2f2f2; }
-  .llmDetail summary { cursor: pointer; font: 11px var(--mono); color: var(--dim); padding: 4px 0; text-transform: uppercase; letter-spacing: .08em; }
-  .llmDetail pre { margin: 0 0 8px; white-space: pre-wrap; word-break: break-word; font: 12px/1.5 var(--mono); }
-  .llmDetail pre.reason { color: #8c8c8c; }
-  .llmDetail pre.out { color: var(--text); }
-  .llmDetail .err { color: var(--red); font: 12px var(--mono); }
+  .llmDetail details { border-bottom: 1px solid var(--soft); }
+  .llmDetail summary { cursor: pointer; font: 11px var(--mono); color: var(--dim); padding: 6px 0; }
+  .llmDetail pre { margin: 0 0 10px; white-space: pre-wrap; word-break: break-word; font: 12px/1.55 var(--mono); }
+  .llmDetail pre.reason { color: var(--dim); }
+  .llmDetail .err { color: var(--bad); font: 12px var(--mono); }
   .caret::after { content: "▍"; animation: blink 1s infinite; color: var(--dim); }
-  @media (max-width: 760px) { .llm { flex-direction: column; } .calls { width: auto; max-height: 160px; border-right: 0; border-bottom: 1px solid var(--line); } }
-  .tag { font: 10px var(--mono); padding: 0 5px; border: 1px solid var(--line); margin-left: 8px; color: var(--dim); vertical-align: 3px; font-weight: 400; }
+  .stack { display: flex; height: 8px; border-radius: 99px; overflow: hidden; background: var(--soft); margin: 8px 0; }
+  .stack i { display: block; height: 100%; }
 </style>
 </head>
 <body>
 <header>
-  <h1><b>■</b>Curio / Agent</h1>
-  <span id="conn" class="pill off">未连接</span>
-  <span id="llm" class="pill">LLM</span>
-  <span id="llmUsage" class="pill" title="本次启动以来接口返回的用量；刷新页面保留，重启程序清零">启动累计 0 tokens · 输入 0 / 输出 0</span>
-  <span id="spec" class="pill">旁观</span>
-  <span id="ver" class="pill">planVersion 0</span>
-  <span class="spacer"></span>
-  <input id="suggest" placeholder="给 Agent 一个建议，例如：去找村庄" />
-  <button onclick="sendSuggest()">发送建议</button>
-  <button onclick="post('/api/replan')">重新规划</button>
+  <span class="brand">Curio</span>
+  <span class="status"><i class="dot" id="connDot"></i><span id="conn">未连接</span></span>
+  <span class="chip" id="state">-</span>
+  <span class="chip" id="llm">LLM</span>
+  <span class="chip" id="llmUsage" title="本次启动以来接口返回的用量">用量 -</span>
+  <span class="chip" id="spec">旁观</span>
+  <span class="grow"></span>
+  <div class="suggest">
+    <input id="suggest" placeholder="给 Agent 一个建议，例如：去找村庄" />
+    <button class="primary" onclick="sendSuggest()">发送</button>
+  </div>
+  <button onclick="post('/api/replan')" title="让它马上重新想一想">重新想</button>
   <button id="pauseBtn" onclick="togglePause()">暂停</button>
-  <button id="layoutBtn" onclick="toggleLayoutEdit()" title="拖动面板标题移动，拖右下角调整大小；布局保存在本浏览器">编辑布局</button>
-  <button onclick="resetLayout()" title="恢复默认布局">重置布局</button>
 </header>
-<main>
-<div class="grid-stack" id="grid">
-  <div class="grid-stack-item" gs-id="status" gs-x="0" gs-y="0" gs-w="3" gs-h="11">
-    <section class="grid-stack-item-content">
-      <h2>角色状态</h2>
-      <div class="row"><span>生命</span><span id="hpv" class="mono">-</span></div>
-      <div class="bar"><i id="hp" ></i></div>
-      <div class="row"><span>饥饿</span><span id="foodv" class="mono">-</span></div>
-      <div class="bar"><i id="food" ></i></div>
-      <div class="row"><span>坐标</span><span id="pos" class="mono">-</span></div>
-      <div class="row"><span>维度 / 群系</span><span id="dim" class="mono">-</span></div>
-      <div class="row"><span>时间</span><span id="time" class="mono">-</span></div>
-      <div class="row"><span>手持</span><span id="held" class="mono">-</span></div>
-      <div class="row"><span>基地</span><span id="base" class="mono">-</span></div>
-    </section>
-  </div>
 
-  <div class="grid-stack-item" gs-id="goal" gs-x="3" gs-y="0" gs-w="3" gs-h="11">
-    <section class="grid-stack-item-content">
-      <h2>兴趣、意图与实际进展</h2>
-      <div class="row"><span>当前意图</span><span id="objective" class="mono" style="text-align:right">-</span></div>
-      <div class="thought" id="intentwhy"></div>
-      <div class="row"><span>最近选择</span><span id="decision" style="text-align:right">-</span></div>
-      <div class="row"><span>事实进展</span><span id="project" class="mono" style="text-align:right">-</span></div>
-      <div class="thought" id="evidence"></div>
-      <div class="goal" id="goal">—</div>
-      <div class="thought" id="thought"></div>
-      <ol class="steps" id="steps"></ol>
-      <div class="row" style="margin-top:10px"><span>LLM</span><span id="llmstate" class="mono">-</span></div>
-      <div class="row"><span>已排队计划</span><span id="queued" class="mono">-</span></div>
-      <div class="row"><span>上次失败</span><span id="lastfail" class="mono">-</span></div>
-      <div class="sub">可权衡的兴趣信号</div>
-      <ul class="plain" id="drives"></ul>
-    </section>
-  </div>
-
-  <div class="grid-stack-item" gs-id="action" gs-x="6" gs-y="0" gs-w="3" gs-h="11">
-    <section class="grid-stack-item-content">
-      <h2>当前动作</h2>
-      <div class="goal mono" id="skill">—</div>
-      <div class="row"><span>来源</span><span id="src" class="mono">-</span></div>
-      <div class="row"><span>进度</span><span id="progv" class="mono">-</span></div>
-      <div class="bar"><i id="prog"></i></div>
-      <div class="row"><span>说明</span><span id="note" class="mono">-</span></div>
-      <div class="row"><span>已运行 / 时限</span><span id="elapsed" class="mono">-</span></div>
-      <div class="row"><span>参数</span><span id="args" class="mono">-</span></div>
-    </section>
-  </div>
-
-  <div class="grid-stack-item" gs-id="metrics" gs-x="9" gs-y="0" gs-w="3" gs-h="11">
-    <section class="grid-stack-item-content">
-      <h2>连贯性指标（最近 10 分钟）</h2>
-      <div class="kpis">
-        <div class="kpi" id="k-idle"><b>-</b><small>无任务秒数（目标 &lt; 60）</small></div>
-        <div class="kpi" id="k-cont"><b>-</b><small>LLM 思考时仍在行动（目标 ≥ 95%）</small></div>
-        <div class="kpi" id="k-succ"><b>-</b><small>技能成功率（目标 ≥ 80%）</small></div>
-        <div class="kpi" id="k-lat"><b>-</b><small>LLM 平均 / P95 延迟</small></div>
+<div class="app">
+  <aside class="col">
+    <div class="card">
+      <h2>身体</h2>
+      <div class="meter"><span class="dim">生命</span><div class="bar" id="hpBar"><i id="hp"></i></div><span class="mono" id="hpv">-</span></div>
+      <div class="meter"><span class="dim">饥饿</span><div class="bar warn" id="foodBar"><i id="food"></i></div><span class="mono" id="foodv">-</span></div>
+      <div style="margin-top:8px">
+        <div class="row"><span>坐标</span><span class="mono" id="pos">-</span></div>
+        <div class="row"><span>维度 · 群系</span><span class="mono" id="dim">-</span></div>
+        <div class="row"><span>时间</span><span id="time">-</span></div>
+        <div class="row"><span>手持</span><span class="mono" id="held">-</span></div>
+        <div class="row"><span>家</span><span id="base">-</span></div>
       </div>
-      <div class="mono" id="thinking-breakdown" style="margin-top:8px" title="与上方指标使用同一思考窗口；行动包含观察填充，任务执行不代表已有目标产出。">思考期构成：等待采样</div>
-      <div class="stack" id="stack"></div>
-      <div class="legend">
-        <span style="--c:var(--grass)">任务</span><span style="--c:var(--blue)">填充</span><span style="--c:var(--violet)">反射</span>
-        <span style="--c:var(--red)">空闲</span><span style="--c:#e6e6e6">暂停/离线</span>
-      </div>
-      <div style="margin-top:10px" class="mono" id="counters"></div>
-    </section>
-  </div>
+    </div>
+    <div class="card">
+      <h2>周围</h2>
+      <div class="label">敌对</div>
+      <div class="chips" id="hostile"></div>
+      <div class="sub">生物 · 玩家</div>
+      <div class="chips" id="passive"></div>
+      <div class="sub">资源（● 看得见 ○ 记得）</div>
+      <ul class="list mono" id="res"></ul>
+    </div>
+    <div class="card">
+      <h2>背包 <span class="r dim mono" id="slots"></span></h2>
+      <div class="chips" id="inv"></div>
+    </div>
+  </aside>
 
-  <div class="grid-stack-item" gs-id="mind" gs-x="0" gs-y="11" gs-w="12" gs-h="12">
-    <section class="grid-stack-item-content">
-      <h2>心智（念头 · 情绪 · 议程 · 窍门 · 日记）<span class="opts mono" id="mindMode"></span></h2>
-      <div class="fill mindgrid">
+  <main class="col">
+    <div class="card">
+      <h2>现在 <span class="r mono dim" id="llmstate">-</span></h2>
+      <div class="now">
         <div>
-          <div class="sub">此刻的感受</div>
-          <div class="thought" id="mindFeeling">—</div>
-          <div id="mindMood"></div>
-          <div class="sub">手上的活</div>
-          <div class="goal" id="mindActivity">—</div>
-          <div class="thought" id="mindActivityWhy"></div>
-          <div class="row"><span>做完接着</span><span id="mindNext" class="mono" style="text-align:right">-</span></div>
-          <div class="row"><span>等会儿回来做</span><span id="mindSuspended" class="mono" style="text-align:right">-</span></div>
-          <div class="row"><span>擅长 / 苦手</span><span id="mindSelfImage" class="mono" style="text-align:right">-</span></div>
+          <div class="label">主目标</div>
+          <div class="goal" id="goal">（还没有主目标）</div>
+          <ul class="checklist" id="checklist"></ul>
+          <div class="activity">
+            <div class="label">手上的活 <span id="actMeta"></span></div>
+            <div class="what" id="act">（在想接下来做什么）</div>
+            <div class="dim" id="actWhy" style="font-size:12px"></div>
+            <ul class="routine" id="routine"></ul>
+            <div class="row" style="margin-top:6px"><span>做完接着</span><span id="next">-</span></div>
+            <div class="row"><span>做完回到</span><span id="suspended">-</span></div>
+          </div>
         </div>
         <div>
-          <div class="sub">念头流</div>
-          <ul class="plain mindlist" id="mindStream"></ul>
+          <div class="label">在想</div>
+          <div class="thought"><span id="thought">—</span><span class="meta" id="feeling"></span></div>
+          <div class="action">
+            <div class="label">身体在做</div>
+            <div><span class="skill" id="skill">—</span> <span class="badge" id="src"></span></div>
+            <div class="meter"><span class="dim">进度</span><div class="bar info"><i id="prog"></i></div><span class="mono" id="progv">-</span></div>
+            <div class="row"><span>说明</span><span id="note">-</span></div>
+            <div class="row"><span>用时</span><span class="mono" id="elapsed">-</span></div>
+            <div class="row"><span>参数</span><span class="mono" id="args">-</span></div>
+            <div class="row"><span>上次失败</span><span id="lastfail">-</span></div>
+          </div>
         </div>
-        <div>
-          <div class="sub">议程（想做的事 / 点子 / 疑问）</div>
-          <ul class="plain mindlist" id="mindAgenda"></ul>
-          <div class="sub">实验</div>
-          <ul class="plain mindlist" id="mindExperiments"></ul>
+      </div>
+    </div>
+
+    <div class="kpis">
+      <div class="kpi" id="k-idle"><b>-</b><small>10 分钟内发呆</small></div>
+      <div class="kpi" id="k-cont"><b>-</b><small>思考时仍在动</small></div>
+      <div class="kpi" id="k-succ"><b>-</b><small>动作成功率</small></div>
+      <div class="kpi" id="k-lat"><b>-</b><small>LLM 平均 / P95</small></div>
+      <div class="kpi" id="k-reflex"><b>-</b><small>反射触发</small></div>
+      <div class="kpi" id="k-death"><b>-</b><small>死亡</small></div>
+    </div>
+
+    <nav class="tabs" id="tabs">
+      <button class="tab" data-tab="mind">心智</button>
+      <button class="tab" data-tab="skills">技能<span class="n" id="nSkills"></span></button>
+      <button class="tab" data-tab="vision">视野</button>
+      <button class="tab" data-tab="memory">记忆</button>
+      <button class="tab" data-tab="events">事件<span class="n" id="nEvents"></span></button>
+      <button class="tab" data-tab="llm">LLM 调用<span class="n" id="llmCount"></span></button>
+      <button class="tab" data-tab="metrics">运行指标</button>
+    </nav>
+
+    <section class="pane" id="pane-mind">
+      <div class="grid3">
+        <div class="card"><h2>念头流</h2><ul class="list scroll" id="mindStream"></ul></div>
+        <div class="col">
+          <div class="card"><h2>议程</h2><ul class="list" id="mindAgenda"></ul></div>
+          <div class="card"><h2>情绪</h2><div id="mindMood"></div><div class="row" style="margin-top:6px"><span>擅长 / 苦手</span><span class="mono" id="mindSelfImage">-</span></div></div>
         </div>
-        <div>
-          <div class="sub">窍门（实际成败）</div>
-          <ul class="plain mindlist" id="mindKnowHow"></ul>
-          <div class="sub">日记</div>
-          <ul class="plain mindlist" id="mindDiary"></ul>
+        <div class="col">
+          <div class="card"><h2>窍门</h2><ul class="list" id="mindKnowHow"></ul></div>
+          <div class="card"><h2>日记</h2><ul class="list" id="mindDiary"></ul></div>
+          <div class="card"><h2>实验</h2><ul class="list" id="mindExperiments"></ul></div>
         </div>
       </div>
     </section>
-  </div>
 
-  <div class="grid-stack-item" gs-id="vision" gs-x="0" gs-y="23" gs-w="6" gs-h="12">
-    <section class="grid-stack-item-content">
-      <h2>AI 视野（射线模拟 · 不透视 · 非图片输入）</h2>
-      <div class="vision">
-        <div style="flex:1.4;min-width:280px">
-          <canvas id="eye" width="480" height="288"></canvas>
-          <div class="legend" id="vlegend"></div>
-          <div class="row mono" style="margin-top:4px"><span id="vmeta">-</span><span id="vopen">-</span></div>
-        </div>
-        <div class="vlist">
-          <div class="sub" style="margin-top:0">看见</div>
-          <ul class="plain" id="vseen"></ul>
-          <div class="sub">听见</div>
-          <ul class="plain" id="vheard"></ul>
-          <div class="sub">视野构成</div>
-          <div class="mono" id="vview">-</div>
-          <div class="sub">最近陆地 / 上次环顾</div>
-          <div class="mono" id="vland">-</div>
+    <section class="pane" id="pane-skills">
+      <div class="card">
+        <h2>会动手的技能 <span class="r dim">写下就生效 · 代码技能会在后台改进</span></h2>
+        <div id="improving"></div>
+        <table><thead><tr><th>技能</th><th>怎么用</th><th>成 / 败</th><th>说明</th></tr></thead><tbody id="skillRows"></tbody></table>
+      </div>
+      <div class="card"><h2>做法说明（按需翻开）</h2><ul class="list" id="knowledge"></ul></div>
+    </section>
+
+    <section class="pane" id="pane-vision">
+      <div class="card">
+        <h2>AI 视野 <span class="r mono dim" id="vmeta">-</span></h2>
+        <div class="vision">
+          <div><canvas id="eye" width="480" height="288"></canvas><div class="legend" id="vlegend"></div></div>
+          <div>
+            <div class="row"><span>视距</span><span class="mono" id="vopen">-</span></div>
+            <div class="row"><span>画面</span><span class="mono" id="vview">-</span></div>
+            <div class="row"><span>最近陆地 / 环顾</span><span class="mono" id="vland">-</span></div>
+            <div class="sub">看见</div><ul class="list mono" id="vseen"></ul>
+            <div class="sub">听见</div><ul class="list mono" id="vheard"></ul>
+          </div>
         </div>
       </div>
     </section>
-  </div>
 
-  <div class="grid-stack-item" gs-id="percept" gs-x="6" gs-y="23" gs-w="3" gs-h="12">
-    <section class="grid-stack-item-content">
-      <h2>感知（只含看见 / 听见 / 记得）</h2>
-      <div class="row"><span>敌对</span><span id="hostile" class="mono">-</span></div>
-      <div class="row"><span>生物</span><span id="passive" class="mono">-</span></div>
-      <div class="row"><span>玩家</span><span id="players" class="mono">-</span></div>
-      <div class="sub">附近资源</div>
-      <ul class="plain" id="res"></ul>
-      <div class="sub">背包 <span id="slots"></span></div>
-      <ul class="plain" id="inv"></ul>
-    </section>
-  </div>
-
-  <div class="grid-stack-item" gs-id="memory" gs-x="9" gs-y="23" gs-w="3" gs-h="12">
-    <section class="grid-stack-item-content">
-      <h2>记忆</h2>
-      <div class="row"><span>已访问区块 / 已见方块·实体·群系</span><span id="seen" class="mono">-</span></div>
-      <div class="sub">最近尝试</div>
-      <ul class="plain" id="goals"></ul>
-      <div class="sub">地标</div>
-      <ul class="plain" id="lms"></ul>
-      <div class="sub">自学技能</div>
-      <ul class="plain" id="skills"></ul>
-      <div class="sub">笔记</div>
-      <ul class="plain" id="notes"></ul>
-    </section>
-  </div>
-
-  <div class="grid-stack-item" gs-id="events" gs-x="0" gs-y="35" gs-w="12" gs-h="12">
-    <section class="grid-stack-item-content">
-      <h2>事件流</h2>
-      <div class="filters">
-        <label><input type="checkbox" class="f" value="P0" checked> P0 紧急</label>
-        <label><input type="checkbox" class="f" value="P1" checked> P1 重要</label>
-        <label><input type="checkbox" class="f" value="P2" checked> P2 机会/决策</label>
-        <label><input type="checkbox" class="f" value="P3"> P3 普通</label>
+    <section class="pane" id="pane-memory">
+      <div class="grid2">
+        <div class="card"><h2>最近做过的事 <span class="r mono dim" id="seen"></span></h2><ul class="list scroll" id="goals"></ul></div>
+        <div class="col">
+          <div class="card"><h2>地标</h2><ul class="list mono" id="lms"></ul></div>
+          <div class="card"><h2>笔记</h2><ul class="list" id="notes"></ul></div>
+        </div>
       </div>
-      <div id="log" class="fill"></div>
     </section>
-  </div>
 
-  <div class="grid-stack-item" gs-id="llm" gs-x="0" gs-y="47" gs-w="12" gs-h="16">
-    <section class="grid-stack-item-content">
-      <h2>LLM 调用（实时：发出的提示词 / 流式返回）<span class="opts"><label><input type="checkbox" id="llmFollow" checked> 跟随最新</label> · <span id="llmCount" class="mono">0</span></span></h2>
-      <div class="llm fill">
-        <ul class="calls" id="llmCalls"><li style="cursor:default;display:block;color:var(--dim)">还没有调用</li></ul>
+    <section class="pane" id="pane-events">
+      <div class="card">
+        <div class="filters">
+          <label><input type="checkbox" class="f" value="P0" checked> 紧急</label>
+          <label><input type="checkbox" class="f" value="P1" checked> 重要</label>
+          <label><input type="checkbox" class="f" value="P2" checked> 决策</label>
+          <label><input type="checkbox" class="f" value="P3"> 普通</label>
+          <span class="grow"></span>
+          <input id="logFilter" placeholder="筛选关键词" style="padding:3px 8px" />
+        </div>
+        <div id="log"></div>
+      </div>
+    </section>
+
+    <section class="pane" id="pane-llm">
+      <div class="filters"><label><input type="checkbox" id="llmFollow" checked> 跟随最新</label></div>
+      <div class="llm">
+        <ul class="calls" id="llmCalls"><li class="empty" style="cursor:default;display:block">还没有调用</li></ul>
         <div class="llmDetail" id="llmDetail"></div>
       </div>
     </section>
-  </div>
+
+    <section class="pane" id="pane-metrics">
+      <div class="grid2">
+        <div class="card">
+          <h2>10 分钟时间分配</h2>
+          <div class="stack" id="stack"></div>
+          <div class="legend"><span style="--c:var(--accent)">做事</span><span style="--c:var(--info)">观察填充</span><span style="--c:var(--warn)">反射</span><span style="--c:var(--bad)">发呆</span><span style="--c:var(--faint)">暂停/离线</span></div>
+          <div class="mono dim" id="thinking-breakdown" style="margin-top:10px">思考期构成：等待采样</div>
+        </div>
+        <div class="card"><h2>计数</h2><div class="mono" id="counters" style="line-height:1.9"></div></div>
+      </div>
+    </section>
+  </main>
 </div>
-</main>
 <script>
 const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s ?? '').replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const pct = (v) => (v == null ? '-' : Math.round(v * 100) + '%');
-let paused = false;
+const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch { /* 隐私模式 */ } };
+const ago = (t) => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 60 ? `${s}秒` : s < 3600 ? `${Math.round(s / 60)}分` : `${Math.round(s / 3600)}时`; };
+const list = (arr, fn, empty = '—') => arr && arr.length ? arr.map(fn).join('') : `<li class="empty">${empty}</li>`;
+let paused = false, unseen = 0, lastState = null;
 
-async function post(url, body) {
-  await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) });
-}
-function sendSuggest() {
-  const t = $('suggest').value.trim();
-  if (t) { post('/api/suggest', { text: t }); $('suggest').value = ''; }
-}
+async function post(url, body) { await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) }); }
+function sendSuggest() { const t = $('suggest').value.trim(); if (t) { post('/api/suggest', { text: t }); $('suggest').value = ''; } }
 $('suggest').addEventListener('keydown', (e) => e.key === 'Enter' && sendSuggest());
 function togglePause() { post(paused ? '/api/resume' : '/api/pause'); }
 
+// 标签页（记住上次看的那一页）
+function showTab(name) {
+  for (const b of document.querySelectorAll('.tab')) b.classList.toggle('on', b.dataset.tab === name);
+  for (const p of document.querySelectorAll('.pane')) p.classList.toggle('on', p.id === `pane-${name}`);
+  lsSet('curio.dashboard.tab', name);
+  if (name === 'events') { unseen = 0; $('nEvents').textContent = ''; $('log').scrollTop = $('log').scrollHeight; }
+  if (name === 'vision' && lastState) drawVision(lastState.vision, lastState.percept.vision);
+}
+document.querySelectorAll('.tab').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.tab)));
+
 function kpi(id, text, cls) { const el = $(id); el.className = 'kpi ' + (cls || ''); el.querySelector('b').textContent = text; }
+const PHASE = { day: '白天', dusk: '黄昏', night: '夜晚', dawn: '黎明' };
+const SRC = { reflex: '反射', llm: '心智', rule: '规则', filler: '张望', user: '操作者' };
 
-
-function renderMind(mind, mode) {
-  if (!mind) { $('mindMode').textContent = ''; return; }
-  $('mindMode').textContent = mode === 'mind' ? '真人式心智' : '真人式心智 · 规则';
-  $('mindFeeling').textContent = (mind.feeling || []).join('，') + (mind.traits?.length ? `　｜性格：${mind.traits.join('、')}` : '') + (mind.likes?.length ? `　｜喜欢：${mind.likes.join('、')}` : '');
-  const names = { energy: '精力', boredom: '无聊', frustration: '烦躁', satisfaction: '满足', curiosity: '好奇' };
-  $('mindMood').innerHTML = Object.entries(names).map(([k, n]) => `<div class="moodrow"><span>${n}</span><div class="bar"><i style="width:${Math.round((mind.mood?.[k] ?? 0) * 100)}%"></i></div></div>`).join('');
+function renderNow(ex, t, s) {
+  const mind = ex.mind || {};
+  const plan = mind.plan, focus = (mind.agenda || []).find((a) => a.status === 'active');
+  $('goal').textContent = plan?.goal || focus?.text || '（还没有主目标）';
+  const nextItem = plan ? plan.steps.findIndex((x) => !x.done) : -1;
+  $('checklist').innerHTML = plan ? plan.steps.map((x, i) => `<li class="${x.done ? 'done' : i === nextItem ? 'next' : ''}">${esc(x.text)}</li>`).join('') : '';
   const a = mind.activity;
-  $('mindActivity').textContent = a ? `${a.what}（第 ${a.round} 轮）` : '（在想接下来做什么）';
-  $('mindActivityWhy').textContent = a ? [a.why, a.done_when ? `收工条件：${a.done_when.status}` : '', ...(a.recent || []).slice(-2)].filter(Boolean).join(' · ') : '';
-  $('mindNext').textContent = mind.next || '-';
-  $('mindSuspended').textContent = (mind.suspended || []).join('、') || '-';
+  $('act').textContent = a ? a.what : (ex.paused ? '已暂停' : '（在想接下来做什么）');
+  $('actMeta').innerHTML = a ? `<span class="badge">${esc(a.kind)}</span> <span class="badge">第 ${esc(a.round)} 轮</span>`
+    + (a.done_when ? ` <span class="badge ${a.done_when.status === 'satisfied' ? 'good' : ''}">收工条件${a.done_when.status === 'satisfied' ? '已达成' : '未达成'}</span>` : '')
+    + (a.failures ? ` <span class="badge bad">失败 ${a.failures}</span>` : '') : '';
+  $('actWhy').textContent = a ? [a.why, ...(a.body_adapted || []).slice(-1).map((x) => `应变：${x}`)].filter(Boolean).join(' · ') : '';
+  $('routine').innerHTML = a ? a.routine.map((r, i) => `<li class="${i === a.next_step - 1 ? 'now' : ''}" title="${esc(r)}">${i + 1}. ${esc(r)}</li>`).join('') : '';
+  $('next').textContent = mind.next || '-';
+  $('suspended').textContent = (mind.suspended || []).join('、') || '-';
+  const last = mind.lastDecision;
+  $('thought').textContent = last?.monologue || (mind.stream || []).filter((x) => x.kind === 'monologue').at(-1)?.text || '—';
+  $('feeling').textContent = [last ? `${last.tier === 'glance' ? '瞥一眼' : '认真想'} · ${last.kind}` : '', (mind.feeling || []).join('，')].filter(Boolean).join(' · ');
+  const since = s.metrics.llm.inFlightSince ? ` ${((s.now - s.metrics.llm.inFlightSince) / 1000).toFixed(0)}s` : '';
+  $('llmstate').textContent = ex.llmInFlight ? `思考中：${ex.llmReason}${since}` : ex.backoffMs ? `冷却 ${Math.round(ex.backoffMs / 1000)}s` : '脑子空闲';
+  $('llmstate').title = $('llmstate').textContent;
+  $('skill').textContent = t ? t.skill : (s.state.connected ? '（空闲）' : '—');
+  $('src').textContent = t ? (SRC[t.source] || t.source) : '';
+  $('src').className = 'badge ' + (t ? ({ reflex: 'bad', llm: 'good', user: 'info' }[t.source] || '') : '');
+  $('progv').textContent = t ? pct(t.progress) : '-'; $('prog').style.width = t ? (t.progress * 100) + '%' : '0';
+  $('note').textContent = t?.note || '-';
+  $('elapsed').textContent = t ? `${((s.now - t.startedAt) / 1000).toFixed(0)}s / ${((t.deadline - t.startedAt) / 1000).toFixed(0)}s` : '-';
+  $('args').textContent = t ? JSON.stringify(t.args) : '-'; $('args').title = $('args').textContent;
+  $('lastfail').textContent = ex.lastFailure ? `${ex.lastFailure.skill} ${ex.lastFailure.code ?? ''}：${ex.lastFailure.summary}` : '-';
+  $('lastfail').title = $('lastfail').textContent;
+}
+
+function renderMind(mind) {
+  if (!mind) return;
+  const names = { energy: '精力', boredom: '无聊', frustration: '烦躁', satisfaction: '满足', curiosity: '好奇' };
+  $('mindMood').innerHTML = Object.entries(names).map(([k, n]) => { const v = Math.round((mind.mood?.[k] ?? 0) * 100);
+    return `<div class="meter"><span class="dim">${n}</span><div class="bar ${k === 'frustration' ? 'bad' : k === 'boredom' ? 'warn' : ''}"><i style="width:${v}%"></i></div><span class="mono">${v}</span></div>`; }).join('');
   const si = mind.selfImage || {};
   $('mindSelfImage').textContent = [(si.goodAt || []).slice(0, 2).join(' '), (si.struggleWith || []).slice(0, 2).join(' ')].filter(Boolean).join(' / ') || '-';
-  const ago = (t) => { const s2 = Math.round((Date.now() - t) / 1000); return s2 < 60 ? `${s2}s` : s2 < 3600 ? `${Math.round(s2 / 60)}m` : `${Math.round(s2 / 3600)}h`; };
   const tag = { monologue: '想', notice: '注意', outcome: '结果', learned: '学到', feeling: '感受' };
-  $('mindStream').innerHTML = (mind.stream || []).slice().reverse().map((t) => `<li><span class="k">${tag[t.kind] || t.kind} · ${ago(t.at)}</span> ${esc(t.text)}</li>`).join('') || '<li>—</li>';
+  $('mindStream').innerHTML = list((mind.stream || []).slice().reverse(), (x) => `<li><span class="k">${tag[x.kind] || x.kind} · ${ago(x.at)}前</span>${esc(x.text)}</li>`);
   const kind = { goal: '想做', idea: '点子', question: '疑问' };
-  $('mindAgenda').innerHTML = (mind.agenda || []).map((x) => `<li>${x.status === 'active' ? '▶ ' : ''}<span class="k">${kind[x.kind] || x.kind}${x.horizon === 'someday' ? '·以后' : ''}</span> ${esc(x.text)}${x.attempts ? ` <span class="k">×${x.attempts}</span>` : ''}</li>`).join('') || '<li>—</li>';
-  $('mindExperiments').innerHTML = (mind.experiments || []).slice().reverse().map((x) => `<li><span class="k">${x.status}</span> ${esc(x.hypothesis)}</li>`).join('') || '<li>—</li>';
-  $('mindKnowHow').innerHTML = (mind.knowHow || []).map((k) => `<li>${esc(k.text)} <span class="k">成${k.wins}/败${k.losses}</span></li>`).join('') || '<li>—</li>';
-  $('mindDiary').innerHTML = (mind.diary || []).slice().reverse().map((d) => `<li><span class="k">${ago(d.at)}前</span> ${esc(d.text)}</li>`).join('') || '<li>—</li>';
+  $('mindAgenda').innerHTML = list(mind.agenda, (x) => `<li>${x.status === 'active' ? '<span class="badge good">主目标</span> ' : ''}<span class="k">${kind[x.kind] || x.kind}${x.horizon === 'someday' ? '·以后' : ''}</span>${esc(x.text)}${x.attempts ? ` <span class="k">×${x.attempts}</span>` : ''}</li>`);
+  $('mindExperiments').innerHTML = list((mind.experiments || []).slice().reverse(), (x) => `<li><span class="badge">${esc(x.status)}</span> ${esc(x.hypothesis)}</li>`);
+  $('mindKnowHow').innerHTML = list(mind.knowHow, (k) => `<li>${esc(k.text)} <span class="k">成${k.wins}/败${k.losses}</span></li>`);
+  $('mindDiary').innerHTML = list((mind.diary || []).slice().reverse(), (d) => `<li><span class="k">${ago(d.at)}前</span>${esc(d.text)}</li>`);
+}
+
+function renderSkills(sk) {
+  if (!sk) return;
+  const mode = { auto: ['条件成立自动做', 'info'], recover: ['动作失败时先试', 'warn'], manual: ['use_skill 调用', ''] };
+  $('nSkills').textContent = sk.list.length || '';
+  $('improving').innerHTML = sk.improving ? `<div class="notice">正在后台改进代码技能「${esc(sk.improving.name)}」（${sk.improving.sinceSec}s）</div>` : '';
+  $('skillRows').innerHTML = sk.list.length ? sk.list.map((b) => {
+    const st = b.stats; const [m, c] = mode[b.mode] || [b.mode, ''];
+    return `<tr><td><b class="mono">${esc(b.name)}</b>${b.source === 'self' ? ' <span class="badge good">自己写的</span>' : ''}${b.code ? ` <span class="badge info">代码 v${b.version ?? 1}</span>` : ''}${st?.disabled ? ' <span class="badge bad">已停用</span>' : ''}</td>`
+      + `<td><span class="badge ${c}">${m}</span>${b.overrides?.length ? `<div class="dim" style="font-size:11px">代替本能 ${esc(b.overrides.join('、'))}</div>` : ''}</td>`
+      + `<td class="mono">${st ? `${st.ok} / ${st.fail}` : '-'}</td>`
+      + `<td>${esc(b.description)}${st?.lastError ? `<div class="err">${esc(st.lastError)}</div>` : ''}</td></tr>`;
+  }).join('') : '<tr><td colspan="4" class="empty">还没有会动手的技能</td></tr>';
+  $('knowledge').innerHTML = list(sk.knowledge, (k) => `<li><b class="mono">${esc(k.name)}</b>${k.source === 'self' ? ' <span class="badge good">自己写的</span>' : ''} <span class="dim">${esc(k.description)}</span></li>`);
 }
 
 function render(s) {
   const st = s.state, p = s.percept, t = s.task, ex = s.exec, m = s.metrics;
-  $('conn').textContent = st.connected ? (st.alive ? `${st.username} 在线` : '死亡/重生中') : '未连接';
-  $('conn').className = 'pill ' + (st.connected ? 'on' : 'off');
+  $('conn').textContent = st.connected ? (st.alive ? `${st.username} 在线` : '死亡 / 重生中') : '未连接';
+  $('connDot').className = 'dot ' + (st.connected ? (st.alive ? 'on' : 'warn') : 'off');
+  paused = ex.paused; $('pauseBtn').textContent = paused ? '继续' : '暂停';
+  $('state').textContent = paused ? '已暂停' : ex.mode === 'mind' ? '自主' : '规则模式';
+  $('state').className = 'chip ' + (paused ? 'off' : 'on');
   $('llm').textContent = `${s.config.llm}${s.config.fakeDelayMs ? ` · 注入 ${s.config.fakeDelayMs}ms` : ''}`;
   const usage = m.llm.tokenUsage;
-  $('llmUsage').textContent = usage
-    ? `启动累计 ${usage.totalTokens.toLocaleString()} tokens · 输入 ${usage.promptTokens.toLocaleString()} / 输出 ${usage.completionTokens.toLocaleString()}${usage.cachedPromptTokens != null && usage.promptTokens ? ` · 缓存命中 ${Math.round(usage.cachedPromptTokens / usage.promptTokens * 100)}%` : ''}${usage.unreportedCalls ? ` · ${usage.unreportedCalls.toLocaleString()} 次用量不完整` : ''}`
-    : '启动累计用量暂不可用';
-  $('spec').textContent = s.spectator.enabled ? `旁观 ${s.config.observer} · ${s.spectator.rconOk ? 'RCON ✓' : 'RCON ✗'}` : '旁观未启用';
-  $('spec').className = 'pill ' + (!s.spectator.enabled ? 'warn' : s.spectator.rconOk ? 'on' : 'off');
+  $('llmUsage').textContent = usage ? `${(usage.totalTokens / 1000).toFixed(1)}k tokens${usage.cachedPromptTokens != null && usage.promptTokens ? ` · 缓存 ${Math.round(usage.cachedPromptTokens / usage.promptTokens * 100)}%` : ''}` : '用量 -';
+  $('llmUsage').title = usage ? `本次启动以来：输入 ${usage.promptTokens.toLocaleString()} / 输出 ${usage.completionTokens.toLocaleString()}` : '';
+  $('spec').textContent = s.spectator.enabled ? `旁观 ${s.config.observer ?? ''} ${s.spectator.rconOk ? '✓' : '✗'}` : '旁观关';
+  $('spec').className = 'chip ' + (!s.spectator.enabled ? '' : s.spectator.rconOk ? 'on' : 'off');
   $('spec').title = s.spectator.reason || s.spectator.lastResult || '';
-  $('ver').textContent = `planVersion ${s.planVersion}`;
-  paused = ex.paused; $('pauseBtn').textContent = paused ? '继续' : '暂停';
 
-  $('hpv').textContent = `${st.hp.toFixed?.(1) ?? st.hp} / 20`; $('hp').style.width = (st.hp / 20 * 100) + '%';
-  $('foodv').textContent = `${st.food} / 20`; $('food').style.width = (st.food / 20 * 100) + '%';
-  $('pos').textContent = p.self.pos.join(', ');
-  $('dim').textContent = `${p.self.dim} / ${p.self.biome ?? '-'}`;
-  $('time').textContent = `${p.time.timeOfDay} (${{ day: '白天', dusk: '黄昏', night: '夜晚', dawn: '黎明' }[p.time.phase]})`;
+  $('hpv').textContent = `${Math.round(st.hp * 10) / 10}/20`; $('hp').style.width = (st.hp / 20 * 100) + '%';
+  $('hpBar').className = 'bar ' + (st.hp <= 6 ? 'bad' : st.hp <= 12 ? 'warn' : '');
+  $('foodv').textContent = `${st.food}/20`; $('food').style.width = (st.food / 20 * 100) + '%';
+  $('foodBar').className = 'bar ' + (st.food <= 6 ? 'bad' : 'warn');
+  $('pos').textContent = p.self.pos.map((n) => Math.round(n)).join(', ');
+  $('dim').textContent = `${p.self.dim} · ${p.self.biome || '-'}`;
+  $('time').textContent = `${PHASE[p.time.phase] ?? p.time.phase} · ${p.time.timeOfDay}`;
   $('held').textContent = p.self.held ?? '空手';
-  $('base').textContent = p.exploration.base ? `${p.exploration.base.dist} 格 · ${p.exploration.base.dir}` : '-';
+  $('base').textContent = p.exploration.base ? `${p.exploration.base.dir} ${p.exploration.base.dist} 格` : '还没有';
+  $('hostile').innerHTML = p.nearby.hostile.length ? p.nearby.hostile.map((h) => `<span class="item hostile">${esc(h.name)} ${h.dist}格${h.how === 'heard' ? '·听见' : ''}</span>`).join('') : '<span class="empty">无</span>';
+  const others = [...p.nearby.passive, ...p.nearby.players.map((x) => `玩家 ${x}`)];
+  $('passive').innerHTML = others.length ? others.map((x) => `<span class="item">${esc(x)}</span>`).join('') : '<span class="empty">无</span>';
+  $('res').innerHTML = list(p.nearby.resources.slice(0, 8), (r) => `<li>${r.seen === 'now' ? '●' : '○'} ${esc(r.block)} ×${r.count} <span class="k">${r.dir ?? ''} ${r.nearest}格</span></li>`);
+  $('slots').textContent = `空位 ${p.emptySlots}`;
+  $('inv').innerHTML = p.inventory.length ? p.inventory.map((i) => `<span class="item">${esc(i.name)} ×${i.count}</span>`).join('') : '<span class="empty">空</span>';
 
-  $('goal').innerHTML = ex.plan ? `${esc(ex.plan.goal)}<span class="tag">${ex.plan.source}</span>` : (ex.paused ? '已暂停' : '—');
-  $('thought').textContent = ex.plan?.thought ?? '';
-  $('steps').innerHTML = (ex.plan?.steps ?? []).map((st2, i) => {
-    const idx = ex.plan.index; const cls = i < idx - 1 ? 'done' : i === idx - 1 ? 'now' : '';
-    return `<li class="${cls}">${esc(st2.skill)} ${esc(JSON.stringify(st2.args ?? {}))}</li>`;
-  }).join('');
-  const since = m.llm.inFlightSince ? ((s.now - m.llm.inFlightSince) / 1000).toFixed(1) + 's' : '';
-  $('llmstate').textContent = ex.llmInFlight ? `思考中（${ex.llmReason}）${since}` : ex.backoffMs ? `冷却 ${Math.round(ex.backoffMs / 1000)}s` : '空闲';
-  $('queued').textContent = ex.queued ? ex.queued.goal : '-';
-  const autonomy = ex.autonomy || {}, interest = autonomy.intent, project = autonomy.project;
-  const decision = (s.memory.decisions || []).at(-1);
-  $('objective').textContent = interest?.text ?? '（等待自己的想法）';
-  $('intentwhy').textContent = interest?.whyNow ?? '';
-  $('decision').textContent = decision ? `${decision.kind}：${decision.reason}` : '尚无选择记录';
-  $('project').textContent = project ? `${project.title} · ${project.status} · ${project.currentMilestone}/${project.milestones.length} · 修订 ${project.revision}` : '开放兴趣，无需工程';
-  const latestEvidence = (autonomy.evidence || []).at(-1);
-  $('evidence').textContent = latestEvidence ? `${latestEvidence.status} · ${JSON.stringify(latestEvidence.actual)}${latestEvidence.reason ? ' · ' + latestEvidence.reason : ''}` : '';
-  $('drives').innerHTML = (p.drives || []).slice(0, 5).map((d) => `<li title="${esc(d.why)}">${'▮'.repeat(Math.max(1, Math.round(d.level * 10)))} ${d.drive} · ${esc(d.suggest)}</li>`).join('') || '<li>—</li>';
-  $('skills').innerHTML = (s.memory.skills || []).map((k) => `<li>macro:${esc(k.name)} · ${esc(k.description)}</li>`).join('') || '<li>—</li>';
-  renderMind(ex.mind, ex.mode);
-  $('lastfail').textContent = ex.lastFailure ? `${ex.lastFailure.skill}: ${ex.lastFailure.code ?? ''} ${ex.lastFailure.summary}` : '-';
-
-  $('skill').textContent = t ? t.skill : (st.connected ? '（空闲）' : '—');
-  $('src').textContent = t ? t.source : '-';
-  $('progv').textContent = t ? pct(t.progress) : '-'; $('prog').style.width = t ? (t.progress * 100) + '%' : '0';
-  $('note').textContent = t?.note || '-';
-  $('elapsed').textContent = t ? `${((s.now - t.startedAt) / 1000).toFixed(0)}s / ${((t.deadline - t.startedAt) / 1000).toFixed(0)}s` : '-';
-  $('args').textContent = t ? JSON.stringify(t.args) : '-';
+  renderNow(ex, t, s);
+  renderMind(ex.mind);
+  renderSkills(s.skills);
 
   kpi('k-idle', `${m.idle10m}s`, m.idle10m < 60 ? 'good' : 'bad');
   kpi('k-cont', pct(m.llmContinuity), m.llmContinuity == null ? '' : m.llmContinuity >= 0.95 ? 'good' : 'bad');
-  const thinking = m.llmThinkingBreakdown;
-  $('thinking-breakdown').textContent = thinking ? `思考期：任务/反射 ${pct(thinking.taskReflexRatio)}（${thinking.taskSec + thinking.reflexSec}s） · 观察填充 ${pct(thinking.fillerRatio)}（${thinking.fillerSec}s） · 空闲 ${pct(thinking.idleRatio)}（${thinking.idleSec}s）` : '思考期构成：等待采样';
-  kpi('k-succ', pct(m.taskSuccessRate), m.taskSuccessRate == null ? '' : m.taskSuccessRate >= 0.8 ? 'good' : 'mid');
-  kpi('k-lat', m.llm.avgLatencyMs == null ? '-' : `${(m.llm.avgLatencyMs / 1000).toFixed(1)} / ${(m.llm.p95LatencyMs / 1000).toFixed(1)}s`, '');
+  kpi('k-succ', pct(m.taskSuccessRate), m.taskSuccessRate == null ? '' : m.taskSuccessRate >= 0.8 ? 'good' : '');
+  kpi('k-lat', m.llm.avgLatencyMs == null ? '-' : `${(m.llm.avgLatencyMs / 1000).toFixed(1)}/${(m.llm.p95LatencyMs / 1000).toFixed(1)}s`);
+  kpi('k-reflex', String(m.reflexTriggers ?? 0));
+  kpi('k-death', String(m.deaths ?? 0), m.deaths ? 'bad' : '');
+
+  const th = m.llmThinkingBreakdown;
+  $('thinking-breakdown').textContent = th ? `思考期：做事/反射 ${pct(th.taskReflexRatio)} · 观察填充 ${pct(th.fillerRatio)} · 发呆 ${pct(th.idleRatio)}` : '思考期构成：等待采样';
   const w = m.window10m, total = Object.values(w).reduce((a, b) => a + b, 0) || 1;
   const seg = (v, c) => `<i style="width:${v / total * 100}%;background:${c}"></i>`;
-  $('stack').innerHTML = seg(w.task, 'var(--grass)') + seg(w.filler, 'var(--blue)') + seg(w.reflex, 'var(--violet)') + seg(w.idle, 'var(--red)') + seg(w.paused + w.offline, '#e6e6e6');
+  $('stack').innerHTML = seg(w.task, 'var(--accent)') + seg(w.filler, 'var(--info)') + seg(w.reflex, 'var(--warn)') + seg(w.idle, 'var(--bad)') + seg(w.paused + w.offline, 'var(--faint)');
   $('counters').innerHTML = [
-    `运行 ${Math.floor(m.uptimeSec / 60)}m · 移动 ${m.distance} 格 · 发现 ${m.discoveries} · 死亡 ${m.deaths}`,
-    `任务 ✓${m.tasks.succeeded} ✗${m.tasks.failed} ⊘${m.tasks.cancelled} · ${ex.mode === 'autonomous' ? `尝试 ✓${m.attempts?.succeeded ?? 0} ✗${m.attempts?.failed ?? 0} · 已验收目标 ${m.goals.succeeded}` : `目标 ✓${m.goals.succeeded} ✗${m.goals.failed}`}`,
-    `计划 LLM ${m.plans.llm} / 规则 ${m.plans.rule} · LLM 调用 ${m.llm.calls}（错误 ${m.llm.errors}，无效 ${m.llm.invalid}，近 1h ${m.llm.callsLastHour}/${m.llm.maxCallsPerHour}）`,
-    m.llm.tiers ? (() => { const avg = (x) => x && x.n ? (x.sum / x.n / 1000).toFixed(1) + 's' : '-'; const L = m.llm.tierLatency || {};
-      return `小决策 ${m.llm.tiers.light}（升级 ${m.llm.tiers.escalated}）平均 ${avg(L.light)} · 完整决策 ${m.llm.tiers.full} 平均 ${avg(L.full)}`; })() : '',
-    `卡死 ${m.stuck} · 反射触发 ${m.reflexTriggers} · 拦截残留动作 ${m.blockedActions}`,
-    Object.keys(m.failCodes).length ? `失败码 ${esc(JSON.stringify(m.failCodes))}` : '',
+    `运行 ${Math.floor(m.uptimeSec / 60)} 分 · 移动 ${m.distance} 格 · 发现 ${m.discoveries} · 死亡 ${m.deaths}`,
+    `动作 ✓${m.tasks.succeeded} ✗${m.tasks.failed} ⊘${m.tasks.cancelled} · 卡死 ${m.stuck} · 拦截残留动作 ${m.blockedActions}`,
+    `LLM ${m.llm.calls} 次（错误 ${m.llm.errors}，无效 ${m.llm.invalid}，近 1 小时 ${m.llm.callsLastHour}/${m.llm.maxCallsPerHour}）`,
+    m.llm.tiers ? `瞥一眼 ${m.llm.tiers.light}（升级 ${m.llm.tiers.escalated}）· 认真想 ${m.llm.tiers.full}` : '',
+    `planVersion ${s.planVersion}`,
+    Object.keys(m.failCodes).length ? `失败码 ${esc(Object.entries(m.failCodes).map(([k, v]) => `${k}×${v}`).join(' '))}` : '',
   ].filter(Boolean).join('<br>');
 
-  $('hostile').textContent = p.nearby.hostile.map((h) => `${h.name}@${h.dist}${h.how === 'heard' ? '(听见)' : ''}`).join(', ') || '无';
-  $('passive').textContent = p.nearby.passive.join(', ') || '无';
-  $('players').textContent = p.nearby.players.join(', ') || '无';
-  $('res').innerHTML = p.nearby.resources.map((r) => `<li>${r.seen === 'now' ? '●' : '○'} ${esc(r.block)} ×${r.count} · ${r.dir ?? ''} ${r.nearest} 格</li>`).join('') || '<li>—</li>';
   drawVision(s.vision, p.vision);
-  $('slots').textContent = `（空位 ${p.emptySlots}）`;
-  $('inv').innerHTML = p.inventory.map((i) => `<li>${esc(i.name)} ×${i.count}</li>`).join('') || '<li>空</li>';
-
   const mem = s.memory;
-  $('seen').textContent = `${mem.visitedChunks} / ${mem.seen.blocks}·${mem.seen.entities}·${mem.seen.biomes}`;
-  $('goals').innerHTML = mem.goals.slice().reverse().map((g) => `<li title="${esc(g.summary)}">${g.status === 'succeeded' ? '✓' : g.status === 'failed' ? '✗' : '·'} [${g.source}] ${esc(g.goal)} — ${esc(g.summary)}</li>`).join('') || '<li>—</li>';
-  $('lms').innerHTML = mem.landmarks.slice().reverse().map((l) => `<li>${l.id} · ${l.kind} · ${esc(l.label)} (${l.pos.x}, ${l.pos.y}, ${l.pos.z})</li>`).join('') || '<li>—</li>';
-  $('notes').innerHTML = mem.notes.slice().reverse().map((n) => `<li>[${n.kind}] ${esc(n.text)}</li>`).join('') || '<li>—</li>';
+  $('seen').textContent = `区块 ${mem.visitedChunks} · 方块 ${mem.seen.blocks} · 生物 ${mem.seen.entities} · 群系 ${mem.seen.biomes}`;
+  $('goals').innerHTML = list(mem.goals.slice().reverse(), (g) => `<li title="${esc(g.summary)}"><span class="badge ${g.status === 'succeeded' ? 'good' : g.status === 'failed' ? 'bad' : ''}">${g.status === 'succeeded' ? '成' : g.status === 'failed' ? '卡住' : '停'}</span> ${esc(g.goal)}<div class="dim" style="font-size:11px">${esc(g.summary)}</div></li>`);
+  $('lms').innerHTML = list(mem.landmarks.slice().reverse(), (l) => `<li>${esc(l.label)} <span class="k">${l.kind} (${l.pos.x}, ${l.pos.y}, ${l.pos.z})</span></li>`);
+  $('notes').innerHTML = list(mem.notes.slice().reverse(), (n) => `<li><span class="k">${n.kind}</span>${esc(n.text)}</li>`);
 }
 
-
+// ------------------------------------------------------------ 视野
 const CATS = ['unknown','sky','dark','water','lava','leaves','wood','grass','dirt','sand','stone','ore','snow','plant','built','other'];
 const CAT_ZH = { unknown:'未加载', sky:'天空', dark:'黑暗', water:'水', lava:'岩浆', leaves:'树叶', wood:'木头', grass:'草地', dirt:'泥土', sand:'沙/砾', stone:'石头', ore:'矿石', snow:'雪/冰', plant:'植物', built:'人造', other:'其他' };
-const PAL = { unknown:[236,236,236], sky:[244,247,250], dark:[34,34,34], water:[120,160,205], lava:[225,110,50], leaves:[110,150,90], wood:[130,95,60], grass:[150,185,110], dirt:[150,120,90], sand:[225,212,165], stone:[150,150,150], ore:[215,165,20], snow:[252,252,252], plant:[175,195,95], built:[195,150,105], other:[185,185,185] };
+const PAL = { unknown:[236,236,236], sky:[226,236,246], dark:[34,34,34], water:[120,160,205], lava:[225,110,50], leaves:[110,150,90], wood:[130,95,60], grass:[150,185,110], dirt:[150,120,90], sand:[225,212,165], stone:[150,150,150], ore:[215,165,20], snow:[252,252,252], plant:[175,195,95], built:[195,150,105], other:[185,185,185] };
 $('vlegend').innerHTML = CATS.filter((c) => c !== 'unknown').map((c) => `<span style="--c:rgb(${PAL[c].join(',')})">${CAT_ZH[c]}</span>`).join('');
 function drawVision(f, vs) {
+  if (!$('pane-vision').classList.contains('on')) return; // 不在看就不画
   const cv = $('eye'), g = cv.getContext('2d');
   if (!f) { g.clearRect(0, 0, cv.width, cv.height); $('vmeta').textContent = '无画面'; return; }
   if (cv.width !== f.cols * 12) { cv.width = f.cols * 12; cv.height = f.rows * 12; }
@@ -443,121 +499,73 @@ function drawVision(f, vs) {
   }
   const tmp = document.createElement('canvas'); tmp.width = f.cols; tmp.height = f.rows; tmp.getContext('2d').putImageData(img, 0, 0);
   g.imageSmoothingEnabled = false; g.drawImage(tmp, 0, 0, cv.width, cv.height);
-  g.strokeStyle = 'rgba(0,0,0,.25)'; g.beginPath(); g.moveTo(cv.width / 2, cv.height / 2 - 8); g.lineTo(cv.width / 2, cv.height / 2 + 8); g.moveTo(cv.width / 2 - 8, cv.height / 2); g.lineTo(cv.width / 2 + 8, cv.height / 2); g.stroke();
+  g.strokeStyle = 'rgba(0,0,0,.3)'; g.beginPath(); g.moveTo(cv.width / 2, cv.height / 2 - 8); g.lineTo(cv.width / 2, cv.height / 2 + 8); g.moveTo(cv.width / 2 - 8, cv.height / 2); g.lineTo(cv.width / 2 + 8, cv.height / 2); g.stroke();
   g.font = '11px ui-monospace, monospace';
   for (const e of f.entities) {
     const x = e.u * cv.width, y = e.v * cv.height;
-    g.fillStyle = e.kind === 'hostile' ? '#d64545' : '#111'; g.fillRect(x - 4, y - 4, 8, 8);
+    g.fillStyle = e.kind === 'hostile' ? '#c43d3d' : '#18181b'; g.fillRect(x - 4, y - 4, 8, 8);
     g.fillText(`${e.name.replace('player:', '')} ${e.dist}`, x + 7, y + 4);
   }
-  $('vmeta').textContent = `朝向 ${f.facing} · ${f.cols}×${f.rows} 射线 · ${f.range} 格 · 扫描 ${f.scanMs}ms`;
+  $('vmeta').textContent = `朝向 ${f.facing} · ${f.cols}×${f.rows} · ${f.range} 格 · ${f.scanMs}ms`;
   if (vs) {
-    $('vopen').textContent = `视距 左${vs.openness.left} 中${vs.openness.center} 右${vs.openness.right}`;
-    $('vseen').innerHTML = vs.seen_entities.map((e) => `<li>${esc(e.name)} · ${e.rel} ${e.dist} 格</li>`).join('') || '<li>—</li>';
-    $('vheard').innerHTML = vs.heard.map((e) => `<li>${esc(e.name)} · ${esc(e.approx)}</li>`).join('') || '<li>—</li>';
+    $('vopen').textContent = `左${vs.openness.left} 中${vs.openness.center} 右${vs.openness.right}`;
+    $('vseen').innerHTML = list(vs.seen_entities, (e) => `<li>${esc(e.name)} · ${e.rel} ${e.dist} 格</li>`);
+    $('vheard').innerHTML = list(vs.heard, (e) => `<li>${esc(e.name)} · ${esc(e.approx)}</li>`);
     $('vview').textContent = vs.view;
     $('vland').textContent = `${vs.nearest_land ? vs.nearest_land.dir + ' ' + vs.nearest_land.dist + ' 格' : '未知'} / ${vs.last_look_around_s == null ? '未环顾' : vs.last_look_around_s + ' 秒前'}`;
   }
 }
 
+// ------------------------------------------------------------ 事件
 const log = $('log');
+const active = () => new Set([...document.querySelectorAll('.f:checked')].map((x) => x.value));
+const visible = (div) => active().has(div.dataset.sev) && (!$('logFilter').value.trim() || div.textContent.includes($('logFilter').value.trim()));
 function addEvent(ev) {
   const div = document.createElement('div');
   div.className = ev.severity; div.dataset.sev = ev.severity;
-  div.textContent = `${new Date(ev.ts).toLocaleTimeString()} ${ev.severity} ${ev.type}  ${ev.msg}`;
-  div.style.display = active().has(ev.severity) ? '' : 'none';
+  div.innerHTML = `<span class="t">${new Date(ev.ts).toLocaleTimeString()}</span>${esc(ev.type)}  ${esc(ev.msg)}`;
+  div.style.display = visible(div) ? '' : 'none';
   const stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 20;
   log.appendChild(div);
-  while (log.children.length > 600) log.removeChild(log.firstChild);
+  while (log.children.length > 800) log.removeChild(log.firstChild);
   if (stick) log.scrollTop = log.scrollHeight;
+  if (!$('pane-events').classList.contains('on') && (ev.severity === 'P0' || ev.severity === 'P1')) { unseen++; $('nEvents').textContent = unseen; }
 }
-const active = () => new Set([...document.querySelectorAll('.f:checked')].map((x) => x.value));
-document.querySelectorAll('.f').forEach((cb) => cb.addEventListener('change', () => {
-  const a = active(); for (const d of log.children) d.style.display = a.has(d.dataset.sev) ? '' : 'none';
-}));
-
-
-// ------------------------------------------------------------ 可自定义布局（gridstack）
-const LAYOUT_KEY = 'curio.dashboard.layout.v2';
-const GS_CDN = 'https://cdn.jsdelivr.net/npm/gridstack@12.3.3/dist/gridstack-all.js';
-let grid = null, editing = false;
-const loadScript = (src) => new Promise((ok, bad) => { const el = document.createElement('script'); el.src = src; el.onload = ok; el.onerror = bad; document.head.appendChild(el); });
-const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
-const lsSet = (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch { /* 隐私模式等 */ } };
-function initGrid() {
-  grid = GridStack.init({
-    column: 12, cellHeight: 32, margin: 0, float: false, animate: false,
-    handle: 'h2', staticGrid: true,
-    columnOpts: { breakpoints: [{ w: 820, c: 1 }], layout: 'list' },
-  }, '#grid');
-  try {
-    const saved = JSON.parse(lsGet(LAYOUT_KEY) || 'null');
-    // addRemove=false：只调整已有面板的位置，不删不增（新加的面板保持默认位置）
-    if (Array.isArray(saved)) grid.load(saved, false);
-  } catch { /* 布局损坏就用默认 */ }
-  grid.on('change', () => {
-    if (grid.getColumn() !== 12) return; // 窄屏单列时不覆盖桌面布局
-    lsSet(LAYOUT_KEY, JSON.stringify(grid.save(false).map(({ id, x, y, w, h }) => ({ id, x, y, w, h }))));
-  });
-}
-function toggleLayoutEdit() {
-  if (!grid) return;
-  editing = !editing;
-  grid.setStatic(!editing);
-  document.body.classList.toggle('editing', editing);
-  $('layoutBtn').classList.toggle('on', editing);
-  $('layoutBtn').textContent = editing ? '完成布局' : '编辑布局';
-}
-function resetLayout() { lsSet(LAYOUT_KEY, null); location.reload(); }
-loadScript('/vendor/gridstack/gridstack-all.js')
-  .catch(() => loadScript(GS_CDN))
-  .then(initGrid)
-  .catch(() => {
-    $('grid').classList.add('nogs');
-    $('layoutBtn').disabled = true; $('layoutBtn').title = 'gridstack 没加载成功（npm install 或联网后可用），使用固定布局';
-  });
+const refilter = () => { for (const d of log.children) d.style.display = visible(d) ? '' : 'none'; };
+document.querySelectorAll('.f').forEach((cb) => cb.addEventListener('change', refilter));
+$('logFilter').addEventListener('input', refilter);
 
 // ------------------------------------------------------------ LLM 调用流
-const calls = new Map(); // id → call
+const calls = new Map();
 let selected = null;
-const REASON_ZH = { no_goal: '无目标', prefetch: '预规划', stale_prefetch: '预规划过时', user_suggestion: '玩家建议', manual_replan: '手动重规划', failure: '失败后重想', project_blocked: '项目受阻', check: '检查' };
-const reasonLabel = (r) => { const [a, b] = String(r ?? '').split('·'); return (REASON_ZH[a] || a) + (b ? ` · ${b}` : ''); };
 const fmtS = (ms) => (ms == null ? '' : (ms / 1000).toFixed(1) + 's');
-function pretty(text) {
-  const t = String(text ?? '');
-  if (!/^\s*[\[{]/.test(t)) return t;
-  try { return JSON.stringify(JSON.parse(t), null, 2); } catch { return t; }
-}
+const reasonLabel = (r) => String(r ?? '').replace(/^mind:/, '');
+function pretty(text) { const t = String(text ?? ''); if (!/^\s*[\[{]/.test(t)) return t; try { return JSON.stringify(JSON.parse(t), null, 2); } catch { return t; } }
 function callRow(c) {
   const u = c.usage || {};
-  const tok = u.total_tokens ? ` · ${u.prompt_tokens}+${u.completion_tokens} tok` : '';
-  return `<span class="st-${c.status}"></span><span>${esc(reasonLabel(c.reason))}${c.attempt ? ' · 重试' : ''}</span><span>${c.status === 'streaming' ? fmtS(Date.now() - c.ts) : fmtS(c.latencyMs)}</span>`
-    + `<small>${new Date(c.ts).toLocaleTimeString()}${tok}${c.status === 'invalid' ? ' · 输出无效' : c.status === 'error' ? ' · 调用失败' : ''}</small>`;
+  return `<span class="st-${c.status}"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(reasonLabel(c.reason))}">${esc(reasonLabel(c.reason))}${c.attempt ? ' · 重试' : ''}</span><span class="mono dim">${c.status === 'streaming' ? fmtS(Date.now() - c.ts) : fmtS(c.latencyMs)}</span>`
+    + `<small>${new Date(c.ts).toLocaleTimeString()}${u.total_tokens ? ` · ${u.prompt_tokens}+${u.completion_tokens} tok` : ''}${c.status === 'invalid' ? ' · 输出无效' : c.status === 'error' ? ' · 调用失败' : ''}</small>`;
 }
 function renderCalls() {
-  const list = [...calls.values()].sort((a, b) => b.ts - a.ts);
-  $('llmCount').textContent = `${list.length} 次`;
-  $('llmCalls').innerHTML = list.map((c) => `<li data-id="${c.id}" class="${c.id === selected ? 'sel' : ''}">${callRow(c)}</li>`).join('') || '<li style="cursor:default;display:block;color:var(--dim)">还没有调用</li>';
+  const arr = [...calls.values()].sort((a, b) => b.ts - a.ts);
+  $('llmCount').textContent = arr.length || '';
+  $('llmCalls').innerHTML = arr.map((c) => `<li data-id="${c.id}" class="${c.id === selected ? 'sel' : ''}">${callRow(c)}</li>`).join('') || '<li class="empty" style="cursor:default;display:block">还没有调用</li>';
 }
 $('llmCalls').addEventListener('click', (e) => {
-  const li = e.target.closest('li[data-id]');
-  if (!li) return;
-  selected = li.dataset.id;
-  $('llmFollow').checked = false;
-  renderCalls(); renderDetail();
+  const li = e.target.closest('li[data-id]'); if (!li) return;
+  selected = li.dataset.id; $('llmFollow').checked = false; renderCalls(); renderDetail();
 });
 function renderDetail() {
   const c = calls.get(selected), el = $('llmDetail');
   if (!c) { el.innerHTML = ''; return; }
   const u = c.usage || {};
-  const meta = [c.provider, new Date(c.ts).toLocaleTimeString(), reasonLabel(c.reason), `第 ${c.attempt + 1} 次`,
-    c.firstTokenMs != null ? `首字 ${fmtS(c.firstTokenMs)}` : '', c.latencyMs != null ? `总耗时 ${fmtS(c.latencyMs)}` : '',
-    u.total_tokens ? `tokens ${u.prompt_tokens} → ${u.completion_tokens}` : '', c.finishReason ? `finish=${c.finishReason}` : ''].filter(Boolean).join(' · ');
-  const msgs = c.messages.map((m, i) => `<details${m.role === 'system' ? '' : i === c.messages.length - 1 ? ' open' : ''}><summary>发送 · ${m.role} · ${m.content.length} 字符</summary><pre>${esc(pretty(m.content))}</pre></details>`).join('');
+  const meta = [c.provider, new Date(c.ts).toLocaleTimeString(), reasonLabel(c.reason), `第 ${c.attempt + 1} 次`, c.firstTokenMs != null ? `首字 ${fmtS(c.firstTokenMs)}` : '',
+    c.latencyMs != null ? `总耗时 ${fmtS(c.latencyMs)}` : '', u.total_tokens ? `tokens ${u.prompt_tokens} → ${u.completion_tokens}` : '', c.finishReason ? `finish=${c.finishReason}` : ''].filter(Boolean).join(' · ');
+  const msgs = c.messages.map((m, i) => `<details${m.role !== 'system' && i === c.messages.length - 1 ? ' open' : ''}><summary>发送 · ${m.role} · ${m.content.length} 字符</summary><pre>${esc(pretty(m.content))}</pre></details>`).join('');
   const streaming = c.status === 'streaming';
   el.innerHTML = `<div class="meta">${esc(meta)}</div>${msgs}`
-    + `<details id="llmReasonBox"${c.reasoning ? ' open' : ''}${c.reasoning ? '' : ' hidden'}><summary>思考过程（reasoning）</summary><pre class="reason" id="llmReason"></pre></details>`
-    + `<details open><summary>返回${streaming ? '（流式接收中）' : ''}</summary><pre class="out${streaming ? ' caret' : ''}" id="llmOut"></pre></details>`
+    + `<details id="llmReasonBox"${c.reasoning ? ' open' : ''}${c.reasoning ? '' : ' hidden'}><summary>思考过程</summary><pre class="reason" id="llmReason"></pre></details>`
+    + `<details open><summary>返回${streaming ? '（接收中）' : ''}</summary><pre class="${streaming ? 'caret' : ''}" id="llmOut"></pre></details>`
     + (c.error ? `<div class="err">${esc(c.error)}</div>` : '');
   $('llmReason').textContent = c.reasoning;
   $('llmOut').textContent = streaming ? c.content : pretty(c.content);
@@ -586,6 +594,7 @@ function onLlm(ev) {
 }
 setInterval(() => { if ([...calls.values()].some((c) => c.status === 'streaming')) renderCalls(); }, 500);
 
+showTab(lsGet('curio.dashboard.tab') || 'mind');
 const es = new EventSource('/api/stream');
 es.addEventListener('llm', (e) => onLlm(JSON.parse(e.data)));
 es.addEventListener('llm_init', (e) => {
@@ -595,9 +604,9 @@ es.addEventListener('llm_init', (e) => {
   if (last) selected = last.id;
   renderCalls(); renderDetail();
 });
-es.addEventListener('state', (e) => render(JSON.parse(e.data)));
+es.addEventListener('state', (e) => { lastState = JSON.parse(e.data); try { render(lastState); } catch (err) { console.error(err); } });
 es.addEventListener('ev', (e) => addEvent(JSON.parse(e.data)));
-es.onerror = () => { $('conn').textContent = '控制台断开'; $('conn').className = 'pill off'; };
+es.onerror = () => { $('conn').textContent = '控制台断开'; $('connDot').className = 'dot off'; };
 </script>
 </body>
 </html>

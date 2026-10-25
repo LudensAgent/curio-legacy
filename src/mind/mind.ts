@@ -984,6 +984,7 @@ export class Mind {
         next: this.queuedNext?.draft.what ?? null,
         stream: self.recentThoughts(10),
         agenda: self.agenda(),
+        plan: self.plan(),
         knowHow: [...self.data.knowHow].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 8),
         experiments: self.experiments(5),
         diary: self.diary(6),
