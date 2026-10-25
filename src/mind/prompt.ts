@@ -34,6 +34,8 @@ export interface MindContext {
   persona: string;
   /** 技能书索引（每份一行） */
   skills?: string[];
+  /** 游戏自己的系统消息（死亡播报、成就、公告），原话 */
+  gameMessages?: string[];
   stuckHere?: StuckHere | null;
   repeatedFailures?: string[];
 }
@@ -269,6 +271,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
     ...(audienceBlock(ctx.audience, glance ? 'light' : 'full') ?? {}),
     surroundings: surroundingsOf(p, ctx.tier),
     body: bodyState(p, s, ctx.activity),
+    ...(ctx.gameMessages?.length ? { game_messages: ctx.gameMessages } : {}),
     since_last_thought: ctx.changes,
     noticed: ctx.noticed.map((n) => `${n.what}${n.level === 'urgent' ? '（要紧）' : ''}`),
     why_thinking_now: ctx.reason,

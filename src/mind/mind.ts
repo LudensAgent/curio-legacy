@@ -15,6 +15,7 @@ import { pickVariant } from '../skills/work.ts';
 import { afterStep, softMiss, createActivity, describeActivity, diffInventory, inventoryOf, nextStep, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
 import { Attention, EXPERIENCE_MS, RECONSIDER, stuckHere, URGENT } from './attention.ts';
 import { homeOf } from './home.ts';
+import type { ParsedGameMessage } from '../memory/game-messages.ts';
 import type { MindContext } from './prompt.ts';
 import { moodWords, type SelfModel } from './self.ts';
 import type { Thinker } from './thinker.ts';
@@ -86,6 +87,9 @@ export class Mind {
   private learnedActivities = new Set<string>();
   private speechEventAt = 0;
   private fillerAt = 0;
+  private gameMessages: { at: number; text: string }[] = [];
+  private deathAt = 0;
+  private deathTold = false;
   private readonly startedAt = Date.now();
   private lastLessonAt = 0;
   private reflecting: AbortController | null = null;
@@ -461,6 +465,7 @@ export class Mind {
       mySkills: tier === 'deliberate' ? this.safe(() => this.d.mySkills?.() ?? [], []) : [],
       researchContext: tier === 'deliberate' && reflect ? this.safe(() => this.d.researchContext?.(), undefined) : undefined,
       persona: this.d.persona,
+      gameMessages: this.recentGameMessages(),
       skills: this.safe(() => this.d.thinker.skillBook?.index() ?? [], []),
       stuckHere: stuckHere(this.recentEnds, state.pos),
       repeatedFailures: [...this.failuresByTarget].filter(([, f]) => f.n >= 2)
@@ -735,8 +740,11 @@ export class Mind {
     this.backoffUntil = 0;
     this.d.bus.publish('resumed', 'P1', 'Agent 恢复，接着刚才的心思继续');
   }
-  onDeath(info: { cause?: string; hazard?: Hazard | null; during?: string } = {}) {
-    const cause = info.cause ? causeName(info.cause as any) ?? info.cause : '不明原因';
+  onDeath(info: { cause?: string; hazard?: Hazard | null; during?: string; message?: string } = {}) {
+    // 游戏的死亡播报是原话（“Curio was blown up by Creeper”），比推测的死因可靠
+    const cause = info.message ? `游戏播报：${info.message}` : info.cause ? causeName(info.cause as any) ?? info.cause : '不明原因';
+    this.deathAt = Date.now();
+    this.deathTold = !!info.message;
     this.suspend('death');
     this.d.arbiter.cancel('死亡');
     this.d.self.feel({ type: 'death' });
@@ -746,6 +754,36 @@ export class Mind {
     this.attention.notice('death', `刚刚死了（${cause}）${info.hazard ? `，(${info.hazard.pos.x},${info.hazard.pos.y},${info.hazard.pos.z}) 一带很危险` : ''}`, 0.9, 0);
     this.settleUntil = Date.now() + 1500;
   }
+  /**
+   * 游戏自己的系统消息：死亡播报、成就、别人进出服务器、公告。
+   * 记进念头流（思考时能看到），重要的写进日记；死亡播报晚到时补到这次死亡上。
+   */
+  onGameMessage(m: ParsedGameMessage) {
+    this.gameMessages.push({ at: Date.now(), text: m.text });
+    if (this.gameMessages.length > 12) this.gameMessages.shift();
+    if (m.kind === 'join' || m.kind === 'leave') return;
+    this.d.self.think(`[游戏] ${m.text}`, 'notice');
+    if (m.kind === 'death_self') {
+      if (!this.deathTold && Date.now() - this.deathAt < 6000) {
+        this.deathTold = true;
+        this.diary(`游戏说我是这么死的：${m.text}`);
+        this.attention.notice('death_told', `游戏播报：${m.text}${m.by ? `（是 ${m.by} 干的）` : ''}`, 0.85, 0);
+      }
+    } else if (m.kind === 'advancement_self') {
+      this.d.self.feel({ type: 'novelty', strength: 0.8 });
+      this.diary(`达成了成就：${m.text}`);
+      this.attention.notice(`adv:${m.text}`, `游戏播报：${m.text}`, 0.5, 60_000);
+    } else if (m.kind === 'death_other') {
+      this.attention.notice(`other_death:${m.text}`, `游戏播报：${m.text}`, 0.4, 30_000);
+    } else {
+      this.attention.notice(`server:${m.text.slice(0, 40)}`, `服务器消息：${m.text}`, 0.35, 120_000);
+    }
+  }
+  /** 最近的游戏消息（给思考看） */
+  recentGameMessages(maxAgeMs = 10 * 60_000): string[] {
+    return this.gameMessages.filter((g) => Date.now() - g.at <= maxAgeMs).slice(-6).map((g) => g.text);
+  }
+
   onSpawn() { if (this.suspendedBy.has('death')) this.settleUntil = Date.now() + 1500; }
   onDisconnected() { this.suspend('disconnected'); this.d.arbiter.cancel('断线'); }
 

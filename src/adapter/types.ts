@@ -247,6 +247,6 @@ export interface GameAdapter {
 
 /**
  * 适配器事件：
- * spawn / death / respawn / hurt / disconnected / kicked / chat(username, message)
+ * spawn / death / respawn / hurt / disconnected / kicked / chat(username, message) / game_message(text, position)
  */
-export type AdapterEvent = 'spawn' | 'death' | 'respawn' | 'hurt' | 'disconnected' | 'kicked' | 'chat';
+export type AdapterEvent = 'spawn' | 'death' | 'respawn' | 'hurt' | 'disconnected' | 'kicked' | 'chat' | 'game_message';

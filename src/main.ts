@@ -4,6 +4,7 @@ import { MineflayerAdapter } from './adapter/mineflayer.ts';
 import { Arbiter } from './arbiter/arbiter.ts';
 import { Reflex } from './brain/reflex.ts';
 import { Mind } from './mind/mind.ts';
+import { parseGameMessage, type ParsedGameMessage } from './memory/game-messages.ts';
 import { SelfModel } from './mind/self.ts';
 import { Thinker } from './mind/thinker.ts';
 import { BUILTIN_SKILLS_DIR, SkillBook } from './knowledge/skillbook.ts';
@@ -262,11 +263,32 @@ setInterval(() => {
   sampleVitals();
 }, 1000).unref();
 
+// 游戏自己的系统消息：死亡播报、成就、进出服务器、公告。原样记进记忆（死因以游戏播报为准）
+const gameLog: { at: number; text: string; parsed: ParsedGameMessage }[] = [];
+let lastDeathAt = 0;
+adapter.on('game_message', (text: string) => {
+  const s = adapter.state();
+  const parsed = parseGameMessage(text, s.username);
+  gameLog.push({ at: Date.now(), text: parsed.text, parsed });
+  if (gameLog.length > 50) gameLog.splice(0, gameLog.length - 50);
+  bus.publish('game_message', parsed.kind === 'death_self' ? 'P1' : 'P3', parsed.text, { kind: parsed.kind, ...(parsed.cause ? { cause: parsed.cause } : {}), ...(parsed.by ? { by: parsed.by } : {}) });
+  if (parsed.kind === 'death_self' || parsed.kind === 'advancement_self') memory.addNote('fact', `游戏提示：${parsed.text}`, s.dim, s.pos);
+  // 死亡事件先到、播报后到：补记到这次死亡上
+  if (parsed.kind === 'death_self' && Date.now() - lastDeathAt < 6000) {
+    memory.updateDeathMessage(parsed.text, parsed.cause);
+    executive.onGameMessage(parsed);
+  } else executive.onGameMessage(parsed);
+});
+const recentDeathMessage = () => [...gameLog].reverse().find((m) => m.parsed.kind === 'death_self' && Date.now() - m.at < 4000);
+
 adapter.on('death', () => {
   const s = adapter.state();
-  // 死因由程序根据死前的真实状态判断，写成危险区域 + 亲历经验（不靠模型）
+  lastDeathAt = Date.now();
+  // 死因优先用游戏的死亡播报；没有播报时由程序根据死前的真实状态判断
   sampleVitals();
-  const cause = deathCause(vitals, lastHurt);
+  const told = recentDeathMessage();
+  const guessed = deathCause(vitals, lastHurt);
+  const cause = told?.parsed.cause && told.parsed.cause !== 'unknown' ? told.parsed.cause : guessed;
   const during = vitals.at(-1)?.task ?? lastWork;
   vitals = [];
   let hazard: ReturnType<typeof memory.addHazard> | null = null;
@@ -277,10 +299,10 @@ adapter.on('death', () => {
     bus.publish('lesson', 'P2', `亲历经验：${text}`, { source: 'observed', hazard });
   } catch (e) { bus.publish('memory', 'P1', `记录危险区域失败：${String((e as Error)?.message ?? e)}`); }
   memory.addLandmark('death', '死亡地点', s.dim, s.pos, 4);
-  memory.setDeath({ ts: Date.now(), dim: s.dim, pos: s.pos, lost: invSnapshot, cause });
+  memory.setDeath({ ts: Date.now(), dim: s.dim, pos: s.pos, lost: invSnapshot, cause, ...(told ? { message: told.text } : {}) });
   awaitingRespawnLoss = true;
-  bus.publish('death', 'P0', `死亡 @ (${Math.round(s.pos.x)}, ${Math.round(s.pos.y)}, ${Math.round(s.pos.z)})，死因：${cause}${during ? `（在做 ${during}）` : ''}`, { cause, during });
-  executive.onDeath({ cause, hazard, during });
+  bus.publish('death', 'P0', `死亡 @ (${Math.round(s.pos.x)}, ${Math.round(s.pos.y)}, ${Math.round(s.pos.z)})，死因：${told ? told.text : cause}${during ? `（在做 ${during}）` : ''}`, { cause, during, ...(told ? { message: told.text } : {}) });
+  executive.onDeath({ cause, hazard, during, ...(told ? { message: told.text } : {}) });
 });
 adapter.on('hurt', () => {
   if (Date.now() - lastHurt < 1000) return;

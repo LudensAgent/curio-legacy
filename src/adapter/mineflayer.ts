@@ -209,6 +209,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     bot.on('chat', (user: string, message: string) => {
       if (user && user !== bot.username) this.emit('chat', user, message);
     });
+    // 游戏自己的系统消息（死亡播报、成就、进出服务器、公告）：原样交给上层记进记忆
+    bot.on('messagestr', (message: string, position: string) => {
+      if (position === 'system' && typeof message === 'string' && message.trim()) this.emit('game_message', message, position);
+    });
     bot.on('end', (reason: string) => {
       this.newSession();
       this.connectedFlag = false;

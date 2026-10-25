@@ -124,6 +124,8 @@ export interface DeathRecord {
   /** 死前背包；复活后与当前背包比较得出真正丢失的物品 */
   lost: { name: string; count: number }[];
   cause?: string;
+  /** 游戏的死亡播报原文（比推测的死因可靠） */
+  message?: string;
 }
 
 interface MemoryData {
@@ -516,6 +518,15 @@ export class WorldMemory {
   setDeath(d: DeathRecord) {
     this.data.lastDeath = { ...d, worldId: this.worldId, pos: { x: Math.round(d.pos.x), y: Math.round(d.pos.y), z: Math.round(d.pos.z) } };
     this.data.deaths[this.worldId] = this.data.lastDeath;
+    this.touch();
+  }
+
+  /** 游戏的死亡播报晚一点才到：补上原文和更可靠的死因 */
+  updateDeathMessage(message: string, cause?: string) {
+    const death = this.lastDeath();
+    if (!death) return;
+    death.message = message.slice(0, 300);
+    if (cause && cause !== 'unknown') death.cause = cause;
     this.touch();
   }
 

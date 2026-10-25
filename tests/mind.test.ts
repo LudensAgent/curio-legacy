@@ -515,3 +515,27 @@ test('被困地下时，模型用原子动作写一段挖阶梯的 routine，身
   assert.equal(rec.outcome, 'done', rec.summary);
   assert.ok(w.adapter.pos.y >= 63, `回到了地表、头顶见天（y=${w.adapter.pos.y}）`);
 });
+
+test('游戏的系统消息进记忆：死亡播报写进日记和念头，之后的思考能看到原话', async (t) => {
+  const { parseGameMessage } = await import('../src/memory/game-messages.ts');
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { monologue: '探洞', decision: 'new', activity: { what: '探洞', steps: [step()] } });
+  w.mind.onDeath({ cause: 'unknown' });
+  w.mind.onGameMessage(parseGameMessage('FakeBot was blown up by Creeper', 'FakeBot'));
+  assert.ok(w.self.diary(1)[0].text.includes('blown up by Creeper'), '日记里有游戏原话');
+  assert.ok(w.self.recentThoughts().some((x) => x.text.includes('[游戏] FakeBot was blown up by Creeper')));
+  w.mind.onGameMessage(parseGameMessage('FakeBot has made the advancement [Stone Age]', 'FakeBot'));
+  assert.ok(w.self.diary(1)[0].text.includes('Stone Age'));
+  await new Promise((r) => setTimeout(r, 1600));
+  await w.tick();
+  const user = w.pending.at(-1)!.messages[1].content;
+  assert.match(user, /"game_messages":\[[^\]]*blown up by Creeper/);
+  assert.match(user, /Creeper/);
+});
+
+test('死亡时已经有游戏播报：直接按原话记，不用推测的死因', async (t) => {
+  const w = fixture(t);
+  w.mind.onDeath({ cause: 'fall', message: 'FakeBot was slain by Zombie' });
+  assert.ok(w.self.diary(1)[0].text.includes('slain by Zombie'));
+});
