@@ -50,7 +50,7 @@ export interface MindContext {
  */
 
 /** 常用动作：给完整参数；其余只列名字和一句用途，需要时用 {"kind":"moves"} 查完整参数 */
-export const COMMON_MOVES = ['dig_at', 'step', 'place_at', 'gather', 'goto', 'explore', 'wander', 'look_around', 'craft', 'smelt', 'eat', 'hunt', 'forage', 'fish', 'farm', 'collect_seeds',
+export const COMMON_MOVES = ['dig_at', 'step', 'place_at', 'defend', 'gather', 'goto', 'explore', 'wander', 'look_around', 'craft', 'smelt', 'eat', 'hunt', 'forage', 'fish', 'farm', 'collect_seeds',
   'pickup_items', 'store_items', 'take_items', 'place_torch', 'shelter', 'sleep', 'wait', 'dig', 'climb_up', 'build', 'boat', 'inspect_block', 'interact_block', 'use_item'];
 
 /** 远行、传送门、末地这些只在用得上时列出来，平时是噪音 */
@@ -115,6 +115,7 @@ const ROUTINE_OF_THINKING = `【每次这样想】
 const CHOOSE = `【选动作】
 - 去记得的地方或坐标 → goto；找没见过的东西 → explore {"until":…}；拿看得见的方块 → gather；身边某一格 → dig_at / step / place_at
 - 过水 → boat 或游过去；吃 → eat（背包有吃的）/ hunt / forage / fish；做东西 → craft、smelt（拿不准先查 recipes）
+- 有怪靠近 → defend {"target":"名字"} 打掉，或走开绕路（苦力怕也是你定：打就砍一下退一步）
 - 过夜 → sleep（有床，看参数选哪张）/ shelter / 自己挖坑封顶；在坑里或地下 → place_at [0,0,0] 垫高或挖台阶
 - 盖新房子 → design 拿图纸 → 攒材料 → build {"draft":"图纸ID"}；没盖完的 → build {"projectId":"作品ID"}；不要自己画图纸`;
 
@@ -124,7 +125,7 @@ const PRINCIPLES = `【原则】
 - 从真实结果里学：出乎意料才写 learned；连续失败就换办法；有 stuck_here 必须换完全不同的思路，别碰 repeated_failures 里的目标。
 - 你会被风景吸引、想把家弄得舒服好看：喜欢的写 liked，想做的放 agenda；天黑惦记家，没盖完的房子会回去盖。情绪是信号：累了歇、烦了换办法、腻了找新鲜事。
 - 只知道亲眼看到或记得的东西，坐标来自观察或地标，不编。
-- 身体只有保命本能（躲苦力怕、溺水上浮、被贴脸还手、快饿死才吃）；插火把、顺手吃、捡东西要你自己做，或用 habits 定成习惯。`;
+- 身体只有保命本能（苦力怕嘶嘶响时躲开、溺水上浮、被贴脸还手、快饿死才吃）；插火把、顺手吃、捡东西要你自己做，或用 habits 定成习惯。`;
 
 const PRECISE = `【精确操作】【身边】local 是以脚为原点的方块图（[前,上,右]，前=facing）。dig_at 挖哪格、step 迈到哪格、place_at 在哪格放方块，都写确切的相对坐标；放进 routine 重复时每步按当时站的位置重算，例如：
 - 朝北挖阶梯上地面：steps [dig_at {"at":[0,2,0],"facing":"N"}, dig_at {"at":[1,1,0],"facing":"N"}, dig_at {"at":[1,2,0],"facing":"N"}, step {"to":[1,1,0],"facing":"N"}]，repeat 10，done_when {"type":"sky_visible","equals":true}
@@ -184,7 +185,7 @@ ${CHOOSE}
 ${CONDITIONS}
 
 【常用动作】
-${movesCatalog(0, new Set([...inUse, 'dig_at', 'step', 'place_at', 'gather', 'goto', 'explore', 'craft', 'eat', 'hunt', 'forage', 'look_around', 'pickup_items', 'wait', 'place_torch', 'sleep', 'shelter', 'build', 'smelt', 'store_items', 'climb_up', 'boat']))}`;
+${movesCatalog(0, new Set([...inUse, 'dig_at', 'step', 'place_at', 'defend', 'gather', 'goto', 'explore', 'craft', 'eat', 'hunt', 'forage', 'look_around', 'pickup_items', 'wait', 'place_torch', 'sleep', 'shelter', 'build', 'smelt', 'store_items', 'climb_up', 'boat']))}`;
 }
 
 /** 按情境追加在用户消息末尾的提醒：只说和眼下有关的 2–4 件事 */

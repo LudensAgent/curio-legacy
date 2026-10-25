@@ -91,6 +91,7 @@ export interface SeenEntity {
   velocity?: Vec3Like;
   phase?: number;
   hp?: number;
+  fusing?: boolean;
   count?: number;
   dir: string; // 绝对方向 N/NE/...
   rel: string; // 相对方向 正前/右前/...
@@ -436,7 +437,7 @@ export class Vision {
       const ddx = cx - eye.x, ddz = cz - eye.z;
       const ayaw = yawTo(ddx, ddz);
       const relYaw = norm(ayaw - eye.yaw);
-      const base: SeenEntity = { id: e.id, name: e.name, kind: e.kind, pos: e.pos, dist: e.dist, height: e.height, velocity: e.velocity, phase: e.phase, hp: e.hp, ...(e.count ? { count: e.count } : {}), dir: dirOfYaw(ayaw), rel: relOf(relYaw), how: 'seen' };
+      const base: SeenEntity = { id: e.id, name: e.name, kind: e.kind, pos: e.pos, dist: e.dist, height: e.height, velocity: e.velocity, phase: e.phase, hp: e.hp, ...(e.fusing ? { fusing: true } : {}), ...(e.count ? { count: e.count } : {}), dir: dirOfYaw(ayaw), rel: relOf(relYaw), how: 'seen' };
       let visible = false;
       let relPitch = 0;
       for (const ty of targets) {
@@ -516,7 +517,7 @@ export class Vision {
     if (!this.syncScope().observationReady) return [];
     return [...this.seen, ...this.heard]
       .filter((e) => e.dist <= radius)
-      .map((e) => ({ id: e.id, perception: e.how, name: e.name, kind: e.kind, pos: e.pos, dist: e.dist, height: e.height, velocity: e.velocity, phase: e.phase, hp: e.hp }))
+      .map((e) => ({ id: e.id, perception: e.how, name: e.name, kind: e.kind, pos: e.pos, dist: e.dist, height: e.height, velocity: e.velocity, phase: e.phase, hp: e.hp, ...(e.fusing ? { fusing: true } : {}) }))
       .sort((a, b) => a.dist - b.dist);
   }
 

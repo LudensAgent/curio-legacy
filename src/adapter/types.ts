@@ -24,6 +24,8 @@ export interface EntityInfo {
   velocity?: Vec3Like;
   phase?: number;
   hp?: number;
+  /** 苦力怕正在嘶嘶作响、马上要炸 */
+  fusing?: boolean;
   /** 掉落物的数量（name 形如 item:raw_rabbit） */
   count?: number;
 }

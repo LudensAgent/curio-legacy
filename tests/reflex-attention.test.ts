@@ -41,7 +41,7 @@ function fixture(t: TestContext, options: { routineCare?: boolean } = {}) {
   const senses: Senses = { perceivedEntities: () => entities, knownBlocks: () => [], refresh() {}, markSweep() {} };
   const reflex = new Reflex(adapter, arbiter, new EventBus(), senses, options);
   return { state, cave, starts, cancellations, setTask, tick: () => reflex.tick(), advance: (ms: number) => { now += ms; },
-    hostile: (name: string) => { entities = [{ id: 42, name, kind: 'hostile', dist: 3, pos: { x: 3, y: 64, z: 0 } }]; },
+    hostile: (name: string, extra: Record<string, unknown> = {}) => { entities = [{ id: 42, name, kind: 'hostile', dist: 3, pos: { x: 3, y: 64, z: 0 }, ...extra }]; },
   };
 }
 
@@ -66,7 +66,7 @@ test('emergencies can interrupt an ongoing meal reflex immediately', (t) => {
   const w = fixture(t);
   w.setTask('eat', 'reflex'); w.state.inLava = true; w.tick();
   assert.equal(w.starts.at(-1)?.step.skill, 'flee');
-  w.state.inLava = false; w.setTask('eat', 'reflex'); w.hostile('creeper'); w.tick();
+  w.state.inLava = false; w.setTask('eat', 'reflex'); w.hostile('creeper', { fusing: true }); w.tick();
   assert.equal(w.starts.length, 2);
   assert.equal(w.starts.at(-1)?.step.skill, 'flee');
   w.setTask('eat', 'reflex'); w.state.inWater = true; w.state.oxygen = 8; w.tick();
@@ -125,8 +125,19 @@ test('autonomous reflexes preserve routine choices and return stuck movement whi
   assert.equal(w.starts.at(-1)?.step.skill, 'flee');
   w.state.inLava = false; w.state.inWater = true; w.state.oxygen = 8; w.tick();
   assert.equal(w.starts.at(-1)?.step.skill, 'surface');
-  w.state.inWater = false; w.state.hp = 20; w.setTask('craft'); w.hostile('creeper'); w.tick();
+  w.state.inWater = false; w.state.hp = 20; w.setTask('craft'); w.hostile('creeper', { fusing: true }); w.tick();
   assert.equal(w.starts.at(-1)?.step.skill, 'flee');
   w.setTask('craft'); w.hostile('spider'); w.tick();
   assert.equal(w.starts.at(-1)?.step.skill, 'defend');
+});
+
+test('苦力怕：打还是跑由脑子定；没响的苦力怕不打断，嘶嘶响才躲，正在跟它打时只后撤几步', (t) => {
+  const w = fixture(t);
+  w.state.hp = 20;
+  w.setTask('hunt', 'llm'); w.hostile('creeper'); w.tick();
+  assert.ok(!w.starts.some((x) => x.step.skill === 'flee'), '3 格外没响：交给脑子决定');
+  w.setTask('defend', 'llm'); w.hostile('creeper', { fusing: true }); w.tick();
+  const f = w.starts.at(-1)!;
+  assert.equal(f.step.skill, 'flee');
+  assert.equal((f.step.args as any).distance, 6, '正在打：后撤几步就行');
 });

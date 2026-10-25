@@ -444,9 +444,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const keys: string[] = this.mcData.entitiesByName?.[ent.name]?.metadataKeys ?? [];
       const phase = ent.metadata?.[keys.indexOf('phase')];
       const hp = ent.metadata?.[keys.indexOf('health')];
+      // 苦力怕的引信：swell_dir=1 正在膨胀，is_ignited=被点燃
+      const fusing = ent.name === 'creeper' && (ent.metadata?.[keys.indexOf('swell_dir')] === 1 || ent.metadata?.[keys.indexOf('is_ignited')] === true);
       out.push({ id: ent.id, name, kind: this.classify(ent), pos: { x: ent.position.x, y: ent.position.y, z: ent.position.z }, dist: d, height: ent.height,
         velocity: ent.velocity ? { x: ent.velocity.x, y: ent.velocity.y, z: ent.velocity.z } : undefined,
-        phase: Number.isInteger(phase) ? phase : undefined, hp: Number.isFinite(hp) ? hp : undefined, ...(count ? { count } : {}) });
+        phase: Number.isInteger(phase) ? phase : undefined, hp: Number.isFinite(hp) ? hp : undefined, ...(fusing ? { fusing: true } : {}), ...(count ? { count } : {}) });
     }
     return out.sort((a, c) => a.dist - c.dist);
   }

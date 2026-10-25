@@ -87,7 +87,9 @@ export class Reflex {
     // 只对看见/听见的威胁做反应（墙后的怪物不会触发反射）
     const hostiles = this.senses.perceivedEntities(12).filter((e) => e.kind === 'hostile' && !(cur?.skill === 'dragon_fight' && e.name === 'ender_dragon'));
     const nearest = hostiles[0];
-    const creeper = hostiles.find((e) => e.name === 'creeper' && e.dist < 5);
+    // 苦力怕：打还是跑由脑子决定；身体只在来不及想的时候躲——它已经在嘶嘶作响，或者贴到眼前而自己并没有在跟它打
+    const fighting = !!cur && cur.source !== 'reflex' && cur.source !== 'filler' && ['defend', 'hit_entity', 'ranged_defend'].includes(cur.skill);
+    const creeper = hostiles.find((e) => e.name === 'creeper' && (e.fusing ? e.dist < 4 : !fighting && e.dist < 2.5));
     if (s.inWater || s.inLava || !s.onGround || (nearest && nearest.dist < 5) || (cur && !TORCH_OK_DURING.has(cur.skill))) this.darkSince = null;
 
     // 先处理真正的险情，吃饭/照明等反射也不能挡住它；已经在脱险就继续，别重新起跑。
@@ -103,7 +105,8 @@ export class Reflex {
     // 躲在避难所里：怪物进不来，不要出去打架/逃跑。
     if (cur?.skill === 'shelter') return;
     if (creeper) {
-      if (cur?.skill !== 'flee' && this.ready('creeper', 3000)) this.fire({ skill: 'flee', args: { distance: 16 } }, 'P0', `苦力怕距离 ${creeper.dist.toFixed(1)}`);
+      // 正在跟它打：后撤几步躲开爆炸就行，不跑远；没在打：跑开
+      if (cur?.skill !== 'flee' && this.ready('creeper', 1500)) this.fire({ skill: 'flee', args: { distance: fighting ? 6 : 12 } }, 'P0', `苦力怕${creeper.fusing ? '在嘶嘶作响，' : ''}距离 ${creeper.dist.toFixed(1)}`);
       return;
     }
     // 判断正在做什么，而不是谁发起的：主动战斗、换气和撤离同样不需要重启。

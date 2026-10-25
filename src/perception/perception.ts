@@ -37,7 +37,7 @@ export interface Percept {
   emptySlots: number;
   /** 只包含看见/听见/记得的东西（没有透视） */
   nearby: {
-    hostile: { name: string; dist: number; how: 'seen' | 'heard' }[];
+    hostile: { name: string; dist: number; how: 'seen' | 'heard'; fusing?: boolean }[];
     passive: string[];
     players: string[];
     /** 看得见的 + 记得的资源方块 */
@@ -383,7 +383,7 @@ export class Perception {
           .filter((e) => e.kind === 'hostile')
           .sort((a, b) => a.dist - b.dist)
           .slice(0, 6)
-          .map((e) => ({ name: e.name, dist: round1(e.dist), how: e.how })),
+          .map((e) => ({ name: e.name, dist: round1(e.dist), how: e.how, ...(e.fusing ? { fusing: true } : {}) })),
         passive: [...passiveCount].map(([n, c]) => (c > 1 ? `${n} x${c}` : n)).slice(0, 8),
         players: v.seen.filter((e) => e.kind === 'player').map((e) => e.name.replace('player:', '')),
         resources: vs

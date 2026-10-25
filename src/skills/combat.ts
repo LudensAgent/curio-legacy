@@ -42,24 +42,26 @@ export const flee: Skill<{ distance: number }> = {
 };
 
 // ------------------------------------------------------------------ defend
-export const defend: Skill<{ entityId?: number }> = {
+export const defend: Skill<{ entityId?: number; target?: string }> = {
   name: 'defend',
-  description: '装备最好的武器并攻击最近的敌对生物（苦力怕除外）',
-  argsDoc: '{}',
+  description: '装备最好的武器去打附近的敌对生物：不写 target 打最近的（不含苦力怕）；target 写生物名专打那一种（打苦力怕要明写 "creeper"：砍一下就后退一步，它嘶嘶响时身体会自己躲开）',
+  argsDoc: '{"target"?: "creeper|zombie|skeleton|spider|<敌对生物名>", "entityId"?: 数字}',
   timeoutMs: 20000,
   movement: true,
   validate(raw) {
-    const id = Number(obj(raw).entityId);
-    return { ok: true, args: Number.isFinite(id) ? { entityId: id } : {} };
+    const a = obj(raw);
+    const id = Number(a.entityId);
+    const target = typeof a.target === 'string' && a.target.trim() ? a.target.trim().toLowerCase().replace(/^minecraft:/, '') : undefined;
+    return { ok: true, args: { ...(Number.isFinite(id) ? { entityId: id } : {}), ...(target ? { target } : {}) } };
   },
   async run(ctx, args) {
     const { adapter, signal, senses } = ctx;
     const pick = () =>
       senses
-        .perceivedEntities(12)
-        .find((e) => e.kind === 'hostile' && e.name !== 'creeper' && (args.entityId === undefined || e.id === args.entityId));
+        .perceivedEntities(16)
+        .find((e) => e.kind === 'hostile' && (args.target ? e.name === args.target : args.entityId !== undefined || e.name !== 'creeper') && (args.entityId === undefined || e.id === args.entityId));
     let target = pick();
-    if (!target) return ok('附近没有可攻击的目标');
+    if (!target) return args.target ? fail('NOT_FOUND', `附近 16 格内没看见 ${args.target}`) : ok('附近没有可攻击的目标');
     const name = target.name;
     await adapter.equipWeapon();
     let hits = 0;
@@ -77,6 +79,11 @@ export const defend: Skill<{ entityId?: number }> = {
         continue;
       }
       if (await adapter.attack(target.id)) hits++;
+      // 打苦力怕：砍一下就往后退一步，别贴着它让它炸
+      if (target.name === 'creeper') {
+        const me = adapter.state().pos, dx = me.x - target.pos.x, dz = me.z - target.pos.z, d = Math.hypot(dx, dz) || 1;
+        await adapter.moveTo({ kind: 'xz', x: me.x + dx / d * 3, z: me.z + dz / d * 3, range: 1 }, { signal, timeoutMs: 900 }).catch((e) => { if (isAbort(e)) throw e; });
+      }
       await sleep(650, signal);
     }
     return ok(`与 ${name} 交战结束（攻击 ${hits} 次）`);
