@@ -19,7 +19,8 @@ export function stuckHere(records: ActivityEnd[], here: ActivityEnd['pos'], now 
   if (!repeated) return null;
   return {
     minutes: Math.max(0.1, Math.round((now - repeated[1][0].at) / 6000) / 10),
-    tried: [...new Set(local.map((r) => r.what))].slice(-10),
+    // 只列真正卡住的办法：这一带做成了的事不算“试过但不行”
+    tried: [...new Set(local.filter((r) => r.outcome === 'stuck').map((r) => r.what))].slice(-8),
     failureCode: repeated[0], lastAt: repeated[1].at(-1)!.at,
   };
 }
@@ -67,6 +68,7 @@ export class Attention {
         if (/^<([^>]+)>/.test(ev.msg) && !/\[想法\]/.test(ev.msg)) return this.notice(`chat:${ev.msg}`, `有人说：${ev.msg}`, 0.5, 5_000);
         return null;
       }
+      case 'reflex_gaveup': return this.notice('reflex_gaveup', ev.msg, 0.8, 20_000);
       case 'skill_improved': return this.notice(`skill_improved:${String(d.name ?? '')}`, ev.msg, 0.35, 0);
       case 'skill_rollback': return this.notice(`skill_rollback:${String(d.name ?? '')}`, ev.msg, 0.35, 0);
       case 'skill_disabled': return d.by === 'stats' ? this.notice(`skill_disabled:${String(d.name ?? '')}`, `${ev.msg}：回头改一改（同名重写 skill）`, 0.5, 600_000) : null;

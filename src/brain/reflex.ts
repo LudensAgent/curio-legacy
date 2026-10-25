@@ -4,7 +4,7 @@ import type { EventBus, Severity } from '../events.ts';
 import type { Senses } from '../skills/types.ts';
 import { hasPlaceable } from '../skills/survival.ts';
 import { measureLight, torchCount } from '../skills/light.ts';
-import { surroundings } from '../perception/surroundings.ts';
+import { isSoftBlock, surroundings } from '../perception/surroundings.ts';
 
 /** 这些动作进行中可以顺手插支火把（插完接着做） */
 const TORCH_OK_DURING = new Set(['explore', 'goto', 'gather', 'wander', 'excavate_path', 'search_structure']);
@@ -39,6 +39,7 @@ export class Reflex {
   constructor(private adapter: GameAdapter, private arbiter: Arbiter, private bus: EventBus, private senses: Senses,
     private options: { routineCare?: boolean; habits?: () => { torch_every?: number; eat_below?: number }; behaviors?: LearnedBehaviors } = {}) {
     bus.on('event', (ev: { type: string; data?: Record<string, unknown> }) => {
+      if (ev.type === 'hurt') { this.lastHurtAt = Date.now(); return; }
       if (ev.type !== 'task_end' || ev.data?.skill !== 'surface') return;
       if (ev.data.status === 'succeeded') { this.surfaceFails = []; return; }
       if (ev.data.status !== 'failed') return;
@@ -81,6 +82,38 @@ export class Reflex {
     return true;
   }
 
+  private lastHurtAt = 0;
+  private flees: number[] = [];
+  private fleeGiveUpUntil = 0;
+
+  /**
+   * 身体此刻有多“安全”：四面（脚和头的高度）都是实心方块就是躲在坑里/洞里；头顶也封上就是完全藏好了。
+   * 躲好了还往外跑，就是把自己从掩体里拽出去送死。
+   */
+  private cover(pos: { x: number; y: number; z: number }): 'sealed' | 'pit' | 'open' {
+    const x = Math.floor(pos.x), y = Math.floor(pos.y + 0.05), z = Math.floor(pos.z);
+    const solid = (dx: number, dy: number, dz: number) => {
+      const n = this.adapter.blockAt({ x: x + dx, y: y + dy, z: z + dz });
+      return !!n && !/^(air|cave_air|void_air|water|lava)$/.test(n) && !isSoftBlock(n);
+    };
+    const walls = [[1, 0], [-1, 0], [0, 1], [0, -1]].every(([dx, dz]) => solid(dx, 0, dz) && solid(dx, 1, dz));
+    if (!walls) return 'open';
+    return solid(0, 2, 0) ? 'sealed' : 'pit';
+  }
+
+  /** 逃跑：同一波危险里连跑三次都甩不掉，就别再一直跑了，交给脑子想办法（垫高、堵路、打） */
+  private flee(distance: number, why: string, sev: Severity = 'P0') {
+    const now = Date.now();
+    this.flees = [...this.flees.filter((t) => now - t < 30_000), now];
+    if (this.flees.length > 3) {
+      this.flees = [];
+      this.fleeGiveUpUntil = now + 20_000;
+      this.bus.publish('reflex_gaveup', 'P1', `连跑了几次都甩不掉（${why}），身体不再自己乱跑：想个办法——垫高、挖坑封顶、堵住路，或者打`, { why });
+      return;
+    }
+    this.fire({ skill: 'flee', args: { distance } }, sev, why);
+  }
+
   private fire(step: Step, sev: Severity, why: string, gentle = false) {
     this.triggers++;
     this.bus.publish('reflex', sev, `${why} → ${step.skill}`);
@@ -116,14 +149,20 @@ export class Reflex {
     const learned = this.options.behaviors;
     if (learned?.tick(cur)) return;
     const instinct = (name: string) => !learned?.suppresses(name, cur);
-    if (creeper && instinct('creeper')) {
+    // 掩体：完全封好就不出去；在坑里或正在挖坑/垫高/封顶时，只有真的被打到、怪就在身边才动
+    const cover = this.cover(s.pos);
+    const fortifying = !!cur && cur.source !== 'reflex' && cur.source !== 'filler' && ['dig_at', 'place_at', 'climb_up', 'shelter', 'wait', 'use_skill', 'dig', 'descend', 'step'].includes(cur.skill);
+    const hurtNow = Date.now() - this.lastHurtAt < 2500;
+    const mustReact = (dist: number) => cover !== 'sealed' && (!(cover === 'pit' || fortifying) || (hurtNow && dist < 4));
+    const canFlee = Date.now() >= this.fleeGiveUpUntil;
+    if (creeper && instinct('creeper') && cover !== 'sealed') {
       // 正在跟它打：后撤几步躲开爆炸就行，不跑远；没在打：跑开
       if (cur?.skill !== 'flee' && this.ready('creeper', 1500)) this.fire({ skill: 'flee', args: { distance: fighting ? 6 : 12 } }, 'P0', `苦力怕${creeper.fusing ? '在嘶嘶作响，' : ''}距离 ${creeper.dist.toFixed(1)}`);
       return;
     }
     // 判断正在做什么，而不是谁发起的：主动战斗、换气和撤离同样不需要重启。
     if (cur?.skill === 'defend' || cur?.skill === 'ranged_defend') {
-      if (s.hp <= 6 && instinct('losing-fight') && this.ready('escalate', 3000)) this.fire({ skill: 'flee', args: { distance: 20 } }, 'P0', `战斗中生命 ${s.hp}`);
+      if (s.hp <= 6 && instinct('losing-fight') && canFlee && this.ready('escalate', 3000)) this.flee(20, `战斗中生命 ${s.hp}`);
       return;
     }
     if (cur?.skill === 'surface' || cur?.skill === 'flee') return;
@@ -132,12 +171,16 @@ export class Reflex {
     if (this.options.routineCare !== false && cur?.source !== 'reflex' && cur?.skill !== 'eat' && !s.isDay && s.hp <= 8 && (!nearest || nearest.dist > 4) && !s.inWater && hasPlaceable(s.inventory) && instinct('night-shelter') && this.ready('shelter', 90000)) {
       return this.fire({ skill: 'shelter', args: { until: 'day' } }, 'P0', `夜里生命只有 ${Math.round(s.hp)}`);
     }
-    if (s.hp <= 6 && nearest && nearest.dist < 10 && instinct('low-hp-flee') && this.ready('lowhp', 4000)) {
-      return this.fire({ skill: 'flee', args: { distance: 24 } }, 'P0', `生命 ${s.hp}，${nearest.name} 在 ${nearest.dist.toFixed(1)} 格`);
+    // 血少时逃：只为看得见、或已经贴到身边（<4 格）的怪跑；只是听见远处有动静不跑
+    const threat = nearest && (nearest.perception !== 'heard' || nearest.dist < 4) ? nearest : undefined;
+    if (s.hp <= 6 && threat && threat.dist < 10 && instinct('low-hp-flee') && canFlee && mustReact(threat.dist) && this.ready('lowhp', 4000)) {
+      return this.flee(24, `生命 ${Math.round(s.hp * 10) / 10}，${threat.name} 在 ${threat.dist.toFixed(1)} 格`);
     }
-    if (nearest && nearest.dist < 4 && nearest.name !== 'creeper' && instinct('fight-back') && this.ready('defend', 4000)) {
-      if (s.hp > 8) return this.fire({ skill: 'defend', args: { entityId: nearest.id } }, 'P1', `${nearest.name} 贴近（${nearest.dist.toFixed(1)} 格）`);
-      return this.fire({ skill: 'flee', args: { distance: 18 } }, 'P1', `${nearest.name} 贴近且生命 ${s.hp}`);
+    if (threat && threat.dist < 4 && threat.name !== 'creeper' && instinct('fight-back') && mustReact(threat.dist) && this.ready('defend', 4000)) {
+      // 有武器才敢硬打；空手只在血很多时还手，否则交给脑子（垫高、堵路、跑）
+      const armed = s.inventory.some((i) => /_(sword|axe)$/.test(i.name));
+      if (s.hp > 8 && (armed || s.hp > 14)) return this.fire({ skill: 'defend', args: { entityId: threat.id } }, 'P1', `${threat.name} 贴近（${threat.dist.toFixed(1)} 格）`);
+      if (s.hp <= 8 && canFlee) return this.flee(18, `${threat.name} 贴近且生命 ${Math.round(s.hp * 10) / 10}`, 'P1');
     }
     // 非紧急动作不互相抢占，尤其不要把已经开始吃的一口掐断，再重新吃同一顿。
     if (cur?.source === 'reflex' || cur?.skill === 'eat') return;

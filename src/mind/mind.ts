@@ -189,7 +189,7 @@ export class Mind {
     this.lastPerceptAt = Date.now();
     let p: Percept;
     try { p = this.d.perception.update(); } catch { return; }
-    const loop = this.attention.fromLoop(this.recentEnds, this.d.adapter.state().pos);
+    const loop = this.progressing() ? null : this.attention.fromLoop(this.recentEnds, this.d.adapter.state().pos);
     for (const n of [...this.attention.fromPercept(p), ...(loop ? [loop] : [])]) {
       this.d.bus.publish('notice', n.level === 'note' ? 'P3' : 'P2', `注意到：${n.what}`, { salience: n.salience, level: n.level });
       if (/^(res|disc|item):/.test(n.key)) { this.d.self.feel({ type: 'novelty', strength: n.salience }); this.speechEventAt = Date.now(); }
@@ -235,6 +235,13 @@ export class Mind {
       return this.think('手上这段活快干完了，想想接下来', this.needsBigPicture() ? 'deliberate' : 'glance');
     }
     if (Date.now() - Math.max(this.activityThoughtAt, this.lastThoughtAt) > this.timing.checkInMs) return this.think('做了一会儿了，抬头看看', 'glance');
+  }
+
+  /** 事情在往前走：主目标清单最近勾掉过一项，或者刚做成了一段活。这时不算“卡在这一带” */
+  private progressing(): boolean {
+    const plan = this.d.self.plan();
+    if (plan && plan.steps.some((st) => st.done) && Date.now() - plan.updatedAt < 5 * 60_000) return true;
+    return this.lastRecord?.outcome === 'done' && Date.now() - this.lastRecord.at < 2 * 60_000;
   }
 
   /** 需要看看全局了吗：好久没认真想过、做完了好几段活、情绪到了临界、刚卡住 */
@@ -438,6 +445,11 @@ export class Mind {
       entry.at.push(Date.now()); entry.n = entry.at.length; entry.last = Date.now();
       this.failuresByTarget.set(key, entry);
     }
+    if (a.awaitingRecovery && step.skill !== 'use_skill') {
+      const name = a.awaitingRecovery;
+      delete a.awaitingRecovery;
+      this.safe(() => this.d.behaviors?.creditRecovery(name, result.status === 'succeeded'), undefined);
+    }
     const percept = this.safe(() => this.d.perception.update(), undefined);
     const verdict = afterStep(a, step, result, durationMs, this.d.adapter.state(), percept);
     // 身体自己应变不了：先试学会的恢复办法（模型以前从类似的卡住里总结出来的），试过还不行才叫脑子
@@ -446,6 +458,7 @@ export class Mind {
       const b = tried.size < 2 ? this.safe(() => this.d.behaviors!.recoveryFor({ skill: step.skill, code: result.failureCode }, tried), null) : null;
       if (b) {
         a.adaptations.push(`skill:${b.name}`);
+        a.awaitingRecovery = b.name;
         a.steps.splice(Math.max(0, a.index - 1), 0, { skill: 'use_skill', args: { name: b.name, failure: { skill: step.skill, args: step.args ?? {}, code: result.failureCode ?? null, summary: result.summary.slice(0, 160) } }, optional: true });
         a.index = Math.max(0, a.index - 1);
         a.consecutiveFailures = 0;
@@ -511,7 +524,7 @@ export class Mind {
     const query = [plan?.goal, ...(plan?.steps.filter((st) => !st.done).slice(0, 2).map((st) => st.text) ?? []), this.activity?.what, this.activity?.why,
       this.lastRecord?.what, this.lastRecord?.outcome === 'stuck' ? this.lastRecord.summary : '', this.lastFailure?.summary, ...noticed.map((n) => n.what), reason].filter(Boolean).join(' ');
     const book = this.d.thinker.skillBook;
-    const recalled = this.safe(() => recallLocal(query, { self: this.d.self, memory: this.d.memory, book }, { n: tier === 'glance' ? 3 : 6, exclude: ['know_how'] }), []);
+    const recalled = this.safe(() => recallLocal(query, { self: this.d.self, memory: this.d.memory, book }, { n: tier === 'glance' ? 3 : 6, exclude: ['know_how'], excludeRefs: this.d.self.history(5).map((r) => r.id) }), []);
     let openedSkill: MindContext['openedSkill'];
     const top = recalled.find((r) => r.kind === 'skill' && r.score >= 4 && r.ref);
     if (tier === 'deliberate' && top && book?.get(top.ref!) && Date.now() - (this.skillOpenedAt.get(top.ref!) ?? 0) > 5 * 60_000) {
@@ -531,7 +544,7 @@ export class Mind {
       persona: this.d.persona,
       gameMessages: this.recentGameMessages(),
       skills: this.safe(() => this.d.thinker.skillBook?.index() ?? [], []),
-      stuckHere: stuckHere(this.recentEnds, state.pos),
+      stuckHere: this.progressing() ? null : stuckHere(this.recentEnds, state.pos),
       recalled, ...(openedSkill ? { openedSkill } : {}), ...(learnFrom ? { learnFrom } : {}), plan,
       ...(this.d.behaviors && tier === 'deliberate' ? { learnedSkills: this.safe(() => this.d.behaviors!.overview(), []) } : {}),
       ...(this.d.thinker.designing ? { designing: { brief: this.d.thinker.designing.brief, minutes: Math.round((Date.now() - this.d.thinker.designing.startedAt) / 60_000) } } : {}),

@@ -7,7 +7,7 @@ import { fail, isAbort, obj, ok, type Skill, type SkillResult } from './types.ts
 
 /** use_skill 只需要按名字取出步骤；注册表由 main 设置（行为引擎） */
 export interface BehaviorLookup {
-  get(name: string): { name: string; description: string; steps: { skill: string; args?: unknown; if?: Predicate; optional?: boolean }[]; code?: string; version?: number } | undefined;
+  get(name: string): { name: string; description: string; steps: { skill: string; args?: unknown; if?: Predicate; optional?: boolean }[]; code?: string; version?: number; needs?: Record<string, string> } | undefined;
   list(): { name: string }[];
 }
 let registry: BehaviorLookup | null = null;
@@ -34,6 +34,10 @@ export const useSkill: Skill<{ name: string; args?: Record<string, unknown>; fai
     const extra = a.args && typeof a.args === 'object' && !Array.isArray(a.args) ? a.args as Record<string, unknown> : undefined;
     if (extra && JSON.stringify(extra).length > 2000) return { ok: false, error: 'args 太大了' };
     const failure = a.failure && typeof a.failure === 'object' ? a.failure as Record<string, unknown> : undefined;
+    // 技能声明了要哪些参数：调用时没给就当场说清楚，别让代码跑到一半才报错
+    const needs = registry?.get(name)?.needs;
+    const missing = needs && !failure ? Object.keys(needs).filter((k) => extra?.[k] === undefined || extra[k] === '') : [];
+    if (missing?.length) return { ok: false, error: `${name} 需要参数：${missing.map((k) => `args.${k}（${needs![k]}）`).join('、')}；写 {"name":"${name}","args":{${missing.map((k) => `"${k}":…`).join(',')}}}` };
     return { ok: true, args: { name, ...(extra ? { args: extra } : {}), ...(failure ? { failure } : {}) } };
   },
   async run(ctx, args) {

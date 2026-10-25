@@ -16,7 +16,7 @@ const ago = (at: number, now: number) => {
   return m < 1 ? '刚才' : m < 60 ? `${m} 分钟前` : m < 1440 ? `${Math.round(m / 60)} 小时前` : `${Math.round(m / 1440)} 天前`;
 };
 
-export function recallLocal(query: string, src: RecallSources, opts: { n?: number; exclude?: Recalled['kind'][]; now?: number } = {}): Recalled[] {
+export function recallLocal(query: string, src: RecallSources, opts: { n?: number; exclude?: Recalled['kind'][]; excludeRefs?: string[]; now?: number } = {}): Recalled[] {
   const q = keywords(query);
   if (!q.size) return [];
   const now = opts.now ?? Date.now();
@@ -30,7 +30,12 @@ export function recallLocal(query: string, src: RecallSources, opts: { n?: numbe
     return n;
   };
   const fresh = (at: number) => at && now - at < 30 * 60_000 ? 0.6 : at && now - at < 3 * 3600_000 ? 0.3 : 0;
-  const push = (r: Omit<Recalled, 'score'>, base: number, at = 0) => { if (base >= 2) out.push({ ...r, score: base + fresh(at), ...(at ? { at } : {}) }); };
+  const hide = new Set(opts.excludeRefs ?? []);
+  // 已经在提示词别处出现的不重复；技能要更相关才算想起来（只沾一两个字的建筑说明不算）
+  const push = (r: Omit<Recalled, 'score'>, base: number, at = 0) => {
+    if (r.ref && hide.has(r.ref)) return;
+    if (base >= (r.kind === 'skill' ? 3 : 2)) out.push({ ...r, score: base + fresh(at), ...(at ? { at } : {}) });
+  };
 
   if (!skip.has('experience')) for (const r of src.self.history(60)) {
     const gained = Object.keys(r.gained).join(' ');

@@ -14,6 +14,7 @@ description: 寻路器说没路或卡在脚边方块时，用代码在身边 12 
 ```behavior
 {
  "when": {"after_failure": {"skill": ["goto"], "code": ["PATH_NOT_FOUND", "STUCK"]}},
+ "args": {"target": "要去的坐标 \"x,y,z\""},
  "priority": 35,
  "cooldown_s": 10
 }

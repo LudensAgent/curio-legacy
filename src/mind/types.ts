@@ -63,6 +63,8 @@ export interface Activity {
   dropped?: string[];
   /** 被身体反射打断了几次 */
   interruptions?: number;
+  /** 刚试过的恢复技能：等重做的那一步出结果再给它记成败 */
+  awaitingRecovery?: string;
   results: StepResult[];
   startInventory: Record<string, number>;
   /** 上一步开工时的身体/视野；只有环境确实变化才原样重试。 */

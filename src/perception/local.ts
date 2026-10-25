@@ -87,7 +87,25 @@ export function localMap(adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like, f
     }
     layers[`u${u >= 0 ? '+' : ''}${u}`] = rows;
   }
-  return { facing, frame: '[前,上,右]；每层的行从前(f=+2)到后(f=-2)，列从左(r=-2)到右(r=+2)，中间是自己', legend, layers };
+  // 帮模型把方块图读成“能站哪、能往哪放”：读字符层做空间换算对模型很难，程序算好直接给
+  const known = (f: number, u: number, r: number) => seen.has(key(f, u, r)) ? at(f, u, r) : null;
+  const isOpen = (n: string | null) => n !== null && (AIR.has(n) || isSoftBlock(n)) && !LIQUID_BLOCKS.has(n);
+  const isSolid = (n: string | null) => n !== null && !AIR.has(n) && !isSoftBlock(n) && !LIQUID_BLOCKS.has(n);
+  const word = (f: number, u: number, r: number) => `${f > 0 ? '前' : f < 0 ? '后' : ''}${r < 0 ? '左' : r > 0 ? '右' : ''}${u > 0 ? `上${u}` : u < 0 ? `下${-u}` : ''}` || '原地';
+  const stand: string[] = [], place: string[] = [];
+  for (const u of [0, -1, 1]) for (let f = 1; f >= -1; f--) for (let r = -1; r <= 1; r++) {
+    if (f === 0 && r === 0) continue;
+    if (u === 1 && !isOpen(known(0, 2, 0))) continue; // 往上迈要先跳，头顶得空
+    if (isOpen(known(f, u, r)) && isOpen(known(f, u + 1, r)) && isSolid(known(f, u - 1, r))) stand.push(`[${f},${u},${r}] ${word(f, u, r)}`);
+  }
+  for (const u of [0, -1, 1, 2]) for (let f = 1; f >= -1; f--) for (let r = -1; r <= 1; r++) {
+    if (f === 0 && r === 0 && (u === 0 || u === 1)) continue;
+    if (!isOpen(known(f, u, r))) continue;
+    const touching = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].some(([df, du, dr]) => isSolid(known(f + df, u + du, r + dr)));
+    if (touching) place.push(`[${f},${u},${r}] ${word(f, u, r)}`);
+  }
+  return { facing, frame: '[前,上,右]；每层的行从前(f=+2)到后(f=-2)，列从左(r=-2)到右(r=+2)，中间是自己', legend, layers,
+    spots: { stand: stand.slice(0, 8), place: place.slice(0, 8), note: 'stand：step 能直接迈到的格子；place：place_at 放得住的格子（贴着实心方块）；原地垫高用 [0,0,0]' } };
 }
 
 export function describeCell(adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like): string {

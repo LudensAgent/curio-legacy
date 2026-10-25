@@ -29,6 +29,8 @@ export interface Behavior {
   when?: Predicate; steps: BehaviorStep[]; priority: number; cooldownMs: number; overrides: string[];
   /** 代码技能：模型写的 JavaScript（在沙箱里跑，只能用 api.*），可以被后台自动改进出新版本 */
   code?: string; version?: number;
+  /** use_skill 调用时必须给的参数：名字 → 说明（恢复时由失败的那一步提供，不检查） */
+  needs?: Record<string, string>;
 }
 export interface RunRecord { at: number; ok: boolean; version?: number; summary: string; line?: number; trace?: string[]; logs?: string[]; args?: string }
 export interface BehaviorStats {
@@ -97,11 +99,19 @@ export function validateBehavior(raw: unknown, adapter: GameAdapter): Validated 
   if (o.when !== undefined && o.when !== null) {
     const p = validatePredicate(o.when);
     if ('error' in p) return { error: `skill.when：${p.error}` };
+    // 恢复类必须写清是哪个动作失败：什么失败都套用的“万能恢复”会在放方块、睡觉失败时也去乱挖
+    const failureOf = (q: Predicate): Predicate['after_failure'] | undefined => q.after_failure ?? q.all?.map(failureOf).find(Boolean);
+    const af = failureOf(p);
+    if (af && !af.skill?.length) return { error: 'after_failure 要写清是哪个动作失败（"skill":["goto"]），不能什么失败都套用这一套' };
     // 只看状态、条件太宽（比如只写 night:true）会一直打断手上的活：自动技能至少要有一个具体的触发
     if (!isRecovery(p) && Object.keys(p).every((k) => ['night', 'dark', 'on_ground', 'doing', 'not_doing'].includes(k))) {
       return { error: 'skill.when 太宽了：自动做的技能要写清具体情况（血量、怪、身边的方块、失败的动作……）' };
     }
     behavior.when = p;
+  }
+  if (o.args !== undefined) {
+    if (!o.args || typeof o.args !== 'object' || Array.isArray(o.args) || Object.keys(o.args).length > 6) return { error: 'skill.args 写调用时要给的参数：{"target":"要去的坐标 x,y,z"}' };
+    behavior.args = Object.fromEntries(Object.entries(o.args).map(([k, v]) => [k.slice(0, 30), String(v).slice(0, 80)]));
   }
   const priority = Math.round(Number(o.priority ?? (behavior.when ? 50 : 30)));
   behavior.priority = Number.isFinite(priority) ? Math.max(1, Math.min(90, priority)) : 50;
@@ -129,7 +139,7 @@ function toBehavior(k: KnowSkill, adapter: GameAdapter): Behavior | null {
   const version = Number((k.behavior as any).version) || (b.code ? 1 : undefined);
   return { name: k.name, description: k.description, source: k.source, mode: b.when ? (isRecovery(b.when) ? 'recover' : 'auto') : 'manual',
     ...(b.when ? { when: b.when } : {}), steps: b.steps ?? [], priority: b.priority, cooldownMs: b.cooldown_s * 1000, overrides: b.overrides ?? [],
-    ...(b.code ? { code: b.code, version } : {}) };
+    ...(b.code ? { code: b.code, version } : {}), ...(b.args ? { needs: b.args } : {}) };
 }
 
 export class BehaviorEngine {
@@ -283,21 +293,37 @@ export class BehaviorEngine {
     }
   }
 
+  /**
+   * 恢复类技能的成败不看它自己的步骤做没做完，而看“重做失败的那一步”成没成：
+   * 挖了一格空气也算“做完”，但路还是不通，那就是没用。
+   */
+  creditRecovery(name: string, worked: boolean) {
+    const b = this.behaviors.get(name);
+    if (!b) return;
+    this.record(b, worked, worked ? '重做那一步成了' : '用了它之后，那一步还是没成', {});
+  }
+
   private onDone(o: TaskOutcome) {
     if (o.task.skill !== 'use_skill' || o.result.status === 'cancelled') return;
     const name = String((o.task.args as any)?.name ?? '');
     const b = this.behaviors.get(name);
     if (!b) return;
     const okRun = o.result.status === 'succeeded';
-    const data = (o.result.data ?? {}) as Record<string, any>;
+    // 恢复时用的：做完了先不算成功，等重做的那一步出结果（creditRecovery）；自己就出错了才直接算失败
+    if ((o.task.args as any)?.failure && okRun) return;
+    this.record(b, okRun, o.result.summary, (o.result.data ?? {}) as Record<string, any>);
+  }
+
+  private record(b: Behavior, okRun: boolean, summary: string, data: Record<string, any>) {
+    const name = b.name;
     let rollback: { from: number; to: number } | null = null;
     this.touch(name, (st) => {
-      if (okRun) st.ok++; else { st.fail++; st.lastError = o.result.summary.slice(0, 120); }
+      if (okRun) st.ok++; else { st.fail++; st.lastError = summary.slice(0, 120); }
       if (b.code) {
         const v = String(b.version ?? 1);
         const per = (st.byVersion ??= {})[v] ??= { ok: 0, fail: 0 };
         if (okRun) per.ok++; else per.fail++;
-        st.recent = [...(st.recent ?? []), { at: Date.now(), ok: okRun, version: b.version, summary: o.result.summary.slice(0, 200),
+        st.recent = [...(st.recent ?? []), { at: Date.now(), ok: okRun, version: b.version, summary: summary.slice(0, 200),
           ...(typeof data.line === 'number' ? { line: data.line } : {}), ...(Array.isArray(data.trace) ? { trace: data.trace.slice(-12) } : {}),
           ...(Array.isArray(data.logs) ? { logs: data.logs.slice(-6) } : {}), ...(data.args ? { args: String(data.args).slice(0, 200) } : {}) }].slice(-6);
         // 新版本跑了几次明显比上一版差：退回上一版（真人改坏了也会改回去）
@@ -323,7 +349,7 @@ export class BehaviorEngine {
   overview(): string[] {
     return [...this.list().map((b) => {
       const st = this.stats[b.name];
-      return `${b.name}［${b.mode === 'auto' ? '自动' : b.mode === 'recover' ? '失败时先试' : '调用'}${b.code ? `，代码 v${b.version ?? 1}` : ''}${b.overrides.length ? `，代替本能 ${b.overrides.join('/')}` : ''}］${st && st.ok + st.fail ? ` 成${st.ok}/败${st.fail}` : ''}${st?.disabled ? ' 已停用' : ''}`;
+      return `${b.name}［${b.mode === 'auto' ? '自动' : b.mode === 'recover' ? '失败时先试' : '调用'}${b.code ? `，代码 v${b.version ?? 1}` : ''}${b.overrides.length ? `，代替本能 ${b.overrides.join('/')}` : ''}${b.needs ? `，调用时给 args.${Object.keys(b.needs).join('/')}` : ''}］${st && st.ok + st.fail ? ` 成${st.ok}/败${st.fail}` : ''}${st?.disabled ? ' 已停用' : ''}`;
     }), ...[...this.invalid].map(([n, why]) => `${n}：${why}`)];
   }
 }

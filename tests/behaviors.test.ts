@@ -110,7 +110,8 @@ test('模型写下的恢复技能立刻生效：动作失败时身体先照它�
   const thinksBefore = pending.length;
   for (let i = 0; i < 6; i++) { mind.tick(); await flush(); }
   assert.deepEqual(ran.slice(0, 3), ['t_fail', 't_ok', 't_fail'], `先失败、照技能做、再重做：${ran}`);
-  assert.equal(behaviors.statsOf('hop-when-blocked')?.ok, 1);
+  assert.equal(behaviors.statsOf('hop-when-blocked')?.fail, 1, '照技能做完了、但重做的那一步还是没成：记一次没用');
+  assert.equal(behaviors.statsOf('hop-when-blocked')?.ok ?? 0, 0);
   assert.ok(pending.length >= thinksBefore, '技能试过还不行才叫脑子');
   assert.match(pending.at(-1)!.messages.at(-1)!.content, /走过去/);
 });
@@ -265,4 +266,68 @@ test('“快干完了想想接下来”每段活只问一次：模型没写 next
   await reply({ monologue: '接着砍', decision: 'continue' });
   for (let i = 0; i < 5; i++) { mind.tick(); await flush(); }
   assert.equal(pending.length, 2, '没写 next 也不再追问');
+});
+
+function reflexWorld(t: TestContext, blockAt: (p: { x: number; y: number; z: number }) => string) {
+  let now = 1_700_000_000_000;
+  t.mock.method(Date, 'now', () => now);
+  const state: AgentState = {
+    connected: true, alive: true, observationReady: true, worldId: 'w', sessionId: 's', observationId: 1, username: 'test', pos: { x: 0.5, y: 64, z: 0.5 }, dim: 'overworld',
+    hp: 5, food: 20, oxygen: 20, timeOfDay: 15000, isDay: false, biome: null, onGround: true, inWater: false, inLava: false, inventory: [], emptySlots: 30, held: null,
+  };
+  let current: TaskInfo | null = null;
+  const starts: Step[] = [];
+  const bus = new EventBus();
+  const events: string[] = [];
+  bus.on('event', (e: any) => events.push(e.type));
+  const adapter = { state: () => state, hasFood: () => false, blockAt, lightAt: () => ({ block: 0, sky: 0 }), eye: () => ({ yaw: 0, pitch: 0 }) } as unknown as GameAdapter;
+  const arbiter = { paused: false, info: () => current,
+    start: (step: Step, source: TaskSource) => { starts.push(step); current = { id: 't', planVersion: 1, skill: step.skill, args: step.args, source, progress: 0, note: '', startedAt: now, deadline: now + 1000, movement: false }; return current; },
+    cancel: () => { current = null; } } as unknown as Arbiter;
+  const entities: EntityInfo[] = [{ id: 7, name: 'skeleton', kind: 'hostile', dist: 3, pos: { x: 3, y: 64, z: 0 }, perception: 'seen' } as EntityInfo];
+  const reflex = new Reflex(adapter, arbiter, bus, { ...noSenses, perceivedEntities: () => entities }, { routineCare: false });
+  const setTask = (skill: string | null) => { current = skill ? { id: 'x', planVersion: 1, skill, args: {}, source: 'llm', progress: 0, note: '', startedAt: now - 3000, deadline: now + 60000, movement: false } : null; };
+  return { state, starts, events, bus, reflex, setTask, advance: (ms: number) => { now += ms; } };
+}
+
+test('反射不再把自己从掩体里拽出去：封好的坑里不跑；在坑里/正在垫高挖坑时只有真被打到才动；连跑几次甩不掉就交给脑子', (t) => {
+  // 四面和头顶都是石头：完全躲好了
+  const sealed = reflexWorld(t, ({ x, y, z }) => (x === 0 && z === 0 && (y === 64 || y === 65)) ? 'air' : 'stone');
+  sealed.reflex.tick();
+  assert.equal(sealed.starts.length, 0, '封好的坑里不出去');
+  // 正在原地垫高（place_at），没被打到：不跑
+  const open = reflexWorld(t, ({ y }) => y < 64 ? 'stone' : 'air');
+  open.setTask('place_at');
+  open.reflex.tick();
+  assert.equal(open.starts.length, 0, '在挖三填一时不被拽走');
+  open.bus.publish('hurt', 'P2', '受到伤害');
+  open.reflex.tick();
+  assert.equal(open.starts.at(-1)?.skill, 'flee', '真被打到、怪就在身边才跑');
+  // 空地上连跑：第 4 次放弃，交给脑子
+  const run = reflexWorld(t, ({ y }) => y < 64 ? 'stone' : 'air');
+  for (let i = 0; i < 5; i++) { run.setTask(null); run.reflex.tick(); run.advance(5000); }
+  assert.equal(run.starts.filter((s) => s.skill === 'flee').length, 3);
+  assert.ok(run.events.includes('reflex_gaveup'));
+});
+
+test('写技能：恢复类必须写清是哪个动作失败；技能声明的参数没给时 use_skill 当场说清', (t) => {
+  const adapter = new FakeAdapter();
+  assert.match((validateBehavior({ name: 'fix-all', description: '什么失败都挖一下', when: { after_failure: {} }, steps: [{ skill: 'dig_at', args: { at: [1, 0, 0] } }] }, adapter) as any).error, /哪个动作失败/);
+  const book = new SkillBook(BUILTIN_SKILLS_DIR, null);
+  const engine = new BehaviorEngine(book, adapter, null, new EventBus(), noSenses);
+  setBehaviorRegistry(engine);
+  t.after(() => setBehaviorRegistry(null));
+  assert.match((SKILLS.use_skill.validate({ name: 'local-path' }, adapter) as any).error, /args\.target/);
+  assert.ok(SKILLS.use_skill.validate({ name: 'local-path', args: { target: '4,64,0' } }, adapter).ok);
+  assert.ok(SKILLS.use_skill.validate({ name: 'local-path', failure: { skill: 'goto' } }, adapter).ok, '恢复时由失败的那一步提供');
+});
+
+test('身边方块图附带算好的落脚点和能放方块的格子', async () => {
+  const { localMap } = await import('../src/perception/local.ts');
+  const adapter = new FakeAdapter(); // 面朝东，平地
+  adapter.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 0 } }); // 正前方一格石头
+  const m = localMap(adapter, adapter.pos, 'E');
+  assert.ok(m.spots.stand.some((s: string) => s.startsWith('[1,1,0]')), `能迈上前方的石头：${m.spots.stand}`);
+  assert.ok(!m.spots.stand.some((s: string) => s.startsWith('[1,0,0]')), '石头那格站不进去');
+  assert.ok(m.spots.place.some((s: string) => s.startsWith('[0,0,-1]')), `左边地上能放：${m.spots.place}`);
 });
