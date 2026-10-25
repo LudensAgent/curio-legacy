@@ -113,18 +113,3 @@ test('已经有床（背包里或放在某处）就不再做第一张以外的�
     assert.ok(!w.actions.includes('craft:white_bed'));
   } finally { ctx.memory.close(); }
 });
-
-test('决策上下文里写着我的床在哪（床放下后不在背包里）', async () => {
-  const { lightUserPrompt, userPrompt } = await import('../src/planner/prompt.ts');
-  const m = new (await import('../src/memory/store.ts')).WorldMemory(null);
-  m.setWorld('w');
-  m.addLandmark('discovery', '我的床', 'overworld', { x: 10, y: 64, z: 0 }, 2);
-  const percept: any = { self: { pos: [0, 64, 0], dim: 'overworld', hp: 20, food: 20, inWater: false, inLava: false, held: null }, inventory: [], emptySlots: 36,
-    nearby: { hostile: [], passive: [], players: [], resources: [] }, vision: null, time: { timeOfDay: 13000, phase: 'night' }, curiosities: [], drives: [], learn_candidates: [] };
-  const ctx: any = { reason: 'no_goal', percept, current: null, lastFailure: null, userSuggestion: null, worldState: { worldId: 'w' } };
-  try {
-    const light = lightUserPrompt(ctx, m);
-    assert.match(light, /"my_bed":\{"placed_at":\[10,64,0\],"dist":10,"in_inventory":false\}/);
-    assert.match(userPrompt(ctx, m), /"my_bed":\{"placed_at":\[10,64,0\]/);
-  } finally { m.close(); }
-});

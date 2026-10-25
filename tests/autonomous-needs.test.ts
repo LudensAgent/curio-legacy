@@ -4,8 +4,6 @@ import { computeDrives, observedNeeds } from '../src/brain/drives.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import type { Percept } from '../src/perception/perception.ts';
 import { ruleProposal } from '../src/planner/plan.ts';
-import { lightUserPrompt, userPrompt, type PlanContext } from '../src/planner/prompt.ts';
-
 function percept(): Percept {
   return {
     ts: 1, connected: true, time: { timeOfDay: 1000, phase: 'day' },
@@ -36,24 +34,6 @@ test('autonomous drives retain observed needs without selecting a home, bed, sto
   assert.doesNotMatch(JSON.stringify(needs), /suggest|level|hunt|craft|build|71|3 羊毛|iron_pickaxe|换个玩法|先准备/);
   const healthy = percept(); healthy.inventory.push({ name: 'apple', count: 1 }); healthy.efficiency = [];
   assert.deepEqual(observedNeeds(healthy), [], 'lack of a house, bed or stockpile does not choose an interest for a healthy player');
-});
-
-test('full and compact model input project facts while preserving the original rule percept', (t) => {
-  const memory = new WorldMemory(null); t.after(() => memory.close());
-  const p = percept();
-  const computed = computeDrives(p, memory); p.drives = computed.drives; p.stock = computed.stock;
-  assert.ok(p.drives.some((d) => /71|hunt/.test(d.suggest)), 'fixture includes the legacy house and sheep script');
-  const original = structuredClone(p);
-  const ctx: PlanContext = { percept: p, reason: 'no_goal', current: null, lastFailure: null, userSuggestion: null };
-  for (const compact of [0, 2]) {
-    const state = payload(userPrompt(ctx, memory, [], 0, compact)).state;
-    assert.ok(state.drives.some((n: { need: string }) => n.need === 'hunger'));
-    assert.doesNotMatch(JSON.stringify(state.drives), /suggest|level|71|hunt|build|stockpile|novelty/);
-    if (!compact) assert.deepEqual(state.efficiency[0], { block: 'stone', mined: 4, avg_s: 2, tool: 'stone_pickaxe' });
-    else assert.equal(state.efficiency, undefined, 'tight context may omit historical effort altogether');
-  }
-  assert.equal(payload(lightUserPrompt(ctx, memory)).state.drives, undefined, 'light decisions do not leak rule suggestions');
-  assert.deepEqual(p, original, 'serialization leaves rule/mock perception unchanged');
 });
 
 test('rule compatibility retains the existing sheep-to-bed proposal', () => {

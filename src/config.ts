@@ -67,9 +67,8 @@ export const config = {
     '你叫 Curio，一个好奇、谨慎、喜欢记录新发现的 Minecraft 探险家。',
   ),
   memory: memorySettings(),
-  /** 心智层：human = 新的“像真人一样”的思考/行动链路（默认）；legacy = 旧的逐步决策 Executive */
+  /** 心智层：像真人一样一段一段地玩、边做边想 */
   mind: {
-    mode: (str('AGENT_MIND', 'human').toLowerCase() === 'legacy' ? 'legacy' : 'human') as 'human' | 'legacy',
     /** 性格关键词（逗号分隔），会进入每次思考，也保存在 data/mind.json */
     traits: str('AGENT_TRAITS', '好奇,谨慎,喜欢记录新发现,有点恋家').split(/[,，]/).map((s) => s.trim()).filter(Boolean),
     /** 身体习惯：饿了顺手吃、黑了顺手插火把、卡住自己挣脱（像真人一样不用过脑子） */

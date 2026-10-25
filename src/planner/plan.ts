@@ -1,76 +1,9 @@
-import type { GameAdapter } from '../adapter/types.ts';
 import type { Step } from '../arbiter/arbiter.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import type { Percept } from '../perception/perception.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
-import { shortId } from '../util.ts';
 import { computeDrives, stockOf, type Drive } from '../brain/drives.ts';
-import type { Binding } from '../projects/types.ts';
-import type { ValidatedIntentDecision } from '../intentions/decision.ts';
-import { validateCondition } from '../projects/conditions.ts';
-import type { Condition } from '../projects/types.ts';
 
-export const GOAL_TYPES = ['explore', 'gather', 'craft', 'survive', 'investigate', 'rest', 'build'] as const;
-
-export interface Plan {
-  id: string;
-  source: 'llm' | 'rule' | 'user';
-  thought: string;
-  goal: string;
-  goalType: string;
-  steps: Step[];
-  index: number;
-  say?: string;
-  abortIf: { hpBelow?: number; night?: boolean };
-  memoryNote?: string;
-  /** 长期目标（跨多个计划），LLM 可更新 */
-  objective?: string;
-  /** 反思得到的经验（长期保留） */
-  lesson?: string;
-  /** LLM 提议学习的新组合技能（原始 JSON，由技能库校验） */
-  learnSkill?: unknown;
-  createdAt: number;
-  retries: number;
-  /** 请求原因（prefetch 表示在上一个任务完成前预先规划） */
-  reason?: string;
-  requestedAt?: number;
-  /** Assigned by Executive, never accepted from model JSON. */
-  binding?: Binding;
-  generation?: number;
-  decision?: ValidatedIntentDecision;
-  /** 被生存反射打断后自动恢复的次数，以及每个步骤被同一反射打断的次数 */
-  resumes?: number;
-  interruptions?: Record<string, number>;
-  /** 模型给出的失败备选：某一步失败时，在重新决策的同时先做这些（1–2 步） */
-  onFail?: Step[];
-  /** 正在执行失败后的补救动作；新决策一到就被替换 */
-  recovering?: { summary: string };
-  /** 模型想做却没有对应能力的事（给观察者看：它还缺什么手脚） */
-  missingAbility?: string;
-  /** 短期工作记忆：做完这些之后打算做什么；接下来几分钟要记住的事 */
-  then?: string;
-  /** 这份决定是基于什么时候、哪些“正在做/排队”的步骤想的（边做边想时用来剔除已做完的步骤） */
-  basis?: { at: number; reason: string; pending: { skill: string; args?: unknown }[]; snapshot?: BasisSnapshot };
-  note?: string;
-  /** Model-selected working approach and open question, never observed facts. */
-  focus?: { approach?: string; question?: string | null };
-  /** A short-horizon prediction, independent of project completion or learned methods. */
-  expect?: Condition;
-  /** 这份决定是带着反思请求想的（由 Executive 设置，不接受模型输入） */
-  reflection?: string;
-}
-
-/** 想这份决定时的世界快照：边做边想的决定只在这些“要紧的事”变了时才作废 */
-export interface BasisSnapshot {
-  sessionId: string;
-  dim: string;
-  pos: { x: number; y: number; z: number };
-  hp: number;
-  inventory: Record<string, number>;
-  hostiles: string[];
-}
-
-/** 模型常把“等一会儿/发呆”写成不存在的技能名 */
 const IDLE_ALIASES = new Set(['wait', 'idle', 'rest_a_bit', 'pause', 'stand_still']);
 
 /**
@@ -136,86 +69,6 @@ export function extractJson(text: string): unknown {
     }
   }
 }
-
-/**
- * 计划校验第 1、2 关：结构 + 技能白名单 + 参数校验。
- * 第 3 关（安全规则）由反射层和 abort_if 在执行期保证。
- */
-export function validatePlan(raw: unknown, adapter: GameAdapter, source: Plan['source'], memory?: WorldMemory): { ok: true; plan: Plan } | { ok: false; error: string } {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, error: '顶层必须是 JSON 对象' };
-  const o = raw as Record<string, any>;
-  const goal = String(o.goal ?? '').trim();
-  if (!goal) return { ok: false, error: '缺少 goal' };
-  const subjectiveEnd = ['defer', 'abandon', 'complete'].includes(o.decision?.kind);
-  if (!Array.isArray(o.steps) || o.steps.length < (subjectiveEnd ? 0 : 1)) return { ok: false, error: 'steps 必须是 1-6 个元素的数组（暂缓/结束可为空）' };
-  // 多写的步骤不作废整个计划：只执行前 6 步，后面的交给下一次决策
-  if (o.steps.length > 6) o.steps = o.steps.slice(0, 6);
-  const steps: Step[] = [];
-  for (const [i, s0] of o.steps.entries()) {
-    const s = normalizeStep(s0) as any;
-    const name = String(s?.skill ?? '');
-    const skill = SKILLS[name];
-    if (!skill || LLM_HIDDEN.has(name)) return { ok: false, error: `steps[${i}] 使用了不存在的技能 "${name}"，可用：${Object.keys(SKILLS).filter((k) => !LLM_HIDDEN.has(k)).join(', ')}` };
-    const v = skill.validate(s?.args ?? {}, adapter);
-    if (!v.ok) return { ok: false, error: `steps[${i}] ${name} 参数错误：${v.error}` };
-    steps.push({ skill: name, args: v.args });
-  }
-  // on_fail 是可选的锦上添花：写错了就忽略，不影响主计划
-  const onFail: Step[] = [];
-  if (Array.isArray(o.on_fail)) for (const s0 of o.on_fail.slice(0, 2)) {
-    const s = normalizeStep(s0) as any;
-    const skill = SKILLS[String(s?.skill ?? '')];
-    if (!skill || LLM_HIDDEN.has(skill.name)) continue;
-    const v = skill.validate(s?.args ?? {}, adapter);
-    if (v.ok) onFail.push({ skill: skill.name, args: v.args });
-  }
-  const ab = o.abort_if && typeof o.abort_if === 'object' ? o.abort_if : {};
-  const hp = Number(ab.hp_below);
-  let focus: Plan['focus'], expect: Condition | undefined;
-  if (o.focus !== undefined) {
-    if (!o.focus || typeof o.focus !== 'object' || Array.isArray(o.focus)) return { ok: false, error: 'focus 必须是主观办法/问题对象' };
-    focus = {};
-    for (const field of ['approach', 'question'] as const) {
-      const value = o.focus[field];
-      if (value === undefined) continue;
-      if (field === 'question' && value === null) { focus.question = null; continue; }
-      if (typeof value !== 'string' || !value.trim() || value.trim().length > 240) return { ok: false, error: `focus.${field} 须为 1–240 字符${field === 'question' ? '，或 null 表示不再追问' : ''}` };
-      focus[field] = value.trim();
-    }
-  }
-  if (o.expect !== undefined) {
-    if (!memory) return { ok: false, error: 'expect 需要可信世界记忆以验证事实条件' };
-    try { expect = validateCondition(o.expect, adapter, memory, adapter.state()); }
-    catch (e) { return { ok: false, error: `expect 无效：${e instanceof Error ? e.message : String(e)}` }; }
-  }
-  return {
-    ok: true,
-    plan: {
-      id: shortId('p_'),
-      source,
-      thought: String(o.thought ?? '').slice(0, 200),
-      goal: goal.slice(0, 60),
-      goalType: GOAL_TYPES.includes(o.goal_type) ? o.goal_type : 'explore',
-      steps,
-      index: 0,
-      say: o.say ? String(o.say).slice(0, 120) : undefined,
-      abortIf: { hpBelow: Number.isFinite(hp) ? Math.max(1, Math.min(19, hp)) : undefined, night: ab.night === true },
-      memoryNote: o.memory_note ? String(o.memory_note).slice(0, 200) : undefined,
-      objective: o.objective ? String(o.objective).slice(0, 120) : undefined,
-      lesson: o.lesson ? String(o.lesson).slice(0, 160) : undefined,
-      learnSkill: o.learn_skill && typeof o.learn_skill === 'object' ? o.learn_skill : undefined,
-      createdAt: Date.now(),
-      retries: 0,
-      ...(onFail.length ? { onFail } : {}),
-      ...(typeof o.missing_ability === 'string' && o.missing_ability.trim() ? { missingAbility: o.missing_ability.trim().slice(0, 200) } : {}),
-      ...(typeof o.then === 'string' && o.then.trim() ? { then: o.then.trim().slice(0, 140) } : {}),
-      ...(typeof o.note === 'string' && o.note.trim() ? { note: o.note.trim().slice(0, 140) } : {}),
-      ...(focus ? { focus } : {}), ...(expect ? { expect } : {}),
-    },
-  };
-}
-
-const FOODS = new Set(['bread', 'cooked_beef', 'cooked_porkchop', 'cooked_chicken', 'cooked_mutton', 'cooked_cod', 'cooked_salmon', 'apple', 'baked_potato', 'carrot', 'beef', 'porkchop', 'chicken', 'mutton', 'potato', 'sweet_berries', 'melon_slice', 'golden_apple', 'cookie', 'pumpkin_pie', 'beetroot', 'dried_kelp']);
 
 const count = (p: Percept, pred: (n: string) => boolean) => p.inventory.filter((i) => pred(i.name)).reduce((a, i) => a + i.count, 0);
 

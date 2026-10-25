@@ -7,8 +7,9 @@ import type { GameAdapter } from '../src/adapter/types.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import type { Percept } from '../src/perception/perception.ts';
 import { MockProvider, OpenAICompatibleProvider } from '../src/planner/llm.ts';
-import { extractJson, ruleProposal, validatePlan } from '../src/planner/plan.ts';
-import { buildMessages } from '../src/planner/prompt.ts';
+import { extractJson, ruleProposal } from '../src/planner/plan.ts';
+import { deliberateSystem } from '../src/mind/prompt.ts';
+import { parseDecision } from '../src/mind/thinker.ts';
 
 const percept: Percept = {
   ts: Date.now(),
@@ -56,7 +57,10 @@ const fakeAdapter = {
 
 const memory = new WorldMemory(null);
 const provider = config.llm.provider === 'openai' ? new OpenAICompatibleProvider(config.llm) : new MockProvider(config.llm.fakeDelayMs, () => ruleProposal(percept));
-const messages = buildMessages(config.persona, { reason: 'check', percept, current: null, lastFailure: null, userSuggestion: null }, memory);
+const messages = [
+  { role: 'system' as const, content: deliberateSystem(config.persona) },
+  { role: 'user' as const, content: `${JSON.stringify({ body: percept.self, inventory: percept.inventory, surroundings: percept.nearby, current_activity: null, why_thinking_now: '连通性检查' })}\n现在你在想什么、打算怎么做？只输出一个 JSON 对象。` },
+];
 
 console.log(`Provider: ${provider.name}  BaseURL: ${config.llm.baseUrl}  Model: ${config.llm.model}`);
 console.log(`Prompt 长度：${messages.reduce((a, m) => a + m.content.length, 0)} 字符\n`);
@@ -64,10 +68,10 @@ try {
   const c = await provider.complete(messages, AbortSignal.timeout(config.llm.timeoutMs + config.llm.fakeDelayMs + 1000), { percept });
   console.log(`延迟：${c.latencyMs} ms  用量：${JSON.stringify(c.usage ?? {})}`);
   console.log('原始输出：\n' + c.text + '\n');
-  const v = validatePlan(extractJson(c.text), fakeAdapter, 'llm');
-  if (v.ok) console.log('✅ 计划有效：', JSON.stringify({ goal: v.plan.goal, thought: v.plan.thought, steps: v.plan.steps }, null, 2));
+  const d = parseDecision(extractJson(c.text), fakeAdapter, memory, false);
+  if (!('error' in d)) console.log('✅ 决定有效：', JSON.stringify({ decision: d.kind, monologue: d.monologue, activity: d.activity?.what, steps: d.activity?.steps }, null, 2));
   else {
-    console.log('❌ 计划无效：', v.error);
+    console.log('❌ 决定无效：', d.error);
     process.exitCode = 1;
   }
 } catch (e: any) {

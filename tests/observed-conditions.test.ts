@@ -6,7 +6,6 @@ import { WorldMemory } from '../src/memory/store.ts';
 import { MethodLibrary } from '../src/methods/learning.ts';
 import { Vision, DEFAULT_VISION } from '../src/perception/vision.ts';
 import { evaluateCondition, validateCondition } from '../src/projects/conditions.ts';
-import { ProjectCoordinator } from '../src/projects/coordinator.ts';
 import { SKILLS } from '../src/skills/index.ts';
 import { inspectBlock } from '../src/skills/observation.ts';
 import { ok, type SkillCtx } from '../src/skills/types.ts';
@@ -61,27 +60,6 @@ test('block inspection reads state only after a fresh visible ray; walls, facing
   assert.deepEqual(w.vision.observeBlocks([w.pos]), [], 'a grid cell without a visible solid shape is not evidence of an opaque object');
   w.shapes([[0, 0, 0, .1875, 1, 1]]);
   assert.equal(w.vision.observeBlocks([w.pos]).length, 1, 'a real thin surface can be inspected');
-});
-
-test('partial visible project progress resets the counter and unknown visibility cannot accumulate failures', (t) => {
-  const w = fixture(t), coordinator = new ProjectCoordinator(w.memory, w.adapter, w.vision);
-  const intent = w.memory.addIntent({ text: '验证一种交互', whyNow: '观察到了对象', context: [], tradeoffs: [], status: 'active', source: 'model' });
-  coordinator.create({ intentId: intent.id, title: '核对两项实际结果', successCondition: { type: 'all_of', conditions: [
-    { type: 'block_state', dimension: 'overworld', pos: w.pos, properties: { open: true } },
-    { type: 'inventory_min', item: 'shield', count: 2 },
-  ] } });
-  coordinator.recordAttempt({ executed: true });
-  assert.equal(w.memory.projects()[0].noProgressAttempts, 1);
-  const before = w.adapter.state(); w.open(true);
-  coordinator.recordAttempt({ executed: true, before });
-  assert.equal(w.memory.projects()[0].noProgressAttempts, 0, 'fresh block facts count as partial progress');
-  w.barrier(true);
-  for (let i = 0; i < 3; i++) coordinator.recordAttempt({ executed: true });
-  assert.equal(w.memory.projects()[0].status, 'active');
-  assert.equal(w.memory.projects()[0].noProgressAttempts, 0);
-  w.barrier(false); w.state.inventory = [{ name: 'shield', count: 2 }];
-  assert.equal(coordinator.reconcile()?.status, 'completed');
-  assert.equal(w.memory.evidence().at(-1)?.source, 'adapter.state+vision');
 });
 
 test('self and equipment predicates read actual state; missing fields and foreign-session receipts are unknown', (t) => {

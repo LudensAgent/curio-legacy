@@ -7,7 +7,6 @@ import { WorldMemory } from '../src/memory/store.ts';
 import { RecipeBook } from '../src/methods/recipes.ts';
 import { Perception } from '../src/perception/perception.ts';
 import { Vision } from '../src/perception/vision.ts';
-import { validatePlan } from '../src/planner/plan.ts';
 import { Planner } from '../src/planner/planner.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 
@@ -58,20 +57,6 @@ test('基础动作的失败会给出可理解的原因', async () => {
   assert.match(r.summary, /没有在乘坐/);
 });
 
-test('模型自己写的组合计划能通过校验', () => {
-  const a = new FakeAdapter();
-  const v = validatePlan({ goal: '造条船划到对岸', thought: '水太宽了，游过去太危险', steps: [
-    { skill: 'craft', args: { item: 'boat', count: 1 } },
-    { skill: 'use_item', args: { item: 'oak_boat', on: 'water' } },
-    { skill: 'interact', args: { entity: 'boat' } },
-    { skill: 'ride', args: { direction: 'E', distance: 60 } },
-    { skill: 'dismount', args: {} },
-  ], missing_ability: '想把船收回背包' }, a, 'llm');
-  assert.ok(v.ok, !v.ok ? v.error : '');
-  if (v.ok) assert.equal(v.plan.missingAbility, '想把船收回背包');
-});
-
-// ------------------------------------------------------------ 配方记忆
 test('配方是玩出来的记忆：拿到过材料才知道；按类别再按物品分级查询', () => {
   const memory = new WorldMemory(null);
   memory.setWorld('w1');
@@ -110,28 +95,5 @@ test('第一次拿到物品时记进记忆并提示想起了哪些配方', () =>
     perception.update();
     assert.equal(unlocked.filter((u) => u[0] === 'cobblestone').length, 1, '只在第一次拿到时提示');
     assert.ok(memory.heldItems().has('cobblestone'));
-  } finally { memory.close(); }
-});
-
-test('决策时模型可以先查配方（只读），再给出计划', async () => {
-  const a = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
-  memory.markSeen('items', 'oak_log');
-  const perception = new Perception(a, memory, bus, new Vision(a));
-  const replies = [
-    JSON.stringify({ kind: 'recipes', category: 'transport' }),
-    JSON.stringify({ kind: 'recipes', item: 'oak_boat' }),
-    JSON.stringify({ goal: '做条船', thought: '有木头就能做船', steps: [{ skill: 'craft', args: { item: 'oak_boat', count: 1 } }] }),
-  ];
-  const sent: string[] = [];
-  const cfg = { ...config, llm: { ...config.llm, provider: 'openai' as const, maxCallsPerHour: 1000, maxPromptTokens: 40000 } };
-  const planner = new Planner(cfg, { name: 'recipe-test', complete: async (m) => { sent.push(m.at(-1)!.content); return { text: replies.shift()!, latencyMs: 5 }; } }, a, memory, bus, null);
-  planner.recipeBook = new RecipeBook(config.mc.version, memory);
-  try {
-    const plan = await planner.propose({ reason: 'no_goal', percept: perception.update(), current: null, lastFailure: null, userSuggestion: null, results: [] });
-    assert.equal(plan.steps[0].skill, 'craft');
-    assert.match(sent[1], /配方记忆查询结果/);
-    assert.match(sent[2], /oak_boat/);
-    assert.equal(bus.recent().filter((e) => e.type === 'recipe_query').length, 2);
-    assert.equal(bus.recent().filter((e) => e.type === 'llm_invalid').length, 0);
   } finally { memory.close(); }
 });

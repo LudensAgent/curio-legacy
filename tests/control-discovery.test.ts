@@ -10,7 +10,6 @@ import { ControlKnowledge, controlCatalog } from '../src/methods/controls.ts';
 import { Perception } from '../src/perception/perception.ts';
 import { Vision } from '../src/perception/vision.ts';
 import { Planner } from '../src/planner/planner.ts';
-import { buildLightMessages, buildMessages, type PlanContext } from '../src/planner/prompt.ts';
 import { SKILLS } from '../src/skills/index.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 
@@ -28,33 +27,4 @@ test('default controls describe general inputs; consulted workflows persist per 
   assert.ok(SKILLS.hunt && SKILLS.build, 'display is not an execution ban');
   assert.deepEqual(Object.keys(SKILLS), before);
   assert.doesNotMatch(fs.readFileSync(file, 'utf8'), /verified|learned|success/);
-});
-
-test('real planner inquiry exposes interfaces on demand; research stays available to deliberate choices without flooding routine ones', async (t) => {
-  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus(), controls = new ControlKnowledge(null);
-  t.after(() => memory.close()); memory.setWorld(adapter.worldId);
-  const percept = new Perception(adapter, memory, bus, new Vision(adapter)).update();
-  const researchContext = { source: 'method_trials', claims: 'model_hypotheses', questions: [{ question: '我还想弄清的现象', hypothesis: '待检验假设', outcomes: { unknown: 1 } }] };
-  const ctx: PlanContext = { reason: 'no_goal', percept, current: null, lastFailure: null, userSuggestion: null, worldState: adapter.state(), researchContext };
-  assert.match(buildMessages('player', ctx, memory)[1].content, /research_context.*我还想弄清的现象/);
-  assert.doesNotMatch(buildLightMessages('player', ctx, memory)[1].content, /research_context|我还想弄清的现象/);
-  for (const messages of [buildMessages('player', ctx, memory), buildLightMessages('player', ctx, memory)]) {
-    assert.doesNotMatch(messages[0].content, /^- boat /m);
-  }
-  let calls = 0;
-  const planner = new Planner({ ...config, llm: { ...config.llm, provider: 'openai' as const, maxCallsPerHour: 20, maxPromptTokens: 40000 } }, {
-    name: 'interface-discovery-fixture', async complete(messages) {
-      const call = calls++;
-      if (call === 0) {
-        assert.doesNotMatch(messages[0].content, /^- boat /m);
-        return { latencyMs: 1, text: JSON.stringify({ kind: 'mechanics', query: 'boat' }) };
-      }
-      if (call === 1) assert.match(messages.at(-1)!.content, /"primitive":"boat"/);
-      if (call === 2) assert.match(messages[0].content, /^- boat /m, 'the next independent request remembers the consulted interface');
-      return { latencyMs: 1, text: JSON.stringify({ goal: '继续观察', steps: [{ skill: 'look_around', args: { seconds: 2 } }] }) };
-    },
-  }, adapter, memory, bus, null, null, undefined, controls);
-  await planner.propose(ctx); await planner.propose(ctx);
-  assert.equal(calls, 3);
-  assert.deepEqual(adapter.actions, [], 'querying an operation must not execute it or force an exploration goal');
 });
