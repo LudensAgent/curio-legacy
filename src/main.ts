@@ -188,6 +188,7 @@ actionChat.start();
 const feed = config.observerFeed ? new ObserverFeed({ botName: config.mc.username, mcVersion: config.mc.version, agentVersion: '0.3.0' }) : null;
 const observerTasks = feed ? installTaskObserver(feed, arbiter, {
   interests: () => perception.snapshot()?.drives ?? [],
+  stats: () => ({ deaths: metrics.counters.deaths, totalTokens: planner.stats.tokenUsage.totalTokens }),
 }) : null;
 let observedBot: unknown = null;
 let observerInstall: MineflayerObserver | null = null;
