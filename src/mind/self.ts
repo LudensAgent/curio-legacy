@@ -16,6 +16,8 @@ interface SelfData {
   stream: Thought[];
   /** 每个技能的手感：做成/失败次数与平均耗时 */
   feel: Record<string, { ok: number; fail: number; ms: number }>;
+  /** 去过的维度（第一次到的时刻）：第一次到一个地方就是“新环境” */
+  visited?: Record<string, number>;
   /** 还没来得及整理的零碎想法：休息/睡前回想时再决定留不留 */
   insights?: { at: number; text: string; outcome?: string }[];
   /** 自己发现的喜好（风景、方块、玩法）：会影响想做什么 */
@@ -276,6 +278,16 @@ export class SelfModel {
     }
     this.touch();
   }
+  /** 第一次到这个维度吗（顺手记下）：没有记录又已经在玩了的老存档，主世界不算新环境 */
+  firstVisit(dim: string, now = Date.now()): boolean {
+    this.data.visited ??= {};
+    if (this.data.visited[dim]) return false;
+    const fresh = Object.keys(this.data.visited).length > 0 || this.data.history.length === 0 || dim !== 'overworld';
+    this.data.visited[dim] = now;
+    this.touch();
+    return fresh && dim !== 'overworld';
+  }
+
   history(n = 6): ActivityRecord[] { return this.data.history.slice(-n); }
   sameKindStreak(kind: ActivityKind): number {
     let n = 0;

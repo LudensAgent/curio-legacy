@@ -199,6 +199,7 @@ ledger.start();
 /** 技能多了定期整理：收起长期用不上的，后台合并说同一件事的、调整谁先上 */
 const curator = new SkillCurator(coderPlanner, behaviors, skillBook, bus);
 curator.ledger = ledger;
+curator.dim = () => adapter.state().dim;
 curator.start();
 /** 学习曲线：给玩法打分（进度、生存、学习、效率），按每条命记到达里程碑的用时 */
 const scorecard = new Scorecard(bus, () => adapter.state(), path.join(config.dataDir, 'scorecard.json'), () => ({
@@ -207,6 +208,12 @@ const scorecard = new Scorecard(bus, () => adapter.state(), path.join(config.dat
   housesComplete: (() => { try { return buildingArchiveFor(memory).list().filter((p) => p.status === 'complete').length; } catch { return 0; } })(),
 }));
 scorecard.start();
+behaviors.drops = () => {
+  const d = memory.lastDeath(), s = adapter.state();
+  if (!d || !d.lost.length || d.dim !== s.dim) return null;
+  const left = Math.round((d.ts + 300_000 - Date.now()) / 1000);
+  return left > 0 ? { dist: Math.round(Math.hypot(d.pos.x - s.pos.x, d.pos.y - s.pos.y, d.pos.z - s.pos.z)), leftS: left, count: d.lost.reduce((n, i) => n + i.count, 0) } : null;
+};
 behaviors.improve = (name, why, note) => { const skipped = improver.consider(name, why, note); if (skipped && why !== 'failures') bus.publish('skill_improve_skipped', 'P3', `先不改「${name}」：${skipped}`); };
 draftsFor(memory);
 /** 大脑：像真人一样一段一段地玩的心智层 */

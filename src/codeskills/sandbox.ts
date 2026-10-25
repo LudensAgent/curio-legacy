@@ -16,7 +16,8 @@ const WORKER = new URL('./sandbox-worker.mjs', import.meta.url);
 export type SandboxHandler = (method: string, args: unknown[]) => Promise<unknown>;
 export interface SandboxResult { ok: boolean; result?: unknown; error?: string; line?: number; calls: number; trace: string[]; logs: string[] }
 
-export const API_METHODS = ['state', 'blockAt', 'region', 'entities', 'act', 'moveTo', 'stepTo', 'digAt', 'placeAt', 'look', 'sleep'] as const;
+export const API_METHODS = ['state', 'blockAt', 'region', 'entities', 'act', 'moveTo', 'stepTo', 'digAt', 'placeAt', 'look', 'sleep',
+  'move', 'lookAt', 'attack', 'equip', 'shield', 'draw', 'release', 'shoot'] as const;
 export const MAX_CODE = 8000;
 
 const wrap = (code: string) => `const __user = async (api, args) => {\n${code}\n};`;
@@ -34,7 +35,7 @@ export function compileCheck(code: string): string | null {
 
 export async function runSandboxed(code: string, args: unknown, handle: SandboxHandler,
   opts: { signal: AbortSignal; deadline: number; pokeMs?: number; maxCalls?: number; onLog?: (t: string) => void; onProgress?: (p: number) => void }): Promise<SandboxResult> {
-  const pokeMs = opts.pokeMs ?? 1500, maxCalls = opts.maxCalls ?? 4000;
+  const pokeMs = opts.pokeMs ?? 1500, maxCalls = opts.maxCalls ?? 12000;
   const trace: string[] = [], logs: string[] = [];
   let calls = 0;
   const finish = (r: Omit<SandboxResult, 'calls' | 'trace' | 'logs'>): SandboxResult => ({ ...r, calls, trace: trace.slice(-30), logs: logs.slice(-20) });

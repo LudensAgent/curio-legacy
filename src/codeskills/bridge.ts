@@ -1,4 +1,5 @@
-import type { Vec3Like } from '../adapter/types.ts';
+import type { DriveKeys, Vec3Like } from '../adapter/types.ts';
+import type { EventBus } from '../events.ts';
 import { facingOfYaw, feetCell } from '../perception/local.ts';
 import { AIR_BLOCKS, isSoftBlock, LIQUID_BLOCKS } from '../perception/surroundings.ts';
 import { SKILLS } from '../skills/index.ts';
@@ -21,15 +22,45 @@ export const API_DOC = `代码是一个 async 函数体，参数 api 和 args �
 - api.entities(半径≤32) → 看见/听见的生物 [{id,name,kind,dist,pos,fusing?}]
 - api.stepTo(x,y,z) 迈到相邻一格（平走、上一级、下一级）｜api.digAt(x,y,z)｜api.placeAt(x,y,z,"方块名|any") → {ok,code,summary}
 - api.moveTo(x,y,z,range) 用寻路走过去 → {ok,error?,pos}｜api.act("动作名",{参数}) 用已有动作（goto、dig_at、defend…）→ {ok,code,summary}
-- api.look(yaw,pitch)｜api.sleep(毫秒≤5000)｜api.log(…) 记一句给自己看｜api.progress(0..1)
-规则：只能用 api 和普通 JavaScript（不能 require/import/eval）；循环要有出口（每次唤醒最多 1.5 秒同步计算，总共最多 4000 次 api 调用）；做成 return 一个结果，做不成 throw new Error("原因")。`;
+- api.look(yaw,pitch)｜api.lookAt(x,y,z)｜api.sleep(毫秒≤5000)｜api.log(…) 记一句给自己看｜api.progress(0..1)
+身体的细动作（打架、走位、躲闪都靠这些拼，怎么打由你决定）：
+- api.move({forward,back,left,right,jump,sprint,sneak}, 毫秒≤1000, {face: 实体id 或 [x,y,z]}?) 按住这些键一小会儿，期间一直盯着 face → {ok, moved 走了几格, stopped?: "lava"|"cliff"}；
+  前面是岩浆/火或一脚会摔 4 格以上，身体会自己停下（ok=false）；{unsafe:true} 关掉这个保护
+- api.attack(实体id) 朝它挥一下（4 格内才打得到）→ {ok, sinceLastMs 距上次挥了多久}；挥得太勤伤害很低：剑约 625ms、斧约 1000ms、空手 250ms 才恢复满
+- api.equip(物品名, "hand"|"off-hand"|"head"|"torso"|"legs"|"feet")｜api.shield(true/false) 举起/放下副手的盾（要先把 shield equip 到 off-hand；举着时走得慢、挡正面的近战和箭）
+- api.draw("bow"|"crossbow"|"trident") 开始蓄力 → api.release([x,y,z]?) 转向那一点松手 → {ok, chargedMs}；弓蓄 1000ms 以上才是满力，远处要往上抬（箭会下坠）
+- api.shoot(实体id) 身体按经验估好提前量和下坠、拉满弓射一箭（慢但省事）
+- api.state() 还有 offHand、armor、usingItem（在举盾/拉弓）、hurtAgoMs（距上次挨打多久）、deathDrop（死后掉在地上还没捡回的东西：{pos,dim,items,secondsLeft} 或 null）
+- api.entities(r) 每个还有 velocity（每 tick 移动，正在冲过来就看得出）、height、hp（看得到时）
+规则：只能用 api 和普通 JavaScript（不能 require/import/eval）；循环要有出口（每次唤醒最多 1.5 秒同步计算，总共最多 12000 次 api 调用）；做成 return 一个结果，做不成 throw new Error("原因")。`;
 const MAX_REGION = 40_000;
 
 const int = (v: unknown, name: string) => { const n = Number(v); if (!Number.isFinite(n)) throw new Error(`${name} 要是数字`); return Math.floor(n); };
 export const kindOf = (name: string | null): 'open' | 'solid' | 'liquid' | 'unknown' =>
   name === null ? 'unknown' : LIQUID_BLOCKS.has(name) ? 'liquid' : AIR_BLOCKS.has(name) || isSoftBlock(name) ? 'open' : 'solid';
 
+/** 每条总线上最近一次挨打的时刻（代码技能读 hurtAgoMs 用） */
+const hurtClock = new WeakMap<EventBus, { at: number }>();
+function hurtAt(bus: EventBus): number {
+  let c = hurtClock.get(bus);
+  if (!c) {
+    const clock = { at: 0 };
+    hurtClock.set(bus, clock);
+    bus.on('event', (ev: { type: string; ts?: number }) => { if (ev.type === 'hurt') clock.at = ev.ts ?? Date.now(); });
+    c = clock;
+  }
+  return c.at;
+}
+let lastSwingAt = 0;
+const point = (v: unknown, name: string): Vec3Like => {
+  const a = Array.isArray(v) ? v : v && typeof v === 'object' ? [(v as any).x, (v as any).y, (v as any).z] : null;
+  if (!a || a.length < 3 || !a.slice(0, 3).every((n) => Number.isFinite(Number(n)))) throw new Error(`${name} 要写 [x,y,z]`);
+  return { x: Number(a[0]), y: Number(a[1]), z: Number(a[2]) };
+};
+const need = <T>(fn: T | undefined, what: string): T => { if (!fn) throw new Error(`这个身体做不了：${what}`); return fn; };
+
 export function makeBridge(ctx: SkillCtx): SandboxHandler {
+  hurtAt(ctx.bus); // 开始记挨打时刻
   const near = (p: Vec3Like) => {
     const s = ctx.adapter.state().pos;
     if (Math.hypot(p.x - s.x, p.y - s.y, p.z - s.z) > READ_RADIUS) throw new Error(`只看得到身边 ${READ_RADIUS} 格内的方块`);
@@ -52,8 +83,19 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
       case 'state': {
         const s = ctx.adapter.state();
         const eye = ctx.adapter.eye();
+        const combat = ctx.adapter.combatState?.() ?? { usingItem: false, offHand: null, drawingSinceMs: null };
+        const hurt = hurtAt(ctx.bus);
+        let deathDrop: unknown = null;
+        try {
+          const d = ctx.memory.lastDeath();
+          const left = d ? Math.round((d.ts + 300_000 - Date.now()) / 1000) : 0;
+          if (d && d.lost.length && left > 0) deathDrop = { pos: d.pos, dim: d.dim, items: d.lost.map((i) => ({ name: i.name, count: i.count })), secondsLeft: left };
+        } catch { /* 记忆暂不可用 */ }
         return { pos: s.pos, feet: feetCell(s.pos), hp: Math.round(s.hp * 10) / 10, food: s.food, oxygen: s.oxygen, onGround: s.onGround !== false, inWater: s.inWater, inLava: s.inLava,
-          isDay: s.isDay, dim: s.dim, yaw: eye?.yaw ?? null, facing: eye ? facingOfYaw(eye.yaw) : null, held: s.held, inventory: s.inventory.map((i) => ({ name: i.name, count: i.count })) };
+          isDay: s.isDay, dim: s.dim, yaw: eye?.yaw ?? null, pitch: eye?.pitch ?? null, facing: eye ? facingOfYaw(eye.yaw) : null, held: s.held,
+          offHand: combat.offHand, armor: (s.equipment ?? []).filter((e) => e.slot !== 'off-hand').map((e) => ({ slot: e.slot, name: e.name })),
+          usingItem: combat.usingItem, drawingMs: combat.drawingSinceMs, hurtAgoMs: hurt ? Date.now() - hurt : null, deathDrop,
+          inventory: s.inventory.map((i) => ({ name: i.name, count: i.count })) };
       }
       case 'blockAt': {
         const p = { x: int(a[0], 'x'), y: int(a[1], 'y'), z: int(a[2], 'z') };
@@ -79,7 +121,10 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
       }
       case 'entities': {
         const r = Math.max(1, Math.min(32, Number(a[0]) || 16));
-        return ctx.senses.perceivedEntities(r).map((e) => ({ id: e.id, name: e.name, kind: e.kind, dist: Math.round(e.dist * 10) / 10, pos: e.pos, ...(e.fusing ? { fusing: true } : {}) }));
+        const r2 = (v: number) => Math.round(v * 100) / 100;
+        return ctx.senses.perceivedEntities(r).map((e) => ({ id: e.id, name: e.name, kind: e.kind, dist: Math.round(e.dist * 10) / 10, pos: e.pos,
+          ...(e.perception ? { how: e.perception } : {}), ...(e.velocity ? { velocity: { x: r2(e.velocity.x), y: r2(e.velocity.y), z: r2(e.velocity.z) } } : {}),
+          ...(e.height ? { height: e.height } : {}), ...(typeof e.hp === 'number' ? { hp: e.hp } : {}), ...(e.fusing ? { fusing: true } : {}) }));
       }
       case 'act': return runSkill(String(a[0] ?? ''), a[1]);
       case 'stepTo': return runSkill('step', { to: rel(int(a[0], 'x'), int(a[1], 'y'), int(a[2], 'z')), facing: 'N' });
@@ -95,6 +140,56 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
         return { ok: true, pos: ctx.adapter.state().pos };
       }
       case 'look': await ctx.adapter.look(Number(a[0]) || 0, Number(a[1]) || 0, ctx.signal); return { ok: true };
+      case 'lookAt': {
+        const p = point(a.length >= 3 ? a.slice(0, 3) : a[0], 'lookAt');
+        const eye = ctx.adapter.eye();
+        if (!eye) throw new Error('现在看不了');
+        const dx = p.x - eye.x, dy = p.y - eye.y, dz = p.z - eye.z;
+        await ctx.adapter.look(Math.atan2(-dx, -dz), Math.atan2(dy, Math.hypot(dx, dz)), ctx.signal);
+        return { ok: true };
+      }
+      case 'move': {
+        const raw = (a[0] && typeof a[0] === 'object' ? a[0] : {}) as Record<string, unknown>;
+        const keys: DriveKeys = {};
+        for (const k of ['forward', 'back', 'left', 'right', 'jump', 'sprint', 'sneak'] as const) if (raw[k]) keys[k] = true;
+        const o = (a[2] && typeof a[2] === 'object' ? a[2] : {}) as Record<string, unknown>;
+        const face = o.face;
+        const r = await need(ctx.adapter.drive?.bind(ctx.adapter), 'move')(keys, Math.max(50, Math.min(1000, Number(a[1]) || 200)), ctx.signal, {
+          ...(typeof face === 'number' ? { faceEntity: face } : face !== undefined ? { facePoint: point(face, 'face') } : {}), guard: o.unsafe !== true });
+        return { ok: r.ok, moved: r.moved, ...(r.stopped ? { stopped: r.stopped } : {}), pos: ctx.adapter.state().pos };
+      }
+      case 'attack': {
+        const id = Number(a[0]);
+        const target = ctx.senses.perceivedEntities(8).find((e) => e.id === id);
+        if (!target) return { ok: false, error: '看不见这个实体（或者太远了）', sinceLastMs: Date.now() - lastSwingAt };
+        if (target.dist > 4.5) return { ok: false, error: `够不着：还有 ${Math.round(target.dist * 10) / 10} 格`, sinceLastMs: Date.now() - lastSwingAt };
+        const since = Date.now() - lastSwingAt;
+        const ok = await ctx.adapter.attack(id, ctx.signal);
+        if (ok) lastSwingAt = Date.now();
+        return { ok, sinceLastMs: since };
+      }
+      case 'equip': {
+        const dest = String(a[1] ?? 'hand');
+        if (!['hand', 'off-hand', 'head', 'torso', 'legs', 'feet'].includes(dest)) throw new Error('equip 的位置写 hand|off-hand|head|torso|legs|feet');
+        const r = await need(ctx.adapter.equipItem?.bind(ctx.adapter), 'equip')(String(a[0] ?? ''), dest as 'hand', ctx.signal);
+        return { ok: r.ok, ...(r.reason ? { code: r.reason } : {}) };
+      }
+      case 'shield': {
+        const r = await need(ctx.adapter.raiseShield?.bind(ctx.adapter), 'shield')(a[0] !== false, ctx.signal);
+        return { ok: r.ok, ...(r.reason ? { code: r.reason } : {}) };
+      }
+      case 'draw': {
+        const r = await need(ctx.adapter.startDraw?.bind(ctx.adapter), 'draw')(String(a[0] ?? 'bow'), ctx.signal);
+        return { ok: r.ok, ...(r.reason ? { code: r.reason } : {}) };
+      }
+      case 'release': {
+        const r = await need(ctx.adapter.releaseDraw?.bind(ctx.adapter), 'release')(ctx.signal, a[0] === undefined || a[0] === null ? undefined : point(a.length >= 3 ? a.slice(0, 3) : a[0], 'release'));
+        return { ok: r.ok, chargedMs: r.chargedMs, ...(r.reason ? { code: r.reason } : {}) };
+      }
+      case 'shoot': {
+        const r = await need(ctx.adapter.rangedAttack?.bind(ctx.adapter), 'shoot')(Number(a[0]), ctx.signal);
+        return { ok: r.ok, ...(r.reason ? { code: r.reason } : {}) };
+      }
       case 'sleep': await sleep(Math.max(0, Math.min(5000, Number(a[0]) || 0)), ctx.signal); return { ok: true };
       default: throw new Error(`没有 api.${method}`);
     }

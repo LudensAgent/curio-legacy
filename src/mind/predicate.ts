@@ -30,6 +30,10 @@ export interface Predicate {
   hurt_within?: number;
   /** 身边的掩体：sealed 四面和头顶都封住｜pit 四面封住头顶空｜open 空地 */
   cover?: ('sealed' | 'pit' | 'open')[];
+  /** 死后掉在地上、还没捡回的东西（同一维度）：可以限定离这里多远以内、还剩多少秒以上 */
+  dropped_items?: { within?: number; left_above?: number };
+  /** 只在这些维度生效（overworld / the_nether / the_end） */
+  dim?: string[];
   any?: Predicate[]; all?: Predicate[]; not?: Predicate;
 }
 
@@ -47,10 +51,12 @@ export interface Sense {
   /** 距上次挨打多少毫秒（不知道为 Infinity） */
   hurtAgoMs: number;
   cover: 'sealed' | 'pit' | 'open';
+  /** 死后掉在地上还没捡回的东西（同一维度才有） */
+  deathDrop?: { dist: number; leftS: number; count: number } | null;
 }
 
 export const PREDICATE_KEYS = ['hp_below', 'food_below', 'oxygen_below', 'in_water', 'in_lava', 'on_ground', 'night', 'dark', 'hostile', 'no_hostile_within',
-  'has', 'lacks', 'doing', 'not_doing', 'cell', 'after_failure', 'hurt_within', 'cover', 'any', 'all', 'not'] as const;
+  'has', 'lacks', 'doing', 'not_doing', 'cell', 'after_failure', 'hurt_within', 'cover', 'dropped_items', 'dim', 'any', 'all', 'not'] as const;
 
 const NAME = /^[a-z0-9_*]{2,60}$/;
 const list = (v: unknown): string[] | null => {
@@ -135,6 +141,18 @@ export function validatePredicate(raw: unknown, depth = 0): Predicate | { error:
     if (!c.length || c.some((x: string) => !['sealed', 'pit', 'open'].includes(x))) return { error: 'cover 写 sealed（四面和头顶都封住）|pit（坑里）|open（空地）' };
     out.cover = c as Predicate['cover'];
   }
+  if (o.dim !== undefined) {
+    const d = list(o.dim);
+    if (!d) return { error: 'dim 写维度名或数组：overworld / the_nether / the_end' };
+    out.dim = d;
+  }
+  if (o.dropped_items !== undefined) {
+    const d = o.dropped_items === true ? {} : o.dropped_items;
+    if (!d || typeof d !== 'object') return { error: 'dropped_items 写 true，或 {"within":格数,"left_above":秒数}' };
+    if ((d as any).within !== undefined && !num((d as any).within, 1, 2000)) return { error: 'dropped_items.within 写 1–2000 格' };
+    if ((d as any).left_above !== undefined && !num((d as any).left_above, 0, 300)) return { error: 'dropped_items.left_above 写 0–300 秒（掉落物 5 分钟后消失）' };
+    out.dropped_items = { ...((d as any).within !== undefined ? { within: (d as any).within } : {}), ...((d as any).left_above !== undefined ? { left_above: (d as any).left_above } : {}) };
+  }
   for (const k of ['any', 'all'] as const) if (o[k] !== undefined) {
     if (!Array.isArray(o[k]) || !o[k].length || o[k].length > 6) return { error: `${k} 写 1–6 个条件的数组` };
     const parts: Predicate[] = [];
@@ -193,6 +211,13 @@ export function evalPredicate(p: Predicate, s: Sense): boolean {
   }
   if (p.hurt_within !== undefined && !(s.hurtAgoMs <= p.hurt_within * 1000)) return false;
   if (p.cover && !p.cover.includes(s.cover)) return false;
+  if (p.dim && !p.dim.includes(st.dim)) return false;
+  if (p.dropped_items) {
+    const d = s.deathDrop;
+    if (!d || !d.count) return false;
+    if (p.dropped_items.within !== undefined && d.dist > p.dropped_items.within) return false;
+    if (p.dropped_items.left_above !== undefined && d.leftS <= p.dropped_items.left_above) return false;
+  }
   if (p.all && !p.all.every((q) => evalPredicate(q, s))) return false;
   if (p.any && !p.any.some((q) => evalPredicate(q, s))) return false;
   if (p.not && evalPredicate(p.not, s)) return false;

@@ -67,6 +67,8 @@ export interface Activity {
   awaitingRecovery?: string;
   results: StepResult[];
   startInventory: Record<string, number>;
+  /** 被绕路的事放下的时刻（回来时要先想想还做不做） */
+  suspendedAt?: number;
   /** 上一步开工时的身体/视野；只有环境确实变化才原样重试。 */
   stepStart?: { pos: { x: number; y: number; z: number }; view?: string };
 }

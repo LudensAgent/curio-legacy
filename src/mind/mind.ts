@@ -114,6 +114,21 @@ export class Mind {
   private pendingReason: { reason: string; tier: 'glance' | 'deliberate' } | null = null;
   /** “这段活快干完了，想想接下来”每段活只问一次（模型没写 next 也不会一直追问） */
   private nearEndAskedFor: string | null = null;
+  /** 刚从绕路回到这段活：先想一想再动手（放下它的这段时间里情况可能变了，比如等的东西到了、要的已经够了） */
+  private resumeCheck: string | null = null;
+  private lastDim: string | null = null;
+
+  /**
+   * 第一次到一个新维度：这是个新环境。不告诉它这里有什么危险（那是它自己要看、要学的），
+   * 只提醒熟悉的那一套不一定适用、以前学的技能都还没在这里验证过——先站稳看清楚，吃了亏就学。
+   */
+  private arriveSomewhereNew(dim: string) {
+    const skills = this.safe(() => this.d.behaviors?.list().filter((b) => this.d.behaviors!.enabled(b)).map((b) => b.name) ?? [], [] as string[]);
+    const text = `第一次来到 ${dim}：这是个全新的环境，在别处管用的那一套（怎么走、怎么躲、哪里安全、东西在哪）不一定还成立`;
+    this.d.self.think(text, 'notice');
+    this.d.bus.publish('new_environment', 'P1', text, { dim, untested: skills });
+    this.requestThink(`${text}。先别急着走远：看清楚这里和以前的地方有什么不同、哪些东西危险、怎么回去${skills.length ? `；你的技能（${skills.slice(0, 8).join('、')}）都是在别处学的，这里还没验证过，可以用 dim 条件写只在这里生效的技能` : ''}；吃了亏、发现了这里的门道，就写 worth_learning`, 'deliberate');
+  }
   /** 上一次卡住的事，和随后在同一带做成的事：提醒模型把管用的做法写成技能 */
   private lastStuck: { what: string; why: string; pos: AgentState['pos']; at: number; skill?: string; code?: string } | null = null;
   private learnFrom: { stuck: NonNullable<Mind['lastStuck']>; solved: { what: string; routine: string[] } } | null = null;
@@ -174,6 +189,10 @@ export class Mind {
       this.attention.reset();
       this.cancelThinking('session_changed');
       this.requestThink('换了个地方，重新看看周围', 'deliberate');
+    }
+    if (this.lastDim !== state.dim) {
+      this.lastDim = state.dim;
+      if (this.d.self.firstVisit(state.dim)) this.arriveSomewhereNew(state.dim);
     }
     this.lastSession = state.sessionId;
     if (Date.now() < this.settleUntil) return;
@@ -275,6 +294,10 @@ export class Mind {
       this.beginActivity(q.draft, q.monologue || `接着做：${q.draft.what}`, 'llm', 'next');
     }
     if (!this.activity) return this.idle();
+    if (this.resumeCheck === this.activity.id) {
+      if (this.thinking || this.pendingReason) return; // 等这一念想完
+      this.resumeCheck = null;
+    } else this.resumeCheck = null;
     const step = nextStep(this.activity);
     if (!step) return this.finishActivity('done', '这段活的步骤都做完了');
     const state = this.d.adapter.state();
@@ -396,7 +419,14 @@ export class Mind {
         this.activityThoughtAt = Date.now();
         this.d.bus.publish('activity_start', 'P2', `回到：${resume.what}`, { activity: describeActivity(resume, state, this.safe(() => this.d.perception.snapshot(), undefined)) });
         this.d.bus.publish('plan', 'P2', `[${resume.source === 'rule' ? 'rule' : 'llm'}] ${resume.what} —— 回到刚才的事`, { thought: `回到刚才的事：${resume.what}`, source: resume.source === 'rule' ? 'rule' : 'llm', steps: resume.steps, planId: resume.id });
-        if (outcome === 'stuck') this.requestThink(`绕路去做的「${a.what}」卡住了：${summary}`, 'deliberate');
+        // 真人做完岔出去的事，会先想一下“刚才在干嘛、还要接着干吗”，而不是闷头接着做：
+        // 放下它的这段时间里，等的东西可能到了、要攒的可能已经够了、天可能黑了
+        const away = Math.max(1, Math.round((Date.now() - (resume.suspendedAt ?? Date.now())) / 1000));
+        delete resume.suspendedAt;
+        this.resumeCheck = resume.id;
+        this.requestThink(outcome === 'stuck'
+          ? `绕路去做的「${a.what}」卡住了：${summary}。原来放下的「${resume.what}」还要接着做吗？`
+          : `绕路去做的「${a.what}」做完了。${away} 秒前放下的「${resume.what}」（${resume.why || '没写原因'}）还要接着做吗？这段时间里它的前提可能已经变了`, 'deliberate');
         return;
       }
     }
@@ -734,6 +764,7 @@ export class Mind {
     if (decision.kind === 'detour' && this.activity) {
       const a = this.activity;
       if (this.d.arbiter.info()?.planId === a.id) { this.d.arbiter.cancel('先去处理别的事'); a.index = Math.max(0, a.index - 1); }
+      a.suspendedAt = Date.now();
       this.suspended.push(a);
       if (this.suspended.length > 2) this.suspended.shift();
       this.activity = null;

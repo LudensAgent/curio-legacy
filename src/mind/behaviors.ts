@@ -40,6 +40,8 @@ export interface BehaviorStats {
   recent?: RunRecord[];
   /** 被整理掉的原因（合并进别的技能、长期用不上）；同名重写就恢复 */
   retired?: string;
+  /** 在各个维度里的成败：到了新环境，看得出哪些技能在这里还没验证过 */
+  byDim?: Record<string, { ok: number; fail: number }>;
   /** 和别的自动技能同时满足条件的次数（给整理用） */
   conflicts?: Record<string, number>;
 }
@@ -160,6 +162,8 @@ export class BehaviorEngine {
   static readonly AFTERMATH_MS = 12_000;
   /** 代码技能失败或心智要求改进时调用（main 接到后台改进器） */
   improve: ImproveHook | null = null;
+  /** 死后掉在地上还没捡回的东西（main 接到世界记忆）：给 dropped_items 条件用 */
+  drops: (() => Sense['deathDrop']) | null = null;
 
   constructor(private book: SkillBook | null, private adapter: GameAdapter, private arbiter: Pick<Arbiter, 'start' | 'info' | 'on' | 'off'> | null,
     private bus: EventBus, private senses: Pick<Senses, 'perceivedEntities'>, private statsFile: string | null = null) {
@@ -192,7 +196,9 @@ export class BehaviorEngine {
   enabled(b: Behavior): boolean { return !this.stats[b.name]?.disabled; }
 
   private sense(cur: TaskInfo | null, failure?: Sense['failure']): Sense {
-    return senseNow(this.adapter, this.senses, cur && cur.source !== 'filler' ? cur.skill : null, failure, this.lastHurtAt ? Date.now() - this.lastHurtAt : Infinity);
+    const s = senseNow(this.adapter, this.senses, cur && cur.source !== 'filler' ? cur.skill : null, failure, this.lastHurtAt ? Date.now() - this.lastHurtAt : Infinity);
+    try { s.deathDrop = this.drops?.() ?? null; } catch { s.deathDrop = null; }
+    return s;
   }
 
   private running(cur: TaskInfo | null): Behavior | undefined {
@@ -394,8 +400,12 @@ export class BehaviorEngine {
   private record(b: Behavior, okRun: boolean, summary: string, data: Record<string, any>) {
     const name = b.name;
     let rollback: { from: number; to: number } | null = null;
+    let dim = 'unknown';
+    try { dim = this.adapter.state().dim; } catch { /* 状态暂不可用 */ }
     this.touch(name, (st) => {
       if (okRun) st.ok++; else { st.fail++; st.lastError = summary.slice(0, 120); }
+      const pd = (st.byDim ??= {})[dim] ??= { ok: 0, fail: 0 };
+      if (okRun) pd.ok++; else pd.fail++;
       if (b.code) {
         const v = String(b.version ?? 1);
         const per = (st.byVersion ??= {})[v] ??= { ok: 0, fail: 0 };
@@ -427,9 +437,13 @@ export class BehaviorEngine {
 
   /** 给模型看的一览（技能书索引之外，带成败和停用状态） */
   overview(): string[] {
+    let dim = '';
+    try { dim = this.adapter.state().dim; } catch { /* 状态暂不可用 */ }
     return [...this.list().map((b) => {
       const st = this.stats[b.name];
-      return `${b.name}［${b.mode === 'auto' ? '自动' : b.mode === 'recover' ? '失败时先试' : '调用'}${b.code ? `，代码 v${b.version ?? 1}` : ''}${b.overrides.length ? `，代替本能 ${b.overrides.join('/')}` : ''}${b.needs ? `，调用时给 args.${Object.keys(b.needs).join('/')}` : ''}］${st && st.ok + st.fail ? ` 成${st.ok}/败${st.fail}` : ''}${st?.retired ? ` 已收起（${st.retired.slice(0, 30)}）` : st?.disabled ? ' 已停用' : ''}`;
+      const here = st?.byDim?.[dim];
+      const untested = st && st.ok + st.fail > 0 && st.byDim && !here && !(b.when?.dim && !b.when.dim.includes(dim)) ? `（在 ${dim} 还没用过）` : '';
+      return `${b.name}［${b.mode === 'auto' ? '自动' : b.mode === 'recover' ? '失败时先试' : '调用'}${b.code ? `，代码 v${b.version ?? 1}` : ''}${b.overrides.length ? `，代替本能 ${b.overrides.join('/')}` : ''}${b.needs ? `，调用时给 args.${Object.keys(b.needs).join('/')}` : ''}］${st && st.ok + st.fail ? ` 成${st.ok}/败${st.fail}` : ''}${st?.retired ? ` 已收起（${st.retired.slice(0, 30)}）` : st?.disabled ? ' 已停用' : ''}${untested}`;
     }), ...[...this.invalid].map(([n, why]) => `${n}：${why}`)];
   }
 }

@@ -28,8 +28,9 @@ description: 怎么把管用的做法写成技能：触发条件、动作步骤�
 ```
 
 - 参数 `api` 和 `args` 已经给好；恢复时 `args.failure = {skill,args,code,summary}` 是刚失败的那一步（比如 `args.failure.args.target`）；`use_skill {"name":…,"args":{…}}` 调用时 args 就是那个对象。
-- `api.state()`、`api.blockAt(x,y,z)`、`api.region(x1,y1,z1,x2,y2,z2)`（返回 palette/kinds/data，第 i 格 i = (y-min.y)*sx*sz + (z-min.z)*sx + (x-min.x)，kind = open|solid|liquid|unknown）、`api.entities(r)`、`api.stepTo(x,y,z)`、`api.digAt(x,y,z)`、`api.placeAt(x,y,z,item)`、`api.moveTo(x,y,z,range)`、`api.act("动作",{参数})`、`api.look(yaw,pitch)`、`api.sleep(ms)`、`api.log(…)`、`api.progress(p)`；全部要 await。
-- 只看得到身边 48 格；region 最多 40000 格；不能 require/import/eval；每次唤醒最多 1.5 秒同步计算，总共最多 4000 次 api 调用；做不成就 `throw new Error("原因")`。
+- `api.state()`、`api.blockAt(x,y,z)`、`api.region(x1,y1,z1,x2,y2,z2)`（返回 palette/kinds/data，第 i 格 i = (y-min.y)*sx*sz + (z-min.z)*sx + (x-min.x)，kind = open|solid|liquid|unknown）、`api.entities(r)`、`api.stepTo(x,y,z)`、`api.digAt(x,y,z)`、`api.placeAt(x,y,z,item)`、`api.moveTo(x,y,z,range)`、`api.act("动作",{参数})`、`api.look(yaw,pitch)`、`api.lookAt(x,y,z)`、`api.sleep(ms)`、`api.log(…)`、`api.progress(p)`；全部要 await。
+- 身体的细动作：`api.move({forward,back,left,right,jump,sprint,sneak}, ms≤1000, {face: 实体id或[x,y,z]})`（按住这些键一小会儿、一直盯着目标；前面是岩浆或高崖会自己停下）、`api.attack(id)`（返回距上次挥了多久）、`api.equip(物品, 位置)`、`api.shield(true/false)`、`api.draw("bow")` + `api.release([x,y,z])`、`api.shoot(id)`。`api.state()` 里有 offHand、armor、usingItem、hurtAgoMs、deathDrop；`api.entities(r)` 里有 velocity、height、hp。
+- 只看得到身边 48 格；region 最多 40000 格；不能 require/import/eval；每次唤醒最多 1.5 秒同步计算，总共最多 12000 次 api 调用；做不成就 `throw new Error("原因")`。
 - **会自己变好**：代码技能老失败时，会在后台单独请一次模型拿着出错记录改代码，换上新版本（v2、v3…）；新版本更差会自动退回旧版。改进有间隔、不会频繁发生。你也可以写 `{"name":"…","improve":"哪里不好"}` 主动要求改进（同样排队、限频）。
 
 ## 条件写法（并列的键都要成立）
@@ -38,6 +39,7 @@ description: 怎么把管用的做法写成技能：触发条件、动作步骤�
 - 背包：`has` `"cobblestone"` 或 `{"item":"*_planks","count":4}`（* 通配）；`lacks` `"torch"`
 - 正在做：`doing` / `not_doing` 动作名或数组
 - 身边的方块：`cell` `{"at":[前,上,右],"is":"air|open|solid|liquid|方块名"}`，可写数组；open = 能穿过（空气、草、雪层）
+- 死后的掉落物：`dropped_items` `true` 或 `{"within":格数,"left_above":秒数}`（同一维度里还有没捡回的东西；掉落物 5 分钟后消失）
 - 失败：`after_failure` `{"skill"?:["goto","explore"],"code"?:["PATH_NOT_FOUND","STUCK"]}`
 - 组合：`any` `[条件…]`、`all` `[条件…]`、`not` `{条件}`
 
@@ -47,6 +49,9 @@ description: 怎么把管用的做法写成技能：触发条件、动作步骤�
 身体只有两条保命底线：掉进岩浆往外跑、水里快没气上浮。除此之外身体不会自己躲怪、逃跑、还手或脱困——这些反应都要你从经历里总结成技能（自动类或恢复类）。一开始技能书是空的，第一次被僵尸追、第一次卡在坑里，都是写技能的时候。
 
 自动类技能的成败看结果：触发后 12 秒内死了、或又掉了 6 点以上的血就记一次没用（记录里带着触发时的血量、周围的怪、是否在坑里、当时在做什么）。代码技能老是没用会在后台被改进。代码技能里 `args.trigger` 就是触发时的这些情况；判断这次不用做时 `return {skipped:"原因"}`，不计数。
+
+## 打架、躲闪、捡回东西
+身体不会任何打法：什么时候拉开距离、什么时候举盾、绕着走还是后退、近战还是用弓、要不要回去捡死后掉的东西、值不值得冒险，都由你从经历里写成技能（多半是代码技能，用 move / attack / shield / draw 一拍一拍地拼）。几条游戏常识：挥得太勤伤害很低（剑约 0.6 秒、斧约 1 秒才恢复满）；冲刺中挥砍能把怪击退；盾只挡正面、举着时走得慢；弓蓄满约 1 秒，远处要往上抬；苦力怕嘶嘶响约 1.5 秒后爆炸。
 
 ## 成败和修改
 每次用完都会记成败（思考里 my_skills 能看到）。自己写的技能用了几次大多失败会被停用，并提醒你：同名再写一次就是修订、重新启用；`{"name":"…","disable":true}` 停用。

@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import type { ActionResult, AgentState, BlockHit, BossDeathObservation, EntityInfo, Eye, GameAdapter, InvItem, MoveOpts, MoveTarget, Optics, Vec3Like } from '../src/adapter/types.ts';
+import type { ActionResult, AgentState, BlockHit, BossDeathObservation, DriveKeys, DriveOptions, DriveResult, EntityInfo, Eye, GameAdapter, InvItem, MoveOpts, MoveTarget, Optics, Vec3Like } from '../src/adapter/types.ts';
 import { dist3, raceAbort, sleep, throwIfAborted } from '../src/util.ts';
 
 /** 离线测试用的模拟游戏：没有 Minecraft 也能验证仲裁、反射、规划与连贯性。 */
@@ -383,6 +383,50 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
     this.yaw = yaw;
     this.pitch = pitch;
   }
+  /** 按住移动键：朝 yaw 的前后左右走（测试里按时间直接算位移，走一步检查一次脚下） */
+  shieldUp = false;
+  drawingSince: number | null = null;
+  async drive(keys: DriveKeys, ms: number, signal: AbortSignal, opts: DriveOptions = {}): Promise<DriveResult> {
+    throwIfAborted(signal);
+    this.actions.push(`drive:${Object.keys(keys).filter((k) => (keys as any)[k]).join('+')}`);
+    const face = () => {
+      const t = opts.faceEntity !== undefined ? this.entities.find((e) => e.id === opts.faceEntity)?.pos : opts.facePoint;
+      if (t) this.yaw = Math.atan2(-(t.x - this.pos.x), -(t.z - this.pos.z));
+    };
+    face();
+    const fx = -Math.sin(this.yaw), fz = -Math.cos(this.yaw);
+    const f = (keys.forward ? 1 : 0) - (keys.back ? 1 : 0), r = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+    const len = Math.hypot(f, r) || 1;
+    const speed = (this.shieldUp || keys.sneak ? 1.3 : keys.sprint ? 5.6 : 4.3) * Math.min(1, ms / 1000);
+    const steps = 10, start = { ...this.pos };
+    for (let i = 0; i < steps; i++) {
+      const nx = this.pos.x + ((fx * f - fz * r) / len) * speed / steps, nz = this.pos.z + ((fz * f + fx * r) / len) * speed / steps;
+      const at = (dy: number) => this.nameAt(Math.floor(nx), Math.floor(this.pos.y) + dy, Math.floor(nz));
+      if (opts.guard !== false && [at(0), at(-1)].some((n) => /lava|fire/.test(n))) return { ok: false, reason: 'HAZARD', stopped: 'lava', moved: dist3(start, this.pos), ms };
+      this.pos = { ...this.pos, x: nx, z: nz };
+      face();
+    }
+    await sleep(Math.min(ms, 5), signal);
+    return { ok: true, moved: Math.round(dist3(start, this.pos) * 100) / 100, ms };
+  }
+  async raiseShield(on: boolean) {
+    if (on && this.equipped.get('off-hand') !== 'shield') return { ok: false, reason: 'NO_SHIELD' };
+    this.shieldUp = on;
+    return { ok: true };
+  }
+  async startDraw(item: string) {
+    if (!this.inv.get(item)) return { ok: false, reason: 'NO_ITEM' };
+    this.drawingSince = Date.now();
+    return { ok: true };
+  }
+  async releaseDraw(_signal: AbortSignal, aim?: Vec3Like) {
+    if (this.drawingSince === null) return { ok: false, reason: 'NOT_DRAWING', chargedMs: 0 };
+    const chargedMs = Date.now() - this.drawingSince;
+    this.drawingSince = null;
+    this.actions.push(`release:${aim ? `${aim.x},${aim.y},${aim.z}` : 'ahead'}`);
+    return { ok: true, chargedMs };
+  }
+  combatState() { return { usingItem: this.shieldUp || this.drawingSince !== null, offHand: this.equipped.get('off-hand') ?? null, drawingSinceMs: this.drawingSince === null ? null : Date.now() - this.drawingSince }; }
   async jump(ms: number, signal: AbortSignal) {
     await sleep(ms, signal);
     if (this.inWater) this.oxygen = Math.min(20, this.oxygen + 6); // 浮上水面换气

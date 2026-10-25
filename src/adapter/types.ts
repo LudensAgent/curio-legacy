@@ -162,6 +162,16 @@ export interface UseItemOptions {
   aim?: Vec3Like;
 }
 
+/** 代码技能直接操纵身体时按住的键 */
+export interface DriveKeys { forward?: boolean; back?: boolean; left?: boolean; right?: boolean; jump?: boolean; sprint?: boolean; sneak?: boolean }
+export interface DriveOptions {
+  /** 一边走一边一直盯着这个实体（打架时走位）或这个点 */
+  faceEntity?: number; facePoint?: Vec3Like;
+  /** 默认 true：前面是岩浆/火、或者一脚下去会摔三格以上就停下（身体本能，不是打法） */
+  guard?: boolean;
+}
+export interface DriveResult extends ActionResult { moved: number; ms: number; stopped?: 'lava' | 'cliff' | 'hurt_stop' }
+
 export interface GameAdapter {
   on(event: AdapterEvent, cb: (...args: any[]) => void): this;
 
@@ -202,6 +212,15 @@ export interface GameAdapter {
   useBlockAt?(pos: Vec3Like, item: string, signal: AbortSignal): Promise<ActionResult>;
   useItem?(item: string, signal: AbortSignal, opts?: UseItemOptions): Promise<ActionResult>;
   rangedAttack?(entityId: number, signal: AbortSignal): Promise<ActionResult>;
+  /** 按住移动键 ms 毫秒（≤1000）：拉开距离、侧移绕圈、跳劈、潜行都靠它 */
+  drive?(keys: DriveKeys, ms: number, signal: AbortSignal, opts?: DriveOptions): Promise<DriveResult>;
+  /** 举起/放下副手的盾 */
+  raiseShield?(on: boolean, signal: AbortSignal): Promise<ActionResult>;
+  /** 拉弓（或其它要蓄力的东西）开始蓄力；releaseDraw 朝 aim 松手，返回蓄了多久 */
+  startDraw?(item: string, signal: AbortSignal): Promise<ActionResult>;
+  releaseDraw?(signal: AbortSignal, aim?: Vec3Like): Promise<ActionResult & { chargedMs: number }>;
+  /** 身体此刻的战斗相关状态：手上是否在用东西（举盾/拉弓）、副手拿着什么 */
+  combatState?(): { usingItem: boolean; offHand: string | null; drawingSinceMs: number | null };
   enterPortalAt?(pos: Vec3Like, signal: AbortSignal, expectedDim?: string): Promise<ActionResult & { from?: AgentState; to?: AgentState }>;
   bossStatus?(): { dragonDeath: BossDeathObservation | null };
   dig(pos: Vec3Like, signal: AbortSignal): Promise<ActionResult>;

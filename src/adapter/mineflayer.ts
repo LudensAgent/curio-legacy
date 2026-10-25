@@ -6,11 +6,15 @@ import type { Config } from '../config.ts';
 import type { EventBus } from '../events.ts';
 import { AbortedError, raceAbort, shortId, sleep, throwIfAborted, TimeoutError } from '../util.ts';
 import { cornerSafe } from './corner-safe.ts';
+import { AIR_BLOCKS } from '../perception/surroundings.ts';
 import type {
   InvItem,
   ActionResult,
   AgentState,
   BlockHit,
+  DriveKeys,
+  DriveOptions,
+  DriveResult,
   EntityInfo,
   EntityKind,
   Eye,
@@ -1779,6 +1783,97 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const check = this.actionCheckpoint(signal);
     if (!this.ready) return;
     await this.afterAction(() => this.bot.look(yaw, pitch, false), check);
+  }
+
+  private drawStartedAt: number | null = null;
+
+  async drive(keys: DriveKeys, ms: number, signal: AbortSignal, opts: DriveOptions = {}): Promise<DriveResult> {
+    const check = this.actionCheckpoint(signal);
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', moved: 0, ms: 0 };
+    const b = this.bot, epoch = this.actionEpoch;
+    const start = b.entity.position.clone(), t0 = Date.now(), total = Math.max(50, Math.min(1000, ms));
+    const names = (Object.keys(keys) as (keyof DriveKeys)[]).filter((k) => keys[k]);
+    const face = () => {
+      const target = opts.faceEntity !== undefined ? b.entities[opts.faceEntity] : null;
+      const p = target?.isValid ? target.position.offset(0, (target.height ?? 1.6) * 0.85, 0) : opts.facePoint ? this.vec(opts.facePoint) : null;
+      if (p) { try { b.lookAt(p, true); } catch { /* ignore */ } }
+    };
+    // 身体本能：不迈进岩浆和火，不从三格以上的高处一脚踩空
+    const danger = (): DriveResult['stopped'] | null => {
+      if (opts.guard === false) return null;
+      const v = b.entity.velocity ?? { x: 0, z: 0 };
+      const speed = Math.hypot(v.x, v.z);
+      if (speed < 0.02) return null;
+      const ahead = b.entity.position.offset((v.x / speed) * 0.7, 0, (v.z / speed) * 0.7);
+      const at = (dy: number) => b.blockAt(ahead.offset(0, dy, 0))?.name ?? null;
+      if ([0, -1].some((dy) => /^(lava|fire|soul_fire|magma_block|campfire|soul_campfire)$/.test(at(dy) ?? ''))) return 'lava';
+      if (!b.entity.onGround) return null;
+      const open = (n: string | null) => n === null || AIR_BLOCKS.has(n);
+      if (open(at(-1)) && open(at(-2)) && open(at(-3)) && open(at(-4))) return 'cliff';
+      return null;
+    };
+    let stopped: DriveResult['stopped'] | undefined;
+    try {
+      check();
+      b.clearControlStates();
+      for (const k of names) b.setControlState(k, true);
+      while (Date.now() - t0 < total) {
+        face();
+        const d = danger();
+        if (d) { stopped = d; break; }
+        await this.afterAction(() => sleep(Math.min(50, total - (Date.now() - t0)), signal), check);
+      }
+    } finally {
+      if (epoch === this.actionEpoch && b === this.bot) for (const k of names) b.setControlState(k, false);
+    }
+    const moved = Math.round(b.entity.position.distanceTo(start) * 100) / 100;
+    return { ok: !stopped, ...(stopped ? { reason: stopped === 'lava' ? 'HAZARD' : 'CLIFF', stopped } : {}), moved, ms: Date.now() - t0 };
+  }
+
+  async raiseShield(on: boolean, signal: AbortSignal): Promise<ActionResult> {
+    const check = this.actionCheckpoint(signal);
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
+    const b = this.bot;
+    if (!on) { this.actionContext.run(check, () => b.deactivateItem()); return { ok: true }; }
+    const off = b.inventory.slots?.[45];
+    if (off?.name !== 'shield') return { ok: false, reason: 'NO_SHIELD' };
+    this.actionContext.run(check, () => b.activateItem(true));
+    return { ok: true };
+  }
+
+  async startDraw(item: string, signal: AbortSignal): Promise<ActionResult> {
+    const check = this.actionCheckpoint(signal);
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
+    const b = this.bot;
+    const it = this.invItem(item);
+    if (!it) return { ok: false, reason: 'NO_ITEM' };
+    if ((item === 'bow' || item === 'crossbow') && !b.inventory.items().some((i: any) => /arrow$|firework_rocket/.test(i.name))) return { ok: false, reason: 'NO_AMMO' };
+    if (b.heldItem?.name !== item) await this.afterAction(() => b.equip(it, 'hand'), check);
+    this.actionContext.run(check, () => b.activateItem());
+    this.drawStartedAt = Date.now();
+    return { ok: true };
+  }
+
+  async releaseDraw(signal: AbortSignal, aim?: Vec3Like): Promise<ActionResult & { chargedMs: number }> {
+    const check = this.actionCheckpoint(signal);
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', chargedMs: 0 };
+    const b = this.bot;
+    if (this.drawStartedAt === null) return { ok: false, reason: 'NOT_DRAWING', chargedMs: 0 };
+    if (aim) {
+      if (![aim.x, aim.y, aim.z].every(Number.isFinite)) return { ok: false, reason: 'BAD_AIM', chargedMs: 0 };
+      await this.afterAction(() => b.lookAt(this.vec(aim), true), check);
+      if (typeof b.waitForTicks === 'function') await this.afterAction(() => raceAbort(b.waitForTicks(1), signal, 2000, () => {}), check);
+    }
+    const chargedMs = Date.now() - this.drawStartedAt;
+    this.drawStartedAt = null;
+    this.actionContext.run(check, () => b.deactivateItem());
+    return { ok: true, chargedMs };
+  }
+
+  combatState() {
+    const b = this.bot;
+    if (!this.ready) return { usingItem: false, offHand: null, drawingSinceMs: null };
+    return { usingItem: !!b.usingHeldItem, offHand: b.inventory.slots?.[45]?.name ?? null, drawingSinceMs: this.drawStartedAt === null ? null : Date.now() - this.drawStartedAt };
   }
 
   async jump(ms: number, signal: AbortSignal) {

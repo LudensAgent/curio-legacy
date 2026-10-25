@@ -29,6 +29,8 @@ export class SkillCurator {
   /** 收获账本：每个技能对收获效率的实际影响 */
   ledger: (LedgerView & { skillEpisodes(): number }) | null = null;
   private evidenceSeen = 0;
+  /** 现在在哪个维度（main 接到身体状态） */
+  dim: () => string = () => '';
   /** 攒够这么多段“用过技能的经历”就值得再看一遍效果 */
   evidenceStep = 15;
 
@@ -45,7 +47,11 @@ export class SkillCurator {
   /** 收起长期用不上的自己写的技能（不需要模型） */
   retireUnused(now = Date.now()): string[] {
     const out: string[] = [];
+    let dim = '';
+    try { dim = this.dim(); } catch { /* 状态暂不可用 */ }
     for (const b of this.active()) {
+      // 只在别的维度生效的技能（比如下界专用的）：人不在那儿时用不上是正常的，不算“长期不用”
+      if (b.when?.dim && dim && !b.when.dim.includes(dim)) continue;
       const st = this.engine.statsOf(b.name);
       const written = this.book?.get(b.name)?.updatedAt ?? now;
       const last = Math.max(written, st?.lastAt ?? 0);

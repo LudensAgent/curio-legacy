@@ -166,7 +166,7 @@ test('一段活连续执行多轮；快干完时边做边想，干完立刻接�
   assert.ok(w.self.recentThoughts().some((x) => x.text === '先砍点树'));
 });
 
-test('绕路：先处理别的事，做完自动回到被打断的那段活', async (t) => {
+test('绕路：先处理别的事，做完回到被打断的那段活——回去之前先想一想还要不要接着做', async (t) => {
   const w = fixture(t);
   await w.tick();
   await w.reply(0, { monologue: '盖墙', decision: 'new', activity: { what: '砌墙', steps: [step(1), step(2)] } });
@@ -181,7 +181,32 @@ test('绕路：先处理别的事，做完自动回到被打断的那段活', as
   await w.finish();
   assert.equal(w.mind.activity?.id, wall.id, '吃完回到砌墙');
   await w.tick();
+  assert.notDeepEqual(w.arbiter.info()?.args, { n: 1 }, '还在想的那一念（绕路时琢磨的下一步）没回来之前也不动手');
+  await w.reply(2, { monologue: '嗯', decision: 'continue' });
+  await w.tick();
+  assert.notDeepEqual(w.arbiter.info()?.args, { n: 1 }, '不闷头接着做：先想一想');
+  const last = w.pending.length - 1;
+  assert.match(w.pending[last].messages[1].content, /弄点吃的」做完了[\s\S]*放下的「砌墙」[\s\S]*还要接着做吗/);
+  await w.reply(last, { monologue: '接着砌', decision: 'continue' });
+  await w.tick();
   assert.deepEqual(w.arbiter.info()?.args, { n: 1 }, '从被打断的那一步重新开始');
+});
+
+test('绕路回来时前提已经变了（等的东西到了、要的已经够了）：可以不再接着做', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { monologue: '等图纸时先攒木头', decision: 'new', activity: { what: '攒原木等图纸', steps: [step(1), step(2)] } });
+  w.mind.attention.notice('dusk', '天快黑了', 0.6);
+  await w.tick();
+  await w.reply(1, { monologue: '先回家', decision: 'detour', activity: { what: '回基地', steps: [step(9)] } });
+  await w.finish();
+  await w.tick();
+  assert.match(w.pending.at(-1)!.messages[1].content, /还要接着做吗/);
+  await w.reply(w.pending.length - 1, { monologue: '图纸到了木头也够了，开工盖房', decision: 'switch', activity: { what: '照图纸盖房', steps: [step(5)] } });
+  await w.tick();
+  assert.equal(w.mind.activity?.what, '照图纸盖房');
+  assert.deepEqual(w.arbiter.info()?.args, { n: 5 });
+  assert.equal(w.self.history(1)[0].what, '攒原木等图纸', '旧活被放下了');
 });
 
 test('卡住时认真想，并把实际结果和卡住时的备选交给模型；学到的窍门会记下来', async (t) => {
