@@ -7,6 +7,7 @@ import { normalizeSkillName, type KnowSkill, type SkillBook, type SkillMode } fr
 import { normalizeStep } from '../planner/plan.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 import type { Senses } from '../skills/types.ts';
+import { compileCheck, MAX_CODE } from '../codeskills/sandbox.ts';
 import { evalPredicate, isRecovery, senseNow, validatePredicate, type Predicate, type Sense } from './predicate.ts';
 
 /**
@@ -26,8 +27,18 @@ export interface BehaviorStep { skill: string; args?: unknown; if?: Predicate; o
 export interface Behavior {
   name: string; description: string; source: KnowSkill['source']; mode: SkillMode;
   when?: Predicate; steps: BehaviorStep[]; priority: number; cooldownMs: number; overrides: string[];
+  /** 代码技能：模型写的 JavaScript（在沙箱里跑，只能用 api.*），可以被后台自动改进出新版本 */
+  code?: string; version?: number;
 }
-export interface BehaviorStats { fired: number; ok: number; fail: number; lastAt: number; disabled?: boolean; lastError?: string }
+export interface RunRecord { at: number; ok: boolean; version?: number; summary: string; line?: number; trace?: string[]; logs?: string[]; args?: string }
+export interface BehaviorStats {
+  fired: number; ok: number; fail: number; lastAt: number; disabled?: boolean; lastError?: string;
+  /** 代码技能：每个版本各自的成败，和最近几次运行的记录（给改进用） */
+  byVersion?: Record<string, { ok: number; fail: number }>;
+  recent?: RunRecord[];
+}
+/** 代码技能某次失败后，看看要不要在后台改进（改进器自己限频） */
+export type ImproveHook = (name: string, why: 'failures' | 'requested', note?: string) => void;
 
 /** 天生的本能（代码里的身体反应）：lava/drowning 是底线不能换；其余可以被自己写的技能用 overrides 换掉 */
 export const INSTINCTS: Record<string, { text: string; locked?: boolean }> = {
@@ -54,10 +65,17 @@ export function validateBehavior(raw: unknown, adapter: GameAdapter): Validated 
   if (o.disable === true || o.disabled === true) return { name, description: '', body: '', behavior: {}, disable: true };
   const description = String(o.description ?? '').replace(/[\r\n]+/g, ' ').trim().slice(0, 200);
   if (description.length < 4) return { error: 'skill.description 写一句：什么时候、做什么' };
-  if (!Array.isArray(o.steps) || !o.steps.length) return { error: 'skill.steps 至少一步动作' };
-  if (o.steps.length > MAX_STEPS) return { error: `skill.steps 最多 ${MAX_STEPS} 步` };
+  const code = typeof o.code === 'string' ? o.code.replace(/\r\n/g, '\n') : undefined;
+  if (code !== undefined) {
+    if (Array.isArray(o.steps) && o.steps.length) return { error: 'skill 里 steps 和 code 只写一种' };
+    const bad = compileCheck(code);
+    if (bad) return { error: `skill.code：${bad}` };
+  } else {
+    if (!Array.isArray(o.steps) || !o.steps.length) return { error: 'skill.steps 至少一步动作（或者写 code：一段 JavaScript）' };
+    if (o.steps.length > MAX_STEPS) return { error: `skill.steps 最多 ${MAX_STEPS} 步` };
+  }
   const steps: Record<string, unknown>[] = [];
-  for (const [i, s0] of o.steps.entries()) {
+  for (const [i, s0] of (code !== undefined ? [] : o.steps as unknown[]).entries()) {
     const { if: _if, optional: _optional, ...plain } = (s0 && typeof s0 === 'object' ? s0 : {}) as Record<string, unknown>;
     const s = normalizeStep(plain) as Record<string, any>;
     const skill = String(s?.skill ?? '');
@@ -75,7 +93,7 @@ export function validateBehavior(raw: unknown, adapter: GameAdapter): Validated 
     if ((s0 as any)?.optional === true) step.optional = true;
     steps.push(step);
   }
-  const behavior: Record<string, unknown> = { steps };
+  const behavior: Record<string, unknown> = code !== undefined ? { code: code.slice(0, MAX_CODE) } : { steps };
   if (o.when !== undefined && o.when !== null) {
     const p = validatePredicate(o.when);
     if ('error' in p) return { error: `skill.when：${p.error}` };
@@ -108,8 +126,10 @@ function toBehavior(k: KnowSkill, adapter: GameAdapter): Behavior | null {
   const v = validateBehavior({ name: k.name, description: k.description || k.name, ...(k.behavior as object) }, adapter);
   if ('error' in v || v.disable) return null;
   const b = v.behavior as Record<string, any>;
+  const version = Number((k.behavior as any).version) || (b.code ? 1 : undefined);
   return { name: k.name, description: k.description, source: k.source, mode: b.when ? (isRecovery(b.when) ? 'recover' : 'auto') : 'manual',
-    ...(b.when ? { when: b.when } : {}), steps: b.steps, priority: b.priority, cooldownMs: b.cooldown_s * 1000, overrides: b.overrides ?? [] };
+    ...(b.when ? { when: b.when } : {}), steps: b.steps ?? [], priority: b.priority, cooldownMs: b.cooldown_s * 1000, overrides: b.overrides ?? [],
+    ...(b.code ? { code: b.code, version } : {}) };
 }
 
 export class BehaviorEngine {
@@ -118,6 +138,8 @@ export class BehaviorEngine {
   private lastFired = new Map<string, number>();
   private invalid = new Map<string, string>();
   private doneListener = (o: TaskOutcome) => this.onDone(o);
+  /** 代码技能失败或心智要求改进时调用（main 接到后台改进器） */
+  improve: ImproveHook | null = null;
 
   constructor(private book: SkillBook | null, private adapter: GameAdapter, private arbiter: Pick<Arbiter, 'start' | 'info' | 'on' | 'off'> | null,
     private bus: EventBus, private senses: Pick<Senses, 'perceivedEntities'>, private statsFile: string | null = null) {
@@ -205,7 +227,16 @@ export class BehaviorEngine {
    * 模型在思考里写下的技能：校验后写进技能书，立刻生效（技能书变更会触发 reload）。
    * {"name":…,"disable":true} 停用；同名再写一次就是修订并重新启用。
    */
-  write(raw: unknown): { ok: true; name: string; created: boolean; mode: SkillMode; disabled?: boolean } | { ok: false; error: string } {
+  write(raw: unknown): { ok: true; name: string; created: boolean; mode: SkillMode; disabled?: boolean; improving?: boolean } | { ok: false; error: string } {
+    const o = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
+    // {"name":…,"improve":"哪里不好"}：请后台改进这份代码技能（异步，改进器限频）
+    if (typeof o.improve === 'string' && !o.code && !o.steps) {
+      const name = normalizeSkillName(String(o.name ?? ''));
+      const b = this.behaviors.get(name);
+      if (!b?.code) return { ok: false, error: `${name || '这份技能'} 不是代码技能，改不了；可以同名重写` };
+      this.improve?.(name, 'requested', o.improve.slice(0, 200));
+      return { ok: true, name, created: false, mode: b.mode, improving: true };
+    }
     const v = validateBehavior(raw, this.adapter);
     if ('error' in v) return { ok: false, error: v.error };
     if (v.disable) {
@@ -225,6 +256,25 @@ export class BehaviorEngine {
     return { ok: true, name: b.name, created: w.created, mode: b.mode };
   }
 
+  /**
+   * 换上一份代码技能的新版本（后台改进的结果，或者退回旧版本）：先校验能编译，再写进技能书，立刻生效。
+   * 统计按版本分开记，用来判断新版本是不是真的更好。
+   */
+  replaceCode(name: string, code: string, note: string): { ok: true; version: number } | { ok: false; error: string } {
+    const b = this.behaviors.get(name);
+    const k = this.book?.get(name);
+    if (!b?.code || !k || !this.book) return { ok: false, error: `${name} 不是代码技能` };
+    const bad = compileCheck(code);
+    if (bad) return { ok: false, error: bad };
+    const raw = { ...(k.behavior as Record<string, unknown>), code, code_file: undefined, version: undefined };
+    const body = `${k.body.replace(/```behavior[\s\S]*?```/, '').trim()}`.replace(/\n*（最近一次改进：[^）]*）$/, '') + `\n\n（最近一次改进：${note.slice(0, 100)}）`;
+    const w = this.book.write(name, k.description, body, raw);
+    if (!w.ok) return w;
+    const nb = this.behaviors.get(name);
+    this.touch(name, (st) => { st.disabled = false; delete st.lastError; });
+    return { ok: true, version: nb?.version ?? 0 };
+  }
+
   private touch(name: string, fn: (st: BehaviorStats) => void) {
     const st = this.stats[name] ??= { fired: 0, ok: 0, fail: 0, lastAt: 0 };
     fn(st);
@@ -239,21 +289,41 @@ export class BehaviorEngine {
     const b = this.behaviors.get(name);
     if (!b) return;
     const okRun = o.result.status === 'succeeded';
+    const data = (o.result.data ?? {}) as Record<string, any>;
+    let rollback: { from: number; to: number } | null = null;
     this.touch(name, (st) => {
       if (okRun) st.ok++; else { st.fail++; st.lastError = o.result.summary.slice(0, 120); }
+      if (b.code) {
+        const v = String(b.version ?? 1);
+        const per = (st.byVersion ??= {})[v] ??= { ok: 0, fail: 0 };
+        if (okRun) per.ok++; else per.fail++;
+        st.recent = [...(st.recent ?? []), { at: Date.now(), ok: okRun, version: b.version, summary: o.result.summary.slice(0, 200),
+          ...(typeof data.line === 'number' ? { line: data.line } : {}), ...(Array.isArray(data.trace) ? { trace: data.trace.slice(-12) } : {}),
+          ...(Array.isArray(data.logs) ? { logs: data.logs.slice(-6) } : {}), ...(data.args ? { args: String(data.args).slice(0, 200) } : {}) }].slice(-6);
+        // 新版本跑了几次明显比上一版差：退回上一版（真人改坏了也会改回去）
+        const prev = st.byVersion[String((b.version ?? 1) - 1)];
+        const rate = (x: { ok: number; fail: number }) => x.ok / Math.max(1, x.ok + x.fail);
+        if (prev && prev.ok + prev.fail >= 2 && per.ok + per.fail >= 3 && rate(per) < rate(prev) - 0.25) rollback = { from: b.version ?? 1, to: (b.version ?? 1) - 1 };
+      }
       // 自己写的技能用了几次大多失败：先停用，让心智回头改（同名重写即可）
       if (b.source === 'self' && st.ok + st.fail >= 4 && st.ok / (st.ok + st.fail) < 0.25 && !st.disabled) {
         st.disabled = true;
         this.bus.publish('skill_disabled', 'P1', `技能「${name}」用了 ${st.ok + st.fail} 次只成了 ${st.ok} 次，先停用；最近一次：${st.lastError ?? ''}`, { name, by: 'stats' });
       }
     });
+    if (rollback) {
+      const { from, to } = rollback as { from: number; to: number };
+      const old = this.book?.codeVersion(name, to);
+      const r = old ? this.replaceCode(name, old, `v${from} 比 v${to} 差，退回 v${to} 的代码`) : null;
+      if (r?.ok) this.bus.publish('skill_rollback', 'P2', `代码技能「${name}」的 v${from} 不如 v${to}，退回旧代码（现在是 v${r.version}）`, { name, from, to });
+    } else if (b.code && !okRun) this.improve?.(name, 'failures');
   }
 
   /** 给模型看的一览（技能书索引之外，带成败和停用状态） */
   overview(): string[] {
     return [...this.list().map((b) => {
       const st = this.stats[b.name];
-      return `${b.name}［${b.mode === 'auto' ? '自动' : b.mode === 'recover' ? '失败时先试' : '调用'}${b.overrides.length ? `，代替本能 ${b.overrides.join('/')}` : ''}］${st && st.ok + st.fail ? ` 成${st.ok}/败${st.fail}` : ''}${st?.disabled ? ' 已停用' : ''}`;
+      return `${b.name}［${b.mode === 'auto' ? '自动' : b.mode === 'recover' ? '失败时先试' : '调用'}${b.code ? `，代码 v${b.version ?? 1}` : ''}${b.overrides.length ? `，代替本能 ${b.overrides.join('/')}` : ''}］${st && st.ok + st.fail ? ` 成${st.ok}/败${st.fail}` : ''}${st?.disabled ? ' 已停用' : ''}`;
     }), ...[...this.invalid].map(([n, why]) => `${n}：${why}`)];
   }
 }

@@ -79,6 +79,8 @@ export const config = {
     checkInSec: num('MIND_CHECK_IN_SEC', 100),
     /** 只瞥一眼多久之后要认真想想全局（秒） */
     deliberateEverySec: num('MIND_DELIBERATE_EVERY_SEC', 360),
+    /** 代码技能后台改进的最小间隔（分钟）：同一时间只改一份，每小时最多两次 */
+    skillImproveGapMin: num('SKILL_IMPROVE_GAP_MIN', 20),
   },
   learning: {
     /** Only explicitly designated isolated worlds may provide candidate promotion evidence. */

@@ -67,6 +67,8 @@ export class Attention {
         if (/^<([^>]+)>/.test(ev.msg) && !/\[想法\]/.test(ev.msg)) return this.notice(`chat:${ev.msg}`, `有人说：${ev.msg}`, 0.5, 5_000);
         return null;
       }
+      case 'skill_improved': return this.notice(`skill_improved:${String(d.name ?? '')}`, ev.msg, 0.35, 0);
+      case 'skill_rollback': return this.notice(`skill_rollback:${String(d.name ?? '')}`, ev.msg, 0.35, 0);
       case 'skill_disabled': return d.by === 'stats' ? this.notice(`skill_disabled:${String(d.name ?? '')}`, `${ev.msg}：回头改一改（同名重写 skill）`, 0.5, 600_000) : null;
       case 'lesson': return d.source === 'observed' ? this.notice(`lesson:${ev.msg.slice(0, 30)}`, ev.msg, 0.3, 300_000) : null;
       default: return null;

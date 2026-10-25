@@ -73,15 +73,29 @@ export class SkillBook {
           const parsed = parseSkillMarkdown(fs.readFileSync(file, 'utf8'));
           const name = (parsed.name ?? entry.name).trim();
           if (!NAME.test(name) || !parsed.body) continue;
-          // 内置的同名技能优先：自己写的不能悄悄覆盖人写的说明
-          if (source === 'self' && this.skills.get(name)?.source === 'builtin') continue;
-          const behavior = behaviorOf(parsed.body);
+          // 内置的同名技能优先：自己写的不能悄悄覆盖人写的说明；只有代码技能可以被改进出新版本
+          const builtin = this.skills.get(name);
+          if (source === 'self' && builtin?.source === 'builtin' && !hasCode(builtin.behavior)) continue;
+          let behavior = behaviorOf(parsed.body);
+          const codeFile = path.join(dir, entry.name, 'code.js');
+          if (fs.existsSync(codeFile)) behavior = { ...(behavior && typeof behavior === 'object' ? behavior : {}), code: fs.readFileSync(codeFile, 'utf8') };
           this.skills.set(name, { name, description: (parsed.description ?? '').slice(0, 200), body: parsed.body.slice(0, 12000), source, file, updatedAt: fs.statSync(file).mtimeMs,
             ...(behavior !== undefined ? { behavior, mode: modeOf(behavior) } : {}) });
         } catch { /* 读不了的技能跳过 */ }
       }
     }
     this.changed();
+  }
+
+  /** 代码技能某个旧版本的代码（退回用） */
+  codeVersion(name: string, version: number): string | null {
+    const k = this.skills.get(name);
+    if (!k) return null;
+    const file = path.join(path.dirname(k.file), 'versions', `v${version}.js`);
+    if (fs.existsSync(file)) return fs.readFileSync(file, 'utf8');
+    // 内置技能的第 1 版就是仓库里的 code.js
+    if (version === 1 && this.builtinDir) { const f = path.join(this.builtinDir, name, 'code.js'); if (fs.existsSync(f)) return fs.readFileSync(f, 'utf8'); }
+    return null;
   }
 
   list(): KnowSkill[] { return [...this.skills.values()].sort((a, b) => Number(a.source === 'self') - Number(b.source === 'self') || a.name.localeCompare(b.name)); }
@@ -96,22 +110,36 @@ export class SkillBook {
     if (!this.selfDir) return { ok: false, error: '没有地方保存自己写的技能' };
     const n = normalizeSkillName(name);
     if (!NAME.test(n)) return { ok: false, error: '技能名只能用小写英文、数字和连字符（2–41 个字符）' };
-    if (this.skills.get(n)?.source === 'builtin') return { ok: false, error: `${n} 是内置技能，不能改；换个名字写自己的版本` };
+    const prev = this.skills.get(n);
+    if (prev?.source === 'builtin' && !(hasCode(prev.behavior) && hasCode(behavior))) return { ok: false, error: `${n} 是内置技能，不能改；换个名字写自己的版本` };
     const desc = description.replace(/[\r\n]+/g, ' ').trim().slice(0, 200);
     let text = body.replace(/\r\n/g, '\n').replace(BEHAVIOR_BLOCK, '').trim().slice(0, 6000);
-    if (behavior !== undefined) text = `${text}${text ? '\n\n' : ''}\`\`\`behavior\n${JSON.stringify(behavior, null, 1)}\n\`\`\``;
+    // 代码单独存成 code.js（换下来的旧版本留在 versions/ 里，退回时用）
+    const code = hasCode(behavior) ? String((behavior as Record<string, unknown>).code) : null;
+    const version = code ? Number((prev?.behavior as any)?.version ?? (hasCode(prev?.behavior) ? 1 : 0)) + 1 : undefined;
+    const meta = code ? { ...(behavior as Record<string, unknown>), code: undefined, code_file: 'code.js', version } : behavior;
+    if (meta !== undefined) text = `${text}${text ? '\n\n' : ''}\`\`\`behavior\n${JSON.stringify(meta, null, 1)}\n\`\`\``;
     if (desc.length < 4 || text.length < 20) return { ok: false, error: '技能需要一句用途说明和至少几行做法' };
-    const created = !this.skills.has(n);
+    const created = !prev;
     const dir = path.join(this.selfDir, n);
     fs.mkdirSync(dir, { recursive: true });
     const file = path.join(dir, 'SKILL.md');
+    if (code) {
+      const codeFile = path.join(dir, 'code.js');
+      const old = fs.existsSync(codeFile) ? fs.readFileSync(codeFile, 'utf8') : hasCode(prev?.behavior) ? String((prev!.behavior as any).code) : null;
+      if (old !== null && version! > 1) { fs.mkdirSync(path.join(dir, 'versions'), { recursive: true }); fs.writeFileSync(path.join(dir, 'versions', `v${version! - 1}.js`), old); }
+      fs.writeFileSync(codeFile, code);
+    }
     fs.writeFileSync(file, `---\nname: ${n}\ndescription: ${desc}\n---\n\n${text}\n`);
+    const stored = code ? { ...(meta as Record<string, unknown>), code } : behavior;
     const skill: KnowSkill = { name: n, description: desc, body: text, source: 'self', file, updatedAt: Date.now(),
-      ...(behavior !== undefined ? { behavior, mode: modeOf(behavior) } : {}) };
+      ...(stored !== undefined ? { behavior: stored, mode: modeOf(stored) } : {}) };
     this.skills.set(n, skill);
     this.changed();
     return { ok: true, skill, created };
   }
 }
+
+export const hasCode = (behavior: unknown) => !!behavior && typeof behavior === 'object' && typeof (behavior as Record<string, unknown>).code === 'string';
 
 export const normalizeSkillName = (name: string) => name.trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');

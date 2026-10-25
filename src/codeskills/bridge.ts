@@ -1,0 +1,102 @@
+import type { Vec3Like } from '../adapter/types.ts';
+import { facingOfYaw, feetCell } from '../perception/local.ts';
+import { AIR_BLOCKS, isSoftBlock, LIQUID_BLOCKS } from '../perception/surroundings.ts';
+import { SKILLS } from '../skills/index.ts';
+import { LLM_HIDDEN } from '../skills/index.ts';
+import type { SkillCtx } from '../skills/types.ts';
+import { sleep, throwIfAborted } from '../util.ts';
+import type { SandboxHandler } from './sandbox.ts';
+
+/**
+ * 代码技能能用的 api：身体感觉得到的东西 + 已有的动作。看方块只看身边（48 格内），没有透视的怪物列表。
+ * 说明写在 skills/writing-skills/SKILL.md，模型写代码前会翻开。
+ */
+export const READ_RADIUS = 48;
+
+/** 给模型看的 api 说明（写代码技能、后台改进时都用这一份） */
+export const API_DOC = `代码是一个 async 函数体，参数 api 和 args 已经给好（args 是 use_skill 的 args；恢复时 args.failure = {skill,args,code,summary} 是刚失败的那一步）。所有 api 调用都要 await，返回普通 JSON。
+- api.state() → {pos, feet:{x,y,z}, hp, food, oxygen, onGround, inWater, inLava, isDay, dim, yaw, facing, held, inventory:[{name,count}]}
+- api.blockAt(x,y,z) → {name, kind}；kind = open（空气、草、雪层，能穿过）| solid | liquid | unknown；只看得到身边 48 格
+- api.region(x1,y1,z1,x2,y2,z2) → {min, size:[sx,sy,sz], palette:[名字], kinds:[同上], data:[下标]}；第 i 格：i = (y-min.y)*sx*sz + (z-min.z)*sx + (x-min.x)；最多 40000 格
+- api.entities(半径≤32) → 看见/听见的生物 [{id,name,kind,dist,pos,fusing?}]
+- api.stepTo(x,y,z) 迈到相邻一格（平走、上一级、下一级）｜api.digAt(x,y,z)｜api.placeAt(x,y,z,"方块名|any") → {ok,code,summary}
+- api.moveTo(x,y,z,range) 用寻路走过去 → {ok,error?,pos}｜api.act("动作名",{参数}) 用已有动作（goto、dig_at、defend…）→ {ok,code,summary}
+- api.look(yaw,pitch)｜api.sleep(毫秒≤5000)｜api.log(…) 记一句给自己看｜api.progress(0..1)
+规则：只能用 api 和普通 JavaScript（不能 require/import/eval）；循环要有出口（每次唤醒最多 1.5 秒同步计算，总共最多 4000 次 api 调用）；做成 return 一个结果，做不成 throw new Error("原因")。`;
+const MAX_REGION = 40_000;
+
+const int = (v: unknown, name: string) => { const n = Number(v); if (!Number.isFinite(n)) throw new Error(`${name} 要是数字`); return Math.floor(n); };
+export const kindOf = (name: string | null): 'open' | 'solid' | 'liquid' | 'unknown' =>
+  name === null ? 'unknown' : LIQUID_BLOCKS.has(name) ? 'liquid' : AIR_BLOCKS.has(name) || isSoftBlock(name) ? 'open' : 'solid';
+
+export function makeBridge(ctx: SkillCtx): SandboxHandler {
+  const near = (p: Vec3Like) => {
+    const s = ctx.adapter.state().pos;
+    if (Math.hypot(p.x - s.x, p.y - s.y, p.z - s.z) > READ_RADIUS) throw new Error(`只看得到身边 ${READ_RADIUS} 格内的方块`);
+  };
+  /** 绝对坐标 → 以脚为原点、面朝北的 [前,上,右]（给 step/dig_at/place_at 用） */
+  const rel = (x: number, y: number, z: number): [number, number, number] => { const f = feetCell(ctx.adapter.state().pos); return [f.z - z, y - f.y, x - f.x]; };
+  const runSkill = async (name: string, args: unknown) => {
+    const skill = SKILLS[name];
+    if (!skill || LLM_HIDDEN.has(name) || name === 'use_skill') throw new Error(`没有 "${name}" 这个动作（代码里不能再调用 use_skill）`);
+    const v = skill.validate(args ?? {}, ctx.adapter);
+    if (!v.ok) throw new Error(`${name} 参数错误：${v.error}`);
+    throwIfAborted(ctx.signal);
+    const r = await skill.run({ ...ctx, deadline: Math.min(ctx.deadline, Date.now() + skill.timeoutMs), progress: () => {} }, v.args);
+    if (r.status === 'cancelled') throw Object.assign(new Error('task cancelled'), { name: 'AbortedError' });
+    return { ok: r.status === 'succeeded', code: r.failureCode ?? null, summary: r.summary.slice(0, 200) };
+  };
+  return async (method, a) => {
+    throwIfAborted(ctx.signal);
+    switch (method) {
+      case 'state': {
+        const s = ctx.adapter.state();
+        const eye = ctx.adapter.eye();
+        return { pos: s.pos, feet: feetCell(s.pos), hp: Math.round(s.hp * 10) / 10, food: s.food, oxygen: s.oxygen, onGround: s.onGround !== false, inWater: s.inWater, inLava: s.inLava,
+          isDay: s.isDay, dim: s.dim, yaw: eye?.yaw ?? null, facing: eye ? facingOfYaw(eye.yaw) : null, held: s.held, inventory: s.inventory.map((i) => ({ name: i.name, count: i.count })) };
+      }
+      case 'blockAt': {
+        const p = { x: int(a[0], 'x'), y: int(a[1], 'y'), z: int(a[2], 'z') };
+        near(p);
+        const name = ctx.adapter.blockAt(p);
+        return { name, kind: kindOf(name) };
+      }
+      case 'region': {
+        const [x1, y1, z1, x2, y2, z2] = a.slice(0, 6).map((v, i) => int(v, 'xyzxyz'[i]));
+        const min = { x: Math.min(x1, x2), y: Math.min(y1, y2), z: Math.min(z1, z2) }, max = { x: Math.max(x1, x2), y: Math.max(y1, y2), z: Math.max(z1, z2) };
+        const size = [max.x - min.x + 1, max.y - min.y + 1, max.z - min.z + 1];
+        if (size[0] * size[1] * size[2] > MAX_REGION) throw new Error(`region 最多 ${MAX_REGION} 格（现在 ${size.join('×')}）`);
+        near(min); near(max);
+        const palette: string[] = [], kinds: string[] = [], index = new Map<string, number>(), data: number[] = [];
+        // 顺序：x 最快，然后 z，最后 y：i = (y-min.y)*sx*sz + (z-min.z)*sx + (x-min.x)
+        for (let y = min.y; y <= max.y; y++) for (let z = min.z; z <= max.z; z++) for (let x = min.x; x <= max.x; x++) {
+          const name = ctx.adapter.blockAt({ x, y, z }) ?? '?';
+          let i = index.get(name);
+          if (i === undefined) { i = palette.length; index.set(name, i); palette.push(name); kinds.push(kindOf(name === '?' ? null : name)); }
+          data.push(i);
+        }
+        return { min, size, palette, kinds, data };
+      }
+      case 'entities': {
+        const r = Math.max(1, Math.min(32, Number(a[0]) || 16));
+        return ctx.senses.perceivedEntities(r).map((e) => ({ id: e.id, name: e.name, kind: e.kind, dist: Math.round(e.dist * 10) / 10, pos: e.pos, ...(e.fusing ? { fusing: true } : {}) }));
+      }
+      case 'act': return runSkill(String(a[0] ?? ''), a[1]);
+      case 'stepTo': return runSkill('step', { to: rel(int(a[0], 'x'), int(a[1], 'y'), int(a[2], 'z')), facing: 'N' });
+      case 'digAt': return runSkill('dig_at', { at: rel(int(a[0], 'x'), int(a[1], 'y'), int(a[2], 'z')), facing: 'N' });
+      case 'placeAt': return runSkill('place_at', { at: rel(int(a[0], 'x'), int(a[1], 'y'), int(a[2], 'z')), item: String(a[3] ?? 'any'), facing: 'N' });
+      case 'moveTo': {
+        const p = { x: Number(a[0]), y: Number(a[1]), z: Number(a[2]) };
+        if (![p.x, p.y, p.z].every(Number.isFinite)) throw new Error('moveTo 要写 x,y,z');
+        const range = Math.max(0, Math.min(8, Number(a[3] ?? 1)));
+        try {
+          await ctx.adapter.moveTo({ kind: 'near', pos: p, range }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(30_000, ctx.deadline - Date.now())) });
+        } catch (e) { if ((e as Error)?.name === 'AbortedError') throw e; return { ok: false, error: String((e as Error)?.message ?? e).slice(0, 160), pos: ctx.adapter.state().pos }; }
+        return { ok: true, pos: ctx.adapter.state().pos };
+      }
+      case 'look': await ctx.adapter.look(Number(a[0]) || 0, Number(a[1]) || 0, ctx.signal); return { ok: true };
+      case 'sleep': await sleep(Math.max(0, Math.min(5000, Number(a[0]) || 0)), ctx.signal); return { ok: true };
+      default: throw new Error(`没有 api.${method}`);
+    }
+  };
+}

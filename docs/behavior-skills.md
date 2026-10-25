@@ -16,6 +16,16 @@
 - 代码里的反射保留为有名字的“本能”（`INSTINCTS`）：`lava`、`drowning` 是底线不能换；`creeper`、`losing-fight`、`low-hp-flee`、`fight-back`、`night-shelter`、`eat`、`torch` 可以被技能的 `overrides` 换掉。
 - 刚卡住、随后在同一带做成另一段活时，下一次思考会收到提醒：把这次管用的做法写成技能。
 
+### 代码技能
+
+`steps` 写不出的做法（寻路算法、按地形挑落脚点、绕着怪走……）由模型直接写成 JavaScript（`"code"`），存成 `data/skills/<name>/code.js`，写下就能被调用：
+
+- **运行**：`use_skill` 把代码放进独立的工作线程（`src/codeskills/sandbox-worker.mjs`），线程里再用无原型的 vm 上下文隔开，禁止 eval/new Function，和 vm 之间只传字符串。代码只能通过 `api.*` 碰游戏（`src/codeskills/bridge.ts`）：状态、身边 48 格内的方块/区域、看见听见的生物、迈一格/挖/放、寻路、调用已有动作。一段同步计算超过 1.5 秒（死循环）就终止线程；另有总时限和 4000 次 api 调用上限。（在主线程里用 vm 超时打断会弄坏 Node 的异步上下文，所以必须是独立线程。）
+- **出错信息**：失败时带回出错的行号、最后 30 次 api 调用和 `api.log` 的内容，记进技能的运行记录。
+- **自己变好**：代码技能当前版本失败 ≥2 次且失败过半时，`CodeImprover`（`src/codeskills/improver.ts`）在后台单独发一次 LLM 请求，拿着代码（带行号）和最近几次运行记录改代码，编译通过就换成新版本（v2、v3…，旧版存在 `versions/`）。新版本跑 3 次以上成功率比上一版低 25 个百分点会自动退回。心智也可以写 `{"name":…,"improve":"哪里不好"}` 主动要求。
+- **不会太频繁**：同一时间只改一份；两次改进至少隔 `SKILL_IMPROVE_GAP_MIN`（默认 20 分钟）；同一份技能 60 分钟内（主动要求时 30 分钟）只改一次；每小时最多 2 次。
+- 内置示范 `skills/local-path`：一段局部 A* 寻路代码，goto 报 PATH_NOT_FOUND/STUCK 时身体会先用它在身边 12 格里找路、一格格迈过去。
+
 完整写法见 `skills/writing-skills/SKILL.md`（模型可以 `{"kind":"skill","name":"writing-skills"}` 翻开）。
 
 ## 专注

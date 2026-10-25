@@ -446,7 +446,7 @@ export class Mind {
       const b = tried.size < 2 ? this.safe(() => this.d.behaviors!.recoveryFor({ skill: step.skill, code: result.failureCode }, tried), null) : null;
       if (b) {
         a.adaptations.push(`skill:${b.name}`);
-        a.steps.splice(Math.max(0, a.index - 1), 0, { skill: 'use_skill', args: { name: b.name }, optional: true });
+        a.steps.splice(Math.max(0, a.index - 1), 0, { skill: 'use_skill', args: { name: b.name, failure: { skill: step.skill, args: step.args ?? {}, code: result.failureCode ?? null, summary: result.summary.slice(0, 160) } }, optional: true });
         a.index = Math.max(0, a.index - 1);
         a.consecutiveFailures = 0;
         this.d.self.think(`${step.skill} 没成，照学会的「${b.name}」试试`, 'outcome');
@@ -729,6 +729,7 @@ export class Mind {
       const w = this.safe(() => this.d.behaviors!.write(raw), { ok: false as const, error: '写技能时出错' });
       if (!w.ok) { decision.notes.push(`skill 没存下：${w.error}`); this.d.bus.publish('skill_rejected', 'P3', `没有保存技能：${w.error}`); return; }
       if (w.disabled) { this.d.self.think(`停用了自己的技能 ${w.name}`, 'learned'); return; }
+      if (w.improving) { this.d.self.think(`请后台改进代码技能 ${w.name}（改好会告诉我）`, 'learned'); return; }
       const how = w.mode === 'auto' ? '条件成立时身体会自动做' : w.mode === 'recover' ? '动作失败时身体会先试它' : '可以在 routine 里 use_skill 调用';
       this.d.self.think(`${w.created ? '学会了' : '改进了'}技能 ${w.name}：${how}`, 'learned');
       this.d.bus.publish('skill_written', 'P2', `${w.created ? '写下新技能' : '修订技能'} ${w.name}（${how}）`, { name: w.name, mode: w.mode, live: true });

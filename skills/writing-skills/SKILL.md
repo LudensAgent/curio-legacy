@@ -1,6 +1,6 @@
 ---
 name: writing-skills
-description: 怎么把管用的做法写成技能：触发条件、步骤、恢复类/自动类/调用类的写法和例子
+description: 怎么把管用的做法写成技能：触发条件、动作步骤或 JavaScript 代码、恢复类/自动类/调用类的写法和例子
 ---
 
 # 写技能
@@ -17,6 +17,21 @@ description: 怎么把管用的做法写成技能：触发条件、步骤、恢�
 - **恢复类**（when 里有 `after_failure`）：手上某个动作失败时，身体先照这套做，再把失败的那一步重做一遍；还不行才叫你。每段活里同一份技能只试一次。
 - **自动类**（when 只有状态条件）：条件一成立身体就去做，像练出来的反射。条件要具体（血量、怪、身边的方块、背包），只写 night/dark 这种太宽的会被拒绝。
 - **调用类**（不写 when）：一套常用连招，只在 routine 里 `use_skill {"name":"…"}` 调用。
+
+## 代码技能（code）
+动作步骤写不出来的做法（寻路算法、绕着怪走、按地形挑落脚点……）直接写成 JavaScript：把 `steps` 换成 `"code":"函数体"`，when / priority / overrides 照旧。代码在沙箱里跑，存下就能用，每次运行的结果、出错的行、最后几次 api 调用都会记下来。
+
+```
+"skill":{"name":"walk-around-water","description":"goto 被水挡住时沿岸绕过去",
+ "when":{"after_failure":{"skill":"goto","code":"PATH_NOT_FOUND"}},
+ "code":"const me = await api.state(); const reg = await api.region(...); ... return {steps: n};"}
+```
+
+- 参数 `api` 和 `args` 已经给好；恢复时 `args.failure = {skill,args,code,summary}` 是刚失败的那一步（比如 `args.failure.args.target`）；`use_skill {"name":…,"args":{…}}` 调用时 args 就是那个对象。
+- `api.state()`、`api.blockAt(x,y,z)`、`api.region(x1,y1,z1,x2,y2,z2)`（返回 palette/kinds/data，第 i 格 i = (y-min.y)*sx*sz + (z-min.z)*sx + (x-min.x)，kind = open|solid|liquid|unknown）、`api.entities(r)`、`api.stepTo(x,y,z)`、`api.digAt(x,y,z)`、`api.placeAt(x,y,z,item)`、`api.moveTo(x,y,z,range)`、`api.act("动作",{参数})`、`api.look(yaw,pitch)`、`api.sleep(ms)`、`api.log(…)`、`api.progress(p)`；全部要 await。
+- 只看得到身边 48 格；region 最多 40000 格；不能 require/import/eval；每次唤醒最多 1.5 秒同步计算，总共最多 4000 次 api 调用；做不成就 `throw new Error("原因")`。
+- 示范：技能书里的 `local-path` 就是一段局部 A* 寻路代码，可以照着写。
+- **会自己变好**：代码技能老失败时，会在后台单独请一次模型拿着出错记录改代码，换上新版本（v2、v3…）；新版本更差会自动退回旧版。改进有间隔、不会频繁发生。你也可以写 `{"name":"…","improve":"哪里不好"}` 主动要求改进（同样排队、限频）。
 
 ## 条件写法（并列的键都要成立）
 - 自己：`hp_below` `food_below` `oxygen_below`（数字），`in_water` `in_lava` `on_ground` `night` `dark`（true/false）

@@ -112,7 +112,7 @@ const DECISIONS = `continue 照常做｜adjust 还是这件事、改一改 routi
 const FOCUS = `【专注】主目标配清单（plan），每段活推进第一项没勾掉的，做完勾掉。缺料是清单里的一步；天黑、饿了、有怪用 detour 插一段（做完自动回来），不换主目标。`;
 
 /** 技能：从经历里总结、写下就生效的做法（详细写法在 writing-skills 技能里，按需查） */
-const SKILLS_DOC = (instincts: string) => `【技能】管用的做法写进 skill，存下那一刻身体就会用：{"name":"英文-连字符","description":"…","when":{条件},"steps":[…]}。when 含 after_failure＝动作失败时先试；只有状态条件＝成立自动做；不写＝use_skill 调用。同样的麻烦第二次碰到或刚找到解法就写；写法先查 {"kind":"skill","name":"writing-skills"}。可 overrides 的本能：${instincts}。`;
+const SKILLS_DOC = (instincts: string) => `【技能】管用的做法写进 skill，存下就生效：{"name":"英文-连字符","description":"…","when":{条件},"steps":[…]或"code":"JS"}。when 含 after_failure＝动作失败时先试；只有状态条件＝成立自动做；不写＝use_skill 调用。同样的麻烦再碰到或刚找到解法就写；写法先查 {"kind":"skill","name":"writing-skills"}。可换的本能：${instincts}。`;
 
 const QUERIES = (skills: string[]) => `【先查再做】需要时先输出一个查询 JSON（不占游戏时间，每次思考最多 3 次），拿到结果再决定：
 - {"kind":"skill","name":"技能名"} 翻开技能书看做法｜{"kind":"design","brief":"用途、多大、风格","where":"here|base|x,y,z"} 请建筑师在后台画图纸（where 是盖在哪：脚下这一带、家旁边或某个坐标）

@@ -10,6 +10,7 @@ import { Thinker } from './mind/thinker.ts';
 import { BUILTIN_SKILLS_DIR, SkillBook } from './knowledge/skillbook.ts';
 import { BehaviorEngine } from './mind/behaviors.ts';
 import { setBehaviorRegistry } from './skills/use-skill.ts';
+import { CodeImprover } from './codeskills/improver.ts';
 import { draftsFor } from './building/drafts.ts';
 import { config } from './config.ts';
 import { EventBus } from './events.ts';
@@ -163,6 +164,9 @@ const skillBook = new SkillBook(BUILTIN_SKILLS_DIR, path.join(config.dataDir, 's
 /** 行为技能：带触发条件和步骤的技能，模型写下就生效（自动做、失败时先试、或 use_skill 调用） */
 const behaviors = new BehaviorEngine(skillBook, adapter, arbiter, bus, vision, path.join(config.dataDir, 'skill-stats.json'));
 setBehaviorRegistry(behaviors);
+/** 代码技能老失败（或心智要求）时，在后台单独请模型改进代码；限频，不会太频繁 */
+const improver = new CodeImprover(planner, behaviors, bus, { globalGapMs: config.mind.skillImproveGapMin * 60_000 });
+behaviors.improve = (name, why, note) => { const skipped = improver.consider(name, why, note); if (skipped && why === 'requested') bus.publish('skill_improve_skipped', 'P3', `先不改「${name}」：${skipped}`); };
 draftsFor(memory);
 /** 大脑：像真人一样一段一段地玩的心智层 */
 const selfModel = new SelfModel(path.join(config.dataDir, 'mind.json'), config.mind.traits);
