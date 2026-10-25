@@ -17,6 +17,10 @@ import { API_DOC } from './bridge.ts';
  * - pain：吃亏的程度——掉血、死亡、丢东西、卡住、失败累加成“痛”，随时间消退；
  *   明显高于它自己平时的水平（跟着它的平均和波动走）才算一次值得学的事；
  * - death：死了一定回头看。
+ * - recurring：同一个动作因为同一种失败码反复失败（半小时内三次以上），而且还没被技能管住。
+ *   吃亏程度是按“比平时痛”算的：一直在出的老毛病会被当成“平时”，永远不显得痛，所以单独看“同一种错一再出现”。
+ * - repeated：心智一步步指挥身体，把同一串动作重复了好几遍（比如“挖前上方、挖前上上方、迈上去”连做四回）：
+ *   这串动作值得练成一个技能，以后一句 use_skill 做完，或者写成循环到条件达成的代码。
  * - efficiency：收获账本发现拿某样东西这次比它自己平时明显费劲或明显省事（相对自己的历史离群，不是固定阈值）：
  *   费劲了就对比最省的那几次哪里不一样；省事了就把这次的做法记下来，下次照做。不针对哪种东西。
  *
@@ -24,9 +28,33 @@ import { API_DOC } from './bridge.ts';
  *
  * 不限次数（模型便宜）；只是同一时间只写一份，其余排队，挨得很近的同类事合并成一件。
  */
-export type ForgeKind = 'death' | 'pain' | 'noted' | 'review' | 'efficiency';
-const KIND_LABEL: Record<ForgeKind, string> = { death: '死亡', pain: '一段吃了大亏的经历', noted: '自己觉得值得学的事', review: '这段时间的回顾', efficiency: '一次收获效率明显变化' };
-const ORDER: ForgeKind[] = ['death', 'noted', 'pain', 'efficiency', 'review'];
+export type ForgeKind = 'death' | 'pain' | 'noted' | 'review' | 'efficiency' | 'recurring' | 'repeated';
+const KIND_LABEL: Record<ForgeKind, string> = { death: '死亡', pain: '一段吃了大亏的经历', noted: '自己觉得值得学的事', review: '这段时间的回顾', efficiency: '一次收获效率明显变化', recurring: '反复出现的同一种失败', repeated: '一再重复的同一串动作' };
+const ORDER: ForgeKind[] = ['death', 'noted', 'recurring', 'repeated', 'pain', 'efficiency', 'review'];
+/** 重复的动作串：最短几步、重复几遍算“一套做法”，在多长时间里看，学过之后多久再看同一串 */
+export const REPEATED = { minLen: 2, maxLen: 6, times: 3, windowMs: 10 * 60_000, againMs: 20 * 60_000 };
+/** 只是看一看、等一等的动作不算一套做法 */
+const IDLE = new Set(['glance', 'look_around', 'wait', 'inspect_block', 'use_skill']);
+
+/** 最近的动作是不是同一串连着做了 times 遍以上（中间夹着看一看、等一等不算打断），优先遍数多、再优先长的 */
+export function findRepeat(tokens: string[], opts = REPEATED): { pattern: string[]; times: number } | null {
+  const seq = tokens.filter((t) => !IDLE.has(t.split(' ')[0]));
+  let best: { pattern: string[]; times: number } | null = null;
+  for (let n = opts.minLen; n <= opts.maxLen; n++) {
+    if (seq.length < n * opts.times) break;
+    const pattern = seq.slice(-n);
+    if (new Set(pattern).size < 2) continue;
+    let times = 0;
+    for (let end = seq.length; end - n >= 0 && seq.slice(end - n, end).every((t, k) => t === pattern[k]); end -= n) times++;
+    if (times >= opts.times && (!best || times > best.times || (times === best.times && n > best.pattern.length))) best = { pattern, times };
+  }
+  return best;
+}
+/** 同一种失败：多少次算“老毛病”、在多长时间里数、学过一次之后多久再看 */
+export const RECURRING = { times: 3, windowMs: 30 * 60_000, againMs: 10 * 60_000 };
+/** 失败原因去掉坐标和数字，好把“同一种原因”归到一起 */
+export const reasonOf = (summary: string) => summary.split(/[；;]/).map((seg, i) => (i === 0 ? seg.split(/[：:]/).pop() ?? seg : seg))
+  .map((r) => r.replace(/\[[^\]]*\]/g, '[…]').replace(/\([^)]*\d[^)]*\)/g, '').replace(/-?\d+(\.\d+)?/g, '#').trim()).filter(Boolean).map((r) => r.slice(0, 60));
 
 interface Incident { kind: ForgeKind; at: number; headline: string; lines: string[]; context: Record<string, unknown>; note?: string; signal?: LedgerSignal }
 
@@ -91,6 +119,9 @@ export class SkillSmith {
   /** 收获账本（投入产出、东西出现在哪）：回顾和效率信号时给模型看 */
   ledger: LedgerView | null = null;
   private lastEfficiency = new Map<string, number>();
+  private recurring = new Map<string, { at: number[]; examples: string[]; reasons: Map<string, number>; learnedAt: number }>();
+  private actions: { at: number; token: string }[] = [];
+  private repeatedAt = new Map<string, number>();
 
   constructor(private planner: Pick<Planner, 'complete' | 'autonomous' | 'noteInvalid'>, private engine: BehaviorEngine, private book: SkillBook | null,
     private bus: EventBus, private state: () => AgentState, private journal: () => string[] = () => []) {}
@@ -138,6 +169,9 @@ export class SkillSmith {
       this.pain.add(3, `卡住：${ev.msg.replace(/^一段活「([^」]{0,20}).*$/, '$1')}`);
     } else if (ev.type === 'task_end' && d.status === 'failed' && d.source !== 'filler') {
       this.pain.add(1, `${d.skill ?? '动作'} 失败`);
+      if (d.skill && d.failureCode) this.failedAgain(String(d.skill), String(d.failureCode), ev.msg, ev.ts);
+    } else if (ev.type === 'task_start' && d.source === 'llm' && d.skill) {
+      this.didAction(String(d.skill), d.args, ev.ts);
     } else if (ev.type === 'reflect_start') {
       this.review('歇下来回想');
     }
@@ -153,6 +187,48 @@ export class SkillSmith {
     const ep = sig.episode;
     const headline = `拿 ${sig.item} ${sig.direction === 'slow' ? `比平时费劲 ${sig.ratio} 倍` : `只花了平时的 ${Math.round(sig.ratio * 100)}%`}：这次「${ep.what}」每个 ${Math.round(sig.thisSec)} 秒，平时 ${Math.round(sig.usualSec)} 秒`;
     this.report('efficiency', ep.at, headline, Math.max(60_000, ep.sec * 1000 + 10_000), undefined, undefined, sig);
+  }
+
+  /**
+   * 同一个动作、同一种失败码又来了：半小时内攒到几次（而且上次为它学过之后又过了一阵）就当成一件值得学的事，
+   * 把这些失败的原文和归好类的原因一起交给模型——它能看出是“踩不住”还是“碰头”，该垫脚还是该挖。
+   */
+  failedAgain(skill: string, code: string, msg: string, at = Date.now()) {
+    if (skill === 'use_skill' || /^(CANCELLED|ABORTED|BAD_ARGS)$/.test(code)) return; // 技能自己的失败由改进器管；写错参数不是身体的问题
+    const key = `${skill}:${code}`;
+    const r = this.recurring.get(key) ?? { at: [], examples: [], reasons: new Map<string, number>(), learnedAt: 0 };
+    this.recurring.set(key, r);
+    r.at = [...r.at.filter((t) => at - t < RECURRING.windowMs), at];
+    const text = msg.replace(/^\[[^\]]*\]\s*/, '').slice(0, 200);
+    r.examples = [...r.examples, text].slice(-10);
+    for (const why of reasonOf(text)) r.reasons.set(why, (r.reasons.get(why) ?? 0) + 1);
+    if (r.at.length < RECURRING.times || at - r.learnedAt < RECURRING.againMs) return;
+    const reasons = [...r.reasons].sort((x, y) => y[1] - x[1]).slice(0, 6).map(([w, n]) => `${w}（${n} 次）`);
+    const lines = [...r.examples.map((e) => `失败：${e}`), `归类的原因：${reasons.join('；')}`,
+      ...this.recent.filter((e) => e.ts >= at - 5 * 60_000).slice(-30).map((e) => `[${((e.ts - at) / 1000).toFixed(0)}s] ${e.type} ${e.msg.replace(/\s+/g, ' ').slice(0, 150)}`)];
+    const n = r.at.length;
+    r.learnedAt = at;
+    r.at = [];
+    r.examples = [];
+    r.reasons.clear();
+    this.report('recurring', at, `${skill} 半小时内第 ${n} 次因为 ${code} 失败；常见原因：${reasons.slice(0, 3).join('；')}`, 0, undefined, lines);
+  }
+
+  /** 心智指挥身体做了一个动作：记下来，看是不是在一遍遍重复同一串 */
+  didAction(skill: string, args: unknown, at = Date.now()) {
+    const a = args && typeof args === 'object' ? { ...(args as Record<string, unknown>) } : {};
+    delete a.facing; // 朝向变了做的还是同一件事（相对坐标本来就跟着朝向走）
+    const token = `${skill} ${JSON.stringify(a)}`.slice(0, 160);
+    this.actions = [...this.actions.filter((x) => at - x.at < REPEATED.windowMs), { at, token }].slice(-80);
+    const hit = findRepeat(this.actions.map((x) => x.token));
+    if (!hit) return;
+    const key = hit.pattern.join(' > ');
+    if (at - (this.repeatedAt.get(key) ?? 0) < REPEATED.againMs) return;
+    this.repeatedAt.set(key, at);
+    this.actions = [];
+    const lines = [`重复的一串：${hit.pattern.map((t, i) => `${i + 1}. ${t}`).join('  ')}（最近 ${Math.round(REPEATED.windowMs / 60000)} 分钟里 ${hit.times} 遍）`,
+      ...this.recent.filter((e) => e.ts >= at - 6 * 60_000).slice(-60).map((e) => `[${((e.ts - at) / 1000).toFixed(0)}s] ${e.type} ${e.msg.replace(/\s+/g, ' ').slice(0, 150)}`)];
+    this.report('repeated', at, `心智一步步指挥身体，把「${hit.pattern.map((t) => t.split(' ')[0]).join(' → ')}」这一串重复了 ${hit.times} 遍`, 0, undefined, lines);
   }
 
   /** 心智说“刚才这事值得学” */
@@ -206,6 +282,15 @@ export class SkillSmith {
       ? `下面是它最近一段时间做过的事，和它的收获账本（每样东西拿一个花多少时间、在变省还是变费劲、东西多出现在什么高度和群系、白忙的比例）。
 找两类问题：一是反复出现、费时间、常失败的；二是“能做成但费劲”的——花时间最多、在变费劲、或者比它自己最省的那几次慢很多的事，想想有没有更省的做法（换个地方、换个顺序、换个找法、一次多做些）。
 判断哪些可以靠一个技能解决（身体以后自己处理，或者让心智用 use_skill 调用的一套做法），写出来（最多 2 份）。`
+      : incident.kind === 'repeated'
+        ? `它的心智一步步指挥身体，把同一串动作重复了好几遍（下面是这串动作和前后经过）。看清楚这串动作在完成什么（比如一级级挖出台阶往上走、一格格垫脚过沟、来回搬东西），
+把它练成一个技能：多半写成调用类（不写 when，心智以后用 use_skill 一句话做完，变化的部分写成 args），需要“一直做到某个条件达成”就写代码技能循环；
+如果这串动作总是在应对同一种情况（某个动作失败后、某种处境），也可以写成恢复类或自动类。existing_skills 里已经有做这件事的，就用同名改进它，别重复造。
+纯属这一次的偶然（比如正好要连砍几棵树）就输出 {"none":true,"why":"…"}。`
+      : incident.kind === 'recurring'
+        ? `同一个动作一再因为同一种原因失败（下面是这些失败的原文、归好类的原因，和最后一次前后的经过）。
+别只看最后一次的位置：找出根本原因（比如目标格脚下踩不住、头顶碰头、路被挡、缺材料），想清楚每种原因真人会怎么处理（垫一块落脚、先挖开头顶、搭一级台阶、绕一下……）。
+写一个恢复类技能：when 写 after_failure 这个动作和失败码（需要区分原因就加 cell 条件，或者写成代码技能按原因分别处理），失败时先把原因处理掉，身体再重做那一步。existing_skills 里已经有管这件事、却老不成或被停用的，用同一个名字重写。`
       : sig?.direction === 'slow'
         ? `收获账本发现：它刚才拿 ${sig.item} 比自己平时明显费劲。下面有这次的经过，和账本里拿这样东西最省的几次是怎么做的、它通常出现在哪。
 对比这次和省的那几次哪里不一样（地方、顺序、找法、走了多少冤枉路、失败了几次），如果有一个技能能让它以后稳定地按省的方式做，写出来；已有技能管这件事却让它变慢了，就用同名改写。`

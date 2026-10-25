@@ -42,6 +42,8 @@ export interface BehaviorStats {
   retired?: string;
   /** 在各个维度里的成败：到了新环境，看得出哪些技能在这里还没验证过 */
   byDim?: Record<string, { ok: number; fail: number }>;
+  /** 和别的技能来回拉锯过（A 做完 B 又把它推回去）：给整理用 */
+  loops?: { with: string; at: number; times: number }[];
   /** 和别的自动技能同时满足条件的次数（给整理用） */
   conflicts?: Record<string, number>;
 }
@@ -153,6 +155,13 @@ export class BehaviorEngine {
   private stats: Record<string, BehaviorStats> = {};
   /** 最近用过哪些技能（名字@版本、什么时候）：收获账本拿它算“用了这个技能拿东西是快了还是慢了” */
   private usage: { at: number; tag: string }[] = [];
+  /** 最近身体自己接手（自动/恢复）的记录：认出来回拉锯 */
+  private fires: { at: number; name: string; doing: string | null }[] = [];
+  /** 拉锯时先让一边歇一会儿（不是停用：过了这段时间照常） */
+  private holds = new Map<string, { until: number; why: string }>();
+  private loopSaid = new Map<string, number>();
+  static readonly LOOP_WINDOW_MS = 5 * 60_000;
+  static readonly HOLD_MS = 90_000;
   private lastFired = new Map<string, number>();
   private invalid = new Map<string, string>();
   private doneListener = (o: TaskOutcome) => this.onDone(o);
@@ -218,6 +227,7 @@ export class BehaviorEngine {
     const matches: Behavior[] = [];
     for (const b of auto) {
       if (b.priority <= floor || running?.name === b.name) continue;
+      if ((this.holds.get(b.name)?.until ?? 0) > now) continue;
       if (now - (this.lastFired.get(b.name) ?? 0) < b.cooldownMs) continue;
       s ??= this.sense(cur);
       if (evalPredicate(b.when!, s)) matches.push(b);
@@ -238,10 +248,55 @@ export class BehaviorEngine {
       this.lastFired.set(b.name, now);
       this.touch(b.name, (st) => { st.fired++; st.lastAt = now; });
       this.bus.publish('instinct', 'P2', `技能「${b.name}」的条件成立，身体照着做：${b.description}`, { name: b.name, source: b.source });
+      this.noteFire(b.name, s.doing, now);
       return true;
     }
     return false;
   }
+
+  /**
+   * 认出来回拉锯：身体自己接手的事一再把彼此（或把手上的活）推回去。
+   * - 两个技能交替接手（A、B、A、B）：一个做完另一个就把它撤销——先让不那么管用的那个歇一会儿，打破循环；
+   * - 同一个技能几分钟里一再打断同一件事：技能和手上的活在拉锯（比如躲进洞里、心智又要上地表、一出来又躲回去）。
+   * 两种都告诉心智（换个做法，或等情况过去）和整理技能的（收窄条件、调优先级、合并）。打法和取舍不写死。
+   */
+  private noteFire(name: string, doing: string | null, now = Date.now()) {
+    this.fires = [...this.fires.filter((f) => now - f.at < BehaviorEngine.LOOP_WINDOW_MS), { at: now, name, doing }].slice(-40);
+    const last = this.fires.slice(-4).map((f) => f.name);
+    let loop: { kind: 'pingpong' | 'tug'; a: string; b: string; times: number } | null = null;
+    if (last.length === 4 && last[0] === last[2] && last[1] === last[3] && last[0] !== last[1]) {
+      loop = { kind: 'pingpong', a: last[3], b: last[2], times: this.fires.filter((f) => f.name === last[2] || f.name === last[3]).length };
+    } else {
+      // 这个技能最近连着几次接手时，手上都是同一件事
+      const same = this.fires.filter((f) => f.name === name);
+      let run = 0;
+      for (let i = same.length - 1; i >= 0 && same[i].doing === doing; i--) run++;
+      if (run >= 3 && doing && doing !== 'use_skill') loop = { kind: 'tug', a: name, b: doing, times: run };
+    }
+    if (!loop) return;
+    const key = [loop.a, loop.b].sort().join('|');
+    if (now - (this.loopSaid.get(key) ?? 0) < BehaviorEngine.LOOP_WINDOW_MS) return;
+    this.loopSaid.set(key, now);
+    const record = (x: string, other: string) => this.touch(x, (st) => {
+      st.loops = [...(st.loops ?? []).filter((l) => l.with !== other), { with: other, at: now, times: loop!.times }].slice(-6);
+      st.conflicts ??= {}; st.conflicts[other] = (st.conflicts[other] ?? 0) + 3; // 让整理技能的尽快来看
+    });
+    if (loop.kind === 'pingpong') {
+      const A = this.behaviors.get(loop.a), B = this.behaviors.get(loop.b);
+      const loser = A && B ? (this.choiceScore(A) >= this.choiceScore(B) ? B : A) : (A ?? B);
+      record(loop.a, loop.b); record(loop.b, loop.a);
+      if (loser) this.holds.set(loser.name, { until: now + BehaviorEngine.HOLD_MS, why: `和「${loser.name === loop.a ? loop.b : loop.a}」来回拉锯` });
+      this.bus.publish('skill_loop', 'P1', `技能「${loop.a}」和「${loop.b}」在来回拉锯：一个做完另一个又把它推回去（几分钟里 ${loop.times} 回）${loser ? `；先让「${loser.name}」歇 ${BehaviorEngine.HOLD_MS / 1000} 秒` : ''}`,
+        { kind: loop.kind, a: loop.a, b: loop.b, times: loop.times, held: loser?.name ?? null });
+    } else {
+      record(loop.a, `doing:${loop.b}`);
+      this.bus.publish('skill_loop', 'P1', `技能「${loop.a}」几分钟里第 ${loop.times} 次打断手上的「${loop.b}」：技能和手上的事在拉锯——要么换个做法完成这件事，要么等情况过去再做，要么改这个技能的条件`,
+        { kind: loop.kind, a: loop.a, b: loop.b, times: loop.times, held: null });
+    }
+  }
+
+  /** 拉锯时被叫停的技能（给控制台和测试看） */
+  heldNow(now = Date.now()): string[] { return [...this.holds].filter(([, h]) => h.until > now).map(([n]) => n); }
 
   /** 同时满足条件时的选择分：优先级 + 实际成功率（没用过的按五五开） */
   choiceScore(b: Behavior): number {
@@ -284,8 +339,9 @@ export class BehaviorEngine {
     const rec = this.list().filter((b) => b.mode === 'recover' && this.enabled(b) && !tried.has(b.name) && now - (this.lastFired.get(b.name) ?? 0) >= Math.min(b.cooldownMs, 5000));
     if (!rec.length) return null;
     const s = this.sense(this.arbiter?.info() ?? null, failure);
-    const hit = rec.find((b) => evalPredicate(b.when!, s));
+    const hit = rec.find((b) => (this.holds.get(b.name)?.until ?? 0) <= now && evalPredicate(b.when!, s));
     if (!hit) return null;
+    this.noteFire(hit.name, failure.skill, now);
     this.lastFired.set(hit.name, now);
     this.touch(hit.name, (st) => { st.fired++; st.lastAt = now; });
     this.bus.publish('instinct', 'P2', `${failure.skill} 没成（${failure.code ?? '失败'}），身体先照技能「${hit.name}」试试：${hit.description}`, { name: hit.name, recover: true });

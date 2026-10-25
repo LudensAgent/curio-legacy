@@ -129,7 +129,7 @@ export const stepTo: Skill<CellArgs> = {
         if (standable(f)) { dest = { ...target, y: target.y - k }; drop = k; break; }
       }
     }
-    if (dest === target && !standable(floor)) problems.push(`目标格脚下是 ${describeCell(a, floor)}，往下 3 格内也没有落脚处（踩不住）`);
+    if (dest === target && !standable(floor)) problems.push(`目标格脚下是 ${describeCell(a, floor)}，往下 3 格内也没有落脚处（踩不住；要过去可以先 place_at [${args.at[0]},${args.at[1] - 1},${args.at[2]}] 垫一块落脚）`);
     if (args.at[1] === 1 && !free({ ...feet, y: feet.y + 2 })) problems.push(`往上跳时自己头顶上方是 ${describeCell(a, { ...feet, y: feet.y + 2 })}`);
     if (problems.length) return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：${problems.join('；')}`, { problems, ...after(ctx, args.facing) });
     try {
@@ -176,14 +176,25 @@ export const placeAt: Skill<CellArgs & { item: string }> = {
       const above = { ...feet, y: feet.y + 2 };
       const n = a.blockAt(above);
       if (n !== null && !AIR.has(n) && !isSoftBlock(n)) return fail('PATH_NOT_FOUND', `头顶上方是 ${n}，跳不起来；先 dig_at [0,2,0]`, after(ctx, args.facing));
-      try {
-        await a.moveTo({ kind: 'xyz', x: feet.x, y: feet.y + 1, z: feet.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(8000, ctx.deadline - Date.now())), allowTerrainChanges: true });
-      } catch (e) {
-        if (isAbort(e)) throw e;
-        return fail(codeFromError(e), `原地垫高没成：${(e as Error).message}`, after(ctx, args.facing));
+      if (a.pillarUp) {
+        const r = await a.pillarUp(names, ctx.signal);
+        if (!r.ok) {
+          const why = r.reason === 'NO_REFERENCE' ? '脚下是空的（悬着、在水里或梯子上），没有能贴着放的面'
+            : r.reason === 'OCCUPIED' ? '脚下这格已经有东西' : r.reason === 'NO_ITEM' ? '背包里没有能垫的方块' : `方块没放上（${r.reason}）`;
+          return fail(r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS' : r.reason === 'NO_REFERENCE' ? 'PATH_NOT_FOUND' : 'EFFECT_NOT_CONFIRMED', `原地垫高没成：${why}`, after(ctx, args.facing));
+        }
+      } else {
+        try {
+          await a.moveTo({ kind: 'xyz', x: feet.x, y: feet.y + 1, z: feet.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(8000, ctx.deadline - Date.now())), allowTerrainChanges: true });
+        } catch (e) {
+          if (isAbort(e)) throw e;
+          return fail(codeFromError(e), `原地垫高没成：${(e as Error).message}`, after(ctx, args.facing));
+        }
       }
       const end = feetCell(a.state().pos);
-      if (end.y <= feet.y) return fail('EFFECT_NOT_CONFIRMED', '没有站高一格', after(ctx, args.facing));
+      // 落稳以后再看：脚下那格真的有方块、人真的高了一格（跳在半空不算）
+      const under = a.blockAt(feet);
+      if (end.y <= feet.y || !under || AIR.has(under) || isSoftBlock(under)) return fail('EFFECT_NOT_CONFIRMED', '没有站高一格：方块没留在脚下', after(ctx, args.facing));
       return ok(`原地垫了一块，站高了一格（现在 y=${end.y}）`, after(ctx, args.facing));
     }
     const pos = toWorld(feet, args.facing, args.at);

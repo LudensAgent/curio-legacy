@@ -383,6 +383,20 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
     this.yaw = yaw;
     this.pitch = pitch;
   }
+  /** 原地垫高：脚下实心才垫得上；放下方块、人升一格 */
+  async pillarUp(itemNames: string[], signal: AbortSignal) {
+    throwIfAborted(signal);
+    const f = { x: Math.floor(this.pos.x), y: Math.floor(this.pos.y), z: Math.floor(this.pos.z) };
+    const below = this.nameAt(f.x, f.y - 1, f.z);
+    if (/^(air|water|lava)$/.test(below)) return { ok: false, reason: 'NO_REFERENCE' };
+    const item = itemNames.find((n) => (this.inv.get(n) ?? 0) > 0);
+    if (!item) return { ok: false, reason: 'NO_ITEM' };
+    this.inv.set(item, this.inv.get(item)! - 1);
+    this.removed.delete(`${f.x},${f.y},${f.z}`);
+    this.blocks.push({ name: item, pos: f });
+    this.pos = { ...this.pos, y: f.y + 1 };
+    return { ok: true, y: f.y + 1 };
+  }
   /** 按住移动键：朝 yaw 的前后左右走（测试里按时间直接算位移，走一步检查一次脚下） */
   shieldUp = false;
   drawingSince: number | null = null;

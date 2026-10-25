@@ -193,6 +193,11 @@ const ledger = new Ledger(path.join(config.dataDir, 'ledger.json'), bus, () => a
   () => ({ blocks: [...vision.visibleNow.values()].filter((b) => NOTABLE.has(b.name)), entities: vision.perceivedEntities(24) }),
   (from, to) => behaviors.usedBetween(from, to));
 ledger.onSignal = (sig) => smith.efficiency(sig);
+// 自己写的技能被停用（用了好几次大多没成）：这本身就是一次值得学的事——是做法不对，还是该换个思路
+bus.on('event', (ev: { type: string; msg: string; data?: Record<string, unknown> }) => {
+  if (ev.type === 'skill_loop') setTimeout(() => void curator.check(), 1000).unref?.(); // 拉锯要尽快理清，不等十分钟一次的例行整理
+  if (ev.type === 'skill_disabled' && ev.data?.by === 'stats') smith.noted(`${ev.msg}。看看是这套做法本身不对、依赖的动作不可靠，还是该换一种思路（必要时用同名重写）`);
+});
 smith.ledger = ledger;
 improver.ledger = ledger;
 ledger.start();

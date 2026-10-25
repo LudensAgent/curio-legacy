@@ -68,6 +68,7 @@ export class Attention {
         if (/^<([^>]+)>/.test(ev.msg) && !/\[想法\]/.test(ev.msg)) return this.notice(`chat:${ev.msg}`, `有人说：${ev.msg}`, 0.5, 5_000);
         return null;
       }
+      case 'skill_loop': return this.notice(`skill_loop:${String(d.a ?? '')}:${String(d.b ?? '')}`, ev.msg, 0.65, 300_000);
       case 'reflex_gaveup': return this.notice('reflex_gaveup', ev.msg, 0.8, 20_000);
       case 'skill_forged': return this.notice(`skill_forged:${String(d.name ?? '')}`, `${ev.msg}（身体以后会自己这么做）`, 0.4, 0);
       case 'skill_merged': return this.notice(`skill_merged:${String(d.into ?? '')}`, ev.msg, 0.3, 0);

@@ -1787,6 +1787,47 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
 
   private drawStartedAt: number | null = null;
 
+  async pillarUp(itemNames: string[], signal: AbortSignal): Promise<ActionResult & { y?: number }> {
+    const check = this.actionCheckpoint(signal);
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
+    const b = this.bot, epoch = this.actionEpoch;
+    const Vec3 = require('vec3').Vec3;
+    const feet = b.entity.position.floored();
+    const below = b.blockAt(feet.offset(0, -1, 0));
+    if (!below || below.boundingBox !== 'block') return { ok: false, reason: 'NO_REFERENCE' };
+    const here = b.blockAt(feet);
+    if (here && here.boundingBox === 'block') return { ok: false, reason: 'OCCUPIED' };
+    const item = b.inventory.items().find((i: any) => itemNames.includes(i.name));
+    if (!item) return { ok: false, reason: 'NO_ITEM' };
+    await this.afterAction(() => b.equip(item, 'hand'), check);
+    b.clearControlStates();
+    await this.afterAction(() => b.look(b.entity.yaw, -Math.PI / 2, true), check);
+    // 站稳了再跳
+    for (let i = 0; i < 20 && !b.entity.onGround; i++) await this.afterAction(() => sleep(25, signal), check);
+    let placed = false, lastError = '';
+    for (let attempt = 0; attempt < 2 && !placed; attempt++) {
+      b.setControlState('jump', true);
+      try {
+        const t0 = Date.now();
+        // 等脚底离开那一格（身体的底面高过方块顶面）才放，否则方块会和自己重叠，服务器不认
+        while (b.entity.position.y < feet.y + 1.02 && Date.now() - t0 < 700) await this.afterAction(() => sleep(15, signal), check);
+        if (b.entity.position.y >= feet.y + 1.02) {
+          try { await this.afterAction(() => raceAbort(b.placeBlock(below, new Vec3(0, 1, 0)), signal, 2500, () => {}), check); placed = true; }
+          catch (e: any) { if (e?.name === 'AbortedError') throw e; lastError = String(e?.message ?? e).slice(0, 80); }
+        } else lastError = '跳不起来';
+      } finally {
+        if (epoch === this.actionEpoch && b === this.bot) b.setControlState('jump', false);
+      }
+      // 落地
+      const t1 = Date.now();
+      while (!b.entity.onGround && Date.now() - t1 < 1500) await this.afterAction(() => sleep(25, signal), check);
+      const block = b.blockAt(feet);
+      placed = !!block && block.boundingBox === 'block' && b.entity.position.y >= feet.y + 0.9;
+    }
+    if (!placed) return { ok: false, reason: lastError ? `NOT_PLACED:${lastError}` : 'NOT_PLACED', y: Math.floor(b.entity.position.y) };
+    return { ok: true, y: Math.floor(b.entity.position.y) };
+  }
+
   async drive(keys: DriveKeys, ms: number, signal: AbortSignal, opts: DriveOptions = {}): Promise<DriveResult> {
     const check = this.actionCheckpoint(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', moved: 0, ms: 0 };

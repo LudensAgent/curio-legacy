@@ -74,7 +74,7 @@ export class SkillCurator {
     const evidence = this.safe(() => this.ledger?.skillEpisodes() ?? 0, 0);
     const newEvidence = evidence - this.evidenceSeen >= this.evidenceStep;
     // 只有效果证据的话，技能少也值得看（一两个技能也可能在拖后腿）
-    const enough = skills.length >= this.opts.minSkills || (newEvidence && skills.length > 0);
+    const enough = skills.length >= this.opts.minSkills || ((newEvidence || conflicted) && skills.length > 0);
     if (!this.planner.autonomous || !enough || now - this.lastRun < this.opts.gapMs || (signature === this.lastSignature && !conflicted && !newEvidence)) {
       return retired.length ? `收起 ${retired.join('、')}` : null;
     }
@@ -106,10 +106,13 @@ export class SkillCurator {
         uses: st ? { ok: st.ok, fail: st.fail, fired: st.fired } : { ok: 0, fail: 0, fired: 0 },
         ...(st?.byVersion && Object.keys(st.byVersion).length > 1 ? { versions: st.byVersion } : {}),
         ...(this.effect(b.name) ? { harvest_effect: this.effect(b.name) } : {}),
-        ...(st?.conflicts && Object.keys(st.conflicts).length ? { clashed_with: st.conflicts } : {}), ...(b.code ? { code: b.code.slice(0, 2500) } : { steps: b.steps }) };
+        ...(st?.conflicts && Object.keys(st.conflicts).length ? { clashed_with: st.conflicts } : {}),
+        ...(st?.loops?.length ? { see_sawed_with: st.loops.map((l) => `${l.with.startsWith('doing:') ? `手上的「${l.with.slice(6)}」` : `「${l.with}」`}（${l.times} 回）`) } : {}), ...(b.code ? { code: b.code.slice(0, 2500) } : { steps: b.steps }) };
     });
     const system = `你在整理 Minecraft 机器人 Curio 自己写的技能（会动手的技能：条件成立时自动做、动作失败时先试、或被调用）。像人整理笔记一样：
 - 说的是同一件事、触发条件大面积重叠的：合并成一份更好的（merge：from 写被合并的名字，skill 写合并后的完整技能，可以沿用其中一个名字）。合并时保留各自真正管用的部分（看 uses 的成败）。
+- 来回拉锯的（see_sawed_with：一个做完另一个又把它推回去，或者技能一再打断手上同一件事）：这最要紧——找出两边条件为什么会轮流成立，
+  收窄条件让它们不再互相触发（比如躲怪的技能加上“怪还在附近”、回地表的技能加上“附近没有怪”），或者合并成一份统一处理；
 - 常常同时满足条件抢着接手的（clashed_with）：调整优先级（priority：更管用、更要紧的高），或者收窄某个的触发条件（用 merge 重写它）。
 - 明显没用、被别的技能完全覆盖的：收起（retire）。
 - 看 harvest_effect（用它时拿东西每个花多少秒、和不用它比、各版本比）：

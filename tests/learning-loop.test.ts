@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import { SkillSmith } from '../src/codeskills/smith.ts';
 import { EventBus } from '../src/events.ts';
 import { BUILTIN_SKILLS_DIR, SkillBook } from '../src/knowledge/skillbook.ts';
+import { WorldMemory } from '../src/memory/store.ts';
 import { BehaviorEngine } from '../src/mind/behaviors.ts';
 import { Scorecard } from '../src/observer/scorecard.ts';
 import { FakeAdapter } from './fake-adapter.ts';
@@ -167,4 +168,89 @@ test('专注：点子和疑问不能当主目标；抄回来的清单格式会�
   assert.equal(self.setPlan(plan.agendaId, ['砍木头', '做木板'])!.progressAt, at, '原样重写不算推进');
   self.checkPlan([0]);
   assert.ok(self.plan()!.progressAt! > at!);
+});
+
+test('老毛病：同一个动作因为同一种原因一再失败（吃亏程度看不出来，因为天天如此），攒到几次就拿着归好类的原因去学', async (t) => {
+  const { reasonOf, RECURRING } = await import('../src/codeskills/smith.ts');
+  assert.deepEqual(reasonOf('[llm] step → failed(PATH_NOT_FOUND)：迈不到 [1,1,0]：目标格是 stone；目标格上方是 dirt（会碰头）'), ['目标格是 stone', '目标格上方是 dirt（会碰头）']);
+  const adapter = new FakeAdapter(), bus = new EventBus();
+  const book = new SkillBook(BUILTIN_SKILLS_DIR, tmp());
+  const engine = new BehaviorEngine(book, adapter, null, bus, noSenses);
+  const asked: string[] = [];
+  const planner = { autonomous: true, noteInvalid() {}, complete: async (m: any[]) => { asked.push(m[0].content + '\n' + m[1].content); return { text: JSON.stringify({ skill: { name: 'pad-then-step', description: '迈不过去因为脚下踩不住时先垫一块', when: { after_failure: { skill: 'step', code: 'PATH_NOT_FOUND' } }, steps: [{ skill: 'place_at', args: { at: [1, 0, 0] } }] } }), latencyMs: 5 }; } };
+  const smith = new SkillSmith(planner as any, engine, book, bus, () => adapter.state());
+  smith.start(1_000_000);
+  t.after(() => smith.stop());
+  const fail = (why: string) => bus.publish('task_end', 'P1', `[llm] step → failed(PATH_NOT_FOUND)：迈不到 [1,1,0]：${why}`, { status: 'failed', skill: 'step', failureCode: 'PATH_NOT_FOUND', source: 'llm' });
+  fail('目标格脚下是 空气，往下 3 格内也没有落脚处（踩不住）');
+  bus.publish('task_end', 'P1', '[llm] craft → failed(MISSING_MATERIALS)：缺木板', { status: 'failed', skill: 'craft', failureCode: 'MISSING_MATERIALS', source: 'llm' });
+  fail('目标格脚下是 空气，往下 3 格内也没有落脚处（踩不住）');
+  await flush();
+  assert.equal(asked.length, 0, `${RECURRING.times} 次以前不算老毛病；别的动作的失败不掺进来`);
+  fail('目标格上方是 stone（会碰头）');
+  await flush();
+  assert.equal(asked.length, 1);
+  assert.match(asked[0], /一再因为同一种原因失败/);
+  assert.match(asked[0], /踩不住.*（2 次）/, '原因归好类、带次数');
+  assert.match(asked[0], /会碰头/);
+  assert.equal(engine.get('pad-then-step')?.mode, 'recover');
+  // 刚学过：同样的错马上又来几次，先看新技能管不管用，不连着再学
+  fail('踩不住'); fail('踩不住'); fail('踩不住');
+  await flush();
+  assert.equal(asked.length, 1);
+});
+
+test('一再重复的同一串动作：心智一步步指挥做了好几遍，就去练成一个技能（看一看、等一等不算）', async (t) => {
+  const { findRepeat } = await import('../src/codeskills/smith.ts');
+  const stair = ['dig_at {"at":[1,1,0]}', 'dig_at {"at":[1,2,0]}', 'step {"at":[1,1,0]}'];
+  assert.deepEqual(findRepeat([...stair, ...stair, 'look_around {}', ...stair])?.times, 3);
+  assert.equal(findRepeat([...stair, ...stair]), null, '两遍还不算');
+  assert.equal(findRepeat(['glance {}', 'wait {}', 'glance {}', 'wait {}', 'glance {}', 'wait {}']), null);
+  const adapter = new FakeAdapter(), bus = new EventBus();
+  const book = new SkillBook(BUILTIN_SKILLS_DIR, tmp());
+  const engine = new BehaviorEngine(book, adapter, null, bus, noSenses);
+  const asked: string[] = [];
+  const planner = { autonomous: true, noteInvalid() {}, complete: async (m: any[]) => { asked.push(m[0].content + '\n' + m[1].content); return { text: '{"none":true,"why":"测试"}', latencyMs: 5 }; } };
+  const smith = new SkillSmith(planner as any, engine, book, bus, () => adapter.state());
+  smith.start(1_000_000);
+  t.after(() => smith.stop());
+  const act = (skill: string, args: object, facing = 'E') => bus.publish('task_start', 'P2', `[llm] ${skill}`, { skill, args: { ...args, facing }, source: 'llm' });
+  for (let i = 0; i < 3; i++) { act('dig_at', { at: [1, 1, 0] }, i % 2 ? 'N' : 'E'); act('dig_at', { at: [1, 2, 0] }); act('step', { at: [1, 1, 0] }); }
+  // 身体自己（反射）做的不算心智指挥
+  bus.publish('task_start', 'P2', '[reflex] place_at', { skill: 'place_at', args: {}, source: 'reflex' });
+  await flush();
+  assert.equal(asked.length, 1);
+  assert.match(asked[0], /同一串动作重复了好几遍/);
+  assert.match(asked[0], /dig_at.*dig_at.*step.*3 遍/);
+});
+
+test('来回拉锯：两个技能交替接手就先让不那么管用的歇一会儿；一个技能一再打断手上同一件事就告诉心智和整理的', async (t) => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  const { Arbiter } = await import('../src/arbiter/arbiter.ts');
+  const { Vision } = await import('../src/perception/vision.ts');
+  const vision = new Vision(adapter), arbiter = new Arbiter(adapter, memory, bus, vision);
+  const book = new SkillBook(BUILTIN_SKILLS_DIR, tmp());
+  const engine = new BehaviorEngine(book, adapter, arbiter, bus, vision);
+  t.after(() => { engine.dispose(); arbiter.cancel('end'); memory.close(); });
+  const loops: any[] = [];
+  bus.on('event', (e: any) => { if (e.type === 'skill_loop') loops.push(e.data); });
+  assert.ok(engine.write({ name: 'hide-from-spider', description: '被蜘蛛盯上时躲进洞里', when: { hp_below: 15 }, code: 'return 1;', priority: 50, cooldown_s: 0 }).ok);
+  assert.ok(engine.write({ name: 'back-to-surface', description: '在地下时回到地表上去', when: { hp_below: 15 }, code: 'return 1;', priority: 50, cooldown_s: 0 }).ok);
+  (engine as any).stats['hide-from-spider'] = { fired: 5, ok: 4, fail: 1, lastAt: 0 };
+  const fire = (name: string, doing: string | null = null) => (engine as any).noteFire(name, doing);
+  fire('hide-from-spider'); fire('back-to-surface'); fire('hide-from-spider'); fire('back-to-surface');
+  assert.equal(loops.length, 1);
+  assert.equal(loops[0].kind, 'pingpong');
+  assert.equal(loops[0].held, 'back-to-surface', '成功率低的那个先歇');
+  assert.deepEqual(engine.heldNow(), ['back-to-surface']);
+  assert.ok(engine.statsOf('back-to-surface')!.loops![0].with === 'hide-from-spider');
+  adapter.hp = 10;
+  arbiter.start({ skill: 'wait', args: { seconds: 1 } }, 'llm');
+  // 歇着的那个条件成立也不接手
+  (engine as any).lastFired.clear();
+  engine.tick(arbiter.info());
+  assert.notEqual((arbiter.info()?.args as any)?.name, 'back-to-surface');
+  fire('hide-from-spider', 'goto'); fire('hide-from-spider', 'goto'); fire('hide-from-spider', 'goto');
+  assert.equal(loops.at(-1).kind, 'tug');
+  assert.match(engine.statsOf('hide-from-spider')!.loops!.at(-1)!.with, /doing:goto/);
 });
