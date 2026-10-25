@@ -126,8 +126,9 @@ export class Mind {
    * 操作者的指令：不是一次性的“建议”，而是一直挂着，直到心智回应做完/做不到、来了新指令，或者放了很久。
    * 每次思考都放在最前面；刚收到时这一念必须照做（不受专注的限制），没回应就再想一次。
    */
-  order: { text: string; at: number; status: 'new' | 'doing'; nudged: number } | null = null;
-  static readonly ORDER_TTL_MS = 30 * 60_000;
+  order: { text: string; at: number; status: 'new' | 'doing'; nudged: number; kind: 'order' | 'suggestion'; activityId?: string } | null = null;
+  /** 指令最多挂这么久（模型忘了说做完也不会一直纠结） */
+  static readonly ORDER_TTL_MS = 10 * 60_000;
   private lastFailure: { skill: string; code?: string; summary: string } | null = null;
   private lastSay = { at: 0, text: '' };
   private lastDiaryAt = 0;
@@ -265,10 +266,10 @@ export class Mind {
       else return;
     }
     if (this.order && Date.now() - this.order.at > Mind.ORDER_TTL_MS) {
-      this.d.bus.publish('operator_order_end', 'P2', `操作者的指令放了半小时还没说做完，先撤下：${this.order.text}`, { status: 'expired' });
+      this.d.bus.publish('operator_order_end', 'P2', `操作者的指令放了十分钟还没说做完，先撤下：${this.order.text}`, { status: 'expired' });
       this.order = null;
     }
-    if (this.order?.status === 'new') return this.think('操作者下了指令', 'deliberate');
+    if (this.order?.status === 'new') return this.think(this.order.kind === 'order' ? '操作者下了指令' : '操作者提了个建议', 'deliberate');
     if (this.userSuggestion) return this.think('操作者给了建议', 'deliberate');
     if (this.pendingReason) { const r = this.pendingReason; this.pendingReason = null; return this.think(r.reason, r.tier); }
     if (urgentNow) return this.think('注意到要紧的事', 'deliberate');
@@ -415,6 +416,13 @@ export class Mind {
     const a = this.activity;
     if (!a) return;
     this.activity = null;
+    // 为操作者的指令开的那段活做完了：指令就算完成（不必等它记得说 done，免得一直挂着纠结）
+    if (this.order?.activityId === a.id) {
+      if (outcome === 'done') {
+        this.d.bus.publish('operator_order_end', 'P2', `照操作者的指令做完了：${this.order.text}`, { status: 'done', via: 'activity' });
+        this.order = null;
+      } else delete this.order.activityId;
+    }
     const state = this.d.adapter.state();
     if (a.dropped?.length) summary = `${summary}；计划里这些没做（写错被丢掉了）：${a.dropped.join('、')}`;
     const record = recordOf(a, outcome, summary, state);
@@ -638,7 +646,7 @@ export class Mind {
       tier, reason: reflect ? `${reason}；做完了好几段活，顺便回头看看哪些办法好用、哪些该改` : reason,
       percept, state, self: this.d.self, memory: this.d.memory, activity: this.activity, suspended: this.suspended,
       lastRecord: this.lastRecord, noticed, changes: this.changesSinceLastThought(), userSuggestion: this.userSuggestion,
-      operatorOrder: this.order ? { text: this.order.text, ageSec: Math.round((Date.now() - this.order.at) / 1000), status: this.order.status } : null,
+      operatorOrder: this.order ? { text: this.order.text, ageSec: Math.round((Date.now() - this.order.at) / 1000), status: this.order.status, kind: this.order.kind } : null,
       audience: this.d.audience?.context(tier === 'glance' ? 'light' : 'full') ?? null, notes: this.notes,
       mySkills: tier === 'deliberate' ? this.safe(() => this.d.mySkills?.() ?? [], []) : [],
       researchContext: tier === 'deliberate' && reflect ? this.safe(() => this.d.researchContext?.(), undefined) : undefined,
@@ -668,7 +676,10 @@ export class Mind {
       if (learnFrom && this.learnFrom === learnFrom) this.learnFrom = null; // 提醒过一次就够了
       if (order && order === this.order) this.answerOrder(order, orderWasNew, decision);
       // 刚收到的指令：照做时不受“专注”的限制（瞥一眼不能换、刚开工先不改）
-      this.apply(decision, activityId, ctx.lastRecord, { urgent: urgent || (orderWasNew && decision.operator?.status !== 'cannot') });
+      // 刚收到的指令（或决定采纳的建议）：照做时不受专注的限制
+      const followsOperator = orderWasNew && (order?.kind === 'order' ? decision.operator?.status !== 'cannot' : decision.operator?.status === 'adopted');
+      this.apply(decision, activityId, ctx.lastRecord, { urgent: urgent || followsOperator });
+      if (followsOperator && this.order === order && order && this.activity && !order.activityId) order.activityId = this.activity.id;
       this.kick();
     }).catch((e: any) => {
       if (this.thinking?.controller !== controller) return;
@@ -989,14 +1000,21 @@ export class Mind {
     this.queuedNext = null;
   }
 
+  /**
+   * 操作者在控制台说的话：以“!”“！”“命令”“指令”“必须”“强制”开头的是指令（一直挂着直到做完/做不到）；
+   * 其余是建议（想一次，采纳或不采纳都行，之后就放下）。
+   */
   suggest(text: string) {
-    const t = text.slice(0, 200);
-    if (this.order) this.d.bus.publish('operator_order_end', 'P3', `新指令替换了旧的：${this.order.text}`, { status: 'replaced' });
-    this.order = { text: t, at: Date.now(), status: 'new', nudged: 0 };
+    const raw = text.trim();
+    const m = raw.match(/^(?:[!！]+|(?:命令|指令|必须|强制)[:：，,\s]*)/);
+    const kind: 'order' | 'suggestion' = m || /强制|命令/.test(raw.slice(0, 12)) ? 'order' : 'suggestion';
+    const t = (m ? raw.slice(m[0].length) : raw).trim().slice(0, 200) || raw.slice(0, 200);
+    if (this.order) this.d.bus.publish('operator_order_end', 'P3', `新的话替换了旧的：${this.order.text}`, { status: 'replaced' });
+    this.order = { text: t, at: Date.now(), status: 'new', nudged: 0, kind };
     this.userSuggestion = null;
     this.backoffUntil = 0;
     if (this.thinking) { this.cancelThinking('new_suggestion'); this.staleDropped++; }
-    this.d.bus.publish('user_suggestion', 'P2', `收到操作者的指令：${t}`);
+    this.d.bus.publish('user_suggestion', 'P2', `收到操作者的${kind === 'order' ? '指令' : '建议'}：${t}`, { kind });
   }
 
   /**
@@ -1005,6 +1023,13 @@ export class Mind {
    */
   private answerOrder(order: NonNullable<Mind['order']>, wasNew: boolean, decision: MindDecision) {
     const r = decision.operator;
+    // 建议：想过一次就放下（采纳了就变成手上的活，没采纳就算了），不追问、不一直挂着
+    if (order.kind === 'suggestion') {
+      this.order = null;
+      const adopted = r?.status === 'adopted' || r?.status === 'doing' || (!!decision.activity && decision.kind !== 'continue' && r?.status !== 'declined');
+      this.d.bus.publish('operator_order_end', 'P3', `操作者的建议${adopted ? '采纳了' : '没采纳'}：${order.text}${r?.note ? `（${r.note}）` : ''}`, { status: adopted ? 'adopted' : 'declined', note: r?.note ?? null });
+      return;
+    }
     if (r?.status === 'done' || r?.status === 'cannot') {
       this.order = null;
       this.d.bus.publish('operator_order_end', 'P2', `${r.status === 'done' ? '照操作者的指令做完了' : '操作者的指令做不到'}：${order.text}${r.note ? `（${r.note}）` : ''}`, { status: r.status, note: r.note ?? null });

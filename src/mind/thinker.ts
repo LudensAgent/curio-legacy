@@ -212,8 +212,8 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
     ...(parsePlan(o.plan) ? { plan: parsePlan(o.plan)! } : {}),
     ...(str(o.switch_reason, 120) ? { switchReason: str(o.switch_reason, 120) } : {}),
     ...(str(o.worth_learning, 240) ? { worthLearning: str(o.worth_learning, 240) } : {}),
-    ...(o.operator && typeof o.operator === 'object' && ['doing', 'done', 'cannot'].includes(String((o.operator as any).status))
-      ? { operator: { status: String((o.operator as any).status) as 'doing' | 'done' | 'cannot', ...(str((o.operator as any).note, 200) ? { note: str((o.operator as any).note, 200) } : {}) } } : {}),
+    ...(o.operator && typeof o.operator === 'object' && ['doing', 'done', 'cannot', 'adopted', 'declined'].includes(String((o.operator as any).status))
+      ? { operator: { status: String((o.operator as any).status) as NonNullable<MindDecision['operator']>['status'], ...(str((o.operator as any).note, 200) ? { note: str((o.operator as any).note, 200) } : {}) } } : {}),
   };
 }
 
