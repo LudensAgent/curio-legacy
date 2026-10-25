@@ -210,6 +210,7 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
     ...(o.skill && typeof o.skill === 'object' && !Array.isArray(o.skill) ? { skill: o.skill as Record<string, unknown> } : {}),
     ...(parsePlan(o.plan) ? { plan: parsePlan(o.plan)! } : {}),
     ...(str(o.switch_reason, 120) ? { switchReason: str(o.switch_reason, 120) } : {}),
+    ...(str(o.worth_learning, 240) ? { worthLearning: str(o.worth_learning, 240) } : {}),
   };
 }
 

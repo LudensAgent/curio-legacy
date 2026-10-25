@@ -8,94 +8,165 @@ import type { Planner } from '../planner/planner.ts';
 import { API_DOC } from './bridge.ts';
 
 /**
- * 造技能：从“刚才出的事”里总结出一份新技能（或者重写管这件事却没做好的旧技能）。
+ * 造技能：从经历里总结出新技能（或者重写管这件事却没做好的旧技能），后台单独请模型写，写下就生效。
  *
- * 主心智在被追、快死、卡住的时候忙着保命，几乎不可能顺手写出一段正确的代码；
- * 所以出了事（死了、同一类事反复卡住、被怪追着甩不掉）之后，单独发一次后台 LLM 请求，
- * 拿着事发前后的经过专门写技能。写下的技能校验通过就立刻生效，和心智自己写的一样记成败、在后台改进。
+ * 什么时候值得学，不写死成“卡住几次”这种规则，而是四个来源：
+ * - noted：心智自己说“刚才这事值得学”（它当时最清楚哪里出乎意料），后台拿那段经过去写；
+ * - review：定期回顾（天亮、歇下来回想时），从这段时间做过的事里找反复出现、费时、常失败的问题；
+ * - pain：吃亏的程度——掉血、死亡、丢东西、卡住、失败累加成“痛”，随时间消退；
+ *   明显高于它自己平时的水平（跟着它的平均和波动走）才算一次值得学的事；
+ * - death：死了一定回头看。
  *
- * 不能太频繁：同一时间只造一份，两次至少隔 gapMs，每小时最多 maxPerHour 次；
- * 排不上的事只留最新的一件，等能造了再造。
+ * 不限次数（模型便宜）；只是同一时间只写一份，其余排队，挨得很近的同类事合并成一件。
  */
-export type ForgeKind = 'death' | 'stuck' | 'cornered';
-export interface SmithOptions { gapMs: number; maxPerHour: number; stuckRepeats: number; stuckWindowMs: number }
-export const DEFAULT_SMITH: SmithOptions = { gapMs: 10 * 60_000, maxPerHour: 3, stuckRepeats: 3, stuckWindowMs: 15 * 60_000 };
+export type ForgeKind = 'death' | 'pain' | 'noted' | 'review';
+const KIND_LABEL: Record<ForgeKind, string> = { death: '死亡', pain: '一段吃了大亏的经历', noted: '自己觉得值得学的事', review: '这段时间的回顾' };
 
-interface Incident { kind: ForgeKind; at: number; headline: string; lines: string[]; context: Record<string, unknown> }
+interface Incident { kind: ForgeKind; at: number; headline: string; lines: string[]; context: Record<string, unknown>; note?: string }
 
 const KEEP = new Set(['task_start', 'task_end', 'hurt', 'notice', 'reflex', 'reflex_gaveup', 'instinct', 'thought', 'attempt_end', 'activity_start', 'activity_adjust',
   'death', 'death_items', 'game_message', 'body_adapt', 'stuck', 'skill_written', 'skill_forged', 'skill_disabled']);
-const KIND_LABEL: Record<ForgeKind, string> = { death: '死亡', stuck: '反复卡在同一件事上', cornered: '被怪追着甩不掉' };
+
+/** 吃亏的程度：自适应的阈值（看它平时痛到什么程度） */
+export class PainMeter {
+  pain = 0;
+  private mean = 0;
+  private varc = 0;
+  private n = 0;
+  private at = Date.now();
+  sources = new Map<string, number>();
+  constructor(private halfLifeMs = 3 * 60_000) {}
+  private decay(now: number) {
+    const k = Math.pow(0.5, Math.max(0, now - this.at) / this.halfLifeMs);
+    this.pain *= k;
+    for (const [s, v] of this.sources) { const nv = v * k; if (nv < 0.05) this.sources.delete(s); else this.sources.set(s, nv); }
+    this.at = now;
+  }
+  add(amount: number, source: string, now = Date.now()) {
+    if (!(amount > 0)) return;
+    this.decay(now);
+    this.pain += amount;
+    this.sources.set(source, (this.sources.get(source) ?? 0) + amount);
+  }
+  /**
+   * 定时取样：更新“平时”的均值和波动，判断这会儿是不是明显比平时痛。
+   * 热身（样本还少）时只认很突出的峰值：至少是均值的好几倍。
+   */
+  sample(now = Date.now()): boolean {
+    this.decay(now);
+    const x = this.pain;
+    const sd = Math.sqrt(this.varc);
+    const spike = this.n >= 10 ? x > this.mean + 3 * Math.max(sd, this.mean * 0.5, 0.5) : x > 4 * Math.max(this.mean, 1) && this.n >= 3;
+    // 均值和方差用指数滑动平均：跟着最近的水平走（前期常死，标准就松；后来稳了，偶尔一次大亏也会被注意到）
+    const a = this.n < 20 ? 1 / (this.n + 1) : 0.05;
+    const d = x - this.mean;
+    this.mean += a * d;
+    this.varc = (1 - a) * (this.varc + a * d * d);
+    this.n++;
+    return spike;
+  }
+  /** 学过了：这一段的痛清零，别反复因为同一件事触发 */
+  reset() { this.pain = 0; this.sources.clear(); }
+  describe(): string { return [...this.sources].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([s, v]) => `${s}（${v.toFixed(1)}）`).join('、'); }
+  baseline() { return { mean: Math.round(this.mean * 10) / 10, sd: Math.round(Math.sqrt(this.varc) * 10) / 10, now: Math.round(this.pain * 10) / 10 }; }
+}
 
 export class SkillSmith {
   busy: { kind: ForgeKind; startedAt: number } | null = null;
-  readonly opts: SmithOptions;
+  readonly pain = new PainMeter();
   private recent: AgentEvent[] = [];
-  private stucks: { at: number; msg: string }[] = [];
-  private lastAt = 0;
-  private starts: number[] = [];
-  private pending: Incident | null = null;
+  private queue: Incident[] = [];
   private timer: NodeJS.Timeout | null = null;
+  private lastHp: number | null = null;
+  private wasDay: boolean | null = null;
+  private lastReview = Date.now();
   private listener = (ev: AgentEvent) => this.onEvent(ev);
-  /** 造过的（给控制台看） */
   history: { at: number; kind: ForgeKind; result: string }[] = [];
 
   constructor(private planner: Pick<Planner, 'complete' | 'autonomous' | 'noteInvalid'>, private engine: BehaviorEngine, private book: SkillBook | null,
-    private bus: EventBus, private state: () => AgentState, opts: Partial<SmithOptions> = {}) {
-    this.opts = { ...DEFAULT_SMITH, ...opts };
-  }
+    private bus: EventBus, private state: () => AgentState, private journal: () => string[] = () => []) {}
 
-  start() {
+  start(tickMs = 5000) {
     this.bus.on('event', this.listener);
-    this.timer = setInterval(() => this.tryPending(), 30_000);
+    let ticks = 0;
+    this.timer = setInterval(() => { this.tick(); if (++ticks % 6 === 0) this.checkPain(); }, tickMs);
     this.timer.unref?.();
   }
   stop() { this.bus.off('event', this.listener); if (this.timer) clearInterval(this.timer); this.timer = null; }
 
-  private onEvent(ev: AgentEvent) {
-    if (KEEP.has(ev.type) && !(ev.type === 'task_start' && /\[filler\]/.test(ev.msg)) && !(ev.type === 'task_end' && /\[filler\]/.test(ev.msg))) {
-      this.recent.push(ev);
-      if (this.recent.length > 500) this.recent.splice(0, this.recent.length - 500);
-    }
-    if (ev.type === 'death') {
-      // 等游戏的死亡播报和掉落清单到了再造
-      setTimeout(() => this.report('death', ev.ts, ev.msg, 75_000), 3000).unref?.();
-    } else if (ev.type === 'reflex_gaveup') {
-      this.report('cornered', ev.ts, ev.msg, 45_000);
-    } else if (ev.type === 'attempt_end' && (ev.data as any)?.outcome === 'stuck') {
-      const now = ev.ts;
-      this.stucks = [...this.stucks.filter((s) => now - s.at < this.opts.stuckWindowMs), { at: now, msg: ev.msg }];
-      if (this.stucks.length >= this.opts.stuckRepeats) {
-        const msgs = this.stucks.map((s) => s.msg);
-        this.stucks = [];
-        this.report('stuck', now, `${this.opts.stuckRepeats} 次卡住：${msgs.map((m) => m.slice(0, 60)).join(' / ')}`, this.opts.stuckWindowMs);
-      }
+  /** 每几秒：掉了多少血算进痛；夜里熬到天亮回顾一次 */
+  tick() {
+    let s: AgentState | null = null;
+    try { s = this.state(); } catch { return; }
+    if (!s.connected || !s.alive) { this.lastHp = null; return; }
+    if (this.lastHp !== null && s.hp < this.lastHp) this.pain.add(this.lastHp - s.hp, '掉血');
+    this.lastHp = s.hp;
+    if (this.wasDay === false && s.isDay) this.review('天亮了');
+    this.wasDay = s.isDay;
+  }
+
+  checkPain(now = Date.now()) {
+    if (this.pain.sample(now)) {
+      const what = this.pain.describe();
+      this.pain.reset();
+      this.report('pain', now, `这段时间明显比平时吃亏：${what}`, 4 * 60_000);
     }
   }
 
-  /** 记下一件事；能造就马上在后台造，不能就留着（只留最新的一件） */
-  report(kind: ForgeKind, at: number, headline: string, windowMs: number) {
-    const lines = this.recent.filter((e) => e.ts >= at - windowMs && e.ts <= at + 5000).slice(-90)
+  private onEvent(ev: AgentEvent) {
+    if (KEEP.has(ev.type) && !/\[filler\]/.test(ev.msg)) {
+      this.recent.push(ev);
+      if (this.recent.length > 800) this.recent.splice(0, this.recent.length - 800);
+    }
+    const d = (ev.data ?? {}) as Record<string, any>;
+    if (ev.type === 'death') {
+      this.pain.add(20, '死亡');
+      // 等游戏的死亡播报和掉落清单到了再写
+      setTimeout(() => { this.pain.reset(); this.report('death', ev.ts, ev.msg, 90_000); }, 3000).unref?.();
+    } else if (ev.type === 'death_items') {
+      this.pain.add(Math.min(10, (ev.msg.match(/×/g)?.length ?? 1)), '丢了东西');
+    } else if (ev.type === 'attempt_end' && d.outcome === 'stuck') {
+      this.pain.add(3, `卡住：${ev.msg.replace(/^一段活「([^」]{0,20}).*$/, '$1')}`);
+    } else if (ev.type === 'task_end' && d.status === 'failed' && d.source !== 'filler') {
+      this.pain.add(1, `${d.skill ?? '动作'} 失败`);
+    } else if (ev.type === 'reflect_start') {
+      this.review('歇下来回想');
+    }
+  }
+
+  /** 心智说“刚才这事值得学” */
+  noted(note: string, now = Date.now()) { this.report('noted', now, note.slice(0, 200), 3 * 60_000, note.slice(0, 300)); }
+
+  /** 回顾这段时间（太频繁就跳过：至少隔一会儿，免得回顾的内容几乎一样） */
+  review(why: string, now = Date.now()) {
+    const lines = this.journal();
+    if (!lines.length || now - this.lastReview < 5 * 60_000) return;
+    this.lastReview = now;
+    this.report('review', now, `${why}，回顾这段时间做过的事`, 0, undefined, lines);
+  }
+
+  report(kind: ForgeKind, at: number, headline: string, windowMs: number, note?: string, journal?: string[]) {
+    const lines = journal ?? this.recent.filter((e) => e.ts >= at - windowMs && e.ts <= at + 5000).slice(-90)
       .map((e) => `[${((e.ts - at) / 1000).toFixed(0)}s] ${e.type} ${e.msg.replace(/\s+/g, ' ').slice(0, 170)}`);
     let st: AgentState | null = null;
     try { st = this.state(); } catch { /* 状态暂不可用 */ }
-    const incident: Incident = { kind, at, headline: headline.slice(0, 300), lines,
+    const incident: Incident = { kind, at, headline: headline.slice(0, 300), lines, ...(note ? { note } : {}),
       context: st ? { hp: Math.round(st.hp * 10) / 10, food: st.food, isDay: st.isDay, dim: st.dim, inventory: st.inventory.slice(0, 20).map((i) => `${i.name}×${i.count}`) } : {} };
-    if (!this.consider(incident)) this.pending = kind === 'death' || !this.pending || this.pending.kind !== 'death' ? incident : this.pending;
+    // 挨得很近的同类事并成一件（比如死亡和它引起的吃亏峰值）
+    const near = this.queue.find((q) => Math.abs(q.at - at) < 60_000 && (q.kind === kind || (q.kind === 'death' && kind === 'pain')));
+    if (near) { if (note) near.note = [near.note, note].filter(Boolean).join('；'); }
+    else this.queue.push(incident);
+    if (this.queue.length > 12) this.queue.splice(0, this.queue.length - 12);
+    this.next();
   }
 
-  private tryPending() { if (this.pending && this.consider(this.pending)) this.pending = null; }
-
-  /** 限频之内就开始造（后台进行），返回是否开始了 */
-  private consider(incident: Incident, now = Date.now()): boolean {
-    if (!this.planner.autonomous || this.busy) return false;
-    if (now - this.lastAt < this.opts.gapMs) return false;
-    this.starts = this.starts.filter((t) => now - t < 3600_000);
-    if (this.starts.length >= this.opts.maxPerHour) return false;
-    this.busy = { kind: incident.kind, startedAt: now };
-    this.lastAt = now;
-    this.starts.push(now);
-    this.bus.publish('skill_forge_start', 'P2', `在后台从刚才的${KIND_LABEL[incident.kind]}里总结技能`, { kind: incident.kind });
+  private next() {
+    if (this.busy || !this.planner.autonomous || !this.queue.length) return;
+    // 死亡和心智点名的先写，回顾最后
+    this.queue.sort((a, b) => ['death', 'noted', 'pain', 'review'].indexOf(a.kind) - ['death', 'noted', 'pain', 'review'].indexOf(b.kind));
+    const incident = this.queue.shift()!;
+    this.busy = { kind: incident.kind, startedAt: Date.now() };
+    this.bus.publish('skill_forge_start', 'P2', `在后台从${KIND_LABEL[incident.kind]}里总结技能`, { kind: incident.kind });
     void this.forge(incident)
       .then((r) => { this.history = [...this.history, { at: Date.now(), kind: incident.kind, result: r }].slice(-20); })
       .catch((e) => {
@@ -103,17 +174,19 @@ export class SkillSmith {
         this.history = [...this.history, { at: Date.now(), kind: incident.kind, result: `出错：${why}` }].slice(-20);
         this.bus.publish('skill_forge_failed', 'P2', `总结技能没成：${why}`);
       })
-      .finally(() => { this.busy = null; });
-    return true;
+      .finally(() => { this.busy = null; this.next(); });
   }
 
   messages(incident: Incident): ChatMessage[] {
     const guide = this.book?.get('writing-skills')?.body ?? '';
-    const system = `你是 Minecraft 机器人 Curio 的“身体技能工程师”。下面是它刚刚经历的一段事（${KIND_LABEL[incident.kind]}）。
-判断：如果身体当时有一个技能，能不能避免这件事或者处理得更好？能，就写出这个技能——写下就立刻生效，下次遇到同类情况身体会自己做。
+    const review = incident.kind === 'review';
+    const system = `你是 Minecraft 机器人 Curio 的“身体技能工程师”。${review
+      ? '下面是它最近一段时间做过的事。找出反复出现、费时间、常失败的问题，判断哪些可以靠一个技能解决（身体以后自己处理），写出来（最多 2 份）。'
+      : `下面是它刚刚经历的一段事（${KIND_LABEL[incident.kind]}）。判断：如果身体当时有一个技能，能不能避免这件事或者处理得更好？能，就写出这个技能。`}
+写下的技能立刻生效，下次遇到同类情况身体会自己做。
 要求：
-- 针对这一类情况，不是只对这一次；触发条件只写身体当时感觉得到的事（血量、看见的怪、身边的方块、刚失败的动作、是否挨打、是否在坑里）。
-- 需要计算（找路、挑方向、挑落脚点、判断要不要打）就写代码技能（code）；简单固定的几步可以写 steps。
+- 针对一类情况，不是只对这一次；触发条件只写身体感觉得到的事（血量、看见的怪、身边的方块、刚失败的动作、是否挨打、是否在坑里）。
+- 需要计算（找路、挑方向、挑落脚点、判断要不要打）就写代码技能（code）；简单固定的几步可以写 steps；也可以不写 when，做成让心智在 routine 里 use_skill 调用的连招。
 - existing_skills 里已经有管这件事的技能、只是没做好：用同一个名字重写它，别重复造。
 - 不是技能能解决的（纯属运气、应该由思考决定的取舍、缺的是材料不是做法）：输出 {"none":true,"why":"…"}。
 
@@ -123,12 +196,14 @@ ${guide}
 代码技能能用的 api：
 ${API_DOC}
 
-只输出一个 JSON 对象：{"skill":{"name":…,"description":…,"when":…,"code"或"steps":…,"priority":…}} 或 {"none":true,"why":"…"}。`;
+只输出一个 JSON 对象：{"skill":{…}}${review ? ' 或 {"skills":[{…},{…}]}' : ''} 或 {"none":true,"why":"…"}。`;
     const user = {
       what_happened: `${KIND_LABEL[incident.kind]}：${incident.headline}`,
-      episode: incident.lines,
+      ...(incident.note ? { its_own_note: incident.note } : {}),
+      [review ? 'recent_activities' : 'episode']: incident.lines,
       now: incident.context,
       existing_skills: this.engine.overview(),
+      ...(incident.kind === 'pain' ? { usual_pain: this.pain.baseline() } : {}),
     };
     return [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify(user) }];
   }
@@ -146,17 +221,20 @@ ${API_DOC}
       }
       if (raw.none) {
         const why = String(raw.why ?? '').slice(0, 160);
-        this.bus.publish('skill_forge_none', 'P3', `看了刚才的${KIND_LABEL[incident.kind]}，没有写技能：${why}`, { kind: incident.kind });
+        this.bus.publish('skill_forge_none', 'P3', `看了${KIND_LABEL[incident.kind]}，没有写技能：${why}`, { kind: incident.kind });
         return `不写：${why}`;
       }
-      const w = this.engine.write(raw.skill ?? raw);
-      if (!w.ok) {
-        messages.push({ role: 'assistant', content: c.text.slice(0, 6000) }, { role: 'user', content: `这个技能存不下：${w.error}。改正后只输出 JSON。` });
-        continue;
+      const drafts = (Array.isArray(raw.skills) ? raw.skills : [raw.skill ?? raw]).slice(0, 2);
+      const done: string[] = [], errors: string[] = [];
+      for (const draft of drafts) {
+        const w = this.engine.write(draft);
+        if (!w.ok) { errors.push(w.error); continue; }
+        const desc = this.engine.get(w.name)?.description ?? '';
+        done.push(`${w.created ? '新技能' : '改写'} ${w.name}`);
+        this.bus.publish('skill_forged', 'P2', `从${KIND_LABEL[incident.kind]}里${w.created ? '总结出新技能' : '改写了技能'}「${w.name}」：${desc}`, { name: w.name, kind: incident.kind, mode: w.mode, created: w.created });
       }
-      const desc = this.engine.get(w.name)?.description ?? '';
-      this.bus.publish('skill_forged', 'P2', `从刚才的${KIND_LABEL[incident.kind]}里${w.created ? '总结出新技能' : '改写了技能'}「${w.name}」：${desc}`, { name: w.name, kind: incident.kind, mode: w.mode, created: w.created });
-      return `${w.created ? '新技能' : '改写'} ${w.name}`;
+      if (done.length) return done.join('、');
+      messages.push({ role: 'assistant', content: c.text.slice(0, 6000) }, { role: 'user', content: `技能存不下：${errors.join('；')}。改正后只输出 JSON。` });
     }
     throw new Error('三次都没写出能存下的技能');
   }

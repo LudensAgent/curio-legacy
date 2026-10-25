@@ -183,6 +183,8 @@ export interface MindDecision {
   plan?: { focus?: string; goal?: string; steps?: string[]; done?: (number | string)[] };
   /** 整个换掉手上的事的理由（有主目标时 switch 必须写） */
   switchReason?: string;
+  /** 刚才的事值得练成技能：哪里出了问题、想学会什么（后台据此写技能） */
+  worthLearning?: string;
   /** 校验时自动纠正/丢弃的部分（下次思考时告诉模型） */
   notes: string[];
   source: 'llm' | 'rule';

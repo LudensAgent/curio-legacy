@@ -15,7 +15,8 @@ import { compileCheck } from './sandbox.ts';
  * - 每小时最多 maxPerHour 次；因为失败而改，需要当前版本至少失败 minFailures 次、且失败占一半以上。
  */
 export interface ImproverOptions { globalGapMs: number; perSkillGapMs: number; requestGapMs: number; minFailures: number; maxPerHour: number }
-export const DEFAULT_IMPROVER: ImproverOptions = { globalGapMs: 20 * 60_000, perSkillGapMs: 60 * 60_000, requestGapMs: 30 * 60_000, minFailures: 2, maxPerHour: 2 };
+/** 默认不限频（模型便宜）：每次改进后新版本要重新攒够失败才会再改，本身就不会连着改 */
+export const DEFAULT_IMPROVER: ImproverOptions = { globalGapMs: 0, perSkillGapMs: 0, requestGapMs: 0, minFailures: 2, maxPerHour: Infinity };
 
 const numbered = (code: string) => code.split('\n').map((l, i) => `${String(i + 1).padStart(3)}| ${l}`).join('\n');
 

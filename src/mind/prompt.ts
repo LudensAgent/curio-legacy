@@ -102,7 +102,7 @@ const OUTPUT = `只输出一个 JSON 对象：
  "activity":{"what":"具体要干什么","why":"为什么现在做","kind":"gather|craft|build|explore|survive|rest|experiment|tidy|social|other","steps":[{"skill":"动作名","args":{}}],"repeat":1,"done_when":{…},"expect":"预计会怎样","if_stuck":"卡住打算怎么办"},
  "next":{同 activity，手上的活快干完时写上，干完直接接上}}
 continue 时可以不写 activity；要换成别的做法就用 adjust/new，别写 continue。顺手、碰运气的步骤加 "optional":true（没成也不算失败）。
-plan（主目标清单：定下 {"focus":"a_…或一句话","steps":["…"]}，做完一项 {"done":[0]}）｜switch_reason｜skill（见【技能】）
+plan（主目标清单：定下 {"focus":"a_…或一句话","steps":["…"]}，做完一项 {"done":[0]}）｜switch_reason｜skill（见【技能】）｜worth_learning（刚才的事值得练成技能时写：哪里出了问题、想学会什么）
 其他可选字段：say（有新发现、改主意、做成事或遇险时说的一句口语）｜agenda（{"add":[{"text":"想做的事或想弄清的问题","kind":"goal|idea|question","horizon":"today|someday"}],"done":["a_…"],"drop":["a_…"],"focus":"a_…"}，规则不要放这里）｜learned（结果出乎意料时的一句窍门，或 {"revise":"k_…","text":"…"} 修订旧窍门）｜hypothesis（experiment 必填）｜experiment_result（上一段是实验时：supported|refuted|unclear）｜diary（值得记住的一句话）｜liked（刚发现喜欢的东西）｜habits（身体的顺手习惯，一直有效：{"torch_every":8} 暗处每 8 格插火把，{"eat_below":12} 饿到 12 顺手吃，{"pickup":true} 捡掉落物；0 关掉）`;
 
 const DECISIONS = `continue 照常做｜adjust 还是这件事、改一改 routine｜new 开始新的一段｜detour 先插一段别的，做完自动回来｜switch 放下手上的改做别的（写 switch_reason）｜experiment 验证一个猜想的小活｜rest 歇一下`;
@@ -111,7 +111,7 @@ const DECISIONS = `continue 照常做｜adjust 还是这件事、改一改 routi
 const FOCUS = `【专注】主目标配清单（plan），每段活推进第一项没勾掉的，做完勾掉。缺料是清单里的一步；天黑、饿了、有怪用 detour 插一段（做完自动回来），不换主目标。`;
 
 /** 技能：从经历里总结、写下就生效的做法（详细写法在 writing-skills 技能里，按需查） */
-const SKILLS_DOC = () => `【技能】管用的做法写进 skill，存下就生效：{"name":"英文-连字符","description":"…","when":{条件},"steps":[…]或"code":"JS"}。when 含 after_failure＝动作失败时先试；只有状态条件＝成立自动做；不写＝use_skill 调用。同样的麻烦再碰到或刚找到解法就写；写法先查 {"kind":"skill","name":"writing-skills"}。身体只会躲岩浆和溺水，别的反应（躲怪、逃跑、脱困）都靠你总结成技能。`;
+const SKILLS_DOC = () => `【技能】管用的做法写进 skill，存下就生效：{"name":"英文-连字符","description":"…","when":{条件},"steps":[…]或"code":"JS"}。when 含 after_failure＝动作失败时先试；只有状态条件＝成立自动做；不写＝use_skill 调用。写不出就用 worth_learning；写法先查 {"kind":"skill","name":"writing-skills"}。身体只会躲岩浆和溺水，别的反应（躲怪、逃跑、脱困）都靠你总结成技能。`;
 
 const QUERIES = (skills: string[]) => `【先查再做】需要时先输出一个查询 JSON（不占游戏时间，每次思考最多 3 次），拿到结果再决定：
 - {"kind":"skill","name":"技能名"} 翻开技能书看做法｜{"kind":"design","brief":"用途、多大、风格","where":"here|base|x,y,z"} 请建筑师在后台画图纸（where 是盖在哪：脚下这一带、家旁边或某个坐标）
@@ -122,7 +122,7 @@ ${skills.length ? `技能书：\n${skills.map((x) => `- ${x}`).join('\n')}` : ''
 /** 用户消息分块：越往后越要紧（模型对末尾注意力最强） */
 const READING = `【消息怎么读】越往后越要紧：【我】性格心情、议程、窍门 →【记得的地方】→【想起来的】自动想起的旧事和技能 →【最近】→【手上的活】→【身边】方块图 local、生物、资源 →【身体】where、生命饥饿、时间、背包 →【专注】主目标和清单 →【此刻】为什么现在想、注意到什么 →【此刻要留意】。`;
 
-const ROUTINE_OF_THINKING = `【每次这样想】（快速过一遍）
+const ROUTINE_OF_THINKING = `【每次这样想】
 1. 【此刻】要紧的（危险、快饿死、卡住）先处理。
 2. 看【专注】：手上的活在推进清单就 continue；做完一项勾掉，接着下一项。
 3. 看【身体】where：地表走路，坑里或地下才挖；身边一格的事对照 local 写坐标。
@@ -138,7 +138,7 @@ const CHOOSE = `【选动作】
 
 const PRINCIPLES = `【原则】
 - 接着刚才的念头往下想，不反复换主意、不重复刚做完的事。
-- 一段活是几分钟的一件事（“砍够 20 个原木”“把墙砌完”）：routine 1–6 步，可 repeat，done_when 写清何时收工；身体连续执行、自己应变，真卡住才叫你。
+- 一段活是几分钟的一件事（“砍够 20 个原木”）：routine 1–6 步，可 repeat，done_when 写清何时收工；身体连续执行、自己应变，真卡住才叫你。
 - 从真实结果里学：出乎意料才写 learned；连续失败就换办法；有 stuck_here 必须换完全不同的思路，别碰 repeated_failures。
 - 你会被风景吸引、想把家弄得舒服好看：喜欢的写 liked，想做的放 agenda。情绪是信号：累了歇、烦了换办法、腻了找新鲜事。
 - 只知道亲眼看到或记得的东西，坐标来自观察或地标，不编。
@@ -148,7 +148,7 @@ const PRECISE = `【精确操作】【身边】local 是以脚为原点的方块
 - 挖阶梯上地面（facing 都写同一个方向，如 "N"）：steps [dig_at {"at":[0,2,0]}, dig_at {"at":[1,1,0]}, dig_at {"at":[1,2,0]}, step {"to":[1,1,0]}]，repeat 10，done_when {"type":"sky_visible","equals":true}
 - 原地垫高：steps [dig_at {"at":[0,2,0]}, place_at {"at":[0,0,0],"item":"any"}]，repeat 6｜平巷：steps [dig_at {"at":[1,0,0]}, dig_at {"at":[1,1,0]}, step {"to":[1,0,0]}]，repeat 8
 - 往下挖：重复 dig_at [0,-1,0]（挖空人就掉下去，不用 step）
-repeat 每轮重做整套 steps：火把别写进重复的 steps，用 habits.torch_every。挖之前看清那格（沙子沙砾会掉，水和岩浆别挖开）。`;
+repeat 每轮重做整套 steps：火把别写进重复的 steps，用 habits.torch_every。挖前看清那格（沙砾会掉，别挖开水和岩浆）。`;
 
 const EXAMPLE = `【例子】想有个家时：
 → {"kind":"design","brief":"湖边能住的小屋，云杉木，放得下床、箱子和工作台"}
@@ -221,7 +221,7 @@ export function situationalReminders(ctx: MindContext): string[] {
   const intent = [ctx.activity?.what, ctx.activity?.why, ...ctx.self.agenda().map((a) => a.text), ...ctx.self.recentThoughts(3).map((t) => t.text)].filter(Boolean).join(' ');
   if (ctx.learnFrom) {
     const f = ctx.learnFrom;
-    out.push(`刚才「${f.stuck.what}」卡住了（${f.stuck.why.slice(0, 50)}${f.stuck.skill ? `，失败的是 ${f.stuck.skill}${f.stuck.code ? ` ${f.stuck.code}` : ''}` : ''}），随后「${f.solved.what}」做成了（${f.solved.routine.slice(0, 4).join('；')}）：以后还会碰到的话，现在就写成 skill（when 写触发条件，比如 after_failure + cell；steps 写这次管用的做法），下次身体自己就会这么做`);
+    out.push(`刚才「${f.stuck.what}」卡住了（${f.stuck.why.slice(0, 50)}${f.stuck.skill ? `，失败的是 ${f.stuck.skill}${f.stuck.code ? ` ${f.stuck.code}` : ''}` : ''}），随后「${f.solved.what}」做成了（${f.solved.routine.slice(0, 4).join('；')}）：以后还会碰到的话，写 worth_learning 说清怎么回事，后台会把它练成技能`);
   }
   if (ctx.stuckHere) out.push(`你在这一带已经卡了 ${ctx.stuckHere.minutes} 分钟：换一个和 tried 完全不同的办法（换区域、换目标、就地安家都行）`);
   const focusItem = ctx.self.activeAgenda();

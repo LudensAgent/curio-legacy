@@ -75,7 +75,7 @@ export const config = {
     reasoningEffort: str('CODER_LLM_REASONING_EFFORT', 'high').toLowerCase(),
     maxTokens: num('CODER_LLM_MAX_TOKENS', 32768),
     timeoutMs: num('CODER_LLM_TIMEOUT_MS', 300000),
-    maxCallsPerHour: num('CODER_LLM_MAX_CALLS_PER_HOUR', 12),
+    maxCallsPerHour: num('CODER_LLM_MAX_CALLS_PER_HOUR', 1000),
   },
   persona: str(
     'AGENT_PERSONA',
@@ -92,10 +92,8 @@ export const config = {
     checkInSec: num('MIND_CHECK_IN_SEC', 100),
     /** 只瞥一眼多久之后要认真想想全局（秒） */
     deliberateEverySec: num('MIND_DELIBERATE_EVERY_SEC', 360),
-    /** 代码技能后台改进的最小间隔（分钟）：同一时间只改一份，每小时最多两次 */
-    skillImproveGapMin: num('SKILL_IMPROVE_GAP_MIN', 20),
-    /** 从死亡/反复卡住里总结新技能的最小间隔（分钟）：同时只造一份，每小时最多三次 */
-    skillForgeGapMin: num('SKILL_FORGE_GAP_MIN', 10),
+    /** 代码技能后台改进的最小间隔（分钟）：默认 0 不限频，同一时间只改一份 */
+    skillImproveGapMin: num('SKILL_IMPROVE_GAP_MIN', 0),
   },
   learning: {
     /** Only explicitly designated isolated worlds may provide candidate promotion evidence. */

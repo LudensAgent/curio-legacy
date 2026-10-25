@@ -182,8 +182,10 @@ const behaviors = new BehaviorEngine(skillBook, adapter, arbiter, bus, vision, p
 setBehaviorRegistry(behaviors);
 /** 代码技能老失败（或心智要求）时，在后台单独请模型改进代码；限频，不会太频繁 */
 const improver = new CodeImprover(coderPlanner, behaviors, bus, { globalGapMs: config.mind.skillImproveGapMin * 60_000 });
-/** 出了事（死了、反复卡住、甩不掉怪）后在后台总结出新技能 */
-const smith = new SkillSmith(coderPlanner, behaviors, skillBook, bus, () => adapter.state(), { gapMs: config.mind.skillForgeGapMin * 60_000 });
+/** 从经历里总结新技能：心智点名、定期回顾、吃了比平时大的亏、死亡 */
+const smith = new SkillSmith(coderPlanner, behaviors, skillBook, bus, () => adapter.state(),
+  // 回顾用的“这段时间做过的事”（回调执行时 selfModel 已经建好）
+  () => selfModel.history(30).map((r) => `${r.what} → ${r.outcome}（${r.durationSec}s${Object.keys(r.gained).length ? `，得到 ${Object.entries(r.gained).map(([k, v]) => `${k}×${v}`).join(' ')}` : ''}）${r.outcome !== 'done' ? `：${r.summary.slice(0, 80)}` : ''}`));
 smith.start();
 /** 技能多了定期整理：收起长期用不上的，后台合并说同一件事的、调整谁先上 */
 const curator = new SkillCurator(coderPlanner, behaviors, skillBook, bus);
@@ -203,6 +205,7 @@ const mind = new Mind({
   adapter, arbiter, perception, memory, bus, self: selfModel, persona: config.persona,
   thinker: new Thinker(planner, adapter, memory, bus, skillBook),
   behaviors,
+  onWorthLearning: (note: string) => smith.noted(note),
   ...(audience ? { audience } : {}),
   mySkills,
   researchContext: () => methods.researchContext(),

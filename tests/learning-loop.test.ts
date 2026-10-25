@@ -15,51 +15,58 @@ const flush = async () => { for (let i = 0; i < 10; i++) await setImmediate(); }
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'curio-learn-'));
 const noSenses = { perceivedEntities: () => [], knownBlocks: () => [], refresh() {}, markSweep() {} };
 
-test('造技能：死了之后在后台拿事发经过写出技能、立刻生效；排队限频，不会每死一次就请一次', async (t) => {
+test('造技能：死了之后在后台拿事发经过写出技能、立刻生效；不限次数，同一时间只写一份，其余排队', async (t) => {
   const adapter = new FakeAdapter(), bus = new EventBus();
   const book = new SkillBook(BUILTIN_SKILLS_DIR, tmp());
   const engine = new BehaviorEngine(book, adapter, null, bus, noSenses);
   const seen: any[] = [];
+  let n = 0;
   const planner = { autonomous: true, noteInvalid() {}, complete: async (messages: any[]) => {
     seen.push(messages);
-    return { text: JSON.stringify({ skill: { name: 'pillar-when-chased', description: '血少被僵尸追时原地垫高', when: { hp_below: 8, hostile: { name: 'zombie', within: 6 }, hurt_within: 4 },
+    n++;
+    return { text: JSON.stringify({ skill: { name: `pillar-when-chased-${n}`, description: '血少被僵尸追时原地垫高', when: { hp_below: 8, hostile: { name: 'zombie', within: 6 }, hurt_within: 4 },
       code: 'const s = await api.state();\nawait api.placeAt(s.feet.x, s.feet.y, s.feet.z, "any");\nreturn { up: 1 };' } }), latencyMs: 5 };
   } };
-  const smith = new SkillSmith(planner as any, engine, book, bus, () => adapter.state(), { gapMs: 60_000 });
-  smith.start();
+  const smith = new SkillSmith(planner as any, engine, book, bus, () => adapter.state());
+  smith.start(1_000_000);
   t.after(() => smith.stop());
   bus.publish('hurt', 'P2', '受到伤害，生命 4');
   bus.publish('task_start', 'P2', '[reflex] flee {"distance":24}');
   smith.report('death', Date.now(), 'Curio was slain by Zombie', 60_000);
+  smith.report('noted', Date.now() + 120_000, '老是被坑困住', 60_000, '老是被坑困住，不会垫高');
   await flush();
-  assert.equal(seen.length, 1);
+  assert.equal(seen.length, 2, '两件事都写了：一件写完接着写下一件');
   assert.match(seen[0][0].content, /身体技能工程师/);
   assert.match(seen[0][0].content, /api\.region/, '带着代码 api 的说明');
   assert.match(seen[0][1].content, /slain by Zombie/);
   assert.match(seen[0][1].content, /受到伤害/, '带着事发经过');
-  assert.equal(engine.get('pillar-when-chased')?.mode, 'auto', '写下就生效');
-  assert.ok(smith.history.at(-1)?.result.includes('pillar-when-chased'));
-  // 一分钟内再死一次：先排着，不马上请
-  smith.report('death', Date.now(), '又死了', 60_000);
-  await flush();
-  assert.equal(seen.length, 1, '离上次太近，排队等着');
+  assert.match(seen[1][1].content, /不会垫高/, '心智自己的说明也带上');
+  assert.equal(engine.get('pillar-when-chased-1')?.mode, 'auto', '写下就生效');
 });
 
-test('造技能：同一段时间里卡住三次才算“反复卡住”；模型觉得不是技能能解决的就不写', async (t) => {
+test('值得学的时机不写死：吃亏程度跟着它自己的平时水平走；回顾这段时间的经历；模型觉得不是技能能解决的就不写', async (t) => {
+  const { PainMeter } = await import('../src/codeskills/smith.ts');
+  const meter = new PainMeter(60_000);
+  let now = 0;
+  // 平时：每分钟掉一点血、偶尔失败
+  for (let i = 0; i < 30; i++) { now += 30_000; meter.add(1 + (i % 3) * 0.5, '掉血', now); assert.equal(meter.sample(now), false, `平常的小亏不算（第 ${i} 次）`); }
+  now += 30_000; meter.add(25, '死亡', now); meter.add(6, '卡住：挖石头', now);
+  assert.equal(meter.sample(now), true, '明显比平时痛');
+  assert.match(meter.describe(), /死亡/);
   const adapter = new FakeAdapter(), bus = new EventBus();
   const book = new SkillBook(BUILTIN_SKILLS_DIR, tmp());
   const engine = new BehaviorEngine(book, adapter, null, bus, noSenses);
-  let calls = 0;
-  const planner = { autonomous: true, noteInvalid() {}, complete: async () => { calls++; return { text: '{"none":true,"why":"缺的是材料"}', latencyMs: 5 }; } };
-  const smith = new SkillSmith(planner as any, engine, book, bus, () => adapter.state(), { gapMs: 0 });
-  smith.start();
+  const asked: string[] = [];
+  const planner = { autonomous: true, noteInvalid() {}, complete: async (m: any[]) => { asked.push(m[0].content + m[1].content); return { text: '{"none":true,"why":"缺的是材料"}', latencyMs: 5 }; } };
+  const smith = new SkillSmith(planner as any, engine, book, bus, () => adapter.state(), () => ['找石头 → stuck（240s）：视野里没有 stone', '找石头 → done（300s）']);
+  smith.start(1_000_000);
   t.after(() => smith.stop());
-  for (let i = 0; i < 2; i++) bus.publish('attempt_end', 'P1', `一段活「挖石头」→ stuck：路被挡住 ${i}`, { outcome: 'stuck' });
+  (smith as any).lastReview = 0;
+  bus.publish('reflect_start', 'P3', '回想一下这段时间');
   await flush();
-  assert.equal(calls, 0);
-  bus.publish('attempt_end', 'P1', '一段活「挖石头」→ stuck：路被挡住', { outcome: 'stuck' });
-  await flush();
-  assert.equal(calls, 1);
+  assert.equal(asked.length, 1);
+  assert.match(asked[0], /反复出现、费时间、常失败/);
+  assert.match(asked[0], /找石头/);
   assert.match(smith.history.at(-1)!.result, /不写/);
   assert.equal(engine.list().length, 0);
 });

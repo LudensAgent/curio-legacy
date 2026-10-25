@@ -510,7 +510,7 @@ function renderSkills(sk) {
   if (!sk) return;
   const mode = { auto: ['条件成立自动做', 'info'], recover: ['动作失败时先试', 'warn'], manual: ['use_skill 调用', ''] };
   $('nSkills').textContent = sk.list.length || '';
-  const kindZh = { death: '死亡', stuck: '反复卡住', cornered: '被怪追着甩不掉' };
+  const kindZh = { death: '死亡', pain: '吃了大亏的经历', noted: '它自己觉得值得学的事', review: '这段时间的回顾' };
   $('improving').innerHTML = (sk.improving ? `<div class="notice">正在后台改进代码技能「${esc(sk.improving.name)}」（${sk.improving.sinceSec}s）</div>` : '')
     + (sk.forging ? `<div class="notice">正在后台从刚才的${kindZh[sk.forging.kind] || sk.forging.kind}里总结技能（${sk.forging.sinceSec}s）</div>` : '')
     + (sk.curating ? '<div class="notice">正在后台整理技能（合并、调优先级、收起用不上的）</div>' : '')

@@ -66,7 +66,7 @@ test('样本里的局部寻路代码技能：绕过一堵墙走到目标', async
   assert.ok(Math.abs(adapter.pos.x - 4.5) <= 1.6 && Math.abs(adapter.pos.z - 0.5) <= 1.6, `走到了 ${JSON.stringify(adapter.pos)}`);
 });
 
-test('代码技能老失败：后台单独请模型改代码，换上新版本；改进有间隔，不会频繁发生', async (t) => {
+test('代码技能老失败：后台单独请模型改代码，换上新版本；旧版本留着', async (t) => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   const vision = new Vision(adapter), arbiter = new Arbiter(adapter, memory, bus, vision);
   const book = new SkillBook(null, tmp());
@@ -94,5 +94,7 @@ test('代码技能老失败：后台单独请模型改代码，换上新版本�
   assert.ok(fs.existsSync(path.join(path.dirname(book.get('buggy')!.file), 'versions', 'v1.js')), '旧版本留着');
   const ok = await once();
   assert.equal(ok.result.status, 'succeeded');
-  assert.match(improver.consider('buggy', 'requested', '想更快')!, /太近/, '刚改过不会马上再改');
+  const limited = new CodeImprover(planner as any, engine, bus, { globalGapMs: 60_000 });
+  (limited as any).lastAt = Date.now();
+  assert.match(limited.consider('buggy', 'requested', '想更快')!, /太近/, '需要时仍可配置间隔（默认不限）');
 });

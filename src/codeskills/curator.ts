@@ -12,7 +12,7 @@ import type { Planner } from '../planner/planner.ts';
  * 收起不是删除：文件和成败都还在，同名重写就恢复。合并和调优先级很少做（有新技能或冲突时，至少隔 gapMs）。
  */
 export interface CuratorOptions { checkMs: number; unusedMs: number; gapMs: number; minSkills: number }
-export const DEFAULT_CURATOR: CuratorOptions = { checkMs: 10 * 60_000, unusedMs: 6 * 3600_000, gapMs: 60 * 60_000, minSkills: 4 };
+export const DEFAULT_CURATOR: CuratorOptions = { checkMs: 10 * 60_000, unusedMs: 6 * 3600_000, gapMs: 0, minSkills: 4 };
 
 export class SkillCurator {
   busy = false;

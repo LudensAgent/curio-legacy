@@ -34,6 +34,8 @@ export interface MindDeps {
   say?: (text: string) => void;
   /** 后天学会的做法（行为技能）：失败时先试的恢复办法、模型写下就生效的新技能 */
   behaviors?: BehaviorEngine;
+  /** 心智觉得刚才的事值得练成技能：交给后台去写 */
+  onWorthLearning?: (note: string) => void;
   timing?: Partial<typeof DEFAULT_TIMING>;
 }
 
@@ -645,6 +647,10 @@ export class Mind {
     this.lastDecision = decision;
     this.notes = decision.notes;
     this.applySkill(decision);
+    if (decision.worthLearning) {
+      this.safe(() => this.d.onWorthLearning?.(decision.worthLearning!), undefined);
+      this.d.bus.publish('worth_learning', 'P3', `觉得值得学：${decision.worthLearning}`);
+    }
     this.applyPlan(decision);
     this.guardFocus(decision, thoughtAboutActivity, !!info.urgent);
     if (decision.notes.length) this.d.bus.publish('decision_normalized', 'P3', `决定里有些地方被纠正了：${decision.notes.join('；').slice(0, 200)}`);
