@@ -8,6 +8,8 @@ import { parseGameMessage, type ParsedGameMessage } from './memory/game-messages
 import { SelfModel } from './mind/self.ts';
 import { Thinker } from './mind/thinker.ts';
 import { BUILTIN_SKILLS_DIR, SkillBook } from './knowledge/skillbook.ts';
+import { BehaviorEngine } from './mind/behaviors.ts';
+import { setBehaviorRegistry } from './skills/use-skill.ts';
 import { draftsFor } from './building/drafts.ts';
 import { config } from './config.ts';
 import { EventBus } from './events.ts';
@@ -158,12 +160,16 @@ const onGoalEnd = (status: string) => {
 
 // 技能书（内置的 skills/ 和自己写的 data/skills/）与建筑图纸库
 const skillBook = new SkillBook(BUILTIN_SKILLS_DIR, path.join(config.dataDir, 'skills'));
+/** 行为技能：带触发条件和步骤的技能，模型写下就生效（自动做、失败时先试、或 use_skill 调用） */
+const behaviors = new BehaviorEngine(skillBook, adapter, arbiter, bus, vision, path.join(config.dataDir, 'skill-stats.json'));
+setBehaviorRegistry(behaviors);
 draftsFor(memory);
 /** 大脑：像真人一样一段一段地玩的心智层 */
 const selfModel = new SelfModel(path.join(config.dataDir, 'mind.json'), config.mind.traits);
 const mind = new Mind({
   adapter, arbiter, perception, memory, bus, self: selfModel, persona: config.persona,
   thinker: new Thinker(planner, adapter, memory, bus, skillBook),
+  behaviors,
   ...(audience ? { audience } : {}),
   mySkills,
   researchContext: () => methods.researchContext(),
@@ -176,7 +182,7 @@ const executive = mind;
 const knownSigs = () => new Set([...library.list().filter((d) => !d.disabled).map((d) => signatureOf(d.steps)),
   ...methods.list().filter((d) => d.status !== 'retired').map((d) => signatureOf(flattenProgram(d.program))), ...proposedHabits]);
 perception.knownSkillSigs = knownSigs;
-const reflex = new Reflex(adapter, arbiter, bus, vision, { routineCare: config.mind.bodyHabits, habits: () => selfModel.habits() });
+const reflex = new Reflex(adapter, arbiter, bus, vision, { routineCare: config.mind.bodyHabits, habits: () => selfModel.habits(), behaviors });
 const spectator = new Spectator(config, adapter, bus);
 const metrics = new Metrics(adapter, arbiter, executive, planner, reflex, bus);
 const actionChat = new ActionChat(adapter, bus, { ...config.actionChat, canSend: () => !executive.paused,

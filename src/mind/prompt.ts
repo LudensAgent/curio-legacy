@@ -12,6 +12,9 @@ import { describeBuild, homeOf, myBuilds } from './home.ts';
 import { activeDrafts } from '../building/drafts.ts';
 import { cleanLesson, moodWords, type SelfModel } from './self.ts';
 import type { Activity, ActivityRecord, Noticing, StuckHere } from './types.ts';
+import type { FocusPlan } from './self.ts';
+import { RECALL_LABEL, type Recalled } from './recall.ts';
+import { INSTINCTS } from './behaviors.ts';
 
 export interface MindContext {
   tier: 'glance' | 'deliberate';
@@ -40,6 +43,16 @@ export interface MindContext {
   repeatedFailures?: string[];
   /** 建筑师正在后台画的图纸 */
   designing?: { brief: string; minutes: number };
+  /** 按关键词自动想起来的经历、教训、技能 */
+  recalled?: Recalled[];
+  /** 想起来、拿得准的技能：直接翻开的全文 */
+  openedSkill?: { name: string; body: string };
+  /** 刚才卡住、随后在同一带做成：值得写成技能 */
+  learnFrom?: { stuck: { what: string; why: string; skill?: string; code?: string }; solved: { what: string; routine: string[] } };
+  /** 主目标和清单 */
+  plan?: FocusPlan | null;
+  /** 自己写的可执行技能一览（带成败） */
+  learnedSkills?: string[];
 }
 
 /**
@@ -51,7 +64,7 @@ export interface MindContext {
 
 /** 常用动作：给完整参数；其余只列名字和一句用途，需要时用 {"kind":"moves"} 查完整参数 */
 export const COMMON_MOVES = ['dig_at', 'step', 'place_at', 'defend', 'gather', 'goto', 'explore', 'wander', 'look_around', 'craft', 'smelt', 'eat', 'hunt', 'forage', 'fish', 'farm', 'collect_seeds',
-  'pickup_items', 'store_items', 'take_items', 'place_torch', 'shelter', 'sleep', 'wait', 'dig', 'climb_up', 'build', 'boat', 'inspect_block', 'interact_block', 'use_item'];
+  'pickup_items', 'store_items', 'take_items', 'place_torch', 'shelter', 'sleep', 'wait', 'dig', 'climb_up', 'build', 'boat', 'inspect_block', 'interact_block', 'use_item', 'use_skill'];
 
 /** 远行、传送门、末地这些只在用得上时列出来，平时是噪音 */
 const ADVANCED = /portal|end_|dragon|stronghold|search_structure|excavate|reservations|base_memory|building_archive|building_review|ranged_defend|equip_armor/;
@@ -90,27 +103,31 @@ const OUTPUT = `只输出一个 JSON 对象：
  "activity":{"what":"具体要干什么","why":"为什么现在做","kind":"gather|craft|build|explore|survive|rest|experiment|tidy|social|other","steps":[{"skill":"动作名","args":{}}],"repeat":1,"done_when":{…},"expect":"预计会怎样","if_stuck":"卡住打算怎么办"},
  "next":{同 activity，手上的活快干完时写上，干完直接接上}}
 continue 时可以不写 activity；要换成别的做法就用 adjust/new，别写 continue。顺手、碰运气的步骤加 "optional":true（没成也不算失败）。
-其他可选字段：say（有新发现、改主意、做成一件事或遇到危险时才说的一句口语）｜agenda（{"add":[{"text":"想做的事或想弄清的问题","kind":"goal|idea|question","horizon":"today|someday"}],"done":["a_…"],"drop":["a_…"],"focus":"a_…"}，规则不要放这里）｜learned（结果出乎意料时的一句窍门，或 {"revise":"k_…","text":"…"} 修订旧窍门）｜hypothesis（experiment 必填）｜experiment_result（上一段是实验时：supported|refuted|unclear）｜diary（值得记住的一句话）｜liked（刚发现自己喜欢的东西）｜habits（身体的顺手习惯，改之前一直有效：{"torch_every":8} 暗处每 8 格插火把，{"eat_below":12} 饿到 12 顺手吃，{"pickup":true} 空档捡掉落物；0 关掉。没定的身体不做）`;
+plan（主目标清单：定下 {"focus":"a_…或一句话","steps":["…"]}，做完一项 {"done":[0]}）｜switch_reason｜skill（见【技能】）
+其他可选字段：say（有新发现、改主意、做成事或遇险时说的一句口语）｜agenda（{"add":[{"text":"想做的事或想弄清的问题","kind":"goal|idea|question","horizon":"today|someday"}],"done":["a_…"],"drop":["a_…"],"focus":"a_…"}，规则不要放这里）｜learned（结果出乎意料时的一句窍门，或 {"revise":"k_…","text":"…"} 修订旧窍门）｜hypothesis（experiment 必填）｜experiment_result（上一段是实验时：supported|refuted|unclear）｜diary（值得记住的一句话）｜liked（刚发现喜欢的东西）｜habits（身体的顺手习惯，一直有效：{"torch_every":8} 暗处每 8 格插火把，{"eat_below":12} 饿到 12 顺手吃，{"pickup":true} 捡掉落物；0 关掉）`;
 
-const DECISIONS = `continue 照常做｜adjust 还是这件事、改一改 routine｜new 开始新的一段｜detour 先插一段别的，做完自动回来｜switch 放下手上的改做别的（独白里说清为什么）｜experiment 验证一个猜想的小活｜rest 歇一下`;
+const DECISIONS = `continue 照常做｜adjust 还是这件事、改一改 routine｜new 开始新的一段｜detour 先插一段别的，做完自动回来｜switch 放下手上的改做别的（写 switch_reason）｜experiment 验证一个猜想的小活｜rest 歇一下`;
+
+/** 专注：主目标 + 清单，插曲用 detour */
+const FOCUS = `【专注】主目标配清单（plan），每段活推进第一项没勾掉的，做完勾掉。缺料是清单里的一步；天黑、饿了、有怪用 detour 插一段（做完自动回来），不换主目标。`;
+
+/** 技能：从经历里总结、写下就生效的做法（详细写法在 writing-skills 技能里，按需查） */
+const SKILLS_DOC = (instincts: string) => `【技能】管用的做法写进 skill，存下那一刻身体就会用：{"name":"英文-连字符","description":"…","when":{条件},"steps":[…]}。when 含 after_failure＝动作失败时先试；只有状态条件＝成立自动做；不写＝use_skill 调用。同样的麻烦第二次碰到或刚找到解法就写；写法先查 {"kind":"skill","name":"writing-skills"}。可 overrides 的本能：${instincts}。`;
 
 const QUERIES = (skills: string[]) => `【先查再做】需要时先输出一个查询 JSON（不占游戏时间，每次思考最多 3 次），拿到结果再决定：
 - {"kind":"skill","name":"技能名"} 翻开技能书看做法｜{"kind":"design","brief":"用途、多大、风格","where":"here|base|x,y,z"} 请建筑师在后台画图纸（where 是盖在哪：脚下这一带、家旁边或某个坐标）
 - {"kind":"recipes","item":"物品名","count":1} 看配方和缺口｜{"kind":"moves","names":["动作名"]} 看动作完整参数
-- {"kind":"recall","query":"…"} 查长期记忆｜{"kind":"mechanics","query":"…"} 查底层操作接口
+- {"kind":"recall","query":"关键词"} 按关键词回想以前的经历、日记、教训和技能｜{"kind":"mechanics","query":"…"} 查底层操作接口
 ${skills.length ? `技能书：\n${skills.map((x) => `- ${x}`).join('\n')}` : ''}`;
 
 /** 用户消息分块：越往后越要紧（模型对末尾注意力最强） */
-const READING = `【消息怎么读】分块给出，越往后越要紧：【我】性格心情、议程、窍门 →【记得的地方】家、床、作品、图纸、地标 →【最近】刚做完的事和念头 →【手上的活】在做什么、做到哪 →【身边】方块图 local、出口、生物、资源 →【身体】在哪(where)、生命饥饿、时间、亮度、背包 →【此刻】为什么现在想、注意到什么 →【此刻要留意】。`;
+const READING = `【消息怎么读】越往后越要紧：【我】性格心情、议程、窍门 →【记得的地方】→【想起来的】自动想起的旧事和技能 →【最近】→【手上的活】→【身边】方块图 local、生物、资源 →【身体】where、生命饥饿、时间、背包 →【专注】主目标和清单 →【此刻】为什么现在想、注意到什么 →【此刻要留意】。`;
 
-const ROUTINE_OF_THINKING = `【每次这样想】
-1. 先看【此刻】和【此刻要留意】：危险、快饿死、天黑、卡住这类要紧的先处理。
-2. 看【身体】where：在地表就走路，在坑里或地下才挖。
-3. 手上的活还对吗：recent 结果正常、done_when 在推进就 continue。
-4. 要换就按【选动作】挑最贴切的；身边一格的事对照【身边】local 写坐标。
-5. 拿不准做法或参数就先查（skill / moves / recipes）。
-6. 输出前核对：动作名在列表里、参数合法、done_when 做完才成立。
-这几步在心里快速过一遍就够，不用长篇推演；拿不准的去查，别反复猜。`;
+const ROUTINE_OF_THINKING = `【每次这样想】（快速过一遍）
+1. 【此刻】要紧的（危险、快饿死、卡住）先处理。
+2. 看【专注】：手上的活在推进清单就 continue；做完一项勾掉，接着下一项。
+3. 看【身体】where：地表走路，坑里或地下才挖；身边一格的事对照 local 写坐标。
+4. 拿不准就先查（skill / moves / recipes / recall）；输出前核对动作名和参数。`;
 
 const CHOOSE = `【选动作】
 - 去记得的地方或坐标 → goto；找没见过的东西 → explore {"until":…}；拿看得见的方块 → gather；身边某一格 → dig_at / step / place_at
@@ -118,15 +135,15 @@ const CHOOSE = `【选动作】
 - 有怪靠近 → defend {"target":"名字"} 打掉，或走开绕路（苦力怕也是你定：打就砍一下退一步）
 - 过夜 → sleep（有床，看参数选哪张）/ shelter / 自己挖坑封顶；在坑里或地下 → place_at [0,0,0] 垫高或挖台阶
 - 盖新房子 → design 拿图纸 → 攒材料 → build {"draft":"图纸ID"}（料不全也能先盖，有多少盖多少）；没盖完的 → build {"projectId":"作品ID"}；不要自己画图纸
-- goto 报没路、挡着的是土坡石坎 → goto {"target":…,"dig":true} 挖穿或垫高直接过去`;
+- goto 没路、挡着的是土坡石坎 → goto {"target":…,"dig":true} 挖穿直走`;
 
 const PRINCIPLES = `【原则】
-- 接着刚才的念头往下想，不反复换主意、不重复刚做完的事；临时处理用 detour，做完自动回到原来的活。
+- 接着刚才的念头往下想，不反复换主意、不重复刚做完的事。
 - 一段活是几分钟的一件事（“砍够 20 个原木”“把墙砌完”）：routine 1–6 步，可 repeat，done_when 写清何时收工；身体连续执行、自己应变，真卡住才叫你。
-- 从真实结果里学：出乎意料才写 learned；连续失败就换办法；有 stuck_here 必须换完全不同的思路，别碰 repeated_failures 里的目标。
-- 你会被风景吸引、想把家弄得舒服好看：喜欢的写 liked，想做的放 agenda；天黑惦记家，没盖完的房子会回去盖。情绪是信号：累了歇、烦了换办法、腻了找新鲜事。
+- 从真实结果里学：出乎意料才写 learned；连续失败就换办法；有 stuck_here 必须换完全不同的思路，别碰 repeated_failures。
+- 你会被风景吸引、想把家弄得舒服好看：喜欢的写 liked，想做的放 agenda。情绪是信号：累了歇、烦了换办法、腻了找新鲜事。
 - 只知道亲眼看到或记得的东西，坐标来自观察或地标，不编。
-- 身体只有保命本能（苦力怕嘶嘶响时躲开、溺水上浮、被贴脸还手、快饿死才吃）；插火把、顺手吃、捡东西要你自己做，或用 habits 定成习惯。`;
+- 身体只有保命本能和你写下的技能；插火把、顺手吃、捡东西要你自己做，或用 habits 定成习惯。`;
 
 const PRECISE = `【精确操作】【身边】local 是以脚为原点的方块图（[前,上,右]，前=facing）。dig_at 挖哪格、step 迈到哪格、place_at 在哪格放方块，都写确切的相对坐标；放进 routine 重复时每步按当时站的位置重算，例如：
 - 朝北挖阶梯上地面：steps [dig_at {"at":[0,2,0],"facing":"N"}, dig_at {"at":[1,1,0],"facing":"N"}, dig_at {"at":[1,2,0],"facing":"N"}, step {"to":[1,1,0],"facing":"N"}]，repeat 10，done_when {"type":"sky_visible","equals":true}
@@ -152,7 +169,11 @@ ${PRINCIPLES}
 
 ${CHOOSE}
 
+${FOCUS}
+
 ${QUERIES(skills)}
+
+${SKILLS_DOC(Object.entries(INSTINCTS).filter(([, v]) => !v.locked).map(([k]) => k).join('、'))}
 
 【决定】${DECISIONS}
 
@@ -176,7 +197,9 @@ ${READING}
 - 手上没活：直接 new 一段，接着【最近】的结果和议程往下玩；活快干完时顺便写 next。小改用 adjust，插一件事用 detour，彻底换事用 switch/new。
 - 在地表就走路，在坑里或地下（看【身体】where）才挖；身边一格的事对照【身边】local 用 dig_at / step / place_at 写确切坐标。
 - 要翻技能书、请建筑师（design）、查配方或想得更深：直接输出查询，如 {"kind":"design","brief":"…"}、{"kind":"skill","name":"…"}、{"kind":"deliberate","reason":"…"}（转成认真想、给你完整信息）。
-${skills.length ? `技能书：${skills.map((x) => x.split('：')[0]).join('、')}。` : ''}盖新房子先 design 拿图纸，再 build {"draft":"图纸ID"}；不要自己画图纸。
+${skills.length ? `技能书：${skills.map((x) => x.split('：')[0]).join('、')}（带步骤的可以 use_skill 调用）。` : ''}盖新房子先 design 拿图纸，再 build {"draft":"图纸ID"}；不要自己画图纸。
+- 有【专注】的主目标就接着推进清单；天黑、饿了、缺料用 detour 插一段，做完会回来；瞥一眼不能 switch。做完清单一项写 "plan":{"done":[序号]}。
+- 刚从卡住里找到办法、想把它变成身体的习惯：转成认真想（{"kind":"deliberate","reason":"写技能"}）。
 
 ${CHOOSE}
 
@@ -186,7 +209,7 @@ ${CHOOSE}
 ${CONDITIONS}
 
 【常用动作】
-${movesCatalog(0, new Set([...inUse, 'dig_at', 'step', 'place_at', 'defend', 'gather', 'goto', 'explore', 'craft', 'eat', 'hunt', 'forage', 'look_around', 'pickup_items', 'wait', 'place_torch', 'sleep', 'shelter', 'build', 'smelt', 'store_items', 'climb_up', 'boat']))}`;
+${movesCatalog(0, new Set([...inUse, 'dig_at', 'step', 'place_at', 'defend', 'gather', 'goto', 'explore', 'craft', 'eat', 'hunt', 'forage', 'look_around', 'pickup_items', 'wait', 'place_torch', 'sleep', 'shelter', 'build', 'smelt', 'store_items', 'climb_up', 'boat', 'use_skill']))}`;
 }
 
 /** 按情境追加在用户消息末尾的提醒：只说和眼下有关的 2–4 件事 */
@@ -197,7 +220,13 @@ export function situationalReminders(ctx: MindContext): string[] {
   const drafts = activeDrafts()?.list(4).filter((d) => !d.usedBy) ?? [];
   const unfinished = myBuilds(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }).filter((b) => b.status !== 'complete' && b.dist <= 96);
   const intent = [ctx.activity?.what, ctx.activity?.why, ...ctx.self.agenda().map((a) => a.text), ...ctx.self.recentThoughts(3).map((t) => t.text)].filter(Boolean).join(' ');
+  if (ctx.learnFrom) {
+    const f = ctx.learnFrom;
+    out.push(`刚才「${f.stuck.what}」卡住了（${f.stuck.why.slice(0, 50)}${f.stuck.skill ? `，失败的是 ${f.stuck.skill}${f.stuck.code ? ` ${f.stuck.code}` : ''}` : ''}），随后「${f.solved.what}」做成了（${f.solved.routine.slice(0, 4).join('；')}）：以后还会碰到的话，现在就写成 skill（when 写触发条件，比如 after_failure + cell；steps 写这次管用的做法），下次身体自己就会这么做`);
+  }
   if (ctx.stuckHere) out.push(`你在这一带已经卡了 ${ctx.stuckHere.minutes} 分钟：换一个和 tried 完全不同的办法（换区域、换目标、就地安家都行）`);
+  const focusItem = ctx.self.activeAgenda();
+  if (focusItem && !ctx.plan && ctx.tier === 'deliberate') out.push(`主目标「${focusItem.text}」还没有清单：写 "plan":{"focus":"${focusItem.id}","steps":[…3–6 项]}，之后一项项推进`);
   const exits = Object.values(p.self.exits ?? {});
   const where = p.self.where?.kind;
   const trapped = where ? where === 'underground' || where === 'pit' : p.self.sky_visible !== true && (p.self.overhead?.covered === 'rock' || p.light?.underground === true) || exits.length > 0 && exits.every((e) => !e.walk && !e.step_up);
@@ -227,7 +256,7 @@ export function situationalReminders(ctx: MindContext): string[] {
   const done = myBuilds(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }).some((b) => b.status === 'complete');
   if (done && !ctx.activity && ctx.self.agenda().filter((x) => x.kind === 'goal').length < 2)
     out.push('家已经盖好了：给自己定个更大的目标放进 agenda（比如下矿弄铁和铁工具、开一块农田养几只动物、扩建仓库、去远处探险），可以先翻 homemaking 技能书');
-  return out.slice(0, 4);
+  return out.slice(0, 5);
 }
 
 /** 记得的最近一张床（自己的或看见过的） */
@@ -247,6 +276,21 @@ function nearestBed(ctx: MindContext): { dist: number; dir: string; pos: string 
 
 const pos3 = (p: [number, number, number]) => p.map((n) => Math.round(n)).join(',');
 
+/** 【专注】：主目标、清单、手上的活是不是在推进它（放在消息靠后，模型最看得见的地方） */
+function focusBlock(ctx: MindContext): Record<string, unknown> | null {
+  const item = ctx.self.activeAgenda();
+  const plan = ctx.plan;
+  if (!item && !plan) return null;
+  const goal = plan?.goal ?? item!.text;
+  const next = plan?.steps.findIndex((st) => !st.done) ?? -1;
+  return {
+    goal, agenda_id: plan?.agendaId ?? item!.id,
+    ...(plan ? { for_min: Math.round((Date.now() - plan.setAt) / 60000), checklist: plan.steps.map((st, i) => `${i}. [${st.done ? 'x' : ' '}] ${st.text}`), ...(next >= 0 ? { next_item: next } : {}) } : { checklist: '还没有：写 plan' }),
+    ...(ctx.activity ? { current_activity_for_goal: ctx.activity.agendaId === (plan?.agendaId ?? item!.id) } : {}),
+    ...(ctx.suspended.length ? { will_resume_after_detour: ctx.suspended.map((a) => a.what) } : {}),
+  };
+}
+
 /** 【身体】：自己在哪、状态、时间、亮度、背包 */
 function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits: object) {
   const inv = new Map<string, number>();
@@ -260,7 +304,8 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
   return {
     ...(p.self.where ? { where: p.self.where.text } : p.self.overhead ? { overhead: p.self.overhead.block ? `头顶 ${p.self.overhead.up} 格是 ${p.self.overhead.block}` : '头顶一直空着' } : {}),
     pos: pos3(p.self.pos), dim: p.self.dim, biome: p.self.biome, sky_visible: p.self.sky_visible ?? null,
-    hp: Math.round(p.self.hp), food: p.self.food,
+    // 血量保留一位小数：半颗心四舍五入成 0 会让模型以为自己已经死了
+    hp: Math.round(p.self.hp * 10) / 10, food: p.self.food,
     ...(p.self.inWater ? { inWater: true, oxygen: s.oxygen } : {}), ...(p.self.inLava ? { inLava: true } : {}), ...(p.self.riding ? { riding: p.self.riding } : {}),
     time: `${{ day: '白天', dusk: '黄昏', night: '夜里', dawn: '清晨' }[p.time.phase] ?? p.time.phase}（${p.time.timeOfDay}）${p.time.can_sleep ? '，能睡觉' : ''}`,
     ...(p.light ? { light: `${{ bright: '亮', dim: '有点暗', dark: '很暗' }[p.light.level] ?? p.light.level}${p.light.mob_spawn_risk ? '，会刷怪' : ''}` } : {}),
@@ -337,9 +382,14 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       ...(!glance && self.experiments().length ? { experiments: self.experiments().map((e) => ({ hypothesis: e.hypothesis, status: e.status, ...(e.evidence ? { evidence: e.evidence } : {}) })) } : {}),
       ...(!glance && self.diary().length ? { diary: self.diary(5).map((d) => d.text) } : {}),
       ...(!glance && ctx.mySkills.length ? { my_methods: ctx.mySkills.slice(0, 8).map((m) => `${m.name}：${m.description.slice(0, 50)}（${m.status}）`) } : {}),
+      ...(!glance && ctx.learnedSkills?.length ? { my_skills: ctx.learnedSkills.slice(0, 12) } : {}),
       ...(!glance && ctx.researchContext ? { research: ctx.researchContext } : {}),
     }],
     ['记得的地方', worldKnowledge(ctx)],
+    ...(ctx.recalled?.length || ctx.openedSkill ? [['想起来的', {
+      ...(ctx.recalled?.length ? { memories: ctx.recalled.map((r) => `[${RECALL_LABEL[r.kind]}] ${r.text}`) } : {}),
+      ...(ctx.openedSkill ? { skill_opened: { name: ctx.openedSkill.name, text: ctx.openedSkill.body } } : {}),
+    }] as [string, Record<string, unknown>]] : []),
     ['最近', {
       ...(!glance ? { recent_activities: self.history(5).map(recordLine) } : {}),
       ...(ctx.lastRecord ? { last_activity: recordLine(ctx.lastRecord) } : {}),
@@ -355,6 +405,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
     }],
     ['身边', surroundingsOf(p, ctx.tier)],
     ['身体', bodyState(p, s, ctx.activity, self.habits())],
+    ...(focusBlock(ctx) ? [['专注', focusBlock(ctx)!] as [string, Record<string, unknown>]] : []),
     ['此刻', {
       why_thinking_now: ctx.reason,
       noticed: ctx.noticed.map((n) => `${n.what}${n.level === 'urgent' ? '（要紧）' : ''}`),

@@ -139,8 +139,8 @@ export interface Consolidation {
   drop: string[];
   add: string[];
   agendaDrop: string[];
-  /** 琢磨出的一整套做法，写成自己的技能 */
-  skill?: { name: string; description: string; body: string };
+  /** 琢磨出的一整套做法，写成自己的技能（raw 是原始对象：带 when/steps 时交给行为引擎，写下就生效） */
+  skill?: { name: string; description: string; body: string; raw?: Record<string, unknown> };
   diary?: string;
   monologue?: string;
 }
@@ -175,6 +175,12 @@ export interface MindDecision {
   liked?: string;
   /** 给身体定的习惯（长期有效，直到改掉） */
   habits?: Habits;
+  /** 写下的技能（原始对象，交给行为引擎/技能书校验）：带 steps 的写下就生效 */
+  skill?: Record<string, unknown>;
+  /** 主目标的清单：定下/改写（focus + steps），或勾掉做完的项（done） */
+  plan?: { focus?: string; goal?: string; steps?: string[]; done?: (number | string)[] };
+  /** 整个换掉手上的事的理由（有主目标时 switch 必须写） */
+  switchReason?: string;
   /** 校验时自动纠正/丢弃的部分（下次思考时告诉模型） */
   notes: string[];
   source: 'llm' | 'rule';

@@ -12,7 +12,9 @@ import { SKILLS } from '../skills/index.ts';
 import { causeName } from '../brain/habits.ts';
 import { pickFuel } from '../skills/economy.ts';
 import { pickVariant } from '../skills/work.ts';
-import { afterStep, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, nextStep, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
+import { afterStep, argsLabel, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, nextStep, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
+import type { BehaviorEngine } from './behaviors.ts';
+import { recallLocal } from './recall.ts';
 import { Attention, EXPERIENCE_MS, RECONSIDER, stuckHere, URGENT } from './attention.ts';
 import { homeOf } from './home.ts';
 import type { ParsedGameMessage } from '../memory/game-messages.ts';
@@ -30,6 +32,8 @@ export interface MindDeps {
   onGoalEnd?: (status: string) => void;
   /** 想说话时（不以 / 开头） */
   say?: (text: string) => void;
+  /** 后天学会的做法（行为技能）：失败时先试的恢复办法、模型写下就生效的新技能 */
+  behaviors?: BehaviorEngine;
   timing?: Partial<typeof DEFAULT_TIMING>;
 }
 
@@ -44,6 +48,8 @@ export const DEFAULT_TIMING = {
   maxBackoffMs: 60_000,
   /** 程序记日记的最小间隔 */
   diaryGapMs: 4 * 60_000,
+  /** 两次“抬头看一眼”之间至少隔这么久（要紧的事、手上没活不受限） */
+  glanceGapMs: 12_000,
 };
 
 interface Snapshot { at: number; sessionId: string; dim: string; pos: AgentState['pos']; hp: number; food: number; inv: Record<string, number>; inWater: boolean; hostiles: string[]; phase: string }
@@ -101,6 +107,12 @@ export class Mind {
   private finishedSinceReflect = 0;
   private activityThoughtAt = 0;
   private pendingReason: { reason: string; tier: 'glance' | 'deliberate' } | null = null;
+  /** “这段活快干完了，想想接下来”每段活只问一次（模型没写 next 也不会一直追问） */
+  private nearEndAskedFor: string | null = null;
+  /** 上一次卡住的事，和随后在同一带做成的事：提醒模型把管用的做法写成技能 */
+  private lastStuck: { what: string; why: string; pos: AgentState['pos']; at: number; skill?: string; code?: string } | null = null;
+  private learnFrom: { stuck: NonNullable<Mind['lastStuck']>; solved: { what: string; routine: string[] } } | null = null;
+  private skillOpenedAt = new Map<string, number>();
 
   constructor(private d: MindDeps) {
     this.timing = { ...DEFAULT_TIMING, ...(d.timing ?? {}) };
@@ -214,9 +226,12 @@ export class Mind {
     }
     // 躲在坑里过夜、睡觉、歇着的时候，一般的事不值得爬起来重新想（只有要紧的事才会）
     const resting = !!current && ['shelter', 'sleep', 'wait'].includes(current.skill) && current.planId === this.activity.id;
-    if (!resting && this.attention.highest() >= RECONSIDER) return this.think('注意到了一些事', 'glance');
-    // 边做边想：最后一轮一开始就琢磨下一段活（模型想一次要好几秒，等干完再想就会站着发呆）
-    if (!this.queuedNext && current?.planId === this.activity.id && remainingSteps(this.activity) < Math.max(1, this.activity.steps.length)) {
+    // 抬头看一眼也要有间隔：注意力被每一件小事拽走，手上的活就总是做不完
+    const gapOk = Date.now() - this.lastThoughtAt >= this.timing.glanceGapMs;
+    if (!resting && gapOk && this.attention.highest() >= RECONSIDER) return this.think('注意到了一些事', 'glance');
+    // 边做边想：最后一轮一开始就琢磨下一段活（模型想一次要好几秒，等干完再想就会站着发呆）；每段活只问一次
+    if (!this.queuedNext && this.nearEndAskedFor !== this.activity.id && current?.planId === this.activity.id && remainingSteps(this.activity) < Math.max(1, this.activity.steps.length)) {
+      this.nearEndAskedFor = this.activity.id;
       return this.think('手上这段活快干完了，想想接下来', this.needsBigPicture() ? 'deliberate' : 'glance');
     }
     if (Date.now() - Math.max(this.activityThoughtAt, this.lastThoughtAt) > this.timing.checkInMs) return this.think('做了一会儿了，抬头看看', 'glance');
@@ -254,7 +269,8 @@ export class Mind {
     this.activity.stepStart = { pos: { ...state.pos }, view: viewOf(this.safe(() => this.d.perception.snapshot(), undefined)) };
     const r = this.d.arbiter.start(step, this.activity.source === 'rule' ? 'rule' : 'llm', { planId: this.activity.id });
     if ('error' in r) this.handleStepResult(step, { status: 'failed', failureCode: 'BAD_ARGS', summary: r.error }, 0);
-    else if (remainingSteps(this.activity) === 0 && !this.queuedNext && !this.thinking && QUICK.has(step.skill)) {
+    else if (remainingSteps(this.activity) === 0 && !this.queuedNext && !this.thinking && QUICK.has(step.skill) && this.nearEndAskedFor !== this.activity.id) {
+      this.nearEndAskedFor = this.activity.id;
       this.think('手上这段活快干完了，想想接下来', this.needsBigPicture() ? 'deliberate' : 'glance');
     }
   }
@@ -343,6 +359,12 @@ export class Mind {
     if (a.kind === 'rest') this.d.self.feel({ type: 'rest', seconds: record.durationSec });
     const exp = this.d.self.experimentFor(a.id);
     if (exp?.status === 'running') this.d.self.concludeExperiment(exp.id, 'unclear', `${outcome}：${summary}；得到 ${JSON.stringify(record.gained)}`);
+    if (outcome === 'stuck') this.lastStuck = { what: a.what, why: summary.slice(0, 100), pos: { ...state.pos }, at: Date.now(), ...(failed ? { skill: failed.skill, code: failed.failureCode } : {}) };
+    else if (outcome === 'done' && this.lastStuck && Date.now() - this.lastStuck.at < 8 * 60_000
+      && Math.hypot(state.pos.x - this.lastStuck.pos.x, state.pos.y - this.lastStuck.pos.y, state.pos.z - this.lastStuck.pos.z) <= 24 && a.what !== this.lastStuck.what) {
+      this.learnFrom = { stuck: this.lastStuck, solved: { what: a.what, routine: a.steps.slice(0, 6).map((st) => `${st.skill} ${argsLabel(st)}`) } };
+      this.lastStuck = null;
+    }
     const gains = Object.entries(record.gained).map(([k, v]) => `${k}×${v}`).join('、');
     this.d.self.think(`${a.what} → ${outcome === 'done' ? '做完了' : outcome === 'stuck' ? '卡住了' : '停下了'}${gains ? `，得到 ${gains}` : ''}${outcome !== 'done' ? `：${summary.slice(0, 60)}` : ''}`, 'outcome');
     const status = outcome === 'done' ? 'succeeded' : outcome === 'stuck' ? 'failed' : 'interrupted';
@@ -418,6 +440,20 @@ export class Mind {
     }
     const percept = this.safe(() => this.d.perception.update(), undefined);
     const verdict = afterStep(a, step, result, durationMs, this.d.adapter.state(), percept);
+    // 身体自己应变不了：先试学会的恢复办法（模型以前从类似的卡住里总结出来的），试过还不行才叫脑子
+    if (verdict.kind === 'stuck' && result.status === 'failed' && step.skill !== 'use_skill' && this.d.behaviors) {
+      const tried = new Set(a.adaptations.filter((x) => x.startsWith('skill:')).map((x) => x.slice(6)));
+      const b = tried.size < 2 ? this.safe(() => this.d.behaviors!.recoveryFor({ skill: step.skill, code: result.failureCode }, tried), null) : null;
+      if (b) {
+        a.adaptations.push(`skill:${b.name}`);
+        a.steps.splice(Math.max(0, a.index - 1), 0, { skill: 'use_skill', args: { name: b.name }, optional: true });
+        a.index = Math.max(0, a.index - 1);
+        a.consecutiveFailures = 0;
+        this.d.self.think(`${step.skill} 没成，照学会的「${b.name}」试试`, 'outcome');
+        this.d.bus.publish('body_adapt', 'P3', `身体先试学会的做法：${b.name}（${b.description}）`, { planId: a.id, skill: b.name });
+        return;
+      }
+    }
     if (verdict.kind === 'continue') {
       if (verdict.adapted) {
         this.d.self.think(verdict.adapted, 'outcome');
@@ -467,8 +503,24 @@ export class Mind {
     const activityId = this.activity?.id ?? null;
     this.thinking = { controller, reason, tier, startedAt: Date.now(), generation, activityId };
     const noticed = this.attention.drain();
+    const urgent = noticed.some((n) => n.level === 'urgent');
     const reflect = tier === 'deliberate' && this.finishedSinceReflect >= 4;
     this.pruneFailures();
+    // 按关键词想起相关的经历、教训和技能（像人看到眼前的事想起以前），拿得准的技能直接翻开
+    const plan = this.d.self.plan();
+    const query = [plan?.goal, ...(plan?.steps.filter((st) => !st.done).slice(0, 2).map((st) => st.text) ?? []), this.activity?.what, this.activity?.why,
+      this.lastRecord?.what, this.lastRecord?.outcome === 'stuck' ? this.lastRecord.summary : '', this.lastFailure?.summary, ...noticed.map((n) => n.what), reason].filter(Boolean).join(' ');
+    const book = this.d.thinker.skillBook;
+    const recalled = this.safe(() => recallLocal(query, { self: this.d.self, memory: this.d.memory, book }, { n: tier === 'glance' ? 3 : 6, exclude: ['know_how'] }), []);
+    let openedSkill: MindContext['openedSkill'];
+    const top = recalled.find((r) => r.kind === 'skill' && r.score >= 4 && r.ref);
+    if (tier === 'deliberate' && top && book?.get(top.ref!) && Date.now() - (this.skillOpenedAt.get(top.ref!) ?? 0) > 5 * 60_000) {
+      const k = book.get(top.ref!)!;
+      this.skillOpenedAt.set(k.name, Date.now());
+      openedSkill = { name: k.name, body: k.body.slice(0, 1500) };
+      this.d.bus.publish('skill_read', 'P3', `想起了技能：${k.name}`, { name: k.name, source: k.source, auto: true });
+    }
+    const learnFrom = this.learnFrom;
     const ctx: MindContext = {
       tier, reason: reflect ? `${reason}；做完了好几段活，顺便回头看看哪些办法好用、哪些该改` : reason,
       percept, state, self: this.d.self, memory: this.d.memory, activity: this.activity, suspended: this.suspended,
@@ -480,6 +532,8 @@ export class Mind {
       gameMessages: this.recentGameMessages(),
       skills: this.safe(() => this.d.thinker.skillBook?.index() ?? [], []),
       stuckHere: stuckHere(this.recentEnds, state.pos),
+      recalled, ...(openedSkill ? { openedSkill } : {}), ...(learnFrom ? { learnFrom } : {}), plan,
+      ...(this.d.behaviors && tier === 'deliberate' ? { learnedSkills: this.safe(() => this.d.behaviors!.overview(), []) } : {}),
       ...(this.d.thinker.designing ? { designing: { brief: this.d.thinker.designing.brief, minutes: Math.round((Date.now() - this.d.thinker.designing.startedAt) / 60_000) } } : {}),
       repeatedFailures: [...this.failuresByTarget].filter(([, f]) => f.n >= 2)
         .sort((a, b) => b[1].n - a[1].n).slice(0, 10).map(([key, f]) => `${key.replace(':', ' ')} ×${f.n}（10 分钟内）`),
@@ -496,7 +550,8 @@ export class Mind {
       if (decision.tier === 'deliberate') { this.lastDeliberateAt = Date.now(); this.finishedSinceReflect = 0; }
       if (suggestion && suggestion === this.userSuggestion) this.userSuggestion = null;
       this.lastSnapshot = this.snapshotNow();
-      this.apply(decision, activityId, ctx.lastRecord);
+      if (learnFrom && this.learnFrom === learnFrom) this.learnFrom = null; // 提醒过一次就够了
+      this.apply(decision, activityId, ctx.lastRecord, { urgent });
       this.kick();
     }).catch((e: any) => {
       if (this.thinking?.controller !== controller) return;
@@ -541,7 +596,11 @@ export class Mind {
       for (const k of this.d.self.data.knowHow) if (c.add.includes(k.text) || c.merge.some((m) => m.text === k.text) || c.rewrite.some((r) => r.id === k.id)) {
         this.d.memory.addLesson(k.text, { source: 'model', key: `know_how:${k.id}` });
       }
-      if (c.skill) {
+      if (c.skill?.raw && this.d.behaviors && (Array.isArray(c.skill.raw.steps) || c.skill.raw.when !== undefined)) {
+        const w = this.safe(() => this.d.behaviors!.write(c.skill!.raw), { ok: false as const, error: '写技能时出错' });
+        if (w.ok) this.d.bus.publish('skill_written', 'P2', `回想时写下技能 ${w.name}`, { name: w.name, mode: w.mode, live: true });
+        else this.d.bus.publish('skill_rejected', 'P3', `没有保存技能：${w.error}`);
+      } else if (c.skill) {
         const w = this.safe(() => this.d.thinker.skillBook?.write(c.skill!.name, c.skill!.description, c.skill!.body) ?? null, null);
         if (w?.ok) {
           this.d.self.think(`把「${w.skill.description}」的做法写成了自己的技能 ${w.skill.name}`, 'learned');
@@ -569,9 +628,12 @@ export class Mind {
   }
 
   /** 把一次决定落到身体和心里 */
-  private apply(decision: MindDecision, thoughtAboutActivity: string | null, reflectedRecord: ActivityRecord | null = this.lastRecord) {
+  private apply(decision: MindDecision, thoughtAboutActivity: string | null, reflectedRecord: ActivityRecord | null = this.lastRecord, info: { urgent?: boolean } = {}) {
     this.lastDecision = decision;
     this.notes = decision.notes;
+    this.applySkill(decision);
+    this.applyPlan(decision);
+    this.guardFocus(decision, thoughtAboutActivity, !!info.urgent);
     if (decision.notes.length) this.d.bus.publish('decision_normalized', 'P3', `决定里有些地方被纠正了：${decision.notes.join('；').slice(0, 200)}`);
     if (decision.monologue) {
       this.d.self.think(decision.monologue);
@@ -655,6 +717,75 @@ export class Mind {
     if (this.activity) this.dropActivity(decision.kind === 'switch' ? 'abandoned' : 'replaced', decision.monologue.slice(0, 80) || `改做：${draft.what}`);
     if (decision.kind === 'switch') this.suspended = [];
     this.beginActivity(draft, decision.monologue, decision.source, decision.kind, decision.kind === 'experiment' ? decision.hypothesis : undefined);
+  }
+
+  /** 模型写下的技能：带动作步骤的交给行为引擎（立刻生效），只有做法说明的写进技能书 */
+  private applySkill(decision: MindDecision) {
+    const raw = decision.skill as Record<string, any> | undefined;
+    if (!raw) return;
+    const executable = Array.isArray(raw.steps) || raw.when !== undefined || raw.disable === true || raw.disabled === true;
+    if (executable) {
+      if (!this.d.behaviors) { decision.notes.push('这里没有行为引擎，带步骤的技能存不下'); return; }
+      const w = this.safe(() => this.d.behaviors!.write(raw), { ok: false as const, error: '写技能时出错' });
+      if (!w.ok) { decision.notes.push(`skill 没存下：${w.error}`); this.d.bus.publish('skill_rejected', 'P3', `没有保存技能：${w.error}`); return; }
+      if (w.disabled) { this.d.self.think(`停用了自己的技能 ${w.name}`, 'learned'); return; }
+      const how = w.mode === 'auto' ? '条件成立时身体会自动做' : w.mode === 'recover' ? '动作失败时身体会先试它' : '可以在 routine 里 use_skill 调用';
+      this.d.self.think(`${w.created ? '学会了' : '改进了'}技能 ${w.name}：${how}`, 'learned');
+      this.d.bus.publish('skill_written', 'P2', `${w.created ? '写下新技能' : '修订技能'} ${w.name}（${how}）`, { name: w.name, mode: w.mode, live: true });
+      return;
+    }
+    const book = this.d.thinker.skillBook;
+    const w = book && typeof raw.name === 'string' && typeof raw.description === 'string' && typeof raw.body === 'string'
+      ? this.safe(() => book.write(raw.name, raw.description, raw.body), null) : null;
+    if (w?.ok) {
+      this.d.self.think(`把「${w.skill.description}」写成了技能 ${w.skill.name}`, 'learned');
+      this.d.bus.publish('skill_written', 'P2', `${w.created ? '写下新技能' : '修订技能'} ${w.skill.name}——${w.skill.description}`, { name: w.skill.name, mode: 'knowledge' });
+    } else decision.notes.push(`skill 没存下：${w && !w.ok ? w.error : '需要 name、description，以及 steps（可执行）或 body（做法说明）'}`);
+  }
+
+  /** 主目标的清单：定下/改写、勾掉做完的项；全勾掉就算主目标完成 */
+  private applyPlan(decision: MindDecision) {
+    const p = decision.plan;
+    if (!p) return;
+    const cur = this.d.self.plan();
+    if (p.steps?.length) {
+      const focus = p.focus ?? cur?.agendaId ?? this.d.self.activeAgenda()?.id ?? p.goal;
+      const set = focus ? this.d.self.setPlan(focus, p.steps) : null;
+      if (set) this.d.bus.publish('plan_set', 'P2', `主目标「${set.goal}」：${set.steps.map((st) => `${st.done ? '☑' : '☐'}${st.text}`).join(' ')}`, { agendaId: set.agendaId });
+      else decision.notes.push('plan 没定下来：需要 focus（议程 ID 或一句话的目标）和 steps');
+    }
+    if (p.done?.length) {
+      const checked = this.d.self.checkPlan(p.done);
+      if (checked.length) this.d.bus.publish('plan_check', 'P3', `勾掉：${checked.join('、')}`);
+      const now = this.d.self.plan();
+      if (now && now.steps.length && now.steps.every((st) => st.done)) {
+        this.d.self.setAgendaStatus(now.agendaId, 'done');
+        this.d.self.think(`「${now.goal}」的清单都做完了`, 'outcome');
+        this.d.bus.publish('plan_done', 'P2', `主目标完成：${now.goal}`);
+      }
+    }
+  }
+
+  /**
+   * 专注：真人不会因为天黑、缺几块木头就忘了自己在盖房子。
+   * - 瞥一眼时不能整个换掉手上的事（switch → detour，做完自动回来）；有主目标时认真想也要写 switch_reason 才能换。
+   * - 刚开工、还顺利的活，瞥一眼时不马上改做法：改动排在这段做完之后。
+   * 要紧的事（危险、快饿死）不受限制。
+   */
+  private guardFocus(decision: MindDecision, thoughtAboutActivity: string | null, urgent: boolean) {
+    const a = this.activity;
+    if (!a || urgent || !decision.activity) return;
+    if (decision.kind === 'switch' && (decision.tier === 'glance' || (this.d.self.plan() && !decision.switchReason))) {
+      decision.kind = 'detour';
+      decision.notes.push(`没写 switch_reason 不能整个换掉手上的事：这次按 detour 处理，做完「${decision.activity.what}」会回到「${a.what}」`);
+      return;
+    }
+    if (decision.kind === 'adjust' && decision.tier === 'glance' && a.id === thoughtAboutActivity && a.failures === 0
+      && Date.now() - this.activityThoughtAt < 25_000 && !this.queuedNext) {
+      this.queuedNext = { draft: decision.activity, monologue: decision.monologue, at: Date.now() };
+      decision.kind = 'continue';
+      decision.notes.push(`「${a.what}」刚开工、还顺利，先不改：你想的「${decision.activity.what}」排在它做完之后`);
+    }
   }
 
   private say(text: string, decision: MindDecision) {

@@ -1,5 +1,5 @@
 import type { GameAdapter } from '../adapter/types.ts';
-import type { Arbiter, Step } from '../arbiter/arbiter.ts';
+import type { Arbiter, Step, TaskInfo } from '../arbiter/arbiter.ts';
 import type { EventBus, Severity } from '../events.ts';
 import type { Senses } from '../skills/types.ts';
 import { hasPlaceable } from '../skills/survival.ts';
@@ -11,8 +11,16 @@ const TORCH_OK_DURING = new Set(['explore', 'goto', 'gather', 'wander', 'excavat
 /** 熟食、面包等正经食物（不含生肉生鱼） */
 const GOOD_FOOD = /^(cooked_|baked_potato|bread|golden_carrot|golden_apple|pumpkin_pie|cookie|apple|carrot|melon_slice|sweet_berries|glow_berries|beetroot|dried_kelp|mushroom_stew|rabbit_stew|beetroot_soup|suspicious_stew|honey_bottle|cake)/;
 
+/** 后天学会的做法（行为技能）：先于本能判断，也可以把某个本能换掉 */
+export interface LearnedBehaviors {
+  tick(cur: TaskInfo | null): boolean;
+  suppresses(instinct: string, cur: TaskInfo | null): boolean;
+}
+
 /**
  * 反射层：不依赖 LLM，按固定频率检查危险并直接抢占动作。
+ * 这里的每条规则都是一个有名字的“本能”（见 mind/behaviors.ts 的 INSTINCTS）：
+ * 自己写的行为技能先判断，条件成立就由技能接手；技能可以用 overrides 换掉除 lava/drowning 以外的本能。
  * 同时负责卡死检测（移动型任务长时间没有位移）。
  * 威胁来自 Vision：看见的，或近距离听见的。
  */
@@ -29,7 +37,7 @@ export class Reflex {
 
   /** routineCare=false leaves ordinary care and recovery choices to the autonomous planner. */
   constructor(private adapter: GameAdapter, private arbiter: Arbiter, private bus: EventBus, private senses: Senses,
-    private options: { routineCare?: boolean; habits?: () => { torch_every?: number; eat_below?: number } } = {}) {
+    private options: { routineCare?: boolean; habits?: () => { torch_every?: number; eat_below?: number }; behaviors?: LearnedBehaviors } = {}) {
     bus.on('event', (ev: { type: string; data?: Record<string, unknown> }) => {
       if (ev.type !== 'task_end' || ev.data?.skill !== 'surface') return;
       if (ev.data.status === 'succeeded') { this.surfaceFails = []; return; }
@@ -104,25 +112,30 @@ export class Reflex {
     }
     // 躲在避难所里：怪物进不来，不要出去打架/逃跑。
     if (cur?.skill === 'shelter') return;
-    if (creeper) {
+    // 后天学会的做法先判断：条件成立就由技能接手（它可能正是用来代替下面某个本能的）
+    const learned = this.options.behaviors;
+    if (learned?.tick(cur)) return;
+    const instinct = (name: string) => !learned?.suppresses(name, cur);
+    if (creeper && instinct('creeper')) {
       // 正在跟它打：后撤几步躲开爆炸就行，不跑远；没在打：跑开
       if (cur?.skill !== 'flee' && this.ready('creeper', 1500)) this.fire({ skill: 'flee', args: { distance: fighting ? 6 : 12 } }, 'P0', `苦力怕${creeper.fusing ? '在嘶嘶作响，' : ''}距离 ${creeper.dist.toFixed(1)}`);
       return;
     }
     // 判断正在做什么，而不是谁发起的：主动战斗、换气和撤离同样不需要重启。
     if (cur?.skill === 'defend' || cur?.skill === 'ranged_defend') {
-      if (s.hp <= 6 && this.ready('escalate', 3000)) this.fire({ skill: 'flee', args: { distance: 20 } }, 'P0', `战斗中生命 ${s.hp}`);
+      if (s.hp <= 6 && instinct('losing-fight') && this.ready('escalate', 3000)) this.fire({ skill: 'flee', args: { distance: 20 } }, 'P0', `战斗中生命 ${s.hp}`);
       return;
     }
     if (cur?.skill === 'surface' || cur?.skill === 'flee') return;
+    if (cur?.skill === 'use_skill' && cur.source === 'reflex' && (!nearest || nearest.dist >= 4)) { this.checkStuck(s.pos, cur); return; } // 身体正照着学会的做法在做
     // 夜里低血量且身上有方块：就地挖坑封顶，比被追着跑更安全
-    if (this.options.routineCare !== false && cur?.source !== 'reflex' && cur?.skill !== 'eat' && !s.isDay && s.hp <= 8 && (!nearest || nearest.dist > 4) && !s.inWater && hasPlaceable(s.inventory) && this.ready('shelter', 90000)) {
+    if (this.options.routineCare !== false && cur?.source !== 'reflex' && cur?.skill !== 'eat' && !s.isDay && s.hp <= 8 && (!nearest || nearest.dist > 4) && !s.inWater && hasPlaceable(s.inventory) && instinct('night-shelter') && this.ready('shelter', 90000)) {
       return this.fire({ skill: 'shelter', args: { until: 'day' } }, 'P0', `夜里生命只有 ${Math.round(s.hp)}`);
     }
-    if (s.hp <= 6 && nearest && nearest.dist < 10 && this.ready('lowhp', 4000)) {
+    if (s.hp <= 6 && nearest && nearest.dist < 10 && instinct('low-hp-flee') && this.ready('lowhp', 4000)) {
       return this.fire({ skill: 'flee', args: { distance: 24 } }, 'P0', `生命 ${s.hp}，${nearest.name} 在 ${nearest.dist.toFixed(1)} 格`);
     }
-    if (nearest && nearest.dist < 4 && nearest.name !== 'creeper' && this.ready('defend', 4000)) {
+    if (nearest && nearest.dist < 4 && nearest.name !== 'creeper' && instinct('fight-back') && this.ready('defend', 4000)) {
       if (s.hp > 8) return this.fire({ skill: 'defend', args: { entityId: nearest.id } }, 'P1', `${nearest.name} 贴近（${nearest.dist.toFixed(1)} 格）`);
       return this.fire({ skill: 'flee', args: { distance: 18 } }, 'P1', `${nearest.name} 贴近且生命 ${s.hp}`);
     }
@@ -138,11 +151,11 @@ export class Reflex {
     const goodFood = s.inventory.some((i) => GOOD_FOOD.test(i.name));
     const busy = !!cur && ['hunt', 'defend', 'ranged_defend', 'flee', 'dragon_fight', 'craft', 'smelt', 'build', 'climb_up', 'dig', 'store_items', 'take_items', 'ride', 'use_item', 'interact', 'sleep', 'look_around'].includes(cur.skill);
     const routineWindow = !cur || cur.source === 'filler' || (Date.now() - cur.startedAt >= 1500 && cur.progress < 0.85);
-    if (cur?.skill !== 'dragon_fight' && safe && this.adapter.hasFood() && (urgent || ((this.options.routineCare !== false || !!eatBelow) && peckish && goodFood && !busy && routineWindow)) && this.ready('eat', 15000)) {
+    if (cur?.skill !== 'dragon_fight' && safe && this.adapter.hasFood() && (urgent || ((this.options.routineCare !== false || !!eatBelow) && peckish && goodFood && !busy && routineWindow)) && instinct('eat') && this.ready('eat', 15000)) {
       return this.fire({ skill: 'eat' }, 'P1', `饥饿 ${s.food} / 生命 ${s.hp}${urgent ? '（很饿了，有什么吃什么）' : ''}`, !urgent);
     }
 
-    if (this.options.routineCare !== false || this.options.habits?.().torch_every) this.autoTorch(s, cur, nearest?.dist ?? Infinity);
+    if ((this.options.routineCare !== false || this.options.habits?.().torch_every) && instinct('torch')) this.autoTorch(s, cur, nearest?.dist ?? Infinity);
     this.checkStuck(s.pos, cur);
   }
 

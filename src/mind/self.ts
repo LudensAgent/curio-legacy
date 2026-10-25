@@ -24,7 +24,11 @@ interface SelfData {
   reflectedAt?: number;
   knowHowAtReflect?: number;
   habits?: Habits;
+  /** 主目标和它的待办清单（像 agent 的 todo 列表）：每段活都应该推进其中没勾掉的一项 */
+  plan?: FocusPlan;
 }
+
+export interface FocusPlan { agendaId: string; goal: string; steps: { text: string; done: boolean }[]; setAt: number; updatedAt: number }
 
 export const clamp01 = (n: number) => Math.max(0, Math.min(1, Number.isFinite(n) ? n : 0));
 
@@ -202,8 +206,49 @@ export class SelfModel {
     const item = this.data.agenda.find((a) => a.id === id);
     if (!item) return false;
     if (status === 'active') for (const a of this.data.agenda) if (a.status === 'active' && a.id !== id) a.status = 'open';
-    item.status = status; item.updatedAt = Date.now(); this.touch();
+    item.status = status; item.updatedAt = Date.now();
+    // 主目标做完或放下了：它的清单也就收起来
+    if ((status === 'done' || status === 'dropped') && this.data.plan?.agendaId === id) delete this.data.plan;
+    if (status === 'active' && this.data.plan && this.data.plan.agendaId !== id) delete this.data.plan;
+    this.touch();
     return true;
+  }
+
+  // ---------------------------------------------------------------- 主目标的清单
+  plan(): FocusPlan | null {
+    const p = this.data.plan;
+    if (!p) return null;
+    const item = this.data.agenda.find((a) => a.id === p.agendaId);
+    if (!item || (item.status !== 'active' && item.status !== 'open')) { delete this.data.plan; this.touch(); return null; }
+    return p;
+  }
+  /**
+   * 定下（或改写）主目标的清单。focus 是议程 ID 或一句话（一句话就新建一个今天的目标）。
+   * 旧清单里同名、已经勾掉的项保持勾掉。
+   */
+  setPlan(focus: string, steps: string[]): FocusPlan | null {
+    const id = focus.startsWith('a_') ? focus : this.addAgenda(focus, 'goal', 'today')?.id;
+    const item = id ? this.data.agenda.find((a) => a.id === id) : undefined;
+    if (!item) return null;
+    if (item.status !== 'active') this.setAgendaStatus(item.id, 'active');
+    const old = this.data.plan?.agendaId === item.id ? this.data.plan : undefined;
+    const doneBefore = new Set(old?.steps.filter((st) => st.done).map((st) => st.text) ?? []);
+    const clean = steps.map((t) => String(t).trim().slice(0, 60)).filter(Boolean).slice(0, 8);
+    this.data.plan = { agendaId: item.id, goal: item.text, steps: clean.map((text) => ({ text, done: doneBefore.has(text) })), setAt: old?.setAt ?? Date.now(), updatedAt: Date.now() };
+    this.touch();
+    return this.data.plan;
+  }
+  /** 勾掉清单里的项：序号或文字 */
+  checkPlan(done: (number | string)[]): string[] {
+    const p = this.plan();
+    if (!p) return [];
+    const out: string[] = [];
+    for (const d of done) {
+      const st = typeof d === 'number' ? p.steps[d] : p.steps.find((x) => x.text === d || x.text.includes(String(d)));
+      if (st && !st.done) { st.done = true; out.push(st.text); }
+    }
+    if (out.length) { p.updatedAt = Date.now(); this.touch(); }
+    return out;
   }
   activeAgenda(): AgendaItem | undefined { return this.data.agenda.find((a) => a.status === 'active'); }
   creditAgenda(id: string | undefined) {

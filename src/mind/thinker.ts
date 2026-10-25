@@ -17,6 +17,7 @@ import { homeOf } from './home.ts';
 import { draftsFor } from '../building/drafts.ts';
 import type { SkillBook } from '../knowledge/skillbook.ts';
 import { describeBuild, myBuilds } from './home.ts';
+import { recallLocal, RECALL_LABEL } from './recall.ts';
 
 /** 思考时可以先做的只读查询（不占游戏时间） */
 const QUERY_KINDS = ['recipes', 'recall', 'mechanics', 'skill', 'design', 'moves'];
@@ -206,7 +207,22 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
     ...(str(o.diary, 160) ? { diary: str(o.diary, 160) } : {}),
     ...(str(o.liked, 60) ? { liked: str(o.liked, 60) } : {}),
     ...(parseHabits(o.habits) ? { habits: parseHabits(o.habits)! } : {}),
+    ...(o.skill && typeof o.skill === 'object' && !Array.isArray(o.skill) ? { skill: o.skill as Record<string, unknown> } : {}),
+    ...(parsePlan(o.plan) ? { plan: parsePlan(o.plan)! } : {}),
+    ...(str(o.switch_reason, 120) ? { switchReason: str(o.switch_reason, 120) } : {}),
   };
+}
+
+/** {"focus":"a_…|一句话","steps":["…"],"done":[0,"…"]} */
+export function parsePlan(raw: unknown): MindDecision['plan'] | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const o = raw as Record<string, any>;
+  const steps = Array.isArray(o.steps) ? o.steps.map((x: unknown) => str(typeof x === 'string' ? x : (x as any)?.text, 60)).filter(Boolean).slice(0, 8) : [];
+  const done = (Array.isArray(o.done) ? o.done : o.done !== undefined ? [o.done] : [])
+    .filter((x: unknown) => Number.isInteger(x) && (x as number) >= 0 && (x as number) < 8 || typeof x === 'string' && x.trim()).slice(0, 8);
+  const focus = str(o.focus ?? o.agenda_id, 100), goal = str(o.goal, 100);
+  if (!steps.length && !done.length) return null;
+  return { ...(focus ? { focus } : {}), ...(goal ? { goal } : {}), ...(steps.length ? { steps } : {}), ...(done.length ? { done } : {}) };
 }
 
 /**
@@ -364,7 +380,13 @@ export class Thinker {
         return JSON.stringify(result).slice(0, 5000);
       }
       const recall = this.planner.recall;
-      if (!recall) return '没有接长期记忆服务；只能凭日记和窍门回忆';
+      if (!recall) {
+        const q = String(raw.query ?? '').slice(0, 300);
+        if (!q.trim()) return '想回忆什么？写 {"kind":"recall","query":"关键词"}';
+        const found = recallLocal(q, { self: ctx.self, memory: this.memory, book: this.book }, { n: 8 });
+        this.bus.publish('recall_local', 'P3', `回想：${q.slice(0, 60)}（${found.length} 条）`);
+        return found.length ? found.map((r) => `[${RECALL_LABEL[r.kind]}] ${r.text}`).join('\n') : '想不起和这些关键词有关的事';
+      }
       const res = await recall.recall({ percept: { self: { dim: ctx.percept.self.dim, pos: ctx.percept.self.pos }, objective: null, nearby: ctx.percept.nearby },
         lastFailure: null, userSuggestion: ctx.userSuggestion }, String(raw.query ?? '').slice(0, 400));
       return boundedJson(res.memories, 3500);
@@ -401,8 +423,9 @@ export function parseConsolidation(raw: unknown, knowHowIds: Set<string>, agenda
   const drop = ids(o.drop, knowHowIds).filter((id) => !used.has(id));
   const add = (Array.isArray(o.add) ? o.add : []).map((t: unknown) => cleanLesson(String(t ?? ''))).filter((t: string) => t.length >= 4).slice(0, 5);
   const sk = o.skill && typeof o.skill === 'object' && !Array.isArray(o.skill) ? o.skill as Record<string, unknown> : null;
-  const skill = sk && typeof sk.name === 'string' && typeof sk.description === 'string' && typeof sk.body === 'string' && sk.body.trim().length >= 20
-    ? { name: sk.name.slice(0, 41), description: sk.description.slice(0, 200), body: sk.body.slice(0, 6000) } : undefined;
+  const executable = !!sk && (Array.isArray(sk.steps) || sk.when !== undefined);
+  const skill = sk && typeof sk.name === 'string' && typeof sk.description === 'string' && (typeof sk.body === 'string' && sk.body.trim().length >= 20 || executable)
+    ? { name: sk.name.slice(0, 41), description: sk.description.slice(0, 200), body: typeof sk.body === 'string' ? sk.body.slice(0, 6000) : '', ...(executable ? { raw: sk } : {}) } : undefined;
   return { rewrite, merge, drop, add, agendaDrop: ids(o.agenda_drop, agendaIds), ...(skill ? { skill } : {}),
     ...(str(o.diary, 160) ? { diary: str(o.diary, 160) } : {}), ...(str(o.monologue, 160) ? { monologue: str(o.monologue, 160) } : {}) };
 }
