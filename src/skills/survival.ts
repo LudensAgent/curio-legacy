@@ -357,6 +357,7 @@ export const pickupItems: Skill<{ radius: number; item?: string }> = {
   async run(ctx, args) {
     const { adapter, senses, signal } = ctx;
     const tried = new Set<number>();
+    const chased = new Map<number, number>();
     const inv = () => {
       const m = new Map<string, number>();
       for (const i of adapter.state().inventory) m.set(i.name, (m.get(i.name) ?? 0) + i.count);
@@ -367,8 +368,10 @@ export const pickupItems: Skill<{ radius: number; item?: string }> = {
     let visits = 0;
     for (let i = 0; i < 30 && Date.now() < ctx.deadline; i++) {
       senses.refresh();
-      const item = senses.perceivedEntities(args.radius).find((e) => e.kind === 'item' && !tried.has(e.id) && wanted(e.name));
+      // 漂在水里的掉落物会动：同一个最多追 3 次，每次按它现在的位置
+      const item = senses.perceivedEntities(args.radius).find((e) => e.kind === 'item' && (chased.get(e.id) ?? 0) < 3 && wanted(e.name));
       if (!item) break;
+      chased.set(item.id, (chased.get(item.id) ?? 0) + 1);
       tried.add(item.id);
       try {
         await adapter.moveTo({ kind: 'near', pos: item.pos, range: 1 }, { signal, timeoutMs: 8000 });

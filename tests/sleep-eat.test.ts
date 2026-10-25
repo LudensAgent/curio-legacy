@@ -105,10 +105,16 @@ test('已经有床（背包里或放在某处）就不再做第一张以外的�
     assert.match(r.summary, /背包里已经有 white_bed/);
     w.inv.delete('white_bed');
     ctx.memory.addLandmark('discovery', '我的床', 'overworld', { x: 40, y: 64, z: 0 }, 2);
+    w.blocks.push({ name: 'white_bed', pos: { x: 40, y: 64, z: 0 } });
     r = await craft.run(ctx, { item: 'white_bed', count: 1 });
     assert.equal(r.status, 'failed');
     assert.match(r.summary, /已经有一张自己的床放在 \(40,64,0\)/);
     assert.ok(!w.actions.includes('craft:white_bed'));
+    // 床被拆了（那一格看得清，已经不是床）：记忆里的床跟着忘掉，可以再做
+    w.blocks.splice(w.blocks.findIndex((b) => b.name === 'white_bed'), 1);
+    r = await craft.run(ctx, { item: 'white_bed', count: 1 });
+    assert.doesNotMatch(r.summary, /已经有一张自己的床/);
+    assert.ok(!ctx.memory.landmarks().some((l) => l.label === '我的床'), '不在了的床从记忆里删掉');
   } finally { ctx.memory.close(); }
 });
 

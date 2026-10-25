@@ -223,7 +223,7 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
 export const goTo: Skill<{ target: string; dig?: boolean; sprint?: boolean }> = {
   name: 'goto',
   description: '沿看得见的落脚点步行去地标、坐标、作品或记得的功能方块；绕开墙壁，遇到已观察的木门会开门。默认不挖墙、不搭柱；写 "dig":true 就像人一样挖穿挡路的土石、垫方块爬上坡坎直接过去。水路不通时可另选 boat',
-  argsDoc: '{"target": "base | death | <地标id或名称> | <作品ID> | crafting_table | x,y,z", "dig"?: true（挖穿/垫高直走）, "sprint"?: true（跑着去：快，但很耗饥饿；默认走路）}',
+  argsDoc: '{"target": "base | death | <地标id或名称> | <作品ID> | crafting_table | x,y,z | 方向 格数（如 \"E 20\" 往东 20 格）", "dig"?: true（挖穿/垫高直走）, "sprint"?: true（跑着去：快，但很耗饥饿；默认走路）}',
   timeoutMs: 600000,
   movement: true,
   validate(raw) {
@@ -239,11 +239,21 @@ export const goTo: Skill<{ target: string; dig?: boolean; sprint?: boolean }> = 
     let flat = false; // 只给了 x,z：只管水平到达，高度随地形
     // 坐标写法很随意：(-3,90,-10)、x=-3 y=90 z=-10、-3 90 -10 都认；只有两个数时当作 x,z
     // 作品 ID（或前几位）先认：像 3f9a1b2c 这样的 ID 里也有数字，不能当坐标
-    const project = /^[0-9a-f-]{6,36}$/i.test(args.target) ? buildingArchiveFor(memory).list().find((p) => p.worldId === s.worldId && p.id.startsWith(args.target.toLowerCase())) : undefined;
+    // “往东 20 格”：按方向和格数算出落点（东 x+、南 z+），免得自己算坐标算反
+    const heading = args.target.trim().toUpperCase().match(/^(N|NE|E|SE|S|SW|W|NW)\s*(\d{1,3})$/);
+    if (heading) {
+      const [dx, dz] = DIRS[heading[1]];
+      const n = Math.min(200, Number(heading[2])), len = Math.hypot(dx, dz) || 1;
+      pos = { x: Math.round(s.pos.x + dx / len * n), y: s.pos.y, z: Math.round(s.pos.z + dz / len * n) };
+      flat = true;
+      label = `往 ${heading[1]} ${n} 格`;
+    }
+    const project = !heading && /^[0-9a-f-]{6,36}$/i.test(args.target) ? buildingArchiveFor(memory).list().find((p) => p.worldId === s.worldId && p.id.startsWith(args.target.toLowerCase())) : undefined;
     const nums = project || /[a-z\u4e00-\u9fa5]{2,}/i.test(args.target.replace(/\b[xyz]\s*[=:]/gi, '')) ? null : args.target.match(/-?\d+(?:\.\d+)?/g);
     const station = !nums && !project && /^[a-z_]+$/.test(args.target) && args.target !== 'base' && args.target !== 'death' && (isStation(args.target) || args.target === 'bed')
       ? findStation(ctx, args.target.endsWith('_bed') || args.target === 'bed' ? BED_NAMES : [args.target], 160) : null;
-    if (nums && nums.length === 3) pos = { x: +nums[0], y: +nums[1], z: +nums[2] };
+    if (heading) { /* 上面已经算好 */ }
+    else if (nums && nums.length === 3) pos = { x: +nums[0], y: +nums[1], z: +nums[2] };
     else if (nums && nums.length === 2) { pos = { x: +nums[0], y: s.pos.y, z: +nums[1] }; flat = true; }
     else if (project) {
       if (project.dimension !== s.dim) return fail('WRONG_DIMENSION', `作品在 ${project.dimension}`);
@@ -268,7 +278,8 @@ export const goTo: Skill<{ target: string; dig?: boolean; sprint?: boolean }> = 
       pos = lm.pos;
       label = lm.label;
     }
-    const range = nums ? 0 : 2;
+    if (!pos) return fail('BAD_ARGS', `看不懂目标：${args.target}`);
+    const range = nums && !heading ? 0 : 2;
     const waterNames = ['water', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass'];
     const waterNear = () => ctx.senses.knownBlocks(waterNames, 12).some((b) => waterNames.includes(adapter.blockAt(b.pos) ?? ''));
     const distance = (p: Vec3Like) => flat ? Math.hypot(p.x - pos!.x, p.z - pos!.z) : dist3(p, pos!);
@@ -373,7 +384,7 @@ export const goTo: Skill<{ target: string; dig?: boolean; sprint?: boolean }> = 
       const end = adapter.state().pos;
       if (!arrived(end)) return fail('PATH_NOT_FOUND', `尚未到达 ${label}，需要重新选择路线`, measured(end));
       await face();
-      return ok(`${alreadyHere ? '已在' : '到达'} ${label}${nums ? ' 的目标格' : ' 附近'}；实际站在 (${end.x.toFixed(2)},${end.y.toFixed(2)},${end.z.toFixed(2)})，本次移动 ${dist3(s.pos, end).toFixed(2)} 格，距目标点 ${distance(end).toFixed(2)} 格${alreadyHere ? '；没有执行新的位移' : ''}`, { ...measured(end), alreadyHere });
+      return ok(`${alreadyHere ? '已在' : '到达'} ${label}${nums ? ' 的目标格' : ' 附近'}；实际站在 (${end.x.toFixed(2)},${end.y.toFixed(2)},${end.z.toFixed(2)})，本次往 ${dirName(end.x - s.pos.x, end.z - s.pos.z)} 移动 ${dist3(s.pos, end).toFixed(2)} 格，距目标点 ${distance(end).toFixed(2)} 格${alreadyHere ? '；没有执行新的位移' : ''}`, { ...measured(end), alreadyHere });
     } catch (e) {
       if (isAbort(e)) throw e;
       const water = waterNear();

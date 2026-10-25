@@ -158,6 +158,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         const mv = new Movements(bot);
         mv.canDig = true;
         mv.allowSprinting = true;
+        // 会扎人、烫人、让人陷进去的方块：寻路绕开（浆果丛里走一趟就掉好几下血，人不会往里踩）
+        for (const n of ['sweet_berry_bush', 'cactus', 'magma_block', 'campfire', 'soul_campfire', 'fire', 'soul_fire', 'powder_snow', 'wither_rose', 'pointed_dripstone']) {
+          const id = this.mcData.blocksByName?.[n]?.id;
+          if (id !== undefined) mv.blocksToAvoid?.add?.(id);
+        }
         // 跑酷跳跃对起跳位置极其敏感：起点不在格子中心就跳不上去，人会卡在方块边上来回抖。普通走路只跳一格台阶。
         mv.allowParkour = false;
         mv.allow1by1towers = true;
@@ -910,10 +915,13 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const deadline = start + Math.max(0, timeoutMs);
     const initialScanUntil = Math.min(deadline, start + 300);
     let picked = 0;
-    const tried = new Set<number>();
+    // 每个掉落物最多追 3 次：掉进水里会漂，走到它原来的位置时它已经不在那儿了，要按它现在的位置再追
+    const tries = new Map<number, number>();
+    const tried = { has: (id: number) => (tries.get(id) ?? 0) >= 3, add: (id: number) => tries.set(id, (tries.get(id) ?? 0) + 1), get size() { return tries.size; } };
     while (Date.now() < deadline) {
       throwIfAborted(signal);
-      const item = this.nearbyEntities(radius).find((e) => e.kind === 'item' && !tried.has(e.id));
+      // 第一次只捡身边的；追过一次的，漂远一点（多 6 格）也接着追
+      const item = this.nearbyEntities(radius + 6).find((e) => e.kind === 'item' && !tried.has(e.id) && (tries.has(e.id) || e.dist <= radius));
       if (!item) {
         // block_update can arrive before item_spawn; briefly allow that first
         // drop to become observable without turning collection into a long wait.
@@ -928,7 +936,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const moveEpoch = this.actionEpoch;
       try {
         await this.afterAction(() => this.moveTo({ kind: 'near', pos: item.pos, range: 1 }, { signal, timeoutMs: Math.max(1, Math.min(5000, deadline - Date.now())) }), check);
-        picked++;
+        if (!this.bot.entities[item.id]) picked++;
       } catch (e: any) {
         if (e?.name === 'AbortedError') throw e;
         if (e instanceof TimeoutError && this.actionEpoch === moveEpoch + 1) {

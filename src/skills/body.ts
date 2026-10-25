@@ -4,7 +4,9 @@ import { dirOfYaw, interactiveName } from '../perception/vision.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
 import { hasPlaceable } from './survival.ts';
 import { ensureToolFor } from './work.ts';
-import { findStation } from './stations.ts';
+import { findStation, forgetStationAt } from './stations.ts';
+import { OWN_BUILDING_HINT, ownBuildingAt } from './build.ts';
+import { noteEdit } from '../mind/edits.ts';
 import type { Vec3Like } from '../adapter/types.ts';
 import { dist3, throwIfAborted } from '../util.ts';
 
@@ -55,7 +57,7 @@ export const why = (e: unknown) => {
   return m;
 };
 
-type TargetDigArgs = { target: string | Vec3Like; block?: string; dir?: undefined; blocks?: undefined };
+type TargetDigArgs = { target: string | Vec3Like; block?: string; own?: boolean; dir?: undefined; blocks?: undefined };
 type DigArgs = { dir: string; blocks: number; target?: undefined; block?: undefined } | TargetDigArgs;
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 const coordinates = (value: unknown): Vec3Like | null => {
@@ -122,17 +124,22 @@ async function recoverBlock(ctx: SkillCtx, args: TargetDigArgs) {
       if (supportsMe() || !adapter.state().onGround) return fail('BAD_ARGS', '尚未离开目标并站稳，未拆除脚下支撑');
     }
     if (adapter.blockAt(pos) !== name) return fail('TARGET_GONE', '目标方块已经改变，未拆除');
+    const mine = args.own ? null : ownBuildingAt(memory, adapter.state(), pos, name);
+    if (mine) return fail('BAD_ARGS', `(${pos.x},${pos.y},${pos.z}) 的 ${name} 是自己盖的「${mine.name}」的一部分，未拆除；${OWN_BUILDING_HINT}`, { target: name, pos, own: mine });
     const before = new Map(adapter.state().inventory.map((item) => [item.name, item.count]));
     await breakCell(ctx, pos, true);
     throwIfAborted(signal);
     if (!AIR.has(adapter.blockAt(pos) ?? '')) return fail('ERROR', `尚未确认 ${name} 已被拆掉`, { target: name, pos, broken: false });
-    await adapter.collectNearbyDrops(signal, 3, Math.max(1, Math.min(1800, ctx.deadline - Date.now())));
+    noteEdit(ctx.taskId, 'dig', pos);
+    // 拆掉的是记得的床/箱子/工作台：它已经不在那儿了，记忆里也要忘掉，免得以后还说“我有张床在那儿”
+    forgetStationAt(ctx.memory, adapter.state().dim, affected, name);
+    await adapter.collectNearbyDrops(signal, 3, Math.max(1, Math.min(3500, ctx.deadline - Date.now())));
     throwIfAborted(signal);
     const gained = adapter.state().inventory.map((item) => ({ name: item.name, count: item.count - (before.get(item.name) ?? 0) })).filter((item) => item.count > 0);
     const data = { target: name, pos, broken: true, gained };
-    if (!gained.length) return fail('ERROR', `已拆下 ${name}，但背包没有新增物品；掉落物尚未拾取，不能当作已拿到`, data);
+    if (!gained.length) return fail('ERROR', `已拆下 ${name}，但背包没有新增物品；${whereDropsWent(ctx, pos)}`, { ...data, drops: dropsNear(ctx, pos) });
     const dropsItself = /_(bed|door)$/.test(name) || ['crafting_table', 'furnace', 'blast_furnace', 'smoker'].includes(name);
-    if (dropsItself && !gained.some((item) => item.name === name)) return fail('ERROR', `已拆下 ${name}，但背包没有新增 ${name}；顺带拾取了 ${gained.map((item) => `${item.name}×${item.count}`).join('、')}，目标掉落物尚未拿到`, data);
+    if (dropsItself && !gained.some((item) => item.name === name)) return fail('ERROR', `已拆下 ${name}，但背包没有新增 ${name}；顺带拾取了 ${gained.map((item) => `${item.name}×${item.count}`).join('、')}，目标掉落物尚未拿到；${whereDropsWent(ctx, pos)}`, data);
     return ok(`已拆下 ${name}；背包新增 ${gained.map((item) => `${item.name}×${item.count}`).join('、')}`, data);
   } catch (error) {
     if (isAbort(error)) throw error;
@@ -144,7 +151,7 @@ async function recoverBlock(ctx: SkillCtx, args: TargetDigArgs) {
 export const dig: Skill<DigArgs> = {
   name: 'dig',
   description: '定点拆除并拾取：target 指定已看见/记住的方块ID、坐标或地标，只拆该块并报告背包实增；也可用 dir 挖头顶/脚下或一人高通道；不会挖进水或岩浆旁边',
-  argsDoc: '{"target"?: "<方块ID|x,y,z|地标ID>" | {"x":0,"y":64,"z":0}, "block"?: "<目标方块类型约束>", "dir"?: "up|down|N|E|S|W|forward", "blocks"?: 1-6}（target 与 dir 二选一）',
+  argsDoc: '{"target"?: "<方块ID|x,y,z|地标ID>" | {"x":0,"y":64,"z":0}, "block"?: "<目标方块类型约束>", "own"?: true（确实要拆自己房子的方块）, "dir"?: "up|down|N|E|S|W|forward", "blocks"?: 1-6}（target 与 dir 二选一）',
   timeoutMs: 60000,
   movement: true,
   validate(raw) {
@@ -155,7 +162,7 @@ export const dig: Skill<DigArgs> = {
       const point = coordinates(target);
       if (!point && (typeof target !== 'string' || !target.trim() || target.length > 160 || /[,，]/.test(target))) return { ok: false, error: 'target 必须是方块ID、地标ID或有效的 x,y,z 坐标' };
       const block = typeof a.block === 'string' && a.block.trim() ? a.block.trim().replace(/^minecraft:/, '') : undefined;
-      return { ok: true, args: { target: point ?? String(target).trim().replace(/^minecraft:/, ''), ...(block ? { block } : {}) } };
+      return { ok: true, args: { target: point ?? String(target).trim().replace(/^minecraft:/, ''), ...(block ? { block } : {}), ...(a.own === true ? { own: true } : {}) } };
     }
     let dir = String(a.dir ?? a.direction ?? '').trim();
     dir = /^(up|down|forward)$/i.test(dir) ? dir.toLowerCase() : dir.toUpperCase();
@@ -270,3 +277,21 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
 };
 
 export const bodySkills = [dig, climbUp];
+
+/** 拆下来的东西掉哪去了：眼睛看得到的掉落物在哪、是不是泡在水里漂着；一个也看不到就照实说 */
+function dropsNear(ctx: SkillCtx, pos: Vec3Like) {
+  return ctx.adapter.nearbyEntities(24).filter((e) => e.kind === 'item').map((e) => {
+    const cell = { x: Math.floor(e.pos.x), y: Math.floor(e.pos.y), z: Math.floor(e.pos.z) };
+    const inWater = LIQUID_BLOCKS.has(ctx.adapter.blockAt(cell) ?? '');
+    return { name: e.name.replace(/^item:/, ''), count: e.count ?? 1, at: cell, dist: Math.round(e.dist), fromTarget: Math.round(dist3(e.pos, pos)), inWater };
+  }).filter((d) => d.fromTarget <= 16).slice(0, 5);
+}
+
+export function whereDropsWent(ctx: SkillCtx, pos: Vec3Like): string {
+  const drops = dropsNear(ctx, pos);
+  if (!drops.length) {
+    const wet = [pos, { ...pos, y: pos.y - 1 }].some((c) => LIQUID_BLOCKS.has(ctx.adapter.blockAt(c) ?? ''));
+    return `附近看不到它的掉落物${wet ? '（那里有水，多半被冲走了）' : '（可能被冲走、掉进缝里或够不着）'}；不能当作已拿到`;
+  }
+  return `掉落物还在地上没捡到：${drops.map((d) => `${d.name}×${d.count} 在 (${d.at.x},${d.at.y},${d.at.z})，离我 ${d.dist} 格${d.inWater ? '，泡在水里正在漂' : ''}`).join('；')}——要拿就 pickup_items {"item":"${drops[0].name}","radius":${Math.min(24, Math.max(6, drops[0].dist + 3))}}`;
+}

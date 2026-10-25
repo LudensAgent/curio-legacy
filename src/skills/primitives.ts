@@ -3,6 +3,8 @@ import { describeCell, FACINGS, facingOfYaw, feetCell, localMap, toWorld, type F
 import { isSoftBlock, LIQUID_BLOCKS, surroundings } from '../perception/surroundings.ts';
 import { throwIfAborted } from '../util.ts';
 import { breakCell, why } from './body.ts';
+import { OWN_BUILDING_HINT, ownBuildingAt } from './build.ts';
+import { noteEdit } from '../mind/edits.ts';
 import { PLACEABLE } from './survival.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
 
@@ -13,7 +15,7 @@ import { codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from
  *   dig_at [0,2,0] → dig_at [1,1,0] → dig_at [1,2,0] → step [1,1,0]   重复几轮就是一道往前上方的阶梯。
  */
 type Rel = [number, number, number];
-interface CellArgs { at: Rel; facing: Facing }
+interface CellArgs { at: Rel; facing: Facing; own?: boolean }
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 
 /** 模型常用的几种写法都认：at / to / pos / offset / rel / cell，数组 [1,1,0]、字符串 "1,1,0"、对象 {"f":1,"u":1,"r":0} */
@@ -53,7 +55,7 @@ const liquidNext = (ctx: SkillCtx, c: Vec3Like) => [[1, 0, 0], [-1, 0, 0], [0, 1
 export const digAt: Skill<CellArgs> = {
   name: 'dig_at',
   description: '挖掉身边指定的那一格（以脚为原点的 [前,上,右]）。自动换合适的工具；那格旁边有水或岩浆、或是基岩时不挖。只挖不走，挖完人还在原地',
-  argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W"}（前后/左右 ±2，上下 -1..3；例：[1,1,0] 前方高一格，[0,2,0] 头顶上方，[0,-1,0] 脚下）',
+  argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "own"?:true（确实要拆自己房子的方块）}（前后/左右 ±2，上下 -1..3；例：[1,1,0] 前方高一格，[0,2,0] 头顶上方，[0,-1,0] 脚下）',
   timeoutMs: 30000,
   movement: false,
   validate(raw, adapter) {
@@ -63,7 +65,7 @@ export const digAt: Skill<CellArgs> = {
     const facing = facingArg(a.facing, adapter);
     if (!FACINGS.includes(facing as Facing)) return { ok: false, error: facing };
     // [0,0,0]/[0,1,0] 是自己站的两格，本来就空：照样接受（执行时说明一下），不当成写错丢掉
-    return { ok: true, args: { at, facing: facing as Facing } };
+    return { ok: true, args: { at, facing: facing as Facing, ...(a.own === true ? { own: true } : {}) } };
   },
   async run(ctx, args) {
     throwIfAborted(ctx.signal);
@@ -76,6 +78,8 @@ export const digAt: Skill<CellArgs> = {
     if (LIQUID_BLOCKS.has(before)) return fail('BAD_ARGS', `[${args.at}] 是 ${before}，挖不了`, after(ctx, args.facing));
     const wet = liquidNext(ctx, pos);
     if (wet) return fail('BAD_ARGS', `[${args.at}] 旁边就是 ${wet}，挖开会流进来`, { wet, ...after(ctx, args.facing) });
+    const mine = args.own ? null : ownBuildingAt(ctx.memory, ctx.adapter.state(), pos, before);
+    if (mine) return fail('BAD_ARGS', `[${args.at}] 的 ${before} 是自己盖的「${mine.name}」的一部分；${OWN_BUILDING_HINT}`, { own: mine, ...after(ctx, args.facing) });
     try {
       await breakCell(ctx, pos, true);
     } catch (e) {
@@ -88,6 +92,7 @@ export const digAt: Skill<CellArgs> = {
       // 沙子、沙砾会从上面掉下来补上
       return ok(`挖掉了 [${args.at}] 的 ${before}，但上面掉下来的 ${now} 又填上了`, { cell: [...args.at], was: before, now, ...after(ctx, args.facing) });
     }
+    noteEdit(ctx.taskId, 'dig', pos);
     return ok(`挖掉了 [${args.at}] 的 ${before}`, { cell: [...args.at], was: before, ...after(ctx, args.facing) });
   },
 };
@@ -209,6 +214,7 @@ export const placeAt: Skill<CellArgs & { item: string }> = {
     }
     const now = a.blockAt(pos);
     if (!now || AIR.has(now)) return fail('EFFECT_NOT_CONFIRMED', `[${args.at}] 还是空的`, after(ctx, args.facing));
+    noteEdit(ctx.taskId, 'place', pos);
     return ok(`在 [${args.at}] 放了 ${now}`, { placed: now, ...after(ctx, args.facing) });
   },
 };

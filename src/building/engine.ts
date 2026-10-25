@@ -356,8 +356,61 @@ export async function constructBuilding(ctx: SkillCtx, archive: BuildingArchive,
   };
   const initial = inspectBuilding(adapter, blueprint, project, survey.defects);
   const result: ConstructionResult = { projectId: project.id, placed: 0, cleared: site ? Object.values(site.cleared).reduce((a, b) => a + b, 0) : 0, inspection: initial, missingMaterials: {}, failures: [], ...(site ? { site } : {}) };
+  /**
+   * 够不着的高处：像玩家一样在墙外贴着垫一根土柱站上去（用泥土、圆石这类不值钱的方块），
+   * 从柱子上能够到的格子接着放；要去别处、或这次施工结束，就从上往下把柱子挖掉、落回地面，不留痕迹。
+   * 原来寻路在施工时不许搭柱，屋顶那一层永远放不上，模型只好一遍遍原样重试。
+   */
+  let climbed: { blocks: Vec3Like[] } | null = null;
+  const PILLAR = ['dirt', 'cobblestone', 'cobbled_deepslate', 'netherrack', 'andesite', 'diorite', 'granite', 'stone', 'coarse_dirt'];
+  const footprint = new Set(blueprint.cells.map((c) => { const w = rotatePosition(c.pos, project.origin, project.rotation); return `${w.x},${w.z}`; }));
+  const reachable = (pos: Vec3Like) => { const e = adapter.eye(); return !!e && Math.hypot(pos.x + 0.5 - e.x, pos.y + 0.5 - e.y, pos.z + 0.5 - e.z) <= 4.2; };
+  const descendPillar = async () => {
+    if (!climbed) return;
+    const c = climbed;
+    climbed = null;
+    while (c.blocks.length) {
+      const b = c.blocks.pop()!;
+      if (AIR.has(adapter.blockAt(b) ?? 'air')) continue;
+      const r = await adapter.dig(b, ctx.signal);
+      if (!r.ok) { result.failures.push({ cellId: 'climb', reason: `垫脚的柱子没拆完：(${b.x},${b.y},${b.z}) ${r.reason ?? ''}` }); return; }
+      await sleep(350, ctx.signal);
+    }
+  };
+  const climbBeside = async (pos: Vec3Like): Promise<boolean> => {
+    if (!adapter.pillarUp) return false;
+    const names = PILLAR.filter((n) => adapter.state().inventory.some((i) => i.name === n && i.count > 0));
+    if (!names.length) return false;
+    const solid = (n: string | null) => !!n && !AIR.has(n) && !/water|lava|leaves|grass|fern|flower|snow$|vine|torch|carpet/.test(n);
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [2, 0], [-2, 0], [0, 2], [0, -2]]) {
+      const cx = pos.x + dx, cz = pos.z + dz;
+      if (footprint.has(`${cx},${cz}`)) continue;
+      let ground: number | null = null;
+      for (let y = pos.y; y >= pos.y - 12; y--) if (solid(adapter.blockAt({ x: cx, y, z: cz }))) { ground = y; break; }
+      if (ground === null) continue;
+      const stand = ground + 1, top = pos.y - 1, climbs = top - stand;
+      if (climbs < 1 || climbs > 8) continue;
+      let clear = true;
+      for (let y = stand; y <= top + 1; y++) if (!AIR.has(adapter.blockAt({ x: cx, y, z: cz }) ?? 'unknown')) { clear = false; break; }
+      if (!clear) continue;
+      try { await adapter.moveTo({ kind: 'near', pos: { x: cx + 0.5, y: stand, z: cz + 0.5 }, range: 0.5 }, { signal: ctx.signal, timeoutMs: Math.max(1, Math.min(12000, ctx.deadline - Date.now())), constructionSafe: true }); }
+      catch (error) { if (isAbort(error)) throw error; continue; }
+      checkSession();
+      const at = adapter.state().pos;
+      if (Math.floor(at.x) !== cx || Math.floor(at.z) !== cz || Math.floor(at.y) !== stand) continue;
+      climbed = { blocks: [] };
+      for (let i = 0; i < climbs; i++) {
+        const r = await adapter.pillarUp(names, ctx.signal);
+        if (!r.ok) { await descendPillar(); return false; }
+        climbed.blocks.push({ x: cx, y: stand + i, z: cz });
+      }
+      return reachable(pos);
+    }
+    return false;
+  };
   const finish = async () => {
     checkSession();
+    await descendPillar();
     for (const door of doors) if (mode !== 'inspect' && door.properties.open !== undefined && Date.now() < ctx.deadline - 1000 && actualState(adapter, rotatePosition(door.pos, project.origin, project.rotation))?.name === door.name) {
       try { if (!await setDoorOpen(door, String(door.properties.open) === 'true')) result.failures.push({ cellId: door.id, reason: 'DOOR_ACCESS_STATE_NOT_RESTORED' }); }
       catch (error) { if (isAbort(error)) throw error; result.failures.push({ cellId: door.id, reason: (error as Error).message }); }
@@ -446,12 +499,16 @@ export async function constructBuilding(ctx: SkillCtx, archive: BuildingArchive,
   const owned = new Set(project.checkpoint.ownedCells);
   const near = async (pos: Vec3Like, placement = false) => {
     checkSession();
+    // 站在垫脚柱上：够得着就直接放；要去别处先下来
+    if (climbed) { if (reachable(pos)) return; await descendPillar(); }
     const s = adapter.state();
     if (placement || Math.hypot(pos.x + 0.5 - s.pos.x, pos.y - s.pos.y, pos.z + 0.5 - s.pos.z) > 3) {
       const moveOptions = () => ({ signal: ctx.signal, timeoutMs: Math.max(1, Math.min(15000, ctx.deadline - Date.now())), constructionSafe: true });
       try { await adapter.moveTo({ kind: placement ? 'place_block' : 'reach_block', pos }, moveOptions()); }
       catch (error) {
-        if (isAbort(error) || !placement || blueprint.spec.layout !== 'house' || pos.y < project.origin.y + 2) throw error;
+        if (isAbort(error) || !placement || pos.y < project.origin.y + 2) throw error;
+        if (await climbBeside(pos)) return;
+        if (blueprint.spec.layout !== 'house') throw error;
         checkSession();
         // A placement heuristic can exhaust ground-level approaches without
         // discovering the completed stairway. Explicitly use our observed,

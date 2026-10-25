@@ -1,3 +1,4 @@
+import { claimEdits } from './edits.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { GameAdapter } from '../adapter/types.ts';
@@ -50,6 +51,10 @@ export interface BehaviorStats {
   loops?: { with: string; at: number; times: number }[];
   /** 和别的自动技能同时满足条件的次数（给整理用） */
   conflicts?: Record<string, number>;
+  /** 动作上互相拆台：它挖掉了另一个技能放的方块、或在另一个技能挖开的地方又放上（技能名 → 格数）。给整理用 */
+  undid?: Record<string, number>;
+  /** 反过来：它做的被谁推翻过 */
+  undoneBy?: Record<string, number>;
 }
 /** 代码技能某次失败后，看看要不要在后台改进（改进器自己限频） */
 export type ImproveHook = (name: string, why: 'failures' | 'requested' | 'slow', note?: string) => void;
@@ -286,6 +291,15 @@ export class BehaviorEngine {
    * - 同一个技能几分钟里一再打断同一件事：技能和手上的活在拉锯（比如躲进洞里、心智又要上地表、一出来又躲回去）。
    * 两种都告诉心智（换个做法，或等情况过去）和整理技能的（收窄条件、调优先级、合并）。打法和取舍不写死。
    */
+  /** 这个技能刚做的，是不是在推翻另一个技能做的（挖了它放的块、填了它挖的洞）：两边都记下，整理时收窄条件或合并 */
+  private noteUndo(name: string, taskId: string) {
+    for (const u of claimEdits(taskId, name)) {
+      this.touch(name, (st) => { st.undid ??= {}; st.undid[u.skill] = (st.undid[u.skill] ?? 0) + u.cells; st.conflicts ??= {}; st.conflicts[u.skill] = (st.conflicts[u.skill] ?? 0) + 2; });
+      this.touch(u.skill, (st) => { st.undoneBy ??= {}; st.undoneBy[name] = (st.undoneBy[name] ?? 0) + u.cells; });
+      this.bus.publish('skill_undo', 'P3', `「${name}」把「${u.skill}」刚弄好的 ${u.cells} 格又改回去了`, { name, other: u.skill, cells: u.cells });
+    }
+  }
+
   private noteFire(name: string, doing: string | null, now = Date.now()) {
     this.fires = [...this.fires.filter((f) => now - f.at < BehaviorEngine.LOOP_WINDOW_MS), { at: now, name, doing }].slice(-40);
     const last = this.fires.slice(-4).map((f) => f.name);
@@ -480,10 +494,12 @@ export class BehaviorEngine {
   }
 
   private onDone(o: TaskOutcome) {
-    if (o.task.skill !== 'use_skill' || o.result.status === 'cancelled') return;
+    if (o.task.skill !== 'use_skill') return;
     const name = String((o.task.args as any)?.name ?? '');
     const b = this.behaviors.get(name);
     if (!b) return;
+    this.noteUndo(name, o.task.id);
+    if (o.result.status === 'cancelled') return;
     this.usage.push({ at: Date.now(), tag: `${name}@v${b.version ?? 1}` });
     if (this.usage.length > 600) this.usage.splice(0, this.usage.length - 600);
     const okRun = o.result.status === 'succeeded';

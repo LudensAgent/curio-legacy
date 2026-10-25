@@ -27,6 +27,47 @@ export function buildingArchiveFor(memory: WorldMemory): BuildingArchive {
   if (!archive) { archive = new BuildingArchive(memory.dataDirectory); archives.set(memory, archive); }
   return archive;
 }
+/**
+ * 这一格是不是自己盖的房子的一部分（图纸上要有方块、而且现场确实是那种方块；脚手架、地基下面的土不算）。
+ * 缺料时把自家墙拆下来当料，build 回头又报缺这一格去补——拆东墙补西墙的死循环。采集/拆除动作先问一下这里。
+ */
+const footprints = new Map<string, Map<string, string>>();
+export function ownBuildingAt(memory: WorldMemory, state: { worldId: string; dim: string }, pos: Vec3Like, blockName?: string | null): { id: string; name: string } | null {
+  const p = { x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z) };
+  let projects: BuildingProject[];
+  try { projects = buildingArchiveFor(memory).list(); } catch { return null; }
+  for (const project of projects) {
+    if (project.worldId !== state.worldId || project.dimension !== state.dim) continue;
+    const spec = project.versions.at(-1)?.spec;
+    if (!spec) continue;
+    const reach = Math.max(spec.width ?? 16, spec.depth ?? 16, 8) + 2;
+    if (Math.abs(p.x - project.origin.x) > reach || Math.abs(p.z - project.origin.z) > reach || p.y < project.origin.y - 1 || p.y > project.origin.y + (spec.height ?? 16) + 4) continue;
+    const key = `${project.id}@${project.versions.length}@${project.origin.x},${project.origin.y},${project.origin.z}@${project.rotation}`;
+    let cells = footprints.get(key);
+    if (!cells) {
+      cells = new Map();
+      try {
+        for (const c of compileBuilding(spec).cells) {
+          if (!c.name || /air$/.test(c.name)) continue;
+          const w = rotatePosition(c.pos, project.origin, project.rotation);
+          cells.set(`${w.x},${w.y},${w.z}`, c.name);
+        }
+      } catch { /* 图纸坏了就不管 */ }
+      footprints.set(key, cells);
+      if (footprints.size > 64) footprints.delete(footprints.keys().next().value!);
+    }
+    const want = cells.get(`${p.x},${p.y},${p.z}`);
+    if (!want) continue;
+    if (project.temporaryBlocks?.some((t) => t.pos.x === p.x && t.pos.y === p.y && t.pos.z === p.z)) continue;
+    // 现场是图纸上的那种方块（门、床这种按名字前缀也认）才算；被换成了别的（掉下来的沙子、长进来的草）不算
+    if (blockName && blockName !== want && blockName.replace(/^.*?_/, '') !== want.replace(/^.*?_/, '')) continue;
+    return { id: project.id, name: spec.name ?? project.id.slice(0, 8) };
+  }
+  return null;
+}
+
+export const OWN_BUILDING_HINT = '拆了拿料，build 回头还会报缺这一格，又去补——拆东墙补西墙。缺料就去采（collect）或从箱子里拿；真要拆（开个门、困在里面出不去、改建）写 "own":true';
+
 interface BuildArgs {
   blueprint: string;
   spec?: BuildingSpec;
@@ -121,6 +162,13 @@ export const build: Skill<BuildArgs> = {
   movement: true,
   validate(raw, adapter) {
     const a = obj(raw);
+    // 把图纸 ID 当成作品 ID 写进 projectId（记混了）：图纸已经开工的换成它的作品，还没开工的当作照图施工
+    if (typeof a.projectId === 'string' && /^dr_/i.test(a.projectId.trim())) {
+      const d = activeDrafts()?.get(a.projectId.trim());
+      if (!d) return { ok: false, error: `${a.projectId} 是图纸 ID 的写法，但没有这张图纸；作品 ID 是 build 返回的那串（不带 dr_）` };
+      if (d.usedBy) a.projectId = d.usedBy;
+      else { a.draft = d.id; delete a.projectId; }
+    }
     // 建筑师画好的图纸：只给 draft ID 就照图施工
     if (typeof a.draft === 'string' && !a.spec && !a.projectId) {
       const draft = activeDrafts()?.get(a.draft);

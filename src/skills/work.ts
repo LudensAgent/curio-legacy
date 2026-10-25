@@ -1,6 +1,7 @@
 import { describePlan, materialPlan } from '../methods/shortfall.ts';
 import { lookAround, surface } from './movement.ts';
 import { findStation, myBed, rememberStation } from './stations.ts';
+import { ownBuildingAt } from './build.ts';
 import { dist3, sleep } from '../util.ts';
 import { codeFromError, clampInt, fail, isAbort, obj, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 import { craftReservationConflict } from '../projects/reservations.ts';
@@ -204,6 +205,7 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
       return parts.length ? `；为安全跳过了 ${parts.join('、')} 的 ${args.block}（换个干燥、露天的地方采）` : '';
     };
     ctx.progress(0, `采集 ${args.block} x${args.count}`);
+    const ownSkipped = new Set<string>();
     while (dug < args.count) {
       const s = adapter.state();
       if (!s.connected) return fail('NOT_CONNECTED', '连接断开');
@@ -221,6 +223,8 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
           skippedUnreachable.add(key(h.pos));
           return false;
         })
+        // 自己盖的房子的墙、屋顶、地板不当原料（拆了 build 又要补：拆东墙补西墙）
+        .filter((h) => { if (!ownBuildingAt(ctx.memory, s, h.pos, h.name)) return true; ownSkipped.add(key(h.pos)); return false; })
         // 水下（上方是水）的方块不去挖：会憋气溺水
         .filter((h) => !WATERY.has(adapter.blockAt({ x: h.pos.x, y: h.pos.y + 1, z: h.pos.z }) ?? 'air'))
         // 比脚下低的目标多扣分：宁可挖身边露天的，也不往坑底/水边钻
@@ -285,10 +289,12 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
         const staleNote = stale.length ? `；已把 ${stale.length} 个过时的 ${args.block} 地标从记忆里删除` : '';
         const looked = searched ? '（已转头找过）' : '';
         const skipped = risky.hazard + risky.wet + risky.deep;
+        const ownNote = ownSkipped.size ? `；另有 ${ownSkipped.size} 块是自己房子上的，没拆（拆了还得补）` : '';
         return dug > 0
-          ? ok(`看不到更多 ${args.block}${looked}，采集了 ${dug}/${args.count}${staleNote}${riskNote()}`, { searched, ...(skipped ? { skippedUnsafe: { ...risky } } : {}) })
+          ? ok(`看不到更多 ${args.block}${looked}，采集了 ${dug}/${args.count}${ownNote}${staleNote}${riskNote()}`, { searched, ...(skipped ? { skippedUnsafe: { ...risky } } : {}) })
           : fail('NOT_FOUND', skipped
             ? `能看见的 ${args.block} 都不安全，没有去挖${riskNote()}${looked}${staleNote}`
+            : ownSkipped.size ? `附近能看到的 ${args.block} 都是自己房子上的（${ownSkipped.size} 块），拆了还得补，没去挖；要去别处找${staleNote}`
             : `视野和记忆里都没有 ${args.block}${looked}${staleNote}；尚未定位该资源，不代表其他地点也没有`, { searched, ...(skipped ? { skippedUnsafe: { ...risky } } : {}) });
       }
       // 记忆里的方块可能已经被砍掉/不在加载范围：这种目标跳过，不能误报成“缺工具”
@@ -430,7 +436,7 @@ export const craft: Skill<{ item: string; count: number; extra?: boolean }> = {
     if (args.item.endsWith('_bed') && !args.extra) {
       const s = ctx.adapter.state();
       const held = s.inventory.find((i) => i.name.endsWith('_bed') && i.count > 0);
-      const placed = myBed(ctx.memory, s);
+      const placed = myBed(ctx.memory, s, (p) => ctx.adapter.blockAt(p));
       if (held) return fail('BAD_ARGS', `背包里已经有 ${held.name} 了，不用再做：天黑（或黄昏）直接 sleep；真要第二张床写 {"item":"${args.item}","extra":true}`);
       if (placed) return fail('BAD_ARGS', `已经有一张自己的床放在 (${placed.pos.x},${placed.pos.y},${placed.pos.z})（${placed.dist} 格外），不用再做：天黑时 sleep 会自己走过去睡；真要第二张床写 {"item":"${args.item}","extra":true}`);
     }
