@@ -213,6 +213,8 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
  * mock 模式下用规则凑出同样形状的决定，整条链路保持一致。
  */
 export class Thinker {
+  /** 正在后台画的图纸 */
+  designing: { brief: string; startedAt: number } | null = null;
   constructor(private planner: Planner, private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private book: SkillBook | null = null) {}
 
   get autonomous() { return this.planner.autonomous; }
@@ -316,18 +318,24 @@ export class Thinker {
       if (kind === 'design') {
         const brief = String(raw.brief ?? raw.request ?? '').trim().slice(0, 400);
         if (!brief) return '要设计什么？写 {"kind":"design","brief":"想要的建筑：用途、大概多大、风格、在哪儿"}';
+        // 建筑师在后台画：想得久（几分钟），这段时间心智照常玩，画好了作为“注意到的事”回来
+        if (this.designing) return `建筑师还在画「${this.designing.brief.slice(0, 40)}」（已经 ${Math.max(1, Math.round((Date.now() - this.designing.startedAt) / 60_000))} 分钟），画好会告诉你；先去做别的，别重复请`;
         this.bus.publish('design_start', 'P2', `请建筑师设计：${brief.slice(0, 80)}`);
         const p = ctx.percept;
-        const res = await designBuilding(this.planner, this.book, draftsFor(this.memory), this.adapter, {
+        const job = designBuilding(this.planner, this.book, draftsFor(this.memory), this.adapter, {
           brief, persona: ctx.persona, inventory: ctx.state.inventory, biome: p.self.biome,
           nearby: [...new Set(p.nearby.resources.map((r) => r.block))].slice(0, 12),
           likes: ctx.self.tastes(),
           pastWorks: myBuilds(this.memory, { worldId: ctx.state.worldId, dim: p.self.dim, pos: ctx.state.pos }).map(describeBuild),
           terrain: terrainSketch(this.adapter),
-        }, signal ? AbortSignal.any([signal, AbortSignal.timeout(20 * 60_000)]) : AbortSignal.timeout(20 * 60_000));
-        if (!res.ok) { this.bus.publish('design_failed', 'P1', res.error); return res.error; }
-        this.bus.publish('design', 'P2', res.summary.slice(0, 300), { draftId: res.draft.id, name: res.draft.name, size: res.draft.size });
-        return res.summary;
+        }, AbortSignal.timeout(20 * 60_000));
+        this.designing = { brief, startedAt: Date.now() };
+        job.then((res) => {
+          if (!res.ok) this.bus.publish('design_failed', 'P1', res.error.slice(0, 300), { brief });
+          else this.bus.publish('design', 'P2', res.summary.slice(0, 400), { draftId: res.draft.id, name: res.draft.name, size: res.draft.size });
+        }).catch((e) => this.bus.publish('design_failed', 'P1', `建筑师没画成：${e instanceof Error ? e.message : String(e)}`.slice(0, 300), { brief }))
+          .finally(() => { this.designing = null; });
+        return `已经请建筑师去画「${brief.slice(0, 60)}」了：要想几分钟，画好会告诉你（图纸会出现在 my_drafts）。这段时间先去做别的——攒木头石头、找吃的都行，不用干等`;
       }
       if (kind === 'recipes') {
         if (!this.planner.recipeBook) return '没有配方记忆';

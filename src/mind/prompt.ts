@@ -38,6 +38,8 @@ export interface MindContext {
   gameMessages?: string[];
   stuckHere?: StuckHere | null;
   repeatedFailures?: string[];
+  /** 建筑师正在后台画的图纸 */
+  designing?: { brief: string; minutes: number };
 }
 
 /**
@@ -166,7 +168,8 @@ export function situationalReminders(ctx: MindContext): string[] {
   else if (trapped) out.push('你在地下或被围住了：看 body.local，用 dig_at / step / place_at 一格一格自己挖出去（比如挖阶梯：dig_at [0,2,0]、dig_at [1,1,0]、dig_at [1,2,0]、step [1,1,0] 重复到 sky_visible）');
   else if (where === 'surface' && p.self.sky_visible !== true) out.push(`你${p.self.where!.text}，不是在地下：直接走路，不用挖`);
   if (unfinished.length) out.push(`「${unfinished[0].name}」还没盖完：材料够了就 build {"projectId":"${unfinished[0].id}"} 接着盖`);
-  if (drafts.length) out.push(`图纸 ${drafts[0].id}「${drafts[0].name}」已经画好：按材料清单攒齐后 build {"draft":"${drafts[0].id}"}`);
+  if (ctx.designing) out.push(`建筑师正在画「${ctx.designing.brief.slice(0, 40)}」（${ctx.designing.minutes} 分钟了），画好会告诉你：先攒常用的木头、石头，或做别的事`);
+  else if (drafts.length) out.push(`图纸 ${drafts[0].id}「${drafts[0].name}」已经画好：按材料清单攒齐后 build {"draft":"${drafts[0].id}"}`);
   else if (!unfinished.length && /盖|建|房|屋|家|住处|庇护/.test(intent)) out.push('想盖新房子：先输出 {"kind":"design","brief":"…"} 请建筑师画图纸，再按清单攒材料、照图施工，不要自己画图纸');
   const bed = nearestBed(ctx);
   const bedInBag = s.inventory.some((i) => i.name.endsWith('_bed'));

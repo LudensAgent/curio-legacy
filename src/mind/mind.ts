@@ -480,6 +480,7 @@ export class Mind {
       gameMessages: this.recentGameMessages(),
       skills: this.safe(() => this.d.thinker.skillBook?.index() ?? [], []),
       stuckHere: stuckHere(this.recentEnds, state.pos),
+      ...(this.d.thinker.designing ? { designing: { brief: this.d.thinker.designing.brief, minutes: Math.round((Date.now() - this.d.thinker.designing.startedAt) / 60_000) } } : {}),
       repeatedFailures: [...this.failuresByTarget].filter(([, f]) => f.n >= 2)
         .sort((a, b) => b[1].n - a[1].n).slice(0, 10).map(([key, f]) => `${key.replace(':', ' ')} ×${f.n}（10 分钟内）`),
     };

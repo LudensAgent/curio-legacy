@@ -60,6 +60,8 @@ export class Attention {
       case 'hurt': return this.notice('hurt', ev.msg, 0.45, 15_000);
       case 'reflex': return this.notice(`reflex:${ev.msg.slice(-12)}`, `身体自己反应了：${ev.msg}`, 0.35, 20_000);
       case 'death_items': return this.notice('death_items', ev.msg, 0.7, 60_000);
+      case 'design': return this.notice(`design:${String(d.draftId ?? '')}`, `建筑师把图纸画好了：${ev.msg}`, 0.6, 0);
+      case 'design_failed': return this.notice(`design_failed:${ev.msg.slice(0, 20)}`, `建筑师没画成：${ev.msg}`, 0.5, 0);
       case 'chat': {
         // 有人在聊天里说话（不是自己）：值得听一听
         if (/^<([^>]+)>/.test(ev.msg) && !/\[想法\]/.test(ev.msg)) return this.notice(`chat:${ev.msg}`, `有人说：${ev.msg}`, 0.5, 5_000);
