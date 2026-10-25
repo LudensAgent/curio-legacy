@@ -32,12 +32,26 @@ const scaleOf = (hint: unknown) => { const n = Number((hint as any)?.maxTokensSc
 
 export class OpenAICompatibleProvider implements LlmProvider {
   readonly name: string;
-  constructor(private cfg: Omit<Config['llm'], 'maxPromptTokens' | 'maxRecallRounds' | 'visionInput' | 'contextWindowTokens' | 'compactAtRatio' | 'lightThinking'> & { lightThinking?: string }) {
+  constructor(private cfg: Omit<Config['llm'], 'maxPromptTokens' | 'maxRecallRounds' | 'visionInput' | 'contextWindowTokens' | 'compactAtRatio' | 'lightThinking' | 'reasoningEffort'> & { lightThinking?: string; reasoningEffort?: string }) {
     this.name = `openai-compatible:${cfg.model}`;
   }
 
   /** 个别任务（建筑设计）要想得更久：输出上限按 hint.maxTokensScale 放大 */
   private maxTokens(hint: unknown) { const scale = scaleOf(hint); return scale > 1 ? Math.min(65536, Math.round(this.cfg.maxTokens * scale)) : this.cfg.maxTokens; }
+
+  /** 服务端不认识 reasoning_effort 时记住，之后不再发送 */
+  private effortParamRejected = false;
+
+  /** 推理力度：hint.reasoningEffort 优先（建筑设计要 high），否则按配置；auto = DeepSeek 认真想用 low（想得短、决定落地快） */
+  private effort(hint: unknown): string | null {
+    if (this.effortParamRejected || this.noThinking(hint)) return null;
+    const want = (hint as any)?.reasoningEffort as string | undefined;
+    if (want) return want;
+    const mode = this.cfg.reasoningEffort ?? 'auto';
+    if (mode === 'off' || mode === 'none') return null;
+    if (mode !== 'auto') return mode;
+    return /deepseek/i.test(`${this.cfg.model} ${this.cfg.baseUrl}`) ? 'low' : null;
+  }
 
   /** 服务端不认识 thinking 参数时记住，之后不再发送 */
   private thinkingParamRejected = false;
@@ -55,7 +69,9 @@ export class OpenAICompatibleProvider implements LlmProvider {
       try {
         return await this.completeOnce(messages, signal, hint, onDelta);
       } catch (e: any) {
-        if (!this.noThinking(hint) || !/^HTTP 4\d\d/.test(String(e?.message)) || !/thinking/i.test(String(e?.message))) throw e;
+        const msg = String(e?.message);
+        if (/^HTTP 4\d\d/.test(msg) && /reasoning_effort/i.test(msg) && this.effort(hint)) { this.effortParamRejected = true; return await this.completeOnce(messages, signal, hint, onDelta); }
+        if (!this.noThinking(hint) || !/^HTTP 4\d\d/.test(msg) || !/thinking/i.test(msg)) throw e;
         this.thinkingParamRejected = true;
         return await this.completeOnce(messages, signal, hint, onDelta);
       }
@@ -90,6 +106,8 @@ export class OpenAICompatibleProvider implements LlmProvider {
     };
     if (this.cfg.jsonMode) body.response_format = { type: 'json_object' };
     if (this.noThinking(hint)) body.thinking = { type: 'disabled' };
+    const effort = this.effort(hint);
+    if (effort) body.reasoning_effort = effort;
     const res = await fetch(`${this.cfg.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -114,6 +132,8 @@ export class OpenAICompatibleProvider implements LlmProvider {
     const body: Record<string, unknown> = { model: this.cfg.model, messages: apiMessages(messages), temperature: this.cfg.temperature, max_tokens: this.maxTokens(hint) };
     if (this.cfg.jsonMode) body.response_format = { type: 'json_object' };
     if (this.noThinking(hint)) body.thinking = { type: 'disabled' };
+    const effort = this.effort(hint);
+    if (effort) body.reasoning_effort = effort;
     if (stream) Object.assign(body, { stream: true, stream_options: { include_usage: true } });
     return body;
   }

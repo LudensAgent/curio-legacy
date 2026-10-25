@@ -59,6 +59,8 @@ export const config = {
     stream: bool('LLM_STREAM', true),
     /** 小决策是否让模型先长篇思考：auto = DeepSeek 时关闭（小决策要快，信息才不会过时）；on = 不干预；off = 总是发送关闭思考的参数 */
     lightThinking: str('LLM_LIGHT_THINKING', 'auto').toLowerCase(),
+    /** 认真想时的推理力度（DeepSeek：low|high|max）；auto = DeepSeek 用 low，其他不发。建筑设计固定用 high */
+    reasoningEffort: str('LLM_REASONING_EFFORT', 'auto').toLowerCase(),
     maxCallsPerHour: num('LLM_MAX_CALLS_PER_HOUR', 90),
     fakeDelayMs: num('LLM_FAKE_DELAY_MS', 0),
   },

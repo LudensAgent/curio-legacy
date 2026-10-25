@@ -88,7 +88,7 @@ export async function designBuilding(planner: Planner, book: SkillBook | null, d
   for (let round = 0; round < 3; round++) {
     signal.throwIfAborted();
     // 设计要想得久：输出上限放大到 4 倍（推理模型的思考也算在里面）
-    const c = await planner.complete(messages, { label: 'architect', tier: quick ? 'light' : 'full', signal, attempt: round, maxTokensScale: quick ? 1 : 4 });
+    const c = await planner.complete(messages, { label: 'architect', tier: quick ? 'light' : 'full', signal, attempt: round, maxTokensScale: quick ? 1 : 4, ...(quick ? {} : { reasoningEffort: 'high' }) });
     // 推理模型想太久把输出额度用光（正文为空）：下一轮不再长考，直接画
     if (c.finishReason === 'length' && !c.text.trim()) quick = true;
     let raw: Record<string, any>;

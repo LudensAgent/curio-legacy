@@ -78,3 +78,24 @@ test('个别任务可以放大输出上限（建筑设计 4 倍），其余照�
   srv.close();
   assert.deepEqual(seen, [400, 100]);
 });
+
+test('推理力度：DeepSeek 认真想默认 low，瞥一眼关掉思考不带力度，建筑设计可以要 high', async () => {
+  const seen: any[] = [];
+  const srv = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      const b = JSON.parse(body);
+      seen.push({ effort: b.reasoning_effort, thinking: b.thinking?.type });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: '{}' }, finish_reason: 'stop' }] }));
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const p = new OpenAICompatibleProvider({ ...cfg(`http://127.0.0.1:${(srv.address() as any).port}`), model: 'deepseek-flash', stream: false });
+  await p.complete([{ role: 'user', content: 'hi' }], AbortSignal.timeout(5000), { tier: 'full' });
+  await p.complete([{ role: 'user', content: 'hi' }], AbortSignal.timeout(5000), { tier: 'light' });
+  await p.complete([{ role: 'user', content: 'hi' }], AbortSignal.timeout(5000), { tier: 'full', reasoningEffort: 'high' });
+  srv.close();
+  assert.deepEqual(seen, [{ effort: 'low', thinking: undefined }, { effort: undefined, thinking: 'disabled' }, { effort: 'high', thinking: undefined }]);
+});

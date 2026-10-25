@@ -109,7 +109,8 @@ const ROUTINE_OF_THINKING = `【每次这样想】
 3. 手上的活还对吗：recent 结果正常、done_when 在推进就 continue。
 4. 要换就按【选动作】挑最贴切的；身边一格的事对照【身边】local 写坐标。
 5. 拿不准做法或参数就先查（skill / moves / recipes）。
-6. 输出前核对：动作名在列表里、参数合法、done_when 做完才成立。`;
+6. 输出前核对：动作名在列表里、参数合法、done_when 做完才成立。
+这几步在心里快速过一遍就够，不用长篇推演；拿不准的去查，别反复猜。`;
 
 const CHOOSE = `【选动作】
 - 去记得的地方或坐标 → goto；找没见过的东西 → explore {"until":…}；拿看得见的方块 → gather；身边某一格 → dig_at / step / place_at

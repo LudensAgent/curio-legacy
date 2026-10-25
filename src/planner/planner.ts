@@ -114,7 +114,7 @@ export class Planner {
    * 一次通用的模型调用（心智层使用）：共享每小时预算、调用统计、JSONL 日志和控制台的 LLM 调用面板。
    * 只负责把文字拿回来；解析、校验和重试由调用方决定。
    */
-  async complete(messages: ChatMessage[], opts: { label: string; tier?: 'light' | 'full'; signal?: AbortSignal; attempt?: number; maxTokensScale?: number }): Promise<{ text: string; latencyMs: number; finishReason?: string }> {
+  async complete(messages: ChatMessage[], opts: { label: string; tier?: 'light' | 'full'; signal?: AbortSignal; attempt?: number; maxTokensScale?: number; reasoningEffort?: string }): Promise<{ text: string; latencyMs: number; finishReason?: string }> {
     const signal = opts.signal;
     signal?.throwIfAborted();
     if (!this.budgetOk()) {
@@ -137,7 +137,7 @@ export class Planner {
     try {
       const scale = opts.maxTokensScale && opts.maxTokensScale > 1 ? Math.min(8, opts.maxTokensScale) : 1;
       const timeout = AbortSignal.timeout(this.cfg.llm.timeoutMs * scale + this.cfg.llm.fakeDelayMs + 1000);
-      const c = await this.provider.complete(messages, signal ? AbortSignal.any([signal, timeout]) : timeout, { tier, ...(scale > 1 ? { maxTokensScale: scale } : {}) }, onDelta);
+      const c = await this.provider.complete(messages, signal ? AbortSignal.any([signal, timeout]) : timeout, { tier, ...(scale > 1 ? { maxTokensScale: scale } : {}), ...(opts.reasoningEffort ? { reasoningEffort: opts.reasoningEffort } : {}) }, onDelta);
       this.recordUsage(c.usage);
       this.stats.lastLatencyMs = c.latencyMs;
       this.stats.tierLatency[tier].sum += c.latencyMs;
