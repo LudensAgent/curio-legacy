@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import type { AgentEvent, EventBus } from '../events.ts';
 import type { LlmTrace } from '../planner/llm-trace.ts';
+import { itemTextures } from './item-textures.ts';
 
 const PUBLIC = fileURLToPath(new URL('../../public/', import.meta.url));
 
@@ -39,9 +40,10 @@ export function startDashboard(
   bus: EventBus,
   h: DashboardHandlers,
   extraRoutes: ((req: http.IncomingMessage, res: http.ServerResponse) => boolean)[] = [],
-  opts: { llmTrace?: LlmTrace } = {},
+  opts: { llmTrace?: LlmTrace; mcVersion?: string } = {},
 ) {
   const clients = new Set<http.ServerResponse>();
+  const textures = itemTextures(opts.mcVersion ?? '1.20.1');
   const vendorDir = gridstackDist();
 
   // LLM 调用的实时追踪（请求全文 + 流式增量）
@@ -83,6 +85,16 @@ export function startDashboard(
     const p = url.pathname;
     if (req.method === 'GET' && p === '/') return file(res, 'dashboard.html');
     if (req.method === 'GET' && p === '/overlay') return file(res, 'overlay.html');
+    // 背包里的物品贴图：/textures/item/oak_log.png
+    if (req.method === 'GET' && p.startsWith('/textures/item/')) {
+      const file = textures.resolve(decodeURIComponent(p.slice('/textures/item/'.length)).replace(/\.png$/, ''));
+      if (!file) return send(res, 404, 'not found', 'text/plain');
+      return fs.readFile(file, (err, data) => {
+        if (err) return send(res, 404, 'not found', 'text/plain');
+        res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'public, max-age=86400' });
+        res.end(data);
+      });
+    }
     if (req.method === 'GET' && p.startsWith('/vendor/gridstack/')) {
       const name = p.slice('/vendor/gridstack/'.length);
       if (!vendorDir || !VENDOR_FILES[name]) return send(res, 404, 'not found', 'text/plain');

@@ -422,7 +422,7 @@ startDashboard(config.dashboard.host, config.dashboard.port, bus, {
   resume: () => executive.resume(),
   replan: () => executive.replan(),
   suggest: (t) => executive.suggest(t),
-}, feed ? [createObserverHandler(feed)] : [], { llmTrace });
+}, feed ? [createObserverHandler(feed)] : [], { llmTrace, mcVersion: config.mc.version });
 
 let shuttingDown = false;
 function shutdown() {

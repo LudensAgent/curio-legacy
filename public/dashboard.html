@@ -138,6 +138,22 @@
   .llmDetail pre.reason { color: var(--dim); }
   .llmDetail .err { color: var(--bad); font: 12px var(--mono); }
   .caret::after { content: "▍"; animation: blink 1s infinite; color: var(--dim); }
+  /* 标签页里的面板：统一的格子，每格等高、内容在格子里滚动，排得整齐 */
+  .board { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-auto-rows: 300px; gap: 12px; }
+  .board.two { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: 240px; }
+  .board > .card { margin: 0; display: flex; flex-direction: column; overflow: hidden; }
+  .board > .card > .body { flex: 1; min-height: 0; overflow: auto; }
+  .board .rows2 { grid-row: span 2; } .board .cols2 { grid-column: span 2; }
+  @media (max-width: 1100px) { .board { grid-template-columns: repeat(2, minmax(0, 1fr)); } .board .cols2 { grid-column: span 2; } }
+  @media (max-width: 760px) { .board, .board.two { grid-template-columns: 1fr; } .board .cols2 { grid-column: auto; } .board .rows2 { grid-row: span 1; } }
+  /* 背包：像游戏里的物品栏 */
+  .inv { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 3px; padding: 6px; background: #c6c6c6; border-radius: 4px; }
+  .slot { position: relative; aspect-ratio: 1; background: #8b8b8b; border: 2px solid; border-color: #373737 #ffffff #ffffff #373737; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  .slot.hot { border-color: #262626 #e8e8e8 #e8e8e8 #262626; }
+  .slot img { width: 76%; height: 76%; image-rendering: pixelated; }
+  .slot .n { position: absolute; right: 2px; bottom: 0; font: 700 11px var(--mono); color: #fff; text-shadow: 1px 1px 0 #3f3f3f; pointer-events: none; }
+  .slot .txt { font: 9px/1.1 var(--mono); color: #fff; text-align: center; padding: 2px; word-break: break-all; text-shadow: 1px 1px 0 #3f3f3f; }
+  .invsep { grid-column: 1 / -1; height: 4px; }
   .stack { display: flex; height: 8px; border-radius: 99px; overflow: hidden; background: var(--soft); margin: 8px 0; }
   .stack i { display: block; height: 100%; }
 </style>
@@ -184,7 +200,7 @@
     </div>
     <div class="card">
       <h2>背包 <span class="r dim mono" id="slots"></span></h2>
-      <div class="chips" id="inv"></div>
+      <div class="inv" id="inv"></div>
     </div>
   </aside>
 
@@ -241,17 +257,12 @@
     </nav>
 
     <section class="pane" id="pane-mind">
-      <div class="grid3">
-        <div class="card"><h2>念头流</h2><ul class="list scroll" id="mindStream"></ul></div>
-        <div class="col">
-          <div class="card"><h2>议程</h2><ul class="list" id="mindAgenda"></ul></div>
-          <div class="card"><h2>情绪</h2><div id="mindMood"></div><div class="row" style="margin-top:6px"><span>擅长 / 苦手</span><span class="mono" id="mindSelfImage">-</span></div></div>
-        </div>
-        <div class="col">
-          <div class="card"><h2>窍门</h2><ul class="list" id="mindKnowHow"></ul></div>
-          <div class="card"><h2>日记</h2><ul class="list" id="mindDiary"></ul></div>
-          <div class="card"><h2>实验</h2><ul class="list" id="mindExperiments"></ul></div>
-        </div>
+      <div class="board">
+        <div class="card rows2"><h2>念头流</h2><ul class="list body" id="mindStream"></ul></div>
+        <div class="card"><h2>议程</h2><ul class="list body" id="mindAgenda"></ul></div>
+        <div class="card"><h2>情绪</h2><div class="body"><div id="mindMood"></div><div class="row" style="margin-top:8px"><span>擅长</span><span class="mono" id="mindGoodAt">-</span></div><div class="row"><span>苦手</span><span class="mono" id="mindStruggle">-</span></div></div></div>
+        <div class="card"><h2>窍门</h2><ul class="list body" id="mindKnowHow"></ul></div>
+        <div class="card"><h2>日记 · 实验</h2><div class="body"><ul class="list" id="mindDiary"></ul><div class="sub">实验</div><ul class="list" id="mindExperiments"></ul></div></div>
       </div>
     </section>
 
@@ -281,12 +292,10 @@
     </section>
 
     <section class="pane" id="pane-memory">
-      <div class="grid2">
-        <div class="card"><h2>最近做过的事 <span class="r mono dim" id="seen"></span></h2><ul class="list scroll" id="goals"></ul></div>
-        <div class="col">
-          <div class="card"><h2>地标</h2><ul class="list mono" id="lms"></ul></div>
-          <div class="card"><h2>笔记</h2><ul class="list" id="notes"></ul></div>
-        </div>
+      <div class="board">
+        <div class="card rows2 cols2"><h2>最近做过的事 <span class="r mono dim" id="seen"></span></h2><ul class="list body" id="goals"></ul></div>
+        <div class="card"><h2>地标</h2><ul class="list mono body" id="lms"></ul></div>
+        <div class="card"><h2>笔记</h2><ul class="list body" id="notes"></ul></div>
       </div>
     </section>
 
@@ -313,14 +322,14 @@
     </section>
 
     <section class="pane" id="pane-metrics">
-      <div class="grid2">
+      <div class="board two">
         <div class="card">
           <h2>10 分钟时间分配</h2>
           <div class="stack" id="stack"></div>
           <div class="legend"><span style="--c:var(--accent)">做事</span><span style="--c:var(--info)">观察填充</span><span style="--c:var(--warn)">反射</span><span style="--c:var(--bad)">发呆</span><span style="--c:var(--faint)">暂停/离线</span></div>
           <div class="mono dim" id="thinking-breakdown" style="margin-top:10px">思考期构成：等待采样</div>
         </div>
-        <div class="card"><h2>计数</h2><div class="mono" id="counters" style="line-height:1.9"></div></div>
+        <div class="card"><h2>计数</h2><div class="mono body" id="counters" style="line-height:1.9"></div></div>
       </div>
     </section>
   </main>
@@ -386,13 +395,31 @@ function renderNow(ex, t, s) {
   $('lastfail').title = $('lastfail').textContent;
 }
 
+// 背包：物品栏格子 + 原版贴图（找不到贴图就显示名字）
+let invKey = '';
+function renderInventory(items, empty) {
+  const key = JSON.stringify([items, empty]);
+  if (key === invKey) return; // 没变就不重画，免得贴图闪
+  invKey = key;
+  const total = Math.max(36, items.length + (empty ?? 0));
+  const cells = [];
+  for (let i = 0; i < total; i++) {
+    const it = items[i];
+    if (!it) { cells.push('<div class="slot"></div>'); continue; }
+    const label = it.name.replace(/_/g, ' ');
+    cells.push(`<div class="slot" title="${esc(label)} ×${it.count}"><img src="/textures/item/${encodeURIComponent(it.name)}.png" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'txt',textContent:${esc(JSON.stringify(label.slice(0, 14)))}}))">${it.count > 1 ? `<span class="n">${it.count}</span>` : ''}</div>`);
+  }
+  $('inv').innerHTML = cells.join('');
+}
+
 function renderMind(mind) {
   if (!mind) return;
   const names = { energy: '精力', boredom: '无聊', frustration: '烦躁', satisfaction: '满足', curiosity: '好奇' };
   $('mindMood').innerHTML = Object.entries(names).map(([k, n]) => { const v = Math.round((mind.mood?.[k] ?? 0) * 100);
     return `<div class="meter"><span class="dim">${n}</span><div class="bar ${k === 'frustration' ? 'bad' : k === 'boredom' ? 'warn' : ''}"><i style="width:${v}%"></i></div><span class="mono">${v}</span></div>`; }).join('');
   const si = mind.selfImage || {};
-  $('mindSelfImage').textContent = [(si.goodAt || []).slice(0, 2).join(' '), (si.struggleWith || []).slice(0, 2).join(' ')].filter(Boolean).join(' / ') || '-';
+  $('mindGoodAt').textContent = (si.goodAt || []).slice(0, 3).join(' ') || '-';
+  $('mindStruggle').textContent = (si.struggleWith || []).slice(0, 3).join(' ') || '-';
   const tag = { monologue: '想', notice: '注意', outcome: '结果', learned: '学到', feeling: '感受' };
   $('mindStream').innerHTML = list((mind.stream || []).slice().reverse(), (x) => `<li><span class="k">${tag[x.kind] || x.kind} · ${ago(x.at)}前</span>${esc(x.text)}</li>`);
   const kind = { goal: '想做', idea: '点子', question: '疑问' };
@@ -446,7 +473,7 @@ function render(s) {
   $('passive').innerHTML = others.length ? others.map((x) => `<span class="item">${esc(x)}</span>`).join('') : '<span class="empty">无</span>';
   $('res').innerHTML = list(p.nearby.resources.slice(0, 8), (r) => `<li>${r.seen === 'now' ? '●' : '○'} ${esc(r.block)} ×${r.count} <span class="k">${r.dir ?? ''} ${r.nearest}格</span></li>`);
   $('slots').textContent = `空位 ${p.emptySlots}`;
-  $('inv').innerHTML = p.inventory.length ? p.inventory.map((i) => `<span class="item">${esc(i.name)} ×${i.count}</span>`).join('') : '<span class="empty">空</span>';
+  renderInventory(p.inventory, p.emptySlots);
 
   renderNow(ex, t, s);
   renderMind(ex.mind);
