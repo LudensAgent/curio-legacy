@@ -166,7 +166,8 @@ export class BehaviorEngine {
   private loopSaid = new Map<string, number>();
   static readonly LOOP_WINDOW_MS = 5 * 60_000;
   static readonly HOLD_MS = 90_000;
-  static readonly ADVISORY_MS = 20 * 60_000;
+  /** 半个游戏日（一个完整的昼夜是 20 分钟）：白天的条件和夜里的条件都轮过一遍了，再给它自动接手的机会 */
+  static readonly ADVISORY_MS = 10 * 60_000;
   private waitSaid = new Map<string, number>();
 
   /** 条件成立了但这次不接手：告诉心智一声（同一个技能两分钟说一次），由它决定要不要现在做 */
@@ -313,7 +314,7 @@ export class BehaviorEngine {
       if (loser) {
         const why = `和「${loser.name === loop.a ? loop.b : loop.a}」来回拉锯`;
         this.holds.set(loser.name, { until: now + BehaviorEngine.HOLD_MS, why });
-        // 只歇一会儿压不住：降成“只提醒、不接手”，直到它被改写（整理时拆开条件）或者二十分钟后
+        // 只歇一会儿压不住：降成“只提醒、不接手”，直到它被改写（整理时拆开条件）或者过了半个游戏日（10 分钟）
         this.touch(loser.name, (st) => { st.advisory = { since: now, why }; });
       }
       this.bus.publish('skill_loop', 'P1', `技能「${loop.a}」和「${loop.b}」在来回拉锯：一个做完另一个又把它推回去（几分钟里 ${loop.times} 回）${loser ? `；「${loser.name}」先改成只提醒、不自动接手，直到它被改写` : ''}`,
