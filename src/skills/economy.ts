@@ -115,9 +115,39 @@ export const storeItems: Skill<{}> = {
   },
 };
 
+const CONTAINERS = ['chest', 'trapped_chest', 'barrel'];
+const listItems = (items: { name: string; count: number }[]) => items.length ? items.slice(0, 10).map((i) => `${i.name}×${i.count}`).join('、') + (items.length > 10 ? ` 等 ${items.length} 种` : '') : '空的';
+
+/**
+ * 记得的箱子里都没有：像人一样去附近看得见的箱子里实际翻一翻（最多三个，近的先），翻过的都记下里面有什么。
+ * 以前只查记忆，从没打开看过的箱子永远“没有”。
+ */
+async function lookInNearbyChests(ctx: SkillCtx, item: string, count: number) {
+  const s = ctx.adapter.state();
+  const known = new Map(ctx.memory.chests(s.dim).map((c) => [`${c.pos.x},${c.pos.y},${c.pos.z}`, c]));
+  const near = ctx.senses.knownBlocks(CONTAINERS, 48)
+    .filter((b) => { const k = known.get(`${b.pos.x},${b.pos.y},${b.pos.z}`); return !k || Date.now() - (k.ts ?? 0) > 10 * 60_000; })
+    .sort((a, b) => Math.hypot(a.pos.x - s.pos.x, a.pos.z - s.pos.z) - Math.hypot(b.pos.x - s.pos.x, b.pos.z - s.pos.z)).slice(0, 3);
+  if (!near.length) return fail('NOT_FOUND', `记得的箱子里没有 ${item}，附近 48 格也没看见别的箱子`);
+  const seen: string[] = [];
+  for (const c of near) {
+    try {
+      const r = await ctx.adapter.useChest(c.pos, [], [{ name: item, count }], ctx.signal);
+      if (!r.ok) { seen.push(`(${c.pos.x},${c.pos.y},${c.pos.z}) 打不开：${r.reason}`); continue; }
+      ctx.memory.setChest(s.dim, c.pos, r.contents);
+      if (r.moved) return ok(`在 (${c.pos.x},${c.pos.y},${c.pos.z}) 的箱子里取出 ${r.moved} 个 ${item}（里面还有：${listItems(r.contents)}）`);
+      seen.push(`(${c.pos.x},${c.pos.y},${c.pos.z})：${listItems(r.contents)}`);
+    } catch (e) {
+      if (isAbort(e)) throw e;
+      seen.push(`(${c.pos.x},${c.pos.y},${c.pos.z}) 出错：${(e as Error).message.slice(0, 60)}`);
+    }
+  }
+  return fail('NOT_FOUND', `翻了 ${seen.length} 个箱子都没有 ${item}：${seen.join('；')}（都记下了）`, { seen });
+}
+
 export const takeItems: Skill<{ item: string; count: number }> = {
   name: 'take_items',
-  description: '从记得的箱子里取出物品（state.storage 里能看到箱子里存了什么）',
+  description: '从箱子里取出物品：先找记得存着它的箱子；记不得的，就去附近看得见的箱子里实际翻一翻（顺便记住里面有什么）',
   argsDoc: '{"item": "<物品名>", "count"?: 1-64}',
   timeoutMs: 90000,
   movement: true,
@@ -129,7 +159,7 @@ export const takeItems: Skill<{ item: string; count: number }> = {
   },
   async run(ctx, args) {
     const chests = ctx.memory.chests().filter((c) => c.items.some((i) => i.name === args.item && i.count > 0));
-    if (!chests.length) return fail('NOT_FOUND', `记得的箱子里没有 ${args.item}`);
+    if (!chests.length) return lookInNearbyChests(ctx, args.item, args.count);
     const s = ctx.adapter.state();
     chests.sort((a, b) => Math.hypot(a.pos.x - s.pos.x, a.pos.z - s.pos.z) - Math.hypot(b.pos.x - s.pos.x, b.pos.z - s.pos.z));
     try {

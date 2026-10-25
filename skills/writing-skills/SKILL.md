@@ -39,6 +39,7 @@ description: 怎么把管用的做法写成技能：触发条件、动作步骤�
 - 背包：`has` `"cobblestone"` 或 `{"item":"*_planks","count":4}`（* 通配）；`lacks` `"torch"`
 - 正在做：`doing` / `not_doing` 动作名或数组
 - 身边的方块：`cell` `{"at":[前,上,右],"is":"air|open|solid|liquid|方块名"}`，可写数组；open = 能穿过（空气、草、雪层）
+- 看得见的掉落物：`drops` `{"within":8,"item"?:["beef","*_log"]}`
 - 死后的掉落物：`dropped_items` `true` 或 `{"within":格数,"left_above":秒数}`（同一维度里还有没捡回的东西；掉落物 5 分钟后消失）
 - 失败：`after_failure` `{"skill"?:["goto","explore"],"code"?:["PATH_NOT_FOUND","STUCK"]}`
 - 组合：`any` `[条件…]`、`all` `[条件…]`、`not` `{条件}`

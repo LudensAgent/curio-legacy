@@ -381,7 +381,13 @@ export const sleepSkill: Skill<{ at?: Vec3Like; place?: boolean }> = {
         const d = Math.round(Math.hypot(args.at.x - s.pos.x, args.at.y - s.pos.y, args.at.z - s.pos.z));
         if (d > 3) {
           ctx.progress(0.2, `走向 ${d} 格外的床`);
-          await ctx.adapter.moveTo({ kind: 'near', pos: args.at, range: 2 }, { signal: ctx.signal, timeoutMs: Math.max(5000, ctx.deadline - Date.now() - 30000) });
+          // 床常常在自己挖的洞里、封好的小屋里：走不过去就像人一样挖开挡路的土石过去
+          try {
+            await ctx.adapter.moveTo({ kind: 'near', pos: args.at, range: 2 }, { signal: ctx.signal, timeoutMs: Math.max(5000, Math.min(60000, ctx.deadline - Date.now() - 30000)) });
+          } catch (e) {
+            if (isAbort(e)) throw e;
+            await ctx.adapter.moveTo({ kind: 'near', pos: args.at, range: 2 }, { signal: ctx.signal, timeoutMs: Math.max(5000, ctx.deadline - Date.now() - 30000), allowTerrainChanges: true });
+          }
         }
       }
       const handy = findStation(ctx, BEDS, 4);

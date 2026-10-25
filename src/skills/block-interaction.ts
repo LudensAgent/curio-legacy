@@ -77,7 +77,15 @@ export const interactBlock: Skill<{ target: string | Vec3Like; item?: string }> 
       const data = { target: expected, pos, item: args.item ?? null, before, actual: actual ?? null, effectEvidence };
       if (!result.ok) return fail('EFFECT_NOT_CONFIRMED', `对 ${expected} 右键失败：${result.reason}`, data);
       if (!effectEvidence.changed) return fail('EFFECT_NOT_CONFIRMED', `已对 ${expected} 发起右键，但实际效果未确认`, data);
-      return ok(`对 ${expected} ${args.item ? `使用 ${args.item}` : '空手右键'}；${effectEvidence.reasons.join('；')}`, data);
+      // 打开的是箱子：顺便看清里面有什么、记下来（之前打开了也不知道里面有什么，取东西时还当它是空的）
+      let contents = '';
+      if (/^(chest|trapped_chest|barrel)$/.test(expected) && !args.item) {
+        try {
+          const r = await adapter.useChest(pos, [], [], signal);
+          if (r.ok) { ctx.memory.setChest(origin.dim, pos, r.contents); contents = `；里面有：${r.contents.length ? r.contents.slice(0, 12).map((i) => `${i.name}×${i.count}`).join('、') : '空的'}（记下了，take_items 可以取）`; }
+        } catch (e) { if (isAbort(e)) throw e; }
+      }
+      return ok(`对 ${expected} ${args.item ? `使用 ${args.item}` : '空手右键'}；${effectEvidence.reasons.join('；')}${contents}`, data);
     } catch (error) {
       if (isAbort(error)) throw error;
       return fail(codeFromError(error), `方块交互失败：${(error as Error).message}`, { effectEvidence: { verified: false, changed: false, reasons: ['交互异常，效果未知'] } });

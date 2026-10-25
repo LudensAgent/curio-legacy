@@ -32,6 +32,8 @@ export interface Predicate {
   cover?: ('sealed' | 'pit' | 'open')[];
   /** 死后掉在地上、还没捡回的东西（同一维度）：可以限定离这里多远以内、还剩多少秒以上 */
   dropped_items?: { within?: number; left_above?: number };
+  /** 看得见的掉落物：可以限定是哪些东西（* 通配）、多远以内 */
+  drops?: { item?: string[]; within: number };
   /** 只在这些维度生效（overworld / the_nether / the_end） */
   dim?: string[];
   any?: Predicate[]; all?: Predicate[]; not?: Predicate;
@@ -51,12 +53,14 @@ export interface Sense {
   /** 距上次挨打多少毫秒（不知道为 Infinity） */
   hurtAgoMs: number;
   cover: 'sealed' | 'pit' | 'open';
+  /** 看得见的掉落物 */
+  drops?: { item: string; dist: number }[];
   /** 死后掉在地上还没捡回的东西（同一维度才有） */
   deathDrop?: { dist: number; leftS: number; count: number } | null;
 }
 
 export const PREDICATE_KEYS = ['hp_below', 'food_below', 'oxygen_below', 'in_water', 'in_lava', 'on_ground', 'night', 'dark', 'hostile', 'no_hostile_within',
-  'has', 'lacks', 'doing', 'not_doing', 'cell', 'after_failure', 'hurt_within', 'cover', 'dropped_items', 'dim', 'any', 'all', 'not'] as const;
+  'has', 'lacks', 'doing', 'not_doing', 'cell', 'after_failure', 'hurt_within', 'cover', 'dropped_items', 'drops', 'dim', 'any', 'all', 'not'] as const;
 
 const NAME = /^[a-z0-9_*]{2,60}$/;
 const list = (v: unknown): string[] | null => {
@@ -141,6 +145,13 @@ export function validatePredicate(raw: unknown, depth = 0): Predicate | { error:
     if (!c.length || c.some((x: string) => !['sealed', 'pit', 'open'].includes(x))) return { error: 'cover 写 sealed（四面和头顶都封住）|pit（坑里）|open（空地）' };
     out.cover = c as Predicate['cover'];
   }
+  if (o.drops !== undefined) {
+    const d = o.drops as Record<string, unknown>;
+    if (!d || typeof d !== 'object' || !num(d.within, 1, 24)) return { error: 'drops 写 {"within":格数(1–24),"item"?:"物品名或数组，可用 *"}' };
+    const item = d.item === undefined ? null : list(d.item);
+    if (d.item !== undefined && !item) return { error: 'drops.item 写物品名或数组' };
+    out.drops = { within: d.within as number, ...(item ? { item } : {}) };
+  }
   if (o.dim !== undefined) {
     const d = list(o.dim);
     if (!d) return { error: 'dim 写维度名或数组：overworld / the_nether / the_end' };
@@ -212,6 +223,7 @@ export function evalPredicate(p: Predicate, s: Sense): boolean {
   if (p.hurt_within !== undefined && !(s.hurtAgoMs <= p.hurt_within * 1000)) return false;
   if (p.cover && !p.cover.includes(s.cover)) return false;
   if (p.dim && !p.dim.includes(st.dim)) return false;
+  if (p.drops && !(s.drops ?? []).some((d) => d.dist <= p.drops!.within && (!p.drops!.item || p.drops!.item.some((i) => glob(i, d.item))))) return false;
   if (p.dropped_items) {
     const d = s.deathDrop;
     if (!d || !d.count) return false;
@@ -231,7 +243,12 @@ export function senseNow(adapter: Pick<GameAdapter, 'state' | 'blockAt' | 'eye'>
   let facing: Facing = 'N';
   try { const eye = adapter.eye?.(); if (eye) facing = facingOfYaw(eye.yaw); } catch { /* 朝向暂不可用 */ }
   let hostiles: Sense['hostiles'] = [];
-  try { hostiles = senses.perceivedEntities(32).filter((e) => e.kind === 'hostile').map((e) => ({ name: e.name, dist: e.dist, ...(e.fusing ? { fusing: true } : {}) })); } catch { /* 感官暂不可用 */ }
+  let drops: NonNullable<Sense['drops']> = [];
+  try {
+    const ents = senses.perceivedEntities(32);
+    hostiles = ents.filter((e) => e.kind === 'hostile').map((e) => ({ name: e.name, dist: e.dist, ...(e.fusing ? { fusing: true } : {}) }));
+    drops = ents.filter((e) => e.kind === 'item' && e.perception !== 'heard').map((e) => ({ item: e.name.replace(/^item:/, ''), dist: e.dist }));
+  } catch { /* 感官暂不可用 */ }
   let lightLevel: number | null = null;
   try { if (adapter.lightAt) lightLevel = measureLight(adapter as Pick<GameAdapter, 'blockAt' | 'lightAt'>, state.pos, state.timeOfDay, state.isDay).level; } catch { /* 光照读不到 */ }
   const feet = feetCell(state.pos);
@@ -242,7 +259,7 @@ export function senseNow(adapter: Pick<GameAdapter, 'state' | 'blockAt' | 'eye'>
     return cache.get(k) ?? null;
   };
   return {
-    state, hostiles, lightLevel, facing, doing, ...(failure ? { failure } : {}), hurtAgoMs, cell,
+    state, hostiles, drops, lightLevel, facing, doing, ...(failure ? { failure } : {}), hurtAgoMs, cell,
     get cover() { return coverOf(cell); },
   };
 }

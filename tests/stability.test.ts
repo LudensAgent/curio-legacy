@@ -126,3 +126,36 @@ test('吃东西：结果里说清吃了什么、每块值多少（生的顺带�
   assert.equal(r.status, 'succeeded', r.summary);
   assert.match(r.summary, /bread×1（\+5 饥饿、饱和 6）/);
 });
+
+test('箱子：记得的箱子里没有，就去附近看得见的箱子里实际翻一翻，翻过的都记下里面有什么', async () => {
+  const { SKILLS } = await import('../src/skills/index.ts');
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null);
+  const chestPos = { x: 3, y: 64, z: 0 };
+  adapter.blocks.push({ name: 'chest', pos: chestPos });
+  (adapter as any).chests.set('3,64,0', new Map([['bread', 5], ['cobblestone', 20]]));
+  const senses = { ...noSenses, knownBlocks: (names: string[]) => names.includes('chest') ? [{ name: 'chest', pos: chestPos, dist: 3 }] : [] };
+  const ctx = { adapter, senses, memory, bus: new EventBus(), signal: new AbortController().signal, deadline: Date.now() + 10_000, taskId: 't', progress() {} } as any;
+  const miss = await SKILLS.take_items.run(ctx, { item: 'apple', count: 4 });
+  assert.equal(miss.failureCode, 'NOT_FOUND');
+  assert.match(miss.summary, /bread×5/, '翻过了，说得出里面有什么');
+  assert.equal(memory.chests()[0].items.find((i) => i.name === 'bread')?.count, 5, '记下了');
+  const got = await SKILLS.take_items.run(ctx, { item: 'bread', count: 3 });
+  assert.equal(got.status, 'succeeded', got.summary);
+  assert.equal(adapter.inv.get('bread'), 3);
+  memory.close();
+});
+
+test('掉落物：看见地上新出现的东西会注意到（捡不捡自己定）；技能条件也能用 drops', async () => {
+  const { Attention } = await import('../src/mind/attention.ts');
+  const { evalPredicate, validatePredicate } = await import('../src/mind/predicate.ts');
+  const att = new Attention();
+  const percept = (drops: any[]) => ({ time: { phase: 'day' }, self: { food: 20, hp: 20, inWater: false }, emptySlots: 10, nearby: { hostile: [], resources: [] }, light: null, vision: { visible_drops: drops } }) as any;
+  att.fromPercept(percept([]));
+  const n = att.fromPercept(percept([{ item: 'beef', count: 2, dist: 3, dir: 'N' }]));
+  assert.ok(n.some((x) => /地上有掉落物：beef×2/.test(x.what)));
+  const p = validatePredicate({ drops: { within: 6, item: ['beef', '*_log'] } });
+  assert.ok(!('error' in p));
+  const sense = (drops: any[]) => ({ state: { dim: 'overworld' }, drops } as any);
+  assert.equal(evalPredicate(p as any, sense([{ item: 'oak_log', dist: 4 }])), true);
+  assert.equal(evalPredicate(p as any, sense([{ item: 'dirt', dist: 2 }])), false);
+});
