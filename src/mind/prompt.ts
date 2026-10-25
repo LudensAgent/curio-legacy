@@ -14,7 +14,8 @@ import { cleanLesson, moodWords, type SelfModel } from './self.ts';
 import type { Activity, ActivityRecord, Noticing, StuckHere } from './types.ts';
 import type { FocusPlan } from './self.ts';
 import { RECALL_LABEL, type Recalled } from './recall.ts';
-import { INSTINCTS } from './behaviors.ts';
+/** 技能书里内置的反射技能（代码技能，可以被重写和在后台改进） */
+const REFLEX_SKILLS = ['dodge-creeper', 'retreat-when-hurt', 'fight-back', 'eat-when-starving'];
 
 export interface MindContext {
   tier: 'glance' | 'deliberate';
@@ -112,7 +113,7 @@ const DECISIONS = `continue 照常做｜adjust 还是这件事、改一改 routi
 const FOCUS = `【专注】主目标配清单（plan），每段活推进第一项没勾掉的，做完勾掉。缺料是清单里的一步；天黑、饿了、有怪用 detour 插一段（做完自动回来），不换主目标。`;
 
 /** 技能：从经历里总结、写下就生效的做法（详细写法在 writing-skills 技能里，按需查） */
-const SKILLS_DOC = (instincts: string) => `【技能】管用的做法写进 skill，存下就生效：{"name":"英文-连字符","description":"…","when":{条件},"steps":[…]或"code":"JS"}。when 含 after_failure＝动作失败时先试；只有状态条件＝成立自动做；不写＝use_skill 调用。同样的麻烦再碰到或刚找到解法就写；写法先查 {"kind":"skill","name":"writing-skills"}。可换的本能：${instincts}。`;
+const SKILLS_DOC = (instincts: string) => `【技能】管用的做法写进 skill，存下就生效：{"name":"英文-连字符","description":"…","when":{条件},"steps":[…]或"code":"JS"}。when 含 after_failure＝动作失败时先试；只有状态条件＝成立自动做；不写＝use_skill 调用。同样的麻烦再碰到或刚找到解法就写；写法先查 {"kind":"skill","name":"writing-skills"}。身体的反射（${instincts}）也是技能，可同名重写。`;
 
 const QUERIES = (skills: string[]) => `【先查再做】需要时先输出一个查询 JSON（不占游戏时间，每次思考最多 3 次），拿到结果再决定：
 - {"kind":"skill","name":"技能名"} 翻开技能书看做法｜{"kind":"design","brief":"用途、多大、风格","where":"here|base|x,y,z"} 请建筑师在后台画图纸（where 是盖在哪：脚下这一带、家旁边或某个坐标）
@@ -131,7 +132,7 @@ const ROUTINE_OF_THINKING = `【每次这样想】（快速过一遍）
 
 const CHOOSE = `【选动作】
 - 去记得的地方或坐标 → goto；找没见过的东西 → explore {"until":…}；拿看得见的方块 → gather；身边某一格 → dig_at / step / place_at
-- 过水 → boat 或游过去；吃 → eat（背包有吃的）/ hunt / forage / fish；做东西 → craft、smelt（会自己放下背包里的工作台/熔炉，不用先 place_at；拿不准先查 recipes）
+- 过水 → boat 或游过去；吃 → eat（背包有吃的）/ hunt / forage / fish；做东西 → craft、smelt（会自己放下背包里的工作台/熔炉；拿不准查 recipes）
 - 有怪靠近 → defend {"target":"名字"} 打掉，或走开绕路（苦力怕也是你定：打就砍一下退一步）
 - 过夜 → sleep（有床，看参数选哪张）/ shelter / 自己挖坑封顶；在坑里或地下 → place_at [0,0,0] 垫高或挖台阶
 - 盖新房子 → design 拿图纸 → 攒材料 → build {"draft":"图纸ID"}（料不全也能先盖，有多少盖多少）；没盖完的 → build {"projectId":"作品ID"}；不要自己画图纸
@@ -173,7 +174,7 @@ ${FOCUS}
 
 ${QUERIES(skills)}
 
-${SKILLS_DOC(Object.entries(INSTINCTS).filter(([, v]) => !v.locked).map(([k]) => k).join('、'))}
+${SKILLS_DOC(REFLEX_SKILLS.join('、'))}
 
 【决定】${DECISIONS}
 

@@ -143,7 +143,9 @@ test('自动技能接手：条件成立时由身体去做，并且能换掉它�
   assert.ok(w.ok && w.mode === 'auto', JSON.stringify(w));
   now += 10_000;
   reflex.tick();
-  assert.deepEqual(starts.at(-1), { skill: 'use_skill', args: { name: 'pillar-from-skeletons' } }, '学会之后：照自己的做法');
+  assert.equal(starts.at(-1)?.skill, 'use_skill', '学会之后：照自己的做法');
+  assert.equal((starts.at(-1)?.args as any).name, 'pillar-from-skeletons');
+  assert.equal((starts.at(-1)?.args as any).args.trigger.hostiles[0].name, 'skeleton', '触发时的情况交给技能');
   const n = starts.length;
   now += 5_000; reflex.tick();
   assert.equal(starts.length, n, '做的时候本能不再插手，冷却内也不重复触发');
@@ -330,4 +332,46 @@ test('身边方块图附带算好的落脚点和能放方块的格子', async ()
   assert.ok(m.spots.stand.some((s: string) => s.startsWith('[1,1,0]')), `能迈上前方的石头：${m.spots.stand}`);
   assert.ok(!m.spots.stand.some((s: string) => s.startsWith('[1,0,0]')), '石头那格站不进去');
   assert.ok(m.spots.place.some((s: string) => s.startsWith('[0,0,-1]')), `左边地上能放：${m.spots.place}`);
+});
+
+test('反射也是技能：内置的躲苦力怕、受伤撤退、还手、饿了吃都是可改进的代码技能；代码里只剩岩浆和溺水', (t) => {
+  let now = 1_700_000_000_000;
+  t.mock.method(Date, 'now', () => now);
+  const book = new SkillBook(BUILTIN_SKILLS_DIR, null);
+  const state: AgentState = {
+    connected: true, alive: true, observationReady: true, worldId: 'w', sessionId: 's', observationId: 1, username: 'test', pos: { x: 0.5, y: 64, z: 0.5 }, dim: 'overworld',
+    hp: 5, food: 20, oxygen: 20, timeOfDay: 15000, isDay: false, biome: null, onGround: true, inWater: false, inLava: false, inventory: [{ name: 'cobblestone', count: 8 }], emptySlots: 30, held: null,
+  };
+  let current: TaskInfo | null = null;
+  const starts: Step[] = [];
+  const bus = new EventBus();
+  const adapter = { state: () => state, hasFood: () => false, blockAt: ({ y }: { y: number }) => y < 64 ? 'stone' : 'air', lightAt: () => ({ block: 0, sky: 0 }), eye: () => ({ yaw: 0, pitch: 0 }), isKnownItem: () => true } as unknown as GameAdapter;
+  const arbiter = { paused: false, info: () => current, on() {}, off() {},
+    start: (step: Step, source: TaskSource) => { starts.push(step); current = { id: 't', planVersion: 1, skill: step.skill, args: step.args, source, progress: 0, note: '', startedAt: now, deadline: now + 1000, movement: false }; return current; },
+    cancel: () => { current = null; } } as unknown as Arbiter;
+  const entities: EntityInfo[] = [{ id: 7, name: 'zombie', kind: 'hostile', dist: 2.5, pos: { x: 3, y: 64, z: 0 }, perception: 'seen' } as EntityInfo];
+  const engine = new BehaviorEngine(book, adapter, arbiter, bus, { ...noSenses, perceivedEntities: () => entities }, path.join(tmp(), 'stats.json'));
+  for (const n of ['dodge-creeper', 'retreat-when-hurt', 'fight-back', 'eat-when-starving']) {
+    assert.equal(engine.get(n)?.mode, 'auto', n);
+    assert.ok(engine.get(n)?.code, `${n} 是代码技能`);
+  }
+  const reflex = new Reflex(adapter, arbiter, bus, { ...noSenses, perceivedEntities: () => entities }, { routineCare: false, behaviors: engine, instincts: 'skills' });
+  reflex.tick();
+  assert.equal(starts.length, 0, '没挨打：血少也不乱跑（代码里不再有逃跑本能）');
+  bus.publish('hurt', 'P2', '受到伤害');
+  reflex.tick();
+  assert.equal(starts.at(-1)?.skill, 'use_skill');
+  assert.equal((starts.at(-1)?.args as any).name, 'retreat-when-hurt', '血少又挨打：交给受伤撤退技能');
+  // 事后评判：12 秒内死了就记一次没用（代码会被后台改进）
+  current = null;
+  bus.publish('death', 'P0', '死了');
+  assert.equal(engine.statsOf('retreat-when-hurt')?.fail, 1);
+  assert.match(engine.statsOf('retreat-when-hurt')!.recent![0].summary, /触发时血 5.*zombie.*死了/);
+  // 再来一次，这回 12 秒后还活着、没再掉血：算管用
+  now += 20_000; bus.publish('hurt', 'P2', '受到伤害'); reflex.tick();
+  current = null; now += 13_000; reflex.tick();
+  assert.equal(engine.statsOf('retreat-when-hurt')?.ok, 1);
+  // 岩浆仍是代码里的底线
+  state.inLava = true; current = null; reflex.tick();
+  assert.equal(starts.at(-1)?.skill, 'flee');
 });

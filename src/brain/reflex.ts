@@ -37,7 +37,9 @@ export class Reflex {
 
   /** routineCare=false leaves ordinary care and recovery choices to the autonomous planner. */
   constructor(private adapter: GameAdapter, private arbiter: Arbiter, private bus: EventBus, private senses: Senses,
-    private options: { routineCare?: boolean; habits?: () => { torch_every?: number; eat_below?: number }; behaviors?: LearnedBehaviors } = {}) {
+    private options: { routineCare?: boolean; habits?: () => { torch_every?: number; eat_below?: number }; behaviors?: LearnedBehaviors;
+      /** builtin：躲苦力怕、逃跑、还手、饿了就吃写在代码里（旧行为）；skills：这些都交给技能书里的反射技能，代码只留岩浆和溺水两条底线 */
+      instincts?: 'builtin' | 'skills' } = {}) {
     bus.on('event', (ev: { type: string; data?: Record<string, unknown> }) => {
       if (ev.type === 'hurt') { this.lastHurtAt = Date.now(); return; }
       if (ev.type !== 'task_end' || ev.data?.skill !== 'surface') return;
@@ -149,12 +151,16 @@ export class Reflex {
     const learned = this.options.behaviors;
     if (learned?.tick(cur)) return;
     const instinct = (name: string) => !learned?.suppresses(name, cur);
+    const legacy = this.options.instincts !== 'skills';
+    if (cur?.skill === 'surface' || cur?.skill === 'flee') return;
+    if (cur?.skill === 'use_skill' && cur.source === 'reflex') { this.checkStuck(s.pos, cur); return; } // 身体正照着反射技能在做
     // 掩体：完全封好就不出去；在坑里或正在挖坑/垫高/封顶时，只有真的被打到、怪就在身边才动
     const cover = this.cover(s.pos);
     const fortifying = !!cur && cur.source !== 'reflex' && cur.source !== 'filler' && ['dig_at', 'place_at', 'climb_up', 'shelter', 'wait', 'use_skill', 'dig', 'descend', 'step'].includes(cur.skill);
     const hurtNow = Date.now() - this.lastHurtAt < 2500;
     const mustReact = (dist: number) => cover !== 'sealed' && (!(cover === 'pit' || fortifying) || (hurtNow && dist < 4));
     const canFlee = Date.now() >= this.fleeGiveUpUntil;
+    if (legacy) {
     if (creeper && instinct('creeper') && cover !== 'sealed') {
       // 正在跟它打：后撤几步躲开爆炸就行，不跑远；没在打：跑开
       if (cur?.skill !== 'flee' && this.ready('creeper', 1500)) this.fire({ skill: 'flee', args: { distance: fighting ? 6 : 12 } }, 'P0', `苦力怕${creeper.fusing ? '在嘶嘶作响，' : ''}距离 ${creeper.dist.toFixed(1)}`);
@@ -165,8 +171,6 @@ export class Reflex {
       if (s.hp <= 6 && instinct('losing-fight') && canFlee && this.ready('escalate', 3000)) this.flee(20, `战斗中生命 ${s.hp}`);
       return;
     }
-    if (cur?.skill === 'surface' || cur?.skill === 'flee') return;
-    if (cur?.skill === 'use_skill' && cur.source === 'reflex' && (!nearest || nearest.dist >= 4)) { this.checkStuck(s.pos, cur); return; } // 身体正照着学会的做法在做
     // 夜里低血量且身上有方块：就地挖坑封顶，比被追着跑更安全
     if (this.options.routineCare !== false && cur?.source !== 'reflex' && cur?.skill !== 'eat' && !s.isDay && s.hp <= 8 && (!nearest || nearest.dist > 4) && !s.inWater && hasPlaceable(s.inventory) && instinct('night-shelter') && this.ready('shelter', 90000)) {
       return this.fire({ skill: 'shelter', args: { until: 'day' } }, 'P0', `夜里生命只有 ${Math.round(s.hp)}`);
@@ -182,13 +186,14 @@ export class Reflex {
       if (s.hp > 8 && (armed || s.hp > 14)) return this.fire({ skill: 'defend', args: { entityId: threat.id } }, 'P1', `${threat.name} 贴近（${threat.dist.toFixed(1)} 格）`);
       if (s.hp <= 8 && canFlee) return this.flee(18, `${threat.name} 贴近且生命 ${Math.round(s.hp * 10) / 10}`, 'P1');
     }
+    }
     // 非紧急动作不互相抢占，尤其不要把已经开始吃的一口掐断，再重新吃同一顿。
     if (cur?.source === 'reflex' || cur?.skill === 'eat') return;
     const safe = !nearest || nearest.dist > 8;
     // 吃东西的反射分轻重：真饿（≤6）或掉血时饥饿不满，什么都吃、马上吃；
     // 只是有点饿（7–12）时，只在有熟食/面包这类“正经食物”时顺手吃，并且不打断打猎、战斗——
     // 手上只有生肉就留给决策去决定（先烤熟更划算），而不是一捡到生肉就吃掉
-    const urgent = s.food <= 6 || (s.hp < 10 && s.food < 18);
+    const urgent = legacy && (s.food <= 6 || (s.hp < 10 && s.food < 18));
     const eatBelow = this.options.habits?.().eat_below;
     const peckish = eatBelow ? s.food <= eatBelow : s.food <= 12 || (s.hp < 14 && s.food < 18);
     const goodFood = s.inventory.some((i) => GOOD_FOOD.test(i.name));

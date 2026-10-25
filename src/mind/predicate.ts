@@ -26,6 +26,10 @@ export interface Predicate {
   doing?: string[]; not_doing?: string[];
   cell?: CellCheck[];
   after_failure?: { skill?: string[]; code?: string[] };
+  /** 最近几秒内挨过打 */
+  hurt_within?: number;
+  /** 身边的掩体：sealed 四面和头顶都封住｜pit 四面封住头顶空｜open 空地 */
+  cover?: ('sealed' | 'pit' | 'open')[];
   any?: Predicate[]; all?: Predicate[]; not?: Predicate;
 }
 
@@ -40,10 +44,13 @@ export interface Sense {
   doing: string | null;
   /** 恢复类技能：刚才失败的那个动作 */
   failure?: { skill: string; code?: string };
+  /** 距上次挨打多少毫秒（不知道为 Infinity） */
+  hurtAgoMs: number;
+  cover: 'sealed' | 'pit' | 'open';
 }
 
 export const PREDICATE_KEYS = ['hp_below', 'food_below', 'oxygen_below', 'in_water', 'in_lava', 'on_ground', 'night', 'dark', 'hostile', 'no_hostile_within',
-  'has', 'lacks', 'doing', 'not_doing', 'cell', 'after_failure', 'any', 'all', 'not'] as const;
+  'has', 'lacks', 'doing', 'not_doing', 'cell', 'after_failure', 'hurt_within', 'cover', 'any', 'all', 'not'] as const;
 
 const NAME = /^[a-z0-9_*]{2,60}$/;
 const list = (v: unknown): string[] | null => {
@@ -119,6 +126,15 @@ export function validatePredicate(raw: unknown, depth = 0): Predicate | { error:
     if (code && (!code.length || code.some((c: string) => !/^[A-Z_]{3,40}$/.test(c)))) return { error: 'after_failure.code 写失败码，例如 PATH_NOT_FOUND、STUCK、TOOL_MISSING' };
     out.after_failure = { ...(skill ? { skill } : {}), ...(code ? { code } : {}) };
   }
+  if (o.hurt_within !== undefined) {
+    if (!num(o.hurt_within, 0.5, 60)) return { error: 'hurt_within 写秒数（0.5–60）：最近几秒内挨过打' };
+    out.hurt_within = o.hurt_within;
+  }
+  if (o.cover !== undefined) {
+    const c = (Array.isArray(o.cover) ? o.cover : String(o.cover).split('|')).map((x: unknown) => String(x).trim());
+    if (!c.length || c.some((x: string) => !['sealed', 'pit', 'open'].includes(x))) return { error: 'cover 写 sealed（四面和头顶都封住）|pit（坑里）|open（空地）' };
+    out.cover = c as Predicate['cover'];
+  }
   for (const k of ['any', 'all'] as const) if (o[k] !== undefined) {
     if (!Array.isArray(o[k]) || !o[k].length || o[k].length > 6) return { error: `${k} 写 1–6 个条件的数组` };
     const parts: Predicate[] = [];
@@ -175,6 +191,8 @@ export function evalPredicate(p: Predicate, s: Sense): boolean {
     const f = s.failure;
     if (!f || (p.after_failure.skill && !p.after_failure.skill.includes(f.skill)) || (p.after_failure.code && !p.after_failure.code.includes(String(f.code ?? '')))) return false;
   }
+  if (p.hurt_within !== undefined && !(s.hurtAgoMs <= p.hurt_within * 1000)) return false;
+  if (p.cover && !p.cover.includes(s.cover)) return false;
   if (p.all && !p.all.every((q) => evalPredicate(q, s))) return false;
   if (p.any && !p.any.some((q) => evalPredicate(q, s))) return false;
   if (p.not && evalPredicate(p.not, s)) return false;
@@ -183,7 +201,7 @@ export function evalPredicate(p: Predicate, s: Sense): boolean {
 
 /** 从适配器和感官凑出此刻的感觉（不透视：怪只认看见/听见的，方块只看身边） */
 export function senseNow(adapter: Pick<GameAdapter, 'state' | 'blockAt' | 'eye'> & Partial<Pick<GameAdapter, 'lightAt'>>, senses: Pick<Senses, 'perceivedEntities'>,
-  doing: string | null, failure?: Sense['failure']): Sense {
+  doing: string | null, failure?: Sense['failure'], hurtAgoMs = Infinity): Sense {
   const state = adapter.state();
   let facing: Facing = 'N';
   try { const eye = adapter.eye?.(); if (eye) facing = facingOfYaw(eye.yaw); } catch { /* 朝向暂不可用 */ }
@@ -193,14 +211,23 @@ export function senseNow(adapter: Pick<GameAdapter, 'state' | 'blockAt' | 'eye'>
   try { if (adapter.lightAt) lightLevel = measureLight(adapter as Pick<GameAdapter, 'blockAt' | 'lightAt'>, state.pos, state.timeOfDay, state.isDay).level; } catch { /* 光照读不到 */ }
   const feet = feetCell(state.pos);
   const cache = new Map<string, string | null>();
-  return {
-    state, hostiles, lightLevel, facing, doing, ...(failure ? { failure } : {}),
-    cell: (rel) => {
-      const k = rel.join(',');
-      if (!cache.has(k)) { try { cache.set(k, adapter.blockAt(toWorld(feet, facing, rel))); } catch { cache.set(k, null); } }
-      return cache.get(k) ?? null;
-    },
+  const cell = (rel: [number, number, number]) => {
+    const k = rel.join(',');
+    if (!cache.has(k)) { try { cache.set(k, adapter.blockAt(toWorld(feet, facing, rel))); } catch { cache.set(k, null); } }
+    return cache.get(k) ?? null;
   };
+  return {
+    state, hostiles, lightLevel, facing, doing, ...(failure ? { failure } : {}), hurtAgoMs, cell,
+    get cover() { return coverOf(cell); },
+  };
+}
+
+/** 掩体：四面（脚和头的高度）都是实心方块就是坑里/洞里；头顶也封上就是完全藏好了 */
+export function coverOf(cell: (rel: [number, number, number]) => string | null): 'sealed' | 'pit' | 'open' {
+  const solid = (rel: [number, number, number]) => cellIs(cell(rel), 'solid');
+  const walls = ([[1, 0], [-1, 0]] as const).every(([f]) => solid([f, 0, 0]) && solid([f, 1, 0])) && ([1, -1] as const).every((r) => solid([0, 0, r]) && solid([0, 1, r]));
+  if (!walls) return 'open';
+  return solid([0, 2, 0]) ? 'sealed' : 'pit';
 }
 
 /** 给模型看的条件说明（一行） */

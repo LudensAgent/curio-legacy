@@ -148,6 +148,10 @@ export class BehaviorEngine {
   private lastFired = new Map<string, number>();
   private invalid = new Map<string, string>();
   private doneListener = (o: TaskOutcome) => this.onDone(o);
+  private lastHurtAt = 0;
+  /** 自动技能做完后要看“结果”：十几秒后还活着、没再掉多少血才算管用 */
+  private aftermath = new Map<string, { hp: number; at: number; summary?: string; data?: Record<string, any>; context: string }>();
+  static readonly AFTERMATH_MS = 12_000;
   /** 代码技能失败或心智要求改进时调用（main 接到后台改进器） */
   improve: ImproveHook | null = null;
 
@@ -155,6 +159,10 @@ export class BehaviorEngine {
     private bus: EventBus, private senses: Pick<Senses, 'perceivedEntities'>, private statsFile: string | null = null) {
     if (statsFile && fs.existsSync(statsFile)) { try { this.stats = JSON.parse(fs.readFileSync(statsFile, 'utf8')) ?? {}; } catch { this.stats = {}; } }
     book?.onChange(() => this.reload());
+    bus.on('event', (ev: { type: string }) => {
+      if (ev.type === 'hurt') this.lastHurtAt = Date.now();
+      else if (ev.type === 'death') for (const name of [...this.aftermath.keys()]) this.judge(name, true);
+    });
     arbiter?.on('done', this.doneListener);
     this.reload();
   }
@@ -178,7 +186,7 @@ export class BehaviorEngine {
   enabled(b: Behavior): boolean { return !this.stats[b.name]?.disabled; }
 
   private sense(cur: TaskInfo | null, failure?: Sense['failure']): Sense {
-    return senseNow(this.adapter, this.senses, cur && cur.source !== 'filler' ? cur.skill : null, failure);
+    return senseNow(this.adapter, this.senses, cur && cur.source !== 'filler' ? cur.skill : null, failure, this.lastHurtAt ? Date.now() - this.lastHurtAt : Infinity);
   }
 
   private running(cur: TaskInfo | null): Behavior | undefined {
@@ -188,6 +196,7 @@ export class BehaviorEngine {
   /** 自动技能：条件成立就由身体去做（返回 true 表示这一拍已经接手） */
   tick(cur: TaskInfo | null, now = Date.now()): boolean {
     if (!this.arbiter) return false;
+    for (const [name, a] of this.aftermath) if (now - a.at >= BehaviorEngine.AFTERMATH_MS) this.judge(name, false);
     const auto = this.list().filter((b) => b.mode === 'auto' && this.enabled(b));
     if (!auto.length) return false;
     const running = this.running(cur);
@@ -199,8 +208,12 @@ export class BehaviorEngine {
       if (now - (this.lastFired.get(b.name) ?? 0) < b.cooldownMs) continue;
       s ??= this.sense(cur);
       if (!evalPredicate(b.when!, s)) continue;
-      const r = this.arbiter.start({ skill: 'use_skill', args: { name: b.name } }, 'reflex');
+      // 触发时的情况交给技能（代码技能里是 args.trigger），也留着给事后评判和改进用
+      const trigger = { hp: Math.round(s.state.hp * 10) / 10, food: s.state.food, doing: s.doing, hurtAgoMs: Number.isFinite(s.hurtAgoMs) ? s.hurtAgoMs : null, cover: s.cover,
+        hostiles: s.hostiles.slice(0, 4).map((h) => ({ name: h.name, dist: Math.round(h.dist * 10) / 10, ...(h.fusing ? { fusing: true } : {}) })) };
+      const r = this.arbiter.start({ skill: 'use_skill', args: { name: b.name, args: { trigger } } }, 'reflex');
       if ('error' in r) { this.lastFired.set(b.name, now); continue; }
+      this.aftermath.set(b.name, { hp: s.state.hp, at: now, context: `触发时血 ${trigger.hp}${trigger.hostiles.length ? `，${trigger.hostiles.map((h) => `${h.name} ${h.dist}格`).join('、')}` : ''}，${trigger.cover === 'open' ? '在空地' : trigger.cover === 'pit' ? '在坑里' : '在封好的坑里'}${s.doing ? `，当时在做 ${s.doing}` : ''}` });
       this.lastFired.set(b.name, now);
       this.touch(b.name, (st) => { st.fired++; st.lastAt = now; });
       this.bus.publish('instinct', 'P2', `技能「${b.name}」的条件成立，身体照着做：${b.description}`, { name: b.name, source: b.source });
@@ -311,7 +324,29 @@ export class BehaviorEngine {
     const okRun = o.result.status === 'succeeded';
     // 恢复时用的：做完了先不算成功，等重做的那一步出结果（creditRecovery）；自己就出错了才直接算失败
     if ((o.task.args as any)?.failure && okRun) return;
+    // 自动技能（后天的反射）：做没做完不算数，十几秒后看结果（judge）；代码本身出错才马上算失败
+    const pending = this.aftermath.get(name);
+    // 技能自己判断这次不用做（怪已经走了、没吃的）：不算一次使用
+    if (okRun && (o.result.data as any)?.result?.skipped) { this.aftermath.delete(name); return; }
+    if (pending && o.task.source === 'reflex') {
+      pending.summary = o.result.summary; pending.data = (o.result.data ?? {}) as Record<string, any>;
+      if (okRun || !['ERROR', 'BAD_ARGS'].includes(String(o.result.failureCode))) return;
+      this.aftermath.delete(name);
+    }
     this.record(b, okRun, o.result.summary, (o.result.data ?? {}) as Record<string, any>);
+  }
+
+  /** 自动技能的事后评判：死了、或者又掉了 6 点以上的血，就是没管用 */
+  private judge(name: string, died: boolean) {
+    const a = this.aftermath.get(name);
+    this.aftermath.delete(name);
+    const b = this.behaviors.get(name);
+    if (!a || !b) return;
+    const hp = this.adapter.state().hp;
+    const lost = Math.max(0, a.hp - hp);
+    const worked = !died && lost < 6;
+    const verdict = died ? '做完 12 秒内死了' : lost >= 6 ? `做完后又掉了 ${Math.round(lost)} 点血` : `之后 12 秒平安（血 ${Math.round(hp)}）`;
+    this.record(b, worked, `${a.context}；${a.summary ? `它做了：${a.summary.slice(0, 100)}；` : ''}结果：${verdict}`, a.data ?? {});
   }
 
   private record(b: Behavior, okRun: boolean, summary: string, data: Record<string, any>) {
