@@ -21,7 +21,7 @@ import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'curio-skills-'));
-const designsIn = (md: string) => [...md.matchAll(/```json\n([\s\S]*?)\n```/g)].map((m) => JSON.parse(m[1]));
+const designsIn = (md: string) => [...md.matchAll(/```json\r?\n([\s\S]*?)\r?\n```/g)].map((m) => JSON.parse(m[1]));
 
 function scriptedPlanner(replies: string[], seen: ChatMessage[][] = []) {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();

@@ -85,3 +85,15 @@ test('原地垫高：头顶空了才跳得起来；背包没方块就说清楚',
   assert.equal(up.status, 'succeeded', up.summary);
   assert.equal(Math.floor(w.pos.y), 61);
 });
+
+test('原子动作认模型常用的几种坐标写法：at / to / pos、字符串、{f,u,r}', () => {
+  const w = pocket();
+  for (const raw of [{ at: [1, 1, 0] }, { pos: [1, 1, 0] }, { offset: '1,1,0' }, { at: { f: 1, u: 1, r: 0 } }]) {
+    const v = digAt.validate({ ...raw, facing: 'N' }, w);
+    assert.ok(v.ok && (v.args as any).at.join() === '1,1,0', JSON.stringify(raw));
+  }
+  const s = stepTo.validate({ pos: [1, 1, 0], facing: 'N' }, w);
+  assert.ok(s.ok, !s.ok ? s.error : '');
+  const bad = digAt.validate({ where: 'front' }, w);
+  assert.ok(!bad.ok && /"at":\[前,上,右\]/.test(bad.error));
+});

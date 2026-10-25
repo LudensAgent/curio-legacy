@@ -410,7 +410,7 @@ test('思考时可以翻开技能书、请建筑师设计；图纸进入之后�
   const w = fixture(t, { book });
   draftsFor(w.memory);
   const md = fs.readFileSync(path.join(BUILTIN_SKILLS_DIR, 'architect', 'SKILL.md'), 'utf8');
-  const cottage = JSON.parse([...md.matchAll(/```json\n([\s\S]*?)\n```/g)][0][1]);
+  const cottage = JSON.parse([...md.matchAll(/```json\r?\n([\s\S]*?)\r?\n```/g)][0][1]);
   await w.tick();
   assert.match(w.pending[0].messages[0].content, /architect：/, '技能索引在提示词里');
   await w.reply(0, { kind: 'skill', name: 'homemaking' });

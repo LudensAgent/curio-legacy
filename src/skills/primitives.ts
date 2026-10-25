@@ -16,8 +16,19 @@ type Rel = [number, number, number];
 interface CellArgs { at: Rel; facing: Facing }
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 
+/** 模型常用的几种写法都认：at / to / pos / offset / rel / cell，数组 [1,1,0]、字符串 "1,1,0"、对象 {"f":1,"u":1,"r":0} */
+function relValue(a: Record<string, any>): unknown {
+  const v = a.at ?? a.to ?? a.pos ?? a.position ?? a.offset ?? a.rel ?? a.cell;
+  if (typeof v === 'string') return v.split(/[,\s]+/).filter(Boolean).map(Number);
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    const f = v.f ?? v.forward ?? v.front, u = v.u ?? v.up, r = v.r ?? v.right;
+    if ([f, u, r].every((n) => n !== undefined)) return [Number(f), Number(u), Number(r)];
+  }
+  return v;
+}
+
 function parseRel(v: unknown, bounds: { f: number; u: [number, number]; r: number }): Rel | string {
-  if (!Array.isArray(v) || v.length !== 3 || v.some((n) => !Number.isInteger(n))) return 'at/to 需要 [前,上,右] 三个整数，例如 [1,1,0]';
+  if (!Array.isArray(v) || v.length !== 3 || v.some((n) => !Number.isInteger(n))) return '需要 "at":[前,上,右] 三个整数，例如 {"at":[1,1,0]}';
   const [f, u, r] = v as number[];
   if (Math.abs(f) > bounds.f || Math.abs(r) > bounds.r || u < bounds.u[0] || u > bounds.u[1]) return `只能是身边的格子：前后 ±${bounds.f}、左右 ±${bounds.r}、上下 ${bounds.u[0]}..${bounds.u[1]}`;
   return [f, u, r];
@@ -46,7 +57,7 @@ export const digAt: Skill<CellArgs> = {
   movement: false,
   validate(raw, adapter) {
     const a = obj(raw);
-    const at = parseRel(a.at ?? a.cell ?? a.rel, { f: 2, u: [-1, 3], r: 2 });
+    const at = parseRel(relValue(a), { f: 2, u: [-1, 3], r: 2 });
     if (typeof at === 'string') return { ok: false, error: at };
     const facing = facingArg(a.facing, adapter);
     if (!FACINGS.includes(facing as Facing)) return { ok: false, error: facing };
@@ -87,7 +98,7 @@ export const stepTo: Skill<CellArgs> = {
   movement: true,
   validate(raw, adapter) {
     const a = obj(raw);
-    const to = parseRel(a.to ?? a.at ?? a.cell, { f: 1, u: [-1, 1], r: 1 });
+    const to = parseRel(relValue(a), { f: 1, u: [-1, 1], r: 1 });
     if (typeof to === 'string') return { ok: false, error: to };
     if (to[0] === 0 && to[2] === 0) return { ok: false, error: '原地上下不是 step：往上用 place_at [0,0,0]（垫一块站上去），往下用 dig_at [0,-1,0]' };
     const facing = facingArg(a.facing, adapter);
@@ -128,7 +139,7 @@ export const placeAt: Skill<CellArgs & { item: string }> = {
   movement: true,
   validate(raw, adapter) {
     const a = obj(raw);
-    const at = parseRel(a.at ?? a.cell ?? a.rel, { f: 2, u: [-1, 3], r: 2 });
+    const at = parseRel(relValue(a), { f: 2, u: [-1, 3], r: 2 });
     if (typeof at === 'string') return { ok: false, error: at };
     if (at[0] === 0 && at[2] === 0 && at[1] === 1) return { ok: false, error: '[0,1,0] 是自己的头，往上垫高用 [0,0,0]' };
     const facing = facingArg(a.facing, adapter);

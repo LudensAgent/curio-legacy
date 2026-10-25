@@ -15,7 +15,7 @@ const NAME = /^[a-z][a-z0-9-]{1,40}$/;
 export const BUILTIN_SKILLS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../skills');
 
 export function parseSkillMarkdown(text: string): { name?: string; description?: string; body: string } {
-  const m = text.match(/^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/);
+  const m = text.replace(/\r\n/g, "\n").match(/^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/);
   if (!m) return { body: text.trim() };
   const meta: Record<string, string> = {};
   for (const line of m[1].split('\n')) {
