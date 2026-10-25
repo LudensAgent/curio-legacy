@@ -5,6 +5,7 @@ import { crystalArrowShot } from '../combat/ballistics.ts';
 import type { Config } from '../config.ts';
 import type { EventBus } from '../events.ts';
 import { AbortedError, raceAbort, shortId, sleep, throwIfAborted, TimeoutError } from '../util.ts';
+import { cornerSafe } from './corner-safe.ts';
 import type {
   InvItem,
   ActionResult,
@@ -173,7 +174,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
             if (b) mv.blocksCantBreak.add(b.id);
           }
         } catch { /* ignore */ }
+        cornerSafe(mv);
         bot.pathfinder.setMovements(mv);
+        // 远一点的目标默认 5 秒想不完就报错：多给点时间，想不完时 goto 会按“没找到路”处理
+        bot.pathfinder.thinkTimeout = 10000;
         this.normalMovements = mv;
         bot.__agentMovementsSet = true;
       }
@@ -499,7 +503,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (b.vehicle) throw new Error(`RIDING：正在乘坐 ${b.vehicle.name}，走路前先 dismount，或用 ride 操控它前进`);
     if (opts.maxDropDown !== undefined && (!this.normalMovements || typeof b.pathfinder.setMovements !== 'function')) throw new Error('No path: 当前寻路器不能配置明确下行范围');
     if (this.normalMovements && typeof b.pathfinder.setMovements === 'function') {
-      const movements = Object.assign(Object.create(Object.getPrototypeOf(this.normalMovements)), this.normalMovements);
+      const movements = cornerSafe(Object.assign(Object.create(Object.getPrototypeOf(this.normalMovements)), this.normalMovements));
       if (opts.constructionSafe) {
         movements.canDig = false; movements.allow1by1towers = false; movements.scafoldingBlocks = [];
       } else if (!opts.allowTerrainChanges) {
@@ -661,6 +665,22 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return cells[0] ? { x: cells[0].x, z: cells[0].z } : null;
   }
 
+  /**
+   * 身体贴着脚边或头边的实心方块、又离格子中心偏了：Pathfinder 按格子中心规划，第一步就会蹭到这块方块。
+   * 先挪回脚下那格的中心（潜行，不会掉下去）再走。返回要回到的格子；不需要时 null。
+   */
+  private hugging(): { x: number; z: number } | null {
+    const b = this.bot, e = b?.entity;
+    if (!e?.onGround || e.isInWater || e.isInLava || b.vehicle || typeof b.blockAt !== 'function' || typeof b.setControlState !== 'function' || !e.position?.offset) return null;
+    const p = e.position, cx = Math.floor(p.x), cz = Math.floor(p.z);
+    const ox = p.x - (cx + 0.5), oz = p.z - (cz + 0.5);
+    if (Math.hypot(ox, oz) < 0.15) return null;
+    const solid = (dx: number, dy: number, dz: number) => { const blk = b.blockAt(p.offset(dx, dy, dz)); return !!blk && blk.boundingBox === 'block' && !/water|lava/.test(blk.name); };
+    const sx = Math.sign(ox), sz = Math.sign(oz);
+    const touching = [0.1, 1.1].some((dy) => (Math.abs(ox) > 0.15 && solid(sx * 0.4, dy, 0)) || (Math.abs(oz) > 0.15 && solid(0, dy, sz * 0.4)));
+    return touching ? { x: cx, z: cz } : null;
+  }
+
   private async steady(cell: { x: number; z: number }, opts: MoveOpts, check: () => void): Promise<void> {
     const b = this.bot, e = b.entity, p = e.position;
     const epoch = this.actionEpoch;
@@ -693,8 +713,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     let corrections = 0, recoveryOrigin = b.entity?.position?.clone?.() ?? null;
     for (;;) {
       check();
-      const edge = this.edgeSupport();
-      if (edge) { await this.steady(edge, opts, check); check(); }
+      const edge = this.edgeSupport() ?? (corrections === 0 && !attempted.has('recentre') ? this.hugging() : null);
+      if (edge) { if (!this.edgeSupport()) attempted.add('recentre'); await this.steady(edge, opts, check); check(); }
       let stalled = false;
       let last = b.entity?.position?.clone?.() ?? null, since = Date.now();
       const watch = setInterval(() => {

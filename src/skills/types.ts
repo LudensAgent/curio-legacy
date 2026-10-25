@@ -111,7 +111,7 @@ export function codeFromError(e: any): FailureCode {
   const name = String(e?.name ?? '');
   const msg = String(e?.message ?? e ?? '');
   if (name === 'TimeoutError' || /timeout/i.test(msg)) return 'TIMEOUT';
-  if (/no ?path|NoPath|path was stopped|cannot reach|goal.*unreachable/i.test(msg)) return 'PATH_NOT_FOUND';
+  if (/no ?path|NoPath|path was stopped|cannot reach|goal.*unreachable|took to+ long to decide path/i.test(msg)) return 'PATH_NOT_FOUND';
   if (/NOT_CONNECTED/.test(msg)) return 'NOT_CONNECTED';
   if (/NO_EFFECT|NOT_CONFIRMED|STATE_UNCHANGED|INVENTORY_UNCHANGED|NO_PLACEMENT_FACE/.test(msg)) return 'EFFECT_NOT_CONFIRMED';
   if (/ENTITY_GONE/.test(msg)) return 'TARGET_GONE';
