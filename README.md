@@ -320,7 +320,7 @@ npm run memory:clear
 src/
 ├─ adapter/      GameAdapter 接口 + Mineflayer 实现（上层不直接碰 mineflayer）
 ├─ arbiter/      动作仲裁器（planVersion、取消、抢占、动作守卫）
-├─ skills/       （仓库根目录）内置技能书：architect 建筑设计手册、homemaking 安家
+├─ skills/       （仓库根目录）技能书说明：architect 建筑设计手册、writing-skills 怎么写技能（会动手的技能都由它自己总结，写到 data/skills/）
 ├─ mind/         心智层（默认）：self 自我模型、attention 注意力、activity 一段活、thinker/prompt 思考、mind 主循环
 ├─ brain/        reflex（反射层、卡死检测）
 ├─ perception/   vision（射线视野、听觉、记忆）+ 感知摘要器（→ 给 LLM 的紧凑 JSON）

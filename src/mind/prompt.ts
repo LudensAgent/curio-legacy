@@ -14,8 +14,6 @@ import { cleanLesson, moodWords, type SelfModel } from './self.ts';
 import type { Activity, ActivityRecord, Noticing, StuckHere } from './types.ts';
 import type { FocusPlan } from './self.ts';
 import { RECALL_LABEL, type Recalled } from './recall.ts';
-/** 技能书里内置的反射技能（代码技能，可以被重写和在后台改进） */
-const REFLEX_SKILLS = ['dodge-creeper', 'retreat-when-hurt', 'fight-back', 'eat-when-starving'];
 
 export interface MindContext {
   tier: 'glance' | 'deliberate';
@@ -113,7 +111,7 @@ const DECISIONS = `continue 照常做｜adjust 还是这件事、改一改 routi
 const FOCUS = `【专注】主目标配清单（plan），每段活推进第一项没勾掉的，做完勾掉。缺料是清单里的一步；天黑、饿了、有怪用 detour 插一段（做完自动回来），不换主目标。`;
 
 /** 技能：从经历里总结、写下就生效的做法（详细写法在 writing-skills 技能里，按需查） */
-const SKILLS_DOC = (instincts: string) => `【技能】管用的做法写进 skill，存下就生效：{"name":"英文-连字符","description":"…","when":{条件},"steps":[…]或"code":"JS"}。when 含 after_failure＝动作失败时先试；只有状态条件＝成立自动做；不写＝use_skill 调用。同样的麻烦再碰到或刚找到解法就写；写法先查 {"kind":"skill","name":"writing-skills"}。身体的反射（${instincts}）也是技能，可同名重写。`;
+const SKILLS_DOC = () => `【技能】管用的做法写进 skill，存下就生效：{"name":"英文-连字符","description":"…","when":{条件},"steps":[…]或"code":"JS"}。when 含 after_failure＝动作失败时先试；只有状态条件＝成立自动做；不写＝use_skill 调用。同样的麻烦再碰到或刚找到解法就写；写法先查 {"kind":"skill","name":"writing-skills"}。身体只会躲岩浆和溺水，别的反应（躲怪、逃跑、脱困）都靠你总结成技能。`;
 
 const QUERIES = (skills: string[]) => `【先查再做】需要时先输出一个查询 JSON（不占游戏时间，每次思考最多 3 次），拿到结果再决定：
 - {"kind":"skill","name":"技能名"} 翻开技能书看做法｜{"kind":"design","brief":"用途、多大、风格","where":"here|base|x,y,z"} 请建筑师在后台画图纸（where 是盖在哪：脚下这一带、家旁边或某个坐标）
@@ -174,7 +172,7 @@ ${FOCUS}
 
 ${QUERIES(skills)}
 
-${SKILLS_DOC(REFLEX_SKILLS.join('、'))}
+${SKILLS_DOC()}
 
 【决定】${DECISIONS}
 
@@ -256,7 +254,7 @@ export function situationalReminders(ctx: MindContext): string[] {
   // 家已经有了、手上又没什么大目标：像玩家一样给自己找下一个更长的目标，而不是只做零碎的小事
   const done = myBuilds(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }).some((b) => b.status === 'complete');
   if (done && !ctx.activity && ctx.self.agenda().filter((x) => x.kind === 'goal').length < 2)
-    out.push('家已经盖好了：给自己定个更大的目标放进 agenda（比如下矿弄铁和铁工具、开一块农田养几只动物、扩建仓库、去远处探险），可以先翻 homemaking 技能书');
+    out.push('家已经盖好了：给自己定个更大的目标放进 agenda（比如下矿弄铁和铁工具、开一块农田养几只动物、扩建仓库、去远处探险）');
   return out.slice(0, 5);
 }
 

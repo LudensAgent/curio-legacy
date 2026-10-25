@@ -34,7 +34,8 @@ test('技能书：读出内置技能和自己写的技能；索引只放一行�
   const self = tmp();
   const book = new SkillBook(BUILTIN_SKILLS_DIR, self);
   assert.ok(book.get('architect')?.body.includes('坡屋顶'));
-  assert.ok(book.get('homemaking'));
+  assert.ok(book.get('writing-skills'));
+  assert.ok(!book.list().some((k) => k.behavior !== undefined), '技能书里没有预置的动作技能：都靠它自己总结');
   assert.ok(book.index().some((l) => l.startsWith('architect：')));
   assert.equal(book.write('architect', '我的版本', '随便写点什么，至少二十个字的内容在这里。').ok, false);
   const w = book.write('Hillside Homes', '在山坡上盖房子的做法', '1. 先用圆石把低的一边垫平\n2. 墙基做高一层\n3. 门开在高的一边');

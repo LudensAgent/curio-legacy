@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { setImmediate } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
@@ -406,7 +407,7 @@ test('思考时可以翻开技能书、请建筑师设计；图纸进入之后�
   const fs = await import('node:fs');
   const path = await import('node:path');
   const { draftsFor } = await import('../src/building/drafts.ts');
-  const book = new SkillBook(BUILTIN_SKILLS_DIR, null);
+  const book = new SkillBook(BUILTIN_SKILLS_DIR, path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'skills'));
   const w = fixture(t, { book });
   draftsFor(w.memory);
   const md = fs.readFileSync(path.join(BUILTIN_SKILLS_DIR, 'architect', 'SKILL.md'), 'utf8');

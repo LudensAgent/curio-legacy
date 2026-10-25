@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -30,6 +31,8 @@ import { FakeAdapter } from './fake-adapter.ts';
 
 const flush = async () => { for (let i = 0; i < 8; i++) await setImmediate(); };
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'curio-behaviors-'));
+/** 以前内置的示范技能，现在只作为测试用的样本（游戏里技能书一开始是空的，靠它自己总结） */
+const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'skills');
 const noSenses: Senses = { perceivedEntities: () => [], knownBlocks: () => [], refresh() {}, markSweep() {} };
 
 /** 测试用的两个动作：一个总是“路被挡住”，一个总能做成 */
@@ -76,8 +79,8 @@ test('写技能：动作和参数要合法；太宽的自动条件、换掉保�
   assert.ok(!('error' in v) && v.name === 'pillar-from-skeletons');
 });
 
-test('内置的示范技能都能被引擎读懂：恢复类、调用类各有一份，写技能的说明可以翻开', () => {
-  const book = new SkillBook(BUILTIN_SKILLS_DIR, null);
+test('样本技能都能被引擎读懂：恢复类、调用类各有一份；写技能的说明是内置的', () => {
+  const book = new SkillBook(BUILTIN_SKILLS_DIR, FIXTURES);
   const engine = new BehaviorEngine(book, new FakeAdapter(), null, new EventBus(), noSenses);
   assert.equal(engine.get('step-up-when-blocked')?.mode, 'recover');
   assert.equal(engine.get('pillar-out-of-pit')?.mode, 'manual');
@@ -232,7 +235,7 @@ test('想起来：按关键词从做过的事、日记和技能书里挑出相�
   self.record({ id: 'r1', what: '挖阶梯回地面', kind: 'explore', outcome: 'stuck', summary: '迈不到 [1,1,0]：目标格上方是 oak_leaves', durationSec: 5, gained: {}, lost: {}, at: Date.now() - 60_000, signature: 'dig_at>step', failures: 1 });
   self.record({ id: 'r2', what: '砍橡木', kind: 'gather', outcome: 'done', summary: '采集了 8 个 oak_log', durationSec: 40, gained: { oak_log: 8 }, lost: {}, at: Date.now(), signature: 'gather:oak_log', failures: 0 });
   self.writeDiary('在雪地边上被骷髅射死了', 'overworld', [0, 64, 0]);
-  const book = new SkillBook(BUILTIN_SKILLS_DIR, null);
+  const book = new SkillBook(BUILTIN_SKILLS_DIR, FIXTURES);
   const r = recallLocal('被树叶挡住 挖阶梯 回地面 step', { self, memory, book });
   assert.equal(r[0]?.kind, 'experience');
   assert.match(r[0].text, /挖阶梯回地面/);
@@ -315,7 +318,7 @@ test('反射不再把自己从掩体里拽出去：封好的坑里不跑；在�
 test('写技能：恢复类必须写清是哪个动作失败；技能声明的参数没给时 use_skill 当场说清', (t) => {
   const adapter = new FakeAdapter();
   assert.match((validateBehavior({ name: 'fix-all', description: '什么失败都挖一下', when: { after_failure: {} }, steps: [{ skill: 'dig_at', args: { at: [1, 0, 0] } }] }, adapter) as any).error, /哪个动作失败/);
-  const book = new SkillBook(BUILTIN_SKILLS_DIR, null);
+  const book = new SkillBook(BUILTIN_SKILLS_DIR, FIXTURES);
   const engine = new BehaviorEngine(book, adapter, null, new EventBus(), noSenses);
   setBehaviorRegistry(engine);
   t.after(() => setBehaviorRegistry(null));
@@ -334,10 +337,10 @@ test('身边方块图附带算好的落脚点和能放方块的格子', async ()
   assert.ok(m.spots.place.some((s: string) => s.startsWith('[0,0,-1]')), `左边地上能放：${m.spots.place}`);
 });
 
-test('反射也是技能：内置的躲苦力怕、受伤撤退、还手、饿了吃都是可改进的代码技能；代码里只剩岩浆和溺水', (t) => {
+test('反射也是技能：躲苦力怕、受伤撤退、还手、饿了吃这类反应写成代码技能后由引擎接手；代码里只剩岩浆和溺水', (t) => {
   let now = 1_700_000_000_000;
   t.mock.method(Date, 'now', () => now);
-  const book = new SkillBook(BUILTIN_SKILLS_DIR, null);
+  const book = new SkillBook(BUILTIN_SKILLS_DIR, FIXTURES);
   const state: AgentState = {
     connected: true, alive: true, observationReady: true, worldId: 'w', sessionId: 's', observationId: 1, username: 'test', pos: { x: 0.5, y: 64, z: 0.5 }, dim: 'overworld',
     hp: 5, food: 20, oxygen: 20, timeOfDay: 15000, isDay: false, biome: null, onGround: true, inWater: false, inLava: false, inventory: [{ name: 'cobblestone', count: 8 }], emptySlots: 30, held: null,

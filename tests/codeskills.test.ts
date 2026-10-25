@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -16,6 +17,7 @@ import { setBehaviorRegistry } from '../src/skills/use-skill.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'curio-code-'));
+const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'skills');
 const run = (code: string, handle = async (m: string, a: unknown[]) => ({ m, a }), deadlineMs = 5000) =>
   runSandboxed(code, { n: 2 }, handle, { signal: new AbortController().signal, deadline: Date.now() + deadlineMs, pokeMs: 400 });
 
@@ -46,12 +48,12 @@ test('沙箱：出错时报出是代码第几行，api 报错会变成代码里�
   assert.match(hang.error!, /永远不会来/);
 });
 
-test('内置的局部寻路代码技能：绕过一堵墙走到目标', async (t) => {
+test('样本里的局部寻路代码技能：绕过一堵墙走到目标', async (t) => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   const vision = new Vision(adapter), arbiter = new Arbiter(adapter, memory, bus, vision);
   adapter.speed = 1000;
   for (const z of [-1, 0, 1]) for (const y of [64, 65]) adapter.blocks.push({ name: 'stone', pos: { x: 2, y, z } });
-  const book = new SkillBook(BUILTIN_SKILLS_DIR, null);
+  const book = new SkillBook(BUILTIN_SKILLS_DIR, FIXTURES);
   const engine = new BehaviorEngine(book, adapter, arbiter, bus, vision);
   setBehaviorRegistry(engine);
   t.after(() => { setBehaviorRegistry(null); engine.dispose(); memory.close(); });
