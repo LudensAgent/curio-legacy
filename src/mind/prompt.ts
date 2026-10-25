@@ -164,9 +164,36 @@ export function situationalReminders(ctx: MindContext): string[] {
   if (unfinished.length) out.push(`「${unfinished[0].name}」还没盖完：材料够了就 build {"projectId":"${unfinished[0].id}"} 接着盖`);
   if (drafts.length) out.push(`图纸 ${drafts[0].id}「${drafts[0].name}」已经画好：按材料清单攒齐后 build {"draft":"${drafts[0].id}"}`);
   else if (!unfinished.length && /盖|建|房|屋|家|住处|庇护/.test(intent)) out.push('想盖新房子：先输出 {"kind":"design","brief":"…"} 请建筑师画图纸，再按清单攒材料、照图施工，不要自己画图纸');
-  if (p.time.phase === 'dusk' || p.time.phase === 'night') out.push(`天${p.time.phase === 'dusk' ? '快' : '已经'}黑了：想好今晚在哪过（家、床，或者就地躲一晚）`);
+  const bed = nearestBed(ctx);
+  const bedInBag = s.inventory.some((i) => i.name.endsWith('_bed'));
+  const bedLine = bed ? `记得的床在 ${bed.dist} 格外（${bed.dir}，${bed.pos}）` : '';
+  if (p.time.phase === 'dusk' || p.time.phase === 'night') {
+    const options = [bed && bed.dist <= 128 ? `${bedLine}，sleep 会自己走过去` : bed ? `${bedLine}，太远了` : '', bedInBag ? '背包里有床，sleep 会就地放下' : ''].filter(Boolean).join('；');
+    out.push(`天${p.time.phase === 'dusk' ? '快' : '已经'}黑了：想好今晚在哪过${options ? `（${options}）` : '（家、床，或者就地躲一晚）'}`);
+  } else {
+    // 像人一样掂量回程：离天黑不远、床又在远处，就该动身或另作打算
+    const tod = ((p.time.timeOfDay % 24000) + 24000) % 24000;
+    const toDuskMin = (12000 - tod) / 1200;
+    if (bed && !bedInBag && bed.dist > 32 && toDuskMin > 0 && toDuskMin <= Math.max(2, bed.dist / 4 / 60 + 1.5))
+      out.push(`再过大约 ${Math.max(1, Math.round(toDuskMin))} 分钟天黑；${bedLine}，走回去要 ${Math.max(1, Math.round(bed.dist / 4 / 60))} 分钟左右：要回去睡就该动身了，否则就近想办法过夜`);
+  }
   if (p.self.food <= 8) out.push(`饿了（饥饿 ${p.self.food}）：留意吃的`);
   return out.slice(0, 4);
+}
+
+/** 记得的最近一张床（自己的或看见过的） */
+function nearestBed(ctx: MindContext): { dist: number; dir: string; pos: string } | null {
+  const p = ctx.percept, s = ctx.state;
+  const [x, , z] = p.self.pos;
+  let best: { dist: number; dir: string; pos: string } | null = null;
+  for (const l of ctx.memory.landmarks()) {
+    if ((l.label !== '床' && l.label !== '我的床') || l.dim !== p.self.dim || (l.worldId && l.worldId !== s.worldId)) continue;
+    const dx = l.pos.x - x, dz = l.pos.z - z, dist = Math.round(Math.hypot(dx, dz, l.pos.y - p.self.pos[1]));
+    if (best && best.dist <= dist) continue;
+    const ns = Math.abs(dz) > Math.abs(dx) * 0.4 ? (dz < 0 ? '北' : '南') : '', ew = Math.abs(dx) > Math.abs(dz) * 0.4 ? (dx < 0 ? '西' : '东') : '';
+    best = { dist, dir: `${ns}${ew}${ns && ew ? '' : '边'}`, pos: `${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}` };
+  }
+  return best;
 }
 
 const pos3 = (p: [number, number, number]) => p.map((n) => Math.round(n)).join(',');

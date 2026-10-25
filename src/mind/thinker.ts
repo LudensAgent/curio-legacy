@@ -91,13 +91,15 @@ export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldM
   if (!Array.isArray(o.steps) || !o.steps.length) return { error: `${label}.steps 需要 1–6 个动作` };
   const steps: ActivityStep[] = [];
   const errors: string[] = [];
+  const dropped: string[] = [];
   for (const [i, s0] of o.steps.slice(0, 6).entries()) {
     const s = normalizeStep(s0) as Record<string, any>;
     const name = String(s?.skill ?? '');
     const skill = SKILLS[name];
-    if (!skill || LLM_HIDDEN.has(name)) { errors.push(`steps[${i}] 没有 "${name}" 这个技能`); continue; }
+    const raw = `${name} ${JSON.stringify(s?.args ?? {}).slice(0, 60)}`;
+    if (!skill || LLM_HIDDEN.has(name)) { errors.push(`steps[${i}] 没有 "${name}" 这个技能`); dropped.push(`${raw}（没有这个动作）`); continue; }
     const v = skill.validate(s?.args ?? {}, adapter);
-    if (!v.ok) { errors.push(`steps[${i}] ${name} 参数错误：${v.error}`); continue; }
+    if (!v.ok) { errors.push(`steps[${i}] ${name} 参数错误：${v.error}`); dropped.push(`${raw}（参数写错）`); continue; }
     const optional = !!s0 && typeof s0 === 'object' && ((s0 as any).optional === true || (s0 as any).opportunistic === true);
     steps.push({ skill: name, args: v.args, ...(optional ? { optional: true } : {}) });
   }
@@ -122,6 +124,7 @@ export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldM
     ...(str(o.expect, 120) ? { expect: str(o.expect, 120) } : {}),
     ...(str(o.if_stuck, 120) ? { ifStuck: str(o.if_stuck, 120) } : {}),
     ...(typeof o.agenda_id === 'string' ? { agendaId: o.agenda_id } : {}),
+    ...(dropped.length ? { dropped } : {}),
   };
 }
 

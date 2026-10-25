@@ -49,6 +49,7 @@ export function createActivity(draft: ActivityDraft, monologue: string, source: 
     ...(draft.doneWhen ? { doneWhen: draft.doneWhen } : {}), ...(draft.expect ? { expect: draft.expect } : {}),
     ...(draft.ifStuck ? { ifStuck: draft.ifStuck } : {}), ...(draft.agendaId ? { agendaId: draft.agendaId } : {}),
     source, monologue, startedAt: Date.now(), failures: 0, consecutiveFailures: 0, adaptations: [], results: [],
+    ...(draft.dropped?.length ? { dropped: [...draft.dropped] } : {}),
     startInventory: inventoryOf(state),
   };
 }
@@ -186,6 +187,7 @@ export function describeActivity(a: Activity, state: AgentState, percept?: Perce
     ...(done ? { done_when: { status: done.status, actual: done.actual } } : {}),
     ...(a.failures ? { failures: a.failures } : {}),
     ...(a.adaptations.length ? { body_adapted: a.adaptations } : {}),
+    ...(a.dropped?.length ? { not_done_written_wrong: a.dropped } : {}),
     recent: a.results.slice(-3).map((r) => `${r.skill} → ${r.status}${r.failureCode ? `(${r.failureCode})` : ''}：${r.summary.slice(0, 80)}`),
     ...(a.expect ? { my_expectation: a.expect } : {}),
     ...(a.hypothesis ? { hypothesis: a.hypothesis } : {}),

@@ -559,3 +559,12 @@ test('说着 continue 却写了一段新的活：按 adjust 处理', () => {
   const same = parseDecision({ decision: 'continue', monologue: '接着等', activity: { what: '在坑里等到天亮', steps: [{ skill: 'look_around', args: { seconds: 3 } }] } }, adapter, memory, true, '在坑里等到天亮');
   assert.ok(!('error' in same) && same.kind === 'continue');
 });
+
+test('写错被丢掉的步骤会记下来，心智看得到它们根本没做', () => {
+  const memory = new WorldMemory(null);
+  const adapter = new FakeAdapter();
+  const d = parseDecision({ decision: 'new', monologue: '放床', activity: { what: '放床', steps: [{ skill: 'no_such_skill', args: { item: 'white_bed' } }, { skill: 'look_around', args: { seconds: 3 } }] } }, adapter, memory, false);
+  assert.ok(!('error' in d) && d.activity?.dropped?.[0]?.startsWith('no_such_skill'));
+  const a = createActivity(d.activity!, '放床', 'llm', adapter.state());
+  assert.ok(a.dropped?.length === 1);
+});

@@ -367,7 +367,10 @@ export const sleepSkill: Skill<{}> = {
       }
       if (!canSleepAt(ctx.adapter.state().timeOfDay)) return fail('ERROR', `等了 ${waited} 秒还没到能睡的时候，稍后再 sleep`);
       const r = await ctx.adapter.sleepInBed(ctx.signal);
-      if (!r.ok) return fail(r.reason === 'NO_BED' ? 'MISSING_MATERIALS' : 'ERROR', `睡不了：${sleepReason(r.reason)}`);
+      if (!r.ok) {
+        const far = r.reason === 'NO_BED' && !bed ? findStation(ctx, BEDS, 2000) : null;
+        return fail(r.reason === 'NO_BED' ? 'MISSING_MATERIALS' : 'ERROR', `睡不了：${sleepReason(r.reason)}${far ? `；记得的床在 ${far.dist} 格外，太远了，今晚赶不过去` : ''}`);
+      }
       if (r.bedPos) { ctx.memory.setBase(s.dim, r.bedPos); ctx.memory.addLandmark('discovery', '我的床', s.dim, r.bedPos, 4); }
       return ok(`${waited ? `在床边等了 ${waited} 秒天黑，` : ''}睡了一觉，天亮了（重生点已设在床边）`);
     } catch (e) { if (isAbort(e)) throw e; return fail(codeFromError(e), `睡觉出错：${(e as Error).message}`); }

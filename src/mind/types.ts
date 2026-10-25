@@ -60,6 +60,9 @@ export interface Activity {
   consecutiveFailures: number;
   /** 本段活里身体自己做过的应变（换个地方找、重试），每种只做一次 */
   adaptations: string[];
+  dropped?: string[];
+  /** 被身体反射打断了几次 */
+  interruptions?: number;
   results: StepResult[];
   startInventory: Record<string, number>;
   /** 上一步开工时的身体/视野；只有环境确实变化才原样重试。 */
@@ -170,4 +173,6 @@ export interface MindDecision {
 export interface ActivityDraft {
   what: string; why: string; kind: ActivityKind; steps: ActivityStep[]; repeat: number;
   doneWhen?: Condition; expect?: string; ifStuck?: string; agendaId?: string;
+  /** 写了但没法执行、被丢掉的步骤（让心智知道它们根本没做） */
+  dropped?: string[];
 }

@@ -330,6 +330,7 @@ export class Mind {
     if (!a) return;
     this.activity = null;
     const state = this.d.adapter.state();
+    if (a.dropped?.length) summary = `${summary}；计划里这些没做（写错被丢掉了）：${a.dropped.join('、')}`;
     const record = recordOf(a, outcome, summary, state);
     const failed = [...a.results].reverse().find((r) => r.status === 'failed' && !(SKILLS[r.skill]?.readOnly && r.failureCode === 'NOT_FOUND'));
     this.recentEnds = [...this.recentEnds.filter((r) => Date.now() - r.at <= EXPERIENCE_MS),
@@ -392,7 +393,12 @@ export class Mind {
     if (!a || o.task.planId !== a.id) return;
     if (o.result.status === 'cancelled') {
       // 被反射打断：等身体安全了把这一步再做一遍
-      if (o.preemptedBy === 'reflex') a.index = Math.max(0, a.index - 1);
+      if (o.preemptedBy === 'reflex') {
+        a.index = Math.max(0, a.index - 1);
+        a.interruptions = (a.interruptions ?? 0) + 1;
+        // 一直被身体躲闪打断：这段活眼下做不成，先想想怎么对付周围的危险
+        if (a.interruptions >= 3) this.finishActivity('stuck', `这段活被身体的躲闪反应打断了 ${a.interruptions} 次，周围有危险：先处理掉威胁（打、跑远、躲起来）再做`);
+      }
       return;
     }
     this.handleStepResult({ skill: o.task.skill, args: o.task.args }, o.result, o.durationMs);
