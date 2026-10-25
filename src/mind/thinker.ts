@@ -147,14 +147,18 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
       steps: [w?.ok ? { skill: 'wait', args: w.args } : { skill: 'look_around', args: { seconds: 6 } }] };
   }
   if (NEEDS_ACTIVITY.has(kind) && !activity) return { error: `decision=${kind} 需要给出 activity（what/steps）` };
+  let promotedNext = false;
   if (kind === 'continue' && !hasActivity) {
-    if (activity) kind = 'new';
+    // 手上没活却写了 continue：把写好的 activity（或 next）当成新的一段
+    const candidate = o.activity ?? o.next;
+    const v = candidate ? validateDraft(candidate, adapter, memory, notes, o.activity ? 'activity' : 'next') : null;
+    if (v && !('error' in v)) { activity = v; kind = 'new'; promotedNext = !o.activity; notes.push('手上没活，continue 按 new 处理'); }
     else return { error: '手上没有正在做的活，不能 continue：请给出 decision=new 和一段 activity' };
   }
   if (kind === 'adjust' && !hasActivity) kind = 'new';
   if (kind === 'experiment' && activity) activity.kind = 'experiment';
   let next: ActivityDraft | undefined;
-  if (o.next) {
+  if (o.next && !promotedNext) {
     const v = validateDraft(o.next, adapter, memory, notes, 'next');
     if ('error' in v) notes.push(`next 已忽略：${v.error}`); else next = v;
   }
@@ -239,6 +243,15 @@ export class Thinker {
         queries++;
         const result = await this.query(ask, raw, ctx, signal);
         messages.push({ role: 'assistant', content: c.text.slice(0, 600) }, { role: 'user', content: `查询结果（只读，不是现场事实）：${result}\n剩余查询 ${3 - queries} 次。请继续：可以再查，或给出决定。` });
+        continue;
+      }
+      // 把查询（design/skill/recipes…）写成了 routine 里的一步：替它查了，再请它据此做决定
+      const embedded = embeddedQuery(raw);
+      if (embedded && queries < 3) {
+        queries++;
+        const result = await this.query(embedded.kind, embedded.args, ctx, signal);
+        messages.push({ role: 'assistant', content: c.text.slice(0, 1500) },
+          { role: 'user', content: `${embedded.kind} 是思考时的查询，不是身体的动作，不能写进 steps。已经替你查了：${result}\n请据此给出决定（steps 里只写动作）。` });
         continue;
       }
       const parsed = parseDecision(raw, this.adapter, this.memory, !!ctx.activity);
@@ -355,4 +368,18 @@ export function parseConsolidation(raw: unknown, knowHowIds: Set<string>, agenda
     ? { name: sk.name.slice(0, 41), description: sk.description.slice(0, 200), body: sk.body.slice(0, 6000) } : undefined;
   return { rewrite, merge, drop, add, agendaDrop: ids(o.agenda_drop, agendaIds), ...(skill ? { skill } : {}),
     ...(str(o.diary, 160) ? { diary: str(o.diary, 160) } : {}), ...(str(o.monologue, 160) ? { monologue: str(o.monologue, 160) } : {}) };
+}
+
+/** 模型把查询写成了 routine 的一步（{"skill":"design","args":{"brief":…}}）：认出来，按查询处理 */
+export function embeddedQuery(raw: unknown): { kind: string; args: Record<string, any> } | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, any>;
+  for (const part of [o.activity, o.next]) {
+    const steps = Array.isArray(part?.steps) ? part.steps : [];
+    for (const st of steps) {
+      const kind = String(st?.skill ?? '');
+      if (QUERY_KINDS.includes(kind)) return { kind, args: { ...(st?.args ?? {}), ...(kind === 'design' && !st?.args?.brief ? { brief: String(part?.what ?? '') } : {}) } };
+    }
+  }
+  return null;
 }

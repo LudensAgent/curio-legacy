@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { critique, designBuilding } from '../src/building/architect.ts';
+import { critique, designBuilding, logsFor } from '../src/building/architect.ts';
 import { compileDesign } from '../src/building/design.ts';
 import { DraftStore, draftsFor } from '../src/building/drafts.ts';
 import { compileBuilding, normalizeSpec } from '../src/building/spec.ts';
@@ -83,6 +83,18 @@ test('自查会指出方盒子、单一材料和太小的屋子', () => {
   assert.ok(issues.some((i) => /放不下/.test(i)));
   assert.ok(issues.some((i) => /一种材料|只用了/.test(i)));
   assert.ok(issues.some((i) => /窗户/.test(i)));
+});
+
+test('自查会指出悬空的屋顶；缺的木料会折成原木数', () => {
+  const layers = [
+    ['       ', ' CCCCC ', ' CCCCC ', ' CCCCC ', ' CCCCC ', ' CCCCC ', '       '],
+    ['       ', ' PPDPP ', ' G...G ', ' P.T.P ', ' G...G ', ' PPPPP ', '       '],
+    ['       ', ' PPPPP ', ' P...P ', ' P...P ', ' P...P ', ' PPPPP ', '       '],
+    ['       ', '       ', '       ', '   S   ', '       ', '       ', '       '],
+  ];
+  const floating = normalizeSpec({ name: 'f', design: { legend: { C: 'cobblestone', P: 'oak_planks', G: 'glass_pane', D: 'oak_door', T: 'torch', S: 'oak_stairs', '.': 'air' }, layers } });
+  assert.ok(critique(floating).some((i) => /悬在半空/.test(i)));
+  assert.equal(logsFor([['oak_planks', 8], ['oak_stairs', 8], ['cobblestone', 30]]), 5);
 });
 
 test('建筑师子代理：独立上下文带设计手册，自查后改进，交回图纸；build 只要 draft ID', async () => {

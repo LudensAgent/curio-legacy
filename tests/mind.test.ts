@@ -10,7 +10,7 @@ import { Attention } from '../src/mind/attention.ts';
 import { Mind } from '../src/mind/mind.ts';
 import { buildMindMessages } from '../src/mind/prompt.ts';
 import { DEFAULT_MOOD, feel, moodWords, SelfModel } from '../src/mind/self.ts';
-import { parseDecision, Thinker } from '../src/mind/thinker.ts';
+import { embeddedQuery, parseDecision, Thinker } from '../src/mind/thinker.ts';
 import { Perception } from '../src/perception/perception.ts';
 import { Vision } from '../src/perception/vision.ts';
 import type { ChatMessage, Completion } from '../src/planner/llm.ts';
@@ -538,4 +538,15 @@ test('死亡时已经有游戏播报：直接按原话记，不用推测的死�
   const w = fixture(t);
   w.mind.onDeath({ cause: 'fall', message: 'FakeBot was slain by Zombie' });
   assert.ok(w.self.diary(1)[0].text.includes('slain by Zombie'));
+});
+
+test('手上没活却写 continue：带着 activity 或 next 就当成新的一段；把 design 写成步骤会被认成查询', () => {
+  const memory = new WorldMemory(null);
+  const adapter = new FakeAdapter();
+  const a = parseDecision({ decision: 'continue', monologue: '接着走', activity: { what: '看看四周', steps: [{ skill: 'look_around', args: { seconds: 3 } }] } }, adapter, memory, false);
+  assert.ok(!('error' in a) && a.kind === 'new' && a.activity?.what === '看看四周');
+  const n = parseDecision({ decision: 'continue', monologue: '接着走', next: { what: '再看看', steps: [{ skill: 'look_around', args: { seconds: 2 } }] } }, adapter, memory, false);
+  assert.ok(!('error' in n) && n.kind === 'new' && n.activity?.what === '再看看' && !n.next);
+  assert.deepEqual(embeddedQuery({ activity: { what: '设计湖边小屋', steps: [{ skill: 'design' }, { skill: 'build' }] } }), { kind: 'design', args: { brief: '设计湖边小屋' } });
+  assert.equal(embeddedQuery({ activity: { what: '砍树', steps: [{ skill: 'gather' }] } }), null);
 });

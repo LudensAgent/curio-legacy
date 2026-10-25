@@ -4,6 +4,7 @@ import { extractJson } from '../planner/plan.ts';
 import type { ChatMessage } from '../planner/llm.ts';
 import type { Planner } from '../planner/planner.ts';
 import type { DesignDraft, DraftStore } from './drafts.ts';
+import { compileDesign } from './design.ts';
 import { compileBuilding, materialCost, normalizeSpec, type BuildingSpec } from './spec.ts';
 
 /**
@@ -39,9 +40,15 @@ export function critique(spec: BuildingSpec): string[] {
   const structural = [...names].filter((n) => !/door|glass|pane|torch|lantern|crafting_table|furnace|chest|stairs|slab|carpet|ladder|trapdoor|fence/.test(n));
   if (structural.length < 2) out.push(`墙和地板只用了 ${structural.join('、') || '一种材料'}：墙基用石头、四角用原木，层次会好很多`);
   if (![...names].some((n) => /glass|pane/.test(n))) out.push('没有窗户，屋里会很闷');
-  if (![...names].some((n) => /torch|lantern/.test(n))) out.push('屋里没有光源，晚上会刷怪');
+  if (![...names].some((n) => /torch|lantern/.test(n)) && !out.some((x) => /光源/.test(x))) out.push('屋里没有光源，晚上会刷怪');
+  // 编译时发现的结构问题（悬空、漏顶、墙洞）：照着盖会盖不上，必须改
+  const warnings = spec.design ? compileDesign(spec.design).warnings : [];
+  for (const w of warnings) if (!out.includes(w)) out.push(/悬在半空/.test(w) ? `${w}——每一层台阶屋顶下面都要有方块托着（在屋里那一侧垫一圈木板，或者把屋顶做成实心），只靠斜对角相连的台阶放不上去` : w);
   return out;
 }
+
+/** 照着盖一定盖不上的问题：没改掉就不能交图 */
+export const isBlocking = (issue: string) => /悬在半空/.test(issue);
 
 export function buildDesignMessages(req: DesignRequest, book: SkillBook | null): ChatMessage[] {
   const guide = book?.get('architect')?.body ?? '';
@@ -60,6 +67,7 @@ export function buildDesignMessages(req: DesignRequest, book: SkillBook | null):
     biome: req.biome ?? null,
     my_likes: req.likes,
     my_past_works: req.pastWorks,
+    budget: req.pastWorks.length ? '按手上和附近的材料量力而行' : '这是第一座房子：总材料控制在 180 块左右、台阶不超过 60 级，攒得起才盖得完',
   };
   return [{ role: 'system', content: system }, { role: 'user', content: `${JSON.stringify(payload)}\n请设计。` }];
 }
@@ -86,12 +94,14 @@ export async function designBuilding(planner: Planner, book: SkillBook | null, d
       continue;
     }
     const issues = critique(spec);
-    if (!best || issues.length < best.issues.length) best = { spec, raw, issues };
+    const score = (xs: string[]) => xs.filter(isBlocking).length * 100 + xs.length;
+    if (!best || score(issues) < score(best.issues)) best = { spec, raw, issues };
     if (!issues.length || round === 2) break;
     messages.push({ role: 'assistant', content: c.text.slice(0, 4000) },
       { role: 'user', content: `自查发现：\n- ${issues.join('\n- ')}\n保留你满意的部分，改进这些问题后重新输出完整的 JSON（如果你觉得某条不适合这座建筑，可以在 notes 里说明理由并保持原样）。` });
   }
   if (!best) return { ok: false, error: `建筑师没能画出能施工的图纸：${lastError}` };
+  if (best.issues.some(isBlocking)) return { ok: false, error: `建筑师画了三版都还有盖不上的地方：${best.issues.filter(isBlocking).join('；')}。换个更简单的要求再请一次（比如墙脚 5×5、两坡顶、屋檐不出挑）` };
   const blueprint = compileBuilding(best.spec);
   const materials = materialCost(blueprint.cells);
   const fx = blueprint.cells.filter((c) => c.pos.y === -1).map((c) => c.pos.x), fz = blueprint.cells.filter((c) => c.pos.y === -1).map((c) => c.pos.z);
@@ -99,8 +109,23 @@ export async function designBuilding(planner: Planner, book: SkillBook | null, d
   const draft = drafts.add({ name: best.spec.name, purpose: best.spec.purpose, brief: req.brief.slice(0, 200), ...(best.raw.style ? { style: String(best.raw.style).slice(0, 200) } : {}),
     spec: best.spec, materials, size, notes: [best.raw.notes, ...best.issues].filter(Boolean).map((n) => String(n).slice(0, 160)) });
   const missing = Object.entries(materials).map(([n, need]) => [n, need - count(req.inventory, n)] as const).filter(([, m]) => m > 0);
+  const logs = logsFor(missing);
   const summary = `图纸 ${draft.id}「${draft.name}」墙脚 ${size.width}×${size.depth}、高 ${size.height}${draft.style ? `；${draft.style}` : ''}。用料：${Object.entries(materials).sort((a, b) => b[1] - a[1]).map(([n, c]) => `${n}×${c}`).join('、')}。`
-    + (missing.length ? `还缺：${missing.map(([n, m]) => `${n}×${m}`).join('、')}（攒够再盖，或者先盖一部分）。` : '材料都齐了。')
+    + (missing.length ? `还缺：${missing.map(([n, m]) => `${n}×${m}`).join('、')}${logs ? `，折合大约 ${logs} 根原木` : ''}（攒够再盖，或者先盖一部分）。` : '材料都齐了。')
     + `要盖时用 build {"draft":"${draft.id}"}。${best.issues.length ? `建筑师留下的提醒：${best.issues.join('；')}` : ''}`;
   return { ok: true, draft, summary, issues: best.issues };
+}
+
+/** 缺的木制品折合多少根原木：1 原木 = 4 木板；4 台阶要 6 木板；1 半砖 = 半块木板 */
+export function logsFor(missing: ReadonlyArray<readonly [string, number]>): number {
+  let planks = 0;
+  for (const [n, m] of missing) {
+    if (!/^(oak|spruce|birch|jungle|acacia|dark_oak|mangrove|cherry)_/.test(n)) continue;
+    if (/_planks$/.test(n)) planks += m;
+    else if (/_stairs$/.test(n)) planks += m * 1.5;
+    else if (/_slab$/.test(n)) planks += m / 2;
+    else if (/_(log|wood)$/.test(n)) planks += m * 4;
+    else if (/_(door|fence|trapdoor)$/.test(n)) planks += m * 2;
+  }
+  return Math.ceil(planks / 4);
 }
