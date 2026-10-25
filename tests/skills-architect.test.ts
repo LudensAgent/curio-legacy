@@ -183,3 +183,12 @@ test('地形草图：东边高起一块、南边有水，行北到南、列西�
   assert.match(t.summary, /东高西低/);
   assert.match(t.summary, /南边有水/);
 });
+
+test('第一座房子要当天盖完：太费料的图会被要求改，省料的不会；以后的房子不限', async () => {
+  const { budgetIssues } = await import('../src/building/architect.ts');
+  const md = fs.readFileSync(path.join(BUILTIN_SKILLS_DIR, 'architect', 'SKILL.md'), 'utf8');
+  const [cottage, cabin] = designsIn(md);
+  assert.ok(budgetIssues(normalizeSpec({ name: 'c', design: cottage }), { pastWorks: [] }).some((i) => /原木/.test(i)));
+  assert.deepEqual(budgetIssues(normalizeSpec({ name: 'b', design: cabin }), { pastWorks: [] }), []);
+  assert.deepEqual(budgetIssues(normalizeSpec({ name: 'c', design: cottage }), { pastWorks: ['小屋'] }), []);
+});

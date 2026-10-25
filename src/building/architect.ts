@@ -61,7 +61,7 @@ export function buildDesignMessages(req: DesignRequest, book: SkillBook | null):
 
 只输出一个 JSON 对象：
 {"name":"作品名（简短）","purpose":"用途","style":"一句话说说风格和用料的想法","site":{"x":0,"z":0,"why":"为什么选这儿"},"design":{"legend":{…},"layers":[[…],…]},"notes":"一句话：盖的时候要注意什么"}
-site 是房子中心相对“我”的位置（x 往东为正、z 往南为正，看 terrain 草图挑），不写就盖在我附近自动选的平地上。图纸的行从北到南、列从西到东，和草图方向一致。`;
+site 是房子中心相对 terrain 草图正中间那格的位置（x 往东为正、z 往南为正，看草图挑），不写就盖在我附近自动选的平地上。图纸的行从北到南、列从西到东，和草图方向一致。`;
   const inv = new Map<string, number>();
   for (const i of req.inventory) inv.set(i.name, (inv.get(i.name) ?? 0) + i.count);
   const payload = {
@@ -72,9 +72,9 @@ site 是房子中心相对“我”的位置（x 往东为正、z 往南为正�
     my_likes: req.likes,
     my_past_works: req.pastWorks,
     ...(req.terrain ? { terrain: {
-      how_to_read: `以我为中心 ${req.terrain.radius * 2 + 1}×${req.terrain.radius * 2 + 1} 格，行从北到南、列从西到东，正中间是我脚下；数字是这一列地表比我脚下高/低几格，~ 是水，? 看不清，带 T 的长着树（盖房要砍掉）`,
+      how_to_read: `以想盖房子的地方为中心 ${req.terrain.radius * 2 + 1}×${req.terrain.radius * 2 + 1} 格，行从北到南、列从西到东，正中间是中心那一列；数字是这一列地表比中心高/低几格，~ 是水，? 看不清，带 T 的长着树（盖房要砍掉）`,
       summary: req.terrain.summary, rows: req.terrain.rows } } : {}),
-    budget: req.pastWorks.length ? '按手上和附近的材料量力而行' : '这是第一座房子：总材料控制在 180 块左右、台阶不超过 60 级，灯用 torch，攒得起才盖得完',
+    budget: req.pastWorks.length ? '按手上和附近的材料量力而行' : `这是第一座房子，要当天盖完：木料折合原木不超过 ${FIRST_HOUSE_LOGS} 根（1 原木=4 木板，4 级台阶要 6 木板，半砖半块木板），圆石 40 块以内，灯用 torch`,
   };
   return [{ role: 'system', content: system }, { role: 'user', content: `${JSON.stringify(payload)}\n请设计。` }];
 }
@@ -104,7 +104,7 @@ export async function designBuilding(planner: Planner, book: SkillBook | null, d
       messages.push({ role: 'assistant', content: c.text.slice(0, 4000) }, { role: 'user', content: `这张图纸没法施工：${lastError}。请改正后重新输出完整的 JSON。` });
       continue;
     }
-    const issues = critique(spec);
+    const issues = [...critique(spec), ...budgetIssues(spec, req)];
     const score = (xs: string[]) => xs.filter(isBlocking).length * 100 + xs.length;
     if (!best || score(issues) < score(best.issues)) best = { spec, raw, issues };
     if (!issues.length || round === 2) break;
@@ -155,4 +155,19 @@ export function siteFor(raw: unknown, terrain: TerrainSketch | undefined, fx: nu
     origin: { x: cx - Math.min(...fx) - Math.floor(size.width / 2), y: terrain.center.y + h + 1, z: cz - Math.min(...fz) - Math.floor(size.depth / 2) },
     why: String(r.why ?? '').slice(0, 80),
   };
+}
+
+/** 第一座房子当天要盖完：木料折合原木的上限 */
+export const FIRST_HOUSE_LOGS = 28;
+
+/** 用料是否攒得起：只管第一座房子（以后的房子量力而行） */
+export function budgetIssues(spec: BuildingSpec, req: Pick<DesignRequest, 'pastWorks'>): string[] {
+  if (req.pastWorks.length) return [];
+  const mats = materialCost(compileBuilding(spec).cells);
+  const logs = logsFor(Object.entries(mats));
+  const stone = (mats.cobblestone ?? 0) + (mats.stone ?? 0) + (mats.stone_bricks ?? 0);
+  const out: string[] = [];
+  if (logs > FIRST_HOUSE_LOGS + 4) out.push(`木料折合 ${logs} 根原木，第一座房子当天攒不齐：控制在 ${FIRST_HOUSE_LOGS} 根以内（台阶最费料，坡顶上半部分改木板或半砖，墙矮一格、屋檐窄一点）`);
+  if (stone > 56) out.push(`要 ${stone} 块石料，太多：墙基一圈就够，墙身用木头`);
+  return out;
 }

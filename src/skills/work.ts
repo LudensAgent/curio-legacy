@@ -104,7 +104,7 @@ export async function ensureToolFor(ctx: SkillCtx, pos: { x: number; y: number; 
 }
 
 /** 走向目标方块；8 秒内几乎没挪动就放弃这个目标（换下一个），而不是原地耗到被判卡死；走着走着进了水也立刻停（ENTERED_WATER） */
-async function moveWithWatchdog(ctx: SkillCtx, pos: { x: number; y: number; z: number }) {
+async function moveWithWatchdog(ctx: SkillCtx, pos: { x: number; y: number; z: number }, dig = false) {
   const stop = new AbortController();
   const dryStart = !ctx.adapter.state().inWater;
   let anchor = ctx.adapter.state().pos, since = Date.now();
@@ -115,7 +115,7 @@ async function moveWithWatchdog(ctx: SkillCtx, pos: { x: number; y: number; z: n
     else if (Date.now() - since >= 8000) stop.abort('no_progress');
   }, 500);
   try {
-    await ctx.adapter.moveTo({ kind: 'reach_block', pos }, { signal: AbortSignal.any([ctx.signal, stop.signal]), timeoutMs: Math.min(90000, Math.max(3000, ctx.deadline - Date.now())) });
+    await ctx.adapter.moveTo({ kind: 'reach_block', pos }, { signal: AbortSignal.any([ctx.signal, stop.signal]), timeoutMs: Math.min(90000, Math.max(3000, ctx.deadline - Date.now())), ...(dig ? { allowTerrainChanges: true } : {}) });
   } catch (e) {
     if (stop.signal.aborted && !ctx.signal.aborted) throw new Error(stop.signal.reason === 'entered_water' ? 'ENTERED_WATER' : 'PATH_NO_PROGRESS');
     throw e;
@@ -135,10 +135,10 @@ function inDeepWater(ctx: SkillCtx): boolean {
   return water(Math.floor(s.pos.y + 1.62)) || (water(feet) && water(feet - 1)) || s.oxygen < 20;
 }
 
-export const gather: Skill<{ block: string; count: number; for?: { item: string; count: number }; note?: string }> = {
+export const gather: Skill<{ block: string; count: number; for?: { item: string; count: number }; note?: string; dig?: boolean }> = {
   name: 'gather',
   description: '前往【看见过或正看见】的指定方块并挖掘、拾取。写 for（要做的东西和数量）时按背包缺口算该采几个，已经够了就不采；看不见的不会去挖（没有透视）；stone/dirt/sand 若看不见会就地向下挖。block 可用别名：log(任意原木)、stone、dirt、coal、iron、ore',
-  argsDoc: '{"block": "log|stone|coal|iron|<方块名>", "for"?: {"item":"要做的东西（物品 ID）","count":1} | "物品名", "count"?: 1-32（不写 for 时用）}',
+  argsDoc: '{"block": "log|stone|coal|iron|<方块名>", "for"?: {"item":"要做的东西（物品 ID）","count":1} | "物品名", "count"?: 1-32（不写 for 时用）, "dig"?: true（路上挡着的土石挖穿、垫方块过去）}',
   timeoutMs: 180000,
   movement: true,
   outcomeBoundary: true,
@@ -157,7 +157,7 @@ export const gather: Skill<{ block: string; count: number; for?: { item: string;
       if (!item) note = `for 里的「${String(f.item ?? a.for).slice(0, 40)}」不是物品 ID，已忽略，按 count 采`;
       else goal = { item, count: clampInt(f.count ?? (m?.[2] ? Number(m[2]) : undefined), 1, 512, 1) };
     }
-    return { ok: true, args: { block, count: clampInt(a.count, 1, 32, 4), ...(goal ? { for: goal } : {}), ...(note ? { note } : {}) } };
+    return { ok: true, args: { block, count: clampInt(a.count, 1, 32, 4), ...(goal ? { for: goal } : {}), ...(note ? { note } : {}), ...(a.dig === true ? { dig: true } : {}) } };
   },
   async run(ctx, args) {
     const r = await gatherRun(ctx, args);
@@ -165,7 +165,7 @@ export const gather: Skill<{ block: string; count: number; for?: { item: string;
   },
 };
 
-async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; for?: { item: string; count: number } }): Promise<SkillResult> {
+async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; for?: { item: string; count: number }; dig?: boolean }): Promise<SkillResult> {
   {
     const { adapter, senses, signal } = ctx;
     let names = adapter.resolveBlockNames(args.block);
@@ -305,7 +305,7 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
       const before = invTotal();
       try {
         ctx.progress(dug / args.count, `前往 ${target.name}（${Math.round(target.dist)} 格）`);
-        await moveWithWatchdog(ctx, target.pos);
+        await moveWithWatchdog(ctx, target.pos, args.dig === true);
         const t0 = Date.now();
         const r = await adapter.dig(target.pos, signal);
         if (!r.ok) throw new Error(r.reason ?? 'DIG_FAILED');
@@ -331,7 +331,7 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
           continue;
         }
         if (++failsInRow >= 4) {
-          return dug > 0 ? ok(`多次失败后停止，采集了 ${dug}/${args.count}`, { dug }) : fail(codeFromError(e) === 'ERROR' ? 'PATH_NOT_FOUND' : codeFromError(e), `无法到达或挖掘 ${args.block}：${(e as Error).message}`);
+          return dug > 0 ? ok(`多次失败后停止，采集了 ${dug}/${args.count}`, { dug }) : fail(codeFromError(e) === 'ERROR' ? 'PATH_NOT_FOUND' : codeFromError(e), `无法到达或挖掘 ${args.block}：${(e as Error).message}${args.dig ? '' : '；路上是土石坡坎挡着就加 "dig":true（挖穿、垫方块过去）'}`);
         }
         continue;
       }

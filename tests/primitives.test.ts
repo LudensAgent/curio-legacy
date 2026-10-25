@@ -67,7 +67,6 @@ test('原子动作如实回报做不到的原因，不替模型做决定', async
   const wet = await digAt.run(ctx, { at: [1, 1, 0], facing: 'N' });
   assert.equal(wet.status, 'failed');
   assert.match(wet.summary, /water/);
-  assert.equal(digAt.validate({ at: [0, 1, 0] }, w).ok, false, '自己站的格子不用挖');
   assert.equal(stepTo.validate({ to: [2, 0, 0] }, w).ok, false, 'step 只走相邻一格');
 });
 
@@ -138,4 +137,14 @@ test('自己在哪：坑底能认出几格深，树下认得出是地表', async
   const tree = whereAmI(flat, { pos: flat.pos }, { block: 'spruce_leaves', up: 4, covered: 'canopy' });
   assert.equal(tree.kind, 'surface');
   assert.match(tree.text, /树叶/);
+});
+
+test('dig_at 自己站的两格不算写错，说明一下就好', async (t) => {
+  const w = new FakeAdapter();
+  assert.ok(digAt.validate({ at: [0, 1, 0] }, w).ok);
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const r = await digAt.run(ctx, { at: [0, 1, 0], facing: 'N' });
+  assert.equal(r.status, 'succeeded');
+  assert.match(r.summary, /\[0,2,0\]/);
 });

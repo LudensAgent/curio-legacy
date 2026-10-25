@@ -62,11 +62,12 @@ export const digAt: Skill<CellArgs> = {
     if (typeof at === 'string') return { ok: false, error: at };
     const facing = facingArg(a.facing, adapter);
     if (!FACINGS.includes(facing as Facing)) return { ok: false, error: facing };
-    if (at[0] === 0 && at[2] === 0 && (at[1] === 0 || at[1] === 1)) return { ok: false, error: '[0,0,0] 和 [0,1,0] 是自己站的地方，本来就是空的' };
+    // [0,0,0]/[0,1,0] 是自己站的两格，本来就空：照样接受（执行时说明一下），不当成写错丢掉
     return { ok: true, args: { at, facing: facing as Facing } };
   },
   async run(ctx, args) {
     throwIfAborted(ctx.signal);
+    if (args.at[0] === 0 && args.at[2] === 0 && (args.at[1] === 0 || args.at[1] === 1)) return ok(`[${args.at}] 是自己站的地方，本来就空着；往上挖是 [0,2,0]`, after(ctx, args.facing));
     const feet = feetCell(ctx.adapter.state().pos);
     const pos = toWorld(feet, args.facing, args.at);
     const before = ctx.adapter.blockAt(pos);
@@ -138,7 +139,10 @@ export const stepTo: Skill<CellArgs> = {
       return fail(codeFromError(e), `迈向 [${args.at}] 没成：${(e as Error).message}`, after(ctx, args.facing));
     }
     const end = feetCell(a.state().pos);
-    if (end.x !== dest.x || Math.abs(end.y - dest.y) > (a.blockAt(floor) === 'snow' ? 1 : 0) || end.z !== dest.z) return fail('EFFECT_NOT_CONFIRMED', `没有站到 [${args.at}]，实际在 (${end.x},${end.y},${end.z})`, after(ctx, args.facing));
+    // 雪层、坡上的半格高低会让脚下那格差一格；水平差一格以内、而且比出发时更靠近目标，就算迈到了
+    const off = Math.hypot(end.x - dest.x, end.z - dest.z), before = Math.hypot(feet.x - dest.x, feet.z - dest.z);
+    if (off > 1 || Math.abs(end.y - dest.y) > 1 || (off > 0 && off >= before)) return fail('EFFECT_NOT_CONFIRMED', `没有站到 [${args.at}]，实际在 (${end.x},${end.y},${end.z})`, after(ctx, args.facing));
+    if (off > 0 || end.y !== dest.y) return ok(`大致迈到了 [${args.at}]（实际在 (${end.x},${end.y},${end.z})）`, { moved: [...args.at], ...after(ctx, args.facing) });
     return ok(drop ? `往前走下了 ${drop} 格的小坎` : `站到了 [${args.at}]`, { moved: [args.at[0], args.at[1] - drop, args.at[2]], ...after(ctx, args.facing) });
   },
 };

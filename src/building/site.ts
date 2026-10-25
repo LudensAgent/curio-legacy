@@ -165,9 +165,10 @@ export interface TerrainSketch {
   summary: string;
 }
 
-export function terrainSketch(adapter: GameAdapter, radius = 8): TerrainSketch {
+export function terrainSketch(adapter: GameAdapter, radius = 8, at?: Vec3Like): TerrainSketch {
   const s = adapter.state();
-  const bx = Math.floor(s.pos.x), bz = Math.floor(s.pos.z), py = Math.floor(s.pos.y);
+  const c = at ?? s.pos;
+  const bx = Math.floor(c.x), bz = Math.floor(c.z), py = Math.floor(c.y);
   const here = surfaceColumn(adapter, bx, bz, py + 2, py - 6, new Set());
   const base = here && !here.wet ? here.y : py - 1;
   const heights: (number | 'water' | null)[][] = [], trees: boolean[][] = [], rows: string[] = [];

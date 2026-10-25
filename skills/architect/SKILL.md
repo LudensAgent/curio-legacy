@@ -45,7 +45,7 @@ description: 设计一座建筑（小屋、住处、仓库、塔、农舍）：�
 
 ## 参考作品
 
-### 林间小屋（7×7 墙脚，云杉木 + 深色橡木坡顶，带屋檐）
+### 林间小屋（7×7 墙脚，云杉木 + 深色橡木坡顶，带屋檐）——第二座以后的房子，约折合 45 根原木
 石头墙基、原木四角柱、云杉木墙、对称的玻璃板窗、深色橡木台阶坡屋顶，屋檐比墙脚宽一圈；屋里有工作台、熔炉、两个箱子和灯笼。
 ```json
 {"legend":{"C": "cobblestone", "L": "oak_log", "P": "spruce_planks", "G": "glass_pane", "D": "spruce_door", "B": "crafting_table", "F": "furnace", "K": "chest", "T": "lantern", "S": "dark_oak_stairs", "s": "dark_oak_slab", ".": "air"},
@@ -62,7 +62,7 @@ description: 设计一座建筑（小屋、住处、仓库、塔、农舍）：�
 ]}
 ```
 
-### 简朴木屋（5×5 墙脚，平顶 + 半砖屋檐）
+### 简朴木屋（5×5 墙脚，平顶 + 半砖屋檐）——适合第一座，当天就能盖完
 材料最省的版本：圆石地板、原木四角、橡木墙、玻璃板窗、木板平顶外加一圈半砖屋檐。
 ```json
 {"legend":{"C": "cobblestone", "L": "oak_log", "P": "oak_planks", "G": "glass_pane", "D": "oak_door", "T": "torch", "s": "oak_slab", ".": "air"},

@@ -13,6 +13,7 @@ import type { SelfModel } from './self.ts';
 import { cleanLesson } from './self.ts';
 import { designBuilding } from '../building/architect.ts';
 import { terrainSketch } from '../building/site.ts';
+import { homeOf } from './home.ts';
 import { draftsFor } from '../building/drafts.ts';
 import type { SkillBook } from '../knowledge/skillbook.ts';
 import { describeBuild, myBuilds } from './home.ts';
@@ -170,7 +171,7 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
   if (kind === 'adjust' && !hasActivity) kind = 'new';
   if (kind === 'experiment' && activity) activity.kind = 'experiment';
   let next: ActivityDraft | undefined;
-  if (o.next && !promotedNext) {
+  if (o.next && !promotedNext && Array.isArray(o.next.steps) && o.next.steps.length) {
     const v = validateDraft(o.next, adapter, memory, notes, 'next');
     if ('error' in v) notes.push(`next 已忽略：${v.error}`); else next = v;
   }
@@ -260,6 +261,14 @@ export class Thinker {
         messages.push({ role: 'assistant', content: c.text.slice(0, 600) }, { role: 'user', content: `查询结果（只读，不是现场事实）：${result}\n剩余查询 ${3 - queries} 次。请继续：可以再查，或给出决定。` });
         continue;
       }
+      // 瞥一眼时把“想深一点”写成了动作：照它的意思转成认真想
+      if (tier === 'glance' && wantsDeliberate(raw)) {
+        tier = 'deliberate';
+        this.planner.stats.tiers.escalated++;
+        this.bus.publish('llm_escalate', 'P3', '抬头一看觉得需要好好想想（把 deliberate 写成了动作）');
+        messages = buildMindMessages({ ...ctx, tier });
+        continue;
+      }
       // 把查询（design/skill/recipes…）写成了 routine 里的一步：替它查了，再请它据此做决定
       const embedded = embeddedQuery(raw);
       if (embedded && queries < 3) {
@@ -322,12 +331,18 @@ export class Thinker {
         if (this.designing) return `建筑师还在画「${this.designing.brief.slice(0, 40)}」（已经 ${Math.max(1, Math.round((Date.now() - this.designing.startedAt) / 60_000))} 分钟），画好会告诉你；先去做别的，别重复请`;
         this.bus.publish('design_start', 'P2', `请建筑师设计：${brief.slice(0, 80)}`);
         const p = ctx.percept;
+        // 盖在哪：where = here（默认，脚下这一带）| base（家旁边）| "x,y,z"。只看得清附近（约 96 格内）的地形，太远就不给地形，到了再定位置
+        const whereRaw = String(raw.where ?? 'here').trim().toLowerCase();
+        const home = homeOf(this.memory, { worldId: ctx.state.worldId, dim: p.self.dim, pos: ctx.state.pos });
+        const coords = whereRaw.match(/^(-?\d+)[,\s]+(-?\d+)[,\s]+(-?\d+)$/);
+        const wanted = /^(base|home|家|基地)$/.test(whereRaw) ? home?.pos ?? null : coords ? { x: +coords[1], y: +coords[2], z: +coords[3] } : undefined;
+        const siteAt = wanted === undefined ? undefined : wanted && Math.hypot(wanted.x - ctx.state.pos.x, wanted.z - ctx.state.pos.z) <= 96 ? wanted : null;
         const job = designBuilding(this.planner, this.book, draftsFor(this.memory), this.adapter, {
           brief, persona: ctx.persona, inventory: ctx.state.inventory, biome: p.self.biome,
           nearby: [...new Set(p.nearby.resources.map((r) => r.block))].slice(0, 12),
           likes: ctx.self.tastes(),
           pastWorks: myBuilds(this.memory, { worldId: ctx.state.worldId, dim: p.self.dim, pos: ctx.state.pos }).map(describeBuild),
-          terrain: terrainSketch(this.adapter),
+          ...(siteAt !== null ? { terrain: terrainSketch(this.adapter, 8, siteAt) } : {}),
         }, AbortSignal.timeout(20 * 60_000));
         this.designing = { brief, startedAt: Date.now() };
         job.then((res) => {
@@ -416,4 +431,10 @@ export function parseHabits(raw: unknown): Habits | null {
   const e = num(o.eat_below, 2, 19); if (e !== undefined) out.eat_below = e;
   if (typeof o.pickup === 'boolean') out.pickup = o.pickup;
   return Object.keys(out).length ? out : null;
+}
+
+/** 快速思考时把 deliberate 写成了一步动作 */
+function wantsDeliberate(raw: unknown): boolean {
+  const o = raw as Record<string, any> | null;
+  return !!o && [o.activity, o.next].some((part) => Array.isArray(part?.steps) && part.steps.some((st: any) => st?.skill === 'deliberate'));
 }
