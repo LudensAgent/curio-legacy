@@ -28,7 +28,12 @@ interface SelfData {
   plan?: FocusPlan;
 }
 
-export interface FocusPlan { agendaId: string; goal: string; steps: { text: string; done: boolean }[]; setAt: number; updatedAt: number }
+export interface FocusPlan { agendaId: string; goal: string; steps: { text: string; done: boolean }[]; setAt: number; updatedAt: number;
+  /** 上一次真正推进（定下清单或勾掉一项）的时间 */
+  progressAt?: number }
+
+/** 清单项的文字：去掉模型从【专注】里抄回来的“0. [ ] ”这类格式 */
+export const cleanPlanStep = (t: string) => { let s = String(t).trim(), prev = ''; while (s !== prev) { prev = s; s = s.replace(/^(?:\d+[.、)]\s*|\[[ xX✓]?\]\s*|[☐☑●○▶-]\s*)/, '').trim(); } return s.slice(0, 60); };
 
 export const clamp01 = (n: number) => Math.max(0, Math.min(1, Number.isFinite(n) ? n : 0));
 
@@ -229,12 +234,16 @@ export class SelfModel {
   setPlan(focus: string, steps: string[]): FocusPlan | null {
     const id = focus.startsWith('a_') ? focus : this.addAgenda(focus, 'goal', 'today')?.id;
     const item = id ? this.data.agenda.find((a) => a.id === id) : undefined;
-    if (!item) return null;
+    // 主目标只能是“想做的事”：随手记下的点子、疑问不该被升成要一直推进的目标
+    if (!item || item.kind !== 'goal') return null;
     if (item.status !== 'active') this.setAgendaStatus(item.id, 'active');
     const old = this.data.plan?.agendaId === item.id ? this.data.plan : undefined;
     const doneBefore = new Set(old?.steps.filter((st) => st.done).map((st) => st.text) ?? []);
-    const clean = steps.map((t) => String(t).trim().slice(0, 60)).filter(Boolean).slice(0, 8);
-    this.data.plan = { agendaId: item.id, goal: item.text, steps: clean.map((text) => ({ text, done: doneBefore.has(text) })), setAt: old?.setAt ?? Date.now(), updatedAt: Date.now() };
+    const clean = steps.map(cleanPlanStep).filter(Boolean).slice(0, 8);
+    const changed = !old || old.steps.map((st) => st.text).join('|') !== clean.join('|');
+    this.data.plan = { agendaId: item.id, goal: item.text, steps: clean.map((text) => ({ text, done: doneBefore.has(text) })), setAt: old?.setAt ?? Date.now(), updatedAt: Date.now(),
+      // 原样重写清单不算推进
+      progressAt: changed ? Date.now() : old?.progressAt ?? old?.setAt ?? Date.now() };
     this.touch();
     return this.data.plan;
   }
@@ -247,7 +256,7 @@ export class SelfModel {
       const st = typeof d === 'number' ? p.steps[d] : p.steps.find((x) => x.text === d || x.text.includes(String(d)));
       if (st && !st.done) { st.done = true; out.push(st.text); }
     }
-    if (out.length) { p.updatedAt = Date.now(); this.touch(); }
+    if (out.length) { p.updatedAt = Date.now(); p.progressAt = Date.now(); this.touch(); }
     return out;
   }
   activeAgenda(): AgendaItem | undefined { return this.data.agenda.find((a) => a.status === 'active'); }

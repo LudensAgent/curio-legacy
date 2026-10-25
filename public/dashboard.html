@@ -285,7 +285,7 @@
             <div class="meter"><span class="dim">生存</span><div class="bar"><i id="lsSurvival"></i></div><span class="mono" id="lsSurvivalV">-</span></div>
             <div class="meter"><span class="dim">学习</span><div class="bar info"><i id="lsLearning"></i></div><span class="mono" id="lsLearningV">-</span></div>
             <div class="meter"><span class="dim">效率</span><div class="bar warn"><i id="lsEfficiency"></i></div><span class="mono" id="lsEfficiencyV">-</span></div>
-            <div class="dim" style="font-size:11px;margin-top:8px">总分 = 进度 40% + 生存 20% + 学习 25% + 效率 15%。进度看里程碑（只增不减）；生存看最近一小时死了几次；学习看用得上的技能和验证过的窍门；效率看最近半小时动作成功率和卡住的比例。</div>
+            <div class="dim" style="font-size:11px;margin-top:8px">总分 = 进度 40% + 生存 20% + 学习 25% + 效率 15%。进度看里程碑（只增不减）；生存看活了多久（S 形曲线，撑过一个游戏日得一半，当前这条命和最近几条命一起算）；学习看用得上的技能和验证过的窍门；效率看最近半小时动作成功率和卡住的比例。</div>
           </div>
         </div>
         <div class="card cols2"><h2>分数曲线 <span class="r dim" id="lsSpan"></span></h2><div class="body chart" id="lsCurve"></div></div>
@@ -477,7 +477,13 @@ function renderLearning(L) {
   $('lsTotal').textContent = n.total;
   for (const k of ['progress', 'survival', 'learning', 'efficiency']) { const id = 'ls' + k[0].toUpperCase() + k.slice(1); $(id).style.width = n[k] + '%'; $(id + 'V').textContent = n[k]; }
   $('lsDeaths').textContent = `最近一小时死了 ${L.deathsLastHour} 次`;
-  $('lsMilestones').innerHTML = L.milestones.map((m) => `<li>${m.at ? '<span class="badge good">✓</span>' : '<span class="badge">　</span>'} ${esc(m.label)} <span class="k">权重 ${m.weight}${m.at ? ` · ${new Date(m.at).toLocaleString()}` : ''}</span></li>`).join('');
+  // 里程碑按原版成就的路线分组；游戏播报过、但不在表里的成就单独列出
+  const groups = [...new Set(L.milestones.map((m) => m.group || ''))];
+  const got = L.milestones.filter((m) => m.at).length;
+  $('lsMilestones').innerHTML = `<li class="dim" style="font-size:11px">已达成 ${got} / ${L.milestones.length}</li>` + groups.map((g) => {
+    const ms = L.milestones.filter((m) => (m.group || '') === g);
+    return `<li><div class="k" style="margin-bottom:3px">${esc(g)} · ${ms.filter((m) => m.at).length}/${ms.length}</div><div class="chips">${ms.map((m) => `<span class="item" style="${m.at ? 'background:var(--accent-soft);color:var(--accent)' : 'opacity:.55'}" title="权重 ${m.weight}${m.at ? ' · ' + new Date(m.at).toLocaleString() : ''}">${m.at ? '✓ ' : ''}${esc(m.label)}</span>`).join('')}</div></li>`;
+  }).join('') + ((L.advancements || []).length ? `<li><div class="k" style="margin-bottom:3px">游戏播报的成就</div><div class="chips">${L.advancements.slice().reverse().map((a) => `<span class="item" title="${new Date(a.at).toLocaleString()}">🏆 ${esc(a.title)}</span>`).join('')}</div></li>` : '');
   const key = JSON.stringify([L.curve.length, L.curve.at(-1)?.t, L.lives.length, L.lives.at(-1)?.reached]);
   if (key === learnKey || !$('pane-learning').classList.contains('on')) return;
   learnKey = key;

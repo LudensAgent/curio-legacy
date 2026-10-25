@@ -14,38 +14,76 @@ import type { AgentEvent, EventBus } from '../events.ts';
  *
  * 另外按“每一条命”记从复活到各个里程碑用了几分钟：同样从空手开始，越来越快就是学到了东西——这是最直接的学习曲线。
  */
-export interface Milestone { key: string; label: string; weight: number; item?: RegExp }
+/**
+ * 里程碑：大致沿着原版成就（Advancements）的路线排，权重越往后越高。
+ * - item：背包里出现这样的物品就算达成（每条命都会重新经过，能算“这条命用了几分钟”）；
+ * - adv：游戏自己播报的成就名（服务器发的是英文名），收到就算达成；
+ * - 其他（活过一晚、睡过一觉、盖好房子、进下界/末地、打死怪、种地、钓鱼）由事件和状态认。
+ */
+export interface Milestone { key: string; label: string; group: string; weight: number; item?: RegExp; adv?: string[] }
 export const MILESTONES: Milestone[] = [
-  { key: 'log', label: '原木', weight: 3, item: /_(log|stem)$/ },
-  { key: 'crafting_table', label: '工作台', weight: 3, item: /^crafting_table$/ },
-  { key: 'wooden_pickaxe', label: '木镐', weight: 4, item: /^wooden_pickaxe$/ },
-  { key: 'cobblestone', label: '圆石', weight: 3, item: /^(cobblestone|cobbled_deepslate)$/ },
-  { key: 'stone_pickaxe', label: '石镐', weight: 6, item: /^stone_pickaxe$/ },
-  { key: 'stone_sword', label: '武器', weight: 3, item: /_(sword)$/ },
-  { key: 'furnace', label: '熔炉', weight: 4, item: /^furnace$/ },
-  { key: 'coal', label: '煤/木炭', weight: 4, item: /^(coal|charcoal)$/ },
-  { key: 'torch', label: '火把', weight: 4, item: /^torch$/ },
-  { key: 'cooked_food', label: '熟食', weight: 4, item: /^(cooked_|baked_potato$|bread$)/ },
-  { key: 'survive_night', label: '活过一晚', weight: 6 },
-  { key: 'bed', label: '床', weight: 6, item: /_bed$/ },
-  { key: 'slept', label: '睡过一觉', weight: 5 },
-  { key: 'shelter', label: '盖好房子', weight: 12 },
-  { key: 'iron_ingot', label: '铁锭', weight: 7, item: /^iron_ingot$/ },
-  { key: 'iron_pickaxe', label: '铁镐', weight: 8, item: /^iron_pickaxe$/ },
-  { key: 'iron_armor', label: '铁甲', weight: 6, item: /^iron_(helmet|chestplate|leggings|boots)$/ },
-  { key: 'diamond', label: '钻石', weight: 8, item: /^diamond$/ },
+  // 起步（Minecraft / Stone Age / Getting an Upgrade）
+  { key: 'log', label: '原木', group: '起步', weight: 2, item: /_(log|stem)$/ },
+  { key: 'crafting_table', label: '工作台（Minecraft）', group: '起步', weight: 3, item: /^crafting_table$/, adv: ['Minecraft'] },
+  { key: 'wooden_pickaxe', label: '木镐', group: '起步', weight: 3, item: /^wooden_pickaxe$/ },
+  { key: 'cobblestone', label: '圆石（石器时代）', group: '起步', weight: 3, item: /^(cobblestone|cobbled_deepslate|blackstone)$/, adv: ['Stone Age'] },
+  { key: 'stone_pickaxe', label: '石镐（获得升级）', group: '起步', weight: 4, item: /^stone_pickaxe$/, adv: ['Getting an Upgrade'] },
+  { key: 'sword', label: '武器', group: '起步', weight: 2, item: /_(sword)$/ },
+  { key: 'furnace', label: '熔炉', group: '起步', weight: 3, item: /^furnace$/ },
+  { key: 'coal', label: '煤/木炭', group: '起步', weight: 2, item: /^(coal|charcoal)$/ },
+  { key: 'torch', label: '火把', group: '起步', weight: 3, item: /^torch$/ },
+  // 活下来（Sweet Dreams / Monster Hunter）
+  { key: 'cooked_food', label: '熟食', group: '活下来', weight: 3, item: /^(cooked_|baked_potato$|bread$)/ },
+  { key: 'survive_night', label: '活过一晚', group: '活下来', weight: 5 },
+  { key: 'bed', label: '床', group: '活下来', weight: 4, item: /_bed$/ },
+  { key: 'slept', label: '睡过一觉（甜蜜的梦）', group: '活下来', weight: 4, adv: ['Sweet Dreams'] },
+  { key: 'kill_hostile', label: '打死怪物（怪物猎人）', group: '活下来', weight: 3, adv: ['Monster Hunter'] },
+  { key: 'shelter', label: '盖好房子', group: '活下来', weight: 10 },
+  { key: 'chest', label: '箱子', group: '活下来', weight: 2, item: /^chest$/ },
+  // 过日子（A Seedy Place / Fishy Business / The Parrots and the Bats）
+  { key: 'plant_seed', label: '种地（开荒垦地）', group: '过日子', weight: 3, adv: ['A Seedy Place'] },
+  { key: 'fish', label: '钓到鱼（腥味十足的生意）', group: '过日子', weight: 3, adv: ['Fishy Business'] },
+  { key: 'breed', label: '繁殖动物（我从哪儿来？）', group: '过日子', weight: 3, adv: ['The Parrots and the Bats'] },
+  { key: 'bread', label: '面包', group: '过日子', weight: 2, item: /^bread$/ },
+  // 铁器时代（Acquire Hardware / Suit Up / Hot Stuff / Isn't It Iron Pick / Not Today, Thank You / Ice Bucket Challenge）
+  { key: 'iron_ingot', label: '铁锭（来硬的）', group: '铁器', weight: 6, item: /^iron_ingot$/, adv: ['Acquire Hardware'] },
+  { key: 'iron_pickaxe', label: '铁镐（这不是铁镐么）', group: '铁器', weight: 6, item: /^iron_pickaxe$/, adv: ["Isn't It Iron Pick"] },
+  { key: 'iron_armor', label: '铁甲（整装上阵）', group: '铁器', weight: 6, item: /^iron_(helmet|chestplate|leggings|boots)$/, adv: ['Suit Up'] },
+  { key: 'shield', label: '盾牌', group: '铁器', weight: 3, item: /^shield$/, adv: ['Not Today, Thank You'] },
+  { key: 'bucket', label: '铁桶', group: '铁器', weight: 3, item: /^bucket$/ },
+  { key: 'lava_bucket', label: '岩浆桶（热腾腾的）', group: '铁器', weight: 4, item: /^lava_bucket$/, adv: ['Hot Stuff'] },
+  { key: 'obsidian', label: '黑曜石（冰桶挑战）', group: '铁器', weight: 5, item: /^obsidian$/, adv: ['Ice Bucket Challenge'] },
+  // 钻石与附魔（Diamonds! / Cover Me with Diamonds / Enchanter）
+  { key: 'diamond', label: '钻石（钻石！）', group: '钻石', weight: 8, item: /^diamond$/, adv: ['Diamonds!'] },
+  { key: 'diamond_pickaxe', label: '钻石镐', group: '钻石', weight: 6, item: /^diamond_pickaxe$/ },
+  { key: 'diamond_armor', label: '钻石甲（用钻石包裹我）', group: '钻石', weight: 6, item: /^diamond_(helmet|chestplate|leggings|boots)$/, adv: ['Cover Me with Diamonds'] },
+  { key: 'enchanting_table', label: '附魔台（附魔师）', group: '钻石', weight: 6, item: /^enchanting_table$/, adv: ['Enchanter'] },
+  // 下界与末地（We Need to Go Deeper / Into Fire / Eye Spy / The End? / Free the End）
+  { key: 'nether', label: '进入下界（勇往直下）', group: '下界与末地', weight: 8, adv: ['We Need to Go Deeper'] },
+  { key: 'blaze_rod', label: '烈焰棒（与火共舞）', group: '下界与末地', weight: 5, item: /^blaze_rod$/, adv: ['Into Fire'] },
+  { key: 'ender_eye', label: '末影之眼', group: '下界与末地', weight: 5, item: /^ender_eye$/ },
+  { key: 'stronghold', label: '找到要塞（隔墙有眼）', group: '下界与末地', weight: 6, adv: ['Eye Spy'] },
+  { key: 'end', label: '进入末地（结束了？）', group: '下界与末地', weight: 8, adv: ['The End?'] },
+  { key: 'dragon', label: '击败末影龙（解放末地）', group: '下界与末地', weight: 15, adv: ['Free the End'] },
 ];
 const TOTAL_WEIGHT = MILESTONES.reduce((n, m) => n + m.weight, 0);
+const ADV_KEY = new Map(MILESTONES.flatMap((m) => (m.adv ?? []).map((a) => [a.toLowerCase(), m.key] as const)));
 /** 每条命都会重新经过、最能看出“熟练度”的几个 */
 export const LIFE_MILESTONES = ['crafting_table', 'stone_pickaxe', 'furnace', 'torch', 'bed', 'shelter'];
 
 export interface Life { n: number; start: number; end?: number; cause?: string; reached: Record<string, number>; nights: number }
 export interface Sample { t: number; total: number; progress: number; survival: number; learning: number; efficiency: number }
-interface Data { version: 1; world: string; startedAt: number; ever: Record<string, number>; lives: Life[]; samples: Sample[]; deaths: number[] }
+interface Data { version: 1; world: string; startedAt: number; ever: Record<string, number>; lives: Life[]; samples: Sample[]; deaths: number[];
+  /** 游戏播报过的所有成就（含不在里程碑表里的） */
+  advancements?: { title: string; at: number }[] }
 
 export interface LearningInput { skills: { ok: number; fail: number; disabled?: boolean }[]; knowHow: { wins: number; losses: number }[]; housesComplete: number }
 
 const clamp = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
+
+/** 活了多久 → 0..1 的 S 形曲线：中点是一个游戏日（20 分钟），坡度 6 分钟（10 分钟约 0.16，40 分钟约 0.97） */
+export const LIFE_MIDPOINT_MIN = 20, LIFE_SLOPE_MIN = 6;
+export const lifeCurve = (minutes: number) => 1 / (1 + Math.exp(-(minutes - LIFE_MIDPOINT_MIN) / LIFE_SLOPE_MIN));
 
 export class Scorecard {
   data: Data;
@@ -106,8 +144,22 @@ export class Scorecard {
       // 合成出来马上放下的工作台、熔炉在背包里待不住：从合成结果里认
       const made = String(d.summary ?? '').match(/合成了 \d+ 个 ([a-z0-9_]+)/)?.[1];
       if (made) this.checkItems([made], ev.ts);
-      if (d.skill === 'sleep' && d.status === 'succeeded') this.reach('slept', ev.ts);
+      if (d.status === 'succeeded') {
+        if (d.skill === 'sleep') this.reach('slept', ev.ts);
+        else if (d.skill === 'farm' && /种|播|plant/i.test(String(d.summary ?? ''))) this.reach('plant_seed', ev.ts);
+        else if (d.skill === 'fish' && /钓到|caught/i.test(String(d.summary ?? ''))) this.reach('fish', ev.ts);
+        else if (['defend', 'hit_entity', 'ranged_defend'].includes(String(d.skill)) && /打死|击杀|杀死|打败|消灭|killed|slain/i.test(String(d.summary ?? ''))) this.reach('kill_hostile', ev.ts);
+      }
       try { this.checkItems(this.state().inventory.map((i) => i.name), ev.ts); } catch { /* 状态暂不可用 */ }
+    } else if (ev.type === 'game_message' && d.kind === 'advancement_self') {
+      // 游戏自己播报的成就：最可靠
+      const title = ev.msg.match(/\[([^\]]+)\]/)?.[1]?.trim();
+      if (title) {
+        const list = (this.data.advancements ??= []);
+        if (!list.some((a) => a.title === title)) { list.push({ title, at: ev.ts }); this.dirty = true; }
+        const key = ADV_KEY.get(title.toLowerCase());
+        if (key) this.reach(key, ev.ts);
+      }
     } else if (ev.type === 'attempt_end') {
       this.attempts = [...this.attempts.filter((a) => ev.ts - a.t < 30 * 60_000), { t: ev.ts, stuck: d.outcome === 'stuck' }];
     }
@@ -121,6 +173,8 @@ export class Scorecard {
       if (this.data.world !== s.worldId) this.data.world = s.worldId;
       this.checkItems(s.inventory.map((i) => i.name), now);
       if (this.wasDay === false && s.isDay) { const l = this.life(now); l.nights++; this.reach('survive_night', now); }
+      if (/nether/.test(s.dim)) this.reach('nether', now);
+      if (/the_end|^end$/.test(s.dim)) this.reach('end', now);
       this.wasDay = s.isDay;
     }
     const learn = this.learning();
@@ -133,9 +187,18 @@ export class Scorecard {
   }
 
   scores(now = Date.now(), learn = this.learning()) {
-    const progress = clamp(MILESTONES.filter((m) => this.data.ever[m.key] !== undefined).reduce((n, m) => n + m.weight, 0) / TOTAL_WEIGHT * 100);
+    // 进度：里程碑按权重累计；里程碑表以外的游戏成就每个再加一点（最多 10 分）
+    const known = new Set(MILESTONES.flatMap((m) => (m.adv ?? []).map((a) => a.toLowerCase())));
+    const extra = Math.min(10, (this.data.advancements ?? []).filter((a) => !known.has(a.title.toLowerCase())).length * 1.5);
+    const progress = clamp(MILESTONES.filter((m) => this.data.ever[m.key] !== undefined).reduce((n, m) => n + m.weight, 0) / TOTAL_WEIGHT * 100 + extra);
     const deathsLastHour = this.data.deaths.filter((t) => now - t < 3600_000).length;
-    const survival = clamp(100 * Math.exp(-0.6 * deathsLastHour));
+    // 生存：按“活了多久”打分，用 S 形曲线——刚复活几分钟几乎不得分，撑过一整个游戏日（20 分钟）正好一半，
+    // 再往后很快接近满分、不再无限加分。当前这条命占六成；最近几条已经结束的命的中位数占四成（稳定地活得久才高）。
+    const cur = this.data.lives.at(-1);
+    const curMin = cur && !cur.end ? (now - cur.start) / 60000 : 0;
+    const ended = this.data.lives.filter((l) => l.end).slice(-5).map((l) => (l.end! - l.start) / 60000).sort((a, b) => a - b);
+    const median = ended.length ? ended[Math.floor(ended.length / 2)] : curMin;
+    const survival = clamp(100 * (0.6 * lifeCurve(curMin) + 0.4 * lifeCurve(median)));
     const used = learn.skills.filter((k) => k.ok + k.fail >= 2 && !k.disabled);
     const useful = used.filter((k) => k.ok / (k.ok + k.fail) >= 0.5).length;
     const rate = used.length ? used.reduce((n, k) => n + k.ok / (k.ok + k.fail), 0) / used.length : 0;
@@ -164,7 +227,8 @@ export class Scorecard {
       reached: Object.fromEntries(LIFE_MILESTONES.filter((k) => l.reached[k] !== undefined).map((k) => [k, Math.round(l.reached[k] / 6) / 10])) }));
     return {
       now: this.scores(now), curve, startedAt: this.data.startedAt,
-      milestones: MILESTONES.map((m) => ({ key: m.key, label: m.label, weight: m.weight, at: this.data.ever[m.key] ?? null })),
+      milestones: MILESTONES.map((m) => ({ key: m.key, label: m.label, group: m.group, weight: m.weight, at: this.data.ever[m.key] ?? null })),
+      advancements: (this.data.advancements ?? []).slice(-40),
       lifeMilestones: LIFE_MILESTONES.map((k) => ({ key: k, label: MILESTONES.find((m) => m.key === k)!.label })),
       lives, deathsLastHour: this.data.deaths.filter((t) => now - t < 3600_000).length,
     };

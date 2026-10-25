@@ -10,7 +10,7 @@ import { validateCondition } from '../projects/conditions.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 import { buildMindMessages, buildReflectionMessages, moveDetails, type MindContext } from './prompt.ts';
 import type { SelfModel } from './self.ts';
-import { cleanLesson } from './self.ts';
+import { cleanLesson, cleanPlanStep } from './self.ts';
 import { designBuilding } from '../building/architect.ts';
 import { terrainSketch } from '../building/site.ts';
 import { homeOf } from './home.ts';
@@ -218,7 +218,7 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
 export function parsePlan(raw: unknown): MindDecision['plan'] | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const o = raw as Record<string, any>;
-  const steps = Array.isArray(o.steps) ? o.steps.map((x: unknown) => str(typeof x === 'string' ? x : (x as any)?.text, 60)).filter(Boolean).slice(0, 8) : [];
+  const steps = Array.isArray(o.steps) ? o.steps.map((x: unknown) => cleanPlanStep(str(typeof x === 'string' ? x : (x as any)?.text, 80))).filter(Boolean).slice(0, 8) : [];
   const done = (Array.isArray(o.done) ? o.done : o.done !== undefined ? [o.done] : [])
     .filter((x: unknown) => Number.isInteger(x) && (x as number) >= 0 && (x as number) < 8 || typeof x === 'string' && x.trim()).slice(0, 8);
   const focus = str(o.focus ?? o.agenda_id, 100), goal = str(o.goal, 100);

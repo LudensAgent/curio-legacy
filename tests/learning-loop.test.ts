@@ -71,7 +71,7 @@ test('值得学的时机不写死：吃亏程度跟着它自己的平时水平�
   assert.equal(engine.list().length, 0);
 });
 
-test('学习曲线：里程碑只增不减；每条命单独记到达里程碑的用时；死得多生存分就低', (t) => {
+test('学习曲线：里程碑只增不减；每条命单独记到达里程碑的用时；生存分按活了多久走 S 形曲线', async (t) => {
   let now = 1_700_000_000_000;
   t.mock.method(Date, 'now', () => now);
   const adapter = new FakeAdapter(), bus = new EventBus();
@@ -86,7 +86,7 @@ test('学习曲线：里程碑只增不减；每条命单独记到达里程碑�
   const s1 = card.summary(now);
   assert.ok(s1.milestones.find((m) => m.key === 'crafting_table')?.at, '合成后马上放下的工作台也算');
   assert.equal(s1.lives[0].reached.stone_pickaxe, 4, '第一条命 4 分钟拿到石镐');
-  assert.equal(s1.now.survival, 100);
+  assert.ok(s1.now.survival < 15, `才活了 4 分钟，生存分很低：${s1.now.survival}`);
   bus.publish('death', 'P0', '死了', { message: 'Curio was slain by Zombie' });
   adapter.inv.clear();
   now += 10_000; bus.publish('spawn', 'P3', '复活');
@@ -95,7 +95,10 @@ test('学习曲线：里程碑只增不减；每条命单独记到达里程碑�
   assert.equal(s2.lives.length, 2);
   assert.equal(s2.lives[1].reached.stone_pickaxe, 2, '第二条命 2 分钟就拿到石镐：学会了');
   assert.equal(s2.lives[0].cause, 'Curio was slain by Zombie');
-  assert.ok(s2.now.survival < 60, `刚死过一次：${s2.now.survival}`);
+  assert.ok(s2.now.survival < 15, `刚死过一次、上一条命只活了 4 分钟：${s2.now.survival}`);
+  const { lifeCurve } = await import('../src/observer/scorecard.ts');
+  assert.ok(Math.abs(lifeCurve(20) - 0.5) < 1e-9, '活过一个游戏日正好一半');
+  assert.ok(lifeCurve(5) < 0.1 && lifeCurve(40) > 0.95, 'S 形：前期很少、后期接近满分');
   assert.ok(s2.now.learning > 0 && s2.now.progress > 0);
   assert.ok(s2.curve.length >= 3);
 });
@@ -130,4 +133,38 @@ test('整理技能：长期用不上的收起；说同一件事的后台合并�
   // 没有新技能、也没有冲突：不再请模型
   await curator.check(now + 1);
   assert.equal(asked, 1);
+});
+
+test('里程碑沿原版成就：游戏播报的成就直接记上，表外的成就也算一点进度；进下界按维度认', (t) => {
+  let now = 1_700_000_000_000;
+  t.mock.method(Date, 'now', () => now);
+  const adapter = new FakeAdapter(), bus = new EventBus();
+  const card = new Scorecard(bus, () => adapter.state(), null, () => ({ skills: [], knowHow: [], housesComplete: 0 }));
+  card.start(1_000_000);
+  t.after(() => card.stop());
+  const before = card.summary(now).now.progress;
+  bus.publish('game_message', 'P1', 'Curio has made the advancement [Stone Age]', { kind: 'advancement_self' });
+  bus.publish('game_message', 'P1', 'Curio has made the advancement [Bullseye]', { kind: 'advancement_self' });
+  adapter.dim = 'the_nether'; card.sample(now);
+  const s = card.summary(now);
+  assert.ok(s.milestones.find((m) => m.key === 'cobblestone')?.at, '石器时代 → 圆石');
+  assert.ok(s.milestones.find((m) => m.key === 'nether')?.at);
+  assert.deepEqual(s.advancements.map((a) => a.title), ['Stone Age', 'Bullseye']);
+  assert.ok(s.now.progress > before);
+  assert.ok(s.milestones.length >= 35, `${s.milestones.length} 个里程碑`);
+});
+
+test('专注：点子和疑问不能当主目标；抄回来的清单格式会被清掉；原样重写清单不算推进', async () => {
+  const { SelfModel, cleanPlanStep } = await import('../src/mind/self.ts');
+  const self = new SelfModel(null);
+  const idea = self.addAgenda('甘蔗能造纸，回头记下这片甘蔗的位置', 'idea', 'someday')!;
+  assert.equal(self.setPlan(idea.id, ['去甘蔗那记坐标']), null, '点子不能当主目标');
+  assert.equal(cleanPlanStep('0. [ ] 0. [x] 吃东西保命'), '吃东西保命');
+  const plan = self.setPlan('盖一间小屋', ['0. [ ] 砍木头', '1. [ ] 做木板'])!;
+  assert.deepEqual(plan.steps.map((s) => s.text), ['砍木头', '做木板']);
+  const at = plan.progressAt;
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(self.setPlan(plan.agendaId, ['砍木头', '做木板'])!.progressAt, at, '原样重写不算推进');
+  self.checkPlan([0]);
+  assert.ok(self.plan()!.progressAt! > at!);
 });

@@ -702,7 +702,11 @@ export class Mind {
       }
       for (const id of decision.agenda.done) this.d.self.setAgendaStatus(id, 'done');
       for (const id of decision.agenda.drop) this.d.self.setAgendaStatus(id, 'dropped');
-      if (decision.agenda.focus) this.d.self.setAgendaStatus(decision.agenda.focus, 'active');
+      if (decision.agenda.focus) {
+        const item = this.d.self.data.agenda.find((a) => a.id === decision.agenda!.focus);
+        if (item && item.kind !== 'goal') decision.notes.push(`「${item.text}」是${item.kind === 'idea' ? '点子' : '疑问'}，不能当主目标：真想做就加成 goal`);
+        else this.d.self.setAgendaStatus(decision.agenda.focus, 'active');
+      }
     }
     if (decision.next) this.queuedNext = { draft: decision.next, monologue: '', at: Date.now() };
 
@@ -772,7 +776,7 @@ export class Mind {
       const focus = p.focus ?? cur?.agendaId ?? this.d.self.activeAgenda()?.id ?? p.goal;
       const set = focus ? this.d.self.setPlan(focus, p.steps) : null;
       if (set) this.d.bus.publish('plan_set', 'P2', `主目标「${set.goal}」：${set.steps.map((st) => `${st.done ? '☑' : '☐'}${st.text}`).join(' ')}`, { agendaId: set.agendaId });
-      else decision.notes.push('plan 没定下来：需要 focus（议程 ID 或一句话的目标）和 steps');
+      else decision.notes.push('plan 没定下来：focus 要是议程里的 goal（点子、疑问不能当主目标），或者一句话的目标；还要有 steps');
     }
     if (p.done?.length) {
       const checked = this.d.self.checkPlan(p.done);
@@ -795,9 +799,10 @@ export class Mind {
   private guardFocus(decision: MindDecision, thoughtAboutActivity: string | null, urgent: boolean) {
     const a = this.activity;
     if (!a || urgent || !decision.activity) return;
-    if (decision.kind === 'switch' && (decision.tier === 'glance' || (this.d.self.plan() && !decision.switchReason))) {
+    // 瞥一眼时不整个换掉手上的事（认真想过就可以换：主目标值不值得，它自己判断）
+    if (decision.kind === 'switch' && decision.tier === 'glance') {
       decision.kind = 'detour';
-      decision.notes.push(`没写 switch_reason 不能整个换掉手上的事：这次按 detour 处理，做完「${decision.activity.what}」会回到「${a.what}」`);
+      decision.notes.push(`瞥一眼时不整个换掉手上的事：这次按 detour 处理，做完「${decision.activity.what}」会回到「${a.what}」；真要换就认真想一想`);
       return;
     }
     if (decision.kind === 'adjust' && decision.tier === 'glance' && a.id === thoughtAboutActivity && a.failures === 0
