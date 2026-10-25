@@ -580,3 +580,20 @@ test('身体习惯由模型定：解析 habits，0/false 关掉，合并后长�
   assert.deepEqual(self.setHabits(parseHabits({ torch_every: 0 })!), ['torch_every=0']);
   assert.deepEqual(self.habits(), { pickup: true });
 });
+
+test('白天站在地表、天光数据没更新时，不会误报“周围很暗”；提示词按块分好、此刻放在最后', () => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  adapter.light = 2; // 客户端天光读数没更新
+  const perception = new Perception(adapter, memory, bus, new Vision(adapter));
+  const p = perception.update();
+  assert.equal(p.light?.level, 'bright');
+  assert.equal(p.light?.mob_spawn_risk, false);
+  const self = new SelfModel(null);
+  const [, user] = buildMindMessages({ tier: 'deliberate', reason: '测试', percept: p, state: adapter.state(), self, memory, activity: null, suspended: [], lastRecord: null,
+    noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' });
+  const order = ['【我】', '【记得的地方】', '【最近】', '【手上的活】', '【身边】', '【身体】', '【此刻】'].map((h) => user.content.indexOf(h));
+  assert.ok(order.every((v, i) => v >= 0 && (i === 0 || v > order[i - 1])), `分块顺序 ${order}`);
+  assert.match(user.content, /【身边】\{"local":/);
+  assert.match(user.content, /【身体】\{"where":"在地表/);
+  memory.close();
+});

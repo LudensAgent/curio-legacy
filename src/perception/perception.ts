@@ -332,7 +332,19 @@ export class Perception {
     const light = s.connected && s.alive && s.observationReady ? this.lightInfo(s) : null;
     const overhead = s.connected && s.alive && s.observationReady ? this.overheadInfo(s) : null;
     // 树冠下天光也会很弱，但人一抬头就知道是树叶，不会以为自己在地下
-    if (light && overhead && (overhead.covered === 'canopy' || overhead.covered === 'open')) light.underground = false;
+    const where = overhead && contact ? whereAmI(this.adapter, s, overhead) : null;
+    if (light && overhead && (overhead.covered === 'canopy' || overhead.covered === 'open')) {
+      light.underground = false;
+      // 白天头顶露天或只隔着树叶：天光至少 13–15。读到很暗，多半是客户端的天光数据没更新（刚加载的区块、刚挖开的格子），
+      // 不能据此说“周围很暗”——人一抬头就看得见天亮着
+      const floor = overhead.covered === 'open' ? 15 : 13;
+      if (s.isDay && where?.kind === 'surface' && light.here < 10 && light.block < floor) {
+        light.here = Math.max(light.here, floor);
+        light.sky = Math.max(light.sky, floor);
+        light.level = 'bright';
+        light.mob_spawn_risk = false;
+      }
+    }
     const environment = this.bodyEnvironment(s, contact, light);
     this.latest = {
       ts: Date.now(),
@@ -359,7 +371,7 @@ export class Perception {
           contacts: { support: contact.support, feet: contact.feet, head: contact.head } } : {}),
         ...environment,
         ...(overhead ? { overhead } : {}),
-        ...(overhead && contact ? { where: whereAmI(this.adapter, s, overhead) } : {}),
+        ...(where ? { where } : {}),
         ...((() => { const eye = this.adapter.eye(); return contact && eye ? { local: localMap(this.adapter, s.pos, facingOfYaw(eye.yaw)) } : {}; })()),
         ...(contact ? { exits: contact.exitOptions } : {}),
       },
