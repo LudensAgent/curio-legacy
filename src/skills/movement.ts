@@ -220,16 +220,16 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
 };
 
 // ------------------------------------------------------------------ goto
-export const goTo: Skill<{ target: string }> = {
+export const goTo: Skill<{ target: string; dig?: boolean }> = {
   name: 'goto',
-  description: '沿看得见的落脚点步行去地标、坐标、作品或记得的功能方块；绕开墙壁，遇到已观察的木门会开门，不自动挖墙、搭柱或架桥。水路不通时可另选 boat',
-  argsDoc: '{"target": "base | death | <地标id或名称> | <作品ID> | crafting_table | x,y,z"}',
+  description: '沿看得见的落脚点步行去地标、坐标、作品或记得的功能方块；绕开墙壁，遇到已观察的木门会开门。默认不挖墙、不搭柱；写 "dig":true 就像人一样挖穿挡路的土石、垫方块爬上坡坎直接过去。水路不通时可另选 boat',
+  argsDoc: '{"target": "base | death | <地标id或名称> | <作品ID> | crafting_table | x,y,z", "dig"?: true（挖穿/垫高直走）}',
   timeoutMs: 600000,
   movement: true,
   validate(raw) {
     const t = String(obj(raw).target ?? '').trim();
     if (!t) return { ok: false, error: 'target 不能为空' };
-    return { ok: true, args: { target: t } };
+    return { ok: true, args: { target: t, ...(obj(raw).dig === true ? { dig: true } : {}) } };
   },
   async run(ctx, args) {
     const { adapter, memory, signal } = ctx;
@@ -343,16 +343,16 @@ export const goTo: Skill<{ target: string }> = {
           const remembered = memoryHops < 12 ? ctx.senses.rememberedWaypoint?.(pos, 24, visited) : null;
           if (remembered) { waypoint = remembered; fromMemory = true; memoryHops++; }
         }
-        if (ctx.senses.navigationWaypoint && !waypoint) {
+        if (ctx.senses.navigationWaypoint && !waypoint && !args.dig) {
           const water = waterNear();
-          return fail('PATH_NOT_FOUND', `前往 ${label}：眼前没有可确认的${water ? '陆地落脚点，附近有水，可考虑 boat 渡河' : '通路，先换个观察位置或寻找入口'}；没有挖墙或搭柱`, { ...measured(cur), waterAhead: water });
+          return fail('PATH_NOT_FOUND', `前往 ${label}：眼前没有可确认的${water ? '陆地落脚点，附近有水，可考虑 boat 渡河' : '通路'}；没有挖墙或搭柱——要直接过去写 goto {"target":"${args.target}","dig":true}（挖穿土石、垫方块上坡）`, { ...measured(cur), waterAhead: water });
         }
         const dxz = Math.hypot(pos.x - cur.x, pos.z - cur.z);
         const target = waypoint ? { kind: 'near' as const, pos: waypoint, range: fromMemory ? 1.2 : 0.7 }
           : dxz > 32 ? { kind: 'xz' as const, x: cur.x + (pos.x - cur.x) * 24 / dxz, z: cur.z + (pos.z - cur.z) * 24 / dxz, range: 2 }
           : flat ? { kind: 'xz' as const, x: pos.x, z: pos.z, range } : { kind: 'near' as const, pos, range };
         try {
-          await adapter.moveTo(target, { signal, timeoutMs: Math.max(1, Math.min(20000, ctx.deadline - Date.now())), allowSwimming: false });
+          await adapter.moveTo(target, { signal, timeoutMs: Math.max(1, Math.min(20000, ctx.deadline - Date.now())), allowSwimming: false, ...(args.dig ? { allowTerrainChanges: true } : {}) });
         } catch (e) {
           if (isAbort(e)) throw e;
           if (await tryDoor()) continue;
@@ -365,7 +365,7 @@ export const goTo: Skill<{ target: string }> = {
         if (fromMemory && dist3(cur, after) < 0.3 && !arrived(after)) { visited.push(waypoint!); continue; }
         if (dist3(cur, after) < 0.3 && !arrived(after)) return fail('PATH_NOT_FOUND', `前往 ${label} 没有取得进展，仍在 (${after.x.toFixed(2)},${after.y.toFixed(2)},${after.z.toFixed(2)})；尚未到达目标位置，需要换入口或路线`, measured(after));
         if (distance(after) < bestDistance - 0.5) { bestDistance = distance(after); detours = 0; }
-        else if (++detours >= 4) return fail('PATH_NOT_FOUND', `绕行后仍未接近 ${label}，需要观察入口或另选路线`, measured(after));
+        else if (++detours >= 4) return fail('PATH_NOT_FOUND', `绕行后仍未接近 ${label}${args.dig ? '' : `；要直接过去写 goto {"target":"${args.target}","dig":true}`}`, measured(after));
         visited.push(waypoint ?? after);
       }
       if (!inScope()) return fail('WRONG_DIMENSION', '途中世界或会话已改变，需要重新规划');
@@ -376,7 +376,7 @@ export const goTo: Skill<{ target: string }> = {
     } catch (e) {
       if (isAbort(e)) throw e;
       const water = waterNear();
-      return fail(codeFromError(e), `前往 ${label} 失败：${(e as Error).message}${water ? '；附近有水，尚未确认干燥步行通路，可沿岸绕行或用 boat 渡河' : ''}`, {
+      return fail(codeFromError(e), `前往 ${label} 失败：${(e as Error).message}${water ? '；附近有水，尚未确认干燥步行通路，可沿岸绕行或用 boat 渡河' : ''}${args.dig ? '' : `；挡路的是土石坡坎就写 goto {"target":"${args.target}","dig":true} 挖穿/垫高直走`}`, {
         ...measured(), waterAhead: water,
       });
     } finally {

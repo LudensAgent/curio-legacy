@@ -130,7 +130,8 @@ test('build preflight cannot spend another deferred project reserve and cancelle
     const result = await build.run(context(adapter, memory), validated.args);
     assert.equal(result.failureCode, 'MISSING_MATERIALS');
     assert.ok((result.data!.missingMaterials as Record<string, number>).cobblestone > 0);
-    assert.equal(adapter.actions.length, 0);
+    // 料不全时会先用自己能用的那部分开工，但别的工程预留的 190 块一块不动
+    assert.ok((adapter.inv.get('cobblestone') ?? 0) >= 190, `预留的圆石被动了：剩 ${adapter.inv.get('cobblestone')}`);
   }
   const signal = new AbortController(); signal.abort();
   const before = reservationsFor(memory).list();

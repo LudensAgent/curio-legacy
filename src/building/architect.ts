@@ -74,7 +74,7 @@ site 是房子中心相对“我”的位置（x 往东为正、z 往南为正�
     ...(req.terrain ? { terrain: {
       how_to_read: `以我为中心 ${req.terrain.radius * 2 + 1}×${req.terrain.radius * 2 + 1} 格，行从北到南、列从西到东，正中间是我脚下；数字是这一列地表比我脚下高/低几格，~ 是水，? 看不清，带 T 的长着树（盖房要砍掉）`,
       summary: req.terrain.summary, rows: req.terrain.rows } } : {}),
-    budget: req.pastWorks.length ? '按手上和附近的材料量力而行' : '这是第一座房子：总材料控制在 180 块左右、台阶不超过 60 级，攒得起才盖得完',
+    budget: req.pastWorks.length ? '按手上和附近的材料量力而行' : '这是第一座房子：总材料控制在 180 块左右、台阶不超过 60 级，灯用 torch，攒得起才盖得完',
   };
   return [{ role: 'system', content: system }, { role: 'user', content: `${JSON.stringify(payload)}\n请设计。` }];
 }

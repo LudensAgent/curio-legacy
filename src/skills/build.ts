@@ -41,6 +41,9 @@ interface BuildArgs {
 const tally = (o: Record<string, number>) => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([n, c]) => `${n}×${c}`).join('、');
 
 /** 把逐格缺陷归成几句人话：整地做了什么、什么东西挡着、地基哪里不行、还差多少块没放 */
+/** 家具和灯：不影响房子能不能住，缺了以后再摆 */
+const FURNISHING = /^(furnace|blast_furnace|smoker|chest|barrel|crafting_table|lantern|soul_lantern|torch|wall_torch|[a-z_]+_bed|bookshelf|flower_pot|[a-z_]+_carpet|anvil|cartography_table|loom|composter)$/;
+
 export function describeBuildProblems(result: ConstructionResult): string {
   const out: string[] = [];
   const site = result.site;
@@ -103,7 +106,7 @@ async function restoreStations(ctx: Parameters<Skill['run']>[0], project: Buildi
 
 export const build: Skill<BuildArgs> = {
   name: 'build',
-  description: '照图施工：有建筑师画好的图纸就写 draft（推荐）；也可以自己设计：spec.design 用字符画分层画出每格放什么（legend 字符→方块，layers 从地板往上，"." 留空，门写下半格），想要什么样就画什么样。程序负责选址（不给 origin 会在附近找干燥平地并整平；给的地方不合适会就近换）、算材料缺口、分阶段施工、逐格验收；返回作品 ID，中断后用 projectId 续建，inspect 检查、repair 修补。',
+  description: '照图施工：有建筑师画好的图纸就写 draft（推荐）；也可以自己设计：spec.design 用字符画分层画出每格放什么（legend 字符→方块，layers 从地板往上，"." 留空，门写下半格），想要什么样就画什么样。程序负责选址（不给 origin 会在附近找干燥平地并整平；给的地方不合适会就近换）、分阶段施工、逐格验收；料不全也照样开工，手上有的先盖（墙基墙身先起来），缺的报给你，补齐后用 projectId 接着盖；返回作品 ID，中断后用 projectId 续建，inspect 检查、repair 修补。',
   argsDoc: '{"draft":"dr_…"}（新房子：照建筑师的图纸盖）｜{"projectId":"作品ID","mode"?:"build|inspect|repair"}（接着盖、检查、修补已有作品）；可选 "origin":{"x":0,"y":64,"z":0}、"rotation":0|90|180|270。图纸先用 {"kind":"design"} 请建筑师画，不要自己写 spec',
   timeoutMs: 600000,
   movement: true,
@@ -250,7 +253,14 @@ export const build: Skill<BuildArgs> = {
       // 自己设计的房子：把设计上的问题告诉模型（不影响验收），下一版可以画得更好
       if (spec.design) { try { const w = compileDesign(spec.design).warnings; if (w.length) notes.push(`设计提示：${w.join('；')}`); } catch { /* 已经编译过，不会到这里 */ } }
       const noteText = notes.length ? `${notes.join('；')}。` : '';
-      if (!result.inspection.complete) {
+      // 主体都盖好了、只差家具（熔炉、箱子、灯笼……）：房子已经能住，家具有了再摆
+      const left = result.inspection.defects;
+      const furnishingOnly = !result.inspection.complete && left.length > 0 && left.every((d) => typeof d.expected === 'string' && FURNISHING.test(d.expected));
+      if (furnishingOnly) {
+        const want = [...new Set(left.map((d) => String(d.expected)))].join('、');
+        notes.push(`主体盖好了，还差家具：${want}——有了用 build {"projectId":"${project.id}","mode":"repair"} 摆上`);
+      }
+      if (!result.inspection.complete && !furnishingOnly) {
         const missing = Object.entries(result.missingMaterials).map(([name, count]) => `${name}×${count}`).join('，');
         const failureCode = missing ? 'MISSING_MATERIALS' : result.failures.some((f) => f.reason === 'WRONG_DIMENSION') ? 'WRONG_DIMENSION' : 'ERROR';
         // 缺料折算成要去采的原材料（像玩家心算：73 块木板 ≈ 19 根原木）
@@ -263,7 +273,7 @@ export const build: Skill<BuildArgs> = {
         }
         const sameAsMissing = rawNeed.size === Object.keys(result.missingMaterials).length && [...rawNeed].every(([n, c]) => result.missingMaterials[n] === c);
         const rawText = sameAsMissing ? '' : [...rawNeed].map(([n, c]) => `${n}×${c}`).join('、');
-        return fail(failureCode, `${noteText}${spec.name} 尚未验收（${result.inspection.defects.length} 个缺陷）${missing ? `；缺少 ${missing}${rawText ? `（折算成原材料：${rawText}，可用 gather 的 for 按缺口采）` : ''}；补齐后用 mode:"repair"` : ''}。${describeBuildProblems(result)}作品 ID ${project.id}。${result.failures[0] ? ` ${result.failures[0].reason}` : ''}`, data);
+        return fail(failureCode, `${noteText}${result.placed ? `这次先盖了 ${result.placed} 块；` : ''}${spec.name} 尚未验收（还差 ${result.inspection.defects.length} 处）${missing ? `；缺少 ${missing}${rawText ? `（折算成原材料：${rawText}，可用 gather 的 for 按缺口采）` : ''}；补齐后用 mode:"repair"` : ''}。${describeBuildProblems(result)}作品 ID ${project.id}。${result.failures[0] ? ` ${result.failures[0].reason}` : ''}`, data);
       }
       if (blueprint.home && args.mode !== 'inspect') {
         const home = rotatePosition(blueprint.home, project.origin, project.rotation);
@@ -271,7 +281,7 @@ export const build: Skill<BuildArgs> = {
         ctx.memory.addLandmark('discovery', `我的${spec.name}`, state.dim, home, 4);
         ctx.bus.publish('built', 'P2', `${spec.name} 逐格及通行检查通过；作品 ${project.id}`);
       }
-      return ok(`${spec.name} 验收通过；本次放置 ${result.placed} 块。${noteText}${describeBuildProblems(result)}作品 ID ${project.id}`, data);
+      return ok(`${spec.name} ${furnishingOnly ? '主体完工' : '验收通过'}；本次放置 ${result.placed} 块。${noteText}${describeBuildProblems(result)}作品 ID ${project.id}`, data);
     } catch (e) {
       if (isAbort(e)) throw e;
       return fail(codeFromError(e), `建筑工程失败：${(e as Error).message}`);

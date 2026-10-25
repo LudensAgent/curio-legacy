@@ -405,15 +405,27 @@ export async function constructBuilding(ctx: SkillCtx, archive: BuildingArchive,
     return finish();
   }
   const needsPlacement = (cell: BuildingCell) => workDefect(cell) || blueprint.cells.some((c) => c.placedBy === cell.id && workDefect(c));
-  const need = materialCost([...blueprint.cells.filter((c) => !c.placedBy && needsPlacement(c)), ...scaffolding.filter((c) => {
+  const scaffoldTodo = scaffolding.filter((c) => {
     const previous = project.temporaryBlocks.find((b) => cellKey(b.pos) === cellKey(c.pos));
     return !previous || adapter.blockAt(rotatePosition(c.pos, project.origin, project.rotation)) !== previous.name;
-  })]);
+  });
+  const need = materialCost([...blueprint.cells.filter((c) => !c.placedBy && needsPlacement(c)), ...scaffoldTodo]);
   const inv = new Map(availableInventoryFor(ctx.memory, adapter.state()).map((i) => [i.name, i.count]));
   for (const [name, count] of Object.entries(need)) if ((inv.get(name) ?? 0) < count) result.missingMaterials[name] = count - (inv.get(name) ?? 0);
-  if (Object.keys(result.missingMaterials).length) return finish();
+  // 像玩家一样有多少料先盖多少：墙基、墙身先起来，缺的那几样（玻璃、灯笼、楼梯……）留着以后补。
+  // 只有一块都放不了（手上的料一样都用不上）时才直接收工
+  const placeable = Object.keys(need).some((name) => (inv.get(name) ?? 0) > 0);
+  if (Object.keys(result.missingMaterials).length && !placeable) return finish();
+  // 只用自己能用的料（别的工程预留的不动），边放边扣
+  const avail = new Map(inv);
+  const have = (name: string) => (avail.get(name) ?? 0) > 0 && adapter.state().inventory.some((i) => i.name === name && i.count > 0);
+  const outOf = new Set<string>();
   for (const door of doors) if (actualState(adapter, rotatePosition(door.pos, project.origin, project.rotation))?.name === door.name) await setDoorOpen(door, true);
-  try { result.scaffoldPlaced = await erectScaffolding(ctx, archive, project, scaffolding, checkSession); }
+  // 料不全时：脚手架的料也不够就先不搭（够得着的低处照样盖），够就搭上并从可用料里扣掉
+  const scaffoldCost = materialCost(scaffoldTodo);
+  const scaffoldOk = Object.entries(scaffoldCost).every(([n, c]) => (avail.get(n) ?? 0) >= c);
+  if (scaffoldOk) for (const [n, c] of Object.entries(scaffoldCost)) avail.set(n, (avail.get(n) ?? 0) - c);
+  if (scaffoldOk) try { result.scaffoldPlaced = await erectScaffolding(ctx, archive, project, scaffolding, checkSession); }
   catch (error) { if (isAbort(error)) throw error; result.failures.push({ cellId: 'scaffolding', reason: (error as Error).message }); return finish(); }
   const owned = new Set(project.checkpoint.ownedCells);
   const near = async (pos: Vec3Like, placement = false) => {
@@ -480,6 +492,8 @@ export async function constructBuilding(ctx: SkillCtx, archive: BuildingArchive,
       if (Date.now() >= ctx.deadline - 1000) return finish();
       if (!needsPlacement(cell) || cell.placedBy) continue;
       if (cell.dependsOn.some((id) => byId.has(id) && workDefect(byId.get(id)!))) continue;
+      // 这一格的料用完了/没有：先跳过，盖别的
+      if (outOf.has(cell.name) || !have(cell.name)) { outOf.add(cell.name); continue; }
       const pos = rotatePosition(cell.pos, project.origin, project.rotation);
       try {
         // A damaged two-block door is repaired as one item, including a surviving upper half.
@@ -504,10 +518,11 @@ export async function constructBuilding(ctx: SkillCtx, archive: BuildingArchive,
         if (!action.ok || cellDefect(adapter, cell, project)) {
           result.failures.push({ cellId: cell.id, reason: action.reason ?? 'PLACEMENT_NOT_VERIFIED' });
           archive.pending(project.id, null);
-          if (action.reason === 'NO_ITEM') return finish();
+          if (action.reason === 'NO_ITEM') outOf.add(cell.name);
           continue;
         }
         result.placed++; progress = true; owned.add(cell.id);
+        avail.set(cell.name, (avail.get(cell.name) ?? 0) - 1);
         archive.checkpoint(project.id, cell.phase, cell.id, `已核实 ${cell.name} @ ${cell.id}`);
         archive.pending(project.id, null);
         for (const auto of blueprint.cells.filter((c) => c.placedBy === cell.id)) if (!cellDefect(adapter, auto, project)) { owned.add(auto.id); archive.checkpoint(project.id, auto.phase, auto.id, '已核实自动生成的配对方块'); }

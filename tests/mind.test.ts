@@ -597,3 +597,16 @@ test('白天站在地表、天光数据没更新时，不会误报“周围很�
   assert.match(user.content, /【身体】\{"where":"在地表/);
   memory.close();
 });
+
+test('goto 可以选择挖穿/垫高直走；工地附近的坐标能当收工位置', async () => {
+  const { goTo } = await import('../src/skills/movement.ts');
+  const v = goTo.validate({ target: 'base', dig: true }, new FakeAdapter());
+  assert.ok(v.ok && v.args.dig === true);
+  const { validateCondition } = await import('../src/projects/conditions.ts');
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null);
+  memory.setWorld(adapter.state().worldId);
+  memory.addLandmark('base', '基地 1', 'overworld', { x: 19, y: 76, z: 22 });
+  assert.doesNotThrow(() => validateCondition({ type: 'location_near', dimension: 'overworld', pos: { x: 12, y: 75, z: 20 }, radius: 6 }, adapter, memory, adapter.state()));
+  assert.throws(() => validateCondition({ type: 'location_near', dimension: 'overworld', pos: { x: 300, y: 75, z: 20 }, radius: 6 }, adapter, memory, adapter.state()));
+  memory.close();
+});

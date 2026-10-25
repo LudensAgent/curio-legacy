@@ -204,3 +204,14 @@ test('亮度：暗处没有火把但有煤 → 先做火把', () => {
   assert.deepEqual(r.steps[0], { skill: 'craft', args: { item: 'torch', count: 8 } });
   assert.equal(r.steps[1].skill, 'place_torch');
 });
+
+test('build：料不全也先开工，有多少盖多少（墙基先起来），缺的报出来', async () => {
+  const a = new FakeAdapter();
+  a.speed = 100000;
+  a.inv.set('cobblestone', 180);
+  const { o } = await runSkill(a, 'build', { blueprint: 'hut', prefab: true });
+  assert.equal(o.result.failureCode, 'MISSING_MATERIALS');
+  assert.ok(Number(o.result.data!.placed) > 0, o.result.summary);
+  assert.match(o.result.summary, /这次先盖了 \d+ 块/);
+  assert.ok(Object.keys(o.result.data!.missingMaterials as object).includes('glass'));
+});

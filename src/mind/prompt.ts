@@ -117,7 +117,8 @@ const CHOOSE = `【选动作】
 - 过水 → boat 或游过去；吃 → eat（背包有吃的）/ hunt / forage / fish；做东西 → craft、smelt（拿不准先查 recipes）
 - 有怪靠近 → defend {"target":"名字"} 打掉，或走开绕路（苦力怕也是你定：打就砍一下退一步）
 - 过夜 → sleep（有床，看参数选哪张）/ shelter / 自己挖坑封顶；在坑里或地下 → place_at [0,0,0] 垫高或挖台阶
-- 盖新房子 → design 拿图纸 → 攒材料 → build {"draft":"图纸ID"}；没盖完的 → build {"projectId":"作品ID"}；不要自己画图纸`;
+- 盖新房子 → design 拿图纸 → 攒材料 → build {"draft":"图纸ID"}（料不全也能先盖，有多少盖多少）；没盖完的 → build {"projectId":"作品ID"}；不要自己画图纸
+- goto 报没路、挡着的是土坡石坎 → goto {"target":…,"dig":true} 挖穿或垫高直接过去`;
 
 const PRINCIPLES = `【原则】
 - 接着刚才的念头往下想，不反复换主意、不重复刚做完的事；临时处理用 detour，做完自动回到原来的活。
@@ -222,6 +223,10 @@ export function situationalReminders(ctx: MindContext): string[] {
       out.push(`再过大约 ${Math.max(1, Math.round(toDuskMin))} 分钟天黑；${bedLine}，走回去要 ${Math.max(1, Math.round(bed.dist / 4 / 60))} 分钟左右：要回去睡就该动身了，否则就近想办法过夜`);
   }
   if (p.self.food <= 8) out.push(`饿了（饥饿 ${p.self.food}）：留意吃的`);
+  // 家已经有了、手上又没什么大目标：像玩家一样给自己找下一个更长的目标，而不是只做零碎的小事
+  const done = myBuilds(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }).some((b) => b.status === 'complete');
+  if (done && !ctx.activity && ctx.self.agenda().filter((x) => x.kind === 'goal').length < 2)
+    out.push('家已经盖好了：给自己定个更大的目标放进 agenda（比如下矿弄铁和铁工具、开一块农田养几只动物、扩建仓库、去远处探险），可以先翻 homemaking 技能书');
   return out.slice(0, 4);
 }
 

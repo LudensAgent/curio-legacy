@@ -3,6 +3,8 @@ import type { WorldMemory } from '../memory/store.ts';
 import type { Percept } from '../perception/perception.ts';
 import type { Senses } from '../skills/types.ts';
 import { dist3 } from '../util.ts';
+import { buildingArchiveFor } from '../skills/build.ts';
+import { activeDrafts } from '../building/drafts.ts';
 import type { Condition, ConditionResult } from './types.ts';
 
 const object = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v);
@@ -28,10 +30,14 @@ export function validateCondition(raw: unknown, adapter: Pick<GameAdapter, 'isKn
     if (typeof raw.dimension !== 'string' || !raw.dimension || raw.dimension.length > 100 || !validPos(raw.pos) || !finite(raw.radius, 0, 256)) {
       throw new Error('位置验收条件的维度、坐标或半径无效');
     }
+    // 记得的地标、自己的作品工地、建筑师选好的位置，附近（半径以内）都算可信：真人会说“走到工地那儿”
+    const near = (p: Vec3Like) => dist3(p, raw.pos) <= Math.max(1, Math.min(16, raw.radius + 2));
     const known = memory.landmarks().some((l) =>
       (!raw.landmarkId || l.id === raw.landmarkId) && l.dim === raw.dimension &&
-      (l.kind !== 'resource' || Date.now() - l.ts <= 15 * 60_000) && dist3(l.pos, raw.pos) <= 1,
-    );
+      (l.kind !== 'resource' || Date.now() - l.ts <= 15 * 60_000) && (raw.landmarkId ? dist3(l.pos, raw.pos) <= 1 : near(l.pos)),
+    ) || (!raw.landmarkId && (() => {
+      try { return buildingArchiveFor(memory).list().some((p) => p.dimension === raw.dimension && near(p.origin)); } catch { return false; }
+    })()) || (!raw.landmarkId && (activeDrafts()?.list(8) ?? []).some((d) => !!d.site && near(d.site)));
     const observed = observationReady(state) && state.worldId === memory.worldId && state.dim === raw.dimension && dist3(state.pos, raw.pos) <= 1;
     if (!known && !observed) throw new Error('位置必须来自当前观测或同一世界内已有的可信记忆');
     return { type: 'location_near', dimension: raw.dimension, pos: { x: raw.pos.x, y: raw.pos.y, z: raw.pos.z }, radius: raw.radius, ...(raw.landmarkId ? { landmarkId: String(raw.landmarkId) } : {}) };
