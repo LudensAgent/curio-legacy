@@ -12,13 +12,14 @@ import { buildMindMessages, buildReflectionMessages, moveDetails, type MindConte
 import type { SelfModel } from './self.ts';
 import { cleanLesson } from './self.ts';
 import { designBuilding } from '../building/architect.ts';
+import { terrainSketch } from '../building/site.ts';
 import { draftsFor } from '../building/drafts.ts';
 import type { SkillBook } from '../knowledge/skillbook.ts';
 import { describeBuild, myBuilds } from './home.ts';
 
 /** 思考时可以先做的只读查询（不占游戏时间） */
 const QUERY_KINDS = ['recipes', 'recall', 'mechanics', 'skill', 'design', 'moves'];
-import { ACTIVITY_KINDS, DECISION_KINDS, type ActivityDraft, type ActivityKind, type ActivityStep, type Consolidation, type DecisionKind, type MindDecision } from './types.ts';
+import { ACTIVITY_KINDS, DECISION_KINDS, type ActivityDraft, type ActivityKind, type ActivityStep, type Consolidation, type DecisionKind, type Habits, type MindDecision } from './types.ts';
 
 const str = (v: unknown, max: number) => typeof v === 'string' ? v.trim().slice(0, max) : '';
 
@@ -201,6 +202,7 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
     ...(verdict ? { verdict } : {}),
     ...(str(o.diary, 160) ? { diary: str(o.diary, 160) } : {}),
     ...(str(o.liked, 60) ? { liked: str(o.liked, 60) } : {}),
+    ...(parseHabits(o.habits) ? { habits: parseHabits(o.habits)! } : {}),
   };
 }
 
@@ -319,6 +321,7 @@ export class Thinker {
           nearby: [...new Set(p.nearby.resources.map((r) => r.block))].slice(0, 12),
           likes: ctx.self.tastes(),
           pastWorks: myBuilds(this.memory, { worldId: ctx.state.worldId, dim: p.self.dim, pos: ctx.state.pos }).map(describeBuild),
+          terrain: terrainSketch(this.adapter),
         }, signal ? AbortSignal.any([signal, AbortSignal.timeout(180_000)]) : AbortSignal.timeout(180_000));
         if (!res.ok) { this.bus.publish('design_failed', 'P1', res.error); return res.error; }
         this.bus.publish('design', 'P2', res.summary.slice(0, 300), { draftId: res.draft.id, name: res.draft.name, size: res.draft.size });
@@ -391,4 +394,16 @@ export function embeddedQuery(raw: unknown): { kind: string; args: Record<string
     }
   }
   return null;
+}
+
+/** {"torch_every":8,"eat_below":12,"pickup":true}；0/false 关掉某个习惯 */
+export function parseHabits(raw: unknown): Habits | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  const out: Habits = {};
+  const num = (v: unknown, lo: number, hi: number) => v === false || v === 0 || v === null ? 0 : Number.isFinite(Number(v)) ? Math.max(lo, Math.min(hi, Math.round(Number(v)))) : undefined;
+  const t = num(o.torch_every, 4, 16); if (t !== undefined) out.torch_every = t;
+  const e = num(o.eat_below, 2, 19); if (e !== undefined) out.eat_below = e;
+  if (typeof o.pickup === 'boolean') out.pickup = o.pickup;
+  return Object.keys(out).length ? out : null;
 }

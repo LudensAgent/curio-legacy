@@ -29,7 +29,7 @@ export class Reflex {
 
   /** routineCare=false leaves ordinary care and recovery choices to the autonomous planner. */
   constructor(private adapter: GameAdapter, private arbiter: Arbiter, private bus: EventBus, private senses: Senses,
-    private options: { routineCare?: boolean } = {}) {
+    private options: { routineCare?: boolean; habits?: () => { torch_every?: number; eat_below?: number } } = {}) {
     bus.on('event', (ev: { type: string; data?: Record<string, unknown> }) => {
       if (ev.type !== 'task_end' || ev.data?.skill !== 'surface') return;
       if (ev.data.status === 'succeeded') { this.surfaceFails = []; return; }
@@ -130,15 +130,16 @@ export class Reflex {
     // 只是有点饿（7–12）时，只在有熟食/面包这类“正经食物”时顺手吃，并且不打断打猎、战斗——
     // 手上只有生肉就留给决策去决定（先烤熟更划算），而不是一捡到生肉就吃掉
     const urgent = s.food <= 6 || (s.hp < 10 && s.food < 18);
-    const peckish = s.food <= 12 || (s.hp < 14 && s.food < 18);
+    const eatBelow = this.options.habits?.().eat_below;
+    const peckish = eatBelow ? s.food <= eatBelow : s.food <= 12 || (s.hp < 14 && s.food < 18);
     const goodFood = s.inventory.some((i) => GOOD_FOOD.test(i.name));
     const busy = !!cur && ['hunt', 'defend', 'ranged_defend', 'flee', 'dragon_fight', 'craft', 'smelt', 'build', 'climb_up', 'dig', 'store_items', 'take_items', 'ride', 'use_item', 'interact', 'sleep', 'look_around'].includes(cur.skill);
     const routineWindow = !cur || cur.source === 'filler' || (Date.now() - cur.startedAt >= 1500 && cur.progress < 0.85);
-    if (cur?.skill !== 'dragon_fight' && safe && this.adapter.hasFood() && (urgent || (this.options.routineCare !== false && peckish && goodFood && !busy && routineWindow)) && this.ready('eat', 15000)) {
+    if (cur?.skill !== 'dragon_fight' && safe && this.adapter.hasFood() && (urgent || ((this.options.routineCare !== false || !!eatBelow) && peckish && goodFood && !busy && routineWindow)) && this.ready('eat', 15000)) {
       return this.fire({ skill: 'eat' }, 'P1', `饥饿 ${s.food} / 生命 ${s.hp}${urgent ? '（很饿了，有什么吃什么）' : ''}`, !urgent);
     }
 
-    if (this.options.routineCare !== false) this.autoTorch(s, cur, nearest?.dist ?? Infinity);
+    if (this.options.routineCare !== false || this.options.habits?.().torch_every) this.autoTorch(s, cur, nearest?.dist ?? Infinity);
     this.checkStuck(s.pos, cur);
   }
 
@@ -166,10 +167,11 @@ export class Reflex {
     this.darkSince ??= Date.now();
     if (cur && Date.now() - this.darkSince < 750) return;
     const here = m.level;
-    if (this.lastTorch && Math.hypot(x - this.lastTorch.x, y - this.lastTorch.y, z - this.lastTorch.z) < 5) return;
+    const spacing = this.options.habits?.().torch_every || 5;
+    if (this.lastTorch && Math.hypot(x - this.lastTorch.x, y - this.lastTorch.y, z - this.lastTorch.z) < spacing) return;
     if (!this.ready('torch', 6000)) return;
     // 身边已经有火把了（光照数据还没刷新，或者火把被挡住）：玩家不会紧挨着再插一支
-    if (this.torchNear(x, y, z, 4)) return;
+    if (this.torchNear(x, y, z, Math.max(4, spacing - 2))) return;
     this.lastTorch = { x, y, z };
     this.torchesPlaced++;
     this.triggers++;

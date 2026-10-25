@@ -5,6 +5,7 @@ import type { ChatMessage } from '../planner/llm.ts';
 import type { Planner } from '../planner/planner.ts';
 import type { DesignDraft, DraftStore } from './drafts.ts';
 import { compileDesign } from './design.ts';
+import type { TerrainSketch } from './site.ts';
 import { compileBuilding, materialCost, normalizeSpec, type BuildingSpec } from './spec.ts';
 
 /**
@@ -20,6 +21,8 @@ export interface DesignRequest {
   nearby: string[];
   likes: string[];
   pastWorks: string[];
+  /** 周围地形（以自己为中心的地表高度草图） */
+  terrain?: TerrainSketch;
 }
 
 export type DesignResult = { ok: true; draft: DesignDraft; summary: string; issues: string[] } | { ok: false; error: string };
@@ -57,7 +60,8 @@ export function buildDesignMessages(req: DesignRequest, book: SkillBook | null):
 你现在是自己的建筑师：专心设计一座 Minecraft 建筑，交回一张能直接施工的图纸。${guide ? `\n\n下面是你的设计手册：\n\n${guide}` : ''}
 
 只输出一个 JSON 对象：
-{"name":"作品名（简短）","purpose":"用途","style":"一句话说说风格和用料的想法","design":{"legend":{…},"layers":[[…],…]},"notes":"一句话：盖的时候要注意什么"}`;
+{"name":"作品名（简短）","purpose":"用途","style":"一句话说说风格和用料的想法","site":{"x":0,"z":0,"why":"为什么选这儿"},"design":{"legend":{…},"layers":[[…],…]},"notes":"一句话：盖的时候要注意什么"}
+site 是房子中心相对“我”的位置（x 往东为正、z 往南为正，看 terrain 草图挑），不写就盖在我附近自动选的平地上。图纸的行从北到南、列从西到东，和草图方向一致。`;
   const inv = new Map<string, number>();
   for (const i of req.inventory) inv.set(i.name, (inv.get(i.name) ?? 0) + i.count);
   const payload = {
@@ -67,6 +71,9 @@ export function buildDesignMessages(req: DesignRequest, book: SkillBook | null):
     biome: req.biome ?? null,
     my_likes: req.likes,
     my_past_works: req.pastWorks,
+    ...(req.terrain ? { terrain: {
+      how_to_read: `以我为中心 ${req.terrain.radius * 2 + 1}×${req.terrain.radius * 2 + 1} 格，行从北到南、列从西到东，正中间是我脚下；数字是这一列地表比我脚下高/低几格，~ 是水，? 看不清，带 T 的长着树（盖房要砍掉）`,
+      summary: req.terrain.summary, rows: req.terrain.rows } } : {}),
     budget: req.pastWorks.length ? '按手上和附近的材料量力而行' : '这是第一座房子：总材料控制在 180 块左右、台阶不超过 60 级，攒得起才盖得完',
   };
   return [{ role: 'system', content: system }, { role: 'user', content: `${JSON.stringify(payload)}\n请设计。` }];
@@ -106,11 +113,12 @@ export async function designBuilding(planner: Planner, book: SkillBook | null, d
   const materials = materialCost(blueprint.cells);
   const fx = blueprint.cells.filter((c) => c.pos.y === -1).map((c) => c.pos.x), fz = blueprint.cells.filter((c) => c.pos.y === -1).map((c) => c.pos.z);
   const size = { width: Math.max(...fx) - Math.min(...fx) + 1, depth: Math.max(...fz) - Math.min(...fz) + 1, height: best.spec.height };
-  const draft = drafts.add({ name: best.spec.name, purpose: best.spec.purpose, brief: req.brief.slice(0, 200), ...(best.raw.style ? { style: String(best.raw.style).slice(0, 200) } : {}),
+  const site = siteFor(best.raw.site, req.terrain, fx, fz, size);
+  const draft = drafts.add({ name: best.spec.name, ...(site ? { site: site.origin, siteWhy: site.why } : {}), purpose: best.spec.purpose, brief: req.brief.slice(0, 200), ...(best.raw.style ? { style: String(best.raw.style).slice(0, 200) } : {}),
     spec: best.spec, materials, size, notes: [best.raw.notes, ...best.issues].filter(Boolean).map((n) => String(n).slice(0, 160)) });
   const missing = Object.entries(materials).map(([n, need]) => [n, need - count(req.inventory, n)] as const).filter(([, m]) => m > 0);
   const logs = logsFor(missing);
-  const summary = `图纸 ${draft.id}「${draft.name}」墙脚 ${size.width}×${size.depth}、高 ${size.height}${draft.style ? `；${draft.style}` : ''}。用料：${Object.entries(materials).sort((a, b) => b[1] - a[1]).map(([n, c]) => `${n}×${c}`).join('、')}。`
+  const summary = `图纸 ${draft.id}「${draft.name}」墙脚 ${size.width}×${size.depth}、高 ${size.height}${draft.style ? `；${draft.style}` : ''}${site ? `；选址在 (${site.origin.x},${site.origin.y},${site.origin.z}) 一带${site.why ? `（${site.why}）` : ''}` : ''}。用料：${Object.entries(materials).sort((a, b) => b[1] - a[1]).map(([n, c]) => `${n}×${c}`).join('、')}。`
     + (missing.length ? `还缺：${missing.map(([n, m]) => `${n}×${m}`).join('、')}${logs ? `，折合大约 ${logs} 根原木` : ''}（攒够再盖，或者先盖一部分）。` : '材料都齐了。')
     + `要盖时用 build {"draft":"${draft.id}"}。${best.issues.length ? `建筑师留下的提醒：${best.issues.join('；')}` : ''}`;
   return { ok: true, draft, summary, issues: best.issues };
@@ -128,4 +136,19 @@ export function logsFor(missing: ReadonlyArray<readonly [string, number]>): numb
     else if (/_(door|fence|trapdoor)$/.test(n)) planks += m * 2;
   }
   return Math.ceil(planks / 4);
+}
+
+/** 建筑师挑的位置（相对我的房子中心）→ 施工 origin（西北角、地面上一格） */
+export function siteFor(raw: unknown, terrain: TerrainSketch | undefined, fx: number[], fz: number[], size: { width: number; depth: number }): { origin: { x: number; y: number; z: number }; why: string } | null {
+  if (!terrain || !raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const dx = Math.round(Number(r.x)), dz = Math.round(Number(r.z));
+  if (!Number.isFinite(dx) || !Number.isFinite(dz) || Math.abs(dx) > terrain.radius || Math.abs(dz) > terrain.radius) return null;
+  const h = terrain.heights[dz + terrain.radius]?.[dx + terrain.radius];
+  if (h === undefined || h === null || h === 'water') return null;
+  const cx = terrain.center.x + dx, cz = terrain.center.z + dz;
+  return {
+    origin: { x: cx - Math.min(...fx) - Math.floor(size.width / 2), y: terrain.center.y + h + 1, z: cz - Math.min(...fz) - Math.floor(size.depth / 2) },
+    why: String(r.why ?? '').slice(0, 80),
+  };
 }

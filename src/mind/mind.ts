@@ -300,7 +300,7 @@ export class Mind {
     // 边想边顺手捡起脚边看得见的掉落物（像人一样不闲着），否则原地张望
     let drops = 0;
     try { drops = ((this.d.perception.snapshot().vision as any)?.visible_drops ?? []).filter((d: any) => (d.dist ?? 99) <= 6).length; } catch { /* 感知暂不可用 */ }
-    if (drops && SKILLS.pickup_items) { this.d.arbiter.start({ skill: 'pickup_items', args: { radius: 6 } }, 'filler'); return; }
+    if (drops && SKILLS.pickup_items && this.d.self.habits().pickup) { this.d.arbiter.start({ skill: 'pickup_items', args: { radius: 6 } }, 'filler'); return; }
     if (!knows) this.d.arbiter.start({ skill: 'look_around', args: { seconds: 4 } }, 'filler');
     else if (SKILLS.glance) this.d.arbiter.start({ skill: 'glance', args: { seconds: 120 } }, 'filler');
   }
@@ -578,6 +578,10 @@ export class Mind {
     }
     if (decision.say) this.say(decision.say, decision);
     if (decision.diary) this.diary(decision.diary);
+    if (decision.habits) {
+      const changed = this.d.self.setHabits(decision.habits);
+      if (changed.length) this.d.bus.publish('habits', 'P3', `给身体定了习惯：${changed.join('，')}`, { habits: this.d.self.habits() });
+    }
     if (decision.liked && this.d.self.like(decision.liked)) {
       this.d.self.think(`我喜欢${decision.liked}`, 'feeling');
       this.d.bus.publish('liked', 'P3', `发现自己喜欢：${decision.liked}`);

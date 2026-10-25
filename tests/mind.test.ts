@@ -568,3 +568,13 @@ test('写错被丢掉的步骤会记下来，心智看得到它们根本没做',
   const a = createActivity(d.activity!, '放床', 'llm', adapter.state());
   assert.ok(a.dropped?.length === 1);
 });
+
+test('身体习惯由模型定：解析 habits，0/false 关掉，合并后长期有效', async () => {
+  const { parseHabits } = await import('../src/mind/thinker.ts');
+  assert.deepEqual(parseHabits({ torch_every: 8, eat_below: 30, pickup: true }), { torch_every: 8, eat_below: 19, pickup: true });
+  assert.equal(parseHabits({ nonsense: 1 }), null);
+  const self = new SelfModel(null, ['好奇']);
+  assert.deepEqual(self.setHabits({ torch_every: 8, pickup: true }), ['torch_every=8', 'pickup=true']);
+  assert.deepEqual(self.setHabits(parseHabits({ torch_every: 0 })!), ['torch_every=0']);
+  assert.deepEqual(self.habits(), { pickup: true });
+});

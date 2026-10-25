@@ -38,21 +38,19 @@ test('黄昏 sleep：在床边等到天黑再躺上去（而不是立刻失败�
   const w = new Clock(); w.inv.set('white_bed', 1); w.tod = 12500; w.ticksPerSecond = 40;
   const ctx = makeCtx(w, { deadlineMs: 60_000 });
   try {
-    const r = await sleepSkill.run(ctx, {});
+    const r = await sleepSkill.run(ctx, { place: true });
     assert.equal(r.status, 'succeeded', r.summary);
     assert.match(r.summary, /等了 \d+ 秒天黑，睡了一觉/);
     assert.ok(w.actions.includes('slept'));
   } finally { ctx.memory.close(); }
 });
 
-test('天黑后 shelter：背包有床、附近没怪就直接睡，不挖坑', async () => {
-  const w = new Clock(); w.inv.set('white_bed', 1); w.inv.set('dirt', 4); w.tod = 14000;
+test('天黑后 shelter 只管躲，不替你决定去睡觉', async () => {
+  const w = new Clock(); w.inv.set('white_bed', 1); w.inv.set('dirt', 4); w.tod = 14000; w.ticksPerSecond = 6000;
   const ctx = makeCtx(w);
   try {
-    const r = await shelter.run(ctx, { until: 'day' });
-    assert.equal(r.status, 'succeeded', r.summary);
-    assert.match(r.summary, /有床就没挖坑/);
-    assert.ok(!w.actions.some((a) => a.startsWith('dig')), '没有挖坑');
+    await shelter.run(ctx, { until: 'day' }, ).catch(() => null);
+    assert.ok(!w.actions.includes('slept'), '没有自己去睡');
   } finally { ctx.memory.close(); }
 });
 
@@ -111,5 +109,16 @@ test('已经有床（背包里或放在某处）就不再做第一张以外的�
     assert.equal(r.status, 'failed');
     assert.match(r.summary, /已经有一张自己的床放在 \(40,64,0\)/);
     assert.ok(!w.actions.includes('craft:white_bed'));
+  } finally { ctx.memory.close(); }
+});
+
+test('sleep 不替你做主：手边没床时列出可选的床，不会自己放下背包里的床', async () => {
+  const w = new Clock(); w.inv.set('white_bed', 1); w.tod = 14000;
+  const ctx = makeCtx(w);
+  try {
+    const r = await sleepSkill.run(ctx, {});
+    assert.equal(r.status, 'failed');
+    assert.match(r.summary, /"place":true/);
+    assert.ok(!w.actions.includes('slept'));
   } finally { ctx.memory.close(); }
 });

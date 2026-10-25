@@ -20,6 +20,9 @@ export interface DesignDraft {
   notes: string[];
   createdAt: number;
   usedBy?: string;
+  /** 建筑师按地形挑的施工位置（origin，旋转 0） */
+  site?: { x: number; y: number; z: number };
+  siteWhy?: string;
 }
 
 export class DraftStore {

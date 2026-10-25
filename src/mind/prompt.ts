@@ -77,7 +77,7 @@ const OUTPUT = `只输出一个 JSON 对象：
  "activity":{"what":"具体要干什么","why":"为什么现在做","kind":"gather|craft|build|explore|survive|rest|experiment|tidy|social|other","steps":[{"skill":"动作名","args":{}}],"repeat":1,"done_when":{…},"expect":"预计会怎样","if_stuck":"卡住打算怎么办"},
  "next":{同 activity，手上的活快干完时写上，干完直接接上}}
 continue 时可以不写 activity；要换成别的做法就用 adjust/new，别写 continue。顺手、碰运气的步骤加 "optional":true（没成也不算失败）。
-其他可选字段：say（有新发现、改主意、做成一件事或遇到危险时才说的一句口语）｜agenda（{"add":[{"text":"想做的事或想弄清的问题","kind":"goal|idea|question","horizon":"today|someday"}],"done":["a_…"],"drop":["a_…"],"focus":"a_…"}，规则不要放这里）｜learned（结果出乎意料时的一句窍门，或 {"revise":"k_…","text":"…"} 修订旧窍门）｜hypothesis（experiment 必填）｜experiment_result（上一段是实验时：supported|refuted|unclear）｜diary（值得记住的一句话）｜liked（刚发现自己喜欢的东西）`;
+其他可选字段：say（有新发现、改主意、做成一件事或遇到危险时才说的一句口语）｜agenda（{"add":[{"text":"想做的事或想弄清的问题","kind":"goal|idea|question","horizon":"today|someday"}],"done":["a_…"],"drop":["a_…"],"focus":"a_…"}，规则不要放这里）｜learned（结果出乎意料时的一句窍门，或 {"revise":"k_…","text":"…"} 修订旧窍门）｜hypothesis（experiment 必填）｜experiment_result（上一段是实验时：supported|refuted|unclear）｜diary（值得记住的一句话）｜liked（刚发现自己喜欢的东西）｜habits（身体的顺手习惯，改之前一直有效：{"torch_every":8} 暗处每 8 格插火把，{"eat_below":12} 饿到 12 顺手吃，{"pickup":true} 空档捡掉落物；0 关掉。没定的身体不做）`;
 
 const DECISIONS = `continue 照常做｜adjust 还是这件事、改一改 routine｜new 开始新的一段｜detour 先插一段别的，做完自动回来｜switch 放下手上的改做别的（独白里说清为什么）｜experiment 验证一个猜想的小活｜rest 歇一下`;
 
@@ -93,7 +93,7 @@ const PRECISE = `【精确操作】身边的事你自己一格一格地做：bod
 - 朝北挖阶梯上到地面（往上迈一级要跳，头顶上方那格也得空）：steps [dig_at {"at":[0,2,0],"facing":"N"}, dig_at {"at":[1,1,0],"facing":"N"}, dig_at {"at":[1,2,0],"facing":"N"}, step {"to":[1,1,0],"facing":"N"}]，repeat 10，done_when {"type":"sky_visible","equals":true}
 - 原地垫高往上爬：steps [dig_at {"at":[0,2,0]}, place_at {"at":[0,0,0],"item":"any"}]，repeat 6
 - 挖一条一人高的平巷：steps [dig_at {"at":[1,0,0]}, dig_at {"at":[1,1,0]}, step {"to":[1,0,0]}]，repeat 8
-repeat 会把整套 steps 每轮重做一遍：火把这种隔七八格才需要的事别写进要重复的 steps——看 body.light（level ≤7 才会刷怪）和附近有没有火把，暗了再单独插一支。
+repeat 每轮重做整套 steps：火把别写进要重复的 steps，用 habits.torch_every 或看 body.light 暗了再插。
 挖之前先看 local 里那格是什么（沙子、沙砾会往下掉，水和岩浆别挖开），走不通就换个方向或换个做法；每一步的结果都会带回新的 local。`;
 
 const EXAMPLE = `【例子】想有个家时：
@@ -169,7 +169,8 @@ export function situationalReminders(ctx: MindContext): string[] {
   const bedInBag = s.inventory.some((i) => i.name.endsWith('_bed'));
   const bedLine = bed ? `记得的床在 ${bed.dist} 格外（${bed.dir}，${bed.pos}）` : '';
   if (p.time.phase === 'dusk' || p.time.phase === 'night') {
-    const options = [bed && bed.dist <= 128 ? `${bedLine}，sleep 会自己走过去` : bed ? `${bedLine}，太远了` : '', bedInBag ? '背包里有床，sleep 会就地放下' : ''].filter(Boolean).join('；');
+    const [bx, by, bz] = bed ? bed.pos.split(',') : [];
+    const options = [bed ? `${bedLine}${bed.dist > 128 ? '，挺远' : ''}，去那儿睡写 sleep {"at":{"x":${bx},"y":${by},"z":${bz}}}` : '', bedInBag ? '背包里有床，就地放下睡写 sleep {"place":true}' : ''].filter(Boolean).join('；');
     out.push(`天${p.time.phase === 'dusk' ? '快' : '已经'}黑了：想好今晚在哪过${options ? `（${options}）` : '（家、床，或者就地躲一晚）'}`);
   } else {
     // 像人一样掂量回程：离天黑不远、床又在远处，就该动身或另作打算
@@ -272,7 +273,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
   const image = self.selfImage();
   const glance = ctx.tier === 'glance';
   const payload = {
-    me: { traits: self.data.traits, feeling: moodWords(self.mood), ...(self.tastes().length ? { likes: self.tastes() } : {}),
+    me: { traits: self.data.traits, feeling: moodWords(self.mood), ...(self.tastes().length ? { likes: self.tastes() } : {}), habits: self.habits(),
       ...((() => { const h = homeOf(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: { x: p.self.pos[0], y: p.self.pos[1], z: p.self.pos[2] } });
         return h ? { home: `${h.label} 在${h.dir}边 ${h.dist} 格 (${Math.round(h.pos.x)},${Math.round(h.pos.y)},${Math.round(h.pos.z)})` } : { home: '还没有家' }; })()),
       ...(!glance && (image.goodAt.length || image.struggleWith.length) ? { self_image: image } : {}) },

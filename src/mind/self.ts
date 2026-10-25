@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { shortId } from '../util.ts';
-import type { ActivityKind, ActivityRecord, AgendaItem, DiaryEntry, Experiment, KnowHow, Mood, Thought } from './types.ts';
+import type { ActivityKind, ActivityRecord, AgendaItem, DiaryEntry, Experiment, Habits, KnowHow, Mood, Thought } from './types.ts';
 
 interface SelfData {
   version: 1;
@@ -23,6 +23,7 @@ interface SelfData {
   /** 上次回想的时间与当时的窍门数 */
   reflectedAt?: number;
   knowHowAtReflect?: number;
+  habits?: Habits;
 }
 
 export const clamp01 = (n: number) => Math.max(0, Math.min(1, Number.isFinite(n) ? n : 0));
@@ -318,6 +319,21 @@ export class SelfModel {
     return true;
   }
   tastes(n = 8): string[] { return (this.data.likes ?? []).slice(-n).map((l) => l.text); }
+
+  // ---------------------------------------------------------------- 身体习惯（模型自己定的）
+  habits(): Habits { return { ...(this.data.habits ?? {}) }; }
+  /** 合并新的习惯；0/false 表示关掉。返回改动的说明（没变就是空） */
+  setHabits(h: Habits): string[] {
+    const cur = (this.data.habits ??= {});
+    const changed: string[] = [];
+    for (const k of ['torch_every', 'eat_below', 'pickup'] as const) {
+      if (h[k] === undefined || cur[k] === h[k]) continue;
+      if (!h[k]) delete cur[k]; else (cur as any)[k] = h[k];
+      changed.push(`${k}=${String(h[k])}`);
+    }
+    if (changed.length) this.touch();
+    return changed;
+  }
 
   // ---------------------------------------------------------------- 回想
   /** 记一条零碎想法，等休息时再整理（人不会每做一件事就立一条规矩） */

@@ -39,21 +39,8 @@ export const shelter: Skill<{ until: 'day' | 'healed' }> = {
     throwIfAborted(signal);
     const s0 = adapter.state();
     if (!s0.connected || !s0.alive || !s0.observationReady) return fail('NOT_CONNECTED', '当前状态无法确认，不能挖避难所');
-    // 有床又到了（或快到）睡觉的时候：玩家会直接睡一觉跳过黑夜，而不是挖坑熬一整夜
-    let sleepNote = '';
-    if (args.until === 'day' && s0.dim === 'overworld' && !s0.inWater && !s0.inLava) {
-      const tod = ((s0.timeOfDay % 24000) + 24000) % 24000;
-      const night = canSleepAt(tod) || (tod >= 11000 && tod < 12542);
-      const hasBed = s0.inventory.some((i) => i.name.endsWith('_bed') && i.count > 0) || !!findStation(ctx, BED_NAMES, 32);
-      const danger = ctx.senses.perceivedEntities(12).some((e) => e.kind === 'hostile');
-      if (night && hasBed && !danger) {
-        ctx.progress(0.05, '有床：先试着睡一觉');
-        const r = await sleepSkill.run(ctx, {});
-        if (r.status === 'succeeded') return { ...r, summary: `有床就没挖坑：${r.summary}` };
-        sleepNote = `（想先睡觉但没成：${r.summary}）`;
-      }
-    }
-    if (s0.inWater || s0.inLava || !s0.onGround) return fail('ERROR', `必须在干燥地面上挖避难所${sleepNote}`);
+    // 睡不睡觉是模型的决定（sleep）；shelter 只管挖坑躲起来
+    if (s0.inWater || s0.inLava || !s0.onGround) return fail('ERROR', `必须在干燥地面上挖避难所`);
     if (!hasPlaceable(s0.inventory)) return fail('MISSING_MATERIALS', '背包里没有可以封顶的方块（泥土/圆石/木板/原木）');
     const here = { x: Math.floor(s0.pos.x), y: Math.floor(s0.pos.y), z: Math.floor(s0.pos.z) };
     if (pitProblem(adapter, here)) {

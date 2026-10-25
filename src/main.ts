@@ -176,7 +176,7 @@ const executive = mind;
 const knownSigs = () => new Set([...library.list().filter((d) => !d.disabled).map((d) => signatureOf(d.steps)),
   ...methods.list().filter((d) => d.status !== 'retired').map((d) => signatureOf(flattenProgram(d.program))), ...proposedHabits]);
 perception.knownSkillSigs = knownSigs;
-const reflex = new Reflex(adapter, arbiter, bus, vision, { routineCare: config.mind.bodyHabits });
+const reflex = new Reflex(adapter, arbiter, bus, vision, { routineCare: config.mind.bodyHabits, habits: () => selfModel.habits() });
 const spectator = new Spectator(config, adapter, bus);
 const metrics = new Metrics(adapter, arbiter, executive, planner, reflex, bus);
 const actionChat = new ActionChat(adapter, bus, { ...config.actionChat, canSend: () => !executive.paused,

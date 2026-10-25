@@ -148,6 +148,16 @@ export interface Consolidation {
 export interface DiaryEntry { at: number; text: string; dim: string; pos: [number, number, number] }
 
 /** 模型输出、校验过的一次决定 */
+/** 模型给身体定下的顺手习惯：不定就不做（身体不会自作主张插火把、吃东西、捡东西） */
+export interface Habits {
+  /** 走路挖矿时，暗处（亮度 ≤7）每隔几格插一支火把；0 = 不插 */
+  torch_every?: number;
+  /** 饥饿降到多少就顺手吃（只吃正经食物）；0 = 不顺手吃 */
+  eat_below?: number;
+  /** 想事情的空档捡脚边的掉落物 */
+  pickup?: boolean;
+}
+
 export interface MindDecision {
   kind: DecisionKind;
   monologue: string;
@@ -163,6 +173,8 @@ export interface MindDecision {
   diary?: string;
   /** 刚发现自己喜欢的东西 */
   liked?: string;
+  /** 给身体定的习惯（长期有效，直到改掉） */
+  habits?: Habits;
   /** 校验时自动纠正/丢弃的部分（下次思考时告诉模型） */
   notes: string[];
   source: 'llm' | 'rule';

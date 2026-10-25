@@ -152,3 +152,52 @@ export function checkSiteAt(adapter: GameAdapter, memory: WorldMemory | null, sp
   const why = r.best ? `地面高度是 ${r.best.origin.y - 1}，和给的 y=${origin.y} 差太多` : [x.wet ? '挨着水/岩浆' : '', x.uneven ? '坡太陡（一边要挖进山里超过 3 格或悬空超过 2 格，整地量太大）' : '', x.artificial ? '占地里有不是自然地形的方块' : '', x.hazard ? '在出过事的危险区域' : '', x.unknown ? '地表被山体/洞顶盖住或区块没加载' : ''].filter(Boolean).join('、') || '地形不合适';
   return { ok: false, why };
 }
+
+/** 给建筑师看的地形草图：以自己为中心，每格是这一列地表比脚下高/低几格（只看露在外面的地表） */
+export interface TerrainSketch {
+  /** 中心（自己站的那一列）的世界坐标，y 是脚下地面的高度 */
+  center: { x: number; y: number; z: number };
+  radius: number;
+  /** 每格相对高度；null = 看不清/在山体里，'water' = 水面 */
+  heights: (number | 'water' | null)[][];
+  trees: boolean[][];
+  rows: string[];
+  summary: string;
+}
+
+export function terrainSketch(adapter: GameAdapter, radius = 8): TerrainSketch {
+  const s = adapter.state();
+  const bx = Math.floor(s.pos.x), bz = Math.floor(s.pos.z), py = Math.floor(s.pos.y);
+  const here = surfaceColumn(adapter, bx, bz, py + 2, py - 6, new Set());
+  const base = here && !here.wet ? here.y : py - 1;
+  const heights: (number | 'water' | null)[][] = [], trees: boolean[][] = [], rows: string[] = [];
+  const stats = { n: [0, 0], s: [0, 0], w: [0, 0], e: [0, 0], water: { n: 0, s: 0, w: 0, e: 0 }, trees: 0, flat: 0, known: 0 };
+  for (let dz = -radius; dz <= radius; dz++) {
+    const hr: (number | 'water' | null)[] = [], tr: boolean[] = [], toks: string[] = [];
+    for (let dx = -radius; dx <= radius; dx++) {
+      const c = surfaceColumn(adapter, bx + dx, bz + dz, base + 12, base - 10, new Set());
+      const h: number | 'water' | null = !c ? null : c.wet ? 'water' : c.y - base;
+      hr.push(h); tr.push(!!c?.tree);
+      const tok = h === null ? '?' : h === 'water' ? '~' : h > 0 ? `+${h}` : String(h);
+      toks.push(`${tok}${c?.tree ? 'T' : ''}`);
+      if (h === null) continue;
+      stats.known++;
+      if (c!.tree) stats.trees++;
+      const side = (k: 'n' | 's' | 'w' | 'e') => { if (h === 'water') stats.water[k]++; else { stats[k][0] += h; stats[k][1]++; } };
+      if (dz < 0) side('n'); if (dz > 0) side('s'); if (dx < 0) side('w'); if (dx > 0) side('e');
+      if (h !== 'water' && Math.abs(h) <= 1) stats.flat++;
+    }
+    heights.push(hr); trees.push(tr); rows.push(toks.join(' '));
+  }
+  const avg = (k: 'n' | 's' | 'w' | 'e') => stats[k][1] ? stats[k][0] / stats[k][1] : 0;
+  const notes: string[] = [];
+  const ns = avg('n') - avg('s'), we = avg('w') - avg('e');
+  if (Math.abs(ns) >= 1) notes.push(ns > 0 ? `北高南低（约 ${ns.toFixed(1)} 格）` : `南高北低（约 ${(-ns).toFixed(1)} 格）`);
+  if (Math.abs(we) >= 1) notes.push(we > 0 ? `西高东低（约 ${we.toFixed(1)} 格）` : `东高西低（约 ${(-we).toFixed(1)} 格）`);
+  if (!notes.length) notes.push('大体平坦');
+  const wet = (Object.entries(stats.water) as [string, number][]).filter(([, n]) => n >= 3).map(([k]) => ({ n: '北', s: '南', w: '西', e: '东' } as Record<string, string>)[k]);
+  if (wet.length) notes.push(`${wet.join('、')}边有水`);
+  if (stats.trees) notes.push(`有 ${stats.trees} 列长着树`);
+  notes.push(`和脚下差不多高（±1）的格子占 ${stats.known ? Math.round(stats.flat / stats.known * 100) : 0}%`);
+  return { center: { x: bx, y: base, z: bz }, radius, heights, trees, rows, summary: notes.join('；') };
+}

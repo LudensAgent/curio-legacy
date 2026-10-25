@@ -264,17 +264,17 @@ export const farm: Skill<{ crop: string; size: number }> = {
 };
 
 // ===================================================================== 远征
-export const expedition: Skill<{ direction: string; distance: number }> = {
+export const expedition: Skill<{ direction: string; distance: number; torches?: boolean; eat_below?: number }> = {
   name: 'expedition',
-  description: '远征：朝一个方向长距离行进（100-600 格），每约 64 格插火把并记录路标，沿途自动记录新发现；出发前应带足食物、火把和工具。用 goto base 沿路标回家',
-  argsDoc: '{"direction": "N|NE|E|SE|S|SW|W|NW", "distance"?: 100-600}',
+  description: '远征：朝一个方向长距离行进（100-600 格），每约 64 格记一个路标，沿途记录新发现；路上要不要在路标插火把、饿到多少吃东西由你在参数里定。出发前带足食物、火把和工具。用 goto base 沿路标回家',
+  argsDoc: '{"direction": "N|NE|E|SE|S|SW|W|NW", "distance"?: 100-600, "torches"?: true（路标处插火把）, "eat_below"?: 2-19（饿到这个数就吃）}',
   timeoutMs: 900000,
   movement: true,
   validate(raw) {
     const a = obj(raw);
     const d = String(a.direction ?? '').toUpperCase();
     if (!DIRS[d]) return { ok: false, error: `direction 必须是 ${Object.keys(DIRS).join('/')}` };
-    return { ok: true, args: { direction: d, distance: clampInt(a.distance, 100, 600, 240) } };
+    return { ok: true, args: { direction: d, distance: clampInt(a.distance, 100, 600, 240), ...(a.torches === true ? { torches: true } : {}), ...(a.eat_below !== undefined ? { eat_below: clampInt(a.eat_below, 2, 19, 12) } : {}) } };
   },
   async run(ctx, args) {
     const { adapter, memory, signal } = ctx;
@@ -303,12 +303,12 @@ export const expedition: Skill<{ direction: string; distance: number }> = {
       if (travelled >= (waypoints + 1) * 64) {
         waypoints++;
         memory.addLandmark('waypoint', `路标 ${args.direction}-${waypoints}`, now.dim, now.pos, 8);
-        if (now.inventory.some((i) => i.name === 'torch')) {
+        if (args.torches && now.inventory.some((i) => i.name === 'torch')) {
           const x = Math.floor(now.pos.x), y = Math.floor(now.pos.y), z = Math.floor(now.pos.z);
           await adapter.placeBlockAt({ x: x + 1, y, z }, ['torch'], signal).catch((er) => { if (isAbort(er)) throw er; });
         }
       }
-      if (now.food <= 12 && adapter.hasFood()) await adapter.eat(signal).catch((er) => { if (isAbort(er)) throw er; });
+      if (args.eat_below && now.food <= args.eat_below && adapter.hasFood()) await adapter.eat(signal).catch((er) => { if (isAbort(er)) throw er; });
       if (now.hp <= 8) break;
       ctx.progress(travelled / args.distance, `远征 ${args.direction}：${travelled}/${args.distance} 格，路标 ${waypoints}`);
       await sleep(50, signal);

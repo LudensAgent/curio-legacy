@@ -114,6 +114,8 @@ export const build: Skill<BuildArgs> = {
       const draft = activeDrafts()?.get(a.draft);
       if (!draft) return { ok: false, error: `没有图纸 ${a.draft}；先用建筑师设计（{"kind":"design","brief":"…"}），或者直接给 spec` };
       a.spec = draft.spec; a.reason ??= `按图纸 ${draft.id}（${draft.name}）施工`;
+      // 建筑师看过地形挑了位置：照着那儿、按图纸的朝向盖（不合适 build 会就近另找）
+      if (draft.site && a.origin === undefined) { a.origin = { ...draft.site }; a.rotation ??= 0; }
     }
     const blueprint = String(a.blueprint ?? (a.spec ? 'custom' : 'hut'));
     // 房子由自己设计（spec.design 字符画），不再从预制蓝图里挑；prefab 只给兼容规则模式和测试用
@@ -329,12 +331,18 @@ export function sleepReason(reason?: string): string {
   return r || '未知原因';
 }
 
-export const sleepSkill: Skill<{}> = {
+export const sleepSkill: Skill<{ at?: Vec3Like; place?: boolean }> = {
   name: 'sleep',
-  description: '主世界天黑后睡在床上（没有就放下背包里的床），跳过黑夜并设重生点；黄昏时会先放好床等天黑再睡。下界和末地禁止。',
-  argsDoc: '{}', timeoutMs: 120000, movement: false,
-  validate() { return { ok: true, args: {} }; },
-  async run(ctx) {
+  description: '天黑后睡床跳过黑夜、设重生点（黄昏会在床边等）。{} 睡手边的床；at 走去那张床睡；place 放下背包里的床睡。只限主世界。',
+  argsDoc: '{}｜{"at":{x,y,z}}｜{"place":true}',
+  timeoutMs: 120000, movement: false,
+  validate(raw) {
+    const a = obj(raw);
+    const at = a.at ?? a.bed;
+    if (at !== undefined && (!at || typeof at !== 'object' || [at.x, at.y, at.z].some((n: unknown) => typeof n !== 'number' || !Number.isFinite(n)))) return { ok: false, error: 'at 需要床的坐标 {"x","y","z"}' };
+    return { ok: true, args: { ...(at ? { at: { x: Math.round(at.x), y: Math.round(at.y), z: Math.round(at.z) } } : {}), ...(a.place === true ? { place: true } : {}) } };
+  },
+  async run(ctx, args = {}) {
     const s = ctx.adapter.state();
     if (s.dim !== 'overworld') return fail('WRONG_DIMENSION', '只能在主世界睡床；当前维度的床会爆炸');
     // 能不能上床看的是“可睡时段”（12542–23459 刻），不是 isDay：黄昏时 isDay 仍为真但马上就能睡
@@ -348,13 +356,23 @@ export const sleepSkill: Skill<{}> = {
       }
     }
     try {
-      // 先去自己的床或看见过的床（昨晚放下的那张），附近没有才放背包里的床
+      // 睡哪张床是模型的决定：给了 at 就走过去；没给就只睡手边的；要放背包里的床得明说 place
       const BEDS = ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black'].map((c) => `${c}_bed`);
-      const bed = findStation(ctx, BEDS, 128);
-      if (bed && bed.dist > 3) {
-        ctx.progress(0.2, `走向 ${bed.dist} 格外${bed.from === 'memory' ? '记得' : '看到'}的床`);
-        await ctx.adapter.moveTo({ kind: 'near', pos: bed.pos, range: 2 }, { signal: ctx.signal, timeoutMs: Math.max(5000, ctx.deadline - Date.now() - 30000) });
+      if (args.at) {
+        const d = Math.round(Math.hypot(args.at.x - s.pos.x, args.at.y - s.pos.y, args.at.z - s.pos.z));
+        if (d > 3) {
+          ctx.progress(0.2, `走向 ${d} 格外的床`);
+          await ctx.adapter.moveTo({ kind: 'near', pos: args.at, range: 2 }, { signal: ctx.signal, timeoutMs: Math.max(5000, ctx.deadline - Date.now() - 30000) });
+        }
       }
+      const handy = findStation(ctx, BEDS, 4);
+      if (!handy && !args.place) {
+        const known = findStation(ctx, BEDS, 2000);
+        const bag = ctx.adapter.state().inventory.some((i) => i.name.endsWith('_bed'));
+        const options = [known ? `记得的床在 ${known.dist} 格外：sleep {"at":{"x":${Math.round(known.pos.x)},"y":${Math.round(known.pos.y)},"z":${Math.round(known.pos.z)}}}` : '', bag ? '背包里有床：sleep {"place":true} 就地放下' : ''].filter(Boolean);
+        return fail(options.length ? 'NOT_FOUND' : 'MISSING_MATERIALS', `手边没有床${args.at ? '（给的位置附近也没有）' : ''}${options.length ? `；${options.join('；')}` : '；3 块同色羊毛 + 3 块木板可以做一张'}`);
+      }
+      const bed = handy;
       // 黄昏：像玩家一样先站在床边（需要时先把床放下），等天黑那一刻躺上去
       let waited = 0;
       while (!canSleepAt(ctx.adapter.state().timeOfDay) && Date.now() < ctx.deadline - 15000) {

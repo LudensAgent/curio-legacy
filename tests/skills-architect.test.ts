@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { critique, designBuilding, logsFor } from '../src/building/architect.ts';
+import { critique, designBuilding, logsFor, siteFor } from '../src/building/architect.ts';
 import { compileDesign } from '../src/building/design.ts';
 import { DraftStore, draftsFor } from '../src/building/drafts.ts';
 import { compileBuilding, normalizeSpec } from '../src/building/spec.ts';
@@ -157,4 +157,29 @@ test('野外临时放的工作台用完收回背包；家附近的留着', async
   const r2 = await craft.run(ctx, { item: 'wooden_pickaxe', count: 1 });
   assert.doesNotMatch(r2.summary, /收回/);
   assert.equal(adapter.blockAt(tablePos), 'crafting_table');
+});
+
+test('建筑师按地形挑的位置换算成施工 origin：房子中心落在选的格子上，地面高度取草图', () => {
+  const radius = 2;
+  const heights: (number | 'water' | null)[][] = [[0, 0, 0, 0, 0], [0, 0, 0, 1, 1], [0, 0, 0, 1, 1], ['water', 0, 0, 1, 1], [null, 0, 0, 0, 0]];
+  const terrain = { center: { x: 100, y: 64, z: 200 }, radius, heights, trees: heights.map((r) => r.map(() => false)), rows: [], summary: '' };
+  const site = siteFor({ x: 1, z: 0, why: '高一点' }, terrain, [0, 4], [0, 4], { width: 5, depth: 5 });
+  assert.deepEqual(site?.origin, { x: 99, y: 66, z: 198 });
+  assert.equal(siteFor({ x: -2, z: 1 }, terrain, [0, 4], [0, 4], { width: 5, depth: 5 }), null, '水面上不行');
+  assert.equal(siteFor({ x: 9, z: 0 }, terrain, [0, 4], [0, 4], { width: 5, depth: 5 }), null, '草图外不行');
+});
+
+test('地形草图：东边高起一块、南边有水，行北到南、列西到东', async () => {
+  const { FakeAdapter } = await import('./fake-adapter.ts');
+  const { terrainSketch } = await import('../src/building/site.ts');
+  const a = new FakeAdapter();
+  for (let z = -2; z <= 2; z++) for (const y of [64, 65]) a.blocks.push({ name: 'dirt', pos: { x: 2, y, z } });
+  for (let x = -2; x <= 2; x++) a.blocks.push({ name: 'water', pos: { x, y: 63, z: 2 } });
+  const t = terrainSketch(a, 2);
+  assert.equal(t.center.y, 63);
+  assert.equal(t.heights[2][4], 2, '正东那列高 2 格');
+  assert.equal(t.heights[4][0], 'water', '南边一行是水');
+  assert.equal(t.rows[2].split(' ')[4], '+2');
+  assert.match(t.summary, /东高西低/);
+  assert.match(t.summary, /南边有水/);
 });
