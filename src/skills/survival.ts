@@ -40,7 +40,7 @@ export const shelter: Skill<{ until: 'day' | 'healed' }> = {
     const s0 = adapter.state();
     if (!s0.connected || !s0.alive || !s0.observationReady) return fail('NOT_CONNECTED', '当前状态无法确认，不能挖避难所');
     // 睡不睡觉是模型的决定（sleep）；shelter 只管挖坑躲起来
-    if (s0.inWater || s0.inLava || !s0.onGround) return fail('ERROR', `必须在干燥地面上挖避难所`);
+    if (s0.inWater || s0.inLava || !s0.onGround) return fail('ERROR', s0.inWater || s0.inLava ? '人在水里/岩浆里，先上岸站到干地上再躲' : '脚下没站稳（在跳、在掉落或站在树枝树叶上），先站到实地上再躲');
     if (!hasPlaceable(s0.inventory)) return fail('MISSING_MATERIALS', '背包里没有可以封顶的方块（泥土/圆石/木板/原木）');
     const here = { x: Math.floor(s0.pos.x), y: Math.floor(s0.pos.y), z: Math.floor(s0.pos.z) };
     if (pitProblem(adapter, here)) {

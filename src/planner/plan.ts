@@ -16,6 +16,10 @@ export function normalizeStep(raw: unknown): unknown {
   const { skill, args, ...rest } = raw as Record<string, unknown>;
   let name = typeof skill === 'string' ? skill.trim() : skill;
   let a: unknown = args;
+  // 原子动作把坐标直接当 args 写：{"skill":"dig_at","args":[0,2,0]}，place_at 还可能把方块名接在后面 [0,3,0,"dirt"]
+  if (Array.isArray(a) && a.length >= 3 && a.slice(0, 3).every((n) => Number.isInteger(n))) {
+    a = { at: a.slice(0, 3), ...(typeof a[3] === 'string' ? { item: a[3] } : {}) };
+  }
   const noArgs = a === undefined || a === null || typeof a !== 'object' || Array.isArray(a) || !Object.keys(a).length;
   if (noArgs && Object.keys(rest).length) a = rest;
   if (typeof name === 'string' && !SKILLS[name] && IDLE_ALIASES.has(name.toLowerCase())) {

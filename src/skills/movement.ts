@@ -85,6 +85,7 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
     const direction = String(a.direction ?? 'auto').toUpperCase();
     if (direction !== 'AUTO' && !DIRS[direction]) return { ok: false, error: `direction 必须是 auto 或 ${Object.keys(DIRS).join('/')}` };
     const until = typeof a.until === 'string' && a.until.trim() ? a.until.trim().toLowerCase().slice(0, 80) : undefined;
+    if (until && until.split('|').some((t) => /^(base|home|家|基地|bed|床)$/.test(t.trim()))) return { ok: false, error: 'until 只认看得见的方块或生物；回家用 goto {"target":"base"}，路不通就看 body.local 一段段走，或用 goto 到中途某个坐标' };
     return { ok: true, args: { direction, distance: clampInt(a.distance, 24, 160, 64), ...(until ? { until } : {}) } };
   },
   async run(ctx, args) {

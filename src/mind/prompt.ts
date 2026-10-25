@@ -160,8 +160,11 @@ export function situationalReminders(ctx: MindContext): string[] {
   const intent = [ctx.activity?.what, ctx.activity?.why, ...ctx.self.agenda().map((a) => a.text), ...ctx.self.recentThoughts(3).map((t) => t.text)].filter(Boolean).join(' ');
   if (ctx.stuckHere) out.push(`你在这一带已经卡了 ${ctx.stuckHere.minutes} 分钟：换一个和 tried 完全不同的办法（换区域、换目标、就地安家都行）`);
   const exits = Object.values(p.self.exits ?? {});
-  const trapped = p.self.sky_visible !== true && (p.self.overhead?.covered === 'rock' || p.light?.underground === true) || exits.length > 0 && exits.every((e) => !e.walk && !e.step_up);
-  if (trapped) out.push('你在地下或被围住了：看 body.local，用 dig_at / step / place_at 一格一格自己挖出去（比如挖阶梯：dig_at [0,2,0]、dig_at [1,1,0]、dig_at [1,2,0]、step [1,1,0] 重复到 sky_visible）');
+  const where = p.self.where?.kind;
+  const trapped = where ? where === 'underground' || where === 'pit' : p.self.sky_visible !== true && (p.self.overhead?.covered === 'rock' || p.light?.underground === true) || exits.length > 0 && exits.every((e) => !e.walk && !e.step_up);
+  if (trapped && where === 'pit') out.push(`你${p.self.where!.text}：原地 place_at [0,0,0] 垫高，或挖一级台阶 step 上去就出来了`);
+  else if (trapped) out.push('你在地下或被围住了：看 body.local，用 dig_at / step / place_at 一格一格自己挖出去（比如挖阶梯：dig_at [0,2,0]、dig_at [1,1,0]、dig_at [1,2,0]、step [1,1,0] 重复到 sky_visible）');
+  else if (where === 'surface' && p.self.sky_visible !== true) out.push(`你${p.self.where!.text}，不是在地下：直接走路，不用挖`);
   if (unfinished.length) out.push(`「${unfinished[0].name}」还没盖完：材料够了就 build {"projectId":"${unfinished[0].id}"} 接着盖`);
   if (drafts.length) out.push(`图纸 ${drafts[0].id}「${drafts[0].name}」已经画好：按材料清单攒齐后 build {"draft":"${drafts[0].id}"}`);
   else if (!unfinished.length && /盖|建|房|屋|家|住处|庇护/.test(intent)) out.push('想盖新房子：先输出 {"kind":"design","brief":"…"} 请建筑师画图纸，再按清单攒材料、照图施工，不要自己画图纸');
@@ -211,8 +214,9 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null) {
   return {
     pos: pos3(p.self.pos), dim: p.self.dim, biome: p.self.biome, hp: Math.round(p.self.hp), food: p.self.food,
     held: p.self.held, ...(p.self.inWater ? { inWater: true, oxygen: s.oxygen } : {}), ...(p.self.inLava ? { inLava: true } : {}),
-    sky_visible: p.self.sky_visible ?? null, depth_below_surface: p.self.depth_below_surface ?? null,
-    ...(p.self.overhead ? { overhead: p.self.overhead.block ? `头顶 ${p.self.overhead.up} 格是 ${p.self.overhead.block}（${{ canopy: '树冠，人在地表', roof: '屋顶或自己搭的', rock: '岩石或泥土，可能在地下', open: '' }[p.self.overhead.covered]}）` : '头顶一直空着' } : {}),
+    ...(p.self.where ? { where: p.self.where.text } : {}),
+    sky_visible: p.self.sky_visible ?? null, ...(p.self.depth_below_surface != null ? { depth_below_surface: p.self.depth_below_surface } : {}),
+    ...(p.self.overhead && !p.self.where ? { overhead: p.self.overhead.block ? `头顶 ${p.self.overhead.up} 格是 ${p.self.overhead.block}（${{ canopy: '树冠，人在地表', roof: '屋顶或自己搭的', rock: '岩石或泥土，可能在地下', open: '' }[p.self.overhead.covered]}）` : '头顶一直空着' } : {}),
     exits: p.self.exits ?? null,
     ...(p.self.local ? { local: p.self.local } : {}),
     ...(digging ? { held_suitable: suitable, ...(!suitable ? { held_note: `正在挖掘，手持 ${p.self.held ?? '空手'}；${tool ? `更适合用 ${tool}` : '应按目标方块选镐或铲等工具'}` } : {}) } : {}),

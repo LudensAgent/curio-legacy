@@ -30,6 +30,7 @@ function relValue(a: Record<string, any>): unknown {
 function parseRel(v: unknown, bounds: { f: number; u: [number, number]; r: number }): Rel | string {
   if (!Array.isArray(v) || v.length !== 3 || v.some((n) => !Number.isInteger(n))) return '需要 "at":[前,上,右] 三个整数，例如 {"at":[1,1,0]}';
   const [f, u, r] = v as number[];
+  if (f === 0 && r === 0 && u < bounds.u[0]) return `够不到脚下 ${-u} 格：往下挖几格就重复 dig_at [0,-1,0]，每挖空一格人就掉下去一格`;
   if (Math.abs(f) > bounds.f || Math.abs(r) > bounds.r || u < bounds.u[0] || u > bounds.u[1]) return `只能是身边的格子：前后 ±${bounds.f}、左右 ±${bounds.r}、上下 ${bounds.u[0]}..${bounds.u[1]}`;
   return [f, u, r];
 }
@@ -115,19 +116,30 @@ export const stepTo: Skill<CellArgs> = {
     const problems: string[] = [];
     if (!free(target)) problems.push(`目标格是 ${describeCell(a, target)}`);
     if (!free(head)) problems.push(`目标格上方是 ${describeCell(a, head)}（会碰头）`);
-    const below = a.blockAt(floor);
-    if (below === null || free(floor) || LIQUID_BLOCKS.has(below)) problems.push(`目标格脚下是 ${describeCell(a, floor)}（踩不住）`);
+    // 能站住：实心方块；薄雪层下面有实心方块也能踩
+    const solid = (p: Vec3Like) => { const n = a.blockAt(p); return n !== null && !LIQUID_BLOCKS.has(n) && !free(p); };
+    const standable = (p: Vec3Like) => solid(p) || (a.blockAt(p) === 'snow' && solid({ ...p, y: p.y - 1 }));
+    let dest = target, drop = 0;
+    if (!standable(floor) && !problems.length && args.at[1] <= 0) {
+      // 走下小坎：前面低 1–3 格有落脚处就直接走下去（像人一样，不必先垫）
+      for (let k = 1; k <= 3; k++) {
+        const f = { ...floor, y: floor.y - k };
+        if (!free({ ...f, y: f.y + 1 })) break;
+        if (standable(f)) { dest = { ...target, y: target.y - k }; drop = k; break; }
+      }
+    }
+    if (dest === target && !standable(floor)) problems.push(`目标格脚下是 ${describeCell(a, floor)}，往下 3 格内也没有落脚处（踩不住）`);
     if (args.at[1] === 1 && !free({ ...feet, y: feet.y + 2 })) problems.push(`往上跳时自己头顶上方是 ${describeCell(a, { ...feet, y: feet.y + 2 })}`);
     if (problems.length) return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：${problems.join('；')}`, { problems, ...after(ctx, args.facing) });
     try {
-      await a.moveTo({ kind: 'xyz', x: target.x, y: target.y, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())) });
+      await a.moveTo({ kind: 'xyz', x: dest.x, y: dest.y, z: dest.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())) });
     } catch (e) {
       if (isAbort(e)) throw e;
       return fail(codeFromError(e), `迈向 [${args.at}] 没成：${(e as Error).message}`, after(ctx, args.facing));
     }
     const end = feetCell(a.state().pos);
-    if (end.x !== target.x || end.y !== target.y || end.z !== target.z) return fail('EFFECT_NOT_CONFIRMED', `没有站到 [${args.at}]，实际在 (${end.x},${end.y},${end.z})`, after(ctx, args.facing));
-    return ok(`站到了 [${args.at}]`, { moved: [...args.at], ...after(ctx, args.facing) });
+    if (end.x !== dest.x || Math.abs(end.y - dest.y) > (a.blockAt(floor) === 'snow' ? 1 : 0) || end.z !== dest.z) return fail('EFFECT_NOT_CONFIRMED', `没有站到 [${args.at}]，实际在 (${end.x},${end.y},${end.z})`, after(ctx, args.facing));
+    return ok(drop ? `往前走下了 ${drop} 格的小坎` : `站到了 [${args.at}]`, { moved: [args.at[0], args.at[1] - drop, args.at[2]], ...after(ctx, args.facing) });
   },
 };
 
@@ -144,7 +156,7 @@ export const placeAt: Skill<CellArgs & { item: string }> = {
     if (at[0] === 0 && at[2] === 0 && at[1] === 1) return { ok: false, error: '[0,1,0] 是自己的头，往上垫高用 [0,0,0]' };
     const facing = facingArg(a.facing, adapter);
     if (!FACINGS.includes(facing as Facing)) return { ok: false, error: facing };
-    const item = String(a.item ?? 'any').replace(/^minecraft:/, '');
+    const item = String(a.item ?? a.block ?? 'any').replace(/^minecraft:/, '');
     if (item !== 'any' && !adapter.isKnownItem(item)) return { ok: false, error: `未知物品：${item}` };
     return { ok: true, args: { at, facing: facing as Facing, item } };
   },

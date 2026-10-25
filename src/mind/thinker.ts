@@ -132,7 +132,7 @@ export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldM
 const NEEDS_ACTIVITY = new Set<DecisionKind>(['adjust', 'new', 'detour', 'switch', 'experiment']);
 
 /** 把模型的 JSON 变成一次决定；能纠正的就地纠正，关键部分无效才要求重答 */
-export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldMemory, hasActivity: boolean, currentWhat?: string): Omit<MindDecision, 'source' | 'tier' | 'requestedAt'> | { error: string } {
+export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldMemory, hasActivity: boolean, currentWhat?: string, currentSkills?: string[]): Omit<MindDecision, 'source' | 'tier' | 'requestedAt'> | { error: string } {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: '顶层必须是 JSON 对象' };
   const o = raw as Record<string, any>;
   const notes: string[] = [];
@@ -141,7 +141,9 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
   const monologue = str(o.monologue ?? o.thought, 200);
   // 说着 continue，却写了一段新的活（带 steps、what 也换了）：嘴上没改口，心里已经换了，按 adjust 处理
   if (kind === 'continue' && hasActivity && currentWhat && o.activity && Array.isArray(o.activity.steps) && o.activity.steps.length
-    && typeof o.activity.what === 'string' && o.activity.what.trim() && o.activity.what.trim() !== currentWhat.trim()) {
+    && typeof o.activity.what === 'string' && o.activity.what.trim() && o.activity.what.trim() !== currentWhat.trim()
+    // 只是换了个说法、做法一样（同一串动作）：还是 continue，不打断手上的活
+    && (!currentSkills || o.activity.steps.map((st: any) => String(st?.skill ?? '')).join('>') !== currentSkills.join('>'))) {
     kind = 'adjust';
     notes.push(`说的是 continue，但写了新的活「${str(o.activity.what, 40)}」，按 adjust 处理`);
   }
@@ -265,7 +267,7 @@ export class Thinker {
           { role: 'user', content: `${embedded.kind} 是思考时的查询，不是身体的动作，不能写进 steps。已经替你查了：${result}\n请据此给出决定（steps 里只写动作）。` });
         continue;
       }
-      const parsed = parseDecision(raw, this.adapter, this.memory, !!ctx.activity, ctx.activity?.what);
+      const parsed = parseDecision(raw, this.adapter, this.memory, !!ctx.activity, ctx.activity?.what, ctx.activity?.steps.map((st) => st.skill));
       if ('error' in parsed) {
         invalid++;
         this.planner.noteInvalid(ctx.reason, parsed.error);

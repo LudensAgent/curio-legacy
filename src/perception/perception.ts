@@ -27,6 +27,8 @@ export interface Percept {
   self: { pos: [number, number, number]; dim: string; hp: number; food: number; biome: string | null; inWater: boolean; inLava: boolean; held: string | null; onGround?: boolean; riding?: string | null; equipment?: { slot: string; name: string }[]; around?: string;
     contacts?: Pick<ReturnType<typeof surroundings>, 'support' | 'feet' | 'head'>;
     sky_visible?: boolean | null; depth_below_surface?: number | null; exits?: ExitOptions;
+    /** 一句话说清自己在哪：地表 / 坑里（几格深）/ 地下 / 水里 */
+    where?: { kind: 'surface' | 'pit' | 'underground' | 'water' | 'unknown'; text: string; depth?: number };
     /** 抬头看到的第一个方块（只看正上方这一列，第一个实心方块之后的看不见）：分清“被树冠遮住”和“在地下” */
     overhead?: { block: string | null; up: number | null; covered: 'open' | 'canopy' | 'roof' | 'rock' };
     /** 身边的方块图（以脚为原点的 [前,上,右]，不透视），配合 dig_at/step/place_at 说出确切的格子 */
@@ -357,6 +359,7 @@ export class Perception {
           contacts: { support: contact.support, feet: contact.feet, head: contact.head } } : {}),
         ...environment,
         ...(overhead ? { overhead } : {}),
+        ...(overhead && contact ? { where: whereAmI(this.adapter, s, overhead) } : {}),
         ...((() => { const eye = this.adapter.eye(); return contact && eye ? { local: localMap(this.adapter, s.pos, facingOfYaw(eye.yaw)) } : {}; })()),
         ...(contact ? { exits: contact.exitOptions } : {}),
       },
@@ -397,4 +400,37 @@ export class Perception {
     this.latest.stock = stock;
     return this.latest;
   }
+}
+
+/**
+ * 自己在哪：看头顶，再看身边两格外那一圈的地面比脚下高多少（站在坑里一眼就看得出四周比自己高），
+ * 只看露在外面的地表，不透视。
+ */
+export function whereAmI(adapter: Pick<GameAdapter, 'blockAt'>, s: { pos: { x: number; y: number; z: number }; inWater?: boolean },
+  overhead: { block: string | null; up: number | null; covered: 'open' | 'canopy' | 'roof' | 'rock' }): { kind: 'surface' | 'pit' | 'underground' | 'water' | 'unknown'; text: string; depth?: number } {
+  const x = Math.floor(s.pos.x), y = Math.floor(s.pos.y), z = Math.floor(s.pos.z);
+  if (s.inWater) return { kind: 'water', text: '在水里' };
+  if (overhead.covered === 'rock') return { kind: 'underground', text: `在地下：头顶 ${overhead.up} 格是 ${overhead.block}` };
+  // 两格外一圈：每列地表比脚下高几格（列顶被挡住就不算）
+  const rises: number[] = [];
+  for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
+    if (Math.max(Math.abs(dx), Math.abs(dz)) !== 2) continue;
+    const top = adapter.blockAt({ x: x + dx, y: y + 6, z: z + dz });
+    if (top === null || !isSoftBlock(top)) continue;
+    for (let h = 5; h >= -3; h--) {
+      const n = adapter.blockAt({ x: x + dx, y: y + h, z: z + dz });
+      if (n === null) break;
+      if (isSoftBlock(n) || /(_leaves|_log|_wood)$/.test(n)) continue;
+      rises.push(h + 1); // 那列能站的高度比我脚下高多少
+      break;
+    }
+  }
+  const higher = rises.filter((r) => r >= 2).length;
+  const sky = overhead.covered === 'canopy' ? `，头顶 ${overhead.up} 格是树叶` : overhead.covered === 'roof' ? `，头顶 ${overhead.up} 格是 ${overhead.block}` : '，头顶露天';
+  if (rises.length >= 8 && higher >= rises.length * 0.75) {
+    const sorted = [...rises].sort((a, b) => a - b);
+    const depth = sorted[Math.floor(sorted.length / 2)];
+    return { kind: 'pit', depth, text: `在一个约 ${depth} 格深的坑里（四周地面比脚下高${sky}）：垫高或挖台阶就能上去` };
+  }
+  return { kind: 'surface', text: `在地表${sky}` };
 }

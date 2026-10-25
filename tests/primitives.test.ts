@@ -97,3 +97,45 @@ test('原子动作认模型常用的几种坐标写法：at / to / pos、字符�
   const bad = digAt.validate({ where: 'front' }, w);
   assert.ok(!bad.ok && /"at":\[前,上,右\]/.test(bad.error));
 });
+
+test('step 能走下 1–3 格的小坎，也能踩上薄雪', async (t) => {
+  const w = new FakeAdapter();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  (w as any).removed.add('0,63,-1'); (w as any).removed.add('0,62,-1');
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const r = await stepTo.run(ctx, { at: [1, 0, 0], facing: 'N' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.match(r.summary, /走下了 2 格/);
+
+  const w2 = new FakeAdapter();
+  w2.pos = { x: 0.5, y: 64, z: 0.5 };
+  (w2 as any).removed.add('0,63,-1');
+  w2.blocks.push({ name: 'snow', pos: { x: 0, y: 63, z: -1 } });
+  const ctx2 = makeCtx(w2);
+  t.after(() => ctx2.memory.close());
+  const r2 = await stepTo.run(ctx2, { at: [1, 0, 0], facing: 'N' });
+  assert.equal(r2.status, 'succeeded', r2.summary);
+});
+
+test('坐标直接写成 args 数组也认；往脚下挖多格会被告知重复 dig_at [0,-1,0]', async () => {
+  const { normalizeStep } = await import('../src/planner/plan.ts');
+  assert.deepEqual(normalizeStep({ skill: 'dig_at', args: [0, 2, 0] }), { skill: 'dig_at', args: { at: [0, 2, 0] } });
+  assert.deepEqual(normalizeStep({ skill: 'place_at', args: [0, 3, 0, 'dirt'] }), { skill: 'place_at', args: { at: [0, 3, 0], item: 'dirt' } });
+  const v = digAt.validate({ at: [0, -2, 0] }, new FakeAdapter());
+  assert.ok(!v.ok && /重复 dig_at \[0,-1,0\]/.test(v.error));
+});
+
+test('自己在哪：坑底能认出几格深，树下认得出是地表', async () => {
+  const { whereAmI } = await import('../src/perception/perception.ts');
+  const w = new FakeAdapter();
+  w.pos = { x: 0.5, y: 62, z: 0.5 };
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) { (w as any).removed.add(`${dx},63,${dz}`); (w as any).removed.add(`${dx},62,${dz}`); }
+  const pit = whereAmI(w, { pos: w.pos }, { block: null, up: null, covered: 'open' });
+  assert.equal(pit.kind, 'pit');
+  assert.equal(pit.depth, 2);
+  const flat = new FakeAdapter();
+  const tree = whereAmI(flat, { pos: flat.pos }, { block: 'spruce_leaves', up: 4, covered: 'canopy' });
+  assert.equal(tree.kind, 'surface');
+  assert.match(tree.text, /树叶/);
+});
