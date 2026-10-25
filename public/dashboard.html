@@ -172,6 +172,8 @@
   .cat.forge { background: var(--bad-soft); color: var(--bad); } .cat.improve { background: var(--info-soft); color: var(--info); }
   .cat.curate { background: var(--soft); color: var(--text); } .cat.other { background: var(--soft); color: var(--dim); }
   .streamcard { display: none; }
+  .widevision { display: none; }
+  canvas#eyeMini { width: 100%; aspect-ratio: 5 / 3; image-rendering: pixelated; border-radius: 6px; background: var(--soft); display: block; }
   /*
    * 宽屏（≥1800px，比如 4K 125% 缩放的 3072 宽）：整个界面铺满一屏、不滚动页面——
    * 左：身体 / 周围 / 背包；中：现在 + 关键数字 + 念头流；右：标签页（每页的格子撑满高度，内容在格子里滚动）。
@@ -203,6 +205,7 @@
     #pane-events #log { flex: 1; height: auto; min-height: 0; }
     #pane-llm .llm { flex: 1; height: auto; min-height: 0; }
     .inv { grid-template-columns: repeat(9, minmax(0, 1fr)); }
+    .widevision { display: block; }
     .scroll { max-height: none; }
   }
   .stack { display: flex; height: 8px; border-radius: 99px; overflow: hidden; background: var(--soft); margin: 8px 0; }
@@ -243,6 +246,15 @@
     </div>
     <div class="card">
       <h2>周围</h2>
+      <div class="widevision">
+        <canvas id="eyeMini" width="480" height="288"></canvas>
+        <div class="dim mono" id="vmetaMini" style="font-size:10px;margin:2px 0 6px"></div>
+        <div class="grid2" style="gap:10px">
+          <div><div class="label">看见</div><ul class="list mono" id="vseenMini"></ul></div>
+          <div><div class="label">听见</div><ul class="list mono" id="vheardMini"></ul></div>
+        </div>
+        <div class="sub"></div>
+      </div>
       <div class="label">敌对</div>
       <div class="chips" id="hostile"></div>
       <div class="sub">生物 · 玩家</div>
@@ -654,11 +666,34 @@ const CATS = ['unknown','sky','dark','water','lava','leaves','wood','grass','dir
 const CAT_ZH = { unknown:'未加载', sky:'天空', dark:'黑暗', water:'水', lava:'岩浆', leaves:'树叶', wood:'木头', grass:'草地', dirt:'泥土', sand:'沙/砾', stone:'石头', ore:'矿石', snow:'雪/冰', plant:'植物', built:'人造', other:'其他' };
 const PAL = { unknown:[236,236,236], sky:[226,236,246], dark:[34,34,34], water:[120,160,205], lava:[225,110,50], leaves:[110,150,90], wood:[130,95,60], grass:[150,185,110], dirt:[150,120,90], sand:[225,212,165], stone:[150,150,150], ore:[215,165,20], snow:[252,252,252], plant:[175,195,95], built:[195,150,105], other:[185,185,185] };
 $('vlegend').innerHTML = CATS.filter((c) => c !== 'unknown').map((c) => `<span style="--c:rgb(${PAL[c].join(',')})">${CAT_ZH[c]}</span>`).join('');
+const wide = () => innerWidth >= 1800;
 function drawVision(f, vs) {
-  if (!$('pane-vision').classList.contains('on')) return; // 不在看就不画
-  const cv = $('eye'), g = cv.getContext('2d');
-  if (!f) { g.clearRect(0, 0, cv.width, cv.height); $('vmeta').textContent = '无画面'; return; }
-  if (cv.width !== f.cols * 12) { cv.width = f.cols * 12; cv.height = f.rows * 12; }
+  // 宽屏时左栏“周围”里一直有一张小视野图和看见/听见列表
+  if (wide()) {
+    if (f) paintFrame($('eyeMini'), f, 8);
+    $('vmetaMini').textContent = f ? `朝向 ${f.facing} · ${f.range} 格视距` : '无画面';
+    if (vs) {
+      $('vseenMini').innerHTML = list(vs.seen_entities.slice(0, 8), (e) => `<li>${esc(e.name)} <span class="k">${e.rel} ${e.dist}格</span></li>`);
+      $('vheardMini').innerHTML = list(vs.heard.slice(0, 8), (e) => `<li>${esc(e.name)} <span class="k">${esc(e.approx)}</span></li>`);
+    }
+  }
+  if (!$('pane-vision').classList.contains('on')) return; // 视野页不在看就不画大图
+  const cv = $('eye');
+  if (!f) { cv.getContext('2d').clearRect(0, 0, cv.width, cv.height); $('vmeta').textContent = '无画面'; return; }
+  paintFrame(cv, f, 12);
+  $('vmeta').textContent = `朝向 ${f.facing} · ${f.cols}×${f.rows} · ${f.range} 格 · ${f.scanMs}ms`;
+  if (vs) {
+    $('vopen').textContent = `左${vs.openness.left} 中${vs.openness.center} 右${vs.openness.right}`;
+    $('vseen').innerHTML = list(vs.seen_entities, (e) => `<li>${esc(e.name)} · ${e.rel} ${e.dist} 格</li>`);
+    $('vheard').innerHTML = list(vs.heard, (e) => `<li>${esc(e.name)} · ${esc(e.approx)}</li>`);
+    $('vview').textContent = vs.view;
+    $('vland').textContent = `${vs.nearest_land ? vs.nearest_land.dir + ' ' + vs.nearest_land.dist + ' 格' : '未知'} / ${vs.last_look_around_s == null ? '未环顾' : vs.last_look_around_s + ' 秒前'}`;
+  }
+}
+/** 把一帧视野画到画布上（scale：每条射线画几像素） */
+function paintFrame(cv, f, scale) {
+  const g = cv.getContext('2d');
+  if (cv.width !== f.cols * scale) { cv.width = f.cols * scale; cv.height = f.rows * scale; }
   const img = g.createImageData(f.cols, f.rows);
   for (let i = 0; i < f.cats.length; i++) {
     const c = PAL[CATS[f.cats[i]]] || PAL.other;
@@ -673,14 +708,6 @@ function drawVision(f, vs) {
     const x = e.u * cv.width, y = e.v * cv.height;
     g.fillStyle = e.kind === 'hostile' ? '#c43d3d' : '#18181b'; g.fillRect(x - 4, y - 4, 8, 8);
     g.fillText(`${e.name.replace('player:', '')} ${e.dist}`, x + 7, y + 4);
-  }
-  $('vmeta').textContent = `朝向 ${f.facing} · ${f.cols}×${f.rows} · ${f.range} 格 · ${f.scanMs}ms`;
-  if (vs) {
-    $('vopen').textContent = `左${vs.openness.left} 中${vs.openness.center} 右${vs.openness.right}`;
-    $('vseen').innerHTML = list(vs.seen_entities, (e) => `<li>${esc(e.name)} · ${e.rel} ${e.dist} 格</li>`);
-    $('vheard').innerHTML = list(vs.heard, (e) => `<li>${esc(e.name)} · ${esc(e.approx)}</li>`);
-    $('vview').textContent = vs.view;
-    $('vland').textContent = `${vs.nearest_land ? vs.nearest_land.dir + ' ' + vs.nearest_land.dist + ' 格' : '未知'} / ${vs.last_look_around_s == null ? '未环顾' : vs.last_look_around_s + ' 秒前'}`;
   }
 }
 
