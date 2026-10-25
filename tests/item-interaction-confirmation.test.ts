@@ -82,3 +82,21 @@ test('cancelled placement cannot send a late packet or report a confirmed block'
   resume(); await flush();
   assert.equal(packets, 0);
 });
+
+test('放船：先转头、等转头发到服务器，再发放置包；mineflayer 因为别的实体先出现而误报失败时，自己认出新出现的船', async () => {
+  const f = fixture('oak_boat');
+  const water = new Vec3(3, 62, 0);
+  f.put('water', water);
+  const order: string[] = [];
+  f.bot.lookAt = async (_p: any, force: boolean) => { order.push(`look:${force}`); };
+  f.bot.waitForTicks = async (n: number) => { order.push(`ticks:${n}`); };
+  f.bot.placeEntity = async () => {
+    order.push('place');
+    f.bot.entities[77] = { id: 77, name: 'boat', position: water.offset(0.5, 1, 0.5) };
+    throw new Error('Failed to place entity');
+  };
+  const r = await f.adapter.useItemOn('oak_boat', { kind: 'block', pos: { x: 3, y: 62, z: 0 } }, new AbortController().signal);
+  assert.deepEqual(order, ['look:true', 'ticks:2', 'place']);
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.spawned, 'boat');
+});

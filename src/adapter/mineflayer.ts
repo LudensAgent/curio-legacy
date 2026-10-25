@@ -2073,6 +2073,13 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return { ok: true, placed: { x: dest.x, y: dest.y, z: dest.z }, effectEvidence };
   }
 
+  /** 等转头真的发给服务器（下一个物理刻才发）；“对着看的方向用物品”的动作要在这之后 */
+  private async lookSynced() {
+    const b = this.bot;
+    if (typeof b.waitForTicks === 'function') await b.waitForTicks(2);
+    else await sleep(120);
+  }
+
   async useItemOn(item: string, target: { kind: 'block'; pos: Vec3Like } | { kind: 'self' }, signal: AbortSignal): Promise<ActionResult & { spawned?: string; placed?: Vec3Like }> {
     const check = this.actionCheckpoint(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
@@ -2091,8 +2098,21 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (/_boat$|_raft$|_spawn_egg$|^armor_stand$|^end_crystal$/.test(item)) {
         // placeEntity 对船用 forceLook:'ignore' 再发 use_item：服务器按“当前视线”射线找水面，所以必须先看向目标水面，
         // 否则船会放到别处或根本放不下
-        if (/_boat$|_raft$/.test(item)) await this.afterAction(() => b.lookAt(block.position.offset(0.5, ['water', 'bubble_column'].includes(block.name) ? 0.9 : 1, 0.5), true), check);
-        const entity = await this.afterAction(() => raceAbort(b.placeEntity(block, new Vec3(0, 1, 0)), signal, 6000, () => {}), check);
+        if (/_boat$|_raft$/.test(item)) {
+          // 看的点和 placeEntity 自己要看的点（顶面中心）一致：它就不会再慢慢转一次头；视线穿过这个点继续往下就落在水面上
+          await this.afterAction(() => b.lookAt(block.position.offset(0.5, 1, 0.5), true), check);
+          // 转头要等下一个物理刻才发给服务器；放船的 use_item 包是立刻发的，服务器会按“转头之前”的视线找水面——放不下或放到别处。等它发出去
+          await this.afterAction(() => this.lookSynced(), check);
+        }
+        const ids = new Set(Object.keys(b.entities ?? {}));
+        let entity: any;
+        try { entity = await this.afterAction(() => raceAbort(b.placeEntity(block, new Vec3(0, 1, 0)), signal, 6000, () => {}), check); }
+        catch (e) {
+          if (e instanceof AbortedError) throw e;
+          // mineflayer 等实体出现时，只要先冒出别的实体（掉落物、怪）就不再等了，会误报放置失败：自己再看一眼
+          entity = Object.values(b.entities ?? {}).find((en: any) => !ids.has(String(en.id)) && /boat|raft|armor_stand|end_crystal/.test(String(en.name)) && en.position.distanceTo(block.position) < 4);
+          if (!entity) throw e;
+        }
         if (typeof (entity as any)?.id !== 'number') return { ok: false, reason: 'ENTITY_NOT_SPAWNED:没有确认放置的实体出现', effectEvidence: { verified: false, changed: false, reasons: ['放置API未返回实际实体'] } };
         return { ok: true, spawned: (entity as any)?.name ?? item, effectEvidence: { verified: true, changed: true, reasons: [`服务器返回新实体 ${(entity as any)?.name ?? item}`] } };
       }
@@ -2105,7 +2125,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       // 对着液体用（水桶装水/倒水等）：先看向液面再“使用物品”；其他情况按“对方块右键”
       const fluid = ['water', 'lava'].includes(block.name);
       const changed = this.blockInteractionChange(block);
-      await this.afterAction(() => b.lookAt(block.position.offset(0.5, fluid ? 0.9 : 0.5, 0.5), true), check);
+      await this.afterAction(() => b.lookAt(block.position.offset(0.5, fluid ? 0.85 : 0.5, 0.5), true), check);
+      if (fluid) await this.afterAction(() => this.lookSynced(), check);
       if (fluid) await this.afterAction(async () => { b.activateItem(); await sleep(250, signal); b.deactivateItem(); }, check);
       else await this.afterAction(() => b.activateBlock(block), check);
       return await this.waitForInteraction(changed, check) ? { ok: true, effectEvidence: { verified: true, changed: true, reasons: changed.reasons() } } : { ok: false, reason: 'NO_EFFECT:目标方块、邻格和背包均未变化', effectEvidence: { verified: true, changed: false, reasons: ['目标、邻格和背包均未变化'] } };
