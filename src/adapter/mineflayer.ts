@@ -26,6 +26,10 @@ import type {
   BossDeathObservation,
   SwimOptions,
   UseItemOptions,
+  GuiOp,
+  GuiSlot,
+  GuiView,
+  TradeView,
 } from './types.ts';
 
 const require = createRequire(import.meta.url);
@@ -61,6 +65,21 @@ const ALIASES: Record<string, string[]> = {
   ...Object.fromEntries(ORE_BASE.map((o) => [o, [`${o}_ore`, `deepslate_${o}_ore`]])),
 };
 
+
+/** 界面里每一格是干什么的——玩家打开界面一眼就看得出（画着燃料、箭头、模板的轮廓） */
+const GUI_ROLES: Record<string, string[]> = {
+  furnace: ['原料', '燃料', '产物'], blast_furnace: ['原料', '燃料', '产物'], smoker: ['原料', '燃料', '产物'],
+  brewing_stand: ['药水瓶', '药水瓶', '药水瓶', '材料', '烈焰粉（燃料）'],
+  anvil: ['要修/改名的物品', '材料或附魔书', '产物（消耗经验）'],
+  grindstone: ['物品', '物品', '产物（去掉附魔、返还少量经验）'],
+  smithing: ['锻造模板', '装备', '材料（下界合金锭/纹饰材料）', '产物'],
+  stonecutter: ['原料', '产物（先用 button 选配方）'],
+  loom: ['旗帜', '染料', '旗帜图案（可选）', '产物（先用 button 选图案）'],
+  cartography: ['地图', '纸/玻璃板/空地图', '产物'],
+  enchantment: ['要附魔的物品', '青金石'],
+  crafting: ['产物', '合成格', '合成格', '合成格', '合成格', '合成格', '合成格', '合成格', '合成格', '合成格'],
+  beacon: ['支付物品（铁/金/绿宝石/钻石/下界合金锭）'],
+};
 
 const WOOL_ZH = ['白', '橙', '品红', '淡蓝', '黄', '黄绿', '粉红', '灰', '淡灰', '青', '紫', '蓝', '棕', '绿', '红', '黑'];
 const PROFESSIONS = ['none', 'armorer', 'butcher', 'cartographer', 'cleric', 'farmer', 'fisherman', 'fletcher', 'leatherworker', 'librarian', 'mason', 'nitwit', 'shepherd', 'toolsmith', 'weaponsmith'];
@@ -1260,6 +1279,170 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const slot = this.bot.getEquipmentDestSlot?.(destination);
     const actual = destination === 'hand' ? this.bot.heldItem : this.bot.inventory.slots?.[slot];
     return actual?.name === name ? { ok: true } : { ok: false, reason: 'EQUIP_NOT_CONFIRMED' };
+  }
+
+  private itemEnchants(item: any): string[] | undefined {
+    try {
+      const list = item?.enchants;
+      return Array.isArray(list) && list.length ? list.map((e: any) => `${e.name} ${e.lvl}`) : undefined;
+    } catch { return undefined; }
+  }
+
+  private guiView(w: any): GuiView {
+    const type = String(w.type ?? '').replace(/^minecraft:/, '');
+    const size = Math.max(0, (w.slots?.length ?? 36) - 36);
+    let roles = GUI_ROLES[type];
+    if (type === 'smithing' && size === 3) roles = roles.slice(1);
+    const slots: GuiSlot[] = [];
+    for (let i = 0; i < size; i++) {
+      const it = w.slots[i];
+      if (!roles && !it) continue;
+      const enchants = it ? this.itemEnchants(it) : undefined;
+      slots.push({ slot: i, ...(roles?.[i] ? { role: roles[i] } : {}), name: it?.name ?? null, count: it?.count ?? 0, ...(enchants ? { enchants } : {}) });
+    }
+    const ench = Array.isArray(w.enchantments) ? w.enchantments.map((e: any, option: number) => {
+      const id = e?.expected?.enchant;
+      const name = id != null && id >= 0 ? this.mcData.enchantments?.[id]?.name : undefined;
+      return { option, level: e?.level ?? 0, ...(name ? { hint: `${name} ${e.expected.level}…` } : {}) };
+    }).filter((e: any) => e.level > 0) : [];
+    return { type, slots, ...(ench.length ? { enchantments: ench } : {}) };
+  }
+
+  /**
+   * 通用界面：玩家打开一个方块界面后能做的事就是这几样——拿起一叠、放一个/全部、shift 点击取走、点按钮。
+   * 不认得哪种工作站怎么用；怎么摆是 LLM 自己的事，这里只把格子里实际有什么如实给回去。
+   */
+  async useGui(pos: Vec3Like, ops: GuiOp[], signal: AbortSignal): Promise<ActionResult & { view?: GuiView; done: string[] }> {
+    const check = this.actionCheckpoint(signal);
+    throwIfAborted(signal);
+    const done: string[] = [];
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', done };
+    await this.interactionReady();
+    check();
+    const b = this.bot;
+    const block = b.blockAt(this.vec(pos));
+    if (!block) return { ok: false, reason: 'UNLOADED', done };
+    await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos }, { signal, timeoutMs: 20000, constructionSafe: true, allowSwimming: false }), check);
+    const open = block.name === 'enchanting_table' && typeof b.openEnchantmentTable === 'function' ? () => b.openEnchantmentTable(block) : () => b.openBlock(block);
+    let w: any;
+    try {
+      w = await this.afterAction(() => raceAbort(open(), signal, 8000, () => {}), check);
+    } catch (e) {
+      if (e instanceof AbortedError) throw e;
+      return { ok: false, reason: `NOT_OPENABLE:${block.name}`, done };
+    }
+    if (!w) return { ok: false, reason: `NOT_OPENABLE:${block.name}`, done };
+    const size = () => Math.max(0, (w.slots?.length ?? 36) - 36);
+    const click = (slot: number, button: number, mode: number) => this.afterAction(() => b.clickWindow(slot, button, mode), check);
+    const invCount = (name: string) => b.inventory.items().filter((i: any) => i.name === name).reduce((n: number, i: any) => n + i.count, 0);
+    const settle = () => this.afterAction(() => sleep(250, signal), check);
+    this.inFlight++; // 界面开着的整个过程都算在忙，空闲巡检不要替它关窗
+    try {
+      await settle();
+      for (const op of ops) {
+        check();
+        if ('put' in op) {
+          const { item, slot } = op.put;
+          if (slot < 0 || slot >= size()) return { ok: false, reason: `BAD_SLOT:${slot}`, view: this.guiView(w), done };
+          const src = w.slots.slice(size()).map((it: any, k: number) => it && it.name === item ? { it, at: size() + k } : null).filter(Boolean)[0] as any;
+          if (!src) return { ok: false, reason: `NO_ITEM:${item}`, view: this.guiView(w), done };
+          const before = w.slots[slot]?.name === item ? w.slots[slot].count : 0;
+          const want = Math.min(op.put.count ?? src.it.count, src.it.count);
+          await click(src.at, 0, 0);
+          if (want >= src.it.count) await click(slot, 0, 0);
+          else for (let k = 0; k < want; k++) await click(slot, 1, 0);
+          if (w.selectedItem || b.inventory.selectedItem) await click(src.at, 0, 0);
+          await settle();
+          const now = w.slots[slot]?.name === item ? w.slots[slot].count : 0;
+          if (now <= before) return { ok: false, reason: `PUT_REFUSED:${item}->${slot}`, view: this.guiView(w), done };
+          done.push(`第 ${slot} 格放入 ${item}×${now - before}`);
+        } else if ('take' in op) {
+          const { slot } = op.take;
+          const it = w.slots[slot];
+          if (slot < 0 || slot >= size()) return { ok: false, reason: `BAD_SLOT:${slot}`, view: this.guiView(w), done };
+          if (!it) return { ok: false, reason: `EMPTY_SLOT:${slot}`, view: this.guiView(w), done };
+          const before = invCount(it.name);
+          await click(slot, 0, 1);
+          await settle();
+          const got = invCount(it.name) - before;
+          if (got <= 0) return { ok: false, reason: `TAKE_REFUSED:${it.name}（产物取不出：可能经验不够、背包满或配方不成立）`, view: this.guiView(w), done };
+          done.push(`从第 ${slot} 格取出 ${it.name}×${got}`);
+        } else if ('button' in op) {
+          b._client.write('enchant_item', { windowId: w.id, enchantment: op.button });
+          await settle();
+          done.push(`点了按钮 ${op.button}`);
+        } else if ('rename' in op) {
+          b._client.write('name_item', { name: op.rename });
+          await settle();
+          done.push(`改名为「${op.rename}」`);
+        }
+      }
+      return { ok: true, view: this.guiView(w), done };
+    } finally {
+      this.inFlight--;
+      try { b.closeWindow(w); } catch { /* ignore */ }
+      if (this.interactionDirty().some((d) => !d.startsWith('窗口'))) this.scheduleRepair('界面操作后残留', 150);
+    }
+  }
+
+  private tradeViews(v: any): TradeView[] {
+    const label = (it: any) => {
+      if (!it) return '';
+      const ench = this.itemEnchants(it) ?? (() => { try { return it.storedEnchants?.length ? it.storedEnchants.map((e: any) => `${e.name} ${e.lvl}`) : undefined; } catch { return undefined; } })();
+      return `${it.name}×${it.count}${ench ? `（${ench.join('、')}）` : ''}`;
+    };
+    return (v.trades ?? []).map((t: any, index: number) => ({
+      index,
+      give: [t.inputItem1, t.inputItem2].filter(Boolean).map(label),
+      get: label(t.outputItem),
+      uses: t.nbTradeUses ?? 0,
+      maxUses: t.maximumNbTradeUses ?? 0,
+      disabled: !!t.tradeDisabled,
+    }));
+  }
+
+  /** 和村民/流浪商人交易：走到跟前右键打开交易界面，看交易表；给了 index 就按真实背包变化做几次 */
+  async tradeWith(entityId: number, index: number | null, times: number, signal: AbortSignal): Promise<ActionResult & { trades: TradeView[]; traded: number }> {
+    const check = this.actionCheckpoint(signal);
+    throwIfAborted(signal);
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', trades: [], traded: 0 };
+    await this.interactionReady();
+    check();
+    const b = this.bot;
+    const entity = b.entities?.[entityId];
+    if (!entity?.isValid) return { ok: false, reason: 'TARGET_GONE', trades: [], traded: 0 };
+    if (b.entity.position.distanceTo(entity.position) > 2.8) {
+      await this.afterAction(() => this.moveTo({ kind: 'near', pos: { x: entity.position.x, y: entity.position.y, z: entity.position.z }, range: 2 }, { signal, timeoutMs: 15000 }), check);
+    }
+    let v: any;
+    try {
+      v = await this.afterAction(() => raceAbort(b.openVillager(entity), signal, 8000, () => {}), check);
+    } catch (e) {
+      if (e instanceof AbortedError) throw e;
+      return { ok: false, reason: 'NO_TRADE_WINDOW（幼年村民、无业村民和傻子不交易）', trades: [], traded: 0 };
+    }
+    this.inFlight++;
+    try {
+      const trades = this.tradeViews(v);
+      if (index === null) return { ok: true, trades, traded: 0 };
+      const t = v.trades?.[index];
+      if (!t) return { ok: false, reason: `NO_SUCH_TRADE:${index}`, trades, traded: 0 };
+      if (t.tradeDisabled) return { ok: false, reason: 'TRADE_LOCKED（这条交易用完了，村民要回工作站补货）', trades, traded: 0 };
+      const have = (it: any) => b.inventory.items().filter((i: any) => i.type === it.type).reduce((n: number, i: any) => n + i.count, 0);
+      const out = t.outputItem;
+      const affordable = Math.min(...[t.inputItem1, t.inputItem2].filter(Boolean).map((it: any) => Math.floor(have(it) / Math.max(1, it.count))));
+      const n = Math.min(times, affordable, Math.max(0, (t.maximumNbTradeUses ?? 99) - (t.nbTradeUses ?? 0)));
+      if (n <= 0) return { ok: false, reason: `NOT_ENOUGH:${[t.inputItem1, t.inputItem2].filter(Boolean).map((it: any) => `${it.name}×${it.count}`).join('+')}`, trades, traded: 0 };
+      const before = have(out);
+      await this.afterAction(() => b.trade(v, index, n), check);
+      await this.afterAction(() => sleep(250, signal), check);
+      const got = have(out) - before;
+      return got > 0 ? { ok: true, trades: this.tradeViews(v), traded: Math.round(got / Math.max(1, out.count)) } : { ok: false, reason: 'TRADE_NOT_CONFIRMED', trades: this.tradeViews(v), traded: 0 };
+    } finally {
+      this.inFlight--;
+      try { v.close?.() ?? b.closeWindow(v); } catch { /* ignore */ }
+      if (this.interactionDirty().some((d) => !d.startsWith('窗口'))) this.scheduleRepair('交易后残留', 150);
+    }
   }
 
   /** 扔出背包里的物品（Q 键）；可先转向某个位置，丢给村民/猪灵/队友或者清背包。按真实背包变化确认。 */

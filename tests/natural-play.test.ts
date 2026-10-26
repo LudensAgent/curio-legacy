@@ -77,3 +77,90 @@ test('hold_item：副手、快捷栏格子，参数检查', async () => {
   assert.equal(holdItem.validate({ item: 'torch', to: 'off-hand', slot: 1 }, ctx.adapter).ok, false);
   assert.equal(holdItem.validate({ item: 'torch', slot: 9 }, ctx.adapter).ok, false);
 });
+
+// ---------------------------------------------------------------- 通用界面 / 交易
+const Vec3 = (await import('vec3')).Vec3;
+const guiBot = (type: string, size: number, inv: Record<number, [string, number]>) => {
+  const slots: any[] = Array(size + 36).fill(null);
+  for (const [k, [name, count]] of Object.entries(inv)) slots[size + Number(k)] = { name, count, type: data.itemsByName[name].id };
+  const w: any = { id: 3, type: `minecraft:${type}`, slots, selectedItem: null };
+  const clicks: number[][] = [];
+  const bot: any = {
+    entity: { position: new Vec3(0, 64, 0) }, game: { dimension: 'overworld' }, entities: {},
+    inventory: { slots: [], get selectedItem() { return w.selectedItem; }, items: () => slots.slice(size).filter(Boolean), emptySlotCount: () => 10 },
+    blockAt: (p: any) => ({ name: type === 'anvil' ? 'anvil' : type, position: p }),
+    async openBlock() { return w; },
+    closeWindow() { w.closed = true; },
+    _client: { write: (name: string, body: any) => clicks.push([name === 'name_item' ? -2 : -1, body.enchantment ?? 0, 0]) },
+    async clickWindow(slot: number, button: number, mode: number) {
+      clicks.push([slot, button, mode]);
+      const at = slots[slot];
+      if (mode === 1) { if (!at) return; const free = slots.findIndex((s, i) => i >= size && !s); slots[free] = at; slots[slot] = null; return; }
+      const cur = w.selectedItem;
+      if (button === 1 && cur) {
+        if (at && at.name !== cur.name) return;
+        slots[slot] = { ...cur, count: (at?.count ?? 0) + 1 }; cur.count--; if (!cur.count) w.selectedItem = null; return;
+      }
+      if (cur && at && at.name === cur.name) { at.count += cur.count; w.selectedItem = null; return; }
+      w.selectedItem = at; slots[slot] = cur;
+    },
+  };
+  const a = adapter() as any; a.bot = bot; a.connectedFlag = true; a.moveTo = async () => {};
+  return { a, w, clicks, slots };
+};
+
+test('use_gui 适配层：按格子放 1 个/全部，shift 取出产物，点按钮；格子上标出用途', async () => {
+  const { a, w, clicks, slots } = guiBot('anvil', 3, { 0: ['iron_sword', 1], 1: ['iron_ingot', 5] });
+  const r = await a.useGui({ x: 1, y: 64, z: 0 }, [{ put: { item: 'iron_sword', slot: 0 } }, { put: { item: 'iron_ingot', slot: 1, count: 2 } }], new AbortController().signal);
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(slots[0].name, 'iron_sword');
+  assert.equal(slots[1].count, 2);
+  assert.equal(slots[3 + 1].count, 3, '剩下的铁锭放回原处');
+  assert.equal(w.selectedItem, null);
+  assert.equal(w.closed, true);
+  assert.deepEqual(r.view.slots.map((s: any) => s.role), ['要修/改名的物品', '材料或附魔书', '产物（消耗经验）']);
+  assert.deepEqual(clicks, [[3, 0, 0], [0, 0, 0], [4, 0, 0], [1, 1, 0], [1, 1, 0], [4, 0, 0]]);
+  slots[2] = { name: 'iron_sword', count: 1, type: data.itemsByName.iron_sword.id };
+  const t = await a.useGui({ x: 1, y: 64, z: 0 }, [{ take: { slot: 2 } }, { button: 1 }], new AbortController().signal);
+  assert.equal(t.ok, true, t.reason);
+  assert.match(t.done.join(' '), /取出 iron_sword×1/);
+  const bad = await a.useGui({ x: 1, y: 64, z: 0 }, [{ take: { slot: 0 } }, { put: { item: 'diamond', slot: 1 } }], new AbortController().signal);
+  assert.equal(bad.ok, false);
+});
+
+test('trade 适配层：先看交易表，按序号交易并按背包变化确认', async () => {
+  const id = (n: string) => data.itemsByName[n].id;
+  const inv = new Map<number, number>([[id('emerald'), 3], [id('wheat'), 40]]);
+  const trades: any[] = [
+    { inputItem1: { name: 'wheat', count: 20, type: id('wheat') }, inputItem2: null, outputItem: { name: 'emerald', count: 1, type: id('emerald') }, nbTradeUses: 0, maximumNbTradeUses: 16, tradeDisabled: false },
+    { inputItem1: { name: 'emerald', count: 1, type: id('emerald') }, inputItem2: null, outputItem: { name: 'bread', count: 6, type: id('bread') }, nbTradeUses: 12, maximumNbTradeUses: 12, tradeDisabled: true },
+  ];
+  const bot: any = {
+    entity: { position: new Vec3(0, 64, 0) }, game: { dimension: 'overworld' },
+    entities: { 9: { isValid: true, position: new Vec3(1, 64, 1) } },
+    inventory: { slots: [], selectedItem: null, items: () => [...inv].filter(([, n]) => n > 0).map(([type, count]) => ({ type, count, name: data.items[type].name })) },
+    async openVillager() { return { trades, close() {} }; },
+    async trade(_v: any, i: number, times: number) { const t = trades[i]; inv.set(t.inputItem1.type, inv.get(t.inputItem1.type)! - t.inputItem1.count * times); inv.set(t.outputItem.type, (inv.get(t.outputItem.type) ?? 0) + times); },
+  };
+  const a = adapter() as any; a.bot = bot; a.connectedFlag = true; a.moveTo = async () => {};
+  const look = await a.tradeWith(9, null, 1, new AbortController().signal);
+  assert.equal(look.ok, true);
+  assert.deepEqual(look.trades.map((t: any) => [t.give, t.get, t.disabled]), [[['wheat×20'], 'emerald×1', false], [['emerald×1'], 'bread×6', true]]);
+  const r = await a.tradeWith(9, 0, 5, new AbortController().signal);
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.traded, 2, '小麦只够两次');
+  assert.match((await a.tradeWith(9, 1, 1, new AbortController().signal)).reason, /TRADE_LOCKED/);
+});
+
+import { trade as tradeSkill, useGui } from '../src/skills/gui.ts';
+
+test('use_gui / trade 参数检查', () => {
+  const ad: any = { isKnownItem: (n: string) => ['iron_ingot', 'anvil'].includes(n), resolveBlockNames: () => [] };
+  const v = useGui.validate({ target: 'anvil', ops: [{ put: { item: 'iron_ingot', slot: 1, count: 2 } }, { take: 2 }, { button: 0 }, { rename: '老伙计' }] }, ad);
+  assert.ok(v.ok, (v as any).error);
+  assert.deepEqual((v as any).args.ops, [{ put: { item: 'iron_ingot', slot: 1, count: 2 } }, { take: { slot: 2 } }, { button: 0 }, { rename: '老伙计' }]);
+  assert.equal(useGui.validate({ target: 'anvil', ops: [{ put: { item: 'iron_ingot' } }] }, ad).ok, false);
+  assert.equal(useGui.validate({ target: 'anvil', ops: [{ jump: 1 }] }, ad).ok, false);
+  assert.deepEqual((tradeSkill.validate({}, ad) as any).args, { who: 'villager', index: null, times: 1 });
+  assert.equal(tradeSkill.validate({ times: 99 }, ad).ok, false);
+});

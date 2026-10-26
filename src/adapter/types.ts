@@ -155,6 +155,31 @@ export interface ActionResult {
   effectEvidence?: EffectEvidence;
 }
 
+/** 界面操作：往某格放东西、从某格取（shift 点击）、点界面按钮（切石机配方、织布机图案、附魔选项）、铁砧改名 */
+export type GuiOp =
+  | { put: { item: string; slot: number; count?: number } }
+  | { take: { slot: number } }
+  | { button: number }
+  | { rename: string };
+
+export interface GuiSlot { slot: number; role?: string; name: string | null; count: number; enchants?: string[] }
+
+/** 打开的界面里看得见的东西：每一格放着什么，附魔台的三个选项 */
+export interface GuiView {
+  type: string;
+  slots: GuiSlot[];
+  enchantments?: { option: number; level: number; hint?: string }[];
+}
+
+export interface TradeView {
+  index: number;
+  give: string[];
+  get: string;
+  uses: number;
+  maxUses: number;
+  disabled: boolean;
+}
+
 export interface SwimOptions {
   timeoutMs?: number;
   /** Refresh only ordinary senses; returning null keeps the swimmer afloat while looking. */
@@ -228,6 +253,10 @@ export interface GameAdapter {
   /** 用背包里 itemNames 中的第一种方块，放到 pos（需要相邻有实心方块可依附） */
   placeBlockAt(pos: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult>;
   placeBlockStateAt?(pos: Vec3Like, name: string, properties: BlockState['properties'], signal: AbortSignal): Promise<ActionResult>;
+  /** 打开看得见的方块界面（工作站、容器），依次执行操作，返回关之前看到的界面 */
+  useGui?(pos: Vec3Like, ops: GuiOp[], signal: AbortSignal): Promise<ActionResult & { view?: GuiView; done: string[] }>;
+  /** 打开村民/流浪商人的交易界面；index 为 null 时只看交易列表 */
+  tradeWith?(entityId: number, index: number | null, times: number, signal: AbortSignal): Promise<ActionResult & { trades: TradeView[]; traded: number }>;
   tossItem?(name: string, count: number | null, signal: AbortSignal, face?: Vec3Like): Promise<ActionResult & { tossed: number }>;
   arrangeHotbar?(name: string, index: number, signal: AbortSignal): Promise<ActionResult>;
   equipItem?(name: string, destination: 'hand' | 'off-hand' | 'head' | 'torso' | 'legs' | 'feet', signal: AbortSignal): Promise<ActionResult>;
