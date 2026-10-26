@@ -209,6 +209,42 @@
     .widevision { display: block; }
     .scroll { max-height: none; }
   }
+  /* 直播页：观察者 HUD 布局、镜头与亮度、LLM 用量、弹幕存档 */
+  #pane-live { overflow: auto; }
+  #pane-live .livegrid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 12px; }
+  @media (max-width: 1200px) { #pane-live .livegrid { grid-template-columns: 1fr; } }
+  #pane-live .card + .card { margin-top: 0; }
+  #pane-live .stackcol { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  .hudstage { position: relative; aspect-ratio: 16 / 9; border-radius: 8px; overflow: hidden; user-select: none; touch-action: none;
+              background: linear-gradient(180deg, #8fb7d9 0%, #a9c8e4 55%, #6f9a55 56%, #5b8446 100%); border: 1px solid var(--line); }
+  .hudstage .hint { position: absolute; left: 8px; bottom: 6px; font-size: 11px; color: rgba(255,255,255,.85); text-shadow: 0 1px 2px rgba(0,0,0,.5); pointer-events: none; }
+  .hudbox { position: absolute; border: 2px solid rgba(20,24,30,.85); background: rgba(16,20,26,.62); color: #fff; border-radius: 4px;
+            font-size: 11px; padding: 2px 5px; cursor: grab; overflow: hidden; white-space: nowrap; box-sizing: border-box; }
+  .hudbox.def { border-style: dashed; background: rgba(16,20,26,.35); }
+  .hudbox.off { opacity: .25; }
+  .hudbox.drag { cursor: grabbing; outline: 2px solid var(--accent); z-index: 2; }
+  .hudbox small { display: block; opacity: .7; font-size: 10px; }
+  .hudpanels { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px 12px; margin-top: 10px; }
+  .hudpanels label, .hudopt label { display: flex; align-items: center; gap: 6px; }
+  .hudpanels button { padding: 1px 6px; font-size: 11px; margin-left: auto; }
+  .hudopt { display: grid; grid-template-columns: 120px minmax(0, 1fr) 64px; align-items: center; gap: 6px 10px; margin-top: 8px; }
+  .hudopt input[type=range] { width: 100%; padding: 0; }
+  .hudopt .v { font: 12px var(--mono); text-align: right; }
+  .hudopt .full { grid-column: 1 / -1; }
+  .hudnote { font-size: 12px; color: var(--dim); margin-top: 6px; }
+  .hudnote.bad { color: var(--bad); }
+  .spend { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 16px; }
+  .dmbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .dmbar input[type=search] { flex: 1; min-width: 140px; }
+  .dmlist { list-style: none; margin: 0; padding: 0; max-height: 520px; overflow: auto; }
+  .dmlist li { display: grid; grid-template-columns: 62px minmax(0, 120px) minmax(0, 1fr); gap: 8px; padding: 5px 0; border-top: 1px solid var(--line); font-size: 12px; }
+  .dmlist li:first-child { border-top: 0; }
+  .dmlist .t { font: 11px var(--mono); color: var(--dim); }
+  .dmlist .u { color: var(--info); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dmlist .q { background: var(--info-soft); border-radius: 6px; }
+  .dmlist .tag { display: inline-block; font: 10px var(--mono); padding: 0 5px; border-radius: 99px; margin-left: 6px; border: 1px solid var(--line); color: var(--dim); }
+  .dmlist .tag.bad { color: var(--bad); border-color: var(--bad-soft); background: var(--bad-soft); }
+  .dmlist .tag.warn { color: var(--warn); border-color: var(--warn-soft); background: var(--warn-soft); }
   .stack { display: flex; height: 8px; border-radius: 99px; overflow: hidden; background: var(--soft); margin: 8px 0; }
   .stack i { display: block; height: 100%; }
 </style>
@@ -315,6 +351,7 @@
 
     <div class="tabsarea">
     <nav class="tabs" id="tabs">
+      <button class="tab" data-tab="live">直播</button>
       <button class="tab" data-tab="learning">学习曲线</button>
       <button class="tab" data-tab="mind">心智</button>
       <button class="tab" data-tab="skills">技能<span class="n" id="nSkills"></span></button>
@@ -345,6 +382,54 @@
           <table><thead><tr><th>东西</th><th>拿到</th><th>每个花</th><th>早先 → 最近</th><th>多在哪</th><th>最省的做法</th></tr></thead><tbody id="lgRows"></tbody></table>
           <div class="sub">见过的（同一格只记一次）</div><div class="chips" id="lgSeen"></div>
         </div></div>
+      </div>
+    </section>
+
+    <section class="pane" id="pane-live">
+      <div class="livegrid">
+        <div class="stackcol">
+          <div class="card">
+            <h2>观察者 HUD <span class="r dim" id="hudStatus">读取中…</span></h2>
+            <div class="hudstage" id="hudStage"><span class="hint">拖动方块改位置（虚线 = 默认位置）· 按 16:9 画面示意</span></div>
+            <div class="hudpanels" id="hudPanels"></div>
+            <div class="hudopt">
+              <label class="full"><input type="checkbox" id="hudEnabled"> 显示 Curio HUD（总开关）</label>
+              <span>想法最多行数</span><input type="range" id="hudThoughtLines" min="1" max="12" step="1"><span class="v" id="hudThoughtLinesV"></span>
+              <span>物品栏 / 血条大小</span><input type="range" id="hudScale" min="0.5" max="3" step="0.05"><span class="v" id="hudScaleV"></span>
+              <span>文字卡片大小</span><input type="range" id="hudInfoScale" min="0.5" max="1.5" step="0.05"><span class="v" id="hudInfoScaleV"></span>
+            </div>
+            <div class="hudnote" id="hudNote">改动立即发给游戏里的观察者模组（不需要快捷键），并记在 live/observer-hud.json。</div>
+          </div>
+          <div class="card">
+            <h2>镜头与亮度 <span class="r dim">只在旁观 Bot 时生效</span></h2>
+            <div class="hudopt">
+              <label class="full"><input type="checkbox" id="camAuto"> 自动切换视角（空旷处退到第三人称，狭窄处回第一人称）</label>
+              <span>跟随距离</span><input type="range" id="camDistance" min="1.5" max="6" step="0.1"><span class="v" id="camDistanceV"></span>
+              <span>转动平滑</span><input type="range" id="camSmoothing" min="0" max="0.8" step="0.01"><span class="v" id="camSmoothingV"></span>
+              <label class="full"><input type="checkbox" id="lightOn"> 暗处增亮（不改游戏设置，只在旁观时生效）</label>
+              <span>伽马</span><input type="range" id="lightGamma" min="0" max="15" step="0.1"><span class="v" id="lightGammaV"></span>
+              <span class="full hudnote">游戏自带的亮度滑块最高是 1.0（「明亮」）；这里可以调到 15，越高洞里越亮。失明、黑暗效果仍然生效。</span>
+            </div>
+          </div>
+        </div>
+        <div class="stackcol">
+          <div class="card">
+            <h2>LLM 用量 <span class="r dim" id="spendModel">-</span></h2>
+            <div class="spend mono" id="spendBody"><span class="dim">等待数据…</span></div>
+            <div class="hudnote">花费按每次调用当时的价格（含 DeepSeek 高峰价）累计；不含记忆服务和侧边聊天。</div>
+          </div>
+          <div class="card">
+            <h2>弹幕存档 <span class="r dim" id="dmMeta">-</span></h2>
+            <div class="dmbar">
+              <select id="dmDate"></select>
+              <input type="search" id="dmSearch" placeholder="搜索弹幕或昵称">
+              <label><input type="checkbox" id="dmQuestions"> 只看提问</label>
+              <label><input type="checkbox" id="dmBlocked"> 含被拦下的</label>
+              <button id="dmReload">刷新</button>
+            </div>
+            <ul class="dmlist" id="dmList"><li class="empty">读取中…</li></ul>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -839,6 +924,167 @@ es.addEventListener('llm_init', (e) => {
 es.addEventListener('state', (e) => { lastState = JSON.parse(e.data); try { render(lastState); } catch (err) { console.error(err); } });
 es.addEventListener('ev', (e) => addEvent(JSON.parse(e.data)));
 es.onerror = () => { $('conn').textContent = '控制台断开'; $('connDot').className = 'dot off'; };
+</script>
+<script>
+// ———— 直播页：观察者 HUD（/api/observer/hud）、LLM 用量、弹幕存档（/api/danmaku）
+(() => {
+  const PANELS = [
+    // 默认位置只是示意（1920×1080、GUI 缩放 2 时大致在这里）；真实位置由模组按屏幕和缩放计算
+    { id: 'info', name: '状态 / 当前动作', def: [0.004, 0.007, 0.27, 0.07] },
+    { id: 'thought', name: '它的想法', def: [0.004, 0.085, 0.27, 0.17] },
+    { id: 'interests', name: '兴趣 · 用量 · 开销', def: [0.8, 0.02, 0.19, 0.36] },
+    { id: 'vitals', name: '快捷栏 / 血条', def: [0.39, 0.885, 0.22, 0.115] },
+    { id: 'inventory', name: '完整背包', def: [0.004, 0.71, 0.17, 0.27] },
+    { id: 'containers', name: '容器界面（居中）', toggleOnly: true },
+    { id: 'hands', name: '第一人称手部', toggleOnly: true },
+  ];
+  let hud = null, sendTimer = null, pending = {};
+  const stage = $('hudStage');
+  function note(text, bad) { const n = $('hudNote'); n.textContent = text; n.className = 'hudnote' + (bad ? ' bad' : ''); }
+
+  async function loadHud() {
+    try {
+      const r = await fetch('/api/observer/hud');
+      if (!r.ok) throw new Error(r.status === 404 ? '观察者数据流没开（OBSERVER_FEED=0）' : 'HTTP ' + r.status);
+      hud = await r.json(); renderHud(); $('hudStatus').textContent = '已同步';
+    } catch (e) { $('hudStatus').textContent = '不可用'; note('读取 HUD 设置失败：' + e.message, true); }
+  }
+  // 合并成一次请求发出去：拖动、拉滑块时不会刷屏
+  function change(patch) {
+    const merge = (a, b) => { for (const k in b) a[k] = b[k] && typeof b[k] === 'object' && !Array.isArray(b[k]) ? merge(a[k] || {}, b[k]) : b[k]; return a; };
+    merge(pending, patch); merge(hud, structuredClone(patch)); renderHud();
+    clearTimeout(sendTimer);
+    sendTimer = setTimeout(async () => {
+      const body = pending; pending = {};
+      try {
+        const r = await fetch('/api/observer/hud', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error || r.status);
+        hud = j; renderHud(); $('hudStatus').textContent = '已保存 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+      } catch (e) { note('保存失败：' + e.message, true); }
+    }, 150);
+  }
+
+  function renderHud() {
+    if (!hud) return;
+    // 预览方块
+    for (const p of PANELS) {
+      if (p.toggleOnly) continue;
+      let el = stage.querySelector(`[data-panel="${p.id}"]`);
+      if (!el) { el = document.createElement('div'); el.className = 'hudbox'; el.dataset.panel = p.id; stage.appendChild(el); bindDrag(el, p); }
+      const cfg = hud.panels[p.id] || { visible: true, x: null, y: null };
+      const custom = cfg.x != null || cfg.y != null;
+      const x = cfg.x ?? p.def[0], y = cfg.y ?? p.def[1];
+      Object.assign(el.style, { left: Math.min(x, 1 - p.def[2]) * 100 + '%', top: Math.min(y, 1 - p.def[3]) * 100 + '%', width: p.def[2] * 100 + '%', height: p.def[3] * 100 + '%' });
+      el.classList.toggle('def', !custom); el.classList.toggle('off', !cfg.visible);
+      el.innerHTML = `${esc(p.name)}<small>${custom ? `${Math.round(x * 100)}%, ${Math.round(y * 100)}%` : '默认位置'}</small>`;
+    }
+    // 显示开关 + 复位
+    $('hudPanels').innerHTML = PANELS.map((p) => {
+      const cfg = hud.panels[p.id] || {};
+      const custom = !p.toggleOnly && (cfg.x != null || cfg.y != null);
+      return `<label><input type="checkbox" data-vis="${p.id}"${cfg.visible !== false ? ' checked' : ''}> ${esc(p.name)}${custom ? `<button data-reset="${p.id}" title="回到默认位置">复位</button>` : ''}</label>`;
+    }).join('');
+    $('hudEnabled').checked = hud.enabled;
+    const setRange = (id, v, fmt) => { const el = $(id); if (document.activeElement !== el) el.value = v; $(id + 'V').textContent = fmt(v); };
+    setRange('hudThoughtLines', hud.thoughtLines, (v) => v + ' 行');
+    setRange('hudScale', hud.hudScale, (v) => '×' + Number(v).toFixed(2));
+    setRange('hudInfoScale', hud.infoScale, (v) => '×' + Number(v).toFixed(2));
+    $('camAuto').checked = hud.camera.auto;
+    setRange('camDistance', hud.camera.distance, (v) => Number(v).toFixed(1) + ' 格');
+    setRange('camSmoothing', hud.camera.smoothing, (v) => Number(v).toFixed(2) + ' 秒');
+    $('lightOn').checked = hud.lighting.brighten;
+    setRange('lightGamma', hud.lighting.gamma, (v) => Number(v).toFixed(1));
+  }
+
+  function bindDrag(el, p) {
+    el.addEventListener('pointerdown', (e) => {
+      e.preventDefault(); el.setPointerCapture(e.pointerId); el.classList.add('drag');
+      const box = stage.getBoundingClientRect(), r = el.getBoundingClientRect();
+      const dx = e.clientX - r.left, dy = e.clientY - r.top;
+      const move = (ev) => {
+        const x = Math.max(0, Math.min(1 - p.def[2], (ev.clientX - dx - box.left) / box.width));
+        const y = Math.max(0, Math.min(1 - p.def[3], (ev.clientY - dy - box.top) / box.height));
+        el.style.left = x * 100 + '%'; el.style.top = y * 100 + '%';
+        el.dataset.x = x.toFixed(4); el.dataset.y = y.toFixed(4);
+      };
+      const up = () => {
+        el.classList.remove('drag'); el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up);
+        if (el.dataset.x) change({ panels: { [p.id]: { x: Number(el.dataset.x), y: Number(el.dataset.y) } } });
+        delete el.dataset.x; delete el.dataset.y;
+      };
+      el.addEventListener('pointermove', move); el.addEventListener('pointerup', up);
+    });
+  }
+
+  $('hudPanels').addEventListener('change', (e) => { const id = e.target.dataset.vis; if (id) change({ panels: { [id]: { visible: e.target.checked } } }); });
+  $('hudPanels').addEventListener('click', (e) => { const id = e.target.dataset.reset; if (id) { e.preventDefault(); change({ panels: { [id]: { x: null, y: null } } }); } });
+  $('hudEnabled').addEventListener('change', (e) => change({ enabled: e.target.checked }));
+  $('hudThoughtLines').addEventListener('input', (e) => change({ thoughtLines: Number(e.target.value) }));
+  $('hudScale').addEventListener('input', (e) => change({ hudScale: Number(e.target.value) }));
+  $('hudInfoScale').addEventListener('input', (e) => change({ infoScale: Number(e.target.value) }));
+  $('camAuto').addEventListener('change', (e) => change({ camera: { auto: e.target.checked } }));
+  $('camDistance').addEventListener('input', (e) => change({ camera: { distance: Number(e.target.value) } }));
+  $('camSmoothing').addEventListener('input', (e) => change({ camera: { smoothing: Number(e.target.value) } }));
+  $('lightOn').addEventListener('change', (e) => change({ lighting: { brighten: e.target.checked } }));
+  $('lightGamma').addEventListener('input', (e) => change({ lighting: { gamma: Number(e.target.value) } }));
+
+  // —— LLM 用量（跟着 /api/stream 的状态刷新）
+  const tok = (n) => n == null ? '—' : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'k' : String(n);
+  function renderSpend() {
+    const s = lastState?.llmSpend;
+    if (!s) return;
+    const money = s.cost == null ? '—（模型价格未知）' : (s.currency === 'CNY' ? '¥' : (s.currency || '') + ' ') + s.cost.toFixed(s.cost < 10 ? 3 : 2);
+    const hit = s.cachedInputTokens != null && s.inputTokens ? (s.cachedInputTokens / s.inputTokens * 100).toFixed(1) + '%' : '—';
+    $('spendModel').textContent = s.model || '-';
+    $('spendBody').innerHTML = [
+      ['上传（输入）', tok(s.inputTokens)], ['下载（输出）', tok(s.outputTokens)],
+      ['缓存命中率', hit], ['每分钟', `↑${tok(s.inputRate)} ↓${tok(s.outputRate)}`],
+      ['实际开销', money], ['当前价格', s.peak == null ? '—' : s.peak ? '高峰价（×2）' : '闲时价'],
+    ].map(([k, v]) => `<div class="row"><span>${k}</span><span>${esc(v)}</span></div>`).join('');
+  }
+
+  // —— 弹幕存档
+  const BLOCK = { injection: '想改规则', command: '要命令', secret: '套密钥', spam: '广告', blocked: '屏蔽词', flood: '刷屏' };
+  async function loadDates() {
+    try {
+      const j = await (await fetch('/api/danmaku?dates=1')).json();
+      const sel = $('dmDate'), keep = sel.value;
+      sel.innerHTML = (j.dates || []).map((d) => `<option>${esc(d)}</option>`).join('') || '<option value="">还没有存档</option>';
+      if (keep && (j.dates || []).includes(keep)) sel.value = keep;
+    } catch { /* 旧版 Curio 没有这个接口 */ }
+  }
+  async function loadDanmaku() {
+    const q = new URLSearchParams({ limit: '500' });
+    if ($('dmDate').value) q.set('date', $('dmDate').value);
+    if ($('dmSearch').value.trim()) q.set('q', $('dmSearch').value.trim());
+    if ($('dmQuestions').checked) q.set('questions', '1');
+    if ($('dmBlocked').checked) q.set('blocked', '1');
+    try {
+      const r = await fetch('/api/danmaku?' + q);
+      if (!r.ok) throw new Error(r.status === 404 ? '这个版本的 Curio 没有弹幕存档' : 'HTTP ' + r.status);
+      const j = await r.json();
+      $('dmMeta').textContent = j.date ? `${j.date} · 共 ${j.total} 条 · 提问 ${j.questions} · 拦下 ${j.blocked}` : '还没有存档';
+      $('dmList').innerHTML = list(j.records, (d) => `<li class="${d.question && !d.blocked ? 'q' : ''}"><span class="t">${new Date(d.ts).toLocaleTimeString('zh-CN', { hour12: false })}</span>` +
+        `<span class="u" title="uid ${esc(d.uid)}">${esc(d.user || '匿名')}</span><span>${esc(d.text)}` +
+        `${d.kind === 'superchat' ? `<span class="tag warn">SC ${esc(d.price ?? '')}</span>` : d.kind === 'gift' ? '<span class="tag">礼物</span>' : ''}` +
+        `${d.question && !d.blocked ? '<span class="tag">提问</span>' : ''}${d.risky ? '<span class="tag warn">有风险</span>' : ''}` +
+        `${d.blocked ? `<span class="tag bad">${esc(BLOCK[d.blocked] || d.blocked)}</span>` : ''}</span></li>`, '没有符合条件的弹幕');
+    } catch (e) { $('dmList').innerHTML = `<li class="empty">${esc(e.message)}</li>`; }
+  }
+  let dmTimer = null;
+  $('dmReload').addEventListener('click', async () => { await loadDates(); loadDanmaku(); });
+  for (const id of ['dmDate', 'dmQuestions', 'dmBlocked']) $(id).addEventListener('change', loadDanmaku);
+  $('dmSearch').addEventListener('input', () => { clearTimeout(dmTimer); dmTimer = setTimeout(loadDanmaku, 250); });
+
+  const onLiveTab = () => $('pane-live').classList.contains('on');
+  async function openLive() { loadHud(); renderSpend(); await loadDates(); loadDanmaku(); }
+  document.querySelector('.tab[data-tab="live"]').addEventListener('click', openLive);
+  if (onLiveTab()) openLive();
+  setInterval(() => { if (onLiveTab()) renderSpend(); }, 1000);
+  // 看着的时候，今天的新弹幕自动出现
+  setInterval(() => { if (onLiveTab() && !$('dmSearch').value && $('dmDate').selectedIndex <= 0) loadDanmaku(); }, 10000);
+})();
 </script>
 </body>
 </html>
