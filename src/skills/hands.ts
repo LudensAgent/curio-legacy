@@ -94,7 +94,10 @@ export const holdItem: Skill<{ item: string; to: Dest; slot?: number }> = {
     const { adapter, signal } = ctx;
     const s = adapter.state();
     const worn = s.equipment?.find((e) => e.slot === args.to)?.name;
-    if (args.to === 'hand' && args.slot === undefined && s.held === args.item) return ok(`${args.item} 已经在主手`);
+    // 手里已经是这种东西：同名还有更耐用的才真换（“换把好石镐”），不然就是已经拿着了
+    const best = s.inventory.find((i) => i.name === args.item)?.durabilities?.[0];
+    const better = s.heldDurability && best !== undefined && best > s.heldDurability.left;
+    if (args.to === 'hand' && args.slot === undefined && s.held === args.item && !better) return ok(`${args.item} 已经在主手${s.heldDurability ? `（耐久 ${s.heldDurability.left}/${s.heldDurability.max}，背包里没有更耐用的同名的）` : ''}`);
     if (args.to !== 'hand' && worn === args.item) return ok(`${args.item} 已经在${SLOT_ZH[args.to]}`);
     if (!s.inventory.some((i) => i.name === args.item)) return fail('MISSING_MATERIALS', `背包里没有 ${args.item}`);
     try {
@@ -109,7 +112,8 @@ export const holdItem: Skill<{ item: string; to: Dest; slot?: number }> = {
       if (!r.ok) return fail('ERROR', `把 ${args.item} 放到${SLOT_ZH[args.to]}失败：${r.reason}`);
       const after = adapter.state();
       const swapped = args.to !== 'hand' && worn && worn !== args.item ? `，换下的 ${worn} 回到背包` : '';
-      return ok(`${args.item} 已在${SLOT_ZH[args.to]}${swapped}`, { held: after.held, equipment: after.equipment });
+      const dur = args.to === 'hand' && after.heldDurability ? `（耐久 ${after.heldDurability.left}/${after.heldDurability.max}）` : '';
+      return ok(`${args.item}${dur} 已在${SLOT_ZH[args.to]}${swapped}`, { held: after.held, equipment: after.equipment });
     } catch (e) {
       if (isAbort(e)) throw e;
       return fail(codeFromError(e), `拿 ${args.item} 出错：${(e as Error).message}`);

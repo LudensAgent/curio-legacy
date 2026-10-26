@@ -447,6 +447,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (max) {
         const left = Math.max(0, max - (it.durabilityUsed ?? 0));
         if (!cur.durability || left < cur.durability.left) cur.durability = { left, max };
+        cur.durabilities = [...(cur.durabilities ?? []), left].sort((a, c) => c - a);
       }
       if ((it.enchants?.length ?? 0) > 0) cur.enchanted = true;
       inv.set(it.name, cur);
@@ -481,6 +482,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       ...(b.experience ? { xp: { level: b.experience.level ?? 0, progress: Math.round((b.experience.progress ?? 0) * 100) / 100 } } : {}),
       emptySlots: b.inventory.emptySlotCount(),
       held: b.heldItem?.name ?? null,
+      ...(() => {
+        const h = b.heldItem, max = h ? this.mcData.itemsByName?.[h.name]?.maxDurability : undefined;
+        return h && max ? { heldDurability: { left: Math.max(0, max - (h.durabilityUsed ?? 0)), max } } : {};
+      })(),
       hotbar: Array.from({ length: 9 }, (_, i) => b.inventory.slots?.[36 + i]?.name ?? null),
       ...(Number.isInteger(b.quickBarSlot) ? { hotbarSelected: b.quickBarSlot } : {}),
       riding: b.vehicle ? String(b.vehicle.name ?? 'vehicle') : null,
@@ -1330,7 +1335,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
     await this.interactionReady();
     check();
-    const item = this.invItem(name);
+    // 同名有好几件（11 把石镐）：拿耐久最高的那件，别总拿到最旧那把
+    const item = this.bestInvItem(name);
     if (!item) return { ok: false, reason: 'NO_ITEM' };
     await this.afterAction(() => this.bot.equip(item, destination), check);
     const slot = this.bot.getEquipmentDestSlot?.(destination);
@@ -1710,6 +1716,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
 
   private invItem(name: string) {
     return this.bot.inventory.items().find((i: any) => i.name === name);
+  }
+
+  /** 同名里耐久最高的一件（不会磨损的东西就是第一件） */
+  private bestInvItem(name: string) {
+    const all = this.bot.inventory.items().filter((i: any) => i.name === name);
+    return all.sort((a: any, c: any) => (a.durabilityUsed ?? 0) - (c.durabilityUsed ?? 0))[0];
   }
 
   async smelt(input: string, count: number, fuel: string, signal: AbortSignal, opts: { furnacePos?: Vec3Like; onProgress?: (done: number) => void } = {}): Promise<ActionResult & { made: number; output?: string; furnacePos?: Vec3Like }> {

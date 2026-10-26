@@ -72,6 +72,8 @@ export interface InvItem {
   count: number;
   /** 会磨损的东西（工具、武器、护甲）：同名里最旧那件还剩多少耐久 / 满耐久 */
   durability?: { left: number; max: number };
+  /** 同名每一件各剩多少耐久（从好到差）：只看最旧那件，会以为 11 把镐全是快坏的 */
+  durabilities?: number[];
   /** 带附魔 */
   enchanted?: boolean;
 }
@@ -109,6 +111,8 @@ export interface AgentState {
   inventory: InvItem[];
   emptySlots: number;
   held: string | null;
+  /** 手里那件还剩多少耐久（会磨损的东西才有） */
+  heldDurability?: { left: number; max: number };
   /** 快捷栏 0-8 格的物品名，空格为 null */
   hotbar?: (string | null)[];
   hotbarSelected?: number;

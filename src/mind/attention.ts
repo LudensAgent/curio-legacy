@@ -84,7 +84,8 @@ export class Attention {
   fromPercept(p: Percept, now = Date.now()): Noticing[] {
     const snap: Snapshot = {
       effects: new Set(p.effects ?? []),
-      worn: new Set((p.inventory ?? []).filter((i) => i.durability && i.durability.left / i.durability.max < 0.15).map((i) => i.name)),
+      // 同名的全都快坏了才算“快坏了”：手里那把快坏、背包里还有好的，不是缺工具
+      worn: new Set((p.inventory ?? []).filter((i) => i.durability && (i.durabilities?.[0] ?? i.durability.left) / i.durability.max < 0.15).map((i) => i.name)),
       tod: ((p.time.timeOfDay % 24000) + 24000) % 24000, weather: p.time.weather ?? '', phase: p.time.phase, food: p.self.food, hp: p.self.hp, emptySlots: p.emptySlots,
       hostiles: new Set(p.nearby.hostile.filter((h) => h.dist <= 16).map((h) => h.name)),
       resources: new Set(p.nearby.resources.filter((r) => r.seen === 'now').map((r) => r.block)),

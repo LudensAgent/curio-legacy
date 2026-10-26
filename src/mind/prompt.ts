@@ -342,13 +342,12 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
     })(),
     ...(p.time.weather ? { weather: p.time.weather } : {}),
     ...(p.light ? { light: `${{ bright: '亮', dim: '有点暗', dark: '很暗' }[p.light.level] ?? p.light.level}${p.light.mob_spawn_risk ? '，会刷怪' : ''}` } : {}),
-    held: p.self.held,
+    held: p.self.held ? `${p.self.held}${s.heldDurability ? `（耐久 ${s.heldDurability.left}/${s.heldDurability.max}${s.heldDurability.left / s.heldDurability.max < 0.15 ? `，快坏了${spareNote(s.inventory.find((i) => i.name === p.self.held), s.heldDurability)}` : ''}）` : ''}` : p.self.held,
     ...(digging && tool && !ownsTool ? { tool_note: `正在挖 ${material}，背包里没有 ${tool}（身体只能空手挖，很慢）：做一把${tool === 'axe' ? '斧子' : tool === 'pickaxe' ? '镐' : '铲子'}会快很多` } : {}),
     // 工具、武器、护甲带上耐久（像物品栏里那条耐久条）；附魔的标出来
     inventory: [...inv].map(([name, count]) => {
       const it = s.inventory.find((i) => i.name === name);
-      const d = it?.durability;
-      return `${name}×${count}${d ? `（耐久 ${d.left}/${d.max}${d.left / d.max < 0.15 ? '，快坏了' : ''}）` : ''}${it?.enchanted ? '（附魔）' : ''}`;
+      return `${name}×${count}${durabilityText(it)}${it?.enchanted ? '（附魔）' : ''}`;
     }), empty_slots: p.emptySlots,
     ...(s.effects?.length ? { effects: s.effects.map((e) => `${e.name}${e.level > 1 ? ` ${e.level} 级` : ''}，还剩 ${e.seconds} 秒`) } : {}),
     ...(s.xp ? { xp_level: s.xp.level } : {}),
@@ -510,4 +509,30 @@ export function buildReflectionMessages(self: SelfModel, persona: string, mySkil
     ...(strategy.length ? { strategy } : {}),
   };
   return [{ role: 'system', content: system }, { role: 'user', content: `${JSON.stringify(payload)}\n回想一下，整理好再告诉我。` }];
+}
+
+/**
+ * 背包里同名工具的耐久：每件都说，同样耐久的合在一起数。
+ * 以前只报最旧那件——11 把石镐里有 2 把快坏，它看到的是“stone_pickaxe×11（耐久 2/131，快坏了）”，
+ * 以为全是废品，一遍遍去做新的、去“换把好的”。
+ */
+export function durabilityText(it: { count: number; durability?: { left: number; max: number }; durabilities?: number[] } | undefined): string {
+  const d = it?.durability;
+  if (!it || !d) return '';
+  const all = it.durabilities?.length ? it.durabilities : [d.left];
+  const worn = (left: number) => left / d.max < 0.15;
+  if (all.length === 1) return `（耐久 ${all[0]}/${d.max}${worn(all[0]) ? '，快坏了' : ''}）`;
+  const groups: [number, number][] = [];
+  for (const left of all) { const g = groups.find(([v]) => v === left); if (g) g[1]++; else groups.push([left, 1]); }
+  const shown = groups.length <= 4 ? groups : [groups[0], [-1, groups.slice(1, -1).reduce((n, [, c]) => n + c, 0)] as [number, number], groups.at(-1)!];
+  const parts = shown.map(([v, c]) => v < 0 ? `其余 ${c} 件在中间` : `${v}/${d.max}${c > 1 ? `×${c}` : ''}`);
+  const nWorn = all.filter(worn).length;
+  const tail = nWorn === all.length ? '，全都快坏了' : nWorn ? `；快坏的 ${nWorn} 件用完会自动换下一件，还有 ${all.length - nWorn} 件好的` : '';
+  return `（耐久 ${parts.join('、')}${tail}）`;
+}
+
+/** 手里那件快坏了：背包里还有好的同名的就说一句，不用再做新的 */
+function spareNote(it: { durabilities?: number[] } | undefined, held: { left: number; max: number }): string {
+  const spare = (it?.durabilities ?? []).filter((v) => v / held.max >= 0.15).length;
+  return spare ? `；背包里还有 ${spare} 件好的，用坏了身体会自动换，也可以 hold_item 先换上，不用再做新的` : '';
 }
