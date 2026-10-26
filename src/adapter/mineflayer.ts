@@ -440,6 +440,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       ...(b.experience ? { xp: { level: b.experience.level ?? 0, progress: Math.round((b.experience.progress ?? 0) * 100) / 100 } } : {}),
       emptySlots: b.inventory.emptySlotCount(),
       held: b.heldItem?.name ?? null,
+      hotbar: Array.from({ length: 9 }, (_, i) => b.inventory.slots?.[36 + i]?.name ?? null),
+      ...(Number.isInteger(b.quickBarSlot) ? { hotbarSelected: b.quickBarSlot } : {}),
       riding: b.vehicle ? String(b.vehicle.name ?? 'vehicle') : null,
       equipment: ['head', 'torso', 'legs', 'feet', 'off-hand'].flatMap((slot) => {
         const item = b.inventory.slots?.[b.getEquipmentDestSlot?.(slot)];
@@ -1250,12 +1252,50 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   async equipItem(name: string, destination: 'hand' | 'off-hand' | 'head' | 'torso' | 'legs' | 'feet', signal: AbortSignal): Promise<ActionResult> {
     const check = this.actionCheckpoint(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
+    await this.interactionReady();
+    check();
     const item = this.invItem(name);
     if (!item) return { ok: false, reason: 'NO_ITEM' };
     await this.afterAction(() => this.bot.equip(item, destination), check);
     const slot = this.bot.getEquipmentDestSlot?.(destination);
     const actual = destination === 'hand' ? this.bot.heldItem : this.bot.inventory.slots?.[slot];
     return actual?.name === name ? { ok: true } : { ok: false, reason: 'EQUIP_NOT_CONFIRMED' };
+  }
+
+  /** 扔出背包里的物品（Q 键）；可先转向某个位置，丢给村民/猪灵/队友或者清背包。按真实背包变化确认。 */
+  async tossItem(name: string, count: number | null, signal: AbortSignal, face?: Vec3Like): Promise<ActionResult & { tossed: number }> {
+    const check = this.actionCheckpoint(signal);
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', tossed: 0 };
+    await this.interactionReady();
+    check();
+    const total = () => this.bot.inventory.items().filter((i: any) => i.name === name).reduce((n: number, i: any) => n + i.count, 0);
+    const have = total();
+    const item = this.invItem(name);
+    if (!item || have <= 0) return { ok: false, reason: 'NO_ITEM', tossed: 0 };
+    const want = count == null ? have : Math.min(count, have);
+    if (face) await this.afterAction(() => this.bot.lookAt(this.vec({ x: face.x, y: face.y + 1, z: face.z }), true), check);
+    await this.afterAction(() => this.bot.toss(item.type, null, want), check);
+    const tossed = have - total();
+    return tossed > 0 ? { ok: true, tossed } : { ok: false, reason: 'TOSS_NOT_CONFIRMED', tossed: 0 };
+  }
+
+  /** 把物品放到快捷栏第 index 格（0-8）并选中它，相当于整理快捷栏后按数字键。 */
+  async arrangeHotbar(name: string, index: number, signal: AbortSignal): Promise<ActionResult> {
+    const check = this.actionCheckpoint(signal);
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
+    if (!Number.isInteger(index) || index < 0 || index > 8) return { ok: false, reason: 'BAD_SLOT' };
+    await this.interactionReady();
+    check();
+    const b = this.bot;
+    const target = 36 + index;
+    if (b.inventory.slots?.[target]?.name !== name) {
+      const item = this.invItem(name);
+      if (!item) return { ok: false, reason: 'NO_ITEM' };
+      await this.afterAction(() => b.moveSlotItem(item.slot, target), check);
+    }
+    if (b.inventory.slots?.[target]?.name !== name) return { ok: false, reason: 'HOTBAR_NOT_CONFIRMED' };
+    b.setQuickBarSlot(index);
+    return b.heldItem?.name === name ? { ok: true } : { ok: false, reason: 'HOTBAR_NOT_CONFIRMED' };
   }
 
   async useBlockAt(pos: Vec3Like, item: string, signal: AbortSignal): Promise<ActionResult> {

@@ -109,6 +109,9 @@ export interface AgentState {
   inventory: InvItem[];
   emptySlots: number;
   held: string | null;
+  /** 快捷栏 0-8 格的物品名，空格为 null */
+  hotbar?: (string | null)[];
+  hotbarSelected?: number;
   /** 正在乘坐的载具/坐骑（boat、minecart、horse…），没有为 null */
   riding?: string | null;
   equipment?: { slot: string; name: string; durabilityRemaining?: number }[];
@@ -225,6 +228,8 @@ export interface GameAdapter {
   /** 用背包里 itemNames 中的第一种方块，放到 pos（需要相邻有实心方块可依附） */
   placeBlockAt(pos: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult>;
   placeBlockStateAt?(pos: Vec3Like, name: string, properties: BlockState['properties'], signal: AbortSignal): Promise<ActionResult>;
+  tossItem?(name: string, count: number | null, signal: AbortSignal, face?: Vec3Like): Promise<ActionResult & { tossed: number }>;
+  arrangeHotbar?(name: string, index: number, signal: AbortSignal): Promise<ActionResult>;
   equipItem?(name: string, destination: 'hand' | 'off-hand' | 'head' | 'torso' | 'legs' | 'feet', signal: AbortSignal): Promise<ActionResult>;
   /** item='' performs a legal empty-hand interaction (for example opening an owned door). */
   useBlockAt?(pos: Vec3Like, item: string, signal: AbortSignal): Promise<ActionResult>;

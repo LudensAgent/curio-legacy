@@ -35,3 +35,45 @@ test('注意到：身上多了状态效果、工具快磨坏了', () => {
   assert.ok(n.some((x) => x.key.startsWith('effect:') && x.level === 'reconsider'));
   assert.ok(n.some((x) => x.key === 'worn:stone_pickaxe'));
 });
+
+import { holdItem, tossItem } from '../src/skills/hands.ts';
+
+const handsCtx = (inv: { name: string; count: number }[], extra: Record<string, unknown> = {}) => {
+  const state: any = { pos: { x: 0, y: 64, z: 0 }, inventory: inv, held: null, equipment: [], hotbar: Array(9).fill(null) };
+  const calls: unknown[][] = [];
+  const adapter: any = {
+    isKnownItem: (n: string) => ['gold_ingot', 'torch', 'shield', 'wheat'].includes(n),
+    state: () => state,
+    moveTo: async () => ({ ok: true }),
+    async tossItem(name: string, count: number | null, _s: unknown, face?: unknown) {
+      calls.push(['toss', name, count, face]);
+      const it = state.inventory.find((i: any) => i.name === name); const n = count ?? it.count; it.count -= n; return { ok: true, tossed: n };
+    },
+    async equipItem(name: string, to: string) { calls.push(['equip', name, to]); if (to === 'hand') state.held = name; else state.equipment = [{ slot: to, name }]; return { ok: true }; },
+    async arrangeHotbar(name: string, i: number) { calls.push(['hotbar', name, i]); state.hotbar[i] = name; state.held = name; return { ok: true }; },
+    ...extra,
+  };
+  const piglin = { id: 7, name: 'piglin', kind: 'neutral', pos: { x: 1, y: 64, z: 1 }, dist: 1.4 };
+  const senses: any = { refresh() {}, perceivedEntities: () => [piglin] };
+  return { ctx: { adapter, senses, signal: new AbortController().signal, progress() {}, deadline: Date.now() + 30000 } as any, calls, state };
+};
+
+test('toss_item：朝看得见的猪灵扔金锭，按背包变化报告数量', async () => {
+  const { ctx, calls } = handsCtx([{ name: 'gold_ingot', count: 5 }]);
+  const v = tossItem.validate({ item: 'gold_ingot', count: 2, to: 'piglin' }, ctx.adapter);
+  assert.ok(v.ok);
+  const r = await tossItem.run(ctx, (v as any).args);
+  assert.equal(r.status, 'succeeded');
+  assert.deepEqual(calls[0], ['toss', 'gold_ingot', 2, { x: 1, y: 64, z: 1 }]);
+  assert.match(r.summary, /还剩 3/);
+  assert.equal((await tossItem.run(ctx, { item: 'gold_ingot', count: 1, to: 'villager' })).failureCode, 'NOT_FOUND');
+});
+
+test('hold_item：副手、快捷栏格子，参数检查', async () => {
+  const { ctx, calls } = handsCtx([{ name: 'torch', count: 16 }, { name: 'shield', count: 1 }]);
+  assert.equal((await holdItem.run(ctx, { item: 'torch', to: 'off-hand' })).status, 'succeeded');
+  assert.equal((await holdItem.run(ctx, { item: 'shield', to: 'hand', slot: 0 })).status, 'succeeded');
+  assert.deepEqual(calls, [['equip', 'torch', 'off-hand'], ['hotbar', 'shield', 0]]);
+  assert.equal(holdItem.validate({ item: 'torch', to: 'off-hand', slot: 1 }, ctx.adapter).ok, false);
+  assert.equal(holdItem.validate({ item: 'torch', slot: 9 }, ctx.adapter).ok, false);
+});
