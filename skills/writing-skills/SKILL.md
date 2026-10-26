@@ -24,8 +24,11 @@ description: 怎么把管用的做法写成技能：触发条件、动作步骤�
 ```
 "skill":{"name":"walk-around-water","description":"goto 被水挡住时沿岸绕过去",
  "when":{"after_failure":{"skill":"goto","code":"PATH_NOT_FOUND"}},
- "code":"const me = await api.state(); const reg = await api.region(...); ... return {steps: n};"}
+ "code":"const me = await api.state(); const reg = await api.region(...); ... return {steps: n};",
+ "verify":"const s = await api.state(); const t = args.args.failure?.args?.target; return s.inWater ? '还泡在水里' : true;"}
 ```
+
+- **必须写 verify（判定）**：代码跑完不抛错不等于做成了（“脱船”技能人还在船上也会报“做完了”）。verify 是另一段函数体，做完以后看一眼世界：`args.before` 是开工前的 `api.state()`，`args.result` 是 code 的返回值，`args.args` 是调用参数；只能用 `api.state/blockAt/region/entities/nearestLand`（只看不动）；做成了 `return true`，没做成 `return "原因"`。判定没通过算这次失败，记进成败、交给后台改进。判得要实在：看身体和世界真的变成了该有的样子（出坑看头顶见不见天、清背包看那几样少了没有、到地方看离目标多远），别只看 code 自己的返回值。
 
 - 参数 `api` 和 `args` 已经给好；恢复时 `args.failure = {skill,args,code,summary}` 是刚失败的那一步（比如 `args.failure.args.target`）；`use_skill {"name":…,"args":{…}}` 调用时 args 就是那个对象。
 - `api.state()`、`api.blockAt(x,y,z)`、`api.region(x1,y1,z1,x2,y2,z2)`（返回 palette/kinds/data，第 i 格 i = (y-min.y)*sx*sz + (z-min.z)*sx + (x-min.x)，kind = open|solid|liquid|unknown）、`api.entities(r)`、`api.nearestLand()`（最近见过的能站的干地，和身体上岸判断同一个标准；自己判断“哪里是干地”时用它，别另写一套）、`api.stepTo(x,y,z)`、`api.digAt(x,y,z)`、`api.placeAt(x,y,z,item)`、`api.moveTo(x,y,z,range,{sprint})`（默认走路，sprint:true 跑：快但很耗饥饿）、`api.act("动作",{参数})`、`api.look(yaw,pitch)`、`api.lookAt(x,y,z)`、`api.sleep(ms)`、`api.log(…)`、`api.progress(p)`；全部要 await。

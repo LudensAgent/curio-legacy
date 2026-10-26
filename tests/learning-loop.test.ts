@@ -26,7 +26,7 @@ test('造技能：死了之后在后台拿事发经过写出技能、立刻生�
     seen.push(messages);
     n++;
     return { text: JSON.stringify({ skill: { name: `pillar-when-chased-${n}`, description: '血少被僵尸追时原地垫高', when: { hp_below: 8, hostile: { name: 'zombie', within: 6 }, hurt_within: 4 },
-      code: 'const s = await api.state();\nawait api.placeAt(s.feet.x, s.feet.y, s.feet.z, "any");\nreturn { up: 1 };' } }), latencyMs: 5 };
+      code: 'const s = await api.state();\nawait api.placeAt(s.feet.x, s.feet.y, s.feet.z, "any");\nreturn { up: 1 };', verify: 'const s = await api.state(); return s.feet.y > args.before.feet.y ? true : "没垫高";' } }), latencyMs: 5 };
   } };
   const smith = new SkillSmith(planner as any, engine, book, bus, () => adapter.state());
   smith.start(1_000_000);
@@ -117,7 +117,7 @@ test('整理技能：长期用不上的收起；说同一件事的后台合并�
   assert.ok(engine.choiceScore(engine.get('run-away')!) > engine.choiceScore(engine.get('flee-from-mobs')!));
   let asked = 0;
   const planner = { autonomous: true, noteInvalid() {}, complete: async () => { asked++; return { text: JSON.stringify({
-    merge: [{ from: ['run-away', 'flee-from-mobs'], skill: { name: 'run-away', description: '血少有怪时背对怪跑开', when: { hp_below: 8, hostile: { within: 8 } }, code: 'return 2;' } }],
+    merge: [{ from: ['run-away', 'flee-from-mobs'], skill: { name: 'run-away', description: '血少有怪时背对怪跑开', when: { hp_below: 8, hostile: { within: 8 } }, code: 'return 2;', verify: 'return true;' } }],
     priority: [{ name: 'pillar-up', priority: 70 }] }), latencyMs: 5 }; } };
   const curator = new SkillCurator(planner as any, engine, book, bus, { unusedMs: 1000, gapMs: 0, minSkills: 2 });
   // never-used 写下很久都没用过：收起（这里把“很久”设成 1 秒）

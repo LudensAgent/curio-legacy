@@ -8,7 +8,7 @@ import { normalizeSkillName, type KnowSkill, type SkillBook, type SkillMode } fr
 import { normalizeStep } from '../planner/plan.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 import type { Senses } from '../skills/types.ts';
-import { compileCheck, MAX_CODE } from '../codeskills/sandbox.ts';
+import { compileCheck, MAX_CODE, MAX_VERIFY, VERIFY_METHODS } from '../codeskills/sandbox.ts';
 import { evalPredicate, isRecovery, isThreat, senseNow, situationOf, validatePredicate, type Predicate, type Sense } from './predicate.ts';
 
 /**
@@ -30,6 +30,8 @@ export interface Behavior {
   when?: Predicate; steps: BehaviorStep[]; priority: number; cooldownMs: number; overrides: string[];
   /** 代码技能：模型写的 JavaScript（在沙箱里跑，只能用 api.*），可以被后台自动改进出新版本 */
   code?: string; version?: number;
+  /** 判定：做完以后看一眼世界，确认真的做成了（只能读的 api；return true 算成，return "原因" 算没成） */
+  verify?: string;
   /** use_skill 调用时必须给的参数：名字 → 说明（恢复时由失败的那一步提供，不检查） */
   needs?: Record<string, string>;
 }
@@ -86,6 +88,9 @@ export const INSTINCTS: Record<string, { text: string; locked?: boolean }> = {
   torch: { text: '暗处顺手插火把（habits.torch_every 打开）' },
 };
 
+/** 代码技能必须带判定时的说明（写技能、改技能时都用这一句） */
+export const VERIFY_REQUIRED = 'skill.verify：代码技能要同时写 verify——一段 JavaScript 函数体，做完以后看一眼世界确认真的做成了。参数 api 和 args：args.before 是开工前的 api.state()，args.result 是 code 的返回值，args.args 是调用参数；只能用 api.state/blockAt/region/entities/nearestLand；做成了 return true，没做成 return "原因"（比如 const s = await api.state(); return s.inWater ? "还在水里" : true）';
+
 const MAX_STEPS = 8;
 type Validated = { name: string; description: string; body: string; behavior: Record<string, unknown>; disable?: boolean };
 
@@ -127,6 +132,12 @@ export function validateBehavior(raw: unknown, adapter: GameAdapter): Validated 
     steps.push(step);
   }
   const behavior: Record<string, unknown> = code !== undefined ? { code: code.slice(0, MAX_CODE) } : { steps };
+  if (o.verify !== undefined && o.verify !== null && o.verify !== '') {
+    const verify = String(o.verify).replace(/\r\n/g, '\n');
+    const bad = compileCheck(verify, { allowed: VERIFY_METHODS, maxLen: MAX_VERIFY });
+    if (bad) return { error: `skill.verify：${bad}（判定只能看：${VERIFY_METHODS.map((m) => `api.${m}`).join('、')}）` };
+    behavior.verify = verify;
+  }
   if (o.when !== undefined && o.when !== null) {
     const p = validatePredicate(o.when);
     if ('error' in p) return { error: `skill.when：${p.error}` };
@@ -170,7 +181,7 @@ function toBehavior(k: KnowSkill, adapter: GameAdapter): Behavior | null {
   const version = Number((k.behavior as any).version) || (b.code ? 1 : undefined);
   return { name: k.name, description: k.description, source: k.source, mode: b.when ? (isRecovery(b.when) ? 'recover' : 'auto') : 'manual',
     ...(b.when ? { when: b.when } : {}), steps: b.steps ?? [], priority: b.priority, cooldownMs: b.cooldown_s * 1000, overrides: b.overrides ?? [],
-    ...(b.code ? { code: b.code, version } : {}), ...(b.args ? { needs: b.args } : {}) };
+    ...(b.code ? { code: b.code, version } : {}), ...(b.verify ? { verify: b.verify } : {}), ...(b.args ? { needs: b.args } : {}) };
 }
 
 /** 恢复技能按“哪个动作、什么错误码”失败来归类 */
@@ -448,6 +459,8 @@ export class BehaviorEngine {
       return { ok: true, name: v.name, created: false, mode: this.behaviors.get(v.name)?.mode ?? 'manual', disabled: true };
     }
     if (!this.book) return { ok: false, error: '没有技能书，存不下技能' };
+    // 模型新写、改写代码技能（心智、技能工程师、整理）必须带判定：代码跑完不抛错不等于做成了（“脱船”技能人还在船上，也报“做完了”）
+    if (opts.by && v.behavior.code && !v.behavior.verify) return { ok: false, error: VERIFY_REQUIRED };
     // 后台总结（每死一次、每吃一次亏都会来一遍）不能推翻一个还没攒够证据的版本：
     // 否则同一个技能在几种打法之间来回改，没有一个版本用够几次，永远不知道哪个管用
     if (opts.by === 'forge') {
@@ -529,13 +542,17 @@ export class BehaviorEngine {
     return `「${name}」当前版本只用了 ${uses} 次（成 ${cur.ok} 败 ${cur.fail}），证据还不够，先不改写它；这次的经过已经记进它的成败，等用够 ${BehaviorEngine.MIN_EVIDENCE} 次再看要不要改`;
   }
 
-  replaceCode(name: string, code: string, note: string): { ok: true; version: number } | { ok: false; error: string } {
+  replaceCode(name: string, code: string, note: string, verify?: string): { ok: true; version: number } | { ok: false; error: string } {
     const b = this.behaviors.get(name);
     const k = this.book?.get(name);
     if (!b?.code || !k || !this.book) return { ok: false, error: `${name} 不是代码技能` };
     const bad = compileCheck(code);
     if (bad) return { ok: false, error: bad };
-    const raw = { ...(k.behavior as Record<string, unknown>), code, code_file: undefined, version: undefined };
+    if (verify !== undefined) {
+      const badVerify = compileCheck(verify, { allowed: VERIFY_METHODS, maxLen: MAX_VERIFY });
+      if (badVerify) return { ok: false, error: `verify：${badVerify}` };
+    }
+    const raw = { ...(k.behavior as Record<string, unknown>), code, code_file: undefined, version: undefined, ...(verify !== undefined ? { verify } : {}) };
     const body = `${k.body.replace(/```behavior[\s\S]*?```/, '').trim()}`.replace(/\n*（最近一次改进：[^）]*）$/, '') + `\n\n（最近一次改进：${note.slice(0, 100)}）`;
     const w = this.book.write(name, k.description, body, raw);
     if (!w.ok) return w;

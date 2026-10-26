@@ -49,15 +49,15 @@ test('a recovery that did not help is not re-run on the same failure right after
 
 test('a freshly forged, still unused version cannot be rewritten by background forging within minutes', () => {
   const engine = new BehaviorEngine(new SkillBook(BUILTIN_SKILLS_DIR, tmp()), new FakeAdapter(), null, new EventBus(), noSenses);
-  assert.ok(engine.write({ name: 'climb-wet', description: '往上爬被水挡住时先横着挪开再爬', when, code: 'return 1;' }, { by: 'forge' }).ok);
-  const again = engine.write({ name: 'climb-wet', description: '往上爬被水挡住时换个方向挖', code: 'return 2;' }, { by: 'forge' });
+  assert.ok(engine.write({ name: 'climb-wet', description: '往上爬被水挡住时先横着挪开再爬', when, code: 'return 1;', verify: 'return true;' }, { by: 'forge' }).ok);
+  const again = engine.write({ name: 'climb-wet', description: '往上爬被水挡住时换个方向挖', code: 'return 2;', verify: 'return true;' }, { by: 'forge' });
   assert.equal(again.ok, false);
   assert.equal((again as any).gated, true);
   assert.match((again as any).error, /才写下、还没用过/);
   engine.statsOf('climb-wet')!.writtenAt = Date.now() - BehaviorEngine.REWRITE_GAP_MS - 1;
-  assert.ok(engine.write({ name: 'climb-wet', description: '往上爬被水挡住时换个方向挖', when, code: 'return 2;' }, { by: 'forge' }).ok, 'after a while an unused version may be rewritten again');
+  assert.ok(engine.write({ name: 'climb-wet', description: '往上爬被水挡住时换个方向挖', when, code: 'return 2;', verify: 'return true;' }, { by: 'forge' }).ok, 'after a while an unused version may be rewritten again');
   // 心智自己点名改写不受这个限制
-  assert.ok(engine.write({ name: 'climb-wet', description: '往上爬被水挡住时心智自己改的做法', when, code: 'return 2;' }, { by: 'mind' }).ok);
+  assert.ok(engine.write({ name: 'climb-wet', description: '往上爬被水挡住时心智自己改的做法', when, code: 'return 2;', verify: 'return true;' }, { by: 'mind' }).ok);
 });
 
 test('skill code that calls an api the sandbox does not have is rejected before saving', async () => {

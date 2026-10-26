@@ -1,5 +1,5 @@
 import { makeBridge } from '../codeskills/bridge.ts';
-import { runSandboxed } from '../codeskills/sandbox.ts';
+import { runSandboxed, VERIFY_METHODS, type SandboxHandler } from '../codeskills/sandbox.ts';
 import { evalPredicate, senseNow, type Predicate } from '../mind/predicate.ts';
 import { throwIfAborted } from '../util.ts';
 import { dirName } from '../perception/perception.ts';
@@ -8,7 +8,7 @@ import { fail, isAbort, obj, ok, type Skill, type SkillResult } from './types.ts
 
 /** use_skill 只需要按名字取出步骤；注册表由 main 设置（行为引擎） */
 export interface BehaviorLookup {
-  get(name: string): { name: string; description: string; steps: { skill: string; args?: unknown; if?: Predicate; optional?: boolean }[]; code?: string; version?: number; needs?: Record<string, string> } | undefined;
+  get(name: string): { name: string; description: string; steps: { skill: string; args?: unknown; if?: Predicate; optional?: boolean }[]; code?: string; version?: number; verify?: string; needs?: Record<string, string> } | undefined;
   list(): { name: string }[];
 }
 let registry: BehaviorLookup | null = null;
@@ -52,10 +52,13 @@ export const useSkill: Skill<{ name: string; args?: Record<string, unknown>; fai
       if (h < 3 && Math.abs(dy) < 1) return { text: '', h: Math.round(h), dy };
       return { text: `（身体实际：往 ${dirName(to.x - from.x, to.z - from.z)} 平移 ${Math.round(h)} 格，高度 ${dy > 0 ? `上升 ${dy}` : dy < 0 ? `下降 ${-dy}` : '没变'}，y ${Math.floor(from.y)}→${Math.floor(to.y)}）`, h: Math.round(h), dy };
     };
+    const bridge = makeBridge(ctx);
+    // 开工前的样子：给判定代码对照（做完以后真的变了没有）
+    const before = b.verify ? await bridge('state', []).catch(() => null) : null;
     if (b.code) {
       // 代码技能：在沙箱里跑模型写的 JavaScript；失败时把出错的行和最后几次 api 调用交回去（后台改进会用到）
       const input = { ...(args.args ?? {}), ...(args.failure ? { failure: args.failure } : {}) };
-      const r = await runSandboxed(b.code, input, makeBridge(ctx), {
+      const r = await runSandboxed(b.code, input, bridge, {
         signal: ctx.signal, deadline: ctx.deadline - 500,
         onProgress: (p) => ctx.progress(Math.max(0, Math.min(1, p))),
         onLog: (t) => ctx.bus.publish('skill_log', 'P3', `[${b.name}] ${t}`),
@@ -63,6 +66,8 @@ export const useSkill: Skill<{ name: string; args?: Record<string, unknown>; fai
       const data = { version: b.version ?? 1, calls: r.calls, trace: r.trace, logs: r.logs, args: JSON.stringify(input).slice(0, 300), ...(r.line ? { line: r.line } : {}) };
       const m = moved();
       if (!r.ok) return fail(/超时/.test(r.error ?? '') ? 'TIMEOUT' : 'ERROR', `代码技能「${b.name}」v${b.version ?? 1} 没成${r.line ? `（第 ${r.line} 行）` : ''}：${r.error}${m.text}`, { ...data, displacement: { horizontal: m.h, dy: m.dy } });
+      const judged = await verifyRun(b, bridge, { before, result: r.result ?? null, args: input }, ctx);
+      if (judged) return fail('ERROR', `代码技能「${b.name}」v${b.version ?? 1} 说做完了，但${judged}${m.text}`, { ...data, result: r.result, verified: false, displacement: { horizontal: m.h, dy: m.dy } });
       return ok(`代码技能「${b.name}」做完了${m.text}${r.result !== null && r.result !== undefined ? `：${JSON.stringify(r.result).slice(0, 160)}` : ''}`, { ...data, result: r.result, displacement: { horizontal: m.h, dy: m.dy } });
     }
     const done: string[] = [];
@@ -89,6 +94,32 @@ export const useSkill: Skill<{ name: string; args?: Record<string, unknown>; fai
       if (r.status === 'failed' && !st.optional) return fail(r.failureCode ?? 'ERROR', `技能「${b.name}」第 ${i + 1} 步 ${st.skill} 没成：${r.summary.slice(0, 120)}`, { done });
     }
     ctx.progress(1);
+    const judged = await verifyRun(b, bridge, { before, result: { done }, args: args.args ?? {} }, ctx);
+    if (judged) return fail('ERROR', `技能「${b.name}」的步骤都做完了，但${judged}${moved().text}`, { done, verified: false });
     return ok(`照技能「${b.name}」做完了：${done.join('，')}${moved().text}`, { done });
   },
 };
+
+/**
+ * 跑技能自己带的判定（verify）：做完以后看一眼世界，确认真的做成了。
+ * 只能读（state/blockAt/region/entities/nearestLand），最多几秒。返回 null = 判定通过（或者这份技能没写判定）；
+ * 否则返回一句说明，算这次没做成——代码没抛错不等于做成了。
+ */
+async function verifyRun(b: { name: string; verify?: string }, bridge: SandboxHandler, input: { before: unknown; result: unknown; args: unknown },
+  ctx: { signal: AbortSignal; deadline: number; bus: { publish: (...a: any[]) => void } }): Promise<string | null> {
+  if (!b.verify) return null;
+  const allowed = new Set<string>(VERIFY_METHODS);
+  const readOnly: SandboxHandler = async (m, a) => {
+    if (!allowed.has(m) && m !== 'log') throw new Error(`判定只能看不能动：不能用 api.${m}`);
+    return bridge(m, a);
+  };
+  const r = await runSandboxed(b.verify, input, readOnly, {
+    signal: ctx.signal, deadline: Math.min(ctx.deadline, Date.now() + 5000), maxCalls: 400,
+    onLog: (t) => ctx.bus.publish('skill_log', 'P3', `[${b.name} 判定] ${t}`),
+  });
+  if (!r.ok) return `判定代码出错${r.line ? `（第 ${r.line} 行）` : ''}：${r.error}`;
+  const v = r.result as unknown;
+  if (v === true || (v && typeof v === 'object' && (v as any).ok === true)) return null;
+  const why = typeof v === 'string' ? v : v && typeof v === 'object' && (v as any).why ? String((v as any).why) : JSON.stringify(v);
+  return `判定没通过：${String(why).slice(0, 200)}`;
+}

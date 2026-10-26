@@ -126,10 +126,10 @@ test('技能目录不列收起的；收起不久的技能后台不同名重写�
   assert.ok(engine.retire('dig-me-out', '一次都没用上'));
   assert.ok(engine.inactive('dig-me-out'));
   assert.ok(!book.index((n) => engine.inactive(n)).some((l) => l.startsWith('dig-me-out')), '目录不列收起的');
-  const w = engine.write({ name: 'dig-me-out', description: '被困在坑里时挖台阶出去 v2', code: 'return 2;' }, { by: 'forge' });
+  const w = engine.write({ name: 'dig-me-out', description: '被困在坑里时挖台阶出去 v2', code: 'return 2;', verify: 'return true;' }, { by: 'forge' });
   assert.ok(!w.ok && (w as any).gated, '收起不久，后台不重写');
   assert.match((w as any).error, /收起/);
-  assert.ok(engine.write({ name: 'dig-me-out', description: '被困在坑里时挖台阶出去 v2', code: 'return 2;' }).ok, '心智自己要写可以');
+  assert.ok(engine.write({ name: 'dig-me-out', description: '被困在坑里时挖台阶出去 v2', code: 'return 2;', verify: 'return true;' }).ok, '心智自己要写可以');
   assert.match(engine.reliable('dig-me-out') ?? '', /不够可靠/);
 });
 

@@ -181,7 +181,7 @@ export class SkillCurator {
         ...(st?.undid && Object.keys(st.undid).length ? { undid_work_of: st.undid } : {}),
         ...(st?.idleInterrupts ? { idle_interrupts: st.idleInterrupts } : {}),
         ...(st?.undoneBy && Object.keys(st.undoneBy).length ? { work_undone_by: st.undoneBy } : {}),
-        ...(st?.loops?.length ? { see_sawed_with: st.loops.map((l) => `${l.with.startsWith('doing:') ? `手上的「${l.with.slice(6)}」` : `「${l.with}」`}（${l.times} 回）`) } : {}), ...(b.code ? { code: b.code.slice(0, 2500) } : { steps: b.steps }) };
+        ...(st?.loops?.length ? { see_sawed_with: st.loops.map((l) => `${l.with.startsWith('doing:') ? `手上的「${l.with.slice(6)}」` : `「${l.with}」`}（${l.times} 回）`) } : {}), ...(b.code ? { code: b.code.slice(0, 2500), ...(b.verify ? { verify: b.verify } : {}) } : { steps: b.steps }) };
     });
     const system = `你在整理 Minecraft 机器人 Curio 自己写的技能（会动手的技能：条件成立时自动做、动作失败时先试、或被调用）。像人整理笔记一样：
 - 说的是同一件事、触发条件大面积重叠的：合并成一份更好的（merge：from 写被合并的名字，skill 写合并后的完整技能，可以沿用其中一个名字）。合并时保留各自真正管用的部分（看 uses 的成败）。
@@ -200,7 +200,7 @@ export class SkillCurator {
   · 不是代码的技能拖慢了事情：用 merge 重写它（from 写它自己）；既没用又拖后腿：收起。
   · 数据太少（一两次）不下结论。
 - 没有要整理的就输出 {"ok":true}。不要为了整理而整理。
-技能格式和写法与原来相同（when / steps 或 code / priority / cooldown_s / args）。
+技能格式和写法与原来相同（when / steps 或 code / priority / cooldown_s / args）；合并出来的代码技能要带 verify（判定：做完以后看一眼世界确认真的做成了，只能用 api.state/blockAt/region/entities/nearestLand，return true 算成、return "原因" 算没成），可以沿用原来的判定。
 只输出一个 JSON 对象：{"merge":[{"from":["a","b"],"skill":{…}}],"priority":[{"name":"…","priority":1-90}],"retire":[{"name":"…","why":"…"}],"improve":[{"name":"…","why":"…"}],"rollback":[{"name":"…","to":1,"why":"…"}]}（用不到的键省略）或 {"ok":true}`;
     return [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify({ skills }) }];
   }

@@ -5,7 +5,7 @@ import type { ChatMessage } from '../planner/llm.ts';
 import { extractJson } from '../planner/plan.ts';
 import type { Planner } from '../planner/planner.ts';
 import { API_DOC } from './bridge.ts';
-import { compileCheck } from './sandbox.ts';
+import { compileCheck, MAX_VERIFY, VERIFY_METHODS } from './sandbox.ts';
 
 /**
  * 代码技能的后台改进：一份代码技能在游戏里反复失败（或心智主动要求）时，单独发一次 LLM 请求，
@@ -87,7 +87,9 @@ export class CodeImprover {
 根据它在游戏里实际运行的记录改进代码：修掉出错的地方，处理记录里暴露出来的情况（比如路被挡、方块读不到、动作失败），让它更可靠；
 如果它能用但费劲（harvest_effect 显示用它时拿东西更慢），就让它更省：少走冤枉路、少做无用的动作、先看再动、一次做完。保持用途不变，代码保持简短清楚。
 ${API_DOC}
-只输出一个 JSON 对象：{"code":"改好的完整函数体","change":"一句话说改了什么"}；如果失败不是代码的问题（比如本来就不该在那种情况下用），输出 {"keep":true,"why":"…"}。`;
+它还带一段判定（verify）：做完以后看一眼世界确认真的做成了（只能用 api.state/blockAt/region/entities/nearestLand；args.before 是开工前的 api.state()，args.result 是代码的返回值；return true 算成，return "原因" 算没成）。
+记录里“说做完了，但判定没通过”的，是代码没真做成——改代码；判定本身写错了（明明做成了却判没过、或者判得太松什么都算成），连判定一起改。
+只输出一个 JSON 对象：{"code":"改好的完整函数体","change":"一句话说改了什么","verify"?:"改好的判定函数体（不改判定就不写）"}；如果失败不是代码的问题（比如本来就不该在那种情况下用），输出 {"keep":true,"why":"…"}。`;
     const user = {
       skill: { name, description: b.description, mode: b.mode, version: b.version ?? 1, ...(b.when ? { when: b.when } : {}) },
       why: WHY_TEXT(why, note),
@@ -95,7 +97,7 @@ ${API_DOC}
       stats: st?.byVersion ?? {},
       recent_runs: runs,
     };
-    return [{ role: 'system', content: system }, { role: 'user', content: `${JSON.stringify(user)}\n\n现在的代码（行号只是给你看的）：\n${numbered(b.code!)}` }];
+    return [{ role: 'system', content: system }, { role: 'user', content: `${JSON.stringify(user)}\n\n现在的代码（行号只是给你看的）：\n${numbered(b.code!)}\n\n${b.verify ? `现在的判定：\n${numbered(b.verify)}` : '现在还没有判定：这次顺便写一个 verify。'}` }];
   }
 
   private effect(name: string): string { try { return this.ledger?.skillEffect(name) ?? ''; } catch { return ''; } }
@@ -113,11 +115,12 @@ ${API_DOC}
       }
       if (raw.keep) { this.bus.publish('skill_improve_kept', 'P3', `看了「${name}」的记录，代码先不改：${String(raw.why ?? '').slice(0, 160)}`, { name }); return; }
       const code = typeof raw.code === 'string' ? raw.code.replace(/\r\n/g, '\n') : '';
-      const bad = compileCheck(code);
+      const verify = typeof raw.verify === 'string' && raw.verify.trim() ? raw.verify.replace(/\r\n/g, '\n') : undefined;
+      const bad = compileCheck(code) ?? (verify ? compileCheck(verify, { allowed: VERIFY_METHODS, maxLen: MAX_VERIFY }) : null);
       if (bad) { messages.push({ role: 'assistant', content: c.text.slice(0, 2000) }, { role: 'user', content: `代码过不了检查：${bad}。改正后只输出 JSON。` }); continue; }
-      if (code.trim() === this.engine.get(name)?.code?.trim()) { this.bus.publish('skill_improve_kept', 'P3', `「${name}」的代码没有变化`, { name }); return; }
+      if (code.trim() === this.engine.get(name)?.code?.trim() && (!verify || verify.trim() === this.engine.get(name)?.verify?.trim())) { this.bus.publish('skill_improve_kept', 'P3', `「${name}」的代码没有变化`, { name }); return; }
       const change = String(raw.change ?? '改进了代码').slice(0, 120);
-      const r = this.engine.replaceCode(name, code, change);
+      const r = this.engine.replaceCode(name, code, change, verify);
       if (!r.ok) throw new Error(r.error);
       this.bus.publish('skill_improved', 'P2', `代码技能「${name}」升级到 v${r.version}：${change}`, { name, version: r.version, change });
       return;

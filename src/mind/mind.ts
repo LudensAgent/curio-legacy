@@ -1018,7 +1018,7 @@ export class Mind {
     const executable = Array.isArray(raw.steps) || raw.when !== undefined || raw.disable === true || raw.disabled === true;
     if (executable) {
       if (!this.d.behaviors) { decision.notes.push('这里没有行为引擎，带步骤的技能存不下'); return; }
-      const w = this.safe(() => this.d.behaviors!.write(raw), { ok: false as const, error: '写技能时出错' });
+      const w = this.safe(() => this.d.behaviors!.write(raw, { by: 'mind' }), { ok: false as const, error: '写技能时出错' });
       if (!w.ok) { decision.notes.push(`skill 没存下：${w.error}`); this.d.bus.publish('skill_rejected', 'P3', `没有保存技能：${w.error}`); return; }
       if (w.disabled) { this.d.self.think(`停用了自己的技能 ${w.name}`, 'learned'); return; }
       if (w.improving) { this.d.self.think(`请后台改进代码技能 ${w.name}（改好会告诉我）`, 'learned'); return; }

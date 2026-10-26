@@ -19,16 +19,20 @@ export interface SandboxResult { ok: boolean; result?: unknown; error?: string; 
 export const API_METHODS = ['useSkill', 'state', 'blockAt', 'region', 'entities', 'nearestLand', 'act', 'moveTo', 'stepTo', 'digAt', 'placeAt', 'look', 'sleep',
   'move', 'lookAt', 'attack', 'equip', 'shield', 'draw', 'release', 'shoot'] as const;
 export const MAX_CODE = 8000;
+/** 判定代码（verify）只能看、不能动：这些读的 api */
+export const VERIFY_METHODS = ['state', 'blockAt', 'region', 'entities', 'nearestLand'] as const;
+export const MAX_VERIFY = 2000;
 
 const wrap = (code: string) => `const __user = async (api, args) => {\n${code}\n};`;
 
 /** 只编译不运行：语法错误时返回中文说明（带行号） */
-export function compileCheck(code: string): string | null {
+export function compileCheck(code: string, opts: { allowed?: readonly string[]; maxLen?: number } = {}): string | null {
+  const maxLen = opts.maxLen ?? MAX_CODE;
   if (typeof code !== 'string' || !code.trim()) return '代码是空的';
-  if (code.length > MAX_CODE) return `代码太长（${code.length} 字符，最多 ${MAX_CODE}）`;
+  if (code.length > maxLen) return `代码太长（${code.length} 字符，最多 ${maxLen}）`;
   if (/\b(?:require|process|eval)\b|\bimport\s*\(|\bFunction\s*\(|globalThis\s*\.\s*constructor/.test(code)) return '代码只能用 api.* 和普通 JavaScript：不能 require/import、碰 process、eval 或 new Function';
   // 用了不存在的 api：保存前就说清楚，别等到游戏里第一次触发才报 TypeError（那一次还会记成技能失败）
-  const known = new Set<string>([...API_METHODS, 'log', 'progress']);
+  const known = new Set<string>([...(opts.allowed ?? API_METHODS), 'log', ...(opts.allowed ? [] : ['progress'])]);
   const unknown = [...new Set([...code.matchAll(/\bapi\s*\.\s*([A-Za-z_$][\w$]*)/g)].map((m) => m[1]).filter((n) => !known.has(n)))];
   if (unknown.length) return `没有 ${unknown.map((n) => `api.${n}`).join('、')}；能用的只有：${[...known].map((n) => `api.${n}`).join('、')}`;
   try { new vm.Script(wrap(code), { filename: 'skill.js', lineOffset: -1 }); return null; } catch (e) {
