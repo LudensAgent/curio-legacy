@@ -60,6 +60,8 @@ export interface Activity {
   consecutiveFailures: number;
   /** 本段活里身体自己做过的应变（换个地方找、重试），每种只做一次 */
   adaptations: string[];
+  /** 同一个 dig_at 连着几轮挖到的都是空气（routine 没按设想的形状挖） */
+  airDigs?: Record<string, number>;
   dropped?: string[];
   /** 被身体反射打断了几次 */
   interruptions?: number;

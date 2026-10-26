@@ -114,6 +114,18 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   if (a.results.length > 16) a.results = a.results.slice(-16);
   if (result.status === 'succeeded') {
     a.consecutiveFailures = 0;
+    // 同一个 dig_at 一轮又一轮都挖到空气：照样“成功”，但这一步什么都没做——routine 多半没按设想的形状在挖
+    // （想挖阶梯往上，[前,上,右] 却写成了一直在平地上走）。说给心智听，由它改步骤
+    if (step.skill === 'dig_at') {
+      const key = JSON.stringify(step.args ?? {});
+      const air = (result.data as any)?.was === 'air';
+      a.airDigs ??= {};
+      if (air) a.airDigs[key] = (a.airDigs[key] ?? 0) + 1; else delete a.airDigs[key];
+      if (air && a.airDigs[key] >= 3) {
+        const at = (step.args as any)?.at;
+        return { kind: 'stuck', why: `dig_at ${Array.isArray(at) ? `[${at}]` : key} 连着 ${a.airDigs[key]} 轮挖到的都是空气，这一步什么都没做：按现在的步骤，身体没在挖你想挖的那几格；看看 [前,上,右] 写得对不对（往上挖阶梯是 dig_at [0,2,0]、[1,1,0]、[1,2,0] 再 step [1,1,0]）` };
+      }
+    }
     if (doneWhenMet(a, state, percept)) return { kind: 'done', met: true, why: '达到了收工条件' };
     if (remainingSteps(a) === 0) {
       if (a.doneWhen) return { kind: 'done', met: false, why: `${a.repeat} 轮做完了，但收工条件还没达到` };

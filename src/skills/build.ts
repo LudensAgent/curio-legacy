@@ -444,7 +444,7 @@ export function sleepReason(reason?: string): string {
   if (r === 'NO_SPACE' || r === 'PLACE_FAILED') return '身边没有能放床的平地（床要两格平整空地）：换块平地再睡';
   if (/monster/i.test(r)) return '附近有怪物，不能睡：先打掉或躲开它们，或者用 shelter 围起来再睡';
   if (/not night|day/i.test(r)) return '还没到能睡的时候';
-  if (/occupied/i.test(r)) return '这张床有人在睡';
+  if (/occupied/i.test(r)) return '这张床被占着（村子里多半是村民在睡）：等下去它也不会空出来，换一张床（sleep {"at":…}）或者 sleep {"place":true} 放自己的床';
   if (/far/i.test(r)) return '离床太远';
   return r || '未知原因';
 }
