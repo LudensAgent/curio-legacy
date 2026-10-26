@@ -223,6 +223,7 @@ export class WorldMemory {
         const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
         this.data = { ...empty(), ...parsed, version: parsed.version ?? 1 };
         this.migrate();
+        this.dedupeOwnTwins();
         this.recoverProjects();
       } catch {
         fs.copyFileSync(file, file + '.corrupt-' + Date.now());
@@ -393,6 +394,12 @@ export class WorldMemory {
       (l) => this.inWorld(l) && l.kind === kind && l.label === label && l.dim === dim && dist3(l.pos, pos) < dedupeRadius,
     );
     if (near) { near.ts = Date.now(); this.touch(); return null; }
+    // 同一格的“工作台”和“我的工作台”只留一个：自己的那个
+    if (kind === 'discovery') {
+      const own = label.startsWith('我的') ? null : this.data.landmarks.find((l) => this.inWorld(l) && l.kind === 'discovery' && l.label === `我的${label}` && l.dim === dim && dist3(l.pos, pos) <= 2);
+      if (own) { own.ts = Date.now(); this.touch(); return null; }
+      if (label.startsWith('我的')) this.dropPlainTwins(label, dim, pos);
+    }
     const lm: Landmark = {
       id: shortId(kind.slice(0, 3) + '_'),
       kind,
@@ -411,6 +418,19 @@ export class WorldMemory {
     }
     this.touch();
     return lm;
+  }
+
+  /** “我的X”记下时，同一格（2 格内）看见时记的“X”就多余了 */
+  private dropPlainTwins(ownLabel: string, dim: string, pos: Vec3Like, worldId = this.worldId) {
+    const plain = ownLabel.slice('我的'.length);
+    const before = this.data.landmarks.length;
+    this.data.landmarks = this.data.landmarks.filter((l) => !((l.worldId ?? 'default') === worldId && l.kind === 'discovery' && l.label === plain && l.dim === dim && dist3(l.pos, pos) <= 2));
+    if (this.data.landmarks.length !== before) this.touch();
+  }
+
+  /** 读档时把以前留下的成对地标（“工作台”+“我的工作台”）合并掉 */
+  private dedupeOwnTwins() {
+    for (const l of [...this.data.landmarks]) if (l.kind === 'discovery' && l.label.startsWith('我的')) this.dropPlainTwins(l.label, l.dim, l.pos, l.worldId ?? 'default');
   }
 
   setBase(dim: string, pos: Vec3Like, label?: string): Landmark {

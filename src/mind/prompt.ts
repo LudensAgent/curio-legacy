@@ -9,6 +9,7 @@ import { myBed } from '../skills/stations.ts';
 import { travelStore } from '../travel/store.ts';
 import { describeActivity } from './activity.ts';
 import { describeBuild, homeOf, myBuilds } from './home.ts';
+import { FACILITY_LABELS, myFacilities } from './facilities.ts';
 import { activeDrafts } from '../building/drafts.ts';
 import { cleanLesson, moodWords, type SelfModel } from './self.ts';
 import type { Activity, ActivityRecord, Noticing, StuckHere } from './types.ts';
@@ -376,10 +377,11 @@ function surroundingsOf(p: Percept, tier: 'glance' | 'deliberate') {
 function worldKnowledge(ctx: MindContext) {
   const p = ctx.percept, s = ctx.state, m = ctx.memory;
   const here = { x: p.self.pos[0], y: p.self.pos[1], z: p.self.pos[2] };
-  const places = m.landmarks().filter((l) => l.dim === p.self.dim && l.worldId === s.worldId)
+  // 自己的设施（箱子、工作站、床、挖过的通道）在 my_facilities 里单独说，这里只列别的地点
+  const places = m.landmarks().filter((l) => l.dim === p.self.dim && l.worldId === s.worldId && !FACILITY_LABELS.has(l.label))
     .map((l) => ({ l, d: Math.round(Math.hypot(l.pos.x - here.x, l.pos.z - here.z)) })).sort((a, b) => a.d - b.d).slice(0, 8)
     .map(({ l, d }) => `${l.label}[${l.id}] (${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}) ${d}格`);
-  const chests = m.chests(p.self.dim).slice(0, 3).map((c) => `(${c.pos.x},${c.pos.y},${c.pos.z}): ${c.items.slice(0, 6).map((i) => `${i.name}×${i.count}`).join('、')}`);
+  const facilities = ctx.tier === 'deliberate' ? myFacilities(m, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['chest', 'station', 'passage']).slice(0, 8).map((f) => f.text) : [];
   const danger = m.hazards(p.self.dim).map((h) => ({ h, d: Math.round(Math.hypot(h.pos.x - here.x, h.pos.z - here.z)) })).filter((e) => e.d < 96).slice(0, 4)
     .map(({ h, d }) => `${h.kind} @(${h.pos.x},${h.pos.y},${h.pos.z}) ${d}格，出过 ${h.count} 次事`);
   const bed = myBed(m, { dim: p.self.dim, worldId: s.worldId, pos: here });
@@ -395,7 +397,7 @@ function worldKnowledge(ctx: MindContext) {
     // 建筑师画好、还没盖的图纸：一直惦记着
     ...(drafts.length ? { my_drafts: drafts.map((d) => `${d.id}「${d.name}」${d.size.width}×${d.size.depth}，用料 ${Object.entries(d.materials).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([n, c]) => `${n}×${c}`).join('、')}`) } : {}),
     ...(remember.length ? { resources_seen_before: remember } : {}),
-    ...(ctx.tier === 'deliberate' ? { places, ...(chests.length ? { chests } : {}), ...(portals.length ? { portals } : {}), explored_around: exploredAround(m, p.self.dim, p.self.pos) } : {}),
+    ...(ctx.tier === 'deliberate' ? { places, ...(facilities.length ? { my_facilities: facilities } : {}), ...(portals.length ? { portals } : {}), explored_around: exploredAround(m, p.self.dim, p.self.pos) } : {}),
     ...(danger.length ? { danger_zones: danger } : {}),
   };
 }
