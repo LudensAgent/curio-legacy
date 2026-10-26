@@ -231,6 +231,9 @@ export class SkillCurator {
         if (names.has(String(p?.name)) && Number.isFinite(Number(p?.priority)) && this.engine.setPriority(String(p.name), Number(p.priority))) done.push(`${p.name} 优先级 ${p.priority}`);
       }
       for (const r of Array.isArray(raw.retire) ? raw.retire.slice(0, 8) : []) {
+        // 刚写下、当前版本还没用够几次的：数据太少不下结论（提示里这么说，代码里也守住）
+        const young = names.has(String(r?.name)) ? this.engine.rewriteGate(String(r.name)) : null;
+        if (young) { errors.push(`${r.name} 先不收：${young.slice(0, 60)}`); continue; }
         if (names.has(String(r?.name)) && this.engine.retire(String(r.name), String(r?.why ?? '整理时收起'))) done.push(`收起 ${r.name}`);
       }
       for (const r of Array.isArray(raw.rollback) ? raw.rollback.slice(0, 4) : []) {
@@ -239,6 +242,9 @@ export class SkillCurator {
         if (!names.has(name) || !b?.code || !(to >= 1) || to >= (b.version ?? 1)) continue;
         const old = this.book?.codeVersion(name, to);
         if (!old) { errors.push(`${name} 没有 v${to} 的代码`); continue; }
+        // 两个版本都要跑够几次才比：凭一两次的结果退回，只会让版本号越涨越多、没有一个版本攒够经验
+        const runs = (v: number) => { const x = this.engine.statsOf(name)?.byVersion?.[String(v)]; return x ? x.ok + x.fail : 0; };
+        if (runs(b.version ?? 1) < 4 || runs(to) < 3) { errors.push(`${name} v${b.version ?? 1} 跑了 ${runs(b.version ?? 1)} 次、v${to} 跑了 ${runs(to)} 次，数据太少不退回`); continue; }
         const why = String(r?.why ?? '').slice(0, 100);
         const w = this.engine.replaceCode(name, old, `整理时退回 v${to}：${why}`);
         if (!w.ok) { errors.push(`${name} 退回失败：${w.error}`); continue; }

@@ -101,8 +101,8 @@ export class SkillBook {
   list(): KnowSkill[] { return [...this.skills.values()].sort((a, b) => Number(a.source === 'self') - Number(b.source === 'self') || a.name.localeCompare(b.name)); }
   get(name: string): KnowSkill | undefined { return this.skills.get(name); }
   /** 提示词里的索引：每份一行 */
-  index(): string[] {
-    return this.list().map((s) => `${s.name}${s.source === 'self' ? '（我自己写的）' : ''}${s.mode ? `［${MODE_LABEL[s.mode]}］` : ''}：${s.description}`);
+  index(skip?: (name: string) => boolean): string[] {
+    return this.list().filter((s) => !skip?.(s.name)).map((s) => `${s.name}${s.source === 'self' ? '（我自己写的）' : ''}${s.mode ? `［${MODE_LABEL[s.mode]}］` : ''}：${s.description}`);
   }
 
   /** 写一份自己的技能（或修订自己写过的）；不能改内置技能。behavior 是已经校验过的触发条件和步骤 */

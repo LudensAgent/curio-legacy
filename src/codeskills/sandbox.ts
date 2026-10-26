@@ -16,7 +16,7 @@ const WORKER = new URL('./sandbox-worker.mjs', import.meta.url);
 export type SandboxHandler = (method: string, args: unknown[]) => Promise<unknown>;
 export interface SandboxResult { ok: boolean; result?: unknown; error?: string; line?: number; calls: number; trace: string[]; logs: string[] }
 
-export const API_METHODS = ['state', 'blockAt', 'region', 'entities', 'act', 'moveTo', 'stepTo', 'digAt', 'placeAt', 'look', 'sleep',
+export const API_METHODS = ['useSkill', 'state', 'blockAt', 'region', 'entities', 'act', 'moveTo', 'stepTo', 'digAt', 'placeAt', 'look', 'sleep',
   'move', 'lookAt', 'attack', 'equip', 'shield', 'draw', 'release', 'shoot'] as const;
 export const MAX_CODE = 8000;
 

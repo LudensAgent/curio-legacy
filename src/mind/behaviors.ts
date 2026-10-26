@@ -43,6 +43,13 @@ export interface BehaviorStats {
   retired?: string;
   /** 在各个维度里的成败：到了新环境，看得出哪些技能在这里还没验证过 */
   byDim?: Record<string, { ok: number; fail: number }>;
+  /** 当前版本是什么时候换上的（写下、改进、退回都算） */
+  versionAt?: number;
+  /** 后台改进或退回换上代码的时刻：刚换上还没跑过的版本，后台不急着再改（以前退回生成的新版本号马上又被改） */
+  swappedAt?: number;
+  /** 收起 / 停用的时刻：墓碑——之后一段时间里后台不再同名重写它 */
+  retiredAt?: number;
+  disabledAt?: number;
   /** 不是代码的技能每改写一次加一（代码技能用自己的版本号）：成败按版本记，改写不清空历史 */
   rev?: number;
   /** 拉锯里输掉的一方：条件成立也不自动接手，只提醒心智；改写后恢复 */
@@ -353,7 +360,7 @@ export class BehaviorEngine {
   /** 整理：把技能收起来（停用并写明原因）；同名重写会恢复 */
   retire(name: string, why: string): boolean {
     if (!this.behaviors.has(name)) return false;
-    this.touch(name, (st) => { st.disabled = true; st.retired = why.slice(0, 120); });
+    this.touch(name, (st) => { st.disabled = true; st.retired = why.slice(0, 120); st.retiredAt = Date.now(); });
     this.bus.publish('skill_retired', 'P2', `整理技能：收起「${name}」（${why.slice(0, 80)}）`, { name, why });
     return true;
   }
@@ -411,7 +418,7 @@ export class BehaviorEngine {
     if ('error' in v) return { ok: false, error: v.error };
     if (v.disable) {
       if (!this.behaviors.has(v.name) && !this.book?.get(v.name)) return { ok: false, error: `没有叫 ${v.name} 的技能` };
-      this.touch(v.name, (st) => { st.disabled = true; });
+      this.touch(v.name, (st) => { st.disabled = true; st.disabledAt = Date.now(); });
       this.bus.publish('skill_disabled', 'P2', `停用了技能 ${v.name}`, { name: v.name, by: 'mind' });
       return { ok: true, name: v.name, created: false, mode: this.behaviors.get(v.name)?.mode ?? 'manual', disabled: true };
     }
@@ -419,7 +426,7 @@ export class BehaviorEngine {
     // 后台总结（每死一次、每吃一次亏都会来一遍）不能推翻一个还没攒够证据的版本：
     // 否则同一个技能在几种打法之间来回改，没有一个版本用够几次，永远不知道哪个管用
     if (opts.by === 'forge') {
-      const gate = this.rewriteGate(v.name);
+      const gate = this.rewriteGate(v.name) ?? this.tombstone(v.name);
       if (gate) return { ok: false, error: gate, gated: true };
     }
     const w = this.book.write(v.name, v.description, v.body, v.behavior);
@@ -429,7 +436,7 @@ export class BehaviorEngine {
     if (!b) return { ok: false, error: '技能写下了，但格式不对没有生效' };
     // 修订就是重新给它一次机会：新版本从零记，旧版本的成败留着（好拿来比）
     this.touch(b.name, (st) => {
-      st.disabled = false; delete st.lastError; delete st.retired; delete st.advisory;
+      st.disabled = false; delete st.lastError; delete st.retired; delete st.advisory; delete st.retiredAt; delete st.disabledAt; delete st.swappedAt; st.versionAt = Date.now();
       if (!b.code && !w.created) st.rev = (st.rev ?? 1) + 1;
     });
     return { ok: true, name: b.name, created: w.created, mode: b.mode };
@@ -447,6 +454,35 @@ export class BehaviorEngine {
     return (b && st?.byVersion?.[this.versionOf(b)]) ?? { ok: 0, fail: 0 };
   }
   static readonly MIN_EVIDENCE = 3;
+  /** 刚换上的版本保护多久 */
+  static readonly FRESH_MS = 30 * 60_000;
+  /** 收起 / 停用之后多久内后台不同名重写（心智自己要写不受限） */
+  static readonly TOMBSTONE_MS = 2 * 3600_000;
+
+  /** 收起或停用不久的技能：后台再重写它多半又是同一套，先不写；返回原因（null = 可以写） */
+  tombstone(name: string): string | null {
+    const st = this.stats[name];
+    if (!st) return null;
+    const at = st.retired ? st.retiredAt : st.disabled ? st.disabledAt : undefined;
+    if (!at || Date.now() - at >= BehaviorEngine.TOMBSTONE_MS) return null;
+    return `「${name}」${Math.round((Date.now() - at) / 60_000)} 分钟前${st.retired ? `被收起（${st.retired.slice(0, 60)}）` : '被停用'}，当时成 ${st.ok} 败 ${st.fail}：先不同名重写；这次的事要是真和当时不同，在 why 里写清楚新证据，输出 none`;
+  }
+
+  /** 收起或停用了 */
+  inactive(name: string): boolean { const st = this.stats[name]; return !!st && (!!st.retired || !!st.disabled); }
+
+  /** 可靠的积木：启用中、当前版本用够了次数、成功明显多于失败（别的代码技能可以 api.useSkill 调用它） */
+  reliable(name: string): string | null {
+    const b = this.behaviors.get(name);
+    if (!b) return `没有技能 ${name}`;
+    if (this.inactive(name)) return `${name} 已收起或停用`;
+    const cur = this.currentStats(name);
+    if (cur.ok < BehaviorEngine.MIN_EVIDENCE || cur.ok < cur.fail * 2) return `${name} 当前版本还不够可靠（成 ${cur.ok} 败 ${cur.fail}）`;
+    return null;
+  }
+  reliableList(): string[] {
+    return this.list().filter((b) => !this.reliable(b.name)).map((b) => { const c = this.currentStats(b.name); return `${b.name}：${b.description.slice(0, 60)}（成 ${c.ok} 败 ${c.fail}${b.needs ? `，args.${Object.keys(b.needs).join('/')}` : ''}）`; });
+  }
   /** 能不能改写这份技能：当前版本用得太少就先别动（停用了、或者代码本身报错的除外） */
   rewriteGate(name: string): string | null {
     const b = this.behaviors.get(name);
@@ -455,6 +491,9 @@ export class BehaviorEngine {
     const cur = this.currentStats(name);
     const uses = cur.ok + cur.fail;
     const codeBroke = /代码技能.*没成|参数错误|SyntaxError|TypeError|ReferenceError/.test(st.recent?.at(-1)?.summary ?? st.lastError ?? '');
+    // 刚换上（写下、改进、退回）的版本还没跑过：先让它跑几次（以前退回旧版本生成的新版本号马上又被改）
+    if (uses === 0 && st.swappedAt && Date.now() - st.swappedAt < BehaviorEngine.FRESH_MS && !codeBroke)
+      return `「${name}」当前版本 ${Math.round((Date.now() - st.swappedAt) / 60_000)} 分钟前才换上，还没用过：先让它跑几次，这次的经过已经记进它的成败`;
     // 一次都没触发过：说明条件没对上这次的事，改写它不会丢掉什么证据
     if (uses === 0 || uses >= BehaviorEngine.MIN_EVIDENCE || codeBroke) return null;
     return `「${name}」当前版本只用了 ${uses} 次（成 ${cur.ok} 败 ${cur.fail}），证据还不够，先不改写它；这次的经过已经记进它的成败，等用够 ${BehaviorEngine.MIN_EVIDENCE} 次再看要不要改`;
@@ -471,7 +510,7 @@ export class BehaviorEngine {
     const w = this.book.write(name, k.description, body, raw);
     if (!w.ok) return w;
     const nb = this.behaviors.get(name);
-    this.touch(name, (st) => { st.disabled = false; delete st.lastError; });
+    this.touch(name, (st) => { st.disabled = false; delete st.lastError; st.versionAt = Date.now(); st.swappedAt = Date.now(); });
     return { ok: true, version: nb?.version ?? 0 };
   }
 
@@ -553,11 +592,13 @@ export class BehaviorEngine {
         // 新版本跑了几次明显比上一版差：退回上一版（真人改坏了也会改回去）
         const prev = st.byVersion[String((b.version ?? 1) - 1)];
         const rate = (x: { ok: number; fail: number }) => x.ok / Math.max(1, x.ok + x.fail);
-        if (prev && prev.ok + prev.fail >= 2 && per.ok + per.fail >= 3 && rate(per) < rate(prev) - 0.25) rollback = { from: b.version ?? 1, to: (b.version ?? 1) - 1 };
+        // 两个版本都要跑够几次才比（以前凭“3 成 0 败”就当标杆，来回退了十几次）
+        if (prev && prev.ok + prev.fail >= BehaviorEngine.MIN_EVIDENCE && per.ok + per.fail >= BehaviorEngine.MIN_EVIDENCE + 1 && rate(per) < rate(prev) - 0.25) rollback = { from: b.version ?? 1, to: (b.version ?? 1) - 1 };
       }
       // 自己写的技能，当前版本用了几次大多失败：先停用，让心智回头改（同名重写即可）
       if (b.source === 'self' && per.ok + per.fail >= 4 && per.ok / (per.ok + per.fail) < 0.25 && !st.disabled) {
         st.disabled = true;
+        st.disabledAt = Date.now();
         this.bus.publish('skill_disabled', 'P1', `技能「${name}」这一版用了 ${per.ok + per.fail} 次只成了 ${per.ok} 次，先停用；最近一次：${st.lastError ?? ''}`, { name, by: 'stats' });
       }
     });

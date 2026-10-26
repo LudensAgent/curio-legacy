@@ -22,7 +22,9 @@ export type ImproveWhy = 'failures' | 'requested' | 'slow';
 const WHY_TEXT = (why: ImproveWhy, note?: string) => why === 'requested' ? `机器人自己觉得要改：${note ?? ''}` : why === 'slow' ? `能用但费劲：${note ?? '用它时拿东西比不用它或比旧版本慢'}` : '最近几次运行大多失败';
 export interface ImproverOptions { globalGapMs: number; perSkillGapMs: number; requestGapMs: number; minFailures: number; maxPerHour: number }
 /** 默认不限频（模型便宜）：每次改进后新版本要重新攒够失败才会再改，本身就不会连着改 */
-export const DEFAULT_IMPROVER: ImproverOptions = { globalGapMs: 0, perSkillGapMs: 0, requestGapMs: 0, minFailures: 2, maxPerHour: Infinity };
+export const DEFAULT_IMPROVER: ImproverOptions = { globalGapMs: 0, perSkillGapMs: 20 * 60_000, requestGapMs: 5 * 60_000, minFailures: 2, maxPerHour: Infinity };
+/** 刚换上（改进、退回）的版本至少跑这么久、这么多次，才因为失败去改它：每个版本都要攒够经验才知道好坏 */
+export const MIN_VERSION_AGE_MS = 15 * 60_000;
 
 const numbered = (code: string) => code.split('\n').map((l, i) => `${String(i + 1).padStart(3)}| ${l}`).join('\n');
 
@@ -55,8 +57,12 @@ export class CodeImprover {
     if (this.starts.length >= this.opts.maxPerHour) return '这一小时改得够多了';
     if (now - (this.perSkill.get(name) ?? 0) < (why === 'failures' ? this.opts.perSkillGapMs : this.opts.requestGapMs)) return '这份技能刚改过';
     if (why === 'failures') {
-      const per = this.engine.statsOf(name)?.byVersion?.[String(b.version ?? 1)];
+      const st = this.engine.statsOf(name);
+      const per = st?.byVersion?.[String(b.version ?? 1)];
       if (!per || per.fail < this.opts.minFailures || per.fail < per.ok) return '失败还不够多';
+      // 代码本身报错（某一行抛错）可以马上修；只是“做了没成”的，刚换上的版本先多跑一阵
+      const codeBroke = /第 \d+ 行|SyntaxError|TypeError|ReferenceError/.test(st?.recent?.at(-1)?.summary ?? st?.lastError ?? '');
+      if (st?.swappedAt && now - st.swappedAt < MIN_VERSION_AGE_MS && !codeBroke) return '这一版刚换上不久';
     }
     this.busy = { name, startedAt: now };
     this.lastAt = now;

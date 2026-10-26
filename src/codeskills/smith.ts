@@ -28,9 +28,9 @@ import { API_DOC } from './bridge.ts';
  *
  * 不限次数（模型便宜）；只是同一时间只写一份，其余排队，挨得很近的同类事合并成一件。
  */
-export type ForgeKind = 'death' | 'pain' | 'noted' | 'review' | 'efficiency' | 'recurring' | 'repeated';
-const KIND_LABEL: Record<ForgeKind, string> = { death: '死亡', pain: '一段吃了大亏的经历', noted: '自己觉得值得学的事', review: '这段时间的回顾', efficiency: '一次收获效率明显变化', recurring: '反复出现的同一种失败', repeated: '一再重复的同一串动作' };
-const ORDER: ForgeKind[] = ['death', 'noted', 'recurring', 'repeated', 'pain', 'efficiency', 'review'];
+export type ForgeKind = 'death' | 'pain' | 'noted' | 'review' | 'efficiency' | 'recurring' | 'repeated' | 'goal';
+const KIND_LABEL: Record<ForgeKind, string> = { death: '死亡', pain: '一段吃了大亏的经历', noted: '自己觉得值得学的事', review: '这段时间的回顾', efficiency: '一次收获效率明显变化', recurring: '反复出现的同一种失败', repeated: '一再重复的同一串动作', goal: '一个迟迟推进不了的目标' };
+const ORDER: ForgeKind[] = ['death', 'noted', 'goal', 'recurring', 'repeated', 'pain', 'efficiency', 'review'];
 /** 重复的动作串：最短几步、重复几遍算“一套做法”，在多长时间里看，学过之后多久再看同一串 */
 export const REPEATED = { minLen: 2, maxLen: 6, times: 3, windowMs: 10 * 60_000, againMs: 20 * 60_000 };
 /** 一次失败说明缺了什么：没吃的、找不到吃的、合成或盖房缺的材料 */
@@ -270,6 +270,17 @@ export class SkillSmith {
     this.report('repeated', at, `心智一步步指挥身体，把「${hit.pattern.map((t) => t.split(' ')[0]).join(' → ')}」这一串重复了 ${hit.times} 遍`, 0, undefined, lines);
   }
 
+  /**
+   * 目标卡住了（主目标清单很久没勾掉一项）：不问“刚才那次失败怎么补救”，而问“要做到这件事，身体还缺什么能力”。
+   * 同一个目标 45 分钟内只问一次。
+   */
+  goalStuck(goal: string, lines: string[], now = Date.now()) {
+    if (now - (this.goalAt.get(goal) ?? 0) < 45 * 60_000) return;
+    this.goalAt.set(goal, now);
+    this.report('goal', now, `主目标「${goal.slice(0, 60)}」很久没有进展`, 0, undefined, lines);
+  }
+  private goalAt = new Map<string, number>();
+
   /** 心智说“刚才这事值得学” */
   noted(note: string, now = Date.now()) { this.report('noted', now, note.slice(0, 200), 3 * 60_000, note.slice(0, 300)); }
 
@@ -322,6 +333,10 @@ export class SkillSmith {
 chronic_shortages 是这两个小时里一再缺的东西：想想能不能把它变成稳定来源（种、养、建一个能持续产出的东西、固定去哪儿补），能写成技能就写，写不了就在 none 的 why 里说清该做什么。
 找两类问题：一是反复出现、费时间、常失败的；二是“能做成但费劲”的——花时间最多、在变费劲、或者比它自己最省的那几次慢很多的事，想想有没有更省的做法（换个地方、换个顺序、换个找法、一次多做些）。
 判断哪些可以靠一个技能解决（身体以后自己处理，或者让心智用 use_skill 调用的一套做法），写出来（最多 2 份）。`
+      : incident.kind === 'goal'
+        ? `它的一个主目标迟迟推进不了（下面是目标、清单和这段时间做过的事）。不要只想“刚才那次失败怎么补救”，而是问：要做到这件事，身体还缺什么能力？
+缺的如果是一套做法（比如“把一面墙从下往上砌完”“开一条巷道找到铁矿并带回来”“出远门前把床收进背包”），写成调用类技能（不写 when，变化的部分写成 args），优先用 reliable_skills 组合；
+缺的如果不是做法，而是该放下或换掉这个目标、该先去弄某样东西，输出 {"none":true,"why":"…"} 并在 why 里说清楚（心智回想时会看到）。`
       : incident.kind === 'repeated'
         ? `它的心智一步步指挥身体，把同一串动作重复了好几遍（下面是这串动作和前后经过）。看清楚这串动作在完成什么（比如一级级挖出台阶往上走、一格格垫脚过沟、来回搬东西），
 把它练成一个技能：多半写成调用类（不写 when，心智以后用 use_skill 一句话做完，变化的部分写成 args），需要“一直做到某个条件达成”就写代码技能循环；
@@ -343,6 +358,8 @@ chronic_shortages 是这两个小时里一再缺的东西：想想能不能把�
 - 针对一类情况，不是只对这一次；触发条件只写身体感觉得到的事（血量、看见的怪、身边的方块、刚失败的动作、是否挨打、是否在坑里）。
 - 需要计算（找路、挑方向、挑落脚点、判断要不要打）就写代码技能（code）；简单固定的几步可以写 steps；也可以不写 when，做成让心智在 routine 里 use_skill 调用的连招。
 - existing_skills 里已经有管这件事的技能、只是没做好：用同一个名字重写它，别重复造。
+- reliable_skills 是已经验证可靠的技能（积木）：代码里用 api.useSkill 调用它们，能组合现成的就别从底层动作重写一遍；新技能可以比它们高一层（比如“开一条巷道找铁并带回来”调用挖巷道的那份）。
+- existing_skills 里标“已收起”的是墓碑：写着当时为什么收起。同一种事没有新证据就输出 none，别把它换个样子再写一遍。
 - young_skills 里的技能当前版本还没用够几次，看不出好坏：不要改写它们，也不要换个名字另写一份做同一件事；这次的事归它们管就输出 none（经过已经记进它们的成败）。
 - 不是技能能解决的（纯属运气、应该由思考决定的取舍、缺的是材料不是做法）：输出 {"none":true,"why":"…"}。
 
@@ -359,6 +376,7 @@ ${API_DOC}
       [review ? 'recent_activities' : 'episode']: incident.lines,
       now: incident.context,
       existing_skills: this.engine.overview(),
+      reliable_skills: this.engine.reliableList(),
       young_skills: this.engine.list().filter((b) => this.engine.rewriteGate(b.name)).map((b) => { const c = this.engine.currentStats(b.name); return `${b.name}（这一版成 ${c.ok} 败 ${c.fail}）`; }),
       ...(incident.kind === 'pain' ? { usual_pain: this.pain.baseline() } : {}),
       ...(this.ledger && review ? { harvest_ledger: this.safeLedger(() => this.ledger!.digest(12)) } : {}),

@@ -34,6 +34,8 @@ export interface MindDeps {
   researchContext?: () => unknown;
   audience?: { context(tier?: 'light' | 'full'): AudienceContext | null; buildConsensus?(windowMs?: number): { viewers: number; messages: number; samples: string[] }; clearBuildConsensus?(): void };
   onGoalEnd?: (status: string) => void;
+  /** 主目标很久没进展：交给后台想“要做到它还缺什么能力” */
+  onGoalStuck?: (goal: string, lines: string[]) => void;
   /** 游戏进度（里程碑）：做到了哪些、接下来还有哪些没做到 */
   progress?: () => { reached: string[]; next: string[] } | null;
   /** 想说话时（不以 / 开头） */
@@ -270,6 +272,7 @@ export class Mind {
     this.safe(() => this.audienceOnBuilding(), undefined);
     this.safe(() => this.autoCheckPlan(p), undefined);
     this.safe(() => this.strategy.onTick(p.time.phase, this.bedDist(), this.activity?.what), undefined);
+    this.safe(() => this.goalStuckCheck(), undefined);
     if (this.activity?.kind === 'rest') this.maybeReflect('歇下来了');
     else if (Date.now() - Math.max(this.d.self.reflectedAt, this.startedAt) > 60 * 60_000) this.maybeReflect('玩了好一阵了');
   }
@@ -332,6 +335,20 @@ export class Mind {
     this.d.self.think(`观众一再说「${c.samples[0] ?? '够了'}」，${r.text}`, 'outcome');
     const n = this.attention.notice(`audience_accept:${site.id}`, `观众们一再劝房子够了：${r.text}——可以去做别的事了`, 0.6, 0);
     if (n) this.d.bus.publish('notice', 'P2', `注意到：${n.what}`, { salience: n.salience, level: n.level });
+  }
+
+  /** 主目标清单 30 分钟以上、8 段活以上没勾掉一项：目标卡住了 */
+  private goalStuckCheck() {
+    const plan = this.d.self.plan();
+    if (!plan || !this.d.onGoalStuck) return;
+    const since = plan.progressAt ?? plan.setAt;
+    const acts = this.d.self.history(60).filter((r) => r.at > since);
+    if (Date.now() - since < 30 * 60_000 || acts.length < 8) return;
+    this.d.onGoalStuck(plan.goal, [
+      `目标：${plan.goal}（定下 ${Math.round((Date.now() - plan.setAt) / 60_000)} 分钟，${Math.round((Date.now() - since) / 60_000)} 分钟没勾掉一项）`,
+      `清单：${plan.steps.map((st, i) => `${i}.[${st.done ? 'x' : ' '}] ${st.text}`).join(' ')}`,
+      ...acts.slice(-20).map((r) => `${r.what} → ${r.outcome}${r.outcome !== 'done' ? `：${r.summary.slice(0, 80)}` : ''}`),
+    ]);
   }
 
   /** 清单项写了 done_when 的：事实达成就自动勾掉；全勾掉主目标就完成 */
@@ -715,10 +732,11 @@ export class Mind {
       researchContext: tier === 'deliberate' && reflect ? this.safe(() => this.d.researchContext?.(), undefined) : undefined,
       persona: this.d.persona,
       gameMessages: this.recentGameMessages(),
-      skills: this.safe(() => this.d.thinker.skillBook?.index() ?? [], []),
+      // 收起、停用的技能不进目录（翻技能书、回想时还看得到）：目录越长越难挑，还拖累缓存
+      skills: this.safe(() => this.d.thinker.skillBook?.index((n) => !!this.d.behaviors?.inactive(n)) ?? [], []),
       stuckHere: this.progressing() ? null : stuckHere(this.recentEnds, state.pos),
       recalled, ...(openedSkill ? { openedSkill } : {}), ...(learnFrom ? { learnFrom } : {}), plan,
-      ...(this.d.behaviors && tier === 'deliberate' ? { learnedSkills: this.safe(() => this.d.behaviors!.overview(), []) } : {}),
+      ...(this.d.behaviors && tier === 'deliberate' ? { learnedSkills: this.safe(() => this.d.behaviors!.overview().filter((l) => !/已收起|已停用/.test(l)), []) } : {}),
       ...(this.d.thinker.designing ? { designing: { brief: this.d.thinker.designing.brief, minutes: Math.round((Date.now() - this.d.thinker.designing.startedAt) / 60_000) } } : {}),
       repeatedFailures: [...this.failuresByTarget].filter(([, f]) => f.n >= 2)
         .sort((a, b) => b[1].n - a[1].n).slice(0, 10).map(([key, f]) => `${key.replace(':', ' ')} ×${f.n}（10 分钟内）`),

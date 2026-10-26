@@ -8,6 +8,7 @@
     "node": ">=20.12"
   },
   "scripts": {
+    "postinstall": "node scripts/patch-deps.mjs",
     "start": "tsx src/main.ts",
     "start:proxy": "node --env-file=.env --use-env-proxy --import tsx src/main.ts",
     "dev": "tsx watch src/main.ts",

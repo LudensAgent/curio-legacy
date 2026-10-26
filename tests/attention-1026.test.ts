@@ -101,3 +101,23 @@ test('策略回顾的事实：夜里在哪过、死在哪，只给事实', () =>
   assert.match(facts, /睡床 0 次，在外面熬 1 次（那几晚离床最远 150 格），夜里死了 1 次/);
   assert.match(facts, /shot by Skeleton×1/);
 });
+
+test('技能目录不列收起的；收起不久的技能后台不同名重写（墓碑）；刚写的不算可靠积木', async () => {
+  const { BUILTIN_SKILLS_DIR, SkillBook } = await import('../src/knowledge/skillbook.ts');
+  const { BehaviorEngine } = await import('../src/mind/behaviors.ts');
+  const { EventBus } = await import('../src/events.ts');
+  const { FakeAdapter } = await import('./fake-adapter.ts');
+  const noSenses = { perceivedEntities: () => [], knownBlocks: () => [], refresh() {}, markSweep() {} };
+  const book = new SkillBook(BUILTIN_SKILLS_DIR, fs.mkdtempSync(path.join(os.tmpdir(), 'curio-tomb-')));
+  const engine = new BehaviorEngine(book, new FakeAdapter(), null, new EventBus(), noSenses as any);
+  const w0 = engine.write({ name: 'dig-me-out', description: '被困在坑里时挖台阶出去', code: 'return 1;' });
+  assert.ok(w0.ok, JSON.stringify(w0));
+  assert.ok(engine.retire('dig-me-out', '一次都没用上'));
+  assert.ok(engine.inactive('dig-me-out'));
+  assert.ok(!book.index((n) => engine.inactive(n)).some((l) => l.startsWith('dig-me-out')), '目录不列收起的');
+  const w = engine.write({ name: 'dig-me-out', description: '被困在坑里时挖台阶出去 v2', code: 'return 2;' }, { by: 'forge' });
+  assert.ok(!w.ok && (w as any).gated, '收起不久，后台不重写');
+  assert.match((w as any).error, /收起/);
+  assert.ok(engine.write({ name: 'dig-me-out', description: '被困在坑里时挖台阶出去 v2', code: 'return 2;' }).ok, '心智自己要写可以');
+  assert.match(engine.reliable('dig-me-out') ?? '', /不够可靠/);
+});

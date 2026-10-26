@@ -178,8 +178,12 @@ export class EpisodicMemory implements MemoryRecall {
           fs.appendFileSync(this.archiveFile, JSON.stringify(episode) + '\n', 'utf8');
         } catch { this.warn('经历归档未能保存；本次经历仅暂存于内存。'); }
       }
-      if (this.remoteEnabled() && this.writable) {
-        this.queue.push({ episode, attempts: 0, nextAttemptAt: 0 });
+      // 远程记忆（Hindsight）每存一段都要用 LLM 抽取事实、合并观察，记忆越大越贵：
+      // 几秒钟就顺利做完的小活只留在本地归档里，远程只存卡住、放弃、做了一分钟以上的，以及发现、死亡、建成
+      const d = (event.data ?? {}) as Record<string, unknown>;
+      const notable = event.type !== 'attempt_end' || d.outcome !== 'done' || Number(d.durationSec ?? 0) >= 60;
+      if (this.remoteEnabled() && this.writable && notable) {
+        this.queue.push({ episode: detail.length > 800 ? { ...episode, text: `${event.msg.slice(0, 4000)} @ ${state.dim} ${position.join(',')}\n${detail.slice(0, 800)}` } : episode, attempts: 0, nextAttemptAt: 0 });
         if (this.persistQueue()) this.scheduleDrain();
       }
     } catch { this.warn('记忆事件处理失败；游戏继续运行。'); }

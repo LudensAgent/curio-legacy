@@ -10,6 +10,7 @@ import { Thinker } from './mind/thinker.ts';
 import { BUILTIN_SKILLS_DIR, SkillBook } from './knowledge/skillbook.ts';
 import { BehaviorEngine } from './mind/behaviors.ts';
 import { setBehaviorRegistry } from './skills/use-skill.ts';
+import { setReliableSkills } from './codeskills/bridge.ts';
 import { CodeImprover } from './codeskills/improver.ts';
 import { SkillSmith } from './codeskills/smith.ts';
 import { SkillCurator } from './codeskills/curator.ts';
@@ -182,6 +183,7 @@ const skillBook = new SkillBook(BUILTIN_SKILLS_DIR, path.join(config.dataDir, 's
 /** 行为技能：带触发条件和步骤的技能，模型写下就生效（自动做、失败时先试、或 use_skill 调用） */
 const behaviors = new BehaviorEngine(skillBook, adapter, arbiter, bus, vision, path.join(config.dataDir, 'skill-stats.json'));
 setBehaviorRegistry(behaviors);
+setReliableSkills((name) => behaviors.reliable(name));
 /** 代码技能老失败（或心智要求）时，在后台单独请模型改进代码；限频，不会太频繁 */
 const improver = new CodeImprover(coderPlanner, behaviors, bus, { globalGapMs: config.mind.skillImproveGapMin * 60_000 });
 /** 从经历里总结新技能：心智点名、定期回顾、吃了比平时大的亏、死亡 */
@@ -194,10 +196,11 @@ const ledger = new Ledger(path.join(config.dataDir, 'ledger.json'), bus, () => a
   () => ({ blocks: [...vision.visibleNow.values()].filter((b) => NOTABLE.has(b.name)), entities: vision.perceivedEntities(24) }),
   (from, to) => behaviors.usedBetween(from, to));
 ledger.onSignal = (sig) => smith.efficiency(sig);
-// 自己写的技能被停用（用了好几次大多没成）：这本身就是一次值得学的事——是做法不对，还是该换个思路
+let loopCurateAt = 0;
 bus.on('event', (ev: { type: string; msg: string; data?: Record<string, unknown> }) => {
-  if (ev.type === 'skill_loop') setTimeout(() => void curator.check(), 1000).unref?.(); // 拉锯要尽快理清，不等十分钟一次的例行整理
-  if (ev.type === 'skill_disabled' && ev.data?.by === 'stats') smith.noted(`${ev.msg}。看看是这套做法本身不对、依赖的动作不可靠，还是该换一种思路（必要时用同名重写）`);
+  // 拉锯要尽快理清，但至少隔 10 分钟（拉锯越多整理越勤，整理本身又在制造拉锯）
+  if (ev.type === 'skill_loop' && Date.now() - loopCurateAt >= 10 * 60_000) { loopCurateAt = Date.now(); setTimeout(() => void curator.check(), 1000).unref?.(); }
+  // 技能被停用不再自动交给后台同名重写（那会形成“写→停用→重写→收起”的闭环）；心智会注意到，要改由它自己决定
 });
 smith.ledger = ledger;
 improver.ledger = ledger;
@@ -230,6 +233,7 @@ const mind = new Mind({
   behaviors,
   ledger,
   onWorthLearning: (note: string) => smith.noted(note),
+  onGoalStuck: (goal, lines) => smith.goalStuck(goal, lines),
   ...(audience ? { audience } : {}),
   mySkills,
   researchContext: () => methods.researchContext(),

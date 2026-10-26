@@ -22,6 +22,7 @@ export const API_DOC = `代码是一个 async 函数体，参数 api 和 args �
 - api.entities(半径≤32) → 看见/听见的生物 [{id,name,kind,dist,pos,fusing?}]
 - api.stepTo(x,y,z) 迈到相邻一格（平走、上一级、下一级）｜api.digAt(x,y,z)｜api.placeAt(x,y,z,"方块名|any") → {ok,code,summary}
 - api.moveTo(x,y,z,range,{sprint,avoid}?) 用寻路走过去（默认走路；sprint:true 跑，快但很耗饥饿；avoid:["方块名"] 这一趟绕开这些方块）→ {ok,error?,pos}｜api.act("动作名",{参数}) 用已有动作（goto、dig_at、defend…）→ {ok,code,summary}
+- api.useSkill("技能名",{args}?) 调用一份已经验证可靠的技能（reliable_skills 里列的，当积木用：先组合已经管用的，再补新的部分）→ {ok,code,summary}；最多套两层
 - api.look(yaw,pitch)｜api.lookAt(x,y,z)｜api.sleep(毫秒≤5000)｜api.log(…) 记一句给自己看｜api.progress(0..1)
 身体的细动作（打架、走位、躲闪都靠这些拼，怎么打由你决定）：
 - api.move({forward,back,left,right,jump,sprint,sneak}, 毫秒≤1000, {face: 实体id 或 [x,y,z]}?) 按住这些键一小会儿，期间一直盯着 face → {ok, moved 走了几格, stopped?: "lava"|"cliff"}；
@@ -58,6 +59,11 @@ const point = (v: unknown, name: string): Vec3Like => {
   return { x: Number(a[0]), y: Number(a[1]), z: Number(a[2]) };
 };
 const need = <T>(fn: T | undefined, what: string): T => { if (!fn) throw new Error(`这个身体做不了：${what}`); return fn; };
+
+/** 哪些技能可靠到能被别的代码技能当积木调用（行为引擎登记；返回 null = 可以） */
+let reliableCheck: ((name: string) => string | null) | null = null;
+export function setReliableSkills(fn: ((name: string) => string | null) | null) { reliableCheck = fn; }
+export const MAX_SKILL_DEPTH = 2;
 
 export function makeBridge(ctx: SkillCtx): SandboxHandler {
   hurtAt(ctx.bus); // 开始记挨打时刻
@@ -127,6 +133,20 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
           ...(e.height ? { height: e.height } : {}), ...(typeof e.hp === 'number' ? { hp: e.hp } : {}), ...(e.fusing ? { fusing: true } : {}) }));
       }
       case 'act': return runSkill(String(a[0] ?? ''), a[1]);
+      case 'useSkill': {
+        const name = String(a[0] ?? '').trim().toLowerCase();
+        const why = reliableCheck ? reliableCheck(name) : '没有登记可靠的技能';
+        if (why) throw new Error(`api.useSkill 只能调用已经验证可靠的技能：${why}`);
+        const depth = (ctx as SkillCtx & { skillDepth?: number }).skillDepth ?? 0;
+        if (depth >= MAX_SKILL_DEPTH) throw new Error(`技能最多套 ${MAX_SKILL_DEPTH} 层`);
+        const skill = SKILLS.use_skill;
+        const v = skill.validate({ name, ...(a[1] && typeof a[1] === 'object' ? { args: a[1] } : {}) }, ctx.adapter);
+        if (!v.ok) throw new Error(`useSkill 参数错误：${v.error}`);
+        throwIfAborted(ctx.signal);
+        const r = await skill.run({ ...ctx, skillDepth: depth + 1, deadline: Math.min(ctx.deadline, Date.now() + skill.timeoutMs), progress: () => {} } as SkillCtx, v.args);
+        if (r.status === 'cancelled') throw Object.assign(new Error('task cancelled'), { name: 'AbortedError' });
+        return { ok: r.status === 'succeeded', code: r.failureCode ?? null, summary: r.summary.slice(0, 200) };
+      }
       case 'stepTo': return runSkill('step', { to: rel(int(a[0], 'x'), int(a[1], 'y'), int(a[2], 'z')), facing: 'N' });
       case 'digAt': return runSkill('dig_at', { at: rel(int(a[0], 'x'), int(a[1], 'y'), int(a[2], 'z')), facing: 'N' });
       case 'placeAt': return runSkill('place_at', { at: rel(int(a[0], 'x'), int(a[1], 'y'), int(a[2], 'z')), item: String(a[3] ?? 'any'), facing: 'N' });
