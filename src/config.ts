@@ -117,6 +117,8 @@ export const config = {
       },
     },
     audience: {
+      /** 仅 danmaku 事件携带清洗后的昵称；游戏 LLM 始终只见匿名代号 */
+      showNames: bool('LIVE_SHOW_NAMES', false),
       maxInPrompt: num('AUDIENCE_MAX_IN_PROMPT', 6),
       windowSec: num('AUDIENCE_WINDOW_SEC', 180),
       perUserGapSec: num('AUDIENCE_PER_USER_GAP_SEC', 8),
