@@ -141,7 +141,8 @@ export class Reflex {
       return;
     }
     // 只在水里才检查氧气：Mineflayer 在陆地上偶尔会报出不准的氧气值
-    if (s.inWater && s.oxygen <= 10) {
+    // 氧气 20 → 0 只要 15 秒左右：降到 10 才浮，深水里常常来不及（日志里浮了 20 秒还是淹死了）
+    if (s.inWater && s.oxygen <= 14) {
       if (cur?.skill !== 'surface' && this.ready('drown', 4000)) this.fireDrown(s);
       return;
     }

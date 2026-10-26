@@ -142,11 +142,18 @@ async function recoverBlock(ctx: SkillCtx, args: TargetDigArgs) {
     forgetStationAt(ctx.memory, adapter.state().dim, affected, name);
     await adapter.collectNearbyDrops(signal, 3, Math.max(1, Math.min(3500, ctx.deadline - Date.now())));
     throwIfAborted(signal);
-    // 床、门、工作台这类“拆下来就是它自己”的：掉落物可能弹到墙后、屋里、坑底（看不见也在那儿），按身体知道的实体位置再走过去捡一次
+    // 床、门、工作台这类“拆下来就是它自己”的：掉落物会弹到旁边、掉进屋里或坑底。像人一样低头看看刚拆的地方，看见了再走过去捡
+    // （只用眼睛看得到的：技能不能透视实体列表）
     if (/_(bed|door)$/.test(name) || ['crafting_table', 'furnace', 'blast_furnace', 'smoker', 'chest'].includes(name)) {
       const had = before.get(name) ?? 0;
       for (let i = 0; i < 2 && (adapter.state().inventory.filter((it) => it.name === name).reduce((n, it) => n + it.count, 0) <= had) && Date.now() < ctx.deadline - 3000; i++) {
-        const drop = adapter.nearbyEntities(10).filter((e) => e.kind === 'item' && e.name.replace(/^item:/, '') === name).sort((a, b) => dist3(a.pos, pos) - dist3(b.pos, pos))[0];
+        const eye = adapter.eye();
+        if (eye) {
+          const vx = pos.x + 0.5 - eye.x, vz = pos.z + 0.5 - eye.z, vy = pos.y + 0.2 - eye.y;
+          try { await adapter.look(Math.hypot(vx, vz) > 0.2 ? Math.atan2(-vx, -vz) : eye.yaw, Math.atan2(vy, Math.max(0.3, Math.hypot(vx, vz))), signal); } catch (e) { if (isAbort(e)) throw e; }
+        }
+        ctx.senses.refresh();
+        const drop = ctx.senses.perceivedEntities(10).filter((e) => e.kind === 'item' && e.name.replace(/^item:/, '') === name).sort((a, b) => dist3(a.pos, pos) - dist3(b.pos, pos))[0];
         if (!drop) break;
         try { await adapter.moveTo({ kind: 'near', pos: drop.pos, range: 1 }, { signal, timeoutMs: Math.min(6000, Math.max(1000, ctx.deadline - Date.now() - 2000)) }); } catch (e) { if (isAbort(e)) throw e; }
         await adapter.collectNearbyDrops(signal, 2, 1500);
@@ -297,7 +304,7 @@ export const bodySkills = [dig, climbUp];
 
 /** 拆下来的东西掉哪去了：眼睛看得到的掉落物在哪、是不是泡在水里漂着；一个也看不到就照实说 */
 function dropsNear(ctx: SkillCtx, pos: Vec3Like) {
-  return ctx.adapter.nearbyEntities(24).filter((e) => e.kind === 'item').map((e) => {
+  return ctx.senses.perceivedEntities(24).filter((e) => e.kind === 'item').map((e) => {
     const cell = { x: Math.floor(e.pos.x), y: Math.floor(e.pos.y), z: Math.floor(e.pos.z) };
     const inWater = LIQUID_BLOCKS.has(ctx.adapter.blockAt(cell) ?? '');
     return { name: e.name.replace(/^item:/, ''), count: e.count ?? 1, at: cell, dist: Math.round(e.dist), fromTarget: Math.round(dist3(e.pos, pos)), inWater };

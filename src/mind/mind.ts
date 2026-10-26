@@ -929,6 +929,10 @@ export class Mind {
     if (decision.kind === 'adjust' && this.activity) {
       if (!sameActivity) { this.staleDropped++; return; } // 对旧活的调整，活已经换了
       const a = this.activity;
+      // 做法真的变了（不只是改个数量）：正在做的那一步也停下，马上按新做法来。
+      // 以前只改了 routine、等手上这一步自己做完：掉进水里想“游上岸”，手上的 gather 却在水下又挖了两分钟，淹死了
+      const changedMethod = signatureOf(a.steps) !== signatureOf(draft.steps);
+      if (changedMethod && this.d.arbiter.info()?.planId === a.id) this.d.arbiter.cancel('改了做法');
       Object.assign(a, { what: draft.what, why: draft.why || a.why, kind: draft.kind, steps: draft.steps, repeat: draft.repeat, iteration: 0, index: 0, adaptations: [], consecutiveFailures: 0,
         monologue: decision.monologue || a.monologue });
       if (draft.doneWhen) a.doneWhen = draft.doneWhen; else delete a.doneWhen;
