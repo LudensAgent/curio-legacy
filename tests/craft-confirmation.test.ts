@@ -150,3 +150,26 @@ test('2×2 合成格里有被打断留下的材料：合成前先收回背包，
   assert.deepEqual(clicks, [2, 3]);
   assert.equal(gridAtCraft.length, 0, '合成时格子是空的');
 });
+
+test('交互卫生：动作被打断后，收回合成格和光标上的东西，并记一笔 interaction_repaired', async () => {
+  const bus = new EventBus();
+  const events: any[] = [];
+  bus.on('event', (e: any) => { if (e.type === 'interaction_repaired') events.push(e); });
+  const adapter = new MineflayerAdapter(config, bus);
+  const slots: any[] = [];
+  slots[1] = { name: 'acacia_planks', count: 2 };
+  const inventory: any = { slots, selectedItem: { name: 'stick', count: 1 }, firstEmptyInventorySlot: () => 20, items: () => [] };
+  const clicks: [number, number][] = [];
+  adapter.bot = {
+    entity: {}, game: { dimension: 'overworld' }, inventory,
+    async clickWindow(slot: number, _b: number, mode: number) { clicks.push([slot, mode]); if (mode === 1) slots[slot] = undefined; else inventory.selectedItem = null; },
+    clearControlStates() {}, deactivateItem() {}, pathfinder: { stop() {}, setGoal() {} },
+  };
+  adapter.mcData = data; (adapter as any).connectedFlag = true;
+  adapter.stopAll();
+  await new Promise((r) => setTimeout(r, 500));
+  assert.deepEqual(clicks, [[1, 1], [20, 0]]);
+  assert.equal(events.length, 1);
+  assert.match(events[0].msg, /合成格里有 acacia_planks×2；光标上拿着 stick×1/);
+  assert.deepEqual(events[0].data.left, []);
+});

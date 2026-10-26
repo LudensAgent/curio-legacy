@@ -74,6 +74,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   private dimension = 'unknown';
   private actionEpoch = 0;
   private actionContext = new AsyncLocalStorage<() => void>();
+  /** 正在进行的底层动作数（afterAction 包着的）；为 0 时才算空闲 */
+  private inFlight = 0;
+  /** 打断后的“收拾残局”：下一个碰背包/界面的动作要等它做完，免得两边的点击交错 */
+  private repairing: Promise<void> | null = null;
+  private hygieneTimer: NodeJS.Timeout | null = null;
   private guardedClients = new WeakSet<object>();
   private dragonDeath: BossDeathObservation | null = null;
   private normalMovements: any = null;
@@ -120,7 +125,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       };
       this.guardedClients.add(client);
     }
+    this.inFlight++;
     const promise = this.actionContext.run(check, operation);
+    promise.finally(() => { this.inFlight--; }).catch(() => {});
     promise.then((late: any) => { try { check(); } catch { try { late?.close?.(); } catch { /* ignore */ } } }, () => {});
     const value = await raceAbort(promise, check.signal, undefined, () => {});
     try { check(); } catch (error) {
@@ -151,6 +158,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
 
     bot.on('spawn', () => {
       this.newSession();
+      // 空闲时巡一眼：有半截交互残留就收拾（不打扰正在进行的动作）
+      if (!this.hygieneTimer) {
+        this.hygieneTimer = setInterval(() => { if (this.inFlight === 0 && !this.repairing && this.interactionDirty().length) this.scheduleRepair('空闲时发现残留'); }, 5000);
+        this.hygieneTimer.unref?.();
+      }
       this.dimension = this.currentDimension();
       this.spawned = true;
       if (!this.mcData) this.mcData = require('minecraft-data')(bot.version);
@@ -869,6 +881,53 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       try { if (b.currentWindow) b.closeWindow(b.currentWindow); } catch { /* ignore */ }
       try { if (b.isSleeping) Promise.resolve(b.wake()).catch(() => {}); } catch { /* ignore */ }
     });
+    // 被打断的动作可能做了一半：界面里摆了一半的材料、光标上拿着东西。等服务器处理完已经发出的包，再收拾
+    this.scheduleRepair('动作被打断', 250);
+  }
+
+  /**
+   * 交互卫生：Mineflayer 的界面操作（合成、箱子、熔炉、装备）是一串点击，中途被打断时，没发出去的点击被丢掉，
+   * 服务器那边就留下半截状态（2×2 合成格里的材料、光标上的物品、没关的窗口），Mineflayer 却以为是干净的，
+   * 之后同类操作会一直对不上（合成卡到超时、放东西放不进去）。这里统一收拾：打断后收一次，空闲时发现残留也收一次；
+   * 碰背包/界面的动作开始前先等收拾完。每次收拾都发 interaction_repaired 事件，日志里看得到有多频繁。
+   */
+  private scheduleRepair(reason: string, delayMs = 0) {
+    if (this.repairing) return;
+    const run = async () => {
+      if (delayMs) await sleep(delayMs);
+      await this.repairInteraction(reason);
+    };
+    this.repairing = this.actionContext.exit(() => run()).catch(() => {}).finally(() => { this.repairing = null; });
+  }
+
+  /** 背包/界面里有没有残留（打断留下的半截交互） */
+  private interactionDirty(): string[] {
+    const b = this.bot;
+    if (!this.ready || !b?.inventory?.slots) return [];
+    const out: string[] = [];
+    const grid = [1, 2, 3, 4].map((i) => b.inventory.slots[i]).filter(Boolean);
+    if (grid.length) out.push(`合成格里有 ${grid.map((i: any) => `${i.name}×${i.count}`).join('、')}`);
+    if (b.inventory.selectedItem) out.push(`光标上拿着 ${b.inventory.selectedItem.name}×${b.inventory.selectedItem.count}`);
+    if (b.currentWindow && this.inFlight === 0) out.push(`窗口 ${b.currentWindow.type ?? ''} 没关`);
+    return out;
+  }
+
+  private async repairInteraction(reason: string) {
+    const b = this.bot;
+    const found = this.interactionDirty();
+    if (!found.length) return;
+    try {
+      if (b.currentWindow && this.inFlight === 0) { try { b.closeWindow(b.currentWindow); } catch { /* ignore */ } await sleep(100); }
+      await this.clearCraftGrid();
+    } catch { /* 下次再收 */ }
+    const left = this.interactionDirty();
+    this.bus.publish('interaction_repaired', left.length ? 'P2' : 'P3', `收拾交互残留（${reason}）：${found.join('；')}${left.length ? `；还剩：${left.join('；')}` : ''}`, { reason, found, left });
+  }
+
+  /** 碰背包/界面的动作开始前：等打断后的收拾做完；还有残留就先收拾 */
+  private async interactionReady() {
+    if (this.repairing) await this.repairing;
+    if (this.interactionDirty().some((d) => !d.startsWith('窗口'))) await this.actionContext.exit(() => this.repairInteraction('动作开始前发现残留'));
   }
 
   private cancelItemUse(b: any) {
@@ -1004,6 +1063,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const check = this.actionCheckpoint(signal);
     throwIfAborted(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
+    await this.interactionReady();
+    check();
     const b = this.bot;
     const item = b.inventory.items().find((i: any) => itemNames.includes(i.name));
     if (!item) return { ok: false, reason: 'NO_ITEM' };
@@ -1319,6 +1380,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const check = this.actionCheckpoint(signal);
     throwIfAborted(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', made: 0 };
+    await this.interactionReady();
+    check();
     const b = this.bot;
     const inItem = this.invItem(input);
     const fuelItem = this.invItem(fuel);
@@ -1373,6 +1436,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const check = this.actionCheckpoint(signal);
     throwIfAborted(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', contents: [], moved: 0 };
+    await this.interactionReady();
+    check();
     const b = this.bot;
     const block = b.blockAt(this.vec(pos));
     if (!block || !['chest', 'trapped_chest', 'barrel'].includes(block.name)) return { ok: false, reason: 'NO_CHEST', contents: [], moved: 0 };
@@ -1640,15 +1705,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const attemptCheck = this.actionCheckpoint(attemptSignal);
     // 背包 2×2 合成格里有上一次被打断留下的东西：Mineflayer 默认格子是空的，照样往里摆、去拿结果，服务器那边对不上，
     // 合成就一直卡到超时（日志里一连串 craft 16 秒后“已取消”）。先把格子清回背包
-    if (!table) await this.afterAction(() => this.clearCraftGrid(), check);
+    await this.interactionReady();
+    check();
     let timedOut = false;
     try {
       await this.afterAction(() => raceAbort(b.craft(recipe, times, table), attemptSignal, timeout, () => { timedOut = true; attempt.abort('craft transaction timed out'); }), attemptCheck);
     } catch (error) {
       attempt.abort('craft transaction ended without confirmation');
       this.actionContext.exit(() => { try { if (b.currentWindow) b.closeWindow(b.currentWindow); } catch { /* ignore */ } });
-      // 被打断或超时：摆了一半的材料留在 2×2 格里，收回来，别让下一次合成也卡住
-      try { await this.clearCraftGrid(); } catch { /* 下次合成前还会再清 */ }
+      // 被打断或超时：摆了一半的材料留在格子里，交给“收拾残局”（在动作上下文之外发包，不会被打断守卫吞掉）
+      this.scheduleRepair(timedOut ? '合成超时' : '合成被打断', 250);
       if (timedOut && !signal.aborted) throw new Error('合成界面没响应（超时）；格子里的材料已收回背包，可以再试一次');
       throw error;
     }
@@ -2097,6 +2163,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
 
   // ---------------------------------------------------------------- 通用基础动作
   private async equipNamed(name: string, check: (() => void) & { signal?: AbortSignal }) {
+    await this.interactionReady();
+    check();
     const it = this.bot.inventory.items().find((i: any) => i.name === name);
     if (!it) return false;
     if (this.bot.heldItem?.name !== name) await this.afterAction(() => this.bot.equip(it, 'hand'), check);
