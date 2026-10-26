@@ -371,19 +371,21 @@ export const pickupItems: Skill<{ radius: number; item?: string }> = {
       return m;
     };
     const before = inv();
-    const wanted = (name: string) => !args.item || name.replace(/^item:/, '') === args.item;
+    // 指名要捡：哪怕是刚扔掉的，也是改主意了，捡回来不算“又捡回来了”
+    if (args.item) adapter.forgetDiscarded?.(args.item);
+    const wanted = (name: string, _pos?: { x: number; y: number; z: number }) => !args.item || name.replace(/^item:/, '') === args.item;
     let visits = 0;
     let looked = false;
     for (let i = 0; i < 30 && Date.now() < ctx.deadline; i++) {
       senses.refresh();
       // 漂在水里的掉落物会动：同一个最多追 3 次，每次按它现在的位置
-      let item = senses.perceivedEntities(args.radius).find((e) => e.kind === 'item' && (chased.get(e.id) ?? 0) < 3 && wanted(e.name));
+      let item = senses.perceivedEntities(args.radius).find((e) => e.kind === 'item' && (chased.get(e.id) ?? 0) < 3 && wanted(e.name, e.pos));
       // 指名要捡的东西（比如自己刚拆下的床）眼前没看见：先转一圈、低头找找（只用眼睛，不透视实体列表）
       if (!item && args.item && !looked) {
         looked = true;
         try { await lookAround.run(ctx, { seconds: 3, for: args.item }); } catch (e) { if (isAbort(e)) throw e; }
         senses.refresh();
-        item = senses.perceivedEntities(args.radius).find((e) => e.kind === 'item' && (chased.get(e.id) ?? 0) < 3 && wanted(e.name));
+        item = senses.perceivedEntities(args.radius).find((e) => e.kind === 'item' && (chased.get(e.id) ?? 0) < 3 && wanted(e.name, e.pos));
       }
       if (!item) break;
       chased.set(item.id, (chased.get(item.id) ?? 0) + 1);

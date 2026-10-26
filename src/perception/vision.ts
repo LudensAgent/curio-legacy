@@ -839,12 +839,15 @@ export class Vision {
       seen_entities: this.seen.filter((e) => e.kind !== 'item').slice(0, 8).map(ent),
       ...(() => {
         // 看得见的掉落物（按物品合并）：猎物掉的肉、挖掉的方块、死亡掉落……
-        const drops = new Map<string, { item: string; count: number; dist: number; dir: string }>();
+        const drops = new Map<string, { item: string; count: number; dist: number; dir: string; tossed_by_me?: boolean }>();
         for (const e of this.seen) {
           if (e.kind !== 'item') continue;
           const item = e.name.replace(/^item:/, '') || 'unknown';
-          const cur = drops.get(item);
-          if (!cur) drops.set(item, { item, count: e.count ?? 1, dist: Math.round(e.dist), dir: e.dir });
+          // 自己刚扔掉的标出来（不藏起来）：看见地上的东西，知道哪些是自己刚腾出去的
+          const mine = !!(e.pos && this.adapter.isDiscarded?.(item, e.pos));
+          const key = mine ? `${item}:mine` : item;
+          const cur = drops.get(key);
+          if (!cur) drops.set(key, { item, count: e.count ?? 1, dist: Math.round(e.dist), dir: e.dir, ...(mine ? { tossed_by_me: true } : {}) });
           else { cur.count += e.count ?? 1; if (e.dist < cur.dist) { cur.dist = Math.round(e.dist); cur.dir = e.dir; } }
         }
         const list = [...drops.values()].sort((a, b) => a.dist - b.dist).slice(0, 8);

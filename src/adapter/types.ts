@@ -261,7 +261,8 @@ export interface GameAdapter {
   useGui?(pos: Vec3Like, ops: GuiOp[], signal: AbortSignal): Promise<ActionResult & { view?: GuiView; done: string[] }>;
   /** 打开村民/流浪商人的交易界面；index 为 null 时只看交易列表 */
   tradeWith?(entityId: number, index: number | null, times: number, signal: AbortSignal): Promise<ActionResult & { trades: TradeView[]; traded: number }>;
-  tossItem?(name: string, count: number | null, signal: AbortSignal, face?: Vec3Like): Promise<ActionResult & { tossed: number }>;
+  /** face：朝这一点扔；gift：是扔给别人的（不记成自己扔掉的） */
+  tossItem?(name: string, count: number | null, signal: AbortSignal, face?: Vec3Like, opts?: { gift?: boolean }): Promise<ActionResult & { tossed: number }>;
   arrangeHotbar?(name: string, index: number, signal: AbortSignal): Promise<ActionResult>;
   equipItem?(name: string, destination: 'hand' | 'off-hand' | 'head' | 'torso' | 'legs' | 'feet', signal: AbortSignal): Promise<ActionResult>;
   /** item='' performs a legal empty-hand interaction (for example opening an owned door). */
@@ -285,6 +286,10 @@ export interface GameAdapter {
   enterPortalAt?(pos: Vec3Like, signal: AbortSignal, expectedDim?: string): Promise<ActionResult & { from?: AgentState; to?: AgentState }>;
   bossStatus?(): { dragonDeath: BossDeathObservation | null };
   dig(pos: Vec3Like, signal: AbortSignal): Promise<ActionResult>;
+  /** 这个掉落物是不是自己几分钟前扔掉的（只是事实，捡不捡由心智和技能自己定） */
+  isDiscarded?(item: string, pos: Vec3Like): boolean;
+  /** 改主意了（指名要捡回某样扔掉的东西）：不再当它是扔掉的，捡回来也不算“又捡回来了” */
+  forgetDiscarded?(item: string): void;
   /** 自己挖掉的方块（动作、代码技能、寻路挖穿的都算），since 之后的；用来记自己挖过的通道 */
   recentDug?(since: number): { pos: Vec3Like; name: string; ts: number }[];
   collectNearbyDrops(signal: AbortSignal, radius: number, timeoutMs: number): Promise<number>;
@@ -333,4 +338,6 @@ export interface GameAdapter {
  * 适配器事件：
  * spawn / death / respawn / hurt / disconnected / kicked / chat(username, message) / game_message(text, position)
  */
-export type AdapterEvent = 'spawn' | 'death' | 'respawn' | 'hurt' | 'disconnected' | 'kicked' | 'chat' | 'game_message';
+export type AdapterEvent = 'spawn' | 'death' | 'respawn' | 'hurt' | 'disconnected' | 'kicked' | 'chat' | 'game_message'
+  /** 捡起了自己刚扔掉的东西：{ item, count } */
+  | 'recollected';

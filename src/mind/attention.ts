@@ -31,7 +31,7 @@ export const RECONSIDER = 0.5;
 
 const levelOf = (s: number): Noticing['level'] => s >= URGENT ? 'urgent' : s >= RECONSIDER ? 'reconsider' : 'note';
 
-interface Snapshot { effects: Set<string>; worn: Set<string>; tod: number; weather: string; phase: string; food: number; hp: number; emptySlots: number; hostiles: Set<string>; resources: Set<string>; light: string | null; inWater: boolean; drops: Map<string, { item: string; count: number; dist: number; dir: string }> }
+interface Snapshot { effects: Set<string>; worn: Set<string>; tod: number; weather: string; phase: string; food: number; hp: number; emptySlots: number; hostiles: Set<string>; resources: Set<string>; light: string | null; inWater: boolean; drops: Map<string, { item: string; count: number; dist: number; dir: string; tossed_by_me?: boolean }> }
 
 /**
  * 注意力：把游戏里发生的事变成“我注意到了…”，并判断值不值得为它停下来重新想。
@@ -62,6 +62,7 @@ export class Attention {
       case 'reflex': return this.notice(`reflex:${ev.msg.slice(-12)}`, `身体自己反应了：${ev.msg}`, 0.35, 20_000);
       case 'death_items': return this.notice('death_items', ev.msg, 0.7, 60_000);
       case 'design': return this.notice(`design:${String(d.draftId ?? '')}`, `建筑师把图纸画好了：${ev.msg}`, 0.6, 0);
+      case 'effect_broken': return this.notice(`effect:${String(d.item ?? '')}`, `刚做完的事又被打破了：${ev.msg}`, 0.55, 60_000);
       case 'design_failed': return this.notice(`design_failed:${ev.msg.slice(0, 20)}`, `建筑师没画成：${ev.msg}`, 0.5, 0);
       case 'chat': {
         // 有人在聊天里说话（不是自己）：值得听一听
@@ -90,7 +91,7 @@ export class Attention {
       hostiles: new Set(p.nearby.hostile.filter((h) => h.dist <= 16).map((h) => h.name)),
       resources: new Set(p.nearby.resources.filter((r) => r.seen === 'now').map((r) => r.block)),
       light: p.light?.level ?? null, inWater: p.self.inWater,
-      drops: new Map(((p.vision as any)?.visible_drops ?? []).map((d: { item: string; count: number; dist: number; dir: string }) => [d.item, d])),
+      drops: new Map(((p.vision as any)?.visible_drops ?? []).map((d: { item: string; count: number; dist: number; dir: string; tossed_by_me?: boolean }) => [d.tossed_by_me ? `${d.item}:mine` : d.item, d])),
     };
     const prev = this.last;
     this.last = snap;
@@ -132,9 +133,9 @@ export class Attention {
     }
     if (snap.light === 'dark' && prev.light !== 'dark') out.push(this.notice('dark', '周围很暗', 0.3, 120_000, now));
     // 地上新出现的掉落物（猎物掉的肉、打怪掉的东西、炸出来的方块……）：看见了就知道，捡不捡它自己定
-    const fresh = [...snap.drops.values()].filter((d) => !prev.drops.has(d.item) && d.dist <= 16);
+    const fresh = [...snap.drops.entries()].filter(([k, d]) => !prev.drops.has(k) && d.dist <= 16).map(([, d]) => d);
     if (fresh.length) out.push(this.notice(`drops:${fresh.map((d) => d.item).sort().join(',')}`,
-      `地上有掉落物：${fresh.slice(0, 4).map((d) => `${d.item}×${d.count}（${d.dir ?? ''}${d.dist}格）`).join('、')}——要不要捡（pickup_items），自己判断`, 0.5, 60_000, now));
+      `地上有掉落物：${fresh.slice(0, 4).map((d) => `${d.item}×${d.count}（${d.dir ?? ''}${d.dist}格${d.tossed_by_me ? '，自己刚扔的' : ''}）`).join('、')}——要不要捡（pickup_items），自己判断`, 0.5, 60_000, now));
     return out.filter((n): n is Noticing => !!n);
   }
 

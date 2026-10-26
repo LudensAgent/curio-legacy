@@ -99,6 +99,9 @@ export function ownOxygen(b: any): number {
   return Number.isFinite(level) ? Math.max(0, Math.min(20, Math.round(level))) : 20;
 }
 
+/** 扔掉的东西多久之内算“自己刚扔的”（掉落物标出来；被捡回来时报一句） */
+const DISCARD_MS = 3 * 60_000;
+
 export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   bot: any = null;
   mcData: any = null;
@@ -201,6 +204,15 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // 这里自己补上：船的乘客名单里没有自己了，就算下船了。
     bot._client.on('set_passengers', (pk: any) => {
       try { this.syncDismount(bot, pk); } catch { /* ignore */ }
+    });
+    // 捡起了自己刚扔掉的东西（不管是动作顺手捡的，还是走到掉落物上自动捡起的）：只报事实，让上层知道“扔了又捡回来了”
+    bot.on('playerCollect', (collector: any, collected: any) => {
+      try {
+        if (collector !== bot.entity || !collected?.position) return;
+        const di = collected.getDroppedItem?.();
+        if (!di?.name || !this.isDiscarded(di.name, collected.position)) return;
+        this.emit('recollected', { item: di.name, count: di.count ?? 1 });
+      } catch { /* ignore */ }
     });
     // 自己挖掉的每一格（不管是哪个动作、代码技能还是寻路挖的）：记自己挖过的通道用
     bot.on('diggingCompleted', (block: any) => {
@@ -1517,7 +1529,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   }
 
   /** 扔出背包里的物品（Q 键）；可先转向某个位置，丢给村民/猪灵/队友或者清背包。按真实背包变化确认。 */
-  async tossItem(name: string, count: number | null, signal: AbortSignal, face?: Vec3Like): Promise<ActionResult & { tossed: number }> {
+  async tossItem(name: string, count: number | null, signal: AbortSignal, face?: Vec3Like, opts: { gift?: boolean } = {}): Promise<ActionResult & { tossed: number }> {
     const check = this.actionCheckpoint(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', tossed: 0 };
     await this.interactionReady();
@@ -1527,9 +1539,17 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const item = this.invItem(name);
     if (!item || have <= 0) return { ok: false, reason: 'NO_ITEM', tossed: 0 };
     const want = count == null ? have : Math.min(count, have);
+    const e = this.bot.entity;
+    // 朝哪扔由调用的人定（toss_item 的 toward）；不指定就朝现在看的方向
     if (face) await this.afterAction(() => this.bot.lookAt(this.vec({ x: face.x, y: face.y + 1, z: face.z }), true), check);
+    const yaw = e?.yaw ?? 0;
     await this.afterAction(() => this.bot.toss(item.type, null, want), check);
     const tossed = have - total();
+    // 记住扔掉了什么、大概落在哪（只是事实：哪些掉落物是自己刚扔的，被捡回来时能说清；不替它决定捡不捡）
+    if (tossed > 0 && !opts.gift && e?.position) {
+      const land = face ?? { x: e.position.x - Math.sin(yaw) * 2, y: e.position.y, z: e.position.z - Math.cos(yaw) * 2 };
+      this.markDiscarded(name, land);
+    }
     return tossed > 0 ? { ok: true, tossed } : { ok: false, reason: 'TOSS_NOT_CONFIRMED', tossed: 0 };
   }
 
@@ -2661,6 +2681,18 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       return { ok: false, reason: String(e?.message ?? e) };
     }
   }
+
+  /** 自己扔掉的东西：落点和时间，3 分钟内落点 6 格以内的同名掉落物算“自己刚扔的” */
+  private discarded: { name: string; pos: Vec3Like; ts: number }[] = [];
+  private markDiscarded(name: string, pos: Vec3Like) {
+    const now = Date.now();
+    this.discarded = this.discarded.filter((d) => now - d.ts < DISCARD_MS).concat({ name, pos, ts: now }).slice(-32);
+  }
+  isDiscarded(item: string, pos: Vec3Like): boolean {
+    const name = item.replace(/^item:/, ''), now = Date.now();
+    return this.discarded.some((d) => d.name === name && now - d.ts < DISCARD_MS && Math.hypot(d.pos.x - pos.x, d.pos.y - pos.y, d.pos.z - pos.z) <= 6);
+  }
+  forgetDiscarded(item: string) { this.discarded = this.discarded.filter((d) => d.name !== item.replace(/^item:/, '')); }
 
   private dugLog: { pos: Vec3Like; name: string; ts: number }[] = [];
   recentDug(since: number) { return this.dugLog.filter((d) => d.ts > since); }

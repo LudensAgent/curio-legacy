@@ -28,9 +28,9 @@ import { API_DOC } from './bridge.ts';
  *
  * 不限次数（模型便宜）；只是同一时间只写一份，其余排队，挨得很近的同类事合并成一件。
  */
-export type ForgeKind = 'death' | 'pain' | 'noted' | 'review' | 'efficiency' | 'recurring' | 'repeated' | 'goal';
-const KIND_LABEL: Record<ForgeKind, string> = { death: '死亡', pain: '一段吃了大亏的经历', noted: '自己觉得值得学的事', review: '这段时间的回顾', efficiency: '一次收获效率明显变化', recurring: '反复出现的同一种失败', repeated: '一再重复的同一串动作', goal: '一个迟迟推进不了的目标' };
-const ORDER: ForgeKind[] = ['death', 'noted', 'goal', 'recurring', 'repeated', 'pain', 'efficiency', 'review'];
+export type ForgeKind = 'death' | 'pain' | 'noted' | 'review' | 'efficiency' | 'recurring' | 'repeated' | 'goal' | 'undone';
+const KIND_LABEL: Record<ForgeKind, string> = { death: '死亡', pain: '一段吃了大亏的经历', noted: '自己觉得值得学的事', review: '这段时间的回顾', efficiency: '一次收获效率明显变化', recurring: '反复出现的同一种失败', repeated: '一再重复的同一串动作', goal: '一个迟迟推进不了的目标', undone: '做完的事又被自己打破' };
+const ORDER: ForgeKind[] = ['death', 'noted', 'goal', 'recurring', 'undone', 'repeated', 'pain', 'efficiency', 'review'];
 /** 重复的动作串：最短几步、重复几遍算“一套做法”，在多长时间里看，学过之后多久再看同一串 */
 export const REPEATED = { minLen: 2, maxLen: 6, times: 3, windowMs: 10 * 60_000, againMs: 20 * 60_000 };
 /** 一次失败说明缺了什么：没吃的、找不到吃的、合成或盖房缺的材料 */
@@ -196,6 +196,8 @@ export class SkillSmith {
       this.shortages = this.shortages.filter((x) => ev.ts - x.at < 2 * 3600_000).slice(-400);
     } else if (ev.type === 'task_start' && d.source === 'llm' && d.skill) {
       this.didAction(String(d.skill), d.args, ev.ts);
+    } else if (ev.type === 'effect_broken') {
+      this.undoneAgain(String(d.by ?? ''), String(d.item ?? ''), ev.msg, ev.ts);
     } else if (ev.type === 'reflect_start') {
       this.review('歇下来回想');
     }
@@ -282,6 +284,17 @@ export class SkillSmith {
   private goalAt = new Map<string, number>();
 
   /** 心智说“刚才这事值得学” */
+  /** 同一种“做完又被打破”（同一个动作、同一样东西）半小时内第 2 次：值得想想怎么让效果留住 */
+  private undone: { key: string; at: number; msg: string }[] = [];
+  private undoneAgain(by: string, item: string, msg: string, at: number) {
+    const key = `${by}:${item}`;
+    this.undone = [...this.undone.filter((u) => at - u.at < 30 * 60_000), { key, at, msg }];
+    const same = this.undone.filter((u) => u.key === key);
+    if (same.length !== 2) return;
+    this.report('undone', at, `${by} 的效果半小时里第 ${same.length} 次被自己打破：${msg}`, 3 * 60_000, undefined,
+      [...same.map((u) => `[${Math.round((u.at - at) / 1000)}s] effect_broken ${u.msg}`), ...this.recent.filter((e) => e.ts >= at - 3 * 60_000 && e.ts <= at).slice(-60).map((e) => `[${((e.ts - at) / 1000).toFixed(0)}s] ${e.type} ${e.msg.replace(/\s+/g, ' ').slice(0, 170)}`)]);
+  }
+
   noted(note: string, now = Date.now()) { this.report('noted', now, note.slice(0, 200), 3 * 60_000, note.slice(0, 300)); }
 
   /** 回顾这段时间（太频繁就跳过：至少隔一会儿，免得回顾的内容几乎一样） */
@@ -337,6 +350,10 @@ chronic_shortages 是这两个小时里一再缺的东西：想想能不能把�
         ? `它的一个主目标迟迟推进不了（下面是目标、清单和这段时间做过的事）。不要只想“刚才那次失败怎么补救”，而是问：要做到这件事，身体还缺什么能力？
 缺的如果是一套做法（比如“把一面墙从下往上砌完”“开一条巷道找到铁矿并带回来”“出远门前把床收进背包”），写成调用类技能（不写 when，变化的部分写成 args），优先用 reliable_skills 组合；
 缺的如果不是做法，而是该放下或换掉这个目标、该先去弄某样东西，输出 {"none":true,"why":"…"} 并在 why 里说清楚（心智回想时会看到）。`
+      : incident.kind === 'undone'
+        ? `它做完的一件事过一会儿又被自己打破了（下面是这件事、之后做过的动作和前后经过）：比如把不要的东西扔掉，接着挖东西时顺手捡回来，或者走到掉落物上被自动捡起。
+想清楚为什么会被打破、真人玩家会怎么避免（扔到哪、扔完往哪走、先做什么后做什么），能写成技能就写：多半是调用类（不写 when，心智用 use_skill 一句话做完，比如“清背包”），
+也可以是恢复类或自动类。纯属偶然、或者应该由思考决定的取舍，输出 {"none":true,"why":"…"}。`
       : incident.kind === 'repeated'
         ? `它的心智一步步指挥身体，把同一串动作重复了好几遍（下面是这串动作和前后经过）。看清楚这串动作在完成什么（比如一级级挖出台阶往上走、一格格垫脚过沟、来回搬东西），
 把它练成一个技能：多半写成调用类（不写 when，心智以后用 use_skill 一句话做完，变化的部分写成 args），需要“一直做到某个条件达成”就写代码技能循环；

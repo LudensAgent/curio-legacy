@@ -258,6 +258,8 @@ export class Arbiter extends EventEmitter {
           skill: task.skill,
           summary: result.summary,
           source,
+          // 动作声明的持续效果（比如扔掉的东西几分钟内不该回到手上）：交给 EffectWatch 盯着
+          ...(result.status === 'succeeded' && result.data?.expect ? { expect: result.data.expect } : {}),
         });
         const { controller: _c, cancelCode: _cc, cancelReason: _cr, preemptedBy, gentle, ...info } = task;
         this.emit('done', { task: info, result, durationMs, preemptedBy, gentle } satisfies TaskOutcome);

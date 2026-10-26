@@ -8,6 +8,7 @@ import { torchCount } from '../skills/light.ts';
 import { interactiveName, NOTABLE, type Vision, type VisionSummary } from './vision.ts';
 import { computeDrives, type Drive, type Stock } from '../brain/drives.ts';
 import { PassageTracker } from '../memory/passages.ts';
+import { EffectWatch } from '../brain/effects.ts';
 import { efficiencyInsights, type EfficiencyInsight } from '../brain/efficiency.ts';
 import { learnCandidates, reflectionDue } from '../brain/habits.ts';
 
@@ -204,6 +205,9 @@ export class Perception {
 
   constructor(private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private vision: Vision) {
     this.passages = new PassageTracker(memory);
+    // 做完的事有没有留住：扔掉的东西被捡回来了，身体当场就知道
+    const effects = new EffectWatch(bus);
+    adapter.on?.('recollected', (r: { item: string; count: number }) => effects.recollected(r.item, r.count));
   }
 
   observeBlocks(positions: Vec3Like[]) { return this.vision.observeBlocks(positions); }

@@ -1,4 +1,5 @@
 import { dist3 } from '../util.ts';
+import { DIRS } from '../perception/perception.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill } from './types.ts';
 import { resolveItemAlias } from './work.ts';
 
@@ -17,10 +18,11 @@ const itemArg = (raw: unknown, adapter: Parameters<typeof resolveItemAlias>[1]) 
 };
 
 // ------------------------------------------------------------------ toss_item
-export const tossItem: Skill<{ item: string; count: number | null; to?: string }> = {
+type Toward = 'back' | 'front' | keyof typeof DIRS | { x: number; y: number; z: number };
+export const tossItem: Skill<{ item: string; count: number | null; to?: string; toward?: Toward }> = {
   name: 'toss_item',
-  description: '扔出物品（Q 键）；to 写看得见的实体会先走近朝它扔',
-  argsDoc: '{"item","count"?:默认全部,"to"?:"<实体名>"}',
+  description: '扔出物品（Q 键）；to 写看得见的实体会先走近朝它扔；toward 定往哪扔（不写就朝正看着的方向，扔在前面一两格）',
+  argsDoc: '{"item","count"?:默认全部,"to"?:"<实体名>","toward"?:"back|front|N|NE|E|SE|S|SW|W|NW" 或 [x,y,z]}',
   timeoutMs: 30000,
   movement: true,
   validate(raw, adapter) {
@@ -34,7 +36,17 @@ export const tossItem: Skill<{ item: string; count: number | null; to?: string }
       count = n;
     }
     const to = typeof a.to === 'string' && a.to.trim() ? a.to.trim().toLowerCase() : undefined;
-    return { ok: true, args: { item, count, ...(to ? { to } : {}) } };
+    let toward: Toward | undefined;
+    if (a.toward !== undefined && a.toward !== null && a.toward !== '') {
+      const t = a.toward;
+      const xyz = Array.isArray(t) ? t : typeof t === 'string' && /^-?\d+(\.\d+)?[,\s]+-?\d+(\.\d+)?[,\s]+-?\d+(\.\d+)?$/.test(t.trim()) ? t.trim().split(/[,\s]+/) : null;
+      if (xyz && xyz.length === 3 && xyz.every((n) => Number.isFinite(Number(n)))) toward = { x: Number(xyz[0]), y: Number(xyz[1]), z: Number(xyz[2]) };
+      else if (typeof t === 'string' && ['back', 'front'].includes(t.trim().toLowerCase())) toward = t.trim().toLowerCase() as 'back' | 'front';
+      else if (typeof t === 'string' && DIRS[t.trim().toUpperCase()]) toward = t.trim().toUpperCase() as keyof typeof DIRS;
+      else return { ok: false, error: 'toward 写 back（身后）、front、方位 N/NE/E/SE/S/SW/W/NW，或坐标 [x,y,z]' };
+      if (to) return { ok: false, error: 'to（扔给谁）和 toward（往哪扔）只写一个' };
+    }
+    return { ok: true, args: { item, count, ...(to ? { to } : {}), ...(toward ? { toward } : {}) } };
   },
   async run(ctx, args) {
     const { adapter, senses, signal } = ctx;
@@ -58,10 +70,20 @@ export const tossItem: Skill<{ item: string; count: number | null; to?: string }
         face = now.pos;
         toName = now.name;
       }
-      const r = await adapter.tossItem(args.item, args.count, signal, face);
+      let where = '';
+      if (!face && args.toward) {
+        // 往哪扔：身后、某个方位、某一点；落点按约 3 格远算（只是转个身再扔）
+        const eye = adapter.eye(), p = adapter.state().pos;
+        const yaw = eye?.yaw ?? 0;
+        const step = (dx: number, dz: number) => { const l = Math.hypot(dx, dz) || 1; return { x: p.x + dx / l * 3, y: p.y, z: p.z + dz / l * 3 }; };
+        const t = args.toward;
+        face = typeof t === 'object' ? t : t === 'back' ? step(Math.sin(yaw), Math.cos(yaw)) : t === 'front' ? step(-Math.sin(yaw), -Math.cos(yaw)) : step(DIRS[t][0], DIRS[t][1]);
+        where = typeof t === 'object' ? `（朝 ${t.x},${t.y},${t.z}）` : t === 'back' ? '（朝身后）' : t === 'front' ? '' : `（朝 ${t}）`;
+      }
+      const r = await adapter.tossItem(args.item, args.count, signal, face, { gift: !!toName });
       if (!r.ok) return fail(r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS' : 'ERROR', `扔 ${args.item} 失败：${r.reason}`);
       const left = adapter.state().inventory.filter((i) => i.name === args.item).reduce((n, i) => n + i.count, 0);
-      return ok(`扔出了 ${r.tossed} 个 ${args.item}${toName ? `（朝 ${toName}）` : ''}，背包还剩 ${left} 个；掉在地上的东西过一会儿才会被捡走或消失`, { item: args.item, tossed: r.tossed, left, ...(toName ? { to: toName } : {}) });
+      return ok(`扔出了 ${r.tossed} 个 ${args.item}${toName ? `（朝 ${toName}）` : where}，背包还剩 ${left} 个；掉在地上的东西过一会儿才会被捡走或消失`, { item: args.item, tossed: r.tossed, left, ...(toName ? {} : { expect: { discarded: [args.item], forMs: 180_000, what: `扔掉了 ${args.item}×${r.tossed}${where}` } }), ...(toName ? { to: toName } : {}) });
     } catch (e) {
       if (isAbort(e)) throw e;
       return fail(codeFromError(e), `扔 ${args.item} 出错：${(e as Error).message}`);
