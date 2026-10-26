@@ -36,6 +36,8 @@ export interface Behavior {
 export interface RunRecord { at: number; ok: boolean; version?: number; summary: string; line?: number; trace?: string[]; logs?: string[]; args?: string }
 export interface BehaviorStats {
   fired: number; ok: number; fail: number; lastAt: number; disabled?: boolean; lastError?: string;
+  /** 最近一次写下（新写或改写）的时刻 */
+  writtenAt?: number;
   /** 恢复时自己判断“跟这事无关”跳过的次数（不算成败） */
   skipped?: number;
   /** 代码技能：每个版本各自的成败，和最近几次运行的记录（给改进用） */
@@ -459,8 +461,7 @@ export class BehaviorEngine {
     if (!b) return { ok: false, error: '技能写下了，但格式不对没有生效' };
     // 修订就是重新给它一次机会：新版本从零记，旧版本的成败留着（好拿来比）
     this.touch(b.name, (st) => {
-      // 新写下的版本也算“刚换上”：没用过之前后台总结不能再改它（以前这里清掉了 swappedAt，同一个技能三分钟里被改写了四次，一次都没用上）
-      st.disabled = false; delete st.lastError; delete st.retired; delete st.advisory; delete st.retiredAt; delete st.disabledAt; st.versionAt = Date.now(); st.swappedAt = Date.now();
+      st.disabled = false; delete st.lastError; delete st.retired; delete st.advisory; delete st.retiredAt; delete st.disabledAt; delete st.swappedAt; st.versionAt = Date.now(); st.writtenAt = Date.now();
       if (!b.code && !w.created) st.rev = (st.rev ?? 1) + 1;
     });
     return { ok: true, name: b.name, created: w.created, mode: b.mode };
@@ -480,6 +481,8 @@ export class BehaviorEngine {
   static readonly MIN_EVIDENCE = 3;
   /** 刚换上的版本保护多久 */
   static readonly FRESH_MS = 30 * 60_000;
+  /** 还没用过的新写版本，至少隔这么久才让后台总结再改写 */
+  static readonly REWRITE_GAP_MS = 10 * 60_000;
   /** 收起 / 停用之后多久内后台不同名重写（心智自己要写不受限） */
   static readonly TOMBSTONE_MS = 2 * 3600_000;
 
@@ -518,7 +521,10 @@ export class BehaviorEngine {
     // 刚换上（写下、改进、退回）的版本还没跑过：先让它跑几次（以前退回旧版本生成的新版本号马上又被改）
     if (uses === 0 && st.swappedAt && Date.now() - st.swappedAt < BehaviorEngine.FRESH_MS && !codeBroke)
       return `「${name}」当前版本 ${Math.round((Date.now() - st.swappedAt) / 60_000)} 分钟前才换上，还没用过：先让它跑几次，这次的经过已经记进它的成败`;
-    // 一次都没触发过：说明条件没对上这次的事，改写它不会丢掉什么证据
+    // 一次都没触发过：说明条件没对上这次的事，改写它不会丢掉什么证据——但刚写下几分钟就再改，等于同一个想法来回换说法
+    // （10-26：stairway-up-when-water-blocks-climb 三分钟里被改写四次，一次都没用上）
+    if (uses === 0 && !codeBroke && st.writtenAt && Date.now() - st.writtenAt < BehaviorEngine.REWRITE_GAP_MS)
+      return `「${name}」${Math.max(1, Math.round((Date.now() - st.writtenAt) / 60_000))} 分钟前才写下、还没用过：先别急着改写，等它用上几次或过一会儿再看`;
     if (uses === 0 || uses >= BehaviorEngine.MIN_EVIDENCE || codeBroke) return null;
     return `「${name}」当前版本只用了 ${uses} 次（成 ${cur.ok} 败 ${cur.fail}），证据还不够，先不改写它；这次的经过已经记进它的成败，等用够 ${BehaviorEngine.MIN_EVIDENCE} 次再看要不要改`;
   }

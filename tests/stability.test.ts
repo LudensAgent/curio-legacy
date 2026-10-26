@@ -30,7 +30,9 @@ test('技能改写不清空历史：成败按版本记；后台总结推翻不�
   const { engine: e } = engine();
   const skill = (how: string) => ({ name: 'dodge-zombie', description: `僵尸贴脸时${how}`, when: { hostile: { name: 'zombie', within: 4 } }, steps: [{ skill: 'flee', args: { distance: 12 } }] });
   assert.ok(e.write(skill('跑开')).ok);
-  assert.equal(e.rewriteGate('dodge-zombie'), null, '一次都没用过：改写不丢证据');
+  assert.match(String(e.rewriteGate('dodge-zombie')), /才写下、还没用过/, '刚写下就改写：同一个想法来回换说法');
+  e.statsOf('dodge-zombie')!.writtenAt = Date.now() - BehaviorEngine.REWRITE_GAP_MS - 1;
+  assert.equal(e.rewriteGate('dodge-zombie'), null, '一次都没用过、也写下有一会儿了：改写不丢证据');
   const rec = (ok: boolean) => (e as any).record(e.get('dodge-zombie'), ok, ok ? '躲开了' : '还是被打', {});
   rec(false);
   const gated = e.write(skill('原地垫高'), { by: 'forge' });
