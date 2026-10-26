@@ -606,9 +606,10 @@ export class Mind {
     this.handleStepResult({ skill: o.task.skill, args: o.task.args }, o.result, o.durationMs);
   }
 
-  private handleStepResult(step: Step, result: { status: 'succeeded' | 'failed' | 'cancelled'; failureCode?: any; summary: string }, durationMs: number) {
+  private handleStepResult(step: Step, result: { status: 'succeeded' | 'failed' | 'cancelled'; failureCode?: any; summary: string; data?: Record<string, unknown> }, durationMs: number) {
     const a = this.activity;
     if (!a) return;
+    if (this.recoverySkipped(a, step, result)) return;
     const observationMiss = softMiss(a, step, result);
     if (result.status === 'failed' && !observationMiss) {
       this.lastFailure = { skill: step.skill, code: result.failureCode, summary: result.summary };
@@ -624,14 +625,15 @@ export class Mind {
     if (a.awaitingRecovery && step.skill !== 'use_skill') {
       const name = a.awaitingRecovery;
       delete a.awaitingRecovery;
-      this.safe(() => this.d.behaviors?.creditRecovery(name, result.status === 'succeeded'), undefined);
+      this.safe(() => this.d.behaviors?.creditRecovery(name, result.status === 'succeeded', { skill: step.skill, code: result.failureCode ?? null }), undefined);
     }
     const percept = this.safe(() => this.d.perception.update(), undefined);
     const verdict = afterStep(a, step, result, durationMs, this.d.adapter.state(), percept);
     // 身体自己应变不了：先试学会的恢复办法（模型以前从类似的卡住里总结出来的），试过还不行才叫脑子
     if (verdict.kind === 'stuck' && result.status === 'failed' && step.skill !== 'use_skill' && this.d.behaviors) {
       const tried = new Set(a.adaptations.filter((x) => x.startsWith('skill:')).map((x) => x.slice(6)));
-      const b = tried.size < 2 ? this.safe(() => this.d.behaviors!.recoveryFor({ skill: step.skill, code: result.failureCode }, tried), null) : null;
+      const skipped = a.adaptations.filter((x) => x.startsWith('skip:')).length;
+      const b = tried.size - skipped < 2 ? this.safe(() => this.d.behaviors!.recoveryFor({ skill: step.skill, code: result.failureCode }, tried), null) : null;
       if (b) {
         a.adaptations.push(`skill:${b.name}`);
         a.awaitingRecovery = b.name;
@@ -655,6 +657,35 @@ export class Mind {
     if (unmet) this.queuedNext = null;
     this.finishActivity(verdict.kind === 'done' ? 'done' : 'stuck', verdict.why);
     if (unmet) this.requestThink(`「${a.what}」${verdict.why}，提前想好的「${unmet.draft.what}」先不接着做：它要的东西还没到手。接下来怎么办？`, 'deliberate');
+  }
+
+  /**
+   * 刚插进去的恢复技能说“这次跟我无关”（skipped）：那一步什么都没变，原样重做只会再失败一次、还把账算到这个技能头上。
+   * 换下一个对得上的恢复技能；没有就把原来的失败交还给心智。返回 true 表示已经处理完。
+   */
+  private recoverySkipped(a: Activity, step: Step, result: { status: string; summary: string; data?: unknown }): boolean {
+    const failure = (step.args as any)?.failure as { skill: string; args?: unknown; code?: string | null; summary?: string } | undefined;
+    if (step.skill !== 'use_skill' || !failure || result.status !== 'succeeded' || !(result.data as any)?.result?.skipped || !this.d.behaviors) return false;
+    const name = String((step.args as any)?.name ?? '');
+    if (a.awaitingRecovery === name) delete a.awaitingRecovery;
+    a.adaptations.push(`skip:${name}`);
+    this.safe(() => this.d.behaviors!.recoverySkipped(name, { skill: failure.skill, code: failure.code ?? null }), undefined);
+    const retry = a.steps[a.index];
+    const tried = new Set(a.adaptations.filter((x) => x.startsWith('skill:')).map((x) => x.slice(6)));
+    const skipped = a.adaptations.filter((x) => x.startsWith('skip:')).length;
+    const next = tried.size - skipped < 2 ? this.safe(() => this.d.behaviors!.recoveryFor({ skill: failure.skill, code: failure.code ?? undefined }, tried), null) : null;
+    if (next) {
+      a.adaptations.push(`skill:${next.name}`);
+      a.awaitingRecovery = next.name;
+      a.steps.splice(a.index, 0, { skill: 'use_skill', args: { name: next.name, failure }, optional: true });
+      this.d.bus.publish('body_adapt', 'P3', `「${name}」说这次跟它无关，换学会的做法：${next.name}（${next.description}）`, { planId: a.id, skill: next.name });
+      return true;
+    }
+    // 没有别的办法：别白白重做那一步，直接把它原来的失败交给心智
+    if (retry && retry.skill === failure.skill) a.steps.splice(a.index, 1);
+    this.d.bus.publish('body_adapt', 'P3', `「${name}」说这次跟它无关，没有别的学会的做法，交给心智`, { planId: a.id, skill: name });
+    this.finishActivity('stuck', `${failure.skill} 没成：${String(failure.summary ?? '').slice(0, 140)}`);
+    return true;
   }
 
   private pruneFailures() {

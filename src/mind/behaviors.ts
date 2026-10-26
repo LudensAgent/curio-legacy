@@ -36,6 +36,8 @@ export interface Behavior {
 export interface RunRecord { at: number; ok: boolean; version?: number; summary: string; line?: number; trace?: string[]; logs?: string[]; args?: string }
 export interface BehaviorStats {
   fired: number; ok: number; fail: number; lastAt: number; disabled?: boolean; lastError?: string;
+  /** 恢复时自己判断“跟这事无关”跳过的次数（不算成败） */
+  skipped?: number;
   /** 代码技能：每个版本各自的成败，和最近几次运行的记录（给改进用） */
   byVersion?: Record<string, { ok: number; fail: number }>;
   recent?: RunRecord[];
@@ -169,6 +171,9 @@ function toBehavior(k: KnowSkill, adapter: GameAdapter): Behavior | null {
     ...(b.code ? { code: b.code, version } : {}), ...(b.args ? { needs: b.args } : {}) };
 }
 
+/** 恢复技能按“哪个动作、什么错误码”失败来归类 */
+const recoverySig = (f: { skill: string; code?: string | null }) => `${f.skill}:${f.code ?? ''}`;
+
 export class BehaviorEngine {
   private behaviors = new Map<string, Behavior>();
   private stats: Record<string, BehaviorStats> = {};
@@ -179,6 +184,9 @@ export class BehaviorEngine {
   /** 拉锯时先让一边歇一会儿（不是停用：过了这段时间照常） */
   private holds = new Map<string, { until: number; why: string; closer?: number }>();
   private loopSaid = new Map<string, number>();
+  /** 恢复技能 × 失败种类 → 最近一次没帮上（或跳过）的时刻 */
+  private recentMiss = new Map<string, number>();
+  static readonly RECOVERY_MISS_MS = 3 * 60_000;
   static readonly LOOP_WINDOW_MS = 5 * 60_000;
   static readonly HOLD_MS = 90_000;
   /** 拉锯输掉的一方只提醒、不接手的时长 */
@@ -398,10 +406,15 @@ export class BehaviorEngine {
 
   /** 恢复类技能：某个动作失败时，身体先试哪一套（同一段活里每套只试一次） */
   recoveryFor(failure: { skill: string; code?: string }, tried: Set<string> = new Set(), now = Date.now()): Behavior | null {
-    const rec = this.list().filter((b) => b.mode === 'recover' && this.enabled(b) && !tried.has(b.name) && now - (this.lastFired.get(b.name) ?? 0) >= Math.min(b.cooldownMs, 5000));
+    const sig = recoverySig(failure);
+    const rec = this.list().filter((b) => b.mode === 'recover' && this.enabled(b) && !tried.has(b.name) && now - (this.lastFired.get(b.name) ?? 0) >= Math.min(b.cooldownMs, 5000)
+      // 同一种失败刚试过没用、或它自己说跟这事无关：几分钟内换了一段活也别再拿它试（以前每重新规划一次就从头再试一遍）
+      && now - (this.recentMiss.get(`${b.name}|${sig}`) ?? -Infinity) >= BehaviorEngine.RECOVERY_MISS_MS);
     if (!rec.length) return null;
     const s = this.sense(this.arbiter?.info() ?? null, failure);
-    const hit = rec.find((b) => (this.holds.get(b.name)?.until ?? 0) <= now && evalPredicate(b.when!, s));
+    // 几个都对得上时，和自动技能一样按“优先级 + 实际成功率”挑，不是排在前面的就先上
+    const hit = rec.filter((b) => (this.holds.get(b.name)?.until ?? 0) <= now && evalPredicate(b.when!, s))
+      .sort((a, b) => this.choiceScore(b) - this.choiceScore(a))[0];
     if (!hit) return null;
     this.noteFire(hit.name, failure.skill, now);
     this.lastFired.set(hit.name, now);
@@ -446,7 +459,8 @@ export class BehaviorEngine {
     if (!b) return { ok: false, error: '技能写下了，但格式不对没有生效' };
     // 修订就是重新给它一次机会：新版本从零记，旧版本的成败留着（好拿来比）
     this.touch(b.name, (st) => {
-      st.disabled = false; delete st.lastError; delete st.retired; delete st.advisory; delete st.retiredAt; delete st.disabledAt; delete st.swappedAt; st.versionAt = Date.now();
+      // 新写下的版本也算“刚换上”：没用过之前后台总结不能再改它（以前这里清掉了 swappedAt，同一个技能三分钟里被改写了四次，一次都没用上）
+      st.disabled = false; delete st.lastError; delete st.retired; delete st.advisory; delete st.retiredAt; delete st.disabledAt; st.versionAt = Date.now(); st.swappedAt = Date.now();
       if (!b.code && !w.created) st.rev = (st.rev ?? 1) + 1;
     });
     return { ok: true, name: b.name, created: w.created, mode: b.mode };
@@ -536,10 +550,21 @@ export class BehaviorEngine {
    * 恢复类技能的成败不看它自己的步骤做没做完，而看“重做失败的那一步”成没成：
    * 挖了一格空气也算“做完”，但路还是不通，那就是没用。
    */
-  creditRecovery(name: string, worked: boolean) {
+  creditRecovery(name: string, worked: boolean, failure?: { skill: string; code?: string | null }) {
     const b = this.behaviors.get(name);
     if (!b) return;
+    if (!worked && failure) this.recentMiss.set(`${name}|${recoverySig(failure)}`, Date.now());
     this.record(b, worked, worked ? '重做那一步成了' : '用了它之后，那一步还是没成', {});
+  }
+
+  /**
+   * 恢复技能自己判断“这次跟我无关”（返回 skipped）：不算成也不算败，不算一次接手（不进拉锯统计），
+   * 几分钟内同一种失败不再找它。那一步不用白白重做一遍——交给下一个对得上的技能，或者交还给心智。
+   */
+  recoverySkipped(name: string, failure: { skill: string; code?: string | null }, now = Date.now()) {
+    this.recentMiss.set(`${name}|${recoverySig(failure)}`, now);
+    for (let i = this.fires.length - 1; i >= 0; i--) if (this.fires[i].name === name) { this.fires.splice(i, 1); break; }
+    this.touch(name, (st) => { st.fired = Math.max(0, st.fired - 1); st.skipped = (st.skipped ?? 0) + 1; });
   }
 
   private onDone(o: TaskOutcome) {

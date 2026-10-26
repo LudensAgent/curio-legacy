@@ -27,6 +27,10 @@ export function compileCheck(code: string): string | null {
   if (typeof code !== 'string' || !code.trim()) return '代码是空的';
   if (code.length > MAX_CODE) return `代码太长（${code.length} 字符，最多 ${MAX_CODE}）`;
   if (/\b(?:require|process|eval)\b|\bimport\s*\(|\bFunction\s*\(|globalThis\s*\.\s*constructor/.test(code)) return '代码只能用 api.* 和普通 JavaScript：不能 require/import、碰 process、eval 或 new Function';
+  // 用了不存在的 api：保存前就说清楚，别等到游戏里第一次触发才报 TypeError（那一次还会记成技能失败）
+  const known = new Set<string>([...API_METHODS, 'log', 'progress']);
+  const unknown = [...new Set([...code.matchAll(/\bapi\s*\.\s*([A-Za-z_$][\w$]*)/g)].map((m) => m[1]).filter((n) => !known.has(n)))];
+  if (unknown.length) return `没有 ${unknown.map((n) => `api.${n}`).join('、')}；能用的只有：${[...known].map((n) => `api.${n}`).join('、')}`;
   try { new vm.Script(wrap(code), { filename: 'skill.js', lineOffset: -1 }); return null; } catch (e) {
     const line = String((e as Error).stack ?? '').match(/skill\.js:(\d+)/)?.[1];
     return `语法错误${line ? `（第 ${line} 行）` : ''}：${(e as Error).message}`;
