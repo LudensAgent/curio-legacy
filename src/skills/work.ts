@@ -1,3 +1,4 @@
+import { chestHint, needsFromShortfall } from './chest-hint.ts';
 import { describePlan, materialPlan } from '../methods/shortfall.ts';
 import { lookAround, surface } from './movement.ts';
 import { findStation, myBed, rememberStation } from './stations.ts';
@@ -453,7 +454,9 @@ export const craft: Skill<{ item: string; count: number; extra?: boolean }> = {
       if (!r.ok) {
         const short = woodShortfall(args.item, args.count, ctx.adapter.state().inventory, !!table);
         const why = [r.detail, short].filter(Boolean).join('；');
-        return fail((r.reason as any) ?? 'ERROR', `无法合成 ${args.item}：${r.reason}${why ? `（${why}）` : ''}${reused}`, why ? { shortfall: why } : undefined);
+        const st = ctx.adapter.state();
+        const inChest = r.reason === 'MISSING_MATERIALS' ? chestHint(ctx.memory, st, needsFromShortfall(r.detail)) : '';
+        return fail((r.reason as any) ?? 'ERROR', `无法合成 ${args.item}：${r.reason}${why ? `（${why}）` : ''}${reused}${inChest}`, why ? { shortfall: why } : undefined);
       }
       // 野外临时放下的工作台用完收回来带着走（真人都这样）；家附近的留着当家具
       const tookBack = r.ok && placedFresh && r.tablePos && !nearHome(ctx, r.tablePos) ? await takeBackTable(ctx, r.tablePos) : false;

@@ -1,3 +1,4 @@
+import { chestHint } from './chest-hint.ts';
 import type { InvItem, Vec3Like } from '../adapter/types.ts';
 import { DIRS } from '../perception/perception.ts';
 import { shortId, sleep } from '../util.ts';
@@ -36,9 +37,9 @@ export const smelt: Skill<{ item: string; count: number }> = {
     const { adapter, senses, signal } = ctx;
     const s = adapter.state();
     const have = s.inventory.filter((i) => i.name === args.item).reduce((n, i) => n + i.count, 0);
-    if (!have) return fail('MISSING_MATERIALS', `背包里没有 ${args.item}`);
+    if (!have) return fail('MISSING_MATERIALS', `背包里没有 ${args.item}${chestHint(ctx.memory, s, [{ item: args.item, count: args.count }])}`);
     const fuel = pickFuel(s.inventory, args.item);
-    if (!fuel) return fail('MISSING_MATERIALS', '没有燃料（煤、木炭、木板或原木）');
+    if (!fuel) return fail('MISSING_MATERIALS', `没有燃料（煤、木炭、木板或原木）${chestHint(ctx.memory, s, [], { fuel: true })}`);
     const furnace = findStation(ctx, ['furnace'], 64);
     const n = Math.min(have, args.count);
     ctx.progress(0, `烧 ${args.item} ×${n}（燃料 ${fuel}）`);

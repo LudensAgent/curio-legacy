@@ -1,3 +1,4 @@
+import { chestHint } from './chest-hint.ts';
 import type { ConstructionResult } from '../building/engine.ts';
 import { materialPlan } from '../methods/shortfall.ts';
 import { findStation, rememberStation } from './stations.ts';
@@ -381,7 +382,9 @@ export const build: Skill<BuildArgs> = {
         }
         const sameAsMissing = rawNeed.size === Object.keys(result.missingMaterials).length && [...rawNeed].every(([n, c]) => result.missingMaterials[n] === c);
         const rawText = sameAsMissing ? '' : [...rawNeed].map(([n, c]) => `${n}×${c}`).join('、');
-        return fail(failureCode, `${noteText}${result.placed ? `这次先盖了 ${result.placed} 块；` : ''}${spec.name} 尚未验收（还差 ${result.inspection.defects.length} 处）${missing ? `；缺少 ${missing}${rawText ? `（折算成原材料：${rawText}，可用 gather 的 for 按缺口采）` : ''}；补齐后用 mode:"repair"` : ''}。${describeBuildProblems(result)}作品 ID ${project.id}。${result.failures[0] ? ` ${result.failures[0].reason}` : ''}`, data);
+        // 缺的成品和折算出的原材料，记得的箱子里有没有（玻璃板、原木常常就存在旁边的箱子里）
+        const inChest = missing ? chestHint(ctx.memory, ctx.adapter.state(), [...Object.entries(result.missingMaterials), ...rawNeed].map(([item, count]) => ({ item, count }))) : '';
+        return fail(failureCode, `${noteText}${result.placed ? `这次先盖了 ${result.placed} 块；` : ''}${spec.name} 尚未验收（还差 ${result.inspection.defects.length} 处）${missing ? `；缺少 ${missing}${rawText ? `（折算成原材料：${rawText}，可用 gather 的 for 按缺口采）` : ''}${inChest}；补齐后用 mode:"repair"` : ''}。${describeBuildProblems(result)}作品 ID ${project.id}。${result.failures[0] ? ` ${result.failures[0].reason}` : ''}`, data);
       }
       if (blueprint.home && args.mode !== 'inspect') {
         const home = rotatePosition(blueprint.home, project.origin, project.rotation);
