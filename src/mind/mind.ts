@@ -859,12 +859,14 @@ export class Mind {
       if (this.reflecting !== controller) return;
       this.reflecting = null;
       if (!c) return;
-      const { before, after } = this.d.self.consolidate(c);
+      const { before, after, keptGoals } = this.d.self.consolidate(c);
+      // 回想想放下正在推进的主目标：不替它放，告诉它，下一次认真想时自己决定
+      for (const g of keptGoals) this.d.bus.publish('goal_kept', 'P3', `回想时觉得主目标「${g.text.slice(0, 40)}」可以放下了，但它还在推进中，先留着：真要放下就在认真想时写 agenda_drop，或者换一个主目标`, { agendaId: g.id });
       for (const k of this.d.self.data.knowHow) if (c.add.includes(k.text) || c.merge.some((m) => m.text === k.text) || c.rewrite.some((r) => r.id === k.id)) {
         this.d.memory.addLesson(k.text, { source: 'model', key: `know_how:${k.id}` });
       }
       if (c.skill?.raw && this.d.behaviors && (Array.isArray(c.skill.raw.steps) || c.skill.raw.when !== undefined)) {
-        const w = this.safe(() => this.d.behaviors!.write(c.skill!.raw), { ok: false as const, error: '写技能时出错' });
+        const w = this.safe(() => this.d.behaviors!.write(c.skill!.raw, { by: 'mind' }), { ok: false as const, error: '写技能时出错' });
         if (w.ok) this.d.bus.publish('skill_written', 'P2', `回想时写下技能 ${w.name}`, { name: w.name, mode: w.mode, live: true });
         else this.d.bus.publish('skill_rejected', 'P3', `没有保存技能：${w.error}`);
       } else if (c.skill) {
@@ -1043,9 +1045,16 @@ export class Mind {
     const cur = this.d.self.plan();
     if (p.steps?.length) {
       const focus = p.focus ?? cur?.agendaId ?? this.d.self.activeAgenda()?.id ?? p.goal;
-      const set = focus ? this.d.self.setPlan(focus, p.steps, p.conditions ?? []) : null;
+      // 模型自己写了 focus（不是沿用手上的活或议程）：它挑中的点子可以升成目标
+      const set = focus ? this.d.self.setPlan(focus, p.steps, p.conditions ?? [], { promote: !!p.focus && p.focus === focus }) : null;
       if (set) this.d.bus.publish('plan_set', 'P2', `主目标「${set.goal}」：${set.steps.map((st) => `${st.done ? '☑' : '☐'}${st.text}`).join(' ')}`, { agendaId: set.agendaId });
-      else decision.notes.push('plan 没定下来：focus 要是议程里的 goal（点子、疑问不能当主目标），或者一句话的目标；还要有 steps');
+      else {
+        const item = focus?.startsWith('a_') ? this.d.self.agenda().find((a) => a.id === focus) : undefined;
+        decision.notes.push(item && item.kind !== 'goal'
+          ? `plan 没定下来：${focus}「${item.text.slice(0, 30)}」是${item.kind === 'idea' ? '点子' : '疑问'}，要当主目标就在 plan 里写 focus 和 steps（清单至少一项），或者把 focus 直接写成一句话的目标（会新建一个目标）`
+          : focus?.startsWith('a_') && !item ? `plan 没定下来：议程里没有 ${focus}；focus 写议程里某个目标的 id，或者直接写一句话的目标（会新建一个目标），还要有 steps`
+          : 'plan 没定下来：focus 写议程里某个目标的 id，或者直接写一句话的目标（会新建一个目标）；还要有 steps（清单至少一项）');
+      }
     }
     if (p.done?.length) {
       const s = this.d.adapter.state(), percept = this.safe(() => this.d.perception.snapshot(), undefined);

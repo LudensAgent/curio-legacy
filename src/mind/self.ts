@@ -235,10 +235,12 @@ export class SelfModel {
    * 定下（或改写）主目标的清单。focus 是议程 ID 或一句话（一句话就新建一个今天的目标）。
    * 旧清单里同名、已经勾掉的项保持勾掉。
    */
-  setPlan(focus: string, steps: string[], conditions: (import('../projects/types.ts').Condition | null)[] = []): FocusPlan | null {
+  setPlan(focus: string, steps: string[], conditions: (import('../projects/types.ts').Condition | null)[] = [], opts: { promote?: boolean } = {}): FocusPlan | null {
     const id = focus.startsWith('a_') ? focus : this.addAgenda(focus, 'goal', 'today')?.id;
     const item = id ? this.data.agenda.find((a) => a.id === id) : undefined;
-    // 主目标只能是“想做的事”：随手记下的点子、疑问不该被升成要一直推进的目标
+    // 主目标只能是“想做的事”：随手记下的点子、疑问不会自己变成要一直推进的目标；
+    // 但认真想时明确把某个点子定成主目标、还写了清单，那就是决定要做了——升成目标
+    if (item && item.kind === 'idea' && opts.promote && steps.some((t) => cleanPlanStep(t))) { item.kind = 'goal'; item.updatedAt = Date.now(); }
     if (!item || item.kind !== 'goal') return null;
     if (item.status !== 'active') this.setAgendaStatus(item.id, 'active');
     const old = this.data.plan?.agendaId === item.id ? this.data.plan : undefined;
@@ -434,7 +436,7 @@ export class SelfModel {
   get reflectedAt() { return this.data.reflectedAt ?? 0; }
 
   /** 应用回想的结果：合并重复、改写含糊的、丢掉被事实推翻的；零碎想法清空 */
-  consolidate(c: import('./types.ts').Consolidation): { before: number; after: number } {
+  consolidate(c: import('./types.ts').Consolidation): { before: number; after: number; keptGoals: { id: string; text: string }[] } {
     const before = this.data.knowHow.length;
     const byId = new Map(this.data.knowHow.map((k) => [k.id, k]));
     for (const m of c.merge) {
@@ -453,13 +455,20 @@ export class SelfModel {
     for (const r of c.rewrite) { const k = byId.get(r.id); if (k) { k.text = r.text; k.updatedAt = Date.now(); } }
     if (c.drop.length) { const drop = new Set(c.drop); this.data.knowHow = this.data.knowHow.filter((k) => !drop.has(k.id)); }
     for (const t of c.add) this.learn(t, { source: 'reflection' });
-    for (const id of c.agendaDrop) this.setAgendaStatus(id, 'dropped');
+    // 回想是整理零碎点子的，不能顺手把正在推进的主目标也收掉（10-26 晚回想合并“矿口前哨”几条点子时，把正在凑头盔的
+    // “攒够铁做一整套铁盔甲”一起丢了，之后就一直没有主目标）。正在推进的目标留着，交给下一次认真想自己决定放不放
+    const keptGoals: { id: string; text: string }[] = [];
+    for (const id of c.agendaDrop) {
+      const item = this.data.agenda.find((a) => a.id === id);
+      if (item && item.kind === 'goal' && (item.status === 'active' || this.data.plan?.agendaId === id)) { keptGoals.push({ id, text: item.text }); continue; }
+      this.setAgendaStatus(id, 'dropped');
+    }
     for (const a of c.agendaAdd ?? []) this.addAgenda(a.text, a.kind, a.horizon);
     this.data.insights = [];
     this.data.reflectedAt = Date.now();
     this.data.knowHowAtReflect = this.data.knowHow.length;
     this.touch();
-    return { before, after: this.data.knowHow.length };
+    return { before, after: this.data.knowHow.length, keptGoals };
   }
 
   // ---------------------------------------------------------------- 手感
