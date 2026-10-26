@@ -1638,11 +1638,18 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const attempt = new AbortController();
     const attemptSignal = AbortSignal.any([signal, attempt.signal]);
     const attemptCheck = this.actionCheckpoint(attemptSignal);
+    // 背包 2×2 合成格里有上一次被打断留下的东西：Mineflayer 默认格子是空的，照样往里摆、去拿结果，服务器那边对不上，
+    // 合成就一直卡到超时（日志里一连串 craft 16 秒后“已取消”）。先把格子清回背包
+    if (!table) await this.afterAction(() => this.clearCraftGrid(), check);
+    let timedOut = false;
     try {
-      await this.afterAction(() => raceAbort(b.craft(recipe, times, table), attemptSignal, timeout, () => attempt.abort('craft transaction timed out')), attemptCheck);
+      await this.afterAction(() => raceAbort(b.craft(recipe, times, table), attemptSignal, timeout, () => { timedOut = true; attempt.abort('craft transaction timed out'); }), attemptCheck);
     } catch (error) {
       attempt.abort('craft transaction ended without confirmation');
       this.actionContext.exit(() => { try { if (b.currentWindow) b.closeWindow(b.currentWindow); } catch { /* ignore */ } });
+      // 被打断或超时：摆了一半的材料留在 2×2 格里，收回来，别让下一次合成也卡住
+      try { await this.clearCraftGrid(); } catch { /* 下次合成前还会再清 */ }
+      if (timedOut && !signal.aborted) throw new Error('合成界面没响应（超时）；格子里的材料已收回背包，可以再试一次');
       throw error;
     }
     // 2x2 inventory crafting resolves from Mineflayer's predicted slot model.
@@ -1651,6 +1658,23 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (typeof b._syncWindow === 'function') {
       await this.afterAction(() => raceAbort(b._syncWindow(b.inventory), signal, 8000, () => {}), check);
     } else await this.afterAction(() => sleep(150, signal), check);
+  }
+
+  /** 把背包 2×2 合成格（1–4 号格）和光标上的东西放回背包 */
+  private async clearCraftGrid() {
+    const b = this.bot;
+    if (!this.ready || b.currentWindow || !b.inventory?.slots) return;
+    let moved = false;
+    for (let slot = 1; slot <= 4; slot++) {
+      if (!b.inventory.slots[slot]) continue;
+      await b.clickWindow(slot, 0, 1); // shift 点击：移回背包
+      moved = true;
+    }
+    if (b.inventory.selectedItem) {
+      const empty = b.inventory.firstEmptyInventorySlot?.();
+      if (empty !== null && empty !== undefined) { await b.clickWindow(empty, 0, 0); moved = true; }
+    }
+    if (moved && typeof b._syncWindow === 'function') await Promise.race([Promise.resolve(b._syncWindow(b.inventory)).catch(() => {}), sleep(3000)]);
   }
 
   /** 尽量一次合成所需数量（一次打开工作台），不行再逐个合成 */

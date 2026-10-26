@@ -129,3 +129,24 @@ test('床：材料真不够时说清楚缺什么', async () => {
   assert.equal(r.reason, 'MISSING_MATERIALS');
   assert.match(r.detail ?? '', /white_wool 还差 1/);
 });
+
+test('2×2 合成格里有被打断留下的材料：合成前先收回背包，免得一直卡到超时', async () => {
+  const adapter = new MineflayerAdapter(config, new EventBus());
+  const recipe = Recipe.find(data.itemsByName.acacia_planks.id, null)[0];
+  const slots: any[] = [];
+  slots[2] = { name: 'acacia_planks', count: 1 }; slots[3] = { name: 'acacia_planks', count: 1 };
+  const clicks: number[] = [];
+  let gridAtCraft: any[] = [];
+  adapter.bot = {
+    entity: {}, game: { dimension: 'overworld' },
+    inventory: { slots, items: () => [{ name: 'acacia_log', type: data.itemsByName.acacia_log.id, count: 1 }], selectedItem: null },
+    recipesAll: () => [recipe], recipesFor: () => [recipe],
+    async clickWindow(slot: number, _b: number, mode: number) { clicks.push(slot); if (mode === 1) slots[slot] = undefined; },
+    async craft() { gridAtCraft = [1, 2, 3, 4].map((i) => slots[i]).filter(Boolean); },
+    async _syncWindow() {},
+  };
+  adapter.mcData = data; (adapter as any).connectedFlag = true;
+  await adapter.craft('acacia_planks', 4, new AbortController().signal);
+  assert.deepEqual(clicks, [2, 3]);
+  assert.equal(gridAtCraft.length, 0, '合成时格子是空的');
+});
