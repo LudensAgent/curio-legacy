@@ -23,7 +23,7 @@ export interface Percept {
   connected: boolean;
   observation?: { ready: boolean; worldId: string; sessionId: string; id: number };
   /** can_sleep：只有夜里（或雷雨）才能上床睡觉，白天 sleep 会失败 */
-  time: { timeOfDay: number; phase: 'day' | 'dusk' | 'night' | 'dawn'; isDay?: boolean; can_sleep?: boolean };
+  time: { timeOfDay: number; phase: 'day' | 'dusk' | 'night' | 'dawn'; isDay?: boolean; can_sleep?: boolean; day?: number };
   self: { pos: [number, number, number]; dim: string; hp: number; food: number; biome: string | null; inWater: boolean; inLava: boolean; held: string | null; onGround?: boolean; riding?: string | null; equipment?: { slot: string; name: string }[]; around?: string;
     contacts?: Pick<ReturnType<typeof surroundings>, 'support' | 'feet' | 'head'>;
     sky_visible?: boolean | null; depth_below_surface?: number | null; exits?: ExitOptions;
@@ -85,6 +85,13 @@ export function phaseOf(t: number): Percept['time']['phase'] {
   if (t < 13800) return 'dusk';
   if (t < 22200) return 'night';
   return 'dawn';
+}
+
+/** 离天黑 / 天亮还有几分钟（现实时间；游戏里 1 分钟 = 1200 刻），给心智一个“时间感” */
+export function clockOf(timeOfDay: number): { toDusk: number | null; toDawn: number | null } {
+  const t = ((timeOfDay % 24000) + 24000) % 24000;
+  const min = (ticks: number) => Math.max(0, Math.round(ticks / 120) / 10);
+  return t < 12000 ? { toDusk: min(12000 - t), toDawn: null } : { toDusk: null, toDawn: min(t < 23000 ? 23000 - t : 24000 + 23000 - t) };
 }
 
 /** 原版：12542–23459 刻之间才能睡觉（不考虑雷雨） */
@@ -350,7 +357,7 @@ export class Perception {
       ts: Date.now(),
       connected: s.connected,
       observation: { ready: s.observationReady, worldId: s.worldId, sessionId: s.sessionId, id: s.observationId },
-      time: { timeOfDay: s.timeOfDay, phase: phaseOf(s.timeOfDay), isDay: s.isDay, can_sleep: canSleepAt(s.timeOfDay) },
+      time: { timeOfDay: s.timeOfDay, phase: phaseOf(s.timeOfDay), isDay: s.isDay, can_sleep: canSleepAt(s.timeOfDay), ...(s.worldDay !== undefined ? { day: s.worldDay } : {}) },
       self: {
         pos: [round1(s.pos.x), round1(s.pos.y), round1(s.pos.z)],
         dim: s.dim,

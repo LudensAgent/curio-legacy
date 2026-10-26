@@ -1,5 +1,5 @@
 import type { AgentEvent } from '../events.ts';
-import type { Percept } from '../perception/perception.ts';
+import { clockOf, type Percept } from '../perception/perception.ts';
 import type { ActivityEnd, Noticing, StuckHere } from './types.ts';
 
 export const EXPERIENCE_MS = 10 * 60_000;
@@ -31,7 +31,7 @@ export const RECONSIDER = 0.5;
 
 const levelOf = (s: number): Noticing['level'] => s >= URGENT ? 'urgent' : s >= RECONSIDER ? 'reconsider' : 'note';
 
-interface Snapshot { phase: string; food: number; hp: number; emptySlots: number; hostiles: Set<string>; resources: Set<string>; light: string | null; inWater: boolean; drops: Map<string, { item: string; count: number; dist: number; dir: string }> }
+interface Snapshot { tod: number; phase: string; food: number; hp: number; emptySlots: number; hostiles: Set<string>; resources: Set<string>; light: string | null; inWater: boolean; drops: Map<string, { item: string; count: number; dist: number; dir: string }> }
 
 /**
  * 注意力：把游戏里发生的事变成“我注意到了…”，并判断值不值得为它停下来重新想。
@@ -83,7 +83,7 @@ export class Attention {
   /** 比较前后两次感知，找出“变化”：天色、饥饿、生命、背包、新出现的怪和资源 */
   fromPercept(p: Percept, now = Date.now()): Noticing[] {
     const snap: Snapshot = {
-      phase: p.time.phase, food: p.self.food, hp: p.self.hp, emptySlots: p.emptySlots,
+      tod: ((p.time.timeOfDay % 24000) + 24000) % 24000, phase: p.time.phase, food: p.self.food, hp: p.self.hp, emptySlots: p.emptySlots,
       hostiles: new Set(p.nearby.hostile.filter((h) => h.dist <= 16).map((h) => h.name)),
       resources: new Set(p.nearby.resources.filter((r) => r.seen === 'now').map((r) => r.block)),
       light: p.light?.level ?? null, inWater: p.self.inWater,
@@ -93,11 +93,17 @@ export class Attention {
     this.last = snap;
     if (!prev) return [];
     const out: (Noticing | null)[] = [];
+    // 时间感：一天里的几个节点各抬头想一次（像人看一眼天色：今天过了多少、晚上还有多久、新的一天要做什么）
+    const day = p.time.day !== undefined ? `第 ${p.time.day + 1} 天` : '';
+    const clock = clockOf(snap.tod);
     if (snap.phase !== prev.phase) {
-      if (snap.phase === 'dusk') out.push(this.notice('dusk', '太阳快下山了', 0.55, 300_000, now));
-      else if (snap.phase === 'night') out.push(this.notice('night', '天黑了，怪物会出来', 0.6, 300_000, now));
-      else if (snap.phase === 'dawn' || (snap.phase === 'day' && prev.phase !== 'dawn')) out.push(this.notice('morning', '天亮了', 0.45, 300_000, now));
+      if (snap.phase === 'dusk') out.push(this.notice('dusk', `${day}太阳快下山了，再过约 ${clock.toDawn ?? 9} 分钟才天亮：今晚怎么过、这段时间做什么`, 0.55, 300_000, now));
+      else if (snap.phase === 'night') out.push(this.notice('night', `天黑了，怪物会出来；离天亮约 ${clock.toDawn} 分钟`, 0.6, 300_000, now));
+      else if (snap.phase === 'dawn' || (snap.phase === 'day' && prev.phase !== 'dawn')) out.push(this.notice('morning', `天亮了，${day ? `新的一天（${day}）` : '新的一天'}开始：想想今天要做成什么`, 0.55, 300_000, now));
     }
+    const crossed = (tick: number) => prev.tod < tick && snap.tod >= tick && snap.tod - prev.tod < 2400;
+    if (crossed(6000)) out.push(this.notice('noon', `中午了，${day}已经过了一半，离天黑约 ${clock.toDusk} 分钟`, 0.5, 300_000, now));
+    if (crossed(18000)) out.push(this.notice('midnight', `半夜了，离天亮约 ${clock.toDawn} 分钟`, 0.5, 300_000, now));
     if (snap.food <= 6 && prev.food > 6) out.push(this.notice('hungry', `饿了（饥饿值 ${snap.food}）`, 0.6, 120_000, now));
     else if (snap.food <= 12 && prev.food > 12) out.push(this.notice('peckish', `有点饿（饥饿值 ${snap.food}）`, 0.3, 300_000, now));
     if (prev.hp - snap.hp >= 4) out.push(this.notice('hp_drop', `掉了 ${Math.round(prev.hp - snap.hp)} 点血，现在 ${Math.round(snap.hp)}`, snap.hp <= 8 ? 0.7 : 0.5, 10_000, now));

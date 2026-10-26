@@ -1,7 +1,7 @@
 import type { AgentState } from '../adapter/types.ts';
 import type { AudienceContext } from '../live/audience.ts';
 import type { WorldMemory } from '../memory/store.ts';
-import type { Percept } from '../perception/perception.ts';
+import { clockOf, type Percept } from '../perception/perception.ts';
 import { audienceBlock, AUDIENCE_RULES, exploredAround, liveAudience, type MySkillInfo } from '../planner/prompt.ts';
 import type { ChatMessage } from '../planner/llm.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
@@ -260,7 +260,8 @@ export function situationalReminders(ctx: MindContext): string[] {
   if (p.time.phase === 'dusk' || p.time.phase === 'night') {
     const [bx, by, bz] = bed ? bed.pos.split(',') : [];
     const options = [bed ? `${bedLine}${bed.dist > 128 ? '，挺远' : ''}，去那儿睡写 sleep {"at":{"x":${bx},"y":${by},"z":${bz}}}` : '', bedInBag ? '背包里有床，就地放下睡写 sleep {"place":true}' : ''].filter(Boolean).join('；');
-    out.push(`天${p.time.phase === 'dusk' ? '快' : '已经'}黑了：想好今晚在哪过${options ? `（${options}）` : '（家、床，或者就地躲一晚）'}`);
+    const toDawn = clockOf(p.time.timeOfDay).toDawn;
+    out.push(`天${p.time.phase === 'dusk' ? '快' : '已经'}黑了${toDawn !== null ? `，离天亮约 ${toDawn} 分钟` : ''}：想好今晚在哪过、这段时间做什么${options ? `（${options}）` : '（家、床，或者就地躲一晚）'}`);
   } else {
     // 像人一样掂量回程：离天黑不远、床又在远处，就该动身或另作打算
     const tod = ((p.time.timeOfDay % 24000) + 24000) % 24000;
@@ -328,7 +329,10 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
     // 血量保留一位小数：半颗心四舍五入成 0 会让模型以为自己已经死了
     hp: Math.round(p.self.hp * 10) / 10, food: p.self.food,
     ...(p.self.inWater ? { inWater: true, oxygen: s.oxygen } : {}), ...(p.self.inLava ? { inLava: true } : {}), ...(p.self.riding ? { riding: p.self.riding } : {}),
-    time: `${{ day: '白天', dusk: '黄昏', night: '夜里', dawn: '清晨' }[p.time.phase] ?? p.time.phase}（${p.time.timeOfDay}）${p.time.can_sleep ? '，能睡觉' : ''}`,
+    time: (() => {
+      const c = clockOf(p.time.timeOfDay);
+      return `${p.time.day !== undefined ? `第 ${p.time.day + 1} 天 ` : ''}${{ day: '白天', dusk: '黄昏', night: '夜里', dawn: '清晨' }[p.time.phase] ?? p.time.phase}（${p.time.timeOfDay}）${c.toDusk !== null ? `，离天黑约 ${c.toDusk} 分钟` : `，离天亮约 ${c.toDawn} 分钟`}${p.time.can_sleep ? '，能睡觉' : ''}`;
+    })(),
     ...(p.light ? { light: `${{ bright: '亮', dim: '有点暗', dark: '很暗' }[p.light.level] ?? p.light.level}${p.light.mob_spawn_risk ? '，会刷怪' : ''}` } : {}),
     held: p.self.held,
     ...(digging && tool && !ownsTool ? { tool_note: `正在挖 ${material}，背包里没有 ${tool}（身体只能空手挖，很慢）：做一把${tool === 'axe' ? '斧子' : tool === 'pickaxe' ? '镐' : '铲子'}会快很多` } : {}),

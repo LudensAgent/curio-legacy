@@ -5,7 +5,7 @@ import type { AudienceContext } from '../live/audience.ts';
 import { compileBuilding, normalizeSpec } from '../building/spec.ts';
 import type { Hazard, WorldMemory } from '../memory/store.ts';
 import { materialPlan } from '../methods/shortfall.ts';
-import type { Perception, Percept } from '../perception/perception.ts';
+import { clockOf, type Perception, type Percept } from '../perception/perception.ts';
 import type { MySkillInfo } from '../planner/prompt.ts';
 import { evaluateCondition, observationReady } from '../projects/conditions.ts';
 import { SKILLS } from '../skills/index.ts';
@@ -144,6 +144,9 @@ export class Mind {
   private pendingReason: { reason: string; tier: 'glance' | 'deliberate' } | null = null;
   /** “这段活快干完了，想想接下来”每段活只问一次（模型没写 next 也不会一直追问） */
   private nearEndAskedFor: string | null = null;
+  private waitingSince: number | null = null;
+  /** 干等时无聊到多少就想想“这段时间能做点什么” */
+  static BORED_AT = 0.6;
   /** 最后一步做了这么久才开始想“接下来做什么” */
   static NEAR_END_AFTER_MS = 4000;
   static NEAR_END_REASON = '手上这段活快干完了，想想接下来';
@@ -259,7 +262,17 @@ export class Mind {
       this.d.bus.publish('notice', n.level === 'note' ? 'P3' : 'P2', `注意到：${n.what}`, { salience: n.salience, level: n.level });
       if (/^(res|disc|item):/.test(n.key)) { this.d.self.feel({ type: 'novelty', strength: n.salience }); this.speechEventAt = Date.now(); }
     }
-    this.d.self.tickMood(!!this.activity && this.activity.kind !== 'rest');
+    // 干等（躲着熬夜、原地等）：无聊涨得快；无聊到一定程度就是一件“注意到的事”，会让它想想这段时间能做点什么
+    const cur = this.d.arbiter.info();
+    const waiting = !!cur && ['shelter', 'wait'].includes(cur.skill) && cur.source !== 'filler';
+    if (waiting) this.waitingSince ??= Date.now(); else this.waitingSince = null;
+    this.d.self.tickMood(waiting ? 'waiting' : !!this.activity && this.activity.kind !== 'rest');
+    if (waiting && this.d.self.mood.boredom >= Mind.BORED_AT && this.waitingSince) {
+      const mins = Math.max(1, Math.round((Date.now() - this.waitingSince) / 60_000));
+      const left = clockOf(p.time.timeOfDay);
+      const n = this.attention.notice('bored_waiting', `已经干等了 ${mins} 分钟，好无聊${left.toDawn !== null ? `（离天亮还有约 ${left.toDawn} 分钟）` : ''}：这段时间能做点什么？`, 0.62, 4 * 60_000);
+      if (n) this.d.bus.publish('notice', 'P2', `注意到：${n.what}`, { salience: n.salience, level: n.level });
+    }
     // 天快黑时惦记家：离家远就想着往回走（像真人一样，不是硬规则：只是一件“注意到”的事）
     if (p.time.phase === 'dusk' || p.time.phase === 'night') {
       const s = this.d.adapter.state();
@@ -302,6 +315,9 @@ export class Mind {
     const resting = !!current && ['shelter', 'sleep', 'wait'].includes(current.skill) && current.planId === this.activity.id;
     // 抬头看一眼也要有间隔：注意力被每一件小事拽走，手上的活就总是做不完
     const gapOk = Date.now() - this.lastThoughtAt >= this.timing.glanceGapMs;
+    // 躲着、等着的时候一般的事不值得爬起来想；但“干等得好无聊”本身就是要想一想的事（无聊让人找新鲜事做）
+    const bored = this.attention.peek().some((n) => n.key === 'bored_waiting');
+    if (bored && gapOk) return this.think('干等着好无聊，想想这段时间能做点什么', 'deliberate');
     if (!resting && gapOk && this.attention.highest() >= RECONSIDER) return this.think('注意到了一些事', 'glance');
     // 边做边想：最后一步做了一会儿（模型想一次要好几秒）才琢磨下一段活；每段活只问一次。
     // 以前“最后一轮一开始”就问：repeat=1 的活第一步一开工就问，模型常顺手把刚开工的活换掉，注意力几秒一换

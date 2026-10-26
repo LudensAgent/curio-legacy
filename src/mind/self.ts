@@ -42,11 +42,13 @@ export const clamp01 = (n: number) => Math.max(0, Math.min(1, Number.isFinite(n)
 export const DEFAULT_MOOD: Mood = { energy: 0.9, boredom: 0.2, frustration: 0, satisfaction: 0.4, curiosity: 0.6 };
 
 /** 情绪随时间自然回归：烦躁和满足淡去、精力在不干活时恢复、好奇慢慢回到中等 */
-export function relaxMood(m: Mood, seconds: number, working: boolean): Mood {
+export function relaxMood(m: Mood, seconds: number, working: boolean | 'waiting'): Mood {
   const k = Math.min(1, seconds / 600);
+  // 干等（躲在坑里熬夜、原地等天亮）最容易无聊：人蹲两三分钟就坐不住了，会想“这段时间能干点什么”
+  const waiting = working === 'waiting';
   return {
-    energy: clamp01(working ? m.energy - seconds / 5400 : m.energy + seconds / 900),
-    boredom: clamp01(m.boredom + (working ? seconds / 2400 : -seconds / 1200)),
+    energy: clamp01(working === true ? m.energy - seconds / 5400 : m.energy + seconds / 900),
+    boredom: clamp01(m.boredom + (waiting ? seconds / 360 : working ? seconds / 2400 : -seconds / 1200)),
     frustration: clamp01(m.frustration * (1 - k * 0.8)),
     satisfaction: clamp01(m.satisfaction + (0.35 - m.satisfaction) * k * 0.5),
     curiosity: clamp01(m.curiosity + (0.5 - m.curiosity) * k * 0.3),
@@ -163,7 +165,7 @@ export class SelfModel {
 
   // ---------------------------------------------------------------- 情绪
   get mood(): Mood { return this.data.mood; }
-  tickMood(working: boolean, now = Date.now()) {
+  tickMood(working: boolean | 'waiting', now = Date.now()) {
     const seconds = Math.max(0, (now - this.data.moodAt) / 1000);
     if (seconds < 1) return;
     this.data.mood = relaxMood(this.data.mood, Math.min(seconds, 600), working);

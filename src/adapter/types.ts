@@ -87,6 +87,8 @@ export interface AgentState {
   food: number;
   oxygen: number;
   timeOfDay: number;
+  /** 世界的第几天（从 0 起，服务端的 time.day） */
+  worldDay?: number;
   isDay: boolean;
   biome: string | null;
   onGround: boolean;

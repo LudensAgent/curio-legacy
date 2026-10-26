@@ -121,3 +121,19 @@ test('技能目录不列收起的；收起不久的技能后台不同名重写�
   assert.ok(engine.write({ name: 'dig-me-out', description: '被困在坑里时挖台阶出去 v2', code: 'return 2;' }).ok, '心智自己要写可以');
   assert.match(engine.reliable('dig-me-out') ?? '', /不够可靠/);
 });
+
+test('时间感：离天黑/天亮几分钟；中午、半夜、天亮各提醒一次；干等比干活无聊得快', async () => {
+  const { clockOf } = await import('../src/perception/perception.ts');
+  const { Attention } = await import('../src/mind/attention.ts');
+  const { relaxMood, DEFAULT_MOOD } = await import('../src/mind/self.ts');
+  assert.deepEqual(clockOf(10800), { toDusk: 1, toDawn: null });
+  assert.deepEqual(clockOf(17000), { toDusk: null, toDawn: 5 });
+  const att = new Attention();
+  const p = (tod: number) => ({ time: { timeOfDay: tod, phase: tod < 12000 ? 'day' : tod < 13800 ? 'dusk' : tod < 22200 ? 'night' : 'dawn', day: 2 }, self: { food: 20, hp: 20, inWater: false }, emptySlots: 5, nearby: { hostile: [], resources: [] }, light: null } as any);
+  att.fromPercept(p(5900));
+  assert.ok(att.fromPercept(p(6100)).some((n) => n.key === 'noon' && /第 3 天/.test(n.what)));
+  att.fromPercept(p(17900));
+  assert.ok(att.fromPercept(p(18100)).some((n) => n.key === 'midnight' && /离天亮约/.test(n.what)));
+  const waited = relaxMood(DEFAULT_MOOD, 120, 'waiting').boredom, worked = relaxMood(DEFAULT_MOOD, 120, true).boredom;
+  assert.ok(waited > worked + 0.2, `干等两分钟 ${waited} vs 干活两分钟 ${worked}`);
+});
