@@ -376,7 +376,11 @@ export const goTo: Skill<{ target: string; dig?: boolean; sprint?: boolean; avoi
         if (!inScope()) return fail('WRONG_DIMENSION', '途中世界或会话已改变，需要重新规划');
         const after = adapter.state().pos;
         if (fromMemory && dist3(cur, after) < 0.3 && !arrived(after)) { visited.push(waypoint!); continue; }
-        if (dist3(cur, after) < 0.3 && !arrived(after)) return fail('PATH_NOT_FOUND', `前往 ${label} 没有取得进展，仍在 (${after.x.toFixed(2)},${after.y.toFixed(2)},${after.z.toFixed(2)})；尚未到达目标位置，需要换入口或路线`, measured(after));
+        if (dist3(cur, after) < 0.3 && !arrived(after)) {
+          // 泡在水里时步行寻路不肯动（不游泳），一下就返回：说清楚是因为在水里
+          const wet = adapter.state().inWater ? '；人泡在水里，步行寻路不游泳——先 surface 游上岸，或在脚下垫一块站出水面，再走' : '';
+          return fail('PATH_NOT_FOUND', `前往 ${label} 没有取得进展，仍在 (${after.x.toFixed(2)},${after.y.toFixed(2)},${after.z.toFixed(2)})；尚未到达目标位置，需要换入口或路线${wet}`, measured(after));
+        }
         if (distance(after) < bestDistance - 0.5) { bestDistance = distance(after); detours = 0; }
         else if (++detours >= (args.dig ? 6 : 4)) return fail('PATH_NOT_FOUND', `绕行后仍未接近 ${label}${args.dig ? '' : `；要直接过去写 goto {"target":"${args.target}","dig":true}`}`, measured(after));
         visited.push(waypoint ?? after);

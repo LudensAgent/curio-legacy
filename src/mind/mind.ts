@@ -650,7 +650,11 @@ export class Mind {
       }
       return;
     }
+    // 步骤做完了，收工条件却没达到（挖了一段巷子没见着铁）：提前想好的下一段多半建立在“这段达成了”上（拿铁去烧），不能照接
+    const unmet = verdict.kind === 'done' && !verdict.met ? this.queuedNext : null;
+    if (unmet) this.queuedNext = null;
     this.finishActivity(verdict.kind === 'done' ? 'done' : 'stuck', verdict.why);
+    if (unmet) this.requestThink(`「${a.what}」${verdict.why}，提前想好的「${unmet.draft.what}」先不接着做：它要的东西还没到手。接下来怎么办？`, 'deliberate');
   }
 
   private pruneFailures() {
@@ -1012,8 +1016,11 @@ export class Mind {
       else decision.notes.push('plan 没定下来：focus 要是议程里的 goal（点子、疑问不能当主目标），或者一句话的目标；还要有 steps');
     }
     if (p.done?.length) {
-      const checked = this.d.self.checkPlan(p.done);
+      const s = this.d.adapter.state(), percept = this.safe(() => this.d.perception.snapshot(), undefined);
+      const refused: string[] = [];
+      const checked = this.d.self.checkPlan(p.done, (c) => evaluateCondition(c, s, s.worldId, [], percept).status === 'satisfied', refused);
       if (checked.length) this.d.bus.publish('plan_check', 'P3', `勾掉：${checked.join('、')}`);
+      if (refused.length) decision.notes.push(`没勾掉「${refused.join('、')}」：它的 done_when 条件实际还没达到`);
       const now = this.d.self.plan();
       if (now && now.steps.length && now.steps.every((st) => st.done)) {
         this.d.self.setAgendaStatus(now.agendaId, 'done');

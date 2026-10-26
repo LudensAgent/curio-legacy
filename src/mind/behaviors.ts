@@ -56,6 +56,9 @@ export interface BehaviorStats {
   advisory?: { since: number; why: string };
   /** 和别的技能来回拉锯过（A 做完 B 又把它推回去）：给整理用 */
   loops?: { with: string; at: number; times: number }[];
+  /** 条件成立接手、却什么都没做就返回（白白打断手上的活）的次数：when 多半比代码里的判断宽。给整理用 */
+  idleInterrupts?: number;
+  idleAt?: number;
   /** 和别的自动技能同时满足条件的次数（给整理用） */
   conflicts?: Record<string, number>;
   /** 动作上互相拆台：它挖掉了另一个技能放的方块、或在另一个技能挖开的地方又放上（技能名 → 格数）。给整理用 */
@@ -174,7 +177,7 @@ export class BehaviorEngine {
   /** 最近身体自己接手（自动/恢复）的记录：认出来回拉锯 */
   private fires: { at: number; name: string; doing: string | null }[] = [];
   /** 拉锯时先让一边歇一会儿（不是停用：过了这段时间照常） */
-  private holds = new Map<string, { until: number; why: string }>();
+  private holds = new Map<string, { until: number; why: string; closer?: number }>();
   private loopSaid = new Map<string, number>();
   static readonly LOOP_WINDOW_MS = 5 * 60_000;
   static readonly HOLD_MS = 90_000;
@@ -196,7 +199,7 @@ export class BehaviorEngine {
   private doneListener = (o: TaskOutcome) => this.onDone(o);
   private lastHurtAt = 0;
   /** 自动技能做完后要看“结果”：十几秒后还活着、没再掉多少血才算管用 */
-  private aftermath = new Map<string, { hp: number; at: number; summary?: string; data?: Record<string, any>; context: string }>();
+  private aftermath = new Map<string, { hp: number; at: number; summary?: string; data?: Record<string, any>; context: string; pos?: { x: number; y: number; z: number }; interrupted?: string; nearest?: number }>();
   static readonly AFTERMATH_MS = 12_000;
   /** 代码技能失败或心智要求改进时调用（main 接到后台改进器） */
   improve: ImproveHook | null = null;
@@ -260,7 +263,14 @@ export class BehaviorEngine {
     const matches: Behavior[] = [];
     for (const b of auto) {
       if (b.priority <= floor || running?.name === b.name) continue;
-      if ((this.holds.get(b.name)?.until ?? 0) > now) continue;
+      const hold = this.holds.get(b.name);
+      if (hold && hold.until > now) {
+        // 白白接手后歇着的：怪比那时又近了 2 格以上、或者挨了打，情况变了，照常接手
+        if (hold.closer === undefined) continue;
+        s ??= this.sense(cur);
+        const nearest = Math.min(Infinity, ...s.hostiles.map((h) => h.dist));
+        if (!(nearest < hold.closer - 2 || s.hurtAgoMs < 3000)) continue;
+      }
       // 不是眼下的危险：心智手上有事（包括操作者交代的）就不打断，等做完再接手
       const threat = isThreat(b.when);
       if (!threat && cur && (cur.source === 'llm' || cur.source === 'rule')) { this.waiting(b, cur, now); continue; }
@@ -282,7 +292,7 @@ export class BehaviorEngine {
         hostiles: s.hostiles.slice(0, 4).map((h) => ({ name: h.name, dist: Math.round(h.dist * 10) / 10, ...(h.fusing ? { fusing: true } : {}) })) };
       const r = this.arbiter.start({ skill: 'use_skill', args: { name: b.name, args: { trigger } } }, 'reflex');
       if ('error' in r) { this.lastFired.set(b.name, now); continue; }
-      this.aftermath.set(b.name, { hp: s.state.hp, at: now, context: `触发时血 ${trigger.hp}${trigger.hostiles.length ? `，${trigger.hostiles.map((h) => `${h.name} ${h.dist}格`).join('、')}` : ''}，${trigger.cover === 'open' ? '在空地' : trigger.cover === 'pit' ? '在坑里' : '在封好的坑里'}${s.doing ? `，当时在做 ${s.doing}` : ''}` });
+      this.aftermath.set(b.name, { hp: s.state.hp, at: now, pos: { ...s.state.pos }, nearest: Math.min(Infinity, ...s.hostiles.map((h) => h.dist)), ...(s.doing && cur && cur.source !== 'filler' ? { interrupted: s.doing } : {}), context: `触发时血 ${trigger.hp}${trigger.hostiles.length ? `，${trigger.hostiles.map((h) => `${h.name} ${h.dist}格`).join('、')}` : ''}，${trigger.cover === 'open' ? '在空地' : trigger.cover === 'pit' ? '在坑里' : '在封好的坑里'}${s.doing ? `，当时在做 ${s.doing}` : ''}` });
       this.lastFired.set(b.name, now);
       this.touch(b.name, (st) => { st.fired++; st.lastAt = now; });
       this.bus.publish('instinct', 'P2', `技能「${b.name}」的条件成立，身体照着做：${b.description}`, { name: b.name, source: b.source });
@@ -546,6 +556,18 @@ export class BehaviorEngine {
     if ((o.task.args as any)?.failure && okRun) return;
     // 自动技能（后天的反射）：做没做完不算数，十几秒后看结果（judge）；代码本身出错才马上算失败
     const pending = this.aftermath.get(name);
+    // 接手了却一下子就返回、人也没动：多半是 when 写得比代码里的判断宽（条件说“苦力怕 10 格内”，代码却觉得 7 格外不算威胁），
+    // 白白打断了手上的活。先让它歇一会儿，记下来给整理技能的看（收窄条件是它自己的事）
+    const here = this.adapter.state().pos;
+    if (okRun && o.task.source === 'reflex' && pending?.interrupted && o.durationMs < 600 && pending.pos
+      && Math.hypot(here.x - pending.pos.x, here.y - pending.pos.y, here.z - pending.pos.z) < 0.3) {
+      const now = Date.now();
+      this.touch(name, (st) => { st.idleInterrupts = (st.idleInterrupts ?? 0) + 1; st.idleAt = now; });
+      this.holds.set(name, { until: now + BehaviorEngine.HOLD_MS, why: '条件成立接手后什么都没做就返回，打断了手上的事', closer: Number.isFinite(pending.nearest) ? pending.nearest : Infinity });
+      this.bus.publish('instinct_idle', 'P3', `技能「${name}」接手后什么都没做就返回（打断了「${pending.interrupted}」），先歇 ${BehaviorEngine.HOLD_MS / 1000} 秒（怪更近或挨打时照常接手）；它的 when 可能比代码里的判断宽`, { name, interrupted: pending.interrupted, times: this.stats[name]?.idleInterrupts });
+      this.aftermath.delete(name);
+      return;
+    }
     // 技能自己判断这次不用做（怪已经走了、没吃的）：不算一次使用
     if (okRun && (o.result.data as any)?.result?.skipped) { this.aftermath.delete(name); return; }
     if (pending && o.task.source === 'reflex') {

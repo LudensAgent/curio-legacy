@@ -262,12 +262,14 @@ export class SelfModel {
     return out;
   }
   /** 勾掉清单里的项：序号或文字 */
-  checkPlan(done: (number | string)[]): string[] {
+  checkPlan(done: (number | string)[], met?: (c: import('../projects/types.ts').Condition) => boolean, refused?: string[]): string[] {
     const p = this.plan();
     if (!p) return [];
     const out: string[] = [];
     for (const d of done) {
       const st = typeof d === 'number' ? p.steps[d] : p.steps.find((x) => x.text === d || x.text.includes(String(d)));
+      // 写了 done_when 的项以事实为准：条件没达到，说“做完了”也不勾
+      if (st && !st.done && st.doneWhen && met && !met(st.doneWhen)) { refused?.push(st.text); continue; }
       if (st && !st.done) { st.done = true; out.push(st.text); }
     }
     if (out.length) { p.updatedAt = Date.now(); p.progressAt = Date.now(); this.touch(); }

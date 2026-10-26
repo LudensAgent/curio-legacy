@@ -113,6 +113,6 @@ test('配方反查：手里的东西能做什么，只列知道的，标出现�
     assert.equal(r.craft[0].ready_now, true, '现在就能做的排前面');
     r = book.query({ uses: 'raw_iron' }, [{ name: 'raw_iron', count: 1 }]);
     assert.equal(r.smelts_into, 'iron_ingot');
-    assert.equal(book.query({ uses: 'no_such_thing' }, [] as any).error, '没有这个物品');
+    assert.equal((book.query({ uses: "no_such_thing" }, []) as any).error, '没有这个物品');
   } finally { memory.close?.(); }
 });

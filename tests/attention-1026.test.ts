@@ -85,6 +85,17 @@ test('清单项可以带 done_when：事实达成就自动勾掉', () => {
   assert.equal(self.plan()!.steps[0].auto, true);
 });
 
+test('模型说做完了，但清单项的 done_when 实际没达到：不勾', () => {
+  const plan = parsePlan({ focus: '挖铁', steps: [{ text: '挖到4块铁矿石', done_when: { type: 'inventory_min', item: 'raw_iron', count: 4 } }, '回家'] }, (c) => c as any);
+  const self = new SelfModel(null);
+  self.setPlan(plan!.focus!, plan!.steps!, plan!.conditions!);
+  const refused: string[] = [];
+  assert.deepEqual(self.checkPlan([0, 1], () => false, refused), ['回家'], '没写条件的照模型说的勾');
+  assert.deepEqual(refused, ['挖到4块铁矿石']);
+  assert.equal(self.plan()!.steps[0].done, false);
+  assert.deepEqual(self.checkPlan([0], () => true), ['挖到4块铁矿石']);
+});
+
 test('技能工程师认得某个技能已经管着某种失败', () => {
   assert.ok(coversFailure({ all: [{ hp_below: 5 }, { after_failure: { skill: ['goto'], code: ['PATH_NOT_FOUND'] } }] }, 'goto', 'PATH_NOT_FOUND'));
   assert.ok(coversFailure({ after_failure: { skill: ['goto'] } }, 'goto', 'STUCK'));

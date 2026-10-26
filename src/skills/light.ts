@@ -121,6 +121,14 @@ export const placeTorch: Skill<{ count: number; auto?: boolean }> = {
         if (here !== null && AIRISH.has(here)) cands.push({ x, y: fy + 1, z, light: lightOf(x, fy + 1, z) });
       }
     }
+    // 窄竖井、一格宽的巷子里四周全是石头：火把没有碰撞箱，可以插在自己脚下那格（地上）或头那格（靠墙）
+    if (!cands.length) {
+      const feetHere = adapter.blockAt({ x: fx, y: fy, z: fz }), floor = adapter.blockAt({ x: fx, y: fy - 1, z: fz });
+      if (feetHere !== null && floor !== null && AIRISH.has(feetHere) && !NOT_SOLID.has(floor)) cands.push({ x: fx, y: fy, z: fz, light: lightOf(fx, fy, fz) });
+      const headHere = adapter.blockAt({ x: fx, y: fy + 1, z: fz });
+      const wall = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => { const n = adapter.blockAt({ x: fx + dx, y: fy + 1, z: fz + dz }); return n !== null && !NOT_SOLID.has(n); });
+      if (headHere !== null && AIRISH.has(headHere) && wall) cands.push({ x: fx, y: fy + 1, z: fz, light: lightOf(fx, fy + 1, fz) });
+    }
     cands.sort((a, b) => a.light - b.light);
     let placed = 0;
     const placedAt: { x: number; y: number; z: number }[] = [];

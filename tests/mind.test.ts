@@ -718,3 +718,19 @@ test('盖房、走路这类事做着做着挨了打，又没有技能接手：�
   assert.match(w.pending.at(-1)!.messages[1].content, /挨打了/);
   assert.notDeepEqual(w.arbiter.info()?.args, { n: 2 }, '想好之前不接着做');
 });
+
+test('步骤做完、收工条件没达到：提前想好的下一段不照接，回头重新想', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { monologue: '挖条巷子找铁', decision: 'new', activity: { what: '开巷找铁', steps: [step(1)], done_when: { type: 'inventory_min', item: 'raw_iron', count: 1 } },
+    next: { what: '把铁烧成锭', steps: [step(2)] } });
+  assert.equal(w.mind.activity?.what, '开巷找铁');
+  assert.ok(w.mind.queuedNext);
+  const before = w.pending.length;
+  await w.finish();
+  await w.tick();
+  assert.notEqual(w.mind.activity?.what, '把铁烧成锭');
+  assert.equal(w.mind.queuedNext, null);
+  assert.ok(w.pending.length > before, '要回头想');
+  assert.match(JSON.stringify(w.pending.at(-1)!.messages), /先不接着做/);
+});
