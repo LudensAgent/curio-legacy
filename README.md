@@ -314,6 +314,19 @@ npm run memory:clear
 
 需要同时重置世界时，先停止 Minecraft 服务器，再运行 `npm run memory:reset`（等价于 `npm run memory:clear -- --full`）。保留 `eula.txt`、配置、mods 和启动组件，清理地图、玩家、日志、录像等运行数据，并清除 `level-seed`，下次启动创建随机种子的新世界。可先运行 `npm run memory:reset -- --dry-run` 预览；完整说明见 [清理与完整重置](docs/memory-hindsight.md#完全清空)。
 
+### 11.1 角色档案：保存、新建、切换角色
+
+一个“角色”是它的记忆和技能（`data/`）、它活过的世界（服务器目录里属于这个世界的部分）和它的 Hindsight 记忆 bank。档案放在 `agents/<日期-时间>/`（不进 git）：
+
+| 命令 | 作用 |
+|---|---|
+| `npm run agents:list` | 列出所有角色，▶ 是当前在用的 |
+| `npm run agents:save` | 给当前角色存一份快照（复制 data 和世界，导出 Hindsight；录像默认不复制，要的话加 `-- --with-recordings`；Agent 还在跑时加 `-- --live`） |
+| `npm run agents:new -- 名字` | 把当前角色整个收进档案，开一个全新的角色：空记忆、空技能、新 bank、随机种子的新世界 |
+| `npm run agents:switch -- <ID或名字>` | 先把当前角色收进档案，再把目标角色搬回 `data/` 和服务器目录；Hindsight 里没有它的 bank 就从档案里的 `hindsight/bank.zip` 恢复 |
+
+new / switch 前先退出 Agent、停掉 Minecraft 服务器（会检查端口）；用 Hindsight 时让它保持运行。第一次用时，现在的 `data/` 会被收编成一个角色（用这次测试开始的时间命名，沿用原来的 bank）。每个角色有自己的 Hindsight bank，切换不会删别人的记忆。运行时仍然是 `data/` 和 `world/`，启动方式不变；切换在同一块盘上是改名，不复制录像。LLM 调用归档（`archives/llm-calls`）是共用的，不跟角色走。
+
 ## 12. 目录
 
 ```

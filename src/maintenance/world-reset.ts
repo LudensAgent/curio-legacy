@@ -9,7 +9,7 @@ const KEEP_FILES = new Set([
   'permissions.json', '.env', 'user_jvm_args.txt', 'jvm_args.txt', 'win_args.txt', 'unix_args.txt',
   'log4j2.xml', 'log4j2_server.xml',
 ]);
-const PROTECTED_PROJECT_DIRECTORIES = ['.git', '.agents', '.codex', '.aws', 'src', 'scripts', 'tests', 'public', 'docs', 'node_modules', 'data'];
+const PROTECTED_PROJECT_DIRECTORIES = ['.git', '.agents', '.codex', '.aws', 'src', 'scripts', 'tests', 'public', 'docs', 'node_modules', 'data', 'agents'];
 const WHITE = /[ \t\f]/;
 
 export interface WorldResetPlan {

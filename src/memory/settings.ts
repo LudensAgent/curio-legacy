@@ -1,5 +1,20 @@
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import type { MemorySettings } from './types.ts';
+
+/** 没有角色档案时的 bank：按“世界 + 名字”算 */
+export const legacyBankId = (worldId: string, agentId: string) => `mc-${createHash('sha256').update(JSON.stringify([worldId, agentId])).digest('hex').slice(0, 32)}`;
+
+/** 当前角色（DATA_DIR/agent.json）自己的 bank：每个角色一份，切换角色就换 bank（npm run agents:*） */
+function agentBank(env: NodeJS.ProcessEnv, worldId: string, agentId: string): string | null {
+  try {
+    const meta = JSON.parse(fs.readFileSync(path.join(path.resolve((env.DATA_DIR ?? '').trim() || './data'), 'agent.json'), 'utf8'));
+    // 只认同一个世界、同一个名字的角色（换了服务器或 BOT_USERNAME 就不是它了）
+    if (meta?.worldId !== worldId || meta?.botUsername !== agentId) return null;
+    return typeof meta?.bankId === 'string' && /^mc-[a-f0-9]{32}$/.test(meta.bankId) ? meta.bankId : null;
+  } catch { return null; }
+}
 
 /** 记忆服务只保管本世界、本角色的 bank；不允许配置任意服务端 bank 名。 */
 export function memorySettings(env: NodeJS.ProcessEnv = process.env): MemorySettings {
@@ -25,7 +40,7 @@ export function memorySettings(env: NodeJS.ProcessEnv = process.env): MemorySett
     agentId,
     baseUrl: endpoint.toString().replace(/\/+$/, ''),
     apiKey: value('HINDSIGHT_API_KEY'),
-    bankId: `mc-${createHash('sha256').update(JSON.stringify([worldId, agentId])).digest('hex').slice(0, 32)}`,
+    bankId: agentBank(env, worldId, agentId) ?? legacyBankId(worldId, agentId),
     timeoutMs: bounded('MEMORY_TIMEOUT_MS', 1500, 100, 15000),
     retainTimeoutMs: bounded('MEMORY_RETAIN_TIMEOUT_MS', 60000, 100, 180000),
     maxContextBytes: bounded('MEMORY_CONTEXT_MAX_BYTES', 6000, 512, 32000),

@@ -19,6 +19,10 @@
     "memory:serve": "docker compose -f compose.memory.yaml up -d",
     "check:memory": "tsx scripts/check-memory.ts",
     "test": "tsx --test tests/*.test.ts",
+    "agents:list": "tsx scripts/agents.ts list",
+    "agents:save": "tsx scripts/agents.ts save",
+    "agents:new": "tsx scripts/agents.ts new",
+    "agents:switch": "tsx scripts/agents.ts switch",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

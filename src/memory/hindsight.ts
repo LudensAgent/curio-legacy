@@ -156,3 +156,45 @@ export class HindsightBackend implements MemoryBackend {
     }
   }
 }
+
+/**
+ * 角色档案用的 bank 操作：整份导出成 zip、从 zip 恢复到一个还不存在的 bank、看 bank 在不在。
+ * 导出不调 LLM；恢复时服务端要重新算向量（不调 LLM 抽取事实），在后台跑，这里等它做完。
+ */
+export function hindsightBankOps(settings: Pick<MemorySettings, 'baseUrl' | 'apiKey'>, opts: { timeoutMs?: number } = {}) {
+  const client = new HindsightClient({ baseUrl: settings.baseUrl, apiKey: settings.apiKey || undefined, userAgent: 'minecraftllm/0.3.0', maxAttempts: 1 });
+  const raw = createClient(createConfig({ baseUrl: settings.baseUrl, headers: settings.apiKey ? { Authorization: `Bearer ${settings.apiKey}` } : {} }));
+  const timeoutMs = opts.timeoutMs ?? 15 * 60_000;
+  return {
+    async exists(bankId: string): Promise<boolean> {
+      const limit = 100;
+      for (let offset = 0; offset < 10000; offset += limit) {
+        const listed = await sdk.listBanks({ client: raw, query: { q: bankId, limit, offset }, signal: AbortSignal.timeout(30_000) });
+        if (!listed.response?.ok || !Array.isArray(listed.data?.banks)) throw new HindsightError('Bank listing failed', listed.response?.status);
+        if (listed.data.banks.some((bank) => bank.bank_id === bankId)) return true;
+        if (listed.data.banks.length < limit) return false;
+      }
+      return false;
+    },
+    async exportTo(bankId: string, file: string): Promise<number> {
+      const bytes = await client.exportBank(bankId, { includeData: true, includeBankConfig: true, includeHistory: false, timeoutMs, signal: AbortSignal.timeout(timeoutMs + 30_000) });
+      const fs = await import('node:fs');
+      fs.writeFileSync(file, bytes);
+      return bytes.byteLength;
+    },
+    async importFrom(file: string, bankId: string): Promise<void> {
+      const fs = await import('node:fs');
+      const archive = new Blob([fs.readFileSync(file)], { type: 'application/zip' });
+      const operationId = await client.importBank(bankId, archive, { targetBankId: bankId, includeData: true, includeBankConfig: true, signal: AbortSignal.timeout(120_000) });
+      const until = Date.now() + timeoutMs;
+      while (Date.now() < until) {
+        const st = await sdk.getOperationStatus({ client: raw, path: { bank_id: bankId, operation_id: operationId }, signal: AbortSignal.timeout(30_000) });
+        const status = st.data?.status;
+        if (status === 'completed') return;
+        if (status === 'failed' || status === 'cancelled' || status === 'not_found') throw new Error(`Hindsight 恢复没成（${status}）`);
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      throw new Error('Hindsight 恢复超时（还在后台跑的话，过一会儿再看）');
+    },
+  };
+}
