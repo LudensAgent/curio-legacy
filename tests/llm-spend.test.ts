@@ -51,3 +51,25 @@ test('spend sums planners, backfills pre-upgrade usage at off-peak price and nam
   assert.equal(s.model, 'deepseek-flash + deepseek-v4-pro');
   assert.equal(llmSpend([fakePlanner('gpt-4o', { promptTokens: 5, completionTokens: 5 })]).cost, null, '认不出价格就不算钱');
 });
+
+test('memory spend accrues per sample at the current price and merges with game spend', async () => {
+  const { MemorySpend, withMemory } = await import('../src/observer/llm-spend.ts');
+  let total = { input: 2_000_000, cached: 1_000_000, output: 500_000, thoughts: 500_000 };
+  const meter = new MemorySpend({ snapshot: () => ({ total, models: ['deepseek-flash'] }) });
+  const weekend = at('2026-10-25T06:30:00Z'), peak = at('2026-10-26T06:30:00Z');
+  // 启动时已有的累计按闲时价：100 万命中 0.02 + 100 万未命中 1 + 100 万输出 4
+  assert.equal(meter.sample(peak).memoryCost!.toFixed(4), '5.0200');
+  total = { input: 3_000_000, cached: 1_000_000, output: 1_000_000, thoughts: 500_000 };
+  // 新增 100 万未命中 + 50 万输出，高峰价 ×2：(1 + 2) × 2 = 6
+  const s = meter.sample(peak);
+  assert.equal(s.memoryCost!.toFixed(4), '11.0200');
+  assert.equal(s.memoryOutputTokens, 1_500_000);
+  assert.equal(s.memoryModel, 'deepseek-flash');
+  const game = llmSpend([fakePlanner('deepseek-flash', { promptTokens: 1, completionTokens: 0, cost: 1, costedPromptTokens: 1, costedCachedTokens: 0, costedCompletionTokens: 0 })], { now: weekend });
+  const merged = withMemory(game, s, weekend);
+  assert.equal(merged.cost!.toFixed(4), '12.0200');
+  assert.equal(merged.memoryCost!.toFixed(4), '11.0200');
+  assert.equal(merged.inputTokens, 1, 'game traffic stays separate');
+  assert.equal(merged.memoryInputTokens, 3_000_000);
+  assert.equal(withMemory(game, null), game);
+});

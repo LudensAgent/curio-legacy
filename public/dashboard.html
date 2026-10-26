@@ -416,7 +416,7 @@
           <div class="card">
             <h2>LLM 用量 <span class="r dim" id="spendModel">-</span></h2>
             <div class="spend mono" id="spendBody"><span class="dim">等待数据…</span></div>
-            <div class="hudnote">花费按每次调用当时的价格（含 DeepSeek 高峰价）累计；不含记忆服务和侧边聊天。</div>
+            <div class="hudnote">花费按每次调用当时的价格（含 DeepSeek 高峰价）累计；游戏和记忆服务分开统计，不含侧边聊天。</div>
           </div>
           <div class="card">
             <h2>弹幕存档 <span class="r dim" id="dmMeta">-</span></h2>
@@ -1035,12 +1035,16 @@ es.onerror = () => { $('conn').textContent = '控制台断开'; $('connDot').cla
     const s = lastState?.llmSpend;
     if (!s) return;
     const money = s.cost == null ? '—（模型价格未知）' : (s.currency === 'CNY' ? '¥' : (s.currency || '') + ' ') + s.cost.toFixed(s.cost < 10 ? 3 : 2);
-    const hit = s.cachedInputTokens != null && s.inputTokens ? (s.cachedInputTokens / s.inputTokens * 100).toFixed(1) + '%' : '—';
-    $('spendModel').textContent = s.model || '-';
+    const rate = (c, i) => c != null && i ? (c / i * 100).toFixed(1) + '%' : '—';
+    const cur = (v) => (s.currency === 'CNY' || !s.currency ? '¥' : s.currency + ' ') + v.toFixed(v < 10 ? 3 : 2);
+    const mem = s.memoryInputTokens != null || s.memoryOutputTokens != null;
+    $('spendModel').textContent = [s.model, mem && s.memoryModel && s.memoryModel !== s.model ? '记忆 ' + s.memoryModel : ''].filter(Boolean).join(' · ') || '-';
     $('spendBody').innerHTML = [
-      ['上传（输入）', tok(s.inputTokens)], ['下载（输出）', tok(s.outputTokens)],
-      ['缓存命中率', hit], ['每分钟', `↑${tok(s.inputRate)} ↓${tok(s.outputRate)}`],
-      ['实际开销', money], ['当前价格', s.peak == null ? '—' : s.peak ? '高峰价（×2）' : '闲时价'],
+      [mem ? '游戏 上传' : '上传（输入）', tok(s.inputTokens)], [mem ? '游戏 下载' : '下载（输出）', tok(s.outputTokens)],
+      [mem ? '游戏 缓存命中' : '缓存命中率', rate(s.cachedInputTokens, s.inputTokens)], ['游戏 每分钟', `↑${tok(s.inputRate)} ↓${tok(s.outputRate)}`],
+      ...(mem ? [['记忆 上传', tok(s.memoryInputTokens)], ['记忆 下载', tok(s.memoryOutputTokens)],
+        ['记忆 缓存命中', rate(s.memoryCachedInputTokens, s.memoryInputTokens)], ['记忆 开销', s.memoryCost == null ? '—' : cur(s.memoryCost)]] : []),
+      ['实际开销（合计）', money], ['当前价格', s.peak == null ? '—' : s.peak ? '高峰价（×2）' : '闲时价'],
     ].map(([k, v]) => `<div class="row"><span>${k}</span><span>${esc(v)}</span></div>`).join('');
   }
 

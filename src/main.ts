@@ -46,7 +46,7 @@ import { liveAudience } from './planner/prompt.ts';
 import { AudienceChannel } from './live/audience.ts';
 import { BilibiliLive, type LiveMessage, type LiveStatus } from './live/bilibili.ts';
 import { DanmakuLog } from './live/danmaku-log.ts';
-import { llmSpend } from './observer/llm-spend.ts';
+import { MemorySpend, llmSpend, withMemory } from './observer/llm-spend.ts';
 import { SkillLibrary } from './skills/library.ts';
 import { ExperienceMiner } from './methods/experience.ts';
 import type { TaskOutcome } from './arbiter/arbiter.ts';

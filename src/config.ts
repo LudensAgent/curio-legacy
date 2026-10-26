@@ -154,6 +154,8 @@ export const config = {
   llmArchiveDir: path.resolve(str('LLM_ARCHIVE_DIR', './archives/llm-calls')),
   /** 收到的每条弹幕（含被拦下的）按天存档，方便复盘和找观众的问题：同样放在数据目录外 */
   danmakuArchiveDir: path.resolve(str('DANMAKU_ARCHIVE_DIR', './archives/danmaku')),
+  /** 记忆服务（Hindsight）所用模型的价格覆盖，格式同 LLM_PRICE；不写就按它上报的模型名查内置价格表 */
+  memoryLlmPrice: str('MEMORY_LLM_PRICE'),
   /** 观察者模组 HUD 的布局和开关（控制台「直播」页修改）：直播设置，不跟着角色存档走 */
   observerHudConfig: path.resolve(str('OBSERVER_HUD_CONFIG', './live/observer-hud.json')),
 };
