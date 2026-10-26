@@ -223,6 +223,9 @@ ${CONDITIONS}
 ${movesCatalog(0, new Set([...inUse, 'dig_at', 'step', 'place_at', 'defend', 'gather', 'goto', 'explore', 'craft', 'eat', 'hunt', 'forage', 'look_around', 'pickup_items', 'wait', 'place_torch', 'sleep', 'shelter', 'build', 'smelt', 'store_items', 'climb_up', 'boat', 'use_skill']))}`;
 }
 
+/** 打算里说要下矿、往下挖 */
+const MINING_INTENT = /下矿|矿道|矿洞|找铁|挖铁|找矿|挖矿|粗铁|铁矿|往下挖|下挖|下到 ?y|挖(阶梯|台阶)[^上]{0,6}(下|降)|石层|深层/;
+
 /** 按情境追加在用户消息末尾的提醒：只说和眼下有关的 2–4 件事 */
 export function situationalReminders(ctx: MindContext): string[] {
   const out: string[] = [];
@@ -241,6 +244,15 @@ export function situationalReminders(ctx: MindContext): string[] {
   const exits = Object.values(p.self.exits ?? {});
   const where = p.self.where?.kind;
   const trapped = where ? where === 'underground' || where === 'pit' : p.self.sky_visible !== true && (p.self.overhead?.covered === 'rock' || p.light?.underground === true) || exits.length > 0 && exits.every((e) => !e.walk && !e.step_up);
+  // 想下矿、想往下挖：自己挖过的通道就是现成的路（10-26 晚它开了 67 次新阶梯，只有被提醒才走回旧矿道）
+  if (MINING_INTENT.test(intent)) {
+    const tunnels = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).filter((f) => f.dist <= 160).slice(0, 2);
+    for (const t of tunnels) {
+      out.push(t.inside
+        ? `你现在就在自己${t.text.replace(/^挖过的通道：/, '挖过的通道里：')}；顺着走比重新挖省事`
+        : `你${t.text}：goto 入口顺着走下去比从这里重新挖省事；太远或者要去别的地方再新挖`);
+    }
+  }
   if (where === 'indoors' && /坑|垫高|台阶|爬出|挖出去|出坑/.test(intent)) out.push(`你${p.self.where!.text}。刚才想的“坑”其实是屋子的墙`);
   if (trapped && where === 'pit') out.push(`你${p.self.where!.text}：原地 place_at [0,0,0] 垫高，或挖一级台阶 step 上去就出来了`);
   else if (trapped) out.push('你在地下或被围住了：看【身边】local，用 dig_at / step / place_at 一格一格自己挖出去（比如挖阶梯：dig_at [0,2,0]、dig_at [1,1,0]、dig_at [1,2,0]、step [1,1,0] 重复到 sky_visible）');

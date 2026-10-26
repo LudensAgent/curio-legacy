@@ -113,3 +113,34 @@ test('地标：同一格的“工作台”和“我的工作台”只留自己�
   assert.deepEqual(loaded.landmarks().map((l) => `${l.label}@${l.pos.x}`).sort(), ['我的熔炉@5', '熔炉@50']);
   loaded.close();
 });
+
+test('按需提醒：想下矿时说出现成的通道；人在通道里就说顺着走；没想下矿不提', async () => {
+  const { situationalReminders } = await import('../src/mind/prompt.ts');
+  const { SelfModel } = await import('../src/mind/self.ts');
+  const { Perception } = await import('../src/perception/perception.ts');
+  const { Vision } = await import('../src/perception/vision.ts');
+  const { EventBus } = await import('../src/events.ts');
+  const { FakeAdapter } = await import('./fake-adapter.ts');
+  const adapter = new FakeAdapter();
+  const m = new WorldMemory(null); m.setWorld(adapter.state().worldId);
+  const world = adapter.state().worldId, dim = adapter.state().dim;
+  // 在 FakeAdapter 的世界里记一条：入口 (0,64,0)，下到 y40
+  const tr = new PassageTracker(m, () => 'p1');
+  tr.observe({ worldId: world, dim, pos: at(0, 64, 0), place: 'surface' }, [], 0);
+  for (let i = 1; i <= 24; i++) tr.observe({ worldId: world, dim, pos: at(i, 64 - i, 0), place: 'underground' }, [{ pos: at(i, 64 - i, 0), name: 'stone', ts: i }], i * 1000);
+  m.addLandmark('discovery', '我的床', dim, at(23, 41, 1), 2);
+  const perception = new Perception(adapter, m, new EventBus(), new Vision(adapter));
+  const ctx = (pos: { x: number; y: number; z: number }, what: string) => {
+    adapter.pos = pos;
+    const self = new SelfModel(null);
+    return { reason: '测试', percept: perception.update(), state: adapter.state(), self, memory: m, activity: { what, why: '' } as any, suspended: [], lastRecord: null,
+      noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', tier: 'glance' as const } as any;
+  };
+  const away = situationalReminders(ctx(at(20, 64, 30), '挖阶梯下到 y20 找铁'));
+  assert.ok(away.some((r) => /你挖过的通道：入口 \(0,64,0\)（36 格外），能走到 y40.*里面有床.*goto 入口顺着走下去比从这里重新挖省事/.test(r)), away.join('\n'));
+  const inside = situationalReminders(ctx(at(22, 42, 0), '顺着矿道往前找铁'));
+  assert.ok(inside.some((r) => /你现在就在自己挖过的通道里：.*顺着走比重新挖省事/.test(r)), inside.join('\n'));
+  const busy = situationalReminders(ctx(at(20, 64, 30), '砍 16 根原木'));
+  assert.ok(!busy.some((r) => /挖过的通道/.test(r)));
+  m.close();
+});
