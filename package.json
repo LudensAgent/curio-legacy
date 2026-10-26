@@ -19,6 +19,7 @@
     "memory:serve": "docker compose -f compose.memory.yaml up -d",
     "check:memory": "tsx scripts/check-memory.ts",
     "test": "tsx --test tests/*.test.ts",
+    "world:seed": "tsx scripts/world-seed.ts",
     "agents:list": "tsx scripts/agents.ts list",
     "agents:save": "tsx scripts/agents.ts save",
     "agents:new": "tsx scripts/agents.ts new",

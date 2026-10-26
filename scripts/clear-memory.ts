@@ -2,11 +2,12 @@
 import { fileURLToPath } from 'node:url';
 import { config } from '../src/config.ts';
 import { resetTestSession } from '../src/maintenance/reset.ts';
+import { defaultServerDir, prepareNewWorld } from '../src/seeds/new-world.ts';
 
 try {
   const args = new Set(process.argv.slice(2));
-  if ([...args].some((arg) => !['--full', '--dry-run', '--hindsight', '--help'].includes(arg))) {
-    throw new Error('未知参数。支持 --full（同时重置世界）、--dry-run（只预览）、--hindsight（即使本地模式也清当前 Hindsight bank）。');
+  if ([...args].some((arg) => !['--full', '--dry-run', '--hindsight', '--help', '--random-seed'].includes(arg))) {
+    throw new Error('未知参数。支持 --full（同时重置世界）、--dry-run（只预览）、--hindsight（即使本地模式也清当前 Hindsight bank）、--random-seed（新世界不按出生难度挑种子）。');
   }
   if (args.has('--help')) {
     console.log('npm run memory:clear [-- --full] [--dry-run] [--hindsight]；npm run memory:reset 为完整重置。先退出 Agent；完整重置还需停止 Minecraft 服务器，Hindsight 保持可用。');
@@ -27,7 +28,15 @@ try {
       console.log('世界记忆、自学技能、历史日志及备份均已清空，保留空数据目录。');
       if ((result as { archived?: string | null }).archived) console.log(`清空前已把这一局的日志、分数和技能统计拷进：${(result as { archived?: string | null }).archived}`);
       if (result.banksCleared) console.log(`已删除并验证 ${result.banksCleared} 个专属 Hindsight bank。`);
-      if (outcome.result.world) console.log('已清理世界与运行数据，保留 EULA、配置、mods 和启动组件；下次启动创建随机种子的新世界。');
+      if (outcome.result.world) {
+        console.log('已清理世界与运行数据，保留 EULA、配置、mods 和启动组件。');
+        if (!args.has('--random-seed')) {
+          const projectDir = fileURLToPath(new URL('../', import.meta.url));
+          try {
+            await prepareNewWorld({ serverDir: defaultServerDir(projectDir), projectDir, rcon: { host: config.observer.rconHost, port: config.observer.rconPort, password: config.observer.rconPassword } }, (s) => console.log(`· ${s}`));
+          } catch (e: any) { console.log(`挑种子没成，下次启动服务器是随机种子的新世界：${e?.message ?? e}`); }
+        } else console.log('下次启动创建随机种子的新世界。');
+      }
     }
   }
 } catch (e: any) {

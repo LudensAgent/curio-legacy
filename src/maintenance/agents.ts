@@ -232,7 +232,7 @@ export async function switchAgent(paths: AgentPaths, target: string, ident: { wo
   }
 }
 
-export async function newAgent(paths: AgentPaths, ident: { worldId: string; botUsername: string; legacyBankId: string }, opts: { label?: string; bank?: BankOps; log?: Log; now?: number } = {}): Promise<{ from: AgentMeta; to: AgentMeta }> {
+export async function newAgent(paths: AgentPaths, ident: { worldId: string; botUsername: string; legacyBankId: string }, opts: { label?: string; bank?: BankOps; log?: Log; now?: number; prepareWorld?: () => Promise<unknown> } = {}): Promise<{ from: AgentMeta; to: AgentMeta }> {
   const log = opts.log ?? (() => {});
   const from = await stashActive(paths, ident, opts.bank, log);
   try {
@@ -244,6 +244,8 @@ export async function newAgent(paths: AgentPaths, ident: { worldId: string; botU
     writeJson(slot(paths, id).meta, to);
     // 世界条目已经搬走了；再按“完整重置”的规则清掉种子，下次启动服务器生成一个随机种子的新世界
     resetWorld(paths.serverDir, paths.projectDir);
+    // 新世界的种子：固定种子、或按出生难度/群系试种子（配置见 .env 的 WORLD_*）
+    try { await opts.prepareWorld?.(); } catch (e) { log(`挑种子没成，保持随机种子：${(e as Error).message}`); }
     writeJson(path.join(paths.agentsDir, 'current.json'), { active: id, at: Date.now() });
     log(`新角色 ${id}${to.label ? `（${to.label}）` : ''}：空的记忆和技能、新的 Hindsight bank，下次启动服务器是一个新世界`);
     return { from, to };

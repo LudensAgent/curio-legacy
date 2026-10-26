@@ -10,6 +10,7 @@ import { assertResetOffline } from '../src/maintenance/offline.ts';
 import { inspectWorldReset } from '../src/maintenance/world-reset.ts';
 import { hindsightBankOps } from '../src/memory/hindsight.ts';
 import { legacyBankId } from '../src/memory/settings.ts';
+import { prepareNewWorld } from '../src/seeds/new-world.ts';
 
 const projectDir = fileURLToPath(new URL('../', import.meta.url));
 const paths: AgentPaths = {
@@ -49,7 +50,9 @@ try {
     console.log(`已存档：${m.id}`);
   } else if (cmd === 'new') {
     await offline();
-    const { from, to } = await newAgent(paths, ident, { label: words.join(' ') || undefined, bank, log });
+    const rcon = { host: config.observer.rconHost, port: config.observer.rconPort, password: config.observer.rconPassword };
+    const { from, to } = await newAgent(paths, ident, { label: words.join(' ') || undefined, bank, log,
+      ...(flags.has('--random-seed') ? {} : { prepareWorld: () => prepareNewWorld({ serverDir: paths.serverDir, projectDir, rcon }, log) }) });
     console.log(`旧角色 ${from.id} 已归档；新角色 ${to.id} 已就绪，启动服务器和 Agent 就是全新的开始`);
   } else if (cmd === 'switch') {
     if (!words[0]) {
@@ -65,7 +68,7 @@ try {
     const m = adoptCurrent(paths, ident, log);
     console.log(`当前角色：${m.id}（世界条目：${worldEntries(paths).join('、')}）`);
   } else {
-    console.log('用法：npm run agents:list | agents:save [-- --live --with-recordings] | agents:new [-- 名字] | agents:switch -- <ID或名字>');
+    console.log('用法：npm run agents:list | agents:save [-- --live --with-recordings] | agents:new [-- 名字 --random-seed] | agents:switch -- <ID或名字>');
     process.exitCode = cmd ? 1 : 0;
   }
 } catch (e: any) {

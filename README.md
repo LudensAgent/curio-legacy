@@ -327,6 +327,15 @@ npm run memory:clear
 
 new / switch 前先退出 Agent、停掉 Minecraft 服务器（会检查端口）；用 Hindsight 时让它保持运行。第一次用时，现在的 `data/` 会被收编成一个角色（用这次测试开始的时间命名，沿用原来的 bank）。每个角色有自己的 Hindsight bank，切换不会删别人的记忆。运行时仍然是 `data/` 和 `world/`，启动方式不变；切换在同一块盘上是改名，不复制录像。LLM 调用归档（`archives/llm-calls`）是共用的，不跟角色走。
 
+### 11.2 新世界的出生点：按群系难度挑种子
+
+开新世界时（`agents:new`、`memory:reset`，或者单独 `npm run world:seed`）会按 `.env` 的配置挑种子：用真正的服务端生成世界、读出生点、问那里是什么群系，不符合就删掉重来（每个种子约 1–2 分钟），都不中就用最接近的。
+
+- `WORLD_SPAWN_DIFFICULTY`：`easy` | `normal` | `hard` | `extreme` | `any`，可以逗号写几档。分级按这个 AI 开局要的东西（木头、羊、平地、石头、水）和危险来定，`npm run world:seed -- --tiers` 打印完整表。
+- `WORLD_SPAWN_BIOMES`：直接指定接受的群系（优先于难度）；`WORLD_SEED`：固定种子；`WORLD_SEED_TRIES`：最多试几个。
+- 试种子要能启动服务端：`SERVER_JAVA`、`SERVER_JAVA_ARGS`、`SERVER_JAR`（默认自动找）、`SERVER_DIR`（默认 `./world`），并通过 RCON（`RCON_*`）问群系。
+- 不想筛就加 `-- --random-seed`。
+
 ## 12. 目录
 
 ```
