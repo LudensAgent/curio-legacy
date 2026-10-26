@@ -106,6 +106,65 @@ export function clockOf(timeOfDay: number): { toDusk: number | null; toDawn: num
   return t < 12000 ? { toDusk: min(12000 - t), toDawn: null } : { toDusk: null, toDawn: min(t < 23000 ? 23000 - t : 24000 + 23000 - t) };
 }
 
+/**
+ * 游戏钟点：给心智的时间感一律用游戏里的钟点说，不用现实分钟。
+ * “离天黑 2 分钟”在人听来是一眨眼，于是它太阳还高高的就收工挖坑、干等；可游戏里 2 分钟是白天的五分之一，
+ * 够砍二三十根木头。换成“下午 4 点，晚上 7 点天黑”，人对钟点的直觉正好和游戏里的比例对得上。
+ * 0 刻 = 早上 6 点，1000 刻 = 1 小时（现实约 50 秒）；18 点日落，约 18 点半能睡，19 点天黑开始刷怪，5 点天亮。
+ */
+export const TICKS_PER_GAME_HOUR = 1000;
+export const SUNSET_TICK = 12000;
+export const SLEEP_TICK = 12542;
+export const DARK_TICK = 13000;
+export const DAWN_TICK = 23000;
+
+const tod24 = (t: number) => ((t % 24000) + 24000) % 24000;
+/** 从 from 往后数到 to 还有多少刻（跨午夜） */
+export const ticksUntil = (from: number, to: number) => (tod24(to) - tod24(from) + 24000) % 24000;
+
+/** 钟点的说法：“下午 3 点”“晚上 6 点半”“凌晨 2 点” */
+export function clockText(timeOfDay: number): string {
+  const totalMin = Math.round(((tod24(timeOfDay) / TICKS_PER_GAME_HOUR + 6) % 24) * 60 / 30) * 30;
+  const h = Math.floor(totalMin / 60) % 24, half = totalMin % 60 === 30;
+  const part = h === 0 ? '半夜' : h < 5 ? '凌晨' : h < 8 ? '早上' : h < 11 ? '上午' : h < 13 ? '中午' : h < 18 ? '下午' : h < 19 ? '傍晚' : '晚上';
+  const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
+  return `${part} ${h12} 点${half ? '半' : ''}`;
+}
+
+/** 一段刻数换成游戏时长：“约 3 个半小时”“约 40 分钟” */
+export function durationText(ticks: number): string {
+  const hours = Math.max(0, ticks) / TICKS_PER_GAME_HOUR;
+  if (hours < 0.9) return `约 ${Math.max(5, Math.round(hours * 60 / 5) * 5)} 分钟`;
+  const halves = Math.round(hours * 2);
+  const whole = Math.floor(halves / 2);
+  return `约 ${whole} 个${halves % 2 ? '半' : ''}小时`;
+}
+
+/** 现实秒数换成游戏时长（走路、干等这些按现实时间量出来的） */
+export const realSecondsToTicks = (sec: number) => sec * 20;
+
+/** 太阳在哪：像人抬头看天 */
+export function sunText(timeOfDay: number): string {
+  const t = tod24(timeOfDay);
+  if (t < 1500) return '太阳刚升起不久';
+  if (t < 4500) return '太阳还在东边';
+  if (t < 7500) return '太阳很高';
+  if (t < 10500) return '太阳偏西';
+  if (t < SUNSET_TICK) return '太阳快挨着地平线了';
+  if (t < DARK_TICK) return '太阳在落山';
+  if (t < DAWN_TICK) return '天黑着';
+  return '东边天开始亮了';
+}
+
+/** 一句话的时间感，给【身体】用：几点、太阳在哪、离天黑 / 能睡 / 天亮还有多久（都是游戏时间） */
+export function timeSense(timeOfDay: number, opts: { canSleep?: boolean } = {}): string {
+  const t = tod24(timeOfDay);
+  const head = `${clockText(t)}，${sunText(t)}`;
+  if (t < SUNSET_TICK) return `${head}；离天黑（晚上 7 点，开始刷怪）还有${durationText(ticksUntil(t, DARK_TICK))}`;
+  if (t < DARK_TICK) return `${head}；${opts.canSleep ? '已经能睡觉，' : `${durationText(ticksUntil(t, SLEEP_TICK))}后能睡觉，`}${durationText(ticksUntil(t, DARK_TICK))}后天黑刷怪`;
+  return `${head}；离天亮（早上 5 点）还有${durationText(ticksUntil(t, DAWN_TICK))}${opts.canSleep ? '，能睡觉' : ''}`;
+}
+
 /** 原版：12542–23459 刻之间才能睡觉；雷雨时任何时候都能睡 */
 export function canSleepAt(timeOfDay: number, weather?: string): boolean {
   if (weather === 'thunder') return true;

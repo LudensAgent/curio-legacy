@@ -163,3 +163,34 @@ test('天气：按群系说清下的是雨还是雪；雷雨随时能睡；变�
   att.fromPercept(p('晴'));
   assert.ok(att.fromPercept(p(weatherHere('thunder', 'plains'))).some((n) => n.key === 'weather' && n.level === 'reconsider'));
 });
+
+test('时间感用游戏钟点说：几点、太阳在哪、离天黑/能睡/天亮还有几个小时', async () => {
+  const { clockText, durationText, timeSense, ticksUntil } = await import('../src/perception/perception.ts');
+  assert.equal(clockText(0), '早上 6 点');
+  assert.equal(clockText(6000), '中午 12 点');
+  assert.equal(clockText(9000), '下午 3 点');
+  assert.equal(clockText(12500), '傍晚 6 点半');
+  assert.equal(clockText(18000), '半夜 12 点');
+  assert.equal(durationText(4000), '约 4 个小时');
+  assert.equal(durationText(3500), '约 3 个半小时');
+  assert.equal(durationText(700), '约 40 分钟');
+  assert.equal(ticksUntil(22000, 23000), 1000);
+  assert.equal(ticksUntil(23500, 23000), 23500);
+  // 下午 3 点：离天黑还有 4 个小时，不再说“离天黑 2.5 分钟”
+  const afternoon = timeSense(9000);
+  assert.match(afternoon, /下午 3 点.*太阳偏西.*离天黑（晚上 7 点，开始刷怪）还有约 4 个小时/);
+  assert.doesNotMatch(afternoon, /\d+(\.\d+)? 分钟/);
+  assert.match(timeSense(12200), /傍晚 6 点.*约 20 分钟后能睡觉.*约 50 分钟后天黑刷怪/);
+  assert.match(timeSense(12600, { canSleep: true }), /已经能睡觉/);
+  assert.match(timeSense(17000), /晚上 11 点.*离天亮（早上 5 点）还有约 6 个小时/);
+});
+
+test('中午的提醒说“下午还长”，不再催着准备过夜', async () => {
+  const { Attention } = await import('../src/mind/attention.ts');
+  const att = new Attention();
+  const p = (tod: number) => ({ time: { timeOfDay: tod, phase: tod < 12000 ? 'day' : tod < 13800 ? 'dusk' : tod < 22200 ? 'night' : 'dawn', day: 0 }, self: { food: 20, hp: 20, inWater: false }, emptySlots: 5, nearby: { hostile: [], resources: [] }, light: null } as any);
+  att.fromPercept(p(5900));
+  const noon = att.fromPercept(p(6100)).find((n) => n.key === 'noon');
+  assert.ok(noon);
+  assert.match(noon!.what, /中午 12 点.*离天黑（晚上 7 点）还有约 7 个小时.*下午还长/);
+});

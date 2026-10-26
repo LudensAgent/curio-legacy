@@ -1,5 +1,5 @@
 import type { AgentEvent } from '../events.ts';
-import { clockOf, type Percept } from '../perception/perception.ts';
+import { DARK_TICK, DAWN_TICK, durationText, ticksUntil, type Percept } from '../perception/perception.ts';
 import type { ActivityEnd, Noticing, StuckHere } from './types.ts';
 
 export const EXPERIENCE_MS = 10 * 60_000;
@@ -97,10 +97,10 @@ export class Attention {
     const out: (Noticing | null)[] = [];
     // 时间感：一天里的几个节点各抬头想一次（像人看一眼天色：今天过了多少、晚上还有多久、新的一天要做什么）
     const day = p.time.day !== undefined ? `第 ${p.time.day + 1} 天` : '';
-    const clock = clockOf(snap.tod);
+    const untilDark = durationText(ticksUntil(snap.tod, DARK_TICK)), untilDawn = durationText(ticksUntil(snap.tod, DAWN_TICK));
     if (snap.phase !== prev.phase) {
-      if (snap.phase === 'dusk') out.push(this.notice('dusk', `${day}太阳快下山了，再过约 ${clock.toDawn ?? 9} 分钟才天亮：今晚怎么过、这段时间做什么`, 0.55, 300_000, now));
-      else if (snap.phase === 'night') out.push(this.notice('night', `天黑了，怪物会出来；离天亮约 ${clock.toDawn} 分钟`, 0.6, 300_000, now));
+      if (snap.phase === 'dusk') out.push(this.notice('dusk', `${day}傍晚 6 点，太阳在落山：${untilDark}后天黑刷怪、半小时后就能睡；今晚在哪过，想好了就去`, 0.55, 300_000, now));
+      else if (snap.phase === 'night') out.push(this.notice('night', `晚上 7 点，天黑了，怪物会出来；离天亮约 ${untilDawn.replace(/^约 /, '')}`, 0.6, 300_000, now));
       else if (snap.phase === 'dawn' || (snap.phase === 'day' && prev.phase !== 'dawn')) out.push(this.notice('morning', `天亮了，${day ? `新的一天（${day}）` : '新的一天'}开始：想想今天要做成什么`, 0.55, 300_000, now));
     }
     // 身上多了状态效果（中毒、饥饿、凋零……）：像人看到心变绿了
@@ -116,8 +116,8 @@ export class Attention {
       else if (now2 === 'clear') out.push(this.notice('weather', `${was === 'thunder' ? '雷雨' : '雨'}停了，天晴了`, 0.35, 120_000, now));
     }
     const crossed = (tick: number) => prev.tod < tick && snap.tod >= tick && snap.tod - prev.tod < 2400;
-    if (crossed(6000)) out.push(this.notice('noon', `中午了，${day}已经过了一半，离天黑约 ${clock.toDusk} 分钟`, 0.5, 300_000, now));
-    if (crossed(18000)) out.push(this.notice('midnight', `半夜了，离天亮约 ${clock.toDawn} 分钟`, 0.5, 300_000, now));
+    if (crossed(6000)) out.push(this.notice('noon', `中午 12 点了，${day}白天过了一半，离天黑（晚上 7 点）还有${untilDark}：下午还长，手上的活接着做`, 0.5, 300_000, now));
+    if (crossed(18000)) out.push(this.notice('midnight', `半夜 12 点了，离天亮约 ${untilDawn.replace(/^约 /, '')}`, 0.5, 300_000, now));
     if (snap.food <= 6 && prev.food > 6) out.push(this.notice('hungry', `饿了（饥饿值 ${snap.food}）`, 0.6, 120_000, now));
     else if (snap.food <= 12 && prev.food > 12) out.push(this.notice('peckish', `有点饿（饥饿值 ${snap.food}）`, 0.3, 300_000, now));
     if (prev.hp - snap.hp >= 4) out.push(this.notice('hp_drop', `掉了 ${Math.round(prev.hp - snap.hp)} 点血，现在 ${Math.round(snap.hp)}`, snap.hp <= 8 ? 0.7 : 0.5, 10_000, now));

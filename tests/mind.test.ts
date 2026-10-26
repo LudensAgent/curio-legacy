@@ -734,3 +734,19 @@ test('步骤做完、收工条件没达到：提前想好的下一段不照接�
   assert.ok(w.pending.length > before, '要回头想');
   assert.match(JSON.stringify(w.pending.at(-1)!.messages), /先不接着做/);
 });
+
+test('提示词：太阳还高就想着躲起来过夜，提醒里把尺度摆出来；状态里的时间是游戏钟点', async () => {
+  const { situationalReminders } = await import('../src/mind/prompt.ts');
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  const perception = new Perception(adapter, memory, bus, new Vision(adapter));
+  const self = new SelfModel(null);
+  const base = { reason: '测试', percept: perception.update(), state: adapter.state(), self, memory, suspended: [], lastRecord: null,
+    noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', tier: 'glance' as const };
+  const hiding = situationalReminders({ ...base, activity: { what: '就地挖坑封顶过夜', why: '离天黑不远了' } } as any);
+  assert.ok(hiding.some((r) => /早上 7 点.*离天黑还有约 12 个小时.*别提前躲起来干等/.test(r)), hiding.join('\n'));
+  const working = situationalReminders({ ...base, activity: { what: '砍 16 个原木', why: '盖小屋' } } as any);
+  assert.ok(!working.some((r) => /别提前躲/.test(r)));
+  const [, user] = buildMindMessages({ ...base, activity: null } as any);
+  assert.match(user.content, /早上 7 点，太阳刚升起不久；离天黑（晚上 7 点，开始刷怪）还有约 12 个小时（游戏时间）/);
+  memory.close();
+});

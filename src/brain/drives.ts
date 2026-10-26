@@ -121,7 +121,7 @@ export function computeDrives(p: Percept, memory: WorldMemory): { drives: Drive[
     out.push({
       drive: 'rest',
       level: night ? 0.75 : 0.5,
-      why: night ? '天黑了，怪物在外面游荡' : '天快黑了',
+      why: night ? '天黑了，怪物在外面游荡' : '太阳在落山，晚上 7 点天黑刷怪',
       suggest: st.hasBed || bedPlaced ? 'sleep（有床直接睡过夜）' : homeBuilt ? 'goto base 回小屋' : st.blocks >= 1 ? 'shelter；有材料的话白天自己设计一间小屋 build' : '尽快收集几个方块以便 shelter',
     });
   }

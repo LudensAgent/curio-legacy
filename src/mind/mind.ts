@@ -5,7 +5,7 @@ import type { AudienceContext } from '../live/audience.ts';
 import { compileBuilding, normalizeSpec } from '../building/spec.ts';
 import type { Hazard, WorldMemory } from '../memory/store.ts';
 import { materialPlan } from '../methods/shortfall.ts';
-import { clockOf, type Perception, type Percept } from '../perception/perception.ts';
+import { DAWN_TICK, durationText, realSecondsToTicks, ticksUntil, type Perception, type Percept } from '../perception/perception.ts';
 import type { MySkillInfo } from '../planner/prompt.ts';
 import { evaluateCondition, observationReady } from '../projects/conditions.ts';
 import { SKILLS } from '../skills/index.ts';
@@ -268,9 +268,10 @@ export class Mind {
     if (waiting) this.waitingSince ??= Date.now(); else this.waitingSince = null;
     this.d.self.tickMood(waiting ? 'waiting' : !!this.activity && this.activity.kind !== 'rest');
     if (waiting && this.d.self.mood.boredom >= Mind.BORED_AT && this.waitingSince) {
-      const mins = Math.max(1, Math.round((Date.now() - this.waitingSince) / 60_000));
-      const left = clockOf(p.time.timeOfDay);
-      const n = this.attention.notice('bored_waiting', `已经干等了 ${mins} 分钟，好无聊${left.toDawn !== null ? `（离天亮还有约 ${left.toDawn} 分钟）` : ''}：这段时间能做点什么？`, 0.62, 4 * 60_000);
+      const waited = durationText(realSecondsToTicks((Date.now() - this.waitingSince) / 1000));
+      const tod = ((p.time.timeOfDay % 24000) + 24000) % 24000;
+      const dark = tod >= 12000 && tod < DAWN_TICK;
+      const n = this.attention.notice('bored_waiting', `已经干等了${waited}（游戏时间），好无聊${dark ? `（离天亮还有${durationText(ticksUntil(tod, DAWN_TICK))}）` : '（现在还是白天）'}：这段时间能做点什么？`, 0.62, 4 * 60_000);
       if (n) this.d.bus.publish('notice', 'P2', `注意到：${n.what}`, { salience: n.salience, level: n.level });
     }
     // 天快黑时惦记家：离家远就想着往回走（像真人一样，不是硬规则：只是一件“注意到”的事）

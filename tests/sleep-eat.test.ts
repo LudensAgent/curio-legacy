@@ -29,7 +29,7 @@ test('白天 sleep：不白跑，说清楚还要多久天黑', async () => {
   try {
     const r = await sleepSkill.run(ctx, {});
     assert.equal(r.status, 'failed');
-    assert.match(r.summary, /还是白天，大约 \d+ 分钟后才能睡/);
+    assert.match(r.summary, /现在是上午 9 点，傍晚 6 点半以后才能睡（还有约 9 个半小时/);
     assert.ok(!w.actions.includes('slept'));
   } finally { ctx.memory.close(); }
 });
