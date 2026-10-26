@@ -87,8 +87,9 @@ export async function designBuilding(planner: Planner, book: SkillBook | null, d
   let lastError = '';
   for (let round = 0; round < 3; round++) {
     signal.throwIfAborted();
-    // 设计要想得久：输出上限放大到 4 倍（推理模型的思考也算在里面）
-    const c = await planner.complete(messages, { label: 'architect', tier: quick ? 'light' : 'full', signal, attempt: round, maxTokensScale: quick ? 1 : 4, ...(quick ? {} : { reasoningEffort: 'high' }) });
+    // 设计比平常的决定要多想一点：输出上限放大到 2 倍（推理模型的思考也算在里面），用配置里的推理力度。
+    // 以前是 4 倍 + high：10-26 那次想了 6 分钟、65536 个 token 全用在思考上，正文是空的；接着不长考的那一轮 3 秒就画出了能用的图纸
+    const c = await planner.complete(messages, { label: 'architect', tier: quick ? 'light' : 'full', signal, attempt: round, maxTokensScale: quick ? 1 : 2 });
     // 推理模型想太久把输出额度用光（正文为空）：下一轮不再长考，直接画
     if (c.finishReason === 'length' && !c.text.trim()) quick = true;
     let raw: Record<string, any>;

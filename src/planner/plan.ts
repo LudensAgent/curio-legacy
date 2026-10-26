@@ -55,6 +55,15 @@ function firstBalancedObject(t: string, start: number): string | null {
 }
 
 /** 从模型输出中提取 JSON（容忍 ```json 包裹或前后多余文字）。 */
+/** 修模型输出里常见的 JSON 小毛病；没改动返回 null */
+export function repairJson(s: string): string | null {
+  const out = s
+    .replace(/[\u200b-\u200d\u2060\ufeff]/g, '')
+    .replace(/([{,]\s*)[「“”]([^「」“”"\n]{1,60})[」“”](\s*:)/g, '$1"$2"$3')
+    .replace(/,(\s*[}\]])/g, '$1');
+  return out === s ? null : out;
+}
+
 export function extractJson(text: string): unknown {
   const t = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
   try {
@@ -68,7 +77,10 @@ export function extractJson(text: string): unknown {
     } catch (error) {
       // 模型偶尔在完整对象后面多写一个右括号或第二段内容：取第一个括号配平的完整对象
       const first = firstBalancedObject(t, a);
-      if (first) return JSON.parse(first);
+      if (first) { try { return JSON.parse(first); } catch { /* 再试试修一修 */ } }
+      // 常见的小毛病：键名用了「」或中文引号、混进零宽字符、多了尾逗号。只在解析失败后才修，修了还不行就照原样报错
+      const fixed = repairJson(first ?? t.slice(a, b + 1));
+      if (fixed) { try { return JSON.parse(fixed); } catch { /* 修不好 */ } }
       throw error;
     }
   }
