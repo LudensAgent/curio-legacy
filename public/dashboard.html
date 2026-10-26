@@ -410,7 +410,7 @@
               <span>转动平滑</span><input type="range" id="camSmoothing" min="0" max="0.8" step="0.01"><span class="v" id="camSmoothingV"></span>
               <label class="full"><input type="checkbox" id="lightOn"> 暗处增亮（不改游戏设置，只在旁观时生效）</label>
               <span>伽马</span><input type="range" id="lightGamma" min="0" max="15" step="0.1"><span class="v" id="lightGammaV"></span>
-              <span class="full hudnote">游戏自带的亮度滑块最高是 1.0（「明亮」）；这里可以调到 15，越高洞里越亮。失明、黑暗效果仍然生效。</span>
+              <span class="full hudnote">游戏自带的亮度滑块最高是 1.0（「明亮」）；这里可以调到 15，越高洞里越亮。开光影时改为给光影包「夜视」补光：伽马 3 约一半、5 以上为满（Complementary 有效）。失明、黑暗效果仍然生效。</span>
             </div>
           </div>
         </div>
@@ -938,6 +938,7 @@ es.onerror = () => { $('conn').textContent = '控制台断开'; $('connDot').cla
     { id: 'vitals', name: '快捷栏 / 血条', def: [0.39, 0.885, 0.22, 0.115] },
     { id: 'inventory', name: '完整背包', def: [0.447, 0.007, 0.106, 0.13] },
     { id: 'landmarks', name: '记得的地点', def: [0.447, 0.142, 0.106, 0.08] },
+    { id: 'view', name: '视角 / 增亮状态', def: [0.88, 0.27, 0.11, 0.04] },
     { id: 'containers', name: '容器界面（居中）', toggleOnly: true },
     { id: 'hands', name: '第一人称手部', toggleOnly: true },
   ];
