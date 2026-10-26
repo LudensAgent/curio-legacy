@@ -143,9 +143,13 @@ export class Reflex {
     // 只在水里才检查氧气：Mineflayer 在陆地上偶尔会报出不准的氧气值
     // 氧气 20 → 0 只要 15 秒左右：降到 10 才浮，深水里常常来不及（日志里浮了 20 秒还是淹死了）
     if (s.inWater && s.oxygen <= 14) {
-      if (cur?.skill !== 'surface' && this.ready('drown', 4000)) this.fireDrown(s);
+      // 后天学会的脱水技能刚接手、气还够：让它做完，别马上又抢回来（两边轮流打断，谁都上不了岸）；气快没了才由底线接管
+      const learnedRescue = cur?.skill === 'use_skill' && cur.source === 'reflex' && Date.now() - cur.startedAt < 12_000 && s.oxygen > 6;
+      if (cur?.skill !== 'surface' && !learnedRescue && this.ready('drown', 4000)) this.fireDrown(s);
       return;
     }
+    // 正在上浮/上岸（不管是身体自己还是脑子叫的）：学会的技能别插手打断它，等它做完
+    if (cur?.skill === 'surface' && s.inWater) return;
     // 躲在避难所里：怪物进不来，不要出去打架/逃跑。
     if (cur?.skill === 'shelter') return;
     // 后天学会的做法先判断：条件成立就由技能接手（它可能正是用来代替下面某个本能的）

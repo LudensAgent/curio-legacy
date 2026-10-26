@@ -2,7 +2,7 @@ import { buildingArchiveFor } from './build.ts';
 import { findStation, isStation } from './stations.ts';
 import { DIR_OFFSETS, surroundings } from '../perception/surroundings.ts';
 import { climbUp } from './body.ts';
-import { hasPlaceable } from './survival.ts';
+import { hasPlaceable, PLACEABLE } from './survival.ts';
 import { DIRS, dirName } from '../perception/perception.ts';
 import { dist3, sleep, throwIfAborted } from '../util.ts';
 import type { Vec3Like } from '../adapter/types.ts';
@@ -17,7 +17,7 @@ export const FOOD_ANIMAL_NAMES = ['cow', 'pig', 'sheep', 'chicken', 'rabbit', 'm
 const CATEGORY: Record<string, string[]> = { animal: FOOD_ANIMAL_NAMES, animals: FOOD_ANIMAL_NAMES, food: FOOD_ANIMAL_NAMES, food_animal: FOOD_ANIMAL_NAMES };
 
 /** target 是否已在视野/近期记忆中：方块（log、iron_ore…）或实体（cow、sheep…）；可写 "cow|sheep" 或类别 "animal" */
-export function sighted(ctx: SkillCtx, target: string, options: { visibleOnly?: boolean; direction?: string } = {}): { what: string; dist: number; key: string } | null {
+export function sighted(ctx: SkillCtx, target: string, options: { visibleOnly?: boolean; direction?: string } = {}): { what: string; dist: number; key: string; pos?: Vec3Like } | null {
   const here = ctx.adapter.state().pos;
   const sector = options.direction ? DIRS[options.direction] : null;
   const inDirection = (pos: Vec3Like) => !sector || Math.abs(Math.atan2(Math.sin(yawOfDir(pos.x - here.x, pos.z - here.z) - yawOfDir(...sector)),
@@ -30,12 +30,12 @@ export function sighted(ctx: SkillCtx, target: string, options: { visibleOnly?: 
         const candidates = ctx.senses.knownBlocks(names, 96).filter((b) => inDirection({ x: b.pos.x + .5, y: b.pos.y, z: b.pos.z + .5 }));
         const hits = options.visibleOnly ? (ctx.senses.observeBlocks?.(candidates.slice(0, 32).map((b) => b.pos)) ?? []) : candidates;
         const hit = hits.find((b) => names.includes(b.name));
-        if (hit) return { what: hit.name, dist: Math.round(dist3(here, hit.pos)), key: `${hit.name}:${hit.pos.x},${hit.pos.y},${hit.pos.z}` };
+        if (hit) return { what: hit.name, dist: Math.round(dist3(here, hit.pos)), key: `${hit.name}:${hit.pos.x},${hit.pos.y},${hit.pos.z}`, pos: hit.pos };
       }
     }
     const e = ctx.senses.perceivedEntities(48).find((x) => (!options.visibleOnly || x.perception === 'seen') && inDirection(x.pos)
       && wanted.some((t) => x.name === t || x.name.replace(/^player:/, '') === t || x.name.endsWith(`_${t}`)));
-    if (e) return { what: e.name, dist: Math.round(e.dist), key: `entity:${e.id}` };
+    if (e) return { what: e.name, dist: Math.round(e.dist), key: `entity:${e.id}`, pos: e.pos };
   }
   return null;
 }
@@ -92,9 +92,18 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
     const { adapter, memory, signal } = ctx;
     const s = adapter.state();
     if (!s.connected) return fail('NOT_CONNECTED', '未连接');
-    const already = args.until ? sighted(ctx, args.until) : null;
+    // 指定了方向就只算那个方向上看见的（要往东找陆地，西边身后那片草地不算）
+    const already = args.until ? sighted(ctx, args.until, args.direction !== 'AUTO' ? { direction: args.direction } : {}) : null;
     const key = args.until ? searchKey(args.until) : '';
-    if (already) { searches.delete(key); return ok(`不用走远：${already.what} 就在 ${already.dist} 格外`, { found: already.what, dist: already.dist, moved: 0 }); }
+    if (already) {
+      searches.delete(key);
+      const at = already.pos;
+      const where = at ? `，在 ${dirName(at.x - s.pos.x, at.z - s.pos.z)} 边 (${Math.floor(at.x)},${Math.floor(at.y)},${Math.floor(at.z)})` : '';
+      // 水底的石头、对岸的草地也“看得见”：说清楚它泡在水里，别当成脚下就有
+      const above = at ? adapter.blockAt({ x: Math.floor(at.x), y: Math.floor(at.y) + 1, z: Math.floor(at.z) }) : null;
+      const underwater = above === 'water' ? '（它在水底，上面是水）' : '';
+      return ok(`不用走远：已经看见 ${already.what} 就在 ${already.dist} 格外${where}${underwater}；这次没有走过去，要过去用 goto`, { found: already.what, dist: already.dist, moved: 0, ...(at ? { pos: at } : {}), ...(underwater ? { underwater: true } : {}) });
+    }
     // 这趟搜寻的进展（同一世界/维度、10 分钟内接着找同一样东西才算同一趟）
     let search = key ? searches.get(key) : undefined;
     // 换了世界/维度、太久没接着找、或者人被挪到了别处（死亡复活、传送）：这趟搜寻就算结束了
@@ -222,7 +231,7 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
 // ------------------------------------------------------------------ goto
 export const goTo: Skill<{ target: string; dig?: boolean; sprint?: boolean; avoid?: string[] }> = {
   name: 'goto',
-  description: '沿看得见的落脚点步行去地标、坐标、作品或记得的功能方块；绕开墙壁，遇到已观察的木门会开门。默认不挖墙、不搭柱；写 "dig":true 就像人一样挖穿挡路的土石、垫方块爬上坡坎直接过去。水路不通时可另选 boat',
+  description: '沿看得见的落脚点步行去地标、坐标、作品或记得的功能方块；绕开墙壁，遇到已观察的木门会开门。默认不挖墙、不搭柱；写 "dig":true 就像人一样挖穿挡路的土石、垫方块爬上坡坎直接过去（遇到水会在水面上垫方块架桥，走完会说垫了多少）。水路不通时可另选 boat',
   argsDoc: '{"target": "base | death | <地标id或名称> | <作品ID> | crafting_table | x,y,z | 方向 格数（如 \"E 20\" 往东 20 格）", "dig"?: true（挖穿/垫高直走）, "sprint"?: true（跑着去：快，但很耗饥饿；默认走路）, "avoid"?: ["绕开的方块"]}',
   timeoutMs: 600000,
   movement: true,
@@ -335,6 +344,21 @@ export const goTo: Skill<{ target: string; dig?: boolean; sprint?: boolean; avoi
       }
       return false;
     };
+    // dig 时寻路会挖开挡路的、在坑和水面上垫方块：走完要说清楚垫了多少、是不是一路架在水上（不然以为自己走在陆地上）
+    const invBefore = new Map<string, number>();
+    for (const i of s.inventory) invBefore.set(i.name, (invBefore.get(i.name) ?? 0) + i.count);
+    const terrainNote = () => {
+      if (!args.dig) return '';
+      const now = new Map<string, number>();
+      for (const i of adapter.state().inventory) now.set(i.name, (now.get(i.name) ?? 0) + i.count);
+      const used = [...invBefore].map(([n, c]) => [n, c - (now.get(n) ?? 0)] as const).filter(([n, d]) => d > 0 && PLACEABLE.includes(n));
+      const end = adapter.state().pos, fx = Math.floor(end.x), fy = Math.floor(end.y), fz = Math.floor(end.z);
+      const wet = (n: string | null) => !!n && waterNames.includes(n);
+      const onBridge = wet(adapter.blockAt({ x: fx, y: fy - 2, z: fz })) || [[1, 0], [-1, 0], [0, 1], [0, -1]].filter(([dx, dz]) => wet(adapter.blockAt({ x: fx + dx, y: fy - 1, z: fz + dz }))).length >= 3;
+      const placed = used.reduce((n, [, d]) => n + d, 0);
+      if (!placed && !onBridge) return '';
+      return `；沿途垫了 ${placed} 块（${used.map(([n, d]) => `${n}×${d}`).join('、') || '—'}）${onBridge ? '，现在脚下是垫在水上的方块、四周是水——这一路多半是在水面上架桥，不是陆地' : ''}`;
+    };
     const startDist = distance(s.pos), alreadyHere = arrived(s.pos);
     const visited: Vec3Like[] = [s.pos];
     let bestDistance = startDist, detours = 0, memoryHops = 0;
@@ -389,7 +413,7 @@ export const goTo: Skill<{ target: string; dig?: boolean; sprint?: boolean; avoi
       const end = adapter.state().pos;
       if (!arrived(end)) return fail('PATH_NOT_FOUND', `尚未到达 ${label}，需要重新选择路线`, measured(end));
       await face();
-      return ok(`${alreadyHere ? '已在' : '到达'} ${label}${nums ? ' 的目标格' : ' 附近'}；实际站在 (${end.x.toFixed(2)},${end.y.toFixed(2)},${end.z.toFixed(2)})，本次往 ${dirName(end.x - s.pos.x, end.z - s.pos.z)} 移动 ${dist3(s.pos, end).toFixed(2)} 格，距目标点 ${distance(end).toFixed(2)} 格${alreadyHere ? '；没有执行新的位移' : ''}`, { ...measured(end), alreadyHere });
+      return ok(`${alreadyHere ? '已在' : '到达'} ${label}${nums ? ' 的目标格' : ' 附近'}；实际站在 (${end.x.toFixed(2)},${end.y.toFixed(2)},${end.z.toFixed(2)})，本次往 ${dirName(end.x - s.pos.x, end.z - s.pos.z)} 移动 ${dist3(s.pos, end).toFixed(2)} 格，距目标点 ${distance(end).toFixed(2)} 格${alreadyHere ? '；没有执行新的位移' : ''}${terrainNote()}`, { ...measured(end), alreadyHere });
     } catch (e) {
       if (isAbort(e)) throw e;
       const water = waterNear();
