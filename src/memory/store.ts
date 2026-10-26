@@ -38,6 +38,28 @@ export interface GoalRecord {
   effectEvidence?: EffectEvidence;
 }
 
+/**
+ * 自己挖出来的一条通道（台阶井、矿道、脱困挖的洞都算）：从地表钻下去、在地下一路挖着走、再回到地表，记成一条。
+ * 只记亲身走过的点（脚下的位置），不透视；它挖过的这些地方以后还能走，比每次从脚下重新往下挖省事。
+ */
+export interface PassageRecord {
+  id: string;
+  worldId?: string;
+  dim: string;
+  /** 从地表钻下去的地方（可能有好几个口），不知道就空着 */
+  entrances: Vec3Like[];
+  /** 沿途脚下的点，每隔几格记一个 */
+  path: Vec3Like[];
+  deepestY: number;
+  /** 这条通道里自己挖掉了多少格 */
+  dug: number;
+  /** 沿途挖到的矿 */
+  ores: Record<string, number>;
+  createdAt: number;
+  lastUsedAt: number;
+  uses: number;
+}
+
 export interface ChestRecord {
   worldId?: string;
   dim: string;
@@ -136,6 +158,7 @@ interface MemoryData {
   objective: { text: string; ts: number } | null;
   digs: DigRecord[];
   chests: Record<string, ChestRecord>;
+  passages?: PassageRecord[];
   farms: FarmRecord[];
   lessons: Lesson[];
   hazards: Hazard[];
@@ -618,6 +641,32 @@ export class WorldMemory {
   recentDigs(windowMs = 20 * 60_000): DigRecord[] {
     const cut = Date.now() - windowMs;
     return (this.data.digs ?? []).filter((d) => d.ts >= cut);
+  }
+
+  // ------------------------------------------------ 自己挖的通道
+  passages(dim?: string): PassageRecord[] {
+    return structuredClone((this.data.passages ?? []).filter((p) => this.inWorld(p) && (!dim || p.dim === dim)));
+  }
+
+  /** 新记或更新一条通道；每个世界最多留 24 条，满了先忘最久没走过的 */
+  savePassage(rec: PassageRecord) {
+    const all = (this.data.passages ??= []);
+    const i = all.findIndex((p) => p.id === rec.id);
+    const copy = structuredClone({ ...rec, worldId: rec.worldId ?? this.worldId });
+    if (i >= 0) all[i] = copy; else all.push(copy);
+    const mine = all.filter((p) => this.inWorld(p));
+    if (mine.length > 24) {
+      const oldest = mine.sort((a, b) => a.lastUsedAt - b.lastUsedAt)[0];
+      all.splice(all.indexOf(oldest), 1);
+    }
+    this.touch();
+  }
+
+  /** 一条通道并进了另一条：这条就不单独留了 */
+  forgetPassage(id: string) {
+    const all = this.data.passages ?? [];
+    const i = all.findIndex((p) => p.id === id && this.inWorld(p));
+    if (i >= 0) { all.splice(i, 1); this.touch(); }
   }
 
   // ------------------------------------------------ 仓储

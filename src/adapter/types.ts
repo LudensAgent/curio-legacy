@@ -285,6 +285,8 @@ export interface GameAdapter {
   enterPortalAt?(pos: Vec3Like, signal: AbortSignal, expectedDim?: string): Promise<ActionResult & { from?: AgentState; to?: AgentState }>;
   bossStatus?(): { dragonDeath: BossDeathObservation | null };
   dig(pos: Vec3Like, signal: AbortSignal): Promise<ActionResult>;
+  /** 自己挖掉的方块（动作、代码技能、寻路挖穿的都算），since 之后的；用来记自己挖过的通道 */
+  recentDug?(since: number): { pos: Vec3Like; name: string; ts: number }[];
   collectNearbyDrops(signal: AbortSignal, radius: number, timeoutMs: number): Promise<number>;
   /** 自动补做两层以内的前置材料（木板、木棍、工作台…）；tablePos = 记得的工作台位置 */
   /** detail：失败时具体缺什么；tablePos：这次用到的工作台位置（便于记住、下次复用） */

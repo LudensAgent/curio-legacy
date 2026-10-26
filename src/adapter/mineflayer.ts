@@ -202,6 +202,14 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     bot._client.on('set_passengers', (pk: any) => {
       try { this.syncDismount(bot, pk); } catch { /* ignore */ }
     });
+    // 自己挖掉的每一格（不管是哪个动作、代码技能还是寻路挖的）：记自己挖过的通道用
+    bot.on('diggingCompleted', (block: any) => {
+      try {
+        if (!block?.position) return;
+        this.dugLog.push({ pos: { x: block.position.x, y: block.position.y, z: block.position.z }, name: String(block.name ?? ''), ts: Date.now() });
+        if (this.dugLog.length > 512) this.dugLog.splice(0, this.dugLog.length - 512);
+      } catch { /* ignore */ }
+    });
 
     bot.on('spawn', () => {
       this.newSession();
@@ -2653,6 +2661,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       return { ok: false, reason: String(e?.message ?? e) };
     }
   }
+
+  private dugLog: { pos: Vec3Like; name: string; ts: number }[] = [];
+  recentDug(since: number) { return this.dugLog.filter((d) => d.ts > since); }
 
   /** 服务器说某载具的乘客里已经没有自己：清掉残留的 bot.vehicle，恢复物理，补发 dismount（见 connect 里的说明） */
   private syncDismount(b: any, pk: { entityId?: number; passengers?: number[] }) {

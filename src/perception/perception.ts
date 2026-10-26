@@ -7,6 +7,7 @@ import { effectiveLight, round1, lightAround } from '../util.ts';
 import { torchCount } from '../skills/light.ts';
 import { interactiveName, NOTABLE, type Vision, type VisionSummary } from './vision.ts';
 import { computeDrives, type Drive, type Stock } from '../brain/drives.ts';
+import { PassageTracker } from '../memory/passages.ts';
 import { efficiencyInsights, type EfficiencyInsight } from '../brain/efficiency.ts';
 import { learnCandidates, reflectionDue } from '../brain/habits.ts';
 
@@ -189,6 +190,9 @@ export type OwnBuiltLookup = (pos: Vec3Like, block: string) => { name: string } 
 export class Perception {
   /** 判断“围着我的是不是自己盖的墙”，用来区分屋里和坑里 */
   ownBuilt?: OwnBuiltLookup;
+  /** 跟着身体记自己挖过的通道（矿道、台阶井） */
+  private passages: PassageTracker;
+  private lastDugAt = 0;
   /** 第一次拿到某个物品时回调（heldBefore 是之前拿到过的物品） */
   onNewItem?: (item: string, heldBefore: Set<string>) => void;
   private latest: Percept | null = null;
@@ -198,7 +202,9 @@ export class Perception {
   /** Only surface heights stood on and observed in this session; never hidden terrain. */
   private surfaceColumns = new Map<string, { y: number; at: number }>();
 
-  constructor(private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private vision: Vision) {}
+  constructor(private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private vision: Vision) {
+    this.passages = new PassageTracker(memory);
+  }
 
   observeBlocks(positions: Vec3Like[]) { return this.vision.observeBlocks(positions); }
 
@@ -419,6 +425,14 @@ export class Perception {
     const overhead = s.connected && s.alive && s.observationReady ? this.overheadInfo(s) : null;
     // 树冠下天光也会很弱，但人一抬头就知道是树叶，不会以为自己在地下
     const where = overhead && contact ? whereAmI(this.adapter, s, overhead, { ownBuilt: this.ownBuilt }) : null;
+    if (where) {
+      try {
+        const dug = this.adapter.recentDug?.(this.lastDugAt) ?? [];
+        if (dug.length) this.lastDugAt = dug[dug.length - 1].ts;
+        const place = where.kind === 'surface' || where.kind === 'indoors' ? 'surface' : where.kind === 'underground' ? 'underground' : 'other';
+        this.passages.observe({ worldId: s.worldId, dim: s.dim, pos: s.pos, place }, dug);
+      } catch { /* 记不下来不影响感知 */ }
+    }
     if (light && overhead && (overhead.covered === 'canopy' || overhead.covered === 'open')) {
       light.underground = false;
       // 白天头顶露天或只隔着树叶：天光至少 13–15。读到很暗，多半是客户端的天光数据没更新（刚加载的区块、刚挖开的格子），
