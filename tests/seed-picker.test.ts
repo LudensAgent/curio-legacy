@@ -4,7 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { ALL_BIOMES, BIOME_TIER, spawnFilter, tierDistance } from '../src/seeds/biome-tiers.ts';
-import { pickSeed, setLevelSeed } from '../src/seeds/seed-picker.ts';
+import { parseLocate, pickSeed, setLevelSeed } from '../src/seeds/seed-picker.ts';
+import { seedSettings } from '../src/seeds/new-world.ts';
 import { prepareNewWorld } from '../src/seeds/new-world.ts';
 
 function server() {
@@ -78,5 +79,38 @@ test('新世界：固定种子直接写；没配筛选就保持随机', async ()
   assert.match(props(dir), /level-seed=12345/);
   setLevelSeed(dir, null);
   assert.equal(await prepareNewWorld(w, () => {}, { WORLD_SPAWN_DIFFICULTY: 'any' }), null);
+  assert.ok(!/level-seed/.test(props(dir)));
+});
+
+test('强制附近有村庄：读 locate 的回答；没村庄的种子不当备选，群系合适也不要', async () => {
+  assert.deepEqual(parseLocate('The nearest #minecraft:village is at [123, ~, -456] (480 blocks away)', { x: 0, z: 0 }), { x: 123, z: -456, dist: 480 });
+  assert.equal(parseLocate('Could not find a structure of type "#minecraft:village" nearby', { x: 0, z: 0 }), null);
+  assert.equal(seedSettings({ WORLD_REQUIRE_VILLAGE: 'true' }).villageWithin, 512);
+  assert.equal(seedSettings({ WORLD_REQUIRE_VILLAGE: 'false', WORLD_VILLAGE_RADIUS: '300' }).villageWithin, 0);
+  assert.throws(() => seedSettings({ WORLD_REQUIRE_VILLAGE: 'on', WORLD_VILLAGE_RADIUS: '5' }), /WORLD_VILLAGE_RADIUS/);
+
+  const { root, dir } = server();
+  setLevelSeed(dir, null);
+  const runs = [
+    { biome: 'forest', village: null },
+    { biome: 'plains', village: { x: 900, z: 0, dist: 900 } },
+    { biome: 'taiga', village: { x: 200, z: 0, dist: 200 } },
+    { biome: 'plains', village: { x: 300, z: 100, dist: 316 } },
+  ];
+  let i = 0;
+  const trial = async () => { fs.mkdirSync(path.join(dir, 'world')); return { ...runs[i++], spawn: { x: 0, y: 64, z: 0 } }; };
+  const base = { serverDir: dir, projectDir: root, filter: spawnFilter('easy', ''), java: 'java', javaArgs: [], rcon: { host: '', port: 0, password: '' }, trial, villageWithin: 512 };
+  const ok = await pickSeed({ ...base, tries: 4 });
+  assert.equal(ok.matched, true);
+  assert.equal(ok.village?.dist, 316);
+  fs.rmSync(path.join(dir, 'world'), { recursive: true });
+
+  i = 0;
+  const near = await pickSeed({ ...base, tries: 3 });
+  assert.equal(near.matched, false);
+  assert.equal(near.biome, 'taiga', '难度退而求其次，但村庄必须有');
+
+  i = 0;
+  await assert.rejects(() => pickSeed({ ...base, tries: 2 }), /都没有村庄/);
   assert.ok(!/level-seed/.test(props(dir)));
 });

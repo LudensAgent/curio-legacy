@@ -15,6 +15,8 @@ export interface SeedPickOptions {
   serverDir: string;
   projectDir: string;
   filter: SpawnFilter;
+  /** 出生点多少格内必须有村庄（水平距离）；不写就不查 */
+  villageWithin?: number;
   tries: number;
   java: string;
   javaArgs: string[];
@@ -24,10 +26,21 @@ export interface SeedPickOptions {
   bootTimeoutMs?: number;
   log?: (line: string) => void;
   /** 测试用：换掉“启动服务端、读出生点群系”这一步 */
-  trial?: (seed: string) => Promise<{ biome: string; spawn: { x: number; y: number; z: number } }>;
+  trial?: (seed: string) => Promise<Trial>;
 }
 
-export interface SeedPick { seed: string; biome: string; spawn: { x: number; y: number; z: number }; matched: boolean; tried: { seed: string; biome: string }[] }
+export interface Village { x: number; z: number; dist: number }
+export interface Trial { biome: string; spawn: { x: number; y: number; z: number }; village?: Village | null }
+export interface SeedPick { seed: string; biome: string; spawn: { x: number; y: number; z: number }; village?: Village | null; matched: boolean; tried: { seed: string; biome: string; village?: number | null }[] }
+
+/** 解析 locate 的回答：“The nearest #minecraft:village is at [123, ~, -456] (789 blocks away)” */
+export function parseLocate(text: string, from: { x: number; z: number }): Village | null {
+  const m = /\[\s*(-?\d+)\s*,\s*[^,\]]+,\s*(-?\d+)\s*\]/.exec(text);
+  if (!m) return null;
+  const x = Number(m[1]), z = Number(m[2]);
+  const away = /\((\d+) blocks? away\)/i.exec(text);
+  return { x, z, dist: away ? Number(away[1]) : Math.round(Math.hypot(x - from.x, z - from.z)) };
+}
 
 /** 随机一个 Java long 种子（带符号的 64 位整数，十进制） */
 export const randomSeed = () => randomBytes(8).readBigInt64LE().toString();
@@ -89,12 +102,12 @@ function waitFor(proc: ChildProcess, pattern: RegExp, timeoutMs: number, what: s
 }
 
 /** 用真正的服务端生成一次世界，读出生点和那里的群系，再关掉 */
-async function serverTrial(opts: SeedPickOptions, seed: string) {
+async function serverTrial(opts: SeedPickOptions, seed: string): Promise<Trial> {
   const plan = inspectWorldReset(opts.serverDir, opts.projectDir);
   const jar = findServerJar(plan.directory, opts.jar);
   const proc = spawnProcess(opts.java, [...opts.javaArgs, '-jar', jar, 'nogui'], { cwd: plan.directory, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   const exited = new Promise<void>((r) => proc.once('exit', () => r()));
-  const rcon = new Rcon(opts.rcon.host, opts.rcon.port, opts.rcon.password, 10_000);
+  const rcon = new Rcon(opts.rcon.host, opts.rcon.port, opts.rcon.password, 60_000); // locate 找村庄可能要十几秒
   try {
     await waitFor(proc, /Done \([\d.,]+s\)!/, opts.bootTimeoutMs ?? 240_000, '服务端生成世界');
     let connected = false;
@@ -108,7 +121,13 @@ async function serverTrial(opts: SeedPickOptions, seed: string) {
       const r = await rcon.send(`execute if biome ${spawn.x} ${spawn.y} ${spawn.z} minecraft:${b}`);
       if (/passed/i.test(r)) { biome = b; break; }
     }
-    return { biome, spawn };
+    // 要求附近有村庄：从出生点找最近的村庄（locate 最远找 100 区块，足够判断 512 格以内）
+    let village: Village | null | undefined;
+    if (opts.villageWithin) {
+      const r = await rcon.send(`execute positioned ${spawn.x} ${spawn.y} ${spawn.z} run locate structure #minecraft:village`);
+      village = parseLocate(r, spawn);
+    }
+    return { biome, spawn, ...(village !== undefined ? { village } : {}) };
   } finally {
     try { await rcon.send('stop'); } catch { proc.stdin?.write('stop\n'); }
     rcon.close();
@@ -124,24 +143,34 @@ export async function pickSeed(opts: SeedPickOptions): Promise<SeedPick> {
   if (fs.existsSync(path.join(plan.directory, plan.levelName))) throw new Error(`地图 ${plan.levelName} 已经存在：种子筛选只给还没生成的新世界用`);
   const trial = opts.trial ?? ((seed: string) => serverTrial(opts, seed));
   const tried: SeedPick['tried'] = [];
+  const within = opts.villageWithin ?? 0;
+  const villageOk = (r: Trial) => !within || (!!r.village && r.village.dist <= within);
   let best: (SeedPick & { d: number }) | null = null;
   for (let i = 0; i < Math.max(1, opts.tries); i++) {
     const seed = randomSeed();
     setLevelSeed(plan.directory, seed);
     log(`第 ${i + 1}/${opts.tries} 个种子 ${seed}：启动服务端生成世界…`);
-    let r: { biome: string; spawn: { x: number; y: number; z: number } };
+    let r: Trial;
     try { r = await trial(seed); }
     catch (e) { removeLevel(plan.directory, opts.projectDir); setLevelSeed(plan.directory, null); throw e; }
-    tried.push({ seed, biome: r.biome });
+    tried.push({ seed, biome: r.biome, ...(within ? { village: r.village ? r.village.dist : null } : {}) });
     const d = tierDistance(r.biome, opts.filter);
-    log(`  出生点 (${r.spawn.x},${r.spawn.y},${r.spawn.z}) 是 ${r.biome}（${BIOME_TIER[r.biome] ? TIER_LABEL[BIOME_TIER[r.biome]] : '未知'}）${d === 0 ? '，符合' : '，不符合'}`);
-    if (d === 0) return { seed, biome: r.biome, spawn: r.spawn, matched: true, tried };
-    if (!best || d < best.d) best = { seed, biome: r.biome, spawn: r.spawn, matched: false, tried, d };
+    const vOk = villageOk(r);
+    const vText = within ? (r.village ? `，最近的村庄在 (${r.village.x},${r.village.z})，${r.village.dist} 格${vOk ? '' : `（超过 ${within}）`}` : '，附近找不到村庄') : '';
+    log(`  出生点 (${r.spawn.x},${r.spawn.y},${r.spawn.z}) 是 ${r.biome}（${BIOME_TIER[r.biome] ? TIER_LABEL[BIOME_TIER[r.biome]] : '未知'}）${vText}${d === 0 && vOk ? '，符合' : '，不符合'}`);
+    const pick = { seed, biome: r.biome, spawn: r.spawn, ...(within ? { village: r.village ?? null } : {}) };
+    if (d === 0 && vOk) return { ...pick, matched: true, tried };
+    // 村庄是强制的：没村庄的种子不能当“最接近的”备选
+    if (vOk && (!best || d < best.d)) best = { ...pick, matched: false, tried, d };
     removeLevel(plan.directory, opts.projectDir);
   }
-  // 都不中：用最接近的那个种子（同一个种子会生成同一个世界，下次启动服务端时生成）
-  setLevelSeed(plan.directory, best!.seed);
-  log(`试了 ${tried.length} 个都不符合「${opts.filter.describe}」，用最接近的 ${best!.seed}（${best!.biome}）`);
-  const { d: _d, ...pick } = best!;
+  if (!best) {
+    setLevelSeed(plan.directory, null);
+    throw new Error(`试了 ${tried.length} 个种子，出生点 ${within} 格内都没有村庄（要求村庄是强制的）；把 WORLD_SEED_TRIES 调大再试，或放宽 WORLD_VILLAGE_RADIUS / 关掉 WORLD_REQUIRE_VILLAGE`);
+  }
+  // 都不完全中：用最接近的那个种子（同一个种子会生成同一个世界，下次启动服务端时生成）
+  setLevelSeed(plan.directory, best.seed);
+  log(`试了 ${tried.length} 个都不符合「${opts.filter.describe}」${within ? `（有 ${within} 格内村庄的里面）` : ''}，用最接近的 ${best.seed}（${best.biome}）`);
+  const { d: _d, ...pick } = best;
   return { ...pick, tried };
 }

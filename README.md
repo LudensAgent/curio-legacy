@@ -333,6 +333,7 @@ new / switch 前先退出 Agent、停掉 Minecraft 服务器（会检查端口�
 
 - `WORLD_SPAWN_DIFFICULTY`：`easy` | `normal` | `hard` | `extreme` | `any`，可以逗号写几档。分级按这个 AI 开局要的东西（木头、羊、平地、石头、水）和危险来定，`npm run world:seed -- --tiers` 打印完整表。
 - `WORLD_SPAWN_BIOMES`：直接指定接受的群系（优先于难度）；`WORLD_SEED`：固定种子；`WORLD_SEED_TRIES`：最多试几个。
+- `WORLD_REQUIRE_VILLAGE=true`：出生点 `WORLD_VILLAGE_RADIUS`（默认 512）格内必须有村庄（每个种子多跑一次 `locate structure #minecraft:village`）。这是硬条件：难度不中可以退而求其次，没村庄的种子一律淘汰；试完都没有就报错，不生成世界。
 - 试种子要能启动服务端：`SERVER_JAVA`、`SERVER_JAVA_ARGS`、`SERVER_JAR`（默认自动找）、`SERVER_DIR`（默认 `./world`），并通过 RCON（`RCON_*`）问群系。
 - 不想筛就加 `-- --random-seed`。
 
