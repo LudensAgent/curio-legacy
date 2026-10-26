@@ -31,7 +31,7 @@ export const RECONSIDER = 0.5;
 
 const levelOf = (s: number): Noticing['level'] => s >= URGENT ? 'urgent' : s >= RECONSIDER ? 'reconsider' : 'note';
 
-interface Snapshot { tod: number; weather: string; phase: string; food: number; hp: number; emptySlots: number; hostiles: Set<string>; resources: Set<string>; light: string | null; inWater: boolean; drops: Map<string, { item: string; count: number; dist: number; dir: string }> }
+interface Snapshot { effects: Set<string>; worn: Set<string>; tod: number; weather: string; phase: string; food: number; hp: number; emptySlots: number; hostiles: Set<string>; resources: Set<string>; light: string | null; inWater: boolean; drops: Map<string, { item: string; count: number; dist: number; dir: string }> }
 
 /**
  * 注意力：把游戏里发生的事变成“我注意到了…”，并判断值不值得为它停下来重新想。
@@ -83,6 +83,8 @@ export class Attention {
   /** 比较前后两次感知，找出“变化”：天色、饥饿、生命、背包、新出现的怪和资源 */
   fromPercept(p: Percept, now = Date.now()): Noticing[] {
     const snap: Snapshot = {
+      effects: new Set(p.effects ?? []),
+      worn: new Set((p.inventory ?? []).filter((i) => i.durability && i.durability.left / i.durability.max < 0.15).map((i) => i.name)),
       tod: ((p.time.timeOfDay % 24000) + 24000) % 24000, weather: p.time.weather ?? '', phase: p.time.phase, food: p.self.food, hp: p.self.hp, emptySlots: p.emptySlots,
       hostiles: new Set(p.nearby.hostile.filter((h) => h.dist <= 16).map((h) => h.name)),
       resources: new Set(p.nearby.resources.filter((r) => r.seen === 'now').map((r) => r.block)),
@@ -101,6 +103,10 @@ export class Attention {
       else if (snap.phase === 'night') out.push(this.notice('night', `天黑了，怪物会出来；离天亮约 ${clock.toDawn} 分钟`, 0.6, 300_000, now));
       else if (snap.phase === 'dawn' || (snap.phase === 'day' && prev.phase !== 'dawn')) out.push(this.notice('morning', `天亮了，${day ? `新的一天（${day}）` : '新的一天'}开始：想想今天要做成什么`, 0.55, 300_000, now));
     }
+    // 身上多了状态效果（中毒、饥饿、凋零……）：像人看到心变绿了
+    for (const e of snap.effects) if (!prev.effects.has(e)) out.push(this.notice(`effect:${e}`, `身上有了状态效果：${e}`, /中毒|凋零|饥饿|失明|黑暗|不祥/.test(e) ? 0.55 : 0.35, 60_000, now));
+    // 工具、武器、护甲快磨坏了
+    for (const n of snap.worn) if (!prev.worn.has(n)) out.push(this.notice(`worn:${n}`, `${n} 快坏了（耐久不到 15%）`, 0.5, 300_000, now));
     // 天气变了：像人抬头看天——下雨、打雷、雨停
     if (snap.weather && prev.weather && snap.weather !== prev.weather) {
       const kind = (w: string) => w.startsWith('雷雨') ? 'thunder' : w.startsWith('下雨') ? 'rain' : 'clear';

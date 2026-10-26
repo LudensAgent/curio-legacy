@@ -34,10 +34,12 @@ export interface Percept {
     /** 身边的方块图（以脚为原点的 [前,上,右]，不透视），配合 dig_at/step/place_at 说出确切的格子 */
     local?: ReturnType<typeof localMap> };
   inventory: InvItem[];
+  /** 身上的状态效果（名字） */
+  effects?: string[];
   emptySlots: number;
   /** 只包含看见/听见/记得的东西（没有透视） */
   nearby: {
-    hostile: { name: string; dist: number; how: 'seen' | 'heard'; fusing?: boolean }[];
+    hostile: { name: string; dist: number; how: 'seen' | 'heard'; fusing?: boolean; traits?: string }[];
     passive: string[];
     players: string[];
     /** 看得见的 + 记得的资源方块 */
@@ -344,7 +346,8 @@ export class Perception {
       .slice(0, 6);
 
     const passiveCount = new Map<string, number>();
-    for (const e of v.seen.filter((x) => x.kind === 'passive')) passiveCount.set(e.name, (passiveCount.get(e.name) ?? 0) + 1);
+    // 同一种、同样特征的合在一起数：“sheep(白色) x2”“villager(农民 2 级)”
+    for (const e of v.seen.filter((x) => x.kind === 'passive')) { const k = (e as any).traits ? `${e.name}(${(e as any).traits})` : e.name; passiveCount.set(k, (passiveCount.get(k) ?? 0) + 1); }
 
     const contact = s.connected && s.alive && s.observationReady ? surroundings(this.adapter, s.pos) : null;
     const light = s.connected && s.alive && s.observationReady ? this.lightInfo(s) : null;
@@ -394,15 +397,16 @@ export class Perception {
         ...((() => { const eye = this.adapter.eye(); return contact && eye ? { local: localMap(this.adapter, s.pos, facingOfYaw(eye.yaw)) } : {}; })()),
         ...(contact ? { exits: contact.exitOptions } : {}),
       },
-      inventory: [...s.inventory.reduce((items, item) => items.set(item.name, (items.get(item.name) ?? 0) + item.count), new Map<string, number>())]
-        .map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count),
+      inventory: [...s.inventory.reduce((items, item) => { const cur = items.get(item.name); items.set(item.name, cur ? { ...cur, count: cur.count + item.count } : { ...item }); return items; }, new Map<string, typeof s.inventory[number]>()).values()]
+        .sort((a, b) => b.count - a.count),
       emptySlots: s.emptySlots,
+      ...(s.effects?.length ? { effects: s.effects.map((e) => e.name) } : {}),
       nearby: {
         hostile: [...v.seen, ...v.heard]
           .filter((e) => e.kind === 'hostile')
           .sort((a, b) => a.dist - b.dist)
           .slice(0, 6)
-          .map((e) => ({ name: e.name, dist: round1(e.dist), how: e.how, ...(e.fusing ? { fusing: true } : {}) })),
+          .map((e) => ({ name: e.name, dist: round1(e.dist), how: e.how, ...(e.fusing ? { fusing: true } : {}), ...((e as any).traits && e.how === 'seen' ? { traits: (e as any).traits } : {}) })),
         passive: [...passiveCount].map(([n, c]) => (c > 1 ? `${n} x${c}` : n)).slice(0, 8),
         players: v.seen.filter((e) => e.kind === 'player').map((e) => e.name.replace('player:', '')),
         resources: vs

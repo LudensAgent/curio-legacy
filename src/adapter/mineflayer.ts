@@ -61,6 +61,12 @@ const ALIASES: Record<string, string[]> = {
   ...Object.fromEntries(ORE_BASE.map((o) => [o, [`${o}_ore`, `deepslate_${o}_ore`]])),
 };
 
+
+const WOOL_ZH = ['白', '橙', '品红', '淡蓝', '黄', '黄绿', '粉红', '灰', '淡灰', '青', '紫', '蓝', '棕', '绿', '红', '黑'];
+const PROFESSIONS = ['none', 'armorer', 'butcher', 'cartographer', 'cleric', 'farmer', 'fisherman', 'fletcher', 'leatherworker', 'librarian', 'mason', 'nitwit', 'shepherd', 'toolsmith', 'weaponsmith'];
+const PROFESSION_ZH: Record<string, string> = { none: '无业', armorer: '盔甲匠', butcher: '屠夫', cartographer: '制图师', cleric: '牧师', farmer: '农民', fisherman: '渔夫', fletcher: '制箭师', leatherworker: '皮匠', librarian: '图书管理员', mason: '石匠', nitwit: '傻子（不交易）', shepherd: '牧羊人', toolsmith: '工具匠', weaponsmith: '武器匠' };
+const EFFECT_ZH: Record<string, string> = { speed: '迅捷', slowness: '缓慢', haste: '急迫', mining_fatigue: '挖掘疲劳', strength: '力量', instant_health: '瞬间治疗', instant_damage: '瞬间伤害', jump_boost: '跳跃提升', nausea: '反胃', regeneration: '生命恢复', resistance: '抗性提升', fire_resistance: '抗火', water_breathing: '水下呼吸', invisibility: '隐身', blindness: '失明', night_vision: '夜视', hunger: '饥饿（吃了不该吃的，饥饿掉得快）', weakness: '虚弱', poison: '中毒（掉血到半颗心为止）', wither: '凋零（会掉血致死）', health_boost: '生命提升', absorption: '伤害吸收', saturation: '饱和', glowing: '发光', levitation: '飘浮', luck: '幸运', unluck: '霉运', slow_falling: '缓降', conduit_power: '潮涌能量', dolphins_grace: '海豚的恩惠', bad_omen: '不祥之兆（进村会引来袭击）', hero_of_the_village: '村庄英雄', darkness: '黑暗' };
+
 export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   bot: any = null;
   mcData: any = null;
@@ -392,8 +398,18 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       };
     }
     const e = b.entity;
-    const inv = new Map<string, number>();
-    for (const it of b.inventory.items()) inv.set(it.name, (inv.get(it.name) ?? 0) + it.count);
+    const inv = new Map<string, InvItem>();
+    for (const it of b.inventory.items()) {
+      const cur: InvItem = inv.get(it.name) ?? { name: it.name, count: 0 };
+      cur.count += it.count;
+      const max = this.mcData.itemsByName?.[it.name]?.maxDurability;
+      if (max) {
+        const left = Math.max(0, max - (it.durabilityUsed ?? 0));
+        if (!cur.durability || left < cur.durability.left) cur.durability = { left, max };
+      }
+      if ((it.enchants?.length ?? 0) > 0) cur.enchanted = true;
+      inv.set(it.name, cur);
+    }
     let biome: string | null = null;
     let chunkReady = false;
     try { const block = b.blockAt(e.position); chunkReady = !!block; biome = block?.biome?.name ?? null; } catch { /* ignore */ }
@@ -419,7 +435,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       onGround: !!e.onGround,
       inWater: !!e.isInWater,
       inLava: !!e.isInLava,
-      inventory: [...inv.entries()].map(([name, count]) => ({ name, count })),
+      inventory: [...inv.values()],
+      ...(this.effectsOf(b).length ? { effects: this.effectsOf(b) } : {}),
+      ...(b.experience ? { xp: { level: b.experience.level ?? 0, progress: Math.round((b.experience.progress ?? 0) * 100) / 100 } } : {}),
       emptySlots: b.inventory.emptySlotCount(),
       held: b.heldItem?.name ?? null,
       riding: b.vehicle ? String(b.vehicle.name ?? 'vehicle') : null,
@@ -430,6 +448,42 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         return [{ slot, name: item.name, durabilityRemaining: max ? max - (item.durabilityUsed ?? 0) : undefined }];
       }),
     };
+  }
+
+  /** 身上的状态效果 */
+  private effectsOf(b: any): { name: string; level: number; seconds: number }[] {
+    const effects = b.entity?.effects;
+    if (!effects) return [];
+    return Object.values<any>(effects).map((e) => {
+      const raw = String(this.mcData.effects?.[e.id]?.name ?? e.id);
+      const key = raw.replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase();
+      return { name: EFFECT_ZH[key] ?? key, level: (e.amplifier ?? 0) + 1, seconds: Math.max(0, Math.round((e.duration ?? 0) / 20)) };
+    });
+  }
+
+  /** 一眼看得出的生物特征（来自实体元数据：玩家看得见的外观） */
+  private traitsOf(ent: any, keys: string[]): string | undefined {
+    const md = ent.metadata ?? [];
+    const get = (k: string) => { const i = keys.indexOf(k); return i >= 0 ? md[i] : undefined; };
+    const out: string[] = [];
+    if (get('baby') === true) out.push('幼崽');
+    if (ent.name === 'sheep') {
+      const w = Number(get('wool'));
+      if (Number.isFinite(w)) { out.push(`${WOOL_ZH[w & 0x0f] ?? '?'}色`); if (w & 0x10) out.push('已剪毛'); }
+    }
+    if (ent.name === 'villager' || ent.name === 'zombie_villager') {
+      const vd = get('villager_data');
+      const prof = vd?.villagerProfession ?? vd?.profession;
+      const p = typeof prof === 'number' ? PROFESSIONS[prof] : typeof prof === 'string' ? prof.replace(/^minecraft:/, '') : undefined;
+      if (p) out.push(`${PROFESSION_ZH[p] ?? p}${vd?.level ? ` ${vd.level} 级` : ''}`);
+    }
+    const flags = Number(get('flags'));
+    if (['wolf', 'cat', 'parrot'].includes(ent.name) && Number.isFinite(flags) && flags & 0x04) out.push(flags & 0x01 ? '已驯服（坐着）' : '已驯服');
+    if (['horse', 'donkey', 'mule', 'llama'].includes(ent.name) && Number.isFinite(flags)) { if (flags & 0x02) out.push('已驯服'); if (flags & 0x04) out.push('有鞍'); }
+    if (ent.name === 'creeper' && get('is_powered') === true) out.push('带电（爆炸更猛）');
+    if (ent.name === 'piglin' && get('is_dancing') === true) out.push('在跳舞');
+    if (ent.name === 'wolf' && Number(get('remaining_anger_time')) > 0) out.push('发怒');
+    return out.length ? out.join('、') : undefined;
   }
 
   private classify(ent: any): EntityKind {
@@ -468,7 +522,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const hp = ent.metadata?.[keys.indexOf('health')];
       // 苦力怕的引信：swell_dir=1 正在膨胀，is_ignited=被点燃
       const fusing = ent.name === 'creeper' && (ent.metadata?.[keys.indexOf('swell_dir')] === 1 || ent.metadata?.[keys.indexOf('is_ignited')] === true);
-      out.push({ id: ent.id, name, kind: this.classify(ent), pos: { x: ent.position.x, y: ent.position.y, z: ent.position.z }, dist: d, height: ent.height,
+      const traits = name.startsWith('item') || ent.type === 'player' ? undefined : this.traitsOf(ent, keys);
+      out.push({ id: ent.id, name, kind: this.classify(ent), ...(traits ? { traits } : {}), pos: { x: ent.position.x, y: ent.position.y, z: ent.position.z }, dist: d, height: ent.height,
         velocity: ent.velocity ? { x: ent.velocity.x, y: ent.velocity.y, z: ent.velocity.z } : undefined,
         phase: Number.isInteger(phase) ? phase : undefined, hp: Number.isFinite(hp) ? hp : undefined, ...(fusing ? { fusing: true } : {}), ...(count ? { count } : {}) });
     }

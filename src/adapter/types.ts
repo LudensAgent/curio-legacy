@@ -26,6 +26,8 @@ export interface EntityInfo {
   hp?: number;
   /** 苦力怕正在嘶嘶作响、马上要炸 */
   fusing?: boolean;
+  /** 一眼看得出的特征：羊毛颜色/剪没剪、幼崽、村民职业和等级、驯没驯服、带电…… */
+  traits?: string;
   /** 掉落物的数量（name 形如 item:raw_rabbit） */
   count?: number;
 }
@@ -68,6 +70,10 @@ export interface BlockHit {
 export interface InvItem {
   name: string;
   count: number;
+  /** 会磨损的东西（工具、武器、护甲）：同名里最旧那件还剩多少耐久 / 满耐久 */
+  durability?: { left: number; max: number };
+  /** 带附魔 */
+  enchanted?: boolean;
 }
 
 export interface AgentState {
@@ -87,6 +93,10 @@ export interface AgentState {
   food: number;
   oxygen: number;
   timeOfDay: number;
+  /** 身上的状态效果（中毒、饥饿、缓慢……）：名字、等级、还剩几秒 */
+  effects?: { name: string; level: number; seconds: number }[];
+  /** 经验等级（附魔、修理要用） */
+  xp?: { level: number; progress: number };
   /** 天气（服务端广播的雨、雷）：clear | rain | thunder */
   weather?: 'clear' | 'rain' | 'thunder';
   /** 世界的第几天（从 0 起，服务端的 time.day） */

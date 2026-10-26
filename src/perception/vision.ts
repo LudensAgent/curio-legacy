@@ -82,6 +82,8 @@ export const NOTABLE = new Set([
 export const GROUND = new Set(['stone', 'cobblestone', 'deepslate', 'andesite', 'granite', 'diorite', 'dirt', 'grass_block', 'sand', 'gravel', 'short_grass', 'tall_grass', 'grass', 'fern', 'water', 'netherrack', 'blackstone', 'basalt', 'soul_sand', 'soul_soil', 'end_stone', 'snow_block', 'ice', 'packed_ice', 'blue_ice']);
 
 export interface SeenEntity {
+  /** 一眼看得出的特征（羊毛颜色、幼崽、村民职业……） */
+  traits?: string;
   id: number;
   name: string;
   kind: EntityInfo['kind'];
@@ -437,7 +439,7 @@ export class Vision {
       const ddx = cx - eye.x, ddz = cz - eye.z;
       const ayaw = yawTo(ddx, ddz);
       const relYaw = norm(ayaw - eye.yaw);
-      const base: SeenEntity = { id: e.id, name: e.name, kind: e.kind, pos: e.pos, dist: e.dist, height: e.height, velocity: e.velocity, phase: e.phase, hp: e.hp, ...(e.fusing ? { fusing: true } : {}), ...(e.count ? { count: e.count } : {}), dir: dirOfYaw(ayaw), rel: relOf(relYaw), how: 'seen' };
+      const base: SeenEntity = { id: e.id, name: e.name, kind: e.kind, pos: e.pos, dist: e.dist, height: e.height, velocity: e.velocity, phase: e.phase, hp: e.hp, ...(e.fusing ? { fusing: true } : {}), ...(e.count ? { count: e.count } : {}), ...(e.traits ? { traits: e.traits } : {}), dir: dirOfYaw(ayaw), rel: relOf(relYaw), how: 'seen' };
       let visible = false;
       let relPitch = 0;
       for (const ty of targets) {
