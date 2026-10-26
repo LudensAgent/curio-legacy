@@ -23,6 +23,7 @@ import { WorldMemory } from './memory/store.ts';
 import { EpisodicMemory } from './memory/episodic.ts';
 import { HindsightBackend } from './memory/hindsight.ts';
 import { buildingArchiveFor, ownBuildingAt } from './skills/build.ts';
+import { myFacilities } from './mind/facilities.ts';
 import { flattenProgram, MethodLibrary, simpleToMethod } from './methods/learning.ts';
 import { ResourceKnowledge } from './methods/knowledge.ts';
 import { ControlKnowledge } from './methods/controls.ts';
@@ -482,6 +483,15 @@ function snapshot() {
     live: live ? { status: live.status(), audience: audience?.stats() } : null,
     llmSpend: currentSpend(),
     memory: {
+      // 自己挖过的通道（dashboard 俯视图用）：当前维度、最近走过的在前；facilities 是同一套“我的设施”的一句话说明
+      ...(() => {
+        const st = adapter.state();
+        const passages = memory.passages(st.dim).sort((a, b) => b.lastUsedAt - a.lastUsedAt).slice(0, 12)
+          .map((p) => ({ id: p.id, entrances: p.entrances, path: p.path, deepestY: p.deepestY, dug: p.dug, ores: p.ores, uses: p.uses, lastUsedAt: p.lastUsedAt }));
+        const facilities = myFacilities(memory, { worldId: st.worldId, dim: st.dim, pos: st.pos }).slice(0, 16)
+          .map((f) => ({ kind: f.kind, label: f.label, pos: f.pos, dist: f.dist, text: f.text }));
+        return { passages, facilities };
+      })(),
       landmarks: memory.landmarks().slice(-12),
       notes: memory.notesFor({ n: 8 }),
       goals: memory.recentGoals(8),

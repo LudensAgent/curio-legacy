@@ -33,6 +33,8 @@
   .chip.on { color: var(--accent); border-color: var(--accent-soft); background: var(--accent-soft); }
   .chip.off { color: var(--bad); border-color: var(--bad-soft); background: var(--bad-soft); }
   button.chip { cursor: pointer; font: 11px var(--mono); }
+  .tunnel-map { width: 100%; height: 320px; flex: none; display: block; background: var(--soft); border-radius: 8px; margin-bottom: 8px; }
+  .tunnel-map text { font: 10px var(--mono); fill: var(--dim); }
   button.chip.sel { color: var(--text); border-color: var(--text); }
   .grow { flex: 1; }
   .suggest { display: flex; gap: 6px; }
@@ -477,6 +479,8 @@
       <div class="board">
         <div class="card rows2 cols2"><h2>最近做过的事 <span class="r mono dim" id="seen"></span></h2><ul class="list body" id="goals"></ul></div>
         <div class="card"><h2>地标</h2><ul class="list mono body" id="lms"></ul></div>
+        <div class="card cols2 rows2"><h2>挖过的通道 · 我的设施 <span class="r dim">俯视图，北在上；路线颜色越深挖得越深</span></h2>
+          <div class="body"><svg id="tunnelMap" class="tunnel-map" role="img" aria-label="挖过的通道俯视图"></svg><ul class="list" id="tunnelList"></ul></div></div>
         <div class="card"><h2>笔记</h2><ul class="list body" id="notes"></ul></div>
       </div>
     </section>
@@ -786,6 +790,46 @@ function render(s) {
   $('goals').innerHTML = list(mem.goals.slice().reverse(), (g) => `<li title="${esc(g.summary)}"><span class="badge ${g.status === 'succeeded' ? 'good' : g.status === 'failed' ? 'bad' : ''}">${g.status === 'succeeded' ? '成' : g.status === 'failed' ? '卡住' : '停'}</span> ${esc(g.goal)}<div class="dim" style="font-size:11px">${esc(g.summary)}</div></li>`);
   $('lms').innerHTML = list(mem.landmarks.slice().reverse(), (l) => `<li>${esc(l.label)} <span class="k">${l.kind} (${l.pos.x}, ${l.pos.y}, ${l.pos.z})</span></li>`);
   $('notes').innerHTML = list(mem.notes.slice().reverse(), (n) => `<li><span class="k">${n.kind}</span>${esc(n.text)}</li>`);
+  renderTunnels(mem, s.state);
+}
+
+/** 挖过的通道俯视图：x 往右是东，z 往下是南（北在上）；路线按深度着色，标出入口、设施和自己 */
+function renderTunnels(mem, st) {
+  const svg = $('tunnelMap');
+  if (!mem.passages) { svg.innerHTML = '<text x="12" y="22">进程重启后开始记录自己挖的通道</text>'; $('tunnelList').innerHTML = ''; return; }
+  const passages = mem.passages, fac = (mem.facilities || []).filter((f) => f.kind !== 'passage');
+  const me = st && st.pos ? { x: st.pos.x, y: st.pos.y, z: st.pos.z } : null;
+  const pts = [...passages.flatMap((p) => [...p.path, ...p.entrances]), ...fac.map((f) => f.pos), ...(me ? [me] : [])];
+  $('tunnelList').innerHTML = list(mem.facilities || [], (f) => `<li><span class="k">${f.kind === 'passage' ? '通道' : f.kind === 'chest' ? '箱子' : f.kind === 'bed' ? '床' : '设施'}</span>${esc(f.text)}</li>`);
+  if (!passages.length) { svg.innerHTML = '<text x="12" y="22">还没有挖过的通道（自己挖够 4 格的地下通道才记）</text>'; return; }
+  const W = svg.clientWidth || 600, H = svg.clientHeight || 300, pad = 18;
+  const xs = pts.map((p) => p.x), zs = pts.map((p) => p.z);
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minZ = Math.min(...zs), maxZ = Math.max(...zs);
+  const k = Math.min((W - 2 * pad) / Math.max(8, maxX - minX), (H - 2 * pad) / Math.max(8, maxZ - minZ));
+  const ox = (W - (maxX - minX) * k) / 2, oz = (H - (maxZ - minZ) * k) / 2;
+  const X = (x) => (ox + (x - minX) * k).toFixed(1), Z = (z) => (oz + (z - minZ) * k).toFixed(1);
+  const ys = passages.flatMap((p) => p.path.map((q) => q.y));
+  const top = Math.max(...ys), bottom = Math.min(...ys);
+  const depth = (y) => top === bottom ? 1 : (top - y) / (top - bottom); // 0 地表 … 1 最深
+  const out = [];
+  for (const p of passages) {
+    for (let i = 1; i < p.path.length; i++) {
+      const a = p.path[i - 1], b = p.path[i];
+      if (Math.hypot(a.x - b.x, a.z - b.z) > 12) continue; // 跳着记的点（并进来的另一段）不连线
+      const d = depth((a.y + b.y) / 2);
+      out.push(`<line x1="${X(a.x)}" y1="${Z(a.z)}" x2="${X(b.x)}" y2="${Z(b.z)}" stroke="var(--info)" stroke-opacity="${(0.3 + 0.7 * d).toFixed(2)}" stroke-width="${(2 + 2 * d).toFixed(1)}" stroke-linecap="round"><title>y${a.y}→y${b.y}</title></line>`);
+    }
+    // 每个落脚点也画一个小点：竖井在俯视图上所有点叠在一处，连线长度为 0，只有点看得见
+    for (const q of p.path) out.push(`<circle cx="${X(q.x)}" cy="${Z(q.z)}" r="2.5" fill="var(--info)" fill-opacity="${(0.3 + 0.7 * depth(q.y)).toFixed(2)}"><title>(${q.x},${q.y},${q.z})</title></circle>`);
+    for (const e of p.entrances) out.push(`<circle cx="${X(e.x)}" cy="${Z(e.z)}" r="5" fill="var(--accent)"><title>入口 (${e.x},${e.y},${e.z})</title></circle>`);
+    const deep = p.path.reduce((m, q) => (q.y < m.y ? q : m), p.path[0]);
+    out.push(`<text x="${(+X(deep.x) + 6).toFixed(1)}" y="${(+Z(deep.z) + 3).toFixed(1)}">y${p.deepestY}</text>`);
+  }
+  for (const f of fac) out.push(`<rect x="${(+X(f.pos.x) - 3.5).toFixed(1)}" y="${(+Z(f.pos.z) - 3.5).toFixed(1)}" width="7" height="7" fill="var(--warn)"><title>${esc(f.text)}</title></rect>`);
+  if (me) out.push(`<path d="M${X(me.x)} ${(+Z(me.z) - 7).toFixed(1)} l6 11 h-12 z" fill="var(--bad)"><title>我在 (${Math.round(me.x)},${Math.round(me.y)},${Math.round(me.z)})</title></path>`);
+  out.push(`<text x="${W - 22}" y="14">N↑</text>`);
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.innerHTML = out.join('');
 }
 
 // ------------------------------------------------------------ 视野
