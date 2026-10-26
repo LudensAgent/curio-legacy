@@ -46,6 +46,7 @@ import { liveAudience } from './planner/prompt.ts';
 import { AudienceChannel } from './live/audience.ts';
 import { BilibiliLive, type LiveMessage, type LiveStatus } from './live/bilibili.ts';
 import { DanmakuLog } from './live/danmaku-log.ts';
+import { hudLandmarks } from './observer/landmarks-hud.ts';
 import { MemorySpend, llmSpend, withMemory } from './observer/llm-spend.ts';
 import { SkillLibrary } from './skills/library.ts';
 import { ExperienceMiner } from './methods/experience.ts';
@@ -289,6 +290,13 @@ function attachObserver() {
 bus.on('event', (ev: { type: string; data?: Record<string, unknown> }) => {
   if (feed && ev.type === 'expression_changed') feed.thought(String(ev.data?.goal ?? ''), String(ev.data?.thought ?? ''));
 });
+// 直播 HUD「记得的地点」：家、最近的死亡点、自己的东西和资源，每秒按当前位置刷新距离
+if (feed) setInterval(() => {
+  try {
+    const s = adapter.state();
+    feed.landmarks(hudLandmarks(memory.landmarks(), s.observationReady ? { pos: s.pos, dim: s.dim } : null));
+  } catch { /* 还没连上服务器 */ }
+}, 1000).unref();
 if (memory.migrated) bus.publish('memory', 'P1', `清理了 ${memory.migrated} 个旧版本留下的地标（当时的矿物位置是穿墙搜到的，不算亲眼所见）`);
 
 
