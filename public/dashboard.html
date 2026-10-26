@@ -397,6 +397,8 @@
               <span>想法最多行数</span><input type="range" id="hudThoughtLines" min="1" max="12" step="1"><span class="v" id="hudThoughtLinesV"></span>
               <span>物品栏 / 血条大小</span><input type="range" id="hudScale" min="0.5" max="3" step="0.05"><span class="v" id="hudScaleV"></span>
               <span>文字卡片大小</span><input type="range" id="hudInfoScale" min="0.5" max="1.5" step="0.05"><span class="v" id="hudInfoScaleV"></span>
+              <span>右侧轮换间隔</span><input type="range" id="hudRotate" min="0" max="30" step="1"><span class="v" id="hudRotateV"></span>
+              <span class="full hudnote">右侧在「兴趣信号」和「运行统计（死亡、Token、开销）」之间轮换；0 = 两页叠在一起常驻。</span>
             </div>
             <div class="hudnote" id="hudNote">改动立即发给游戏里的观察者模组（不需要快捷键），并记在 live/observer-hud.json。</div>
           </div>
@@ -932,9 +934,9 @@ es.onerror = () => { $('conn').textContent = '控制台断开'; $('connDot').cla
     // 默认位置只是示意（1920×1080、GUI 缩放 2 时大致在这里）；真实位置由模组按屏幕和缩放计算
     { id: 'info', name: '状态 / 当前动作', def: [0.004, 0.007, 0.27, 0.07] },
     { id: 'thought', name: '它的想法', def: [0.004, 0.085, 0.27, 0.17] },
-    { id: 'interests', name: '兴趣 · 用量 · 开销', def: [0.8, 0.02, 0.19, 0.36] },
+    { id: 'interests', name: '兴趣 / 统计（轮换）', def: [0.82, 0.02, 0.17, 0.24] },
     { id: 'vitals', name: '快捷栏 / 血条', def: [0.39, 0.885, 0.22, 0.115] },
-    { id: 'inventory', name: '完整背包', def: [0.004, 0.71, 0.17, 0.27] },
+    { id: 'inventory', name: '完整背包', def: [0.447, 0.007, 0.106, 0.13] },
     { id: 'containers', name: '容器界面（居中）', toggleOnly: true },
     { id: 'hands', name: '第一人称手部', toggleOnly: true },
   ];
@@ -990,6 +992,7 @@ es.onerror = () => { $('conn').textContent = '控制台断开'; $('connDot').cla
     setRange('hudThoughtLines', hud.thoughtLines, (v) => v + ' 行');
     setRange('hudScale', hud.hudScale, (v) => '×' + Number(v).toFixed(2));
     setRange('hudInfoScale', hud.infoScale, (v) => '×' + Number(v).toFixed(2));
+    setRange('hudRotate', hud.sidebarRotateSeconds ?? 8, (v) => Number(v) ? v + ' 秒' : '不轮换');
     $('camAuto').checked = hud.camera.auto;
     setRange('camDistance', hud.camera.distance, (v) => Number(v).toFixed(1) + ' 格');
     setRange('camSmoothing', hud.camera.smoothing, (v) => Number(v).toFixed(2) + ' 秒');
@@ -1023,6 +1026,7 @@ es.onerror = () => { $('conn').textContent = '控制台断开'; $('connDot').cla
   $('hudThoughtLines').addEventListener('input', (e) => change({ thoughtLines: Number(e.target.value) }));
   $('hudScale').addEventListener('input', (e) => change({ hudScale: Number(e.target.value) }));
   $('hudInfoScale').addEventListener('input', (e) => change({ infoScale: Number(e.target.value) }));
+  $('hudRotate').addEventListener('input', (e) => change({ sidebarRotateSeconds: Number(e.target.value) }));
   $('camAuto').addEventListener('change', (e) => change({ camera: { auto: e.target.checked } }));
   $('camDistance').addEventListener('input', (e) => change({ camera: { distance: Number(e.target.value) } }));
   $('camSmoothing').addEventListener('input', (e) => change({ camera: { smoothing: Number(e.target.value) } }));
