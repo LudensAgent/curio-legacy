@@ -27,6 +27,8 @@ export interface DashboardHandlers {
   suggest(text: string): void;
   /** 切换自动旁观（附着到 Bot / 自由旁观） */
   spectate?(on: boolean): Promise<unknown> | unknown;
+  /** 弹幕存档：?dates=1 列出有存档的日期；否则按 date / q / questions / blocked / limit 查询 */
+  danmaku?(query: URLSearchParams): unknown;
 }
 
 /**
@@ -113,6 +115,10 @@ export function startDashboard(
       clients.add(res);
       req.on('close', () => clients.delete(res));
       return;
+    }
+    if (req.method === 'GET' && p === '/api/danmaku') {
+      if (!h.danmaku) return send(res, 404, '{"error":"not supported"}');
+      return send(res, 200, JSON.stringify(h.danmaku(url.searchParams)));
     }
     if (req.method === 'POST') {
       if (p === '/api/pause') { h.pause(); return send(res, 200, '{"ok":true}'); }

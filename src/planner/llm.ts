@@ -32,7 +32,7 @@ const scaleOf = (hint: unknown) => { const n = Number((hint as any)?.maxTokensSc
 
 export class OpenAICompatibleProvider implements LlmProvider {
   readonly name: string;
-  constructor(private cfg: Omit<Config['llm'], 'maxPromptTokens' | 'maxRecallRounds' | 'visionInput' | 'contextWindowTokens' | 'compactAtRatio' | 'lightThinking' | 'reasoningEffort'> & { lightThinking?: string; reasoningEffort?: string }) {
+  constructor(private cfg: Omit<Config['llm'], 'maxPromptTokens' | 'maxRecallRounds' | 'visionInput' | 'contextWindowTokens' | 'compactAtRatio' | 'lightThinking' | 'reasoningEffort' | 'price' | 'priceHolidays'> & { lightThinking?: string; reasoningEffort?: string }) {
     this.name = `openai-compatible:${cfg.model}`;
   }
 

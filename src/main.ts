@@ -45,6 +45,8 @@ import { Planner } from './planner/planner.ts';
 import { liveAudience } from './planner/prompt.ts';
 import { AudienceChannel } from './live/audience.ts';
 import { BilibiliLive, type LiveMessage, type LiveStatus } from './live/bilibili.ts';
+import { DanmakuLog } from './live/danmaku-log.ts';
+import { llmSpend } from './observer/llm-spend.ts';
 import { SkillLibrary } from './skills/library.ts';
 import { ExperienceMiner } from './methods/experience.ts';
 import type { TaskOutcome } from './arbiter/arbiter.ts';
@@ -87,6 +89,8 @@ const coderCfg = { ...config, llm: { ...config.llm,
   ...(config.coder.model ? { model: config.coder.model } : {}),
   ...(config.coder.baseUrl ? { baseUrl: config.coder.baseUrl } : {}),
   ...(config.coder.apiKey ? { apiKey: config.coder.apiKey } : {}),
+  // 写代码的模型另有价格就用它的；同一个模型沿用 LLM_PRICE
+  ...(config.coder.price ? { price: config.coder.price } : config.coder.model && config.coder.model !== config.llm.model ? { price: '' } : {}),
   reasoningEffort: config.coder.reasoningEffort, maxTokens: config.coder.maxTokens, timeoutMs: config.coder.timeoutMs,
   maxCallsPerHour: config.coder.maxCallsPerHour, jsonMode: true } };
 const coderPlanner = config.llm.provider === 'openai'
@@ -110,9 +114,10 @@ setInterval(() => library.prune(), 60_000).unref();
 // ------------------------------------------------------------ 直播间（可选）：弹幕只作参考
 const audience = config.live.bilibili.enabled ? new AudienceChannel(config.live.audience, bus) : null;
 const live = config.live.bilibili.enabled ? new BilibiliLive(config.live.bilibili, { log: (sev, msg) => bus.publish('live', sev, msg) }) : null;
+const danmakuLog = new DanmakuLog(config.danmakuArchiveDir, (msg) => bus.publish('live', 'P1', msg));
 if (live && audience) {
   liveAudience.enabled = true;
-  live.on('message', (m: LiveMessage) => audience.ingest(m));
+  live.on('message', (m: LiveMessage) => { danmakuLog.record(m, audience.ingest(m)); });
   live.on('status', (st: LiveStatus) => bus.publish('live_status', st.state === 'error' ? 'P1' : 'P3', `B 站直播间：${st.state}${st.detail ? `（${st.detail}）` : ''}`));
 }
 
@@ -262,10 +267,13 @@ const actionChat = new ActionChat(adapter, bus, { ...config.actionChat, canSend:
 actionChat.start();
 
 // ------------------------------------------------------------ Curio Observer（观察者客户端模组的数据流）
-const feed = config.observerFeed ? new ObserverFeed({ botName: config.mc.username, mcVersion: config.mc.version, agentVersion: '0.3.0' }) : null;
+const feed = config.observerFeed ? new ObserverFeed({ botName: config.mc.username, mcVersion: config.mc.version, agentVersion: '0.3.0',
+  hudConfigPath: config.observerHudConfig }) : null;
+/** 直播 HUD 的 LLM 用量：上传/下载 token、缓存命中、每分钟速率、模型和真实花费 */
+const currentSpend = () => llmSpend([planner, coderPlanner], { holidays: config.llm.priceHolidays });
 const observerTasks = feed ? installTaskObserver(feed, arbiter, {
   interests: () => perception.snapshot()?.drives ?? [],
-  stats: () => ({ deaths: metrics.counters.deaths, totalTokens: runStats.totalTokens() }),
+  stats: () => ({ deaths: metrics.counters.deaths, totalTokens: runStats.totalTokens(), ...currentSpend() }),
 }) : null;
 let observedBot: unknown = null;
 let observerInstall: MineflayerObserver | null = null;
@@ -455,6 +463,7 @@ function snapshot() {
     learning: { ...scorecard.summary(), ledger: ledger.summary() },
     spectator: spectator.status,
     live: live ? { status: live.status(), audience: audience?.stats() } : null,
+    llmSpend: currentSpend(),
     memory: {
       landmarks: memory.landmarks().slice(-12),
       notes: memory.notesFor({ n: 8 }),
@@ -489,6 +498,10 @@ metrics.start();
 live?.start();
 startDashboard(config.dashboard.host, config.dashboard.port, bus, {
   snapshot,
+  danmaku: (q) => q.get('dates') === '1' ? { dates: danmakuLog.dates() } : danmakuLog.query({
+    date: q.get('date') ?? undefined, q: q.get('q') ?? undefined, questions: q.get('questions') === '1',
+    blocked: q.get('blocked') === '1', limit: Number(q.get('limit')) || undefined,
+  }),
   pause: () => executive.pause(),
   resume: () => executive.resume(),
   replan: () => executive.replan(),

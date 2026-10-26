@@ -9,6 +9,7 @@ import { ControlKnowledge } from '../methods/controls.ts';
 import { llmCategory, type LlmTrace } from './llm-trace.ts';
 import type { RecipeBook } from '../methods/recipes.ts';
 import { enforcePromptBudget } from './prompt.ts';
+import { costOf, isPeak, priceFor, type ModelPrice } from './pricing.ts';
 
 export interface LlmTokenUsage {
   promptTokens: number;
@@ -18,6 +19,12 @@ export interface LlmTokenUsage {
   unreportedCalls: number;
   /** 输入中命中服务端前缀缓存的 token 数（DeepSeek: prompt_cache_hit_tokens；OpenAI: prompt_tokens_details.cached_tokens） */
   cachedPromptTokens?: number;
+  /** 按每次调用当时的价格（含高峰价）累计的真实花费，币种见 Planner.price */
+  cost?: number;
+  /** 已经算进 cost 的 token：升级前留下的累计用量没有逐次价格，显示时按闲时价补估 */
+  costedPromptTokens?: number;
+  costedCachedTokens?: number;
+  costedCompletionTokens?: number;
 }
 
 export interface LlmStats {
@@ -46,7 +53,12 @@ export interface LlmStats {
  */
 export class Planner {
   private window: number[] = [];
+  /** 最近一分钟每次调用的上传/下载 token（直播 HUD 的实时速率） */
+  private recentUsage: { t: number; input: number; output: number }[] = [];
   stats: LlmStats;
+  /** 这个规划器用的模型和它的价格（认不出的模型没有价格，不算钱） */
+  readonly model: string;
+  readonly price: ModelPrice | null;
   /** 配方记忆（模型按需分级查询） */
   recipeBook?: RecipeBook;
 
@@ -61,6 +73,8 @@ export class Planner {
     private memoryRecall?: MemoryRecall,
     private controls = new ControlKnowledge(null),
   ) {
+    this.model = cfg.llm.provider === 'mock' ? 'mock' : cfg.llm.model;
+    this.price = cfg.llm.provider === 'mock' ? null : priceFor(cfg.llm.model, (cfg.llm as { price?: string }).price);
     this.stats = {
       provider: provider.name,
       calls: 0,
@@ -95,6 +109,22 @@ export class Planner {
     if (prompt == null || completion == null) sum.unreportedCalls++;
     const cached = count(u?.prompt_cache_hit_tokens) ?? count((u?.prompt_tokens_details as Record<string, unknown> | undefined)?.cached_tokens);
     if (cached != null) sum.cachedPromptTokens = (sum.cachedPromptTokens ?? 0) + cached;
+    const now = Date.now();
+    if (this.price && prompt != null && completion != null) {
+      const peak = isPeak(now, (this.cfg.llm as { priceHolidays?: string[] }).priceHolidays ?? []);
+      sum.cost = (sum.cost ?? 0) + costOf({ promptTokens: prompt, cachedPromptTokens: cached ?? 0, completionTokens: completion }, this.price, peak);
+      sum.costedPromptTokens = (sum.costedPromptTokens ?? 0) + prompt;
+      sum.costedCachedTokens = (sum.costedCachedTokens ?? 0) + Math.min(prompt, cached ?? 0);
+      sum.costedCompletionTokens = (sum.costedCompletionTokens ?? 0) + completion;
+    }
+    this.recentUsage.push({ t: now, input: prompt ?? 0, output: completion ?? 0 });
+    this.usageRate(now);
+  }
+
+  /** 最近一分钟上传、下载了多少 token（每分钟） */
+  usageRate(now = Date.now()): { input: number; output: number } {
+    this.recentUsage = this.recentUsage.filter((r) => now - r.t <= 60_000);
+    return this.recentUsage.reduce((a, r) => ({ input: a.input + r.input, output: a.output + r.output }), { input: 0, output: 0 });
   }
 
   private prune() {

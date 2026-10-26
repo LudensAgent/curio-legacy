@@ -63,6 +63,10 @@ export const config = {
     reasoningEffort: str('LLM_REASONING_EFFORT', 'auto').toLowerCase(),
     maxCallsPerHour: num('LLM_MAX_CALLS_PER_HOUR', 90),
     fakeDelayMs: num('LLM_FAKE_DELAY_MS', 0),
+    /** 价格覆盖（每百万 token：命中,未命中,输出[,币种]）；不写就用内置的 DeepSeek 价格表 */
+    price: str('LLM_PRICE'),
+    /** 按闲时价算的法定节假日（北京时间日期，逗号分隔），DeepSeek 高峰价只在工作日生效 */
+    priceHolidays: str('LLM_PRICE_HOLIDAYS').split(',').map((s) => s.trim()).filter(Boolean),
   },
   /**
    * 后台写代码用的模型（造技能、改进代码技能）：不赶时间，可以用更强、更慢的模型。
@@ -76,6 +80,7 @@ export const config = {
     maxTokens: num('CODER_LLM_MAX_TOKENS', 32768),
     timeoutMs: num('CODER_LLM_TIMEOUT_MS', 300000),
     maxCallsPerHour: num('CODER_LLM_MAX_CALLS_PER_HOUR', 1000),
+    price: str('CODER_LLM_PRICE'),
   },
   persona: str(
     'AGENT_PERSONA',
@@ -147,6 +152,10 @@ export const config = {
   dataDir: path.resolve(str('DATA_DIR', './data')),
   /** 每次 LLM 调用的完整记录（提示词、思考过程、完整回复）：放在数据目录外面，清空记忆、重置世界都不会删 */
   llmArchiveDir: path.resolve(str('LLM_ARCHIVE_DIR', './archives/llm-calls')),
+  /** 收到的每条弹幕（含被拦下的）按天存档，方便复盘和找观众的问题：同样放在数据目录外 */
+  danmakuArchiveDir: path.resolve(str('DANMAKU_ARCHIVE_DIR', './archives/danmaku')),
+  /** 观察者模组 HUD 的布局和开关（控制台「直播」页修改）：直播设置，不跟着角色存档走 */
+  observerHudConfig: path.resolve(str('OBSERVER_HUD_CONFIG', './live/observer-hud.json')),
 };
 
 export type Config = typeof config;
