@@ -180,6 +180,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const bot = mineflayer.createBot({ host, port, username, version, auth: 'offline', viewDistance: 32 });
     this.bot = bot;
     bot.loadPlugin(pathfinder);
+    // 踩水：每个物理刻看一眼，空闲泡在水里时按住上浮（见 treadWater）
+    bot.on('physicsTick', () => { try { this.treadWater(bot); } catch { /* ignore */ } });
 
     bot.on('spawn', () => {
       this.newSession();
@@ -943,6 +945,41 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       return `确认脚下有支撑，向${label}挪半步后重新寻路`;
     }
     return null;
+  }
+
+  /** 踩水按住的上浮键还是不是我们的（任何别的代码碰了 jump 就归它） */
+  private treading = false;
+  /**
+   * 踩水：人泡在水里、手上又没有动作在控制身体时（心智在想下一步、两步之间），像玩家一样按住空格浮在水面，
+   * 不然身体会一直往下沉，几秒后憋气、反射抢走控制去上浮，心智永远插不上手。
+   * 任何动作一碰控制键（寻路、游泳、挖、走）就把控制交还给它；只在泡水且悬空/头在水里时才按。
+   */
+  private treadWater(b: any) {
+    const e = b?.entity;
+    if (!e || b !== this.bot || typeof b.setControlState !== 'function' || typeof b.getControlState !== 'function') return;
+    if (!b.__treadWrapped) {
+      // 别的代码设置 jump（包括 clearControlStates）时，上浮键的所有权就交出去了
+      const raw = b.setControlState.bind(b);
+      b.__setControlRaw = raw;
+      b.setControlState = (k: string, v: boolean) => { if (k === 'jump' && b === this.bot) this.treading = false; return raw(k, v); };
+      b.__treadWrapped = true;
+    }
+    const raw = b.__setControlRaw as (k: string, v: boolean) => void;
+    const busy = this.inFlight > 0 || !!b.targetDigBlock || !!b.pathfinder?.goal || !!b.vehicle || !!b.isSleeping
+      || ['forward', 'back', 'left', 'right', 'sneak', 'sprint'].some((k) => b.getControlState(k));
+    let submerged = false;
+    if (e.isInWater && typeof b.blockAt === 'function' && e.position?.offset) {
+      const head = b.blockAt(e.position.offset(0, e.eyeHeight ?? 1.62, 0));
+      submerged = !!head && (['water', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass'].includes(head.name) || String(head.getProperties?.().waterlogged) === 'true');
+    }
+    const want = !busy && !!e.isInWater && !e.isInLava && (!e.onGround || submerged);
+    if (want) {
+      if (!b.getControlState('jump')) raw('jump', true);
+      this.treading = true;
+    } else if (this.treading) {
+      this.treading = false;
+      raw('jump', false);
+    }
   }
 
   stopAll() {
@@ -2427,7 +2464,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           b.setControlState('forward', true);
         } else b.setControlState('forward', false);
         if (p.distanceTo(anchor) >= 0.3) { lastProgress = Date.now(); anchor = p.clone(); }
-        if (!dry && destination && Date.now() - lastProgress >= 2500) return { ok: false, reason: 'SWIM_NO_PROGRESS', landed: false, oxygen: b.oxygenLevel ?? 20 };
+        // 贴着岸往上爬时水平位置本来就不动（靠水里撞墙的上抬一点点爬上去）：多给点时间，别刚贴上岸就算没进展
+        const climbingBank = !!b.entity.isCollidedHorizontally && distance <= 1.6;
+        if (!dry && destination && Date.now() - lastProgress >= (climbingBank ? 5000 : 2500)) return { ok: false, reason: 'SWIM_NO_PROGRESS', landed: false, oxygen: b.oxygenLevel ?? 20 };
         if (typeof b.waitForTicks === 'function') await this.afterAction(() => raceAbort(b.waitForTicks(2), signal, 2000, () => {}), check);
         else await this.afterAction(() => sleep(100, signal), check);
       }

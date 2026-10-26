@@ -98,9 +98,35 @@ export const digAt: Skill<CellArgs> = {
   },
 };
 
+const WATER_PLANTS = new Set(['seagrass', 'tall_seagrass', 'kelp', 'kelp_plant']);
+
+/**
+ * 在水里迈向相邻一格：那一列上（比脚低 1 格到高 2 格）有干的落脚处，就朝它游过去、贴岸按住跳爬上去。
+ * 那一列没有能站的干地时返回 null，交给平常的检查（会说清楚那边是什么）。
+ */
+async function stepOutOfWater(ctx: SkillCtx, args: CellArgs, feet: Vec3Like) {
+  const a = ctx.adapter;
+  const dry = (p: Vec3Like) => { const n = a.blockAt(p); return n !== null && (AIR.has(n) || isSoftBlock(n)) && !LIQUID_BLOCKS.has(n) && !WATER_PLANTS.has(n); };
+  const solid = (p: Vec3Like) => { const n = a.blockAt(p); return n !== null && !LIQUID_BLOCKS.has(n) && !AIR.has(n) && !isSoftBlock(n); };
+  const base = toWorld(feet, args.facing, [args.at[0], 0, args.at[2]]);
+  let stand: Vec3Like | null = null, dy = 0;
+  for (const k of [...new Set([args.at[1], 1, 0, 2, -1])]) {
+    const c = { ...base, y: feet.y + k };
+    if (solid({ ...c, y: c.y - 1 }) && dry(c) && dry({ ...c, y: c.y + 1 })) { stand = c; dy = k; break; }
+  }
+  if (!stand) return null;
+  const rel: [number, number, number] = [args.at[0], dy, args.at[2]];
+  const res = await a.swimTo!({ x: stand.x + 0.5, y: stand.y, z: stand.z + 0.5 }, ctx.signal, { timeoutMs: Math.max(1000, Math.min(7000, ctx.deadline - Date.now())) });
+  const s = a.state(), end = feetCell(s.pos);
+  if (!s.inWater && s.onGround && Math.hypot(end.x - stand.x, end.z - stand.z) <= 1 && Math.abs(end.y - stand.y) <= 1) {
+    return ok(`从水里爬上了岸 [${rel}]（实际在 (${end.x},${end.y},${end.z})）`, { moved: rel, landed: true, ...after(ctx, args.facing) });
+  }
+  return fail('EFFECT_NOT_CONFIRMED', `从水里朝 [${rel}] 的岸爬了，没上去（岸边落脚处比脚高 ${dy} 格${dy >= 2 ? '，从水里多半爬不上两格高的岸，换一处低一点的岸' : ''}；${res.ok ? '' : `游泳：${res.reason}；`}现在${s.inWater ? '还在水里' : '不在水里但没站稳'}）`, { stand: rel, ...after(ctx, args.facing) });
+}
+
 export const stepTo: Skill<CellArgs> = {
   name: 'step',
-  description: '迈到身边相邻的一格（[前,上,右]）：可以平走、上一级台阶（上+1，会跳）、下一级（上-1）。目标格和头顶要空、脚下要实；上台阶时自己头顶上方也要空。只走这一格',
+  description: '迈到身边相邻的一格（[前,上,右]）：可以平走、上一级台阶（上+1，会跳）、下一级（上-1）。目标格和头顶要空、脚下要实；上台阶时自己头顶上方也要空。只走这一格。泡在水里时朝岸那边迈（[1,0,0] 就行），身体会游过去、贴着岸爬上去（岸比脚高一两格也行）',
   argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W"}（前后/左右 ±1，上下 -1..1；例：[1,0,0] 往前一格，[1,1,0] 迈上前方台阶）',
   timeoutMs: 8000,
   movement: true,
@@ -119,6 +145,11 @@ export const stepTo: Skill<CellArgs> = {
     const start = a.state().pos, feet = feetCell(start);
     const target = toWorld(feet, args.facing, args.at);
     const free = (p: Vec3Like) => { const n = a.blockAt(p); return n !== null && (AIR.has(n) || isSoftBlock(n)); };
+    // 泡在水里：脚下那格是水、岸往往比脚高一两格，平地上的“上下 ±1”对不上。像玩家一样朝那边游、贴着岸按住跳爬上去
+    if (a.state().inWater && a.swimTo) {
+      const out = await stepOutOfWater(ctx, args, feet);
+      if (out) return out;
+    }
     const head = { ...target, y: target.y + 1 }, floor = { ...target, y: target.y - 1 };
     const problems: string[] = [];
     if (!free(target)) problems.push(`目标格是 ${describeCell(a, target)}${LIQUID_BLOCKS.has(a.blockAt(target) ?? '') ? '' : `（要过去先 dig_at [${args.at}] 挖开）`}`);

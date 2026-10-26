@@ -6,6 +6,7 @@ import { hasPlaceable, PLACEABLE } from './survival.ts';
 import { DIRS, dirName } from '../perception/perception.ts';
 import { dist3, sleep, throwIfAborted } from '../util.ts';
 import type { Vec3Like } from '../adapter/types.ts';
+import { feetCell } from '../perception/local.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
 
 // ------------------------------------------------------------------ 寻找与张望（人眼式：不透视，只是转头看）
@@ -688,12 +689,29 @@ export const surface: Skill<{ escape?: 'dig' | 'shore' }> = {
     // 没找到岸，但已经浮在水面、能正常呼吸：溺水危险已解除，交还给原来的事情（由它决定怎么离开水面）
     if (s.oxygen >= 18 && !ceilingAbove(ctx)) {
       const land = ctx.senses.nearestLand?.(s.pos, []);
-      return ok(`浮在水面能正常呼吸了（氧气 ${s.oxygen}/20），还没上岸${land ? `；最近看到的陆地在 ${land.dir} ${land.dist} 格` : '；附近没看到能上岸的地方'}`,
-        { attempts, landed: false, afloat: true, pos: s.pos, ...(brokeCeiling ? { brokeCeiling } : {}) });
+      const shore = land ? shoreHint(s.pos, land) : null;
+      return ok(`浮在水面能正常呼吸了（氧气 ${s.oxygen}/20），还没上岸${shore ? shore.text : '；附近没看到能上岸的地方'}`,
+        { attempts, landed: false, afloat: true, pos: s.pos, ...(shore ? { shore: shore.data } : {}), ...(brokeCeiling ? { brokeCeiling } : {}) });
     }
     return fail('STUCK', `尚未确认安全上岸，氧气 ${s.oxygen}/20${s.inWater ? '，仍在水中' : '，尚未站稳干地'}${notes.length ? `（${[...new Set(notes)].join('；')}）` : ''}`, { attempts, landed: false, pos: s.pos, ...(brokeCeiling ? { brokeCeiling } : {}) });
   },
 };
+
+/**
+ * 把“最近的陆地”说成能直接用的话：落脚处比脚高几格；就贴在身边时给出能照抄的 step。
+ * 只说方向和距离时，模型会按平地的高度去迈（[0,0,1]），而岸其实比泡在水里的脚高一两格。
+ */
+export function shoreHint(pos: Vec3Like, land: { dir: string; dist: number; pos: Vec3Like }) {
+  const feet = feetCell(pos), stand = { x: land.pos.x, y: land.pos.y + 1, z: land.pos.z };
+  const dx = stand.x - feet.x, dz = stand.z - feet.z, dy = stand.y - feet.y;
+  const height = dy > 0 ? `，落脚处比脚高 ${dy} 格` : dy < 0 ? `，落脚处比脚低 ${-dy} 格` : '，落脚处和脚一样高';
+  const data = { dir: land.dir, dist: land.dist, dy, stand };
+  if (Math.abs(dx) + Math.abs(dz) === 1) {
+    const facing = dx === 1 ? 'E' : dx === -1 ? 'W' : dz === 1 ? 'S' : 'N';
+    return { text: `；岸就贴在身边（${facing}）${height}：step {"to":[1,0,0],"facing":"${facing}"} 会从水里爬上去`, data: { ...data, step: { to: [1, 0, 0], facing } } };
+  }
+  return { text: `；最近看到的陆地在 ${land.dir} ${land.dist} 格${height}`, data };
+}
 
 /** 沿气穴路线分段游过去（游泳原语只会走直线，拐弯的水道要一段一段游）；上了岸返回 true */
 async function swimPath(ctx: SkillCtx, path: Vec[], end: number): Promise<boolean> {
