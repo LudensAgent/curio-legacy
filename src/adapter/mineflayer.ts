@@ -1461,13 +1461,25 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (this.currentDimension() !== 'overworld') return { ok: false, reason: 'WRONG_DIMENSION' };
     const b = this.bot;
     const bedIds = Object.values<any>(this.mcData.blocksByName).filter((x) => x.name.endsWith('_bed')).map((x) => x.id);
-    let bed = b.findBlock({ matching: bedIds, maxDistance: 4 });
+    // findBlock 偶尔漏掉就在身边的床（日志里记得的床 1 格外，它却说附近没床）：再逐格看一遍
+    const nearBed = (r: number) => {
+      const found = b.findBlock({ matching: bedIds, maxDistance: r });
+      if (found) return found;
+      const c = b.entity.position.floored();
+      let best: any = null;
+      for (let dx = -r; dx <= r; dx++) for (let dy = -2; dy <= 2; dy++) for (let dz = -r; dz <= r; dz++) {
+        const blk = b.blockAt(c.offset(dx, dy, dz));
+        if (blk && String(blk.name).endsWith('_bed') && (!best || blk.position.distanceTo(b.entity.position) < best.position.distanceTo(b.entity.position))) best = blk;
+      }
+      return best;
+    };
+    let bed = nearBed(4);
     if (!bed) {
       const bedItem = b.inventory.items().find((i: any) => i.name.endsWith('_bed'));
       if (!bedItem) return { ok: false, reason: 'NO_BED' };
-      if (!this.findPlaceSpots(true).length) return { ok: false, reason: 'NO_SPACE' };
+      if (!this.findPlaceSpots(true, true).length) return { ok: false, reason: 'NO_SPACE' };
       await this.placeNearby(bedItem.name, true, signal, check);
-      bed = b.findBlock({ matching: bedIds, maxDistance: 4 });
+      bed = nearBed(4);
       if (!bed) return { ok: false, reason: 'PLACE_FAILED' };
       this.bus.publish('place', 'P2', '放下了床');
     }
@@ -1487,7 +1499,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return { ok: true, bedPos };
   }
 
-  private findPlaceSpots(requireHeadroom = true): any[] {
+  private findPlaceSpots(requireHeadroom = true, bed = false): any[] {
     const REPLACEABLE = new Set(['air', 'cave_air', 'void_air', 'water', 'short_grass', 'grass', 'tall_grass', 'fern', 'large_fern', 'snow', 'dead_bush', 'seagrass', 'tall_seagrass']);
     const b = this.bot;
     const base = b.entity.position.floored();
@@ -1499,9 +1511,23 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const above = b.blockAt(base.offset(dx, dy + 1, dz));
       const above2 = b.blockAt(base.offset(dx, dy + 2, dz));
       // 能放进去的格子：空气，也包括水和矮草、雪层这类一放方块就被顶掉的（人在水里也能把工作台放在水底）
-      if (REPLACEABLE.has(above?.name) && (!requireHeadroom || REPLACEABLE.has(above2?.name))) candidates.push(ref);
+      if (!(REPLACEABLE.has(above?.name) && (!requireHeadroom || REPLACEABLE.has(above2?.name)))) continue;
+      if (bed) {
+        // 床有两格：旁边至少要有一格同样能放的位置
+        const roomy = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([ox, oz]) => {
+          const g = b.blockAt(base.offset(dx + ox, dy, dz + oz)), a1 = b.blockAt(base.offset(dx + ox, dy + 1, dz + oz));
+          return g?.boundingBox === 'block' && REPLACEABLE.has(a1?.name);
+        });
+        if (!roomy) continue;
+      }
+      candidates.push(ref);
     }
-    return candidates.sort((a, c) => a.position.distanceTo(b.entity.position) - c.position.distanceTo(b.entity.position)).slice(0, 12);
+    const dist = (r: any) => r.position.distanceTo(b.entity.position);
+    if (!bed) return candidates.sort((a, c) => dist(a) - dist(c)).slice(0, 12);
+    // 床：像人一样放在有顶的地方（屋里、洞里），和脚下同一层，而不是随手放在屋顶或露天
+    const covered = (r: any) => { for (let up = 2; up <= 5; up++) { const blk = b.blockAt(r.position.offset(0, up, 0)); if (blk && blk.boundingBox === 'block') return true; } return false; };
+    const score = (r: any) => dist(r) + (covered(r) ? 0 : 6) + Math.abs(r.position.y + 1 - base.y) * 2;
+    return candidates.sort((a, c) => score(a) - score(c)).slice(0, 12);
   }
 
   /**
@@ -1510,7 +1536,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
    */
   private async placeNearby(item: string, requireHeadroom: boolean, signal: AbortSignal, check: (() => void) & { signal?: AbortSignal }): Promise<any | null> {
     const b = this.bot, Vec3 = require('vec3').Vec3, up = new Vec3(0, 1, 0);
-    const spots = this.findPlaceSpots(requireHeadroom);
+    const spots = this.findPlaceSpots(requireHeadroom, /_bed$/.test(item));
     const ordered = [...spots.filter((r) => this.canClickPlacementFace(r, up)), ...spots.filter((r) => !this.canClickPlacementFace(r, up))].slice(0, 6);
     for (const ref of ordered) {
       const position = ref.position.offset(0, 1, 0);

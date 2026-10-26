@@ -261,8 +261,10 @@ test('“快干完了想想接下来”每段活只问一次：模型没写 next
   const cfg = { ...config, llm: { ...config.llm, provider: 'openai' as const, maxCallsPerHour: 1000, maxPromptTokens: 60000, timeoutMs: 60000 } };
   const planner = new Planner(cfg, { name: 'scripted', complete: (messages) => new Promise((resolve) => pending.push({ resolve, messages })) }, adapter, memory, bus, null);
   const mind = new Mind({ adapter, arbiter, perception, memory, bus, self: new SelfModel(null), persona: '你叫 Curio。', thinker: new Thinker(planner, adapter, memory, bus, null) });
+  const nearEnd = Mind.NEAR_END_AFTER_MS;
+  Mind.NEAR_END_AFTER_MS = 0; // 最后一步一开始就算“快干完了”（测试里不等 4 秒）
   mind.start(1_000_000);
-  t.after(() => { mind.stop(); arbiter.cancel('end'); memory.close(); });
+  t.after(() => { Mind.NEAR_END_AFTER_MS = nearEnd; mind.stop(); arbiter.cancel('end'); memory.close(); });
   const reply = async (body: object) => { pending.at(-1)!.resolve({ text: JSON.stringify(body), latencyMs: 10 }); await flush(); };
   mind.tick(); await flush();
   await reply({ monologue: '砍树', decision: 'new', activity: { what: '砍树', steps: [{ skill: 't_slow2' }] } });

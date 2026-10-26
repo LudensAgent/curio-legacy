@@ -1,7 +1,7 @@
 import type { ConstructionResult } from '../building/engine.ts';
 import { materialPlan } from '../methods/shortfall.ts';
 import { findStation, rememberStation } from './stations.ts';
-import { checkSiteAt, describeSiteFailure, surveyBuildSite } from '../building/site.ts';
+import { checkSiteAt, describeSiteFailure, projectRect, surveyBuildSite, type SiteRect } from '../building/site.ts';
 import { ownStationsAt } from '../building/engine.ts';
 import type { BuildingProject } from '../building/archive.ts';
 import type { Vec3Like } from '../adapter/types.ts';
@@ -68,13 +68,46 @@ export function ownBuildingAt(memory: WorldMemory, state: { worldId: string; dim
 
 export const OWN_BUILDING_HINT = '拆了拿料，build 回头还会报缺这一格，又去补——拆东墙补西墙。缺料就去采（collect）或从箱子里拿；真要拆（开个门、困在里面出不去、改建）写 "own":true';
 
+/** 自己别的作品占着的地（没盖完的、放弃的、盖好的都算）：新工地不和它们重叠；except 是正在续建的那座 */
+export function ownFootprints(archive: BuildingArchive, worldId: string, dim: string, except?: string): SiteRect[] {
+  return archive.list().filter((p) => p.worldId === worldId && p.dimension === dim && p.id !== except && p.versions.length)
+    .map((p) => { const r = projectRect(p.origin, p.rotation, p.versions.at(-1)!.spec); return { minX: r.minX - 1, maxX: r.maxX + 1, minZ: r.minZ - 1, maxZ: r.maxZ + 1 }; });
+}
+
+/**
+ * 认定一座作品“这样就行了”（accept）或“不要了”（abandon）。
+ * 真人盖房不会为屋顶一块台阶放成木板就一直补下去：能进门、能挡怪，觉得够了就收工；地方选错了、烂尾了就放下。
+ * 由心智自己（或听了操作者、观众的话）决定，程序只记下这个决定，并把家设在收了工的房子里。
+ */
+export function settleBuild(memory: WorldMemory, projectId: string, how: 'accept' | 'abandon', by: 'agent' | 'operator' | 'audience', note: string): { ok: true; project: BuildingProject; text: string } | { ok: false; error: string } {
+  const archive = buildingArchiveFor(memory);
+  const old = archive.get(projectId);
+  if (!old) return { ok: false, error: `没有建筑档案 ${projectId}` };
+  const name = old.versions.at(-1)?.spec.name ?? old.id.slice(0, 8);
+  const left = old.inspections.at(-1)?.defects.length ?? 0;
+  if (how === 'abandon') {
+    const project = archive.abandon(old.id, note);
+    return { ok: true, project, text: `「${name}」不要了：不再续建、不再惦记（占着的地新工地会避开；想重拾就 build {"projectId":"${old.id}"}）` };
+  }
+  const project = archive.accept(old.id, by, note);
+  try {
+    const blueprint = compileBuilding(normalizeSpec(structuredClone(project.versions.at(-1)!.spec)));
+    if (blueprint.home) {
+      const home = rotatePosition(blueprint.home, project.origin, project.rotation);
+      memory.setBase(project.dimension, home, name);
+      memory.addLandmark('discovery', `我的${name}`, project.dimension, home, 4);
+    }
+  } catch { /* 图纸编译不了就只记状态 */ }
+  return { ok: true, project, text: `「${name}」按能住收工了${left ? `（逐格看还差 ${left} 处，不再惦记；以后想补写 build {"projectId":"${old.id}","mode":"repair"}）` : ''}` };
+}
+
 interface BuildArgs {
   blueprint: string;
   spec?: BuildingSpec;
   origin?: Vec3Like;
   rotation?: Rotation;
   projectId?: string;
-  mode: 'build' | 'inspect' | 'repair';
+  mode: 'build' | 'inspect' | 'repair' | 'accept' | 'abandon';
   reason?: string;
   cells?: [number, number, number][];
 }
@@ -160,8 +193,8 @@ async function restoreStations(ctx: Parameters<Skill['run']>[0], project: Buildi
 
 export const build: Skill<BuildArgs> = {
   name: 'build',
-  description: '照图施工：有建筑师画好的图纸就写 draft（推荐）；也可以自己设计：spec.design 用字符画分层画出每格放什么（legend 字符→方块，layers 从地板往上，"." 留空，门写下半格），想要什么样就画什么样。程序负责选址（不给 origin 会在附近找干燥平地并整平；给的地方不合适会就近换）、分阶段施工、逐格验收；料不全也照样开工，手上有的先盖（墙基墙身先起来），缺的报给你，补齐后用 projectId 接着盖；返回作品 ID，中断后用 projectId 续建，inspect 检查、repair 修补。',
-  argsDoc: '{"draft":"dr_…"}（新房子：照建筑师的图纸盖）｜{"projectId":"作品ID","mode"?:"build|inspect|repair"}（接着盖、检查、修补已有作品）；可选 "origin":{"x":0,"y":64,"z":0}、"rotation":0|90|180|270。图纸先用 {"kind":"design"} 请建筑师画，不要自己写 spec',
+  description: '照图施工：有建筑师画好的图纸就写 draft（推荐）；也可以自己设计：spec.design 用字符画分层画出每格放什么（legend 字符→方块，layers 从地板往上，"." 留空，门写下半格），想要什么样就画什么样。程序负责选址（不给 origin 会在附近找干燥平地并整平；给的地方不合适会就近换）、分阶段施工、逐格验收；料不全也照样开工，手上有的先盖（墙基墙身先起来），缺的报给你，补齐后用 projectId 接着盖；返回作品 ID，中断后用 projectId 续建，inspect 检查、repair 修补；觉得够住了就 accept 收工，不想要了就 abandon（是不是“够了”自己判断，不必逐格完美）。',
+  argsDoc: '{"draft":"dr_…"}（新房子：照建筑师的图纸盖）｜{"projectId":"作品ID","mode"?:"build|inspect|repair"}（接着盖、检查、修补已有作品）｜{"mode":"accept|abandon"}（够住了收工 / 不要了）；可选 "origin":{"x":0,"y":64,"z":0}、"rotation":0|90|180|270。图纸先用 {"kind":"design"} 请建筑师画，不要自己写 spec',
   timeoutMs: 600000,
   movement: true,
   validate(raw, adapter) {
@@ -187,7 +220,7 @@ export const build: Skill<BuildArgs> = {
       return { ok: false, error: `房子要自己设计（最好先请建筑师画图纸：思考时输出 {"kind":"design","brief":"…"}，再 build {"draft":"dr_…"}）；或者直接写 spec={"name":"…","design":{legend,layers}}。layers 从下往上（第 0 层地板），每层的行从前（北）到后，一个字符一个方块，"." 留空、空格不管，门只写下半格。例如 spec.design=${DESIGN_EXAMPLE_RICH}` };
     if (!Object.hasOwn(BLUEPRINTS, blueprint) && blueprint !== 'custom') return { ok: false, error: '未知蓝图；可用 hut/big_hut/pillar/wall/custom' };
     if (a.projectId !== undefined && (typeof a.projectId !== 'string' || !a.projectId.trim() || a.projectId.length > 100)) return { ok: false, error: 'projectId 需要有效作品 ID' };
-    if (!['build', 'inspect', 'repair'].includes(a.mode ?? 'build')) return { ok: false, error: 'mode 支持 build/inspect/repair' };
+    if (!['build', 'inspect', 'repair', 'accept', 'abandon'].includes(a.mode ?? 'build')) return { ok: false, error: 'mode 支持 build/inspect/repair/accept/abandon' };
     if (a.rotation !== undefined && ![0, 90, 180, 270].includes(a.rotation)) return { ok: false, error: 'rotation 支持 0/90/180/270' };
     if (a.origin !== undefined && (!a.origin || typeof a.origin !== 'object' || [a.origin.x, a.origin.y, a.origin.z].some((n) => !Number.isInteger(n) || Math.abs(n) > 30000000))) return { ok: false, error: 'origin 需要合法整数坐标' };
     if (a.reason !== undefined && (typeof a.reason !== 'string' || a.reason.length > 1000)) return { ok: false, error: 'reason 最多 1000 字符' };
@@ -210,10 +243,22 @@ export const build: Skill<BuildArgs> = {
       const state = ctx.adapter.state();
       if (!state.connected || !state.alive || !ctx.adapter.eye()) return fail('NOT_CONNECTED', '未连接或尚未存活');
       const archive = buildingArchiveFor(ctx.memory);
+      if (args.mode === 'accept' || args.mode === 'abandon') {
+        // 没给 projectId：最近一座没盖完的
+        const id = args.projectId
+          ? archive.list().find((p) => p.id === args.projectId || p.id.startsWith(args.projectId!))?.id
+          : archive.list().filter((p) => p.worldId === state.worldId && p.dimension === state.dim && p.status !== 'complete' && p.status !== 'abandoned')
+            .sort((a, b) => Math.hypot(a.origin.x - state.pos.x, a.origin.z - state.pos.z) - Math.hypot(b.origin.x - state.pos.x, b.origin.z - state.pos.z))[0]?.id;
+        if (!id) return fail('NOT_FOUND', args.projectId ? `没有建筑档案 ${args.projectId}` : '附近没有没盖完的作品');
+        const r = settleBuild(ctx.memory, id, args.mode, 'agent', args.reason ?? (args.mode === 'accept' ? '觉得能住了' : '不想要了'));
+        if (!r.ok) return fail('NOT_FOUND', r.error);
+        ctx.bus.publish(args.mode === 'accept' ? 'build_accepted' : 'build_abandoned', 'P2', r.text, { projectId: id, by: 'agent' });
+        return ok(r.text, { projectId: id, status: r.project.status });
+      }
       // 忘了作品 ID 也没关系：附近有没盖完的房子就接着盖（像玩家回到工地），而不是在旁边另起一座
       const near = (p: Vec3Like) => Math.hypot(p.x - (args.origin ?? state.pos).x, p.z - (args.origin ?? state.pos).z) <= (args.origin ? 6 : 16);
       const nearby = !args.projectId && args.mode === 'build' ? archive.list()
-        .filter((p) => p.worldId === state.worldId && p.dimension === state.dim && p.status !== 'complete' && near(p.origin)
+        .filter((p) => p.worldId === state.worldId && p.dimension === state.dim && p.status !== 'complete' && p.status !== 'abandoned' && near(p.origin)
           && (!args.origin || (args.origin.x === p.origin.x && args.origin.y === p.origin.y && args.origin.z === p.origin.z))
           && (args.rotation === undefined || args.rotation === p.rotation))
         .sort((a, b) => b.updatedAt - a.updatedAt) : [];
@@ -226,6 +271,8 @@ export const build: Skill<BuildArgs> = {
       });
       const resumed = abandoned.find((x) => !x.why || (args.origin && !x.terrain))?.p;
       const skippedSite = !resumed ? abandoned.find((x) => x.why) : undefined;
+      // 不再接着盖的旧工地：标成放弃，免得它一直挂在“没盖完”里、和新工地互相打架（位置会被新选址避开）
+      if (skippedSite) { try { archive.abandon(skippedSite.p.id, skippedSite.why ?? '不在那里接着盖'); } catch { /* 档案写不进去不影响施工 */ } }
       if (skippedSite) notes.push(`附近没盖完的「${skippedSite.p.versions.at(-1)?.spec.name ?? skippedSite.p.id.slice(0, 8)}」${skippedSite.why}，不在那里接着盖，换了块地另起`);
       const projectId = args.projectId ?? resumed?.id;
       const old = projectId ? archive.get(projectId.length < 36 ? archive.list().find((p) => p.id.startsWith(projectId))?.id ?? projectId : projectId) : undefined;
@@ -264,7 +311,7 @@ export const build: Skill<BuildArgs> = {
       let surveyFrom: { center?: Vec3Like; radius: number; why?: string } | null = origin ? null : { radius: 24 };
       // 模型给了 origin（新工地）：先按同样的标准看一眼那块地，不合适就在它附近 16 格内另找
       if (origin && !old && args.mode === 'build' && spec.layout === 'house') {
-        const check = checkSiteAt(ctx.adapter, ctx.memory, spec, origin, rotation, own);
+        const check = checkSiteAt(ctx.adapter, ctx.memory, spec, origin, rotation, own, ownFootprints(archive, state.worldId, state.dim));
         if (check.ok) {
           if (check.origin.y !== origin.y) notes.push(`origin 的 y 按地面校正为 ${check.origin.y}`);
           origin = check.origin;
@@ -272,7 +319,7 @@ export const build: Skill<BuildArgs> = {
       }
       if (surveyFrom) {
         // 先看看附近的地形，挑一块平整、干燥、没出过事的空地，再走过去
-        const survey = surveyBuildSite(ctx.adapter, ctx.memory, spec, { radius: surveyFrom.radius, rotations, ownStations: own, ...(surveyFrom.center ? { center: surveyFrom.center } : {}) });
+        const survey = surveyBuildSite(ctx.adapter, ctx.memory, spec, { radius: surveyFrom.radius, rotations, ownStations: own, avoid: ownFootprints(archive, state.worldId, state.dim), ...(surveyFrom.center ? { center: surveyFrom.center } : {}) });
         const given = surveyFrom.center;
         if (!survey.best) return fail('NOT_FOUND', `${given ? `原定位置（${given.x},${given.y},${given.z}）不合适（${surveyFrom.why}）；` : ''}${describeSiteFailure(survey, spec, surveyFrom.radius)}${notes.length ? `；${notes.join('；')}` : ''}`, { survey: { checked: survey.checked, rejected: survey.rejected, hint: survey.hint } });
         origin = survey.best.origin; rot = survey.best.rotation;
@@ -404,7 +451,7 @@ export function sleepReason(reason?: string): string {
 
 export const sleepSkill: Skill<{ at?: Vec3Like; place?: boolean }> = {
   name: 'sleep',
-  description: '天黑后睡床跳过黑夜、设重生点（黄昏会在床边等）。{} 睡手边的床；at 走去那张床睡；place 放下背包里的床睡。只限主世界。',
+  description: '天黑后睡床跳过黑夜、设重生点（黄昏会在床边等）。{} 睡手边的床；at 走去那张床睡；place 放下背包里的床睡（挑附近有顶的地方）。床拆下来（dig）会掉成床物品，捡起来就在背包里。只限主世界。',
   argsDoc: '{}｜{"at":{x,y,z}}｜{"place":true}',
   timeoutMs: 120000, movement: false,
   validate(raw) {

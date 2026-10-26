@@ -30,7 +30,7 @@ interface SelfData {
   plan?: FocusPlan;
 }
 
-export interface FocusPlan { agendaId: string; goal: string; steps: { text: string; done: boolean }[]; setAt: number; updatedAt: number;
+export interface FocusPlan { agendaId: string; goal: string; steps: { text: string; done: boolean; doneWhen?: import('../projects/types.ts').Condition; auto?: boolean }[]; setAt: number; updatedAt: number;
   /** 上一次真正推进（定下清单或勾掉一项）的时间 */
   progressAt?: number }
 
@@ -233,7 +233,7 @@ export class SelfModel {
    * 定下（或改写）主目标的清单。focus 是议程 ID 或一句话（一句话就新建一个今天的目标）。
    * 旧清单里同名、已经勾掉的项保持勾掉。
    */
-  setPlan(focus: string, steps: string[]): FocusPlan | null {
+  setPlan(focus: string, steps: string[], conditions: (import('../projects/types.ts').Condition | null)[] = []): FocusPlan | null {
     const id = focus.startsWith('a_') ? focus : this.addAgenda(focus, 'goal', 'today')?.id;
     const item = id ? this.data.agenda.find((a) => a.id === id) : undefined;
     // 主目标只能是“想做的事”：随手记下的点子、疑问不该被升成要一直推进的目标
@@ -241,13 +241,23 @@ export class SelfModel {
     if (item.status !== 'active') this.setAgendaStatus(item.id, 'active');
     const old = this.data.plan?.agendaId === item.id ? this.data.plan : undefined;
     const doneBefore = new Set(old?.steps.filter((st) => st.done).map((st) => st.text) ?? []);
-    const clean = steps.map(cleanPlanStep).filter(Boolean).slice(0, 8);
+    const cleaned = steps.map((t, i) => ({ text: cleanPlanStep(t), cond: conditions[i] ?? null })).filter((x) => x.text).slice(0, 8);
+    const clean = cleaned.map((x) => x.text);
     const changed = !old || old.steps.map((st) => st.text).join('|') !== clean.join('|');
-    this.data.plan = { agendaId: item.id, goal: item.text, steps: clean.map((text) => ({ text, done: doneBefore.has(text) })), setAt: old?.setAt ?? Date.now(), updatedAt: Date.now(),
+    this.data.plan = { agendaId: item.id, goal: item.text, steps: cleaned.map(({ text, cond }) => ({ text, done: doneBefore.has(text), ...(cond ? { doneWhen: cond } : {}) })), setAt: old?.setAt ?? Date.now(), updatedAt: Date.now(),
       // 原样重写清单不算推进
       progressAt: changed ? Date.now() : old?.progressAt ?? old?.setAt ?? Date.now() };
     this.touch();
     return this.data.plan;
+  }
+  /** 清单里带 done_when、还没勾掉的项：身体看得见的事实达成了就自动勾（不用等模型记得写 done） */
+  autoCheckPlan(met: (c: import('../projects/types.ts').Condition) => boolean): string[] {
+    const p = this.plan();
+    if (!p) return [];
+    const out: string[] = [];
+    for (const st of p.steps) if (!st.done && st.doneWhen && met(st.doneWhen)) { st.done = true; st.auto = true; out.push(st.text); }
+    if (out.length) { p.updatedAt = Date.now(); p.progressAt = Date.now(); this.touch(); }
+    return out;
   }
   /** 勾掉清单里的项：序号或文字 */
   checkPlan(done: (number | string)[]): string[] {
@@ -440,6 +450,7 @@ export class SelfModel {
     if (c.drop.length) { const drop = new Set(c.drop); this.data.knowHow = this.data.knowHow.filter((k) => !drop.has(k.id)); }
     for (const t of c.add) this.learn(t, { source: 'reflection' });
     for (const id of c.agendaDrop) this.setAgendaStatus(id, 'dropped');
+    for (const a of c.agendaAdd ?? []) this.addAgenda(a.text, a.kind, a.horizon);
     this.data.insights = [];
     this.data.reflectedAt = Date.now();
     this.data.knowHowAtReflect = this.data.knowHow.length;

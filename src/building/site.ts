@@ -25,10 +25,19 @@ export interface SiteCandidate {
 const MAX_CUT = 3, MAX_FILL = 2;
 export const levelBudget = (spec: Pick<BuildingSpec, 'width' | 'depth'>) => Math.round(40 * (spec.width * spec.depth) / 25);
 
+/** 世界坐标里的一块矩形占地（含边） */
+export interface SiteRect { minX: number; maxX: number; minZ: number; maxZ: number }
+
+/** 一座作品的占地矩形（按它的朝向转到世界坐标） */
+export function projectRect(origin: Vec3Like, rotation: Rotation, spec: Pick<BuildingSpec, 'width' | 'depth'>): SiteRect {
+  const a = rotatePosition({ x: 0, y: 0, z: 0 }, origin, rotation), b = rotatePosition({ x: spec.width - 1, y: 0, z: spec.depth - 1 }, origin, rotation);
+  return { minX: Math.min(a.x, b.x), maxX: Math.max(a.x, b.x), minZ: Math.min(a.z, b.z), maxZ: Math.max(a.z, b.z) };
+}
+
 export interface SiteSurvey {
   best: SiteCandidate | null;
   checked: number;
-  rejected: { wet: number; uneven: number; hazard: number; artificial: number; unknown: number };
+  rejected: { wet: number; uneven: number; hazard: number; artificial: number; unknown: number; occupied?: number };
   /** 地势更平、更干的方向（失败时给建议） */
   hint: string | null;
 }
@@ -59,7 +68,7 @@ export function surfaceColumn(adapter: GameAdapter, x: number, z: number, top: n
   return null;
 }
 
-export function surveyBuildSite(adapter: GameAdapter, memory: WorldMemory | null, spec: Pick<BuildingSpec, 'width' | 'depth' | 'height' | 'layout'> & { maxFoundationDepth?: number }, opts: { radius?: number; rotations?: Rotation[]; ownStations?: Vec3Like[]; center?: Vec3Like } = {}): SiteSurvey {
+export function surveyBuildSite(adapter: GameAdapter, memory: WorldMemory | null, spec: Pick<BuildingSpec, 'width' | 'depth' | 'height' | 'layout'> & { maxFoundationDepth?: number }, opts: { radius?: number; rotations?: Rotation[]; ownStations?: Vec3Like[]; center?: Vec3Like; avoid?: SiteRect[] } = {}): SiteSurvey {
   const s = adapter.state();
   const radius = opts.radius ?? 24;
   const rotations = opts.rotations ?? [0, 90, 180, 270];
@@ -76,7 +85,8 @@ export function surveyBuildSite(adapter: GameAdapter, memory: WorldMemory | null
     if (!cols.has(k)) cols.set(k, Math.hypot(x - bx, z - bz) > reach ? null : surfaceColumn(adapter, x, z, by + 10, by - 12, own));
     return cols.get(k)!;
   };
-  const rejected = { wet: 0, uneven: 0, hazard: 0, artificial: 0, unknown: 0 };
+  const rejected = { wet: 0, uneven: 0, hazard: 0, artificial: 0, unknown: 0, occupied: 0 };
+  const avoid = opts.avoid ?? [];
   const dirScore = new Map<string, { ok: number; n: number; wet: number }>();
   let best: SiteCandidate | null = null, checked = 0;
   for (let dx = -radius; dx <= radius; dx += radius ? 2 : 1) for (let dz = -radius; dz <= radius; dz += radius ? 2 : 1) {
@@ -98,6 +108,8 @@ export function surveyBuildSite(adapter: GameAdapter, memory: WorldMemory | null
         if (c.wet) { reason = 'wet'; break; }
         const margin = lx === b.minX || lx === b.maxX || lz === b.minZ || lz === b.maxZ;
         if (margin) continue; // 余量这一圈只要求干燥
+        // 自己别的工地（盖了一半的、放弃的）占着的地方：不在上面另起一座，免得两座互相把对方当成占位
+        if (avoid.some((r) => p.x >= r.minX && p.x <= r.maxX && p.z >= r.minZ && p.z <= r.maxZ)) { reason = 'occupied'; break; }
         if (c.artificial) { reason = 'artificial'; break; }
         heights.push(c.y);
         if (c.tree) trees++;
@@ -140,16 +152,16 @@ export function surveyBuildSite(adapter: GameAdapter, memory: WorldMemory | null
 /** 失败时的人话说明 */
 export function describeSiteFailure(survey: SiteSurvey, spec: Pick<BuildingSpec, 'width' | 'depth'>, radius = 24): string {
   const r = survey.rejected;
-  const why = [r.wet ? '挨水/岩浆' : '', r.uneven ? '坡太陡、要铲/填的方块太多' : '', r.artificial ? '有不是自然地形的方块' : '', r.hazard ? '在出过事的危险区域' : '', r.unknown ? '有区块没加载、或地表被山体/洞顶盖住' : ''].filter(Boolean).join('、');
+  const why = [r.occupied ? '和自己别的工地重叠' : '', r.wet ? '挨水/岩浆' : '', r.uneven ? '坡太陡、要铲/填的方块太多' : '', r.artificial ? '有不是自然地形的方块' : '', r.hazard ? '在出过事的危险区域' : '', r.unknown ? '有区块没加载、或地表被山体/洞顶盖住' : ''].filter(Boolean).join('、');
   return `附近 ${radius} 格内没有够平（或整得平）又不挨水的 ${spec.width}×${spec.depth} 空地${why ? `（试过的位置主要问题：${why}）` : ''}，换个地方${survey.hint ? `（比如往 ${survey.hint} 走 30 格以上）` : ''}再试，或直接给 origin`;
 }
 
 /** 某个指定 origin 能不能盖：能盖返回校正过高度的 origin；不能盖返回原因 */
-export function checkSiteAt(adapter: GameAdapter, memory: WorldMemory | null, spec: Pick<BuildingSpec, 'width' | 'depth' | 'height' | 'layout'> & { maxFoundationDepth?: number }, origin: Vec3Like, rotation: Rotation, ownStations: Vec3Like[] = []): { ok: true; origin: Vec3Like } | { ok: false; why: string } {
-  const r = surveyBuildSite(adapter, memory, spec, { radius: 0, rotations: [rotation], ownStations, center: origin });
+export function checkSiteAt(adapter: GameAdapter, memory: WorldMemory | null, spec: Pick<BuildingSpec, 'width' | 'depth' | 'height' | 'layout'> & { maxFoundationDepth?: number }, origin: Vec3Like, rotation: Rotation, ownStations: Vec3Like[] = [], avoid: SiteRect[] = []): { ok: true; origin: Vec3Like } | { ok: false; why: string } {
+  const r = surveyBuildSite(adapter, memory, spec, { radius: 0, rotations: [rotation], ownStations, center: origin, avoid });
   if (r.best && Math.abs(r.best.origin.y - origin.y) <= 2) return { ok: true, origin: r.best.origin };
   const x = r.rejected;
-  const why = r.best ? `地面高度是 ${r.best.origin.y - 1}，和给的 y=${origin.y} 差太多` : [x.wet ? '挨着水/岩浆' : '', x.uneven ? '坡太陡（一边要挖进山里超过 3 格或悬空超过 2 格，整地量太大）' : '', x.artificial ? '占地里有不是自然地形的方块' : '', x.hazard ? '在出过事的危险区域' : '', x.unknown ? '地表被山体/洞顶盖住或区块没加载' : ''].filter(Boolean).join('、') || '地形不合适';
+  const why = r.best ? `地面高度是 ${r.best.origin.y - 1}，和给的 y=${origin.y} 差太多` : [x.occupied ? '和自己别的工地重叠' : '', x.wet ? '挨着水/岩浆' : '', x.uneven ? '坡太陡（一边要挖进山里超过 3 格或悬空超过 2 格，整地量太大）' : '', x.artificial ? '占地里有不是自然地形的方块' : '', x.hazard ? '在出过事的危险区域' : '', x.unknown ? '地表被山体/洞顶盖住或区块没加载' : ''].filter(Boolean).join('、') || '地形不合适';
   return { ok: false, why };
 }
 

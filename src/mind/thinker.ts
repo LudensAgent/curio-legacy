@@ -209,7 +209,13 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
     ...(str(o.liked, 60) ? { liked: str(o.liked, 60) } : {}),
     ...(parseHabits(o.habits) ? { habits: parseHabits(o.habits)! } : {}),
     ...(o.skill && typeof o.skill === 'object' && !Array.isArray(o.skill) ? { skill: o.skill as Record<string, unknown> } : {}),
-    ...(parsePlan(o.plan) ? { plan: parsePlan(o.plan)! } : {}),
+    ...(() => {
+      const plan = parsePlan(o.plan, (c, i) => {
+        try { return validateCondition(normalizeDoneWhen(c), adapter, memory, adapter.state()); }
+        catch (e) { notes.push(`plan.steps[${i}].done_when 无效已忽略：${e instanceof Error ? e.message : String(e)}`); return null; }
+      });
+      return plan ? { plan } : {};
+    })(),
     ...(str(o.switch_reason, 120) ? { switchReason: str(o.switch_reason, 120) } : {}),
     ...(str(o.worth_learning, 240) ? { worthLearning: str(o.worth_learning, 240) } : {}),
     ...(o.operator && typeof o.operator === 'object' && ['doing', 'done', 'cannot', 'adopted', 'declined'].includes(String((o.operator as any).status))
@@ -217,16 +223,19 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
   };
 }
 
-/** {"focus":"a_…|一句话","steps":["…"],"done":[0,"…"]} */
-export function parsePlan(raw: unknown): MindDecision['plan'] | null {
+/** {"focus":"a_…|一句话","steps":["…" 或 {"text":"…","done_when":{条件}}],"done":[0,"…"]} */
+export function parsePlan(raw: unknown, condition?: (c: unknown, i: number) => import('../projects/types.ts').Condition | null): MindDecision['plan'] | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const o = raw as Record<string, any>;
-  const steps = Array.isArray(o.steps) ? o.steps.map((x: unknown) => cleanPlanStep(str(typeof x === 'string' ? x : (x as any)?.text, 80))).filter(Boolean).slice(0, 8) : [];
+  const items = (Array.isArray(o.steps) ? o.steps : []).map((x: unknown) => ({ text: cleanPlanStep(str(typeof x === 'string' ? x : (x as any)?.text, 80)), when: x && typeof x === 'object' ? (x as any).done_when ?? (x as any).doneWhen : undefined }))
+    .filter((x: { text: string }) => x.text).slice(0, 8);
+  const steps: string[] = items.map((x: { text: string }) => x.text);
+  const conditions = items.map((x: { when: unknown }, i: number) => x.when !== undefined && x.when !== null && condition ? condition(x.when, i) : null);
   const done = (Array.isArray(o.done) ? o.done : o.done !== undefined ? [o.done] : [])
     .filter((x: unknown) => Number.isInteger(x) && (x as number) >= 0 && (x as number) < 8 || typeof x === 'string' && x.trim()).slice(0, 8);
   const focus = str(o.focus ?? o.agenda_id, 100), goal = str(o.goal, 100);
   if (!steps.length && !done.length) return null;
-  return { ...(focus ? { focus } : {}), ...(goal ? { goal } : {}), ...(steps.length ? { steps } : {}), ...(done.length ? { done } : {}) };
+  return { ...(focus ? { focus } : {}), ...(goal ? { goal } : {}), ...(steps.length ? { steps } : {}), ...(conditions.some(Boolean) ? { conditions } : {}), ...(done.length ? { done } : {}) };
 }
 
 /**
@@ -318,9 +327,9 @@ export class Thinker {
    * 休息/睡前回想：把零碎的经验整理成少数几条靠谱的窍门，顺便写一句日记。
    * 在后台进行，不打断手上的事；mock 模式下不做（规则模式不会写窍门）。
    */
-  async reflect(self: SelfModel, persona: string, signal: AbortSignal): Promise<Consolidation | null> {
+  async reflect(self: SelfModel, persona: string, signal: AbortSignal, strategy: string[] = []): Promise<Consolidation | null> {
     if (!this.planner.autonomous) return null;
-    const messages = buildReflectionMessages(self, persona, this.book?.list().filter((k) => k.source === 'self').map((k) => `${k.name}：${k.description}`) ?? []);
+    const messages = buildReflectionMessages(self, persona, this.book?.list().filter((k) => k.source === 'self').map((k) => `${k.name}：${k.description}`) ?? [], strategy);
     for (let attempt = 0; attempt < 2; attempt++) {
       const c = await this.planner.complete(messages, { label: 'mind:回想', tier: 'full', signal, attempt });
       try {
@@ -432,7 +441,10 @@ export function parseConsolidation(raw: unknown, knowHowIds: Set<string>, agenda
   const executable = !!sk && (Array.isArray(sk.steps) || sk.when !== undefined);
   const skill = sk && typeof sk.name === 'string' && typeof sk.description === 'string' && (typeof sk.body === 'string' && sk.body.trim().length >= 20 || executable)
     ? { name: sk.name.slice(0, 41), description: sk.description.slice(0, 200), body: typeof sk.body === 'string' ? sk.body.slice(0, 6000) : '', ...(executable ? { raw: sk } : {}) } : undefined;
-  return { rewrite, merge, drop, add, agendaDrop: ids(o.agenda_drop, agendaIds), ...(skill ? { skill } : {}),
+  const agendaAdd = (Array.isArray(o.agenda_add) ? o.agenda_add : []).map((a: any) => typeof a === 'string' ? { text: a } : a)
+    .map((a: any) => ({ text: str(a?.text, 60), kind: a?.kind === 'goal' ? 'goal' as const : 'idea' as const, horizon: a?.horizon === 'someday' ? 'someday' as const : 'today' as const }))
+    .filter((a: { text: string }) => a.text.length >= 4).slice(0, 3);
+  return { rewrite, merge, drop, add, agendaDrop: ids(o.agenda_drop, agendaIds), ...(agendaAdd.length ? { agendaAdd } : {}), ...(skill ? { skill } : {}),
     ...(str(o.diary, 160) ? { diary: str(o.diary, 160) } : {}), ...(str(o.monologue, 160) ? { monologue: str(o.monologue, 160) } : {}) };
 }
 

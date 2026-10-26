@@ -62,7 +62,16 @@ export function findRepeat(tokens: string[], opts = REPEATED): { pattern: string
   return best;
 }
 /** 同一种失败：多少次算“老毛病”、在多长时间里数、学过一次之后多久再看 */
-export const RECURRING = { times: 3, windowMs: 30 * 60_000, againMs: 10 * 60_000 };
+export const RECURRING = { times: 3, windowMs: 30 * 60_000, againMs: 10 * 60_000, maxAgainMs: 2 * 3600_000 };
+
+/** 技能的触发条件里有没有“某动作因某失败码失败后”这一条（all 里嵌套的也算） */
+export function coversFailure(when: unknown, skill: string, code: string): boolean {
+  if (!when || typeof when !== 'object') return false;
+  const w = when as { after_failure?: { skill?: string[]; code?: string[] }; all?: unknown[] };
+  const af = w.after_failure;
+  if (af && (af.skill ?? []).includes(skill) && (!af.code?.length || af.code.includes(code))) return true;
+  return Array.isArray(w.all) && w.all.some((x) => coversFailure(x, skill, code));
+}
 /** 失败原因去掉坐标和数字，好把“同一种原因”归到一起 */
 export const reasonOf = (summary: string) => summary.split(/[；;]/).map((seg, i) => (i === 0 ? seg.split(/[：:]/).pop() ?? seg : seg))
   .map((r) => r.replace(/\[[^\]]*\]/g, '[…]').replace(/\([^)]*\d[^)]*\)/g, '').replace(/-?\d+(\.\d+)?/g, '#').trim()).filter(Boolean).map((r) => r.slice(0, 60));
@@ -130,7 +139,7 @@ export class SkillSmith {
   /** 收获账本（投入产出、东西出现在哪）：回顾和效率信号时给模型看 */
   ledger: LedgerView | null = null;
   private lastEfficiency = new Map<string, number>();
-  private recurring = new Map<string, { at: number[]; examples: string[]; reasons: Map<string, number>; learnedAt: number }>();
+  private recurring = new Map<string, { at: number[]; examples: string[]; reasons: Map<string, number>; learnedAt: number; learned?: number }>();
   private actions: { at: number; token: string }[] = [];
   /** 一再缺的东西（没吃的、合成缺料、找不到）：回顾时问能不能变成稳定来源 */
   private shortages: { at: number; what: string; how: string }[] = [];
@@ -210,6 +219,8 @@ export class SkillSmith {
    */
   failedAgain(skill: string, code: string, msg: string, at = Date.now()) {
     if (skill === 'use_skill' || /^(CANCELLED|ABORTED|BAD_ARGS)$/.test(code)) return; // 技能自己的失败由改进器管；写错参数不是身体的问题
+    // build 报“尚未验收”是房子的验收结果（缺几块、要不要收工），不是身体的毛病：不为它造身体技能
+    if (skill === 'build' && /尚未验收/.test(msg)) return;
     const key = `${skill}:${code}`;
     const r = this.recurring.get(key) ?? { at: [], examples: [], reasons: new Map<string, number>(), learnedAt: 0 };
     this.recurring.set(key, r);
@@ -217,12 +228,17 @@ export class SkillSmith {
     const text = msg.replace(/^\[[^\]]*\]\s*/, '').slice(0, 200);
     r.examples = [...r.examples, text].slice(-10);
     for (const why of reasonOf(text)) r.reasons.set(why, (r.reasons.get(why) ?? 0) + 1);
-    if (r.at.length < RECURRING.times || at - r.learnedAt < RECURRING.againMs) return;
+    // 同一个老毛病学过几次还在犯：间隔一次比一次长（10 分钟、20、40……最多 2 小时），别一遍遍重写同一份技能
+    const again = Math.min(RECURRING.maxAgainMs, RECURRING.againMs * 2 ** (r.learned ?? 0));
+    if (r.at.length < RECURRING.times || at - r.learnedAt < again) return;
+    // 已经有刚写好、还没用够几次的技能管这种失败：等它攒够成败再说（经过已经记进它的成败）
+    if (this.engine.list().some((b) => coversFailure(b.when, skill, code) && this.engine.rewriteGate(b.name))) return;
     const reasons = [...r.reasons].sort((x, y) => y[1] - x[1]).slice(0, 6).map(([w, n]) => `${w}（${n} 次）`);
     const lines = [...r.examples.map((e) => `失败：${e}`), `归类的原因：${reasons.join('；')}`,
       ...this.recent.filter((e) => e.ts >= at - 5 * 60_000).slice(-30).map((e) => `[${((e.ts - at) / 1000).toFixed(0)}s] ${e.type} ${e.msg.replace(/\s+/g, ' ').slice(0, 150)}`)];
     const n = r.at.length;
     r.learnedAt = at;
+    r.learned = (r.learned ?? 0) + 1;
     r.at = [];
     r.examples = [];
     r.reasons.clear();

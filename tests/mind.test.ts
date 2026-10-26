@@ -46,6 +46,7 @@ function fixture(t: TestContext, opts: { autonomous?: boolean; book?: import('..
     } };
   const said: string[] = [];
   const mind = new Mind({ adapter, arbiter, perception, memory, bus, self, persona: '你叫 Curio。', thinker: new Thinker(planner, adapter, memory, bus, opts.book ?? null), say: (s) => said.push(s) });
+  Mind.NEAR_END_AFTER_MS = 0;
   mind.start(1_000_000);
   t.after(() => { mind.stop(); arbiter.cancel('test end'); memory.close(); if (previous) SKILLS.mind_step = previous; else delete SKILLS.mind_step; });
   const reply = async (i: number, body: object) => { pending[i].resolve({ text: JSON.stringify(body), latencyMs: 1200 }); await flush(); };
@@ -172,6 +173,7 @@ test('绕路：先处理别的事，做完回到被打断的那段活——回�
   await w.reply(0, { monologue: '盖墙', decision: 'new', activity: { what: '砌墙', steps: [step(1), step(2)] } });
   const wall = w.mind.activity!;
   w.mind.attention.notice('hungry', '饿了', 0.6);
+  (w.mind as any).lastThoughtAt = 0; // 离上次想事情够久了
   await w.tick();
   assert.equal(w.pending.length, 2);
   await w.reply(1, { monologue: '先吃点东西', decision: 'detour', activity: { what: '弄点吃的', steps: [step(9)] } });
@@ -197,6 +199,7 @@ test('绕路回来时前提已经变了（等的东西到了、要的已经够�
   await w.tick();
   await w.reply(0, { monologue: '等图纸时先攒木头', decision: 'new', activity: { what: '攒原木等图纸', steps: [step(1), step(2)] } });
   w.mind.attention.notice('dusk', '天快黑了', 0.6);
+  (w.mind as any).lastThoughtAt = 0;
   await w.tick();
   await w.reply(1, { monologue: '先回家', decision: 'detour', activity: { what: '回基地', steps: [step(9)] } });
   await w.finish();
@@ -345,16 +348,18 @@ test('模型可以把步骤标成 optional，校验时保留', () => {
   memory.close();
 });
 
-test('边做边想：一段活的最后一轮刚开始就琢磨下一段，干完直接接上', async (t) => {
+test('边做边想：最后一步做着的时候琢磨下一段（不是一开工就问），干完直接接上', async (t) => {
   const w = fixture(t);
   await w.tick();
   await w.reply(0, { monologue: '砍树', decision: 'new', activity: { what: '砍树', steps: [step(1), step(2)] } });
   await w.tick();
-  assert.equal(w.pending.length, 2, '第一步一开始就在想下一段（模型要想好几秒）');
-  assert.equal(w.pending[1].hint.tier, 'light');
-  await w.reply(1, { monologue: '然后做工作台', decision: 'continue', next: { what: '做工作台', steps: [step(3)] } });
+  assert.equal(w.pending.length, 1, '第一步刚开工不问“接下来做什么”（以前一开工就问，模型常顺手把刚开工的活换掉）');
   await w.finish();
   await w.tick();
+  await w.tick();
+  assert.equal(w.pending.length, 2, '最后一步在做时开始想下一段（模型要想好几秒）');
+  assert.equal(w.pending[1].hint.tier, 'light');
+  await w.reply(1, { monologue: '然后做工作台', decision: 'continue', next: { what: '做工作台', steps: [step(3)] } });
   await w.finish();
   await w.tick();
   assert.equal(w.mind.activity?.what, '做工作台');

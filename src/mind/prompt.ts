@@ -114,7 +114,7 @@ const DECISIONS = `continue 照常做｜adjust 还是这件事、改一改 routi
 const OPERATOR = `【操作者】控制台里的操作者（直播的主人）说话分两种。【操作者的指令】：优先于自己的主目标、手上的活和弹幕，这一念就照做（可以直接 switch），做法自己想，不讨价还价；只有会马上送命才先保命再回来；写 operator doing / done / cannot。做完或做不到就说，别一直挂着。【操作者的建议】：只是提个想法，认真掂量一下，合适就采纳（adopted），不合适就说一句为什么（declined），然后照自己的节奏玩，不用一直惦记。`;
 
 /** 专注：主目标 + 清单，插曲用 detour */
-const FOCUS = `【专注】主目标（只能是 goal）配清单（plan），每项是动作能完成、能验证的事；看到的资源和地点会自动记住，不用专门记。每段活推进第一项没勾掉的，做完勾掉；天黑、饿了用 detour 插一段。清单久没推进就想想这个目标还值不值得：改写或放下。`;
+const FOCUS = `【专注】主目标（只能是 goal）配清单（plan），每项是动作能完成、能验证的事，可写 {"text":"…","done_when":{…}} 达成自动勾；看到的资源和地点会自动记住，不用专门记。每段活推进第一项没勾掉的，做完勾掉；天黑、饿了用 detour 插一段。清单久没推进就想想这个目标还值不值得：改写或放下。`;
 
 /** 技能：从经历里总结、写下就生效的做法（详细写法在 writing-skills 技能里，按需查） */
 const SKILLS_DOC = () => `【技能】管用的做法写进 skill，存下就生效：{"name":"英文-连字符","description":"…","when":{条件},"steps":[…]或"code":"JS"}。when 含 after_failure＝动作失败时先试；只有状态条件＝成立自动做；不写＝use_skill 调用。写不出就用 worth_learning；写法先查 {"kind":"skill","name":"writing-skills"}。身体只会躲岩浆和溺水，别的反应（躲怪、逃跑、脱困）都靠你总结成技能。`;
@@ -242,7 +242,14 @@ export function situationalReminders(ctx: MindContext): string[] {
   if (trapped && where === 'pit') out.push(`你${p.self.where!.text}：原地 place_at [0,0,0] 垫高，或挖一级台阶 step 上去就出来了`);
   else if (trapped) out.push('你在地下或被围住了：看【身边】local，用 dig_at / step / place_at 一格一格自己挖出去（比如挖阶梯：dig_at [0,2,0]、dig_at [1,1,0]、dig_at [1,2,0]、step [1,1,0] 重复到 sky_visible）');
   else if (where === 'surface' && p.self.sky_visible !== true) out.push(`你${p.self.where!.text}，不是在地下：直接走路，不用挖`);
-  if (unfinished.length) out.push(`「${unfinished[0].name}」还没盖完：材料够了就 build {"projectId":"${unfinished[0].id}"} 接着盖`);
+  // 没盖完的房子：久没碰了才提一句；一直在补却补不动，就把事实摆出来让它掂量够不够住（不再每一念都催“接着盖”）
+  const site = unfinished[0];
+  if (site) {
+    const idleMin = (Date.now() - site.lastWorkedAt) / 60_000;
+    if (site.attempts >= 5 && site.recentProgress !== null && site.recentProgress <= 2)
+      out.push(`「${site.name}」已经验收过 ${site.attempts} 次，最近几次只少了 ${Math.max(0, site.recentProgress)} 处，还差 ${site.missing} 处：想想是不是已经够住了（够了就 build {"projectId":"${site.id}","mode":"accept"} 收工去做别的；不想要了就 abandon）`);
+    else if (idleMin >= 20) out.push(`「${site.name}」还没盖完（还差 ${site.missing} 处）：想接着盖写 build {"projectId":"${site.id}"}；够住了就 accept，不想要了就 abandon`);
+  }
   if (ctx.designing) out.push(`建筑师正在画「${ctx.designing.brief.slice(0, 40)}」（${ctx.designing.minutes} 分钟了），画好会告诉你：先攒常用的木头、石头，或做别的事`);
   else if (drafts.length) out.push(`图纸 ${drafts[0].id}「${drafts[0].name}」已经画好：按材料清单攒齐后 build {"draft":"${drafts[0].id}"}`);
   else if (!unfinished.length && /盖|建|房|屋|家|住处|庇护/.test(intent)) out.push('想盖新房子：现在就输出 {"kind":"design","brief":"…","where":"here|base"} 请建筑师——画图要几分钟，一边画一边去攒木头石头，图到了按清单补齐就能盖；不要自己画图纸');
@@ -263,7 +270,8 @@ export function situationalReminders(ctx: MindContext): string[] {
   if (p.self.food <= 8) out.push(`饿了（饥饿 ${p.self.food}）：留意吃的`);
   // 家已经有了、手上又没什么大目标：像玩家一样给自己找下一个更长的目标，而不是只做零碎的小事
   const done = myBuilds(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }).some((b) => b.status === 'complete');
-  if (done && !ctx.activity && ctx.self.agenda().filter((x) => x.kind === 'goal').length < 2)
+  const planOpen = !!ctx.plan && ctx.plan.steps.some((st) => !st.done);
+  if (done && (!ctx.activity || !planOpen) && ctx.self.agenda().filter((x) => x.kind === 'goal' && x.status !== 'done' && x.status !== 'dropped').length < 2)
     out.push('家已经盖好了：给自己定个更大的目标放进 agenda（比如下矿弄铁和铁工具、开一块农田养几只动物、扩建仓库、去远处探险）');
   return out.slice(0, 5);
 }
@@ -294,7 +302,7 @@ function focusBlock(ctx: MindContext): Record<string, unknown> | null {
   const next = plan?.steps.findIndex((st) => !st.done) ?? -1;
   return {
     goal, agenda_id: plan?.agendaId ?? item!.id,
-    ...(plan ? { for_min: Math.round((Date.now() - plan.setAt) / 60000), checklist: plan.steps.map((st, i) => `${i}. [${st.done ? 'x' : ' '}] ${st.text}`), ...(next >= 0 ? { next_item: next } : {}),
+    ...(plan ? { for_min: Math.round((Date.now() - plan.setAt) / 60000), checklist: plan.steps.map((st, i) => `${i}. [${st.done ? 'x' : ' '}] ${st.text}${st.done && st.auto ? '（条件达成，自动勾的）' : !st.done && st.doneWhen ? '（条件达成会自动勾）' : ''}`), ...(next >= 0 ? { next_item: next } : {}),
       // 进展的事实交给它自己判断：多久没勾掉一项、这期间做了几段活
       no_progress_min: Math.round((Date.now() - (plan.progressAt ?? plan.setAt)) / 60000),
       activities_since_progress: ctx.self.history(60).filter((r) => r.at > (plan.progressAt ?? plan.setAt)).length } : { checklist: '还没有：写 plan' }),
@@ -450,7 +458,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
  * 休息/睡前回想：像人一样把这段时间的零碎经验整理成少数几条靠谱的窍门。
  * 只依据实际成败次数和最近的真实结果，不发明新的事实。
  */
-export function buildReflectionMessages(self: SelfModel, persona: string, mySkills: string[] = []): ChatMessage[] {
+export function buildReflectionMessages(self: SelfModel, persona: string, mySkills: string[] = [], strategy: string[] = []): ChatMessage[] {
   const now = Date.now();
   const system = `${persona}
 
@@ -463,9 +471,12 @@ export function buildReflectionMessages(self: SelfModel, persona: string, mySkil
 - 议程里已经过时、做不成或不再想做的，可以放下（agenda_drop）。
 - 整理后窍门总数最好不超过 25 条。
 - 如果这段时间琢磨出了一整套成体系、以后还会用到的做法（比如怎么在山坡上盖房、怎么经营一块农田、夜里怎么过），可以写成一份自己的技能（skill：英文小写名字、一句用途、几行 Markdown 写清步骤和要点），以后直接翻开用；已有同名的自己写的技能会被更新。没有就省略。
+- 再退一步看看日子是怎么过的（strategy：夜里在哪过、怎么死的、哪些目标耗了很多段活、盖房花了多少工夫、游戏进度到哪了）：
+  找出最大的、一再出现的麻烦，问自己“有没有一种根本不同的玩法能让它不再发生”——不是把同一件事做得更用力，而是换个思路（出门时带上什么、把什么搬到哪、换个地方住、先去弄某样东西、干脆放下某件事）。
+  想到了就放进议程 agenda_add（{"text":"…","kind":"idea|goal"}，最多 3 条，写清要做什么），并把背后的道理写成一条窍门 add；没想到就不写，不要硬凑。
 - 用一句话写日记（diary）记下这段时间最值得记住的事，再用一句独白（monologue）说说现在的感受。
 只输出一个 JSON 对象：
-{"merge":[{"ids":["k_…","k_…"],"text":"…"}],"rewrite":[{"id":"k_…","text":"…"}],"drop":["k_…"],"add":["…"],"agenda_drop":["a_…"],"skill":{"name":"…","description":"…","body":"…"},"diary":"…","monologue":"…"}`;
+{"merge":[{"ids":["k_…","k_…"],"text":"…"}],"rewrite":[{"id":"k_…","text":"…"}],"drop":["k_…"],"add":["…"],"agenda_drop":["a_…"],"agenda_add":[{"text":"…","kind":"idea"}],"skill":{"name":"…","description":"…","body":"…"},"diary":"…","monologue":"…"}`;
   const payload = {
     know_how: self.data.knowHow.map((k) => ({ id: k.id, text: cleanLesson(k.text), wins: k.wins, losses: k.losses, ...(k.unverified ? { unverified: true } : {}),
       age_min: Math.round((now - k.createdAt) / 60000) })),
@@ -476,6 +487,7 @@ export function buildReflectionMessages(self: SelfModel, persona: string, mySkil
     diary: self.diary(5).map((d) => d.text),
     feeling: moodWords(self.mood),
     ...(mySkills.length ? { my_skills: mySkills } : {}),
+    ...(strategy.length ? { strategy } : {}),
   };
   return [{ role: 'system', content: system }, { role: 'user', content: `${JSON.stringify(payload)}\n回想一下，整理好再告诉我。` }];
 }

@@ -143,6 +143,8 @@ export interface Consolidation {
   drop: string[];
   add: string[];
   agendaDrop: string[];
+  /** 策略回顾想出的新玩法：放进议程的点子或目标 */
+  agendaAdd?: { text: string; kind: 'goal' | 'idea'; horizon: 'today' | 'someday' }[];
   /** 琢磨出的一整套做法，写成自己的技能（raw 是原始对象：带 when/steps 时交给行为引擎，写下就生效） */
   skill?: { name: string; description: string; body: string; raw?: Record<string, unknown> };
   diary?: string;
@@ -182,7 +184,7 @@ export interface MindDecision {
   /** 写下的技能（原始对象，交给行为引擎/技能书校验）：带 steps 的写下就生效 */
   skill?: Record<string, unknown>;
   /** 主目标的清单：定下/改写（focus + steps），或勾掉做完的项（done） */
-  plan?: { focus?: string; goal?: string; steps?: string[]; done?: (number | string)[] };
+  plan?: { focus?: string; goal?: string; steps?: string[]; done?: (number | string)[]; conditions?: (import('../projects/types.ts').Condition | null)[] };
   /** 整个换掉手上的事的理由（有主目标时 switch 必须写） */
   switchReason?: string;
   /** 刚才的事值得练成技能：哪里出了问题、想学会什么（后台据此写技能） */

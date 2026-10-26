@@ -43,7 +43,12 @@ export interface BuildingProject {
   rotation: Rotation;
   createdAt: number;
   updatedAt: number;
-  status: 'planned' | 'building' | 'incomplete' | 'complete';
+  /** complete：逐格验收通过，或者被认定“能住、这样就行了”（acceptance）；abandoned：不要了，不再惦记 */
+  status: 'planned' | 'building' | 'incomplete' | 'complete' | 'abandoned';
+  /** 没逐格验收通过、但被认定可以收工：谁认定的、当时还差几处 */
+  acceptance?: { at: number; by: 'agent' | 'operator' | 'audience'; note: string; defectsLeft: number };
+  abandonedAt?: number;
+  abandonNote?: string;
   versions: DesignVersion[];
   checkpoint: { phase: BuildingPhase | 'survey' | 'inspection'; ownedCells: string[]; note: string };
   inspections: BuildingInspection[];
@@ -105,7 +110,7 @@ export class BuildingArchive {
     if (!previous || JSON.stringify(previous.spec) !== JSON.stringify(input.spec)) {
       if (project.versions.length >= 64) throw new Error('单个作品已达到 64 个设计版本');
       project.versions.push({ version: (previous?.version ?? 0) + 1, at: Date.now(), spec: structuredClone(input.spec), materials: { ...input.materials }, reason: (input.reason ?? '首次设计').slice(0, 1000) });
-      project.status = 'planned';
+      if (!project.acceptance) project.status = 'planned';
       project.updatedAt = Date.now();
       this.save();
     }
@@ -176,10 +181,33 @@ export class BuildingArchive {
     const project = this.require(id);
     project.inspections.push(structuredClone(inspection));
     project.inspections = project.inspections.slice(-20);
-    project.status = inspection.complete ? 'complete' : 'incomplete';
+    // 认定过“这样就行了”的作品：之后的复查只记录缺陷，不再把它变回“没盖完”
+    project.status = inspection.complete || project.acceptance ? 'complete' : 'incomplete';
     project.updatedAt = Date.now();
     project.checkpoint.phase = 'inspection';
     this.save();
+  }
+
+  /** 认定可以收工（没逐格验收通过也算能住）：之后不再当成没盖完的工地 */
+  accept(id: string, by: 'agent' | 'operator' | 'audience', note: string) {
+    const project = this.require(id);
+    project.acceptance = { at: Date.now(), by, note: note.slice(0, 300), defectsLeft: project.inspections.at(-1)?.defects.length ?? 0 };
+    project.status = 'complete';
+    delete project.abandonedAt; delete project.abandonNote;
+    project.updatedAt = Date.now();
+    this.save();
+    return structuredClone(project);
+  }
+
+  /** 不要了：不再续建、不再提醒；位置仍被占着（选址会避开），想重拾就用 projectId 接着盖 */
+  abandon(id: string, note: string) {
+    const project = this.require(id);
+    project.status = 'abandoned';
+    project.abandonedAt = Date.now();
+    project.abandonNote = note.slice(0, 300);
+    project.updatedAt = Date.now();
+    this.save();
+    return structuredClone(project);
   }
 
   feedback(id: string, input: Omit<ArtifactFeedback, 'id' | 'at' | 'designVersion'>) {

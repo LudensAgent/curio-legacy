@@ -142,6 +142,16 @@ async function recoverBlock(ctx: SkillCtx, args: TargetDigArgs) {
     forgetStationAt(ctx.memory, adapter.state().dim, affected, name);
     await adapter.collectNearbyDrops(signal, 3, Math.max(1, Math.min(3500, ctx.deadline - Date.now())));
     throwIfAborted(signal);
+    // 床、门、工作台这类“拆下来就是它自己”的：掉落物可能弹到墙后、屋里、坑底（看不见也在那儿），按身体知道的实体位置再走过去捡一次
+    if (/_(bed|door)$/.test(name) || ['crafting_table', 'furnace', 'blast_furnace', 'smoker', 'chest'].includes(name)) {
+      const had = before.get(name) ?? 0;
+      for (let i = 0; i < 2 && (adapter.state().inventory.filter((it) => it.name === name).reduce((n, it) => n + it.count, 0) <= had) && Date.now() < ctx.deadline - 3000; i++) {
+        const drop = adapter.nearbyEntities(10).filter((e) => e.kind === 'item' && e.name.replace(/^item:/, '') === name).sort((a, b) => dist3(a.pos, pos) - dist3(b.pos, pos))[0];
+        if (!drop) break;
+        try { await adapter.moveTo({ kind: 'near', pos: drop.pos, range: 1 }, { signal, timeoutMs: Math.min(6000, Math.max(1000, ctx.deadline - Date.now() - 2000)) }); } catch (e) { if (isAbort(e)) throw e; }
+        await adapter.collectNearbyDrops(signal, 2, 1500);
+      }
+    }
     const gained = adapter.state().inventory.map((item) => ({ name: item.name, count: item.count - (before.get(item.name) ?? 0) })).filter((item) => item.count > 0);
     const data = { target: name, pos, broken: true, gained };
     if (!gained.length) return fail('ERROR', `已拆下 ${name}，但背包没有新增物品；${whereDropsWent(ctx, pos)}`, { ...data, drops: dropsNear(ctx, pos) });

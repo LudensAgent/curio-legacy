@@ -89,7 +89,8 @@ export function surveyFoundation(adapter: StateBuildingAdapter, blueprint: Build
       }
       if (solidGround(name)) { supported = true; break; }
       // 树叶、草丛这类不承重的自然方块：挖掉换成地基
-      if (!replaceable(name) && !VEGETATION.test(name)) {
+      // 火把、地毯、按钮这类薄东西也不算地基问题：拆掉就能填（以前一支火把就让整块工地被判“地基不行”，换地另起却又选回原地）
+      if (!replaceable(name) && !VEGETATION.test(name) && !clearanceFixture(name)) {
         defects.push({ cellId: cellKey(local), pos, kind: 'terrain', expected: '可承重地面或可填补空隙', actual: name });
         break;
       }

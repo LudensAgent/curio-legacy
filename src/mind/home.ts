@@ -6,7 +6,7 @@ import { buildingArchiveFor } from '../skills/build.ts';
  * “家”和“我盖过的东西”：真人玩家一直记得家在哪、哪座房子还没盖完。
  * 这些都是自己做过/到过的事实（地标、作品档案），不是推测。
  */
-export interface BuildNote { id: string; name: string; status: string; pos: Vec3Like; dist: number; missing: number }
+export interface BuildNote { id: string; name: string; status: string; pos: Vec3Like; dist: number; missing: number; accepted?: boolean; attempts: number; lastWorkedAt: number; recentProgress: number | null }
 export interface HomeNote { label: string; pos: Vec3Like; dist: number; dir: string }
 
 const dirOf = (from: Vec3Like, to: Vec3Like) => {
@@ -17,10 +17,14 @@ const dirOf = (from: Vec3Like, to: Vec3Like) => {
 export function myBuilds(memory: WorldMemory, state: Pick<AgentState, 'worldId' | 'dim' | 'pos'>, n = 5): BuildNote[] {
   let projects: ReturnType<ReturnType<typeof buildingArchiveFor>['list']> = [];
   try { projects = buildingArchiveFor(memory).list(); } catch { return []; }
-  return projects.filter((p) => p.worldId === state.worldId && p.dimension === state.dim).map((p) => {
+  // 放弃了的不再记挂（只在选址时避开那块地）
+  return projects.filter((p) => p.worldId === state.worldId && p.dimension === state.dim && p.status !== 'abandoned').map((p) => {
     const last = p.inspections.at(-1);
     return { id: p.id, name: p.versions.at(-1)?.spec.name ?? '作品', status: p.status, pos: p.origin,
-      dist: Math.round(Math.hypot(p.origin.x - state.pos.x, p.origin.z - state.pos.z)), missing: last && !last.complete ? last.defects.length : 0 };
+      dist: Math.round(Math.hypot(p.origin.x - state.pos.x, p.origin.z - state.pos.z)), missing: last && !last.complete ? last.defects.length : 0,
+      ...(p.acceptance ? { accepted: true } : {}), attempts: p.inspections.length, lastWorkedAt: p.updatedAt,
+      // 最近几次验收少了几处缺口（null：验收次数太少看不出来）
+      recentProgress: p.inspections.length >= 4 ? p.inspections.at(-4)!.defects.length - (last?.defects.length ?? 0) : null };
   }).sort((a, b) => Number(a.status === 'complete') - Number(b.status === 'complete') || a.dist - b.dist).slice(0, n);
 }
 
@@ -39,6 +43,6 @@ export function homeOf(memory: WorldMemory, state: Pick<AgentState, 'worldId' | 
 }
 
 export function describeBuild(b: BuildNote): string {
-  const st = b.status === 'complete' ? '盖好了' : b.missing ? `没盖完，还差 ${b.missing} 处` : b.status === 'planned' ? '刚规划' : '没盖完';
+  const st = b.status === 'complete' ? (b.accepted ? `收工了，能住${b.missing ? `（逐格还差 ${b.missing} 处，不必补）` : ''}` : '盖好了') : b.missing ? `没盖完，还差 ${b.missing} 处${b.attempts >= 5 ? `，已经验收过 ${b.attempts} 次` : ''}` : b.status === 'planned' ? '刚规划' : '没盖完';
   return `${b.name}[${b.id}] ${st} (${Math.round(b.pos.x)},${Math.round(b.pos.y)},${Math.round(b.pos.z)}) ${b.dist}格`;
 }

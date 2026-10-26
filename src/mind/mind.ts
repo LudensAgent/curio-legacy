@@ -7,7 +7,7 @@ import type { Hazard, WorldMemory } from '../memory/store.ts';
 import { materialPlan } from '../methods/shortfall.ts';
 import type { Perception, Percept } from '../perception/perception.ts';
 import type { MySkillInfo } from '../planner/prompt.ts';
-import { observationReady } from '../projects/conditions.ts';
+import { evaluateCondition, observationReady } from '../projects/conditions.ts';
 import { SKILLS } from '../skills/index.ts';
 import { causeName } from '../brain/habits.ts';
 import { pickFuel } from '../skills/economy.ts';
@@ -16,7 +16,10 @@ import { afterStep, argsLabel, softMiss, createActivity, describeActivity, doneW
 import type { BehaviorEngine } from './behaviors.ts';
 import { recallLocal } from './recall.ts';
 import { Attention, EXPERIENCE_MS, RECONSIDER, stuckHere, URGENT } from './attention.ts';
-import { homeOf } from './home.ts';
+import { homeOf, myBuilds } from './home.ts';
+import { settleBuild } from '../skills/build.ts';
+import { myBed } from '../skills/stations.ts';
+import { StrategyLog } from './strategy.ts';
 import type { ParsedGameMessage } from '../memory/game-messages.ts';
 import type { MindContext } from './prompt.ts';
 import { moodWords, type SelfModel } from './self.ts';
@@ -29,8 +32,10 @@ export interface MindDeps {
   thinker: Thinker; self: SelfModel; persona: string;
   mySkills?: () => MySkillInfo[];
   researchContext?: () => unknown;
-  audience?: { context(tier?: 'light' | 'full'): AudienceContext | null };
+  audience?: { context(tier?: 'light' | 'full'): AudienceContext | null; buildConsensus?(windowMs?: number): { viewers: number; messages: number; samples: string[] }; clearBuildConsensus?(): void };
   onGoalEnd?: (status: string) => void;
+  /** 游戏进度（里程碑）：做到了哪些、接下来还有哪些没做到 */
+  progress?: () => { reached: string[]; next: string[] } | null;
   /** 想说话时（不以 / 开头） */
   say?: (text: string) => void;
   /** 后天学会的做法（行为技能）：失败时先试的恢复办法、模型写下就生效的新技能 */
@@ -137,6 +142,9 @@ export class Mind {
   private pendingReason: { reason: string; tier: 'glance' | 'deliberate' } | null = null;
   /** “这段活快干完了，想想接下来”每段活只问一次（模型没写 next 也不会一直追问） */
   private nearEndAskedFor: string | null = null;
+  /** 最后一步做了这么久才开始想“接下来做什么” */
+  static NEAR_END_AFTER_MS = 4000;
+  static NEAR_END_REASON = '手上这段活快干完了，想想接下来';
   /** 刚从绕路回到这段活：先想一想再动手（放下它的这段时间里情况可能变了，比如等的东西到了、要的已经够了） */
   private resumeCheck: string | null = null;
   private lastDim: string | null = null;
@@ -169,6 +177,12 @@ export class Mind {
   private doneListener = (o: TaskOutcome) => this.onDone(o);
   private preemptListener = (o: TaskPreemption) => this.onPreempt(o);
   private eventListener = (ev: AgentEvent) => this.onEvent(ev);
+  /** 日子是怎么过的（夜里在哪、怎么死的）：回想时做策略回顾用 */
+  readonly strategy = new StrategyLog();
+  private bedDist(): number | null {
+    const s = this.d.adapter.state();
+    return this.safe(() => myBed(this.d.memory, s)?.dist ?? null, null);
+  }
 
   start(intervalMs = 250) {
     if (!this.listening) {
@@ -253,6 +267,9 @@ export class Mind {
         if (n) this.d.bus.publish('notice', 'P2', `注意到：${n.what}`, { salience: n.salience, level: n.level });
       }
     }
+    this.safe(() => this.audienceOnBuilding(), undefined);
+    this.safe(() => this.autoCheckPlan(p), undefined);
+    this.safe(() => this.strategy.onTick(p.time.phase, this.bedDist(), this.activity?.what), undefined);
     if (this.activity?.kind === 'rest') this.maybeReflect('歇下来了');
     else if (Date.now() - Math.max(this.d.self.reflectedAt, this.startedAt) > 60 * 60_000) this.maybeReflect('玩了好一阵了');
   }
@@ -283,13 +300,57 @@ export class Mind {
     // 抬头看一眼也要有间隔：注意力被每一件小事拽走，手上的活就总是做不完
     const gapOk = Date.now() - this.lastThoughtAt >= this.timing.glanceGapMs;
     if (!resting && gapOk && this.attention.highest() >= RECONSIDER) return this.think('注意到了一些事', 'glance');
-    // 边做边想：最后一轮一开始就琢磨下一段活（模型想一次要好几秒，等干完再想就会站着发呆）；每段活只问一次
-    if (!this.queuedNext && this.nearEndAskedFor !== this.activity.id && current?.planId === this.activity.id && remainingSteps(this.activity) < Math.max(1, this.activity.steps.length)) {
+    // 边做边想：最后一步做了一会儿（模型想一次要好几秒）才琢磨下一段活；每段活只问一次。
+    // 以前“最后一轮一开始”就问：repeat=1 的活第一步一开工就问，模型常顺手把刚开工的活换掉，注意力几秒一换
+    if (!this.queuedNext && this.nearEndAskedFor !== this.activity.id && current?.planId === this.activity.id && remainingSteps(this.activity) === 0
+      && Date.now() - current.startedAt >= Mind.NEAR_END_AFTER_MS) {
       this.nearEndAskedFor = this.activity.id;
-      return this.think('手上这段活快干完了，想想接下来', this.needsBigPicture() ? 'deliberate' : 'glance');
+      return this.think(Mind.NEAR_END_REASON, this.needsBigPicture() ? 'deliberate' : 'glance');
     }
     if (Date.now() - Math.max(this.activityThoughtAt, this.lastThoughtAt) > this.timing.checkInMs) return this.think('做了一会儿了，抬头看看', 'glance');
   }
+
+  /**
+   * 造房子阶段听观众的：好几位观众（或一再有人）劝“房子够了、别修了”，就把手边那座没盖完的房子认定为能住。
+   * 只在确实在盖/补这座房子时才算（离工地近、最近在上面干过活、手上的事和盖房有关），别的时候这些弹幕只是普通弹幕。
+   */
+  private audienceOnBuilding() {
+    const a = this.d.audience;
+    if (!a?.buildConsensus) return;
+    const c = a.buildConsensus(Mind.AUDIENCE_ACCEPT.windowMs);
+    if (c.viewers < Mind.AUDIENCE_ACCEPT.viewers && !(c.messages >= Mind.AUDIENCE_ACCEPT.messages && c.viewers >= 2)) return;
+    const s = this.d.adapter.state();
+    const site = myBuilds(this.d.memory, s, 20).find((b) => b.status !== 'complete' && b.dist <= 32 && b.attempts >= 1 && Date.now() - b.lastWorkedAt <= 15 * 60_000);
+    if (!site) return;
+    const doing = [this.activity?.what, this.activity?.why, this.d.self.plan()?.goal, ...(this.d.self.plan()?.steps.filter((x) => !x.done).map((x) => x.text) ?? [])].filter(Boolean).join(' ');
+    const building = this.activity?.kind === 'build' || this.activity?.steps.some((st) => st.skill === 'build') || /屋|房|家|缺口|补|盖|建|build/.test(doing);
+    if (!building) return;
+    const r = settleBuild(this.d.memory, site.id, 'accept', 'audience', `观众一再劝够了（${c.viewers} 位、${c.messages} 条）：${c.samples.join(' / ')}`.slice(0, 300));
+    a.clearBuildConsensus?.();
+    if (!r.ok) return;
+    this.d.bus.publish('build_accepted', 'P2', `${r.text}（听了观众的：${c.samples[0] ?? ''}）`, { projectId: site.id, by: 'audience', viewers: c.viewers, messages: c.messages });
+    this.d.self.think(`观众一再说「${c.samples[0] ?? '够了'}」，${r.text}`, 'outcome');
+    const n = this.attention.notice(`audience_accept:${site.id}`, `观众们一再劝房子够了：${r.text}——可以去做别的事了`, 0.6, 0);
+    if (n) this.d.bus.publish('notice', 'P2', `注意到：${n.what}`, { salience: n.salience, level: n.level });
+  }
+
+  /** 清单项写了 done_when 的：事实达成就自动勾掉；全勾掉主目标就完成 */
+  private autoCheckPlan(p: Percept) {
+    const s = this.d.adapter.state();
+    const checked = this.d.self.autoCheckPlan((c) => evaluateCondition(c, s, s.worldId, [], p).status === 'satisfied');
+    if (!checked.length) return;
+    this.d.bus.publish('plan_check', 'P3', `条件达成，自动勾掉：${checked.join('、')}`, { auto: true });
+    this.d.self.think(`清单「${checked.join('、')}」已经做到了`, 'outcome');
+    const now = this.d.self.plan();
+    if (now && now.steps.length && now.steps.every((st) => st.done)) {
+      this.d.self.setAgendaStatus(now.agendaId, 'done');
+      this.d.self.think(`「${now.goal}」的清单都做完了`, 'outcome');
+      this.d.bus.publish('plan_done', 'P2', `主目标完成：${now.goal}`);
+    }
+  }
+
+  /** 观众劝“够了”多少才算共识：5 分钟内 3 位观众，或至少 2 位观众说了 3 条以上 */
+  static AUDIENCE_ACCEPT = { windowMs: 5 * 60_000, viewers: 3, messages: 3 };
 
   /** 事情在往前走：主目标清单最近勾掉过一项，或者刚做成了一段活。这时不算“卡在这一带” */
   private progressing(): boolean {
@@ -342,7 +403,7 @@ export class Mind {
     if ('error' in r) this.handleStepResult(step, { status: 'failed', failureCode: 'BAD_ARGS', summary: r.error }, 0);
     else if (remainingSteps(this.activity) === 0 && !this.queuedNext && !this.thinking && QUICK.has(step.skill) && this.nearEndAskedFor !== this.activity.id) {
       this.nearEndAskedFor = this.activity.id;
-      this.think('手上这段活快干完了，想想接下来', this.needsBigPicture() ? 'deliberate' : 'glance');
+      this.think(Mind.NEAR_END_REASON, this.needsBigPicture() ? 'deliberate' : 'glance');
     }
   }
 
@@ -576,6 +637,8 @@ export class Mind {
 
   private onEvent(ev: AgentEvent) {
     if (ev.type === 'notice') return;
+    if (ev.type === 'death' || ev.type === 'task_end') this.safe(() => this.strategy.onEvent(ev, {
+      phase: this.safe(() => this.d.perception.snapshot().time.phase, ''), bedDist: this.bedDist(), doing: this.activity?.what ?? this.lastRecord?.what ?? '' }), undefined);
     const n = this.attention.fromEvent(ev);
     if (n && n.level !== 'note') this.d.bus.publish('notice', 'P2', `注意到：${n.what}`, { salience: n.salience, level: n.level });
     if (ev.type === 'hurt') { this.d.self.feel({ type: 'hurt', amount: 2 }); this.hurtWhileBusy(); }
@@ -678,7 +741,7 @@ export class Mind {
       // 刚收到的指令：照做时不受“专注”的限制（瞥一眼不能换、刚开工先不改）
       // 刚收到的指令（或决定采纳的建议）：照做时不受专注的限制
       const followsOperator = orderWasNew && (order?.kind === 'order' ? decision.operator?.status !== 'cannot' : decision.operator?.status === 'adopted');
-      this.apply(decision, activityId, ctx.lastRecord, { urgent: urgent || followsOperator });
+      this.apply(decision, activityId, ctx.lastRecord, { urgent: urgent || followsOperator, nearEnd: reason === Mind.NEAR_END_REASON });
       if (followsOperator && this.order === order && order && this.activity && !order.activityId) order.activityId = this.activity.id;
       this.kick();
     }).catch((e: any) => {
@@ -712,11 +775,17 @@ export class Mind {
    */
   private maybeReflect(why: string) {
     if (this.reflecting || this.paused || !this.autonomous) return;
-    if (Date.now() - this.d.self.reflectedAt < 20 * 60_000 || this.d.self.reflectionBacklog() < 5) return;
+    // 零碎经验攒够了才回想；攒得少，隔久一点也回想一次——那时主要是退一步看看日子怎么过的（策略回顾）
+    const since = Date.now() - this.d.self.reflectedAt;
+    if (since < 20 * 60_000 || this.d.self.reflectionBacklog() < 5 && since < 45 * 60_000) return;
     const controller = new AbortController();
     this.reflecting = controller;
     this.d.bus.publish('reflect_start', 'P3', `回想一下这段时间（${why}）`);
-    this.d.thinker.reflect(this.d.self, this.d.persona, controller.signal).then((c) => {
+    const strategy = this.safe(() => this.strategy.facts({
+      agenda: this.d.self.data.agenda, builds: myBuilds(this.d.memory, this.d.adapter.state(), 8),
+      progress: this.safe(() => this.d.progress?.() ?? null, null),
+    }), [] as string[]);
+    this.d.thinker.reflect(this.d.self, this.d.persona, controller.signal, strategy).then((c) => {
       if (this.reflecting !== controller) return;
       this.reflecting = null;
       if (!c) return;
@@ -734,6 +803,10 @@ export class Mind {
           this.d.self.think(`把「${w.skill.description}」的做法写成了自己的技能 ${w.skill.name}`, 'learned');
           this.d.bus.publish('skill_written', 'P2', `${w.created ? '写了一份新技能' : '修订了技能'}：${w.skill.name}——${w.skill.description}`, { name: w.skill.name });
         } else if (w && !w.ok) this.d.bus.publish('skill_rejected', 'P3', `没有保存技能：${w.error}`);
+      }
+      for (const a of c.agendaAdd ?? []) {
+        this.d.self.think(`回头看了看这几天，想换个玩法：${a.text}`, 'learned');
+        this.d.bus.publish('agenda', 'P2', `回想时想到新玩法：${a.text}`, { kind: a.kind, source: 'strategy' });
       }
       if (c.diary) this.diary(c.diary);
       if (c.monologue) this.d.self.think(c.monologue, 'learned');
@@ -756,7 +829,7 @@ export class Mind {
   }
 
   /** 把一次决定落到身体和心里 */
-  private apply(decision: MindDecision, thoughtAboutActivity: string | null, reflectedRecord: ActivityRecord | null = this.lastRecord, info: { urgent?: boolean } = {}) {
+  private apply(decision: MindDecision, thoughtAboutActivity: string | null, reflectedRecord: ActivityRecord | null = this.lastRecord, info: { urgent?: boolean; nearEnd?: boolean } = {}) {
     this.lastDecision = decision;
     this.notes = decision.notes;
     this.applySkill(decision);
@@ -766,6 +839,14 @@ export class Mind {
     }
     this.applyPlan(decision);
     this.guardFocus(decision, thoughtAboutActivity, !!info.urgent);
+    // 问的是“这段快干完了，接下来做什么”：写成 activity 的回答当作下一段（排在手上这段之后），不打断快做完的活
+    if (info.nearEnd && !info.urgent && decision.activity && !decision.next && ['new', 'adjust', 'continue'].includes(decision.kind)
+      && this.activity && this.activity.id === thoughtAboutActivity && this.activity.consecutiveFailures === 0) {
+      decision.next = decision.activity;
+      delete decision.activity;
+      decision.kind = 'continue';
+      decision.notes.push(`问的是接下来做什么：「${decision.next.what}」排在「${this.activity.what}」做完之后`);
+    }
     if (decision.notes.length) this.d.bus.publish('decision_normalized', 'P3', `决定里有些地方被纠正了：${decision.notes.join('；').slice(0, 200)}`);
     if (decision.monologue) {
       this.d.self.think(decision.monologue);
@@ -888,7 +969,7 @@ export class Mind {
     const cur = this.d.self.plan();
     if (p.steps?.length) {
       const focus = p.focus ?? cur?.agendaId ?? this.d.self.activeAgenda()?.id ?? p.goal;
-      const set = focus ? this.d.self.setPlan(focus, p.steps) : null;
+      const set = focus ? this.d.self.setPlan(focus, p.steps, p.conditions ?? []) : null;
       if (set) this.d.bus.publish('plan_set', 'P2', `主目标「${set.goal}」：${set.steps.map((st) => `${st.done ? '☑' : '☐'}${st.text}`).join(' ')}`, { agendaId: set.agendaId });
       else decision.notes.push('plan 没定下来：focus 要是议程里的 goal（点子、疑问不能当主目标），或者一句话的目标；还要有 steps');
     }

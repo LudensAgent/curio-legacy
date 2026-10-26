@@ -369,7 +369,9 @@ export const pickupItems: Skill<{ radius: number; item?: string }> = {
     for (let i = 0; i < 30 && Date.now() < ctx.deadline; i++) {
       senses.refresh();
       // 漂在水里的掉落物会动：同一个最多追 3 次，每次按它现在的位置
-      const item = senses.perceivedEntities(args.radius).find((e) => e.kind === 'item' && (chased.get(e.id) ?? 0) < 3 && wanted(e.name));
+      // 指名要捡的东西（比如自己刚拆下的床）：看不见也可能就在墙后、坑底，身体知道附近有这个掉落物就走过去
+      const item = senses.perceivedEntities(args.radius).find((e) => e.kind === 'item' && (chased.get(e.id) ?? 0) < 3 && wanted(e.name))
+        ?? (args.item ? adapter.nearbyEntities(args.radius).find((e) => e.kind === 'item' && (chased.get(e.id) ?? 0) < 3 && wanted(e.name)) : undefined);
       if (!item) break;
       chased.set(item.id, (chased.get(item.id) ?? 0) + 1);
       tried.add(item.id);

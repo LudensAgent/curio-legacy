@@ -77,6 +77,32 @@ export function shoreSpot(ctx: Ctx, water: Vec3Like, from: Vec3Like): Vec3Like |
   return best?.p ?? null;
 }
 
+/**
+ * 放得下船的水面：船有 1.375 格宽，放在紧贴岸边的那格水上，船身会压进岸上的方块，服务器直接不放（报 Failed to place entity）。
+ * 四周 8 格都是水面才算宽裕；返回宽裕的格子数（8 = 完全开阔）。
+ */
+export function boatRoom(ctx: Ctx, p: Vec3Like): number {
+  let n = 0;
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) if ((dx || dz) && isWaterSurface(ctx, { x: p.x + dx, y: p.y, z: p.z + dz })) n++;
+  return n;
+}
+
+/** 站在岸边伸手放船：够得着（眼睛到水面 4.5 格内，服务器按 5 格视线找水面）、四周宽裕的水面里挑最近的 */
+export function boatSpot(ctx: Ctx, fallback: BlockHit): BlockHit {
+  const eye = ctx.adapter.eye();
+  const here = ctx.adapter.state().pos;
+  const from = eye ? { x: eye.x, y: eye.y, z: eye.z } : { x: here.x, y: here.y + 1.62, z: here.z };
+  let best: { h: BlockHit; score: number } | null = null;
+  for (const h of ctx.senses.knownBlocks(['water'], 6).filter((b) => isWaterSurface(ctx, b.pos))) {
+    const d = dist3(from, { x: h.pos.x + 0.5, y: h.pos.y + 0.9, z: h.pos.z + 0.5 });
+    if (d > 4.5) continue;
+    const room = boatRoom(ctx, h.pos);
+    const score = (8 - room) * 3 + d;
+    if (!best || score < best.score) best = { h, score };
+  }
+  return best?.h ?? fallback;
+}
+
 /** 看得见的水面，优先朝 want 方向、开阔一些、近一些的 */
 export function findWaterSurface(ctx: Ctx, maxDist: number, opts: { want?: { x: number; z: number }; minOpen?: number; shore?: boolean } = {}): BlockHit | null {
   ctx.senses.refresh();
@@ -256,7 +282,7 @@ export const boat: Skill<BoatArgs> = {
             { shortfall: '5 块同种木板（约 2 块同种原木）' });
           ctx.progress(0.05, `先用木板做一条 ${pick.item}`);
           const r = await craft.run(ctx, { item: pick.item, count: 1 });
-          if (r.status !== 'succeeded') return fail(r.failureCode ?? 'MISSING_MATERIALS', `做船失败：${r.summary}`, r.data);
+          if (r.status !== 'succeeded') return fail(r.failureCode ?? 'MISSING_MATERIALS', `做船失败：${r.summary}${r.failureCode === 'NO_CRAFTING_TABLE' ? '（船要在工作台上做：背包里没有工作台，也没走到记得的工作台；先做一个放身上，或者先 craft 好船再来）' : ''}`, r.data);
           item = adapter.state().inventory.find((i) => isBoatItem(i.name) && i.count > 0)?.name;
           if (!item) return fail('ERROR', `合成报告成功，但背包里没看到船（${r.summary}）`);
           crafted = item;
@@ -286,7 +312,7 @@ export const boat: Skill<BoatArgs> = {
           }
         }
         // 走到岸边后重新挑最近的水面放船（够得着）
-        const near = findWaterSurface(ctx, 5, { want: wantOf(adapter.state().pos), minOpen: 2 }) ?? water;
+        const near = boatSpot(ctx, findWaterSurface(ctx, 5, { want: wantOf(adapter.state().pos), minOpen: 2 }) ?? water);
         ctx.progress(0.3, `把 ${item} 放到水面上`);
         const knownBoats = new Set(ctx.senses.perceivedEntities(12).filter((e) => isBoatEntity(e.name)).map((e) => e.id));
         const before = boatItems();
@@ -299,7 +325,8 @@ export const boat: Skill<BoatArgs> = {
         let ent = findNew();
         for (let i = 0; !ent && i < 8; i++) { await sleep(250, signal); ent = findNew(); }
         if (!ent) {
-          return fail('ERROR', `放船失败：${placed.ok ? '船没有出现在水面上' : placed.reason}${boatItems() < before ? '（背包里的船少了一条，可能放到别处了）' : ''}`);
+          const room = boatRoom(ctx, near.pos);
+          return fail('ERROR', `放船失败：${placed.ok ? '船没有出现在水面上' : placed.reason}${boatItems() < before ? '（背包里的船少了一条，可能放到别处了）' : ''}；对着的水面 (${near.pos.x},${near.pos.y},${near.pos.z}) 周围 8 格里 ${room} 格是水${room < 8 ? '（船身比一格宽，挨着岸放不下：往开阔些的水边走几步再放）' : ''}`);
         }
         boatId = ent.id;
         ctx.progress(0.38, '坐上船');
