@@ -1,7 +1,7 @@
 import minecraftData from 'minecraft-data';
 import type { InvItem } from '../adapter/types.ts';
 // Pure acquisition knowledge, independent of optional economy skills.
-const SMELTABLE: Record<string, string> = {
+export const SMELTABLE: Record<string, string> = {
   raw_iron: 'iron_ingot', raw_gold: 'gold_ingot', raw_copper: 'copper_ingot',
   sand: 'glass', red_sand: 'glass', cobblestone: 'stone', clay_ball: 'brick', kelp: 'dried_kelp', cactus: 'green_dye',
   beef: 'cooked_beef', porkchop: 'cooked_porkchop', chicken: 'cooked_chicken', mutton: 'cooked_mutton',

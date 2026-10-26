@@ -121,8 +121,8 @@ export const stepTo: Skill<CellArgs> = {
     const free = (p: Vec3Like) => { const n = a.blockAt(p); return n !== null && (AIR.has(n) || isSoftBlock(n)); };
     const head = { ...target, y: target.y + 1 }, floor = { ...target, y: target.y - 1 };
     const problems: string[] = [];
-    if (!free(target)) problems.push(`目标格是 ${describeCell(a, target)}`);
-    if (!free(head)) problems.push(`目标格上方是 ${describeCell(a, head)}（会碰头）`);
+    if (!free(target)) problems.push(`目标格是 ${describeCell(a, target)}${LIQUID_BLOCKS.has(a.blockAt(target) ?? '') ? '' : `（要过去先 dig_at [${args.at}] 挖开）`}`);
+    if (!free(head)) problems.push(`目标格上方是 ${describeCell(a, head)}（会碰头${LIQUID_BLOCKS.has(a.blockAt(head) ?? '') ? '' : `；先 dig_at [${args.at[0]},${args.at[1] + 1},${args.at[2]}]`}）`);
     // 能站住：实心方块；薄雪层下面有实心方块也能踩
     const solid = (p: Vec3Like) => { const n = a.blockAt(p); return n !== null && !LIQUID_BLOCKS.has(n) && !free(p); };
     const standable = (p: Vec3Like) => solid(p) || (a.blockAt(p) === 'snow' && solid({ ...p, y: p.y - 1 }));
@@ -136,7 +136,7 @@ export const stepTo: Skill<CellArgs> = {
       }
     }
     if (dest === target && !standable(floor)) problems.push(`目标格脚下是 ${describeCell(a, floor)}，往下 3 格内也没有落脚处（踩不住；要过去可以先 place_at [${args.at[0]},${args.at[1] - 1},${args.at[2]}] 垫一块落脚）`);
-    if (args.at[1] === 1 && !free({ ...feet, y: feet.y + 2 })) problems.push(`往上跳时自己头顶上方是 ${describeCell(a, { ...feet, y: feet.y + 2 })}`);
+    if (args.at[1] === 1 && !free({ ...feet, y: feet.y + 2 })) problems.push(`往上跳时自己头顶上方是 ${describeCell(a, { ...feet, y: feet.y + 2 })}（跳不起来；先 dig_at [0,2,0]）`);
     if (problems.length) return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：${problems.join('；')}`, { problems, ...after(ctx, args.facing) });
     try {
       await a.moveTo({ kind: 'xyz', x: dest.x, y: dest.y, z: dest.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())) });

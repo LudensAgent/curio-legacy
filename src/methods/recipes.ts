@@ -1,7 +1,7 @@
 import minecraftData from 'minecraft-data';
 import type { InvItem } from '../adapter/types.ts';
 import type { WorldMemory } from '../memory/store.ts';
-import { ResourceKnowledge } from './knowledge.ts';
+import { ResourceKnowledge, SMELTABLE } from './knowledge.ts';
 import { describePlan, materialPlan } from './shortfall.ts';
 
 /**
@@ -9,6 +9,7 @@ import { describePlan, materialPlan } from './shortfall.ts';
  * LLM 分两级按需查询，不把配方表整个塞进上下文：
  *   1) {kind:"recipes", category:"transport"} → 这一类里已知的配方（变体合并）、现在材料够不够、大致需要什么；未解锁的只给数量
  *   2) {kind:"recipes", item:"oak_boat"} → 具体配方、还缺什么、缺的东西从哪来
+ *   3) {kind:"recipes", uses:"iron_ingot"} → 反过来：手里这样东西能拿来做什么（只列已知的）
  */
 
 export const RECIPE_CATEGORIES: Record<string, { zh: string; test: RegExp }> = {
@@ -85,10 +86,33 @@ export class RecipeBook {
     return [...out].slice(0, 8);
   }
 
-  query(raw: { category?: unknown; item?: unknown; count?: unknown }, inventory: InvItem[]): unknown {
+  /** 反查：拿这样东西能做什么。和正查一样只列“知道”的配方；变体（各种木头/颜色）合并成一组 */
+  private uses(material: string, held: Set<string>, have: (n: string) => number) {
+    if (!this.data.itemsByName[material]) return { uses: material, error: '没有这个物品' };
+    const groups = new Map<string, { example: string; with: Set<string>; ready: boolean; table: boolean }>();
+    let locked = 0;
+    for (const e of this.entries) {
+      if (!e.inputs.includes(material)) continue;
+      if (!this.known(e, held)) { locked++; continue; }
+      const g = variantGroup(e.item);
+      const others = e.inputs.filter((n) => n !== material);
+      const ready = others.every((n) => have(n) > 0) && have(material) > 0;
+      const cur = groups.get(g);
+      if (!cur) groups.set(g, { example: e.item, with: new Set(others.map(variantGroup)), ready, table: e.table });
+      else { if (ready && !cur.ready) cur.example = e.item; cur.ready ||= ready; }
+    }
+    const craft = [...groups].sort((a, b) => Number(b[1].ready) - Number(a[1].ready)).slice(0, 30).map(([g, v]) => ({
+      item: g.includes('<') ? `${g}（如 ${v.example}）` : g, ...(v.with.size ? { with: [...v.with].slice(0, 5) } : {}), ...(v.table ? { table: true } : {}), ...(v.ready ? { ready_now: true } : {}),
+    }));
+    const smelt = SMELTABLE[material] ? { smelts_into: SMELTABLE[material] } : {};
+    return { uses: material, have: have(material), ...(craft.length ? { craft } : { craft: [], note: '想不起能拿它合成什么' }), ...smelt, ...(groups.size > 30 ? { more: groups.size - 30 } : {}), ...(locked ? { unknown_recipes: locked } : {}) };
+  }
+
+  query(raw: { category?: unknown; item?: unknown; count?: unknown; uses?: unknown }, inventory: InvItem[]): unknown {
     const held = this.memory.heldItems();
     for (const i of inventory) held.add(i.name);
     const have = (n: string) => inventory.filter((i) => i.name === n).reduce((a, i) => a + i.count, 0);
+    if (typeof raw.uses === 'string' && raw.uses.trim()) return this.uses(raw.uses.trim().replace(/^minecraft:/, ''), held, have);
     if (typeof raw.item === 'string' && raw.item.trim()) {
       const item = raw.item.trim().replace(/^minecraft:/, '');
       const e = this.entries.find((x) => x.item === item);

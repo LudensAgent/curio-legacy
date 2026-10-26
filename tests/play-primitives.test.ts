@@ -97,3 +97,22 @@ test('第一次拿到物品时记进记忆并提示想起了哪些配方', () =>
     assert.ok(memory.heldItems().has('cobblestone'));
   } finally { memory.close(); }
 });
+
+test('配方反查：手里的东西能做什么，只列知道的，标出现在就能做的', () => {
+  const memory = new WorldMemory(null);
+  memory.setWorld('w1');
+  const book = new RecipeBook(config.mc.version, memory);
+  try {
+    let r: any = book.query({ uses: 'iron_ingot' }, []);
+    assert.equal(r.craft.length, 0);
+    assert.ok(r.unknown_recipes > 0);
+    r = book.query({ uses: 'iron_ingot' }, [{ name: 'iron_ingot', count: 3 }, { name: 'stick', count: 2 }]);
+    const pick = r.craft.find((c: any) => c.item === 'iron_pickaxe');
+    assert.ok(pick, JSON.stringify(r.craft.slice(0, 5)));
+    assert.equal(pick.ready_now, true);
+    assert.equal(r.craft[0].ready_now, true, '现在就能做的排前面');
+    r = book.query({ uses: 'raw_iron' }, [{ name: 'raw_iron', count: 1 }]);
+    assert.equal(r.smelts_into, 'iron_ingot');
+    assert.equal(book.query({ uses: 'no_such_thing' }, [] as any).error, '没有这个物品');
+  } finally { memory.close?.(); }
+});

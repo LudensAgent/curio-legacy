@@ -298,8 +298,15 @@ export const hunt: Skill<{ animal?: string; count: number }> = {
         target = findPrey();
       }
       const what = args.animal ?? '可以猎杀的动物';
-      if (!target) return kills ? ok(`猎到 ${kills} 只，附近没有更多猎物`, { kills, searched: true })
-        : fail('NOT_FOUND', `转头找过了，视野里没有${fishing && deepFish ? `能在浅水够到的 ${what}（看见的都在深水里，不潜下去）` : what}${escaped ? `（有 ${escaped} 只跑出了视线）` : ''}；没有动物时可以 forage 摘苹果/浆果`, { searched: true });
+      if (!target) {
+        if (kills) return ok(`猎到 ${kills} 只，附近没有更多猎物`, { kills, searched: true });
+        // 说清楚看见了什么：只有马、只有别的动物、还是什么都没有——下一步才知道该换目标还是换地方
+        const others = new Map<string, number>();
+        for (const e of senses.perceivedEntities(48)) if (e.kind === 'passive' && e.name !== args.animal) others.set(e.name, (others.get(e.name) ?? 0) + 1);
+        const food = [...others].filter(([n]) => FOOD_ANIMALS.has(n));
+        const seen = others.size ? `；看得见的动物：${[...others].map(([n, c]) => `${n}×${c}`).join('、')}${food.length && args.animal ? '（其中有能吃的，可以改猎它们）' : ''}` : '；视野里一只动物都没有';
+        return fail('NOT_FOUND', `转头找过了，视野里没有${fishing && deepFish ? `能在浅水够到的 ${what}（看见的都在深水里，不潜下去）` : what}${escaped ? `（有 ${escaped} 只跑出了视线）` : ''}${seen}；动物多在开阔的草地、平原，可以 explore 换个地方，或 forage 摘苹果/浆果`, { searched: true, seen: Object.fromEntries(others) });
+      }
       const id = target.id;
       let lastPos = target.pos;
       let hits = 0, lastDist = target.dist;

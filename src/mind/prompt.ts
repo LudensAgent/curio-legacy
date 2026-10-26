@@ -121,8 +121,8 @@ const SKILLS_DOC = () => `【技能】管用的做法写进 skill，存下就生
 
 const QUERIES = (skills: string[]) => `【先查再做】需要时先输出一个查询 JSON（不占游戏时间，每次思考最多 3 次），拿到结果再决定：
 - {"kind":"skill","name":"技能名"} 翻开技能书看做法｜{"kind":"design","brief":"用途、多大、风格","where":"here|base|x,y,z"} 请建筑师在后台画图纸（where 是盖在哪：脚下这一带、家旁边或某个坐标）
-- {"kind":"recipes","item":"物品名","count":1} 看配方和缺口｜{"kind":"moves","names":["动作名"]} 看动作完整参数
-- {"kind":"recall","query":"关键词"} 按关键词回想以前的经历、日记、教训和技能｜{"kind":"mechanics","query":"…"} 查底层操作接口`;
+- {"kind":"recipes","item":"物品名","count":1} 看配方和缺口（"uses":"物品" 反查用途）｜{"kind":"moves","names":["动作名"]} 看动作参数
+- {"kind":"recall","query":"关键词"} 回想以前的经历、日记、教训和技能｜{"kind":"mechanics","query":"…"} 查底层操作接口`;
 /** 技能书目录放在系统提示词最后：它变得最勤（写、改、收起），放在前面会让后面不变的大段内容每次都缓存不中 */
 const SKILL_INDEX = (skills: string[]) => skills.length ? `\n\n【技能书】\n${skills.map((x) => `- ${x}`).join('\n')}` : '';
 

@@ -385,7 +385,7 @@ export class Thinker {
       }
       if (kind === 'recipes') {
         if (!this.planner.recipeBook) return '没有配方记忆';
-        this.bus.publish('recipe_query', 'P3', `查配方：${raw.item ? `物品 ${raw.item}` : `类别 ${raw.category ?? '（列出类别）'}`}`);
+        this.bus.publish('recipe_query', 'P3', `查配方：${raw.uses ? `能拿 ${raw.uses} 做什么` : raw.item ? `物品 ${raw.item}` : `类别 ${raw.category ?? '（列出类别）'}`}`);
         return JSON.stringify(this.planner.recipeBook.query(raw, ctx.state.inventory)).slice(0, 4000);
       }
       if (kind === 'mechanics') {
