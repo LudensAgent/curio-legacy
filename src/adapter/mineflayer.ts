@@ -195,6 +195,13 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     bot.loadPlugin(pathfinder);
     // 踩水：每个物理刻看一眼，空闲泡在水里时按住上浮（见 treadWater）
     bot.on('physicsTick', () => { try { this.treadWater(bot); } catch { /* ignore */ } });
+    // mineflayer 4.39 的下船检测有缺陷：1.9+ 服务器下船时发的是 set_passengers(船, [其余乘客])，
+    // 里面已经没有 bot，而 mineflayer 只在“乘客里有 bot 且 entityId = -1”时才清 bot.vehicle、发 dismount——这种包服务器从不发。
+    // 结果 bot.vehicle 一直挂着：dismount 等不到事件报 DISMOUNT_FAILED，走路报 RIDING，坐船时关掉的物理也恢复不了，人卡在水里。
+    // 这里自己补上：船的乘客名单里没有自己了，就算下船了。
+    bot._client.on('set_passengers', (pk: any) => {
+      try { this.syncDismount(bot, pk); } catch { /* ignore */ }
+    });
 
     bot.on('spawn', () => {
       this.newSession();
@@ -2635,6 +2642,26 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     }
   }
 
+  /** 服务器说某载具的乘客里已经没有自己：清掉残留的 bot.vehicle，恢复物理，补发 dismount（见 connect 里的说明） */
+  private syncDismount(b: any, pk: { entityId?: number; passengers?: number[] }) {
+    const v = b.vehicle, me = b.entity?.id;
+    if (!v || me === undefined || pk?.entityId !== v.id) return;
+    if ((pk.passengers ?? []).includes(me)) return;
+    this.clearStaleVehicle(b, v);
+  }
+
+  private clearStaleVehicle(b: any, v: any) {
+    if (b.vehicle !== v) return;
+    b.vehicle = null;
+    if (Array.isArray(v?.passengers)) {
+      const i = v.passengers.indexOf(b.entity);
+      if (i !== -1) v.passengers.splice(i, 1);
+    }
+    if (b.entity && b.entity.vehicle === v) b.entity.vehicle = null;
+    b.physicsEnabled = true;
+    b.emit('dismount', v);
+  }
+
   async dismount(signal: AbortSignal): Promise<ActionResult> {
     const check = this.actionCheckpoint(signal);
     const b = this.bot;
@@ -2644,8 +2671,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const on = () => { clearTimeout(t); resolve(true); };
       b.once('dismount', on);
     });
+    const v = b.vehicle;
     b.dismount();
-    const ok = await this.afterAction(() => off, check);
+    let ok = await this.afterAction(() => off, check);
+    // 兜底：没等到事件，但载具已经不在了，或者服务器已经把人挪到离载具一格多外，说明其实已经下来了
+    if (!ok && b.vehicle === v) {
+      const gone = !v || !b.entities?.[v.id];
+      const apart = !!v?.position && !!b.entity?.position && b.entity.position.distanceTo(v.position) > 1.2;
+      if (gone || apart) { this.clearStaleVehicle(b, v); ok = true; }
+    }
+    if (!ok && !b.vehicle) ok = true;
     if (ok) b.physicsEnabled = true;
     return ok ? { ok: true } : { ok: false, reason: 'DISMOUNT_FAILED' };
   }
