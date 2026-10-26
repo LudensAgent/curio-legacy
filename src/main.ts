@@ -286,10 +286,17 @@ function attachObserver() {
   observedBot = adapter.bot;
   bus.publish('observer_feed', 'P3', `Curio Observer 数据流已挂载到 ${config.mc.username}`);
 }
-// Chat, the mod and OBS share one action-bound expression lifecycle.
-bus.on('event', (ev: { type: string; data?: Record<string, unknown> }) => {
-  if (feed && ev.type === 'expression_changed') feed.thought(String(ev.data?.goal ?? ''), String(ev.data?.thought ?? ''));
-});
+// 直播 HUD「此刻的想法」：和控制台「在想」同一来源——最近一次决策的独白，没有就取最近一条独白——
+// 一直显示到有新的想法为止（游戏内聊天仍走跟动作绑定、会过期的表达状态）
+let hudThoughtKey = '';
+if (feed) setInterval(() => {
+  const thought = mind.lastDecision?.monologue || selfModel.recentThoughts(10).filter((t) => t.kind === 'monologue').at(-1)?.text || '';
+  const goal = mind.currentIntent()?.text ?? '';
+  const key = goal + '\u0000' + thought;
+  if (key === hudThoughtKey) return;
+  hudThoughtKey = key;
+  feed.thought(goal, thought);
+}, 500).unref();
 // 直播 HUD「记得的地点」：家、最近的死亡点、自己的东西和资源，每秒按当前位置刷新距离
 if (feed) setInterval(() => {
   try {
