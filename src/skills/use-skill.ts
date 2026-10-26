@@ -2,6 +2,7 @@ import { makeBridge } from '../codeskills/bridge.ts';
 import { runSandboxed } from '../codeskills/sandbox.ts';
 import { evalPredicate, senseNow, type Predicate } from '../mind/predicate.ts';
 import { throwIfAborted } from '../util.ts';
+import { dirName } from '../perception/perception.ts';
 import { SKILLS } from './index.ts';
 import { fail, isAbort, obj, ok, type Skill, type SkillResult } from './types.ts';
 
@@ -43,6 +44,14 @@ export const useSkill: Skill<{ name: string; args?: Record<string, unknown>; fai
   async run(ctx, args) {
     const b = registry?.get(args.name);
     if (!b) return fail('BAD_ARGS', `技能 ${args.name} 不存在或已停用`);
+    // 技能自己报的结果之外，身体实际挪了多少：一份叫“挖阶梯下去”的技能，实际是在地表平着走了几十格，靠这个才看得出来
+    const from = ctx.adapter.state().pos;
+    const moved = () => {
+      const to = ctx.adapter.state().pos;
+      const h = Math.hypot(to.x - from.x, to.z - from.z), dy = Math.floor(to.y) - Math.floor(from.y);
+      if (h < 3 && Math.abs(dy) < 1) return { text: '', h: Math.round(h), dy };
+      return { text: `（身体实际：往 ${dirName(to.x - from.x, to.z - from.z)} 平移 ${Math.round(h)} 格，高度 ${dy > 0 ? `上升 ${dy}` : dy < 0 ? `下降 ${-dy}` : '没变'}，y ${Math.floor(from.y)}→${Math.floor(to.y)}）`, h: Math.round(h), dy };
+    };
     if (b.code) {
       // 代码技能：在沙箱里跑模型写的 JavaScript；失败时把出错的行和最后几次 api 调用交回去（后台改进会用到）
       const input = { ...(args.args ?? {}), ...(args.failure ? { failure: args.failure } : {}) };
@@ -52,8 +61,9 @@ export const useSkill: Skill<{ name: string; args?: Record<string, unknown>; fai
         onLog: (t) => ctx.bus.publish('skill_log', 'P3', `[${b.name}] ${t}`),
       });
       const data = { version: b.version ?? 1, calls: r.calls, trace: r.trace, logs: r.logs, args: JSON.stringify(input).slice(0, 300), ...(r.line ? { line: r.line } : {}) };
-      if (!r.ok) return fail(/超时/.test(r.error ?? '') ? 'TIMEOUT' : 'ERROR', `代码技能「${b.name}」v${b.version ?? 1} 没成${r.line ? `（第 ${r.line} 行）` : ''}：${r.error}`, data);
-      return ok(`代码技能「${b.name}」做完了${r.result !== null && r.result !== undefined ? `：${JSON.stringify(r.result).slice(0, 160)}` : ''}`, { ...data, result: r.result });
+      const m = moved();
+      if (!r.ok) return fail(/超时/.test(r.error ?? '') ? 'TIMEOUT' : 'ERROR', `代码技能「${b.name}」v${b.version ?? 1} 没成${r.line ? `（第 ${r.line} 行）` : ''}：${r.error}${m.text}`, { ...data, displacement: { horizontal: m.h, dy: m.dy } });
+      return ok(`代码技能「${b.name}」做完了${m.text}${r.result !== null && r.result !== undefined ? `：${JSON.stringify(r.result).slice(0, 160)}` : ''}`, { ...data, result: r.result, displacement: { horizontal: m.h, dy: m.dy } });
     }
     const done: string[] = [];
     for (const [i, st] of b.steps.entries()) {
@@ -79,6 +89,6 @@ export const useSkill: Skill<{ name: string; args?: Record<string, unknown>; fai
       if (r.status === 'failed' && !st.optional) return fail(r.failureCode ?? 'ERROR', `技能「${b.name}」第 ${i + 1} 步 ${st.skill} 没成：${r.summary.slice(0, 120)}`, { done });
     }
     ctx.progress(1);
-    return ok(`照技能「${b.name}」做完了：${done.join('，')}`, { done });
+    return ok(`照技能「${b.name}」做完了：${done.join('，')}${moved().text}`, { done });
   },
 };
