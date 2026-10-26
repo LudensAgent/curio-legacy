@@ -86,6 +86,19 @@ const PROFESSIONS = ['none', 'armorer', 'butcher', 'cartographer', 'cleric', 'fa
 const PROFESSION_ZH: Record<string, string> = { none: '无业', armorer: '盔甲匠', butcher: '屠夫', cartographer: '制图师', cleric: '牧师', farmer: '农民', fisherman: '渔夫', fletcher: '制箭师', leatherworker: '皮匠', librarian: '图书管理员', mason: '石匠', nitwit: '傻子（不交易）', shepherd: '牧羊人', toolsmith: '工具匠', weaponsmith: '武器匠' };
 const EFFECT_ZH: Record<string, string> = { speed: '迅捷', slowness: '缓慢', haste: '急迫', mining_fatigue: '挖掘疲劳', strength: '力量', instant_health: '瞬间治疗', instant_damage: '瞬间伤害', jump_boost: '跳跃提升', nausea: '反胃', regeneration: '生命恢复', resistance: '抗性提升', fire_resistance: '抗火', water_breathing: '水下呼吸', invisibility: '隐身', blindness: '失明', night_vision: '夜视', hunger: '饥饿（吃了不该吃的，饥饿掉得快）', weakness: '虚弱', poison: '中毒（掉血到半颗心为止）', wither: '凋零（会掉血致死）', health_boost: '生命提升', absorption: '伤害吸收', saturation: '饱和', glowing: '发光', levitation: '飘浮', luck: '幸运', unluck: '霉运', slow_falling: '缓降', conduit_power: '潮涌能量', dolphins_grace: '海豚的恩惠', bad_omen: '不祥之兆（进村会引来袭击）', hero_of_the_village: '村庄英雄', darkness: '黑暗' };
 
+/**
+ * 自己的憋气值（0–20）。mineflayer 把收到的每个生物的 air_supply 都写进 bot.oxygenLevel，不看是不是自己：
+ * 旁边有海豚（最多 4800 tick）就显示 300 多，旁边有快淹死的怪又会显得很低。只读自己实体的元数据才可靠。
+ */
+export function ownOxygen(b: any): number {
+  const keys = b?.registry?.entitiesByName?.player?.metadataKeys;
+  const i = Array.isArray(keys) && keys.includes('air_supply') ? keys.indexOf('air_supply') : 1;
+  const raw = b?.entity?.metadata?.[i];
+  if (typeof raw === 'number' && Number.isFinite(raw)) return Math.max(0, Math.min(20, Math.round(raw / 15)));
+  const level = Number(b?.oxygenLevel);
+  return Number.isFinite(level) ? Math.max(0, Math.min(20, Math.round(level))) : 20;
+}
+
 export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   bot: any = null;
   mcData: any = null;
@@ -447,7 +460,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       dim,
       hp: b.health ?? 0,
       food: b.food ?? 0,
-      oxygen: b.oxygenLevel ?? 20,
+      oxygen: ownOxygen(b),
       timeOfDay: b.time?.timeOfDay ?? 0,
       ...(Number.isFinite(b.time?.day) ? { worldDay: b.time.day } : {}),
       weather: (b.thunderState ?? 0) > 0.5 && (b.isRaining || (b.rainState ?? 0) > 0.2) ? 'thunder' : b.isRaining || (b.rainState ?? 0) > 0.2 ? 'rain' : 'clear',
@@ -608,7 +621,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (b.entity.onFire || (b.entity.metadata?.[0] & 1)) out.push('身上着火');
     const near = this.nearbyEntities(5).filter((e) => e.kind === 'hostile' || /arrow|fireball|trident/.test(e.name)).slice(0, 2);
     for (const e of near) out.push(`${e.name} 在 ${e.dist.toFixed(1)} 格`);
-    if ((b.oxygenLevel ?? 20) <= 0) out.push('没气了');
+    if (ownOxygen(b) <= 0) out.push('没气了');
     if ((b.food ?? 20) <= 0) out.push('饿着');
     return out.slice(0, 4).join('、');
   }
@@ -2438,9 +2451,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       while (Date.now() < end) {
         check();
         const dry = dryFooting();
-        if (dry && (b.oxygenLevel ?? 20) >= 18) {
+        if (dry && ownOxygen(b) >= 18) {
           drySince ??= Date.now();
-          if (Date.now() - drySince >= 600) return { ok: true, landed: true, oxygen: b.oxygenLevel ?? 20 };
+          if (Date.now() - drySince >= 600) return { ok: true, landed: true, oxygen: ownOxygen(b) };
         } else drySince = null;
         // A brief breach of the water surface is not a landing. Keep ascending
         // until there is actual support, then release jump and let the body settle.
@@ -2466,11 +2479,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         if (p.distanceTo(anchor) >= 0.3) { lastProgress = Date.now(); anchor = p.clone(); }
         // 贴着岸往上爬时水平位置本来就不动（靠水里撞墙的上抬一点点爬上去）：多给点时间，别刚贴上岸就算没进展
         const climbingBank = !!b.entity.isCollidedHorizontally && distance <= 1.6;
-        if (!dry && destination && Date.now() - lastProgress >= (climbingBank ? 5000 : 2500)) return { ok: false, reason: 'SWIM_NO_PROGRESS', landed: false, oxygen: b.oxygenLevel ?? 20 };
+        if (!dry && destination && Date.now() - lastProgress >= (climbingBank ? 5000 : 2500)) return { ok: false, reason: 'SWIM_NO_PROGRESS', landed: false, oxygen: ownOxygen(b) };
         if (typeof b.waitForTicks === 'function') await this.afterAction(() => raceAbort(b.waitForTicks(2), signal, 2000, () => {}), check);
         else await this.afterAction(() => sleep(100, signal), check);
       }
-      return { ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, oxygen: b.oxygenLevel ?? 20 };
+      return { ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, oxygen: ownOxygen(b) };
     } finally {
       // A replaced task owns the controls now; stopAll already released ours.
       if (epoch === this.actionEpoch && b === this.bot) {
