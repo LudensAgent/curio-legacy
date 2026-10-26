@@ -87,6 +87,8 @@ export interface AgentState {
   food: number;
   oxygen: number;
   timeOfDay: number;
+  /** 天气（服务端广播的雨、雷）：clear | rain | thunder */
+  weather?: 'clear' | 'rain' | 'thunder';
   /** 世界的第几天（从 0 起，服务端的 time.day） */
   worldDay?: number;
   isDay: boolean;

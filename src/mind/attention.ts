@@ -31,7 +31,7 @@ export const RECONSIDER = 0.5;
 
 const levelOf = (s: number): Noticing['level'] => s >= URGENT ? 'urgent' : s >= RECONSIDER ? 'reconsider' : 'note';
 
-interface Snapshot { tod: number; phase: string; food: number; hp: number; emptySlots: number; hostiles: Set<string>; resources: Set<string>; light: string | null; inWater: boolean; drops: Map<string, { item: string; count: number; dist: number; dir: string }> }
+interface Snapshot { tod: number; weather: string; phase: string; food: number; hp: number; emptySlots: number; hostiles: Set<string>; resources: Set<string>; light: string | null; inWater: boolean; drops: Map<string, { item: string; count: number; dist: number; dir: string }> }
 
 /**
  * 注意力：把游戏里发生的事变成“我注意到了…”，并判断值不值得为它停下来重新想。
@@ -83,7 +83,7 @@ export class Attention {
   /** 比较前后两次感知，找出“变化”：天色、饥饿、生命、背包、新出现的怪和资源 */
   fromPercept(p: Percept, now = Date.now()): Noticing[] {
     const snap: Snapshot = {
-      tod: ((p.time.timeOfDay % 24000) + 24000) % 24000, phase: p.time.phase, food: p.self.food, hp: p.self.hp, emptySlots: p.emptySlots,
+      tod: ((p.time.timeOfDay % 24000) + 24000) % 24000, weather: p.time.weather ?? '', phase: p.time.phase, food: p.self.food, hp: p.self.hp, emptySlots: p.emptySlots,
       hostiles: new Set(p.nearby.hostile.filter((h) => h.dist <= 16).map((h) => h.name)),
       resources: new Set(p.nearby.resources.filter((r) => r.seen === 'now').map((r) => r.block)),
       light: p.light?.level ?? null, inWater: p.self.inWater,
@@ -100,6 +100,14 @@ export class Attention {
       if (snap.phase === 'dusk') out.push(this.notice('dusk', `${day}太阳快下山了，再过约 ${clock.toDawn ?? 9} 分钟才天亮：今晚怎么过、这段时间做什么`, 0.55, 300_000, now));
       else if (snap.phase === 'night') out.push(this.notice('night', `天黑了，怪物会出来；离天亮约 ${clock.toDawn} 分钟`, 0.6, 300_000, now));
       else if (snap.phase === 'dawn' || (snap.phase === 'day' && prev.phase !== 'dawn')) out.push(this.notice('morning', `天亮了，${day ? `新的一天（${day}）` : '新的一天'}开始：想想今天要做成什么`, 0.55, 300_000, now));
+    }
+    // 天气变了：像人抬头看天——下雨、打雷、雨停
+    if (snap.weather && prev.weather && snap.weather !== prev.weather) {
+      const kind = (w: string) => w.startsWith('雷雨') ? 'thunder' : w.startsWith('下雨') ? 'rain' : 'clear';
+      const now2 = kind(snap.weather), was = kind(prev.weather);
+      if (now2 === 'thunder') out.push(this.notice('weather', `打雷了：${snap.weather}`, 0.6, 120_000, now));
+      else if (now2 === 'rain' && was === 'clear') out.push(this.notice('weather', `开始${snap.weather}`, 0.4, 120_000, now));
+      else if (now2 === 'clear') out.push(this.notice('weather', `${was === 'thunder' ? '雷雨' : '雨'}停了，天晴了`, 0.35, 120_000, now));
     }
     const crossed = (tick: number) => prev.tod < tick && snap.tod >= tick && snap.tod - prev.tod < 2400;
     if (crossed(6000)) out.push(this.notice('noon', `中午了，${day}已经过了一半，离天黑约 ${clock.toDusk} 分钟`, 0.5, 300_000, now));

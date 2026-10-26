@@ -413,6 +413,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       oxygen: b.oxygenLevel ?? 20,
       timeOfDay: b.time?.timeOfDay ?? 0,
       ...(Number.isFinite(b.time?.day) ? { worldDay: b.time.day } : {}),
+      weather: (b.thunderState ?? 0) > 0.5 && (b.isRaining || (b.rainState ?? 0) > 0.2) ? 'thunder' : b.isRaining || (b.rainState ?? 0) > 0.2 ? 'rain' : 'clear',
       isDay: b.time?.isDay ?? true,
       biome,
       onGround: !!e.onGround,

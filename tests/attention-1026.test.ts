@@ -137,3 +137,18 @@ test('时间感：离天黑/天亮几分钟；中午、半夜、天亮各提醒�
   const waited = relaxMood(DEFAULT_MOOD, 120, 'waiting').boredom, worked = relaxMood(DEFAULT_MOOD, 120, true).boredom;
   assert.ok(waited > worked + 0.2, `干等两分钟 ${waited} vs 干活两分钟 ${worked}`);
 });
+
+test('天气：按群系说清下的是雨还是雪；雷雨随时能睡；变天会注意到', async () => {
+  const { weatherHere, canSleepAt } = await import('../src/perception/perception.ts');
+  const { Attention } = await import('../src/mind/attention.ts');
+  assert.equal(weatherHere('clear', 'plains'), '晴');
+  assert.match(weatherHere('rain', 'desert'), /不落雨/);
+  assert.match(weatherHere('rain', 'snowy_taiga'), /雪/);
+  assert.match(weatherHere('thunder', 'plains'), /白天也会刷怪/);
+  assert.equal(canSleepAt(3000), false);
+  assert.equal(canSleepAt(3000, 'thunder'), true);
+  const att = new Attention();
+  const p = (w: string) => ({ time: { timeOfDay: 3000, phase: 'day', weather: w }, self: { food: 20, hp: 20, inWater: false }, emptySlots: 5, nearby: { hostile: [], resources: [] }, light: null } as any);
+  att.fromPercept(p('晴'));
+  assert.ok(att.fromPercept(p(weatherHere('thunder', 'plains'))).some((n) => n.key === 'weather' && n.level === 'reconsider'));
+});

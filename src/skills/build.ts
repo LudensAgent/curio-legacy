@@ -465,7 +465,7 @@ export const sleepSkill: Skill<{ at?: Vec3Like; place?: boolean }> = {
     if (s.dim !== 'overworld') return fail('WRONG_DIMENSION', '只能在主世界睡床；当前维度的床会爆炸');
     // 能不能上床看的是“可睡时段”（12542–23459 刻），不是 isDay：黄昏时 isDay 仍为真但马上就能睡
     const tod = ((s.timeOfDay % 24000) + 24000) % 24000;
-    if (!canSleepAt(tod)) {
+    if (!canSleepAt(tod, s.weather)) {
       const waitTicks = 12542 - tod;
       // 离天黑还早：说清楚还要多久，别白跑一趟
       if (waitTicks < 0 || waitTicks > 1600) {
@@ -499,7 +499,7 @@ export const sleepSkill: Skill<{ at?: Vec3Like; place?: boolean }> = {
       const bed = handy;
       // 黄昏：像玩家一样先站在床边（需要时先把床放下），等天黑那一刻躺上去
       let waited = 0;
-      while (!canSleepAt(ctx.adapter.state().timeOfDay) && Date.now() < ctx.deadline - 15000) {
+      while (!canSleepAt(ctx.adapter.state().timeOfDay, ctx.adapter.state().weather) && Date.now() < ctx.deadline - 15000) {
         throwIfAborted(ctx.signal);
         const now = ctx.adapter.state();
         if (now.hp < s.hp - 2) return fail('ERROR', `等天黑时受到伤害（生命 ${Math.round(now.hp)}），先处理威胁再睡`);
@@ -507,7 +507,7 @@ export const sleepSkill: Skill<{ at?: Vec3Like; place?: boolean }> = {
         await delay(1000, ctx.signal);
         waited++;
       }
-      if (!canSleepAt(ctx.adapter.state().timeOfDay)) return fail('ERROR', `等了 ${waited} 秒还没到能睡的时候，稍后再 sleep`);
+      if (!canSleepAt(ctx.adapter.state().timeOfDay, ctx.adapter.state().weather)) return fail('ERROR', `等了 ${waited} 秒还没到能睡的时候，稍后再 sleep`);
       const r = await ctx.adapter.sleepInBed(ctx.signal);
       if (!r.ok) {
         const far = r.reason === 'NO_BED' && !bed ? findStation(ctx, BEDS, 2000) : null;

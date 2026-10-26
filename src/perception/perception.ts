@@ -23,7 +23,7 @@ export interface Percept {
   connected: boolean;
   observation?: { ready: boolean; worldId: string; sessionId: string; id: number };
   /** can_sleep：只有夜里（或雷雨）才能上床睡觉，白天 sleep 会失败 */
-  time: { timeOfDay: number; phase: 'day' | 'dusk' | 'night' | 'dawn'; isDay?: boolean; can_sleep?: boolean; day?: number };
+  time: { timeOfDay: number; phase: 'day' | 'dusk' | 'night' | 'dawn'; isDay?: boolean; can_sleep?: boolean; day?: number; weather?: string };
   self: { pos: [number, number, number]; dim: string; hp: number; food: number; biome: string | null; inWater: boolean; inLava: boolean; held: string | null; onGround?: boolean; riding?: string | null; equipment?: { slot: string; name: string }[]; around?: string;
     contacts?: Pick<ReturnType<typeof surroundings>, 'support' | 'feet' | 'head'>;
     sky_visible?: boolean | null; depth_below_surface?: number | null; exits?: ExitOptions;
@@ -87,6 +87,16 @@ export function phaseOf(t: number): Percept['time']['phase'] {
   return 'dawn';
 }
 
+/** 这里实际是什么天气：雨落在干燥群系不下、在冷的群系变成雪（原版按群系温度）；雷雨时天光暗，白天也会刷怪 */
+const DRY = /desert|savanna|badlands/;
+const COLD = /snowy|frozen|ice_spikes|grove|jagged_peaks|frozen_peaks/;
+export function weatherHere(weather: string, biome: string | null): string {
+  if (weather === 'clear') return '晴';
+  const b = biome ?? '';
+  const fall = DRY.test(b) ? '（这里干燥，不落雨）' : COLD.test(b) ? '（这里冷，下的是雪）' : '';
+  return weather === 'thunder' ? `雷雨${fall}：天很暗，白天也会刷怪，会打雷；雷雨时随时能上床睡` : `下雨${fall}`;
+}
+
 /** 离天黑 / 天亮还有几分钟（现实时间；游戏里 1 分钟 = 1200 刻），给心智一个“时间感” */
 export function clockOf(timeOfDay: number): { toDusk: number | null; toDawn: number | null } {
   const t = ((timeOfDay % 24000) + 24000) % 24000;
@@ -94,8 +104,9 @@ export function clockOf(timeOfDay: number): { toDusk: number | null; toDawn: num
   return t < 12000 ? { toDusk: min(12000 - t), toDawn: null } : { toDusk: null, toDawn: min(t < 23000 ? 23000 - t : 24000 + 23000 - t) };
 }
 
-/** 原版：12542–23459 刻之间才能睡觉（不考虑雷雨） */
-export function canSleepAt(timeOfDay: number): boolean {
+/** 原版：12542–23459 刻之间才能睡觉；雷雨时任何时候都能睡 */
+export function canSleepAt(timeOfDay: number, weather?: string): boolean {
+  if (weather === 'thunder') return true;
   const t = ((timeOfDay % 24000) + 24000) % 24000;
   return t >= 12542 && t <= 23459;
 }
@@ -345,7 +356,8 @@ export class Perception {
       // 白天头顶露天或只隔着树叶：天光至少 13–15。读到很暗，多半是客户端的天光数据没更新（刚加载的区块、刚挖开的格子），
       // 不能据此说“周围很暗”——人一抬头就看得见天亮着
       const floor = overhead.covered === 'open' ? 15 : 13;
-      if (s.isDay && where?.kind === 'surface' && light.here < 10 && light.block < floor) {
+      // 雷雨时天光本来就暗（最多 10 左右），白天也会刷怪：不做这个“其实很亮”的修正
+      if (s.isDay && s.weather !== 'thunder' && where?.kind === 'surface' && light.here < 10 && light.block < floor) {
         light.here = Math.max(light.here, floor);
         light.sky = Math.max(light.sky, floor);
         light.level = 'bright';
@@ -357,7 +369,7 @@ export class Perception {
       ts: Date.now(),
       connected: s.connected,
       observation: { ready: s.observationReady, worldId: s.worldId, sessionId: s.sessionId, id: s.observationId },
-      time: { timeOfDay: s.timeOfDay, phase: phaseOf(s.timeOfDay), isDay: s.isDay, can_sleep: canSleepAt(s.timeOfDay), ...(s.worldDay !== undefined ? { day: s.worldDay } : {}) },
+      time: { timeOfDay: s.timeOfDay, phase: phaseOf(s.timeOfDay), isDay: s.isDay, can_sleep: canSleepAt(s.timeOfDay, s.weather), ...(s.worldDay !== undefined ? { day: s.worldDay } : {}), ...(s.weather ? { weather: weatherHere(s.weather, s.biome) } : {}) },
       self: {
         pos: [round1(s.pos.x), round1(s.pos.y), round1(s.pos.z)],
         dim: s.dim,

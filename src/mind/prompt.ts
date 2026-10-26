@@ -333,6 +333,7 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
       const c = clockOf(p.time.timeOfDay);
       return `${p.time.day !== undefined ? `第 ${p.time.day + 1} 天 ` : ''}${{ day: '白天', dusk: '黄昏', night: '夜里', dawn: '清晨' }[p.time.phase] ?? p.time.phase}（${p.time.timeOfDay}）${c.toDusk !== null ? `，离天黑约 ${c.toDusk} 分钟` : `，离天亮约 ${c.toDawn} 分钟`}${p.time.can_sleep ? '，能睡觉' : ''}`;
     })(),
+    ...(p.time.weather ? { weather: p.time.weather } : {}),
     ...(p.light ? { light: `${{ bright: '亮', dim: '有点暗', dark: '很暗' }[p.light.level] ?? p.light.level}${p.light.mob_spawn_risk ? '，会刷怪' : ''}` } : {}),
     held: p.self.held,
     ...(digging && tool && !ownsTool ? { tool_note: `正在挖 ${material}，背包里没有 ${tool}（身体只能空手挖，很慢）：做一把${tool === 'axe' ? '斧子' : tool === 'pickaxe' ? '镐' : '铲子'}会快很多` } : {}),
