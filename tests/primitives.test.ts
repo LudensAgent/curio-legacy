@@ -125,6 +125,38 @@ test('坐标直接写成 args 数组也认；往脚下挖多格会被告知重�
   assert.ok(!v.ok && /重复 dig_at \[0,-1,0\]/.test(v.error));
 });
 
+test('自己在哪：站在自己盖的小屋里是“屋里”不是“坑里”，还说得出门在哪；贴着屋外墙不算屋里', async () => {
+  const { whereAmI } = await import('../src/perception/perception.ts');
+  // 5×5 小屋：墙 y=64..66，屋顶 y=67，门开在北墙中间（z=-2）
+  const hut = () => {
+    const w = new FakeAdapter();
+    const cells = new Map<string, string>();
+    for (let x = -2; x <= 2; x++) for (let z = -2; z <= 2; z++) {
+      cells.set(`${x},67,${z}`, 'oak_planks');
+      if (Math.max(Math.abs(x), Math.abs(z)) === 2) for (let y = 64; y <= 66; y++) cells.set(`${x},${y},${z}`, 'oak_planks');
+    }
+    cells.set('0,64,-2', 'oak_door'); cells.set('0,65,-2', 'oak_door');
+    for (const [k, name] of cells) { const [x, y, z] = k.split(',').map(Number); w.blocks.push({ name, pos: { x, y, z } }); }
+    const ownBuilt = (pos: { x: number; y: number; z: number }, block: string) => cells.get(`${pos.x},${pos.y},${pos.z}`) === block ? { name: '白桦小舍' } : null;
+    return { w, ownBuilt };
+  };
+  const { w, ownBuilt } = hut();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  const inside = whereAmI(w, { pos: w.pos }, { block: 'oak_planks', up: 3, covered: 'roof' }, { ownBuilt });
+  assert.equal(inside.kind, 'indoors');
+  assert.equal(inside.building, '白桦小舍');
+  assert.match(inside.text, /自己盖的「白桦小舍」屋里.*这不是坑.*门在 N 边 2 格/);
+  // 别人的房子（不是自己盖的）：认得出是屋里，但不说是自己的
+  const theirs = whereAmI(w, { pos: w.pos }, { block: 'oak_planks', up: 3, covered: 'roof' });
+  assert.equal(theirs.kind, 'indoors');
+  assert.doesNotMatch(theirs.text, /自己盖的/);
+  // 屋外贴着南墙站：不是屋里
+  const out = hut();
+  out.w.pos = { x: 0.5, y: 64, z: 3.5 };
+  const outside = whereAmI(out.w, { pos: out.w.pos }, { block: null, up: null, covered: 'open' }, { ownBuilt: out.ownBuilt });
+  assert.notEqual(outside.kind, 'indoors');
+});
+
 test('自己在哪：坑底能认出几格深，树下认得出是地表', async () => {
   const { whereAmI } = await import('../src/perception/perception.ts');
   const w = new FakeAdapter();

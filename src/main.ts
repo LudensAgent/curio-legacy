@@ -22,7 +22,7 @@ import { attachLogger, JsonlWriter } from './log.ts';
 import { WorldMemory } from './memory/store.ts';
 import { EpisodicMemory } from './memory/episodic.ts';
 import { HindsightBackend } from './memory/hindsight.ts';
-import { buildingArchiveFor } from './skills/build.ts';
+import { buildingArchiveFor, ownBuildingAt } from './skills/build.ts';
 import { flattenProgram, MethodLibrary, simpleToMethod } from './methods/learning.ts';
 import { ResourceKnowledge } from './methods/knowledge.ts';
 import { ControlKnowledge } from './methods/controls.ts';
@@ -66,6 +66,8 @@ const adapter = new MineflayerAdapter(config, bus);
 const vision = new Vision(adapter, config.vision);
 const arbiter = new Arbiter(adapter, memory, bus, vision);
 const perception = new Perception(adapter, memory, bus, vision);
+// 区分“在自家屋里”和“在坑里”：围着自己的墙是不是自己盖的房子
+perception.ownBuilt = (pos, block) => { const st = adapter.state(); return ownBuildingAt(memory, { worldId: st.worldId, dim: st.dim }, pos, block); };
 const episodic = new EpisodicMemory(config.memory, memory, bus, () => adapter.state(), config.dataDir,
   config.memory.provider === 'hindsight' ? new HindsightBackend(config.memory) : undefined);
 episodic.start();

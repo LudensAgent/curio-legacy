@@ -27,8 +27,8 @@ export interface Percept {
   self: { pos: [number, number, number]; dim: string; hp: number; food: number; biome: string | null; inWater: boolean; inLava: boolean; held: string | null; onGround?: boolean; riding?: string | null; equipment?: { slot: string; name: string }[]; around?: string;
     contacts?: Pick<ReturnType<typeof surroundings>, 'support' | 'feet' | 'head'>;
     sky_visible?: boolean | null; depth_below_surface?: number | null; exits?: ExitOptions;
-    /** 一句话说清自己在哪：地表 / 坑里（几格深）/ 地下 / 水里 */
-    where?: { kind: 'surface' | 'pit' | 'underground' | 'water' | 'unknown'; text: string; depth?: number };
+    /** 一句话说清自己在哪：地表 / 屋里 / 坑里（几格深）/ 地下 / 水里 */
+    where?: { kind: WhereKind; text: string; depth?: number; building?: string };
     /** 抬头看到的第一个方块（只看正上方这一列，第一个实心方块之后的看不见）：分清“被树冠遮住”和“在地下” */
     overhead?: { block: string | null; up: number | null; covered: 'open' | 'canopy' | 'roof' | 'rock' };
     /** 身边的方块图（以脚为原点的 [前,上,右]，不透视），配合 dig_at/step/place_at 说出确切的格子 */
@@ -182,7 +182,13 @@ export function dirName(dx: number, dz: number): string {
  * 感知摘要器：每次先让 Vision 扫描一遍视野，再把“看见/听见/记得”的东西压缩成 LLM 可读的 JSON。
  * 新发现（首次看见的方块/实体/群系）只在真正看见时触发。
  */
+export type WhereKind = 'surface' | 'indoors' | 'pit' | 'underground' | 'water' | 'unknown';
+/** 这一格是不是自己盖的房子的一部分（由 main 接上 skills/build.ts 的 ownBuildingAt，感知层不直接依赖建造） */
+export type OwnBuiltLookup = (pos: Vec3Like, block: string) => { name: string } | null;
+
 export class Perception {
+  /** 判断“围着我的是不是自己盖的墙”，用来区分屋里和坑里 */
+  ownBuilt?: OwnBuiltLookup;
   /** 第一次拿到某个物品时回调（heldBefore 是之前拿到过的物品） */
   onNewItem?: (item: string, heldBefore: Set<string>) => void;
   private latest: Percept | null = null;
@@ -412,7 +418,7 @@ export class Perception {
     const light = s.connected && s.alive && s.observationReady ? this.lightInfo(s) : null;
     const overhead = s.connected && s.alive && s.observationReady ? this.overheadInfo(s) : null;
     // 树冠下天光也会很弱，但人一抬头就知道是树叶，不会以为自己在地下
-    const where = overhead && contact ? whereAmI(this.adapter, s, overhead) : null;
+    const where = overhead && contact ? whereAmI(this.adapter, s, overhead, { ownBuilt: this.ownBuilt }) : null;
     if (light && overhead && (overhead.covered === 'canopy' || overhead.covered === 'open')) {
       light.underground = false;
       // 白天头顶露天或只隔着树叶：天光至少 13–15。读到很暗，多半是客户端的天光数据没更新（刚加载的区块、刚挖开的格子），
@@ -496,17 +502,31 @@ export class Perception {
   }
 }
 
+/** 人砌出来的方块：围着自己的“高地面”如果是这些，多半是墙，不是坑壁（圆石、泥土不算：挖坑垫脚也用它们） */
+const MAN_MADE = /(_planks|_stairs|_slab|glass|_pane|_door|_trapdoor|_fence|_fence_gate|_wall|bricks|_wool|terracotta|concrete|smooth_stone|chiseled_|polished_)$/;
+
 /**
  * 自己在哪：看头顶，再看身边两格外那一圈的地面比脚下高多少（站在坑里一眼就看得出四周比自己高），
  * 只看露在外面的地表，不透视。
+ * 那一圈“高出来的”如果是自己盖的房子的墙（或者人砌的方块），就是在屋里，不是在坑里：
+ * 站在 5×5 的小屋中间，两格外正好是墙，以前会被当成“4 格深的坑”，它就在自家屋里垫高、挖台阶、想拆屋顶出去。
  */
 export function whereAmI(adapter: Pick<GameAdapter, 'blockAt'>, s: { pos: { x: number; y: number; z: number }; inWater?: boolean },
-  overhead: { block: string | null; up: number | null; covered: 'open' | 'canopy' | 'roof' | 'rock' }): { kind: 'surface' | 'pit' | 'underground' | 'water' | 'unknown'; text: string; depth?: number } {
+  overhead: { block: string | null; up: number | null; covered: 'open' | 'canopy' | 'roof' | 'rock' },
+  opts: { ownBuilt?: OwnBuiltLookup } = {}): { kind: WhereKind; text: string; depth?: number; building?: string } {
   const x = Math.floor(s.pos.x), y = Math.floor(s.pos.y), z = Math.floor(s.pos.z);
   if (s.inWater) return { kind: 'water', text: '在水里' };
-  if (overhead.covered === 'rock') return { kind: 'underground', text: `在地下：头顶 ${overhead.up} 格是 ${overhead.block}` };
+  const own = (pos: Vec3Like, block: string) => { try { return opts.ownBuilt?.(pos, block) ?? null; } catch { return null; } };
+  // 头顶第一块实心方块：是自己的屋顶就算在屋里（屋顶用石头盖，overhead 也会说是 rock）
+  let roof: { block: string; owner: { name: string } | null } | null = null;
+  for (let h = 2; h <= 8 && !roof; h++) {
+    const b = adapter.blockAt({ x, y: y + h, z });
+    if (b === null) break;
+    if (!isSoftBlock(b)) roof = { block: b, owner: own({ x, y: y + h, z }, b) };
+  }
+  if (overhead.covered === 'rock' && !roof?.owner) return { kind: 'underground', text: `在地下：头顶 ${overhead.up} 格是 ${overhead.block}` };
   // 两格外一圈：每列地表比脚下高几格（列顶被挡住就不算）
-  const rises: number[] = [];
+  const cols: { rise: number; block: string; owner: { name: string } | null }[] = [];
   for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
     if (Math.max(Math.abs(dx), Math.abs(dz)) !== 2) continue;
     const top = adapter.blockAt({ x: x + dx, y: y + 6, z: z + dz });
@@ -515,16 +535,45 @@ export function whereAmI(adapter: Pick<GameAdapter, 'blockAt'>, s: { pos: { x: n
       const n = adapter.blockAt({ x: x + dx, y: y + h, z: z + dz });
       if (n === null) break;
       if (isSoftBlock(n) || /(_leaves|_log|_wood)$/.test(n)) continue;
-      rises.push(h + 1); // 那列能站的高度比我脚下高多少
+      // 那列能站的高度比我脚下高多少；高出来的那一列从脚边往上是什么（墙还是土）
+      const wallAt = { x: x + dx, y: y + Math.min(h, 1), z: z + dz };
+      const wall = h >= 1 ? adapter.blockAt(wallAt) ?? n : n;
+      cols.push({ rise: h + 1, block: wall, owner: h >= 1 ? own(wallAt, wall) ?? own({ x: x + dx, y: y + h, z: z + dz }, n) : null });
       break;
     }
   }
-  const higher = rises.filter((r) => r >= 2).length;
-  const sky = overhead.covered === 'canopy' ? `，头顶 ${overhead.up} 格是树叶` : overhead.covered === 'roof' ? `，头顶 ${overhead.up} 格是 ${overhead.block}` : '，头顶露天';
-  if (rises.length >= 8 && higher >= rises.length * 0.75) {
+  const rises = cols.map((c) => c.rise);
+  const high = cols.filter((c) => c.rise >= 2);
+  const sky = overhead.covered === 'canopy' ? `，头顶 ${overhead.up} 格是树叶` : overhead.covered === 'roof' || overhead.covered === 'rock' ? `，头顶 ${overhead.up} 格是 ${overhead.block}` : '，头顶露天';
+  const enclosed = rises.length >= 8 && high.length >= rises.length * 0.75;
+  // 屋里：头顶是自己的屋顶、身边也有自己的墙；或者四周基本围住了、围着的一半以上是自己的墙。
+  // 不能只数有几列是墙：站在自家屋外贴着墙、在屋角，那一圈里也有不少列是自己的墙和屋顶
+  const ownWalls = high.filter((c) => c.owner);
+  const building = roof?.owner?.name ?? ownWalls[0]?.owner?.name;
+  const manMade = high.filter((c) => MAN_MADE.test(c.block)).length;
+  if (building && ((roof?.owner && ownWalls.length >= 2) || (enclosed && ownWalls.length >= Math.max(2, high.length * 0.5)))) {
+    return { kind: 'indoors', building, text: `在自己盖的「${building}」屋里（四周是墙${roof?.owner ? '，头顶是屋顶' : sky}）：这不是坑，别垫高、别挖墙和屋顶；${doorText(adapter, x, y, z)}` };
+  }
+  if (enclosed && manMade >= high.length * 0.6) {
+    return { kind: 'indoors', text: `在一间有墙围着的屋子里（墙是 ${high.find((c) => MAN_MADE.test(c.block))!.block}${sky}）：这不是坑，别垫高、别挖墙；${doorText(adapter, x, y, z)}` };
+  }
+  if (enclosed) {
     const sorted = [...rises].sort((a, b) => a - b);
     const depth = sorted[Math.floor(sorted.length / 2)];
     return { kind: 'pit', depth, text: `在一个约 ${depth} 格深的坑里（四周地面比脚下高${sky}）：垫高或挖台阶就能上去` };
   }
   return { kind: 'surface', text: `在地表${sky}` };
+}
+
+/** 屋里找门：脚边 4 格内最近的一扇门在哪个方向 */
+function doorText(adapter: Pick<GameAdapter, 'blockAt'>, x: number, y: number, z: number): string {
+  let best: { dx: number; dz: number; d: number } | null = null;
+  for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) for (let dy = -1; dy <= 1; dy++) {
+    const b = adapter.blockAt({ x: x + dx, y: y + dy, z: z + dz });
+    if (!b || !/_door$/.test(b) || /trapdoor/.test(b)) continue;
+    const d = Math.hypot(dx, dz);
+    if (!best || d < best.d) best = { dx, dz, d };
+  }
+  if (!best) return '出去要走门；没看到门的话，在墙上开一格（dig_at 写 "own":true），出去再补上';
+  return `出去走门：门在 ${dirName(best.dx, best.dz)} 边 ${Math.max(1, Math.round(best.d))} 格（门能直接走过，goto 过去就行）`;
 }
