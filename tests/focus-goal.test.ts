@@ -1,3 +1,4 @@
+import { Mind } from '../src/mind/mind.ts';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Attention } from '../src/mind/attention.ts';
@@ -38,4 +39,60 @@ test('认真想时明确把某个点子定成主目标、写了清单：升成�
   assert.equal(self.agenda().find((x) => x.id === idea.id)?.kind, 'goal');
   // 一句话的目标照旧：新建一个目标
   assert.ok(self.setPlan('做一套铁盔甲', ['烧铁', '做头盔']));
+});
+
+test('主目标是阶段成果：还在推进时，眼前的事顶替不了它；认真想写了理由、操作者下令、或同时放下旧目标才换', () => {
+  const self = new SelfModel(null);
+  const armour = self.setPlan('穿上一整套铁甲', ['挖够粗铁', '烧成铁锭', '做胸甲和护腿', '做头盔和靴子'])!;
+  const goalId = armour.agendaId;
+  const night = '先安全过夜，天亮再回地面清包备料';
+  const refusal = self.goalSwitchRefusal(night, { deliberate: false });
+  assert.match(refusal ?? '', /还在推进.*detour/);
+  assert.match(self.goalSwitchRefusal(night, { deliberate: true }) ?? '', /switch_reason/, '认真想但没写理由也不换');
+  assert.equal(self.goalSwitchRefusal(night, { deliberate: false, reason: '想换' }) !== null, true, '瞥一眼写了理由也不换');
+  assert.equal(self.goalSwitchRefusal('去下界', { deliberate: true, reason: '铁甲已经够用，下一阶段去下界' }), null);
+  assert.equal(self.goalSwitchRefusal(night, { deliberate: false, operator: true }), null);
+  assert.equal(self.goalSwitchRefusal(night, { deliberate: false, releasing: [goalId] }), null);
+  // 改写自己的清单不算换
+  assert.equal(self.goalSwitchRefusal(goalId, { deliberate: false }), null);
+  assert.equal(self.goalSwitchRefusal('穿上一整套铁甲', { deliberate: false }), null);
+  // 清单都勾完了，可以定下一个
+  self.checkPlan([0, 1, 2, 3]);
+  assert.equal(self.goalSwitchRefusal(night, { deliberate: false }), null);
+});
+
+test('清单不随眼前的事改：没做完的项不能被顶掉；认真想写了理由才改；加项、原样重写都行，改写不算推进', () => {
+  const self = new SelfModel(null), events: string[] = [];
+  const bus = { publish: (type: string) => { events.push(type); } };
+  const mind = Object.create(Mind.prototype) as any;
+  mind.d = { self, bus, adapter: { state: () => ({}) }, perception: { snapshot: () => undefined } };
+  mind.safe = (f: () => unknown) => f();
+  const apply = (plan: object, tier: 'glance' | 'deliberate' = 'deliberate') => { const d = { plan, tier, notes: [] as string[] }; mind.applyPlan(d); return d; };
+  apply({ focus: '开一条固定矿道', steps: ['在 y30 推平巷插火把', '挖到 3 块粗铁', '回地面冶炼'] });
+  const id = self.plan()!.agendaId;
+  self.data.plan!.progressAt = Date.now() - 40 * 60_000;
+  const stale = self.data.plan!.progressAt;
+  // 镐坏了被困住：想把清单换成脱困的眼前事
+  let d = apply({ steps: ['拿到石镐走出矿道', '回地面冶炼'] });
+  assert.deepEqual(self.plan()!.steps.map((s) => s.text), ['在 y30 推平巷插火把', '挖到 3 块粗铁', '回地面冶炼'], '没改');
+  assert.match(d.notes.join(), /switch_reason[\s\S]*detour/);
+  assert.ok(events.includes('plan_rewrite_refused'));
+  d = apply({ steps: ['拿到石镐走出矿道'] , switchReason: '真的' }, 'glance');
+  assert.equal(self.plan()!.steps.length, 3, '瞥一眼不改清单');
+  // 加项不删旧的：可以
+  apply({ steps: ['在 y30 推平巷插火把', '挖到 3 块粗铁', '回地面冶炼', '矿口放箱子'] });
+  assert.equal(self.plan()!.steps.length, 4);
+  assert.equal(self.plan()!.progressAt, stale, '改写清单不算推进');
+  // 原样重写：不发 plan_set
+  const n = events.filter((e) => e === 'plan_set').length;
+  apply({ steps: ['在 y30 推平巷插火把', '挖到 3 块粗铁', '回地面冶炼', '矿口放箱子'] });
+  assert.equal(events.filter((e) => e === 'plan_set').length, n);
+  // 认真想、写了理由：可以改
+  apply({ steps: ['在 y-10 深板岩层推平巷', '挖到 3 块粗铁', '回地面冶炼'], switchReason: 'y30 这一片挖了 40 格没见铁，换到更深的层' });
+  assert.equal(self.plan()!.steps[0].text, '在 y-10 深板岩层推平巷');
+  assert.equal(self.plan()!.agendaId, id);
+  // 勾项照常
+  apply({ done: [1] }, 'glance');
+  assert.equal(self.plan()!.steps[1].done, true);
+  assert.notEqual(self.plan()!.progressAt, stale, '勾掉一项才算推进');
 });

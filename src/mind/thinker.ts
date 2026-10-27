@@ -233,9 +233,10 @@ export function parsePlan(raw: unknown, condition?: (c: unknown, i: number) => i
   const conditions = items.map((x: { when: unknown }, i: number) => x.when !== undefined && x.when !== null && condition ? condition(x.when, i) : null);
   const done = (Array.isArray(o.done) ? o.done : o.done !== undefined ? [o.done] : [])
     .filter((x: unknown) => Number.isInteger(x) && (x as number) >= 0 && (x as number) < 8 || typeof x === 'string' && x.trim()).slice(0, 8);
-  const focus = str(o.focus ?? o.agenda_id, 100), goal = str(o.goal, 100);
+  const focus = str(o.focus ?? o.agenda_id, 100), goal = str(o.goal, 100), switchReason = str(o.switch_reason, 120);
   if (!steps.length && !done.length) return null;
-  return { ...(focus ? { focus } : {}), ...(goal ? { goal } : {}), ...(steps.length ? { steps } : {}), ...(conditions.some(Boolean) ? { conditions } : {}), ...(done.length ? { done } : {}) };
+  return { ...(focus ? { focus } : {}), ...(goal ? { goal } : {}), ...(steps.length ? { steps } : {}), ...(conditions.some(Boolean) ? { conditions } : {}), ...(done.length ? { done } : {}),
+    ...(switchReason ? { switchReason } : {}) };
 }
 
 /**

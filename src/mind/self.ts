@@ -246,13 +246,29 @@ export class SelfModel {
     const old = this.data.plan?.agendaId === item.id ? this.data.plan : undefined;
     const doneBefore = new Set(old?.steps.filter((st) => st.done).map((st) => st.text) ?? []);
     const cleaned = steps.map((t, i) => ({ text: cleanPlanStep(t), cond: conditions[i] ?? null })).filter((x) => x.text).slice(0, 8);
-    const clean = cleaned.map((x) => x.text);
-    const changed = !old || old.steps.map((st) => st.text).join('|') !== clean.join('|');
     this.data.plan = { agendaId: item.id, goal: item.text, steps: cleaned.map(({ text, cond }) => ({ text, done: doneBefore.has(text), ...(cond ? { doneWhen: cond } : {}) })), setAt: old?.setAt ?? Date.now(), updatedAt: Date.now(),
-      // 原样重写清单不算推进
-      progressAt: changed ? Date.now() : old?.progressAt ?? old?.setAt ?? Date.now() };
+      // 只有勾掉一项才算推进；改写清单（哪怕改得面目全非）不算，不然改一次就把“多久没推进”清零了
+      progressAt: old ? old.progressAt ?? old.setAt : Date.now() };
     this.touch();
     return this.data.plan;
+  }
+  /**
+   * 主目标是这一阶段要拿到的成果，不随眼前的事换：
+   * 已有主目标还在推进（清单没做完）时，换成别的目标要认真想过、写出理由，或者是操作者下的令；
+   * 同一个决定里先放下/做完了当前目标的不拦。返回拒绝的说明，可以换就返回 null。
+   */
+  goalSwitchRefusal(target: string, opts: { deliberate: boolean; reason?: string; operator?: boolean; releasing?: string[] }): string | null {
+    const plan = this.plan();
+    const cur = plan ? this.data.agenda.find((a) => a.id === plan.agendaId) : this.activeAgenda();
+    if (!cur || cur.status !== 'active' || cur.kind !== 'goal') return null;
+    const t = target.trim();
+    if (!t || t === cur.id || t === cur.text) return null;
+    if (plan && plan.steps.length && plan.steps.every((st) => st.done)) return null;
+    if (opts.releasing?.includes(cur.id) || opts.operator) return null;
+    if (opts.deliberate && opts.reason?.trim()) return null;
+    return `主目标「${cur.text.slice(0, 40)}」还在推进，没换成「${(this.data.agenda.find((a) => a.id === t)?.text ?? t).slice(0, 30)}」：`
+      + '眼前要先做的事（过夜、脱困、回地面、吃饭、清包、补工具）直接写成 activity 或 detour，做完会回到主目标；'
+      + (opts.deliberate ? '真决定换一个阶段目标，在 plan 里写 "switch_reason" 说为什么' : '真要换主目标得认真想一想，并写 switch_reason');
   }
   /** 清单里带 done_when、还没勾掉的项：身体看得见的事实达成了就自动勾（不用等模型记得写 done） */
   autoCheckPlan(met: (c: import('../projects/types.ts').Condition) => boolean): string[] {

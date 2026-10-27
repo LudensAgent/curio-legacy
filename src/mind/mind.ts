@@ -22,7 +22,7 @@ import { myBed } from '../skills/stations.ts';
 import { StrategyLog } from './strategy.ts';
 import type { ParsedGameMessage } from '../memory/game-messages.ts';
 import type { MindContext } from './prompt.ts';
-import { moodWords, type SelfModel } from './self.ts';
+import { cleanPlanStep, moodWords, type SelfModel } from './self.ts';
 import type { LedgerView } from './ledger.ts';
 import type { Thinker } from './thinker.ts';
 import type { Activity, ActivityDraft, ActivityEnd, ActivityOutcome, ActivityRecord, MindDecision } from './types.ts';
@@ -970,7 +970,9 @@ export class Mind {
       for (const id of decision.agenda.drop) this.d.self.setAgendaStatus(id, 'dropped');
       if (decision.agenda.focus) {
         const item = this.d.self.data.agenda.find((a) => a.id === decision.agenda!.focus);
+        const refused = item?.kind === 'goal' ? this.goalSwitchRefusal(decision, decision.agenda.focus) : null;
         if (item && item.kind !== 'goal') decision.notes.push(`「${item.text}」是${item.kind === 'idea' ? '点子' : '疑问'}，不能当主目标：真想做就加成 goal`);
+        else if (refused) { decision.notes.push(refused); this.d.bus.publish('goal_switch_refused', 'P3', refused, { to: decision.agenda.focus }); }
         else this.d.self.setAgendaStatus(decision.agenda.focus, 'active');
       }
     }
@@ -1038,6 +1040,15 @@ export class Mind {
     } else decision.notes.push(`skill 没存下：${w && !w.ok ? w.error : '需要 name、description，以及 steps（可执行）或 body（做法说明）'}`);
   }
 
+  private goalSwitchRefusal(decision: MindDecision, target: string): string | null {
+    return this.d.self.goalSwitchRefusal(target, {
+      deliberate: decision.tier === 'deliberate',
+      reason: decision.plan?.switchReason ?? decision.switchReason,
+      operator: decision.operator?.status === 'doing' || decision.operator?.status === 'adopted',
+      releasing: [...(decision.agenda?.drop ?? []), ...(decision.agenda?.done ?? [])],
+    });
+  }
+
   /** 主目标的清单：定下/改写、勾掉做完的项；全勾掉就算主目标完成 */
   private applyPlan(decision: MindDecision) {
     const p = decision.plan;
@@ -1045,8 +1056,31 @@ export class Mind {
     const cur = this.d.self.plan();
     if (p.steps?.length) {
       const focus = p.focus ?? cur?.agendaId ?? this.d.self.activeAgenda()?.id ?? p.goal;
+      // 想把主目标换成另一件事：先看当前的阶段目标是不是还在推进（眼前的事不该顶替它）
+      const refused = focus ? this.goalSwitchRefusal(decision, focus) : null;
+      if (refused) {
+        decision.notes.push(refused);
+        this.d.bus.publish('goal_switch_refused', 'P3', refused, { to: focus });
+        return;
+      }
+      // 改写同一个主目标的清单：清单是这一阶段要拿到的东西，不跟着眼前的事改。
+      // 以前天黑、镐坏、被困一来，没做完的项就被“拿到石镐走出矿道”“爬到上层空档”这类眼前事顶掉，
+      // 改来改去一个钟头，最后剩下的几项凑齐就算完成了，原来要的东西（固定矿道）根本没做
+      const same = !!cur && (focus === cur.agendaId || focus === cur.goal);
+      if (same && cur) {
+        const next = p.steps.map((t) => cleanPlanStep(t)).filter(Boolean);
+        if (next.join('|') === cur.steps.map((st) => st.text).join('|')) return this.applyPlanDone(decision); // 原样重写：什么都不用做
+        const dropped = cur.steps.filter((st) => !st.done && !next.includes(st.text)).map((st) => st.text);
+        if (dropped.length && !(decision.tier === 'deliberate' && p.switchReason)) {
+          const why = decision.tier === 'glance' ? '瞥一眼时不改清单' : '要删改没做完的项得在 plan 里写 "switch_reason" 说为什么（比如这一项做不成、换了更好的做法）';
+          decision.notes.push(`清单没改：「${dropped.slice(0, 3).join('」「')}」还没做完，${why}。眼前的事（脱困、回地面、补工具、过夜）写成 activity 或 detour，做完会回到清单；新冒出来的必要步骤可以加在后面，不用删旧的`);
+          this.d.bus.publish('plan_rewrite_refused', 'P3', `主目标「${cur.goal}」的清单没改：没做完的「${dropped.slice(0, 3).join('」「')}」不随眼前的事删掉`, { dropped, tier: decision.tier });
+          return this.applyPlanDone(decision);
+        }
+      }
       // 模型自己写了 focus（不是沿用手上的活或议程）：它挑中的点子可以升成目标
       const set = focus ? this.d.self.setPlan(focus, p.steps, p.conditions ?? [], { promote: !!p.focus && p.focus === focus }) : null;
+      if (set && same && p.switchReason) this.d.self.think(`改了「${set.goal}」的清单：${p.switchReason}`, 'monologue');
       if (set) this.d.bus.publish('plan_set', 'P2', `主目标「${set.goal}」：${set.steps.map((st) => `${st.done ? '☑' : '☐'}${st.text}`).join(' ')}`, { agendaId: set.agendaId });
       else {
         const item = focus?.startsWith('a_') ? this.d.self.agenda().find((a) => a.id === focus) : undefined;
@@ -1056,6 +1090,13 @@ export class Mind {
           : 'plan 没定下来：focus 写议程里某个目标的 id，或者直接写一句话的目标（会新建一个目标）；还要有 steps（清单至少一项）');
       }
     }
+    this.applyPlanDone(decision);
+  }
+
+  /** 勾掉清单里做完的项；全勾掉就算主目标完成 */
+  private applyPlanDone(decision: MindDecision) {
+    const p = decision.plan;
+    if (!p) return;
     if (p.done?.length) {
       const s = this.d.adapter.state(), percept = this.safe(() => this.d.perception.snapshot(), undefined);
       const refused: string[] = [];
