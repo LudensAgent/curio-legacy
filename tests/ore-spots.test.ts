@@ -106,3 +106,19 @@ test('看见黑曜石时记下位置；看见岩浆既记成危险也记成资�
   assert.ok(ls.some((l) => l.kind === 'danger' && l.label === 'lava'));
   memory.close();
 });
+
+test('看见的资源和危险点：亲眼看到那一格已经变了（岩浆浇成黑曜石、被舀空）就从记忆里删掉', async () => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null);
+  memory.setWorld(adapter.state().worldId);
+  memory.addLandmark('danger', 'lava', 'overworld', { x: 3, y: 64, z: 0 });
+  memory.addLandmark('resource', 'lava', 'overworld', { x: 3, y: 64, z: 0 });
+  memory.addLandmark('resource', 'iron_ore', 'overworld', { x: 4, y: 64, z: 1 });
+  adapter.blocks.push({ name: 'obsidian', pos: { x: 3, y: 64, z: 0 } });
+  const perception = new Perception(adapter, memory, new EventBus(), new Vision(adapter));
+  perception.update();
+  const ls = memory.landmarks();
+  assert.ok(!ls.some((l) => l.label === 'lava'), JSON.stringify(ls));
+  assert.ok(ls.some((l) => l.kind === 'resource' && l.label === 'obsidian'), '看到的黑曜石记上');
+  assert.ok(!ls.some((l) => l.label === 'iron_ore'), '那格现在是空的，铁矿记录也删掉');
+  memory.close();
+});

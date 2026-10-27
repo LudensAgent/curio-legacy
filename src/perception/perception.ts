@@ -444,11 +444,17 @@ export class Perception {
   private forgetVanishedOre(s: { dim: string; pos: Vec3Like }) {
     if (Date.now() - this.vanishedCheckAt < 2000) return;
     this.vanishedCheckAt = Date.now();
-    for (const l of this.memory.landmarks()) {
-      if (l.kind !== 'resource' || !isResourceBlock(l.label) || l.dim !== s.dim) continue;
-      if (Math.hypot(l.pos.x - s.pos.x, l.pos.y - s.pos.y, l.pos.z - s.pos.z) > 8) continue;
-      const seen = this.vision.seenAt(l.pos);
-      if (seen && oreKind(seen) !== oreKind(l.label)) this.memory.removeLandmark(l.id);
+    // 记着的矿点、岩浆这类危险点：走近了、亲眼看那一格（视线真的够得着）已经不是它了——
+    // 岩浆被水浇成了黑曜石、被舀走、矿被挖了——就忘掉，免得一直惦记一处早就没了的东西
+    const watched = this.memory.landmarks().filter((l) => l.dim === s.dim && (l.kind === 'resource' ? isResourceBlock(l.label) : l.kind === 'danger' && DANGER.has(l.label))
+      && Math.hypot(l.pos.x - s.pos.x, l.pos.y - s.pos.y, l.pos.z - s.pos.z) <= 12);
+    if (!watched.length) return;
+    // 先取刚扫到的表面，再专门看一眼这些格子（视线够得着才算看见）
+    const glimpsed = new Map(watched.map((l) => [l.id, this.vision.seenAt(l.pos)]));
+    const seen = new Map(this.vision.observeBlocks(watched.slice(0, 32).map((l) => l.pos)).map((o) => [`${o.pos.x},${o.pos.y},${o.pos.z}`, o.name]));
+    for (const l of watched) {
+      const now = seen.get(`${l.pos.x},${l.pos.y},${l.pos.z}`) ?? glimpsed.get(l.id);
+      if (now && oreKind(now) !== oreKind(l.label) && !(l.label === 'lava' && /lava/.test(now))) this.memory.removeLandmark(l.id);
     }
   }
 
@@ -486,7 +492,9 @@ export class Perception {
         }
         // 岩浆既危险又是资源（浇水成黑曜石、当燃料）：两样都记
         if (DANGER.has(b.name)) this.memory.addLandmark('danger', b.name, s.dim, b.pos);
-        if (isResourceBlock(b.name)) this.memory.addLandmark('resource', b.name, s.dim, b.pos);
+        // 岩浆只把源头记成资源（浇水能变黑曜石、能舀）；流动的岩浆只算危险
+        const flowing = b.name === 'lava' && Number(this.adapter.blockStateAt?.(b.pos)?.properties?.level ?? 0) !== 0;
+        if (isResourceBlock(b.name) && !flowing) this.memory.addLandmark('resource', b.name, s.dim, b.pos);
         if (DANGER.has(b.name) || isResourceBlock(b.name)) continue;
         if (interactiveName(b.name)) {
           // 看见的功能方块记成地标（自己放下的已记为“我的X”，附近有就不重复记）
