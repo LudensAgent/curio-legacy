@@ -457,7 +457,7 @@ export function sleepReason(reason?: string): string {
   if (r === 'NO_SPACE' || r === 'PLACE_FAILED') return '身边没有能放床的平地（床要两格平整空地）：换块平地再睡';
   if (/monster/i.test(r)) return '附近有怪物，不能睡：先打掉或躲开它们，或者用 shelter 围起来再睡';
   if (/not night|day/i.test(r)) return '还没到能睡的时候';
-  if (/occupied/i.test(r)) return '这张床被占着（村子里多半是村民在睡）：等下去它也不会空出来，换一张床（sleep {"at":…}）或者 sleep {"place":true} 放自己的床';
+  if (/occupied/i.test(r)) return '这张床被占着，点了一下床也没空出来（村民一般会被叫醒，叫不醒的多半是别的玩家）：换一张床（sleep {"at":…}）或者 sleep {"place":true} 放自己的床';
   if (/far/i.test(r)) return '离床太远';
   return r || '未知原因';
 }
@@ -520,7 +520,7 @@ export const sleepSkill: Skill<{ at?: Vec3Like; place?: boolean }> = {
         waited++;
       }
       if (!canSleepAt(ctx.adapter.state().timeOfDay, ctx.adapter.state().weather)) return fail('ERROR', `等了 ${waited} 秒还没到能睡的时候，稍后再 sleep`);
-      const r = await ctx.adapter.sleepInBed(ctx.signal);
+      const r = await ctx.adapter.sleepInBed(ctx.signal, args.at ? { at: args.at } : {});
       if (!r.ok) {
         const far = r.reason === 'NO_BED' && !bed ? findStation(ctx, BEDS, 2000) : null;
         return fail(r.reason === 'NO_BED' ? 'MISSING_MATERIALS' : 'ERROR', `睡不了：${sleepReason(r.reason)}${far ? `；记得的床在 ${far.dist} 格外，太远了，今晚赶不过去` : ''}`);

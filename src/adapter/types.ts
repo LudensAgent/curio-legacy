@@ -301,7 +301,8 @@ export interface GameAdapter {
   /** detail：失败时具体缺什么；tablePos：这次用到的工作台位置（便于记住、下次复用） */
   craft(item: string, count: number, signal: AbortSignal, opts?: { tablePos?: Vec3Like }): Promise<ActionResult & { crafted: number; detail?: string; tablePos?: Vec3Like }>;
   /** 睡在身边的床上（没有就把背包里的床放下）；一直睡到醒来 */
-  sleepInBed(signal: AbortSignal): Promise<ActionResult & { bedPos?: Vec3Like }>;
+  /** at：要睡的那张床（村子里几张床挨着时用来认准）；床被村民睡着会先把它叫醒 */
+  sleepInBed(signal: AbortSignal, opts?: { at?: Vec3Like }): Promise<ActionResult & { bedPos?: Vec3Like }>;
   /** 用熔炉烧东西：furnacePos = 记得的熔炉；没有就用背包里的熔炉放下。返回烧出的数量 */
   smelt(input: string, count: number, fuel: string, signal: AbortSignal, opts?: { furnacePos?: Vec3Like; onProgress?: (done: number) => void }): Promise<ActionResult & { made: number; output?: string; furnacePos?: Vec3Like }>;
   /** 打开箱子：存入 deposits / 取出 withdraws，返回箱子里现在的物品 */

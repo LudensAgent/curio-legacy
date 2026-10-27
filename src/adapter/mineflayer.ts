@@ -1971,7 +1971,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return { age, max };
   }
 
-  async sleepInBed(signal: AbortSignal): Promise<ActionResult & { bedPos?: Vec3Like }> {
+  async sleepInBed(signal: AbortSignal, opts: { at?: Vec3Like } = {}): Promise<ActionResult & { bedPos?: Vec3Like }> {
     const check = this.actionCheckpoint(signal);
     throwIfAborted(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
@@ -1979,16 +1979,18 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const b = this.bot;
     const bedIds = Object.values<any>(this.mcData.blocksByName).filter((x) => x.name.endsWith('_bed')).map((x) => x.id);
     // findBlock 偶尔漏掉就在身边的床（日志里记得的床 1 格外，它却说附近没床）：再逐格看一遍
+    const occupied = (blk: any) => { try { return blk?.getProperties?.().occupied === true; } catch { return false; } };
+    // 村子里几张床挨着：指定了哪张就睡那张；否则先挑空着的，再挑近的
     const nearBed = (r: number) => {
-      const found = b.findBlock({ matching: bedIds, maxDistance: r });
-      if (found) return found;
       const c = b.entity.position.floored();
+      const want = opts.at ? this.vec(opts.at) : null;
+      const score = (blk: any) => (want ? blk.position.distanceTo(want) * 10 : 0) + (occupied(blk) ? 5 : 0) + blk.position.distanceTo(b.entity.position);
       let best: any = null;
       for (let dx = -r; dx <= r; dx++) for (let dy = -2; dy <= 2; dy++) for (let dz = -r; dz <= r; dz++) {
         const blk = b.blockAt(c.offset(dx, dy, dz));
-        if (blk && String(blk.name).endsWith('_bed') && (!best || blk.position.distanceTo(b.entity.position) < best.position.distanceTo(b.entity.position))) best = blk;
+        if (blk && String(blk.name).endsWith('_bed') && (!best || score(blk) < score(best))) best = blk;
       }
-      return best;
+      return best ?? b.findBlock({ matching: bedIds, maxDistance: r });
     };
     let bed = nearBed(4);
     if (!bed) {
@@ -2001,6 +2003,14 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       this.bus.publish('place', 'P2', '放下了床');
     }
     await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos: bed.position }, { signal, timeoutMs: 15000 }), check);
+    // 原版里右键一张被村民睡着的床会把村民叫醒（BedBlock.kickVillagerOutOfBed），再右键就能自己睡；
+    // mineflayer 的 sleep 看见 occupied 就直接报错，所以先像玩家一样点一下，等床空出来
+    if (occupied(b.blockAt(bed.position))) {
+      await this.afterAction(() => b.activateBlock(b.blockAt(bed.position)), check);
+      for (let i = 0; i < 10 && occupied(b.blockAt(bed.position)); i++) await sleep(150, signal);
+      if (occupied(b.blockAt(bed.position))) return { ok: false, reason: 'the bed is occupied (点了一下床，占着的人没有起来——可能是别的玩家)' };
+      bed = b.blockAt(bed.position);
+    }
     try {
       await this.afterAction(() => raceAbort(b.sleep(bed), signal, 5000, () => {}), check);
     } catch (e: any) {

@@ -188,3 +188,24 @@ test('use_gui / trade 参数检查', () => {
   assert.deepEqual((tradeSkill.validate({}, ad) as any).args, { who: 'villager', index: null, times: 1 });
   assert.equal(tradeSkill.validate({ times: 99 }, ad).ok, false);
 });
+
+test('睡村民占着的床：先点一下把村民叫醒，再躺上去；指定了哪张就睡哪张', async () => {
+  const beds = new Map<string, { occupied: boolean }>([['3,64,0', { occupied: true }], ['-2,64,0', { occupied: false }]]);
+  const blk = (x: number, y: number, z: number) => {
+    const st = beds.get(`${x},${y},${z}`);
+    return st ? { name: 'white_bed', position: new Vec3(x, y, z), getProperties: () => ({ occupied: st.occupied, part: 'head', facing: 'north' }) } : { name: 'air', position: new Vec3(x, y, z) };
+  };
+  let slept: any = null; const clicks: string[] = [];
+  const bot: any = {
+    entity: { position: new Vec3(0.5, 64, 0.5) }, game: { dimension: 'overworld' }, isSleeping: false,
+    blockAt: (p: any) => blk(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z)),
+    findBlock: () => null,
+    async activateBlock(b: any) { clicks.push(`${b.position.x}`); beds.get(`${b.position.x},64,0`)!.occupied = false; },
+    async sleep(b: any) { if (b.getProperties().occupied) throw new Error('the bed is occupied'); slept = b.position.x; },
+  };
+  const a = adapter() as any; a.bot = bot; a.connectedFlag = true; a.moveTo = async () => {}; a.currentDimension = () => 'overworld';
+  const r = await a.sleepInBed(new AbortController().signal, { at: { x: 3, y: 64, z: 0 } });
+  assert.equal(r.ok, true, r.reason);
+  assert.deepEqual(clicks, ['3'], '先点一下占着的那张');
+  assert.equal(slept, 3, '睡的是指定的那张，不是旁边空着的');
+});
