@@ -6,7 +6,7 @@ import { ownBuildingAt } from './build.ts';
 import { AbortedError, dist3, sleep } from '../util.ts';
 import { codeFromError, clampInt, fail, isAbort, obj, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 import { craftReservationConflict } from '../projects/reservations.ts';
-import { oreSpotsNear } from '../memory/ore-spots.ts';
+import { isResourceBlock, oreSpotsNear } from '../memory/ore-spots.ts';
 import { config } from '../config.ts';
 import { FOOD_VALUE, foodNote } from './food.ts';
 import type { InvItem } from '../adapter/types.ts';
@@ -276,10 +276,10 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
         const skipped = risky.hazard + risky.wet + risky.deep;
         const ownNote = ownSkipped.size ? `；另有 ${ownSkipped.size} 块是自己房子上的，没拆（拆了还得补）` : '';
         // 眼前看不见，但长期记着别处有：说出在哪（去不去由心智定）；“记忆里没有”只在真没记过时才说
-        const spots = names.some((n) => /_ore$/.test(n)) ? oreSpotsNear(ctx.memory.landmarks(), { worldId: s.worldId, dim: s.dim, pos: s.pos }, { only: names, excludeWithin: 6 }).slice(0, 3) : [];
+        const spots = names.some((n) => isResourceBlock(n)) ? oreSpotsNear(ctx.memory.landmarks(), { worldId: s.worldId, dim: s.dim, pos: s.pos }, { only: names, excludeWithin: 6 }).slice(0, 3) : [];
         const remembered = spots.length
           ? `；不过记得别处有 ${args.block}：${spots.map((o) => o.text).join('；')}——要去就 goto {"target":"${spots[0].pos.x},${spots[0].pos.y},${spots[0].pos.z}","dig":true} 走到跟前再 gather`
-          : /_ore$/.test(args.block) ? `；长期记忆里也没记过哪里有 ${args.block}` : '';
+          : isResourceBlock(args.block) ? `；长期记忆里也没记过哪里有 ${args.block}` : '';
         return dug > 0
           ? ok(`看不到更多 ${args.block}${looked}，采集了 ${dug}/${args.count}${ownNote}${staleNote}${riskNote()}${remembered}${underNote}`, { searched, ...(skipped ? { skippedUnsafe: { ...risky } } : {}) })
           : fail('NOT_FOUND', skipped

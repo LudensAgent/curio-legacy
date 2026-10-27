@@ -16,7 +16,7 @@ import type { Activity, ActivityRecord, Noticing, StuckHere } from './types.ts';
 import type { FocusPlan } from './self.ts';
 import { RECALL_LABEL, type Recalled } from './recall.ts';
 import { foodNote } from '../skills/food.ts';
-import { oreSpotsByKind, oreSpotsNear } from '../memory/ore-spots.ts';
+import { isResourceBlock, oreSpotsByKind, oreSpotsNear } from '../memory/ore-spots.ts';
 import { creatureSpotsByKind, creatureSpotsNear } from '../memory/creature-spots.ts';
 
 export interface MindContext {
@@ -425,7 +425,7 @@ function worldKnowledge(ctx: MindContext) {
   const here = { x: p.self.pos[0], y: p.self.pos[1], z: p.self.pos[2] };
   // 自己的设施（箱子、工作站、床、挖过的通道）在 my_facilities 里单独说，这里只列别的地点
   // 矿点按矿种单独列（ore_spots），不和死亡点、基地挤这 8 个位置
-  const places = m.landmarks().filter((l) => l.dim === p.self.dim && l.worldId === s.worldId && !FACILITY_LABELS.has(l.label) && !(l.kind === 'resource' && /_ore$/.test(l.label)) && l.kind !== 'herd')
+  const places = m.landmarks().filter((l) => l.dim === p.self.dim && l.worldId === s.worldId && !FACILITY_LABELS.has(l.label) && !(l.kind === 'resource' && isResourceBlock(l.label)) && l.kind !== 'herd')
     .map((l) => ({ l, d: Math.round(Math.hypot(l.pos.x - here.x, l.pos.z - here.z)) })).sort((a, b) => a.d - b.d).slice(0, 8)
     .map(({ l, d }) => `${l.label}[${l.id}] (${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}) ${d}格`);
   const facilities = ctx.tier === 'deliberate' ? myFacilities(m, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['chest', 'station', 'passage']).slice(0, 8).map((f) => f.text) : [];

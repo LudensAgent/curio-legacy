@@ -1,4 +1,5 @@
 import type { Vec3Like } from '../adapter/types.ts';
+import { isResourceBlock } from '../memory/ore-spots.ts';
 import { passageLevels } from '../memory/passages.ts';
 import type { Landmark, PassageRecord, WorldMemory } from '../memory/store.ts';
 import { STATION_LABEL } from '../skills/stations.ts';
@@ -41,7 +42,7 @@ export function describePassage(rec: PassageRecord, here: Vec3Like, stations: La
   const ores = Object.entries(rec.ores).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([n, c]) => `${n}×${c}`);
   const near = (l: Landmark, r: number) => rec.path.some((p) => d3(p, l.pos) <= r);
   const things = [...new Set(stations.filter((l) => near(l, 4)).map((l) => l.label.replace(/^我的/, '')))];
-  const seen = [...new Set(resources.filter((l) => /_ore$/.test(l.label) && near(l, 6)).map((l) => l.label))].slice(0, 3);
+  const seen = [...new Set(resources.filter((l) => isResourceBlock(l.label) && near(l, 6)).map((l) => l.label))].slice(0, 3);
   const text = `${rec.entrances.length ? `入口 ${at(entrance)}` : `最高处 ${at(entrance)}`}${inside ? '' : `（${dist} 格外）`}，能走到 y${rec.deepestY}`
     + `${levels.length ? `，横巷在 y${levels.join('、y')}` : ''}${ores.length ? `，挖到过 ${ores.join('、')}` : ''}`
     + `${seen.length ? `，沿途见过 ${seen.join('、')}` : ''}${things.length ? `，里面有${things.join('、')}` : ''}`;

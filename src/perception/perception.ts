@@ -8,7 +8,7 @@ import { torchCount } from '../skills/light.ts';
 import { interactiveName, NOTABLE, type Vision, type VisionSummary } from './vision.ts';
 import { computeDrives, type Drive, type Stock } from '../brain/drives.ts';
 import { PassageTracker } from '../memory/passages.ts';
-import { oreKind } from '../memory/ore-spots.ts';
+import { isResourceBlock, oreKind } from '../memory/ore-spots.ts';
 import { HERD_SKIP } from '../memory/creature-spots.ts';
 import { EffectWatch } from '../brain/effects.ts';
 import { efficiencyInsights, type EfficiencyInsight } from '../brain/efficiency.ts';
@@ -399,7 +399,7 @@ export class Perception {
   /** 自己挖掉了矿：那一处记下的矿点就没了（同一片矿脉里还看得见的，下一次看见时会重新记） */
   private forgetMinedOre(s: { dim: string }, dug: { pos: Vec3Like; name: string }[]) {
     for (const d of dug) {
-      if (!d.name.endsWith('_ore')) continue;
+      if (!isResourceBlock(d.name)) continue;
       for (const l of this.memory.landmarks()) {
         if (l.kind === 'resource' && l.dim === s.dim && oreKind(l.label) === oreKind(d.name)
           && Math.hypot(l.pos.x - d.pos.x, l.pos.y - d.pos.y, l.pos.z - d.pos.z) <= 3) this.memory.removeLandmark(l.id);
@@ -445,7 +445,7 @@ export class Perception {
     if (Date.now() - this.vanishedCheckAt < 2000) return;
     this.vanishedCheckAt = Date.now();
     for (const l of this.memory.landmarks()) {
-      if (l.kind !== 'resource' || !l.label.endsWith('_ore') || l.dim !== s.dim) continue;
+      if (l.kind !== 'resource' || !isResourceBlock(l.label) || l.dim !== s.dim) continue;
       if (Math.hypot(l.pos.x - s.pos.x, l.pos.y - s.pos.y, l.pos.z - s.pos.z) > 8) continue;
       const seen = this.vision.seenAt(l.pos);
       if (seen && oreKind(seen) !== oreKind(l.label)) this.memory.removeLandmark(l.id);
@@ -484,14 +484,16 @@ export class Perception {
         if (this.memory.markSeen('blocks', b.name)) {
           this.bus.publish('discovery', 'P2', `首次看见方块：${b.name}（${Math.round(b.dist)} 格外）`, { category: 'block', name: b.name, pos: b.pos });
         }
+        // 岩浆既危险又是资源（浇水成黑曜石、当燃料）：两样都记
         if (DANGER.has(b.name)) this.memory.addLandmark('danger', b.name, s.dim, b.pos);
-        else if (interactiveName(b.name)) {
+        if (isResourceBlock(b.name)) this.memory.addLandmark('resource', b.name, s.dim, b.pos);
+        if (DANGER.has(b.name) || isResourceBlock(b.name)) continue;
+        if (interactiveName(b.name)) {
           // 看见的功能方块记成地标（自己放下的已记为“我的X”，附近有就不重复记）
           const zh = interactiveName(b.name)!;
           const mine = this.memory.landmarks().some((l) => l.label === `我的${zh}` && l.dim === s.dim && Math.hypot(l.pos.x - b.pos.x, l.pos.y - b.pos.y, l.pos.z - b.pos.z) <= 2);
           if (!mine) this.memory.addLandmark('discovery', zh, s.dim, b.pos, 6);
         } else if (STRUCTURE_HINT.has(b.name)) this.memory.addLandmark('discovery', b.name, s.dim, b.pos);
-        else if (b.name.endsWith('_ore')) this.memory.addLandmark('resource', b.name, s.dim, b.pos);
       }
       this.forgetVanishedOre(s);
       for (const e of v.seen) {

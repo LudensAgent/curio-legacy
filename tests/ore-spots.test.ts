@@ -80,3 +80,29 @@ test('挖掉记下的那块矿，矿点就忘掉；看见那一格已经不是�
   assert.ok(!memory.landmarks().some((l) => l.label === 'coal_ore'), '亲眼看见那格是石头了');
   memory.close();
 });
+
+test('黑曜石、岩浆这类做不出来的天然资源也记成资源点，回想“黑曜石”“岩浆”想得起来', async () => {
+  const m = new WorldMemory(null);
+  m.setWorld('w');
+  m.addLandmark('resource', 'obsidian', 'overworld', { x: 273, y: 63, z: -11 });
+  m.addLandmark('resource', 'lava', 'overworld', { x: -30, y: 12, z: 0 });
+  const spots = oreSpotsNear(m.landmarks(), { worldId: 'w', dim: 'overworld', pos: { x: 0, y: 64, z: 0 } }, { radius: 2000 });
+  const byKind = oreSpotsByKind(spots, 1);
+  assert.ok(byKind.obsidian && byKind.lava, JSON.stringify(byKind));
+  assert.match(oreAlias('obsidian'), /黑曜石/);
+  const r = recallLocal('附魔台还差黑曜石，去找岩浆', { self: new SelfModel(null), memory: m });
+  assert.ok(r.some((x) => x.kind === 'place' && /obsidian|lava/.test(x.text)), JSON.stringify(r));
+  m.close();
+});
+
+test('看见黑曜石时记下位置；看见岩浆既记成危险也记成资源', () => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null);
+  adapter.blocks.push({ name: 'obsidian', pos: { x: 3, y: 64, z: 0 } }, { name: 'lava', pos: { x: 3, y: 64, z: 2 } });
+  const perception = new Perception(adapter, memory, new EventBus(), new Vision(adapter));
+  perception.update();
+  const ls = memory.landmarks();
+  assert.ok(ls.some((l) => l.kind === 'resource' && l.label === 'obsidian'), JSON.stringify(ls));
+  assert.ok(ls.some((l) => l.kind === 'resource' && l.label === 'lava'));
+  assert.ok(ls.some((l) => l.kind === 'danger' && l.label === 'lava'));
+  memory.close();
+});
