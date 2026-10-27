@@ -2738,8 +2738,33 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         }
         return ok ? { ok: true, mounted: String(ent.name) } : { ok: false, reason: 'MOUNT_FAILED' };
       }
-      await this.afterAction(() => b.activateEntity(ent), check);
-      return { ok: true };
+      if (!item) {
+        await this.afterAction(() => b.activateEntity(ent), check);
+        return { ok: true };
+      }
+      // 拿着东西右键生物：喂食、繁殖、剪毛、挤奶、上鞍、命名……是否真起作用要看得见的反馈：
+      // 背包变了（东西用掉/换成别的/工具磨损），或者对方冒出爱心、开始驯服之类的动静
+      const sig = () => this.state().inventory.map((i) => `${i.name}:${i.count}:${i.durability?.left ?? ''}`).sort().join('|');
+      const countOf = (n: string) => this.state().inventory.filter((i) => i.name === n).reduce((t, i) => t + i.count, 0);
+      const before = sig(), heldBefore = countOf(item);
+      const statuses: number[] = [];
+      const onStatus = (pk: any) => { if (pk?.entityId === entityId) statuses.push(Number(pk.entityStatus)); };
+      b._client.on('entity_status', onStatus);
+      try {
+        await this.afterAction(() => b.activateEntity(ent), check);
+        for (let i = 0; i < 8 && sig() === before && !statuses.length; i++) await sleep(100, signal);
+        await sleep(150, signal);
+      } finally { b._client.off('entity_status', onStatus); }
+      const reasons: string[] = [];
+      const used = heldBefore - countOf(item);
+      if (used > 0) reasons.push(`背包里的 ${item} 少了 ${used} 个`);
+      else if (sig() !== before) reasons.push('背包有变化');
+      // 原版 EntityEvent：18 冒爱心（进入求偶），6/7 驯服失败/成功（冒烟/冒心）
+      if (statuses.includes(18)) reasons.push(`${ent.name} 冒出了爱心`);
+      if (statuses.includes(7)) reasons.push(`${ent.name} 被驯服了`);
+      if (statuses.includes(6)) reasons.push(`${ent.name} 冒烟（这次没驯服成）`);
+      if (!reasons.length) return { ok: false, reason: `NO_EFFECT:拿着 ${item} 右键了 ${ent.name}，背包和它都没有反应`, effectEvidence: { verified: true, changed: false, reasons: ['背包未变化，对方也没有可见反应'] } };
+      return { ok: true, effectEvidence: { verified: true, changed: true, reasons } };
     } catch (e: any) {
       if (e instanceof AbortedError) throw e;
       return { ok: false, reason: String(e?.message ?? e) };

@@ -23,7 +23,7 @@ const dirOk = (dir: string | undefined, from: { x: number; z: number }, to: { x:
 // ------------------------------------------------------------------ use_item
 export const useItem: Skill<{ item: string; on: string; dir?: string }> = {
   name: 'use_item',
-  description: '手持物品右键：对着看得见的方块、水面或岩浆（on 写方块名），或对自己（on:"self"）',
+  description: '手持物品右键：对着看得见的方块、水面或岩浆（on 写方块名），或对自己（on:"self"）；对生物用东西（喂、剪、挤奶）是 interact',
   argsDoc: '{"item": "<物品名>", "on"?: "self | water | lava | <方块名>", "dir"?: "N|NE|E|SE|S|SW|W|NW"}',
   timeoutMs: 30000,
   movement: true,
@@ -56,7 +56,12 @@ export const useItem: Skill<{ item: string; on: string; dir?: string }> = {
         .filter((h) => dirOk(args.dir, s.pos, h.pos))
         .sort((a, b) => a.dist - b.dist);
       const target = hits[0];
-      if (!target) return fail('NOT_FOUND', `看不见可以对着用的 ${args.on}${args.dir ? `（${args.dir} 方向）` : ''}`);
+      if (!target) {
+        // on 写的是生物（牛、猪、羊……）不是方块：拿着东西右键生物就是 interact
+        const creature = !fluid && senses.perceivedEntities(32).some((e) => e.kind !== 'item' && e.perception !== 'heard' && matchesEntity(e.name, args.on));
+        if (creature) return interact.run(ctx, { entity: args.on, with: args.item });
+        return fail('NOT_FOUND', `看不见可以对着用的 ${args.on}${args.dir ? `（${args.dir} 方向）` : ''}${fluid ? '' : '（on 只认方块；对生物用东西写 interact {"entity":…,"with":…}）'}`);
+      }
       if (dist3(adapter.state().pos, target.pos) > 4.2) {
         ctx.progress(0.3, `走到 ${target.name} 旁边`);
         await adapter.moveTo({ kind: 'near', pos: target.pos, range: 3 }, { signal, timeoutMs: Math.max(5000, ctx.deadline - Date.now() - 5000) });
@@ -78,6 +83,11 @@ export const useItem: Skill<{ item: string; on: string; dir?: string }> = {
 };
 
 // ------------------------------------------------------------------ interact
+const matchesEntity = (n: string, want: string) => n === want || n.endsWith(`_${want}`) || n.replace(/^player:/, '') === want;
+/** 拿着某样东西右键后确实起了作用的生物：同样东西再对同一只用一般没用（已经在求偶、已经剪过毛），下次先换一只 */
+const servedWith = new Map<string, number>();
+const SERVED_MS = 5 * 60_000;
+
 export const interact: Skill<{ entity: string; with?: string }> = {
   name: 'interact',
   description: '右键看得见的实体：载具/坐骑会坐上去；可手持物品（with）对生物使用',
@@ -100,8 +110,14 @@ export const interact: Skill<{ entity: string; with?: string }> = {
     const { adapter, senses, signal } = ctx;
     if (!adapter.interactEntity) return fail('ERROR', '当前适配器不支持与实体交互');
     if (args.with && !adapter.state().inventory.some((i) => i.name === args.with)) return fail('MISSING_MATERIALS', `背包里没有 ${args.with}`);
-    const match = (n: string) => n === args.entity || n.endsWith(`_${args.entity}`) || n.replace(/^player:/, '') === args.entity;
-    const find = () => { senses.refresh(); return senses.perceivedEntities(32).filter((e) => e.kind !== 'item' && match(e.name)).sort((a, b) => a.dist - b.dist)[0]; };
+    const now = Date.now();
+    for (const [k, t] of servedWith) if (now - t > SERVED_MS) servedWith.delete(k);
+    const served = (e: EntityInfo) => !!args.with && servedWith.has(`${e.id}:${args.with}`);
+    const find = () => {
+      senses.refresh();
+      return senses.perceivedEntities(32).filter((e) => e.kind !== 'item' && matchesEntity(e.name, args.entity))
+        .sort((a, b) => Number(served(a)) - Number(served(b)) || a.dist - b.dist)[0];
+    };
     let target = find();
     // 刚放下的船/刚出现的实体要过一会儿才看得到：稍等再看两次
     for (let i = 0; !target && i < 2; i++) { await sleep(250, signal); target = find(); }
@@ -111,9 +127,15 @@ export const interact: Skill<{ entity: string; with?: string }> = {
         ctx.progress(0.3, `走近 ${target.name}`);
         await adapter.moveTo({ kind: 'follow_entity', entityId: target.id, range: 2 }, { signal, timeoutMs: 15000 });
       }
+      const who = `${target.name}${target.traits ? `（${target.traits}）` : ''}`;
+      const again = served(target) ? '；看得见的同类里只剩这只刚才已经用过' : '';
       const r = await adapter.interactEntity(target.id, args.with ?? null, signal);
-      if (!r.ok) return fail('ERROR', `和 ${target.name} 交互失败：${r.reason}`);
-      return ok(r.mounted ? `坐上了 ${r.mounted}` : `对 ${target.name}${args.with ? ` 使用了 ${args.with}` : ' 右键交互'}`, { entity: target.name, ...(r.mounted ? { mounted: r.mounted } : {}) });
+      if (!r.ok && /^NO_EFFECT/.test(String(r.reason))) return fail('EFFECT_NOT_CONFIRMED', `拿着 ${args.with} 右键了 ${who}，背包和它都没有反应${again}`, { entity: target.name, entityId: target.id, pos: target.pos, effectEvidence: r.effectEvidence });
+      if (!r.ok) return fail('ERROR', `和 ${who} 交互失败：${r.reason}`, { entity: target.name, pos: target.pos });
+      if (args.with && r.effectEvidence?.changed) servedWith.set(`${target.id}:${args.with}`, Date.now());
+      const seen = r.effectEvidence?.reasons?.length ? `：${r.effectEvidence.reasons.join('，')}` : '';
+      return ok(r.mounted ? `坐上了 ${r.mounted}` : `对 ${who}${args.with ? ` 使用了 ${args.with}${seen}` : ' 右键交互'}`,
+        { entity: target.name, entityId: target.id, pos: target.pos, ...(r.mounted ? { mounted: r.mounted } : {}), ...(r.effectEvidence ? { effectEvidence: r.effectEvidence } : {}) });
     } catch (e) {
       if (isAbort(e)) throw e;
       return fail(codeFromError(e), `和 ${target.name} 交互出错：${(e as Error).message}`);

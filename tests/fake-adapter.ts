@@ -489,8 +489,16 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
       this.riding = e.name; this.ridingId = e.id; this.pos = { ...e.pos };
       return { ok: true, mounted: e.name };
     }
+    if (item) {
+      // 测试里放进 refuseFeed 的实体不接受（已经在求偶等），其余的吃掉一个
+      if (this.refuseFeed.has(e.id) || !(this.inv.get(item) ?? 0)) return { ok: false, reason: `NO_EFFECT:拿着 ${item} 右键了 ${e.name}，背包和它都没有反应`, effectEvidence: { verified: true, changed: false, reasons: [] } };
+      this.inv.set(item, this.inv.get(item)! - 1);
+      this.refuseFeed.add(e.id);
+      return { ok: true, effectEvidence: { verified: true, changed: true, reasons: [`背包里的 ${item} 少了 1 个`, `${e.name} 冒出了爱心`] } };
+    }
     return { ok: true };
   }
+  refuseFeed = new Set<number>();
   dismountToward: Vec3Like | null = null;
   async dismount(signal: AbortSignal, opts: { toward?: Vec3Like } = {}) {
     await sleep(20, signal);
