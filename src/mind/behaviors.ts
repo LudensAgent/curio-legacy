@@ -89,7 +89,7 @@ export const INSTINCTS: Record<string, { text: string; locked?: boolean }> = {
 };
 
 /** 代码技能必须带判定时的说明（写技能、改技能时都用这一句） */
-export const VERIFY_REQUIRED = 'skill.verify：代码技能要同时写 verify——一段 JavaScript 函数体，做完以后看一眼世界确认真的做成了。参数 api 和 args：args.before 是开工前的 api.state()，args.result 是 code 的返回值，args.args 是调用参数；只能用 api.state/blockAt/region/entities/nearestLand；做成了 return true，没做成 return "原因"（比如 const s = await api.state(); return s.inWater ? "还在水里" : true）';
+export const VERIFY_REQUIRED = 'skill.verify：代码技能要同时写 verify——一段 JavaScript 函数体，做完以后看一眼世界确认真的做成了。参数 api 和 args：args.before 是开工前的 api.state()，args.result 是 code 的返回值，args.args 是调用参数（目标要拿它核对，别拿 args.result 里代码自己算的值）；只能用 api.state/blockAt/region/entities/nearestLand；做成了 return true，没做成 return "原因"（比如 const s = await api.state(); return s.inWater ? "还在水里" : true）';
 
 const MAX_STEPS = 8;
 type Validated = { name: string; description: string; body: string; behavior: Record<string, unknown>; disable?: boolean };

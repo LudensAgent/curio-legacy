@@ -87,11 +87,13 @@ export class CodeImprover {
 根据它在游戏里实际运行的记录改进代码：修掉出错的地方，处理记录里暴露出来的情况（比如路被挡、方块读不到、动作失败），让它更可靠；
 如果它能用但费劲（harvest_effect 显示用它时拿东西更慢），就让它更省：少走冤枉路、少做无用的动作、先看再动、一次做完。保持用途不变，代码保持简短清楚。
 ${API_DOC}
-它还带一段判定（verify）：做完以后看一眼世界确认真的做成了（只能用 api.state/blockAt/region/entities/nearestLand；args.before 是开工前的 api.state()，args.result 是代码的返回值；return true 算成，return "原因" 算没成）。
+它还带一段判定（verify）：做完以后看一眼世界确认真的做成了（只能用 api.state/blockAt/region/entities/nearestLand；args.before 是开工前的 api.state()，args.result 是代码的返回值，args.args 是调用参数；return true 算成，return "原因" 算没成）。
+判定的目标要拿调用参数 args.args 来核对，不能拿 args.result 里代码自己算出来的目标比——不然代码读错参数，判定也跟着错，记录全是“成功”。
+代码里调用参数就是 args 本身（args.y），判定里才是 args.args.y；调用类技能声明了参数（needs）的，代码要读的就是这些名字。
 记录里“说做完了，但判定没通过”的，是代码没真做成——改代码；判定本身写错了（明明做成了却判没过、或者判得太松什么都算成），连判定一起改。
 只输出一个 JSON 对象：{"code":"改好的完整函数体","change":"一句话说改了什么","verify"?:"改好的判定函数体（不改判定就不写）"}；如果失败不是代码的问题（比如本来就不该在那种情况下用），输出 {"keep":true,"why":"…"}。`;
     const user = {
-      skill: { name, description: b.description, mode: b.mode, version: b.version ?? 1, ...(b.when ? { when: b.when } : {}) },
+      skill: { name, description: b.description, mode: b.mode, version: b.version ?? 1, ...(b.when ? { when: b.when } : {}), ...(b.needs ? { args: b.needs } : {}) },
       why: WHY_TEXT(why, note),
       ...(this.effect(name) ? { harvest_effect: this.effect(name) } : {}),
       stats: st?.byVersion ?? {},

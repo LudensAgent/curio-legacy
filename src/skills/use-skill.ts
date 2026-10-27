@@ -38,6 +38,9 @@ export const useSkill: Skill<{ name: string; args?: Record<string, unknown>; fai
     // 技能声明了要哪些参数：调用时没给就当场说清楚，别让代码跑到一半才报错
     const needs = registry?.get(name)?.needs;
     const missing = needs && !failure ? Object.keys(needs).filter((k) => extra?.[k] === undefined || extra[k] === '') : [];
+    // 声明了参数的技能：传了它不认识的名字（targetY、depth……）会被代码悄悄忽略，当场说清楚它要的是什么
+    const unknown = needs && extra ? Object.keys(extra).filter((k) => !(k in needs) && k !== 'trigger') : [];
+    if (unknown.length) return { ok: false, error: `${name} 不认识参数 ${unknown.map((k) => `args.${k}`).join('、')}；它要的是：${Object.entries(needs!).map(([k, v]) => `args.${k}（${v}）`).join('、')}` };
     if (missing?.length) return { ok: false, error: `${name} 需要参数：${missing.map((k) => `args.${k}（${needs![k]}）`).join('、')}；写 {"name":"${name}","args":{${missing.map((k) => `"${k}":…`).join(',')}}}` };
     return { ok: true, args: { name, ...(extra ? { args: extra } : {}), ...(failure ? { failure } : {}) } };
   },
@@ -58,7 +61,9 @@ export const useSkill: Skill<{ name: string; args?: Record<string, unknown>; fai
     if (b.code) {
       // 代码技能：在沙箱里跑模型写的 JavaScript；失败时把出错的行和最后几次 api 调用交回去（后台改进会用到）
       const input = { ...(args.args ?? {}), ...(args.failure ? { failure: args.failure } : {}) };
-      const r = await runSandboxed(b.code, input, bridge, {
+      // 判定里调用参数在 args.args，代码里就是 args 本身；两种写法都认，免得代码照着判定的写法读不到参数
+      const codeArgs = 'args' in input ? input : { ...input, args: input };
+      const r = await runSandboxed(b.code, codeArgs, bridge, {
         signal: ctx.signal, deadline: ctx.deadline - 500,
         onProgress: (p) => ctx.progress(Math.max(0, Math.min(1, p))),
         onLog: (t) => ctx.bus.publish('skill_log', 'P3', `[${b.name}] ${t}`),
@@ -66,6 +71,11 @@ export const useSkill: Skill<{ name: string; args?: Record<string, unknown>; fai
       const data = { version: b.version ?? 1, calls: r.calls, trace: r.trace, logs: r.logs, args: JSON.stringify(input).slice(0, 300), ...(r.line ? { line: r.line } : {}) };
       const m = moved();
       if (!r.ok) return fail(/超时/.test(r.error ?? '') ? 'TIMEOUT' : 'ERROR', `代码技能「${b.name}」v${b.version ?? 1} 没成${r.line ? `（第 ${r.line} 行）` : ''}：${r.error}${m.text}`, { ...data, displacement: { horizontal: m.h, dy: m.dy } });
+      // 代码自己说没成（返回 {ok:false,…}）：照它说的算失败，不能记成“做完了”
+      const res = r.result as Record<string, unknown> | null | undefined;
+      if (res && typeof res === 'object' && !Array.isArray(res) && res.ok === false) {
+        return fail('ERROR', `代码技能「${b.name}」v${b.version ?? 1} 自己报告没成：${JSON.stringify(res).slice(0, 160)}${m.text}`, { ...data, result: r.result, displacement: { horizontal: m.h, dy: m.dy } });
+      }
       const judged = await verifyRun(b, bridge, { before, result: r.result ?? null, args: input }, ctx);
       if (judged) return fail('ERROR', `代码技能「${b.name}」v${b.version ?? 1} 说做完了，但${judged}${m.text}`, { ...data, result: r.result, verified: false, displacement: { horizontal: m.h, dy: m.dy } });
       return ok(`代码技能「${b.name}」做完了${m.text}${r.result !== null && r.result !== undefined ? `：${JSON.stringify(r.result).slice(0, 160)}` : ''}`, { ...data, result: r.result, displacement: { horizontal: m.h, dy: m.dy } });
