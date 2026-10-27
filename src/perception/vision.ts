@@ -587,6 +587,9 @@ export class Vision {
     return out.sort((a, b) => a.dist - b.dist);
   }
 
+  /** 这一格这几秒内亲眼看见是什么（看不见返回 null，不透视） */
+  seenAt(pos: Vec3Like): string | null { return this.visibleSurfaces.get(keyOf(pos.x, pos.y, pos.z))?.name ?? null; }
+
   /** 让最近扫描一次（例如转头之后）。距离上次不足 150ms 则跳过。 */
   refresh() {
     this.syncScope();

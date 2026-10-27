@@ -30,7 +30,7 @@ function rank(l: Landmark, latestDeath: Landmark | undefined): number {
 
 export function hudLandmarks(all: readonly Landmark[], here: { pos: { x: number; y: number; z: number }; dim: string } | null,
   max = 6, now = Date.now()): HudLandmark[] {
-  const usable = all.filter((l) => !l.label.startsWith('biome:') && (l.kind !== 'resource' || now - l.ts <= RESOURCE_TTL_MS));
+  const usable = all.filter((l) => !l.label.startsWith('biome:') && l.kind !== 'herd' && (l.kind !== 'resource' || now - l.ts <= RESOURCE_TTL_MS));
   const latestDeath = usable.filter((l) => l.kind === 'death').sort((a, b) => b.ts - a.ts)[0];
   const distance = (l: Landmark) => here && l.dim === here.dim
     ? Math.hypot(l.pos.x - here.pos.x, l.pos.y - here.pos.y, l.pos.z - here.pos.z) : null;

@@ -2,6 +2,8 @@ import type { SkillBook } from '../knowledge/skillbook.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import type { LedgerView } from './ledger.ts';
 import { cleanLesson, keywords, type SelfModel } from './self.ts';
+import { oreAlias } from '../memory/ore-spots.ts';
+import { creatureAlias, HERD_MAX_AGE_MS } from '../memory/creature-spots.ts';
 
 /**
  * 按关键词想起来：像人看到眼前的事会想起以前的经历、学过的做法。
@@ -59,7 +61,14 @@ export function recallLocal(query: string, src: RecallSources, opts: { n?: numbe
     for (const s of src.extraSkills ?? []) push({ kind: 'skill', text: s.text, ref: s.name }, score(s.text));
   }
   if (!skip.has('place')) {
-    try { for (const l of src.memory.landmarks()) push({ kind: 'place', text: `${l.label} (${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}) ${l.dim}`, ref: l.id }, score(`${l.label} ${l.kind}`), l.ts); } catch { /* 记忆暂不可用 */ }
+    try {
+      for (const l of src.memory.landmarks()) {
+        const herd = l.kind === 'herd';
+        if (herd && now - l.ts > HERD_MAX_AGE_MS) continue; // 动物早走远了
+        push({ kind: 'place', text: `${l.label} (${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}) ${l.dim}${herd ? `，${ago(l.ts, now)}见过 ${l.count ?? 1} 只${l.detail ? `（${l.detail}）` : ''}` : ''}`, ref: l.id },
+          score(`${l.label} ${l.kind}`, [oreAlias(l.label), herd ? creatureAlias(l.label) : '']), l.ts);
+      }
+    } catch { /* 记忆暂不可用 */ }
   }
   // 收获账：想到某样东西，就想起拿它一般花多少、在哪多、最省的做法是什么（名字或拿到它的那些活沾上关键词）
   if (!skip.has('ledger') && src.ledger) {

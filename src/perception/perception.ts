@@ -8,6 +8,8 @@ import { torchCount } from '../skills/light.ts';
 import { interactiveName, NOTABLE, type Vision, type VisionSummary } from './vision.ts';
 import { computeDrives, type Drive, type Stock } from '../brain/drives.ts';
 import { PassageTracker } from '../memory/passages.ts';
+import { oreKind } from '../memory/ore-spots.ts';
+import { HERD_SKIP } from '../memory/creature-spots.ts';
 import { EffectWatch } from '../brain/effects.ts';
 import { efficiencyInsights, type EfficiencyInsight } from '../brain/efficiency.ts';
 import { learnCandidates, reflectionDue } from '../brain/habits.ts';
@@ -326,6 +328,62 @@ export class Perception {
     return { sky_visible: skyVisible, depth_below_surface: surface ? round1(Math.max(0, surface.y - s.pos.y)) : null };
   }
 
+  /** 自己挖掉了矿：那一处记下的矿点就没了（同一片矿脉里还看得见的，下一次看见时会重新记） */
+  private forgetMinedOre(s: { dim: string }, dug: { pos: Vec3Like; name: string }[]) {
+    for (const d of dug) {
+      if (!d.name.endsWith('_ore')) continue;
+      for (const l of this.memory.landmarks()) {
+        if (l.kind === 'resource' && l.dim === s.dim && oreKind(l.label) === oreKind(d.name)
+          && Math.hypot(l.pos.x - d.pos.x, l.pos.y - d.pos.y, l.pos.z - d.pos.z) <= 3) this.memory.removeLandmark(l.id);
+      }
+    }
+  }
+
+  private herdAt = 0;
+  private herdMiss = new Map<string, number>();
+  /**
+   * 不主动攻击的生物（被动和中立的：羊、牛、狼、村民……）在哪一带出没：亲眼看见就记下（同一种挨在一起的算一群，记中心和只数）；
+   * 走到记得的出没点跟前、好几秒都没看见这种生物，就忘掉那一处（它们走开了）。
+   */
+  private noteHerds(s: { dim: string; pos: Vec3Like }, seen: { name: string; kind: string; pos: Vec3Like; traits?: string; how?: string }[]) {
+    const now = Date.now();
+    if (now - this.herdAt < 5000) return;
+    this.herdAt = now;
+    const groups = new Map<string, { pos: Vec3Like; traits?: string }[]>();
+    for (const e of seen) {
+      if (e.kind !== 'passive' || e.how === 'heard' || HERD_SKIP.has(e.name)) continue;
+      (groups.get(e.name) ?? groups.set(e.name, []).get(e.name)!).push(e);
+    }
+    for (const [name, list] of groups) {
+      const c = { x: list.reduce((a, e) => a + e.pos.x, 0) / list.length, y: list.reduce((a, e) => a + e.pos.y, 0) / list.length, z: list.reduce((a, e) => a + e.pos.z, 0) / list.length };
+      const tally = new Map<string, number>();
+      for (const e of list) for (const t of (e.traits ?? '').split('、').filter(Boolean)) tally.set(t, (tally.get(t) ?? 0) + 1);
+      const detail = [...tally].map(([t, n]) => `${t}×${n}`).join('、').slice(0, 60);
+      this.memory.noteHerd(name, s.dim, c, list.length, detail || undefined);
+    }
+    for (const l of this.memory.landmarks()) {
+      if (l.kind !== 'herd' || l.dim !== s.dim) continue;
+      const close = Math.hypot(l.pos.x - s.pos.x, l.pos.y - s.pos.y, l.pos.z - s.pos.z) <= 10;
+      if (!close || groups.has(l.label)) { this.herdMiss.delete(l.id); continue; }
+      const since = this.herdMiss.get(l.id) ?? now;
+      this.herdMiss.set(l.id, since);
+      if (now - since >= 8000) { this.memory.removeLandmark(l.id); this.herdMiss.delete(l.id); }
+    }
+  }
+
+  private vanishedCheckAt = 0;
+  /** 走到记得的矿点跟前，亲眼看见那一格已经不是矿了：忘掉这一处（只信看见的，不透视） */
+  private forgetVanishedOre(s: { dim: string; pos: Vec3Like }) {
+    if (Date.now() - this.vanishedCheckAt < 2000) return;
+    this.vanishedCheckAt = Date.now();
+    for (const l of this.memory.landmarks()) {
+      if (l.kind !== 'resource' || !l.label.endsWith('_ore') || l.dim !== s.dim) continue;
+      if (Math.hypot(l.pos.x - s.pos.x, l.pos.y - s.pos.y, l.pos.z - s.pos.z) > 8) continue;
+      const seen = this.vision.seenAt(l.pos);
+      if (seen && oreKind(seen) !== oreKind(l.label)) this.memory.removeLandmark(l.id);
+    }
+  }
+
   update(): Percept {
     const s = this.adapter.state();
     this.memory.setWorld(s.worldId);
@@ -367,11 +425,13 @@ export class Perception {
         } else if (STRUCTURE_HINT.has(b.name)) this.memory.addLandmark('discovery', b.name, s.dim, b.pos);
         else if (b.name.endsWith('_ore')) this.memory.addLandmark('resource', b.name, s.dim, b.pos);
       }
+      this.forgetVanishedOre(s);
       for (const e of v.seen) {
         if (e.kind === 'item' || e.kind === 'other') continue;
         const key = e.kind === 'player' ? 'player' : e.name;
         if (this.memory.markSeen('entities', key)) this.bus.publish('discovery', 'P2', `首次看见实体：${e.name}`, { category: 'entity', name: e.name });
       }
+      this.noteHerds(s, v.seen);
     }
 
     const vs = s.connected && s.observationReady ? v.summary(here) : null;
@@ -433,6 +493,7 @@ export class Perception {
       try {
         const dug = this.adapter.recentDug?.(this.lastDugAt) ?? [];
         if (dug.length) this.lastDugAt = dug[dug.length - 1].ts;
+        this.forgetMinedOre(s, dug);
         const place = where.kind === 'surface' || where.kind === 'indoors' ? 'surface' : where.kind === 'underground' ? 'underground' : 'other';
         this.passages.observe({ worldId: s.worldId, dim: s.dim, pos: s.pos, place }, dug);
       } catch { /* 记不下来不影响感知 */ }

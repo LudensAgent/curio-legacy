@@ -4,6 +4,7 @@ import { lookAround } from './movement.ts';
 import { sleepSkill } from './build.ts';
 import { findStation } from './stations.ts';
 import { canSleepAt } from '../perception/perception.ts';
+import { creatureSpotsNear } from '../memory/creature-spots.ts';
 
 /** 可以用来封顶/搭建的方块（不含会下落的沙子沙砾） */
 export const PLACEABLE = [
@@ -305,7 +306,12 @@ export const hunt: Skill<{ animal?: string; count: number }> = {
         for (const e of senses.perceivedEntities(48)) if (e.kind === 'passive' && e.name !== args.animal) others.set(e.name, (others.get(e.name) ?? 0) + 1);
         const food = [...others].filter(([n]) => FOOD_ANIMALS.has(n));
         const seen = others.size ? `；看得见的动物：${[...others].map(([n, c]) => `${n}×${c}`).join('、')}${food.length && args.animal ? '（其中有能吃的，可以改猎它们）' : ''}` : '；视野里一只动物都没有';
-        return fail('NOT_FOUND', `转头找过了，视野里没有${fishing && deepFish ? `能在浅水够到的 ${what}（看见的都在深水里，不潜下去）` : what}${escaped ? `（有 ${escaped} 只跑出了视线）` : ''}${seen}；动物多在开阔的草地、平原，可以 explore 换个地方，或 forage 摘苹果/浆果`, { searched: true, seen: Object.fromEntries(others) });
+        // 眼前没有，但记得别处见过：说出在哪、多久前（动物会走动，只是大概那一带；去不去由心智定）
+        const st = ctx.adapter.state();
+        const want = args.animal ? [args.animal] : [...FOOD_ANIMALS];
+        const spots = creatureSpotsNear(ctx.memory.landmarks(), { worldId: st.worldId, dim: st.dim, pos: st.pos }, { only: want, excludeWithin: 12 }).slice(0, 3);
+        const remembered = spots.length ? `；记得别处见过：${spots.map((o) => `${o.label} ${o.text}`).join('；')}——要去就 goto {"target":"${spots[0].pos.x},${spots[0].pos.y},${spots[0].pos.z}"} 再 hunt` : '';
+        return fail('NOT_FOUND', `转头找过了，视野里没有${fishing && deepFish ? `能在浅水够到的 ${what}（看见的都在深水里，不潜下去）` : what}${escaped ? `（有 ${escaped} 只跑出了视线）` : ''}${seen}${remembered || '；动物多在开阔的草地、平原，可以 explore 换个地方，或 forage 摘苹果/浆果'}`, { searched: true, seen: Object.fromEntries(others), ...(spots.length ? { remembered: spots.map((o) => o.pos) } : {}) });
       }
       const id = target.id;
       let lastPos = target.pos;

@@ -6,7 +6,7 @@ import { reservationsFor } from '../projects/reservations.ts';
 import type { Decision, Intent, Preference } from '../intentions/types.ts';
 import type { Evidence, PauseReason, Project } from '../projects/types.ts';
 
-export type LandmarkKind = 'base' | 'resource' | 'danger' | 'discovery' | 'death' | 'waypoint';
+export type LandmarkKind = 'base' | 'resource' | 'danger' | 'discovery' | 'death' | 'waypoint' | 'herd';
 
 export interface Landmark {
   id: string;
@@ -18,6 +18,9 @@ export interface Landmark {
   /** Selection metadata, independent of the last actual observation time. */
   primary?: boolean;
   worldId?: string;
+  /** herd（不主动攻击的生物出没点）：上次看见几只、外观（羊的颜色等） */
+  count?: number;
+  detail?: string;
 }
 
 export interface GoalRecord {
@@ -413,7 +416,7 @@ export class WorldMemory {
     this.data.landmarks.push(lm);
     if (this.data.landmarks.length > 200) {
       const disposable = this.data.landmarks.map((landmark, index) => ({ landmark, index }))
-        .filter(({ landmark }) => ['resource', 'danger', 'death'].includes(landmark.kind)).sort((a, b) => a.landmark.ts - b.landmark.ts)[0];
+        .filter(({ landmark }) => ['herd', 'resource', 'danger', 'death'].includes(landmark.kind)).sort((a, b) => a.landmark.ts - b.landmark.ts)[0];
       if (disposable) this.data.landmarks.splice(disposable.index, 1);
       else { this.data.landmarks.pop(); return null; }
     }
@@ -470,7 +473,7 @@ export class WorldMemory {
     if (!base) {
       if (this.bases().length >= 64) throw new Error('当前世界已保存 64 个基地，需要先人工回顾，不能静默丢弃旧基地');
       if (this.data.landmarks.length >= 200) {
-        const disposable = this.data.landmarks.map((landmark, index) => ({ landmark, index })).filter(({ landmark }) => ['resource', 'danger', 'death'].includes(landmark.kind)).sort((a, b) => a.landmark.ts - b.landmark.ts)[0];
+        const disposable = this.data.landmarks.map((landmark, index) => ({ landmark, index })).filter(({ landmark }) => ['herd', 'resource', 'danger', 'death'].includes(landmark.kind)).sort((a, b) => a.landmark.ts - b.landmark.ts)[0];
         if (!disposable) throw new Error('地标档案已满；保留所有重要地点，无法新增基地');
         this.data.landmarks.splice(disposable.index, 1);
       }
@@ -528,6 +531,27 @@ export class WorldMemory {
     this.data.landmarks.splice(i, 1);
     this.touch();
     return true;
+  }
+
+  /**
+   * 不主动攻击的生物（羊、牛、狼、村民……）在哪一带出没：同一种 32 格内只记一处，再看见就挪到这回看见的中心、刷新数量和时间。
+   * 每个世界最多记 40 处，满了先忘最久没见的。
+   */
+  noteHerd(label: string, dim: string, pos: Vec3Like, count: number, detail?: string): Landmark {
+    const p = { x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z) };
+    const near = this.data.landmarks.find((l) => this.inWorld(l) && l.kind === 'herd' && l.label === label && l.dim === dim && dist3(l.pos, p) < 32);
+    if (near) {
+      near.pos = p; near.ts = Date.now(); near.count = count;
+      if (detail) near.detail = detail; else delete near.detail;
+      this.touch();
+      return near;
+    }
+    const herds = this.data.landmarks.filter((l) => this.inWorld(l) && l.kind === 'herd').sort((a, b) => a.ts - b.ts);
+    if (herds.length >= 40) this.data.landmarks = this.data.landmarks.filter((l) => l !== herds[0]);
+    const lm: Landmark = { id: shortId('herd_'), kind: 'herd', label, dim, pos: p, ts: Date.now(), worldId: this.worldId, count, ...(detail ? { detail } : {}) };
+    this.data.landmarks.push(lm);
+    this.touch();
+    return lm;
   }
 
   /** 资源地标附近 radius 格内、名字匹配 names 的地标 */

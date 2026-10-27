@@ -16,6 +16,8 @@ import type { Activity, ActivityRecord, Noticing, StuckHere } from './types.ts';
 import type { FocusPlan } from './self.ts';
 import { RECALL_LABEL, type Recalled } from './recall.ts';
 import { foodNote } from '../skills/food.ts';
+import { oreSpotsByKind, oreSpotsNear } from '../memory/ore-spots.ts';
+import { creatureSpotsByKind, creatureSpotsNear } from '../memory/creature-spots.ts';
 
 export interface MindContext {
   tier: 'glance' | 'deliberate';
@@ -390,7 +392,8 @@ function worldKnowledge(ctx: MindContext) {
   const p = ctx.percept, s = ctx.state, m = ctx.memory;
   const here = { x: p.self.pos[0], y: p.self.pos[1], z: p.self.pos[2] };
   // 自己的设施（箱子、工作站、床、挖过的通道）在 my_facilities 里单独说，这里只列别的地点
-  const places = m.landmarks().filter((l) => l.dim === p.self.dim && l.worldId === s.worldId && !FACILITY_LABELS.has(l.label))
+  // 矿点按矿种单独列（ore_spots），不和死亡点、基地挤这 8 个位置
+  const places = m.landmarks().filter((l) => l.dim === p.self.dim && l.worldId === s.worldId && !FACILITY_LABELS.has(l.label) && !(l.kind === 'resource' && /_ore$/.test(l.label)) && l.kind !== 'herd')
     .map((l) => ({ l, d: Math.round(Math.hypot(l.pos.x - here.x, l.pos.z - here.z)) })).sort((a, b) => a.d - b.d).slice(0, 8)
     .map(({ l, d }) => `${l.label}[${l.id}] (${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}) ${d}格`);
   const facilities = ctx.tier === 'deliberate' ? myFacilities(m, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['chest', 'station', 'passage']).slice(0, 8).map((f) => f.text) : [];
@@ -402,6 +405,10 @@ function worldKnowledge(ctx: MindContext) {
   const home = homeOf(m, { worldId: s.worldId, dim: p.self.dim, pos: here });
   const drafts = activeDrafts()?.list(4).filter((d) => !d.usedBy) ?? [];
   const remember = p.nearby.resources.filter((r) => r.seen === 'memory').slice(0, ctx.tier === 'glance' ? 3 : 6).map((r) => `${r.block} ${r.dir ?? ''}${r.nearest}格`);
+  // 记得的矿点：每种矿最近的一两处（带高低差），瞥一眼也看得到——想挖铁时知道铁在哪
+  const ores = oreSpotsByKind(oreSpotsNear(m.landmarks(), { worldId: s.worldId, dim: p.self.dim, pos: here }), ctx.tier === 'glance' ? 1 : 2, ctx.tier === 'glance' ? 5 : 8);
+  // 记得的生物出没点（不主动攻击的：羊、牛、狼、村民……）：动物会走动，只是大概那一带，带着多久前看见
+  const herds = creatureSpotsByKind(creatureSpotsNear(m.landmarks(), { worldId: s.worldId, dim: p.self.dim, pos: here }), 1, ctx.tier === 'glance' ? 5 : 10);
   return {
     home: home ? `${home.label} 在${home.dir}边 ${home.dist} 格 (${Math.round(home.pos.x)},${Math.round(home.pos.y)},${Math.round(home.pos.z)})` : '还没有家',
     ...(bed ? { my_bed: `(${bed.pos.x},${bed.pos.y},${bed.pos.z}) ${bed.dist}格` } : {}),
@@ -409,6 +416,8 @@ function worldKnowledge(ctx: MindContext) {
     // 建筑师画好、还没盖的图纸：一直惦记着
     ...(drafts.length ? { my_drafts: drafts.map((d) => `${d.id}「${d.name}」${d.size.width}×${d.size.depth}，用料 ${Object.entries(d.materials).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([n, c]) => `${n}×${c}`).join('、')}`) } : {}),
     ...(remember.length ? { resources_seen_before: remember } : {}),
+    ...(Object.keys(ores).length ? { ore_spots: ores } : {}),
+    ...(Object.keys(herds).length ? { animal_spots: herds } : {}),
     ...(ctx.tier === 'deliberate' ? { places, ...(facilities.length ? { my_facilities: facilities } : {}), ...(portals.length ? { portals } : {}), explored_around: exploredAround(m, p.self.dim, p.self.pos) } : {}),
     ...(danger.length ? { danger_zones: danger } : {}),
   };

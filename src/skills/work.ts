@@ -6,6 +6,7 @@ import { ownBuildingAt } from './build.ts';
 import { AbortedError, dist3, sleep } from '../util.ts';
 import { codeFromError, clampInt, fail, isAbort, obj, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 import { craftReservationConflict } from '../projects/reservations.ts';
+import { oreSpotsNear } from '../memory/ore-spots.ts';
 import { config } from '../config.ts';
 import { FOOD_VALUE, foodNote } from './food.ts';
 
@@ -284,19 +285,25 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
           const r = await lookAround.run(ctx, { seconds: 3, for: args.block });
           if (r.status === 'succeeded') continue;
         }
-        // 走到了记忆里的资源地标附近却看不到它：地标过时（被挖走 / 记错），从记忆里抹掉
-        const stale = ctx.memory.resourceLandmarksNear(names, s.dim, s.pos, 16);
+        // 走到了记忆里的资源地标跟前（5 格内）、转头找过也看不到它：地标过时（被挖走 / 记错），从记忆里抹掉。
+        // 远一点的不抹：矿常常埋在石头里，站在十几格外看不见不代表没了
+        const stale = ctx.memory.resourceLandmarksNear(names, s.dim, s.pos, 5);
         for (const l of stale) ctx.memory.removeLandmark(l.id);
         const staleNote = stale.length ? `；已把 ${stale.length} 个过时的 ${args.block} 地标从记忆里删除` : '';
         const looked = searched ? '（已转头找过）' : '';
         const skipped = risky.hazard + risky.wet + risky.deep;
         const ownNote = ownSkipped.size ? `；另有 ${ownSkipped.size} 块是自己房子上的，没拆（拆了还得补）` : '';
+        // 眼前看不见，但长期记着别处有：说出在哪（去不去由心智定）；“记忆里没有”只在真没记过时才说
+        const spots = names.some((n) => /_ore$/.test(n)) ? oreSpotsNear(ctx.memory.landmarks(), { worldId: s.worldId, dim: s.dim, pos: s.pos }, { only: names, excludeWithin: 6 }).slice(0, 3) : [];
+        const remembered = spots.length
+          ? `；不过记得别处有 ${args.block}：${spots.map((o) => o.text).join('；')}——要去就 goto {"target":"${spots[0].pos.x},${spots[0].pos.y},${spots[0].pos.z}","dig":true} 走到跟前再 gather`
+          : /_ore$/.test(args.block) ? `；长期记忆里也没记过哪里有 ${args.block}` : '';
         return dug > 0
-          ? ok(`看不到更多 ${args.block}${looked}，采集了 ${dug}/${args.count}${ownNote}${staleNote}${riskNote()}`, { searched, ...(skipped ? { skippedUnsafe: { ...risky } } : {}) })
+          ? ok(`看不到更多 ${args.block}${looked}，采集了 ${dug}/${args.count}${ownNote}${staleNote}${riskNote()}${remembered}`, { searched, ...(skipped ? { skippedUnsafe: { ...risky } } : {}) })
           : fail('NOT_FOUND', skipped
             ? `能看见的 ${args.block} 都不安全，没有去挖${riskNote()}${looked}${staleNote}`
             : ownSkipped.size ? `附近能看到的 ${args.block} 都是自己房子上的（${ownSkipped.size} 块），拆了还得补，没去挖；要去别处找${staleNote}`
-            : `视野和记忆里都没有 ${args.block}${looked}${staleNote}；尚未定位该资源，不代表其他地点也没有`, { searched, ...(skipped ? { skippedUnsafe: { ...risky } } : {}) });
+            : `眼前看不见 ${args.block}${looked}${staleNote}${remembered || '；尚未定位该资源，不代表其他地点也没有'}`, { searched, ...(spots.length ? { remembered: spots.map((o) => o.pos) } : {}), ...(skipped ? { skippedUnsafe: { ...risky } } : {}) });
       }
       // 记忆里的方块可能已经被砍掉/不在加载范围：这种目标跳过，不能误报成“缺工具”
       const present = hits.filter((h) => adapter.blockAt(h.pos) === h.name);

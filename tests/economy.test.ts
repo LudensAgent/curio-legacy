@@ -55,14 +55,25 @@ test('记忆迁移：旧版本穿墙得来的矿物地标被清掉，自己的�
   assert.equal(new WorldMemory(file).migrated, 0, '迁移只做一次');
 });
 
-test('过时地标：走到资源地标附近却看不到矿，gather 失败并把地标删掉', async () => {
+test('过时地标：走到资源地标跟前（5 格内）却看不到矿，gather 失败并把地标删掉', async () => {
   const a = new FakeAdapter();
   const memory = new WorldMemory(null);
-  memory.addLandmark('resource', 'iron_ore', 'overworld', { x: 3, y: 56, z: 2 });
+  memory.addLandmark('resource', 'iron_ore', 'overworld', { x: 2, y: 63, z: 2 });
   const { o } = await runSkill(a, 'gather', { block: 'iron_ore', count: 2 }, memory);
   assert.equal(o.result.failureCode, 'NOT_FOUND');
   assert.match(o.result.summary, /过时的 iron_ore 地标/);
   assert.equal(memory.landmarks().filter((l) => l.kind === 'resource').length, 0);
+});
+
+test('远一点、埋在石头里的矿点看不见不删：留着，并在失败结果里说出在哪', async () => {
+  const a = new FakeAdapter();
+  const memory = new WorldMemory(null);
+  memory.setWorld(a.state().worldId);
+  memory.addLandmark('resource', 'iron_ore', 'overworld', { x: 3, y: 56, z: 2 });
+  const { o } = await runSkill(a, 'gather', { block: 'iron_ore', count: 2 }, memory);
+  assert.equal(o.result.failureCode, 'NOT_FOUND');
+  assert.match(o.result.summary, /记得别处有 iron_ore：\(3,56,2\)/);
+  assert.equal(memory.landmarks().filter((l) => l.kind === 'resource').length, 1);
 });
 
 test('物品泛称：bed → white_bed、planks → oak_planks；按背包材料挑颜色/木种', () => {
