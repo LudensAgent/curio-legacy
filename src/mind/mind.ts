@@ -959,9 +959,9 @@ export class Mind {
       for (const n of noticed) this.attention.notice(`${n.key}:again`, n.what, n.salience * 0.8, 0); // 没想成，注意到的事别丢
       this.d.bus.publish('llm_error', 'P1', `脑子卡了一下：${String(e?.message ?? e).slice(0, 200)}；先凭习惯继续`);
       if (this.d.arbiter.info()?.source === 'filler') this.d.arbiter.cancel('思考失败');
-      // 脑子转不动的时候凭习惯做事：手上没活就按规则找点事做，保证不发呆
+      // 脑子转不动的时候：手上没活就先停下看看四周（不替它定玩法），等下一次想清楚
       if (!this.activity && !this.queuedNext) {
-        const habit = this.d.thinker.ruleDecision({ ...ctx, activity: null, tier: 'deliberate' });
+        const habit = this.d.thinker.idleDecision();
         if (habit.activity) this.beginActivity(habit.activity, habit.monologue || '先凭习惯做点事', 'habit', 'habit');
       }
       this.kick();

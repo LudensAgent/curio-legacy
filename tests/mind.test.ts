@@ -229,13 +229,14 @@ test('卡住时认真想，并把实际结果和卡住时的备选交给模型�
   assert.ok(w.memory.lessonsFor(5).some((l) => /圆石/.test(l.text)));
 });
 
-test('模型出错时凭习惯继续玩，不发呆', async (t) => {
+test('模型出错时不发呆：先停下看看四周，不替它定玩法', async (t) => {
   const w = fixture(t);
   await w.tick();
   w.pending[0].reject(new Error('HTTP 503'));
   await flush();
   assert.equal(w.mind.activity?.source, 'habit');
   assert.ok(w.arbiter.info(), '有事在做');
+  assert.equal(w.arbiter.info()?.skill, 'look_around', '只停下看看，不替它定玩法');
 });
 
 test('瞥一眼觉得需要深想时升级为完整思考', async (t) => {

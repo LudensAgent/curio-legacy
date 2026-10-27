@@ -429,7 +429,16 @@ export class Thinker {
     }
   }
 
-  /** mock/兜底：规则目标包装成一段活，保证没有模型也能连贯地玩 */
+  /**
+   * 脑子一时转不动（模型报错）时的兜底：不替它定玩法（以前是一棵写死的“砍树→木镐→石镐、天黑挖坑”），
+   * 只停下来看看四周，等下一次想清楚。危险由反射层的底线管
+   */
+  idleDecision(requestedAt = Date.now()): MindDecision {
+    return { kind: 'new', monologue: '脑子有点乱，先停下看看四周', notes: [], source: 'rule', tier: 'glance', requestedAt,
+      activity: { what: '先停下看看四周', why: '等想清楚再动', kind: 'rest', repeat: 1, steps: [{ skill: 'look_around', args: { seconds: 4 } }] } };
+  }
+
+  /** mock 模式（没有模型）：规则目标包装成一段活，保证整条链路能连贯地跑 */
   ruleDecision(ctx: MindContext, requestedAt = Date.now()): MindDecision {
     if (ctx.activity && ctx.tier === 'glance' && !ctx.noticed.some((n) => n.level !== 'note')) {
       return { kind: 'continue', monologue: '', notes: [], source: 'rule', tier: ctx.tier, requestedAt };
