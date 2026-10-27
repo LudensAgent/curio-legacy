@@ -1980,7 +1980,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     check();
     const b = this.bot;
     const block = b.blockAt(this.vec(pos));
-    if (!block || !['chest', 'trapped_chest', 'barrel'].includes(block.name)) return { ok: false, reason: 'NO_CHEST', contents: [], moved: 0 };
+    // 那一片没加载（离得太远）：看不到那里是什么，不能当成“箱子没了”
+    if (!block) return { ok: false, reason: 'UNLOADED', contents: [], moved: 0 };
+    if (!['chest', 'trapped_chest', 'barrel'].includes(block.name)) return { ok: false, reason: 'NO_CHEST', contents: [], moved: 0 };
     // 原版规则：箱子顶上压着实心不透明方块就开不了盖（木桶不受影响）。以前直接 openContainer 干等 8 秒超时，
     // 心智只看到 TIMEOUT，猜是“站不到旁边”，最后干脆把箱子挖了
     if (block.name !== 'barrel') {

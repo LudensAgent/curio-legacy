@@ -271,10 +271,20 @@ export const takeItems: Skill<{ item: string; count: number }> = {
     return { ok: true, args: { item, count: clampInt(a.count, 1, 64, 16) } };
   },
   async run(ctx, args) {
-    const chests = ctx.memory.chests().filter((c) => c.items.some((i) => i.name === args.item && i.count > 0));
-    if (!chests.length) return lookInNearbyChests(ctx, args.item, args.count);
     const s = ctx.adapter.state();
-    chests.sort((a, b) => Math.hypot(a.pos.x - s.pos.x, a.pos.z - s.pos.z) - Math.hypot(b.pos.x - s.pos.x, b.pos.z - s.pos.z));
+    const flat = (p: Vec3Like) => Math.round(Math.hypot(p.x - s.pos.x, p.z - s.pos.z));
+    const all = ctx.memory.chests().filter((c) => c.items.some((i) => i.name === args.item && i.count > 0));
+    // 别的维度、或者远到这一趟走不过去的箱子：不去开（开不到也不等于箱子没了），只告诉它在哪
+    const REACH = 96;
+    const chests = all.filter((c) => c.dim === s.dim && flat(c.pos) <= REACH);
+    const far = all.filter((c) => !chests.includes(c)).sort((a, b) => flat(a.pos) - flat(b.pos)).slice(0, 3)
+      .map((c) => `(${c.pos.x},${c.pos.y},${c.pos.z})${c.dim !== s.dim ? `（${c.dim}）` : ` ${flat(c.pos)} 格外`}的箱子里记得有 ${args.item}×${c.items.filter((i) => i.name === args.item).reduce((t, i) => t + i.count, 0)}`);
+    const farNote = far.length ? `；更远的：${far.join('、')}——要的话先走过去再取` : '';
+    if (!chests.length) {
+      const r = await lookInNearbyChests(ctx, args.item, args.count);
+      return r.status === 'succeeded' || !farNote ? r : fail('NOT_FOUND', `${r.summary}${farNote}`, r.data);
+    }
+    chests.sort((a, b) => flat(a.pos) - flat(b.pos));
     // 记得的箱子挨个试：那里已经不是箱子了就忘掉它换下一个，而不是一直报 NO_CHEST 让心智去“修”
     const tried: string[] = [];
     for (const c of chests.slice(0, 3)) {
@@ -282,6 +292,7 @@ export const takeItems: Skill<{ item: string; count: number }> = {
       try {
         const r = await openChest(ctx, c.pos, [], [{ name: args.item, count: args.count }]);
         if (!r.ok && r.reason === 'NO_CHEST') { ctx.memory.forgetChest(c.dim, c.pos); tried.push(`${at} 已经没有箱子了（记录删了）`); continue; }
+        if (!r.ok && r.reason === 'UNLOADED') { tried.push(`${at} 那一片还没加载、看不到，走近了再取`); continue; }
         if (!r.ok) { tried.push(`${at}：${r.reason}`); continue; }
         ctx.memory.setChest(c.dim, c.pos, r.contents);
         if (r.moved) return ok(`在 ${at} 的箱子里取出 ${r.moved} 个 ${args.item}${clearedNote(r)}`);
@@ -293,7 +304,7 @@ export const takeItems: Skill<{ item: string; count: number }> = {
     }
     const fallback = await lookInNearbyChests(ctx, args.item, args.count);
     if (fallback.status === 'succeeded') return fallback;
-    return fail('NOT_FOUND', `没取到 ${args.item}：${tried.join('；')}；${fallback.summary}。箱子打不开别挖箱子，东西会洒一地`);
+    return fail('NOT_FOUND', `没取到 ${args.item}：${tried.join('；')}；${fallback.summary}${farNote}。箱子打不开别挖箱子，东西会洒一地`);
   },
 };
 
