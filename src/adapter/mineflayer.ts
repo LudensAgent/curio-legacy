@@ -5,6 +5,7 @@ import { crystalArrowShot } from '../combat/ballistics.ts';
 import type { Config } from '../config.ts';
 import type { EventBus } from '../events.ts';
 import { AbortedError, raceAbort, shortId, sleep, throwIfAborted, TimeoutError } from '../util.ts';
+import { installClientGuard } from './click-guard.ts';
 import { cornerSafe } from './corner-safe.ts';
 import { AIR_BLOCKS } from '../perception/surroundings.ts';
 import type {
@@ -196,13 +197,17 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // writing their next packet. Preserve ownership through those continuations.
     const client = this.bot?._client;
     if (client && !this.guardedClients.has(client)) {
-      const write = client.write;
       const context = this.actionContext;
-      client.write = function (...args: any[]) {
-        const guard = context.getStore();
-        try { guard?.(); } catch { return; }
-        return write.apply(this, args);
-      };
+      installClientGuard(client, {
+        guard: () => context.getStore(),
+        // 界面点击失控（见 click-guard.ts）：记下当时的窗口和光标，事后能看出是哪种操作
+        onLoop: (clicks) => {
+          const b = this.bot;
+          queueMicrotask(() => this.bus.publish('click_loop', 'P1', `界面点击失控，已中止：同一轮连续点了 ${clicks} 下（窗口 ${b?.currentWindow?.type ?? '背包'}，光标上 ${b?.inventory?.selectedItem?.name ?? b?.currentWindow?.selectedItem?.name ?? '没东西'}）`,
+            { clicks, window: b?.currentWindow?.type ?? null, selected: b?.currentWindow?.selectedItem?.name ?? b?.inventory?.selectedItem?.name ?? null, emptySlots: b?.inventory?.emptySlotCount?.() ?? null }));
+          this.scheduleRepair('界面点击失控', 500);
+        },
+      });
       this.guardedClients.add(client);
     }
     this.inFlight++;
