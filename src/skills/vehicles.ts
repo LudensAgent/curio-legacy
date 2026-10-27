@@ -195,7 +195,7 @@ export type BoatRoute = {
  *   能跨上去 = 岸上落脚处和水面齐平或只高一格（从船上跳得上去）；两格以上的土坎不算。
  * 一格宽的水道船身挤不过去，代价很高；没加载的区块当作走不通。
  */
-export function planBoatRoute(ctx: Ctx, from: Vec3Like, target: XZ, opts: { maxNodes?: number; avoid?: Set<string> } = {}): BoatRoute | null {
+export function planBoatRoute(ctx: Ctx, from: Vec3Like, target: XZ, opts: { maxNodes?: number; avoid?: Set<string>; /** 不管目标，只找最近的能上岸的地方 */ anyShore?: boolean } = {}): BoatRoute | null {
   const sy = surfaceYAt(ctx, from);
   if (sy === null) return null;
   const key = (x: number, z: number) => `${x},${z}`;
@@ -222,8 +222,8 @@ export function planBoatRoute(ctx: Ctx, from: Vec3Like, target: XZ, opts: { maxN
   }
   if (!start) return null;
   const tx = Math.floor(target.x), tz = Math.floor(target.z);
-  const targetWater = nav(tx, tz);
-  const h = (x: number, z: number) => Math.hypot(x - tx, z - tz);
+  const targetWater = !opts.anyShore && nav(tx, tz);
+  const h = (x: number, z: number) => (opts.anyShore ? 0 : Math.hypot(x - tx, z - tz));
   // 搜索范围：起点和目标的包围盒外扩 48 格
   const minX = Math.min(start.x, tx) - 48, maxX = Math.max(start.x, tx) + 48, minZ = Math.min(start.z, tz) - 48, maxZ = Math.max(start.z, tz) + 48;
   // 船身 1.375 格宽：船心在格子正中时会探进四周 8 格各 0.19 格，旁边（含斜角）有方块就会蹭上、卡在角上。
@@ -246,7 +246,7 @@ export function planBoatRoute(ctx: Ctx, from: Vec3Like, target: XZ, opts: { maxN
       for (const [dy, extra] of [[1, 0], [2, 2]] as const) {
         const p = { x: x + dx, y: sy + dy, z: z + dz };
         if (!standable(ctx, p)) continue;
-        const walk = Math.hypot(p.x - tx, p.z - tz) * 1.2 + extra + (dx && dz ? 0.5 : 0);
+        const walk = (opts.anyShore ? 0 : Math.hypot(p.x - tx, p.z - tz) * 1.2) + extra + (dx && dz ? 0.5 : 0);
         if (!best || walk < best.score) best = { p, extra: walk, score: walk };
         break;
       }
@@ -382,6 +382,36 @@ async function stepAshore(ctx: Ctx, heading: { x: number; z: number }, prefer: V
     if (isAbort(e)) throw e;
   }
   return !footOverWater(ctx);
+}
+
+/**
+ * 下船时旁边没有能落脚的地方，服务器会把人放在船顶上。mineflayer 的物理不知道船的碰撞箱：它以为脚下是水、一直往下掉，
+ * 服务器一刻刻把人拉回船顶（回放里一秒十来次传送），人就僵在那里，寻路、放船都做不成。把脚下这条船打掉，人落进水里再游。
+ * 只认脚底下贴着的那条（身体碰着的，不靠眼睛）
+ */
+async function getOffBoatTop(ctx: Ctx, boatId: number | null): Promise<boolean> {
+  const { adapter, senses, signal } = ctx;
+  const st = adapter.state();
+  // 站得住（onGround）脚下却是水：踩着的是一个实体，多半就是船
+  if (st.riding || st.onGround === false || st.inWater || !footOverWater(ctx)) return false;
+  const eye = adapter.eye();
+  try { await adapter.look(eye?.yaw ?? 0, -Math.PI / 2 + 0.05, signal); } catch (e) { if (isAbort(e)) throw e; } // 低头看脚下
+  await sleep(150, signal);
+  const find = () => {
+    senses.refresh();
+    const p = adapter.state().pos;
+    return senses.perceivedEntities(4).find((e) => e.kind !== 'item' && isPlainBoat(e.name) && (boatId === null || e.id === boatId)
+      && Math.hypot(e.pos.x - p.x, e.pos.z - p.z) < 1.2 && p.y - e.pos.y > 0.2 && p.y - e.pos.y < 1.2);
+  };
+  const under = find();
+  if (!under) return false;
+  for (let i = 0; i < 8; i++) {
+    await adapter.attack(under.id, signal);
+    await sleep(300, signal);
+    senses.refresh();
+    if (!senses.perceivedEntities(4).some((e) => e.id === under.id)) return true;
+  }
+  return false;
 }
 
 /** 被取消时还坐在船上：用独立的信号尽量下船（原任务的信号已经中止了） */
@@ -607,6 +637,19 @@ export const boat: Skill<BoatArgs> = {
         replans++;
         if (Date.now() > ctx.deadline - 30000) break;
       }
+      // 停在了水中间（水路到不了目标、半路被挡）：先靠到最近能上岸的地方再下船——在水中间下船会被服务器放到船顶上，人僵在那里
+      if (!seen && r.ok && !(route?.reach === 'shore' && r.arrived) && !(route?.reach === 'water' && r.arrived) && adapter.state().riding) {
+        const here = adapter.state().pos;
+        const alt = planBoatRoute(ctx, here, here, { anyShore: true, avoid });
+        if (alt?.landing) {
+          const end = alt.waypoints[alt.waypoints.length - 1];
+          const r2 = Math.hypot(end.x - here.x, end.z - here.z) <= 1.2 ? { ok: true, arrived: true, moved: 0 }
+            : await adapter.ride(end, signal, { timeoutMs: Math.max(3000, Math.min(30000, ctx.deadline - Date.now() - 20000)), via: alt.waypoints.slice(0, -1), arriveWithin: 0.8 });
+          moved += r2.moved;
+          const p2 = adapter.state().pos;
+          if (r2.arrived || Math.hypot(end.x - p2.x, end.z - p2.z) <= 1.8) { route = alt; r = { ...r2, arrived: true }; notes.push('水路到不了目标，先靠到了最近能上岸的地方'); }
+        }
+      }
       moved = Math.round(moved);
       const found = seen as { what: string; dist: number } | null;
       const how = found ? `看见 ${found.what}（${found.dist} 格外）停下`
@@ -624,10 +667,13 @@ export const boat: Skill<BoatArgs> = {
         if (!d.ok) return fail('ERROR', `划了 ${moved} 格（${how}），但下不了船：${d.reason}`, { moved });
       }
       const boatPos = boatAt; // 下船前船所在的位置（下船后人已经在岸上了，回头找船要看这里）
+      const brokeUnder = await getOffBoatTop(ctx, boatId);
+      if (brokeUnder) notes.push('下船时被放到了船顶上（旁边没有能站的岸），把脚下的船打掉落进水里');
       const ashore = await stepAshore(ctx, heading, landing);
       if (!ashore) notes.push(landing ? `靠岸了但没能跨上岸（岸边落脚处 ${landing.x},${landing.y},${landing.z}），还在水里` : '附近没有能从水里直接上去的岸（岸太高或太远），还在水里');
       let kept = false;
-      if (args.keep && ashore) {
+      if (brokeUnder) notes.push(`船打成了掉落物，漂在 (${Math.round(boatPos.x)},${Math.round(boatPos.z)}) 附近，要的话 pickup_items`);
+      else if (args.keep && ashore) {
         ctx.progress(0.92, '把船收回背包');
         const k = await retrieveBoat(ctx, boatId, boatItems, boatPos);
         kept = k.kept;

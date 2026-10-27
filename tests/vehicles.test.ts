@@ -194,3 +194,15 @@ test('boat：放船不放在自己身上（船身压着人服务器不让放）�
   assert.equal(r.status, 'succeeded', r.summary);
   assert.ok(!a.actions.includes('boat:blocked-by-self'), a.actions.join(' '));
 });
+
+test('boat：目标水域连不过去 → 不在水中间下船，先靠到最近能上岸的地方', async () => {
+  const a = new FakeAdapter();
+  lake(a);
+  for (let x = 15; x <= 25; x++) for (let z = 20; z <= 25; z++) a.blocks.push({ name: 'water', pos: { x, y: 63, z } }); // 北边另一个水塘，不连着
+  a.inv.set('oak_boat', 1);
+  const { run } = setup(a);
+  const r = await run('boat', { to: '20,22', keep: false });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.match(r.summary, /上岸/, r.summary);
+  assert.equal(a.inWater, false, r.summary);
+});
