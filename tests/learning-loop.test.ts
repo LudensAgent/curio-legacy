@@ -110,7 +110,9 @@ test('整理技能：长期用不上的收起；说同一件事的后台合并�
   const book = new SkillBook(BUILTIN_SKILLS_DIR, tmp());
   const engine = new BehaviorEngine(book, adapter, null, bus, noSenses);
   const mk = (name: string, priority = 50) => engine.write({ name, description: `${name} 的做法`, when: { hp_below: 8, hostile: { within: 8 } }, code: 'return 1;', priority });
-  for (const n of ['run-away', 'flee-from-mobs', 'pillar-up', 'never-used']) assert.ok(mk(n).ok);
+  for (const n of ['run-away', 'flee-from-mobs', 'pillar-up']) assert.ok(mk(n).ok);
+  // 不是救命的技能才按“好久没用”收（救命的平时用不上是正常的）
+  assert.ok(engine.write({ name: 'never-used', description: '饿了先吃背包里的面包', when: { food_below: 8 }, code: 'return 1;' }).ok);
   // 成功率影响选择：同优先级下成功多的分更高
   (engine as any).stats['run-away'] = { fired: 6, ok: 5, fail: 1, lastAt: Date.now() };
   (engine as any).stats['flee-from-mobs'] = { fired: 6, ok: 1, fail: 5, lastAt: Date.now() };

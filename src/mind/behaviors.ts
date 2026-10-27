@@ -75,8 +75,9 @@ export interface BehaviorStats {
 /** 代码技能某次失败后，看看要不要在后台改进（改进器自己限频） */
 export type ImproveHook = (name: string, why: 'failures' | 'requested' | 'slow', note?: string) => void;
 
-/** 天生的本能（代码里的身体反应）：lava/drowning 是底线不能换；其余可以被自己写的技能用 overrides 换掉 */
-export const INSTINCTS: Record<string, { text: string; locked?: boolean }> = {
+/** 天生的本能（代码里的身体反应）：lava/drowning 是底线不能换；其余可以被自己写的技能用 overrides 换掉。
+ * off：这次运行里代码没开这条（比如躲怪、还手交给自己写的技能）——要如实告诉模型，别让它以为身体会自己躲 */
+export const INSTINCTS: Record<string, { text: string; locked?: boolean; off?: string }> = {
   lava: { text: '掉进岩浆立刻往外跑', locked: true },
   drowning: { text: '水里快没气了就上浮/找气', locked: true },
   creeper: { text: '苦力怕嘶嘶响或贴脸时躲开' },
@@ -87,6 +88,33 @@ export const INSTINCTS: Record<string, { text: string; locked?: boolean }> = {
   eat: { text: '很饿时有什么吃什么' },
   torch: { text: '暗处顺手插火把（habits.torch_every 打开）' },
 };
+
+/** 标出这次运行里哪些本能代码没开（由反射层的配置决定） */
+export function markInstincts(active: Iterable<string>, why = '代码里没开，靠自己写的技能') {
+  const on = new Set(active);
+  for (const [k, v] of Object.entries(INSTINCTS)) { if (on.has(k) || v.locked) delete v.off; else v.off = why; }
+}
+
+let instinctSource: (() => Iterable<string>) | null = null;
+/** 本能开没开由反射层的配置决定（习惯会变，所以每次用时现问） */
+export function setInstinctSource(fn: () => Iterable<string>) { instinctSource = fn; refreshInstincts(); }
+export function refreshInstincts() { if (instinctSource) { try { markInstincts(instinctSource()); } catch { /* 反射层还没好 */ } } }
+
+/** 给模型看的本能现状：哪些身体会自己做、哪些不会 */
+export function instinctNote(): string {
+  refreshInstincts();
+  const on = Object.entries(INSTINCTS).filter(([, v]) => !v.off).map(([k, v]) => `${k}（${v.text}）`);
+  const off = Object.entries(INSTINCTS).filter(([, v]) => v.off).map(([k, v]) => `${k}（${v.text}）`);
+  return `身体自己会做的本能：${on.join('、') || '无'}。${off.length ? `没开、身体不会自己做的：${off.join('、')}——遇到这些情况只能靠自己写的技能或心智临场决定。` : ''}`;
+}
+
+/**
+ * 救命的技能：条件成立时自动做、或某个动作失败时先试，而且管的是要命的处境（掉血、挨打、怪在附近、窒息、溺水、岩浆）或换掉某个本能。
+ * 这种技能平时很少触发是正常的——不能因为“好久没用上”“技能太多”就收起来，不然越久没出事，出事时越没招。
+ */
+export function isEmergency(b: Pick<Behavior, 'mode' | 'when' | 'overrides'>): boolean {
+  return (b.mode === 'auto' || b.mode === 'recover') && (isThreat(b.when) || (b.overrides?.length ?? 0) > 0);
+}
 
 /** 代码技能必须带判定时的说明（写技能、改技能时都用这一句） */
 export const VERIFY_REQUIRED = 'skill.verify：代码技能要同时写 verify——一段 JavaScript 函数体，做完以后看一眼世界确认真的做成了。参数 api 和 args：args.before 是开工前的 api.state()，args.result 是 code 的返回值，args.args 是调用参数（目标要拿它核对，别拿 args.result 里代码自己算的值）；只能用 api.state/blockAt/region/entities/nearestLand；做成了 return true，没做成 return "原因"（比如 const s = await api.state(); return s.inWater ? "还在水里" : true）';
@@ -728,13 +756,14 @@ export class BehaviorEngine {
 
   /** 给模型看的一览（技能书索引之外，带成败和停用状态） */
   overview(): string[] {
+    refreshInstincts();
     let dim = '';
     try { dim = this.adapter.state().dim; } catch { /* 状态暂不可用 */ }
     return [...this.list().map((b) => {
       const st = this.stats[b.name];
       const here = st?.byDim?.[dim];
       const untested = st && st.ok + st.fail > 0 && st.byDim && !here && !(b.when?.dim && !b.when.dim.includes(dim)) ? `（在 ${dim} 还没用过）` : '';
-      return `${b.name}［${b.mode === 'auto' ? '自动' : b.mode === 'recover' ? '失败时先试' : '调用'}${b.code ? `，代码 v${b.version ?? 1}` : ''}${b.overrides.length ? `，代替本能 ${b.overrides.join('/')}` : ''}${b.needs ? `，调用时给 args.${Object.keys(b.needs).join('/')}` : ''}］${st && st.ok + st.fail ? ` 成${st.ok}/败${st.fail}` : ''}${st?.retired ? ` 已收起（${st.retired.slice(0, 30)}）` : st?.disabled ? ' 已停用' : ''}${untested}`;
+      return `${b.name}［${b.mode === 'auto' ? '自动' : b.mode === 'recover' ? '失败时先试' : '调用'}${b.code ? `，代码 v${b.version ?? 1}` : ''}${b.overrides.length ? `，代替本能 ${b.overrides.map((o) => INSTINCTS[o]?.off ? `${o}（这条本能本来就没开）` : o).join('/')}` : ''}${b.needs ? `，调用时给 args.${Object.keys(b.needs).join('/')}` : ''}］${st && st.ok + st.fail ? ` 成${st.ok}/败${st.fail}` : ''}${st?.retired ? ` 已收起（${st.retired.slice(0, 30)}）` : st?.disabled ? ' 已停用' : ''}${untested}`;
     }), ...[...this.invalid].map(([n, why]) => `${n}：${why}`)];
   }
 }

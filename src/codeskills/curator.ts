@@ -1,6 +1,6 @@
 import type { EventBus } from '../events.ts';
 import type { SkillBook } from '../knowledge/skillbook.ts';
-import type { BehaviorEngine } from '../mind/behaviors.ts';
+import { isEmergency, type BehaviorEngine } from '../mind/behaviors.ts';
 import type { LedgerView } from '../mind/ledger.ts';
 import type { ChatMessage } from '../planner/llm.ts';
 import { extractJson } from '../planner/plan.ts';
@@ -83,6 +83,8 @@ export class SkillCurator {
     let dim = '';
     try { dim = this.dim(); } catch { /* 状态暂不可用 */ }
     for (const b of this.active()) {
+      // 救命的技能平时用不上是正常的：不按“好久没用”收
+      if (isEmergency(b)) continue;
       // 只在别的维度生效的技能（比如下界专用的）：人不在那儿时用不上是正常的，不算“长期不用”
       if (b.when?.dim && dim && !b.when.dim.includes(dim)) continue;
       const st = this.engine.statsOf(b.name);
@@ -117,7 +119,8 @@ export class SkillCurator {
       const tries = (st?.ok ?? 0) + (st?.fail ?? 0);
       if (tries >= 6 && (st?.ok ?? 0) / tries < 0.2 && this.settled(b, now, dim) && this.engine.retire(b.name, `用了 ${tries} 次只成了 ${st?.ok ?? 0} 次，在添乱`)) out.push(b.name);
     }
-    const left = this.active();
+    // 救命的技能不占名额、也不因为技能太多被挤掉（它们在添乱时照样按上面那条收）
+    const left = this.active().filter((b) => !isEmergency(b));
     const over = left.length - this.opts.maxActive;
     if (over > 0) {
       const value = (name: string) => { const st = this.engine.statsOf(name); return (st?.ok ?? 0) * 3 - (st?.fail ?? 0); };
@@ -171,7 +174,7 @@ export class SkillCurator {
     for (const [a, b] of similarSkills(this.active())) { similar.set(a, [...(similar.get(a) ?? []), b]); similar.set(b, [...(similar.get(b) ?? []), a]); }
     const skills = this.active().map((b) => {
       const st = this.engine.statsOf(b.name);
-      return { name: b.name, description: b.description, mode: b.mode, priority: b.priority, ...(b.when ? { when: b.when } : {}),
+      return { name: b.name, description: b.description, mode: b.mode, priority: b.priority, ...(b.when ? { when: b.when } : {}), ...(isEmergency(b) ? { lifesaver: true } : {}),
         kind: b.code ? `代码 v${b.version ?? 1}（${b.code.length} 字符）` : `${b.steps.length} 步`,
         uses: st ? { ok: st.ok, fail: st.fail, fired: st.fired } : { ok: 0, fail: 0, fired: 0 },
         ...(st?.byVersion && Object.keys(st.byVersion).length > 1 ? { versions: st.byVersion } : {}),
@@ -192,6 +195,7 @@ export class SkillCurator {
 - 白白打断的（idle_interrupts：条件成立接手了，代码却什么都没做就返回、人也没动，打断了手上的活的次数）：when 比代码里真正动手的判断宽，把 when 收窄到和代码一致。
 - 常常同时满足条件抢着接手的（clashed_with）：调整优先级（priority：更管用、更要紧的高），或者收窄某个的触发条件（用 merge 重写它）。
 - 明显没用、被别的技能完全覆盖的：收起（retire）。
+- lifesaver 是救命的技能（管掉血、挨打、窒息、溺水这类处境）：平时很少触发是正常的，不要因为 uses 少收起；只在它一再失败、或被别的技能完全覆盖（merge）时才动。
 - similar_to 是名字或说明看着相近的：逐对看是不是在做同一件事。是的话合并成一份，或者收起用得少、成得少的那份（uses 少的、fail 多的）；只是名字像、其实管的是两回事的就留着。
 - 技能越少越好记、越不容易互相抢：功能重复的、用了很少次还没成过的，宁可收起；真需要时还能再学。
 - 看 harvest_effect（用它时拿东西每个花多少秒、和不用它比、各版本比）：
@@ -236,6 +240,12 @@ export class SkillCurator {
         // 刚写下、当前版本还没用够几次的：数据太少不下结论（提示里这么说，代码里也守住）
         const young = names.has(String(r?.name)) ? this.engine.rewriteGate(String(r.name)) : null;
         if (young) { errors.push(`${r.name} 先不收：${young.slice(0, 60)}`); continue; }
+        // 救命的技能：只有在添乱（用了不少次几乎总失败）时才收；合并进别的技能走 merge
+        const eb = names.has(String(r?.name)) ? this.engine.get(String(r.name)) : undefined;
+        if (eb && isEmergency(eb)) {
+          const st = this.engine.statsOf(eb.name), tries = (st?.ok ?? 0) + (st?.fail ?? 0);
+          if (!(tries >= 6 && (st?.ok ?? 0) / tries < 0.2)) { errors.push(`${r.name} 是救命的技能，用得少不收（要合并就用 merge）`); continue; }
+        }
         if (names.has(String(r?.name)) && this.engine.retire(String(r.name), String(r?.why ?? '整理时收起'))) done.push(`收起 ${r.name}`);
       }
       for (const r of Array.isArray(raw.rollback) ? raw.rollback.slice(0, 4) : []) {

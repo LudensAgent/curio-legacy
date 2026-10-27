@@ -50,6 +50,14 @@ export class Reflex {
     });
   }
 
+  /** 这次运行里代码真的会做的本能（给模型如实说；其余要靠自己写的技能） */
+  activeInstincts(): string[] {
+    const legacy = this.options.instincts !== 'skills';
+    const care = this.options.routineCare !== false;
+    return ['lava', 'drowning', 'eat', ...(legacy ? ['creeper', 'losing-fight', 'low-hp-flee', 'fight-back'] : []),
+      ...(legacy && care ? ['night-shelter'] : []), ...(care || this.options.habits?.().torch_every ? ['torch'] : [])];
+  }
+
   /** 防溺水：同一处（4 格内、90 秒内）已经失败过就换打法——第 1 次失败后找气穴/往上挖，第 2 次起让寻路带着往岸上走 */
   drowningStep(): Step {
     const p = this.adapter.state().pos;

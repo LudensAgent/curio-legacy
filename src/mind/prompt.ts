@@ -60,6 +60,8 @@ export interface MindContext {
   stageReview?: Record<string, unknown>;
   /** 自己写的可执行技能一览（带成败） */
   learnedSkills?: string[];
+  /** 本能现状：哪些身体会自己做（躲苦力怕、还手这些现在可能没开） */
+  instincts?: string;
 }
 
 /**
@@ -479,6 +481,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       ...(!glance && self.diary().length ? { diary: self.diary(5).map((d) => d.text) } : {}),
       ...(!glance && ctx.mySkills.length ? { my_methods: ctx.mySkills.slice(0, 8).map((m) => `${m.name}：${m.description.slice(0, 50)}（${m.status}）`) } : {}),
       ...(!glance && ctx.learnedSkills?.length ? { my_skills: ctx.learnedSkills.slice(0, 12) } : {}),
+      ...(!glance && ctx.instincts ? { body_instincts: ctx.instincts } : {}),
       ...(!glance && ctx.researchContext ? { research: ctx.researchContext } : {}),
     }],
     ['记得的地方', worldKnowledge(ctx)],

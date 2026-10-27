@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { AgentState } from '../adapter/types.ts';
 import type { AgentEvent, EventBus } from '../events.ts';
 import type { SkillBook } from '../knowledge/skillbook.ts';
-import type { BehaviorEngine } from '../mind/behaviors.ts';
+import { instinctNote, type BehaviorEngine } from '../mind/behaviors.ts';
 import type { LedgerSignal, LedgerView } from '../mind/ledger.ts';
 import type { ChatMessage } from '../planner/llm.ts';
 import { extractJson } from '../planner/plan.ts';
@@ -527,6 +527,8 @@ chronic_shortages 是这两个小时里一再缺的东西：想想能不能把�
 - 不是技能能解决的（纯属运气、应该由思考决定的取舍、缺的是材料不是做法）：输出 {"none":true,"why":"…"}。
 - 先分清失败是“做法不对”还是“身体做不到”：动作接口本身没有这种能力（比如步行寻路不会游泳、某种操作根本没有动作可用、返回的信息里看不到决定成败的那件事），
   在上面写技能打补丁也绕不过去，只会写一份收一份。这种输出 {"none":true,"why":"…","limitation":"一句话：身体缺什么能力 / 看不到什么"}，会报给开发者补上，不要写补丁技能。
+
+${instinctNote()}
 
 写技能的说明：
 ${guide}

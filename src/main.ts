@@ -9,7 +9,7 @@ import { parseGameMessage, type ParsedGameMessage } from './memory/game-messages
 import { SelfModel } from './mind/self.ts';
 import { Thinker } from './mind/thinker.ts';
 import { BUILTIN_SKILLS_DIR, SkillBook } from './knowledge/skillbook.ts';
-import { BehaviorEngine } from './mind/behaviors.ts';
+import { BehaviorEngine, setInstinctSource } from './mind/behaviors.ts';
 import { setBehaviorRegistry } from './skills/use-skill.ts';
 import { setReliableSkills } from './codeskills/bridge.ts';
 import { CodeImprover } from './codeskills/improver.ts';
@@ -274,6 +274,8 @@ const knownSigs = () => new Set([...library.list().filter((d) => !d.disabled).ma
   ...methods.list().filter((d) => d.status !== 'retired').map((d) => signatureOf(flattenProgram(d.program))), ...proposedHabits]);
 perception.knownSkillSigs = knownSigs;
 const reflex = new Reflex(adapter, arbiter, bus, vision, { routineCare: config.mind.bodyHabits, habits: () => selfModel.habits(), behaviors, instincts: 'skills' });
+/** 哪些本能代码真的会做：如实告诉心智和写技能的模型（躲怪、还手现在靠自己写的技能） */
+setInstinctSource(() => reflex.activeInstincts());
 const spectator = new Spectator(config, adapter, bus);
 const metrics = new Metrics(adapter, arbiter, executive, planner, reflex, bus);
 /** 一次测试从头到尾的累计数字（死亡、token、调用次数、任务成败、路程、运行时长）：重启不清零，清空记忆/重置世界才从零开始 */

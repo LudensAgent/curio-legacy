@@ -285,7 +285,7 @@ export function coverOf(cell: (rel: [number, number, number]) => string | null):
  */
 export function isThreat(p: Predicate | undefined): boolean {
   if (!p) return false;
-  if (p.hostile || p.hurt_within !== undefined || p.hp_below !== undefined || p.in_lava || p.oxygen_below !== undefined) return true;
+  if (p.hostile || p.hurt_within !== undefined || p.hp_below !== undefined || p.in_lava || p.in_wall || p.oxygen_below !== undefined) return true;
   return !!p.any?.some(isThreat) || !!p.all?.some(isThreat);
 }
 
