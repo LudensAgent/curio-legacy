@@ -2806,6 +2806,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
    * 每刻先乘水的阻力 0.9 再加一点桨力，船头每刻最多转 BOAT_TURN；桨力比原版小，极速约 5.6 格/秒（原版满桨 8 格/秒），
    * 像真人那样不总是满桨：方向差得多时先停桨转向，快到终点时提前收桨滑过去。前方是陆地/方块就停下（靠岸）。
    */
+  /** 最近一次自己推进到的船位置（见 ride 里的说明） */
+  private lastBoat: { v: any; pos: any; at: number } | null = null;
   async ride(target: { x: number; z: number }, signal: AbortSignal, opts: { timeoutMs: number; stop?: () => boolean; via?: { x: number; z: number }[]; arriveWithin?: number }): Promise<ActionResult & { arrived: boolean; blocked?: boolean; moved: number }> {
     const check = this.actionCheckpoint(signal);
     const b = this.bot;
@@ -2826,12 +2828,20 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     let vx = 0, vz = 0;
     let boatYaw = Number.isFinite(v.yaw) ? v.yaw : Math.atan2(-(target.x - v.position.x), -(target.z - v.position.z));
     let lastProgressAt = Date.now(), progressFrom = v.position.clone();
+    // 船的位置以自己推进的为准：服务器会把船的移动（rel_entity_move）也广播给坐在船上的人，原版客户端对自己操控的载具忽略这些包，
+    // mineflayer 却照样加到 v.position 上——等于每一步走了两遍，还会越滚越快（实测冲到四五十格/秒），船乱冲、冲过头撞岸。
+    // 所以这里另存一份位置，每刻覆盖回去；服务器真不认可时会回发 vehicle_move，由 resync 改这份位置
+    // 上一段刚划完、还坐在同一条船上：那时迟到的服务器广播也会叠进 v.position，用自己记下的位置
+    const lb = this.lastBoat;
+    let cur = (isBoat && lb && lb.v === v && Date.now() - lb.at < 30_000 ? lb.pos : v.position).clone();
+    if (isBoat) { start.set(cur.x, cur.y, cur.z); progressFrom = cur.clone(); }
     // 服务器不认可上报的位置（撞到东西 / moved wrongly）时会回发 vehicle_move 把船拉回去：
     // 以服务器为准重新同步，否则本地以为在前进、服务器那边船其实没动，越错越远
     const Vec3c = require('vec3').Vec3;
     const resync = (pk: any) => {
       if (!ownsControls() || !isBoat || b.vehicle !== v || !Number.isFinite(pk?.x)) return;
-      v.position = new Vec3c(pk.x, pk.y, pk.z);
+      cur = new Vec3c(pk.x, pk.y, pk.z);
+      v.position = cur.clone();
       b.entity.position = new Vec3c(pk.x, pk.y + 0.4, pk.z);
       vx = 0; vz = 0;
     };
@@ -2859,9 +2869,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (isBoat) b.physicsEnabled = false; // 坐船期间不模拟玩家自身的重力/碰撞（下船时恢复）
       while (Date.now() < end) {
         check();
-        if (b.vehicle !== v) return { ok: false, reason: 'DISMOUNTED', arrived: false, moved: v.position.distanceTo(start) };
-        if (opts.stop?.()) return { ok: true, arrived: false, moved: v.position.distanceTo(start) };
-        const p = v.position;
+        if (b.vehicle !== v) return { ok: false, reason: 'DISMOUNTED', arrived: false, moved: cur.distanceTo(start) };
+        if (opts.stop?.()) return { ok: true, arrived: false, moved: cur.distanceTo(start) };
+        if (isBoat) v.position = cur.clone(); // 抹掉两刻之间 mineflayer 叠加上去的服务器广播
+        const p = isBoat ? cur : v.position;
         // 依次经过拐点：到拐点 1 格内就转向下一个
         while (leg < via.length && Math.hypot(via[leg].x - p.x, via[leg].z - p.z) <= 1.5) leg++;
         const goal = leg < via.length ? via[leg] : target;
@@ -2899,7 +2910,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         if (Math.hypot(nx - progressFrom.x, nz - progressFrom.z) > 2) { progressFrom = new Vec3(nx, p.y, nz); lastProgressAt = Date.now(); }
         else if (Date.now() - lastProgressAt > 10000) return { ok: true, arrived: false, blocked: true, moved: p.distanceTo(start) };
         const deg = ((Math.PI - boatYaw) * 180) / Math.PI;
-        v.position = new Vec3(nx, p.y, nz);
+        cur = new Vec3(nx, p.y, nz);
+        v.position = cur.clone();
         v.yaw = boatYaw;
         b.entity.position = new Vec3(nx, p.y + 0.4, nz);
         b.entity.yaw = boatYaw;
@@ -2911,9 +2923,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         }, check);
         await this.afterAction(tick, check);
       }
-      return { ok: false, reason: 'TIMEOUT', arrived: false, moved: v.position.distanceTo(start) };
+      return { ok: false, reason: 'TIMEOUT', arrived: false, moved: cur.distanceTo(start) };
     } finally {
       if (isBoat) {
+        if (b.vehicle === v && ownsControls()) { v.position = cur.clone(); b.entity.position = cur.offset(0, 0.4, 0); this.lastBoat = { v, pos: cur.clone(), at: Date.now() }; }
         try { b._client.off('vehicle_move', resync); } catch { /* ignore */ }
       }
       signal.removeEventListener('abort', releaseControls);

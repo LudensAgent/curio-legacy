@@ -69,3 +69,25 @@ test('mounted ride uses an independent bounded cadence, preserves new ownership 
   assert.equal((await losingRide).reason, 'DISMOUNTED');
   assert.equal(dismounted.bot.physicsEnabled, true);
 });
+
+test('boat ride ignores the server echoing the boat moves back to its own passenger (no double speed)', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_700_000_000_000 });
+  const w = fixture();
+  w.bot.vehicle.yaw = -Math.PI / 2; // 船头朝东（+x）
+  // 服务器把船的每次移动当 rel_entity_move 广播回来，mineflayer 会再加一遍到 vehicle.position 上
+  let lastX = 0;
+  const write = w.client.write;
+  w.client.write = (name: string, payload: any) => {
+    write(name, payload);
+    if (name === 'vehicle_move') { const d = payload.x - lastX; lastX = payload.x; queueMicrotask(() => { w.bot.vehicle.position = w.bot.vehicle.position.offset(d, 0, 0); }); }
+  };
+  const pending = w.adapter.ride({ x: 100, z: 0 }, new AbortController().signal, { timeoutMs: 1000 });
+  for (let i = 0; i < 21; i++) { t.mock.timers.tick(50); await flush(); await flush(); }
+  const r = await pending;
+  const moves = w.packets.filter((p) => p.name === 'vehicle_move');
+  const x = moves.at(-1)!.payload.x;
+  // 原版式加速：20 刻约 3.4 格；要是把服务器的回显也算进去，会翻倍还越滚越快
+  assert.ok(x > 2.5 && x < 4.2, `1 秒只该划出 3 格多，实际 ${x.toFixed(2)}；${r.reason}`);
+  const steps = moves.map((p, i) => p.payload.x - (i ? moves[i - 1].payload.x : 0));
+  assert.ok(steps.every((s) => s <= 0.29), `每刻不超过 0.28 格：${steps.map((s) => s.toFixed(2)).join(' ')}`);
+});
