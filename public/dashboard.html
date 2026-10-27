@@ -33,8 +33,17 @@
   .chip.on { color: var(--accent); border-color: var(--accent-soft); background: var(--accent-soft); }
   .chip.off { color: var(--bad); border-color: var(--bad-soft); background: var(--bad-soft); }
   button.chip { cursor: pointer; font: 11px var(--mono); }
-  .tunnel-map { width: 100%; height: 320px; flex: none; display: block; background: var(--soft); border-radius: 8px; margin-bottom: 8px; }
-  .tunnel-map text { font: 10px var(--mono); fill: var(--dim); }
+  .tmap { position: relative; flex: none; margin-bottom: 8px; }
+  .tunnel-map { width: 100%; height: 380px; display: block; background: var(--soft); border-radius: 8px; cursor: crosshair; touch-action: none; image-rendering: pixelated; }
+  .tunnel-map.grab { cursor: grabbing; }
+  .tmap-ctl { position: absolute; top: 8px; right: 8px; display: flex; gap: 4px; align-items: center; flex-wrap: wrap; justify-content: flex-end; max-width: calc(100% - 16px); }
+  .tmap-ctl button { font: 12px var(--mono); min-width: 28px; height: 26px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--text); cursor: pointer; }
+  .tmap-ctl button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  .tmap-ctl label { font-size: 11px; color: var(--dim); background: var(--card); border: 1px solid var(--line); border-radius: 6px; height: 26px; padding: 0 6px; display: inline-flex; align-items: center; gap: 3px; cursor: pointer; }
+  .tmap-tip { position: absolute; pointer-events: none; font: 11px/1.45 var(--mono); background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; box-shadow: 0 4px 14px rgba(0,0,0,.12); max-width: 320px; z-index: 2; }
+  .tmap-empty { position: absolute; left: 12px; top: 10px; font-size: 12px; color: var(--dim); pointer-events: none; }
+  .tmap-legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: var(--dim); margin: 6px 0 4px; }
+  .tmap-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
   button.chip.sel { color: var(--text); border-color: var(--text); }
   .grow { flex: 1; }
   .suggest { display: flex; gap: 6px; }
@@ -497,8 +506,20 @@
       <div class="board">
         <div class="card rows2 cols2"><h2>最近做过的事 <span class="r mono dim" id="seen"></span></h2><ul class="list body" id="goals"></ul></div>
         <div class="card"><h2>地标</h2><ul class="list mono body" id="lms"></ul></div>
-        <div class="card cols2 rows2"><h2>挖过的通道 · 我的设施 <span class="r dim">俯视图，北在上；路线颜色越深挖得越深</span></h2>
-          <div class="body"><svg id="tunnelMap" class="tunnel-map" role="img" aria-label="挖过的通道俯视图"></svg><ul class="list" id="tunnelList"></ul></div></div>
+        <div class="card cols2 rows2"><h2>挖过的通道 · 我的设施 <span class="r dim">一格一方块，北在上 · 滚轮缩放、拖动平移、双击看全貌</span></h2>
+          <div class="body">
+            <div class="tmap">
+              <canvas id="tunnelMap" class="tunnel-map" role="img" aria-label="挖过的通道和设施的方块格子地图"></canvas>
+              <div class="tmap-ctl">
+                <label><input type="checkbox" id="tmL-passage">通道</label><label><input type="checkbox" id="tmL-facility">设施</label><label><input type="checkbox" id="tmL-landmark">地点</label>
+                <button id="tmFollow" title="视野跟着自己走">跟随</button><button id="tmFit" title="看全通道和设施">全貌</button><button id="tmOut" title="缩小">−</button><button id="tmIn" title="放大">+</button>
+              </div>
+              <div class="tmap-empty" id="tmEmpty" hidden></div>
+              <div class="tmap-tip" id="tmTip" hidden></div>
+            </div>
+            <div class="tmap-legend"><span><i style="background:rgb(150,112,76)"></i>地表附近</span><span><i style="background:rgb(140,140,140)"></i>石头层</span><span><i style="background:rgb(80,80,88)"></i>y&lt;0 深板岩</span><span><i style="background:var(--accent)"></i>入口</span><span><i style="background:#a8752f"></i>箱子</span><span><i style="background:#9c6b3c"></i>工作台</span><span><i style="background:#7a7a7a"></i>熔炉</span><span><i style="background:#b8312f"></i>床</span><span><i style="background:var(--info)"></i>地点</span><span><i style="background:var(--bad)"></i>我</span></div>
+            <ul class="list" id="tunnelList"></ul>
+          </div></div>
         <div class="card"><h2>笔记</h2><ul class="list body" id="notes"></ul></div>
       </div>
     </section>
@@ -905,46 +926,196 @@ function render(s) {
   $('goals').innerHTML = list(mem.goals.slice().reverse(), (g) => `<li title="${esc(g.summary)}"><span class="badge ${g.status === 'succeeded' ? 'good' : g.status === 'failed' ? 'bad' : ''}">${g.status === 'succeeded' ? '成' : g.status === 'failed' ? '卡住' : '停'}</span> ${esc(g.goal)}<div class="dim" style="font-size:11px">${esc(g.summary)}</div></li>`);
   $('lms').innerHTML = list(mem.landmarks.slice().reverse(), (l) => `<li>${esc(l.label)} <span class="k">${l.kind} (${l.pos.x}, ${l.pos.y}, ${l.pos.z})</span></li>`);
   $('notes').innerHTML = list(mem.notes.slice().reverse(), (n) => `<li><span class="k">${n.kind}</span>${esc(n.text)}</li>`);
-  renderTunnels(mem, s.state);
+  renderTunnels(mem, s.state && { ...s.state, yaw: mem.facingYaw });
 }
 
-/** 挖过的通道俯视图：x 往右是东，z 往下是南（北在上）；路线按深度着色，标出入口、设施和自己 */
-function renderTunnels(mem, st) {
-  const svg = $('tunnelMap');
-  if (!mem.passages) { svg.innerHTML = '<text x="12" y="22">进程重启后开始记录自己挖的通道</text>'; $('tunnelList').innerHTML = ''; return; }
-  const passages = mem.passages, fac = (mem.facilities || []).filter((f) => f.kind !== 'passage');
-  const me = st && st.pos ? { x: st.pos.x, y: st.pos.y, z: st.pos.z } : null;
-  const pts = [...passages.flatMap((p) => [...p.path, ...p.entrances]), ...fac.map((f) => f.pos), ...(me ? [me] : [])];
-  $('tunnelList').innerHTML = list(mem.facilities || [], (f) => `<li><span class="k">${f.kind === 'passage' ? '通道' : f.kind === 'chest' ? '箱子' : f.kind === 'bed' ? '床' : '设施'}</span>${esc(f.text)}</li>`);
-  if (!passages.length) { svg.innerHTML = '<text x="12" y="22">还没有挖过的通道（自己挖够 4 格的地下通道才记）</text>'; return; }
-  const W = svg.clientWidth || 600, H = svg.clientHeight || 300, pad = 18;
-  const xs = pts.map((p) => p.x), zs = pts.map((p) => p.z);
-  const minX = Math.min(...xs), maxX = Math.max(...xs), minZ = Math.min(...zs), maxZ = Math.max(...zs);
-  const k = Math.min((W - 2 * pad) / Math.max(8, maxX - minX), (H - 2 * pad) / Math.max(8, maxZ - minZ));
-  const ox = (W - (maxX - minX) * k) / 2, oz = (H - (maxZ - minZ) * k) / 2;
-  const X = (x) => (ox + (x - minX) * k).toFixed(1), Z = (z) => (oz + (z - minZ) * k).toFixed(1);
-  const ys = passages.flatMap((p) => p.path.map((q) => q.y));
-  const top = Math.max(...ys), bottom = Math.min(...ys);
-  const depth = (y) => top === bottom ? 1 : (top - y) / (top - bottom); // 0 地表 … 1 最深
-  const out = [];
-  for (const p of passages) {
-    for (let i = 1; i < p.path.length; i++) {
-      const a = p.path[i - 1], b = p.path[i];
-      if (Math.hypot(a.x - b.x, a.z - b.z) > 12) continue; // 跳着记的点（并进来的另一段）不连线
-      const d = depth((a.y + b.y) / 2);
-      out.push(`<line x1="${X(a.x)}" y1="${Z(a.z)}" x2="${X(b.x)}" y2="${Z(b.z)}" stroke="var(--info)" stroke-opacity="${(0.3 + 0.7 * d).toFixed(2)}" stroke-width="${(2 + 2 * d).toFixed(1)}" stroke-linecap="round"><title>y${a.y}→y${b.y}</title></line>`);
+/**
+ * 挖过的通道 · 我的设施：MC 式的方块格子地图（俯视，x 往右是东，z 往下是南，北在上）。
+ * 一格 = 一个方块；通道格按高度上色（地表泥土 → 石头 → 深板岩），设施画成对应方块，入口和自己单独标出。
+ * 滚轮缩放（以鼠标处为中心）、拖动平移、双击回到全貌；“跟随”时视野跟着自己走。
+ */
+const tmap = { cx: 0, cz: 0, s: 8, fitted: false, follow: false, drag: null, data: null, hover: null, layers: { passage: true, facility: true, landmark: true } };
+const TM_FAC = { // 设施方块：底色、描边、格内字
+  chest: { fill: '#a8752f', edge: '#5e3e14', ch: '箱' }, bed: { fill: '#b8312f', edge: '#e8e2d5', ch: '床' },
+  crafting: { fill: '#9c6b3c', edge: '#4a3016', ch: '台' }, furnace: { fill: '#7a7a7a', edge: '#3a3a3a', ch: '炉' },
+  farm: { fill: '#6b4a2b', edge: '#3d6b2a', ch: '田' }, station: { fill: '#8a6a4a', edge: '#3e2c1a', ch: '设' },
+};
+const tmFacStyle = (f) => f.kind === 'chest' ? TM_FAC.chest : f.kind === 'bed' ? TM_FAC.bed
+  : /工作台/.test(f.label) ? TM_FAC.crafting : /熔炉|高炉|烟熏/.test(f.label) ? TM_FAC.furnace : /农田/.test(f.label) ? TM_FAC.farm : TM_FAC.station;
+/** 通道格的颜色按绝对高度：y≥56 泥土，0~56 石头由浅到深，y<0 深板岩 */
+function tmDepthColor(y) {
+  const mix = (a, b, t) => `rgb(${a.map((v, i) => Math.round(v + (b[i] - v) * Math.max(0, Math.min(1, t)))).join(',')})`;
+  if (y >= 56) return mix([150, 112, 76], [134, 100, 68], (y - 56) / 30);
+  if (y >= 0) return mix([108, 108, 108], [176, 176, 176], y / 56); // 越深越暗，同一片矿道里不同层也分得开
+  return mix([70, 70, 78], [96, 96, 104], (y + 64) / 64);
+}
+/** 把记忆里的通道、设施、地点整理成一张“格子 → 内容”的表 */
+function tmBuild(mem, st) {
+  const cells = new Map(), key = (x, z) => x + ',' + z;
+  const cell = (x, z) => { const k = key(x, z); let c = cells.get(k); if (!c) cells.set(k, c = { x, z, ys: [] }); return c; };
+  for (const p of mem.passages || []) {
+    const pts = p.path.map((q) => ({ x: Math.floor(q.x), y: Math.round(q.y), z: Math.floor(q.z) }));
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i], b = pts[i + 1];
+      cell(a.x, a.z).ys.push(a.y);
+      if (!b || Math.hypot(a.x - b.x, a.z - b.z) > 12) continue; // 跳着记的点（并进来的另一段）不连
+      const n = Math.max(Math.abs(b.x - a.x), Math.abs(b.z - a.z));
+      for (let t = 1; t < n; t++) cell(Math.round(a.x + (b.x - a.x) * t / n), Math.round(a.z + (b.z - a.z) * t / n)).ys.push(Math.round(a.y + (b.y - a.y) * t / n));
     }
-    // 每个落脚点也画一个小点：竖井在俯视图上所有点叠在一处，连线长度为 0，只有点看得见
-    for (const q of p.path) out.push(`<circle cx="${X(q.x)}" cy="${Z(q.z)}" r="2.5" fill="var(--info)" fill-opacity="${(0.3 + 0.7 * depth(q.y)).toFixed(2)}"><title>(${q.x},${q.y},${q.z})</title></circle>`);
-    for (const e of p.entrances) out.push(`<circle cx="${X(e.x)}" cy="${Z(e.z)}" r="5" fill="var(--accent)"><title>入口 (${e.x},${e.y},${e.z})</title></circle>`);
-    const deep = p.path.reduce((m, q) => (q.y < m.y ? q : m), p.path[0]);
-    out.push(`<text x="${(+X(deep.x) + 6).toFixed(1)}" y="${(+Z(deep.z) + 3).toFixed(1)}">y${p.deepestY}</text>`);
+    for (const e of p.entrances) { const c = cell(Math.floor(e.x), Math.floor(e.z)); c.entrance = { ...e, deepestY: p.deepestY }; }
   }
-  for (const f of fac) out.push(`<rect x="${(+X(f.pos.x) - 3.5).toFixed(1)}" y="${(+Z(f.pos.z) - 3.5).toFixed(1)}" width="7" height="7" fill="var(--warn)"><title>${esc(f.text)}</title></rect>`);
-  if (me) out.push(`<path d="M${X(me.x)} ${(+Z(me.z) - 7).toFixed(1)} l6 11 h-12 z" fill="var(--bad)"><title>我在 (${Math.round(me.x)},${Math.round(me.y)},${Math.round(me.z)})</title></path>`);
-  out.push(`<text x="${W - 22}" y="14">N↑</text>`);
-  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-  svg.innerHTML = out.join('');
+  const fac = (mem.facilities || []).filter((f) => f.kind !== 'passage').map((f) => ({ ...f, x: Math.floor(f.pos.x), z: Math.floor(f.pos.z) }));
+  const facKeys = new Set(fac.map((f) => key(f.x, f.z)));
+  const lms = (mem.landmarks || []).filter((l) => l.pos && (!l.dim || !st || !st.dim || l.dim === st.dim))
+    .map((l) => ({ ...l, x: Math.floor(l.pos.x), z: Math.floor(l.pos.z) })).filter((l) => !facKeys.has(key(l.x, l.z)));
+  const me = st && st.pos ? { x: st.pos.x, y: st.pos.y, z: st.pos.z, yaw: st.yaw } : null;
+  return { cells, fac, lms, me };
+}
+/** 把视野调到能看全通道和设施（地点太远的不算，免得缩成一个点）；near = 只看自己周围这么多格以内的 */
+function tmFit(cv, near = 0) {
+  const d = tmap.data; if (!d) return;
+  const close = (p) => !near || !d.me || Math.hypot(p.x - d.me.x, p.z - d.me.z) <= near;
+  const pts = [...[...d.cells.values(), ...d.fac].filter(close), ...(d.me ? [d.me] : [])];
+  if (!pts.length) pts.push(...d.lms);
+  if (!pts.length) return;
+  const xs = pts.map((p) => p.x), zs = pts.map((p) => p.z);
+  const minX = Math.min(...xs), maxX = Math.max(...xs) + 1, minZ = Math.min(...zs), maxZ = Math.max(...zs) + 1;
+  tmap.cx = (minX + maxX) / 2; tmap.cz = (minZ + maxZ) / 2;
+  tmap.s = Math.max(1, Math.min(32, Math.min((cv.clientWidth - 40) / Math.max(16, maxX - minX), (cv.clientHeight - 40) / Math.max(16, maxZ - minZ))));
+}
+function tmDraw() {
+  const cv = $('tunnelMap'); if (!cv || !tmap.data) return;
+  const W = cv.clientWidth, H = cv.clientHeight, dpr = devicePixelRatio || 1;
+  if (!W || !H) return;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+  const g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const css = getComputedStyle(document.documentElement), v = (n) => css.getPropertyValue(n).trim();
+  const { cells, fac, lms, me } = tmap.data;
+  if (tmap.follow && me) { tmap.cx = me.x; tmap.cz = me.z; }
+  const s = tmap.s, X = (x) => (x - tmap.cx) * s + W / 2, Z = (z) => (z - tmap.cz) * s + H / 2;
+  const x0 = Math.floor(tmap.cx - W / 2 / s) - 1, x1 = Math.ceil(tmap.cx + W / 2 / s) + 1, z0 = Math.floor(tmap.cz - H / 2 / s) - 1, z1 = Math.ceil(tmap.cz + H / 2 / s) + 1;
+  g.fillStyle = v('--soft'); g.fillRect(0, 0, W, H);
+  // 方块格线（放大才画）和区块线（每 16 格）
+  g.lineWidth = 1;
+  if (s >= 7) {
+    g.strokeStyle = v('--line'); g.beginPath();
+    for (let x = x0; x <= x1; x++) { const px = Math.round(X(x)) + 0.5; g.moveTo(px, 0); g.lineTo(px, H); }
+    for (let z = z0; z <= z1; z++) { const pz = Math.round(Z(z)) + 0.5; g.moveTo(0, pz); g.lineTo(W, pz); }
+    g.stroke();
+  }
+  g.strokeStyle = v('--faint'); g.globalAlpha = s >= 7 ? 0.9 : 0.5; g.beginPath();
+  const step = s < 1.5 ? 64 : 16;
+  for (let x = Math.ceil(x0 / step) * step; x <= x1; x += step) { const px = Math.round(X(x)) + 0.5; g.moveTo(px, 0); g.lineTo(px, H); }
+  for (let z = Math.ceil(z0 / step) * step; z <= z1; z += step) { const pz = Math.round(Z(z)) + 0.5; g.moveTo(0, pz); g.lineTo(W, pz); }
+  g.stroke(); g.globalAlpha = 1;
+  const pad = s >= 4 ? 0.5 : 0, cs = Math.max(2, s - pad * 2); // 缩得很小时也至少 2px，免得看不见
+  // 通道格：取这格里最深的高度上色；同一格上下跨 3 格以上（竖井/台阶）画个深色内框
+  if (tmap.layers.passage) for (const c of cells.values()) {
+    if (c.x < x0 || c.x > x1 || c.z < z0 || c.z > z1 || !c.ys.length) continue;
+    const lo = Math.min(...c.ys), hi = Math.max(...c.ys);
+    g.fillStyle = tmDepthColor(lo); g.fillRect(X(c.x) + pad, Z(c.z) + pad, cs, cs);
+    if (hi - lo >= 3 && s >= 6) { g.strokeStyle = 'rgba(0,0,0,.55)'; g.lineWidth = Math.max(1, s / 8); g.strokeRect(X(c.x) + s * 0.25, Z(c.z) + s * 0.25, s * 0.5, s * 0.5); }
+  }
+  if (tmap.layers.passage) for (const c of cells.values()) {
+    if (!c.entrance || c.x < x0 || c.x > x1 || c.z < z0 || c.z > z1) continue;
+    const r = Math.max(3, s * 0.42); g.fillStyle = v('--accent'); g.strokeStyle = v('--card'); g.lineWidth = 1.5;
+    g.beginPath(); g.moveTo(X(c.x) + s / 2 - r, Z(c.z) + s / 2 - r * 0.6); g.lineTo(X(c.x) + s / 2 + r, Z(c.z) + s / 2 - r * 0.6); g.lineTo(X(c.x) + s / 2, Z(c.z) + s / 2 + r * 0.8); g.closePath(); g.fill(); g.stroke();
+  }
+  // 地点：小菱形
+  if (tmap.layers.landmark) for (const l of lms) {
+    if (l.x < x0 || l.x > x1 || l.z < z0 || l.z > z1) continue;
+    const cx = X(l.x) + s / 2, cz = Z(l.z) + s / 2, r = Math.max(3, Math.min(7, s * 0.35));
+    g.fillStyle = v('--info'); g.beginPath(); g.moveTo(cx, cz - r); g.lineTo(cx + r, cz); g.lineTo(cx, cz + r); g.lineTo(cx - r, cz); g.closePath(); g.fill();
+  }
+  // 设施：画成对应的方块
+  if (tmap.layers.facility) for (const f of fac) {
+    if (f.x < x0 || f.x > x1 || f.z < z0 || f.z > z1) continue;
+    const st = tmFacStyle(f), m = Math.max(4, s), px = X(f.x) + s / 2 - m / 2, pz = Z(f.z) + s / 2 - m / 2;
+    g.fillStyle = st.fill; g.fillRect(px, pz, m, m);
+    g.strokeStyle = st.edge; g.lineWidth = Math.max(1, m / 8); g.strokeRect(px + g.lineWidth / 2, pz + g.lineWidth / 2, m - g.lineWidth, m - g.lineWidth);
+    if (s >= 14) { g.fillStyle = '#fff'; g.font = `600 ${Math.round(s * 0.55)}px system-ui, "Microsoft YaHei", sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(st.ch, px + m / 2, pz + m / 2 + 1); }
+  }
+  // 自己：朝向箭头（不知道朝向就画成圆点）
+  if (me) {
+    const cx = X(me.x), cz = Z(me.z), r = Math.max(6, Math.min(12, s * 0.7));
+    g.fillStyle = v('--bad'); g.strokeStyle = v('--card'); g.lineWidth = 2;
+    if (Number.isFinite(me.yaw)) {
+      // mineflayer 的 yaw：0 朝北（-z），逆时针为正
+      const a = -me.yaw, dx = Math.sin(a), dz = -Math.cos(a);
+      g.beginPath(); g.moveTo(cx + dx * r, cz + dz * r); g.lineTo(cx - dz * r * 0.6 - dx * r * 0.6, cz + dx * r * 0.6 - dz * r * 0.6); g.lineTo(cx - dx * r * 0.25, cz - dz * r * 0.25); g.lineTo(cx + dz * r * 0.6 - dx * r * 0.6, cz - dx * r * 0.6 - dz * r * 0.6); g.closePath();
+    } else { g.beginPath(); g.arc(cx, cz, r * 0.6, 0, Math.PI * 2); }
+    g.fill(); g.stroke();
+  }
+  // 坐标刻度（区块线上）和比例
+  g.font = '10px ' + v('--mono'); g.fillStyle = v('--dim'); g.textBaseline = 'top'; g.textAlign = 'left';
+  const lab = s < 1.5 ? 128 : s < 4 ? 64 : s < 10 ? 32 : 16;
+  for (let x = Math.ceil(x0 / lab) * lab; x <= x1; x += lab) g.fillText(String(x), X(x) + 3, 3);
+  for (let z = Math.ceil(z0 / lab) * lab; z <= z1; z += lab) g.fillText(String(z), 3, Z(z) + 3);
+  g.textAlign = 'right'; g.fillText(`N↑  1 格 = ${s >= 10 ? Math.round(s) : s.toFixed(1)} px`, W - 8, H - 14);
+  tmTip();
+}
+let tmRaf = 0;
+const tmRedraw = () => { if (!tmRaf) tmRaf = requestAnimationFrame(() => { tmRaf = 0; tmDraw(); }); };
+/** 鼠标所在格子的说明 */
+function tmTip() {
+  const tip = $('tmTip'), h = tmap.hover, d = tmap.data;
+  if (!tip) return;
+  if (!h || !d) { tip.hidden = true; return; }
+  const k = h.x + ',' + h.z, c = d.cells.get(k), lines = [`(${h.x}, ${h.z})`];
+  if (d.me && Math.floor(d.me.x) === h.x && Math.floor(d.me.z) === h.z) lines.push(`我在这里 y${Math.round(d.me.y)}`);
+  if (c && c.ys.length && tmap.layers.passage) {
+    const lo = Math.min(...c.ys), hi = Math.max(...c.ys);
+    lines.push(`通道 ${lo === hi ? 'y' + lo : `y${lo}~y${hi}（竖井/台阶）`}`);
+    if (c.entrance) lines.push(`入口 (${c.entrance.x},${c.entrance.y},${c.entrance.z})，能走到 y${c.entrance.deepestY}`);
+  }
+  if (tmap.layers.facility) for (const f of d.fac) if (f.x === h.x && f.z === h.z) lines.push(f.text);
+  if (tmap.layers.landmark) for (const l of d.lms) if (l.x === h.x && l.z === h.z) lines.push(`${l.label} · ${l.kind} (${l.pos.x},${l.pos.y},${l.pos.z})`);
+  tip.hidden = false;
+  tip.innerHTML = lines.map(esc).join('<br>');
+  const W = $('tunnelMap').clientWidth;
+  tip.style.left = Math.min(h.px + 14, W - tip.offsetWidth - 4) + 'px'; tip.style.top = (h.pz + 14) + 'px';
+}
+function tmInit() {
+  const cv = $('tunnelMap');
+  const toBlock = (e) => { const r = cv.getBoundingClientRect(), px = e.clientX - r.left, pz = e.clientY - r.top; return { px, pz, bx: (px - cv.clientWidth / 2) / tmap.s + tmap.cx, bz: (pz - cv.clientHeight / 2) / tmap.s + tmap.cz }; };
+  const zoom = (f, at) => {
+    const ns = Math.max(0.5, Math.min(48, tmap.s * f));
+    if (at && !tmap.follow) { tmap.cx = at.bx - (at.bx - tmap.cx) * tmap.s / ns; tmap.cz = at.bz - (at.bz - tmap.cz) * tmap.s / ns; }
+    tmap.s = ns; tmRedraw();
+  };
+  cv.addEventListener('wheel', (e) => { e.preventDefault(); zoom(Math.exp(-Math.max(-300, Math.min(300, e.deltaY)) * 0.003), toBlock(e)); }, { passive: false });
+  cv.addEventListener('pointerdown', (e) => { cv.setPointerCapture(e.pointerId); tmap.drag = { x: e.clientX, z: e.clientY, cx: tmap.cx, cz: tmap.cz }; cv.classList.add('grab'); });
+  cv.addEventListener('pointermove', (e) => {
+    const b = toBlock(e);
+    if (tmap.drag) {
+      tmap.cx = tmap.drag.cx - (e.clientX - tmap.drag.x) / tmap.s; tmap.cz = tmap.drag.cz - (e.clientY - tmap.drag.z) / tmap.s;
+      if (tmap.follow && Math.hypot(e.clientX - tmap.drag.x, e.clientY - tmap.drag.z) > 4) { tmap.follow = false; $('tmFollow').classList.remove('on'); }
+    }
+    tmap.hover = { x: Math.floor(b.bx), z: Math.floor(b.bz), px: b.px, pz: b.pz };
+    tmRedraw();
+  });
+  const end = () => { tmap.drag = null; cv.classList.remove('grab'); };
+  cv.addEventListener('pointerup', end); cv.addEventListener('pointercancel', end);
+  cv.addEventListener('pointerleave', () => { tmap.hover = null; tmTip(); });
+  cv.addEventListener('dblclick', () => { tmap.follow = false; $('tmFollow').classList.remove('on'); tmFit(cv); tmRedraw(); });
+  $('tmIn').onclick = () => zoom(1.5); $('tmOut').onclick = () => zoom(1 / 1.5);
+  $('tmFit').onclick = () => { tmap.follow = false; $('tmFollow').classList.remove('on'); tmFit(cv); tmRedraw(); };
+  $('tmFollow').onclick = () => { tmap.follow = !tmap.follow; $('tmFollow').classList.toggle('on', tmap.follow); if (tmap.follow && tmap.s < 6) tmap.s = 10; tmRedraw(); };
+  for (const k of Object.keys(tmap.layers)) { const el = $('tmL-' + k); el.checked = tmap.layers[k]; el.onchange = () => { tmap.layers[k] = el.checked; tmRedraw(); }; }
+  new ResizeObserver(() => tmRedraw()).observe(cv);
+  matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', tmRedraw); // 切换深浅色时重画（颜色取自 CSS 变量）
+}
+tmInit();
+
+function renderTunnels(mem, st) {
+  const fac = mem.facilities || [];
+  $('tunnelList').innerHTML = list(fac, (f) => `<li><span class="k">${f.kind === 'passage' ? '通道' : f.kind === 'chest' ? '箱子' : f.kind === 'bed' ? '床' : '设施'}</span>${esc(f.text)}</li>`);
+  const empty = !mem.passages ? '进程重启后开始记录自己挖的通道' : !mem.passages.length && !fac.length ? '还没有挖过的通道（自己挖够 4 格的地下通道才记），也没有设施' : '';
+  $('tmEmpty').textContent = empty; $('tmEmpty').hidden = !empty;
+  tmap.data = tmBuild(mem, st);
+  // 第一次打开：看自己周围 96 格内的通道和设施；“全貌”/双击才看全部
+  if (!tmap.fitted && (tmap.data.cells.size || tmap.data.fac.length || tmap.data.me)) { tmFit($('tunnelMap'), 96); tmap.fitted = true; }
+  tmRedraw();
 }
 
 // ------------------------------------------------------------ 视野

@@ -503,7 +503,9 @@ function snapshot() {
           .map((p) => ({ id: p.id, entrances: p.entrances, path: p.path, deepestY: p.deepestY, dug: p.dug, ores: p.ores, uses: p.uses, lastUsedAt: p.lastUsedAt }));
         const facilities = myFacilities(memory, { worldId: st.worldId, dim: st.dim, pos: st.pos }).slice(0, 16)
           .map((f) => ({ kind: f.kind, label: f.label, pos: f.pos, dist: f.dist, text: f.text }));
-        return { passages, facilities };
+        // 朝向：地图上画自己的箭头
+        const facingYaw = adapter.eye()?.yaw ?? null;
+        return { passages, facilities, facingYaw };
       })(),
       landmarks: memory.landmarks().slice(-12),
       notes: memory.notesFor({ n: 8 }),
