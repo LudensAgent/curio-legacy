@@ -3,7 +3,7 @@ import { describePlan, materialPlan } from '../methods/shortfall.ts';
 import { lookAround, surface } from './movement.ts';
 import { findStation, myBed, rememberStation } from './stations.ts';
 import { ownBuildingAt } from './build.ts';
-import { dist3, sleep } from '../util.ts';
+import { AbortedError, dist3, sleep } from '../util.ts';
 import { codeFromError, clampInt, fail, isAbort, obj, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 import { craftReservationConflict } from '../projects/reservations.ts';
 import { config } from '../config.ts';
@@ -419,6 +419,39 @@ export function woodShortfall(item: string, count: number, inv: { name: string; 
   return parts.length ? parts.join('；') : null;
 }
 
+/**
+ * 被打断的合成：取消只是不再等服务器回包，合成请求往往已经发出去、过一会儿就做成了。
+ * 记下来，看它到底成没成：成了就说一声；紧接着又要做同一样东西时，先算上它，免得多做一份。
+ */
+const INTERRUPTED_WINDOW_MS = 60_000;
+const interruptedCrafts = new Map<string, { at: number; landed: Promise<number> }>();
+const countIn = (inv: { name: string; count: number }[], item: string) => inv.filter((i) => i.name === item).reduce((n, i) => n + i.count, 0);
+
+function watchInterruptedCraft(ctx: SkillCtx, item: string, before: number, settleMs = 5000) {
+  const landed = (async () => {
+    const end = Date.now() + settleMs;
+    let gained = 0;
+    for (;;) {
+      try { gained = countIn(ctx.adapter.state().inventory, item) - before; } catch { return 0; }
+      if (gained > 0 || Date.now() >= end) break;
+      await sleep(250);
+    }
+    if (gained <= 0) return 0;
+    const total = countIn(ctx.adapter.state().inventory, item);
+    ctx.bus.publish('craft_landed', 'P2', `刚才被打断的合成其实做成了：${item} +${gained}（背包里现在共 ${total} 个）`, { item, count: gained, total });
+    return gained;
+  })();
+  interruptedCrafts.set(item, { at: Date.now(), landed });
+}
+
+/** 合成结果里顺带说清现在有多少（身上穿着的也算上）：做不做第二件由它自己定，但得看得见已经有的 */
+function haveNote(ctx: SkillCtx, item: string): string {
+  const s = ctx.adapter.state();
+  const total = countIn(s.inventory, item);
+  const worn = s.equipment?.some((e) => e.name === item) ? '，身上还穿着一件' : '';
+  return `（背包里现在共 ${total} 个${worn}）`;
+}
+
 export const craft: Skill<{ item: string; count: number; extra?: boolean }> = {
   name: 'craft',
   description: '合成物品。会自动补做两层以内的前置材料（原木→木板→木棍）、自动使用记得的工作台或现做一个放下，所以直接写最终物品即可。常用：wooden_pickaxe、stone_pickaxe、furnace、torch、crafting_table',
@@ -442,6 +475,19 @@ export const craft: Skill<{ item: string; count: number; extra?: boolean }> = {
       if (placed) return fail('BAD_ARGS', `已经有一张自己的床放在 (${placed.pos.x},${placed.pos.y},${placed.pos.z})（${placed.dist} 格外），不用再做：天黑时 sleep 会自己走过去睡；真要第二张床写 {"item":"${args.item}","extra":true}`);
     }
     args = { ...args, item: pickVariant(args.item, ctx.adapter.state().inventory) };
+    // 刚被打断的同一样合成：先等它落地，做成了就算进这次的数量
+    let landedNote = '';
+    const prior = interruptedCrafts.get(args.item);
+    if (prior) {
+      interruptedCrafts.delete(args.item);
+      const landed = Date.now() - prior.at <= INTERRUPTED_WINDOW_MS ? await prior.landed : 0;
+      if (ctx.signal.aborted) throw new AbortedError(String(ctx.signal.reason ?? 'aborted'));
+      if (landed >= args.count) {
+        return ok(`刚才被打断的那次合成其实已经做成了 ${landed} 个 ${args.item}，这次不再重复做${haveNote(ctx, args.item)}`, { crafted: 0, landedEarlier: landed });
+      }
+      if (landed > 0) { args = { ...args, count: args.count - landed }; landedNote = `；刚才被打断的那次其实已做成 ${landed} 个，这次只补 ${args.count} 个`; }
+    }
+    const before = countIn(ctx.adapter.state().inventory, args.item);
     try {
       // 先用看得见或记得的工作台（自己放过的也算），附近没有才让底层现做一个
       const table = findStation(ctx, ['crafting_table'], 48);
@@ -460,9 +506,9 @@ export const craft: Skill<{ item: string; count: number; extra?: boolean }> = {
       }
       // 野外临时放下的工作台用完收回来带着走（真人都这样）；家附近的留着当家具
       const tookBack = r.ok && placedFresh && r.tablePos && !nearHome(ctx, r.tablePos) ? await takeBackTable(ctx, r.tablePos) : false;
-      return ok(`合成了 ${r.crafted} 个 ${args.item}${reused}${tookBack ? '；临时放下的工作台已收回背包' : ''}`, { crafted: r.crafted, ...(tookBack ? { tableTakenBack: true } : {}) });
+      return ok(`合成了 ${r.crafted} 个 ${args.item}${haveNote(ctx, args.item)}${reused}${landedNote}${tookBack ? '；临时放下的工作台已收回背包' : ''}`, { crafted: r.crafted, ...(tookBack ? { tableTakenBack: true } : {}) });
     } catch (e) {
-      if (isAbort(e)) throw e;
+      if (isAbort(e)) { watchInterruptedCraft(ctx, args.item, before); throw e; }
       return fail(codeFromError(e), `合成 ${args.item} 出错：${(e as Error).message}`);
     }
   },

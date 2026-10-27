@@ -58,6 +58,7 @@ export class Attention {
     switch (ev.type) {
       case 'discovery': return this.notice(`disc:${ev.msg}`, ev.msg, 0.42, 120_000);
       case 'item_new': return this.notice(`item:${String(d.item ?? ev.msg)}`, ev.msg, 0.4, 600_000);
+      case 'craft_landed': return this.notice(`craft_landed:${String(d.item ?? '')}`, ev.msg, 0.45, 30_000);
       case 'hurt': return this.notice('hurt', ev.msg, 0.45, 15_000);
       case 'reflex': return this.notice(`reflex:${ev.msg.slice(-12)}`, `身体自己反应了：${ev.msg}`, 0.35, 20_000);
       case 'death_items': return this.notice('death_items', ev.msg, 0.7, 60_000);
