@@ -22,6 +22,7 @@ import { attachLogger, JsonlWriter } from './log.ts';
 import { WorldMemory } from './memory/store.ts';
 import { EpisodicMemory } from './memory/episodic.ts';
 import { HindsightBackend } from './memory/hindsight.ts';
+import { HindsightUsage } from './memory/hindsight-usage.ts';
 import { buildingArchiveFor, ownBuildingAt } from './skills/build.ts';
 import { myFacilities } from './mind/facilities.ts';
 import { flattenProgram, MethodLibrary, simpleToMethod } from './methods/learning.ts';
@@ -264,8 +265,12 @@ const reflex = new Reflex(adapter, arbiter, bus, vision, { routineCare: config.m
 const spectator = new Spectator(config, adapter, bus);
 const metrics = new Metrics(adapter, arbiter, executive, planner, reflex, bus);
 /** 一次测试从头到尾的累计数字（死亡、token、调用次数、任务成败、路程、运行时长）：重启不清零，清空记忆/重置世界才从零开始 */
-const runStats = new RunStats(path.join(config.dataDir, 'run-stats.json'), metrics, { main: planner, coder: coderPlanner !== planner ? coderPlanner : null });
+/** Hindsight 自己调 LLM 的用量（不经过 Curio，本地日志里没有）：读它的 /metrics，累计进本次测试 */
+const memoryLlm = config.memory.provider === 'hindsight' ? new HindsightUsage({ baseUrl: config.memory.baseUrl, apiKey: config.memory.apiKey }) : null;
+const runStats = new RunStats(path.join(config.dataDir, 'run-stats.json'), metrics, { main: planner, coder: coderPlanner !== planner ? coderPlanner : null },
+  { memoryLlm });
 runStats.start();
+memoryLlm?.start();
 const actionChat = new ActionChat(adapter, bus, { ...config.actionChat, canSend: () => !executive.paused,
   context: () => ({ plan: executive.plan, task: arbiter.info(), intent: mind.currentIntent() }),
 });
@@ -274,8 +279,10 @@ actionChat.start();
 // ------------------------------------------------------------ Curio Observer（观察者客户端模组的数据流）
 const feed = config.observerFeed ? new ObserverFeed({ botName: config.mc.username, mcVersion: config.mc.version, agentVersion: '0.3.0',
   hudConfigPath: config.observerHudConfig }) : null;
-/** 直播 HUD 的 LLM 用量：上传/下载 token、缓存命中、每分钟速率、模型和真实花费 */
-const currentSpend = () => llmSpend([planner, coderPlanner], { holidays: config.llm.priceHolidays });
+/** 直播 HUD 的 LLM 用量：游戏和记忆分开的上传/下载 token、缓存命中，每分钟速率、模型和真实花费（合计 + 其中记忆） */
+const memorySpend = memoryLlm ? new MemorySpend(memoryLlm, { price: config.memoryLlmPrice, holidays: config.llm.priceHolidays }) : null;
+const currentSpend = () => withMemory(llmSpend([planner, coderPlanner], { holidays: config.llm.priceHolidays }), memorySpend?.sample(),
+  Date.now(), config.llm.priceHolidays);
 const observerTasks = feed ? installTaskObserver(feed, arbiter, {
   interests: () => perception.snapshot()?.drives ?? [],
   stats: () => ({ deaths: metrics.counters.deaths, totalTokens: runStats.totalTokens(), ...currentSpend() }),
@@ -472,6 +479,7 @@ function snapshot() {
     methods: { definitions: methods.list().slice(-12), gaps: methods.abilityGaps().slice(-8) },
     episodicMemory: episodic.snapshot(),
     metrics: metrics.snapshot(),
+    memoryLlm: memoryLlm?.snapshot() ?? null,
     skills: { list: behaviors.list().map((b) => ({ name: b.name, description: b.description, mode: b.mode, source: b.source, code: !!b.code, version: b.version ?? null,
       overrides: b.overrides, priority: b.priority, stats: behaviors.statsOf(b.name) ? { ok: behaviors.statsOf(b.name)!.ok, fail: behaviors.statsOf(b.name)!.fail, disabled: !!behaviors.statsOf(b.name)!.disabled,
         retired: behaviors.statsOf(b.name)!.retired ?? null, lastError: behaviors.statsOf(b.name)!.lastError ?? null } : null })),

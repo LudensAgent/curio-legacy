@@ -276,6 +276,7 @@
   <span class="chip" id="state">-</span>
   <span class="chip" id="llm">LLM</span>
   <span class="chip" id="llmUsage" title="本次启动以来接口返回的用量">用量 -</span>
+  <span class="chip" id="memUsage" title="Hindsight 记忆服务自己调 LLM 的用量" hidden>记忆 -</span>
   <span class="chip" id="spec">旁观</span>
   <span class="grow"></span>
   <div class="suggest">
@@ -817,6 +818,25 @@ function renderSkills(sk) {
   $('knowledge').innerHTML = list(sk.knowledge, (k) => `<li><b class="mono">${esc(k.name)}</b>${k.source === 'self' ? ' <span class="badge good">自己写的</span>' : ''} <span class="dim">${esc(k.description)}</span></li>`);
 }
 
+const MEM_SCOPE = { memory: '写入抽取', consolidation: '合并观察', reflect: '反思', answer: '回答' };
+const fmtTok = (n) => n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : `${(n / 1000).toFixed(1)}k`;
+function renderMemUsage(u) {
+  const el = $('memUsage');
+  el.hidden = !u;
+  if (!u) return;
+  const t = u.total;
+  el.textContent = t.tokens || u.ok ? `记忆 ${fmtTok(t.tokens)} tokens${t.input ? ` · 缓存 ${Math.round(t.cached / t.input * 100)}%` : ''}${t.thoughts ? ` · 推理 ${fmtTok(t.thoughts)}` : ''}` : '记忆用量 -';
+  el.className = 'chip' + (u.error ? ' off' : '');
+  const lines = ['Hindsight 记忆服务（本次测试累计，重启 Curio 不清零）'];
+  if (u.models?.length) lines.push(`模型 ${u.models.join(' / ')}`);
+  for (const [k, b] of Object.entries(u.byScope || {})) {
+    lines.push(`${MEM_SCOPE[k] ?? k}：${b.calls} 次${b.failed ? `（失败 ${b.failed}）` : ''} · 输入 ${b.input.toLocaleString()}（缓存 ${b.cached.toLocaleString()}）· 输出 ${b.output.toLocaleString()} · 推理 ${b.thoughts.toLocaleString()}`);
+  }
+  if (u.baseline) lines.push(`接上时容器里已有 ${u.baseline.tokens.toLocaleString()} token，没算进来`);
+  if (u.error) lines.push(`读取失败：${u.error}`);
+  el.title = lines.join('\n');
+}
+
 function render(s) {
   const st = s.state, p = s.percept, t = s.task, ex = s.exec, m = s.metrics;
   $('conn').textContent = st.connected ? (st.alive ? `${st.username} 在线` : '死亡 / 重生中') : '未连接';
@@ -828,6 +848,7 @@ function render(s) {
   const usage = m.llm.tokenUsage;
   $('llmUsage').textContent = usage ? `${(usage.totalTokens / 1000).toFixed(1)}k tokens${usage.cachedPromptTokens != null && usage.promptTokens ? ` · 缓存 ${Math.round(usage.cachedPromptTokens / usage.promptTokens * 100)}%` : ''}` : '用量 -';
   $('llmUsage').title = usage ? `本次启动以来：输入 ${usage.promptTokens.toLocaleString()} / 输出 ${usage.completionTokens.toLocaleString()}` : '';
+  renderMemUsage(s.memoryLlm);
   $('spec').textContent = s.spectator.enabled ? `旁观 ${s.config.observer ?? ''} ${s.spectator.rconOk ? '✓' : '✗'}` : '旁观关';
   $('spec').className = 'chip ' + (!s.spectator.enabled ? '' : s.spectator.rconOk ? 'on' : 'off');
   $('spec').title = s.spectator.reason || s.spectator.lastResult || '';

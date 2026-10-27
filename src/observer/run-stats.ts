@@ -19,7 +19,12 @@ interface Saved {
   distance: number;
   counters: Counters;
   planners: Record<string, PlannerTotals>;
+  /** 不经过 Curio 自己的 LLM 统计、但也算在这次测试里的用量（比如 Hindsight 记忆服务） */
+  extras?: Record<string, unknown>;
 }
+
+/** 额外的累计来源：自己管怎么存、怎么读回，以及算进总 token 的数 */
+export interface RunStatsExtra { dump(): unknown; load(saved: unknown): void; totalTokens?(): number }
 
 const PLANNER_KEYS = ['calls', 'ok', 'errors', 'invalid', 'budgetFallbacks', 'tokenUsage', 'tiers', 'tierLatency'] as const;
 
@@ -38,7 +43,8 @@ export class RunStats {
   /** 这次进程启动时，已经累计了多少（读回来的） */
   readonly previous: { uptimeSec: number; startedAt: number } = { uptimeSec: 0, startedAt: Date.now() };
 
-  constructor(private file: string, private metrics: Metrics, private planners: Record<string, { stats: LlmStats } | null | undefined>) {
+  constructor(private file: string, private metrics: Metrics, private planners: Record<string, { stats: LlmStats } | null | undefined>,
+    private extras: Record<string, RunStatsExtra | null | undefined> = {}) {
     try {
       const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as Saved;
       if (raw?.version === 1) this.saved = raw;
@@ -55,6 +61,9 @@ export class RunStats {
       const pick: Record<string, unknown> = {};
       for (const k of PLANNER_KEYS) pick[k] = prev[k];
       addInto(p.stats as unknown as Record<string, any>, pick);
+    }
+    for (const [name, x] of Object.entries(extras)) {
+      if (x && s.extras?.[name] !== undefined) { try { x.load(s.extras[name]); } catch { /* 旧格式读不了就从零记 */ } }
     }
     this.previous.uptimeSec = s.uptimeSec ?? 0;
     this.previous.startedAt = s.startedAt ?? Date.now();
@@ -83,12 +92,16 @@ export class RunStats {
       planners[name] = pick as unknown as PlannerTotals;
     }
     const uptimeSec = Math.round((Date.now() - (m as unknown as { startedAt: number }).startedAt) / 1000);
-    return { version: 1, startedAt: this.previous.startedAt, savedAt: Date.now(), uptimeSec, distance: Math.round(m.distance), counters: structuredClone(m.counters), planners };
+    const extras: Record<string, unknown> = {};
+    for (const [name, x] of Object.entries(this.extras)) if (x) extras[name] = x.dump();
+    return { version: 1, startedAt: this.previous.startedAt, savedAt: Date.now(), uptimeSec, distance: Math.round(m.distance), counters: structuredClone(m.counters), planners,
+      ...(Object.keys(extras).length ? { extras } : {}) };
   }
 
-  /** 所有模型加起来用了多少 token（直播叠层用） */
+  /** 所有模型加起来用了多少 token（直播叠层用），含 Hindsight 记忆服务这类额外来源 */
   totalTokens(): number {
-    return Object.values(this.planners).reduce((n, p) => n + (p?.stats.tokenUsage.totalTokens ?? 0), 0);
+    return Object.values(this.planners).reduce((n, p) => n + (p?.stats.tokenUsage.totalTokens ?? 0), 0)
+      + Object.values(this.extras).reduce((n, x) => n + (x?.totalTokens?.() ?? 0), 0);
   }
 
   save() {

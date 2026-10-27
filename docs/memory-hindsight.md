@@ -127,3 +127,11 @@ episodic.stop();
 后续优先评估“相同线索能否想起相关经历、无关往事是否挤占上下文、错误推断是否被新观察纠正”，再增加定期反思、可解释遗忘、兴趣与审美档案。它们服务于 LLM 想做的事情，而不把经历强制转换成下一条必做任务。
 
 本地故障回退只检索最近 2000 条经历，启动最多读取归档末尾 8 MiB；完整 JSONL 保留在磁盘，更早经历由 Hindsight 负责召回。待写队列为保证离线经历不丢失而不做截断，目前仍使用 JSON 原子保存；长时间离线积累大量事件时，后续需改为 journal 或索引存储，避免同步重写成本增长。
+
+## 记忆服务的 LLM 用量与推理
+
+- Hindsight 自己调 LLM（写入时抽取事实、合并观察、反思），这些调用不经过 Curio，本地 `data/logs/llm-*.jsonl` 里没有。Curio 每 30 秒读一次 `HINDSIGHT_URL/metrics` 里的 `hindsight_llm_*` 计数，按用途累计进 `data/run-stats.json` 的 `extras.memoryLlm`（重启 Curio 不清零），控制台顶栏显示为「记忆 … tokens」，悬停看分用途明细；直播叠层的总 token 也包含它。
+- 第一次接上时容器里已有的数不算进本次测试，只记成 baseline；容器重启后计数器归零，会自动接着算。
+- `HINDSIGHT_API_LLM_API_KEY`：给记忆服务单独一个 key，服务商后台就能把它的花费分开看；留空回退到 `LLM_API_KEY`。
+- `HINDSIGHT_API_LLM_EXTRA_BODY={"thinking":{"type":"disabled"}}`：DeepSeek 默认开思考、力度 high，抽取事实用不着，关掉能省下大部分输出 token。换成别家模型时清空它，需要的话改设 `HINDSIGHT_API_LLM_REASONING_EFFORT`。
+- 这几项只在重启 Hindsight 容器（`docker compose -f compose.memory.yaml up -d`）后生效；用量统计在重启 Curio 后生效。

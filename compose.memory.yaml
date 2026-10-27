@@ -16,6 +16,11 @@ services:
       HINDSIGHT_API_LLM_API_KEY: "${HINDSIGHT_API_LLM_API_KEY:-${LLM_API_KEY:-}}"
       HINDSIGHT_API_LLM_BASE_URL: "${HINDSIGHT_API_LLM_BASE_URL:-${LLM_BASE_URL:-https://api.openai.com/v1}}"
       HINDSIGHT_API_LLM_MODEL: "${HINDSIGHT_API_LLM_MODEL:-${LLM_MODEL:-gpt-4o-mini}}"
+      # Minimal reasoning. DeepSeek thinks at high effort unless told otherwise, so .env sends
+      # {"thinking":{"type":"disabled"}} as extra body; "null" (the default) sends nothing extra.
+      # Other models: clear the extra body and set a reasoning effort (e.g. low) instead.
+      HINDSIGHT_API_LLM_EXTRA_BODY: "${HINDSIGHT_API_LLM_EXTRA_BODY:-null}"
+      HINDSIGHT_API_LLM_REASONING_EFFORT: "${HINDSIGHT_API_LLM_REASONING_EFFORT:-}"
       HINDSIGHT_API_WORKER_ID: minecraftllm-memory
       # Chinese gameplay notes require multilingual retrieval models.
       HINDSIGHT_API_EMBEDDINGS_PROVIDER: local
