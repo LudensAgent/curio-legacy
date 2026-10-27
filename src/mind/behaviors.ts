@@ -683,6 +683,34 @@ export class BehaviorEngine {
   /** 这段时间里用过的技能（名字@版本） */
   usedBetween(from: number, to: number): string[] { return [...new Set(this.usage.filter((u) => u.at >= from && u.at <= to).map((u) => u.tag))]; }
 
+  /**
+   * 给后台写技能的模型看的一览：在用的（启用、停用）全列；已收起的墓碑只列和这次的事沾边的几条，
+   * 其余只给个数——以前 160 多条墓碑全塞进去，占了提示词三分之二，大多和这次的事无关。
+   * 墓碑按收起原因分两种：做不好、被合并的（没新证据别再写）；只是数量上限、太久没用上收起的（不是做不好，这次需要就可以重写）。
+   */
+  forgeOverview(about: string, focus = about, maxRetired = BehaviorEngine.FORGE_TOMBSTONES): string[] {
+    const all = this.overview();
+    const names = this.list().map((b) => b.name);
+    const text = about.toLowerCase();
+    const active: string[] = [], scored: { line: string; score: number; at: number }[] = [];
+    this.list().forEach((b, i) => {
+      const st = this.stats[b.name];
+      const line = all[i];
+      if (!st?.retired) { active.push(line); return; }
+      const score = tombstoneRelevance(b, text, focus);
+      if (score >= 2) {
+        const tag = idleRetirement(st.retired) && !this.tombstone(b.name) ? '；不是做不好，只是当时用不上，这次需要可以同名重写' : '';
+        scored.push({ line: line + tag, score, at: st.retiredAt ?? 0 });
+      }
+    });
+    const picked = scored.sort((a, b) => b.score - a.score || b.at - a.at).slice(0, maxRetired);
+    const retired = names.filter((n) => this.stats[n]?.retired).length;
+    const rest = retired - picked.length;
+    return [...active, ...picked.map((x) => x.line), ...all.slice(names.length),
+      ...(rest > 0 ? [`另有 ${rest} 份已收起的技能和这次的事不沾边，没列出`] : [])];
+  }
+  static FORGE_TOMBSTONES = 8;
+
   /** 给模型看的一览（技能书索引之外，带成败和停用状态） */
   overview(): string[] {
     let dim = '';
@@ -694,4 +722,36 @@ export class BehaviorEngine {
       return `${b.name}［${b.mode === 'auto' ? '自动' : b.mode === 'recover' ? '失败时先试' : '调用'}${b.code ? `，代码 v${b.version ?? 1}` : ''}${b.overrides.length ? `，代替本能 ${b.overrides.join('/')}` : ''}${b.needs ? `，调用时给 args.${Object.keys(b.needs).join('/')}` : ''}］${st && st.ok + st.fail ? ` 成${st.ok}/败${st.fail}` : ''}${st?.retired ? ` 已收起（${st.retired.slice(0, 30)}）` : st?.disabled ? ' 已停用' : ''}${untested}`;
     }), ...[...this.invalid].map(([n, why]) => `${n}：${why}`)];
   }
+}
+
+/** 只是因为数量上限、太久没用上而收起的（不是做不好） */
+export function idleRetirement(why: string): boolean { return /^技能太多|小时没用上|一次都没用上/.test(why); }
+
+const NAME_STOP = new Set(['and', 'the', 'then', 'when', 'with', 'from', 'into', 'out', 'for', 'off', 'low', 'get', 'use', 'first', 'skill']);
+/**
+ * 墓碑和这次的事沾不沾边：这次的经过里点名了它、它管的失败动作或代替的本能出现了、名字里的词出现了、
+ * 描述和这次的标题（focus，短的那句；整段经过太长，常见说法处处都有）有几处相同的说法。分数越高越相关
+ */
+export function tombstoneRelevance(b: Pick<Behavior, 'name' | 'description' | 'when' | 'overrides'>, about: string, focus = about): number {
+  const text = about.toLowerCase();
+  let score = 0;
+  if (text.includes(b.name.toLowerCase())) score += 5;
+  // 管失败的：这次经过里那个动作真的失败过才算（dig_at、step 几乎每段经过里都有，光出现不算）
+  for (const sk of b.when?.after_failure?.skill ?? []) {
+    if (!sk) continue;
+    const s = sk.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp(`${s} → (?!succeeded)|${s}[^\\n]{0,40}(失败|failed)`).test(text)) score += 3;
+    else if (focus.toLowerCase().includes(sk.toLowerCase())) score += 1;
+  }
+  for (const o of b.overrides ?? []) if (o && text.includes(o.toLowerCase())) score += 2;
+  const words = b.name.toLowerCase().split(/[-_\s]+/).filter((w) => w.length >= 3 && !NAME_STOP.has(w));
+  // 名字里的词只和标题比：dig、step 这类动作名在整段经过里处处都有
+  score += words.filter((w) => focus.toLowerCase().includes(w)).length;
+  const desc = (b.description ?? '').slice(0, 80);
+  const grams = new Set<string>();
+  for (let i = 0; i + 2 <= desc.length; i++) { const g = desc.slice(i, i + 2); if (/^[\u4e00-\u9fff]{2}$/.test(g)) grams.add(g); }
+  let shared = 0;
+  const head = focus.toLowerCase();
+  for (const g of grams) if (head.includes(g)) shared++;
+  return score + (shared >= 5 ? 3 : shared >= 3 ? 2 : shared >= 2 ? 1 : 0);
 }

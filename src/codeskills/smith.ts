@@ -417,7 +417,7 @@ chronic_shortages 是这两个小时里一再缺的东西：想想能不能把�
 - 调用类技能（不写 when）有要调用方给的参数时，写 "args":{"参数名":"意思"} 声明；代码里读 args.参数名，verify 里拿 args.args.参数名 核对目标（别拿代码自己算出来、放进返回值的目标比）。
 - existing_skills 里已经有管这件事的技能、只是没做好：用同一个名字重写它，别重复造。
 - reliable_skills 是已经验证可靠的技能（积木）：代码里用 api.useSkill 调用它们，能组合现成的就别从底层动作重写一遍；新技能可以比它们高一层（比如“开一条巷道找铁并带回来”调用挖巷道的那份）。
-- existing_skills 里标“已收起”的是墓碑：写着当时为什么收起。同一种事没有新证据就输出 none，别把它换个样子再写一遍。
+- existing_skills 里标“已收起”的是墓碑（只列了和这次沾边的）：写着当时为什么收起。做不好、被合并而收起的，同一种事没有新证据就输出 none，别把它换个样子再写一遍；标着“不是做不好”的，这次确实需要就用同一个名字重写。
 - young_skills 里的技能当前版本还没用够几次，看不出好坏：不要改写它们，也不要换个名字另写一份做同一件事；这次的事归它们管就输出 none（经过已经记进它们的成败）。
 - 不是技能能解决的（纯属运气、应该由思考决定的取舍、缺的是材料不是做法）：输出 {"none":true,"why":"…"}。
 
@@ -433,7 +433,7 @@ ${API_DOC}
       ...(incident.note ? { its_own_note: incident.note } : {}),
       [review ? 'recent_activities' : 'episode']: incident.lines,
       now: incident.context,
-      existing_skills: this.engine.overview(),
+      existing_skills: this.engine.forgeOverview([incident.headline, incident.note ?? '', ...incident.lines].join('\n'), `${incident.headline}\n${incident.note ?? ''}`),
       reliable_skills: this.engine.reliableList(),
       young_skills: this.engine.list().filter((b) => this.engine.rewriteGate(b.name)).map((b) => { const c = this.engine.currentStats(b.name); return `${b.name}（这一版成 ${c.ok} 败 ${c.fail}）`; }),
       ...(incident.kind === 'pain' ? { usual_pain: this.pain.baseline() } : {}),
