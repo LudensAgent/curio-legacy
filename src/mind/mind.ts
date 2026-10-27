@@ -23,7 +23,7 @@ import { myBed } from '../skills/stations.ts';
 import { StrategyLog } from './strategy.ts';
 import type { ParsedGameMessage } from '../memory/game-messages.ts';
 import type { MindContext } from './prompt.ts';
-import { cleanPlanStep, moodWords, type SelfModel } from './self.ts';
+import { cleanPlanStep, moodWords, SelfModel } from './self.ts';
 import type { LedgerView } from './ledger.ts';
 import type { Thinker } from './thinker.ts';
 import type { Activity, ActivityDraft, ActivityEnd, ActivityOutcome, ActivityRecord, MindDecision } from './types.ts';
@@ -38,7 +38,8 @@ export interface MindDeps {
   /** 主目标很久没进展：交给后台想“要做到它还缺什么能力” */
   onGoalStuck?: (goal: string, lines: string[]) => void;
   /** 游戏进度（里程碑）：做到了哪些、接下来还有哪些没做到 */
-  progress?: () => { reached: string[]; next: string[] } | null;
+  /** 游戏进度（里程碑）：做到了哪些、还没做到哪些；lastAt = 最近一次做到新里程碑的时刻 */
+  progress?: () => { reached: string[]; next: string[]; lastAt?: number | null } | null;
   /** 想说话时（不以 / 开头） */
   say?: (text: string) => void;
   /** 后天学会的做法（行为技能）：失败时先试的恢复办法、模型写下就生效的新技能 */
@@ -143,6 +144,23 @@ export class Mind {
   private finishedSinceReflect = 0;
   private activityThoughtAt = 0;
   private pendingReason: { reason: string; tier: 'glance' | 'deliberate' } | null = null;
+  /** 正在等的“阶段回顾”：情绪（腻了、烦了）或回想提醒它停下来看看这一阶段在做什么 */
+  private review: { at: number; why: string } | null = null;
+  private lastReviewAt = 0;
+  /** 这一念是阶段回顾：只有这时（或主目标停滞）才允许换主目标 */
+  private inReview = false;
+  /** 回想时觉得主目标可以放下了：留到下一次阶段回顾时告诉它 */
+  private keptHint: string | null = null;
+  /** 两次因为情绪的阶段回顾至少隔多久（每次在这个范围里随机）：情绪只是提醒，不能一烦就换目标 */
+  static REVIEW_GAP_MIN: [number, number] = [45, 90];
+  private reviewGapMs = 45 * 60_000;
+  /** 多久没做到新的游戏进度，算“一直在同一带打转” */
+  static NO_MILESTONE_MIN = 90;
+  /** 情绪到多少才提醒回顾 */
+  static BORED_REVIEW = 0.75;
+  static FED_UP_REVIEW = 0.65;
+  /** 游戏里现在是第几天（感知时更新） */
+  private gameDay = NaN;
   /** “这段活快干完了，想想接下来”每段活只问一次（模型没写 next 也不会一直追问） */
   private nearEndAskedFor: string | null = null;
   private waitingSince: number | null = null;
@@ -317,6 +335,9 @@ export class Mind {
     this.safe(() => this.autoCheckPlan(p), undefined);
     this.safe(() => this.strategy.onTick(p.time.phase, this.bedDist(), this.activity?.what), undefined);
     this.safe(() => this.goalStuckCheck(), undefined);
+    this.gameDay = p.time.day ?? NaN;
+    this.d.self.notePlanDay(this.gameDay);
+    this.safe(() => this.stageReviewCheck(), undefined);
     if (this.activity?.kind === 'rest') this.maybeReflect('歇下来了');
     else if (Date.now() - Math.max(this.d.self.reflectedAt, this.startedAt) > 60 * 60_000) this.maybeReflect('玩了好一阵了');
   }
@@ -400,6 +421,60 @@ export class Mind {
       `清单：${plan.steps.map((st, i) => `${i}.[${st.done ? 'x' : ' '}] ${st.text}`).join(' ')}`,
       ...acts.slice(-20).map((r) => `${r.what} → ${r.outcome}${r.outcome !== 'done' ? `：${r.summary.slice(0, 80)}` : ''}`),
     ]);
+  }
+
+  /**
+   * 情绪和目标联动：腻了、烦了（或回想觉得主目标可以放下），而且事情不是正顺利——
+   * 主目标很久没勾掉一项，或者很久没做到新的游戏进度（一直在同一类事上打转）——就停下来认真回顾一次阶段目标。
+   * 回顾只是给它看事实、让它自己决定换不换；平时一时的想法换不掉主目标（见 SelfModel.goalSwitchRefusal）。
+   */
+  private stageReviewCheck(now = Date.now()) {
+    if (this.review) { if (now - this.review.at > 10 * 60_000) this.review = null; return; }
+    if (now < this.dangerUntil || this.order) return;
+    const s = this.d.adapter.state();
+    if (s.hp < 8) return; // 保命要紧，先别想阶段的事
+    const plan = this.d.self.plan();
+    const days = this.d.self.planDays(this.gameDay);
+    // 1) 主目标过了好几个游戏天（3–5 天里随机）还没做成：回顾一次，别一直钻牛角尖
+    const overdue = !!plan && plan.reviewDays !== undefined && days >= plan.reviewDays;
+    // 2) 情绪提醒：腻透了或烦透了，而且确实没进展（主目标停滞、或很久没有新的游戏进度）；
+    //    目标至少做了一天、离上次回顾够久，才提醒——情绪会起伏，不能一烦就换
+    const m = this.d.self.mood;
+    const bored = m.boredom >= Mind.BORED_REVIEW, fed = m.frustration >= Mind.FED_UP_REVIEW;
+    const stalledMin = this.d.self.planStalledMin(now);
+    const lastAt = this.safe(() => this.d.progress?.()?.lastAt ?? null, null);
+    const noMilestoneMin = lastAt ? (now - lastAt) / 60_000 : null;
+    const stale = !plan || stalledMin >= SelfModel.STALL_MIN || (noMilestoneMin !== null && noMilestoneMin >= Mind.NO_MILESTONE_MIN);
+    const moody = (bored || fed || !!this.keptHint) && stale && (!plan || days >= 1) && now - this.lastReviewAt >= this.reviewGapMs;
+    if (!overdue && !moody) return;
+    const why = [overdue ? `主目标定下 ${Math.floor(days)} 天了还没做成` : '', bored ? '好无聊' : '', fed ? '很烦躁' : '',
+      plan && stalledMin >= SelfModel.STALL_MIN ? `主目标 ${Math.round(stalledMin)} 分钟没勾掉一项` : '',
+      noMilestoneMin !== null && noMilestoneMin >= Mind.NO_MILESTONE_MIN ? `${Math.round(noMilestoneMin)} 分钟没有新的游戏进度` : '',
+      this.keptHint ? '回想时觉得主目标可以放下了' : ''].filter(Boolean).join('、');
+    this.review = { at: now, why };
+    this.d.bus.publish('stage_review', 'P2', `停下来回顾阶段目标：${why}`, { boredom: m.boredom, frustration: m.frustration, days, stalledMin: Math.round(stalledMin), noMilestoneMin: noMilestoneMin === null ? null : Math.round(noMilestoneMin) });
+    this.requestThink(`${why}：停下来想想这一阶段到底在做什么，要不要换个阶段目标`, 'deliberate');
+  }
+
+  /** 阶段回顾时给模型看的事实：这一阶段做了多久、前几个阶段目标、游戏进度、搁着的想法 */
+  private stageReviewFacts(now = Date.now()): Record<string, unknown> {
+    const plan = this.d.self.plan();
+    const prog = this.safe(() => this.d.progress?.() ?? null, null);
+    const min = (ms: number) => Math.round(ms / 60_000);
+    const outcome = { done: '做完', dropped: '放下', switched: '换掉' } as const;
+    return {
+      why: this.review?.why ?? '',
+      feeling: moodWords(this.d.self.mood),
+      ...(plan ? { current: `「${plan.goal}」定下 ${Math.floor(this.d.self.planDays(this.gameDay))} 个游戏天（${min(now - plan.setAt)} 分钟），${Math.round(this.d.self.planStalledMin(now))} 分钟没勾掉一项，清单 ${plan.steps.filter((st) => st.done).length}/${plan.steps.length}` } : { current: '没有主目标' }),
+      recent_stages: this.d.self.stages(6).map((r) => `「${r.goal.slice(0, 40)}」${min(r.endAt - r.setAt)} 分钟 → ${outcome[r.outcome]}（${r.stepsDone}/${r.steps}）`),
+      ...(prog ? { game_progress: { reached: prog.reached.slice(-10), not_yet: prog.next.slice(0, 10),
+        ...(prog.lastAt ? { last_new_min_ago: min(now - prog.lastAt) } : {}) } } : {}),
+      ideas_waiting: this.d.self.agenda().filter((a) => a.status !== 'active').slice(-6).map((a) => `${a.id} ${a.kind === 'goal' ? '目标' : a.kind === 'idea' ? '点子' : '疑问'}：${a.text.slice(0, 40)}`),
+      ...(this.keptHint ? { reflection: this.keptHint } : {}),
+      how: '情绪在提醒你停下来看看：recent_stages 是不是一直在同一类事上打转，game_progress 里还有什么没做到、手上的东西够不够去做。'
+        + '值得接着做就 continue；想换就写 plan {"focus":"议程 id 或一句话的新目标","steps":[3–6 项],"switch_reason":"为什么"}。'
+        + '新的主目标是这一阶段要拿到的成果，不是过夜、清包、补工具这类眼前事；平时一时的想法换不掉主目标，这种回顾时才能换。',
+    };
   }
 
   /** 清单项写了 done_when 的：事实达成就自动勾掉；全勾掉主目标就完成 */
@@ -746,6 +821,7 @@ export class Mind {
       phase: this.safe(() => this.d.perception.snapshot().time.phase, ''), bedDist: this.bedDist(), doing: this.activity?.what ?? this.lastRecord?.what ?? '' }), undefined);
     const n = this.attention.fromEvent(ev);
     if (n && n.level !== 'note') this.d.bus.publish('notice', 'P2', `注意到：${n.what}`, { salience: n.salience, level: n.level });
+    if (ev.type === 'milestone') this.d.self.feel({ type: 'milestone' });
     if (ev.type === 'hurt') { this.lastHurtEventAt = Date.now(); this.d.self.feel({ type: 'hurt', amount: 2 }); this.hurtWhileBusy(); }
     if (ev.type === 'item_new' || ev.type === 'discovery') {
       this.speechEventAt = Date.now();
@@ -810,6 +886,8 @@ export class Mind {
       this.d.bus.publish('skill_read', 'P3', `想起了技能：${k.name}`, { name: k.name, source: k.source, auto: true });
     }
     const learnFrom = this.learnFrom;
+    // 有等着的阶段回顾、而且不是危急关头：这一念认真想想阶段目标
+    const reviewing = !!this.review && tier === 'deliberate' && !urgent;
     const ctx: MindContext = {
       tier, reason: reflect ? `${reason}；做完了好几段活，顺便回头看看哪些办法好用、哪些该改` : reason,
       percept, state, self: this.d.self, memory: this.d.memory, activity: this.activity, suspended: this.suspended,
@@ -824,6 +902,7 @@ export class Mind {
       skills: this.safe(() => this.d.thinker.skillBook?.index((n) => !!this.d.behaviors?.inactive(n)) ?? [], []),
       stuckHere: this.progressing() ? null : stuckHere(this.recentEnds, state.pos),
       recalled, ...(openedSkill ? { openedSkill } : {}), ...(learnFrom ? { learnFrom } : {}), plan,
+      ...(reviewing ? { stageReview: this.safe(() => this.stageReviewFacts(), { why: this.review?.why ?? '' }) } : {}),
       ...(this.d.behaviors && tier === 'deliberate' ? { learnedSkills: this.safe(() => this.d.behaviors!.overview().filter((l) => !/已收起|已停用/.test(l)), []) } : {}),
       ...(this.d.thinker.designing ? { designing: { brief: this.d.thinker.designing.brief, minutes: Math.round((Date.now() - this.d.thinker.designing.startedAt) / 60_000) } } : {}),
       repeatedFailures: [...this.failuresByTarget].filter(([, f]) => f.n >= 2)
@@ -847,7 +926,12 @@ export class Mind {
       // 刚收到的指令：照做时不受“专注”的限制（瞥一眼不能换、刚开工先不改）
       // 刚收到的指令（或决定采纳的建议）：照做时不受专注的限制
       const followsOperator = orderWasNew && (order?.kind === 'order' ? decision.operator?.status !== 'cannot' : decision.operator?.status === 'adopted');
-      this.apply(decision, activityId, ctx.lastRecord, { urgent: urgent || followsOperator, nearEnd: reason === Mind.NEAR_END_REASON });
+      const goalBefore = this.d.self.plan()?.agendaId ?? null;
+      this.inReview = reviewing;
+      try {
+        this.apply(decision, activityId, ctx.lastRecord, { urgent: urgent || followsOperator, nearEnd: reason === Mind.NEAR_END_REASON });
+      } finally { this.inReview = false; }
+      if (reviewing) this.closeReview(goalBefore);
       if (followsOperator && this.order === order && order && this.activity && !order.activityId) order.activityId = this.activity.id;
       this.kick();
     }).catch((e: any) => {
@@ -897,6 +981,7 @@ export class Mind {
       if (!c) return;
       const { before, after, keptGoals } = this.d.self.consolidate(c);
       // 回想想放下正在推进的主目标：不替它放，告诉它，下一次认真想时自己决定
+      for (const g of keptGoals) this.keptHint = `回想时觉得主目标「${g.text.slice(0, 40)}」可以放下了`;
       for (const g of keptGoals) this.d.bus.publish('goal_kept', 'P3', `回想时觉得主目标「${g.text.slice(0, 40)}」可以放下了，但它还在推进中，先留着：真要放下就在认真想时写 agenda_drop，或者换一个主目标`, { agendaId: g.id });
       for (const k of this.d.self.data.knowHow) if (c.add.includes(k.text) || c.merge.some((m) => m.text === k.text) || c.rewrite.some((r) => r.id === k.id)) {
         this.d.memory.addLesson(k.text, { source: 'model', key: `know_how:${k.id}` });
@@ -1076,8 +1161,23 @@ export class Mind {
     } else decision.notes.push(`skill 没存下：${w && !w.ok ? w.error : '需要 name、description，以及 steps（可执行）或 body（做法说明）'}`);
   }
 
+  /** 阶段回顾想完了：记下结果（换了，还是接着做），隔一阵才会再回顾 */
+  private closeReview(goalBefore: string | null) {
+    const after = this.d.self.plan();
+    const switched = !!after && after.agendaId !== goalBefore;
+    this.d.bus.publish('stage_review_done', 'P2', switched ? `回顾后换了阶段目标：${after!.goal}` : `回顾后接着做：${after?.goal ?? '（还没有主目标）'}`, { switched, why: this.review?.why });
+    // 接着做：给它再宽限一两天才因为“太久没做成”回顾；下次情绪提醒也隔一段随机的时间
+    if (!switched) this.d.self.postponeReview();
+    this.review = null;
+    this.lastReviewAt = Date.now();
+    const [lo, hi] = Mind.REVIEW_GAP_MIN;
+    this.reviewGapMs = (lo + this.d.self.rand() * (hi - lo)) * 60_000;
+    this.keptHint = null;
+  }
+
   private goalSwitchRefusal(decision: MindDecision, target: string): string | null {
     return this.d.self.goalSwitchRefusal(target, {
+      review: this.inReview,
       deliberate: decision.tier === 'deliberate',
       reason: decision.plan?.switchReason ?? decision.switchReason,
       operator: decision.operator?.status === 'doing' || decision.operator?.status === 'adopted',

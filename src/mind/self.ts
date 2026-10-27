@@ -28,11 +28,19 @@ interface SelfData {
   habits?: Habits;
   /** 主目标和它的待办清单（像 agent 的 todo 列表）：每段活都应该推进其中没勾掉的一项 */
   plan?: FocusPlan;
+  /** 最近几个主目标（阶段目标）的起止和结局：回顾阶段目标时看自己是不是一直在原地打转 */
+  stages?: StageRecord[];
 }
+
+export interface StageRecord { goal: string; setAt: number; endAt: number; outcome: 'done' | 'dropped' | 'switched'; stepsDone: number; steps: number }
 
 export interface FocusPlan { agendaId: string; goal: string; steps: { text: string; done: boolean; doneWhen?: import('../projects/types.ts').Condition; auto?: boolean }[]; setAt: number; updatedAt: number;
   /** 上一次真正推进（定下清单或勾掉一项）的时间 */
-  progressAt?: number }
+  progressAt?: number;
+  /** 定下时是游戏里的第几天 */
+  setDay?: number;
+  /** 过了这么多游戏天还没做成，就停下来回顾要不要换（定下时在 3–5 天里随机，回顾后接着做会往后推） */
+  reviewDays?: number }
 
 /** 清单项的文字：去掉模型从【专注】里抄回来的“0. [ ] ”这类格式 */
 export const cleanPlanStep = (t: string) => { let s = String(t).trim(), prev = ''; while (s !== prev) { prev = s; s = s.replace(/^(?:\d+[.、)]\s*|\[[ xX✓]?\]\s*|[☐☑●○▶-]\s*)/, '').trim(); } return s.slice(0, 60); };
@@ -41,16 +49,20 @@ export const clamp01 = (n: number) => Math.max(0, Math.min(1, Number.isFinite(n)
 
 export const DEFAULT_MOOD: Mood = { energy: 0.9, boredom: 0.2, frustration: 0, satisfaction: 0.4, curiosity: 0.6 };
 
-/** 情绪随时间自然回归：烦躁和满足淡去、精力在不干活时恢复、好奇慢慢回到中等 */
-export function relaxMood(m: Mood, seconds: number, working: boolean | 'waiting'): Mood {
+/**
+ * 情绪随时间自然回归：烦躁和满足淡去、精力在不干活时恢复、好奇慢慢回到中等。
+ * 无聊跟着主目标走：干活时目标一直有进展就几乎不腻；很久没勾掉一项（stalled）还在干，才越干越腻。
+ */
+export function relaxMood(m: Mood, seconds: number, working: boolean | 'waiting', opts: { stalled?: boolean } = {}): Mood {
   const k = Math.min(1, seconds / 600);
   // 干等（躲在坑里熬夜、原地等天亮）最容易无聊：人蹲两三分钟就坐不住了，会想“这段时间能干点什么”
   const waiting = working === 'waiting';
   return {
     energy: clamp01(working === true ? m.energy - seconds / 5400 : m.energy + seconds / 900),
-    boredom: clamp01(m.boredom + (waiting ? seconds / 360 : working ? seconds / 2400 : -seconds / 1200)),
+    boredom: clamp01(m.boredom + (waiting ? seconds / 360 : working ? seconds / (opts.stalled ? 3600 : 10800) : -seconds / 1200)),
     frustration: clamp01(m.frustration * (1 - k * 0.8)),
-    satisfaction: clamp01(m.satisfaction + (0.35 - m.satisfaction) * k * 0.5),
+    // 成就感淡得比以前快（约十来分钟淡一半）：持续的满足要靠持续的进展撑着
+    satisfaction: clamp01(m.satisfaction + (0.35 - m.satisfaction) * k * 1.5),
     curiosity: clamp01(m.curiosity + (0.5 - m.curiosity) * k * 0.3),
   };
 }
@@ -62,16 +74,28 @@ export type MoodEvent =
   | { type: 'hurt'; amount: number }
   | { type: 'death' }
   | { type: 'rest'; seconds: number }
-  | { type: 'sleep' };
+  | { type: 'sleep' }
+  /** 主目标的清单勾掉了一项 */
+  | { type: 'progress' }
+  /** 主目标整个做完了 */
+  | { type: 'goal_done' }
+  /** 换上了一个新的主目标 */
+  | { type: 'goal_set' }
+  /** 游戏进度上第一次做到一件事（里程碑） */
+  | { type: 'milestone' };
 
-/** 事件对情绪的影响：都是可解释的小幅变化，模型看到的是“为什么会这样觉得” */
+/**
+ * 事件对情绪的影响：都是可解释的小幅变化，模型看到的是“为什么会这样觉得”。
+ * 成就感来自真正的进展（勾掉主目标的一项、做完主目标、游戏里第一次做到某事），
+ * 不来自挖一格、吃一口这种每分钟几十次的小动作——以前每个成功的动作都加一点，满足一直是满的，等于没有信号。
+ */
 export function feel(m: Mood, e: MoodEvent): Mood {
   const n = { ...m };
   if (e.type === 'step') {
-    if (e.ok) { n.frustration -= 0.04; n.satisfaction += 0.01; } else { n.frustration += 0.12; n.satisfaction -= 0.02; }
+    if (e.ok) { n.frustration -= 0.03; } else { n.frustration += 0.09; n.satisfaction -= 0.01; }
   } else if (e.type === 'activity_end') {
-    if (e.outcome === 'done') { n.satisfaction += 0.12 + Math.min(0.15, e.gainedKinds * 0.03); n.frustration -= 0.15; }
-    if (e.outcome === 'stuck') { n.frustration += 0.18; n.satisfaction -= 0.05; }
+    if (e.outcome === 'done') { n.satisfaction += 0.02 + Math.min(0.06, e.gainedKinds * 0.02); n.frustration -= 0.1; }
+    if (e.outcome === 'stuck') { n.frustration += 0.12; n.satisfaction -= 0.04; }
     n.boredom += e.sameKindStreak >= 3 ? 0.12 : e.sameKindStreak <= 1 ? -0.08 : 0.03;
   } else if (e.type === 'novelty') {
     n.curiosity += 0.15 * e.strength; n.boredom -= 0.2 * e.strength; n.satisfaction += 0.03 * e.strength;
@@ -83,6 +107,14 @@ export function feel(m: Mood, e: MoodEvent): Mood {
     n.energy += e.seconds / 600; n.boredom += e.seconds / 900;
   } else if (e.type === 'sleep') {
     n.energy = 1; n.frustration *= 0.4;
+  } else if (e.type === 'progress') {
+    n.satisfaction += 0.15; n.frustration -= 0.15; n.boredom -= 0.12;
+  } else if (e.type === 'goal_done') {
+    n.satisfaction += 0.25; n.frustration -= 0.2; n.boredom -= 0.15;
+  } else if (e.type === 'goal_set') {
+    n.boredom -= 0.2; n.curiosity += 0.05;
+  } else if (e.type === 'milestone') {
+    n.satisfaction += 0.3; n.boredom -= 0.3; n.curiosity += 0.1;
   }
   return { energy: clamp01(n.energy), boredom: clamp01(n.boredom), frustration: clamp01(n.frustration), satisfaction: clamp01(n.satisfaction), curiosity: clamp01(n.curiosity) };
 }
@@ -168,11 +200,51 @@ export class SelfModel {
   tickMood(working: boolean | 'waiting', now = Date.now()) {
     const seconds = Math.max(0, (now - this.data.moodAt) / 1000);
     if (seconds < 1) return;
-    this.data.mood = relaxMood(this.data.mood, Math.min(seconds, 600), working);
+    this.data.mood = relaxMood(this.data.mood, Math.min(seconds, 600), working, { stalled: this.planStalledMin(now) >= SelfModel.STALL_MIN });
     this.data.moodAt = now;
     this.touch();
   }
   feel(e: MoodEvent) { this.data.mood = feel(this.data.mood, e); this.touch(); }
+  /** 主目标多久没勾掉一项（分钟）：没有主目标算 0 */
+  planStalledMin(now = Date.now()): number {
+    const p = this.data.plan;
+    return p ? Math.max(0, (now - (p.progressAt ?? p.setAt)) / 60_000) : 0;
+  }
+  /** 主目标多久（真实分钟，约两个游戏天）没勾掉一项就算“停滞”：越干越腻，认真想写了理由也能换 */
+  static STALL_MIN = 40;
+  /** 一个主目标过了几个游戏天还没做成就回顾一次（每个目标在这个范围里随机，免得一到点就换） */
+  static REVIEW_DAYS: [number, number] = [3, 5];
+  /** 随机数（测试里可以换掉） */
+  rand: () => number = Math.random;
+  /** 记下主目标是在游戏第几天定的（心智每次感知时调用） */
+  notePlanDay(day: number) {
+    const p = this.data.plan;
+    if (!p || !Number.isFinite(day)) return;
+    if (p.setDay === undefined) { p.setDay = day; this.touch(); }
+    // 旧存档里的主目标还没有回顾期限：补一个
+    if (p.reviewDays === undefined) { p.reviewDays = SelfModel.REVIEW_DAYS[0] + this.rand() * (SelfModel.REVIEW_DAYS[1] - SelfModel.REVIEW_DAYS[0]); this.touch(); }
+  }
+  /** 主目标定下以来过了几个游戏天 */
+  planDays(day: number): number {
+    const p = this.data.plan;
+    return p?.setDay !== undefined && Number.isFinite(day) ? Math.max(0, day - p.setDay) : 0;
+  }
+  /** 回顾后决定接着做：再给它 1–2 个游戏天，到时再回顾 */
+  postponeReview(): number | null {
+    const p = this.data.plan;
+    if (!p) return null;
+    p.reviewDays = (p.reviewDays ?? SelfModel.REVIEW_DAYS[0]) + 1 + this.rand();
+    this.touch();
+    return p.reviewDays;
+  }
+  /** 最近几个阶段目标的经过 */
+  stages(n = 8): StageRecord[] { return (this.data.stages ?? []).slice(-n); }
+  private endStage(outcome: StageRecord['outcome'], now = Date.now()) {
+    const p = this.data.plan;
+    if (!p) return;
+    const rec: StageRecord = { goal: p.goal, setAt: p.setAt, endAt: now, outcome, stepsDone: p.steps.filter((st) => st.done).length, steps: p.steps.length };
+    this.data.stages = [...(this.data.stages ?? []), rec].slice(-12);
+  }
 
   // ---------------------------------------------------------------- 念头流
   think(text: string, kind: Thought['kind'] = 'monologue') {
@@ -217,8 +289,12 @@ export class SelfModel {
     if (status === 'active') for (const a of this.data.agenda) if (a.status === 'active' && a.id !== id) a.status = 'open';
     item.status = status; item.updatedAt = Date.now();
     // 主目标做完或放下了：它的清单也就收起来
-    if ((status === 'done' || status === 'dropped') && this.data.plan?.agendaId === id) delete this.data.plan;
-    if (status === 'active' && this.data.plan && this.data.plan.agendaId !== id) delete this.data.plan;
+    if ((status === 'done' || status === 'dropped') && this.data.plan?.agendaId === id) {
+      this.endStage(status);
+      if (status === 'done') this.feel({ type: 'goal_done' });
+      delete this.data.plan;
+    }
+    if (status === 'active' && this.data.plan && this.data.plan.agendaId !== id) { this.endStage('switched'); delete this.data.plan; }
     this.touch();
     return true;
   }
@@ -244,11 +320,14 @@ export class SelfModel {
     if (!item || item.kind !== 'goal') return null;
     if (item.status !== 'active') this.setAgendaStatus(item.id, 'active');
     const old = this.data.plan?.agendaId === item.id ? this.data.plan : undefined;
+    if (!old) this.feel({ type: 'goal_set' });
     const doneBefore = new Set(old?.steps.filter((st) => st.done).map((st) => st.text) ?? []);
     const cleaned = steps.map((t, i) => ({ text: cleanPlanStep(t), cond: conditions[i] ?? null })).filter((x) => x.text).slice(0, 8);
     this.data.plan = { agendaId: item.id, goal: item.text, steps: cleaned.map(({ text, cond }) => ({ text, done: doneBefore.has(text), ...(cond ? { doneWhen: cond } : {}) })), setAt: old?.setAt ?? Date.now(), updatedAt: Date.now(),
       // 只有勾掉一项才算推进；改写清单（哪怕改得面目全非）不算，不然改一次就把“多久没推进”清零了
-      progressAt: old ? old.progressAt ?? old.setAt : Date.now() };
+      progressAt: old ? old.progressAt ?? old.setAt : Date.now(),
+      ...(old?.setDay !== undefined ? { setDay: old.setDay } : {}),
+      reviewDays: old?.reviewDays ?? SelfModel.REVIEW_DAYS[0] + this.rand() * (SelfModel.REVIEW_DAYS[1] - SelfModel.REVIEW_DAYS[0]) };
     this.touch();
     return this.data.plan;
   }
@@ -257,7 +336,7 @@ export class SelfModel {
    * 已有主目标还在推进（清单没做完）时，换成别的目标要认真想过、写出理由，或者是操作者下的令；
    * 同一个决定里先放下/做完了当前目标的不拦。返回拒绝的说明，可以换就返回 null。
    */
-  goalSwitchRefusal(target: string, opts: { deliberate: boolean; reason?: string; operator?: boolean; releasing?: string[] }): string | null {
+  goalSwitchRefusal(target: string, opts: { deliberate: boolean; reason?: string; operator?: boolean; releasing?: string[]; review?: boolean }): string | null {
     const plan = this.plan();
     const cur = plan ? this.data.agenda.find((a) => a.id === plan.agendaId) : this.activeAgenda();
     if (!cur || cur.status !== 'active' || cur.kind !== 'goal') return null;
@@ -265,9 +344,15 @@ export class SelfModel {
     if (!t || t === cur.id || t === cur.text) return null;
     if (plan && plan.steps.length && plan.steps.every((st) => st.done)) return null;
     if (opts.releasing?.includes(cur.id) || opts.operator) return null;
-    if (opts.deliberate && opts.reason?.trim()) return null;
-    return `主目标「${cur.text.slice(0, 40)}」还在推进，没换成「${(this.data.agenda.find((a) => a.id === t)?.text ?? t).slice(0, 30)}」：`
-      + '眼前要先做的事（过夜、脱困、回地面、吃饭、清包、补工具）直接写成 activity 或 detour，做完会回到主目标；'
+    // 一时冒出来的想法不能顶掉主目标：只有停下来回顾阶段目标时（腻了、烦了、或回想觉得该放下），
+    // 或者主目标已经很久没推进（没有清单也算），认真想过、写了理由才换
+    const stalled = !plan || this.planStalledMin() >= SelfModel.STALL_MIN;
+    if (opts.deliberate && opts.reason?.trim() && (opts.review || stalled)) return null;
+    const to = (this.data.agenda.find((a) => a.id === t)?.text ?? t).slice(0, 30);
+    const head = `主目标「${cur.text.slice(0, 40)}」还在推进，没换成「${to}」：`;
+    if (opts.deliberate && opts.reason?.trim()) return head + `${Math.round(this.planStalledMin())} 分钟前还勾掉过清单，一时的想法不换主目标。`
+      + '想做的事先记进 agenda（以后再做），眼前要先做的事写成 activity 或 detour；等停下来回顾阶段目标时（腻了、烦了、或者主目标很久没进展）再决定换不换';
+    return head + '眼前要先做的事（过夜、脱困、回地面、吃饭、清包、补工具）直接写成 activity 或 detour，做完会回到主目标；'
       + (opts.deliberate ? '真决定换一个阶段目标，在 plan 里写 "switch_reason" 说为什么' : '真要换主目标得认真想一想，并写 switch_reason');
   }
   /** 清单里带 done_when、还没勾掉的项：身体看得见的事实达成了就自动勾（不用等模型记得写 done） */
@@ -276,7 +361,7 @@ export class SelfModel {
     if (!p) return [];
     const out: string[] = [];
     for (const st of p.steps) if (!st.done && st.doneWhen && met(st.doneWhen)) { st.done = true; st.auto = true; out.push(st.text); }
-    if (out.length) { p.updatedAt = Date.now(); p.progressAt = Date.now(); this.touch(); }
+    if (out.length) { p.updatedAt = Date.now(); p.progressAt = Date.now(); this.feel({ type: 'progress' }); this.touch(); }
     return out;
   }
   /** 勾掉清单里的项：序号或文字 */
@@ -290,7 +375,7 @@ export class SelfModel {
       if (st && !st.done && st.doneWhen && met && !met(st.doneWhen)) { refused?.push(st.text); continue; }
       if (st && !st.done) { st.done = true; out.push(st.text); }
     }
-    if (out.length) { p.updatedAt = Date.now(); p.progressAt = Date.now(); this.touch(); }
+    if (out.length) { p.updatedAt = Date.now(); p.progressAt = Date.now(); this.feel({ type: 'progress' }); this.touch(); }
     return out;
   }
   activeAgenda(): AgendaItem | undefined { return this.data.agenda.find((a) => a.status === 'active'); }

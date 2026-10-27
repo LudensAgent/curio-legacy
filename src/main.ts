@@ -253,7 +253,8 @@ const mind = new Mind({
   researchContext: () => methods.researchContext(),
   progress: () => {
     const ms = scorecard.summary().milestones;
-    return { reached: ms.filter((m) => m.at !== null).sort((a, b) => a.at! - b.at!).map((m) => m.label), next: ms.filter((m) => m.at === null).map((m) => m.label) };
+    const reached = ms.filter((m) => m.at !== null).sort((a, b) => a.at! - b.at!);
+    return { reached: reached.map((m) => m.label), next: ms.filter((m) => m.at === null).map((m) => m.label), lastAt: reached.at(-1)?.at ?? null };
   },
   onGoalEnd,
   say: (text) => { if (config.actionChat.enabled) adapter.chat(text); },
