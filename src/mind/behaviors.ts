@@ -418,6 +418,11 @@ export class BehaviorEngine {
     return candidates.some((b) => evalPredicate(b.when!, s));
   }
 
+  /** 恢复技能抽到的成功机会低于这个就不上（成 2 败 20 的技能大约一成多的时候还会被试一次） */
+  static RECOVERY_MIN_CHANCE = 0.2;
+  /** 可替换的随机数（测试用） */
+  rand: () => number = Math.random;
+
   /** 恢复类技能：某个动作失败时，身体先试哪一套（同一段活里每套只试一次） */
   recoveryFor(failure: { skill: string; code?: string }, tried: Set<string> = new Set(), now = Date.now()): Behavior | null {
     const sig = recoverySig(failure);
@@ -430,6 +435,15 @@ export class BehaviorEngine {
     const hit = rec.filter((b) => (this.holds.get(b.name)?.until ?? 0) <= now && evalPredicate(b.when!, s))
       .sort((a, b) => this.choiceScore(b) - this.choiceScore(a))[0];
     if (!hit) return null;
+    // 按它以往的成败“掷一次骰子”（Beta 后验抽样）：常成功的几乎总会上，老失败的偶尔还给它机会、多数时候直接交还给心智。
+    // 不设硬门槛，也不替它判死刑——成败一变，上场的机会跟着变
+    const st = this.statsOf(hit.name);
+    const p = betaSample((st?.ok ?? 0) + 1, (st?.fail ?? 0) + 1, this.rand);
+    if ((st?.ok ?? 0) + (st?.fail ?? 0) >= 3 && p < BehaviorEngine.RECOVERY_MIN_CHANCE) { // 还没用够 3 次的照常试，先攒证据
+      this.recentMiss.set(`${hit.name}|${sig}`, now);
+      this.bus.publish('instinct_skipped', 'P3', `${failure.skill} 没成，「${hit.name}」以往成 ${st?.ok ?? 0} 败 ${st?.fail ?? 0}，这次多半也不管用，交给脑子想`, { name: hit.name, ok: st?.ok ?? 0, fail: st?.fail ?? 0 });
+      return null;
+    }
     this.noteFire(hit.name, failure.skill, now);
     this.lastFired.set(hit.name, now);
     this.touch(hit.name, (st) => { st.fired++; st.lastAt = now; });
@@ -755,4 +769,11 @@ export function tombstoneRelevance(b: Pick<Behavior, 'name' | 'description' | 'w
   const head = focus.toLowerCase();
   for (const g of grams) if (head.includes(g)) shared++;
   return score + (shared >= 5 ? 3 : shared >= 3 ? 2 : shared >= 2 ? 1 : 0);
+}
+
+/** Beta(a,b) 抽样（a、b 是正整数：两组指数分布之和的比值） */
+export function betaSample(a: number, b: number, rand: () => number = Math.random): number {
+  const gamma = (k: number) => { let x = 0; for (let i = 0; i < Math.min(k, 200); i++) x -= Math.log(1 - rand()); return x; };
+  const x = gamma(Math.max(1, Math.round(a))), y = gamma(Math.max(1, Math.round(b)));
+  return x / (x + y);
 }

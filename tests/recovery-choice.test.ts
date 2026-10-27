@@ -19,8 +19,17 @@ function setup() {
   assert.ok(engine.write({ name: 'lower-but-works', description: '优先级低，但管用', when, priority: 40, code: 'return { ok: true };' }).ok);
   engine.creditRecovery('high-but-useless', true); for (let i = 0; i < 3; i++) engine.creditRecovery('high-but-useless', false);
   for (let i = 0; i < 6; i++) engine.creditRecovery('lower-but-works', true);
+  engine.rand = () => 0.5; // 抽样固定成后验均值，测试不靠运气
   return engine;
 }
+
+test('a recovery skill that keeps failing is mostly handed back to the mind instead of being run again', () => {
+  const engine = setup(), now = Date.now();
+  for (const n of ['lower-but-works', 'high-but-useless']) Object.assign(engine.statsOf(n)!, { ok: 2, fail: 20 }); // 历史上老失败（还没被停用）
+  assert.equal(engine.recoveryFor(failure, new Set(), now), null, '成功机会抽到一成多：交给心智');
+  let draw = 0; engine.rand = () => (draw++ < 2 ? 0.999 : 0.001); // 抽样偶尔抽到高的：照样给它机会（不判死刑）
+  assert.ok(engine.recoveryFor(failure, new Set(), now + BehaviorEngine.RECOVERY_MISS_MS + 10_000));
+});
 
 test('recovery picks by priority plus actual success rate, not list order alone', () => {
   const engine = setup();

@@ -1,3 +1,4 @@
+import { appendFileSync } from 'node:fs';
 import path from 'node:path';
 import { runtime } from './runtime.ts';
 import { MineflayerAdapter } from './adapter/mineflayer.ts';
@@ -63,6 +64,11 @@ import { ObserverFeed, createObserverHandler, installMineflayerObserver, install
 
 const bus = new EventBus();
 attachLogger(bus, config.dataDir);
+// 学技能时判断出的“身体做不到的事”：单独记一份，给开发者补能力用（不要让它在上面一份份写补丁技能）
+bus.on('event', (ev: { type: string; ts?: number; msg: string; data?: Record<string, unknown> }) => {
+  if (ev.type !== 'body_limit') return;
+  try { appendFileSync(path.join(config.dataDir, 'body-limits.jsonl'), JSON.stringify({ ts: Date.now(), ...ev.data }) + '\n'); } catch { /* 记不下也不影响运行 */ }
+});
 
 process.on('unhandledRejection', (e: any) => bus.publish('unhandled', 'P1', String(e?.stack ?? e)));
 process.on('uncaughtException', (e: any) => bus.publish('uncaught', 'P0', String(e?.stack ?? e)));

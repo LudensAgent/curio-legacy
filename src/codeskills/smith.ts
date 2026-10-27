@@ -525,6 +525,8 @@ chronic_shortages 是这两个小时里一再缺的东西：想想能不能把�
 - young_skills 里的技能当前版本还没用够几次，看不出好坏：不要改写它们，也不要换个名字另写一份做同一件事；这次的事归它们管就输出 none（经过已经记进它们的成败）。
 - 因为 existing_skills / young_skills / reliable_skills 里已经有一份技能管着这件事才不写的：none 里写 "covered_by":"那份技能的名字"。以后同一件事直接交给它，不再请你看，直到它失败、被改或被收起。
 - 不是技能能解决的（纯属运气、应该由思考决定的取舍、缺的是材料不是做法）：输出 {"none":true,"why":"…"}。
+- 先分清失败是“做法不对”还是“身体做不到”：动作接口本身没有这种能力（比如步行寻路不会游泳、某种操作根本没有动作可用、返回的信息里看不到决定成败的那件事），
+  在上面写技能打补丁也绕不过去，只会写一份收一份。这种输出 {"none":true,"why":"…","limitation":"一句话：身体缺什么能力 / 看不到什么"}，会报给开发者补上，不要写补丁技能。
 
 写技能的说明：
 ${guide}
@@ -564,7 +566,7 @@ ${API_DOC}`;
     const system = `你是 Minecraft 机器人 Curio 的“身体技能工程师”。${this.taskFor(incident)}
 ${this.rules()}
 
-只输出一个 JSON 对象：{"skill":{…}}${review ? ' 或 {"skills":[{…},{…}]}' : ''} 或 {"none":true,"why":"…","covered_by":"管这件事的技能名（不是因为已有技能管着才不写就省略）"}。`;
+只输出一个 JSON 对象：{"skill":{…}}${review ? ' 或 {"skills":[{…},{…}]}' : ''} 或 {"none":true,"why":"…","covered_by":"管这件事的技能名（不是因为已有技能管着才不写就省略）","limitation":"身体做不到时才写"}。`;
     const { what_happened, its_own_note, ...rest } = this.incidentFacts(incident) as Record<string, unknown>;
     const user = { what_happened, ...(its_own_note ? { its_own_note } : {}), ...rest, now: incident.context, ...this.skillTables([incident]) };
     return [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify(user) }];
@@ -576,7 +578,7 @@ ${this.rules()}
 逐件判断：值得写技能就写，不值得就说为什么；几件说的是同一回事可以合写一份。整批最多写 2 份技能。
 ${this.rules()}
 
-只输出一个 JSON 对象：{"results":[{"event":1,"skill":{…}},{"event":2,"none":true,"why":"…","covered_by":"管这件事的技能名（不是因为已有技能管着才不写就省略）"}]}，每件事都要有一条。`;
+只输出一个 JSON 对象：{"results":[{"event":1,"skill":{…}},{"event":2,"none":true,"why":"…","covered_by":"管这件事的技能名（不是因为已有技能管着才不写就省略）","limitation":"身体做不到时才写"}]}，每件事都要有一条。`;
     const user = {
       events: incidents.map((i, k) => ({ event: k + 1, how_to_look: this.taskFor(i), ...this.incidentFacts(i, 40) })),
       now: incidents.at(-1)!.context,
@@ -616,6 +618,8 @@ ${this.rules()}
           const why = String(r.why ?? '').slice(0, 160);
           const by = typeof r.covered_by === 'string' && this.engine.get(r.covered_by) && !this.engine.inactive(r.covered_by) ? r.covered_by : null;
           if (by) this.setOwner(inc, by);
+          const limitation = typeof r.limitation === 'string' && r.limitation.trim() ? r.limitation.trim().slice(0, 200) : null;
+          if (limitation) this.bus.publish('body_limit', 'P2', `身体做不到的事（报给开发者）：${limitation}`, { kind: inc.kind, limitation, headline: inc.headline.slice(0, 200) });
           this.bus.publish('skill_forge_none', 'P3', `看了${KIND_LABEL[inc.kind]}，没有写技能：${why}${by ? `（归「${by}」管，同一件事以后直接交给它）` : ''}`, { kind: inc.kind, ...(by ? { coveredBy: by } : {}) });
           out.push(`${tag}不写：${why}`);
           continue;
