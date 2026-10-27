@@ -179,6 +179,32 @@ export interface GuiView {
   enchantments?: { option: number; level: number; hint?: string }[];
 }
 
+/** 熔炉三格里各有什么 */
+export interface FurnaceSlots {
+  input: { name: string; count: number } | null;
+  output: { name: string; count: number } | null;
+  fuel: { name: string; count: number } | null;
+}
+export interface FurnaceLeave extends FurnaceSlots { pos: Vec3Like; block: string; burning: boolean; why?: string }
+export interface SmeltOpts {
+  furnacePos?: Vec3Like;
+  onProgress?: (done: number) => void;
+  /** 主燃料用完后可以接着补的燃料（按先后） */
+  moreFuels?: string[];
+  /** 离开熔炉时（包括被打断）里面还剩什么 */
+  onLeave?: (state: FurnaceLeave) => void;
+}
+export interface SmeltResult extends ActionResult {
+  made: number;
+  output?: string;
+  furnacePos?: Vec3Like;
+  /** 没烧完的原料取回了几个 */
+  returned?: number;
+  /** 为什么没烧完：燃料用完 / 卡住不动 / 等太久 */
+  stopped?: 'out_of_fuel' | 'stalled' | 'deadline';
+  left?: FurnaceSlots;
+}
+
 export interface TradeView {
   index: number;
   give: string[];
@@ -304,7 +330,9 @@ export interface GameAdapter {
   /** at：要睡的那张床（村子里几张床挨着时用来认准）；床被村民睡着会先把它叫醒 */
   sleepInBed(signal: AbortSignal, opts?: { at?: Vec3Like }): Promise<ActionResult & { bedPos?: Vec3Like }>;
   /** 用熔炉烧东西：furnacePos = 记得的熔炉；没有就用背包里的熔炉放下。返回烧出的数量 */
-  smelt(input: string, count: number, fuel: string, signal: AbortSignal, opts?: { furnacePos?: Vec3Like; onProgress?: (done: number) => void }): Promise<ActionResult & { made: number; output?: string; furnacePos?: Vec3Like }>;
+  smelt(input: string, count: number, fuel: string, signal: AbortSignal, opts?: SmeltOpts): Promise<SmeltResult>;
+  /** 打开熔炉取回烧好的和没烧的（fuel:true 连燃料一起） */
+  emptyFurnace?(pos: Vec3Like, signal: AbortSignal, opts?: { fuel?: boolean }): Promise<ActionResult & { taken: { name: string; count: number }[]; left: FurnaceSlots; burning: boolean }>;
   /** 打开箱子：存入 deposits / 取出 withdraws，返回箱子里现在的物品 */
   useChest(pos: Vec3Like, deposits: InvItem[], withdraws: InvItem[], signal: AbortSignal): Promise<ActionResult & { contents: InvItem[]; moved: number }>;
   /** 用锄头把泥土/草方块锄成耕地 */

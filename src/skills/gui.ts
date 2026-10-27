@@ -85,6 +85,11 @@ export const useGui: Skill<{ target: string | Vec3Like; ops: GuiOp[] }> = {
       const pos = spots.sort((p, q) => dist3(here, p) - dist3(here, q))[0];
       if (!pos) return fail('NOT_FOUND', `看不见${typeof args.target === 'string' ? ` ${args.target}` : '这个方块'}（转头看过也没有；记忆里的坐标不能代替看见）`);
       const r = await adapter.useGui(pos, args.ops, signal);
+      // 熔炉类：关掉后里面的东西留着，记下来（取空了就忘掉）
+      if (r.view && /^(furnace|blast_furnace|smoker)$/.test(r.view.type)) {
+        const at = (i: number) => { const x = r.view!.slots.find((sl) => sl.slot === i); return x?.name && x.count > 0 ? { name: x.name, count: x.count } : null; };
+        ctx.memory.setFurnace({ dim: adapter.state().dim, pos, block: r.view.type, input: at(0), output: at(2), fuel: at(1), burning: false });
+      }
       const view = showView(r.view);
       const did = r.done.length ? `做了：${r.done.join('，')}。` : '';
       if (!r.ok) {

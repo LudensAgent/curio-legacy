@@ -31,6 +31,9 @@ import type {
   GuiSlot,
   GuiView,
   TradeView,
+  FurnaceSlots,
+  SmeltOpts,
+  SmeltResult,
 } from './types.ts';
 
 const require = createRequire(import.meta.url);
@@ -1821,7 +1824,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return all.sort((a: any, c: any) => (a.durabilityUsed ?? 0) - (c.durabilityUsed ?? 0))[0];
   }
 
-  async smelt(input: string, count: number, fuel: string, signal: AbortSignal, opts: { furnacePos?: Vec3Like; onProgress?: (done: number) => void } = {}): Promise<ActionResult & { made: number; output?: string; furnacePos?: Vec3Like }> {
+  private invCountOf(name: string): number {
+    return this.bot.inventory.items().filter((i: any) => i.name === name).reduce((n: number, i: any) => n + i.count, 0);
+  }
+
+  async smelt(input: string, count: number, fuel: string, signal: AbortSignal, opts: SmeltOpts = {}): Promise<SmeltResult> {
     const check = this.actionCheckpoint(signal);
     throwIfAborted(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', made: 0 };
@@ -1849,14 +1856,34 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const furnace: any = await this.afterAction(() => raceAbort(b.openFurnace(block), signal, 8000, () => {}), check);
     let made = 0;
     let outputName: string | undefined;
+    let stopped: SmeltResult['stopped'];
+    let returned = 0;
+    const lit = () => { try { return b.blockAt(block.position)?.getProperties?.().lit === true; } catch { return false; } };
+    const slot = (it: any) => (it && it.count > 0 ? { name: String(it.name), count: Number(it.count) } : null);
+    const contents = () => ({ input: slot(furnace.inputItem()), output: slot(furnace.outputItem()), fuel: slot(furnace.fuelItem()) });
+    const fuels = [fuel, ...(opts.moreFuels ?? []).filter((f) => f !== fuel && f !== input)];
+    // 燃料：一个能烧几件（原版燃烧时间 / 200 刻）
+    const per = (f: string) => /coal_block/.test(f) ? 80 : /coal$|charcoal/.test(f) ? 8 : /_planks$|_log$|_wood$/.test(f) ? 1.5 : f === 'stick' ? 0.5 : 1;
+    const addFuel = async (need: number) => {
+      for (const f of fuels) {
+        const it = this.invItem(f);
+        if (!it) continue;
+        const cur = furnace.fuelItem();
+        if (cur && cur.name !== f) continue; // 燃料格里是别的燃料，同一格放不进
+        const k = Math.min(this.invCountOf(f), Math.max(1, Math.ceil(need / per(f))), 64 - (cur?.count ?? 0));
+        if (k <= 0) continue;
+        await this.afterAction(() => furnace.putFuel(it.type, null, k), check);
+        return true;
+      }
+      return false;
+    };
     try {
       const n = Math.min(count, inItem.count, 64);
-      // 燃料：煤/木炭一个烧 8 个，木板/原木 1.5 个，木棍 0.5 个
-      const per = /coal$|charcoal/.test(fuel) ? 8 : /_planks$|_log$/.test(fuel) ? 1.5 : fuel === 'stick' ? 0.5 : 1;
-      const fuelN = Math.min(fuelItem.count, Math.ceil(n / per));
-      if (!furnace.fuelItem()) await this.afterAction(() => furnace.putFuel(fuelItem.type, null, fuelN), check);
+      if (!furnace.fuelItem()) await addFuel(n);
       await this.afterAction(() => furnace.putInput(inItem.type, null, n), check);
       const deadline = Date.now() + n * 11000 + 15000;
+      // 判断有没有在往前走：原料在少、成品在多、进度条在动、火亮着，任何一样都算在烧
+      let lastMove = Date.now(), lastProgress = furnace.progress, lastIn = furnace.inputItem()?.count ?? 0;
       while (made < n && Date.now() < deadline) {
         await this.afterAction(() => sleep(1000, signal), check);
         const out = furnace.outputItem();
@@ -1866,15 +1893,75 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           await this.afterAction(() => furnace.takeOutput(), check);
           made += taken;
           opts.onProgress?.(made);
+          lastMove = Date.now();
         }
-        if (!furnace.inputItem() && !furnace.outputItem()) break;
+        const inNow = furnace.inputItem()?.count ?? 0;
+        if (!inNow) break;
+        if (inNow !== lastIn || furnace.progress !== lastProgress) { lastMove = Date.now(); lastIn = inNow; lastProgress = furnace.progress; }
+        // 火灭了、燃料格空了，原料还在：燃料用完了。背包里还有燃料就补上，没有就别干等
+        const burning = (furnace.fuel ?? 0) > 0 || lit();
+        if (!burning && !furnace.fuelItem()) {
+          if (await addFuel(inNow)) { lastMove = Date.now(); continue; }
+          stopped = 'out_of_fuel';
+          break;
+        }
+        // 一件 10 秒；15 秒什么都没变就是卡住了（成品格堵着别的东西、放进去的烧不了……）
+        if (Date.now() - lastMove > 15000) { stopped = 'stalled'; break; }
       }
-      // 剩下的原料取回来
-      if (furnace.inputItem()) await this.afterAction(() => furnace.takeInput().catch(() => {}), check);
+      if (!stopped && made < n && furnace.inputItem()) stopped = 'deadline';
+      // 烧好的和没烧的都拿回来，按背包实际变化算
+      if (furnace.outputItem()) {
+        const o = furnace.outputItem(); outputName ??= o.name;
+        const before = this.invCountOf(o.name);
+        await this.afterAction(() => furnace.takeOutput().catch(() => {}), check);
+        made += Math.max(0, this.invCountOf(o.name) - before);
+      }
+      if (furnace.inputItem()) {
+        const before = this.invCountOf(input);
+        await this.afterAction(() => furnace.takeInput().catch(() => {}), check);
+        returned = Math.max(0, this.invCountOf(input) - before);
+      }
+    } finally {
+      // 不管怎么离开（包括被打断），都把熔炉里还剩什么报出去：东西不会自己回到背包
+      try { opts.onLeave?.({ pos: furnacePos, block: String(block.name), ...contents(), burning: lit() || (furnace.fuel ?? 0) > 0, ...(stopped ? { why: stopped } : {}) }); } catch { /* ignore */ }
+      try { furnace.close(); } catch { /* ignore */ }
+    }
+    const left = contents();
+    const base = { made, output: outputName, furnacePos, returned, ...(stopped ? { stopped } : {}), left };
+    return made > 0 ? { ok: true, ...base } : { ok: false, reason: stopped === 'out_of_fuel' ? 'OUT_OF_FUEL' : stopped === 'stalled' ? 'STALLED' : 'NOTHING_SMELTED', ...base };
+  }
+
+  /** 打开熔炉把烧好的、没烧的（可选连燃料）都取回背包；按背包实际变化算 */
+  async emptyFurnace(pos: Vec3Like, signal: AbortSignal, opts: { fuel?: boolean } = {}): Promise<ActionResult & { taken: { name: string; count: number }[]; left: FurnaceSlots; burning: boolean }> {
+    const check = this.actionCheckpoint(signal);
+    const none = { taken: [], left: { input: null, output: null, fuel: null }, burning: false };
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', ...none };
+    await this.interactionReady();
+    const b = this.bot;
+    const block = b.blockAt(this.vec(pos));
+    if (!block || !/^(furnace|blast_furnace|smoker)$/.test(block.name)) return { ok: false, reason: `NOT_A_FURNACE:${block?.name ?? 'unloaded'}`, ...none };
+    await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos: block.position }, { signal, timeoutMs: 30000 }), check);
+    const furnace: any = await this.afterAction(() => raceAbort(b.openFurnace(block), signal, 8000, () => {}), check);
+    const slot = (it: any) => (it && it.count > 0 ? { name: String(it.name), count: Number(it.count) } : null);
+    const taken: { name: string; count: number }[] = [];
+    try {
+      const grab = async (get: () => any, take: () => Promise<any>) => {
+        const it = get();
+        if (!it) return;
+        const before = this.invCountOf(it.name);
+        await this.afterAction(() => take().catch(() => {}), check);
+        const got = this.invCountOf(it.name) - before;
+        if (got > 0) taken.push({ name: it.name, count: got });
+      };
+      await grab(() => furnace.outputItem(), () => furnace.takeOutput());
+      await grab(() => furnace.inputItem(), () => furnace.takeInput());
+      if (opts.fuel) await grab(() => furnace.fuelItem(), () => furnace.takeFuel());
+      const left = { input: slot(furnace.inputItem()), output: slot(furnace.outputItem()), fuel: slot(furnace.fuelItem()) };
+      const burning = (furnace.fuel ?? 0) > 0;
+      return { ok: true, taken, left, burning };
     } finally {
       try { furnace.close(); } catch { /* ignore */ }
     }
-    return made > 0 ? { ok: true, made, output: outputName, furnacePos } : { ok: false, reason: 'NOTHING_SMELTED', made: 0, furnacePos };
   }
 
   async useChest(pos: Vec3Like, deposits: InvItem[], withdraws: InvItem[], signal: AbortSignal): Promise<ActionResult & { contents: InvItem[]; moved: number }> {

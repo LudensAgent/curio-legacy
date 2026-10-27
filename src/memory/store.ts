@@ -71,6 +71,25 @@ export interface ChestRecord {
   ts: number;
 }
 
+/**
+ * 自己留在熔炉（烟熏炉、高炉）里的东西：放进去要等着烧，离开以后它不会自己回到背包。
+ * 记下离开那一刻里面有什么、烧到哪了，之后路过时对照看得见的样子（亮着/灭了）提醒自己回来取
+ */
+export interface FurnaceRecord {
+  worldId?: string;
+  dim: string;
+  pos: Vec3Like;
+  block: string;
+  input: { name: string; count: number } | null;
+  output: { name: string; count: number } | null;
+  fuel: { name: string; count: number } | null;
+  /** 离开时还在烧（火苗亮着） */
+  burning: boolean;
+  /** 停下来的原因：燃料用完 / 卡住 / 被打断离开 */
+  why?: string;
+  ts: number;
+}
+
 export interface FarmRecord {
   worldId?: string;
   id: string;
@@ -161,6 +180,7 @@ interface MemoryData {
   objective: { text: string; ts: number } | null;
   digs: DigRecord[];
   chests: Record<string, ChestRecord>;
+  furnaces?: Record<string, FurnaceRecord>;
   passages?: PassageRecord[];
   farms: FarmRecord[];
   lessons: Lesson[];
@@ -757,6 +777,24 @@ export class WorldMemory {
 
   chests(dim?: string): ChestRecord[] {
     return Object.values(this.data.chests ?? {}).filter((c) => this.inWorld(c) && (!dim || c.dim === dim));
+  }
+
+  /** 熔炉里留下了东西就记着；取空了（或者那里不再是熔炉）就忘掉 */
+  setFurnace(rec: Omit<FurnaceRecord, 'worldId' | 'ts'> & { ts?: number }) {
+    const k = `${this.worldId}:${rec.dim}:${rec.pos.x},${rec.pos.y},${rec.pos.z}`;
+    const all = (this.data.furnaces ??= {});
+    if (!rec.input && !rec.output) { if (all[k]) { delete all[k]; this.touch(); } return; }
+    all[k] = { worldId: this.worldId, ...rec, ts: rec.ts ?? Date.now() };
+    this.touch();
+  }
+
+  forgetFurnace(dim: string, pos: Vec3Like) {
+    const k = `${this.worldId}:${dim}:${pos.x},${pos.y},${pos.z}`;
+    if (this.data.furnaces?.[k]) { delete this.data.furnaces[k]; this.touch(); }
+  }
+
+  furnaces(dim?: string): FurnaceRecord[] {
+    return Object.values(this.data.furnaces ?? {}).filter((c) => this.inWorld(c) && (!dim || c.dim === dim));
   }
 
   /** 所有箱子里各物品的总数 */

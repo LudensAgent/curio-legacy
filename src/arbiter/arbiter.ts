@@ -57,7 +57,7 @@ interface Running extends TaskInfo {
 /** 会“透视”的原始查询：技能必须改用 ctx.senses（看见/听见/记得的东西）。 */
 // lightAt 不在其中：身边的明暗是看得出来的
 const XRAY_METHODS = new Set(['findBlocks', 'nearbyEntities', 'blockOptics']);
-const ACTION_METHODS = new Set(['moveTo', 'dig', 'placeBlockAt', 'placeBlockStateAt', 'equipItem', 'tossItem', 'arrangeHotbar', 'useGui', 'tradeWith', 'useBlockAt', 'useItem', 'rangedAttack', 'enterPortalAt', 'collectNearbyDrops', 'craft', 'sleepInBed', 'smelt', 'useChest', 'till', 'plant', 'eat', 'equipWeapon', 'attack', 'look', 'jump', 'swimTo', 'chat', 'stopAll', 'fish', 'useItemOn', 'interactEntity', 'ride']);
+const ACTION_METHODS = new Set(['moveTo', 'dig', 'placeBlockAt', 'placeBlockStateAt', 'equipItem', 'tossItem', 'arrangeHotbar', 'useGui', 'tradeWith', 'useBlockAt', 'useItem', 'rangedAttack', 'enterPortalAt', 'collectNearbyDrops', 'craft', 'sleepInBed', 'smelt', 'useChest', 'till', 'plant', 'eat', 'equipWeapon', 'attack', 'look', 'jump', 'swimTo', 'chat', 'stopAll', 'fish', 'useItemOn', 'interactEntity', 'ride', 'emptyFurnace']);
 
 /**
  * 动作仲裁器：任意时刻只有一个任务拥有角色控制权。

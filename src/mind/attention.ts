@@ -62,6 +62,7 @@ export class Attention {
       case 'hurt': return this.notice('hurt', ev.msg, 0.45, 15_000);
       case 'reflex': return this.notice(`reflex:${ev.msg.slice(-12)}`, `身体自己反应了：${ev.msg}`, 0.35, 20_000);
       case 'death_items': return this.notice('death_items', ev.msg, 0.7, 60_000);
+      case 'process_changed': return this.notice(`process:${JSON.stringify(d.pos ?? ev.msg)}`, ev.msg, 0.55, 5 * 60_000);
       case 'design': return this.notice(`design:${String(d.draftId ?? '')}`, `建筑师把图纸画好了：${ev.msg}`, 0.6, 0);
       case 'skill_hint': return this.notice(`skill_hint:${String(d.skill ?? '')}`, ev.msg, 0.5, 10 * 60_000);
       case 'goal_kept': return this.notice(`goal_kept:${String(d.agendaId ?? '')}`, ev.msg, 0.4, 600_000);

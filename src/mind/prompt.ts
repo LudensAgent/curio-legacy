@@ -70,7 +70,7 @@ export interface MindContext {
  */
 
 /** 常用动作：给完整参数；其余只列名字和一句用途，需要时用 {"kind":"moves"} 查完整参数 */
-export const COMMON_MOVES = ['dig_at', 'step', 'place_at', 'defend', 'gather', 'goto', 'explore', 'wander', 'look_around', 'craft', 'smelt', 'eat', 'hunt', 'forage', 'fish', 'farm', 'collect_seeds',
+export const COMMON_MOVES = ['dig_at', 'step', 'place_at', 'defend', 'gather', 'goto', 'explore', 'wander', 'look_around', 'craft', 'smelt', 'collect_furnace', 'eat', 'hunt', 'forage', 'fish', 'farm', 'collect_seeds',
   'pickup_items', 'store_items', 'take_items', 'place_torch', 'shelter', 'sleep', 'wait', 'dig', 'climb_up', 'build', 'boat', 'travel', 'inspect_block', 'interact_block', 'use_item', 'use_skill'];
 
 /** 远行、传送门、末地这些只在用得上时列出来，平时是噪音 */
@@ -450,6 +450,8 @@ function worldKnowledge(ctx: MindContext) {
     ...(Object.keys(herds).length ? { animal_spots: herds } : {}),
     ...(ctx.tier === 'deliberate' ? { places, ...(facilities.length ? { my_facilities: facilities } : {}), ...(portals.length ? { portals } : {}), explored_around: exploredAround(m, p.self.dim, p.self.pos) } : {}),
     ...(danger.length ? { danger_zones: danger } : {}),
+    // 自己开了头、要等它自己变化的事：离开时留下的样子和现在看得到的样子
+    ...(p.waiting_on?.length ? { waiting_on: p.waiting_on } : {}),
   };
 }
 

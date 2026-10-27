@@ -22,6 +22,14 @@ export function pickFuel(inv: InvItem[], input: string): string | null {
   return null;
 }
 
+const slotText = (x: { name: string; count: number } | null) => (x ? `${x.name}×${x.count}` : '');
+const STOP_ZH: Record<string, string> = { out_of_fuel: '燃料烧完了，背包里也没有能补的燃料', stalled: '15 秒没有任何进展（成品格堵着、或放进去的烧不了）', deadline: '等太久还没烧完' };
+
+/** 熔炉里留下的东西记进记忆：东西不会自己回到背包，之后路过要想得起来 */
+function noteFurnace(ctx: SkillCtx, l: import('../adapter/types.ts').FurnaceLeave) {
+  ctx.memory.setFurnace({ dim: ctx.adapter.state().dim, pos: l.pos, block: l.block, input: l.input, output: l.output, fuel: l.fuel, burning: l.burning, ...(l.why ? { why: l.why } : {}) });
+}
+
 export const smelt: Skill<{ item: string; count: number }> = {
   name: 'smelt',
   description: `用熔炉烧东西（自动找记得的熔炉；没有就用 8 圆石做一个放下；燃料自动选煤/木炭/木板/原木）。可烧：生铁→铁锭、生肉→熟肉、原木→木炭（可做火把）、沙子→玻璃、圆石→石头等`,
@@ -45,13 +53,58 @@ export const smelt: Skill<{ item: string; count: number }> = {
     const n = Math.min(have, args.count);
     ctx.progress(0, `烧 ${args.item} ×${n}（燃料 ${fuel}）`);
     try {
-      const r = await adapter.smelt(args.item, n, fuel, signal, { furnacePos: furnace?.pos, onProgress: (d) => ctx.progress(d / n, `已烧好 ${d}/${n}`) });
+      const moreFuels = FUELS.filter((f) => f !== fuel && f !== args.item && s.inventory.some((i) => i.name === f && i.count > 0));
+      const r = await adapter.smelt(args.item, n, fuel, signal, { furnacePos: furnace?.pos, moreFuels, onLeave: (l) => noteFurnace(ctx, l), onProgress: (d) => ctx.progress(d / n, `已烧好 ${d}/${n}`) });
       if (r.furnacePos) rememberStation(ctx, 'furnace', r.furnacePos);
-      if (!r.ok) return fail(r.reason === 'NO_FURNACE' ? 'MISSING_MATERIALS' : 'ERROR', `烧不了：${r.reason}${r.reason === 'NO_FURNACE' ? '（需要 8 个圆石做熔炉）' : ''}`);
-      return ok(`烧好了 ${r.made} 个 ${r.output ?? SMELTABLE[args.item]}${furnace && furnace.dist > 4 ? `（用了 ${furnace.dist} 格外${furnace.from === 'memory' ? '记得' : '看到'}的熔炉）` : ''}`, { made: r.made });
+      const at = r.furnacePos ? ` (${r.furnacePos.x},${r.furnacePos.y},${r.furnacePos.z})` : '';
+      const why = r.stopped ? `；没烧完：${STOP_ZH[r.stopped]}` : '';
+      const back = r.returned ? `，没烧的 ${r.returned} 个 ${args.item} 取回了背包` : '';
+      const still = r.left && (r.left.input || r.left.output) ? `；熔炉${at}里还留着 ${[slotText(r.left.input), slotText(r.left.output)].filter(Boolean).join('、')}（背包满了拿不回来，记得回来取）` : '';
+      if (!r.ok) {
+        if (r.reason === 'NO_FURNACE') return fail('MISSING_MATERIALS', '烧不了：NO_FURNACE（需要 8 个圆石做熔炉）');
+        if (r.reason === 'OUT_OF_FUEL') return fail('MISSING_MATERIALS', `一个也没烧成：燃料不够（${fuel} 烧完了，背包里没有别的燃料）${back}${still}${chestHint(ctx.memory, s, [], { fuel: true })}`, { stopped: r.stopped });
+        return fail('ERROR', `烧不了：${r.reason}${why}${back}${still}`, { stopped: r.stopped });
+      }
+      return ok(`烧好了 ${r.made} 个 ${r.output ?? SMELTABLE[args.item]}${furnace && furnace.dist > 4 ? `（用了 ${furnace.dist} 格外${furnace.from === 'memory' ? '记得' : '看到'}的熔炉）` : ''}${why}${back}${still}`, { made: r.made, ...(r.stopped ? { stopped: r.stopped } : {}) });
     } catch (e) {
       if (isAbort(e)) throw e;
       return fail(codeFromError(e), `冶炼出错：${(e as Error).message}`);
+    }
+  },
+};
+
+export const collectFurnace: Skill<{ at?: Vec3Like; fuel: boolean }> = {
+  name: 'collect_furnace',
+  description: '回到熔炉把烧好的和没烧完的东西取回背包（fuel:true 连剩下的燃料也拿走）；不给 at 就取最近一个留着东西的熔炉',
+  argsDoc: '{"at"?:{x,y,z},"fuel"?:true}',
+  timeoutMs: 60000,
+  movement: true,
+  validate(raw) {
+    const a = obj(raw);
+    const at = a.at;
+    if (at !== undefined && (!at || typeof at !== 'object' || ['x', 'y', 'z'].some((k) => !Number.isFinite(Number((at as any)[k]))))) return { ok: false, error: 'at 需要熔炉坐标 {"x","y","z"}' };
+    return { ok: true, args: { ...(at ? { at: { x: Math.round(Number((at as any).x)), y: Math.round(Number((at as any).y)), z: Math.round(Number((at as any).z)) } } : {}), fuel: a.fuel === true } };
+  },
+  async run(ctx, args) {
+    const { adapter, memory, signal } = ctx;
+    if (!adapter.emptyFurnace) return fail('ERROR', '当前适配器不支持');
+    const s = adapter.state();
+    const d = (p: Vec3Like) => Math.round(Math.hypot(p.x - s.pos.x, p.y - s.pos.y, p.z - s.pos.z));
+    const pos = args.at ?? memory.furnaces(s.dim).sort((a, b) => d(a.pos) - d(b.pos))[0]?.pos ?? findStation(ctx, ['furnace'], 16)?.pos;
+    if (!pos) return fail('NOT_FOUND', '不记得哪个熔炉里留着东西，身边也没看到熔炉');
+    try {
+      const r = await adapter.emptyFurnace(pos, signal, { fuel: args.fuel });
+      if (!r.ok) {
+        if (/^NOT_A_FURNACE/.test(String(r.reason))) memory.forgetFurnace(s.dim, pos);
+        return fail(/^NOT_A_FURNACE/.test(String(r.reason)) ? 'TARGET_GONE' : 'ERROR', `取不了：${r.reason}`);
+      }
+      memory.setFurnace({ dim: s.dim, pos, block: adapter.blockAt(pos) ?? 'furnace', input: r.left.input, output: r.left.output, fuel: r.left.fuel, burning: r.burning });
+      const got = r.taken.map((t) => `${t.name}×${t.count}`).join('、');
+      const left = [r.left.input, r.left.output].filter(Boolean).map((x) => `${x!.name}×${x!.count}`).join('、');
+      return ok(`${got ? `从熔炉 (${pos.x},${pos.y},${pos.z}) 取回了 ${got}` : `熔炉 (${pos.x},${pos.y},${pos.z}) 里没有可取的东西`}${left ? `；还剩 ${left}（背包满了）` : ''}${r.left.fuel ? `；燃料格里还有 ${r.left.fuel.name}×${r.left.fuel.count}` : ''}`, { taken: r.taken });
+    } catch (e) {
+      if (isAbort(e)) throw e;
+      return fail(codeFromError(e), `取熔炉出错：${(e as Error).message}`);
     }
   },
 };

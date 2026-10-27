@@ -3,7 +3,7 @@ import { facingOfYaw, localMap } from './local.ts';
 import type { GameAdapter, InvItem, Vec3Like } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
-import { effectiveLight, round1, lightAround } from '../util.ts';
+import { dist3, effectiveLight, round1, lightAround } from '../util.ts';
 import { torchCount } from '../skills/light.ts';
 import { interactiveName, NOTABLE, type Vision, type VisionSummary } from './vision.ts';
 import { computeDrives, type Drive, type Stock } from '../brain/drives.ts';
@@ -73,6 +73,8 @@ export interface Percept {
   storage: { chests: number; nearest: number | null; stored: string; source?: 'historical_chest_snapshot'; availability?: 'unconfirmed_until_opened'; oldestObservedAt?: number; ageSeconds?: number } | null;
   /** 农田：作物、格数、成熟数量（离得近时才能看清） */
   farms: { crop: string; cells: number; dist: number; mature: number | null; minutes_since_planted: number }[];
+  /** 自己开了头、要等它自己变化的事（熔炉里烧着的东西……）：离开时的样子 + 现在看得见的样子 */
+  waiting_on?: string[];
   /** 最近反复成功的同一套步骤（可以 learn_skill 学成技能） */
   learn_candidates: { steps: string; times: number }[];
   /** 是否该反思一下（在 lesson 字段写经验） */
@@ -213,6 +215,43 @@ export class Perception {
   }
 
   observeBlocks(positions: Vec3Like[]) { return this.vision.observeBlocks(positions); }
+
+  /** 上次亲眼看到熔炉时火亮没亮：亮→灭是一次“状态转换”，值得注意 */
+  private furnaceLit = new Map<string, boolean>();
+
+  /**
+   * 熔炉里留着的东西：记得放了什么、什么时候离开的；看得见熔炉时对照火亮不亮。
+   * 火灭了、原料还在 → 多半燃料没了；火灭了、原料没了 → 烧完了，成品在等着取。
+   */
+  private waitingOn(dim: string, here: Vec3Like): string[] {
+    const recs = this.memory.furnaces(dim);
+    if (!recs.length) return [];
+    const seen = new Map(this.vision.observeBlocks(recs.filter((r) => dist3(r.pos, here) <= 48).map((r) => r.pos)).map((o) => [`${o.pos.x},${o.pos.y},${o.pos.z}`, o]));
+    const out: { d: number; text: string }[] = [];
+    for (const r of recs) {
+      const key = `${r.pos.x},${r.pos.y},${r.pos.z}`, d = Math.round(dist3(r.pos, here));
+      const at = `熔炉 (${key}) ${d}格`;
+      const o = seen.get(key);
+      if (o && !/^(furnace|blast_furnace|smoker)$/.test(o.name)) { this.memory.forgetFurnace(dim, r.pos); this.furnaceLit.delete(key); continue; }
+      const mins = Math.round((Date.now() - r.ts) / 60000);
+      const inside = [r.input ? `没烧的 ${r.input.name}×${r.input.count}` : '', r.output ? `烧好的 ${r.output.name}×${r.output.count}` : ''].filter(Boolean).join('、');
+      const left = `${mins ? `${mins} 分钟前` : '刚才'}离开时里面有 ${inside}${r.why === 'out_of_fuel' ? '（当时燃料就烧完了）' : r.why === 'stalled' ? '（当时卡住不动）' : ''}`;
+      let now = '';
+      if (o) {
+        const lit = String(o.properties?.lit) === 'true';
+        const before = this.furnaceLit.get(key) ?? r.burning;
+        this.furnaceLit.set(key, lit);
+        now = lit ? '；现在看过去火还亮着，在烧' : r.input ? '；现在看过去火灭了：原料没烧完，燃料多半用完了' : '；现在看过去火灭了：烧完了，成品在等着取';
+        if (before && !lit) this.bus.publish('process_changed', 'P2', `${at}的火灭了：${r.input ? `里面的 ${r.input.name} 多半没烧完，燃料用完了` : '东西烧完了'}，要的话回去取（collect_furnace）`, { kind: 'furnace', pos: r.pos });
+      } else if (r.burning && r.input) {
+        // 看不见：按原版一件 10 秒估一下，只是估计
+        const doneBy = r.ts + r.input.count * 10_000;
+        now = Date.now() > doneBy ? '；按时间估算应该烧完了（燃料够的话），没亲眼看到' : '；还在烧（按时间估算）';
+      }
+      out.push({ d, text: `${at}：${left}${now}` });
+    }
+    return out.sort((a, b) => a.d - b.d).slice(0, 4).map((x) => x.text);
+  }
 
   start(intervalMs = 700) {
     this.timer = setInterval(() => {
@@ -570,6 +609,7 @@ export class Perception {
       light,
       storage: this.storageInfo(s.dim, here),
       farms: s.observationReady ? this.farmInfo(s.dim, here) : [],
+      waiting_on: s.observationReady ? this.waitingOn(s.dim, { x: s.pos.x, y: s.pos.y, z: s.pos.z }) : [],
       learn_candidates: learnCandidates(this.memory, this.knownSkillSigs?.() ?? new Set()).map((c) => ({ steps: c.signature, times: c.times })),
       reflection_due: reflectionDue(this.memory),
       exploration: { visitedChunks: this.memory.visitedChunkCount, noveltyByDir, base: baseInfo },
