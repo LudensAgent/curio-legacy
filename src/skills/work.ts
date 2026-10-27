@@ -14,9 +14,8 @@ import type { InvItem } from '../adapter/types.ts';
 const key = (p: { x: number; y: number; z: number }) => `${p.x},${p.y},${p.z}`;
 
 // ------------------------------------------------------------------ gather
-/** 可以“往下挖”找到的地表/地下方块 */
-const DIGGABLE_DOWN = new Set(['stone', 'cobblestone', 'deepslate', 'andesite', 'granite', 'diorite', 'tuff', 'dirt', 'grass_block', 'coarse_dirt', 'sand', 'gravel', 'clay']);
-const UNSAFE_BELOW = new Set(['lava', 'water', 'air', 'cave_air', 'bedrock']);
+/** 常常就在脚下的方块：看不见别处的时候提一句脚下踩着的是不是它 */
+const UNDERFOOT = new Set(['stone', 'cobblestone', 'deepslate', 'andesite', 'granite', 'diorite', 'tuff', 'dirt', 'grass_block', 'coarse_dirt', 'sand', 'gravel', 'clay']);
 const WATERY = new Set(['water', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass', 'bubble_column', 'lava']);
 /** 木头/树叶这类长在地面上的东西不怕挨着水；石头矿石这类往往在坑底、洞里，挨着水就容易一路走进水下 */
 const isTreeTarget = (name: string) => /_log$|_stem$|_wood$|_hyphae$|_leaves$|mushroom_block$/.test(name);
@@ -142,7 +141,7 @@ function inDeepWater(ctx: SkillCtx): boolean {
 
 export const gather: Skill<{ block: string; count: number; for?: { item: string; count: number }; note?: string; dig?: boolean }> = {
   name: 'gather',
-  description: '前往【看见过或正看见】的指定方块并挖掘、拾取。写 for（要做的东西和数量）时按背包缺口算该采几个，已经够了就不采；看不见的不会去挖（没有透视）；stone/dirt/sand 若看不见会就地向下挖。block 可用别名：log(任意原木)、stone、dirt、coal、iron、ore',
+  description: '前往【看见过或正看见】的指定方块并挖掘、拾取。写 for（要做的东西和数量）时按背包缺口算该采几个，已经够了就不采；看不见的不会去挖（没有透视），也不会自己往下挖。block 可用别名：log(任意原木)、stone、dirt、coal、iron、ore',
   argsDoc: '{"block": "log|stone|coal|iron|<方块名>", "for"?: {"item":"要做的东西（物品 ID）","count":1} | "物品名", "count"?: 1-32（不写 for 时用）, "dig"?: true（路上挡着的土石挖穿、垫方块过去）}',
   timeoutMs: 180000,
   movement: true,
@@ -189,7 +188,7 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
       if (wanted.length) names = wanted;
       ctx.progress(0, `${describePlan(plan)}：先采 ${args.block}×${args.count}`);
     }
-    const canDigDown = names.some((n) => DIGGABLE_DOWN.has(n));
+    const canDigDown = names.some((n) => UNDERFOOT.has(n));
     const skip = new Set<string>();
     let unreachable = unreachableTargets.get(adapter);
     if (!unreachable) { unreachable = new Map(); unreachableTargets.set(adapter, unreachable); }
@@ -197,7 +196,7 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
     const skippedUnreachable = new Set<string>();
     let dug = 0;
     let failsInRow = 0;
-    let dugDown = 0;
+    let underNote = '';
     let searched = false;
     let lost = 0;
     const risky: Record<TargetRisk, number> = { hazard: 0, wet: 0, deep: 0 };
@@ -256,28 +255,10 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
         if (skippedUnreachable.size && !candidates.length) return dug > 0
           ? ok(`采集了 ${dug}/${args.count}；其余 ${skippedUnreachable.size} 处刚确认无法到达或够不着，先换个站位再采`, { dug, skippedUnreachable: skippedUnreachable.size })
           : fail('PATH_NOT_FOUND', `${skippedUnreachable.size} 处 ${args.block} 刚确认无法到达或够不着，同一站位暂不重复尝试；先换个方向走至少 3 格，或稍后再试`, { skippedUnreachable: skippedUnreachable.size });
-        // 看不见目标：石头/泥土类可以就地往下挖（脚下的方块是“踩着的”，不算透视）
-        if (canDigDown && dugDown < 8 && !s.inWater) {
-          const below = { x: Math.floor(s.pos.x), y: Math.floor(s.pos.y) - 1, z: Math.floor(s.pos.z) };
-          const under = adapter.blockAt(below);
-          const under2 = adapter.blockAt({ ...below, y: below.y - 1 });
-          // 旁边有水就别往下挖：一挖开水就灌进来（脚边的方块是踩着、碰着的，不算透视）
-          const wet = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => [below.y, below.y + 1].some((y) => WATERY.has(adapter.blockAt({ x: below.x + dx, y, z: below.z + dz }) ?? 'air')));
-          const danger = !!ctx.memory.hazardAt?.(below, s.dim, ['drowning', 'lava']);
-          if (danger) risky.hazard++;
-          if (under && DIGGABLE_DOWN.has(under) && !UNSAFE_BELOW.has(under2 ?? 'air') && !wet && !danger) {
-            ctx.progress(dug / args.count, `向下挖（${under}）`);
-            const r = await adapter.dig(below, signal);
-            if (r.ok) {
-              dugDown++;
-              if (names.includes(under)) {
-                dug++;
-                ctx.progress(dug / args.count, `采集 ${args.block} ${dug}/${args.count}`);
-              }
-              await adapter.collectNearbyDrops(signal, 3, 1500);
-              continue;
-            }
-          }
+        // 看不见目标：不替它决定往下挖（直上直下挖是最危险的挖法），只说脚下踩着的是什么，挖不挖、往哪挖由它定
+        if (canDigDown && !underNote) {
+          const under = adapter.blockAt({ x: Math.floor(s.pos.x), y: Math.floor(s.pos.y) - 1, z: Math.floor(s.pos.z) });
+          if (under && names.includes(under)) underNote = `；脚下踩着的就是 ${under}（要挖自己用 dig_at，往下挖小心掉进洞里或岩浆）`;
         }
         // 眼前没有了就转头找找（砍完一棵树，人会四下看看下一棵在哪），每次采集只找一次
         if (!searched && !s.inWater) {
@@ -300,11 +281,11 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
           ? `；不过记得别处有 ${args.block}：${spots.map((o) => o.text).join('；')}——要去就 goto {"target":"${spots[0].pos.x},${spots[0].pos.y},${spots[0].pos.z}","dig":true} 走到跟前再 gather`
           : /_ore$/.test(args.block) ? `；长期记忆里也没记过哪里有 ${args.block}` : '';
         return dug > 0
-          ? ok(`看不到更多 ${args.block}${looked}，采集了 ${dug}/${args.count}${ownNote}${staleNote}${riskNote()}${remembered}`, { searched, ...(skipped ? { skippedUnsafe: { ...risky } } : {}) })
+          ? ok(`看不到更多 ${args.block}${looked}，采集了 ${dug}/${args.count}${ownNote}${staleNote}${riskNote()}${remembered}${underNote}`, { searched, ...(skipped ? { skippedUnsafe: { ...risky } } : {}) })
           : fail('NOT_FOUND', skipped
             ? `能看见的 ${args.block} 都不安全，没有去挖${riskNote()}${looked}${staleNote}`
             : ownSkipped.size ? `附近能看到的 ${args.block} 都是自己房子上的（${ownSkipped.size} 块），拆了还得补，没去挖；要去别处找${staleNote}`
-            : `眼前看不见 ${args.block}${looked}${staleNote}${remembered || '；尚未定位该资源，不代表其他地点也没有'}`, { searched, ...(spots.length ? { remembered: spots.map((o) => o.pos) } : {}), ...(skipped ? { skippedUnsafe: { ...risky } } : {}) });
+            : `眼前看不见 ${args.block}${looked}${staleNote}${remembered || '；尚未定位该资源，不代表其他地点也没有'}${underNote}`, { searched, ...(spots.length ? { remembered: spots.map((o) => o.pos) } : {}), ...(skipped ? { skippedUnsafe: { ...risky } } : {}) });
       }
       // 记忆里的方块可能已经被砍掉/不在加载范围：这种目标跳过，不能误报成“缺工具”
       const present = hits.filter((h) => adapter.blockAt(h.pos) === h.name);

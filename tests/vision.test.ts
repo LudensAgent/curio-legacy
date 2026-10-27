@@ -128,7 +128,7 @@ test('技能调用透视接口会被拒绝（必须用 ctx.senses）', async () 
   }
 });
 
-test('gather：埋在地下的原木不会去挖（NOT_FOUND）；背后的树要转头看见后才去砍；看不见石头时就地向下挖', async () => {
+test('gather：埋在地下的原木不会去挖（NOT_FOUND）；背后的树要转头看见后才去砍；看不见石头时不自己往下挖', async () => {
   const { adapter, vision } = setup();
   adapter.blocks.push({ name: 'oak_log', pos: { x: 3, y: adapter.groundY - 3, z: 0 } }); // 埋在地下：转头也看不见
   const arbiter = new Arbiter(adapter, new WorldMemory(null), new EventBus(), vision);
@@ -149,10 +149,11 @@ test('gather：埋在地下的原木不会去挖（NOT_FOUND）；背后的树�
 
   adapter.pitch = 0.3; // 抬头，看不到地面
   done = new Promise<TaskOutcome>((r) => arbiter.once('done', r));
+  const y0 = adapter.state().pos.y;
   arbiter.start({ skill: 'gather', args: { block: 'stone', count: 2 } }, 'llm');
   o = await done;
-  assert.equal(o.result.status, 'succeeded', o.result.summary);
-  assert.ok((adapter.inv.get('cobblestone') ?? 0) >= 2);
+  assert.equal(o.result.failureCode, 'NOT_FOUND', o.result.summary);
+  assert.ok(adapter.state().pos.y >= y0 - 0.01, '不自己往下挖');
 });
 
 test('扫描性能（40×24 射线，64 格）', () => {

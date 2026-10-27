@@ -101,7 +101,7 @@ export class Arbiter extends EventEmitter {
     return skill.validate(step.args ?? {}, this.adapter);
   }
 
-  private guard(signal: AbortSignal): GameAdapter {
+  private guard(signal: AbortSignal, opts: { noMake?: boolean; skill?: string } = {}): GameAdapter {
     const target = this.adapter as any;
     const origin = this.adapter.state();
     return new Proxy(target, {
@@ -121,6 +121,8 @@ export class Arbiter extends EventEmitter {
               this.bus.publish('blocked_action', 'P1', `已取消任务试图调用 ${String(prop)}，已拦截`);
               throw new AbortedError('task cancelled');
             }
+            // 这一步写了 "make":false：身体不顺手做缺的工具、熔炉、船、火把（craft 自己要做的那样东西不算）
+            if (opts.noMake && prop === 'craft' && opts.skill !== 'craft') throw new Error(`NO_MAKE: 这一步写了 "make":false，不顺手做 ${String(args[0])}；缺什么就先自己决定要不要做`);
             if (this.current?.source !== 'reflex' && reservationsFor(this.memory).list(state.worldId).length) {
               const available = new Map(availableInventoryFor(this.memory, state).map((i) => [i.name, i.count]));
               const requireAvailable = (name: string, count: number) => {
@@ -211,8 +213,9 @@ export class Arbiter extends EventEmitter {
     });
 
     const timeout = setTimeout(() => controller.abort('TIMEOUT'), skill.timeoutMs + 2000);
+    const invBefore = inventoryCounts(this.adapter);
     const ctx = {
-      adapter: this.guard(controller.signal),
+      adapter: this.guard(controller.signal, { noMake: (step.args as Record<string, unknown> | undefined)?.make === false, skill: skill.name }),
       senses: this.senses,
       memory: this.memory,
       bus: this.bus,
@@ -248,6 +251,8 @@ export class Arbiter extends EventEmitter {
           this.adapter.stopAll();
         }
         const durationMs = Date.now() - task.startedAt;
+        // 动作顺手用掉、结果里又没提到的东西（自动做的工作台、熔炉、船、镐子、火把、烧掉的燃料……）：如实补一句
+        if (source !== 'filler') { const spent = spentNote(invBefore, inventoryCounts(this.adapter), result.summary); if (spent) result = { ...result, summary: `${result.summary}${spent}` }; }
         this.memory.recordSkill(skill.name, result.status, result.failureCode);
         const sev = result.status === 'failed' ? 'P1' : source === 'filler' ? 'P3' : 'P2';
         this.bus.publish('task_end', sev, `[${source}] ${skill.name} → ${result.status}${result.failureCode ? `(${result.failureCode})` : ''}：${result.summary}`, {
@@ -281,4 +286,20 @@ export class Arbiter extends EventEmitter {
     t.controller.abort(reason);
     this.adapter.stopAll();
   }
+}
+
+function inventoryCounts(adapter: GameAdapter): Map<string, number> {
+  const m = new Map<string, number>();
+  try { for (const i of adapter.state().inventory) m.set(i.name, (m.get(i.name) ?? 0) + i.count); } catch { /* 状态暂不可用 */ }
+  return m;
+}
+
+/** 背包里少了、结果里又没提到的东西：“；顺带用掉了 oak_planks×5、coal×1” */
+export function spentNote(before: Map<string, number>, after: Map<string, number>, summary: string): string {
+  const out: string[] = [];
+  for (const [name, n] of before) {
+    const d = n - (after.get(name) ?? 0);
+    if (d > 0 && !summary.includes(name)) out.push(`${name}×${d}`);
+  }
+  return out.length ? `；顺带用掉了 ${out.slice(0, 8).join('、')}${out.length > 8 ? ` 等 ${out.length} 样` : ''}` : '';
 }

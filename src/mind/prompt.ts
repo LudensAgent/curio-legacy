@@ -91,7 +91,7 @@ export function movesCatalog(chars = 40, only?: Set<string>, advanced = true): s
   const visible = Object.values(SKILLS).filter((s) => !LLM_HIDDEN.has(s.name) && (!only || only.has(s.name)));
   const common = visible.filter((s) => COMMON_MOVES.includes(s.name)).map((s) => `- ${s.name} ${s.argsDoc}${chars ? `：${briefOf(s.description, chars)}` : ''}`);
   const rare = only ? [] : visible.filter((s) => !COMMON_MOVES.includes(s.name) && (advanced || !ADVANCED.test(s.name))).map((s) => `${s.name}（${briefOf(s.description, 14)}）`);
-  return `${common.join('\n')}${rare.length ? `\n其他动作（用 {"kind":"moves","names":["…"]} 查完整参数）：${rare.join('、')}` : ''}`;
+  return `${common.join('\n')}${rare.length ? `\n其他动作（用 {"kind":"moves","names":["…"]} 查完整参数）：${rare.join('、')}` : ''}${only ? '' : '\n缺工具、熔炉、船、火把时动作会顺手做（结果里写用掉了什么）；不想让它做就加 "make":false，缺了会停下说缺什么'}`;
 }
 
 /** 完整参数（moves 查询用） */
