@@ -30,6 +30,8 @@ export class PassageTracker {
   private active: { rec: PassageRecord; existing: boolean } | null = null;
   private lastSurface: { pos: Vec3Like; dim: string; worldId: string; ts: number } | null = null;
   private lastPos: { pos: Vec3Like; dim: string; worldId: string } | null = null;
+  /** 最近一次在地下（或在自己挖的竖井、台阶里）的位置：挖上地表时，冒出来的那个点也是入口 */
+  private lastBelow: { pos: Vec3Like; ts: number } | null = null;
 
   constructor(private memory: Pick<WorldMemory, 'passages' | 'savePassage'> & Partial<Pick<WorldMemory, 'forgetPassage'>>, private newId: () => string = () => `psg_${Math.random().toString(36).slice(2, 8)}`) {}
 
@@ -41,15 +43,28 @@ export class PassageTracker {
     if (jumped) { this.finish(); this.lastSurface = null; }
 
     if (s.place === 'surface') {
+      // 从下面挖上来、冒出地表：这个点也是这条通道的入口（以前只记从地表下去的那头，挖上来的出口没记）
+      const below = this.lastBelow;
+      if (this.active && below && now - below.ts < 120_000 && flat(below.pos, pos) <= 16 && pos.y >= below.pos.y) {
+        this.addEntrance(this.active.rec, pos);
+        this.save();
+      }
       this.finish();
+      this.lastBelow = null;
       this.lastSurface = { pos, dim: s.dim, worldId: s.worldId, ts: now };
       return;
     }
-    if (s.place !== 'underground') {
+    // 在自己挖的竖井、台阶里往上爬时，身体常常判断成“坑里”（四周比脚下高、头顶开着或是自己垫的方块），
+    // 以前这种时候既不开始也不记点，挖上来的通道就漏了。手上正在这儿挖、而且比地表低，就当在地下记
+    const digging = dug.some((b) => d3(cell(b.pos), pos) <= 6);
+    const belowSurface = !this.lastSurface || pos.y <= this.lastSurface.pos.y - 2;
+    const inShaft = s.place === 'other' && digging && (!!this.active || belowSurface);
+    if (s.place !== 'underground' && !inShaft) {
       // 坑里、水里：不开始也不结束，但手上挖的照样算在这一段里
       if (this.active) this.count(this.active.rec, pos, dug);
       return;
     }
+    this.lastBelow = { pos, ts: now };
 
     if (!this.active) {
       const old = this.memory.passages(s.dim).find((p) => p.worldId === s.worldId && p.path.some((q) => d3(q, pos) <= 3));

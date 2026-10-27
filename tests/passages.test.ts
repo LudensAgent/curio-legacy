@@ -34,7 +34,8 @@ test('通道：挖台阶下去、横着推一段，记下入口、最深处、�
   tr.observe({ worldId: W, dim: D, pos: at(36, 50, 0), place: 'surface' }, [], t + 9000);
   const [p] = m.passages(D);
   assert.equal(p.id, 'p1');
-  assert.deepEqual(p.entrances, [at(0, 64, 0)]);
+  // 下去的口和挖上来冒出地表的口都是入口
+  assert.deepEqual(p.entrances, [at(0, 64, 0), at(36, 50, 0)]);
   assert.equal(p.deepestY, 40);
   assert.equal(p.ores.iron_ore, 1);
   assert.ok(p.dug >= 30);
@@ -70,7 +71,9 @@ test('通道：从另一个口下到以前挖过的通道里，接着那一条�
   const [p] = m.passages(D);
   assert.equal(m.passages(D).length, 1);
   assert.equal(p.uses, 2);
-  assert.equal(p.entrances.length, 2);
+  // 原来下去的口、横巷尽头上到地表的口、新挖下来的口
+  assert.equal(p.entrances.length, 3);
+  assert.ok(p.entrances.some((e) => e.x === 30 && e.z === 8));
   m.close();
 });
 
@@ -142,5 +145,50 @@ test('按需提醒：想下矿时说出现成的通道；人在通道里就说�
   assert.ok(inside.some((r) => /你现在就在自己挖过的通道里：.*顺着走比重新挖省事/.test(r)), inside.join('\n'));
   const busy = situationalReminders(ctx(at(20, 64, 30), '砍 16 根原木'));
   assert.ok(!busy.some((r) => /挖过的通道/.test(r)));
+  m.close();
+});
+
+test('通道：从下往上挖也记——竖井、台阶里身体常判断成“坑里”，手上在挖就照样记点；冒出地表的地方记成入口', () => {
+  const m = new WorldMemory(null); m.setWorld(W);
+  const tr = new PassageTracker(m, () => 'up');
+  // 重生在地下（没有刚才的地表记录），一路挖台阶往上：一半的时候身体说“在坑里”
+  let t = 0;
+  for (let i = 0; i <= 20; i++) {
+    t += 1000;
+    const pos = at(100 + i, 40 + i, 5);
+    tr.observe({ worldId: W, dim: D, pos, place: i % 2 ? 'other' : 'underground' }, [{ pos: at(100 + i, 41 + i, 5), name: 'stone', ts: t }, { pos: at(101 + i, 42 + i, 5), name: 'stone', ts: t }], t);
+  }
+  tr.observe({ worldId: W, dim: D, pos: at(121, 62, 5), place: 'surface' }, [], t + 1000);
+  const [p] = m.passages(D);
+  assert.equal(p?.id, 'up');
+  assert.ok(p.path.length >= 6, `记了 ${p.path.length} 个点`);
+  assert.equal(p.deepestY, 40);
+  assert.deepEqual(p.entrances, [at(121, 62, 5)]);
+  m.close();
+});
+
+test('通道：只在“坑里”的竖直垫高往上爬（全程没判断成地下），也记下来', () => {
+  const m = new WorldMemory(null); m.setWorld(W);
+  const tr = new PassageTracker(m, () => 'shaft');
+  tr.observe({ worldId: W, dim: D, pos: at(0, 70, 0), place: 'surface' }, [], 0);
+  let t = 200_000; // 很久以后，在别处的地下：先瞬移过去
+  tr.observe({ worldId: W, dim: D, pos: at(50, 30, 50), place: 'other' }, [], t);
+  for (let y = 31; y <= 60; y++) { t += 1500; tr.observe({ worldId: W, dim: D, pos: at(50, y, 50), place: 'other' }, [{ pos: at(50, y + 1, 50), name: 'stone', ts: t }], t); }
+  tr.observe({ worldId: W, dim: D, pos: at(50, 62, 50), place: 'surface' }, [], t + 1000);
+  const [p] = m.passages(D);
+  assert.equal(p?.id, 'shaft');
+  assert.ok(p.path.some((q) => q.y <= 33) && p.path.some((q) => q.y >= 58));
+  assert.deepEqual(p.entrances, [at(50, 62, 50)]);
+  m.close();
+});
+
+test('通道：在地表平整地基、挖个浅坑不算通道', () => {
+  const m = new WorldMemory(null); m.setWorld(W);
+  const tr = new PassageTracker(m);
+  let t = 0;
+  tr.observe({ worldId: W, dim: D, pos: at(0, 64, 0), place: 'surface' }, [], t);
+  for (let i = 0; i < 10; i++) { t += 1000; tr.observe({ worldId: W, dim: D, pos: at(i, 63, 0), place: 'other' }, [{ pos: at(i, 63, 1), name: 'dirt', ts: t }, { pos: at(i, 64, 1), name: 'dirt', ts: t }], t); }
+  tr.observe({ worldId: W, dim: D, pos: at(10, 64, 0), place: 'surface' }, [], t + 1000);
+  assert.equal(m.passages(D).length, 0);
   m.close();
 });
