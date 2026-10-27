@@ -139,6 +139,16 @@ NO_PROXY=localhost,127.0.0.1,::1
 
 然后使用 `npm run start:proxy` 启动，需要 Node.js 24.5+（或 22.21+）。该命令在 Node 启动阶段加载 `.env`，并[启用环境变量代理](https://nodejs.org/api/cli.html#--use-env-proxy)，使原生 `fetch` 等 HTTP(S) 请求使用代理；本机 Minecraft、控制台和 Hindsight 地址保留直连。已有进程环境变量优先于 `.env`，请确保启动终端中的代理配置与预期一致。HTTPS 请求的代理地址仍可使用 `http://`，协议取决于代理端口。
 
+### 无人值守：崩溃或卡死后自动重启
+
+直播或长时间测试时用 `npm run supervise`（需要代理时用 `npm run supervise:proxy`）代替 `npm start`。外面多一层守护进程：
+
+- Agent 崩溃（包括内存耗尽）或卡死（10 秒一次的心跳 2 分钟没来）会被自动重启；连续崩溃时间隔从 3 秒逐步拉长到 2 分钟。
+- 每次异常都会在 `data/logs/` 留下 `crash-*.log`（当时 stderr 和 stdout 的最后几百行、最后一次内存读数），stderr 全量写进 `console-err-*.log`，Node 致命错误另有诊断报告 `report.*.json`；事件日志里记一条 `process_restart`。
+- 堆内存用到 92% 时 Agent 会先存档再退出，让守护马上重启，不等到内存耗尽被直接中止；每 10 分钟的内存读数记在事件 `process_memory` 里。
+- Ctrl+C 照常存档退出，守护随之结束。
+
+
 模型拿到的是：
 
 - 系统提示：人设、技能白名单和参数格式、安全原则、输出格式。

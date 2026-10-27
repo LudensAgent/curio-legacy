@@ -11,6 +11,8 @@
     "postinstall": "node scripts/patch-deps.mjs",
     "start": "tsx src/main.ts",
     "start:proxy": "node --env-file=.env --use-env-proxy --import tsx src/main.ts",
+    "supervise": "node scripts/supervise.mjs",
+    "supervise:proxy": "node scripts/supervise.mjs --proxy",
     "dev": "tsx watch src/main.ts",
     "check:llm": "tsx scripts/check-llm.ts",
     "check:rcon": "tsx scripts/check-rcon.ts",

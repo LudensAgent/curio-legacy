@@ -1,0 +1,159 @@
+#!/usr/bin/env node
+/**
+ * Curio 守护进程：让 Agent 出错退出或卡死后自己爬起来。
+ *
+ *   npm run supervise          （等同 npm start，外面多一层守护）
+ *   npm run supervise:proxy    （等同 npm run start:proxy）
+ *
+ * - 子进程非正常退出（崩溃、内存耗尽、被杀）→ 写崩溃报告、记一条事件，等几秒后重启；连续崩溃时等待逐步拉长。
+ * - 子进程卡死（事件循环停住，心跳超时）→ 杀掉重启。
+ * - 子进程正常退出（Ctrl+C / 关闭，退出码 0）→ 守护一起退出；退出码 75 = 子进程自己要求重启（内存快满时先存档再退）。
+ * - stderr 全部落盘到 data/logs/console-err-YYYYMMDD.log；Node 致命错误另有诊断报告（--report-on-fatalerror）。
+ *
+ * 纯 JS，不依赖 tsx，守护本身尽量不出错。
+ */
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+export const RESTART_EXIT_CODE = 75;
+const pad = (n) => String(n).padStart(2, '0');
+const day = (d = new Date()) => `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
+const stamp = (d = new Date()) => `${day(d)}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
+
+/** .env 里的 DATA_DIR（守护进程不加载整份 .env，只要这一项） */
+function dataDirFrom(root) {
+  if (process.env.DATA_DIR) return path.resolve(root, process.env.DATA_DIR);
+  try {
+    const m = fs.readFileSync(path.join(root, '.env'), 'utf8').match(/^\s*DATA_DIR\s*=\s*["']?([^"'#\r\n]+?)["']?\s*(?:#.*)?$/m);
+    if (m) return path.resolve(root, m[1]);
+  } catch { /* 没有 .env */ }
+  return path.resolve(root, 'data');
+}
+
+/** 第 n 次连续崩溃后等多久再起（毫秒） */
+export function backoffMs(n) { return [3_000, 10_000, 30_000, 60_000][Math.min(n, 4) - 1] ?? 120_000; }
+
+/**
+ * @param {object} o
+ * @param {string[]} o.command  [可执行文件, ...参数]
+ * @param {string} o.cwd
+ * @param {string} o.logDir
+ * @param {number} [o.hangMs]      心跳多久没来算卡死
+ * @param {number} [o.startupMs]   启动后多久内还没心跳不算卡死
+ * @param {number} [o.stableMs]    跑满多久后连续崩溃计数清零
+ * @param {(n:number)=>number} [o.backoff]
+ * @param {(line:string)=>void} [o.say]
+ * @returns {{ stop(): Promise<void>, done: Promise<void> }}
+ */
+export function supervise(o) {
+  const hangMs = o.hangMs ?? 120_000, startupMs = o.startupMs ?? 300_000, stableMs = o.stableMs ?? 600_000;
+  const backoff = o.backoff ?? backoffMs;
+  const say = o.say ?? ((l) => console.log(`\x1b[35m[守护 ${new Date().toLocaleTimeString()}]\x1b[0m ${l}`));
+  fs.mkdirSync(o.logDir, { recursive: true });
+
+  let child = null, stopping = false, crashes = 0, restarts = 0, timer = null, resolveDone;
+  const done = new Promise((r) => { resolveDone = r; });
+
+  const event = (severity, type, msg, data) => {
+    try { fs.appendFileSync(path.join(o.logDir, `events-${day()}.jsonl`), JSON.stringify({ ts: Date.now(), type, severity, msg, data }) + '\n'); } catch { /* 写不了日志也要继续守护 */ }
+  };
+
+  const start = () => {
+    if (stopping) return;
+    const startedAt = Date.now();
+    let lastBeat = null, killedForHang = false;
+    const errTail = [], outTail = [];
+    const keep = (arr, s, max) => { for (const line of stripAnsi(s).split(/\r?\n/)) if (line) { arr.push(line); if (arr.length > max) arr.shift(); } };
+    const errFile = () => path.join(o.logDir, `console-err-${day()}.log`);
+
+    const c = spawn(o.command[0], o.command.slice(1), { cwd: o.cwd, stdio: ['inherit', 'pipe', 'pipe', 'ipc'], windowsHide: false });
+    child = c;
+    c.stdout.on('data', (b) => { process.stdout.write(b); keep(outTail, b.toString(), 80); });
+    c.stderr.on('data', (b) => {
+      process.stderr.write(b);
+      const s = b.toString();
+      keep(errTail, s, 200);
+      try { fs.appendFileSync(errFile(), stripAnsi(s).split(/\r?\n/).map((l) => (l ? `[${new Date().toISOString()}] ${l}` : l)).join('\n')); } catch { /* ignore */ }
+    });
+    c.on('message', (m) => { if (m && m.type === 'hb') lastBeat = { at: Date.now(), ...m }; });
+
+    const watchdog = setInterval(() => {
+      const since = lastBeat ? Date.now() - lastBeat.at : Date.now() - startedAt;
+      if (since > (lastBeat ? hangMs : startupMs) && !killedForHang && !stopping) {
+        killedForHang = true;
+        say(`${Math.round(since / 1000)} 秒没有心跳，判定卡死，强制结束`);
+        try { c.kill('SIGKILL'); } catch { /* 已经没了 */ }
+      }
+    }, 5_000);
+    watchdog.unref?.();
+
+    c.on('exit', (code, signal) => {
+      clearInterval(watchdog);
+      child = null;
+      const ranMs = Date.now() - startedAt;
+      if (stopping) { say('Agent 已退出，守护结束'); resolveDone(); return; }
+      if (code === 0 && !killedForHang) { say('Agent 正常退出，守护结束'); resolveDone(); return; }
+
+      const planned = code === RESTART_EXIT_CODE;
+      const why = killedForHang ? '卡死（心跳超时）' : planned ? '自己要求重启（内存快满，已先存档）' : signal ? `被信号 ${signal} 结束` : `退出码 ${code}`;
+      if (!planned) crashes = ranMs >= stableMs ? 1 : crashes + 1;
+      restarts++;
+      const wait = planned ? 2_000 : backoff(crashes);
+      const report = path.join(o.logDir, `crash-${stamp()}.log`);
+      const mem = lastBeat ? `最后一次心跳 ${new Date(lastBeat.at).toLocaleString()}：rss ${mb(lastBeat.rss)}，堆 ${mb(lastBeat.heapUsed)} / 上限 ${mb(lastBeat.heapLimit)}` : '没有收到过心跳';
+      try {
+        fs.writeFileSync(report, [
+          `Curio 异常退出：${why}`, `时间：${new Date().toLocaleString()}，本次运行 ${Math.round(ranMs / 1000)} 秒`, mem, '',
+          '---- stderr 最后 200 行 ----', ...errTail, '', '---- stdout 最后 80 行 ----', ...outTail, '',
+        ].join('\n'));
+      } catch { /* ignore */ }
+      event(planned ? 'P1' : 'P0', 'process_restart', `Agent ${why}，${Math.round(wait / 1000)} 秒后自动重启（第 ${restarts} 次）`, { code, signal, hang: killedForHang, planned, ranSec: Math.round(ranMs / 1000), crashes, report: path.basename(report), lastBeat });
+      say(`Agent ${why}；崩溃报告 ${path.relative(o.cwd, report)}；${Math.round(wait / 1000)} 秒后重启`);
+      timer = setTimeout(() => { timer = null; start(); }, wait);
+    });
+  };
+
+  const stop = async () => {
+    if (stopping) return done;
+    stopping = true;
+    if (timer) { clearTimeout(timer); timer = null; resolveDone(); return done; }
+    const c = child;
+    if (!c) { resolveDone(); return done; }
+    // 先请它自己存档退出（Windows 上 kill('SIGINT') 等于直接杀掉，不能用）
+    try { c.send({ type: 'shutdown' }); } catch { /* IPC 断了 */ }
+    const force = setTimeout(() => { try { c.kill('SIGKILL'); } catch { /* ignore */ } }, 20_000);
+    force.unref?.();
+    return done;
+  };
+
+  start();
+  return { stop, done };
+}
+
+const mb = (n) => (typeof n === 'number' ? `${Math.round(n / 1048576)} MB` : '?');
+
+// ------------------------------------------------------------ 命令行入口
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const logDir = path.join(dataDirFrom(root), 'logs');
+  const proxy = process.argv.includes('--proxy');
+  const command = [process.execPath,
+    ...(proxy ? ['--env-file=.env', '--use-env-proxy'] : []),
+    // Node 自己的致命错误（比如内存耗尽）会写一份诊断报告，崩溃原因不再只留在终端里
+    '--report-on-fatalerror', `--report-directory=${logDir}`, '--report-compact',
+    '--import', 'tsx', 'src/main.ts'];
+  const s = supervise({ command, cwd: root, logDir });
+  // 终端里按 Ctrl+C：子进程自己也会收到并存档退出；这里只等它，不重复发
+  let interrupted = 0;
+  const onSignal = () => {
+    interrupted++;
+    if (interrupted === 1) void s.stop();
+    else process.exit(1);
+  };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+  s.done.then(() => process.exit(0));
+}

@@ -23,6 +23,8 @@ import { WorldMemory } from './memory/store.ts';
 import { EpisodicMemory } from './memory/episodic.ts';
 import { HindsightBackend } from './memory/hindsight.ts';
 import { HindsightUsage } from './memory/hindsight-usage.ts';
+import { installProcessHealth, RESTART_EXIT_CODE } from './observer/process-health.ts';
+import { sandboxStats } from './codeskills/sandbox.ts';
 import { buildingArchiveFor, ownBuildingAt } from './skills/build.ts';
 import { myFacilities } from './mind/facilities.ts';
 import { flattenProgram, MethodLibrary, simpleToMethod } from './methods/learning.ts';
@@ -532,7 +534,7 @@ reflex.start();
 spectator.start();
 metrics.start();
 live?.start();
-startDashboard(config.dashboard.host, config.dashboard.port, bus, {
+const dashboard = startDashboard(config.dashboard.host, config.dashboard.port, bus, {
   snapshot,
   danmaku: (q) => q.get('dates') === '1' ? { dates: danmakuLog.dates() } : danmakuLog.query({
     date: q.get('date') ?? undefined, q: q.get('q') ?? undefined, questions: q.get('questions') === '1',
@@ -546,7 +548,8 @@ startDashboard(config.dashboard.host, config.dashboard.port, bus, {
 }, feed ? [createObserverHandler(feed)] : [], { llmTrace, mcVersion: config.mc.version, env: { backupDir: path.join(config.dataDir, 'env-backups') } });
 
 let shuttingDown = false;
-function shutdown() {
+/** code：0 正常退出；RESTART_EXIT_CODE 请守护进程重启 */
+function shutdown(code = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   bus.publish('shutdown', 'P1', '正在退出，保存记忆…');
@@ -563,7 +566,14 @@ function shutdown() {
   feed?.dispose();
   memory.close();
   adapter.quit();
-  setTimeout(() => process.exit(0), 500);
+  processHealth.dispose();
+  runStats.stop();
+  memoryLlm?.stop();
+  setTimeout(() => process.exit(code), 500);
 }
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+process.on('SIGINT', () => shutdown());
+process.on('SIGTERM', () => shutdown());
+/** 心跳给守护进程（scripts/supervise.mjs）、记录内存趋势、内存快满时先存档再请守护重启 */
+const processHealth = installProcessHealth(bus, { onShutdown: () => shutdown(), onMemoryRestart: () => shutdown(RESTART_EXIT_CODE),
+  extra: () => ({ ...dashboard.streamStats(), ...sandboxStats() }),
+  snapshotAtBytes: config.heapSnapshotMb * 1048576, snapshotDir: path.join(config.dataDir, 'logs') });

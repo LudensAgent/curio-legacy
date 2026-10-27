@@ -41,11 +41,15 @@ export function compileCheck(code: string, opts: { allowed?: readonly string[]; 
   }
 }
 
+let liveWorkers = 0;
+/** 现在活着的沙箱线程数（每个线程有自己的 V8 堆；正常最多一两个，越来越多就是没被收掉） */
+export function sandboxStats() { return { sandboxWorkers: liveWorkers }; }
+
 export async function runSandboxed(code: string, args: unknown, handle: SandboxHandler,
   opts: { signal: AbortSignal; deadline: number; pokeMs?: number; maxCalls?: number; onLog?: (t: string) => void; onProgress?: (p: number) => void }): Promise<SandboxResult> {
   const pokeMs = opts.pokeMs ?? 1500, maxCalls = opts.maxCalls ?? 12000;
   const trace: string[] = [], logs: string[] = [];
-  let calls = 0;
+  let calls = 0, logged = 0;
   const finish = (r: Omit<SandboxResult, 'calls' | 'trace' | 'logs'>): SandboxResult => ({ ...r, calls, trace: trace.slice(-30), logs: logs.slice(-20) });
   const failWith = (error: string) => {
     const line = Number(error.match(/skill\.js:(\d+)/)?.[1]);
@@ -56,6 +60,10 @@ export async function runSandboxed(code: string, args: unknown, handle: SandboxH
   opts.signal.throwIfAborted();
   // 独立线程：死循环、算太久时直接终止线程（在主线程里打断 vm 会弄坏 Node 的异步上下文）
   const worker = new Worker(WORKER, { workerData: { methods: API_METHODS }, resourceLimits: { maxOldGenerationSizeMb: 64, maxYoungGenerationSizeMb: 16 }, stdout: true, stderr: true });
+  liveWorkers++;
+  // stdout/stderr 设成了 true 就得有人读走，不然线程里打印的东西会一直攒着
+  worker.stdout.resume();
+  worker.stderr.resume();
   let settle!: (r: SandboxResult) => void;
   let rejectAbort!: (e: Error) => void;
   const result = new Promise<SandboxResult>((res, rej) => { settle = res; rejectAbort = rej; });
@@ -78,10 +86,17 @@ export async function runSandboxed(code: string, args: unknown, handle: SandboxH
   const overall = setTimeout(() => end(failWith('代码超时：总时限用完了（循环太多、或者在等很久的动作）')), Math.max(100, opts.deadline - Date.now()));
   let chain = Promise.resolve();
   worker.on('error', (e) => end(failWith(`代码出错：${String((e as Error)?.message ?? e)}`)));
-  worker.on('exit', () => end(failWith('沙箱线程意外退出')));
+  worker.on('exit', () => { liveWorkers--; end(failWith('沙箱线程意外退出')); });
   worker.on('message', (msg: any) => {
     if (done) return;
-    if (msg.t === 'log') { const t = String(msg.text ?? ''); logs.push(t); opts.onLog?.(t); return; }
+    if (msg.t === 'log') {
+      const t = String(msg.text ?? '');
+      logs.push(t);
+      if (logs.length > 40) logs.splice(0, logs.length - 20);
+      // 循环里每圈都 log 的代码：只把前 50 条送上总线，免得刷满事件日志
+      if (++logged <= 50) opts.onLog?.(t);
+      return;
+    }
     if (msg.t === 'progress') { opts.onProgress?.(Number(msg.p) || 0); return; }
     if (msg.t === 'done') { end(msg.ok ? finish({ ok: true, result: msg.result }) : failWith(String(msg.error ?? '出错了'))); return; }
     if (msg.t !== 'call') return;
@@ -95,11 +110,11 @@ export async function runSandboxed(code: string, args: unknown, handle: SandboxH
       try {
         const value = await handle(String(msg.m), a);
         out = JSON.stringify(value === undefined ? null : value);
-        trace.push(`${msg.m}(${JSON.stringify(a).slice(1, -1).slice(0, 60)}) → ${out.slice(0, 80)}`);
+        trace.push(`${msg.m}(${JSON.stringify(a).slice(1, -1).slice(0, 60)}) → ${out.slice(0, 80)}`); if (trace.length > 60) trace.splice(0, trace.length - 30);
       } catch (e) {
         if ((e as Error)?.name === 'AbortedError') { end(e as Error); return; }
         out = String((e as Error)?.message ?? e).slice(0, 300); isError = true;
-        trace.push(`${msg.m}(${JSON.stringify(a).slice(1, -1).slice(0, 60)}) ✗ ${out.slice(0, 80)}`);
+        trace.push(`${msg.m}(${JSON.stringify(a).slice(1, -1).slice(0, 60)}) ✗ ${out.slice(0, 80)}`); if (trace.length > 60) trace.splice(0, trace.length - 30);
       }
       if (done) return;
       worker.postMessage({ t: 'result', id: msg.id, json: out, isError });
