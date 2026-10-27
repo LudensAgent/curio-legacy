@@ -750,3 +750,33 @@ test('提示词：太阳还高就想着躲起来过夜，提醒里把尺度摆�
   assert.match(user.content, /早上 7 点，太阳刚升起不久；离天黑（晚上 7 点，开始刷怪）还有约 12 个小时（游戏时间）/);
   memory.close();
 });
+
+test('提示词：【身体】写出身上穿戴的盔甲和副手（不在背包里，不写它就以为没穿）', () => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  const perception = new Perception(adapter, memory, bus, new Vision(adapter));
+  const self = new SelfModel(null);
+  const base = { reason: '测试', percept: perception.update(), self, memory, activity: null, suspended: [], lastRecord: null,
+    noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', skills: [], tier: 'deliberate' as const };
+  const body = (state: any) => buildMindMessages({ ...base, state } as any)[1].content.match(/【身体】(.*)/)![1];
+  const bare = JSON.parse(body({ ...adapter.state(), equipment: [] }));
+  assert.equal(bare.wearing, '没穿盔甲，副手空着');
+  const dressed = JSON.parse(body({ ...adapter.state(), equipment: [
+    { slot: 'head', name: 'iron_helmet', durabilityRemaining: 165 }, { slot: 'torso', name: 'iron_chestplate', durabilityRemaining: 240 },
+    { slot: 'legs', name: 'iron_leggings' }, { slot: 'feet', name: 'iron_boots', durabilityRemaining: 195 }] }));
+  assert.deepEqual(dressed.wearing, { 头: 'iron_helmet（耐久剩 165）', 胸: 'iron_chestplate（耐久剩 240）', 腿: 'iron_leggings', 脚: 'iron_boots（耐久剩 195）' });
+});
+
+test('要命的处境（头被沙砾埋住、正在掉血）：撤掉正在慢慢想的，马上快想一次，并告诉它眼前的事实', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  assert.equal(w.pending.length, 1, '先在认真想');
+  const s = w.adapter.state();
+  w.adapter.blocks.push({ name: 'gravel', pos: { x: Math.floor(s.pos.x), y: Math.floor(s.pos.y + 1.62), z: Math.floor(s.pos.z) } });
+  w.bus.publish('hurt', 'P2', '受到伤害，生命 9（当时：身体碰着 gravel）');
+  (w.mind as any).lastPerceptAt = 0;
+  await w.tick();
+  assert.equal(w.pending.length, 2, '马上又想了一次');
+  assert.equal(w.pending[1].hint?.tier, 'light', '用快的那一档');
+  const user = w.pending[1].messages.at(-1)!.content;
+  assert.match(user, /头被 gravel 埋住了，正在窒息掉血/);
+});

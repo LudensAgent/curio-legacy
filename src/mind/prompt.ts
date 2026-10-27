@@ -336,6 +336,7 @@ function focusBlock(ctx: MindContext): Record<string, unknown> | null {
   };
 }
 
+const WEAR_SLOT: Record<string, string> = { head: '头', torso: '胸', legs: '腿', feet: '脚', 'off-hand': '副手' };
 /** 【身体】：自己在哪、状态、时间、亮度、背包 */
 function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits: object) {
   const inv = new Map<string, number>();
@@ -358,6 +359,10 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
     ...(p.time.weather ? { weather: p.time.weather } : {}),
     ...(p.light ? { light: `${{ bright: '亮', dim: '有点暗', dark: '很暗' }[p.light.level] ?? p.light.level}${p.light.mob_spawn_risk ? '，会刷怪' : ''}` } : {}),
     held: p.self.held ? `${p.self.held}${s.heldDurability ? `（耐久 ${s.heldDurability.left}/${s.heldDurability.max}${s.heldDurability.left / s.heldDurability.max < 0.15 ? `，快坏了${spareNote(s.inventory.find((i) => i.name === p.self.held), s.heldDurability)}` : ''}）` : ''}` : p.self.held,
+    // 身上穿戴的（盔甲、副手）：不在背包里，不写出来它就以为自己什么都没穿
+    wearing: s.equipment?.length
+      ? Object.fromEntries(s.equipment.map((e) => [WEAR_SLOT[e.slot] ?? e.slot, `${e.name}${e.durabilityRemaining !== undefined ? `（耐久剩 ${e.durabilityRemaining}）` : ''}`]))
+      : '没穿盔甲，副手空着',
     ...(digging && tool && !ownsTool ? { tool_note: `正在挖 ${material}，背包里没有 ${tool}（身体只能空手挖，很慢）：做一把${tool === 'axe' ? '斧子' : tool === 'pickaxe' ? '镐' : '铲子'}会快很多` } : {}),
     // 工具、武器、护甲带上耐久（像物品栏里那条耐久条）；附魔的标出来
     inventory: [...inv].map(([name, count]) => {
