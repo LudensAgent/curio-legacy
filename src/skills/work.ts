@@ -9,6 +9,7 @@ import { craftReservationConflict } from '../projects/reservations.ts';
 import { oreSpotsNear } from '../memory/ore-spots.ts';
 import { config } from '../config.ts';
 import { FOOD_VALUE, foodNote } from './food.ts';
+import type { InvItem } from '../adapter/types.ts';
 
 const key = (p: { x: number; y: number; z: number }) => `${p.x},${p.y},${p.z}`;
 
@@ -459,10 +460,48 @@ function haveNote(ctx: SkillCtx, item: string): string {
   return `（背包里现在共 ${total} 个${worn}）`;
 }
 
+/** 工具、武器、护甲、盾：材质等级（同一种东西，等级不低于要做的那把就算“已经有了”） */
+const TOOL_TIER: Record<string, number> = { wooden: 0, golden: 0, stone: 1, iron: 2, diamond: 3, netherite: 4 };
+const ARMOR_TIER: Record<string, number> = { leather: 0, golden: 1, chainmail: 2, iron: 3, diamond: 4, netherite: 5 };
+function gearKind(name: string): { kind: string; tier: number } | null {
+  let m = name.match(/^(wooden|stone|golden|iron|diamond|netherite)_(sword|pickaxe|axe|shovel|hoe)$/);
+  if (m) return { kind: m[2], tier: TOOL_TIER[m[1]] };
+  m = name.match(/^(leather|chainmail|golden|iron|diamond|netherite)_(helmet|chestplate|leggings|boots)$/);
+  if (m) return { kind: m[2], tier: ARMOR_TIER[m[1]] };
+  return name === 'shield' ? { kind: 'shield', tier: 0 } : null;
+}
+/**
+ * 要做的工具/武器/护甲，手上已经有同类、等级不低、还经用（剩四分之一以上耐久）的了：多半是忘了自己有。
+ * 镐、斧、锹允许多带一把备用；剑、锄、护甲、盾有一件就够。返回说明，没问题返回 null
+ */
+export function gearAlreadyHeld(item: string, inv: InvItem[], worn: { name: string; durabilityRemaining?: number }[] = []): string | null {
+  const want = gearKind(item);
+  if (!want) return null;
+  const have: string[] = [];
+  let usable = 0;
+  for (const i of inv) {
+    const g = gearKind(i.name);
+    if (!g || g.kind !== want.kind || g.tier < want.tier || i.count <= 0) continue;
+    const max = i.durability?.max ?? 0;
+    const lefts = i.durabilities?.length ? i.durabilities : Array.from({ length: i.count }, () => i.durability?.left ?? max);
+    const ok = max ? lefts.filter((l) => l / max >= 0.25).length : i.count;
+    usable += ok;
+    have.push(`${i.name}×${i.count}${max ? `（耐久 ${lefts.map((l) => `${l}/${max}`).join('、')}）` : ''}`);
+  }
+  for (const e of worn) {
+    const g = gearKind(e.name);
+    if (!g || g.kind !== want.kind || g.tier < want.tier) continue;
+    usable++;
+    have.push(`身上穿着的 ${e.name}`);
+  }
+  const limit = ['pickaxe', 'axe', 'shovel'].includes(want.kind) ? 2 : 1;
+  return usable >= limit ? `已经有 ${have.join('、')}，还经用` : null;
+}
+
 export const craft: Skill<{ item: string; count: number; extra?: boolean }> = {
   name: 'craft',
   description: '合成物品。会自动补做两层以内的前置材料（原木→木板→木棍）、自己走到附近的工作台用（没有就现做一个放下、用完收回），所以直接写最终物品即可，不用先做/放工作台。常用：wooden_pickaxe、stone_pickaxe、furnace、torch',
-  argsDoc: '{"item": "<物品名>", "count"?: 1-64, "extra"?: true（附近已有工作台/熔炉、背包里已有床时还要再做一个）}',
+  argsDoc: '{"item": "<物品名>", "count"?: 1-64, "extra"?: true（附近已有工作台/熔炉、已有床、已有同类还经用的工具武器护甲时还要再做一个）}',
   timeoutMs: 60000,
   movement: false,
   validate(raw, adapter) {
@@ -489,6 +528,12 @@ export const craft: Skill<{ item: string; count: number; extra?: boolean }> = {
       if (held) return fail('BAD_ARGS', `背包里已经有 ${held.count} 个${zh}了，不用再做：${use}（附近没有时会把背包里这个放下）；真要再做一个写 {"item":"${args.item}","extra":true}`);
       const near = findStation(ctx, [args.item], 24);
       if (near) return fail('BAD_ARGS', `${near.dist} 格外 (${near.pos.x},${near.pos.y},${near.pos.z}) 就有${zh}${near.from === 'memory' ? '（记得的）' : ''}，不用再做：${use}；真要再做一个写 {"item":"${args.item}","extra":true}`);
+    }
+    // 工具、武器、护甲：手上已经有同类、等级不低、还经用的，多半是忘了（背包里攒了三把铁剑）。说清楚有什么；真要再做写 extra:true
+    if (!args.extra) {
+      const s = ctx.adapter.state();
+      const held = gearAlreadyHeld(args.item, s.inventory, s.equipment);
+      if (held) return fail('BAD_ARGS', `${held}，不用再做 ${args.item}：打架、干活时会自己拿出最好的那件用；真要再做一把（备用、给别处）写 {"item":"${args.item}","extra":true}`);
     }
     args = { ...args, item: pickVariant(args.item, ctx.adapter.state().inventory) };
     // 刚被打断的同一样合成：先等它落地，做成了就算进这次的数量
