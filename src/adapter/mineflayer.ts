@@ -84,6 +84,27 @@ const GUI_ROLES: Record<string, string[]> = {
 const WOOL_ZH = ['白', '橙', '品红', '淡蓝', '黄', '黄绿', '粉红', '灰', '淡灰', '青', '紫', '蓝', '棕', '绿', '红', '黑'];
 const PROFESSIONS = ['none', 'armorer', 'butcher', 'cartographer', 'cleric', 'farmer', 'fisherman', 'fletcher', 'leatherworker', 'librarian', 'mason', 'nitwit', 'shepherd', 'toolsmith', 'weaponsmith'];
 const PROFESSION_ZH: Record<string, string> = { none: '无业', armorer: '盔甲匠', butcher: '屠夫', cartographer: '制图师', cleric: '牧师', farmer: '农民', fisherman: '渔夫', fletcher: '制箭师', leatherworker: '皮匠', librarian: '图书管理员', mason: '石匠', nitwit: '傻子（不交易）', shepherd: '牧羊人', toolsmith: '工具匠', weaponsmith: '武器匠' };
+/** 效果到点后几秒内还没收到“结束”包也当作结束（包可能晚到） */
+const EFFECT_GRACE_S = 3;
+export function remainingEffects(effects: Record<string, any>, seenAt: Map<number, number>, now = Date.now()): { e: any; seconds: number }[] {
+  const out: { e: any; seconds: number }[] = [];
+  for (const [k, e] of Object.entries(effects)) {
+    const total = (e.duration ?? 0) / 20;
+    // 时长为负是“无限”（信标、指令给的）：不往下数
+    if (total < 0) { out.push({ e, seconds: 0 }); continue; }
+    if (!seenAt.has(e.id)) seenAt.set(e.id, now);
+    const left = total - (now - seenAt.get(e.id)!) / 1000;
+    if (left < -EFFECT_GRACE_S) { delete effects[k]; seenAt.delete(e.id); continue; }
+    out.push({ e, seconds: Math.max(0, Math.round(left)) });
+  }
+  return out;
+}
+export function clearSelfEffects(bot: any, seenAt: Map<number, number>) {
+  const effects = bot.entity?.effects;
+  if (effects) for (const k of Object.keys(effects)) delete effects[k];
+  seenAt.clear();
+}
+
 const EFFECT_ZH: Record<string, string> = { speed: '迅捷', slowness: '缓慢', haste: '急迫', mining_fatigue: '挖掘疲劳', strength: '力量', instant_health: '瞬间治疗', instant_damage: '瞬间伤害', jump_boost: '跳跃提升', nausea: '反胃', regeneration: '生命恢复', resistance: '抗性提升', fire_resistance: '抗火', water_breathing: '水下呼吸', invisibility: '隐身', blindness: '失明', night_vision: '夜视', hunger: '饥饿（吃了不该吃的，饥饿掉得快）', weakness: '虚弱', poison: '中毒（掉血到半颗心为止）', wither: '凋零（会掉血致死）', health_boost: '生命提升', absorption: '伤害吸收', saturation: '饱和', glowing: '发光', levitation: '飘浮', luck: '幸运', unluck: '霉运', slow_falling: '缓降', conduit_power: '潮涌能量', dolphins_grace: '海豚的恩惠', bad_omen: '不祥之兆（进村会引来袭击）', hero_of_the_village: '村庄英雄', darkness: '黑暗' };
 
 /**
@@ -274,7 +295,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       }
       this.emit('spawn');
     });
-    bot.on('death', () => { this.newSession(); this.emit('death'); });
+    // 死亡会清掉所有状态效果，但服务器不会逐个发“效果结束”：自己清，免得重生后还以为中着毒
+    bot.on('death', () => { clearSelfEffects(bot, this.effectSeenAt); this.newSession(); this.emit('death'); });
+    // Mineflayer 只记包里的时长、不往下数：记下收到的时刻，读的时候自己减
+    bot.on('entityEffect', (e: any, eff: any) => { if (e === bot.entity) this.effectSeenAt.set(eff.id, Date.now()); });
+    bot.on('entityEffectEnd', (e: any, eff: any) => { if (e === bot.entity) this.effectSeenAt.delete(eff.id); });
     bot.on('respawn', () => { this.newSession(); this.emit('respawn'); });
     bot.on('entityHurt', (e: any) => {
       if (e === bot.entity) this.emit('hurt', this.hurtCause());
@@ -520,14 +545,17 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     };
   }
 
-  /** 身上的状态效果 */
+  /** 收到每个状态效果（按效果 id）的时刻 */
+  private effectSeenAt = new Map<number, number>();
+
+  /** 身上的状态效果：剩余时间按收到包以来过了多久往下数；早该结束、却没收到“结束”包的当作已经没了 */
   private effectsOf(b: any): { name: string; level: number; seconds: number }[] {
     const effects = b.entity?.effects;
     if (!effects) return [];
-    return Object.values<any>(effects).map((e) => {
+    return remainingEffects(effects, this.effectSeenAt).map(({ e, seconds }) => {
       const raw = String(this.mcData.effects?.[e.id]?.name ?? e.id);
       const key = raw.replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase();
-      return { name: EFFECT_ZH[key] ?? key, level: (e.amplifier ?? 0) + 1, seconds: Math.max(0, Math.round((e.duration ?? 0) / 20)) };
+      return { name: EFFECT_ZH[key] ?? key, level: (e.amplifier ?? 0) + 1, seconds };
     });
   }
 
