@@ -90,6 +90,9 @@ export function remainingSteps(a: Activity): number {
   return Math.max(0, a.steps.length - a.index) + Math.max(0, a.repeat - a.iteration - 1) * a.steps.length;
 }
 
+/** 顺手的步骤遇到这些失败，再做几轮也一样：直接从这段活里去掉 */
+const OPTIONAL_HOPELESS = new Set(['TARGET_GONE', 'BAD_ARGS', 'UNKNOWN_ITEM', 'WRONG_DIMENSION']);
+
 /** 失败了值得原样再试一次的情况（路被挡、东西跑了、偶发错误） */
 const RETRYABLE = new Set(['TIMEOUT', 'STUCK', 'PATH_NOT_FOUND', 'TARGET_GONE', 'ERROR', 'EFFECT_NOT_CONFIRMED']);
 /** 不想清楚就没法继续的失败（缺材料、缺工具、背包满…） */
@@ -136,7 +139,21 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   if (result.status === 'cancelled') return { kind: 'continue' };
   if (softMiss(a, step, result)) {
     a.consecutiveFailures = 0;
-    const optional = ownStep(a, step)?.optional === true;
+    const own = ownStep(a, step);
+    const optional = own?.optional === true;
+    // 顺手的一步这次是“再试也不会成”的失败（要挖的已经没了、参数本身就不对；找不到连着两轮）：后面几轮不再做它
+    const code = result.failureCode ?? 'ERROR';
+    const missKey = `optmiss:${step.skill}:${JSON.stringify(step.args ?? {}).slice(0, 80)}`;
+    if (optional && code === 'NOT_FOUND') a.adaptations.push(missKey);
+    const hopeless = optional && (OPTIONAL_HOPELESS.has(code) || (code === 'NOT_FOUND' && a.adaptations.filter((x) => x === missKey).length >= 2));
+    if (hopeless && own && a.steps.length > 1) {
+      const i = a.steps.indexOf(own);
+      if (i >= 0) { a.steps.splice(i, 1); if (i < a.index) a.index--; }
+      if (doneWhenMet(a, state, percept)) return { kind: 'done', met: true, why: '达到了收工条件' };
+      return remainingSteps(a) === 0
+        ? { kind: 'done', met: !a.doneWhen, why: `顺手的「${step.skill}」没成（${code}）；这段活的步骤都做完了${a.doneWhen ? '，收工条件尚未达到' : ''}` }
+        : { kind: 'continue', adapted: `顺手的「${step.skill}」再做也不会成（${result.summary.slice(0, 40)}），后面几轮不再做它` };
+    }
     if (doneWhenMet(a, state, percept)) return { kind: 'done', met: true, why: '达到了收工条件' };
     return remainingSteps(a) === 0
       ? { kind: 'done', met: !a.doneWhen, why: `${optional ? `顺手的「${step.skill}」没成` : '观察没有找到目标'}；这段活的步骤都做完了${a.doneWhen ? '，收工条件尚未达到' : ''}` }
