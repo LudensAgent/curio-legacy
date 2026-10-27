@@ -86,6 +86,9 @@ export function inferKind(steps: Step[]): ActivityKind {
   return 'other';
 }
 
+/** 决定里能当场退回去改的毛病：步骤写错被丢、收工条件无效、next 被忽略 */
+const FIXABLE_NOTE = /丢掉了不能执行的步骤|done_when 无效|next 已忽略/;
+
 /** 校验一段活：步骤必须是会的手脚、参数合法；写错的个别步骤丢掉并记下，全错才算无效 */
 export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldMemory, notes: string[], label = 'activity'): ActivityDraft | { error: string } {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: `${label} 必须是对象` };
@@ -259,6 +262,8 @@ export class Thinker {
     let tier = ctx.tier;
     let messages = buildMindMessages(ctx);
     let queries = 0, invalid = 0;
+    let repaired = false;
+    let firstDraft: Omit<MindDecision, 'source' | 'tier' | 'requestedAt'> | null = null;
     for (let attempt = 0; attempt < 8; attempt++) {
       signal.throwIfAborted();
       const c = await this.planner.complete(messages, { label: `mind:${ctx.reason}${tier === 'glance' ? '·瞥一眼' : ''}`, tier: tier === 'glance' ? 'light' : 'full', signal, attempt });
@@ -310,17 +315,30 @@ export class Thinker {
           { role: 'user', content: `${embedded.kind} 是思考时的查询，不是身体的动作，不能写进 steps。已经替你查了：${result}\n请据此给出决定（steps 里只写动作）。` });
         continue;
       }
+      if (firstDraft && raw?.keep === true) { this.planner.stats.ok++; return { ...firstDraft, source: 'llm', tier, requestedAt }; }
       const parsed = parseDecision(raw, this.adapter, this.memory, !!ctx.activity, ctx.activity?.what, ctx.activity?.steps.map((st) => st.skill));
       if ('error' in parsed) {
+        if (firstDraft) return { ...firstDraft, source: 'llm', tier, requestedAt }; // 改的这版反而不能用：用第一版
         invalid++;
         this.planner.noteInvalid(ctx.reason, parsed.error);
         if (invalid >= 2) throw new Error(`INVALID_DECISION: ${parsed.error}`);
         messages.push({ role: 'assistant', content: c.text.slice(0, 1500) }, { role: 'user', content: `这个决定没法执行：${parsed.error}。请改正后只输出一个 JSON 对象。` });
         continue;
       }
+      // 能执行，但有几处写错被丢掉了（步骤参数、收工条件）：当场退回去让它改一次，不默默丢掉
+      // （以前一下午约 100 次：漏了参数的那一步直接没了，收工条件被忽略，活做一半才发现）
+      const fixable = parsed.notes.filter((n) => FIXABLE_NOTE.test(n));
+      if (fixable.length && !repaired && Date.now() - requestedAt < 40_000) {
+        repaired = true;
+        firstDraft = parsed;
+        messages.push({ role: 'assistant', content: c.text.slice(0, 2500) },
+          { role: 'user', content: `这个决定有几处写错了，执行时会被丢掉：${fixable.join('；').slice(0, 600)}。\n要这些就改正后重新输出整个 JSON 对象；觉得丢掉也无所谓，就输出 {"keep":true}。` });
+        continue;
+      }
       this.planner.stats.ok++;
       return { ...parsed, source: 'llm', tier, requestedAt };
     }
+    if (firstDraft) return { ...firstDraft, source: 'llm', tier, requestedAt };
     throw new Error('INVALID_DECISION: 思考轮次用完');
   }
 

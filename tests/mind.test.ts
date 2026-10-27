@@ -780,3 +780,20 @@ test('要命的处境（头被沙砾埋住、正在掉血）：撤掉正在慢�
   const user = w.pending[1].messages.at(-1)!.content;
   assert.match(user, /头被 gravel 埋住了，正在窒息掉血/);
 });
+
+test('决定里有一步写错：当场退回去让它改一次（改了用新的，说不要就用原来的），不默默丢掉', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { monologue: '先这样', decision: 'new', activity: { what: '两步活', steps: [step(1), { skill: 'use_skill', args: {} }] } });
+  assert.equal(w.pending.length, 2, '退回去改');
+  assert.match(w.pending[1].messages.at(-1)!.content, /执行时会被丢掉.*keep/s);
+  await w.reply(1, { monologue: '改好了', decision: 'new', activity: { what: '两步活', steps: [step(1), step(2)] } });
+  assert.equal(w.mind.activity?.steps.length, 2);
+
+  const v = fixture(t);
+  await v.tick();
+  await v.reply(0, { monologue: '先这样', decision: 'new', activity: { what: '一步活', steps: [step(1), { skill: 'use_skill', args: {} }] } });
+  await v.reply(1, { keep: true });
+  assert.equal(v.mind.activity?.what, '一步活');
+  assert.equal(v.mind.activity?.steps.length, 1, '不要就按丢掉写错那步的原样执行');
+});
