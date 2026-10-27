@@ -29,8 +29,27 @@ export type DesignResult = { ok: true; draft: DesignDraft; summary: string; issu
 
 const count = (inv: InvItem[], name: string) => inv.filter((i) => i.name === name).reduce((n, i) => n + i.count, 0);
 
-/** 外观和居住上的自查（不拦着盖，只是给建筑师改进的依据） */
-export function critique(spec: BuildingSpec): string[] {
+/**
+ * 建筑的种类：住处要住得舒服好看；前哨（矿口、补给点）实用为主；其他（仓库、畜栏、塔、围墙、平台……）照用途来。
+ * 按请求里的说法认，认不出来按住处算（以前只设计房子）。
+ */
+export type BuildKind = 'dwelling' | 'outpost' | 'utility';
+export function buildKindOf(text: string): BuildKind {
+  if (/前哨|据点|补给|驿站|矿口|落脚|过夜点|营地/.test(text)) return 'outpost';
+  if (/住处|住的|家|屋|舍|房子|宅|别墅|小木/.test(text)) return 'dwelling';
+  if (/仓|库|塔|栏|圈|围|墙|台|棚|田|厩|码头|灯|雕|门楼|拱|花园|广场|路|阶/.test(text)) return 'utility';
+  return 'dwelling';
+}
+
+/** 不同种类给建筑师的提示：要什么、不必要什么 */
+const KIND_HINT: Record<BuildKind, string> = {
+  dwelling: '住处：住得舒服、看着顺眼，室内放得下床、箱子、工作台和熔炉',
+  outpost: '前哨/补给点：实用为主、省料（石头为主），墙脚 4×4 到 5×5，屋里放得下床、箱子、工作台、熔炉和一盏灯，门朝着矿口或常走的路；不必有窗户和坡顶',
+  utility: '照用途来设计：仓库好进出、箱子靠墙；畜栏是一圈围栏加门、留出动物的地方；塔要高、里面有梯子、顶上有平台和护栏；围墙、平台、路照着要围的范围画。用不上的（床、窗户、坡顶）就别加',
+};
+
+/** 外观和居住上的自查（不拦着盖，只是给建筑师改进的依据）；不同种类查的不一样 */
+export function critique(spec: BuildingSpec, kind: BuildKind = 'dwelling'): string[] {
   const out: string[] = [];
   const blueprint = compileBuilding(spec);
   const cells = blueprint.cells;
@@ -38,15 +57,22 @@ export function critique(spec: BuildingSpec): string[] {
   const footprint = cells.filter((c) => c.pos.y === -1);
   const xs = footprint.map((c) => c.pos.x), zs = footprint.map((c) => c.pos.z);
   const w = xs.length ? Math.max(...xs) - Math.min(...xs) + 1 : 0, d = zs.length ? Math.max(...zs) - Math.min(...zs) + 1 : 0;
-  if (w - 2 < 3 || d - 2 < 3) out.push(`室内只有 ${Math.max(0, w - 2)}×${Math.max(0, d - 2)}，放不下床、箱子和工作台；住处的墙脚至少 5×5`);
-  if (![...names].some((n) => /_stairs$|_slab$/.test(n)) && w >= 5) out.push('屋顶是平的方盒子：试试用台阶一层层往里收做坡顶，或者在屋顶外面加一圈半砖做屋檐');
-  const structural = [...names].filter((n) => !/door|glass|pane|torch|lantern|crafting_table|furnace|chest|stairs|slab|carpet|ladder|trapdoor|fence/.test(n));
-  if (structural.length < 2) out.push(`墙和地板只用了 ${structural.join('、') || '一种材料'}：墙基用石头、四角用原木，层次会好很多`);
-  if (![...names].some((n) => /glass|pane/.test(n))) out.push('没有窗户，屋里会很闷');
-  if (![...names].some((n) => /torch|lantern/.test(n)) && !out.some((x) => /光源/.test(x))) out.push('屋里没有光源，晚上会刷怪');
+  if (kind === 'dwelling') {
+    if (w - 2 < 3 || d - 2 < 3) out.push(`室内只有 ${Math.max(0, w - 2)}×${Math.max(0, d - 2)}，放不下床、箱子和工作台；住处的墙脚至少 5×5`);
+    if (![...names].some((n) => /_stairs$|_slab$/.test(n)) && w >= 5) out.push('屋顶是平的方盒子：试试用台阶一层层往里收做坡顶，或者在屋顶外面加一圈半砖做屋檐');
+    const structural = [...names].filter((n) => !/door|glass|pane|torch|lantern|crafting_table|furnace|chest|stairs|slab|carpet|ladder|trapdoor|fence/.test(n));
+    if (structural.length < 2) out.push(`墙和地板只用了 ${structural.join('、') || '一种材料'}：墙基用石头、四角用原木，层次会好很多`);
+    if (![...names].some((n) => /glass|pane/.test(n))) out.push('没有窗户，屋里会很闷');
+  }
+  if (kind === 'outpost') {
+    if (w - 2 < 2 || d - 2 < 2) out.push(`室内只有 ${Math.max(0, w - 2)}×${Math.max(0, d - 2)}，放不下床、箱子、工作台和熔炉；前哨的墙脚至少 4×4`);
+    for (const [re, what] of [[/chest/, '箱子'], [/crafting_table/, '工作台'], [/furnace/, '熔炉']] as const) if (![...names].some((n) => re.test(n))) out.push(`前哨里没有${what}：补给点就靠这几样`);
+  }
+  if (kind !== 'utility' && ![...names].some((n) => /torch|lantern/.test(n)) && !out.some((x) => /光源/.test(x))) out.push('屋里没有光源，晚上会刷怪');
   // 编译时发现的结构问题（悬空、漏顶、墙洞）：照着盖会盖不上，必须改
   const warnings = spec.design ? compileDesign(spec.design).warnings : [];
-  for (const w of warnings) if (!out.includes(w)) out.push(/悬在半空/.test(w) ? `${w}——每一层台阶屋顶下面都要有方块托着（在屋里那一侧垫一圈木板，或者把屋顶做成实心），只靠斜对角相连的台阶放不上去` : w);
+  // 屋顶、墙洞、光源这些是“屋子”的要求：畜栏、围墙、平台这类不查，只查盖不盖得上
+  for (const w of warnings) if (!out.includes(w) && (kind !== 'utility' || isBlocking(w))) out.push(/悬在半空/.test(w) ? `${w}——每一层台阶屋顶下面都要有方块托着（在屋里那一侧垫一圈木板，或者把屋顶做成实心），只靠斜对角相连的台阶放不上去` : w);
   return out;
 }
 
@@ -55,9 +81,10 @@ export const isBlocking = (issue: string) => /悬在半空/.test(issue);
 
 export function buildDesignMessages(req: DesignRequest, book: SkillBook | null): ChatMessage[] {
   const guide = book?.get('architect')?.body ?? '';
+  const kind = buildKindOf(req.brief);
   const system = `${req.persona}
 
-你现在是自己的建筑师：专心设计一座 Minecraft 建筑，交回一张能直接施工的图纸。画完程序会替你检查，有问题再改。${guide ? `\n\n下面是你的设计手册：\n\n${guide}` : ''}
+你现在是自己的建筑师：专心设计一座 Minecraft 建筑（住处、前哨、仓库、畜栏、塔、围墙……照请求来），交回一张能直接施工的图纸。只能盖在露天的干地上：不画在地下、山体里或水上。画完程序会替你检查，有问题再改。${guide ? `\n\n下面是你的设计手册：\n\n${guide}` : ''}
 
 只输出一个 JSON 对象：
 {"name":"作品名（简短）","purpose":"用途","style":"一句话说说风格和用料的想法","site":{"x":0,"z":0,"why":"为什么选这儿"},"design":{"legend":{…},"layers":[[…],…]},"notes":"一句话：盖的时候要注意什么"}
@@ -66,6 +93,7 @@ site 是房子中心相对 terrain 草图正中间那格的位置（x 往东为�
   for (const i of req.inventory) inv.set(i.name, (inv.get(i.name) ?? 0) + i.count);
   const payload = {
     request: req.brief,
+    kind: KIND_HINT[kind],
     inventory: [...inv].map(([n, c]) => `${n}×${c}`),
     nearby_materials: req.nearby,
     biome: req.biome ?? null,
@@ -74,7 +102,8 @@ site 是房子中心相对 terrain 草图正中间那格的位置（x 往东为�
     ...(req.terrain ? { terrain: {
       how_to_read: `以想盖房子的地方为中心 ${req.terrain.radius * 2 + 1}×${req.terrain.radius * 2 + 1} 格，行从北到南、列从西到东，正中间是中心那一列；数字是这一列地表比中心高/低几格，~ 是水，? 看不清，带 T 的长着树（盖房要砍掉）`,
       summary: req.terrain.summary, rows: req.terrain.rows } } : {}),
-    budget: req.pastWorks.length ? '按手上和附近的材料量力而行' : `这是第一座房子，要当天盖完：木料折合原木不超过 ${FIRST_HOUSE_LOGS} 根（1 原木=4 木板，4 级台阶要 6 木板，半砖半块木板），圆石 40 块以内，灯用 torch`,
+    budget: kind !== 'dwelling' ? `实用的小建筑：省料，木料折合原木不超过 ${UTILITY_LOGS} 根，能用圆石就用圆石，灯用 torch`
+      : req.pastWorks.length ? '按手上和附近的材料量力而行' : `这是第一座房子，要当天盖完：木料折合原木不超过 ${FIRST_HOUSE_LOGS} 根（1 原木=4 木板，4 级台阶要 6 木板，半砖半块木板），圆石 40 块以内，灯用 torch`,
   };
   return [{ role: 'system', content: system }, { role: 'user', content: `${JSON.stringify(payload)}\n请设计。` }];
 }
@@ -105,7 +134,8 @@ export async function designBuilding(planner: Planner, book: SkillBook | null, d
       messages.push({ role: 'assistant', content: c.text.slice(0, 4000) }, { role: 'user', content: `这张图纸没法施工：${lastError}。请改正后重新输出完整的 JSON。` });
       continue;
     }
-    const issues = [...critique(spec), ...budgetIssues(spec, req)];
+    const kind = buildKindOf(req.brief);
+    const issues = [...critique(spec, kind), ...budgetIssues(spec, req, kind)];
     const score = (xs: string[]) => xs.filter(isBlocking).length * 100 + xs.length;
     if (!best || score(issues) < score(best.issues)) best = { spec, raw, issues };
     if (!issues.length || round === 2) break;
@@ -161,11 +191,15 @@ export function siteFor(raw: unknown, terrain: TerrainSketch | undefined, fx: nu
 /** 第一座房子当天要盖完：木料折合原木的上限 */
 export const FIRST_HOUSE_LOGS = 28;
 
-/** 用料是否攒得起：只管第一座房子（以后的房子量力而行） */
-export function budgetIssues(spec: BuildingSpec, req: Pick<DesignRequest, 'pastWorks'>): string[] {
-  if (req.pastWorks.length) return [];
+/** 前哨、仓库这类实用小建筑：木料折合原木的上限 */
+export const UTILITY_LOGS = 16;
+
+/** 用料是否攒得起：第一座房子要当天盖完；实用小建筑要省料（以后的房子量力而行） */
+export function budgetIssues(spec: BuildingSpec, req: Pick<DesignRequest, 'pastWorks'>, kind: BuildKind = 'dwelling'): string[] {
   const mats = materialCost(compileBuilding(spec).cells);
   const logs = logsFor(Object.entries(mats));
+  if (kind !== 'dwelling') return logs > UTILITY_LOGS + 4 ? [`木料折合 ${logs} 根原木：实用的小建筑别这么费料，控制在 ${UTILITY_LOGS} 根以内（墙用圆石，屋顶用平顶或半砖）`] : [];
+  if (req.pastWorks.length) return [];
   const stone = (mats.cobblestone ?? 0) + (mats.stone ?? 0) + (mats.stone_bricks ?? 0);
   const out: string[] = [];
   if (logs > FIRST_HOUSE_LOGS + 4) out.push(`木料折合 ${logs} 根原木，第一座房子当天攒不齐：控制在 ${FIRST_HOUSE_LOGS} 根以内（台阶最费料，坡顶上半部分改木板或半砖，墙矮一格、屋檐窄一点）`);

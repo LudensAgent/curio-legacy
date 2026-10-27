@@ -125,7 +125,7 @@ const FOCUS = `【专注】主目标是这一阶段要拿到的成果（有床�
 const SKILLS_DOC = () => `【技能】管用的做法写进 skill，存下就生效：{"name":"英文-连字符","description":"…","when":{条件},"steps":[…]或"code":"JS"}。when 含 after_failure＝动作失败时先试；只有状态条件＝成立自动做；不写＝use_skill 调用。写不出就用 worth_learning；写法先查 {"kind":"skill","name":"writing-skills"}。身体只会躲岩浆和溺水，别的反应（躲怪、逃跑、脱困）都靠你总结成技能。`;
 
 const QUERIES = (skills: string[]) => `【先查再做】需要时先输出一个查询 JSON（不占游戏时间，每次思考最多 3 次），拿到结果再决定：
-- {"kind":"skill","name":"技能名"} 翻开技能书看做法｜{"kind":"design","brief":"用途、多大、风格","where":"here|base|x,y,z"} 请建筑师在后台画图纸（where 是盖在哪：脚下这一带、家旁边或某个坐标）
+- {"kind":"skill","name":"技能名"} 翻开技能书看做法｜{"kind":"design","brief":"用途、多大、风格","where":"here|base|x,y,z"} 请建筑师画图纸：房子、前哨、仓库、畜栏、塔等要长期用的建筑（where：脚下、家旁或坐标）
 - {"kind":"recipes","item":"物品名","count":1} 看配方和缺口（"uses":"物品" 反查用途）｜{"kind":"moves","names":["动作名"]} 看动作参数
 - {"kind":"recall","query":"关键词"} 回想以前的经历、日记、教训和技能｜{"kind":"mechanics","query":"…"} 查底层操作接口`;
 /** 技能书目录放在系统提示词最后：它变得最勤（写、改、收起），放在前面会让后面不变的大段内容每次都缓存不中 */
@@ -271,7 +271,8 @@ export function situationalReminders(ctx: MindContext): string[] {
   }
   if (ctx.designing) out.push(`建筑师正在画「${ctx.designing.brief.slice(0, 40)}」（${ctx.designing.minutes} 分钟了），画好会告诉你：先攒常用的木头、石头，或做别的事`);
   else if (drafts.length) out.push(`图纸 ${drafts[0].id}「${drafts[0].name}」已经画好：按材料清单攒齐后 build {"draft":"${drafts[0].id}"}`);
-  else if (!unfinished.length && /盖|建|房|屋|家|住处|庇护/.test(intent)) out.push('想盖新房子：现在就输出 {"kind":"design","brief":"…","where":"here|base"} 请建筑师——画图要几分钟，一边画一边去攒木头石头，图到了按清单补齐就能盖；不要自己画图纸');
+  else if (!unfinished.length && /盖|建|房|屋|家|住处|庇护|前哨|据点|补给点|仓库|畜栏|围栏|瞭望|塔|围墙|平台/.test(intent))
+    out.push('想盖要长期用的建筑（房子、前哨、仓库、畜栏、塔……）：现在就输出 {"kind":"design","brief":"…","where":"here|base"} 请建筑师——画图要几分钟，一边画一边去攒料，图到了按清单补齐就能盖；不要自己画图纸。施工只认露天干地：地下的落脚点自己挖、应急的几块自己搭');
   const bed = nearestBed(ctx);
   const bedInBag = s.inventory.some((i) => i.name.endsWith('_bed'));
   const bedLine = bed ? `记得的床在 ${bed.dist} 格外（${bed.dir}，${bed.pos}）` : '';
