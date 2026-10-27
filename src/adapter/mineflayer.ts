@@ -2243,6 +2243,55 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   }
 
   /** 合成 times 次；超时后先停止并核对真实库存，不能盲目重复扣料。 */
+  /**
+   * 一次合成一批：像玩家一样每个合成格放 times 个料，再 shift 点产物，服务器一口气合成到料用完。
+   * 一批的上限由料决定：每格最多放一组（大多 64，鸡蛋/雪球 16，桶 1），背包放不下的产物服务器会停在那里。
+   * 返回这一批实际做出了几次（按背包变化算）；做不成就返回 0，由调用方退回逐个合成。
+   */
+  private async craftBatch(recipe: any, times: number, table: any, signal: AbortSignal): Promise<number> {
+    const check = this.actionCheckpoint(signal);
+    const b = this.bot;
+    if (typeof b._syncWindow !== 'function' || typeof b.transfer !== 'function') return 0;
+    const w = table ? 3 : 2;
+    const cells: { slot: number; id: number }[] = [];
+    if (recipe.inShape) {
+      recipe.inShape.forEach((row: any[], y: number) => row.forEach((c: any, x: number) => { if (c && c.id !== -1) cells.push({ slot: 1 + x + w * y, id: c.id }); }));
+    } else {
+      (recipe.ingredients ?? []).forEach((c: any, i: number) => cells.push({ slot: 1 + i, id: c.id }));
+    }
+    if (!cells.length || cells.some((c) => c.slot > w * w)) return 0;
+    // 每格最多一组：桶这种一组只有 1 个的料，一批就只能做 1 次
+    const stack = (id: number) => this.mcData.items[id]?.stackSize ?? 64;
+    const n = Math.min(times, ...cells.map((c) => stack(c.id)));
+    if (n <= 0) return 0;
+    const resultId = recipe.result?.id;
+    const before = this.invCount(resultId);
+    let window: any = b.inventory;
+    if (table) window = await this.afterAction(() => raceAbort(b.openBlock(table), signal, 8000, () => {}), check);
+    try {
+      if (table && !String(window.type ?? '').startsWith('minecraft:crafting')) return 0;
+      // 合成格里不能有别的东西
+      for (let i = 1; i <= w * w; i++) if (window.slots[i]) await this.afterAction(() => b.clickWindow(i, 0, 1), check);
+      for (const c of cells) {
+        await this.afterAction(() => b.transfer({ window, itemType: c.id, metadata: null, count: n, sourceStart: window.inventoryStart, sourceEnd: window.inventoryEnd, destStart: c.slot, destEnd: c.slot + 1 }), check);
+      }
+      await this.afterAction(() => raceAbort(b._syncWindow(window), signal, 8000, () => {}), check);
+      if (!window.slots[0]) return 0;
+      await this.afterAction(() => b.clickWindow(0, 0, 1), check);
+      await this.afterAction(() => raceAbort(b._syncWindow(window), signal, 8000, () => {}), check);
+    } finally {
+      // 剩在格子里的料（产物放不下、或桶这种合成后留下的容器）收回背包
+      try {
+        for (let i = 1; i <= w * w; i++) if (window.slots[i]) await b.clickWindow(i, 0, 1);
+        if (window.selectedItem) await b.putSelectedItemRange?.(window.inventoryStart, window.inventoryEnd, window, null);
+        await raceAbort(b._syncWindow(window), signal, 5000, () => {}).catch(() => {});
+      } catch { /* 交给收拾残局 */ this.scheduleRepair('批量合成后残留', 250); }
+      if (table) { try { b.closeWindow(window); } catch { /* ignore */ } }
+    }
+    const per = recipe.result?.count ?? 1;
+    return Math.max(0, Math.round((this.invCount(resultId) - before) / per));
+  }
+
   private async craftOnce(recipe: any, table: any, signal: AbortSignal, times = 1) {
     const check = this.actionCheckpoint(signal);
     const b = this.bot;
@@ -2304,10 +2353,18 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const times = Math.max(1, Math.ceil((count - made) / per));
       const bulk = times > 1 ? b.recipesFor(id, null, times * per, table)[0] : null;
       const before = this.invCount(id);
-      if (bulk) {
-        await this.afterAction(() => this.craftOnce(bulk, table, signal, times), check);
-      } else {
-        await this.afterAction(() => this.craftOnce(any, table, signal, 1), check);
+      // 先按玩家的做法整批做（每格放一叠料、shift 点产物）；不行再退回一次一个
+      // 料够做几次（配方里每样要几个 × 次数 ≤ 背包里有的）
+      const afford = (r: any) => Math.min(...(r.delta ?? []).filter((d: any) => d.count < 0).map((d: any) => Math.floor(this.invCount(d.id) / -d.count)));
+      const recipe = bulk ?? any;
+      const want = Math.max(1, Math.min(times, afford(recipe) || 1));
+      const batched = await this.afterAction(() => this.craftBatch(recipe, want, table, signal), check).catch((e: any) => { if (e instanceof AbortedError) throw e; return 0; });
+      if (!batched) {
+        if (bulk) {
+          await this.afterAction(() => this.craftOnce(bulk, table, signal, times), check);
+        } else {
+          await this.afterAction(() => this.craftOnce(any, table, signal, 1), check);
+        }
       }
       const produced = this.invCount(id) - before;
       if (produced <= 0) break;
@@ -2429,7 +2486,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (made <= 0) break;
       crafted += made;
     }
-    return crafted > 0 ? { ok: true, crafted, ...(tablePos ? { tablePos } : {}) }
+    // 没做够：说清卡在哪（料不够 / 背包满了），别让它以为做齐了
+    const short = crafted > 0 && crafted < count
+      ? (b.inventory.emptySlotCount?.() === 0 ? '背包满了，放不下更多产物' : this.missingReport(data.id, count - crafted, table))
+      : undefined;
+    return crafted > 0 ? { ok: true, crafted, ...(short ? { detail: short } : {}), ...(tablePos ? { tablePos } : {}) }
       : { ok: false, reason: 'MISSING_MATERIALS', crafted: 0, detail: this.missingReport(data.id, count, table), ...(tablePos ? { tablePos } : {}) };
   }
 

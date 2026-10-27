@@ -500,7 +500,7 @@ export function gearAlreadyHeld(item: string, inv: InvItem[], worn: { name: stri
 
 export const craft: Skill<{ item: string; count: number; extra?: boolean }> = {
   name: 'craft',
-  description: '合成物品。会自动补做两层以内的前置材料（原木→木板→木棍）、自己走到附近的工作台用（没有就现做一个放下、用完收回），所以直接写最终物品即可，不用先做/放工作台。常用：wooden_pickaxe、stone_pickaxe、furnace、torch',
+  description: '合成物品。会自动补做两层以内的前置材料（原木→木板→木棍）、自己走到附近的工作台用（没有就现做一个放下、用完收回），所以直接写最终物品即可，不用先做/放工作台。count 写这次一共要几个（产物个数），会按格子放料一批批做出来，不用拆成多次。常用：wooden_pickaxe、stone_pickaxe、furnace、torch',
   argsDoc: '{"item": "<物品名>", "count"?: 1-64, "extra"?: true（附近已有工作台/熔炉、已有床、已有同类还经用的工具武器护甲时还要再做一个）}',
   timeoutMs: 60000,
   movement: false,
@@ -568,7 +568,8 @@ export const craft: Skill<{ item: string; count: number; extra?: boolean }> = {
       }
       // 野外临时放下的工作台用完收回来带着走（真人都这样）；家附近的留着当家具
       const tookBack = r.ok && placedFresh && r.tablePos && !nearHome(ctx, r.tablePos) ? await takeBackTable(ctx, r.tablePos) : false;
-      return ok(`合成了 ${r.crafted} 个 ${args.item}${haveNote(ctx, args.item)}${reused}${landedNote}${tookBack ? '；临时放下的工作台已收回背包' : ''}`, { crafted: r.crafted, ...(tookBack ? { tableTakenBack: true } : {}) });
+      const shortNote = r.crafted < args.count && r.detail ? `；要 ${args.count} 个只做了 ${r.crafted} 个：${r.detail}` : '';
+      return ok(`合成了 ${r.crafted} 个 ${args.item}${shortNote}${haveNote(ctx, args.item)}${reused}${landedNote}${tookBack ? '；临时放下的工作台已收回背包' : ''}`, { crafted: r.crafted, ...(tookBack ? { tableTakenBack: true } : {}) });
     } catch (e) {
       if (isAbort(e)) { watchInterruptedCraft(ctx, args.item, before); throw e; }
       return fail(codeFromError(e), `合成 ${args.item} 出错：${(e as Error).message}`);
