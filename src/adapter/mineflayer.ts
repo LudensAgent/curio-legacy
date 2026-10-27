@@ -1854,6 +1854,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const b = this.bot;
     const block = b.blockAt(this.vec(pos));
     if (!block || !['chest', 'trapped_chest', 'barrel'].includes(block.name)) return { ok: false, reason: 'NO_CHEST', contents: [], moved: 0 };
+    // 原版规则：箱子顶上压着实心不透明方块就开不了盖（木桶不受影响）。以前直接 openContainer 干等 8 秒超时，
+    // 心智只看到 TIMEOUT，猜是“站不到旁边”，最后干脆把箱子挖了
+    if (block.name !== 'barrel') {
+      const up = b.blockAt(block.position.offset(0, 1, 0));
+      if (up && up.boundingBox === 'block' && !up.transparent) return { ok: false, reason: `LID_BLOCKED:${up.name}`, contents: [], moved: 0 };
+    }
     await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos }, { signal, timeoutMs: 30000 }), check);
     const chest: any = await this.afterAction(() => raceAbort(b.openContainer(block), signal, 8000, () => {}), check);
     let moved = 0;

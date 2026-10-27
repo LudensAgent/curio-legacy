@@ -5,7 +5,7 @@ import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type Skill
 import { hasPlaceable } from './survival.ts';
 import { ensureToolFor } from './work.ts';
 import { findStation, forgetStationAt } from './stations.ts';
-import { OWN_BUILDING_HINT, ownBuildingAt } from './build.ts';
+import { OWN_BUILDING_HINT, ownBuildingAt, storedChestAt } from './build.ts';
 import { noteEdit } from '../mind/edits.ts';
 import type { Vec3Like } from '../adapter/types.ts';
 import { dist3, throwIfAborted } from '../util.ts';
@@ -129,6 +129,8 @@ async function recoverBlock(ctx: SkillCtx, args: TargetDigArgs) {
     if (adapter.blockAt(pos) !== name) return fail('TARGET_GONE', '目标方块已经改变，未拆除');
     const mine = args.own ? null : ownBuildingAt(memory, adapter.state(), pos, name);
     if (mine) return fail('BAD_ARGS', `(${pos.x},${pos.y},${pos.z}) 的 ${name} 是自己盖的「${mine.name}」的一部分，未拆除；${OWN_BUILDING_HINT}`, { target: name, pos, own: mine });
+    const stash = args.own ? null : storedChestAt(memory, adapter.state(), pos, name);
+    if (stash) return fail('BAD_ARGS', stash, { target: name, pos });
     const before = new Map(adapter.state().inventory.map((item) => [item.name, item.count]));
     await breakCell(ctx, pos, true);
     throwIfAborted(signal);

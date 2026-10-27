@@ -1,3 +1,4 @@
+import { storeItems } from '../src/skills/economy.ts';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -92,9 +93,9 @@ test('仓储：存进箱子（工具留身上），再取出来', async () => {
   a.inv.set('dirt', 40);
   a.inv.set('raw_copper', 9);
   const memory = new WorldMemory(null);
-  let r = await runSkill(a, 'store_items', {}, memory);
-  assert.equal(r.o.result.status, 'succeeded', r.o.result.summary);
-  assert.equal(a.inv.get('dirt'), 16, '留 16 个泥土');
+  let r = await runSkill(a, 'store_items', { items: ['dirt:24', 'raw_copper'] }, memory);
+  assert.equal(r.o.result.status, 'succeeded', JSON.stringify(r.o.result));
+  assert.equal(a.inv.get('dirt'), 16, '只存点名的 24 个泥土');
   assert.equal(a.inv.get('raw_copper'), 0);
   assert.equal(a.inv.get('stone_pickaxe') ?? a.inv.get('wooden_pickaxe') ?? 1, a.inv.get('stone_pickaxe') ?? a.inv.get('wooden_pickaxe') ?? 1);
   assert.equal(memory.chests().length, 1);
@@ -122,7 +123,7 @@ test('农业：开垦并播种；成熟后收割补种', async () => {
 test('规则目标：背包快满 → 存箱子；有生铁和圆石 → 冶炼', () => {
   const m = new WorldMemory(null);
   const full = ruleProposal(P({ emptySlots: 1 }), m) as any;
-  assert.equal(full.steps[0].skill, 'store_items');
+  assert.notEqual(full?.steps?.[0]?.skill, 'store_items', '存哪些得它自己点名，规则兜底不替它挑');
   const p = P();
   p.inventory.push({ name: 'raw_iron', count: 4 }, { name: 'cobblestone', count: 20 });
   const r = ruleProposal(p, m) as any;
@@ -137,4 +138,26 @@ test('自学：同一套步骤成功 3 次 → 成为习惯候选，签名一致
   assert.equal(c[0].times, 3);
   assert.equal(habitName(c[0]), 'gather_coal_craft_torch');
   assert.equal(learnCandidates(m, new Set([signatureOf(plan)])).length, 0, '学过的不再提示');
+});
+
+test('仓储：存什么由它点名，没点名的一样不动；结果写清箱子坐标', async () => {
+  const a = new FakeAdapter();
+  a.inv.set('chest', 1);
+  a.inv.set('iron_ingot', 7);
+  a.inv.set('cobblestone', 50);
+  a.inv.set('andesite', 10);
+  a.inv.set('raw_copper', 5);
+  const memory = new WorldMemory(null);
+  assert.equal(storeItems.validate({}, undefined as any).ok, false, '不点名就不存');
+  assert.equal(storeItems.validate({ items: 'not an array!' }, undefined as any).ok, false);
+  assert.deepEqual((storeItems.validate({ items: ['dirt:32', 'minecraft:*_log'] }, undefined as any) as any).args.items, [{ name: 'dirt', count: 32 }, { name: '*_log' }]);
+  let r = await runSkill(a, 'store_items', { items: ['cobblestone', 'and*', 'gravel'] }, memory);
+  assert.equal(r.o.result.status, 'succeeded', r.o.result.summary);
+  assert.equal(a.inv.get('cobblestone') ?? 0, 0, '点名的整包存');
+  assert.equal(a.inv.get('andesite') ?? 0, 0, '通配');
+  assert.equal(a.inv.get('raw_copper'), 5, '没点名的不动');
+  assert.equal(a.inv.get('iron_ingot'), 7, '没点名的不动');
+  assert.match(r.o.result.summary, /\(-?\d+,-?\d+,-?\d+\)/);
+  assert.match(r.o.result.summary, /cobblestone×50/);
+  assert.match(r.o.result.summary, /没有 gravel/);
 });

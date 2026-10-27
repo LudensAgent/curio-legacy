@@ -695,6 +695,12 @@ export class WorldMemory {
     this.touch();
   }
 
+  /** 那里已经不是箱子了（被挖、被炸）：别再惦记 */
+  forgetChest(dim: string, pos: Vec3Like) {
+    const k = `${this.worldId}:${dim}:${pos.x},${pos.y},${pos.z}`;
+    if (this.data.chests?.[k]) { delete this.data.chests[k]; this.touch(); }
+  }
+
   chests(dim?: string): ChestRecord[] {
     return Object.values(this.data.chests ?? {}).filter((c) => this.inWorld(c) && (!dim || c.dim === dim));
   }

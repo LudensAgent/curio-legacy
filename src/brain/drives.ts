@@ -179,7 +179,7 @@ export function computeDrives(p: Percept, memory: WorldMemory): { drives: Drive[
     out.push({ drive: 'curiosity', level: 0.45, why: `之前看见过 ${c.what}，在 ${c.dir} ${c.dist} 格外，还没去过`, suggest: `explore {direction:"${c.dir}"} 去看看` });
   }
   // ---- 仓储：背包快满了就回家整理
-  if (p.emptySlots <= 5) out.push({ drive: 'storage', level: p.emptySlots <= 2 ? 0.8 : 0.6, why: `背包只剩 ${p.emptySlots} 个空位`, suggest: 'store_items（存进箱子，没有就做一个）' });
+  if (p.emptySlots <= 5) out.push({ drive: 'storage', level: p.emptySlots <= 2 ? 0.8 : 0.6, why: `背包只剩 ${p.emptySlots} 个空位`, suggest: 'store_items（挑眼下用不上的点名存进箱子）' });
   else if (p.emptySlots <= 12 && homeBuilt) out.push({ drive: 'storage', level: 0.3, why: `背包空位 ${p.emptySlots}，东西有点杂`, suggest: 'store_items' });
 
   // ---- 冶炼：生矿、生肉、要做火把却没煤

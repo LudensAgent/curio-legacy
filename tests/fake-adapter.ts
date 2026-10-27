@@ -308,6 +308,8 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
   }
   async useChest(pos: Vec3Like, deposits: InvItem[], withdraws: InvItem[], signal: AbortSignal) {
     if (this.nameAt(pos.x, pos.y, pos.z) !== 'chest') return { ok: false, reason: 'NO_CHEST', contents: [], moved: 0 };
+    const lid = this.nameAt(pos.x, pos.y + 1, pos.z);
+    if (lid && /stone|dirt|planks|andesite|diorite|granite|deepslate/.test(lid)) return { ok: false, reason: `LID_BLOCKED:${lid}`, contents: [], moved: 0 };
     await sleep(50, signal);
     const c = this.chests.get(this.k(pos.x, pos.y, pos.z)) ?? new Map<string, number>();
     let moved = 0;

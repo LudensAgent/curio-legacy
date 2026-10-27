@@ -3,6 +3,7 @@ import type { InvItem, Vec3Like } from '../adapter/types.ts';
 import { DIRS } from '../perception/perception.ts';
 import { shortId, sleep } from '../util.ts';
 import { findStation, rememberStation } from './stations.ts';
+import { ownBuildingAt } from './build.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
 
 // ===================================================================== 冶炼
@@ -56,11 +57,24 @@ export const smelt: Skill<{ item: string; count: number }> = {
 };
 
 // ===================================================================== 仓储
-/** 身上一直要带着的东西：工具、武器、食物、火把、床，以及少量建材 */
-export function isEssential(name: string) {
-  return /_(pickaxe|axe|shovel|hoe|sword)$|^(torch|white_bed|.*_bed|bread|cooked_.*|baked_potato|apple|carrot|golden_apple|shears|bucket|water_bucket|flint_and_steel|compass|clock)$/.test(name);
-}
-const KEEP_SOME: Record<string, number> = { cobblestone: 32, dirt: 16, oak_planks: 16, birch_planks: 16, spruce_planks: 16, stick: 8, coal: 16, charcoal: 16, wheat_seeds: 16 };
+/**
+ * 存什么由它自己按眼下的需要点名，身体不替它判断“哪些是废料、哪些值钱”
+ * （以前写死一张留身上的表，表外的铁锭、粗铁跟着石块整包进了箱子）
+ */
+type StoreSpec = { name: string; count?: number };
+/** "cobblestone" 整包存；"dirt:32" 只存 32 个；名字里可以写 * 通配（"*_log"） */
+const parseStoreSpecs = (v: unknown): StoreSpec[] | null => {
+  const arr = Array.isArray(v) ? v : typeof v === 'string' ? v.split(/[,，|\s]+/) : null;
+  if (!arr) return null;
+  const out: StoreSpec[] = [];
+  for (const x of arr) {
+    const m = /^(?:minecraft:)?([a-z0-9_*]{2,60})(?:[:×x*](\d+))?$/.exec(String(x).trim().toLowerCase());
+    if (!m) return null;
+    out.push(m[2] ? { name: m[1], count: Math.max(1, +m[2]) } : { name: m[1] });
+  }
+  return out.length && out.length <= 24 ? out : null;
+};
+const nameMatch = (pattern: string, name: string) => pattern.includes('*') ? new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`).test(name) : pattern === name;
 
 async function ensureChest(ctx: SkillCtx): Promise<Vec3Like | null> {
   const known = findStation(ctx, ['chest'], 48);
@@ -84,31 +98,46 @@ async function ensureChest(ctx: SkillCtx): Promise<Vec3Like | null> {
   return null;
 }
 
-export const storeItems: Skill<{}> = {
+export const storeItems: Skill<{ items: StoreSpec[] }> = {
   name: 'store_items',
-  description: '把背包里暂时用不上的东西存进记得的箱子（没有就做一个放下，8 木板），工具/食物/火把/少量建材留在身上。背包快满时使用',
-  argsDoc: '{}',
+  description: '点名存进箱子：用不上的存，要用的留',
+  argsDoc: '{"items":["dirt:32",…]}',
   timeoutMs: 90000,
   movement: true,
-  validate() {
-    return { ok: true, args: {} };
+  validate(raw) {
+    const items = parseStoreSpecs(obj(raw).items);
+    if (!items) return { ok: false, error: 'items 写要存的物品名数组：["cobblestone","dirt:32"]（不写数量就整包存，可用 * 通配）。先看背包，按接下来要用什么挑' };
+    return { ok: true, args: { items } };
   },
-  async run(ctx) {
+  async run(ctx, args) {
+    const planFor = (inventory: InvItem[]) => {
+      const have = new Map<string, number>();
+      for (const it of inventory) if (it.name !== 'chest') have.set(it.name, (have.get(it.name) ?? 0) + it.count);
+      const plan = new Map<string, number>();
+      for (const spec of args.items) {
+        for (const [name, n] of have) {
+          if (!nameMatch(spec.name, name)) continue;
+          const left = n - (plan.get(name) ?? 0);
+          const take = Math.min(left, spec.count ?? left);
+          if (take > 0) plan.set(name, (plan.get(name) ?? 0) + take);
+        }
+      }
+      return [...plan].map(([name, count]) => ({ name, count }));
+    };
+    const missing = (plan: InvItem[]) => args.items.filter((s) => !plan.some((d) => nameMatch(s.name, d.name))).map((s) => s.name);
+    if (!planFor(ctx.adapter.state().inventory).length) return ok(`背包里没有 ${args.items.map((s) => s.name).join('、')}，没什么可存`);
     const pos = await ensureChest(ctx);
     if (!pos) return fail('MISSING_MATERIALS', '没有箱子也做不了（需要 8 木板）');
     const s = ctx.adapter.state();
-    const deposits: InvItem[] = [];
-    for (const it of s.inventory) {
-      if (isEssential(it.name)) continue;
-      const keep = KEEP_SOME[it.name] ?? 0;
-      if (it.count > keep) deposits.push({ name: it.name, count: it.count - keep });
-    }
-    if (!deposits.length) return ok('背包里没有需要存放的东西');
+    const plan = planFor(s.inventory); // 做箱子可能用掉了木板，重算
+    if (!plan.length) return ok('背包里已经没有要存的东西了');
     try {
-      const r = await ctx.adapter.useChest(pos, deposits, [], ctx.signal);
+      const r = await openChest(ctx, pos, plan, []);
       if (!r.ok) return fail('ERROR', `存放失败：${r.reason}`);
       ctx.memory.setChest(s.dim, pos, r.contents);
-      return ok(`存入 ${r.moved} 个物品（${deposits.map((d) => `${d.name}×${d.count}`).slice(0, 6).join('、')}）；背包空位 ${ctx.adapter.state().emptySlots}`);
+      const list = plan.slice(0, 10).map((d) => `${d.name}×${d.count}`).join('、') + (plan.length > 10 ? ` 等 ${plan.length} 种` : '');
+      const miss = missing(plan);
+      return ok(`存进 (${pos.x},${pos.y},${pos.z}) 的箱子 ${r.moved} 个${clearedNote(r)}：${list}${miss.length ? `；背包里没有 ${miss.join('、')}` : ''}；背包空位 ${ctx.adapter.state().emptySlots}`);
     } catch (e) {
       if (isAbort(e)) throw e;
       return fail(codeFromError(e), `存放出错：${(e as Error).message}`);
@@ -117,6 +146,24 @@ export const storeItems: Skill<{}> = {
 };
 
 const CONTAINERS = ['chest', 'trapped_chest', 'barrel'];
+
+/**
+ * 开箱存取。箱子顶上压着方块（原版开不了盖）就先挖掉那一格再开——挖的是盖子上的方块，不是箱子；
+ * 那一格是自己房子的一部分就不动，把原因交给心智
+ */
+async function openChest(ctx: SkillCtx, pos: Vec3Like, deposits: InvItem[], withdraws: InvItem[]): Promise<Awaited<ReturnType<SkillCtx['adapter']['useChest']>> & { cleared?: string }> {
+  let r = await ctx.adapter.useChest(pos, deposits, withdraws, ctx.signal);
+  const lid = !r.ok && /^LID_BLOCKED:(.+)$/.exec(r.reason ?? '');
+  if (!lid) return r;
+  const up = { x: pos.x, y: pos.y + 1, z: pos.z };
+  const mine = ownBuildingAt(ctx.memory, ctx.adapter.state(), up, lid[1]);
+  if (mine) return { ...r, reason: `箱子顶上 (${up.x},${up.y},${up.z}) 压着 ${lid[1]}，开不了盖；那是「${mine.name}」的一部分，没挖。挪走箱子或改建再说，别挖箱子` };
+  const d = await ctx.adapter.dig(up, ctx.signal);
+  if (!d.ok) return { ...r, reason: `箱子顶上 (${up.x},${up.y},${up.z}) 压着 ${lid[1]}，开不了盖；想挖掉它没成（${d.reason}）。挖掉箱子上面那一格就能开，别挖箱子` };
+  r = await ctx.adapter.useChest(pos, deposits, withdraws, ctx.signal);
+  return r.ok ? { ...r, cleared: lid[1] } : r;
+}
+const clearedNote = (r: { cleared?: string }) => r.cleared ? `（先挖掉了压在箱子顶上的 ${r.cleared}）` : '';
 const listItems = (items: { name: string; count: number }[]) => items.length ? items.slice(0, 10).map((i) => `${i.name}×${i.count}`).join('、') + (items.length > 10 ? ` 等 ${items.length} 种` : '') : '空的';
 
 /**
@@ -133,10 +180,10 @@ async function lookInNearbyChests(ctx: SkillCtx, item: string, count: number) {
   const seen: string[] = [];
   for (const c of near) {
     try {
-      const r = await ctx.adapter.useChest(c.pos, [], [{ name: item, count }], ctx.signal);
+      const r = await openChest(ctx, c.pos, [], [{ name: item, count }]);
       if (!r.ok) { seen.push(`(${c.pos.x},${c.pos.y},${c.pos.z}) 打不开：${r.reason}`); continue; }
       ctx.memory.setChest(s.dim, c.pos, r.contents);
-      if (r.moved) return ok(`在 (${c.pos.x},${c.pos.y},${c.pos.z}) 的箱子里取出 ${r.moved} 个 ${item}（里面还有：${listItems(r.contents)}）`);
+      if (r.moved) return ok(`在 (${c.pos.x},${c.pos.y},${c.pos.z}) 的箱子里取出 ${r.moved} 个 ${item}${clearedNote(r)}（里面还有：${listItems(r.contents)}）`);
       seen.push(`(${c.pos.x},${c.pos.y},${c.pos.z})：${listItems(r.contents)}`);
     } catch (e) {
       if (isAbort(e)) throw e;
@@ -163,15 +210,25 @@ export const takeItems: Skill<{ item: string; count: number }> = {
     if (!chests.length) return lookInNearbyChests(ctx, args.item, args.count);
     const s = ctx.adapter.state();
     chests.sort((a, b) => Math.hypot(a.pos.x - s.pos.x, a.pos.z - s.pos.z) - Math.hypot(b.pos.x - s.pos.x, b.pos.z - s.pos.z));
-    try {
-      const r = await ctx.adapter.useChest(chests[0].pos, [], [{ name: args.item, count: args.count }], ctx.signal);
-      if (!r.ok) return fail('ERROR', `取不到：${r.reason}`);
-      ctx.memory.setChest(chests[0].dim, chests[0].pos, r.contents);
-      return r.moved ? ok(`取出 ${r.moved} 个 ${args.item}`) : fail('NOT_FOUND', `箱子里的 ${args.item} 已经没了`);
-    } catch (e) {
-      if (isAbort(e)) throw e;
-      return fail(codeFromError(e), `取物出错：${(e as Error).message}`);
+    // 记得的箱子挨个试：那里已经不是箱子了就忘掉它换下一个，而不是一直报 NO_CHEST 让心智去“修”
+    const tried: string[] = [];
+    for (const c of chests.slice(0, 3)) {
+      const at = `(${c.pos.x},${c.pos.y},${c.pos.z})`;
+      try {
+        const r = await openChest(ctx, c.pos, [], [{ name: args.item, count: args.count }]);
+        if (!r.ok && r.reason === 'NO_CHEST') { ctx.memory.forgetChest(c.dim, c.pos); tried.push(`${at} 已经没有箱子了（记录删了）`); continue; }
+        if (!r.ok) { tried.push(`${at}：${r.reason}`); continue; }
+        ctx.memory.setChest(c.dim, c.pos, r.contents);
+        if (r.moved) return ok(`在 ${at} 的箱子里取出 ${r.moved} 个 ${args.item}${clearedNote(r)}`);
+        tried.push(`${at} 里的 ${args.item} 已经没了`);
+      } catch (e) {
+        if (isAbort(e)) throw e;
+        tried.push(`${at} 出错：${(e as Error).message.slice(0, 60)}`);
+      }
     }
+    const fallback = await lookInNearbyChests(ctx, args.item, args.count);
+    if (fallback.status === 'succeeded') return fallback;
+    return fail('NOT_FOUND', `没取到 ${args.item}：${tried.join('；')}；${fallback.summary}。箱子打不开别挖箱子，东西会洒一地`);
   },
 };
 

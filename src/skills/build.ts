@@ -67,6 +67,16 @@ export function ownBuildingAt(memory: WorldMemory, state: { worldId: string; dim
   return null;
 }
 
+/** 记得里面存着东西的箱子：挖掉它东西会洒一地（还常被岩浆、水冲走）。返回给心智看的说明，不是就 null */
+export function storedChestAt(memory: WorldMemory, state: { dim: string }, pos: Vec3Like, blockName?: string | null): string | null {
+  if (blockName && !/chest|barrel/.test(blockName)) return null;
+  const p = { x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z) };
+  const rec = memory.chests(state.dim).find((c) => c.pos.x === p.x && c.pos.y === p.y && c.pos.z === p.z);
+  const items = rec?.items.filter((i) => i.count > 0) ?? [];
+  if (!items.length) return null;
+  return `(${p.x},${p.y},${p.z}) 是存着 ${items.slice(0, 4).map((i) => `${i.name}×${i.count}`).join('、')}${items.length > 4 ? ' 等' : ''} 的箱子，没拆。要拿东西用 take_items（开不了盖多半是顶上压着方块，take_items 会自己挖掉那一格）；真要搬箱子写 "own":true，东西会洒一地`;
+}
+
 export const OWN_BUILDING_HINT = '拆了拿料，build 回头还会报缺这一格，又去补——拆东墙补西墙。缺料就去采（collect）或从箱子里拿；真要拆（开个门、困在里面出不去、改建）写 "own":true';
 
 /** 自己别的作品占着的地（没盖完的、放弃的、盖好的都算）：新工地不和它们重叠；except 是正在续建的那座 */

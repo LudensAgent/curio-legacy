@@ -245,7 +245,7 @@ function baseRule(p: Percept, memory?: WorldMemory): Record<string, unknown> {
         if (st.cobblestone < 16 && hasWoodPick) return mk('多挖点圆石备用。', '囤积圆石', 'gather', [{ skill: 'gather', args: { block: 'stone', count: 12 } }]);
         return null;
       case 'storage':
-        return mk(`背包只剩 ${p.emptySlots} 个空位，把不常用的东西存进箱子。`, '整理背包', 'build', [{ skill: 'store_items' }]);
+        return null; // 存哪些要按它接下来的打算点名，规则兜底替它挑不了
       case 'smelt': {
         const m = /smelt \{item:"([a-z_]+)"\}/.exec(d.suggest ?? '');
         if (!m) return null;

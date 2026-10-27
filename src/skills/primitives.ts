@@ -3,7 +3,7 @@ import { describeCell, FACINGS, facingOfYaw, feetCell, localMap, toWorld, type F
 import { isSoftBlock, LIQUID_BLOCKS, surroundings } from '../perception/surroundings.ts';
 import { throwIfAborted } from '../util.ts';
 import { breakCell, why } from './body.ts';
-import { OWN_BUILDING_HINT, ownBuildingAt } from './build.ts';
+import { OWN_BUILDING_HINT, ownBuildingAt, storedChestAt } from './build.ts';
 import { noteEdit } from '../mind/edits.ts';
 import { PLACEABLE } from './survival.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
@@ -81,6 +81,8 @@ export const digAt: Skill<CellArgs> = {
     if (wet) return fail('BAD_ARGS', `[${args.at}] 旁边就是 ${wet}，挖开会流进来`, { wet, ...after(ctx, args.facing) });
     const mine = args.own ? null : ownBuildingAt(ctx.memory, ctx.adapter.state(), pos, before);
     if (mine) return fail('BAD_ARGS', `[${args.at}] 的 ${before} 是自己盖的「${mine.name}」的一部分；${OWN_BUILDING_HINT}`, { own: mine, ...after(ctx, args.facing) });
+    const stash = args.own ? null : storedChestAt(ctx.memory, ctx.adapter.state(), pos, before);
+    if (stash) return fail('BAD_ARGS', stash, after(ctx, args.facing));
     const how: { noDrop?: boolean; ms?: number } = {};
     try {
       await breakCell(ctx, pos, true, how);
@@ -155,7 +157,7 @@ export const stepTo: Skill<CellArgs> = {
     }
     const head = { ...target, y: target.y + 1 }, floor = { ...target, y: target.y - 1 };
     const problems: string[] = [];
-    if (!free(target)) problems.push(`目标格是 ${describeCell(a, target)}${LIQUID_BLOCKS.has(a.blockAt(target) ?? '') ? '' : `（要过去先 dig_at [${args.at}] 挖开）`}`);
+    if (!free(target)) problems.push(`目标格是 ${describeCell(a, target)}${LIQUID_BLOCKS.has(a.blockAt(target) ?? '') ? '' : /chest|barrel|furnace|crafting_table|_bed$/.test(a.blockAt(target) ?? '') ? '（是用得着的东西，绕过去，别挖）' : `（要过去先 dig_at [${args.at}] 挖开）`}`);
     if (!free(head)) problems.push(`目标格上方是 ${describeCell(a, head)}（会碰头${LIQUID_BLOCKS.has(a.blockAt(head) ?? '') ? '' : `；先 dig_at [${args.at[0]},${args.at[1] + 1},${args.at[2]}]`}）`);
     // 能站住：实心方块；薄雪层下面有实心方块也能踩
     const solid = (p: Vec3Like) => { const n = a.blockAt(p); return n !== null && !LIQUID_BLOCKS.has(n) && !free(p); };
