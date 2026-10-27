@@ -212,7 +212,8 @@ export class Vision {
   /** 最近亲眼看见的生物及其最后位置（3 分钟） */
   sightings = new Map<number, { id: number; name: string; kind: string; pos: Vec3Like; at: number }>();
   /** 亲眼看见过的掉落物最后在哪（转过头就不在视野里了，但人记得“床掉在东北三格”） */
-  private dropSightings = new Map<number, { id: number; name: string; pos: Vec3Like; at: number }>();
+  /** 亲眼见过的掉落物：first 是第一次看到的时间（掉落物 5 分钟后消失，这是它最晚的“出生”时间） */
+  private dropSightings = new Map<number, { id: number; name: string; pos: Vec3Like; at: number; first: number; count?: number }>();
   /** 本次扫描看到的值得注意的方块 */
   visibleNow = new Map<string, { name: string; pos: Vec3Like; dist: number }>();
   private visibleSurfaces = new Map<string, { name: string; pos: Vec3Like; at: number }>();
@@ -472,8 +473,18 @@ export class Vision {
     // 记住亲眼看见过的生物在哪（像人一样：“刚才那头牛在坡那边”）；只记看见的，不记听见/墙后的
     for (const e of seen) if (e.kind !== 'item' && e.kind !== 'other') this.sightings.set(e.id, { id: e.id, name: e.name, kind: e.kind, pos: { ...e.pos }, at: now });
     for (const [id, x] of this.sightings) if (now - x.at > 180_000) this.sightings.delete(id);
-    for (const e of seen) if (e.kind === 'item') this.dropSightings.set(e.id, { id: e.id, name: e.name.replace(/^item:/, ''), pos: { ...e.pos }, at: now });
+    for (const e of seen) if (e.kind === 'item') this.dropSightings.set(e.id, { id: e.id, name: e.name.replace(/^item:/, ''), pos: { ...e.pos }, at: now, first: this.dropSightings.get(e.id)?.first ?? now, ...((e as any).count ? { count: (e as any).count } : {}) });
     for (const [id, x] of this.dropSightings) if (now - x.at > 300_000) this.dropSightings.delete(id);
+    // 正看着记得放掉落物的那块地方，东西却不在了（被捡走、烧掉、消失）：亲眼看到没了，就忘掉
+    const seenIds = new Set(seen.map((e) => e.id));
+    for (const [id, x] of this.dropSightings) {
+      if (seenIds.has(id)) continue;
+      const ddx = x.pos.x - eye.x, ddy = x.pos.y + 0.12 - eye.y, ddz = x.pos.z - eye.z, dist = Math.hypot(ddx, ddy, ddz);
+      if (dist < 0.5 || dist > 12) continue;
+      if (Math.abs(norm(yawTo(ddx, ddz) - eye.yaw)) > hFov / 2 - 0.1 || Math.abs(Math.atan2(ddy, Math.hypot(ddx, ddz)) - eye.pitch) > vFov / 2 - 0.1) continue;
+      if (dist > Math.max(seeRange(light(Math.floor(x.pos.x), Math.floor(x.pos.y), Math.floor(x.pos.z))), 4)) continue;
+      if (this.clearLine(eye, ddx / dist, ddy / dist, ddz / dist, dist - 0.4, opt)) this.dropSightings.delete(id);
+    }
     this.lastScanAt = now;
     this.frame = { cols, rows, cats, dists, facing: dirOfYaw(eye.yaw), range, entities: ents, ts: now, scanMs: Date.now() - t0 };
   }
@@ -614,6 +625,15 @@ export class Vision {
   recentDrops(maxAgeMs = 120_000): { id: number; name: string; pos: Vec3Like; ageMs: number }[] {
     const now = Date.now(), visible = new Set(this.seen.map((e) => e.id));
     return [...this.dropSightings.values()].filter((d) => !visible.has(d.id) && now - d.at <= maxAgeMs).map((d) => ({ id: d.id, name: d.name, pos: d.pos, ageMs: now - d.at }));
+  }
+
+  /**
+   * 见过的掉落物（看得见的和刚看不见的），带第一次看到的时间：地上的东西 5 分钟就消失，
+   * 从第一次看到算起，它最多还能留多久。看见它没了（就在视野里却不在了）的已经被忘掉。
+   */
+  dropsSeen(): { id: number; name: string; pos: Vec3Like; firstMs: number; lastMs: number; visible: boolean; count?: number }[] {
+    const now = Date.now(), visible = new Set(this.seen.map((e) => e.id));
+    return [...this.dropSightings.values()].filter((d) => now - d.first < 300_000).map((d) => ({ id: d.id, name: d.name, pos: d.pos, firstMs: now - d.first, lastMs: now - d.at, visible: visible.has(d.id), ...(d.count ? { count: d.count } : {}) }));
   }
 
   /** 走到记得的地方一看没有了（被捡走、消失、漂走）：忘掉它 */

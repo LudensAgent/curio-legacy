@@ -225,7 +225,7 @@ export class Perception {
    */
   private waitingOn(dim: string, here: Vec3Like): string[] {
     const recs = this.memory.furnaces(dim);
-    if (!recs.length) return [];
+    if (!recs.length) return this.dropsWaiting(here);
     const seen = new Map(this.vision.observeBlocks(recs.filter((r) => dist3(r.pos, here) <= 48).map((r) => r.pos)).map((o) => [`${o.pos.x},${o.pos.y},${o.pos.z}`, o]));
     const out: { d: number; text: string }[] = [];
     for (const r of recs) {
@@ -250,7 +250,36 @@ export class Perception {
       }
       out.push({ d, text: `${at}：${left}${now}` });
     }
-    return out.sort((a, b) => a.d - b.d).slice(0, 4).map((x) => x.text);
+    return [...out.sort((a, b) => a.d - b.d).slice(0, 4).map((x) => x.text), ...this.dropsWaiting(here)];
+  }
+
+  /**
+   * 地上见过、还没捡的东西：掉落物 5 分钟就消失。从第一次看到算起，它最多还能留多久。
+   * 刚掉下来不到 45 秒的不提（干活时顺手就捡了）；自己扔掉的不提。
+   */
+  private dropWarned = new Set<string>();
+  private dropsWaiting(here: Vec3Like): string[] {
+    if (this.dropWarned.size > 200) this.dropWarned.clear();
+    const all = this.vision.dropsSeen?.() ?? [];
+    const groups: { name: string; pos: Vec3Like; count: number; firstMs: number; visible: boolean }[] = [];
+    for (const d of all) {
+      if (d.firstMs < 45_000 || this.adapter.isDiscarded?.(d.name, d.pos)) continue;
+      const g = groups.find((x) => x.name === d.name && dist3(x.pos, d.pos) <= 3);
+      if (g) { g.count += d.count ?? 1; g.firstMs = Math.max(g.firstMs, d.firstMs); g.visible ||= d.visible; } else groups.push({ name: d.name, pos: d.pos, count: d.count ?? 1, firstMs: d.firstMs, visible: d.visible });
+    }
+    const inv = this.adapter.state().inventory;
+    const have = (n: string) => inv.filter((i) => i.name === n).reduce((t, i) => t + i.count, 0);
+    return groups.sort((a, b) => b.firstMs - a.firstMs).slice(0, 3).map((g) => {
+      const left = Math.max(0, Math.round((300_000 - g.firstMs) / 60_000 * 10) / 10);
+      const at = `(${Math.round(g.pos.x)},${Math.round(g.pos.y)},${Math.round(g.pos.z)}) ${Math.round(dist3(g.pos, here))}格`;
+      const key = `${g.name}@${Math.round(g.pos.x)},${Math.round(g.pos.z)}`;
+      // 快消失了、背包里又没多少的东西：值得注意一下（要不要回去捡由它自己判断）
+      if (left <= 2 && have(g.name) < 16 && !this.dropWarned.has(key)) {
+        this.dropWarned.add(key);
+        this.bus.publish('process_changed', 'P2', `地上的 ${g.name}×${g.count} ${at}再过不到 ${Math.max(1, Math.ceil(left))} 分钟就会消失（掉落物 5 分钟后没了）`, { kind: 'drop', pos: key });
+      }
+      return `地上的 ${g.name}×${g.count} ${at}：${Math.round(g.firstMs / 60000 * 10) / 10} 分钟前第一次看到${g.visible ? '，现在看得见' : '，现在不在视野里'}；最多再过 ${left} 分钟就会消失`;
+    });
   }
 
   start(intervalMs = 700) {
