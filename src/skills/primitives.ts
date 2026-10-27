@@ -16,7 +16,7 @@ import { findStation } from './stations.ts';
  *   dig_at [0,2,0] → dig_at [1,1,0] → dig_at [1,2,0] → step [1,1,0]   重复几轮就是一道往前上方的阶梯。
  */
 type Rel = [number, number, number];
-interface CellArgs { at: Rel; facing: Facing; own?: boolean }
+interface CellArgs { at: Rel; facing: Facing; own?: boolean; wet?: boolean }
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 
 /** 模型常用的几种写法都认：at / to / pos / offset / rel / cell，数组 [1,1,0]、字符串 "1,1,0"、对象 {"f":1,"u":1,"r":0} */
@@ -50,16 +50,26 @@ function after(ctx: SkillCtx, facing: Facing) {
   return { position: { ...s.pos }, local: localMap(ctx.adapter, s.pos, facing), around: surroundings(ctx.adapter).text };
 }
 
-const liquidNext = (ctx: SkillCtx, c: Vec3Like) => [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, -1]]
-  .map(([dx, dy, dz]) => ctx.adapter.blockAt({ x: c.x + dx, y: c.y + dy, z: c.z + dz })).find((n) => !!n && LIQUID_BLOCKS.has(n));
+const liquidNext = (ctx: SkillCtx, c: Vec3Like) => wetNeighbours(ctx, c)[0]?.name;
+/** 这一格挖开以后会流进来的液体：在哪几格（侧面四格和上面；下面的流不上来） */
+const wetNeighbours = (ctx: SkillCtx, c: Vec3Like) => [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, -1]]
+  .map(([dx, dy, dz]) => ({ pos: { x: c.x + dx, y: c.y + dy, z: c.z + dz }, name: ctx.adapter.blockAt({ x: c.x + dx, y: c.y + dy, z: c.z + dz }) ?? '' }))
+  .filter((w) => LIQUID_BLOCKS.has(w.name));
+/** 世界坐标换回以脚为原点的 [前,上,右] */
+const FWD: Record<Facing, [number, number]> = { N: [0, -1], E: [1, 0], S: [0, 1], W: [-1, 0] };
+const RGT: Record<Facing, [number, number]> = { N: [1, 0], E: [0, 1], S: [-1, 0], W: [0, -1] };
+const toRel = (feet: Vec3Like, facing: Facing, p: Vec3Like): [number, number, number] => {
+  const dx = p.x - feet.x, dz = p.z - feet.z;
+  return [dx * FWD[facing][0] + dz * FWD[facing][1], p.y - feet.y, dx * RGT[facing][0] + dz * RGT[facing][1]];
+};
 
 /** 挖下来是要带走的东西（挖下来的方块就是同名物品）：挖完核对有没有真进背包 */
 const KEEPSAKE = /_bed$|^(crafting_table|furnace|smoker|blast_furnace|chest|barrel|anvil|jukebox|ender_chest|enchanting_table|brewing_stand|cartography_table|smithing_table|loom|stonecutter|grindstone)$|_door$|shulker_box$/;
 
 export const digAt: Skill<CellArgs> = {
   name: 'dig_at',
-  description: '挖掉身边指定的那一格（以脚为原点的 [前,上,右]）。自动换合适的工具；那格旁边有水或岩浆、或是基岩时不挖。只挖不走，挖完人还在原地',
-  argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "own"?:true（确实要拆自己房子的方块）}（前后/左右 ±2，上下 -1..3；例：[1,1,0] 前方高一格，[0,2,0] 头顶上方，[0,-1,0] 脚下）',
+  description: '挖掉身边指定的那一格（以脚为原点的 [前,上,右]）。自动换合适的工具；那格旁边有水时默认不挖（会说是哪几格，可以先堵上或写 wet:true 照挖），旁边有岩浆、或是基岩时不挖。只挖不走，挖完人还在原地',
+  argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "own"?:true（确实要拆自己房子的方块）, "wet"?:true（旁边有水也照挖，让水流进来）}（前后/左右 ±2，上下 -1..3；例：[1,1,0] 前方高一格，[0,2,0] 头顶上方，[0,-1,0] 脚下）',
   timeoutMs: 30000,
   movement: false,
   validate(raw, adapter) {
@@ -69,7 +79,7 @@ export const digAt: Skill<CellArgs> = {
     const facing = facingArg(a.facing, adapter);
     if (!FACINGS.includes(facing as Facing)) return { ok: false, error: facing };
     // [0,0,0]/[0,1,0] 是自己站的两格，本来就空：照样接受（执行时说明一下），不当成写错丢掉
-    return { ok: true, args: { at, facing: facing as Facing, ...(a.own === true ? { own: true } : {}) } };
+    return { ok: true, args: { at, facing: facing as Facing, ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}) } };
   },
   async run(ctx, args) {
     throwIfAborted(ctx.signal);
@@ -81,8 +91,15 @@ export const digAt: Skill<CellArgs> = {
     if (before === null) return fail('NOT_FOUND', `[${args.at}] 那一格还没加载或看不见`, after(ctx, args.facing));
     if (AIR.has(before)) return ok(`[${args.at}] 本来就是空的，不用挖`, { cell: [...args.at], was: 'air', ...after(ctx, args.facing) });
     if (LIQUID_BLOCKS.has(before)) return fail('BAD_ARGS', `[${args.at}] 是 ${before}，挖不了`, after(ctx, args.facing));
-    const wet = liquidNext(ctx, pos);
-    if (wet) return fail('BAD_ARGS', `[${args.at}] 旁边就是 ${wet}，挖开会流进来`, { wet, ...after(ctx, args.facing) });
+    // 挖开会进水/进岩浆：默认不挖，但说清是哪几格、能怎么办（像人一样先堵上，或者认了让水流进来）
+    const wets = wetNeighbours(ctx, pos);
+    const lava = wets.some((w) => /lava/.test(w.name));
+    if (wets.length && (lava || !args.wet)) {
+      const cells = wets.map((w) => `[${toRel(feet, args.facing, w.pos)}] 是 ${w.name}`).join('、');
+      const fix = lava ? '岩浆不能放进来：先 place_at 把那几格堵上，或者换个方向挖'
+        : `可以先 place_at 往那几格放方块把水堵上（水格可以直接放方块），或者写 "wet":true 照挖、让水流进来（水只会漫过来，不会伤人，挖完可以再堵）；也可以换个方向`;
+      return fail('BAD_ARGS', `[${args.at}] 挖开会有液体流进来：${cells}。${fix}`, { wet: wets[0].name, wetCells: wets.map((w) => toRel(feet, args.facing, w.pos)), ...after(ctx, args.facing) });
+    }
     const mine = args.own ? null : ownBuildingAt(ctx.memory, ctx.adapter.state(), pos, before);
     if (mine) return fail('BAD_ARGS', `[${args.at}] 的 ${before} 是自己盖的「${mine.name}」的一部分；${OWN_BUILDING_HINT}`, { own: mine, ...after(ctx, args.facing) });
     const stash = args.own ? null : storedChestAt(ctx.memory, ctx.adapter.state(), pos, before);
@@ -92,7 +109,7 @@ export const digAt: Skill<CellArgs> = {
     const countOf = (n: string) => ctx.adapter.state().inventory.filter((i) => i.name === n).reduce((a, i) => a + i.count, 0);
     const had = keepsake ? countOf(keepsake) : 0;
     try {
-      await breakCell(ctx, pos, true, how);
+      await breakCell(ctx, pos, true, how, { allowWater: !!args.wet });
     } catch (e) {
       if (isAbort(e)) throw e;
       const m = String((e as Error).message);

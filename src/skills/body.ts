@@ -26,13 +26,14 @@ function liquidNext(ctx: SkillCtx, c: { x: number; y: number; z: number }): stri
   return null;
 }
 
-export async function breakCell(ctx: SkillCtx, c: Vec3Like, exact = false, info?: { noDrop?: boolean; ms?: number }): Promise<string | null> {
+export async function breakCell(ctx: SkillCtx, c: Vec3Like, exact = false, info?: { noDrop?: boolean; ms?: number }, opts: { allowWater?: boolean } = {}): Promise<string | null> {
   const name = ctx.adapter.blockAt(c);
   if (!exact && isSoftBlock(name)) return null;
   if (name && LIQUID_BLOCKS.has(name)) throw new Error(`LIQUID:${name}`);
   if (name === 'bedrock') throw new Error('BEDROCK');
   const wet = liquidNext(ctx, c);
-  if (wet) throw new Error(`LIQUID_NEAR:${wet}`);
+  // 调用的人明说了接受进水（dig_at 的 wet:true）：水照挖，岩浆仍然不挖
+  if (wet && !(opts.allowWater && !/lava/.test(wet))) throw new Error(`LIQUID_NEAR:${wet}`);
   // 没有合适的镐：工作台就在手边、木料够，像玩家一样顺手做一把木镐（dig/climb_up 是“就地”的动作，合成时不能走开）；
   // 做不了也不停下——空手照样挖得掉，只是慢、不掉东西（挖开一格清路、脱困用不着镐）
   if (!ctx.adapter.canHarvest(c) && findStation(ctx, ['crafting_table'], 4)) await ensureToolFor(ctx, c);

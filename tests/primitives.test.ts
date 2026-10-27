@@ -180,3 +180,21 @@ test('dig_at 自己站的两格不算写错，说明一下就好', async (t) => 
   assert.equal(r.status, 'succeeded');
   assert.match(r.summary, /\[0,2,0\]/);
 });
+
+test('dig_at 旁边有水：说出是哪几格、怎么堵；写 wet:true 照挖；岩浆照样不挖', async (t) => {
+  const w = pocket();
+  // 前方那格（0,60,-1）是石头，它再往前一格（0,60,-2）是水
+  w.blocks.push({ name: 'water', pos: { x: 0, y: 60, z: -2 } });
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  let r = await digAt.run(ctx, { at: [1, 0, 0], facing: 'N' });
+  assert.equal(r.status, 'failed');
+  assert.match(r.summary, /\[2,0,0\] 是 water/);
+  assert.match(r.summary, /wet/);
+  r = await digAt.run(ctx, { at: [1, 0, 0], facing: 'N', wet: true });
+  assert.equal(r.status, 'succeeded', r.summary);
+  w.blocks.push({ name: 'lava', pos: { x: 0, y: 61, z: -2 } });
+  r = await digAt.run(ctx, { at: [1, 1, 0], facing: 'N', wet: true });
+  assert.equal(r.status, 'failed');
+  assert.match(r.summary, /岩浆/);
+});

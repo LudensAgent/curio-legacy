@@ -22,7 +22,7 @@ export const API_DOC = `代码是一个 async 函数体，参数 api 和 args �
 - api.entities(半径≤32) → 看见/听见的实体 [{id,name,kind,dist,pos,fusing?}]（kind=item 的是掉落物，name 形如 item:cobblestone）
 - api.drops(半径≤32) → 地上的掉落物 [{id,item,count?,pos,dist,seen,ageSec?}]：seen=true 是眼前看得见的；seen=false 是刚才亲眼见过、现在不在视野里（记得的位置，ageSec 秒前）。扔完东西核对“走开了没有、有没有被捡回来”就看这个
 - api.nearestLand() → 最近亲眼见过的、能站的干地 {stand:{x,y,z} 站上去时脚的位置, dir, dist, dy 比脚高几格} 或 null（和 surface、上岸判断用的是同一个标准：脚下实心、上面两格是空气、不是水底）
-- api.stepTo(x,y,z) 迈到相邻一格（平走、上一级、下一级）｜api.digAt(x,y,z)｜api.placeAt(x,y,z,"方块名|any") → {ok,code,summary}
+- api.stepTo(x,y,z) 迈到相邻一格（平走、上一级、下一级）｜api.digAt(x,y,z, {wet:true}?)（旁边有水默认不挖，结果里有 wetCells；第 4 个参数 {wet:true} 照挖让水流进来）｜api.placeAt(x,y,z,"方块名|any") → {ok,code,summary}
 - api.moveTo(x,y,z,range,{sprint,avoid}?) 用寻路走过去（默认走路；sprint:true 跑，快但很耗饥饿；avoid:["方块名"] 这一趟绕开这些方块）→ {ok,error?,pos}｜api.act("动作名",{参数}) 用已有动作（goto、dig_at、defend…）→ {ok,code,summary}
 - api.useSkill("技能名",{args}?) 调用一份已经验证可靠的技能（reliable_skills 里列的，当积木用：先组合已经管用的，再补新的部分）→ {ok,code,summary}；最多套两层
 - api.look(yaw,pitch)｜api.lookAt(x,y,z)｜api.sleep(毫秒≤5000)｜api.log(…) 记一句给自己看｜api.progress(0..1)
@@ -170,7 +170,7 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
         return { ok: r.status === 'succeeded', code: r.failureCode ?? null, summary: r.summary.slice(0, 200) };
       }
       case 'stepTo': return runSkill('step', { to: rel(int(a[0], 'x'), int(a[1], 'y'), int(a[2], 'z')), facing: 'N' });
-      case 'digAt': return runSkill('dig_at', { at: rel(int(a[0], 'x'), int(a[1], 'y'), int(a[2], 'z')), facing: 'N' });
+      case 'digAt': return runSkill('dig_at', { at: rel(int(a[0], 'x'), int(a[1], 'y'), int(a[2], 'z')), facing: 'N', ...(a[3] && typeof a[3] === 'object' && (a[3] as any).wet === true ? { wet: true } : {}) });
       case 'placeAt': return runSkill('place_at', { at: rel(int(a[0], 'x'), int(a[1], 'y'), int(a[2], 'z')), item: String(a[3] ?? 'any'), facing: 'N' });
       case 'moveTo': {
         const p = { x: Number(a[0]), y: Number(a[1]), z: Number(a[2]) };
