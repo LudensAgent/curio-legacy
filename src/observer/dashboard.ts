@@ -6,8 +6,11 @@ import path from 'node:path';
 import type { AgentEvent, EventBus } from '../events.ts';
 import type { LlmTrace } from '../planner/llm-trace.ts';
 import { itemTextures } from './item-textures.ts';
+import { envStore, type EnvStoreOptions } from './env-config.ts';
 
 const PUBLIC = fileURLToPath(new URL('../../public/', import.meta.url));
+/** 一个实时连接最多积压多少没读走的数据，超过就断开 */
+export const MAX_BACKLOG = 16 * 1024 * 1024;
 
 /** 本地 node_modules 里的 gridstack（npm install 后可离线使用；没有时页面回退到 CDN） */
 function gridstackDist(): string | null {
@@ -44,27 +47,67 @@ export function startDashboard(
   bus: EventBus,
   h: DashboardHandlers,
   extraRoutes: ((req: http.IncomingMessage, res: http.ServerResponse) => boolean)[] = [],
-  opts: { llmTrace?: LlmTrace; mcVersion?: string } = {},
+  opts: { llmTrace?: LlmTrace; mcVersion?: string; env?: EnvStoreOptions } = {},
 ) {
   const clients = new Set<http.ServerResponse>();
+  let slowDropped = 0;
+  /**
+   * 往一个 SSE 连接里写一帧。不看背压的话，对方不读（浏览器标签被冻结、OBS 源卡住、半开的连接）时，
+   * 每秒一整份状态快照和每次 LLM 调用的全文都会堆在这个进程的内存里，几个小时就能把堆撑满。
+   * - 状态帧本身就是整份快照：对方还没读完上一批就跳过这一帧，下一秒的会补上；
+   * - 事件和 LLM 帧照常写，但积压超过 MAX_BACKLOG 就断开这个连接（EventSource 会自己重连，重连时补发最近的事件）。
+   */
+  const push = (c: http.ServerResponse, line: string, droppable = false) => {
+    if (c.destroyed || c.writableEnded) { clients.delete(c); return; }
+    if (droppable && c.writableNeedDrain) return;
+    c.write(line);
+    if (c.writableLength > MAX_BACKLOG) {
+      const mb = Math.round(c.writableLength / 1048576);
+      clients.delete(c);
+      c.destroy();
+      slowDropped++;
+      // 在总线的事件回调里，别同步再发事件
+      queueMicrotask(() => bus.publish('dashboard_slow_client', 'P1', `控制台/叠加页的一个实时连接 ${mb} MB 没读走，断开它（它会自己重连）`, { mb }));
+    }
+  };
+  const broadcast = (line: string, droppable = false) => { for (const c of [...clients]) push(c, line, droppable); };
+  /** 实时连接的数量和积压（写进内存日志，事后能看出是不是它） */
+  const streamStats = () => {
+    let backlog = 0;
+    for (const c of clients) backlog += c.writableLength;
+    return { sseClients: clients.size, sseBacklog: backlog, sseDropped: slowDropped };
+  };
   const textures = itemTextures(opts.mcVersion ?? '1.20.1');
   const vendorDir = gridstackDist();
+  const env = envStore(opts.env);
+
+  /**
+   * 改 .env 能换掉 LLM 地址、密钥这些东西，所以比别的接口多三道门：
+   * 只认本机连接、Host 必须是本机（防 DNS 重绑定）、有 Origin 时必须同源（防别的网页偷偷 POST）。
+   */
+  const localOnly = (req: http.IncomingMessage) => {
+    const ra = req.socket.remoteAddress ?? '';
+    if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ra)) return false;
+    const h = String(req.headers.host ?? '');
+    if (![`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`].includes(h)) return false;
+    const origin = req.headers.origin;
+    return !origin || origin === `http://${h}`;
+  };
 
   // LLM 调用的实时追踪（请求全文 + 流式增量）
   opts.llmTrace?.on('llm', (ev: unknown) => {
-    const line = `event: llm\ndata: ${JSON.stringify(ev)}\n\n`;
-    for (const c of clients) c.write(line);
+    if (!clients.size) return;
+    broadcast(`event: llm\ndata: ${JSON.stringify(ev)}\n\n`);
   });
 
   bus.on('event', (ev: AgentEvent) => {
-    if (ev.type === 'tick') return;
-    const line = `event: ev\ndata: ${JSON.stringify(ev)}\n\n`;
-    for (const c of clients) c.write(line);
+    if (ev.type === 'tick' || !clients.size) return;
+    broadcast(`event: ev\ndata: ${JSON.stringify(ev)}\n\n`);
   });
   setInterval(() => {
-    if (!clients.size) return;
-    const line = `event: state\ndata: ${JSON.stringify(h.snapshot())}\n\n`;
-    for (const c of clients) c.write(line);
+    // 所有连接都还没读完上一帧就不必算新快照
+    if (![...clients].some((c) => !c.writableNeedDrain)) return;
+    broadcast(`event: state\ndata: ${JSON.stringify(h.snapshot())}\n\n`, true);
   }, 1000).unref();
 
   const send = (res: http.ServerResponse, code: number, body: string, type = 'application/json; charset=utf-8') => {
@@ -104,6 +147,21 @@ export function startDashboard(
       if (!vendorDir || !VENDOR_FILES[name]) return send(res, 404, 'not found', 'text/plain');
       return fs.readFile(path.join(vendorDir, name), (err, data) => (err ? send(res, 404, 'not found', 'text/plain') : send(res, 200, data.toString(), VENDOR_FILES[name])));
     }
+    if (p === '/api/env') {
+      if (!localOnly(req)) return send(res, 403, '{"error":"只允许在本机的控制台页面里修改配置"}');
+      if (req.method === 'GET') return send(res, 200, JSON.stringify(env.view()));
+      if (req.method === 'POST') {
+        if (!String(req.headers['content-type'] ?? '').includes('application/json')) return send(res, 415, '{"error":"需要 application/json"}');
+        try {
+          const r = env.update(await readBody(req));
+          if (!r.ok) return send(res, 400, JSON.stringify(r));
+          bus.publish('config', 'P1', `控制台修改了 .env：${r.changed.join('、')}（重启 Curio 后生效）`);
+          return send(res, 200, JSON.stringify(r));
+        } catch (e: any) {
+          return send(res, 500, JSON.stringify({ ok: false, error: String(e?.message ?? e) }));
+        }
+      }
+    }
     if (req.method === 'GET' && p === '/api/llm') return send(res, 200, JSON.stringify(opts.llmTrace?.recent() ?? []));
     if (req.method === 'GET' && p === '/api/state') return send(res, 200, JSON.stringify(h.snapshot()));
     if (req.method === 'GET' && p === '/api/events') return send(res, 200, JSON.stringify(bus.recent(200)));
@@ -113,7 +171,9 @@ export function startDashboard(
       for (const ev of bus.recent(60)) res.write(`event: ev\ndata: ${JSON.stringify(ev)}\n\n`);
       if (opts.llmTrace) res.write(`event: llm_init\ndata: ${JSON.stringify(opts.llmTrace.recent())}\n\n`);
       clients.add(res);
-      req.on('close', () => clients.delete(res));
+      // 以响应（连接）关闭为准：IncomingMessage 的 close 在请求读完时就可能触发
+      res.on('close', () => clients.delete(res));
+      req.on('close', () => { if (res.destroyed) clients.delete(res); });
       return;
     }
     if (req.method === 'GET' && p === '/api/danmaku') {
@@ -142,5 +202,5 @@ export function startDashboard(
   });
   server.on('error', (e) => bus.publish('dashboard', 'P1', `控制台启动失败：${e.message}`));
   server.listen(port, host, () => bus.publish('dashboard', 'P3', `控制台 http://${host}:${port}  ·  OBS 叠加 http://${host}:${port}/overlay`));
-  return server;
+  return Object.assign(server, { streamStats });
 }

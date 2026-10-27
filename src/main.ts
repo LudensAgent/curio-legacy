@@ -535,7 +535,7 @@ startDashboard(config.dashboard.host, config.dashboard.port, bus, {
   replan: () => executive.replan(),
   suggest: (t) => executive.suggest(t),
   spectate: (on) => spectator.setActive(on),
-}, feed ? [createObserverHandler(feed)] : [], { llmTrace, mcVersion: config.mc.version });
+}, feed ? [createObserverHandler(feed)] : [], { llmTrace, mcVersion: config.mc.version, env: { backupDir: path.join(config.dataDir, 'env-backups') } });
 
 let shuttingDown = false;
 function shutdown() {

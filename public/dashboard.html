@@ -97,6 +97,22 @@
   .tab .n { font: 10px var(--mono); color: var(--faint); margin-left: 4px; }
   .pane { display: none; margin-top: 12px; }
   .pane.on { display: block; }
+  /* 配置页（.env） */
+  #pane-config { overflow: auto; }
+  .cfgbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .cfgbar input { width: 220px; }
+  .cfgnote { font-size: 12px; padding: 8px 12px; border-radius: 8px; background: var(--warn-soft); color: var(--warn); margin-bottom: 10px; display: none; }
+  .cfgnote.on { display: block; } .cfgnote.ok { background: var(--accent-soft); color: var(--accent); } .cfgnote.bad { background: var(--bad-soft); color: var(--bad); }
+  .cfgsec { margin-bottom: 12px; }
+  .cfgrow { display: grid; grid-template-columns: minmax(180px, 260px) minmax(0, 1fr) auto; gap: 4px 12px; align-items: center; padding: 7px 0; border-top: 1px solid var(--line); }
+  .cfgrow:first-of-type { border-top: 0; }
+  .cfgrow .k { font: 12px var(--mono); word-break: break-all; }
+  .cfgrow .k small { display: inline-block; margin-left: 6px; font: 10px var(--mono); color: var(--dim); border: 1px solid var(--line); border-radius: 99px; padding: 0 6px; }
+  .cfgrow .d { grid-column: 1 / -1; font-size: 12px; color: var(--dim); margin-top: -2px; }
+  .cfgrow input { width: 100%; font: 12px var(--mono); }
+  .cfgrow input.dirty { border-color: var(--warn); background: var(--warn-soft); }
+  .cfgrow button { padding: 4px 8px; font-size: 11px; }
+  @media (max-width: 960px) { .cfgrow { grid-template-columns: 1fr auto; } .cfgrow .k { grid-column: 1 / -1; } }
   .grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
   .grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
   @media (max-width: 1100px) { .grid3 { grid-template-columns: 1fr 1fr; } }
@@ -364,6 +380,7 @@
       <button class="tab" data-tab="events">事件<span class="n" id="nEvents"></span></button>
       <button class="tab" data-tab="llm">LLM 调用<span class="n" id="llmCount"></span></button>
       <button class="tab" data-tab="metrics">运行指标</button>
+      <button class="tab" data-tab="config">配置<span class="n" id="nCfg"></span></button>
     </nav>
 
     <section class="pane" id="pane-learning">
@@ -518,6 +535,18 @@
         <div class="card"><h2>计数</h2><div class="mono body" id="counters" style="line-height:1.9"></div></div>
       </div>
     </section>
+
+    <section class="pane" id="pane-config">
+      <div class="cfgbar">
+        <input id="cfgSearch" placeholder="搜索配置项 / 说明" />
+        <span class="grow"></span>
+        <span class="dim" id="cfgDirty"></span>
+        <button onclick="loadEnv()">重新读取</button>
+        <button class="primary" id="cfgSave" onclick="saveEnv()">保存到 .env</button>
+      </div>
+      <div class="cfgnote" id="cfgNote"></div>
+      <div id="cfgBody"><div class="empty">读取中…</div></div>
+    </section>
     </div>
   </main>
 </div>
@@ -546,6 +575,71 @@ function showTab(name) {
   if (name === 'events') { unseen = 0; $('nEvents').textContent = ''; $('log').scrollTop = $('log').scrollHeight; }
   if (name === 'vision' && lastState) drawVision(lastState.vision, lastState.percept.vision);
   if (name === 'learning' && lastState) { learnKey = ''; renderLearning(lastState.learning); }
+  if (name === 'config' && !envView) loadEnv();
+}
+
+// ———— 配置页：读写项目根目录的 .env（以 .env.example 为目录；密钥不回显；重启 Curio 后生效）
+let envView = null;
+const envEdits = new Map(); // key -> 新值（null = 注释掉，回到默认）
+function cfgNote(text, cls) { const n = $('cfgNote'); n.textContent = text; n.className = 'cfgnote' + (text ? ' on ' + (cls || '') : ''); }
+async function loadEnv() {
+  try {
+    const r = await fetch('/api/env');
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.status);
+    envView = j; envEdits.clear(); renderEnv();
+    cfgNote(j.restartNeeded ? '.env 已经改过，重启 Curio 后才会生效。' : '', 'warn');
+  } catch (e) { $('cfgBody').innerHTML = `<div class="empty">读取失败：${esc(e.message)}</div>`; }
+}
+function renderEnv() {
+  if (!envView) return;
+  const q = $('cfgSearch').value.trim().toLowerCase();
+  const html = envView.sections.map((s) => {
+    const rows = s.items.filter((i) => !q || (i.key + ' ' + i.desc + ' ' + s.title).toLowerCase().includes(q)).map((i) => {
+      const edited = envEdits.has(i.key);
+      const val = edited ? (envEdits.get(i.key) ?? '') : (i.secret ? '' : (i.value ?? ''));
+      const ph = i.secret ? (i.set ? '已设置（留空不改）' : '未设置') : (i.value == null ? (i.example != null ? '默认：' + i.example : '未设置（用默认值）') : '');
+      const tags = [i.secret ? '密钥' : '', i.optional ? '可选' : '', i.changed ? '待重启' : '', i.value == null && !i.secret && !i.set ? '未写入' : ''].filter(Boolean).map((t) => `<small>${t}</small>`).join('');
+      return `<div class="cfgrow"><div class="k">${esc(i.key)}${tags}</div>
+        <input data-k="${esc(i.key)}" type="${i.secret ? 'password' : 'text'}" autocomplete="off" spellcheck="false" class="${edited ? 'dirty' : ''}" value="${esc(val)}" placeholder="${esc(ph)}">
+        <button data-reset="${esc(i.key)}" title="从 .env 里注释掉这一项，回到默认值" ${i.set || i.value != null ? '' : 'disabled'}>默认</button>
+        ${i.desc ? `<div class="d">${esc(i.desc)}</div>` : ''}</div>`;
+    }).join('');
+    return rows ? `<div class="card cfgsec"><h2>${esc(s.title)}</h2>${rows}</div>` : '';
+  }).join('');
+  $('cfgBody').innerHTML = html || '<div class="empty">没有匹配的配置项</div>';
+  $('cfgDirty').textContent = envEdits.size ? `${envEdits.size} 项未保存` : '';
+  $('nCfg').textContent = envEdits.size ? envEdits.size : '';
+}
+$('cfgSearch').addEventListener('input', renderEnv);
+$('cfgBody').addEventListener('input', (e) => {
+  const k = e.target.dataset && e.target.dataset.k; if (!k) return;
+  const item = envView.sections.flatMap((s) => s.items).find((i) => i.key === k);
+  const v = e.target.value;
+  const unchanged = item.secret ? v === '' : v === (item.value ?? '');
+  if (unchanged) envEdits.delete(k); else envEdits.set(k, v);
+  e.target.classList.toggle('dirty', !unchanged);
+  $('cfgDirty').textContent = envEdits.size ? `${envEdits.size} 项未保存` : '';
+  $('nCfg').textContent = envEdits.size ? envEdits.size : '';
+});
+$('cfgBody').addEventListener('click', (e) => {
+  const k = e.target.dataset && e.target.dataset.reset; if (!k) return;
+  envEdits.set(k, null); renderEnv();
+  const inp = document.querySelector(`#cfgBody input[data-k="${CSS.escape(k)}"]`); if (inp) { inp.value = ''; inp.classList.add('dirty'); inp.placeholder = '保存后回到默认值'; }
+});
+async function saveEnv() {
+  if (!envEdits.size) return cfgNote('没有改动。', 'ok');
+  const keys = [...envEdits.keys()];
+  if (!confirm(`要把 ${keys.length} 项写进 .env 吗？\n${keys.join('\n')}\n\n（旧文件会备份到 data/env-backups，重启 Curio 后生效）`)) return;
+  $('cfgSave').disabled = true;
+  try {
+    const r = await fetch('/api/env', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ set: Object.fromEntries(envEdits) }) });
+    const j = await r.json();
+    if (!r.ok || !j.ok) throw new Error(j.error || r.status);
+    await loadEnv();
+    cfgNote(`已保存 ${j.changed.length} 项：${j.changed.join('、')}。重启 Curio 后生效（侧边聊天 / Live2D 桥也要重启）。`, 'ok');
+  } catch (e) { cfgNote('保存失败：' + e.message, 'bad'); }
+  finally { $('cfgSave').disabled = false; }
 }
 document.querySelectorAll('.tab').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.tab)));
 
