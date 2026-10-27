@@ -35,7 +35,8 @@ export function homeOf(memory: WorldMemory, state: Pick<AgentState, 'worldId' | 
   const built = myBuilds(memory, state, 20).filter((b) => b.status === 'complete').sort((a, b) => a.dist - b.dist)[0];
   if (built) return note(built.name, built.pos);
   const marks = memory.landmarks().filter((l) => l.dim === state.dim && (!l.worldId || l.worldId === state.worldId));
-  const base = marks.filter((l) => l.kind === 'base' || /家|基地|小屋/.test(l.label))
+  // 有首选基地就是它（自己定的家）；没有才在像家的地点里挑最近的
+  const base = marks.find((l) => l.kind === 'base' && l.primary) ?? marks.filter((l) => l.kind === 'base' || /家|基地|小屋/.test(l.label))
     .sort((a, b) => Math.hypot(a.pos.x - here.x, a.pos.z - here.z) - Math.hypot(b.pos.x - here.x, b.pos.z - here.z))[0];
   if (base) return note(base.label, base.pos);
   const bed = marks.find((l) => /我的床/.test(l.label));

@@ -224,6 +224,7 @@ export class WorldMemory {
         this.data = { ...empty(), ...parsed, version: parsed.version ?? 1 };
         this.migrate();
         this.dedupeOwnTwins();
+        this.dropBedBases();
         this.recoverProjects();
       } catch {
         fs.copyFileSync(file, file + '.corrupt-' + Date.now());
@@ -426,6 +427,35 @@ export class WorldMemory {
     const before = this.data.landmarks.length;
     this.data.landmarks = this.data.landmarks.filter((l) => !((l.worldId ?? 'default') === worldId && l.kind === 'discovery' && l.label === plain && l.dim === dim && dist3(l.pos, pos) <= 2));
     if (this.data.landmarks.length !== before) this.touch();
+  }
+
+  /**
+   * 以前每睡一觉就在床边记一个没名字的“基地 N”，床收走了也不删，越攒越多，“回基地”也被带到最后睡过的地方。
+   * 读档时清掉：同一世界、同一维度里没名字的基地只留编号最小的那个（出生点），起了名字的（自己定的、盖房记的）都留着；
+   * 首选基地被清掉了，就改选最近确认过的有名字的基地。
+   */
+  private dropBedBases() {
+    const unnamed = (l: Landmark) => l.kind === 'base' && /^基地 \d+$/.test(l.label);
+    const num = (l: Landmark) => Number(l.label.replace(/\D/g, '')) || Infinity;
+    const groups = new Map<string, Landmark[]>();
+    for (const l of this.data.landmarks) if (l.kind === 'base') {
+      const k = `${l.worldId ?? 'default'}|${l.dim}`;
+      (groups.get(k) ?? groups.set(k, []).get(k)!).push(l);
+    }
+    let changed = false;
+    for (const bases of groups.values()) {
+      const auto = bases.filter(unnamed).sort((a, b) => num(a) - num(b));
+      if (auto.length <= 1) continue;
+      const drop = new Set(auto.slice(1));
+      this.data.landmarks = this.data.landmarks.filter((l) => !drop.has(l));
+      changed = true;
+      const left = bases.filter((l) => !drop.has(l));
+      if (!left.some((l) => l.primary)) {
+        const pick = left.filter((l) => !unnamed(l)).sort((a, b) => b.ts - a.ts)[0] ?? left[0];
+        for (const l of left) l.primary = l === pick;
+      }
+    }
+    if (changed) this.touch();
   }
 
   /** 读档时把以前留下的成对地标（“工作台”+“我的工作台”）合并掉 */
