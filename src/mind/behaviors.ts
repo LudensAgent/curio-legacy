@@ -310,10 +310,11 @@ export class BehaviorEngine {
       if (!s) break;
       // 触发时的情况交给技能（代码技能里是 args.trigger），也留着给事后评判和改进用
       const trigger = { hp: Math.round(s.state.hp * 10) / 10, food: s.state.food, doing: s.doing, hurtAgoMs: Number.isFinite(s.hurtAgoMs) ? s.hurtAgoMs : null, cover: s.cover,
-        hostiles: s.hostiles.slice(0, 4).map((h) => ({ name: h.name, dist: Math.round(h.dist * 10) / 10, ...(h.fusing ? { fusing: true } : {}) })) };
+        hostiles: s.hostiles.slice(0, 4).map((h) => ({ name: h.name, dist: Math.round(h.dist * 10) / 10, ...(h.fusing ? { fusing: true } : {}) })),
+        offHand: s.state.equipment?.find((e) => e.slot === 'off-hand')?.name ?? null };
       const r = this.arbiter.start({ skill: 'use_skill', args: { name: b.name, args: { trigger } } }, 'reflex');
       if ('error' in r) { this.lastFired.set(b.name, now); continue; }
-      this.aftermath.set(b.name, { hp: s.state.hp, at: now, pos: { ...s.state.pos }, nearest: Math.min(Infinity, ...s.hostiles.map((h) => h.dist)), ...(s.doing && cur && cur.source !== 'filler' ? { interrupted: s.doing } : {}), context: `触发时血 ${trigger.hp}${trigger.hostiles.length ? `，${trigger.hostiles.map((h) => `${h.name} ${h.dist}格`).join('、')}` : ''}，${trigger.cover === 'open' ? '在空地' : trigger.cover === 'pit' ? '在坑里' : '在封好的坑里'}${s.doing ? `，当时在做 ${s.doing}` : ''}` });
+      this.aftermath.set(b.name, { hp: s.state.hp, at: now, pos: { ...s.state.pos }, nearest: Math.min(Infinity, ...s.hostiles.map((h) => h.dist)), ...(s.doing && cur && cur.source !== 'filler' ? { interrupted: s.doing } : {}), context: `触发时血 ${trigger.hp}${trigger.hostiles.length ? `，${trigger.hostiles.map((h) => `${h.name} ${h.dist}格`).join('、')}` : ''}，${trigger.cover === 'open' ? '在空地' : trigger.cover === 'pit' ? '在坑里' : '在封好的坑里'}${s.doing ? `，当时在做 ${s.doing}` : ''}${trigger.offHand ? `，副手拿着 ${trigger.offHand}` : ''}` });
       this.lastFired.set(b.name, now);
       this.touch(b.name, (st) => { st.fired++; st.lastAt = now; });
       this.bus.publish('instinct', 'P2', `技能「${b.name}」的条件成立，身体照着做：${b.description}`, { name: b.name, source: b.source });

@@ -2,7 +2,7 @@ import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 
 // These are general operations exposed by the current registry, not recipes
 // for situations. Specialized workflows remain searchable as composites.
-const PRIMITIVES = ['use_item', 'interact_block', 'interact', 'ride', 'dismount', 'dig', 'hit_entity', 'inspect_block', 'craft', 'look_around', 'goto', 'pickup_items', 'climb_up', 'assess_landings', 'descend', 'eat', 'wait'];
+const PRIMITIVES = ['use_item', 'interact_block', 'interact', 'ride', 'dismount', 'dig', 'hit_entity', 'inspect_block', 'craft', 'look_around', 'goto', 'pickup_items', 'climb_up', 'assess_landings', 'descend', 'eat', 'wait', 'guard'];
 const ALIASES: Record<string, string[]> = {
   use_item: ['右键', '使用物品', '放置', '放下', 'right click', 'use item', 'place', 'place block'],
   interact_block: ['空手右键', '方块交互', '开门', '关门', '点击方块', '门', '按钮', '拉杆', 'activate block', 'right click block', 'door', 'button', 'lever'],
@@ -21,6 +21,7 @@ const ALIASES: Record<string, string[]> = {
   descend: ['下行', '下去', '下落', '跳下', '跳入水', 'descend', 'drop down', 'water landing'],
   eat: ['吃', '进食', 'eat', 'food'],
   wait: ['等待', '等候', 'wait', 'pause'],
+  guard: ['举盾', '格挡', '挡箭', '挡住', '盾', '盾牌', '防御', 'shield', 'block', 'guard', 'parry'],
 };
 const normalize = (value: string) => value.normalize('NFKC').toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
 const STOP_WORDS = new Set(['a', 'an', 'the', 'to', 'of', 'for', 'with', 'how', 'can', 'please', 'i']);

@@ -386,7 +386,9 @@ export class SkillSmith {
     const owner = this.ownerOf(key);
     if (owner) { this.handOver(kind, headline, owner); return; }
     const incident: Incident = { kind, at, headline: headline.slice(0, 300), lines, ...(note ? { note } : {}), ...(signal ? { signal } : {}), ...(key ? { key } : {}), queuedAt: Date.now(),
-      context: st ? { hp: Math.round(st.hp * 10) / 10, food: st.food, isDay: st.isDay, dim: st.dim, inventory: st.inventory.slice(0, 20).map((i) => `${i.name}×${i.count}`) } : {} };
+      context: st ? { hp: Math.round(st.hp * 10) / 10, food: st.food, isDay: st.isDay, dim: st.dim, inventory: st.inventory.slice(0, 20).map((i) => `${i.name}×${i.count}`),
+        // 穿着的和副手的（盾、护甲）不在背包里：不写出来，写技能时就不知道有盾可用
+        ...(st.equipment?.length ? { wearing: st.equipment.map((e) => `${e.slot}:${e.name}`) } : {}) } : {} };
     // 挨得很近的同类事并成一件（比如死亡和它引起的吃亏峰值）
     const near = this.queue.find((q) => Math.abs(q.at - at) < 60_000 && (q.kind === kind || (q.kind === 'death' && kind === 'pain')));
     // 还在排队的同一件事又来了：留新的经过

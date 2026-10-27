@@ -59,4 +59,56 @@ export const rangedDefend: Skill<{ entityId?: number; shots: number }> = {
   },
 };
 
-export const equipmentSkills = { equip_armor: equipArmor, ranged_defend: rangedDefend };
+/**
+ * 举盾：通用的身体动作（右键按住副手的盾），什么时候举、举多久、边挡边做什么由心智和它自己学的技能决定。
+ * 报告实际效果：期间掉了多少血、盾挡下了几下（盾耐久少了多少）——挡没挡住要看结果，不是举了就算挡了。
+ */
+export const guard: Skill<{ seconds: number; target?: string; back?: boolean }> = {
+  name: 'guard',
+  description: '举起副手的盾挡一会儿：面朝目标（不写就朝最近的敌对生物），挡正面的近战和箭；举着时走得慢、不能攻击，可以边挡边后退',
+  argsDoc: '{"seconds"?:1-6, "target"?:"<生物名>", "back"?:true（边挡边慢慢后退）}',
+  timeoutMs: 12000,
+  movement: true,
+  validate(raw) {
+    const a = obj(raw);
+    const seconds = Number(a.seconds ?? 2);
+    if (!Number.isFinite(seconds) || seconds < 1 || seconds > 6) return { ok: false, error: 'seconds 是 1-6' };
+    const target = typeof a.target === 'string' && a.target.trim() ? a.target.trim() : undefined;
+    return { ok: true, args: { seconds, ...(target ? { target } : {}), ...(a.back === true ? { back: true } : {}) } };
+  },
+  async run(ctx, args) {
+    const { adapter, senses, signal } = ctx;
+    if (!adapter.raiseShield) return fail('ERROR', '适配器不支持举盾');
+    const shieldDur = () => adapter.state().equipment?.find((e) => e.slot === 'off-hand' && e.name === 'shield')?.durabilityRemaining;
+    if (adapter.combatState?.().offHand !== 'shield') {
+      if (!adapter.state().inventory.some((i) => i.name === 'shield' && i.count > 0) || !adapter.equipItem) return fail('MISSING_MATERIALS', '副手没有盾，背包里也没有（盾 = 6 木板 + 1 铁锭）');
+      const r = await adapter.equipItem('shield', 'off-hand', signal);
+      if (!r.ok) return fail('ERROR', `把盾换到副手没成：${r.reason}`);
+    }
+    const hp0 = adapter.state().hp, dur0 = shieldDur();
+    const end = Date.now() + args.seconds * 1000;
+    let faced = '';
+    try {
+      const up = await adapter.raiseShield(true, signal);
+      if (!up.ok) return fail('ERROR', `举盾没成：${up.reason}`);
+      while (Date.now() < end) {
+        senses.refresh();
+        const foe = senses.perceivedEntities(16).filter((e) => args.target ? e.name === args.target : e.kind === 'hostile').sort((a, b) => a.dist - b.dist)[0];
+        if (foe) faced = `${foe.name} ${Math.round(foe.dist)} 格`;
+        if (adapter.drive) await adapter.drive(args.back ? { back: true } : {}, Math.min(500, end - Date.now()), signal, foe ? { faceEntity: foe.id } : {});
+        else await sleep(Math.min(500, end - Date.now()), signal);
+      }
+    } catch (e) {
+      if (isAbort(e)) { try { await adapter.raiseShield(false, AbortSignal.timeout(1000)); } catch { /* ignore */ } throw e; }
+      return fail(codeFromError(e), `举盾时出错：${(e as Error).message}`);
+    } finally {
+      try { await adapter.raiseShield(false, AbortSignal.timeout(1000)); } catch { /* ignore */ }
+    }
+    const lost = Math.max(0, Math.round((hp0 - adapter.state().hp) * 10) / 10), dur1 = shieldDur();
+    const blocked = dur0 !== undefined && dur1 !== undefined ? Math.max(0, dur0 - dur1) : 0;
+    return ok(`举盾 ${args.seconds} 秒${faced ? `（对着 ${faced}）` : '（附近没看见敌对生物）'}：${blocked ? `盾挡下了攻击（盾耐久 -${blocked}）` : '盾没挡到东西'}，${lost ? `掉了 ${lost} 点血` : '没掉血'}`,
+      { blocked, hpLost: lost, ...(dur1 !== undefined ? { shieldLeft: dur1 } : {}) });
+  },
+};
+
+export const equipmentSkills = { equip_armor: equipArmor, ranged_defend: rangedDefend, guard };

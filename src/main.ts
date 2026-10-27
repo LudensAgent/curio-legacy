@@ -422,13 +422,27 @@ adapter.on('death', () => {
   bus.publish('death', 'P0', `死亡 @ (${Math.round(s.pos.x)}, ${Math.round(s.pos.y)}, ${Math.round(s.pos.z)})，死因：${told ? told.text : cause}${during ? `（在做 ${during}）` : ''}`, { cause, during, ...(told ? { message: told.text } : {}) });
   executive.onDeath({ cause, hazard, during, ...(told ? { message: told.text } : {}) });
 });
+// 盾挡下了一击：副手盾的耐久掉了而人没挨打。这是举盾有用的直接反馈（给心智和学技能的看）
+let shieldDurSeen: number | null = null;
+setInterval(() => {
+  try {
+    const d = adapter.state().equipment?.find((e) => e.slot === 'off-hand' && e.name === 'shield')?.durabilityRemaining;
+    if (d === undefined) { shieldDurSeen = null; return; }
+    if (shieldDurSeen !== null && d < shieldDurSeen) bus.publish('blocked', 'P2', `举盾挡下了攻击（盾耐久 -${shieldDurSeen - d}，剩 ${d}）`, { shieldLeft: d });
+    shieldDurSeen = d;
+  } catch { /* 状态暂不可用 */ }
+}, 400).unref?.();
 adapter.on('hurt', (cause?: string) => {
   if (Date.now() - lastHurt < 1000) return;
   lastHurt = Date.now();
   // entityHurt 先于生命值更新到达，稍等再读
+  // 挨打那一刻盾举没举（只记事实；举不举、什么时候举由它自己学）
+  const combat = adapter.combatState?.();
+  const shield = combat?.offHand === 'shield' ? (combat.usingItem ? '举着盾也挨了' : '副手有盾但没举') : '';
   setTimeout(() => {
     const st = adapter.state();
-    bus.publish('hurt', 'P1', `受到伤害，生命 ${st.hp.toFixed(1)}${st.inWater ? `，氧气 ${st.oxygen}/20` : ''}${cause ? `（当时：${cause}）` : ''}`, cause ? { around: cause } : undefined);
+    const around = [cause, shield].filter(Boolean).join('；');
+    bus.publish('hurt', 'P1', `受到伤害，生命 ${st.hp.toFixed(1)}${st.inWater ? `，氧气 ${st.oxygen}/20` : ''}${around ? `（当时：${around}）` : ''}`, around ? { around, ...(shield ? { shield } : {}) } : undefined);
   }, 150);
 });
 adapter.on('disconnected', (reason: string) => {
