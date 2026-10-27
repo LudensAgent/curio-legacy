@@ -17,8 +17,8 @@ export const READ_RADIUS = 48;
 /** 给模型看的 api 说明（写代码技能、后台改进时都用这一份） */
 export const API_DOC = `代码是一个 async 函数体，参数 api 和 args 已经给好（args 是 use_skill 的 args；恢复时 args.failure = {skill,args,code,summary,target?,position} 是刚失败的那一步：target 是那一步实际要去/要动的坐标（动作算出来的，比如 goto "NW 20" 的落点），position 是失败时人在哪）。所有 api 调用都要 await，返回普通 JSON。
 - api.state() → {pos, feet:{x,y,z}, hp, food, oxygen, onGround, inWater, inLava, isDay, dim, yaw, facing, held, inventory:[{name,count}]}
-- api.blockAt(x,y,z) → {name, kind}；kind = open（空气、草、雪层，能穿过）| solid | liquid | unknown；只看得到身边 48 格
-- api.region(x1,y1,z1,x2,y2,z2) → {min, size:[sx,sy,sz], palette:[名字], kinds:[同上], data:[下标]}；第 i 格：i = (y-min.y)*sx*sz + (z-min.z)*sx + (x-min.x)；最多 40000 格
+- api.blockAt(x,y,z) → {name, kind}；kind = open（空气、草、雪层，能穿过）| solid | liquid | unknown；只看得到身边 48 格。实心方块只有亲眼看见过、或在手边（2.5 格内）才认得出 name，埋在里面没露出来的 name 是 null（只知道实心；矿要先看见才认得，不透视）
+- api.region(x1,y1,z1,x2,y2,z2) → {min, size:[sx,sy,sz], palette:[名字], kinds:[同上], data:[下标]}；第 i 格：i = (y-min.y)*sx*sz + (z-min.z)*sx + (x-min.x)；最多 40000 格；认不出的实心方块在 palette 里是 "solid?"
 - api.entities(半径≤32) → 看见/听见的实体 [{id,name,kind,dist,pos,fusing?}]（kind=item 的是掉落物，name 形如 item:cobblestone）
 - api.drops(半径≤32) → 地上的掉落物 [{id,item,count?,pos,dist,seen,ageSec?}]：seen=true 是眼前看得见的；seen=false 是刚才亲眼见过、现在不在视野里（记得的位置，ageSec 秒前）。扔完东西核对“走开了没有、有没有被捡回来”就看这个
 - api.nearestLand() → 最近亲眼见过的、能站的干地 {stand:{x,y,z} 站上去时脚的位置, dir, dist, dy 比脚高几格} 或 null（和 surface、上岸判断用的是同一个标准：脚下实心、上面两格是空气、不是水底）
@@ -69,6 +69,19 @@ export const MAX_SKILL_DEPTH = 2;
 
 export function makeBridge(ctx: SkillCtx): SandboxHandler {
   hurtAt(ctx.bus); // 开始记挨打时刻
+  /**
+   * 方块名只给认得出的：亲眼看见过的，或者就在手边（伸手摸得到、挖的时候看得见）。
+   * 埋在石头里、没露出来的实心方块只知道“是实心的”，不知道是什么——矿要先看见才认得（不透视）
+   */
+  const TOUCH = 2.5;
+  const identify = (p: Vec3Like, name: string | null): string | null => {
+    if (name === null || kindOf(name) !== 'solid') return name;
+    const eye = ctx.adapter.eye() ?? { ...ctx.adapter.state().pos, y: ctx.adapter.state().pos.y + 1.62 };
+    if (Math.hypot(p.x + 0.5 - eye.x, p.y + 0.5 - eye.y, p.z + 0.5 - eye.z) <= TOUCH) return name;
+    const seen = ctx.senses.recognizedAt?.(p);
+    if (seen === undefined) return name; // 没有视觉的环境（测试替身）：照旧
+    return seen === name ? name : null;
+  };
   const near = (p: Vec3Like) => {
     const s = ctx.adapter.state().pos;
     if (Math.hypot(p.x - s.x, p.y - s.y, p.z - s.z) > READ_RADIUS) throw new Error(`只看得到身边 ${READ_RADIUS} 格内的方块`);
@@ -108,8 +121,8 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
       case 'blockAt': {
         const p = { x: int(a[0], 'x'), y: int(a[1], 'y'), z: int(a[2], 'z') };
         near(p);
-        const name = ctx.adapter.blockAt(p);
-        return { name, kind: kindOf(name) };
+        const actual = ctx.adapter.blockAt(p);
+        return { name: identify(p, actual), kind: kindOf(actual) };
       }
       case 'region': {
         const [x1, y1, z1, x2, y2, z2] = a.slice(0, 6).map((v, i) => int(v, 'xyzxyz'[i]));
@@ -120,9 +133,11 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
         const palette: string[] = [], kinds: string[] = [], index = new Map<string, number>(), data: number[] = [];
         // 顺序：x 最快，然后 z，最后 y：i = (y-min.y)*sx*sz + (z-min.z)*sx + (x-min.x)
         for (let y = min.y; y <= max.y; y++) for (let z = min.z; z <= max.z; z++) for (let x = min.x; x <= max.x; x++) {
-          const name = ctx.adapter.blockAt({ x, y, z }) ?? '?';
+          const actual = ctx.adapter.blockAt({ x, y, z });
+          // 认不出的实心方块记成 "solid?"：只知道实心，不知道是什么
+          const name = actual === null ? '?' : identify({ x, y, z }, actual) ?? 'solid?';
           let i = index.get(name);
-          if (i === undefined) { i = palette.length; index.set(name, i); palette.push(name); kinds.push(kindOf(name === '?' ? null : name)); }
+          if (i === undefined) { i = palette.length; index.set(name, i); palette.push(name); kinds.push(name === 'solid?' ? 'solid' : kindOf(name === '?' ? null : name)); }
           data.push(i);
         }
         return { min, size, palette, kinds, data };

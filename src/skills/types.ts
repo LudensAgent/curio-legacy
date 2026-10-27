@@ -63,6 +63,8 @@ export interface Senses {
   navigationWaypoint?(target: Vec3Like, maxDistance: number, excluded: Vec3Like[]): Vec3Like | null;
   /** 自己走过的落脚点里更靠近目标的一个（来时的路）；只用亲身到过的位置 */
   rememberedWaypoint?(target: Vec3Like, maxDistance: number, excluded: Vec3Like[]): Vec3Like | null;
+  /** 这一格认得出是什么：刚看见或之前亲眼见过的；没见过就 null（不透视） */
+  recognizedAt?(pos: Vec3Like): string | null;
   /** 最近亲眼看见的某类生物的最后位置 */
   lastSighting?(match: (name: string) => boolean, maxAgeMs?: number): { id: number; name: string; pos: Vec3Like; ageMs: number } | null;
   /** 最近亲眼看见过、现在不在视野里的掉落物 */
