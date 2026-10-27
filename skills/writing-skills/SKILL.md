@@ -37,7 +37,7 @@ description: 怎么把管用的做法写成技能：触发条件、动作步骤�
 - **会自己变好**：代码技能老失败时，会在后台单独请一次模型拿着出错记录改代码，换上新版本（v2、v3…）；新版本更差会自动退回旧版。改进有间隔、不会频繁发生。你也可以写 `{"name":"…","improve":"哪里不好"}` 主动要求改进（同样排队、限频）。
 
 ## 条件写法（并列的键都要成立）
-- 自己：`hp_below` `food_below` `oxygen_below`（数字），`in_water` `in_lava` `on_ground` `night` `dark`（true/false）
+- 自己：`hp_below` `food_below` `oxygen_below`（数字），`in_water` `in_lava` `on_ground` `night` `dark`（true/false），`in_wall`（true：头那一格是实心方块——被沙砾埋住或卡进墙里，正在窒息掉血）
 - 怪：`hostile` `{"name"?:"skeleton"或["zombie","husk"],"within":16,"fusing"?:true}`；`no_hostile_within` 数字
 - 背包：`has` `"cobblestone"` 或 `{"item":"*_planks","count":4}`（* 通配）；`lacks` `"torch"`
 - 正在做：`doing` / `not_doing` 动作名或数组

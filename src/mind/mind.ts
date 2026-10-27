@@ -16,6 +16,7 @@ import { afterStep, argsLabel, softMiss, createActivity, describeActivity, doneW
 import type { BehaviorEngine } from './behaviors.ts';
 import { recallLocal } from './recall.ts';
 import { Attention, EXPERIENCE_MS, RECONSIDER, stuckHere, URGENT } from './attention.ts';
+import { headInWall } from './predicate.ts';
 import { homeOf, myBuilds } from './home.ts';
 import { settleBuild } from '../skills/build.ts';
 import { myBed } from '../skills/stations.ts';
@@ -150,6 +151,11 @@ export class Mind {
   /** 最后一步做了这么久才开始想“接下来做什么” */
   static NEAR_END_AFTER_MS = 4000;
   static NEAR_END_REASON = '手上这段活快干完了，想想接下来';
+  /** 要命的处境（窒息、被贴身围攻、水下没气）：用“瞥一眼”那档快速拿主意，几秒都等不起 */
+  static DANGER_REASON = '有危险，马上拿主意';
+  private lastHurtEventAt = 0;
+  /** 危险还在的这段时间里，等想法时不让身体去张望、捡东西 */
+  private dangerUntil = 0;
   /** 刚从绕路回到这段活：先想一想再动手（放下它的这段时间里情况可能变了，比如等的东西到了、要的已经够了） */
   private resumeCheck: string | null = null;
   private lastDim: string | null = null;
@@ -253,12 +259,36 @@ export class Mind {
     if (!running || (running.source === 'filler' && (this.activity || this.queuedNext))) this.act();
   }
 
+  /**
+   * 眼下要命的处境：只说身体此刻感觉得到的事实和能做的选择，不替它做决定。
+   * - 头那一格是实心方块、刚掉过血：窒息
+   * - 近战怪贴身（3 格内）、刚挨过打、血不多：被围攻
+   * - 在水下、氧气快没了：溺水
+   */
+  private sensedDanger(p: Percept): { key: string; what: string }[] {
+    const s = this.d.adapter.state(), hp = Math.round(s.hp * 10) / 10;
+    const hurtRecently = Date.now() - this.lastHurtEventAt <= 3000;
+    const out: { key: string; what: string }[] = [];
+    const head = this.safe(() => this.d.adapter.blockAt({ x: Math.floor(s.pos.x), y: Math.floor(s.pos.y + 1.62), z: Math.floor(s.pos.z) }), null);
+    if (hurtRecently && headInWall(head)) {
+      out.push({ key: 'danger:suffocate', what: `头被 ${head} 埋住了，正在窒息掉血（血 ${hp}）：马上挖开头这一格（dig_at [0,1,0]），或者退回能站的格子` });
+    }
+    if (s.inWater && s.oxygen <= 5) out.push({ key: 'danger:drown', what: `在水下快没气了（氧气 ${s.oxygen}/20，血 ${hp}）：马上往上游出水面，或者上岸` });
+    const close = p.nearby.hostile.filter((h) => h.dist <= 3 && h.name !== 'creeper');
+    if (close.length && hurtRecently && hp <= 12) {
+      out.push({ key: 'danger:melee', what: `被 ${close.map((h) => `${h.name} ${h.dist}格`).join('、')} 贴身打（血 ${hp}）：现在就定——打（defend；退无可退写 "stay":true）还是跑（flee）` });
+    }
+    return out;
+  }
+
   private perceive() {
     this.lastPerceptAt = Date.now();
     let p: Percept;
     try { p = this.d.perception.update(); } catch { return; }
     const loop = this.progressing() ? null : this.attention.fromLoop(this.recentEnds, this.d.adapter.state().pos);
-    for (const n of [...this.attention.fromPercept(p), ...(loop ? [loop] : [])]) {
+    const dangers = this.safe(() => this.sensedDanger(p), []).map((d) => this.attention.notice(d.key, d.what, 0.9, 4000)).filter((n): n is NonNullable<typeof n> => !!n);
+    if (dangers.length) this.dangerUntil = Date.now() + 6000;
+    for (const n of [...dangers, ...this.attention.fromPercept(p), ...(loop ? [loop] : [])]) {
       this.d.bus.publish('notice', n.level === 'note' ? 'P3' : 'P2', `注意到：${n.what}`, { salience: n.salience, level: n.level });
       if (/^(res|disc|item):/.test(n.key)) { this.d.self.feel({ type: 'novelty', strength: n.salience }); this.speechEventAt = Date.now(); }
     }
@@ -294,11 +324,15 @@ export class Mind {
   private decideWhetherToThink(current: ReturnType<Arbiter['info']>) {
     if (Date.now() < this.backoffUntil) return;
     const urgentNow = this.attention.highest() >= URGENT;
+    const danger = this.attention.peek().some((n) => n.key.startsWith('danger:'));
     if (this.thinking) {
+      // 要命的时候不等慢慢想完：撤掉正在想的，马上快想一次
+      if (danger && this.thinking.reason !== Mind.DANGER_REASON) { this.cancelThinking('danger'); this.staleDropped++; }
       // 正在“瞥一眼”时出了要紧的事：改成认真想
-      if (urgentNow && this.thinking.tier === 'glance') { this.cancelThinking('urgent'); this.staleDropped++; }
+      else if (urgentNow && !danger && this.thinking.tier === 'glance') { this.cancelThinking('urgent'); this.staleDropped++; }
       else return;
     }
+    if (danger) return this.think(Mind.DANGER_REASON, 'glance');
     if (this.order && Date.now() - this.order.at > Mind.ORDER_TTL_MS) {
       this.d.bus.publish('operator_order_end', 'P2', `操作者的指令放了十分钟还没说做完，先撤下：${this.order.text}`, { status: 'expired' });
       this.order = null;
@@ -472,6 +506,8 @@ export class Mind {
   /** 没有活可干时（正在想事情）：原地看看四周，不乱跑也不消耗东西 */
   private idle() {
     if (this.d.arbiter.info() || !this.thinking) return;
+    // 危险还在：别去张望、捡东西（站着等想法，比走到怪堆里强）
+    if (Date.now() < this.dangerUntil) return;
     // 张望被打断（踩空、受伤）后别每一拍都重新开始，隔几秒再说
     if (Date.now() - this.fillerAt < 3000) return;
     this.fillerAt = Date.now();
@@ -710,7 +746,7 @@ export class Mind {
       phase: this.safe(() => this.d.perception.snapshot().time.phase, ''), bedDist: this.bedDist(), doing: this.activity?.what ?? this.lastRecord?.what ?? '' }), undefined);
     const n = this.attention.fromEvent(ev);
     if (n && n.level !== 'note') this.d.bus.publish('notice', 'P2', `注意到：${n.what}`, { salience: n.salience, level: n.level });
-    if (ev.type === 'hurt') { this.d.self.feel({ type: 'hurt', amount: 2 }); this.hurtWhileBusy(); }
+    if (ev.type === 'hurt') { this.lastHurtEventAt = Date.now(); this.d.self.feel({ type: 'hurt', amount: 2 }); this.hurtWhileBusy(); }
     if (ev.type === 'item_new' || ev.type === 'discovery') {
       this.speechEventAt = Date.now();
       this.d.self.feel({ type: 'novelty', strength: ev.type === 'item_new' ? 0.6 : 0.4 });

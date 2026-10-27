@@ -19,6 +19,8 @@ export interface CellCheck { at: [number, number, number]; is: CellIs | CellIs[]
 export interface Predicate {
   hp_below?: number; food_below?: number; oxygen_below?: number;
   in_water?: boolean; in_lava?: boolean; on_ground?: boolean; night?: boolean; dark?: boolean;
+  /** 头那一格是实心方块（被沙砾埋住、卡进墙里，会窒息掉血） */
+  in_wall?: boolean;
   hostile?: { name?: string[]; within: number; fusing?: boolean };
   no_hostile_within?: number;
   has?: { item: string; count: number };
@@ -59,7 +61,7 @@ export interface Sense {
   deathDrop?: { dist: number; leftS: number; count: number } | null;
 }
 
-export const PREDICATE_KEYS = ['hp_below', 'food_below', 'oxygen_below', 'in_water', 'in_lava', 'on_ground', 'night', 'dark', 'hostile', 'no_hostile_within',
+export const PREDICATE_KEYS = ['hp_below', 'food_below', 'oxygen_below', 'in_water', 'in_lava', 'on_ground', 'night', 'dark', 'in_wall', 'hostile', 'no_hostile_within',
   'has', 'lacks', 'doing', 'not_doing', 'cell', 'after_failure', 'hurt_within', 'cover', 'dropped_items', 'drops', 'dim', 'any', 'all', 'not'] as const;
 
 const NAME = /^[a-z0-9_*]{2,60}$/;
@@ -84,7 +86,7 @@ export function validatePredicate(raw: unknown, depth = 0): Predicate | { error:
     if (!num(o[k], 0.5, 21)) return { error: `${k} 要写 1–20 的数` };
     out[k] = o[k];
   }
-  for (const k of ['in_water', 'in_lava', 'on_ground', 'night', 'dark'] as const) if (o[k] !== undefined) {
+  for (const k of ['in_water', 'in_lava', 'on_ground', 'night', 'dark', 'in_wall'] as const) if (o[k] !== undefined) {
     if (typeof o[k] !== 'boolean') return { error: `${k} 要写 true/false` };
     out[k] = o[k];
   }
@@ -183,6 +185,9 @@ const glob = (pattern: string, name: string) => pattern.includes('*')
   ? new RegExp(`^${pattern.split('*').map((s) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`).test(name)
   : pattern === name;
 
+/** 头那一格是不是会让人窒息的实心方块 */
+export function headInWall(name: string | null): boolean { return cellIs(name, 'solid'); }
+
 function cellIs(name: string | null, is: CellIs): boolean {
   if (name === null) return false;
   const air = AIR_BLOCKS.has(name), liquid = LIQUID_BLOCKS.has(name), open = air || isSoftBlock(name);
@@ -208,6 +213,7 @@ export function evalPredicate(p: Predicate, s: Sense): boolean {
   if (p.on_ground !== undefined && (st.onGround !== false) !== p.on_ground) return false;
   if (p.night !== undefined && !st.isDay !== p.night) return false;
   if (p.dark !== undefined && ((s.lightLevel !== null && s.lightLevel <= 7) !== p.dark)) return false;
+  if (p.in_wall !== undefined && headInWall(s.cell([0, 1, 0])) !== p.in_wall) return false;
   if (p.hostile && !s.hostiles.some((h) => h.dist <= p.hostile!.within && (!p.hostile!.name || p.hostile!.name.some((n) => glob(n, h.name)))
     && (p.hostile!.fusing === undefined || !!h.fusing === p.hostile!.fusing))) return false;
   if (p.no_hostile_within !== undefined && s.hostiles.some((h) => h.dist <= p.no_hostile_within!)) return false;

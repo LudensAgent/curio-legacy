@@ -42,9 +42,9 @@ export const flee: Skill<{ distance: number }> = {
 };
 
 // ------------------------------------------------------------------ defend
-export const defend: Skill<{ entityId?: number; target?: string }> = {
+export const defend: Skill<{ entityId?: number; target?: string; stay?: boolean }> = {
   name: 'defend',
-  description: '装备最好的武器去打附近的敌对生物：不写 target 打最近的（不含苦力怕）；target 写生物名专打那一种（打苦力怕要明写 "creeper"：砍一下就后退一步，它嘶嘶响时身体会自己躲开）',
+  description: '装备最好的武器去打附近的敌对生物：不写 target 打最近的（不含苦力怕）；target 写生物名专打那一种（苦力怕要明写 "creeper"，身体会砍一下退一步、嘶嘶响就躲）；退无可退 "stay":true 硬打',
   argsDoc: '{"target"?: "creeper|zombie|skeleton|spider|<敌对生物名>", "entityId"?: 数字}',
   timeoutMs: 20000,
   movement: true,
@@ -52,7 +52,7 @@ export const defend: Skill<{ entityId?: number; target?: string }> = {
     const a = obj(raw);
     const id = Number(a.entityId);
     const target = typeof a.target === 'string' && a.target.trim() ? a.target.trim().toLowerCase().replace(/^minecraft:/, '') : undefined;
-    return { ok: true, args: { ...(Number.isFinite(id) ? { entityId: id } : {}), ...(target ? { target } : {}) } };
+    return { ok: true, args: { ...(Number.isFinite(id) ? { entityId: id } : {}), ...(target ? { target } : {}), ...(a.stay === true ? { stay: true } : {}) } };
   },
   async run(ctx, args) {
     const { adapter, signal, senses } = ctx;
@@ -66,7 +66,11 @@ export const defend: Skill<{ entityId?: number; target?: string }> = {
     await adapter.equipWeapon();
     let hits = 0;
     while (Date.now() < ctx.deadline) {
-      if (adapter.state().hp <= 6) return fail('LOW_HP', `与 ${name} 战斗时生命过低`);
+      if (!args.stay && adapter.state().hp <= 6) {
+        // 不替它决定跑还是打：把局面说清楚（谁贴着、血多少），下一步它自己选
+        const near = senses.perceivedEntities(8).filter((e) => e.kind === 'hostile').map((e) => `${e.name} ${Math.round(e.dist * 10) / 10}格`);
+        return fail('LOW_HP', `血只剩 ${Math.round(adapter.state().hp * 10) / 10}，停手了（打了 ${hits} 下）；身边：${near.join('、') || '没看见怪'}。要跑就 flee；退无可退、跑只会被追着打就 defend {"stay":true} 硬打`);
+      }
       senses.refresh();
       target = senses.perceivedEntities(16).find((e) => e.id === (args.entityId ?? target!.id));
       if (!target) return ok(`${name} 已被击退或消失（攻击 ${hits} 次）`);
