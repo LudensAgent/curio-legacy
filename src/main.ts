@@ -58,7 +58,7 @@ import { MemorySpend, llmSpend, withMemory } from './observer/llm-spend.ts';
 import { SkillLibrary } from './skills/library.ts';
 import { ExperienceMiner } from './methods/experience.ts';
 import type { TaskOutcome } from './arbiter/arbiter.ts';
-import { deathCause, habitName, hazardLesson, learnCandidates, signatureOf, type LearnCandidate, type VitalSample } from './brain/habits.ts';
+import { deathCause, habitName, hazardLesson, learnCandidates, signatureOf, type VitalSample } from './brain/habits.ts';
 import type { MySkillInfo } from './planner/prompt.ts';
 import { ObserverFeed, createObserverHandler, installMineflayerObserver, installTaskObserver, type MineflayerBotLike, type MineflayerObserver } from 'curio-observer';
 
@@ -136,22 +136,6 @@ if (live && audience) {
   live.on('status', (st: LiveStatus) => bus.publish('live_status', st.state === 'error' ? 'P1' : 'P3', `B 站直播间：${st.state}${st.detail ? `（${st.detail}）` : ''}`));
 }
 
-/**
- * 学一个新组合：自主模式下进方法库（简单格式自动补上可观测的验收条件，试验两种情境后才算学会）；
- * 自动习惯必须有可观测验收条件；模型显式提出的组合可另存为宏。
- */
-function learnSkill(raw: unknown, origin: 'model' | 'habit'): { ok: boolean; name?: string; error?: string } {
-  if (!planner.autonomous) return library.learn(raw);
-  const converted = simpleToMethod(raw, adapter, memory, { allowMacro: origin !== 'habit' });
-  if (converted.kind === 'invalid') return { ok: false, error: converted.error };
-  if (converted.kind === 'macro') {
-    const r = library.learn(converted.macro);
-    if (r.ok) bus.publish('skill_learned', 'P3', `推不出可验收的结果，「${converted.macro.name}」先记成组合技能 ${r.name}`, { origin });
-    return r;
-  }
-  return methods.propose(converted.method, { intentId: memory.currentIntent()?.id, projectId: memory.activeProject()?.id });
-}
-
 // Preserve old records, but do not keep executing automatic habits whose only
 // evidence was the old right-click acknowledgement. Explicit macros stay intact.
 adapter.on('spawn', () => {
@@ -166,14 +150,8 @@ adapter.on('spawn', () => {
   }
 });
 
-/** 自主模式的习惯化：同一套步骤成功 3 次以上，自动提成候选方法（每个签名只提一次） */
+/** 已经提过的习惯签名（非自主模式的旧路径用） */
 const proposedHabits = new Set<string>();
-function formHabit(c: LearnCandidate) {
-  proposedHabits.add(c.signature);
-  const r = learnSkill({ name: habitName(c), description: `习惯：${c.goal}`.slice(0, 120), steps: c.steps }, 'habit');
-  if (r.ok) bus.publish('habit', 'P2', `「${c.signature}」做了 ${c.times} 次，养成习惯 ${r.name}（候选，试验通过后才算学会）`, { signature: c.signature, times: c.times });
-  else bus.publish('habit', 'P3', `「${c.signature}」做了 ${c.times} 次，但没能固定成习惯：${r.error}`, { signature: c.signature });
-}
 
 function mySkills(): MySkillInfo[] {
   const stats = memory.skillStats();
@@ -193,7 +171,8 @@ const onGoalEnd = (status: string) => {
   if (status !== 'succeeded') return;
   const c = learnCandidates(memory, knownSigs()).find((x) => x.times >= 3 && !proposedHabits.has(x.signature));
   if (!c) return;
-  if (planner.autonomous) { formHabit(c); return; }
+  // 自主模式不再另养“习惯”：一再重复的同一串动作由后台写技能（smith 的 repeated）统一管，免得两套检测各学一份
+  if (planner.autonomous) return;
   const r = library.learn({ name: habitName(c), description: `习惯：${c.goal}`, steps: c.steps });
   if (r.ok) bus.publish('habit', 'P2', `「${c.signature}」做了 ${c.times} 次，养成习惯 ${r.name}`);
 };

@@ -23,7 +23,7 @@ const dirOk = (dir: string | undefined, from: { x: number; z: number }, to: { x:
 // ------------------------------------------------------------------ use_item
 export const useItem: Skill<{ item: string; on: string; dir?: string }> = {
   name: 'use_item',
-  description: '手持物品右键：对着看得见的方块、水面或岩浆（on 写方块名），或对自己（on:"self"）；对生物用东西（喂、剪、挤奶）是 interact',
+  description: '手持物品右键：对着最近的看得见的某种方块、水面或岩浆（on 写方块名），或对自己（on:"self"，扔东西朝正看着的方向）；要对准确定的那一格用 interact_block（写坐标）；对生物用东西（喂、剪、挤奶）是 interact',
   argsDoc: '{"item": "<物品名>", "on"?: "self | water | lava | <方块名>", "dir"?: "N|NE|E|SE|S|SW|W|NW"}',
   timeoutMs: 30000,
   movement: true,

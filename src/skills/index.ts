@@ -35,7 +35,8 @@ export const SKILLS: Record<string, Skill> = Object.fromEntries(
 );
 
 /** 只给反射层/填充行为使用、不让 LLM 主动规划的技能 */
-export const LLM_HIDDEN = new Set(['unstuck', 'glance']);
+/** 心智不直接用的：unstuck/glance/wander 是身体等想法时的填充动作 */
+export const LLM_HIDDEN = new Set(['unstuck', 'glance', 'wander']);
 
 export function skillCatalog(): string {
   return Object.values(SKILLS)

@@ -69,3 +69,11 @@ test('look 朝方向或坐标转头；dive 只在水里用，气不够就停下�
   assert.equal(low.status, 'failed');
   assert.match(low.summary, /气快不够了.*surface/);
 });
+
+test('心智看到的动作表：wander 是身体的填充动作，不列给心智', async () => {
+  const { movesCatalog } = await import('../src/mind/prompt.ts');
+  const { LLM_HIDDEN } = await import('../src/skills/index.ts');
+  assert.ok(LLM_HIDDEN.has('wander'));
+  assert.ok(!/\bwander\b/.test(movesCatalog(28)));
+  assert.match(movesCatalog(28), /look（/, 'look 在其他动作里');
+});
