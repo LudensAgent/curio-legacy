@@ -120,6 +120,17 @@ export function ownOxygen(b: any): number {
   return Number.isFinite(level) ? Math.max(0, Math.min(20, Math.round(level))) : 20;
 }
 
+/**
+ * 死亡/重生后把自己的憋气值复位成满（300 = 20 格）。服务器只发“变了的”元数据：新生成的玩家憋气是默认满值，不会发包，
+ * mineflayer 却沿用同一个 bot.entity，元数据里还留着淹死前的 0——于是重生在岸上也一直显示氧气 0，防溺水反射反复触发。
+ */
+export function resetOwnOxygen(b: any) {
+  const keys = b?.registry?.entitiesByName?.player?.metadataKeys;
+  const i = Array.isArray(keys) && keys.includes('air_supply') ? keys.indexOf('air_supply') : 1;
+  if (b?.entity?.metadata && typeof b.entity.metadata[i] === 'number') b.entity.metadata[i] = 300;
+  if (b && 'oxygenLevel' in b) b.oxygenLevel = 20;
+}
+
 /** 没有对应工具时，空手挖一格最多肯花多久（超过就当挖不动：黑曜石之类） */
 const HAND_DIG_MAX_MS = 30_000;
 /** 扔掉的东西多久之内算“自己刚扔的”（掉落物标出来；被捡回来时报一句） */
@@ -301,11 +312,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       this.emit('spawn');
     });
     // 死亡会清掉所有状态效果，但服务器不会逐个发“效果结束”：自己清，免得重生后还以为中着毒
-    bot.on('death', () => { clearSelfEffects(bot, this.effectSeenAt); this.newSession(); this.emit('death'); });
+    bot.on('death', () => { clearSelfEffects(bot, this.effectSeenAt); resetOwnOxygen(bot); this.newSession(); this.emit('death'); });
     // Mineflayer 只记包里的时长、不往下数：记下收到的时刻，读的时候自己减
     bot.on('entityEffect', (e: any, eff: any) => { if (e === bot.entity) this.effectSeenAt.set(eff.id, Date.now()); });
     bot.on('entityEffectEnd', (e: any, eff: any) => { if (e === bot.entity) this.effectSeenAt.delete(eff.id); });
-    bot.on('respawn', () => { this.newSession(); this.emit('respawn'); });
+    bot.on('respawn', () => { resetOwnOxygen(bot); this.newSession(); this.emit('respawn'); });
     bot.on('entityHurt', (e: any) => {
       if (e === bot.entity) this.emit('hurt', this.hurtCause());
     });

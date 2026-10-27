@@ -17,3 +17,11 @@ test('without metadata the fallback is still clamped to 0..20', () => {
   assert.equal(ownOxygen({ oxygenLevel: -3, entity: {} }), 0);
   assert.equal(ownOxygen({ entity: {} }), 20);
 });
+
+test('淹死重生后憋气值复位：服务器不会再发满值的元数据，不能沿用死前的 0', async () => {
+  const { ownOxygen, resetOwnOxygen } = await import('../src/adapter/mineflayer.ts');
+  const b: any = { registry: { entitiesByName: { player: { metadataKeys: ['shared_flags', 'air_supply'] } } }, entity: { metadata: [0, 0] }, oxygenLevel: 0 };
+  assert.equal(ownOxygen(b), 0);
+  resetOwnOxygen(b);
+  assert.equal(ownOxygen(b), 20);
+});

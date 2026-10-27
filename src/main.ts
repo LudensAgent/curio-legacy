@@ -438,7 +438,8 @@ adapter.on('hurt', (cause?: string) => {
   // entityHurt 先于生命值更新到达，稍等再读
   // 挨打那一刻盾举没举（只记事实；举不举、什么时候举由它自己学）
   const combat = adapter.combatState?.();
-  const shield = combat?.offHand === 'shield' ? (combat.usingItem ? '举着盾也挨了' : '副手有盾但没举') : '';
+  // 淹水、岩浆、摔落、饿这些盾挡不了，不提
+  const shield = combat?.offHand === 'shield' && !/没气|溺|岩浆|lava|着火|火|摔|饿/.test(cause ?? '') ? (combat.usingItem ? '举着盾也挨了' : '副手有盾但没举') : '';
   setTimeout(() => {
     const st = adapter.state();
     const around = [cause, shield].filter(Boolean).join('；');
