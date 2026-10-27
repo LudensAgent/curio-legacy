@@ -55,6 +55,9 @@ export const useSkill: Skill<{ name: string; args?: Record<string, unknown>; fai
       if (h < 3 && Math.abs(dy) < 1) return { text: '', h: Math.round(h), dy };
       return { text: `（身体实际：往 ${dirName(to.x - from.x, to.z - from.z)} 平移 ${Math.round(h)} 格，高度 ${dy > 0 ? `上升 ${dy}` : dy < 0 ? `下降 ${-dy}` : '没变'}，y ${Math.floor(from.y)}→${Math.floor(to.y)}）`, h: Math.round(h), dy };
     };
+    // 背包的样子：和位置一起看这次到底有没有做任何事
+    const invSig = () => ctx.adapter.state().inventory.map((i) => `${i.name}:${i.count}`).sort().join('|');
+    const invBefore = invSig();
     const bridge = makeBridge(ctx);
     // 开工前的样子：给判定代码对照（做完以后真的变了没有）
     const before = b.verify ? await bridge('state', []).catch(() => null) : null;
@@ -78,7 +81,12 @@ export const useSkill: Skill<{ name: string; args?: Record<string, unknown>; fai
       }
       const judged = await verifyRun(b, bridge, { before, result: r.result ?? null, args: input }, ctx);
       if (judged) return fail('ERROR', `代码技能「${b.name}」v${b.version ?? 1} 说做完了，但${judged}${m.text}`, { ...data, result: r.result, verified: false, displacement: { horizontal: m.h, dy: m.dy } });
-      return ok(`代码技能「${b.name}」做完了${m.text}${r.result !== null && r.result !== undefined ? `：${JSON.stringify(r.result).slice(0, 160)}` : ''}`, { ...data, result: r.result, displacement: { horizontal: m.h, dy: m.dy } });
+      // 代码没报错，但身体一点没动、背包没变、也没挖没放：说清楚这次什么都没做（可能是条件不满足就跳过了，也可能是技能没起作用），别当成“做成了”
+      const acted = (r.trace ?? []).some((t: string) => /^(digAt|placeAt|stepTo|moveTo|goto|attack|useItem|useOn|craft|smelt|equip|toss|eat|interact|swim|jump|pillar)/.test(String(t)) && / → /.test(String(t)) && !/"ok":false/.test(String(t)));
+      const still = Math.abs(ctx.adapter.state().pos.x - from.x) + Math.abs(ctx.adapter.state().pos.z - from.z) < 0.3 && Math.floor(ctx.adapter.state().pos.y) === Math.floor(from.y);
+      const noop = still && invSig() === invBefore && !acted;
+      const noopText = noop ? '（身体这次什么都没做：没挪动、背包没变、没挖也没放。是条件不满足跳过了，还是技能没起作用，看上面的结果；要的事并没有发生）' : '';
+      return ok(`代码技能「${b.name}」做完了${m.text}${r.result !== null && r.result !== undefined ? `：${JSON.stringify(r.result).slice(0, 160)}` : ''}${noopText}`, { ...data, result: r.result, displacement: { horizontal: m.h, dy: m.dy }, ...(noop ? { noop: true } : {}) });
     }
     const done: string[] = [];
     for (const [i, st] of b.steps.entries()) {
