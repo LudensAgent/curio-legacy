@@ -102,10 +102,10 @@ export const useGui: Skill<{ target: string | Vec3Like; ops: GuiOp[] }> = {
 const showTrades = (t: TradeView[]) => t.map((x) => `#${x.index} ${x.give.join(' + ')} → ${x.get}${x.disabled ? '（已售罄）' : `（${x.uses}/${x.maxUses}）`}`).join('；');
 
 // ------------------------------------------------------------------ trade
-export const trade: Skill<{ who: string; index: number | null; times: number }> = {
+export const trade: Skill<{ who: string; id?: number; index: number | null; times: number }> = {
   name: 'trade',
-  description: '和看得见的村民/流浪商人交易：不带 index 先看他卖什么收什么，带 index 按那条交易做 times 次',
-  argsDoc: '{"who"?:"villager|wandering_trader","index"?:n,"times"?:1-12}',
+  description: '和看得见的村民/流浪商人交易：不带 index 先看他卖什么收什么（价格是现价），带 index 按那条交易做 times 次；交易表是每一位各自的，按表交易时用 id 指定同一位',
+  argsDoc: '{"who"?:"villager|wandering_trader","id"?:<实体id>,"index"?:n,"times"?:1-12}',
   timeoutMs: 40000,
   movement: true,
   outcomeBoundary: true,
@@ -119,25 +119,42 @@ export const trade: Skill<{ who: string; index: number | null; times: number }> 
     }
     const times = a.times === undefined ? 1 : Number(a.times);
     if (!Number.isInteger(times) || times < 1 || times > 12) return { ok: false, error: 'times 必须是 1-12' };
-    return { ok: true, args: { who, index, times } };
+    let id: number | undefined;
+    if (a.id !== undefined && a.id !== null) {
+      id = Number(a.id);
+      if (!Number.isInteger(id) || id < 0) return { ok: false, error: 'id 必须是看到的实体 id' };
+    }
+    return { ok: true, args: { who, index, times, ...(id !== undefined ? { id } : {}) } };
   },
   async run(ctx, args) {
     const { adapter, senses, signal } = ctx;
     if (!adapter.tradeWith) return fail('ERROR', '当前适配器不支持交易');
     senses.refresh();
     const match = (n: string) => n === args.who || n.endsWith(`_${args.who}`);
-    const target = senses.perceivedEntities(24).filter((e) => match(e.name)).sort((a, b) => a.dist - b.dist)[0];
-    if (!target) return fail('NOT_FOUND', `看不见 ${args.who}`);
-    const who = `${target.name}${target.traits ? `（${target.traits}）` : ''}`;
+    // 一眼看得出不交易的（幼崽、傻子、无业）排到后面；给了 id 就只找那一位
+    const unlikely = (e: { traits?: string }) => /幼崽|傻子|无业/.test(e.traits ?? '');
+    const seen = senses.perceivedEntities(24).filter((e) => e.perception !== 'heard' && (args.id !== undefined ? e.id === args.id : match(e.name)))
+      .sort((a, b) => Number(unlikely(a)) - Number(unlikely(b)) || a.dist - b.dist);
+    if (!seen.length) return fail('NOT_FOUND', args.id !== undefined ? `看不见 id=${args.id} 的交易对象` : `看不见 ${args.who}`);
+    const others = (exclude: number) => seen.filter((e) => e.id !== exclude).slice(0, 4).map((e) => `id=${e.id} ${e.name}${e.traits ? `（${e.traits}）` : ''} ${Math.round(e.dist)}格`).join('；');
+    let target = seen[0];
+    let who = `${target.name}${target.traits ? `（${target.traits}）` : ''}`;
     try {
-      const r = await adapter.tradeWith(target.id, args.index, args.times, signal);
+      let r = await adapter.tradeWith(target.id, args.index, args.times, signal);
+      // 只看交易表时，这位打不开交易界面就问问旁边下一位（给了 index 的交易表是那一位的，不换人）
+      for (const next of seen.slice(1, 3)) {
+        if (r.ok || args.index !== null || args.id !== undefined || !/NO_TRADE_WINDOW/.test(String(r.reason))) break;
+        target = next; who = `${target.name}${target.traits ? `（${target.traits}）` : ''}`;
+        r = await adapter.tradeWith(target.id, args.index, args.times, signal);
+      }
       const list = r.trades.length ? `交易表：${showTrades(r.trades)}` : '';
       if (!r.ok) {
         const code = r.reason?.startsWith('NOT_ENOUGH') ? 'MISSING_MATERIALS' : r.reason === 'TARGET_GONE' ? 'TARGET_GONE' : 'ERROR';
-        return fail(code, `和 ${who} 交易没成：${r.reason}。${list}`, { trades: r.trades, villager: target.id });
+        const alt = others(target.id);
+        return fail(code, `和 ${who}（id=${target.id}）交易没成：${r.reason}。${list}${alt ? `${list ? '；' : ''}旁边还有：${alt}（trade {"id":…} 指定哪一位）` : ''}`, { trades: r.trades, villager: target.id });
       }
-      if (args.index === null) return ok(`${who} 的${list || '交易表是空的'}`, { trades: r.trades, villager: target.id });
-      return ok(`和 ${who} 按 #${args.index} 交易了 ${r.traded} 次。${list}`, { trades: r.trades, traded: r.traded, villager: target.id });
+      if (args.index === null) return ok(`${who}（id=${target.id}）的${list || '交易表是空的'}；要按某条交易写 trade {"id":${target.id},"index":n}`, { trades: r.trades, villager: target.id });
+      return ok(`和 ${who}（id=${target.id}）按 #${args.index} 交易了 ${r.traded} 次。${list}`, { trades: r.trades, traded: r.traded, villager: target.id });
     } catch (e) {
       if (isAbort(e)) throw e;
       return fail(codeFromError(e), `交易出错：${(e as Error).message}`);

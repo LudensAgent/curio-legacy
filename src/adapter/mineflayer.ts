@@ -1532,9 +1532,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const ench = this.itemEnchants(it) ?? (() => { try { return it.storedEnchants?.length ? it.storedEnchants.map((e: any) => `${e.name} ${e.lvl}`) : undefined; } catch { return undefined; } })();
       return `${it.name}×${it.count}${ench ? `（${ench.join('、')}）` : ''}`;
     };
+    // 第一样要付的东西按现价算：村民会按需求涨价、按声望/治愈打折，交易表里的基础数量不是真正要付的
+    const price = (t: any) => {
+      const it = t.inputItem1;
+      if (!it) return '';
+      const real = Number.isFinite(t.realPrice) ? t.realPrice : it.count;
+      return real === it.count ? label(it) : label({ ...it, name: it.name, count: real, nbt: it.nbt }) + `（原价 ${it.count}）`;
+    };
     return (v.trades ?? []).map((t: any, index: number) => ({
       index,
-      give: [t.inputItem1, t.inputItem2].filter(Boolean).map(label),
+      give: [price(t), t.hasItem2 === false ? null : t.inputItem2 ? label(t.inputItem2) : null].filter(Boolean) as string[],
       get: label(t.outputItem),
       uses: t.nbTradeUses ?? 0,
       maxUses: t.maximumNbTradeUses ?? 0,
@@ -1557,7 +1564,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     }
     let v: any;
     try {
-      v = await this.afterAction(() => raceAbort(b.openVillager(entity), signal, 8000, () => {}), check);
+      // mineflayer 的 openVillager 只认 villager 实体类型；流浪商人打开的是同一种交易界面，借村民的类型号过一下它的检查
+      const villagerType = this.mcData.entitiesByName?.villager?.id;
+      const asVillager = entity.name === 'villager' || villagerType === undefined ? entity : Object.create(entity, { entityType: { value: villagerType } });
+      v = await this.afterAction(() => raceAbort(b.openVillager(asVillager), signal, 8000, () => {}), check);
     } catch (e) {
       if (e instanceof AbortedError) throw e;
       return { ok: false, reason: 'NO_TRADE_WINDOW（幼年村民、无业村民和傻子不交易）', trades: [], traded: 0 };
@@ -1571,9 +1581,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (t.tradeDisabled) return { ok: false, reason: 'TRADE_LOCKED（这条交易用完了，村民要回工作站补货）', trades, traded: 0 };
       const have = (it: any) => b.inventory.items().filter((i: any) => i.type === it.type).reduce((n: number, i: any) => n + i.count, 0);
       const out = t.outputItem;
-      const affordable = Math.min(...[t.inputItem1, t.inputItem2].filter(Boolean).map((it: any) => Math.floor(have(it) / Math.max(1, it.count))));
+      const cost = [{ it: t.inputItem1, n: Number.isFinite(t.realPrice) ? t.realPrice : t.inputItem1?.count }, ...(t.hasItem2 && t.inputItem2 ? [{ it: t.inputItem2, n: t.inputItem2.count }] : [])].filter((c) => c.it);
+      const affordable = Math.min(...cost.map((c) => Math.floor(have(c.it) / Math.max(1, c.n))));
       const n = Math.min(times, affordable, Math.max(0, (t.maximumNbTradeUses ?? 99) - (t.nbTradeUses ?? 0)));
-      if (n <= 0) return { ok: false, reason: `NOT_ENOUGH:${[t.inputItem1, t.inputItem2].filter(Boolean).map((it: any) => `${it.name}×${it.count}`).join('+')}`, trades, traded: 0 };
+      if (n <= 0) return { ok: false, reason: `NOT_ENOUGH:${cost.map((c) => `${c.it.name}×${c.n}（有 ${have(c.it)}）`).join('+')}`, trades, traded: 0 };
       const before = have(out);
       await this.afterAction(() => b.trade(v, index, n), check);
       await this.afterAction(() => sleep(250, signal), check);

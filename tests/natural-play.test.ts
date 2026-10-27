@@ -152,6 +152,30 @@ test('trade 适配层：先看交易表，按序号交易并按背包变化确�
   assert.match((await a.tradeWith(9, 1, 1, new AbortController().signal)).reason, /TRADE_LOCKED/);
 });
 
+test('trade 适配层：按现价（涨价/打折后）算能做几次；流浪商人也能打开交易界面', async () => {
+  const id = (n: string) => data.itemsByName[n].id;
+  const inv = new Map<number, number>([[id('emerald'), 10]]);
+  const trades: any[] = [
+    { inputItem1: { name: 'emerald', count: 1, type: id('emerald') }, hasItem2: false, realPrice: 4, outputItem: { name: 'bread', count: 6, type: id('bread') }, nbTradeUses: 0, maximumNbTradeUses: 12, tradeDisabled: false },
+  ];
+  let opened: any = null;
+  const bot: any = {
+    entity: { position: new Vec3(0, 64, 0) }, game: { dimension: 'overworld' },
+    entities: { 9: { isValid: true, name: 'wandering_trader', entityType: 999, position: new Vec3(1, 64, 1) } },
+    inventory: { slots: [], selectedItem: null, items: () => [...inv].filter(([, n]) => n > 0).map(([type, count]) => ({ type, count, name: data.items[type].name })) },
+    async openVillager(e: any) { opened = e; return { trades, close() {} }; },
+    async trade(_v: any, i: number, times: number) { const t = trades[i]; inv.set(t.inputItem1.type, inv.get(t.inputItem1.type)! - t.realPrice * times); inv.set(t.outputItem.type, (inv.get(t.outputItem.type) ?? 0) + t.outputItem.count * times); },
+  };
+  const a = adapter() as any; a.bot = bot; a.connectedFlag = true; a.moveTo = async () => {};
+  const look = await a.tradeWith(9, null, 1, new AbortController().signal);
+  assert.equal(look.ok, true, look.reason);
+  assert.equal(opened.entityType, data.entitiesByName.villager.id, '借村民的类型号打开');
+  assert.deepEqual(look.trades[0].give, ['emerald×4（原价 1）']);
+  const r = await a.tradeWith(9, 0, 5, new AbortController().signal);
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.traded, 2, '10 个绿宝石按现价 4 只够两次');
+});
+
 import { trade as tradeSkill, useGui } from '../src/skills/gui.ts';
 
 test('use_gui / trade 参数检查', () => {
