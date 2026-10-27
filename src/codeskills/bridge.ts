@@ -15,11 +15,12 @@ import type { SandboxHandler } from './sandbox.ts';
 export const READ_RADIUS = 48;
 
 /** 给模型看的 api 说明（写代码技能、后台改进时都用这一份） */
-export const API_DOC = `代码是一个 async 函数体，参数 api 和 args 已经给好（args 是 use_skill 的 args；恢复时 args.failure = {skill,args,code,summary} 是刚失败的那一步）。所有 api 调用都要 await，返回普通 JSON。
+export const API_DOC = `代码是一个 async 函数体，参数 api 和 args 已经给好（args 是 use_skill 的 args；恢复时 args.failure = {skill,args,code,summary,target?,position} 是刚失败的那一步：target 是那一步实际要去/要动的坐标（动作算出来的，比如 goto "NW 20" 的落点），position 是失败时人在哪）。所有 api 调用都要 await，返回普通 JSON。
 - api.state() → {pos, feet:{x,y,z}, hp, food, oxygen, onGround, inWater, inLava, isDay, dim, yaw, facing, held, inventory:[{name,count}]}
 - api.blockAt(x,y,z) → {name, kind}；kind = open（空气、草、雪层，能穿过）| solid | liquid | unknown；只看得到身边 48 格
 - api.region(x1,y1,z1,x2,y2,z2) → {min, size:[sx,sy,sz], palette:[名字], kinds:[同上], data:[下标]}；第 i 格：i = (y-min.y)*sx*sz + (z-min.z)*sx + (x-min.x)；最多 40000 格
-- api.entities(半径≤32) → 看见/听见的生物 [{id,name,kind,dist,pos,fusing?}]
+- api.entities(半径≤32) → 看见/听见的实体 [{id,name,kind,dist,pos,fusing?}]（kind=item 的是掉落物，name 形如 item:cobblestone）
+- api.drops(半径≤32) → 地上的掉落物 [{id,item,count?,pos,dist,seen,ageSec?}]：seen=true 是眼前看得见的；seen=false 是刚才亲眼见过、现在不在视野里（记得的位置，ageSec 秒前）。扔完东西核对“走开了没有、有没有被捡回来”就看这个
 - api.nearestLand() → 最近亲眼见过的、能站的干地 {stand:{x,y,z} 站上去时脚的位置, dir, dist, dy 比脚高几格} 或 null（和 surface、上岸判断用的是同一个标准：脚下实心、上面两格是空气、不是水底）
 - api.stepTo(x,y,z) 迈到相邻一格（平走、上一级、下一级）｜api.digAt(x,y,z)｜api.placeAt(x,y,z,"方块名|any") → {ok,code,summary}
 - api.moveTo(x,y,z,range,{sprint,avoid}?) 用寻路走过去（默认走路；sprint:true 跑，快但很耗饥饿；avoid:["方块名"] 这一趟绕开这些方块）→ {ok,error?,pos}｜api.act("动作名",{参数}) 用已有动作（goto、dig_at、defend…）→ {ok,code,summary}
@@ -132,6 +133,18 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
         return ctx.senses.perceivedEntities(r).map((e) => ({ id: e.id, name: e.name, kind: e.kind, dist: Math.round(e.dist * 10) / 10, pos: e.pos,
           ...(e.perception ? { how: e.perception } : {}), ...(e.velocity ? { velocity: { x: r2(e.velocity.x), y: r2(e.velocity.y), z: r2(e.velocity.z) } } : {}),
           ...(e.height ? { height: e.height } : {}), ...(typeof e.hp === 'number' ? { hp: e.hp } : {}), ...(e.fusing ? { fusing: true } : {}) }));
+      }
+      case 'drops': {
+        // 地上的掉落物：眼前看得见的，加上刚才亲眼见过、转身后不在视野里的（记得掉在哪）。不透视
+        const r = Math.max(1, Math.min(32, Number(a[0]) || 16));
+        const here = ctx.adapter.state().pos;
+        ctx.senses.refresh();
+        const seen = ctx.senses.perceivedEntities(r).filter((e) => e.kind === 'item').map((e) => ({ id: e.id, item: e.name.replace(/^item:/, ''), count: (e as any).count ?? 1, pos: e.pos, dist: Math.round(e.dist * 10) / 10, seen: true }));
+        const ids = new Set(seen.map((d) => d.id));
+        const remembered = (ctx.senses.recentDrops?.(120_000) ?? []).filter((d) => !ids.has(d.id))
+          .map((d) => ({ id: d.id, item: d.name, pos: d.pos, dist: Math.round(Math.hypot(d.pos.x - here.x, d.pos.y - here.y, d.pos.z - here.z) * 10) / 10, seen: false, ageSec: Math.round(d.ageMs / 1000) }))
+          .filter((d) => d.dist <= r);
+        return [...seen, ...remembered].sort((x, y) => x.dist - y.dist);
       }
       case 'nearestLand': {
         const s = ctx.adapter.state();

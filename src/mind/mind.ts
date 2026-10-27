@@ -91,6 +91,22 @@ const QUICK = new Set(['craft', 'eat', 'place_torch', 'pickup_items', 'equip', '
  * - 每段活结束都留下记录（得到了什么、和预想比如何），模型据此写窍门、修正窍门的可信度、给实验下结论；
  * - 情绪（精力/无聊/烦躁/满足/好奇）由真实经历推动，影响它想做什么；议程和日记让它跨越几个小时、重启之后仍接着原来的心思玩。
  */
+/**
+ * 交给恢复技能的“刚失败的那一步”：除了动作、参数、失败码和一句话，还带上动作自己算出来的目标坐标
+ * （比如 goto "NW 20" 实际要去的那一格）和失败时人在哪——以前只有一句话，恢复技能和它的核对都“没有目标坐标”
+ */
+export function failureFor(step: { skill: string; args?: unknown }, result: { failureCode?: string | null; summary: string; data?: unknown }, pos: { x: number; y: number; z: number }) {
+  const d = (result.data ?? {}) as Record<string, any>;
+  const xyz = (v: any) => v && [v.x, v.y, v.z].every((n) => Number.isFinite(Number(n))) ? { x: Math.round(Number(v.x) * 10) / 10, y: Math.round(Number(v.y) * 10) / 10, z: Math.round(Number(v.z) * 10) / 10 } : undefined;
+  const target = xyz(d.target) ?? xyz(d.targetCell) ?? xyz(d.pos) ?? xyz(d.blockTarget?.pos);
+  return {
+    skill: step.skill, args: step.args ?? {}, code: result.failureCode ?? null, summary: result.summary.slice(0, 160),
+    ...(target ? { target } : {}),
+    position: xyz(d.position) ?? xyz(pos)!,
+    ...(d.waterAhead !== undefined ? { waterAhead: !!d.waterAhead } : {}),
+  };
+}
+
 export class Mind {
   activity: Activity | null = null;
   suspended: Activity[] = [];
@@ -749,7 +765,7 @@ export class Mind {
       if (b) {
         a.adaptations.push(`skill:${b.name}`);
         a.awaitingRecovery = b.name;
-        a.steps.splice(Math.max(0, a.index - 1), 0, { skill: 'use_skill', args: { name: b.name, failure: { skill: step.skill, args: step.args ?? {}, code: result.failureCode ?? null, summary: result.summary.slice(0, 160) } }, optional: true });
+        a.steps.splice(Math.max(0, a.index - 1), 0, { skill: 'use_skill', args: { name: b.name, failure: failureFor(step, result, this.d.adapter.state().pos) }, optional: true });
         a.index = Math.max(0, a.index - 1);
         a.consecutiveFailures = 0;
         this.d.self.think(`${step.skill} 没成，照学会的「${b.name}」试试`, 'outcome');

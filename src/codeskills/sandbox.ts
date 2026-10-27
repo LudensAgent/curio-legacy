@@ -16,11 +16,11 @@ const WORKER = new URL('./sandbox-worker.mjs', import.meta.url);
 export type SandboxHandler = (method: string, args: unknown[]) => Promise<unknown>;
 export interface SandboxResult { ok: boolean; result?: unknown; error?: string; line?: number; calls: number; trace: string[]; logs: string[] }
 
-export const API_METHODS = ['useSkill', 'state', 'blockAt', 'region', 'entities', 'nearestLand', 'act', 'moveTo', 'stepTo', 'digAt', 'placeAt', 'look', 'sleep',
+export const API_METHODS = ['useSkill', 'state', 'blockAt', 'region', 'entities', 'drops', 'nearestLand', 'act', 'moveTo', 'stepTo', 'digAt', 'placeAt', 'look', 'sleep',
   'move', 'lookAt', 'attack', 'equip', 'shield', 'draw', 'release', 'shoot'] as const;
 export const MAX_CODE = 8000;
 /** 判定代码（verify）只能看、不能动：这些读的 api */
-export const VERIFY_METHODS = ['state', 'blockAt', 'region', 'entities', 'nearestLand'] as const;
+export const VERIFY_METHODS = ['state', 'blockAt', 'region', 'entities', 'drops', 'nearestLand'] as const;
 export const MAX_VERIFY = 2000;
 
 const wrap = (code: string) => `const __user = async (api, args) => {\n${code}\n};`;

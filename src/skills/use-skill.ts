@@ -112,7 +112,7 @@ export const useSkill: Skill<{ name: string; args?: Record<string, unknown>; fai
 
 /**
  * 跑技能自己带的判定（verify）：做完以后看一眼世界，确认真的做成了。
- * 只能读（state/blockAt/region/entities/nearestLand），最多几秒。返回 null = 判定通过（或者这份技能没写判定）；
+ * 只能读（state/blockAt/region/entities/drops/nearestLand），最多几秒。返回 null = 判定通过（或者这份技能没写判定）；
  * 否则返回一句说明，算这次没做成——代码没抛错不等于做成了。
  */
 async function verifyRun(b: { name: string; verify?: string }, bridge: SandboxHandler, input: { before: unknown; result: unknown; args: unknown },
