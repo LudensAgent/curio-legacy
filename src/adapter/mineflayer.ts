@@ -125,6 +125,11 @@ const HAND_DIG_MAX_MS = 30_000;
 /** 扔掉的东西多久之内算“自己刚扔的”（掉落物标出来；被捡回来时报一句） */
 const DISCARD_MS = 3 * 60_000;
 
+/** 船：每刻桨力（极速 = 桨力 ×10 格/刻；0.028 ≈ 5.6 格/秒，原版满桨 0.04 ≈ 8 格/秒）、船头每刻最多转多少、方向差多少以内才划 */
+const BOAT_THRUST = 0.028;
+const BOAT_TURN = (9 * Math.PI) / 180;
+const BOAT_ROW_ANGLE = (35 * Math.PI) / 180;
+
 export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   bot: any = null;
   mcData: any = null;
@@ -2797,8 +2802,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
 
   /**
    * 操控载具。马、猪等坐骑由服务器计算运动，只需发送方向输入；
-   * 船的运动由客户端计算（原版就是这样），Mineflayer 不模拟，所以这里按简化的船只运动学自己推进并上报位置：
-   * 在水面上加速到约 8 格/秒，前方是陆地/方块就停下（靠岸），离目标 2 格内算到达。
+   * 船的运动由客户端计算（原版就是这样），Mineflayer 不模拟，所以这里照原版船的运动学自己推进并上报位置：
+   * 每刻先乘水的阻力 0.9 再加一点桨力，船头每刻最多转 BOAT_TURN；桨力比原版小，极速约 5.6 格/秒（原版满桨 8 格/秒），
+   * 像真人那样不总是满桨：方向差得多时先停桨转向，快到终点时提前收桨滑过去。前方是陆地/方块就停下（靠岸）。
    */
   async ride(target: { x: number; z: number }, signal: AbortSignal, opts: { timeoutMs: number; stop?: () => boolean; via?: { x: number; z: number }[]; arriveWithin?: number }): Promise<ActionResult & { arrived: boolean; blocked?: boolean; moved: number }> {
     const check = this.actionCheckpoint(signal);
@@ -2816,7 +2822,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const arriveWithin = Math.max(0.3, opts.arriveWithin ?? 2);
     let leg = 0;
     const passable = (blk: any) => !blk || blk.boundingBox === 'empty';
-    let speed = 0;
+    // 船速是一个向量（会滑行），船头朝向单独转（转得慢，像真的划船）
+    let vx = 0, vz = 0;
+    let boatYaw = Number.isFinite(v.yaw) ? v.yaw : Math.atan2(-(target.x - v.position.x), -(target.z - v.position.z));
+    let lastProgressAt = Date.now(), progressFrom = v.position.clone();
     // 服务器不认可上报的位置（撞到东西 / moved wrongly）时会回发 vehicle_move 把船拉回去：
     // 以服务器为准重新同步，否则本地以为在前进、服务器那边船其实没动，越错越远
     const Vec3c = require('vec3').Vec3;
@@ -2824,7 +2833,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (!ownsControls() || !isBoat || b.vehicle !== v || !Number.isFinite(pk?.x)) return;
       v.position = new Vec3c(pk.x, pk.y, pk.z);
       b.entity.position = new Vec3c(pk.x, pk.y + 0.4, pk.z);
-      speed = 0;
+      vx = 0; vz = 0;
     };
     if (isBoat) b._client.on('vehicle_move', resync);
     // Mineflayer stops emitting player physicsTick while mounted, and boats
@@ -2854,7 +2863,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         if (opts.stop?.()) return { ok: true, arrived: false, moved: v.position.distanceTo(start) };
         const p = v.position;
         // 依次经过拐点：到拐点 1 格内就转向下一个
-        while (leg < via.length && Math.hypot(via[leg].x - p.x, via[leg].z - p.z) <= 1) leg++;
+        while (leg < via.length && Math.hypot(via[leg].x - p.x, via[leg].z - p.z) <= 1.5) leg++;
         const goal = leg < via.length ? via[leg] : target;
         const dx = goal.x - p.x, dz = goal.z - p.z, dist = Math.hypot(dx, dz);
         if (leg >= via.length && dist <= arriveWithin) return { ok: true, arrived: true, moved: p.distanceTo(start) };
@@ -2865,22 +2874,39 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           await this.afterAction(tick, check);
           continue;
         }
-        // 快到终点时收桨减速，停得准（要贴着上岸点停）
-        speed = Math.min(0.4, speed + 0.04, leg >= via.length ? Math.max(0.1, dist * 0.2) : 0.4);
-        const step = Math.min(speed, dist);
-        const nx = p.x + (dx / dist) * step, nz = p.z + (dz / dist) * step;
+        // 船头慢慢转向目标（每刻最多 BOAT_TURN）
+        const diff = Math.atan2(Math.sin(yaw - boatYaw), Math.cos(yaw - boatYaw));
+        const turn = Math.max(-BOAT_TURN, Math.min(BOAT_TURN, diff));
+        boatYaw += turn;
+        // 划桨：方向差太多先停桨转向；快到终点按滑行距离（速度×9 刻）提前收桨
+        const speed = Math.hypot(vx, vz);
+        const last = leg >= via.length;
+        const rowing = Math.abs(diff) < BOAT_ROW_ANGLE && (!last || dist > speed * 9 + arriveWithin * 0.5);
+        vx *= 0.9; vz *= 0.9; // 水的阻力
+        if (rowing) { vx += -Math.sin(boatYaw) * BOAT_THRUST; vz += -Math.cos(boatYaw) * BOAT_THRUST; }
+        const sp = Math.hypot(vx, vz);
         const Vec3 = require('vec3').Vec3;
-        const feet = b.blockAt(new Vec3(nx + (dx / dist) * 0.7, p.y, nz + (dz / dist) * 0.7));
-        const under = b.blockAt(new Vec3(nx, p.y - 0.2, nz));
-        if (!passable(feet) && !water(feet)) return { ok: true, arrived: false, blocked: true, moved: p.distanceTo(start) }; // 前面是岸或障碍：靠岸
-        if (!water(under) && !water(b.blockAt(new Vec3(nx, p.y - 1, nz)))) return { ok: true, arrived: false, blocked: true, moved: p.distanceTo(start) }; // 船不能上岸行驶
-        const deg = ((Math.PI - yaw) * 180) / Math.PI;
+        let nx = p.x, nz = p.z;
+        if (sp > 1e-4) {
+          const ux = vx / sp, uz = vz / sp;
+          nx = p.x + vx; nz = p.z + vz;
+          const feet = b.blockAt(new Vec3(nx + ux * 0.7, p.y, nz + uz * 0.7));
+          const under = b.blockAt(new Vec3(nx, p.y - 0.2, nz));
+          if (!passable(feet) && !water(feet)) return { ok: true, arrived: false, blocked: true, moved: p.distanceTo(start) }; // 前面是岸或障碍：靠岸
+          if (!water(under) && !water(b.blockAt(new Vec3(nx, p.y - 1, nz)))) return { ok: true, arrived: false, blocked: true, moved: p.distanceTo(start) }; // 船不能上岸行驶
+        }
+        // 十秒都没挪开两格（顶着东西、原地打转）：当作走不通，交给上层重新找路
+        if (Math.hypot(nx - progressFrom.x, nz - progressFrom.z) > 2) { progressFrom = new Vec3(nx, p.y, nz); lastProgressAt = Date.now(); }
+        else if (Date.now() - lastProgressAt > 10000) return { ok: true, arrived: false, blocked: true, moved: p.distanceTo(start) };
+        const deg = ((Math.PI - boatYaw) * 180) / Math.PI;
         v.position = new Vec3(nx, p.y, nz);
-        v.yaw = yaw;
+        v.yaw = boatYaw;
         b.entity.position = new Vec3(nx, p.y + 0.4, nz);
-        b.entity.yaw = yaw;
+        b.entity.yaw = boatYaw;
+        // 桨的动画：往前划两支桨都动；只转向时划一边（原版：左桨 = 右转或前进，右桨 = 左转或前进）
+        const turningLeft = turn > 1e-3, turningRight = turn < -1e-3;
         await this.afterAction(async () => {
-          b._client.write('steer_boat', { leftPaddle: true, rightPaddle: true });
+          b._client.write('steer_boat', { leftPaddle: rowing || turningRight, rightPaddle: rowing || turningLeft });
           b._client.write('vehicle_move', { x: nx, y: p.y, z: nz, yaw: deg, pitch: 0 });
         }, check);
         await this.afterAction(tick, check);
