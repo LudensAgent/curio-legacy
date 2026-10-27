@@ -578,7 +578,7 @@ async function rescue(): Promise<{ ok: boolean; error?: string; to?: SurfaceSpot
       return { ok: false, error: `RCON 失败：${e?.message ?? e}`, from };
     }
     // 游戏里给所有人（主播的旁观客户端也在内）弹一行字幕、发一条聊天；失败不影响救援本身
-    const notice = '主包的大手发力，拯救了鱼鱼';
+    const notice = '紧急救援：主包的大手发力，拯救了鱼鱼';
     for (const cmd of [
       'title @a times 10 70 20',
       `title @a subtitle ${JSON.stringify({ text: notice, color: 'gold', bold: true })}`,
