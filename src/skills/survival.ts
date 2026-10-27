@@ -393,6 +393,30 @@ export const pickupItems: Skill<{ radius: number; item?: string }> = {
         senses.refresh();
         item = senses.perceivedEntities(args.radius).find((e) => e.kind === 'item' && (chased.get(e.id) ?? 0) < 3 && wanted(e.name, e.pos));
       }
+      // 眼前没有，但刚才亲眼看见过掉在哪（转过身、走开几步就看不到了）：走回那里低头看一眼，走到跟前会自动捡起
+      if (!item && senses.recentDrops) {
+        const here = adapter.state().pos;
+        const mem = senses.recentDrops(120_000)
+          .filter((d) => wanted(d.name) && (chased.get(d.id) ?? 0) < 2 && Math.hypot(d.pos.x - here.x, d.pos.y - here.y, d.pos.z - here.z) <= args.radius + 8)
+          .sort((a, b) => Math.hypot(a.pos.x - here.x, a.pos.z - here.z) - Math.hypot(b.pos.x - here.x, b.pos.z - here.z))[0];
+        if (mem) {
+          chased.set(mem.id, (chased.get(mem.id) ?? 0) + 1);
+          try {
+            await adapter.moveTo({ kind: 'near', pos: mem.pos, range: 1 }, { signal, timeoutMs: 8000 });
+            visits++;
+            ctx.progress(Math.min(1, visits / 10), `回去捡刚才看见的 ${mem.name}`);
+          } catch (e) { if (isAbort(e)) throw e; }
+          const eye = adapter.eye();
+          if (eye) {
+            const dx = mem.pos.x - eye.x, dz = mem.pos.z - eye.z, dy = mem.pos.y + 0.2 - eye.y;
+            try { await adapter.look(Math.atan2(-dx, -dz), Math.atan2(dy, Math.max(0.3, Math.hypot(dx, dz))), signal); } catch (e) { if (isAbort(e)) throw e; }
+          }
+          await sleep(250, signal);
+          senses.refresh();
+          if (!senses.perceivedEntities(args.radius).some((e) => e.id === mem.id)) senses.forgetDrop?.(mem.id); // 到跟前也没看见：被捡走了或者没了
+          continue;
+        }
+      }
       if (!item) break;
       chased.set(item.id, (chased.get(item.id) ?? 0) + 1);
       tried.add(item.id);

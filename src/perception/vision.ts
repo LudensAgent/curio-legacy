@@ -211,6 +211,8 @@ export class Vision {
   heard: SeenEntity[] = [];
   /** 最近亲眼看见的生物及其最后位置（3 分钟） */
   sightings = new Map<number, { id: number; name: string; kind: string; pos: Vec3Like; at: number }>();
+  /** 亲眼看见过的掉落物最后在哪（转过头就不在视野里了，但人记得“床掉在东北三格”） */
+  private dropSightings = new Map<number, { id: number; name: string; pos: Vec3Like; at: number }>();
   /** 本次扫描看到的值得注意的方块 */
   visibleNow = new Map<string, { name: string; pos: Vec3Like; dist: number }>();
   private visibleSurfaces = new Map<string, { name: string; pos: Vec3Like; at: number }>();
@@ -234,6 +236,7 @@ export class Vision {
       this.seen = [];
       this.heard = [];
       this.sightings.clear();
+      this.dropSightings.clear();
       this.visibleNow.clear();
       this.visibleSurfaces.clear();
       this.composition = {};
@@ -272,6 +275,7 @@ export class Vision {
       this.seen = [];
       this.heard = [];
       this.sightings.clear();
+      this.dropSightings.clear();
       this.visibleNow.clear();
       this.visibleSurfaces.clear();
       return;
@@ -468,6 +472,8 @@ export class Vision {
     // 记住亲眼看见过的生物在哪（像人一样：“刚才那头牛在坡那边”）；只记看见的，不记听见/墙后的
     for (const e of seen) if (e.kind !== 'item' && e.kind !== 'other') this.sightings.set(e.id, { id: e.id, name: e.name, kind: e.kind, pos: { ...e.pos }, at: now });
     for (const [id, x] of this.sightings) if (now - x.at > 180_000) this.sightings.delete(id);
+    for (const e of seen) if (e.kind === 'item') this.dropSightings.set(e.id, { id: e.id, name: e.name.replace(/^item:/, ''), pos: { ...e.pos }, at: now });
+    for (const [id, x] of this.dropSightings) if (now - x.at > 300_000) this.dropSightings.delete(id);
     this.lastScanAt = now;
     this.frame = { cols, rows, cats, dists, facing: dirOfYaw(eye.yaw), range, entities: ents, ts: now, scanMs: Date.now() - t0 };
   }
@@ -602,6 +608,17 @@ export class Vision {
     let best: { id: number; name: string; pos: Vec3Like; at: number } | null = null;
     for (const x of this.sightings.values()) if (match(x.name) && now - x.at <= maxAgeMs && (!best || x.at > best.at)) best = x;
     return best ? { id: best.id, name: best.name, pos: best.pos, ageMs: now - best.at } : null;
+  }
+
+  /** 最近亲眼看见过、现在不在视野里的掉落物（只来自以往的视觉扫描，不透视） */
+  recentDrops(maxAgeMs = 120_000): { id: number; name: string; pos: Vec3Like; ageMs: number }[] {
+    const now = Date.now(), visible = new Set(this.seen.map((e) => e.id));
+    return [...this.dropSightings.values()].filter((d) => !visible.has(d.id) && now - d.at <= maxAgeMs).map((d) => ({ id: d.id, name: d.name, pos: d.pos, ageMs: now - d.at }));
+  }
+
+  /** 走到记得的地方一看没有了（被捡走、消失、漂走）：忘掉它 */
+  forgetDrop(id: number) {
+    this.dropSightings.delete(id);
   }
 
   markSweep() {

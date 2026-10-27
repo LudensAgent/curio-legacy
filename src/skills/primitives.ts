@@ -1,7 +1,7 @@
 import type { Vec3Like } from '../adapter/types.ts';
 import { describeCell, FACINGS, facingOfYaw, feetCell, localMap, toWorld, type Facing } from '../perception/local.ts';
 import { isSoftBlock, LIQUID_BLOCKS, surroundings } from '../perception/surroundings.ts';
-import { throwIfAborted } from '../util.ts';
+import { sleep, throwIfAborted } from '../util.ts';
 import { breakCell, why } from './body.ts';
 import { OWN_BUILDING_HINT, ownBuildingAt, storedChestAt } from './build.ts';
 import { noteEdit } from '../mind/edits.ts';
@@ -53,6 +53,9 @@ function after(ctx: SkillCtx, facing: Facing) {
 const liquidNext = (ctx: SkillCtx, c: Vec3Like) => [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, -1]]
   .map(([dx, dy, dz]) => ctx.adapter.blockAt({ x: c.x + dx, y: c.y + dy, z: c.z + dz })).find((n) => !!n && LIQUID_BLOCKS.has(n));
 
+/** 挖下来是要带走的东西（挖下来的方块就是同名物品）：挖完核对有没有真进背包 */
+const KEEPSAKE = /_bed$|^(crafting_table|furnace|smoker|blast_furnace|chest|barrel|anvil|jukebox|ender_chest|enchanting_table|brewing_stand|cartography_table|smithing_table|loom|stonecutter|grindstone)$|_door$|shulker_box$/;
+
 export const digAt: Skill<CellArgs> = {
   name: 'dig_at',
   description: '挖掉身边指定的那一格（以脚为原点的 [前,上,右]）。自动换合适的工具；那格旁边有水或岩浆、或是基岩时不挖。只挖不走，挖完人还在原地',
@@ -85,6 +88,9 @@ export const digAt: Skill<CellArgs> = {
     const stash = args.own ? null : storedChestAt(ctx.memory, ctx.adapter.state(), pos, before);
     if (stash) return fail('BAD_ARGS', stash, after(ctx, args.facing));
     const how: { noDrop?: boolean; ms?: number } = {};
+    const keepsake = KEEPSAKE.test(before) ? before : null;
+    const countOf = (n: string) => ctx.adapter.state().inventory.filter((i) => i.name === n).reduce((a, i) => a + i.count, 0);
+    const had = keepsake ? countOf(keepsake) : 0;
     try {
       await breakCell(ctx, pos, true, how);
     } catch (e) {
@@ -100,7 +106,15 @@ export const digAt: Skill<CellArgs> = {
     noteEdit(ctx.taskId, 'dig', pos);
     // 空手挖的：挖开了，但慢、不掉东西（要拿到圆石、矿石得用镐）
     const hand = how.noDrop ? `（空手挖的，用了 ${Math.max(1, Math.round((how.ms ?? 0) / 1000))} 秒，没有掉落：要拿到东西得用镐）` : '';
-    return ok(`挖掉了 [${args.at}] 的 ${before}${hand}`, { cell: [...args.at], was: before, ...(how.noDrop ? { noDrop: true } : {}), ...after(ctx, args.facing) });
+    // 床、工作台、熔炉、箱子这类要搬走的东西：挖下来不等于拿到了，看背包里有没有真的多出来
+    let got = '';
+    let inBag: boolean | undefined;
+    if (keepsake && !how.noDrop) {
+      for (let i = 0; i < 6 && countOf(keepsake) <= had; i++) await sleep(150, ctx.signal);
+      inBag = countOf(keepsake) > had;
+      got = inBag ? `；${keepsake} 已经进了背包（现在共 ${countOf(keepsake)} 个）` : `；${keepsake} 掉在地上，还没进背包——要拿回来写 pickup_items {"item":"${keepsake}"}，别当成已经拿到了`;
+    }
+    return ok(`挖掉了 [${args.at}] 的 ${before}${hand}${got}`, { cell: [...args.at], was: before, ...(how.noDrop ? { noDrop: true } : {}), ...(inBag !== undefined ? { inBag } : {}), ...after(ctx, args.facing) });
   },
 };
 

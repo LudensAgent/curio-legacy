@@ -65,6 +65,9 @@ export interface Senses {
   rememberedWaypoint?(target: Vec3Like, maxDistance: number, excluded: Vec3Like[]): Vec3Like | null;
   /** 最近亲眼看见的某类生物的最后位置 */
   lastSighting?(match: (name: string) => boolean, maxAgeMs?: number): { id: number; name: string; pos: Vec3Like; ageMs: number } | null;
+  /** 最近亲眼看见过、现在不在视野里的掉落物 */
+  recentDrops?(maxAgeMs?: number): { id: number; name: string; pos: Vec3Like; ageMs: number }[];
+  forgetDrop?(id: number): void;
 }
 
 export interface SkillCtx {
