@@ -88,6 +88,7 @@
   .thought .meta { display: block; margin-top: 6px; font-size: 11px; color: var(--dim); }
   .badge { font: 10px var(--mono); padding: 1px 6px; border-radius: 4px; background: var(--soft); color: var(--dim); vertical-align: 1px; white-space: nowrap; }
   .badge.bad { background: var(--bad-soft); color: var(--bad); }
+  #rescueBtn { color: var(--bad); border-color: var(--bad-soft); white-space: nowrap; } #rescueBtn.bad { background: var(--bad-soft); } #rescueBtn:disabled { opacity: .8; cursor: progress; }
   .badge.good { background: var(--accent-soft); color: var(--accent); }
   .badge.info { background: var(--info-soft); color: var(--info); }
   .badge.warn { background: var(--warn-soft); color: var(--warn); }
@@ -294,6 +295,7 @@
   </div>
   <button id="specBtn" onclick="toggleSpectate()" title="自动旁观：你的客户端跟着 Bot 看；关掉后留在旁观模式自由飞">旁观</button>
   <button onclick="post('/api/replan')" title="让它马上重新想一想">重新想</button>
+  <button id="rescueBtn" onclick="rescueBot()" title="卡在坑底、矿道、墙缝里出不来时：找周围最近的露天平地，用 RCON 把它传送过去">紧急救援</button>
   <button id="pauseBtn" onclick="togglePause()">暂停</button>
 </header>
 
@@ -585,6 +587,20 @@ let paused = false, unseen = 0, lastState = null;
 async function post(url, body) { await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) }); }
 function sendSuggest() { const t = $('suggest').value.trim(); if (t) { post('/api/suggest', { text: t }); $('suggest').value = ''; } }
 $('suggest').addEventListener('keydown', (e) => e.key === 'Enter' && sendSuggest());
+/** 紧急救援：确认后让后台找最近的地表并 /tp 过去；结果在按钮上显示几秒 */
+async function rescueBot() {
+  const btn = $('rescueBtn');
+  if (btn.disabled || !confirm('把它传送到周围最近的露天平地？手上的事会停下，传送后它会重新想。')) return;
+  btn.disabled = true; btn.textContent = '救援中…';
+  let msg;
+  try {
+    const r = await (await fetch('/api/rescue', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).json();
+    msg = r.ok ? `已传送到 ${r.to.x},${r.to.y},${r.to.z}` : `没救成：${r.error || '未知原因'}`;
+    btn.classList.toggle('bad', !r.ok);
+  } catch (e) { msg = `没救成：${e.message}`; btn.classList.add('bad'); }
+  btn.textContent = msg.length > 22 ? msg.slice(0, 22) + '…' : msg; btn.title = msg;
+  setTimeout(() => { btn.disabled = false; btn.textContent = '紧急救援'; btn.classList.remove('bad'); btn.title = '卡在坑底、矿道、墙缝里出不来时：找周围最近的露天平地，用 RCON 把它传送过去'; }, 5000);
+}
 function togglePause() { post(paused ? '/api/resume' : '/api/pause'); }
 let specActive = false;
 async function toggleSpectate() { $('specBtn').textContent = '切换中…'; await post('/api/spectate', { on: !specActive }); }

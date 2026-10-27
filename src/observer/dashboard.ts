@@ -28,6 +28,8 @@ export interface DashboardHandlers {
   resume(): void;
   replan(): void;
   suggest(text: string): void;
+  /** 紧急救援：找最近的露天平地，用 RCON 把 Bot 传送过去 */
+  rescue?(): Promise<unknown>;
   /** 切换自动旁观（附着到 Bot / 自由旁观） */
   spectate?(on: boolean): Promise<unknown> | unknown;
   /** 弹幕存档：?dates=1 列出有存档的日期；否则按 date / q / questions / blocked / limit 查询 */
@@ -184,6 +186,11 @@ export function startDashboard(
       if (p === '/api/pause') { h.pause(); return send(res, 200, '{"ok":true}'); }
       if (p === '/api/resume') { h.resume(); return send(res, 200, '{"ok":true}'); }
       if (p === '/api/replan') { h.replan(); return send(res, 200, '{"ok":true}'); }
+      if (p === '/api/rescue') {
+        if (!h.rescue) return send(res, 404, '{"error":"not supported"}');
+        const r = await h.rescue();
+        return send(res, 200, JSON.stringify(r));
+      }
       if (p === '/api/spectate') {
         const body = await readBody(req);
         if (!h.spectate) return send(res, 404, '{"error":"not supported"}');

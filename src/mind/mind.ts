@@ -1388,6 +1388,16 @@ export class Mind {
     this.d.bus.publish('decision_normalized', 'P2', `没回应操作者的指令，再想一次：${order.text.slice(0, 60)}`);
     this.requestThink('操作者的指令还没照做', 'deliberate');
   }
+  /** 操作者用「紧急救援」把它从卡住的地方传送走了：手上那段活作废（是在原地的打算），按新位置马上重新想 */
+  rescued(what: string) {
+    this.dropActivity('interrupted', '被操作者紧急传送到了别处');
+    this.suspended = [];
+    const n = this.attention.notice('rescued', what, 0.95, 0);
+    if (n) this.d.bus.publish('notice', 'P2', `注意到：${n.what}`, { salience: n.salience, level: n.level });
+    this.backoffUntil = 0;
+    this.cancelThinking('rescued');
+    this.requestThink(what, 'deliberate');
+  }
   replan() {
     this.backoffUntil = 0;
     this.cancelThinking('manual_replan');

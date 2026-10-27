@@ -40,6 +40,8 @@ import { LlmTrace } from './planner/llm-trace.ts';
 import { Metrics } from './observer/metrics.ts';
 import { RunStats } from './observer/run-stats.ts';
 import { Spectator } from './observer/spectator.ts';
+import { findSurfaceSpot, type SurfaceSpot } from './observer/rescue.ts';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { Perception } from './perception/perception.ts';
 import { NOTABLE, Vision } from './perception/vision.ts';
 import { Ledger } from './mind/ledger.ts';
@@ -549,7 +551,45 @@ const dashboard = startDashboard(config.dashboard.host, config.dashboard.port, b
   replan: () => executive.replan(),
   suggest: (t) => executive.suggest(t),
   spectate: (on) => spectator.setActive(on),
+  rescue: () => rescue(),
 }, feed ? [createObserverHandler(feed)] : [], { llmTrace, mcVersion: config.mc.version, env: { backupDir: path.join(config.dataDir, 'env-backups') } });
+
+/**
+ * 紧急救援（控制台按钮）：卡在坑底、矿道、墙缝里出不来时，找周围最近的露天平地，用 RCON /tp 传送过去。
+ * 只用 RCON，不用重启服务器；先停下手上的事、下船，传送后让它按新位置重新想。
+ */
+let rescuing = false;
+async function rescue(): Promise<{ ok: boolean; error?: string; to?: SurfaceSpot; from?: { x: number; y: number; z: number } }> {
+  if (rescuing) return { ok: false, error: '上一次救援还没做完' };
+  const s = adapter.state();
+  if (!s.connected) return { ok: false, error: 'Bot 没连上服务器' };
+  if (s.dim !== 'overworld') return { ok: false, error: `现在在 ${s.dim}，那里没有地表，紧急救援只支持主世界` };
+  const from = { x: Math.round(s.pos.x * 10) / 10, y: Math.round(s.pos.y * 10) / 10, z: Math.round(s.pos.z * 10) / 10 };
+  const spot = findSurfaceSpot((p) => adapter.blockAt(p), s.pos);
+  if (!spot) return { ok: false, error: '周围 32 格内没找到露天平地（可能区块没加载，或全是水面/树冠）', from };
+  rescuing = true;
+  try {
+    arbiter.cancel('紧急救援');
+    if (adapter.state().riding && adapter.dismount) { try { await adapter.dismount(AbortSignal.timeout(3000)); } catch { /* tp 也会把人从载具上拉下来 */ } }
+    try {
+      await spectator.command(`tp ${config.mc.username} ${spot.x + 0.5} ${spot.y} ${spot.z + 0.5}`);
+    } catch (e: any) {
+      bus.publish('rescue', 'P1', `紧急救援失败：RCON 命令没发出去（${e?.message ?? e}）`);
+      return { ok: false, error: `RCON 失败：${e?.message ?? e}`, from };
+    }
+    for (let i = 0; i < 30; i++) { // 等服务器把新位置发回来
+      const p = adapter.state().pos;
+      if (Math.hypot(p.x - spot.x - 0.5, p.z - spot.z - 0.5) < 1.5 && Math.abs(p.y - spot.y) < 2) break;
+      await sleep(100);
+    }
+    const at = (p: { x: number; y: number; z: number }) => `(${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)})`;
+    bus.publish('rescue', 'P1', `紧急救援：操作者把我从 ${at(from)} 传送到最近的地表 ${at(spot)}（水平 ${spot.dist} 格外）`, { from, to: spot });
+    mind.rescued(`刚才卡在 ${at(from)} 出不来，操作者把我传送到了地表 ${at(spot)}：先看清周围，再决定接着做什么`);
+    return { ok: true, from, to: spot };
+  } finally {
+    rescuing = false;
+  }
+}
 
 let shuttingDown = false;
 /** code：0 正常退出；RESTART_EXIT_CODE 请守护进程重启 */
