@@ -309,6 +309,7 @@ if (feed) setInterval(() => {
   } catch { /* 还没连上服务器 */ }
 }, 1000).unref();
 if (memory.migrated) bus.publish('memory', 'P1', `清理了 ${memory.migrated} 个旧版本留下的地标（当时的矿物位置是穿墙搜到的，不算亲眼所见）`);
+if (memory.patched.length) bus.publish('memory', 'P1', `套用了人工记忆修正：${memory.patched.join('；')}`);
 
 
 // ------------------------------------------------------------ 游戏事件

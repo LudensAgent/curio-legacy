@@ -249,6 +249,7 @@ export class WorldMemory {
         this.dedupeOwnTwins();
         this.dropBedBases();
         this.recoverProjects();
+        this.applyPatch(file);
       } catch {
         fs.copyFileSync(file, file + '.corrupt-' + Date.now());
         this.data = empty();
@@ -344,6 +345,35 @@ export class WorldMemory {
       }
     }
   }
+  /**
+   * 运行中改不了记忆文件（进程会定时写回、覆盖掉）：要人工纠正时，把改动写进同目录的 memory-patch.json，
+   * 下次启动读记忆时套用一次，然后改名成 memory-patch.applied-<时间>.json。
+   * 格式：{"removeLandmarks":["id"…], "removeChests":["键"…], "setChests":[箱子记录…], "removeFurnaces":["键"…]}
+   */
+  patched: string[] = [];
+  private applyPatch(file: string) {
+    const pf = path.join(path.dirname(file), 'memory-patch.json');
+    if (!fs.existsSync(pf)) return;
+    try {
+      const p = JSON.parse(fs.readFileSync(pf, 'utf8')) as { removeLandmarks?: string[]; removeChests?: string[]; setChests?: ChestRecord[]; removeFurnaces?: string[] };
+      const ids = new Set(p.removeLandmarks ?? []);
+      const before = this.data.landmarks.length;
+      this.data.landmarks = this.data.landmarks.filter((l) => !ids.has(l.id));
+      if (before !== this.data.landmarks.length) this.patched.push(`删了 ${before - this.data.landmarks.length} 个地标`);
+      for (const k of p.removeChests ?? []) if (this.data.chests?.[k]) { delete this.data.chests[k]; this.patched.push(`删了箱子 ${k}`); }
+      for (const c of p.setChests ?? []) {
+        if (!c?.pos || !c.dim || !Array.isArray(c.items)) continue;
+        (this.data.chests ??= {})[`${c.worldId ?? this.data.worldId}:${c.dim}:${c.pos.x},${c.pos.y},${c.pos.z}`] = { ...c, worldId: c.worldId ?? this.data.worldId, ts: c.ts ?? Date.now() };
+        this.patched.push(`写入箱子 (${c.pos.x},${c.pos.y},${c.pos.z})`);
+      }
+      for (const k of p.removeFurnaces ?? []) if (this.data.furnaces?.[k]) { delete this.data.furnaces[k]; this.patched.push(`删了熔炉 ${k}`); }
+      this.touch();
+      fs.renameSync(pf, path.join(path.dirname(file), `memory-patch.applied-${Date.now()}.json`));
+    } catch (e) {
+      this.patched.push(`memory-patch.json 没套用：${String((e as Error)?.message ?? e).slice(0, 80)}`);
+    }
+  }
+
   /** 迁移时清掉的地标数（main 启动时报告） */
   migrated = 0;
 
