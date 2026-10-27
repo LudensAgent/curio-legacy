@@ -577,6 +577,16 @@ async function rescue(): Promise<{ ok: boolean; error?: string; to?: SurfaceSpot
       bus.publish('rescue', 'P1', `紧急救援失败：RCON 命令没发出去（${e?.message ?? e}）`);
       return { ok: false, error: `RCON 失败：${e?.message ?? e}`, from };
     }
+    // 游戏里给所有人（主播的旁观客户端也在内）弹一行字幕、发一条聊天；失败不影响救援本身
+    const notice = '主包的大手发力，拯救了鱼鱼';
+    for (const cmd of [
+      'title @a times 10 70 20',
+      `title @a subtitle ${JSON.stringify({ text: notice, color: 'gold', bold: true })}`,
+      `title @a title ${JSON.stringify({ text: '' })}`,
+      `tellraw @a ${JSON.stringify({ text: notice, color: 'gold' })}`,
+    ]) {
+      try { await spectator.command(cmd); } catch { /* ignore */ }
+    }
     for (let i = 0; i < 30; i++) { // 等服务器把新位置发回来
       const p = adapter.state().pos;
       if (Math.hypot(p.x - spot.x - 0.5, p.z - spot.z - 0.5) < 1.5 && Math.abs(p.y - spot.y) < 2) break;
