@@ -2825,7 +2825,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     let leg = 0;
     const passable = (blk: any) => !blk || blk.boundingBox === 'empty';
     // 船速是一个向量（会滑行），船头朝向单独转（转得慢，像真的划船）
-    let vx = 0, vz = 0;
+    let vx = 0, vz = 0, stuckTicks = 0;
+    const rejections: number[] = []; // 服务器不认可、把船拉回的时刻
     let boatYaw = Number.isFinite(v.yaw) ? v.yaw : Math.atan2(-(target.x - v.position.x), -(target.z - v.position.z));
     let lastProgressAt = Date.now(), progressFrom = v.position.clone();
     // 船的位置以自己推进的为准：服务器会把船的移动（rel_entity_move）也广播给坐在船上的人，原版客户端对自己操控的载具忽略这些包，
@@ -2844,6 +2845,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       v.position = cur.clone();
       b.entity.position = new Vec3c(pk.x, pk.y + 0.4, pk.z);
       vx = 0; vz = 0;
+      rejections.push(Date.now());
+      if (rejections.length > 10) rejections.shift();
     };
     if (isBoat) b._client.on('vehicle_move', resync);
     // Mineflayer stops emitting player physicsTick while mounted, and boats
@@ -2895,17 +2898,34 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         const rowing = Math.abs(diff) < BOAT_ROW_ANGLE && (!last || dist > speed * 9 + arriveWithin * 0.5);
         vx *= 0.9; vz *= 0.9; // 水的阻力
         if (rowing) { vx += -Math.sin(boatYaw) * BOAT_THRUST; vz += -Math.cos(boatYaw) * BOAT_THRUST; }
-        const sp = Math.hypot(vx, vz);
         const Vec3 = require('vec3').Vec3;
-        let nx = p.x, nz = p.z;
-        if (sp > 1e-4) {
-          const ux = vx / sp, uz = vz / sp;
-          nx = p.x + vx; nz = p.z + vz;
-          const feet = b.blockAt(new Vec3(nx + ux * 0.7, p.y, nz + uz * 0.7));
+        // 船身（1.375×0.5625）在 (x,z) 处会不会碰到方块：四角、四边中点和中心，船底和船舷两个高度。
+        // 服务器按整个船身做碰撞，只看船头正前方一个点的话，侧面蹭到岸角会被服务器一刻刻拉回（卡在角上不动）
+        const HALF = 0.69;
+        const hits = (x: number, z: number) => {
+          for (const ox of [-HALF, 0, HALF]) for (const oz of [-HALF, 0, HALF]) for (const oy of [0.05, 0.5]) {
+            const blk = b.blockAt(new Vec3(x + ox, p.y + oy, z + oz));
+            if (!passable(blk) && !water(blk) && blk?.name !== 'lily_pad') return true;
+          }
+          return false;
+        };
+        // 像原版的碰撞一样：撞上就沿着墙滑（只保留没被挡住的那个方向的速度），两边都挡住就停住
+        let nx = p.x + vx, nz = p.z + vz;
+        let collided = false;
+        // 本来就和方块挨着（位置有误差）时不做碰撞，免得一开始就动不了
+        if ((Math.abs(vx) > 1e-4 || Math.abs(vz) > 1e-4) && hits(nx, nz) && !hits(p.x, p.z)) {
+          collided = true;
+          if (!hits(p.x + vx, p.z)) { nz = p.z; vz = 0; }
+          else if (!hits(p.x, p.z + vz)) { nx = p.x; vx = 0; }
+          else { nx = p.x; nz = p.z; vx = 0; vz = 0; }
+        }
+        if (Math.hypot(nx - p.x, nz - p.z) > 1e-4) {
           const under = b.blockAt(new Vec3(nx, p.y - 0.2, nz));
-          if (!passable(feet) && !water(feet)) return { ok: true, arrived: false, blocked: true, moved: p.distanceTo(start) }; // 前面是岸或障碍：靠岸
           if (!water(under) && !water(b.blockAt(new Vec3(nx, p.y - 1, nz)))) return { ok: true, arrived: false, blocked: true, moved: p.distanceTo(start) }; // 船不能上岸行驶
         }
+        // 顶着岸/卡在角上一秒多挪不动，或者服务器接连把船拉回：当作这边过不去，交给上层换路
+        stuckTicks = collided && Math.hypot(nx - p.x, nz - p.z) < 0.03 ? stuckTicks + 1 : 0;
+        if (stuckTicks >= 25 || rejections.filter((t) => Date.now() - t < 2000).length >= 5) return { ok: true, arrived: false, blocked: true, moved: p.distanceTo(start) };
         // 十秒都没挪开两格（顶着东西、原地打转）：当作走不通，交给上层重新找路
         if (Math.hypot(nx - progressFrom.x, nz - progressFrom.z) > 2) { progressFrom = new Vec3(nx, p.y, nz); lastProgressAt = Date.now(); }
         else if (Date.now() - lastProgressAt > 10000) return { ok: true, arrived: false, blocked: true, moved: p.distanceTo(start) };

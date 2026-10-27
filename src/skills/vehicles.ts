@@ -226,10 +226,14 @@ export function planBoatRoute(ctx: Ctx, from: Vec3Like, target: XZ, opts: { maxN
   const h = (x: number, z: number) => Math.hypot(x - tx, z - tz);
   // 搜索范围：起点和目标的包围盒外扩 48 格
   const minX = Math.min(start.x, tx) - 48, maxX = Math.max(start.x, tx) + 48, minZ = Math.min(start.z, tz) - 48, maxZ = Math.max(start.z, tz) + 48;
+  // 船身 1.375 格宽：船心在格子正中时会探进四周 8 格各 0.19 格，旁边（含斜角）有方块就会蹭上、卡在角上。
+  // 所以四周 8 格都是水的格子才算“宽裕”，贴岸的格子代价高（只在不得不走、或者最后靠岸时才走）
   const narrowCost = (x: number, z: number) => {
     const w = !nav(x - 1, z), e = !nav(x + 1, z), n = !nav(x, z - 1), s = !nav(x, z + 1);
-    if ((w && e) || (n && s)) return 8; // 一格宽：船身 1.375 格，挤不过去
-    return ((w ? 1 : 0) + (e ? 1 : 0) + (n ? 1 : 0) + (s ? 1 : 0)) * 0.4; // 贴岸走容易蹭停，稍微离岸
+    if ((w && e) || (n && s)) return 12; // 一格宽：挤不过去
+    let blocked = 0;
+    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) if ((dx || dz) && !nav(x + dx, z + dz)) blocked++;
+    return blocked ? 3 + blocked * 0.5 : 0;
   };
   // 水格旁边能直接从船上跨上去的岸：返回最好的落脚处和额外代价
   const landingCache = new Map<string, { p: Vec3Like; extra: number } | null>();
@@ -322,7 +326,8 @@ export function planBoatRoute(ctx: Ctx, from: Vec3Like, target: XZ, opts: { maxN
     const ux = (b.x - a.x) / len, uz = (b.z - a.z) / len;
     for (let t = 0; t <= len; t += 0.25) {
       const px = a.x + ux * t, pz = a.z + uz * t;
-      for (const off of [-0.45, 0, 0.45]) if (!nav(Math.floor(px - uz * off), Math.floor(pz + ux * off))) return false;
+      // 两侧各看出半个船身多一点（0.75），不让拉直后的直线从岸角边擦过去
+      for (const off of [-0.75, 0, 0.75]) if (!nav(Math.floor(px - uz * off), Math.floor(pz + ux * off))) return false;
     }
     return true;
   };
@@ -613,11 +618,12 @@ export const boat: Skill<BoatArgs> = {
       // ---- e) 下船（先面朝要上的那块岸：服务器按乘客朝向挑下船落点）、上岸、收船
       ctx.progress(0.85, '下船');
       const landing = route?.landing && route.reach === 'shore' && r.arrived ? route.landing : null;
+      const boatAt = { ...adapter.state().pos };
       if (adapter.state().riding) {
         const d = await adapter.dismount(signal, landing ? { toward: { x: landing.x + 0.5, y: landing.y, z: landing.z + 0.5 } } : undefined);
         if (!d.ok) return fail('ERROR', `划了 ${moved} 格（${how}），但下不了船：${d.reason}`, { moved });
       }
-      const boatPos = adapter.state().pos;
+      const boatPos = boatAt; // 下船前船所在的位置（下船后人已经在岸上了，回头找船要看这里）
       const ashore = await stepAshore(ctx, heading, landing);
       if (!ashore) notes.push(landing ? `靠岸了但没能跨上岸（岸边落脚处 ${landing.x},${landing.y},${landing.z}），还在水里` : '附近没有能从水里直接上去的岸（岸太高或太远），还在水里');
       let kept = false;

@@ -91,3 +91,23 @@ test('boat ride ignores the server echoing the boat moves back to its own passen
   const steps = moves.map((p, i) => p.payload.x - (i ? moves[i - 1].payload.x : 0));
   assert.ok(steps.every((s) => s <= 0.29), `每刻不超过 0.28 格：${steps.map((s) => s.toFixed(2)).join(' ')}`);
 });
+
+test('boat ride checks the whole hull: grazing a bank corner stops it quickly instead of being pulled back by the server', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_700_000_000_000 });
+  const w = fixture();
+  w.bot.vehicle.position = new Vec3(0.5, 64, 0.5);
+  w.bot.vehicle.yaw = -Math.PI / 2; // 船头朝东
+  // 船心沿 z=0.5 往东走，船身探到 z=1.19；(3,64,1) 这块岸角会蹭到船舷
+  w.bot.blockAt = (pos: any) => {
+    const x = Math.floor(pos.x), y = Math.floor(pos.y), z = Math.floor(pos.z);
+    if (x === 3 && y === 64 && z === 1) return { name: 'stone', boundingBox: 'block' };
+    return { name: y < 64 ? 'water' : 'air', boundingBox: 'empty' };
+  };
+  const pending = w.adapter.ride({ x: 10.5, z: 0.5 }, new AbortController().signal, { timeoutMs: 5000 });
+  for (let i = 0; i < 101 && !(await Promise.race([pending.then(() => true), flush().then(() => false)])); i++) { t.mock.timers.tick(50); await flush(); }
+  const r = await pending;
+  assert.equal(r.blocked, true, JSON.stringify(r));
+  const xs = w.packets.filter((p) => p.name === 'vehicle_move').map((p) => p.payload.x);
+  assert.ok(Math.max(...xs) <= 3 - 0.69 + 1e-6, `船身不能压进岸角：最远 x=${Math.max(...xs).toFixed(2)}`);
+  assert.ok(Date.now() - 1_700_000_000_000 < 4000, '卡住一秒多就该放弃，不是干等十秒');
+});
