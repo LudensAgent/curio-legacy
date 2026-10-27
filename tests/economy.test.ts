@@ -162,6 +162,11 @@ test('仓储：存什么由它点名，没点名的一样不动；结果写清�
   assert.equal(storeItems.validate({}, undefined as any).ok, false, '不点名就不存');
   assert.equal(storeItems.validate({ items: 'not an array!' }, undefined as any).ok, false);
   assert.deepEqual((storeItems.validate({ items: ['dirt:32', 'minecraft:*_log'] }, undefined as any) as any).args.items, [{ name: 'dirt', count: 32 }, { name: '*_log' }]);
+  // 模型实际常写的对象形式（10-27 日志里连着十几次 BAD_ARGS）
+  assert.deepEqual((storeItems.validate({ items: [{ name: 'granite', count: 40 }, { name: 'diorite' }, { item: 'minecraft:gravel', count: 0 }] }, undefined as any) as any).args.items,
+    [{ name: 'granite', count: 40 }, { name: 'diorite' }, { name: 'gravel' }]);
+  assert.deepEqual((storeItems.validate({ items: { dirt: 32, andesite: true } }, undefined as any) as any).args.items, [{ name: 'dirt', count: 32 }, { name: 'andesite' }]);
+  assert.equal(storeItems.validate({ items: [{ count: 3 }] }, undefined as any).ok, false, '对象没名字不收');
   let r = await runSkill(a, 'store_items', { items: ['cobblestone', 'and*', 'gravel'] }, memory);
   assert.equal(r.o.result.status, 'succeeded', r.o.result.summary);
   assert.equal(a.inv.get('cobblestone') ?? 0, 0, '点名的整包存');

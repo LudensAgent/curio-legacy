@@ -62,13 +62,25 @@ export const smelt: Skill<{ item: string; count: number }> = {
  * （以前写死一张留身上的表，表外的铁锭、粗铁跟着石块整包进了箱子）
  */
 type StoreSpec = { name: string; count?: number };
-/** "cobblestone" 整包存；"dirt:32" 只存 32 个；名字里可以写 * 通配（"*_log"） */
+/**
+ * "cobblestone" 整包存；"dirt:32" 只存 32 个；名字里可以写 * 通配（"*_log"）。
+ * 模型常写成别的样子，意思一样就照收：[{"name":"dirt","count":32}]、{"dirt":32,"granite":true}
+ */
 const parseStoreSpecs = (v: unknown): StoreSpec[] | null => {
-  const arr = Array.isArray(v) ? v : typeof v === 'string' ? v.split(/[,，|\s]+/) : null;
+  const arr = Array.isArray(v) ? v : typeof v === 'string' ? v.split(/[,，|\s]+/)
+    : v && typeof v === 'object' ? Object.entries(v as Record<string, unknown>).map(([name, count]) => ({ name, count })) : null;
   if (!arr) return null;
   const out: StoreSpec[] = [];
   for (const x of arr) {
-    const m = /^(?:minecraft:)?([a-z0-9_*]{2,60})(?:[:×x*](\d+))?$/.exec(String(x).trim().toLowerCase());
+    let text: string;
+    if (x && typeof x === 'object' && !Array.isArray(x)) {
+      const o = x as Record<string, unknown>;
+      const name = o.name ?? o.item;
+      if (typeof name !== 'string') return null;
+      const n = typeof o.count === 'number' || typeof o.count === 'string' ? Number(o.count) : NaN; // true / null 当“整包”
+      text = Number.isFinite(n) && n >= 1 ? `${name}:${Math.floor(n)}` : name;
+    } else text = String(x);
+    const m = /^(?:minecraft:)?([a-z0-9_*]{2,60})(?:\s*[:×x*]\s*(\d+))?$/.exec(text.trim().toLowerCase());
     if (!m) return null;
     out.push(m[2] ? { name: m[1], count: Math.max(1, +m[2]) } : { name: m[1] });
   }
@@ -101,7 +113,7 @@ async function ensureChest(ctx: SkillCtx): Promise<Vec3Like | null> {
 export const storeItems: Skill<{ items: StoreSpec[] }> = {
   name: 'store_items',
   description: '点名存进箱子：用不上的存，要用的留',
-  argsDoc: '{"items":["dirt:32",…]}',
+  argsDoc: '{"items":["dirt:32","granite",…]}（也收 [{"name":"dirt","count":32}]）',
   timeoutMs: 90000,
   movement: true,
   validate(raw) {
