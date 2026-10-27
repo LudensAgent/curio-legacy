@@ -151,3 +151,34 @@ test('boat：本来就坐在船上、划船时出错也会下船；认不出自�
   assert.ok(!a.actions.includes('attack:6'), '别人的船不能打');
   assert.ok(a.actions.includes('attack:5'), r.summary);
 });
+
+test('boat：水路拐弯也能划过去（沿水面寻路，不是直线撞岸就停）', async () => {
+  const a = new FakeAdapter();
+  // 先往东一段（x=4..22, z=-2..2），再折向北（x=18..22, z=-30..-2）；直线去目标会撞上中间的陆地
+  for (let x = 4; x <= 22; x++) for (let z = -2; z <= 2; z++) a.blocks.push({ name: 'water', pos: { x, y: 63, z } });
+  for (let x = 18; x <= 22; x++) for (let z = -30; z < -2; z++) a.blocks.push({ name: 'water', pos: { x, y: 63, z } });
+  a.inv.set('oak_boat', 1);
+  const { run } = setup(a);
+  const r = await run('boat', { to: '20,-28', keep: false });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.arrived, true, r.summary);
+  assert.ok(a.pos.z < -24, `应该划到北边水道尽头，z=${a.pos.z}`);
+  assert.ok(a.ridePaths[0].length >= 2, `应该有拐点：${JSON.stringify(a.ridePaths)}`);
+  assert.ok((r.data?.moved as number) > 25, r.summary);
+});
+
+test('boat：目标在陆上 → 停到人能跨上去的低岸边，不在两格高的土坎下面下船', async () => {
+  const a = new FakeAdapter();
+  lake(a);
+  // 东岸 z<=0 那段是两格高的土坎（落脚处比水面高 3 格，从船上跳不上去）；z>=1 是和水面齐平的低岸
+  for (let x = 41; x <= 70; x++) for (let z = -3; z <= 0; z++) for (const y of [64, 65]) a.blocks.push({ name: 'dirt', pos: { x, y, z } });
+  a.inv.set('oak_boat', 1);
+  const { run } = setup(a);
+  const r = await run('boat', { to: '60,-2', keep: false });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.route, 'shore', r.summary);
+  assert.ok(a.dismountToward, '下船前要面朝岸边');
+  assert.ok(a.dismountToward!.z >= 1, `应该选低岸那段：${JSON.stringify(a.dismountToward)}`);
+  assert.match(r.summary, /上岸/);
+  assert.ok(a.pos.x >= 41 && Math.floor(a.pos.z) >= 1, `应该站到低岸上：${JSON.stringify(a.pos)}`);
+});

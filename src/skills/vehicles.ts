@@ -147,14 +147,196 @@ const parseXZ = (v: unknown): { x: number; z: number } | null | undefined => {
   return m ? { x: +m[1], z: +m[2] } : null;
 };
 
+// ------------------------------------------------------------------ 水路寻路
+type XZ = { x: number; z: number };
+/** 船能浮着过去的格子：水（海草、海带也是水），上面是空气或睡莲（船会压碎睡莲） */
+const BOAT_FLUID = new Set(['water', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass']);
+const BOAT_ABOVE = new Set([...AIRISH, 'lily_pad']);
+
+/** 船所在的水面高度（水方块的 y）：船/坐船的人在水面方块里或高出一格；脚下那格不是水就看周围一圈 */
+export function surfaceYAt(ctx: Ctx, p: Vec3Like): number | null {
+  const bx = Math.floor(p.x), by = Math.floor(p.y), bz = Math.floor(p.z);
+  for (const [dx, dz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+    for (const dy of [0, -1, -2, 1]) {
+      const y = by + dy;
+      if (BOAT_FLUID.has(ctx.adapter.blockAt({ x: bx + dx, y, z: bz + dz }) ?? '') && BOAT_ABOVE.has(ctx.adapter.blockAt({ x: bx + dx, y: y + 1, z: bz + dz }) ?? 'air')) return y;
+    }
+  }
+  return null;
+}
+
+export type BoatRoute = {
+  /** 水面高度 */
+  sy: number;
+  /** 依次经过的点（格子中心，已拉直）；最后一个是终点 */
+  waypoints: XZ[];
+  /** 靠岸后要踏上去的那格（人站的位置）；目标本身在水上、或水路到不了岸时为 null */
+  landing: Vec3Like | null;
+  /** water：目标就在水上；shore：停在离目标最近的低岸边；partial：水路只能走到离目标最近的地方 */
+  reach: 'water' | 'shore' | 'partial';
+};
+
+/**
+ * 在已加载的方块里沿水面找一条船能走的路（A*，8 邻接，不切角）：
+ * - 目标在水上：划到目标旁边；
+ * - 目标在陆上：在所有“旁边有能从船上直接跨上去的岸”的水格里，挑「划过去 + 上岸后步行到目标」总代价最小的那个停靠。
+ *   能跨上去 = 岸上落脚处和水面齐平或只高一格（从船上跳得上去）；两格以上的土坎不算。
+ * 一格宽的水道船身挤不过去，代价很高；没加载的区块当作走不通。
+ */
+export function planBoatRoute(ctx: Ctx, from: Vec3Like, target: XZ, opts: { maxNodes?: number; avoid?: Set<string> } = {}): BoatRoute | null {
+  const sy = surfaceYAt(ctx, from);
+  if (sy === null) return null;
+  const key = (x: number, z: number) => `${x},${z}`;
+  const navCache = new Map<string, boolean>();
+  const nav = (x: number, z: number) => {
+    const k = key(x, z);
+    let v = navCache.get(k);
+    if (v === undefined) {
+      v = !opts.avoid?.has(k) && BOAT_FLUID.has(ctx.adapter.blockAt({ x, y: sy, z }) ?? '') && BOAT_ABOVE.has(ctx.adapter.blockAt({ x, y: sy + 1, z }) ?? 'air');
+      navCache.set(k, v);
+    }
+    return v;
+  };
+  // 起点：船所在的格子（贴岸时可能落在岸上那格，取周围最近的水格）
+  const fx = Math.floor(from.x), fz = Math.floor(from.z);
+  let start: XZ | null = nav(fx, fz) ? { x: fx, z: fz } : null;
+  if (!start) {
+    let bd = Infinity;
+    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+      if (!nav(fx + dx, fz + dz)) continue;
+      const d = Math.hypot(fx + dx + 0.5 - from.x, fz + dz + 0.5 - from.z);
+      if (d < bd) { bd = d; start = { x: fx + dx, z: fz + dz }; }
+    }
+  }
+  if (!start) return null;
+  const tx = Math.floor(target.x), tz = Math.floor(target.z);
+  const targetWater = nav(tx, tz);
+  const h = (x: number, z: number) => Math.hypot(x - tx, z - tz);
+  // 搜索范围：起点和目标的包围盒外扩 48 格
+  const minX = Math.min(start.x, tx) - 48, maxX = Math.max(start.x, tx) + 48, minZ = Math.min(start.z, tz) - 48, maxZ = Math.max(start.z, tz) + 48;
+  const narrowCost = (x: number, z: number) => {
+    const w = !nav(x - 1, z), e = !nav(x + 1, z), n = !nav(x, z - 1), s = !nav(x, z + 1);
+    if ((w && e) || (n && s)) return 8; // 一格宽：船身 1.375 格，挤不过去
+    return ((w ? 1 : 0) + (e ? 1 : 0) + (n ? 1 : 0) + (s ? 1 : 0)) * 0.4; // 贴岸走容易蹭停，稍微离岸
+  };
+  // 水格旁边能直接从船上跨上去的岸：返回最好的落脚处和额外代价
+  const landingCache = new Map<string, { p: Vec3Like; extra: number } | null>();
+  const landingNear = (x: number, z: number) => {
+    const k = key(x, z);
+    if (landingCache.has(k)) return landingCache.get(k)!;
+    let best: { p: Vec3Like; extra: number; score: number } | null = null;
+    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+      if ((!dx && !dz) || nav(x + dx, z + dz)) continue;
+      for (const [dy, extra] of [[1, 0], [2, 2]] as const) {
+        const p = { x: x + dx, y: sy + dy, z: z + dz };
+        if (!standable(ctx, p)) continue;
+        const walk = Math.hypot(p.x - tx, p.z - tz) * 1.2 + extra + (dx && dz ? 0.5 : 0);
+        if (!best || walk < best.score) best = { p, extra: walk, score: walk };
+        break;
+      }
+    }
+    const v = best ? { p: best.p, extra: best.extra } : null;
+    landingCache.set(k, v);
+    return v;
+  };
+
+  type Node = { x: number; z: number; g: number; f: number; parent: Node | null; goal?: Vec3Like | null };
+  const heap: Node[] = [];
+  const push = (n: Node) => {
+    heap.push(n);
+    for (let i = heap.length - 1; i > 0;) { const p = (i - 1) >> 1; if (heap[p].f <= heap[i].f) break; [heap[p], heap[i]] = [heap[i], heap[p]]; i = p; }
+  };
+  const pop = (): Node | undefined => {
+    const top = heap[0], last = heap.pop();
+    if (heap.length && last) {
+      heap[0] = last;
+      for (let i = 0; ;) {
+        const l = i * 2 + 1, r = l + 1;
+        let m = i;
+        if (l < heap.length && heap[l].f < heap[m].f) m = l;
+        if (r < heap.length && heap[r].f < heap[m].f) m = r;
+        if (m === i) break;
+        [heap[m], heap[i]] = [heap[i], heap[m]];
+        i = m;
+      }
+    }
+    return top;
+  };
+  const best = new Map<string, number>();
+  const closed = new Set<string>();
+  push({ ...start, g: 0, f: h(start.x, start.z), parent: null });
+  best.set(key(start.x, start.z), 0);
+  let closest: Node | null = null;
+  let found: Node | null = null;
+  const maxNodes = opts.maxNodes ?? 20000;
+  for (let expanded = 0; heap.length && expanded < maxNodes;) {
+    const cur = pop()!;
+    if (cur.goal !== undefined) { found = cur; break; } // 虚拟终点：停在这里上岸
+    const k = key(cur.x, cur.z);
+    if (closed.has(k)) continue;
+    closed.add(k);
+    expanded++;
+    if (!closest || h(cur.x, cur.z) < h(closest.x, closest.z)) closest = cur;
+    if (targetWater) {
+      if (h(cur.x, cur.z) <= 1.5) { found = { ...cur, goal: null }; break; }
+    } else {
+      const land = landingNear(cur.x, cur.z);
+      if (land) push({ x: cur.x, z: cur.z, g: cur.g + land.extra, f: cur.g + land.extra, parent: cur.parent, goal: land.p });
+    }
+    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+      if (!dx && !dz) continue;
+      const nx = cur.x + dx, nz = cur.z + dz;
+      if (nx < minX || nx > maxX || nz < minZ || nz > maxZ || !nav(nx, nz)) continue;
+      if (dx && dz && (!nav(cur.x + dx, cur.z) || !nav(cur.x, cur.z + dz))) continue; // 不切角
+      const nk = key(nx, nz);
+      if (closed.has(nk)) continue;
+      const g = cur.g + (dx && dz ? Math.SQRT2 : 1) + narrowCost(nx, nz);
+      if (g >= (best.get(nk) ?? Infinity)) continue;
+      best.set(nk, g);
+      push({ x: nx, z: nz, g, f: g + h(nx, nz), parent: cur });
+    }
+  }
+  const end = found ?? closest;
+  if (!end) return null;
+  // 终点那格本身：虚拟终点节点的 parent 指向它之前的格子，补回来
+  const cells: XZ[] = [];
+  for (let n: Node | null = found && found.goal !== undefined && found.goal !== null ? { ...found, goal: undefined } : end; n; n = n.parent) cells.push({ x: n.x, z: n.z });
+  cells.reverse();
+  const centers = cells.map((c) => ({ x: c.x + 0.5, z: c.z + 0.5 }));
+  // 拉直：能直线划过去（沿线及两侧都是水）的中间点省掉
+  const clear = (a: XZ, b: XZ) => {
+    const len = Math.hypot(b.x - a.x, b.z - a.z);
+    if (len < 1e-6) return true;
+    const ux = (b.x - a.x) / len, uz = (b.z - a.z) / len;
+    for (let t = 0; t <= len; t += 0.25) {
+      const px = a.x + ux * t, pz = a.z + uz * t;
+      for (const off of [-0.45, 0, 0.45]) if (!nav(Math.floor(px - uz * off), Math.floor(pz + ux * off))) return false;
+    }
+    return true;
+  };
+  const waypoints: XZ[] = [];
+  for (let i = 0; i < centers.length - 1;) {
+    let j = i + 1;
+    for (let k = centers.length - 1; k > i + 1; k--) if (clear(centers[i], centers[k])) { j = k; break; }
+    waypoints.push(centers[j]);
+    i = j;
+  }
+  if (!waypoints.length) waypoints.push(centers[centers.length - 1]);
+  const landing = found && found.goal ? found.goal : null;
+  return { sy, waypoints, landing, reach: found ? (targetWater ? 'water' : landing ? 'shore' : 'partial') : 'partial' };
+}
+
 const footOverWater = (ctx: Ctx) => {
   const p = ctx.adapter.state().pos;
   const f = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) };
   return ctx.adapter.state().inWater || fluidAt(ctx, f) || fluidAt(ctx, { ...f, y: f.y - 1 });
 };
 
-/** 下船后脚下还是水：走/游到旁边最近的岸上 */
-async function stepAshore(ctx: Ctx, heading: { x: number; z: number }) {
+/**
+ * 下船后脚下还是水（被放在船顶上、或掉进水里）：先朝岸边那格跳上去（从船顶踏上岸，寻路在船上/水里走不动），
+ * 不行再游/走到旁边最近的岸上。prefer = 规划好的上岸点。
+ */
+async function stepAshore(ctx: Ctx, heading: { x: number; z: number }, prefer: Vec3Like | null = null) {
   if (!footOverWater(ctx)) return true;
   const p = ctx.adapter.state().pos;
   const c = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) };
@@ -165,8 +347,17 @@ async function stepAshore(ctx: Ctx, heading: { x: number; z: number }) {
     const s = Math.hypot(dx, dz) - (dx * heading.x + dz * heading.z) * 0.3; // 优先往前（对岸）
     if (!best || s < best.s) best = { p: q, s };
   }
-  const land = best?.p ?? ctx.senses.nearestLand?.(p)?.pos ?? null;
+  const land = (prefer && standable(ctx, prefer) && dist3(prefer, p) <= 4 ? prefer : null) ?? best?.p ?? ctx.senses.nearestLand?.(p)?.pos ?? null;
   if (!land) return false;
+  // 近在一两格：面朝那格按住前进+跳，像人一样从船上/浅水里一步跨上去
+  if (ctx.adapter.drive && Math.hypot(land.x + 0.5 - p.x, land.z + 0.5 - p.z) <= 2.6) {
+    const face = { x: land.x + 0.5, y: land.y + 1.2, z: land.z + 0.5 };
+    for (let i = 0; i < 3 && footOverWater(ctx); i++) {
+      try { await ctx.adapter.drive({ forward: true, jump: true }, 600, ctx.signal, { facePoint: face }); } catch (e) { if (isAbort(e)) throw e; }
+      await sleep(250, ctx.signal);
+    }
+    if (!footOverWater(ctx)) return true;
+  }
   try {
     if (ctx.adapter.state().inWater && ctx.adapter.swimTo) await ctx.adapter.swimTo(land, ctx.signal, { timeoutMs: 12000 });
     else await ctx.adapter.moveTo({ kind: 'xyz', x: land.x, y: land.y, z: land.z }, { signal: ctx.signal, timeoutMs: 10000 });
@@ -240,7 +431,7 @@ type BoatArgs = { to?: { x: number; z: number }; direction?: string; distance: n
 
 export const boat: Skill<BoatArgs> = {
   name: 'boat',
-  description: '过河/渡湖/沿海岸远行时坐船：没船先用 5 块同种木板做一条，找水面放下坐上去划到目标，靠岸下船并把船收回背包；比游泳快且不会淹死',
+  description: '过河/渡湖/沿海岸远行时坐船：没船先用 5 块同种木板做一条，沿水路绕弯划向目标，目标在陆上就停到离它最近、跨得上去的岸边下船并收船；比游泳快不会淹死',
   argsDoc: '{"to"?:"x,z","direction"?:"N|E|S|W|NE…","distance"?:8-240,"until"?,"keep"?}',
   timeoutMs: 180000,
   movement: true,
@@ -344,7 +535,7 @@ export const boat: Skill<BoatArgs> = {
         if (!mounted) return fail('ERROR', '船放下了但坐不上去（船还在水边，可以用 interact 再试）', { boatId });
       } else notes.push(`本来就坐在 ${s0.riding} 上`);
 
-      // ---- d) 划船
+      // ---- d) 划船：沿水面寻路（绕弯、避开一格宽的水道），目标在陆上就停到离它最近、人能跨上去的低岸边
       const start = adapter.state().pos;
       if (!direction && !args.to) {
         const w = findWaterSurface(ctx, 24, { minOpen: 4 });
@@ -356,23 +547,51 @@ export const boat: Skill<BoatArgs> = {
       const heading = (() => { const vx = target.x - start.x, vz = target.z - start.z, l = Math.hypot(vx, vz) || 1; return { x: vx / l, z: vz / l }; })();
       ctx.progress(0.45, `划船去 ${Math.round(target.x)},${Math.round(target.z)}`);
       let seen: { what: string; dist: number } | null = null;
-      const r = await adapter.ride(target, signal, {
-        timeoutMs: Math.max(3000, ctx.deadline - Date.now() - 25000), // 留时间靠岸、收船
-        stop: () => { if (!args.until) return false; ctx.senses.refresh(); seen = sighted(ctx, args.until); return !!seen; },
-      });
-      const moved = Math.round(r.moved);
+      const stop = () => { if (!args.until) return false; ctx.senses.refresh(); seen = sighted(ctx, args.until); return !!seen; };
+      const avoid = new Set<string>();
+      let route: BoatRoute | null = null;
+      let r: Awaited<ReturnType<NonNullable<typeof adapter.ride>>> = { ok: true, arrived: false, moved: 0 };
+      let moved = 0, replans = 0;
+      for (let leg = 0; leg < 4; leg++) {
+        const here = adapter.state().pos;
+        route = planBoatRoute(ctx, here, target, { avoid });
+        const end = route ? route.waypoints[route.waypoints.length - 1] : target;
+        const via = route ? route.waypoints.slice(0, -1) : [];
+        // 已经停在上岸点旁边（或目标旁边）就不用再划
+        if (route && Math.hypot(end.x - here.x, end.z - here.z) <= 1.2) { r = { ok: true, arrived: true, moved: 0 }; break; }
+        r = await adapter.ride(end, signal, {
+          timeoutMs: Math.max(3000, ctx.deadline - Date.now() - 25000), // 留时间靠岸、收船
+          stop, via, arriveWithin: route ? 0.8 : 2,
+        });
+        moved += r.moved;
+        if (seen || !r.ok || !r.blocked || !route) break;
+        // 半路蹭到岸/障碍：离终点不远就算到了，否则把前面那格记成走不通、从这里重新规划
+        const p = adapter.state().pos;
+        if (Math.hypot(end.x - p.x, end.z - p.z) <= 1.8) { r = { ...r, arrived: true }; break; }
+        const next = route.waypoints.find((w) => Math.hypot(w.x - p.x, w.z - p.z) > 1) ?? end;
+        const l = Math.hypot(next.x - p.x, next.z - p.z) || 1;
+        avoid.add(`${Math.floor(p.x + ((next.x - p.x) / l) * 1.2)},${Math.floor(p.z + ((next.z - p.z) / l) * 1.2)}`);
+        replans++;
+        if (Date.now() > ctx.deadline - 30000) break;
+      }
+      moved = Math.round(moved);
       const found = seen as { what: string; dist: number } | null;
-      const how = found ? `看见 ${found.what}（${found.dist} 格外）停下` : r.arrived ? '到了目标附近' : r.blocked ? '前方靠岸/有障碍停下' : r.ok ? '停下' : `中途出问题（${r.reason}）`;
+      const how = found ? `看见 ${found.what}（${found.dist} 格外）停下`
+        : route?.reach === 'shore' && r.arrived ? '划到离目标最近、能上岸的岸边'
+          : route?.reach === 'partial' ? '水路到不了目标，划到了水路上离目标最近的地方'
+            : r.arrived ? '到了目标附近' : r.blocked ? '前方靠岸/有障碍停下' : r.ok ? '停下' : `中途出问题（${r.reason}）`;
+      if (replans) notes.push(`途中蹭到岸重新找了 ${replans} 次路`);
 
-      // ---- e) 下船、上岸、收船
+      // ---- e) 下船（先面朝要上的那块岸：服务器按乘客朝向挑下船落点）、上岸、收船
       ctx.progress(0.85, '下船');
+      const landing = route?.landing && route.reach === 'shore' && r.arrived ? route.landing : null;
       if (adapter.state().riding) {
-        const d = await adapter.dismount(signal);
+        const d = await adapter.dismount(signal, landing ? { toward: { x: landing.x + 0.5, y: landing.y, z: landing.z + 0.5 } } : undefined);
         if (!d.ok) return fail('ERROR', `划了 ${moved} 格（${how}），但下不了船：${d.reason}`, { moved });
       }
       const boatPos = adapter.state().pos;
-      const ashore = await stepAshore(ctx, heading);
-      if (!ashore) notes.push('下船处附近没找到能站的岸，还在水里');
+      const ashore = await stepAshore(ctx, heading, landing);
+      if (!ashore) notes.push(landing ? `靠岸了但没能跨上岸（岸边落脚处 ${landing.x},${landing.y},${landing.z}），还在水里` : '附近没有能从水里直接上去的岸（岸太高或太远），还在水里');
       let kept = false;
       if (args.keep && ashore) {
         ctx.progress(0.92, '把船收回背包');
@@ -380,11 +599,13 @@ export const boat: Skill<BoatArgs> = {
         kept = k.kept;
         notes.push(k.note);
       } else if (args.keep) notes.push('没上岸，船先不收');
-      else notes.push('船留在岸边');
+      else notes.push(ashore ? '船留在岸边' : '船留在水上');
       if (crafted) notes.unshift(`先做了一条 ${crafted}`);
       const p = adapter.state().pos;
       const at = `(${Math.round(p.x)}, ${Math.round(p.y)}, ${Math.round(p.z)})`;
-      const data = { moved, landed: { x: Math.round(p.x), y: Math.round(p.y), z: Math.round(p.z) }, kept, ...(found ? { found: found.what } : {}), ...(r.arrived ? { arrived: true } : {}), ...(crafted ? { crafted } : {}) };
+      const walkLeft = args.to && !found ? Math.round(Math.hypot(args.to.x - p.x, args.to.z - p.z)) : 0;
+      if (walkLeft > 3 && ashore) notes.push(`离目标还有 ${walkLeft} 格陆路`);
+      const data = { moved, landed: { x: Math.round(p.x), y: Math.round(p.y), z: Math.round(p.z) }, kept, ...(found ? { found: found.what } : {}), ...(r.arrived ? { arrived: true } : {}), ...(crafted ? { crafted } : {}), ...(route ? { route: route.reach } : {}) };
       if (!r.ok && moved < 3) return fail(r.reason === 'TIMEOUT' ? 'TIMEOUT' : 'ERROR', `坐上船但没划动：${r.reason}；${notes.join('，')}`, data);
       return ok(`坐船划了 ${moved} 格，${how}，在 ${at} ${ashore ? '上岸' : '下船'}；${notes.join('，')}`, data);
     } catch (e) {

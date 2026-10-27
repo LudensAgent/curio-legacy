@@ -485,21 +485,29 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
     }
     return { ok: true };
   }
-  async dismount(signal: AbortSignal) {
+  dismountToward: Vec3Like | null = null;
+  async dismount(signal: AbortSignal, opts: { toward?: Vec3Like } = {}) {
     await sleep(20, signal);
     if (!this.riding) return { ok: false, reason: 'NOT_MOUNTED' };
     this.riding = null; this.ridingId = null;
+    this.dismountToward = opts.toward ?? null;
     return { ok: true };
   }
-  async ride(target: { x: number; z: number }, signal: AbortSignal, opts: { timeoutMs: number; stop?: () => boolean }) {
+  ridePaths: { x: number; z: number }[][] = [];
+  async ride(target: { x: number; z: number }, signal: AbortSignal, opts: { timeoutMs: number; stop?: () => boolean; via?: { x: number; z: number }[]; arriveWithin?: number }) {
     if (!this.riding) return { ok: false, reason: 'NOT_MOUNTED', arrived: false, moved: 0 };
     const start = { ...this.pos };
     const boat = this.riding === 'boat';
+    const via = opts.via ?? [];
+    this.ridePaths.push([...via, target]);
+    let leg = 0;
     for (let i = 0; i < 400; i++) {
       throwIfAborted(signal);
       if (opts.stop?.()) return { ok: true, arrived: false, moved: dist3(start, this.pos) };
-      const dx = target.x - this.pos.x, dz = target.z - this.pos.z, d = Math.hypot(dx, dz);
-      if (d <= 2) return { ok: true, arrived: true, moved: dist3(start, this.pos) };
+      while (leg < via.length && Math.hypot(via[leg].x - this.pos.x, via[leg].z - this.pos.z) <= 1) leg++;
+      const goal = leg < via.length ? via[leg] : target;
+      const dx = goal.x - this.pos.x, dz = goal.z - this.pos.z, d = Math.hypot(dx, dz);
+      if (leg >= via.length && d <= (opts.arriveWithin ?? 2)) return { ok: true, arrived: true, moved: dist3(start, this.pos) };
       const nx = this.pos.x + (dx / d) * Math.min(1, d), nz = this.pos.z + (dz / d) * Math.min(1, d);
       if (boat && this.nameAt(Math.floor(nx), Math.floor(this.pos.y) - 1, Math.floor(nz)) !== 'water') return { ok: true, arrived: false, blocked: true, moved: dist3(start, this.pos) };
       this.pos = { x: nx, y: this.pos.y, z: nz };

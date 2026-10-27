@@ -326,10 +326,13 @@ export interface GameAdapter {
   useItemOn?(item: string, target: { kind: 'block'; pos: Vec3Like } | { kind: 'self' }, signal: AbortSignal): Promise<ActionResult & { spawned?: string; placed?: Vec3Like }>;
   /** 右键一个实体：船/矿车/马会坐上去，其他生物按手上物品交互（喂食、繁殖、剪毛、交易…） */
   interactEntity?(entityId: number, item: string | null, signal: AbortSignal): Promise<ActionResult & { mounted?: string }>;
-  /** 从载具/坐骑上下来 */
-  dismount?(signal: AbortSignal): Promise<ActionResult>;
-  /** 操控正在乘坐的载具朝 target 前进；stop() 返回 true 时停下 */
-  ride?(target: { x: number; z: number }, signal: AbortSignal, opts: { timeoutMs: number; stop?: () => boolean }): Promise<ActionResult & { arrived: boolean; blocked?: boolean; moved: number }>;
+  /** 从载具/坐骑上下来；toward = 先面朝这个点（原版下船时按乘客朝向挑落点，面朝岸边就会落到岸上） */
+  dismount?(signal: AbortSignal, opts?: { toward?: Vec3Like }): Promise<ActionResult>;
+  /**
+   * 操控正在乘坐的载具朝 target 前进；stop() 返回 true 时停下。
+   * via = 先依次经过的点（水路寻路拉直后的拐点）；arriveWithin = 离 target 多近算到（默认 2 格）
+   */
+  ride?(target: { x: number; z: number }, signal: AbortSignal, opts: { timeoutMs: number; stop?: () => boolean; via?: { x: number; z: number }[]; arriveWithin?: number }): Promise<ActionResult & { arrived: boolean; blocked?: boolean; moved: number }>;
   /**
    * 甩一次竿钓鱼：手持 fishing_rod 朝 aim（水面方块）甩出，咬钩自动收竿；timeoutMs 内没咬钩就收竿（reason NO_BITE）。
    * caught = 实际进了背包的东西（cod、salmon…）；没有钓鱼竿 reason = NO_ROD

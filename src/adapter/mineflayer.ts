@@ -2760,10 +2760,22 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     b.emit('dismount', v);
   }
 
-  async dismount(signal: AbortSignal): Promise<ActionResult> {
+  async dismount(signal: AbortSignal, opts: { toward?: Vec3Like } = {}): Promise<ActionResult> {
     const check = this.actionCheckpoint(signal);
     const b = this.bot;
     if (!this.ready || !b.vehicle) return { ok: false, reason: 'NOT_MOUNTED' };
+    if (opts.toward && b.entity?.position) {
+      // 原版 Boat.getDismountLocationForPassenger 沿乘客的朝向找落点（船身一侧约 1.3 格），找不到才把人放到船顶上。
+      // 坐船时物理关着，mineflayer 不会自己发转头包：这里直接发，等一刻让服务器收到再下船
+      const dx = opts.toward.x - b.entity.position.x, dz = opts.toward.z - b.entity.position.z;
+      if (Math.hypot(dx, dz) > 0.1) {
+        const yaw = Math.atan2(-dx, -dz);
+        b.entity.yaw = yaw;
+        b.entity.pitch = 0;
+        try { b._client.write('look', { yaw: ((Math.PI - yaw) * 180) / Math.PI, pitch: 0, onGround: false }); } catch { /* ignore */ }
+        await this.afterAction(() => sleep(100, signal), check);
+      }
+    }
     const off = new Promise<boolean>((resolve) => {
       const t = setTimeout(() => { b.off('dismount', on); resolve(false); }, 2500);
       const on = () => { clearTimeout(t); resolve(true); };
@@ -2788,7 +2800,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
    * 船的运动由客户端计算（原版就是这样），Mineflayer 不模拟，所以这里按简化的船只运动学自己推进并上报位置：
    * 在水面上加速到约 8 格/秒，前方是陆地/方块就停下（靠岸），离目标 2 格内算到达。
    */
-  async ride(target: { x: number; z: number }, signal: AbortSignal, opts: { timeoutMs: number; stop?: () => boolean }): Promise<ActionResult & { arrived: boolean; blocked?: boolean; moved: number }> {
+  async ride(target: { x: number; z: number }, signal: AbortSignal, opts: { timeoutMs: number; stop?: () => boolean; via?: { x: number; z: number }[]; arriveWithin?: number }): Promise<ActionResult & { arrived: boolean; blocked?: boolean; moved: number }> {
     const check = this.actionCheckpoint(signal);
     const b = this.bot;
     if (!this.ready || !b.vehicle) return { ok: false, reason: 'NOT_MOUNTED', arrived: false, moved: 0 };
@@ -2798,7 +2810,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const start = v.position.clone();
     const end = Date.now() + (Number.isFinite(opts.timeoutMs) ? Math.max(0, opts.timeoutMs) : 0);
     const isBoat = /boat|raft/.test(String(v.name));
-    const water = (blk: any) => !!blk && (blk.name === 'water' || blk.name === 'bubble_column' || String(blk.getProperties?.().waterlogged) === 'true');
+    // 海草、海带长在水里，船照样浮在上面过去
+    const water = (blk: any) => !!blk && (['water', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass'].includes(blk.name) || String(blk.getProperties?.().waterlogged) === 'true');
+    const via = (opts.via ?? []).filter((w) => Number.isFinite(w?.x) && Number.isFinite(w?.z));
+    const arriveWithin = Math.max(0.3, opts.arriveWithin ?? 2);
+    let leg = 0;
     const passable = (blk: any) => !blk || blk.boundingBox === 'empty';
     let speed = 0;
     // 服务器不认可上报的位置（撞到东西 / moved wrongly）时会回发 vehicle_move 把船拉回去：
@@ -2837,8 +2853,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         if (b.vehicle !== v) return { ok: false, reason: 'DISMOUNTED', arrived: false, moved: v.position.distanceTo(start) };
         if (opts.stop?.()) return { ok: true, arrived: false, moved: v.position.distanceTo(start) };
         const p = v.position;
-        const dx = target.x - p.x, dz = target.z - p.z, dist = Math.hypot(dx, dz);
-        if (dist <= 2) return { ok: true, arrived: true, moved: p.distanceTo(start) };
+        // 依次经过拐点：到拐点 1 格内就转向下一个
+        while (leg < via.length && Math.hypot(via[leg].x - p.x, via[leg].z - p.z) <= 1) leg++;
+        const goal = leg < via.length ? via[leg] : target;
+        const dx = goal.x - p.x, dz = goal.z - p.z, dist = Math.hypot(dx, dz);
+        if (leg >= via.length && dist <= arriveWithin) return { ok: true, arrived: true, moved: p.distanceTo(start) };
         const yaw = Math.atan2(-dx, -dz);
         if (!isBoat) {
           await this.afterAction(() => b.look(yaw, 0, true), check);
@@ -2846,7 +2865,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           await this.afterAction(tick, check);
           continue;
         }
-        speed = Math.min(0.4, speed + 0.04);
+        // 快到终点时收桨减速，停得准（要贴着上岸点停）
+        speed = Math.min(0.4, speed + 0.04, leg >= via.length ? Math.max(0.1, dist * 0.2) : 0.4);
         const step = Math.min(speed, dist);
         const nx = p.x + (dx / dist) * step, nz = p.z + (dz / dist) * step;
         const Vec3 = require('vec3').Vec3;
