@@ -87,15 +87,27 @@ export function boatRoom(ctx: Ctx, p: Vec3Like): number {
   return n;
 }
 
-/** 站在岸边伸手放船：够得着（眼睛到水面 4.5 格内，服务器按 5 格视线找水面）、四周宽裕的水面里挑最近的 */
-export function boatSpot(ctx: Ctx, fallback: BlockHit): BlockHit {
+/**
+ * 站在岸边伸手放船：够得着（眼睛到水面 4.5 格内，服务器按 5 格视线找水面）、四周宽裕的水面里挑最近的。
+ * 船的碰撞箱 1.375 格宽，会和人（以及别的船）相撞：服务器放船前检查船身碰不碰到人，碰到就报 Failed to place entity。
+ * 所以船心离自己水平方向至少 minGap 格（默认 1.3，船半宽 0.69 + 人半宽 0.3 再留点余量），也不放在已有的船上。
+ */
+export function boatSpot(ctx: Ctx, fallback: BlockHit, opts: { minGap?: number; exclude?: Set<string> } = {}): BlockHit {
   const eye = ctx.adapter.eye();
   const here = ctx.adapter.state().pos;
   const from = eye ? { x: eye.x, y: eye.y, z: eye.z } : { x: here.x, y: here.y + 1.62, z: here.z };
+  const minGap = opts.minGap ?? 1.3;
+  const boats = ctx.senses.perceivedEntities(8).filter((e) => e.kind !== 'item' && isBoatEntity(e.name));
+  const clearOf = (p: Vec3Like) => {
+    const cx = p.x + 0.5, cz = p.z + 0.5;
+    if (Math.max(Math.abs(cx - here.x), Math.abs(cz - here.z)) < minGap) return false;
+    if (opts.exclude?.has(`${p.x},${p.z}`)) return false;
+    return !boats.some((b) => Math.max(Math.abs(b.pos.x - cx), Math.abs(b.pos.z - cz)) < 1.5);
+  };
   let best: { h: BlockHit; score: number } | null = null;
   for (const h of ctx.senses.knownBlocks(['water'], 6).filter((b) => isWaterSurface(ctx, b.pos))) {
     const d = dist3(from, { x: h.pos.x + 0.5, y: h.pos.y + 0.9, z: h.pos.z + 0.5 });
-    if (d > 4.5) continue;
+    if (d > 4.5 || !clearOf(h.pos)) continue;
     const room = boatRoom(ctx, h.pos);
     const score = (8 - room) * 3 + d;
     if (!best || score < best.score) best = { h, score };
@@ -502,22 +514,38 @@ export const boat: Skill<BoatArgs> = {
             if (dist3(adapter.state().pos, water.pos) > 4.5) return fail(codeFromError(e) === 'ERROR' ? 'PATH_NOT_FOUND' : codeFromError(e), `走不到水边：${(e as Error).message}`);
           }
         }
-        // 走到岸边后重新挑最近的水面放船（够得着）
-        const near = boatSpot(ctx, findWaterSurface(ctx, 5, { want: wantOf(adapter.state().pos), minOpen: 2 }) ?? water);
+        // 走到岸边后重新挑最近的水面放船（够得着、船身不压着自己）；没放成就换一格离自己更远的再放一次
         ctx.progress(0.3, `把 ${item} 放到水面上`);
         const knownBoats = new Set(ctx.senses.perceivedEntities(12).filter((e) => isBoatEntity(e.name)).map((e) => e.id));
-        const before = boatItems();
-        const placed = await adapter.useItemOn(item, { kind: 'block', pos: near.pos }, signal);
-        const findNew = () => {
-          ctx.senses.refresh();
-          return ctx.senses.perceivedEntities(12).filter((e) => e.kind !== 'item' && isPlainBoat(e.name) && !knownBoats.has(e.id))
-            .sort((a, b) => dist3(a.pos, near.pos) - dist3(b.pos, near.pos))[0];
-        };
-        let ent = findNew();
-        for (let i = 0; !ent && i < 8; i++) { await sleep(250, signal); ent = findNew(); }
+        const tried = new Set<string>();
+        let near: BlockHit = water;
+        let ent: ReturnType<typeof ctx.senses.perceivedEntities>[number] | undefined;
+        let lastWhy = '';
+        for (let attempt = 0; attempt < 2 && !ent; attempt++) {
+          near = boatSpot(ctx, findWaterSurface(ctx, 5, { want: wantOf(adapter.state().pos), minOpen: 2 }) ?? water, { minGap: attempt ? 2 : 1.3, exclude: tried });
+          if (tried.has(`${near.pos.x},${near.pos.z}`)) break; // 没有别的格子可换了
+          tried.add(`${near.pos.x},${near.pos.z}`);
+          const before = boatItems();
+          const placed = await adapter.useItemOn(item, { kind: 'block', pos: near.pos }, signal);
+          const target = near.pos;
+          const findNew = () => {
+            ctx.senses.refresh();
+            return ctx.senses.perceivedEntities(12).filter((e) => e.kind !== 'item' && isPlainBoat(e.name) && !knownBoats.has(e.id))
+              .sort((a, b) => dist3(a.pos, target) - dist3(b.pos, target))[0];
+          };
+          ent = findNew();
+          for (let i = 0; !ent && i < 8; i++) { await sleep(250, signal); ent = findNew(); }
+          if (!ent) {
+            const room = boatRoom(ctx, near.pos);
+            const p = adapter.state().pos;
+            const gap = Math.max(Math.abs(near.pos.x + 0.5 - p.x), Math.abs(near.pos.z + 0.5 - p.z));
+            lastWhy = `${placed.ok ? '船没有出现在水面上' : placed.reason}${boatItems() < before ? '（背包里的船少了一条，可能放到别处了）' : ''}；对着的水面 (${near.pos.x},${near.pos.y},${near.pos.z}) 周围 8 格里 ${room} 格是水`
+              + `${room < 8 ? '（船身比一格宽，挨着岸放不下：往开阔些的水边走几步再放）' : ''}${gap < 1.3 ? '（离自己太近，船身会压着自己）' : ''}`;
+          }
+        }
         if (!ent) {
-          const room = boatRoom(ctx, near.pos);
-          return fail('ERROR', `放船失败：${placed.ok ? '船没有出现在水面上' : placed.reason}${boatItems() < before ? '（背包里的船少了一条，可能放到别处了）' : ''}；对着的水面 (${near.pos.x},${near.pos.y},${near.pos.z}) 周围 8 格里 ${room} 格是水${room < 8 ? '（船身比一格宽，挨着岸放不下：往开阔些的水边走几步再放）' : ''}`);
+          const inWater = adapter.state().inWater;
+          return fail('ERROR', `放船失败：${lastWhy}${inWater ? '；人泡在水里，船放不到身边——先上岸，站在岸上朝离自己两三格的开阔水面放' : ''}`);
         }
         boatId = ent.id;
         ctx.progress(0.38, '坐上船');

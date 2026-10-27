@@ -462,6 +462,12 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
     if (!(this.inv.get(item) ?? 0)) return { ok: false, reason: `NO_ITEM:${item}` };
     this.actions.push(`use:${item}:${target.kind === 'block' ? this.nameAt(target.pos.x, target.pos.y, target.pos.z) : 'self'}`);
     if (target.kind === 'block' && /_boat$/.test(item)) {
+      this.yaw = Math.atan2(-(target.pos.x + 0.5 - this.pos.x), -(target.pos.z + 0.5 - this.pos.z)); // 放船前看向那格水面（真适配器也是）
+      // 和原版一样：船身（1.375 格宽）压着人就放不下
+      if (Math.max(Math.abs(target.pos.x + 0.5 - this.pos.x), Math.abs(target.pos.z + 0.5 - this.pos.z)) < 0.99) {
+        this.actions.push('boat:blocked-by-self');
+        return { ok: false, reason: 'Failed to place entity' };
+      }
       this.inv.set(item, this.inv.get(item)! - 1);
       const id = 9000 + this.entities.length;
       this.boatItems.set(id, item);

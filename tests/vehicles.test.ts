@@ -182,3 +182,15 @@ test('boat：目标在陆上 → 停到人能跨上去的低岸边，不在两�
   assert.match(r.summary, /上岸/);
   assert.ok(a.pos.x >= 41 && Math.floor(a.pos.z) >= 1, `应该站到低岸上：${JSON.stringify(a.pos)}`);
 });
+
+test('boat：放船不放在自己身上（船身压着人服务器不让放），泡在水里也挑离自己远一点的水面', async () => {
+  const a = new FakeAdapter();
+  lake(a);
+  a.inv.set('oak_boat', 1);
+  a.pos = { x: 6.2, y: 64, z: 0.3 }; // 泡在浅水里，不在格子正中
+  a.inWater = true;
+  const { run } = setup(a);
+  const r = await run('boat', { direction: 'E', distance: 80, keep: false });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.ok(!a.actions.includes('boat:blocked-by-self'), a.actions.join(' '));
+});
