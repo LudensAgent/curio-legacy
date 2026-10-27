@@ -9,7 +9,7 @@ import type { Vec3Like } from '../adapter/types.ts';
 import { feetCell } from '../perception/local.ts';
 import { passageRoute } from '../memory/passages.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
-import { travelTo } from './overland.ts';
+import { planTravel, travelTo } from './overland.ts';
 
 // ------------------------------------------------------------------ 寻找与张望（人眼式：不透视，只是转头看）
 /** 朝 (dx,dz) 方向的 yaw（0 = 北/-Z，正值向左/西） */
@@ -253,6 +253,14 @@ export const goTo: Skill<{ target: string; dig?: boolean; sprint?: boolean; avoi
       const t = await travelTo(ctx, d.target, args.target);
       return t.status === 'succeeded' ? ok(`步行寻路被水挡住，改走水陆路线：${t.summary}`, { ...t.data, viaTravel: true })
         : fail(t.failureCode ?? 'PATH_NOT_FOUND', `步行寻路被水挡住（${r.summary.slice(0, 80)}）；改走水陆路线也没到：${t.summary}`, { ...d, ...t.data, viaTravel: true });
+    }
+    // 走不通（不是水的事，或者没到换水路的条件）：看一眼地形，说清楚是被什么挡住了
+    if (r.status === 'failed' && r.failureCode === 'PATH_NOT_FOUND' && d.target && !/看地形/.test(r.summary)) {
+      try {
+        const here = ctx.adapter.state().pos;
+        const plan = planTravel((p) => ctx.adapter.blockAt(p), here, d.target, { canBoat: false, maxNodes: 8000, margin: 16 });
+        if (plan && !plan.reached && plan.why) return { ...r, summary: `${r.summary}（看地形：${plan.why}）` };
+      } catch { /* 诊断不了就照原样 */ }
     }
     return r;
   },

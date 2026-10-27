@@ -50,3 +50,11 @@ test('travel：走到河边、坐船过河、上岸走到对面', async () => {
   assert.ok(a.pos.x > 27, JSON.stringify(a.pos));
   assert.match(r.summary, /坐船|游了/);
 });
+
+test('planTravel：站在自己垫的高柱子上下不去时，说清楚是落差的问题', () => {
+  const a = new FakeAdapter();
+  for (let y = 64; y <= 69; y++) a.blocks.push({ name: 'dirt', pos: { x: 0, y, z: 0 } });
+  const plan = planTravel((p) => a.blockAt(p), { x: 0.5, y: 70, z: 0.5 }, { x: 20, z: 0 }, { canBoat: false })!;
+  assert.equal(plan.reached, false);
+  assert.match(plan.why ?? '', /站在高处/);
+});

@@ -10,7 +10,7 @@ import { codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from
  */
 
 type BlockAt = (p: Vec3Like) => string | null;
-export type Col = { kind: 'land' | 'water' | 'blocked'; y: number };
+export type Col = { kind: 'land' | 'water' | 'blocked'; y: number; why?: 'unloaded' | 'obstacle' | 'deep' };
 
 const PASS = new Set(['air', 'cave_air', 'void_air', 'short_grass', 'grass', 'tall_grass', 'fern', 'large_fern', 'dead_bush', 'snow', 'dandelion', 'poppy',
   'blue_orchid', 'allium', 'azure_bluet', 'red_tulip', 'orange_tulip', 'white_tulip', 'pink_tulip', 'oxeye_daisy', 'cornflower', 'lily_of_the_valley',
@@ -26,25 +26,25 @@ export function surveyColumn(blockAt: BlockAt, x: number, z: number, hintY: numb
   // 起点在实心里（山坡更高）：往上找到空处
   for (let i = 0; i < 24; i++) {
     const n = at(y);
-    if (n === null) return { kind: 'blocked', y: hintY };
+    if (n === null) return { kind: 'blocked', y: hintY, why: 'unloaded' };
     if (PASS.has(n) || isLeaves(n)) break;
     y++;
   }
   for (let i = 0; i < 40; i++, y--) {
     const n = at(y);
-    if (n === null) return { kind: 'blocked', y: hintY };
+    if (n === null) return { kind: 'blocked', y: hintY, why: 'unloaded' };
     if (PASS.has(n) || isLeaves(n)) continue;
     if (WATER.has(n)) return { kind: 'water', y };
-    if (DANGER.test(n) || /_log$|_wood$|_fence|_wall$|_fence_gate$/.test(n)) return { kind: 'blocked', y };
+    if (DANGER.test(n) || /_log$|_wood$|_fence|_wall$|_fence_gate$/.test(n)) return { kind: 'blocked', y, why: 'obstacle' };
     const feet = at(y + 1), head = at(y + 2);
-    if (feet === null || head === null || !PASS.has(feet) || !PASS.has(head)) return { kind: 'blocked', y: y + 1 };
+    if (feet === null || head === null || !PASS.has(feet) || !PASS.has(head)) return { kind: 'blocked', y: y + 1, why: 'obstacle' };
     return { kind: 'land', y: y + 1 };
   }
-  return { kind: 'blocked', y: hintY };
+  return { kind: 'blocked', y: hintY, why: 'deep' };
 }
 
 export type Leg = { mode: 'walk' | 'water'; cells: { x: number; y: number; z: number }[] };
-export type TravelPlan = { legs: Leg[]; reached: boolean; cells: number };
+export type TravelPlan = { legs: Leg[]; reached: boolean; cells: number; /** 没到时：周围路走不通的主要原因（给身体和心智看） */ why?: string };
 
 /**
  * 在已加载的地形上找一条水陆路线（A*，8 邻接，不切角）：
@@ -75,19 +75,25 @@ export function planTravel(blockAt: BlockAt, from: Vec3Like, to: { x: number; z:
     if (heap.length) { heap[0] = last; for (let i = 0; ;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < heap.length && heap[l].f < heap[m].f) m = l; if (r < heap.length && heap[r].f < heap[m].f) m = r; if (m === i) break; [heap[m], heap[i]] = [heap[i], heap[m]]; i = m; } }
     return top;
   };
+  // 走不通的边记下原因（起点附近的单独记）：没到时告诉它“卡在哪类地形上”
+  const rejNear = new Map<string, number>(), rejAll = new Map<string, number>();
+  let nearNow = false;
+  const no = (why: string) => { rejAll.set(why, (rejAll.get(why) ?? 0) + 1); if (nearNow) rejNear.set(why, (rejNear.get(why) ?? 0) + 1); return null; };
   const step = (a: Col, b: Col): number | null => {
-    if (b.kind === 'blocked') return null;
+    if (b.kind === 'blocked') return no(b.why === 'unloaded' ? 'unloaded' : b.why === 'deep' ? 'drop' : 'obstacle');
     if (a.kind === 'land' && b.kind === 'land') {
       const dy = b.y - a.y;
-      if (dy > 1 || dy < -3) return null;
+      if (dy > 1) return no('climb');
+      if (dy < -3) return no('drop');
       return 1 + (dy > 0 ? 0.3 : dy < -1 ? 0.5 : 0);
     }
     if (a.kind === 'land' && b.kind === 'water') {
       const drop = a.y - (b.y + 1);
-      if (drop < -1 || drop > 3) return null;
+      if (drop < -1) return no('climb');
+      if (drop > 3) return no('drop');
       return opts.canBoat ? 1 + 6 : 2.5;
     }
-    if (a.kind === 'water' && b.kind === 'land') return b.y - (a.y + 1) <= 1 ? 1.5 : null;
+    if (a.kind === 'water' && b.kind === 'land') return b.y - (a.y + 1) <= 1 ? 1.5 : no('bank');
     return opts.canBoat ? 1 : 2.5; // 水里
   };
   const best = new Map<string, number>();
@@ -101,6 +107,7 @@ export function planTravel(blockAt: BlockAt, from: Vec3Like, to: { x: number; z:
     closed.add(k); n++;
     if (!closest || h(cur.x, cur.z) < h(closest.x, closest.z)) closest = cur;
     if (h(cur.x, cur.z) <= 1.5 && cur.c.kind === 'land') { found = cur; break; }
+    nearNow = Math.hypot(cur.x - sx, cur.z - sz) <= 2.5;
     for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
       if (!dx && !dz) continue;
       const nx = cur.x + dx, nz = cur.z + dz;
@@ -120,7 +127,8 @@ export function planTravel(blockAt: BlockAt, from: Vec3Like, to: { x: number; z:
     }
   }
   const end = found ?? closest;
-  if (!end || (end.x === sx && end.z === sz)) return { legs: [], reached: !!found, cells: 0 };
+  const why = found ? undefined : explainBlocked(end && Math.hypot(end.x - sx, end.z - sz) < 3 ? rejNear : rejAll, rejNear);
+  if (!end || (end.x === sx && end.z === sz)) return { legs: [], reached: !!found, cells: 0, ...(why ? { why } : {}) };
   const path: Node[] = [];
   for (let n: Node | null = end; n; n = n.parent) path.push(n);
   path.reverse();
@@ -131,7 +139,21 @@ export function planTravel(blockAt: BlockAt, from: Vec3Like, to: { x: number; z:
     if (legs.length && legs[legs.length - 1].mode === mode) legs[legs.length - 1].cells.push(cell);
     else legs.push({ mode, cells: [cell] });
   }
-  return { legs, reached: !!found, cells: path.length - 1 };
+  return { legs, reached: !!found, cells: path.length - 1, ...(why ? { why } : {}) };
+}
+
+const WHY_ZH: Record<string, string> = {
+  drop: '往下落差超过 3 格（悬崖、深坑，或者自己正站在高处/柱子上）', climb: '要一次往上爬 2 格以上（陡坡、高墙）',
+  obstacle: '被树干、墙、栅栏、岩浆这类东西挡住', bank: '水边的岸比水面高 2 格以上，从水里上不去', unloaded: '再往前的地形还没加载（太远，走近了才看得到）',
+};
+/** 把被拒的边归成一两句话：起点附近四周都走不通时特别说明 */
+function explainBlocked(rej: Map<string, number>, near: Map<string, number>): string | undefined {
+  const top = [...rej].sort((a, b) => b[1] - a[1]).filter(([, n]) => n > 0).slice(0, 2).map(([k]) => WHY_ZH[k]).filter(Boolean);
+  if (!top.length) return undefined;
+  const nearTotal = [...near.values()].reduce((a, b) => a + b, 0);
+  const nearDrop = near.get('drop') ?? 0;
+  if (nearTotal >= 6 && nearDrop / nearTotal > 0.6) return '脚下四周大多是 3 格以上的落差：你站在高处（柱子、悬崖边、自己垫的方块上），先找安全的办法下去（一级级挖台阶下、往水里跳、或者往下垫）';
+  return `挡路的主要是：${top.join('；')}`;
 }
 
 // ------------------------------------------------------------------ travel
@@ -180,7 +202,8 @@ export const travel: Skill<TravelArgs> = {
         if (adapter.state().riding) { try { await adapter.dismount?.(signal); } catch (e) { if (isAbort(e)) throw e; } }
         const plan = planTravel(blockAt, here, target, { canBoat: canBoat(), avoid });
         if (!plan) return fail('PATH_NOT_FOUND', `travel 只管地面上的路：现在脚下不是地面（在地下、悬空或站不住），先回到地面再走；${done.length ? `已经${done.join('，')}` : ''}`);
-        if (!plan.legs.length) { lastErr = lastErr || '看得到的地形里找不到更近的路（远处没加载、或被墙/悬崖/岩浆挡住）'; break; }
+        if (!plan.legs.length) { lastErr = lastErr || `看得到的地形里找不到更近的路：${plan.why ?? '远处没加载、或被墙/悬崖/岩浆挡住'}`; break; }
+        if (!plan.reached && plan.why && round === 0) lastErr = `路只能规划到一半：${plan.why}`;
         ctx.progress(1 - Math.min(1, flat(here) / Math.max(1, flat(startPos))), `规划了 ${plan.legs.map((l) => `${l.mode === 'walk' ? '走' : '水'}${l.cells.length}`).join('→')}`);
         // 一次最多走 ~120 格，再按新看到的地形重新规划
         let budget = 120, failed = false;
