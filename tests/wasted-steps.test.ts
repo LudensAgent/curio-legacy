@@ -30,6 +30,7 @@ test('a dig that actually removes a block resets the air count', () => {
   for (const r of [air, air, stone, air, air]) { a.index = 1; assert.equal(afterStep(a, dig, r, 50, adapter.state()).kind === 'stuck', false); }
 });
 
-test('an occupied bed is explained as not worth waiting for', () => {
-  assert.match(sleepReason('the bed is occupied'), /等下去它也不会空出来/);
+test('a bed that stays occupied after a click is explained, with other ways to sleep', () => {
+  assert.match(sleepReason('the bed is occupied'), /点了一下床也没空出来/);
+  assert.match(sleepReason('the bed is occupied'), /sleep \{"place":true\}/);
 });
