@@ -41,6 +41,8 @@ test('coordinate goto requires the target cell and reports measured movement inc
   t.mock.method(globalThis, 'setTimeout', ((callback: () => void) => { queueMicrotask(callback); return 0; }) as unknown as typeof setTimeout);
   for (const moves of [false, true]) {
     const adapter = new TestWorld(); adapter.pos = { x: 25.45, y: 77, z: -21.2 };
+    // 目标格脚下是实地、能站进去：站在旁边一格不算到
+    adapter.setBlock({ x: 24, y: 76, z: -22 }, 'stone');
     const ctx = makeCtx(adapter); t.after(() => ctx.memory.close());
     let calls = 0;
     t.mock.method(adapter, 'moveTo', async (target) => {
@@ -61,4 +63,23 @@ test('coordinate goto requires the target cell and reports measured movement inc
       assert.match(again.summary, /没有执行新的位移/);
     }
   }
+});
+
+test('coordinate goto: a solid target block means standing on it; a cell that cannot be entered counts as reached from next to it', async (t) => {
+  t.mock.method(globalThis, 'setTimeout', ((callback: () => void) => { queueMicrotask(callback); return 0; }) as unknown as typeof setTimeout);
+  const adapter = new TestWorld(); adapter.pos = { x: 20.5, y: 77, z: 0.5 };
+  adapter.setBlock({ x: 24, y: 76, z: 0 }, 'stone');
+  const ctx = makeCtx(adapter); t.after(() => ctx.memory.close());
+  const targets: any[] = [];
+  t.mock.method(adapter, 'moveTo', async (target: any) => { targets.push(target); adapter.pos = { x: 24.5, y: 77, z: 0.5 }; });
+  let r = await goTo.run(ctx, { target: '24,76,0' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(targets[0].pos.y, 77, 'aims at the cell above the solid block');
+  assert.match(r.summary, /按站到它上面算/);
+  // 路径报错，但人其实已经到了
+  adapter.pos = { x: 20.5, y: 77, z: 0.5 };
+  t.mock.method(adapter, 'moveTo', async () => { adapter.pos = { x: 24.5, y: 77, z: 0.5 }; throw new Error('Took to long to decide path to goal!'); });
+  r = await goTo.run(ctx, { target: '24,77,0' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.match(r.summary, /人已经到了/);
 });
