@@ -34,8 +34,11 @@ test('合成被打断但其实做成了：说一声；紧接着再要同一样�
   assert.equal(w.crafts, 1, '没有再发一次合成');
   assert.ok(events.some((e) => e.startsWith('craft_landed:') && /iron_sword \+1/.test(e)));
 
-  // 之后正常再做：照做，并说清现在共有几把
-  const r2 = await craft.run(makeCtx(w), { item: 'iron_sword', count: 1 });
+  // 之后再要一把：已经有一把还经用的铁剑，不再做；明说要备用（extra）才做，并说清现在共有几把
+  const dup = await craft.run(makeCtx(w), { item: 'iron_sword', count: 1 });
+  assert.equal(dup.failureCode, 'BAD_ARGS');
+  assert.match(dup.summary, /已经有 iron_sword×1/);
+  const r2 = await craft.run(makeCtx(w), { item: 'iron_sword', count: 1, extra: true });
   assert.match(r2.summary, /合成了 1 个 iron_sword（背包里现在共 2 个）/);
   assert.equal(w.crafts, 2);
 });
@@ -45,6 +48,6 @@ test('合成成功的结果写出背包里共有几个，身上穿着同样的�
   w.inv.set('iron_chestplate', 1);
   const base = w.state.bind(w);
   (w as any).state = () => ({ ...base(), equipment: [{ slot: 'torso', name: 'iron_chestplate' }] });
-  const r = await craft.run(makeCtx(w), { item: 'iron_chestplate', count: 1 });
+  const r = await craft.run(makeCtx(w), { item: 'iron_chestplate', count: 1, extra: true }); // 已经穿着一件，明说要再做
   assert.match(r.summary, /合成了 1 个 iron_chestplate（背包里现在共 2 个，身上还穿着一件）/);
 });

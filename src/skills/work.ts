@@ -530,7 +530,8 @@ export const craft: Skill<{ item: string; count: number; extra?: boolean }> = {
       if (near) return fail('BAD_ARGS', `${near.dist} 格外 (${near.pos.x},${near.pos.y},${near.pos.z}) 就有${zh}${near.from === 'memory' ? '（记得的）' : ''}，不用再做：${use}；真要再做一个写 {"item":"${args.item}","extra":true}`);
     }
     // 工具、武器、护甲：手上已经有同类、等级不低、还经用的，多半是忘了（背包里攒了三把铁剑）。说清楚有什么；真要再做写 extra:true
-    if (!args.extra) {
+    // 刚被打断的同一样合成在等落地：交给下面的“打断续做”去算，不当成重复做
+    if (!args.extra && !interruptedCrafts.has(args.item)) {
       const s = ctx.adapter.state();
       const held = gearAlreadyHeld(args.item, s.inventory, s.equipment);
       if (held) return fail('BAD_ARGS', `${held}，不用再做 ${args.item}：打架、干活时会自己拿出最好的那件用；真要再做一把（备用、给别处）写 {"item":"${args.item}","extra":true}`);

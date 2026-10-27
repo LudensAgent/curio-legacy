@@ -154,7 +154,7 @@ test('goto does not toggle a door again when the native approach has already ope
   assert.equal(adapter.blockStateAt(door).properties.open, true);
 });
 
-test('a visible destination across water remains a dry-walking request and offers a boat after failure', async (t) => {
+test('a visible destination across water stays dry walking, then hands over to the amphibious route planner', async (t) => {
   const adapter = start(), water = { x: 3, y: 64, z: 0 };
   adapter.setBlock(water, 'water');
   const ctx = makeCtx(adapter, { senses: {
@@ -168,9 +168,10 @@ test('a visible destination across water remains a dry-walking request and offer
   });
   const result = await goTo.run(ctx, { target: '8,64,0' });
   assert.equal(result.status, 'failed');
-  assert.equal(walk.mock.callCount(), 1);
+  assert.ok(walk.mock.callCount() >= 1);
   assert.equal(result.data?.waterAhead, true);
-  assert.match(result.summary, /boat/);
+  assert.equal(result.data?.viaTravel, true, 'water blocked the walk, so the travel planner took over');
+  assert.match(result.summary, /步行寻路被水挡住.*水陆路线/);
   assert.equal(adapter.inWater, false);
 });
 

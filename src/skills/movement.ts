@@ -8,7 +8,8 @@ import { dist3, sleep, throwIfAborted } from '../util.ts';
 import type { Vec3Like } from '../adapter/types.ts';
 import { feetCell } from '../perception/local.ts';
 import { passageRoute } from '../memory/passages.ts';
-import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
+import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
+import { travelTo } from './overland.ts';
 
 // ------------------------------------------------------------------ 寻找与张望（人眼式：不透视，只是转头看）
 /** 朝 (dx,dz) 方向的 yaw（0 = 北/-Z，正值向左/西） */
@@ -244,6 +245,22 @@ export const goTo: Skill<{ target: string; dig?: boolean; sprint?: boolean; avoi
     return { ok: true, args: { target: t, ...(obj(raw).dig === true ? { dig: true } : {}), ...(obj(raw).sprint === true ? { sprint: true } : {}), ...(avoid.length ? { avoid } : {}) } };
   },
   async run(ctx, args) {
+    const r = await walkTo(ctx, args);
+    // 步行寻路被水挡住（泡在水里、附近有水、没有干路）而目标还远：接着按水陆路线走（走、游、坐船接力），不用它自己再一点点试
+    const d = (r.data ?? {}) as { target?: Vec3Like; position?: Vec3Like; waterAhead?: boolean };
+    if (r.status === 'failed' && (r.failureCode === 'PATH_NOT_FOUND' || r.failureCode === 'TIMEOUT') && d.target && !ctx.signal.aborted && Date.now() < ctx.deadline - 15000
+      && (d.waterAhead || ctx.adapter.state().inWater || /水/.test(r.summary)) && Math.hypot(d.target.x - ctx.adapter.state().pos.x, d.target.z - ctx.adapter.state().pos.z) > 6) {
+      const t = await travelTo(ctx, d.target, args.target);
+      return t.status === 'succeeded' ? ok(`步行寻路被水挡住，改走水陆路线：${t.summary}`, { ...t.data, viaTravel: true })
+        : fail(t.failureCode ?? 'PATH_NOT_FOUND', `步行寻路被水挡住（${r.summary.slice(0, 80)}）；改走水陆路线也没到：${t.summary}`, { ...d, ...t.data, viaTravel: true });
+    }
+    return r;
+  },
+};
+
+/** goto 的步行部分 */
+async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; sprint?: boolean; avoid?: string[] }): Promise<SkillResult> {
+  {
     const { adapter, memory, signal } = ctx;
     const s = adapter.state();
     let pos: { x: number; y: number; z: number } | null = null;
@@ -452,8 +469,8 @@ export const goTo: Skill<{ target: string; dig?: boolean; sprint?: boolean; avoi
     } finally {
       clearInterval(prog);
     }
-  },
-};
+  }
+}
 
 const BED_NAMES = ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black'].map((c) => `${c}_bed`);
 
