@@ -38,6 +38,9 @@ import type {
 
 const require = createRequire(import.meta.url);
 
+/** 右键一点就打开、触发的方块：贴着它放东西要按住潜行 */
+const OPENS_ON_CLICK = /chest$|barrel|crafting_table|furnace|smoker|_door$|_trapdoor$|_fence_gate$|_button$|lever|_bed$|anvil|enchanting_table|brewing_stand|loom|stonecutter|grindstone|smithing_table|cartography_table|hopper|dispenser|dropper|shulker_box|note_block|jukebox|beacon|lectern|bell|repeater|comparator|cake/;
+
 const HOSTILE = new Set([
   'zombie', 'husk', 'drowned', 'zombie_villager', 'skeleton', 'stray', 'creeper', 'spider',
   'cave_spider', 'witch', 'slime', 'magma_cube', 'phantom', 'pillager', 'vindicator', 'evoker',
@@ -1293,13 +1296,18 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (cur && cur.boundingBox === 'block') return { ok: true }; // 已经有方块了
     const Vec3 = require('vec3').Vec3;
     const faces = [new Vec3(0, -1, 0), new Vec3(0, 1, 0), new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)];
-    for (const f of faces) {
-      const ref = b.blockAt(target.plus(f));
-      if (!ref || ref.boundingBox !== 'block') continue;
+    // 贴着箱子、工作台、门这类一点就打开的方块放：先试别的面；只能贴着它时按住潜行再放（不然是打开它，不是放方块）
+    const refs = faces.map((f) => ({ f, ref: b.blockAt(target.plus(f)) })).filter((x) => x.ref && x.ref.boundingBox === 'block')
+      .sort((x, y) => Number(OPENS_ON_CLICK.test(x.ref.name)) - Number(OPENS_ON_CLICK.test(y.ref.name)));
+    for (const { f, ref } of refs) {
       if (!this.canClickPlacementFace(ref, f.scaled(-1))) continue;
+      const sneak = OPENS_ON_CLICK.test(ref.name);
       try {
         await this.afterAction(() => b.equip(item, 'hand'), check);
-        await this.afterAction(() => raceAbort(b.placeBlock(ref, f.scaled(-1)), signal, 5000, () => {}), check);
+        if (sneak) { b.setControlState('sneak', true); await this.afterAction(() => sleep(120, signal), check); }
+        try {
+          await this.afterAction(() => raceAbort(b.placeBlock(ref, f.scaled(-1)), signal, 5000, () => {}), check);
+        } finally { if (sneak) b.setControlState('sneak', false); }
         return { ok: true };
       } catch (e: any) {
         if (e?.name === 'AbortedError') throw e;
@@ -2510,9 +2518,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return this.foodItems().length > 0;
   }
 
-  async eat(signal: AbortSignal): Promise<boolean> {
+  async eat(signal: AbortSignal, want?: string): Promise<boolean> {
     const check = this.actionCheckpoint(signal);
-    const item = this.foodItems()[0];
+    const item = want ? this.bot?.inventory.items().find((i: any) => i.name === want && (this.mcData.foodsByName ?? {})[i.name]) : this.foodItems()[0];
     if (!item) return false;
     const b = this.bot;
     await this.afterAction(() => b.equip(item, 'hand'), check);
@@ -2706,6 +2714,42 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       await this.afterAction(() => sleep(ms, signal), check);
     } finally {
       if (epoch === this.actionEpoch && b === this.bot) b.setControlState('jump', false);
+    }
+  }
+
+  /**
+   * 在水里朝一格游过去：看着它往前游，目标在下面就按潜行往下沉，在上面就按跳往上游。
+   * 到了（1.3 格内）、气不够了、出了水、或者超时就停，松开所有按键；不替它决定去哪、潜多深。
+   */
+  async diveTo(target: Vec3Like, signal: AbortSignal, opts: { minOxygen?: number; timeoutMs?: number } = {}): Promise<ActionResult & { reached: boolean; oxygen: number }> {
+    const check = this.actionCheckpoint(signal);
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', reached: false, oxygen: 0 };
+    const b = this.bot, epoch = this.actionEpoch;
+    const minOxygen = opts.minOxygen ?? 6;
+    const end = Date.now() + Math.max(500, Math.min(30000, opts.timeoutMs ?? 15000));
+    const goal = this.vec(target).offset(0.5, 0.5, 0.5);
+    const oxygen = () => this.state().oxygen;
+    check();
+    b.pathfinder?.setGoal(null);
+    b.clearControlStates();
+    try {
+      while (Date.now() < end) {
+        check();
+        const eye = b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0);
+        const d = goal.distanceTo(b.entity.position.offset(0, 0.9, 0));
+        if (d <= 1.3) return { ok: true, reached: true, oxygen: oxygen() };
+        if (!b.entity.isInWater) return { ok: false, reason: 'OUT_OF_WATER', reached: false, oxygen: oxygen() };
+        if (oxygen() <= minOxygen) return { ok: false, reason: 'LOW_OXYGEN', reached: false, oxygen: oxygen() };
+        await this.afterAction(() => b.lookAt(goal, true), check);
+        const dy = goal.y - eye.y;
+        b.setControlState('forward', Math.hypot(goal.x - eye.x, goal.z - eye.z) > 0.6);
+        b.setControlState('sneak', dy < -0.5);
+        b.setControlState('jump', dy > 0.5);
+        await this.afterAction(() => sleep(100, signal), check);
+      }
+      return { ok: false, reason: 'TIMEOUT', reached: false, oxygen: oxygen() };
+    } finally {
+      if (epoch === this.actionEpoch && b === this.bot) b.clearControlStates();
     }
   }
 

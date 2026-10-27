@@ -342,13 +342,16 @@ export interface GameAdapter {
   /** 作物生长阶段：{age, max}；不是作物返回 null */
   cropAge(pos: Vec3Like): { age: number; max: number } | null;
   hasFood(): boolean;
-  eat(signal: AbortSignal): Promise<boolean>;
+  /** item：指定吃哪样（不写挑背包里最好的） */
+  eat(signal: AbortSignal, item?: string): Promise<boolean>;
   equipWeapon(signal?: AbortSignal): Promise<void>;
   attack(entityId: number, signal?: AbortSignal): Promise<boolean>;
   look(yaw: number, pitch: number, signal?: AbortSignal): Promise<void>;
   jump(ms: number, signal: AbortSignal): Promise<void>;
   /** Swim toward an observed shore, retaining buoyancy until dry footing is verified. */
   swimTo?(target: Vec3Like | null, signal: AbortSignal, opts?: SwimOptions): Promise<ActionResult & { landed: boolean; oxygen: number }>;
+  /** 在水里朝一格游过去（往下潜或往上游）：到了、气不够了（oxygen ≤ minOxygen）、出了水或超时就停 */
+  diveTo?(target: Vec3Like, signal: AbortSignal, opts?: { minOxygen?: number; timeoutMs?: number }): Promise<ActionResult & { reached: boolean; oxygen: number }>;
 
   // ---- 通用基础动作：玩家的“右键”和“方向键”。上层用它们组合出技能清单里没有的玩法
   /** 手持 item 右键：对着一个方块/水面（block），或对空中/自己（self） */

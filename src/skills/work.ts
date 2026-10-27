@@ -559,17 +559,22 @@ export const craft: Skill<{ item: string; count: number; extra?: boolean }> = {
 };
 
 // ------------------------------------------------------------------ eat
-export const eat: Skill<{}> = {
+export const eat: Skill<{ item?: string }> = {
   name: 'eat',
-  description: '吃背包里最好的食物，一直吃到饱（饱食度 18 以上才会自然回血）；没有正常食物且饥饿值不超过 6 时允许吃腐肉救急',
-  argsDoc: '{}',
+  description: '吃东西，一直吃到饱（饱食度 18 以上才会自然回血）：写 item 只吃那一样（比如先吃生的、留着金苹果），不写挑背包里最好的；没有正常食物且饥饿值不超过 6 时允许吃腐肉救急',
+  argsDoc: '{"item"?: "<食物名>"}',
   timeoutMs: 20000,
   movement: false,
-  validate() {
-    return { ok: true, args: {} };
+  validate(raw, adapter) {
+    const name = String(obj(raw).item ?? '').trim().replace(/^minecraft:/, '');
+    if (!name) return { ok: true, args: {} };
+    const item = resolveItemAlias(name, adapter);
+    if (!item || !FOOD_VALUE[item]) return { ok: false, error: `${name} 不是能吃的东西` };
+    return { ok: true, args: { item } };
   },
-  async run(ctx) {
-    if (!ctx.adapter.hasFood()) {
+  async run(ctx, args) {
+    if (args.item && !ctx.adapter.state().inventory.some((i) => i.name === args.item && i.count > 0)) return fail('NO_FOOD', `背包里没有 ${args.item}`);
+    if (!args.item && !ctx.adapter.hasFood()) {
       const inv = ctx.adapter.state().inventory;
       const has = (re: RegExp) => inv.some((i) => re.test(i.name) && i.count > 0);
       const alt = [
@@ -593,7 +598,7 @@ export const eat: Skill<{}> = {
       do {
         const before = ctx.adapter.state().food;
         const invBefore = counts();
-        const used = await ctx.adapter.eat(ctx.signal);
+        const used = await ctx.adapter.eat(ctx.signal, args.item);
         if (used === false) break;
         bites++;
         const until = Date.now() + 1500;
@@ -602,7 +607,7 @@ export const eat: Skill<{}> = {
         eaten++;
         const invAfter = counts();
         for (const [name, n] of invBefore) if ((invAfter.get(name) ?? 0) < n && FOOD_VALUE[name]) ate[name] = (ate[name] ?? 0) + (n - (invAfter.get(name) ?? 0));
-      } while (eaten < 6 && ctx.adapter.state().food < 18 && ctx.adapter.hasFood() && Date.now() < ctx.deadline - 2500);
+      } while (eaten < 6 && ctx.adapter.state().food < 18 && (args.item ? ctx.adapter.state().inventory.some((i) => i.name === args.item && i.count > 0) : ctx.adapter.hasFood()) && Date.now() < ctx.deadline - 2500);
       const food = ctx.adapter.state().food;
       if (!eaten) return fail('ERROR', `没吃进去：试了 ${bites} 口，饥饿值还是 ${food}${food >= 20 ? '（已经饱了）' : '（可能被打断或手上换了东西），稍后再试'}`, { bites });
       // 吃了什么、每块值多少（生的顺带说烤熟后值多少）：让它自己看出划不划算

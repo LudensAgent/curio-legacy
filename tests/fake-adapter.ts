@@ -351,9 +351,10 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
   hasFood() {
     return (this.inv.get('bread') ?? 0) > 0;
   }
-  async eat(signal: AbortSignal) {
+  async eat(signal: AbortSignal, item = 'bread') {
     await sleep(100, signal);
-    if ((this.inv.get('bread') ?? 0) > 0) this.inv.set('bread', this.inv.get('bread')! - 1);
+    if ((this.inv.get(item) ?? 0) <= 0) return false;
+    this.inv.set(item, this.inv.get(item)! - 1);
     this.food = 20;
     return true;
   }

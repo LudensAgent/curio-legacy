@@ -297,4 +297,42 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
   },
 };
 
-export const primitiveSkills = [digAt, stepTo, placeAt];
+/** 绝对坐标："xyz":[x,y,z]、"x,y,z" 或 {"x":…,"y":…,"z":…} */
+function absValue(v: unknown): Vec3Like | null {
+  const arr = typeof v === 'string' ? v.split(/[,\s]+/).filter(Boolean).map(Number)
+    : Array.isArray(v) ? v.map(Number) : v && typeof v === 'object' ? [(v as any).x, (v as any).y, (v as any).z].map(Number) : null;
+  return arr && arr.length === 3 && arr.every(Number.isInteger) ? { x: arr[0], y: arr[1], z: arr[2] } : null;
+}
+
+/**
+ * 让原子动作也认绝对坐标（"xyz"）：[前,上,右] 要按朝向心算，模型常算错（日志里 dig_at [0,2,0] 挖到空气）。
+ * 开工时按当时站的位置和朝向换成 [前,上,右]，在 routine 里重复时每次都按当时的位置重新换——绝对坐标指的始终是同一格。
+ */
+function withAbsolute<A extends CellArgs>(skill: Skill<A>, bounds: { f: number; u: [number, number]; r: number }): Skill<A & { xyz?: Vec3Like }> {
+  const rel = (feet: Vec3Like, facing: Facing, p: Vec3Like) => parseRel(toRel(feet, facing, p), bounds);
+  const far = (p: Vec3Like, why: string) => `(${p.x},${p.y},${p.z}) 不在身边能${skill.name === 'step' ? '迈到' : '够到'}的范围：${why}；先走近（goto 那里）再做`;
+  return {
+    ...skill,
+    argsDoc: `${skill.argsDoc}；也可以用绝对坐标 "xyz":[x,y,z] 代替 [前,上,右]`,
+    validate(raw, adapter) {
+      const a = obj(raw);
+      const p = absValue(a.xyz ?? a.abs ?? a.world);
+      if (!p) return skill.validate(raw, adapter);
+      const facing = facingArg(a.facing, adapter);
+      if (!FACINGS.includes(facing as Facing)) return { ok: false, error: facing };
+      const r = rel(feetCell(adapter.state().pos), facing as Facing, p);
+      if (typeof r === 'string') return { ok: false, error: far(p, r) };
+      const { xyz: _x, abs: _a, world: _w, at: _at, to: _to, pos: _p, ...rest } = a;
+      const v = skill.validate({ ...rest, at: r, facing }, adapter);
+      return v.ok ? { ok: true, args: { ...v.args, xyz: p } } : v;
+    },
+    async run(ctx, args) {
+      if (!args.xyz) return skill.run(ctx, args);
+      const r = rel(feetCell(ctx.adapter.state().pos), args.facing, args.xyz);
+      if (typeof r === 'string') return fail('PATH_NOT_FOUND', far(args.xyz, r), after(ctx, args.facing));
+      return skill.run(ctx, { ...args, at: r });
+    },
+  };
+}
+
+export const primitiveSkills = [withAbsolute(digAt, { f: 2, u: [-1, 3], r: 2 }), withAbsolute(stepTo, { f: 1, u: [-1, 1], r: 1 }), withAbsolute(placeAt, { f: 2, u: [-1, 3], r: 2 })];

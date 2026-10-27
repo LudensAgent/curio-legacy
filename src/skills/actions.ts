@@ -287,4 +287,71 @@ export const ride: Skill<{ direction?: string; to?: { x: number; z: number }; di
   },
 };
 
-export const actionSkills = [useItem, interact, hitEntity, dismount, ride];
+// ------------------------------------------------------------------ look
+/** 转头：朝一个方向（八方位，或 up/down）或者一格（xyz）看过去。扔东西、射箭、用东西都朝正看着的方向 */
+export const look: Skill<{ dir?: string; xyz?: { x: number; y: number; z: number } }> = {
+  name: 'look',
+  description: '转头看向一个方向（N…NW、up 抬头、down 低头）或一格坐标；只转头不走。之后用 use_item（扔雪球、末影珍珠、鸡蛋）或 toss_item 就朝这边',
+  argsDoc: '{"dir"?: "N|NE|E|SE|S|SW|W|NW|up|down", "xyz"?: [x,y,z]}',
+  timeoutMs: 3000,
+  movement: false,
+  validate(raw) {
+    const a = obj(raw);
+    const v = a.xyz ?? a.at;
+    const arr = typeof v === 'string' ? v.split(/[,\s]+/).filter(Boolean).map(Number) : Array.isArray(v) ? v.map(Number) : null;
+    if (arr && arr.length === 3 && arr.every(Number.isFinite)) return { ok: true, args: { xyz: { x: arr[0], y: arr[1], z: arr[2] } } };
+    const dir = String(a.dir ?? a.direction ?? '').trim();
+    if (/^(up|down)$/i.test(dir) || DIRS[dir.toUpperCase()]) return { ok: true, args: { dir: /^(up|down)$/i.test(dir) ? dir.toLowerCase() : dir.toUpperCase() } };
+    return { ok: false, error: '写 "dir":"N|NE|E|SE|S|SW|W|NW|up|down" 或 "xyz":[x,y,z]' };
+  },
+  async run(ctx, args) {
+    const eye = ctx.adapter.eye();
+    if (!eye) return fail('ERROR', '还看不到东西（没连上或没出生）');
+    let yaw = eye.yaw, pitch = 0;
+    if (args.xyz) {
+      const dx = args.xyz.x + 0.5 - eye.x, dy = args.xyz.y + 0.5 - eye.y, dz = args.xyz.z + 0.5 - eye.z;
+      yaw = yawOfDir(dx, dz); pitch = Math.atan2(dy, Math.hypot(dx, dz));
+    } else if (args.dir === 'up' || args.dir === 'down') pitch = args.dir === 'up' ? Math.PI / 2 - 0.05 : -(Math.PI / 2 - 0.05);
+    else { const [dx, dz] = DIRS[args.dir!]; yaw = yawOfDir(dx, dz); }
+    await ctx.adapter.look(yaw, pitch, ctx.signal);
+    return ok(args.xyz ? `看向 (${args.xyz.x},${args.xyz.y},${args.xyz.z})` : `看向 ${args.dir}`);
+  },
+};
+
+// ------------------------------------------------------------------ dive
+/** 在水里朝一格游过去（往下潜或往上游）：捡水底的东西、挖水下的方块之前先游到跟前。气不够就停，不替它决定潜多深 */
+export const dive: Skill<{ xyz: { x: number; y: number; z: number }; min_oxygen: number }> = {
+  name: 'dive',
+  description: '在水里朝一格游过去（往下潜或往上游），到跟前停下；气（oxygen）降到 min_oxygen 就停下回报，上不上浮由你定。只在水里用',
+  argsDoc: '{"xyz": [x,y,z], "min_oxygen"?: 2-18（默认 8）}',
+  timeoutMs: 35000,
+  movement: true,
+  validate(raw) {
+    const a = obj(raw);
+    const v = a.xyz ?? a.at ?? a.to;
+    const arr = typeof v === 'string' ? v.split(/[,\s]+/).filter(Boolean).map(Number) : Array.isArray(v) ? v.map(Number) : null;
+    if (!arr || arr.length !== 3 || !arr.every(Number.isFinite)) return { ok: false, error: '写 "xyz":[x,y,z]（要游到的那一格）' };
+    return { ok: true, args: { xyz: { x: Math.floor(arr[0]), y: Math.floor(arr[1]), z: Math.floor(arr[2]) }, min_oxygen: clampInt(a.min_oxygen, 2, 18, 8) } };
+  },
+  async run(ctx, args) {
+    const a = ctx.adapter;
+    if (!a.diveTo) return fail('ERROR', '当前适配器不会潜水');
+    if (!a.state().inWater) return fail('BAD_ARGS', '不在水里：dive 只管水里游；陆上走路用 goto / step');
+    const d = dist3(a.state().pos, args.xyz);
+    if (d > 24) return fail('BAD_ARGS', `(${args.xyz.x},${args.xyz.y},${args.xyz.z}) 有 ${Math.round(d)} 格远，一口气游不到；先游近一点`);
+    try {
+      const r = await a.diveTo(args.xyz, ctx.signal, { minOxygen: args.min_oxygen, timeoutMs: ctx.deadline - Date.now() - 2000 });
+      const p = a.state().pos;
+      const at = `现在在 (${p.x.toFixed(1)},${p.y.toFixed(1)},${p.z.toFixed(1)})，氧气 ${r.oxygen}/20`;
+      if (r.reached) return ok(`游到了 (${args.xyz.x},${args.xyz.y},${args.xyz.z}) 跟前，${at}`, { oxygen: r.oxygen });
+      const why = r.reason === 'LOW_OXYGEN' ? `气快不够了（到了 ${args.min_oxygen}），停下了：要换气就往上游出水面（surface）`
+        : r.reason === 'OUT_OF_WATER' ? '出了水，停下了' : r.reason === 'TIMEOUT' ? '游了一阵还没到' : `没游到：${r.reason}`;
+      return fail(r.reason === 'LOW_OXYGEN' ? 'ERROR' : 'PATH_NOT_FOUND', `${why}；${at}`, { oxygen: r.oxygen, reason: r.reason });
+    } catch (e) {
+      if (isAbort(e)) throw e;
+      return fail(codeFromError(e), `潜水出错：${(e as Error).message}`);
+    }
+  },
+};
+
+export const actionSkills = [useItem, interact, hitEntity, dismount, ride, look, dive];
