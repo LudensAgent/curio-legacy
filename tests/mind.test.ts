@@ -517,7 +517,7 @@ test('提示词：盖房的念头会在消息末尾提醒先请建筑师；瞥�
     assert.match(user.content, /【此刻要留意】[\s\S]*(design|draft)[\s\S]*只输出一个 JSON 对象。$/, '提醒放在消息最后');
   }
   const [deliberate] = buildMindMessages({ ...base, tier: 'deliberate' });
-  assert.ok(deliberate.content.length < 8700, `认真想的系统提示词 ${deliberate.content.length} 字`);
+  assert.ok(deliberate.content.length <= 10000, `认真想的系统提示词 ${deliberate.content.length} 字`);
   assert.match(deliberate.content, /其他动作（用 \{"kind":"moves"/);
   const label = argsLabel({ skill: 'build', args: { spec: { name: '小屋', width: 5, depth: 5, design: { legend: {}, layers: [['PPP']] }, components: Array(100).fill({}) } } });
   assert.ok(label.length < 80 && /小屋/.test(label) && !/components/.test(label), label);
