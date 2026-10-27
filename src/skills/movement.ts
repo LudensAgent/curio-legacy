@@ -7,6 +7,7 @@ import { DIRS, dirName } from '../perception/perception.ts';
 import { dist3, sleep, throwIfAborted } from '../util.ts';
 import type { Vec3Like } from '../adapter/types.ts';
 import { feetCell } from '../perception/local.ts';
+import { passageRoute } from '../memory/passages.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
 
 // ------------------------------------------------------------------ 寻找与张望（人眼式：不透视，只是转头看）
@@ -364,6 +365,33 @@ export const goTo: Skill<{ target: string; dig?: boolean; sprint?: boolean; avoi
     const visited: Vec3Like[] = [s.pos];
     let bestDistance = startDist, detours = 0, memoryHops = 0;
     const prog = setInterval(() => ctx.progress(1 - Math.min(1, distance(adapter.state().pos) / Math.max(1, startDist))), 1000);
+    // 两头都在自己挖过的通道附近：先沿记下的脚下点一段段走（亲身站过的地方），比让寻路在石头里现找可靠
+    let routeNote = '';
+    try {
+      const recs = memory.passages?.(s.dim) ?? [];
+      const route = !alreadyHere && startDist > 6 ? passageRoute(recs, s.pos, pos) : null;
+      if (route && route.length >= 2) {
+        let legs = 0;
+        for (const w of route) {
+          if (!inScope()) return fail('WRONG_DIMENSION', '途中世界或会话已改变，需要重新规划');
+          if (Date.now() >= ctx.deadline) break;
+          const here = adapter.state().pos;
+          if (dist3(here, w) <= 1.5) continue;
+          if (distance(w) > distance(here) + 1 && legs > 0 && distance(here) < 6) break; // 已经比路线上的下一个点离目标还近
+          try {
+            await adapter.moveTo({ kind: 'near', pos: w, range: 1.2 }, { signal, timeoutMs: Math.max(1, Math.min(8000, ctx.deadline - Date.now())), allowSwimming: false, ...(args.dig ? { allowTerrainChanges: true } : {}), ...(args.sprint ? { sprint: true } : {}) });
+          } catch (e) {
+            if (isAbort(e)) throw e;
+            break;
+          }
+          if (dist3(adapter.state().pos, here) < 0.3) break;
+          legs++;
+          visited.push(w);
+        }
+        const now = adapter.state().pos;
+        if (legs) { routeNote = `；沿自己挖过的通道走了 ${legs} 段`; bestDistance = Math.min(bestDistance, distance(now)); }
+      }
+    } catch (e) { if (isAbort(e)) throw e; }
     try {
       for (let hops = 0; !arrived(adapter.state().pos) && hops < 160; hops++) {
         if (!inScope()) return fail('WRONG_DIMENSION', '途中世界或会话已改变，需要重新规划');
@@ -414,7 +442,7 @@ export const goTo: Skill<{ target: string; dig?: boolean; sprint?: boolean; avoi
       const end = adapter.state().pos;
       if (!arrived(end)) return fail('PATH_NOT_FOUND', `尚未到达 ${label}，需要重新选择路线`, measured(end));
       await face();
-      return ok(`${alreadyHere ? '已在' : '到达'} ${label}${nums ? ' 的目标格' : ' 附近'}；实际站在 (${end.x.toFixed(2)},${end.y.toFixed(2)},${end.z.toFixed(2)})，本次往 ${dirName(end.x - s.pos.x, end.z - s.pos.z)} 移动 ${dist3(s.pos, end).toFixed(2)} 格，距目标点 ${distance(end).toFixed(2)} 格${alreadyHere ? '；没有执行新的位移' : ''}${terrainNote()}`, { ...measured(end), alreadyHere });
+      return ok(`${alreadyHere ? '已在' : '到达'} ${label}${nums ? ' 的目标格' : ' 附近'}；实际站在 (${end.x.toFixed(2)},${end.y.toFixed(2)},${end.z.toFixed(2)})，本次往 ${dirName(end.x - s.pos.x, end.z - s.pos.z)} 移动 ${dist3(s.pos, end).toFixed(2)} 格，距目标点 ${distance(end).toFixed(2)} 格${alreadyHere ? '；没有执行新的位移' : ''}${routeNote}${terrainNote()}`, { ...measured(end), alreadyHere });
     } catch (e) {
       if (isAbort(e)) throw e;
       const water = waterNear();

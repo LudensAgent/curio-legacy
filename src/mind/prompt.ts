@@ -251,7 +251,7 @@ export function situationalReminders(ctx: MindContext): string[] {
     const tunnels = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).filter((f) => f.dist <= 160).slice(0, 2);
     for (const t of tunnels) {
       out.push(t.inside
-        ? `你现在就在自己${t.text.replace(/^挖过的通道：/, '挖过的通道里：')}；顺着走比重新挖省事`
+        ? `你现在就在自己${t.text.replace(/^挖过的通道：/, '挖过的通道里：')}；顺着走比重新挖省事：goto 通道里的坐标或设施会自己沿记下的路线一段段走，不用一格格挖`
         : `你${t.text}：goto 入口顺着走下去比从这里重新挖省事；太远或者要去别的地方再新挖`);
     }
   }

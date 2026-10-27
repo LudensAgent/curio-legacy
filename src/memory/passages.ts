@@ -131,3 +131,56 @@ export function passageLevels(rec: Pick<PassageRecord, 'path'>): number[] {
   }
   return levels;
 }
+
+/**
+ * 沿自己挖过、走过的通道找一条路：把各条通道记下的脚下点连成网（同一条里前后相邻的点、不同条里挨得很近的点），
+ * 从离自己最近的点走到离目标最近的点。都是亲身站过的地方，比让寻路在石头里现找可靠。
+ * 两头离通道太远、或者连不上，就返回 null（交给普通寻路）。
+ */
+export function passageRoute(recs: Pick<PassageRecord, 'path'>[], from: Vec3Like, to: Vec3Like,
+  opts: { near?: number; hop?: number; link?: number } = {}): Vec3Like[] | null {
+  const near = opts.near ?? 5, hop = opts.hop ?? 7, link = opts.link ?? 3.5;
+  const nodes: Vec3Like[] = [];
+  const edges = new Map<number, Set<number>>();
+  const add = (a: number, b: number) => { if (a === b) return; (edges.get(a) ?? edges.set(a, new Set()).get(a)!).add(b); (edges.get(b) ?? edges.set(b, new Set()).get(b)!).add(a); };
+  const indexOf = (p: Vec3Like) => {
+    const i = nodes.findIndex((q) => q.x === p.x && q.y === p.y && q.z === p.z);
+    if (i >= 0) return i;
+    nodes.push(p);
+    return nodes.length - 1;
+  };
+  for (const r of recs) {
+    let prev = -1;
+    for (const p of r.path) {
+      const i = indexOf(p);
+      if (prev >= 0 && d3(nodes[prev], p) <= hop) add(prev, i);
+      prev = i;
+    }
+  }
+  for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) if (d3(nodes[i], nodes[j]) <= link) add(i, j);
+  const closest = (p: Vec3Like) => {
+    let best = -1, bd = Infinity;
+    nodes.forEach((q, i) => { const d = d3(q, p); if (d < bd) { bd = d; best = i; } });
+    return bd <= near ? best : -1;
+  };
+  const a = closest(from), b = closest(to);
+  if (a < 0 || b < 0) return null;
+  if (a === b) return [nodes[a]];
+  // 最短路（点不多，朴素 Dijkstra 就够）
+  const dist = new Array<number>(nodes.length).fill(Infinity), prevOf = new Array<number>(nodes.length).fill(-1), done = new Set<number>();
+  dist[a] = 0;
+  for (;;) {
+    let u = -1;
+    for (let i = 0; i < nodes.length; i++) if (!done.has(i) && dist[i] < Infinity && (u < 0 || dist[i] < dist[u])) u = i;
+    if (u < 0 || u === b) break;
+    done.add(u);
+    for (const v of edges.get(u) ?? []) {
+      const nd = dist[u] + d3(nodes[u], nodes[v]);
+      if (nd < dist[v]) { dist[v] = nd; prevOf[v] = u; }
+    }
+  }
+  if (dist[b] === Infinity) return null;
+  const route: Vec3Like[] = [];
+  for (let v = b; v >= 0; v = prevOf[v]) route.unshift(nodes[v]);
+  return route;
+}
