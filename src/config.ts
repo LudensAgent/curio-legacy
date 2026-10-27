@@ -99,6 +99,11 @@ export const config = {
     deliberateEverySec: num('MIND_DELIBERATE_EVERY_SEC', 360),
     /** 代码技能后台改进的最小间隔（分钟）：默认 0 不限频，同一时间只改一份 */
     skillImproveGapMin: num('SKILL_IMPROVE_GAP_MIN', 0),
+    /** 后台改进代码技能每小时最多几次 */
+    skillImproveMaxPerHour: num('SKILL_IMPROVE_MAX_PER_HOUR', 12),
+    /** 后台写技能每小时最多请模型几次（死亡不算）；同一件事多少分钟内不再请第二次 */
+    skillForgeMaxPerHour: num('SKILL_FORGE_MAX_PER_HOUR', 24),
+    skillForgeRepeatMin: num('SKILL_FORGE_REPEAT_MIN', 20),
   },
   learning: {
     /** Only explicitly designated isolated worlds may provide candidate promotion evidence. */

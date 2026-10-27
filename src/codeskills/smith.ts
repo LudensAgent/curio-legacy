@@ -144,9 +144,15 @@ export class SkillSmith {
   /** 一再缺的东西（没吃的、合成缺料、找不到）：回顾时问能不能变成稳定来源 */
   private shortages: { at: number; what: string; how: string }[] = [];
   private repeatedAt = new Map<string, number>();
+  /** 最近一小时请模型写技能的时刻；同一件事（同类、去掉数字后同一句话）上次请模型的时刻 */
+  private forgedAt: number[] = [];
+  private handledAt = new Map<string, number>();
+  private retryTimer: NodeJS.Timeout | null = null;
 
   constructor(private planner: Pick<Planner, 'complete' | 'autonomous' | 'noteInvalid'>, private engine: BehaviorEngine, private book: SkillBook | null,
-    private bus: EventBus, private state: () => AgentState, private journal: () => string[] = () => []) {}
+    private bus: EventBus, private state: () => AgentState, private journal: () => string[] = () => [],
+    /** 每小时最多请模型写几次（死亡不算在内）；同一件事多久内不再请第二次 */
+    private limits: { maxPerHour: number; repeatMs: number } = { maxPerHour: 24, repeatMs: 20 * 60_000 }) {}
 
   start(tickMs = 5000) {
     this.bus.on('event', this.listener);
@@ -154,7 +160,7 @@ export class SkillSmith {
     this.timer = setInterval(() => { this.tick(); if (++ticks % 6 === 0) this.checkPain(); }, tickMs);
     this.timer.unref?.();
   }
-  stop() { this.bus.off('event', this.listener); if (this.timer) clearInterval(this.timer); this.timer = null; }
+  stop() { this.bus.off('event', this.listener); if (this.timer) clearInterval(this.timer); this.timer = null; if (this.retryTimer) clearTimeout(this.retryTimer); this.retryTimer = null; }
 
   /** 每几秒：掉了多少血算进痛；夜里熬到天亮回顾一次 */
   tick() {
@@ -320,11 +326,44 @@ export class SkillSmith {
     this.next();
   }
 
+  /** 同一件事：同类，去掉数字（坐标、次数、秒数）后同一句话 */
+  static signature(i: Pick<Incident, 'kind' | 'headline'>): string {
+    return `${i.kind}:${i.headline.replace(/-?\d+(\.\d+)?/g, '#').replace(/\s+/g, ' ').slice(0, 80)}`;
+  }
+
   private next() {
     if (this.busy || !this.planner.autonomous || !this.queue.length) return;
+    const now = Date.now();
+    this.forgedAt = this.forgedAt.filter((t) => now - t < 3_600_000);
     // 死亡和心智点名的先写，回顾最后
     this.queue.sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind));
-    const incident = this.queue.shift()!;
+    let incident: Incident | undefined;
+    while (this.queue.length) {
+      const c = this.queue[0];
+      // 一小时的额度用完了：死亡照样看，其余的等额度空出来（排队的事太多时旧的会被挤掉）
+      if (c.kind !== 'death' && this.forgedAt.length >= this.limits.maxPerHour) {
+        if (!this.retryTimer) {
+          const wait = Math.max(5_000, this.forgedAt[0] + 3_600_000 - now);
+          this.bus.publish('skill_forge_capped', 'P3', `这一小时已经请模型写了 ${this.forgedAt.length} 次技能，先攒着，${Math.ceil(wait / 60_000)} 分钟后再看`, { queued: this.queue.length });
+          this.retryTimer = setTimeout(() => { this.retryTimer = null; this.next(); }, wait);
+          this.retryTimer.unref?.();
+        }
+        return;
+      }
+      this.queue.shift();
+      const sig = SkillSmith.signature(c);
+      // 同一件事刚看过（不管当时写没写成）：不再花一次模型调用
+      if (c.kind !== 'death' && now - (this.handledAt.get(sig) ?? -Infinity) < this.limits.repeatMs) {
+        this.bus.publish('skill_forge_skipped', 'P3', `「${c.headline.slice(0, 60)}」${Math.round(this.limits.repeatMs / 60_000)} 分钟内已经看过一回，这次不再请模型`, { kind: c.kind });
+        continue;
+      }
+      this.handledAt.set(sig, now);
+      if (this.handledAt.size > 200) this.handledAt.delete(this.handledAt.keys().next().value!);
+      incident = c;
+      break;
+    }
+    if (!incident) return;
+    this.forgedAt.push(now);
     this.busy = { kind: incident.kind, startedAt: Date.now() };
     this.bus.publish('skill_forge_start', 'P2', `在后台从${KIND_LABEL[incident.kind]}里总结技能`, { kind: incident.kind });
     void this.forge(incident)
