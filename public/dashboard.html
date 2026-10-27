@@ -44,6 +44,7 @@
   .tmap-empty { position: absolute; left: 12px; top: 10px; font-size: 12px; color: var(--dim); pointer-events: none; }
   .tmap-legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: var(--dim); margin: 6px 0 4px; }
   .tmap-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; box-shadow: inset 0 0 0 1px rgba(0,0,0,.35); }
   button.chip.sel { color: var(--text); border-color: var(--text); }
   .grow { flex: 1; }
   .suggest { display: flex; gap: 6px; }
@@ -508,18 +509,19 @@
       <div class="board">
         <div class="card rows2 cols2"><h2>最近做过的事 <span class="r mono dim" id="seen"></span></h2><ul class="list body" id="goals"></ul></div>
         <div class="card"><h2>地标</h2><ul class="list mono body" id="lms"></ul></div>
+        <div class="card"><h2>资源点记忆 <span class="r dim" id="resCount"></span></h2><ul class="list body" id="resList"></ul></div>
         <div class="card cols2 rows2"><h2>挖过的通道 · 我的设施 <span class="r dim">一格一方块，北在上 · 滚轮缩放、拖动平移、双击看全貌</span></h2>
           <div class="body">
             <div class="tmap">
               <canvas id="tunnelMap" class="tunnel-map" role="img" aria-label="挖过的通道和设施的方块格子地图"></canvas>
               <div class="tmap-ctl">
-                <label><input type="checkbox" id="tmL-passage">通道</label><label><input type="checkbox" id="tmL-facility">设施</label><label><input type="checkbox" id="tmL-landmark">地点</label>
+                <label><input type="checkbox" id="tmL-passage">通道</label><label><input type="checkbox" id="tmL-facility">设施</label><label><input type="checkbox" id="tmL-landmark">地点</label><label><input type="checkbox" id="tmL-resource">资源</label>
                 <button id="tmFollow" title="视野跟着自己走">跟随</button><button id="tmFit" title="看全通道和设施">全貌</button><button id="tmOut" title="缩小">−</button><button id="tmIn" title="放大">+</button>
               </div>
               <div class="tmap-empty" id="tmEmpty" hidden></div>
               <div class="tmap-tip" id="tmTip" hidden></div>
             </div>
-            <div class="tmap-legend"><span><i style="background:rgb(150,112,76)"></i>地表附近</span><span><i style="background:rgb(140,140,140)"></i>石头层</span><span><i style="background:rgb(80,80,88)"></i>y&lt;0 深板岩</span><span><i style="background:var(--accent)"></i>入口</span><span><i style="background:#a8752f"></i>箱子</span><span><i style="background:#9c6b3c"></i>工作台</span><span><i style="background:#7a7a7a"></i>熔炉</span><span><i style="background:#b8312f"></i>床</span><span><i style="background:var(--info)"></i>地点</span><span><i style="background:var(--bad)"></i>我</span></div>
+            <div class="tmap-legend"><span><i style="background:rgb(150,112,76)"></i>地表附近</span><span><i style="background:rgb(140,140,140)"></i>石头层</span><span><i style="background:rgb(80,80,88)"></i>y&lt;0 深板岩</span><span><i style="background:var(--accent)"></i>入口</span><span><i style="background:#a8752f"></i>箱子</span><span><i style="background:#9c6b3c"></i>工作台</span><span><i style="background:#7a7a7a"></i>熔炉</span><span><i style="background:#b8312f"></i>床</span><span><i style="background:var(--info)"></i>地点</span><span id="tmResLegend" style="display:contents"></span><span><i style="background:var(--bad)"></i>我</span></div>
             <ul class="list" id="tunnelList"></ul>
           </div></div>
         <div class="card"><h2>笔记</h2><ul class="list body" id="notes"></ul></div>
@@ -950,7 +952,16 @@ function render(s) {
  * 一格 = 一个方块；通道格按高度上色（地表泥土 → 石头 → 深板岩），设施画成对应方块，入口和自己单独标出。
  * 滚轮缩放（以鼠标处为中心）、拖动平移、双击回到全貌；“跟随”时视野跟着自己走。
  */
-const tmap = { cx: 0, cz: 0, s: 8, fitted: false, follow: false, drag: null, data: null, hover: null, layers: { passage: true, facility: true, landmark: true } };
+const tmap = { cx: 0, cz: 0, s: 8, fitted: false, follow: false, drag: null, data: null, hover: null, layers: { passage: true, facility: true, landmark: true, resource: true } };
+/** 资源点：亲眼看见才记、看到没了就删。颜色照矿石/方块本身的颜色 */
+const TM_RES = {
+  coal: ['#2b2b2b', '煤'], iron: ['#d8af93', '铁'], copper: ['#c8693b', '铜'], gold: ['#f5d33f', '金'], diamond: ['#4fe0d4', '钻石'],
+  redstone: ['#d42a2a', '红石'], lapis: ['#2a52c9', '青金石'], emerald: ['#2fbf5c', '绿宝石'], 'nether quartz': ['#ece6dc', '石英'], 'nether gold': ['#e8b84a', '下界金'],
+  obsidian: ['#3b1f5c', '黑曜石'], crying_obsidian: ['#6a2fb0', '哭泣黑曜石'], ancient_debris: ['#6b4a3a', '远古残骸'],
+  budding_amethyst: ['#9a6ad6', '紫水晶母岩'], amethyst_cluster: ['#b48be6', '紫水晶簇'], lava: ['#ff6a00', '岩浆源'],
+  'danger:lava': ['#ff6a00', '岩浆（危险）'], 'danger:spawner': ['#1e1e1e', '刷怪笼（危险）'],
+};
+const tmRes = (t) => TM_RES[t] ?? ['#bbb', t];
 const TM_FAC = { // 设施方块：底色、描边、格内字
   chest: { fill: '#a8752f', edge: '#5e3e14', ch: '箱' }, bed: { fill: '#b8312f', edge: '#e8e2d5', ch: '床' },
   crafting: { fill: '#9c6b3c', edge: '#4a3016', ch: '台' }, furnace: { fill: '#7a7a7a', edge: '#3a3a3a', ch: '炉' },
@@ -982,10 +993,11 @@ function tmBuild(mem, st) {
   }
   const fac = (mem.facilities || []).filter((f) => f.kind !== 'passage').map((f) => ({ ...f, x: Math.floor(f.pos.x), z: Math.floor(f.pos.z) }));
   const facKeys = new Set(fac.map((f) => key(f.x, f.z)));
-  const lms = (mem.landmarks || []).filter((l) => l.pos && (!l.dim || !st || !st.dim || l.dim === st.dim))
+  const lms = (mem.landmarks || []).filter((l) => l.pos && l.kind !== 'resource' && l.kind !== 'danger' && (!l.dim || !st || !st.dim || l.dim === st.dim))
     .map((l) => ({ ...l, x: Math.floor(l.pos.x), z: Math.floor(l.pos.z) })).filter((l) => !facKeys.has(key(l.x, l.z)));
+  const res = (mem.resources || []).map((r) => ({ ...r, x: Math.floor(r.pos.x), z: Math.floor(r.pos.z) }));
   const me = st && st.pos ? { x: st.pos.x, y: st.pos.y, z: st.pos.z, yaw: st.yaw } : null;
-  return { cells, fac, lms, me };
+  return { cells, fac, lms, res, me };
 }
 /** 把视野调到能看全通道和设施（地点太远的不算，免得缩成一个点）；near = 只看自己周围这么多格以内的 */
 function tmFit(cv, near = 0) {
@@ -1043,6 +1055,14 @@ function tmDraw() {
     const cx = X(l.x) + s / 2, cz = Z(l.z) + s / 2, r = Math.max(3, Math.min(7, s * 0.35));
     g.fillStyle = v('--info'); g.beginPath(); g.moveTo(cx, cz - r); g.lineTo(cx + r, cz); g.lineTo(cx, cz + r); g.lineTo(cx - r, cz); g.closePath(); g.fill();
   }
+  // 资源点：照矿的颜色画一小块；危险点（岩浆、刷怪笼）加红框
+  if (tmap.layers.resource) for (const r of tmap.data.res) {
+    if (r.x < x0 || r.x > x1 || r.z < z0 || r.z > z1) continue;
+    const [col] = tmRes(r.type), m = Math.max(3, s * 0.62), px = X(r.x) + s / 2 - m / 2, pz = Z(r.z) + s / 2 - m / 2;
+    g.fillStyle = col; g.fillRect(px, pz, m, m);
+    g.strokeStyle = r.kind === 'danger' ? v('--bad') : 'rgba(0,0,0,.6)'; g.lineWidth = r.kind === 'danger' ? Math.max(1.5, m / 6) : 1;
+    g.strokeRect(px + g.lineWidth / 2, pz + g.lineWidth / 2, m - g.lineWidth, m - g.lineWidth);
+  }
   // 设施：画成对应的方块
   if (tmap.layers.facility) for (const f of fac) {
     if (f.x < x0 || f.x > x1 || f.z < z0 || f.z > z1) continue;
@@ -1086,6 +1106,7 @@ function tmTip() {
   }
   if (tmap.layers.facility) for (const f of d.fac) if (f.x === h.x && f.z === h.z) lines.push(f.text);
   if (tmap.layers.landmark) for (const l of d.lms) if (l.x === h.x && l.z === h.z) lines.push(`${l.label} · ${l.kind} (${l.pos.x},${l.pos.y},${l.pos.z})`);
+  if (tmap.layers.resource) for (const r of d.res) if (r.x === h.x && r.z === h.z) lines.push(`${tmRes(r.type)[1]} ${r.label} (${r.pos.x},${r.pos.y},${r.pos.z}) · ${tmAgo(r.ts)}看到`);
   tip.hidden = false;
   tip.innerHTML = lines.map(esc).join('<br>');
   const W = $('tunnelMap').clientWidth;
@@ -1123,11 +1144,31 @@ function tmInit() {
 }
 tmInit();
 
+const tmAgo = (ts) => { const m = Math.round((Date.now() - ts) / 60000); return m < 1 ? '刚才' : m < 60 ? `${m} 分钟前` : m < 1440 ? `${Math.round(m / 60)} 小时前` : `${Math.round(m / 1440)} 天前`; };
+const tmDir = (dx, dz) => { if (Math.hypot(dx, dz) < 1) return ''; const a = (Math.atan2(dz, dx) * 180 / Math.PI + 360 + 22.5) % 360; return ['东', '东南', '南', '西南', '西', '西北', '北', '东北'][Math.floor(a / 45)]; };
+/** 资源点记忆：按种类归拢，每种几处、最近那处在哪、多久前看到 */
+function renderResources(mem, st) {
+  const res = mem.resources;
+  if (!res) { $('resList').innerHTML = '<li class="dim">进程重启后开始显示</li>'; $('resCount').textContent = ''; return; }
+  const groups = new Map();
+  for (const r of res) { if (!groups.has(r.type)) groups.set(r.type, []); groups.get(r.type).push(r); }
+  $('resCount').textContent = res.length ? `${res.length} 处，当前维度` : '';
+  const here = st && st.pos;
+  $('resList').innerHTML = list([...groups.entries()], ([type, rs]) => {
+    const [col, zh] = tmRes(type), n = rs[0];
+    const dy = here ? Math.round(n.pos.y - here.y) : 0, where = here ? `${tmDir(n.pos.x - here.x, n.pos.z - here.z)}${n.dist}格${dy >= 2 ? `，高 ${dy}` : dy <= -2 ? `，低 ${-dy}` : ''}` : '';
+    const newest = Math.max(...rs.map((r) => r.ts));
+    return `<li><i class="swatch" style="background:${col}"></i><b>${esc(zh)}</b> ×${rs.length} <span class="k">最近 (${n.pos.x},${n.pos.y},${n.pos.z}) ${esc(where)} · 最新一处${tmAgo(newest)}看到</span></li>`;
+  }, '还没有亲眼看到过的资源点');
+  const types = [...groups.keys()];
+  $('tmResLegend').innerHTML = types.slice(0, 10).map((t) => `<span><i style="background:${tmRes(t)[0]}"></i>${esc(tmRes(t)[1])}</span>`).join('');
+}
 function renderTunnels(mem, st) {
   const fac = mem.facilities || [];
   $('tunnelList').innerHTML = list(fac, (f) => `<li><span class="k">${f.kind === 'passage' ? '通道' : f.kind === 'chest' ? '箱子' : f.kind === 'bed' ? '床' : '设施'}</span>${esc(f.text)}</li>`);
   const empty = !mem.passages ? '进程重启后开始记录自己挖的通道' : !mem.passages.length && !fac.length ? '还没有挖过的通道（自己挖够 4 格的地下通道才记），也没有设施' : '';
   $('tmEmpty').textContent = empty; $('tmEmpty').hidden = !empty;
+  renderResources(mem, st);
   tmap.data = tmBuild(mem, st);
   // 第一次打开：看自己周围 96 格内的通道和设施；“全貌”/双击才看全部
   if (!tmap.fitted && (tmap.data.cells.size || tmap.data.fac.length || tmap.data.me)) { tmFit($('tunnelMap'), 96); tmap.fitted = true; }

@@ -21,6 +21,7 @@ import { config } from './config.ts';
 import { EventBus } from './events.ts';
 import { attachLogger, JsonlWriter } from './log.ts';
 import { WorldMemory } from './memory/store.ts';
+import { oreKind } from './memory/ore-spots.ts';
 import { EpisodicMemory } from './memory/episodic.ts';
 import { HindsightBackend } from './memory/hindsight.ts';
 import { HindsightUsage } from './memory/hindsight-usage.ts';
@@ -510,7 +511,12 @@ function snapshot() {
           .map((f) => ({ kind: f.kind, label: f.label, pos: f.pos, dist: f.dist, text: f.text }));
         // 朝向：地图上画自己的箭头
         const facingYaw = adapter.eye()?.yaw ?? null;
-        return { passages, facilities, facingYaw };
+        // 资源点（亲眼看见才记、看到没了就删的矿、黑曜石、岩浆……）和危险点：当前维度，近的在前
+        const resources = memory.landmarks().filter((l) => l.dim === st.dim && (!l.worldId || l.worldId === st.worldId) && (l.kind === 'resource' || l.kind === 'danger'))
+          .map((l) => ({ id: l.id, kind: l.kind, label: l.label, type: l.kind === 'danger' ? `danger:${l.label}` : oreKind(l.label), pos: l.pos, ts: l.ts,
+            dist: Math.round(Math.hypot(l.pos.x - st.pos.x, l.pos.y - st.pos.y, l.pos.z - st.pos.z)) }))
+          .sort((a, b) => a.dist - b.dist).slice(0, 300);
+        return { passages, facilities, facingYaw, resources };
       })(),
       landmarks: memory.landmarks().slice(-12),
       notes: memory.notesFor({ n: 8 }),
