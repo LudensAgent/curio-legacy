@@ -230,6 +230,19 @@ ${movesCatalog(0, new Set([...inUse, 'dig_at', 'step', 'place_at', 'defend', 'ga
 /** 打算里说要下矿、往下挖 */
 const MINING_INTENT = /下矿|矿道|矿洞|找铁|挖铁|找矿|挖矿|粗铁|铁矿|往下挖|下挖|下到 ?y|挖(阶梯|台阶)[^上]{0,6}(下|降)|石层|深层/;
 
+/** 打算里说要从地下回地面 */
+const SURFACE_INTENT = /回地面|回到地面|见天|爬出|挖出去|出矿|上到地面|挖(阶梯|台阶).{0,8}上|往上挖/;
+
+/**
+ * 走旧矿道和就地新挖各要花多少，用数字摆出来让它自己比（不替它选）。
+ * 挖台阶：每往下/往上一格要挖掉约 3 格方块（石头带镐约 1 秒一格）；走路约 4 格/秒，矿道里绕一点算 1.5 倍
+ */
+function digVsWalk(dy: number, walk: number): string {
+  const blocks = Math.max(0, Math.round(Math.abs(dy) * 3));
+  const digMin = blocks / 60, walkSec = Math.round((walk * 1.5) / 4);
+  return `走过去约 ${walkSec < 90 ? `${walkSec} 秒` : `${Math.round(walkSec / 60)} 分钟`}；从这里挖台阶${dy > 0 ? '下' : '上'}去要挖约 ${blocks} 格（约 ${digMin < 1 ? '不到 1' : Math.round(digMin)} 分钟，还费镐）`;
+}
+
 /** 按情境追加在用户消息末尾的提醒：只说和眼下有关的 2–4 件事 */
 export function situationalReminders(ctx: MindContext): string[] {
   const out: string[] = [];
@@ -249,13 +262,22 @@ export function situationalReminders(ctx: MindContext): string[] {
   const where = p.self.where?.kind;
   const trapped = where ? where === 'underground' || where === 'pit' : p.self.sky_visible !== true && (p.self.overhead?.covered === 'rock' || p.light?.underground === true) || exits.length > 0 && exits.every((e) => !e.walk && !e.step_up);
   // 想下矿、想往下挖：自己挖过的通道就是现成的路（10-26 晚它开了 67 次新阶梯，只有被提醒才走回旧矿道）
+  // 想下到哪一层（打算里写了 y 就按它，没写按通道最深处）
+  const wantY = (() => { const m = intent.match(/y ?(-?\d{1,3})/); return m ? Number(m[1]) : null; })();
   if (MINING_INTENT.test(intent)) {
     const tunnels = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).filter((f) => f.dist <= 160).slice(0, 2);
     for (const t of tunnels) {
+      const deep = Number(t.text.match(/能走到 y(-?\d+)/)?.[1] ?? here.y);
+      const dy = here.y - (wantY !== null && wantY >= deep ? wantY : deep);
       out.push(t.inside
         ? `你现在就在自己${t.text.replace(/^挖过的通道：/, '挖过的通道里：')}；顺着走比重新挖省事：goto 通道里的坐标或设施会自己沿记下的路线一段段走，不用一格格挖`
-        : `你${t.text}：goto 入口顺着走下去比从这里重新挖省事；太远或者要去别的地方再新挖`);
+        : `你${t.text}：${dy > 4 ? `${digVsWalk(dy, t.dist)}。` : ''}goto 入口会顺着记下的路线走下去；要去的地方离这条通道远，再就地新挖`);
     }
+  }
+  // 人在自己挖过的通道里、想回地面：原路就是现成的出口
+  if (SURFACE_INTENT.test(intent) && p.self.sky_visible !== true) {
+    const t = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).find((f) => f.inside);
+    if (t) out.push(`你在自己挖过的通道里，入口 (${Math.round(t.pos.x)},${Math.round(t.pos.y)},${Math.round(t.pos.z)}) 就是出口：goto 入口会沿原路一段段走上去；${digVsWalk(here.y - t.pos.y, Math.hypot(t.pos.x - here.x, t.pos.y - here.y, t.pos.z - here.z))}`);
   }
   if (where === 'indoors' && /坑|垫高|台阶|爬出|挖出去|出坑/.test(intent)) out.push(`你${p.self.where!.text}。刚才想的“坑”其实是屋子的墙`);
   if (trapped && where === 'pit') out.push(`你${p.self.where!.text}：原地 place_at [0,0,0] 垫高，或挖一级台阶 step 上去就出来了`);
