@@ -461,8 +461,8 @@ function haveNote(ctx: SkillCtx, item: string): string {
 
 export const craft: Skill<{ item: string; count: number; extra?: boolean }> = {
   name: 'craft',
-  description: '合成物品。会自动补做两层以内的前置材料（原木→木板→木棍）、自动使用记得的工作台或现做一个放下，所以直接写最终物品即可。常用：wooden_pickaxe、stone_pickaxe、furnace、torch、crafting_table',
-  argsDoc: '{"item": "<物品名>", "count"?: 1-64}',
+  description: '合成物品。会自动补做两层以内的前置材料（原木→木板→木棍）、自己走到附近的工作台用（没有就现做一个放下、用完收回），所以直接写最终物品即可，不用先做/放工作台。常用：wooden_pickaxe、stone_pickaxe、furnace、torch',
+  argsDoc: '{"item": "<物品名>", "count"?: 1-64, "extra"?: true（附近已有工作台/熔炉、背包里已有床时还要再做一个）}',
   timeoutMs: 60000,
   movement: false,
   validate(raw, adapter) {
@@ -480,6 +480,15 @@ export const craft: Skill<{ item: string; count: number; extra?: boolean }> = {
       const placed = myBed(ctx.memory, s, (p) => ctx.adapter.blockAt(p));
       if (held) return fail('BAD_ARGS', `背包里已经有 ${held.name} 了，不用再做：天黑（或黄昏）直接 sleep；真要第二张床写 {"item":"${args.item}","extra":true}`);
       if (placed) return fail('BAD_ARGS', `已经有一张自己的床放在 (${placed.pos.x},${placed.pos.y},${placed.pos.z})（${placed.dist} 格外），不用再做：天黑时 sleep 会自己走过去睡；真要第二张床写 {"item":"${args.item}","extra":true}`);
+    }
+    // 工作台、熔炉也一样：附近就有（看得见或记得的），或者背包里揣着一个，多半是忘了。说清楚在哪；真要再做一个写 extra:true
+    if ((args.item === 'crafting_table' || args.item === 'furnace') && !args.extra) {
+      const zh = args.item === 'crafting_table' ? '工作台' : '熔炉';
+      const use = args.item === 'crafting_table' ? '要做需要工作台的东西，直接 craft 那样东西，会自己走过去用' : '要烧东西直接 smelt，会自己走过去用';
+      const held = ctx.adapter.state().inventory.find((i) => i.name === args.item && i.count > 0);
+      if (held) return fail('BAD_ARGS', `背包里已经有 ${held.count} 个${zh}了，不用再做：${use}（附近没有时会把背包里这个放下）；真要再做一个写 {"item":"${args.item}","extra":true}`);
+      const near = findStation(ctx, [args.item], 24);
+      if (near) return fail('BAD_ARGS', `${near.dist} 格外 (${near.pos.x},${near.pos.y},${near.pos.z}) 就有${zh}${near.from === 'memory' ? '（记得的）' : ''}，不用再做：${use}；真要再做一个写 {"item":"${args.item}","extra":true}`);
     }
     args = { ...args, item: pickVariant(args.item, ctx.adapter.state().inventory) };
     // 刚被打断的同一样合成：先等它落地，做成了就算进这次的数量

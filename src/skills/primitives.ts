@@ -7,6 +7,7 @@ import { OWN_BUILDING_HINT, ownBuildingAt, storedChestAt } from './build.ts';
 import { noteEdit } from '../mind/edits.ts';
 import { PLACEABLE } from './survival.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
+import { findStation } from './stations.ts';
 
 /**
  * 原子动作：模型说出确切是哪一格，身体只负责准确执行、检查安全、如实回报。
@@ -189,7 +190,7 @@ export const stepTo: Skill<CellArgs> = {
   },
 };
 
-export const placeAt: Skill<CellArgs & { item: string }> = {
+export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
   name: 'place_at',
   description: '在身边指定的空格放一块方块（[前,上,右]）；[0,0,0] 表示原地垫一块站上去（跳起来往脚下放）。item 写方块名，或 "any" 用背包里随便一种能垫的（泥土、圆石、木板…）',
   argsDoc: '{"at":[前,上,右], "item"?:"<方块名>|any", "facing"?:"N|E|S|W"}（前后/左右 ±2，上下 -1..3；例：[0,0,0] 原地垫高一格，[1,-1,0] 填前方脚下的坑）',
@@ -204,7 +205,7 @@ export const placeAt: Skill<CellArgs & { item: string }> = {
     if (!FACINGS.includes(facing as Facing)) return { ok: false, error: facing };
     const item = String(a.item ?? a.block ?? 'any').replace(/^minecraft:/, '');
     if (item !== 'any' && !adapter.isKnownItem(item)) return { ok: false, error: `未知物品：${item}` };
-    return { ok: true, args: { at, facing: facing as Facing, item } };
+    return { ok: true, args: { at, facing: facing as Facing, item, ...(a.extra === true ? { extra: true } : {}) } };
   },
   async run(ctx, args) {
     throwIfAborted(ctx.signal);
@@ -212,6 +213,14 @@ export const placeAt: Skill<CellArgs & { item: string }> = {
     const inv = a.state().inventory;
     const names = args.item === 'any' ? PLACEABLE.filter((n) => inv.some((i) => i.name === n && i.count > 0)) : [args.item];
     if (!names.length || !inv.some((i) => names.includes(i.name) && i.count > 0)) return fail('MISSING_MATERIALS', `背包里没有 ${args.item === 'any' ? '能垫的方块（泥土/圆石/木板…）' : args.item}`, after(ctx, args.facing));
+    // 旁边已经有一个工作台/熔炉还要再放：多半是没注意到它（合成/烧东西会自己走过去用）。真要再放一个写 extra:true
+    if ((args.item === 'crafting_table' || args.item === 'furnace') && !args.extra) {
+      const near = findStation(ctx, [args.item], 8);
+      if (near) {
+        const zh = args.item === 'crafting_table' ? '工作台' : '熔炉';
+        return fail('BAD_ARGS', `旁边 ${near.dist} 格 (${near.pos.x},${near.pos.y},${near.pos.z}) 已经有${zh}了，不用再放：${args.item === 'crafting_table' ? 'craft' : 'smelt'} 会自己走过去用它；真要再放一个写 "extra":true`, after(ctx, args.facing));
+      }
+    }
     const feet = feetCell(a.state().pos);
     if (args.at[0] === 0 && args.at[1] === 0 && args.at[2] === 0) {
       // 原地垫高：跳起来往脚下放一块，站上去
