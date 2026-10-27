@@ -54,3 +54,10 @@ test('stop() asks the agent to save and exit instead of killing it', async () =>
   assert.equal(r.runs(), 1);
   assert.deepEqual(r.events(), []);
 });
+
+test('an agent that announced it will be busy (heap snapshot) is not killed for missing heartbeats', async () => {
+  const r = run(['busy'], { hangMs: 300, startupMs: 300 });
+  await r.s.done;
+  assert.equal(r.runs(), 1);
+  assert.deepEqual(r.events(), []);
+});

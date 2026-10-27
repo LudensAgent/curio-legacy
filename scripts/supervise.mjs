@@ -49,7 +49,8 @@ export function backoffMs(n) { return [3_000, 10_000, 30_000, 60_000][Math.min(n
  * @returns {{ stop(): Promise<void>, done: Promise<void> }}
  */
 export function supervise(o) {
-  const hangMs = o.hangMs ?? 120_000, startupMs = o.startupMs ?? 300_000, stableMs = o.stableMs ?? 600_000;
+  // 卡死判定：Minecraft 服务器 30 秒收不到包就把 bot 踢掉（游戏里显示“退出了游戏”），守护要赶在那之后不久就重启，不能干等两分钟
+  const hangMs = o.hangMs ?? 45_000, startupMs = o.startupMs ?? 300_000, stableMs = o.stableMs ?? 600_000;
   const backoff = o.backoff ?? backoffMs;
   const say = o.say ?? ((l) => console.log(`\x1b[35m[守护 ${new Date().toLocaleTimeString()}]\x1b[0m ${l}`));
   fs.mkdirSync(o.logDir, { recursive: true });
@@ -78,10 +79,16 @@ export function supervise(o) {
       keep(errTail, s, 200);
       try { fs.appendFileSync(errFile(), stripAnsi(s).split(/\r?\n/).map((l) => (l ? `[${new Date().toISOString()}] ${l}` : l)).join('\n')); } catch { /* ignore */ }
     });
-    c.on('message', (m) => { if (m && m.type === 'hb') lastBeat = { at: Date.now(), ...m }; });
+    // busy：子进程要故意停一会儿（比如写堆快照），先说一声，这段时间不算卡死
+    let busyUntil = 0;
+    c.on('message', (m) => {
+      if (m && m.type === 'hb') lastBeat = { at: Date.now(), ...m };
+      else if (m && m.type === 'busy') busyUntil = Date.now() + Math.min(Number(m.ms) || 0, 10 * 60_000);
+    });
 
     const watchdog = setInterval(() => {
       const since = lastBeat ? Date.now() - lastBeat.at : Date.now() - startedAt;
+      if (Date.now() < busyUntil) return;
       if (since > (lastBeat ? hangMs : startupMs) && !killedForHang && !stopping) {
         killedForHang = true;
         say(`${Math.round(since / 1000)} 秒没有心跳，判定卡死，强制结束`);

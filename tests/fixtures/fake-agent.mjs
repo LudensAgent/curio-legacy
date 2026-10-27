@@ -11,3 +11,5 @@ if (what === 'restart') process.exit(75);
 if (what === 'hang') { const end = Date.now() + 60_000; while (Date.now() < end) { /* 卡死：不再发心跳 */ } }
 if (what === 'ok') setTimeout(() => process.exit(0), 50);
 if (what === 'wait') setInterval(() => process.send?.({ type: 'hb' }), 50);
+// 说好要忙一阵（写堆快照）：停住 7 秒不发心跳，然后正常退出
+if (what === 'busy') { process.send?.({ type: 'busy', ms: 60_000 }); setTimeout(() => { const end = Date.now() + 7_000; while (Date.now() < end) { /* 写快照 */ } process.exit(0); }, 50); }

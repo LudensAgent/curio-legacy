@@ -66,6 +66,8 @@ export function installProcessHealth(bus: EventBus, opts: {
       const dir = opts.snapshotDir ?? '.';
       const file = path.join(dir, `heap-${new Date(now).toISOString().replace(/[:.]/g, '-')}.heapsnapshot`);
       bus.publish('memory_snapshot', 'P1', `堆已用 ${mb(m.heapUsed)}（远高于平时），写一份堆快照留着查是谁占的：${file}（进程会停顿一会儿）`, { ...m, ...extra(), file });
+      // 写快照会停住事件循环几十秒：先告诉守护进程，免得被当成卡死杀掉
+      send?.({ type: 'busy', ms: 5 * 60_000 });
       try {
         fs.mkdirSync(dir, { recursive: true });
         const written = (opts.writeSnapshot ?? ((f: string) => v8.writeHeapSnapshot(f)))(file);
