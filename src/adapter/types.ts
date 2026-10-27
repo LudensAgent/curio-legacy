@@ -156,6 +156,10 @@ export interface EffectEvidence {
 export interface ActionResult {
   ok: boolean;
   reason?: string;
+  /** 挖掉了，但手上没有对应的工具，什么都没掉（空手挖石头） */
+  noDrop?: boolean;
+  /** 实际挖了多久（毫秒） */
+  digMs?: number;
   effectEvidence?: EffectEvidence;
 }
 

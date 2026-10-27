@@ -99,6 +99,8 @@ export function ownOxygen(b: any): number {
   return Number.isFinite(level) ? Math.max(0, Math.min(20, Math.round(level))) : 20;
 }
 
+/** 没有对应工具时，空手挖一格最多肯花多久（超过就当挖不动：黑曜石之类） */
+const HAND_DIG_MAX_MS = 30_000;
 /** 扔掉的东西多久之内算“自己刚扔的”（掉落物标出来；被捡回来时报一句） */
 const DISCARD_MS = 3 * 60_000;
 
@@ -1140,16 +1142,23 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const block = b.blockAt(this.vec(pos));
     if (!block || ['air', 'cave_air', 'void_air', 'water', 'lava'].includes(block.name)) return { ok: false, reason: 'NO_BLOCK' };
     if (block.diggable === false) return { ok: false, reason: 'UNBREAKABLE_BLOCK' };
-    // 没有对应工具时只是不掉东西：积雪、草这类一碰就碎的照样能清掉（拆雪层不用铲子）；石头矿石才真要镐
-    const flimsy = typeof block.hardness === 'number' && block.hardness <= 0.5;
-    if (!this.canHarvest(pos) && !flimsy) return { ok: false, reason: 'TOOL_MISSING' };
+    // 没有对应工具时只是不掉东西，照样能挖掉（原版：空手挖石头约 7.5 秒、深板岩约 15 秒，什么都不掉）：
+    // 清路、脱困只要把这一格挖开，用不着镐；要拿到圆石、矿石才得用镐（gather 自己会先检查）。
+    // 以前这里一律拒绝（TOOL_MISSING），它就学成了“没镐石头动不了”，镐快断时宁可困在洞里也不敢挖
+    const harvest = this.canHarvest(pos);
     await this.afterAction(() => this.equipBestTool(block, signal), check);
     throwIfAborted(signal);
     if (!b.canDigBlock(block)) return { ok: false, reason: 'OUT_OF_REACH' };
-    await this.afterAction(() => raceAbort(b.dig(block, true), signal, 20000, () => {
+    const e = b.entity;
+    let ms = 0;
+    try { ms = block.digTime(b.heldItem?.type ?? null, false, !!e?.isInWater, !e?.onGround, b.heldItem?.enchants ?? [], e?.effects ?? {}); } catch { ms = 0; }
+    // 空手也要挖半分钟以上的（黑曜石之类）：真的挖不动
+    if (!harvest && (!Number.isFinite(ms) || ms > HAND_DIG_MAX_MS)) return { ok: false, reason: 'TOOL_MISSING' };
+    const t0 = Date.now();
+    await this.afterAction(() => raceAbort(b.dig(block, true), signal, Math.max(20000, (Number.isFinite(ms) ? ms : 0) + 5000), () => {
       try { b.stopDigging(); } catch { /* ignore */ }
     }), check);
-    return { ok: true };
+    return harvest ? { ok: true } : { ok: true, noDrop: true, digMs: Date.now() - t0 };
   }
 
   async collectNearbyDrops(signal: AbortSignal, radius: number, timeoutMs: number): Promise<number> {

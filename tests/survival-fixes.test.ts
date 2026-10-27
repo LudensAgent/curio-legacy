@@ -333,26 +333,33 @@ test('建筑 spec：门写成木料时换成同木种的门，认不出就用橡
   assert.equal(normalizeSpec({ palette: { door: 'iron_door' } }).palette.door, 'oak_door');
 });
 
-test('dig：挖不动石头时不只报 TOOL_MISSING——工作台在手边就顺手做木镐，否则说清楚缺什么、不走开', async () => {
+test('dig：没有镐也能空手挖开石头（慢、不掉东西）；工作台在手边、有木料时顺手先做一把木镐', async () => {
   const w = new TestWorld();
   w.canHarvest = () => (w.inv.get('wooden_pickaxe') ?? 0) > 0;
+  // 像真的身体一样：没有对应的镐也挖得掉，只是什么都不掉
+  const realDig = w.dig.bind(w);
+  w.dig = async (pos: any, signal: AbortSignal) => {
+    const hand = !w.canHarvest();
+    const before = new Map(w.inv);
+    const r = await realDig(pos, signal);
+    if (hand && r.ok) { w.inv.clear(); for (const [k, v] of before) w.inv.set(k, v); return { ...r, noDrop: true, digMs: 7500 }; }
+    return r;
+  };
   const p = w.state().pos;
-  w.setBlock({ x: Math.floor(p.x), y: Math.floor(p.y) + 2, z: Math.floor(p.z) }, 'stone');
+  const above = (n: number) => ({ x: Math.floor(p.x), y: Math.floor(p.y) + 2 + n, z: Math.floor(p.z) });
+  w.setBlock(above(0), 'stone');
   const ctx = makeCtx(w);
   try {
     let r = await dig.run(ctx, { dir: 'up', blocks: 1 });
-    assert.equal(r.status, 'failed');
-    assert.doesNotMatch(r.summary, /^TOOL_MISSING/);
-    assert.match(r.summary, /镐子/);
+    assert.equal(r.status, 'succeeded', `没有镐、没有工作台：空手挖开（${r.summary}）`);
+    assert.ok(!w.actions.includes('craft:wooden_pickaxe'), '就地动作不为了合成走开');
+    assert.ok(!w.inv.get('cobblestone'), '空手挖不掉东西');
+    w.setBlock(above(0), 'stone');
     w.inv.set('oak_log', 3);
-    r = await dig.run(ctx, { dir: 'up', blocks: 1 });
-    assert.equal(r.status, 'failed', '工作台不在手边：就地动作不能为了合成走开');
-    assert.match(r.summary, /先 craft wooden_pickaxe/);
-    assert.ok(!w.actions.includes('craft:wooden_pickaxe'));
     w.setBlock({ x: Math.floor(p.x) + 1, y: Math.floor(p.y), z: Math.floor(p.z) }, 'crafting_table');
     r = await dig.run(ctx, { dir: 'up', blocks: 1 });
     assert.equal(r.status, 'succeeded', r.summary);
-    assert.ok(w.actions.includes('craft:wooden_pickaxe'), '工作台就在手边：顺手做一把木镐');
+    assert.ok(w.actions.includes('craft:wooden_pickaxe'), '工作台就在手边、有木料：顺手做一把木镐');
   } finally { ctx.memory.close(); }
 });
 

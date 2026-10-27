@@ -81,8 +81,9 @@ export const digAt: Skill<CellArgs> = {
     if (wet) return fail('BAD_ARGS', `[${args.at}] 旁边就是 ${wet}，挖开会流进来`, { wet, ...after(ctx, args.facing) });
     const mine = args.own ? null : ownBuildingAt(ctx.memory, ctx.adapter.state(), pos, before);
     if (mine) return fail('BAD_ARGS', `[${args.at}] 的 ${before} 是自己盖的「${mine.name}」的一部分；${OWN_BUILDING_HINT}`, { own: mine, ...after(ctx, args.facing) });
+    const how: { noDrop?: boolean; ms?: number } = {};
     try {
-      await breakCell(ctx, pos, true);
+      await breakCell(ctx, pos, true, how);
     } catch (e) {
       if (isAbort(e)) throw e;
       const m = String((e as Error).message);
@@ -94,7 +95,9 @@ export const digAt: Skill<CellArgs> = {
       return ok(`挖掉了 [${args.at}] 的 ${before}，但上面掉下来的 ${now} 又填上了`, { cell: [...args.at], was: before, now, ...after(ctx, args.facing) });
     }
     noteEdit(ctx.taskId, 'dig', pos);
-    return ok(`挖掉了 [${args.at}] 的 ${before}`, { cell: [...args.at], was: before, ...after(ctx, args.facing) });
+    // 空手挖的：挖开了，但慢、不掉东西（要拿到圆石、矿石得用镐）
+    const hand = how.noDrop ? `（空手挖的，用了 ${Math.max(1, Math.round((how.ms ?? 0) / 1000))} 秒，没有掉落：要拿到东西得用镐）` : '';
+    return ok(`挖掉了 [${args.at}] 的 ${before}${hand}`, { cell: [...args.at], was: before, ...(how.noDrop ? { noDrop: true } : {}), ...after(ctx, args.facing) });
   },
 };
 

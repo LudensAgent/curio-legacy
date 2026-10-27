@@ -26,24 +26,20 @@ function liquidNext(ctx: SkillCtx, c: { x: number; y: number; z: number }): stri
   return null;
 }
 
-export async function breakCell(ctx: SkillCtx, c: Vec3Like, exact = false): Promise<string | null> {
+export async function breakCell(ctx: SkillCtx, c: Vec3Like, exact = false, info?: { noDrop?: boolean; ms?: number }): Promise<string | null> {
   const name = ctx.adapter.blockAt(c);
   if (!exact && isSoftBlock(name)) return null;
   if (name && LIQUID_BLOCKS.has(name)) throw new Error(`LIQUID:${name}`);
   if (name === 'bedrock') throw new Error('BEDROCK');
   const wet = liquidNext(ctx, c);
   if (wet) throw new Error(`LIQUID_NEAR:${wet}`);
-  // 挖不动（没有合适的镐）：像玩家一样有木料就先做一把木镐，没有就说清楚缺什么，而不是只报 TOOL_MISSING
-  // 但 dig/climb_up 是“就地”的动作（可能站在柱子上、坑里），合成时不能走开：只有工作台就在手边时才顺手做
-  if (!ctx.adapter.canHarvest(c)) {
-    const block = ctx.adapter.blockAt(c) ?? '它';
-    if (!findStation(ctx, ['crafting_table'], 4)) throw new Error(`NEED_TOOL:手上没有能挖 ${block} 的镐子（需要 wooden_pickaxe 以上）；先 craft wooden_pickaxe（背包有木料就能做），再来挖`);
-    const tool = await ensureToolFor(ctx, c);
-    if (!tool.ok) throw new Error(`NEED_TOOL:${tool.message}`);
-  }
+  // 没有合适的镐：工作台就在手边、木料够，像玩家一样顺手做一把木镐（dig/climb_up 是“就地”的动作，合成时不能走开）；
+  // 做不了也不停下——空手照样挖得掉，只是慢、不掉东西（挖开一格清路、脱困用不着镐）
+  if (!ctx.adapter.canHarvest(c) && findStation(ctx, ['crafting_table'], 4)) await ensureToolFor(ctx, c);
   if (exact && ctx.adapter.blockAt(c) !== name) throw new Error('TARGET_CHANGED：目标方块已经改变，停止拆除');
   const r = await ctx.adapter.dig(c, ctx.signal);
   if (!r.ok) throw new Error(r.reason ?? 'DIG_FAILED');
+  if (info) { info.noDrop = !!r.noDrop; info.ms = r.digMs; }
   return name;
 }
 
@@ -53,7 +49,7 @@ export const why = (e: unknown) => {
   if (m.startsWith('LIQUID:')) return `那边是 ${m.slice(7)}`;
   if (m === 'BEDROCK') return '碰到基岩，挖不动';
   if (m.startsWith('NEED_TOOL:')) return m.slice(10);
-  if (m === 'TOOL_MISSING') return '手上没有能挖它的工具（石头类要镐子，先 craft wooden_pickaxe）';
+  if (m === 'TOOL_MISSING') return '空手也挖不动（太硬了，空手要挖半分钟以上，比如黑曜石）：要挖开得先有对应的镐子';
   return m;
 };
 
