@@ -1878,13 +1878,22 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         if (!it) continue;
         const cur = furnace.fuelItem();
         if (cur && cur.name !== f) continue; // 燃料格里是别的燃料，同一格放不进
-        const k = Math.min(this.invCountOf(f), Math.max(1, Math.ceil(need / per(f))), 64 - (cur?.count ?? 0));
+        // 按熔炉窗口里实际看得到的数量放（背包模型和窗口偶尔对不上，多放一个就会整个报错）
+        const have = typeof furnace.count === 'function' ? furnace.count(it.type, null) : this.invCountOf(f);
+        const k = Math.min(have, Math.max(1, Math.ceil(need / per(f))), 64 - (cur?.count ?? 0));
         if (k <= 0) continue;
-        await this.afterAction(() => furnace.putFuel(it.type, null, k), check);
-        return true;
+        try {
+          await this.afterAction(() => furnace.putFuel(it.type, null, k), check);
+          return true;
+        } catch (e) {
+          if (e instanceof AbortedError) throw e;
+          // 这一种放不进去：试下一种燃料
+        }
       }
       return false;
     };
+    let failure: unknown = null;
+    const startedAt = Date.now();
     try {
       const n = Math.min(count, inItem.count, 64);
       if (!furnace.fuelItem()) await addFuel(n);
@@ -1907,7 +1916,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         if (!inNow) break;
         if (inNow !== lastIn || furnace.progress !== lastProgress) { lastMove = Date.now(); lastIn = inNow; lastProgress = furnace.progress; }
         // 火灭了、燃料格空了，原料还在：燃料用完了。背包里还有燃料就补上，没有就别干等
-        const burning = (furnace.fuel ?? 0) > 0 || lit();
+        // （刚开工时熔炉还没把燃烧进度发过来、方块也还没亮：先等几秒再下结论）
+        const burning = (furnace.fuel ?? 0) > 0 || lit() || (furnace.fuel === null && Date.now() - startedAt < 4000);
         if (!burning && !furnace.fuelItem()) {
           if (await addFuel(inNow)) { lastMove = Date.now(); continue; }
           stopped = 'out_of_fuel';
@@ -1917,7 +1927,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         if (Date.now() - lastMove > 15000) { stopped = 'stalled'; break; }
       }
       if (!stopped && made < n && furnace.inputItem()) stopped = 'deadline';
-      // 烧好的和没烧的都拿回来，按背包实际变化算
+    } catch (e) {
+      if (e instanceof AbortedError) {
+        try { opts.onLeave?.({ pos: furnacePos, block: String(block.name), ...contents(), burning: lit() || (furnace.fuel ?? 0) > 0, why: 'interrupted' }); } catch { /* ignore */ }
+        try { furnace.close(); } catch { /* ignore */ }
+        throw e;
+      }
+      failure = e;
+    }
+    try {
+      // 烧好的和没烧的都拿回来，按背包实际变化算（中途出错也要拿）
       if (furnace.outputItem()) {
         const o = furnace.outputItem(); outputName ??= o.name;
         const before = this.invCountOf(o.name);
@@ -1936,7 +1955,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     }
     const left = contents();
     const base = { made, output: outputName, furnacePos, returned, ...(stopped ? { stopped } : {}), left };
-    return made > 0 ? { ok: true, ...base } : { ok: false, reason: stopped === 'out_of_fuel' ? 'OUT_OF_FUEL' : stopped === 'stalled' ? 'STALLED' : 'NOTHING_SMELTED', ...base };
+    return made > 0 ? { ok: true, ...base } : { ok: false, reason: failure ? `ERROR:${String((failure as Error)?.message ?? failure).slice(0, 120)}` : stopped === 'out_of_fuel' ? 'OUT_OF_FUEL' : stopped === 'stalled' ? 'STALLED' : 'NOTHING_SMELTED', ...base };
   }
 
   /** 打开熔炉把烧好的、没烧的（可选连燃料）都取回背包；按背包实际变化算 */
