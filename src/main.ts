@@ -202,7 +202,8 @@ const improver = new CodeImprover(coderPlanner, behaviors, bus, { globalGapMs: c
 const smith = new SkillSmith(coderPlanner, behaviors, skillBook, bus, () => adapter.state(),
   // 回顾用的“这段时间做过的事”（回调执行时 selfModel 已经建好）
   () => selfModel.history(30).map((r) => `${r.what} → ${r.outcome}（${r.durationSec}s${Object.keys(r.gained).length ? `，得到 ${Object.entries(r.gained).map(([k, v]) => `${k}×${v}`).join(' ')}` : ''}）${r.outcome !== 'done' ? `：${r.summary.slice(0, 80)}` : ''}`),
-  { maxPerHour: config.mind.skillForgeMaxPerHour, repeatMs: config.mind.skillForgeRepeatMin * 60_000 });
+  { maxPerHour: config.mind.skillForgeMaxPerHour, repeatMs: config.mind.skillForgeRepeatMin * 60_000,
+    batchMs: config.mind.skillForgeBatchSec * 1000, ownersFile: path.join(config.dataDir, 'skill-owners.json') });
 smith.start();
 /** 收获账本：每段活的投入产出、东西出现在哪（高度、群系、维度），不针对哪种东西；拿某样东西明显比平时费劲/省事就交给造技能的对比 */
 const ledger = new Ledger(path.join(config.dataDir, 'ledger.json'), bus, () => adapter.state(),

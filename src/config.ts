@@ -104,6 +104,8 @@ export const config = {
     /** 后台写技能每小时最多请模型几次（死亡不算）；同一件事多少分钟内不再请第二次 */
     skillForgeMaxPerHour: num('SKILL_FORGE_MAX_PER_HOUR', 24),
     skillForgeRepeatMin: num('SKILL_FORGE_REPEAT_MIN', 20),
+    /** 后台写技能攒批：第一件事进队后等多少秒，把这段时间的事一次请模型看完（死亡不等）；0 = 不攒 */
+    skillForgeBatchSec: num('SKILL_FORGE_BATCH_SEC', 180),
   },
   learning: {
     /** Only explicitly designated isolated worlds may provide candidate promotion evidence. */

@@ -63,6 +63,7 @@ export class Attention {
       case 'reflex': return this.notice(`reflex:${ev.msg.slice(-12)}`, `身体自己反应了：${ev.msg}`, 0.35, 20_000);
       case 'death_items': return this.notice('death_items', ev.msg, 0.7, 60_000);
       case 'design': return this.notice(`design:${String(d.draftId ?? '')}`, `建筑师把图纸画好了：${ev.msg}`, 0.6, 0);
+      case 'skill_hint': return this.notice(`skill_hint:${String(d.skill ?? '')}`, ev.msg, 0.5, 10 * 60_000);
       case 'goal_kept': return this.notice(`goal_kept:${String(d.agendaId ?? '')}`, ev.msg, 0.4, 600_000);
       case 'effect_broken': return this.notice(`effect:${String(d.item ?? '')}`, `刚做完的事又被打破了：${ev.msg}`, 0.55, 60_000);
       case 'design_failed': return this.notice(`design_failed:${ev.msg.slice(0, 20)}`, `建筑师没画成：${ev.msg}`, 0.5, 0);
