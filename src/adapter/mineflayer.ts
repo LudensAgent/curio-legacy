@@ -646,7 +646,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const e = b.entity;
     const inv = new Map<string, InvItem>();
     for (const it of b.inventory.items()) {
-      const cur: InvItem = inv.get(it.name) ?? { name: it.name, count: 0 };
+      const stackSize = this.mcData.itemsByName?.[it.name]?.stackSize;
+      const cur: InvItem = inv.get(it.name) ?? { name: it.name, count: 0, ...(stackSize ? { stackSize } : {}) };
       cur.count += it.count;
       const max = this.mcData.itemsByName?.[it.name]?.maxDurability;
       if (max) {
@@ -1687,7 +1688,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (!item || slot < 5 || slot > 45) return [];
       const max = this.mcData.itemsByName?.[item.name]?.maxDurability;
       const enchants = this.itemEnchants(item);
-      return [{ slot, name: item.name, count: item.count,
+      const stackSize = this.mcData.itemsByName?.[item.name]?.stackSize;
+      return [{ slot, name: item.name, count: item.count, ...(stackSize ? { stackSize } : {}),
         ...(max ? { durability: { left: Math.max(0, max - (item.durabilityUsed ?? 0)), max } } : {}),
         ...(enchants ? { enchants } : {}),
         ...(item.customName ? { customName: item.customName } : {}),

@@ -437,8 +437,9 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
     // 工具、武器、护甲带上耐久（像物品栏里那条耐久条）；附魔的标出来
     inventory: [...inv].map(([name, count]) => {
       const it = s.inventory.find((i) => i.name === name);
-      return `${name}×${count}${durabilityText(it)}${it?.enchanted ? '（附魔）' : ''}`;
+      return `${name}×${count}${it?.stackSize ? `（每叠上限 ${it.stackSize}）` : ''}${durabilityText(it)}${it?.enchanted ? '（附魔）' : ''}`;
     }), empty_slots: p.emptySlots,
+    ...(p.emptySlots <= 5 ? { inventory_space: '空格数是空槽位数量，不是可携带物品数量；物品的每叠上限因物品而异，已有未满且可合并的叠也可能容纳更多。物品总数不表示各槽分布，同名物品的属性不同时也不一定能合并。' } : {}),
     ...(s.effects?.length ? { effects: s.effects.map((e) => `${e.name}${e.level > 1 ? ` ${e.level} 级` : ''}，${e.seconds > 0 ? `剩余时间按正常速度估算为${durationText(realSecondsToTicks(e.seconds))}游戏时间` : '剩余时长未知或接近结束'}`) } : {}),
     ...(s.xp ? { xp_level: s.xp.level } : {}),
     // 背包里的食物各值多少（生的顺带说烤熟后值多少）：只给事实，吃不吃、烤不烤由它自己定

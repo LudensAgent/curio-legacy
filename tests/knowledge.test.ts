@@ -7,6 +7,20 @@ import { KnowledgeBase } from '../src/knowledge/library.ts';
 import { SKILLS } from '../src/skills/index.ts';
 import { ok } from '../src/skills/types.ts';
 
+test('inventory stack knowledge is searchable and distinguishes slots from item quantities', () => {
+  const library = new KnowledgeBase('1.20.1');
+  for (const query of ['背包物品堆叠', '铁锭一格能放多少', 'inventory stack']) {
+    const result = library.query({ query, limit: 12 });
+    assert.ok('matches' in result);
+    assert.ok(result.matches.some((match) => match.id === 'inventory-and-stacks'), query);
+  }
+  const result = library.query({ id: 'inventory-and-stacks', section: 'stacking' });
+  assert.ok('document' in result);
+  assert.match(result.document.sections[0].text, /粗铁和铁锭/);
+  assert.match(result.document.sections[0].text, /没有空槽位并不必然/);
+  assert.ok(result.document.sources.some((source) => source.url === 'https://minecraft.wiki/w/Item'));
+});
+
 function fixture(t: TestContext, documents: { id: string; title: string; aliases: string[]; version?: string; sources?: { url: string; title: string }[]; body: string }[]) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-knowledge-'));
   documents.forEach(({ body, version, sources, ...metadata }) => fs.writeFileSync(path.join(directory, `${metadata.id}.md`), `---\n${Object.entries({ ...metadata,

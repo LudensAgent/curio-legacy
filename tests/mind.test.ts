@@ -1244,6 +1244,21 @@ test('提示词：【身体】写出身上穿戴的盔甲和副手（不在背�
   assert.deepEqual(dressed.wearing, { 头: 'iron_helmet（耐久剩 165）', 胸: 'iron_chestplate（耐久剩 240）', 腿: 'iron_leggings', 脚: 'iron_boots（耐久剩 195）' });
 });
 
+test('提示词区分背包空槽与物品的堆叠上限', () => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  const perception = new Perception(adapter, memory, bus, new Vision(adapter));
+  const percept = { ...perception.update(), emptySlots: 4 };
+  const state = { ...adapter.state(), inventory: [{ name: 'raw_iron', count: 4, stackSize: 64 }, { name: 'bucket', count: 2, stackSize: 16 }] };
+  const [, user] = buildMindMessages({ reason: '测试', percept, state, self: new SelfModel(null), memory, activity: null, suspended: [], lastRecord: null,
+    noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', skills: [], tier: 'deliberate' } as any);
+  const body = JSON.parse(user.content.match(/【身体】(.*)/)![1]);
+  assert.equal(body.empty_slots, 4);
+  assert.deepEqual(body.inventory, ['raw_iron×4（每叠上限 64）', 'bucket×2（每叠上限 16）']);
+  assert.match(body.inventory_space, /空格数是空槽位数量，不是可携带物品数量/);
+  assert.match(body.inventory_space, /同名物品的属性不同时也不一定能合并/);
+  memory.close();
+});
+
 test('要命的处境（头被沙砾埋住、正在掉血）：撤掉正在慢慢想的，马上快想一次，并告诉它眼前的事实', async (t) => {
   const w = fixture(t);
   await w.tick();

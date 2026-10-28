@@ -72,6 +72,22 @@ test('real adapter inventory observation retains slot identity, full enchantment
   assert.deepEqual(observed.find((item) => item.slot === 12)?.nbt, { map: 42 });
 });
 
+test('inventory inspection reports the actual per-stack limit for each item', async () => {
+  const { adapter, slots } = slotFixture();
+  adapter.mcData.itemsByName.iron_ingot = { stackSize: 64 };
+  adapter.mcData.itemsByName.bucket = { stackSize: 16 };
+  slots[10] = { slot: 10, name: 'iron_ingot', type: 1, metadata: 0, count: 4 };
+  slots[11] = { slot: 11, name: 'bucket', type: 2, metadata: 0, count: 2 };
+  const observed = adapter.inventorySlots();
+  assert.equal(observed.find((item) => item.slot === 10)?.stackSize, 64);
+  assert.equal(observed.find((item) => item.slot === 11)?.stackSize, 16);
+  const ctx = makeCtx(new FakeAdapter());
+  ctx.adapter.inventorySlots = () => observed;
+  const result = await inspectInventory.run(ctx, {});
+  assert.match(result.summary, /iron_ingot×4（每叠上限 64）/);
+  assert.match(result.summary, /bucket×2（每叠上限 16）/);
+});
+
 test('real adapter equips the selected lower-durability tool and verifies identity instead of a same-name substitute', async () => {
   const { adapter, bot, syncs } = slotFixture(), signal = new AbortController().signal;
   assert.equal((await adapter.equipItem('diamond_pickaxe', 'hand', signal, { sourceSlot: 9 })).ok, true);

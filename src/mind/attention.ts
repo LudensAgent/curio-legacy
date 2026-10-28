@@ -128,7 +128,7 @@ export class Attention {
     if (snap.food <= 6 && prev.food > 6) out.push(this.notice('hungry', `饿了（饥饿值 ${snap.food}）`, 0.6, 120_000, now));
     else if (snap.food <= 12 && prev.food > 12) out.push(this.notice('peckish', `有点饿（饥饿值 ${snap.food}）`, 0.3, 300_000, now));
     if (prev.hp - snap.hp >= 4) out.push(this.notice('hp_drop', `掉了 ${Math.round(prev.hp - snap.hp)} 点血，现在 ${Math.round(snap.hp)}`, snap.hp <= 8 ? 0.7 : 0.5, 10_000, now));
-    if (snap.emptySlots === 0 && prev.emptySlots > 0) out.push(this.notice('inv_full', '背包满了，再捡东西就装不下了', 0.55, 180_000, now));
+    if (snap.emptySlots === 0 && prev.emptySlots > 0) out.push(this.notice('inv_full', '背包没有空格了；与已有未满物品堆兼容的物品仍可能装入', 0.55, 180_000, now));
     for (const h of snap.hostiles) if (!prev.hostiles.has(h) && h !== 'creeper') out.push(this.notice(`hostile:${h}`, `附近出现了 ${h}`, 0.4, 30_000, now));
     // 苦力怕靠近是要立刻拿主意的事：打（defend {"target":"creeper"}，砍一下退一步）还是绕开跑远
     const creeper = p.nearby.hostile.find((h) => h.name === 'creeper' && h.dist <= 10);

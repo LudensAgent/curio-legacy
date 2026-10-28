@@ -70,6 +70,8 @@ export interface BlockHit {
 export interface InvItem {
   name: string;
   count: number;
+  /** 此物品每叠的数量上限，不代表同名物品一定能合并 */
+  stackSize?: number;
   /** 会磨损的东西（工具、武器、护甲）：同名里最旧那件还剩多少耐久 / 满耐久 */
   durability?: { left: number; max: number };
   /** 同名每一件各剩多少耐久（从好到差）：只看最旧那件，会以为 11 把镐全是快坏的 */
@@ -83,6 +85,7 @@ export interface InventorySlot {
   slot: number;
   name: string;
   count: number;
+  stackSize?: number;
   durability?: { left: number; max: number };
   enchants?: string[];
   customName?: string;

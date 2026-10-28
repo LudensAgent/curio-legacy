@@ -149,6 +149,17 @@ test('时间感：离天黑/天亮几分钟；中午、半夜、天亮各提醒�
   assert.ok(waited > worked + 0.2, `干等两分钟 ${waited} vs 干活两分钟 ${worked}`);
 });
 
+test('背包空格用完时，提醒保留已有未满堆可能继续容纳物品', async () => {
+  const { Attention } = await import('../src/mind/attention.ts');
+  const att = new Attention();
+  const p = (emptySlots: number) => ({ time: { timeOfDay: 3000, phase: 'day' }, self: { food: 20, hp: 20, inWater: false }, emptySlots, nearby: { hostile: [], resources: [] }, light: null } as any);
+  att.fromPercept(p(1));
+  const notice = att.fromPercept(p(0)).find((n) => n.key === 'inv_full');
+  assert.ok(notice);
+  assert.match(notice.what, /没有空格.*未满物品堆兼容的物品仍可能装入/);
+  assert.equal(att.fromPercept(p(0)).some((n) => n.key === 'inv_full'), false);
+});
+
 test('天气：按群系说清下的是雨还是雪；雷雨随时能睡；变天会注意到', async () => {
   const { weatherHere, canSleepAt } = await import('../src/perception/perception.ts');
   const { Attention } = await import('../src/mind/attention.ts');

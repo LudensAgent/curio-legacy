@@ -162,7 +162,7 @@ export const holdItem: Skill<{ item: string | null; to: Dest; slot?: number; sou
 
 export const inspectInventory: Skill<{}> = {
   name: 'inspect_inventory',
-  description: '按实际槽位查看背包、快捷栏和装备中的每一叠物品，保留附魔、自定义名、耐久及 NBT（药水、书、地图等）；sourceSlot 可用于精确持物或丢弃',
+  description: '逐槽查看背包、快捷栏和装备的物品、堆叠上限、附魔、自定义名、耐久及 NBT；sourceSlot 可用于精确持物或丢弃',
   argsDoc: '{}',
   timeoutMs: 3000,
   movement: false,
@@ -171,7 +171,7 @@ export const inspectInventory: Skill<{}> = {
   async run(ctx) {
     if (!ctx.adapter.inventorySlots) return fail('ERROR', '当前适配器不能逐槽查看物品');
     const slots = ctx.adapter.inventorySlots();
-    return ok(slots.length ? `物品槽位：${slots.map((item) => `${item.slot}: ${item.name}×${item.count}${item.customName ? `「${item.customName}」` : ''}${item.enchants?.length ? `（${item.enchants.join('、')}）` : ''}`).join('；')}；操作后槽位可能改变，下次选择前重新查看` : '背包和装备槽都是空的', { slots });
+    return ok(slots.length ? `物品槽位：${slots.map((item) => `${item.slot}: ${item.name}×${item.count}${item.stackSize ? `（每叠上限 ${item.stackSize}）` : ''}${item.customName ? `「${item.customName}」` : ''}${item.enchants?.length ? `（${item.enchants.join('、')}）` : ''}`).join('；')}；操作后槽位可能改变，下次选择前重新查看` : '背包和装备槽都是空的', { slots });
   },
 };
 
