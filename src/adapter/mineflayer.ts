@@ -167,7 +167,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   private observationId = 0;
   private dimension = 'unknown';
   private actionEpoch = 0;
-  private actionContext = new AsyncLocalStorage<() => void>();
+  private actionContext = new AsyncLocalStorage<(() => void) & { signal?: AbortSignal }>();
   /** 正在进行的底层动作数（afterAction 包着的）；为 0 时才算空闲 */
   private inFlight = 0;
   /** 打断后的“收拾残局”：下一个碰背包/界面的动作要等它做完，免得两边的点击交错 */
@@ -190,6 +190,53 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   }
 
   private worldIdentity() { return this.cfg.memory?.worldId || `${this.cfg.mc.host}:${this.cfg.mc.port}`; }
+
+  /** 连着点了多少下界面（两下之间没歇过 1 秒）：慢速版的点击失控保护 */
+  private pacedClicks = 0;
+  private lastPacedClick = 0;
+
+  /**
+   * 界面节奏（UI_PACING_MS / UI_OPEN_HOLD_MS / UI_CLOSE_HOLD_MS）：真人合成、整理箱子是一下一下点的，Mineflayer 几十毫秒就点完了，
+   * 直播观众根本看不清。打在 Mineflayer 里的补丁（scripts/patch-deps.mjs）让每次 clickWindow 都先过 bot.beforeWindowClick——
+   * craft / transfer / deposit / withdraw / toss / equip 内部的点击全走这里；打开容器、工作台、熔炉后再多停一会儿让人看见界面。
+   */
+  private installUiPacing(bot: any) {
+    const ui = this.cfg.ui ?? { pacingMs: 0, openHoldMs: 0, closeHoldMs: 0 };
+    bot.beforeWindowClick = async (_slot: number, _button: number, mode: number) => {
+      const now = Date.now();
+      this.pacedClicks = now - this.lastPacedClick > 1000 ? 1 : this.pacedClicks + 1;
+      this.lastPacedClick = now;
+      // 点击失控（见 click-guard.ts）：放慢之后循环不再撑爆内存，但也不能让它无休止地点下去
+      if (this.pacedClicks > 400) {
+        this.pacedClicks = 0;
+        this.scheduleRepair('界面点击失控（慢速）', 500);
+        throw new Error('CLICK_LOOP: 连续点了 400 下界面还没停（多半是窗口已经关了），中止这次界面操作');
+      }
+      if (ui.pacingMs <= 0) return;
+      // shift 点击是一下整叠移走，真人也点得快些
+      const ms = mode === 1 ? Math.round(ui.pacingMs * 0.6) : ui.pacingMs;
+      await sleep(ms, this.actionContext.getStore()?.signal);
+    };
+    if (ui.openHoldMs > 0) {
+      // 所有窗口（箱子、工作台、熔炉、附魔台、交易、bot.craft 自己开的工作台）都从这两个入口打开：开完先停一下再往里放东西
+      for (const name of ['openBlock', 'openEntity']) {
+        const orig = bot[name];
+        if (typeof orig !== 'function') continue;
+        bot[name] = async (...args: any[]) => {
+          const w = await orig.apply(bot, args);
+          try { await sleep(ui.openHoldMs, this.actionContext.getStore()?.signal); } catch (e) { try { w?.close?.() ?? bot.closeWindow(w); } catch { /* ignore */ } throw e; }
+          return w;
+        };
+      }
+    }
+  }
+
+  /** 关窗前停一下，让观众看清结果；动作已被打断就立刻关 */
+  private async uiCloseHold(signal?: AbortSignal) {
+    const ms = this.cfg.ui?.closeHoldMs ?? 0;
+    if (ms <= 0 || signal?.aborted) return;
+    await sleep(ms, signal).catch(() => {});
+  }
 
   /** A pending transaction must never continue issuing commands after its owner ends. */
   private actionCheckpoint(signal?: AbortSignal) {
@@ -254,6 +301,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     this.bot = bot;
     this.guardPrePlayWrites(bot);
     bot.loadPlugin(pathfinder);
+    this.installUiPacing(bot);
     // 踩水：每个物理刻看一眼，空闲泡在水里时按住上浮（见 treadWater）
     bot.on('physicsTick', () => { try { this.treadWater(bot); } catch { /* ignore */ } });
     // mineflayer 4.39 的下船检测有缺陷：1.9+ 服务器下船时发的是 set_passengers(船, [其余乘客])，
@@ -1633,6 +1681,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       }
       return { ok: true, view: this.guiView(w), done };
     } finally {
+      await this.uiCloseHold(signal);
       this.inFlight--;
       try { b.closeWindow(w); } catch { /* ignore */ }
       if (this.interactionDirty().some((d) => !d.startsWith('窗口'))) this.scheduleRepair('界面操作后残留', 150);
@@ -1704,6 +1753,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const got = have(out) - before;
       return got > 0 ? { ok: true, trades: this.tradeViews(v), traded: Math.round(got / Math.max(1, out.count)) } : { ok: false, reason: 'TRADE_NOT_CONFIRMED', trades: this.tradeViews(v), traded: 0 };
     } finally {
+      await this.uiCloseHold(signal);
       this.inFlight--;
       try { v.close?.() ?? b.closeWindow(v); } catch { /* ignore */ }
       if (this.interactionDirty().some((d) => !d.startsWith('窗口'))) this.scheduleRepair('交易后残留', 150);
@@ -2072,6 +2122,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     } finally {
       // 不管怎么离开（包括被打断），都把熔炉里还剩什么报出去：东西不会自己回到背包
       try { opts.onLeave?.({ pos: furnacePos, block: String(block.name), ...contents(), burning: lit() || (furnace.fuel ?? 0) > 0, ...(stopped ? { why: stopped } : {}) }); } catch { /* ignore */ }
+      await this.uiCloseHold(signal);
       try { furnace.close(); } catch { /* ignore */ }
     }
     const left = contents();
@@ -2108,6 +2159,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const burning = (furnace.fuel ?? 0) > 0;
       return { ok: true, taken, left, burning };
     } finally {
+      await this.uiCloseHold(signal);
       try { furnace.close(); } catch { /* ignore */ }
     }
   }
@@ -2154,6 +2206,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       for (const i of chest.containerItems()) m.set(i.name, (m.get(i.name) ?? 0) + i.count);
       return { ok: true, contents: [...m].map(([name, count]) => ({ name, count })), moved };
     } finally {
+      await this.uiCloseHold(signal);
       try { chest.close(); } catch { /* ignore */ }
     }
   }
@@ -2436,6 +2489,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         if (window.selectedItem) await b.putSelectedItemRange?.(window.inventoryStart, window.inventoryEnd, window, null);
         await raceAbort(b._syncWindow(window), signal, 5000, () => {}).catch(() => {});
       } catch { /* 交给收拾残局 */ this.scheduleRepair('批量合成后残留', 250); }
+      // 做完停一下再关（背包 2×2 合成没有窗口，也停一下，让观众看到产物进了背包）
+      await this.uiCloseHold(signal);
       if (table) { try { b.closeWindow(window); } catch { /* ignore */ } }
     }
     const per = recipe.result?.count ?? 1;
@@ -2445,8 +2500,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   private async craftOnce(recipe: any, table: any, signal: AbortSignal, times = 1) {
     const check = this.actionCheckpoint(signal);
     const b = this.bot;
-    const pace = Number(process.env.UI_PACING_MS ?? 250) || 0;
-    const timeout = 10000 + (pace > 0 ? 3000 + pace * 12 * times : 0);
+    const pace = this.cfg.ui?.pacingMs ?? 0;
+    const timeout = 10000 + (pace > 0 ? 3000 + (this.cfg.ui?.openHoldMs ?? 0) + pace * 12 * times : 0);
     const attempt = new AbortController();
     const attemptSignal = AbortSignal.any([signal, attempt.signal]);
     const attemptCheck = this.actionCheckpoint(attemptSignal);

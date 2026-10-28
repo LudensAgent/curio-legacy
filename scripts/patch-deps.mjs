@@ -34,3 +34,13 @@ function patch(rel, mark, anchor, replacement, done, missing) {
   patch('mineflayer/lib/plugins/physics.js', mark, anchor, `      ${mark}\n      if (catchupTicks >= PHYSICS_CATCHUP_TICKS) { timeAccumulator = Math.min(timeAccumulator, PHYSICS_TIMESTEP); break }`,
     'mineflayer 物理补丁已打上：卡顿后不再快进补帧', '检查 doPhysics 的补帧循环');
 }
+
+// mineflayer 背包：craft / transfer / deposit / toss / equip 内部调的是模块里的本地 clickWindow，不走 bot.clickWindow，
+// 外面包不到；合成、整理箱子几十下点击在几十毫秒内全部发完，直播观众根本看不清。
+// 在 clickWindow 入口留一个钩子：bot.beforeWindowClick 存在时每次点击前先等它（Agent 里按 UI_PACING_MS 停顿）。
+{
+  const mark = '/* curio-patch: window click hook */';
+  const anchor = `  async function clickWindow (slot, mouseButton, mode) {\n`;
+  patch('mineflayer/lib/plugins/inventory.js', mark, anchor, `${anchor}    ${mark}\n    if (typeof bot.beforeWindowClick === 'function') await bot.beforeWindowClick(slot, mouseButton, mode)\n`,
+    'mineflayer 背包补丁已打上：每次界面点击前先过 bot.beforeWindowClick 钩子', '检查 clickWindow 的定义');
+}

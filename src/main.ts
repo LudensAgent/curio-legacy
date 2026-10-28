@@ -303,7 +303,9 @@ let observerInstall: MineflayerObserver | null = null;
 function attachObserver() {
   if (!feed || !adapter.bot || adapter.bot === observedBot) return;
   observerInstall?.dispose();
-  observerInstall = installMineflayerObserver(adapter.bot as MineflayerBotLike, feed);
+  // 合成/背包的节奏由适配器统一放慢（UI_PACING_MS 打在 Mineflayer 的 clickWindow 入口，craft/transfer/deposit/toss 全覆盖），
+  // 数据流这边不再另外包一层 bot.clickWindow，免得 bot.craft 那条路被放慢两次
+  observerInstall = installMineflayerObserver(adapter.bot as MineflayerBotLike, feed, { pacingMs: 0 });
   observedBot = adapter.bot;
   bus.publish('observer_feed', 'P3', `Curio Observer 数据流已挂载到 ${config.mc.username}`);
 }

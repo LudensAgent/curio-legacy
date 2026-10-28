@@ -150,12 +150,16 @@
 
 ### 6.3 合成节奏（让观众看清）
 
-`bot.craft()` 内部依次 `await bot.clickWindow(...)`，速度非常快。`UI_PACING_MS > 0` 时：
+Mineflayer 的 `craft` / `transfer` / `deposit` / `withdraw` / `toss` / `equip` 内部调的是模块内的本地 `clickWindow`，不经过 `bot.clickWindow`，
+在外面包 `bot.clickWindow` 只能管到 `bot.craft` 那一条路；整批合成（每格放一叠、shift 点产物）和箱子整理几十下点击在几十毫秒内全部发完。
+现在由 Agent 的适配器统一放慢（`scripts/patch-deps.mjs` 给 Mineflayer 打补丁，`MineflayerAdapter.installUiPacing`）。`UI_PACING_MS > 0` 时：
 
-1. 在 `craft()` 期间临时包装 `bot.clickWindow`，每次点击前 `await sleep(UI_PACING_MS)`（默认 250ms），合成结束后恢复原函数。
-2. 窗口打开后先停留 `UI_OPEN_HOLD_MS`（默认 600ms），关闭前停留 `UI_CLOSE_HOLD_MS`（默认 800ms）。
+1. Mineflayer 的 `clickWindow` 入口每次先 `await bot.beforeWindowClick(slot, button, mode)`；适配器在这里 `sleep(UI_PACING_MS)`（默认 250ms，shift 点击按 60%），
+   所有背包操作（合成、箱子、熔炉、交易、扔、换装备）都一下一下点。动作被打断时停顿立刻结束。
+2. `openBlock` / `openEntity`（所有窗口都从这两个入口打开）返回前停留 `UI_OPEN_HOLD_MS`（默认 600ms）；关窗前停留 `UI_CLOSE_HOLD_MS`（默认 800ms），背包 2×2 合成结束时也停一下。
+3. `installMineflayerObserver` 传 `pacingMs: 0`，数据流不再另外包 `bot.clickWindow`。
 
-这只会拉长合成技能本身的耗时，不影响仲裁器、反射层和预规划。设为 0 即可关闭。
+这只会拉长合成/整理技能本身的耗时，不影响仲裁器、反射层和预规划。设为 0 即可关闭。
 
 ### 6.4 增量与限流
 
