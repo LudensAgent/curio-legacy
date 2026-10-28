@@ -14,7 +14,7 @@ test('Free the End prerequisites and common blockers are discoverable within the
     ['猪灵交易不给珍珠', 'ender-pearls-and-eyes'],
     ['末影之眼怎么合成', 'ender-pearls-and-eyes'],
     ['找不到要塞里的传送门房', 'strongholds-and-end-entry'],
-    ['末地门需要几个末影之眼', 'strongholds-and-end-entry'],
+    ['末地门需要几个末影之眼', 'portals-and-dimensions'],
     ['末地水晶怎样给龙回血', 'ender-dragon-and-crystals'],
     ['龙栖息时射箭有没有用', 'ender-dragon-and-crystals'],
     ['缓降药水怎么酿造', 'brewing-and-potions'],
@@ -30,15 +30,15 @@ test('Free the End prerequisites and common blockers are discoverable within the
   });
 });
 
-test('progression references preserve alternatives, version conditions and completion evidence in individual chapters', () => {
+test('mechanic references preserve requirements, version conditions and effects in individual chapters', () => {
   const library = new KnowledgeBase('1.20.1');
   const chapters = [
-    { id: 'free-the-end', section: 'dependencies', facts: [/猪灵/, /牧师/, /采收或浇筑/, /不规定/] },
-    { id: 'obsidian-and-portal-building', section: 'harvesting-or-casting', facts: [/熔岩源/, /钻石镐/, /不要求先挖钻石/] },
-    { id: 'ender-pearls-and-eyes', section: 'piglin-bartering', facts: [/成年猪灵/, /金锭/, /幼年猪灵/, /没有.*必有珍珠/] },
+    { id: 'free-the-end', section: 'goal-and-evidence', facts: [/击杀末影龙/, /多人/, /进度/] },
+    { id: 'obsidian-and-portal-building', section: 'harvesting-or-casting', facts: [/熔岩源/, /钻石镐/, /形成黑曜石的过程不需要钻石镐/] },
+    { id: 'ender-pearls-and-eyes', section: 'piglin-bartering', facts: [/成年猪灵/, /金锭/, /幼年猪灵/, /随机/] },
     { id: 'strongholds-and-end-entry', section: 'portal-frames', facts: [/十二/, /朝向环内/, /无法取回/] },
     { id: 'ender-dragon-and-crystals', section: 'dragon-phases', facts: [/1\.20\.1/, /栖息时.*免疫箭/, /龙息/] },
-    { id: 'end-exit-and-recovery', section: 'exit-portal', facts: [/重生锚/, /世界出生点/, /重新观察/] },
+    { id: 'end-exit-and-recovery', section: 'exit-portal', facts: [/重生锚/, /世界出生点/, /个人重生点/] },
     { id: 'end-exit-and-recovery', section: 'death-and-items', facts: [/六千游戏刻/, /实体运算/, /暂停/] },
   ];
   chapters.forEach(({ id, section, facts }) => {

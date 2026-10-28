@@ -1,6 +1,6 @@
 ---
 id: "ore-distribution-and-search"
-title: "寻找铁、煤、钻石与金矿"
+title: "铁、煤、钻石与金矿的生成分布"
 kind: "mechanic"
 edition: "java"
 versions: ["1.20.1"]
@@ -10,14 +10,14 @@ versionNote: "采用 1.18 后、Java 1.20.1 的原版矿层规则；不套用 1.
 reviewedAt: "2026-10-28"
 ---
 
-## iron-and-coal | 找铁矿、找煤矿的高度与地形
+## iron-and-coal | 铁矿和煤矿在哪里生成
 
-铁有多个生成批次：地下批次在 Y=16 附近较集中，另有小矿团分布于 Y=-64 至 72；山地高处也有一批，在 Y=232 附近达到其高度分布峰值。高处没有岩石时不会凭空生成矿，露头和实际地形同样重要。煤主要生成于 Y=0 以上，其中一批偏向 Y=96，另一批在更高处；找深层钻石不保证同时能补到煤。煤不足时也可查[木炭与燃料](knowledge:crafting-and-smelting#fuel-and-output)。高度分布不是必须挖到某层的指令。[铁矿石](https://minecraft.wiki/w/Iron_ore)、[煤矿石](https://minecraft.wiki/w/Coal_ore)。
+铁矿有多个生成批次：地下批次在 Y=16 附近较集中，另有小矿团分布于 Y=-64 至 72；山地高处也有一批，在 Y=232 附近达到其高度分布峰值。矿石只能替换符合条件的岩石，高处的空气不会因处在该高度而生成矿石。煤矿主要生成于 Y=0 以上，其中一批偏向 Y=96，另一批在更高处；煤和深层钻石的高度分布不同。高度分布描述生成概率，不保证某个区块或坐标存在矿石。[铁矿石](https://minecraft.wiki/w/Iron_ore)、[煤矿石](https://minecraft.wiki/w/Coal_ore)。
 
-## diamond-and-gold | 钻石矿石、金矿石与投入选择
+## diamond-and-gold | 钻石矿石与金矿石的生成范围
 
-Java 1.20.1 钻石生成于 Y=16 以下，整体越低越多，但基岩、深板岩挖掘成本、熔岩与通路会影响实际效率；不要套用旧版“钻石都在 Y=12”或 1.20.2 增加钻石后的密度预期。部分生成尝试会跳过暴露于空气的矿，不能据此断言洞穴一定不如巷道。普通金矿的主要高度分布偏向 Y=-16，恶地另有高处金矿。用钻石采黑曜石与不采钻石而浇筑门是不同的资源方案，见[造门选择](knowledge:obsidian-and-portal-building#harvesting-or-casting)。[钻石矿石及历史](https://minecraft.wiki/w/Diamond_ore)、[1.18 矿层说明](https://feedback.minecraft.net/hc/en-us/articles/4415128577293-Minecraft-Java-Edition-1-18)。
+Java 1.20.1 钻石生成于 Y=16 以下，整体越低越多；部分生成尝试会跳过暴露于空气的位置。基岩占据的空间、岩石种类与地形也会影响实际可见的矿石分布。1.20.2 增加了深层钻石的生成批次，该变化不属于 1.20.1。普通金矿的主要高度分布偏向 Y=-16，恶地另有高处金矿。[钻石矿石及历史](https://minecraft.wiki/w/Diamond_ore)、[1.18 矿层说明](https://feedback.minecraft.net/hc/en-us/articles/4415128577293-Minecraft-Java-Edition-1-18)。
 
-## search-and-harvest | 发现矿物、采收到材料与维持通路
+## search-and-harvest | 矿石采收等级与冶炼产物
 
-看见矿石后，还要满足[工具采收等级](knowledge:mining-and-drops#tools)：铁矿用石镐或更高，钻石矿和主世界金矿用铁镐或更高，不能因金镐挖得快就误用。粗铁、粗金需要[冶炼](knowledge:crafting-and-smelting#furnaces)才能作为普通铁锭、金锭使用。洞穴可查看露头，人工通道可暴露新岩面；哪种方式合适取决于已知通路、资源、危险和时间。已见矿脉、可达矿脉、方块掉落与材料入包分别确认；高度概率不提供透视，也不替 Agent 选择挖掘路线。[铁矿石](https://minecraft.wiki/w/Iron_ore)、[金矿石](https://minecraft.wiki/w/Gold_Ore)。
+矿石掉落受[工具采收等级](knowledge:mining-and-drops#tools)限制：铁矿用石镐或更高等级的镐采收，钻石矿和主世界金矿需要铁镐或更高等级的镐。金镐的挖掘速度较快，但其采收等级不足以采收这些矿石。通常情况下，铁矿和金矿分别掉落粗铁、粗金；二者经[冶炼](knowledge:crafting-and-smelting#furnaces)分别产生铁锭和金锭。矿石被破坏、产生掉落物与掉落物进入玩家背包是不同的游戏事件。[铁矿石](https://minecraft.wiki/w/Iron_ore)、[金矿石](https://minecraft.wiki/w/Gold_Ore)。
