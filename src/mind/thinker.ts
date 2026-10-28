@@ -266,6 +266,20 @@ export class Thinker {
     let tier = ctx.tier;
     let messages = buildMindMessages(ctx);
     let queries = 0, invalid = 0;
+    let knowledgeBytes = 0;
+    const knowledgeExhausted = JSON.stringify({ error: '本次思考的知识查询预算已用完，请根据已读资料作决定。' });
+    const knowledgeReserve = Buffer.byteLength(knowledgeExhausted, 'utf8');
+    const query = async (kind: string, raw: Record<string, unknown>) => {
+      if (kind !== 'knowledge') return this.query(kind, raw, ctx, signal);
+      const remaining = 10_000 - knowledgeBytes;
+      if (remaining < 512 + knowledgeReserve) {
+        knowledgeBytes += knowledgeReserve;
+        return knowledgeExhausted;
+      }
+      const result = await this.query(kind, raw, ctx, signal, remaining - knowledgeReserve);
+      knowledgeBytes += Buffer.byteLength(result, 'utf8');
+      return result;
+    };
     let repaired = false;
     let firstDraft: Omit<MindDecision, 'source' | 'tier' | 'requestedAt'> | null = null;
     for (let attempt = 0; attempt < 8; attempt++) {
@@ -298,7 +312,7 @@ export class Thinker {
       if (QUERY_KINDS.includes(ask)) {
         if (queries >= 3) { messages.push({ role: 'assistant', content: c.text.slice(0, 400) }, { role: 'user', content: '这次的查询次数用完了，请根据已知信息给出决定。' }); continue; }
         queries++;
-        const result = await this.query(ask, raw, ctx, signal);
+        const result = await query(ask, raw);
         messages.push({ role: 'assistant', content: c.text.slice(0, 600) }, { role: 'user', content: `查询结果（只读，不是现场事实）：${result}\n剩余查询 ${3 - queries} 次。请继续：可以再查，或给出决定。` });
         continue;
       }
@@ -320,7 +334,7 @@ export class Thinker {
           messages = buildMindMessages({ ...ctx, tier });
         }
         queries++;
-        const result = await this.query(embedded.kind, embedded.args, ctx, signal);
+        const result = await query(embedded.kind, embedded.args);
         messages.push({ role: 'assistant', content: c.text.slice(0, 1500) },
           { role: 'user', content: `${embedded.kind} 是思考时的查询，不是身体的动作，不能写进 steps。已经替你查了：${result}\n请据此给出决定（steps 里只写动作）。` });
         continue;
@@ -372,11 +386,11 @@ export class Thinker {
     return null;
   }
 
-  private async query(kind: string, raw: Record<string, any>, ctx: MindContext, signal?: AbortSignal): Promise<string> {
+  private async query(kind: string, raw: Record<string, any>, ctx: MindContext, signal?: AbortSignal, maxBytes?: number): Promise<string> {
     try {
       if (kind === 'knowledge') {
         if (!this.knowledge) return '知识库未启用，无法查询游戏资料';
-        const result = this.knowledge.query(raw);
+        const result = this.knowledge.query(raw, maxBytes);
         this.bus.publish('knowledge_query', 'P3', `查知识：${String(raw.id ?? raw.query ?? '目录').slice(0, 80)}`);
         return JSON.stringify(result);
       }

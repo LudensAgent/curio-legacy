@@ -139,7 +139,7 @@ const QUERIES = (skills: string[]) => `【先查再做】需要时先输出一�
 - {"kind":"skill","name":"技能名"} 翻开技能书看做法｜{"kind":"design","brief":"用途、多大、风格","where":"here|base|x,y,z"} 请建筑师画图纸：房子、前哨、仓库、畜栏、塔等要长期用的建筑（where：脚下、家旁或坐标）
 - {"kind":"recipes","item":"物品名","count":1} 看配方和缺口（"uses":"物品" 反查用途）｜{"kind":"moves","names":["动作名"]} 看动作参数
 - {"kind":"recall","query":"关键词"} 回想以前的经历、日记、教训和技能｜{"kind":"mechanics","query":"…"} 查底层操作接口
-- {"kind":"knowledge","query":"想了解的问题"} 搜索游戏资料和相关段落；{"kind":"knowledge","id":"文档id","section":"章节id"} 读文档（section 可省略）；{"kind":"knowledge"} 浏览目录。knowledge 是带出处和版本的文献参考，moves 查实际动作接口，recipes 查配方与缺口，recall 查自己的经历。读到的做法由你判断是否采用，不代表现场事实或已经学会的技能。`;
+- {"kind":"knowledge","query":"问题"} 搜索 Wiki 候选；再用 {"kind":"knowledge","id":"文档id"} 看章节目录，加 "section":"章节id" 读正文，续页按 nextCursor 传 cursor。空查询浏览目录，目录续页传 offset。摘录不等于读完或学会；资料不代表现场事实，做法自行判断。`;
 /** 技能书目录放在系统提示词最后：它变得最勤（写、改、收起），放在前面会让后面不变的大段内容每次都缓存不中 */
 const SKILL_INDEX = (skills: string[]) => skills.length ? `\n\n【技能书】\n${skills.map((x) => `- ${x}`).join('\n')}` : '';
 
@@ -223,7 +223,7 @@ ${READING}
 - 先看【此刻】：没什么要紧的、手上的活还顺，就 continue（独白可以很短）。
 - 手上没活：直接 new 一段，接着【最近】的结果和议程往下玩；活快干完时顺便写 next。小改用 adjust，插一件事用 detour，彻底换事用 switch/new。
 - 在地表就走路，在坑里或地下（看【身体】where）才挖；身边一格的事对照【身边】local 用 dig_at / step / place_at 写确切坐标。
-- 要翻技能书、请建筑师（design）、查配方、查游戏资料或想得更深：直接输出查询，如 {"kind":"knowledge","query":"想了解的问题"}、{"kind":"design","brief":"…"}、{"kind":"skill","name":"…"}、{"kind":"deliberate","reason":"…"}（转成认真想、给你完整信息）。knowledge 是文献参考，moves 查动作接口，recipes 查配方，recall 查自己的经历；资料不代表现场事实或已经学会的技能。
+- 要翻技能书、请建筑师、查配方/游戏资料或想得更深：直接输出查询，如 {"kind":"knowledge","query":"问题"}、{"kind":"design","brief":"…"}、{"kind":"skill","name":"…"}、{"kind":"deliberate","reason":"…"}（转成认真想）。knowledge 先搜候选再读章节，摘录不等于读完或学会；资料不代表现场事实。
 ${skills.length ? `技能书：${skills.map((x) => x.split('：')[0]).join('、')}（带步骤的可以 use_skill 调用）。` : ''}盖新房子先 design 拿图纸，再 build {"draft":"图纸ID"}；不要自己画图纸。
 - 有【专注】的主目标就接着推进清单；天黑、饿了、缺料用 detour 插一段，做完会回来；瞥一眼不能 switch。做完清单一项写 "plan":{"done":[序号]}。
 - 刚从卡住里找到办法、想把它变成身体的习惯：转成认真想（{"kind":"deliberate","reason":"写技能"}）。

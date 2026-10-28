@@ -20,7 +20,11 @@ import { FakeAdapter } from './fake-adapter.ts';
 const decision = { decision: 'new', monologue: '先看看眼前的情况，再决定怎么用这些资料。',
   activity: { what: '观察身边', steps: [{ skill: 'look_around', args: { seconds: 1 } }] } };
 
-function fixture(t: TestContext, replies: object[], tier: MindContext['tier'] = 'deliberate') {
+function fixture(t: TestContext, replies: object[], tier: MindContext['tier'] = 'deliberate', body = `## conditions | 条件
+测试资料：关于床的使用条件，是否采用由 Agent 自己决定。
+
+## effects | 效果
+测试资料：查询不代表已经使用床或学会了操作。`) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-knowledge-protocol-'));
   fs.writeFileSync(path.join(directory, 'fixture-topic.md'), `---
 id: "fixture-topic"
@@ -32,11 +36,7 @@ aliases: ["bed", "床"]
 sources: [{"url":"https://minecraft.wiki/w/Bed","title":"Bed"}]
 ---
 
-## conditions | 条件
-测试资料：关于床的使用条件，是否采用由 Agent 自己决定。
-
-## effects | 效果
-测试资料：查询不代表已经使用床或学会了操作。
+${body}
 `);
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   const self = new SelfModel(null), perception = new Perception(adapter, memory, bus, new Vision(adapter));
@@ -48,7 +48,8 @@ sources: [{"url":"https://minecraft.wiki/w/Bed","title":"Bed"}]
     assert.ok(reply, 'unexpected additional model call');
     return { text: JSON.stringify(reply), latencyMs: 1 };
   } }, adapter, memory, bus, null);
-  const thinker = new Thinker(planner, adapter, memory, bus, null, new KnowledgeBase('1.20.1', directory));
+  const knowledge = new KnowledgeBase('1.20.1', directory);
+  const thinker = new Thinker(planner, adapter, memory, bus, null, knowledge);
   const ctx: MindContext = { tier, reason: '查看知识资料', percept: perception.update(), state: adapter.state(), self, memory,
     activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '你是 Curio。' };
   t.after(() => {
@@ -56,7 +57,7 @@ sources: [{"url":"https://minecraft.wiki/w/Bed","title":"Bed"}]
     assert.equal(path.dirname(directory), path.resolve(os.tmpdir()));
     fs.rmSync(directory, { recursive: true, force: true });
   });
-  return { adapter, memory, bus, self, planner, calls, think: () => thinker.think(ctx, new AbortController().signal) };
+  return { adapter, memory, bus, self, planner, knowledge, calls, think: () => thinker.think(ctx, new AbortController().signal) };
 }
 
 test('knowledge search and section reading inform a decision without executing actions or changing personal memory and skills', async (t) => {
@@ -109,4 +110,26 @@ test('knowledge and existing queries share the three-query budget', async (t) =>
   assert.match(w.calls[2].at(-1)!.content, /use_item/);
   assert.match(w.calls[4].at(-1)!.content, /查询次数用完了/);
   assert.equal(w.bus.recent().filter((e) => e.type === 'knowledge_query').length, 2);
+});
+
+test('knowledge reading obeys one cumulative byte budget, reports pagination or exhaustion and resets for the next thought', async (t) => {
+  const read = { kind: 'knowledge', id: 'fixture-topic', section: 'conditions' };
+  const w = fixture(t, [read, read, read, decision, read, decision], 'deliberate', `## conditions | 条件\n${'知识预算测试的完整中文正文。'.repeat(1000)}`);
+  const queried = t.mock.method(w.knowledge, 'query');
+  await w.think();
+  const prefix = '查询结果（只读，不是现场事实）：';
+  const results = w.calls[3].filter((message) => message.role === 'user' && message.content.startsWith(prefix))
+    .map(({ content }) => content.slice(prefix.length, content.lastIndexOf('\n剩余查询')));
+  assert.equal(results.length, 3);
+  assert.ok(results.reduce((bytes, result) => bytes + Buffer.byteLength(result, 'utf8'), 0) <= 10000);
+  assert.ok(results.every((result) => /"action":"read"|知识查询预算已用完|BUDGET_TOO_SMALL/.test(result)));
+  const backendCalls = queried.mock.calls.length;
+  if (/知识查询预算已用完/.test(results[2])) assert.ok(backendCalls < 3, 'no backend access after knowledge bytes are exhausted');
+  else {
+    assert.equal(backendCalls, 3);
+    assert.match(results[2], /"nextCursor":|BUDGET_TOO_SMALL/);
+  }
+  await w.think();
+  assert.equal(queried.mock.calls.length, backendCalls + 1, 'a new thought gets a fresh knowledge budget');
+  assert.match(w.calls[5].at(-1)!.content, /"action":"read"/);
 });
