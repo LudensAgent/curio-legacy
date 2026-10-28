@@ -5,7 +5,7 @@ import { throwIfAborted } from '../util.ts';
 import { dirName } from '../perception/perception.ts';
 import { SKILLS } from './index.ts';
 import { constrainRecoveryAction, recoveryContext, type RecoveryContext } from './recovery.ts';
-import { fail, isAbort, obj, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
+import { fail, isAbort, obj, ok, runSkill, validateSkill, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 
 /** use_skill 只需要按名字取出步骤；注册表由 main 设置（行为引擎） */
 export interface BehaviorLookup {
@@ -40,7 +40,7 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
     }
     let extra = a.args && typeof a.args === 'object' && !Array.isArray(a.args) ? a.args as Record<string, unknown> : undefined;
     // 参数直接摊在外面（{"name":"x","dir":"E","count":20}）也认：两种写法它都会写，意思一样，没必要每次退回去让它改
-    const flat = Object.fromEntries(Object.entries(a).filter(([k]) => !['name', 'skill', 'args', 'failure', 'trial'].includes(k)));
+    const flat = Object.fromEntries(Object.entries(a).filter(([k]) => !['name', 'skill', 'args', 'failure', 'trial', 'make'].includes(k)));
     if (Object.keys(flat).length) extra = { ...flat, ...(extra ?? {}) };
     if (extra && JSON.stringify(extra).length > 2000) return { ok: false, error: 'args 太大了' };
     const failure = a.failure === undefined ? undefined : recoveryContext(a.failure);
@@ -118,15 +118,15 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
         ctx.progress(i / b.steps.length, `${b.name}：第 ${i + 1} 步 ${st.skill}`);
         if (st.if && !evalPredicate(st.if, senseNow(ctx.adapter, ctx.senses, 'use_skill'))) { done.push(`${st.skill} 跳过（条件不成立）`); continue; }
         const skill = SKILLS[st.skill];
-        const v = skill?.validate(st.args ?? {}, ctx.adapter);
+        const v = skill ? validateSkill(skill, st.args ?? {}, ctx.adapter) : null;
         if (!skill || !v?.ok) {
           if (st.optional) { done.push(`${st.skill} 跳过（${v && !v.ok ? v.error : '没有这个动作'}）`); continue; }
           return fail('BAD_ARGS', `技能「${b.name}」第 ${i + 1} 步 ${st.skill} 写错了：${v && !v.ok ? v.error : '没有这个动作'}`, { done });
         }
         let r: SkillResult;
         try {
-          r = await skill.run({ ...ctx, senses: visibleActionSenses(ctx.senses), deadline: Math.min(ctx.deadline, Date.now() + skill.timeoutMs),
-            progress: (p, note) => ctx.progress((i + Math.max(0, Math.min(1, p))) / b.steps.length, note) }, constrainRecoveryAction(ctx, st.skill, v.args));
+          r = await runSkill({ ...ctx, senses: visibleActionSenses(ctx.senses), deadline: Math.min(ctx.deadline, Date.now() + skill.timeoutMs),
+            progress: (p, note) => ctx.progress((i + Math.max(0, Math.min(1, p))) / b.steps.length, note) }, skill, constrainRecoveryAction(ctx, st.skill, v.args));
         } catch (e) {
           if (isAbort(e)) throw e;
           r = fail('ERROR', String((e as Error)?.message ?? e));

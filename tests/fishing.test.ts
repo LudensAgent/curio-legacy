@@ -36,17 +36,21 @@ test('fish：有钓鱼竿 → 走到岸边往水里甩竿，报告钓到的鱼',
   assert.notEqual(a.blockAt({ x: Math.floor(a.pos.x), y: 63, z: Math.floor(a.pos.z) }), 'water', `站在岸上，pos=${JSON.stringify(a.pos)}`);
 });
 
-test('fish：没竿时有木棍和线就先做一根；材料不够给出缺什么', async () => {
+test('fish：默认不造竿，显式 make:true 才准备；材料不够给出缺口', async () => {
   const a = new FakeAdapter();
   pond(a);
   const run = runner(a);
-  let r = await run('fish', { count: 1 });
+  let r = await run('fish', { count: 1, make: true });
   assert.equal(r.failureCode, 'MISSING_MATERIALS');
   assert.match(r.summary, /3 根木棍 \+ 2 根线/);
   assert.match(r.summary, /蜘蛛/);
   a.inv.set('stick', 3);
   a.inv.set('string', 2);
   r = await run('fish', { count: 1 });
+  assert.equal(r.failureCode, 'MISSING_MATERIALS');
+  assert.match(r.summary, /make:true/);
+  assert.ok(!a.actions.includes('craft:fishing_rod'));
+  r = await run('fish', { count: 1, make: true });
   assert.equal(r.status, 'succeeded', r.summary);
   assert.ok(a.actions.includes('craft:fishing_rod'));
   assert.equal(r.data?.craftedRod, true);

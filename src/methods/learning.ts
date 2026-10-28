@@ -227,7 +227,9 @@ export class MethodLibrary {
         this.gaps = Array.isArray(saved.gaps) ? saved.gaps.slice(-100) : [];
         for (const raw of (Array.isArray(saved.methods) ? saved.methods : []).slice(-100)) {
           const validated = this.prepare(raw);
-          const trials = Array.isArray(raw.trials) ? raw.trials.slice(-20) : [];
+          // Earlier experience mining attached old inventory gains to a different
+          // extracted program. Those synthetic trials never executed this version.
+          const trials = Array.isArray(raw.trials) ? raw.trials.slice(-20).filter((trial: MethodTrial) => trial.sessionId !== 'observed' && trial.observationId !== 'observed') : [];
           const status = raw.status === 'retired' ? 'retired' : raw.status === 'verified' && this.hasProof(trials) ? 'verified' : 'candidate';
           const definition: MethodDefinition = { ...validated, version: raw.version, createdAt: raw.createdAt, trials, status, scope: raw.scope ?? {} };
           this.definitions.push(definition);
@@ -399,28 +401,6 @@ export class MethodLibrary {
       data: { ...result.data, methodName: skill.name, version: definition.version, methodStatus: definition.status,
         expected: result.data?.expected ?? definition.postcondition, trialStatus: latest?.status },
     };
-  }
-
-  /**
-   * 从真实经历里采纳一个做法：同一套步骤在正常游玩中、两个不同的地方，真的让背包多出了目标物品。
-   * 这些经历本身就是事实验收（来源仍是 adapter.state 的背包实测），所以直接记为通过的试验并晋升，
-   * 不需要模型主动提议、也不需要再专门去试。
-   */
-  adoptObserved(raw: unknown, evidence: { contextKey: string; worldId: string; dimension: string; ts: number; before: unknown; after: unknown }[]):
-    { ok: true; name: string; version: number; status: 'candidate' | 'verified'; existing?: boolean } | { ok: false; error: string } {
-    const r = this.propose(raw);
-    if (!r.ok) return r;
-    const def = this.definitions.find((d) => d.version === r.version && (r.name === `method:${d.name}` || r.name === `trial:${d.name}:v${d.version}`));
-    if (!def || def.status === 'verified') return r;
-    for (const e of evidence) {
-      if (!this.trialAllowed(e.worldId) || def.trials.some((t) => t.contextKey === e.contextKey && t.status === 'verified')) continue;
-      def.trials.push({ id: shortId('trial_'), ts: e.ts, worldId: e.worldId, dimension: e.dimension, sessionId: 'observed', observationId: 'observed',
-        contextKey: e.contextKey, parameters: {}, before: e.before, after: e.after, status: 'verified',
-        reason: '正常游玩中用这套做法真的做成过（背包实测增加）', source: 'adapter.state' });
-    }
-    if (def.trials.length > 20) def.trials.splice(0, def.trials.length - 20);
-    this.save();
-    return this.promote(def.name, def.version) ? { ok: true, name: `method:${def.name}`, version: def.version, status: 'verified' } : r;
   }
 
   /** 已验证方法的当前版本（同名取最新），给“更快的做法替换旧做法”用 */

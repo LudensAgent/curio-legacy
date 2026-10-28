@@ -3,7 +3,7 @@ import type { WorldMemory } from '../memory/store.ts';
 import { evaluateCondition, observeCondition, validateCondition } from '../projects/conditions.ts';
 import { SKILLS, LLM_HIDDEN } from '../skills/index.ts';
 import type { SkillCtx, SkillResult } from '../skills/types.ts';
-import { fail, ok } from '../skills/types.ts';
+import { fail, ok, runSkill, validateSkill } from '../skills/types.ts';
 import { throwIfAborted } from '../util.ts';
 
 export interface Parameter {
@@ -73,7 +73,7 @@ export function validateProgram(raw: unknown, parameters: Record<string, string 
     if (node.type === 'call') {
       const skill = SKILLS[node.skill];
       if (!skill || LLM_HIDDEN.has(node.skill) || node.skill.includes(':')) throw new Error(`不可组合的底层技能: ${String(node.skill)}`);
-      const validation = skill.validate(substitute(node.args ?? {}, parameters), adapter);
+      const validation = validateSkill(skill, substitute(node.args ?? {}, parameters), adapter);
       if (!validation.ok) throw new Error(`${node.skill}: ${validation.error}`);
       return { type: 'call', skill: node.skill, args: structuredClone(node.args ?? {}) };
     }
@@ -109,9 +109,9 @@ export async function executeProgram(program: Program, parameters: Record<string
       if (--remainingCalls < 0) return fail('BAD_ARGS', '方法执行超过 64 个底层动作');
       const skill = SKILLS[node.skill];
       if (!skill || LLM_HIDDEN.has(node.skill) || node.skill.includes(':')) return fail('BAD_ARGS', '底层技能已不可用');
-      const validation = skill.validate(substitute(node.args ?? {}, parameters), ctx.adapter);
+      const validation = validateSkill(skill, substitute(node.args ?? {}, parameters), ctx.adapter);
       if (!validation.ok) return fail('BAD_ARGS', validation.error);
-      const result = await skill.run({ ...ctx, deadline: Math.min(ctx.deadline, Date.now() + skill.timeoutMs) }, validation.args);
+      const result = await runSkill({ ...ctx, deadline: Math.min(ctx.deadline, Date.now() + skill.timeoutMs) }, skill, validation.args);
       throwIfAborted(ctx.signal);
       return result;
     }

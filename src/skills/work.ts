@@ -92,7 +92,7 @@ export async function ensureToolFor(ctx: SkillCtx, pos: { x: number; y: number; 
   const tier = pickaxeTierFor(block);
   const inv = adapter.state().inventory;
   const woodShort = woodShortfall('wooden_pickaxe', 1, inv, !!findStation(ctx, ['crafting_table'], 48));
-  if (tier === 'wooden' && !woodShort) {
+  if (ctx.make === true && tier === 'wooden' && !woodShort) {
     ctx.progress(0, `挖 ${block} 要镐子：先做一把木镐`);
     const r = await craft.run(ctx, { item: 'wooden_pickaxe', count: 1 });
     if (r.status === 'succeeded' && adapter.canHarvest(pos)) return { ok: true, crafted: 'wooden_pickaxe' };
@@ -101,7 +101,7 @@ export async function ensureToolFor(ctx: SkillCtx, pos: { x: number; y: number; 
   if (!tier) return { ok: false, message: `手上的工具挖不了 ${block}` };
   const hasWood = inv.some((i) => /_(log|planks|stem)$/.test(i.name) && i.count > 0);
   const hasCobble = inv.some((i) => /^(cobblestone|cobbled_deepslate|blackstone)$/.test(i.name) && i.count >= 3);
-  const hint = tier === 'wooden' ? (hasWood ? `背包有木料但不够（${woodShort}）` : '先砍点木头做 wooden_pickaxe')
+  const hint = tier === 'wooden' ? (!woodShort ? '背包有足够木料，可先显式 craft wooden_pickaxe' : hasWood ? `背包有木料但不够（${woodShort}）` : '先砍点木头做 wooden_pickaxe')
     : tier === 'stone' ? (hasCobble ? '背包有圆石，可以先 craft stone_pickaxe' : '先挖 3 块圆石做 stone_pickaxe')
     : `先做 ${tier}_pickaxe`;
   return { ok: false, message: `手上没有能挖 ${block} 的镐子（需要 ${tier}_pickaxe 以上）；${hint}` };
@@ -481,8 +481,8 @@ export function gearAlreadyHeld(item: string, inv: InvItem[], worn: { name: stri
 
 export const craft: Skill<{ item: string; count: number; extra?: boolean }> = {
   name: 'craft',
-  description: '合成物品。会自动补做两层以内的前置材料（原木→木板→木棍）、自己走到附近的工作台用（没有就现做一个放下、用完收回），所以直接写最终物品即可，不用先做/放工作台。count 写这次一共要几个（产物个数），会按格子放料一批批做出来，不用拆成多次。常用：wooden_pickaxe、stone_pickaxe、furnace、torch',
-  argsDoc: '{"item": "<物品名>", "count"?: 1-64, "extra"?: true（附近已有工作台/熔炉、已有床、已有同类还经用的工具武器护甲时还要再做一个）}',
+  description: '合成指定物品，默认只使用现有材料和已放好的工作台；缺少前置材料或工作台就报告缺口。make:true 显式允许补做两层以内的材料并制造、放置临时工作台，用完收回。count 是本次产物个数。',
+  argsDoc: '{"item": "<物品名>", "count"?: 1-64, "make"?: true（允许补材料和准备工作台）, "extra"?: true（已有同类设施、床或经用装备仍要再做）}',
   timeoutMs: 60000,
   movement: false,
   validate(raw, adapter) {
@@ -504,9 +504,9 @@ export const craft: Skill<{ item: string; count: number; extra?: boolean }> = {
     // 工作台、熔炉也一样：附近就有（看得见或记得的），或者背包里揣着一个，多半是忘了。说清楚在哪；真要再做一个写 extra:true
     if ((args.item === 'crafting_table' || args.item === 'furnace') && !args.extra) {
       const zh = args.item === 'crafting_table' ? '工作台' : '熔炉';
-      const use = args.item === 'crafting_table' ? '要做需要工作台的东西，直接 craft 那样东西，会自己走过去用' : '要烧东西直接 smelt，会自己走过去用';
+      const use = args.item === 'crafting_table' ? '可先放好工作台，再 craft 要做的东西' : '可先放好熔炉，再 smelt';
       const held = ctx.adapter.state().inventory.find((i) => i.name === args.item && i.count > 0);
-      if (held) return fail('BAD_ARGS', `背包里已经有 ${held.count} 个${zh}了，不用再做：${use}（附近没有时会把背包里这个放下）；真要再做一个写 {"item":"${args.item}","extra":true}`);
+      if (held) return fail('BAD_ARGS', `背包里已经有 ${held.count} 个${zh}了，不用再做：${use}；真要再做一个写 {"item":"${args.item}","extra":true}`);
       const near = findStation(ctx, [args.item], 24);
       if (near) return fail('BAD_ARGS', `${near.dist} 格外 (${near.pos.x},${near.pos.y},${near.pos.z}) 就有${zh}${near.from === 'memory' ? '（记得的）' : ''}，不用再做：${use}；真要再做一个写 {"item":"${args.item}","extra":true}`);
     }
@@ -532,7 +532,7 @@ export const craft: Skill<{ item: string; count: number; extra?: boolean }> = {
     }
     const before = countIn(ctx.adapter.state().inventory, args.item);
     try {
-      // 先用看得见或记得的工作台（自己放过的也算），附近没有才让底层现做一个
+      // 只复用已知工作台；自动准备必须由当前动作的 make:true 授权。
       const table = findStation(ctx, ['crafting_table'], 48);
       const conflict = craftReservationConflict(ctx.memory, ctx.adapter.state(), args.item, args.count, config.mc.version, !!table);
       if (conflict) return fail('MISSING_MATERIALS', `预留保护：${conflict.reason}`, { conflict });

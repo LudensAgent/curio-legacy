@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { facingOfYaw, localMap, toWorld } from '../src/perception/local.ts';
 import { digAt, placeAt, stepTo } from '../src/skills/primitives.ts';
+import { dig } from '../src/skills/body.ts';
+import { makeBridge } from '../src/codeskills/bridge.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
 
@@ -181,7 +183,7 @@ test('dig_at 自己站的两格不算写错，说明一下就好', async (t) => 
   assert.match(r.summary, /\[0,2,0\]/);
 });
 
-test('dig_at 旁边有水：说出是哪几格、怎么堵；写 wet:true 照挖；岩浆照样不挖', async (t) => {
+test('dig_at 液体邻格默认不挖；wet:true 与 lava:true 分别授权进水和进岩浆', async (t) => {
   const w = pocket();
   // 前方那格（0,60,-1）是石头，它再往前一格（0,60,-2）是水
   w.blocks.push({ name: 'water', pos: { x: 0, y: 60, z: -2 } });
@@ -197,4 +199,42 @@ test('dig_at 旁边有水：说出是哪几格、怎么堵；写 wet:true 照挖
   r = await digAt.run(ctx, { at: [1, 1, 0], facing: 'N', wet: true });
   assert.equal(r.status, 'failed');
   assert.match(r.summary, /岩浆/);
+  r = await digAt.run(ctx, { at: [1, 1, 0], facing: 'N', wet: true, lava: true });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.ok(w.actions.includes('dig:stone'));
+});
+
+test('dig_at with a nearby table and materials does not create a tool by default', async (t) => {
+  const adapter = new FakeAdapter();
+  adapter.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 0 } }, { name: 'crafting_table', pos: { x: 1, y: 64, z: 1 } });
+  adapter.inv.set('oak_planks', 8); adapter.inv.set('stick', 4);
+  adapter.canHarvest = () => !!adapter.inv.get('wooden_pickaxe');
+  const ctx = makeCtx(adapter);
+  t.after(() => ctx.memory.close());
+  const result = await digAt.run(ctx, { at: [1, 0, 0], facing: 'E' });
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.deepEqual(adapter.actions, ['dig:stone']);
+  assert.equal(adapter.inv.get('wooden_pickaxe'), undefined);
+});
+
+test('explicit lava permission reaches dig validation and the code skill bridge', async (t) => {
+  for (const mode of ['dig', 'bridge']) {
+    const adapter = new FakeAdapter();
+    adapter.blocks.push({ name: 'stone', pos: { x: 0, y: 66, z: 0 } }, { name: 'lava', pos: { x: 1, y: 66, z: 0 } });
+    const ctx = makeCtx(adapter);
+    t.after(() => ctx.memory.close());
+    if (mode === 'dig') {
+      const blocked = dig.validate({ dir: 'up', blocks: 1 }, adapter);
+      assert.ok(blocked.ok);
+      assert.equal((await dig.run(ctx, blocked.args)).status, 'failed');
+      const allowed = dig.validate({ dir: 'up', blocks: 1, lava: true }, adapter);
+      assert.ok(allowed.ok);
+      assert.equal((await dig.run(ctx, allowed.args)).status, 'succeeded');
+    } else {
+      const bridge = makeBridge(ctx);
+      assert.equal((await bridge('digAt', [0, 66, 0]) as { ok: boolean }).ok, false);
+      assert.equal((await bridge('digAt', [0, 66, 0, { lava: true }]) as { ok: boolean }).ok, true);
+    }
+    assert.deepEqual(adapter.actions, ['dig:stone']);
+  }
 });

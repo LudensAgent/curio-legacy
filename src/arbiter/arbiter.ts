@@ -3,7 +3,7 @@ import type { GameAdapter } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { SKILLS } from '../skills/index.ts';
-import type { FailureCode, Senses, SkillResult } from '../skills/types.ts';
+import { runSkill, validateSkill, type FailureCode, type Senses, type SkillResult } from '../skills/types.ts';
 import { AbortedError, shortId } from '../util.ts';
 import { availableInventoryFor, craftReservationConflict, reservationsFor } from '../projects/reservations.ts';
 import { config } from '../config.ts';
@@ -57,7 +57,7 @@ interface Running extends TaskInfo {
 /** 会“透视”的原始查询：技能必须改用 ctx.senses（看见/听见/记得的东西）。 */
 // lightAt 不在其中：身边的明暗是看得出来的
 const XRAY_METHODS = new Set(['findBlocks', 'nearbyEntities', 'blockOptics']);
-const ACTION_METHODS = new Set(['moveTo', 'dig', 'placeBlockAt', 'placeBlockStateAt', 'equipItem', 'tossItem', 'arrangeHotbar', 'useGui', 'tradeWith', 'useBlockAt', 'useItem', 'rangedAttack', 'enterPortalAt', 'collectNearbyDrops', 'craft', 'sleepInBed', 'smelt', 'useChest', 'till', 'plant', 'eat', 'equipWeapon', 'attack', 'look', 'jump', 'swimTo', 'chat', 'stopAll', 'fish', 'useItemOn', 'interactEntity', 'ride', 'dismount', 'emptyFurnace']);
+const ACTION_METHODS = new Set(['moveTo', 'dig', 'placeBlockAt', 'placeBlockStateAt', 'equipItem', 'tossItem', 'arrangeHotbar', 'useGui', 'tradeWith', 'useBlockAt', 'useItem', 'rangedAttack', 'enterPortalAt', 'collectNearbyDrops', 'craft', 'sleepInBed', 'smelt', 'useChest', 'till', 'plant', 'eat', 'equipWeapon', 'attack', 'look', 'jump', 'swimTo', 'diveTo', 'pillarUp', 'drive', 'raiseShield', 'startDraw', 'releaseDraw', 'signText', 'editBook', 'chat', 'stopAll', 'fish', 'useItemOn', 'interactEntity', 'ride', 'dismount', 'emptyFurnace']);
 
 /**
  * 动作仲裁器：任意时刻只有一个任务拥有角色控制权。
@@ -98,10 +98,10 @@ export class Arbiter extends EventEmitter {
   validate(step: Step): { ok: true; args: unknown } | { ok: false; error: string } {
     const skill = SKILLS[step.skill];
     if (!skill) return { ok: false, error: `未知技能：${step.skill}` };
-    return skill.validate(step.args ?? {}, this.adapter);
+    return validateSkill(skill, step.args ?? {}, this.adapter);
   }
 
-  private guard(signal: AbortSignal, opts: { noMake?: boolean; skill?: string } = {}): GameAdapter {
+  private guard(signal: AbortSignal): GameAdapter {
     const target = this.adapter as any;
     const origin = this.adapter.state();
     return new Proxy(target, {
@@ -121,8 +121,6 @@ export class Arbiter extends EventEmitter {
               this.bus.publish('blocked_action', 'P1', `已取消任务试图调用 ${String(prop)}，已拦截`);
               throw new AbortedError('task cancelled');
             }
-            // 这一步写了 "make":false：身体不顺手做缺的工具、熔炉、船、火把（craft 自己要做的那样东西不算）
-            if (opts.noMake && prop === 'craft' && opts.skill !== 'craft') throw new Error(`NO_MAKE: 这一步写了 "make":false，不顺手做 ${String(args[0])}；缺什么就先自己决定要不要做`);
             if (this.current?.source !== 'reflex' && reservationsFor(this.memory).list(state.worldId).length) {
               const available = new Map(availableInventoryFor(this.memory, state).map((i) => [i.name, i.count]));
               const requireAvailable = (name: string, count: number) => {
@@ -160,7 +158,7 @@ export class Arbiter extends EventEmitter {
             }
             // These older primitives did not expose a signal. Bind task ownership
             // here so their internal post-await checks also observe cancellation.
-              const signalIndex: Record<string, number> = { dig: 1, placeBlockAt: 2, placeBlockStateAt: 3, equipItem: 2, useBlockAt: 2, useItem: 1, rangedAttack: 1, enterPortalAt: 1, collectNearbyDrops: 0, craft: 2, sleepInBed: 0, smelt: 3, useChest: 3, till: 1, plant: 2, eat: 0, equipWeapon: 0, attack: 1, look: 2, jump: 1, swimTo: 1 };
+            const signalIndex: Record<string, number> = { dig: 1, placeBlockAt: 2, placeBlockStateAt: 3, equipItem: 2, tossItem: 2, arrangeHotbar: 2, useGui: 2, tradeWith: 3, useBlockAt: 2, useItem: 1, rangedAttack: 1, enterPortalAt: 1, collectNearbyDrops: 0, craft: 2, sleepInBed: 0, smelt: 3, useChest: 3, till: 1, plant: 2, eat: 0, equipWeapon: 0, attack: 1, look: 2, jump: 1, swimTo: 1, diveTo: 1, pillarUp: 1, drive: 2, raiseShield: 1, startDraw: 1, releaseDraw: 0, signText: 1, editBook: 2, fish: 0, useItemOn: 2, interactEntity: 2, ride: 1, dismount: 0, emptyFurnace: 1 };
             if (prop === 'moveTo') args[1] = { ...(args[1] as object), signal };
             else if (String(prop) in signalIndex) args[signalIndex[String(prop)]] = signal;
             return v.apply(t, args);
@@ -215,7 +213,7 @@ export class Arbiter extends EventEmitter {
     const timeout = setTimeout(() => controller.abort('TIMEOUT'), skill.timeoutMs + 2000);
     const invBefore = inventoryCounts(this.adapter);
     const ctx = {
-      adapter: this.guard(controller.signal, { noMake: (step.args as Record<string, unknown> | undefined)?.make === false, skill: skill.name }),
+      adapter: this.guard(controller.signal),
       senses: this.senses,
       memory: this.memory,
       bus: this.bus,
@@ -229,8 +227,7 @@ export class Arbiter extends EventEmitter {
       },
     };
 
-    skill
-      .run(ctx, v.args)
+    runSkill(ctx, skill, v.args as { make?: boolean })
       .catch((e: any): SkillResult => {
         if (e?.name === 'AbortedError') return { status: 'cancelled', summary: String(controller.signal.reason ?? '已取消') };
         return { status: 'failed', failureCode: 'ERROR', summary: String(e?.message ?? e) };

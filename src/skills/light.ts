@@ -70,7 +70,7 @@ function blockLightAround(adapter: Pick<GameAdapter, 'blockAt' | 'lightAt'>, pos
  */
 export const placeTorch: Skill<{ count: number; auto?: boolean }> = {
   name: 'place_torch',
-  description: '在周围暗处补照明，已有足够方块光或有效火把时直接结束；放置后重新看亮度，不密集堆火把。缺火把且确实需要时才合成',
+  description: '在周围暗处放背包火把，已有足够方块光时结束；放置后核对亮度。缺火把默认返回缺口，make:true 才允许合成（消耗煤/木炭和木棍，也可能准备前置材料）',
   argsDoc: '{"count"?: 1-4}',
   timeoutMs: 30000,
   movement: false,
@@ -93,6 +93,7 @@ export const placeTorch: Skill<{ count: number; auto?: boolean }> = {
     if (args.auto && lit.sky === true && s.isDay) return ok('这里是露天，白天本来就亮，不用插火把', { placed: 0 });
     if (args.auto && (lit.level === null || lit.level > 4 || lit.sky !== false)) return ok('周围没有确认需要补光的暗处，先保留火把', { placed: 0 });
     if (torchCount(s.inventory) === 0) {
+      if (ctx.make !== true) return fail('MISSING_MATERIALS', '没有火把，未合成；可自行准备，或显式 make:true 允许消耗煤/木炭和木棍制作');
       const r = await adapter.craft('torch', 4, signal).catch((e) => {
         if (isAbort(e)) throw e;
         return { ok: false, reason: String(e?.message ?? e), crafted: 0 };

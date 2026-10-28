@@ -220,7 +220,7 @@ test('斜着走不切角：一侧有实心方块就不走斜线', () => {
   assert.equal(cornerSafe(mv), mv);
 });
 
-test('专注：瞥一眼不能整个换掉手上的事（改成 detour 做完回来）；主目标有清单，做完一项勾掉', async (t) => {
+test('专注提醒不改写瞥一眼的 switch：做完新活动不会自动恢复旧活动', async (t) => {
   const ran = testSkills(t);
   const prev = SKILLS.t_slow;
   t.after(() => { if (prev) SKILLS.t_slow = prev; else delete SKILLS.t_slow; });
@@ -248,8 +248,10 @@ test('专注：瞥一眼不能整个换掉手上的事（改成 detour 做完回
   await reply({ monologue: '天黑了，先躲起来', decision: 'switch', activity: { what: '挖坑躲一晚', steps: [{ skill: 't_ok' }] } });
   for (let i = 0; i < 4; i++) { mind.tick(); await flush(); }
   assert.ok(ran.includes('t_ok'), '躲了');
-  assert.equal(mind.activity?.what, '砍木头', '做完插曲回到原来的活');
-  assert.match(mind.lastDecision!.notes.join(), /detour/);
+  assert.notEqual(mind.activity?.what, '砍木头', '明确放下的旧活动不自动恢复');
+  assert.equal(mind.suspended.length, 0);
+  assert.equal(mind.lastDecision!.kind, 'switch');
+  assert.match(mind.lastDecision!.notes.join(), /保留你的明确决定/);
   // 勾掉清单
   (mind as any).applyPlan({ plan: { done: [0] }, notes: [] });
   assert.equal(self.plan()?.steps[0].done, true);
@@ -357,7 +359,7 @@ test('写技能：恢复类必须写清是哪个动作失败；技能声明的�
   t.after(() => setBehaviorRegistry(null));
   assert.match((SKILLS.use_skill.validate({ name: 'local-path' }, adapter) as any).error, /args\.target/);
   assert.ok(SKILLS.use_skill.validate({ name: 'local-path', args: { target: '4,64,0' } }, adapter).ok);
-  assert.ok(SKILLS.use_skill.validate({ name: 'local-path', failure: { skill: 'goto' } }, adapter).ok, '恢复时由失败的那一步提供');
+  assert.ok(SKILLS.use_skill.validate({ name: 'local-path', failure: { skill: 'goto', args: { target: '4,64,0' }, target: { x: 4, y: 64, z: 0 } } }, adapter).ok, '恢复时由失败的那一步提供原参数和绝对目标');
 });
 
 test('身边方块图附带算好的落脚点和能放方块的格子', async () => {

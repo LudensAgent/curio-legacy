@@ -1,7 +1,9 @@
-import { EventEmitter } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import { createRequire } from 'node:module';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Entity } from 'prismarine-entity';
+import type { Item } from 'prismarine-item';
+import { simplify } from 'prismarine-nbt';
 import { crystalArrowShot } from '../combat/ballistics.ts';
 import type { Config } from '../config.ts';
 import type { EventBus } from '../events.ts';
@@ -11,6 +13,8 @@ import { cornerSafe } from './corner-safe.ts';
 import { AIR_BLOCKS, attachmentFaces } from '../perception/surroundings.ts';
 import type {
   InvItem,
+  InventorySlot,
+  GuiTarget,
   ActionResult,
   AgentState,
   BlockHit,
@@ -1341,8 +1345,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const e = b.entity;
     let ms = 0;
     try { ms = block.digTime(b.heldItem?.type ?? null, false, !!e?.isInWater, !e?.onGround, b.heldItem?.enchants ?? [], e?.effects ?? {}); } catch { ms = 0; }
-    // 空手也要挖半分钟以上的（黑曜石之类）：真的挖不动
-    if (!harvest && (!Number.isFinite(ms) || ms > HAND_DIG_MAX_MS)) return { ok: false, reason: 'TOOL_MISSING' };
+    // Long legal hand digs exceed this bounded action's execution budget.
+    if (!harvest && (!Number.isFinite(ms) || ms > HAND_DIG_MAX_MS)) return { ok: false, reason: 'HAND_DIG_TIMEOUT:预计挖掘时间超过本次身体动作预算；这不代表游戏禁止空手挖掘' };
     const t0 = Date.now();
     await this.afterAction(() => raceAbort(b.dig(block, true), signal, Math.max(20000, (Number.isFinite(ms) ? ms : 0) + 5000), () => {
       try { b.stopDigging(); } catch { /* ignore */ }
@@ -1558,19 +1562,50 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return matches() ? { ok: true } : { ok: false, reason: 'BLOCK_STATE_MISMATCH' };
   }
 
-  async equipItem(name: string, destination: 'hand' | 'off-hand' | 'head' | 'torso' | 'legs' | 'feet', signal: AbortSignal): Promise<ActionResult> {
+  inventorySlots(): InventorySlot[] {
+    if (!this.ready) return [];
+    const slots: (Item | null)[] = this.bot.inventory.slots ?? [];
+    return slots.flatMap((item, slot) => {
+      if (!item || slot < 5 || slot > 45) return [];
+      const max = this.mcData.itemsByName?.[item.name]?.maxDurability;
+      const enchants = this.itemEnchants(item);
+      return [{ slot, name: item.name, count: item.count,
+        ...(max ? { durability: { left: Math.max(0, max - (item.durabilityUsed ?? 0)), max } } : {}),
+        ...(enchants ? { enchants } : {}),
+        ...(item.customName ? { customName: item.customName } : {}),
+        ...(item.nbt ? { nbt: simplify(item.nbt) } : {}) }];
+    });
+  }
+
+  async equipItem(name: string | null, destination: 'hand' | 'off-hand' | 'head' | 'torso' | 'legs' | 'feet', signal: AbortSignal, opts: { sourceSlot?: number } = {}): Promise<ActionResult> {
     const check = this.actionCheckpoint(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
     await this.interactionReady();
     check();
-    // 同名有好几件（11 把石镐）：拿耐久最高的那件，别总拿到最旧那把
-    const item = this.bestInvItem(name);
+    const b = this.bot;
+    if (name === null) {
+      if (destination === 'hand' && !b.heldItem) return { ok: true };
+      const slot = b.getEquipmentDestSlot?.(destination);
+      if (destination !== 'hand' && !b.inventory.slots?.[slot]) return { ok: true };
+      // Mineflayer's equipEmpty drops the held stack when full. Emptying a hand
+      // never authorizes that additional action.
+      const empty = b.inventory.slots?.slice(9, 45).some((item: Item | null) => !item);
+      if (!empty) return { ok: false, reason: 'INVENTORY_FULL' };
+      await this.afterAction(() => b.unequip(destination), check);
+      await this.syncInventory(check);
+      const actual = destination === 'hand' ? b.heldItem : b.inventory.slots?.[slot];
+      return !actual ? { ok: true } : { ok: false, reason: 'UNEQUIP_NOT_CONFIRMED' };
+    }
+    const item = opts.sourceSlot === undefined ? this.bestInvItem(name) : b.inventory.slots?.[opts.sourceSlot];
     if (!item) return { ok: false, reason: 'NO_ITEM' };
+    if (item.name !== name) return { ok: false, reason: 'SOURCE_ITEM_CHANGED' };
+    const identity = JSON.stringify([item.type, item.metadata, item.nbt ?? null]);
     await this.afterAction(() => this.bot.equip(item, destination), check);
+    await this.syncInventory(check);
     const slot = this.bot.getEquipmentDestSlot?.(destination);
     const actual = destination === 'hand' ? this.bot.heldItem : this.bot.inventory.slots?.[slot];
     if (destination === 'hand' && actual?.name === name) this.noteToolChoice(name);
-    return actual?.name === name ? { ok: true } : { ok: false, reason: 'EQUIP_NOT_CONFIRMED' };
+    return actual?.name === name && (opts.sourceSlot === undefined || JSON.stringify([actual.type, actual.metadata, actual.nbt ?? null]) === identity) ? { ok: true } : { ok: false, reason: 'EQUIP_NOT_CONFIRMED' };
   }
 
   private itemEnchants(item: any): string[] | undefined {
@@ -1580,31 +1615,35 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     } catch { return undefined; }
   }
 
+  private async syncInventory(check: ReturnType<MineflayerAdapter['actionCheckpoint']>) {
+    await this.afterAction(() => raceAbort(this.bot._syncWindow(this.bot.inventory), check.signal, 3000, () => {}), check);
+  }
+
   private guiView(w: any): GuiView {
     const type = String(w.type ?? '').replace(/^minecraft:/, '');
-    const size = Math.max(0, (w.slots?.length ?? 36) - 36);
+    const size = w.inventoryStart ?? Math.max(0, (w.slots?.length ?? 36) - 36);
     let roles = GUI_ROLES[type];
     if (type === 'smithing' && size === 3) roles = roles.slice(1);
     const slots: GuiSlot[] = [];
-    for (let i = 0; i < size; i++) {
+    for (let i = 0; i < (w.slots?.length ?? 0); i++) {
       const it = w.slots[i];
-      if (!roles && !it) continue;
       const enchants = it ? this.itemEnchants(it) : undefined;
-      slots.push({ slot: i, ...(roles?.[i] ? { role: roles[i] } : {}), name: it?.name ?? null, count: it?.count ?? 0, ...(enchants ? { enchants } : {}) });
+      slots.push({ slot: i, ...(i >= size ? { role: '背包' } : roles?.[i] ? { role: roles[i] } : {}), name: it?.name ?? null, count: it?.count ?? 0, ...(enchants ? { enchants } : {}), ...(it?.customName ? { customName: it.customName } : {}), ...(it?.nbt ? { nbt: simplify(it.nbt) } : {}) });
     }
     const ench = Array.isArray(w.enchantments) ? w.enchantments.map((e: any, option: number) => {
       const id = e?.expected?.enchant;
       const name = id != null && id >= 0 ? this.mcData.enchantments?.[id]?.name : undefined;
       return { option, level: e?.level ?? 0, ...(name ? { hint: `${name} ${e.expected.level}…` } : {}) };
     }).filter((e: any) => e.level > 0) : [];
-    return { type, slots, ...(ench.length ? { enchantments: ench } : {}) };
+    const cursor: Item | null = w.selectedItem ?? null;
+    return { type, slots, inventoryStart: w.inventoryStart ?? size, cursor: cursor ? { slot: -1, name: cursor.name, count: cursor.count, ...(cursor.nbt ? { nbt: simplify(cursor.nbt) } : {}) } : null, ...(ench.length ? { enchantments: ench } : {}) };
   }
 
   /**
    * 通用界面：玩家打开一个方块界面后能做的事就是这几样——拿起一叠、放一个/全部、shift 点击取走、点按钮。
    * 不认得哪种工作站怎么用；怎么摆是 LLM 自己的事，这里只把格子里实际有什么如实给回去。
    */
-  async useGui(pos: Vec3Like, ops: GuiOp[], signal: AbortSignal): Promise<ActionResult & { view?: GuiView; done: string[] }> {
+  async useGui(target: GuiTarget, ops: GuiOp[], signal: AbortSignal): Promise<ActionResult & { view?: GuiView; done: string[] }> {
     const check = this.actionCheckpoint(signal);
     throwIfAborted(signal);
     const done: string[] = [];
@@ -1612,20 +1651,44 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     await this.interactionReady();
     check();
     const b = this.bot;
-    const block = b.blockAt(this.vec(pos));
-    if (!block) return { ok: false, reason: 'UNLOADED', done };
-    await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos }, { signal, timeoutMs: 20000, constructionSafe: true, allowSwimming: false }), check);
-    const open = block.name === 'enchanting_table' && typeof b.openEnchantmentTable === 'function' ? () => b.openEnchantmentTable(block) : () => b.openBlock(block);
+    let open: () => Promise<unknown>;
+    if (target === 'inventory') open = async () => b.inventory;
+    else if ('entityId' in target) {
+      const entity = b.entities?.[target.entityId];
+      if (!entity) return { ok: false, reason: 'ENTITY_GONE', done };
+      if (/horse|donkey|mule|llama|camel/.test(entity.name ?? '')) {
+        if (b.vehicle?.id !== target.entityId) return { ok: false, reason: 'MOUNT_REQUIRED', done };
+        open = async () => {
+          const pending = once(b, 'windowOpen', { signal: AbortSignal.any([signal, AbortSignal.timeout(8000)]) });
+          b._client.write('entity_action', { entityId: b.entity.id, actionId: 6, jumpBoost: 0 });
+          return (await pending)[0];
+        };
+      } else {
+        if (entity.position.distanceTo(b.entity.position) > 4.5) await this.afterAction(() => this.moveTo({ kind: 'follow_entity', entityId: target.entityId, range: 3 }, { signal, timeoutMs: 20000, constructionSafe: true }), check);
+        if (b.entities?.[target.entityId] !== entity || entity.position.distanceTo(b.entity.position) > 4.5) return { ok: false, reason: 'ENTITY_OUT_OF_REACH', done };
+        open = () => b.openEntity(entity);
+      }
+    } else {
+      const block = b.blockAt(this.vec(target));
+      if (!block) return { ok: false, reason: 'UNLOADED', done };
+      await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos: target }, { signal, timeoutMs: 20000, constructionSafe: true, allowSwimming: false }), check);
+      open = block.name === 'enchanting_table' && typeof b.openEnchantmentTable === 'function' ? () => b.openEnchantmentTable(block) : () => b.openBlock(block);
+    }
     let w: any;
     try {
       w = await this.afterAction(() => raceAbort(open(), signal, 8000, () => {}), check);
     } catch (e) {
       if (e instanceof AbortedError) throw e;
-      return { ok: false, reason: `NOT_OPENABLE:${block.name}`, done };
+      return { ok: false, reason: 'NOT_OPENABLE', done };
     }
-    if (!w) return { ok: false, reason: `NOT_OPENABLE:${block.name}`, done };
-    const size = () => Math.max(0, (w.slots?.length ?? 36) - 36);
-    const click = (slot: number, button: number, mode: number) => this.afterAction(() => b.clickWindow(slot, button, mode), check);
+    if (!w) return { ok: false, reason: 'NOT_OPENABLE', done };
+    const size = () => w.inventoryStart ?? Math.max(0, (w.slots?.length ?? 36) - 36);
+    const click = async (slot: number, button: number, mode: number) => {
+      await this.afterAction(() => b.clickWindow(slot, button, mode), check);
+      // 1.20.1 clicks update the client prediction before acknowledgement.
+      // The installed sync asks for authoritative slots and carried cursor.
+      await this.afterAction(() => raceAbort(b._syncWindow(w), signal, 3000, () => {}), check);
+    };
     const invCount = (name: string) => b.inventory.items().filter((i: any) => i.name === name).reduce((n: number, i: any) => n + i.count, 0);
     const settle = () => this.afterAction(() => sleep(250, signal), check);
     this.inFlight++; // 界面开着的整个过程都算在忙，空闲巡检不要替它关窗
@@ -1636,7 +1699,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         if ('put' in op) {
           const { item, slot } = op.put;
           if (slot < 0 || slot >= size()) return { ok: false, reason: `BAD_SLOT:${slot}`, view: this.guiView(w), done };
-          const src = w.slots.slice(size()).map((it: any, k: number) => it && it.name === item ? { it, at: size() + k } : null).filter(Boolean)[0] as any;
+          const source = op.put.sourceSlot;
+          const src = source === undefined ? w.slots.slice(size()).map((it: Item | null, k: number) => it && it.name === item ? { it, at: size() + k } : null).find((entry: { it: Item; at: number } | null) => entry !== null)
+            : source >= size() && source < w.slots.length && w.slots[source]?.name === item ? { it: w.slots[source], at: source } : null;
           if (!src) return { ok: false, reason: `NO_ITEM:${item}`, view: this.guiView(w), done };
           const before = w.slots[slot]?.name === item ? w.slots[slot].count : 0;
           const want = Math.min(op.put.count ?? src.it.count, src.it.count);
@@ -1682,9 +1747,27 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           const got = target ? this.itemEnchants(target) : undefined;
           done.push(table && got ? `附魔成功：${target.name} 得到 ${got.join('、')}（经验 ${xpBefore}→${b.experience?.level ?? '?'} 级）` : `点了按钮 ${op.button}，界面变了`);
         } else if ('rename' in op) {
+          if (!/^(minecraft:)?anvil$/.test(String(w.type))) return { ok: false, reason: 'RENAME_REQUIRES_ANVIL', view: this.guiView(w), done };
           b._client.write('name_item', { name: op.rename });
-          await settle();
-          done.push(`改名为「${op.rename}」`);
+          const accepted = () => [op.rename, JSON.stringify(op.rename), JSON.stringify({ text: op.rename })].includes(w.slots[2]?.customName);
+          const confirmed = await this.waitForInteraction(accepted, check);
+          if (!confirmed) return { ok: false, reason: 'RENAME_NOT_CONFIRMED', view: this.guiView(w), done };
+          done.push(`改名预览已确认为「${op.rename}」；仍需取出产物才会完成改名`);
+        } else if ('click' in op) {
+          const { slot, button, mode } = op.click;
+          if (slot !== -999 && (slot < 0 || slot >= w.slots.length)) return { ok: false, reason: `BAD_SLOT:${slot}`, view: this.guiView(w), done };
+          const key = () => JSON.stringify([w.slots, w.selectedItem]);
+          const before = key();
+          await click(slot, button, mode);
+          if (!(await this.waitForInteraction(() => key() !== before, check))) return { ok: false, reason: 'CLICK_NOT_CONFIRMED', view: this.guiView(w), done };
+          done.push(`点击第 ${slot} 格（button=${button},mode=${mode}），已确认格子或光标变化`);
+        } else if ('beacon' in op) {
+          if (!/^(minecraft:)?beacon$/.test(String(w.type))) return { ok: false, reason: 'NOT_BEACON', view: this.guiView(w), done };
+          const before = w.slots[0]?.count ?? 0;
+          if (!before) return { ok: false, reason: 'NO_BEACON_PAYMENT', view: this.guiView(w), done };
+          b._client.write('set_beacon_effect', { primary_effect: op.beacon.primary, secondary_effect: op.beacon.secondary });
+          if (!(await this.waitForInteraction(() => (w.slots[0]?.count ?? 0) < before, check))) return { ok: false, reason: 'BEACON_NOT_CONFIRMED', view: this.guiView(w), done };
+          done.push(`信标选择已提交，确认支付物品被消耗；效果是否作用于身体请检查状态`);
         }
       }
       return { ok: true, view: this.guiView(w), done };
@@ -1694,6 +1777,69 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       try { b.closeWindow(w); } catch { /* ignore */ }
       if (this.interactionDirty().some((d) => !d.startsWith('窗口'))) this.scheduleRepair('界面操作后残留', 150);
     }
+  }
+
+  async signText(pos: Vec3Like, signal: AbortSignal, opts: { lines?: string[]; back?: boolean } = {}): Promise<ActionResult & { lines?: string[] }> {
+    const check = this.actionCheckpoint(signal);
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
+    const b = this.bot;
+    await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos }, { signal, timeoutMs: 15000, constructionSafe: true }), check);
+    const block = b.blockAt(this.vec(pos));
+    if (!block || !/_sign$/.test(block.name)) return { ok: false, reason: 'NOT_SIGN' };
+    const read = (): string[] | undefined => {
+      const current = b.blockAt(this.vec(pos));
+      const text = current?.getSignText?.()[opts.back ? 1 : 0];
+      return typeof text === 'string' ? text.split('\n') : undefined;
+    };
+    if (!opts.lines) {
+      const lines = read();
+      return lines ? { ok: true, lines } : { ok: false, reason: 'SIGN_TEXT_UNAVAILABLE' };
+    }
+    // Editing requires the server to open this sign's editor first. An ordinary
+    // block use without that acknowledgement cannot authorize an update packet.
+    const opened = new Promise<void>((resolve, reject) => {
+      const editorSignal = AbortSignal.any([signal, AbortSignal.timeout(3000)]);
+      const cleanup = () => { b.removeListener('signOpen', onOpen); editorSignal.removeEventListener('abort', onAbort); };
+      const onOpen = (sign: { position?: Vec3Like }) => {
+        if (!sign.position || sign.position.x !== pos.x || sign.position.y !== pos.y || sign.position.z !== pos.z) return;
+        cleanup(); resolve();
+      };
+      const onAbort = () => { cleanup(); reject(editorSignal.reason); };
+      b.on('signOpen', onOpen);
+      editorSignal.addEventListener('abort', onAbort, { once: true });
+    });
+    await this.afterAction(() => Promise.all([opened, b.activateBlock(block)]).then(() => undefined), check);
+    b.updateSign(block, opts.lines.join('\n'), opts.back === true);
+    const expected = Array.from({ length: 4 }, (_, i) => opts.lines?.[i] ?? '');
+    const matches = () => { const actual = read(); return !!actual && expected.every((line, i) => line === (actual[i] ?? '')); };
+    if (!(await this.waitForInteraction(matches, check))) return { ok: false, reason: 'SIGN_NOT_CONFIRMED', lines: read() };
+    return { ok: true, lines: read() };
+  }
+
+  async editBook(sourceSlot: number, pages: string[], signal: AbortSignal, title?: string): Promise<ActionResult> {
+    const check = this.actionCheckpoint(signal);
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
+    await this.interactionReady();
+    check();
+    const b = this.bot, book: Item | null = b.inventory.slots?.[sourceSlot];
+    if (book?.name !== 'writable_book') return { ok: false, reason: 'SOURCE_ITEM_CHANGED' };
+    const equipped = await this.equipItem('writable_book', 'hand', signal, { sourceSlot });
+    if (!equipped.ok) return equipped;
+    check();
+    const slot = 36 + b.quickBarSlot;
+    // The installed writeBook helper mutates its local NBT before sending.
+    // Send the 1.20.1 edit directly so only server inventory updates prove it.
+    b._client.write('edit_book', { hand: b.quickBarSlot, pages, title: title ?? null });
+    const matches = () => {
+      const actual: Item | null = b.inventory.slots?.[slot];
+      if (!actual?.nbt || actual.name !== (title === undefined ? 'writable_book' : 'written_book')) return false;
+      const nbt = simplify(actual.nbt) as { pages?: unknown; title?: unknown };
+      const actualPages = nbt.pages;
+      return Array.isArray(actualPages) && actualPages.length === pages.length
+        && pages.every((page, i) => [page, JSON.stringify(page), JSON.stringify({ text: page })].includes(actualPages[i]))
+        && (title === undefined || nbt.title === title);
+    };
+    return await this.waitForInteraction(matches, check) ? { ok: true } : { ok: false, reason: 'BOOK_NOT_CONFIRMED' };
   }
 
   private tradeViews(v: any): TradeView[] {
@@ -1769,21 +1915,26 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   }
 
   /** 扔出背包里的物品（Q 键）；可先转向某个位置，丢给村民/猪灵/队友或者清背包。按真实背包变化确认。 */
-  async tossItem(name: string, count: number | null, signal: AbortSignal, face?: Vec3Like, opts: { gift?: boolean } = {}): Promise<ActionResult & { tossed: number }> {
+  async tossItem(name: string, count: number | null, signal: AbortSignal, face?: Vec3Like, opts: { gift?: boolean; sourceSlot?: number } = {}): Promise<ActionResult & { tossed: number }> {
     const check = this.actionCheckpoint(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', tossed: 0 };
     await this.interactionReady();
     check();
-    const total = () => this.bot.inventory.items().filter((i: any) => i.name === name).reduce((n: number, i: any) => n + i.count, 0);
+    const total = () => (opts.sourceSlot === undefined ? this.bot.inventory.items() : this.bot.inventory.slots.slice(5, 46)).filter((item: Item | null) => item?.name === name).reduce((n: number, item: Item) => n + item.count, 0);
     const have = total();
-    const item = this.invItem(name);
+    const item = opts.sourceSlot === undefined ? this.invItem(name) : this.bot.inventory.slots?.[opts.sourceSlot];
     if (!item || have <= 0) return { ok: false, reason: 'NO_ITEM', tossed: 0 };
-    const want = count == null ? have : Math.min(count, have);
+    if (item.name !== name) return { ok: false, reason: 'SOURCE_ITEM_CHANGED', tossed: 0 };
+    const available = opts.sourceSlot === undefined ? have : item.count;
+    const want = count == null ? available : Math.min(count, available);
     const e = this.bot.entity;
     // 朝哪扔由调用的人定（toss_item 的 toward）；不指定就朝现在看的方向
     if (face) await this.afterAction(() => this.bot.lookAt(this.vec({ x: face.x, y: face.y + 1, z: face.z }), true), check);
     const yaw = e?.yaw ?? 0;
-    await this.afterAction(() => this.bot.toss(item.type, null, want), check);
+    if (opts.sourceSlot === undefined) await this.afterAction(() => this.bot.toss(item.type, null, want), check);
+    else if (want === item.count) await this.afterAction(() => this.bot.clickWindow(opts.sourceSlot, 1, 4), check);
+    else for (let n = 0; n < want; n++) await this.afterAction(() => this.bot.clickWindow(opts.sourceSlot, 0, 4), check);
+    await this.syncInventory(check);
     const tossed = have - total();
     // 记住扔掉了什么、大概落在哪（只是事实：哪些掉落物是自己刚扔的，被捡回来时能说清；不替它决定捡不捡）
     if (tossed > 0 && !opts.gift && e?.position) {
@@ -1794,7 +1945,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   }
 
   /** 把物品放到快捷栏第 index 格（0-8）并选中它，相当于整理快捷栏后按数字键。 */
-  async arrangeHotbar(name: string, index: number, signal: AbortSignal): Promise<ActionResult> {
+  async arrangeHotbar(name: string, index: number, signal: AbortSignal, opts: { sourceSlot?: number } = {}): Promise<ActionResult> {
     const check = this.actionCheckpoint(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
     if (!Number.isInteger(index) || index < 0 || index > 8) return { ok: false, reason: 'BAD_SLOT' };
@@ -1802,12 +1953,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     check();
     const b = this.bot;
     const target = 36 + index;
-    if (b.inventory.slots?.[target]?.name !== name) {
-      const item = this.invItem(name);
-      if (!item) return { ok: false, reason: 'NO_ITEM' };
+    const item = opts.sourceSlot === undefined ? this.invItem(name) : b.inventory.slots?.[opts.sourceSlot];
+    if (!item) return { ok: false, reason: 'NO_ITEM' };
+    if (item.name !== name) return { ok: false, reason: 'SOURCE_ITEM_CHANGED' };
+    const identity = JSON.stringify([item.type, item.metadata, item.nbt ?? null]);
+    if (opts.sourceSlot !== undefined ? opts.sourceSlot !== target : b.inventory.slots?.[target]?.name !== name) {
       await this.afterAction(() => b.moveSlotItem(item.slot, target), check);
+      await this.syncInventory(check);
     }
     if (b.inventory.slots?.[target]?.name !== name) return { ok: false, reason: 'HOTBAR_NOT_CONFIRMED' };
+    if (opts.sourceSlot !== undefined && JSON.stringify([b.inventory.slots[target].type, b.inventory.slots[target].metadata, b.inventory.slots[target].nbt ?? null]) !== identity) return { ok: false, reason: 'HOTBAR_NOT_CONFIRMED' };
     b.setQuickBarSlot(index);
     if (b.heldItem?.name !== name) return { ok: false, reason: 'HOTBAR_NOT_CONFIRMED' };
     this.noteToolChoice(name);
@@ -2002,6 +2157,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   }
 
   private invItem(name: string) {
+    if (this.bot.heldItem?.name === name) return this.bot.heldItem;
     return this.bot.inventory.items().find((i: any) => i.name === name);
   }
 
@@ -2032,7 +2188,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (opts.furnacePos && ['furnace'].includes(b.blockAt(this.vec(opts.furnacePos))?.name)) block = b.blockAt(this.vec(opts.furnacePos));
     block ??= b.findBlock({ matching: furnaceIds, maxDistance: 5 });
     if (!block) {
-      if (!this.invItem('furnace')) await this.afterAction(() => this.craft('furnace', 1, signal), check);
+      if (!opts.prepare) return { ok: false, reason: 'NO_FURNACE', made: 0 };
+      if (!this.invItem('furnace')) await this.afterAction(() => this.craft('furnace', 1, signal, { prepare: true }), check);
       if (!this.invItem('furnace')) return { ok: false, reason: 'NO_FURNACE', made: 0 };
       block = await this.placeNearby('furnace', false, signal, check);
       if (!block) return { ok: false, reason: 'NO_SPACE', made: 0 };
@@ -2631,7 +2788,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   }
 
   /** 找到可用的工作台：记得的位置 → 身边 → 背包里的 → 现做一个；必要时放下 */
-  private async ensureTable(signal: AbortSignal, knownPos?: Vec3Like): Promise<any | null> {
+  private async ensureTable(signal: AbortSignal, knownPos?: Vec3Like, prepare = false): Promise<any | null> {
     const check = this.actionCheckpoint(signal);
     const b = this.bot;
     const tableId = this.mcData.blocksByName.crafting_table.id;
@@ -2646,7 +2803,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       catch (error: any) { if (error?.name === 'AbortedError') throw error; check(); table = null; }
       if (table && !reachable(table)) table = null;
     }
-    if (!table) {
+    if (!table && prepare) {
       let tableItem = b.inventory.items().find((i: any) => i.name === 'crafting_table');
       if (!tableItem && (await this.afterAction(() => this.craftSimple(this.mcData.itemsByName.crafting_table.id, 1, null, signal, 2), check))) {
         tableItem = b.inventory.items().find((i: any) => i.name === 'crafting_table');
@@ -2672,7 +2829,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return table;
   }
 
-  async craft(item: string, count: number, signal: AbortSignal, opts: { tablePos?: Vec3Like } = {}): Promise<ActionResult & { crafted: number; detail?: string; tablePos?: Vec3Like }> {
+  async craft(item: string, count: number, signal: AbortSignal, opts: { tablePos?: Vec3Like; prepare?: boolean } = {}): Promise<ActionResult & { crafted: number; detail?: string; tablePos?: Vec3Like }> {
     const check = this.actionCheckpoint(signal);
     throwIfAborted(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', crafted: 0 };
@@ -2683,12 +2840,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
 
     let table: any = null;
     if (this.needsTable(data.id, count)) {
-      table = await this.afterAction(() => this.ensureTable(signal, opts.tablePos), check);
+      table = await this.afterAction(() => this.ensureTable(signal, opts.tablePos, opts.prepare === true), check);
       if (!table) return { ok: false, reason: 'NO_CRAFTING_TABLE', crafted: 0, detail: this.missingReport(data.id, count, null) };
     }
     const tablePos = table?.position ? { x: table.position.x, y: table.position.y, z: table.position.z } : undefined;
     const before = this.invCount(data.id);
-    await this.afterAction(() => this.ensureIngredients(data.id, count, table, signal, 2), check);
+    if (opts.prepare) await this.afterAction(() => this.ensureIngredients(data.id, count, table, signal, 2), check);
     let crafted = await this.afterAction(() => this.craftUpTo(data.id, count, table, signal), check);
     crafted = Math.max(crafted, this.invCount(data.id) - before);
     // 同种木板凑不齐但混着几种木板够用：按实际的木板拼配方（原版允许）
@@ -2727,7 +2884,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
 
   async eat(signal: AbortSignal, want?: string): Promise<boolean> {
     const check = this.actionCheckpoint(signal);
-    const item = want ? this.bot?.inventory.items().find((i: any) => i.name === want && (this.mcData.foodsByName ?? {})[i.name]) : this.foodItems()[0];
+    const item = want ? (this.mcData.foodsByName ?? {})[want] ? this.invItem(want) : null : this.foodItems()[0];
     if (!item) return false;
     const b = this.bot;
     await this.afterAction(() => b.equip(item, 'hand'), check);

@@ -6,7 +6,7 @@ import { AIR_BLOCKS, isSoftBlock, LIQUID_BLOCKS } from '../perception/surroundin
 import { SKILLS } from '../skills/index.ts';
 import { LLM_HIDDEN } from '../skills/index.ts';
 import { constrainRecoveryAction } from '../skills/recovery.ts';
-import type { Senses, SkillCtx } from '../skills/types.ts';
+import { runSkill as executeSkill, validateSkill, type Senses, type SkillCtx } from '../skills/types.ts';
 import { sleep, throwIfAborted } from '../util.ts';
 import type { SandboxHandler } from './sandbox.ts';
 
@@ -25,7 +25,7 @@ export const API_DOC = `代码是一个 async 函数体，参数 api 和 args �
 - api.entities(半径≤32) → 看见的实体 [{id,name,kind,dist,pos,how:"seen",fusing?}]（kind=item 的是掉落物，name 形如 item:cobblestone）；只听见的返回 {name,kind,how:"heard",dir,dist,fusing?}，没有精确位置或实体id，距离约两格精度，只能据此决定转头或搜索。挥击、射击、跟踪和 api.act 的实体动作只能选择当前看见的目标
 - api.drops(半径≤32) → 地上的掉落物 [{id,item,count?,pos,dist,seen,ageSec?}]：seen=true 是眼前看得见的；seen=false 是刚才亲眼见过、现在不在视野里（记得的位置，ageSec 秒前）。扔完东西核对“走开了没有、有没有被捡回来”就看这个
 - api.nearestLand() → 最近候选干地经当前视野确认后返回 {stand:{x,y,z} 站上去时脚的位置, dir, dist, dy 比脚高几格} 或 null（支撑为实心、上面两格为空气、不是水底）；历史位置或被遮挡的位置不能当作已确认落点，null 不代表四周一定没有陆地
-- api.stepTo(x,y,z) 迈到相邻一格（平走、上一级、下一级）｜api.digAt(x,y,z, {wet:true}?)（旁边有水默认不挖，结果里有 wetCells；第 4 个参数 {wet:true} 照挖让水流进来）｜api.placeAt(x,y,z,"方块名|any") → {ok,code,summary}
+- api.stepTo(x,y,z) 迈到相邻一格（平走、上一级、下一级）｜api.digAt(x,y,z, {wet:true,lava:true}?)（旁边有液体默认不挖；wet:true 接受进水，lava:true 接受进岩浆，分别显式选择）｜api.placeAt(x,y,z,"方块名|any") → {ok,code,summary}
 - api.moveTo(x,y,z,range,{sprint,avoid}?) 用寻路走过去（默认走路；sprint:true 跑，快但很耗饥饿；avoid:["方块名"] 这一趟绕开这些方块）→ {ok,error?,pos}｜api.act("动作名",{参数}) 用已有动作（goto、dig_at、defend…）→ {ok,code,summary,data?}；data 保留动作返回的实际观测与失败进展，去掉独立的原始 local/around 地图；查看地形仍用 blockAt/region 的可见边界
 - api.useSkill("技能名",{args}?) 调用一份已经验证可靠的技能（reliable_skills 里列的，当积木用：先组合已经管用的，再补新的部分）→ {ok,code,summary}；最多套两层
 - api.look(yaw,pitch)｜api.lookAt(x,y,z)｜api.sleep(毫秒≤5000)｜api.log(…) 记一句给自己看｜api.progress(0..1)
@@ -33,7 +33,7 @@ export const API_DOC = `代码是一个 async 函数体，参数 api 和 args �
 - api.move({forward,back,left,right,jump,sprint,sneak}, 毫秒≤1000, {face: 实体id 或 [x,y,z]}?) 按住这些键一小会儿，期间一直盯着 face → {ok, moved 走了几格, stopped?: "lava"|"cliff"}；
   前面是岩浆/火或一脚会摔 4 格以上，身体会自己停下（ok=false）；{unsafe:true} 关掉这个保护
 - api.attack(实体id) 朝它挥一下（4 格内才打得到）→ {ok, sinceLastMs 距上次挥了多久}；挥得太勤伤害很低：剑约 625ms、斧约 1000ms、空手 250ms 才恢复满
-- api.equip(物品名, "hand"|"off-hand"|"head"|"torso"|"legs"|"feet")｜api.shield(true/false) 举起/放下副手的盾（要先把 shield equip 到 off-hand；举着时走得慢、挡正面的近战和箭）
+- api.equip(物品名或null, "hand"|"off-hand"|"head"|"torso"|"legs"|"feet", {sourceSlot}?) 指定现有槽位可区分同名物品；null 清空该装备位。api.act("inspect_inventory",{}) 查看槽位、附魔、名称和NBT｜api.shield(true/false) 举起/放下副手的盾（要先把 shield equip 到 off-hand；举着时走得慢、挡正面的近战和箭）
 - api.draw("bow"|"crossbow"|"trident") 开始蓄力 → api.release([x,y,z]?) 转向那一点松手 → {ok, chargedMs}；弓蓄 1000ms 以上才是满力，远处要往上抬（箭会下坠）
 - api.shoot(实体id) 身体按经验估好提前量和下坠、拉满弓射一箭（慢但省事）
 - api.state() 还有 offHand、armor、usingItem（在举盾/拉弓）、hurtAgoMs（距上次挨打多久）、deathDrop（死后掉在地上还没捡回的东西：{pos,dim,items,secondsLeft} 或 null）
@@ -113,10 +113,10 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
   const runSkill = async (name: string, args: unknown) => {
     const skill = SKILLS[name];
     if (!skill || LLM_HIDDEN.has(name) || name === 'use_skill') throw new Error(`没有 "${name}" 这个动作（代码里不能再调用 use_skill）`);
-    const v = skill.validate(args ?? {}, ctx.adapter);
+    const v = validateSkill(skill, args ?? {}, ctx.adapter);
     if (!v.ok) throw new Error(`${name} 参数错误：${v.error}`);
     throwIfAborted(ctx.signal);
-    const r = await skill.run({ ...ctx, senses: actionSenses, deadline: Math.min(ctx.deadline, Date.now() + skill.timeoutMs), progress: () => {} }, constrainRecoveryAction(ctx, name, v.args));
+    const r = await executeSkill({ ...ctx, senses: actionSenses, deadline: Math.min(ctx.deadline, Date.now() + skill.timeoutMs), progress: () => {} }, skill, constrainRecoveryAction(ctx, name, v.args));
     if (r.status === 'cancelled') throw Object.assign(new Error('task cancelled'), { name: 'AbortedError' });
     const { local: _local, around: _around, ...data } = r.data ?? {};
     return { ok: r.status === 'succeeded', code: r.failureCode ?? null, summary: r.summary.slice(0, 200), ...(Object.keys(data).length ? { data } : {}) };
@@ -216,15 +216,18 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
         const depth = (ctx as SkillCtx & { skillDepth?: number }).skillDepth ?? 0;
         if (depth >= MAX_SKILL_DEPTH) throw new Error(`技能最多套 ${MAX_SKILL_DEPTH} 层`);
         const skill = SKILLS.use_skill;
-        const v = skill.validate({ name, ...(a[1] && typeof a[1] === 'object' ? { args: a[1] } : {}) }, ctx.adapter);
+        const v = validateSkill(skill, { name, ...(a[1] && typeof a[1] === 'object' ? { args: a[1] } : {}) }, ctx.adapter);
         if (!v.ok) throw new Error(`useSkill 参数错误：${v.error}`);
         throwIfAborted(ctx.signal);
-        const r = await skill.run({ ...ctx, skillDepth: depth + 1, deadline: Math.min(ctx.deadline, Date.now() + skill.timeoutMs), progress: () => {} } as SkillCtx, v.args);
+        const r = await executeSkill({ ...ctx, skillDepth: depth + 1, deadline: Math.min(ctx.deadline, Date.now() + skill.timeoutMs), progress: () => {} } as SkillCtx, skill, v.args);
         if (r.status === 'cancelled') throw Object.assign(new Error('task cancelled'), { name: 'AbortedError' });
         return { ok: r.status === 'succeeded', code: r.failureCode ?? null, summary: r.summary.slice(0, 200) };
       }
       case 'stepTo': return runSkill('step', { to: rel(int(a[0], 'x'), int(a[1], 'y'), int(a[2], 'z')), facing: 'N' });
-      case 'digAt': return runSkill('dig_at', { at: rel(int(a[0], 'x'), int(a[1], 'y'), int(a[2], 'z')), facing: 'N', ...(a[3] && typeof a[3] === 'object' && (a[3] as any).wet === true ? { wet: true } : {}) });
+      case 'digAt': {
+        const options = a[3] && typeof a[3] === 'object' ? a[3] as Record<string, unknown> : {};
+        return runSkill('dig_at', { at: rel(int(a[0], 'x'), int(a[1], 'y'), int(a[2], 'z')), facing: 'N', ...(options.wet === true ? { wet: true } : {}), ...(options.lava === true ? { lava: true } : {}) });
+      }
       case 'placeAt': return runSkill('place_at', { at: rel(int(a[0], 'x'), int(a[1], 'y'), int(a[2], 'z')), item: String(a[3] ?? 'any'), facing: 'N' });
       case 'moveTo': {
         const p = { x: Number(a[0]), y: Number(a[1]), z: Number(a[2]) };
@@ -278,7 +281,9 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
       case 'equip': {
         const dest = String(a[1] ?? 'hand');
         if (!['hand', 'off-hand', 'head', 'torso', 'legs', 'feet'].includes(dest)) throw new Error('equip 的位置写 hand|off-hand|head|torso|legs|feet');
-        const r = await need(ctx.adapter.equipItem?.bind(ctx.adapter), 'equip')(String(a[0] ?? ''), dest as 'hand', ctx.signal);
+        const options = a[2] && typeof a[2] === 'object' ? a[2] as Record<string, unknown> : {};
+        if (options.sourceSlot !== undefined && (!Number.isInteger(options.sourceSlot) || Number(options.sourceSlot) < 5 || Number(options.sourceSlot) > 45)) throw new Error('sourceSlot 必须是 5–45 的背包槽位');
+        const r = await need(ctx.adapter.equipItem?.bind(ctx.adapter), 'equip')(a[0] === null ? null : String(a[0] ?? ''), dest as 'hand', ctx.signal, options.sourceSlot !== undefined ? { sourceSlot: Number(options.sourceSlot) } : undefined);
         return { ok: r.ok, ...(r.reason ? { code: r.reason } : {}) };
       }
       case 'shield': {

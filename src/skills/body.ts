@@ -12,31 +12,25 @@ import { dist3, throwIfAborted } from '../util.ts';
 
 /**
  * 身体的基本动作：对着某个方向挖（玩家按住左键）、原地垫方块往上爬（跳起来往脚下放方块）。
- * 被困在坑里、洞里、头顶被封住时，玩家就是这么出去的。程序只负责动作本身和不挖进岩浆/水里。
+ * 程序执行指定动作；液体邻接默认停下，Agent 可分别允许进水或进岩浆。
  */
 
 const floor = (p: { x: number; y: number; z: number }) => ({ x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) });
 
 /** 挖开这一格会不会让液体流进来（它的邻格有水/岩浆） */
-function liquidNext(ctx: SkillCtx, c: { x: number; y: number; z: number }): string | null {
-  for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
-    const n = ctx.adapter.blockAt({ x: c.x + dx, y: c.y + dy, z: c.z + dz });
-    if (n && LIQUID_BLOCKS.has(n)) return n;
-  }
-  return null;
-}
+const liquidNeighbours = (ctx: SkillCtx, c: Vec3Like) => [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, -1]]
+  .map(([dx, dy, dz]) => ctx.adapter.blockAt({ x: c.x + dx, y: c.y + dy, z: c.z + dz }))
+  .filter((name): name is string => name !== null && LIQUID_BLOCKS.has(name));
 
-export async function breakCell(ctx: SkillCtx, c: Vec3Like, exact = false, info?: { noDrop?: boolean; ms?: number }, opts: { allowWater?: boolean } = {}): Promise<string | null> {
+export async function breakCell(ctx: SkillCtx, c: Vec3Like, exact = false, info?: { noDrop?: boolean; ms?: number }, opts: { allowWater?: boolean; allowLava?: boolean } = {}): Promise<string | null> {
   const name = ctx.adapter.blockAt(c);
   if (!exact && isSoftBlock(name)) return null;
   if (name && LIQUID_BLOCKS.has(name)) throw new Error(`LIQUID:${name}`);
   if (name === 'bedrock') throw new Error('BEDROCK');
-  const wet = liquidNext(ctx, c);
-  // 调用的人明说了接受进水（dig_at 的 wet:true）：水照挖，岩浆仍然不挖
-  if (wet && !(opts.allowWater && !/lava/.test(wet))) throw new Error(`LIQUID_NEAR:${wet}`);
-  // 没有合适的镐：工作台就在手边、木料够，像玩家一样顺手做一把木镐（dig/climb_up 是“就地”的动作，合成时不能走开）；
-  // 做不了也不停下——空手照样挖得掉，只是慢、不掉东西（挖开一格清路、脱困用不着镐）
-  if (!ctx.adapter.canHarvest(c) && findStation(ctx, ['crafting_table'], 4)) await ensureToolFor(ctx, c);
+  const wet = liquidNeighbours(ctx, c).find((name) => /lava/.test(name) ? !opts.allowLava : !opts.allowWater);
+  if (wet) throw new Error(`LIQUID_NEAR:${wet}`);
+  // 只有 make:true 才能在身边工作台准备木镐；默认直接用现有工具或空手挖。
+  if (ctx.make === true && !ctx.adapter.canHarvest(c) && findStation(ctx, ['crafting_table'], 4)) await ensureToolFor(ctx, c);
   if (exact && ctx.adapter.blockAt(c) !== name) throw new Error('TARGET_CHANGED：目标方块已经改变，停止拆除');
   const r = await ctx.adapter.dig(c, ctx.signal);
   if (!r.ok) throw new Error(r.reason ?? 'DIG_FAILED');
@@ -50,12 +44,12 @@ export const why = (e: unknown) => {
   if (m.startsWith('LIQUID:')) return `那边是 ${m.slice(7)}`;
   if (m === 'BEDROCK') return '碰到基岩，挖不动';
   if (m.startsWith('NEED_TOOL:')) return m.slice(10);
-  if (m === 'TOOL_MISSING') return '空手也挖不动（太硬了，空手要挖半分钟以上，比如黑曜石）：要挖开得先有对应的镐子';
+  if (m === 'TOOL_MISSING') return '适配器报告当前工具条件不足；检查具体方块、工具和动作时间预算';
   return m;
 };
 
-type TargetDigArgs = { target: string | Vec3Like; block?: string; own?: boolean; dir?: undefined; blocks?: undefined };
-type DigArgs = { dir: string; blocks: number; target?: undefined; block?: undefined } | TargetDigArgs;
+type TargetDigArgs = { target: string | Vec3Like; block?: string; own?: boolean; dir?: undefined; blocks?: undefined; wet?: boolean; lava?: boolean };
+type DigArgs = ({ dir: string; blocks: number; target?: undefined; block?: undefined } | TargetDigArgs) & { wet?: boolean; lava?: boolean };
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 const coordinates = (value: unknown): Vec3Like | null => {
   const parts = typeof value === 'string' ? value.trim().split(/[,， ]+/).map(Number) : null;
@@ -133,7 +127,7 @@ async function recoverBlock(ctx: SkillCtx, args: TargetDigArgs) {
     const stash = args.own ? null : storedChestAt(memory, adapter.state(), pos, name);
     if (stash) return fail('BAD_ARGS', stash, { target: name, pos });
     const before = new Map(adapter.state().inventory.map((item) => [item.name, item.count]));
-    await breakCell(ctx, pos, true);
+    await breakCell(ctx, pos, true, undefined, { allowWater: args.wet, allowLava: args.lava });
     throwIfAborted(signal);
     if (!AIR.has(adapter.blockAt(pos) ?? '')) return fail('ERROR', `尚未确认 ${name} 已被拆掉`, { target: name, pos, broken: false });
     noteEdit(ctx.taskId, 'dig', pos);
@@ -173,8 +167,8 @@ async function recoverBlock(ctx: SkillCtx, args: TargetDigArgs) {
 // ------------------------------------------------------------------ dig
 export const dig: Skill<DigArgs> = {
   name: 'dig',
-  description: '定点拆除并拾取：target 指定已看见/记住的方块ID、坐标或地标，只拆该块并报告背包实增；也可用 dir 挖头顶/脚下或一人高通道；不会挖进水或岩浆旁边',
-  argsDoc: '{"target"?: "<方块ID|x,y,z|地标ID>" | {"x":0,"y":64,"z":0}, "block"?: "<目标方块类型约束>", "own"?: true（确实要拆自己房子的方块）, "dir"?: "up|down|N|E|S|W|forward", "blocks"?: 1-6}（target 与 dir 二选一）',
+  description: '定点拆除并拾取，或按 dir 开挖短通道；默认不制造工具，不挖开液体邻格。wet:true 接受进水，lava:true 接受进岩浆，分别显式选择。',
+  argsDoc: '{"target"?: "<方块ID|x,y,z|地标ID>" | {"x":0,"y":64,"z":0}, "block"?: "<目标方块类型约束>", "own"?: true, "dir"?: "up|down|N|E|S|W|forward", "blocks"?: 1-6, "wet"?:true, "lava"?:true}（target 与 dir 二选一）',
   timeoutMs: 60000,
   movement: true,
   validate(raw) {
@@ -185,12 +179,12 @@ export const dig: Skill<DigArgs> = {
       const point = coordinates(target);
       if (!point && (typeof target !== 'string' || !target.trim() || target.length > 160 || /[,，]/.test(target))) return { ok: false, error: 'target 必须是方块ID、地标ID或有效的 x,y,z 坐标' };
       const block = typeof a.block === 'string' && a.block.trim() ? a.block.trim().replace(/^minecraft:/, '') : undefined;
-      return { ok: true, args: { target: point ?? String(target).trim().replace(/^minecraft:/, ''), ...(block ? { block } : {}), ...(a.own === true ? { own: true } : {}) } };
+      return { ok: true, args: { target: point ?? String(target).trim().replace(/^minecraft:/, ''), ...(block ? { block } : {}), ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}) } };
     }
     let dir = String(a.dir ?? a.direction ?? '').trim();
     dir = /^(up|down|forward)$/i.test(dir) ? dir.toLowerCase() : dir.toUpperCase();
     if (!['up', 'down', 'forward', ...Object.keys(DIR_OFFSETS)].includes(dir)) return { ok: false, error: 'dir 必须是 up/down/forward/N/E/S/W' };
-    return { ok: true, args: { dir, blocks: clampInt(a.blocks ?? a.count, 1, 6, dir === 'up' ? 2 : 1) } };
+    return { ok: true, args: { dir, blocks: clampInt(a.blocks ?? a.count, 1, 6, dir === 'up' ? 2 : 1), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}) } };
   },
   async run(ctx, args) {
     if (args.target !== undefined) return recoverBlock(ctx, args);
@@ -200,7 +194,7 @@ export const dig: Skill<DigArgs> = {
       if (args.dir === 'up') {
         const me = floor(adapter.state().pos);
         for (let i = 0; i < args.blocks; i++) {
-          const n = await breakCell(ctx, { x: me.x, y: me.y + 2 + i, z: me.z });
+          const n = await breakCell(ctx, { x: me.x, y: me.y + 2 + i, z: me.z }, false, undefined, { allowWater: args.wet, allowLava: args.lava });
           if (n) dug.push(n);
         }
         return ok(`挖开了头顶 ${dug.length ? dug.join('、') : '（本来就空着）'}`, { dug });
@@ -211,7 +205,7 @@ export const dig: Skill<DigArgs> = {
           const c = { x: me.x, y: me.y - 1, z: me.z };
           const under = adapter.blockAt({ x: c.x, y: c.y - 1, z: c.z });
           if (isSoftBlock(under) || (under && LIQUID_BLOCKS.has(under))) return dug.length ? ok(`往下挖了 ${dug.length} 格，再下面是 ${under ?? '空的'}，停下`, { dug }) : fail('BAD_ARGS', `脚下再往下是 ${under ?? '空的'}，往下挖会掉下去`);
-          const n = await breakCell(ctx, c);
+          const n = await breakCell(ctx, c, false, undefined, { allowWater: args.wet, allowLava: args.lava });
           if (n) dug.push(n);
           await adapter.moveTo({ kind: 'xyz', x: c.x, y: c.y, z: c.z }, { signal, timeoutMs: 4000 }).catch((e) => { if (isAbort(e)) throw e; });
         }
@@ -224,7 +218,7 @@ export const dig: Skill<DigArgs> = {
         const me = floor(adapter.state().pos);
         const feet = { x: me.x + dx, y: me.y, z: me.z + dz };
         for (const c of [{ ...feet, y: feet.y + 1 }, feet]) {
-          const n = await breakCell(ctx, c);
+          const n = await breakCell(ctx, c, false, undefined, { allowWater: args.wet, allowLava: args.lava });
           if (n) dug.push(n);
         }
         await adapter.moveTo({ kind: 'xyz', ...feet }, { signal, timeoutMs: 5000 });

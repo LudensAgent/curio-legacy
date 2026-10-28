@@ -13,16 +13,25 @@ const ctx = (over: Record<string, unknown> = {}) => ({
 const decision = (extra: Record<string, unknown> = {}) => ({ kind: 'adjust', tier: 'glance', monologue: 'x', notes: [] as string[],
   activity: { what: '先捡脚边圆石，再往南挖台阶', steps: [] }, ...extra });
 
-test('瞥一眼想改做法、手上这一步正在顺利做：不打断，排在后面；再瞥一眼就替换排着的那段', () => {
+test('瞥一眼明确 adjust 时保留决定，不排到后面或覆盖已有 next', () => {
   const c = ctx(), d1 = decision();
   guard.call(c, d1, 'act1', false);
-  assert.equal(d1.kind, 'continue');
-  assert.equal(c.queuedNext.draft.what, '先捡脚边圆石，再往南挖台阶');
+  assert.equal(d1.kind, 'adjust');
+  assert.equal(c.queuedNext, null);
+  c.queuedNext = { draft: { what: '原本的下一段' } };
   const d2 = decision({ activity: { what: '垫高再挖', steps: [] } });
   guard.call(c, d2, 'act1', false);
-  assert.equal(d2.kind, 'continue', '排队的位置被占了也不放行');
-  assert.equal(c.queuedNext.draft.what, '垫高再挖');
-  assert.match(d2.notes[0], /替换了之前排着的那段/);
+  assert.equal(d2.kind, 'adjust');
+  assert.equal(c.queuedNext.draft.what, '原本的下一段');
+  assert.match(d2.notes[0], /明确选择的 adjust/);
+});
+
+test('瞥一眼明确 switch 时仅提示放下活动的含义，不改成 detour', () => {
+  const c = ctx(), d = decision({ kind: 'switch' });
+  guard.call(c, d, 'act1', false);
+  assert.equal(d.kind, 'switch');
+  assert.equal(c.queuedNext, null);
+  assert.match(d.notes.join(), /不会自动回来/);
 });
 
 test('手上没在做、已经失败过、或是认真想过的：照常改', () => {

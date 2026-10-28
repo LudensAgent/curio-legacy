@@ -78,6 +78,17 @@ export interface InvItem {
   enchanted?: boolean;
 }
 
+/** Occupied player inventory slots, retaining the identity hidden by name totals. */
+export interface InventorySlot {
+  slot: number;
+  name: string;
+  count: number;
+  durability?: { left: number; max: number };
+  enchants?: string[];
+  customName?: string;
+  nbt?: unknown;
+}
+
 export interface AgentState {
   connected: boolean;
   alive: boolean;
@@ -165,18 +176,24 @@ export interface ActionResult {
 
 /** 界面操作：往某格放东西、从某格取（shift 点击）、点界面按钮（切石机配方、织布机图案、附魔选项）、铁砧改名 */
 export type GuiOp =
-  | { put: { item: string; slot: number; count?: number } }
+  | { put: { item: string; slot: number; count?: number; sourceSlot?: number } }
   | { take: { slot: number } }
   | { button: number }
-  | { rename: string };
+  | { rename: string }
+  | { click: { slot: number; button: number; mode: 0 | 1 | 2 | 3 | 4 } }
+  | { beacon: { primary: number | null; secondary: number | null } };
 
-export interface GuiSlot { slot: number; role?: string; name: string | null; count: number; enchants?: string[] }
+export type GuiTarget = Vec3Like | { entityId: number } | 'inventory';
+
+export interface GuiSlot { slot: number; role?: string; name: string | null; count: number; enchants?: string[]; customName?: string; nbt?: unknown }
 
 /** 打开的界面里看得见的东西：每一格放着什么，附魔台的三个选项 */
 export interface GuiView {
   type: string;
   slots: GuiSlot[];
   enchantments?: { option: number; level: number; hint?: string }[];
+  inventoryStart?: number;
+  cursor?: InventorySlot | null;
 }
 
 /** 熔炉三格里各有什么 */
@@ -187,6 +204,8 @@ export interface FurnaceSlots {
 }
 export interface FurnaceLeave extends FurnaceSlots { pos: Vec3Like; block: string; burning: boolean; why?: string }
 export interface SmeltOpts {
+  /** Explicit permission to manufacture/place a missing furnace. Defaults to false. */
+  prepare?: boolean;
   furnacePos?: Vec3Like;
   onProgress?: (done: number) => void;
   /** 主燃料用完后可以接着补的燃料（按先后） */
@@ -256,6 +275,7 @@ export interface GameAdapter {
   on(event: AdapterEvent, cb: (...args: any[]) => void): this;
 
   state(): AgentState;
+  inventorySlots?(): InventorySlot[];
 
   // ---- 视觉原语（只给 Vision 模块使用；上层只能拿到 Vision 的结果，避免透视）
   eye(): Eye | null;
@@ -288,13 +308,15 @@ export interface GameAdapter {
   placeBlockAt(pos: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult>;
   placeBlockStateAt?(pos: Vec3Like, name: string, properties: BlockState['properties'], signal: AbortSignal): Promise<ActionResult>;
   /** 打开看得见的方块界面（工作站、容器），依次执行操作，返回关之前看到的界面 */
-  useGui?(pos: Vec3Like, ops: GuiOp[], signal: AbortSignal): Promise<ActionResult & { view?: GuiView; done: string[] }>;
+  useGui?(target: GuiTarget, ops: GuiOp[], signal: AbortSignal): Promise<ActionResult & { view?: GuiView; done: string[] }>;
+  signText?(pos: Vec3Like, signal: AbortSignal, opts?: { lines?: string[]; back?: boolean }): Promise<ActionResult & { lines?: string[] }>;
+  editBook?(sourceSlot: number, pages: string[], signal: AbortSignal, title?: string): Promise<ActionResult>;
   /** 打开村民/流浪商人的交易界面；index 为 null 时只看交易列表 */
   tradeWith?(entityId: number, index: number | null, times: number, signal: AbortSignal): Promise<ActionResult & { trades: TradeView[]; traded: number }>;
   /** face：朝这一点扔；gift：是扔给别人的（不记成自己扔掉的） */
-  tossItem?(name: string, count: number | null, signal: AbortSignal, face?: Vec3Like, opts?: { gift?: boolean }): Promise<ActionResult & { tossed: number }>;
-  arrangeHotbar?(name: string, index: number, signal: AbortSignal): Promise<ActionResult>;
-  equipItem?(name: string, destination: 'hand' | 'off-hand' | 'head' | 'torso' | 'legs' | 'feet', signal: AbortSignal): Promise<ActionResult>;
+  tossItem?(name: string, count: number | null, signal: AbortSignal, face?: Vec3Like, opts?: { gift?: boolean; sourceSlot?: number }): Promise<ActionResult & { tossed: number }>;
+  arrangeHotbar?(name: string, index: number, signal: AbortSignal, opts?: { sourceSlot?: number }): Promise<ActionResult>;
+  equipItem?(name: string | null, destination: 'hand' | 'off-hand' | 'head' | 'torso' | 'legs' | 'feet', signal: AbortSignal, opts?: { sourceSlot?: number }): Promise<ActionResult>;
   /** item='' performs a legal empty-hand interaction (for example opening an owned door). */
   useBlockAt?(pos: Vec3Like, item: string, signal: AbortSignal): Promise<ActionResult>;
   useItem?(item: string, signal: AbortSignal, opts?: UseItemOptions): Promise<ActionResult>;
@@ -323,9 +345,9 @@ export interface GameAdapter {
   /** 自己挖掉的方块（动作、代码技能、寻路挖穿的都算），since 之后的；用来记自己挖过的通道 */
   recentDug?(since: number): { pos: Vec3Like; name: string; ts: number }[];
   collectNearbyDrops(signal: AbortSignal, radius: number, timeoutMs: number): Promise<number>;
-  /** 自动补做两层以内的前置材料（木板、木棍、工作台…）；tablePos = 记得的工作台位置 */
+  /** 只合成指定目标；prepare:true 才补做两层前置材料并制造/放置工作台。tablePos = 已知工作台位置 */
   /** detail：失败时具体缺什么；tablePos：这次用到的工作台位置（便于记住、下次复用） */
-  craft(item: string, count: number, signal: AbortSignal, opts?: { tablePos?: Vec3Like }): Promise<ActionResult & { crafted: number; detail?: string; tablePos?: Vec3Like }>;
+  craft(item: string, count: number, signal: AbortSignal, opts?: { tablePos?: Vec3Like; prepare?: boolean }): Promise<ActionResult & { crafted: number; detail?: string; tablePos?: Vec3Like }>;
   /** 睡在身边的床上（没有就把背包里的床放下）；一直睡到醒来 */
   /** at：要睡的那张床（村子里几张床挨着时用来认准）；床被村民睡着会先把它叫醒 */
   sleepInBed(signal: AbortSignal, opts?: { at?: Vec3Like }): Promise<ActionResult & { bedPos?: Vec3Like }>;

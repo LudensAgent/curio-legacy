@@ -75,6 +75,10 @@ export interface Senses {
 
 export interface SkillCtx {
   adapter: GameAdapter;
+  /** Task ownership guard before per-skill preparation permissions are applied. */
+  actionAdapter?: GameAdapter;
+  /** Only true authorizes preparation; false also forbids nested opt-in. */
+  make?: boolean;
   senses: Senses;
   memory: WorldMemory;
   bus: EventBus;
@@ -104,6 +108,37 @@ export interface Skill<A = any> {
   outcomeBoundary?: boolean;
   validate(raw: unknown, adapter: GameAdapter): Validation<A>;
   run(ctx: SkillCtx, args: A): Promise<SkillResult>;
+}
+
+/** Preserve shared execution options even when a skill normalizes its own arguments. */
+export function validateSkill<A>(skill: Skill<A>, raw: unknown, adapter: GameAdapter): Validation<A & { make?: boolean }> {
+  const options = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+  if (options.make !== undefined && typeof options.make !== 'boolean') return { ok: false, error: 'make 必须是 boolean' };
+  const validation = skill.validate(raw, adapter);
+  if (!validation.ok) return validation;
+  return { ok: true, args: { ...validation.args, ...(options.make !== undefined ? { make: options.make as boolean } : {}) } };
+}
+
+/** Bind preparation to this explicit action, preserving the task guard across nested calls. */
+export function runSkill<A>(ctx: SkillCtx, skill: Skill<A>, args: A & { make?: boolean }): Promise<SkillResult> {
+  if (ctx.make === false && args.make === true) return Promise.resolve(fail('BAD_ARGS', '外层动作已指定 make:false，嵌套动作不能开启自动准备'));
+  const make = args.make ?? ctx.make;
+  const actionAdapter = ctx.actionAdapter ?? ctx.adapter;
+  const adapter = new Proxy(actionAdapter, {
+    get(target, property) {
+      if (property === 'craft') return (...call: Parameters<GameAdapter['craft']>) => {
+        if (skill.name !== 'craft' && make !== true) throw new Error(`NO_MAKE: 未授权自动准备（make:true），不顺手做 ${call[0]}`);
+        return target.craft(call[0], call[1], call[2], { ...call[3], prepare: make === true });
+      };
+      if (property === 'smelt') return (...call: Parameters<GameAdapter['smelt']>) => target.smelt(call[0], call[1], call[2], call[3], { ...call[4], prepare: make === true });
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return skill.run({ ...ctx, adapter, actionAdapter, make }, args).catch((error: unknown) => {
+    if (isAbort(error)) throw error;
+    return fail(codeFromError(error), error instanceof Error ? error.message : String(error));
+  });
 }
 
 export const ok = (summary: string, data?: Record<string, unknown>): SkillResult => ({ status: 'succeeded', summary, data });

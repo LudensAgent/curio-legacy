@@ -368,6 +368,18 @@ test('边做边想：最后一步做着的时候琢磨下一段（不是一开�
   assert.equal(w.pending.length, 3, '新的一段一开始又在想下一段');
 });
 
+for (const kind of ['new', 'adjust'] as const) test(`即使问的是接下来，明确 ${kind} 仍立即改变当前活动`, async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { monologue: '砍树', decision: 'new', activity: { what: '砍树', steps: [step()] } });
+  await w.tick();
+  assert.equal(w.pending.length, 2);
+  await w.reply(1, { monologue: '现在改做法', decision: kind, activity: { what: '改为收集石头', steps: [step(2)] } });
+  assert.equal(w.mind.lastDecision?.kind, kind);
+  assert.equal(w.mind.activity?.what, '改为收集石头');
+  assert.equal(w.mind.lastDecision?.next, undefined);
+});
+
 test('零碎经验先存着，出乎意料（卡住）才马上记成窍门', async (t) => {
   const w = fixture(t);
   await w.tick();

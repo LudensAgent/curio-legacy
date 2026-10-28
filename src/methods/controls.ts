@@ -5,7 +5,7 @@ import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 /** Buttons and queries, rather than a list of activities the player ought to do. */
 export const BASIC_CONTROLS = [
   'look_around', 'goto', 'inspect_block', 'use_item', 'interact_block', 'interact', 'hit_entity',
-  'dig', 'pickup_items', 'craft', 'equip', 'eat', 'ride', 'dismount', 'climb_up', 'assess_landings', 'descend', 'wait',
+  'look', 'dig', 'dig_at', 'step', 'place_at', 'pickup_items', 'craft', 'hold_item', 'inspect_inventory', 'toss_item', 'use_gui', 'sign_text', 'edit_book', 'eat', 'ride', 'dismount', 'climb_up', 'assess_landings', 'descend', 'wait',
   'query_resource', 'method_catalog', 'experiment_method', 'record_ability_gap',
 ] as const;
 
@@ -18,7 +18,7 @@ export function controlCatalog(disclosed: string[] = [], descriptionChars = 120,
     const skill = SKILLS[name];
     if (!skill || LLM_HIDDEN.has(name)) return [];
     return [`- ${skill.name} ${skill.argsDoc}${descriptionChars ? `：${skill.description.slice(0, descriptionChars)}` : ''}`];
-  }).join('\n');
+  }).join('\n') + '\n共享参数 make：默认不额外制造或放置准备设施；make:true 显式允许准备并消耗材料；make:false 禁止本动作及嵌套技能开启准备。craft 仍可合成本次明确指定的目标物品。';
 }
 
 /** Knowing an interface is not evidence that its effect has been learned. */

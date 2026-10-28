@@ -13,7 +13,7 @@ const count = (inv: { name: string; count: number }[], pred: (n: string) => bool
 export const fish: Skill<{ count: number }> = {
   name: 'fish',
   outcomeBoundary: true,
-  description: '用钓鱼竿在水边钓鱼（没竿且有木棍+线会先做）。钓鱼是没有动物时稳定的食物来源，钓到的生鱼可烤着吃（smelt）',
+  description: '用已有钓鱼竿在可见水边钓指定次数，自动等待咬钩并收竿；缺竿默认返回缺口，make:true 才允许用3木棍和2线制作钓鱼竿并准备前置材料',
   argsDoc: '{"count"?:1-16}',
   timeoutMs: 300000,
   movement: true,
@@ -29,6 +29,7 @@ export const fish: Skill<{ count: number }> = {
     try {
       // ---- 钓鱼竿
       if (!s0.inventory.some((i) => i.name === 'fishing_rod' && i.count > 0)) {
+        if (ctx.make !== true) return fail('MISSING_MATERIALS', '没有钓鱼竿，未制造；可自行准备，或显式 make:true 允许消耗3木棍和2线制作');
         const inv = s0.inventory;
         const string = count(inv, (n) => n === 'string');
         const sticks = count(inv, (n) => n === 'stick') + 4 * count(inv, (n) => n.endsWith('_planks')) + 8 * count(inv, (n) => /_(log|stem)$/.test(n));

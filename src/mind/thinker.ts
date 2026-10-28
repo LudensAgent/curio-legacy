@@ -8,6 +8,7 @@ import { extractJson, normalizeStep, ruleProposal } from '../planner/plan.ts';
 import type { Planner } from '../planner/planner.ts';
 import { validateCondition } from '../projects/conditions.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
+import { validateSkill } from '../skills/types.ts';
 import { buildMindMessages, buildReflectionMessages, moveDetails, type MindContext } from './prompt.ts';
 import type { SelfModel } from './self.ts';
 import { cleanLesson, cleanPlanStep } from './self.ts';
@@ -107,7 +108,7 @@ export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldM
     const skill = SKILLS[name];
     const raw = `${name} ${JSON.stringify(s?.args ?? {}).slice(0, 60)}`;
     if (!skill || LLM_HIDDEN.has(name)) { errors.push(`steps[${i}] 没有 "${name}" 这个技能`); dropped.push(`${raw}（没有这个动作）`); continue; }
-    const v = skill.validate(s?.args ?? {}, adapter);
+    const v = validateSkill(skill, s?.args ?? {}, adapter);
     if (!v.ok) { errors.push(`steps[${i}] ${name} 参数错误：${v.error}`); dropped.push(`${raw}（参数写错）`); continue; }
     const optional = !!s0 && typeof s0 === 'object' && ((s0 as any).optional === true || (s0 as any).opportunistic === true);
     steps.push({ skill: name, args: v.args, ...(optional ? { optional: true } : {}) });

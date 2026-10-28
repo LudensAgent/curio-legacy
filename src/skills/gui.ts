@@ -1,4 +1,4 @@
-import type { GuiOp, GuiView, TradeView, Vec3Like } from '../adapter/types.ts';
+import type { GuiOp, GuiTarget, GuiView, TradeView, Vec3Like } from '../adapter/types.ts';
 import { dist3 } from '../util.ts';
 import { glanceAt, inspectBlock } from './observation.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill } from './types.ts';
@@ -24,7 +24,7 @@ const parseOps = (raw: unknown, adapter: Parameters<typeof resolveItemAlias>[1])
   const out: GuiOp[] = [];
   for (const r of raw) {
     const o = obj(r);
-    const slotOf = (v: unknown) => (Number.isInteger(Number(v)) && Number(v) >= 0 && Number(v) < 64 ? Number(v) : null);
+    const slotOf = (v: unknown) => (Number.isInteger(Number(v)) && Number(v) >= 0 && Number(v) < 256 ? Number(v) : null);
     if (o.put !== undefined) {
       const p = obj(o.put);
       const item = resolveItemAlias(String(p.item ?? '').trim().replace(/^minecraft:/, ''), adapter);
@@ -33,7 +33,9 @@ const parseOps = (raw: unknown, adapter: Parameters<typeof resolveItemAlias>[1])
       if (slot === null) return 'put 需要 slot（界面里的格子号）';
       const count = p.count === undefined ? undefined : Number(p.count);
       if (count !== undefined && (!Number.isInteger(count) || count < 1 || count > 64)) return 'put.count 必须是 1-64';
-      out.push({ put: { item, slot, ...(count ? { count } : {}) } });
+      const sourceSlot = p.sourceSlot === undefined ? undefined : slotOf(p.sourceSlot);
+      if (sourceSlot === null) return 'put.sourceSlot 必须是本次界面显示的背包源槽号';
+      out.push({ put: { item, slot, ...(count ? { count } : {}), ...(sourceSlot !== undefined ? { sourceSlot } : {}) } });
     } else if (o.take !== undefined) {
       const slot = slotOf(typeof o.take === 'object' ? obj(o.take).slot : o.take);
       if (slot === null) return 'take 需要 slot';
@@ -46,22 +48,35 @@ const parseOps = (raw: unknown, adapter: Parameters<typeof resolveItemAlias>[1])
       const name = String(o.rename).slice(0, 50);
       if (!name.trim()) return 'rename 不能为空';
       out.push({ rename: name });
+    } else if (o.click !== undefined) {
+      const c = obj(o.click), slot = Number(c.slot), button = Number(c.button), mode = Number(c.mode ?? 0);
+      const buttons = [[0, 1], [0, 1], Array.from({ length: 9 }, (_, i) => i), [2], [0, 1]];
+      if (!Number.isInteger(slot) || slot !== -999 && (slot < 0 || slot >= 256) || !Number.isInteger(mode) || !buttons[mode]?.includes(button)) return '当前适配器只支持 mode 0普通/1shift/2快捷栏0-8/3创造克隆/4丢弃；拖拽、双击和副手交换请组合普通槽位点击；slot:-999 会丢弃光标物品';
+      out.push({ click: { slot, button, mode: mode as 0 | 1 | 2 | 3 | 4 } });
+    } else if (o.beacon !== undefined) {
+      const b = obj(o.beacon);
+      const effect = (v: unknown) => v === null || Number.isInteger(v) && Number(v) >= 1 && Number(v) <= 33;
+      if (!effect(b.primary) || !effect(b.secondary)) return 'beacon.primary/secondary 要是效果ID（1-33）或 null';
+      out.push({ beacon: { primary: b.primary, secondary: b.secondary } });
     } else return `看不懂的操作：${JSON.stringify(r)}`;
   }
   return out;
 };
 
 // ------------------------------------------------------------------ use_gui
-export const useGui: Skill<{ target: string | Vec3Like; ops: GuiOp[] }> = {
+export const useGui: Skill<{ target: string | Vec3Like | { entityId: number }; ops: GuiOp[] }> = {
   name: 'use_gui',
-  description: '打开看得见的方块界面（铁砧、锻造台、砂轮、切石机、酿造台、附魔台、织布机、漏斗等），看每格放着什么，按格子放入/取出/点按钮',
-  argsDoc: '{"target":"<方块名>"|{x,y,z},"ops"?:[{"put":{"item","slot","count"?}}|{"take":{"slot"}}|{"button":n}|{"rename":"名字"}]}，不带 ops 只看',
+  description: '打开可见工作站/容器、指定实体容器（坐骑需已骑上）或自己的背包；返回槽号、物品属性和光标。按槽放取、点击或选择信标效果。点击窗外会丢弃；改名先确认产物预览，需取出才完成',
+  argsDoc: '{"target":"<方块名>|inventory"|{x,y,z}|{"entityId":n},"ops"?:[{"put":{"item","slot","count"?,"sourceSlot"?}}|{"take":{"slot"}}|{"button":n}|{"rename":"名字"}|{"click":{"slot":n,"button":0,"mode":0}}|{"beacon":{"primary":1,"secondary":null}}]}，不带 ops 只看；sourceSlot使用本次窗口槽号；click mode只支持0普通/1shift/2快捷栏/3创造克隆/4丢弃',
   timeoutMs: 45000,
   movement: true,
   outcomeBoundary: true,
   validate(raw, adapter) {
     const a = obj(raw);
-    const target = inspectBlock.validate({ target: a.target }, adapter);
+    const entityId = a.target && typeof a.target === 'object' ? a.target.entityId : undefined;
+    const target = a.target === 'inventory' ? { ok: true as const, args: { target: 'inventory' } }
+      : entityId !== undefined ? Number.isInteger(entityId) && entityId >= 0 ? { ok: true as const, args: { target: { entityId } } } : { ok: false as const, error: 'entityId 必须是非负整数' }
+      : inspectBlock.validate({ target: a.target }, adapter);
     if (!target.ok) return target;
     const ops = parseOps(a.ops, adapter);
     if (typeof ops === 'string') return { ok: false, error: ops };
@@ -71,22 +86,32 @@ export const useGui: Skill<{ target: string | Vec3Like; ops: GuiOp[] }> = {
     const { adapter, senses, signal } = ctx;
     if (!adapter.useGui) return fail('ERROR', '当前适配器不支持界面操作');
     try {
-      const names = typeof args.target === 'string' ? [args.target, ...adapter.resolveBlockNames(args.target)] : null;
-      senses.refresh();
-      const candidates: Vec3Like[] = names ? senses.knownBlocks(names, 32).slice(0, 8).map((h) => h.pos) : [args.target as Vec3Like];
-      const seen = () => {
+      let target: GuiTarget;
+      if (args.target === 'inventory') target = 'inventory';
+      else if (typeof args.target === 'object' && 'entityId' in args.target) {
+        const id = args.target.entityId;
         senses.refresh();
-        if (!senses.observeBlocks) return candidates.filter((p) => !names || names.includes(adapter.blockAt(p) ?? ''));
-        return senses.observeBlocks(candidates).filter((o) => o.source === 'vision' && (!names || names.includes(o.name))).map((o) => o.pos);
-      };
-      let spots = seen();
-      if (!spots.length && candidates[0]) { await glanceAt(ctx, candidates[0]); spots = seen(); }
-      const here = adapter.state().pos;
-      const pos = spots.sort((p, q) => dist3(here, p) - dist3(here, q))[0];
-      if (!pos) return fail('NOT_FOUND', `看不见${typeof args.target === 'string' ? ` ${args.target}` : '这个方块'}（转头看过也没有；记忆里的坐标不能代替看见）`);
-      const r = await adapter.useGui(pos, args.ops, signal);
+        if (!senses.perceivedEntities(32).some((e) => e.id === id && e.perception !== 'heard')) return fail('NOT_FOUND', '当前看不见指定实体，未打开容器');
+        target = args.target;
+      } else {
+        const names = typeof args.target === 'string' ? [args.target, ...adapter.resolveBlockNames(args.target)] : null;
+        senses.refresh();
+        const candidates: Vec3Like[] = names ? senses.knownBlocks(names, 32).slice(0, 8).map((h) => h.pos) : [args.target as Vec3Like];
+        const seen = () => {
+          senses.refresh();
+          return (senses.observeBlocks?.(candidates) ?? []).filter((o) => o.source === 'vision' && (!names || names.includes(o.name))).map((o) => o.pos);
+        };
+        let spots = seen();
+        if (!spots.length && candidates[0]) { await glanceAt(ctx, candidates[0]); spots = seen(); }
+        const here = adapter.state().pos;
+        const pos = spots.sort((p, q) => dist3(here, p) - dist3(here, q))[0];
+        if (!pos) return fail('NOT_FOUND', `看不见${typeof args.target === 'string' ? ` ${args.target}` : '这个方块'}（转头看过也没有；记忆里的坐标不能代替看见）`);
+        target = pos;
+      }
+      const pos = target;
+      const r = await adapter.useGui(target, args.ops, signal);
       // 熔炉类：关掉后里面的东西留着，记下来（取空了就忘掉）
-      if (r.view && /^(furnace|blast_furnace|smoker)$/.test(r.view.type)) {
+      if (typeof pos === 'object' && 'x' in pos && r.view && /^(furnace|blast_furnace|smoker)$/.test(r.view.type)) {
         const at = (i: number) => { const x = r.view!.slots.find((sl) => sl.slot === i); return x?.name && x.count > 0 ? { name: x.name, count: x.count } : null; };
         ctx.memory.setFurnace({ dim: adapter.state().dim, pos, block: r.view.type, input: at(0), output: at(2), fuel: at(1), burning: false });
       }
@@ -96,7 +121,7 @@ export const useGui: Skill<{ target: string | Vec3Like; ops: GuiOp[] }> = {
         const code = r.reason?.startsWith('NO_ITEM') ? 'MISSING_MATERIALS' : r.reason?.startsWith('NOT_OPENABLE') ? 'BAD_ARGS' : 'ERROR';
         return fail(code, `界面操作没做完：${r.reason}。${did}${view}`, { pos, done: r.done, view: r.view });
       }
-      return ok(`${did}${view}${args.ops.length ? '' : '（只看了一眼，没有动）'}；关掉后工作站里剩下的输入会退回背包，熔炉/酿造台/漏斗里的会留在里面`, { pos, done: r.done, view: r.view });
+      return ok(`${did}${view}${args.ops.length ? '' : '（只看了一眼，没有动）'}；窗口已关闭，工作站输入是否保留取决于该界面的游戏规则`, { target, done: r.done, view: r.view });
     } catch (e) {
       if (isAbort(e)) throw e;
       return fail(codeFromError(e), `界面操作出错：${(e as Error).message}`);

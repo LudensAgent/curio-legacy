@@ -2,7 +2,7 @@ import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 
 // These are general operations exposed by the current registry, not recipes
 // for situations. Specialized workflows remain searchable as composites.
-const PRIMITIVES = ['use_item', 'interact_block', 'interact', 'ride', 'dismount', 'dig', 'hit_entity', 'inspect_block', 'craft', 'look_around', 'goto', 'pickup_items', 'climb_up', 'assess_landings', 'descend', 'eat', 'wait', 'guard'];
+const PRIMITIVES = ['use_item', 'interact_block', 'interact', 'ride', 'dismount', 'dig', 'dig_at', 'step', 'place_at', 'hit_entity', 'inspect_block', 'craft', 'look', 'look_around', 'goto', 'pickup_items', 'hold_item', 'inspect_inventory', 'toss_item', 'use_gui', 'sign_text', 'edit_book', 'climb_up', 'assess_landings', 'descend', 'eat', 'wait', 'guard'];
 const ALIASES: Record<string, string[]> = {
   use_item: ['右键', '使用物品', '放置', '放下', 'right click', 'use item', 'place', 'place block'],
   interact_block: ['空手右键', '方块交互', '开门', '关门', '点击方块', '门', '按钮', '拉杆', 'activate block', 'right click block', 'door', 'button', 'lever'],

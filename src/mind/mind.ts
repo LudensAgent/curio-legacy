@@ -1055,8 +1055,9 @@ export class Mind {
     }
     this.applyPlan(decision);
     this.guardFocus(decision, thoughtAboutActivity, !!info.urgent);
-    // 问的是“这段快干完了，接下来做什么”：写成 activity 的回答当作下一段（排在手上这段之后），不打断快做完的活
-    if (info.nearEnd && !info.urgent && decision.activity && !decision.next && ['new', 'adjust', 'continue'].includes(decision.kind)
+    // Only an explicit continue can supply its missing next draft this way.
+    // new/adjust/switch retain the Agent's request to change the current work.
+    if (info.nearEnd && !info.urgent && decision.activity && !decision.next && decision.kind === 'continue'
       && this.activity && this.activity.id === thoughtAboutActivity && this.activity.consecutiveFailures === 0) {
       decision.next = decision.activity;
       delete decision.activity;
@@ -1279,32 +1280,20 @@ export class Mind {
     }
   }
 
-  /**
-   * 专注：真人不会因为天黑、缺几块木头就忘了自己在盖房子。
-   * - 瞥一眼时不能整个换掉手上的事（switch → detour，做完自动回来）；有主目标时认真想也要写 switch_reason 才能换。
-   * - 刚开工、还顺利的活，瞥一眼时不马上改做法：改动排在这段做完之后。
-   * 要紧的事（危险、快饿死）不受限制。
-   */
+  /** Focus reminders preserve the Agent's explicit choice and scheduling. */
   private guardFocus(decision: MindDecision, thoughtAboutActivity: string | null, urgent: boolean) {
     const a = this.activity;
     if (!a || urgent || !decision.activity) return;
-    // 瞥一眼时不整个换掉手上的事（认真想过就可以换：主目标值不值得，它自己判断）
     if (decision.kind === 'switch' && decision.tier === 'glance') {
-      decision.kind = 'detour';
-      decision.notes.push(`瞥一眼时不整个换掉手上的事：这次按 detour 处理，做完「${decision.activity.what}」会回到「${a.what}」；真要换就认真想一想`);
+      decision.notes.push(`这次 switch 会放下「${a.what}」，不会自动回来；保留你的明确决定`);
       return;
     }
-    // 瞥一眼时想改做法，而手上这一步正在顺利做（动作还在跑、没失败过）：不当场打断。
-    // 以前只护“开工 25 秒内”、而且排队的位置被占了就放行，结果每隔十几秒瞥一眼就把正在挖的台阶取消重来，活永远做不完
     const running = this.d.arbiter.info();
     const stepRunning = !!running && running.source !== 'filler' && running.source !== 'reflex' && running.planId === a.id;
     const young = Date.now() - this.activityThoughtAt < 25_000;
     if (decision.kind === 'adjust' && decision.tier === 'glance' && a.id === thoughtAboutActivity && a.failures === 0
       && (young || stepRunning || decision.saidContinue)) {
-      const replaced = !!this.queuedNext;
-      this.queuedNext = { draft: decision.activity, monologue: decision.monologue, at: Date.now() };
-      decision.kind = 'continue';
-      decision.notes.push(`「${a.what}」${stepRunning ? '手上这一步正在做' : '刚开工'}、还顺利，先不打断：你想的「${decision.activity.what}」排在它做完之后${replaced ? '（替换了之前排着的那段）' : ''}`);
+      decision.notes.push(`「${a.what}」${stepRunning ? '手上这一步正在做' : '刚开工'}、尚未失败；这次按你明确选择的 adjust 改做法`);
     }
   }
 
@@ -1458,7 +1447,7 @@ export class Mind {
   }
   onDeath(info: { cause?: string; hazard?: Hazard | null; during?: string; message?: string } = {}) {
     // 游戏的死亡播报是原话（“Curio was blown up by Creeper”），比推测的死因可靠
-    const cause = info.message ? `游戏播报：${info.message}` : info.cause ? causeName(info.cause as any) ?? info.cause : '不明原因';
+    const cause = info.message ? `游戏播报：${info.message}` : info.cause ? causeName(info.cause) : '不明原因';
     this.deathAt = Date.now();
     this.deathTold = !!info.message;
     this.suspend('death');

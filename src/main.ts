@@ -61,7 +61,7 @@ import { MemorySpend, llmSpend, withMemory } from './observer/llm-spend.ts';
 import { SkillLibrary } from './skills/library.ts';
 import { ExperienceMiner } from './methods/experience.ts';
 import type { TaskOutcome } from './arbiter/arbiter.ts';
-import { deathCause, habitName, hazardLesson, learnCandidates, signatureOf, type VitalSample } from './brain/habits.ts';
+import { deathCause, habitName, hazardFact, learnCandidates, signatureOf, type VitalSample } from './brain/habits.ts';
 import type { MySkillInfo } from './planner/prompt.ts';
 import { ObserverFeed, createObserverHandler, installMineflayerObserver, installTaskObserver, type MineflayerBotLike, type MineflayerObserver } from 'curio-observer';
 
@@ -332,7 +332,8 @@ if (feed) setInterval(() => {
 if (feed) setInterval(() => {
   try {
     const s = adapter.state();
-    feed.landmarks(hudLandmarks(memory.landmarks(), s.observationReady ? { pos: s.pos, dim: s.dim } : null));
+    feed.landmarks(hudLandmarks(memory.landmarks(), s.observationReady ? { pos: s.pos, dim: s.dim } : null)
+      .map((landmark) => ({ ...landmark, kind: landmark.kind === 'herd' ? 'discovery' as const : landmark.kind })));
   } catch { /* 还没连上服务器 */ }
 }, 1000).unref();
 if (memory.migrated) bus.publish('memory', 'P1', `清理了 ${memory.migrated} 个旧版本留下的地标（当时的矿物位置是穿墙搜到的，不算亲眼所见）`);
@@ -421,21 +422,22 @@ adapter.on('death', () => {
   sampleVitals();
   const told = recentDeathMessage();
   const guessed = deathCause(vitals, lastHurt);
-  const cause = told?.parsed.cause && told.parsed.cause !== 'unknown' ? told.parsed.cause : guessed;
+  const cause = told?.parsed.cause && told.parsed.cause !== 'unknown' ? told.parsed.cause : 'unknown';
+  const causeSource = told ? 'game_message' : guessed !== 'unknown' ? 'state_inference' : 'unknown';
+  const causeText = told ? `游戏播报：${told.text}` : guessed !== 'unknown' ? `状态推测死因：${guessed}（未经游戏播报确认）` : '死因未确认';
   const during = vitals.at(-1)?.task ?? lastWork;
   vitals = [];
   let hazard: ReturnType<typeof memory.addHazard> | null = null;
   try {
-    const h = hazard = memory.addHazard({ dim: s.dim, pos: s.pos, kind: cause, ...(during ? { during } : {}) });
-    const text = hazardLesson(h);
-    memory.addLesson(text, { source: 'observed', key: `hazard:${h.id}` });
-    bus.publish('lesson', 'P2', `亲历经验：${text}`, { source: 'observed', hazard });
+    const h = hazard = memory.addHazard({ dim: s.dim, pos: s.pos, kind: cause, note: told ? causeText : '死因未确认', ...(during ? { during } : {}) });
+    memory.addNote('fact', hazardFact(h), s.dim, s.pos);
+    if (causeSource === 'state_inference') memory.addNote('inference', causeText, s.dim, s.pos);
   } catch (e) { bus.publish('memory', 'P1', `记录危险区域失败：${String((e as Error)?.message ?? e)}`); }
   memory.addLandmark('death', '死亡地点', s.dim, s.pos, 4);
-  memory.setDeath({ ts: Date.now(), dim: s.dim, pos: s.pos, lost: invSnapshot, cause, ...(told ? { message: told.text } : {}) });
+  memory.setDeath({ ts: Date.now(), dim: s.dim, pos: s.pos, lost: invSnapshot, cause: causeText, ...(told ? { message: told.text } : {}) });
   awaitingRespawnLoss = true;
-  bus.publish('death', 'P0', `死亡 @ (${Math.round(s.pos.x)}, ${Math.round(s.pos.y)}, ${Math.round(s.pos.z)})，死因：${told ? told.text : cause}${during ? `（在做 ${during}）` : ''}`, { cause, during, ...(told ? { message: told.text } : {}) });
-  executive.onDeath({ cause, hazard, during, ...(told ? { message: told.text } : {}) });
+  bus.publish('death', 'P0', `死亡 @ (${Math.round(s.pos.x)}, ${Math.round(s.pos.y)}, ${Math.round(s.pos.z)})，${causeText}${during ? `（在做 ${during}）` : ''}`, { cause, causeSource, ...(causeSource === 'state_inference' ? { suspectedCause: guessed } : {}), during, ...(told ? { message: told.text } : {}) });
+  executive.onDeath({ cause: causeText, hazard, during, ...(told ? { message: told.text } : {}) });
 });
 // 盾挡下了一击：副手盾的耐久掉了而人没挨打。这是举盾有用的直接反馈（给心智和学技能的看）
 let shieldDurSeen: number | null = null;

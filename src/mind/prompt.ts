@@ -225,7 +225,7 @@ ${READING}
 - 在地表就走路，在坑里或地下（看【身体】where）才挖；身边一格的事对照【身边】local 用 dig_at / step / place_at 写确切坐标。
 - 要翻技能书、请建筑师、查配方/游戏资料或想得更深：直接输出查询，如 {"kind":"knowledge","query":"问题"}、{"kind":"design","brief":"…"}、{"kind":"skill","name":"…"}、{"kind":"deliberate","reason":"…"}（转成认真想）。knowledge 先搜候选再读章节，摘录不等于读完或学会；资料不代表现场事实。
 ${skills.length ? `技能书：${skills.map((x) => x.split('：')[0]).join('、')}（带步骤的可以 use_skill 调用）。` : ''}盖新房子先 design 拿图纸，再 build {"draft":"图纸ID"}；不要自己画图纸。
-- 有【专注】的主目标就接着推进清单；天黑、饿了、缺料用 detour 插一段，做完会回来；瞥一眼不能 switch。做完清单一项写 "plan":{"done":[序号]}。
+- 有【专注】的主目标时，可用 detour 暂时插一段并自动回来；明确决定放下当前活动用 switch，想立即改做法用 adjust，瞥一眼也能选择。系统可能提示打断的影响，但不会把 switch/adjust 改成其它决定。做完清单一项写 "plan":{"done":[序号]}。
 - 刚从卡住里找到办法、想把它变成身体的习惯：转成认真想（{"kind":"deliberate","reason":"写技能"}）。
 
 ${CHOOSE}

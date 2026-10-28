@@ -85,24 +85,16 @@ export function deathCause(samples: VitalSample[], lastHurtAt = 0, now = Date.no
 
 const RANGED = /skeleton|stray|bogged|creeper|pillager|blaze|ghast|witch|drowned|shulker|wither|guardian/;
 
-const CAUSE_TEXT: Record<HazardKind, [string, string]> = {
-  drowning: ['淹死', '别在这一带往下挖或潜水；挖进水里先往上游、离开水边'],
-  lava: ['掉进岩浆', '这一带地下有岩浆，挖矿时别直着往下挖，先看清脚下'],
-  fall: ['摔死', '这里有落差，走边缘时慢一点、别从高处跳'],
-  mob: ['被怪打死', '这附近危险，天黑前躲好、带上武器或绕开'],
-  // 不是怪干的爆炸（下界/末地睡床、重生锚、TNT）：是什么炸的看游戏播报，经验由它自己总结，这里不替它下结论
-  explosion: ['被炸死', '这里炸过：想想刚才碰了什么、为什么会炸'],
-  starvation: ['饿死', '出远门前先备好食物，饿了就先找吃的'],
-  suffocation: ['窒息而死', '别在会塌的沙砾下面挖'],
-  unknown: ['死过', '这附近出过事，小心'],
+const CAUSE_TEXT: Record<HazardKind, string> = {
+  drowning: '淹死', lava: '掉进岩浆', fall: '摔死', mob: '被怪打死',
+  explosion: '被炸死', starvation: '饿死', suffocation: '窒息而死', unknown: '死亡',
 };
 
-export const causeName = (kind: HazardKind | string) => CAUSE_TEXT[kind as HazardKind]?.[0] ?? String(kind);
+export const causeName = (kind: HazardKind | string) => CAUSE_TEXT[kind as HazardKind] ?? String(kind);
 
-/** “在 (x,y,z) 附近做 gather stone 时淹死过 3 次：别在这一带挖” */
-export function hazardLesson(h: { pos: { x: number; y: number; z: number }; kind: HazardKind; count: number; during?: string }): string {
-  const [what, advice] = CAUSE_TEXT[h.kind];
-  return `在 (${h.pos.x},${h.pos.y},${h.pos.z}) 附近${h.during ? `做 ${h.during} 时` : ''}${what}过 ${h.count} 次：${advice}`;
+/** Record what happened without turning a fixed strategy into personal learning. */
+export function hazardFact(h: { pos: { x: number; y: number; z: number }; kind: HazardKind; count: number; during?: string; note?: string }): string {
+  return `在 (${h.pos.x},${h.pos.y},${h.pos.z}) 附近${h.during ? `做 ${h.during} 时` : ''}${causeName(h.kind)}过 ${h.count} 次${h.note ? `；${h.note}` : ''}`;
 }
 
 /** 与 Executive 记录目标时相同的步骤签名 */

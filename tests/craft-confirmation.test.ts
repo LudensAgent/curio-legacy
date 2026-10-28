@@ -41,7 +41,7 @@ test('real recipe graph confirms 2x2 server inventory and replenishes planks con
   };
   adapter.bot = bot; adapter.mcData = data; (adapter as any).connectedFlag = true;
   adapter.moveTo = async () => {};
-  const result = await adapter.craft('wooden_pickaxe', 1, new AbortController().signal);
+  const result = await adapter.craft('wooden_pickaxe', 1, new AbortController().signal, { prepare: true });
   assert.equal(result.ok, true, result.reason);
   assert.equal(result.crafted, 1);
   assert.equal(server.get(data.itemsByName.wooden_pickaxe.id), 1);
@@ -107,7 +107,7 @@ function bedWorld(items: [string, number][], tableNearby = true) {
 
 test('床：羊毛和木板够、旁边有工作台时能做出来（原来误判成不需要工作台，只试 2×2 染色配方）', async () => {
   const w = bedWorld([['white_wool', 4], ['oak_planks', 5]]);
-  const r = await w.adapter.craft('white_bed', 1, new AbortController().signal);
+  const r = await w.adapter.craft('white_bed', 1, new AbortController().signal, { prepare: true });
   assert.equal(r.ok, true, `${r.reason} ${r.detail ?? ''}`);
   assert.equal(w.count('white_bed'), 1);
   assert.equal(w.count('white_wool'), 1);
@@ -116,7 +116,7 @@ test('床：羊毛和木板够、旁边有工作台时能做出来（原来误�
 
 test('床：混着几种木板也能做（原版允许任意木板）', async () => {
   const w = bedWorld([['white_wool', 3], ['oak_planks', 1], ['birch_planks', 2]]);
-  const r = await w.adapter.craft('white_bed', 1, new AbortController().signal);
+  const r = await w.adapter.craft('white_bed', 1, new AbortController().signal, { prepare: true });
   assert.equal(r.ok, true, `${r.reason} ${r.detail ?? ''}`);
   assert.equal(w.count('white_bed'), 1);
   assert.equal(w.count('oak_planks') + w.count('birch_planks'), 0);
@@ -124,7 +124,7 @@ test('床：混着几种木板也能做（原版允许任意木板）', async ()
 
 test('床：材料真不够时说清楚缺什么', async () => {
   const w = bedWorld([['white_wool', 2], ['oak_planks', 3]]);
-  const r = await w.adapter.craft('white_bed', 1, new AbortController().signal);
+  const r = await w.adapter.craft('white_bed', 1, new AbortController().signal, { prepare: true });
   assert.equal(r.ok, false);
   assert.equal(r.reason, 'MISSING_MATERIALS');
   assert.match(r.detail ?? '', /white_wool 还差 1/);

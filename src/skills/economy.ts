@@ -33,7 +33,7 @@ function noteFurnace(ctx: SkillCtx, l: import('../adapter/types.ts').FurnaceLeav
 
 export const smelt: Skill<{ item: string; count: number }> = {
   name: 'smelt',
-  description: `用熔炉烧东西（自动找记得的熔炉；没有就用 8 圆石做一个放下；燃料自动选煤/木炭/木板/原木）。可烧：生铁→铁锭、生肉→熟肉、原木→木炭（可做火把）、沙子→玻璃、圆石→石头等`,
+  description: `用已有熔炉烧指定物品，燃料按煤/木炭/木板/原木选择；缺熔炉默认返回缺口。make:true 才允许制造和放置熔炉（消耗8圆石或背包熔炉）。可烧生铁、生肉、原木、沙子、圆石等`,
   argsDoc: '{"item": "raw_iron|beef|oak_log|sand|…", "count"?: 1-64}',
   timeoutMs: 600000,
   movement: false,
@@ -145,6 +145,7 @@ const nameMatch = (pattern: string, name: string) => pattern.includes('*') ? new
 async function ensureChest(ctx: SkillCtx): Promise<Vec3Like | null> {
   const known = findStation(ctx, ['chest'], 48);
   if (known) return known.pos;
+  if (ctx.make !== true) return null;
   const s = ctx.adapter.state();
   if (!s.inventory.some((i) => i.name === 'chest')) {
     const r = await ctx.adapter.craft('chest', 1, ctx.signal);
@@ -166,7 +167,7 @@ async function ensureChest(ctx: SkillCtx): Promise<Vec3Like | null> {
 
 export const storeItems: Skill<{ items: StoreSpec[]; note?: string }> = {
   name: 'store_items',
-  description: '点名存进箱子：用不上的存，要用的留。可以给箱子起个名（note，如“放矿的”），以后找东西想得起来',
+  description: '把点名物品存入已有箱子，可用 note 记用途；缺箱子默认返回缺口，make:true 才允许合成和放置新箱子（消耗8木板或背包箱子）',
   argsDoc: '{"items":["dirt:32","granite",…], "note"?: "放矿的"}（也收 [{"name":"dirt","count":32}]）',
   timeoutMs: 90000,
   movement: true,
@@ -194,7 +195,7 @@ export const storeItems: Skill<{ items: StoreSpec[]; note?: string }> = {
     const missing = (plan: InvItem[]) => args.items.filter((s) => !plan.some((d) => nameMatch(s.name, d.name))).map((s) => s.name);
     if (!planFor(ctx.adapter.state().inventory).length) return ok(`背包里没有 ${args.items.map((s) => s.name).join('、')}，没什么可存`);
     const pos = await ensureChest(ctx);
-    if (!pos) return fail('MISSING_MATERIALS', '没有箱子也做不了（需要 8 木板）');
+    if (!pos) return fail('MISSING_MATERIALS', ctx.make === true ? '未能准备可用箱子（制造需要8木板，也需要可放置的位置）' : '没有已知可用箱子，未制造或放置；可自行准备，或显式 make:true 允许消耗8木板制作并放置箱子');
     const s = ctx.adapter.state();
     const plan = planFor(s.inventory); // 做箱子可能用掉了木板，重算
     if (!plan.length) return ok('背包里已经没有要存的东西了');
@@ -363,7 +364,7 @@ export const collectSeeds: Skill<{ count: number }> = {
 
 export const farm: Skill<{ crop: string; size: number }> = {
   name: 'farm',
-  description: '经营农田：成熟的作物收割并补种；没有农田就在脚边开垦一块（需要锄头，会自动用木板/圆石+木棍做；需要种子：wheat_seeds 可用 collect_seeds 获得，carrot/potato 直接种）。稳定的食物来源',
+  description: '经营农田：收割成熟作物并补种，或按 crop/size 在附近开垦；消耗对应种子并使用锄头。缺锄头默认返回缺口，make:true 才允许消耗木板/圆石和木棍制作锄头',
   argsDoc: '{"crop"?: "wheat|carrot|potato|beetroot", "size"?: 4-25}',
   timeoutMs: 240000,
   movement: true,
@@ -382,6 +383,7 @@ export const farm: Skill<{ crop: string; size: number }> = {
 
     if (!f) {
       if (!s.inventory.some((i) => i.name.endsWith('_hoe'))) {
+        if (ctx.make !== true) return fail('MISSING_MATERIALS', '没有锄头，未制造；请自行准备，或显式 make:true 授权制作');
         const hoe = s.inventory.some((i) => i.name === 'cobblestone') ? 'stone_hoe' : 'wooden_hoe';
         const r = await adapter.craft(hoe, 1, signal);
         if (!r.ok) return fail('MISSING_MATERIALS', `没有锄头也做不了（${hoe}：2 ${hoe === 'stone_hoe' ? '圆石' : '木板'} + 2 木棍）`);

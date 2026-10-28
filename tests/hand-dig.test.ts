@@ -37,10 +37,11 @@ test('空手挖石头：挖得掉，只是不掉东西（不再一律报“没�
   assert.deepEqual(dug, ['stone']);
 });
 
-test('空手挖黑曜石这种要挖半分钟以上的：仍然挖不动', async () => {
+test('空手挖黑曜石超出身体预算：报告时间限制，不冒充游戏规则或工具缺失', async () => {
   const { bot, dug } = botWith('obsidian', 250_000);
   const r = await adapterWith(bot).dig({ x: 1, y: 64, z: 0 }, new AbortController().signal);
-  assert.deepEqual(r, { ok: false, reason: 'TOOL_MISSING' });
+  assert.equal(r.ok, false);
+  assert.match(r.reason ?? '', /HAND_DIG_TIMEOUT.*不代表游戏禁止空手/);
   assert.deepEqual(dug, []);
 });
 
