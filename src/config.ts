@@ -2,9 +2,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { memorySettings } from './memory/settings.ts';
 
-if (fs.existsSync('.env') && typeof (process as any).loadEnvFile === 'function') {
-  (process as any).loadEnvFile('.env');
-}
+const selectedEnv = process.execArgv.find((arg) => arg.startsWith('--env-file='))?.slice('--env-file='.length)
+  || process.env.ENV_FILE?.trim();
+export const envFile = path.resolve(selectedEnv || '.env');
+const hasEnv = fs.existsSync(envFile);
+if (selectedEnv && !hasEnv) throw new Error(`找不到配置文件：${envFile}`);
+if (hasEnv) process.loadEnvFile(envFile);
 
 const str = (k: string, d = '') => (process.env[k] ?? d).trim();
 const num = (k: string, d: number) => {
@@ -18,8 +21,12 @@ const bool = (k: string, d: boolean) => {
 };
 
 const observer = str('OBSERVER_PLAYER');
+const configuredMode = str('CURIO_MODE', 'local');
+if (configuredMode !== 'local' && configuredMode !== 'live') throw new Error('CURIO_MODE 必须为 local 或 live');
+const mode = path.basename(envFile) === '.env.live' ? 'live' : configuredMode;
 
 export const config = {
+  mode,
   mc: {
     host: str('MC_HOST', '127.0.0.1'),
     port: num('MC_PORT', 25565),
@@ -184,3 +191,7 @@ export const config = {
 };
 
 export type Config = typeof config;
+
+export function requireLocalMode(action: string) {
+  if (config.mode === 'live') throw new Error(`直播配置不执行${action}，请使用本地配置。`);
+}

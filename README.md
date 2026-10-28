@@ -1,5 +1,7 @@
 # Minecraft Curiosity Agent · MVP
 
+本地测试与直播可以使用独立配置：`npm run start:local` 读取 `.env.local`，`npm run start:live` 读取 `.env.live`。本地 `save:local` / `load:local` 管理测试世界，直播连接 Mac 服务并拒绝本地维护。配置准备和目录隔离见 [本地测试与直播配置分离](docs/local-live-profiles.md)。
+
 一个**可验证、可观测**的最小版本，满足三件事：
 
 | 要求 | 实现方式 |

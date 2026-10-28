@@ -35,7 +35,7 @@ export interface AgentMeta {
   adopted?: boolean;
 }
 
-export interface AgentPaths { projectDir: string; dataDir: string; serverDir: string; agentsDir: string }
+export interface AgentPaths { projectDir: string; dataDir: string; serverDir: string; agentsDir: string; envFile?: string }
 
 /** Hindsight 的 bank 操作（导出、恢复、在不在）；本地记忆模式下不传 */
 export interface BankOps {
@@ -154,11 +154,11 @@ export async function saveActive(paths: AgentPaths, ident: { worldId: string; bo
   SERVER_CONFIG.filter((n) => exists(path.join(paths.serverDir, n))).forEach((n) => {
     fs.cpSync(path.join(paths.serverDir, n), path.join(tmp, 'config', 'server', n), { recursive: true });
   });
-  const env = path.join(paths.projectDir, '.env');
+  const env = paths.envFile ?? path.join(paths.projectDir, '.env');
   if (exists(env)) fs.copyFileSync(env, path.join(tmp, 'config', '.env'));
   if (opts.bank && opts.bankSettings) writeJson(path.join(tmp, 'config', 'hindsight.json'), opts.bankSettings);
   const saved = { ...meta, savedAt: Date.now() };
-  writeJson(path.join(tmp, META), { ...saved, hindsight: !!opts.bank, dataDir: path.resolve(paths.dataDir), serverDir: path.resolve(paths.serverDir) });
+  writeJson(path.join(tmp, META), { ...saved, hindsight: !!opts.bank, dataDir: path.resolve(paths.dataDir), serverDir: path.resolve(paths.serverDir), envFile: path.resolve(env) });
   writeJson(path.join(tmp, 'data', META), saved);
   keepPrevious(paths, meta.id, 'save');
   move(tmp, s.save);
@@ -173,13 +173,17 @@ export async function loadActive(paths: AgentPaths, opts: { bank?: BankOps; log?
   const meta = activeAgent(paths);
   if (!meta) throw new Error('当前没有角色，请先快速存档：npm run save');
   const s = slot(paths, meta.id);
-  const saved = readJson<AgentMeta & { hindsight: boolean; dataDir: string; serverDir: string }>(path.join(s.save, META));
+  const saved = readJson<AgentMeta & { hindsight: boolean; dataDir: string; serverDir: string; envFile?: string }>(path.join(s.save, META));
   if (!saved || saved.id !== meta.id || !exists(path.join(s.save, 'data')) || !exists(path.join(s.save, 'world'))
     || !exists(path.join(s.save, 'config', 'server', 'server.properties'))) {
     throw new Error(`${meta.id} 没有完整的快速存档，请先 npm run save`);
   }
   if (saved.dataDir !== path.resolve(paths.dataDir) || saved.serverDir !== path.resolve(paths.serverDir)) {
     throw new Error('DATA_DIR 或 SERVER_DIR 与快速存档不同，请先改回存档时的目录再 load');
+  }
+  const env = paths.envFile ?? path.join(paths.projectDir, '.env');
+  if (saved.envFile && saved.envFile !== path.resolve(env)) {
+    throw new Error('配置文件与快速存档不同，请使用存档时的本地配置再 load');
   }
   if (saved.hindsight && !opts.bank) throw new Error('存档使用 Hindsight，请保持记忆服务运行并加 -- --hindsight 读档');
   const data = inspectMemoryDirectory(paths.dataDir, paths.projectDir);
@@ -203,11 +207,10 @@ export async function loadActive(paths: AgentPaths, opts: { bank?: BankOps; log?
     const source = path.join(s.save, 'config', 'server', n);
     if (exists(source)) fs.cpSync(source, target, { recursive: true });
   });
-  const env = path.join(paths.projectDir, '.env');
   const savedEnv = path.join(s.save, 'config', '.env');
   if (exists(savedEnv)) fs.copyFileSync(savedEnv, env);
   else fs.rmSync(env, { force: true });
-  const { hindsight, dataDir, serverDir, ...restored } = saved;
+  const { hindsight, dataDir, serverDir, envFile, ...restored } = saved;
   writeJson(s.meta, restored);
   writeJson(path.join(paths.agentsDir, 'current.json'), { active: meta.id, at: Date.now() });
   log(`已快速读档 ${meta.id}：世界、记忆、技能和配置已恢复，快照保留，可反复 load`);

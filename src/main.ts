@@ -18,7 +18,7 @@ import { SkillSmith } from './codeskills/smith.ts';
 import { SkillCurator } from './codeskills/curator.ts';
 import { Scorecard } from './observer/scorecard.ts';
 import { draftsFor } from './building/drafts.ts';
-import { config } from './config.ts';
+import { config, envFile } from './config.ts';
 import { EventBus } from './events.ts';
 import { attachLogger, JsonlWriter } from './log.ts';
 import { WorldMemory } from './memory/store.ts';
@@ -586,7 +586,7 @@ const dashboard = startDashboard(config.dashboard.host, config.dashboard.port, b
   suggest: (t) => executive.suggest(t),
   spectate: (on) => spectator.setActive(on),
   rescue: () => rescue(),
-}, feed ? [createObserverHandler(feed)] : [], { llmTrace, mcVersion: config.mc.version, env: { backupDir: path.join(config.dataDir, 'env-backups') } });
+}, feed ? [createObserverHandler(feed)] : [], { llmTrace, mcVersion: config.mc.version, env: { file: envFile, backupDir: path.join(config.dataDir, 'env-backups') } });
 
 /**
  * 紧急救援（控制台按钮）：卡在坑底、矿道、墙缝里出不来时，找周围最近的露天平地，用 RCON /tp 传送过去。

@@ -156,6 +156,25 @@ test('没有快速存档时拒绝读档；本地记忆读档不需要 Hindsight'
   assert.equal(fs.readFileSync(path.join(paths.dataDir, 'mind.json'), 'utf8'), '{"who":"A"}');
 });
 
+test('选定配置的快速存读档只恢复该文件，保留直播和默认配置', async (t) => {
+  const { root, paths } = project();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const local = path.join(root, '.env.local');
+  const live = path.join(root, '.env.live');
+  const fallback = path.join(root, '.env');
+  fs.writeFileSync(local, 'CURIO_MODE=local\nMEMORY_WORLD_ID=test\n');
+  fs.writeFileSync(live, 'CURIO_MODE=live\nMEMORY_WORLD_ID=live\n');
+  fs.writeFileSync(fallback, 'legacy=true\n');
+  const selected = { ...paths, envFile: local };
+  await saveActive(selected, ident);
+  fs.writeFileSync(local, 'CURIO_MODE=local\nMEMORY_WORLD_ID=changed\n');
+  await assert.rejects(loadActive({ ...paths, envFile: live }), /配置文件与快速存档不同/);
+  await loadActive(selected);
+  assert.equal(fs.readFileSync(local, 'utf8'), 'CURIO_MODE=local\nMEMORY_WORLD_ID=test\n');
+  assert.equal(fs.readFileSync(live, 'utf8'), 'CURIO_MODE=live\nMEMORY_WORLD_ID=live\n');
+  assert.equal(fs.readFileSync(fallback, 'utf8'), 'legacy=true\n');
+});
+
 test('当前角色的 bank：记忆设置跟着 data/agent.json 走，换了世界或名字就不认', () => {
   const { paths } = project();
   fs.writeFileSync(path.join(paths.dataDir, 'agent.json'), JSON.stringify({ id: '20261026-134500', bankId: 'mc-' + 'b'.repeat(32), worldId: 'w1', botUsername: 'Bot' }));

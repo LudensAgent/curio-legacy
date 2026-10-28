@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { config } from '../src/config.ts';
+import { config, envFile, requireLocalMode } from '../src/config.ts';
 import { activeAgent, adoptCurrent, listAgents, loadActive, newAgent, saveActive, switchAgent, worldEntries, type AgentPaths } from '../src/maintenance/agents.ts';
 import { assertResetOffline } from '../src/maintenance/offline.ts';
 import { inspectWorldReset } from '../src/maintenance/world-reset.ts';
@@ -18,6 +18,7 @@ const paths: AgentPaths = {
   projectDir, dataDir: config.dataDir,
   serverDir: path.resolve(process.env.SERVER_DIR?.trim() || path.join(projectDir, 'world')),
   agentsDir: path.resolve(process.env.AGENTS_DIR?.trim() || path.join(projectDir, 'agents')),
+  envFile,
 };
 const ident = { worldId: config.memory.worldId, botUsername: config.memory.agentId, legacyBankId: legacyBankId(config.memory.worldId, config.memory.agentId) };
 const log = (s: string) => console.log(`· ${s}`);
@@ -41,6 +42,7 @@ async function offline() {
 const when = (t?: number) => t ? new Date(t).toLocaleString('zh-CN', { hour12: false }) : '—';
 
 try {
+  if (['save', 'load', 'new', 'switch', 'adopt'].includes(cmd)) requireLocalMode('角色存读档和世界管理');
   if (cmd === 'list') {
     const all = listAgents(paths);
     if (!all.length) console.log('还没有角色档案（第一次 save / new / switch 时会把现在的 data/ 收编成一个）');

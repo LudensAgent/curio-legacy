@@ -23,13 +23,13 @@ const day = (d = new Date()) => `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad
 const stamp = (d = new Date()) => `${day(d)}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
 
-/** .env 里的 DATA_DIR（守护进程不加载整份 .env，只要这一项） */
-function dataDirFrom(root) {
+/** 所选配置里的 DATA_DIR（守护进程不加载整份配置，只要这一项） */
+function dataDirFrom(root, envFile) {
   if (process.env.DATA_DIR) return path.resolve(root, process.env.DATA_DIR);
   try {
-    const m = fs.readFileSync(path.join(root, '.env'), 'utf8').match(/^\s*DATA_DIR\s*=\s*["']?([^"'#\r\n]+?)["']?\s*(?:#.*)?$/m);
+    const m = fs.readFileSync(envFile, 'utf8').match(/^\s*DATA_DIR\s*=\s*["']?([^"'#\r\n]+?)["']?\s*(?:#.*)?$/m);
     if (m) return path.resolve(root, m[1]);
-  } catch { /* 没有 .env */ }
+  } catch { /* 没有默认配置文件 */ }
   return path.resolve(root, 'data');
 }
 
@@ -145,10 +145,16 @@ const mb = (n) => (typeof n === 'number' ? `${Math.round(n / 1048576)} MB` : '?'
 // ------------------------------------------------------------ 命令行入口
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-  const logDir = path.join(dataDirFrom(root), 'logs');
+  const selectedEnv = process.execArgv.find((arg) => arg.startsWith('--env-file='))?.slice('--env-file='.length)
+    || process.env.ENV_FILE?.trim();
+  const envFile = path.resolve(root, selectedEnv || '.env');
+  const hasEnv = fs.existsSync(envFile);
+  if (selectedEnv && !hasEnv) throw new Error(`找不到配置文件：${envFile}`);
+  const logDir = path.join(dataDirFrom(root, envFile), 'logs');
   const proxy = process.argv.includes('--proxy');
   const command = [process.execPath,
-    ...(proxy ? ['--env-file=.env', '--use-env-proxy'] : []),
+    ...(hasEnv ? [`--env-file=${envFile}`] : []),
+    ...(proxy ? ['--use-env-proxy'] : []),
     // Node 自己的致命错误（比如内存耗尽）会写一份诊断报告，崩溃原因不再只留在终端里
     '--report-on-fatalerror', `--report-directory=${logDir}`, '--report-compact',
     '--import', 'tsx', 'src/main.ts'];
