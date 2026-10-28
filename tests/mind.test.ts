@@ -873,7 +873,7 @@ test('操作者的建议：想一次，采纳或不采纳都行，之后就放�
   assert.equal(w.mind.activity?.what, '砌墙');
 });
 
-test('同一步原样失败三次就不再原样重试：直接算卡住，让它换做法', async (t) => {
+test('同一步失败三次后仍执行 Agent 明确选择的重试，并提示历史', async (t) => {
   const w = fixture(t);
   await w.tick();
   for (let i = 0; i < 3; i++) {
@@ -885,8 +885,34 @@ test('同一步原样失败三次就不再原样重试：直接算卡住，让�
   }
   await w.reply(w.pending.length - 1, { monologue: '再试一次', decision: 'new', activity: { what: '照图纸补屋顶', steps: [step(3)] } });
   await w.tick();
-  assert.notDeepEqual(w.arbiter.info()?.args, { n: 3 }, '第四次不再原样做');
-  assert.match(w.self.history(1)[0].summary, /原样失败 3 次.*换做法/);
+  assert.deepEqual(w.arbiter.info()?.args, { n: 3 }, '第四次仍按选择执行');
+  assert.match(w.bus.recent().filter((e) => e.type === 'notice').at(-1)?.msg ?? '', /此前出现 3 次同类失败/);
+});
+
+for (const scenario of ['same', 'position', 'direction', 'pitch', 'parameters', 'code', 'reason', 'danger'] as const) test(`重复失败的思考级别：${scenario}`, async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  const activity = { what: '尝试动作', steps: [step(3)] };
+  await w.reply(0, { decision: 'new', activity });
+  await w.tick();
+  await w.finish(fail('BAD_ARGS', '目标不在当前视野'));
+  await w.tick();
+  assert.equal(w.bus.recent().filter((e) => e.type === 'llm_request').at(-1)?.data?.tier, 'deliberate');
+  await w.reply(w.pending.length - 1, { decision: 'new', activity: scenario === 'parameters' ? { ...activity, steps: [step(4)] } : activity });
+  await w.tick();
+  if (scenario === 'position') w.adapter.pos.x += 1;
+  if (scenario === 'direction') w.adapter.yaw += Math.PI / 2;
+  if (scenario === 'pitch') w.adapter.pitch += Math.PI / 4;
+  if (scenario === 'danger') w.adapter.hp = 10;
+  await w.finish(fail(scenario === 'code' ? 'UNKNOWN_ITEM' : 'BAD_ARGS', scenario === 'reason' ? '目标已经消失' : '目标不在当前视野'));
+  await w.tick();
+  const request = w.bus.recent().filter((e) => e.type === 'llm_request').at(-1);
+  assert.equal(request?.data?.tier, scenario === 'same' ? 'glance' : 'deliberate');
+  if (scenario === 'same') {
+    assert.match(request?.msg ?? '', /刚才相同动作也失败：目标不在当前视野/);
+    await w.reply(w.pending.length - 1, { kind: 'deliberate', reason: '需要想清楚' });
+    assert.equal(w.bus.recent().filter((e) => e.type === 'llm_escalate').length, 1, 'Agent 可主动升级为认真想');
+  }
 });
 
 test('盖房、走路这类事做着做着挨了打，又没有技能接手：先停下、马上认真想（不边挨打边砌墙）', async (t) => {
@@ -937,6 +963,10 @@ test('步骤做完、收工条件没达到：提前想好的下一段不照接�
   assert.equal(w.mind.queuedNext, null);
   assert.ok(w.pending.length > before, '要回头想');
   assert.match(JSON.stringify(w.pending.at(-1)!.messages), /先不接着做/);
+  assert.equal(w.bus.recent().filter((event) => event.type === 'llm_request').at(-1)?.data?.tier, 'glance');
+  await w.reply(w.pending.length - 1, { kind: 'deliberate', reason: '需要更多上下文' });
+  assert.equal(w.bus.recent().filter((event) => event.type === 'llm_escalate').length, 1, 'Agent 仍能主动升级认真想');
+  assert.match(JSON.stringify(w.pending.at(-1)!.messages), /收工条件未满足/);
 });
 
 test('思考期间活动卡住，丢弃基于旧状态的答复并把失败和注意事项交给下一次思考', async (t) => {
@@ -968,6 +998,31 @@ test('思考期间收工条件未满足，重新思考实际结果', async (t) =
   assert.notEqual(w.mind.activity?.what, '旧决定');
   await w.tick();
   assert.match(JSON.stringify(w.pending.at(-1)!.messages), /收工条件未满足/);
+  assert.equal(w.bus.recent().filter((event) => event.type === 'llm_request').at(-1)?.data?.tier, 'glance');
+});
+
+test('收工条件无法确认时保留认真想', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { decision: 'new', activity: { what: '检查方块', steps: [step(1)], done_when: {
+    type: 'block_state', dimension: w.adapter.state().dim, pos: { x: 1000, y: 64, z: 1000 }, name: 'stone',
+  } } });
+  await w.finish();
+  await w.tick();
+  assert.equal(w.self.history(1)[0].outcome, 'unmet');
+  assert.match(JSON.stringify(w.pending.at(-1)!.messages), /状态 unknown/);
+  assert.equal(w.bus.recent().filter((event) => event.type === 'llm_request').at(-1)?.data?.tier, 'deliberate');
+});
+
+test('收工条件未达到且需要全局判断时仍认真想', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { decision: 'new', activity: { what: '找铁', steps: [step(1)], done_when: { type: 'inventory_min', item: 'raw_iron', count: 1 } } });
+  (w.mind as any).lastDeliberateAt = 0;
+  await w.finish();
+  await w.tick();
+  assert.equal(w.self.history(1)[0].outcome, 'unmet');
+  assert.equal(w.bus.recent().filter((event) => event.type === 'llm_request').at(-1)?.data?.tier, 'deliberate');
 });
 
 test('活动卡住时保留正在处理的危险和操作者指令', async (t) => {

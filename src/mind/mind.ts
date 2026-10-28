@@ -132,8 +132,9 @@ export class Mind {
   private lastRecord: ActivityRecord | null = null;
   private recentEnds: ActivityEnd[] = [];
   private failuresByTarget = new Map<string, { n: number; last: number; at: number[] }>();
-  /** 同一个动作、同样的参数、同样的失败：连着来了几次就不让原样再试（得换做法） */
+  /** 同一个动作、同样的参数、同样的失败：记录次数，供心智参考。 */
   private sameFails = new Map<string, { n: number; last: number; code: string; why: string; summary: string }>();
+  private lastStuckAttempt: { step: { skill: string; args?: unknown }; code: string; summary: string; pos: AgentState['pos']; worldId: string; sessionId: string; dim: string; yaw: number; pitch: number; at: number } | null = null;
   static readonly SAME_FAIL_LIMIT = 3;
   static readonly SAME_FAIL_MS = 10 * 60_000;
   private learnedActivities = new Set<string>();
@@ -614,11 +615,10 @@ export class Mind {
     } else this.resumeCheck = null;
     const step = nextStep(this.activity);
     if (!step) return this.finishActivity('done', '这段活的步骤都做完了');
-    // 原样失败过好几次的那一步：不再原样重试（换参数、换位置、先解决失败的原因、或者换一种动作）
+    // 提醒曾经失败，仍执行 Agent 明确选择的动作。
     const same = this.sameFails.get(exactSig(step));
     if (same && same.n >= Mind.SAME_FAIL_LIMIT && Date.now() - same.last < Mind.SAME_FAIL_MS) {
-      this.d.bus.publish('decision_normalized', 'P2', `「${step.skill} ${argsLabel(step)}」已经原样失败 ${same.n} 次，不再原样重试`, { skill: step.skill });
-      return this.finishActivity('stuck', `「${step.skill} ${argsLabel(step)}」已经原样失败 ${same.n} 次（${same.summary}），再原样试也一样：换做法——先解决失败的原因、换参数或位置、或者换一种动作`);
+      this.d.bus.publish('notice', 'P2', `「${step.skill}」相同参数（不含朝向）的动作此前出现 ${same.n} 次同类失败（${same.summary}），仍按选择执行`, { skill: step.skill });
     }
     const state = this.d.adapter.state();
     this.activity.stepStart = { pos: { ...state.pos }, view: viewOf(this.safe(() => this.d.perception.snapshot(), undefined)) };
@@ -694,9 +694,10 @@ export class Mind {
     this.d.bus.publish('activity_start', 'P2', `${how === 'next' ? '接着' : how === 'habit' ? '凭习惯' : '开始'}：${a.what}${a.why ? `（${a.why}）` : ''}`, { activity: describeActivity(a, state, this.safe(() => this.d.perception.snapshot(), undefined)) });
   }
 
-  private finishActivity(outcome: ActivityOutcome, summary: string) {
+  private finishActivity(outcome: ActivityOutcome, summary: string, unmet?: { reason: string; known: boolean }) {
     const a = this.activity;
     if (!a) return;
+    if (outcome !== 'stuck') this.lastStuckAttempt = null;
     this.activity = null;
     // A thought started before this result cannot account for the failure. Retry with
     // the actual result before starting another activity; preserve urgent and operator thoughts.
@@ -707,7 +708,6 @@ export class Mind {
       for (const n of thought.noticed) {
         if (!this.attention.peek().some((pending) => pending.key === n.key)) this.attention.notice(n.key, n.what, n.salience, 0);
       }
-      if (outcome === 'unmet') this.requestThink(`「${a.what}」收工条件未满足：${summary}`, 'deliberate');
     }
     // 收工条件只表示触发了停止，不能由此断言操作者的整条指令已经完成。
     if (this.order?.activityId === a.id) {
@@ -766,9 +766,23 @@ export class Mind {
         return;
       }
     }
+    if (outcome === 'unmet') {
+      this.requestThink(unmet?.reason ?? `「${a.what}」收工条件未满足：${summary}`,
+        unmet?.known && !this.needsBigPicture() && this.attention.highest() < URGENT ? 'glance' : 'deliberate');
+    }
     if (outcome === 'stuck') {
       this.queuedNext = null; // 提前想好的下一步多半基于“这段会成功”的假设
-      this.requestThink(`「${a.what}」卡住了：${summary}${a.ifStuck ? `；之前想过卡住时：${a.ifStuck}` : ''}`, 'deliberate');
+      const eye = this.d.adapter.eye();
+      const previous = this.lastStuckAttempt;
+      const repeated = !!failed && !!failed.failureCode && !!eye && !!previous && Date.now() - previous.at < Mind.SAME_FAIL_MS
+        && previous.worldId === state.worldId && previous.sessionId === state.sessionId && previous.dim === state.dim
+        && Math.hypot(state.pos.x - previous.pos.x, state.pos.y - previous.pos.y, state.pos.z - previous.pos.z) < 0.1
+        && previous.yaw === eye.yaw && previous.pitch === eye.pitch && previous.code === failed.failureCode && previous.summary === failed.summary
+        && isDeepStrictEqual(previous.step, { skill: failed.skill, args: failed.args });
+      this.lastStuckAttempt = failed?.failureCode && eye ? { step: { skill: failed.skill, args: failed.args }, code: failed.failureCode,
+        summary: failed.summary, pos: { ...state.pos }, worldId: state.worldId, sessionId: state.sessionId, dim: state.dim, yaw: eye.yaw, pitch: eye.pitch, at: Date.now() } : null;
+      const urgent = this.attention.highest() >= URGENT || state.hp <= 12 || state.inWater || state.inLava;
+      this.requestThink(`「${a.what}」卡住了：${summary}${repeated ? `；刚才相同动作也失败：${previous!.summary}` : ''}${a.ifStuck ? `；之前想过卡住时：${a.ifStuck}` : ''}`, repeated && !urgent ? 'glance' : 'deliberate');
     }
   }
 
@@ -835,7 +849,8 @@ export class Mind {
       this.safe(() => this.d.behaviors?.creditRecovery(name, result.status === 'succeeded', { skill: step.skill, code: result.failureCode ?? null }), undefined);
     }
     const percept = this.safe(() => this.d.perception.update(), undefined);
-    const verdict = afterStep(a, step, result, durationMs, this.d.adapter.state(), percept);
+    const state = this.d.adapter.state();
+    const verdict = afterStep(a, step, result, durationMs, state, percept);
     // 身体自己应变不了：先试学会的恢复办法（模型以前从类似的卡住里总结出来的），试过还不行才叫脑子
     if (verdict.kind === 'stuck' && result.status === 'failed' && step.skill !== 'use_skill' && this.d.behaviors) {
       const tried = new Set(a.adaptations.filter((x) => x.startsWith('skill:')).map((x) => x.slice(6)));
@@ -862,8 +877,11 @@ export class Mind {
     // 步骤做完但收工条件未达到时，保留既有的重新思考流程；满足条件则遵守 Agent 的后续选择。
     const nextToReview = verdict.kind === 'done' && !verdict.met ? this.queuedNext : null;
     if (nextToReview) this.queuedNext = null;
-    this.finishActivity(verdict.kind === 'done' ? verdict.met ? 'done' : 'unmet' : 'stuck', verdict.why);
-    if (nextToReview) this.requestThink(`「${a.what}」${verdict.why}；提前想好的「${nextToReview.draft.what}」先不接着做，请根据实际结果决定是否继续。`, 'deliberate');
+    const unmet = verdict.kind === 'done' && !verdict.met && a.doneWhen ? {
+      reason: nextToReview ? `「${a.what}」${verdict.why}；提前想好的「${nextToReview.draft.what}」先不接着做，请根据实际结果决定是否继续。` : `「${a.what}」收工条件未满足：${verdict.why}`,
+      known: evaluateCondition(a.doneWhen, state, state.worldId, [], percept).status === 'unsatisfied',
+    } : undefined;
+    this.finishActivity(verdict.kind === 'done' ? verdict.met ? 'done' : 'unmet' : 'stuck', verdict.why, unmet);
   }
 
   /**

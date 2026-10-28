@@ -74,7 +74,7 @@ const KEEPSAKE = /_bed$|^(crafting_table|furnace|smoker|blast_furnace|chest|barr
 export const digAt: Skill<CellArgs> = {
   name: 'dig_at',
   description: '挖掉身边指定的一格，自动换现有工具，默认不造工具。液体邻格默认不挖；wet:true 接受进水，lava:true 接受进岩浆，分别显式选择。只挖不走，不能挖基岩。',
-  argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "own"?:true, "wet"?:true（允许进水）, "lava"?:true（允许进岩浆）}（前后/左右 ±2，上下 -1..3；例：[1,1,0] 前方高一格，[0,2,0] 头顶上方，[0,-1,0] 脚下）',
+  argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "own"?:true, "wet"?:true（允许进水）, "lava"?:true（允许进岩浆）}（前后/左右 ±2，上下 -1..3；facing 只定义相对坐标的方向，不会转头；例：[1,1,0] 前方高一格，[0,2,0] 头顶上方，[0,-1,0] 脚下）',
   timeoutMs: 30000,
   movement: false,
   validate(raw, adapter) {
@@ -96,7 +96,7 @@ export const digAt: Skill<CellArgs> = {
     if (before === null) return fail('NOT_FOUND', `[${args.at}] 那一格还没加载或看不见`, after(ctx, args.facing, pos));
     if (args.at[0] === 0 && args.at[2] === 0 && (args.at[1] === 0 || args.at[1] === 1) && AIR.has(before)) return ok(`[${args.at}] 是自己站的地方，本来就空着；往上挖是 [0,2,0]`, { ...after(ctx, args.facing, pos), noop: true });
     if (AIR.has(before)) return seenBefore ? ok(`[${args.at}] 本来就是空的，不用挖`, { cell: [...args.at], was: 'air', ...after(ctx, args.facing, pos), noop: true })
-      : fail('NOT_FOUND', `[${args.at}] 没有发生挖掘；目标格未在当前视野，未确认方块状态`, { ...after(ctx, args.facing, pos), noop: true });
+      : fail('NOT_FOUND', `[${args.at}] 没有发生挖掘；目标格 (${pos.x},${pos.y},${pos.z}) 未在当前视野，未确认方块状态。facing ${args.facing} 只定义坐标方向，不会转头`, { ...after(ctx, args.facing, pos), noop: true });
     if (LIQUID_BLOCKS.has(before)) return fail('BAD_ARGS', `[${args.at}] ${seenBefore ? `是 ${seenBefore}` : '未看清目标，当前不能挖掘'}，挖不了`, after(ctx, args.facing, pos));
     // 挖开会进水/进岩浆：默认不挖，但说清是哪几格、能怎么办（像人一样先堵上，或者认了让水流进来）
     const wets = wetNeighbours(ctx, pos);

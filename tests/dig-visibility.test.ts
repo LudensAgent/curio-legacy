@@ -13,7 +13,8 @@ test('digging an unseen empty cell reports an unconfirmed result to the caller',
   const result = await digAt.run(ctx, args);
   assert.equal(result.status, 'failed');
   assert.equal(result.failureCode, 'NOT_FOUND');
-  assert.match(result.summary, /没有发生挖掘.*未在当前视野/);
+  assert.match(result.summary, /没有发生挖掘.*\(1,64,0\).*未在当前视野/);
+  assert.match(result.summary, /facing E 只定义坐标方向，不会转头/);
   assert.doesNotMatch(result.summary, /本来就是空/);
   assert.deepEqual(result.data?.targetCell, { x: 1, y: 64, z: 0 });
   const nested = await makeBridge(ctx)('act', ['dig_at', args]) as { ok: boolean };
