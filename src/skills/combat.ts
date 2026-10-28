@@ -44,8 +44,8 @@ export const flee: Skill<{ distance: number }> = {
 // ------------------------------------------------------------------ defend
 export const defend: Skill<{ entityId?: number; target?: string; stay?: boolean }> = {
   name: 'defend',
-  description: '装备最好的武器去打附近的敌对生物：不写 target 打最近的（不含苦力怕）；target 写生物名专打那一种（苦力怕要明写 "creeper"，身体会砍一下退一步、嘶嘶响就躲）；退无可退 "stay":true 硬打',
-  argsDoc: '{"target"?: "creeper|zombie|skeleton|spider|<敌对生物名>", "entityId"?: 数字}',
+  description: '装备最好的武器去打附近的敌对生物：不写 target 打最近的（不含苦力怕）；target 写生物名专打那一种（苦力怕要明写 "creeper"，身体会砍一下退一步、嘶嘶响就躲）；血量不会改变已选择的攻击动作；不会自动举盾，举盾可用 guard',
+  argsDoc: '{"target"?: "creeper|zombie|skeleton|spider|<敌对生物名>", "entityId"?: 数字, "stay"?: boolean（兼容旧参数，不改变攻击行为）}',
   timeoutMs: 20000,
   movement: true,
   validate(raw) {
@@ -66,11 +66,6 @@ export const defend: Skill<{ entityId?: number; target?: string; stay?: boolean 
     await adapter.equipWeapon();
     let hits = 0;
     while (Date.now() < ctx.deadline) {
-      if (!args.stay && adapter.state().hp <= 6) {
-        // 不替它决定跑还是打：把局面说清楚（谁贴着、血多少），下一步它自己选
-        const near = senses.perceivedEntities(8).filter((e) => e.kind === 'hostile').map((e) => `${e.name} ${Math.round(e.dist * 10) / 10}格`);
-        return fail('LOW_HP', `血只剩 ${Math.round(adapter.state().hp * 10) / 10}，停手了（打了 ${hits} 下）；身边：${near.join('、') || '没看见怪'}。要跑就 flee；退无可退、跑只会被追着打就 defend {"stay":true} 硬打`);
-      }
       senses.refresh();
       target = senses.perceivedEntities(16).find((e) => e.id === (args.entityId ?? target!.id));
       if (!target) return ok(`${name} 已被击退或消失（攻击 ${hits} 次）`);

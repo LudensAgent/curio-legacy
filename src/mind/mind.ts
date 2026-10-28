@@ -371,7 +371,7 @@ export class Mind {
     if (s.inWater && s.oxygen <= 5) out.push({ key: 'danger:drown', what: `在水下快没气了（氧气 ${s.oxygen}/20，血 ${hp}）` });
     const close = p.nearby.hostile.filter((h) => h.dist <= 3 && h.name !== 'creeper');
     if (close.length && hurtRecently && hp <= 12) {
-      out.push({ key: 'danger:melee', what: `被 ${close.map((h) => `${h.name} ${h.dist}格`).join('、')} 贴身打（血 ${hp}）：现在就定——打（defend；退无可退写 "stay":true）还是跑（flee）` });
+      out.push({ key: 'danger:melee', what: `被 ${close.map((h) => `${h.name} ${h.dist}格`).join('、')} 贴身打（血 ${hp}）` });
     }
     return out;
   }

@@ -14,7 +14,7 @@ test('技能触发条件 in_wall：头那一格是实心方块', () => {
   assert.equal(evalPredicate(p, sense('torch')), false, '火把这类不算埋住');
 });
 
-test('defend 血少不再只说"生命过低"：说清谁贴着、可以 flee 或 stay 硬打；stay 时接着打', async () => {
+test('defend 在低血量时执行已选择的目标；旧 stay 参数仍可用', async () => {
   const w = new TestWorld();
   (w as any).hp = 5;
   const base = w.state.bind(w);
@@ -24,10 +24,11 @@ test('defend 血少不再只说"生命过低"：说清谁贴着、可以 flee �
   (w as any).attack = async () => { hits++; return true; };
   const ctx = makeCtx(w, { senses: { perceivedEntities: () => (hits >= 2 ? [] : [zombie]) as any }, deadlineMs: 5000 });
   const r = await defend.run(ctx, { target: 'zombie' });
-  assert.equal(r.status, 'failed');
-  assert.match(r.summary, /血只剩 5，停手了.*zombie 1格.*flee.*"stay":true/);
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(hits, 2, '低血量不应阻止 Agent 已选择的攻击');
+  hits = 0;
   const r2 = await defend.run(ctx, { target: 'zombie', stay: true });
-  assert.equal(r2.status, 'succeeded');
+  assert.equal(r2.status, 'succeeded', r2.summary);
   assert.equal(hits, 2);
   assert.deepEqual(defend.validate({ stay: true }, w as any), { ok: true, args: { stay: true } });
 });
