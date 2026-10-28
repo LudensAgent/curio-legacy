@@ -29,3 +29,10 @@ test('死亡播报晚到时补到这次死亡记录上', () => {
   assert.equal(d?.cause, 'mob');
   memory.close();
 });
+
+test('下界睡床炸死、自己引爆：算爆炸，不算被怪打死', async () => {
+  const { deathCauseOf } = await import('../src/memory/game-messages.ts');
+  assert.equal(deathCauseOf('Curio was killed by [Intentional Game Design]'), 'explosion');
+  assert.equal(deathCauseOf('Curio blew up'), 'explosion');
+  assert.equal(deathCauseOf('Curio was blown up by Creeper'), 'mob');
+});

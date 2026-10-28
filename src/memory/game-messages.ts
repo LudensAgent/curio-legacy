@@ -15,6 +15,8 @@ export function deathCauseOf(text: string): HazardKind {
   if (/drown/i.test(text)) return 'drowning';
   if (/starv/i.test(text)) return 'starvation';
   if (/suffocat|squash|squish|crammed/i.test(text)) return 'suffocation';
+  // 床在下界/末地爆炸的播报是 “killed by [Intentional Game Design]”；“blew up” 是自己引爆的（TNT 之类）：都不是怪
+  if (/Intentional Game Design|\bblew up\b|blown up by (?:Primed TNT|TNT|End Crystal|Firework)/i.test(text)) return 'explosion';
   if (/slain|shot|blown up|blew up|killed by|fireballed|stung|pummeled|impaled|obliterated/i.test(text)) return 'mob';
   return 'unknown';
 }

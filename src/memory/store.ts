@@ -134,7 +134,7 @@ export interface Note {
  * 危险区域：在这里出过事（淹死、掉岩浆、摔死、被怪打死……）。由程序根据真实死亡/伤害记录，
  * 不由模型编造；寻路/采集据此绕开，提示词里作为“我在这里吃过亏”的经验。
  */
-export type HazardKind = 'drowning' | 'lava' | 'fall' | 'mob' | 'starvation' | 'suffocation' | 'unknown';
+export type HazardKind = 'drowning' | 'lava' | 'fall' | 'mob' | 'explosion' | 'starvation' | 'suffocation' | 'unknown';
 export interface Hazard {
   id: string;
   worldId?: string;
