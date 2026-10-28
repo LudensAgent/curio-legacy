@@ -72,7 +72,7 @@ test('无聊：连续多次采集后，欲望会转向建造/探索等别的事'
   assert.ok(['home', 'explore', 'curiosity', 'automate', 'bed'].includes(top), `最强欲望不应再是采集类，实际 ${top}`);
 });
 
-test('死亡追踪：感知里出现 death_recovery，回到原地且没有掉落物后清除', () => {
+test('死亡追踪：回到原地但没有看见掉落物，不代表已确认消失', () => {
   const adapter = new FakeAdapter();
   const memory = new WorldMemory(null);
   const vision = new Vision(adapter);
@@ -84,8 +84,24 @@ test('死亡追踪：感知里出现 death_recovery，回到原地且没有掉�
   assert.equal(p.death_recovery?.dist, 30);
   assert.equal(p.drives[0].drive, 'recover');
   adapter.pos = { x: 30, y: 64, z: 1 };
-  assert.equal(perception.update().death_recovery, null);
-  assert.equal(memory.lastDeath(), null);
+  assert.ok(perception.update().death_recovery);
+  assert.ok(memory.lastDeath());
+});
+
+test('死亡记录：经过现实五分钟不代表掉落物消失', () => {
+  const adapter = new FakeAdapter();
+  const memory = new WorldMemory(null);
+  const bus = new EventBus();
+  const events: string[] = [];
+  bus.on('event', (e) => events.push(e.msg));
+  const perception = new Perception(adapter, memory, bus, new Vision(adapter));
+  memory.setWorld(adapter.worldId);
+  memory.setDeath({ ts: Date.now() - 360_000, dim: 'overworld', pos: { x: 30, y: 64, z: 0 }, lost: [{ name: 'oak_log', count: 5 }] });
+  const p = perception.update();
+  assert.ok(memory.lastDeath());
+  assert.equal(p.death_recovery?.seconds_left, 0);
+  assert.ok(p.drives.some((d) => d.drive === 'recover' && d.why.includes('当前状态未知')));
+  assert.ok(!events.some((e) => e.includes('死亡掉落物已经消失')));
 });
 
 const runSkill = async (adapter: FakeAdapter, skill: string, args: unknown, memory = new WorldMemory(null)) => {

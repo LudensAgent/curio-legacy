@@ -16,7 +16,7 @@ const setup = () => {
   return { a, bus, events, vision, perception };
 };
 
-test('地上没捡的东西：记得第一次看到的时间，说出最多还能留多久，快消失时注意到一次', () => {
+test('地上没捡的东西：估计游戏时长并说明消失时间未知，提醒一次', () => {
   const { a, vision, perception, events } = setup();
   a.entities.push({ id: 7, name: 'item:white_bed', kind: 'item', pos: { x: 6, y: 64, z: 0 }, dist: 6, height: 0.25, count: 1 } as any);
   perception.update();
@@ -25,9 +25,12 @@ test('地上没捡的东西：记得第一次看到的时间，说出最多还�
   assert.ok(rec, '看见过就记下');
   rec.first -= 240_000;
   let p = perception.update();
-  assert.ok(p.waiting_on?.some((t) => /white_bed×1/.test(t) && /最多再过 1 分钟/.test(t)), JSON.stringify(p.waiting_on));
+  assert.ok(p.waiting_on?.some((t) => /white_bed×1/.test(t) && /约 5 个小时前第一次看到/.test(t) && /无法确定何时消失/.test(t)), JSON.stringify(p.waiting_on));
   p = perception.update();
   assert.equal(events.filter((e) => e.startsWith('process_changed') && /white_bed/.test(e)).length, 1, '只提醒一次');
+  rec.first -= 120_000;
+  p = perception.update();
+  assert.ok(p.waiting_on?.some((t) => /white_bed×1/.test(t) && /现在看得见/.test(t)), '首次看到超过现实 5 分钟后，仍可看见的物品不应消失');
 });
 
 test('刚掉的不提；正看着那块地方东西却没了（被捡走）就忘掉', async () => {

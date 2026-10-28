@@ -32,7 +32,7 @@ export interface Predicate {
   hurt_within?: number;
   /** 身边的掩体：sealed 四面和头顶都封住｜pit 四面封住头顶空｜open 空地 */
   cover?: ('sealed' | 'pit' | 'open')[];
-  /** 死后掉在地上、还没捡回的东西（同一维度）：可以限定离这里多远以内、还剩多少秒以上 */
+  /** 死亡掉落记录（同一维度）：可以限定距离及按正常 TPS、持续加载估算的剩余现实秒 */
   dropped_items?: { within?: number; left_above?: number };
   /** 看得见的掉落物：可以限定是哪些东西（* 通配）、多远以内 */
   drops?: { item?: string[]; within: number };
@@ -163,7 +163,7 @@ export function validatePredicate(raw: unknown, depth = 0): Predicate | { error:
     const d = o.dropped_items === true ? {} : o.dropped_items;
     if (!d || typeof d !== 'object') return { error: 'dropped_items 写 true，或 {"within":格数,"left_above":秒数}' };
     if ((d as any).within !== undefined && !num((d as any).within, 1, 2000)) return { error: 'dropped_items.within 写 1–2000 格' };
-    if ((d as any).left_above !== undefined && !num((d as any).left_above, 0, 300)) return { error: 'dropped_items.left_above 写 0–300 秒（掉落物 5 分钟后消失）' };
+    if ((d as any).left_above !== undefined && !num((d as any).left_above, 0, 300)) return { error: 'dropped_items.left_above 写 0–300 现实秒（按正常 TPS 和区块持续加载估算）' };
     out.dropped_items = { ...((d as any).within !== undefined ? { within: (d as any).within } : {}), ...((d as any).left_above !== undefined ? { left_above: (d as any).left_above } : {}) };
   }
   for (const k of ['any', 'all'] as const) if (o[k] !== undefined) {

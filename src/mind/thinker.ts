@@ -411,7 +411,7 @@ export class Thinker {
         const brief = String(raw.brief ?? raw.request ?? '').trim().slice(0, 400);
         if (!brief) return '要设计什么？写 {"kind":"design","brief":"想要的建筑：用途、大概多大、风格、在哪儿"}';
         // 建筑师在后台画：想得久（几分钟），这段时间心智照常玩，画好了作为“注意到的事”回来
-        if (this.designing) return `建筑师还在画「${this.designing.brief.slice(0, 40)}」（已经 ${Math.max(1, Math.round((Date.now() - this.designing.startedAt) / 60_000))} 分钟），画好会告诉你；先去做别的，别重复请`;
+        if (this.designing) return `建筑师还在画「${this.designing.brief.slice(0, 40)}」（已经 ${Math.max(1, Math.round((Date.now() - this.designing.startedAt) / 60_000))} 现实分钟），画好会告诉你；先去做别的，别重复请`;
         this.bus.publish('design_start', 'P2', `请建筑师设计：${brief.slice(0, 80)}`);
         const p = ctx.percept;
         // 盖在哪：where = here（默认，脚下这一带）| base（家旁边）| "x,y,z"。只看得清附近（约 96 格内）的地形，太远就不给地形，到了再定位置
@@ -433,7 +433,7 @@ export class Thinker {
           else this.bus.publish('design', 'P2', res.summary.slice(0, 400), { draftId: res.draft.id, name: res.draft.name, size: res.draft.size });
         }).catch((e) => this.bus.publish('design_failed', 'P1', `建筑师没画成：${e instanceof Error ? e.message : String(e)}`.slice(0, 300), { brief }))
           .finally(() => { this.designing = null; });
-        return `已经请建筑师去画「${brief.slice(0, 60)}」了：要想几分钟，画好会告诉你（图纸会出现在 my_drafts）。这段时间先去做别的——攒木头石头、找吃的都行，不用干等`;
+        return `已经请建筑师去画「${brief.slice(0, 60)}」了：要想几现实分钟，画好会告诉你（图纸会出现在 my_drafts）。这段时间先去做别的——攒木头石头、找吃的都行，不用干等`;
       }
       if (kind === 'recipes') {
         if (!this.planner.recipeBook) return '没有配方记忆';

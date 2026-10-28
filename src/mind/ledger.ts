@@ -49,7 +49,7 @@ export interface Sight { blocks: { name: string; pos: Vec3Like }[]; entities: En
 
 const median = (xs: number[]) => { if (!xs.length) return 0; const s = [...xs].sort((a, b) => a - b); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
 const r1 = (x: number) => Math.round(x * 10) / 10;
-const fmtSec = (s: number) => s >= 120 ? `${r1(s / 60)} 分钟` : `${Math.round(s)} 秒`;
+const fmtSec = (s: number) => s >= 120 ? `${r1(s / 60)} 现实分钟` : `${Math.round(s)} 现实秒`;
 const top = (rec: Record<string, number> | undefined, n: number) => Object.entries(rec ?? {}).sort((a, b) => b[1] - a[1]).slice(0, n);
 
 /** 一段活里某样东西“分到”的花费：几样东西一起得到就平分时间，再除以得到的个数 */

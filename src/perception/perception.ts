@@ -1,3 +1,5 @@
+import { durationText, realSecondsToTicks, TICKS_PER_GAME_HOUR } from './time.ts';
+export { durationText, realSecondsToTicks, TICKS_PER_GAME_HOUR } from './time.ts';
 import { isSoftBlock, surroundings, type ExitOptions, type Surroundings } from './surroundings.ts';
 import { qtyWord, rememberedStock } from '../memory/chest-memory.ts';
 import { facingOfYaw, localMap } from './local.ts';
@@ -51,7 +53,7 @@ export interface Percept {
     resources: { block: string; count: number; nearest: number; dir?: string; seen: 'now' | 'memory' }[];
   };
   vision: VisionSummary | null;
-  /** 死亡后掉落物还在（5 分钟内）时出现：在哪、丢了什么、还剩多少秒消失 */
+  /** 死亡掉落记录：剩余秒数是按正常 TPS 且持续加载估算的现实秒，不代表物品当前状态 */
   death_recovery: { dir: string; dist: number; lost: string; seconds_left: number } | null;
   /** 看见过但还没去过的有趣东西（好奇心候选） */
   curiosities: { what: string; dir: string; dist: number }[];
@@ -106,7 +108,7 @@ export function weatherHere(weather: string, biome: string | null): string {
   return weather === 'thunder' ? `雷雨${fall}：天很暗，白天也会刷怪，会打雷；雷雨时随时能上床睡` : `下雨${fall}`;
 }
 
-/** 离天黑 / 天亮还有几分钟（现实时间；游戏里 1 分钟 = 1200 刻），给心智一个“时间感” */
+/** 离天黑 / 天亮还有几分钟（现实时间；正常 20 TPS 时现实 1 分钟 = 1200 刻），给心智一个“时间感” */
 export function clockOf(timeOfDay: number): { toDusk: number | null; toDawn: number | null } {
   const t = ((timeOfDay % 24000) + 24000) % 24000;
   const min = (ticks: number) => Math.max(0, Math.round(ticks / 120) / 10);
@@ -115,11 +117,10 @@ export function clockOf(timeOfDay: number): { toDusk: number | null; toDawn: num
 
 /**
  * 游戏钟点：给心智的时间感一律用游戏里的钟点说，不用现实分钟。
- * “离天黑 2 分钟”在人听来是一眨眼，于是它太阳还高高的就收工挖坑、干等；可游戏里 2 分钟是白天的五分之一，
+ * “离天黑 2 分钟”在人听来是一眨眼，于是它太阳还高高的就收工挖坑、干等；正常速度下现实 2 分钟是游戏白天的五分之一，
  * 够砍二三十根木头。换成“下午 4 点，晚上 7 点天黑”，人对钟点的直觉正好和游戏里的比例对得上。
  * 0 刻 = 早上 6 点，1000 刻 = 1 小时（现实约 50 秒）；18 点日落，约 18 点半能睡，19 点天黑开始刷怪，5 点天亮。
  */
-export const TICKS_PER_GAME_HOUR = 1000;
 export const SUNSET_TICK = 12000;
 export const SLEEP_TICK = 12542;
 export const DARK_TICK = 13000;
@@ -137,18 +138,6 @@ export function clockText(timeOfDay: number): string {
   const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
   return `${part} ${h12} 点${half ? '半' : ''}`;
 }
-
-/** 一段刻数换成游戏时长：“约 3 个半小时”“约 40 分钟” */
-export function durationText(ticks: number): string {
-  const hours = Math.max(0, ticks) / TICKS_PER_GAME_HOUR;
-  if (hours < 0.9) return `约 ${Math.max(5, Math.round(hours * 60 / 5) * 5)} 分钟`;
-  const halves = Math.round(hours * 2);
-  const whole = Math.floor(halves / 2);
-  return `约 ${whole} 个${halves % 2 ? '半' : ''}小时`;
-}
-
-/** 现实秒数换成游戏时长（走路、干等这些按现实时间量出来的） */
-export const realSecondsToTicks = (sec: number) => sec * 20;
 
 /** 太阳在哪：像人抬头看天 */
 export function sunText(timeOfDay: number): string {
@@ -234,9 +223,9 @@ export class Perception {
       const at = `熔炉 (${key}) ${d}格`;
       const o = seen.get(key);
       if (o && !/^(furnace|blast_furnace|smoker)$/.test(o.name)) { this.memory.forgetFurnace(dim, r.pos); this.furnaceLit.delete(key); continue; }
-      const mins = Math.round((Date.now() - r.ts) / 60000);
+      const elapsed = Math.max(0, (Date.now() - r.ts) / 1000);
       const inside = [r.input ? `没烧的 ${r.input.name}×${r.input.count}` : '', r.output ? `烧好的 ${r.output.name}×${r.output.count}` : ''].filter(Boolean).join('、');
-      const left = `${mins ? `${mins} 分钟前` : '刚才'}离开时里面有 ${inside}${r.why === 'out_of_fuel' ? '（当时燃料就烧完了）' : r.why === 'stalled' ? '（当时卡住不动）' : ''}`;
+      const left = `${elapsed < 1 ? '刚才' : `${durationText(realSecondsToTicks(elapsed))}前（游戏时间，按正常运行速度估算）`}离开时里面有 ${inside}${r.why === 'out_of_fuel' ? '（当时燃料就烧完了）' : r.why === 'stalled' ? '（当时卡住不动）' : ''}`;
       let now = '';
       if (o) {
         const lit = String(o.properties?.lit) === 'true';
@@ -247,7 +236,7 @@ export class Perception {
       } else if (r.burning && r.input) {
         // 看不见：按原版一件 10 秒估一下，只是估计
         const doneBy = r.ts + r.input.count * 10_000;
-        now = Date.now() > doneBy ? '；按时间估算应该烧完了（燃料够的话），没亲眼看到' : '；还在烧（按时间估算）';
+        now = Date.now() > doneBy ? '；按正常运行速度估算可能烧完了（燃料够且区块持续加载的话），没亲眼看到' : '；按正常运行速度估算可能还在烧，没亲眼看到';
       }
       out.push({ d, text: `${at}：${left}${now}` });
     }
@@ -255,8 +244,8 @@ export class Perception {
   }
 
   /**
-   * 地上见过、还没捡的东西：掉落物 5 分钟就消失。从第一次看到算起，它最多还能留多久。
-   * 刚掉下来不到 45 秒的不提（干活时顺手就捡了）；自己扔掉的不提。
+   * 地上见过、还没捡的东西：出生时间和区块加载情况未知，按正常 TPS 估算仅供参考。
+   * 第一次看到不到 45 现实秒的不提；自己扔掉的不提。
    */
   private dropWarned = new Set<string>();
   private dropsWaiting(here: Vec3Like): string[] {
@@ -277,9 +266,9 @@ export class Perception {
       // 快消失了、背包里又没多少的东西：值得注意一下（要不要回去捡由它自己判断）
       if (left <= 2 && have(g.name) < 16 && !this.dropWarned.has(key)) {
         this.dropWarned.add(key);
-        this.bus.publish('process_changed', 'P2', `地上的 ${g.name}×${g.count} ${at}再过不到 ${Math.max(1, Math.ceil(left))} 分钟就会消失（掉落物 5 分钟后没了）`, { kind: 'drop', pos: key });
+        this.bus.publish('process_changed', 'P2', `地上的 ${g.name}×${g.count} ${at}已见过一段时间；掉落物存在 6000 个实体刻后消失，出生时间和加载情况未知`, { kind: 'drop', pos: key });
       }
-      return `地上的 ${g.name}×${g.count} ${at}：${Math.round(g.firstMs / 60000 * 10) / 10} 分钟前第一次看到${g.visible ? '，现在看得见' : '，现在不在视野里'}；最多再过 ${left} 分钟就会消失`;
+      return `地上的 ${g.name}×${g.count} ${at}：约 ${durationText(realSecondsToTicks(g.firstMs / 1000)).replace(/^约 /, '')}前第一次看到（按正常 TPS 折算的游戏时间）${g.visible ? '，现在看得见' : '，现在不在视野里'}；出生时间和区块加载情况未知，无法确定何时消失`;
     });
   }
 
@@ -526,28 +515,19 @@ export class Perception {
         ? { dist: Math.round(Math.hypot(base.pos.x - s.pos.x, base.pos.z - s.pos.z)), dir: dirName(base.pos.x - s.pos.x, base.pos.z - s.pos.z) }
         : null;
 
-    // ---- 死亡掉落物：物品在地上 5 分钟后消失
+    // ---- 死亡掉落物：现实时间只能估算；未观察到消失时保留记录
     let deathRecovery: Percept['death_recovery'] = null;
     const d = this.memory.lastDeath();
     if (d && d.lost.length && s.connected && s.observationReady) {
-      const left = Math.round((d.ts + 300_000 - Date.now()) / 1000);
+      const left = Math.max(0, Math.round((d.ts + 300_000 - Date.now()) / 1000));
       const dist = Math.hypot(d.pos.x - here.x, d.pos.z - here.z);
-      if (left <= 0) {
-        this.memory.clearDeath();
-        this.bus.publish('death_items', 'P1', '死亡掉落物已经消失（超过 5 分钟）');
-      } else if (d.dim === s.dim) {
-        const itemsNear = v.seen.some((e) => e.kind === 'item' && Math.hypot(e.pos.x - d.pos.x, e.pos.z - d.pos.z) < 10);
-        if (dist < 4 && !itemsNear) {
-          this.memory.clearDeath();
-          this.bus.publish('death_items', 'P2', '回到了死亡地点，附近已经没有掉落物（已捡回或被冲走）');
-        } else {
-          deathRecovery = {
-            dir: dirName(d.pos.x - here.x, d.pos.z - here.z),
-            dist: Math.round(dist),
-            lost: d.lost.slice(0, 8).map((i) => `${i.name}×${i.count}`).join('、'),
-            seconds_left: left,
-          };
-        }
+      if (d.dim === s.dim) {
+        deathRecovery = {
+          dir: dirName(d.pos.x - here.x, d.pos.z - here.z),
+          dist: Math.round(dist),
+          lost: d.lost.slice(0, 8).map((i) => `${i.name}×${i.count}`).join('、'),
+          seconds_left: left,
+        };
       }
     }
 

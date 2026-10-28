@@ -212,7 +212,7 @@ export class Vision {
   /** 最近亲眼看见的非掉落物实体及其最后位置（3 分钟；不是当前存在的保证） */
   sightings = new Map<number, { id: number; name: string; kind: string; pos: Vec3Like; at: number }>();
   /** 亲眼看见过的掉落物最后在哪（转过头就不在视野里了，但人记得“床掉在东北三格”） */
-  /** 亲眼见过的掉落物：first 是第一次看到的时间（掉落物 5 分钟后消失，这是它最晚的“出生”时间） */
+  /** 亲眼见过的掉落物：first 是第一次看到的现实时间，出生时间未知 */
   private dropSightings = new Map<number, { id: number; name: string; pos: Vec3Like; at: number; first: number; count?: number }>();
   /** 本次扫描看到的值得注意的方块 */
   visibleNow = new Map<string, { name: string; pos: Vec3Like; dist: number }>();
@@ -636,12 +636,12 @@ export class Vision {
   }
 
   /**
-   * 见过的掉落物（看得见的和刚看不见的），带第一次看到的时间：地上的东西 5 分钟就消失，
-   * 从第一次看到算起，它最多还能留多久。看见它没了（就在视野里却不在了）的已经被忘掉。
+   * 见过的掉落物（看得见的和刚看不见的），带第一次看到的现实时间。
+   * 出生时间、区块加载及实际消失时间未知；确认原位置已空时忘掉。
    */
   dropsSeen(): { id: number; name: string; pos: Vec3Like; firstMs: number; lastMs: number; visible: boolean; count?: number }[] {
     const now = Date.now(), visible = new Set(this.seen.map((e) => e.id));
-    return [...this.dropSightings.values()].filter((d) => now - d.first < 300_000).map((d) => ({ id: d.id, name: d.name, pos: d.pos, firstMs: now - d.first, lastMs: now - d.at, visible: visible.has(d.id), ...(d.count ? { count: d.count } : {}) }));
+    return [...this.dropSightings.values()].map((d) => ({ id: d.id, name: d.name, pos: d.pos, firstMs: now - d.first, lastMs: now - d.at, visible: visible.has(d.id), ...(d.count ? { count: d.count } : {}) }));
   }
 
   /** 走到记得的地方一看没有了（被捡走、消失、漂走）：忘掉它 */

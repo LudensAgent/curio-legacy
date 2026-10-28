@@ -13,6 +13,9 @@ test('养动物的说明书：只在打算里提到养/引/喂时给；点名了
   assert.doesNotMatch(cow, /猪：/, '没点名的动物不给');
   assert.match(cow, /lead/, '带着走的办法要提到');
   assert.match(cow, /两只成年各喂一次/);
+  assert.match(cow, /6000 个实体刻.*游戏钟表约 6 小时/);
+  assert.match(cow, /24000 个实体刻.*游戏钟表 1 天/);
+  assert.match(husbandryFacts('养鸡')!, /6000–12000 个实体刻.*游戏钟表约 6–12 小时/);
   const any = husbandryFacts('想养几只动物')!;
   assert.match(any, /牛：.*羊：.*猪：/s, '没点名就都给');
 });
@@ -22,6 +25,7 @@ test('村民的说明书：按打算里说的事挑相关的几条', () => {
   assert.match(villagerFacts('去村庄用小麦换绿宝石')!, /农民收小麦/);
   assert.match(villagerFacts('给村民放讲台换职业')!, /讲台 lectern/);
   assert.match(villagerFacts('让村民繁殖')!, /多余的床/);
+  assert.match(villagerFacts('治疗僵尸村民')!, /3600–6000 个实体刻.*游戏钟表约 3 小时 36 分至 6 小时/);
 });
 
 test('打猎的账：按 hunt 的活数次数、估只数、最近几次走多远', () => {

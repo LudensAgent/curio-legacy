@@ -1,5 +1,6 @@
 import type { WorldMemory } from '../memory/store.ts';
 import type { Percept } from '../perception/perception.ts';
+import { durationText, realSecondsToTicks } from '../perception/time.ts';
 import { buildingArchiveFor } from '../skills/build.ts';
 
 /**
@@ -79,7 +80,7 @@ export function observedNeeds(p: Percept): ObservedNeed[] {
   if (p.death_recovery) {
     const d = p.death_recovery;
     needs.push({ need: 'lost_items', facts: [`死亡时遗失 ${d.lost}`, `记忆中的掉落位置在 ${d.dir} ${d.dist} 格外`,
-      `预计距掉落物消失还有 ${d.seconds_left} 秒`], unknowns: ['掉落物的当前状态与前往路线尚未确认'] });
+      d.seconds_left > 0 ? `按正常 TPS 且区块持续加载估算，最多还剩${durationText(realSecondsToTicks(d.seconds_left))}（游戏时间）` : '按正常 TPS 且区块持续加载估算，常规寿命已过去；实际情况未知'], unknowns: ['掉落物的当前状态与前往路线尚未确认'] });
   }
   for (const e of (p.efficiency ?? []).slice(0, 2)) {
     needs.push({ need: 'effort', facts: [`最近用${e.tool}挖了 ${e.mined} 个 ${e.block}，实测平均 ${e.avg_s} 秒/个`] });
@@ -108,7 +109,7 @@ export function computeDrives(p: Percept, memory: WorldMemory): { drives: Drive[
 
   if (p.death_recovery) {
     const d = p.death_recovery;
-    out.push({ drive: 'recover', level: d.seconds_left > d.dist / 3 + 20 ? 0.95 : 0.3, why: `死亡掉落物（${d.lost}）还在 ${d.dir} ${d.dist} 格外，${d.seconds_left} 秒后消失`, suggest: 'goto {target:"death"} 然后 pickup_items' });
+    out.push({ drive: 'recover', level: d.seconds_left > d.dist / 3 + 20 ? 0.95 : 0.3, why: `死亡时掉落的 ${d.lost} 记录在 ${d.dir} ${d.dist} 格外，当前状态未知`, suggest: 'goto {target:"death"} 然后 pickup_items' });
   }
   if (p.self.hp <= 8 || (hostiles >= 2 && p.self.hp <= 14)) {
     out.push({ drive: 'survive', level: p.self.hp <= 5 ? 1 : 0.8, why: `生命 ${p.self.hp}，附近敌对 ${hostiles} 个`, suggest: night ? 'shelter（挖坑封顶躲到天亮）' : '远离危险、吃东西回血' });
@@ -195,7 +196,7 @@ export function computeDrives(p: Percept, memory: WorldMemory): { drives: Drive[
   const farmsNear = p.farms ?? [];
   const ripe = farmsNear.find((f) => (f.mature ?? 0) >= 2);
   if (ripe) out.push({ drive: 'farm', level: 0.5, why: `农田（${ripe.crop}）有 ${ripe.mature} 格成熟了`, suggest: 'farm（收割并补种）' });
-  else if (farmsNear.length && farmsNear[0].minutes_since_planted >= 25 && farmsNear[0].dist <= 200 && !night) out.push({ drive: 'farm', level: 0.3, why: `农田种下 ${farmsNear[0].minutes_since_planted} 分钟了，去看看`, suggest: 'farm' });
+  else if (farmsNear.length && farmsNear[0].minutes_since_planted >= 25 && farmsNear[0].dist <= 200 && !night) out.push({ drive: 'farm', level: 0.3, why: `农田种下${durationText(realSecondsToTicks(farmsNear[0].minutes_since_planted * 60))}（游戏时间，按正常运行速度估算）了，去看看`, suggest: 'farm' });
   else if (!farmsNear.length && st.toolTier !== 'none' && !night) {
     const grass = (p.vision?.view ?? '').includes('grass');
     if (seedsHave) out.push({ drive: 'farm', level: homeBuilt ? 0.45 : 0.3, why: `有 ${seedsHave}，还没有农田，食物全靠打猎不稳定`, suggest: `farm {crop:"${seedsHave === 'wheat_seeds' ? 'wheat' : seedsHave.replace('_seeds', '')}"}` });

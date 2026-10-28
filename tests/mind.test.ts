@@ -761,6 +761,12 @@ test('提示词：太阳还高就想着躲起来过夜，提醒里把尺度摆�
   assert.ok(!working.some((r) => /别提前躲/.test(r)));
   const [, user] = buildMindMessages({ ...base, activity: null } as any);
   assert.match(user.content, /早上 7 点，太阳刚升起不久；离天黑（晚上 7 点，开始刷怪）还有约 12 个小时（游戏时间）/);
+  const percept = { ...base.percept, death_recovery: { dir: 'N', dist: 20, lost: 'stone×1', seconds_left: 50 } };
+  const [, timed] = buildMindMessages({ ...base, percept, state: { ...adapter.state(), effects: [{ name: 'speed', level: 1, seconds: 50 }] }, activity: null } as any);
+  assert.match(timed.content, /估计还剩约 1 个小时游戏时间；实际状态未知/);
+  assert.match(timed.content, /剩余时间按正常速度估算为约 1 个小时游戏时间/);
+  const [, expired] = buildMindMessages({ ...base, percept: { ...percept, death_recovery: { ...percept.death_recovery, seconds_left: 0 } }, activity: null } as any);
+  assert.match(expired.content, /估算已过常规寿命；实际状态未知/);
   memory.close();
 });
 

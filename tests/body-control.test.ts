@@ -98,6 +98,9 @@ test('感官：代码能读到距上次挨打多久、死后掉在地上的东�
   assert.ok(s.hurtAgoMs >= 0 && s.hurtAgoMs < 5000);
   assert.deepEqual(s.deathDrop.items, [{ name: 'iron_pickaxe', count: 1 }]);
   assert.ok(s.deathDrop.secondsLeft > 230 && s.deathDrop.secondsLeft <= 240);
+  memory.setDeath({ ts: Date.now() - 360_000, dim: 'overworld', pos: { x: 10, y: 64, z: 0 }, lost: [{ name: 'iron_pickaxe', count: 1 }] });
+  const later = await run('return await api.state();');
+  assert.equal((later.result as any).deathDrop.secondsLeft, 0, '超出估算时长也保留死亡掉落记录');
 });
 
 test('触发条件：dropped_items 和 dim 都是感觉得到的事实，怎么用由技能自己定', () => {

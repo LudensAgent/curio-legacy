@@ -238,8 +238,8 @@ scorecard.start();
 behaviors.drops = () => {
   const d = memory.lastDeath(), s = adapter.state();
   if (!d || !d.lost.length || d.dim !== s.dim) return null;
-  const left = Math.round((d.ts + 300_000 - Date.now()) / 1000);
-  return left > 0 ? { dist: Math.round(Math.hypot(d.pos.x - s.pos.x, d.pos.y - s.pos.y, d.pos.z - s.pos.z)), leftS: left, count: d.lost.reduce((n, i) => n + i.count, 0) } : null;
+  const left = Math.max(0, Math.round((d.ts + 300_000 - Date.now()) / 1000));
+  return { dist: Math.round(Math.hypot(d.pos.x - s.pos.x, d.pos.y - s.pos.y, d.pos.z - s.pos.z)), leftS: left, count: d.lost.reduce((n, i) => n + i.count, 0) };
 };
 behaviors.improve = (name, why, note) => { const skipped = improver.consider(name, why, note); if (skipped && why !== 'failures') bus.publish('skill_improve_skipped', 'P3', `先不改「${name}」：${skipped}`); };
 draftsFor(memory);
@@ -356,7 +356,7 @@ adapter.on('spawn', () => {
         .filter((i) => i.count > 0);
       if (lost.length) {
         memory.updateDeathLost(lost);
-        bus.publish('death_items', 'P1', `死亡掉落：${lost.map((i) => `${i.name}×${i.count}`).join('、')}（5 分钟内回去还能捡回）`);
+        bus.publish('death_items', 'P1', `死亡掉落：${lost.map((i) => `${i.name}×${i.count}`).join('、')}（物品经过 6000 个实体刻后消失，区块未加载时不会继续计时）`);
       } else memory.clearDeath();
     }, 1500);
   }

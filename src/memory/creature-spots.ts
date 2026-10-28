@@ -27,7 +27,7 @@ function dir(dx: number, dz: number): string {
   if (Math.hypot(dx, dz) < 1) return '';
   return DIRS[Math.floor(((Math.atan2(dz, dx) * 180 / Math.PI + 360 + 22.5) % 360) / 45)];
 }
-const ago = (ms: number) => { const m = Math.round(ms / 60000); return m < 1 ? '刚才' : m < 60 ? `${m} 分钟前` : `${Math.round(m / 60)} 小时前`; };
+const ago = (ms: number) => { const m = Math.round(ms / 60000); return m < 1 ? '刚才' : m < 60 ? `${m} 现实分钟前` : `${Math.round(m / 60)} 现实小时前`; };
 
 export interface CreatureSpot { label: string; pos: Vec3Like; dist: number; text: string; id: string; ageMs: number }
 

@@ -350,7 +350,7 @@ export class SelfModel {
     if (opts.deliberate && opts.reason?.trim() && (opts.review || stalled)) return null;
     const to = (this.data.agenda.find((a) => a.id === t)?.text ?? t).slice(0, 30);
     const head = `主目标「${cur.text.slice(0, 40)}」还在推进，没换成「${to}」：`;
-    if (opts.deliberate && opts.reason?.trim()) return head + `${Math.round(this.planStalledMin())} 分钟前还勾掉过清单，一时的想法不换主目标。`
+    if (opts.deliberate && opts.reason?.trim()) return head + `${Math.round(this.planStalledMin())} 现实分钟前还勾掉过清单，一时的想法不换主目标。`
       + '想做的事先记进 agenda（以后再做），眼前要先做的事写成 activity 或 detour；等停下来回顾阶段目标时（腻了、烦了、或者主目标很久没进展）再决定换不换';
     return head + '眼前要先做的事（过夜、脱困、回地面、吃饭、清包、补工具）直接写成 activity 或 detour，做完会回到主目标；'
       + (opts.deliberate ? '真决定换一个阶段目标，在 plan 里写 "switch_reason" 说为什么' : '真要换主目标得认真想一想，并写 switch_reason');

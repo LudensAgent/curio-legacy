@@ -75,8 +75,8 @@ test('技能对收获的影响：用它时和不用它时、各版本之间，�
   const ep = (sec: number, skill?: string) => { at += 600_000; if (skill) used[at - 1000] = [skill]; ledger.closeEpisode({ what: '挖石头', kind: 'gather', signature: 's', outcome: 'done', sec, gained: { cobblestone: 8 } }, at); };
   ep(160); ep(170); ep(80, 'strip-mine@v1'); ep(90, 'strip-mine@v1'); ep(40, 'strip-mine@v2'); ep(48, 'strip-mine@v2');
   const effect = ledger.skillEffect('strip-mine');
-  assert.match(effect, /cobblestone 用它时每个 \d+ 秒（4 次），不用它时 21 秒（2 次）/);
-  assert.match(effect, /按版本.*v2 每个 6 秒.*v1 每个 11 秒|按版本.*v1 每个 11 秒.*v2 每个 6 秒/);
+  assert.match(effect, /cobblestone 用它时每个 \d+ 现实秒（4 次），不用它时 21 现实秒（2 次）/);
+  assert.match(effect, /按版本.*v2 每个 6 现实秒.*v1 每个 11 现实秒|按版本.*v1 每个 11 现实秒.*v2 每个 6 现实秒/);
   assert.equal(ledger.skillEpisodes(), 4);
 });
 
@@ -90,7 +90,7 @@ test('想到某样东西就想起它的账：中文的活名也能连到物品�
   const found = recallLocal('去挖铁矿做铁镐', { self, memory, ledger });
   const hit = found.find((r) => r.kind === 'ledger');
   assert.ok(hit, '想起了收获账');
-  assert.match(hit!.text, /raw_iron：1 段活拿到 5 个，每个约 60 秒/);
+  assert.match(hit!.text, /raw_iron：1 段活拿到 5 个，每个约 60 现实秒/);
 });
 
 test('效率信号交给造技能的：费劲了对比最省的几次；回顾时整本账一起看', async (t) => {

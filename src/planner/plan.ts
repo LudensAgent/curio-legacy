@@ -185,7 +185,7 @@ function baseRule(p: Percept, memory?: WorldMemory): Record<string, unknown> {
     switch (d.drive) {
       case 'recover': {
         const dr = p.death_recovery!;
-        return mk(`死的时候掉的东西（${dr.lost}）还在 ${dr.dir} ${dr.dist} 格外，趁 ${dr.seconds_left} 秒内回去捡。`, '回去捡回掉落物', 'survive', [
+        return mk(`死亡时掉落的东西（${dr.lost}）记录在 ${dr.dir} ${dr.dist} 格外，当前状态未知。`, '回去捡回掉落物', 'survive', [
           { skill: 'goto', args: { target: 'death' } },
           { skill: 'pickup_items', args: { radius: 12 } },
         ]);

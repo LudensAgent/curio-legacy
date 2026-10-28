@@ -163,7 +163,7 @@ const CHOOSE = `【选动作】
 
 const PRINCIPLES = `【原则】
 - 接着刚才的念头往下想，不反复换主意、不重复刚做完的事。
-- 一段活是几分钟的一件事（“砍够 20 个原木”）：routine 1–6 步，可 repeat，done_when 写清何时收工；身体连续执行、自己应变，真卡住才叫你。
+- 一段活（如“砍 20 根木头”）：routine 1–6 步，可 repeat，done_when 写清何时收工；身体连续执行、自己应变，真卡住才叫你。
 - 从真实结果里学：出乎意料才写 learned；连续失败就换办法；有 stuck_here 必须换完全不同的思路，别碰 repeated_failures。
 - 你会被风景吸引、想把家弄得舒服好看：喜欢的写 liked，想做的放 agenda。情绪是信号：累了歇、烦了换办法、腻了找新鲜事。
 - 只知道亲眼看到或记得的东西，坐标来自观察或地标，不编。
@@ -258,8 +258,8 @@ const SURFACE_INTENT = /回地面|回到地面|见天|爬出|挖出去|出矿|�
  */
 function digVsWalk(dy: number, walk: number): string {
   const blocks = Math.max(0, Math.round(Math.abs(dy) * 3));
-  const digMin = blocks / 60, walkSec = Math.round((walk * 1.5) / 4);
-  return `走过去约 ${walkSec < 90 ? `${walkSec} 秒` : `${Math.round(walkSec / 60)} 分钟`}；从这里挖台阶${dy > 0 ? '下' : '上'}去要挖约 ${blocks} 格（约 ${digMin < 1 ? '不到 1' : Math.round(digMin)} 分钟，还费镐）`;
+  const walkSec = Math.round((walk * 1.5) / 4);
+  return `走过去${durationText(realSecondsToTicks(walkSec))}；从这里挖台阶${dy > 0 ? '下' : '上'}去要挖约 ${blocks} 格（${durationText(realSecondsToTicks(blocks))}，还费镐）；耗时为按正常速度估算的游戏时间`;
 }
 
 /** 按情境追加在用户消息末尾的提醒：只说和眼下有关的 2–4 件事 */
@@ -274,7 +274,7 @@ export function situationalReminders(ctx: MindContext): string[] {
     const f = ctx.learnFrom;
     out.push(`刚才「${f.stuck.what}」卡住了（${f.stuck.why.slice(0, 50)}${f.stuck.skill ? `，失败的是 ${f.stuck.skill}${f.stuck.code ? ` ${f.stuck.code}` : ''}` : ''}），随后「${f.solved.what}」做成了（${f.solved.routine.slice(0, 4).join('；')}）：以后还会碰到的话，写 worth_learning 说清怎么回事，后台会把它练成技能`);
   }
-  if (ctx.stuckHere) out.push(`你在这一带已经卡了 ${ctx.stuckHere.minutes} 分钟：换一个和 tried 完全不同的办法（换区域、换目标、就地安家都行）`);
+  if (ctx.stuckHere) out.push(`你在这一带已经卡了 ${ctx.stuckHere.minutes} 现实分钟：换一个和 tried 完全不同的办法（换区域、换目标、就地安家都行）`);
   const focusItem = ctx.self.activeAgenda();
   if (focusItem && !ctx.plan && ctx.tier === 'deliberate') out.push(`主目标「${focusItem.text}」还没有清单：写 "plan":{"focus":"${focusItem.id}","steps":[…3–6 项]}，之后一项项推进`);
   const exits = Object.values(p.self.exits ?? {});
@@ -306,10 +306,10 @@ export function situationalReminders(ctx: MindContext): string[] {
     const depth = p.self.depth_below_surface ?? 0;
     const back = (() => {
       const t = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).find((f) => f.inside);
-      if (t) { const walkSec = Math.round((Math.hypot(t.pos.x - here.x, t.pos.y - here.y, t.pos.z - here.z) * 1.5) / 4); return `沿通道走回入口约 ${walkSec < 90 ? `${walkSec} 秒` : `${Math.round(walkSec / 60)} 分钟`}`; }
-      return depth >= 6 ? `挖台阶回地面约 ${Math.round(depth * 3)} 格（约 ${Math.max(1, Math.round(depth * 3 / 60))} 分钟）` : '';
+      if (t) { const walkSec = Math.round((Math.hypot(t.pos.x - here.x, t.pos.y - here.y, t.pos.z - here.z) * 1.5) / 4); return `沿通道走回入口${durationText(realSecondsToTicks(walkSec))}（按正常速度估算的游戏时间）`; }
+      return depth >= 6 ? `挖台阶回地面约 ${Math.round(depth * 3)} 格（${durationText(realSecondsToTicks(depth * 3))}，按正常速度估算的游戏时间）` : '';
     })();
-    out.push(`下矿的账：这趟下来 ${Math.round(trip.minutes)} 分钟${got.length ? `，挖到 ${got.join(' ')}` : '，还没挖到矿'}；背包空 ${p.emptySlots} 格${picks.length ? `；${picks.join('、')}` : ''}；身边${seen.length ? `看得见 ${seen.join('、')}` : '没看见矿'}${remembered ? `，48 格内记得 ${remembered} 处矿点` : ''}${back ? `；${back}，再下来一趟也差不多这个价` : ''}。清单后面几项还要不要这些料，一起掂量再决定收不收工`);
+    out.push(`下矿的账：这趟下来${durationText(realSecondsToTicks(trip.minutes * 60))}（按正常速度估算的游戏时间）${got.length ? `，挖到 ${got.join(' ')}` : '，还没挖到矿'}；背包空 ${p.emptySlots} 格${picks.length ? `；${picks.join('、')}` : ''}；身边${seen.length ? `看得见 ${seen.join('、')}` : '没看见矿'}${remembered ? `，48 格内记得 ${remembered} 处矿点` : ''}${back ? `；${back}，再下来一趟也差不多这个价` : ''}。清单后面几项还要不要这些料，一起掂量再决定收不收工`);
   }
   // 养动物、村民交易：打算里提到了才把机制摆出来（模型对这些的记忆常是含糊或老版本的）
   const husbandry = husbandryFacts(intent);
@@ -345,10 +345,10 @@ export function situationalReminders(ctx: MindContext): string[] {
       out.push(`「${site.name}」已经验收过 ${site.attempts} 次，最近几次只少了 ${Math.max(0, site.recentProgress)} 处，还差 ${site.missing} 处：想想是不是已经够住了（够了就 build {"projectId":"${site.id}","mode":"accept"} 收工去做别的；不想要了就 abandon）`);
     else if (idleMin >= 20) out.push(`「${site.name}」还没盖完（还差 ${site.missing} 处）：想接着盖写 build {"projectId":"${site.id}"}；够住了就 accept，不想要了就 abandon`);
   }
-  if (ctx.designing) out.push(`建筑师正在画「${ctx.designing.brief.slice(0, 40)}」（${ctx.designing.minutes} 分钟了），画好会告诉你：先攒常用的木头、石头，或做别的事`);
+  if (ctx.designing) out.push(`建筑师正在画「${ctx.designing.brief.slice(0, 40)}」（${ctx.designing.minutes} 现实分钟了），画好会告诉你：先攒常用的木头、石头，或做别的事`);
   else if (drafts.length) out.push(`图纸 ${drafts[0].id}「${drafts[0].name}」已经画好：按材料清单攒齐后 build {"draft":"${drafts[0].id}"}`);
   else if (!unfinished.length && /盖|建|房|屋|家|住处|庇护|前哨|据点|补给点|仓库|畜栏|围栏|瞭望|塔|围墙|平台/.test(intent))
-    out.push('想盖要长期用的建筑（房子、前哨、仓库、畜栏、塔……）：现在就输出 {"kind":"design","brief":"…","where":"here|base"} 请建筑师——画图要几分钟，一边画一边去攒料，图到了按清单补齐就能盖；不要自己画图纸。施工只认露天干地：地下的落脚点自己挖、应急的几块自己搭');
+    out.push('想盖要长期用的建筑（房子、前哨、仓库、畜栏、塔……）：现在就输出 {"kind":"design","brief":"…","where":"here|base"} 请建筑师——画图要几现实分钟，一边画一边去攒料，图到了按清单补齐就能盖；不要自己画图纸。施工只认露天干地：地下的落脚点自己挖、应急的几块自己搭');
   const bed = nearestBed(ctx);
   const bedInBag = s.inventory.some((i) => i.name.endsWith('_bed'));
   const bedLine = bed ? `记得的床在 ${bed.dist} 格外（${bed.dir}，${bed.pos}）` : '';
@@ -364,12 +364,12 @@ export function situationalReminders(ctx: MindContext): string[] {
     // 太阳还高就想着躲起来过夜：把尺度摆出来（挖窝十几秒、天黑还早），让它接着干活
     const toDarkTicks = ticksUntil(tod, DARK_TICK);
     if (tod < 11000 && toDarkTicks > 2000 && /过夜|躲|窝|封顶|天黑|等天/.test(intent))
-      out.push(`现在${timeSense(tod).split('；')[0]}，离天黑还有${durationText(toDarkTicks)}（游戏 1 小时≈现实 50 秒）：挖个能封顶的窝只要十几秒，下午 5 点以后再准备过夜就来得及，现在手上的活接着做，别提前躲起来干等`);
+      out.push(`现在${timeSense(tod).split('；')[0]}，离天黑还有${durationText(toDarkTicks)}（游戏 1 小时≈现实 50 秒）：挖个能封顶的窝估计要十几现实秒，下午 5 点以后再准备过夜就来得及，现在手上的活接着做，别提前躲起来干等`);
     // 都换成游戏时间比：走回去要的时间（约 4 格/秒）加一个游戏小时的余量，够不着天黑前到床就提醒
     const toDark = ticksUntil(tod, DARK_TICK);
     const walk = realSecondsToTicks(bed ? bed.dist / 4 : 0);
     if (bed && !bedInBag && bed.dist > 32 && toDark <= walk + 1000)
-      out.push(`离天黑（晚上 7 点）还有${durationText(toDark)}；${bedLine}，走回去要${durationText(walk)}：要回去睡就该动身了，否则就近想办法过夜`);
+      out.push(`离天黑（晚上 7 点）还有${durationText(toDark)}；${bedLine}，走回去估计要${durationText(walk)}（按正常速度估算的游戏时间）：要回去睡就该动身了，否则就近想办法过夜`);
   }
   if (p.self.food <= 8) out.push(`饿了（饥饿 ${p.self.food}）：留意吃的`);
   // 家已经有了、手上又没什么大目标：像玩家一样给自己找下一个更长的目标，而不是只做零碎的小事
@@ -448,7 +448,7 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
       const it = s.inventory.find((i) => i.name === name);
       return `${name}×${count}${durabilityText(it)}${it?.enchanted ? '（附魔）' : ''}`;
     }), empty_slots: p.emptySlots,
-    ...(s.effects?.length ? { effects: s.effects.map((e) => `${e.name}${e.level > 1 ? ` ${e.level} 级` : ''}，还剩 ${e.seconds} 秒`) } : {}),
+    ...(s.effects?.length ? { effects: s.effects.map((e) => `${e.name}${e.level > 1 ? ` ${e.level} 级` : ''}，${e.seconds > 0 ? `剩余时间按正常速度估算为${durationText(realSecondsToTicks(e.seconds))}游戏时间` : '剩余时长未知或接近结束'}`) } : {}),
     ...(s.xp ? { xp_level: s.xp.level } : {}),
     // 背包里的食物各值多少（生的顺带说烤熟后值多少）：只给事实，吃不吃、烤不烤由它自己定
     ...([...inv.keys()].some((n) => foodNote(n)) ? { food_values: Object.fromEntries([...inv.keys()].filter((n) => foodNote(n)).map((n) => [n, foodNote(n)])) } : {}),
@@ -468,7 +468,12 @@ function surroundingsOf(p: Percept, tier: 'glance' | 'deliberate') {
     ...(v ? { facing: v.facing, view: v.view, ...((v as any).visible_drops?.length ? { drops: (v as any).visible_drops.slice(0, 4) } : {}),
       ...(v.nearest_land ? { nearest_land: v.nearest_land } : {}) } : {}),
     ...(tier === 'deliberate' && p.curiosities.length ? { curious_about: p.curiosities.slice(0, 5).map((c) => `${c.what} ${c.dir}${c.dist}格`) } : {}),
-    ...(p.death_recovery ? { my_dropped_items: p.death_recovery } : {}),
+    ...(p.death_recovery ? { my_dropped_items: {
+      dir: p.death_recovery.dir, dist: p.death_recovery.dist, lost: p.death_recovery.lost,
+      lifetime: p.death_recovery.seconds_left > 0
+        ? `假设区块持续加载且正常速度，估计还剩${durationText(realSecondsToTicks(p.death_recovery.seconds_left))}游戏时间；实际状态未知`
+        : '按区块持续加载且正常速度估算已过常规寿命；实际状态未知',
+    } } : {}),
   };
 }
 
@@ -512,7 +517,7 @@ function worldKnowledge(ctx: MindContext) {
 function recordLine(r: ActivityRecord) {
   const g = Object.entries(r.gained).slice(0, 6).map(([k, v]) => `${k}+${v}`).join(' ');
   const l = Object.entries(r.lost).slice(0, 4).map(([k, v]) => `${k}-${v}`).join(' ');
-  return { what: r.what, outcome: r.outcome, took_s: r.durationSec, ...(g ? { gained: g } : {}), ...(l ? { used: l } : {}), summary: r.summary,
+  return { what: r.what, outcome: r.outcome, took_real_s: r.durationSec, ...(g ? { gained: g } : {}), ...(l ? { used: l } : {}), summary: r.summary,
     ...(r.expect ? { i_expected: r.expect } : {}), ...(r.hypothesis ? { hypothesis: r.hypothesis } : {}) };
 }
 
@@ -564,8 +569,8 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
     ['手上的活', {
       current_activity: ctx.activity ? describeActivity(ctx.activity, s, p) : null,
       ...(ctx.suspended.length ? { will_resume_after: ctx.suspended.map((a) => a.what) } : {}),
-      ...(ctx.designing ? { architect_drawing: `${ctx.designing.brief.slice(0, 60)}（${ctx.designing.minutes} 分钟了）` } : {}),
-      ...(ctx.stuckHere ? { stuck_here: { minutes: ctx.stuckHere.minutes, tried: ctx.stuckHere.tried } } : {}),
+      ...(ctx.designing ? { architect_drawing: `${ctx.designing.brief.slice(0, 60)}（${ctx.designing.minutes} 现实分钟了）` } : {}),
+      ...(ctx.stuckHere ? { stuck_here: { real_minutes: ctx.stuckHere.minutes, tried: ctx.stuckHere.tried } } : {}),
       ...(ctx.repeatedFailures?.length ? { repeated_failures: ctx.repeatedFailures } : {}),
       ...(ctx.notes.length ? { last_decision_corrections: ctx.notes } : {}),
     }],
@@ -589,10 +594,10 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
   // 操作者的指令放在最前面，最后的提醒里再说一遍（开头和结尾模型最不容易忽略）
   const order = ctx.operatorOrder;
   if (order && order.kind === 'suggestion') {
-    sections.unshift(['操作者的建议', { suggestion: order.text, received: `${order.ageSec} 秒前`, how: '掂量一下：合适就采纳（operator adopted），不合适说一句为什么（declined），之后照自己的节奏玩' }]);
+    sections.unshift(['操作者的建议', { suggestion: order.text, received: `${order.ageSec} 现实秒前`, how: '掂量一下：合适就采纳（operator adopted），不合适说一句为什么（declined），之后照自己的节奏玩' }]);
     reminders.unshift(`操作者提了个建议「${order.text.slice(0, 80)}」：采纳还是不采纳，写 operator`);
   } else if (order) {
-    sections.unshift(['操作者的指令', { order: order.text, received: `${order.ageSec} 秒前`, status: order.status === 'new' ? '刚收到，还没照做' : '照做中', must: '优先于你自己的打算；照做，并在 operator 里回应 doing / done / cannot' }]);
+    sections.unshift(['操作者的指令', { order: order.text, received: `${order.ageSec} 现实秒前`, status: order.status === 'new' ? '刚收到，还没照做' : '照做中', must: '优先于你自己的打算；照做，并在 operator 里回应 doing / done / cannot' }]);
     reminders.unshift(`操作者的指令「${order.text.slice(0, 80)}」${order.status === 'new' ? '刚收到：这一念就照做（把它变成手上的活）' : '还没做完：手上的活要为它服务；做完了就写 done'}，并写 operator`);
   }
   const body = noteGoneSpots(sections.map(([name, data]) => `【${name}】${JSON.stringify(data)}`).join('\n'), ctx.memory, p.self.dim);

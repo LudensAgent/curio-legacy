@@ -339,7 +339,7 @@ export class Mind {
       const waited = durationText(realSecondsToTicks((Date.now() - this.waitingSince) / 1000));
       const tod = ((p.time.timeOfDay % 24000) + 24000) % 24000;
       const dark = tod >= 12000 && tod < DAWN_TICK;
-      const n = this.attention.notice('bored_waiting', `已经干等了${waited}（游戏时间），好无聊${dark ? `（离天亮还有${durationText(ticksUntil(tod, DAWN_TICK))}）` : '（现在还是白天）'}：这段时间能做点什么？`, 0.62, 4 * 60_000);
+      const n = this.attention.notice('bored_waiting', `已经干等了${waited}（按正常速度估算的游戏时间），好无聊${dark ? `（离天亮还有${durationText(ticksUntil(tod, DAWN_TICK))}）` : '（现在还是白天）'}：这段时间能做点什么？`, 0.62, 4 * 60_000);
       if (n) this.d.bus.publish('notice', 'P2', `注意到：${n.what}`, { salience: n.salience, level: n.level });
     }
     // 天快黑时惦记家：离家远就想着往回走（像真人一样，不是硬规则：只是一件“注意到”的事）
@@ -437,7 +437,7 @@ export class Mind {
     const acts = this.d.self.history(60).filter((r) => r.at > since);
     if (Date.now() - since < 30 * 60_000 || acts.length < 8) return;
     this.d.onGoalStuck(plan.goal, [
-      `目标：${plan.goal}（定下 ${Math.round((Date.now() - plan.setAt) / 60_000)} 分钟，${Math.round((Date.now() - since) / 60_000)} 分钟没勾掉一项）`,
+      `目标：${plan.goal}（定下 ${Math.round((Date.now() - plan.setAt) / 60_000)} 现实分钟，${Math.round((Date.now() - since) / 60_000)} 现实分钟没勾掉一项）`,
       `清单：${plan.steps.map((st, i) => `${i}.[${st.done ? 'x' : ' '}] ${st.text}`).join(' ')}`,
       ...acts.slice(-20).map((r) => `${r.what} → ${r.outcome}${r.outcome !== 'done' ? `：${r.summary.slice(0, 80)}` : ''}`),
     ]);
@@ -468,8 +468,8 @@ export class Mind {
     const moody = (bored || fed || !!this.keptHint) && stale && (!plan || days >= 1) && now - this.lastReviewAt >= this.reviewGapMs;
     if (!overdue && !moody) return;
     const why = [overdue ? `主目标定下 ${Math.floor(days)} 天了还没做成` : '', bored ? '好无聊' : '', fed ? '很烦躁' : '',
-      plan && stalledMin >= SelfModel.STALL_MIN ? `主目标 ${Math.round(stalledMin)} 分钟没勾掉一项` : '',
-      noMilestoneMin !== null && noMilestoneMin >= Mind.NO_MILESTONE_MIN ? `${Math.round(noMilestoneMin)} 分钟没有新的游戏进度` : '',
+      plan && stalledMin >= SelfModel.STALL_MIN ? `主目标 ${Math.round(stalledMin)} 现实分钟没勾掉一项` : '',
+      noMilestoneMin !== null && noMilestoneMin >= Mind.NO_MILESTONE_MIN ? `${Math.round(noMilestoneMin)} 现实分钟没有新的游戏进度` : '',
       this.keptHint ? '回想时觉得主目标可以放下了' : ''].filter(Boolean).join('、');
     this.review = { at: now, why };
     this.d.bus.publish('stage_review', 'P2', `停下来回顾阶段目标：${why}`, { boredom: m.boredom, frustration: m.frustration, days, stalledMin: Math.round(stalledMin), noMilestoneMin: noMilestoneMin === null ? null : Math.round(noMilestoneMin) });
@@ -485,10 +485,10 @@ export class Mind {
     return {
       why: this.review?.why ?? '',
       feeling: moodWords(this.d.self.mood),
-      ...(plan ? { current: `「${plan.goal}」定下 ${Math.floor(this.d.self.planDays(this.gameDay))} 个游戏天（${min(now - plan.setAt)} 分钟），${Math.round(this.d.self.planStalledMin(now))} 分钟没勾掉一项，清单 ${plan.steps.filter((st) => st.done).length}/${plan.steps.length}` } : { current: '没有主目标' }),
-      recent_stages: this.d.self.stages(6).map((r) => `「${r.goal.slice(0, 40)}」${min(r.endAt - r.setAt)} 分钟 → ${outcome[r.outcome]}（${r.stepsDone}/${r.steps}）`),
+      ...(plan ? { current: `「${plan.goal}」定下 ${Math.floor(this.d.self.planDays(this.gameDay))} 个游戏天（${min(now - plan.setAt)} 现实分钟），${Math.round(this.d.self.planStalledMin(now))} 现实分钟没勾掉一项，清单 ${plan.steps.filter((st) => st.done).length}/${plan.steps.length}` } : { current: '没有主目标' }),
+      recent_stages: this.d.self.stages(6).map((r) => `「${r.goal.slice(0, 40)}」${min(r.endAt - r.setAt)} 现实分钟 → ${outcome[r.outcome]}（${r.stepsDone}/${r.steps}）`),
       ...(prog ? { game_progress: { reached: prog.reached.slice(-10), not_yet: prog.next.slice(0, 10),
-        ...(prog.lastAt ? { last_new_min_ago: min(now - prog.lastAt) } : {}) } } : {}),
+        ...(prog.lastAt ? { last_new_real_min_ago: min(now - prog.lastAt) } : {}) } } : {}),
       ideas_waiting: this.d.self.agenda().filter((a) => a.status !== 'active').slice(-6).map((a) => `${a.id} ${a.kind === 'goal' ? '目标' : a.kind === 'idea' ? '点子' : '疑问'}：${a.text.slice(0, 40)}`),
       ...(this.keptHint ? { reflection: this.keptHint } : {}),
       how: '情绪在提醒你停下来看看：recent_stages 是不是一直在同一类事上打转，game_progress 里还有什么没做到、手上的东西够不够去做。'
@@ -572,7 +572,7 @@ export class Mind {
 
   /** 只检查眼下确实会用的物品；采集等前置动作的产出仍交给实际执行确认。 */
   private queuedProblem(q: NonNullable<Mind['queuedNext']>): string | null {
-    if (Date.now() - q.at > 90_000) return '已等待超过 90 秒，身体和物品可能变了';
+    if (Date.now() - q.at > 90_000) return '已等待超过 90 现实秒，身体和物品可能变了';
     const state = this.d.adapter.state();
     for (const step of q.draft.steps) {
       const args = (step.args ?? {}) as Record<string, any>;
@@ -695,7 +695,7 @@ export class Mind {
         this.resumeCheck = resume.id;
         this.requestThink(outcome === 'stuck'
           ? `绕路去做的「${a.what}」卡住了：${summary}。原来放下的「${resume.what}」还要接着做吗？`
-          : `绕路去做的「${a.what}」做完了。${away} 秒前放下的「${resume.what}」（${resume.why || '没写原因'}）还要接着做吗？这段时间里它的前提可能已经变了`, 'deliberate');
+          : `绕路去做的「${a.what}」做完了。${away} 现实秒前放下的「${resume.what}」（${resume.why || '没写原因'}）还要接着做吗？这段时间里它的前提可能已经变了`, 'deliberate');
         return;
       }
     }
@@ -929,7 +929,7 @@ export class Mind {
       ...(this.d.behaviors && tier === 'deliberate' ? { learnedSkills: this.safe(() => this.d.behaviors!.overview().filter((l) => !/已收起|已停用/.test(l)), []), instincts: this.safe(() => instinctNote(), '') } : {}),
       ...(this.d.thinker.designing ? { designing: { brief: this.d.thinker.designing.brief, minutes: Math.round((Date.now() - this.d.thinker.designing.startedAt) / 60_000) } } : {}),
       repeatedFailures: [...this.failuresByTarget].filter(([, f]) => f.n >= 2)
-        .sort((a, b) => b[1].n - a[1].n).slice(0, 10).map(([key, f]) => `${key.replace(':', ' ')} ×${f.n}（10 分钟内）`),
+        .sort((a, b) => b[1].n - a[1].n).slice(0, 10).map(([key, f]) => `${key.replace(':', ' ')} ×${f.n}（10 现实分钟内）`),
     };
     const suggestion = this.userSuggestion;
     const order = this.order, orderWasNew = order?.status === 'new';
@@ -1342,8 +1342,8 @@ export class Mind {
     const prev = this.lastSnapshot, now = this.snapshotNow();
     if (!prev) return ['刚开始玩，或者刚回过神来'];
     const secs = Math.round((now.at - prev.at) / 1000);
-    if (now.sessionId !== prev.sessionId || now.dim !== prev.dim) return [`${secs} 秒里换了世界/维度`];
-    const out: string[] = [`距上次想事情 ${secs} 秒`];
+    if (now.sessionId !== prev.sessionId || now.dim !== prev.dim) return [`${secs} 现实秒里换了世界/维度`];
+    const out: string[] = [`距上次想事情 ${secs} 现实秒`];
     const moved = Math.hypot(now.pos.x - prev.pos.x, now.pos.y - prev.pos.y, now.pos.z - prev.pos.z);
     if (moved >= 3) out.push(`走了约 ${Math.round(moved)} 格`);
     const { gained, lost } = diffInventory(prev.inv, now.inv);

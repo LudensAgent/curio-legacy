@@ -5,8 +5,8 @@ import { clampInt, fail, obj, ok, type Skill } from './types.ts';
 /** 原地等一会儿：像人一样站着、偶尔慢慢转头看看；受伤或掉进水里就提前结束 */
 export const wait: Skill<{ seconds: number; look: boolean }> = {
   name: 'wait',
-  description: '原地等一会儿（等天亮/等作物/等怪离开），会慢慢看看四周；受伤或落水会提前停',
-  argsDoc: '{"seconds"?:2-60}',
+  description: '原地等并环顾；受伤或落水停。seconds 为现实秒，20 TPS 时每秒约 1.2 游戏分钟',
+  argsDoc: '{"seconds"?:2-60（现实秒）}',
   timeoutMs: 65000,
   movement: false,
   validate(raw) {
@@ -25,19 +25,23 @@ export const wait: Skill<{ seconds: number; look: boolean }> = {
     }
     const s0 = adapter.state();
     const t0 = Date.now();
+    const elapsed = () => {
+      const seconds = (Date.now() - t0) / 1000;
+      return `${Math.round(seconds)} 现实秒（按 20 TPS 估算约 ${Math.round(seconds * 12) / 10} 游戏分钟，实际取决于服务器运行）`;
+    };
     const end = Math.min(t0 + args.seconds * 1000, ctx.deadline - 1000);
     const yaw0 = adapter.eye()?.yaw ?? 0;
     let k = 0;
     while (Date.now() < end) {
       await sleep(Math.min(2000, Math.max(1, end - Date.now())), signal);
       const s = adapter.state();
-      if (s.hp <= s0.hp - 2) return ok(`等了 ${Math.round((Date.now() - t0) / 1000)} 秒，受到伤害（生命 ${Math.round(s.hp)}），提前停下`, { interrupted: 'hurt' });
-      if (s.inWater && !s0.inWater && !s.riding) return ok(`等了 ${Math.round((Date.now() - t0) / 1000)} 秒，掉进了水里，提前停下`, { interrupted: 'water' });
+      if (s.hp <= s0.hp - 2) return ok(`等了 ${elapsed()}，受到伤害（生命 ${Math.round(s.hp)}），提前停下`, { interrupted: 'hurt' });
+      if (s.inWater && !s0.inWater && !s.riding) return ok(`等了 ${elapsed()}，掉进了水里，提前停下`, { interrupted: 'water' });
       if (args.look && Date.now() < end) await adapter.look(yaw0 + Math.sin(++k * 0.9) * 0.9, -0.1, signal);
       ctx.progress(Math.min(1, (Date.now() - t0) / (args.seconds * 1000)), '等待中');
     }
     const s = adapter.state();
-    return ok(`${landed}原地等了 ${Math.round((Date.now() - t0) / 1000)} 秒（现在${s.isDay ? '白天' : '夜晚'}）`);
+    return ok(`${landed}原地等了 ${elapsed()}（现在${s.isDay ? '白天' : '夜晚'}）`);
   },
 };
 
@@ -48,7 +52,7 @@ export const wait: Skill<{ seconds: number; look: boolean }> = {
 export const glance: Skill<{ seconds: number }> = {
   name: 'glance',
   description: '想事情时持续留意当前视野，偶尔轻微扫视（不移动、不消耗东西）',
-  argsDoc: '{"seconds"?:2-300}',
+  argsDoc: '{"seconds"?:2-300（现实秒）}',
   timeoutMs: 305000,
   movement: false,
   readOnly: true,

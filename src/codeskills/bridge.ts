@@ -36,7 +36,7 @@ export const API_DOC = `代码是一个 async 函数体，参数 api 和 args �
 - api.equip(物品名或null, "hand"|"off-hand"|"head"|"torso"|"legs"|"feet", {sourceSlot}?) 指定现有槽位可区分同名物品；null 清空该装备位。api.act("inspect_inventory",{}) 查看槽位、附魔、名称和NBT｜api.shield(true/false) 举起/放下副手的盾（要先把 shield equip 到 off-hand；举着时走得慢、挡正面的近战和箭）
 - api.draw("bow"|"crossbow"|"trident") 开始蓄力 → api.release([x,y,z]?) 转向那一点松手 → {ok, chargedMs}；弓蓄 1000ms 以上才是满力，远处要往上抬（箭会下坠）
 - api.shoot(实体id) 身体按经验估好提前量和下坠、拉满弓射一箭（慢但省事）
-- api.state() 还有 offHand、armor、usingItem（在举盾/拉弓）、hurtAgoMs（距上次挨打多久）、deathDrop（死后掉在地上还没捡回的东西：{pos,dim,items,secondsLeft} 或 null）
+- api.state() 还有 offHand、armor、usingItem（在举盾/拉弓）、hurtAgoMs（距上次挨打多久）、deathDrop（死亡掉落记录：{pos,dim,items,secondsLeft} 或 null；secondsLeft 是按正常 TPS 且持续加载估算的剩余现实秒，0 不代表已消失）
 - api.entities(r) 每个还有 velocity（每 tick 移动，正在冲过来就看得出）、height、hp（看得到时）
 规则：只能用 api 和普通 JavaScript（不能 require/import/eval）；循环要有出口（每次唤醒最多 1.5 秒同步计算，总共最多 12000 次 api 调用）；做成 return 一个结果，做不成 throw new Error("原因")。`;
 const MAX_REGION = 40_000;
@@ -132,8 +132,8 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
         let deathDrop: unknown = null;
         try {
           const d = ctx.memory.lastDeath();
-          const left = d ? Math.round((d.ts + 300_000 - Date.now()) / 1000) : 0;
-          if (d && d.lost.length && left > 0) deathDrop = { pos: d.pos, dim: d.dim, items: d.lost.map((i) => ({ name: i.name, count: i.count })), secondsLeft: left };
+          const left = d ? Math.max(0, Math.round((d.ts + 300_000 - Date.now()) / 1000)) : 0;
+          if (d && d.lost.length) deathDrop = { pos: d.pos, dim: d.dim, items: d.lost.map((i) => ({ name: i.name, count: i.count })), secondsLeft: left };
         } catch { /* 记忆暂不可用 */ }
         return { pos: s.pos, feet: feetCell(s.pos), hp: Math.round(s.hp * 10) / 10, food: s.food, oxygen: s.oxygen, onGround: s.onGround !== false, inWater: s.inWater, inLava: s.inLava,
           isDay: s.isDay, dim: s.dim, yaw: eye?.yaw ?? null, pitch: eye?.pitch ?? null, facing: eye ? facingOfYaw(eye.yaw) : null, held: s.held, riding: s.riding ?? null,

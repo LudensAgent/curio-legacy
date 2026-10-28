@@ -149,7 +149,7 @@ export class Attention {
     if (!stuck) return null;
     // 同一带、同一种失败只提醒一次（冷却几分钟），否则每多失败一次就逼着重新深想一遍
     return this.notice(`loop:${stuck.failureCode}`,
-      `在 (${Math.round(here.x)},${Math.round(here.y)},${Math.round(here.z)}) 一带已卡住 ${stuck.minutes} 分钟，试过：${stuck.tried.join('、')}；需要换完全不同的思路`,
+      `在 (${Math.round(here.x)},${Math.round(here.y)},${Math.round(here.z)}) 一带已卡住 ${stuck.minutes} 现实分钟，试过：${stuck.tried.join('、')}；需要换完全不同的思路`,
       0.8, 4 * 60_000, now);
   }
 
