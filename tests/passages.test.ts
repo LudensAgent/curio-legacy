@@ -140,11 +140,12 @@ test('按需提醒：想下矿时说出现成的通道；人在通道里就说�
       noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', tier: 'glance' as const } as any;
   };
   const away = situationalReminders(ctx(at(20, 64, 30), '挖阶梯下到 y20 找铁'));
-  assert.ok(away.some((r) => /你挖过的通道：入口 \(0,64,0\)（36 格外），能走到 y40.*里面有床.*走过去约 \d+ 分钟；从这里挖台阶下去要挖约 \d+ 格.*按正常速度估算的游戏时间.*goto 入口会顺着记下的路线走下去/.test(r)), away.join('\n'));
+  assert.ok(away.some((r) => /记得自己挖过的通道：入口 \(0,64,0\)（36 格外），能走到 y40.*里面有床.*当前是否可通尚未确认/.test(r)), away.join('\n'));
+  assert.ok(!away.some((r) => /goto 入口会顺着记下的路线走下去/.test(r)), away.join('\n'));
   const inside = situationalReminders(ctx(at(22, 42, 0), '顺着矿道往前找铁'));
-  assert.ok(inside.some((r) => /你现在就在自己挖过的通道里：.*顺着走比重新挖省事/.test(r)), inside.join('\n'));
+  assert.ok(inside.some((r) => /记得自己在挖过的通道里：.*当前是否可通尚未确认/.test(r)), inside.join('\n'));
   const up = situationalReminders(ctx(at(22, 42, 0), '挖台阶一路挖到见天回地面'));
-  assert.ok(up.some((r) => /入口 \(0,64,0\) 就是出口：goto 入口会沿原路一段段走上去；走过去约 \d+ 分钟；从这里挖台阶上去要挖约 \d+ 格.*按正常速度估算的游戏时间/.test(r)), up.join('\n'));
+  assert.ok(up.some((r) => /记得这条自己挖过的通道的入口在 \(0,64,0\)；当前是否可通尚未确认/.test(r)), up.join('\n'));
   const busy = situationalReminders(ctx(at(20, 64, 30), '砍 16 根原木'));
   assert.ok(!busy.some((r) => /挖过的通道/.test(r)));
   m.close();

@@ -256,16 +256,6 @@ const MINING_INTENT = /下矿|矿道|矿洞|找铁|挖铁|找矿|挖矿|粗铁|�
 /** 打算里说要从地下回地面 */
 const SURFACE_INTENT = /回地面|回到地面|见天|爬出|挖出去|出矿|上到地面|挖(阶梯|台阶).{0,8}上|往上挖/;
 
-/**
- * 走旧矿道和就地新挖各要花多少，用数字摆出来让它自己比（不替它选）。
- * 挖台阶：每往下/往上一格要挖掉约 3 格方块（石头带镐约 1 秒一格）；走路约 4 格/秒，矿道里绕一点算 1.5 倍
- */
-function digVsWalk(dy: number, walk: number): string {
-  const blocks = Math.max(0, Math.round(Math.abs(dy) * 3));
-  const walkSec = Math.round((walk * 1.5) / 4);
-  return `走过去${durationText(realSecondsToTicks(walkSec))}；从这里挖台阶${dy > 0 ? '下' : '上'}去要挖约 ${blocks} 格（${durationText(realSecondsToTicks(blocks))}，还费镐）；耗时为按正常速度估算的游戏时间`;
-}
-
 /** 按情境追加在用户消息末尾的提醒：只说和眼下有关的 2–4 件事 */
 export function situationalReminders(ctx: MindContext): string[] {
   const out: string[] = [];
@@ -284,20 +274,16 @@ export function situationalReminders(ctx: MindContext): string[] {
   const exits = Object.values(p.self.exits ?? {});
   const where = p.self.where?.kind;
   const trapped = where ? where === 'underground' || where === 'pit' : p.self.sky_visible !== true && (p.self.overhead?.covered === 'rock' || p.light?.underground === true) || exits.length > 0 && exits.every((e) => !e.walk && !e.step_up);
-  // 想下矿、想往下挖：自己挖过的通道就是现成的路（10-26 晚它开了 67 次新阶梯，只有被提醒才走回旧矿道）
-  // 想下到哪一层（打算里写了 y 就按它，没写按通道最深处）
-  const wantY = (() => { const m = intent.match(/y ?(-?\d{1,3})/); return m ? Number(m[1]) : null; })();
+  // 旧通道是历史记忆，不保证现在仍然可通。
   if (MINING_INTENT.test(intent)) {
     // 矿在哪一层是版本事实：模型记得的多是老版本（钻石 y12），摆出这个世界的版本对应的分布，下到哪层它自己定
     const layers = oreLayerFacts(config.mc.version, intent);
     if (layers) out.push(layers);
     const tunnels = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).filter((f) => f.dist <= 160).slice(0, 2);
     for (const t of tunnels) {
-      const deep = Number(t.text.match(/能走到 y(-?\d+)/)?.[1] ?? here.y);
-      const dy = here.y - (wantY !== null && wantY >= deep ? wantY : deep);
       out.push(t.inside
-        ? `你现在就在自己${t.text.replace(/^挖过的通道：/, '挖过的通道里：')}；顺着走比重新挖省事：goto 通道里的坐标或设施会自己沿记下的路线一段段走，不用一格格挖`
-        : `你${t.text}：${dy > 4 ? `${digVsWalk(dy, t.dist)}。` : ''}goto 入口会顺着记下的路线走下去；要去的地方离这条通道远，再就地新挖`);
+        ? `记得自己在${t.text.replace(/^挖过的通道：/, '挖过的通道里：')}；当前是否可通尚未确认`
+        : `记得自己${t.text}；当前是否可通尚未确认`);
     }
   }
   // 下矿的账：在地下、手上的活快收工或想回地面时，把这一趟的成本和身边还剩的矿摆出来（真人多挖几组是因为知道“再来一趟更贵”）；多挖不多挖它自己定
@@ -332,10 +318,10 @@ export function situationalReminders(ctx: MindContext): string[] {
     const feed = s.inventory.filter((i) => /^(wheat|wheat_seeds|carrot|potato|beetroot|beetroot_seeds|melon_seeds|pumpkin_seeds)$/.test(i.name)).map((i) => `${i.name}×${i.count}`).slice(0, 4);
     out.push(`肉的账：这局已经打猎 ${hunting.trips} 次、大约 ${hunting.animals} 只，最近几次每次为了肉走 ${hunting.recentWalked ?? '?'} 格；现在看得见能吃的动物 ${seenNow} 只，128 格内记得的还有约 ${remembered} 只${feed.length ? `；背包里有 ${feed.join(' ')}` : ''}。动物不会再生，打一只少一只——是接着找，还是圈几只养起来，自己掂量`);
   }
-  // 人在自己挖过的通道里、想回地面：原路就是现成的出口
+  // 回地面时提供记过的入口，实际是否可通仍需确认。
   if (SURFACE_INTENT.test(intent) && p.self.sky_visible !== true) {
     const t = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).find((f) => f.inside);
-    if (t) out.push(`你在自己挖过的通道里，入口 (${Math.round(t.pos.x)},${Math.round(t.pos.y)},${Math.round(t.pos.z)}) 就是出口：goto 入口会沿原路一段段走上去；${digVsWalk(here.y - t.pos.y, Math.hypot(t.pos.x - here.x, t.pos.y - here.y, t.pos.z - here.z))}`);
+    if (t) out.push(`记得这条自己挖过的通道的入口在 (${Math.round(t.pos.x)},${Math.round(t.pos.y)},${Math.round(t.pos.z)})；当前是否可通尚未确认`);
   }
   if (where === 'indoors' && /坑|垫高|台阶|爬出|挖出去|出坑/.test(intent)) out.push(`你${p.self.where!.text}。刚才想的“坑”其实是屋子的墙`);
   if (trapped && where === 'pit') out.push(`你${p.self.where!.text}：看【身边】local 和背包，怎么上去自己定`);
