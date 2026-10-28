@@ -109,7 +109,7 @@ export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldM
     const raw = `${name} ${JSON.stringify(s?.args ?? {}).slice(0, 60)}`;
     if (!skill || LLM_HIDDEN.has(name)) { errors.push(`steps[${i}] 没有 "${name}" 这个技能`); dropped.push(`${raw}（没有这个动作）`); continue; }
     const v = validateSkill(skill, s?.args ?? {}, adapter);
-    if (!v.ok) { errors.push(`steps[${i}] ${name} 参数错误：${v.error}`); dropped.push(`${raw}（参数写错）`); continue; }
+    if (!v.ok) { errors.push(`steps[${i}] ${name} 校验失败：${v.error}`); dropped.push(`${raw}（${v.error.slice(0, 300)}）`); continue; }
     const optional = !!s0 && typeof s0 === 'object' && ((s0 as any).optional === true || (s0 as any).opportunistic === true);
     steps.push({ skill: name, args: v.args, ...(optional ? { optional: true } : {}) });
   }

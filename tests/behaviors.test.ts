@@ -118,6 +118,32 @@ test('样本技能读取：恢复类、调用类与写技能说明可用，引�
   assert.match(engine.overview().join('\n'), /step-up-when-blocked.*恢复条件没有可调用的动作 wander/);
 });
 
+test('技能目录按行为引擎状态区分文字、可执行、候选和无效定义', () => {
+  const book = new SkillBook(null, tmp());
+  const engine = new BehaviorEngine(book, new FakeAdapter(), null, new EventBus(), noSenses);
+  const text = '这是记录下来的做法，需要阅读后自行选择动作。';
+  const valid = { steps: [{ skill: 'look_around', args: {} }] };
+  assert.ok(book.write('notes-only', '一份文字做法', text).ok);
+  assert.ok(book.write('ready-action', '一个可执行动作', text, valid).ok);
+  assert.ok(book.write('candidate-action', '一个待试用动作', text, valid, { candidate: true }).ok);
+  assert.ok(book.write('bad-action', '一个失效动作', text, { steps: [{ skill: 'no_such_action' }] }).ok);
+  assert.ok(book.write('ready-action', '待试用的新版本', text, valid, { candidate: true }).ok);
+  const index = book.index(undefined, (name, trial) => engine.executionError(name, trial));
+  assert.match(index.find((line) => line.startsWith('notes-only'))!, /仅文字记录.*不能用 use_skill/);
+  assert.match(index.find((line) => line.startsWith('ready-action'))!, /可执行.*候选，用 use_skill trial:true/);
+  assert.match(index.find((line) => line.startsWith('candidate-action'))!, /候选，用 use_skill trial:true/);
+  assert.match(index.find((line) => line.startsWith('bad-action'))!, /不可执行/);
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  const perception = new Perception(adapter, memory, bus, new Vision(adapter));
+  const [system] = buildMindMessages({ tier: 'glance', reason: '测试', percept: perception.update(), state: adapter.state(), self: new SelfModel(null),
+    memory, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '测试', skills: index });
+  assert.match(system.content, /notes-only[^\n]*仅文字记录/);
+  assert.match(system.content, /candidate-action[^\n]*候选，用 use_skill trial:true/);
+  assert.doesNotMatch(system.content, /一份文字做法/);
+  memory.close();
+  engine.dispose();
+});
+
 test('模型写下恢复候选后显式试用，取得实际证据才参与失败恢复并验证重做结果', async (t) => {
   const ran = testSkills(t);
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();

@@ -53,7 +53,7 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
     // 声明了参数的技能：传了它不认识的名字（targetY、depth……）会被代码悄悄忽略，当场说清楚它要的是什么
     const unknown = needs && extra ? Object.keys(extra).filter((k) => !(k in needs) && k !== 'trigger') : [];
     if (unknown.length) return { ok: false, error: `${name} 不认识参数 ${unknown.map((k) => `args.${k}`).join('、')}；它要的是：${Object.entries(needs!).map(([k, v]) => `args.${k}（${v}）`).join('、')}` };
-    if (missing?.length) return { ok: false, error: `${name} 需要参数：${missing.map((k) => `args.${k}（${needs![k]}）`).join('、')}；写 {"name":"${name}","args":{${missing.map((k) => `"${k}":…`).join(',')}}}` };
+    if (missing?.length) return { ok: false, error: `${name} 需要参数：${missing.map((k) => `args.${k}（${needs![k]}）`).join('、')}；完整参数：${Object.entries(needs!).map(([k, v]) => `args.${k}（${v}）`).join('、')}；已提供：${Object.keys(extra ?? {}).map((k) => `args.${k}`).join('、') || '无'}；保留已提供的参数并补齐缺项` };
     return { ok: true, args: { name, ...(trial ? { trial } : {}), ...(extra ? { args: extra } : {}), ...(failure ? { failure } : {}) } };
   },
   async run(ctx, args) {

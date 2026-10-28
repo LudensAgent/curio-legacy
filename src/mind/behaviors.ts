@@ -284,6 +284,7 @@ export class BehaviorEngine {
   }
   private lastFired = new Map<string, number>();
   private invalid = new Map<string, string>();
+  private invalidCandidates = new Map<string, string>();
   private doneListener = (o: TaskOutcome) => this.onDone(o);
   private lastHurtAt = 0;
   /** 自动技能做完后要看“结果”：十几秒后还活着、没再掉多少血才算管用 */
@@ -315,16 +316,17 @@ export class BehaviorEngine {
     this.behaviors.clear();
     this.candidates.clear();
     this.invalid.clear();
+    this.invalidCandidates.clear();
     for (const k of this.book?.list() ?? []) {
       if (k.behavior === undefined) continue;
       const b = toBehavior(k, this.adapter);
       if (b && !('error' in b)) { b.version ??= this.stats[b.name]?.rev ?? 1; this.behaviors.set(b.name, b); }
-      else this.invalid.set(k.name, b?.error ?? '格式不对，没有生效');
+      else if ((k.behavior as Record<string, unknown>).candidate !== true) this.invalid.set(k.name, b?.error ?? '格式不对，没有生效');
     }
     for (const k of this.book?.pending() ?? []) {
       const b = toBehavior(k, this.adapter);
       if (b && !('error' in b)) this.candidates.set(b.name, b);
-      else this.invalid.set(k.name, `候选未通过校验：${b?.error ?? '格式不对'}`);
+      else this.invalidCandidates.set(k.name, b?.error ?? '格式不对');
     }
   }
 
@@ -335,7 +337,15 @@ export class BehaviorEngine {
   executionError(name: string, trial = false): string | null {
     const b = this.get(name, trial);
     if (this.inactive(name) && !(trial && b?.candidate && this.stats[name]?.candidatePermit === b.version)) return `技能 ${name} 已停用或收起；由心智显式修订后再试`;
-    if (!b) return trial ? `没有 ${name} 的候选版本` : `没有技能 ${name}`;
+    if (!b) {
+      const invalid = trial ? this.invalidCandidates.get(name) : this.invalid.get(name);
+      if (invalid) return `技能 ${name} 的${trial ? '候选版本' : '可执行定义'}未通过校验：${invalid}`;
+      if (!trial && this.candidates.has(name)) return `${name} 尚为候选；用 use_skill {name:"${name}",trial:true} 显式试用`;
+      if (!trial && this.invalidCandidates.has(name)) return `技能 ${name} 的候选版本未通过校验：${this.invalidCandidates.get(name)}`;
+      const entry = this.book?.get(name);
+      if (!trial && entry && entry.behavior === undefined) return `技能 ${name} 是文字记录，没有可执行行为；可用 {"kind":"skill","name":"${name}"} 阅读`;
+      return trial ? `没有 ${name} 的候选版本` : `没有技能 ${name}`;
+    }
     return b.candidate && !trial ? `${name} 尚为候选；用 use_skill {name:"${name}",trial:true} 显式试用` : null;
   }
   editToken(name: string): string | undefined {
@@ -955,7 +965,8 @@ export class BehaviorEngine {
       const candidate = this.candidates.get(b.name);
       const trial = candidate ? `；候选 v${candidate.version} 尚未启用，用 use_skill {name:"${b.name}",trial:true} 试用，试用成${this.currentStats(b.name, true).ok}/败${this.currentStats(b.name, true).fail}` : '';
       return `${b.name}［${b.mode === 'auto' ? '自动' : b.mode === 'recover' ? '失败时先试' : '调用'}${b.code ? `，代码 v${b.version ?? 1}` : ''}${b.overrides.length ? `，代替本能 ${b.overrides.map((o) => INSTINCTS[o]?.off ? `${o}（这条本能本来就没开）` : o).join('/')}` : ''}${b.needs ? `，调用时给 args.${Object.keys(b.needs).join('/')}` : ''}］${st && st.ok + st.fail ? ` 成${st.ok}/败${st.fail}` : ''}${st?.retired ? ` 已收起（${st.retired.slice(0, 30)}）` : st?.disabled ? ' 已停用' : ''}${untested}${trial}`;
-    }), ...[...this.invalid].map(([n, why]) => `${n}：${why}`)];
+    }), ...[...this.invalid].map(([n, why]) => `${n}：${why}`),
+      ...[...this.invalidCandidates].map(([n, why]) => `${n}：候选未通过校验：${why}`)];
   }
 }
 

@@ -141,8 +141,25 @@ export class SkillBook {
     return true;
   }
   /** 提示词里的索引：每份一行 */
-  index(skip?: (name: string) => boolean): string[] {
-    return this.list().filter((s) => !skip?.(s.name)).map((s) => `${s.name}${s.source === 'self' ? '（我自己写的）' : ''}${s.mode ? `［${(s.behavior as Record<string, unknown>)?.candidate === true ? '候选，用 use_skill trial:true 试用' : MODE_LABEL[s.mode]}］` : ''}：${s.description}`);
+  index(skip?: (name: string) => boolean, executionError?: (name: string, trial: boolean) => string | null): string[] {
+    return this.list().filter((s) => !skip?.(s.name)).map((s) => {
+      const candidate = this.candidates.get(s.name);
+      const status: string[] = [];
+      if (s !== candidate) {
+        if (s.behavior === undefined) status.push(/```behavior(?:\s|$)/.test(s.body)
+          ? '行为定义格式无效，不能用 use_skill 直接执行' : '仅文字记录，先阅读，不能用 use_skill 直接执行');
+        else if (!executionError) status.push(`未确认是否可执行${s.mode ? `，声明方式：${MODE_LABEL[s.mode]}` : ''}`);
+        else {
+          const error = executionError(s.name, false);
+          status.push(error ? `不可执行：${error}` : `可执行${s.mode ? `，${MODE_LABEL[s.mode]}` : ''}`);
+        }
+      }
+      if (candidate) {
+        const error = executionError?.(s.name, true);
+        status.push(!executionError ? '候选，尚未确认能否试用' : error ? `候选不可试用：${error}` : '候选，用 use_skill trial:true 试用');
+      }
+      return `${s.name}${s.source === 'self' ? '（我自己写的）' : ''}：［${status.join('；')}］${s.description}`;
+    });
   }
 
   /** 写一份自己的技能（或修订自己写过的）；不能改内置技能。behavior 是已经校验过的触发条件和步骤 */
