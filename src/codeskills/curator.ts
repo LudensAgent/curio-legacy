@@ -57,6 +57,7 @@ export class SkillCurator {
   private lastSignature = '';
   private conflictSeen = new Map<string, number>();
   private timer: NodeJS.Timeout | null = null;
+  private observationStartedAt = Date.now();
   readonly opts: CuratorOptions;
   history: { at: number; result: string }[] = [];
   /** 收获账本：每个技能对收获效率的实际影响 */
@@ -72,7 +73,7 @@ export class SkillCurator {
     this.opts = { ...DEFAULT_CURATOR, ...opts };
   }
 
-  start() { this.timer = setInterval(() => void this.check(), this.opts.checkMs); this.timer.unref?.(); }
+  start() { this.observationStartedAt = Date.now(); this.timer = setInterval(() => void this.check(), this.opts.checkMs); this.timer.unref?.(); }
   stop() { if (this.timer) clearInterval(this.timer); this.timer = null; }
 
   private active() { return this.engine.list().filter((b) => b.source === 'self' && this.engine.enabled(b)); }
@@ -89,19 +90,23 @@ export class SkillCurator {
       if (b.when?.dim && dim && !b.when.dim.includes(dim)) continue;
       const st = this.engine.statsOf(b.name);
       const written = this.book?.get(b.name)?.updatedAt ?? now;
-      const last = Math.max(written, st?.lastAt ?? 0, st?.lastUsedAt ?? 0, st?.recent?.at(-1)?.at ?? 0);
+      // Offline time provides no opportunity to use a skill. After each start,
+      // observe this process for the full idle window before retiring it.
+      const last = Math.max(this.observationStartedAt, written, st?.lastAt ?? 0, st?.lastUsedAt ?? 0, st?.restoredAt ?? 0, st?.recent?.at(-1)?.at ?? 0);
       if (now - last >= this.opts.unusedMs) {
-        const why = st && st.ok + st.fail + st.fired > 0 ? `${Math.round((now - last) / 3600_000)} 小时没用上` : `写下 ${Math.round((now - written) / 3600_000)} 小时一次都没用上`;
+        const hours = Math.round((now - last) / 3600_000);
+        const why = st && st.ok + st.fail + st.fired > 0 ? `本次运行观察 ${hours} 小时没用上` : `本次运行观察 ${hours} 小时一次都没用上`;
         if (this.engine.retire(b.name, why)) out.push(b.name);
       }
     }
     return out;
   }
 
-  /** 是谁：近一小时写的不算（还没机会用）；只在别的维度用的不算 */
+  /** 近一小时写下或恢复的还没机会用；只在别的维度用的不算。 */
   private settled(b: { name: string; when?: { dim?: string[] } }, now: number, dim: string) {
     if (b.when?.dim && dim && !b.when.dim.includes(dim)) return false;
-    return now - (this.book?.get(b.name)?.updatedAt ?? now) >= 3600_000;
+    const since = Math.max(this.book?.get(b.name)?.updatedAt ?? now, this.engine.statsOf(b.name)?.restoredAt ?? 0);
+    return now - since >= 3600_000;
   }
 
   /**

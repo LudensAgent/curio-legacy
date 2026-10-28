@@ -63,6 +63,9 @@ export interface BehaviorStats {
   /** 收起 / 停用的时刻：墓碑——之后一段时间里后台不再同名重写它 */
   retiredAt?: number;
   disabledAt?: number;
+  /** 手动恢复的时间与原收起记录；不代表技能被调用过。 */
+  restoredAt?: number;
+  lastRestoration?: { at: number; retiredAt: number; reason: string };
   /** 不是代码的技能每改写一次加一（代码技能用自己的版本号）：成败按版本记，改写不清空历史 */
   rev?: number;
   /** 拉锯里输掉的一方：条件成立也不自动接手，只提醒心智；改写后恢复 */
@@ -480,6 +483,29 @@ export class BehaviorEngine {
     this.touch(name, (st) => { st.disabled = true; st.retired = why.slice(0, 120); st.retiredAt = Date.now(); delete st.candidatePermit; });
     this.bus.publish('skill_retired', 'P2', `整理技能：收起「${name}」（${why.slice(0, 80)}）`, { name, why });
     return true;
+  }
+
+  /** 恢复明确指定且状态未变的闲置技能；保留版本与使用历史。 */
+  restoreRetired(entries: { name: string; retiredAt: number }[], now = Date.now()): string[] {
+    if (!this.statsFile) throw new Error('没有技能统计文件，不能持久化恢复');
+    for (const { name, retiredAt } of entries) {
+      const b = this.behaviors.get(name), st = this.stats[name];
+      if (!b || b.source !== 'self' || b.candidate || !st?.retired || st.retiredAt !== retiredAt || !/小时没用上|一次都没用上/.test(st.retired)) {
+        throw new Error(`技能 ${name} 不存在或收起状态已变化，未恢复任何技能`);
+      }
+    }
+    const next = { ...this.stats };
+    for (const { name, retiredAt } of entries) {
+      const old = next[name];
+      const restored = { ...old, disabled: false, restoredAt: now, lastRestoration: { at: now, retiredAt, reason: old.retired! } };
+      delete restored.retired;
+      delete restored.retiredAt;
+      delete restored.disabledAt;
+      next[name] = restored;
+    }
+    fs.writeFileSync(this.statsFile, JSON.stringify(next, null, 1));
+    this.stats = next;
+    return entries.map(({ name }) => name);
   }
 
   /** 整理：调整优先级（同时满足条件时谁先上） */

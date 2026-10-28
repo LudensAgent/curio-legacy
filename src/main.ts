@@ -15,6 +15,7 @@ import { BehaviorEngine, setInstinctSource } from './mind/behaviors.ts';
 import { setBehaviorRegistry } from './skills/use-skill.ts';
 import { setReliableSkills } from './codeskills/bridge.ts';
 import { CodeImprover } from './codeskills/improver.ts';
+import { installSkillRestoreRequest } from './mind/restore-request.ts';
 import { SkillSmith } from './codeskills/smith.ts';
 import { SkillCurator } from './codeskills/curator.ts';
 import { Scorecard } from './observer/scorecard.ts';
@@ -569,6 +570,7 @@ const dashboard = startDashboard(config.dashboard.host, config.dashboard.port, b
   spectate: (on) => spectator.setActive(on),
   rescue: () => rescue(),
 }, feed ? [createObserverHandler(feed)] : [], { llmTrace, mcVersion: config.mc.version, env: { file: envFile, backupDir: path.join(config.dataDir, 'env-backups') } });
+installSkillRestoreRequest(dashboard, behaviors, bus, path.join(config.dataDir, 'skill-restore-request.json'));
 
 /**
  * 紧急救援（控制台按钮）：卡在坑底、矿道、墙缝里出不来时，找周围最近的露天平地，用 RCON /tp 传送过去。
