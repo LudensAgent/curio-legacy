@@ -613,7 +613,7 @@ export class Perception {
         ...environment,
         ...(overhead ? { overhead } : {}),
         ...(where ? { where } : {}),
-        ...((() => { const eye = this.adapter.eye(); return contact && eye ? { local: localMap(this.adapter, s.pos, facingOfYaw(eye.yaw)) } : {}; })()),
+        ...((() => { const eye = this.adapter.eye(); return contact && eye ? { local: localMap(this.adapter, s.pos, facingOfYaw(eye.yaw), this.observeBlocks.bind(this)) } : {}; })()),
         ...(contact ? { exits: contact.exitOptions } : {}),
       },
       inventory: [...s.inventory.reduce((items, item) => { const cur = items.get(item.name); items.set(item.name, cur ? { ...cur, count: cur.count + item.count } : { ...item }); return items; }, new Map<string, typeof s.inventory[number]>()).values()]

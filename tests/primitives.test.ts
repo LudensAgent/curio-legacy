@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { Vec3Like } from '../src/adapter/types.ts';
 import { facingOfYaw, localMap, toWorld } from '../src/perception/local.ts';
 import { digAt, placeAt, stepTo } from '../src/skills/primitives.ts';
 import { dig } from '../src/skills/body.ts';
@@ -15,6 +16,13 @@ function pocket() {
   return w;
 }
 
+/** These mechanics tests explicitly assume the requested target is visible. */
+const visibleTargets = (w: FakeAdapter) => (positions: Vec3Like[]) => positions.flatMap((pos) => {
+  const name = w.blockAt(pos);
+  return name === null ? [] : [{ name, pos, properties: {}, worldId: w.worldId, sessionId: w.sessionId,
+    dimension: w.dim, observationId: 1, observedAt: Date.now(), source: 'vision' as const }];
+});
+
 test('局部坐标：[前,上,右] 按朝向换算；yaw 换成 N/E/S/W', () => {
   assert.deepEqual(toWorld({ x: 0, y: 60, z: 0 }, 'N', [1, 1, 0]), { x: 0, y: 61, z: -1 });
   assert.deepEqual(toWorld({ x: 0, y: 60, z: 0 }, 'E', [1, 0, 1]), { x: 1, y: 60, z: 1 });
@@ -24,15 +32,19 @@ test('局部坐标：[前,上,右] 按朝向换算；yaw 换成 N/E/S/W', () => 
   assert.equal(facingOfYaw(Math.PI / 2), 'W');
 });
 
-test('身边方块图不透视：只看得见和身体连通的空气格及贴着它们的方块', () => {
+test('身边方块图只显示当前观察，连通但未看见的格子仍是未知', () => {
   const w = pocket();
   w.blocks.push({ name: 'gravel', pos: { x: 0, y: 61, z: -1 } });
-  const m = localMap(w, w.pos, 'N');
+  const m = localMap(w, w.pos, 'N', (positions) => positions.filter((pos) => pos.x === 0 && pos.y === 61 && pos.z === -1)
+    .map((pos) => ({ pos, name: 'gravel' })));
   assert.equal(m.layers['u+1'][1][2], 'G', '前方头高那格是沙砾');
   assert.equal(m.legend.G, 'gravel');
+  assert.equal(m.source, 'current_vision');
   assert.equal(m.layers['u+0'][2][2], 'Y');
   assert.equal(m.layers['u+0'][0][2], '?', '隔着石头的格子看不见');
   assert.equal(m.layers['u+3'][2][2], '?');
+  const fallback = localMap({ blockAt: () => { throw new Error('local map must not read hidden blocks'); } }, w.pos, 'N');
+  assert.equal(fallback.layers['u+1'][1][2], '?', '缺少视觉后端也不能退回读取隐藏世界');
 });
 
 test('LLM 自己组合原子动作：挖开头顶和前上方两格、迈上去，重复几轮就是一道回到地面的阶梯', async (t) => {
@@ -69,6 +81,7 @@ test('原子动作如实回报做不到的原因，不替模型做决定', async
   const step = await stepTo.run(ctx, { at: [1, 0, 0], facing: 'N' });
   assert.equal(step.status, 'failed');
   assert.match(step.summary, /目标格是 未看清的格子/, 'physical obstruction does not identify an unobserved block');
+  ctx.senses.observeBlocks = visibleTargets(w);
   w.blocks.push({ name: 'water', pos: { x: 0, y: 62, z: -1 } });
   const wet = await digAt.run(ctx, { at: [1, 1, 0], facing: 'N' });
   assert.equal(wet.status, 'failed');
@@ -78,7 +91,7 @@ test('原子动作如实回报做不到的原因，不替模型做决定', async
 
 test('原地垫高：头顶空了才跳得起来；背包没方块就说清楚', async (t) => {
   const w = pocket();
-  const ctx = makeCtx(w);
+  const ctx = makeCtx(w, { senses: { observeBlocks: visibleTargets(w) } });
   t.after(() => ctx.memory.close());
   const none = await placeAt.run(ctx, { at: [0, 0, 0], facing: 'N', item: 'any' });
   assert.equal(none.failureCode, 'MISSING_MATERIALS');
@@ -213,7 +226,7 @@ test('dig_at 液体邻格默认不挖；wet:true 与 lava:true 分别授权进�
   const w = pocket();
   // 前方那格（0,60,-1）是石头，它再往前一格（0,60,-2）是水
   w.blocks.push({ name: 'water', pos: { x: 0, y: 60, z: -2 } });
-  const ctx = makeCtx(w);
+  const ctx = makeCtx(w, { senses: { observeBlocks: visibleTargets(w) } });
   t.after(() => ctx.memory.close());
   let r = await digAt.run(ctx, { at: [1, 0, 0], facing: 'N' });
   assert.equal(r.status, 'failed');
@@ -235,7 +248,7 @@ test('dig_at with a nearby table and materials does not create a tool by default
   adapter.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 0 } }, { name: 'crafting_table', pos: { x: 1, y: 64, z: 1 } });
   adapter.inv.set('oak_planks', 8); adapter.inv.set('stick', 4);
   adapter.canHarvest = () => !!adapter.inv.get('wooden_pickaxe');
-  const ctx = makeCtx(adapter);
+  const ctx = makeCtx(adapter, { senses: { observeBlocks: visibleTargets(adapter) } });
   t.after(() => ctx.memory.close());
   const result = await digAt.run(ctx, { at: [1, 0, 0], facing: 'E' });
   assert.equal(result.status, 'succeeded', result.summary);
@@ -247,7 +260,7 @@ test('explicit lava permission reaches dig validation and the code skill bridge'
   for (const mode of ['dig', 'bridge']) {
     const adapter = new FakeAdapter();
     adapter.blocks.push({ name: 'stone', pos: { x: 0, y: 66, z: 0 } }, { name: 'lava', pos: { x: 1, y: 66, z: 0 } });
-    const ctx = makeCtx(adapter);
+    const ctx = makeCtx(adapter, { senses: { observeBlocks: visibleTargets(adapter) } });
     t.after(() => ctx.memory.close());
     if (mode === 'dig') {
       const blocked = dig.validate({ dir: 'up', blocks: 1 }, adapter);

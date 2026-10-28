@@ -18,6 +18,11 @@ test('原子动作认绝对坐标 xyz：开工时按当时的位置和朝向换�
   assert.ok(v.ok, JSON.stringify(v));
   assert.deepEqual((v as any).args.at, [0, 2, 0], '头顶上方那格');
   const ctx = makeCtx(w);
+  ctx.senses.observeBlocks = (positions) => positions.flatMap((pos) => {
+    const name = w.blockAt(pos);
+    return name === null ? [] : [{ pos, name, properties: {}, worldId: w.worldId, sessionId: w.sessionId,
+      dimension: w.dim, observationId: 1, observedAt: Date.now(), source: 'vision' as const }];
+  });
   t.after(() => ctx.memory.close());
   const r = await dig.run(ctx, (v as any).args);
   assert.equal(r.status, 'succeeded', r.summary);

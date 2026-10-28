@@ -5,6 +5,7 @@ import { sleep, throwIfAborted } from '../util.ts';
 import { breakCell, why } from './body.ts';
 import { OWN_BUILDING_HINT, ownBuildingAt, storedChestAt } from './build.ts';
 import { noteEdit } from '../mind/edits.ts';
+import { glanceAt } from './observation.ts';
 import { PLACEABLE } from './survival.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
 import { findStation, isStation, rememberStation } from './stations.ts';
@@ -47,7 +48,7 @@ function facingArg(raw: unknown, adapter: { eye(): { yaw: number } | null }): Fa
 /** 执行后附上身边的新样子，模型下一步就知道该挖哪格 */
 function after(ctx: SkillCtx, facing: Facing, target?: Vec3Like) {
   const s = ctx.adapter.state();
-  return { position: { ...s.pos }, ...(target ? { targetCell: { ...target } } : {}), local: localMap(ctx.adapter, s.pos, facing), around: surroundings(ctx.adapter).text };
+  return { position: { ...s.pos }, ...(target ? { targetCell: { ...target } } : {}), local: localMap(ctx.adapter, s.pos, facing, ctx.senses.observeBlocks?.bind(ctx.senses)), around: surroundings(ctx.adapter).text };
 }
 
 function visibleCells(ctx: SkillCtx, positions: Vec3Like[]) {
@@ -73,8 +74,8 @@ const KEEPSAKE = /_bed$|^(crafting_table|furnace|smoker|blast_furnace|chest|barr
 
 export const digAt: Skill<CellArgs> = {
   name: 'dig_at',
-  description: '挖掉身边指定的一格，自动换现有工具，默认不造工具。液体邻格默认不挖；wet:true 接受进水，lava:true 接受进岩浆，分别显式选择。只挖不走，不能挖基岩。',
-  argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "own"?:true, "wet"?:true（允许进水）, "lava"?:true（允许进岩浆）}（前后/左右 ±2，上下 -1..3；facing 只定义相对坐标的方向，不会转头；例：[1,1,0] 前方高一格，[0,2,0] 头顶上方，[0,-1,0] 脚下）',
+  description: '挖掉身边指定的一格；目标不在视野时先转头看向它，仍看不见则返回未知，不挖其他位置。自动换现有工具，默认不造工具。液体邻格默认不挖；wet:true 接受进水，lava:true 接受进岩浆，分别显式选择。只挖不走，不能挖基岩。',
+  argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "own"?:true, "wet"?:true（允许进水）, "lava"?:true（允许进岩浆）}（前后/左右 ±2，上下 -1..3；facing 定义相对坐标的方向，执行时可能转头观察固定的目标格；例：[1,1,0] 前方高一格，[0,2,0] 头顶上方，[0,-1,0] 脚下）',
   timeoutMs: 30000,
   movement: false,
   validate(raw, adapter) {
@@ -90,13 +91,21 @@ export const digAt: Skill<CellArgs> = {
     throwIfAborted(ctx.signal);
     const feet = feetCell(ctx.adapter.state().pos);
     const pos = toWorld(feet, args.facing, args.at);
-    const before = ctx.adapter.blockAt(pos);
-    const seenBefore = visibleCells(ctx, [pos]).get(`${pos.x},${pos.y},${pos.z}`);
+    const physical = ctx.adapter.blockAt(pos);
     // 自己站的两格通常是空的；但也可能有火把、花、雪层、蜘蛛网这类东西，那就照样拿掉
-    if (before === null) return fail('NOT_FOUND', `[${args.at}] 那一格还没加载或看不见`, after(ctx, args.facing, pos));
-    if (args.at[0] === 0 && args.at[2] === 0 && (args.at[1] === 0 || args.at[1] === 1) && AIR.has(before)) return ok(`[${args.at}] 是自己站的地方，本来就空着；往上挖是 [0,2,0]`, { ...after(ctx, args.facing, pos), noop: true });
-    if (AIR.has(before)) return seenBefore ? ok(`[${args.at}] 本来就是空的，不用挖`, { cell: [...args.at], was: 'air', ...after(ctx, args.facing, pos), noop: true })
-      : fail('NOT_FOUND', `[${args.at}] 没有发生挖掘；目标格 (${pos.x},${pos.y},${pos.z}) 未在当前视野，方块状态未知，未确认是空气还是其他方块。facing ${args.facing} 只定义坐标方向，不会转头`, { ...after(ctx, args.facing, pos), noop: true });
+    if (physical === null) return fail('NOT_FOUND', `[${args.at}] 那一格还没加载或看不见`, after(ctx, args.facing, pos));
+    if (args.at[0] === 0 && args.at[2] === 0 && (args.at[1] === 0 || args.at[1] === 1) && AIR.has(physical)) return ok(`[${args.at}] 是自己站的地方，本来就空着；往上挖是 [0,2,0]`, { ...after(ctx, args.facing, pos), noop: true });
+    const key = `${pos.x},${pos.y},${pos.z}`;
+    let seenBefore = visibleCells(ctx, [pos]).get(key);
+    if (!seenBefore && ctx.senses.observeBlocks) {
+      await glanceAt(ctx, pos);
+      throwIfAborted(ctx.signal);
+      seenBefore = visibleCells(ctx, [pos]).get(key);
+    }
+    if (!seenBefore) return fail('NOT_FOUND', `[${args.at}] 没有发生挖掘；目标格 (${pos.x},${pos.y},${pos.z}) ${ctx.senses.observeBlocks ? '尝试看向后仍未在当前视野' : '当前没有视觉确认'}，可能被遮挡、太暗或未加载，方块状态未知，未确认是空气还是其他方块`, { ...after(ctx, args.facing, pos), noop: true });
+    const before = ctx.adapter.blockAt(pos);
+    if (before !== seenBefore) return fail('TARGET_GONE', `[${args.at}] 目标格在观察后已改变或尚未加载，没有执行挖掘`, { ...after(ctx, args.facing, pos), noop: true });
+    if (AIR.has(before)) return ok(`[${args.at}] 本来就是空的，不用挖`, { cell: [...args.at], was: 'air', ...after(ctx, args.facing, pos), noop: true });
     if (LIQUID_BLOCKS.has(before)) return fail('BAD_ARGS', `[${args.at}] ${seenBefore ? `是 ${seenBefore}` : '未看清目标，当前不能挖掘'}，挖不了`, after(ctx, args.facing, pos));
     // 挖开会进水/进岩浆：默认不挖，但说清是哪几格、能怎么办（像人一样先堵上，或者认了让水流进来）
     const wets = wetNeighbours(ctx, pos);
@@ -163,10 +172,10 @@ async function stepOutOfWater(ctx: SkillCtx, args: CellArgs, feet: Vec3Like) {
   const rel: [number, number, number] = [args.at[0], dy, args.at[2]];
   const res = await a.swimTo!({ x: stand.x + 0.5, y: stand.y, z: stand.z + 0.5 }, ctx.signal, { timeoutMs: Math.max(1000, Math.min(7000, ctx.deadline - Date.now())) });
   const s = a.state(), end = feetCell(s.pos);
-  if (!s.inWater && s.onGround && Math.hypot(end.x - stand.x, end.z - stand.z) <= 1 && Math.abs(end.y - stand.y) <= 1) {
+  if (!s.inWater && s.onGround && end.x === stand.x && end.y === stand.y && end.z === stand.z) {
     return ok(`从水里爬上了岸 [${rel}]（实际在 (${end.x},${end.y},${end.z})）`, { moved: rel, landed: true, ...after(ctx, args.facing, stand) });
   }
-  return fail('EFFECT_NOT_CONFIRMED', `从水里朝 [${rel}] 的岸爬了，没上去（岸边落脚处比脚高 ${dy} 格${dy >= 2 ? '，从水里多半爬不上两格高的岸，换一处低一点的岸' : ''}；${res.ok ? '' : `游泳：${res.reason}；`}现在${s.inWater ? '还在水里' : '不在水里但没站稳'}）`, { stand: rel, ...after(ctx, args.facing, stand) });
+  return fail('EFFECT_NOT_CONFIRMED', `从水里朝 [${rel}] 的岸爬了，没有站到指定落脚格（岸边落脚处比脚高 ${dy} 格；${res.ok ? '' : `游泳：${res.reason}；`}现在${s.inWater ? '还在水里' : s.onGround ? '已离水并站稳' : '不在水里但没站稳'}，实际在 (${end.x},${end.y},${end.z})）`, { stand: rel, ...after(ctx, args.facing, stand) });
 }
 
 export const stepTo: Skill<CellArgs> = {
@@ -215,41 +224,57 @@ export const stepTo: Skill<CellArgs> = {
     // 沿梯子往上爬一格：目标是自己头那格，脚下是梯子；头顶上方要空
     if (args.at[0] === 0 && args.at[2] === 0 && args.at[1] === 1) {
       const top = { ...target, y: target.y + 1 };
-      if (!free(top)) return fail('PATH_NOT_FOUND', `梯子往上爬不动：头顶上方是 ${describe(top)}（先 dig_at [0,2,0]）`, after(ctx, args.facing, target));
+      if (!free(top)) {
+        if (describe(top) === '未看清的格子' && ctx.senses.observeBlocks) {
+          await glanceAt(ctx, top);
+          for (const [key, value] of visibleCells(ctx, [top])) seen.set(key, value);
+        }
+        return fail('PATH_NOT_FOUND', describe(top) === '未看清的格子' ? '梯子往上爬不动：头顶跳跃空间未确认'
+          : `梯子往上爬不动：头顶上方是 ${describe(top)}`, after(ctx, args.facing, target));
+      }
+      let movementError: unknown;
       try {
         await a.moveTo({ kind: 'xyz', x: target.x, y: target.y, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())) });
       } catch (e) {
         if (isAbort(e)) throw e;
-        return fail(codeFromError(e), `沿梯子往上爬没成：${(e as Error).message}`, after(ctx, args.facing, target));
+        movementError = e;
       }
+      throwIfAborted(ctx.signal);
       const end = feetCell(a.state().pos);
-      if (end.y < target.y) return fail('EFFECT_NOT_CONFIRMED', `没有爬上去，实际在 (${end.x},${end.y},${end.z})${a.blockAt(target) === 'ladder' ? '' : '：上面那格没有梯子，梯子要一格一格接着挂'}`, after(ctx, args.facing, target));
+      if (end.x !== target.x || end.y !== target.y || end.z !== target.z) return fail(movementError ? codeFromError(movementError) : 'EFFECT_NOT_CONFIRMED', `没有爬到指定格，实际在 (${end.x},${end.y},${end.z})${movementError ? `；${(movementError as Error).message}` : ''}`, after(ctx, args.facing, target));
       return ok(`沿梯子爬上了一格（现在 y=${end.y}）${a.blockAt({ ...end }) === 'ladder' ? '' : '；这格没有梯子了，再往上要先挂'}`, { moved: [0, 1, 0], ...after(ctx, args.facing, target) });
     }
     const head = { ...target, y: target.y + 1 }, floor = { ...target, y: target.y - 1 };
+    const solid = (p: Vec3Like) => { const n = a.blockAt(p); return n !== null && !LIQUID_BLOCKS.has(n) && !free(p); };
+    const standable = (p: Vec3Like) => solid(p) || (a.blockAt(p) === 'snow' && solid({ ...p, y: p.y - 1 }));
+    const ownHead = { ...feet, y: feet.y + 2 };
+    const unseenBlock = [!free(target) ? target : null, !free(head) ? head : null, !standable(floor) ? floor : null,
+      args.at[1] === 1 && !free(ownHead) ? ownHead : null].find((p) => p && describe(p) === '未看清的格子');
+    if (unseenBlock && ctx.senses.observeBlocks) {
+      await glanceAt(ctx, unseenBlock);
+      for (const [key, value] of visibleCells(ctx, [target, head, floor, ownHead])) seen.set(key, value);
+    }
     const problems: string[] = [];
     if (!free(target)) problems.push(describe(target) === '未看清的格子' ? '目标格是 未看清的格子，无法确认通行空间'
       : `目标格是 ${describe(target)}${describe(target).endsWith('_door') ? '（门的状态或碰撞形状阻碍通行）' : LIQUID_BLOCKS.has(describe(target)) ? '' : /chest|barrel|furnace|crafting_table|_bed$/.test(describe(target)) ? '（是用得着的东西，绕过去，别挖）' : `（要过去先 dig_at [${args.at}] 挖开）`}`);
     if (!free(head)) problems.push(describe(head) === '未看清的格子' ? '目标格上方是 未看清的格子，无法确认头部空间'
       : `目标格上方是 ${describe(head)}${describe(head).endsWith('_door') ? '（门的状态或碰撞形状阻碍通行）' : `（会碰头${LIQUID_BLOCKS.has(describe(head)) ? '' : `；先 dig_at [${args.at[0]},${args.at[1] + 1},${args.at[2]}]`}）`}`);
     // 能站住：实心方块；薄雪层下面有实心方块也能踩
-    const solid = (p: Vec3Like) => { const n = a.blockAt(p); return n !== null && !LIQUID_BLOCKS.has(n) && !free(p); };
-    const standable = (p: Vec3Like) => solid(p) || (a.blockAt(p) === 'snow' && solid({ ...p, y: p.y - 1 }));
     if (!standable(floor)) problems.push(`目标格脚下是 ${describe(floor)}，目标高度没有确认可站的支撑；可查看落点后选择下行，或放置支撑`);
     if (args.at[1] === 1 && !free({ ...feet, y: feet.y + 2 })) problems.push(describe({ ...feet, y: feet.y + 2 }) === '未看清的格子'
       ? '往上跳时自己头顶上方是 未看清的格子，无法确认跳跃空间'
       : `往上跳时自己头顶上方是 ${describe({ ...feet, y: feet.y + 2 })}（跳不起来；先 dig_at [0,2,0]）`);
     if (problems.length) return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：${problems.join('；')}`, { problems, ...after(ctx, args.facing, target) });
+    let movementError: unknown;
     try {
       await a.moveTo({ kind: 'xyz', x: target.x, y: target.y, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())) });
     } catch (e) {
       if (isAbort(e)) throw e;
-      return fail(codeFromError(e), `迈向 [${args.at}] 没成：${(e as Error).message}`, after(ctx, args.facing, target));
+      movementError = e;
     }
+    throwIfAborted(ctx.signal);
     const end = feetCell(a.state().pos);
-    const off = Math.hypot(end.x - target.x, end.z - target.z), before = Math.hypot(feet.x - target.x, feet.z - target.z);
-    if (off > 1 || end.y !== target.y || (off > 0 && off >= before)) return fail('EFFECT_NOT_CONFIRMED', `没有站到 [${args.at}]，实际在 (${end.x},${end.y},${end.z})`, after(ctx, args.facing, target));
-    if (off > 0) return ok(`大致迈到了 [${args.at}]（实际在 (${end.x},${end.y},${end.z})）`, { moved: [...args.at], ...after(ctx, args.facing, target) });
+    if (end.x !== target.x || end.y !== target.y || end.z !== target.z) return fail(movementError ? codeFromError(movementError) : 'EFFECT_NOT_CONFIRMED', `没有站到 [${args.at}]，实际在 (${end.x},${end.y},${end.z})${movementError ? `；${(movementError as Error).message}` : ''}`, after(ctx, args.facing, target));
     return ok(`站到了 [${args.at}]`, { moved: [...args.at], ...after(ctx, args.facing, target) });
   },
 };

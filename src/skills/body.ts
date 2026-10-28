@@ -208,6 +208,13 @@ export const dig: Skill<DigArgs> = {
     if (args.target !== undefined) return recoverBlock(ctx, args);
     const { adapter, signal } = ctx;
     const dug: string[] = [];
+    const start = adapter.state().pos;
+    let walked = 0, targetCell: Vec3Like | undefined;
+    const effectEvidence = (position: Vec3Like) => {
+      const moved = dist3(start, position);
+      const reasons = [...(dug.length ? [`已挖 ${dug.join('、')}`] : []), ...(moved > 0.01 ? [`实际位移 ${moved.toFixed(2)} 格`] : [])];
+      return { verified: true, changed: reasons.length > 0, reasons };
+    };
     try {
       if (args.dir === 'up') {
         const me = floor(adapter.state().pos);
@@ -231,21 +238,34 @@ export const dig: Skill<DigArgs> = {
       }
       const dirKey = args.dir === 'forward' ? dirOfYaw(adapter.eye()?.yaw ?? 0).replace(/^(N|S)[EW]$/, '$1') : args.dir;
       const [dx, dz] = DIR_OFFSETS[dirKey] ?? DIRS[dirKey] ?? [0, -1];
-      let walked = 0;
       for (let i = 0; i < args.blocks; i++) {
         const me = floor(adapter.state().pos);
         const feet = { x: me.x + dx, y: me.y, z: me.z + dz };
+        targetCell = feet;
         for (const c of [{ ...feet, y: feet.y + 1 }, feet]) {
           const n = await breakCell(ctx, c, false, undefined, { allowWater: args.wet, allowLava: args.lava });
           if (n) dug.push(n);
         }
-        await adapter.moveTo({ kind: 'xyz', ...feet }, { signal, timeoutMs: 5000 });
+        let moveError: unknown;
+        try { await adapter.moveTo({ kind: 'xyz', ...feet }, { signal, timeoutMs: 5000 }); }
+        catch (e) { if (isAbort(e)) throw e; moveError = e; }
+        throwIfAborted(signal);
+        const position = adapter.state().pos;
+        if (Math.floor(position.x) !== feet.x || Math.floor(position.y + 0.05) !== feet.y || Math.floor(position.z) !== feet.z) {
+          return fail(moveError ? codeFromError(moveError) : 'PATH_NOT_FOUND', `往 ${dirKey} 已前进 ${walked} 格${dug.length ? `，挖了 ${dug.join('、')}` : ''}；没有进入目标格 (${feet.x},${feet.y},${feet.z})，实际位置 (${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})${moveError ? `；${why(moveError)}` : ''}`,
+            { dug, walked, targetCell: feet, position: { ...position }, effectEvidence: effectEvidence(position) });
+        }
         walked++;
       }
       return ok(`往 ${dirKey} 挖了 ${walked} 格（${dug.length ? dug.join('、') : '本来就通'}）`, { dug, walked });
     } catch (e) {
       if (isAbort(e)) throw e;
       const msg = why(e);
+      if (args.dir !== 'up' && args.dir !== 'down') {
+        const position = adapter.state().pos;
+        const code = msg.includes('流进来') || msg.includes('基岩') || msg.startsWith('那边是') ? 'BAD_ARGS' : codeFromError(e);
+        return fail(code, `往 ${args.dir} 已前进 ${walked} 格${dug.length ? `，挖了 ${dug.join('、')}` : ''}；${msg}`, { dug, walked, ...(targetCell ? { targetCell } : {}), position: { ...position }, effectEvidence: effectEvidence(position) });
+      }
       return dug.length ? ok(`挖了 ${dug.join('、')}，然后${msg}`, { dug }) : fail(msg.includes('流进来') || msg.includes('基岩') || msg.startsWith('那边是') ? 'BAD_ARGS' : codeFromError(e), msg);
     }
   },
@@ -272,11 +292,11 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
     if (!onLadder() && !hasPlaceable(adapter.state().inventory)) return fail('MISSING_MATERIALS', '脚下没有梯子，背包里也没有能垫脚的方块（泥土/圆石/石头/木板）');
     const start = adapter.state().pos.y;
     const reached = (around: ReturnType<typeof surroundings>) => (!args.untilSky || around.sky) && (!args.untilExit || around.exits.length > 0);
-    const finish = (stopped?: string) => {
+    const finish = (stopped?: string, failureCause?: 'PILLAR_CLEARANCE') => {
       const state = adapter.state(), around = surroundings(adapter);
       const climbed = Math.max(0, Math.floor(state.pos.y + 0.05) - Math.floor(start + 0.05));
       const goalReached = args.untilSky || args.untilExit ? reached(around) : climbed >= args.height;
-      const facts = { climbed, sky: around.sky, exits: around.exits, goalReached, position: { ...state.pos },
+      const facts = { climbed, sky: around.sky, exits: around.exits, goalReached, position: { ...state.pos }, ...(failureCause ? { failureCause } : {}),
         effectEvidence: { verified: true, changed: state.pos.y > start + 0.05, reasons: [`实际高度 ${start} → ${state.pos.y}`] } };
       if (!climbed) return fail('STUCK', `未实际爬升${stopped ? `：${stopped}` : '，没有完成垫高'}`, facts);
       if (stopped || !goalReached) return fail('STUCK', `往上爬了 ${climbed} 格后停下：${stopped ?? '已到本次高度或时间上限，仍未满足停止条件'}`, facts);
@@ -302,7 +322,7 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
         if (Math.floor(after.y + 0.05) <= me.y || after.y <= before.y + 0.05) return finish('移动已结束，但脚下没有实际升到上一格');
       } catch (e) {
         if (isAbort(e)) throw e;
-        return finish(why(e));
+        return finish(why(e), e instanceof Error && e.name === 'PillarClearanceError' ? 'PILLAR_CLEARANCE' : undefined);
       }
       ctx.senses.refresh();
       if (!onLadder() && !hasPlaceable(adapter.state().inventory)) break;

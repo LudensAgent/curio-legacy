@@ -183,6 +183,7 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   if (step.skill === 'place_at' && ['NOT_PLACED:跳不起来', 'NOT_PLACED:头顶跳跃空间受阻', 'NOT_PLACED:头顶跳跃空间未加载'].includes(String(result.data?.pillarFailure))) {
     return { kind: 'stuck', why: result.summary.slice(0, 160) };
   }
+  if (step.skill === 'climb_up' && result.data?.failureCause === 'PILLAR_CLEARANCE') return { kind: 'stuck', why: result.summary.slice(0, 160) };
   if (RETRYABLE.has(code) && !(step.skill === 'goto' && code === 'PATH_NOT_FOUND') && changed && a.consecutiveFailures === 1 && !a.adaptations.includes(`retry:${key}`)) {
     a.adaptations.push(`retry:${key}`);
     a.index = Math.max(0, a.index - 1);

@@ -4,6 +4,7 @@ import { Reflex } from '../src/brain/reflex.ts';
 import { EventBus } from '../src/events.ts';
 import { afterStep, createActivity, nextStep } from '../src/mind/activity.ts';
 import { placeAt } from '../src/skills/primitives.ts';
+import { climbUp } from '../src/skills/body.ts';
 import { fail } from '../src/skills/types.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
@@ -39,6 +40,41 @@ test('the actual place_at failure carries the jump reason to the scheduler', asy
   const result = await placeAt.run(ctx, { at: [0, 0, 0], facing: 'N', item: 'cobblestone' });
   assert.equal(result.data?.pillarFailure, 'NOT_PLACED:跳不起来');
   assert.equal(afterStep(activity, step, result, 100, adapter.state()).kind, 'stuck');
+});
+
+test('climb_up reports the actual ascent and stops retrying a confirmed pillar obstruction', async (t) => {
+  const adapter = new FakeAdapter();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  adapter.inv.set('dirt', 4);
+  let calls = 0;
+  t.mock.method(adapter, 'moveTo', async () => {
+    if (++calls === 1) { adapter.pos = { ...adapter.pos, y: 65 }; return; }
+    const error = new Error('No path: jump clearance');
+    error.name = 'PillarClearanceError';
+    throw error;
+  });
+  const ctx = makeCtx(adapter);
+  t.after(() => ctx.memory.close());
+  const activity = createActivity({ what: '爬升', why: '', kind: 'other', repeat: 1,
+    steps: [{ skill: 'climb_up', args: { height: 3, untilSky: false } }] }, '', 'llm', adapter.state());
+  const step = nextStep(activity)!;
+  activity.stepStart = { pos: { ...adapter.state().pos } };
+  const result = await climbUp.run(ctx, { height: 3, untilSky: false });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.data?.climbed, 1);
+  assert.equal(result.data?.failureCause, 'PILLAR_CLEARANCE');
+  assert.equal((result.data?.effectEvidence as { changed: boolean }).changed, true);
+  assert.equal(afterStep(activity, step, result, 100, adapter.state()).kind, 'stuck');
+  assert.ok(!activity.adaptations.some((item) => item.startsWith('retry:')));
+});
+
+test('other climb_up failures retain the existing retry decision', () => {
+  const adapter = new FakeAdapter();
+  const activity = createActivity({ what: '爬升', why: '', kind: 'other', repeat: 1,
+    steps: [{ skill: 'climb_up', args: { height: 3, untilSky: false } }] }, '', 'llm', adapter.state());
+  const step = nextStep(activity)!;
+  activity.stepStart = { pos: { x: 99, y: 64, z: 99 } };
+  assert.equal(afterStep(activity, step, fail('STUCK', '其他阻碍'), 100, adapter.state()).kind, 'continue');
 });
 
 test('torch habit is opt-in and only runs while idle', () => {

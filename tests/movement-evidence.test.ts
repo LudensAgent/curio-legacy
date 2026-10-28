@@ -27,9 +27,15 @@ test('directional observation rejects remembered or opposite targets and disting
   assert.equal(found.data?.newlyDiscovered, true);
   assert.equal(found.data?.directionInspected, true);
   assert.equal(found.data?.alreadyVisible, false);
+  assert.equal(found.data?.turned, true);
+  assert.deepEqual(found.data?.foundPos, newSouth.pos);
+  assert.deepEqual(found.data?.finalView, { yaw: adapter.eye()!.yaw, pitch: adapter.eye()!.pitch });
   const known = await lookAround.run(ctx, { for: 'stone', direction: 'S', seconds: 2 });
   assert.equal(views, 2, 'a currently visible target in the requested direction needs no extra turn');
   assert.equal(known.data?.alreadyVisible, true); assert.equal(known.data?.newlyDiscovered, false);
+  assert.equal(known.data?.turned, false);
+  assert.deepEqual(known.data?.foundPos, newSouth.pos);
+  assert.match(known.summary, /没有转头/);
   visible = false;
   const missing = await lookAround.run(ctx, { for: 'stone', direction: 'S', seconds: 2 });
   assert.equal(missing.failureCode, 'NOT_FOUND');

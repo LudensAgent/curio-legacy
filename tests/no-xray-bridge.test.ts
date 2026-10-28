@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { BlockObservation } from '../src/adapter/types.ts';
 import { makeBridge, visibleActionSenses } from '../src/codeskills/bridge.ts';
+import { localMap } from '../src/perception/local.ts';
 import { Vision } from '../src/perception/vision.ts';
 import { goTo } from '../src/skills/movement.ts';
 import { FakeAdapter } from './fake-adapter.ts';
@@ -79,6 +80,17 @@ test('real vision hides ores, liquids and empty cavities behind a wall from both
   assert.deepEqual(await api('region', [3, 64, 0, 3, 66, 0]), {
     min: { x: 3, y: 64, z: 0 }, size: [1, 3, 1], palette: ['?'], kinds: ['unknown'], data: [0, 0, 0],
   });
+});
+
+test('the local map uses actual vision and leaves cells behind a wall unknown', () => {
+  const adapter = new FakeAdapter();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  for (let y = 63; y <= 67; y++) for (let z = -2; z <= 2; z++) adapter.blocks.push({ name: 'stone', pos: { x: 1, y, z } });
+  adapter.blocks.push({ name: 'diamond_ore', pos: { x: 2, y: 65, z: 0 } });
+  const vision = new Vision(adapter);
+  const map = localMap(adapter, adapter.pos, 'E', vision.observeBlocks.bind(vision));
+  assert.equal(map.layers['u+1'][0][2], '?');
+  assert.ok(!Object.values(map.legend).includes('diamond_ore'));
 });
 
 test('hearing gives rough cues without exact targets; direct and delegated entity actions require sight', async (t) => {

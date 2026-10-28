@@ -27,37 +27,20 @@ export function toWorld(feet: Vec3Like, facing: Facing, rel: [number, number, nu
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 
 /**
- * 身边的方块图（不透视）：以脚为原点的 5×5×5（上下 u=-1..3），从脚所在的空气出发，
- * 只有和身边连通的空气格、以及贴着这些空气格的方块才算“看得见/摸得到”，其余标 ?。
+ * 身边的方块图（不透视）：以脚为原点的 5×5×5（上下 u=-1..3），
+ * 只显示本次视觉确认的格子；身体所在的两格标 Y，其余未知标 ?。
  * 行从前（f=+2）到后（f=-2），列从左（r=-2）到右（r=+2），中间那列就是自己（Y）。
  */
-export function localMap(adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like, facing: Facing) {
+export function localMap(_adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like, facing: Facing,
+  observe?: (positions: Vec3Like[]) => readonly { name: string; pos: Vec3Like }[]) {
   const feet = feetCell(pos);
   const R = 2, U0 = -1, U1 = 3;
-  const key = (f: number, u: number, r: number) => `${f},${u},${r}`;
-  const name = new Map<string, string | null>();
-  const at = (f: number, u: number, r: number) => {
-    const k = key(f, u, r);
-    if (!name.has(k)) name.set(k, adapter.blockAt(toWorld(feet, facing, [f, u, r])));
-    return name.get(k) ?? null;
-  };
-  const open = (n: string | null) => n !== null && (AIR.has(n) || isSoftBlock(n) || LIQUID_BLOCKS.has(n));
-  // 从身体占的两格出发，沿连通的空气/软方块向外看
-  const seen = new Set<string>();
-  const queue: [number, number, number][] = [[0, 0, 0], [0, 1, 0]];
-  for (const c of queue) seen.add(key(...c));
-  for (let i = 0; i < queue.length; i++) {
-    const [f, u, r] = queue[i];
-    if (!open(at(f, u, r)) && !(f === 0 && r === 0 && (u === 0 || u === 1))) continue;
-    for (const [df, du, dr] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
-      const n: [number, number, number] = [f + df, u + du, r + dr];
-      if (Math.abs(n[0]) > R || Math.abs(n[2]) > R || n[1] < U0 || n[1] > U1) continue;
-      const k = key(...n);
-      if (seen.has(k)) continue;
-      seen.add(k);
-      queue.push(n);
-    }
-  }
+  const key = (p: Vec3Like) => `${p.x},${p.y},${p.z}`;
+  const positions: Vec3Like[] = [];
+  for (let u = U0; u <= U1; u++) for (let f = -R; f <= R; f++) for (let r = -R; r <= R; r++) positions.push(toWorld(feet, facing, [f, u, r]));
+  const observed = new Map(Array.from({ length: Math.ceil(positions.length / 32) }, (_, i) => observe?.(positions.slice(i * 32, (i + 1) * 32)) ?? [])
+    .flat().map((block) => [key(block.pos), block.name]));
+  const at = (f: number, u: number, r: number) => observed.get(key(toWorld(feet, facing, [f, u, r]))) ?? null;
   const legend: Record<string, string> = { '.': '空气', Y: '自己', '?': '看不见/未知' };
   const charOf = new Map<string, string>();
   const pool = 'ABCDEFGHIJKLMNOPQRSTUVWXZ0123456789';
@@ -80,7 +63,7 @@ export function localMap(adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like, f
       let row = '';
       for (let r = -R; r <= R; r++) {
         if (f === 0 && r === 0 && (u === 0 || u === 1)) { row += 'Y'; continue; }
-        const n = seen.has(key(f, u, r)) ? at(f, u, r) : null;
+        const n = at(f, u, r);
         row += n === null ? '?' : symbol(n);
       }
       rows.push(row);
@@ -88,7 +71,7 @@ export function localMap(adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like, f
     layers[`u${u >= 0 ? '+' : ''}${u}`] = rows;
   }
   // 帮模型把方块图读成“能站哪、能往哪放”：读字符层做空间换算对模型很难，程序算好直接给
-  const known = (f: number, u: number, r: number) => seen.has(key(f, u, r)) ? at(f, u, r) : null;
+  const known = (f: number, u: number, r: number) => at(f, u, r);
   const isOpen = (n: string | null) => n !== null && (AIR.has(n) || isSoftBlock(n)) && !LIQUID_BLOCKS.has(n);
   const isSolid = (n: string | null) => n !== null && !AIR.has(n) && !isSoftBlock(n) && !LIQUID_BLOCKS.has(n);
   const word = (f: number, u: number, r: number) => `${f > 0 ? '前' : f < 0 ? '后' : ''}${r < 0 ? '左' : r > 0 ? '右' : ''}${u > 0 ? `上${u}` : u < 0 ? `下${-u}` : ''}` || '原地';
@@ -104,8 +87,8 @@ export function localMap(adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like, f
     const touching = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].some(([df, du, dr]) => isSolid(known(f + df, u + du, r + dr)));
     if (touching) place.push(`[${f},${u},${r}] ${word(f, u, r)}`);
   }
-  return { facing, frame: '[前,上,右]；每层的行从前(f=+2)到后(f=-2)，列从左(r=-2)到右(r=+2)，中间是自己', legend, layers,
-    spots: { stand: stand.slice(0, 8), place: place.slice(0, 8), note: 'stand：step 能直接迈到的格子；place：place_at 放得住的格子（贴着实心方块）；[0,0,0] 是自己脚下那格（放实心方块=跳起来垫脚；梯子等贴墙物可放进自己站的格子）' } };
+  return { facing, source: 'current_vision', frame: '[前,上,右]；每层的行从前(f=+2)到后(f=-2)，列从左(r=-2)到右(r=+2)，中间是自己；只显示本次看见的格子，? 是未知', legend, layers,
+    spots: { stand: stand.slice(0, 8), place: place.slice(0, 8), note: 'stand/place 根据当前可见格估计，实际移动和放置仍需动作确认；[0,0,0] 是自己脚下那格' } };
 }
 
 export function describeCell(adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like): string {

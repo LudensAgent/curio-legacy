@@ -416,7 +416,7 @@ test('身边方块图附带算好的落脚点和能放方块的格子', async ()
   const { localMap } = await import('../src/perception/local.ts');
   const adapter = new FakeAdapter(); // 面朝东，平地
   adapter.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 0 } }); // 正前方一格石头
-  const m = localMap(adapter, adapter.pos, 'E');
+  const m = localMap(adapter, adapter.pos, 'E', (positions) => positions.map((pos) => ({ pos, name: adapter.blockAt(pos)! })));
   assert.ok(m.spots.stand.some((s: string) => s.startsWith('[1,1,0]')), `能迈上前方的石头：${m.spots.stand}`);
   assert.ok(!m.spots.stand.some((s: string) => s.startsWith('[1,0,0]')), '石头那格站不进去');
   assert.ok(m.spots.place.some((s: string) => s.startsWith('[0,0,-1]')), `左边地上能放：${m.spots.place}`);

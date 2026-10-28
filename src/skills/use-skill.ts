@@ -79,8 +79,9 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
       const handle = makeBridge(ctx);
       const bridge: SandboxHandler = async (method, values) => {
         const value = await handle(method, values);
-        const receipt = value as { ok?: boolean; data?: Record<string, unknown> } | null;
-        if (!VERIFY_METHODS.includes(method as typeof VERIFY_METHODS[number]) && !['log', 'sleep'].includes(method) && receipt?.ok === true && receipt.data?.noop !== true) acted = true;
+        const receipt = value as { ok?: boolean; data?: { noop?: boolean; effectEvidence?: { verified?: boolean; changed?: boolean } } } | null;
+        if (!VERIFY_METHODS.includes(method as typeof VERIFY_METHODS[number]) && !['log', 'sleep'].includes(method)
+          && (receipt?.ok === true && receipt.data?.noop !== true || receipt?.data?.effectEvidence?.verified === true && receipt.data.effectEvidence.changed === true)) acted = true;
         return value;
       };
       // 开工前的样子：给判定代码对照（做完以后真的变了没有）
@@ -134,7 +135,9 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
         if (r.status === 'cancelled') return r;
         if (r.status === 'succeeded' && r.data?.noop !== true) completedSteps++;
         done.push(`${st.skill} → ${r.status === 'succeeded' ? '成' : `没成(${r.failureCode ?? ''})`}`);
-        if (r.status === 'failed' && !st.optional) return fail(r.failureCode ?? 'ERROR', `技能「${b.name}」第 ${i + 1} 步 ${st.skill} 没成：${r.summary.slice(0, 120)}`, { done });
+        if (r.status === 'failed' && !st.optional) return fail(r.failureCode ?? 'ERROR', `技能「${b.name}」第 ${i + 1} 步 ${st.skill} 没成：${r.summary.slice(0, 120)}`,
+          { done, ...(r.data?.effectEvidence ? { effectEvidence: r.data.effectEvidence } : {}),
+            ...(r.data?.dug ? { dug: r.data.dug } : {}), ...(r.data?.walked !== undefined ? { walked: r.data.walked } : {}) });
       }
       ctx.progress(1);
       const judged = await verifyRun(b, bridge, { before, result: { done }, args: { ...args.args, ...(args.failure ? { failure: args.failure } : {}) } }, ctx);

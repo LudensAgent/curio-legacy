@@ -580,7 +580,7 @@ export const wander: Skill<{ radius: number }> = {
 export const lookAround: Skill<{ seconds: number; for?: string; direction?: string }> = {
   name: 'look_around',
   readOnly: true,
-  description: '停下来专门找东西（for），或只看某个方向（direction）；看见就停',
+  description: '停下来专门找东西（for），或扫描某个方向（direction）；看见就停。已在视野里的目标不触发转头，扫描结束也不保证面朝扇区中心',
   argsDoc: '{"for"?: "<要找的方块或生物>", "direction"?: "N|NE|E|SE|S|SW|W|NW", "seconds"?: 2-20}',
   timeoutMs: 25000,
   movement: false,
@@ -599,13 +599,17 @@ export const lookAround: Skill<{ seconds: number; for?: string; direction?: stri
     const priorKnown = new Set([...ctx.senses.knownBlocks(names, 96).map((b) => `${b.name}:${b.pos.x},${b.pos.y},${b.pos.z}`),
       ...ctx.senses.perceivedEntities(48).map((e) => `entity:${e.id}`)]);
     const observed = () => args.for ? sighted(ctx, args.for, { visibleOnly: true, direction: args.direction }) : null;
-    const facts = (views: number, hit: ReturnType<typeof sighted> = null) => ({ searched: views > 0, scanViews: views,
-      ...(args.direction ? { direction: args.direction, directionInspected: views > 0 } : {}),
-      alreadyVisible: views === 0 && !!hit, newlyDiscovered: !!hit && !priorKnown.has(hit.key),
-      ...(hit ? { found: hit.what, dist: hit.dist, source: 'current_vision' } : {}) });
+    const facts = (views: number, hit: ReturnType<typeof sighted> = null) => {
+      const eye = ctx.adapter.eye();
+      return { searched: views > 0, scanViews: views, turned: views > 0,
+        ...(args.direction ? { direction: args.direction, directionInspected: views > 0 } : {}),
+        alreadyVisible: views === 0 && !!hit, newlyDiscovered: !!hit && !priorKnown.has(hit.key),
+        ...(eye ? { finalView: { yaw: eye.yaw, pitch: eye.pitch } } : {}),
+        ...(hit ? { found: hit.what, dist: hit.dist, ...(hit.pos ? { foundPos: hit.pos } : {}), source: 'current_vision' } : {}) };
+    };
     if (args.for) {
       const known = observed();
-      if (known) return ok(`${args.direction ? `${args.direction} 方向` : '当前视野'}已看见 ${known.what}（${known.dist} 格外）；没有新的搜索发现`, facts(0, known));
+      if (known) return ok(`${args.direction ? `${args.direction} 方向` : '当前视野'}已看见 ${known.what}（${known.dist} 格外）；没有转头，也没有新的搜索发现`, facts(0, known));
     }
     // 定向：在该方向 ±75° 扇形里看 5 个角度；全向：转一圈 8 个角度
     const sector = args.direction ? DIRS[args.direction] : null;
