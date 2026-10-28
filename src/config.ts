@@ -24,6 +24,7 @@ const observer = str('OBSERVER_PLAYER');
 const configuredMode = str('CURIO_MODE', 'local');
 if (configuredMode !== 'local' && configuredMode !== 'live') throw new Error('CURIO_MODE 必须为 local 或 live');
 const mode = path.basename(envFile) === '.env.live' ? 'live' : configuredMode;
+const dataDir = path.resolve(str('DATA_DIR') || `./data/${mode}`);
 
 export const config = {
   mode,
@@ -103,10 +104,10 @@ export const config = {
     'AGENT_PERSONA',
     '你叫 Curio，一个好奇、谨慎、喜欢记录新发现的 Minecraft 探险家。',
   ),
-  memory: memorySettings(),
+  memory: memorySettings({ ...process.env, DATA_DIR: dataDir }),
   /** 心智层：像真人一样一段一段地玩、边做边想 */
   mind: {
-    /** 性格关键词（逗号分隔），会进入每次思考，也保存在 data/mind.json */
+    /** 性格关键词（逗号分隔），会进入每次思考，也保存在 DATA_DIR/mind.json */
     traits: str('AGENT_TRAITS', '好奇,谨慎,喜欢记录新发现,有点恋家').split(/[,，]/).map((s) => s.trim()).filter(Boolean),
     /** 身体习惯：饿了顺手吃、黑了顺手插火把、卡住自己挣脱（像真人一样不用过脑子） */
     bodyHabits: bool('MIND_BODY_HABITS', false),
@@ -158,7 +159,7 @@ export const config = {
   },
   dashboard: {
     host: str('DASHBOARD_HOST', '127.0.0.1'),
-    port: num('DASHBOARD_PORT', 3000),
+    port: num('DASHBOARD_PORT', mode === 'live' ? 3000 : 3001),
   },
   vision: {
     // 0 或 auto = 跟随服务器 view-distance
@@ -177,17 +178,17 @@ export const config = {
   ui: { pacingMs: num('UI_PACING_MS', 250), openHoldMs: num('UI_OPEN_HOLD_MS', 600), closeHoldMs: num('UI_CLOSE_HOLD_MS', 800) },
   viewerPort: num('VIEWER_PORT', 0),
   actionChat: { enabled: bool('CHAT_ACTIONS', true), minIntervalMs: num('CHAT_ACTION_INTERVAL_MS', 1800) },
-  dataDir: path.resolve(str('DATA_DIR', './data')),
-  /** 堆用到这么多 MB 时写一份堆快照到 data/logs（每个进程一次），查内存是谁占的；0 = 不写。平时堆只有一两百 MB */
+  dataDir,
+  /** 堆用到这么多 MB 时写一份堆快照到 DATA_DIR/logs（每个进程一次），查内存是谁占的；0 = 不写。平时堆只有一两百 MB */
   heapSnapshotMb: num('HEAP_SNAPSHOT_MB', 1024),
   /** 每次 LLM 调用的完整记录（提示词、思考过程、完整回复）：放在数据目录外面，清空记忆、重置世界都不会删 */
-  llmArchiveDir: path.resolve(str('LLM_ARCHIVE_DIR', './archives/llm-calls')),
+  llmArchiveDir: path.resolve(str('LLM_ARCHIVE_DIR', `./archives/${mode}/llm-calls`)),
   /** 收到的每条弹幕（含被拦下的）按天存档，方便复盘和找观众的问题：同样放在数据目录外 */
-  danmakuArchiveDir: path.resolve(str('DANMAKU_ARCHIVE_DIR', './archives/danmaku')),
+  danmakuArchiveDir: path.resolve(str('DANMAKU_ARCHIVE_DIR', `./archives/${mode}/danmaku`)),
   /** 记忆服务（Hindsight）所用模型的价格覆盖，格式同 LLM_PRICE；不写就按它上报的模型名查内置价格表 */
   memoryLlmPrice: str('MEMORY_LLM_PRICE'),
   /** 观察者模组 HUD 的布局和开关（控制台「直播」页修改）：直播设置，不跟着角色存档走 */
-  observerHudConfig: path.resolve(str('OBSERVER_HUD_CONFIG', './live/observer-hud.json')),
+  observerHudConfig: path.resolve(str('OBSERVER_HUD_CONFIG', mode === 'live' ? './live/observer-hud.json' : './live/observer-hud.local.json')),
 };
 
 export type Config = typeof config;

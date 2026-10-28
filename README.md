@@ -1,6 +1,6 @@
 # Minecraft Curiosity Agent · MVP
 
-本地测试与直播可以使用独立配置：`npm run start:local` 读取 `.env.local`，`npm run start:live` 读取 `.env.live`，两者均默认启用守护进程（含 `:proxy` 版本）。本地 `save:local` / `load:local` 管理测试世界，直播连接 Mac 服务并拒绝本地维护。配置准备和目录隔离见 [本地测试与直播配置分离](docs/local-live-profiles.md)。
+本地测试与直播使用独立配置：`npm run start:local` 读取 `.env.local`，使用 `data/local`、`agents/local`；`npm run start:live` 读取 `.env.live`，使用 `data/live`、`agents/live`。两者均默认启用守护进程（含 `:proxy` 版本）。全量 `save:local` / `load:local` 只管理本地测试环境；直播的 Windows 角色数据可单独恢复，Mac 世界与 Hindsight 在 Mac 维护。未指定配置时仍读取 `.env`，默认回退本地；日常推荐使用明确的 local/live 命令。配置准备和目录隔离见 [本地测试与直播配置分离](docs/local-live-profiles.md)。
 
 一个**可验证、可观测**的最小版本，满足三件事：
 
@@ -56,17 +56,17 @@ difficulty=easy
 
 ```powershell
 npm install
-copy .env.example .env      # macOS/Linux: cp .env.example .env
+copy .env.local.example .env.local  # macOS/Linux: cp .env.local.example .env.local
 npm test                    # 离线测试，不需要 Minecraft
-npm start
+npm run start:local
 ```
 
-打开控制台：<http://127.0.0.1:3000>
+打开本地控制台：<http://127.0.0.1:3001>。直播使用 `.env.live` 和 `npm run start:live`，控制台沿用 <http://127.0.0.1:3000>。
 
 - **自定义布局**：点「编辑布局」后拖动面板标题移动、拖右下角调整大小，布局保存在本浏览器；「重置布局」恢复默认。布局用 [gridstack](https://gridstackjs.com/)（`npm install` 后离线可用；没装时从 CDN 加载；都失败就用固定布局）。
 - **LLM 调用面板**：每次调用发出的完整提示词（system / user）、模型的思考过程（reasoning）和返回内容都会实时流式显示，附带首字延迟、总耗时、token 用量、finish_reason。`LLM_STREAM=false` 可关闭流式请求（面板仍会在结束时显示全文）。
 
-`.env` 里至少要改：
+所选配置文件（本地 `.env.local`、直播 `.env.live`）里至少要改：
 
 ```ini
 OBSERVER_PLAYER=你的游戏名
@@ -100,6 +100,7 @@ RCON_PASSWORD=和 server.properties 一致
 - 每个新目标会作为“思考字幕”推给模组。
 - 合成会自动放慢（`UI_PACING_MS` 等），让观众看清材料一格格放进去；设为 0 关闭。Agent 的合成时限已按节奏放宽，且尽量一次合成所需数量，不会每个木板都开关一次界面。
 - 不需要时设 `OBSERVER_FEED=false`。
+- HUD 配置按环境隔离：本地使用 `live/observer-hud.local.json`，直播沿用 `live/observer-hud.json`，两者互不共用，也不跟随角色存读档。
 - 控制台「直播」页的 HUD 布局由新版观察者模组每秒通过本机 `POST /api/observer/layout` 回传实际画布、GUI 缩放和已绘制面板的边界，预览和拖动使用同一套 GUI 坐标。4K、Windows 125% 显示缩放或 Iris 光影环境无需手动校准；调整 HUD 大小、想法行数和面板开关后，预览会跟随实际绘制结果更新。布局只保存在内存中，不控制 Bot。升级后需要重启 Agent，并将重新构建的模组 JAR 安装到观察者客户端再重启客户端；旧版模组会显示「等待游戏实际布局」，不再使用固定比例的示意框。
 
 ## 5. OBS
@@ -147,7 +148,7 @@ NO_PROXY=localhost,127.0.0.1,::1
 `npm run start:local`、`npm run start:live` 及其 `:proxy` 版本默认使用守护进程，`supervise:local` / `supervise:live` 系列命令仍可使用。沿用根目录 `.env` 时，用 `npm run supervise`（需要代理时用 `npm run supervise:proxy`）代替 `npm start`。守护进程负责：
 
 - Agent 崩溃（包括内存耗尽）或卡死（10 秒一次的心跳超过 45 秒没来，启动阶段首次心跳等待最多 5 分钟）会被自动重启；连续崩溃时间隔从 3 秒逐步拉长到 1 分钟。
-- 每次异常都会在所选配置的 `DATA_DIR/logs/` 留下 `crash-*.log`（当时 stderr 和 stdout 的最后几百行、最后一次内存读数），stderr 全量写进 `console-err-*.log`，Node 致命错误另有诊断报告 `report.*.json`；事件日志里记一条 `process_restart`。默认配置的日志目录为 `data/logs/`，local/live 示例分别为 `data-local/logs/`、`data-live/logs/`。
+- 每次异常都会在所选配置的 `DATA_DIR/logs/` 留下 `crash-*.log`（当时 stderr 和 stdout 的最后几百行、最后一次内存读数），stderr 全量写进 `console-err-*.log`，Node 致命错误另有诊断报告 `report.*.json`；事件日志里记一条 `process_restart`。local/live 默认分别为 `data/local/logs/`、`data/live/logs/`。
 - 堆内存用到 92% 时 Agent 会先存档再退出，让守护马上重启，不等到内存耗尽被直接中止；每 10 分钟的内存读数记在事件 `process_memory` 里。
 - Ctrl+C 照常存档退出，守护随之结束。
 
@@ -227,7 +228,7 @@ Mineflayer 本身知道已加载区块里的每一个方块、墙后的每一只
 | **议程** | 自己写下的“今天/以后想做的事、冒出来的点子、想弄清的疑问”，可设焦点；太多时最旧的“以后再说”先被忘掉 | `mind/self.ts` |
 | **学习** | 每段活结束都有实测记录（得到/用掉了什么、耗时、和预想比）。模型用 `learned` 总结窍门；之后同一套做法（签名）再成功/失败会**自动修正窍门的成败次数**，可信度随实践变化；按眼下的事挑出相关窍门给模型看 | `mind/self.ts` |
 | **创新** | 无聊或遇到新东西时冒点子；`experiment` 必须写 `hypothesis`，结束后模型看实际结果给出 `experiment_result`（supported/refuted/unclear），结论进入后续思考。底层 `use_item/interact_block/hit_entity/ride…` 与方法库 `experiment_method` 仍可组合新玩法 | `mind/mind.ts` |
-| **连贯与记忆** | 念头流（最近 40 个念头）、日记、议程、窍门、实验、技能手感都保存在 `data/mind.json`，重启后接着原来的心思玩；被反射打断的那一步会在安全后重做，不额外调用模型；模型出错时**凭习惯**（规则目标）继续玩，不发呆 | `mind/mind.ts` |
+| **连贯与记忆** | 念头流（最近 40 个念头）、日记、议程、窍门、实验、技能手感都保存在 `DATA_DIR/mind.json`，重启后接着原来的心思玩；被反射打断的那一步会在安全后重做，不额外调用模型；模型出错时**凭习惯**（规则目标）继续玩，不发呆 | `mind/mind.ts` |
 | **顺手的事** | routine 里的步骤可以标 `optional`（“路上见到动物就打”“有果子就摘”）：没成不算这段活失败，身体接着做后面的步骤 | `mind/activity.ts` |
 | **流水线式边做边想** | 一段活的最后一轮一开始就琢磨下一段并写成 `next`，干完直接接上，不再“干 8 秒、站着想 9 秒” | `mind/mind.ts` |
 | **睡前回想** | 平常的小想法先记成零碎想法，只有出乎意料（卡住、实验）才马上立成窍门；睡觉、歇脚或每隔约一小时在后台回想一次：合并重复、丢掉被推翻的、把被证实的想法变成窍门、写一句日记 | `mind/mind.ts`、`mind/self.ts`、`mind/prompt.ts` |
@@ -235,7 +236,7 @@ Mineflayer 本身知道已加载区块里的每一个方块、墙后的每一只
 | **搞清自己在哪** | 抬头看正上方第一个方块：树冠下会说“头顶 3 格是橡树叶，人在地表”，不会以为困在地下；砍树先砍够得着的树干根部 | `perception/perception.ts`、`skills/work.ts` |
 | **家和作品** | 一直记得家在哪（盖好的房子 > 基地 > 床）、哪座房子没盖完（带作品 ID）、哪张图纸还没盖；天黑离家远会惦记回家；野外临时放的工作台用完收回背包 | `mind/home.ts`、`skills/work.ts` |
 | **喜好与闲心** | 会被风景吸引、想把家弄得舒服；发现喜欢的东西用 `liked` 记成喜好；躲坑过夜/睡觉时一般的事不会把它叫起来重新想；想事情时顺手捡脚边的掉落物 | `mind/self.ts`、`mind/mind.ts` |
-| **技能书** | 像现在的 agent 一样按需加载：提示词里只放每份技能的一行用途，需要时 `{"kind":"skill","name":"…"}` 翻开全文。内置在 `skills/<名字>/SKILL.md`（可自己添加），回想时也会把琢磨出的整套做法写成自己的技能（`data/skills/`） | `knowledge/skillbook.ts`、`skills/` |
+| **技能书** | 像现在的 agent 一样按需加载：提示词里只放每份技能的一行用途，需要时 `{"kind":"skill","name":"…"}` 翻开全文。内置在 `skills/<名字>/SKILL.md`（可自己添加），回想时也会把琢磨出的整套做法写成自己的技能（`DATA_DIR/skills/`） | `knowledge/skillbook.ts`、`skills/` |
 | **建筑师子代理** | `{"kind":"design","brief":"湖边能住的小家"}` 交给独立上下文的建筑师：带设计手册和参考作品，自查（太小、方盒子、单一材料、没窗没光）后改进，交回图纸 ID 和材料清单；攒够材料后 `build {"draft":"dr_…"}` 照图施工 | `building/architect.ts`、`building/drafts.ts`、`skills/architect/SKILL.md` |
 | **更丰富的建筑** | 图纸可以用台阶（自动朝中间往上爬做坡顶）、半砖、栅栏、玻璃板、活板门、梯子、地毯、灯笼；地板外多画一圈就是屋檐；最大 13×13、12 层 | `building/design.ts` |
 | **身体习惯** | 默认关闭（`MIND_BODY_HABITS=false`）：吃东西、插火把、躲避、脱困都由模型自己决定；身体只保留保命反射（躲苦力怕、溺水上浮、贴脸自卫、饿到 ≤6 才自动吃）。设为 true 才让身体顺手吃、自动插火把、自己挣脱 | `brain/reflex.ts` |
@@ -258,14 +259,14 @@ Mineflayer 本身知道已加载区块里的每一个方块、墙后的每一只
 
 ## 9. MVP 验收清单
 
-在控制台上可以直接看到下面这些指标（数据全部来自 `data/logs/*.jsonl`，也可以事后分析）：
+在控制台上可以直接看到下面这些指标（数据全部来自 `DATA_DIR/logs/*.jsonl`，也可以事后分析）：
 
 | # | 验收项 | 怎么验证 | 目标 |
 |---|---|---|---|
 | 1 | Bot 稳定连接并进入世界 | 顶栏显示“Curio 在线”；事件 `spawn` | — |
 | 2 | 能从 Agent 视角观察 | 你的客户端自动附着；Bot 死亡后 5 秒内重新附着；顶栏显示“RCON ✓” | ≤ 5 s |
 | 3 | OBS 能采集画面和叠加 | 关闭/重开客户端，Agent 不受影响（顶栏仍在线，任务继续） | 必须 |
-| 4 | LLM 接入并真正驱动行为 | 事件 `plan [llm] …`；`data/logs/llm-*.jsonl` 里有完整的输入输出 | — |
+| 4 | LLM 接入并真正驱动行为 | 事件 `plan [llm] …`；`DATA_DIR/logs/llm-*.jsonl` 里有完整的输入输出 | — |
 | 5 | **思考时不发呆** | 指标“LLM 思考时仍在行动” | ≥ 95% |
 | 6 | 10 分钟内空闲时间短 | 指标“无任务秒数” | < 60 s |
 | 7 | 技能执行可靠 | 指标“技能成功率”，以及失败码分布 | ≥ 80% |
@@ -309,39 +310,43 @@ LLM_FAKE_DELAY_MS=30000   # 每次思考额外等 30 秒
 
 ## 11. 数据与日志
 
+`DATA_DIR` 随所选配置变化：本地默认 `data/local/`，直播默认 `data/live/`。直播的 `MEMORY_WORLD_ID` 沿用旧直播世界身份，Mac 网络 IP 变化时只改连接地址，不改这个 ID。
+
 | 文件 | 内容 |
 |---|---|
-| `data/logs/events-YYYYMMDD.jsonl` | 所有事件：任务开始/结束、计划、反射、发现、卡死、旁观… |
-| `data/logs/llm-YYYYMMDD.jsonl` | 每次 LLM 调用的原因、延迟、token 用量、原始输出、是否有效 |
-| `data/world-memory.json` | 已访问区块、首次见到的方块/实体/群系、地标、技能统计、目标历史、笔记、长期目标、最近一次死亡 |
-| `data/skill-library.json` | Agent 自学的组合技能 |
-| `data/mind.json` | 心智：性格、情绪、议程、窍门（成败次数）、实验、日记、念头流、技能手感 |
+| `DATA_DIR/logs/events-YYYYMMDD.jsonl` | 所有事件：任务开始/结束、计划、反射、发现、卡死、旁观… |
+| `DATA_DIR/logs/llm-YYYYMMDD.jsonl` | 每次 LLM 调用的原因、延迟、token 用量、原始输出、是否有效 |
+| `DATA_DIR/world-memory.json` | 已访问区块、首次见到的方块/实体/群系、地标、技能统计、目标历史、笔记、长期目标、最近一次死亡 |
+| `DATA_DIR/skill-library.json` | Agent 自学的组合技能 |
+| `DATA_DIR/mind.json` | 心智：性格、情绪、议程、窍门（成败次数）、实验、日记、念头流、技能手感 |
 
 完全清空历史记忆：先用 **Ctrl+C 退出 Agent**，再执行：
 
 ```powershell
-npm run memory:clear
+npm run memory:clear:local
 ```
 
-命令会清空 `DATA_DIR`（默认 `data/`）中的所有内容，包括世界记忆、长期目标、经验教训、死亡记录、自学技能、日志和备份，并删除、核验当前及已登记的 Hindsight 专属 bank。保留空数据目录以避开 Windows 对目录本身的占用；文件仍被锁定时明确报错。`.env` 和 Minecraft 游戏存档保持不变。先退出 Agent 并等待记忆写入结束，保持 Hindsight 可访问。
+命令会清空本地配置的 `DATA_DIR`（默认 `data/local/`）中的所有内容，包括世界记忆、长期目标、经验教训、死亡记录、自学技能、日志和备份，并删除、核验当前及已登记的本地 Hindsight 专属 bank。保留空数据目录以避开 Windows 对目录本身的占用；文件仍被锁定时明确报错。所选配置文件和 Minecraft 游戏存档保持不变。先退出本地 Agent 并等待记忆写入结束，保持本地 Hindsight 可访问。
 
-需要同时重置世界时，先停止 Minecraft 服务器，再运行 `npm run memory:reset`（等价于 `npm run memory:clear -- --full`）。保留 `eula.txt`、配置、mods 和启动组件，清理地图、玩家、日志、录像等运行数据，并清除 `level-seed`，下次启动创建随机种子的新世界。可先运行 `npm run memory:reset -- --dry-run` 预览；完整说明见 [清理与完整重置](docs/memory-hindsight.md#完全清空)。
+需要同时重置本地世界时，先停止本地 Minecraft 服务器，再运行 `npm run memory:reset:local`（等价于 `npm run memory:clear:local -- --full`）。保留 `eula.txt`、配置、mods 和启动组件，清理地图、玩家、日志、录像等运行数据，并清除 `level-seed`，下次启动创建随机种子的新世界。可先运行 `npm run memory:reset:local -- --dry-run` 预览；完整说明见 [清理与完整重置](docs/memory-hindsight.md#完全清空)。
 
 ### 11.1 角色档案：保存、新建、切换角色
 
-一个“角色”是它的记忆和技能（`data/`）、它活过的世界（服务器目录里属于这个世界的部分）和它的 Hindsight 记忆 bank。档案放在 `agents/<日期-时间>/`（不进 git）：
+一个“角色”是它的记忆和技能（`DATA_DIR`）、它活过的世界（服务器目录里属于这个世界的部分）和它的 Hindsight 记忆 bank。档案按环境放在 `agents/local/<日期-时间>/`、`agents/live/<日期-时间>/`（不进 git）。下面的全量角色管理命令只用于 local：
 
 | 命令 | 作用 |
 |---|---|
-| `npm run agents:list` | 列出所有角色，▶ 是当前在用的 |
-| `npm run save` / `npm run agents:save` | 快速存档：冻结当前 data、世界、`.env`、`server.properties` 和服务端 `config/configs/defaultconfigs`，导出 Hindsight；录像默认不复制，要的话加 `-- --with-recordings` |
-| `npm run load` / `npm run agents:load` | 快速读档：覆盖当前角色的世界、记忆、技能和配置，Hindsight 也回退；快照保留，可以反复读取 |
-| `npm run agents:new -- 名字` | 把当前角色整个收进档案，开一个全新的角色：空记忆、空技能、新 bank、随机种子的新世界 |
-| `npm run agents:switch -- <ID或名字>` | 先把当前角色收进档案，再把目标角色搬回 `data/` 和服务器目录；Hindsight 里没有它的 bank 就从档案里的 `hindsight/bank.zip` 恢复 |
+| `npm run agents:local -- list` | 列出本地角色，▶ 是当前在用的 |
+| `npm run save:local` | 快速存档：冻结当前 `data/local`、本地世界、`.env.local`、`server.properties` 和服务端 `config/configs/defaultconfigs`，导出本地 Hindsight；录像默认不复制，要的话加 `-- --with-recordings` |
+| `npm run load:local` | 快速读档：覆盖当前本地角色的世界、记忆、技能和配置，本地 Hindsight 也回退；快照保留，可以反复读取 |
+| `npm run agents:local -- new 名字` | 把当前本地角色整个收进档案，开一个全新的角色：空记忆、空技能、新 bank、随机种子的新世界 |
+| `npm run agents:local -- switch <ID或名字>` | 先把当前本地角色收进档案，再把目标角色搬回 `data/local/` 和本地服务器目录；本地 Hindsight 里没有它的 bank 就从档案里的 `hindsight/bank.zip` 恢复 |
 
-new / switch 前先退出 Agent、停掉 Minecraft 服务器（会检查端口）；用 Hindsight 时让它保持运行。第一次用时，现在的 `data/` 会被收编成一个角色（用这次测试开始的时间命名，沿用原来的 bank）。每个角色有自己的 Hindsight bank，切换不会删别人的记忆。运行时仍然是 `data/` 和 `world/`，启动方式不变；切换在同一块盘上是改名，不复制录像。LLM 调用归档（`archives/llm-calls`）是共用的，不跟角色走。
+new / switch 前先退出本地 Agent、停掉本地 Minecraft 服务器（会检查端口）；用 Hindsight 时让本地服务保持运行。第一次用时，现在的 `data/local/` 会被收编成一个角色（用这次测试开始的时间命名，沿用原来的 bank）。每个角色有自己的 Hindsight bank，切换不会删别人的记忆。本地运行时使用 `data/local/` 和 `SERVER_DIR`（默认 `world/`）；切换在同一块盘上是改名，不复制录像。LLM 调用归档由 `LLM_ARCHIVE_DIR` 指定，位于角色目录之外，不跟角色走。
 
-反复测试时：先停 Agent 和服务器 → `npm run save` → 启动测试 → 再停 Agent 和服务器 → `npm run load` → 启动重测。快速存档独立放在 `agents/<ID>/save/`，只有再次 save 才覆盖，new / switch 不会改动它；上一份保留在 `.previous/save/`。load 会丢弃存档之后的进度；未存档的录像保留。save / load 使用相同的 `DATA_DIR`、`SERVER_DIR` 和 `AGENTS_DIR`，默认检查离线，Hindsight 服务保持运行；save 可加 `-- --live`，但运行中复制的数据可能不一致。旧版 agents:save 的档案需重新 save 一次才能快速读档。
+反复测试时：先停本地 Agent 和服务器 → `npm run save:local` → 启动测试 → 再停 Agent 和服务器 → `npm run load:local` → `npm run start:local` 启动重测。快速存档独立放在 `agents/local/<ID>/save/`，只有再次 save 才覆盖，new / switch 不会改动它；上一份保留在 `.previous/save/`。load 会丢弃存档之后的进度；未存档的录像保留。save / load 使用相同的 `DATA_DIR`、`SERVER_DIR`、`AGENTS_DIR` 和配置文件，默认检查离线，本地 Hindsight 服务保持运行；save 可加 `-- --live` 允许运行中复制本地数据，但快照可能不一致，这个参数不切换到直播配置。旧版 agents:save 的档案需重新 save 一次才能快速读档。
+
+单独恢复直播的 Windows 角色数据时，将选定档案中的 `save/data/` 复制到 `data/live/`，保留 `agent.json` 中的世界身份和 bank ID；`.env.live` 继续使用当前直播连接配置。该操作不执行直播全量 load，Mac 的世界和 Hindsight 由 Mac 端维护。恢复后使用 `npm run start:live`。
 
 ### 11.2 新世界的出生点：按群系难度挑种子
 
@@ -359,7 +364,7 @@ new / switch 前先退出 Agent、停掉 Minecraft 服务器（会检查端口�
 src/
 ├─ adapter/      GameAdapter 接口 + Mineflayer 实现（上层不直接碰 mineflayer）
 ├─ arbiter/      动作仲裁器（planVersion、取消、抢占、动作守卫）
-├─ skills/       （仓库根目录）技能书说明：architect 建筑设计手册、writing-skills 怎么写技能（会动手的技能都由它自己总结，写到 data/skills/）
+├─ skills/       （仓库根目录）技能书说明：architect 建筑设计手册、writing-skills 怎么写技能（会动手的技能都由它自己总结，写到 DATA_DIR/skills/）
 ├─ mind/         心智层（默认）：self 自我模型、attention 注意力、activity 一段活、thinker/prompt 思考、mind 主循环
 ├─ brain/        reflex（反射层、卡死检测）
 ├─ perception/   vision（射线视野、听觉、记忆）+ 感知摘要器（→ 给 LLM 的紧凑 JSON）
@@ -370,6 +375,12 @@ src/
 public/          dashboard.html、overlay.html
 tests/           离线测试（FakeAdapter 模拟世界）
 scripts/         check-llm、check-rcon
+data/
+├─ local/        Windows 本地测试数据
+└─ live/         Windows 直播角色数据
+agents/
+├─ local/        本地角色档案和完整快速存档
+└─ live/         直播角色信息与本地数据档案
 ```
 
 ## 13. 已知限制与下一步

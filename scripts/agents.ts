@@ -17,7 +17,7 @@ const projectDir = fileURLToPath(new URL('../', import.meta.url));
 const paths: AgentPaths = {
   projectDir, dataDir: config.dataDir,
   serverDir: path.resolve(process.env.SERVER_DIR?.trim() || path.join(projectDir, 'world')),
-  agentsDir: path.resolve(process.env.AGENTS_DIR?.trim() || path.join(projectDir, 'agents')),
+  agentsDir: path.resolve(process.env.AGENTS_DIR?.trim() || path.join(projectDir, 'agents', config.mode)),
   envFile,
 };
 const ident = { worldId: config.memory.worldId, botUsername: config.memory.agentId, legacyBankId: legacyBankId(config.memory.worldId, config.memory.agentId) };

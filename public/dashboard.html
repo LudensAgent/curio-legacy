@@ -453,7 +453,7 @@
               <span>右侧轮换间隔</span><input type="range" id="hudRotate" min="0" max="30" step="1"><span class="v" id="hudRotateV"></span>
               <span class="full hudnote">右侧在「兴趣信号」和「运行统计（死亡、Token、开销）」之间轮换；0 = 两页叠在一起常驻。</span>
             </div>
-            <div class="hudnote" id="hudNote">改动立即发给游戏里的观察者模组（不需要快捷键），并记在 live/observer-hud.json。</div>
+            <div class="hudnote" id="hudNote">改动立即发给游戏里的观察者模组（不需要快捷键），并记在当前配置的 HUD 文件。</div>
             <div class="hudnote">预览按游戏实际分辨率、GUI 缩放和面板尺寸同步，每秒刷新。Windows 显示缩放无需手填；关闭的面板、容器打开时暂时隐藏的面板不会显示。</div>
           </div>
           <div class="card">
@@ -701,7 +701,7 @@ $('cfgBody').addEventListener('click', (e) => {
 async function saveEnv() {
   if (!envEdits.size) return cfgNote('没有改动。', 'ok');
   const keys = [...envEdits.keys()];
-  if (!confirm(`要把 ${keys.length} 项写进 .env 吗？\n${keys.join('\n')}\n\n（旧文件会备份到 data/env-backups，重启 Curio 后生效）`)) return;
+  if (!confirm(`要把 ${keys.length} 项写进 ${envView.file} 吗？\n${keys.join('\n')}\n\n（旧文件会备份到当前数据目录的 env-backups，重启 Curio 后生效）`)) return;
   $('cfgSave').disabled = true;
   try {
     const r = await fetch('/api/env', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ set: Object.fromEntries(envEdits) }) });

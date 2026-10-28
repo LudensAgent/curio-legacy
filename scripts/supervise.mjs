@@ -8,7 +8,7 @@
  * - 子进程非正常退出（崩溃、内存耗尽、被杀）→ 写崩溃报告、记一条事件，等几秒后重启；连续崩溃时等待逐步拉长。
  * - 子进程卡死（事件循环停住，心跳超时）→ 杀掉重启。
  * - 子进程正常退出（Ctrl+C / 关闭，退出码 0）→ 守护一起退出；退出码 75 = 子进程自己要求重启（内存快满时先存档再退）。
- * - stderr 全部落盘到 data/logs/console-err-YYYYMMDD.log；Node 致命错误另有诊断报告（--report-on-fatalerror）。
+ * - stderr 全部落盘到 DATA_DIR/logs/console-err-YYYYMMDD.log；Node 致命错误另有诊断报告（--report-on-fatalerror）。
  *
  * 纯 JS，不依赖 tsx，守护本身尽量不出错。
  */
@@ -16,6 +16,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseEnv } from 'node:util';
 
 export const RESTART_EXIT_CODE = 75;
 const pad = (n) => String(n).padStart(2, '0');
@@ -23,14 +24,13 @@ const day = (d = new Date()) => `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad
 const stamp = (d = new Date()) => `${day(d)}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
 
-/** 所选配置里的 DATA_DIR（守护进程不加载整份配置，只要这一项） */
+/** 守护日志跟随所选配置；进程环境变量的优先级与子进程一致。 */
 function dataDirFrom(root, envFile) {
-  if (process.env.DATA_DIR) return path.resolve(root, process.env.DATA_DIR);
-  try {
-    const m = fs.readFileSync(envFile, 'utf8').match(/^\s*DATA_DIR\s*=\s*["']?([^"'#\r\n]+?)["']?\s*(?:#.*)?$/m);
-    if (m) return path.resolve(root, m[1]);
-  } catch { /* 没有默认配置文件 */ }
-  return path.resolve(root, 'data');
+  const env = { ...(fs.existsSync(envFile) ? parseEnv(fs.readFileSync(envFile, 'utf8')) : {}), ...process.env };
+  const configuredMode = env.CURIO_MODE?.trim() || 'local';
+  if (configuredMode !== 'local' && configuredMode !== 'live') throw new Error('CURIO_MODE 必须为 local 或 live');
+  const mode = path.basename(envFile) === '.env.live' ? 'live' : configuredMode;
+  return path.resolve(root, env.DATA_DIR?.trim() || path.join('data', mode));
 }
 
 /** 第 n 次连续崩溃后等多久再起（毫秒） */

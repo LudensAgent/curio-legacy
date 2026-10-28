@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { config } from '../src/config.ts';
 import { repairLearnedSkills } from '../src/maintenance/learned-skills.ts';
 
 const projectDir = fileURLToPath(new URL('../', import.meta.url));
@@ -7,7 +8,7 @@ const args = process.argv.slice(2);
 const unknown = args.filter((arg) => arg !== '--apply' && arg !== '--dry-run' && !arg.startsWith('--data-dir=') && !arg.startsWith('--repairs-dir='));
 if (unknown.length || args.includes('--apply') && args.includes('--dry-run')) throw new Error('用法：repair-learned-skills.ts [--apply|--dry-run] [--data-dir=路径] [--repairs-dir=路径]；执行 --apply 前先停止 Agent');
 const result = repairLearnedSkills({
-  dataDir: path.resolve(args.find((arg) => arg.startsWith('--data-dir='))?.slice('--data-dir='.length) || path.join(projectDir, 'data')),
+  dataDir: path.resolve(args.find((arg) => arg.startsWith('--data-dir='))?.slice('--data-dir='.length) || config.dataDir),
   repairsDir: path.resolve(args.find((arg) => arg.startsWith('--repairs-dir='))?.slice('--repairs-dir='.length) || path.join(projectDir, 'maintenance', 'skill-repairs', '2026-10-28')),
   apply: args.includes('--apply'),
 });

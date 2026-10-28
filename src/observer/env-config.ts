@@ -169,9 +169,10 @@ export interface EnvStoreOptions {
 export function envStore(opts: EnvStoreOptions = {}) {
   const file = path.resolve(opts.file ?? '.env');
   const example = path.resolve(opts.example ?? '.env.example');
-  const backupDir = path.resolve(opts.backupDir ?? 'data/env-backups');
   const read = (f: string) => { try { return fs.readFileSync(f, 'utf8'); } catch { return ''; } };
   const startedWith = parseEnv(read(file));
+  const mode = path.basename(file) === '.env.live' || startedWith.get('CURIO_MODE')?.trim() === 'live' ? 'live' : 'local';
+  const backupDir = path.resolve(opts.backupDir ?? path.join(startedWith.get('DATA_DIR')?.trim() || path.join('data', mode), 'env-backups'));
 
   function schema() {
     return parseSchema(read(example));

@@ -64,4 +64,26 @@ test('显式配置缺失或模式无效时报错，默认无 .env 仍可本地�
   const { config } = await loadConfig();
   assert.equal(config.mode, 'local');
   assert.equal(config.mc.host, '127.0.0.1');
+  assert.equal(config.dataDir, path.join(root, 'data', 'local'));
+  assert.equal(config.dashboard.port, 3001);
+});
+
+test('未填写目录时按模式读取独立角色与记忆身份，直播文件名保持直播默认值', async (t) => {
+  const root = project(t);
+  for (const mode of ['local', 'live']) {
+    const directory = path.join(root, 'data', mode);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'agent.json'), JSON.stringify({
+      worldId: 'saved-world', botUsername: 'TestBot', bankId: `mc-${(mode === 'local' ? 'a' : 'b').repeat(32)}`,
+    }));
+    fs.writeFileSync(path.join(root, `.env.${mode}`), 'CURIO_MODE=local\nMEMORY_WORLD_ID=saved-world\nBOT_USERNAME=TestBot\n');
+    process.env.ENV_FILE = `.env.${mode}`;
+    const { config } = await loadConfig();
+    assert.equal(config.mode, mode);
+    assert.equal(config.dataDir, directory);
+    assert.equal(config.memory.bankId, `mc-${(mode === 'local' ? 'a' : 'b').repeat(32)}`);
+    assert.equal(config.dashboard.port, mode === 'local' ? 3001 : 3000);
+    assert.equal(config.llmArchiveDir, path.join(root, 'archives', mode, 'llm-calls'));
+    assert.equal(config.observerHudConfig, path.join(root, 'live', mode === 'live' ? 'observer-hud.json' : 'observer-hud.local.json'));
+  }
 });
