@@ -42,3 +42,35 @@ export const inspectBlock: Skill<{ target: string | Vec3Like }> = {
       { target: observed.name, pos: observed.pos, actual: observed, effectEvidence: { verified: true, changed: false, reasons: ['只读视觉观测'] } });
   },
 };
+
+export const rememberPlace: Skill<{ target?: Vec3Like; entityId?: number; label: string }> = {
+  name: 'remember_place',
+  description: '主动记下当前亲眼看见的方块或实体所在位置，并给它命名；记录是历史观察，不会跟踪视野外的变化，也不会自动前往或交互',
+  argsDoc: '{"label":"自定地点名","target":{"x":整数,"y":整数,"z":整数}} 或 {"label":"自定地点名","entityId":看到的实体ID}',
+  timeoutMs: 3000,
+  movement: false,
+  validate(raw, adapter) {
+    const input = obj(raw);
+    const label = typeof input.label === 'string' ? input.label.trim().slice(0, 60) : '';
+    if (!label) return { ok: false, error: 'label 需要一个地点名' };
+    if (input.entityId !== undefined) {
+      if (input.target !== undefined || !Number.isInteger(input.entityId) || input.entityId < 0) return { ok: false, error: 'entityId 需要当前看到的非负整数ID，不能与 target 同时指定' };
+      return { ok: true, args: { entityId: input.entityId, label } };
+    }
+    const parsed = inspectBlock.validate({ target: input.target }, adapter);
+    if (!parsed.ok || typeof parsed.args.target === 'string') return { ok: false, error: 'target 需要亲眼看见的方块坐标，或用 entityId 指定实体' };
+    return { ok: true, args: { target: parsed.args.target, label } };
+  },
+  async run(ctx, args) {
+    const state = ctx.adapter.state();
+    if (!state.observationReady || !state.connected) return fail('NOT_FOUND', '当前没有可用的视觉观察，未写入地点记忆');
+    ctx.senses.refresh();
+    const entity = args.entityId === undefined ? undefined : ctx.senses.perceivedEntities(48).find((e) => e.id === args.entityId && e.perception !== 'heard');
+    const block = args.target ? ctx.senses.observeBlocks?.([args.target])[0] : undefined;
+    const observed = entity ?? block;
+    if (!observed) return fail('NOT_FOUND', '当前看不见指定对象，未凭坐标或历史记录编造新观察');
+    const landmark = ctx.memory.addLandmark('waypoint', `${args.label}（${observed.name}）`, state.dim, observed.pos, 1);
+    return ok(`已记下「${args.label}」：${observed.name} 曾见于 ${state.dim} (${observed.pos.x},${observed.pos.y},${observed.pos.z})`,
+      { landmark, source: 'visual_observation', worldId: state.worldId, dimension: state.dim, observedAt: Date.now(), currentlyConfirmed: true });
+  },
+};

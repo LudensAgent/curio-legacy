@@ -1,6 +1,7 @@
 import type { Vec3Like } from '../adapter/types.ts';
 import { dist3 } from '../util.ts';
 import { INTERACTIVE_BLOCKS, interactiveName } from '../perception/vision.ts';
+import { chestLocation, isContainerLandmark } from '../memory/chest-memory.ts';
 import type { SkillCtx } from './types.ts';
 
 /**
@@ -13,10 +14,15 @@ export const isStation = (block: string) => !!interactiveName(block);
 export function rememberStation(ctx: SkillCtx, kind: string, pos: Vec3Like | undefined) {
   const zh = interactiveName(kind);
   if (!zh || !pos) return;
-  ctx.memory.addLandmark('discovery', `我的${zh}`, ctx.adapter.state().dim, pos, 2);
+  ctx.memory.addLandmark('discovery', `我的${zh}`, ctx.adapter.state().dim, pos, isContainerLandmark(kind) ? 0.1 : 2);
 }
 
-type StationMemory = { landmarks(): { id?: string; label: string; dim: string; pos: Vec3Like; worldId?: string }[]; removeLandmark?(id: string): boolean };
+type StationMemory = {
+  landmarks(): { id?: string; label: string; dim: string; pos: Vec3Like; worldId?: string; ts?: number }[];
+  removeLandmark?(id: string): boolean;
+  forgetChest?(dim: string, pos: Vec3Like): void;
+  forgetFurnace?(dim: string, pos: Vec3Like): void;
+};
 
 /**
  * 记得的工作站还在不在：离得够近（区块加载着）、那一格看得清，又不是这种方块了——那就是被拆了、烧了或者别人拿走了，
@@ -30,15 +36,16 @@ function stillThere(memory: StationMemory, l: { id?: string; pos: Vec3Like }, he
   return false;
 }
 
-/** 拆掉了一个工作站：记忆里这一格（床是两格）的“我的X”/“X”一起忘掉 */
+/** Confirmed removal invalidates the station and its local storage or furnace contents together. */
 export function forgetStationAt(memory: StationMemory, dim: string, cells: Vec3Like[], blockName: string): number {
   const zh = interactiveName(blockName);
-  if (!zh) return 0;
   let n = 0;
   for (const l of memory.landmarks()) {
-    if (l.dim !== dim || (l.label !== `我的${zh}` && l.label !== zh) || !l.id) continue;
-    if (cells.some((c) => dist3(c, l.pos) <= 1.5) && memory.removeLandmark?.(l.id)) n++;
+    if (l.dim !== dim || !l.id || !(zh && (l.label === `我的${zh}` || l.label === zh) || l.label.endsWith(`（${blockName}）`))) continue;
+    if (cells.some((c) => dist3(c, l.pos) <= 0.1) && memory.removeLandmark?.(l.id)) n++;
   }
+  if (['chest', 'trapped_chest', 'barrel'].includes(blockName) || blockName.endsWith('shulker_box')) cells.forEach((pos) => memory.forgetChest?.(dim, pos));
+  if (['furnace', 'blast_furnace', 'smoker'].includes(blockName)) cells.forEach((pos) => memory.forgetFurnace?.(dim, pos));
   return n;
 }
 
@@ -56,19 +63,23 @@ export function myBed(memory: StationMemory,
 }
 
 /** 先看视野/近期视觉记忆，再看自己记下的工作站地标；返回最近的一个 */
-export function findStation(ctx: SkillCtx, kinds: string[], maxDist: number): { pos: Vec3Like; dist: number; from: 'seen' | 'memory' } | null {
+export function findStation(ctx: SkillCtx, kinds: string[], maxDist: number): { pos: Vec3Like; dist: number; from: 'seen' | 'memory'; radius?: number } | null {
   const s = ctx.adapter.state();
   const here = s.pos;
-  const out: { pos: Vec3Like; dist: number; from: 'seen' | 'memory' }[] = [];
-  const seen = ctx.senses.knownBlocks(kinds, maxDist)[0];
+  const out: { pos: Vec3Like; dist: number; from: 'seen' | 'memory'; radius?: number }[] = [];
+  const known = ctx.senses.knownBlocks(kinds, maxDist);
+  const visibleContainers = new Set((ctx.senses.observeBlocks?.(known.filter((b) => isContainerLandmark(b.name)).slice(0, 32).map((b) => b.pos)) ?? [])
+    .filter((b) => kinds.includes(b.name)).map((b) => `${b.pos.x},${b.pos.y},${b.pos.z}`));
+  const seen = known.find((b) => !isContainerLandmark(b.name) || visibleContainers.has(`${b.pos.x},${b.pos.y},${b.pos.z}`));
   if (seen) out.push({ pos: seen.pos, dist: Math.round(dist3(here, seen.pos)), from: 'seen' });
   // 自己的（我的X）和看见过的（X）都算
   const labels = new Set(kinds.flatMap((k) => { const zh = interactiveName(k); return zh ? [`我的${zh}`, zh] : []; }));
   for (const l of ctx.memory.landmarks()) {
     if (!labels.has(l.label) || l.dim !== s.dim || (l.worldId && l.worldId !== s.worldId)) continue;
-    if (!stillThere(ctx.memory, l, here, (p) => ctx.adapter.blockAt(p), (n) => kinds.includes(n))) continue;
-    const d = dist3(here, l.pos);
-    if (d <= maxDist) out.push({ pos: l.pos, dist: Math.round(d), from: 'memory' });
+    if (!stillThere(ctx.memory, l, here, (p) => ctx.senses.observeBlocks?.([p])[0]?.name ?? null, (n) => kinds.includes(n))) continue;
+    const location = isContainerLandmark(l.label) ? chestLocation(l) : { pos: l.pos, radius: 0 };
+    const d = dist3(here, location.pos);
+    if (d <= maxDist) out.push({ pos: location.pos, dist: Math.round(d), from: 'memory', radius: location.radius });
   }
   return out.sort((a, b) => a.dist - b.dist)[0] ?? null;
 }

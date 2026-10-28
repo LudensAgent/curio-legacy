@@ -19,26 +19,33 @@ const chestAt = (a: FakeAdapter, m: WorldMemory, pos: { x: number; y: number; z:
   m.setChest('overworld', pos, Object.entries(items).map(([name, count]) => ({ name, count })));
 };
 
-test('箱子顶上压着石头：take_items 先挖掉盖子上的方块再取，箱子还在', async () => {
+test('箱子顶上压着石头：take_items 报告选定箱子打不开，不擅自挖盖', async (t) => {
   const a = new FakeAdapter(), m = new WorldMemory(null);
+  t.after(() => m.close()); m.setWorld(a.state().worldId);
   const pos = { x: 2, y: 64, z: 0 };
   chestAt(a, m, pos, { iron_ingot: 5 });
   a.blocks.push({ name: 'stone', pos: { x: 2, y: 65, z: 0 } });
-  const r = await runSkill(a, 'take_items', { item: 'iron_ingot', count: 3 }, m);
-  assert.equal(r.status, 'succeeded', r.summary);
-  assert.equal(a.inv.get('iron_ingot'), 3);
+  const r = await runSkill(a, 'take_items', { item: 'iron_ingot', count: 3, target: pos }, m);
+  assert.equal(r.status, 'failed', r.summary);
+  assert.equal(a.inv.get('iron_ingot') ?? 0, 0);
   assert.equal(a.blockAt(pos), 'chest', '箱子没被挖');
-  assert.match(r.summary, /挖掉了压在箱子顶上的 stone/);
+  assert.equal(a.blockAt({ ...pos, y: 65 }), 'stone', '没有授权拆盖子');
+  assert.match(r.summary, /LID_BLOCKED:stone/);
+  assert.ok(!a.actions.some((action) => action.startsWith('dig:')));
 });
 
-test('记得的箱子已经没了：删掉记录，换下一个记得的箱子', async () => {
+test('选定箱子已经没了：亲眼确认后删记录，但不换下一个箱子', async (t) => {
   const a = new FakeAdapter(), m = new WorldMemory(null);
-  m.setChest('overworld', { x: 1, y: 64, z: 1 }, [{ name: 'coal', count: 9 }]); // 那里其实没有箱子了
+  t.after(() => m.close()); m.setWorld(a.state().worldId);
+  const missing = { x: 1, y: 64, z: 1 };
+  m.setChest('overworld', missing, [{ name: 'coal', count: 9 }]); // 那里其实没有箱子了
   chestAt(a, m, { x: 4, y: 64, z: 0 }, { coal: 6 });
-  const r = await runSkill(a, 'take_items', { item: 'coal', count: 4 }, m);
-  assert.equal(r.status, 'succeeded', r.summary);
-  assert.equal(a.inv.get('coal'), 4);
+  const r = await runSkill(a, 'take_items', { item: 'coal', count: 4, target: missing }, m);
+  assert.equal(r.failureCode, 'TARGET_GONE', r.summary);
+  assert.equal(a.inv.get('coal') ?? 0, 0, '另一个箱子没被自动翻找');
   assert.equal(m.chests().length, 1, '没了的箱子记录删掉');
+  assert.equal(a.chests.get('4,64,0')?.get('coal'), 6);
+  assert.match(r.summary, /未改选其他容器/);
 });
 
 test('存着东西的箱子：dig 不拆，告诉它怎么取', async () => {

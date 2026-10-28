@@ -15,6 +15,7 @@ import { isThreat, situationOf } from '../src/mind/predicate.ts';
 import { Vision } from '../src/perception/vision.ts';
 import { describeBuildProblems } from '../src/skills/build.ts';
 import { FakeAdapter } from './fake-adapter.ts';
+import { makeCtx } from './survival-helpers.ts';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'curio-stab-'));
 const noSenses = { perceivedEntities: () => [], knownBlocks: () => [], refresh() {}, markSweep() {} };
@@ -131,20 +132,29 @@ test('吃东西：结果里说清吃了什么、每块值多少（生的顺带�
   assert.match(r.summary, /bread×1（\+5 饥饿、饱和 6）/);
 });
 
-test('箱子：记得的箱子里没有，就去附近看得见的箱子里实际翻一翻，翻过的都记下里面有什么', async () => {
+test('箱子：先返回候选，Agent 明确选定后才翻找，并留下所见与缺物印象', async () => {
   const { SKILLS } = await import('../src/skills/index.ts');
   const adapter = new FakeAdapter(), memory = new WorldMemory(null);
+  memory.setWorld(adapter.state().worldId);
   const chestPos = { x: 3, y: 64, z: 0 };
   adapter.blocks.push({ name: 'chest', pos: chestPos });
-  (adapter as any).chests.set('3,64,0', new Map([['bread', 5], ['cobblestone', 20]]));
-  const senses = { ...noSenses, knownBlocks: (names: string[]) => names.includes('chest') ? [{ name: 'chest', pos: chestPos, dist: 3 }] : [] };
-  const ctx = { adapter, senses, memory, bus: new EventBus(), signal: new AbortController().signal, deadline: Date.now() + 10_000, taskId: 't', progress() {} } as any;
-  const miss = await SKILLS.take_items.run(ctx, { item: 'apple', count: 4 });
+  adapter.chests.set('3,64,0', new Map([['bread', 5], ['cobblestone', 20]]));
+  const ctx = makeCtx(adapter, { memory, senses: {
+    knownBlocks: (names: string[]) => names.includes('chest') ? [{ name: 'chest', pos: chestPos, dist: 3 }] : [],
+    observeBlocks: (positions) => positions.map((pos) => ({ name: adapter.blockAt(pos) ?? 'air', properties: {}, pos,
+      worldId: adapter.worldId, dimension: adapter.dim, sessionId: adapter.sessionId, observationId: 1, observedAt: Date.now(), source: 'vision' })),
+  } });
+  const candidates = await SKILLS.take_items.run(ctx, { item: 'apple', count: 4 });
+  assert.equal(candidates.failureCode, 'BAD_ARGS');
+  assert.deepEqual((candidates.data?.candidates as { target: unknown }[]).map((candidate) => candidate.target), [chestPos]);
+  assert.equal(memory.chests().length, 0, '只列线索没有打开箱子或抄下内容');
+  assert.equal(adapter.inv.get('bread') ?? 0, 0);
+  const miss = await SKILLS.take_items.run(ctx, { item: 'apple', count: 4, target: chestPos });
   assert.equal(miss.failureCode, 'NOT_FOUND');
-  assert.match(miss.summary, /只有 cobblestone、bread/, '翻过了，说得出瞥见了什么（不报数量）');
+  assert.match(miss.summary, /未改选其他容器/);
   assert.equal(memory.chests()[0].traces.find((t) => t.item === 'bread')?.kind, 'glimpsed', '留下了印象');
   assert.equal(memory.chests()[0].traces.find((t) => t.item === 'apple')?.kind, 'absent', '也记得这里没有 apple');
-  const got = await SKILLS.take_items.run(ctx, { item: 'bread', count: 3 });
+  const got = await SKILLS.take_items.run(ctx, { item: 'bread', count: 3, target: chestPos });
   assert.equal(got.status, 'succeeded', got.summary);
   assert.equal(adapter.inv.get('bread'), 3);
   memory.close();

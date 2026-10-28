@@ -87,6 +87,18 @@ test('episodic: associative local recall finds older relevant memories and scope
   assert.equal(x.backend.retained.length, 0);
 });
 
+test('episodic: events without a known dimension stay local and cannot contaminate a remote scope', async (t) => {
+  const x = setup(t);
+  x.adapter.dim = 'unknown';
+  x.service.start();
+  x.bus.publish('death', 'P0', 'dimension was not available during disconnection');
+  await pause();
+  assert.equal(x.service.snapshot().archived, 1);
+  assert.equal(x.service.snapshot().queued, 0);
+  assert.equal(x.backend.retained.length, 0);
+  assert.equal((await x.service.recall(context())).memories.length, 0);
+});
+
 test('episodic: remote recall uses intent, failures, suggestions and resources with a complete JSON byte budget', async (t) => {
   const x = setup(t, settings({ maxContextBytes: 512 }));
   x.backend.recallImpl = async () => [{ id: 'x'.repeat(500), text: '下界传送门失败的教训'.repeat(500), source: 's'.repeat(500), observedAt: 'date'.repeat(200), kind: 'inference'.repeat(50) }];

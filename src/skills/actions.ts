@@ -296,7 +296,7 @@ export const ride: Skill<{ direction?: string; to?: { x: number; z: number }; di
         const end = route ? route.waypoints[route.waypoints.length - 1] : target;
         const result = await adapter.ride(end, signal, {
           timeoutMs: Math.max(1, ctx.deadline - Date.now() - 1000),
-          stop: () => { if (!args.until) return false; ctx.senses.refresh(); seen = sighted(ctx, args.until); return !!seen; },
+          stop: () => { if (!args.until) return false; ctx.senses.refresh(); seen = sighted(ctx, args.until, { visibleOnly: true }); return !!seen; },
           ...(route ? { via: route.waypoints.slice(0, -1), arriveWithin: 0.8 } : {}),
         });
         moved += result.moved;

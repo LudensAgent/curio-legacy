@@ -75,7 +75,7 @@ export function storedChestAt(memory: WorldMemory, state: { dim: string }, pos: 
   if (!rec) return null;
   const remembered = [...new Set(rec.traces.filter((t) => t.kind !== 'absent').map((t) => t.item))];
   const what = remembered.length ? `存着 ${remembered.slice(0, 4).join('、')}${remembered.length > 4 ? ' 等' : ''} ` : '自己用过、里面可能还有东西';
-  return `(${p.x},${p.y},${p.z}) 是${what}的箱子，没拆。要拿东西用 take_items（开不了盖多半是顶上压着方块，take_items 会自己挖掉那一格）；真要搬箱子写 "own":true，东西会洒一地`;
+  return `(${p.x},${p.y},${p.z}) 是${what}的箱子，没拆。要拿东西可用 take_items 指定这个箱子，或 use_gui 查看；打不开时返回实际原因，不会自行挖盖。真要搬箱子写 "own":true，东西会洒一地`;
 }
 
 export const OWN_BUILDING_HINT = '拆了拿料，build 回头还会报缺这一格，又去补——拆东墙补西墙。缺料就去采（collect）或从箱子里拿；真要拆（开个门、困在里面出不去、改建）写 "own":true';

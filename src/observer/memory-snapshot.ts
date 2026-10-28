@@ -1,6 +1,7 @@
 import type { AgentState } from '../adapter/types.ts';
-import { describeChest } from '../memory/chest-memory.ts';
+import { chestLocation, chestRecollectionLocation, describeChest, isContainerLandmark } from '../memory/chest-memory.ts';
 import { oreKind } from '../memory/ore-spots.ts';
+import { recallText } from '../memory/recollection.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { myFacilities } from '../mind/facilities.ts';
 
@@ -32,7 +33,7 @@ export function dashboardMemory(memory: WorldMemory, state: Pick<AgentState, 'wo
   const currentLandmarks = landmarks.filter(inDimension);
   return {
     worldId: state.worldId, dimension: state.dim, dimensions, facingYaw,
-    landmarks: currentLandmarks,
+    landmarks: currentLandmarks.map((l) => isContainerLandmark(l.label) ? { ...l, ...chestLocation(l, clock) } : l),
     creatures: currentLandmarks.filter((l) => l.kind === 'herd').sort((a, b) => b.ts - a.ts),
     resources: currentLandmarks.filter((l) => l.kind === 'resource' || l.kind === 'danger')
       .map((l) => ({ ...l, type: l.kind === 'danger' ? `danger:${l.label}` : oreKind(l.label),
@@ -40,11 +41,13 @@ export function dashboardMemory(memory: WorldMemory, state: Pick<AgentState, 'wo
       .sort((a, b) => a.dist - b.dist),
     passages: passages.filter(inDimension).sort((a, b) => b.lastUsedAt - a.lastUsedAt).slice(0, 12),
     facilities: facilities.slice(0, 16).map((f) => ({ ...f, worldId: state.worldId, dim: state.dim })),
-    chests: chests.filter(inDimension).map((c) => ({ worldId: c.worldId, dim: c.dim, pos: c.pos, note: c.note, uses: c.uses,
+    chests: chests.filter(inDimension).map((c) => ({ worldId: c.worldId, dim: c.dim, ...chestRecollectionLocation(c, clock), note: c.note, uses: c.uses,
       traces: c.traces.length, text: describeChest(c, clock) })),
     hazards: hazards.filter(inDimension).slice(-10),
     farms: farms.filter(inDimension).map((f) => ({ dim: f.dim, crop: f.crop, cells: f.cells.length, harvests: f.harvests })),
-    notes: memory.notesFor({ dimension: state.dim, n: 8 }).filter(inWorld),
-    goals: memory.recentGoals(100).filter((g) => inWorld(g) && (!g.dimension || g.dimension === state.dim)).slice(-8),
+    notes: memory.notesFor({ dimension: state.dim, n: 8 }).filter(inWorld)
+      .map((n) => ({ ...n, text: recallText(n.text, memory, n.dimension, n.kind === 'fact' ? n.ts : 0) })),
+    goals: memory.recentGoals(100).filter((g) => inWorld(g) && (!g.dimension || g.dimension === state.dim)).slice(-8)
+      .map(({ goal, summary, plan: _plan, ...g }) => ({ ...g, goal: recallText(goal, memory, g.dimension, g.ts), summary: recallText(summary, memory, g.dimension, g.ts) })),
   };
 }

@@ -1,5 +1,14 @@
 import type { Vec3Like } from '../adapter/types.ts';
 
+const CONTAINER_LABELS = new Set(['箱子', '陷阱箱', '木桶', '潜影盒', 'chest', 'trapped_chest', 'barrel', 'shulker_box']);
+/** Recall projection policy only; adopting it does not rewrite or revalidate saved observations. */
+export const CHEST_LOCATION_MODEL_VERSION = 1;
+/** Static local containers; ender chests share inventory across locations and are not independent stores. */
+export const isContainerLandmark = (label: string) => {
+  const name = label.replace(/^我的/, '').match(/（([^（）]+)）$/)?.[1] ?? label.replace(/^我的/, '');
+  return CONTAINER_LABELS.has(name) || /^[a-z_]+_shulker_box$/.test(name);
+};
+
 /**
  * 箱子记忆：像人一样记“我往这个箱子放过什么”，而不是“里面现在有什么”。
  *
@@ -51,6 +60,7 @@ export interface ChestRecall {
   qty?: ChestQty;
   confidence: Confidence;
   score: number;
+  observedAt: number;
 }
 
 export interface ChestUse {
@@ -187,7 +197,7 @@ export function recall(chests: ChestRecord[], accept: (name: string) => boolean,
       const score = traceScore(t, chest, clock);
       const confidence = confidenceOf(score);
       if (!confidence) continue;
-      if (!best || score > best.score) best = { chest, item: t.item, kind: t.kind, qty: t.qty, confidence, score };
+      if (!best || score > best.score) best = { chest, item: t.item, kind: t.kind, qty: t.qty, confidence, score, observedAt: t.ts };
     }
     if (best) out.push(best);
   }
@@ -196,14 +206,35 @@ export function recall(chests: ChestRecord[], accept: (name: string) => boolean,
 
 const at = (p: Vec3Like) => `(${p.x},${p.y},${p.z})`;
 
-/** 箱子怎么称呼：起过名就用名 */
-export const chestName = (c: ChestRecord) => (c.note ? `${c.note}的箱子 ${at(c.pos)}` : `${at(c.pos)} 的箱子`);
+/** 近期工作记忆保留位置；更久只记区域，中心是范围标记，不能作为箱子的精确交互坐标。 */
+export function chestLocation(c: Pick<ChestRecord, 'pos' | 'ts'>, clock: Pick<Clock, 'now'> = {}) {
+  const precise = Math.max(0, (clock.now ?? Date.now()) - c.ts) <= 120_000;
+  const pos = precise ? { ...c.pos } : { x: Math.floor(c.pos.x / 32) * 32 + 16, y: Math.floor(c.pos.y / 16) * 16 + 8, z: Math.floor(c.pos.z / 32) * 32 + 16 };
+  const radius = precise ? 0 : 24;
+  return { pos, radius, precise, observedAt: c.ts, text: precise ? at(pos) : `中心 ${at(pos)}、半径约 ${radius} 格的区域（范围中心，不是箱子坐标）` };
+}
+
+/** 名称只能带当前记忆精度允许的位置。 */
+export const chestName = (c: ChestRecord, clock?: Pick<Clock, 'now'>) => `${c.note ? `${c.note}的箱子` : '箱子'} ${chestLocation(c, clock).text}`;
+
+function recalledTraces(c: ChestRecord, clock: Clock, max: number) {
+  return c.traces.filter((trace) => trace.kind !== 'absent').map((trace) => ({ trace, confidence: confidenceOf(traceScore(trace, c, clock)) }))
+    .filter((entry) => entry.confidence !== null).sort((a, b) => traceScore(b.trace, c, clock) - traceScore(a.trace, c, clock)).slice(0, max);
+}
+
+/** A newly used box must not sharpen the location of an older, independently fading item impression. */
+export function chestRecollectionLocation(c: ChestRecord, clock: Clock, max = 4) {
+  const traces = recalledTraces(c, clock, max);
+  return chestLocation({ pos: c.pos, ts: Math.min(c.ts, ...traces.map((entry) => entry.trace.ts)) }, clock);
+}
 
 /** 一条回忆说成人话 */
-export function describeRecall(r: ChestRecall, dist?: number): string {
-  const where = `${chestName(r.chest)}${dist != null ? `（${dist} 格外）` : ''}`;
+export function describeRecall(r: ChestRecall, dist?: number, clock?: Pick<Clock, 'now'>): string {
+  const location = chestLocation({ pos: r.chest.pos, ts: r.observedAt }, clock);
+  const where = `${chestName({ ...r.chest, ts: r.observedAt }, clock)}${location.precise && dist != null ? `（${dist} 格外）` : ''}`;
   const q = qtyWord(r.qty);
   const some = q ? `${q} ` : '';
+  if (!location.precise) return `记得${location.text}的箱子里${r.kind === 'put' ? '放过' : r.kind === 'took' ? '拿过' : '见过'}${some}${r.item}，不确定是哪只箱子或还剩多少`;
   if (r.confidence === 'sure') {
     if (r.kind === 'put') return `记得往 ${where} 放过${some}${r.item}`;
     if (r.kind === 'took') return `在 ${where} 拿过 ${r.item}，应该还有${q ? ` ${q}` : ''}`;
@@ -215,11 +246,11 @@ export function describeRecall(r: ChestRecall, dist?: number): string {
 
 /** 一个箱子现在记得的样子：“放矿的箱子 (x,y,z)：放过不少 raw_iron、几个 coal；好像还有 cobblestone” */
 export function describeChest(c: ChestRecord, clock: Clock, max = 4): string {
-  const scored = c.traces.filter((t) => t.kind !== 'absent').map((t) => ({ t, s: traceScore(t, c, clock), conf: confidenceOf(traceScore(t, c, clock)) })).filter((x) => x.conf).sort((a, b) => b.s - a.s);
-  const sure = scored.filter((x) => x.conf !== 'vague').slice(0, max).map((x) => `${x.t.kind === 'took' ? '拿过' : x.t.kind === 'put' ? '放过' : '有'}${qtyWord(x.t.qty) ? `${qtyWord(x.t.qty)} ` : ''}${x.t.item}`);
-  const vague = scored.filter((x) => x.conf === 'vague').slice(0, Math.max(0, max - sure.length)).map((x) => x.t.item);
+  const traces = recalledTraces(c, clock, max), location = chestRecollectionLocation(c, clock, max);
+  const sure = traces.filter((entry) => entry.confidence !== 'vague').map(({ trace }) => `${trace.kind === 'took' ? '拿过' : trace.kind === 'put' ? '放过' : '有'}${qtyWord(trace.qty) ? `${qtyWord(trace.qty)} ` : ''}${trace.item}`);
+  const vague = traces.filter((entry) => entry.confidence === 'vague').map(({ trace }) => trace.item);
   const body = [sure.join('、'), vague.length ? `好像还有 ${vague.join('、')}` : ''].filter(Boolean).join('；');
-  return `${chestName(c)}：${body || (c.uses ? '用过，里面有什么记不清了' : '没打开过')}`;
+  return `${chestName({ ...c, ts: location.observedAt }, clock)}：${body || (c.uses ? '用过，里面有什么记不清了' : '没打开过')}${location.precise ? '' : '；历史区域印象，具体箱子需重新看见'}`;
 }
 
 /** 所有箱子里记得的东西合起来（给“家里大概有什么”用），同一样东西取最清楚的那条 */

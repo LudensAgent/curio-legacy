@@ -23,6 +23,9 @@ import type { HuntTally } from './ledger.ts';
 import { FOOD_ANIMAL_NAMES } from '../skills/movement.ts';
 import { config } from '../config.ts';
 import { creatureSpotsByKind, creatureSpotsNear } from '../memory/creature-spots.ts';
+import { chestLocation, isContainerLandmark } from '../memory/chest-memory.ts';
+import { noteGoneSpots, recallText } from '../memory/recollection.ts';
+export { noteGoneSpots } from '../memory/recollection.ts';
 
 export interface MindContext {
   tier: 'glance' | 'deliberate';
@@ -466,7 +469,9 @@ function surroundingsOf(p: Percept, tier: 'glance' | 'deliberate') {
     hostile: p.nearby.hostile.slice(0, 5), passive: p.nearby.passive.slice(0, 6), players: p.nearby.players,
     see_now: p.nearby.resources.filter((r) => r.seen === 'now').slice(0, n).map((r) => `${r.block}×${r.count} ${r.dir ?? ''}${r.nearest}格`),
     ...(v ? { facing: v.facing, view: v.view, ...((v as any).visible_drops?.length ? { drops: (v as any).visible_drops.slice(0, 4) } : {}),
-      ...(v.nearest_land ? { nearest_land: v.nearest_land } : {}) } : {}),
+      ...(v.nearest_land ? { nearest_land: v.nearest_land } : {}),
+      ...(v.recent_sightings?.length ? { recent_sightings: { dimension: p.self.dim, source: 'past_visual_observation',
+        currently_visible: false, sightings: v.recent_sightings.slice(0, tier === 'glance' ? 3 : 6) } } : {}) } : {}),
     ...(tier === 'deliberate' && p.curiosities.length ? { curious_about: p.curiosities.slice(0, 5).map((c) => `${c.what} ${c.dir}${c.dist}格`) } : {}),
     ...(p.death_recovery ? { my_dropped_items: {
       dir: p.death_recovery.dir, dist: p.death_recovery.dist, lost: p.death_recovery.lost,
@@ -483,8 +488,9 @@ function worldKnowledge(ctx: MindContext) {
   // 自己的设施（箱子、工作站、床、挖过的通道）在 my_facilities 里单独说，这里只列别的地点
   // 矿点按矿种单独列（ore_spots），不和死亡点、基地挤这 8 个位置
   const places = m.landmarks().filter((l) => l.dim === p.self.dim && l.worldId === s.worldId && !FACILITY_LABELS.has(l.label) && !(l.kind === 'resource' && isResourceBlock(l.label)) && l.kind !== 'herd')
+    .map((l) => isContainerLandmark(l.label) ? { ...l, ...chestLocation(l) } : { ...l, radius: 0, precise: true })
     .map((l) => ({ l, d: Math.round(Math.hypot(l.pos.x - here.x, l.pos.z - here.z)) })).sort((a, b) => a.d - b.d).slice(0, 8)
-    .map(({ l, d }) => `${l.label}[${l.id}] (${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}) ${d}格`);
+    .map(({ l, d }) => `${l.label}[${l.id}] (${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}) ${l.precise ? `${d}格` : `是区域中心，半径约${l.radius}格；具体位置待重新看见`}`);
   const facilities = ctx.tier === 'deliberate' ? myFacilities(m, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['chest', 'station', 'passage']).slice(0, 8).map((f) => f.text) : [];
   const danger = m.hazards(p.self.dim).map((h) => ({ h, d: Math.round(Math.hypot(h.pos.x - here.x, h.pos.z - here.z)) })).filter((e) => e.d < 96).slice(0, 4)
     .map(({ h, d }) => `${h.kind} @(${h.pos.x},${h.pos.y},${h.pos.z}) ${d}格，出过 ${h.count} 次事`);
@@ -514,25 +520,11 @@ function worldKnowledge(ctx: MindContext) {
   };
 }
 
-function recordLine(r: ActivityRecord) {
+function recordLine(r: ActivityRecord, memory: WorldMemory, dimension: string) {
   const g = Object.entries(r.gained).slice(0, 6).map(([k, v]) => `${k}+${v}`).join(' ');
   const l = Object.entries(r.lost).slice(0, 4).map(([k, v]) => `${k}-${v}`).join(' ');
-  return { what: r.what, outcome: r.outcome, took_real_s: r.durationSec, ...(g ? { gained: g } : {}), ...(l ? { used: l } : {}), summary: r.summary,
-    ...(r.expect ? { i_expected: r.expect } : {}), ...(r.hypothesis ? { hypothesis: r.hypothesis } : {}) };
-}
-
-/**
- * 窍门、议程、回想、念头里写着的坐标，如果那里的东西已经亲眼看到没了（岩浆被填、矿被挖），就在坐标后面注一句。
- * 文字记忆不会自己更新，不注明它会一直照着一处早就不存在的东西去找
- */
-export function noteGoneSpots(text: string, memory: Pick<WorldMemory, 'goneNear'> | undefined, dim: string): string {
-  if (!memory?.goneNear) return text;
-  return text.replace(/\(?(-?\d{1,7}),\s*(-?\d{1,3}),\s*(-?\d{1,7})\)?/g, (m, x, y, z) => {
-    const gone = memory.goneNear(dim, { x: +x, y: +y, z: +z }, 3);
-    if (!gone.length) return m;
-    const g = gone[0];
-    return `${m}〔亲眼看过：这里的 ${g.label} 已经没了，现在是 ${g.now}〕`;
-  });
+  return { what: recallText(r.what, memory, dimension, r.at), outcome: r.outcome, took_real_s: r.durationSec, ...(g ? { gained: g } : {}), ...(l ? { used: l } : {}), summary: recallText(r.summary, memory, dimension, r.at),
+    ...(r.expect ? { i_expected: recallText(r.expect, memory, dimension, r.at) } : {}), ...(r.hypothesis ? { hypothesis: recallText(r.hypothesis, memory, dimension, 0) } : {}) };
 }
 
 export function buildMindMessages(ctx: MindContext): ChatMessage[] {
@@ -547,9 +539,9 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       traits: self.data.traits, feeling: moodWords(self.mood), ...(self.tastes().length ? { likes: self.tastes() } : {}),
       ...(!glance && (image.goodAt.length || image.struggleWith.length) ? { self_image: image } : {}),
       agenda: self.agenda().map((a) => ({ id: a.id, text: a.text, kind: a.kind, horizon: a.horizon, ...(a.status === 'active' ? { focus: true } : {}), ...(a.attempts ? { tried: a.attempts } : {}) })),
-      know_how: self.relevantKnowHow(context, ctx.activity?.kind, glance ? 3 : 6).map((k) => ({ id: k.id, text: cleanLesson(k.text), wins: k.wins, losses: k.losses, unverified: k.unverified === true })),
-      ...(!glance && self.experiments().length ? { experiments: self.experiments().map((e) => ({ hypothesis: e.hypothesis, status: e.status, ...(e.evidence ? { evidence: e.evidence } : {}) })) } : {}),
-      ...(!glance && self.diary().length ? { diary: self.diary(5).map((d) => d.text) } : {}),
+      know_how: self.relevantKnowHow(context, ctx.activity?.kind, glance ? 3 : 6).map((k) => ({ id: k.id, text: recallText(cleanLesson(k.text), ctx.memory, undefined, k.source === 'observed' ? k.createdAt : 0), wins: k.wins, losses: k.losses, unverified: k.unverified === true })),
+      ...(!glance && self.experiments().length ? { experiments: self.experiments().map((e) => ({ hypothesis: recallText(e.hypothesis, ctx.memory, undefined, 0), status: e.status, ...(e.evidence ? { evidence: recallText(e.evidence, ctx.memory, undefined, e.at) } : {}) })) } : {}),
+      ...(!glance && self.diary().length ? { diary: self.diary(5).map((d) => recallText(d.text, ctx.memory, undefined, 0)) } : {}),
       // 学会的东西只列一张表：技能书里会动手的技能（use_skill 调用）+ 从经历里验证过的做法（直接写成一步）
       ...(!glance && (ctx.learnedSkills?.length || ctx.mySkills.length) ? { my_skills: [...(ctx.learnedSkills ?? []).slice(0, 12),
         ...ctx.mySkills.slice(0, 6).map((m) => `${m.name}［${m.status === 'verified' ? '验证过的做法' : m.status === 'macro' ? '组合' : '试验中的做法'}，直接写成一步 {"skill":"${m.name}"}］：${m.description.slice(0, 50)}`)] } : {}),
@@ -562,9 +554,9 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       ...(ctx.openedSkill ? { skill_opened: { name: ctx.openedSkill.name, text: ctx.openedSkill.body } } : {}),
     }] as [string, Record<string, unknown>]] : []),
     ['最近', {
-      ...(!glance ? { recent_activities: self.history(5).map(recordLine) } : {}),
-      ...(ctx.lastRecord ? { last_activity: recordLine(ctx.lastRecord) } : {}),
-      stream: self.recentThoughts(glance ? 4 : 8).map((t) => `${t.kind === 'monologue' ? '' : `[${t.kind}] `}${t.text}`),
+      ...(!glance ? { recent_activities: self.history(5).map((r) => recordLine(r, ctx.memory, s.dim)) } : {}),
+      ...(ctx.lastRecord ? { last_activity: recordLine(ctx.lastRecord, ctx.memory, s.dim) } : {}),
+      stream: self.recentThoughts(glance ? 4 : 8).map((t) => `${t.kind === 'monologue' ? '' : `[${t.kind}] `}${recallText(t.text, ctx.memory, undefined, t.kind === 'outcome' || t.kind === 'notice' ? t.at : 0)}`),
     }],
     ['手上的活', {
       current_activity: ctx.activity ? describeActivity(ctx.activity, s, p) : null,
@@ -608,8 +600,9 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
  * 休息/睡前回想：像人一样把这段时间的零碎经验整理成少数几条靠谱的窍门。
  * 只依据实际成败次数和最近的真实结果，不发明新的事实。
  */
-export function buildReflectionMessages(self: SelfModel, persona: string, mySkills: string[] = [], strategy: string[] = []): ChatMessage[] {
+export function buildReflectionMessages(self: SelfModel, persona: string, mySkills: string[] = [], strategy: string[] = [], memory?: WorldMemory): ChatMessage[] {
   const now = Date.now();
+  const historical = (text: string, observedAt = 0) => memory ? recallText(text, memory, undefined, observedAt, now) : text;
   const system = `${persona}
 
 你在 Minecraft 里歇下来了（休息、睡觉或者告一段落），回想一下这段时间：哪些办法真的好用，哪些想法被事实推翻了，哪些说的是同一回事。像人一样把零碎的经验整理成少数几条靠谱的窍门。
@@ -629,13 +622,13 @@ export function buildReflectionMessages(self: SelfModel, persona: string, mySkil
 只输出一个 JSON 对象：
 {"merge":[{"ids":["k_…","k_…"],"text":"…"}],"rewrite":[{"id":"k_…","text":"…"}],"drop":["k_…"],"add":["…"],"agenda_drop":["a_…"],"agenda_add":[{"text":"…","kind":"idea"}],"skill":{"name":"…","description":"…","body":"…"},"diary":"…","monologue":"…"}`;
   const payload = {
-    know_how: self.data.knowHow.map((k) => ({ id: k.id, text: cleanLesson(k.text), wins: k.wins, losses: k.losses, ...(k.unverified ? { unverified: true } : {}),
+    know_how: self.data.knowHow.map((k) => ({ id: k.id, text: historical(cleanLesson(k.text), k.source === 'observed' ? k.createdAt : 0), wins: k.wins, losses: k.losses, ...(k.unverified ? { unverified: true } : {}),
       age_min: Math.round((now - k.createdAt) / 60000) })),
-    insights: self.insights().map((i) => `${i.text}${i.outcome ? `（当时结果：${i.outcome}）` : ''}`),
-    recent: self.history(20).map((r) => `${r.what} → ${r.outcome}${Object.keys(r.gained).length ? `，得到 ${Object.entries(r.gained).map(([k, v]) => `${k}×${v}`).join(' ')}` : ''}${r.outcome !== 'done' ? `：${r.summary.slice(0, 60)}` : ''}`),
-    experiments: self.experiments(6).map((e) => `${e.hypothesis} → ${e.status}${e.evidence ? `（${e.evidence.slice(0, 80)}）` : ''}`),
+    insights: self.insights().map((i) => historical(`${i.text}${i.outcome ? `（当时结果：${i.outcome}）` : ''}`)),
+    recent: self.history(20).map((r) => historical(`${r.what} → ${r.outcome}${Object.keys(r.gained).length ? `，得到 ${Object.entries(r.gained).map(([k, v]) => `${k}×${v}`).join(' ')}` : ''}${r.outcome !== 'done' ? `：${r.summary.slice(0, 60)}` : ''}`, r.at)),
+    experiments: self.experiments(6).map((e) => `${historical(e.hypothesis)} → ${e.status}${e.evidence ? `（${historical(e.evidence.slice(0, 80), e.at)}）` : ''}`),
     agenda: self.agenda().map((a) => ({ id: a.id, text: a.text, kind: a.kind, tried: a.attempts })),
-    diary: self.diary(5).map((d) => d.text),
+    diary: self.diary(5).map((d) => historical(d.text)),
     feeling: moodWords(self.mood),
     ...(mySkills.length ? { my_skills: mySkills } : {}),
     ...(strategy.length ? { strategy } : {}),

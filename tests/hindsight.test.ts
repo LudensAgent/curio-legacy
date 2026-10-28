@@ -120,6 +120,29 @@ test('Hindsight recall preserves inference provenance and document source', asyn
   assert.equal(noMetadata.kind, 'inference');
 });
 
+test('Hindsight mention time does not become an observation time', async t => {
+  const mentionedAt = '2026-10-28T08:00:00.000Z', observedAt = '2026-10-23T12:00:00.000Z';
+  const backend = await fixture(t, (_request, response) => json(response, { results: [
+    { id: 'consolidated', text: 'There was a chest', tags: scope, type: 'observation', mentioned_at: mentionedAt },
+    { id: 'experienced', text: 'I opened a chest', tags: scope, type: 'experience', mentioned_at: mentionedAt,
+      metadata: { source: 'skill:use_gui', kind: 'experience', observed_at: observedAt } },
+  ] }));
+  const [inference, experience] = await backend.recall({ worldId: episode.worldId, dimension: episode.dimension, query: 'chest' }, activeSignal());
+  assert.equal(inference.kind, 'inference');
+  assert.equal(inference.source, 'hindsight:consolidation');
+  assert.equal(inference.observedAt, undefined);
+  assert.equal(inference.mentionedAt, mentionedAt);
+  assert.equal(experience.kind, 'experience');
+  assert.equal(experience.source, 'skill:use_gui');
+  assert.equal(experience.observedAt, observedAt);
+  assert.equal(experience.mentionedAt, mentionedAt);
+  [inference, experience].forEach((entry) => {
+    assert.equal(entry.worldId, episode.worldId);
+    assert.equal(entry.dimension, episode.dimension);
+    assert.equal(entry.historical, true);
+  });
+});
+
 test('Hindsight errors fail closed without echoing server bodies, and incomplete retain is rejected', async t => {
   let status = 500;
   const backend = await fixture(t, (_request, response) => json(response,

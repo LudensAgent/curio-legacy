@@ -981,7 +981,7 @@ function render(s) {
   $('memoryDimensions').innerHTML = (mem.dimensions || []).map((d) => `<div class="memory-dimension${d.dim === mem.dimension ? ' current' : ''}"${d.dim === mem.dimension ? ' aria-current="location"' : ''}><b>${esc(dimensionName(d.dim))}</b>${d.dim === mem.dimension ? ' <span class="badge good">Agent 在此</span>' : ''}<div class="counts">地点 ${d.landmarks} · 资源 ${d.resources} · 生物 ${d.creatures} · 箱子 ${d.chests}<br>通道 ${d.passages} · 设施 ${d.facilities} · 危险 ${d.hazards}</div></div>`).join('');
   $('seen').textContent = `世界累计 · 区块 ${mem.visitedChunks} · 方块 ${mem.seen.blocks} · 生物 ${mem.seen.entities} · 群系 ${mem.seen.biomes}`;
   $('goals').innerHTML = list(mem.goals.slice().reverse(), (g) => `<li title="${esc(g.summary)}"><span class="badge ${g.status === 'succeeded' ? 'good' : g.status === 'failed' ? 'bad' : ''}">${g.status === 'succeeded' ? '成' : g.status === 'failed' ? '卡住' : '停'}</span> ${esc(g.goal)} <span class="badge">${esc(g.dimension ? dimensionName(g.dimension) : '未标注维度')}</span><div class="dim" style="font-size:11px">${esc(g.summary)}</div></li>`);
-  $('lms').innerHTML = list(mem.landmarks.slice().reverse(), (l) => `<li>${esc(l.label)} <span class="k">${l.kind} (${l.pos.x}, ${l.pos.y}, ${l.pos.z})</span></li>`);
+  $('lms').innerHTML = list(mem.landmarks.slice().reverse(), (l) => `<li>${esc(l.label)} <span class="k">${l.kind} (${l.pos.x}, ${l.pos.y}, ${l.pos.z})${l.radius ? ` 区域中心 · 半径约 ${l.radius} 格` : ''}</span></li>`);
   $('creatureCount').textContent = `${(mem.creatures || []).length} 处`;
   $('creatures').innerHTML = list(mem.creatures, (c) => `<li><b>${esc(c.label)}</b> <span class="k">(${c.pos.x}, ${c.pos.y}, ${c.pos.z}) · ${tmAgo(c.ts)}见过${c.count ? ` ${c.count} 只` : ''}</span>${c.detail ? `<div class="dim" style="font-size:11px">${esc(c.detail)}</div>` : ''}</li>`, '当前维度还没有记住的生物出没点');
   $('chestCount').textContent = `${(mem.chests || []).length} 个`;
@@ -1079,6 +1079,11 @@ function tmDraw() {
   for (let x = Math.ceil(x0 / step) * step; x <= x1; x += step) { const px = Math.round(X(x)) + 0.5; g.moveTo(px, 0); g.lineTo(px, H); }
   for (let z = Math.ceil(z0 / step) * step; z <= z1; z += step) { const pz = Math.round(Z(z)) + 0.5; g.moveTo(0, pz); g.lineTo(W, pz); }
   g.stroke(); g.globalAlpha = 1;
+  // 容器的历史范围不能画成一格精确方块。
+  for (const area of [...(tmap.layers.facility ? fac : []), ...(tmap.layers.landmark ? lms : [])].filter((entry) => entry.radius > 0)) {
+    g.save(); g.strokeStyle = v('--info'); g.globalAlpha = 0.5; g.lineWidth = 1.5; g.setLineDash([5, 4]);
+    g.beginPath(); g.arc(X(area.x) + s / 2, Z(area.z) + s / 2, area.radius * s, 0, Math.PI * 2); g.stroke(); g.restore();
+  }
   const pad = s >= 4 ? 0.5 : 0, cs = Math.max(2, s - pad * 2); // 缩得很小时也至少 2px，免得看不见
   // 通道格：取这格里最深的高度上色；同一格上下跨 3 格以上（竖井/台阶）画个深色内框
   if (tmap.layers.passage) for (const c of cells.values()) {
@@ -1110,6 +1115,7 @@ function tmDraw() {
   if (tmap.layers.facility) for (const f of fac) {
     if (f.x < x0 || f.x > x1 || f.z < z0 || f.z > z1) continue;
     const st = tmFacStyle(f), m = Math.max(4, s), px = X(f.x) + s / 2 - m / 2, pz = Z(f.z) + s / 2 - m / 2;
+    if (f.radius) { g.fillStyle = st.fill; g.font = '12px ' + v('--mono'); g.textAlign = 'center'; g.fillText('?', px + m / 2, pz + m); continue; }
     g.fillStyle = st.fill; g.fillRect(px, pz, m, m);
     g.strokeStyle = st.edge; g.lineWidth = Math.max(1, m / 8); g.strokeRect(px + g.lineWidth / 2, pz + g.lineWidth / 2, m - g.lineWidth, m - g.lineWidth);
     if (s >= 14) { g.fillStyle = '#fff'; g.font = `600 ${Math.round(s * 0.55)}px system-ui, "Microsoft YaHei", sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(st.ch, px + m / 2, pz + m / 2 + 1); }
@@ -1148,7 +1154,7 @@ function tmTip() {
     if (c.entrance) lines.push(`入口 (${c.entrance.x},${c.entrance.y},${c.entrance.z})，能走到 y${c.entrance.deepestY}`);
   }
   if (tmap.layers.facility) for (const f of d.fac) if (f.x === h.x && f.z === h.z) lines.push(f.text);
-  if (tmap.layers.landmark) for (const l of d.lms) if (l.x === h.x && l.z === h.z) lines.push(`${l.label} · ${l.kind} (${l.pos.x},${l.pos.y},${l.pos.z})`);
+  if (tmap.layers.landmark) for (const l of d.lms) if (l.x === h.x && l.z === h.z) lines.push(`${l.label} · ${l.kind} (${l.pos.x},${l.pos.y},${l.pos.z})${l.radius ? ` 区域中心，半径约 ${l.radius} 格，具体位置未知` : ''}`);
   if (tmap.layers.resource) for (const r of d.res) if (r.x === h.x && r.z === h.z) lines.push(`${tmRes(r.type)[1]} ${r.label} (${r.pos.x},${r.pos.y},${r.pos.z}) · ${tmAgo(r.ts)}看到`);
   tip.hidden = false;
   tip.innerHTML = lines.map(esc).join('<br>');

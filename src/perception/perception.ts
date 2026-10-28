@@ -1,7 +1,7 @@
 import { durationText, realSecondsToTicks, TICKS_PER_GAME_HOUR } from './time.ts';
 export { durationText, realSecondsToTicks, TICKS_PER_GAME_HOUR } from './time.ts';
 import { isSoftBlock, surroundings, type ExitOptions, type Surroundings } from './surroundings.ts';
-import { qtyWord, rememberedStock } from '../memory/chest-memory.ts';
+import { isContainerLandmark, qtyWord, rememberedStock } from '../memory/chest-memory.ts';
 import { facingOfYaw, localMap } from './local.ts';
 import type { GameAdapter, InvItem, Vec3Like } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
@@ -12,7 +12,6 @@ import { interactiveName, NOTABLE, type Vision, type VisionSummary } from './vis
 import { computeDrives, type Drive, type Stock } from '../brain/drives.ts';
 import { PassageTracker } from '../memory/passages.ts';
 import { isResourceBlock, oreKind } from '../memory/ore-spots.ts';
-import { HERD_SKIP } from '../memory/creature-spots.ts';
 import { EffectWatch } from '../brain/effects.ts';
 import { efficiencyInsights, type EfficiencyInsight } from '../brain/efficiency.ts';
 import { learnCandidates, reflectionDue } from '../brain/habits.ts';
@@ -396,56 +395,66 @@ export class Perception {
     }
   }
 
-  private herdAt = 0;
-  private herdMiss = new Map<string, number>();
   /**
-   * 不主动攻击的生物（被动和中立的：羊、牛、狼、村民……）在哪一带出没：亲眼看见就记下（同一种挨在一起的算一群，记中心和只数）；
-   * 走到记得的出没点跟前、好几秒都没看见这种生物，就忘掉那一处（它们走开了）。
+   * 同种生物按实际所见的位置分群；一次短暂目击也留下历史线索。
+   * 没看见不证明离开或消失，旧点只由已有的历史时间规则控制召回。
    */
   private noteHerds(s: { dim: string; pos: Vec3Like }, seen: { name: string; kind: string; pos: Vec3Like; traits?: string; how?: string }[]) {
-    const now = Date.now();
-    if (now - this.herdAt < 5000) return;
-    this.herdAt = now;
-    const groups = new Map<string, { pos: Vec3Like; traits?: string }[]>();
-    for (const e of seen) {
-      if (e.kind !== 'passive' || e.how === 'heard' || HERD_SKIP.has(e.name)) continue;
-      (groups.get(e.name) ?? groups.set(e.name, []).get(e.name)!).push(e);
-    }
-    for (const [name, list] of groups) {
+    const groups = seen.filter((e) => e.kind === 'passive' && e.how !== 'heard')
+      .reduce<{ name: string; list: typeof seen }[]>((groups, e) => {
+        const joined = groups.filter((g) => g.name === e.name && g.list.some((other) => Math.hypot(other.pos.x - e.pos.x, other.pos.y - e.pos.y, other.pos.z - e.pos.z) < 32));
+        return [...groups.filter((g) => !joined.includes(g)), { name: e.name, list: [e, ...joined.flatMap((g) => g.list)] }];
+      }, []);
+    for (const { name, list } of groups) {
       const c = { x: list.reduce((a, e) => a + e.pos.x, 0) / list.length, y: list.reduce((a, e) => a + e.pos.y, 0) / list.length, z: list.reduce((a, e) => a + e.pos.z, 0) / list.length };
       const tally = new Map<string, number>();
       for (const e of list) for (const t of (e.traits ?? '').split('、').filter(Boolean)) tally.set(t, (tally.get(t) ?? 0) + 1);
       const detail = [...tally].map(([t, n]) => `${t}×${n}`).join('、').slice(0, 60);
       this.memory.noteHerd(name, s.dim, c, list.length, detail || undefined);
     }
-    for (const l of this.memory.landmarks()) {
-      if (l.kind !== 'herd' || l.dim !== s.dim) continue;
-      const close = Math.hypot(l.pos.x - s.pos.x, l.pos.y - s.pos.y, l.pos.z - s.pos.z) <= 10;
-      if (!close || groups.has(l.label)) { this.herdMiss.delete(l.id); continue; }
-      const since = this.herdMiss.get(l.id) ?? now;
-      this.herdMiss.set(l.id, since);
-      if (now - since >= 8000) { this.memory.removeLandmark(l.id); this.herdMiss.delete(l.id); }
-    }
   }
 
   private vanishedCheckAt = 0;
-  /** 走到记得的矿点跟前，亲眼看见那一格已经不是矿了：忘掉这一处（只信看见的，不透视） */
+  /** Only fresh sight can contradict a remembered resource, hazard or functional block. */
   private forgetVanishedOre(s: { dim: string; pos: Vec3Like }) {
     if (Date.now() - this.vanishedCheckAt < 2000) return;
     this.vanishedCheckAt = Date.now();
     // 记着的矿点、岩浆这类危险点：走近了、亲眼看那一格（视线真的够得着）已经不是它了——
     // 岩浆被水浇成了黑曜石、被舀走、矿被挖了——就忘掉，免得一直惦记一处早就没了的东西
-    const watched = this.memory.landmarks().filter((l) => l.dim === s.dim && (l.kind === 'resource' ? isResourceBlock(l.label) : l.kind === 'danger' && DANGER.has(l.label))
-      && Math.hypot(l.pos.x - s.pos.x, l.pos.y - s.pos.y, l.pos.z - s.pos.z) <= 12);
-    if (!watched.length) return;
+    const watched = this.memory.landmarks().filter((l) => l.dim === s.dim && (l.kind === 'resource' ? isResourceBlock(l.label)
+      : l.kind === 'danger' ? DANGER.has(l.label) : isContainerLandmark(l.label))
+      && Math.hypot(l.pos.x - s.pos.x, l.pos.y - s.pos.y, l.pos.z - s.pos.z) <= this.vision.effectiveRange());
+    const boxes = this.memory.chests(s.dim).filter((c) => !watched.some((l) => dist3(l.pos, c.pos) < .1)
+      && dist3(c.pos, s.pos) <= this.vision.effectiveRange());
+    if (!watched.length && !boxes.length) return;
     // 先取刚扫到的表面，再专门看一眼这些格子（视线够得着才算看见）
     const glimpsed = new Map(watched.map((l) => [l.id, this.vision.seenAt(l.pos)]));
-    const seen = new Map(this.vision.observeBlocks(watched.slice(0, 32).map((l) => l.pos)).map((o) => [`${o.pos.x},${o.pos.y},${o.pos.z}`, o.name]));
+    const positions = [...watched, ...boxes].map((l) => l.pos);
+    const seen = new Map(Array.from({ length: Math.ceil(positions.length / 32) }, (_, i) => this.vision.observeBlocks(positions.slice(i * 32, (i + 1) * 32))).flat()
+      .map((o) => [`${o.pos.x},${o.pos.y},${o.pos.z}`, o]));
     for (const l of watched) {
-      const now = seen.get(`${l.pos.x},${l.pos.y},${l.pos.z}`) ?? glimpsed.get(l.id);
-      if (now && oreKind(now) !== oreKind(l.label) && !(l.label === 'lava' && /lava/.test(now))) {
+      const observed = seen.get(`${l.pos.x},${l.pos.y},${l.pos.z}`);
+      const now = observed?.name ?? glimpsed.get(l.id);
+      if (isContainerLandmark(l.label)) {
+        if (now && !isContainerLandmark(now)) {
+          this.memory.removeLandmark(l.id);
+          this.memory.forgetChest(s.dim, l.pos);
+          this.memory.markGone(l.label, s.dim, l.pos, now);
+        }
+        continue;
+      }
+      const flowing = l.kind === 'resource' && l.label === 'lava' && observed?.name === 'lava'
+        && observed.properties.level !== undefined && Number(observed.properties.level) !== 0;
+      if (flowing || now && oreKind(now) !== oreKind(l.label) && !(l.label === 'lava' && /lava/.test(now))) {
         this.memory.removeLandmark(l.id);
-        this.memory.markGone(l.label, l.dim, l.pos, now);
+        this.memory.markGone(l.label, l.dim, l.pos, flowing ? 'lava（流动，非源方块）' : now!);
+      }
+    }
+    for (const c of boxes) {
+      const now = seen.get(`${c.pos.x},${c.pos.y},${c.pos.z}`)?.name;
+      if (now && !isContainerLandmark(now)) {
+        this.memory.forgetChest(s.dim, c.pos);
+        this.memory.markGone('箱子', s.dim, c.pos, now);
       }
     }
   }
@@ -485,14 +494,19 @@ export class Perception {
         // 岩浆既危险又是资源（浇水成黑曜石、当燃料）：两样都记
         if (DANGER.has(b.name)) this.memory.addLandmark('danger', b.name, s.dim, b.pos);
         // 岩浆只把源头记成资源（浇水能变黑曜石、能舀）；流动的岩浆只算危险
-        const flowing = b.name === 'lava' && Number(this.adapter.blockStateAt?.(b.pos)?.properties?.level ?? 0) !== 0;
-        if (isResourceBlock(b.name) && !flowing) this.memory.addLandmark('resource', b.name, s.dim, b.pos);
+        const level = b.name === 'lava' ? this.adapter.blockStateAt?.(b.pos)?.properties.level : undefined;
+        if (b.name === 'lava' && level !== undefined && Number(level) !== 0) {
+          for (const l of this.memory.landmarks().filter((l) => l.kind === 'resource' && l.label === 'lava' && l.dim === s.dim
+            && l.pos.x === b.pos.x && l.pos.y === b.pos.y && l.pos.z === b.pos.z)) this.memory.removeLandmark(l.id);
+        }
+        if (isResourceBlock(b.name) && (b.name !== 'lava' || level !== undefined && Number(level) === 0)) this.memory.addLandmark('resource', b.name, s.dim, b.pos);
         if (DANGER.has(b.name) || isResourceBlock(b.name)) continue;
         if (interactiveName(b.name)) {
           // 看见的功能方块记成地标（自己放下的已记为“我的X”，附近有就不重复记）
           const zh = interactiveName(b.name)!;
-          const mine = this.memory.landmarks().some((l) => l.label === `我的${zh}` && l.dim === s.dim && Math.hypot(l.pos.x - b.pos.x, l.pos.y - b.pos.y, l.pos.z - b.pos.z) <= 2);
-          if (!mine) this.memory.addLandmark('discovery', zh, s.dim, b.pos, 6);
+          const container = isContainerLandmark(b.name);
+          const mine = this.memory.landmarks().some((l) => l.label === `我的${zh}` && l.dim === s.dim && Math.hypot(l.pos.x - b.pos.x, l.pos.y - b.pos.y, l.pos.z - b.pos.z) <= (container ? 0.1 : 2));
+          if (!mine) this.memory.addLandmark('discovery', zh, s.dim, b.pos, container ? 0.1 : 6);
         } else if (STRUCTURE_HINT.has(b.name)) this.memory.addLandmark('discovery', b.name, s.dim, b.pos);
       }
       this.forgetVanishedOre(s);

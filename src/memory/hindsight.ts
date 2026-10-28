@@ -48,7 +48,7 @@ export class HindsightBackend implements MemoryBackend {
     const scope = scopeTags(episode.worldId, episode.dimension);
     const interpretation = episode.kind === 'inference'
       ? 'Agent inference or hypothesis. It may be wrong; do not promote it to an observed fact.'
-      : 'First-person gameplay experience, limited to what the agent observed or did.';
+      : 'First-person gameplay experience, limited to what the agent observed or did at that time. Historical locations and container impressions do not establish current existence or stock.';
     try {
       const result = await this.client.retain(this.bankId, `${interpretation}\n${episode.text.slice(0, 8000)}`, {
         async: false,
@@ -100,20 +100,22 @@ export class HindsightBackend implements MemoryBackend {
         .filter(result => typeof result.id === 'string' && !!result.id && typeof result.text === 'string' && !!result.text.trim())
         .filter(result => !seen.has(result.id) && !!seen.add(result.id))
         .slice(0, MAX_RESULTS)
-        .map(result => this.entry(result));
+        .map(result => this.entry(result, request));
     } catch (error) {
       return requestError('recall', error, signal);
     }
   }
 
-  private entry(result: RecallResult): MemoryEntry {
+  private entry(result: RecallResult, request: RecallRequest): MemoryEntry {
     const metadata = result.metadata;
-    const observedAt = metadata?.observed_at || result.occurred_start || result.mentioned_at;
+    const observedAt = metadata?.observed_at || result.occurred_start;
     return {
       id: bounded(result.id, 160),
       text: bounded(result.text, MAX_TEXT),
       source: bounded(metadata?.source || result.document_id || 'hindsight:consolidation', 160),
+      worldId: request.worldId, dimension: request.dimension, historical: true,
       ...(observedAt ? { observedAt: bounded(observedAt, 64) } : {}),
+      ...(result.mentioned_at ? { mentionedAt: bounded(result.mentioned_at, 64) } : {}),
       // Consolidated observations are interpretations, not fresh gameplay evidence.
       kind: result.type === 'observation' || metadata?.kind === 'inference' || result.tags?.includes('kind:inference')
         ? 'inference'

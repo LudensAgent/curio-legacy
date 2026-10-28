@@ -59,7 +59,7 @@ test('地下的矿看不见；背后的树看不见，环顾一圈后才知道',
   assert.ok(vision.lastSweepAt > 0);
 });
 
-test('记忆：转身后仍记得看见过的方块；方块被挖掉后会遗忘', () => {
+test('记忆：转身后保留所见地点，重新看见方块消失才遗忘', () => {
   const { adapter, vision } = setup();
   adapter.blocks.push({ name: 'coal_ore', pos: { x: 8, y: 64, z: 1 } });
   vision.scan();
@@ -68,7 +68,9 @@ test('记忆：转身后仍记得看见过的方块；方块被挖掉后会遗�
   assert.ok(!sees(vision, 'coal_ore'));
   assert.equal(vision.knownBlocks(['coal_ore'], 96).length, 1, '应记得煤矿位置');
   adapter.blocks = adapter.blocks.filter((b) => b.name !== 'coal_ore');
-  assert.equal(vision.knownBlocks(['coal_ore'], 96).length, 0, '方块没了应遗忘');
+  assert.equal(vision.knownBlocks(['coal_ore'], 96).length, 1, '背后的变化不能更新记忆');
+  adapter.yaw = -Math.PI / 2;
+  assert.equal(vision.knownBlocks(['coal_ore'], 96).length, 0, '重新看见该格为空才遗忘');
 });
 
 test('实体：墙后的僵尸看不见；近处的能“听见”，远处的感知不到', () => {

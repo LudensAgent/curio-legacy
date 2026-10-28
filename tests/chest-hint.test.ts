@@ -18,11 +18,11 @@ test('缺材料时说记得往哪个箱子放过：缺铁锭和木棍，指到�
   const needs = needsFromShortfall('iron_ingot 还差 2（有 0），stick 还差 1（有 0）');
   assert.deepEqual(needs, [{ item: 'iron_ingot', count: 2 }, { item: 'stick', count: 1 }]);
   const t = chestHint(fresh(), here, needs);
-  assert.match(t, /记得往 \(293,68,-369\) 的箱子（11 格外） 放过几个 iron_ingot/);
+  assert.match(t, /记得往 箱子 \(293,68,-369\)（11 格外） 放过几个 iron_ingot/);
   assert.match(t, /放过不少 birch_log/, '缺木棍：记得放过原木也算');
   assert.doesNotMatch(t, /×\d/, '不说精确数量');
   assert.doesNotMatch(t, /"item"/, '不替它写好参数');
-  assert.match(t, /take_items 去翻翻/);
+  assert.match(t, /选定并重新看见箱子后，用 target 指定这一只/);
   assert.doesNotMatch(t, /145,63,-121/, '同样有木头，挑记得更牢（自己放过）的那个箱子');
 });
 

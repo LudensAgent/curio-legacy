@@ -196,6 +196,21 @@ export interface GuiView {
   cursor?: InventorySlot | null;
 }
 
+/** Only synchronized observations of a local storage block, never a requested transfer plan. */
+export interface GuiContainerObservation {
+  block: string;
+  before: { name: string; count: number }[];
+  after: { name: string; count: number }[];
+  put: { name: string; count: number }[];
+  took: { name: string; count: number }[];
+}
+
+export interface GuiResult extends ActionResult {
+  view?: GuiView;
+  done: string[];
+  container?: GuiContainerObservation;
+}
+
 /** 熔炉三格里各有什么 */
 export interface FurnaceSlots {
   input: { name: string; count: number } | null;
@@ -308,7 +323,7 @@ export interface GameAdapter {
   placeBlockAt(pos: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult>;
   placeBlockStateAt?(pos: Vec3Like, name: string, properties: BlockState['properties'], signal: AbortSignal): Promise<ActionResult>;
   /** 打开看得见的方块界面（工作站、容器），依次执行操作，返回关之前看到的界面 */
-  useGui?(target: GuiTarget, ops: GuiOp[], signal: AbortSignal): Promise<ActionResult & { view?: GuiView; done: string[] }>;
+  useGui?(target: GuiTarget, ops: GuiOp[], signal: AbortSignal, opts?: { onContainer?: (observation: GuiContainerObservation) => void }): Promise<GuiResult>;
   signText?(pos: Vec3Like, signal: AbortSignal, opts?: { lines?: string[]; back?: boolean }): Promise<ActionResult & { lines?: string[] }>;
   editBook?(sourceSlot: number, pages: string[], signal: AbortSignal, title?: string): Promise<ActionResult>;
   /** 打开村民/流浪商人的交易界面；index 为 null 时只看交易列表 */
@@ -356,7 +371,7 @@ export interface GameAdapter {
   /** 打开熔炉取回烧好的和没烧的（fuel:true 连燃料一起） */
   emptyFurnace?(pos: Vec3Like, signal: AbortSignal, opts?: { fuel?: boolean }): Promise<ActionResult & { taken: { name: string; count: number }[]; left: FurnaceSlots; burning: boolean }>;
   /** 打开箱子：存入 deposits / 取出 withdraws，返回箱子里现在的物品 */
-  useChest(pos: Vec3Like, deposits: InvItem[], withdraws: InvItem[], signal: AbortSignal): Promise<ActionResult & { contents: InvItem[]; moved: number }>;
+  useChest(pos: Vec3Like, deposits: InvItem[], withdraws: InvItem[], signal: AbortSignal, opts?: { onContainer?: (observation: GuiContainerObservation) => void }): Promise<ActionResult & { contents: InvItem[]; moved: number; container?: GuiContainerObservation }>;
   /** 用锄头把泥土/草方块锄成耕地 */
   till(pos: Vec3Like, signal: AbortSignal): Promise<ActionResult>;
   /** 在耕地上播种（seed: wheat_seeds / carrot / potato / beetroot_seeds） */

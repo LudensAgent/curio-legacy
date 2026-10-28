@@ -1,10 +1,11 @@
 import { chestHint } from './chest-hint.ts';
-import { checkedRecently, chestName, describeRecall, type ChestRecall } from '../memory/chest-memory.ts';
-import type { InvItem, Vec3Like } from '../adapter/types.ts';
+import { chestLocation, chestRecollectionLocation, describeChest, describeRecall, isContainerLandmark } from '../memory/chest-memory.ts';
+import type { GuiContainerObservation, InvItem, Vec3Like } from '../adapter/types.ts';
 import { DIRS } from '../perception/perception.ts';
 import { shortId, sleep } from '../util.ts';
-import { findStation, rememberStation } from './stations.ts';
-import { ownBuildingAt } from './build.ts';
+import { findStation, forgetStationAt, rememberStation } from './stations.ts';
+import { interactiveName } from '../perception/vision.ts';
+import { glanceAt } from './observation.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
 
 // ===================================================================== 冶炼
@@ -142,186 +143,192 @@ const parseStoreSpecs = (v: unknown): StoreSpec[] | null => {
 };
 const nameMatch = (pattern: string, name: string) => pattern.includes('*') ? new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`).test(name) : pattern === name;
 
-async function ensureChest(ctx: SkillCtx): Promise<Vec3Like | null> {
-  const known = findStation(ctx, ['chest'], 48);
-  if (known) return known.pos;
-  if (ctx.make !== true) return null;
-  const s = ctx.adapter.state();
-  if (!s.inventory.some((i) => i.name === 'chest')) {
-    const r = await ctx.adapter.craft('chest', 1, ctx.signal);
-    if (!r.ok) return null;
-  }
-  const x = Math.floor(s.pos.x), y = Math.floor(s.pos.y), z = Math.floor(s.pos.z);
-  for (const [dx, dz] of [[2, 0], [0, 2], [-2, 0], [0, -2], [1, 1], [-1, -1]]) {
-    const p = { x: x + dx, y, z: z + dz };
-    if ((ctx.adapter.blockAt(p) ?? 'air') !== 'air') continue;
-    const r = await ctx.adapter.placeBlockAt(p, ['chest'], ctx.signal);
-    if (r.ok) {
-      ctx.memory.addLandmark('discovery', '我的箱子', s.dim, p, 3);
-      ctx.senses.refresh();
-      return p;
-    }
-  }
-  return null;
+const CONTAINERS = ['chest', 'trapped_chest', 'barrel', 'shulker_box', ...['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black'].map((color) => `${color}_shulker_box`)];
+type ContainerTarget = string | Vec3Like;
+const posKey = (pos: Vec3Like) => `${pos.x},${pos.y},${pos.z}`;
+
+/** Only a fresh non-container observation can invalidate a remembered local store. */
+function forgetObservedContainer(ctx: SkillCtx, pos: Vec3Like) {
+  const state = ctx.adapter.state();
+  if (ctx.memory.worldId !== state.worldId) return;
+  const landmarks = ctx.memory.landmarks().filter((l) => l.dim === state.dim && posKey(l.pos) === posKey(pos) && isContainerLandmark(l.label));
+  const name = CONTAINERS.find((name) => landmarks.some((l) => l.label === name || l.label === interactiveName(name) || l.label === `我的${interactiveName(name)}` || l.label.endsWith(`（${name}）`)));
+  if (name || ctx.memory.chestAt(state.dim, pos)) forgetStationAt(ctx.memory, state.dim, [pos], name ?? 'chest');
+  landmarks.forEach((landmark) => ctx.memory.removeLandmark(landmark.id));
 }
 
-export const storeItems: Skill<{ items: StoreSpec[]; note?: string }> = {
+function parseContainerTarget(value: unknown): ContainerTarget | undefined | null {
+  if (value === undefined) return undefined;
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (/^-?\d+\s*,\s*-?\d+\s*,\s*-?\d+$/.test(text)) return parseContainerTarget(text.split(',').map(Number));
+    return text && text.length <= 100 ? text : null;
+  }
+  const xyz = Array.isArray(value) ? value : value && typeof value === 'object'
+    ? ['x', 'y', 'z'].map((key) => (value as Record<string, unknown>)[key]) : [];
+  if (xyz.length !== 3 || !xyz.every((n) => typeof n === 'number' && Number.isInteger(n) && Math.abs(n) <= 29_999_984) || Math.abs(Number(xyz[1])) > 2048) return null;
+  return { x: Number(xyz[0]), y: Number(xyz[1]), z: Number(xyz[2]) };
+}
+
+/** Listing evidence does not choose a box or spend a search budget on the Agent's behalf. */
+function containerCandidates(ctx: SkillCtx) {
+  const state = ctx.adapter.state(), clock = ctx.memory.chestClock(state.worldDay);
+  const records = ctx.memory.chests(state.dim).filter((c) => (c.worldId ?? 'default') === state.worldId);
+  const landmarks = ctx.memory.landmarks().filter((l) => (l.worldId ?? 'default') === state.worldId && l.dim === state.dim && isContainerLandmark(l.label));
+  const known = new Map([...landmarks.map((l) => [posKey(l.pos), { pos: l.pos, ts: l.ts, label: l.label, id: l.id }] as const),
+    ...records.map((c) => {
+      const landmark = landmarks.find((l) => posKey(l.pos) === posKey(c.pos));
+      return [posKey(c.pos), { pos: c.pos, ts: Math.max(c.ts, landmark?.ts ?? 0), label: c.note ? `${c.note}的箱子` : '用过的容器', id: landmark?.id }] as const;
+    })]);
+  ctx.senses.refresh();
+  const recent = ctx.senses.knownBlocks(CONTAINERS, 48);
+  const positions = [...new Map([...recent.map((b) => [posKey(b.pos), b.pos] as const), ...[...known.values()].map((c) => [posKey(c.pos), c.pos] as const)]).values()];
+  const visible = Array.from({ length: Math.ceil(positions.length / 32) }, (_, index) => positions.slice(index * 32, (index + 1) * 32))
+    .flatMap((batch) => ctx.senses.observeBlocks?.(batch) ?? []);
+  visible.forEach((block) => {
+    if (!CONTAINERS.includes(block.name)) {
+      if (known.has(posKey(block.pos))) { forgetObservedContainer(ctx, block.pos); known.delete(posKey(block.pos)); }
+      return;
+    }
+    const previous = known.get(posKey(block.pos));
+    known.set(posKey(block.pos), { pos: block.pos, ts: block.observedAt, label: previous?.label ?? block.name, id: previous?.id });
+  });
+  return [...known.values()].map((candidate) => {
+    const location = chestLocation(candidate, clock);
+    const seen = visible.some((block) => posKey(block.pos) === posKey(candidate.pos) && CONTAINERS.includes(block.name));
+    const record = records.find((c) => posKey(c.pos) === posKey(candidate.pos));
+    return { label: candidate.label, worldId: state.worldId, dimension: state.dim, location,
+      distance: Math.round(Math.hypot(location.pos.x - state.pos.x, location.pos.y - state.pos.y, location.pos.z - state.pos.z)),
+      ...(location.precise ? { target: candidate.id ?? candidate.pos } : {}),
+      source: seen ? 'current_visual_observation' : 'historical_observation',
+      contents: record ? chestRecollectionLocation(record, clock).precise ? describeChest(record, clock) : '用过，物品印象只记得这一带，无法对应到具体箱子' : '未打开过，内容未知' };
+  }).sort((a, b) => a.distance - b.distance).slice(0, 24);
+}
+
+/** A historical area is a cue to look again, never a concealed exact interaction target. */
+async function selectedContainer(ctx: SkillCtx, target: ContainerTarget) {
+  const state = ctx.adapter.state();
+  let pos: Vec3Like;
+  if (typeof target === 'string') {
+    const matches = ctx.memory.landmarks().filter((l) => (l.worldId ?? 'default') === state.worldId && l.dim === state.dim && isContainerLandmark(l.label) && (l.id === target || l.label === target));
+    if (matches.length !== 1) return { ok: false as const, result: fail('BAD_ARGS', 'target 需要明确的容器地标 ID 或坐标；同名多个容器不能自动代选', { candidates: containerCandidates(ctx) }) };
+    const location = chestLocation(matches[0]);
+    ctx.senses.refresh();
+    const current = ctx.senses.observeBlocks?.([matches[0].pos])[0];
+    if (current && !CONTAINERS.includes(current.name)) {
+      forgetObservedContainer(ctx, matches[0].pos);
+      return { ok: false as const, result: fail('TARGET_GONE', `选定地点亲眼看见已是 ${current.name}，忘掉已失效的容器记忆；未改选其他容器`) };
+    }
+    if (!location.precise && !current) return { ok: false as const, result: fail('NOT_FOUND', `只记得${location.text}有容器，具体位置需重新看见；未按隐藏坐标前往`, { location }) };
+    pos = matches[0].pos;
+  } else pos = target;
+  ctx.senses.refresh();
+  let observed = ctx.senses.observeBlocks?.([pos])[0];
+  if (!observed) { await glanceAt(ctx, pos); observed = ctx.senses.observeBlocks?.([pos])[0]; }
+  if (!observed) return { ok: false as const, result: fail('NOT_FOUND', '当前看不见选定容器；可能被遮挡、太远或未加载，未换箱或移动去搜索') };
+  if (!CONTAINERS.includes(observed.name)) {
+    forgetObservedContainer(ctx, pos);
+    return { ok: false as const, result: fail('TARGET_GONE', `选定位置当前是 ${observed.name}，忘掉已失效的容器记忆；未改选其他容器`) };
+  }
+  return { ok: true as const, pos };
+}
+
+export const storeItems: Skill<{ items: StoreSpec[]; target?: ContainerTarget; note?: string }> = {
   name: 'store_items',
-  description: '把点名物品存入已有箱子，可用 note 记用途；缺箱子默认返回缺口，make:true 才允许合成和放置新箱子（消耗8木板或背包箱子）',
-  argsDoc: '{"items":["dirt:32","granite",…], "note"?: "放矿的"}（也收 [{"name":"dirt","count":32}]）',
+  description: '把点名物品存入 target 指定、重新看见的容器；不带 target 只返回容器线索让你选择。不会制造箱子、挖盖或更换目标；note 可记录用途',
+  argsDoc: '{"items":["dirt:32","granite",…],"target"?:{x,y,z}|"容器地标ID","note"?:"放矿的"}；items也收 [{"name":"dirt","count":32}]；make 不会授权此工具选址造箱',
   timeoutMs: 90000,
   movement: true,
+  outcomeBoundary: true,
   validate(raw) {
-    const items = parseStoreSpecs(obj(raw).items);
-    if (!items) return { ok: false, error: 'items 写要存的物品名数组：["cobblestone","dirt:32"]（不写数量就整包存，可用 * 通配）。先看背包，按接下来要用什么挑' };
-    const note = typeof obj(raw).note === 'string' ? String(obj(raw).note).trim().replace(/的?箱子$/, '').slice(0, 30) : '';
-    return { ok: true, args: note ? { items, note } : { items } };
+    const input = obj(raw), items = parseStoreSpecs(input.items);
+    if (!items) return { ok: false, error: 'items 写要存的物品名数组：["cobblestone","dirt:32"]（不写数量就整包存，可用 * 通配）' };
+    const target = parseContainerTarget(input.target);
+    if (target === null) return { ok: false, error: 'target 需要整数坐标或明确的容器地标 ID' };
+    const note = typeof input.note === 'string' ? input.note.trim().replace(/的?箱子$/, '').slice(0, 30) : '';
+    return { ok: true, args: { items, ...(target !== undefined ? { target } : {}), ...(note ? { note } : {}) } };
   },
   async run(ctx, args) {
-    const planFor = (inventory: InvItem[]) => {
-      const have = new Map<string, number>();
-      for (const it of inventory) if (it.name !== 'chest') have.set(it.name, (have.get(it.name) ?? 0) + it.count);
-      const plan = new Map<string, number>();
-      for (const spec of args.items) {
-        for (const [name, n] of have) {
-          if (!nameMatch(spec.name, name)) continue;
-          const left = n - (plan.get(name) ?? 0);
-          const take = Math.min(left, spec.count ?? left);
-          if (take > 0) plan.set(name, (plan.get(name) ?? 0) + take);
-        }
-      }
-      return [...plan].map(([name, count]) => ({ name, count }));
+    if (args.target === undefined) return fail('BAD_ARGS', '尚未指定存入哪只容器；这些是地点线索，内容与位置可能已经变化，请自行选择 target', { candidates: containerCandidates(ctx) });
+    const selected = await selectedContainer(ctx, args.target);
+    if (!selected.ok) return selected.result;
+    const state = ctx.adapter.state(), have = new Map<string, number>();
+    state.inventory.forEach((item) => have.set(item.name, (have.get(item.name) ?? 0) + item.count));
+    const requested = new Map<string, number>();
+    args.items.forEach((spec) => have.forEach((count, name) => {
+      if (!nameMatch(spec.name, name)) return;
+      const take = Math.min(count - (requested.get(name) ?? 0), spec.count ?? count);
+      if (take > 0) requested.set(name, (requested.get(name) ?? 0) + take);
+    }));
+    const plan = [...requested].map(([name, count]) => ({ name, count }));
+    const missing = args.items.filter((spec) => ![...have.keys()].some((name) => nameMatch(spec.name, name))).map((spec) => spec.name);
+    if (!plan.length) return fail('MISSING_MATERIALS', '背包里没有点名要存入的物品，未操作容器');
+    let container: GuiContainerObservation | undefined;
+    const record = (contents?: InvItem[]) => {
+      const after = new Map<string, number>();
+      ctx.adapter.state().inventory.forEach((item) => after.set(item.name, (after.get(item.name) ?? 0) + item.count));
+      const put = container?.put ?? plan.map((item) => ({ name: item.name, count: Math.max(0, Math.min(item.count, (have.get(item.name) ?? 0) - (after.get(item.name) ?? 0))) })).filter((item) => item.count > 0);
+      const seen = container?.after ?? contents;
+      if ((put.length || seen) && ctx.memory.worldId === state.worldId) ctx.memory.noteChestUse(state.dim, selected.pos, { put, ...(seen ? { seen } : {}), note: args.note, day: state.worldDay });
+      return put;
     };
-    const missing = (plan: InvItem[]) => args.items.filter((s) => !plan.some((d) => nameMatch(s.name, d.name))).map((s) => s.name);
-    if (!planFor(ctx.adapter.state().inventory).length) return ok(`背包里没有 ${args.items.map((s) => s.name).join('、')}，没什么可存`);
-    const pos = await ensureChest(ctx);
-    if (!pos) return fail('MISSING_MATERIALS', ctx.make === true ? '未能准备可用箱子（制造需要8木板，也需要可放置的位置）' : '没有已知可用箱子，未制造或放置；可自行准备，或显式 make:true 允许消耗8木板制作并放置箱子');
-    const s = ctx.adapter.state();
-    const plan = planFor(s.inventory); // 做箱子可能用掉了木板，重算
-    if (!plan.length) return ok('背包里已经没有要存的东西了');
     try {
-      const r = await openChest(ctx, pos, plan, []);
-      if (!r.ok) return fail('ERROR', `存放失败：${r.reason}`);
-      const rec = ctx.memory.noteChestUse(s.dim, pos, { put: plan, seen: r.contents, note: args.note, day: s.worldDay });
-      const list = plan.slice(0, 10).map((d) => `${d.name}×${d.count}`).join('、') + (plan.length > 10 ? ` 等 ${plan.length} 种` : '');
-      const miss = missing(plan);
-      return ok(`存进 ${chestName(rec)} ${r.moved} 个${clearedNote(r)}：${list}${miss.length ? `；背包里没有 ${miss.join('、')}` : ''}；背包空位 ${ctx.adapter.state().emptySlots}`);
-    } catch (e) {
-      if (isAbort(e)) throw e;
-      return fail(codeFromError(e), `存放出错：${(e as Error).message}`);
+      const result = await ctx.adapter.useChest(selected.pos, plan, [], ctx.signal, { onContainer: (observation) => { container = observation; } });
+      container ??= result.container;
+      const put = record(result.ok || result.moved > 0 ? result.contents : undefined), moved = put.reduce((count, item) => count + item.count, 0);
+      const actual = put.map((item) => `${item.name}×${item.count}`).join('、');
+      if (!result.ok) return fail('ERROR', `选定容器存放未完成：${result.reason}${moved ? `；实际已存入 ${actual}` : ''}；未挖盖、造箱或更换容器`, { moved, put });
+      return ok(`在选定容器存入 ${actual || '0 件物品'}${moved < plan.reduce((count, item) => count + item.count, 0) ? '；只有这部分实际存入' : ''}${missing.length ? `；背包没有 ${missing.join('、')}` : ''}`, { moved, put, ...(missing.length ? { missing } : {}) });
+    } catch (error) {
+      const put = record();
+      if (isAbort(error)) throw error;
+      return fail(codeFromError(error), `存放出错：${(error as Error).message}`, { put });
     }
   },
 };
 
-const CONTAINERS = ['chest', 'trapped_chest', 'barrel'];
-
-/**
- * 开箱存取。箱子顶上压着方块（原版开不了盖）就先挖掉那一格再开——挖的是盖子上的方块，不是箱子；
- * 那一格是自己房子的一部分就不动，把原因交给心智
- */
-async function openChest(ctx: SkillCtx, pos: Vec3Like, deposits: InvItem[], withdraws: InvItem[]): Promise<Awaited<ReturnType<SkillCtx['adapter']['useChest']>> & { cleared?: string }> {
-  let r = await ctx.adapter.useChest(pos, deposits, withdraws, ctx.signal);
-  const lid = !r.ok && /^LID_BLOCKED:(.+)$/.exec(r.reason ?? '');
-  if (!lid) return r;
-  const up = { x: pos.x, y: pos.y + 1, z: pos.z };
-  const mine = ownBuildingAt(ctx.memory, ctx.adapter.state(), up, lid[1]);
-  if (mine) return { ...r, reason: `箱子顶上 (${up.x},${up.y},${up.z}) 压着 ${lid[1]}，开不了盖；那是「${mine.name}」的一部分，没挖。挪走箱子或改建再说，别挖箱子` };
-  const d = await ctx.adapter.dig(up, ctx.signal);
-  if (!d.ok) return { ...r, reason: `箱子顶上 (${up.x},${up.y},${up.z}) 压着 ${lid[1]}，开不了盖；想挖掉它没成（${d.reason}）。挖掉箱子上面那一格就能开，别挖箱子` };
-  r = await ctx.adapter.useChest(pos, deposits, withdraws, ctx.signal);
-  return r.ok ? { ...r, cleared: lid[1] } : r;
-}
-const clearedNote = (r: { cleared?: string }) => r.cleared ? `（先挖掉了压在箱子顶上的 ${r.cleared}）` : '';
-const listItems = (items: { name: string; count: number }[]) => items.length ? items.slice(0, 10).map((i) => `${i.name}×${i.count}`).join('、') + (items.length > 10 ? ` 等 ${items.length} 种` : '') : '空的';
-
-const posKey = (p: Vec3Like) => `${p.x},${p.y},${p.z}`;
-const at = (p: Vec3Like) => `(${p.x},${p.y},${p.z})`;
-
-/**
- * 翻箱子找东西。人找东西就是这样：先去最有把握“放过”的箱子，没有再翻别的用过的、看得见的箱子，
- * 翻过的每一个都留下点印象（翻到什么、没翻到什么），找到就停。
- * 以前是“查记忆里的清单 → 精确命中 → 去拿”，记忆是抄来的清单，所以从不翻、也从不记错。
- */
-async function rummage(ctx: SkillCtx, item: string, count: number, candidates: { pos: Vec3Like; why: string }[]) {
-  const s = ctx.adapter.state();
-  const log: string[] = [];
-  let opened = 0;
-  for (const c of candidates) {
-    const where = at(c.pos);
-    try {
-      const r = await openChest(ctx, c.pos, [], [{ name: item, count }]);
-      if (!r.ok && r.reason === 'NO_CHEST') { ctx.memory.forgetChest(s.dim, c.pos); log.push(`${where} 已经没有箱子了（忘了它）`); continue; }
-      if (!r.ok && r.reason === 'UNLOADED') { log.push(`${where} 那一片还没加载、看不到，走近了再翻`); continue; }
-      if (!r.ok) { log.push(`${where} 打不开：${r.reason}`); continue; }
-      opened++;
-      const rec = ctx.memory.noteChestUse(s.dim, c.pos, { took: r.moved ? [{ name: item, count: r.moved }] : [], seen: r.contents, sought: [item], day: s.worldDay });
-      if (r.moved) {
-        const before = log.length ? `翻了 ${log.length + 1} 个箱子：${log.join('；')}；` : '';
-        return ok(`${before}在 ${chestName(rec)} 里找到了，取出 ${r.moved} 个 ${item}${clearedNote(r)}${r.moved < count ? `（只有这么多）` : ''}`);
-      }
-      log.push(`${where}${c.why ? `（${c.why}）` : ''}里没有，只有 ${glance(r.contents)}`);
-    } catch (e) {
-      if (isAbort(e)) throw e;
-      log.push(`${where} 出错：${(e as Error).message.slice(0, 60)}`);
-    }
-  }
-  return { opened, log };
-}
-/** 开箱时一眼看到的：最多的三样 */
-const glance = (items: { name: string; count: number }[]) => items.length ? [...items].sort((a, b) => b.count - a.count).slice(0, 3).map((i) => i.name).join('、') + (items.length > 3 ? ' 等' : '') : '空的';
-
-export const takeItems: Skill<{ item: string; count: number }> = {
+export const takeItems: Skill<{ item: string; count: number; target?: ContainerTarget }> = {
   name: 'take_items',
-  description: '去箱子里翻东西：先翻记得放过它的箱子，再翻别的用过的、看得见的箱子，翻到为止（翻过的都会留个印象）',
-  argsDoc: '{"item": "<物品名>", "count"?: 1-64}',
+  description: '从 target 指定、重新看见的容器取出指定物品；不带 target 只返回容器地点和物品印象。不会自行翻其他箱子、挖盖、制造设施或决定搜索顺序',
+  argsDoc: '{"item":"<物品名>","count"?:1-64,"target"?:{x,y,z}|"容器地标ID"}；未指定target时只列线索，不执行存取',
   timeoutMs: 90000,
   movement: true,
+  outcomeBoundary: true,
   validate(raw, adapter) {
-    const a = obj(raw);
-    const item = String(a.item ?? '').replace(/^minecraft:/, '');
+    const input = obj(raw), item = String(input.item ?? '').replace(/^minecraft:/, ''), target = parseContainerTarget(input.target);
     if (!adapter.isKnownItem(item)) return { ok: false, error: `未知物品：${item}` };
-    return { ok: true, args: { item, count: clampInt(a.count, 1, 64, 16) } };
+    if (target === null) return { ok: false, error: 'target 需要整数坐标或明确的容器地标 ID' };
+    return { ok: true, args: { item, count: clampInt(input.count, 1, 64, 16), ...(target !== undefined ? { target } : {}) } };
   },
   async run(ctx, args) {
-    const s = ctx.adapter.state();
-    const flat = (p: Vec3Like) => Math.round(Math.hypot(p.x - s.pos.x, p.z - s.pos.z));
-    const REACH = 96;
-    const clock = ctx.memory.chestClock(s.worldDay);
-    const recalls = ctx.memory.recallChests(args.item, { day: s.worldDay });
-    // 别的维度、或者远到这一趟走不过去的箱子：不去开（开不到也不等于箱子没了），只说记得在哪
-    const near = recalls.filter((r) => r.chest.dim === s.dim && flat(r.chest.pos) <= REACH);
-    const far = recalls.filter((r) => !near.includes(r)).sort((a, b) => flat(a.chest.pos) - flat(b.chest.pos)).slice(0, 3)
-      .map((r) => `${describeRecall(r, r.chest.dim === s.dim ? flat(r.chest.pos) : undefined)}${r.chest.dim !== s.dim ? `（${r.chest.dim}）` : ''}`);
-    const farNote = far.length ? `；更远的：${far.join('；')}——要的话先走过去再翻` : '';
-
-    // 翻的顺序：最有把握放过的在前，把握差不多就近的先；然后是别的用过的箱子（近的先）；最后是看得见但没用过的
-    const rank = (r: ChestRecall) => (r.confidence === 'sure' ? 0 : r.confidence === 'likely' ? 1 : 2);
-    const planned = new Map<string, { pos: Vec3Like; why: string }>();
-    for (const r of [...near].sort((a, b) => rank(a) - rank(b) || flat(a.chest.pos) - flat(b.chest.pos))) {
-      planned.set(posKey(r.chest.pos), { pos: r.chest.pos, why: r.confidence === 'sure' ? '记得放过' : r.confidence === 'likely' ? '好像放过' : '隐约记得' });
+    const state = ctx.adapter.state();
+    if (args.target === undefined) {
+      const hints = ctx.memory.recallChests(args.item, { day: state.worldDay }).slice(0, 8).map((recall) => ({ dimension: recall.chest.dim, text: describeRecall(recall) }));
+      return fail('BAD_ARGS', '尚未指定翻哪只容器；请根据地点线索自行观察、选择 target 和停止时机，未自动搜索', { candidates: containerCandidates(ctx), hints });
     }
-    const recentlyChecked: string[] = [];
-    const others = ctx.memory.chests(s.dim).filter((c) => flat(c.pos) <= 48 && !planned.has(posKey(c.pos)))
-      .sort((a, b) => flat(a.pos) - flat(b.pos));
-    for (const c of others) {
-      // 刚翻过没有：这次先不去（人也记得“那个我刚看过”）
-      if (checkedRecently(c, args.item, clock)) { recentlyChecked.push(at(c.pos)); continue; }
-      planned.set(posKey(c.pos), { pos: c.pos, why: c.note ? `${c.note}的箱子` : '用过的箱子' });
+    const selected = await selectedContainer(ctx, args.target);
+    if (!selected.ok) return selected.result;
+    const before = ctx.adapter.state().inventory.filter((item) => item.name === args.item).reduce((count, item) => count + item.count, 0);
+    let container: GuiContainerObservation | undefined;
+    const record = (contents?: InvItem[]) => {
+      const after = ctx.adapter.state().inventory.filter((item) => item.name === args.item).reduce((count, item) => count + item.count, 0);
+      const moved = container ? container.took.filter((item) => item.name === args.item).reduce((count, item) => count + item.count, 0) : Math.max(0, Math.min(args.count, after - before));
+      const seen = container?.after ?? contents;
+      if ((moved || seen) && ctx.memory.worldId === state.worldId) ctx.memory.noteChestUse(state.dim, selected.pos, { took: moved ? [{ name: args.item, count: moved }] : [], ...(seen ? { seen, sought: [args.item] } : {}), day: state.worldDay });
+      return moved;
+    };
+    try {
+      const result = await ctx.adapter.useChest(selected.pos, [], [{ name: args.item, count: args.count }], ctx.signal, { onContainer: (observation) => { container = observation; } });
+      container ??= result.container;
+      const moved = record(result.ok || result.moved > 0 ? result.contents : undefined);
+      if (!result.ok) return fail('ERROR', `选定容器取物未完成：${result.reason}${moved ? `；实际已取出 ${moved} 个 ${args.item}` : ''}；未挖盖或换箱`, { moved });
+      if (!moved) return fail('NOT_FOUND', `选定容器没有取到 ${args.item}；只记录这次实际看到的内容，未改选其他容器`, { moved });
+      return ok(`从选定容器取出 ${moved} 个 ${args.item}${moved < args.count ? '（只取到了这些）' : ''}`, { moved });
+    } catch (error) {
+      const moved = record();
+      if (isAbort(error)) throw error;
+      return fail(codeFromError(error), `取物出错：${(error as Error).message}`, { moved });
     }
-    const known = new Set(planned.keys());
-    for (const b of ctx.senses.knownBlocks(CONTAINERS, 48).sort((a, b) => flat(a.pos) - flat(b.pos))) {
-      if (known.has(posKey(b.pos)) || ctx.memory.chestAt(s.dim, b.pos)) continue;
-      planned.set(posKey(b.pos), { pos: b.pos, why: '没打开过' });
-    }
-    const candidates = [...planned.values()].slice(0, 4);
-    if (!candidates.length) {
-      const checked = recentlyChecked.length ? `刚翻过 ${recentlyChecked.join('、')} 都没有；` : '';
-      return fail('NOT_FOUND', `不记得往哪个箱子放过 ${args.item}：${checked}附近 48 格也没看见别的箱子${farNote}`);
-    }
-    const r = await rummage(ctx, args.item, args.count, candidates);
-    if ('status' in r) return r;
-    const checked = recentlyChecked.length ? `；${recentlyChecked.join('、')} 刚翻过没有，这次没再去` : '';
-    return fail('NOT_FOUND', `翻了 ${r.opened} 个箱子都没有 ${args.item}：${r.log.join('；')}${checked}${farNote}。箱子打不开别挖箱子，东西会洒一地`);
   },
 };
 

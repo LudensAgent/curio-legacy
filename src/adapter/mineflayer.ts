@@ -35,6 +35,8 @@ import type {
   GuiOp,
   GuiSlot,
   GuiView,
+  GuiContainerObservation,
+  GuiResult,
   TradeView,
   FurnaceSlots,
   SmeltOpts,
@@ -52,6 +54,24 @@ const goalsLib = () => (pathfinderGoals ??= require('mineflayer-pathfinder').goa
 
 /** 右键一点就打开、触发的方块：贴着它放东西要按住潜行 */
 const OPENS_ON_CLICK = /chest$|barrel|crafting_table|furnace|smoker|_door$|_trapdoor$|_fence_gate$|_button$|lever|_bed$|anvil|enchanting_table|brewing_stand|loom|stonecutter|grindstone|smithing_table|cartography_table|hopper|dispenser|dropper|shulker_box|note_block|jukebox|beacon|lectern|bell|repeater|comparator|cake/;
+const isLocalStorage = (name: string) => ['chest', 'trapped_chest', 'barrel'].includes(name) || name.endsWith('shulker_box');
+
+/** Call only with acknowledged container slots, so partial operations remain factual. */
+function observeStorage(block: string, items: { name: string; count: number }[], previous?: GuiContainerObservation): GuiContainerObservation {
+  const totals = new Map<string, number>();
+  items.forEach((item) => totals.set(item.name, (totals.get(item.name) ?? 0) + item.count));
+  const after = [...totals].map(([name, count]) => ({ name, count }));
+  if (!previous) return { block, before: after, after, put: [], took: [] };
+  const before = new Map(previous.after.map((item) => [item.name, item.count]));
+  const put = new Map(previous.put.map((item) => [item.name, item.count]));
+  const took = new Map(previous.took.map((item) => [item.name, item.count]));
+  [...new Set([...before.keys(), ...totals.keys()])].forEach((name) => {
+    const delta = (totals.get(name) ?? 0) - (before.get(name) ?? 0);
+    if (delta > 0) put.set(name, (put.get(name) ?? 0) + delta);
+    if (delta < 0) took.set(name, (took.get(name) ?? 0) - delta);
+  });
+  return { block, before: previous.before, after, put: [...put].map(([name, count]) => ({ name, count })), took: [...took].map(([name, count]) => ({ name, count })) };
+}
 
 const HOSTILE = new Set([
   'zombie', 'husk', 'drowned', 'zombie_villager', 'skeleton', 'stray', 'creeper', 'spider',
@@ -1676,7 +1696,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
    * 通用界面：玩家打开一个方块界面后能做的事就是这几样——拿起一叠、放一个/全部、shift 点击取走、点按钮。
    * 不认得哪种工作站怎么用；怎么摆是 LLM 自己的事，这里只把格子里实际有什么如实给回去。
    */
-  async useGui(target: GuiTarget, ops: GuiOp[], signal: AbortSignal): Promise<ActionResult & { view?: GuiView; done: string[] }> {
+  async useGui(target: GuiTarget, ops: GuiOp[], signal: AbortSignal, opts: { onContainer?: (observation: GuiContainerObservation) => void } = {}): Promise<GuiResult> {
     const check = this.actionCheckpoint(signal);
     throwIfAborted(signal);
     const done: string[] = [];
@@ -1685,6 +1705,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     check();
     const b = this.bot;
     let open: () => Promise<unknown>;
+    let storageBlock: string | undefined;
     if (target === 'inventory') open = async () => b.inventory;
     else if ('entityId' in target) {
       const entity = b.entities?.[target.entityId];
@@ -1706,6 +1727,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     } else {
       const block = b.blockAt(this.vec(target));
       if (!block) return { ok: false, reason: 'UNLOADED', done };
+      if (isLocalStorage(block.name)) storageBlock = block.name;
       await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos: target }, { signal, timeoutMs: 20000, constructionSafe: true, allowSwimming: false }), check);
       open = block.name === 'enchanting_table' && typeof b.openEnchantmentTable === 'function' ? () => b.openEnchantmentTable(block) : () => b.openBlock(block);
     }
@@ -1718,11 +1740,17 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     }
     if (!w) return { ok: false, reason: 'NOT_OPENABLE', done };
     const size = () => w.inventoryStart ?? Math.max(0, (w.slots?.length ?? 36) - 36);
+    let container: GuiContainerObservation | undefined;
+    const observeContainer = () => {
+      if (!storageBlock) return;
+      container = observeStorage(storageBlock, (w.slots.slice(0, size()) as (Item | null)[]).filter((item): item is Item => item !== null), container);
+    };
+    const finish = (result: ActionResult & { view?: GuiView }): GuiResult => ({ ...result, done, ...(container ? { container } : {}) });
     const click = async (slot: number, button: number, mode: number) => {
       await this.afterAction(() => b.clickWindow(slot, button, mode), check);
       // 1.20.1 clicks update the client prediction before acknowledgement.
       // The installed sync asks for authoritative slots and carried cursor.
-      await this.afterAction(() => raceAbort(b._syncWindow(w), signal, 3000, () => {}), check);
+      await this.afterAction(() => raceAbort(b._syncWindow(w), signal, 3000, () => {}).then((result) => { observeContainer(); return result; }), check);
     };
     // Open containers maintain their own player slots until Mineflayer closes them.
     const invCount = (name: string) => w.slots.slice(size()).filter((i: Item | null) => i?.name === name).reduce((n: number, i: Item) => n + i.count, 0);
@@ -1735,15 +1763,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         await this.afterAction(() => sleep(this.cfg.ui?.openHoldMs ?? 0, signal), check);
       }
       await settle();
+      observeContainer();
       for (const op of ops) {
         check();
         if ('put' in op) {
           const { item, slot } = op.put;
-          if (slot < 0 || slot >= size()) return { ok: false, reason: `BAD_SLOT:${slot}`, view: this.guiView(w), done };
+          if (slot < 0 || slot >= size()) return finish({ ok: false, reason: `BAD_SLOT:${slot}`, view: this.guiView(w) });
           const source = op.put.sourceSlot;
           const src = source === undefined ? w.slots.slice(size()).map((it: Item | null, k: number) => it && it.name === item ? { it, at: size() + k } : null).find((entry: { it: Item; at: number } | null) => entry !== null)
             : source >= size() && source < w.slots.length && w.slots[source]?.name === item ? { it: w.slots[source], at: source } : null;
-          if (!src) return { ok: false, reason: `NO_ITEM:${item}`, view: this.guiView(w), done };
+          if (!src) return finish({ ok: false, reason: `NO_ITEM:${item}`, view: this.guiView(w) });
           const before = w.slots[slot]?.name === item ? w.slots[slot].count : 0;
           const want = Math.min(op.put.count ?? src.it.count, src.it.count);
           await click(src.at, 0, 0);
@@ -1752,18 +1781,18 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           if (w.selectedItem || b.inventory.selectedItem) await click(src.at, 0, 0);
           await settle();
           const now = w.slots[slot]?.name === item ? w.slots[slot].count : 0;
-          if (now <= before) return { ok: false, reason: `PUT_REFUSED:${item}->${slot}`, view: this.guiView(w), done };
+          if (now <= before) return finish({ ok: false, reason: `PUT_REFUSED:${item}->${slot}`, view: this.guiView(w) });
           done.push(`第 ${slot} 格放入 ${item}×${now - before}`);
         } else if ('take' in op) {
           const { slot } = op.take;
           const it = w.slots[slot];
-          if (slot < 0 || slot >= size()) return { ok: false, reason: `BAD_SLOT:${slot}`, view: this.guiView(w), done };
-          if (!it) return { ok: false, reason: `EMPTY_SLOT:${slot}`, view: this.guiView(w), done };
+          if (slot < 0 || slot >= size()) return finish({ ok: false, reason: `BAD_SLOT:${slot}`, view: this.guiView(w) });
+          if (!it) return finish({ ok: false, reason: `EMPTY_SLOT:${slot}`, view: this.guiView(w) });
           const before = invCount(it.name);
           await click(slot, 0, 1);
           await settle();
           const got = invCount(it.name) - before;
-          if (got <= 0) return { ok: false, reason: `TAKE_REFUSED:${it.name}（产物取不出：可能经验不够、背包满或配方不成立）`, view: this.guiView(w), done };
+          if (got <= 0) return finish({ ok: false, reason: `TAKE_REFUSED:${it.name}（产物取不出：可能经验不够、背包满或配方不成立）`, view: this.guiView(w) });
           done.push(`从第 ${slot} 格取出 ${it.name}×${got}`);
         } else if ('button' in op) {
           // 附魔台：选项要等服务器把等级发过来才有（刚放进东西的那一下还没有），没准备好就点，服务器会悄悄不理
@@ -1783,40 +1812,41 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
             const need = table ? w.enchantments[op.button]?.level : undefined;
             const lapis = table ? (w.slots[1]?.name === 'lapis_lazuli' ? w.slots[1].count : 0) : undefined;
             const why = table ? `（这个选项需 ${need > 0 ? `${need} 级` : '——还没有选项（放进去的东西不能附魔，或者没放青金石）'}，身上 ${xpBefore} 级，台上青金石 ${lapis} 个；选项 ${op.button} 要 ${op.button + 1} 个青金石、扣 ${op.button + 1} 级）` : '';
-            return { ok: false, reason: `BUTTON_NO_EFFECT:点了按钮 ${op.button}，界面里什么都没变${why}`, view: this.guiView(w), done };
+            return finish({ ok: false, reason: `BUTTON_NO_EFFECT:点了按钮 ${op.button}，界面里什么都没变${why}`, view: this.guiView(w) });
           }
           const target = table ? w.slots[0] : null;
           const got = target ? this.itemEnchants(target) : undefined;
-          if (table && !got?.length) return { ok: false, reason: `ENCHANTMENT_NOT_CONFIRMED:点了按钮 ${op.button} 后目标物品变了，但未观察到附魔`, view: this.guiView(w), done };
+          if (table && !got?.length) return finish({ ok: false, reason: `ENCHANTMENT_NOT_CONFIRMED:点了按钮 ${op.button} 后目标物品变了，但未观察到附魔`, view: this.guiView(w) });
           done.push(table && got ? `附魔成功：${target.name} 得到 ${got.join('、')}（经验 ${xpBefore}→${b.experience?.level ?? '?'} 级）` : `点了按钮 ${op.button}，界面变了`);
         } else if ('rename' in op) {
-          if (!/^(minecraft:)?anvil$/.test(String(w.type))) return { ok: false, reason: 'RENAME_REQUIRES_ANVIL', view: this.guiView(w), done };
+          if (!/^(minecraft:)?anvil$/.test(String(w.type))) return finish({ ok: false, reason: 'RENAME_REQUIRES_ANVIL', view: this.guiView(w) });
           await paceButton();
           b._client.write('name_item', { name: op.rename });
           const accepted = () => [op.rename, JSON.stringify(op.rename), JSON.stringify({ text: op.rename })].includes(w.slots[2]?.customName);
           const confirmed = await this.waitForInteraction(accepted, check);
-          if (!confirmed) return { ok: false, reason: 'RENAME_NOT_CONFIRMED', view: this.guiView(w), done };
+          if (!confirmed) return finish({ ok: false, reason: 'RENAME_NOT_CONFIRMED', view: this.guiView(w) });
           done.push(`改名预览已确认为「${op.rename}」；仍需取出产物才会完成改名`);
         } else if ('click' in op) {
           const { slot, button, mode } = op.click;
-          if (slot !== -999 && (slot < 0 || slot >= w.slots.length)) return { ok: false, reason: `BAD_SLOT:${slot}`, view: this.guiView(w), done };
+          if (slot !== -999 && (slot < 0 || slot >= w.slots.length)) return finish({ ok: false, reason: `BAD_SLOT:${slot}`, view: this.guiView(w) });
           const key = () => JSON.stringify([w.slots, w.selectedItem]);
           const before = key();
           await click(slot, button, mode);
-          if (!(await this.waitForInteraction(() => key() !== before, check))) return { ok: false, reason: 'CLICK_NOT_CONFIRMED', view: this.guiView(w), done };
+          if (!(await this.waitForInteraction(() => key() !== before, check))) return finish({ ok: false, reason: 'CLICK_NOT_CONFIRMED', view: this.guiView(w) });
           done.push(`点击第 ${slot} 格（button=${button},mode=${mode}），已确认格子或光标变化`);
         } else if ('beacon' in op) {
-          if (!/^(minecraft:)?beacon$/.test(String(w.type))) return { ok: false, reason: 'NOT_BEACON', view: this.guiView(w), done };
+          if (!/^(minecraft:)?beacon$/.test(String(w.type))) return finish({ ok: false, reason: 'NOT_BEACON', view: this.guiView(w) });
           const before = w.slots[0]?.count ?? 0;
-          if (!before) return { ok: false, reason: 'NO_BEACON_PAYMENT', view: this.guiView(w), done };
+          if (!before) return finish({ ok: false, reason: 'NO_BEACON_PAYMENT', view: this.guiView(w) });
           await paceButton();
           b._client.write('set_beacon_effect', { primary_effect: op.beacon.primary, secondary_effect: op.beacon.secondary });
-          if (!(await this.waitForInteraction(() => (w.slots[0]?.count ?? 0) < before, check))) return { ok: false, reason: 'BEACON_NOT_CONFIRMED', view: this.guiView(w), done };
+          if (!(await this.waitForInteraction(() => (w.slots[0]?.count ?? 0) < before, check))) return finish({ ok: false, reason: 'BEACON_NOT_CONFIRMED', view: this.guiView(w) });
           done.push(`信标选择已提交，确认支付物品被消耗；效果是否作用于身体请检查状态`);
         }
       }
-      return { ok: true, view: this.guiView(w), done };
+      return finish({ ok: true, view: this.guiView(w) });
     } finally {
+      if (container) opts.onContainer?.(container);
       await this.uiCloseHold(signal);
       this.inFlight--;
       if (target === 'inventory') this.emit('inventory_close');
@@ -2398,7 +2428,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     }
   }
 
-  async useChest(pos: Vec3Like, deposits: InvItem[], withdraws: InvItem[], signal: AbortSignal): Promise<ActionResult & { contents: InvItem[]; moved: number }> {
+  async useChest(pos: Vec3Like, deposits: InvItem[], withdraws: InvItem[], signal: AbortSignal, opts: { onContainer?: (observation: GuiContainerObservation) => void } = {}): Promise<ActionResult & { contents: InvItem[]; moved: number; container?: GuiContainerObservation }> {
     const check = this.actionCheckpoint(signal);
     throwIfAborted(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', contents: [], moved: 0 };
@@ -2408,23 +2438,29 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const block = b.blockAt(this.vec(pos));
     // 那一片没加载（离得太远）：看不到那里是什么，不能当成“箱子没了”
     if (!block) return { ok: false, reason: 'UNLOADED', contents: [], moved: 0 };
-    if (!['chest', 'trapped_chest', 'barrel'].includes(block.name)) return { ok: false, reason: 'NO_CHEST', contents: [], moved: 0 };
+    if (!isLocalStorage(block.name)) return { ok: false, reason: 'NO_CHEST', contents: [], moved: 0 };
     // 原版规则：箱子顶上压着实心不透明方块就开不了盖（木桶不受影响）。以前直接 openContainer 干等 8 秒超时，
     // 心智只看到 TIMEOUT，猜是“站不到旁边”，最后干脆把箱子挖了
-    if (block.name !== 'barrel') {
+    if (block.name === 'chest' || block.name === 'trapped_chest') {
       const up = b.blockAt(block.position.offset(0, 1, 0));
       if (up && up.boundingBox === 'block' && !up.transparent) return { ok: false, reason: `LID_BLOCKED:${up.name}`, contents: [], moved: 0 };
     }
     await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos }, { signal, timeoutMs: 30000 }), check);
     const chest: any = await this.afterAction(() => raceAbort(b.openContainer(block), signal, 8000, () => {}), check);
-    let moved = 0;
+    let container: GuiContainerObservation | undefined;
+    const synchronize = () => this.afterAction(() => raceAbort(b._syncWindow(chest), signal, 3000, () => {}).then((result) => {
+      container = observeStorage(block.name, chest.containerItems() as Item[], container);
+      return result;
+    }), check);
     try {
+      await synchronize();
       for (const d of deposits) {
         check();
         const it = this.invItem(d.name);
         if (!it) continue;
         const n = Math.min(d.count, b.inventory.items().filter((i: any) => i.name === d.name).reduce((a: number, i: any) => a + i.count, 0));
-        try { await this.afterAction(() => chest.deposit(it.type, null, n), check); moved += n; } catch { /* 箱子满了 */ }
+        try { await this.afterAction(() => chest.deposit(it.type, null, n), check); } catch (e) { if (e instanceof AbortedError) throw e; }
+        await synchronize();
         check();
       }
       for (const w of withdraws) {
@@ -2433,13 +2469,15 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         if (id === undefined) continue;
         const have = chest.containerItems().filter((i: any) => i.type === id).reduce((a: number, i: any) => a + i.count, 0);
         const n = Math.min(w.count, have);
-        if (n > 0) { try { await this.afterAction(() => chest.withdraw(id, null, n), check); moved += n; } catch { /* 背包满了 */ } }
+        if (n > 0) {
+          try { await this.afterAction(() => chest.withdraw(id, null, n), check); } catch (e) { if (e instanceof AbortedError) throw e; }
+          await synchronize();
+        }
         check();
       }
-      const m = new Map<string, number>();
-      for (const i of chest.containerItems()) m.set(i.name, (m.get(i.name) ?? 0) + i.count);
-      return { ok: true, contents: [...m].map(([name, count]) => ({ name, count })), moved };
+      return { ok: true, contents: container!.after, moved: [...container!.put, ...container!.took].reduce((sum, item) => sum + item.count, 0), container };
     } finally {
+      if (container) opts.onContainer?.(container);
       await this.uiCloseHold(signal);
       try { chest.close(); } catch { /* ignore */ }
     }

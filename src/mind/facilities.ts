@@ -3,7 +3,7 @@ import { isResourceBlock } from '../memory/ore-spots.ts';
 import { passageLevels } from '../memory/passages.ts';
 import type { Landmark, PassageRecord, WorldMemory } from '../memory/store.ts';
 import { STATION_LABEL } from '../skills/stations.ts';
-import { describeChest } from '../memory/chest-memory.ts';
+import { chestLocation, chestRecollectionLocation, describeChest, isContainerLandmark } from '../memory/chest-memory.ts';
 
 /** 算“设施”的地标：工作台、熔炉、床、箱子这些功能方块，加上农田；盖的房子在 my_builds 里另说 */
 export const FACILITY_LABELS = new Set([...Object.values(STATION_LABEL), '我的床', '我的农田']);
@@ -14,13 +14,13 @@ export const FACILITY_LABELS = new Set([...Object.values(STATION_LABEL), '我的
  * 这里是查它们的统一入口：认真想时列出来，需要的时候（缺材料、想下矿）按需提一句。
  */
 export type FacilityKind = 'chest' | 'station' | 'bed' | 'passage';
-export interface Facility { kind: FacilityKind; label: string; pos: Vec3Like; dist: number; text: string; /** 通道：人就在里面 */ inside?: boolean }
+export interface Facility { kind: FacilityKind; label: string; pos: Vec3Like; dist: number; text: string; radius?: number; precise?: boolean; observedAt?: number; /** 通道：人就在里面 */ inside?: boolean }
 
 type State = { worldId: string; dim: string; pos: Vec3Like; worldDay?: number };
 const flat = (a: Vec3Like, b: Vec3Like) => Math.round(Math.hypot(a.x - b.x, a.z - b.z));
 const d3 = (a: Vec3Like, b: Vec3Like) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 const at = (p: Vec3Like) => `(${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)})`;
-const mine = (l: Landmark, s: State) => l.dim === s.dim && (!l.worldId || l.worldId === s.worldId);
+const mine = (l: Landmark, s: State) => l.dim === s.dim && (l.worldId ?? 'default') === s.worldId;
 
 /** 自己放下/用过的工作站和床（“我的X”），同一格的只算一个 */
 function myStations(memory: Pick<WorldMemory, 'landmarks'>, s: State): Landmark[] {
@@ -58,15 +58,23 @@ export function myFacilities(memory: Pick<WorldMemory, 'landmarks' | 'chests' | 
   if (want('chest')) {
     const clock = memory.chestClock(s.worldDay);
     for (const c of memory.chests(s.dim)) {
-      if (c.worldId && c.worldId !== s.worldId) continue;
-      // 说的是印象（放过什么、大概多少），不是清单：人记得的就这么多，要确切得去翻
-      out.push({ kind: 'chest', label: '我的箱子', pos: c.pos, dist: flat(c.pos, s.pos), text: `${describeChest(c, clock)}，${flat(c.pos, s.pos)}格` });
+      if ((c.worldId ?? 'default') !== s.worldId) continue;
+      const location = chestRecollectionLocation(c, clock);
+      out.push({ kind: 'chest', label: '用过的容器', pos: location.pos, dist: flat(location.pos, s.pos), radius: location.radius,
+        precise: location.precise, observedAt: location.observedAt, text: `${describeChest(c, clock)}${location.precise ? `，${flat(location.pos, s.pos)}格` : ''}` });
+    }
+    for (const l of memory.landmarks()) {
+      if (l.kind !== 'discovery' || !mine(l, s) || !isContainerLandmark(l.label)) continue;
+      if (memory.chests(s.dim).some((c) => d3(c.pos, l.pos) <= 0.1)) continue;
+      const location = chestLocation(l, clock);
+      out.push({ kind: 'chest', label: l.label, pos: location.pos, dist: flat(location.pos, s.pos), radius: location.radius,
+        precise: location.precise, observedAt: location.observedAt, text: `${l.label} ${location.text}，只记得地点，内容未知` });
     }
   }
   for (const l of stations) {
-    if (l.label === '我的箱子' && want('chest')) continue; // 箱子按存货说，上面已经有了
+    if (isContainerLandmark(l.label)) continue;
     const kind: FacilityKind = l.label === '我的床' ? 'bed' : 'station';
-    if (!want(kind) || l.label === '我的箱子') continue;
+    if (!want(kind)) continue;
     out.push({ kind, label: l.label, pos: l.pos, dist: flat(l.pos, s.pos), text: `${l.label.replace(/^我的/, '')} ${at(l.pos)} ${flat(l.pos, s.pos)}格` });
   }
   if (want('passage')) {

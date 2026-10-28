@@ -6,6 +6,14 @@ import { codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 const TERRAIN = new Set(['dirt', 'grass_block', 'stone', 'cobblestone', 'deepslate', 'netherrack', 'sand', 'gravel']);
 
+function visiblePortal(ctx: SkillCtx, positions: Vec3Like[], kinds: string[]) {
+  for (let offset = 0; offset < positions.length; offset += 32) {
+    const portal = ctx.senses.observeBlocks?.(positions.slice(offset, offset + 32)).find((block) => kinds.includes(block.name));
+    if (portal) return portal;
+  }
+  return undefined;
+}
+
 export const buildPortal: Skill<{ origin: Vec3Like; axis: 'x' | 'z' }> = {
   name: 'build_portal',
   description: '在身边用 10 块黑曜石建最小下界门并用打火石点燃；逐块验收，记录实际门位置。需要少量施工支撑块。',
@@ -90,7 +98,8 @@ export const observePortal: Skill<{}> = {
   async run(ctx) {
     ctx.senses.refresh();
     const state = ctx.adapter.state();
-    const portal = ctx.senses.knownBlocks(['nether_portal', 'end_portal', 'end_gateway'], 8).find((p) => ctx.adapter.blockAt(p.pos) === p.name);
+    const kinds = ['nether_portal', 'end_portal', 'end_gateway'];
+    const portal = visiblePortal(ctx, ctx.senses.knownBlocks(kinds, 8).map((block) => block.pos), kinds);
     if (!portal) return fail('NOT_FOUND', '附近没有已观察并能核对的传送门');
     const endpoint = travelStore(ctx.memory).observe(state, portal.pos, portal.name as PortalEndpoint['kind']);
     return ok(`记录传送门 ${endpoint.id}`, { portalId: endpoint.id, endpoint });
@@ -112,15 +121,13 @@ async function traverse(ctx: SkillCtx, endpoint: PortalEndpoint) {
     if (!result.ok || !result.from || !result.to) return fail('ERROR', `传送未验收：${result.reason}`);
     const to = result.to;
     if (!to.observationReady || to.dim === state.dim || to.worldId !== state.worldId || to.sessionId === state.sessionId) return fail('ERROR', '没有获得新维度的有效观察');
-    // Only the loaded blocks around the actual arrival position are inspected.
-    // An End arrival platform is not automatically a return portal.
-    let observed: Vec3Like | null = null;
-    for (let dx = -2; dx <= 2 && !observed; dx++) for (let dy = -1; dy <= 1 && !observed; dy++) for (let dz = -2; dz <= 2 && !observed; dz++) {
-      const pos = { x: Math.floor(to.pos.x) + dx, y: Math.floor(to.pos.y) + dy, z: Math.floor(to.pos.z) + dz };
-      if (adapter.blockAt(pos) === endpoint.kind) observed = pos;
-    }
+    // Arrival is a fact; a nearby return portal still requires fresh sight.
+    const positions = [-2, -1, 0, 1, 2].flatMap((dx) => [-1, 0, 1].flatMap((dy) => [-2, -1, 0, 1, 2].map((dz) => ({
+      x: Math.floor(to.pos.x) + dx, y: Math.floor(to.pos.y) + dy, z: Math.floor(to.pos.z) + dz,
+    }))));
+    const observed = visiblePortal(ctx, positions, [endpoint.kind]);
     const store = travelStore(ctx.memory);
-    const destination = store.observe(to, observed ?? to.pos, endpoint.kind, !!observed);
+    const destination = store.observe(to, observed?.pos ?? to.pos, endpoint.kind, !!observed);
     store.record(endpoint.id, destination.id, result.from, to);
     ctx.memory.setWorld(to.worldId);
     ctx.memory.addLandmark('waypoint', `传送到达 ${destination.id}`, to.dim, to.pos, 3);
@@ -196,7 +203,7 @@ export const useEndGateway: Skill<{ portalId?: string }> = {
     const store = travelStore(ctx.memory);
     senses.refresh();
     const known = args.portalId ? store.get(args.portalId, initial.worldId) : undefined;
-    const seen = !args.portalId ? senses.knownBlocks(['end_gateway'], 64).find((b) => adapter.blockAt(b.pos) === 'end_gateway') : undefined;
+    const seen = !args.portalId ? visiblePortal(ctx, senses.knownBlocks(['end_gateway'], 64).map((block) => block.pos), ['end_gateway']) : undefined;
     const endpoint = known ?? (seen ? store.observe(initial, seen.pos, 'end_gateway') : undefined);
     if (!endpoint || endpoint.kind !== 'end_gateway' || !endpoint.portalObserved || endpoint.dim !== initial.dim) return fail('NOT_FOUND', '没有当前维度已观察到的折跃门');
     try {
@@ -237,11 +244,10 @@ export const useEndGateway: Skill<{ portalId?: string }> = {
         if (!sameSession(to)) return fail('ERROR', '折跃过程会话中断，不能确认到达');
         if (pearlCount(to) < pearlsBefore) pearlConsumed = true;
         if (to.observationReady && dist3(from.pos, to.pos) >= 48) {
-          let returnPos: Vec3Like | null = null;
-          for (let dx = -3; dx <= 3 && !returnPos; dx++) for (let dy = -2; dy <= 2 && !returnPos; dy++) for (let dz = -3; dz <= 3 && !returnPos; dz++) {
-            const pos = { x: Math.floor(to.pos.x) + dx, y: Math.floor(to.pos.y) + dy, z: Math.floor(to.pos.z) + dz };
-            if (adapter.blockAt(pos) === 'end_gateway') returnPos = pos;
-          }
+          const positions = [-3, -2, -1, 0, 1, 2, 3].flatMap((dx) => [-2, -1, 0, 1, 2].flatMap((dy) => [-3, -2, -1, 0, 1, 2, 3].map((dz) => ({
+            x: Math.floor(to.pos.x) + dx, y: Math.floor(to.pos.y) + dy, z: Math.floor(to.pos.z) + dz,
+          }))));
+          const returnPos = visiblePortal(ctx, positions, ['end_gateway'])?.pos;
           const destination = store.observe(to, returnPos ?? to.pos, 'end_gateway', !!returnPos);
           store.recordGateway(endpoint.id, destination.id, from, to);
           ctx.memory.addLandmark('waypoint', `折跃后实际到达 ${destination.id}`, to.dim, to.pos, 3);

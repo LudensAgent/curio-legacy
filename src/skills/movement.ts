@@ -31,7 +31,8 @@ export function sighted(ctx: SkillCtx, target: string, options: { visibleOnly?: 
       const names = ctx.adapter.resolveBlockNames(t).filter(Boolean);
       if (names.length) {
         const candidates = ctx.senses.knownBlocks(names, 96).filter((b) => inDirection({ x: b.pos.x + .5, y: b.pos.y, z: b.pos.z + .5 }));
-        const hits = options.visibleOnly ? (ctx.senses.observeBlocks?.(candidates.slice(0, 32).map((b) => b.pos)) ?? []) : candidates;
+        const hits = options.visibleOnly ? Array.from({ length: Math.ceil(candidates.length / 32) }, (_, index) =>
+          ctx.senses.observeBlocks?.(candidates.slice(index * 32, (index + 1) * 32).map((b) => b.pos)) ?? []).flat() : candidates;
         const hit = hits.find((b) => names.includes(b.name));
         if (hit) return { what: hit.name, dist: Math.round(dist3(here, hit.pos)), key: `${hit.name}:${hit.pos.x},${hit.pos.y},${hit.pos.z}`, pos: hit.pos };
       }
@@ -51,7 +52,7 @@ export async function glance(ctx: SkillCtx, until?: string): Promise<{ what: str
     await ctx.adapter.look(eye.yaw + off, -0.15);
     await sleep(off === 0 ? 200 : 260, ctx.signal); // 视觉刷新节流 150ms：每个角度都要停够一次扫描
     ctx.senses.refresh();
-    const seen = until ? sighted(ctx, until) : null;
+    const seen = until ? sighted(ctx, until, { visibleOnly: true }) : null;
     if (seen) return seen;
   }
   return null;
@@ -96,7 +97,7 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
     const s = adapter.state();
     if (!s.connected) return fail('NOT_CONNECTED', '未连接');
     // 指定了方向就只算那个方向上看见的（要往东找陆地，西边身后那片草地不算）
-    const already = args.until ? sighted(ctx, args.until, args.direction !== 'AUTO' ? { direction: args.direction } : {}) : null;
+    const already = args.until ? sighted(ctx, args.until, { visibleOnly: true, ...(args.direction !== 'AUTO' ? { direction: args.direction } : {}) }) : null;
     const key = args.until ? searchKey(args.until) : '';
     if (already) {
       searches.delete(key);
@@ -186,7 +187,7 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
       ctx.progress(Math.min(1, movedNow() / distance));
       if (args.until && !seen) {
         ctx.senses.refresh();
-        seen = sighted(ctx, args.until);
+        seen = sighted(ctx, args.until, { visibleOnly: true });
         if (seen) stopWalk?.abort('target_seen');
       }
     }, 500);
@@ -302,7 +303,7 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; spri
       label = `作品 ${project.versions.at(-1)?.spec.name ?? project.id.slice(0, 8)}`;
     } else if (station) {
       pos = station.pos;
-      label = `${station.from === 'memory' ? '记得的' : '看到的'} ${args.target}`;
+      label = `${station.from === 'memory' ? '记得的' : '看到的'} ${args.target}${station.radius ? ` 所在区域中心（半径约${station.radius}格，具体位置未确认）` : ''}`;
     } else if (args.target.toLowerCase() === 'death') {
       const d = memory.lastDeath();
       if (!d) return fail('NOT_FOUND', '没有记录的死亡地点');

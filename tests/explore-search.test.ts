@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { Vision } from '../src/perception/vision.ts';
 import { explore, resetSearches } from '../src/skills/movement.ts';
 import { makeCtx, TestWorld } from './survival-helpers.ts';
 
@@ -64,6 +65,8 @@ test('沙漠里找木头：直接走远，并提示一直朝一个方向走到�
 
 test('找到目标后这趟搜寻结束，下次重新开始计算', async (t) => {
   const { w, ctx } = world(); t.after(() => ctx.memory.close());
+  const vision = new Vision(w);
+  ctx.senses.observeBlocks = vision.observeBlocks.bind(vision);
   await explore.run(ctx, { direction: 'E', distance: 48, until: 'log' });
   w.setBlock({ x: Math.floor(w.pos.x) + 3, y: 64, z: Math.floor(w.pos.z) }, 'oak_log');
   const found = await explore.run(ctx, { direction: 'E', distance: 48, until: 'log' });

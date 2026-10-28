@@ -98,6 +98,7 @@ test('黑曜石、岩浆这类做不出来的天然资源也记成资源点，�
 test('看见黑曜石时记下位置；看见岩浆既记成危险也记成资源', () => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null);
   adapter.blocks.push({ name: 'obsidian', pos: { x: 3, y: 64, z: 0 } }, { name: 'lava', pos: { x: 3, y: 64, z: 2 } });
+  adapter.blockProperties.set('3,64,2', { level: 0 });
   const perception = new Perception(adapter, memory, new EventBus(), new Vision(adapter));
   perception.update();
   const ls = memory.landmarks();

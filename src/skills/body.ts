@@ -1,6 +1,7 @@
 import { DIRS } from '../perception/perception.ts';
 import { DIR_OFFSETS, isSoftBlock, LIQUID_BLOCKS, surroundings } from '../perception/surroundings.ts';
 import { dirOfYaw, interactiveName } from '../perception/vision.ts';
+import { isContainerLandmark } from '../memory/chest-memory.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
 import { hasPlaceable } from './survival.ts';
 import { ensureToolFor } from './work.ts';
@@ -32,7 +33,21 @@ export async function breakCell(ctx: SkillCtx, c: Vec3Like, exact = false, info?
   // 只有 make:true 才能在身边工作台准备木镐；默认直接用现有工具或空手挖。
   if (ctx.make === true && !ctx.adapter.canHarvest(c) && findStation(ctx, ['crafting_table'], 4)) await ensureToolFor(ctx, c);
   if (exact && ctx.adapter.blockAt(c) !== name) throw new Error('TARGET_CHANGED：目标方块已经改变，停止拆除');
-  const r = await ctx.adapter.dig(c, ctx.signal);
+  const origin = ctx.adapter.state();
+  const affected = [c], properties = ctx.adapter.blockStateAt?.(c)?.properties ?? {};
+  const facing = ({ north: [0, -1], east: [1, 0], south: [0, 1], west: [-1, 0] } as Record<string, number[]>)[String(properties.facing)];
+  if (name?.endsWith('_bed') && facing && ['foot', 'head'].includes(String(properties.part))) {
+    const sign = properties.part === 'head' ? -1 : 1;
+    affected.push({ x: c.x + facing[0] * sign, y: c.y, z: c.z + facing[1] * sign });
+  } else if (name?.endsWith('_door') && ['lower', 'upper'].includes(String(properties.half))) affected.push({ ...c, y: c.y + (properties.half === 'lower' ? 1 : -1) });
+  const r = await ctx.adapter.dig(c, ctx.signal).finally(() => {
+    if (!name || ctx.memory.worldId !== origin.worldId || ctx.adapter.state().dim !== origin.dim) return;
+    const removed = affected.filter((pos) => { const after = ctx.adapter.blockAt(pos); return after !== null && after !== name; });
+    if (removed.length) {
+      forgetStationAt(ctx.memory, origin.dim, removed, name);
+      removed.forEach((pos) => ctx.memory.markGone(name, origin.dim, pos, ctx.adapter.blockAt(pos)!));
+    }
+  });
   if (!r.ok) throw new Error(r.reason ?? 'DIG_FAILED');
   if (info) { info.noDrop = !!r.noDrop; info.ms = r.digMs; }
   return name;
@@ -64,15 +79,18 @@ async function recoverBlock(ctx: SkillCtx, args: TargetDigArgs) {
   senses.refresh();
   let pos = coordinates(args.target), expected = args.block, landmarkLabel: string | undefined;
   if (!pos && typeof args.target === 'string') {
-    const landmark = memory.landmarks().find((l) => l.id === args.target || l.label === args.target);
+    const landmark = memory.findLandmark(args.target);
     if (landmark) {
       if (landmark.dim !== start.dim || landmark.worldId && landmark.worldId !== start.worldId) return fail('WRONG_DIMENSION', '目标地标不在当前世界/维度，未拆除');
+      if (landmark.radius) return fail('NOT_FOUND', `只记得 ${landmark.label} 所在区域（中心 ${landmark.pos.x},${landmark.pos.y},${landmark.pos.z}，半径约${landmark.radius}格）；具体方块需重新看见，未按隐藏坐标接近或拆除`);
       pos = floor(landmark.pos);
       landmarkLabel = landmark.label;
     } else {
       const names = adapter.resolveBlockNames(args.target);
-      const seen = senses.knownBlocks(names, 64).sort((a, b) => a.dist - b.dist)[0];
+      const known = senses.knownBlocks(names, 64).sort((a, b) => a.dist - b.dist);
+      const seen = known.find((hit) => !isContainerLandmark(hit.name) || senses.observeBlocks?.([hit.pos]).some((observed) => observed.name === hit.name));
       const station = seen ? null : findStation(ctx, names, 64);
+      if (station?.radius) return fail('NOT_FOUND', `只记得容器所在区域，半径约${station.radius}格；具体方块需重新看见，未拆除`);
       pos = seen ? floor(seen.pos) : station ? floor(station.pos) : null;
       expected ??= seen?.name;
       if (pos && !expected && names.includes(adapter.blockAt(pos) ?? '')) expected = adapter.blockAt(pos)!;

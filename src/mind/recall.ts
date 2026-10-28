@@ -4,13 +4,15 @@ import type { LedgerView } from './ledger.ts';
 import { cleanLesson, keywords, type SelfModel } from './self.ts';
 import { oreAlias } from '../memory/ore-spots.ts';
 import { creatureAlias, HERD_MAX_AGE_MS } from '../memory/creature-spots.ts';
+import { chestLocation, isContainerLandmark } from '../memory/chest-memory.ts';
+import { recallText } from '../memory/recollection.ts';
 
 /**
  * 按关键词想起来：像人看到眼前的事会想起以前的经历、学过的做法。
  * 不依赖外部服务：在日记、做过的事、窍门、游戏教训、技能书和记得的地方里，按关键词重叠 + 新近程度挑出最相关的几条。
  * 每次思考前自动想一遍（结果放进提示词）；模型也可以主动 {"kind":"recall","query":"…"} 再想。
  */
-export interface Recalled { kind: 'experience' | 'diary' | 'know_how' | 'lesson' | 'skill' | 'place' | 'note' | 'ledger'; text: string; score: number; ref?: string; at?: number }
+export interface Recalled { kind: 'experience' | 'diary' | 'know_how' | 'lesson' | 'skill' | 'place' | 'note' | 'ledger'; text: string; score: number; ref?: string; at?: number; worldId?: string; dimension?: string; source?: string }
 
 export interface RecallSources { self: SelfModel; memory: WorldMemory; book?: SkillBook | null; extraSkills?: { name: string; text: string }[]; ledger?: LedgerView | null }
 
@@ -37,7 +39,8 @@ export function recallLocal(query: string, src: RecallSources, opts: { n?: numbe
   // 已经在提示词别处出现的不重复；技能要更相关才算想起来（只沾一两个字的建筑说明不算）
   const push = (r: Omit<Recalled, 'score'>, base: number, at = 0) => {
     if (r.ref && hide.has(r.ref)) return;
-    if (base >= (r.kind === 'skill' ? 3 : 2)) out.push({ ...r, score: base + fresh(at), ...(at ? { at } : {}) });
+    const observedAt = ['know_how', 'lesson', 'diary'].includes(r.kind) || r.kind === 'note' && r.source !== 'note:fact' ? 0 : at || undefined;
+    if (base >= (r.kind === 'skill' ? 3 : 2)) out.push({ ...r, text: r.kind === 'skill' ? r.text : recallText(r.text, src.memory, r.dimension, observedAt, now), score: base + fresh(at), ...(at ? { at } : {}) });
   };
 
   if (!skip.has('experience')) for (const r of src.self.history(60)) {
@@ -54,7 +57,7 @@ export function recallLocal(query: string, src: RecallSources, opts: { n?: numbe
     try { for (const l of src.memory.lessonsFor(40)) push({ kind: 'lesson', text: l.text.slice(0, 120) }, score(l.text), l.ts); } catch { /* 记忆暂不可用 */ }
   }
   if (!skip.has('note')) {
-    try { for (const n of src.memory.notesFor({ n: 30 })) push({ kind: 'note', text: n.text.slice(0, 120) }, score(n.text), n.ts); } catch { /* 记忆暂不可用 */ }
+    try { for (const n of src.memory.notesFor({ n: 30 })) push({ kind: 'note', text: `${n.text.slice(0, 120)}〔${n.kind}，${n.dimension ?? '维度未标注'}，${ago(n.ts, now)}的笔记〕`, worldId: n.worldId, dimension: n.dimension, source: `note:${n.kind}` }, score(n.text), n.ts); } catch { /* 记忆暂不可用 */ }
   }
   if (!skip.has('skill')) {
     for (const s of src.book?.list() ?? []) push({ kind: 'skill', text: `${s.name}：${s.description}`, ref: s.name }, score(`${s.name.replace(/-/g, ' ')} ${s.description}`, [s.body.slice(0, 600)]) * 0.9);
@@ -65,7 +68,9 @@ export function recallLocal(query: string, src: RecallSources, opts: { n?: numbe
       for (const l of src.memory.landmarks()) {
         const herd = l.kind === 'herd';
         if (herd && now - l.ts > HERD_MAX_AGE_MS) continue; // 动物早走远了
-        push({ kind: 'place', text: `${l.label} (${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}) ${l.dim}${herd ? `，${ago(l.ts, now)}见过 ${l.count ?? 1} 只${l.detail ? `（${l.detail}）` : ''}` : ''}`, ref: l.id },
+        const location = isContainerLandmark(l.label) ? chestLocation(l, { now }) : null;
+        const where = location ? location.text : `(${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)})`;
+        push({ kind: 'place', text: `${l.label} ${where} ${l.dim}${herd ? `，${ago(l.ts, now)}见过 ${l.count ?? 1} 只${l.detail ? `（${l.detail}）` : ''}` : `，${ago(l.ts, now)}的历史地点，当前状态待复核`}`, ref: l.id, worldId: l.worldId, dimension: l.dim, source: 'historical_observation' },
           score(`${l.label} ${l.kind}`, [oreAlias(l.label), herd ? creatureAlias(l.label) : '']), l.ts);
       }
     } catch { /* 记忆暂不可用 */ }

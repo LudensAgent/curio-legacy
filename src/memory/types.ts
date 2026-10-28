@@ -13,7 +13,11 @@ export interface MemoryEntry {
   text: string;
   source: string;
   observedAt?: string;
+  mentionedAt?: string;
   kind?: string;
+  worldId?: string;
+  dimension?: string;
+  historical?: boolean;
 }
 
 export interface RecallRequest {

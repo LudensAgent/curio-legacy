@@ -8,8 +8,6 @@ import type { Landmark } from './store.ts';
 
 /** 超过这么久没再看见，就不当回事了（动物会走远） */
 export const HERD_MAX_AGE_MS = 3 * 3600_000;
-/** 不值得记的：一闪而过、或者本来就到处都是 */
-export const HERD_SKIP = new Set(['bat', 'glow_squid', 'tropical_fish', 'pufferfish', 'wandering_trader', 'trader_llama']);
 
 /** 中文里说起它的词：回想按词重叠打分，“找羊”“羊毛”要能想起 sheep */
 const CREATURE_ZH: Record<string, string> = {

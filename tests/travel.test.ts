@@ -57,7 +57,7 @@ test('a refused ignition cannot produce a successful portal record', async () =>
 });
 
 test('portal travel records observed coordinates in both dimensions and verifies a return only after returning', async () => {
-  const { adapter, memory, run } = setup();
+  const { adapter, memory, vision, run } = setup();
   const sourcePos = { x: 3, y: 64, z: 0 };
   const destinationPos = { x: 71, y: 55, z: -33 }; // deliberately unrelated to coordinate scaling
   adapter.blocks.push({ name: 'nether_portal', pos: sourcePos });
@@ -71,6 +71,14 @@ test('portal travel records observed coordinates in both dimensions and verifies
   assert.equal(first.routes[0].returnVerified, false);
   const destination = first.endpoints.find((e) => e.dim === 'the_nether')!;
   assert.deepEqual(destination.pos, destinationPos);
+  assert.equal(destination.portalObserved, false, 'arrival inside a portal is not a fresh sight line to it');
+  adapter.groundY = destinationPos.y - 1;
+  adapter.pos = { ...destinationPos, x: destinationPos.x - 3 };
+  await adapter.look(-Math.PI / 2, -0.3);
+  vision.scan();
+  assert.equal(vision.observeBlocks([destinationPos])[0]?.name, 'nether_portal');
+  assert.equal((await run('observe_portal')).result.status, 'succeeded');
+  assert.equal(travelStore(memory).get(destination.id, adapter.worldId)?.portalObserved, true);
   const returned = await run('recall_portal', { returnId: destination.id });
   assert.equal(returned.result.status, 'succeeded', returned.result.summary);
   assert.equal(adapter.dim, 'overworld');
@@ -158,7 +166,7 @@ test('equip_armor confirms real slots and ranged_defend spends arrows without cl
 });
 
 test('End gateway records actual same-session displacement and only verifies return after a second teleport', async () => {
-  const { adapter, memory, run } = setup();
+  const { adapter, memory, vision, run } = setup();
   adapter.dim = 'the_end'; adapter.inv.set('ender_pearl', 2);
   const sourcePos = { x: 3, y: 64, z: 0 }, outerPos = { x: 1011, y: 74, z: -202 };
   adapter.blocks.push({ name: 'end_gateway', pos: sourcePos }, { name: 'end_gateway', pos: outerPos });
@@ -177,6 +185,11 @@ test('End gateway records actual same-session displacement and only verifies ret
   assert.equal(first.gateways[0].returnVerified, false);
   const destination = first.endpoints.find((e) => e.pos.x > 100)!;
   assert.deepEqual(destination.pos, outerPos);
+  adapter.pos = { ...outerPos, x: outerPos.x - 3 };
+  await adapter.look(-Math.PI / 2, -0.3);
+  vision.scan();
+  assert.equal(vision.observeBlocks([outerPos])[0]?.name, 'end_gateway');
+  assert.equal((await run('observe_portal')).result.status, 'succeeded');
   assert.equal((await run('use_end_gateway', { portalId: destination.id })).result.status, 'succeeded');
   assert.ok(travelStore(memory).snapshot(adapter.worldId).gateways.every((r) => r.returnVerified));
   assert.equal(adapter.inv.get('ender_pearl'), 0);

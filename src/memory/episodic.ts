@@ -6,6 +6,8 @@ import { EventBus, type AgentEvent } from '../events.ts';
 import type { WorldMemory } from './store.ts';
 import { registerMemoryBackend } from './registry.ts';
 import type { MemoryBackend, MemoryContext, MemoryEntry, MemoryEpisode, MemoryRecall, MemorySettings } from './types.ts';
+import { recallText } from './recollection.ts';
+import { chestLocation, isContainerLandmark } from './chest-memory.ts';
 
 type RecallContext = Parameters<MemoryRecall['recall']>[0];
 interface PendingEpisode { episode: MemoryEpisode; attempts: number; nextAttemptAt: number }
@@ -163,7 +165,7 @@ export class EpisodicMemory implements MemoryRecall {
       const kind = INFERENCE_EVENTS.has(event.type) ? 'inference' : 'experience';
       const position = [state.pos.x, state.pos.y, state.pos.z].map(Math.round);
       const detail = event.data ? JSON.stringify(event.data).slice(0, 3000) : '';
-      const text = `${event.msg.slice(0, 4000)} @ ${state.dim} ${position.join(',')}${detail ? `\n${detail}` : ''}`;
+      const text = recallText(`${event.msg.slice(0, 4000)} @ ${state.dim} ${position.join(',')}${detail ? `\n${detail}` : ''}`, this.memory, state.dim, event.ts);
       const episode: MemoryEpisode = {
         id: `mc-${hash(JSON.stringify([this.settings.agentId, worldId, state.dim, event.ts, event.type, text]))}`,
         ts: event.ts, worldId, dimension: state.dim, kind, source: event.type, text,
@@ -182,8 +184,8 @@ export class EpisodicMemory implements MemoryRecall {
       // 几秒钟就顺利做完的小活只留在本地归档里，远程只存卡住、放弃、做了一分钟以上的，以及发现、死亡、建成
       const d = (event.data ?? {}) as Record<string, unknown>;
       const notable = event.type !== 'attempt_end' || d.outcome !== 'done' || Number(d.durationSec ?? 0) >= 60;
-      if (this.remoteEnabled() && this.writable && notable) {
-        this.queue.push({ episode: detail.length > 800 ? { ...episode, text: `${event.msg.slice(0, 4000)} @ ${state.dim} ${position.join(',')}\n${detail.slice(0, 800)}` } : episode, attempts: 0, nextAttemptAt: 0 });
+      if (this.remoteEnabled() && this.writable && notable && ['overworld', 'the_nether', 'the_end'].includes(state.dim)) {
+        this.queue.push({ episode: detail.length > 800 ? { ...episode, text: recallText(`${event.msg.slice(0, 4000)} @ ${state.dim} ${position.join(',')}\n${detail.slice(0, 800)}`, this.memory, state.dim, event.ts) } : episode, attempts: 0, nextAttemptAt: 0 });
         if (this.persistQueue()) this.scheduleDrain();
       }
     } catch { this.warn('记忆事件处理失败；游戏继续运行。'); }
@@ -267,7 +269,7 @@ export class EpisodicMemory implements MemoryRecall {
       ...m.landmarks().map((landmark) => {
         const l = landmark as typeof landmark & HistoricalScope;
         return { entry: { id: `landmark:${l.id}`, text: l.worldId
-          ? `${l.label} @ ${l.dim} ${JSON.stringify(l.pos)} (historical location; verify on arrival)`
+          ? `${l.label} @ ${l.dim} ${isContainerLandmark(l.label) ? chestLocation(l).text : JSON.stringify(l.pos)} (historical location; verify on arrival)`
           : `${l.label} (legacy observation; world and location unverified)`,
         source: l.worldId ? 'landmark' : 'legacy:landmark', kind: l.worldId ? 'experience' : 'inference', observedAt: new Date(l.ts).toISOString() }, ts: l.ts, worldId: l.worldId, dimension: l.dim, searchText: l.label };
       }),
@@ -284,7 +286,8 @@ export class EpisodicMemory implements MemoryRecall {
       .filter((r) => !q.size || r.overlap > 0)
       .sort((a, b) => b.score - a.score)
       .filter((r) => { if (seen.has(r.entry.text)) return false; seen.add(r.entry.text); return true; })
-      .slice(0, 20).map((r) => r.entry);
+      .slice(0, 20).map((r) => ({ ...r.entry, worldId: r.worldId, dimension: r.dimension, historical: true,
+        text: recallText(r.entry.text, m, r.dimension, r.entry.kind === 'experience' || r.entry.kind === 'fact' ? r.ts : 0) }));
   }
 
   /** JSON byte budget includes the query, provenance, and all other returned metadata. */
@@ -295,8 +298,10 @@ export class EpisodicMemory implements MemoryRecall {
     while (bytes(result) > budget && result.query.length) result.query = result.query.slice(0, Math.floor(result.query.length / 2));
     for (const candidate of memories) {
       if (!candidate || typeof candidate.text !== 'string' || typeof candidate.id !== 'string' || typeof candidate.source !== 'string') continue;
-      const entry: MemoryEntry = { id: candidate.id.slice(0, 200), text: candidate.text.slice(0, 6000), source: candidate.source.slice(0, 100) };
+      const entry: MemoryEntry = { id: candidate.id.slice(0, 200), text: candidate.text.slice(0, 6000), source: candidate.source.slice(0, 100), historical: true,
+        ...(candidate.worldId ? { worldId: candidate.worldId.slice(0, 160) } : {}), ...(candidate.dimension ? { dimension: candidate.dimension.slice(0, 160) } : {}) };
       if (typeof candidate.observedAt === 'string') entry.observedAt = candidate.observedAt.slice(0, 50);
+      if (candidate.mentionedAt) entry.mentionedAt = candidate.mentionedAt.slice(0, 50);
       if (typeof candidate.kind === 'string') entry.kind = candidate.kind.slice(0, 30);
       result.memories.push(entry);
       while (bytes(result) > budget && entry.text.length) entry.text = entry.text.slice(0, Math.floor(entry.text.length * 0.75));
@@ -318,7 +323,8 @@ export class EpisodicMemory implements MemoryRecall {
           if (generation === this.generation && this.started) {
             this.recallFailures = 0;
             this.nextRecallAt = 0;
-            if (memories.length) return this.bounded('hindsight', query, memories);
+            if (memories.length) return this.bounded('hindsight', query, memories.map((entry) => ({ ...entry, worldId: this.settings.worldId, dimension,
+              text: recallText(entry.text, this.memory, dimension, entry.kind === 'experience' && entry.observedAt ? Date.parse(entry.observedAt) : 0) })));
           }
         } catch {
           if (generation === this.generation) {

@@ -55,14 +55,17 @@ test('记忆迁移：旧版本穿墙得来的矿物地标被清掉，自己的�
   assert.equal(new WorldMemory(file).migrated, 0, '迁移只做一次');
 });
 
-test('过时地标：走到资源地标跟前（5 格内）却看不到矿，gather 失败并把地标删掉', async () => {
+test('近处矿点看不到不等于消失：gather 失败，保留尚未重新确认的历史线索', async (t) => {
   const a = new FakeAdapter();
   const memory = new WorldMemory(null);
-  memory.addLandmark('resource', 'iron_ore', 'overworld', { x: 2, y: 63, z: 2 });
+  t.after(() => memory.close()); memory.setWorld(a.state().worldId);
+  const landmark = memory.addLandmark('resource', 'iron_ore', 'overworld', { x: 2, y: 63, z: 2 });
+  assert.ok(landmark);
   const { o } = await runSkill(a, 'gather', { block: 'iron_ore', count: 2 }, memory);
   assert.equal(o.result.failureCode, 'NOT_FOUND');
-  assert.match(o.result.summary, /过时的 iron_ore 地标/);
-  assert.equal(memory.landmarks().filter((l) => l.kind === 'resource').length, 0);
+  assert.match(o.result.summary, /历史 iron_ore 地点尚未重新确认，保留线索/);
+  assert.deepEqual(memory.landmarks().filter((l) => l.kind === 'resource').map((l) => l.id), [landmark.id]);
+  assert.doesNotMatch(o.result.summary, /删掉|已经消失|资源已经没了/);
 });
 
 test('远一点、埋在石头里的矿点看不见不删：留着，并在失败结果里说出在哪', async () => {
@@ -101,16 +104,22 @@ test('冶炼：生铁 + 煤 → 铁锭', async () => {
 test('仓储：存进箱子（工具留身上），再取出来', async () => {
   const a = new FakeAdapter();
   a.inv.set('chest', 1);
+  a.inv.set('stone_pickaxe', 1);
   a.inv.set('dirt', 40);
   a.inv.set('raw_copper', 9);
   const memory = new WorldMemory(null);
-  let r = await runSkill(a, 'store_items', { items: ['dirt:24', 'raw_copper'], make: true }, memory);
+  memory.setWorld(a.state().worldId);
+  const target = { x: 2, y: 64, z: 0 };
+  a.blocks.push({ name: 'chest', pos: target });
+  a.chests.set('2,64,0', new Map());
+  let r = await runSkill(a, 'store_items', { items: ['dirt:24', 'raw_copper'], target }, memory);
   assert.equal(r.o.result.status, 'succeeded', JSON.stringify(r.o.result));
   assert.equal(a.inv.get('dirt'), 16, '只存点名的 24 个泥土');
   assert.equal(a.inv.get('raw_copper'), 0);
-  assert.equal(a.inv.get('stone_pickaxe') ?? a.inv.get('wooden_pickaxe') ?? 1, a.inv.get('stone_pickaxe') ?? a.inv.get('wooden_pickaxe') ?? 1);
+  assert.equal(a.inv.get('stone_pickaxe'), 1, '未点名的工具留身上');
+  assert.equal(a.inv.get('chest'), 1, '没有自动放置背包里的箱子');
   assert.equal(memory.chests().length, 1);
-  r = await runSkill(a, 'take_items', { item: 'raw_copper', count: 4 }, memory);
+  r = await runSkill(a, 'take_items', { item: 'raw_copper', count: 4, target }, memory);
   assert.equal(r.o.result.status, 'succeeded', r.o.result.summary);
   assert.equal(a.inv.get('raw_copper'), 4);
 });
@@ -152,7 +161,7 @@ test('自学：重复 succeeded 步骤不自动变成习惯；步骤签名仍可
   assert.equal(learnCandidates(m, new Set([signatureOf(plan)])).length, 0, '学过的不再提示');
 });
 
-test('仓储：存什么由它点名，没点名的一样不动；结果写清箱子坐标', async () => {
+test('仓储：存什么和存入哪个箱子由它点名，没点名的一样不动', async () => {
   const a = new FakeAdapter();
   a.inv.set('chest', 1);
   a.inv.set('iron_ingot', 7);
@@ -160,6 +169,10 @@ test('仓储：存什么由它点名，没点名的一样不动；结果写清�
   a.inv.set('andesite', 10);
   a.inv.set('raw_copper', 5);
   const memory = new WorldMemory(null);
+  memory.setWorld(a.state().worldId);
+  const target = { x: 2, y: 64, z: 0 };
+  a.blocks.push({ name: 'chest', pos: target });
+  a.chests.set('2,64,0', new Map());
   assert.equal(storeItems.validate({}, undefined as any).ok, false, '不点名就不存');
   assert.equal(storeItems.validate({ items: 'not an array!' }, undefined as any).ok, false);
   assert.deepEqual((storeItems.validate({ items: ['dirt:32', 'minecraft:*_log'] }, undefined as any) as any).args.items, [{ name: 'dirt', count: 32 }, { name: '*_log' }]);
@@ -168,29 +181,29 @@ test('仓储：存什么由它点名，没点名的一样不动；结果写清�
     [{ name: 'granite', count: 40 }, { name: 'diorite' }, { name: 'gravel' }]);
   assert.deepEqual((storeItems.validate({ items: { dirt: 32, andesite: true } }, undefined as any) as any).args.items, [{ name: 'dirt', count: 32 }, { name: 'andesite' }]);
   assert.equal(storeItems.validate({ items: [{ count: 3 }] }, undefined as any).ok, false, '对象没名字不收');
-  let r = await runSkill(a, 'store_items', { items: ['cobblestone', 'and*', 'gravel'], make: true }, memory);
+  const r = await runSkill(a, 'store_items', { items: ['cobblestone', 'and*', 'gravel'], target }, memory);
   assert.equal(r.o.result.status, 'succeeded', r.o.result.summary);
   assert.equal(a.inv.get('cobblestone') ?? 0, 0, '点名的整包存');
   assert.equal(a.inv.get('andesite') ?? 0, 0, '通配');
   assert.equal(a.inv.get('raw_copper'), 5, '没点名的不动');
   assert.equal(a.inv.get('iron_ingot'), 7, '没点名的不动');
-  assert.match(r.o.result.summary, /\(-?\d+,-?\d+,-?\d+\)/);
+  assert.deepEqual([...a.chests.get('2,64,0')!], [['cobblestone', 50], ['andesite', 10]], '只操作指定容器和实际存在的点名物品');
   assert.match(r.o.result.summary, /cobblestone×50/);
   assert.match(r.o.result.summary, /没有 gravel/);
 });
 
-test('仓储默认不制造或放置箱子，缺的是已放置箱子而非断言缺材料', async (t) => {
-  for (const preparation of ['chest', 'oak_planks']) {
+test('仓储未指定 target 只返回线索，make:true 也不制造或放置箱子', async (t) => {
+  for (const preparation of ['chest', 'oak_planks']) for (const make of [false, true]) {
     const a = new FakeAdapter(), memory = new WorldMemory(null);
     t.after(() => memory.close());
     a.inv.set(preparation, preparation === 'chest' ? 1 : 8);
     a.inv.set('dirt', 40);
     const before = [...a.inv];
-    const { o } = await runSkill(a, 'store_items', { items: ['dirt:24'] }, memory);
+    const { o } = await runSkill(a, 'store_items', { items: ['dirt:24'], make }, memory);
     assert.equal(o.result.status, 'failed');
-    assert.equal(o.result.failureCode, 'MISSING_MATERIALS');
-    assert.match(o.result.summary, /箱子/);
-    assert.match(o.result.summary, /make:true/);
+    assert.equal(o.result.failureCode, 'BAD_ARGS');
+    assert.match(o.result.summary, /target/);
+    assert.deepEqual(o.result.data?.candidates, []);
     assert.doesNotMatch(o.result.summary, /也做不了/);
     assert.deepEqual([...a.inv], before, '准备材料和待存物品都保留');
     assert.ok(!a.actions.some((action) => /^(craft|place):chest$/.test(action)));

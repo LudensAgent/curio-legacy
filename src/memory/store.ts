@@ -5,7 +5,7 @@ import { dist3, shortId } from '../util.ts';
 import { reservationsFor } from '../projects/reservations.ts';
 import type { Decision, Intent, Preference } from '../intentions/types.ts';
 import type { Evidence, PauseReason, Project } from '../projects/types.ts';
-import { applyUse, migrateRecord, prune, recall, type ChestRecall, type ChestRecord, type ChestUse, type Clock } from './chest-memory.ts';
+import { applyUse, chestLocation, isContainerLandmark, migrateRecord, prune, recall, type ChestRecall, type ChestRecord, type ChestUse, type Clock } from './chest-memory.ts';
 
 export type { ChestRecord, ChestRecall, ChestTrace, ChestUse, ChestQty, Confidence } from './chest-memory.ts';
 
@@ -24,6 +24,10 @@ export interface Landmark {
   /** herd（不主动攻击的生物出没点）：上次看见几只、外观（羊的颜色等） */
   count?: number;
   detail?: string;
+  /** Recall-only location projection; historical container areas are not exact interaction targets. */
+  radius?: number;
+  precise?: boolean;
+  observedAt?: number;
 }
 
 export interface GoalRecord {
@@ -459,13 +463,14 @@ export class WorldMemory {
 
   // ------------------------------------------------ 地标
   addLandmark(kind: LandmarkKind, label: string, dim: string, pos: Vec3Like, dedupeRadius = 24): Landmark | null {
+    const radius = kind === 'discovery' && isContainerLandmark(label) ? 0.1 : dedupeRadius;
     const near = this.data.landmarks.find(
-      (l) => this.inWorld(l) && l.kind === kind && l.label === label && l.dim === dim && dist3(l.pos, pos) < dedupeRadius,
+      (l) => this.inWorld(l) && l.kind === kind && l.label === label && l.dim === dim && dist3(l.pos, pos) < radius,
     );
     if (near) { near.ts = Date.now(); this.touch(); return null; }
     // 同一格的“工作台”和“我的工作台”只留一个：自己的那个
     if (kind === 'discovery') {
-      const own = label.startsWith('我的') ? null : this.data.landmarks.find((l) => this.inWorld(l) && l.kind === 'discovery' && l.label === `我的${label}` && l.dim === dim && dist3(l.pos, pos) <= 2);
+      const own = label.startsWith('我的') ? null : this.data.landmarks.find((l) => this.inWorld(l) && l.kind === 'discovery' && l.label === `我的${label}` && l.dim === dim && dist3(l.pos, pos) <= (isContainerLandmark(label) ? 0.1 : 2));
       if (own) { own.ts = Date.now(); this.touch(); return null; }
       if (label.startsWith('我的')) this.dropPlainTwins(label, dim, pos);
     }
@@ -489,11 +494,12 @@ export class WorldMemory {
     return lm;
   }
 
-  /** “我的X”记下时，同一格（2 格内）看见时记的“X”就多余了 */
+  /** Containers only dedupe in the same cell; existing multi-block station rules remain unchanged. */
   private dropPlainTwins(ownLabel: string, dim: string, pos: Vec3Like, worldId = this.worldId) {
     const plain = ownLabel.slice('我的'.length);
+    const radius = isContainerLandmark(plain) ? 0.1 : 2;
     const before = this.data.landmarks.length;
-    this.data.landmarks = this.data.landmarks.filter((l) => !((l.worldId ?? 'default') === worldId && l.kind === 'discovery' && l.label === plain && l.dim === dim && dist3(l.pos, pos) <= 2));
+    this.data.landmarks = this.data.landmarks.filter((l) => !((l.worldId ?? 'default') === worldId && l.kind === 'discovery' && l.label === plain && l.dim === dim && dist3(l.pos, pos) <= radius));
     if (this.data.landmarks.length !== before) this.touch();
   }
 
@@ -586,12 +592,15 @@ export class WorldMemory {
   findLandmark(q: string, dim?: string): Landmark | undefined {
     const s = q.trim().toLowerCase();
     if (s === 'base' || s === '基地') return this.base(dim);
-    const candidates = this.landmarks().filter((l) => (!dim || l.dim === dim) && (l.kind !== 'resource' || Date.now() - l.ts <= 15 * 60_000));
-    return (
+    const candidates = this.landmarks().filter((l) => !dim || l.dim === dim);
+    const found = (
       candidates.find((l) => l.id.toLowerCase() === s) ??
       candidates.find((l) => l.label.toLowerCase() === s) ??
       candidates.find((l) => l.label.toLowerCase().includes(s))
     );
+    if (!found || !isContainerLandmark(found.label)) return found;
+    const location = chestLocation(found);
+    return { ...found, pos: location.pos, radius: location.radius, precise: location.precise, observedAt: location.observedAt };
   }
 
   landmarks(): Landmark[] {
@@ -645,7 +654,7 @@ export class WorldMemory {
 
   /** 资源地标附近 radius 格内、名字匹配 names 的地标 */
   resourceLandmarksNear(names: string[], dim: string, pos: Vec3Like, radius: number): Landmark[] {
-    return this.landmarks().filter((l) => l.kind === 'resource' && Date.now() - l.ts <= 15 * 60_000 && l.dim === dim && names.includes(l.label) && dist3(l.pos, pos) <= radius);
+    return this.landmarks().filter((l) => l.kind === 'resource' && l.dim === dim && names.includes(l.label) && dist3(l.pos, pos) <= radius);
   }
 
   // ------------------------------------------------ 技能 / 目标 / 笔记
@@ -846,8 +855,8 @@ export class WorldMemory {
     const all = (this.data.chests ??= {});
     this.data.chestOps = (this.data.chestOps ?? 0) + 1;
     const rec = all[k] ?? (all[k] = { worldId: this.worldId, dim, pos: { x: pos.x, y: pos.y, z: pos.z }, uses: 0, ts: Date.now(), traces: [] });
-    const clock = this.chestClock(use.day);
-    applyUse(rec, { ...use, now: use.now ?? clock.now }, clock);
+    const clock = { ...this.chestClock(use.day), now: use.now ?? Date.now() };
+    applyUse(rec, use, clock);
     prune(rec, clock);
     this.touch();
     return rec;

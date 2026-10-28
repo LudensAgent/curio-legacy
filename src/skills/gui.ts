@@ -1,4 +1,4 @@
-import type { GuiOp, GuiTarget, GuiView, TradeView, Vec3Like } from '../adapter/types.ts';
+import type { GuiContainerObservation, GuiOp, GuiTarget, GuiView, TradeView, Vec3Like } from '../adapter/types.ts';
 import { dist3 } from '../util.ts';
 import { glanceAt, inspectBlock } from './observation.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill } from './types.ts';
@@ -84,6 +84,7 @@ export const useGui: Skill<{ target: string | Vec3Like | { entityId: number }; o
   },
   async run(ctx, args) {
     const { adapter, senses, signal } = ctx;
+    const origin = adapter.state();
     if (!adapter.useGui) return fail('ERROR', '当前适配器不支持界面操作');
     try {
       let target: GuiTarget;
@@ -109,7 +110,14 @@ export const useGui: Skill<{ target: string | Vec3Like | { entityId: number }; o
         target = pos;
       }
       const pos = target;
-      const r = await adapter.useGui(target, args.ops, signal);
+      let recorded = false;
+      const rememberContainer = (observation: GuiContainerObservation) => {
+        if (typeof pos !== 'object' || !('x' in pos) || ctx.memory.worldId !== origin.worldId) return;
+        ctx.memory.noteChestUse(origin.dim, pos, { put: observation.put, took: observation.took, seen: observation.after, day: origin.worldDay });
+        recorded = true;
+      };
+      const r = await adapter.useGui(target, args.ops, signal, { onContainer: rememberContainer });
+      if (!recorded && r.container) rememberContainer(r.container);
       // 熔炉类：关掉后里面的东西留着，记下来（取空了就忘掉）
       if (typeof pos === 'object' && 'x' in pos && r.view && /^(furnace|blast_furnace|smoker)$/.test(r.view.type)) {
         const at = (i: number) => { const x = r.view!.slots.find((sl) => sl.slot === i); return x?.name && x.count > 0 ? { name: x.name, count: x.count } : null; };

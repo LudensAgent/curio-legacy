@@ -1,5 +1,7 @@
 import type { BlockHit, BlockObservation, EntityInfo, Eye, GameAdapter, Optics, Vec3Like } from '../adapter/types.ts';
 import type { LandingOption } from '../skills/types.ts';
+import minecraftData from 'minecraft-data';
+import { isResourceBlock } from '../memory/ore-spots.ts';
 
 /**
  * AI 视觉（不使用图片）：用区块数据模拟“人眼能看到的范围”。
@@ -28,8 +30,8 @@ export interface VisionConfig {
 }
 
 export const DEFAULT_VISION: VisionConfig = { range: 0, hFov: 100, vFov: 60, cols: 40, rows: 24, hearRadius: 10, bandCols: 160, bandRows: 8 };
-const FALLBACK_RANGE = 160;
-const MAX_RANGE = 256;
+const FALLBACK_RANGE = 64;
+const MAX_RANGE = 64;
 
 export const CATS = ['unknown', 'sky', 'dark', 'water', 'lava', 'leaves', 'wood', 'grass', 'dirt', 'sand', 'stone', 'ore', 'snow', 'plant', 'built', 'other'] as const;
 export type Cat = (typeof CATS)[number];
@@ -59,23 +61,30 @@ export function catOf(name: string): Cat {
 }
 
 const LOGS = ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log'];
-const ORES = ['coal', 'iron', 'copper', 'gold', 'redstone', 'lapis', 'diamond', 'emerald'].flatMap((o) => [`${o}_ore`, `deepslate_${o}_ore`]);
-/** 值得记住位置的方块（资源/结构/危险） */
-/** 可交互的功能方块（中文名）：看见了会记住位置，自己放下的记成“我的X”，用的时候先复用 */
+const BLOCK_NAMES = minecraftData('1.20.1').blocksArray.map((block) => block.name);
+/** 名称后缀表示同一交互机制；变种由当前版本的注册表提供。 */
+const INTERACTIVE_FAMILIES = [['_door', '门'], ['_trapdoor', '活板门'], ['_fence_gate', '栅栏门'], ['_button', '按钮'],
+  ['_pressure_plate', '压力板'], ['_sign', '告示牌'], ['_shulker_box', '潜影盒'], ['_bed', '床']];
+/** 可交互的功能方块：记录世界事实，不决定何时或如何使用。 */
 export const INTERACTIVE_BLOCKS: Record<string, string> = {
   crafting_table: '工作台', furnace: '熔炉', smoker: '烟熏炉', blast_furnace: '高炉', chest: '箱子', trapped_chest: '陷阱箱', barrel: '木桶',
   ender_chest: '末影箱', anvil: '铁砧', chipped_anvil: '开裂的铁砧', damaged_anvil: '损坏的铁砧', enchanting_table: '附魔台', smithing_table: '锻造台',
   stonecutter: '切石机', loom: '织布机', grindstone: '砂轮', brewing_stand: '酿造台', cauldron: '炼药锅', water_cauldron: '炼药锅', composter: '堆肥桶',
   lectern: '讲台', cartography_table: '制图台', fletching_table: '制箭台', note_block: '音符盒', jukebox: '唱片机', bell: '钟', beacon: '信标',
   respawn_anchor: '重生锚', lodestone: '磁石', campfire: '营火', soul_campfire: '灵魂营火', hopper: '漏斗', dispenser: '发射器', dropper: '投掷器',
+  lever: '拉杆', shulker_box: '潜影盒', repeater: '红石中继器', comparator: '红石比较器', daylight_detector: '阳光探测器', cake: '蛋糕',
+  lava_cauldron: '炼药锅', powder_snow_cauldron: '炼药锅', chiseled_bookshelf: '雕纹书架', end_portal_frame: '末地传送门框架',
+  beehive: '蜂箱', bee_nest: '蜂巢',
+  ...Object.fromEntries(BLOCK_NAMES.flatMap((name) => {
+    const family = INTERACTIVE_FAMILIES.find(([suffix]) => name.endsWith(suffix));
+    return family ? [[name, family[1]]] : [];
+  })),
 };
-/** 任意颜色的床都算“床” */
-export const interactiveName = (block: string): string | undefined => INTERACTIVE_BLOCKS[block] ?? (block.endsWith('_bed') ? '床' : undefined);
+export const interactiveName = (block: string): string | undefined => INTERACTIVE_BLOCKS[block];
 
+/** 与持久资源分类使用同一入口，避免看见了却无法留下地点。 */
 export const NOTABLE = new Set([
-  ...LOGS, ...ORES, ...Object.keys(INTERACTIVE_BLOCKS),
-  ...['oak', 'spruce', 'birch', 'jungle', 'acacia', 'dark_oak', 'mangrove', 'cherry', 'bamboo', 'crimson', 'warped', 'iron'].map((wood) => `${wood}_door`),
-  ...['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black'].map((c) => `${c}_bed`), 'lava', 'spawner', 'hay_block', 'sugar_cane',
+  ...LOGS, ...BLOCK_NAMES.filter(isResourceBlock), ...Object.keys(INTERACTIVE_BLOCKS), 'spawner', 'hay_block', 'sugar_cane',
   'pumpkin', 'melon', 'obsidian', 'clay', 'sweet_berry_bush', 'nether_portal', 'end_portal', 'end_gateway', 'end_portal_frame', 'stone_bricks', 'mossy_stone_bricks', 'cracked_stone_bricks', 'bookshelf', 'iron_bars',
 ]);
 /** 采集目标常用的地表方块：也记住，但每种限量 */
@@ -260,9 +269,8 @@ export class Vision {
 
   /** 实际视距：配置值，或服务器下发的渲染距离（区块数 × 16） */
   effectiveRange(): number {
-    if (this.cfg.range > 0) return Math.min(MAX_RANGE, this.cfg.range);
     const rd = this.adapter.renderDistance?.();
-    return Math.min(MAX_RANGE, rd && rd > 0 ? rd : FALLBACK_RANGE);
+    return Math.min(MAX_RANGE, this.cfg.range > 0 ? this.cfg.range : FALLBACK_RANGE, rd && rd > 0 ? rd : FALLBACK_RANGE);
   }
 
   // ------------------------------------------------------------ 扫描
@@ -309,7 +317,7 @@ export class Vision {
         // The End uses a brightened client lightmap even with zero sky/block
         // light (1.20.1 DimensionEffects.End). This floor belongs only to
         // visibility; raw light and mob-spawn rules remain unchanged.
-        l = r ? Math.max(r.block, r.sky - darkness, s.dim === 'the_end' ? 4 : 0) : 15;
+        l = Math.max(r?.block ?? 0, (r?.sky ?? 0) - darkness, s.dim === 'the_end' ? 4 : 0);
         lightCache.set(k, l);
       }
       return l;
@@ -362,7 +370,7 @@ export class Vision {
         const o = opt(x, y, z);
         if (!o) { if (!hitCat) { hitCat = 'unknown'; hitDist = d; } return true; }
         if (o.kind === 'clear') {
-          if (NOTABLE.has(o.name) || GROUND.has(o.name)) note(o.name, x, y, z, d); // 甘蔗、草等无碰撞箱的植物
+          if ((NOTABLE.has(o.name) || GROUND.has(o.name)) && d <= seeRange(light(x, y, z))) note(o.name, x, y, z, d); // 透明物体同样需要看清，之后仍可透过它看向别处
           lx = x; ly = y; lz = z;
           return false;
         }
@@ -569,7 +577,7 @@ export class Vision {
           (bx, by, bz) => bx === pos.x && by === pos.y && bz === pos.z ? { name: 'air', kind: 'clear' } : this.adapter.blockOptics(bx, by, bz))) return false;
         const near = Math.max(0, hit - .1), l = this.adapter.lightAt(Math.floor(eye.x + dx / distance * near), Math.floor(eye.y + dy / distance * near), Math.floor(eye.z + dz / distance * near));
         const t = state.timeOfDay, darkness = t < 12000 ? 0 : t < 13800 || t >= 22200 ? 5 : 11;
-        const light = l ? Math.max(l.block, l.sky - darkness) : 0;
+        const light = Math.max(l?.block ?? 0, (l?.sky ?? 0) - darkness, state.dim === 'the_end' ? 4 : 0);
         return hit <= (light >= 4 ? this.effectiveRange() : light >= 2 ? 12 : light >= 1 ? 6 : 3);
       });
       if (!visible) continue;
@@ -584,24 +592,23 @@ export class Vision {
 
   /**
    * 已知的方块位置：当前看得见或曾经看见过（15 分钟内）。
-   * 回到记忆位置时会校验方块是否还在（被挖掉/改变则遗忘）。
+   * 只有重新亲眼看见该格已改变才遗忘；视野外或遮挡后的变化不能更新记忆。
    */
   knownBlocks(names: string[], maxDist: number): BlockHit[] {
     const s = this.syncScope();
     if (!s.observationReady) return [];
     const set = new Set(names);
-    const now = Date.now();
-    const out: BlockHit[] = [];
-    for (const [k, v] of this.known) {
-      if (!set.has(v.name)) continue;
-      if (now - v.lastSeen > RESOURCE_MEMORY_TTL_MS) { this.forget(k); continue; }
-      const d = Math.hypot(v.pos.x - s.pos.x, v.pos.y - s.pos.y, v.pos.z - s.pos.z);
-      if (d > maxDist) continue;
-      const cur = this.adapter.blockOptics(v.pos.x, v.pos.y, v.pos.z);
-      if (cur && cur.name !== v.name) { this.forget(k); continue; }
-      out.push({ name: v.name, pos: v.pos, dist: d });
-    }
-    return out.sort((a, b) => a.dist - b.dist);
+    const candidates = [...this.known.entries()].filter(([, value]) => set.has(value.name))
+      .map(([key, value]) => ({ key, value, dist: Math.hypot(value.pos.x - s.pos.x, value.pos.y - s.pos.y, value.pos.z - s.pos.z) }))
+      .filter((candidate) => candidate.dist <= maxDist);
+    const observed = new Map(Array.from({ length: Math.ceil(candidates.length / 32) }, (_, index) =>
+      this.observeBlocks(candidates.slice(index * 32, (index + 1) * 32).map((candidate) => candidate.value.pos)))
+      .flat().map((block) => [keyOf(block.pos.x, block.pos.y, block.pos.z), block.name]));
+    return candidates.filter(({ key, value }) => {
+      const current = observed.get(key);
+      if (current && current !== value.name) { this.forget(key); return false; }
+      return true;
+    }).map(({ value, dist }) => ({ name: value.name, pos: value.pos, dist })).sort((a, b) => a.dist - b.dist);
   }
 
   /** 这一格这几秒内亲眼看见是什么（看不见返回 null，不透视） */
