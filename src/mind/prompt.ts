@@ -18,6 +18,9 @@ import { RECALL_LABEL, type Recalled } from './recall.ts';
 import { foodNote } from '../skills/food.ts';
 import { isResourceBlock, oreSpotsByKind, oreSpotsNear } from '../memory/ore-spots.ts';
 import { oreLayerFacts } from '../knowledge/ore-layers.ts';
+import { husbandryFacts, villagerFacts } from '../knowledge/husbandry.ts';
+import type { HuntTally } from './ledger.ts';
+import { FOOD_ANIMAL_NAMES } from '../skills/movement.ts';
 import { config } from '../config.ts';
 import { creatureSpotsByKind, creatureSpotsNear } from '../memory/creature-spots.ts';
 
@@ -58,6 +61,8 @@ export interface MindContext {
   learnFrom?: { stuck: { what: string; why: string; skill?: string; code?: string }; solved: { what: string; routine: string[] } };
   /** 这一趟下地：下来多久、背包多了什么、是不是手上的活快收工了（给“下矿的账”） */
   trip?: { minutes: number; gained: Record<string, number>; nearEnd: boolean };
+  /** 打猎的账（给“肉快打光了”这种事实） */
+  hunting?: HuntTally | null;
   /** 主目标和清单 */
   plan?: FocusPlan | null;
   /** 阶段回顾：情绪或回想提醒它停下来看这一阶段在做什么（有这一项时才允许换主目标） */
@@ -234,6 +239,9 @@ ${movesCatalog(0, new Set([...inUse, 'dig_at', 'step', 'place_at', 'defend', 'ga
 }
 
 /** 打算里说要下矿、往下挖 */
+/** 身体快把手上的活做完时那一念的 reason（mind.ts 用同一个字符串） */
+export const NEAR_END_REASON = '手上这段活快干完了，想想接下来';
+
 const MINING_INTENT = /下矿|矿道|矿洞|找铁|挖铁|找矿|挖矿|粗铁|铁矿|往下挖|下挖|下到 ?y|挖(阶梯|台阶)[^上]{0,6}(下|降)|石层|深层/;
 
 /** 打算里说要从地下回地面 */
@@ -297,6 +305,23 @@ export function situationalReminders(ctx: MindContext): string[] {
       return depth >= 6 ? `挖台阶回地面约 ${Math.round(depth * 3)} 格（约 ${Math.max(1, Math.round(depth * 3 / 60))} 分钟）` : '';
     })();
     out.push(`下矿的账：这趟下来 ${Math.round(trip.minutes)} 分钟${got.length ? `，挖到 ${got.join(' ')}` : '，还没挖到矿'}；背包空 ${p.emptySlots} 格${picks.length ? `；${picks.join('、')}` : ''}；身边${seen.length ? `看得见 ${seen.join('、')}` : '没看见矿'}${remembered ? `，48 格内记得 ${remembered} 处矿点` : ''}${back ? `；${back}，再下来一趟也差不多这个价` : ''}。清单后面几项还要不要这些料，一起掂量再决定收不收工`);
+  }
+  // 养动物、村民交易：打算里提到了才把机制摆出来（模型对这些的记忆常是含糊或老版本的）
+  const husbandry = husbandryFacts(intent);
+  if (husbandry) out.push(husbandry);
+  const villagers = villagerFacts(intent);
+  if (villagers) out.push(villagers);
+  // 肉的账：刚打完猎或正打着，把这一带还剩几只、为了肉走了多远摆出来（真人会在这时想“该养了”；养不养它自己定）
+  const hunting = ctx.hunting;
+  const hunted = !!ctx.lastRecord && /\bhunt\b/.test(ctx.lastRecord.signature ?? '') && Date.now() - ctx.lastRecord.at < 3 * 60_000
+    || !!ctx.activity && (ctx.activity.steps ?? []).some((st) => st.skill === 'hunt') && ctx.reason === NEAR_END_REASON;
+  if (hunting && hunting.trips >= 2 && hunted && !husbandry) {
+    // passive 写法是 "cow x3" 或 "sheep(白)"：数能吃的那几种
+    const seenNow = p.nearby.passive.reduce((n, t) => { const m = t.match(/^([a-z_]+)(?:\([^)]*\))?(?: x(\d+))?$/); return m && FOOD_ANIMAL_NAMES.includes(m[1]) ? n + (Number(m[2]) || 1) : n; }, 0);
+    const herds = creatureSpotsNear(ctx.memory.landmarks(), { worldId: s.worldId, dim: p.self.dim, pos: here }, { radius: 128, only: FOOD_ANIMAL_NAMES });
+    const remembered = herds.reduce((n, h) => n + (Number(h.text.match(/(\d+) 只/)?.[1]) || 1), 0);
+    const feed = s.inventory.filter((i) => /^(wheat|wheat_seeds|carrot|potato|beetroot|beetroot_seeds|melon_seeds|pumpkin_seeds)$/.test(i.name)).map((i) => `${i.name}×${i.count}`).slice(0, 4);
+    out.push(`肉的账：这局已经打猎 ${hunting.trips} 次、大约 ${hunting.animals} 只，最近几次每次为了肉走 ${hunting.recentWalked ?? '?'} 格；现在看得见能吃的动物 ${seenNow} 只，128 格内记得的还有约 ${remembered} 只${feed.length ? `；背包里有 ${feed.join(' ')}` : ''}。动物不会再生，打一只少一只——是接着找，还是圈几只养起来，自己掂量`);
   }
   // 人在自己挖过的通道里、想回地面：原路就是现成的出口
   if (SURFACE_INTENT.test(intent) && p.self.sky_visible !== true) {

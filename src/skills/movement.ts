@@ -5,7 +5,7 @@ import { climbUp } from './body.ts';
 import { hasPlaceable, PLACEABLE } from './survival.ts';
 import { DIRS, dirName } from '../perception/perception.ts';
 import { dist3, sleep, throwIfAborted } from '../util.ts';
-import type { Vec3Like } from '../adapter/types.ts';
+import type { EntityInfo, Vec3Like } from '../adapter/types.ts';
 import { feetCell } from '../perception/local.ts';
 import { passageRoute } from '../memory/passages.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
@@ -232,17 +232,19 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
 };
 
 // ------------------------------------------------------------------ goto
-export const goTo: Skill<{ target: string; dig?: boolean; sprint?: boolean; avoid?: string[] }> = {
+export const goTo: Skill<{ target: string; dig?: boolean; sprint?: boolean; avoid?: string[]; lead?: string }> = {
   name: 'goto',
-  description: '沿看得见的落脚点步行去地标、坐标、作品或记得的功能方块；绕开墙壁，遇到已观察的木门会开门。默认不挖墙、不搭柱；写 "dig":true 就像人一样挖穿挡路的土石、垫方块爬上坡坎直接过去（遇到水会在水面上垫方块架桥，走完会说垫了多少）。水路不通时可另选 boat',
-  argsDoc: '{"target": "base（首选基地，不一定是最近的房子；回某栋房子直接写它的名字） | death | <地标id或名称> | <作品ID> | crafting_table | x,y,z | 方向 格数（如 \"E 20\" 往东 20 格）", "dig"?: true（挖穿/垫高直走）, "sprint"?: true（跑着去：快，但很耗饥饿；默认走路）, "avoid"?: ["绕开的方块"]}',
+  description: '沿看得见的落脚点步行去地标、坐标、作品或记得的功能方块；绕开墙壁，遇到已观察的木门会开门。默认不挖墙、不搭柱；写 "dig":true 就像人一样挖穿挡路的土石、垫方块爬上坡坎直接过去（遇到水会在水面上垫方块架桥，走完会说垫了多少）。水路不通时可另选 boat。"lead" 写一种看得见的生物：带着它走——几格一停，它掉队就等它跟上来；它跟不跟你得自己弄对（手里拿它爱吃的，它才跟）',
+  argsDoc: '{"target": "base（首选基地，不一定是最近的房子；回某栋房子直接写它的名字） | death | <地标id或名称> | <作品ID> | crafting_table | x,y,z | 方向 格数（如 \"E 20\" 往东 20 格）", "dig"?: true（挖穿/垫高直走）, "sprint"?: true（跑着去：快，但很耗饥饿；默认走路）, "avoid"?: ["绕开的方块"], "lead"?: "<带着走的生物名，如 cow>"}',
   timeoutMs: 600000,
   movement: true,
   validate(raw) {
     const t = String(obj(raw).target ?? '').trim();
     if (!t) return { ok: false, error: 'target 不能为空' };
     const avoid = Array.isArray(obj(raw).avoid) ? (obj(raw).avoid as unknown[]).map((n) => String(n).replace(/^minecraft:/, '')).filter((n) => /^[a-z_]+$/.test(n)).slice(0, 16) : [];
-    return { ok: true, args: { target: t, ...(obj(raw).dig === true ? { dig: true } : {}), ...(obj(raw).sprint === true ? { sprint: true } : {}), ...(avoid.length ? { avoid } : {}) } };
+    const lead = typeof obj(raw).lead === 'string' ? String(obj(raw).lead).trim().toLowerCase().replace(/^minecraft:/, '') : '';
+    if (obj(raw).lead !== undefined && !/^[a-z_]{2,40}$/.test(lead)) return { ok: false, error: 'lead 写生物名，比如 "cow"' };
+    return { ok: true, args: { target: t, ...(obj(raw).dig === true ? { dig: true } : {}), ...(obj(raw).sprint === true && !lead ? { sprint: true } : {}), ...(avoid.length ? { avoid } : {}), ...(lead ? { lead } : {}) } };
   },
   async run(ctx, args) {
     const r = await walkTo(ctx, args);
@@ -267,7 +269,16 @@ export const goTo: Skill<{ target: string; dig?: boolean; sprint?: boolean; avoi
 };
 
 /** goto 的步行部分 */
-async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; sprint?: boolean; avoid?: string[] }): Promise<SkillResult> {
+/** 带着走：动物只在手持它爱吃的东西、离人 10 格以内时才跟着来；人走得比它快，所以几格一停、掉队就等 */
+const LEAD_HOP = 5, LEAD_CLOSE = 4, LEAD_LOST = 12, LEAD_WAIT_MS = 8000;
+
+/** 被带的那只现在在哪：优先找同一个实体 id，找不到再按名字找最近的 */
+function follower(ctx: SkillCtx, name: string, id: number | null): EntityInfo | null {
+  const seen = ctx.senses.perceivedEntities(24).filter((e) => e.perception !== 'heard' && e.name === name);
+  return (id !== null ? seen.find((e) => e.id === id) : undefined) ?? seen.sort((a, b) => a.dist - b.dist)[0] ?? null;
+}
+
+async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; sprint?: boolean; avoid?: string[]; lead?: string }): Promise<SkillResult> {
   {
     const { adapter, memory, signal } = ctx;
     const s = adapter.state();
@@ -442,15 +453,34 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; spri
       }
     } catch (e) { if (isAbort(e)) throw e; }
     try {
-      for (let hops = 0; !arrived(adapter.state().pos) && hops < 160; hops++) {
+      let leadId: number | null = null, leadWaited = 0;
+      for (let hops = 0; !arrived(adapter.state().pos) && hops < (args.lead ? 400 : 160); hops++) {
         if (!inScope()) return fail('WRONG_DIMENSION', '途中世界或会话已改变，需要重新规划');
         if (Date.now() >= ctx.deadline) return fail('TIMEOUT', '步行时间已用完，按当前位置重新选择路线');
         await face();
         const cur = adapter.state().pos;
+        // 带着走：每一小段之前先看它跟上没有，掉队就停下等；等不来就说清楚它最后在哪
+        if (args.lead) {
+          let f = follower(ctx, args.lead, leadId);
+          if (f) leadId = f.id;
+          const waitUntil = Date.now() + LEAD_WAIT_MS;
+          while (f && f.dist > LEAD_CLOSE && Date.now() < waitUntil && Date.now() < ctx.deadline) {
+            try { await adapter.look(Math.atan2(-(f.pos.x - cur.x), -(f.pos.z - cur.z)), 0, signal); } catch (e) { if (isAbort(e)) throw e; }
+            await sleep(500, signal);
+            f = follower(ctx, args.lead, leadId);
+          }
+          if (!f || f.dist > LEAD_LOST) {
+            const held = adapter.state().held ?? '空手';
+            const last = f ? `还在 ${f.dist.toFixed(0)} 格外的 (${Math.round(f.pos.x)},${Math.round(f.pos.y)},${Math.round(f.pos.z)}) 没跟上来` : '不在视野里了';
+            return fail('TARGET_GONE', `带着走的 ${args.lead} ${last}（手里拿的是 ${held}；动物只在人手持它爱吃的东西、离它 10 格以内时才跟）；人走到 (${cur.x.toFixed(1)},${cur.y.toFixed(1)},${cur.z.toFixed(1)})，离目标还有 ${distance(cur).toFixed(0)} 格`, { ...measured(cur), lead: args.lead, leadPos: f?.pos ?? null });
+          }
+          if (f.dist > LEAD_CLOSE) { leadWaited++; if (leadWaited >= 3) return fail('TARGET_GONE', `带着走的 ${args.lead} 一直落在 ${f.dist.toFixed(0)} 格外不肯跟（手里拿的是 ${adapter.state().held ?? '空手'}）；人在 (${cur.x.toFixed(1)},${cur.y.toFixed(1)},${cur.z.toFixed(1)})，离目标还有 ${distance(cur).toFixed(0)} 格`, { ...measured(cur), lead: args.lead, leadPos: f.pos }); }
+          else leadWaited = 0;
+        }
         // dig：不找“看得见的落脚点”，直接让寻路朝目标走，挡路的土石挖开、坡坎垫方块（真人赶路也是这样）
-        let waypoint = args.dig ? null : ctx.senses.navigationWaypoint?.(pos, 12, visited);
+        let waypoint = args.dig || args.lead ? null : ctx.senses.navigationWaypoint?.(pos, 12, visited);
         let fromMemory = false;
-        if (ctx.senses.navigationWaypoint && !waypoint && !args.dig) {
+        if (ctx.senses.navigationWaypoint && !waypoint && !args.dig && !args.lead) {
           if (await tryDoor()) continue;
           await glance(ctx);
           if (ctx.senses.navigationWaypoint(pos, 12, visited)) continue;
@@ -458,12 +488,14 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; spri
           const remembered = memoryHops < 12 ? ctx.senses.rememberedWaypoint?.(pos, 24, visited) : null;
           if (remembered) { waypoint = remembered; fromMemory = true; memoryHops++; }
         }
-        if (ctx.senses.navigationWaypoint && !waypoint && !args.dig) {
+        if (ctx.senses.navigationWaypoint && !waypoint && !args.dig && !args.lead) {
           const water = waterNear();
           return fail('PATH_NOT_FOUND', `前往 ${label}：眼前没有可确认的${water ? '陆地落脚点，附近有水，可考虑 boat 渡河' : '通路'}；没有挖墙或搭柱——要直接过去写 goto {"target":"${args.target}","dig":true}（挖穿土石、垫方块上坡）`, { ...measured(cur), waterAhead: water });
         }
         const dxz = Math.hypot(pos.x - cur.x, pos.z - cur.z);
         const target = waypoint ? { kind: 'near' as const, pos: waypoint, range: fromMemory ? 1.2 : 0.7 }
+          // 带着走：一次只挪几格，免得把它甩开
+          : args.lead && dxz > LEAD_HOP ? { kind: 'xz' as const, x: cur.x + (pos.x - cur.x) * LEAD_HOP / dxz, z: cur.z + (pos.z - cur.z) * LEAD_HOP / dxz, range: 1.5 }
           : dxz > 32 ? { kind: 'xz' as const, x: cur.x + (pos.x - cur.x) * 24 / dxz, z: cur.z + (pos.z - cur.z) * 24 / dxz, range: 2 }
           : flat ? { kind: 'xz' as const, x: pos.x, z: pos.z, range } : { kind: 'near' as const, pos, range };
         try {
@@ -493,6 +525,11 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; spri
       const end = adapter.state().pos;
       if (!arrived(end)) return nextTo(end) ? reachedNear(end, '那一格本身走不进去') : fail('PATH_NOT_FOUND', `尚未到达 ${label}，需要重新选择路线`, measured(end));
       await face();
+      if (args.lead) {
+        const f = follower(ctx, args.lead, leadId);
+        const note = f ? `带着的 ${args.lead} 在 ${f.dist.toFixed(0)} 格外 (${Math.round(f.pos.x)},${Math.round(f.pos.y)},${Math.round(f.pos.z)})` : `带着的 ${args.lead} 已不在视野里`;
+        return ok(`到达 ${label}；人站在 (${end.x.toFixed(2)},${end.y.toFixed(2)},${end.z.toFixed(2)})，${note}${terrainNote()}`, { ...measured(end), lead: args.lead, leadPos: f?.pos ?? null, leadDist: f?.dist ?? null });
+      }
       return ok(`${alreadyHere ? '已在' : '到达'} ${label}${nums ? ' 的目标格' : ' 附近'}；实际站在 (${end.x.toFixed(2)},${end.y.toFixed(2)},${end.z.toFixed(2)})，本次往 ${dirName(end.x - s.pos.x, end.z - s.pos.z)} 移动 ${dist3(s.pos, end).toFixed(2)} 格，距目标点 ${distance(end).toFixed(2)} 格${alreadyHere ? '；没有执行新的位移' : ''}${targetNote}${routeNote}${terrainNote()}`, { ...measured(end), alreadyHere });
     } catch (e) {
       if (isAbort(e)) throw e;

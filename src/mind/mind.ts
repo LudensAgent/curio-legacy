@@ -22,7 +22,7 @@ import { settleBuild } from '../skills/build.ts';
 import { myBed } from '../skills/stations.ts';
 import { StrategyLog } from './strategy.ts';
 import type { ParsedGameMessage } from '../memory/game-messages.ts';
-import type { MindContext } from './prompt.ts';
+import { NEAR_END_REASON, type MindContext } from './prompt.ts';
 import { cleanPlanStep, moodWords, SelfModel } from './self.ts';
 import type { LedgerView } from './ledger.ts';
 import type { Thinker } from './thinker.ts';
@@ -184,7 +184,7 @@ export class Mind {
   static BORED_AT = 0.6;
   /** 最后一步做了这么久才开始想“接下来做什么” */
   static NEAR_END_AFTER_MS = 4000;
-  static NEAR_END_REASON = '手上这段活快干完了，想想接下来';
+  static NEAR_END_REASON = NEAR_END_REASON;
   /** 要命的处境（窒息、被贴身围攻、水下没气）：用“瞥一眼”那档快速拿主意，几秒都等不起 */
   static DANGER_REASON = '有危险，马上拿主意';
   private lastHurtEventAt = 0;
@@ -921,6 +921,7 @@ export class Mind {
       skills: this.safe(() => this.d.thinker.skillBook?.index((n) => !!this.d.behaviors?.inactive(n)) ?? [], []),
       stuckHere: this.progressing() ? null : stuckHere(this.recentEnds, state.pos),
       recalled, ...(openedSkill ? { openedSkill } : {}), ...(learnFrom ? { learnFrom } : {}), plan,
+      hunting: this.safe(() => this.d.ledger?.huntTally() ?? null, null),
       ...(this.trip ? { trip: { minutes: (Date.now() - this.trip.since) / 60_000, gained: diffInventory(this.trip.inventory, inventoryOf(state)).gained, nearEnd: reason === Mind.NEAR_END_REASON } } : {}),
       ...(reviewing ? { stageReview: this.safe(() => this.stageReviewFacts(), { why: this.review?.why ?? '' }) } : {}),
       ...(this.d.behaviors && tier === 'deliberate' ? { learnedSkills: this.safe(() => this.d.behaviors!.overview().filter((l) => !/已收起|已停用/.test(l)), []), instincts: this.safe(() => instinctNote(), '') } : {}),

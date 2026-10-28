@@ -32,7 +32,12 @@ interface LedgerData { version: 1; seen: Record<string, Dist>; got: Record<strin
 export interface LedgerSignal { item: string; direction: 'slow' | 'fast'; ratio: number; usualSec: number; thisSec: number; episode: Episode }
 
 /** 心智和造技能的看到的账（只读） */
-export interface LedgerView { names(): string[]; describe(name: string): string; digest(n?: number): string[]; skillEffect(name: string): string; aliases(name: string): string[] }
+export interface LedgerView { names(): string[]; describe(name: string): string; digest(n?: number): string[]; skillEffect(name: string): string; aliases(name: string): string[]; huntTally(): HuntTally }
+
+/** 打猎的账：为了肉走了多远、打了多少 */
+export interface HuntTally { trips: number; animals: number; walked: number; recentWalked: number | null; lastAt: number | null }
+/** 动物身上掉的生肉：一块肉算一只（鸡掉 1，牛猪羊 1–3 都按 1 只估，宁可少算） */
+const RAW_MEAT = new Set(['beef', 'porkchop', 'mutton', 'chicken', 'rabbit']);
 
 export interface ItemStats {
   item: string; episodes: number; units: number; perUnitSec: number;
@@ -308,6 +313,15 @@ export class Ledger implements LedgerView {
     const seen = top(Object.fromEntries(Object.entries(this.data.seen).filter(([k]) => !this.data.got[k]).map(([k, v]) => [k, v.n])), 5);
     if (seen.length) lines.push(`见过但还没拿过：${seen.map(([k]) => `${k}（${describeDist(this.data.seen[k])}）`).join('；')}`);
     return lines.filter(Boolean);
+  }
+
+  /** 打猎的账：hunt 过几次、大概打了几只、每次为了肉走多远（最近 3 次平均） */
+  huntTally(): HuntTally {
+    const hunts = this.data.episodes.filter((e) => /\bhunt\b/.test(e.signature) || Object.keys(e.gained).some((k) => RAW_MEAT.has(k)));
+    const animals = hunts.reduce((n, e) => n + Object.entries(e.gained).filter(([k]) => RAW_MEAT.has(k)).reduce((m, [, v]) => m + Math.max(1, Math.ceil(v / 2)), 0), 0);
+    const recent = hunts.slice(-3);
+    return { trips: hunts.length, animals, walked: hunts.reduce((n, e) => n + e.walked, 0),
+      recentWalked: recent.length ? Math.round(recent.reduce((n, e) => n + e.walked, 0) / recent.length) : null, lastAt: hunts.at(-1)?.at ?? null };
   }
 
   /** 给控制台看 */
