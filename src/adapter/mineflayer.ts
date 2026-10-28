@@ -37,6 +37,13 @@ import type {
 } from './types.ts';
 
 const require = createRequire(import.meta.url);
+/**
+ * 运行时依赖只在模块加载时取一次。以前 vec() 里每次都 require('vec3')：每次都要走一遍模块解析（运行器的钩子不缓存，
+ * 每次都翻 node_modules、读 package.json），blockAt 一秒调用上万次时主线程能卡上 5~10 秒，服务器就以超时踢人（10-28 08:53 采样）
+ */
+const { Vec3 } = require('vec3');
+let pathfinderGoals: any = null;
+const goalsLib = () => (pathfinderGoals ??= require('mineflayer-pathfinder').goals);
 
 /** 右键一点就打开、触发的方块：贴着它放东西要按住潜行 */
 const OPENS_ON_CLICK = /chest$|barrel|crafting_table|furnace|smoker|_door$|_trapdoor$|_fence_gate$|_button$|lever|_bed$|anvil|enchanting_table|brewing_stand|loom|stonecutter|grindstone|smithing_table|cartography_table|hopper|dispenser|dropper|shulker_box|note_block|jukebox|beacon|lectern|bell|repeater|comparator|cake/;
@@ -409,7 +416,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   }
 
   private vec(p: Vec3Like) {
-    const Vec3 = require('vec3').Vec3;
     return new Vec3(p.x, p.y, p.z);
   }
 
@@ -809,7 +815,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       };
       b.pathfinder.setMovements(movements);
     }
-    const { goals } = require('mineflayer-pathfinder');
+    const goals = goalsLib();
     let goal: any;
     switch (target.kind) {
       case 'near':
@@ -1312,7 +1318,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const target = this.vec(pos);
     const cur = b.blockAt(target);
     if (cur && cur.boundingBox === 'block') return { ok: true }; // 已经有方块了
-    const Vec3 = require('vec3').Vec3;
     const faces = [new Vec3(0, -1, 0), new Vec3(0, 1, 0), new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)];
     // 贴着箱子、工作台、门这类一点就打开的方块放：先试别的面；只能贴着它时按住潜行再放（不然是打开它，不是放方块）
     const refs = faces.map((f) => ({ f, ref: b.blockAt(target.plus(f)) })).filter((x) => x.ref && x.ref.boundingBox === 'block')
@@ -2196,7 +2201,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
    * 以前直接对着“最近的空位”发放置包，空位可能在 5、6 格外或被挡着，服务器默默不理，熔炉、床就放不下。
    */
   private async placeNearby(item: string, requireHeadroom: boolean, signal: AbortSignal, check: (() => void) & { signal?: AbortSignal }): Promise<any | null> {
-    const b = this.bot, Vec3 = require('vec3').Vec3, up = new Vec3(0, 1, 0);
+    const b = this.bot, up = new Vec3(0, 1, 0);
     const spots = this.findPlaceSpots(requireHeadroom, /_bed$/.test(item));
     const ordered = [...spots.filter((r) => this.canClickPlacementFace(r, up)), ...spots.filter((r) => !this.canClickPlacementFace(r, up))].slice(0, 6);
     for (const ref of ordered) {
@@ -2615,7 +2620,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const check = this.actionCheckpoint(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
     const b = this.bot, epoch = this.actionEpoch;
-    const Vec3 = require('vec3').Vec3;
     const feet = b.entity.position.floored();
     const below = b.blockAt(feet.offset(0, -1, 0));
     if (!below || below.boundingBox !== 'block') return { ok: false, reason: 'NO_REFERENCE' };
@@ -2921,7 +2925,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       }
       const block = b.blockAt(this.vec(target.pos));
       if (!block) return { ok: false, reason: 'NO_BLOCK' };
-      const Vec3 = require('vec3').Vec3;
       if (this.mcData.blocksByName?.[item]) return await this.placeItemAgainst(item, block, check);
       // 放置实体类物品（船、矿车、盔甲架、刷怪蛋）：对着方块顶面放
       if (/_boat$|_raft$|_spawn_egg$|^armor_stand$|^end_crystal$/.test(item)) {
@@ -3131,7 +3134,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (isBoat) { start.set(cur.x, cur.y, cur.z); progressFrom = cur.clone(); }
     // 服务器不认可上报的位置（撞到东西 / moved wrongly）时会回发 vehicle_move 把船拉回去：
     // 以服务器为准重新同步，否则本地以为在前进、服务器那边船其实没动，越错越远
-    const Vec3c = require('vec3').Vec3;
+    const Vec3c = Vec3;
     const resync = (pk: any) => {
       if (!ownsControls() || !isBoat || b.vehicle !== v || !Number.isFinite(pk?.x)) return;
       cur = new Vec3c(pk.x, pk.y, pk.z);
@@ -3191,7 +3194,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         const rowing = Math.abs(diff) < BOAT_ROW_ANGLE && (!last || dist > speed * 9 + arriveWithin * 0.5);
         vx *= 0.9; vz *= 0.9; // 水的阻力
         if (rowing) { vx += -Math.sin(boatYaw) * BOAT_THRUST; vz += -Math.cos(boatYaw) * BOAT_THRUST; }
-        const Vec3 = require('vec3').Vec3;
         // 船身（1.375×0.5625）在 (x,z) 处会不会碰到方块：四角、四边中点和中心，船底和船舷两个高度。
         // 服务器按整个船身做碰撞，只看船头正前方一个点的话，侧面蹭到岸角会被服务器一刻刻拉回（卡在角上不动）
         const HALF = 0.69;
@@ -3264,7 +3266,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     };
     const before = counts();
     if (opts.aim) {
-      const Vec3 = require('vec3').Vec3;
       // 瞄准水面上方一点，浮漂抛物线落进水里
       await this.afterAction(() => b.lookAt(new Vec3(opts.aim!.x + 0.5, opts.aim!.y + 1.4, opts.aim!.z + 0.5), true), check);
       // 甩竿是立刻发的，转头要下一刻才到服务器：不等的话浮漂按转头前的方向甩出去（甩到岸上、挂在方块上）
