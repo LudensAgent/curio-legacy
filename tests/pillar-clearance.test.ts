@@ -35,17 +35,17 @@ function fixture(x = 0.8) {
 
 test('actual body width detects an adjacent ceiling even when the centre column is empty', () => {
   const w = fixture(); w.put(1, 66, 0, 'stone');
-  assert.equal((w.adapter as any).pillarClearance(), 'blocked');
+  assert.deepEqual((w.adapter as any).pillarClearance(), { kind: 'blocked', min: { x: 0, y: 65, z: 0 }, max: { x: 1, y: 66, z: 0 } });
   w.bot.entity.position.x = 0.5;
   assert.equal((w.adapter as any).pillarClearance(), null);
   w.bot.entity.position.x = 0.8; w.put(1, 66, 0, null);
-  assert.equal((w.adapter as any).pillarClearance(), 'unknown');
+  assert.deepEqual((w.adapter as any).pillarClearance(), { kind: 'unknown', min: { x: 0, y: 65, z: 0 }, max: { x: 1, y: 66, z: 0 } });
 });
 
 test('clearance uses partial collision shapes and ignores blocks above the swept height', () => {
   const w = fixture();
   w.put(1, 66, 0, 'stone_slab');
-  assert.equal((w.adapter as any).pillarClearance(), 'blocked');
+  assert.equal((w.adapter as any).pillarClearance()?.kind, 'blocked');
   w.put(1, 66, 0, 'air'); w.put(1, 67, 0, 'stone');
   assert.equal((w.adapter as any).pillarClearance(), null);
 });
@@ -70,6 +70,9 @@ test('explicit pillar refuses an obstructed jump before toggling jump or placing
   const w = fixture(); w.put(1, 66, 0, 'stone');
   const result = await w.adapter.pillarUp(['cobblestone'], new AbortController().signal);
   assert.equal(result.reason, 'NOT_PLACED:头顶跳跃空间受阻');
+  assert.match(result.clearanceDetail!, /x=0\.\.1, y=65\.\.66, z=0\.\.0/);
+  assert.match(result.clearanceDetail!, /具体障碍位置和方块名称未确认/);
+  assert.doesNotMatch(result.clearanceDetail!, /stone/);
   assert.notEqual(w.controls.jump, true);
 });
 
@@ -83,7 +86,7 @@ test('goto stops a blocked Pathfinder tower after its planned digging and before
   // The earlier Pathfinder physicsTick listener has finished the planned dig
   // and selected jump-to-place; the adjacent ceiling is still present.
   w.put(1, 66, 0, 'stone'); w.bot.setControlState('jump', true); w.bot.emit('physicsTick');
-  await assert.rejects(pending, /原地搭柱头顶跳跃空间受阻/);
+  await assert.rejects(pending, /原地搭柱头顶跳跃空间受阻；跳跃时身体扫过的方块范围 x=0\.\.1, y=65\.\.66, z=0\.\.0，具体障碍位置和方块名称未确认/);
   assert.equal(stopped, true);
   assert.equal(w.controls.jump, false);
   assert.equal(w.bot.listenerCount('physicsTick'), 0);

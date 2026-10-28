@@ -132,6 +132,8 @@ export class Mind {
   private lastRecord: ActivityRecord | null = null;
   private recentEnds: ActivityEnd[] = [];
   private failuresByTarget = new Map<string, { n: number; last: number; at: number[] }>();
+  /** 近期动作失败的实际反馈，只在同一会话、附近再次决策时提供。 */
+  private recentActionFailures: { step: Step; code: string | null; summary: string; pos: AgentState['pos']; worldId: string; sessionId: string; dim: string; at: number }[] = [];
   /** 同一个动作、同样的参数、同样的失败：记录次数，供心智参考。 */
   private sameFails = new Map<string, { n: number; last: number; code: string; why: string; summary: string }>();
   private lastStuckAttempt: { step: { skill: string; args?: unknown }; code: string; summary: string; pos: AgentState['pos']; worldId: string; sessionId: string; dim: string; yaw: number; pitch: number; at: number } | null = null;
@@ -838,6 +840,10 @@ export class Mind {
     const observationMiss = softMiss(a, step, result);
     if (result.status === 'failed' && !observationMiss) {
       this.lastFailure = { skill: step.skill, code: result.failureCode, summary: result.summary };
+      const failedState = this.d.adapter.state();
+      this.recentActionFailures.push({ step: structuredClone(step), code: result.failureCode ?? null, summary: result.summary.slice(0, 240),
+        pos: { ...failedState.pos }, worldId: failedState.worldId, sessionId: failedState.sessionId, dim: failedState.dim, at: Date.now() });
+      this.recentActionFailures = this.recentActionFailures.filter((f) => Date.now() - f.at < Mind.SAME_FAIL_MS).slice(-30);
       this.pruneFailures();
       const key = targetKeyOf(step);
       const entry = this.failuresByTarget.get(key) ?? { n: 0, last: 0, at: [] };
@@ -1041,6 +1047,11 @@ export class Mind {
       ...(this.d.thinker.designing ? { designing: { brief: this.d.thinker.designing.brief, minutes: Math.round((Date.now() - this.d.thinker.designing.startedAt) / 60_000) } } : {}),
       repeatedFailures: [...this.failuresByTarget].filter(([, f]) => f.n >= 2)
         .sort((a, b) => b[1].n - a[1].n).slice(0, 10).map(([key, f]) => `${key.replace(':', ' ')} ×${f.n}（10 现实分钟内）`),
+      recentActionFailures: this.recentActionFailures.filter((f) => Date.now() - f.at < Mind.SAME_FAIL_MS
+        && f.worldId === state.worldId && f.sessionId === state.sessionId && f.dim === state.dim
+        && Math.hypot(f.pos.x - state.pos.x, f.pos.y - state.pos.y, f.pos.z - state.pos.z) <= 8).slice(-6)
+        .map((f) => ({ skill: f.step.skill, args: f.step.args ?? {}, failure_code: f.code, summary: f.summary,
+          position: f.pos, observed_at: new Date(f.at).toISOString() })),
     };
     const suggestion = this.userSuggestion;
     const order = this.order, orderWasNew = order?.status === 'new';

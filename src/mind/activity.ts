@@ -194,6 +194,8 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   const key = `${a.index - 1}:${step.skill}:${code}`;
   if (a.failures >= 5) return { kind: 'stuck', why: `这段活已经失败 ${a.failures} 次了（最近：${result.summary.slice(0, 80)}）` };
   if (NEEDS_THOUGHT.has(code)) return { kind: 'stuck', why: result.summary.slice(0, 160) };
+  // step 的落点检查发生在动作结束时；转头造成的视野变化不会改变刚确认的障碍。
+  if (step.skill === 'step' && result.data?.movementNotAttempted === true) return { kind: 'stuck', why: result.summary.slice(0, 160) };
   if (step.skill === 'place_at' && ['NOT_PLACED:跳不起来', 'NOT_PLACED:头顶跳跃空间受阻', 'NOT_PLACED:头顶跳跃空间未加载'].includes(String(result.data?.pillarFailure))) {
     return { kind: 'stuck', why: result.summary.slice(0, 160) };
   }

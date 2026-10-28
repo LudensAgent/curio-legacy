@@ -42,6 +42,18 @@ test('the actual place_at failure carries the jump reason to the scheduler', asy
   assert.equal(afterStep(activity, step, result, 100, adapter.state()).kind, 'stuck');
 });
 
+test('place_at includes the checked head sweep in its failure feedback', async (t) => {
+  const adapter = new FakeAdapter();
+  adapter.inv.set('cobblestone', 4);
+  t.mock.method(adapter, 'pillarUp', async () => ({ ok: false, reason: 'NOT_PLACED:头顶跳跃空间受阻',
+    clearanceDetail: '头顶跳跃空间受阻；跳跃时身体扫过的方块范围 x=0..1, y=65..66, z=0..0，具体障碍位置和方块名称未确认' }));
+  const ctx = makeCtx(adapter);
+  t.after(() => ctx.memory.close());
+  const result = await placeAt.run(ctx, { at: [0, 0, 0], facing: 'N', item: 'cobblestone' });
+  assert.match(result.summary, /x=0\.\.1, y=65\.\.66, z=0\.\.0/);
+  assert.equal(result.data?.pillarFailure, 'NOT_PLACED:头顶跳跃空间受阻');
+});
+
 test('climb_up reports the actual ascent and stops retrying a confirmed pillar obstruction', async (t) => {
   const adapter = new FakeAdapter();
   adapter.pos = { x: 0.5, y: 64, z: 0.5 };

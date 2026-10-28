@@ -54,6 +54,8 @@ export interface MindContext {
   gameMessages?: string[];
   stuckHere?: StuckHere | null;
   repeatedFailures?: string[];
+  /** 动作结束时实际观察到的失败；地形可能随后改变。 */
+  recentActionFailures?: { skill: string; args: unknown; failure_code: string | null; summary: string; position: AgentState['pos']; observed_at: string }[];
   /** 建筑师正在后台画的图纸 */
   designing?: { brief: string; minutes: number };
   /** 按关键词自动想起来的经历、教训、技能 */
@@ -555,6 +557,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
     ...(ctx.stageReview ? [['阶段回顾', ctx.stageReview] as [string, Record<string, unknown>]] : []),
     ['此刻', {
       why_thinking_now: ctx.reason,
+      ...(ctx.recentActionFailures?.length ? { recent_action_failures: { note: '动作结束时的实际反馈，位置和环境可能随后改变', entries: ctx.recentActionFailures } } : {}),
       noticed: ctx.noticed.map((n) => `${n.what}${n.level === 'urgent' ? '（要紧）' : ''}`),
       since_last_thought: ctx.changes,
       ...(ctx.gameMessages?.length ? { game_messages: ctx.gameMessages } : {}),

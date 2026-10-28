@@ -44,10 +44,20 @@ import type {
   SmeltResult,
 } from './types.ts';
 
+type PillarClearance = { kind: 'blocked' | 'unknown'; min: Vec3Like; max: Vec3Like };
+
+function describePillarClearance(clearance: PillarClearance): string {
+  const { min, max } = clearance;
+  const range = `跳跃时身体扫过的方块范围 x=${min.x}..${max.x}, y=${min.y}..${max.y}, z=${min.z}..${max.z}`;
+  return clearance.kind === 'blocked'
+    ? `头顶跳跃空间受阻；${range}，具体障碍位置和方块名称未确认`
+    : `头顶跳跃空间未加载；${range}，具体未加载位置未确认`;
+}
+
 class PillarClearanceError extends Error {
   override name = 'PillarClearanceError';
-  constructor(reason: 'blocked' | 'unknown') {
-    super(`No path: 原地搭柱${reason === 'blocked' ? '头顶跳跃空间受阻' : '头顶跳跃空间未加载'}，未放置方块`);
+  constructor(clearance: PillarClearance) {
+    super(`No path: 原地搭柱${describePillarClearance(clearance)}，未放置方块`);
   }
 }
 
@@ -1108,18 +1118,20 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   }
 
   /** Check the actual player's head sweep before jumping high enough to place a block underfoot. */
-  private pillarClearance(): 'blocked' | 'unknown' | null {
+  private pillarClearance(): PillarClearance | null {
     const b = this.bot, p = b.entity.position, feetY = Math.floor(p.y), epsilon = 1e-6;
     const top = feetY + 1.02 + 1.8;
-    for (let x = Math.floor(p.x - 0.3 + epsilon); x <= Math.floor(p.x + 0.3 - epsilon); x++)
-      for (let y = Math.floor(p.y + 1.8); y <= Math.floor(top - epsilon); y++)
-        for (let z = Math.floor(p.z - 0.3 + epsilon); z <= Math.floor(p.z + 0.3 - epsilon); z++) {
+    const min = { x: Math.floor(p.x - 0.3 + epsilon), y: Math.floor(p.y + 1.8), z: Math.floor(p.z - 0.3 + epsilon) };
+    const max = { x: Math.floor(p.x + 0.3 - epsilon), y: Math.floor(top - epsilon), z: Math.floor(p.z + 0.3 - epsilon) };
+    for (let x = min.x; x <= max.x; x++)
+      for (let y = min.y; y <= max.y; y++)
+        for (let z = min.z; z <= max.z; z++) {
           const block = b.blockAt(p.offset(x - p.x, y - p.y, z - p.z));
-          if (!block) return 'unknown';
+          if (!block) return { kind: 'unknown', min, max };
           const shapes: number[][] = block.shapes ?? (block.boundingBox === 'empty' ? [] : [[0, 0, 0, 1, 1, 1]]);
           if (shapes.some((shape) => x + shape[3] > p.x - 0.3 + epsilon && x + shape[0] < p.x + 0.3 - epsilon
             && z + shape[5] > p.z - 0.3 + epsilon && z + shape[2] < p.z + 0.3 - epsilon
-            && y + shape[4] > p.y + 1.8 + epsilon && y + shape[1] < top - epsilon)) return 'blocked';
+            && y + shape[4] > p.y + 1.8 + epsilon && y + shape[1] < top - epsilon)) return { kind: 'blocked', min, max };
         }
     return null;
   }
@@ -1136,7 +1148,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       check();
       const edge = this.edgeSupport() ?? (corrections === 0 && !attempted.has('recentre') ? this.hugging() : null);
       if (edge) { if (!this.edgeSupport()) attempted.add('recentre'); await this.steady(edge, opts, check); check(); }
-      let stalled = false, blockedPillar: 'blocked' | 'unknown' | null = null;
+      let stalled = false, blockedPillar: PillarClearance | null = null;
       let last = b.entity?.position?.clone?.() ?? null, since = Date.now();
       let groundedY = b.entity?.onGround ? last?.y ?? null : null;
       let verticalY = last?.y ?? null;
@@ -3203,7 +3215,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
 
   private drawStartedAt: number | null = null;
 
-  async pillarUp(itemNames: string[], signal: AbortSignal): Promise<ActionResult & { y?: number }> {
+  async pillarUp(itemNames: string[], signal: AbortSignal): Promise<ActionResult & { y?: number; clearanceDetail?: string }> {
     const check = this.actionCheckpoint(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
     const b = this.bot, epoch = this.actionEpoch;
@@ -3223,7 +3235,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     for (let i = 0; i < 20 && !b.entity.onGround; i++) await this.afterAction(() => sleep(25, signal), check);
     if (!b.entity.onGround) return { ok: false, reason: 'NOT_PLACED:尚未站稳' };
     const clearance = this.pillarClearance();
-    if (clearance) return { ok: false, reason: `NOT_PLACED:头顶跳跃空间${clearance === 'blocked' ? '受阻' : '未加载'}` };
+    if (clearance) return { ok: false, reason: `NOT_PLACED:头顶跳跃空间${clearance.kind === 'blocked' ? '受阻' : '未加载'}`, clearanceDetail: describePillarClearance(clearance) };
     let placed = false, lastError = '';
     {
       b.setControlState('jump', true);

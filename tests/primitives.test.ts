@@ -5,6 +5,7 @@ import { facingOfYaw, localMap, toWorld } from '../src/perception/local.ts';
 import { digAt, placeAt, stepTo } from '../src/skills/primitives.ts';
 import { dig } from '../src/skills/body.ts';
 import { makeBridge } from '../src/codeskills/bridge.ts';
+import { afterStep, createActivity, nextStep } from '../src/mind/activity.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
 
@@ -87,6 +88,26 @@ test('原子动作如实回报做不到的原因，不替模型做决定', async
   assert.equal(wet.status, 'failed');
   assert.match(wet.summary, /water/);
   assert.equal(stepTo.validate({ to: [2, 0, 0] }, w).ok, false, 'step 只走相邻一格');
+});
+
+test('step 落点检查失败后，转头或视野变化不会自动重试同一动作', async (t) => {
+  const w = pocket();
+  const ctx = makeCtx(w, { senses: { observeBlocks: visibleTargets(w) } });
+  t.after(() => ctx.memory.close());
+  const activity = createActivity({ what: '迈上台阶', why: '', kind: 'other', repeat: 1,
+    steps: [{ skill: 'step', args: { at: [1, 1, 0], facing: 'N' } }] }, '', 'llm', w.state());
+  const step = nextStep(activity)!;
+  activity.stepStart = { pos: { ...w.state().pos }, view: '先前视野' };
+  w.removed.add('0,60,-1');
+  w.removed.add('0,61,-1');
+  w.removed.add('0,62,-1');
+  w.removed.add('0,63,-1');
+  const result = await stepTo.run(ctx, { at: [1, 1, 0], facing: 'N' });
+  assert.match(result.summary, /目标格脚下 .*是 air/);
+  assert.equal(result.data?.movementNotAttempted, true);
+  const percept = { self: { around: '转头后的视野' }, nearby: { resources: [] } } as unknown as import('../src/perception/perception.ts').Percept;
+  assert.equal(afterStep(activity, step, result, 100, w.state(), percept).kind, 'stuck');
+  assert.ok(!activity.adaptations.some((item) => item.startsWith('retry:')));
 });
 
 test('原地垫高：头顶空了才跳得起来；背包没方块就说清楚', async (t) => {

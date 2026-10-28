@@ -1033,6 +1033,42 @@ test('同一步失败三次后仍执行 Agent 明确选择的重试，并提示�
   assert.match(w.bus.recent().filter((e) => e.type === 'notice').at(-1)?.msg ?? '', /此前出现 3 次同类失败/);
 });
 
+test('再次决策时提供附近实际失败动作的参数、结果、位置和时间', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { decision: 'new', activity: { what: '尝试动作', steps: [step(3)] } });
+  await w.tick();
+  const position = { ...w.adapter.pos };
+  await w.finish(fail('BAD_ARGS', '目标脚下是 air'));
+  await w.tick();
+  let current = JSON.parse(w.pending.at(-1)!.messages[1].content.split('\n').find((line) => line.startsWith('【此刻】'))!.slice('【此刻】'.length));
+  assert.equal(current.recent_action_failures.note, '动作结束时的实际反馈，位置和环境可能随后改变');
+  assert.deepEqual(current.recent_action_failures.entries[0], { skill: 'mind_step', args: { n: 3 }, failure_code: 'BAD_ARGS',
+    summary: '目标脚下是 air', position, observed_at: current.recent_action_failures.entries[0].observed_at });
+  assert.ok(Number.isFinite(Date.parse(current.recent_action_failures.entries[0].observed_at)));
+  await w.reply(w.pending.length - 1, { decision: 'new', activity: { what: '再次尝试', steps: [step(4)] } });
+  await w.tick();
+  await w.finish(fail('BAD_ARGS', '目标仍然是 air'));
+  await w.tick();
+  current = JSON.parse(w.pending.at(-1)!.messages[1].content.split('\n').find((line) => line.startsWith('【此刻】'))!.slice('【此刻】'.length));
+  assert.deepEqual(current.recent_action_failures.entries.map((e: { args: unknown }) => e.args), [{ n: 3 }, { n: 4 }]);
+});
+
+test('失败反馈只包含近期同一会话附近的最近六次', async (t) => {
+  const w = fixture(t), state = w.adapter.state(), now = Date.now();
+  const entry = (n: number) => ({ step: step(n), code: 'BAD_ARGS', summary: `失败 ${n}`, pos: { ...state.pos },
+    worldId: state.worldId, sessionId: state.sessionId, dim: state.dim, at: now });
+  (w.mind as any).recentActionFailures = [
+    ...Array.from({ length: 8 }, (_, i) => entry(i)),
+    { ...entry(8), worldId: 'other-world' }, { ...entry(9), sessionId: 'other-session' },
+    { ...entry(10), dim: 'other-dimension' }, { ...entry(11), pos: { ...state.pos, x: state.pos.x + 9 } },
+    { ...entry(12), at: now - Mind.SAME_FAIL_MS - 1 },
+  ];
+  await w.tick();
+  const current = JSON.parse(w.pending.at(-1)!.messages[1].content.split('\n').find((line) => line.startsWith('【此刻】'))!.slice('【此刻】'.length));
+  assert.deepEqual(current.recent_action_failures.entries.map((e: { args: { n: number } }) => e.args.n), [2, 3, 4, 5, 6, 7]);
+});
+
 for (const scenario of ['same', 'position', 'direction', 'pitch', 'parameters', 'code', 'reason', 'danger'] as const) test(`重复失败的思考级别：${scenario}`, async (t) => {
   const w = fixture(t);
   await w.tick();

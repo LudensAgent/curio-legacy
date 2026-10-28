@@ -265,7 +265,7 @@ export const stepTo: Skill<CellArgs> = {
     if (args.at[1] === 1 && !free({ ...feet, y: feet.y + 2 })) problems.push(describe({ ...feet, y: feet.y + 2 }) === '未看清的格子'
       ? '往上跳时自己头顶上方是 未看清的格子，无法确认跳跃空间'
       : `往上跳时自己头顶上方是 ${describe({ ...feet, y: feet.y + 2 })}（跳不起来；先 dig_at [0,2,0]）`);
-    if (problems.length) return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：${problems.join('；')}`, { problems,
+    if (problems.length) return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：${problems.join('；')}`, { problems, movementNotAttempted: true,
       ...(!hasSupport ? { landingSupport: { pos: floor, observed: seen.get(`${floor.x},${floor.y},${floor.z}`) ?? null } } : {}),
       ...after(ctx, args.facing, target) });
     let movementError: unknown;
@@ -325,7 +325,7 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
           const why = r.reason === 'NO_REFERENCE' ? '脚下是空的（悬着、在水里或梯子上），没有能贴着放的面'
             : r.reason === 'OCCUPIED' ? '脚下这格已经有东西'
             : String(r.reason).startsWith('BLOCKED:') ? `脚下这格有 ${seen.get(`${feet.x},${feet.y},${feet.z}`) ?? '未看清的阻挡'}，方块放不进去；先 dig_at [0,0,0] 把它拿掉` : r.reason === 'NO_ITEM' ? '背包里没有能垫的方块' : `方块没放上（${r.reason}）`;
-          return fail(r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS' : r.reason === 'NO_REFERENCE' ? 'PATH_NOT_FOUND' : 'EFFECT_NOT_CONFIRMED', `原地垫高没成：${why}`, { ...after(ctx, args.facing, pos), pillarFailure: r.reason });
+          return fail(r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS' : r.reason === 'NO_REFERENCE' ? 'PATH_NOT_FOUND' : 'EFFECT_NOT_CONFIRMED', `原地垫高没成：${why}${r.clearanceDetail ? `；${r.clearanceDetail}` : ''}`, { ...after(ctx, args.facing, pos), pillarFailure: r.reason });
         }
       } else {
         const above = { ...feet, y: feet.y + 2 }, n = a.blockAt(above);
