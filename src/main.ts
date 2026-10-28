@@ -127,6 +127,17 @@ perception.onNewItem = (item, heldBefore) => {
   bus.publish('item_new', 'P2', `第一次拿到 ${item}${unlocked.length ? `，想起了用它能做的东西：${unlocked.join('、')}` : ''}`, { item, unlocked });
 };
 setInterval(() => library.prune(), 60_000).unref();
+// 事件循环被卡住（同步算得太久）时，服务器收不到心跳回包，30 秒就以超时踢人：卡超过 3 秒就记下来，带上当时在做什么
+{
+  let last = Date.now();
+  setInterval(() => {
+    const now = Date.now(), stall = now - last - 1000;
+    last = now;
+    if (stall < 3000) return;
+    const task = arbiter.info();
+    bus.publish('event_loop_stall', 'P1', `主线程卡住了 ${(stall / 1000).toFixed(1)} 秒（超过 15~30 秒服务器会以超时踢掉）；当时手上：${task ? `${task.source} ${task.skill}` : '空闲'}`, { stallMs: stall, task: task?.skill ?? null });
+  }, 1000).unref();
+}
 // ------------------------------------------------------------ 直播间（可选）：弹幕只作参考
 const audience = config.live.bilibili.enabled ? new AudienceChannel(config.live.audience, bus) : null;
 const live = config.live.bilibili.enabled ? new BilibiliLive(config.live.bilibili, { log: (sev, msg) => bus.publish('live', sev, msg) }) : null;

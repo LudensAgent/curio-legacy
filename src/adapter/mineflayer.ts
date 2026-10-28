@@ -245,6 +245,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // 向服务器请求尽可能大的视距；服务器会按 view-distance 截断
     const bot = mineflayer.createBot({ host, port, username, version, auth: 'offline', viewDistance: 32 });
     this.bot = bot;
+    this.guardPrePlayWrites(bot);
     bot.loadPlugin(pathfinder);
     // 踩水：每个物理刻看一眼，空闲泡在水里时按住上浮（见 treadWater）
     bot.on('physicsTick', () => { try { this.treadWater(bot); } catch { /* ignore */ } });
@@ -360,6 +361,23 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       this.emit('disconnected', reason);
       if (!this.stopped) this.scheduleReconnect();
     });
+  }
+
+  /**
+   * 断线重连时，上一条连接里还没收尾的动作、定时器可能拿着新的 bot 发包；新连接还在登录阶段时，
+   * 游戏内的包（转头、点窗口……）在服务器看来是坏包，直接以 DecoderException 踢掉（10-28 08:22 连续几次）。
+   * 进游戏之前只放行握手/登录需要的包，其它的丢掉并记一笔，以后好查是谁在发
+   */
+  private guardPrePlayWrites(bot: any) {
+    const client = bot._client;
+    if (!client || typeof client.write !== 'function') return;
+    const PRE_PLAY = new Set(['set_protocol', 'legacy_server_list_ping', 'ping_start', 'ping', 'login_start', 'encryption_begin', 'login_plugin_response', 'login_acknowledged']);
+    const write = client.write.bind(client);
+    let reported = 0;
+    client.write = (name: string, params: unknown) => {
+      if (client.state === 'play' || PRE_PLAY.has(name)) return write(name, params);
+      if (reported++ < 5) this.bus.publish('net_guard', 'P2', `还没进游戏（${client.state}）就有代码想发 ${name} 包，丢掉了：多半是断线前没收尾的动作`, { name, state: client.state, stack: new Error().stack?.split('\n').slice(2, 7).join(' | ') });
+    };
   }
 
   private scheduleReconnect() {
