@@ -1,5 +1,6 @@
 import { appendFileSync } from 'node:fs';
 import path from 'node:path';
+import { startStallProfiler } from './observer/stall-profiler.ts';
 import { runtime } from './runtime.ts';
 import { MineflayerAdapter } from './adapter/mineflayer.ts';
 import { Arbiter } from './arbiter/arbiter.ts';
@@ -127,7 +128,8 @@ perception.onNewItem = (item, heldBefore) => {
   bus.publish('item_new', 'P2', `第一次拿到 ${item}${unlocked.length ? `，想起了用它能做的东西：${unlocked.join('、')}` : ''}`, { item, unlocked });
 };
 setInterval(() => library.prune(), 60_000).unref();
-// 事件循环被卡住（同步算得太久）时，服务器收不到心跳回包，30 秒就以超时踢人：卡超过 3 秒就记下来，带上当时在做什么
+// 事件循环被卡住（同步算得太久）时，服务器收不到心跳回包，30 秒就以超时踢人：卡超过 3 秒就记下来，带上当时在做什么，
+// 以及那段时间 CPU 都花在哪几个函数上（完整采样存到 data/logs/stall-*.cpuprofile，可以用 Chrome DevTools 打开）
 {
   let last = Date.now();
   setInterval(() => {
@@ -137,6 +139,9 @@ setInterval(() => library.prune(), 60_000).unref();
     const task = arbiter.info();
     bus.publish('event_loop_stall', 'P1', `主线程卡住了 ${(stall / 1000).toFixed(1)} 秒（超过 15~30 秒服务器会以超时踢掉）；当时手上：${task ? `${task.source} ${task.skill}` : '空闲'}`, { stallMs: stall, task: task?.skill ?? null });
   }, 1000).unref();
+  if (process.env.STALL_PROFILER !== '0') startStallProfiler(path.join(config.dataDir, 'logs'), (r) => {
+    bus.publish('event_loop_profile', 'P1', `卡顿那段时间 CPU 花在：${r.top.join('；')}${r.file ? `（完整采样：${path.basename(r.file)}）` : ''}`, { stallMs: r.stallMs, top: r.top, file: r.file });
+  });
 }
 // ------------------------------------------------------------ 直播间（可选）：弹幕只作参考
 const audience = config.live.bilibili.enabled ? new AudienceChannel(config.live.audience, bus) : null;
