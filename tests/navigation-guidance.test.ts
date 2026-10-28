@@ -93,6 +93,21 @@ test('visual guidance selects a visible floor and excludes ground hidden behind 
   assert.ok(!blocked || blocked.x < 3, 'seeing a wall cannot reveal footholds behind it');
 });
 
+test('visual guidance can select an observed adjacent destination', () => {
+  const adapter = start();
+  adapter.pos.x = 0.8;
+  adapter.pitch = -0.9;
+  const vision = new Vision(adapter, { range: 16, hFov: 70, vFov: 65, cols: 31, rows: 21, bandCols: 0, bandRows: 0, hearRadius: 10 });
+  vision.scan();
+  const surfaces = (vision as any).visibleSurfaces as Map<string, unknown>;
+  assert.ok(surfaces.has('1,63,0'), 'the target floor is actually seen by the vision scan');
+  const target = { x: 1, y: 64, z: 0 };
+  assert.deepEqual(vision.navigationWaypoint(target, 12, [adapter.pos]), { x: 1.5, y: 64, z: 0.5 });
+  assert.notDeepEqual(vision.navigationWaypoint(target, 12, [adapter.pos, { x: 1.5, y: 64, z: 0.5 }]), { x: 1.5, y: 64, z: 0.5 }, 'a previously attempted destination stays excluded');
+  adapter.setBlock({ x: 1, y: 64, z: 0 }, 'stone');
+  assert.notDeepEqual(vision.navigationWaypoint(target, 12, [adapter.pos]), { x: 1.5, y: 64, z: 0.5 }, 'a newly blocked cell is not treated as a valid landing');
+});
+
 test('real wooden-door state shapes reveal ground through an opened narrow doorway', (t) => {
   const require = createRequire(import.meta.url);
   const data = require('minecraft-data')('1.20.1'), Block = require('prismarine-block')(data);

@@ -823,10 +823,15 @@ export class Vision {
       if (hazardousFloor(surface.name)) continue;
       const p = { x: surface.pos.x + 0.5, y: surface.pos.y + 1, z: surface.pos.z + 0.5 };
       const distance = Math.hypot(p.x - here.x, p.z - here.z);
-      if (distance < 1.5 || distance > maxDistance || Math.abs(p.y - here.y) > 2) continue;
+      // A nearby requested cell is a destination, not an intermediate hop to skip.
+      const destination = Math.floor(target.x) === surface.pos.x && Math.floor(target.y) === p.y && Math.floor(target.z) === surface.pos.z
+        && (Math.floor(here.x) !== surface.pos.x || Math.floor(here.y) !== p.y || Math.floor(here.z) !== surface.pos.z);
+      if ((!destination && distance < 1.5) || distance > maxDistance || Math.abs(p.y - here.y) > 2) continue;
       // 不挖不垫只能一格一格往上走：近处高出两格的地面是一堵墙，不是落脚点
       if (p.y - here.y > 1.2 && distance < 3 * (p.y - here.y)) continue;
-      if (excluded.some((e) => Math.hypot(e.x - p.x, e.z - p.z) < 1 && Math.abs(e.y - p.y) < 1)) continue;
+      if (excluded.some((e) => destination
+        ? Math.floor(e.x) === surface.pos.x && Math.floor(e.y) === p.y && Math.floor(e.z) === surface.pos.z
+        : Math.hypot(e.x - p.x, e.z - p.z) < 1 && Math.abs(e.y - p.y) < 1)) continue;
       const floor = this.adapter.blockOptics(surface.pos.x, surface.pos.y, surface.pos.z);
       if (floor?.kind !== 'solid' || hazardousFloor(floor.name)) continue;
       // 短时视觉记忆只提供候选；地表状态变化或含水方块不能继续被当成干燥落脚点。
