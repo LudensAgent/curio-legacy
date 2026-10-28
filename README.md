@@ -331,11 +331,14 @@ npm run memory:clear
 | 命令 | 作用 |
 |---|---|
 | `npm run agents:list` | 列出所有角色，▶ 是当前在用的 |
-| `npm run agents:save` | 给当前角色存一份快照（复制 data 和世界，导出 Hindsight；录像默认不复制，要的话加 `-- --with-recordings`；Agent 还在跑时加 `-- --live`） |
+| `npm run save` / `npm run agents:save` | 快速存档：冻结当前 data、世界、`.env`、`server.properties` 和服务端 `config/configs/defaultconfigs`，导出 Hindsight；录像默认不复制，要的话加 `-- --with-recordings` |
+| `npm run load` / `npm run agents:load` | 快速读档：覆盖当前角色的世界、记忆、技能和配置，Hindsight 也回退；快照保留，可以反复读取 |
 | `npm run agents:new -- 名字` | 把当前角色整个收进档案，开一个全新的角色：空记忆、空技能、新 bank、随机种子的新世界 |
 | `npm run agents:switch -- <ID或名字>` | 先把当前角色收进档案，再把目标角色搬回 `data/` 和服务器目录；Hindsight 里没有它的 bank 就从档案里的 `hindsight/bank.zip` 恢复 |
 
 new / switch 前先退出 Agent、停掉 Minecraft 服务器（会检查端口）；用 Hindsight 时让它保持运行。第一次用时，现在的 `data/` 会被收编成一个角色（用这次测试开始的时间命名，沿用原来的 bank）。每个角色有自己的 Hindsight bank，切换不会删别人的记忆。运行时仍然是 `data/` 和 `world/`，启动方式不变；切换在同一块盘上是改名，不复制录像。LLM 调用归档（`archives/llm-calls`）是共用的，不跟角色走。
+
+反复测试时：先停 Agent 和服务器 → `npm run save` → 启动测试 → 再停 Agent 和服务器 → `npm run load` → 启动重测。快速存档独立放在 `agents/<ID>/save/`，只有再次 save 才覆盖，new / switch 不会改动它；上一份保留在 `.previous/save/`。load 会丢弃存档之后的进度；未存档的录像保留。save / load 使用相同的 `DATA_DIR`、`SERVER_DIR` 和 `AGENTS_DIR`，默认检查离线，Hindsight 服务保持运行；save 可加 `-- --live`，但运行中复制的数据可能不一致。旧版 agents:save 的档案需重新 save 一次才能快速读档。
 
 ### 11.2 新世界的出生点：按群系难度挑种子
 

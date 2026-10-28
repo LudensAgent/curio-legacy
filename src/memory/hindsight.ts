@@ -158,7 +158,7 @@ export class HindsightBackend implements MemoryBackend {
 }
 
 /**
- * 角色档案用的 bank 操作：整份导出成 zip、从 zip 恢复到一个还不存在的 bank、看 bank 在不在。
+ * 角色档案用的 bank 操作：整份导出成 zip、从 zip 恢复到一个还不存在的 bank、检查和清除 bank。
  * 导出不调 LLM；恢复时服务端要重新算向量（不调 LLM 抽取事实），在后台跑，这里等它做完。
  */
 export function hindsightBankOps(settings: Pick<MemorySettings, 'baseUrl' | 'apiKey'>, opts: { timeoutMs?: number } = {}) {
@@ -166,6 +166,9 @@ export function hindsightBankOps(settings: Pick<MemorySettings, 'baseUrl' | 'api
   const raw = createClient(createConfig({ baseUrl: settings.baseUrl, headers: settings.apiKey ? { Authorization: `Bearer ${settings.apiKey}` } : {} }));
   const timeoutMs = opts.timeoutMs ?? 15 * 60_000;
   return {
+    async remove(bankId: string): Promise<void> {
+      await new HindsightBackend({ ...settings, bankId }).clear(AbortSignal.timeout(timeoutMs));
+    },
     async exists(bankId: string): Promise<boolean> {
       const limit = 100;
       for (let offset = 0; offset < 10000; offset += limit) {

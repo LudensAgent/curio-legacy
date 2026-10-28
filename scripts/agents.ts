@@ -1,11 +1,12 @@
 /**
- * 角色档案：npm run agents:list | agents:save | agents:new [名字] | agents:switch <ID或名字>
+ * 角色档案：npm run agents:list | save | load | agents:new [名字] | agents:switch <ID或名字>
  * 存档 / 新建 / 切换前先退出 Agent、停掉 Minecraft 服务器；用 Hindsight 时让它保持运行（要导出、恢复记忆）。
  */
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config } from '../src/config.ts';
-import { adoptCurrent, listAgents, newAgent, saveActive, switchAgent, worldEntries, type AgentPaths } from '../src/maintenance/agents.ts';
+import { activeAgent, adoptCurrent, listAgents, loadActive, newAgent, saveActive, switchAgent, worldEntries, type AgentPaths } from '../src/maintenance/agents.ts';
 import { assertResetOffline } from '../src/maintenance/offline.ts';
 import { inspectWorldReset } from '../src/maintenance/world-reset.ts';
 import { hindsightBankOps } from '../src/memory/hindsight.ts';
@@ -23,7 +24,11 @@ const log = (s: string) => console.log(`· ${s}`);
 const [cmd, ...rest] = process.argv.slice(2);
 const flags = new Set(rest.filter((a) => a.startsWith('--')));
 const words = rest.filter((a) => !a.startsWith('--'));
-const bank = config.memory.provider === 'hindsight' || flags.has('--hindsight') ? hindsightBankOps(config.memory) : undefined;
+const current = activeAgent(paths);
+const savedBank = current ? path.join(paths.agentsDir, current.id, 'save', 'config', 'hindsight.json') : '';
+const useSavedBank = cmd === 'load' && !!savedBank && fs.existsSync(savedBank);
+const bankSettings = useSavedBank ? JSON.parse(fs.readFileSync(savedBank, 'utf8')) as { baseUrl: string; apiKey: string } : config.memory;
+const bank = useSavedBank || config.memory.provider === 'hindsight' || flags.has('--hindsight') ? hindsightBankOps(bankSettings) : undefined;
 
 async function offline() {
   const world = inspectWorldReset(paths.serverDir, paths.projectDir);
@@ -46,8 +51,12 @@ try {
   } else if (cmd === 'save') {
     if (!flags.has('--live')) await offline();
     else console.log('（--live：Agent 或服务器还在跑，存下的世界和数据可能不完全一致）');
-    const m = await saveActive(paths, ident, { bank, withRecordings: flags.has('--with-recordings'), log });
+    const m = await saveActive(paths, ident, { bank, bankSettings: { baseUrl: config.memory.baseUrl, apiKey: config.memory.apiKey }, withRecordings: flags.has('--with-recordings'), log });
     console.log(`已存档：${m.id}`);
+  } else if (cmd === 'load') {
+    await offline();
+    const m = await loadActive(paths, { bank, log });
+    console.log(`已读档：${m.id}；启动服务器和 Agent 即可从快速存档继续测试`);
   } else if (cmd === 'new') {
     await offline();
     const rcon = { host: config.observer.rconHost, port: config.observer.rconPort, password: config.observer.rconPassword };
@@ -68,7 +77,7 @@ try {
     const m = adoptCurrent(paths, ident, log);
     console.log(`当前角色：${m.id}（世界条目：${worldEntries(paths).join('、')}）`);
   } else {
-    console.log('用法：npm run agents:list | agents:save [-- --live --with-recordings] | agents:new [-- 名字 --random-seed] | agents:switch -- <ID或名字>');
+    console.log('用法：npm run agents:list | save [-- --live --with-recordings] | load | agents:new [-- 名字 --random-seed] | agents:switch -- <ID或名字>');
     process.exitCode = cmd ? 1 : 0;
   }
 } catch (e: any) {

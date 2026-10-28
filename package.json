@@ -24,6 +24,9 @@
     "world:seed": "tsx scripts/world-seed.ts",
     "agents:list": "tsx scripts/agents.ts list",
     "agents:save": "tsx scripts/agents.ts save",
+    "agents:load": "tsx scripts/agents.ts load",
+    "save": "tsx scripts/agents.ts save",
+    "load": "tsx scripts/agents.ts load",
     "agents:new": "tsx scripts/agents.ts new",
     "agents:switch": "tsx scripts/agents.ts switch",
     "typecheck": "tsc --noEmit"
