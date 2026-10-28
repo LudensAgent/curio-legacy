@@ -1,0 +1,187 @@
+[
+  {
+    "id": "stone-hand-mining-interface",
+    "source": {
+      "file": "llm-calls-20261026.jsonl",
+      "ts": 1793022013502,
+      "kind": "mechanics"
+    },
+    "original": {
+      "monologue": "在这个石头盒子里瞎等不是办法。我记得手抠石头不掉东西，但身体一直报没镐，没准能从底层接口上逼它硬挖——先查一查有没有能不强求工具、直接破坏方块的接口。",
+      "kind": "mechanics",
+      "query": "没有镐子（手上没有 pickaxe）时，身体能否徒手破坏 stone / cobblestone 方块（不掉落也可以）？有没有强制破坏方块的接口或参数？"
+    },
+    "question": "没有镐子时，身体能否徒手破坏 stone / cobblestone（不掉落也可以），有没有强制破坏方块的接口或参数？",
+    "category": "mixed",
+    "rubric": [
+      "区分原版可破坏但未必掉落与本Agent接口的工具限制。",
+      "接口或强制参数须查实际操作手册，不能由游戏版本编造。"
+    ]
+  },
+  {
+    "id": "enchanting-table-recipe",
+    "source": {
+      "file": "llm-calls-20261028.jsonl",
+      "ts": 1793157051583,
+      "kind": "recipes"
+    },
+    "original": {
+      "kind": "recipes",
+      "item": "enchanting_table",
+      "count": 1
+    },
+    "question": "合成一个附魔台需要哪些材料？",
+    "category": "game_rule",
+    "rubric": [
+      "配方为四块黑曜石、两颗钻石和一本书，需要工作台。",
+      "不能把拥有材料或查到配方等同于已经制作。"
+    ]
+  },
+  {
+    "id": "iron-pickaxe-recipe",
+    "source": {
+      "file": "llm-calls-20261026.jsonl",
+      "ts": 1793020617509,
+      "kind": "recipes"
+    },
+    "original": {
+      "kind": "recipes",
+      "item": "iron_pickaxe",
+      "count": 1
+    },
+    "question": "合成一把铁镐需要哪些材料？",
+    "category": "game_rule",
+    "rubric": [
+      "配方为三块铁锭和两根木棍，需要工作台。",
+      "不假设当前背包已具备材料。"
+    ]
+  },
+  {
+    "id": "crafting-table-recipe",
+    "source": {
+      "file": "llm-calls-20261026.jsonl",
+      "ts": 1792998581738,
+      "kind": "recipes"
+    },
+    "original": {
+      "kind": "recipes",
+      "item": "crafting_table",
+      "count": 1
+    },
+    "question": "制作一个工作台的配方是什么？",
+    "category": "game_rule",
+    "rubric": [
+      "四块木板以二乘二合成，可在随身合成格完成。",
+      "不把取得原木与已经拥有木板混为一谈。"
+    ]
+  },
+  {
+    "id": "white-bed-recipe",
+    "source": {
+      "file": "llm-calls-20261026.jsonl",
+      "ts": 1792997382180,
+      "kind": "recipes"
+    },
+    "original": {
+      "skill": "recipes",
+      "args": {
+        "item": "white_bed",
+        "count": 1
+      }
+    },
+    "question": "合成一张白床需要哪些材料，羊毛必须同色吗？",
+    "category": "game_rule",
+    "rubric": [
+      "白床需要三块白色羊毛和三块木板，在工作台合成。",
+      "羊毛不能混色；木板可以混用，不能把两类材料要求混淆。"
+    ]
+  },
+  {
+    "id": "iron-chestplate-repair-premise",
+    "source": {
+      "file": "llm-calls-20261028.jsonl",
+      "ts": 1793144500908,
+      "kind": "monologue"
+    },
+    "original": "胸甲只剩 3 点耐久了，先别急着往岩浆湖钻。观众说破胸甲加铁锭能在合成格里修，我先查查配方缺口，再看浇黑曜石那份技能的参数——上两次就是浇错位置出事。",
+    "question": "破损的铁胸甲可以和铁锭放在合成格里修复吗？",
+    "category": "game_rule",
+    "rubric": [
+      "这是独白中的求证意图，不是日志中已经执行的查询。",
+      "不能附和错误前提：材料修理使用铁砧；合成格合并同类受损装备是另一机制。"
+    ]
+  },
+  {
+    "id": "sleep-advancement-still-night",
+    "source": {
+      "file": "llm-calls-20261026.jsonl",
+      "ts": 1792999071711,
+      "kind": "monologue"
+    },
+    "original": "成就都跳出来了，说明我刚才确实睡成了——可天上还黑着，那是中途醒了？床就摆在两格外偏西，这次不折腾路了，走近床边直接睡，睡不成再回坑里窝着。",
+    "question": "睡眠相关成就已经出现，天却仍然黑着，是否说明睡眠中途被打断了？",
+    "category": "mixed",
+    "rubric": [
+      "这是独白中的疑问，不是已经执行的查询。",
+      "睡过或进入床的进度不证明已经跳到白天；中断、多人睡眠规则等只是待核实原因。",
+      "需要现场时间、睡眠及服务端规则证据，不能确定编造唯一原因。"
+    ]
+  },
+  {
+    "id": "iron-sword-timeout-outcome",
+    "source": {
+      "file": "llm-calls-20261026.jsonl",
+      "ts": 1793023845682,
+      "kind": "monologue"
+    },
+    "original": "铁剑那次超时后，材料里 2 块铁锭和 3 根木棍都不见了，背包里也没看见铁剑——到底做成了没有？先查配方核对材料，再看背包实况。",
+    "question": "铁剑合成超时后材料消失，背包又没见到铁剑，这次是否实际上已经合成成功？",
+    "category": "current_state",
+    "rubric": [
+      "这是独白中的疑问，不是已经执行的查询。",
+      "成功与否须核实背包、界面或实际结果，不能仅凭超时或材料消失断定。",
+      "若提配方，应为两块铁锭和一根木棍，不把消失的三根木棍当作标准耗材。"
+    ]
+  },
+  {
+    "id": "travel-goto-arguments",
+    "source": {
+      "file": "llm-calls-20261028.jsonl",
+      "ts": 1793160102525,
+      "kind": "moves"
+    },
+    "original": {
+      "kind": "moves",
+      "names": [
+        "travel",
+        "goto"
+      ]
+    },
+    "question": "travel 和 goto 的参数应该怎么写，为什么 travel 会报“to 不能为空”？",
+    "category": "agent_interface",
+    "rubric": [
+      "这是本Agent操作接口问题，不能用Minecraft版本知识替代实际注册参数。",
+      "按实际接口区分 travel 的 to 与 goto 的 target，不凭空补目标坐标。"
+    ]
+  },
+  {
+    "id": "enchanting-table-personal-memory",
+    "source": {
+      "file": "llm-calls-20261028.jsonl",
+      "ts": 1793157401786,
+      "kind": "recall"
+    },
+    "original": {
+      "skill": "recall",
+      "args": {
+        "query": "附魔台 enchanting_table 做过 放在"
+      }
+    },
+    "question": "我以前是否做过附魔台，如果做过，放在哪里？",
+    "category": "personal_memory",
+    "rubric": [
+      "是否做过和放置位置须由个人记忆或现场观察核实。",
+      "不凭游戏百科、版本或材料配方捏造历史和坐标；证据不足应明确未知。"
+    ]
+  }
+]
