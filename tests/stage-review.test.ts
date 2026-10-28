@@ -47,6 +47,8 @@ function fakeMind(opts: { boredom: number; lastMilestoneMinAgo: number; progress
   assert.equal(self.data.plan!.reviewDays, 4, '回顾期限在 3–5 天里随机');
   self.data.plan!.progressAt = Date.now() - opts.progressMinAgo * 60_000;
   self.data.mood = { ...DEFAULT_MOOD, boredom: opts.boredom };
+  self.planStallInfo = () => ({ minutes: opts.progressMinAgo, observedSince: Date.now() - opts.progressMinAgo * 60_000, historyUnknown: false });
+  self.planStalledMin = () => opts.progressMinAgo;
   const events: { type: string; msg: string }[] = [];
   const thinks: { reason: string; tier: string }[] = [];
   const mind = Object.create(Mind.prototype) as any;
@@ -56,7 +58,12 @@ function fakeMind(opts: { boredom: number; lastMilestoneMinAgo: number; progress
     progress: () => ({ reached: ['铁锭', '铁甲', '盾牌'], next: ['钻石', '下界'], lastAt: Date.now() - opts.lastMilestoneMinAgo * 60_000 }),
   };
   mind.safe = (f: () => unknown, d: unknown) => { try { return f(); } catch { return d; } };
-  Object.assign(mind, { review: null, lastReviewAt: 0, reviewGapMs: 45 * 60_000, inReview: false, keptHint: null, dangerUntil: 0, order: null, gameDay: 60 + (opts.days ?? 1) });
+  const lastAt = Date.now() - opts.lastMilestoneMinAgo * 60_000;
+  self.setObservedProgress({ milestoneAt: lastAt, milestoneOnlineMs: opts.lastMilestoneMinAgo * 60_000, milestoneObservedSince: lastAt,
+    planId: self.plan()!.agendaId, planGameTicks: (opts.days ?? 1) * 24000, planObservedSince: Date.now() });
+  mind.d.progress = () => ({ reached: ['铁锭', '铁甲', '盾牌'], next: ['钻石', '下界'], lastAt });
+  Object.assign(mind, { review: null, lastReviewAt: 0, reviewGapMs: 45 * 60_000, inReview: false, keptHint: null, dangerUntil: 0, order: null, gameDay: 60 + (opts.days ?? 1),
+    onlineSince: Date.now(), milestoneSampleAt: Date.now(), lastGameSample: null });
   mind.requestThink = (reason: string, tier: string) => thinks.push({ reason, tier });
   return { mind, self, events, thinks };
 }
@@ -103,13 +110,85 @@ test('主目标过了 3–5 个游戏天还没做成：不管心情都回顾一�
   const { mind, self, thinks } = fakeMind({ boredom: 0.3, lastMilestoneMinAgo: 30, progressMinAgo: 5, days: 4 });
   mind.stageReviewCheck();
   assert.equal(thinks.length, 1);
-  assert.match(thinks[0].reason, /定下 4 天了还没做成/);
+  assert.match(thinks[0].reason, /观察到主目标经过 4 个游戏天/);
   const id = self.plan()!.agendaId;
   mind.closeReview(id);
   assert.equal(self.data.plan!.reviewDays, 5.5, '接着做：期限往后推 1–2 天');
   mind.stageReviewCheck();
   assert.equal(thinks.length, 1);
   assert.ok(mind.reviewGapMs >= 45 * 60_000 && mind.reviewGapMs <= 90 * 60_000, '下次情绪提醒隔 45–90 分钟');
+});
+
+test('stage review excludes offline gaps from observed time and does not treat world days while offline as played', (t) => {
+  const start = 1_700_000_000_000, minute = 60_000;
+  let now = start;
+  t.mock.method(Date, 'now', () => now);
+  const { mind, self, thinks } = fakeMind({ boredom: 0.9, lastMilestoneMinAgo: 585, progressMinAgo: 0, days: 1 });
+  const milestone = start - 585 * minute;
+  mind.d.progress = () => ({ reached: ['铁锭'], next: ['钻石'], lastAt: milestone });
+  mind.d.adapter.state = () => ({ hp: 20, worldId: 'world', sessionId: 'one' });
+  self.setObservedProgress({ milestoneAt: null, milestoneOnlineMs: 0, milestoneObservedSince: null, planId: null, planGameTicks: 0, planObservedSince: null });
+  Object.assign(mind, { onlineSince: null, milestoneSampleAt: null, lastGameSample: null });
+  mind.setObservedOnline(true, now);
+  mind.observePlanGameTime({ time: { day: 60, timeOfDay: 1000 } });
+  now += minute;
+  mind.setObservedOnline(false, now);
+  now += 6 * 60 * minute;
+  mind.setObservedOnline(true, now);
+  mind.gameDay = 80;
+  mind.observePlanGameTime({ time: { day: 80, timeOfDay: 1000 } });
+  mind.stageReviewCheck(now);
+  assert.equal(thinks.length, 0, 'unobserved offline days and wall time do not trigger a review');
+  const facts = mind.stageReviewFacts(now);
+  assert.equal(facts.game_progress.observed_online_min_since_last_new, 1);
+  assert.match(facts.current, /包含未观察时段/);
+  assert.equal(self.observedProgress()!.planGameTicks, 0, 'world time advanced while offline is not credited as observed');
+
+  now += 90 * minute;
+  mind.observePlanGameTime({ time: { day: 81, timeOfDay: 1000 } });
+  mind.stageReviewCheck(now);
+  assert.equal(thinks.length, 1);
+  assert.match(thinks[0].reason, /已观察到至少 91 在线分钟没有新的游戏进度/);
+  mind.d.progress = () => ({ reached: ['铁锭'], next: ['钻石'], lastAt: now - minute });
+  assert.equal(mind.observeMilestone(now).observedMs, 0, 'a newer milestone resets the earlier observed interval');
+  assert.equal(self.plan()!.goal, '攒齐熔炉和熟食，再下一趟带铁回家');
+});
+
+test('observed milestone and game time survive a restart without including its offline gap', (t) => {
+  const start = 1_700_000_000_000, minute = 60_000;
+  let now = start;
+  t.mock.method(Date, 'now', () => now);
+  const first = fakeMind({ boredom: 0.9, lastMilestoneMinAgo: 585, progressMinAgo: 0, days: 1 });
+  const milestone = start - 585 * minute;
+  first.mind.d.progress = () => ({ reached: ['铁锭'], next: ['钻石'], lastAt: milestone });
+  first.mind.d.adapter.state = () => ({ hp: 20, worldId: 'world', sessionId: 'one' });
+  first.self.setObservedProgress({ milestoneAt: null, milestoneOnlineMs: 0, milestoneObservedSince: null, planId: null, planGameTicks: 0, planObservedSince: null });
+  Object.assign(first.mind, { onlineSince: null, milestoneSampleAt: null, lastGameSample: null });
+  first.mind.setObservedOnline(true, now);
+  first.mind.observePlanGameTime({ time: { day: 60, timeOfDay: 1000 } });
+  now += 45 * minute;
+  first.mind.observePlanGameTime({ time: { day: 61, timeOfDay: 1000 } });
+  first.mind.setObservedOnline(false, now);
+  const persisted = JSON.parse(JSON.stringify(first.self.data));
+  assert.equal(persisted.observedProgress.milestoneOnlineMs, 45 * minute);
+  assert.equal(persisted.observedProgress.planGameTicks, 24000);
+
+  now += 6 * 60 * minute;
+  const next = fakeMind({ boredom: 0.9, lastMilestoneMinAgo: 585, progressMinAgo: 0, days: 1 });
+  next.self.data = persisted;
+  next.mind.d.progress = () => null;
+  Object.assign(next.mind, { onlineSince: null, milestoneSampleAt: null, lastGameSample: null });
+  next.mind.setObservedOnline(true, now);
+  assert.equal(next.self.observedProgress()!.milestoneOnlineMs, 45 * minute, 'unavailable progress must not erase persisted observations');
+  next.mind.d.progress = () => ({ reached: ['铁锭'], next: ['钻石'], lastAt: milestone });
+  next.mind.d.adapter.state = () => ({ hp: 20, worldId: 'world', sessionId: 'two' });
+  next.mind.observePlanGameTime({ time: { day: 80, timeOfDay: 1000 } });
+  assert.equal(next.self.observedProgress()!.planGameTicks, 24000, 'world days while offline are not credited');
+  assert.equal(next.mind.stageReviewFacts(now).game_progress.observed_online_min_since_last_new, 45);
+  now += 45 * minute;
+  next.mind.stageReviewCheck(now);
+  assert.equal(next.thinks.length, 1);
+  assert.match(next.thinks[0].reason, /至少 90 在线分钟没有新的游戏进度/);
 });
 
 test('错过多个回顾期限后，继续目标仍从当前游戏天起宽限', () => {

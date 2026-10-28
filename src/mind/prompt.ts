@@ -394,11 +394,12 @@ function focusBlock(ctx: MindContext): Record<string, unknown> | null {
   if (!item && !plan) return null;
   const goal = plan?.goal ?? item!.text;
   const next = plan?.steps.findIndex((st) => !st.done) ?? -1;
+  const stall = plan ? ctx.self.planStallInfo() : null;
   return {
     goal, agenda_id: plan?.agendaId ?? item!.id,
-    ...(plan ? { for_min: Math.round((Date.now() - plan.setAt) / 60000), checklist: plan.steps.map((st, i) => `${i}. [${st.done ? 'x' : ' '}] ${st.text}${st.done && st.auto ? '（条件达成，自动勾的）' : !st.done && st.doneWhen ? '（条件达成会自动勾）' : ''}`), ...(next >= 0 ? { next_item: next } : {}),
+    ...(plan ? { goal_age_wall_clock_min: Math.round((Date.now() - plan.setAt) / 60000), checklist: plan.steps.map((st, i) => `${i}. [${st.done ? 'x' : ' '}] ${st.text}${st.done && st.auto ? '（条件达成，自动勾的）' : !st.done && st.doneWhen ? '（条件达成会自动勾）' : ''}`), ...(next >= 0 ? { next_item: next } : {}),
       // 进展的事实交给它自己判断：多久没勾掉一项、这期间做了几段活
-      no_progress_min: Math.round((Date.now() - (plan.progressAt ?? plan.setAt)) / 60000),
+      no_progress_observed_online_min: Math.round(stall!.minutes), ...(stall!.historyUnknown ? { earlier_online_time: '未知' } : {}),
       activities_since_progress: ctx.self.history(60).filter((r) => r.at > (plan.progressAt ?? plan.setAt)).length } : { checklist: '还没有：写 plan' }),
     ...(ctx.activity ? { current_activity_for_goal: ctx.activity.agendaId === (plan?.agendaId ?? item!.id) } : {}),
     ...(ctx.suspended.length ? { will_resume_after_detour: ctx.suspended.map((a) => a.what) } : {}),

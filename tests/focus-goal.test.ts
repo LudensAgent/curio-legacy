@@ -47,14 +47,16 @@ test('主目标是阶段成果：还在推进时，眼前的事顶替不了它�
   const goalId = armour.agendaId;
   const night = '先安全过夜，天亮再回地面清包备料';
   const refusal = self.goalSwitchRefusal(night, { deliberate: false });
-  assert.match(refusal ?? '', /还在推进.*detour/);
+  assert.match(refusal ?? '', /尚未完成.*detour/);
   assert.match(self.goalSwitchRefusal(night, { deliberate: true }) ?? '', /switch_reason/, '认真想但没写理由也不换');
   assert.equal(self.goalSwitchRefusal(night, { deliberate: false, reason: '想换' }) !== null, true, '瞥一眼写了理由也不换');
   // 刚还在推进：认真想、写了理由，一时的想法也顶不掉主目标；停下来回顾阶段目标时、或主目标停滞了才换
   assert.match(self.goalSwitchRefusal('先吃口东西保命', { deliberate: true, reason: '血太少' }) ?? '', /一时的想法不换主目标.*agenda/);
   assert.equal(self.goalSwitchRefusal('去下界', { deliberate: true, reason: '铁甲已经够用，下一阶段去下界', review: true }), null);
   assert.notEqual(self.goalSwitchRefusal('去下界', { deliberate: false, reason: '铁甲已经够用', review: true }), null, '回顾也要认真想');
-  self.data.plan!.progressAt = Date.now() - (SelfModel.STALL_MIN + 1) * 60_000;
+  self.data.plan!.stalledOnlineMs = (SelfModel.STALL_MIN + 1) * 60_000;
+  self.data.plan!.stalledObservedSince = Date.now() - self.data.plan!.stalledOnlineMs;
+  self.data.plan!.stalledHistoryUnknown = false;
   assert.equal(self.goalSwitchRefusal('去下界', { deliberate: true, reason: '铁甲这条卡了很久' }), null, '主目标停滞了，认真想写了理由就能换');
   self.data.plan!.progressAt = Date.now();
   assert.equal(self.goalSwitchRefusal(night, { deliberate: false, operator: true }), null);

@@ -145,6 +145,10 @@ export class Mind {
   private deathAt = 0;
   private deathTold = false;
   private readonly startedAt = Date.now();
+  /** 在线观察的计时基点只留在内存，累计值由 SelfModel 持久化。 */
+  private onlineSince: number | null = null;
+  private milestoneSampleAt: number | null = null;
+  private lastGameSample: { ticks: number; worldId: string; sessionId: string } | null = null;
   private lastLessonAt = 0;
   private reflecting: AbortController | null = null;
   private notes: string[] = [];
@@ -222,6 +226,61 @@ export class Mind {
   get inFlight() { return !!this.thinking; }
   get autonomous() { return this.d.thinker.autonomous; }
 
+  private setObservedOnline(online: boolean, now = Date.now()) {
+    if (!online && this.onlineSince !== null) this.observeMilestone(now);
+    this.d.self.setOnline(online, now);
+    if (online && this.onlineSince === null) {
+      this.onlineSince = now;
+      this.milestoneSampleAt = now;
+      this.observeMilestone(now);
+    }
+    else if (!online && this.onlineSince !== null) {
+      this.onlineSince = null;
+      this.milestoneSampleAt = null;
+      this.lastGameSample = null;
+    }
+  }
+
+  private observeMilestone(now: number) {
+    const progress = this.safe(() => this.d.progress?.() ?? null, null);
+    if (!progress) {
+      // 没有进度来源时无法判断中途是否出现了新里程碑，不抹掉已观察记录，也不推算缺口。
+      this.milestoneSampleAt = this.onlineSince === null ? null : now;
+      return { lastAt: null, observedMs: 0 };
+    }
+    const lastAt = progress.lastAt ?? null;
+    const current = this.d.self.observedProgress() ?? { milestoneAt: null, milestoneOnlineMs: 0, milestoneObservedSince: null, planId: null, planGameTicks: 0, planObservedSince: null };
+    const changed = lastAt !== current.milestoneAt;
+    const next = { ...current, milestoneAt: lastAt, milestoneOnlineMs: changed ? 0 : current.milestoneOnlineMs,
+      milestoneObservedSince: changed ? (this.onlineSince !== null ? now : null) : current.milestoneObservedSince };
+    if (lastAt !== null && this.onlineSince !== null && this.milestoneSampleAt !== null)
+      next.milestoneOnlineMs += Math.max(0, now - Math.max(lastAt, this.milestoneSampleAt));
+    this.milestoneSampleAt = this.onlineSince === null ? null : now;
+    if (changed || next.milestoneOnlineMs !== current.milestoneOnlineMs) this.d.self.setObservedProgress(next);
+    return { lastAt, observedMs: next.milestoneOnlineMs };
+  }
+
+  private observePlanGameTime(p: Percept) {
+    const plan = this.d.self.plan();
+    const current = this.d.self.observedProgress() ?? { milestoneAt: null, milestoneOnlineMs: 0, milestoneObservedSince: null, planId: null, planGameTicks: 0, planObservedSince: null };
+    const changed = current.planId !== (plan?.agendaId ?? null);
+    const next = { ...current, planId: plan?.agendaId ?? null, planGameTicks: changed ? 0 : current.planGameTicks,
+      planObservedSince: changed ? Date.now() : current.planObservedSince };
+    if (changed) {
+      this.lastGameSample = null;
+    }
+    if (!plan || !Number.isFinite(p.time.day) || !Number.isFinite(p.time.timeOfDay)) {
+      if (changed) this.d.self.setObservedProgress(next);
+      return;
+    }
+    const state = this.d.adapter.state();
+    const sample = { ticks: p.time.day! * 24000 + ((p.time.timeOfDay % 24000) + 24000) % 24000, worldId: state.worldId, sessionId: state.sessionId };
+    if (this.onlineSince !== null && this.lastGameSample?.worldId === sample.worldId && this.lastGameSample.sessionId === sample.sessionId)
+      next.planGameTicks += Math.max(0, sample.ticks - this.lastGameSample.ticks);
+    this.lastGameSample = this.onlineSince === null ? null : sample;
+    if (changed || next.planGameTicks !== current.planGameTicks) this.d.self.setObservedProgress(next);
+  }
+
   // ---------------------------------------------------------------- 生命周期
   private doneListener = (o: TaskOutcome) => this.onDone(o);
   private preemptListener = (o: TaskPreemption) => this.onPreempt(o);
@@ -244,6 +303,7 @@ export class Mind {
   }
 
   stop() {
+    this.setObservedOnline(false);
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.cancelThinking('shutdown');
@@ -261,6 +321,7 @@ export class Mind {
   // ---------------------------------------------------------------- 主循环
   tick() {
     const state = this.d.adapter.state();
+    this.setObservedOnline(observationReady(state) && !this.paused);
     const task = this.d.arbiter.info();
     const travelling = !!task && ['travel_portal', 'recall_portal'].includes(task.skill);
     if (travelling && !observationReady(state)) return; // 传送技能自己等落地
@@ -355,6 +416,7 @@ export class Mind {
     this.safe(() => this.autoCheckPlan(p), undefined);
     this.safe(() => this.strategy.onTick(p.time.phase, this.bedDist(), this.activity?.what), undefined);
     this.safe(() => this.goalStuckCheck(), undefined);
+    this.observePlanGameTime(p);
     this.gameDay = p.time.day ?? NaN;
     this.d.self.notePlanDay(this.gameDay);
     this.safe(() => this.stageReviewCheck(), undefined);
@@ -435,9 +497,10 @@ export class Mind {
     if (!plan || !this.d.onGoalStuck) return;
     const since = plan.progressAt ?? plan.setAt;
     const acts = this.d.self.history(60).filter((r) => r.at > since);
-    if (Date.now() - since < 30 * 60_000 || acts.length < 8) return;
+    const stall = this.d.self.planStallInfo();
+    if (stall.minutes < 30 || acts.length < 8) return;
     this.d.onGoalStuck(plan.goal, [
-      `目标：${plan.goal}（定下 ${Math.round((Date.now() - plan.setAt) / 60_000)} 现实分钟，${Math.round((Date.now() - since) / 60_000)} 现实分钟没勾掉一项）`,
+      `目标：${plan.goal}（距制定 ${Math.round((Date.now() - plan.setAt) / 60_000)} 现实分钟，包含离线；已观察到${stall.historyUnknown ? '至少 ' : ' '}${Math.round(stall.minutes)} 在线分钟没勾掉一项${stall.historyUnknown ? '，更早的在线时长未知' : ''}）`,
       `清单：${plan.steps.map((st, i) => `${i}.[${st.done ? 'x' : ' '}] ${st.text}`).join(' ')}`,
       ...acts.slice(-20).map((r) => `${r.what} → ${r.outcome}：${r.summary.slice(0, 180)}`),
     ]);
@@ -454,22 +517,23 @@ export class Mind {
     const s = this.d.adapter.state();
     if (s.hp < 8) return; // 保命要紧，先别想阶段的事
     const plan = this.d.self.plan();
-    const days = this.d.self.planDays(this.gameDay);
+    const days = (this.d.self.observedProgress()?.planGameTicks ?? 0) / 24000;
     // 1) 主目标过了好几个游戏天（3–5 天里随机）还没做成：回顾一次，别一直钻牛角尖
     const overdue = !!plan && plan.reviewDays !== undefined && days >= plan.reviewDays;
     // 2) 情绪提醒：腻透了或烦透了，而且确实没进展（主目标停滞、或很久没有新的游戏进度）；
     //    目标至少做了一天、离上次回顾够久，才提醒——情绪会起伏，不能一烦就换
     const m = this.d.self.mood;
     const bored = m.boredom >= Mind.BORED_REVIEW, fed = m.frustration >= Mind.FED_UP_REVIEW;
-    const stalledMin = this.d.self.planStalledMin(now);
-    const lastAt = this.safe(() => this.d.progress?.()?.lastAt ?? null, null);
-    const noMilestoneMin = lastAt ? (now - lastAt) / 60_000 : null;
+    const stall = this.d.self.planStallInfo(now);
+    const stalledMin = stall.minutes;
+    const milestone = this.observeMilestone(now);
+    const noMilestoneMin = milestone.lastAt ? milestone.observedMs / 60_000 : null;
     const stale = !plan || stalledMin >= SelfModel.STALL_MIN || (noMilestoneMin !== null && noMilestoneMin >= Mind.NO_MILESTONE_MIN);
     const moody = (bored || fed || !!this.keptHint) && stale && (!plan || days >= 1) && now - this.lastReviewAt >= this.reviewGapMs;
     if (!overdue && !moody) return;
-    const why = [overdue ? `主目标定下 ${Math.floor(days)} 天了还没做成` : '', bored ? '好无聊' : '', fed ? '很烦躁' : '',
-      plan && stalledMin >= SelfModel.STALL_MIN ? `主目标 ${Math.round(stalledMin)} 现实分钟没勾掉一项` : '',
-      noMilestoneMin !== null && noMilestoneMin >= Mind.NO_MILESTONE_MIN ? `${Math.round(noMilestoneMin)} 现实分钟没有新的游戏进度` : '',
+    const why = [overdue ? `已观察到主目标经过 ${Math.floor(days)} 个游戏天，仍未做成（更早未观察时间未知）` : '', bored ? '好无聊' : '', fed ? '很烦躁' : '',
+      plan && stalledMin >= SelfModel.STALL_MIN ? `已观察到${stall.historyUnknown ? '至少 ' : ' '}${Math.round(stalledMin)} 在线分钟没勾掉一项${stall.historyUnknown ? '，更早的在线时长未知' : ''}` : '',
+      noMilestoneMin !== null && noMilestoneMin >= Mind.NO_MILESTONE_MIN ? `已观察到至少 ${Math.round(noMilestoneMin)} 在线分钟没有新的游戏进度，更早的在线时长未知` : '',
       this.keptHint ? '回想时觉得主目标可以放下了' : ''].filter(Boolean).join('、');
     this.review = { at: now, why };
     this.d.bus.publish('stage_review', 'P2', `停下来回顾阶段目标：${why}`, { boredom: m.boredom, frustration: m.frustration, days, stalledMin: Math.round(stalledMin), noMilestoneMin: noMilestoneMin === null ? null : Math.round(noMilestoneMin) });
@@ -481,14 +545,15 @@ export class Mind {
     const plan = this.d.self.plan();
     const prog = this.safe(() => this.d.progress?.() ?? null, null);
     const min = (ms: number) => Math.round(ms / 60_000);
+    const milestone = this.observeMilestone(now);
     const outcome = { done: '做完', dropped: '放下', switched: '换掉' } as const;
     return {
       why: this.review?.why ?? '',
       feeling: moodWords(this.d.self.mood),
-      ...(plan ? { current: `「${plan.goal}」定下 ${Math.floor(this.d.self.planDays(this.gameDay))} 个游戏天（${min(now - plan.setAt)} 现实分钟），${Math.round(this.d.self.planStalledMin(now))} 现实分钟没勾掉一项，清单 ${plan.steps.filter((st) => st.done).length}/${plan.steps.length}` } : { current: '没有主目标' }),
+      ...(plan ? { current: `「${plan.goal}」制定至今世界日期相差 ${Math.floor(this.d.self.planDays(this.gameDay))} 个游戏天，包含未观察时段；已观察到至少 ${Math.floor((this.d.self.observedProgress()?.planGameTicks ?? 0) / 24000)} 个游戏天；已观察到${this.d.self.planStallInfo(now).historyUnknown ? '至少 ' : ' '}${Math.round(this.d.self.planStalledMin(now))} 在线分钟没勾掉一项，清单 ${plan.steps.filter((st) => st.done).length}/${plan.steps.length}` } : { current: '没有主目标' }),
       recent_stages: this.d.self.stages(6).map((r) => `「${r.goal.slice(0, 40)}」${min(r.endAt - r.setAt)} 现实分钟 → ${outcome[r.outcome]}（${r.stepsDone}/${r.steps}）`),
       ...(prog ? { game_progress: { reached: prog.reached.slice(-10), not_yet: prog.next.slice(0, 10),
-        ...(prog.lastAt ? { last_new_real_min_ago: min(now - prog.lastAt) } : {}) } } : {}),
+        ...(prog.lastAt ? { last_new_wall_min_ago: min(now - prog.lastAt), observed_online_min_since_last_new: min(milestone.observedMs), online_history: '已观察值，更早在线时长可能未知' } : {}) } } : {}),
       ideas_waiting: this.d.self.agenda().filter((a) => a.status !== 'active').slice(-6).map((a) => `${a.id} ${a.kind === 'goal' ? '目标' : a.kind === 'idea' ? '点子' : '疑问'}：${a.text.slice(0, 40)}`),
       ...(this.keptHint ? { reflection: this.keptHint } : {}),
       how: '情绪在提醒你停下来看看：recent_stages 是不是一直在同一类事上打转，game_progress 里还有什么没做到、手上的东西够不够去做。'
@@ -1199,7 +1264,7 @@ export class Mind {
     const switched = !!after && after.agendaId !== goalBefore;
     this.d.bus.publish('stage_review_done', 'P2', switched ? `回顾后换了阶段目标：${after!.goal}` : `回顾后接着做：${after?.goal ?? '（还没有主目标）'}`, { switched, why: this.review?.why });
     // 接着做：给它再宽限一两天才因为“太久没做成”回顾；下次情绪提醒也隔一段随机的时间
-    if (!switched) this.d.self.postponeReview(this.gameDay);
+    if (!switched) this.d.self.postponeReview(this.gameDay, (this.d.self.observedProgress()?.planGameTicks ?? 0) / 24000);
     this.review = null;
     this.lastReviewAt = Date.now();
     const [lo, hi] = Mind.REVIEW_GAP_MIN;
@@ -1431,6 +1496,7 @@ export class Mind {
   }
   pause() {
     this.paused = true;
+    this.setObservedOnline(false);
     this.generation++;
     this.cancelThinking('paused');
     const running = this.d.arbiter.info();
@@ -1446,6 +1512,7 @@ export class Mind {
     this.d.bus.publish('resumed', 'P1', 'Agent 恢复，接着刚才的心思继续');
   }
   onDeath(info: { cause?: string; hazard?: Hazard | null; during?: string; message?: string } = {}) {
+    this.setObservedOnline(false);
     // 游戏的死亡播报是原话（“Curio was blown up by Creeper”），比推测的死因可靠
     const cause = info.message ? `游戏播报：${info.message}` : info.cause ? causeName(info.cause) : '不明原因';
     this.deathAt = Date.now();
@@ -1490,7 +1557,7 @@ export class Mind {
   }
 
   onSpawn() { if (this.suspendedBy.has('death')) this.settleUntil = Date.now() + 1500; }
-  onDisconnected() { this.suspend('disconnected'); this.d.arbiter.cancel('断线'); }
+  onDisconnected() { this.setObservedOnline(false); this.suspend('disconnected'); this.d.arbiter.cancel('断线'); }
 
   /** 兼容旧接口：控制台、动作聊天和 !status 读的“当前计划” */
   get plan() {

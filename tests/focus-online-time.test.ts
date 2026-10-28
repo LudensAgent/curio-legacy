@@ -1,0 +1,70 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { test } from 'node:test';
+import { SelfModel } from '../src/mind/self.ts';
+
+test('legacy goals count only observed online time across disconnection and restart', (t) => {
+  let now = 1_700_000_000_000;
+  t.mock.method(Date, 'now', () => now);
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'focus-online-')), 'mind.json');
+  const initial = new SelfModel(file);
+  initial.setPlan('寻找铁矿', ['下矿', '收集粗铁']);
+  const originalProgressAt = initial.plan()!.progressAt!;
+  initial.flush();
+  initial.close();
+  now += 9 * 60 * 60_000;
+
+  const self = new SelfModel(file);
+  t.after(() => self.close());
+  self.data.mood.frustration = 0.8;
+  self.setOnline(true, now);
+  assert.deepEqual(self.planStallInfo(now), { minutes: 0, observedSince: now, historyUnknown: true });
+  self.tickMood(true, now);
+  assert.equal(self.mood.frustration, 0.8, 'the first tick does not apply offline time as work');
+  now += 10 * 60_000;
+  self.setOnline(false, now);
+  assert.equal(self.planStalledMin(now), 10);
+  const mood = structuredClone(self.mood);
+  now += 6 * 60 * 60_000;
+  self.setOnline(true, now);
+  self.tickMood(true, now);
+  assert.deepEqual(self.mood, mood, 'a disconnect cannot age the mood as though the agent was working');
+  assert.equal(self.planStalledMin(now), 10);
+  self.setOnline(false, now);
+  self.flush();
+  self.close();
+  now += 8 * 60 * 60_000;
+
+  const restored = new SelfModel(file);
+  t.after(() => restored.close());
+  restored.setOnline(true, now);
+  assert.equal(restored.planStalledMin(now), 10, 'observed online time survives restart without the offline gap');
+  assert.equal(restored.planStallInfo(now).historyUnknown, true);
+  assert.equal(restored.plan()!.progressAt, originalProgressAt, 'the historical wall-clock timestamp is not rewritten');
+  now += 5 * 60_000;
+  restored.setOnline(true, now);
+  assert.equal(restored.planStalledMin(now), 15);
+  const preserved = restored.planStallInfo(now);
+  restored.setPlan(restored.plan()!.agendaId, ['下矿', '收集粗铁', '回地面']);
+  assert.deepEqual(restored.planStallInfo(now), preserved, 'rewriting a checklist is not progress');
+  restored.checkPlan([0]);
+  assert.deepEqual(restored.planStallInfo(now), { minutes: 0, observedSince: now, historyUnknown: false });
+  assert.equal(restored.plan()!.progressAt, now);
+});
+
+test('goal-switch stall threshold is based on observed online time', (t) => {
+  let now = 1_700_000_000_000;
+  t.mock.method(Date, 'now', () => now);
+  const self = new SelfModel(null);
+  self.setOnline(true, now);
+  self.setPlan('寻找铁矿', ['下矿', '收集粗铁']);
+  now += 20 * 60_000;
+  self.setOnline(false, now);
+  now += 8 * 60 * 60_000;
+  self.setOnline(true, now);
+  assert.match(self.goalSwitchRefusal('寻找村庄', { deliberate: true, reason: '想换' }) ?? '', /已观察到 20 分钟在线无清单进展/);
+  now += 21 * 60_000;
+  assert.equal(self.goalSwitchRefusal('寻找村庄', { deliberate: true, reason: '想换' }), null);
+});

@@ -30,13 +30,26 @@ interface SelfData {
   plan?: FocusPlan;
   /** 最近几个主目标（阶段目标）的起止和结局：回顾阶段目标时看自己是不是一直在原地打转 */
   stages?: StageRecord[];
+  observedProgress?: ObservedProgress;
 }
 
 export interface StageRecord { goal: string; setAt: number; endAt: number; outcome: 'done' | 'dropped' | 'switched'; stepsDone: number; steps: number }
+export interface ObservedProgress {
+  milestoneAt: number | null;
+  milestoneOnlineMs: number;
+  milestoneObservedSince: number | null;
+  planId: string | null;
+  planGameTicks: number;
+  planObservedSince: number | null;
+}
 
 export interface FocusPlan { agendaId: string; goal: string; steps: { text: string; done: boolean; doneWhen?: import('../projects/types.ts').Condition; auto?: boolean }[]; setAt: number; updatedAt: number;
   /** 上一次真正推进（定下清单或勾掉一项）的时间 */
   progressAt?: number;
+  /** 已观察的在线停滞时长；历史数据不足时只表示下限。 */
+  stalledOnlineMs?: number;
+  stalledObservedSince?: number;
+  stalledHistoryUnknown?: boolean;
   /** 定下时是游戏里的第几天 */
   setDay?: number;
   /** 过了这么多游戏天还没做成，就停下来回顾要不要换（定下时在 3–5 天里随机，回顾后接着做会往后推） */
@@ -171,6 +184,7 @@ export class SelfModel {
   data: SelfData;
   private dirty = false;
   private timer: NodeJS.Timeout | null = null;
+  private onlineAt: number | null = null;
 
   constructor(private file: string | null, traits: string[] = []) {
     this.data = { version: 1, traits, mood: { ...DEFAULT_MOOD }, moodAt: Date.now(), agenda: [], knowHow: [], experiments: [], diary: [], history: [], stream: [], feel: {} };
@@ -184,6 +198,8 @@ export class SelfModel {
   }
 
   private touch() { this.dirty = true; }
+  observedProgress(): ObservedProgress | null { return this.data.observedProgress ?? null; }
+  setObservedProgress(value: ObservedProgress) { this.data.observedProgress = { ...value }; this.touch(); }
   flush() {
     if (!this.file || !this.dirty) return;
     this.dirty = false;
@@ -197,7 +213,28 @@ export class SelfModel {
 
   // ---------------------------------------------------------------- 情绪
   get mood(): Mood { return this.data.mood; }
+  /** 只累计有游戏观察、且未暂停的时间；旧存档无法重建的历史不作猜测。 */
+  setOnline(online: boolean, now = Date.now()) {
+    const plan = this.data.plan;
+    if (this.onlineAt !== null && plan?.stalledObservedSince !== undefined) {
+      const since = Math.max(this.onlineAt, plan.progressAt ?? plan.setAt);
+      plan.stalledOnlineMs = (plan.stalledOnlineMs ?? 0) + Math.max(0, now - since);
+      this.touch();
+    }
+    if (online && this.onlineAt === null) {
+      // 持久化情绪保留，离线时间不作为现在工作状态回填。
+      this.data.moodAt = now;
+      if (plan && plan.stalledObservedSince === undefined) {
+        plan.stalledOnlineMs = 0;
+        plan.stalledObservedSince = now;
+        plan.stalledHistoryUnknown = true;
+      }
+      this.touch();
+    }
+    this.onlineAt = online ? now : null;
+  }
   tickMood(working: boolean | 'waiting', now = Date.now()) {
+    if (this.onlineAt === null) return;
     const seconds = Math.max(0, (now - this.data.moodAt) / 1000);
     if (seconds < 1) return;
     this.data.mood = relaxMood(this.data.mood, Math.min(seconds, 600), working, { stalled: this.planStalledMin(now) >= SelfModel.STALL_MIN });
@@ -205,10 +242,21 @@ export class SelfModel {
     this.touch();
   }
   feel(e: MoodEvent) { this.data.mood = feel(this.data.mood, e); this.touch(); }
-  /** 主目标多久没勾掉一项（分钟）：没有主目标算 0 */
+  /** 已观察到的在线停滞分钟；旧存档未知历史不按墙钟推测。 */
   planStalledMin(now = Date.now()): number {
     const p = this.data.plan;
-    return p ? Math.max(0, (now - (p.progressAt ?? p.setAt)) / 60_000) : 0;
+    if (!p || p.stalledObservedSince === undefined) return 0;
+    const pending = this.onlineAt === null ? 0 : Math.max(0, now - Math.max(this.onlineAt, p.progressAt ?? p.setAt));
+    return ((p.stalledOnlineMs ?? 0) + pending) / 60_000;
+  }
+  planStallInfo(now = Date.now()) {
+    const p = this.data.plan;
+    return { minutes: this.planStalledMin(now), observedSince: p?.stalledObservedSince ?? null, historyUnknown: p?.stalledHistoryUnknown ?? true };
+  }
+  private resetPlanStall(plan: FocusPlan, now: number) {
+    plan.stalledOnlineMs = 0;
+    if (this.onlineAt !== null) { plan.stalledObservedSince = now; plan.stalledHistoryUnknown = false; }
+    else { delete plan.stalledObservedSince; plan.stalledHistoryUnknown = true; }
   }
   /** 主目标多久（真实分钟，约两个游戏天）没勾掉一项就算“停滞”：越干越腻，认真想写了理由也能换 */
   static STALL_MIN = 40;
@@ -230,10 +278,10 @@ export class SelfModel {
     return p?.setDay !== undefined && Number.isFinite(day) ? Math.max(0, day - p.setDay) : 0;
   }
   /** 回顾后决定接着做：再给它 1–2 个游戏天，到时再回顾 */
-  postponeReview(day: number): number | null {
+  postponeReview(day: number, observedDays?: number): number | null {
     const p = this.data.plan;
     if (!p) return null;
-    p.reviewDays = Math.max(p.reviewDays ?? SelfModel.REVIEW_DAYS[0], this.planDays(day)) + 1 + this.rand();
+    p.reviewDays = Math.max(p.reviewDays ?? SelfModel.REVIEW_DAYS[0], observedDays ?? this.planDays(day)) + 1 + this.rand();
     this.touch();
     return p.reviewDays;
   }
@@ -326,8 +374,10 @@ export class SelfModel {
     this.data.plan = { agendaId: item.id, goal: item.text, steps: cleaned.map(({ text, cond }) => ({ text, done: doneBefore.has(text), ...(cond ? { doneWhen: cond } : {}) })), setAt: old?.setAt ?? Date.now(), updatedAt: Date.now(),
       // 只有勾掉一项才算推进；改写清单（哪怕改得面目全非）不算，不然改一次就把“多久没推进”清零了
       progressAt: old ? old.progressAt ?? old.setAt : Date.now(),
+      ...(old?.stalledObservedSince !== undefined ? { stalledOnlineMs: old.stalledOnlineMs, stalledObservedSince: old.stalledObservedSince, stalledHistoryUnknown: old.stalledHistoryUnknown } : {}),
       ...(old?.setDay !== undefined ? { setDay: old.setDay } : {}),
       reviewDays: old?.reviewDays ?? SelfModel.REVIEW_DAYS[0] + this.rand() * (SelfModel.REVIEW_DAYS[1] - SelfModel.REVIEW_DAYS[0]) };
+    if (!old) this.resetPlanStall(this.data.plan, this.data.plan.progressAt!);
     this.touch();
     return this.data.plan;
   }
@@ -349,8 +399,8 @@ export class SelfModel {
     const stalled = !plan || this.planStalledMin() >= SelfModel.STALL_MIN;
     if (opts.deliberate && opts.reason?.trim() && (opts.review || stalled)) return null;
     const to = (this.data.agenda.find((a) => a.id === t)?.text ?? t).slice(0, 30);
-    const head = `主目标「${cur.text.slice(0, 40)}」还在推进，没换成「${to}」：`;
-    if (opts.deliberate && opts.reason?.trim()) return head + `${Math.round(this.planStalledMin())} 现实分钟前还勾掉过清单，一时的想法不换主目标。`
+    const head = `主目标「${cur.text.slice(0, 40)}」尚未完成，没换成「${to}」：`;
+    if (opts.deliberate && opts.reason?.trim()) return head + `已观察到 ${Math.round(this.planStalledMin())} 分钟在线无清单进展${this.planStallInfo().historyUnknown ? '（更早的在线时长未知）' : ''}，一时的想法不换主目标。`
       + '想做的事先记进 agenda（以后再做），眼前要先做的事写成 activity 或 detour；等停下来回顾阶段目标时（腻了、烦了、或者主目标很久没进展）再决定换不换';
     return head + '眼前要先做的事（过夜、脱困、回地面、吃饭、清包、补工具）直接写成 activity 或 detour，做完会回到主目标；'
       + (opts.deliberate ? '真决定换一个阶段目标，在 plan 里写 "switch_reason" 说为什么' : '真要换主目标得认真想一想，并写 switch_reason');
@@ -361,7 +411,7 @@ export class SelfModel {
     if (!p) return [];
     const out: string[] = [];
     for (const st of p.steps) if (!st.done && st.doneWhen && met(st.doneWhen)) { st.done = true; st.auto = true; out.push(st.text); }
-    if (out.length) { p.updatedAt = Date.now(); p.progressAt = Date.now(); this.feel({ type: 'progress' }); this.touch(); }
+    if (out.length) { p.updatedAt = Date.now(); p.progressAt = Date.now(); this.resetPlanStall(p, p.progressAt); this.feel({ type: 'progress' }); this.touch(); }
     return out;
   }
   /** 勾掉清单里的项：序号或文字 */
@@ -375,7 +425,7 @@ export class SelfModel {
       if (st && !st.done && st.doneWhen && met && !met(st.doneWhen)) { refused?.push(st.text); continue; }
       if (st && !st.done) { st.done = true; out.push(st.text); }
     }
-    if (out.length) { p.updatedAt = Date.now(); p.progressAt = Date.now(); this.feel({ type: 'progress' }); this.touch(); }
+    if (out.length) { p.updatedAt = Date.now(); p.progressAt = Date.now(); this.resetPlanStall(p, p.progressAt); this.feel({ type: 'progress' }); this.touch(); }
     return out;
   }
   activeAgenda(): AgendaItem | undefined { return this.data.agenda.find((a) => a.status === 'active'); }
