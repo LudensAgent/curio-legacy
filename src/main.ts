@@ -23,14 +23,12 @@ import { config, envFile } from './config.ts';
 import { EventBus } from './events.ts';
 import { attachLogger, JsonlWriter } from './log.ts';
 import { WorldMemory } from './memory/store.ts';
-import { oreKind } from './memory/ore-spots.ts';
 import { EpisodicMemory } from './memory/episodic.ts';
 import { HindsightBackend } from './memory/hindsight.ts';
 import { HindsightUsage } from './memory/hindsight-usage.ts';
 import { installProcessHealth, RESTART_EXIT_CODE } from './observer/process-health.ts';
 import { sandboxStats } from './codeskills/sandbox.ts';
 import { buildingArchiveFor, ownBuildingAt } from './skills/build.ts';
-import { myFacilities } from './mind/facilities.ts';
 import { flattenProgram, MethodLibrary, simpleToMethod } from './methods/learning.ts';
 import { ResourceKnowledge } from './methods/knowledge.ts';
 import { ControlKnowledge } from './methods/controls.ts';
@@ -40,6 +38,7 @@ import { SKILLS } from './skills/index.ts';
 import { travelStore } from './travel/store.ts';
 import { ActionChat } from './observer/action-chat.ts';
 import { startDashboard } from './observer/dashboard.ts';
+import { dashboardMemory } from './observer/memory-snapshot.ts';
 import { LlmTrace } from './planner/llm-trace.ts';
 import { Metrics } from './observer/metrics.ts';
 import { RunStats } from './observer/run-stats.ts';
@@ -495,6 +494,7 @@ adapter.on('chat', (user: string, message: string) => {
 
 // ------------------------------------------------------------ 启动
 function snapshot() {
+  const state = adapter.state();
   return {
     now: Date.now(),
     runtime,
@@ -506,14 +506,14 @@ function snapshot() {
       fakeDelayMs: config.llm.fakeDelayMs,
       observer: config.observer.player || null,
     },
-    state: adapter.state(),
+    state,
     percept: perception.snapshot(),
     vision: vision.frame,
     task: arbiter.info(),
     planVersion: arbiter.planVersion,
     exec: executive.snapshot(),
     expression: actionChat.snapshot(),
-    travel: travelStore(memory).snapshot(adapter.state().worldId),
+    travel: travelStore(memory).snapshot(state.worldId),
     methods: { definitions: methods.list().slice(-12), gaps: methods.abilityGaps().slice(-8) },
     episodicMemory: episodic.snapshot(),
     metrics: metrics.snapshot(),
@@ -530,38 +530,17 @@ function snapshot() {
     live: live ? { status: live.status(), audience: audience?.stats() } : null,
     llmSpend: currentSpend(),
     memory: {
-      // 自己挖过的通道（dashboard 俯视图用）：当前维度、最近走过的在前；facilities 是同一套“我的设施”的一句话说明
-      ...(() => {
-        const st = adapter.state();
-        const passages = memory.passages(st.dim).sort((a, b) => b.lastUsedAt - a.lastUsedAt).slice(0, 12)
-          .map((p) => ({ id: p.id, entrances: p.entrances, path: p.path, deepestY: p.deepestY, dug: p.dug, ores: p.ores, uses: p.uses, lastUsedAt: p.lastUsedAt }));
-        const facilities = myFacilities(memory, { worldId: st.worldId, dim: st.dim, pos: st.pos }).slice(0, 16)
-          .map((f) => ({ kind: f.kind, label: f.label, pos: f.pos, dist: f.dist, text: f.text }));
-        // 朝向：地图上画自己的箭头
-        const facingYaw = adapter.eye()?.yaw ?? null;
-        // 资源点（亲眼看见才记、看到没了就删的矿、黑曜石、岩浆……）和危险点：当前维度，近的在前
-        const resources = memory.landmarks().filter((l) => l.dim === st.dim && (!l.worldId || l.worldId === st.worldId) && (l.kind === 'resource' || l.kind === 'danger'))
-          .map((l) => ({ id: l.id, kind: l.kind, label: l.label, type: l.kind === 'danger' ? `danger:${l.label}` : oreKind(l.label), pos: l.pos, ts: l.ts,
-            dist: Math.round(Math.hypot(l.pos.x - st.pos.x, l.pos.y - st.pos.y, l.pos.z - st.pos.z)) }))
-          .sort((a, b) => a.dist - b.dist).slice(0, 300);
-        return { passages, facilities, facingYaw, resources };
-      })(),
-      landmarks: memory.landmarks().slice(-12),
-      notes: memory.notesFor({ n: 8 }),
-      goals: memory.recentGoals(8),
+      ...dashboardMemory(memory, state, adapter.eye()?.yaw ?? null),
       objective: memory.objective(),
       intentions: memory.intents().slice(-12),
       preferences: memory.preferences(),
       decisions: memory.decisions().slice(-10),
       projects: memory.projects().slice(-10),
-      artifacts: buildingArchiveFor(memory).list().slice(-8).map((p) => ({ id: p.id, status: p.status,
+      artifacts: buildingArchiveFor(memory).list().filter((p) => p.worldId === state.worldId && p.dimension === state.dim).slice(-8).map((p) => ({ id: p.id, status: p.status,
         name: p.versions.at(-1)?.spec.name, version: p.versions.at(-1)?.version, defects: p.inspections.at(-1)?.defects.length,
         feedback: p.feedback.slice(-3) })),
       lessons: memory.lessonsFor(8),
-      hazards: memory.hazards().slice(-10),
       mySkills: mySkills(),
-      farms: memory.farms().map((f) => ({ crop: f.crop, cells: f.cells.length, harvests: f.harvests })),
-      chests: memory.chests().map((c) => ({ pos: c.pos, note: c.note, uses: c.uses, traces: c.traces.length })),
       skills: library.list().map((d) => ({ name: d.name, description: d.description, steps: d.steps.length, ...(d.disabled ? { disabled: d.disabled } : {}) })),
       seen: memory.seenCount(),
       visitedChunks: memory.visitedChunkCount,

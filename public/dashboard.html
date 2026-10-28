@@ -32,6 +32,14 @@
   .chip { font: 11px var(--mono); color: var(--dim); padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; white-space: nowrap; }
   .chip.on { color: var(--accent); border-color: var(--accent-soft); background: var(--accent-soft); }
   .chip.off { color: var(--bad); border-color: var(--bad-soft); background: var(--bad-soft); }
+  .world-chip { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+  .memory-scope { flex: none; }
+  .memory-dimensions { display: flex; flex-wrap: wrap; gap: 8px; }
+  .memory-dimension { flex: 1 1 190px; padding: 8px 10px; background: var(--soft); border: 1px solid var(--line); border-radius: 6px; }
+  .memory-dimension.current { border-color: var(--accent); background: var(--accent-soft); }
+  .memory-dimension b { font-size: 12px; font-weight: 600; }
+  .memory-dimension .counts { font-size: 11px; color: var(--dim); margin-top: 3px; }
+  .memory-scope-note { margin-top: 8px; font-size: 11px; color: var(--dim); overflow-wrap: anywhere; }
   button.chip { cursor: pointer; font: 11px var(--mono); }
   .tmap { position: relative; flex: none; margin-bottom: 8px; }
   .tunnel-map { width: 100%; height: 380px; display: block; background: var(--soft); border-radius: 8px; cursor: crosshair; touch-action: none; image-rendering: pixelated; }
@@ -290,6 +298,8 @@
   <span class="brand">Curio</span>
   <span class="status"><i class="dot" id="connDot"></i><span id="conn">未连接</span></span>
   <span class="chip" id="state">-</span>
+  <span class="chip on" id="currentDimension">维度 -</span>
+  <span class="chip world-chip" id="currentWorld">世界 -</span>
   <span class="chip" id="llm">LLM</span>
   <span class="chip" id="llmUsage" title="本次启动以来接口返回的用量">用量 -</span>
   <span class="chip" id="memUsage" title="Hindsight 记忆服务自己调 LLM 的用量" hidden>记忆 -</span>
@@ -516,9 +526,18 @@
     </section>
 
     <section class="pane" id="pane-memory">
+      <div class="card memory-scope">
+        <h2>当前维度记忆 <span class="r" id="memoryDimension">等待 Agent 状态</span></h2>
+        <div class="memory-dimensions" id="memoryDimensions"></div>
+        <div class="memory-scope-note" id="memoryScope">空间记忆与地图随 Agent 切换维度；未标注维度的经历与笔记单独标记。</div>
+      </div>
       <div class="board">
         <div class="card rows2 cols2"><h2>最近做过的事 <span class="r mono dim" id="seen"></span></h2><ul class="list body" id="goals"></ul></div>
-        <div class="card"><h2>地标</h2><ul class="list mono body" id="lms"></ul></div>
+        <div class="card"><h2>地点 · 生物 · 箱子</h2><div class="body">
+          <div class="label">地标</div><ul class="list mono" id="lms"></ul>
+          <div class="sub">生物出没点 <span id="creatureCount"></span></div><ul class="list" id="creatures"></ul>
+          <div class="sub">箱子印象 <span id="chestCount"></span></div><ul class="list" id="chests"></ul>
+        </div></div>
         <div class="card"><h2>资源点记忆 <span class="r dim" id="resCount"></span></h2><ul class="list body" id="resList"></ul></div>
         <div class="card cols2 rows2"><h2>挖过的通道 · 我的设施 <span class="r dim">一格一方块，北在上 · 滚轮缩放、拖动平移、双击看全貌</span></h2>
           <div class="body">
@@ -594,6 +613,7 @@ const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return nu
 const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch { /* 隐私模式 */ } };
 const ago = (t) => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 60 ? `${s}秒` : s < 3600 ? `${Math.round(s / 60)}分` : `${Math.round(s / 3600)}时`; };
 const list = (arr, fn, empty = '—') => arr && arr.length ? arr.map(fn).join('') : `<li class="empty">${empty}</li>`;
+const dimensionName = (dim) => ({ overworld: '主世界', the_nether: '下界', the_end: '末地' }[String(dim ?? '').replace(/^minecraft:/, '')] ?? dim ?? '未知维度');
 let paused = false, unseen = 0, lastState = null;
 
 async function post(url, body) { await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) }); }
@@ -624,6 +644,7 @@ function showTab(name) {
   lsSet('curio.dashboard.tab', name);
   if (name === 'events') { unseen = 0; $('nEvents').textContent = ''; $('log').scrollTop = $('log').scrollHeight; }
   if (name === 'vision' && lastState) drawVision(lastState.vision, lastState.percept.vision);
+  if (name === 'memory' && lastState) renderTunnels(lastState.memory, { ...lastState.state, yaw: lastState.memory.facingYaw });
   if (name === 'learning' && lastState) { learnKey = ''; renderLearning(lastState.learning); }
   if (name === 'config' && !envView) loadEnv();
 }
@@ -893,6 +914,10 @@ function render(s) {
   paused = ex.paused; $('pauseBtn').textContent = paused ? '继续' : '暂停';
   $('state').textContent = paused ? '已暂停' : ex.mode === 'mind' ? '自主' : '规则模式';
   $('state').className = 'chip ' + (paused ? 'off' : 'on');
+  $('currentDimension').textContent = dimensionName(st.dim);
+  $('currentDimension').title = st.dim;
+  $('currentWorld').textContent = `世界 ${st.worldId}`;
+  $('currentWorld').title = `当前世界：${st.worldId}`;
   $('llm').textContent = `${s.config.llm}${s.config.fakeDelayMs ? ` · 注入 ${s.config.fakeDelayMs}ms` : ''}`;
   const usage = m.llm.tokenUsage;
   $('llmUsage').textContent = usage ? `${(usage.totalTokens / 1000).toFixed(1)}k tokens${usage.cachedPromptTokens != null && usage.promptTokens ? ` · 缓存 ${Math.round(usage.cachedPromptTokens / usage.promptTokens * 100)}%` : ''}` : '用量 -';
@@ -907,7 +932,8 @@ function render(s) {
   $('foodv').textContent = `${st.food}/20`; $('food').style.width = (st.food / 20 * 100) + '%';
   $('foodBar').className = 'bar ' + (st.food <= 6 ? 'bad' : 'warn');
   $('pos').textContent = p.self.pos.map((n) => Math.round(n)).join(', ');
-  $('dim').textContent = `${p.self.dim} · ${p.self.biome || '-'}`;
+  $('dim').textContent = `${dimensionName(st.dim)} · ${p.self.biome || '-'}`;
+  $('dim').title = st.dim;
   $('time').textContent = `${PHASE[p.time.phase] ?? p.time.phase} · ${p.time.timeOfDay}`;
   $('held').textContent = p.self.held ?? '空手';
   $('base').textContent = p.exploration.base ? `${p.exploration.base.dir} ${p.exploration.base.dist} 格` : '还没有';
@@ -950,10 +976,17 @@ function render(s) {
 
   drawVision(s.vision, p.vision);
   const mem = s.memory;
-  $('seen').textContent = `区块 ${mem.visitedChunks} · 方块 ${mem.seen.blocks} · 生物 ${mem.seen.entities} · 群系 ${mem.seen.biomes}`;
-  $('goals').innerHTML = list(mem.goals.slice().reverse(), (g) => `<li title="${esc(g.summary)}"><span class="badge ${g.status === 'succeeded' ? 'good' : g.status === 'failed' ? 'bad' : ''}">${g.status === 'succeeded' ? '成' : g.status === 'failed' ? '卡住' : '停'}</span> ${esc(g.goal)}<div class="dim" style="font-size:11px">${esc(g.summary)}</div></li>`);
+  $('memoryDimension').textContent = dimensionName(mem.dimension);
+  $('memoryScope').textContent = `世界 ${mem.worldId} · 空间记忆与地图跟随 Agent，只显示${dimensionName(mem.dimension)}。未标注维度的经历与笔记单独标记；探索计数为当前世界累计。箱内物品是历史印象。`;
+  $('memoryDimensions').innerHTML = (mem.dimensions || []).map((d) => `<div class="memory-dimension${d.dim === mem.dimension ? ' current' : ''}"${d.dim === mem.dimension ? ' aria-current="location"' : ''}><b>${esc(dimensionName(d.dim))}</b>${d.dim === mem.dimension ? ' <span class="badge good">Agent 在此</span>' : ''}<div class="counts">地点 ${d.landmarks} · 资源 ${d.resources} · 生物 ${d.creatures} · 箱子 ${d.chests}<br>通道 ${d.passages} · 设施 ${d.facilities} · 危险 ${d.hazards}</div></div>`).join('');
+  $('seen').textContent = `世界累计 · 区块 ${mem.visitedChunks} · 方块 ${mem.seen.blocks} · 生物 ${mem.seen.entities} · 群系 ${mem.seen.biomes}`;
+  $('goals').innerHTML = list(mem.goals.slice().reverse(), (g) => `<li title="${esc(g.summary)}"><span class="badge ${g.status === 'succeeded' ? 'good' : g.status === 'failed' ? 'bad' : ''}">${g.status === 'succeeded' ? '成' : g.status === 'failed' ? '卡住' : '停'}</span> ${esc(g.goal)} <span class="badge">${esc(g.dimension ? dimensionName(g.dimension) : '未标注维度')}</span><div class="dim" style="font-size:11px">${esc(g.summary)}</div></li>`);
   $('lms').innerHTML = list(mem.landmarks.slice().reverse(), (l) => `<li>${esc(l.label)} <span class="k">${l.kind} (${l.pos.x}, ${l.pos.y}, ${l.pos.z})</span></li>`);
-  $('notes').innerHTML = list(mem.notes.slice().reverse(), (n) => `<li><span class="k">${n.kind}</span>${esc(n.text)}</li>`);
+  $('creatureCount').textContent = `${(mem.creatures || []).length} 处`;
+  $('creatures').innerHTML = list(mem.creatures, (c) => `<li><b>${esc(c.label)}</b> <span class="k">(${c.pos.x}, ${c.pos.y}, ${c.pos.z}) · ${tmAgo(c.ts)}见过${c.count ? ` ${c.count} 只` : ''}</span>${c.detail ? `<div class="dim" style="font-size:11px">${esc(c.detail)}</div>` : ''}</li>`, '当前维度还没有记住的生物出没点');
+  $('chestCount').textContent = `${(mem.chests || []).length} 个`;
+  $('chests').innerHTML = list(mem.chests, (c) => `<li>${esc(c.text)}<div class="dim" style="font-size:11px">用过 ${c.uses} 次 · ${c.traces} 条物品印象</div></li>`, '当前维度还没有用过的箱子');
+  $('notes').innerHTML = list(mem.notes.slice().reverse(), (n) => `<li><span class="k">${n.kind}</span>${esc(n.text)} <span class="badge">${esc(n.dimension ? dimensionName(n.dimension) : '未标注维度')}</span></li>`);
   renderTunnels(mem, s.state && { ...s.state, yaw: mem.facingYaw });
 }
 
@@ -962,7 +995,7 @@ function render(s) {
  * 一格 = 一个方块；通道格按高度上色（地表泥土 → 石头 → 深板岩），设施画成对应方块，入口和自己单独标出。
  * 滚轮缩放（以鼠标处为中心）、拖动平移、双击回到全貌；“跟随”时视野跟着自己走。
  */
-const tmap = { cx: 0, cz: 0, s: 8, fitted: false, follow: false, drag: null, data: null, hover: null, layers: { passage: true, facility: true, landmark: true, resource: true } };
+const tmap = { scope: '', cx: 0, cz: 0, s: 8, fitted: false, follow: false, drag: null, data: null, hover: null, layers: { passage: true, facility: true, landmark: true, resource: true } };
 /** 资源点：亲眼看见才记、看到没了就删。颜色照矿石/方块本身的颜色 */
 const TM_RES = {
   coal: ['#2b2b2b', '煤'], iron: ['#d8af93', '铁'], copper: ['#c8693b', '铜'], gold: ['#f5d33f', '金'], diamond: ['#4fe0d4', '钻石'],
@@ -1174,6 +1207,13 @@ function renderResources(mem, st) {
   $('tmResLegend').innerHTML = types.slice(0, 10).map((t) => `<span><i style="background:${tmRes(t)[0]}"></i>${esc(tmRes(t)[1])}</span>`).join('');
 }
 function renderTunnels(mem, st) {
+  const scope = JSON.stringify([mem.worldId ?? st?.worldId, mem.dimension ?? st?.dim]);
+  if (scope !== tmap.scope) {
+    Object.assign(tmap, { scope, cx: 0, cz: 0, s: 8, fitted: false, follow: false, drag: null, data: null, hover: null });
+    $('tmFollow').classList.remove('on');
+    $('tunnelMap').classList.remove('grab');
+    $('tmTip').hidden = true;
+  }
   const fac = mem.facilities || [];
   $('tunnelList').innerHTML = list(fac, (f) => `<li><span class="k">${f.kind === 'passage' ? '通道' : f.kind === 'chest' ? '箱子' : f.kind === 'bed' ? '床' : '设施'}</span>${esc(f.text)}</li>`);
   const empty = !mem.passages ? '进程重启后开始记录自己挖的通道' : !mem.passages.length && !fac.length ? '还没有挖过的通道（自己挖够 4 格的地下通道才记），也没有设施' : '';
@@ -1181,7 +1221,8 @@ function renderTunnels(mem, st) {
   renderResources(mem, st);
   tmap.data = tmBuild(mem, st);
   // 第一次打开：看自己周围 96 格内的通道和设施；“全貌”/双击才看全部
-  if (!tmap.fitted && (tmap.data.cells.size || tmap.data.fac.length || tmap.data.me)) { tmFit($('tunnelMap'), 96); tmap.fitted = true; }
+  const map = $('tunnelMap');
+  if (!tmap.fitted && map.clientWidth && map.clientHeight && (tmap.data.cells.size || tmap.data.fac.length || tmap.data.me)) { tmFit(map, 96); tmap.fitted = true; }
   tmRedraw();
 }
 
