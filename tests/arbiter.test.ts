@@ -68,6 +68,28 @@ test('抢占：新任务启动时旧任务记录 preemptedBy，planVersion 递�
   arbiter.cancel('cleanup');
 });
 
+test('取消后的旧任务不能用独立信号下船', async () => {
+  const { adapter, arbiter, next } = setup();
+  adapter.riding = 'boat';
+  SKILLS.test_stale_dismount = {
+    name: 'test_stale_dismount', description: '', argsDoc: '{}', timeoutMs: 1000, movement: false,
+    validate: () => ({ ok: true, args: {} }),
+    async run(ctx) {
+      await sleep(30);
+      await ctx.adapter.dismount?.(new AbortController().signal);
+      return { status: 'succeeded', summary: 'should not reach' };
+    },
+  };
+  try {
+    const completed = next();
+    arbiter.start({ skill: 'test_stale_dismount' }, 'llm');
+    arbiter.cancel('replan');
+    assert.equal((await completed).result.status, 'cancelled');
+    assert.equal(arbiter.blockedActions, 1);
+    assert.equal(adapter.riding, 'boat');
+  } finally { delete SKILLS.test_stale_dismount; }
+});
+
 test('参数不合法的步骤被拒绝，不会启动', () => {
   const { arbiter } = setup();
   const r = arbiter.start({ skill: 'explore', args: { direction: 'UP' } }, 'llm');

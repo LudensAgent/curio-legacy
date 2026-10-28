@@ -528,7 +528,7 @@ test('提示词：盖房的念头会在消息末尾提醒先请建筑师；瞥�
 test('思考时可以查动作的完整参数', async (t) => {
   const w = fixture(t);
   await w.tick();
-  await w.reply(0, { kind: 'moves', names: ['boat', 'ride'] });
+  await w.reply(0, { kind: 'moves', names: ['use_item', 'ride'] });
   assert.match(w.pending[1].messages.at(-1)!.content, /- ride /);
 });
 

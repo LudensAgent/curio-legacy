@@ -19,7 +19,6 @@ import { handSkills } from './hands.ts';
 import { guiSkills } from './gui.ts';
 import { bodySkills } from './body.ts';
 import { primitiveSkills } from './primitives.ts';
-import { vehicleSkills } from './vehicles.ts';
 import { fish } from './fishing.ts';
 import { glance, wait } from './wait.ts';
 import { forage } from './forage.ts';
@@ -31,7 +30,7 @@ import { useSkill } from './use-skill.ts';
 
 /** 技能白名单：LLM 只能从这里选择技能，参数必须通过各自的 validate。 */
 export const SKILLS: Record<string, Skill> = Object.fromEntries(
-  [explore, gather, goTo, craft, eat, hunt, pickupItems, shelter, build, buildingArchive, buildingReview, sleepSkill, placeTorch, smelt, collectFurnace, storeItems, takeItems, collectSeeds, farm, expedition, flee, defend, wander, lookAround, unstuck, surface, ...Object.values(travelSkills), ...Object.values(equipmentSkills), ...Object.values(dragonSkills), ...Object.values(structureSkills), ...reservationSkills, ...baseSkills, ...actionSkills, ...handSkills, ...guiSkills, ...bodySkills, ...primitiveSkills, ...vehicleSkills, ...overlandSkills, fish, wait, glance, forage, inspectBlock, interactBlock, assessLandings, descend, useSkill].map((s) => [s.name, s]),
+  [explore, gather, goTo, craft, eat, hunt, pickupItems, shelter, build, buildingArchive, buildingReview, sleepSkill, placeTorch, smelt, collectFurnace, storeItems, takeItems, collectSeeds, farm, expedition, flee, defend, wander, lookAround, unstuck, surface, ...Object.values(travelSkills), ...Object.values(equipmentSkills), ...Object.values(dragonSkills), ...Object.values(structureSkills), ...reservationSkills, ...baseSkills, ...actionSkills, ...handSkills, ...guiSkills, ...bodySkills, ...primitiveSkills, ...overlandSkills, fish, wait, glance, forage, inspectBlock, interactBlock, assessLandings, descend, useSkill].map((s) => [s.name, s]),
 );
 
 /** 只给反射层/填充行为使用、不让 LLM 主动规划的技能 */

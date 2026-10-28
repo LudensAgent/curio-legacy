@@ -65,6 +65,16 @@ test('idle in deep water: treading keeps the head above the surface, like a play
   assert.ok(bot.entity.position.y > 61.5);
 });
 
+test('waiting for an interaction preserves treading while explicit diving still owns movement', (t) => {
+  const { adapter, bot, controls, tick } = pond(t);
+  Object.assign(adapter, { inFlight: 1 }); // Waiting for equipment / placement acknowledgement.
+  tick(200, true);
+  assert.ok(bot.oxygenLevel >= 19, `oxygen ${bot.oxygenLevel} y=${bot.entity.position.y}`);
+  bot.setControlState('sneak', true);
+  tick(1, true);
+  assert.equal(controls.jump, false, 'an explicit downward input keeps control of the body');
+});
+
 test('treading hands the controls back as soon as an action moves the body', (t) => {
   const { bot, controls, tick } = pond(t);
   tick(20, true);

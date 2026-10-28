@@ -1,10 +1,10 @@
 import type { Vec3Like } from '../adapter/types.ts';
 import { dist3 } from '../util.ts';
-import { boat, chooseBoat, isBoatItem } from './vehicles.ts';
+import { ride } from './actions.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
 
 /**
- * 出行：像人一样看地形挑路——能走就走，过水就游（短）或者坐船（长），再上岸接着走。
+ * 出行：步行与游泳的水陆寻路；已经乘船时委托水面导航，不隐式切换载具。
  * 这是身体的寻路能力（和 goto 的步行寻路一样是基础设施），不是战术：去哪、什么时候去由心智决定。
  * 只看已经加载的地形（服务器发来的、走过附近的区块），看不到的地方当作走不通，走到近处再重新规划。
  */
@@ -48,7 +48,7 @@ export type TravelPlan = { legs: Leg[]; reached: boolean; cells: number; /** 没
 
 /**
  * 在已加载的地形上找一条水陆路线（A*，8 邻接，不切角）：
- * 走路每格 1、坡每高一格 +0.3、往下跳 2–3 格 +0.5；水里坐船每格 1（有船或能做船，下水要放船 +6），没船游泳每格 2.5；
+ * 走路每格 1、坡每高一格 +0.3、往下跳 2–3 格 +0.5；水里按调用方声明的乘船能力每格 1，游泳每格 2.5；
  * 上下水：从岸上下水落差不超过 3 格，从水里上岸岸边最多比水面高 1 格（游上去或从船上跳上去）。
  */
 export function planTravel(blockAt: BlockAt, from: Vec3Like, to: { x: number; z: number }, opts: { canBoat: boolean; avoid?: Set<string>; maxNodes?: number; margin?: number }): TravelPlan | null {
@@ -173,8 +173,8 @@ const parseTarget = (ctx: SkillCtx, raw: string): { x: number; y?: number; z: nu
 
 export const travel: Skill<TravelArgs> = {
   name: 'travel',
-  description: '远行：按看得到的地形规划水陆路线，能走就走、过水短的游过去、长的坐船（没船用木板现做），再上岸接着走；适合隔着河湖水网的远处目标',
-  argsDoc: '{"to": "x,z | x,y,z | 地标名 | base | death", "noBoat"?: true（不坐船，只走和游）}',
+  description: '按地形步行和游泳前往目标；已乘船时沿水路停靠，保持乘坐并反馈落脚处，不制造或切换载具',
+  argsDoc: '{"to": "x,z | x,y,z | 地标名 | base | death", "noBoat"?: true（只走和游，已乘船时需先自行下船）}',
   timeoutMs: 600000,
   movement: true,
   validate(raw) {
@@ -190,17 +190,22 @@ export const travel: Skill<TravelArgs> = {
     const s0 = adapter.state();
     const startPos = { ...s0.pos };
     const flat = (p: Vec3Like) => Math.hypot(p.x - target.x, p.z - target.z);
-    const canBoat = () => !args.noBoat && (adapter.state().inventory.some((i) => isBoatItem(i.name) && i.count > 0) || !!chooseBoat(adapter.state().inventory));
+    if (s0.riding) {
+      if (args.noBoat || !/(^|_)(boat|raft)$/.test(s0.riding)) return fail('BAD_ARGS', `正在乘坐 ${s0.riding}，此次出行不能使用当前载具；是否下船由你决定`);
+      const result = await ride.run(ctx, { to: { x: target.x, z: target.z }, distance: 240 });
+      if (result.status !== 'succeeded') return result;
+      if (flat(adapter.state().pos) <= 2.5) return result;
+      return fail('PATH_NOT_FOUND', `水路部分已停船，距 ${target.label} 还有 ${Math.round(flat(adapter.state().pos))} 格；${result.summary}`, { ...result.data, target });
+    }
     const avoid = new Set<string>();
     const done: string[] = [];
-    let walked = 0, boated = 0, swum = 0, replans = 0, lastErr = '';
+    let walked = 0, swum = 0, replans = 0, lastErr = '';
     const blockAt: BlockAt = (p) => adapter.blockAt(p);
     try {
       for (let round = 0; round < 12 && Date.now() < ctx.deadline - 5000; round++) {
         const here = adapter.state().pos;
         if (flat(here) <= 2.5) break;
-        if (adapter.state().riding) { try { await adapter.dismount?.(signal); } catch (e) { if (isAbort(e)) throw e; } }
-        const plan = planTravel(blockAt, here, target, { canBoat: canBoat(), avoid });
+        const plan = planTravel(blockAt, here, target, { canBoat: false, avoid });
         if (!plan) return fail('PATH_NOT_FOUND', `travel 只管地面上的路：现在脚下不是地面（在地下、悬空或站不住），先回到地面再走；${done.length ? `已经${done.join('，')}` : ''}`);
         if (!plan.legs.length) { lastErr = lastErr || `看得到的地形里找不到更近的路：${plan.why ?? '远处没加载、或被墙/悬崖/岩浆挡住'}`; break; }
         if (!plan.reached && plan.why && round === 0) lastErr = `路只能规划到一半：${plan.why}`;
@@ -227,19 +232,11 @@ export const travel: Skill<TravelArgs> = {
               if (j >= leg.cells.length - 1 || budget <= 0) break;
             }
           } else {
-            // 过水：要上的岸是下一段路的第一格；短（≤6 格）或者没船就游，长就坐船
             const land = next?.cells[0] ?? leg.cells[leg.cells.length - 1];
             const before = adapter.state().pos;
-            if (leg.cells.length <= 6 || !canBoat()) {
-              const r = adapter.swimTo ? await adapter.swimTo(land, signal, { timeoutMs: Math.min(20000, 3000 + leg.cells.length * 1500) }) : { ok: false, reason: 'NO_SWIM', landed: false, oxygen: 20 };
-              swum += dist3(before, adapter.state().pos);
-              if (!r.ok || !r.landed) { lastErr = `游过 ${leg.cells.length} 格水没上岸（${r.reason ?? '没站稳'}）`; avoid.add(`${land.x},${land.z}`); failed = true; }
-            } else {
-              const r = await boat.run(ctx, { to: { x: land.x + 0.5, z: land.z + 0.5 }, distance: 240, keep: true });
-              boated += Number((r.data as any)?.moved ?? dist3(before, adapter.state().pos));
-              if (r.status !== 'succeeded') { lastErr = `坐船那段没成：${r.summary}`; failed = true; }
-              else if (dist3(adapter.state().pos, land) > 6) { lastErr = `坐船停在离预定上岸点 ${Math.round(dist3(adapter.state().pos, land))} 格的地方：${r.summary}`; }
-            }
+            const r = adapter.swimTo ? await adapter.swimTo(land, signal, { timeoutMs: Math.min(20000, 3000 + leg.cells.length * 1500) }) : { ok: false, reason: 'NO_SWIM', landed: false, oxygen: 20 };
+            swum += dist3(before, adapter.state().pos);
+            if (!r.ok || !r.landed) { lastErr = `游过 ${leg.cells.length} 格水没上岸（${r.reason ?? '没站稳'}）`; avoid.add(`${land.x},${land.z}`); failed = true; }
             budget -= dist3(before, adapter.state().pos);
             failed = true; // 过完一段水就按新位置重新规划（岸那边的路这时才看得清）
           }
@@ -252,17 +249,12 @@ export const travel: Skill<TravelArgs> = {
     }
     const end = adapter.state().pos;
     const left = Math.round(flat(end));
-    const how = [walked > 1 ? `走了约 ${Math.round(walked)} 格` : '', swum > 1 ? `游了约 ${Math.round(swum)} 格` : '', boated > 1 ? `坐船约 ${Math.round(boated)} 格` : ''].filter(Boolean).join('、') || '没怎么挪动';
+    const how = [walked > 1 ? `走了约 ${Math.round(walked)} 格` : '', swum > 1 ? `游了约 ${Math.round(swum)} 格` : ''].filter(Boolean).join('、') || '没怎么挪动';
     const at = `(${Math.round(end.x)},${Math.round(end.y)},${Math.round(end.z)})`;
-    if (left <= 2.5) return ok(`到了 ${target.label} 附近 ${at}：${how}`, { walked: Math.round(walked), swum: Math.round(swum), boated: Math.round(boated), replans });
+    if (left <= 2.5) return ok(`到了 ${target.label} 附近 ${at}：${how}`, { walked: Math.round(walked), swum: Math.round(swum), replans });
     const closer = Math.round(flat(startPos) - left);
-    return fail(closer > 4 ? 'TIMEOUT' : 'PATH_NOT_FOUND', `离 ${target.label} 还有 ${left} 格，现在在 ${at}（${how}，比出发时近了 ${closer} 格）${lastErr ? `；${lastErr}` : ''}`, { walked: Math.round(walked), swum: Math.round(swum), boated: Math.round(boated), left, replans });
+    return fail(closer > 4 ? 'TIMEOUT' : 'PATH_NOT_FOUND', `离 ${target.label} 还有 ${left} 格，现在在 ${at}（${how}，比出发时近了 ${closer} 格）${lastErr ? `；${lastErr}` : ''}`, { walked: Math.round(walked), swum: Math.round(swum), left, replans });
   },
 };
-
-/** goto 被水挡住时接着用：已知目标坐标，直接按水陆路线走 */
-export async function travelTo(ctx: SkillCtx, pos: Vec3Like, label: string) {
-  return travel.run(ctx, { x: pos.x, y: pos.y, z: pos.z, label });
-}
 
 export const overlandSkills = [travel];

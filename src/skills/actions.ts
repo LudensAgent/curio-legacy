@@ -5,6 +5,7 @@ import { sighted, yawOfDir } from './movement.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill } from './types.ts';
 import { resolveItemAlias } from './work.ts';
 import { isStation, rememberStation } from './stations.ts';
+import { planBoatRoute, type BoatRoute } from './vehicles.ts';
 
 /**
  * 通用基础动作：相当于玩家的“右键”和“方向键”。
@@ -88,16 +89,18 @@ const matchesEntity = (n: string, want: string) => n === want || n.endsWith(`_${
 const servedWith = new Map<string, number>();
 const SERVED_MS = 5 * 60_000;
 
-export const interact: Skill<{ entity: string; with?: string }> = {
+export const interact: Skill<{ entity: string | number; with?: string }> = {
   name: 'interact',
-  description: '右键看得见的实体：载具/坐骑会坐上去；可手持物品（with）对生物使用',
-  argsDoc: '{"entity": "<实体名，如 boat、horse、cow、villager>", "with"?: "<手持物品>"}',
+  description: '按名称或 ID 右键当前看得见的实体；载具/坐骑会坐上去，可持物（with）交互。记得的位置须重新看见',
+  argsDoc: '{"entity": "<实体名>" | <实体ID>, "with"?: "<手持物品>"}',
   timeoutMs: 30000,
   movement: true,
   validate(raw, adapter) {
     const a = obj(raw);
-    const entity = String(a.entity ?? '').trim().toLowerCase();
-    if (!entity) return { ok: false, error: 'entity 不能为空' };
+    const target = a.entity ?? a.entityId;
+    const entity = typeof target === 'string' ? target.trim().toLowerCase() : target;
+    if (typeof entity !== 'string' && typeof entity !== 'number') return { ok: false, error: 'entity 必须是实体名或非负整数 ID' };
+    if (typeof entity === 'string' ? !entity || entity.length > 80 : !Number.isSafeInteger(entity) || entity < 0) return { ok: false, error: 'entity 必须是实体名或非负整数 ID' };
     let withItem: string | undefined;
     if (a.with !== undefined && a.with !== null && String(a.with).trim()) {
       const it = resolveItemAlias(String(a.with).trim(), adapter);
@@ -115,7 +118,7 @@ export const interact: Skill<{ entity: string; with?: string }> = {
     const served = (e: EntityInfo) => !!args.with && servedWith.has(`${e.id}:${args.with}`);
     const find = () => {
       senses.refresh();
-      return senses.perceivedEntities(32).filter((e) => e.kind !== 'item' && matchesEntity(e.name, args.entity))
+      return senses.perceivedEntities(32).filter((e) => e.kind !== 'item' && e.perception !== 'heard' && (typeof args.entity === 'number' ? e.id === args.entity : matchesEntity(e.name, args.entity)))
         .sort((a, b) => Number(served(a)) - Number(served(b)) || a.dist - b.dist)[0];
     };
     let target = find();
@@ -125,8 +128,16 @@ export const interact: Skill<{ entity: string; with?: string }> = {
     try {
       if (target.dist > 3) {
         ctx.progress(0.3, `走近 ${target.name}`);
-        await adapter.moveTo({ kind: 'follow_entity', entityId: target.id, range: 2 }, { signal, timeoutMs: 15000 });
+        const targetId = target.id;
+        await adapter.moveTo({ kind: 'follow_entity', entityId: targetId, range: 2 }, { signal, timeoutMs: 15000 });
+        await sleep(150, signal);
+        senses.refresh();
+        const current = senses.perceivedEntities(32).find((e) => e.id === targetId && e.perception !== 'heard');
+        if (!current) return fail('TARGET_GONE', `走近后看不见原来的实体 ${targetId}，未改选其他实体`);
+        target = current;
+        if (target.dist > 3) return fail('PATH_NOT_FOUND', `尚未走到 ${target.name} 的交互范围内`, { entityId: targetId, pos: target.pos });
       }
+      throwIfAborted(signal);
       const who = `${target.name}${target.traits ? `（${target.traits}）` : ''}`;
       const again = served(target) ? '；看得见的同类里只剩这只刚才已经用过' : '';
       const r = await adapter.interactEntity(target.id, args.with ?? null, signal);
@@ -223,17 +234,22 @@ export const hitEntity: Skill<{ entity: string | number; hits: number }> = {
 };
 
 // ------------------------------------------------------------------ dismount
-export const dismount: Skill<{}> = {
+export const dismount: Skill<{ toward?: { x: number; y: number; z: number } }> = {
   name: 'dismount',
   description: '从正在乘坐的东西上下来',
-  argsDoc: '{}',
+  argsDoc: '{"toward"?: [x,y,z]（下船时朝向的落脚处）}',
   timeoutMs: 8000,
   movement: false,
-  validate() { return { ok: true, args: {} }; },
-  async run(ctx) {
+  validate(raw) {
+    const a = obj(raw);
+    if (a.toward === undefined) return { ok: true, args: {} };
+    if (!Array.isArray(a.toward) || a.toward.length !== 3 || !a.toward.every((n: unknown) => typeof n === 'number' && Number.isFinite(n))) return { ok: false, error: 'toward 的格式是 [x,y,z]' };
+    return { ok: true, args: { toward: { x: a.toward[0], y: a.toward[1], z: a.toward[2] } } };
+  },
+  async run(ctx, args) {
     if (!ctx.adapter.dismount) return fail('ERROR', '当前适配器不支持下载具');
     if (!ctx.adapter.state().riding) return fail('BAD_ARGS', '现在没有在乘坐任何东西');
-    const r = await ctx.adapter.dismount(ctx.signal);
+    const r = await ctx.adapter.dismount(ctx.signal, args);
     return r.ok ? ok('下来了') : fail('ERROR', `下不来：${r.reason}`);
   },
 };
@@ -242,7 +258,7 @@ export const dismount: Skill<{}> = {
 export const ride: Skill<{ direction?: string; to?: { x: number; z: number }; distance: number; until?: string }> = {
   name: 'ride',
   outcomeBoundary: true,
-  description: '操控正在乘坐的东西朝方向或坐标前进，靠岸/遇障碍停下，until 看见即停',
+  description: '驾驶当前载具；船沿水面寻路并考虑船宽，陆上目标停靠可上岸处；遇障碍或 until 即停，保持乘坐',
   argsDoc: '{"direction"?: "N|NE|E|SE|S|SW|W|NW", "to"?: "x,z", "distance"?: 8-240, "until"?: "<方块/生物>"}',
   timeoutMs: 120000,
   movement: true,
@@ -268,21 +284,43 @@ export const ride: Skill<{ direction?: string; to?: { x: number; z: number }; di
     const [dx, dz] = args.direction ? DIRS[args.direction] : [0, 0];
     const target = args.to ?? { x: s.pos.x + dx * args.distance, z: s.pos.z + dz * args.distance };
     let seen: { what: string; dist: number } | null = null;
+    const isBoat = /(^|_)(boat|raft)$/.test(s.riding);
+    const avoid = new Set<string>();
+    let route: BoatRoute | null = null, moved = 0;
     try {
-      const r = await adapter.ride(target, signal, {
-        timeoutMs: Math.max(3000, ctx.deadline - Date.now() - 2000),
-        stop: () => { if (!args.until) return false; ctx.senses.refresh(); seen = sighted(ctx, args.until); return !!seen; },
-      });
-      const moved = Math.round(r.moved);
-      if (!r.ok) return fail(r.reason === 'TIMEOUT' ? 'TIMEOUT' : 'ERROR', `乘坐 ${s.riding} 前进失败：${r.reason}（走了 ${moved} 格）`, { moved });
-      const f = seen as { what: string; dist: number } | null;
-      if (f) return ok(`乘坐 ${s.riding} 前进 ${moved} 格，看见 ${f.what}（${f.dist} 格外），停下`, { moved, found: f.what });
-      if (r.arrived) return ok(`乘坐 ${s.riding} 到了目标附近（${moved} 格）`, { moved, arrived: true });
-      if (r.blocked) return ok(`乘坐 ${s.riding} 前进 ${moved} 格后前方靠岸/有障碍，停下了`, { moved, blocked: true });
-      return ok(`乘坐 ${s.riding} 前进了 ${moved} 格`, { moved });
+      let r = { ok: true, arrived: false, blocked: false, reason: '' };
+      for (let attempt = 0; attempt < (isBoat ? 4 : 1); attempt++) {
+        const here = adapter.state().pos;
+        route = isBoat ? planBoatRoute(ctx, here, target, { avoid }) : null;
+        if (isBoat && !route) return fail('PATH_NOT_FOUND', '当前位置没有可确认的水面航线，仍保持乘坐', { moved, arrived: false, position: here, riding: adapter.state().riding });
+        const end = route ? route.waypoints[route.waypoints.length - 1] : target;
+        const result = await adapter.ride(end, signal, {
+          timeoutMs: Math.max(1, ctx.deadline - Date.now() - 1000),
+          stop: () => { if (!args.until) return false; ctx.senses.refresh(); seen = sighted(ctx, args.until); return !!seen; },
+          ...(route ? { via: route.waypoints.slice(0, -1), arriveWithin: 0.8 } : {}),
+        });
+        moved += result.moved;
+        r = { ok: result.ok, arrived: result.arrived, blocked: result.blocked ?? false, reason: result.reason ?? '' };
+        if (seen || !r.ok || !r.blocked || !route) break;
+        const p = adapter.state().pos;
+        if (Math.hypot(end.x - p.x, end.z - p.z) <= 1.8) { r.arrived = true; break; }
+        const next = route.waypoints.find((w) => Math.hypot(w.x - p.x, w.z - p.z) > 1) ?? end;
+        const length = Math.hypot(next.x - p.x, next.z - p.z) || 1;
+        avoid.add(`${Math.floor(p.x + (next.x - p.x) / length * 1.2)},${Math.floor(p.z + (next.z - p.z) / length * 1.2)}`);
+      }
+      moved = Math.round(moved);
+      const data = { moved, position: { ...adapter.state().pos }, riding: adapter.state().riding, arrived: r.arrived && (!route || route.reach === 'water'),
+        ...(route ? { route: route.reach } : {}), ...(route?.landing && r.arrived ? { docked: true, landing: route.landing } : {}), ...(r.blocked ? { blocked: true } : {}) };
+      if (!r.ok) return fail(r.reason === 'TIMEOUT' ? 'TIMEOUT' : 'ERROR', `乘坐 ${s.riding} 前进失败：${r.reason}（走了 ${moved} 格）`, data);
+      const found = seen as { what: string; dist: number } | null;
+      if (found) return ok(`乘坐 ${s.riding} 前进 ${moved} 格，看见 ${found.what}（${found.dist} 格外），停下并保持乘坐`, { ...data, found: found.what });
+      if (route?.reach === 'partial') return fail('PATH_NOT_FOUND', `水路尚不能到达目标，前进 ${moved} 格后停船，仍保持乘坐`, data);
+      if (route?.landing && r.arrived) return ok(`划了 ${moved} 格，停靠在可上岸处，仍保持乘坐；岸上落脚处 (${route.landing.x},${route.landing.y},${route.landing.z})`, data);
+      if (r.arrived) return ok(`乘坐 ${s.riding} 到了目标附近（${moved} 格），保持乘坐`, data);
+      return ok(`乘坐 ${s.riding} 前进 ${moved} 格${r.blocked ? '后遇到障碍' : ''}，停下并保持乘坐`, data);
     } catch (e) {
       if (isAbort(e)) throw e;
-      return fail(codeFromError(e), `乘坐出错：${(e as Error).message}`);
+      return fail(codeFromError(e), `乘坐出错：${(e as Error).message}`, { moved: Math.round(moved), arrived: false, position: { ...adapter.state().pos }, riding: adapter.state().riding });
     }
   },
 };

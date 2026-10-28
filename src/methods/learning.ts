@@ -139,7 +139,7 @@ export function derivePostcondition(steps: SimpleStep[], adapter: Pick<GameAdapt
       item = GATHER_DROPS[a.block] ?? (/(_ore|^log|^wood|^logs)$/.test(a.block) ? null : a.block);
       // 写了 for 时采多少由缺口决定，只要求至少拿到 1 个
       count = a.for ? 1 : n(a.count, 1);
-    } else if (['goto', 'boat'].includes(st.skill)) {
+    } else if (['goto', 'ride'].includes(st.skill)) {
       const target = String(a.target ?? a.to ?? '').trim();
       if (!target) continue;
       const lm = memory.findLandmark(target, state.dim);

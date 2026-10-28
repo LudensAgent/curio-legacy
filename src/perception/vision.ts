@@ -209,7 +209,7 @@ export class Vision {
   frame: VisionFrame | null = null;
   seen: SeenEntity[] = [];
   heard: SeenEntity[] = [];
-  /** 最近亲眼看见的生物及其最后位置（3 分钟） */
+  /** 最近亲眼看见的非掉落物实体及其最后位置（3 分钟；不是当前存在的保证） */
   sightings = new Map<number, { id: number; name: string; kind: string; pos: Vec3Like; at: number }>();
   /** 亲眼看见过的掉落物最后在哪（转过头就不在视野里了，但人记得“床掉在东北三格”） */
   /** 亲眼见过的掉落物：first 是第一次看到的时间（掉落物 5 分钟后消失，这是它最晚的“出生”时间） */
@@ -470,8 +470,8 @@ export class Vision {
     }
     this.seen = seen.sort((a, b) => a.dist - b.dist);
     this.heard = heard.sort((a, b) => a.dist - b.dist);
-    // 记住亲眼看见过的生物在哪（像人一样：“刚才那头牛在坡那边”）；只记看见的，不记听见/墙后的
-    for (const e of seen) if (e.kind !== 'item' && e.kind !== 'other') this.sightings.set(e.id, { id: e.id, name: e.name, kind: e.kind, pos: { ...e.pos }, at: now });
+    // 记住亲眼看见过的实体在哪；只记看见的，不记听见/墙后的，也不跟踪视野外的移动
+    for (const e of seen) if (e.kind !== 'item') this.sightings.set(e.id, { id: e.id, name: e.name, kind: e.kind, pos: { ...e.pos }, at: now });
     for (const [id, x] of this.sightings) if (now - x.at > 180_000) this.sightings.delete(id);
     for (const e of seen) if (e.kind === 'item') this.dropSightings.set(e.id, { id: e.id, name: e.name.replace(/^item:/, ''), pos: { ...e.pos }, at: now, first: this.dropSightings.get(e.id)?.first ?? now, ...((e as any).count ? { count: (e as any).count } : {}) });
     for (const [id, x] of this.dropSightings) if (now - x.at > 300_000) this.dropSightings.delete(id);
@@ -621,7 +621,7 @@ export class Vision {
     if (Date.now() - this.lastScanAt >= 150) this.scan();
   }
 
-  /** 最近一次亲眼看见符合条件的生物在哪里（不透视：只来自以往的视觉扫描） */
+  /** 最近一次亲眼看见符合条件的实体在哪里（历史视觉；需要重新看见才能交互） */
   lastSighting(match: (name: string) => boolean, maxAgeMs = 120_000): { id: number; name: string; pos: Vec3Like; ageMs: number } | null {
     const now = Date.now();
     let best: { id: number; name: string; pos: Vec3Like; at: number } | null = null;
@@ -875,7 +875,7 @@ export class Vision {
     const remembered = group([...this.known.values()].filter((b) => NOTABLE.has(b.name) && !this.visibleNow.has(keyOf(b.pos.x, b.pos.y, b.pos.z)) && !visibleNames.has(b.name)))
       .filter((r) => r.nearest <= this.effectiveRange())
       .slice(0, 10);
-    const ent = (e: SeenEntity) => ({ name: e.name, dist: Math.round(e.dist), dir: e.dir, rel: e.rel });
+    const ent = (e: SeenEntity) => ({ id: e.id, name: e.name, pos: { ...e.pos }, dist: Math.round(e.dist), dir: e.dir, rel: e.rel });
     return {
       facing: eye ? dirOfYaw(eye.yaw) : null,
       fov: this.cfg.hFov,
@@ -908,11 +908,11 @@ export class Vision {
       })(),
       last_look_around_s: this.lastSweepAt ? Math.round((now - this.lastSweepAt) / 1000) : null,
       ...(() => {
-        // 刚才看见、现在不在视野里的生物（“半分钟前东北边有头牛”）
+        // 历史视觉中的实体位置，可能已经移动或消失；不能作为当前交互目标
         const visibleIds = new Set(this.seen.map((e) => e.id));
         const recent = [...this.sightings.values()].filter((x) => !visibleIds.has(x.id) && now - x.at <= 120_000)
           .sort((a, b) => b.at - a.at).slice(0, 6)
-          .map((x) => ({ name: x.name, dir: dirOfYaw(yawTo(x.pos.x - here.x, x.pos.z - here.z)), dist: Math.round(Math.hypot(x.pos.x - here.x, x.pos.z - here.z)), seconds_ago: Math.round((now - x.at) / 1000) }));
+          .map((x) => ({ id: x.id, name: x.name, pos: { ...x.pos }, source: 'past_visual_observation' as const, currently_visible: false as const, dir: dirOfYaw(yawTo(x.pos.x - here.x, x.pos.z - here.z)), dist: Math.round(Math.hypot(x.pos.x - here.x, x.pos.z - here.z)), seconds_ago: Math.round((now - x.at) / 1000) }));
         return recent.length ? { recent_sightings: recent } : {};
       })(),
     };

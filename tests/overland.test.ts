@@ -41,14 +41,33 @@ test('planTravel：隔着河——有船就坐船过去，没船就游过去', (
   assert.ok(swim.legs.some((l) => l.mode === 'water'));
 });
 
-test('travel：走到河边、坐船过河、上岸走到对面', async () => {
+test('travel：未乘船时只走和游，不消耗背包船或木料', async () => {
   const a = new FakeAdapter();
   river(a);
   a.inv.set('oak_boat', 1);
+  a.inv.set('oak_log', 8);
   const r = await run(a, 'travel', { to: '30,0' });
   assert.equal(r.status, 'succeeded', r.summary);
   assert.ok(a.pos.x > 27, JSON.stringify(a.pos));
-  assert.match(r.summary, /坐船|游了/);
+  assert.match(r.summary, /游了/);
+  assert.equal(a.inv.get('oak_boat'), 1);
+  assert.equal(a.inv.get('oak_log'), 8);
+  assert.equal(a.riding, null);
+  assert.ok(!a.actions.some((action) => /^(craft|use|interact|attack):/.test(action)));
+});
+
+test('travel：已乘船时继续水面导航，不在重规划中下船', async () => {
+  const a = new FakeAdapter();
+  river(a);
+  a.pos = { x: 12.5, y: 64, z: 0.5 };
+  a.entities.push({ id: 7, name: 'boat', kind: 'other', pos: { ...a.pos }, dist: 0, height: 0.6 });
+  await a.interactEntity(7, null, new AbortController().signal);
+  const result = await run(a, 'travel', { to: '30,0' });
+  assert.equal(result.failureCode, 'PATH_NOT_FOUND', '岸外陆路尚未完成');
+  assert.equal(result.data?.docked, true);
+  assert.equal(a.riding, 'boat');
+  assert.equal(a.dismountToward, null);
+  assert.ok(a.pos.x > 18);
 });
 
 test('planTravel：站在自己垫的高柱子上下不去时，说清楚是落差的问题', () => {

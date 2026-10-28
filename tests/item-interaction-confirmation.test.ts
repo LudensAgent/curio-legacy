@@ -83,20 +83,61 @@ test('cancelled placement cannot send a late packet or report a confirmed block'
   assert.equal(packets, 0);
 });
 
-test('放船：先转头、等转头发到服务器，再发放置包；mineflayer 因为别的实体先出现而误报失败时，自己认出新出现的船', async () => {
-  const f = fixture('oak_boat');
-  const water = new Vec3(3, 62, 0);
+test('boat and raft use preserve the fluid-surface aim and wait past unrelated entity spawns', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_700_000_000_000 });
+  for (const item of ['oak_boat', 'bamboo_raft']) {
+    const f = fixture(item), water = new Vec3(3, 62, 0), order: string[] = [];
+    f.put('water', water, { level: 0 });
+    f.bot.lookAt = async (point: { x: number; y: number; z: number }, force: boolean) => {
+      order.push(`look:${force}`);
+      assert.equal(point.y, water.y + 8 / 9 - 0.01, 'aim just inside the actual source-water surface');
+    };
+    f.bot.waitForTicks = async (n: number) => { order.push(`ticks:${n}`); };
+    f.bot.placeEntity = async () => { assert.fail('placeEntity would aim at the block top again and rejects rafts'); };
+    f.bot.activateItem = () => {
+      order.push('use');
+      f.bot.entities[77] = { id: 77, name: 'cow', position: water.offset(0.5, 1, 0.5) };
+      setTimeout(() => { f.consume(); f.bot.entities[88] = { id: 88, name: 'boat', position: water.offset(0.5, 0.9, 0.5) }; }, 100);
+    };
+    const pending = f.adapter.useItemOn(item, { kind: 'block', pos: water }, new AbortController().signal);
+    await flush(); t.mock.timers.tick(100); await flush();
+    const result = await pending;
+    assert.deepEqual(order, ['look:true', 'ticks:2', 'use']);
+    assert.equal(result.ok, true, result.reason);
+    assert.equal(result.spawned, 'boat');
+    assert.equal(result.effectEvidence?.changed, true);
+  }
+});
+
+test('boat use reports consumption honestly without treating an existing boat as a new placement', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_700_000_000_000 });
+  for (const consumed of [false, true]) {
+    const f = fixture('oak_boat'), water = new Vec3(3, 62, 0);
+    f.put('water', water);
+    f.bot.entities[77] = { id: 77, name: 'boat', position: water.offset(0.5, 0.9, 0.5) };
+    f.bot.lookAt = async () => {};
+    f.bot.waitForTicks = async () => {};
+    f.bot.activateItem = () => { if (consumed) f.consume(); };
+    const pending = f.adapter.useItemOn('oak_boat', { kind: 'block', pos: water }, new AbortController().signal);
+    await flush(); t.mock.timers.tick(5000); await flush();
+    const result = await pending;
+    assert.equal(result.ok, false);
+    assert.match(result.reason ?? '', /ENTITY_NOT_SPAWNED/);
+    assert.equal(result.effectEvidence?.verified, true);
+    assert.equal(result.effectEvidence?.changed, consumed);
+  }
+});
+
+test('cancelled boat use cannot send a late use-item packet after its look wait', async () => {
+  const f = fixture('oak_boat'), water = new Vec3(3, 62, 0), controller = new AbortController();
   f.put('water', water);
-  const order: string[] = [];
-  f.bot.lookAt = async (_p: any, force: boolean) => { order.push(`look:${force}`); };
-  f.bot.waitForTicks = async (n: number) => { order.push(`ticks:${n}`); };
-  f.bot.placeEntity = async () => {
-    order.push('place');
-    f.bot.entities[77] = { id: 77, name: 'boat', position: water.offset(0.5, 1, 0.5) };
-    throw new Error('Failed to place entity');
-  };
-  const r = await f.adapter.useItemOn('oak_boat', { kind: 'block', pos: { x: 3, y: 62, z: 0 } }, new AbortController().signal);
-  assert.deepEqual(order, ['look:true', 'ticks:2', 'place']);
-  assert.equal(r.ok, true, r.reason);
-  assert.equal(r.spawned, 'boat');
+  f.bot.lookAt = async () => {};
+  let resume!: () => void, uses = 0;
+  f.bot.waitForTicks = () => new Promise<void>((resolve) => { resume = resolve; });
+  f.bot.activateItem = () => { uses++; };
+  const pending = f.adapter.useItemOn('oak_boat', { kind: 'block', pos: water }, controller.signal);
+  await flush(); controller.abort('replaced'); f.adapter.stopAll();
+  await assert.rejects(pending, { name: 'AbortedError' });
+  resume(); await flush();
+  assert.equal(uses, 0);
 });

@@ -80,7 +80,7 @@ export function inferKind(steps: Step[]): ActivityKind {
   if (first.some((s) => ['build', 'repair', 'build_structure'].includes(s))) return 'build';
   if (first.some((s) => ['gather', 'hunt', 'fish', 'collect_seeds', 'forage', 'farm'].includes(s))) return 'gather';
   if (first.some((s) => ['craft', 'smelt'].includes(s))) return 'craft';
-  if (first.some((s) => ['explore', 'expedition', 'goto', 'boat'].includes(s))) return 'explore';
+  if (first.some((s) => ['explore', 'expedition', 'goto', 'ride', 'travel'].includes(s))) return 'explore';
   if (first.some((s) => ['sleep', 'wait', 'shelter'].includes(s))) return 'rest';
   if (first.some((s) => ['store_items', 'take_items'].includes(s))) return 'tidy';
   if (first.some((s) => ['experiment_method'].includes(s) || s.startsWith('trial:'))) return 'experiment';

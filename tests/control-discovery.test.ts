@@ -20,10 +20,10 @@ test('default controls describe general inputs; consulted workflows persist per 
   const basic = controlCatalog();
   for (const name of ['inspect_block', 'interact_block', 'hit_entity', 'goto']) assert.match(basic, new RegExp(`^- ${name} `, 'm'));
   for (const name of ['hunt', 'farm', 'boat', 'expedition', 'shelter', 'build']) assert.doesNotMatch(basic, new RegExp(`^- ${name} `, 'm'));
-  controls.expose('world-a', ['boat', 'unstuck', 'invented_power']);
-  assert.deepEqual(new ControlKnowledge(file).names('world-a'), ['boat']);
+  controls.expose('world-a', ['hunt', 'unstuck', 'invented_power']);
+  assert.deepEqual(new ControlKnowledge(file).names('world-a'), ['hunt']);
   assert.deepEqual(new ControlKnowledge(file).names('world-b'), []);
-  assert.match(controlCatalog(controls.names('world-a')), /^- boat /m);
+  assert.match(controlCatalog(controls.names('world-a')), /^- hunt /m);
   assert.ok(SKILLS.hunt && SKILLS.build, 'display is not an execution ban');
   assert.deepEqual(Object.keys(SKILLS), before);
   assert.doesNotMatch(fs.readFileSync(file, 'utf8'), /verified|learned|success/);

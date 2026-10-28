@@ -26,7 +26,7 @@ const plan = (p: Percept, m = new WorldMemory(null)) => ruleProposal(p, m) as an
 test('欲望：饿了、背包没吃的、看见牛 → 去打猎', () => {
   const p = P();
   p.self.food = 8;
-  p.vision!.seen_entities = [{ name: 'cow', dist: 12, dir: 'E', rel: '正前' }];
+  p.vision!.seen_entities = [{ id: 1, name: 'cow', pos: { x: 12, y: 64, z: 0 }, dist: 12, dir: 'E', rel: '正前' }];
   const r = plan(p);
   assert.equal(r.steps[0].skill, 'hunt');
   assert.equal(r.steps[0].args.animal, 'cow');

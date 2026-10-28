@@ -37,7 +37,8 @@ test('基础动作可以组合出“造船过河”：放船 → 坐上去 → �
   assert.equal(a.state().riding, 'boat');
   r = await run('ride', { direction: 'E', distance: 80 });
   assert.equal(r.status, 'succeeded', r.summary);
-  assert.equal(r.data?.blocked, true, '划到对岸靠岸停下');
+  assert.equal(r.data?.docked, true, '按水面航线停靠到对岸');
+  assert.equal(a.state().riding, 'boat', '下船由下一步明确选择');
   assert.ok(a.pos.x > 35, `应该划到湖对面，x=${a.pos.x}`);
   r = await run('dismount', {});
   assert.equal(r.status, 'succeeded', r.summary);

@@ -9,7 +9,7 @@ import type { EntityInfo, Vec3Like } from '../adapter/types.ts';
 import { feetCell } from '../perception/local.ts';
 import { passageRoute } from '../memory/passages.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
-import { planTravel, travelTo } from './overland.ts';
+import { planTravel } from './overland.ts';
 
 // ------------------------------------------------------------------ 寻找与张望（人眼式：不透视，只是转头看）
 /** 朝 (dx,dz) 方向的 yaw（0 = 北/-Z，正值向左/西） */
@@ -234,7 +234,7 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
 // ------------------------------------------------------------------ goto
 export const goTo: Skill<{ target: string; dig?: boolean; sprint?: boolean; avoid?: string[]; lead?: string }> = {
   name: 'goto',
-  description: '沿看得见的落脚点步行去地标、坐标、作品或记得的功能方块；绕开墙壁，遇到已观察的木门会开门。默认不挖墙、不搭柱；写 "dig":true 就像人一样挖穿挡路的土石、垫方块爬上坡坎直接过去（遇到水会在水面上垫方块架桥，走完会说垫了多少）。水路不通时可另选 boat。"lead" 写一种看得见的生物：带着它走——几格一停，它掉队就等它跟上来；它跟不跟你得自己弄对（手里拿它爱吃的，它才跟）',
+  description: '沿看得见的落脚点步行去地标、坐标、作品或记得的功能方块；绕开墙壁，遇到已观察的木门会开门。默认不挖墙、不搭柱；写 "dig":true 就像人一样挖穿挡路的土石、垫方块爬上坡坎直接过去（遇到水会在水面上垫方块架桥，走完会说垫了多少）。是否换用载具由你决定；上船后 ride 提供水面导航。"lead" 写一种看得见的生物：带着它走——几格一停，它掉队就等它跟上来；它跟不跟你得自己弄对（手里拿它爱吃的，它才跟）',
   argsDoc: '{"target": "base（首选基地，不一定是最近的房子；回某栋房子直接写它的名字） | death | <地标id或名称> | <作品ID> | crafting_table | x,y,z | 方向 格数（如 \"E 20\" 往东 20 格）", "dig"?: true（挖穿/垫高直走）, "sprint"?: true（跑着去：快，但很耗饥饿；默认走路）, "avoid"?: ["绕开的方块"], "lead"?: "<带着走的生物名，如 cow>"}',
   timeoutMs: 600000,
   movement: true,
@@ -248,15 +248,8 @@ export const goTo: Skill<{ target: string; dig?: boolean; sprint?: boolean; avoi
   },
   async run(ctx, args) {
     const r = await walkTo(ctx, args);
-    // 步行寻路被水挡住（泡在水里、附近有水、没有干路）而目标还远：接着按水陆路线走（走、游、坐船接力），不用它自己再一点点试
     const d = (r.data ?? {}) as { target?: Vec3Like; position?: Vec3Like; waterAhead?: boolean };
-    if (r.status === 'failed' && (r.failureCode === 'PATH_NOT_FOUND' || r.failureCode === 'TIMEOUT') && d.target && !ctx.signal.aborted && Date.now() < ctx.deadline - 15000
-      && (d.waterAhead || ctx.adapter.state().inWater || /水/.test(r.summary)) && Math.hypot(d.target.x - ctx.adapter.state().pos.x, d.target.z - ctx.adapter.state().pos.z) > 6) {
-      const t = await travelTo(ctx, d.target, args.target);
-      return t.status === 'succeeded' ? ok(`步行寻路被水挡住，改走水陆路线：${t.summary}`, { ...t.data, viaTravel: true })
-        : fail(t.failureCode ?? 'PATH_NOT_FOUND', `步行寻路被水挡住（${r.summary.slice(0, 80)}）；改走水陆路线也没到：${t.summary}`, { ...d, ...t.data, viaTravel: true });
-    }
-    // 走不通（不是水的事，或者没到换水路的条件）：看一眼地形，说清楚是被什么挡住了
+    // 走不通时反馈地形，不将步行委托自动升级为游泳或准备载具。
     if (r.status === 'failed' && r.failureCode === 'PATH_NOT_FOUND' && d.target && !/看地形/.test(r.summary)) {
       try {
         const here = ctx.adapter.state().pos;
@@ -490,7 +483,7 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; spri
         }
         if (ctx.senses.navigationWaypoint && !waypoint && !args.dig && !args.lead) {
           const water = waterNear();
-          return fail('PATH_NOT_FOUND', `前往 ${label}：眼前没有可确认的${water ? '陆地落脚点，附近有水，可考虑 boat 渡河' : '通路'}；没有挖墙或搭柱——要直接过去写 goto {"target":"${args.target}","dig":true}（挖穿土石、垫方块上坡）`, { ...measured(cur), waterAhead: water });
+          return fail('PATH_NOT_FOUND', `前往 ${label}：眼前没有可确认的${water ? '陆地落脚点，附近有水，可自行选择游泳或准备载具' : '通路'}；没有挖墙或搭柱——要直接过去写 goto {"target":"${args.target}","dig":true}（挖穿土石、垫方块上坡）`, { ...measured(cur), waterAhead: water });
         }
         const dxz = Math.hypot(pos.x - cur.x, pos.z - cur.z);
         const target = waypoint ? { kind: 'near' as const, pos: waypoint, range: fromMemory ? 1.2 : 0.7 }
@@ -538,7 +531,7 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; spri
       if (inScope() && arrived(now)) { await face(); return ok(`到达 ${label}${nums ? ' 的目标格' : ' 附近'}；实际站在 (${now.x.toFixed(2)},${now.y.toFixed(2)},${now.z.toFixed(2)})，距目标点 ${distance(now).toFixed(2)} 格（寻路最后报了“${(e as Error).message.slice(0, 40)}”，但人已经到了）${targetNote}${routeNote}${terrainNote()}`, measured(now)); }
       if (inScope() && nextTo(now)) return reachedNear(now, `寻路报“${(e as Error).message.slice(0, 40)}”，那一格没走进去`);
       const water = waterNear();
-      return fail(codeFromError(e), `前往 ${label} 失败：${(e as Error).message}${water ? '；附近有水，尚未确认干燥步行通路，可沿岸绕行或用 boat 渡河' : ''}${args.dig ? '' : `；挡路的是土石坡坎就写 goto {"target":"${args.target}","dig":true} 挖穿/垫高直走`}`, {
+      return fail(codeFromError(e), `前往 ${label} 失败：${(e as Error).message}${water ? '；附近有水，尚未确认干燥步行通路，可沿岸绕行，或自行选择过水方式' : ''}${args.dig ? '' : `；挡路的是土石坡坎就写 goto {"target":"${args.target}","dig":true} 挖穿/垫高直走`}`, {
         ...measured(), waterAhead: water,
       });
     } finally {

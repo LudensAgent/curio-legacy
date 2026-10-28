@@ -30,7 +30,7 @@ const percept: Percept = {
     openness: { left: 40, center: 64, right: 18 },
     visible_resources: [{ block: 'oak_log', count: 23, nearest: 15, dir: 'NE', rel: '右前' }],
     remembered_resources: [{ block: 'coal_ore', count: 3, nearest: 17, dir: 'W', rel: '左侧' }],
-    seen_entities: [{ name: 'cow', dist: 9, dir: 'N', rel: '正前' }],
+    seen_entities: [{ id: 1, name: 'cow', pos: { x: 12, y: 70, z: -39 }, dist: 9, dir: 'N', rel: '正前' }],
     heard: [],
     nearest_land: { dir: 'N', dist: 0 },
     last_look_around_s: 30,

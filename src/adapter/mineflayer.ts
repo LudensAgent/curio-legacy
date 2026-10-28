@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import type { Entity } from 'prismarine-entity';
 import { crystalArrowShot } from '../combat/ballistics.ts';
 import type { Config } from '../config.ts';
 import type { EventBus } from '../events.ts';
@@ -1178,7 +1179,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const raw = b.__setControlRaw as (k: string, v: boolean) => void;
     // 疾跑着冲进水里：键还按着，进水这一刻松开
     if (e.isInWater && !b.vehicle && b.getControlState('sprint')) raw('sprint', false);
-    const busy = this.inFlight > 0 || !!b.targetDigBlock || !!b.pathfinder?.goal || !!b.vehicle || !!b.isSleeping
+    // Waiting for an interaction does not take ownership of movement or buoyancy.
+    const busy = !!b.targetDigBlock || !!b.pathfinder?.goal || !!b.vehicle || !!b.isSleeping
       || ['forward', 'back', 'left', 'right', 'sneak', 'sprint'].some((k) => b.getControlState(k));
     let submerged = false;
     if (e.isInWater && typeof b.blockAt === 'function' && e.position?.offset) {
@@ -3090,16 +3092,31 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const block = b.blockAt(this.vec(target.pos));
       if (!block) return { ok: false, reason: 'NO_BLOCK' };
       if (this.mcData.blocksByName?.[item]) return await this.placeItemAgainst(item, block, check);
-      // 放置实体类物品（船、矿车、盔甲架、刷怪蛋）：对着方块顶面放
-      if (/_boat$|_raft$|_spawn_egg$|^armor_stand$|^end_crystal$/.test(item)) {
-        // placeEntity 对船用 forceLook:'ignore' 再发 use_item：服务器按“当前视线”射线找水面，所以必须先看向目标水面，
-        // 否则船会放到别处或根本放不下
-        if (/_boat$|_raft$/.test(item)) {
-          // 看的点和 placeEntity 自己要看的点（顶面中心）一致：它就不会再慢慢转一次头；视线穿过这个点继续往下就落在水面上
-          await this.afterAction(() => b.lookAt(block.position.offset(0.5, 1, 0.5), true), check);
-          // 转头要等下一个物理刻才发给服务器；放船的 use_item 包是立刻发的，服务器会按“转头之前”的视线找水面——放不下或放到别处。等它发出去
-          await this.afterAction(() => this.lookSynced(), check);
-        }
+      if (/_boat$|_raft$/.test(item)) {
+        // Boat use raycasts from the player's eyes. Aim inside the requested fluid
+        // surface instead of the air at y+1; placeEntity would overwrite this aim.
+        const level = Number(block.getProperties?.().level ?? 0);
+        const height = block.name === 'water' && b.blockAt(block.position.offset(0, 1, 0))?.name !== 'water'
+          ? 1 - ((level >= 8 ? 0 : level) + 1) / 9 : 1;
+        const aim = block.position.offset(0.5, height - 0.01, 0.5);
+        await this.afterAction(() => b.lookAt(aim, true), check);
+        await this.afterAction(() => this.lookSynced(), check);
+        const ids = new Set(Object.keys(b.entities ?? {}));
+        const count = () => (b.inventory.items() as InvItem[]).filter((held) => held.name === item).reduce((sum, held) => sum + held.count, 0);
+        const before = count();
+        const appeared = () => Object.values(b.entities as Record<number, Entity>).find((entity) => !ids.has(String(entity.id))
+          && /(^|_)(boat|raft)$/.test(entity.name ?? '') && entity.position.distanceTo(aim) < 3);
+        await this.afterAction(async () => { b.activateItem(); b.deactivateItem(); }, check);
+        const confirmed = await this.waitForInteraction(() => !!appeared(), check, 5000);
+        const entity = appeared(), consumed = before - count();
+        const reasons = [...(entity ? [`目标附近出现新实体 ${entity.name} #${entity.id}`] : ['目标附近没有确认新船实体']),
+          ...(consumed > 0 ? [`背包 ${item} 减少 ${consumed}`] : [])];
+        const effectEvidence = { verified: true, changed: !!entity || consumed > 0, reasons };
+        return confirmed && entity ? { ok: true, spawned: entity.name ?? item, effectEvidence }
+          : { ok: false, reason: `ENTITY_NOT_SPAWNED:目标附近没有确认新船${consumed > 0 ? '，但背包里的船已减少' : '，背包里的船未减少'}`, effectEvidence };
+      }
+      // Other entity items use their block-face placement API.
+      if (/_spawn_egg$|^armor_stand$|^end_crystal$/.test(item)) {
         const ids = new Set(Object.keys(b.entities ?? {}));
         let entity: any;
         try { entity = await this.afterAction(() => raceAbort(b.placeEntity(block, new Vec3(0, 1, 0)), signal, 6000, () => {}), check); }

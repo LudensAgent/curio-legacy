@@ -22,8 +22,9 @@ test('mechanics search handles bilingual actions and exact names while keeping c
   for (const query of ['拆除方块', 'break a block', 'dig']) assert.equal(queryMechanics(query, 1).mechanics[0]?.primitive, 'dig', query);
   assert.equal(queryMechanics('右键实体', 1).mechanics[0]?.primitive, 'interact');
   assert.equal(queryMechanics('place blocks', 1).mechanics[0]?.primitive, 'use_item');
-  const composite = queryMechanics('boat', 1).mechanics[0];
-  assert.equal(composite?.primitive, 'boat'); assert.equal(composite?.kind, 'composite');
+  const navigation = queryMechanics('boat', 1).mechanics[0];
+  assert.equal(navigation?.primitive, 'ride'); assert.equal(navigation?.kind, 'primitive');
+  assert.equal(SKILLS.boat, undefined);
   assert.deepEqual(queryMechanics('quantum telekinesis 999').mechanics, []);
   assert.equal(queryMechanics('use_item', 1).mechanics[0]?.parameters, SKILLS.use_item.argsDoc);
   assert.ok(queryMechanics('坐船').mechanics.some((entry) => entry.primitive === 'interact'), 'object language should also reveal general operations');

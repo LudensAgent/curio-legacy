@@ -11,7 +11,7 @@ function percept(): Percept {
     inventory: [{ name: 'stone_pickaxe', count: 1 }], emptySlots: 35,
     nearby: { hostile: [], passive: ['sheep'], players: [], resources: [{ block: 'oak_log', count: 4, nearest: 5, seen: 'now' }] },
     vision: { facing: 'N', fov: 100, range: 64, view: 'sky 50%', openness: { left: 64, center: 64, right: 64 },
-      visible_resources: [], remembered_resources: [], seen_entities: [{ name: 'sheep', dist: 5, dir: 'E', rel: '前方' }],
+      visible_resources: [], remembered_resources: [], seen_entities: [{ id: 1, name: 'sheep', pos: { x: 5, y: 64, z: 0 }, dist: 5, dir: 'E', rel: '前方' }],
       heard: [], nearest_land: null, last_look_around_s: null },
     exploration: { visitedChunks: 1, noveltyByDir: { N: 1, S: 0 }, base: null },
     death_recovery: null, curiosities: [], objective: null, drives: [], stock: null,
