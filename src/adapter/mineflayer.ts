@@ -1751,19 +1751,36 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   private blockInteractionChange(block: any) {
     const b = this.bot, window = b.currentWindow;
     const cells = [[0, 0, 0], [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].map(([x, y, z]) => block.position.offset(x, y, z));
-    const blocks = () => JSON.stringify(cells.map((pos) => { const at = b.blockAt(pos); return at ? [at.name, at.stateId, at.getProperties?.()] : null; }));
+    // 原样说出变了什么（哪格从什么变成什么、背包哪样多了少了）：桶空了却没出现水（下界会蒸发）这种事，要它自己看得出来
+    const snap = () => cells.map((pos) => { const at = b.blockAt(pos); return at ? { name: at.name as string, key: JSON.stringify([at.name, at.stateId, at.getProperties?.()]) } : null; });
     const inventory = () => {
       const counts = new Map<string, number>();
       for (const item of b.inventory.items()) counts.set(item.name, (counts.get(item.name) ?? 0) + item.count);
-      return JSON.stringify([...counts].sort(([a], [c]) => a.localeCompare(c)));
+      return counts;
     };
-    const beforeBlocks = blocks(), beforeInventory = inventory(), beforeDamage = b.heldItem?.durabilityUsed;
-    const reasons = () => [
-      ...(blocks() !== beforeBlocks ? ['目标或相邻格的实际方块状态改变'] : []),
-      ...(inventory() !== beforeInventory ? ['背包物品数量改变'] : []),
-      ...(b.heldItem?.durabilityUsed !== beforeDamage ? ['手持工具耐久改变'] : []),
-      ...(b.currentWindow && b.currentWindow !== window ? ['服务器打开了交互窗口'] : []),
-    ];
+    const beforeBlocks = snap(), beforeInventory = inventory(), beforeDamage = b.heldItem?.durabilityUsed;
+    const blockDiff = () => {
+      const now = snap();
+      return now.flatMap((at, i) => {
+        const was = beforeBlocks[i];
+        if ((at?.key ?? null) === (was?.key ?? null)) return [];
+        const p = cells[i];
+        return [`(${p.x},${p.y},${p.z}) ${was?.name ?? '?'}${was?.name === at?.name ? ' 状态变了' : `→${at?.name ?? '?'}`}`];
+      });
+    };
+    const inventoryDiff = () => {
+      const now = inventory(), names = new Set([...now.keys(), ...beforeInventory.keys()]);
+      return [...names].sort().flatMap((n) => { const d = (now.get(n) ?? 0) - (beforeInventory.get(n) ?? 0); return d ? [`${n} ${d > 0 ? '+' : ''}${d}`] : []; });
+    };
+    const reasons = () => {
+      const blocks = blockDiff(), items = inventoryDiff();
+      return [
+        ...(blocks.length ? [`方块变了：${blocks.slice(0, 4).join('、')}`] : []),
+        ...(items.length ? [`背包：${items.slice(0, 6).join('、')}${blocks.length ? '' : '（周围方块没变）'}`] : []),
+        ...(b.heldItem?.durabilityUsed !== beforeDamage ? ['手持工具耐久改变'] : []),
+        ...(b.currentWindow && b.currentWindow !== window ? ['服务器打开了交互窗口'] : []),
+      ];
+    };
     return Object.assign(() => reasons().length > 0, { reasons });
   }
 
