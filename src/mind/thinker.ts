@@ -16,12 +16,13 @@ import { terrainSketch } from '../building/site.ts';
 import { homeOf } from './home.ts';
 import { draftsFor } from '../building/drafts.ts';
 import type { SkillBook } from '../knowledge/skillbook.ts';
+import type { KnowledgeBase } from '../knowledge/library.ts';
 import { describeBuild, myBuilds } from './home.ts';
 import type { LedgerView } from './ledger.ts';
 import { recallLocal, RECALL_LABEL } from './recall.ts';
 
 /** 思考时可以先做的只读查询（不占游戏时间） */
-const QUERY_KINDS = ['recipes', 'recall', 'mechanics', 'skill', 'design', 'moves'];
+const QUERY_KINDS = ['recipes', 'recall', 'mechanics', 'skill', 'design', 'moves', 'knowledge'];
 import { ACTIVITY_KINDS, DECISION_KINDS, type ActivityDraft, type ActivityKind, type ActivityStep, type Consolidation, type DecisionKind, type Habits, type MindDecision } from './types.ts';
 
 const str = (v: unknown, max: number) => typeof v === 'string' ? v.trim().slice(0, max) : '';
@@ -254,7 +255,7 @@ export class Thinker {
   designing: { brief: string; startedAt: number } | null = null;
   /** 收获账本：主动回想时也能想起拿某样东西花多少、在哪多 */
   ledger: LedgerView | null = null;
-  constructor(private planner: Planner, private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private book: SkillBook | null = null) {}
+  constructor(private planner: Planner, private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private book: SkillBook | null = null, private knowledge: KnowledgeBase | null = null) {}
 
   get autonomous() { return this.planner.autonomous; }
   get skillBook(): SkillBook | null { return this.book; }
@@ -312,6 +313,12 @@ export class Thinker {
       // 把查询（design/skill/recipes…）写成了 routine 里的一步：替它查了，再请它据此做决定
       const embedded = embeddedQuery(raw);
       if (embedded && queries < 3) {
+        if (tier === 'glance' && embedded.kind === 'knowledge') {
+          tier = 'deliberate';
+          this.planner.stats.tiers.escalated++;
+          this.bus.publish('llm_escalate', 'P3', `抬头一看觉得需要好好想想（把 ${embedded.kind} 查询写成了动作）`);
+          messages = buildMindMessages({ ...ctx, tier });
+        }
         queries++;
         const result = await this.query(embedded.kind, embedded.args, ctx, signal);
         messages.push({ role: 'assistant', content: c.text.slice(0, 1500) },
@@ -367,6 +374,12 @@ export class Thinker {
 
   private async query(kind: string, raw: Record<string, any>, ctx: MindContext, signal?: AbortSignal): Promise<string> {
     try {
+      if (kind === 'knowledge') {
+        if (!this.knowledge) return '知识库未启用，无法查询游戏资料';
+        const result = this.knowledge.query(raw);
+        this.bus.publish('knowledge_query', 'P3', `查知识：${String(raw.id ?? raw.query ?? '目录').slice(0, 80)}`);
+        return JSON.stringify(result);
+      }
       if (kind === 'moves') {
         const names = (Array.isArray(raw.names) ? raw.names : [raw.name ?? raw.names]).map((n: unknown) => String(n ?? '').trim()).filter(Boolean);
         return names.length ? moveDetails(names) : '要查哪些动作？写 {"kind":"moves","names":["动作名"]}';

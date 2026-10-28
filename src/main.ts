@@ -10,6 +10,7 @@ import { parseGameMessage, type ParsedGameMessage } from './memory/game-messages
 import { SelfModel } from './mind/self.ts';
 import { Thinker } from './mind/thinker.ts';
 import { BUILTIN_SKILLS_DIR, SkillBook } from './knowledge/skillbook.ts';
+import { KnowledgeBase } from './knowledge/library.ts';
 import { BehaviorEngine, setInstinctSource } from './mind/behaviors.ts';
 import { setBehaviorRegistry } from './skills/use-skill.ts';
 import { setReliableSkills } from './codeskills/bridge.ts';
@@ -247,7 +248,7 @@ draftsFor(memory);
 const selfModel = new SelfModel(path.join(config.dataDir, 'mind.json'), config.mind.traits);
 const mind = new Mind({
   adapter, arbiter, perception, memory, bus, self: selfModel, persona: config.persona,
-  thinker: Object.assign(new Thinker(planner, adapter, memory, bus, skillBook), { ledger }),
+  thinker: Object.assign(new Thinker(planner, adapter, memory, bus, skillBook, new KnowledgeBase(config.mc.version)), { ledger }),
   behaviors,
   ledger,
   onWorthLearning: (note: string) => smith.noted(note),

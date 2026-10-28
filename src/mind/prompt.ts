@@ -138,7 +138,8 @@ const SKILLS_DOC = () => `【技能】管用的做法写进 skill，存下就生
 const QUERIES = (skills: string[]) => `【先查再做】需要时先输出一个查询 JSON（不占游戏时间，每次思考最多 3 次），拿到结果再决定：
 - {"kind":"skill","name":"技能名"} 翻开技能书看做法｜{"kind":"design","brief":"用途、多大、风格","where":"here|base|x,y,z"} 请建筑师画图纸：房子、前哨、仓库、畜栏、塔等要长期用的建筑（where：脚下、家旁或坐标）
 - {"kind":"recipes","item":"物品名","count":1} 看配方和缺口（"uses":"物品" 反查用途）｜{"kind":"moves","names":["动作名"]} 看动作参数
-- {"kind":"recall","query":"关键词"} 回想以前的经历、日记、教训和技能｜{"kind":"mechanics","query":"…"} 查底层操作接口`;
+- {"kind":"recall","query":"关键词"} 回想以前的经历、日记、教训和技能｜{"kind":"mechanics","query":"…"} 查底层操作接口
+- {"kind":"knowledge","query":"想了解的问题"} 搜索游戏资料和相关段落；{"kind":"knowledge","id":"文档id","section":"章节id"} 读文档（section 可省略）；{"kind":"knowledge"} 浏览目录。knowledge 是带出处和版本的文献参考，moves 查实际动作接口，recipes 查配方与缺口，recall 查自己的经历。读到的做法由你判断是否采用，不代表现场事实或已经学会的技能。`;
 /** 技能书目录放在系统提示词最后：它变得最勤（写、改、收起），放在前面会让后面不变的大段内容每次都缓存不中 */
 const SKILL_INDEX = (skills: string[]) => skills.length ? `\n\n【技能书】\n${skills.map((x) => `- ${x}`).join('\n')}` : '';
 
@@ -150,7 +151,7 @@ const ROUTINE_OF_THINKING = `【每次这样想】
 1. 【此刻】要紧的（危险、快饿死、卡住）先处理。
 2. 看【专注】：在推进清单就 continue。
 3. 看【身体】where：地表走路，坑里或地下才挖；身边一格的事对照 local 写坐标。
-4. 拿不准就先查（skill / moves / recipes / recall）；输出前核对动作名和参数。`;
+4. 拿不准就先查（knowledge / skill / moves / recipes / recall）；输出前核对动作名和参数。`;
 
 const CHOOSE = `【选动作】
 - 去记得的地方或坐标 → goto；找没见过的东西 → explore {"until":…}；拿看得见的方块 → gather；身边某一格 → dig_at / step / place_at
@@ -222,7 +223,7 @@ ${READING}
 - 先看【此刻】：没什么要紧的、手上的活还顺，就 continue（独白可以很短）。
 - 手上没活：直接 new 一段，接着【最近】的结果和议程往下玩；活快干完时顺便写 next。小改用 adjust，插一件事用 detour，彻底换事用 switch/new。
 - 在地表就走路，在坑里或地下（看【身体】where）才挖；身边一格的事对照【身边】local 用 dig_at / step / place_at 写确切坐标。
-- 要翻技能书、请建筑师（design）、查配方或想得更深：直接输出查询，如 {"kind":"design","brief":"…"}、{"kind":"skill","name":"…"}、{"kind":"deliberate","reason":"…"}（转成认真想、给你完整信息）。
+- 要翻技能书、请建筑师（design）、查配方、查游戏资料或想得更深：直接输出查询，如 {"kind":"knowledge","query":"想了解的问题"}、{"kind":"design","brief":"…"}、{"kind":"skill","name":"…"}、{"kind":"deliberate","reason":"…"}（转成认真想、给你完整信息）。knowledge 是文献参考，moves 查动作接口，recipes 查配方，recall 查自己的经历；资料不代表现场事实或已经学会的技能。
 ${skills.length ? `技能书：${skills.map((x) => x.split('：')[0]).join('、')}（带步骤的可以 use_skill 调用）。` : ''}盖新房子先 design 拿图纸，再 build {"draft":"图纸ID"}；不要自己画图纸。
 - 有【专注】的主目标就接着推进清单；天黑、饿了、缺料用 detour 插一段，做完会回来；瞥一眼不能 switch。做完清单一项写 "plan":{"done":[序号]}。
 - 刚从卡住里找到办法、想把它变成身体的习惯：转成认真想（{"kind":"deliberate","reason":"写技能"}）。
