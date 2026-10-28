@@ -151,7 +151,7 @@ const CHOOSE = `【选动作】
 - 去记得的地方或坐标 → goto；找没见过的东西 → explore {"until":…}；拿看得见的方块 → gather；身边某一格 → dig_at / step / place_at
 - 过水 → boat 或游过去；远处隔着河湖水网 → travel（自己挑路，走、游、坐船接力；goto 被水挡住也会自动接着这样走）；吃 → eat（背包有吃的）/ hunt / forage / fish；做东西 → craft、smelt（会自己放下背包里的工作台/熔炉；拿不准查 recipes）
 - 有怪靠近 → defend {"target":"名字"} 打掉，或走开绕路（苦力怕也是你定：打就砍一下退一步）
-- 过夜 → sleep（有床，看参数选哪张）/ shelter / 自己挖坑封顶；在坑里或地下 → place_at [0,0,0] 垫高或挖台阶
+- 过夜 → sleep（有床，看参数选哪张）/ shelter / 自己挖坑封顶；在坑里或地下想上去 → 看【身边】local 和背包，用 dig_at / step / place_at 自己想办法（怎么上去由你定，背包里有什么用什么）
 - 盖新房子 → design 拿图纸 → 攒材料 → build {"draft":"图纸ID"}（料不全也能先盖，有多少盖多少）；没盖完的 → build {"projectId":"作品ID"}；不要自己画图纸
 - goto 没路、挡着的是土坡石坎 → goto {"target":…,"dig":true} 挖穿直走`;
 
@@ -164,9 +164,8 @@ const PRINCIPLES = `【原则】
 - 身体只有保命本能和你写下的技能；插火把、顺手吃、捡东西要你自己做，或用 habits 定成习惯。`;
 
 const PRECISE = `【精确操作】【身边】local 是以脚为原点的方块图（[前,上,右]，前=facing），local.spots 已算好能站（stand）、能放（place）的格子。dig_at / step / place_at 都写确切的相对坐标，routine 重复时每步按当时站的位置重算，例如：
-- 挖阶梯上地面（facing 都写同一个方向，如 "N"）：steps [dig_at {"at":[0,2,0]}, dig_at {"at":[1,1,0]}, dig_at {"at":[1,2,0]}, step {"to":[1,1,0]}]，repeat 10，done_when {"type":"sky_visible","equals":true}
-- 原地垫高：steps [dig_at {"at":[0,2,0]}, place_at {"at":[0,0,0],"item":"any"}]，repeat 6｜平巷：steps [dig_at {"at":[1,0,0]}, dig_at {"at":[1,1,0]}, step {"to":[1,0,0]}]，repeat 8
-- 往下挖：重复 dig_at [0,-1,0]（挖空人就掉下去，不用 step）
+- 写法示例（只是语法，不是该怎么走）：steps [dig_at {"at":[1,0,0]}, dig_at {"at":[1,1,0]}, step {"to":[1,0,0]}]，repeat 8，facing 都写同一个方向（如 "N"），done_when 写看得到的结果（如 {"type":"sky_visible","equals":true}）
+- [0,0,0] 是自己脚下那格、[0,1,0] 是自己头那格：place_at [0,0,0] 放实心方块会跳起来垫在脚下；梯子、火把这种贴墙的东西可以放进自己站的格子（要贴着实心墙）。挖空脚下 [0,-1,0] 人会自己掉下去，不用 step
 repeat 每轮重做整套 steps：火把别写进重复的 steps，用 habits.torch_every。挖前看清那格（沙砾会掉，别挖开水和岩浆）。`;
 
 const EXAMPLE = `【例子】想有个家时：
@@ -305,8 +304,8 @@ export function situationalReminders(ctx: MindContext): string[] {
     if (t) out.push(`你在自己挖过的通道里，入口 (${Math.round(t.pos.x)},${Math.round(t.pos.y)},${Math.round(t.pos.z)}) 就是出口：goto 入口会沿原路一段段走上去；${digVsWalk(here.y - t.pos.y, Math.hypot(t.pos.x - here.x, t.pos.y - here.y, t.pos.z - here.z))}`);
   }
   if (where === 'indoors' && /坑|垫高|台阶|爬出|挖出去|出坑/.test(intent)) out.push(`你${p.self.where!.text}。刚才想的“坑”其实是屋子的墙`);
-  if (trapped && where === 'pit') out.push(`你${p.self.where!.text}：原地 place_at [0,0,0] 垫高，或挖一级台阶 step 上去就出来了`);
-  else if (trapped) out.push('你在地下或被围住了：看【身边】local，用 dig_at / step / place_at 一格一格自己挖出去（比如挖阶梯：dig_at [0,2,0]、dig_at [1,1,0]、dig_at [1,2,0]、step [1,1,0] 重复到 sky_visible）');
+  if (trapped && where === 'pit') out.push(`你${p.self.where!.text}：看【身边】local 和背包，怎么上去自己定`);
+  else if (trapped) out.push('你在地下或被围住了：看【身边】local，用 dig_at / step / place_at 一格一格自己出去，怎么出去自己定');
   else if (where === 'surface' && p.self.sky_visible !== true) out.push(`你${p.self.where!.text}，不是在地下：直接走路，不用挖`);
   // 没盖完的房子：久没碰了才提一句；一直在补却补不动，就把事实摆出来让它掂量够不够住（不再每一念都催“接着盖”）
   const site = unfinished[0];

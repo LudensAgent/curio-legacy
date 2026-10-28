@@ -242,7 +242,7 @@ export const dig: Skill<DigArgs> = {
 // ------------------------------------------------------------------ climb_up
 export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boolean }> = {
   name: 'climb_up',
-  description: '原地垫方块往上爬（头顶挡着会先挖开）：until_sky 爬到看得见天空，until_exit 爬到四周有路可走（出坑）；需要背包里有泥土/圆石等方块',
+  description: '原地往上爬（头顶挡着会先挖开）：脚下是梯子就沿梯子爬，否则跳起来往脚下垫方块（需要背包里有泥土/圆石等方块）；until_sky 爬到看得见天空，until_exit 爬到四周有路可走（出坑）',
   argsDoc: '{"height"?: 1-24, "until_sky"?: boolean, "until_exit"?: boolean}；兼容 untilSky/untilExit；两个停止条件同时开启时须同时满足',
   timeoutMs: 90000,
   movement: true,
@@ -256,7 +256,8 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
   async run(ctx, args) {
     const { adapter, signal } = ctx;
     throwIfAborted(signal);
-    if (!hasPlaceable(adapter.state().inventory)) return fail('MISSING_MATERIALS', '背包里没有能垫脚的方块（泥土/圆石/石头/木板）');
+    const onLadder = () => adapter.blockAt(floor(adapter.state().pos)) === 'ladder';
+    if (!onLadder() && !hasPlaceable(adapter.state().inventory)) return fail('MISSING_MATERIALS', '脚下没有梯子，背包里也没有能垫脚的方块（泥土/圆石/石头/木板）');
     const start = adapter.state().pos.y;
     const reached = (around: ReturnType<typeof surroundings>) => (!args.untilSky || around.sky) && (!args.untilExit || around.exits.length > 0);
     const finish = (stopped?: string) => {
@@ -292,7 +293,7 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
         return finish(why(e));
       }
       ctx.senses.refresh();
-      if (!hasPlaceable(adapter.state().inventory)) break;
+      if (!onLadder() && !hasPlaceable(adapter.state().inventory)) break;
     }
     throwIfAborted(signal);
     return finish();

@@ -105,7 +105,7 @@ export function localMap(adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like, f
     if (touching) place.push(`[${f},${u},${r}] ${word(f, u, r)}`);
   }
   return { facing, frame: '[前,上,右]；每层的行从前(f=+2)到后(f=-2)，列从左(r=-2)到右(r=+2)，中间是自己', legend, layers,
-    spots: { stand: stand.slice(0, 8), place: place.slice(0, 8), note: 'stand：step 能直接迈到的格子；place：place_at 放得住的格子（贴着实心方块）；原地垫高用 [0,0,0]' } };
+    spots: { stand: stand.slice(0, 8), place: place.slice(0, 8), note: 'stand：step 能直接迈到的格子；place：place_at 放得住的格子（贴着实心方块）；[0,0,0] 是自己脚下那格（放实心方块=跳起来垫脚；梯子等贴墙物可放进自己站的格子）' } };
 }
 
 export function describeCell(adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like): string {

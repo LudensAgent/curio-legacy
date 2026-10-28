@@ -7,8 +7,16 @@ import type { GameAdapter, Vec3Like } from '../adapter/types.ts';
 
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 /** 能直接穿过去的（不挡路） */
-const SOFT = /^(air|cave_air|void_air|short_grass|grass|tall_grass|fern|large_fern|dead_bush|snow|torch|wall_torch|.*_torch|.*_flower|dandelion|poppy|.*_tulip|azure_bluet|oxeye_daisy|cornflower|lily_of_the_valley|allium|blue_orchid|.*_sapling|.*_mushroom|sugar_cane|vine|.*_carpet|rail|.*_rail|redstone_wire|.*_button|lever|tripwire|.*_pressure_plate|sweet_berry_bush|seagrass|tall_seagrass|kelp|kelp_plant)$/;
+const SOFT = /^(air|cave_air|void_air|ladder|short_grass|grass|tall_grass|fern|large_fern|dead_bush|snow|torch|wall_torch|.*_torch|.*_flower|dandelion|poppy|.*_tulip|azure_bluet|oxeye_daisy|cornflower|lily_of_the_valley|allium|blue_orchid|.*_sapling|.*_mushroom|sugar_cane|vine|.*_carpet|rail|.*_rail|redstone_wire|.*_button|lever|tripwire|.*_pressure_plate|sweet_berry_bush|seagrass|tall_seagrass|kelp|kelp_plant)$/;
 const LIQUID = new Set(['water', 'lava', 'bubble_column']);
+
+/** 贴墙放的东西能挂在哪一面：梯子只能挂在实心方块的侧面；火把、告示牌、杠杆可以立在地上或挂墙；其余整块方块哪面都行（null） */
+export function attachmentFaces(name: string): 'side' | 'floor_or_side' | null {
+  if (name === 'ladder' || /_wall_(sign|torch|banner|fan)$|^(tripwire_hook|item_frame|glow_item_frame|painting)$/.test(name)) return 'side';
+  if (/(^|_)torch$|_sign$|_banner$|^(lever|.*_button)$/.test(name)) return 'floor_or_side';
+  return null;
+}
+
 
 export const DIR_OFFSETS: Record<string, [number, number]> = { N: [0, -1], E: [1, 0], S: [0, 1], W: [-1, 0] };
 export type ExitOptions = Record<string, { walk: boolean | null; step_up: boolean | null }>;

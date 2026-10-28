@@ -721,7 +721,7 @@ export function whereAmI(adapter: Pick<GameAdapter, 'blockAt'>, s: { pos: { x: n
   if (enclosed) {
     const sorted = [...rises].sort((a, b) => a - b);
     const depth = sorted[Math.floor(sorted.length / 2)];
-    return { kind: 'pit', depth, text: `在一个约 ${depth} 格深的坑里（四周地面比脚下高${sky}）：垫高或挖台阶就能上去` };
+    return { kind: 'pit', depth, text: `在一个约 ${depth} 格深的坑里（四周地面比脚下高${sky}）` };
   }
   return { kind: 'surface', text: `在地表${sky}` };
 }

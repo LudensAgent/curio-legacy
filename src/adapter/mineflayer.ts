@@ -7,7 +7,7 @@ import type { EventBus } from '../events.ts';
 import { AbortedError, raceAbort, shortId, sleep, throwIfAborted, TimeoutError } from '../util.ts';
 import { installClientGuard } from './click-guard.ts';
 import { cornerSafe } from './corner-safe.ts';
-import { AIR_BLOCKS } from '../perception/surroundings.ts';
+import { AIR_BLOCKS, attachmentFaces } from '../perception/surroundings.ts';
 import type {
   InvItem,
   ActionResult,
@@ -1426,10 +1426,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const target = this.vec(pos);
     const cur = b.blockAt(target);
     if (cur && cur.boundingBox === 'block') return { ok: true }; // 已经有方块了
-    const faces = [new Vec3(0, -1, 0), new Vec3(0, 1, 0), new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)];
+    // 贴墙的东西（梯子、火把、按钮……）要以它能挂住的那一面为参照：梯子只能挂在实心墙的侧面，火把可以立在地上或挂在墙上；
+    // 以前对什么方块都先试脚下那块的顶面，梯子就放不上，还只报“没有参照”，学不到“要贴墙放”
+    const attach = attachmentFaces(item.name);
+    const sides = [new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)];
+    const faces = attach === 'side' ? sides : attach === 'floor_or_side' ? [...sides, new Vec3(0, -1, 0)]
+      : [new Vec3(0, -1, 0), new Vec3(0, 1, 0), ...sides];
     // 贴着箱子、工作台、门这类一点就打开的方块放：先试别的面；只能贴着它时按住潜行再放（不然是打开它，不是放方块）
     const refs = faces.map((f) => ({ f, ref: b.blockAt(target.plus(f)) })).filter((x) => x.ref && x.ref.boundingBox === 'block')
       .sort((x, y) => Number(OPENS_ON_CLICK.test(x.ref.name)) - Number(OPENS_ON_CLICK.test(y.ref.name)));
+    if (!refs.length && attach) return { ok: false, reason: attach === 'side' ? 'NO_WALL' : 'NO_FLOOR_OR_WALL' };
     for (const { f, ref } of refs) {
       if (!this.canClickPlacementFace(ref, f.scaled(-1))) continue;
       const sneak = OPENS_ON_CLICK.test(ref.name);
