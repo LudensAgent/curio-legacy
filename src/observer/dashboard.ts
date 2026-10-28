@@ -7,6 +7,7 @@ import type { AgentEvent, EventBus } from '../events.ts';
 import type { LlmTrace } from '../planner/llm-trace.ts';
 import { itemTextures } from './item-textures.ts';
 import { envStore, type EnvStoreOptions } from './env-config.ts';
+import { parseHudLayout, type HudLayout } from './hud-layout.ts';
 
 const PUBLIC = fileURLToPath(new URL('../../public/', import.meta.url));
 /** 一个实时连接最多积压多少没读走的数据，超过就断开 */
@@ -42,7 +43,7 @@ export interface DashboardHandlers {
  * - /overlay   OBS 浏览器源（透明背景的状态叠加）
  * - /api/stream  Server-Sent Events：每秒推送状态 + 实时事件
  */
-/** extraRoutes：在控制台路由之前尝试的处理器（返回 true 表示已处理），用于挂载 Curio Observer 数据流 */
+/** extraRoutes：在布局遥测之外的控制台路由之前尝试的处理器（返回 true 表示已处理），用于挂载 Curio Observer 数据流 */
 export function startDashboard(
   host: string,
   port: number,
@@ -53,6 +54,7 @@ export function startDashboard(
 ) {
   const clients = new Set<http.ServerResponse>();
   let slowDropped = 0;
+  let hudLayout: (HudLayout & { receivedAt: number }) | null = null;
   /**
    * 往一个 SSE 连接里写一帧。不看背压的话，对方不读（浏览器标签被冻结、OBS 源卡住、半开的连接）时，
    * 每秒一整份状态快照和每次 LLM 调用的全文都会堆在这个进程的内存里，几个小时就能把堆撑满。
@@ -91,7 +93,8 @@ export function startDashboard(
     const ra = req.socket.remoteAddress ?? '';
     if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ra)) return false;
     const h = String(req.headers.host ?? '');
-    if (![`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`].includes(h)) return false;
+    const listenPort = req.socket.localPort ?? port;
+    if (![`127.0.0.1:${listenPort}`, `localhost:${listenPort}`, `[::1]:${listenPort}`].includes(h)) return false;
     const origin = req.headers.origin;
     return !origin || origin === `http://${h}`;
   };
@@ -129,9 +132,21 @@ export function startDashboard(
     });
 
   const server = http.createServer(async (req, res) => {
-    for (const route of extraRoutes) if (route(req, res)) return;
     const url = new URL(req.url ?? '/', 'http://x');
     const p = url.pathname;
+    if (p === '/api/observer/layout') {
+      if (!localOnly(req)) return send(res, 403, '{"error":"只允许本机访问 HUD 布局"}');
+      if (req.method === 'GET') return send(res, 200, JSON.stringify(hudLayout));
+      if (req.method === 'POST') {
+        if (!String(req.headers['content-type'] ?? '').includes('application/json')) return send(res, 415, '{"error":"需要 application/json"}');
+        const layout = parseHudLayout(await readBody(req));
+        if (!layout) return send(res, 400, '{"error":"HUD 布局格式无效"}');
+        hudLayout = { ...layout, receivedAt: Date.now() };
+        return send(res, 200, JSON.stringify(hudLayout));
+      }
+      return send(res, 405, '{"error":"method not allowed"}');
+    }
+    for (const route of extraRoutes) if (route(req, res)) return;
     if (req.method === 'GET' && p === '/') return file(res, 'dashboard.html');
     if (req.method === 'GET' && p === '/overlay') return file(res, 'overlay.html');
     // 背包里的物品贴图：/textures/item/oak_log.png

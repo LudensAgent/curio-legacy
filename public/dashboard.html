@@ -248,13 +248,18 @@
   #pane-live .stackcol { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
   .hudstage { position: relative; aspect-ratio: 16 / 9; border-radius: 8px; overflow: hidden; user-select: none; touch-action: none;
               background: linear-gradient(180deg, #8fb7d9 0%, #a9c8e4 55%, #6f9a55 56%, #5b8446 100%); border: 1px solid var(--line); }
-  .hudstage .hint { position: absolute; left: 8px; bottom: 6px; font-size: 11px; color: rgba(255,255,255,.85); text-shadow: 0 1px 2px rgba(0,0,0,.5); pointer-events: none; }
-  .hudbox { position: absolute; border: 2px solid rgba(20,24,30,.85); background: rgba(16,20,26,.62); color: #fff; border-radius: 4px;
-            font-size: 11px; padding: 2px 5px; cursor: grab; overflow: hidden; white-space: nowrap; box-sizing: border-box; }
+  .hudcanvas { position: absolute; inset: 0; overflow: hidden; }
+  .hudempty { position: absolute; inset: 0; display: grid; place-content: center; gap: 6px; padding: 20px; text-align: center;
+              color: #fff; background: rgba(16,20,26,.62); pointer-events: none; }
+  .hudempty[hidden] { display: none; }
+  .hudempty small { opacity: .8; }
+  .hudbox { position: absolute; border: 1px solid rgba(255,255,255,.65); background: rgba(16,20,26,.72); color: #fff; border-radius: 2px;
+            font-size: 10px; line-height: 1.2; padding: 1px 3px; cursor: grab; overflow: hidden; white-space: nowrap; box-sizing: border-box; }
   .hudbox.def { border-style: dashed; background: rgba(16,20,26,.35); }
-  .hudbox.off { opacity: .25; }
+  .hudstage.stale .hudcanvas { opacity: .4; pointer-events: none; }
   .hudbox.drag { cursor: grabbing; outline: 2px solid var(--accent); z-index: 2; }
-  .hudbox small { display: block; opacity: .7; font-size: 10px; }
+  .hudmeta { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: baseline; margin: 8px 0; color: var(--dim); font-size: 11px; }
+  .hudmeta .live { color: var(--accent); }
   .hudpanels { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px 12px; margin-top: 10px; }
   .hudpanels label, .hudopt label { display: flex; align-items: center; gap: 6px; }
   .hudpanels button { padding: 1px 6px; font-size: 11px; margin-left: auto; }
@@ -424,17 +429,22 @@
         <div class="stackcol">
           <div class="card">
             <h2>观察者 HUD <span class="r dim" id="hudStatus">读取中…</span></h2>
-            <div class="hudstage" id="hudStage"><span class="hint">拖动方块改位置（虚线 = 默认位置）· 按 16:9 画面示意</span></div>
+            <div class="hudstage" id="hudStage">
+              <div class="hudcanvas" id="hudCanvas"></div>
+              <div class="hudempty" id="hudEmpty"><span>等待游戏实际布局</span><small>需要支持布局回传的 Curio Observer 模组</small></div>
+            </div>
+            <div class="hudmeta"><span id="hudLayoutStatus">尚未收到模组布局</span><span class="mono" id="hudViewport"></span><span>拖动面板改位置 · 虚线 = 默认位置</span></div>
             <div class="hudpanels" id="hudPanels"></div>
             <div class="hudopt">
               <label class="full"><input type="checkbox" id="hudEnabled"> 显示 Curio HUD（总开关）</label>
               <span>想法最多行数</span><input type="range" id="hudThoughtLines" min="1" max="12" step="1"><span class="v" id="hudThoughtLinesV"></span>
-              <span>物品栏 / 血条大小</span><input type="range" id="hudScale" min="0.5" max="3" step="0.05"><span class="v" id="hudScaleV"></span>
+              <span>HUD 整体大小</span><input type="range" id="hudScale" min="0.5" max="3" step="0.05"><span class="v" id="hudScaleV"></span>
               <span>文字卡片大小</span><input type="range" id="hudInfoScale" min="0.5" max="1.5" step="0.05"><span class="v" id="hudInfoScaleV"></span>
               <span>右侧轮换间隔</span><input type="range" id="hudRotate" min="0" max="30" step="1"><span class="v" id="hudRotateV"></span>
               <span class="full hudnote">右侧在「兴趣信号」和「运行统计（死亡、Token、开销）」之间轮换；0 = 两页叠在一起常驻。</span>
             </div>
             <div class="hudnote" id="hudNote">改动立即发给游戏里的观察者模组（不需要快捷键），并记在 live/observer-hud.json。</div>
+            <div class="hudnote">预览按游戏实际分辨率、GUI 缩放和面板尺寸同步，每秒刷新。Windows 显示缩放无需手填；关闭的面板、容器打开时暂时隐藏的面板不会显示。</div>
           </div>
           <div class="card">
             <h2>镜头与亮度 <span class="r dim">只在旁观 Bot 时生效</span></h2>
@@ -1339,21 +1349,20 @@ es.onerror = () => { $('conn').textContent = '控制台断开'; $('connDot').cla
 // ———— 直播页：观察者 HUD（/api/observer/hud）、LLM 用量、弹幕存档（/api/danmaku）
 (() => {
   const PANELS = [
-    // 默认位置只是示意（1920×1080、GUI 缩放 2 时大致在这里）；真实位置由模组按屏幕和缩放计算
-    { id: 'info', name: '状态 / 当前动作', def: [0.004, 0.007, 0.27, 0.07] },
-    { id: 'thought', name: '它的想法', def: [0.004, 0.085, 0.27, 0.17] },
-    { id: 'interests', name: '兴趣信号', def: [0.82, 0.02, 0.17, 0.24] },
+    { id: 'info', name: '状态 / 当前动作' },
+    { id: 'thought', name: '它的想法' },
+    { id: 'interests', name: '兴趣信号' },
     // 运行统计和兴趣信号共用右侧同一块位置：两个都开才轮换（或叠放），只开一个就只显示那一页
     { id: 'stats', name: '运行统计（与兴趣信号同位，都开才轮换）', toggleOnly: true },
-    { id: 'vitals', name: '快捷栏 / 血条', def: [0.39, 0.885, 0.22, 0.115] },
-    { id: 'inventory', name: '完整背包', def: [0.447, 0.007, 0.106, 0.13] },
-    { id: 'landmarks', name: '记得的地点', def: [0.447, 0.142, 0.106, 0.08] },
-    { id: 'view', name: '视角 / 增亮状态', def: [0.88, 0.27, 0.11, 0.04] },
+    { id: 'vitals', name: '快捷栏 / 血条' },
+    { id: 'inventory', name: '完整背包' },
+    { id: 'landmarks', name: '记得的地点' },
+    { id: 'view', name: '视角 / 增亮状态' },
     { id: 'containers', name: '容器界面（居中）', toggleOnly: true },
     { id: 'hands', name: '第一人称手部', toggleOnly: true },
   ];
-  let hud = null, sendTimer = null, pending = {};
-  const stage = $('hudStage');
+  let hud = null, sendTimer = null, pending = {}, layout = null, layoutError = '', loadingLayout = false, dragging = false, requestedPosition = null;
+  const stage = $('hudStage'), canvas = $('hudCanvas');
   function note(text, bad) { const n = $('hudNote'); n.textContent = text; n.className = 'hudnote' + (bad ? ' bad' : ''); }
 
   async function loadHud() {
@@ -1362,6 +1371,63 @@ es.onerror = () => { $('conn').textContent = '控制台断开'; $('connDot').cla
       if (!r.ok) throw new Error(r.status === 404 ? '观察者数据流没开（OBSERVER_FEED=0）' : 'HTTP ' + r.status);
       hud = await r.json(); renderHud(); $('hudStatus').textContent = '已同步';
     } catch (e) { $('hudStatus').textContent = '不可用'; note('读取 HUD 设置失败：' + e.message, true); }
+  }
+
+  async function loadLayout() {
+    if (loadingLayout) return;
+    loadingLayout = true;
+    try {
+      const r = await fetch('/api/observer/layout');
+      if (!r.ok) throw new Error(r.status === 404 ? '请重启更新后的 Agent 以启用布局同步' : '布局同步失败：HTTP ' + r.status);
+      layout = await r.json(); layoutError = '';
+    } catch (e) { layoutError = e.message; }
+    finally { loadingLayout = false; }
+    renderLayout();
+  }
+
+  function renderLayout() {
+    if (dragging) return;
+    const fresh = layout && !layoutError && Date.now() - layout.receivedAt < 5000;
+    if (requestedPosition && (Date.now() > requestedPosition.until || !layout?.panels[requestedPosition.id])) requestedPosition = null;
+    stage.classList.toggle('stale', !fresh);
+    $('hudLayoutStatus').textContent = layoutError || (fresh ? '游戏实际布局 · 每秒同步' : layout ? '布局已过期 · 等待游戏回传' : '尚未收到模组布局');
+    $('hudLayoutStatus').classList.toggle('live', !!fresh);
+    const viewport = layout?.viewport;
+    if (viewport) {
+      stage.style.aspectRatio = `${viewport.framebufferWidth} / ${viewport.framebufferHeight}`;
+      $('hudViewport').textContent = `${viewport.framebufferWidth}×${viewport.framebufferHeight} · GUI ${viewport.guiWidth}×${viewport.guiHeight} · ×${Number(viewport.guiScale).toFixed(2)}`;
+    }
+    let drawn = 0;
+    for (const p of PANELS) {
+      if (p.toggleOnly) continue;
+      let el = canvas.querySelector(`[data-panel="${p.id}"]`);
+      let bounds = layout?.panels[p.id];
+      if (!bounds) { if (el) el.remove(); continue; }
+      if (requestedPosition?.id === p.id) {
+        const x = Math.max(0, Math.min(viewport.guiWidth - bounds.width, requestedPosition.x * viewport.guiWidth));
+        const y = Math.max(0, Math.min(viewport.guiHeight - bounds.height, requestedPosition.y * viewport.guiHeight));
+        if (Math.abs(bounds.x - x) < 0.05 && Math.abs(bounds.y - y) < 0.05) requestedPosition = null;
+        else bounds = { ...bounds, x, y };
+      }
+      drawn++;
+      if (!el) { el = document.createElement('div'); el.className = 'hudbox'; el.dataset.panel = p.id; canvas.appendChild(el); bindDrag(el, p); }
+      const cfg = hud?.panels[p.id];
+      const custom = cfg && (cfg.x != null || cfg.y != null);
+      Object.assign(el.style, { left: bounds.x / viewport.guiWidth * 100 + '%', top: bounds.y / viewport.guiHeight * 100 + '%',
+        width: bounds.width / viewport.guiWidth * 100 + '%', height: bounds.height / viewport.guiHeight * 100 + '%' });
+      el.classList.toggle('def', !custom);
+      el.textContent = p.id === 'interests' ? '兴趣 / 运行统计' : p.name;
+      el.title = `${p.name} · GUI 坐标 ${bounds.x.toFixed(1)}, ${bounds.y.toFixed(1)} · ${bounds.width.toFixed(1)}×${bounds.height.toFixed(1)}${custom ? '' : ' · 默认位置'}`;
+    }
+    if (requestedPosition && fresh) {
+      $('hudLayoutStatus').textContent = '位置已提交 · 等待游戏布局';
+      $('hudLayoutStatus').classList.remove('live');
+    }
+    const empty = $('hudEmpty');
+    empty.hidden = !!fresh && drawn > 0;
+    empty.innerHTML = !fresh
+      ? `<span>${esc(layoutError || (layout ? '游戏布局已过期' : '等待游戏实际布局'))}</span><small>更新 Curio Observer 模组后，在游戏中旁观 Bot 即可自动同步</small>`
+      : `<span>${hud?.enabled === false ? 'HUD 总开关已关闭' : '当前没有绘制 HUD 面板'}</span><small>旁观 Bot 并开启面板后会自动出现；F1 隐藏 HUD 时也会同步隐藏</small>`;
   }
   // 合并成一次请求发出去：拖动、拉滑块时不会刷屏
   function change(patch) {
@@ -1375,24 +1441,13 @@ es.onerror = () => { $('conn').textContent = '控制台断开'; $('connDot').cla
         const j = await r.json();
         if (!r.ok) throw new Error(j.error || r.status);
         hud = j; renderHud(); $('hudStatus').textContent = '已保存 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
-      } catch (e) { note('保存失败：' + e.message, true); }
+      } catch (e) { requestedPosition = null; renderLayout(); note('保存失败：' + e.message, true); }
     }, 150);
   }
 
   function renderHud() {
     if (!hud) return;
-    // 预览方块
-    for (const p of PANELS) {
-      if (p.toggleOnly) continue;
-      let el = stage.querySelector(`[data-panel="${p.id}"]`);
-      if (!el) { el = document.createElement('div'); el.className = 'hudbox'; el.dataset.panel = p.id; stage.appendChild(el); bindDrag(el, p); }
-      const cfg = hud.panels[p.id] || { visible: true, x: null, y: null };
-      const custom = cfg.x != null || cfg.y != null;
-      const x = cfg.x ?? p.def[0], y = cfg.y ?? p.def[1];
-      Object.assign(el.style, { left: Math.min(x, 1 - p.def[2]) * 100 + '%', top: Math.min(y, 1 - p.def[3]) * 100 + '%', width: p.def[2] * 100 + '%', height: p.def[3] * 100 + '%' });
-      el.classList.toggle('def', !custom); el.classList.toggle('off', !cfg.visible);
-      el.innerHTML = `${esc(p.name)}<small>${custom ? `${Math.round(x * 100)}%, ${Math.round(y * 100)}%` : '默认位置'}</small>`;
-    }
+    renderLayout();
     // 显示开关 + 复位
     $('hudPanels').innerHTML = PANELS.map((p) => {
       const cfg = hud.panels[p.id] || {};
@@ -1414,21 +1469,32 @@ es.onerror = () => { $('conn').textContent = '控制台断开'; $('connDot').cla
 
   function bindDrag(el, p) {
     el.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 || !hud || !layout || layoutError || Date.now() - layout.receivedAt >= 5000) return;
       e.preventDefault(); el.setPointerCapture(e.pointerId); el.classList.add('drag');
-      const box = stage.getBoundingClientRect(), r = el.getBoundingClientRect();
+      dragging = true;
+      const box = canvas.getBoundingClientRect(), r = el.getBoundingClientRect();
+      const bounds = layout.panels[p.id], viewport = layout.viewport;
+      const maxX = Math.max(0, 1 - bounds.width / viewport.guiWidth), maxY = Math.max(0, 1 - bounds.height / viewport.guiHeight);
       const dx = e.clientX - r.left, dy = e.clientY - r.top;
+      let position = null;
       const move = (ev) => {
-        const x = Math.max(0, Math.min(1 - p.def[2], (ev.clientX - dx - box.left) / box.width));
-        const y = Math.max(0, Math.min(1 - p.def[3], (ev.clientY - dy - box.top) / box.height));
+        const x = Math.max(0, Math.min(maxX, (ev.clientX - dx - box.left) / box.width));
+        const y = Math.max(0, Math.min(maxY, (ev.clientY - dy - box.top) / box.height));
         el.style.left = x * 100 + '%'; el.style.top = y * 100 + '%';
-        el.dataset.x = x.toFixed(4); el.dataset.y = y.toFixed(4);
+        position = { x, y };
       };
-      const up = () => {
+      const finish = (save) => {
+        dragging = false;
         el.classList.remove('drag'); el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up);
-        if (el.dataset.x) change({ panels: { [p.id]: { x: Number(el.dataset.x), y: Number(el.dataset.y) } } });
-        delete el.dataset.x; delete el.dataset.y;
+        el.removeEventListener('pointercancel', cancel); el.removeEventListener('lostpointercapture', cancel);
+        if (save && position) {
+          requestedPosition = { id: p.id, ...position, until: Date.now() + 5000 };
+          change({ panels: { [p.id]: position } });
+        } else renderLayout();
       };
+      const up = () => finish(true), cancel = () => finish(false);
       el.addEventListener('pointermove', move); el.addEventListener('pointerup', up);
+      el.addEventListener('pointercancel', cancel); el.addEventListener('lostpointercapture', cancel);
     });
   }
 
@@ -1498,10 +1564,10 @@ es.onerror = () => { $('conn').textContent = '控制台断开'; $('connDot').cla
   $('dmSearch').addEventListener('input', () => { clearTimeout(dmTimer); dmTimer = setTimeout(loadDanmaku, 250); });
 
   const onLiveTab = () => $('pane-live').classList.contains('on');
-  async function openLive() { loadHud(); renderSpend(); await loadDates(); loadDanmaku(); }
+  async function openLive() { loadHud(); loadLayout(); renderSpend(); await loadDates(); loadDanmaku(); }
   document.querySelector('.tab[data-tab="live"]').addEventListener('click', openLive);
   if (onLiveTab()) openLive();
-  setInterval(() => { if (onLiveTab()) renderSpend(); }, 1000);
+  setInterval(() => { if (onLiveTab()) { renderSpend(); loadLayout(); } }, 1000);
   // 看着的时候，今天的新弹幕自动出现
   setInterval(() => { if (onLiveTab() && !$('dmSearch').value && $('dmDate').selectedIndex <= 0) loadDanmaku(); }, 10000);
 })();
