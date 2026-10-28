@@ -128,12 +128,11 @@ async function enclosure(ctx: SkillCtx, args: { until: 'day' | 'healed' }, why: 
   while (Date.now() < waitEnd) {
     const s = adapter.state();
     if (Math.floor(s.pos.x) !== x || Math.floor(s.pos.z) !== z) return fail('ERROR', '离开了围起来的小间');
-    // 小间进水 / 开始憋气：马上拆开一面墙出去，不在里面淹死
+    // 避难条件已变化：报告现场与已做的事，让调用方决定下一步。
     if (s.inWater || s.inLava || s.oxygen < 18) {
-      const side = { x: x + 1, y: y + 1, z };
-      await adapter.dig(side, signal).catch((e) => { if (isAbort(e)) throw e; });
-      await adapter.dig({ ...side, y }, signal).catch((e) => { if (isAbort(e)) throw e; });
-      return fail('ERROR', `小间里进了水/开始憋气（氧气 ${s.oxygen}/20），拆开东面的墙出来了`);
+      const reason = s.inLava ? '小间里有岩浆' : s.inWater ? '小间里进了水' : '氧气不足';
+      return fail('ERROR', `${reason}（氧气 ${s.oxygen}/20）；已放 ${placed} 块，停止等待，当前位置 (${s.pos.x.toFixed(1)},${s.pos.y.toFixed(1)},${s.pos.z.toFixed(1)})`,
+        { enclosure: true, placed, position: { ...s.pos }, inWater: s.inWater, inLava: s.inLava, oxygen: s.oxygen });
     }
     if (!sealed()) return fail('ERROR', '围墙被破开了');
     const morning = s.timeOfDay >= 0 && s.timeOfDay < 11500 && s.isDay;

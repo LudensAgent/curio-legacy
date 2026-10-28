@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
+import { EventEmitter, once } from 'node:events';
 import { createRequire } from 'node:module';
-import { test, type TestContext } from 'node:test';
+import { test } from 'node:test';
 import { MineflayerAdapter } from '../src/adapter/mineflayer.ts';
 import { config } from '../src/config.ts';
 import { EventBus } from '../src/events.ts';
@@ -10,85 +11,32 @@ import { stepTo } from '../src/skills/primitives.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 
 const require = createRequire(import.meta.url);
-const data = require('minecraft-data')('1.20.1');
 const Vec3 = require('vec3').Vec3;
 
-/** 真实物理的水塘：x<6 是 60..63 的水，x≥6 是到 63 的石岸，59 以下是石头 */
-function pond(t: TestContext) {
-  const { Physics, PlayerState } = require('prismarine-physics');
-  const Block = require('prismarine-block')(data);
-  let now = 100000;
-  t.mock.method(Date, 'now', () => now);
-  const controls: Record<string, boolean> = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
-  const world = { getBlock(position: any) {
-    const p = position.floored();
-    const name = p.y <= 59 || p.x >= 6 && p.y <= 63 ? 'stone' : p.x < 6 && p.y <= 63 ? 'water' : 'air';
-    const block = Block.fromStateId(data.blocksByName[name].defaultState, 0);
-    block.position = p; return block;
-  } };
-  const physics = Physics(data, world);
-  const bot: any = {
-    version: '1.20.1', game: { dimension: 'overworld' },
-    entity: { position: new Vec3(2.5, 61, 2.5), velocity: new Vec3(0, 0, 0), eyeHeight: 1.62, onGround: false, isInWater: true,
-      isInLava: false, isInWeb: false, isCollidedHorizontally: false, isCollidedVertically: false, yaw: 0, pitch: 0, effects: {}, attributes: {} },
-    jumpTicks: 0, jumpQueued: false, fireworkRocketDuration: 0, oxygenLevel: 20,
-    inventory: { slots: [] }, pathfinder: { setGoal() {} },
-    setControlState(name: string, value: boolean) { controls[name] = value; },
-    getControlState(name: string) { return !!controls[name]; },
-    clearControlStates() { for (const key of Object.keys(controls)) bot.setControlState(key, false); },
-    blockAt: (p: any) => world.getBlock(p),
-  };
-  const adapter = new MineflayerAdapter(config, new EventBus());
-  adapter.bot = bot; adapter.mcData = data; (adapter as any).connectedFlag = true;
-  const tick = (n: number, tread: boolean) => {
-    for (let i = 0; i < n; i++) {
-      if (tread) (adapter as any).treadWater(bot);
-      physics.simulatePlayer(new PlayerState(bot, controls), world).apply(bot);
-      const head = world.getBlock(bot.entity.position.offset(0, 1.62, 0));
-      bot.oxygenLevel = head.name === 'water' ? Math.max(0, bot.oxygenLevel - 0.05) : Math.min(20, bot.oxygenLevel + 0.5);
-      now += 50;
-    }
-  };
-  return { adapter, bot, controls, tick };
-}
-
-test('idle in deep water: without treading the body sinks and holds its breath', (t) => {
-  const { bot, tick } = pond(t);
-  tick(200, false);
-  assert.ok(bot.oxygenLevel < 15, `oxygen ${bot.oxygenLevel}`);
+test('idle physics ticks in water do not press jump or change explicit controls', async () => {
+  const mineflayer = require('mineflayer');
+  const createBot = mineflayer.createBot;
+  const client = Object.assign(new EventEmitter(), { state: 'play', version: '1.20.1', write() {}, end() {} });
+  const bot = createBot({ version: '1.20.1', client, loadInternalPlugins: false });
+  const controls: Record<string, boolean> = {};
+  bot.entity = { position: new Vec3(2.5, 61, 2.5), eyeHeight: 1.62, onGround: false, isInWater: true, isInLava: false };
+  bot.blockAt = () => ({ name: 'water', getProperties: () => ({}) });
+  bot.setControlState = (name: string, value: boolean) => { controls[name] = value; };
+  bot.getControlState = (name: string) => !!controls[name];
+  bot.loadPlugin = () => {};
+  mineflayer.createBot = () => bot;
+  try {
+    const adapter = new MineflayerAdapter(config, new EventBus());
+    adapter.connect();
+    await once(bot, 'inject_allowed');
+    for (let i = 0; i < 20; i++) bot.emit('physicsTick');
+    assert.notEqual(controls.jump, true, 'idle ticks must not start an ascent');
+    bot.setControlState('sneak', true);
+    bot.emit('physicsTick');
+    assert.equal(controls.sneak, true, 'explicit descent remains under caller control');
+    assert.notEqual(controls.jump, true);
+  } finally { mineflayer.createBot = createBot; }
 });
-
-test('idle in deep water: treading keeps the head above the surface, like a player holding jump', (t) => {
-  const { bot, tick } = pond(t);
-  tick(200, true);
-  assert.ok(bot.oxygenLevel >= 19, `oxygen ${bot.oxygenLevel} y=${bot.entity.position.y}`);
-  assert.ok(bot.entity.position.y > 61.5);
-});
-
-test('waiting for an interaction preserves treading while explicit diving still owns movement', (t) => {
-  const { adapter, bot, controls, tick } = pond(t);
-  Object.assign(adapter, { inFlight: 1 }); // Waiting for equipment / placement acknowledgement.
-  tick(200, true);
-  assert.ok(bot.oxygenLevel >= 19, `oxygen ${bot.oxygenLevel} y=${bot.entity.position.y}`);
-  bot.setControlState('sneak', true);
-  tick(1, true);
-  assert.equal(controls.jump, false, 'an explicit downward input keeps control of the body');
-});
-
-test('treading hands the controls back as soon as an action moves the body', (t) => {
-  const { bot, controls, tick } = pond(t);
-  tick(20, true);
-  assert.equal(controls.jump, true);
-  bot.setControlState('forward', true); // 某个动作接手了
-  tick(1, true);
-  assert.equal(controls.jump, false, 'treading must not keep pressing jump under someone else\'s action');
-  bot.setControlState('forward', false);
-  bot.setControlState('jump', true); // 别的代码自己按着 jump：这时不归踩水管
-  bot.entity.isInWater = false;
-  tick(1, true);
-  assert.equal(controls.jump, true, 'jump owned by other code is left alone');
-});
-
 function shore() {
   const adapter = new FakeAdapter();
   adapter.groundY = 59;
@@ -159,13 +107,4 @@ test('surface only reports breathing when the head is observed in air', async (t
       else assert.doesNotMatch(result.summary, /正常呼吸/);
     } finally { memory.close(); }
   }
-});
-
-test('no sprinting in water: a sprint key pressed while swimming is not passed on', (t) => {
-  const { bot, controls, tick } = pond(t);
-  tick(5, true);
-  bot.setControlState('forward', true);
-  bot.setControlState('sprint', true);
-  assert.equal(controls.sprint, false, 'surface swimming must not be marked as sprinting (would look like running on water)');
-  bot.setControlState('forward', false);
 });

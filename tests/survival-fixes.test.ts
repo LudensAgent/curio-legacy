@@ -114,26 +114,6 @@ test('surface：头顶挖不动时，沿连通的水道游向最近的气穴', a
   } finally { ctx.memory.close(); }
 });
 
-test('reflex：同一处 surface 失败过就换打法（找气穴/往上挖 → 寻路上岸）', () => {
-  const w = submerged(58);
-  const bus = new EventBus();
-  const started: any[] = [];
-  const arbiter: any = { paused: false, info: () => null, start: (step: any) => { started.push(step); return {}; }, cancel() {} };
-  const reflex = new Reflex(w, arbiter, bus, { perceivedEntities: () => [], knownBlocks: () => [], refresh() {}, markSweep() {} });
-  assert.deepEqual(reflex.drowningStep(), { skill: 'surface' });
-  bus.publish('task_end', 'P1', 'surface failed', { skill: 'surface', status: 'failed' });
-  reflex.tick();
-  assert.deepEqual(started.at(-1), { skill: 'surface', args: { escape: 'dig' } });
-  bus.publish('task_end', 'P1', 'surface failed', { skill: 'surface', status: 'failed' });
-  assert.deepEqual(reflex.drowningStep(), { skill: 'surface', args: { escape: 'shore' } });
-  // 换个地方就重新按常规来
-  w.pos = { x: 30.5, y: 58, z: 0.5 };
-  assert.deepEqual(reflex.drowningStep(), { skill: 'surface' });
-  bus.publish('task_end', 'P1', 'ok', { skill: 'surface', status: 'succeeded' });
-  w.pos = { x: 0.5, y: 58, z: 0.5 };
-  assert.deepEqual(reflex.drowningStep(), { skill: 'surface' });
-});
-
 // ------------------------------------------------------------ 火把 / 吃 / 打鱼
 test('place_torch：半空中或泡在水里时立刻说明原因，不去找位置', async () => {
   const w = new TestWorld();
@@ -370,30 +350,48 @@ test('dig：没有镐也能空手挖开石头（慢、不掉东西）；工作�
 });
 
 // ------------------------------------------------------------ 第四轮评审
-test('shelter：站在水里不就地围墙；小间里进水就拆墙出来', async () => {
+test('shelter：站在水里不就地围墙', async () => {
   const { shelter } = await import('../src/skills/survival.ts');
   const w = new TestWorld();
   w.pos = { x: 0.5, y: 64, z: 0.5 };
   for (let x = -14; x <= 14; x++) for (let z = -14; z <= 14; z++) for (let y = 60; y <= 63; y++) w.setBlock({ x, y, z }, 'sand');
   w.inv.set('cobblestone', 16);
   w.setBlock({ x: 0, y: 64, z: 0 }, 'water'); // 脚下这格是浅水
-  let ctx = makeCtx(w);
+  const ctx = makeCtx(w);
   try {
     const r = await shelter.run(ctx, { until: 'day' });
     assert.equal(r.status, 'failed'); assert.match(r.summary, /水里/);
     assert.ok(!w.actions.some((a) => a.startsWith('place:')));
   } finally { ctx.memory.close(); }
-  w.setBlock({ x: 0, y: 64, z: 0 }, 'air');
-  w.isDay = false; // 夜里：要在小间里等
-  // 围好之后（顶已经放上）小间里开始进水
-  const state = w.state.bind(w);
-  w.state = () => { const s = state(); return w.blockAt({ x: 0, y: 66, z: 0 }) === 'cobblestone' ? { ...s, inWater: true, oxygen: 15 } : s; };
-  ctx = makeCtx(w, { deadlineMs: 20000 });
-  try {
-    const r = await shelter.run(ctx, { until: 'day' });
-    assert.equal(r.status, 'failed'); assert.match(r.summary, /拆开东面的墙/);
-    assert.equal(w.blockAt({ x: 1, y: 65, z: 0 }), 'air');
-  } finally { ctx.memory.close(); }
+});
+
+test('shelter：小间进水、岩浆或空气不足时如实停止，不替角色拆墙', async () => {
+  const { shelter } = await import('../src/skills/survival.ts');
+  for (const hazard of ['water', 'lava', 'oxygen'] as const) {
+    const w = new TestWorld();
+    w.pos = { x: 0.5, y: 64, z: 0.5 };
+    for (let x = -14; x <= 14; x++) for (let z = -14; z <= 14; z++) for (let y = 60; y <= 63; y++) w.setBlock({ x, y, z }, 'sand');
+    w.inv.set('cobblestone', 16);
+    w.isDay = false;
+    const state = w.state.bind(w);
+    w.state = () => {
+      const s = state();
+      if (w.blockAt({ x: 0, y: 66, z: 0 }) !== 'cobblestone') return s;
+      return { ...s, inWater: hazard === 'water', inLava: hazard === 'lava', oxygen: hazard === 'oxygen' ? 15 : 20 };
+    };
+    const ctx = makeCtx(w, { deadlineMs: 20000 });
+    try {
+      const r = await shelter.run(ctx, { until: 'day' });
+      assert.equal(r.status, 'failed');
+      assert.match(r.summary, hazard === 'water' ? /小间里进了水/ : hazard === 'lava' ? /小间里有岩浆/ : /氧气不足/);
+      assert.doesNotMatch(r.summary, /拆开|出来了/);
+      assert.equal(r.data?.placed, 9);
+      assert.deepEqual(r.data?.position, w.pos);
+      assert.equal(w.blockAt({ x: 1, y: 65, z: 0 }), 'cobblestone');
+      assert.equal(w.blockAt({ x: 1, y: 64, z: 0 }), 'cobblestone');
+      assert.ok(!w.actions.some((a) => a.startsWith('dig:')), `${hazard}: ${w.actions.join(',')}`);
+    } finally { ctx.memory.close(); }
+  }
 });
 
 test('place_torch：模型明确要插时白天露天也插；只有反射顺手插才跳过', async () => {

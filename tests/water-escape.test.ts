@@ -157,12 +157,18 @@ test('climbing out onto the bank does not keep bunny-hopping on dry land', async
   assert.equal(hops, 0, `jumped ${hops} times on dry land before settling`);
 });
 
-test('stuck against the bank while walking: the nudge swims over and climbs out instead of bobbing until timeout', async (t) => {
+test('stuck in water: correction does not choose a bank or start swimming', async (t) => {
   const { adapter, bot } = pond(t);
   bot.entity.position = new Vec3(5.4, 62.4, 2.5);
   await bot.waitForTicks(4);
-  const action = await (adapter as any).nudge(new Set(), { signal: new AbortController().signal, timeoutMs: 10000 }, { x: 12, y: 64, z: 2.5 });
-  assert.match(String(action), /爬上了岸/);
-  assert.equal(bot.entity.isInWater, false);
-  assert.ok(bot.entity.position.x >= 6);
+  const before = bot.entity.position.clone();
+  let swims = 0;
+  adapter.swimTo = async () => { swims++; return { ok: false, landed: false, oxygen: 20 }; };
+  for (const allowSwimming of [false, true]) {
+    const action = await (adapter as any).nudge(new Set(), { signal: new AbortController().signal, timeoutMs: 10000, allowSwimming });
+    assert.equal(action, null);
+  }
+  assert.equal(swims, 0);
+  assert.deepEqual(bot.entity.position, before);
+  assert.equal(bot.entity.isInWater, true);
 });

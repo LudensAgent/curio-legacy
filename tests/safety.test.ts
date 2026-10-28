@@ -20,19 +20,32 @@ const setup = () => {
   return { adapter, bus, events, vision, arbiter, reflex };
 };
 
-test('防溺水：氧气不足时反射层抢占当前任务去换气', async () => {
+test('水下氧气不足时身体不自动抢占任务执行 surface', () => {
   const { adapter, events, arbiter, reflex } = setup();
-  adapter.speed = 1;
-  arbiter.start({ skill: 'explore', args: { distance: 64 } }, 'llm');
-  adapter.inWater = true;
-  adapter.oxygen = 8;
-  reflex.start(50);
-  await sleep(1500);
-  reflex.stop();
-  arbiter.cancel('end');
-  assert.ok(events.some((e) => e.type === 'reflex' && e.msg.includes('溺水')), '应触发防溺水反射');
-  assert.ok(events.some((e) => e.type === 'task_start' && e.msg.includes('surface')));
-  assert.ok(adapter.oxygen > 8, '应该浮上去换气');
+  const task = arbiter.start({ skill: 'explore', args: { distance: 64 } }, 'llm');
+  assert.ok(!('error' in task));
+  try {
+    adapter.inWater = true;
+    for (const oxygen of [14, 8, 0]) {
+      adapter.oxygen = oxygen;
+      reflex.tick();
+      assert.equal(arbiter.info()?.id, task.id);
+    }
+    assert.ok(!events.some((e) => e.type === 'task_start' && e.data?.skill === 'surface'));
+    assert.ok(!events.some((e) => e.type === 'reflex' && e.msg.includes('溺水')));
+  } finally { arbiter.cancel('end'); }
+});
+
+test('进入岩浆时身体不自动抢占任务执行 flee', () => {
+  const { adapter, events, arbiter, reflex } = setup();
+  const task = arbiter.start({ skill: 'explore', args: { distance: 64 } }, 'llm');
+  assert.ok(!('error' in task));
+  try {
+    adapter.inLava = true;
+    reflex.tick();
+    assert.equal(arbiter.info()?.id, task.id);
+    assert.ok(!events.some((e) => e.type === 'task_start' && e.data?.skill === 'flee'));
+  } finally { arbiter.cancel('end'); }
 });
 
 test('卡死判定：原地连续挖掘（进度在涨）不算卡死；位置和进度都不变才算', async () => {

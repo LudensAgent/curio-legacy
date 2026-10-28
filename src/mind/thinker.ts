@@ -460,7 +460,7 @@ export class Thinker {
 
   /**
    * 脑子一时转不动（模型报错）时的兜底：不替它定玩法（以前是一棵写死的“砍树→木镐→石镐、天黑挖坑”），
-   * 只停下来看看四周，等下一次想清楚。危险由反射层的底线管
+   * 只停下来看看四周，等下一次想清楚；危险状态由感知如实提供。
    */
   idleDecision(requestedAt = Date.now()): MindDecision {
     return { kind: 'new', monologue: '脑子有点乱，先停下看看四周', notes: [], source: 'rule', tier: 'glance', requestedAt,

@@ -161,7 +161,7 @@ export function ownOxygen(b: any): number {
 
 /**
  * 死亡/重生后把自己的憋气值复位成满（300 = 20 格）。服务器只发“变了的”元数据：新生成的玩家憋气是默认满值，不会发包，
- * mineflayer 却沿用同一个 bot.entity，元数据里还留着淹死前的 0——于是重生在岸上也一直显示氧气 0，防溺水反射反复触发。
+ * mineflayer 却沿用同一个 bot.entity，元数据里还留着淹死前的 0，导致重生后氧气状态不准确。
  */
 export function resetOwnOxygen(b: any) {
   const keys = b?.registry?.entitiesByName?.player?.metadataKeys;
@@ -356,8 +356,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         this.bus.publish('ui_pacing_unavailable', 'P1', 'Mineflayer 界面点击节奏补丁未生效，点击不会按 UI_PACING_MS 放慢；请运行 node scripts/patch-deps.mjs 并重启');
       }
     });
-    // 踩水：每个物理刻看一眼，空闲泡在水里时按住上浮（见 treadWater）
-    bot.on('physicsTick', () => { try { this.treadWater(bot); } catch { /* ignore */ } });
     // mineflayer 4.39 的下船检测有缺陷：1.9+ 服务器下船时发的是 set_passengers(船, [其余乘客])，
     // 里面已经没有 bot，而 mineflayer 只在“乘客里有 bot 且 entityId = -1”时才清 bot.vehicle、发 dismount——这种包服务器从不发。
     // 结果 bot.vehicle 一直挂着：dismount 等不到事件报 DISMOUNT_FAILED，走路报 RIDING，坐船时关掉的物理也恢复不了，人卡在水里。
@@ -1100,47 +1098,21 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       check();
       if (opts.maxDropDown !== undefined) throw new Error('No path: 明确下行未能完成，未改走其他边缘');
       if (corrections >= 3) throw new Error('No path: 附近连续调整后仍无法前进，换条路线');
-      const action = await this.nudge(attempted, opts, goal);
+      const action = await this.nudge(attempted, opts);
       check();
-      if (!action) throw new Error('No path: 附近没有可确认安全的调整空间，换条路线');
+      if (!action) throw new Error(b.entity.isInWater
+        ? 'No path: 当前在水中，寻路没有取得进展，未另选上岸位置'
+        : 'No path: 附近没有可确认安全的调整空间，换条路线');
       corrections++;
       this.bus.publish('path_nudge', 'P3', `走路被挡住，第 ${corrections} 次调整：${action}`);
     }
   }
 
-  /** 身边一步内能从水里爬上去的岸（脚下实心、身子两格空、不是水）：离目标近的优先 */
-  private bankBeside(goal?: any): Vec3Like | null {
-    const b = this.bot, f = b.entity.position.floored();
-    const wet = (x: any) => !x || /^(water|lava|bubble_column|kelp|kelp_plant|seagrass|tall_seagrass)$/.test(x.name) || String(x.getProperties?.().waterlogged) === 'true';
-    const open = (x: any) => !!x && x.boundingBox === 'empty' && !wet(x);
-    const g = goal && Number.isFinite(goal.x) && Number.isFinite(goal.z) ? goal : null;
-    let best: { pos: Vec3Like; score: number } | null = null;
-    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
-      for (const dy of [-1, 0, 1, 2]) {
-        const c = f.offset(dx, dy, dz), under = b.blockAt(c.offset(0, -1, 0));
-        if (!under || under.boundingBox !== 'block' || wet(under) || !open(b.blockAt(c)) || !open(b.blockAt(c.offset(0, 1, 0)))) continue;
-        const pos = { x: c.x + 0.5, y: c.y, z: c.z + 0.5 };
-        const score = (g ? Math.hypot(pos.x - g.x, pos.z - g.z) : 0) + Math.hypot(dx, dz) * 0.5 + Math.abs(dy) * 0.2;
-        if (!best || score < best.score) best = { pos, score };
-      }
-    }
-    return best?.pos ?? null;
-  }
-
-  private async nudge(attempted: Set<string>, opts: MoveOpts, goal?: any): Promise<string | null> {
+  private async nudge(attempted: Set<string>, opts: MoveOpts): Promise<string | null> {
     const check = this.actionCheckpoint(opts.signal);
     const b = this.bot, epoch = this.actionEpoch;
     const ownsControls = () => epoch === this.actionEpoch && b === this.bot;
     const p = b.entity.position, yaw = b.entity.yaw;
-    // 在水里贴着岸上不去：像玩家一样朝岸游、按住跳爬上去（游泳的控制交给 swimTo），上岸了再接着寻路
-    if (b.entity.isInWater && !b.entity.isInLava && !attempted.has('climb_out')) {
-      attempted.add('climb_out');
-      const bank = this.bankBeside(goal);
-      if (!bank) return null;
-      const r = await this.swimTo(bank, opts.signal, { timeoutMs: 5000 });
-      check();
-      return r.landed ? `贴着岸上不去，朝 (${Math.floor(bank.x)},${Math.floor(bank.y)},${Math.floor(bank.z)}) 游过去爬上了岸` : null;
-    }
     // Swimming and airborne recovery need their own controls; do not blindly
     // jump or step backwards before the feet have landed.
     if (!b.entity.onGround || b.entity.isInWater || b.entity.isInLava) return null;
@@ -1203,51 +1175,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       return `确认脚下有支撑，向${label}挪半步后重新寻路`;
     }
     return null;
-  }
-
-  /** 踩水按住的上浮键还是不是我们的（任何别的代码碰了 jump 就归它） */
-  private treading = false;
-  /**
-   * 踩水：人泡在水里、手上又没有动作在控制身体时（心智在想下一步、两步之间），像玩家一样按住空格浮在水面，
-   * 不然身体会一直往下沉，几秒后憋气、反射抢走控制去上浮，心智永远插不上手。
-   * 任何动作一碰控制键（寻路、游泳、挖、走）就把控制交还给它；只在泡水且悬空/头在水里时才按。
-   */
-  private treadWater(b: any) {
-    const e = b?.entity;
-    if (!e || b !== this.bot || typeof b.setControlState !== 'function' || typeof b.getControlState !== 'function') return;
-    if (!b.__treadWrapped) {
-      // 别的代码设置 jump（包括 clearControlStates）时，上浮键的所有权就交出去了
-      const raw = b.setControlState.bind(b);
-      b.__setControlRaw = raw;
-      // 水里没有“疾跑”：MC 里要么在水面慢慢划，要么整个人沉下去游泳。寻路器照样按疾跑键的话，服务器把人标成疾跑，
-      // 别人看到的就是在水面上跑步（水上漂）。物理模拟也不支持潜泳，所以泡在水里时疾跑键一律不按。
-      const wet = () => !!b.entity?.isInWater && !b.vehicle;
-      b.setControlState = (k: string, v: boolean) => {
-        if (k === 'jump' && b === this.bot) this.treading = false;
-        if (k === 'sprint' && v && wet()) v = false;
-        return raw(k, v);
-      };
-      b.__treadWrapped = true;
-    }
-    const raw = b.__setControlRaw as (k: string, v: boolean) => void;
-    // 疾跑着冲进水里：键还按着，进水这一刻松开
-    if (e.isInWater && !b.vehicle && b.getControlState('sprint')) raw('sprint', false);
-    // Waiting for an interaction does not take ownership of movement or buoyancy.
-    const busy = !!b.targetDigBlock || !!b.pathfinder?.goal || !!b.vehicle || !!b.isSleeping
-      || ['forward', 'back', 'left', 'right', 'sneak', 'sprint'].some((k) => b.getControlState(k));
-    let submerged = false;
-    if (e.isInWater && typeof b.blockAt === 'function' && e.position?.offset) {
-      const head = b.blockAt(e.position.offset(0, e.eyeHeight ?? 1.62, 0));
-      submerged = !!head && (['water', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass'].includes(head.name) || String(head.getProperties?.().waterlogged) === 'true');
-    }
-    const want = !busy && !!e.isInWater && !e.isInLava && (!e.onGround || submerged);
-    if (want) {
-      if (!b.getControlState('jump')) raw('jump', true);
-      this.treading = true;
-    } else if (this.treading) {
-      this.treading = false;
-      raw('jump', false);
-    }
   }
 
   stopAll() {

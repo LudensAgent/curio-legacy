@@ -88,6 +88,26 @@ test('cancelled correction cannot release the next action owner controls', async
   assert.equal(w.controls.left, true);
 });
 
+test('a stalled water route reports the blockage without selecting a new destination', async (t) => {
+  const advance = clock(t);
+  for (const allowSwimming of [false, true]) {
+    const w = fixture(), goal = { x: 12, y: 64, z: 2 };
+    w.bot.entity.isInWater = true;
+    w.bot.entity.onGround = false;
+    let rejectPath: (e: Error) => void = () => {}, actualGoal: unknown, swims = 0;
+    w.bot.pathfinder = { goto: (target: unknown) => { actualGoal = target; return new Promise((_, reject) => { rejectPath = reject; }); },
+      isMoving: () => true, stop() { rejectPath(new Error('Path was stopped')); }, setGoal() {} };
+    w.adapter.swimTo = async () => { swims++; return { ok: false, landed: false, oxygen: 20 }; };
+    const pending = (w.adapter as any).gotoUnstalled(goal, { ...w.opts, allowSwimming }, (w.adapter as any).actionCheckpoint(w.opts.signal));
+    const rejected = assert.rejects(pending, /当前在水中.*未另选上岸位置/);
+    await advance(2700);
+    await rejected;
+    assert.equal(actualGoal, goal);
+    assert.equal(swims, 0);
+    assert.deepEqual(w.controls, {});
+  }
+});
+
 test('stale path watchdog and timeout never stop the next owner', async (t) => {
   const advance = clock(t), w = fixture();
   let stops = 0;

@@ -73,11 +73,38 @@ test('写技能：动作和参数要合法；太宽的自动条件、换掉保�
   const adapter = new FakeAdapter();
   assert.match((validateBehavior({ name: 'x1', description: '乱写一通', steps: [{ skill: 'teleport' }] }, adapter) as any).error, /没有 "teleport"/);
   assert.match((validateBehavior({ name: 'night-thing', description: '天黑就做点什么', when: { night: true }, steps: [{ skill: 'look_around', args: { seconds: 3 } }] }, adapter) as any).error, /太宽/);
-  assert.match((validateBehavior({ name: 'swim-no', description: '水里不想上浮', when: { in_water: true, oxygen_below: 8 }, steps: [{ skill: 'look_around' }], overrides: ['drowning'] }, adapter) as any).error, /底线/);
+  assert.ok(!('error' in validateBehavior({ name: 'swim-no', description: '水里自主选择反应', when: { in_water: true, oxygen_below: 8 }, steps: [{ skill: 'look_around' }], overrides: ['drowning'] }, adapter)));
+  assert.ok(!('error' in validateBehavior({ name: 'lava-choose', description: '在岩浆里自主选择反应', when: { in_lava: true }, steps: [{ skill: 'look_around' }], overrides: ['lava'] }, adapter)));
   assert.match((validateBehavior({ name: 'nest', description: '套娃技能', steps: [{ skill: 'use_skill', args: { name: 'a' } }] }, adapter) as any).error, /不能再调用技能/);
   const v = validateBehavior({ name: 'Pillar From Skeletons', description: '血少被骷髅射时垫高', when: { hp_below: 8, hostile: { name: 'skeleton', within: 16 } },
     steps: [{ skill: 'place_at', args: { at: [0, 0, 0], item: 'any' }, if: { cell: { at: [0, 2, 0], is: 'air' } } }], overrides: ['low-hp-flee'] }, adapter);
   assert.ok(!('error' in v) && v.name === 'pillar-from-skeletons');
+});
+
+for (const liquid of ['water', 'lava'] as const) test(`自学技能可在${liquid}危险条件下自主响应`, () => {
+  const adapter = new FakeAdapter(), bus = new EventBus();
+  adapter.inWater = liquid === 'water';
+  adapter.inLava = liquid === 'lava';
+  adapter.oxygen = 7;
+  const starts: Step[] = [];
+  const current = { id: 'task', planVersion: 1, skill: 'dig_at', args: {}, source: 'llm', progress: 0,
+    note: '', startedAt: Date.now(), deadline: Date.now() + 30000, movement: false } as TaskInfo;
+  const arbiter = { paused: false, info: () => current, on() {}, off() {},
+    start: (step: Step, source: TaskSource) => {
+      starts.push(step);
+      return { ...current, id: 'learned', skill: step.skill, args: step.args, source };
+    } } as unknown as Arbiter;
+  const engine = new BehaviorEngine(new SkillBook(null, tmp()), adapter, arbiter, bus, noSenses);
+  try {
+    const when = liquid === 'water' ? { in_water: true, oxygen_below: 8 } : { in_lava: true };
+    const name = `${liquid}-learned`;
+    const result = engine.write({ name, description: '自己学会的液体处境反应', when, overrides: [liquid === 'water' ? 'drowning' : 'lava'], steps: [{ skill: 'look_around' }] });
+    assert.ok(result.ok, JSON.stringify(result));
+    const reflex = new Reflex(adapter, arbiter, bus, noSenses, { instincts: 'skills', routineCare: false, behaviors: engine });
+    reflex.tick();
+    assert.equal(starts.at(-1)?.skill, 'use_skill');
+    assert.equal((starts.at(-1)?.args as { name: string }).name, name);
+  } finally { engine.dispose(); }
 });
 
 test('样本技能读取：恢复类、调用类与写技能说明可用，引用隐藏动作的旧样本拒绝启用', () => {
@@ -184,7 +211,7 @@ test('自动技能接手：条件成立时由身体去做，并且能换掉它�
   now += 5_000; reflex.tick();
   assert.equal(starts.length, n, '做的时候本能不再插手，冷却内也不重复触发');
   assert.ok(engine.suppresses('low-hp-flee', null));
-  assert.ok(!engine.suppresses('lava', null), '保命底线换不掉');
+  assert.ok(!engine.suppresses('lava', null), '没有声明替代 lava 的技能');
 });
 
 test('use_skill：一步步照做，每步的 if 当场判断', async (t) => {
@@ -369,7 +396,7 @@ test('身边方块图附带算好的落脚点和能放方块的格子', async ()
   assert.ok(m.spots.place.some((s: string) => s.startsWith('[0,0,-1]')), `左边地上能放：${m.spots.place}`);
 });
 
-test('反射也是技能：躲苦力怕、受伤撤退、还手、饿了吃这类反应写成代码技能后由引擎接手；代码里只剩岩浆和溺水', (t) => {
+test('反射也是技能：躲苦力怕、受伤撤退、还手、饿了吃这类反应写成代码技能后由引擎接手', (t) => {
   let now = 1_700_000_000_000;
   t.mock.method(Date, 'now', () => now);
   const book = new SkillBook(BUILTIN_SKILLS_DIR, FIXTURES);
@@ -406,7 +433,7 @@ test('反射也是技能：躲苦力怕、受伤撤退、还手、饿了吃这�
   now += 20_000; bus.publish('hurt', 'P2', '受到伤害'); reflex.tick();
   current = null; now += 13_000; reflex.tick();
   assert.equal(engine.statsOf('retreat-when-hurt')?.ok, 1);
-  // 岩浆仍是代码里的底线
+  // 岩浆没有内置强制逃跑
   state.inLava = true; current = null; reflex.tick();
-  assert.equal(starts.at(-1)?.skill, 'flee');
+  assert.notEqual(starts.at(-1)?.skill, 'flee');
 });

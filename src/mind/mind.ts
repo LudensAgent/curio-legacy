@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 import type { AgentState, GameAdapter } from '../adapter/types.ts';
-import type { Arbiter, Step, TaskOutcome, TaskPreemption } from '../arbiter/arbiter.ts';
+import type { Arbiter, Step, TaskOutcome } from '../arbiter/arbiter.ts';
 import type { AgentEvent, EventBus } from '../events.ts';
 import type { AudienceContext } from '../live/audience.ts';
 import { compileBuilding, normalizeSpec } from '../building/spec.ts';
@@ -159,8 +159,8 @@ export class Mind {
   /** 指令最多挂这么久（模型忘了说做完也不会一直纠结） */
   static readonly ORDER_TTL_MS = 10 * 60_000;
   private lastFailure: { skill: string; code?: string; summary: string } | null = null;
-  private surfacePreemptions = new Map<string, { activity: Activity; steps: Activity['steps']; skill: string }>();
-  private surfaceInterruptedTasks = new Set<string>();
+  private reflexWaiting: { taskId: string; activity: Activity; baseline: AgentState } | null = null;
+  private reflexDuringThought: { controller: AbortController; summary: string } | null = null;
   private lastSay = { at: 0, text: '' };
   private lastDiaryAt = 0;
   private finishedSinceReflect = 0;
@@ -282,7 +282,6 @@ export class Mind {
 
   // ---------------------------------------------------------------- 生命周期
   private doneListener = (o: TaskOutcome) => this.onDone(o);
-  private preemptListener = (o: TaskPreemption) => this.onPreempt(o);
   private eventListener = (ev: AgentEvent) => this.onEvent(ev);
   /** 日子是怎么过的（夜里在哪、怎么死的）：回想时做策略回顾用 */
   readonly strategy = new StrategyLog();
@@ -294,7 +293,6 @@ export class Mind {
   start(intervalMs = 250) {
     if (!this.listening) {
       this.d.arbiter.on('done', this.doneListener);
-      this.d.arbiter.on('preempt', this.preemptListener);
       this.d.bus.on('event', this.eventListener);
       this.listening = true;
     }
@@ -310,7 +308,6 @@ export class Mind {
     this.reflecting = null;
     if (this.listening) {
       this.d.arbiter.off('done', this.doneListener);
-      this.d.arbiter.off('preempt', this.preemptListener);
       this.d.bus.off('event', this.eventListener);
       this.listening = false;
     }
@@ -371,7 +368,7 @@ export class Mind {
     if (hurtRecently && headInWall(head)) {
       out.push({ key: 'danger:suffocate', what: `头被 ${head} 埋住了，正在窒息掉血（血 ${hp}）：马上挖开头这一格（dig_at [0,1,0]），或者退回能站的格子` });
     }
-    if (s.inWater && s.oxygen <= 5) out.push({ key: 'danger:drown', what: `在水下快没气了（氧气 ${s.oxygen}/20，血 ${hp}）：马上往上游出水面，或者上岸` });
+    if (s.inWater && s.oxygen <= 5) out.push({ key: 'danger:drown', what: `在水下快没气了（氧气 ${s.oxygen}/20，血 ${hp}）` });
     const close = p.nearby.hostile.filter((h) => h.dist <= 3 && h.name !== 'creeper');
     if (close.length && hurtRecently && hp <= 12) {
       out.push({ key: 'danger:melee', what: `被 ${close.map((h) => `${h.name} ${h.dist}格`).join('、')} 贴身打（血 ${hp}）：现在就定——打（defend；退无可退写 "stay":true）还是跑（flee）` });
@@ -793,20 +790,15 @@ export class Mind {
       if (o.task.skill === 'sleep' && o.result.status === 'succeeded') { this.d.self.feel({ type: 'sleep' }); this.maybeReflect('睡了一觉'); }
     }
     if (o.task.source === 'reflex') {
-      const preemption = this.surfacePreemptions.get(o.task.id);
-      this.surfacePreemptions.delete(o.task.id);
-      if (preemption && o.result.status !== 'cancelled' && this.activity === preemption.activity && this.activity.steps === preemption.steps) {
-        const a = preemption.activity;
-        a.interruptions = (a.interruptions ?? 0) + 1;
-        const inWater = this.d.adapter.state().inWater;
-        if (inWater || a.interruptions >= 3) {
-          this.finishActivity('stuck', `「${preemption.skill}」被防溺水反射中断（这段活已被反射打断 ${a.interruptions} 次）；surface 结果：${o.result.summary}；${inWater ? '现在仍在水中' : '现在已不在水中'}，请根据实际情况决定是否继续`);
-        }
+      if (this.thinking) this.reflexDuringThought = { controller: this.thinking.controller, summary: o.result.summary };
+      if (this.reflexWaiting?.taskId === o.task.id) {
+        const waiting = this.reflexWaiting;
+        this.reflexWaiting = null;
+        if (this.activity === waiting.activity) this.reviewReflexChange(waiting.baseline, o.result.summary);
       }
       return;
     }
     const a = this.activity;
-    if (this.surfaceInterruptedTasks.delete(o.task.id)) return;
     if (!a || o.task.planId !== a.id) return;
     if (o.result.status === 'cancelled') {
       // 被反射打断：等身体安全了把这一步再做一遍
@@ -875,31 +867,34 @@ export class Mind {
   }
 
   /**
-   * 刚插进去的恢复技能说“这次跟我无关”（skipped）：那一步什么都没变，原样重做只会再失败一次、还把账算到这个技能头上。
+   * 恢复技能明确跳过或未观察到动作效果时，不盲目重做原来失败的动作。
    * 换下一个对得上的恢复技能；没有就把原来的失败交还给心智。返回 true 表示已经处理完。
    */
   private recoverySkipped(a: Activity, step: Step, result: { status: string; summary: string; data?: unknown }): boolean {
     const failure = (step.args as any)?.failure as { skill: string; args?: unknown; code?: string | null; summary?: string } | undefined;
-    if (step.skill !== 'use_skill' || !failure || result.status !== 'succeeded' || !(result.data as any)?.result?.skipped || !this.d.behaviors) return false;
+    const data = result.data as { noop?: boolean; result?: { skipped?: unknown } } | undefined;
+    const skipped = !!data?.result?.skipped;
+    if (step.skill !== 'use_skill' || !failure || result.status !== 'succeeded' || (!skipped && data?.noop !== true) || !this.d.behaviors) return false;
     const name = String((step.args as any)?.name ?? '');
+    const why = skipped ? `「${name}」说这次跟它无关` : `「${name}」没有观察到实际动作效果`;
     if (a.awaitingRecovery === name) delete a.awaitingRecovery;
     a.adaptations.push(`skip:${name}`);
     this.safe(() => this.d.behaviors!.recoverySkipped(name, { skill: failure.skill, code: failure.code ?? null }), undefined);
     const retry = a.steps[a.index];
     const tried = new Set(a.adaptations.filter((x) => x.startsWith('skill:')).map((x) => x.slice(6)));
-    const skipped = a.adaptations.filter((x) => x.startsWith('skip:')).length;
-    const next = tried.size - skipped < 2 ? this.safe(() => this.d.behaviors!.recoveryFor({ skill: failure.skill, code: failure.code ?? undefined }, tried), null) : null;
+    const skippedCount = a.adaptations.filter((x) => x.startsWith('skip:')).length;
+    const next = tried.size - skippedCount < 2 ? this.safe(() => this.d.behaviors!.recoveryFor({ skill: failure.skill, code: failure.code ?? undefined }, tried), null) : null;
     if (next) {
       a.adaptations.push(`skill:${next.name}`);
       a.awaitingRecovery = next.name;
       a.steps.splice(a.index, 0, { skill: 'use_skill', args: { name: next.name, failure }, optional: true });
-      this.d.bus.publish('body_adapt', 'P3', `「${name}」说这次跟它无关，换学会的做法：${next.name}（${next.description}）`, { planId: a.id, skill: next.name });
+      this.d.bus.publish('body_adapt', 'P3', `${why}，换学会的做法：${next.name}（${next.description}）`, { planId: a.id, skill: next.name });
       return true;
     }
     // 没有别的办法：别白白重做那一步，直接把它原来的失败交给心智
     if (retry && retry.skill === failure.skill) a.steps.splice(a.index, 1);
-    this.d.bus.publish('body_adapt', 'P3', `「${name}」说这次跟它无关，没有别的学会的做法，交给心智`, { planId: a.id, skill: name });
-    this.finishActivity('stuck', `${failure.skill} 没成：${String(failure.summary ?? '').slice(0, 140)}`);
+    this.d.bus.publish('body_adapt', 'P3', `${why}，没有别的学会的做法，交给心智`, { planId: a.id, skill: name });
+    this.finishActivity('stuck', `${failure.skill} 没成：${String(failure.summary ?? '').slice(0, 140)}；${why}：${result.summary.slice(0, 140)}`);
     return true;
   }
 
@@ -912,15 +907,18 @@ export class Mind {
     }
   }
 
-  private onPreempt(o: TaskPreemption) {
-    if (o.replacement.source !== 'reflex' || !this.activity || o.task.planId !== this.activity.id) return;
-    // 是这一步把自己带进了水里：上岸后别原样再走一遍
-    if (o.replacement.skill === 'surface') {
-      this.surfacePreemptions.set(o.replacement.id, { activity: this.activity, steps: this.activity.steps, skill: o.task.skill });
-      this.surfaceInterruptedTasks.add(o.task.id);
-      this.activity.index = Math.max(0, this.activity.index - 1);
-      this.attention.notice('into_water', `做「${o.task.skill}」时触发了防溺水反射`, 0.7, 30_000);
-    }
+  /** 决策时观察到的状态经反射改变后，由心智决定是否继续原计划。 */
+  private reviewReflexChange(before: AgentState, summary: string) {
+    const a = this.activity;
+    if (!a) return;
+    const now = this.d.adapter.state();
+    const moved = Math.hypot(now.pos.x - before.pos.x, now.pos.y - before.pos.y, now.pos.z - before.pos.z) >= 0.5;
+    const changed = moved || now.worldId !== before.worldId || now.sessionId !== before.sessionId || now.dim !== before.dim
+      || now.inWater !== before.inWater || now.inLava !== before.inLava || now.onGround !== before.onGround
+      || now.hp !== before.hp || now.alive !== before.alive || Math.abs(now.oxygen - before.oxygen) >= 4;
+    if (!changed) return;
+    this.resumeCheck = a.id;
+    this.requestThink(`身体反射的结果：${summary}；期间身体状态已变化，先确认「${a.what}」还要接着做吗`, 'deliberate');
   }
 
   private onEvent(ev: AgentEvent) {
@@ -1050,6 +1048,13 @@ export class Mind {
       try {
         this.apply(decision, activityId, ctx.lastRecord, { urgent: urgent || followsOperator, nearEnd: reason === Mind.NEAR_END_REASON });
       } finally { this.inReview = false; }
+      const runningReflex = this.d.arbiter.info();
+      if (runningReflex?.source === 'reflex' && this.activity) {
+        this.reflexWaiting = { taskId: runningReflex.id, activity: this.activity, baseline: state };
+      } else if (this.reflexDuringThought?.controller === controller) {
+        this.reviewReflexChange(state, this.reflexDuringThought.summary);
+      }
+      if (this.reflexDuringThought?.controller === controller) this.reflexDuringThought = null;
       if (reviewing) this.closeReview(goalBefore);
       if (followsOperator && this.order === order && order && this.activity && !order.activityId) order.activityId = this.activity.id;
       this.kick();

@@ -17,6 +17,7 @@ import { Vision } from '../src/perception/vision.ts';
 import type { ChatMessage, Completion } from '../src/planner/llm.ts';
 import { Planner } from '../src/planner/planner.ts';
 import { SKILLS } from '../src/skills/index.ts';
+import { setBehaviorRegistry } from '../src/skills/use-skill.ts';
 import { fail, ok, type SkillResult } from '../src/skills/types.ts';
 import { AbortedError } from '../src/util.ts';
 import { FakeAdapter } from './fake-adapter.ts';
@@ -55,6 +56,69 @@ function fixture(t: TestContext, opts: { autonomous?: boolean; book?: import('..
 }
 
 const step = (n = 1) => ({ skill: 'mind_step', args: { n } });
+
+for (const scenario of ['noop', 'skipped', 'changed', 'steps-noop', 'steps-changed', 'steps-condition'] as const) test(`恢复技能实际执行后按效果处理原动作：${scenario}`, async (t) => {
+  const w = fixture(t);
+  const code = scenario === 'changed' ? 'await api.move({forward:true}, 100); return {ok:true};'
+    : scenario === 'skipped' ? 'return {skipped:"条件不符"};' : 'return {ok:true,plugged:0,moved:false,note:"头顶没有液体"};';
+  const previous = SKILLS.repair_probe;
+  SKILLS.repair_probe = { name: 'repair_probe', description: '测试恢复动作', argsDoc: '{}', timeoutMs: 3000, movement: true,
+    validate: () => ({ ok: true, args: {} }),
+    async run(ctx) {
+      if (scenario === 'steps-changed') {
+        await ctx.adapter.drive!({ forward: true }, 100, ctx.signal);
+        return ok('身体已移动');
+      }
+      return ok('没有需要移动', { noop: true });
+    } };
+  t.after(() => { if (previous) SKILLS.repair_probe = previous; else delete SKILLS.repair_probe; });
+  const repair = { name: 'repair-test', description: '尝试恢复', steps: scenario.startsWith('steps-')
+    ? [{ skill: 'repair_probe', ...(scenario === 'steps-condition' ? { if: { hp_below: 1 } } : {}) }]
+    : [], ...(scenario.startsWith('steps-') ? {} : { code }) };
+  setBehaviorRegistry({ get: (name) => name === repair.name ? repair : undefined, list: () => [{ name: repair.name }] });
+  t.after(() => setBehaviorRegistry(null));
+  let selected = false, skipped = 0;
+  (w.mind as any).d.behaviors = {
+    recoveryFor: () => { if (selected) return null; selected = true; return repair; },
+    recoverySkipped: () => { skipped++; },
+    creditRecovery: () => {},
+  };
+  await w.tick();
+  await w.reply(0, { decision: 'new', activity: { what: '原动作', steps: [step()] } });
+  await w.finish(fail('STUCK', '原动作没有成功'));
+  const completed = new Promise<import('../src/arbiter/arbiter.ts').TaskOutcome>((resolve) => w.arbiter.once('done', resolve));
+  await w.tick();
+  const done = await completed;
+  assert.equal(done.task.skill, 'use_skill');
+  assert.equal(done.result.status, 'succeeded', done.result.summary);
+  assert.equal(done.result.data?.noop === true, scenario !== 'changed' && scenario !== 'steps-changed');
+  await flush();
+  if (scenario === 'changed' || scenario === 'steps-changed') {
+    assert.equal(skipped, 0);
+    await w.tick();
+    assert.equal(w.arbiter.info()?.skill, 'mind_step', '恢复有实际动作后可以重试原动作');
+  } else {
+    assert.equal(skipped, 1);
+    assert.equal(w.mind.activity, null, '没有恢复效果时交回心智');
+    assert.ok(!w.arbiter.info() || w.arbiter.info()?.skill !== 'mind_step');
+    const outcome = w.bus.recent().slice().reverse().find((event) => event.type === 'attempt_end');
+    assert.match(outcome?.msg ?? '', /原动作没有成功/);
+    if (scenario === 'noop' || scenario.startsWith('steps-')) assert.match(outcome?.msg ?? '', /没有观察到实际动作效果/);
+  }
+});
+
+test('手动调用未产生动作的技能仍正常返回成功和 noop 证据', async (t) => {
+  const w = fixture(t);
+  const skill = { name: 'manual-noop', description: '观察后结束', steps: [], code: 'return {ok:true,note:"没有需要做的"};' };
+  setBehaviorRegistry({ get: (name) => name === skill.name ? skill : undefined, list: () => [{ name: skill.name }] });
+  t.after(() => setBehaviorRegistry(null));
+  const completed = new Promise<import('../src/arbiter/arbiter.ts').TaskOutcome>((resolve) => w.arbiter.once('done', resolve));
+  const started = w.arbiter.start({ skill: 'use_skill', args: { name: skill.name } }, 'llm');
+  assert.ok(!('error' in started));
+  const outcome = await completed;
+  assert.equal(outcome.result.status, 'succeeded');
+  assert.equal(outcome.result.data?.noop, true);
+});
 
 test('身体自己应变：没找到换地方找、偶发失败再试一次、缺材料才叫脑子', () => {
   const adapter = new FakeAdapter();
@@ -314,74 +378,6 @@ test('被生存反射打断的那一步，等身体安全了再做一遍，不�
   assert.equal(w.pending.length, 1, '没有为此额外调用模型');
 });
 
-for (const scenario of ['still-wet', 'failed', 'landed', 'cancelled', 'adjusted', 'new'] as const) test(`surface 抢占后依据结果处理原活动：${scenario}`, async (t) => {
-  const w = fixture(t);
-  const original = SKILLS.surface;
-  let finishSurface: (result: SkillResult) => void = () => {};
-  SKILLS.surface = { ...original, run: async (ctx) => new Promise<SkillResult>((resolve, reject) => {
-    finishSurface = resolve;
-    ctx.signal.addEventListener('abort', () => reject(new AbortedError('cancelled')), { once: true });
-  }) };
-  t.after(() => { SKILLS.surface = original; });
-  await w.tick();
-  await w.reply(0, { decision: 'new', activity: { what: '继续挖矿', steps: [step()] } });
-  if (scenario === 'adjusted' || scenario === 'new') {
-    (w.arbiter as any).current.startedAt = Date.now() - Mind.NEAR_END_AFTER_MS;
-    await w.tick();
-    assert.equal(w.pending.length, 2);
-  }
-  w.adapter.inWater = true;
-  w.arbiter.start({ skill: 'surface', args: {} }, 'reflex');
-  await flush();
-  if (scenario === 'adjusted' || scenario === 'new') {
-    await w.reply(1, { decision: scenario === 'adjusted' ? 'adjust' : 'new', activity: { what: '改做观察', steps: [step(2)] } });
-    assert.equal(w.mind.activity?.what, '改做观察');
-  }
-  if (scenario === 'cancelled') w.arbiter.cancel('操作取消');
-  else {
-    if (scenario === 'landed') w.adapter.inWater = false;
-    finishSurface(scenario === 'failed' ? fail('STUCK', '尚未确认安全上岸，仍在水中') : ok(scenario === 'landed' ? '已上岸' : '氧气 20/20，仍在水中', { landed: scenario === 'landed' }));
-  }
-  await flush();
-  await w.tick();
-  if (scenario === 'still-wet' || scenario === 'failed') {
-    assert.equal(w.mind.activity, null);
-    assert.notEqual(w.arbiter.info()?.skill, 'mind_step');
-    assert.match(JSON.stringify(w.pending.at(-1)?.messages), /仍在水中/);
-  } else {
-    assert.deepEqual(w.arbiter.info()?.args, { n: scenario === 'adjusted' || scenario === 'new' ? 2 : 1 });
-    if (scenario === 'adjusted' || scenario === 'new') assert.equal(w.mind.activity?.what, '改做观察');
-    if (scenario === 'cancelled') assert.equal(w.mind.activity?.interruptions ?? 0, 0);
-  }
-});
-
-test('同一活动三次被 surface 打断，即使每次上岸也交回心智', async (t) => {
-  const w = fixture(t);
-  const original = SKILLS.surface;
-  let finishSurface: (result: SkillResult) => void = () => {};
-  SKILLS.surface = { ...original, run: async (ctx) => new Promise<SkillResult>((resolve, reject) => {
-    finishSurface = resolve;
-    ctx.signal.addEventListener('abort', () => reject(new AbortedError('cancelled')), { once: true });
-  }) };
-  t.after(() => { SKILLS.surface = original; });
-  await w.tick();
-  await w.reply(0, { decision: 'new', activity: { what: '继续挖矿', steps: [step()] } });
-  for (let n = 1; n <= 3; n++) {
-    assert.deepEqual(w.arbiter.info()?.args, { n: 1 });
-    w.adapter.inWater = true;
-    w.arbiter.start({ skill: 'surface', args: {} }, 'reflex');
-    await flush();
-    w.adapter.inWater = false;
-    finishSurface(ok(`第 ${n} 次已上岸`, { landed: true }));
-    await flush();
-    await w.tick();
-    if (n < 3) assert.equal(w.mind.activity?.interruptions, n);
-  }
-  assert.equal(w.mind.activity, null);
-  assert.notEqual(w.arbiter.info()?.skill, 'mind_step');
-  assert.match(JSON.stringify(w.pending.at(-1)?.messages), /被反射打断 3 次.*第 3 次已上岸/);
-});
-
 test('死亡后放下手上的活，复活后认真想想，并记进日记和情绪', async (t) => {
   const w = fixture(t);
   await w.tick();
@@ -409,28 +405,6 @@ test('在原地失败、周围也没变化时不原样重试；goto 找不到路
   const s2 = nextStep(g)!;
   g.stepStart = { pos: { x: 99, y: 64, z: 99 } };
   assert.equal(afterStep(g, s2, fail('PATH_NOT_FOUND', '眼前没有可确认的通路'), 100, adapter.state()).kind, 'stuck');
-});
-
-test('surface 失败后氧气恢复但仍在水中，交回失败事实；低氧和其他动作保留原有重试', () => {
-  const adapter = new FakeAdapter();
-  adapter.inWater = true;
-  const attempt = (skill: string, oxygen: number) => {
-    adapter.oxygen = oxygen;
-    const a = createActivity({ what: '尝试脱困', why: '', kind: 'survive', repeat: 1, steps: [{ skill }] }, '', 'llm', adapter.state());
-    const action = nextStep(a)!;
-    a.stepStart = { pos: { ...adapter.pos, x: adapter.pos.x - 1 } };
-    const summary = '尚未确认安全上岸，仍在水中';
-    return { a, action, summary, verdict: afterStep(a, action, fail('STUCK', summary), 32000, adapter.state()) };
-  };
-  const safe = attempt('surface', 15);
-  assert.deepEqual(safe.verdict, { kind: 'stuck', why: safe.summary });
-  assert.equal(safe.a.results.at(-1)?.summary, safe.summary);
-  const low = attempt('surface', 14);
-  assert.equal(low.verdict.kind, 'continue');
-  assert.equal(nextStep(low.a)?.skill, 'surface');
-  const other = attempt('climb_up', 20);
-  assert.equal(other.verdict.kind, 'continue');
-  assert.equal(nextStep(other.a)?.skill, 'climb_up');
 });
 
 test('顺手的步骤没成不算这段活失败，接着做后面的', () => {

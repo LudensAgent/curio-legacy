@@ -20,7 +20,7 @@ export interface LearnedBehaviors {
 /**
  * 反射层：不依赖 LLM，按固定频率检查危险并直接抢占动作。
  * 这里的每条规则都是一个有名字的“本能”（见 mind/behaviors.ts 的 INSTINCTS）：
- * 自己写的行为技能先判断，条件成立就由技能接手；技能可以用 overrides 换掉除 lava/drowning 以外的本能。
+ * 自己写的行为技能先判断，条件成立就由技能接手。
  * 同时负责卡死检测（移动型任务长时间没有位移）。
  * 威胁来自 Vision：看见的，或近距离听见的。
  */
@@ -32,21 +32,13 @@ export class Reflex {
   triggers = 0;
   enabled = true;
 
-  /** 最近几次 surface 失败的位置：同一处连着失败就换一种脱困打法，而不是重复同一套 */
-  private surfaceFails: { t: number; x: number; y: number; z: number }[] = [];
-
   /** routineCare=false leaves ordinary care and recovery choices to the autonomous planner. */
   constructor(private adapter: GameAdapter, private arbiter: Arbiter, private bus: EventBus, private senses: Senses,
     private options: { routineCare?: boolean; habits?: () => { torch_every?: number; eat_below?: number }; behaviors?: LearnedBehaviors;
-      /** builtin：躲苦力怕、逃跑、还手、饿了就吃写在代码里（旧行为）；skills：这些都交给技能书里的反射技能，代码只留岩浆和溺水两条底线 */
+      /** builtin：躲苦力怕、逃跑、还手、饿了就吃写在代码里（旧行为）；skills：这些都交给技能书里的反射技能 */
       instincts?: 'builtin' | 'skills' } = {}) {
     bus.on('event', (ev: { type: string; data?: Record<string, unknown> }) => {
-      if (ev.type === 'hurt') { this.lastHurtAt = Date.now(); return; }
-      if (ev.type !== 'task_end' || ev.data?.skill !== 'surface') return;
-      if (ev.data.status === 'succeeded') { this.surfaceFails = []; return; }
-      if (ev.data.status !== 'failed') return;
-      const p = this.adapter.state().pos;
-      this.surfaceFails = [...this.surfaceFails.filter((f) => Date.now() - f.t < 90_000), { t: Date.now(), x: p.x, y: p.y, z: p.z }].slice(-6);
+      if (ev.type === 'hurt') this.lastHurtAt = Date.now();
     });
   }
 
@@ -54,21 +46,8 @@ export class Reflex {
   activeInstincts(): string[] {
     const legacy = this.options.instincts !== 'skills';
     const care = this.options.routineCare !== false;
-    return ['lava', 'drowning', 'eat', ...(legacy ? ['creeper', 'losing-fight', 'low-hp-flee', 'fight-back'] : []),
+    return [...(legacy || care || this.options.habits?.().eat_below ? ['eat'] : []), ...(legacy ? ['creeper', 'losing-fight', 'low-hp-flee', 'fight-back'] : []),
       ...(legacy && care ? ['night-shelter'] : []), ...(care || this.options.habits?.().torch_every ? ['torch'] : [])];
-  }
-
-  /** 防溺水：同一处（4 格内、90 秒内）已经失败过就换打法——第 1 次失败后找气穴/往上挖，第 2 次起让寻路带着往岸上走 */
-  drowningStep(): Step {
-    const p = this.adapter.state().pos;
-    const here = this.surfaceFails.filter((f) => Date.now() - f.t < 90_000 && Math.hypot(f.x - p.x, f.y - p.y, f.z - p.z) <= 4).length;
-    if (!here) return { skill: 'surface' };
-    return { skill: 'surface', args: { escape: here === 1 ? 'dig' : here % 2 === 0 ? 'shore' : 'dig' } };
-  }
-
-  private fireDrown(s: { oxygen: number }) {
-    const step = this.drowningStep();
-    this.fire(step, 'P0', `氧气 ${s.oxygen}/20，有溺水风险${step.args ? `（这里上浮失败过，换打法：${(step.args as any).escape === 'dig' ? '找气穴/往上挖' : '让寻路往岸上走'}）` : ''}`);
   }
 
   start(intervalMs = 250) {
@@ -143,21 +122,6 @@ export class Reflex {
     const creeper = hostiles.find((e) => e.name === 'creeper' && (e.fusing ? e.dist < 4 : !fighting && e.dist < 2.5));
     if (s.inWater || s.inLava || !s.onGround || (nearest && nearest.dist < 5) || (cur && !TORCH_OK_DURING.has(cur.skill))) this.darkSince = null;
 
-    // 先处理真正的险情，吃饭/照明等反射也不能挡住它；已经在脱险就继续，别重新起跑。
-    if (s.inLava) {
-      if (cur?.skill !== 'flee' && this.ready('lava', 1500)) this.fire({ skill: 'flee', args: { distance: 8 } }, 'P0', '掉进岩浆');
-      return;
-    }
-    // 只在水里才检查氧气：Mineflayer 在陆地上偶尔会报出不准的氧气值
-    // 氧气 20 → 0 只要 15 秒左右：降到 10 才浮，深水里常常来不及（日志里浮了 20 秒还是淹死了）
-    if (s.inWater && s.oxygen <= 14) {
-      // 后天学会的脱水技能刚接手、气还够：让它做完，别马上又抢回来（两边轮流打断，谁都上不了岸）；气快没了才由底线接管
-      const learnedRescue = cur?.skill === 'use_skill' && cur.source === 'reflex' && Date.now() - cur.startedAt < 12_000 && s.oxygen > 6;
-      if (cur?.skill !== 'surface' && !learnedRescue && this.ready('drown', 4000)) this.fireDrown(s);
-      return;
-    }
-    // 正在上浮/上岸（不管是身体自己还是脑子叫的）：学会的技能别插手打断它，等它做完
-    if (cur?.skill === 'surface' && s.inWater) return;
     // 躲在避难所里：怪物进不来，不要出去打架/逃跑。
     if (cur?.skill === 'shelter') return;
     // 后天学会的做法先判断：条件成立就由技能接手（它可能正是用来代替下面某个本能的）

@@ -102,11 +102,11 @@ export function nextSkillVersion(book: SkillBook | null, name: string, stats?: B
 /** 代码技能某次失败后，看看要不要在后台改进（改进器自己限频） */
 export type ImproveHook = (name: string, why: 'failures' | 'requested' | 'slow', note?: string) => void;
 
-/** 天生的本能（代码里的身体反应）：lava/drowning 是底线不能换；其余可以被自己写的技能用 overrides 换掉。
+/** 天生的本能（代码里的身体反应）可以被自己写的技能用 overrides 换掉。
  * off：这次运行里代码没开这条（比如躲怪、还手交给自己写的技能）——要如实告诉模型，别让它以为身体会自己躲 */
 export const INSTINCTS: Record<string, { text: string; locked?: boolean; off?: string }> = {
-  lava: { text: '掉进岩浆立刻往外跑', locked: true },
-  drowning: { text: '水里快没气了就上浮/找气', locked: true },
+  lava: { text: '掉进岩浆时的反应', off: '代码里没开，靠自己写的技能' },
+  drowning: { text: '水里快没气时的反应', off: '代码里没开，靠自己写的技能' },
   creeper: { text: '苦力怕嘶嘶响或贴脸时躲开' },
   'losing-fight': { text: '打架时血掉到 6 以下就撤' },
   'low-hp-flee': { text: '血 ≤6 又有怪在 10 格内就逃' },
@@ -213,8 +213,6 @@ export function validateBehavior(raw: unknown, adapter?: GameAdapter): Validated
       }
       return [...(condition.all ?? []), ...(condition.any ?? [])].map(failures).find((why) => why !== null) ?? null;
     };
-    const requiresLava = (condition: Predicate): boolean => condition.in_lava === true || !!condition.all?.some(requiresLava) || !!condition.any?.length && condition.any.every(requiresLava);
-    if (!isRecovery(p) && requiresLava(p)) return { error: 'skill.when：in_lava 自动触发先由岩浆底线接管；请写成心智显式调用的技能' };
     const unreachable = failures(p);
     if (unreachable) return { error: `skill.when：${unreachable}` };
   }

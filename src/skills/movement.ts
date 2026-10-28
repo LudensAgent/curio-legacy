@@ -622,8 +622,9 @@ export const unstuck: Skill<{}> = {
     return { ok: true, args: {} };
   },
   async run(ctx) {
-    // Random horizontal pathfinding can sink back into the same water trap.
-    if (ctx.adapter.state().inWater) return surface.run(ctx, {});
+    const initial = ctx.adapter.state();
+    if (initial.inWater) return fail('STUCK', `当前在水中，unstuck 没有执行移动；氧气 ${initial.oxygen}/20`,
+      { pos: initial.pos, inWater: true, oxygen: initial.oxygen });
     const { adapter, signal } = ctx;
     const s = adapter.state();
     const around = surroundings(adapter, s.pos);
@@ -650,13 +651,13 @@ export const unstuck: Skill<{}> = {
   },
 };
 
-// ------------------------------------------------------------------ surface（仅反射层使用：防溺水）
+// ------------------------------------------------------------------ surface（由 Agent 主动调用）
 type Vec = { x: number; y: number; z: number };
-/** escape：同一处上浮失败过时反射层换的打法——dig=优先找气穴/往上挖，shore=让寻路带着往岸上走 */
+/** escape：可选起始方式——dig=优先找气穴/往上挖，shore=让寻路带着往岸上走 */
 export const surface: Skill<{ escape?: 'dig' | 'shore' }> = {
   name: 'surface',
-  description: '被水困住时尝试上浮换气并游上岸；能呼吸但没能上岸时会说明仍在水中',
-  argsDoc: '{}',
+  description: '尝试上浮换气并游上岸；可能寻找气穴、挖开头顶方块或寻路到附近岸边，未上岸会如实报告',
+  argsDoc: '{"escape"?: "dig"（优先寻找气穴或挖开头顶）|"shore"（优先尝试寻路上岸）}',
   timeoutMs: 35000,
   movement: true,
   validate(raw) {

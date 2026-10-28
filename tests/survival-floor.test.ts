@@ -21,13 +21,15 @@ test('本能如实：技能模式下躲苦力怕、低血逃、还手代码里�
   const arbiter = new Arbiter(adapter, memory, bus, new Vision(adapter));
   const reflex = new Reflex(adapter, arbiter, bus, noSenses as any, { routineCare: false, instincts: 'skills' });
   const on = reflex.activeInstincts();
-  assert.ok(on.includes('lava') && on.includes('drowning') && on.includes('eat'));
+  assert.ok(!on.includes('lava') && !on.includes('drowning') && !on.includes('eat'));
   assert.ok(!on.includes('creeper') && !on.includes('low-hp-flee') && !on.includes('fight-back'));
   setInstinctSource(() => reflex.activeInstincts());
   const note = instinctNote();
   assert.match(note, /没开、身体不会自己做的：[^。]*creeper/);
+  assert.match(note, /drowning（水里快没气时的反应）/);
+  assert.ok(INSTINCTS.drowning.off);
   assert.ok(INSTINCTS['low-hp-flee'].off);
-  assert.equal(INSTINCTS.lava.off, undefined);
+  assert.ok(INSTINCTS.lava.off);
   const book = new SkillBook(BUILTIN_SKILLS_DIR, tmp());
   const engine = new BehaviorEngine(book, adapter, null, bus, noSenses as any);
   assert.ok(engine.write({ name: 'run-from-mobs', description: '血少有怪就跑', when: { hp_below: 6, hostile: { within: 10 } }, overrides: ['low-hp-flee'], code: 'return 1;' }).ok);

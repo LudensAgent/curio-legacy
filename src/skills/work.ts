@@ -1,6 +1,6 @@
 import { chestHint, needsFromShortfall } from './chest-hint.ts';
 import { describePlan, materialPlan } from '../methods/shortfall.ts';
-import { lookAround, surface } from './movement.ts';
+import { lookAround } from './movement.ts';
 import { findStation, myBed, rememberStation } from './stations.ts';
 import { ownBuildingAt } from './build.ts';
 import { AbortedError, dist3, sleep } from '../util.ts';
@@ -201,7 +201,6 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
     let lost = 0;
     const risky: Record<TargetRisk, number> = { hazard: 0, wet: 0, deep: 0 };
     const riskCache = new Map<string, TargetRisk | null>();
-    let wetEntries = 0;
     const riskNote = () => {
       const parts = [risky.hazard ? `${risky.hazard} 处在出过事的危险区域` : '', risky.wet ? `${risky.wet} 处挨着水/岩浆或要泡在水里挖` : '', risky.deep ? `${risky.deep} 处在脚下很深、旁边有水的地方` : ''].filter(Boolean);
       return parts.length ? `；为安全跳过了 ${parts.join('、')} 的 ${args.block}（换个干燥、露天的地方采）` : '';
@@ -313,17 +312,12 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
           unreachable.set(`${failedAt.worldId}:${failedAt.dim}:${key(target.pos)}`, { at: Date.now(), from: { ...failedAt.pos }, block: target.name });
         }
         if ((e as Error).message === 'ENTERED_WATER') {
-          // 走着走着下了水：这一片都别去了，先上岸，再看别的目标
           rememberWet(ctx, target.pos);
           risky.wet++;
-          ctx.progress(dug / args.count, `去 ${target.name} 要下水，放弃这一片，先上岸`);
           adapter.stopAll();
-          const out = await surface.run(ctx, {});
-          if (++wetEntries >= 2 || out.status !== 'succeeded') {
-            const msg = `去挖 ${args.block} 的路上两次进了水（${out.summary}），这一带的 ${args.block} 要下水才够得着，换个干燥的地方采${riskNote()}`;
-            return dug > 0 ? ok(`采集了 ${dug}/${args.count}；${msg}`, { dug }) : fail('NOT_FOUND', msg, { skippedUnsafe: { ...risky } });
-          }
-          continue;
+          const current = adapter.state();
+          return fail('PATH_NOT_FOUND', `前往 ${target.name} 时进入水中，已停止采集；已采 ${dug}/${args.count}，氧气 ${current.oxygen}/20`,
+            { dug, target: target.pos, pos: current.pos, inWater: current.inWater, oxygen: current.oxygen });
         }
         if (++failsInRow >= 4) {
           return dug > 0 ? ok(`多次失败后停止，采集了 ${dug}/${args.count}`, { dug }) : fail(codeFromError(e) === 'ERROR' ? 'PATH_NOT_FOUND' : codeFromError(e), `无法到达或挖掘 ${args.block}：${(e as Error).message}${args.dig ? '' : '；路上是土石坡坎挡着就加 "dig":true（挖穿、垫方块过去）'}`);
