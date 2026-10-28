@@ -127,6 +127,28 @@ test('repeated jumping at the same place is not treated as path progress', async
   assert.equal(stops, 1, 'the watchdog must stop a path whose only movement is jumping');
 });
 
+test('a stalled path records its last planned nodes and collision state, then releases its listener', async (t) => {
+  const advance = clock(t), w = fixture(), events = new EventEmitter();
+  w.bot.on = events.on.bind(events);
+  w.bot.removeListener = events.removeListener.bind(events);
+  w.bot.entity.isCollidedHorizontally = true;
+  let rejectPath: (error: Error) => void = () => {};
+  w.bot.pathfinder = { goto: () => new Promise((_, reject) => { rejectPath = reject; }), isMoving: () => true,
+    stop() { rejectPath(new Error('Path was stopped')); }, setGoal() {} };
+  (w.adapter as any).nudge = async () => null;
+  const pending = (w.adapter as any).gotoUnstalled({ x: 2, y: 65, z: 0 }, w.opts, (w.adapter as any).actionCheckpoint(w.opts.signal));
+  const rejected = assert.rejects(pending, /No path/);
+  events.emit('path_update', { status: 'success', path: [{ x: 1, y: 65, z: 0 }, { x: 2, y: 65, z: 0 }] });
+  await advance(2700);
+  await rejected;
+  const stalled = (w.adapter as any).bus.recent().find((event: { type: string }) => event.type === 'path_stalled');
+  assert.deepEqual(stalled.data.position, { x: 0.5, y: 64, z: 0.5 });
+  assert.equal(stalled.data.collidedHorizontally, true);
+  assert.deepEqual(stalled.data.goal, { x: 2, y: 65, z: 0 });
+  assert.deepEqual(stalled.data.plannedPath, { status: 'success', nodes: [{ x: 1, y: 65, z: 0 }, { x: 2, y: 65, z: 0 }] });
+  assert.equal(events.listenerCount('path_update'), 0);
+});
+
 test('tower landings between watchdog samples count as progress during slow placements', async (t) => {
   const advance = clock(t), w = fixture(), events = new EventEmitter();
   w.bot.on = events.on.bind(events);

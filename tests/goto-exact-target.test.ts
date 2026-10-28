@@ -56,6 +56,20 @@ test('goto preserves timeout and does not report an adjacent unknown cell as blo
   assert.equal(result.data?.moved, 0);
 });
 
+test('a failed adjacent goto reports a freshly observed target door without claiming why it blocked movement', async (t) => {
+  const adapter = new TestWorld();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  const s = adapter.state(), pos = { x: 1, y: 65, z: 0 };
+  const ctx = makeCtx(adapter, { senses: { observeBlocks: () => [{ name: 'oak_door', pos, properties: { open: true },
+    source: 'vision', worldId: s.worldId, sessionId: s.sessionId, dimension: s.dim, observedAt: Date.now(), observationId: 1 }] } });
+  t.after(() => ctx.memory.close());
+  t.mock.method(adapter, 'blockOptics', () => ({ name: 'oak_door', kind: 'solid', shapes: [[0, 0, 0.8125, 1, 1, 1]] }));
+  t.mock.method(adapter, 'moveTo', async () => { throw new Error('No path'); });
+  const result = await goTo.run(ctx, { target: '1,65,0', dig: true });
+  assert.match(result.summary, /目标格看到 oak_door，门目前打开，门板位于该格南侧，仍有碰撞，尚未确认/);
+  assert.equal((result.data?.observedDoor as { properties: { open: boolean } }).properties.open, true);
+});
+
 test('goto cannot report arrival when pathfinding resolves without reaching the adjacent cell', async (t) => {
   const adapter = new TestWorld();
   adapter.pos = { x: 0.5, y: 64, z: 0.5 };

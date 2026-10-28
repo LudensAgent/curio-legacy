@@ -897,8 +897,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         };
       }
       // Installed Pathfinder handles gates, but omits two-block wooden doors.
-      // Keep the upper half out of the break list; crossing the closed lower
-      // half must issue its ordinary useOne interaction before walking through.
+      // Keep both halves out of the break list. Check the actual door panel for
+      // each approach and open a closed door only when doing so clears the way.
       movements.canOpenDoors = opts.maxDropDown === undefined;
       const getBlock = movements.getBlock;
       movements.getBlock = function (...args: any[]) {
@@ -913,6 +913,42 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           openable: !open && properties.half === 'lower',
         });
       };
+      let blockClass: any;
+      for (const [method, dy] of [['getMoveForward', 0], ['getMoveJumpUp', 1]] as const) {
+        const getMove = movements[method];
+        movements[method] = function (node: any, dir: any, neighbors: any[]) {
+          const door = this.getBlock(node, dir.x, dy, dir.z);
+          const properties = door.getProperties?.();
+          if (!door.name?.endsWith('_door') || door.name === 'iron_door' || properties?.half !== 'lower') {
+            return getMove.call(this, node, dir, neighbors);
+          }
+          const startX = node.x + 0.5, startZ = node.z + 0.5;
+          const minX = Math.min(startX, startX + dir.x) - 0.3, maxX = Math.max(startX, startX + dir.x) + 0.3;
+          const minZ = Math.min(startZ, startZ + dir.z) - 0.3, maxZ = Math.max(startZ, startZ + dir.z) + 0.3;
+          const collides = (shapes: number[][]) => shapes.some((shape) => door.position.x + shape[3] > minX && door.position.x + shape[0] < maxX
+            && door.position.z + shape[5] > minZ && door.position.z + shape[2] < maxZ);
+          const isOpen = properties.open === true || properties.open === 'true';
+          let openDoor = false;
+          if (collides(door.shapes)) {
+            // An open door remains a panel; never change it behind the caller's back.
+            if (isOpen || !this.canOpenDoors) return;
+            blockClass ??= require('prismarine-block')(b.registry);
+            const opened = blockClass.fromProperties(door.name, { ...properties, open: true }, 0);
+            if (collides(opened.shapes)) return;
+            openDoor = true;
+          }
+          // Preserve all the normal movement checks while treating only the verified
+          // clear doorway as passable. Opening is added only when it clears the path.
+          const before = neighbors.length, getBlock = this.getBlock;
+          this.getBlock = function (...args: any[]) {
+            const block = getBlock.apply(this, args);
+            return block.position?.equals(door.position) ? Object.assign(Object.create(Object.getPrototypeOf(block)), block, { safe: true, openable: false }) : block;
+          };
+          try { getMove.call(this, node, dir, neighbors); }
+          finally { this.getBlock = getBlock; }
+          if (openDoor) for (const move of neighbors.slice(before)) move.toPlace.unshift({ x: door.position.x, y: door.position.y, z: door.position.z, dx: 0, dy: 0, dz: 0, useOne: true });
+        };
+      }
       b.pathfinder.setMovements(movements);
     }
     const goals = goalsLib();
@@ -1073,6 +1109,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       let last = b.entity?.position?.clone?.() ?? null, since = Date.now();
       let groundedY = b.entity?.onGround ? last?.y ?? null : null;
       let verticalY = last?.y ?? null;
+      let plannedPath: { status: string; nodes: { x: number; y: number; z: number }[] } | null = null;
+      const onPathUpdate = (result: { status: string; path: { x: number; y: number; z: number }[] }) => {
+        plannedPath = { status: result.status, nodes: result.path.slice(0, 6).map(({ x, y, z }) => ({ x, y, z })) };
+      };
       const onPhysicsTick = () => {
         const p = b.entity?.position;
         if (!ownsControls() || !b.entity?.onGround || !p?.clone) return;
@@ -1084,6 +1124,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         since = Date.now();
       };
       b.on?.('physicsTick', onPhysicsTick);
+      b.on?.('path_update', onPathUpdate);
       const watch = setInterval(() => {
         try { check(); } catch { clearInterval(watch); return; }
         const p = b.entity?.position;
@@ -1107,7 +1148,14 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         }
         // A jump-and-place may need several seconds for the server to confirm
         // the block; still bound retries if the placement never succeeds.
-        if (Date.now() - since >= (b.pathfinder?.isBuilding?.() ? 4500 : 2500) && !stalled) { stalled = true; try { b.pathfinder.stop(); b.pathfinder.setGoal(null); } catch { /* ignore */ } }
+        if (Date.now() - since >= (b.pathfinder?.isBuilding?.() ? 4500 : 2500) && !stalled) {
+          stalled = true;
+          this.bus.publish('path_stalled', 'P3', '寻路执行停滞，记录位置和最近一次规划', {
+            position: { x: p.x, y: p.y, z: p.z }, yaw: b.entity.yaw, onGround: b.entity.onGround,
+            collidedHorizontally: b.entity.isCollidedHorizontally, goal: { x: goal.x, y: goal.y, z: goal.z }, plannedPath,
+          });
+          try { b.pathfinder.stop(); b.pathfinder.setGoal(null); } catch { /* ignore */ }
+        }
       }, 300);
       try {
         const remaining = deadline - Date.now();
@@ -1119,6 +1167,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       } finally {
         clearInterval(watch);
         b.removeListener?.('physicsTick', onPhysicsTick);
+        b.removeListener?.('path_update', onPathUpdate);
       }
       check();
       if (opts.maxDropDown !== undefined) throw new Error('No path: 明确下行未能完成，未改走其他边缘');
@@ -2017,7 +2066,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (!block) return { ok: false, reason: 'UNLOADED' };
     const held = item ? this.invItem(item) : null;
     if (item && !held) return { ok: false, reason: 'NO_ITEM' };
-    await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos }, { signal, timeoutMs: 15000, constructionSafe: item === '', ...(item === '' ? { allowSwimming: false } : {}) }), check);
+    // A nearby visible block does not need another pathfinding run. In a tight
+    // doorway that run can stall before an otherwise reachable right-click.
+    const eye = b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0);
+    const direction = block.position.offset(0.5, 0.5, 0.5).minus(eye);
+    const distance = direction.norm();
+    const hit = distance <= 4.4 && distance > 0 && b.world?.raycast?.(eye, direction.normalize(), distance + 0.05, (candidate: any, ray: any) =>
+      candidate.position.equals(block.position) || !!ray.intersect(candidate.shapes, candidate.position));
+    if (!hit?.position?.equals(block.position)) {
+      await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos }, { signal, timeoutMs: 15000, constructionSafe: item === '', ...(item === '' ? { allowSwimming: false } : {}) }), check);
+    }
     const current = b.blockAt(this.vec(pos));
     if (!current || current.name !== block.name) return { ok: false, reason: 'TARGET_CHANGED' };
     if (held) return this.afterAction(() => this.useItemOn(item, { kind: 'block', pos }, signal), check);

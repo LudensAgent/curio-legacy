@@ -114,7 +114,7 @@ async function doorMovements(name: string, open: boolean) {
     blockAt(position: any) {
       const p = position.floored();
       const block = p.x === 1 && p.z === 0 && [64, 65].includes(p.y)
-        ? Block.fromProperties(name, { facing: 'north', half: p.y === 64 ? 'lower' : 'upper', hinge: 'left', open, powered: false }, 0)
+        ? Block.fromProperties(name, { facing: 'east', half: p.y === 64 ? 'lower' : 'upper', hinge: 'left', open, powered: false }, 0)
         : Block.fromStateId(registry.blocksByName[p.y === 63 ? 'stone' : 'air'].defaultState, 0);
       block.position = p; return block;
     },

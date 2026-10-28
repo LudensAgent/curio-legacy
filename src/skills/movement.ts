@@ -344,7 +344,18 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; spri
       ...(flat ? { horizontalOnly: true } : {}) });
     // 邻格只是实际进展，不代表已到达指定格；不推断未见目标的障碍。
     const nextTo = (p: Vec3Like) => !flat && !!nums && !heading && Math.max(Math.abs(Math.floor(p.x) - Math.floor(pos!.x)), Math.abs(Math.floor(p.y) - Math.floor(pos!.y)), Math.abs(Math.floor(p.z) - Math.floor(pos!.z))) <= 1;
-    const failedNear = (p: Vec3Like, why: string, code: FailureCode = 'PATH_NOT_FOUND') => fail(code, `尚未到达 ${label} 的目标格：实际站在 (${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)})，紧挨着目标格，差 ${distance(p).toFixed(2)} 格（${why}）${routeNote}${terrainNote()}`, { ...measured(p), nextTo: true });
+    const failedNear = (p: Vec3Like, why: string, code: FailureCode = 'PATH_NOT_FOUND') => {
+      ctx.senses.refresh();
+      const door = ctx.senses.observeBlocks?.([cell(pos!)])[0];
+      const observedDoor = door?.source === 'vision' && door.worldId === s.worldId && door.dimension === s.dim && door.sessionId === s.sessionId
+        && Math.abs(Date.now() - door.observedAt) <= 2000 && door.name.endsWith('_door') ? door : null;
+      const open = observedDoor?.properties.open;
+      const shape = observedDoor ? adapter.blockOptics(observedDoor.pos.x, observedDoor.pos.y, observedDoor.pos.z)?.shapes?.[0] : null;
+      const panel = shape ? shape[0] >= 0.75 ? '东' : shape[3] <= 0.25 ? '西' : shape[2] >= 0.75 ? '南' : shape[5] <= 0.25 ? '北' : null : null;
+      const doorNote = observedDoor && (open === true || open === false || open === 'true' || open === 'false')
+        ? `；目标格看到 ${observedDoor.name}，门目前${String(open) === 'true' ? '打开' : '关闭'}，门板${panel ? `位于该格${panel}侧，` : ''}仍有碰撞，尚未确认它是否挡住路线` : '';
+      return fail(code, `尚未到达 ${label} 的目标格：实际站在 (${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)})，紧挨着目标格，差 ${distance(p).toFixed(2)} 格（${why}）${doorNote}${routeNote}${terrainNote()}`, { ...measured(p), nextTo: true, ...(observedDoor ? { observedDoor } : {}) });
+    };
     const inScope = () => {
       throwIfAborted(signal);
       const now = adapter.state();

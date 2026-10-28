@@ -171,7 +171,7 @@ async function stepOutOfWater(ctx: SkillCtx, args: CellArgs, feet: Vec3Like) {
 
 export const stepTo: Skill<CellArgs> = {
   name: 'step',
-  description: '迈到身边相邻的一格（[前,上,右]）：可以平走、上一级台阶（上+1，会跳）、下一级（上-1）；脚下是梯子时 [0,1,0] 沿梯子爬一格。目标格和头顶要空、脚下要实；上台阶时自己头顶上方也要空。陆上只走指定高度的一格，不会自动下坎；更深的落点可用 assess_landings 查看并用 descend 明确选择。泡在水里时朝岸那边迈（[1,0,0] 就行），身体会游过去、贴着岸爬上去（岸比脚高一两格也行）',
+  description: '迈到身边相邻的一格（[前,上,右]）：可以平走、上一级台阶（上+1，会跳）、下一级（上-1）；脚下是梯子时 [0,1,0] 沿梯子爬一格。目标格和头顶需要有身体通行空间、脚下要有支撑；上台阶时自己头顶上方也要空。陆上只走指定高度的一格，不会自动下坎；更深的落点可用 assess_landings 查看并用 descend 明确选择。泡在水里时朝岸那边迈（[1,0,0] 就行），身体会游过去、贴着岸爬上去（岸比脚高一两格也行）',
   argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W"}（前后/左右 ±1，上下 -1..1；例：[1,0,0] 往前一格，[1,1,0] 迈上前方台阶）',
   timeoutMs: 8000,
   movement: true,
@@ -195,7 +195,18 @@ export const stepTo: Skill<CellArgs> = {
     const target = toWorld(feet, args.facing, args.at);
     const seen = visibleCells(ctx, [target, { ...target, y: target.y + 1 }, { ...target, y: target.y - 1 }, { ...feet, y: feet.y + 2 }]);
     const describe = (p: Vec3Like) => seen.get(`${p.x},${p.y},${p.z}`) ?? '未看清的格子';
-    const free = (p: Vec3Like) => { const n = a.blockAt(p); return n !== null && (AIR.has(n) || isSoftBlock(n)); };
+    const free = (p: Vec3Like) => {
+      const n = a.blockAt(p);
+      if (n === null) return false;
+      if (AIR.has(n) || isSoftBlock(n)) return true;
+      if (!n.endsWith('_door') || n === 'iron_door') return false;
+      const open = a.blockStateAt?.(p)?.properties.open;
+      if (typeof open !== 'boolean') return false;
+      const shapes = a.blockOptics(p.x, p.y, p.z)?.shapes;
+      // Either door state can put its panel at the side of the cell. Check
+      // the centered footprint; the movement executor checks the actual route.
+      return !!shapes && !shapes.some(([x0, y0, z0, x1, y1, z1]) => x0 < .8 && x1 > .2 && z0 < .8 && z1 > .2 && y0 < 1 && y1 > 0);
+    };
     // 泡在水里：脚下那格是水、岸往往比脚高一两格，平地上的“上下 ±1”对不上。像玩家一样朝那边游、贴着岸按住跳爬上去
     if (a.state().inWater && a.swimTo) {
       const out = await stepOutOfWater(ctx, args, feet);
@@ -217,13 +228,17 @@ export const stepTo: Skill<CellArgs> = {
     }
     const head = { ...target, y: target.y + 1 }, floor = { ...target, y: target.y - 1 };
     const problems: string[] = [];
-    if (!free(target)) problems.push(`目标格是 ${describe(target)}${LIQUID_BLOCKS.has(describe(target)) ? '' : /chest|barrel|furnace|crafting_table|_bed$/.test(describe(target)) ? '（是用得着的东西，绕过去，别挖）' : `（要过去先 dig_at [${args.at}] 挖开）`}`);
-    if (!free(head)) problems.push(`目标格上方是 ${describe(head)}（会碰头${LIQUID_BLOCKS.has(describe(head)) ? '' : `；先 dig_at [${args.at[0]},${args.at[1] + 1},${args.at[2]}]`}）`);
+    if (!free(target)) problems.push(describe(target) === '未看清的格子' ? '目标格是 未看清的格子，无法确认通行空间'
+      : `目标格是 ${describe(target)}${describe(target).endsWith('_door') ? '（门的状态或碰撞形状阻碍通行）' : LIQUID_BLOCKS.has(describe(target)) ? '' : /chest|barrel|furnace|crafting_table|_bed$/.test(describe(target)) ? '（是用得着的东西，绕过去，别挖）' : `（要过去先 dig_at [${args.at}] 挖开）`}`);
+    if (!free(head)) problems.push(describe(head) === '未看清的格子' ? '目标格上方是 未看清的格子，无法确认头部空间'
+      : `目标格上方是 ${describe(head)}${describe(head).endsWith('_door') ? '（门的状态或碰撞形状阻碍通行）' : `（会碰头${LIQUID_BLOCKS.has(describe(head)) ? '' : `；先 dig_at [${args.at[0]},${args.at[1] + 1},${args.at[2]}]`}）`}`);
     // 能站住：实心方块；薄雪层下面有实心方块也能踩
     const solid = (p: Vec3Like) => { const n = a.blockAt(p); return n !== null && !LIQUID_BLOCKS.has(n) && !free(p); };
     const standable = (p: Vec3Like) => solid(p) || (a.blockAt(p) === 'snow' && solid({ ...p, y: p.y - 1 }));
     if (!standable(floor)) problems.push(`目标格脚下是 ${describe(floor)}，目标高度没有确认可站的支撑；可查看落点后选择下行，或放置支撑`);
-    if (args.at[1] === 1 && !free({ ...feet, y: feet.y + 2 })) problems.push(`往上跳时自己头顶上方是 ${describe({ ...feet, y: feet.y + 2 })}（跳不起来；先 dig_at [0,2,0]）`);
+    if (args.at[1] === 1 && !free({ ...feet, y: feet.y + 2 })) problems.push(describe({ ...feet, y: feet.y + 2 }) === '未看清的格子'
+      ? '往上跳时自己头顶上方是 未看清的格子，无法确认跳跃空间'
+      : `往上跳时自己头顶上方是 ${describe({ ...feet, y: feet.y + 2 })}（跳不起来；先 dig_at [0,2,0]）`);
     if (problems.length) return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：${problems.join('；')}`, { problems, ...after(ctx, args.facing, target) });
     try {
       await a.moveTo({ kind: 'xyz', x: target.x, y: target.y, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())) });
