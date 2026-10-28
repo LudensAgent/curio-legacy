@@ -183,6 +183,8 @@ const EXAMPLE = `【例子】想有个家时：
 export function deliberateSystem(persona: string, skills: string[] = [], advanced = false): string {
   return `${persona}
 
+游戏版本：Minecraft Java Edition ${config.mc.version}。
+
 你就是这个 Minecraft 角色本人，像真人玩家一样连续地玩，同时在直播。
 
 ${OPERATOR}
@@ -216,6 +218,8 @@ ${movesCatalog(28, undefined, advanced)}${SKILL_INDEX(skills)}`;
 
 export function glanceSystem(persona: string, inUse: Set<string>, skills: string[] = []): string {
   return `${persona}
+
+游戏版本：Minecraft Java Edition ${config.mc.version}。
 
 你在连续地玩 Minecraft，这次只是抬头看一眼。
 ${OPERATOR}
