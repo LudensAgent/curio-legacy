@@ -439,7 +439,7 @@ export class Mind {
     this.d.onGoalStuck(plan.goal, [
       `目标：${plan.goal}（定下 ${Math.round((Date.now() - plan.setAt) / 60_000)} 现实分钟，${Math.round((Date.now() - since) / 60_000)} 现实分钟没勾掉一项）`,
       `清单：${plan.steps.map((st, i) => `${i}.[${st.done ? 'x' : ' '}] ${st.text}`).join(' ')}`,
-      ...acts.slice(-20).map((r) => `${r.what} → ${r.outcome}${r.outcome !== 'done' ? `：${r.summary.slice(0, 80)}` : ''}`),
+      ...acts.slice(-20).map((r) => `${r.what} → ${r.outcome}：${r.summary.slice(0, 180)}`),
     ]);
   }
 
@@ -642,9 +642,9 @@ export class Mind {
     const a = this.activity;
     if (!a) return;
     this.activity = null;
-    // 为操作者的指令开的那段活做完了：指令就算完成（不必等它记得说 done，免得一直挂着纠结）
+    // 收工条件只表示触发了停止，不能由此断言操作者的整条指令已经完成。
     if (this.order?.activityId === a.id) {
-      if (outcome === 'done') {
+      if (outcome === 'done' && !a.doneWhen) {
         this.d.bus.publish('operator_order_end', 'P2', `照操作者的指令做完了：${this.order.text}`, { status: 'done', via: 'activity' });
         this.order = null;
       } else delete this.order.activityId;
@@ -664,24 +664,24 @@ export class Mind {
     const exp = this.d.self.experimentFor(a.id);
     if (exp?.status === 'running') this.d.self.concludeExperiment(exp.id, 'unclear', `${outcome}：${summary}；得到 ${JSON.stringify(record.gained)}`);
     if (outcome === 'stuck') this.lastStuck = { what: a.what, why: summary.slice(0, 100), pos: { ...state.pos }, at: Date.now(), ...(failed ? { skill: failed.skill, code: failed.failureCode } : {}) };
-    else if (outcome === 'done' && this.lastStuck && Date.now() - this.lastStuck.at < 8 * 60_000
+    else if (outcome === 'done' && record.completion !== 'condition' && this.lastStuck && Date.now() - this.lastStuck.at < 8 * 60_000
       && Math.hypot(state.pos.x - this.lastStuck.pos.x, state.pos.y - this.lastStuck.pos.y, state.pos.z - this.lastStuck.pos.z) <= 24 && a.what !== this.lastStuck.what) {
       this.learnFrom = { stuck: this.lastStuck, solved: { what: a.what, routine: a.steps.slice(0, 6).map((st) => `${st.skill} ${argsLabel(st)}`) } };
       this.lastStuck = null;
     }
     const gains = Object.entries(record.gained).map(([k, v]) => `${k}×${v}`).join('、');
-    this.d.self.think(`${a.what} → ${outcome === 'done' ? '做完了' : outcome === 'stuck' ? '卡住了' : '停下了'}${gains ? `，得到 ${gains}` : ''}${outcome !== 'done' ? `：${summary.slice(0, 60)}` : ''}`, 'outcome');
-    const status = outcome === 'done' ? 'succeeded' : outcome === 'stuck' ? 'failed' : 'interrupted';
+    this.d.self.think(`${a.what} → ${outcome === 'done' ? '收工' : outcome === 'stuck' ? '卡住了' : '停下了'}${gains ? `，得到 ${gains}` : ''}：${summary.slice(0, 180)}`, 'outcome');
+    const status = outcome === 'done' ? 'succeeded' : outcome === 'unmet' ? 'condition_unmet' : outcome === 'stuck' ? 'failed' : 'interrupted';
     const goalType = ['tidy', 'social', 'other', 'experiment'].includes(a.kind) ? 'investigate' : a.kind;
-    this.d.memory.recordGoal({ goal: a.what, goalType, source: a.source === 'rule' ? 'rule' : 'llm', status, summary, durationSec: record.durationSec,
+    this.d.memory.recordGoal({ goal: a.what, goalType, source: a.source === 'rule' ? 'rule' : 'llm', status: record.completion === 'condition' ? 'condition_met' : status, summary, durationSec: record.durationSec,
       steps: signatureOf(a.steps).split('>'), plan: a.steps, worldId: state.worldId, dimension: state.dim });
     this.d.bus.publish('attempt_end', outcome === 'stuck' ? 'P1' : 'P3', `一段活「${a.what}」→ ${outcome}：${summary}${gains ? `（得到 ${gains}）` : ''}`,
-      { planId: a.id, status, outcome, gained: record.gained, durationSec: record.durationSec, what: a.what, kind: a.kind, signature: record.signature,
+      { planId: a.id, status, outcome, ...(record.completion ? { completion: record.completion } : {}), gained: record.gained, durationSec: record.durationSec, what: a.what, kind: a.kind, signature: record.signature,
         how: a.steps.slice(0, 6).map((st) => `${st.skill} ${argsLabel(st)}`).join(' > ').slice(0, 300), effectEvidence: { verified: true, changed: !!gains, reasons: gains ? [`背包实增 ${gains}`] : [] } });
-    try { this.d.onGoalEnd?.(status); } catch { /* 习惯化失败不影响游玩 */ }
-    if (outcome === 'done' && (gains || record.durationSec > 90) && Date.now() - this.lastDiaryAt > this.timing.diaryGapMs) this.diary(`${a.what}${gains ? `，得到 ${gains}` : ''}`);
+    try { this.d.onGoalEnd?.(record.completion === 'condition' ? 'condition_met' : status); } catch { /* 习惯化失败不影响游玩 */ }
+    if (outcome === 'done' && record.completion !== 'condition' && (gains || record.durationSec > 90) && Date.now() - this.lastDiaryAt > this.timing.diaryGapMs) this.diary(`${a.what}${gains ? `，得到 ${gains}` : ''}`);
     // 绕路的事做完了：回到被打断的那段活
-    if (outcome === 'done' || outcome === 'stuck') {
+    if (outcome === 'done' || outcome === 'unmet' || outcome === 'stuck') {
       const resume = this.suspended.pop();
       if (resume) {
         this.activity = resume;
@@ -695,7 +695,7 @@ export class Mind {
         this.resumeCheck = resume.id;
         this.requestThink(outcome === 'stuck'
           ? `绕路去做的「${a.what}」卡住了：${summary}。原来放下的「${resume.what}」还要接着做吗？`
-          : `绕路去做的「${a.what}」做完了。${away} 现实秒前放下的「${resume.what}」（${resume.why || '没写原因'}）还要接着做吗？这段时间里它的前提可能已经变了`, 'deliberate');
+          : `绕路去做的「${a.what}」已收工：${summary}。${away} 现实秒前放下的「${resume.what}」（${resume.why || '没写原因'}）还要接着做吗？这段时间里它的前提可能已经变了`, 'deliberate');
         return;
       }
     }
@@ -784,11 +784,11 @@ export class Mind {
       }
       return;
     }
-    // 步骤做完了，收工条件却没达到（挖了一段巷子没见着铁）：提前想好的下一段多半建立在“这段达成了”上（拿铁去烧），不能照接
-    const unmet = verdict.kind === 'done' && !verdict.met ? this.queuedNext : null;
-    if (unmet) this.queuedNext = null;
-    this.finishActivity(verdict.kind === 'done' ? 'done' : 'stuck', verdict.why);
-    if (unmet) this.requestThink(`「${a.what}」${verdict.why}，提前想好的「${unmet.draft.what}」先不接着做：它要的东西还没到手。接下来怎么办？`, 'deliberate');
+    // 步骤做完但收工条件未达到时，保留既有的重新思考流程；满足条件则遵守 Agent 的后续选择。
+    const nextToReview = verdict.kind === 'done' && !verdict.met ? this.queuedNext : null;
+    if (nextToReview) this.queuedNext = null;
+    this.finishActivity(verdict.kind === 'done' ? verdict.met ? 'done' : 'unmet' : 'stuck', verdict.why);
+    if (nextToReview) this.requestThink(`「${a.what}」${verdict.why}；提前想好的「${nextToReview.draft.what}」先不接着做，请根据实际结果决定是否继续。`, 'deliberate');
   }
 
   /**
@@ -1303,7 +1303,7 @@ export class Mind {
     const state = this.d.adapter.state();
     const changedMind = ['switch', 'detour', 'experiment'].includes(decision.kind);
     const discovered = this.speechEventAt > this.lastSay.at && Date.now() - this.speechEventAt <= 60_000;
-    const completed = this.lastRecord?.outcome === 'done' && this.lastRecord.at > this.lastSay.at;
+    const completed = this.lastRecord?.outcome === 'done' && this.lastRecord.completion !== 'condition' && this.lastRecord.at > this.lastSay.at;
     const danger = state.inLava || state.hp <= 8 || state.inWater && state.oxygen < 8 || this.safe(() => this.d.perception.snapshot().nearby.hostile.some((h) => h.dist <= 12), false);
     if (!changedMind && !discovered && !completed && !danger) return;
     const grams = (s: string) => {

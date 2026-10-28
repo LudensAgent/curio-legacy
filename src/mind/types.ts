@@ -47,6 +47,8 @@ export interface Activity {
   /** 下一个要做的步骤序号 */
   index: number;
   doneWhen?: Condition;
+  /** 这一段是由已满足的收工条件结束的，不能推断自由文本目标也已完成。 */
+  conditionTriggered?: boolean;
   /** 自己的预想（自由文字），收工后和实际结果放在一起回看 */
   expect?: string;
   /** 卡住时的备选思路（交给下一次思考，不自动执行） */
@@ -75,10 +77,12 @@ export interface Activity {
   stepStart?: { pos: { x: number; y: number; z: number }; view?: string };
 }
 
-export type ActivityOutcome = 'done' | 'stuck' | 'abandoned' | 'interrupted' | 'replaced';
+export type ActivityOutcome = 'done' | 'unmet' | 'stuck' | 'abandoned' | 'interrupted' | 'replaced';
 
 export interface ActivityRecord {
   id: string; what: string; kind: ActivityKind; outcome: ActivityOutcome; summary: string; durationSec: number;
+  /** 收工条件只是中止这段活动的触发依据，不自动验证活动描述中的全部目标。 */
+  completion?: 'condition' | 'steps' | 'unmet';
   gained: Record<string, number>; lost: Record<string, number>; expect?: string; hypothesis?: string; at: number;
   signature: string; failures: number;
 }

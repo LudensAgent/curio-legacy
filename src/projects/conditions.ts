@@ -66,6 +66,13 @@ export function validateCondition(raw: unknown, adapter: Pick<GameAdapter, 'isKn
     if (typeof raw.equals !== 'boolean') throw new Error(`${raw.type} 验收条件的 equals 必须是布尔值`);
     return { type: raw.type, equals: raw.equals };
   }
+  if (raw.type === 'position_y') {
+    if ((raw.min === undefined && raw.max === undefined) || (raw.min !== undefined && !finite(raw.min, -2048, 2048)) ||
+      (raw.max !== undefined && !finite(raw.max, -2048, 2048)) || (raw.min !== undefined && raw.max !== undefined && raw.min > raw.max)) {
+      throw new Error('position_y 需要有效的 min 或 max，且 min 不能大于 max');
+    }
+    return { type: 'position_y', ...(raw.min !== undefined ? { min: raw.min } : {}), ...(raw.max !== undefined ? { max: raw.max } : {}) };
+  }
   if (raw.type === 'equipment') {
     if (!['hand', 'off-hand', 'head', 'torso', 'legs', 'feet'].includes(raw.slot) || !(raw.item === null || typeof raw.item === 'string' && adapter.isKnownItem(raw.item))) throw new Error('装备验收需要有效槽位和具体物品或 null');
     return { type: 'equipment', slot: raw.slot, item: raw.item };
@@ -113,6 +120,11 @@ export function evaluateCondition(condition: Condition, state: AgentState, world
     const actual = state[condition.field];
     if (actual === undefined) return { status: 'unknown', actual: null, reason: '适配器没有提供该自身状态' };
     return { status: actual === condition.equals ? 'satisfied' : 'unsatisfied', actual: { field: condition.field, value: actual, expected: condition.equals } };
+  }
+  if (condition.type === 'position_y') {
+    const y = state.pos.y;
+    return { status: (condition.min === undefined || y >= condition.min) && (condition.max === undefined || y <= condition.max) ? 'satisfied' : 'unsatisfied',
+      actual: { y, ...(condition.min !== undefined ? { min: condition.min } : {}), ...(condition.max !== undefined ? { max: condition.max } : {}) } };
   }
   if (condition.type === 'sky_visible' || condition.type === 'underground') {
     const age = percept ? Date.now() - percept.ts : Infinity;

@@ -45,7 +45,7 @@ export function recallLocal(query: string, src: RecallSources, opts: { n?: numbe
 
   if (!skip.has('experience')) for (const r of src.self.history(60)) {
     const gained = Object.keys(r.gained).join(' ');
-    push({ kind: 'experience', text: `${ago(r.at, now)}「${r.what}」→ ${r.outcome === 'done' ? '做成了' : r.outcome === 'stuck' ? '卡住了' : '停下了'}：${r.summary.slice(0, 80)}`, ref: r.id },
+    push({ kind: 'experience', text: `${ago(r.at, now)}「${r.what}」→ ${r.outcome === 'done' ? '收工' : r.outcome === 'stuck' ? '卡住了' : '停下了'}：${r.summary.slice(0, 150)}`, ref: r.id },
       score(`${r.what} ${r.summary} ${r.signature}`, [gained]) * (r.outcome === 'stuck' ? 1.2 : 1), r.at);
   }
   if (!skip.has('diary')) for (const d of src.self.diary(50)) push({ kind: 'diary', text: `${ago(d.at, now)}：${d.text}` }, score(d.text), d.at);

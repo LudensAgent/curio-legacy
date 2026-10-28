@@ -65,7 +65,7 @@ test('coordinate goto requires the target cell and reports measured movement inc
   }
 });
 
-test('coordinate goto: a solid target block means standing on it; a cell that cannot be entered counts as reached from next to it', async (t) => {
+test('coordinate goto preserves a solid target and requires actual arrival even after a path error', async (t) => {
   t.mock.method(globalThis, 'setTimeout', ((callback: () => void) => { queueMicrotask(callback); return 0; }) as unknown as typeof setTimeout);
   const adapter = new TestWorld(); adapter.pos = { x: 20.5, y: 77, z: 0.5 };
   adapter.setBlock({ x: 24, y: 76, z: 0 }, 'stone');
@@ -78,9 +78,10 @@ test('coordinate goto: a solid target block means standing on it; a cell that ca
   const targets: any[] = [];
   t.mock.method(adapter, 'moveTo', async (target: any) => { targets.push(target); adapter.pos = { x: 24.5, y: 77, z: 0.5 }; });
   let r = await goTo.run(ctx, { target: '24,76,0' });
-  assert.equal(r.status, 'succeeded', r.summary);
-  assert.equal(targets[0].pos.y, 77, 'aims at the cell above the solid block');
-  assert.match(r.summary, /按站到它上面算/);
+  assert.equal(r.status, 'failed', r.summary);
+  assert.equal(targets[0].pos.y, 76, 'does not substitute the cell above the requested solid block');
+  assert.deepEqual(r.data?.targetCell, { x: 24, y: 76, z: 0 });
+  assert.equal(r.data?.arrivedCell, false);
   // 路径报错，但人其实已经到了
   adapter.pos = { x: 20.5, y: 77, z: 0.5 };
   t.mock.method(adapter, 'moveTo', async () => { adapter.pos = { x: 24.5, y: 77, z: 0.5 }; throw new Error('Took to long to decide path to goal!'); });

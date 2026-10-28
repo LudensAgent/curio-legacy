@@ -93,10 +93,10 @@ export const digAt: Skill<CellArgs> = {
     const before = ctx.adapter.blockAt(pos);
     const seenBefore = visibleCells(ctx, [pos]).get(`${pos.x},${pos.y},${pos.z}`);
     // 自己站的两格通常是空的；但也可能有火把、花、雪层、蜘蛛网这类东西，那就照样拿掉
-    if (args.at[0] === 0 && args.at[2] === 0 && (args.at[1] === 0 || args.at[1] === 1) && (before === null || AIR.has(before))) return ok(`[${args.at}] 是自己站的地方，本来就空着；往上挖是 [0,2,0]`, { ...after(ctx, args.facing, pos), noop: true });
     if (before === null) return fail('NOT_FOUND', `[${args.at}] 那一格还没加载或看不见`, after(ctx, args.facing, pos));
+    if (args.at[0] === 0 && args.at[2] === 0 && (args.at[1] === 0 || args.at[1] === 1) && AIR.has(before)) return ok(`[${args.at}] 是自己站的地方，本来就空着；往上挖是 [0,2,0]`, { ...after(ctx, args.facing, pos), noop: true });
     if (AIR.has(before)) return seenBefore ? ok(`[${args.at}] 本来就是空的，不用挖`, { cell: [...args.at], was: 'air', ...after(ctx, args.facing, pos), noop: true })
-      : ok(`[${args.at}] 没有发生挖掘；目标格未在当前视野，未确认方块状态`, { ...after(ctx, args.facing, pos), noop: true });
+      : fail('NOT_FOUND', `[${args.at}] 没有发生挖掘；目标格未在当前视野，未确认方块状态`, { ...after(ctx, args.facing, pos), noop: true });
     if (LIQUID_BLOCKS.has(before)) return fail('BAD_ARGS', `[${args.at}] ${seenBefore ? `是 ${seenBefore}` : '未看清目标，当前不能挖掘'}，挖不了`, after(ctx, args.facing, pos));
     // 挖开会进水/进岩浆：默认不挖，但说清是哪几格、能怎么办（像人一样先堵上，或者认了让水流进来）
     const wets = wetNeighbours(ctx, pos);
@@ -171,7 +171,7 @@ async function stepOutOfWater(ctx: SkillCtx, args: CellArgs, feet: Vec3Like) {
 
 export const stepTo: Skill<CellArgs> = {
   name: 'step',
-  description: '迈到身边相邻的一格（[前,上,右]）：可以平走、上一级台阶（上+1，会跳）、下一级（上-1）；脚下是梯子时 [0,1,0] 沿梯子爬一格。目标格和头顶要空、脚下要实；上台阶时自己头顶上方也要空。只走这一格。泡在水里时朝岸那边迈（[1,0,0] 就行），身体会游过去、贴着岸爬上去（岸比脚高一两格也行）',
+  description: '迈到身边相邻的一格（[前,上,右]）：可以平走、上一级台阶（上+1，会跳）、下一级（上-1）；脚下是梯子时 [0,1,0] 沿梯子爬一格。目标格和头顶要空、脚下要实；上台阶时自己头顶上方也要空。陆上只走指定高度的一格，不会自动下坎；更深的落点可用 assess_landings 查看并用 descend 明确选择。泡在水里时朝岸那边迈（[1,0,0] 就行），身体会游过去、贴着岸爬上去（岸比脚高一两格也行）',
   argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W"}（前后/左右 ±1，上下 -1..1；例：[1,0,0] 往前一格，[1,1,0] 迈上前方台阶）',
   timeoutMs: 8000,
   movement: true,
@@ -222,30 +222,20 @@ export const stepTo: Skill<CellArgs> = {
     // 能站住：实心方块；薄雪层下面有实心方块也能踩
     const solid = (p: Vec3Like) => { const n = a.blockAt(p); return n !== null && !LIQUID_BLOCKS.has(n) && !free(p); };
     const standable = (p: Vec3Like) => solid(p) || (a.blockAt(p) === 'snow' && solid({ ...p, y: p.y - 1 }));
-    let dest = target, drop = 0;
-    if (!standable(floor) && !problems.length && args.at[1] <= 0) {
-      // 走下小坎：前面低 1–3 格有落脚处就直接走下去（像人一样，不必先垫）
-      for (let k = 1; k <= 3; k++) {
-        const f = { ...floor, y: floor.y - k };
-        if (!free({ ...f, y: f.y + 1 })) break;
-        if (standable(f)) { dest = { ...target, y: target.y - k }; drop = k; break; }
-      }
-    }
-    if (dest === target && !standable(floor)) problems.push(`目标格脚下是 ${describe(floor)}，往下 3 格内也没有落脚处（踩不住；要过去可以先 place_at [${args.at[0]},${args.at[1] - 1},${args.at[2]}] 垫一块落脚）`);
+    if (!standable(floor)) problems.push(`目标格脚下是 ${describe(floor)}，目标高度没有确认可站的支撑；可查看落点后选择下行，或放置支撑`);
     if (args.at[1] === 1 && !free({ ...feet, y: feet.y + 2 })) problems.push(`往上跳时自己头顶上方是 ${describe({ ...feet, y: feet.y + 2 })}（跳不起来；先 dig_at [0,2,0]）`);
     if (problems.length) return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：${problems.join('；')}`, { problems, ...after(ctx, args.facing, target) });
     try {
-      await a.moveTo({ kind: 'xyz', x: dest.x, y: dest.y, z: dest.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())) });
+      await a.moveTo({ kind: 'xyz', x: target.x, y: target.y, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())) });
     } catch (e) {
       if (isAbort(e)) throw e;
       return fail(codeFromError(e), `迈向 [${args.at}] 没成：${(e as Error).message}`, after(ctx, args.facing, target));
     }
     const end = feetCell(a.state().pos);
-    // 雪层、坡上的半格高低会让脚下那格差一格；水平差一格以内、而且比出发时更靠近目标，就算迈到了
-    const off = Math.hypot(end.x - dest.x, end.z - dest.z), before = Math.hypot(feet.x - dest.x, feet.z - dest.z);
-    if (off > 1 || Math.abs(end.y - dest.y) > 1 || (off > 0 && off >= before)) return fail('EFFECT_NOT_CONFIRMED', `没有站到 [${args.at}]，实际在 (${end.x},${end.y},${end.z})`, after(ctx, args.facing, target));
-    if (off > 0 || end.y !== dest.y) return ok(`大致迈到了 [${args.at}]（实际在 (${end.x},${end.y},${end.z})）`, { moved: [...args.at], ...after(ctx, args.facing, target) });
-    return ok(drop ? `往前走下了 ${drop} 格的小坎` : `站到了 [${args.at}]`, { moved: [args.at[0], args.at[1] - drop, args.at[2]], ...after(ctx, args.facing, target) });
+    const off = Math.hypot(end.x - target.x, end.z - target.z), before = Math.hypot(feet.x - target.x, feet.z - target.z);
+    if (off > 1 || end.y !== target.y || (off > 0 && off >= before)) return fail('EFFECT_NOT_CONFIRMED', `没有站到 [${args.at}]，实际在 (${end.x},${end.y},${end.z})`, after(ctx, args.facing, target));
+    if (off > 0) return ok(`大致迈到了 [${args.at}]（实际在 (${end.x},${end.y},${end.z})）`, { moved: [...args.at], ...after(ctx, args.facing, target) });
+    return ok(`站到了 [${args.at}]`, { moved: [...args.at], ...after(ctx, args.facing, target) });
   },
 };
 

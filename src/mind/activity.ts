@@ -108,6 +108,18 @@ export type StepVerdict =
  * 处理不了才交给脑子想。返回这段活接下来怎么办。
  */
 export function afterStep(a: Activity, step: Step, result: SkillResult, durationMs: number, state: AgentState, percept?: Percept): StepVerdict {
+  const conditionReached = (): StepVerdict | null => {
+    if (!a.doneWhen) return null;
+    const evidence = evaluateCondition(a.doneWhen, state, state.worldId, [], percept);
+    if (evidence.status !== 'satisfied') return null;
+    a.conditionTriggered = true;
+    return { kind: 'done', met: true, why: `收工条件满足：${JSON.stringify(a.doneWhen)}；位置 (${state.pos.x.toFixed(1)},${state.pos.y.toFixed(1)},${state.pos.z.toFixed(1)})；实际 ${JSON.stringify(evidence.actual)}；只确认该条件，其他目标未由此验证` };
+  };
+  const conditionUnmet = () => {
+    if (!a.doneWhen) return '';
+    const evidence = evaluateCondition(a.doneWhen, state, state.worldId, [], percept);
+    return `；收工条件未满足或无法确认：${JSON.stringify(a.doneWhen)}；状态 ${evidence.status}，实际 ${JSON.stringify(evidence.actual)}；位置 (${state.pos.x.toFixed(1)},${state.pos.y.toFixed(1)},${state.pos.z.toFixed(1)})`;
+  };
   const previous = [...a.results].reverse().find((r) => r.status === 'failed' && targetKeyOf(r) === targetKeyOf(step));
   const view = viewOf(percept);
   const baseline = previous?.pos ? previous : a.stepStart;
@@ -129,9 +141,10 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
         return { kind: 'stuck', why: `dig_at ${Array.isArray(at) ? `[${at}]` : key} 连着 ${a.airDigs[key]} 轮挖到的都是空气，这一步什么都没做：按现在的步骤，身体没在挖你想挖的那几格；看看 [前,上,右] 写得对不对（往上挖阶梯是 dig_at [0,2,0]、[1,1,0]、[1,2,0] 再 step [1,1,0]）` };
       }
     }
-    if (doneWhenMet(a, state, percept)) return { kind: 'done', met: true, why: '达到了收工条件' };
+    const reached = conditionReached();
+    if (reached) return reached;
     if (remainingSteps(a) === 0) {
-      if (a.doneWhen) return { kind: 'done', met: false, why: `${a.repeat} 轮做完了，但收工条件还没达到` };
+      if (a.doneWhen) return { kind: 'done', met: false, why: `${a.repeat} 轮做完了${conditionUnmet()}` };
       return { kind: 'done', met: true, why: '这段活的步骤都做完了' };
     }
     return { kind: 'continue' };
@@ -149,14 +162,16 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     if (hopeless && own && a.steps.length > 1) {
       const i = a.steps.indexOf(own);
       if (i >= 0) { a.steps.splice(i, 1); if (i < a.index) a.index--; }
-      if (doneWhenMet(a, state, percept)) return { kind: 'done', met: true, why: '达到了收工条件' };
+      const reached = conditionReached();
+      if (reached) return reached;
       return remainingSteps(a) === 0
-        ? { kind: 'done', met: !a.doneWhen, why: `顺手的「${step.skill}」没成（${code}）；这段活的步骤都做完了${a.doneWhen ? '，收工条件尚未达到' : ''}` }
+        ? { kind: 'done', met: !a.doneWhen, why: `顺手的「${step.skill}」没成（${code}）；这段活的步骤都做完了${conditionUnmet()}` }
         : { kind: 'continue', adapted: `顺手的「${step.skill}」再做也不会成（${result.summary.slice(0, 40)}），后面几轮不再做它` };
     }
-    if (doneWhenMet(a, state, percept)) return { kind: 'done', met: true, why: '达到了收工条件' };
+    const reached = conditionReached();
+    if (reached) return reached;
     return remainingSteps(a) === 0
-      ? { kind: 'done', met: !a.doneWhen, why: `${optional ? `顺手的「${step.skill}」没成` : '观察没有找到目标'}；这段活的步骤都做完了${a.doneWhen ? '，收工条件尚未达到' : ''}` }
+      ? { kind: 'done', met: !a.doneWhen, why: `${optional ? `顺手的「${step.skill}」没成` : '观察没有找到目标'}；这段活的步骤都做完了${conditionUnmet()}` }
       : { kind: 'continue', ...(optional ? { adapted: `顺手的「${step.skill}」没成（${result.failureCode ?? '失败'}），不碍事，接着做` } : {}) };
   }
   a.failures++;
@@ -186,6 +201,7 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
   const { gained, lost } = diffInventory(a.startInventory, inventoryOf(state));
   return {
     id: a.id, what: a.what, kind: a.kind, outcome, summary: summary.slice(0, 200),
+    ...(outcome === 'done' ? { completion: a.conditionTriggered ? 'condition' as const : 'steps' as const } : outcome === 'unmet' ? { completion: 'unmet' as const } : {}),
     durationSec: Math.round((Date.now() - a.startedAt) / 1000), gained, lost,
     ...(a.expect ? { expect: a.expect } : {}), ...(a.hypothesis ? { hypothesis: a.hypothesis } : {}),
     at: Date.now(), signature: signatureOf(a.steps.filter((s) => !(a.adaptations.length && s.skill === 'explore' && (s.args as any)?.distance === 64))),

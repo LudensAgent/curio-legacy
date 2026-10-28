@@ -6,7 +6,7 @@ import { Arbiter } from '../src/arbiter/arbiter.ts';
 import { config } from '../src/config.ts';
 import { EventBus } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
-import { afterStep, createActivity, nextStep, remainingSteps } from '../src/mind/activity.ts';
+import { afterStep, createActivity, nextStep, recordOf, remainingSteps, signatureOf } from '../src/mind/activity.ts';
 import { Attention } from '../src/mind/attention.ts';
 import { Mind } from '../src/mind/mind.ts';
 import { buildMindMessages } from '../src/mind/prompt.ts';
@@ -91,6 +91,29 @@ test('routine 可以重复多轮，达到收工条件就提前结束', () => {
   const v = afterStep(a, s, ok('又一根'), 10, adapter.state());
   assert.equal(v.kind, 'done');
   assert.equal((v as any).met, true);
+});
+
+test('a stopping condition records its actual evidence rather than claiming the activity description is verified', () => {
+  const adapter = new FakeAdapter();
+  adapter.pos = { x: 1375, y: 62, z: 297 };
+  const state = adapter.state();
+  const a = createActivity({ what: '挖台阶到 y30', why: '', kind: 'gather', repeat: 6, steps: [step()],
+    doneWhen: { type: 'underground', equals: true } }, '', 'llm', state);
+  const percept = { ts: Date.now(), observation: { ready: true, worldId: state.worldId, sessionId: state.sessionId },
+    self: { pos: [state.pos.x, state.pos.y, state.pos.z], dim: state.dim, around: {} }, nearby: { resources: [] }, light: { underground: true } } as any;
+  const next = nextStep(a)!;
+  const verdict = afterStep(a, next, ok('往下走了一格'), 10, state, percept);
+  assert.equal(verdict.kind, 'done');
+  if (verdict.kind !== 'done') return;
+  assert.match(verdict.why, /underground/);
+  assert.match(verdict.why, /62\.0/);
+  assert.match(verdict.why, /其他目标未由此验证/);
+  const record = recordOf(a, 'done', verdict.why, state);
+  assert.equal(record.completion, 'condition');
+  const self = new SelfModel(null, []);
+  const lesson = self.learn('沿下坡前进', { kind: 'gather', signature: record.signature, source: 'reflection' })!;
+  self.record(record);
+  assert.equal(lesson.wins, 0, 'a stopping condition is not proof that the described task succeeded');
 });
 
 test('决定的校验：能纠正就纠正，关键部分错了才要求重答', () => {
@@ -734,18 +757,61 @@ test('盖房、走路这类事做着做着挨了打，又没有技能接手：�
 
 test('步骤做完、收工条件没达到：提前想好的下一段不照接，回头重新想', async (t) => {
   const w = fixture(t);
+  const statuses: string[] = [], events: any[] = [];
+  const recorded = t.mock.method(w.memory, 'recordGoal');
+  (w.mind as any).d.onGoalEnd = (status: string) => statuses.push(status);
+  w.bus.on('event', (event) => { if (event.type === 'attempt_end') events.push(event); });
   await w.tick();
   await w.reply(0, { monologue: '挖条巷子找铁', decision: 'new', activity: { what: '开巷找铁', steps: [step(1)], done_when: { type: 'inventory_min', item: 'raw_iron', count: 1 } },
     next: { what: '把铁烧成锭', steps: [step(2)] } });
   assert.equal(w.mind.activity?.what, '开巷找铁');
   assert.ok(w.mind.queuedNext);
+  const learned = w.self.learn('开巷找铁的做法', { kind: 'gather', signature: signatureOf(w.mind.activity!.steps), source: 'reflection' })!;
+  (w.mind as any).order = { text: '找铁', status: 'doing', kind: 'order', at: Date.now(), activityId: w.mind.activity!.id };
   const before = w.pending.length;
   await w.finish();
   await w.tick();
+  const record = w.self.history(1)[0];
+  assert.equal(record.outcome, 'unmet');
+  assert.equal(record.completion, 'unmet');
+  assert.match(record.summary, /收工条件未满足或无法确认/);
+  assert.match(record.summary, /raw_iron/);
+  assert.equal(recorded.mock.calls[0].arguments[0].status, 'condition_unmet');
+  assert.deepEqual(statuses, ['condition_unmet']);
+  assert.equal(events[0].data.status, 'condition_unmet');
+  assert.equal(events[0].data.outcome, 'unmet');
+  assert.equal(learned.wins, 0);
+  assert.equal((w.mind as any).order.text, '找铁');
+  assert.equal(w.self.diary(1).length, 0);
   assert.notEqual(w.mind.activity?.what, '把铁烧成锭');
   assert.equal(w.mind.queuedNext, null);
   assert.ok(w.pending.length > before, '要回头想');
   assert.match(JSON.stringify(w.pending.at(-1)!.messages), /先不接着做/);
+});
+
+test('stopping on a condition preserves evidence while following the queued activity', async (t) => {
+  const w = fixture(t), statuses: string[] = [];
+  const recorded = t.mock.method(w.memory, 'recordGoal');
+  (w.mind as any).d.onGoalEnd = (status: string) => statuses.push(status);
+  await w.tick();
+  await w.reply(0, { monologue: '下去看看', decision: 'new', activity: { what: '下到 y30', steps: [step(1)],
+    done_when: { type: 'inventory_min', item: 'oak_log', count: 1 } }, next: { what: '接下来的事', steps: [step(2)] } });
+  assert.ok(w.mind.queuedNext);
+  (w.mind as any).order = { text: '下到 y30', status: 'doing', kind: 'order', at: Date.now(), activityId: w.mind.activity!.id };
+  w.adapter.inv.set('oak_log', 1);
+  await w.finish();
+  await w.tick();
+  const record = w.self.history(1)[0];
+  assert.equal(record.completion, 'condition');
+  assert.match(record.summary, /inventory_min/);
+  assert.match(record.summary, /64\.0/);
+  assert.equal(recorded.mock.calls[0].arguments[0].status, 'condition_met');
+  assert.deepEqual(statuses, ['condition_met']);
+  assert.equal((w.mind as any).order.text, '下到 y30', 'a stop condition does not mark the operator instruction complete');
+  assert.equal(w.self.diary(1).length, 0, 'a stop condition does not write a goal-completion diary');
+  assert.ok(w.self.recentThoughts().some((x) => x.text.includes('收工条件满足') && x.text.includes('64.0')));
+  assert.equal(w.mind.queuedNext, null);
+  assert.equal(w.mind.activity?.what, '接下来的事');
 });
 
 test('提示词：太阳还高就想着躲起来过夜，提醒里把尺度摆出来；状态里的时间是游戏钟点', async () => {

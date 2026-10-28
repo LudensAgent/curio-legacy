@@ -390,7 +390,7 @@ export class SelfModel {
     if (this.data.history.length > 60) this.data.history = this.data.history.slice(-60);
     // 同一套做法后来的成败会修正“窍门”的可信度：这就是从实践里学
     for (const k of this.data.knowHow) if (k.signature && k.signature === r.signature) {
-      if (r.outcome === 'done') { k.wins++; k.unverified = false; } else if (r.outcome === 'stuck') k.losses++;
+      if (r.outcome === 'done' && r.completion !== 'condition') { k.wins++; k.unverified = false; } else if (r.outcome === 'stuck') k.losses++;
       k.updatedAt = Date.now();
     }
     this.touch();

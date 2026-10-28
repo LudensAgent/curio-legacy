@@ -1,6 +1,6 @@
 import { buildingArchiveFor } from './build.ts';
 import { findStation, isStation } from './stations.ts';
-import { DIR_OFFSETS, isSoftBlock, LIQUID_BLOCKS, surroundings } from '../perception/surroundings.ts';
+import { DIR_OFFSETS, surroundings } from '../perception/surroundings.ts';
 import { climbUp } from './body.ts';
 import { hasPlaceable, PLACEABLE } from './survival.ts';
 import { DIRS, dirName } from '../perception/perception.ts';
@@ -8,7 +8,7 @@ import { dist3, sleep, throwIfAborted } from '../util.ts';
 import type { EntityInfo, Vec3Like } from '../adapter/types.ts';
 import { feetCell } from '../perception/local.ts';
 import { passageRoute } from '../memory/passages.ts';
-import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
+import { clampInt, codeFromError, fail, isAbort, obj, ok, type FailureCode, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 import { planTravel } from './overland.ts';
 
 // ------------------------------------------------------------------ 寻找与张望（人眼式：不透视，只是转头看）
@@ -235,7 +235,7 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
 // ------------------------------------------------------------------ goto
 export const goTo: Skill<{ target: string; dig?: boolean; sprint?: boolean; avoid?: string[]; lead?: string }> = {
   name: 'goto',
-  description: '沿看得见的落脚点步行去地标、坐标、作品或记得的功能方块；绕开墙壁，遇到已观察的木门会开门。默认不挖墙、不搭柱；写 "dig":true 就像人一样挖穿挡路的土石、垫方块爬上坡坎直接过去（遇到水会在水面上垫方块架桥，走完会说垫了多少）。是否换用载具由你决定；上船后 ride 提供水面导航。"lead" 写一种看得见的生物：带着它走——几格一停，它掉队就等它跟上来；它跟不跟你得自己弄对（手里拿它爱吃的，它才跟）',
+  description: '沿看得见的落脚点步行去地标、坐标、作品或记得的功能方块；明确三维坐标须进入指定格，两维坐标须到指定水平格，地标到附近即可。绕开墙壁，遇到已观察的木门会开门。默认不挖墙、不搭柱；写 "dig":true 就像人一样挖穿挡路的土石、垫方块爬上坡坎直接过去（遇到水会在水面上垫方块架桥，走完会说垫了多少）。是否换用载具由你决定；上船后 ride 提供水面导航。"lead" 写一种看得见的生物：带着它走——几格一停，它掉队就等它跟上来；它跟不跟你得自己弄对（手里拿它爱吃的，它才跟）',
   argsDoc: '{"target": "base（首选基地，不一定是最近的房子；回某栋房子直接写它的名字） | death | <地标id或名称> | <作品ID> | crafting_table | x,y,z | 方向 格数（如 \"E 20\" 往东 20 格）", "dig"?: true（挖穿/垫高直走）, "sprint"?: true（跑着去：快，但很耗饥饿；默认走路）, "avoid"?: ["绕开的方块"], "lead"?: "<带着走的生物名，如 cow>"}',
   timeoutMs: 600000,
   movement: true,
@@ -322,20 +322,11 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; spri
       label = /^(base|基地)$/i.test(args.target.trim()) ? `${lm.label}（首选基地 base）` : lm.label;
     }
     if (!pos) return fail('BAD_ARGS', `看不懂目标：${args.target}`);
-    // 写的坐标常常是“那块方块”（矿点、地面、记下的方块位置），而人要站的是它上面那一格：
-    // 不挖的时候，目标格是实心的、上面两格能站，就按站到它上面算；是岩浆就说清楚
-    let targetNote = '';
+    // 明确坐标始终指向指定格，不替调用方改成方块上方的格子。
     if (nums && nums.length === 3 && !heading) {
       ctx.senses.refresh();
-      const visible = ctx.senses.observeBlocks?.([0, 1, 2].map((dy) => ({ x: Math.floor(pos!.x), y: Math.floor(pos!.y) + dy, z: Math.floor(pos!.z) }))) ?? [];
-      const at = (dy: number) => visible.find((b) => b.pos.y === Math.floor(pos!.y) + dy)?.name ?? null;
-      const here = at(0);
-      const open = (n: string | null) => n !== null && (isSoftBlock(n) || ['air', 'cave_air', 'void_air'].includes(n));
+      const here = ctx.senses.observeBlocks?.([{ x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z) }])[0]?.name;
       if (here && /lava/.test(here)) return fail('BAD_ARGS', `目标格 (${pos.x},${pos.y},${pos.z}) 是 ${here}，不能走进去；要去它旁边就写旁边那一格的坐标`);
-      if (!args.dig && here && !open(here) && !LIQUID_BLOCKS.has(here) && open(at(1)) && open(at(2))) {
-        targetNote = `（目标格 (${pos.x},${pos.y},${pos.z}) 是 ${here}，站不进去，按站到它上面算）`;
-        pos = { ...pos, y: pos.y + 1 };
-      }
     }
     const range = nums && !heading ? 0 : 2;
     const waterNames = ['water', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass'];
@@ -348,16 +339,9 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; spri
       targetCell: cell(pos!), positionCell: cell(position), arrivedCell: Math.floor(position.x) === Math.floor(pos!.x)
         && Math.floor(position.z) === Math.floor(pos!.z) && (flat || Math.floor(position.y) === Math.floor(pos!.y)),
       ...(flat ? { horizontalOnly: true } : {}) });
-    // 没走进目标格、但就停在它紧挨着的一格（上下左右斜角、高低差一格内）：算到了，说清差多少
-    // 只在那一格本身站不进去时才这样算（实心、悬空、是液体）；能站进去却没走进去的，照样算没到
-    const openCell = (n: string | null) => n !== null && (isSoftBlock(n) || ['air', 'cave_air', 'void_air'].includes(n));
-    const enterable = () => {
-      const c = { x: Math.floor(pos!.x), y: Math.floor(pos!.y), z: Math.floor(pos!.z) };
-      const below = adapter.blockAt({ ...c, y: c.y - 1 });
-      return openCell(adapter.blockAt(c)) && openCell(adapter.blockAt({ ...c, y: c.y + 1 })) && below !== null && !openCell(below) && !LIQUID_BLOCKS.has(below);
-    };
-    const nextTo = (p: Vec3Like) => !flat && !!nums && !heading && Math.max(Math.abs(Math.floor(p.x) - Math.floor(pos!.x)), Math.abs(Math.floor(p.y) - Math.floor(pos!.y)), Math.abs(Math.floor(p.z) - Math.floor(pos!.z))) <= 1 && !enterable();
-    const reachedNear = (p: Vec3Like, why: string) => ok(`到了 ${label} 旁边：实际站在 (${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)})，紧挨着目标格，差 ${distance(p).toFixed(2)} 格（${why}）${targetNote}`, { ...measured(p), nextTo: true });
+    // 邻格只是实际进展，不代表已到达指定格；不推断未见目标的障碍。
+    const nextTo = (p: Vec3Like) => !flat && !!nums && !heading && Math.max(Math.abs(Math.floor(p.x) - Math.floor(pos!.x)), Math.abs(Math.floor(p.y) - Math.floor(pos!.y)), Math.abs(Math.floor(p.z) - Math.floor(pos!.z))) <= 1;
+    const failedNear = (p: Vec3Like, why: string, code: FailureCode = 'PATH_NOT_FOUND') => fail(code, `尚未到达 ${label} 的目标格：实际站在 (${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)})，紧挨着目标格，差 ${distance(p).toFixed(2)} 格（${why}）${routeNote}${terrainNote()}`, { ...measured(p), nextTo: true });
     const inScope = () => {
       throwIfAborted(signal);
       const now = adapter.state();
@@ -508,31 +492,31 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; spri
         if (fromMemory && dist3(cur, after) < 0.3 && !arrived(after)) { visited.push(waypoint!); continue; }
         if (arrived(after)) continue;
         if (dist3(cur, after) < 0.3 && !arrived(after)) {
-          if (nextTo(after)) return reachedNear(after, '那一格本身走不进去');
+          if (nextTo(after)) return failedNear(after, '没有取得进展');
           // 泡在水里时步行寻路不肯动（不游泳），一下就返回：说清楚是因为在水里
           const wet = adapter.state().inWater ? '；人泡在水里，步行寻路不游泳——先 surface 游上岸，或在脚下垫一块站出水面，再走' : '';
           return fail('PATH_NOT_FOUND', `前往 ${label} 没有取得进展，仍在 (${after.x.toFixed(2)},${after.y.toFixed(2)},${after.z.toFixed(2)})；尚未到达目标位置，需要换入口或路线${wet}`, measured(after));
         }
         if (distance(after) < bestDistance - 0.5) { bestDistance = distance(after); detours = 0; }
-        else if (++detours >= (args.dig ? 6 : 4)) return nextTo(after) ? reachedNear(after, '绕了几次也没走进那一格') : fail('PATH_NOT_FOUND', `绕行后仍未接近 ${label}${args.dig ? '' : `；要直接过去写 goto {"target":"${args.target}","dig":true}`}`, measured(after));
+        else if (++detours >= (args.dig ? 6 : 4)) return nextTo(after) ? failedNear(after, '绕了几次也没走进那一格') : fail('PATH_NOT_FOUND', `绕行后仍未接近 ${label}${args.dig ? '' : `；要直接过去写 goto {"target":"${args.target}","dig":true}`}`, measured(after));
         visited.push(waypoint ?? after);
       }
       if (!inScope()) return fail('WRONG_DIMENSION', '途中世界或会话已改变，需要重新规划');
       const end = adapter.state().pos;
-      if (!arrived(end)) return nextTo(end) ? reachedNear(end, '那一格本身走不进去') : fail('PATH_NOT_FOUND', `尚未到达 ${label}，需要重新选择路线`, measured(end));
+      if (!arrived(end)) return nextTo(end) ? failedNear(end, '那一格没走进去') : fail('PATH_NOT_FOUND', `尚未到达 ${label}，需要重新选择路线`, measured(end));
       await face();
       if (args.lead) {
         const f = follower(ctx, args.lead, leadId);
         const note = f ? `带着的 ${args.lead} 在 ${f.dist.toFixed(0)} 格外 (${Math.round(f.pos.x)},${Math.round(f.pos.y)},${Math.round(f.pos.z)})` : `带着的 ${args.lead} 已不在视野里`;
         return ok(`到达 ${label}；人站在 (${end.x.toFixed(2)},${end.y.toFixed(2)},${end.z.toFixed(2)})，${note}${terrainNote()}`, { ...measured(end), lead: args.lead, leadPos: f?.pos ?? null, leadDist: f?.dist ?? null });
       }
-      return ok(`${alreadyHere ? '已在' : '到达'} ${label}${nums ? ' 的目标格' : ' 附近'}；实际站在 (${end.x.toFixed(2)},${end.y.toFixed(2)},${end.z.toFixed(2)})，本次往 ${dirName(end.x - s.pos.x, end.z - s.pos.z)} 移动 ${dist3(s.pos, end).toFixed(2)} 格，距目标点 ${distance(end).toFixed(2)} 格${alreadyHere ? '；没有执行新的位移' : ''}${targetNote}${routeNote}${terrainNote()}`, { ...measured(end), alreadyHere });
+      return ok(`${alreadyHere ? '已在' : '到达'} ${label}${nums ? ' 的目标格' : ' 附近'}；实际站在 (${end.x.toFixed(2)},${end.y.toFixed(2)},${end.z.toFixed(2)})，本次往 ${dirName(end.x - s.pos.x, end.z - s.pos.z)} 移动 ${dist3(s.pos, end).toFixed(2)} 格，距目标点 ${distance(end).toFixed(2)} 格${alreadyHere ? '；没有执行新的位移' : ''}${routeNote}${terrainNote()}`, { ...measured(end), alreadyHere });
     } catch (e) {
       if (isAbort(e)) throw e;
       // 寻路报错（想太久、换路失败）时人可能已经走到了：先看看实际在哪，别把到了的当成没到
       const now = adapter.state().pos;
-      if (inScope() && arrived(now)) { await face(); return ok(`到达 ${label}${nums ? ' 的目标格' : ' 附近'}；实际站在 (${now.x.toFixed(2)},${now.y.toFixed(2)},${now.z.toFixed(2)})，距目标点 ${distance(now).toFixed(2)} 格（寻路最后报了“${(e as Error).message.slice(0, 40)}”，但人已经到了）${targetNote}${routeNote}${terrainNote()}`, measured(now)); }
-      if (inScope() && nextTo(now)) return reachedNear(now, `寻路报“${(e as Error).message.slice(0, 40)}”，那一格没走进去`);
+      if (inScope() && arrived(now)) { await face(); return ok(`到达 ${label}${nums ? ' 的目标格' : ' 附近'}；实际站在 (${now.x.toFixed(2)},${now.y.toFixed(2)},${now.z.toFixed(2)})，距目标点 ${distance(now).toFixed(2)} 格（寻路最后报了“${(e as Error).message.slice(0, 40)}”，但人已经到了）${routeNote}${terrainNote()}`, measured(now)); }
+      if (inScope() && nextTo(now)) return failedNear(now, `寻路报“${(e as Error).message}”，那一格没走进去`, codeFromError(e));
       const water = waterNear();
       return fail(codeFromError(e), `前往 ${label} 失败：${(e as Error).message}${water ? '；附近有水，尚未确认干燥步行通路，可沿岸绕行，或自行选择过水方式' : ''}${args.dig ? '' : `；挡路的是土石坡坎就写 goto {"target":"${args.target}","dig":true} 挖穿/垫高直走`}`, {
         ...measured(), waterAhead: water,

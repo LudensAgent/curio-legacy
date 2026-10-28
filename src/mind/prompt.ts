@@ -116,7 +116,8 @@ export function moveDetails(names: string[]): string {
 
 const CONDITIONS = `done_when 的写法（可选，写错会被忽略）：
 {"type":"inventory_min","item":"oak_log","count":20}｜{"type":"location_near","dimension":"overworld","pos":{"x":0,"y":64,"z":0},"radius":4}（坐标要来自观察或地标）｜{"type":"self_state","field":"inWater|inLava|onGround","equals":false}｜{"type":"self_state","field":"held|riding","equals":"物品名或 null"}｜{"type":"sky_visible","equals":true}｜{"type":"underground","equals":false}｜{"type":"equipment","slot":"hand","item":"stone_pickaxe"}｜{"type":"inventory_full","free_slots":2}（背包只剩 2 格空）｜{"type":"all_of","conditions":[…]}｜{"type":"any_of","conditions":[…]}（哪个先到就收工：“铁够 24 个，或背包装满”）
-写开工时还不成立、做完才成立的事（往下躲进地里 → {"type":"underground","equals":true}）；开工前就成立的条件会被当成没写。`;
+高度范围：{"type":"position_y","max":30}（脚的位置 y ≤ 30），也可写 min 或同时写 min、max。
+写与这段活实际收工目标相符的条件；条件只证明它自身成立，不证明描述里的其他目标达成。开工前就成立的条件会被当成没写。`;
 
 const OUTPUT = `只输出一个 JSON 对象：
 {"monologue":"第一人称内心独白，接着刚才的念头往下想（20–80 字）",
@@ -523,7 +524,7 @@ function worldKnowledge(ctx: MindContext) {
 function recordLine(r: ActivityRecord, memory: WorldMemory, dimension: string) {
   const g = Object.entries(r.gained).slice(0, 6).map(([k, v]) => `${k}+${v}`).join(' ');
   const l = Object.entries(r.lost).slice(0, 4).map(([k, v]) => `${k}-${v}`).join(' ');
-  return { what: recallText(r.what, memory, dimension, r.at), outcome: r.outcome, took_real_s: r.durationSec, ...(g ? { gained: g } : {}), ...(l ? { used: l } : {}), summary: recallText(r.summary, memory, dimension, r.at),
+  return { what: recallText(r.what, memory, dimension, r.at), outcome: r.completion === 'condition' ? 'condition_met' : r.outcome, took_real_s: r.durationSec, ...(g ? { gained: g } : {}), ...(l ? { used: l } : {}), summary: recallText(r.summary, memory, dimension, r.at),
     ...(r.expect ? { i_expected: recallText(r.expect, memory, dimension, r.at) } : {}), ...(r.hypothesis ? { hypothesis: recallText(r.hypothesis, memory, dimension, 0) } : {}) };
 }
 
@@ -625,7 +626,7 @@ export function buildReflectionMessages(self: SelfModel, persona: string, mySkil
     know_how: self.data.knowHow.map((k) => ({ id: k.id, text: historical(cleanLesson(k.text), k.source === 'observed' ? k.createdAt : 0), wins: k.wins, losses: k.losses, ...(k.unverified ? { unverified: true } : {}),
       age_min: Math.round((now - k.createdAt) / 60000) })),
     insights: self.insights().map((i) => historical(`${i.text}${i.outcome ? `（当时结果：${i.outcome}）` : ''}`)),
-    recent: self.history(20).map((r) => historical(`${r.what} → ${r.outcome}${Object.keys(r.gained).length ? `，得到 ${Object.entries(r.gained).map(([k, v]) => `${k}×${v}`).join(' ')}` : ''}${r.outcome !== 'done' ? `：${r.summary.slice(0, 60)}` : ''}`, r.at)),
+    recent: self.history(20).map((r) => historical(`${r.what} → ${r.completion === 'condition' ? 'condition_met' : r.outcome}${Object.keys(r.gained).length ? `，得到 ${Object.entries(r.gained).map(([k, v]) => `${k}×${v}`).join(' ')}` : ''}：${r.summary.slice(0, 180)}`, r.at)),
     experiments: self.experiments(6).map((e) => `${historical(e.hypothesis)} → ${e.status}${e.evidence ? `（${historical(e.evidence.slice(0, 80), e.at)}）` : ''}`),
     agenda: self.agenda().map((a) => ({ id: a.id, text: a.text, kind: a.kind, tried: a.attempts })),
     diary: self.diary(5).map((d) => historical(d.text)),

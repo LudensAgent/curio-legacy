@@ -37,7 +37,11 @@ test('身边方块图不透视：只看得见和身体连通的空气格及贴�
 
 test('LLM 自己组合原子动作：挖开头顶和前上方两格、迈上去，重复几轮就是一道回到地面的阶梯', async (t) => {
   const w = pocket();
-  const ctx = makeCtx(w);
+  const ctx = makeCtx(w, { senses: { observeBlocks: (positions) => positions.flatMap((pos) => {
+    const name = w.blockAt(pos);
+    return name === null ? [] : [{ name, pos, properties: {}, worldId: w.worldId, sessionId: w.sessionId,
+      dimension: w.dim, observationId: 1, observedAt: Date.now(), source: 'vision' as const }];
+  }) } });
   t.after(() => ctx.memory.close());
   const routine = [
     digAt.validate({ at: [0, 2, 0], facing: 'N' }, w),
@@ -99,15 +103,25 @@ test('原子动作认模型常用的几种坐标写法：at / to / pos、字符�
   assert.ok(!bad.ok && /"at":\[前,上,右\]/.test(bad.error));
 });
 
-test('step 能走下 1–3 格的小坎，也能踩上薄雪', async (t) => {
+test('step 保持指定高度，显式选择下一级才下行，也能踩上薄雪', async (t) => {
   const w = new FakeAdapter();
   w.pos = { x: 0.5, y: 64, z: 0.5 };
-  (w as any).removed.add('0,63,-1'); (w as any).removed.add('0,62,-1');
+  (w as any).removed.add('0,63,-1');
   const ctx = makeCtx(w);
   t.after(() => ctx.memory.close());
+  const move = t.mock.method(w, 'moveTo', w.moveTo.bind(w));
   const r = await stepTo.run(ctx, { at: [1, 0, 0], facing: 'N' });
-  assert.equal(r.status, 'succeeded', r.summary);
-  assert.match(r.summary, /走下了 2 格/);
+  assert.equal(r.status, 'failed');
+  assert.equal(r.failureCode, 'PATH_NOT_FOUND');
+  assert.equal(move.mock.callCount(), 0, '无目标高度支撑时不向低处改选落点');
+  (w as any).removed.add('0,62,-1');
+  const deeper = await stepTo.run(ctx, { at: [1, -1, 0], facing: 'N' });
+  assert.equal(deeper.failureCode, 'PATH_NOT_FOUND', '指定下一级也不能自动改成下两级');
+  assert.equal(move.mock.callCount(), 0);
+  (w as any).removed.delete('0,62,-1');
+  const down = await stepTo.run(ctx, { at: [1, -1, 0], facing: 'N' });
+  assert.equal(down.status, 'succeeded', down.summary);
+  assert.equal(Math.floor(w.pos.y), 63);
 
   const w2 = new FakeAdapter();
   w2.pos = { x: 0.5, y: 64, z: 0.5 };
@@ -117,6 +131,18 @@ test('step 能走下 1–3 格的小坎，也能踩上薄雪', async (t) => {
   t.after(() => ctx2.memory.close());
   const r2 = await stepTo.run(ctx2, { at: [1, 0, 0], facing: 'N' });
   assert.equal(r2.status, 'succeeded', r2.summary);
+});
+
+test('step 不把实际落到其他高度当作到达目标', async (t) => {
+  const w = new FakeAdapter();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  t.mock.method(w, 'moveTo', async () => { w.pos = { x: 0.5, y: 63, z: -0.5 }; });
+  const r = await stepTo.run(ctx, { at: [1, 0, 0], facing: 'N' });
+  assert.equal(r.status, 'failed');
+  assert.equal(r.failureCode, 'EFFECT_NOT_CONFIRMED');
+  assert.match(r.summary, /实际在 \(0,63,-1\)/);
 });
 
 test('坐标直接写成 args 数组也认；往脚下挖多格会被告知重复 dig_at [0,-1,0]', async () => {

@@ -7,6 +7,7 @@ export type Condition =
   | { type: 'self_state'; field: 'inWater' | 'inLava' | 'onGround'; equals: boolean }
   | { type: 'sky_visible'; equals: boolean }
   | { type: 'underground'; equals: boolean }
+  | { type: 'position_y'; min?: number; max?: number }
   | { type: 'equipment'; slot: 'hand' | 'off-hand' | 'head' | 'torso' | 'legs' | 'feet'; item: string | null }
   | { type: 'block_state'; dimension: string; pos: Vec3Like; name?: string; properties?: Record<string, string | number | boolean> }
   /** 背包装满了（或只剩 free_slots 格空）：“挖到背包差不多满再上来”这种收工方式 */

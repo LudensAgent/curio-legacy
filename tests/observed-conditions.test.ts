@@ -81,6 +81,22 @@ test('self and equipment predicates read actual state; missing fields and foreig
   assert.throws(() => validateCondition({ type: 'self_state', field: 'hp', equals: 'boat' }, w.adapter, w.memory, state));
 });
 
+test('position_y validates an explicit height range and evaluates the observed position', (t) => {
+  const w = fixture(t);
+  const below = validateCondition({ type: 'position_y', max: 30 }, w.adapter, w.memory, w.adapter.state());
+  assert.equal(evaluateCondition(below, w.adapter.state()).status, 'unsatisfied');
+  w.state.pos.y = 30;
+  assert.deepEqual(evaluateCondition(below, w.adapter.state()).actual, { y: 30, max: 30 });
+  assert.equal(evaluateCondition(below, w.adapter.state()).status, 'satisfied');
+  const band = validateCondition({ type: 'position_y', min: -10, max: 30 }, w.adapter, w.memory, w.adapter.state());
+  w.state.pos.y = -11;
+  assert.equal(evaluateCondition(band, w.adapter.state()).status, 'unsatisfied');
+  assert.throws(() => validateCondition({ type: 'position_y' }, w.adapter, w.memory, w.adapter.state()));
+  assert.throws(() => validateCondition({ type: 'position_y', min: 40, max: 30 }, w.adapter, w.memory, w.adapter.state()));
+  w.state.observationReady = false;
+  assert.equal(evaluateCondition(below, w.adapter.state()).status, 'unknown');
+});
+
 test('method branches and postconditions use fresh observations, and an unknown baseline cannot become learning proof', async (t) => {
   const w = fixture(t), previous = SKILLS.observation_toggle;
   SKILLS.observation_toggle = { name: 'observation_toggle', description: 'test receipt', argsDoc: '{}', timeoutMs: 1000, movement: false,
