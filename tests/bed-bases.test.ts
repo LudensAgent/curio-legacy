@@ -57,3 +57,17 @@ test('家在哪：有首选基地就是它，不再挑离得最近的那个', ()
   assert.equal(homeOf(m, { worldId: W, dim: 'overworld', pos: { x: 0, y: 64, z: 0 } })?.label, '高地白桦小舍');
   m.close();
 });
+
+test('memory-patch.json 的 selectBase：重启时把首选基地（家）改回指定的那个', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-patch-'));
+  const file = path.join(dir, 'world-memory.json');
+  fs.writeFileSync(file, JSON.stringify({ version: 1, worldId: W, landmarks: [base('矿口防爆小前哨', 1385, 3, true), base('林边橡木小屋', 272, 2)] }));
+  fs.writeFileSync(path.join(dir, 'memory-patch.json'), JSON.stringify({ selectBase: 'base_林边橡木小屋' }));
+  const m = new WorldMemory(file);
+  m.setWorld(W);
+  assert.equal(m.base('overworld')?.label, '林边橡木小屋');
+  assert.equal(m.bases('overworld').filter((b) => b.primary).length, 1);
+  assert.ok(m.patched.some((s) => s.includes('林边橡木小屋')));
+  assert.ok(!fs.existsSync(path.join(dir, 'memory-patch.json')));
+  m.close();
+});

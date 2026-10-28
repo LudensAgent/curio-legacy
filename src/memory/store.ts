@@ -355,14 +355,14 @@ export class WorldMemory {
   /**
    * 运行中改不了记忆文件（进程会定时写回、覆盖掉）：要人工纠正时，把改动写进同目录的 memory-patch.json，
    * 下次启动读记忆时套用一次，然后改名成 memory-patch.applied-<时间>.json。
-   * 格式：{"removeLandmarks":["id"…], "removeChests":["键"…], "setChests":[箱子记录…], "removeFurnaces":["键"…], "markGone":[{label,dim,pos,now}…]}
+   * 格式：{"removeLandmarks":["id"…], "removeChests":["键"…], "setChests":[箱子记录…], "removeFurnaces":["键"…], "markGone":[{label,dim,pos,now}…], "selectBase":"基地 id"（改首选基地/家）}
    */
   patched: string[] = [];
   private applyPatch(file: string) {
     const pf = path.join(path.dirname(file), 'memory-patch.json');
     if (!fs.existsSync(pf)) return;
     try {
-      const p = JSON.parse(fs.readFileSync(pf, 'utf8')) as { removeLandmarks?: string[]; removeChests?: string[]; setChests?: ChestRecord[]; removeFurnaces?: string[]; markGone?: { label: string; dim: string; pos: Vec3Like; now?: string }[] };
+      const p = JSON.parse(fs.readFileSync(pf, 'utf8')) as { removeLandmarks?: string[]; removeChests?: string[]; setChests?: ChestRecord[]; removeFurnaces?: string[]; markGone?: { label: string; dim: string; pos: Vec3Like; now?: string }[]; selectBase?: string };
       const ids = new Set(p.removeLandmarks ?? []);
       const before = this.data.landmarks.length;
       this.data.landmarks = this.data.landmarks.filter((l) => !ids.has(l.id));
@@ -375,6 +375,13 @@ export class WorldMemory {
       }
       for (const k of p.removeFurnaces ?? []) if (this.data.furnaces?.[k]) { delete this.data.furnaces[k]; this.patched.push(`删了熔炉 ${k}`); }
       for (const g of p.markGone ?? []) if (g?.pos && g.label && g.dim) { this.markGone(g.label, g.dim, g.pos, g.now ?? '别的东西'); this.patched.push(`记下 (${g.pos.x},${g.pos.y},${g.pos.z}) 的 ${g.label} 已经没了`); }
+      if (typeof p.selectBase === 'string' && p.selectBase) {
+        const target = this.data.landmarks.find((l) => this.inWorld(l) && l.kind === 'base' && l.id === p.selectBase);
+        if (target) {
+          for (const l of this.data.landmarks) if (this.inWorld(l) && l.kind === 'base' && l.dim === target.dim) l.primary = l.id === target.id;
+          this.patched.push(`首选基地（家）改成 ${target.label}`);
+        } else this.patched.push(`没找到基地 ${p.selectBase}，首选没改`);
+      }
       this.touch();
       fs.renameSync(pf, path.join(path.dirname(file), `memory-patch.applied-${Date.now()}.json`));
     } catch (e) {
