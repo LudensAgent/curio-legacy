@@ -53,3 +53,16 @@ test('dig-down-to-depth v11：声明了 y，判定拿调用方给的 y 核对', 
   assert.match(code, /typeof args\.y === "number"/);
   assert.doesNotMatch(code, /feet\.y - 20/);
 });
+
+test('参数摊平写也认；说明里写了默认值的参数可以不给', (t) => {
+  const { engine, adapter } = rig(t);
+  assert.ok(engine.write({ name: 'echo-y', description: '把要到的高度原样报回来', args: { y: '要挖到的高度', dir: '方向 N/S/E/W，不给就按当前朝向' }, code: 'return { y: args.y };', verify: 'return true;' }).ok);
+  const flat = useSkill.validate({ name: 'echo-y', y: 30, dir: 'E' }, adapter as any) as any;
+  assert.equal(flat.ok, true, flat.error);
+  assert.deepEqual(flat.args.args, { y: 30, dir: 'E' });
+  const noDir = useSkill.validate({ name: 'echo-y', args: { y: 30 } }, adapter as any) as any;
+  assert.equal(noDir.ok, true, noDir.error);
+  const noY = useSkill.validate({ name: 'echo-y', args: { dir: 'E' } }, adapter as any) as any;
+  assert.equal(noY.ok, false);
+  assert.match(noY.error, /需要参数：args\.y/);
+});

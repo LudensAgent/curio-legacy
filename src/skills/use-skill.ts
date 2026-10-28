@@ -32,7 +32,10 @@ export const useSkill: Skill<{ name: string; args?: Record<string, unknown>; fai
       const have = registry.list().map((b) => b.name).slice(0, 12);
       return { ok: false, error: `没有叫 ${name} 的可执行技能${have.length ? `；有：${have.join('、')}` : '（还没写过带步骤的技能）'}` };
     }
-    const extra = a.args && typeof a.args === 'object' && !Array.isArray(a.args) ? a.args as Record<string, unknown> : undefined;
+    let extra = a.args && typeof a.args === 'object' && !Array.isArray(a.args) ? a.args as Record<string, unknown> : undefined;
+    // 参数直接摊在外面（{"name":"x","dir":"E","count":20}）也认：两种写法它都会写，意思一样，没必要每次退回去让它改
+    const flat = Object.fromEntries(Object.entries(a).filter(([k]) => !['name', 'skill', 'args', 'failure'].includes(k)));
+    if (Object.keys(flat).length) extra = { ...flat, ...(extra ?? {}) };
     if (extra && JSON.stringify(extra).length > 2000) return { ok: false, error: 'args 太大了' };
     const failure = a.failure && typeof a.failure === 'object' ? a.failure as Record<string, unknown> : undefined;
     // 技能声明了要哪些参数：调用时没给就当场说清楚，别让代码跑到一半才报错
