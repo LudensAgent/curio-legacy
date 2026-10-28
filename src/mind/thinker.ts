@@ -385,10 +385,12 @@ export class Thinker {
         return names.length ? moveDetails(names) : '要查哪些动作？写 {"kind":"moves","names":["动作名"]}';
       }
       if (kind === 'skill') {
-        const skill = this.book?.get(String(raw.name ?? '').trim());
+        const name = String(raw.name ?? '').trim();
+        const candidate = this.book?.candidate(name);
+        const skill = raw.trial === true ? candidate : this.book?.get(name);
         if (!skill) return `没有叫「${String(raw.name ?? '')}」的技能；有这些：${this.book?.index().join('；') ?? '（没有技能书）'}`;
         this.bus.publish('skill_read', 'P3', `翻开技能：${skill.name}`, { name: skill.name, source: skill.source });
-        return `技能「${skill.name}」：\n${skill.body}`.slice(0, 9000);
+        return `技能「${skill.name}」：\n${skill.body}${!candidate && skill.behavior ? `\n完整执行契约（读取不代表当前已启用或已验证）：\n${JSON.stringify(skill.behavior)}` : ''}${candidate ? `\n\n候选 v${(candidate.behavior as Record<string, unknown>).version} 尚未启用；用 use_skill {name:"${name}",trial:true,args:{…}} 显式试用。候选的完整参数、触发、代码和验收：\n${JSON.stringify(candidate.behavior)}` : ''}`;
       }
       if (kind === 'design') {
         const brief = String(raw.brief ?? raw.request ?? '').trim().slice(0, 400);

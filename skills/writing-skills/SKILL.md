@@ -5,12 +5,12 @@ description: 怎么把管用的做法写成技能：触发条件、动作步骤�
 
 # 写技能
 
-技能是你自己从经历里总结出的做法。写在决定的 `skill` 字段里，校验通过就存进技能书，**这一刻起身体就会用**，不用等重启、也不用等下次回想。
+技能是你从经历里提出的做法。写在决定的 `skill` 字段里，校验后保存为**候选**。由你选择时机，用 `use_skill {"name":"…","trial":true,"args":{…}}` 试用；旧稳定版保留，候选不自动接手。当前版本至少三次实际验收成功，且成功次数不少于失败的两倍，才按原定模式启用。跳过、无动作自报成功、离线检查均不能代替游戏证据。用 `{"kind":"skill","name":"…","trial":true}` 阅读候选完整契约。
 
 ```
 "skill": {"name":"英文小写-连字符","description":"一句话：什么时候、做什么",
           "when":{触发条件}, "steps":[{"skill":"动作","args":{},"if"?:{条件},"optional"?:true}],
-          "priority":1-90, "cooldown_s":20, "overrides"?:["本能名"], "body"?:"几行说明"}
+          "verify":"只读验收函数体", "priority":1-90, "cooldown_s":20, "overrides"?:["本能名"], "body"?:"目标、输入、允许副作用、停止和验收方式"}
 ```
 
 ## 三种技能
@@ -19,7 +19,7 @@ description: 怎么把管用的做法写成技能：触发条件、动作步骤�
 - **调用类**（不写 when）：一套常用连招，只在 routine 里 `use_skill {"name":"…"}` 调用。
 
 ## 代码技能（code）
-动作步骤写不出来的做法（寻路算法、绕着怪走、按地形挑落脚点……）直接写成 JavaScript：把 `steps` 换成 `"code":"函数体"`，when / priority / overrides 照旧。代码在沙箱里跑，存下就能用，每次运行的结果、出错的行、最后几次 api 调用都会记下来。
+固定的几步优先用 `steps`；有界参数程序可以用 `experiment_method` 提出并试验。需要算法时，把 `steps` 换成 `"code":"函数体"`，when / priority / overrides 照旧，保留 JavaScript 自由组合能力。代码在沙箱里运行，每次实际结果、出错行和调用轨迹都会留下；编译检查不是掌握证据。
 
 ```
 "skill":{"name":"walk-around-water","description":"goto 被水挡住时沿岸绕过去",
@@ -33,7 +33,9 @@ description: 怎么把管用的做法写成技能：触发条件、动作步骤�
 - 参数 `api` 和 `args` 已经给好；恢复时 `args.failure = {skill,args,code,summary}` 是刚失败的那一步（比如 `args.failure.args.target`）；`use_skill {"name":…,"args":{…}}` 调用时 args 就是那个对象（比如 `args.y`）。调用类技能要在 skill 里写 `"args":{"y":"要挖到的高度"}` 声明参数名和意思：心智调用时会看到，写错名字会被当场提醒。
 - `api.state()`、`api.blockAt(x,y,z)`、`api.region(x1,y1,z1,x2,y2,z2)`（返回 palette/kinds/data，第 i 格 i = (y-min.y)*sx*sz + (z-min.z)*sx + (x-min.x)，kind = open|solid|liquid|unknown）、`api.entities(r)`、`api.nearestLand()`（最近见过的能站的干地，和身体上岸判断同一个标准；自己判断“哪里是干地”时用它，别另写一套）、`api.stepTo(x,y,z)`、`api.digAt(x,y,z)`、`api.placeAt(x,y,z,item)`、`api.moveTo(x,y,z,range,{sprint})`（默认走路，sprint:true 跑：快但很耗饥饿）、`api.act("动作",{参数})`、`api.look(yaw,pitch)`、`api.lookAt(x,y,z)`、`api.sleep(ms)`、`api.log(…)`、`api.progress(p)`；全部要 await。
 - 身体的细动作：`api.move({forward,back,left,right,jump,sprint,sneak}, ms≤1000, {face: 实体id或[x,y,z]})`（按住这些键一小会儿、一直盯着目标；前面是岩浆或高崖会自己停下）、`api.attack(id)`（返回距上次挥了多久）、`api.equip(物品, 位置)`、`api.shield(true/false)`、`api.draw("bow")` + `api.release([x,y,z])`、`api.shoot(id)`。`api.state()` 里有 offHand、armor、usingItem、hurtAgoMs、deathDrop；`api.entities(r)` 里有 velocity、height、hp。
-- 只看得到身边 48 格；region 最多 40000 格；不能 require/import/eval；每次唤醒最多 1.5 秒同步计算，总共最多 12000 次 api 调用；做不成就 `throw new Error("原因")`。
+- 方块查询只返回当前视觉确认的格子；未看见、遮挡、黑暗或未加载均为 `name:null,kind:"unknown"`，连实心/空气/液体也不能猜。48 格是查询上限，不代表这个范围全都看得见。region 的第 i 格是 `palette[data[i]]` 和 `kinds[data[i]]`，unknown 不代表空气，更不代表没有矿。听到的实体只给粗略方向和距离，没有真实 ID/坐标；精确攻击/射击只接受当前看见的实体。
+- region 最多 40000 格；不能 require/import/eval、网络/文件访问或接触 adapter/宿主世界对象；每次唤醒最多 1.5 秒同步计算，总共最多 12000 次 api 调用；做不成就 `throw new Error("原因")`。
+- 恢复用 `args.failure.target` 的绝对坐标；失败动作的 `at/to` 是相对坐标，不能当世界坐标。保留原目标和允许手段，缺材料/接口就报告缺口，不擅自换实体、开采范围或新增探索。修改 `when/args/verify` 也属于完整版本修订。
 - **会自己变好**：代码技能老失败时，会在后台单独请一次模型拿着出错记录改代码，换上新版本（v2、v3…）；新版本更差会自动退回旧版。改进有间隔、不会频繁发生。你也可以写 `{"name":"…","improve":"哪里不好"}` 主动要求改进（同样排队、限频）。
 
 ## 条件写法（并列的键都要成立）

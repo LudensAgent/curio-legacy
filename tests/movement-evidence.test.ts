@@ -69,7 +69,12 @@ test('coordinate goto: a solid target block means standing on it; a cell that ca
   t.mock.method(globalThis, 'setTimeout', ((callback: () => void) => { queueMicrotask(callback); return 0; }) as unknown as typeof setTimeout);
   const adapter = new TestWorld(); adapter.pos = { x: 20.5, y: 77, z: 0.5 };
   adapter.setBlock({ x: 24, y: 76, z: 0 }, 'stone');
-  const ctx = makeCtx(adapter); t.after(() => ctx.memory.close());
+  const ctx = makeCtx(adapter, { senses: { observeBlocks: (positions) => positions.map((pos) => {
+    const state = adapter.state();
+    return { ...adapter.blockStateAt(pos), pos, worldId: state.worldId, sessionId: state.sessionId, dimension: state.dim,
+      observationId: state.observationId, observedAt: Date.now(), source: 'vision' as const };
+  }) } });
+  t.after(() => ctx.memory.close());
   const targets: any[] = [];
   t.mock.method(adapter, 'moveTo', async (target: any) => { targets.push(target); adapter.pos = { x: 24.5, y: 77, z: 0.5 }; });
   let r = await goTo.run(ctx, { target: '24,76,0' });

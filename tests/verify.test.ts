@@ -22,7 +22,12 @@ function setup(t: any) {
   const engine = new BehaviorEngine(new SkillBook(null, tmp()), adapter, arbiter, bus, vision);
   setBehaviorRegistry(engine);
   t.after(() => { setBehaviorRegistry(null); engine.dispose(); memory.close(); });
-  const run = (name: string) => new Promise<TaskOutcome>((r) => { arbiter.once('done', r); arbiter.start({ skill: 'use_skill', args: { name } }, 'llm'); });
+  const run = (name: string) => new Promise<TaskOutcome>((resolve, reject) => {
+    const done = (outcome: TaskOutcome) => resolve(outcome);
+    arbiter.once('done', done);
+    const started = arbiter.start({ skill: 'use_skill', args: { name, trial: true } }, 'llm');
+    if ('error' in started) { arbiter.off('done', done); reject(new Error(started.error)); }
+  });
   return { adapter, bus, engine, run };
 }
 
@@ -34,7 +39,7 @@ test('verify：模型写代码技能必须带判定；判定只能看不能动',
   assert.ok('error' in bad && /判定只能看/.test(bad.error) && /api\.digAt/.test(bad.error), JSON.stringify(bad));
   const yes = engine.write({ name: 'exit-boat', description: '下不了船时换个办法', code: 'return 1;', verify: 'const s = await api.state(); return s.inWater ? "还在水里" : true;' }, { by: 'forge' });
   assert.ok(yes.ok, JSON.stringify(yes));
-  assert.match(engine.get('exit-boat')?.verify ?? '', /inWater/);
+  assert.match(engine.get('exit-boat', true)?.verify ?? '', /inWater/);
 });
 
 test('verify：代码说做完了但判定没通过，算这次没做成、记进失败；判定通过才算成', async (t) => {
@@ -74,5 +79,5 @@ test('verify：判定没过的记录交给后台改进，改进器看得到判�
   assert.equal(asked.length, 1);
   assert.match(asked[0], /现在的判定/);
   assert.match(asked[0], /判定没通过：还在水里/, '改进时看得到判定没过的记录');
-  assert.match(engine.get('swim-out')?.verify ?? '', /v2/);
+  assert.match(engine.get('swim-out', true)?.verify ?? '', /v2/);
 });

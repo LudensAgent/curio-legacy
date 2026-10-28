@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { AgentState } from '../adapter/types.ts';
 import type { AgentEvent, EventBus } from '../events.ts';
-import type { SkillBook } from '../knowledge/skillbook.ts';
+import { normalizeSkillName, type SkillBook } from '../knowledge/skillbook.ts';
 import { instinctNote, type BehaviorEngine } from '../mind/behaviors.ts';
 import type { LedgerSignal, LedgerView } from '../mind/ledger.ts';
 import type { ChatMessage } from '../planner/llm.ts';
@@ -513,11 +513,13 @@ chronic_shortages 是这两个小时里一再缺的东西：想想能不能把�
   /** 写技能的共同要求（单件、成批都一样） */
   private rules(): string {
     const guide = this.book?.get('writing-skills')?.body ?? '';
-    return `写下的技能立刻生效，下次遇到同类情况身体会自己做。
+    return `你提出的是待验证的技能候选；保存、代码能运行和游戏目标达成是三件不同的事，实际观测才是使用与修订的依据。
 要求：
 - 针对一类情况，不是只对这一次；触发条件只写身体感觉得到的事（血量、看见的怪、身边的方块、刚失败的动作、是否挨打、是否在坑里）。
-- 需要计算（找路、挑方向、挑落脚点、判断要不要打）就写代码技能（code）；简单固定的几步可以写 steps；也可以不写 when，做成让心智在 routine 里 use_skill 调用的连招。
-- 代码技能必须同时写 verify：做完以后看一眼世界、确认真的做成了（脱船就看还在不在船上，出坑就看头顶见不见天，清背包就看那几样少了没有）；判定没通过算这次没做成，会记进成败、交给后台改进。
+- 先在 body 写清调用目标、输入含义与坐标基准、允许的动作与资源消耗、何时停止、以及看什么观测确认结果。目标、手段和资源取舍来自它自己的委托或经历；缺准备条件就报告缺口，不擅自换目标或另做一套流程。
+- 能用现有可靠技能就组合它们；固定的几步优先 steps。需要参数化试验时，心智已有 experiment_method（有界参数程序、观测后置条件和试验证据），不能把 program 当成此处尚不支持的 skill 字段；适合这种试验就输出 none，在 why 说明可检验的设想，交给心智选择。确实需要计算（找路、挑方向、挑落脚点）或循环时保留 code，也可以不写 when，做成由心智 use_skill 调用的做法。
+- steps 和 code 候选都必须同时写 verify：做完以后看一眼世界、确认真的做成了（脱船就看还在不在船上，出坑就看头顶见不见天，清背包就看那几样少了没有）；判定没通过算这次没做成，会记进成败、交给后台改进。
+- verify 核对调用方指定的原目标和实际前后观测，不能只信代码返回 ok、自己算出的目标或仅仅发生了移动；未做事的 skipped 不等于目标已完成，无法观察时说明不能确认。循环必须有明确退出条件和次数/时间边界。
 - 调用类技能（不写 when）有要调用方给的参数时，写 "args":{"参数名":"意思"} 声明；代码里读 args.参数名，verify 里拿 args.args.参数名 核对目标（别拿代码自己算出来、放进返回值的目标比）。
 - existing_skills 里已经有管这件事的技能、只是没做好：用同一个名字重写它，别重复造。
 - reliable_skills 是已经验证可靠的技能（积木）：代码里用 api.useSkill 调用它们，能组合现成的就别从底层动作重写一遍；新技能可以比它们高一层（比如“开一条巷道找铁并带回来”调用挖巷道的那份）。
@@ -592,6 +594,7 @@ ${this.rules()}
   private safeLedger(fn: () => string[]): string[] { try { return fn().filter(Boolean); } catch { return []; } }
 
   private async forge(batch: Incident[]): Promise<string> {
+    const expectedTokens = new Map((this.book?.list() ?? this.engine.list()).map((b) => [b.name, this.engine.editToken(b.name)] as const));
     const single = batch.length === 1;
     const messages = single ? this.messages(batch[0]) : this.batchMessages(batch);
     const label = single ? KIND_LABEL[batch[0].kind] : `一批 ${batch.length} 件`;
@@ -601,6 +604,12 @@ ${this.rules()}
     let written = 0;
     for (let attempt = 0; attempt < 3; attempt++) {
       const c = await this.planner.complete(messages, { label: `skill:总结（${label}）`, tier: 'full', signal, attempt, maxTokensScale: 2 });
+      const incomplete = c.finishReason === 'length' ? '输出被长度上限截断' : !c.text.trim() ? '模型没有返回正文' : null;
+      if (incomplete) {
+        this.planner.noteInvalid('总结技能', incomplete);
+        messages.push({ role: 'user', content: `刚才${incomplete}，没有保存技能或执行动作。缩小为当前证据支持的一份候选或 none，重新输出完整 JSON；不要续写残片。` });
+        continue;
+      }
       let raw: Record<string, any>;
       try { raw = extractJson(c.text) as Record<string, any>; } catch (e) {
         this.planner.noteInvalid('总结技能', (e as Error).message);
@@ -632,13 +641,14 @@ ${this.rules()}
         for (const draft of drafts) {
           if (written >= 2) break;
           const { event: _e, ...clean } = draft as Record<string, unknown>;
-          const w = this.engine.write(clean, { by: 'forge' });
+          const name = typeof clean.name === 'string' ? normalizeSkillName(clean.name) : '';
+          const w = this.engine.write(clean, { by: 'forge', expectedToken: expectedTokens.get(name) });
           if (!w.ok) { if ('gated' in w && w.gated) gated.push(w.error); else bad.push(w.error); continue; }
           written++; ok++;
-          this.setOwner(inc, w.name);
-          const desc = this.engine.get(w.name)?.description ?? '';
-          out.push(`${tag}${w.created ? '新技能' : '改写'} ${w.name}`);
-          this.bus.publish('skill_forged', 'P2', `从${KIND_LABEL[inc.kind]}里${w.created ? '总结出新技能' : '改写了技能'}「${w.name}」：${desc}`, { name: w.name, kind: inc.kind, mode: w.mode, created: w.created });
+          if (!w.candidate) this.setOwner(inc, w.name);
+          const desc = (this.engine.get(w.name, true) ?? this.engine.get(w.name))?.description ?? '';
+          out.push(`${tag}${w.candidate ? '待验证候选' : w.created ? '新技能' : '改写'} ${w.name}`);
+          this.bus.publish('skill_forged', 'P2', `从${KIND_LABEL[inc.kind]}里${w.candidate ? '写下待验证候选' : w.created ? '总结出新技能' : '改写了技能'}「${w.name}」：${desc}`, { name: w.name, kind: inc.kind, mode: w.mode, created: w.created, candidate: !!w.candidate });
         }
         if (ok || written >= 2) { settled.add(idx); continue; }
         if (gated.length && !bad.length) {

@@ -243,7 +243,7 @@ export function evalPredicate(p: Predicate, s: Sense): boolean {
 }
 
 /** 从适配器和感官凑出此刻的感觉（不透视：怪只认看见/听见的，方块只看身边） */
-export function senseNow(adapter: Pick<GameAdapter, 'state' | 'blockAt' | 'eye'> & Partial<Pick<GameAdapter, 'lightAt'>>, senses: Pick<Senses, 'perceivedEntities'>,
+export function senseNow(adapter: Pick<GameAdapter, 'state' | 'blockAt' | 'eye'> & Partial<Pick<GameAdapter, 'lightAt'>>, senses: Pick<Senses, 'perceivedEntities' | 'observeBlocks'>,
   doing: string | null, failure?: Sense['failure'], hurtAgoMs = Infinity): Sense {
   const state = adapter.state();
   let facing: Facing = 'N';
@@ -261,7 +261,7 @@ export function senseNow(adapter: Pick<GameAdapter, 'state' | 'blockAt' | 'eye'>
   const cache = new Map<string, string | null>();
   const cell = (rel: [number, number, number]) => {
     const k = rel.join(',');
-    if (!cache.has(k)) { try { cache.set(k, adapter.blockAt(toWorld(feet, facing, rel))); } catch { cache.set(k, null); } }
+    if (!cache.has(k)) cache.set(k, senses.observeBlocks?.([toWorld(feet, facing, rel)])[0]?.name ?? null);
     return cache.get(k) ?? null;
   };
   return {

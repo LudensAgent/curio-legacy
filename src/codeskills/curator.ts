@@ -89,9 +89,9 @@ export class SkillCurator {
       if (b.when?.dim && dim && !b.when.dim.includes(dim)) continue;
       const st = this.engine.statsOf(b.name);
       const written = this.book?.get(b.name)?.updatedAt ?? now;
-      const last = Math.max(written, st?.lastAt ?? 0);
+      const last = Math.max(written, st?.lastAt ?? 0, st?.lastUsedAt ?? 0, st?.recent?.at(-1)?.at ?? 0);
       if (now - last >= this.opts.unusedMs) {
-        const why = st?.fired ? `${Math.round((now - last) / 3600_000)} 小时没用上` : `写下 ${Math.round((now - written) / 3600_000)} 小时一次都没用上`;
+        const why = st && st.ok + st.fail + st.fired > 0 ? `${Math.round((now - last) / 3600_000)} 小时没用上` : `写下 ${Math.round((now - written) / 3600_000)} 小时一次都没用上`;
         if (this.engine.retire(b.name, why)) out.push(b.name);
       }
     }
@@ -115,7 +115,7 @@ export class SkillCurator {
     let dim = '';
     try { dim = this.dim(); } catch { /* 状态暂不可用 */ }
     for (const b of this.active()) {
-      const st = this.engine.statsOf(b.name);
+      const st = this.engine.currentStats(b.name);
       const tries = (st?.ok ?? 0) + (st?.fail ?? 0);
       if (tries >= 6 && (st?.ok ?? 0) / tries < 0.2 && this.settled(b, now, dim) && this.engine.retire(b.name, `用了 ${tries} 次只成了 ${st?.ok ?? 0} 次，在添乱`)) out.push(b.name);
     }
@@ -123,7 +123,7 @@ export class SkillCurator {
     const left = this.active().filter((b) => !isEmergency(b));
     const over = left.length - this.opts.maxActive;
     if (over > 0) {
-      const value = (name: string) => { const st = this.engine.statsOf(name); return (st?.ok ?? 0) * 3 - (st?.fail ?? 0); };
+      const value = (name: string) => { const st = this.engine.currentStats(name); return st.ok * 3 - st.fail; };
       const last = (name: string) => Math.max(this.book?.get(name)?.updatedAt ?? 0, this.engine.statsOf(name)?.lastAt ?? 0);
       const victims = left.filter((b) => this.settled(b, now, dim)).sort((a, b) => value(a.name) - value(b.name) || last(a.name) - last(b.name)).slice(0, over);
       for (const b of victims) {
@@ -176,7 +176,8 @@ export class SkillCurator {
       const st = this.engine.statsOf(b.name);
       return { name: b.name, description: b.description, mode: b.mode, priority: b.priority, ...(b.when ? { when: b.when } : {}), ...(isEmergency(b) ? { lifesaver: true } : {}),
         kind: b.code ? `代码 v${b.version ?? 1}（${b.code.length} 字符）` : `${b.steps.length} 步`,
-        uses: st ? { ok: st.ok, fail: st.fail, fired: st.fired } : { ok: 0, fail: 0, fired: 0 },
+        uses: { ...this.engine.currentStats(b.name), fired: st?.fired ?? 0 },
+        lifetime: st ? { ok: st.ok, fail: st.fail } : { ok: 0, fail: 0 },
         ...(st?.byVersion && Object.keys(st.byVersion).length > 1 ? { versions: st.byVersion } : {}),
         ...(this.effect(b.name) ? { harvest_effect: this.effect(b.name) } : {}),
         ...(st?.conflicts && Object.keys(st.conflicts).length ? { clashed_with: st.conflicts } : {}),
@@ -188,6 +189,7 @@ export class SkillCurator {
     });
     const system = `你在整理 Minecraft 机器人 Curio 自己写的技能（会动手的技能：条件成立时自动做、动作失败时先试、或被调用）。像人整理笔记一样：
 - 说的是同一件事、触发条件大面积重叠的：合并成一份更好的（merge：from 写被合并的名字，skill 写合并后的完整技能，可以沿用其中一个名字）。合并时保留各自真正管用的部分（看 uses 的成败）。
+- merge 先保存候选，原技能保留；候选实际验收通过后再根据新证据决定是否 retire 来源技能。uses 是当前稳定版本的证据，lifetime 是历史总计，不混用。
 - 来回拉锯的（see_sawed_with：一个做完另一个又把它推回去，或者技能一再打断手上同一件事）：这最要紧——找出两边条件为什么会轮流成立，
   收窄条件让它们不再互相触发（比如躲怪的技能加上“怪还在附近”、回地表的技能加上“附近没有怪”），或者合并成一份统一处理；
 - 动作上互相拆台的（undid_work_of：它挖掉了那个技能放的方块、或把那个技能挖开的地方又填上，数字是格数；work_undone_by 是反过来）：和拉锯一样要紧。
@@ -229,9 +231,8 @@ export class SkillCurator {
         const from = (Array.isArray(m?.from) ? m.from : []).map(String).filter((n: string) => names.has(n));
         const w = this.engine.write(m?.skill, { by: 'curator' });
         if (!w.ok) { errors.push(`合并 ${from.join('+')} 没存下：${w.error}`); continue; }
-        for (const n of from) if (n !== w.name) this.engine.retire(n, `合并进 ${w.name}`);
-        done.push(`${from.join('+')} → ${w.name}`);
-        this.bus.publish('skill_merged', 'P2', `整理技能：${from.join('、')} 合并成「${w.name}」`, { from, into: w.name });
+        done.push(`${from.join('+')} → 候选 ${w.name}（保留原技能，验收后再决定收起）`);
+        this.bus.publish('skill_merged', 'P2', `整理技能：${from.join('、')} 生成合并候选「${w.name}」；原技能保持原状态`, { from, into: w.name, candidate: true });
       }
       for (const p of Array.isArray(raw.priority) ? raw.priority.slice(0, 8) : []) {
         if (names.has(String(p?.name)) && Number.isFinite(Number(p?.priority)) && this.engine.setPriority(String(p.name), Number(p.priority))) done.push(`${p.name} 优先级 ${p.priority}`);
@@ -243,7 +244,7 @@ export class SkillCurator {
         // 救命的技能：只有在添乱（用了不少次几乎总失败）时才收；合并进别的技能走 merge
         const eb = names.has(String(r?.name)) ? this.engine.get(String(r.name)) : undefined;
         if (eb && isEmergency(eb)) {
-          const st = this.engine.statsOf(eb.name), tries = (st?.ok ?? 0) + (st?.fail ?? 0);
+          const st = this.engine.currentStats(eb.name), tries = st.ok + st.fail;
           if (!(tries >= 6 && (st?.ok ?? 0) / tries < 0.2)) { errors.push(`${r.name} 是救命的技能，用得少不收（要合并就用 merge）`); continue; }
         }
         if (names.has(String(r?.name)) && this.engine.retire(String(r.name), String(r?.why ?? '整理时收起'))) done.push(`收起 ${r.name}`);
@@ -252,13 +253,13 @@ export class SkillCurator {
         const name = String(r?.name ?? ''), to = Math.floor(Number(r?.to));
         const b = this.engine.get(name);
         if (!names.has(name) || !b?.code || !(to >= 1) || to >= (b.version ?? 1)) continue;
-        const old = this.book?.codeVersion(name, to);
-        if (!old) { errors.push(`${name} 没有 v${to} 的代码`); continue; }
+        const old = this.book?.definitionVersion(name, to);
+        if (!old) { errors.push(`${name} 没有 v${to} 的完整技能快照`); continue; }
         // 两个版本都要跑够几次才比：凭一两次的结果退回，只会让版本号越涨越多、没有一个版本攒够经验
         const runs = (v: number) => { const x = this.engine.statsOf(name)?.byVersion?.[String(v)]; return x ? x.ok + x.fail : 0; };
         if (runs(b.version ?? 1) < 4 || runs(to) < 3) { errors.push(`${name} v${b.version ?? 1} 跑了 ${runs(b.version ?? 1)} 次、v${to} 跑了 ${runs(to)} 次，数据太少不退回`); continue; }
         const why = String(r?.why ?? '').slice(0, 100);
-        const w = this.engine.replaceCode(name, old, `整理时退回 v${to}：${why}`);
+        const w = this.engine.rollback(name, to, `整理时退回 v${to}：${why}`);
         if (!w.ok) { errors.push(`${name} 退回失败：${w.error}`); continue; }
         done.push(`${name} 退回 v${to}`);
         this.bus.publish('skill_rollback', 'P2', `整理技能：「${name}」v${b.version ?? 1} 不如 v${to}，退回旧代码（现在是 v${w.version}）：${why}`, { name, from: b.version ?? 1, to, by: 'curator' });

@@ -7,12 +7,12 @@ import type { EventBus } from '../events.ts';
 import { normalizeSkillName, type KnowSkill, type SkillBook, type SkillMode } from '../knowledge/skillbook.ts';
 import { normalizeStep } from '../planner/plan.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
-import type { Senses } from '../skills/types.ts';
+import type { Senses, SkillResult } from '../skills/types.ts';
 import { compileCheck, MAX_CODE, MAX_VERIFY, VERIFY_METHODS } from '../codeskills/sandbox.ts';
 import { evalPredicate, isRecovery, isThreat, senseNow, situationOf, validatePredicate, type Predicate, type Sense } from './predicate.ts';
 
 /**
- * 行为技能：模型从经历里总结出来、写下就生效的“做法”。
+ * 行为技能：模型总结候选，通过显式游戏试用验收后启用的做法。
  *
  *   {"name":"pillar-up-from-skeletons","description":"血少又被骷髅射时先垫高三格躲箭",
  *    "when":{"hp_below":8,"hostile":{"name":"skeleton","within":16}},
@@ -30,6 +30,7 @@ export interface Behavior {
   when?: Predicate; steps: BehaviorStep[]; priority: number; cooldownMs: number; overrides: string[];
   /** 代码技能：模型写的 JavaScript（在沙箱里跑，只能用 api.*），可以被后台自动改进出新版本 */
   code?: string; version?: number;
+  candidate?: boolean;
   /** 判定：做完以后看一眼世界，确认真的做成了（只能读的 api；return true 算成，return "原因" 算没成） */
   verify?: string;
   /** use_skill 调用时必须给的参数：名字 → 说明（恢复时由失败的那一步提供，不检查） */
@@ -40,6 +41,8 @@ export interface BehaviorStats {
   fired: number; ok: number; fail: number; lastAt: number; disabled?: boolean; lastError?: string;
   /** 最近一次写下（新写或改写）的时刻 */
   writtenAt?: number;
+  lastUsedAt?: number;
+  candidatePermit?: number;
   /** 恢复时自己判断“跟这事无关”跳过的次数（不算成败） */
   skipped?: number;
   /** 代码技能：每个版本各自的成败，和最近几次运行的记录（给改进用） */
@@ -178,6 +181,17 @@ export function validateBehavior(raw: unknown, adapter: GameAdapter): Validated 
       return { error: 'skill.when 太宽了：自动做的技能要写清具体情况（血量、怪、身边的方块、失败的动作……）' };
     }
     behavior.when = p;
+    const failures = (condition: Predicate): string | null => {
+      for (const name of condition.after_failure?.skill ?? []) {
+        if (!SKILLS[name] || LLM_HIDDEN.has(name)) return `恢复条件没有可调用的动作 ${name}`;
+        if (SKILLS[name].readOnly && condition.after_failure?.code?.includes('NOT_FOUND')) return `${name} 的 NOT_FOUND 是观察结果，不进入恢复调度；请由心智选择下一步`;
+      }
+      return [...(condition.all ?? []), ...(condition.any ?? [])].map(failures).find((why) => why !== null) ?? null;
+    };
+    const requiresLava = (condition: Predicate): boolean => condition.in_lava === true || !!condition.all?.some(requiresLava) || !!condition.any?.length && condition.any.every(requiresLava);
+    if (!isRecovery(p) && requiresLava(p)) return { error: 'skill.when：in_lava 自动触发先由岩浆底线接管；请写成心智显式调用的技能' };
+    const unreachable = failures(p);
+    if (unreachable) return { error: `skill.when：${unreachable}` };
   }
   if (o.args !== undefined) {
     if (!o.args || typeof o.args !== 'object' || Array.isArray(o.args) || Object.keys(o.args).length > 6) return { error: 'skill.args 写调用时要给的参数：{"target":"要去的坐标 x,y,z"}' };
@@ -196,20 +210,21 @@ export function validateBehavior(raw: unknown, adapter: GameAdapter): Validated 
     if (list.length && !behavior.when) return { error: 'overrides 需要 when：什么情况下用你的做法代替本能' };
     if (list.length) behavior.overrides = list;
   }
-  const body = String(o.body ?? o.note ?? o.notes ?? '').trim().slice(0, 3000) || `${description}\n\n（从经历里总结出来的做法，写下就生效。）`;
+  const body = String(o.body ?? o.note ?? o.notes ?? '').trim().slice(0, 3000) || `${description}\n\n（从经历里提出的做法；先显式试用，用实际观测验收。）`;
   return { name, description, body, behavior };
 }
 
 /** 把技能书里一份带 behavior 的技能变成可执行的行为；格式不对就跳过 */
-function toBehavior(k: KnowSkill, adapter: GameAdapter): Behavior | null {
+function toBehavior(k: KnowSkill, adapter: GameAdapter): Behavior | { error: string } | null {
   if (!k.behavior || typeof k.behavior !== 'object') return null;
   const v = validateBehavior({ name: k.name, description: k.description || k.name, ...(k.behavior as object) }, adapter);
-  if ('error' in v || v.disable) return null;
+  if ('error' in v) return v;
+  if (v.disable) return null;
   const b = v.behavior as Record<string, any>;
   const version = Number((k.behavior as any).version) || (b.code ? 1 : undefined);
   return { name: k.name, description: k.description, source: k.source, mode: b.when ? (isRecovery(b.when) ? 'recover' : 'auto') : 'manual',
     ...(b.when ? { when: b.when } : {}), steps: b.steps ?? [], priority: b.priority, cooldownMs: b.cooldown_s * 1000, overrides: b.overrides ?? [],
-    ...(b.code ? { code: b.code, version } : {}), ...(b.verify ? { verify: b.verify } : {}), ...(b.args ? { needs: b.args } : {}) };
+    ...(b.code ? { code: b.code } : {}), version, ...((k.behavior as Record<string, unknown>).candidate === true ? { candidate: true } : {}), ...(b.verify ? { verify: b.verify } : {}), ...(b.args ? { needs: b.args } : {}) };
 }
 
 /** 恢复技能按“哪个动作、什么错误码”失败来归类 */
@@ -217,6 +232,7 @@ const recoverySig = (f: { skill: string; code?: string | null }) => `${f.skill}:
 
 export class BehaviorEngine {
   private behaviors = new Map<string, Behavior>();
+  private candidates = new Map<string, Behavior>();
   private stats: Record<string, BehaviorStats> = {};
   /** 最近用过哪些技能（名字@版本、什么时候）：收获账本拿它算“用了这个技能拿东西是快了还是慢了” */
   private usage: { at: number; tag: string }[] = [];
@@ -256,7 +272,7 @@ export class BehaviorEngine {
   drops: (() => Sense['deathDrop']) | null = null;
 
   constructor(private book: SkillBook | null, private adapter: GameAdapter, private arbiter: Pick<Arbiter, 'start' | 'info' | 'on' | 'off'> | null,
-    private bus: EventBus, private senses: Pick<Senses, 'perceivedEntities'>, private statsFile: string | null = null) {
+    private bus: EventBus, private senses: Pick<Senses, 'perceivedEntities' | 'observeBlocks'>, private statsFile: string | null = null) {
     if (statsFile && fs.existsSync(statsFile)) { try { this.stats = JSON.parse(fs.readFileSync(statsFile, 'utf8')) ?? {}; } catch { this.stats = {}; } }
     book?.onChange(() => this.reload());
     bus.on('event', (ev: { type: string }) => {
@@ -271,19 +287,35 @@ export class BehaviorEngine {
 
   reload() {
     this.behaviors.clear();
+    this.candidates.clear();
     this.invalid.clear();
     for (const k of this.book?.list() ?? []) {
       if (k.behavior === undefined) continue;
       const b = toBehavior(k, this.adapter);
-      if (b) this.behaviors.set(b.name, b);
-      else this.invalid.set(k.name, '格式不对，没有生效');
+      if (b && !('error' in b)) { b.version ??= this.stats[b.name]?.rev ?? 1; this.behaviors.set(b.name, b); }
+      else this.invalid.set(k.name, b?.error ?? '格式不对，没有生效');
+    }
+    for (const k of this.book?.pending() ?? []) {
+      const b = toBehavior(k, this.adapter);
+      if (b && !('error' in b)) this.candidates.set(b.name, b);
+      else this.invalid.set(k.name, `候选未通过校验：${b?.error ?? '格式不对'}`);
     }
   }
 
   list(): Behavior[] { return [...this.behaviors.values()].sort((a, b) => b.priority - a.priority || a.name.localeCompare(b.name)); }
-  get(name: string): Behavior | undefined { return this.behaviors.get(name); }
+  get(name: string, trial = false): Behavior | undefined { return trial ? this.candidates.get(name) : this.behaviors.get(name); }
   statsOf(name: string): BehaviorStats | undefined { return this.stats[name]; }
-  enabled(b: Behavior): boolean { return !this.stats[b.name]?.disabled; }
+  enabled(b: Behavior): boolean { return !b.candidate && !this.inactive(b.name); }
+  executionError(name: string, trial = false): string | null {
+    const b = this.get(name, trial);
+    if (this.inactive(name) && !(trial && b?.candidate && this.stats[name]?.candidatePermit === b.version)) return `技能 ${name} 已停用或收起；由心智显式修订后再试`;
+    if (!b) return trial ? `没有 ${name} 的候选版本` : `没有技能 ${name}`;
+    return b.candidate && !trial ? `${name} 尚为候选；用 use_skill {name:"${name}",trial:true} 显式试用` : null;
+  }
+  editToken(name: string): string | undefined {
+    const k = this.book?.get(name), candidate = this.book?.candidate(name), st = this.stats[name];
+    return k || candidate || st ? JSON.stringify([k?.updatedAt, k?.behavior, candidate?.updatedAt, candidate?.behavior, st?.disabled, st?.retired, st?.disabledAt, st?.retiredAt]) : undefined;
+  }
 
   private sense(cur: TaskInfo | null, failure?: Sense['failure']): Sense {
     const s = senseNow(this.adapter, this.senses, cur && cur.source !== 'filler' ? cur.skill : null, failure, this.lastHurtAt ? Date.now() - this.lastHurtAt : Infinity);
@@ -420,7 +452,7 @@ export class BehaviorEngine {
   /** 整理：把技能收起来（停用并写明原因）；同名重写会恢复 */
   retire(name: string, why: string): boolean {
     if (!this.behaviors.has(name)) return false;
-    this.touch(name, (st) => { st.disabled = true; st.retired = why.slice(0, 120); st.retiredAt = Date.now(); });
+    this.touch(name, (st) => { st.disabled = true; st.retired = why.slice(0, 120); st.retiredAt = Date.now(); delete st.candidatePermit; });
     this.bus.publish('skill_retired', 'P2', `整理技能：收起「${name}」（${why.slice(0, 80)}）`, { name, why });
     return true;
   }
@@ -431,7 +463,7 @@ export class BehaviorEngine {
     if (!k || !this.book || !k.behavior || typeof k.behavior !== 'object') return false;
     const p = Math.max(1, Math.min(90, Math.round(priority)));
     const raw = { ...(k.behavior as Record<string, unknown>), priority: p, code_file: undefined, version: undefined };
-    const w = this.book.write(name, k.description, k.body, raw);
+    const w = this.write({ name, description: k.description, body: k.body, ...raw }, { by: 'curator' });
     return w.ok;
   }
 
@@ -480,15 +512,17 @@ export class BehaviorEngine {
   }
 
   /**
-   * 模型在思考里写下的技能：校验后写进技能书，立刻生效（技能书变更会触发 reload）。
-   * {"name":…,"disable":true} 停用；同名再写一次就是修订并重新启用。
+   * 模型写出的版本先存候选，稳定版继续使用；disable 同时拦调度和直接调用。
    */
-  write(raw: unknown, opts: { by?: 'mind' | 'forge' | 'curator' } = {}): { ok: true; name: string; created: boolean; mode: SkillMode; disabled?: boolean; improving?: boolean } | { ok: false; error: string; gated?: boolean } {
+  write(raw: unknown, opts: { by?: 'mind' | 'forge' | 'curator' | 'improve'; expectedToken?: string } = {}): { ok: true; name: string; created: boolean; mode: SkillMode; disabled?: boolean; improving?: boolean; candidate?: boolean } | { ok: false; error: string; gated?: boolean } {
     const o = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
+    const requestedName = normalizeSkillName(String(o.name ?? ''));
+    if (Object.hasOwn(opts, 'expectedToken') && opts.expectedToken !== this.editToken(requestedName)) return { ok: false, error: '技能在生成期间已修订、停用或收起，忽略过期结果', gated: true };
+    if (opts.by && opts.by !== 'mind' && this.inactive(requestedName)) return { ok: false, error: '技能已停用或收起，后台结果不能重新启用它', gated: true };
     // {"name":…,"improve":"哪里不好"}：请后台改进这份代码技能（异步，改进器限频）
     if (typeof o.improve === 'string' && !o.code && !o.steps) {
       const name = normalizeSkillName(String(o.name ?? ''));
-      const b = this.behaviors.get(name);
+      const b = this.get(name, true) ?? this.get(name);
       if (!b?.code) return { ok: false, error: `${name || '这份技能'} 不是代码技能，改不了；可以同名重写` };
       this.improve?.(name, 'requested', o.improve.slice(0, 200));
       return { ok: true, name, created: false, mode: b.mode, improving: true };
@@ -497,40 +531,44 @@ export class BehaviorEngine {
     if ('error' in v) return { ok: false, error: v.error };
     if (v.disable) {
       if (!this.behaviors.has(v.name) && !this.book?.get(v.name)) return { ok: false, error: `没有叫 ${v.name} 的技能` };
-      this.touch(v.name, (st) => { st.disabled = true; st.disabledAt = Date.now(); });
+      this.touch(v.name, (st) => { st.disabled = true; st.disabledAt = Date.now(); delete st.candidatePermit; });
       this.bus.publish('skill_disabled', 'P2', `停用了技能 ${v.name}`, { name: v.name, by: 'mind' });
       return { ok: true, name: v.name, created: false, mode: this.behaviors.get(v.name)?.mode ?? 'manual', disabled: true };
     }
     if (!this.book) return { ok: false, error: '没有技能书，存不下技能' };
     // 模型新写、改写代码技能（心智、技能工程师、整理）必须带判定：代码跑完不抛错不等于做成了（“脱船”技能人还在船上，也报“做完了”）
-    if (opts.by && v.behavior.code && !v.behavior.verify) return { ok: false, error: VERIFY_REQUIRED };
+    if (opts.by && !v.behavior.verify) return { ok: false, error: VERIFY_REQUIRED };
     // 后台总结（每死一次、每吃一次亏都会来一遍）不能推翻一个还没攒够证据的版本：
     // 否则同一个技能在几种打法之间来回改，没有一个版本用够几次，永远不知道哪个管用
     if (opts.by === 'forge') {
       const gate = this.rewriteGate(v.name) ?? this.tombstone(v.name);
       if (gate) return { ok: false, error: gate, gated: true };
     }
-    const w = this.book.write(v.name, v.description, v.body, v.behavior);
+    const versions = Object.keys(this.stats[v.name]?.byVersion ?? {}).map(Number).filter(Number.isFinite);
+    const version = Math.max(0, ...versions, this.get(v.name)?.version ?? 0, this.get(v.name, true)?.version ?? 0) + 1;
+    const w = this.book.write(v.name, v.description, v.body, v.behavior, { candidate: !!opts.by, version });
     if (!w.ok) return w;
     if (!this.behaviors.has(w.skill.name)) this.reload();
-    const b = this.behaviors.get(w.skill.name);
+    const b = opts.by ? this.candidates.get(w.skill.name) : this.behaviors.get(w.skill.name);
     if (!b) return { ok: false, error: '技能写下了，但格式不对没有生效' };
     // 修订就是重新给它一次机会：新版本从零记，旧版本的成败留着（好拿来比）
     this.touch(b.name, (st) => {
-      st.disabled = false; delete st.lastError; delete st.retired; delete st.advisory; delete st.retiredAt; delete st.disabledAt; delete st.swappedAt; st.versionAt = Date.now(); st.writtenAt = Date.now();
-      if (!b.code && !w.created) st.rev = (st.rev ?? 1) + 1;
+      if (!opts.by) { st.disabled = false; delete st.lastError; delete st.retired; delete st.advisory; delete st.retiredAt; delete st.disabledAt; }
+      st.candidatePermit = opts.by === 'mind' ? b.version : undefined;
+      delete st.swappedAt; st.versionAt = Date.now(); st.writtenAt = Date.now();
+      if (!b.code && !w.created && !b.version) st.rev = (st.rev ?? 1) + 1;
     });
-    return { ok: true, name: b.name, created: w.created, mode: b.mode };
+    return { ok: true, name: b.name, created: w.created, mode: b.mode, ...(opts.by ? { candidate: true } : {}) };
   }
 
   /**
-   * 换上一份代码技能的新版本（后台改进的结果，或者退回旧版本）：先校验能编译，再写进技能书，立刻生效。
+   * 修订保存候选，按版本积累真实证据；回退恢复完整契约。
    * 统计按版本分开记，用来判断新版本是不是真的更好。
    */
   /** 当前版本的成败 */
   versionOf(b: Behavior): string { return String(b.version ?? this.stats[b.name]?.rev ?? 1); }
-  currentStats(name: string): { ok: number; fail: number } {
-    const b = this.behaviors.get(name);
+  currentStats(name: string, trial = false): { ok: number; fail: number } {
+    const b = this.get(name, trial);
     const st = this.stats[name];
     return (b && st?.byVersion?.[this.versionOf(b)]) ?? { ok: 0, fail: 0 };
   }
@@ -559,6 +597,7 @@ export class BehaviorEngine {
     const b = this.behaviors.get(name);
     if (!b) return `没有技能 ${name}`;
     if (this.inactive(name)) return `${name} 已收起或停用`;
+    if (b.candidate) return `${name} 尚为候选，需要显式试用验收`;
     const cur = this.currentStats(name);
     if (cur.ok < BehaviorEngine.MIN_EVIDENCE || cur.ok < cur.fail * 2) return `${name} 当前版本还不够可靠（成 ${cur.ok} 败 ${cur.fail}）`;
     return null;
@@ -568,10 +607,10 @@ export class BehaviorEngine {
   }
   /** 能不能改写这份技能：当前版本用得太少就先别动（停用了、或者代码本身报错的除外） */
   rewriteGate(name: string): string | null {
-    const b = this.behaviors.get(name);
+    const b = this.get(name, true) ?? this.get(name);
     const st = this.stats[name];
     if (!b || b.source !== 'self' || !st || st.disabled) return null;
-    const cur = this.currentStats(name);
+    const cur = this.currentStats(name, !!b.candidate);
     const uses = cur.ok + cur.fail;
     const codeBroke = /代码技能.*没成|参数错误|SyntaxError|TypeError|ReferenceError/.test(st.recent?.at(-1)?.summary ?? st.lastError ?? '');
     // 刚换上（写下、改进、退回）的版本还没跑过：先让它跑几次（以前退回旧版本生成的新版本号马上又被改）
@@ -585,9 +624,9 @@ export class BehaviorEngine {
     return `「${name}」当前版本只用了 ${uses} 次（成 ${cur.ok} 败 ${cur.fail}），证据还不够，先不改写它；这次的经过已经记进它的成败，等用够 ${BehaviorEngine.MIN_EVIDENCE} 次再看要不要改`;
   }
 
-  replaceCode(name: string, code: string, note: string, verify?: string): { ok: true; version: number } | { ok: false; error: string } {
-    const b = this.behaviors.get(name);
-    const k = this.book?.get(name);
+  replaceCode(name: string, code: string, note: string, verify?: string, expectedToken?: string): { ok: true; version: number } | { ok: false; error: string } {
+    const b = this.get(name, true) ?? this.get(name);
+    const k = this.book?.candidate(name) ?? this.book?.get(name);
     if (!b?.code || !k || !this.book) return { ok: false, error: `${name} 不是代码技能` };
     const bad = compileCheck(code);
     if (bad) return { ok: false, error: bad };
@@ -597,11 +636,46 @@ export class BehaviorEngine {
     }
     const raw = { ...(k.behavior as Record<string, unknown>), code, code_file: undefined, version: undefined, ...(verify !== undefined ? { verify } : {}) };
     const body = `${k.body.replace(/```behavior[\s\S]*?```/, '').trim()}`.replace(/\n*（最近一次改进：[^）]*）$/, '') + `\n\n（最近一次改进：${note.slice(0, 100)}）`;
-    const w = this.book.write(name, k.description, body, raw);
+    const w = this.write({ name, description: k.description, body, ...raw }, { by: 'improve', ...(expectedToken !== undefined ? { expectedToken } : {}) });
     if (!w.ok) return w;
-    const nb = this.behaviors.get(name);
-    this.touch(name, (st) => { st.disabled = false; delete st.lastError; st.versionAt = Date.now(); st.swappedAt = Date.now(); });
+    const nb = this.candidates.get(name);
     return { ok: true, version: nb?.version ?? 0 };
+  }
+
+  rollback(name: string, to: number, note: string): { ok: true; version: number } | { ok: false; error: string } {
+    if (this.inactive(name)) return { ok: false, error: '停用或收起的技能不能由后台回滚重新启用' };
+    const old = this.book?.definitionVersion(name, to);
+    if (!old?.behavior || !this.book) return { ok: false, error: `v${to} 缺少完整技能快照，不能只退代码并沿用新契约` };
+    const raw = { ...old.behavior as Record<string, unknown>, name, description: old.description, body: old.body, candidate: undefined };
+    const checked = validateBehavior(raw, this.adapter);
+    if ('error' in checked) return { ok: false, error: checked.error };
+    const w = this.book.write(name, old.description, old.body, checked.behavior);
+    if (!w.ok) return w;
+    this.touch(name, (st) => { st.versionAt = Date.now(); st.swappedAt = Date.now(); });
+    this.bus.publish('skill_restored', 'P2', `恢复 ${name} v${to} 的完整契约：${note}`);
+    return { ok: true, version: this.get(name)?.version ?? 0 };
+  }
+
+  /** 嵌套调用也保留子技能自己的版本证据；顶层由 arbiter 的 done 事件记账。 */
+  recordInvocation(name: string, result: SkillResult) {
+    if (result.status === 'cancelled') return;
+    const b = this.completed(name, result.data?.version);
+    if (!b) return;
+    this.touch(name, (st) => { st.lastUsedAt = Date.now(); });
+    this.usage.push({ at: Date.now(), tag: `${name}@v${b.version ?? 1}` });
+    if (this.usage.length > 600) this.usage.splice(0, this.usage.length - 600);
+    const returned = result.data?.result;
+    if (returned && typeof returned === 'object' && 'skipped' in returned && returned.skipped) return;
+    const succeeded = result.status === 'succeeded' && (!b.candidate || result.data?.verified === true && result.data?.noop !== true);
+    this.record(b, succeeded, result.data?.noop === true ? `${result.summary}；没有实际动作，不作为候选成功证据` : result.summary, result.data ?? {});
+  }
+
+  private completed(name: string, version: unknown) {
+    const current = [this.get(name), this.get(name, true)].find((entry) => entry && (version === undefined || this.versionOf(entry) === String(version)));
+    if (current) return current;
+    const old = typeof version === 'number' ? this.book?.definitionVersion(name, version) : null;
+    const restored = old ? toBehavior(old, this.adapter) : null;
+    return restored && !('error' in restored) ? restored : undefined;
   }
 
   private touch(name: string, fn: (st: BehaviorStats) => void) {
@@ -636,10 +710,12 @@ export class BehaviorEngine {
   private onDone(o: TaskOutcome) {
     if (o.task.skill !== 'use_skill') return;
     const name = String((o.task.args as any)?.name ?? '');
-    const b = this.behaviors.get(name);
+    const b = this.completed(name, o.result.data?.version);
     if (!b) return;
     this.noteUndo(name, o.task.id);
     if (o.result.status === 'cancelled') return;
+    this.touch(name, (st) => { st.lastUsedAt = Date.now(); });
+    if (b.candidate) { this.recordInvocation(name, o.result); return; }
     this.usage.push({ at: Date.now(), tag: `${name}@v${b.version ?? 1}` });
     if (this.usage.length > 600) this.usage.splice(0, this.usage.length - 600);
     const okRun = o.result.status === 'succeeded';
@@ -701,7 +777,7 @@ export class BehaviorEngine {
       st.recent = [...(st.recent ?? []), { at: Date.now(), ok: okRun, version: Number(v), summary: summary.slice(0, 200),
           ...(typeof data.line === 'number' ? { line: data.line } : {}), ...(Array.isArray(data.trace) ? { trace: data.trace.slice(-12) } : {}),
           ...(Array.isArray(data.logs) ? { logs: data.logs.slice(-6) } : {}), ...(data.args ? { args: String(data.args).slice(0, 200) } : {}) }].slice(-6);
-      if (b.code) {
+      if (b.code && !b.candidate) {
         // 新版本跑了几次明显比上一版差：退回上一版（真人改坏了也会改回去）
         const prev = st.byVersion[String((b.version ?? 1) - 1)];
         const rate = (x: { ok: number; fail: number }) => x.ok / Math.max(1, x.ok + x.fail);
@@ -709,16 +785,23 @@ export class BehaviorEngine {
         if (prev && prev.ok + prev.fail >= BehaviorEngine.MIN_EVIDENCE && per.ok + per.fail >= BehaviorEngine.MIN_EVIDENCE + 1 && rate(per) < rate(prev) - 0.25) rollback = { from: b.version ?? 1, to: (b.version ?? 1) - 1 };
       }
       // 自己写的技能，当前版本用了几次大多失败：先停用，让心智回头改（同名重写即可）
-      if (b.source === 'self' && per.ok + per.fail >= 4 && per.ok / (per.ok + per.fail) < 0.25 && !st.disabled) {
+      if (!b.candidate && b.source === 'self' && per.ok + per.fail >= 4 && per.ok / (per.ok + per.fail) < 0.25 && !st.disabled) {
         st.disabled = true;
         st.disabledAt = Date.now();
         this.bus.publish('skill_disabled', 'P1', `技能「${name}」这一版用了 ${per.ok + per.fail} 次只成了 ${per.ok} 次，先停用；最近一次：${st.lastError ?? ''}`, { name, by: 'stats' });
       }
     });
+    if (b.candidate) {
+      const per = this.stats[name]?.byVersion?.[this.versionOf(b)];
+      if (!this.executionError(name, true) && this.candidates.get(name)?.version === b.version && per && per.ok >= BehaviorEngine.MIN_EVIDENCE && per.ok >= per.fail * 2 && this.book?.promote(name)) {
+        this.touch(name, (st) => { st.disabled = false; delete st.retired; delete st.retiredAt; delete st.disabledAt; delete st.candidatePermit; delete st.lastError; });
+        this.bus.publish('skill_promoted', 'P2', `候选技能 ${name} v${b.version} 已通过 ${per.ok} 次实际验收，启用其原定模式`, { name, version: b.version });
+      } else if (!okRun && b.code) this.improve?.(name, 'failures');
+      return;
+    }
     if (rollback) {
       const { from, to } = rollback as { from: number; to: number };
-      const old = this.book?.codeVersion(name, to);
-      const r = old ? this.replaceCode(name, old, `v${from} 比 v${to} 差，退回 v${to} 的代码`) : null;
+      const r = this.rollback(name, to, `v${from} 比 v${to} 差`);
       if (r?.ok) this.bus.publish('skill_rollback', 'P2', `代码技能「${name}」的 v${from} 不如 v${to}，退回旧代码（现在是 v${r.version}）`, { name, from, to });
     } else if (b.code && !okRun) this.improve?.(name, 'failures');
   }
@@ -763,7 +846,9 @@ export class BehaviorEngine {
       const st = this.stats[b.name];
       const here = st?.byDim?.[dim];
       const untested = st && st.ok + st.fail > 0 && st.byDim && !here && !(b.when?.dim && !b.when.dim.includes(dim)) ? `（在 ${dim} 还没用过）` : '';
-      return `${b.name}［${b.mode === 'auto' ? '自动' : b.mode === 'recover' ? '失败时先试' : '调用'}${b.code ? `，代码 v${b.version ?? 1}` : ''}${b.overrides.length ? `，代替本能 ${b.overrides.map((o) => INSTINCTS[o]?.off ? `${o}（这条本能本来就没开）` : o).join('/')}` : ''}${b.needs ? `，调用时给 args.${Object.keys(b.needs).join('/')}` : ''}］${st && st.ok + st.fail ? ` 成${st.ok}/败${st.fail}` : ''}${st?.retired ? ` 已收起（${st.retired.slice(0, 30)}）` : st?.disabled ? ' 已停用' : ''}${untested}`;
+      const candidate = this.candidates.get(b.name);
+      const trial = candidate ? `；候选 v${candidate.version} 尚未启用，用 use_skill {name:"${b.name}",trial:true} 试用，试用成${this.currentStats(b.name, true).ok}/败${this.currentStats(b.name, true).fail}` : '';
+      return `${b.name}［${b.mode === 'auto' ? '自动' : b.mode === 'recover' ? '失败时先试' : '调用'}${b.code ? `，代码 v${b.version ?? 1}` : ''}${b.overrides.length ? `，代替本能 ${b.overrides.map((o) => INSTINCTS[o]?.off ? `${o}（这条本能本来就没开）` : o).join('/')}` : ''}${b.needs ? `，调用时给 args.${Object.keys(b.needs).join('/')}` : ''}］${st && st.ok + st.fail ? ` 成${st.ok}/败${st.fail}` : ''}${st?.retired ? ` 已收起（${st.retired.slice(0, 30)}）` : st?.disabled ? ' 已停用' : ''}${untested}${trial}`;
     }), ...[...this.invalid].map(([n, why]) => `${n}：${why}`)];
   }
 }

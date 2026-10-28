@@ -7,7 +7,7 @@ import { setImmediate } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
 import { cornerSafe } from '../src/adapter/corner-safe.ts';
 import type { AgentState, EntityInfo, GameAdapter } from '../src/adapter/types.ts';
-import { Arbiter, type Step, type TaskInfo, type TaskSource } from '../src/arbiter/arbiter.ts';
+import { Arbiter, type Step, type TaskInfo, type TaskOutcome, type TaskSource } from '../src/arbiter/arbiter.ts';
 import { Reflex } from '../src/brain/reflex.ts';
 import { config } from '../src/config.ts';
 import { EventBus } from '../src/events.ts';
@@ -50,16 +50,17 @@ function testSkills(t: TestContext) {
 test('触发条件：只认能感觉到的事，写错给出中文说明；身边方块、怪和失败都能判断', () => {
   const adapter = new FakeAdapter();
   adapter.blocks.push({ name: 'dirt', pos: { x: 1, y: 64, z: 0 } }); // 面朝东，正前方脚边一格土
+  const vision = new Vision(adapter);
   assert.match((validatePredicate({ teleport: true }) as any).error, /不认识的条件/);
   assert.match((validatePredicate({ cell: { at: [9, 0, 0], is: 'solid' } }) as any).error, /cell\.at/);
   const p = validatePredicate({ after_failure: { skill: 'goto', code: 'PATH_NOT_FOUND|STUCK' }, cell: [{ at: [1, 0, 0], is: 'solid' }, { at: [1, 1, 0], is: 'open' }] });
   assert.ok(!('error' in p));
   if ('error' in p) return;
-  const s = senseNow(adapter, noSenses, null, { skill: 'goto', code: 'STUCK' });
+  const s = senseNow(adapter, vision, null, { skill: 'goto', code: 'STUCK' });
   assert.equal(s.facing, 'E');
   assert.ok(evalPredicate(p, s));
-  assert.ok(!evalPredicate(p, senseNow(adapter, noSenses, null, { skill: 'craft', code: 'STUCK' })), '别的动作失败不算');
-  assert.ok(!evalPredicate(p, senseNow(adapter, noSenses, null)), '没有失败时恢复类条件不成立');
+  assert.ok(!evalPredicate(p, senseNow(adapter, vision, null, { skill: 'craft', code: 'STUCK' })), '别的动作失败不算');
+  assert.ok(!evalPredicate(p, senseNow(adapter, vision, null)), '没有失败时恢复类条件不成立');
   const skel: Senses = { ...noSenses, perceivedEntities: () => [{ id: 1, name: 'skeleton', kind: 'hostile', dist: 12, pos: { x: 12, y: 64, z: 0 } } as EntityInfo] };
   const danger = validatePredicate({ hp_below: 8, hostile: { name: 'skeleton', within: 16 }, has: { item: '*_planks', count: 2 } }) as any;
   adapter.hp = 6; adapter.inv.set('oak_planks', 3);
@@ -79,19 +80,26 @@ test('写技能：动作和参数要合法；太宽的自动条件、换掉保�
   assert.ok(!('error' in v) && v.name === 'pillar-from-skeletons');
 });
 
-test('样本技能都能被引擎读懂：恢复类、调用类各有一份；写技能的说明是内置的', () => {
+test('样本技能读取：恢复类、调用类与写技能说明可用，引用隐藏动作的旧样本拒绝启用', () => {
   const book = new SkillBook(BUILTIN_SKILLS_DIR, FIXTURES);
   const engine = new BehaviorEngine(book, new FakeAdapter(), null, new EventBus(), noSenses);
-  assert.equal(engine.get('step-up-when-blocked')?.mode, 'recover');
+  assert.equal(engine.get('local-path')?.mode, 'recover');
   assert.equal(engine.get('pillar-out-of-pit')?.mode, 'manual');
   assert.ok(book.get('writing-skills')?.body.includes('after_failure'));
-  assert.ok(book.index().some((l) => l.startsWith('step-up-when-blocked') && l.includes('动作失败时先试')));
-  assert.ok(!engine.overview().some((l) => l.includes('格式不对')), engine.overview().join('\n'));
+  assert.ok(book.index().some((l) => l.startsWith('local-path') && l.includes('动作失败时先试')));
+  assert.equal(engine.get('step-up-when-blocked'), undefined, '旧样本的 wander 已不是可调用恢复目标');
+  assert.match(engine.overview().join('\n'), /step-up-when-blocked.*恢复条件没有可调用的动作 wander/);
 });
 
-test('模型写下的恢复技能立刻生效：动作失败时身体先照它做，再重做失败的那步，不用先叫脑子', async (t) => {
+test('模型写下恢复候选后显式试用，取得实际证据才参与失败恢复并验证重做结果', async (t) => {
   const ran = testSkills(t);
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  const advance = SKILLS.t_ok;
+  SKILLS.t_ok = { ...advance, async run(ctx, args) {
+    const result = await advance.run(ctx, args);
+    adapter.pos = { ...adapter.pos, x: adapter.pos.x + 1 };
+    return result;
+  } };
   const vision = new Vision(adapter), arbiter = new Arbiter(adapter, memory, bus, vision);
   const perception = new Perception(adapter, memory, bus, vision);
   const book = new SkillBook(BUILTIN_SKILLS_DIR, tmp());
@@ -107,14 +115,37 @@ test('模型写下的恢复技能立刻生效：动作失败时身体先照它�
   mind.tick(); await flush();
   // 第一次思考：写下技能 + 开始一段活
   await reply({ monologue: '老是被脚边的方块卡住，记下怎么办', decision: 'new',
-    skill: { name: 'hop-when-blocked', description: '路被挡住时先迈一步', when: { after_failure: { skill: 't_fail', code: 'PATH_NOT_FOUND' } }, steps: [{ skill: 't_ok' }] },
+    skill: { name: 'hop-when-blocked', description: '路被挡住时先迈一步', when: { after_failure: { skill: 't_fail', code: 'PATH_NOT_FOUND' } }, steps: [{ skill: 't_ok' }],
+      verify: 'const s = await api.state(); return s.pos.x > args.before.pos.x ? true : "实际没有前进";' },
     activity: { what: '走过去', steps: [{ skill: 't_fail' }] } });
-  assert.equal(behaviors.get('hop-when-blocked')?.mode, 'recover', '写下就生效');
+  assert.equal(behaviors.get('hop-when-blocked', true)?.mode, 'recover');
+  assert.ok(behaviors.executionError('hop-when-blocked'), '候选不能当已学会的技能直接用');
+  assert.equal(behaviors.recoveryFor({ skill: 't_fail', code: 'PATH_NOT_FOUND' }), null, '未验收的候选不自动接手失败');
+  for (let i = 0; i < BehaviorEngine.MIN_EVIDENCE; i++) {
+    const done = new Promise<TaskOutcome>((resolve) => arbiter.once('done', resolve));
+    const started = arbiter.start({ skill: 'use_skill', args: { name: 'hop-when-blocked', trial: true } }, 'llm');
+    assert.ok(!('error' in started), JSON.stringify(started));
+    const outcome = await done;
+    assert.equal(outcome.result.status, 'succeeded', outcome.result.summary);
+    assert.equal(outcome.result.data?.verified, true, '每次试用核对实际位置变化');
+  }
+  assert.equal(behaviors.get('hop-when-blocked', true), undefined, '达到实际验收次数后晋级');
+  assert.equal(behaviors.get('hop-when-blocked')?.mode, 'recover');
+  assert.equal(behaviors.currentStats('hop-when-blocked').ok, BehaviorEngine.MIN_EVIDENCE);
+  ran.length = 0;
+  for (let i = 0; i < 6 && pending.length < 2; i++) { mind.tick(); await flush(); }
+  assert.ok(pending.length >= 2, '初次未验收的恢复方案交回心智');
+  await reply({ monologue: '已经试过有效的前进一步，继续走过去', decision: 'new', activity: { what: '再走过去', steps: [{ skill: 't_fail' }] } });
   const thinksBefore = pending.length;
-  for (let i = 0; i < 6; i++) { mind.tick(); await flush(); }
+  for (let i = 0; i < 6; i++) {
+    mind.tick();
+    const current = arbiter.info();
+    if (current?.planId && current.planId === mind.activity?.id) await new Promise<TaskOutcome>((resolve) => arbiter.once('done', resolve));
+    await flush();
+  }
   assert.deepEqual(ran.slice(0, 3), ['t_fail', 't_ok', 't_fail'], `先失败、照技能做、再重做：${ran}`);
   assert.equal(behaviors.statsOf('hop-when-blocked')?.fail, 1, '照技能做完了、但重做的那一步还是没成：记一次没用');
-  assert.equal(behaviors.statsOf('hop-when-blocked')?.ok ?? 0, 0);
+  assert.equal(behaviors.statsOf('hop-when-blocked')?.ok, BehaviorEngine.MIN_EVIDENCE, '自动恢复失败不能把试用证据改成成功');
   assert.ok(pending.length >= thinksBefore, '技能试过还不行才叫脑子');
   assert.match(pending.at(-1)!.messages.at(-1)!.content, /走过去/);
 });
@@ -171,7 +202,7 @@ test('use_skill：一步步照做，每步的 if 当场判断', async (t) => {
   assert.equal(o.result.status, 'succeeded');
   assert.deepEqual(ran, ['t_ok'], '前面是空气，第一步跳过');
   assert.match(o.result.summary, /跳过/);
-  assert.match((arbiter.start({ skill: 'use_skill', args: { name: 'nope' } }, 'llm') as any).error, /没有叫 nope/);
+  assert.match((arbiter.start({ skill: 'use_skill', args: { name: 'nope' } }, 'llm') as any).error, /没有.*nope/);
 });
 
 test('斜着走不切角：一侧有实心方块就不走斜线', () => {

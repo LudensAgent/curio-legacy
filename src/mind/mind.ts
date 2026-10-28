@@ -1007,9 +1007,9 @@ export class Mind {
       for (const k of this.d.self.data.knowHow) if (c.add.includes(k.text) || c.merge.some((m) => m.text === k.text) || c.rewrite.some((r) => r.id === k.id)) {
         this.d.memory.addLesson(k.text, { source: 'model', key: `know_how:${k.id}` });
       }
-      if (c.skill?.raw && this.d.behaviors && (Array.isArray(c.skill.raw.steps) || c.skill.raw.when !== undefined)) {
+      if (c.skill?.raw && this.d.behaviors && (Array.isArray(c.skill.raw.steps) || typeof c.skill.raw.code === 'string' || typeof c.skill.raw.improve === 'string' || c.skill.raw.when !== undefined)) {
         const w = this.safe(() => this.d.behaviors!.write(c.skill!.raw, { by: 'mind' }), { ok: false as const, error: '写技能时出错' });
-        if (w.ok) this.d.bus.publish('skill_written', 'P2', `回想时写下技能 ${w.name}`, { name: w.name, mode: w.mode, live: true });
+        if (w.ok) this.d.bus.publish('skill_written', 'P2', `回想时写下候选技能 ${w.name}；用 use_skill {name:"${w.name}",trial:true} 试用`, { name: w.name, mode: w.mode, candidate: true, live: false });
         else this.d.bus.publish('skill_rejected', 'P3', `没有保存技能：${w.error}`);
       } else if (c.skill) {
         const w = this.safe(() => this.d.thinker.skillBook?.write(c.skill!.name, c.skill!.description, c.skill!.body) ?? null, null);
@@ -1161,16 +1161,16 @@ export class Mind {
   private applySkill(decision: MindDecision) {
     const raw = decision.skill as Record<string, any> | undefined;
     if (!raw) return;
-    const executable = Array.isArray(raw.steps) || raw.when !== undefined || raw.disable === true || raw.disabled === true;
+    const executable = Array.isArray(raw.steps) || typeof raw.code === 'string' || typeof raw.improve === 'string' || raw.when !== undefined || raw.disable === true || raw.disabled === true;
     if (executable) {
       if (!this.d.behaviors) { decision.notes.push('这里没有行为引擎，带步骤的技能存不下'); return; }
       const w = this.safe(() => this.d.behaviors!.write(raw, { by: 'mind' }), { ok: false as const, error: '写技能时出错' });
       if (!w.ok) { decision.notes.push(`skill 没存下：${w.error}`); this.d.bus.publish('skill_rejected', 'P3', `没有保存技能：${w.error}`); return; }
       if (w.disabled) { this.d.self.think(`停用了自己的技能 ${w.name}`, 'learned'); return; }
       if (w.improving) { this.d.self.think(`请后台改进代码技能 ${w.name}（改好会告诉我）`, 'learned'); return; }
-      const how = w.mode === 'auto' ? '条件成立时身体会自动做' : w.mode === 'recover' ? '动作失败时身体会先试它' : '可以在 routine 里 use_skill 调用';
-      this.d.self.think(`${w.created ? '学会了' : '改进了'}技能 ${w.name}：${how}`, 'learned');
-      this.d.bus.publish('skill_written', 'P2', `${w.created ? '写下新技能' : '修订技能'} ${w.name}（${how}）`, { name: w.name, mode: w.mode, live: true });
+      const how = `候选尚未启用；由我决定何时用 use_skill {name:"${w.name}",trial:true} 试用，实际验收后才按原定模式启用`;
+      this.d.self.think(`写下${w.created ? '新' : '修订'}候选技能 ${w.name}：${how}`, 'learned');
+      this.d.bus.publish('skill_written', 'P2', `写下候选技能 ${w.name}（${how}）`, { name: w.name, mode: w.mode, candidate: true, live: false });
       return;
     }
     const book = this.d.thinker.skillBook;

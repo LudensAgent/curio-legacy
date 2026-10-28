@@ -75,9 +75,10 @@ export class Attention {
       }
       case 'skill_loop': return this.notice(`skill_loop:${String(d.a ?? '')}:${String(d.b ?? '')}`, ev.msg, 0.65, 300_000);
       case 'reflex_gaveup': return this.notice('reflex_gaveup', ev.msg, 0.8, 20_000);
-      case 'skill_forged': return this.notice(`skill_forged:${String(d.name ?? '')}`, `${ev.msg}（身体以后会自己这么做）`, 0.4, 0);
+      case 'skill_forged': return this.notice(`skill_forged:${String(d.name ?? '')}`, d.candidate ? `${ev.msg}；尚未启用，由我选择时机用 use_skill {name:"${String(d.name ?? '')}",trial:true} 试用` : `${ev.msg}（身体以后会自己这么做）`, 0.4, 0);
       case 'skill_merged': return this.notice(`skill_merged:${String(d.into ?? '')}`, ev.msg, 0.3, 0);
       case 'skill_improved': return this.notice(`skill_improved:${String(d.name ?? '')}`, ev.msg, 0.35, 0);
+      case 'skill_promoted': return this.notice(`skill_promoted:${String(d.name ?? '')}`, ev.msg, 0.4, 0);
       case 'skill_rollback': return this.notice(`skill_rollback:${String(d.name ?? '')}`, ev.msg, 0.35, 0);
       case 'skill_disabled': return d.by === 'stats' ? this.notice(`skill_disabled:${String(d.name ?? '')}`, `${ev.msg}：回头改一改（同名重写 skill）`, 0.5, 600_000) : null;
       case 'lesson': return d.source === 'observed' ? this.notice(`lesson:${ev.msg.slice(0, 30)}`, ev.msg, 0.3, 300_000) : null;

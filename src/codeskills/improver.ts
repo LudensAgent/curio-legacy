@@ -1,15 +1,15 @@
 import type { EventBus } from '../events.ts';
+import { normalizeSkillName } from '../knowledge/skillbook.ts';
 import type { BehaviorEngine } from '../mind/behaviors.ts';
 import type { LedgerView } from '../mind/ledger.ts';
 import type { ChatMessage } from '../planner/llm.ts';
 import { extractJson } from '../planner/plan.ts';
 import type { Planner } from '../planner/planner.ts';
 import { API_DOC } from './bridge.ts';
-import { compileCheck, MAX_VERIFY, VERIFY_METHODS } from './sandbox.ts';
 
 /**
  * 代码技能的后台改进：一份代码技能在游戏里反复失败（或心智主动要求）时，单独发一次 LLM 请求，
- * 拿着代码、出错的行和最近几次 api 调用去改，改好的版本校验后立刻换上（旧版本留着，新版本更差会自动退回）。
+ * 拿着代码、出错的行和最近几次 api 调用修订契约；通过校验先存候选，显式试用取得观测证据后才替换稳定版。
  *
  * 像建筑师一样在后台进行，不打断游玩；而且不能太频繁：
  * - 同一时间只改一份；两次改进之间至少隔 globalGapMs；同一份技能至少隔 perSkillGapMs（主动要求时 requestGapMs）；
@@ -21,7 +21,7 @@ import { compileCheck, MAX_VERIFY, VERIFY_METHODS } from './sandbox.ts';
 export type ImproveWhy = 'failures' | 'requested' | 'slow';
 const WHY_TEXT = (why: ImproveWhy, note?: string) => why === 'requested' ? `机器人自己觉得要改：${note ?? ''}` : why === 'slow' ? `能用但费劲：${note ?? '用它时拿东西比不用它或比旧版本慢'}` : '最近几次运行大多失败';
 export interface ImproverOptions { globalGapMs: number; perSkillGapMs: number; requestGapMs: number; minFailures: number; maxPerHour: number;
-  /** 同一份技能最多改几轮：改了这么多版还不可靠，就收起不再改（0 = 不限） */
+  /** 同一份技能最多改几轮：达到上限仍不可靠时停止后台改进，保留稳定版和历史（0 = 不限） */
   maxRounds: number }
 /** 默认不限频（模型便宜）：每次改进后新版本要重新攒够失败才会再改，本身就不会连着改 */
 export const DEFAULT_IMPROVER: ImproverOptions = { globalGapMs: 0, perSkillGapMs: 20 * 60_000, requestGapMs: 5 * 60_000, minFailures: 2, maxPerHour: Infinity, maxRounds: 5 };
@@ -47,8 +47,9 @@ export class CodeImprover {
   /** 看看要不要改；要改就在后台开始，立刻返回。返回不改的原因（null = 已开始） */
   consider(name: string, why: ImproveWhy, note?: string, now = Date.now()): string | null {
     if (!this.planner.autonomous) return '没有模型';
-    const b = this.engine.get(name);
+    const b = this.engine.get(name, true) ?? this.engine.get(name);
     if (!b?.code) return '不是代码技能';
+    if (this.engine.inactive(name)) return '这份技能已停用或收起，后台改进不重新启用它';
     if (this.busy) {
       // 自己要求的、整理时发现费劲的：排队等这份改完再改（老失败的会再触发，不用排）
       if (why !== 'failures' && this.busy.name !== name && !this.waiting.some((w) => w.name === name)) { this.waiting.push({ name, why, note }); return `排队：正在改「${this.busy.name}」`; }
@@ -58,12 +59,12 @@ export class CodeImprover {
     this.starts = this.starts.filter((t) => now - t < 3600_000);
     if (this.starts.length >= this.opts.maxPerHour) return '这一小时改得够多了';
     if (now - (this.perSkill.get(name) ?? 0) < (why === 'failures' ? this.opts.perSkillGapMs : this.opts.requestGapMs)) return '这份技能刚改过';
-    // 改了太多轮还是不可靠：再改也是把钱花在同一个坑里，收起它；真需要的话心智会另写一份
+    // 达到改进轮数上限只停止这次后台请求，不能连仍可用的稳定版和历史一起收起。
     const rounds = Object.keys(this.engine.statsOf(name)?.byVersion ?? {}).length - 1;
     if (this.opts.maxRounds > 0 && rounds >= this.opts.maxRounds && this.engine.reliable(name)) {
-      const why2 = `改了 ${rounds} 轮还是不可靠（${this.engine.reliable(name)}）`;
-      this.engine.retire(name, why2);
-      return `收起：${why2}`;
+      const why2 = `已达后台改进上限 ${this.opts.maxRounds} 轮（记录 ${rounds} 轮，${this.engine.reliable(name)}）；停止本次改进，保留稳定版和历史`;
+      this.bus.publish('skill_improve_skipped', 'P3', `先不改「${name}」：${why2}`, { name, rounds, maxRounds: this.opts.maxRounds });
+      return why2;
     }
     if (why === 'failures') {
       const st = this.engine.statsOf(name);
@@ -88,19 +89,21 @@ export class CodeImprover {
   }
 
   private messages(name: string, why: ImproveWhy, note?: string): ChatMessage[] {
-    const b = this.engine.get(name)!;
+    const b = (this.engine.get(name, true) ?? this.engine.get(name))!;
     const st = this.engine.statsOf(name);
     const runs = (st?.recent ?? []).slice(-5).map((r) => ({ when_min_ago: Math.round((Date.now() - r.at) / 60000), version: r.version, ok: r.ok, result: r.summary,
       ...(r.line ? { line: r.line } : {}), ...(r.args ? { args: r.args } : {}), ...(r.trace?.length ? { last_api_calls: r.trace } : {}), ...(r.logs?.length ? { logs: r.logs } : {}) }));
     const system = `你在维护一个 Minecraft 机器人自己写的“代码技能”：一段在沙箱里运行的 JavaScript，通过 api 操作游戏。
 根据它在游戏里实际运行的记录改进代码：修掉出错的地方，处理记录里暴露出来的情况（比如路被挡、方块读不到、动作失败），让它更可靠；
 如果它能用但费劲（harvest_effect 显示用它时拿东西更慢），就让它更省：少走冤枉路、少做无用的动作、先看再动、一次做完。保持用途不变，代码保持简短清楚。
+先分清问题在触发条件 when、参数声明 args、执行步骤/代码还是验收 verify；不要只改代码来绕过触发和参数错误。保持调用方的目标、允许手段和资源范围；缺准备条件就返回事实，不代替它另选玩法。
+body 说明输入的含义和坐标基准、原目标、允许的副作用、停止条件与可观察的后置条件。优先组合已可靠的技能，固定几步可改成 steps；需要计算和循环时继续使用 code，每个循环有次数/时间边界。保存的新版本仍是待验证候选，不把编译通过叫作已经学会。
 ${API_DOC}
 它还带一段判定（verify）：做完以后看一眼世界确认真的做成了（只能用 api.state/blockAt/region/entities/drops/nearestLand；args.before 是开工前的 api.state()，args.result 是代码的返回值，args.args 是调用参数；return true 算成，return "原因" 算没成）。
 判定的目标要拿调用参数 args.args 来核对，不能拿 args.result 里代码自己算出来的目标比——不然代码读错参数，判定也跟着错，记录全是“成功”。
 代码里调用参数就是 args 本身（args.y），判定里才是 args.args.y；调用类技能声明了参数（needs）的，代码要读的就是这些名字。
 记录里“说做完了，但判定没通过”的，是代码没真做成——改代码；判定本身写错了（明明做成了却判没过、或者判得太松什么都算成），连判定一起改。
-只输出一个 JSON 对象：{"code":"改好的完整函数体","change":"一句话说改了什么","verify"?:"改好的判定函数体（不改判定就不写）"}；如果失败不是代码的问题（比如本来就不该在那种情况下用），输出 {"keep":true,"why":"…"}。`;
+只输出一个 JSON 对象：{"skill":{"name":"原技能名","description":"用途","body":"目标、输入、停止与结果确认","when"?:{触发条件},"args"?:{参数声明},"steps"?:[动作步骤],"code"?:"完整函数体","verify":"完整判定函数体","priority"?:1-90,"cooldown_s"?:3-600,"overrides"?:[]},"change":"一句话说改了哪一层、依据是什么"}。skill 是同名完整契约，steps/code 只写一种，两者都必须带 verify。若无需改变契约，也兼容 {"code":"完整函数体","verify"?:"完整判定","change":"…"}。如果没有证据支持修订，输出 {"keep":true,"why":"…"}；模型复审和自报 ok 不能代替游戏观测。`;
     const user = {
       skill: { name, description: b.description, mode: b.mode, version: b.version ?? 1, ...(b.when ? { when: b.when } : {}), ...(b.needs ? { args: b.needs } : {}) },
       why: WHY_TEXT(why, note),
@@ -114,26 +117,58 @@ ${API_DOC}
   private effect(name: string): string { try { return this.ledger?.skillEffect(name) ?? ''; } catch { return ''; } }
 
   private async improve(name: string, why: ImproveWhy, note?: string) {
+    const expectedToken = this.engine.editToken(name);
     const messages = this.messages(name, why, note);
     const signal = AbortSignal.timeout(10 * 60_000);
     for (let attempt = 0; attempt < 2; attempt++) {
       const c = await this.planner.complete(messages, { label: `skill:改进 ${name}`, tier: 'full', signal, attempt, maxTokensScale: 2 });
-      let raw: Record<string, any>;
-      try { raw = extractJson(c.text) as Record<string, any>; } catch (e) {
-        this.planner.noteInvalid(`改进 ${name}`, (e as Error).message);
+      if (this.engine.editToken(name) !== expectedToken) {
+        this.bus.publish('skill_improve_skipped', 'P3', `「${name}」在生成期间已被修订、停用或收起，丢弃旧结果`, { name });
+        return;
+      }
+      const incomplete = c.finishReason === 'length' ? '输出被长度上限截断' : !c.text.trim() ? '模型没有返回正文' : null;
+      if (incomplete) {
+        this.planner.noteInvalid(`改进 ${name}`, incomplete);
+        messages.push({ role: 'user', content: `刚才${incomplete}，没有保存修订或执行动作。缩小改动范围，重新输出完整 JSON 或 keep；不要续写残片。` });
+        continue;
+      }
+      let raw: Record<string, unknown>;
+      try {
+        const parsed = extractJson(c.text);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('修订需要一个 JSON 对象');
+        raw = parsed as Record<string, unknown>;
+      } catch (e) {
+        this.planner.noteInvalid(`改进 ${name}`, e instanceof Error ? e.message : String(e));
         messages.push({ role: 'user', content: '刚才的回复不是合法 JSON，请只输出一个 JSON 对象。' });
         continue;
       }
       if (raw.keep) { this.bus.publish('skill_improve_kept', 'P3', `看了「${name}」的记录，代码先不改：${String(raw.why ?? '').slice(0, 160)}`, { name }); return; }
-      const code = typeof raw.code === 'string' ? raw.code.replace(/\r\n/g, '\n') : '';
-      const verify = typeof raw.verify === 'string' && raw.verify.trim() ? raw.verify.replace(/\r\n/g, '\n') : undefined;
-      const bad = compileCheck(code) ?? (verify ? compileCheck(verify, { allowed: VERIFY_METHODS, maxLen: MAX_VERIFY }) : null);
-      if (bad) { messages.push({ role: 'assistant', content: c.text.slice(0, 2000) }, { role: 'user', content: `代码过不了检查：${bad}。改正后只输出 JSON。` }); continue; }
-      if (code.trim() === this.engine.get(name)?.code?.trim() && (!verify || verify.trim() === this.engine.get(name)?.verify?.trim())) { this.bus.publish('skill_improve_kept', 'P3', `「${name}」的代码没有变化`, { name }); return; }
-      const change = String(raw.change ?? '改进了代码').slice(0, 120);
-      const r = this.engine.replaceCode(name, code, change, verify);
-      if (!r.ok) throw new Error(r.error);
-      this.bus.publish('skill_improved', 'P2', `代码技能「${name}」升级到 v${r.version}：${change}`, { name, version: r.version, change });
+      const change = String(raw.change ?? '依据运行记录修订了技能').slice(0, 120);
+      let saved: { ok: true } | { ok: false; error: string };
+      if (raw.skill !== undefined) {
+        if (!raw.skill || typeof raw.skill !== 'object' || Array.isArray(raw.skill)) saved = { ok: false, error: 'skill 须为同名完整技能对象' };
+        else {
+          const draft = raw.skill as Record<string, unknown>;
+          saved = draft.name !== undefined && (typeof draft.name !== 'string' || normalizeSkillName(draft.name) !== name)
+            ? { ok: false, error: `修订必须保留原技能名 ${name}` }
+            : draft.disable === true || draft.disabled === true
+              ? { ok: false, error: '改进输出应为候选契约或 keep，不能把停用指令当作改进' }
+              : this.engine.write({ ...draft, name }, { by: 'improve', expectedToken });
+        }
+      } else {
+        const code = typeof raw.code === 'string' ? raw.code.replace(/\r\n/g, '\n') : '';
+        const verify = typeof raw.verify === 'string' && raw.verify.trim() ? raw.verify.replace(/\r\n/g, '\n') : undefined;
+        const current = this.engine.get(name, true) ?? this.engine.get(name);
+        if (code.trim() === current?.code?.trim() && (!verify || verify.trim() === current?.verify?.trim())) { this.bus.publish('skill_improve_kept', 'P3', `「${name}」的代码和判定没有变化`, { name }); return; }
+        saved = this.engine.replaceCode(name, code, change, verify, expectedToken);
+      }
+      if (!saved.ok) {
+        this.planner.noteInvalid(`改进 ${name}`, saved.error);
+        messages.push({ role: 'assistant', content: c.text.slice(0, 6000) }, { role: 'user', content: `修订过不了检查：${saved.error}。改正后只输出完整 JSON。` });
+        continue;
+      }
+      const version = (this.engine.get(name, true) ?? this.engine.get(name))?.version;
+      this.bus.publish('skill_improved', 'P2', `技能「${name}」写下待验证修订${version ? ` v${version}` : ''}：${change}`, { name, version, change, candidate: true });
       return;
     }
     throw new Error('两次都没拿到能用的代码');

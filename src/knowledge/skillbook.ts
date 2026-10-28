@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
  * - 自己写的技能放在 data/skills/<名字>/SKILL.md：从经历里总结出一套做法，就写成一份，下次直接用。
  *
  * 一份技能可以只是“知识”（正文），也可以带一段 ```behavior JSON：触发条件 + 动作步骤。
- * 带 behavior 的技能是身体真的会去做的（见 mind/behaviors.ts）：写下的那一刻就生效，不用重启。
+ * 模型写出的 behavior 先保存候选；显式试用验收后再启用（见 mind/behaviors.ts）。
  */
 export type SkillMode = 'auto' | 'recover' | 'manual';
 export interface KnowSkill {
@@ -54,6 +54,7 @@ const MODE_LABEL: Record<SkillMode, string> = { auto: '条件成立自动做', r
 
 export class SkillBook {
   private skills = new Map<string, KnowSkill>();
+  private candidates = new Map<string, KnowSkill>();
   private listeners = new Set<() => void>();
   constructor(private builtinDir: string | null = BUILTIN_SKILLS_DIR, private selfDir: string | null = null) { this.reload(); }
 
@@ -63,11 +64,21 @@ export class SkillBook {
 
   reload() {
     this.skills.clear();
+    this.candidates.clear();
     for (const [dir, source] of [[this.builtinDir, 'builtin'], [this.selfDir, 'self']] as const) {
       if (!dir || !fs.existsSync(dir)) continue;
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         if (!entry.isDirectory()) continue;
         const file = path.join(dir, entry.name, 'SKILL.md');
+        const candidateFile = path.join(dir, entry.name, 'candidate.json');
+        if (source === 'self' && fs.existsSync(candidateFile)) {
+          try {
+            const candidate = JSON.parse(fs.readFileSync(candidateFile, 'utf8')) as { name: string; description: string; body: string; behavior: Record<string, unknown> };
+            if (candidate.name === entry.name && NAME.test(candidate.name) && typeof candidate.description === 'string' && typeof candidate.body === 'string' && candidate.behavior && typeof candidate.behavior === 'object') {
+              this.candidates.set(candidate.name, { ...candidate, source, file: candidateFile, updatedAt: fs.statSync(candidateFile).mtimeMs, mode: modeOf(candidate.behavior) });
+            }
+          } catch { /* 损坏的候选不影响稳定技能加载 */ }
+        }
         if (!fs.existsSync(file)) continue;
         try {
           const parsed = parseSkillMarkdown(fs.readFileSync(file, 'utf8'));
@@ -78,7 +89,7 @@ export class SkillBook {
           if (source === 'self' && builtin?.source === 'builtin' && !hasCode(builtin.behavior)) continue;
           let behavior = behaviorOf(parsed.body);
           const codeFile = path.join(dir, entry.name, 'code.js');
-          if (fs.existsSync(codeFile)) behavior = { ...(behavior && typeof behavior === 'object' ? behavior : {}), code: fs.readFileSync(codeFile, 'utf8') };
+          if (fs.existsSync(codeFile) && !(behavior && typeof behavior === 'object' && 'steps' in behavior)) behavior = { ...(behavior && typeof behavior === 'object' ? behavior : {}), code: fs.readFileSync(codeFile, 'utf8') };
           this.skills.set(name, { name, description: (parsed.description ?? '').slice(0, 200), body: parsed.body.slice(0, 12000), source, file, updatedAt: fs.statSync(file).mtimeMs,
             ...(behavior !== undefined ? { behavior, mode: modeOf(behavior) } : {}) });
         } catch { /* 读不了的技能跳过 */ }
@@ -98,15 +109,33 @@ export class SkillBook {
     return null;
   }
 
-  list(): KnowSkill[] { return [...this.skills.values()].sort((a, b) => Number(a.source === 'self') - Number(b.source === 'self') || a.name.localeCompare(b.name)); }
-  get(name: string): KnowSkill | undefined { return this.skills.get(name); }
+  /** 完整版本用于回退；只有旧代码、没有契约的历史不能冒充完整版本。 */
+  definitionVersion(name: string, version: number): KnowSkill | null {
+    const k = this.skills.get(name) ?? this.candidates.get(name);
+    if (!k) return null;
+    const file = path.join(path.dirname(k.file), 'versions', `v${version}.json`);
+    return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) as KnowSkill : null;
+  }
+
+  list(): KnowSkill[] { return [...new Map([...this.candidates, ...this.skills]).values()].sort((a, b) => Number(a.source === 'self') - Number(b.source === 'self') || a.name.localeCompare(b.name)); }
+  get(name: string): KnowSkill | undefined { return this.skills.get(name) ?? this.candidates.get(name); }
+  candidate(name: string): KnowSkill | undefined { return this.candidates.get(name); }
+  pending(): KnowSkill[] { return [...this.candidates.values()]; }
+  promote(name: string): boolean {
+    const candidate = this.candidates.get(name);
+    if (!candidate) return false;
+    const behavior = { ...candidate.behavior as Record<string, unknown>, candidate: undefined };
+    const r = this.write(name, candidate.description, candidate.body, behavior, { version: Number((candidate.behavior as Record<string, unknown>).version) });
+    if (!r.ok) return false;
+    return true;
+  }
   /** 提示词里的索引：每份一行 */
   index(skip?: (name: string) => boolean): string[] {
-    return this.list().filter((s) => !skip?.(s.name)).map((s) => `${s.name}${s.source === 'self' ? '（我自己写的）' : ''}${s.mode ? `［${MODE_LABEL[s.mode]}］` : ''}：${s.description}`);
+    return this.list().filter((s) => !skip?.(s.name)).map((s) => `${s.name}${s.source === 'self' ? '（我自己写的）' : ''}${s.mode ? `［${(s.behavior as Record<string, unknown>)?.candidate === true ? '候选，用 use_skill trial:true 试用' : MODE_LABEL[s.mode]}］` : ''}：${s.description}`);
   }
 
   /** 写一份自己的技能（或修订自己写过的）；不能改内置技能。behavior 是已经校验过的触发条件和步骤 */
-  write(name: string, description: string, body: string, behavior?: unknown): { ok: true; skill: KnowSkill; created: boolean } | { ok: false; error: string } {
+  write(name: string, description: string, body: string, behavior?: unknown, opts: { candidate?: boolean; version?: number } = {}): { ok: true; skill: KnowSkill; created: boolean } | { ok: false; error: string } {
     if (!this.selfDir) return { ok: false, error: '没有地方保存自己写的技能' };
     const n = normalizeSkillName(name);
     if (!NAME.test(n)) return { ok: false, error: '技能名只能用小写英文、数字和连字符（2–41 个字符）' };
@@ -116,25 +145,54 @@ export class SkillBook {
     let text = body.replace(/\r\n/g, '\n').replace(BEHAVIOR_BLOCK, '').trim().slice(0, 6000);
     // 代码单独存成 code.js（换下来的旧版本留在 versions/ 里，退回时用）
     const code = hasCode(behavior) ? String((behavior as Record<string, unknown>).code) : null;
-    const version = code ? Number((prev?.behavior as any)?.version ?? (hasCode(prev?.behavior) ? 1 : 0)) + 1 : undefined;
-    const meta = code ? { ...(behavior as Record<string, unknown>), code: undefined, code_file: 'code.js', version } : behavior;
+    const previousVersion = (prev?.behavior as Record<string, unknown> | undefined)?.version;
+    const pendingVersion = (this.candidates.get(n)?.behavior as Record<string, unknown> | undefined)?.version;
+    const version = opts.version ?? Math.max(Number(previousVersion) || 0, Number(pendingVersion) || 0) + 1;
+    const definition = behavior && typeof behavior === 'object' ? { ...behavior, version, ...(opts.candidate ? { candidate: true } : {}) } : undefined;
+    const meta = code ? { ...definition, code: undefined, code_file: 'code.js' } : definition;
     if (meta !== undefined) text = `${text}${text ? '\n\n' : ''}\`\`\`behavior\n${JSON.stringify(meta, null, 1)}\n\`\`\``;
     if (desc.length < 4 || text.length < 20) return { ok: false, error: '技能需要一句用途说明和至少几行做法' };
     const created = !prev;
     const dir = path.join(this.selfDir, n);
     fs.mkdirSync(dir, { recursive: true });
+    if (opts.candidate) {
+      const file = path.join(dir, 'candidate.json');
+      const old = this.candidates.get(n);
+      if (old) {
+        fs.mkdirSync(path.join(dir, 'versions'), { recursive: true });
+        fs.writeFileSync(path.join(dir, 'versions', `v${(old.behavior as Record<string, unknown>).version}.json`), JSON.stringify(old, null, 1));
+      }
+      const skill: KnowSkill = { name: n, description: desc, body: text, source: 'self', file, updatedAt: Date.now(), behavior: definition, mode: modeOf(definition) };
+      fs.writeFileSync(file, JSON.stringify({ name: n, description: desc, body: text, behavior: definition }, null, 1));
+      this.candidates.set(n, skill);
+      this.changed();
+      return { ok: true, skill, created };
+    }
     const file = path.join(dir, 'SKILL.md');
+    if (prev?.behavior) {
+      fs.mkdirSync(path.join(dir, 'versions'), { recursive: true });
+      fs.writeFileSync(path.join(dir, 'versions', `v${Number(previousVersion) || 1}.json`), JSON.stringify(prev, null, 1));
+    }
     if (code) {
       const codeFile = path.join(dir, 'code.js');
       const old = fs.existsSync(codeFile) ? fs.readFileSync(codeFile, 'utf8') : hasCode(prev?.behavior) ? String((prev!.behavior as any).code) : null;
       if (old !== null && version! > 1) { fs.mkdirSync(path.join(dir, 'versions'), { recursive: true }); fs.writeFileSync(path.join(dir, 'versions', `v${version! - 1}.js`), old); }
       fs.writeFileSync(codeFile, code);
+    } else if (fs.existsSync(path.join(dir, 'code.js'))) {
+      fs.unlinkSync(path.join(dir, 'code.js'));
     }
     fs.writeFileSync(file, `---\nname: ${n}\ndescription: ${desc}\n---\n\n${text}\n`);
-    const stored = code ? { ...(meta as Record<string, unknown>), code } : behavior;
+    const stored = code ? { ...(meta as Record<string, unknown>), code } : definition;
     const skill: KnowSkill = { name: n, description: desc, body: text, source: 'self', file, updatedAt: Date.now(),
       ...(stored !== undefined ? { behavior: stored, mode: modeOf(stored) } : {}) };
     this.skills.set(n, skill);
+    const pending = this.candidates.get(n);
+    if (pending) {
+      fs.mkdirSync(path.join(dir, 'versions'), { recursive: true });
+      fs.writeFileSync(path.join(dir, 'versions', `v${(pending.behavior as Record<string, unknown>).version}.json`), JSON.stringify(pending, null, 1));
+      fs.unlinkSync(pending.file);
+      this.candidates.delete(n);
+    }
     this.changed();
     return { ok: true, skill, created };
   }

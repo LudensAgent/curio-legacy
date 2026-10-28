@@ -48,7 +48,7 @@ test('沙箱：出错时报出是代码第几行，api 报错会变成代码里�
   assert.match(hang.error!, /永远不会来/);
 });
 
-test('样本里的局部寻路代码技能：绕过一堵墙走到目标', async (t) => {
+test('旧局部寻路样本在未观察的地形前如实失败，不能读取墙后地图假装已找到路', async (t) => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   const vision = new Vision(adapter), arbiter = new Arbiter(adapter, memory, bus, vision);
   adapter.speed = 1000;
@@ -62,11 +62,12 @@ test('样本里的局部寻路代码技能：绕过一堵墙走到目标', async
   const done = new Promise<TaskOutcome>((r) => arbiter.once('done', r));
   arbiter.start({ skill: 'use_skill', args: { name: 'local-path', args: { target: '4,64,0' } } }, 'llm');
   const o = await done;
-  assert.equal(o.result.status, 'succeeded', o.result.summary);
-  assert.ok(Math.abs(adapter.pos.x - 4.5) <= 1.6 && Math.abs(adapter.pos.z - 0.5) <= 1.6, `走到了 ${JSON.stringify(adapter.pos)}`);
+  assert.equal(o.result.status, 'failed', o.result.summary);
+  assert.match(o.result.summary, /找不到能走的路/);
+  assert.deepEqual(adapter.pos, { x: 0, y: 64, z: 0 }, '未观察完整地形时没有凭隐藏地图移动');
 });
 
-test('代码技能老失败：后台单独请模型改代码，换上新版本；旧版本留着', async (t) => {
+test('代码技能老失败：后台生成待验证修订，稳定版保留，显式试用新版本', async (t) => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   const vision = new Vision(adapter), arbiter = new Arbiter(adapter, memory, bus, vision);
   const book = new SkillBook(null, tmp());
@@ -75,14 +76,19 @@ test('代码技能老失败：后台单独请模型改代码，换上新版本�
   const asked: string[] = [];
   const planner = { autonomous: true, noteInvalid() {}, complete: async (messages: any[]) => {
     asked.push(messages.at(-1).content);
-    return { text: JSON.stringify({ code: 'const s = await api.state();\nreturn s.feet;', change: '不再读 args.target，直接返回脚下' }), latencyMs: 5 };
+    return { text: JSON.stringify({ code: 'const s = await api.state();\nreturn s.feet;', verify: 'const s = await api.state(); return s.hp > 0 ? true : "没有存活状态";', change: '不再读 args.target，直接返回脚下' }), latencyMs: 5 };
   } };
   const improver = new CodeImprover(planner as any, engine, bus);
   engine.improve = (n, why, note) => { improver.consider(n, why, note); };
   t.after(() => { setBehaviorRegistry(null); engine.dispose(); memory.close(); });
   const w = engine.write({ name: 'buggy', description: '一段会出错的代码技能', code: 'const t = args.target.x;\nreturn t;' });
   assert.ok(w.ok, JSON.stringify(w));
-  const once = () => new Promise<TaskOutcome>((r) => { arbiter.once('done', r); arbiter.start({ skill: 'use_skill', args: { name: 'buggy' } }, 'llm'); });
+  const once = (trial = false) => new Promise<TaskOutcome>((resolve, reject) => {
+    const done = (outcome: TaskOutcome) => resolve(outcome);
+    arbiter.once('done', done);
+    const started = arbiter.start({ skill: 'use_skill', args: { name: 'buggy', ...(trial ? { trial: true } : {}) } }, 'llm');
+    if ('error' in started) { arbiter.off('done', done); reject(new Error(started.error)); }
+  });
   const first = await once();
   assert.match(first.result.summary, /第 1 行/);
   assert.equal(asked.length, 0, '失败一次还不改');
@@ -90,16 +96,17 @@ test('代码技能老失败：后台单独请模型改代码，换上新版本�
   for (let i = 0; i < 10; i++) await setImmediate();
   assert.equal(asked.length, 1, '失败两次后在后台改');
   assert.match(asked[0], /args\.target/, '改进时看得到出错的代码和记录');
-  assert.equal(engine.get('buggy')?.version, 2);
-  assert.ok(fs.existsSync(path.join(path.dirname(book.get('buggy')!.file), 'versions', 'v1.js')), '旧版本留着');
-  const ok = await once();
+  assert.equal(engine.get('buggy')?.version, 1, '生成修订不覆盖稳定版');
+  assert.equal(engine.get('buggy', true)?.version, 2);
+  assert.ok(fs.existsSync(path.join(path.dirname(book.get('buggy')!.file), 'code.js')), '稳定代码仍在原位置');
+  const ok = await once(true);
   assert.equal(ok.result.status, 'succeeded');
   const limited = new CodeImprover(planner as any, engine, bus, { globalGapMs: 60_000 });
   (limited as any).lastAt = Date.now();
   assert.match(limited.consider('buggy', 'requested', '想更快')!, /太近/, '需要时仍可配置间隔（默认不限）');
 });
 
-test('同一份代码技能改了太多轮还不可靠：收起不再改，别把钱一直花在同一个坑里', async (t) => {
+test('代码技能达到后台改进轮数上限：停止本次改进，保留稳定版和历史', async (t) => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   const vision = new Vision(adapter), arbiter = new Arbiter(adapter, memory, bus, vision);
   const book = new SkillBook(null, tmp());
@@ -111,9 +118,14 @@ test('同一份代码技能改了太多轮还不可靠：收起不再改，别�
   // 已经换过 3 版（byVersion 里 4 个版本），每版都没攒够成功
   for (let v = 1; v <= 4; v++) (engine as any).touch('churn', (st: any) => { st.byVersion = { ...(st.byVersion ?? {}), [v]: { ok: 0, fail: 2 } }; });
   const improver = new CodeImprover(planner as any, engine, bus, { maxRounds: 3 });
+  const stable = engine.get('churn');
+  const history = structuredClone(engine.statsOf('churn')?.byVersion);
   const why = improver.consider('churn', 'requested', '再改改');
-  assert.match(why!, /收起.*3 轮/);
-  assert.ok(engine.inactive('churn'), '收起了');
+  assert.match(why!, /上限 3 轮.*停止本次改进/);
+  assert.equal(engine.inactive('churn'), false, '轮数限制不能替代技能停用或收起决定');
+  assert.equal(engine.get('churn'), stable, '保留原稳定版');
+  assert.deepEqual(engine.statsOf('churn')?.byVersion, history, '历史证据保留');
+  assert.ok(bus.recent().some((e) => e.type === 'skill_improve_skipped' && e.data?.maxRounds === 3));
   assert.equal(improver.busy, null, '没有再发请求');
   const loose = new CodeImprover(planner as any, engine, bus, { maxRounds: 0 });
   const fresh = engine.write({ name: 'fresh', description: '另一份老改不好的技能', code: 'const s = await api.state();\nreturn s.feet;' });

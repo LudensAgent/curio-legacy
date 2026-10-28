@@ -62,7 +62,7 @@ test('原子动作如实回报做不到的原因，不替模型做决定', async
   t.after(() => ctx.memory.close());
   const step = await stepTo.run(ctx, { at: [1, 0, 0], facing: 'N' });
   assert.equal(step.status, 'failed');
-  assert.match(step.summary, /目标格是 stone/);
+  assert.match(step.summary, /目标格是 未看清的格子/, 'physical obstruction does not identify an unobserved block');
   w.blocks.push({ name: 'water', pos: { x: 0, y: 62, z: -1 } });
   const wet = await digAt.run(ctx, { at: [1, 1, 0], facing: 'N' });
   assert.equal(wet.status, 'failed');
@@ -78,7 +78,7 @@ test('原地垫高：头顶空了才跳得起来；背包没方块就说清楚',
   assert.equal(none.failureCode, 'MISSING_MATERIALS');
   w.inv.set('cobblestone', 4);
   const blocked = await placeAt.run(ctx, { at: [0, 0, 0], facing: 'N', item: 'any' });
-  assert.match(blocked.summary, /头顶上方是 stone/);
+  assert.match(blocked.summary, /头顶上方是 未看清的格子/);
   await digAt.run(ctx, { at: [0, 2, 0], facing: 'N' });
   const up = await placeAt.run(ctx, { at: [0, 0, 0], facing: 'N', item: 'any' });
   assert.equal(up.status, 'succeeded', up.summary);

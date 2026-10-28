@@ -132,8 +132,8 @@ const OPERATOR = `【操作者】控制台里的操作者（直播的主人）�
 /** 专注：主目标 + 清单，插曲用 detour */
 const FOCUS = `【专注】主目标是这一阶段要拿到的成果（有床有箱的家、整套铁甲、去下界），不是做法，也不是过夜、脱困这类眼前事（detour）。清单 3–6 项可验证的子任务，可写 {"text":"…","done_when":{…}} 自动勾；依次推进；久没推进就改清单，有【阶段回顾】时可换目标（写 switch_reason）。`;
 
-/** 技能：从经历里总结、写下就生效的做法（详细写法在 writing-skills 技能里，按需查） */
-const SKILLS_DOC = () => `【技能】管用的做法写进 skill，存下就生效：{"name":"英文-连字符","description":"…","when":{条件},"steps":[…]或"code":"JS"}。when 含 after_failure＝动作失败时先试；只有状态条件＝成立自动做；不写＝use_skill 调用。写不出就用 worth_learning；写法先查 {"kind":"skill","name":"writing-skills"}。身体只会躲岩浆和溺水，别的反应（躲怪、逃跑、脱困）都靠你总结成技能。`;
+/** 技能的生成、试用与正式使用分开，完整写法按需查。 */
+const SKILLS_DOC = () => `【技能】把做法写进 skill 会保存候选：{"name":"英文-连字符","description":"…","when":{条件},"steps":[…]或"code":"JS","verify":"观察原目标是否达成"}。你决定何时在 routine 用 use_skill {"name":"…","trial":true,"args":{…}} 显式试用；候选不自动接手、不替换稳定版，取得足够实际验收证据才启用。启用后 when 含 after_failure＝动作失败时先试；只有状态条件＝成立自动做；不写＝手动调用。方块只读当前视觉，unknown不能当作空气或已知矿物；只听到的实体没有精确坐标和可交互ID。写不出就用 worth_learning；写法先查 {"kind":"skill","name":"writing-skills"}。岩浆和溺水底线由身体承担。`;
 
 const QUERIES = (skills: string[]) => `【先查再做】需要时先输出一个查询 JSON（不占游戏时间，每次思考最多 3 次），拿到结果再决定：
 - {"kind":"skill","name":"技能名"} 翻开技能书看做法｜{"kind":"design","brief":"用途、多大、风格","where":"here|base|x,y,z"} 请建筑师画图纸：房子、前哨、仓库、畜栏、塔等要长期用的建筑（where：脚下、家旁或坐标）

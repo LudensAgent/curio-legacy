@@ -325,7 +325,9 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; spri
     // 不挖的时候，目标格是实心的、上面两格能站，就按站到它上面算；是岩浆就说清楚
     let targetNote = '';
     if (nums && nums.length === 3 && !heading) {
-      const at = (dy: number) => adapter.blockAt({ x: pos!.x, y: pos!.y + dy, z: pos!.z });
+      ctx.senses.refresh();
+      const visible = ctx.senses.observeBlocks?.([0, 1, 2].map((dy) => ({ x: Math.floor(pos!.x), y: Math.floor(pos!.y) + dy, z: Math.floor(pos!.z) }))) ?? [];
+      const at = (dy: number) => visible.find((b) => b.pos.y === Math.floor(pos!.y) + dy)?.name ?? null;
       const here = at(0);
       const open = (n: string | null) => n !== null && (isSoftBlock(n) || ['air', 'cave_air', 'void_air'].includes(n));
       if (here && /lava/.test(here)) return fail('BAD_ARGS', `目标格 (${pos.x},${pos.y},${pos.z}) 是 ${here}，不能走进去；要去它旁边就写旁边那一格的坐标`);
@@ -353,7 +355,7 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; spri
       const below = adapter.blockAt({ ...c, y: c.y - 1 });
       return openCell(adapter.blockAt(c)) && openCell(adapter.blockAt({ ...c, y: c.y + 1 })) && below !== null && !openCell(below) && !LIQUID_BLOCKS.has(below);
     };
-    const nextTo = (p: Vec3Like) => !flat && !!nums && !heading && !enterable() && Math.max(Math.abs(Math.floor(p.x) - Math.floor(pos!.x)), Math.abs(Math.floor(p.y) - Math.floor(pos!.y)), Math.abs(Math.floor(p.z) - Math.floor(pos!.z))) <= 1;
+    const nextTo = (p: Vec3Like) => !flat && !!nums && !heading && Math.max(Math.abs(Math.floor(p.x) - Math.floor(pos!.x)), Math.abs(Math.floor(p.y) - Math.floor(pos!.y)), Math.abs(Math.floor(p.z) - Math.floor(pos!.z))) <= 1 && !enterable();
     const reachedNear = (p: Vec3Like, why: string) => ok(`到了 ${label} 旁边：实际站在 (${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)})，紧挨着目标格，差 ${distance(p).toFixed(2)} 格（${why}）${targetNote}`, { ...measured(p), nextTo: true });
     const inScope = () => {
       throwIfAborted(signal);

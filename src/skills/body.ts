@@ -203,7 +203,7 @@ export const dig: Skill<DigArgs> = {
           const n = await breakCell(ctx, { x: me.x, y: me.y + 2 + i, z: me.z });
           if (n) dug.push(n);
         }
-        return ok(`挖开了头顶 ${dug.length ? dug.join('、') : '（本来就空着）'}｜${surroundings(adapter).text}`, { dug });
+        return ok(`挖开了头顶 ${dug.length ? dug.join('、') : '（本来就空着）'}`, { dug });
       }
       if (args.dir === 'down') {
         for (let i = 0; i < args.blocks; i++) {
@@ -215,7 +215,7 @@ export const dig: Skill<DigArgs> = {
           if (n) dug.push(n);
           await adapter.moveTo({ kind: 'xyz', x: c.x, y: c.y, z: c.z }, { signal, timeoutMs: 4000 }).catch((e) => { if (isAbort(e)) throw e; });
         }
-        return ok(`往下挖了 ${dug.length} 格（${dug.join('、')}）｜${surroundings(adapter).text}`, { dug });
+        return ok(`往下挖了 ${dug.length} 格（${dug.join('、')}）`, { dug });
       }
       const dirKey = args.dir === 'forward' ? dirOfYaw(adapter.eye()?.yaw ?? 0).replace(/^(N|S)[EW]$/, '$1') : args.dir;
       const [dx, dz] = DIR_OFFSETS[dirKey] ?? DIRS[dirKey] ?? [0, -1];
@@ -230,11 +230,11 @@ export const dig: Skill<DigArgs> = {
         await adapter.moveTo({ kind: 'xyz', ...feet }, { signal, timeoutMs: 5000 });
         walked++;
       }
-      return ok(`往 ${dirKey} 挖了 ${walked} 格（${dug.length ? dug.join('、') : '本来就通'}）｜${surroundings(adapter).text}`, { dug, walked });
+      return ok(`往 ${dirKey} 挖了 ${walked} 格（${dug.length ? dug.join('、') : '本来就通'}）`, { dug, walked });
     } catch (e) {
       if (isAbort(e)) throw e;
       const msg = why(e);
-      return dug.length ? ok(`挖了 ${dug.join('、')}，然后${msg}｜${surroundings(adapter).text}`, { dug }) : fail(msg.includes('流进来') || msg.includes('基岩') || msg.startsWith('那边是') ? 'BAD_ARGS' : codeFromError(e), `${msg}｜${surroundings(adapter).text}`);
+      return dug.length ? ok(`挖了 ${dug.join('、')}，然后${msg}`, { dug }) : fail(msg.includes('流进来') || msg.includes('基岩') || msg.startsWith('那边是') ? 'BAD_ARGS' : codeFromError(e), msg);
     }
   },
 };
@@ -266,14 +266,14 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
       const goalReached = args.untilSky || args.untilExit ? reached(around) : climbed >= args.height;
       const facts = { climbed, sky: around.sky, exits: around.exits, goalReached, position: { ...state.pos },
         effectEvidence: { verified: true, changed: state.pos.y > start + 0.05, reasons: [`实际高度 ${start} → ${state.pos.y}`] } };
-      if (!climbed) return fail('STUCK', `未实际爬升${stopped ? `：${stopped}` : '，没有完成垫高'}｜${around.text}`, facts);
-      if (stopped || !goalReached) return fail('STUCK', `往上爬了 ${climbed} 格后停下：${stopped ?? '已到本次高度或时间上限，仍未满足停止条件'}｜${around.text}`, facts);
-      return ok(`往上爬了 ${climbed} 格${args.untilExit ? '，四周有路了' : args.untilSky ? '，看得见天空了' : ''}｜${around.text}`, facts);
+      if (!climbed) return fail('STUCK', `未实际爬升${stopped ? `：${stopped}` : '，没有完成垫高'}`, facts);
+      if (stopped || !goalReached) return fail('STUCK', `往上爬了 ${climbed} 格后停下：${stopped ?? '已到本次高度或时间上限，仍未满足停止条件'}`, facts);
+      return ok(`往上爬了 ${climbed} 格${args.untilExit ? '，四周有路了' : args.untilSky ? '，看得见天空了' : ''}`, facts);
     };
     const initial = surroundings(adapter);
     if ((args.untilSky || args.untilExit) && reached(initial)) {
       // 已经满足停止条件：没有垫高是对的，但要说清楚，免得以为“爬不上去”
-      return ok(`${args.untilExit ? '四周已经有路可走' : '已经看得见天空'}，所以没有垫高；如果是想站上坑沿，用 {"height":2} 这样直接指定格数｜${initial.text}`,
+      return ok(`${args.untilExit ? '四周已经有路可走' : '已经看得见天空'}，所以没有垫高；如果是想站上坑沿，用 {"height":2} 这样直接指定格数`,
         { climbed: 0, alreadySatisfied: true, sky: initial.sky, exits: initial.exits });
     }
     for (let i = 0; i < args.height && Date.now() < ctx.deadline - 1000; i++) {
