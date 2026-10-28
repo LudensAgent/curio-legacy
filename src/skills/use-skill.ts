@@ -37,7 +37,9 @@ export const useSkill: Skill<{ name: string; args?: Record<string, unknown>; fai
     const failure = a.failure && typeof a.failure === 'object' ? a.failure as Record<string, unknown> : undefined;
     // 技能声明了要哪些参数：调用时没给就当场说清楚，别让代码跑到一半才报错
     const needs = registry?.get(name)?.needs;
-    const missing = needs && !failure ? Object.keys(needs).filter((k) => extra?.[k] === undefined || extra[k] === '') : [];
+    // 说明里写了“默认…/不给就…/省略…/可选”的参数是可以不给的：以前一律当必填，报错又说“不给就按当前朝向”，自相矛盾
+    const optional = (desc: unknown) => /默认|不给|省略|可选|可不|不写|没给|缺省|optional|default/i.test(String(desc ?? ''));
+    const missing = needs && !failure ? Object.keys(needs).filter((k) => !optional(needs[k]) && (extra?.[k] === undefined || extra[k] === '')) : [];
     // 声明了参数的技能：传了它不认识的名字（targetY、depth……）会被代码悄悄忽略，当场说清楚它要的是什么
     const unknown = needs && extra ? Object.keys(extra).filter((k) => !(k in needs) && k !== 'trigger') : [];
     if (unknown.length) return { ok: false, error: `${name} 不认识参数 ${unknown.map((k) => `args.${k}`).join('、')}；它要的是：${Object.entries(needs!).map(([k, v]) => `args.${k}（${v}）`).join('、')}` };
