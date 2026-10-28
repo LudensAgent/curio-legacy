@@ -14,7 +14,7 @@ import { worldPoint } from '../skills/recovery.ts';
 import { causeName } from '../brain/habits.ts';
 import { pickFuel } from '../skills/economy.ts';
 import { pickVariant } from '../skills/work.ts';
-import { afterStep, argsLabel, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, nextStep, recordOf, signatureOf, targetKeyOf, viewOf } from './activity.ts';
+import { afterStep, argsLabel, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, nextStep, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
 import { instinctNote, type BehaviorEngine } from './behaviors.ts';
 import { recallLocal } from './recall.ts';
 import { Attention, EXPERIENCE_MS, RECONSIDER, stuckHere, URGENT } from './attention.ts';
@@ -181,9 +181,12 @@ export class Mind {
   static FED_UP_REVIEW = 0.65;
   /** 游戏里现在是第几天（感知时更新） */
   private gameDay = NaN;
+  /** 每段活最多提前规划一次，避免动作还在运行时反复追问。 */
+  private nearEndAskedFor: string | null = null;
   private waitingSince: number | null = null;
   /** 干等时无聊到多少就想想“这段时间能做点什么” */
   static BORED_AT = 0.6;
+  static NEAR_END_AFTER_MS = 4000;
   static NEAR_END_REASON = NEAR_END_REASON;
   /** 要命的处境（窒息、被贴身围攻、水下没气）：用“瞥一眼”那档快速拿主意，几秒都等不起 */
   static DANGER_REASON = '有危险，马上拿主意';
@@ -451,7 +454,12 @@ export class Mind {
     const bored = this.attention.peek().some((n) => n.key === 'bored_waiting');
     if (bored && gapOk) return this.think('干等着好无聊，想想这段时间能做点什么', 'deliberate');
     if (!resting && gapOk && this.attention.highest() >= RECONSIDER) return this.think('注意到了一些事', 'glance');
-    // 没有待启动的步骤，不代表正在执行的最后一步快做完了；等结果回来再决定接下来做什么。
+    // 最后一步仍在执行、结果未知：可以提前想下一段，不把它当成已经完成。
+    if (!this.queuedNext && this.nearEndAskedFor !== this.activity.id && current?.planId === this.activity.id
+      && remainingSteps(this.activity) === 0 && Date.now() - current.startedAt >= Mind.NEAR_END_AFTER_MS) {
+      this.nearEndAskedFor = this.activity.id;
+      return this.think(Mind.NEAR_END_REASON, 'glance');
+    }
     if (Date.now() - Math.max(this.activityThoughtAt, this.lastThoughtAt) > this.timing.checkInMs) return this.think('做了一会儿了，抬头看看', 'glance');
   }
 

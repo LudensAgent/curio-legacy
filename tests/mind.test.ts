@@ -399,6 +399,78 @@ test('存物动作刚启动也不自动预判完成', async (t) => {
   assert.equal(w.pending.length, 2, '确认动作结束后再想接下来');
 });
 
+test('最后一步运行一段时间后提前想下一段，结果未知时不打断，每段活只问一次', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { decision: 'new', activity: { what: '砍树', steps: [step()] } });
+  (w.arbiter as any).current.startedAt = Date.now() - Mind.NEAR_END_AFTER_MS;
+  await w.tick();
+  assert.equal(w.pending.length, 2);
+  assert.equal(w.pending[1].hint.tier, 'light');
+  assert.match(w.pending[1].messages[1].content, /最后一步正在执行，结果还不知道/);
+  await w.reply(1, { decision: 'continue', next: { what: '做工作台', steps: [step(2)] } });
+  assert.deepEqual(w.arbiter.info()?.args, { n: 1 });
+  assert.equal(w.mind.activity?.what, '砍树');
+  for (let i = 0; i < 3; i++) await w.tick();
+  assert.equal(w.pending.length, 2);
+  await w.finish();
+  await w.tick();
+  assert.equal(w.mind.activity?.what, '做工作台');
+  assert.deepEqual(w.arbiter.info()?.args, { n: 2 });
+});
+
+test('提前规划没写 next 也不反复追问', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { decision: 'new', activity: { what: '砍树', steps: [step()] } });
+  (w.arbiter as any).current.startedAt = Date.now() - Mind.NEAR_END_AFTER_MS;
+  await w.tick();
+  await w.reply(1, { decision: 'continue' });
+  for (let i = 0; i < 3; i++) await w.tick();
+  assert.equal(w.pending.length, 2);
+  assert.deepEqual(w.arbiter.info()?.args, { n: 1 });
+});
+
+test('提前规划时动作失败，过期的 next 不会执行，失败交给下一次思考', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { decision: 'new', activity: { what: '砍树', steps: [step()] } });
+  (w.arbiter as any).current.startedAt = Date.now() - Mind.NEAR_END_AFTER_MS;
+  await w.tick();
+  await w.finish(fail('MISSING_MATERIALS', '缺少斧头'));
+  await w.reply(1, { decision: 'continue', next: { what: '过期的下一段', steps: [step(2)] } });
+  assert.notEqual(w.mind.activity?.what, '过期的下一段');
+  assert.equal(w.mind.queuedNext, null);
+  await w.tick();
+  assert.match(JSON.stringify(w.pending.at(-1)!.messages), /缺少斧头/);
+});
+
+test('提前规划已排队的 next 在当前动作失败后丢弃', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { decision: 'new', activity: { what: '砍树', steps: [step()] } });
+  (w.arbiter as any).current.startedAt = Date.now() - Mind.NEAR_END_AFTER_MS;
+  await w.tick();
+  await w.reply(1, { decision: 'continue', next: { what: '过期的下一段', steps: [step(2)] } });
+  assert.ok(w.mind.queuedNext);
+  await w.finish(fail('MISSING_MATERIALS', '缺少斧头'));
+  assert.equal(w.mind.queuedNext, null);
+  await w.tick();
+  assert.notEqual(w.mind.activity?.what, '过期的下一段');
+  assert.match(JSON.stringify(w.pending.at(-1)!.messages), /缺少斧头/);
+});
+
+test('提前规划明确选择调整时仍执行新的动作', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { decision: 'new', activity: { what: '砍树', steps: [step()] } });
+  (w.arbiter as any).current.startedAt = Date.now() - Mind.NEAR_END_AFTER_MS;
+  await w.tick();
+  await w.reply(1, { decision: 'adjust', activity: { what: '采石头', steps: [step(2)] } });
+  assert.equal(w.mind.activity?.what, '采石头');
+  assert.deepEqual(w.arbiter.info()?.args, { n: 2 });
+});
+
 for (const kind of ['new', 'adjust'] as const) test(`注意到事情后明确 ${kind} 仍立即改变当前活动`, async (t) => {
   const w = fixture(t);
   await w.tick();
