@@ -191,6 +191,8 @@ export interface MindDecision {
   switchReason?: string;
   /** 刚才的事值得练成技能：哪里出了问题、想学会什么（后台据此写技能） */
   worthLearning?: string;
+  /** 模型嘴上说的是 continue（只是顺手写了一段活，被当成 adjust）：手上的活还在顺利做时不该被它打断 */
+  saidContinue?: boolean;
   /** 对操作者指令的回应：照做中 / 做完了 / 做不到（附原因） */
   operator?: { status: 'doing' | 'done' | 'cannot' | 'adopted' | 'declined'; note?: string };
   /** 校验时自动纠正/丢弃的部分（下次思考时告诉模型） */

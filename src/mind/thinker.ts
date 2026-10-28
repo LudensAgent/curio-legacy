@@ -143,6 +143,7 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
   const o = raw as Record<string, any>;
   const notes: string[] = [];
   let kind: DecisionKind = DECISION_KINDS.includes(o.decision) ? o.decision : (o.activity ? 'new' : 'continue');
+  let saidContinue = false;
   if (!DECISION_KINDS.includes(o.decision) && o.decision !== undefined) notes.push(`decision "${String(o.decision)}" 不认识，按 ${kind} 处理`);
   const monologue = str(o.monologue ?? o.thought, 200);
   // 说着 continue，却写了一段新的活（带 steps、what 也换了）：嘴上没改口，心里已经换了，按 adjust 处理
@@ -151,6 +152,7 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
     // 只是换了个说法、做法一样（同一串动作）：还是 continue，不打断手上的活
     && (!currentSkills || o.activity.steps.map((st: any) => String(st?.skill ?? '')).join('>') !== currentSkills.join('>'))) {
     kind = 'adjust';
+    saidContinue = true;
     notes.push(`说的是 continue，但写了新的活「${str(o.activity.what, 40)}」，按 adjust 处理`);
   }
   let activity: ActivityDraft | undefined;
@@ -202,7 +204,7 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
   const verdict = ['supported', 'refuted', 'unclear'].includes(o.experiment_result) ? o.experiment_result as 'supported' | 'refuted' | 'unclear' : undefined;
   if (kind === 'experiment' && !hypothesis) notes.push('experiment 没写 hypothesis，这次只当普通尝试');
   return {
-    kind, monologue, notes,
+    kind, monologue, notes, ...(saidContinue ? { saidContinue: true } : {}),
     ...(str(o.say, 120) && !str(o.say, 120).startsWith('/') ? { say: str(o.say, 120) } : {}),
     ...(activity ? { activity } : {}), ...(next ? { next } : {}), ...(agenda ? { agenda } : {}),
     ...(learned ? { learned } : {}),

@@ -1279,11 +1279,17 @@ export class Mind {
       decision.notes.push(`瞥一眼时不整个换掉手上的事：这次按 detour 处理，做完「${decision.activity.what}」会回到「${a.what}」；真要换就认真想一想`);
       return;
     }
+    // 瞥一眼时想改做法，而手上这一步正在顺利做（动作还在跑、没失败过）：不当场打断。
+    // 以前只护“开工 25 秒内”、而且排队的位置被占了就放行，结果每隔十几秒瞥一眼就把正在挖的台阶取消重来，活永远做不完
+    const running = this.d.arbiter.info();
+    const stepRunning = !!running && running.source !== 'filler' && running.source !== 'reflex' && running.planId === a.id;
+    const young = Date.now() - this.activityThoughtAt < 25_000;
     if (decision.kind === 'adjust' && decision.tier === 'glance' && a.id === thoughtAboutActivity && a.failures === 0
-      && Date.now() - this.activityThoughtAt < 25_000 && !this.queuedNext) {
+      && (young || stepRunning || decision.saidContinue)) {
+      const replaced = !!this.queuedNext;
       this.queuedNext = { draft: decision.activity, monologue: decision.monologue, at: Date.now() };
       decision.kind = 'continue';
-      decision.notes.push(`「${a.what}」刚开工、还顺利，先不改：你想的「${decision.activity.what}」排在它做完之后`);
+      decision.notes.push(`「${a.what}」${stepRunning ? '手上这一步正在做' : '刚开工'}、还顺利，先不打断：你想的「${decision.activity.what}」排在它做完之后${replaced ? '（替换了之前排着的那段）' : ''}`);
     }
   }
 
