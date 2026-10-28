@@ -51,7 +51,7 @@ function slotFixture() {
     async toss() { assert.fail('exact source selection must never fall back to tossing by item type'); },
     activateItem() { const held = slots[36 + bot.quickBarSlot]; assert.ok(held); uses.push(held); },
   };
-  const adapter = new MineflayerAdapter(config, new EventBus());
+  const adapter = new MineflayerAdapter({ ...config, ui: { ...config.ui, openHoldMs: 0, closeHoldMs: 0 } }, new EventBus());
   adapter.bot = bot;
   adapter.mcData = { itemsByName: { diamond_pickaxe: { maxDurability: 1561 } } };
   Reflect.set(adapter, 'connectedFlag', true);
@@ -107,6 +107,52 @@ test('real adapter replaces a same-name hotbar item with the requested source sl
   assert.equal(result.ok, true, result.reason);
   assert.deepEqual(moves, [[9, 36]]);
   assert.deepEqual(bot.heldItem?.enchants, [{ name: 'silk_touch', lvl: 1 }]);
+});
+
+test('inventory clicks expose one virtual window for equip, unequip, toss and hotbar moves', async () => {
+  for (const operation of ['equip', 'unequip', 'toss', 'hotbar']) {
+    const f = slotFixture(), events: string[] = [];
+    f.adapter.on('inventory_open', () => events.push('open'));
+    f.adapter.on('inventory_close', () => events.push('close'));
+    const originalPacing = async () => { events.push('paced'); };
+    (f.bot as any).beforeWindowClick = originalPacing;
+    const equip = f.bot.equip, unequip = f.bot.unequip, click = f.bot.clickWindow, move = f.bot.moveSlotItem;
+    f.bot.equip = async (...args) => { await (f.bot as any).beforeWindowClick(9, 0, 0); await equip(...args); };
+    f.bot.unequip = async (...args) => { await (f.bot as any).beforeWindowClick(36, 0, 0); await unequip(...args); };
+    f.bot.clickWindow = async (...args) => { await (f.bot as any).beforeWindowClick(...args); await click(...args); };
+    f.bot.moveSlotItem = async (...args) => { await (f.bot as any).beforeWindowClick(args[0], 0, 0); await move(...args); };
+    const signal = new AbortController().signal;
+    const result = operation === 'equip' ? await f.adapter.equipItem('diamond_pickaxe', 'hand', signal, { sourceSlot: 9 })
+      : operation === 'unequip' ? await f.adapter.equipItem(null, 'hand', signal)
+      : operation === 'toss' ? await f.adapter.tossItem('diamond_pickaxe', 1, signal, undefined, { sourceSlot: 9 })
+      : await f.adapter.arrangeHotbar('diamond_pickaxe', 0, signal, { sourceSlot: 9 });
+    assert.equal(result.ok, true, operation);
+    assert.deepEqual(events, ['open', 'paced', 'close'], operation);
+    assert.equal((f.bot as any).beforeWindowClick, originalPacing);
+  }
+});
+
+test('inventory presentation closes after a failed click and never opens for a hotbar-only equip', async () => {
+  const f = slotFixture(), events: string[] = [];
+  f.adapter.on('inventory_open', () => events.push('open'));
+  f.adapter.on('inventory_close', () => events.push('close'));
+  f.bot.equip = async () => { await (f.bot as any).beforeWindowClick(9, 0, 0); throw new Error('click failed'); };
+  await assert.rejects(f.adapter.equipItem('diamond_pickaxe', 'hand', new AbortController().signal, { sourceSlot: 9 }), /click failed/);
+  assert.deepEqual(events, ['open', 'close']);
+  events.length = 0;
+  f.bot.equip = async () => {};
+  await f.adapter.equipItem('diamond_pickaxe', 'hand', new AbortController().signal, { sourceSlot: 36 });
+  assert.deepEqual(events, []);
+});
+
+test('cancelling during the inventory opening hold closes the virtual window', async () => {
+  const f = slotFixture(), controller = new AbortController(), events: string[] = [];
+  Reflect.get(f.adapter, 'cfg').ui.openHoldMs = 1000;
+  f.adapter.on('inventory_open', () => { events.push('open'); controller.abort(); });
+  f.adapter.on('inventory_close', () => events.push('close'));
+  f.bot.equip = async () => { await (f.bot as any).beforeWindowClick(9, 0, 0); };
+  await assert.rejects(f.adapter.equipItem('diamond_pickaxe', 'hand', controller.signal, { sourceSlot: 9 }));
+  assert.deepEqual(events, ['open', 'close']);
 });
 
 test('real adapter tosses only the selected NBT stack, including partial counts, without spilling to same-name slots', async () => {

@@ -112,6 +112,21 @@ test('GUI put selects the requested source NBT stack and raw clicks expose actua
   assert.deepEqual(result.view?.slots.find((slot) => slot.slot === 5)?.nbt, { Potion: 'minecraft:poison' });
 });
 
+test('GUI take confirms output against the open window inventory', async (t) => {
+  const advance = clock(t), f = fixture('brewing_stand', 5);
+  f.window.slots[0] = f.item('potion', 0);
+  f.bot.clickWindow = async (slot, button, mode) => {
+    assert.deepEqual([slot, button, mode], [0, 0, 1]);
+    f.window.slots[5] = f.window.slots[0];
+    f.window.slots[0] = null;
+  };
+  const pending = f.adapter.useGui(f.position, [{ take: { slot: 0 } }], new AbortController().signal);
+  await advance(); const result = await pending;
+  assert.equal(result.ok, true, result.reason);
+  assert.match(result.done[0], /potion×1/);
+  assert.equal(f.playerSlots[9], null, 'the player inventory is not yet copied from the open window');
+});
+
 test('raw GUI clicks fail when neither slots nor cursor actually change', async (t) => {
   const advance = clock(t), f = fixture();
   f.bot.clickWindow = async () => {};
@@ -151,18 +166,23 @@ test('GUI validation rejects modes and buttons unsupported by the installed wind
 
 test('player inventory and entity containers can be opened through the same GUI primitive', async (t) => {
   const advance = clock(t), f = fixture('generic_9x3', 27), signal = new AbortController().signal;
+  const lifecycle: string[] = [];
+  f.adapter.on('inventory_open', () => lifecycle.push('open'));
+  f.adapter.on('inventory_close', () => lifecycle.push('close'));
   f.playerSlots[9] = f.item('bread', 9, 2);
   let pending = f.adapter.useGui('inventory', [{ click: { slot: 9, button: 0, mode: 0 } }], signal);
   await advance(); const inventory = await pending;
   assert.equal(inventory.ok, true, inventory.reason);
   assert.equal(inventory.view?.type, 'inventory');
   assert.equal(inventory.view?.cursor?.name, 'bread');
+  assert.deepEqual(lifecycle, ['open', 'close']);
   f.bot.inventory.selectedItem = null;
   f.bot.entities[22] = { id: 22, name: 'chest_minecart', position: new Vec3(2, 64, 0) };
   pending = f.adapter.useGui({ entityId: 22 }, [], signal);
   await advance(); const entity = await pending;
   assert.equal(entity.ok, true, entity.reason);
   assert.deepEqual(f.opens, [22]);
+  assert.deepEqual(lifecycle, ['open', 'close'], 'entity windows use Mineflayer window events');
 });
 
 test('mounted horse inventory uses the inventory-open entity action and requires the chosen mount', async (t) => {

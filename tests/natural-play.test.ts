@@ -164,8 +164,9 @@ test('trade 适配层：先看交易表，按序号交易并按背包变化确�
     entity: { position: new Vec3(0, 64, 0) }, game: { dimension: 'overworld' },
     entities: { 9: { isValid: true, position: new Vec3(1, 64, 1) } },
     inventory: { slots: [], selectedItem: null, items: () => [...inv].filter(([, n]) => n > 0).map(([type, count]) => ({ type, count, name: data.items[type].name })) },
-    async openVillager() { return { trades, close() {} }; },
+    async openVillager() { return { trades, inventoryStart: 3, inventoryEnd: 39, get slots() { return [null, null, null, ...bot.inventory.items()]; }, close() {} }; },
     async trade(_v: any, i: number, times: number) { const t = trades[i]; inv.set(t.inputItem1.type, inv.get(t.inputItem1.type)! - t.inputItem1.count * times); inv.set(t.outputItem.type, (inv.get(t.outputItem.type) ?? 0) + times); },
+    async _syncWindow() {},
   };
   const a = adapter() as any; a.bot = bot; a.connectedFlag = true; a.moveTo = async () => {};
   const look = await a.tradeWith(9, null, 1, new AbortController().signal);
@@ -188,8 +189,9 @@ test('trade 适配层：按现价（涨价/打折后）算能做几次；流浪�
     entity: { position: new Vec3(0, 64, 0) }, game: { dimension: 'overworld' },
     entities: { 9: { isValid: true, name: 'wandering_trader', entityType: 999, position: new Vec3(1, 64, 1) } },
     inventory: { slots: [], selectedItem: null, items: () => [...inv].filter(([, n]) => n > 0).map(([type, count]) => ({ type, count, name: data.items[type].name })) },
-    async openVillager(e: any) { opened = e; return { trades, close() {} }; },
+    async openVillager(e: any) { opened = e; return { trades, inventoryStart: 3, inventoryEnd: 39, get slots() { return [null, null, null, ...bot.inventory.items()]; }, close() {} }; },
     async trade(_v: any, i: number, times: number) { const t = trades[i]; inv.set(t.inputItem1.type, inv.get(t.inputItem1.type)! - t.realPrice * times); inv.set(t.outputItem.type, (inv.get(t.outputItem.type) ?? 0) + t.outputItem.count * times); },
+    async _syncWindow() {},
   };
   const a = adapter() as any; a.bot = bot; a.connectedFlag = true; a.moveTo = async () => {};
   const look = await a.tradeWith(9, null, 1, new AbortController().signal);
@@ -199,6 +201,55 @@ test('trade 适配层：按现价（涨价/打折后）算能做几次；流浪�
   const r = await a.tradeWith(9, 0, 5, new AbortController().signal);
   assert.equal(r.ok, true, r.reason);
   assert.equal(r.traded, 2, '10 个绿宝石按现价 4 只够两次');
+});
+
+test('trade 用窗口中的实时背包确认批次，关闭前 bot.inventory 仍可能是旧值', async () => {
+  const emerald = data.itemsByName.emerald.id, bread = data.itemsByName.bread.id;
+  const inventory = [{ type: emerald, name: 'emerald', count: 6, metadata: 0 }];
+  const slots: any[] = [null, null, null, { ...inventory[0] }, null];
+  const trades = [{ inputItem1: { type: emerald, name: 'emerald', count: 2, metadata: 0 }, realPrice: 2,
+    hasItem2: false, outputItem: { type: bread, name: 'bread', count: 3, metadata: 0 }, nbTradeUses: 0, maximumNbTradeUses: 12 }];
+  const window = { trades, slots, inventoryStart: 3, inventoryEnd: 5, close() {} };
+  const bot: any = {
+    entity: { position: new Vec3(0, 64, 0) }, game: { dimension: 'overworld' },
+    entities: { 9: { isValid: true, name: 'villager', position: new Vec3(1, 64, 1) } },
+    inventory: { slots: [], selectedItem: null, items: () => inventory },
+    async openVillager() { return window; },
+    async trade(_v: any, _index: number, times: number) {
+      slots[3].count -= times * 2;
+      slots[4] = { type: bread, name: 'bread', count: times * 3, metadata: 0 };
+    },
+    async _syncWindow(actual: unknown) { assert.equal(actual, window); },
+  };
+  const a = adapter() as any; a.bot = bot; a.connectedFlag = true;
+  const r = await a.tradeWith(9, 0, 3, new AbortController().signal);
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.traded, 3);
+  assert.equal(inventory[0].count, 6, '测试保留旧的 bot.inventory');
+});
+
+test('trade 不把被服务器撤销的预测库存当作成功交易', async () => {
+  const emerald = data.itemsByName.emerald.id, bread = data.itemsByName.bread.id;
+  const slots: any[] = [null, null, null, { type: emerald, name: 'emerald', count: 2, metadata: 0 }, null];
+  const trades = [{ inputItem1: { type: emerald, name: 'emerald', count: 2, metadata: 0 }, realPrice: 2,
+    hasItem2: false, outputItem: { type: bread, name: 'bread', count: 3, metadata: 0 }, nbTradeUses: 0, maximumNbTradeUses: 12 }];
+  const window = { trades, slots, inventoryStart: 3, inventoryEnd: 5, close() {} };
+  const bot: any = {
+    entity: { position: new Vec3(0, 64, 0) }, game: { dimension: 'overworld' },
+    entities: { 9: { isValid: true, name: 'villager', position: new Vec3(1, 64, 1) } },
+    inventory: { slots: [], selectedItem: null, items: () => [] },
+    async openVillager() { return window; },
+    async trade() { slots[3] = null; slots[4] = { type: bread, name: 'bread', count: 3, metadata: 0 }; },
+    async _syncWindow(actual: unknown) {
+      assert.equal(actual, window);
+      slots[3] = { type: emerald, name: 'emerald', count: 2, metadata: 0 }; slots[4] = null;
+    },
+  };
+  const a = adapter() as any; a.bot = bot; a.connectedFlag = true;
+  const r = await a.tradeWith(9, 0, 1, new AbortController().signal);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'TRADE_NOT_CONFIRMED');
+  assert.equal(r.traded, 0);
 });
 
 import { trade as tradeSkill, useGui } from '../src/skills/gui.ts';

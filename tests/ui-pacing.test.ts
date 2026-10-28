@@ -45,6 +45,54 @@ test('窗口打开后先停留 UI_OPEN_HOLD_MS 再交给调用方；箱子/熔�
   assert.deepEqual(opened, ['open crafting_table']);
 });
 
+test('附魔台先安装选项监听，再执行打开窗口停留', async () => {
+  const a = new MineflayerAdapter({ ...config, ui: { pacingMs: 0, openHoldMs: 120, closeHoldMs: 0 } } as any, new EventBus()) as any;
+  let listening = false, received = false;
+  const bot: any = {
+    async openBlock() {
+      setTimeout(() => { received = listening; }, 20);
+      return { close() {} };
+    },
+    async openEnchantmentTable(block: unknown) {
+      const window = await bot.openBlock(block);
+      listening = true;
+      return window;
+    },
+  };
+  a.installUiPacing(bot);
+  const start = Date.now();
+  await bot.openEnchantmentTable({ name: 'enchanting_table' });
+  assert.ok(Date.now() - start >= 110);
+  assert.equal(received, true, '停留期间也能接收服务器发来的附魔选项');
+  const direct = Date.now();
+  await bot.openBlock({ name: 'enchanting_table' });
+  assert.ok(Date.now() - direct >= 110, '直接打开附魔台也会停留');
+});
+
+test('熔炉先安装进度监听，再执行打开窗口停留', async () => {
+  const a = new MineflayerAdapter({ ...config, ui: { pacingMs: 0, openHoldMs: 120, closeHoldMs: 0 } } as any, new EventBus()) as any;
+  let listening = false, received = false;
+  const bot: any = {
+    async openBlock() {
+      setTimeout(() => { received = listening; }, 20);
+      return { close() {} };
+    },
+    async openFurnace(block: unknown) {
+      const window = await bot.openBlock(block);
+      listening = true;
+      return window;
+    },
+  };
+  a.installUiPacing(bot);
+  const start = Date.now();
+  await bot.openFurnace({ name: 'furnace' });
+  assert.ok(Date.now() - start >= 110);
+  assert.equal(received, true, '停留期间也能接收服务器发来的熔炉属性');
+  const direct = Date.now();
+  await bot.openBlock({ name: 'furnace' });
+  assert.ok(Date.now() - direct >= 110, '直接打开熔炉也会停留');
+});
+
 test('动作被打断时停顿立刻结束，并把刚打开的窗口关掉', async () => {
   const { a, bot, opened } = rig({ pacingMs: 500, openHoldMs: 500, closeHoldMs: 500 });
   const ac = new AbortController();

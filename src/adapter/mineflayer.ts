@@ -223,12 +223,15 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       await sleep(ms, this.actionContext.getStore()?.signal);
     };
     if (ui.openHoldMs > 0) {
-      // 所有窗口（箱子、工作台、熔炉、附魔台、交易、bot.craft 自己开的工作台）都从这两个入口打开：开完先停一下再往里放东西
-      for (const name of ['openBlock', 'openEntity']) {
+      // 开窗后停一下；附魔台和熔炉先安装属性监听，再执行停留。
+      const specializedOpen = new AsyncLocalStorage<boolean>();
+      for (const name of ['openBlock', 'openEntity', 'openEnchantmentTable', 'openFurnace']) {
         const orig = bot[name];
         if (typeof orig !== 'function') continue;
         bot[name] = async (...args: any[]) => {
-          const w = await orig.apply(bot, args);
+          const w = await (name === 'openEnchantmentTable' || name === 'openFurnace' ? specializedOpen.run(true, () => orig.apply(bot, args)) : orig.apply(bot, args));
+          // These helpers install property listeners after openBlock returns.
+          if (name === 'openBlock' && specializedOpen.getStore()) return w;
           try { await sleep(ui.openHoldMs, this.actionContext.getStore()?.signal); } catch (e) { try { w?.close?.() ?? bot.closeWindow(w); } catch { /* ignore */ } throw e; }
           return w;
         };
@@ -241,6 +244,26 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const ms = this.cfg.ui?.closeHoldMs ?? 0;
     if (ms <= 0 || signal?.aborted) return;
     await sleep(ms, signal).catch(() => {});
+  }
+
+  /** Present inventory clicks as a virtual window, but leave hotbar-only changes invisible. */
+  private async withObservedInventory<T>(signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
+    const b = this.bot, beforeClick = b.beforeWindowClick;
+    let opened = false;
+    const observeClick = async (...args: any[]) => {
+      if (!opened && !b.currentWindow) {
+        opened = true;
+        this.emit('inventory_open');
+        await sleep(this.cfg.ui?.openHoldMs ?? 0, signal);
+      }
+      if (beforeClick) await beforeClick.apply(b, args);
+    };
+    b.beforeWindowClick = observeClick;
+    try { return await operation(); }
+    finally {
+      if (b.beforeWindowClick === observeClick) b.beforeWindowClick = beforeClick;
+      if (opened) { await this.uiCloseHold(signal); this.emit('inventory_close'); }
+    }
   }
 
   /** A pending transaction must never continue issuing commands after its owner ends. */
@@ -306,7 +329,13 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     this.bot = bot;
     this.guardPrePlayWrites(bot);
     bot.loadPlugin(pathfinder);
-    this.installUiPacing(bot);
+    // Mineflayer 在 inject_allowed 才注入 openBlock 等方法；注入后再包装。
+    bot.once('inject_allowed', () => {
+      this.installUiPacing(bot);
+      if ((this.cfg.ui?.pacingMs ?? 0) > 0 && (typeof bot.clickWindow !== 'function' || !Function.prototype.toString.call(bot.clickWindow).includes('/* curio-patch: window click hook */'))) {
+        this.bus.publish('ui_pacing_unavailable', 'P1', 'Mineflayer 界面点击节奏补丁未生效，点击不会按 UI_PACING_MS 放慢；请运行 node scripts/patch-deps.mjs 并重启');
+      }
+    });
     // 踩水：每个物理刻看一眼，空闲泡在水里时按住上浮（见 treadWater）
     bot.on('physicsTick', () => { try { this.treadWater(bot); } catch { /* ignore */ } });
     // mineflayer 4.39 的下船检测有缺陷：1.9+ 服务器下船时发的是 set_passengers(船, [其余乘客])，
@@ -1591,21 +1620,25 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       // never authorizes that additional action.
       const empty = b.inventory.slots?.slice(9, 45).some((item: Item | null) => !item);
       if (!empty) return { ok: false, reason: 'INVENTORY_FULL' };
-      await this.afterAction(() => b.unequip(destination), check);
-      await this.syncInventory(check);
-      const actual = destination === 'hand' ? b.heldItem : b.inventory.slots?.[slot];
-      return !actual ? { ok: true } : { ok: false, reason: 'UNEQUIP_NOT_CONFIRMED' };
+      return this.withObservedInventory(signal, async () => {
+        await this.afterAction(() => b.unequip(destination), check);
+        await this.syncInventory(check);
+        const actual = destination === 'hand' ? b.heldItem : b.inventory.slots?.[slot];
+        return !actual ? { ok: true } : { ok: false, reason: 'UNEQUIP_NOT_CONFIRMED' };
+      });
     }
     const item = opts.sourceSlot === undefined ? this.bestInvItem(name) : b.inventory.slots?.[opts.sourceSlot];
     if (!item) return { ok: false, reason: 'NO_ITEM' };
     if (item.name !== name) return { ok: false, reason: 'SOURCE_ITEM_CHANGED' };
     const identity = JSON.stringify([item.type, item.metadata, item.nbt ?? null]);
-    await this.afterAction(() => this.bot.equip(item, destination), check);
-    await this.syncInventory(check);
-    const slot = this.bot.getEquipmentDestSlot?.(destination);
-    const actual = destination === 'hand' ? this.bot.heldItem : this.bot.inventory.slots?.[slot];
-    if (destination === 'hand' && actual?.name === name) this.noteToolChoice(name);
-    return actual?.name === name && (opts.sourceSlot === undefined || JSON.stringify([actual.type, actual.metadata, actual.nbt ?? null]) === identity) ? { ok: true } : { ok: false, reason: 'EQUIP_NOT_CONFIRMED' };
+    return this.withObservedInventory(signal, async () => {
+      await this.afterAction(() => this.bot.equip(item, destination), check);
+      await this.syncInventory(check);
+      const slot = this.bot.getEquipmentDestSlot?.(destination);
+      const actual = destination === 'hand' ? this.bot.heldItem : this.bot.inventory.slots?.[slot];
+      if (destination === 'hand' && actual?.name === name) this.noteToolChoice(name);
+      return actual?.name === name && (opts.sourceSlot === undefined || JSON.stringify([actual.type, actual.metadata, actual.nbt ?? null]) === identity) ? { ok: true } : { ok: false, reason: 'EQUIP_NOT_CONFIRMED' };
+    });
   }
 
   private itemEnchants(item: any): string[] | undefined {
@@ -1661,7 +1694,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         open = async () => {
           const pending = once(b, 'windowOpen', { signal: AbortSignal.any([signal, AbortSignal.timeout(8000)]) });
           b._client.write('entity_action', { entityId: b.entity.id, actionId: 6, jumpBoost: 0 });
-          return (await pending)[0];
+          const window = (await pending)[0];
+          try { await sleep(this.cfg.ui?.openHoldMs ?? 0, signal); } catch (e) { try { b.closeWindow(window); } catch { /* ignore */ } throw e; }
+          return window;
         };
       } else {
         if (entity.position.distanceTo(b.entity.position) > 4.5) await this.afterAction(() => this.moveTo({ kind: 'follow_entity', entityId: target.entityId, range: 3 }, { signal, timeoutMs: 20000, constructionSafe: true }), check);
@@ -1689,10 +1724,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       // The installed sync asks for authoritative slots and carried cursor.
       await this.afterAction(() => raceAbort(b._syncWindow(w), signal, 3000, () => {}), check);
     };
-    const invCount = (name: string) => b.inventory.items().filter((i: any) => i.name === name).reduce((n: number, i: any) => n + i.count, 0);
+    // Open containers maintain their own player slots until Mineflayer closes them.
+    const invCount = (name: string) => w.slots.slice(size()).filter((i: Item | null) => i?.name === name).reduce((n: number, i: Item) => n + i.count, 0);
     const settle = () => this.afterAction(() => sleep(250, signal), check);
+    const paceButton = () => this.afterAction(() => sleep(this.cfg.ui?.pacingMs ?? 0, signal), check);
     this.inFlight++; // 界面开着的整个过程都算在忙，空闲巡检不要替它关窗
     try {
+      if (target === 'inventory') {
+        this.emit('inventory_open');
+        await this.afterAction(() => sleep(this.cfg.ui?.openHoldMs ?? 0, signal), check);
+      }
       await settle();
       for (const op of ops) {
         check();
@@ -1731,7 +1772,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
             const until = Date.now() + 1500;
             while (Date.now() < until && !(w.enchantments[op.button]?.level > 0)) await this.afterAction(() => sleep(100, signal), check);
           }
-          const key = () => JSON.stringify(w.slots.slice(0, size()).map((it: any) => it ? [it.name, it.count, this.itemEnchants(it) ?? null] : null));
+          const key = () => JSON.stringify((table ? w.slots.slice(0, 1) : w.slots.slice(0, size())).map((it: any) => it ? [it.name, it.count, this.itemEnchants(it) ?? null, it.nbt ?? null] : null));
+          await paceButton();
           const before = key(), xpBefore = b.experience?.level ?? 0;
           b._client.write('enchant_item', { windowId: w.id, enchantment: op.button });
           const until = Date.now() + 1500;
@@ -1745,9 +1787,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           }
           const target = table ? w.slots[0] : null;
           const got = target ? this.itemEnchants(target) : undefined;
+          if (table && !got?.length) return { ok: false, reason: `ENCHANTMENT_NOT_CONFIRMED:点了按钮 ${op.button} 后目标物品变了，但未观察到附魔`, view: this.guiView(w), done };
           done.push(table && got ? `附魔成功：${target.name} 得到 ${got.join('、')}（经验 ${xpBefore}→${b.experience?.level ?? '?'} 级）` : `点了按钮 ${op.button}，界面变了`);
         } else if ('rename' in op) {
           if (!/^(minecraft:)?anvil$/.test(String(w.type))) return { ok: false, reason: 'RENAME_REQUIRES_ANVIL', view: this.guiView(w), done };
+          await paceButton();
           b._client.write('name_item', { name: op.rename });
           const accepted = () => [op.rename, JSON.stringify(op.rename), JSON.stringify({ text: op.rename })].includes(w.slots[2]?.customName);
           const confirmed = await this.waitForInteraction(accepted, check);
@@ -1765,6 +1809,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           if (!/^(minecraft:)?beacon$/.test(String(w.type))) return { ok: false, reason: 'NOT_BEACON', view: this.guiView(w), done };
           const before = w.slots[0]?.count ?? 0;
           if (!before) return { ok: false, reason: 'NO_BEACON_PAYMENT', view: this.guiView(w), done };
+          await paceButton();
           b._client.write('set_beacon_effect', { primary_effect: op.beacon.primary, secondary_effect: op.beacon.secondary });
           if (!(await this.waitForInteraction(() => (w.slots[0]?.count ?? 0) < before, check))) return { ok: false, reason: 'BEACON_NOT_CONFIRMED', view: this.guiView(w), done };
           done.push(`信标选择已提交，确认支付物品被消耗；效果是否作用于身体请检查状态`);
@@ -1774,7 +1819,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     } finally {
       await this.uiCloseHold(signal);
       this.inFlight--;
-      try { b.closeWindow(w); } catch { /* ignore */ }
+      if (target === 'inventory') this.emit('inventory_close');
+      else { try { b.closeWindow(w); } catch { /* ignore */ } }
       if (this.interactionDirty().some((d) => !d.startsWith('窗口'))) this.scheduleRepair('界面操作后残留', 150);
     }
   }
@@ -1895,7 +1941,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const t = v.trades?.[index];
       if (!t) return { ok: false, reason: `NO_SUCH_TRADE:${index}`, trades, traded: 0 };
       if (t.tradeDisabled) return { ok: false, reason: 'TRADE_LOCKED（这条交易用完了，村民要回工作站补货）', trades, traded: 0 };
-      const have = (it: any) => b.inventory.items().filter((i: any) => i.type === it.type).reduce((n: number, i: any) => n + i.count, 0);
+      // Mineflayer copies the player inventory from the merchant window back to
+      // bot.inventory only when the window closes. Read the live window while
+      // it is open, otherwise a completed trade can be reported as unconfirmed.
+      const have = (it: any) => v.slots.slice(v.inventoryStart, v.inventoryEnd)
+        .filter((i: any) => i?.type === it.type && i.metadata === it.metadata)
+        .reduce((n: number, i: any) => n + i.count, 0);
       const out = t.outputItem;
       const cost = [{ it: t.inputItem1, n: Number.isFinite(t.realPrice) ? t.realPrice : t.inputItem1?.count }, ...(t.hasItem2 && t.inputItem2 ? [{ it: t.inputItem2, n: t.inputItem2.count }] : [])].filter((c) => c.it);
       const affordable = Math.min(...cost.map((c) => Math.floor(have(c.it) / Math.max(1, c.n))));
@@ -1903,6 +1954,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (n <= 0) return { ok: false, reason: `NOT_ENOUGH:${cost.map((c) => `${c.it.name}×${c.n}（有 ${have(c.it)}）`).join('+')}`, trades, traded: 0 };
       const before = have(out);
       await this.afterAction(() => b.trade(v, index, n), check);
+      // Window clicks are predicted locally in 1.20.1. Ask the server for the
+      // complete window state before treating the inventory delta as a trade.
+      await this.afterAction(() => raceAbort(b._syncWindow(v), signal, 3000, () => {}), check);
       await this.afterAction(() => sleep(250, signal), check);
       const got = have(out) - before;
       return got > 0 ? { ok: true, trades: this.tradeViews(v), traded: Math.round(got / Math.max(1, out.count)) } : { ok: false, reason: 'TRADE_NOT_CONFIRMED', trades: this.tradeViews(v), traded: 0 };
@@ -1931,10 +1985,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // 朝哪扔由调用的人定（toss_item 的 toward）；不指定就朝现在看的方向
     if (face) await this.afterAction(() => this.bot.lookAt(this.vec({ x: face.x, y: face.y + 1, z: face.z }), true), check);
     const yaw = e?.yaw ?? 0;
-    if (opts.sourceSlot === undefined) await this.afterAction(() => this.bot.toss(item.type, null, want), check);
-    else if (want === item.count) await this.afterAction(() => this.bot.clickWindow(opts.sourceSlot, 1, 4), check);
-    else for (let n = 0; n < want; n++) await this.afterAction(() => this.bot.clickWindow(opts.sourceSlot, 0, 4), check);
-    await this.syncInventory(check);
+    await this.withObservedInventory(signal, async () => {
+      if (opts.sourceSlot === undefined) await this.afterAction(() => this.bot.toss(item.type, null, want), check);
+      else if (want === item.count) await this.afterAction(() => this.bot.clickWindow(opts.sourceSlot, 1, 4), check);
+      else for (let n = 0; n < want; n++) await this.afterAction(() => this.bot.clickWindow(opts.sourceSlot, 0, 4), check);
+      await this.syncInventory(check);
+    });
     const tossed = have - total();
     // 记住扔掉了什么、大概落在哪（只是事实：哪些掉落物是自己刚扔的，被捡回来时能说清；不替它决定捡不捡）
     if (tossed > 0 && !opts.gift && e?.position) {
@@ -1958,8 +2014,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (item.name !== name) return { ok: false, reason: 'SOURCE_ITEM_CHANGED' };
     const identity = JSON.stringify([item.type, item.metadata, item.nbt ?? null]);
     if (opts.sourceSlot !== undefined ? opts.sourceSlot !== target : b.inventory.slots?.[target]?.name !== name) {
-      await this.afterAction(() => b.moveSlotItem(item.slot, target), check);
-      await this.syncInventory(check);
+      await this.withObservedInventory(signal, async () => {
+        await this.afterAction(() => b.moveSlotItem(item.slot, target), check);
+        await this.syncInventory(check);
+      });
     }
     if (b.inventory.slots?.[target]?.name !== name) return { ok: false, reason: 'HOTBAR_NOT_CONFIRMED' };
     if (opts.sourceSlot !== undefined && JSON.stringify([b.inventory.slots[target].type, b.inventory.slots[target].metadata, b.inventory.slots[target].nbt ?? null]) !== identity) return { ok: false, reason: 'HOTBAR_NOT_CONFIRMED' };
@@ -2205,6 +2263,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const lit = () => { try { return b.blockAt(block.position)?.getProperties?.().lit === true; } catch { return false; } };
     const slot = (it: any) => (it && it.count > 0 ? { name: String(it.name), count: Number(it.count) } : null);
     const contents = () => ({ input: slot(furnace.inputItem()), output: slot(furnace.outputItem()), fuel: slot(furnace.fuelItem()) });
+    const have = (name: string) => furnace.slots.slice(furnace.inventoryStart, furnace.inventoryEnd)
+      .filter((item: Item | null) => item?.name === name).reduce((n: number, item: Item) => n + item.count, 0);
+    const sync = () => this.afterAction(() => raceAbort(b._syncWindow(furnace), signal, 3000, () => {}), check);
     const fuels = [fuel, ...(opts.moreFuels ?? []).filter((f) => f !== fuel && f !== input)];
     // 燃料：一个能烧几件（原版燃烧时间 / 200 刻）
     const per = (f: string) => /coal_block/.test(f) ? 80 : /coal$|charcoal/.test(f) ? 8 : /_planks$|_log$|_wood$/.test(f) ? 1.5 : f === 'stick' ? 0.5 : 1;
@@ -2242,8 +2303,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         const out = furnace.outputItem();
         if (out && out.count > 0) {
           outputName = out.name;
-          const taken = out.count;
+          const before = have(out.name);
           await this.afterAction(() => furnace.takeOutput(), check);
+          await sync();
+          const taken = Math.max(0, have(out.name) - before);
+          if (!taken) { stopped = 'stalled'; break; }
           made += taken;
           opts.onProgress?.(made);
           lastMove = Date.now();
@@ -2275,14 +2339,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       // 烧好的和没烧的都拿回来，按背包实际变化算（中途出错也要拿）
       if (furnace.outputItem()) {
         const o = furnace.outputItem(); outputName ??= o.name;
-        const before = this.invCountOf(o.name);
+        const before = have(o.name);
         await this.afterAction(() => furnace.takeOutput().catch(() => {}), check);
-        made += Math.max(0, this.invCountOf(o.name) - before);
+        await sync();
+        made += Math.max(0, have(o.name) - before);
       }
       if (furnace.inputItem()) {
-        const before = this.invCountOf(input);
+        const before = have(input);
         await this.afterAction(() => furnace.takeInput().catch(() => {}), check);
-        returned = Math.max(0, this.invCountOf(input) - before);
+        await sync();
+        returned = Math.max(0, have(input) - before);
       }
     } finally {
       // 不管怎么离开（包括被打断），都把熔炉里还剩什么报出去：东西不会自己回到背包
@@ -2307,14 +2373,17 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos: block.position }, { signal, timeoutMs: 30000 }), check);
     const furnace: any = await this.afterAction(() => raceAbort(b.openFurnace(block), signal, 8000, () => {}), check);
     const slot = (it: any) => (it && it.count > 0 ? { name: String(it.name), count: Number(it.count) } : null);
+    const have = (name: string) => furnace.slots.slice(furnace.inventoryStart, furnace.inventoryEnd)
+      .filter((item: Item | null) => item?.name === name).reduce((n: number, item: Item) => n + item.count, 0);
     const taken: { name: string; count: number }[] = [];
     try {
       const grab = async (get: () => any, take: () => Promise<any>) => {
         const it = get();
         if (!it) return;
-        const before = this.invCountOf(it.name);
+        const before = have(it.name);
         await this.afterAction(() => take().catch(() => {}), check);
-        const got = this.invCountOf(it.name) - before;
+        await this.afterAction(() => raceAbort(b._syncWindow(furnace), signal, 3000, () => {}), check);
+        const got = have(it.name) - before;
         if (got > 0) taken.push({ name: it.name, count: got });
       };
       await grab(() => furnace.outputItem(), () => furnace.takeOutput());
@@ -2614,12 +2683,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   /**
    * 一次合成一批：像玩家一样每个合成格放 times 个料，再 shift 点产物，服务器一口气合成到料用完。
    * 一批的上限由料决定：每格最多放一组（大多 64，鸡蛋/雪球 16，桶 1），背包放不下的产物服务器会停在那里。
-   * 返回这一批实际做出了几次（按背包变化算）；做不成就返回 0，由调用方退回逐个合成。
+   * 返回这一批实际做出了几次（按背包变化算）；仅无法执行批量操作时返回 null，由调用方退回逐个合成。
    */
-  private async craftBatch(recipe: any, times: number, table: any, signal: AbortSignal): Promise<number> {
+  private async craftBatch(recipe: any, times: number, table: any, signal: AbortSignal): Promise<number | null> {
     const check = this.actionCheckpoint(signal);
     const b = this.bot;
-    if (typeof b._syncWindow !== 'function' || typeof b.transfer !== 'function') return 0;
+    if (typeof b._syncWindow !== 'function' || typeof b.transfer !== 'function') return null;
     const w = table ? 3 : 2;
     const cells: { slot: number; id: number }[] = [];
     if (recipe.inShape) {
@@ -2627,7 +2696,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     } else {
       (recipe.ingredients ?? []).forEach((c: any, i: number) => cells.push({ slot: 1 + i, id: c.id }));
     }
-    if (!cells.length || cells.some((c) => c.slot > w * w)) return 0;
+    if (!cells.length || cells.some((c) => c.slot > w * w)) return null;
     // 每格最多一组：桶这种一组只有 1 个的料，一批就只能做 1 次
     const stack = (id: number) => this.mcData.items[id]?.stackSize ?? 64;
     const n = Math.min(times, ...cells.map((c) => stack(c.id)));
@@ -2636,19 +2705,20 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const before = this.invCount(resultId);
     let window: any = b.inventory;
     if (table) window = await this.afterAction(() => raceAbort(b.openBlock(table), signal, 8000, () => {}), check);
-    // 背包 2×2 合成没有 windowOpen 事件：告诉直播数据流“背包界面打开了”，并像开窗口一样先停一下
-    else { this.emit('inventory_open'); await this.afterAction(() => sleep(this.cfg.ui?.openHoldMs ?? 0, signal), check); }
     try {
-      if (table && !String(window.type ?? '').startsWith('minecraft:crafting')) return 0;
+      // 背包 2×2 没有 windowOpen 事件；停留期间被打断也必须成对关闭观察端界面。
+      if (!table) { this.emit('inventory_open'); await this.afterAction(() => sleep(this.cfg.ui?.openHoldMs ?? 0, signal), check); }
+      if (table && !String(window.type ?? '').startsWith('minecraft:crafting')) throw new Error('打开的窗口不是工作台');
       // 合成格里不能有别的东西
       for (let i = 1; i <= w * w; i++) if (window.slots[i]) await this.afterAction(() => b.clickWindow(i, 0, 1), check);
       for (const c of cells) {
         await this.afterAction(() => b.transfer({ window, itemType: c.id, metadata: null, count: n, sourceStart: window.inventoryStart, sourceEnd: window.inventoryEnd, destStart: c.slot, destEnd: c.slot + 1 }), check);
       }
       await this.afterAction(() => raceAbort(b._syncWindow(window), signal, 8000, () => {}), check);
-      if (!window.slots[0]) return 0;
-      await this.afterAction(() => b.clickWindow(0, 0, 1), check);
-      await this.afterAction(() => raceAbort(b._syncWindow(window), signal, 8000, () => {}), check);
+      if (window.slots[0]?.type === resultId) {
+        await this.afterAction(() => b.clickWindow(0, 0, 1), check);
+        await this.afterAction(() => raceAbort(b._syncWindow(window), signal, 8000, () => {}), check);
+      }
     } finally {
       // 剩在格子里的料（产物放不下、或桶这种合成后留下的容器）收回背包
       try {
@@ -2668,7 +2738,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const check = this.actionCheckpoint(signal);
     const b = this.bot;
     const pace = this.cfg.ui?.pacingMs ?? 0;
-    const timeout = 10000 + (pace > 0 ? 3000 + (this.cfg.ui?.openHoldMs ?? 0) + pace * 12 * times : 0);
+    const timeout = 10000 + (this.cfg.ui?.openHoldMs ?? 0) + (this.cfg.ui?.closeHoldMs ?? 0) + (pace > 0 ? 3000 + pace * 12 * times : 0);
     const attempt = new AbortController();
     const attemptSignal = AbortSignal.any([signal, attempt.signal]);
     const attemptCheck = this.actionCheckpoint(attemptSignal);
@@ -2677,6 +2747,20 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     await this.interactionReady();
     check();
     let timedOut = false;
+    // Mineflayer 的 bot.craft 用 activateBlock 打开工作台，绕过 openBlock 的停留包装。
+    // 在窗口打开后暂停第一次点击，给观察端展示空工作台的时间。
+    const hold = table ? (this.cfg.ui?.openHoldMs ?? 0) : 0;
+    const beforeClick = b.beforeWindowClick;
+    const closeWindow = b.closeWindow;
+    const heldClose = async (...args: any[]) => { await this.uiCloseHold(attemptSignal); return closeWindow.apply(b, args); };
+    let openedAt = 0;
+    const opened = (window: any) => { if (String(window?.type ?? '').startsWith('minecraft:crafting')) openedAt = Date.now(); };
+    const pacedClick = async (...args: any[]) => {
+      if (openedAt) { const remaining = hold - (Date.now() - openedAt); openedAt = 0; if (remaining > 0) await sleep(remaining, attemptSignal); }
+      await beforeClick.apply(b, args);
+    };
+    if (hold > 0 && typeof beforeClick === 'function') { b.on('windowOpen', opened); b.beforeWindowClick = pacedClick; }
+    if (table && typeof closeWindow === 'function') b.closeWindow = heldClose;
     try {
       await this.afterAction(() => raceAbort(b.craft(recipe, times, table), attemptSignal, timeout, () => { timedOut = true; attempt.abort('craft transaction timed out'); }), attemptCheck);
     } catch (error) {
@@ -2686,6 +2770,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       this.scheduleRepair(timedOut ? '合成超时' : '合成被打断', 250);
       if (timedOut && !signal.aborted) throw new Error('合成界面没响应（超时）；格子里的材料已收回背包，可以再试一次');
       throw error;
+    } finally {
+      if (hold > 0 && typeof beforeClick === 'function') {
+        b.removeListener('windowOpen', opened);
+        if (b.beforeWindowClick === pacedClick) b.beforeWindowClick = beforeClick;
+      }
+      if (b.closeWindow === heldClose) b.closeWindow = closeWindow;
     }
     // 2x2 inventory crafting resolves from Mineflayer's predicted slot model.
     // Wait for the server's authoritative inventory before using that output in
@@ -2730,8 +2820,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const afford = (r: any) => Math.min(...(r.delta ?? []).filter((d: any) => d.count < 0).map((d: any) => Math.floor(this.invCount(d.id) / -d.count)));
       const recipe = bulk ?? any;
       const want = Math.max(1, Math.min(times, afford(recipe) || 1));
-      const batched = await this.afterAction(() => this.craftBatch(recipe, want, table, signal), check).catch((e: any) => { if (e instanceof AbortedError) throw e; return 0; });
-      if (!batched) {
+      const batched = await this.afterAction(() => this.craftBatch(recipe, want, table, signal), check);
+      if (batched === null) {
         if (bulk) {
           await this.afterAction(() => this.craftOnce(bulk, table, signal, times), check);
         } else {
@@ -2850,6 +2940,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     crafted = Math.max(crafted, this.invCount(data.id) - before);
     // 同种木板凑不齐但混着几种木板够用：按实际的木板拼配方（原版允许）
     for (let tries = 0; crafted < count && tries < 8; tries++) {
+      // 正常配方仍可用时，失败不代表需要换木板配方（例如背包已满）。
+      if (b.recipesFor(data.id, null, 1, table)[0]) break;
       const mixed = this.mixedPlanksRecipe(data.id, 1, table);
       if (!mixed) break;
       const was = this.invCount(data.id);

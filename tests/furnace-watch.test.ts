@@ -18,6 +18,8 @@ function rig(fuelCount: number) {
   };
   f.fuelN = 0;
   const furnace: any = {
+    inventoryStart: 3, inventoryEnd: 39,
+    get slots() { return [null, null, null, ...[...inv].map(([name, count]) => it(name, count))]; },
     get fuel() { return f.burn > 0 ? 1 : 0; }, get progress() { return f.progress; },
     inputItem: () => it('raw_iron', f.input), fuelItem: () => it('stick', f.fuelN), outputItem: () => { step(); return it('iron_ingot', f.output); },
     async putFuel(_t: number, _m: null, n: number) { inv.set('stick', inv.get('stick')! - n); f.fuelN += n; },
@@ -32,6 +34,7 @@ function rig(fuelCount: number) {
     blockAt: () => furnaceBlock, findBlock: () => furnaceBlock,
     inventory: { slots: [], items: () => [...inv].filter(([, n]) => n > 0).map(([name, count]) => ({ name, count, type: data.itemsByName[name].id })) },
     async openFurnace() { return furnace; },
+    async _syncWindow(window: unknown) { assert.equal(window, furnace); },
   };
   const a = new MineflayerAdapter(config, new EventBus()) as any;
   a.mcData = data; a.bot = bot; a.connectedFlag = true; a.moveTo = async () => {};
@@ -60,4 +63,32 @@ test('主燃料用完时用背包里别的燃料接着烧', async () => {
   const r = await a.smelt('raw_iron', 2, 'stick', new AbortController().signal, { moreFuels: ['coal'] });
   assert.equal(r.ok, true, r.reason);
   assert.equal(r.made, 2);
+});
+
+test('取熔炉内容时读取窗口背包并以服务器同步结果确认', async () => {
+  for (const accept of [true, false]) {
+    const make = (name: string, count: number) => ({ name, count, type: data.itemsByName[name].id });
+    const slots: any[] = [null, null, make('iron_ingot', 3), null];
+    const furnace = {
+      slots, inventoryStart: 3, inventoryEnd: 4, fuel: 0,
+      outputItem: () => slots[2], inputItem: () => null, fuelItem: () => null,
+      async takeOutput() { slots[3] = slots[2]; slots[2] = null; },
+      close() {},
+    };
+    const block = { name: 'furnace', position: new Vec3(2, 64, 0) };
+    const bot: any = {
+      entity: { position: new Vec3(0, 64, 0) }, game: { dimension: 'overworld' },
+      blockAt: () => block, inventory: { slots: [], items: () => [] },
+      async openFurnace() { return furnace; },
+      async _syncWindow(window: unknown) {
+        assert.equal(window, furnace);
+        if (!accept) { slots[2] = slots[3]; slots[3] = null; }
+      },
+    };
+    const a = new MineflayerAdapter(config, new EventBus()) as any;
+    a.mcData = data; a.bot = bot; a.connectedFlag = true; a.moveTo = async () => {}; a.interactionReady = async () => {};
+    const r = await a.emptyFurnace(block.position, new AbortController().signal);
+    assert.deepEqual(r.taken, accept ? [{ name: 'iron_ingot', count: 3 }] : [], JSON.stringify(r));
+    assert.deepEqual(r.left.output, accept ? null : { name: 'iron_ingot', count: 3 });
+  }
 });
