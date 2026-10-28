@@ -651,6 +651,37 @@ test('零碎经验先存着，出乎意料（卡住）才马上记成窍门', as
   assert.ok(w.self.data.knowHow.some((k) => /斧头/.test(k.text)), '卡住之后的教训马上记下');
 });
 
+test('模型在活动成功后写出的结论不能直接继承活动验证结果', async (t) => {
+  const w = fixture(t);
+  (w.mind as any).lastRecord = { id: 'done', what: '站上岸', kind: 'survive', outcome: 'done', summary: '站上岸',
+    durationSec: 1, gained: {}, lost: {}, at: Date.now(), signature: 'step', failures: 0 };
+  await w.tick();
+  await w.reply(0, { monologue: '我有个想法', decision: 'new', learned: '铁镐可以采收黑曜石', activity: { what: '看看周围', steps: [step()] } });
+  const lesson = w.self.data.knowHow.find((k) => k.text === '铁镐可以采收黑曜石')!;
+  assert.equal(lesson.unverified, true);
+  assert.equal(lesson.wins, 0);
+  assert.equal(lesson.signature, undefined);
+});
+
+test('改写结论后，旧动作的结果不能替新结论验证', () => {
+  const self = new SelfModel(null);
+  const old = self.learn('站干岸浇水', { source: 'reflection', signature: 'pour', outcome: 'done' })!;
+  const revised = self.learn('站干岸浇水，铁镐可以采收黑曜石', { source: 'reflection', revise: old.id })!;
+  assert.equal(revised.signature, undefined);
+  assert.equal(revised.unverified, true);
+  self.record({ id: 'a', what: '浇水', kind: 'gather', outcome: 'done', summary: '', durationSec: 1, gained: {}, lost: {}, at: Date.now(), signature: 'pour', failures: 0 });
+  assert.equal(revised.wins, 0);
+  assert.equal(revised.unverified, true);
+});
+
+test('相同动作成功计入活动反馈，但不自动证实未验证的结论', () => {
+  const self = new SelfModel(null);
+  const lesson = self.learn('假设一种挖矿方法有效', { source: 'reflection', signature: 'dig' })!;
+  self.record({ id: 'a', what: '挖矿', kind: 'gather', outcome: 'done', summary: '', durationSec: 1, gained: {}, lost: {}, at: Date.now(), signature: 'dig', failures: 0 });
+  assert.equal(lesson.wins, 1);
+  assert.equal(lesson.unverified, true);
+});
+
 test('回想：合并重复、丢掉被推翻的、证实的零碎想法变成窍门', async () => {
   const { parseConsolidation } = await import('../src/mind/thinker.ts');
   const self = new SelfModel(null);
@@ -663,11 +694,41 @@ test('回想：合并重复、丢掉被推翻的、证实的零碎想法变成�
   assert.deepEqual(parsed.drop, [c.id], '已合并的不能再被丢');
   const r = self.consolidate(parsed);
   assert.equal(r.before, 3);
-  assert.ok(self.data.knowHow.some((k) => k.text === '掉进浅坑时原地垫方块爬出去' && k.wins === 2));
+  assert.ok(self.data.knowHow.some((k) => k.text === '掉进浅坑时原地垫方块爬出去' && k.wins === 0 && k.unverified));
   assert.ok(!self.data.knowHow.some((k) => k.id === c.id));
   assert.ok(self.data.knowHow.some((k) => k.text === '桦木林边上常有羊'));
   assert.equal(self.insights().length, 0);
   assert.equal(self.reflectionBacklog(), 0);
+});
+
+test('回想合并或改写结论不能继承旧做法的验证证据', () => {
+  const self = new SelfModel(null);
+  const old = self.learn('用水接触岩浆形成黑曜石', { source: 'reflection', signature: 'pour', outcome: 'done' })!;
+  const guess = self.learn('铁镐可以采收黑曜石', { source: 'reflection' })!;
+  self.consolidate({ merge: [{ ids: [old.id, guess.id], text: '用水接触岩浆形成黑曜石；铁镐可以采收' }], rewrite: [], drop: [], add: [], agendaDrop: [] });
+  assert.equal(old.wins, 0);
+  assert.equal(old.unverified, true);
+  assert.equal(old.signature, undefined);
+  self.record({ id: 'a', what: '浇水', kind: 'gather', outcome: 'done', summary: '', durationSec: 1, gained: {}, lost: {}, at: Date.now(), signature: 'pour', failures: 0 });
+  assert.equal(old.wins, 0, '重复旧做法不能验证加入的新结论');
+  assert.equal(old.unverified, true);
+
+  const original = self.learn('下矿时用镐挖石头', { source: 'reflection', signature: 'dig', outcome: 'done' })!;
+  self.consolidate({ merge: [], rewrite: [{ id: original.id, text: '下矿时用镐挖石头，铁镐能采收黑曜石' }], drop: [], add: [], agendaDrop: [] });
+  assert.equal(original.wins, 0);
+  assert.equal(original.unverified, true);
+  assert.equal(original.signature, undefined);
+});
+
+test('回想完全保留同一结论及做法时仍可合并成败记录', () => {
+  const self = new SelfModel(null);
+  const first = self.learn('沿下坡前进', { source: 'reflection', signature: 'step', outcome: 'done' })!;
+  self.data.knowHow.push({ ...first, id: 'other', wins: 2, losses: 1 });
+  self.consolidate({ merge: [{ ids: [first.id, 'other'], text: first.text }], rewrite: [], drop: [], add: [], agendaDrop: [] });
+  assert.equal(first.wins, 3);
+  assert.equal(first.losses, 1);
+  assert.equal(first.unverified, false);
+  assert.equal(first.signature, 'step');
 });
 
 test('打转提醒同一种失败只提一次，几分钟内不反复逼着深想', () => {

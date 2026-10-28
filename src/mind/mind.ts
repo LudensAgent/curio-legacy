@@ -1239,8 +1239,9 @@ export class Mind {
       const activityId = last?.id ?? thoughtAboutActivity ?? this.activity?.id ?? `${this.lastSession}:initial`;
       if (this.learnedActivities.has(activityId)) return;
       const previousTexts = new Map(this.d.self.data.knowHow.map((k) => [k.id, k.text]));
-      const k = this.d.self.learn(text, { kind: last?.kind, signature: last?.signature, source: last?.hypothesis ? 'experiment' : 'reflection',
-        outcome: last?.outcome, tags: last ? Object.keys(last.gained) : [], revise });
+      // 活动结果是观察到的事实，但不能自动证明模型据此写出的任意结论。
+      const k = this.d.self.learn(text, { kind: last?.kind, source: last?.hypothesis ? 'experiment' : 'reflection',
+        tags: last ? Object.keys(last.gained) : [], revise });
       if (k) {
         this.lastLessonAt = Date.now();
         this.learnedActivities.add(activityId);

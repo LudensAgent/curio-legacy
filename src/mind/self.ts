@@ -440,7 +440,7 @@ export class SelfModel {
     if (this.data.history.length > 60) this.data.history = this.data.history.slice(-60);
     // 同一套做法后来的成败会修正“窍门”的可信度：这就是从实践里学
     for (const k of this.data.knowHow) if (k.signature && k.signature === r.signature) {
-      if (r.outcome === 'done' && r.completion !== 'condition') { k.wins++; k.unverified = false; } else if (r.outcome === 'stuck') k.losses++;
+      if (r.outcome === 'done' && r.completion !== 'condition') k.wins++; else if (r.outcome === 'stuck') k.losses++;
       k.updatedAt = Date.now();
     }
     this.touch();
@@ -478,7 +478,7 @@ export class SelfModel {
       const changed = cleanLesson(same.text) !== t;
       same.text = t;
       // 新的说法不能继承旧结论的成功证据，尤其是失败后猜出的替代办法。
-      if (changed) { same.wins = 0; same.losses = 0; same.unverified = opts.outcome !== 'done'; }
+      if (changed) { same.wins = 0; same.losses = 0; same.unverified = opts.outcome !== 'done'; same.signature = undefined; }
       same.updatedAt = Date.now();
       if (opts.outcome === 'done') { same.wins++; same.unverified = false; }
       else if (opts.outcome === 'stuck') { same.losses++; if (!same.wins) same.unverified = true; }
@@ -594,16 +594,22 @@ export class SelfModel {
       const parts = m.ids.map((id) => byId.get(id)).filter((k): k is KnowHow => !!k);
       if (parts.length < 2) continue;
       const [keep, ...rest] = parts;
+      // 回想可能添加了新的结论：旧做法的成败不能证明改写后的整句话。
+      const unchanged = parts.every((k) => cleanLesson(k.text) === cleanLesson(m.text) && k.signature === keep.signature);
       keep.text = m.text;
-      keep.wins = parts.reduce((n, k) => n + k.wins, 0);
-      keep.losses = parts.reduce((n, k) => n + k.losses, 0);
-      keep.unverified = parts.every((k) => k.unverified === true) && keep.wins === 0;
+      keep.wins = unchanged ? parts.reduce((n, k) => n + k.wins, 0) : 0;
+      keep.losses = unchanged ? parts.reduce((n, k) => n + k.losses, 0) : 0;
+      keep.unverified = unchanged ? parts.every((k) => k.unverified === true) && keep.wins === 0 : true;
+      if (!unchanged) keep.signature = undefined;
       keep.tags = [...new Set(parts.flatMap((k) => k.tags))].slice(0, 12);
       keep.updatedAt = Date.now();
       const drop = new Set(rest.map((k) => k.id));
       this.data.knowHow = this.data.knowHow.filter((k) => !drop.has(k.id));
     }
-    for (const r of c.rewrite) { const k = byId.get(r.id); if (k) { k.text = r.text; k.updatedAt = Date.now(); } }
+    for (const r of c.rewrite) { const k = byId.get(r.id); if (k) {
+      if (cleanLesson(k.text) !== cleanLesson(r.text)) { k.wins = 0; k.losses = 0; k.unverified = true; k.signature = undefined; }
+      k.text = r.text; k.updatedAt = Date.now();
+    } }
     if (c.drop.length) { const drop = new Set(c.drop); this.data.knowHow = this.data.knowHow.filter((k) => !drop.has(k.id)); }
     for (const t of c.add) this.learn(t, { source: 'reflection' });
     // 回想是整理零碎点子的，不能顺手把正在推进的主目标也收掉（10-26 晚回想合并“矿口前哨”几条点子时，把正在凑头盔的

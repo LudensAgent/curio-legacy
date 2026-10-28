@@ -8,6 +8,7 @@ import { Reflex } from './brain/reflex.ts';
 import { Mind } from './mind/mind.ts';
 import { parseGameMessage, type ParsedGameMessage } from './memory/game-messages.ts';
 import { SelfModel } from './mind/self.ts';
+import { applyMindPatch } from './mind/mind-patch.ts';
 import { Thinker } from './mind/thinker.ts';
 import { BUILTIN_SKILLS_DIR, SkillBook } from './knowledge/skillbook.ts';
 import { KnowledgeBase } from './knowledge/library.ts';
@@ -245,6 +246,12 @@ behaviors.drops = () => {
 behaviors.improve = (name, why, note) => { const skipped = improver.consider(name, why, note); if (skipped && why !== 'failures') bus.publish('skill_improve_skipped', 'P3', `先不改「${name}」：${skipped}`); };
 draftsFor(memory);
 /** 大脑：像真人一样一段一段地玩的心智层 */
+try {
+  const correction = applyMindPatch(config.dataDir);
+  if (correction) bus.publish('mind_patch', 'P2', correction);
+} catch (e) {
+  bus.publish('mind_patch', 'P1', `mind-patch.json 没套用：${String(e)}`);
+}
 const selfModel = new SelfModel(path.join(config.dataDir, 'mind.json'), config.mind.traits);
 const mind = new Mind({
   adapter, arbiter, perception, memory, bus, self: selfModel, persona: config.persona,
