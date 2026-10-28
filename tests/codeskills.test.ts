@@ -98,3 +98,26 @@ test('代码技能老失败：后台单独请模型改代码，换上新版本�
   (limited as any).lastAt = Date.now();
   assert.match(limited.consider('buggy', 'requested', '想更快')!, /太近/, '需要时仍可配置间隔（默认不限）');
 });
+
+test('同一份代码技能改了太多轮还不可靠：收起不再改，别把钱一直花在同一个坑里', async (t) => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  const vision = new Vision(adapter), arbiter = new Arbiter(adapter, memory, bus, vision);
+  const book = new SkillBook(null, tmp());
+  const engine = new BehaviorEngine(book, adapter, arbiter, bus, vision);
+  setBehaviorRegistry(engine);
+  t.after(() => { setBehaviorRegistry(null); engine.dispose(); memory.close(); });
+  const planner = { autonomous: true, noteInvalid() {}, complete: async () => ({ text: JSON.stringify({ code: 'return 1;', change: 'x' }), latencyMs: 1 }) };
+  assert.ok(engine.write({ name: 'churn', description: '老改不好的技能', code: 'return 1;' }).ok);
+  // 已经换过 3 版（byVersion 里 4 个版本），每版都没攒够成功
+  for (let v = 1; v <= 4; v++) (engine as any).touch('churn', (st: any) => { st.byVersion = { ...(st.byVersion ?? {}), [v]: { ok: 0, fail: 2 } }; });
+  const improver = new CodeImprover(planner as any, engine, bus, { maxRounds: 3 });
+  const why = improver.consider('churn', 'requested', '再改改');
+  assert.match(why!, /收起.*3 轮/);
+  assert.ok(engine.inactive('churn'), '收起了');
+  assert.equal(improver.busy, null, '没有再发请求');
+  const loose = new CodeImprover(planner as any, engine, bus, { maxRounds: 0 });
+  const fresh = engine.write({ name: 'fresh', description: '另一份老改不好的技能', code: 'const s = await api.state();\nreturn s.feet;' });
+  assert.ok(fresh.ok, JSON.stringify(fresh));
+  for (let v = 1; v <= 4; v++) (engine as any).touch('fresh', (st: any) => { st.byVersion = { ...(st.byVersion ?? {}), [v]: { ok: 0, fail: 2 } }; });
+  assert.equal(loose.consider('fresh', 'requested', '改'), null, 'maxRounds=0 不限');
+});

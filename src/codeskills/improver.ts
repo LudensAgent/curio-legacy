@@ -20,9 +20,11 @@ import { compileCheck, MAX_VERIFY, VERIFY_METHODS } from './sandbox.ts';
  */
 export type ImproveWhy = 'failures' | 'requested' | 'slow';
 const WHY_TEXT = (why: ImproveWhy, note?: string) => why === 'requested' ? `机器人自己觉得要改：${note ?? ''}` : why === 'slow' ? `能用但费劲：${note ?? '用它时拿东西比不用它或比旧版本慢'}` : '最近几次运行大多失败';
-export interface ImproverOptions { globalGapMs: number; perSkillGapMs: number; requestGapMs: number; minFailures: number; maxPerHour: number }
+export interface ImproverOptions { globalGapMs: number; perSkillGapMs: number; requestGapMs: number; minFailures: number; maxPerHour: number;
+  /** 同一份技能最多改几轮：改了这么多版还不可靠，就收起不再改（0 = 不限） */
+  maxRounds: number }
 /** 默认不限频（模型便宜）：每次改进后新版本要重新攒够失败才会再改，本身就不会连着改 */
-export const DEFAULT_IMPROVER: ImproverOptions = { globalGapMs: 0, perSkillGapMs: 20 * 60_000, requestGapMs: 5 * 60_000, minFailures: 2, maxPerHour: Infinity };
+export const DEFAULT_IMPROVER: ImproverOptions = { globalGapMs: 0, perSkillGapMs: 20 * 60_000, requestGapMs: 5 * 60_000, minFailures: 2, maxPerHour: Infinity, maxRounds: 5 };
 /** 刚换上（改进、退回）的版本至少跑这么久、这么多次，才因为失败去改它：每个版本都要攒够经验才知道好坏 */
 export const MIN_VERSION_AGE_MS = 15 * 60_000;
 
@@ -56,6 +58,13 @@ export class CodeImprover {
     this.starts = this.starts.filter((t) => now - t < 3600_000);
     if (this.starts.length >= this.opts.maxPerHour) return '这一小时改得够多了';
     if (now - (this.perSkill.get(name) ?? 0) < (why === 'failures' ? this.opts.perSkillGapMs : this.opts.requestGapMs)) return '这份技能刚改过';
+    // 改了太多轮还是不可靠：再改也是把钱花在同一个坑里，收起它；真需要的话心智会另写一份
+    const rounds = Object.keys(this.engine.statsOf(name)?.byVersion ?? {}).length - 1;
+    if (this.opts.maxRounds > 0 && rounds >= this.opts.maxRounds && this.engine.reliable(name)) {
+      const why2 = `改了 ${rounds} 轮还是不可靠（${this.engine.reliable(name)}）`;
+      this.engine.retire(name, why2);
+      return `收起：${why2}`;
+    }
     if (why === 'failures') {
       const st = this.engine.statsOf(name);
       const per = st?.byVersion?.[String(b.version ?? 1)];

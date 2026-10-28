@@ -201,7 +201,7 @@ const behaviors = new BehaviorEngine(skillBook, adapter, arbiter, bus, vision, p
 setBehaviorRegistry(behaviors);
 setReliableSkills((name) => behaviors.reliable(name));
 /** 代码技能老失败（或心智要求）时，在后台单独请模型改进代码；限频，不会太频繁 */
-const improver = new CodeImprover(coderPlanner, behaviors, bus, { globalGapMs: config.mind.skillImproveGapMin * 60_000, maxPerHour: config.mind.skillImproveMaxPerHour });
+const improver = new CodeImprover(coderPlanner, behaviors, bus, { globalGapMs: config.mind.skillImproveGapMin * 60_000, maxPerHour: config.mind.skillImproveMaxPerHour, maxRounds: config.mind.skillImproveMaxRounds });
 /** 从经历里总结新技能：心智点名、定期回顾、吃了比平时大的亏、死亡 */
 const smith = new SkillSmith(coderPlanner, behaviors, skillBook, bus, () => adapter.state(),
   // 回顾用的“这段时间做过的事”（回调执行时 selfModel 已经建好）
@@ -558,7 +558,7 @@ function snapshot() {
       hazards: memory.hazards().slice(-10),
       mySkills: mySkills(),
       farms: memory.farms().map((f) => ({ crop: f.crop, cells: f.cells.length, harvests: f.harvests })),
-      chests: memory.chests().map((c) => ({ pos: c.pos, items: c.items.length })),
+      chests: memory.chests().map((c) => ({ pos: c.pos, note: c.note, uses: c.uses, traces: c.traces.length })),
       skills: library.list().map((d) => ({ name: d.name, description: d.description, steps: d.steps.length, ...(d.disabled ? { disabled: d.disabled } : {}) })),
       seen: memory.seenCount(),
       visitedChunks: memory.visitedChunkCount,
