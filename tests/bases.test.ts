@@ -18,6 +18,9 @@ test('multiple named bases survive within one dimension and selection preserves 
   await sleep(2);
   const mountain = memory.setBase('overworld', { x: 100, y: 90, z: 100 }, '山顶营地');
   assert.equal(memory.bases('overworld').length, 2);
+  // 盖好一个新地方不等于搬家：没说 select 的话首选还是原来的
+  assert.equal(memory.base('overworld')!.id, river.id);
+  memory.setBase('overworld', { x: 100, y: 90, z: 100 }, '山顶营地', { select: true });
   assert.equal(memory.base('overworld')!.id, mountain.id);
   assert.equal(memory.bases('overworld').filter((b) => b.primary).length, 1);
   const selected = memory.selectBase(river.id);

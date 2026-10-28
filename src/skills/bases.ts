@@ -25,7 +25,7 @@ export const baseMemory: Skill<{ operation: 'remember' | 'select' | 'list'; labe
         if (!ctx.memory.bases().some((base) => base.id === args.baseId)) return fail('NOT_FOUND', '没有当前世界中可信的该基地');
         return ok('已切换首选基地；其实际确认时间保持原值', { base: ctx.memory.selectBase(args.baseId!) });
       }
-      return ok('已根据当前观测保存命名基地', { base: ctx.memory.setBase(state.dim, state.pos, args.label), source: 'adapter.state.pos', sessionId: state.sessionId, observationId: state.observationId });
+      return ok('已根据当前观测保存命名基地', { base: ctx.memory.setBase(state.dim, state.pos, args.label, { select: true }), source: 'adapter.state.pos', sessionId: state.sessionId, observationId: state.observationId });
     } catch (error) { if (isAbort(error)) throw error; return fail('ERROR', (error as Error).message); }
   },
 };

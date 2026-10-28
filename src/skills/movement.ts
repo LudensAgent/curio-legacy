@@ -235,7 +235,7 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
 export const goTo: Skill<{ target: string; dig?: boolean; sprint?: boolean; avoid?: string[] }> = {
   name: 'goto',
   description: '沿看得见的落脚点步行去地标、坐标、作品或记得的功能方块；绕开墙壁，遇到已观察的木门会开门。默认不挖墙、不搭柱；写 "dig":true 就像人一样挖穿挡路的土石、垫方块爬上坡坎直接过去（遇到水会在水面上垫方块架桥，走完会说垫了多少）。水路不通时可另选 boat',
-  argsDoc: '{"target": "base | death | <地标id或名称> | <作品ID> | crafting_table | x,y,z | 方向 格数（如 \"E 20\" 往东 20 格）", "dig"?: true（挖穿/垫高直走）, "sprint"?: true（跑着去：快，但很耗饥饿；默认走路）, "avoid"?: ["绕开的方块"]}',
+  argsDoc: '{"target": "base（首选基地，不一定是最近的房子；回某栋房子直接写它的名字） | death | <地标id或名称> | <作品ID> | crafting_table | x,y,z | 方向 格数（如 \"E 20\" 往东 20 格）", "dig"?: true（挖穿/垫高直走）, "sprint"?: true（跑着去：快，但很耗饥饿；默认走路）, "avoid"?: ["绕开的方块"]}',
   timeoutMs: 600000,
   movement: true,
   validate(raw) {
@@ -313,7 +313,8 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; spri
       }
       if (lm.dim !== s.dim) return fail('WRONG_DIMENSION', `地标 ${lm.label} 在 ${lm.dim}`);
       pos = lm.pos;
-      label = lm.label;
+      // 写的是 base：把首选基地的名字带上，免得把“家”想成别的房子
+      label = /^(base|基地)$/i.test(args.target.trim()) ? `${lm.label}（首选基地 base）` : lm.label;
     }
     if (!pos) return fail('BAD_ARGS', `看不懂目标：${args.target}`);
     // 写的坐标常常是“那块方块”（矿点、地面、记下的方块位置），而人要站的是它上面那一格：

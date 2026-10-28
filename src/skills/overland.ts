@@ -168,7 +168,7 @@ const parseTarget = (ctx: SkillCtx, raw: string): { x: number; y?: number; z: nu
   const s = ctx.adapter.state();
   if (raw === 'death') { const d = ctx.memory.lastDeath(); return d && d.dim === s.dim ? { ...d.pos, label: '死亡地点' } : null; }
   const lm = ctx.memory.findLandmark(raw, s.dim);
-  return lm && lm.dim === s.dim ? { ...lm.pos, label: lm.label } : null;
+  return lm && lm.dim === s.dim ? { ...lm.pos, label: /^(base|基地)$/i.test(raw.trim()) ? `${lm.label}（首选基地 base）` : lm.label } : null;
 };
 
 export const travel: Skill<TravelArgs> = {

@@ -524,9 +524,14 @@ export class WorldMemory {
     for (const l of [...this.data.landmarks]) if (l.kind === 'discovery' && l.label.startsWith('我的')) this.dropPlainTwins(l.label, l.dim, l.pos, l.worldId ?? 'default');
   }
 
-  setBase(dim: string, pos: Vec3Like, label?: string): Landmark {
+  /**
+   * 记一个基地。select 决定要不要把它设为该维度的首选（“家”）：
+   * 不传时只有该维度还没有首选基地才设首选——盖好一个前哨、畜栏不等于搬家，搬家要自己 base_memory select 决定。
+   */
+  setBase(dim: string, pos: Vec3Like, label?: string, opts: { select?: boolean } = {}): Landmark {
     if (typeof dim !== 'string' || !dim || !pos || [pos.x, pos.y, pos.z].some((n) => !Number.isFinite(n))) throw new Error('基地需要实际维度与有限坐标');
     if (label !== undefined && (typeof label !== 'string' || !label.trim() || label.length > 100)) throw new Error('基地名称需要 1–100 字符');
+    const hadPrimary = this.data.landmarks.some((l) => this.inWorld(l) && l.kind === 'base' && l.dim === dim && l.primary);
     let base = this.data.landmarks.filter((l) => this.inWorld(l) && l.kind === 'base' && l.dim === dim && dist3(l.pos, pos) <= 4).sort((a, b) => dist3(a.pos, pos) - dist3(b.pos, pos))[0];
     if (!base) {
       if (this.bases().length >= 64) throw new Error('当前世界已保存 64 个基地，需要先人工回顾，不能静默丢弃旧基地');
@@ -542,7 +547,10 @@ export class WorldMemory {
       base.ts = Date.now();
       if (label !== undefined) base.label = label.trim();
     }
-    return this.selectBase(base.id);
+    const select = opts.select ?? !hadPrimary;
+    if (select) return this.selectBase(base.id);
+    this.touch();
+    return structuredClone(base);
   }
 
   private inWorld(record: { worldId?: string }): boolean { return (record.worldId ?? 'default') === this.worldId; }

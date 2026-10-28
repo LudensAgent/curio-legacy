@@ -28,15 +28,17 @@ export function myBuilds(memory: WorldMemory, state: Pick<AgentState, 'worldId' 
   }).sort((a, b) => Number(a.status === 'complete') - Number(b.status === 'complete') || a.dist - b.dist).slice(0, n);
 }
 
-/** 家：盖好的住处优先，其次是基地地标，再次是自己的床 */
+/** 家：自己定的首选基地优先（和 goto base 指同一处），其次是最近盖好的住处，再次是别的基地地标、自己的床 */
 export function homeOf(memory: WorldMemory, state: Pick<AgentState, 'worldId' | 'dim' | 'pos'>): HomeNote | null {
   const here = state.pos;
   const note = (label: string, pos: Vec3Like): HomeNote => ({ label, pos, dist: Math.round(Math.hypot(pos.x - here.x, pos.z - here.z)), dir: dirOf(here, pos) });
+  const marks = memory.landmarks().filter((l) => l.dim === state.dim && (!l.worldId || l.worldId === state.worldId));
+  const primary = marks.find((l) => l.kind === 'base' && l.primary);
+  if (primary) return note(primary.label, primary.pos);
   const built = myBuilds(memory, state, 20).filter((b) => b.status === 'complete').sort((a, b) => a.dist - b.dist)[0];
   if (built) return note(built.name, built.pos);
-  const marks = memory.landmarks().filter((l) => l.dim === state.dim && (!l.worldId || l.worldId === state.worldId));
-  // 有首选基地就是它（自己定的家）；没有才在像家的地点里挑最近的
-  const base = marks.find((l) => l.kind === 'base' && l.primary) ?? marks.filter((l) => l.kind === 'base' || /家|基地|小屋/.test(l.label))
+  // 没定过首选基地：在像家的地点里挑最近的
+  const base = marks.filter((l) => l.kind === 'base' || /家|基地|小屋/.test(l.label))
     .sort((a, b) => Math.hypot(a.pos.x - here.x, a.pos.z - here.z) - Math.hypot(b.pos.x - here.x, b.pos.z - here.z))[0];
   if (base) return note(base.label, base.pos);
   const bed = marks.find((l) => /我的床/.test(l.label));
