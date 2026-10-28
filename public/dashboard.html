@@ -1342,7 +1342,9 @@ es.onerror = () => { $('conn').textContent = '控制台断开'; $('connDot').cla
     // 默认位置只是示意（1920×1080、GUI 缩放 2 时大致在这里）；真实位置由模组按屏幕和缩放计算
     { id: 'info', name: '状态 / 当前动作', def: [0.004, 0.007, 0.27, 0.07] },
     { id: 'thought', name: '它的想法', def: [0.004, 0.085, 0.27, 0.17] },
-    { id: 'interests', name: '兴趣 / 统计（轮换）', def: [0.82, 0.02, 0.17, 0.24] },
+    { id: 'interests', name: '兴趣信号', def: [0.82, 0.02, 0.17, 0.24] },
+    // 运行统计和兴趣信号共用右侧同一块位置：两个都开才轮换（或叠放），只开一个就只显示那一页
+    { id: 'stats', name: '运行统计（与兴趣信号同位，都开才轮换）', toggleOnly: true },
     { id: 'vitals', name: '快捷栏 / 血条', def: [0.39, 0.885, 0.22, 0.115] },
     { id: 'inventory', name: '完整背包', def: [0.447, 0.007, 0.106, 0.13] },
     { id: 'landmarks', name: '记得的地点', def: [0.447, 0.142, 0.106, 0.08] },
@@ -1458,7 +1460,7 @@ es.onerror = () => { $('conn').textContent = '控制台断开'; $('connDot').cla
       [mem ? '游戏 缓存命中' : '缓存命中率', rate(s.cachedInputTokens, s.inputTokens)], ['游戏 每分钟', `↑${tok(s.inputRate)} ↓${tok(s.outputRate)}`],
       ...(mem ? [['记忆 上传', tok(s.memoryInputTokens)], ['记忆 下载', tok(s.memoryOutputTokens)],
         ['记忆 缓存命中', rate(s.memoryCachedInputTokens, s.memoryInputTokens)], ['记忆 开销', s.memoryCost == null ? '—' : cur(s.memoryCost)]] : []),
-      ['实际开销（合计）', money], ['当前价格', s.peak == null ? '—' : s.peak ? '高峰价（×2）' : '闲时价'],
+      ['实际开销（合计）', money], ['当前价格', s.peak == null ? '—' : s.peak ? '峰（×2）' : '谷'],
     ].map(([k, v]) => `<div class="row"><span>${k}</span><span>${esc(v)}</span></div>`).join('');
   }
 
