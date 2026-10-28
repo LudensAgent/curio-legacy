@@ -13,7 +13,8 @@ test('take_items：远处（或别的维度）的箱子不去开，记录不删�
   ctx.memory.setChest('the_nether', { x: 5, y: 70, z: 5 }, [{ name: 'obsidian', count: 1 }]);
   const r = await takeItems.run(ctx, { item: 'obsidian', count: 4 });
   assert.equal(r.status, 'failed');
-  assert.match(r.summary, /\(1100,63,-11\) \d+ 格外的箱子里记得有 obsidian×2/);
+  assert.match(r.summary, /往 \(1100,63,-11\) 的箱子（\d+ 格外） 放过几个 obsidian/, '只说记得放过、大概多少，不报精确数量');
+  assert.doesNotMatch(r.summary, /obsidian×\d/);
   assert.match(r.summary, /the_nether/);
   assert.equal(ctx.memory.chests().length, 2, '记录都还在');
 });

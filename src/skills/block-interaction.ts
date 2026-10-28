@@ -86,7 +86,11 @@ export const interactBlock: Skill<{ target: string | Vec3Like; item?: string }> 
       if (/^(chest|trapped_chest|barrel)$/.test(expected) && !args.item) {
         try {
           const r = await adapter.useChest(pos, [], [], signal);
-          if (r.ok) { ctx.memory.setChest(origin.dim, pos, r.contents); contents = `；里面有：${r.contents.length ? r.contents.slice(0, 12).map((i) => `${i.name}×${i.count}`).join('、') : '空的'}（记下了，take_items 可以取）`; }
+          if (r.ok) {
+            // 看一眼只会留下“里面有啥”的大概印象（最多的几样），不是抄清单；要什么还得 take_items 去翻
+            ctx.memory.noteChestUse(origin.dim, pos, { seen: r.contents, day: origin.worldDay });
+            contents = `；里面有：${r.contents.length ? r.contents.slice(0, 12).map((i) => `${i.name}×${i.count}`).join('、') : '空的'}（留了个大概印象，要用 take_items 去翻）`;
+          }
         } catch (e) { if (isAbort(e)) throw e; }
       }
       return ok(`对 ${expected} ${args.item ? `使用 ${args.item}` : '空手右键'}；${effectEvidence.reasons.join('；')}${contents}`, data);

@@ -141,8 +141,9 @@ test('箱子：记得的箱子里没有，就去附近看得见的箱子里实�
   const ctx = { adapter, senses, memory, bus: new EventBus(), signal: new AbortController().signal, deadline: Date.now() + 10_000, taskId: 't', progress() {} } as any;
   const miss = await SKILLS.take_items.run(ctx, { item: 'apple', count: 4 });
   assert.equal(miss.failureCode, 'NOT_FOUND');
-  assert.match(miss.summary, /bread×5/, '翻过了，说得出里面有什么');
-  assert.equal(memory.chests()[0].items.find((i) => i.name === 'bread')?.count, 5, '记下了');
+  assert.match(miss.summary, /只有 cobblestone、bread/, '翻过了，说得出瞥见了什么（不报数量）');
+  assert.equal(memory.chests()[0].traces.find((t) => t.item === 'bread')?.kind, 'glimpsed', '留下了印象');
+  assert.equal(memory.chests()[0].traces.find((t) => t.item === 'apple')?.kind, 'absent', '也记得这里没有 apple');
   const got = await SKILLS.take_items.run(ctx, { item: 'bread', count: 3 });
   assert.equal(got.status, 'succeeded', got.summary);
   assert.equal(adapter.inv.get('bread'), 3);

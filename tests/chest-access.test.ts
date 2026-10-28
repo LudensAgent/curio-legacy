@@ -44,12 +44,12 @@ test('记得的箱子已经没了：删掉记录，换下一个记得的箱子',
 test('存着东西的箱子：dig 不拆，告诉它怎么取', async () => {
   const m = new WorldMemory(null);
   m.setChest('overworld', { x: 3, y: 64, z: 3 }, [{ name: 'iron_ingot', count: 8 }]);
-  assert.match(storedChestAt(m, { dim: 'overworld' }, { x: 3, y: 64, z: 3 }, 'chest') ?? '', /iron_ingot×8[\s\S]*take_items/);
+  assert.match(storedChestAt(m, { dim: 'overworld' }, { x: 3, y: 64, z: 3 }, 'chest') ?? '', /存着 iron_ingot 的箱子[\s\S]*take_items/);
   assert.equal(storedChestAt(m, { dim: 'overworld' }, { x: 3, y: 64, z: 3 }, 'stone'), null);
   assert.equal(storedChestAt(m, { dim: 'overworld' }, { x: 9, y: 64, z: 9 }, 'chest'), null, '不记得的箱子不拦');
   const a = new FakeAdapter();
   a.blocks.push({ name: 'chest', pos: { x: 3, y: 64, z: 3 } });
   const r = await runSkill(a, 'dig', { target: '3,64,3' }, m);
-  assert.match(r.summary, /存着 iron_ingot×8 的箱子，没拆/);
+  assert.match(r.summary, /存着 iron_ingot 的箱子，没拆/);
   assert.equal(a.blockAt({ x: 3, y: 64, z: 3 }), 'chest');
 });

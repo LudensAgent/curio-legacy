@@ -1,4 +1,5 @@
 import { chestHint } from './chest-hint.ts';
+import { checkedRecently, chestName, describeRecall, type ChestRecall } from '../memory/chest-memory.ts';
 import type { InvItem, Vec3Like } from '../adapter/types.ts';
 import { DIRS } from '../perception/perception.ts';
 import { shortId, sleep } from '../util.ts';
@@ -163,16 +164,17 @@ async function ensureChest(ctx: SkillCtx): Promise<Vec3Like | null> {
   return null;
 }
 
-export const storeItems: Skill<{ items: StoreSpec[] }> = {
+export const storeItems: Skill<{ items: StoreSpec[]; note?: string }> = {
   name: 'store_items',
-  description: '点名存进箱子：用不上的存，要用的留',
-  argsDoc: '{"items":["dirt:32","granite",…]}（也收 [{"name":"dirt","count":32}]）',
+  description: '点名存进箱子：用不上的存，要用的留。可以给箱子起个名（note，如“放矿的”），以后找东西想得起来',
+  argsDoc: '{"items":["dirt:32","granite",…], "note"?: "放矿的"}（也收 [{"name":"dirt","count":32}]）',
   timeoutMs: 90000,
   movement: true,
   validate(raw) {
     const items = parseStoreSpecs(obj(raw).items);
     if (!items) return { ok: false, error: 'items 写要存的物品名数组：["cobblestone","dirt:32"]（不写数量就整包存，可用 * 通配）。先看背包，按接下来要用什么挑' };
-    return { ok: true, args: { items } };
+    const note = typeof obj(raw).note === 'string' ? String(obj(raw).note).trim().replace(/的?箱子$/, '').slice(0, 30) : '';
+    return { ok: true, args: note ? { items, note } : { items } };
   },
   async run(ctx, args) {
     const planFor = (inventory: InvItem[]) => {
@@ -199,10 +201,10 @@ export const storeItems: Skill<{ items: StoreSpec[] }> = {
     try {
       const r = await openChest(ctx, pos, plan, []);
       if (!r.ok) return fail('ERROR', `存放失败：${r.reason}`);
-      ctx.memory.setChest(s.dim, pos, r.contents);
+      const rec = ctx.memory.noteChestUse(s.dim, pos, { put: plan, seen: r.contents, note: args.note, day: s.worldDay });
       const list = plan.slice(0, 10).map((d) => `${d.name}×${d.count}`).join('、') + (plan.length > 10 ? ` 等 ${plan.length} 种` : '');
       const miss = missing(plan);
-      return ok(`存进 (${pos.x},${pos.y},${pos.z}) 的箱子 ${r.moved} 个${clearedNote(r)}：${list}${miss.length ? `；背包里没有 ${miss.join('、')}` : ''}；背包空位 ${ctx.adapter.state().emptySlots}`);
+      return ok(`存进 ${chestName(rec)} ${r.moved} 个${clearedNote(r)}：${list}${miss.length ? `；背包里没有 ${miss.join('、')}` : ''}；背包空位 ${ctx.adapter.state().emptySlots}`);
     } catch (e) {
       if (isAbort(e)) throw e;
       return fail(codeFromError(e), `存放出错：${(e as Error).message}`);
@@ -231,36 +233,45 @@ async function openChest(ctx: SkillCtx, pos: Vec3Like, deposits: InvItem[], with
 const clearedNote = (r: { cleared?: string }) => r.cleared ? `（先挖掉了压在箱子顶上的 ${r.cleared}）` : '';
 const listItems = (items: { name: string; count: number }[]) => items.length ? items.slice(0, 10).map((i) => `${i.name}×${i.count}`).join('、') + (items.length > 10 ? ` 等 ${items.length} 种` : '') : '空的';
 
+const posKey = (p: Vec3Like) => `${p.x},${p.y},${p.z}`;
+const at = (p: Vec3Like) => `(${p.x},${p.y},${p.z})`;
+
 /**
- * 记得的箱子里都没有：像人一样去附近看得见的箱子里实际翻一翻（最多三个，近的先），翻过的都记下里面有什么。
- * 以前只查记忆，从没打开看过的箱子永远“没有”。
+ * 翻箱子找东西。人找东西就是这样：先去最有把握“放过”的箱子，没有再翻别的用过的、看得见的箱子，
+ * 翻过的每一个都留下点印象（翻到什么、没翻到什么），找到就停。
+ * 以前是“查记忆里的清单 → 精确命中 → 去拿”，记忆是抄来的清单，所以从不翻、也从不记错。
  */
-async function lookInNearbyChests(ctx: SkillCtx, item: string, count: number) {
+async function rummage(ctx: SkillCtx, item: string, count: number, candidates: { pos: Vec3Like; why: string }[]) {
   const s = ctx.adapter.state();
-  const known = new Map(ctx.memory.chests(s.dim).map((c) => [`${c.pos.x},${c.pos.y},${c.pos.z}`, c]));
-  const near = ctx.senses.knownBlocks(CONTAINERS, 48)
-    .filter((b) => { const k = known.get(`${b.pos.x},${b.pos.y},${b.pos.z}`); return !k || Date.now() - (k.ts ?? 0) > 10 * 60_000; })
-    .sort((a, b) => Math.hypot(a.pos.x - s.pos.x, a.pos.z - s.pos.z) - Math.hypot(b.pos.x - s.pos.x, b.pos.z - s.pos.z)).slice(0, 3);
-  if (!near.length) return fail('NOT_FOUND', `记得的箱子里没有 ${item}，附近 48 格也没看见别的箱子`);
-  const seen: string[] = [];
-  for (const c of near) {
+  const log: string[] = [];
+  let opened = 0;
+  for (const c of candidates) {
+    const where = at(c.pos);
     try {
       const r = await openChest(ctx, c.pos, [], [{ name: item, count }]);
-      if (!r.ok) { seen.push(`(${c.pos.x},${c.pos.y},${c.pos.z}) 打不开：${r.reason}`); continue; }
-      ctx.memory.setChest(s.dim, c.pos, r.contents);
-      if (r.moved) return ok(`在 (${c.pos.x},${c.pos.y},${c.pos.z}) 的箱子里取出 ${r.moved} 个 ${item}${clearedNote(r)}（里面还有：${listItems(r.contents)}）`);
-      seen.push(`(${c.pos.x},${c.pos.y},${c.pos.z})：${listItems(r.contents)}`);
+      if (!r.ok && r.reason === 'NO_CHEST') { ctx.memory.forgetChest(s.dim, c.pos); log.push(`${where} 已经没有箱子了（忘了它）`); continue; }
+      if (!r.ok && r.reason === 'UNLOADED') { log.push(`${where} 那一片还没加载、看不到，走近了再翻`); continue; }
+      if (!r.ok) { log.push(`${where} 打不开：${r.reason}`); continue; }
+      opened++;
+      const rec = ctx.memory.noteChestUse(s.dim, c.pos, { took: r.moved ? [{ name: item, count: r.moved }] : [], seen: r.contents, sought: [item], day: s.worldDay });
+      if (r.moved) {
+        const before = log.length ? `翻了 ${log.length + 1} 个箱子：${log.join('；')}；` : '';
+        return ok(`${before}在 ${chestName(rec)} 里找到了，取出 ${r.moved} 个 ${item}${clearedNote(r)}${r.moved < count ? `（只有这么多）` : ''}`);
+      }
+      log.push(`${where}${c.why ? `（${c.why}）` : ''}里没有，只有 ${glance(r.contents)}`);
     } catch (e) {
       if (isAbort(e)) throw e;
-      seen.push(`(${c.pos.x},${c.pos.y},${c.pos.z}) 出错：${(e as Error).message.slice(0, 60)}`);
+      log.push(`${where} 出错：${(e as Error).message.slice(0, 60)}`);
     }
   }
-  return fail('NOT_FOUND', `翻了 ${seen.length} 个箱子都没有 ${item}：${seen.join('；')}（都记下了）`, { seen });
+  return { opened, log };
 }
+/** 开箱时一眼看到的：最多的三样 */
+const glance = (items: { name: string; count: number }[]) => items.length ? [...items].sort((a, b) => b.count - a.count).slice(0, 3).map((i) => i.name).join('、') + (items.length > 3 ? ' 等' : '') : '空的';
 
 export const takeItems: Skill<{ item: string; count: number }> = {
   name: 'take_items',
-  description: '从箱子里取出物品：先找记得存着它的箱子；记不得的，就去附近看得见的箱子里实际翻一翻（顺便记住里面有什么）',
+  description: '去箱子里翻东西：先翻记得放过它的箱子，再翻别的用过的、看得见的箱子，翻到为止（翻过的都会留个印象）',
   argsDoc: '{"item": "<物品名>", "count"?: 1-64}',
   timeoutMs: 90000,
   movement: true,
@@ -273,38 +284,43 @@ export const takeItems: Skill<{ item: string; count: number }> = {
   async run(ctx, args) {
     const s = ctx.adapter.state();
     const flat = (p: Vec3Like) => Math.round(Math.hypot(p.x - s.pos.x, p.z - s.pos.z));
-    const all = ctx.memory.chests().filter((c) => c.items.some((i) => i.name === args.item && i.count > 0));
-    // 别的维度、或者远到这一趟走不过去的箱子：不去开（开不到也不等于箱子没了），只告诉它在哪
     const REACH = 96;
-    const chests = all.filter((c) => c.dim === s.dim && flat(c.pos) <= REACH);
-    const far = all.filter((c) => !chests.includes(c)).sort((a, b) => flat(a.pos) - flat(b.pos)).slice(0, 3)
-      .map((c) => `(${c.pos.x},${c.pos.y},${c.pos.z})${c.dim !== s.dim ? `（${c.dim}）` : ` ${flat(c.pos)} 格外`}的箱子里记得有 ${args.item}×${c.items.filter((i) => i.name === args.item).reduce((t, i) => t + i.count, 0)}`);
-    const farNote = far.length ? `；更远的：${far.join('、')}——要的话先走过去再取` : '';
-    if (!chests.length) {
-      const r = await lookInNearbyChests(ctx, args.item, args.count);
-      return r.status === 'succeeded' || !farNote ? r : fail('NOT_FOUND', `${r.summary}${farNote}`, r.data);
+    const clock = ctx.memory.chestClock(s.worldDay);
+    const recalls = ctx.memory.recallChests(args.item, { day: s.worldDay });
+    // 别的维度、或者远到这一趟走不过去的箱子：不去开（开不到也不等于箱子没了），只说记得在哪
+    const near = recalls.filter((r) => r.chest.dim === s.dim && flat(r.chest.pos) <= REACH);
+    const far = recalls.filter((r) => !near.includes(r)).sort((a, b) => flat(a.chest.pos) - flat(b.chest.pos)).slice(0, 3)
+      .map((r) => `${describeRecall(r, r.chest.dim === s.dim ? flat(r.chest.pos) : undefined)}${r.chest.dim !== s.dim ? `（${r.chest.dim}）` : ''}`);
+    const farNote = far.length ? `；更远的：${far.join('；')}——要的话先走过去再翻` : '';
+
+    // 翻的顺序：最有把握放过的在前，把握差不多就近的先；然后是别的用过的箱子（近的先）；最后是看得见但没用过的
+    const rank = (r: ChestRecall) => (r.confidence === 'sure' ? 0 : r.confidence === 'likely' ? 1 : 2);
+    const planned = new Map<string, { pos: Vec3Like; why: string }>();
+    for (const r of [...near].sort((a, b) => rank(a) - rank(b) || flat(a.chest.pos) - flat(b.chest.pos))) {
+      planned.set(posKey(r.chest.pos), { pos: r.chest.pos, why: r.confidence === 'sure' ? '记得放过' : r.confidence === 'likely' ? '好像放过' : '隐约记得' });
     }
-    chests.sort((a, b) => flat(a.pos) - flat(b.pos));
-    // 记得的箱子挨个试：那里已经不是箱子了就忘掉它换下一个，而不是一直报 NO_CHEST 让心智去“修”
-    const tried: string[] = [];
-    for (const c of chests.slice(0, 3)) {
-      const at = `(${c.pos.x},${c.pos.y},${c.pos.z})`;
-      try {
-        const r = await openChest(ctx, c.pos, [], [{ name: args.item, count: args.count }]);
-        if (!r.ok && r.reason === 'NO_CHEST') { ctx.memory.forgetChest(c.dim, c.pos); tried.push(`${at} 已经没有箱子了（记录删了）`); continue; }
-        if (!r.ok && r.reason === 'UNLOADED') { tried.push(`${at} 那一片还没加载、看不到，走近了再取`); continue; }
-        if (!r.ok) { tried.push(`${at}：${r.reason}`); continue; }
-        ctx.memory.setChest(c.dim, c.pos, r.contents);
-        if (r.moved) return ok(`在 ${at} 的箱子里取出 ${r.moved} 个 ${args.item}${clearedNote(r)}`);
-        tried.push(`${at} 里的 ${args.item} 已经没了`);
-      } catch (e) {
-        if (isAbort(e)) throw e;
-        tried.push(`${at} 出错：${(e as Error).message.slice(0, 60)}`);
-      }
+    const recentlyChecked: string[] = [];
+    const others = ctx.memory.chests(s.dim).filter((c) => flat(c.pos) <= 48 && !planned.has(posKey(c.pos)))
+      .sort((a, b) => flat(a.pos) - flat(b.pos));
+    for (const c of others) {
+      // 刚翻过没有：这次先不去（人也记得“那个我刚看过”）
+      if (checkedRecently(c, args.item, clock)) { recentlyChecked.push(at(c.pos)); continue; }
+      planned.set(posKey(c.pos), { pos: c.pos, why: c.note ? `${c.note}的箱子` : '用过的箱子' });
     }
-    const fallback = await lookInNearbyChests(ctx, args.item, args.count);
-    if (fallback.status === 'succeeded') return fallback;
-    return fail('NOT_FOUND', `没取到 ${args.item}：${tried.join('；')}；${fallback.summary}${farNote}。箱子打不开别挖箱子，东西会洒一地`);
+    const known = new Set(planned.keys());
+    for (const b of ctx.senses.knownBlocks(CONTAINERS, 48).sort((a, b) => flat(a.pos) - flat(b.pos))) {
+      if (known.has(posKey(b.pos)) || ctx.memory.chestAt(s.dim, b.pos)) continue;
+      planned.set(posKey(b.pos), { pos: b.pos, why: '没打开过' });
+    }
+    const candidates = [...planned.values()].slice(0, 4);
+    if (!candidates.length) {
+      const checked = recentlyChecked.length ? `刚翻过 ${recentlyChecked.join('、')} 都没有；` : '';
+      return fail('NOT_FOUND', `不记得往哪个箱子放过 ${args.item}：${checked}附近 48 格也没看见别的箱子${farNote}`);
+    }
+    const r = await rummage(ctx, args.item, args.count, candidates);
+    if ('status' in r) return r;
+    const checked = recentlyChecked.length ? `；${recentlyChecked.join('、')} 刚翻过没有，这次没再去` : '';
+    return fail('NOT_FOUND', `翻了 ${r.opened} 个箱子都没有 ${args.item}：${r.log.join('；')}${checked}${farNote}。箱子打不开别挖箱子，东西会洒一地`);
   },
 };
 

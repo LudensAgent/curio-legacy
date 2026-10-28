@@ -5,6 +5,9 @@ import { dist3, shortId } from '../util.ts';
 import { reservationsFor } from '../projects/reservations.ts';
 import type { Decision, Intent, Preference } from '../intentions/types.ts';
 import type { Evidence, PauseReason, Project } from '../projects/types.ts';
+import { applyUse, migrateRecord, prune, recall, type ChestRecall, type ChestRecord, type ChestUse, type Clock } from './chest-memory.ts';
+
+export type { ChestRecord, ChestRecall, ChestTrace, ChestUse, ChestQty, Confidence } from './chest-memory.ts';
 
 export type LandmarkKind = 'base' | 'resource' | 'danger' | 'discovery' | 'death' | 'waypoint' | 'herd';
 
@@ -61,14 +64,6 @@ export interface PassageRecord {
   createdAt: number;
   lastUsedAt: number;
   uses: number;
-}
-
-export interface ChestRecord {
-  worldId?: string;
-  dim: string;
-  pos: Vec3Like;
-  items: { name: string; count: number }[];
-  ts: number;
 }
 
 /**
@@ -182,6 +177,8 @@ interface MemoryData {
   objective: { text: string; ts: number } | null;
   digs: DigRecord[];
   chests: Record<string, ChestRecord>;
+  /** 开过多少次箱子：箱子印象按“中间又开过几次别的箱子”淡化 */
+  chestOps?: number;
   furnaces?: Record<string, FurnaceRecord>;
   /** 亲眼看到已经没了的资源/危险点：别处的文字记忆（窍门、议程、回想）里还写着那个坐标时，要能指出来 */
   gone?: GoneSpot[];
@@ -315,6 +312,12 @@ export class WorldMemory {
 
   /** 清理旧版本留下的“透视”数据 */
   private migrate() {
+    // 箱子：旧版整箱快照 → 印象（不看版本号，哪条还是旧样子就转哪条）
+    for (const [k, c] of Object.entries(this.data.chests ?? {})) {
+      if (!c || (c as ChestRecord).traces) continue;
+      this.data.chests[k] = migrateRecord(c as any, this.data.chestOps ?? 0);
+      this.touch();
+    }
     const version = this.data.version ?? 1;
     if (version >= MEMORY_VERSION) return;
     if (version < 2) {
@@ -366,8 +369,8 @@ export class WorldMemory {
       if (before !== this.data.landmarks.length) this.patched.push(`删了 ${before - this.data.landmarks.length} 个地标`);
       for (const k of p.removeChests ?? []) if (this.data.chests?.[k]) { delete this.data.chests[k]; this.patched.push(`删了箱子 ${k}`); }
       for (const c of p.setChests ?? []) {
-        if (!c?.pos || !c.dim || !Array.isArray(c.items)) continue;
-        (this.data.chests ??= {})[`${c.worldId ?? this.data.worldId}:${c.dim}:${c.pos.x},${c.pos.y},${c.pos.z}`] = { ...c, worldId: c.worldId ?? this.data.worldId, ts: c.ts ?? Date.now() };
+        if (!c?.pos || !c.dim || (!Array.isArray(c.items) && !Array.isArray(c.traces))) continue;
+        (this.data.chests ??= {})[`${c.worldId ?? this.data.worldId}:${c.dim}:${c.pos.x},${c.pos.y},${c.pos.z}`] = migrateRecord({ ...c, worldId: c.worldId ?? this.data.worldId }, this.data.chestOps ?? 0);
         this.patched.push(`写入箱子 (${c.pos.x},${c.pos.y},${c.pos.z})`);
       }
       for (const k of p.removeFurnaces ?? []) if (this.data.furnaces?.[k]) { delete this.data.furnaces[k]; this.patched.push(`删了熔炉 ${k}`); }
@@ -815,19 +818,50 @@ export class WorldMemory {
   }
 
   // ------------------------------------------------ 仓储
-  setChest(dim: string, pos: Vec3Like, items: { name: string; count: number }[]) {
-    (this.data.chests ??= {})[`${this.worldId}:${dim}:${pos.x},${pos.y},${pos.z}`] = { worldId: this.worldId, dim, pos, items, ts: Date.now() };
+  private chestKey(dim: string, pos: Vec3Like) { return `${this.worldId}:${dim}:${pos.x},${pos.y},${pos.z}`; }
+  /** 箱子记忆的“现在”：游戏日 + 开箱序号，用来算印象淡了多少 */
+  chestClock(day?: number): Clock { return { day, now: Date.now(), op: this.data.chestOps ?? 0 }; }
+
+  /**
+   * 用了一次箱子（存、取、或只是打开看了看）：按人的注意力记印象——放过什么记得牢，拿过的就不确定还剩多少，
+   * 顺眼看到的只留最多几样，找过没有的记成“这里没有”。不抄清单（见 chest-memory.ts）
+   */
+  noteChestUse(dim: string, pos: Vec3Like, use: ChestUse) {
+    const k = this.chestKey(dim, pos);
+    const all = (this.data.chests ??= {});
+    this.data.chestOps = (this.data.chestOps ?? 0) + 1;
+    const rec = all[k] ?? (all[k] = { worldId: this.worldId, dim, pos: { x: pos.x, y: pos.y, z: pos.z }, uses: 0, ts: Date.now(), traces: [] });
+    const clock = this.chestClock(use.day);
+    applyUse(rec, { ...use, now: use.now ?? clock.now }, clock);
+    prune(rec, clock);
     this.touch();
+    return rec;
+  }
+
+  /** 老接口：知道这个箱子里有这些东西（当作自己放进去的）。新代码用 noteChestUse */
+  setChest(dim: string, pos: Vec3Like, items: { name: string; count: number }[], day?: number) {
+    return this.noteChestUse(dim, pos, { put: items, seen: items, day });
   }
 
   /** 那里已经不是箱子了（被挖、被炸）：别再惦记 */
   forgetChest(dim: string, pos: Vec3Like) {
-    const k = `${this.worldId}:${dim}:${pos.x},${pos.y},${pos.z}`;
+    const k = this.chestKey(dim, pos);
     if (this.data.chests?.[k]) { delete this.data.chests[k]; this.touch(); }
   }
 
   chests(dim?: string): ChestRecord[] {
     return Object.values(this.data.chests ?? {}).filter((c) => this.inWorld(c) && (!dim || c.dim === dim));
+  }
+
+  chestAt(dim: string, pos: Vec3Like): ChestRecord | undefined {
+    const c = this.data.chests?.[this.chestKey(dim, pos)];
+    return c && this.inWorld(c) ? c : undefined;
+  }
+
+  /** 想找某样东西：记得哪些箱子里可能有，确定的在前（accept 可以放宽：找木板时原木也算） */
+  recallChests(accept: string | ((name: string) => boolean), opts: { dim?: string; day?: number } = {}): ChestRecall[] {
+    const fn = typeof accept === 'string' ? (n: string) => n === accept : accept;
+    return recall(this.chests(opts.dim), fn, this.chestClock(opts.day));
   }
 
   /** 熔炉里留下了东西就记着；取空了（或者那里不再是熔炉）就忘掉 */
@@ -846,13 +880,6 @@ export class WorldMemory {
 
   furnaces(dim?: string): FurnaceRecord[] {
     return Object.values(this.data.furnaces ?? {}).filter((c) => this.inWorld(c) && (!dim || c.dim === dim));
-  }
-
-  /** 所有箱子里各物品的总数 */
-  storedTotals(dim?: string): Map<string, number> {
-    const m = new Map<string, number>();
-    for (const c of this.chests(dim)) for (const i of c.items) m.set(i.name, (m.get(i.name) ?? 0) + i.count);
-    return m;
   }
 
   // ------------------------------------------------ 农田

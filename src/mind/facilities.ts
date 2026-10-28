@@ -3,6 +3,7 @@ import { isResourceBlock } from '../memory/ore-spots.ts';
 import { passageLevels } from '../memory/passages.ts';
 import type { Landmark, PassageRecord, WorldMemory } from '../memory/store.ts';
 import { STATION_LABEL } from '../skills/stations.ts';
+import { describeChest } from '../memory/chest-memory.ts';
 
 /** 算“设施”的地标：工作台、熔炉、床、箱子这些功能方块，加上农田；盖的房子在 my_builds 里另说 */
 export const FACILITY_LABELS = new Set([...Object.values(STATION_LABEL), '我的床', '我的农田']);
@@ -15,7 +16,7 @@ export const FACILITY_LABELS = new Set([...Object.values(STATION_LABEL), '我的
 export type FacilityKind = 'chest' | 'station' | 'bed' | 'passage';
 export interface Facility { kind: FacilityKind; label: string; pos: Vec3Like; dist: number; text: string; /** 通道：人就在里面 */ inside?: boolean }
 
-type State = { worldId: string; dim: string; pos: Vec3Like };
+type State = { worldId: string; dim: string; pos: Vec3Like; worldDay?: number };
 const flat = (a: Vec3Like, b: Vec3Like) => Math.round(Math.hypot(a.x - b.x, a.z - b.z));
 const d3 = (a: Vec3Like, b: Vec3Like) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 const at = (p: Vec3Like) => `(${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)})`;
@@ -50,16 +51,16 @@ export function describePassage(rec: PassageRecord, here: Vec3Like, stations: La
 }
 
 /** 自己的设施，近的在前；kinds 不给就全要 */
-export function myFacilities(memory: Pick<WorldMemory, 'landmarks' | 'chests' | 'passages'>, s: State, kinds?: FacilityKind[]): Facility[] {
+export function myFacilities(memory: Pick<WorldMemory, 'landmarks' | 'chests' | 'passages' | 'chestClock'>, s: State, kinds?: FacilityKind[]): Facility[] {
   const want = (k: FacilityKind) => !kinds || kinds.includes(k);
   const out: Facility[] = [];
   const stations = myStations(memory, s);
   if (want('chest')) {
+    const clock = memory.chestClock(s.worldDay);
     for (const c of memory.chests(s.dim)) {
       if (c.worldId && c.worldId !== s.worldId) continue;
-      // 按数量挑最多的几样说（以前按存进去的先后，铁锭、原木排在后面就看不到）
-      const top = [...c.items].filter((i) => i.count > 0).sort((a, b) => b.count - a.count).slice(0, 6).map((i) => `${i.name}×${i.count}`);
-      out.push({ kind: 'chest', label: '我的箱子', pos: c.pos, dist: flat(c.pos, s.pos), text: `箱子 ${at(c.pos)} ${flat(c.pos, s.pos)}格：${top.join('、') || '空'}${c.items.length > 6 ? ` 等 ${c.items.length} 样` : ''}` });
+      // 说的是印象（放过什么、大概多少），不是清单：人记得的就这么多，要确切得去翻
+      out.push({ kind: 'chest', label: '我的箱子', pos: c.pos, dist: flat(c.pos, s.pos), text: `${describeChest(c, clock)}，${flat(c.pos, s.pos)}格` });
     }
   }
   for (const l of stations) {

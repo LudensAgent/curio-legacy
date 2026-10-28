@@ -1,4 +1,5 @@
 import { isSoftBlock, surroundings, type ExitOptions, type Surroundings } from './surroundings.ts';
+import { qtyWord, rememberedStock } from '../memory/chest-memory.ts';
 import { facingOfYaw, localMap } from './local.ts';
 import type { GameAdapter, InvItem, Vec3Like } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
@@ -70,7 +71,7 @@ export interface Percept {
     torches: number;
   } | null;
   /** 仓储：记得的箱子与里面存了什么 */
-  storage: { chests: number; nearest: number | null; stored: string; source?: 'historical_chest_snapshot'; availability?: 'unconfirmed_until_opened'; oldestObservedAt?: number; ageSeconds?: number } | null;
+  storage: { chests: number; nearest: number | null; stored: string; source?: 'fuzzy_recollection'; availability?: 'unconfirmed_until_opened'; oldestObservedAt?: number; ageSeconds?: number } | null;
   /** 农田：作物、格数、成熟数量（离得近时才能看清） */
   farms: { crop: string; cells: number; dist: number; mature: number | null; minutes_since_planted: number }[];
   /** 自己开了头、要等它自己变化的事（熔炉里烧着的东西……）：离开时的样子 + 现在看得见的样子 */
@@ -310,12 +311,11 @@ export class Perception {
     const chests = this.memory.chests().filter((c) => c.dim === dim);
     if (!chests.length) return null;
     const nearest = Math.min(...chests.map((c) => Math.round(Math.hypot(c.pos.x - here.x, c.pos.z - here.z))));
-    const stored = new Map<string, number>();
-    for (const chest of chests) for (const item of chest.items) stored.set(item.name, (stored.get(item.name) ?? 0) + item.count);
-    const totals = [...stored].filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
+    // 记得的是印象（放过/见过什么、大概多少），不是库存清单
+    const stock = rememberedStock(chests, this.memory.chestClock(this.adapter.state().worldDay));
     const oldestObservedAt = Math.min(...chests.map((chest) => chest.ts));
-    return { chests: chests.length, nearest, stored: totals.slice(0, 14).map(([n, c]) => `${n}×${c}`).join('、') || '（空）',
-      source: 'historical_chest_snapshot', availability: 'unconfirmed_until_opened', oldestObservedAt,
+    return { chests: chests.length, nearest, stored: stock.slice(0, 14).map((x) => `${x.item}${x.qty ? `（${qtyWord(x.qty)}）` : ''}${x.confidence === 'vague' ? '?' : ''}`).join('、') || '（记不得放过什么）',
+      source: 'fuzzy_recollection', availability: 'unconfirmed_until_opened', oldestObservedAt,
       ageSeconds: Math.max(0, Math.round((Date.now() - oldestObservedAt) / 1000)) };
   }
 
