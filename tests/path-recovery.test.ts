@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
 import { setImmediate } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
@@ -105,6 +106,76 @@ test('a stalled water route reports the blockage without selecting a new destina
     assert.equal(actualGoal, goal);
     assert.equal(swims, 0);
     assert.deepEqual(w.controls, {});
+  }
+});
+
+test('repeated jumping at the same place is not treated as path progress', async (t) => {
+  const advance = clock(t), w = fixture();
+  let stops = 0, rejectPath: (e: Error) => void = () => {};
+  w.bot.pathfinder = { goto: () => new Promise((_, reject) => { rejectPath = reject; }), isMoving: () => true,
+    isBuilding: () => true, stop() { stops++; rejectPath(new Error('Path was stopped')); }, setGoal() {} };
+  (w.adapter as any).nudge = async () => null;
+  const pending = (w.adapter as any).gotoUnstalled({}, w.opts, (w.adapter as any).actionCheckpoint(w.opts.signal));
+  const rejected = assert.rejects(pending, /No path/);
+  for (let i = 0; i < 18 && !stops; i++) {
+    const height = [0.5, 1.05, 0.5, 0][i % 4];
+    w.bot.entity.position.y = 64 + height;
+    w.bot.entity.onGround = height === 0;
+    await advance(300);
+  }
+  await rejected;
+  assert.equal(stops, 1, 'the watchdog must stop a path whose only movement is jumping');
+});
+
+test('tower landings between watchdog samples count as progress during slow placements', async (t) => {
+  const advance = clock(t), w = fixture(), events = new EventEmitter();
+  w.bot.on = events.on.bind(events);
+  w.bot.removeListener = events.removeListener.bind(events);
+  let stops = 0;
+  w.bot.pathfinder = { goto: () => new Promise(() => {}), isMoving: () => true, isBuilding: () => true,
+    stop() { stops++; }, setGoal() {} };
+  const pending = (w.adapter as any).gotoUnstalled({}, w.opts, (w.adapter as any).actionCheckpoint(w.opts.signal));
+  const rejected = assert.rejects(pending, { name: 'AbortedError' });
+  for (let level = 0; level < 2; level++) {
+    w.bot.entity.position.y = 64 + level + 0.1;
+    w.bot.entity.onGround = false;
+    await advance(3000);
+    assert.equal(stops, 0, 'a three-second placement must not be stopped');
+    w.bot.entity.position.y = 65 + level;
+    w.bot.entity.onGround = true;
+    events.emit('physicsTick');
+    // Leave the block before the next 300ms watchdog sample.
+    w.bot.entity.position.y += 0.1;
+    w.bot.entity.onGround = false;
+  }
+  await advance(2000);
+  assert.equal(stops, 0, 'the missed landing still resets the watchdog');
+  w.controller.abort('test end');
+  await rejected;
+  assert.equal(events.listenerCount('physicsTick'), 0, 'the path releases its listener on cancellation');
+});
+
+test('the path watchdog preserves walking, real vertical progress and an ongoing dig', async (t) => {
+  const advance = clock(t);
+  for (const mode of ['walk', 'tower', 'ladder', 'dig'] as const) {
+    const w = fixture();
+    let stops = 0;
+    w.bot.pathfinder = { goto: () => new Promise(() => {}), isMoving: () => true, stop() { stops++; }, setGoal() {} };
+    if (mode === 'dig') w.bot.targetDigBlock = { name: 'stone' };
+    const pending = (w.adapter as any).gotoUnstalled({}, w.opts, (w.adapter as any).actionCheckpoint(w.opts.signal));
+    const rejected = assert.rejects(pending, { name: 'AbortedError' });
+    for (let i = 1; i <= 12; i++) {
+      if (mode === 'walk') w.bot.entity.position.x = 0.5 + i * 0.12;
+      if (mode === 'tower') {
+        w.bot.entity.position.y = 64 + Math.floor(i / 3) + (i % 3 ? 0.4 : 0);
+        w.bot.entity.onGround = i % 3 === 0;
+      }
+      if (mode === 'ladder') { w.bot.entity.position.y = 64 + i * 0.2; w.bot.entity.onGround = false; }
+      await advance(300);
+    }
+    assert.equal(stops, 0, `${mode} is genuine progress or active work`);
+    w.controller.abort('test end');
+    await rejected;
   }
 });
 

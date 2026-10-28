@@ -1071,6 +1071,19 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (edge) { if (!this.edgeSupport()) attempted.add('recentre'); await this.steady(edge, opts, check); check(); }
       let stalled = false;
       let last = b.entity?.position?.clone?.() ?? null, since = Date.now();
+      let groundedY = b.entity?.onGround ? last?.y ?? null : null;
+      let verticalY = last?.y ?? null;
+      const onPhysicsTick = () => {
+        const p = b.entity?.position;
+        if (!ownsControls() || !b.entity?.onGround || !p?.clone) return;
+        if (groundedY === null) { groundedY = p.y; return; }
+        if (Math.abs(p.y - groundedY) < 0.5) return;
+        groundedY = p.y;
+        verticalY = p.y;
+        last = p.clone();
+        since = Date.now();
+      };
+      b.on?.('physicsTick', onPhysicsTick);
       const watch = setInterval(() => {
         try { check(); } catch { clearInterval(watch); return; }
         const p = b.entity?.position;
@@ -1080,10 +1093,21 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         if (recoveryOrigin && p.distanceTo(recoveryOrigin) >= 1.5) {
           corrections = 0; attempted.clear(); recoveryOrigin = p.clone();
         }
-        // 泡在水里时上下浮动不算走动：贴着岸一直跳却上不去，身体在上下晃、水平没挪，以前要等到整趟超时（20 秒）才放弃
-        const moved = b.entity?.isInWater ? Math.hypot(p.x - last.x, p.z - last.z) : p.distanceTo(last);
-        if (moved >= 0.3 || b.targetDigBlock || !b.pathfinder?.isMoving?.()) { last = p.clone(); since = Date.now(); return; }
-        if (Date.now() - since >= 2500 && !stalled) { stalled = true; try { b.pathfinder.stop(); b.pathfinder.setGoal(null); } catch { /* ignore */ } }
+        // A jump oscillates vertically without advancing. Count horizontal
+        // travel, a newly reached standing height, or sustained vertical travel
+        // beyond a jump's height (for example a ladder), not the jump itself.
+        const horizontal = Math.hypot(p.x - last.x, p.z - last.z);
+        const grounded = !!b.entity?.onGround;
+        if (grounded && groundedY === null) groundedY = p.y;
+        const landedProgress = grounded && groundedY !== null && Math.abs(p.y - groundedY) >= 0.5;
+        const verticalProgress = !b.entity?.isInWater && verticalY !== null && Math.abs(p.y - verticalY) >= 1.5;
+        if (landedProgress) groundedY = p.y;
+        if (horizontal >= 0.3 || landedProgress || verticalProgress || b.targetDigBlock || !b.pathfinder?.isMoving?.()) {
+          last = p.clone(); verticalY = p.y; since = Date.now(); return;
+        }
+        // A jump-and-place may need several seconds for the server to confirm
+        // the block; still bound retries if the placement never succeeds.
+        if (Date.now() - since >= (b.pathfinder?.isBuilding?.() ? 4500 : 2500) && !stalled) { stalled = true; try { b.pathfinder.stop(); b.pathfinder.setGoal(null); } catch { /* ignore */ } }
       }, 300);
       try {
         const remaining = deadline - Date.now();
@@ -1094,6 +1118,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         if (!stalled || e?.name === 'AbortedError') throw e;
       } finally {
         clearInterval(watch);
+        b.removeListener?.('physicsTick', onPhysicsTick);
       }
       check();
       if (opts.maxDropDown !== undefined) throw new Error('No path: 明确下行未能完成，未改走其他边缘');

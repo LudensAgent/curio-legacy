@@ -78,6 +78,35 @@ test('travel：地标和目标别名经二次校验保留目的地与选项', ()
   }
 });
 
+test('travel：三维目标不能只按水平距离报告到达', async () => {
+  const a = new FakeAdapter();
+  a.pos = { x: 1390.73, y: 58, z: 282.5 };
+  const result = await run(a, 'travel', { to: '1391,67,284' });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.failureCode, 'PATH_NOT_FOUND');
+  assert.match(result.summary, /当前在.*58.*目标高度 67.*尚未到达/);
+  assert.deepEqual(a.pos, { x: 1390.73, y: 58, z: 282.5 });
+  assert.ok(!a.actions.some((action) => /^(dig|place|swim):/.test(action)));
+  assert.equal((await run(a, 'travel', { to: '1391,284' })).status, 'succeeded', '二维目标仍按水平距离判断');
+  assert.equal((await run(a, 'travel', { to: '1391,58,284' })).status, 'succeeded', '三维目标在真实范围内可以到达');
+  const boundary = await run(a, 'travel', { to: '1391,60,284' });
+  assert.equal(boundary.status, 'failed', '三维距离超过 2.5 格不得先取整再称到达');
+});
+
+test('travel：乘船达到水平位置但高度不同时不能报告三维目标到达', async () => {
+  const a = new FakeAdapter();
+  river(a);
+  a.pos = { x: 12.5, y: 64, z: 0.5 };
+  a.entities.push({ id: 7, name: 'boat', kind: 'other', pos: { ...a.pos }, dist: 0, height: 0.6 });
+  await a.interactEntity(7, null, new AbortController().signal);
+  const result = await run(a, 'travel', { to: '20,70,0' });
+  assert.equal(result.status, 'failed', result.summary);
+  assert.equal(result.failureCode, 'PATH_NOT_FOUND');
+  assert.match(result.summary, /目标高度 70.*尚未到达/);
+  assert.equal(a.riding, 'boat');
+  assert.equal(a.dismountToward, null);
+});
+
 test('travel：已乘船时继续水面导航，不在重规划中下船', async () => {
   const a = new FakeAdapter();
   river(a);

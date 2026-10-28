@@ -173,8 +173,8 @@ const parseTarget = (ctx: SkillCtx, raw: string): { x: number; y?: number; z: nu
 
 export const travel: Skill<TravelArgs> = {
   name: 'travel',
-  description: '按地形步行和游泳前往目标；已乘船时沿水路停靠，保持乘坐并反馈落脚处，不制造或切换载具',
-  argsDoc: '{"to": "x,z | x,y,z | 地标名 | base | death", "noBoat"?: true（只走和游，已乘船时需先自行下船）}',
+  description: '按地形步行和游泳前往目标；已乘船时沿水路停靠，保持乘坐并反馈落脚处，不制造或切换载具；三维目标核对实际高度',
+  argsDoc: '{"to": "x,z | x,y,z | 地标名 | base | death", "noBoat"?: true（只走和游，已乘船时需先自行下船）}；目标 2.5 格内算到达，带 y 时按三维距离核对',
   timeoutMs: 600000,
   movement: true,
   validate(raw) {
@@ -190,11 +190,18 @@ export const travel: Skill<TravelArgs> = {
     const s0 = adapter.state();
     const startPos = { ...s0.pos };
     const flat = (p: Vec3Like) => Math.hypot(p.x - target.x, p.z - target.z);
+    const arrived = (p: Vec3Like) => target.y === undefined
+      ? flat(p) <= 2.5
+      : dist3(p, { x: target.x, y: target.y, z: target.z }) <= 2.5;
     if (s0.riding) {
       if (args.noBoat || !/(^|_)(boat|raft)$/.test(s0.riding)) return fail('BAD_ARGS', `正在乘坐 ${s0.riding}，此次出行不能使用当前载具；是否下船由你决定`);
       const result = await ride.run(ctx, { to: { x: target.x, z: target.z }, distance: 240 });
       if (result.status !== 'succeeded') return result;
-      if (flat(adapter.state().pos) <= 2.5) return result;
+      if (arrived(adapter.state().pos)) return result;
+      if (target.y !== undefined && flat(adapter.state().pos) <= 2.5) {
+        const p = adapter.state().pos;
+        return fail('PATH_NOT_FOUND', `水路已到 ${target.label} 的水平附近，但当前高度 ${p.y.toFixed(1)}，目标高度 ${target.y}，尚未到达；水面导航不能确认该高度的落点；${result.summary}`, { ...result.data, target, pos: p });
+      }
       return fail('PATH_NOT_FOUND', `水路部分已停船，距 ${target.label} 还有 ${Math.round(flat(adapter.state().pos))} 格；${result.summary}`, { ...result.data, target });
     }
     const avoid = new Set<string>();
@@ -251,9 +258,10 @@ export const travel: Skill<TravelArgs> = {
     const left = Math.round(flat(end));
     const how = [walked > 1 ? `走了约 ${Math.round(walked)} 格` : '', swum > 1 ? `游了约 ${Math.round(swum)} 格` : ''].filter(Boolean).join('、') || '没怎么挪动';
     const at = `(${Math.round(end.x)},${Math.round(end.y)},${Math.round(end.z)})`;
-    if (left <= 2.5) return ok(`到了 ${target.label} 附近 ${at}：${how}`, { walked: Math.round(walked), swum: Math.round(swum), replans });
+    if (target.y === undefined ? left <= 2.5 : arrived(end)) return ok(`到了 ${target.label} 附近 ${at}：${how}`, { walked: Math.round(walked), swum: Math.round(swum), replans });
+    if (target.y !== undefined && flat(end) <= 2.5) return fail('PATH_NOT_FOUND', `到了 ${target.label} 的水平附近，但当前在 ${at}，目标高度 ${target.y}，尚未到达；travel 只规划地面和水面的水平路线，无法确认通往该高度的路径`, { walked: Math.round(walked), swum: Math.round(swum), pos: { ...end }, target, replans });
     const closer = Math.round(flat(startPos) - left);
-    return fail(closer > 4 ? 'TIMEOUT' : 'PATH_NOT_FOUND', `离 ${target.label} 还有 ${left} 格，现在在 ${at}（${how}，比出发时近了 ${closer} 格）${lastErr ? `；${lastErr}` : ''}`, { walked: Math.round(walked), swum: Math.round(swum), left, replans });
+    return fail(closer > 4 ? 'TIMEOUT' : 'PATH_NOT_FOUND', `离 ${target.label} 的水平距离还有 ${left} 格，现在在 ${at}${target.y !== undefined ? `，目标高度 ${target.y}` : ''}（${how}，水平距离比出发时近了 ${closer} 格）${lastErr ? `；${lastErr}` : ''}`, { walked: Math.round(walked), swum: Math.round(swum), left, replans });
   },
 };
 
