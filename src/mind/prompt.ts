@@ -464,6 +464,20 @@ function recordLine(r: ActivityRecord) {
     ...(r.expect ? { i_expected: r.expect } : {}), ...(r.hypothesis ? { hypothesis: r.hypothesis } : {}) };
 }
 
+/**
+ * 窍门、议程、回想、念头里写着的坐标，如果那里的东西已经亲眼看到没了（岩浆被填、矿被挖），就在坐标后面注一句。
+ * 文字记忆不会自己更新，不注明它会一直照着一处早就不存在的东西去找
+ */
+export function noteGoneSpots(text: string, memory: Pick<WorldMemory, 'goneNear'> | undefined, dim: string): string {
+  if (!memory?.goneNear) return text;
+  return text.replace(/\(?(-?\d{1,7}),\s*(-?\d{1,3}),\s*(-?\d{1,7})\)?/g, (m, x, y, z) => {
+    const gone = memory.goneNear(dim, { x: +x, y: +y, z: +z }, 3);
+    if (!gone.length) return m;
+    const g = gone[0];
+    return `${m}〔亲眼看过：这里的 ${g.label} 已经没了，现在是 ${g.now}〕`;
+  });
+}
+
 export function buildMindMessages(ctx: MindContext): ChatMessage[] {
   const self = ctx.self, p = ctx.percept, s = ctx.state;
   const context = [ctx.activity?.what, ctx.lastRecord?.what, ...ctx.noticed.map((n) => n.what), ...self.agenda().map((a) => a.text),
@@ -529,7 +543,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
     sections.unshift(['操作者的指令', { order: order.text, received: `${order.ageSec} 秒前`, status: order.status === 'new' ? '刚收到，还没照做' : '照做中', must: '优先于你自己的打算；照做，并在 operator 里回应 doing / done / cannot' }]);
     reminders.unshift(`操作者的指令「${order.text.slice(0, 80)}」${order.status === 'new' ? '刚收到：这一念就照做（把它变成手上的活）' : '还没做完：手上的活要为它服务；做完了就写 done'}，并写 operator`);
   }
-  const body = sections.map(([name, data]) => `【${name}】${JSON.stringify(data)}`).join('\n');
+  const body = noteGoneSpots(sections.map(([name, data]) => `【${name}】${JSON.stringify(data)}`).join('\n'), ctx.memory, p.self.dim);
   return [{ role: 'system', content: system }, { role: 'user', content: `${body}${reminders.length ? `\n\n【此刻要留意】\n${reminders.map((r) => `- ${r}`).join('\n')}` : ''}\n\n现在你在想什么、打算怎么做？只输出一个 JSON 对象。` }];
 }
 

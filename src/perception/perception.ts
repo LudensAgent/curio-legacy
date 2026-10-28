@@ -454,7 +454,10 @@ export class Perception {
     const seen = new Map(this.vision.observeBlocks(watched.slice(0, 32).map((l) => l.pos)).map((o) => [`${o.pos.x},${o.pos.y},${o.pos.z}`, o.name]));
     for (const l of watched) {
       const now = seen.get(`${l.pos.x},${l.pos.y},${l.pos.z}`) ?? glimpsed.get(l.id);
-      if (now && oreKind(now) !== oreKind(l.label) && !(l.label === 'lava' && /lava/.test(now))) this.memory.removeLandmark(l.id);
+      if (now && oreKind(now) !== oreKind(l.label) && !(l.label === 'lava' && /lava/.test(now))) {
+        this.memory.removeLandmark(l.id);
+        this.memory.markGone(l.label, l.dim, l.pos, now);
+      }
     }
   }
 

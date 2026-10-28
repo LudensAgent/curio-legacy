@@ -122,3 +122,20 @@ test('看见的资源和危险点：亲眼看到那一格已经变了（岩浆�
   assert.ok(!ls.some((l) => l.label === 'iron_ore'), '那格现在是空的，铁矿记录也删掉');
   memory.close();
 });
+
+test('看到没了的地方记下来；窍门、议程里还写着那个坐标时，在提示里注明已经没了', async () => {
+  const { noteGoneSpots } = await import('../src/mind/prompt.ts');
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null);
+  memory.setWorld(adapter.state().worldId);
+  memory.addLandmark('danger', 'lava', 'overworld', { x: 3, y: 64, z: 0 });
+  const perception = new Perception(adapter, memory, new EventBus(), new Vision(adapter));
+  perception.update();
+  assert.ok(!memory.landmarks().some((l) => l.label === 'lava'));
+  const text = noteGoneSpots('做黑曜石：去开阔湖（y50 横巷或 3,64,1）；别处 (40,64,40) 不相干', memory, 'overworld');
+  assert.match(text, /3,64,1〔亲眼看过：这里的 lava 已经没了，现在是 air〕/);
+  assert.match(text, /\(40,64,40\) 不相干/);
+  // 又看见岩浆了：不再注明
+  memory.addLandmark('danger', 'lava', 'overworld', { x: 3, y: 64, z: 0 });
+  assert.doesNotMatch(noteGoneSpots('3,64,1', memory, 'overworld'), /已经没了/);
+  memory.close();
+});

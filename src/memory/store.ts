@@ -90,6 +90,8 @@ export interface FurnaceRecord {
   ts: number;
 }
 
+export interface GoneSpot { worldId?: string; dim: string; label: string; pos: Vec3Like; now: string; ts: number }
+
 export interface FarmRecord {
   worldId?: string;
   id: string;
@@ -181,6 +183,8 @@ interface MemoryData {
   digs: DigRecord[];
   chests: Record<string, ChestRecord>;
   furnaces?: Record<string, FurnaceRecord>;
+  /** 亲眼看到已经没了的资源/危险点：别处的文字记忆（窍门、议程、回想）里还写着那个坐标时，要能指出来 */
+  gone?: GoneSpot[];
   passages?: PassageRecord[];
   farms: FarmRecord[];
   lessons: Lesson[];
@@ -348,14 +352,14 @@ export class WorldMemory {
   /**
    * 运行中改不了记忆文件（进程会定时写回、覆盖掉）：要人工纠正时，把改动写进同目录的 memory-patch.json，
    * 下次启动读记忆时套用一次，然后改名成 memory-patch.applied-<时间>.json。
-   * 格式：{"removeLandmarks":["id"…], "removeChests":["键"…], "setChests":[箱子记录…], "removeFurnaces":["键"…]}
+   * 格式：{"removeLandmarks":["id"…], "removeChests":["键"…], "setChests":[箱子记录…], "removeFurnaces":["键"…], "markGone":[{label,dim,pos,now}…]}
    */
   patched: string[] = [];
   private applyPatch(file: string) {
     const pf = path.join(path.dirname(file), 'memory-patch.json');
     if (!fs.existsSync(pf)) return;
     try {
-      const p = JSON.parse(fs.readFileSync(pf, 'utf8')) as { removeLandmarks?: string[]; removeChests?: string[]; setChests?: ChestRecord[]; removeFurnaces?: string[] };
+      const p = JSON.parse(fs.readFileSync(pf, 'utf8')) as { removeLandmarks?: string[]; removeChests?: string[]; setChests?: ChestRecord[]; removeFurnaces?: string[]; markGone?: { label: string; dim: string; pos: Vec3Like; now?: string }[] };
       const ids = new Set(p.removeLandmarks ?? []);
       const before = this.data.landmarks.length;
       this.data.landmarks = this.data.landmarks.filter((l) => !ids.has(l.id));
@@ -367,6 +371,7 @@ export class WorldMemory {
         this.patched.push(`写入箱子 (${c.pos.x},${c.pos.y},${c.pos.z})`);
       }
       for (const k of p.removeFurnaces ?? []) if (this.data.furnaces?.[k]) { delete this.data.furnaces[k]; this.patched.push(`删了熔炉 ${k}`); }
+      for (const g of p.markGone ?? []) if (g?.pos && g.label && g.dim) { this.markGone(g.label, g.dim, g.pos, g.now ?? '别的东西'); this.patched.push(`记下 (${g.pos.x},${g.pos.y},${g.pos.z}) 的 ${g.label} 已经没了`); }
       this.touch();
       fs.renameSync(pf, path.join(path.dirname(file), `memory-patch.applied-${Date.now()}.json`));
     } catch (e) {
@@ -573,6 +578,22 @@ export class WorldMemory {
 
   landmarks(): Landmark[] {
     return this.data.landmarks.filter((l) => this.inWorld(l));
+  }
+
+  /** 亲眼看到某处的资源/危险已经没了（现在是 now） */
+  markGone(label: string, dim: string, pos: Vec3Like, now: string) {
+    const all = (this.data.gone ??= []);
+    const i = all.findIndex((g) => this.inWorld(g) && g.dim === dim && g.label === label && dist3(g.pos, pos) <= 1);
+    const rec: GoneSpot = { worldId: this.worldId, dim, label, pos: { x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z) }, now, ts: Date.now() };
+    if (i >= 0) all[i] = rec; else all.push(rec);
+    if (all.length > 120) all.splice(0, all.length - 120);
+    this.touch();
+  }
+
+  /** 某个坐标附近亲眼看到已经没了的东西（又看见它了就不算） */
+  goneNear(dim: string, pos: Vec3Like, r = 3): GoneSpot[] {
+    return (this.data.gone ?? []).filter((g) => this.inWorld(g) && g.dim === dim && dist3(g.pos, pos) <= r
+      && !this.data.landmarks.some((l) => this.inWorld(l) && l.dim === dim && l.label === g.label && dist3(l.pos, g.pos) <= 1));
   }
 
   removeLandmark(id: string): boolean {
