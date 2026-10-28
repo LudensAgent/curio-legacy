@@ -1,6 +1,6 @@
 import { DIRS } from '../perception/perception.ts';
 import { dist3, sleep, throwIfAborted } from '../util.ts';
-import type { EntityInfo } from '../adapter/types.ts';
+import type { DriveKeys, EntityInfo } from '../adapter/types.ts';
 import { sighted, yawOfDir } from './movement.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill } from './types.ts';
 import { resolveItemAlias } from './work.ts';
@@ -392,4 +392,35 @@ export const dive: Skill<{ xyz: { x: number; y: number; z: number }; min_oxygen:
   },
 };
 
-export const actionSkills = [useItem, interact, hitEntity, dismount, ride, look, dive];
+export const pressKeys: Skill<{ keys: DriveKeys; ms: number; guard: boolean }> = {
+  name: 'press_keys',
+  description: '按住所选方向、跳跃、潜行等按键 50–10000 毫秒后松开；水中按 jump 可上浮。默认移动时检测前方岩浆、火及地面高处边缘并停止，guard:false 关闭此保护；不自动选目标或确认换气。',
+  argsDoc: '{"keys":{"forward"?:boolean,"back"?:boolean,"left"?:boolean,"right"?:boolean,"jump"?:boolean（水中上浮）,"sprint"?:boolean,"sneak"?:boolean},"ms":50-10000,"guard"?:boolean（false 关闭地形保护）}',
+  timeoutMs: 12000,
+  movement: true,
+  validate(raw) {
+    const a = obj(raw);
+    if (!a.keys || typeof a.keys !== 'object' || Array.isArray(a.keys)) return { ok: false, error: 'keys 需要按键名与布尔值组成的对象' };
+    const input = a.keys as Record<string, unknown>;
+    const names = ['forward', 'back', 'left', 'right', 'jump', 'sprint', 'sneak'] as const;
+    if (Object.entries(input).some(([key, value]) => !names.some((name) => name === key) || typeof value !== 'boolean')) return { ok: false, error: 'keys 只能包含 forward、back、left、right、jump、sprint、sneak 布尔值' };
+    const keys: DriveKeys = {};
+    for (const name of names) if (input[name] === true) keys[name] = true;
+    if (!Object.keys(keys).length) return { ok: false, error: 'keys 至少选择一个按键' };
+    if (!Number.isInteger(a.ms) || a.ms < 50 || a.ms > 10000) return { ok: false, error: 'ms 必须是 50 到 10000 的整数毫秒' };
+    if (a.guard !== undefined && typeof a.guard !== 'boolean') return { ok: false, error: 'guard 必须是 boolean' };
+    return { ok: true, args: { keys, ms: a.ms, guard: a.guard !== false } };
+  },
+  async run(ctx, args) {
+    const adapter = ctx.adapter;
+    if (!adapter.drive) return fail('ERROR', '当前适配器不支持按键控制');
+    const before = { ...adapter.state().pos };
+    const result = await adapter.drive(args.keys, args.ms, ctx.signal, { guard: args.guard });
+    const after = adapter.state();
+    const data = { keys: args.keys, ms: result.ms, moved: result.moved, before, position: after.pos, inWater: after.inWater, oxygen: after.oxygen, ...(result.stopped ? { stopped: result.stopped } : {}) };
+    const detail = `位置 (${after.pos.x.toFixed(1)},${after.pos.y.toFixed(1)},${after.pos.z.toFixed(1)})，${after.inWater ? '在水中' : '不在水中'}，氧气 ${after.oxygen}/20`;
+    return result.ok ? ok(`按键 ${Object.keys(args.keys).join('+')} 已松开；${detail}`, data) : fail('ERROR', `按键控制结束：${result.reason ?? '未知'}；${detail}`, data);
+  },
+};
+
+export const actionSkills = [useItem, interact, hitEntity, dismount, ride, look, dive, pressKeys];

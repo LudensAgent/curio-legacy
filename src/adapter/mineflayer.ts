@@ -3252,7 +3252,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const check = this.actionCheckpoint(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', moved: 0, ms: 0 };
     const b = this.bot, epoch = this.actionEpoch;
-    const start = b.entity.position.clone(), t0 = Date.now(), total = Math.max(50, Math.min(1000, ms));
+    const start = b.entity.position.clone(), t0 = Date.now(), total = Math.max(50, Math.min(10000, ms));
     const names = (Object.keys(keys) as (keyof DriveKeys)[]).filter((k) => keys[k]);
     const face = () => {
       const target = opts.faceEntity !== undefined ? b.entities[opts.faceEntity] : null;

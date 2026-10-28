@@ -283,7 +283,7 @@ export interface UseItemOptions {
   aim?: Vec3Like;
 }
 
-/** 代码技能直接操纵身体时按住的键 */
+/** 直接操纵身体时按住的键 */
 export interface DriveKeys { forward?: boolean; back?: boolean; left?: boolean; right?: boolean; jump?: boolean; sprint?: boolean; sneak?: boolean }
 export interface DriveOptions {
   /** 一边走一边一直盯着这个实体（打架时走位）或这个点 */
