@@ -299,6 +299,7 @@ const observerTasks = feed ? installTaskObserver(feed, arbiter, {
 }) : null;
 let observedBot: unknown = null;
 let observerInstall: MineflayerObserver | null = null;
+let inventoryUiHooked = false;
 /** 每次创建新的 Mineflayer bot（首次连接、断线重连）时重新挂载；同一个 bot 的重生不重复挂载 */
 function attachObserver() {
   if (!feed || !adapter.bot || adapter.bot === observedBot) return;
@@ -306,6 +307,12 @@ function attachObserver() {
   // 合成/背包的节奏由适配器统一放慢（UI_PACING_MS 打在 Mineflayer 的 clickWindow 入口，craft/transfer/deposit/toss 全覆盖），
   // 数据流这边不再另外包一层 bot.clickWindow，免得 bot.craft 那条路被放慢两次
   observerInstall = installMineflayerObserver(adapter.bot as MineflayerBotLike, feed, { pacingMs: 0 });
+  // 整批合成不经过 bot.craft，数据流看不到背包 2×2 合成的“界面打开/关闭”；由适配器在合成前后发事件
+  if (!inventoryUiHooked) {
+    inventoryUiHooked = true;
+    adapter.on('inventory_open', () => { if (observedBot && feed.isAttached(observedBot as MineflayerBotLike)) feed.openInventory(); });
+    adapter.on('inventory_close', () => { if (observedBot && feed.isAttached(observedBot as MineflayerBotLike)) feed.closeInventory(); });
+  }
   observedBot = adapter.bot;
   bus.publish('observer_feed', 'P3', `Curio Observer 数据流已挂载到 ${config.mc.username}`);
 }

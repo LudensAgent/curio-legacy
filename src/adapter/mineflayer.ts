@@ -2471,6 +2471,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const before = this.invCount(resultId);
     let window: any = b.inventory;
     if (table) window = await this.afterAction(() => raceAbort(b.openBlock(table), signal, 8000, () => {}), check);
+    // 背包 2×2 合成没有 windowOpen 事件：告诉直播数据流“背包界面打开了”，并像开窗口一样先停一下
+    else { this.emit('inventory_open'); await this.afterAction(() => sleep(this.cfg.ui?.openHoldMs ?? 0, signal), check); }
     try {
       if (table && !String(window.type ?? '').startsWith('minecraft:crafting')) return 0;
       // 合成格里不能有别的东西
@@ -2491,7 +2493,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       } catch { /* 交给收拾残局 */ this.scheduleRepair('批量合成后残留', 250); }
       // 做完停一下再关（背包 2×2 合成没有窗口，也停一下，让观众看到产物进了背包）
       await this.uiCloseHold(signal);
-      if (table) { try { b.closeWindow(window); } catch { /* ignore */ } }
+      if (table) { try { b.closeWindow(window); } catch { /* ignore */ } } else this.emit('inventory_close');
     }
     const per = recipe.result?.count ?? 1;
     return Math.max(0, Math.round((this.invCount(resultId) - before) / per));
