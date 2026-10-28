@@ -17,6 +17,8 @@ import type { FocusPlan } from './self.ts';
 import { RECALL_LABEL, type Recalled } from './recall.ts';
 import { foodNote } from '../skills/food.ts';
 import { isResourceBlock, oreSpotsByKind, oreSpotsNear } from '../memory/ore-spots.ts';
+import { oreLayerFacts } from '../knowledge/ore-layers.ts';
+import { config } from '../config.ts';
 import { creatureSpotsByKind, creatureSpotsNear } from '../memory/creature-spots.ts';
 
 export interface MindContext {
@@ -267,6 +269,9 @@ export function situationalReminders(ctx: MindContext): string[] {
   // 想下到哪一层（打算里写了 y 就按它，没写按通道最深处）
   const wantY = (() => { const m = intent.match(/y ?(-?\d{1,3})/); return m ? Number(m[1]) : null; })();
   if (MINING_INTENT.test(intent)) {
+    // 矿在哪一层是版本事实：模型记得的多是老版本（钻石 y12），摆出这个世界的版本对应的分布，下到哪层它自己定
+    const layers = oreLayerFacts(config.mc.version, intent);
+    if (layers) out.push(layers);
     const tunnels = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).filter((f) => f.dist <= 160).slice(0, 2);
     for (const t of tunnels) {
       const deep = Number(t.text.match(/能走到 y(-?\d+)/)?.[1] ?? here.y);
