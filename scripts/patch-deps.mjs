@@ -25,6 +25,40 @@ function patch(rel, mark, anchor, replacement, done, missing) {
     'mineflayer-pathfinder 补丁已打上：placingBlock 为空时不再每刻抛错', '检查 placingBlock 的用法');
 }
 
+// 搭桥后先退回原来的落脚点，途中继续潜行；取消时清掉返回动作，避免旧的放置回包恢复它。
+{
+  const rel = 'mineflayer-pathfinder/index.js';
+  patch(rel, '/* curio-patch: bridge return epoch */', '  let returningPos = null',
+    '  let returningPos = null\n  let bridgeReturnEpoch = 0 /* curio-patch: bridge return epoch */',
+    'mineflayer-pathfinder 桥接返回状态已启用', '检查 returningPos 状态');
+  patch(rel, '/* curio-patch: cancel bridge return */', '    if (clearStates) bot.clearControlStates()',
+    `    if (clearStates) {\n      /* curio-patch: cancel bridge return */\n      bridgeReturnEpoch++\n      returningPos = null\n      bot.clearControlStates()\n    }`,
+    'mineflayer-pathfinder 取消时清除桥接返回', '检查 resetPath 控制状态');
+  patch(rel, '/* curio-patch: finish bridge return */', '      returningPos = null\n    }\n\n    if (path.length === 0)',
+    '      returningPos = null\n      bot.setControlState(\'sneak\', false) /* curio-patch: finish bridge return */\n    }\n\n    if (path.length === 0)',
+    'mineflayer-pathfinder 返回后松开潜行', '检查 returningPos 处理');
+  patch(rel, '/* curio-patch: bridge placement epoch */', `        bot.equip(block, 'hand')\n          .then(function () {\n            lockEquipItem.release()`,
+    `        const placementEpoch = bridgeReturnEpoch /* curio-patch: bridge placement epoch */\n        bot.equip(block, 'hand')\n          .then(function () {\n            lockEquipItem.release()\n            if (placementEpoch !== bridgeReturnEpoch) return`,
+    'mineflayer-pathfinder 忽略取消后的装备回包', '检查搭桥装备调用');
+  patch(rel, '/* curio-patch: hold sneak on bridge return */', `                // Dont release Sneak if the block placement was not successful\n                bot.setControlState('sneak', false)\n                if (bot.pathfinder.LOSWhenPlacingBlocks && placingBlock.returnPos) returningPos = placingBlock.returnPos.clone()`,
+    `                /* curio-patch: hold sneak on bridge return */\n                if (placementEpoch !== bridgeReturnEpoch) return\n                if (bot.pathfinder.LOSWhenPlacingBlocks && placingBlock.returnPos) {\n                  returningPos = placingBlock.returnPos.clone()\n                  bot.setControlState('sneak', true)\n                } else {\n                  bot.setControlState('sneak', false)\n                }`,
+    'mineflayer-pathfinder 搭桥返回时保持潜行', '检查搭桥放置完成回调');
+}
+
+// 路径中断时角色可能蹲在方块边缘，脚心已经进入还没有支撑的相邻格；不能把脚心瞬移到该格中心。
+{
+  const anchor = `    const blockX = Math.floor(bot.entity.position.x) + 0.5
+    const blockZ = Math.floor(bot.entity.position.z) + 0.5
+
+    // Make sure our bounding box don't collide with neighboring blocks
+    // otherwise recenter the position
+    if (Math.abs(bot.entity.position.x - blockX) > 0.2) { bot.entity.position.x = blockX }
+    if (Math.abs(bot.entity.position.z - blockZ) > 0.2) { bot.entity.position.z = blockZ }`;
+  patch('mineflayer-pathfinder/index.js', '/* curio-patch: stop without moving position */', anchor,
+    '    /* curio-patch: stop without moving position */',
+    'mineflayer-pathfinder 停止时不再把角色移到相邻空格中心', '检查 fullStop 的位置重置');
+}
+
 // mineflayer 物理：主线程卡住 N 秒后，积压的时间不会丢掉，之后每 50ms 补跑 4 个物理刻、只消化掉 3 刻的积压，
 // 于是卡 10 秒之后身体会用 4 倍速跑上好几秒（水面上看着像“水上漂”，上岸、转弯都冲过头）。
 // 真人卡顿了就是卡顿了，不会事后快进：补跑到上限时把剩下的积压扔掉。
@@ -33,6 +67,26 @@ function patch(rel, mark, anchor, replacement, done, missing) {
   const anchor = `      if (catchupTicks >= PHYSICS_CATCHUP_TICKS) break`;
   patch('mineflayer/lib/plugins/physics.js', mark, anchor, `      ${mark}\n      if (catchupTicks >= PHYSICS_CATCHUP_TICKS) { timeAccumulator = Math.min(timeAccumulator, PHYSICS_TIMESTEP); break }`,
     'mineflayer 物理补丁已打上：卡顿后不再快进补帧', '检查 doPhysics 的补帧循环');
+}
+
+// 潜行防坠必须检查脚下碰撞体是否真的相交；只统计相邻格里的形状会把够不到的玻璃板等误认为支撑。
+{
+  const rel = 'prismarine-physics/index.js';
+  const anchor = `      // In the 3 loops bellow, y offset should be -1, but that doesnt reproduce vanilla behavior.`;
+  const replacement = `      /* curio-patch: sneak support intersection */
+      function hasSneakSupport (dx, dz) {
+        const support = getPlayerBB(pos).offset(dx, 0, dz)
+        support.minY = pos.y - physics.stepHeight
+        support.maxY = pos.y
+        return getSurroundingBBs(world, support).some(bb => bb.intersects(support))
+      }`;
+  patch(rel, '/* curio-patch: sneak support intersection */', anchor, replacement,
+    'prismarine-physics 潜行支撑使用实际碰撞体', '检查潜行边缘保护');
+  for (const [suffix, dx, dz] of [['offset(dx, 0, 0)', 'dx', '0'], ['offset(0, 0, dz)', '0', 'dz'], ['offset(dx, 0, dz)', 'dx', 'dz']]) {
+    const original = `getSurroundingBBs(world, getPlayerBB(pos).${suffix}).length === 0`;
+    patch(rel, `!hasSneakSupport(${dx}, ${dz})`, original, `!hasSneakSupport(${dx}, ${dz})`,
+      'prismarine-physics 潜行方向碰撞检查已更新', '检查潜行方向循环');
+  }
 }
 
 // mineflayer 背包：craft / transfer / deposit / toss / equip 内部调的是模块里的本地 clickWindow，不走 bot.clickWindow，
