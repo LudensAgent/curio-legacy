@@ -395,6 +395,7 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
     if (/^(air|water|lava)$/.test(below)) return { ok: false, reason: 'NO_REFERENCE' };
     const item = itemNames.find((n) => (this.inv.get(n) ?? 0) > 0);
     if (!item) return { ok: false, reason: 'NO_ITEM' };
+    if (!/^(air|cave_air|void_air|water)$/.test(this.nameAt(f.x, f.y + 2, f.z))) return { ok: false, reason: 'NOT_PLACED:头顶跳跃空间受阻' };
     this.inv.set(item, this.inv.get(item)! - 1);
     this.removed.delete(`${f.x},${f.y},${f.z}`);
     this.blocks.push({ name: item, pos: f });

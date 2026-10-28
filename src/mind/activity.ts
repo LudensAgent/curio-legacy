@@ -180,6 +180,9 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   const key = `${a.index - 1}:${step.skill}:${code}`;
   if (a.failures >= 5) return { kind: 'stuck', why: `这段活已经失败 ${a.failures} 次了（最近：${result.summary.slice(0, 80)}）` };
   if (NEEDS_THOUGHT.has(code)) return { kind: 'stuck', why: result.summary.slice(0, 160) };
+  if (step.skill === 'place_at' && ['NOT_PLACED:跳不起来', 'NOT_PLACED:头顶跳跃空间受阻', 'NOT_PLACED:头顶跳跃空间未加载'].includes(String(result.data?.pillarFailure))) {
+    return { kind: 'stuck', why: result.summary.slice(0, 160) };
+  }
   if (RETRYABLE.has(code) && !(step.skill === 'goto' && code === 'PATH_NOT_FOUND') && changed && a.consecutiveFailures === 1 && !a.adaptations.includes(`retry:${key}`)) {
     a.adaptations.push(`retry:${key}`);
     a.index = Math.max(0, a.index - 1);

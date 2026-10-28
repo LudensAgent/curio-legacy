@@ -148,6 +148,10 @@ export interface MoveOpts {
   constructionSafe?: boolean;
   /** 仅明确的挖掘/爬升动作允许寻路挖块和搭建；日常移动默认绕行。 */
   allowTerrainChanges?: boolean;
+  /** 是否允许寻路放置支撑方块；未指定时沿用 allowTerrainChanges 的旧行为。 */
+  allowPlace?: boolean;
+  /** 是否允许寻路原地搭柱；未指定时沿用 allowPlace。 */
+  allowTower?: boolean;
   /** 步行引导可禁止入水；换气、游泳等动作保留自己的移动权限。 */
   allowSwimming?: boolean;
   /** 跑着去（快但很耗饥饿：每跑一格掉的饥饿相当于走路的很多倍）；不写就走路。逃离（away_from）默认跑 */

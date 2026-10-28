@@ -291,18 +291,17 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
     const attachable = args.item !== 'any' && attachmentFaces(args.item);
     if (args.at[0] === 0 && args.at[1] === 0 && args.at[2] === 0 && !attachable) {
       // 原地垫高：跳起来往脚下放一块，站上去
-      const above = { ...feet, y: feet.y + 2 };
-      const n = a.blockAt(above);
-      if (n !== null && !AIR.has(n) && !isSoftBlock(n)) return fail('PATH_NOT_FOUND', `头顶上方是 ${seen.get(`${above.x},${above.y},${above.z}`) ?? '未看清的格子'}，跳不起来；先 dig_at [0,2,0]`, after(ctx, args.facing, pos));
       if (a.pillarUp) {
         const r = await a.pillarUp(names, ctx.signal);
         if (!r.ok) {
           const why = r.reason === 'NO_REFERENCE' ? '脚下是空的（悬着、在水里或梯子上），没有能贴着放的面'
             : r.reason === 'OCCUPIED' ? '脚下这格已经有东西'
             : String(r.reason).startsWith('BLOCKED:') ? `脚下这格有 ${seen.get(`${feet.x},${feet.y},${feet.z}`) ?? '未看清的阻挡'}，方块放不进去；先 dig_at [0,0,0] 把它拿掉` : r.reason === 'NO_ITEM' ? '背包里没有能垫的方块' : `方块没放上（${r.reason}）`;
-          return fail(r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS' : r.reason === 'NO_REFERENCE' ? 'PATH_NOT_FOUND' : 'EFFECT_NOT_CONFIRMED', `原地垫高没成：${why}`, after(ctx, args.facing, pos));
+          return fail(r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS' : r.reason === 'NO_REFERENCE' ? 'PATH_NOT_FOUND' : 'EFFECT_NOT_CONFIRMED', `原地垫高没成：${why}`, { ...after(ctx, args.facing, pos), pillarFailure: r.reason });
         }
       } else {
+        const above = { ...feet, y: feet.y + 2 }, n = a.blockAt(above);
+        if (n === null || !AIR.has(n) && !isSoftBlock(n)) return fail('PATH_NOT_FOUND', `无法确认头顶跳跃空间足够（${seen.get(`${above.x},${above.y},${above.z}`) ?? '未看清的格子'}）`, after(ctx, args.facing, pos));
         try {
           await a.moveTo({ kind: 'xyz', x: feet.x, y: feet.y + 1, z: feet.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(8000, ctx.deadline - Date.now())), allowTerrainChanges: true });
         } catch (e) {

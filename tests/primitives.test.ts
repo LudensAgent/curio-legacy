@@ -84,7 +84,7 @@ test('原地垫高：头顶空了才跳得起来；背包没方块就说清楚',
   assert.equal(none.failureCode, 'MISSING_MATERIALS');
   w.inv.set('cobblestone', 4);
   const blocked = await placeAt.run(ctx, { at: [0, 0, 0], facing: 'N', item: 'any' });
-  assert.match(blocked.summary, /头顶上方是 未看清的格子/);
+  assert.match(blocked.summary, /头顶跳跃空间受阻/);
   await digAt.run(ctx, { at: [0, 2, 0], facing: 'N' });
   const up = await placeAt.run(ctx, { at: [0, 0, 0], facing: 'N', item: 'any' });
   assert.equal(up.status, 'succeeded', up.summary);

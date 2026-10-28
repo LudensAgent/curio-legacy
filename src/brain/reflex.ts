@@ -7,7 +7,7 @@ import { measureLight, torchCount } from '../skills/light.ts';
 import { isSoftBlock, surroundings } from '../perception/surroundings.ts';
 
 /** 这些动作进行中可以顺手插支火把（插完接着做） */
-const TORCH_OK_DURING = new Set(['explore', 'goto', 'gather', 'wander', 'excavate_path', 'search_structure']);
+const TORCH_OK_DURING = new Set(['explore', 'gather', 'wander', 'excavate_path', 'search_structure']);
 /** 熟食、面包等正经食物（不含生肉生鱼） */
 const GOOD_FOOD = /^(cooked_|baked_potato|bread|golden_carrot|golden_apple|pumpkin_pie|cookie|apple|carrot|melon_slice|sweet_berries|glow_berries|beetroot|dried_kelp|mushroom_stew|rabbit_stew|beetroot_soup|suspicious_stew|honey_bottle|cake)/;
 

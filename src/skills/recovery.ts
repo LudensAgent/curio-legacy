@@ -1,5 +1,6 @@
 import type { Vec3Like } from '../adapter/types.ts';
 import { facingOfYaw, feetCell, toWorld, type Facing } from '../perception/local.ts';
+import { attachmentFaces } from '../perception/surroundings.ts';
 import type { SkillCtx } from './types.ts';
 
 export type RecoveryContext = { skill: string; args: Record<string, unknown>; target?: Vec3Like; position?: Vec3Like; entityId?: number; allowPlace?: boolean };
@@ -30,8 +31,14 @@ export function constrainRecoveryAction(ctx: SkillCtx, name: string, values: Rec
   if (!scope) return values;
   const original = scope.args, args = { ...values };
   const terrain = ['goto', 'step', 'explore'].includes(scope.skill) && original.dig === true;
+  const placement = scope.skill === 'goto' ? (original.place ?? terrain) === true : terrain || scope.allowPlace === true;
+  const tower = scope.skill === 'goto' ? placement && (original.tower ?? terrain) === true : placement;
   if (name === 'goto') {
     if (args.dig === true && !terrain) throw new Error('原动作没有授权挖穿或垫块，恢复不能升级为 dig:true');
+    if (args.place === true && !placement) throw new Error('原动作没有授权放置，恢复不能增加放置');
+    if (args.tower === true && !tower) throw new Error('原动作没有授权搭柱，恢复不能增加搭柱');
+    if (!placement) args.place = false;
+    if (!tower) args.tower = false;
     if (['goto', 'step', 'explore'].includes(scope.skill) && args.sprint === true && original.sprint !== true) throw new Error('原动作没有选择冲刺，恢复不能增加冲刺消耗');
     if (original.lead !== undefined && args.lead !== original.lead) throw new Error('恢复必须保留原带领对象');
     if (scope.target) {
@@ -43,7 +50,9 @@ export function constrainRecoveryAction(ctx: SkillCtx, name: string, values: Rec
   }
   if (name === 'dig_at' || name === 'place_at' || name === 'step') {
     if (name === 'dig_at' && scope.skill !== 'dig_at' && !terrain) throw new Error('原委托没有授权挖掘，恢复不能改挖其他方块');
-    if (name === 'place_at' && scope.skill !== 'place_at' && !terrain && !scope.allowPlace) throw new Error('原委托没有授权支出方块；需要心智显式选择 allowPlace 才能放置');
+    if (name === 'place_at' && scope.skill !== 'place_at' && !placement) throw new Error('原委托没有授权支出方块；需要心智显式选择 allowPlace 才能放置');
+    if (name === 'place_at' && scope.skill === 'goto' && !tower && Array.isArray(args.at) && args.at[0] === 0 && args.at[1] === 0 && args.at[2] === 0
+      && !(typeof args.item === 'string' && args.item !== 'any' && attachmentFaces(args.item))) throw new Error('原动作没有授权搭柱，恢复不能原地垫高');
     if (name === scope.skill && scope.target) {
       const facing = (args.facing ?? facingOfYaw(ctx.adapter.eye()?.yaw ?? 0)) as Facing;
       const target = toWorld(feetCell(ctx.adapter.state().pos), facing, args.at as [number, number, number]);

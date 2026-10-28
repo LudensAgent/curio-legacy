@@ -11,6 +11,7 @@ import { AbortedError, raceAbort, shortId, sleep, throwIfAborted, TimeoutError }
 import { installClientGuard } from './click-guard.ts';
 import { cornerSafe } from './corner-safe.ts';
 import { AIR_BLOCKS, attachmentFaces } from '../perception/surroundings.ts';
+
 import type {
   InvItem,
   InventorySlot,
@@ -42,6 +43,13 @@ import type {
   SmeltOpts,
   SmeltResult,
 } from './types.ts';
+
+class PillarClearanceError extends Error {
+  override name = 'PillarClearanceError';
+  constructor(reason: 'blocked' | 'unknown') {
+    super(`No path: 原地搭柱${reason === 'blocked' ? '头顶跳跃空间受阻' : '头顶跳跃空间未加载'}，未放置方块`);
+  }
+}
 
 const require = createRequire(import.meta.url);
 /**
@@ -855,6 +863,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         movements.canDig = true; movements.allow1by1towers = false; movements.scafoldingBlocks = [];
         movements.blocksCantBreak = this.allButLeaves(movements.blocksCantBreak);
       }
+      if (!opts.constructionSafe) {
+        const allowPlace = opts.allowPlace ?? !!opts.allowTerrainChanges;
+        const allowTower = allowPlace && (opts.allowTower ?? allowPlace);
+        movements.scafoldingBlocks = allowPlace ? [...this.normalMovements.scafoldingBlocks] : [];
+        movements.allow1by1towers = allowTower && this.normalMovements.allow1by1towers;
+      }
       movements.allowParkour = false;
       // 这一趟要绕开的方块（比如吃过亏的浆果丛、仙人掌）：由调用的人决定，身体不替它定
       if (opts.avoid?.length) {
@@ -1093,6 +1107,23 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     this.bus.publish('path_steady', 'P3', `站在方块边缘，先挪回脚下那一格中心再走`);
   }
 
+  /** Check the actual player's head sweep before jumping high enough to place a block underfoot. */
+  private pillarClearance(): 'blocked' | 'unknown' | null {
+    const b = this.bot, p = b.entity.position, feetY = Math.floor(p.y), epsilon = 1e-6;
+    const top = feetY + 1.02 + 1.8;
+    for (let x = Math.floor(p.x - 0.3 + epsilon); x <= Math.floor(p.x + 0.3 - epsilon); x++)
+      for (let y = Math.floor(p.y + 1.8); y <= Math.floor(top - epsilon); y++)
+        for (let z = Math.floor(p.z - 0.3 + epsilon); z <= Math.floor(p.z + 0.3 - epsilon); z++) {
+          const block = b.blockAt(p.offset(x - p.x, y - p.y, z - p.z));
+          if (!block) return 'unknown';
+          const shapes: number[][] = block.shapes ?? (block.boundingBox === 'empty' ? [] : [[0, 0, 0, 1, 1, 1]]);
+          if (shapes.some((shape) => x + shape[3] > p.x - 0.3 + epsilon && x + shape[0] < p.x + 0.3 - epsilon
+            && z + shape[5] > p.z - 0.3 + epsilon && z + shape[2] < p.z + 0.3 - epsilon
+            && y + shape[4] > p.y + 1.8 + epsilon && y + shape[1] < top - epsilon)) return 'blocked';
+        }
+    return null;
+  }
+
   /** Inspect the nearby obstruction before trying a short correction, then replan. */
   private async gotoUnstalled(goal: any, opts: MoveOpts, check: () => void) {
     const b = this.bot;
@@ -1105,7 +1136,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       check();
       const edge = this.edgeSupport() ?? (corrections === 0 && !attempted.has('recentre') ? this.hugging() : null);
       if (edge) { if (!this.edgeSupport()) attempted.add('recentre'); await this.steady(edge, opts, check); check(); }
-      let stalled = false;
+      let stalled = false, blockedPillar: 'blocked' | 'unknown' | null = null;
       let last = b.entity?.position?.clone?.() ?? null, since = Date.now();
       let groundedY = b.entity?.onGround ? last?.y ?? null : null;
       let verticalY = last?.y ?? null;
@@ -1116,6 +1147,13 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const onPhysicsTick = () => {
         const p = b.entity?.position;
         if (!ownsControls() || !b.entity?.onGround || !p?.clone) return;
+        // Pathfinder schedules jump-to-place on its physicsTick listener. This
+        // listener runs afterward, before the next physics step, and checks
+        // actual position after any planned digging has completed.
+        if (b.pathfinder?.isBuilding?.() && b.getControlState?.('jump')) {
+          blockedPillar = this.pillarClearance();
+          if (blockedPillar) { b.pathfinder.stop(); b.pathfinder.setGoal(null); return; }
+        }
         if (groundedY === null) { groundedY = p.y; return; }
         if (Math.abs(p.y - groundedY) < 0.5) return;
         groundedY = p.y;
@@ -1161,8 +1199,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         const remaining = deadline - Date.now();
         if (remaining <= 0) throw new Error('TIMEOUT');
         await this.afterAction(() => raceAbort(b.pathfinder.goto(goal), opts.signal, remaining, () => { if (ownsControls()) this.stopAll(); }), check);
+        if (blockedPillar) throw new PillarClearanceError(blockedPillar);
         if (!stalled) return;
       } catch (e: any) {
+        if (blockedPillar && ownsControls() && e?.name !== 'AbortedError') throw new PillarClearanceError(blockedPillar);
         if (!stalled || e?.name === 'AbortedError') throw e;
       } finally {
         clearInterval(watch);
@@ -3094,8 +3134,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     await this.afterAction(() => b.look(b.entity.yaw, -Math.PI / 2, true), check);
     // 站稳了再跳
     for (let i = 0; i < 20 && !b.entity.onGround; i++) await this.afterAction(() => sleep(25, signal), check);
+    if (!b.entity.onGround) return { ok: false, reason: 'NOT_PLACED:尚未站稳' };
+    const clearance = this.pillarClearance();
+    if (clearance) return { ok: false, reason: `NOT_PLACED:头顶跳跃空间${clearance === 'blocked' ? '受阻' : '未加载'}` };
     let placed = false, lastError = '';
-    for (let attempt = 0; attempt < 2 && !placed; attempt++) {
+    {
       b.setControlState('jump', true);
       try {
         const t0 = Date.now();

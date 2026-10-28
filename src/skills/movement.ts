@@ -233,10 +233,10 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
 };
 
 // ------------------------------------------------------------------ goto
-export const goTo: Skill<{ target: string; dig?: boolean; sprint?: boolean; avoid?: string[]; lead?: string }> = {
+export const goTo: Skill<{ target: string; dig?: boolean; place?: boolean; tower?: boolean; sprint?: boolean; avoid?: string[]; lead?: string }> = {
   name: 'goto',
-  description: '沿看得见的落脚点步行去地标、坐标、作品或记得的功能方块；明确三维坐标须进入指定格，两维坐标须到指定水平格，地标到附近即可。绕开墙壁，遇到已观察的木门会开门。默认不挖墙、不搭柱；写 "dig":true 就像人一样挖穿挡路的土石、垫方块爬上坡坎直接过去（遇到水会在水面上垫方块架桥，走完会说垫了多少）。是否换用载具由你决定；上船后 ride 提供水面导航。"lead" 写一种看得见的生物：带着它走——几格一停，它掉队就等它跟上来；它跟不跟你得自己弄对（手里拿它爱吃的，它才跟）',
-  argsDoc: '{"target": "base（首选基地，不一定是最近的房子；回某栋房子直接写它的名字） | death | <地标id或名称> | <作品ID> | crafting_table | x,y,z | 方向 格数（如 \"E 20\" 往东 20 格）" 或 {"x": 数字, "y": 数字, "z": 数字}, "dig"?: true（挖穿/垫高直走）, "sprint"?: true（跑着去：快，但很耗饥饿；默认走路）, "avoid"?: ["绕开的方块"], "lead"?: "<带着走的生物名，如 cow>"}',
+  description: '沿看得见的落脚点步行去地标或坐标；明确三维坐标须进入指定格。遇到已观察的木门会开门。默认不挖墙、不放方块；dig:true 兼容旧行为，允许挖掘、垫路及原地搭柱。place:false 可禁止放置，tower:false 可禁止原地搭柱；也可单独设 place:true 授权垫路、tower:true 授权搭柱。搭建消耗方块，可能在水面架桥。lead 可带指定生物走。',
+  argsDoc: '{"target":"<地标、坐标或方向>" 或 {"x":数字,"y":数字,"z":数字}, "dig"?:boolean, "place"?:boolean（允许垫路，默认继承 dig）, "tower"?:boolean（允许原地搭柱，默认继承 dig 且需要 place）, "sprint"?:boolean, "avoid"?:["方块名"], "lead"?:"生物名"}',
   timeoutMs: 600000,
   movement: true,
   validate(raw) {
@@ -245,10 +245,12 @@ export const goTo: Skill<{ target: string; dig?: boolean; sprint?: boolean; avoi
     const t = typeof target === 'string' ? target.trim()
       : point && [point.x, point.y, point.z].every((n) => typeof n === 'number' && Number.isFinite(n)) ? `${point.x},${point.y},${point.z}` : '';
     if (!t) return { ok: false, error: 'target 需要地标、坐标字符串或包含数字 x、y、z 的坐标对象' };
+    for (const flag of ['dig', 'place', 'tower'] as const) if (obj(raw)[flag] !== undefined && typeof obj(raw)[flag] !== 'boolean') return { ok: false, error: `${flag} 需要布尔值` };
+    if (obj(raw).tower === true && (obj(raw).place ?? obj(raw).dig) !== true) return { ok: false, error: 'tower:true 需要允许放置（place:true 或 dig:true）' };
     const avoid = Array.isArray(obj(raw).avoid) ? (obj(raw).avoid as unknown[]).map((n) => String(n).replace(/^minecraft:/, '')).filter((n) => /^[a-z_]+$/.test(n)).slice(0, 16) : [];
     const lead = typeof obj(raw).lead === 'string' ? String(obj(raw).lead).trim().toLowerCase().replace(/^minecraft:/, '') : '';
     if (obj(raw).lead !== undefined && !/^[a-z_]{2,40}$/.test(lead)) return { ok: false, error: 'lead 写生物名，比如 "cow"' };
-    return { ok: true, args: { target: t, ...(obj(raw).dig === true ? { dig: true } : {}), ...(obj(raw).sprint === true && !lead ? { sprint: true } : {}), ...(avoid.length ? { avoid } : {}), ...(lead ? { lead } : {}) } };
+    return { ok: true, args: { target: t, ...(obj(raw).dig === true ? { dig: true } : {}), ...(typeof obj(raw).place === 'boolean' ? { place: obj(raw).place as boolean } : {}), ...(typeof obj(raw).tower === 'boolean' ? { tower: obj(raw).tower as boolean } : {}), ...(obj(raw).sprint === true && !lead ? { sprint: true } : {}), ...(avoid.length ? { avoid } : {}), ...(lead ? { lead } : {}) } };
   },
   async run(ctx, args) {
     const r = await walkTo(ctx, args);
@@ -275,9 +277,11 @@ function follower(ctx: SkillCtx, name: string, id: number | null): EntityInfo | 
   return (id !== null ? seen.find((e) => e.id === id) : undefined) ?? seen.sort((a, b) => a.dist - b.dist)[0] ?? null;
 }
 
-async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; sprint?: boolean; avoid?: string[]; lead?: string }): Promise<SkillResult> {
+async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; place?: boolean; tower?: boolean; sprint?: boolean; avoid?: string[]; lead?: string }): Promise<SkillResult> {
   {
     const { adapter, memory, signal } = ctx;
+    const allowPlace = args.place ?? !!args.dig, allowTower = allowPlace && (args.tower ?? !!args.dig);
+    const terrainPermission = { ...(args.dig ? { allowTerrainChanges: true } : {}), allowPlace, allowTower };
     const s = adapter.state();
     let pos: { x: number; y: number; z: number } | null = null;
     let label = args.target;
@@ -404,7 +408,7 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; spri
     const invBefore = new Map<string, number>();
     for (const i of s.inventory) invBefore.set(i.name, (invBefore.get(i.name) ?? 0) + i.count);
     const terrainNote = () => {
-      if (!args.dig) return '';
+      if (!allowPlace) return '';
       const now = new Map<string, number>();
       for (const i of adapter.state().inventory) now.set(i.name, (now.get(i.name) ?? 0) + i.count);
       const used = [...invBefore].map(([n, c]) => [n, c - (now.get(n) ?? 0)] as const).filter(([n, d]) => d > 0 && PLACEABLE.includes(n));
@@ -433,9 +437,9 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; spri
           if (dist3(here, w) <= 1.5) continue;
           if (distance(w) > distance(here) + 1 && legs > 0 && distance(here) < 6) break; // 已经比路线上的下一个点离目标还近
           try {
-            await adapter.moveTo({ kind: 'near', pos: w, range: 1.2 }, { signal, timeoutMs: Math.max(1, Math.min(8000, ctx.deadline - Date.now())), allowSwimming: false, ...(args.dig ? { allowTerrainChanges: true } : {}), ...(args.sprint ? { sprint: true } : {}) });
+            await adapter.moveTo({ kind: 'near', pos: w, range: 1.2 }, { signal, timeoutMs: Math.max(1, Math.min(8000, ctx.deadline - Date.now())), allowSwimming: false, ...terrainPermission, ...(args.sprint ? { sprint: true } : {}) });
           } catch (e) {
-            if (isAbort(e)) throw e;
+            if (isAbort(e) || (e as Error).name === 'PillarClearanceError') throw e;
             break;
           }
           if (dist3(adapter.state().pos, here) < 0.3) break;
@@ -445,7 +449,10 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; spri
         const now = adapter.state().pos;
         if (legs) { routeNote = `；沿自己挖过的通道走了 ${legs} 段`; bestDistance = Math.min(bestDistance, distance(now)); }
       }
-    } catch (e) { if (isAbort(e)) throw e; }
+    } catch (e) {
+      if (isAbort(e)) { clearInterval(prog); throw e; }
+      if ((e as Error).name === 'PillarClearanceError') { clearInterval(prog); return fail('PATH_NOT_FOUND', `${(e as Error).message}${terrainNote()}`, measured()); }
+    }
     try {
       let leadId: number | null = null, leadWaited = 0;
       for (let hops = 0; !arrived(adapter.state().pos) && hops < (args.lead ? 400 : 160); hops++) {
@@ -472,9 +479,9 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; spri
           else leadWaited = 0;
         }
         // dig：不找“看得见的落脚点”，直接让寻路朝目标走，挡路的土石挖开、坡坎垫方块（真人赶路也是这样）
-        let waypoint = args.dig || args.lead ? null : ctx.senses.navigationWaypoint?.(pos, 12, visited);
+        let waypoint = args.dig || allowPlace || args.lead ? null : ctx.senses.navigationWaypoint?.(pos, 12, visited);
         let fromMemory = false;
-        if (ctx.senses.navigationWaypoint && !waypoint && !args.dig && !args.lead) {
+        if (ctx.senses.navigationWaypoint && !waypoint && !args.dig && !allowPlace && !args.lead) {
           if (await tryDoor()) continue;
           await glance(ctx);
           if (ctx.senses.navigationWaypoint(pos, 12, visited)) continue;
@@ -482,9 +489,9 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; spri
           const remembered = memoryHops < 12 ? ctx.senses.rememberedWaypoint?.(pos, 24, visited) : null;
           if (remembered) { waypoint = remembered; fromMemory = true; memoryHops++; }
         }
-        if (ctx.senses.navigationWaypoint && !waypoint && !args.dig && !args.lead) {
+        if (ctx.senses.navigationWaypoint && !waypoint && !args.dig && !allowPlace && !args.lead) {
           const water = waterNear();
-          return fail('PATH_NOT_FOUND', `前往 ${label}：眼前没有可确认的${water ? '陆地落脚点，附近有水，可自行选择游泳或准备载具' : '通路'}；没有挖墙或搭柱——要直接过去写 goto {"target":"${args.target}","dig":true}（挖穿土石、垫方块上坡）`, { ...measured(cur), waterAhead: water });
+          return fail('PATH_NOT_FOUND', `前往 ${label}：眼前没有可确认的${water ? '陆地落脚点，附近有水' : '通路'}；没有挖墙或搭柱`, { ...measured(cur), waterAhead: water });
         }
         const dxz = Math.hypot(pos.x - cur.x, pos.z - cur.z);
         const target = waypoint ? { kind: 'near' as const, pos: waypoint, range: fromMemory ? 1.2 : 0.7 }
@@ -493,9 +500,9 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; spri
           : dxz > 32 ? { kind: 'xz' as const, x: cur.x + (pos.x - cur.x) * 24 / dxz, z: cur.z + (pos.z - cur.z) * 24 / dxz, range: 2 }
           : flat ? { kind: 'xz' as const, x: pos.x, z: pos.z, range } : { kind: 'near' as const, pos, range };
         try {
-          await adapter.moveTo(target, { signal, timeoutMs: Math.max(1, Math.min(20000, ctx.deadline - Date.now())), allowSwimming: false, ...(args.dig ? { allowTerrainChanges: true } : {}), ...(args.sprint ? { sprint: true } : {}), ...(args.avoid ? { avoid: args.avoid } : {}) });
+          await adapter.moveTo(target, { signal, timeoutMs: Math.max(1, Math.min(20000, ctx.deadline - Date.now())), allowSwimming: false, ...terrainPermission, ...(args.sprint ? { sprint: true } : {}), ...(args.avoid ? { avoid: args.avoid } : {}) });
         } catch (e) {
-          if (isAbort(e)) throw e;
+          if (isAbort(e) || (e as Error).name === 'PillarClearanceError') throw e;
           if (await tryDoor()) continue;
           // 记忆里的落脚点走不过去（被挡住、地形变了）：记下，换下一个
           if (fromMemory) { visited.push(waypoint!); continue; }
@@ -512,7 +519,7 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; spri
           return fail('PATH_NOT_FOUND', `前往 ${label} 没有取得进展，仍在 (${after.x.toFixed(2)},${after.y.toFixed(2)},${after.z.toFixed(2)})；尚未到达目标位置，需要换入口或路线${wet}`, measured(after));
         }
         if (distance(after) < bestDistance - 0.5) { bestDistance = distance(after); detours = 0; }
-        else if (++detours >= (args.dig ? 6 : 4)) return nextTo(after) ? failedNear(after, '绕了几次也没走进那一格') : fail('PATH_NOT_FOUND', `绕行后仍未接近 ${label}${args.dig ? '' : `；要直接过去写 goto {"target":"${args.target}","dig":true}`}`, measured(after));
+        else if (++detours >= (args.dig || allowPlace ? 6 : 4)) return nextTo(after) ? failedNear(after, '绕了几次也没走进那一格') : fail('PATH_NOT_FOUND', `绕行后仍未接近 ${label}`, measured(after));
         visited.push(waypoint ?? after);
       }
       if (!inScope()) return fail('WRONG_DIMENSION', '途中世界或会话已改变，需要重新规划');
@@ -532,7 +539,7 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; spri
       if (inScope() && arrived(now)) { await face(); return ok(`到达 ${label}${nums ? ' 的目标格' : ' 附近'}；实际站在 (${now.x.toFixed(2)},${now.y.toFixed(2)},${now.z.toFixed(2)})，距目标点 ${distance(now).toFixed(2)} 格（寻路最后报了“${(e as Error).message.slice(0, 40)}”，但人已经到了）${routeNote}${terrainNote()}`, measured(now)); }
       if (inScope() && nextTo(now)) return failedNear(now, `寻路报“${(e as Error).message}”，那一格没走进去`, codeFromError(e));
       const water = waterNear();
-      return fail(codeFromError(e), `前往 ${label} 失败：${(e as Error).message}${water ? '；附近有水，尚未确认干燥步行通路，可沿岸绕行，或自行选择过水方式' : ''}${args.dig ? '' : `；挡路的是土石坡坎就写 goto {"target":"${args.target}","dig":true} 挖穿/垫高直走`}`, {
+      return fail(codeFromError(e), `前往 ${label} 失败：${(e as Error).message}${water ? '；附近有水，尚未确认干燥步行通路' : ''}`, {
         ...measured(), waterAhead: water,
       });
     } finally {
