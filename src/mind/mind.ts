@@ -1027,6 +1027,14 @@ export class Mind {
       if (this.thinking?.controller !== controller) { this.staleDropped++; return; }
       this.thinking = null;
       if (generation !== this.generation || this.paused) { this.staleDropped++; return; }
+      // 绕路完成后可能已经恢复了另一段活；绕路时提前想的决定不能改写那段活或它的下一段。
+      if (reason === Mind.NEAR_END_REASON && activityId && this.activity && this.activity.id !== activityId) {
+        this.staleDropped++;
+        for (const n of noticed) {
+          if (!this.attention.peek().some((pending) => pending.key === n.key)) this.attention.notice(n.key, n.what, n.salience, 0);
+        }
+        return;
+      }
       this.errors = 0; this.backoffUntil = 0;
       this.lastThoughtAt = Date.now();
       if (decision.tier === 'deliberate') { this.lastDeliberateAt = Date.now(); this.finishedSinceReflect = 0; }

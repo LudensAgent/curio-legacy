@@ -797,11 +797,11 @@ test('手上没活却写 continue：带着 activity 或 next 就当成新的一�
   assert.equal(embeddedQuery({ activity: { what: '砍树', steps: [{ skill: 'gather' }] } }), null);
 });
 
-test('说着 continue 却写了一段新的活：按 adjust 处理', () => {
+test('说着 continue 却写了一段新的活：要求澄清', () => {
   const memory = new WorldMemory(null);
   const adapter = new FakeAdapter();
   const d = parseDecision({ decision: 'continue', monologue: '趁空做点别的', activity: { what: '做木板', steps: [{ skill: 'look_around', args: { seconds: 3 } }] } }, adapter, memory, true, '在坑里等到天亮');
-  assert.ok(!('error' in d) && d.kind === 'adjust' && d.activity?.what === '做木板');
+  assert.ok('error' in d && /continue.*adjust.*next/.test(d.error));
   const same = parseDecision({ decision: 'continue', monologue: '接着等', activity: { what: '在坑里等到天亮', steps: [{ skill: 'look_around', args: { seconds: 3 } }] } }, adapter, memory, true, '在坑里等到天亮');
   assert.ok(!('error' in same) && same.kind === 'continue');
 });
