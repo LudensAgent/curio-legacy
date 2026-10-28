@@ -980,7 +980,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         if (recoveryOrigin && p.distanceTo(recoveryOrigin) >= 1.5) {
           corrections = 0; attempted.clear(); recoveryOrigin = p.clone();
         }
-        if (p.distanceTo(last) >= 0.3 || b.targetDigBlock || !b.pathfinder?.isMoving?.()) { last = p.clone(); since = Date.now(); return; }
+        // 泡在水里时上下浮动不算走动：贴着岸一直跳却上不去，身体在上下晃、水平没挪，以前要等到整趟超时（20 秒）才放弃
+        const moved = b.entity?.isInWater ? Math.hypot(p.x - last.x, p.z - last.z) : p.distanceTo(last);
+        if (moved >= 0.3 || b.targetDigBlock || !b.pathfinder?.isMoving?.()) { last = p.clone(); since = Date.now(); return; }
         if (Date.now() - since >= 2500 && !stalled) { stalled = true; try { b.pathfinder.stop(); b.pathfinder.setGoal(null); } catch { /* ignore */ } }
       }, 300);
       try {
@@ -996,7 +998,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       check();
       if (opts.maxDropDown !== undefined) throw new Error('No path: 明确下行未能完成，未改走其他边缘');
       if (corrections >= 3) throw new Error('No path: 附近连续调整后仍无法前进，换条路线');
-      const action = await this.nudge(attempted, opts);
+      const action = await this.nudge(attempted, opts, goal);
       check();
       if (!action) throw new Error('No path: 附近没有可确认安全的调整空间，换条路线');
       corrections++;
@@ -1004,11 +1006,39 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     }
   }
 
-  private async nudge(attempted: Set<string>, opts: MoveOpts): Promise<string | null> {
+  /** 身边一步内能从水里爬上去的岸（脚下实心、身子两格空、不是水）：离目标近的优先 */
+  private bankBeside(goal?: any): Vec3Like | null {
+    const b = this.bot, f = b.entity.position.floored();
+    const wet = (x: any) => !x || /^(water|lava|bubble_column|kelp|kelp_plant|seagrass|tall_seagrass)$/.test(x.name) || String(x.getProperties?.().waterlogged) === 'true';
+    const open = (x: any) => !!x && x.boundingBox === 'empty' && !wet(x);
+    const g = goal && Number.isFinite(goal.x) && Number.isFinite(goal.z) ? goal : null;
+    let best: { pos: Vec3Like; score: number } | null = null;
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+      for (const dy of [-1, 0, 1, 2]) {
+        const c = f.offset(dx, dy, dz), under = b.blockAt(c.offset(0, -1, 0));
+        if (!under || under.boundingBox !== 'block' || wet(under) || !open(b.blockAt(c)) || !open(b.blockAt(c.offset(0, 1, 0)))) continue;
+        const pos = { x: c.x + 0.5, y: c.y, z: c.z + 0.5 };
+        const score = (g ? Math.hypot(pos.x - g.x, pos.z - g.z) : 0) + Math.hypot(dx, dz) * 0.5 + Math.abs(dy) * 0.2;
+        if (!best || score < best.score) best = { pos, score };
+      }
+    }
+    return best?.pos ?? null;
+  }
+
+  private async nudge(attempted: Set<string>, opts: MoveOpts, goal?: any): Promise<string | null> {
     const check = this.actionCheckpoint(opts.signal);
     const b = this.bot, epoch = this.actionEpoch;
     const ownsControls = () => epoch === this.actionEpoch && b === this.bot;
     const p = b.entity.position, yaw = b.entity.yaw;
+    // 在水里贴着岸上不去：像玩家一样朝岸游、按住跳爬上去（游泳的控制交给 swimTo），上岸了再接着寻路
+    if (b.entity.isInWater && !b.entity.isInLava && !attempted.has('climb_out')) {
+      attempted.add('climb_out');
+      const bank = this.bankBeside(goal);
+      if (!bank) return null;
+      const r = await this.swimTo(bank, opts.signal, { timeoutMs: 5000 });
+      check();
+      return r.landed ? `贴着岸上不去，朝 (${Math.floor(bank.x)},${Math.floor(bank.y)},${Math.floor(bank.z)}) 游过去爬上了岸` : null;
+    }
     // Swimming and airborne recovery need their own controls; do not blindly
     // jump or step backwards before the feet have landed.
     if (!b.entity.onGround || b.entity.isInWater || b.entity.isInLava) return null;
@@ -2855,6 +2885,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     let lastProgress = Date.now(), anchor = b.entity.position.clone();
     let destination = target, nextObservation = 0, nextTurn = Date.now() + 750;
     const water = (block: any) => !!block && (['water', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass'].includes(block.name) || String(block.getProperties?.().waterlogged) === 'true');
+    const headUnder = () => water(b.blockAt(b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0)));
     const dryFooting = () => {
       const p = b.entity.position;
       const support = b.blockAt(p.offset(0, -0.05, 0));
@@ -2887,7 +2918,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           // Keep jump held while turning and refreshing the view; separate
           // jump/scan actions let the player sink during every camera turn.
           await this.afterAction(() => b.look(b.entity.yaw + Math.PI / 2, -0.1, true), check);
-    const headUnder = () => water(b.blockAt(b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0)));
           nextTurn = Date.now() + 1000;
         }
         const p = b.entity.position;

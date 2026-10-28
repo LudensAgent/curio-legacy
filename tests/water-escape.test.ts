@@ -139,3 +139,30 @@ test('surface keeps ownership after oxygen14 and only reports success after actu
     assert.equal(result.data?.landed, true); assert.match(result.summary, /上岸并站稳/);
   } finally { memory.close(); }
 });
+
+test('climbing out onto the bank does not keep bunny-hopping on dry land', async (t) => {
+  const { adapter, bot } = pond(t);
+  const tick = bot.waitForTicks.bind(bot);
+  let hops = 0, wasGround = false;
+  bot.waitForTicks = async (n: number) => {
+    for (let i = 0; i < n; i++) {
+      await tick(1);
+      const e = bot.entity;
+      if (wasGround && !e.onGround && !e.isInWater && e.position.x >= 6) hops++;
+      wasGround = e.onGround;
+    }
+  };
+  const result = await adapter.swimTo({ x: 7.5, y: 64, z: 2.5 }, new AbortController().signal, { timeoutMs: 15000 });
+  assert.equal(result.landed, true, `${result.reason}; pos=${bot.entity.position}`);
+  assert.equal(hops, 0, `jumped ${hops} times on dry land before settling`);
+});
+
+test('stuck against the bank while walking: the nudge swims over and climbs out instead of bobbing until timeout', async (t) => {
+  const { adapter, bot } = pond(t);
+  bot.entity.position = new Vec3(5.4, 62.4, 2.5);
+  await bot.waitForTicks(4);
+  const action = await (adapter as any).nudge(new Set(), { signal: new AbortController().signal, timeoutMs: 10000 }, { x: 12, y: 64, z: 2.5 });
+  assert.match(String(action), /爬上了岸/);
+  assert.equal(bot.entity.isInWater, false);
+  assert.ok(bot.entity.position.x >= 6);
+});
