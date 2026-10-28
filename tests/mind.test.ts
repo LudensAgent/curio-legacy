@@ -182,7 +182,7 @@ test('a stopping condition records its actual evidence rather than claiming the 
 test('决定的校验：能纠正就纠正，关键部分错了才要求重答', () => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null);
   assert.ok('error' in parseDecision({ decision: 'continue', monologue: '嗯' }, adapter, memory, false));
-  const d = parseDecision({ decision: 'new', monologue: '去砍树', activity: { what: '砍树', steps: [{ skill: 'no_such_skill' }, { skill: 'look_around', args: { seconds: 3 } }] } }, adapter, memory, false);
+  const d = parseDecision({ decision: 'new', monologue: '去砍树', activity: { what: '砍树', steps: [{ skill: 'no_such_skill', optional: true }, { skill: 'look_around', args: { seconds: 3 } }] } }, adapter, memory, false);
   assert.ok(!('error' in d));
   if ('error' in d) return;
   assert.equal(d.activity!.steps.length, 1);
@@ -834,7 +834,7 @@ test('说着 continue 却写了一段新的活：要求澄清', () => {
 test('写错被丢掉的步骤会记下来，心智看得到它们根本没做', () => {
   const memory = new WorldMemory(null);
   const adapter = new FakeAdapter();
-  const d = parseDecision({ decision: 'new', monologue: '放床', activity: { what: '放床', steps: [{ skill: 'no_such_skill', args: { item: 'white_bed' } }, { skill: 'look_around', args: { seconds: 3 } }] } }, adapter, memory, false);
+  const d = parseDecision({ decision: 'new', monologue: '放床', activity: { what: '放床', steps: [{ skill: 'no_such_skill', args: { item: 'white_bed' }, optional: true }, { skill: 'look_around', args: { seconds: 3 } }] } }, adapter, memory, false);
   assert.ok(!('error' in d) && d.activity?.dropped?.[0]?.startsWith('no_such_skill'));
   const a = createActivity(d.activity!, '放床', 'llm', adapter.state());
   assert.ok(a.dropped?.length === 1);
@@ -1166,10 +1166,10 @@ test('要命的处境（头被沙砾埋住、正在掉血）：撤掉正在慢�
   assert.match(user, /头被 gravel 埋住了，正在窒息掉血/);
 });
 
-test('决定里有一步写错：当场退回去让它改一次（改了用新的，说不要就用原来的），不默默丢掉', async (t) => {
+test('决定里有可选步骤写错：当场退回去让它改一次（改了用新的，说不要就用原来的）', async (t) => {
   const w = fixture(t);
   await w.tick();
-  await w.reply(0, { monologue: '先这样', decision: 'new', activity: { what: '两步活', steps: [step(1), { skill: 'use_skill', args: {} }] } });
+  await w.reply(0, { monologue: '先这样', decision: 'new', activity: { what: '两步活', steps: [step(1), { skill: 'use_skill', args: {}, optional: true }] } });
   assert.equal(w.pending.length, 2, '退回去改');
   assert.match(w.pending[1].messages.at(-1)!.content, /执行时会被丢掉.*keep/s);
   await w.reply(1, { monologue: '改好了', decision: 'new', activity: { what: '两步活', steps: [step(1), step(2)] } });
@@ -1177,8 +1177,32 @@ test('决定里有一步写错：当场退回去让它改一次（改了用新�
 
   const v = fixture(t);
   await v.tick();
-  await v.reply(0, { monologue: '先这样', decision: 'new', activity: { what: '一步活', steps: [step(1), { skill: 'use_skill', args: {} }] } });
+  await v.reply(0, { monologue: '先这样', decision: 'new', activity: { what: '一步活', steps: [step(1), { skill: 'use_skill', args: {}, optional: true }] } });
   await v.reply(1, { keep: true });
   assert.equal(v.mind.activity?.what, '一步活');
   assert.equal(v.mind.activity?.steps.length, 1, '不要就按丢掉写错那步的原样执行');
+});
+
+test('必需步骤写错时整段不执行，返回错误让 Agent 自己修正', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { monologue: '先这样', decision: 'new', activity: { what: '两步活', steps: [step(1), { skill: 'use_skill', args: {} }] } });
+  assert.equal(w.pending.length, 2);
+  assert.match(w.pending[1].messages.at(-1)!.content, /必需步骤无法执行.*steps\[1\]/);
+  assert.equal(Boolean(w.mind.activity), false);
+  await w.reply(1, { monologue: '不做那一步了', decision: 'new', activity: { what: '先看看', steps: [step(1)] } });
+  assert.equal(w.mind.activity?.what, '先看看');
+  assert.equal(w.mind.activity?.steps.length, 1);
+});
+
+test('修订稿的必需步骤无效时不会回退执行旧稿', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { decision: 'new', activity: { what: '旧稿', steps: [step(1), { skill: 'use_skill', args: {}, optional: true }] } });
+  await w.reply(1, { decision: 'new', activity: { what: '修订稿', steps: [step(1), { skill: 'use_skill', args: {} }] } });
+  assert.equal(w.pending.length, 3);
+  assert.match(w.pending[2].messages.at(-1)!.content, /必需步骤无法执行/);
+  assert.equal(Boolean(w.mind.activity), false);
+  await w.reply(2, { decision: 'new', activity: { what: '重新决定', steps: [step(1)] } });
+  assert.equal(w.mind.activity?.what, '重新决定');
 });

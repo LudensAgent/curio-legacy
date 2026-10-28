@@ -7,7 +7,7 @@ import { EventBus } from '../src/events.ts';
 import type { Senses } from '../src/skills/types.ts';
 
 // Decision-only fixture: no skill execution, game simulation, timers or real waiting.
-function fixture(t: TestContext, options: { routineCare?: boolean } = {}) {
+function fixture(t: TestContext, options: { routineCare?: boolean; habits?: () => { torch_every?: number } } = {}) {
   let now = 1_700_000_000_000;
   t.mock.method(Date, 'now', () => now);
   const state: AgentState = {
@@ -40,7 +40,7 @@ function fixture(t: TestContext, options: { routineCare?: boolean } = {}) {
   } as unknown as Arbiter;
   const senses: Senses = { perceivedEntities: () => entities, knownBlocks: () => [], refresh() {}, markSweep() {} };
   const reflex = new Reflex(adapter, arbiter, new EventBus(), senses, options);
-  return { state, cave, starts, cancellations, setTask, tick: () => reflex.tick(), advance: (ms: number) => { now += ms; },
+  return { state, cave, starts, cancellations, setTask, setIdle: () => { current = null; }, tick: () => reflex.tick(), advance: (ms: number) => { now += ms; },
     hostile: (name: string, extra: Record<string, unknown> = {}) => { entities = [{ id: 42, name, kind: 'hostile', dist: 3, pos: { x: 3, y: 64, z: 0 }, ...extra }]; },
   };
 }
@@ -88,8 +88,8 @@ test('routine meals wait for a suitable pause, while urgent hunger does not', (t
   assert.notEqual(w.starts.at(-1)?.gentle, true);
 });
 
-test('auto lighting ignores transient darkness, airborne movement and a short observation', (t) => {
-  const w = fixture(t);
+test('opted-in lighting waits for idle and does not run in daylight or while airborne', (t) => {
+  const w = fixture(t, { habits: () => ({ torch_every: 8 }) });
   w.state.inventory = [{ name: 'torch', count: 8 }];
   w.setTask('goto'); w.tick();
   w.advance(500); w.cave.dark = false; w.tick();
@@ -98,7 +98,13 @@ test('auto lighting ignores transient darkness, airborne movement and a short ob
   w.setTask('goto', 'llm', 0.95); w.tick();
   assert.equal(w.starts.length, 0, 'do not cancel observation, a jump or the end of a walk');
   w.setTask('goto'); w.tick(); w.advance(800); w.tick();
-  assert.equal(w.starts.length, 1, 'a grounded walk through sustained darkness still gets light');
+  assert.equal(w.starts.length, 0, 'sustained darkness does not interrupt a walk');
+  w.setIdle(); w.state.onGround = false; w.tick();
+  assert.equal(w.starts.length, 0, 'do not place while airborne');
+  w.state.onGround = true; w.cave.dark = false; w.tick();
+  assert.equal(w.starts.length, 0, 'do not place when sufficiently lit');
+  w.cave.dark = true; w.tick();
+  assert.equal(w.starts.length, 1, 'idle darkness with the habit enabled gets light');
   assert.equal(w.starts[0].step.skill, 'place_torch');
   assert.equal(w.starts[0].gentle, true);
 });

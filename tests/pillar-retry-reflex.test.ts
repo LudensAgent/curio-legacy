@@ -41,7 +41,7 @@ test('the actual place_at failure carries the jump reason to the scheduler', asy
   assert.equal(afterStep(activity, step, result, 100, adapter.state()).kind, 'stuck');
 });
 
-test('routine torch placement waits until goto ends, but still works while idle', () => {
+test('torch habit is opt-in and only runs while idle', () => {
   const adapter = new FakeAdapter();
   adapter.inv.set('torch', 4);
   adapter.blocks.push({ name: 'stone', pos: { x: 0, y: 66, z: 0 } });
@@ -50,9 +50,22 @@ test('routine torch placement waits until goto ends, but still works while idle'
   let current: { skill: string; progress: number; movement: boolean } | null = { skill: 'goto', progress: 0.2, movement: false };
   const arbiter = { paused: false, info: () => current, start: (...args: unknown[]) => requests.push(args) };
   const senses = { perceivedEntities: () => [] };
-  const reflex = new Reflex(adapter, arbiter as never, new EventBus(), senses as never, { instincts: 'skills' });
+  let torchEvery = 0;
+  const reflex = new Reflex(adapter, arbiter as never, new EventBus(), senses as never,
+    { instincts: 'skills', routineCare: true, habits: () => ({ torch_every: torchEvery }) });
+  assert.ok(!reflex.activeInstincts().includes('torch'));
   reflex.tick();
   assert.equal(requests.length, 0);
+  current = null;
+  reflex.tick();
+  assert.equal(requests.length, 0, 'routine care alone must not consume a torch');
+  torchEvery = 8;
+  assert.ok(reflex.activeInstincts().includes('torch'));
+  for (const skill of ['goto', 'gather', 'explore']) {
+    current = { skill, progress: 0.2, movement: false };
+    reflex.tick();
+    assert.equal(requests.length, 0, `${skill} must not be interrupted`);
+  }
   current = null;
   reflex.tick();
   assert.equal(requests.length, 1);

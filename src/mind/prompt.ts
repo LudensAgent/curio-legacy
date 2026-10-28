@@ -126,7 +126,7 @@ const OUTPUT = `只输出一个 JSON 对象：
  "next":{同 activity，可提前写下一段；手上的活成功结束后再接上}}
 continue 时可以不写 activity；要换成别的做法就用 adjust/new，别写 continue。顺手、碰运气的步骤加 "optional":true（没成也不算失败）。
 operator（有【操作者的指令】时必写 {"status":"doing|done|cannot","note":"…"}；有【操作者的建议】时写 {"status":"adopted|declined","note":"…"}）｜plan（主目标清单：定下 {"focus":"a_…或一句话","steps":["…"]}，做完一项 {"done":[0]}）｜skill（见【技能】）｜worth_learning（刚才的事值得练成技能时写：哪里出了问题、想学会什么）
-其他可选字段：say（有新发现、改主意、做成事或遇险时说的一句口语）｜agenda（{"add":[{"text":"想做的事或想弄清的问题","kind":"goal|idea|question","horizon":"today|someday"}],"done":["a_…"],"drop":["a_…"],"focus":"a_…"}，规则不要放这里）｜learned（结果出乎意料时的一句窍门，或 {"revise":"k_…","text":"…"} 修订旧窍门）｜hypothesis（experiment 必填）｜experiment_result（上一段是实验时：supported|refuted|unclear）｜diary（值得记住的一句话）｜liked（刚发现喜欢的东西）｜habits（身体的顺手习惯，一直有效：{"torch_every":8} 暗处每 8 格插火把，{"eat_below":12} 饿到 12 顺手吃，{"pickup":true} 捡掉落物；0 关掉）`;
+其他可选字段：say（有新发现、改主意、做成事或遇险时说的一句口语）｜agenda（{"add":[{"text":"想做的事或想弄清的问题","kind":"goal|idea|question","horizon":"today|someday"}],"done":["a_…"],"drop":["a_…"],"focus":"a_…"}，规则不要放这里）｜learned（结果出乎意料时的一句窍门，或 {"revise":"k_…","text":"…"} 修订旧窍门）｜hypothesis（experiment 必填）｜experiment_result（上一段是实验时：supported|refuted|unclear）｜diary（值得记住的一句话）｜liked（刚发现喜欢的东西）｜habits（身体的顺手习惯，一直有效：{"torch_every":8} 空闲且暗时相隔约 8 格消耗一支火把，不打断动作；{"eat_below":12} 饿到 12 顺手吃，{"pickup":true} 捡掉落物；0 关掉）`;
 
 const DECISIONS = `continue 照常做｜adjust 还是这件事、改一改 routine｜new 开始新的一段｜detour 先插一段别的，做完自动回来｜switch 放下手上的改做别的｜experiment 验证一个猜想的小活｜rest 歇一下`;
 
@@ -140,7 +140,7 @@ const FOCUS = `【专注】主目标是这一阶段要拿到的成果（有床�
 const SKILLS_DOC = () => `【技能】把做法写进 skill 会保存候选：{"name":"英文-连字符","description":"…","when":{条件},"steps":[…]或"code":"JS","verify":"观察原目标是否达成"}。你决定何时在 routine 用 use_skill {"name":"…","trial":true,"args":{…}} 显式试用；候选不自动接手、不替换稳定版，取得足够实际验收证据才启用。启用后 when 含 after_failure＝动作失败时先试；只有状态条件＝成立自动做；不写＝手动调用。方块只读当前视觉，unknown不能当作空气或已知矿物；只听到的实体没有精确坐标和可交互ID。写不出就用 worth_learning；写法先查 {"kind":"skill","name":"writing-skills"}。遇到岩浆或水下呼吸问题由你或你学会的技能处理。`;
 
 const QUERIES = (skills: string[]) => `【先查再做】需要时先输出一个查询 JSON（不占游戏时间，每次思考最多 3 次），拿到结果再决定：
-- {"kind":"skill","name":"技能名"} 翻开技能书看做法｜{"kind":"design","brief":"用途、多大、风格","where":"here|base|x,y,z"} 请建筑师画图纸：房子、前哨、仓库、畜栏、塔等要长期用的建筑（where：脚下、家旁或坐标）
+- {"kind":"skill","query":"关键词"} 查技能（空查询浏览目录，offset 分页，含收起和停用）；{"kind":"skill","name":"技能名"} 读技能及版本记录，加 "version":30 读历史版本；读取不代表启用或验证｜{"kind":"design","brief":"用途、多大、风格","where":"here|base|x,y,z"} 请建筑师画图纸：房子、前哨、仓库、畜栏、塔等要长期用的建筑（where：脚下、家旁或坐标）
 - {"kind":"recipes","item":"物品名","count":1} 看配方和缺口（"uses":"物品" 反查用途）｜{"kind":"moves","names":["动作名"]} 看动作参数
 - {"kind":"recall","query":"关键词"} 回想以前的经历、日记、教训和技能｜{"kind":"mechanics","query":"…"} 查底层操作接口
 - {"kind":"knowledge","query":"问题"} 搜索 Wiki 候选；再用 {"kind":"knowledge","id":"文档id"} 看章节目录，加 "section":"章节id" 读正文，续页按 nextCursor 传 cursor。空查询浏览目录，目录续页传 offset。摘录不等于读完或学会；资料不代表现场事实，做法自行判断。`;
@@ -176,7 +176,7 @@ const PRINCIPLES = `【原则】
 const PRECISE = `【精确操作】【身边】local 是以脚为原点的方块图（[前,上,右]，前=facing），local.spots 已算好能站（stand）、能放（place）的格子。dig_at / step / place_at 都写确切的相对坐标，routine 重复时每步按当时站的位置重算，例如：
 - 写法示例（只是语法，不是该怎么走）：steps [dig_at {"at":[1,0,0]}, dig_at {"at":[1,1,0]}, step {"to":[1,0,0]}]，repeat 8，facing 都写同一个方向（如 "N"），done_when 写看得到的结果（如 {"type":"sky_visible","equals":true}）
 - [0,0,0] 是自己脚下那格、[0,1,0] 是自己头那格：place_at [0,0,0] 放实心方块会跳起来垫在脚下；梯子、火把这种贴墙的东西可以放进自己站的格子（要贴着实心墙）。挖空脚下 [0,-1,0] 人会自己掉下去，不用 step
-repeat 每轮重做整套 steps：火把别写进重复的 steps，用 habits.torch_every。挖前看清那格（沙砾会掉，别挖开水和岩浆）。`;
+repeat 每轮重做整套 steps；需要照明时可主动调用 place_torch，也可选择 habits.torch_every 在空闲时照明。挖前看清那格。`;
 
 const EXAMPLE = `【例子】想有个家时：
 → {"kind":"design","brief":"湖边能住的小屋，云杉木，放得下床、箱子和工作台"}

@@ -20,6 +20,7 @@ import type { SkillBook } from '../knowledge/skillbook.ts';
 import type { KnowledgeBase } from '../knowledge/library.ts';
 import { describeBuild, myBuilds } from './home.ts';
 import type { LedgerView } from './ledger.ts';
+import type { BehaviorStats } from './behaviors.ts';
 import { recallLocal, RECALL_LABEL } from './recall.ts';
 
 /** 思考时可以先做的只读查询（不占游戏时间） */
@@ -92,30 +93,40 @@ export function inferKind(steps: Step[]): ActivityKind {
 /** 决定里能当场退回去改的毛病：步骤写错被丢、收工条件无效、next 被忽略 */
 const FIXABLE_NOTE = /丢掉了不能执行的步骤|done_when 无效|next 已忽略/;
 
-/** 校验一段活：步骤必须是会的手脚、参数合法；写错的个别步骤丢掉并记下，全错才算无效 */
+/** 校验一段活：必需步骤必须可执行，可选步骤写错则丢掉并记录原因。 */
 export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldMemory, notes: string[], label = 'activity'): ActivityDraft | { error: string } {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: `${label} 必须是对象` };
   const o = raw as Record<string, any>;
   const what = str(o.what ?? o.goal, 80);
   if (!what) return { error: `${label}.what 不能为空` };
   if (!Array.isArray(o.steps) || !o.steps.length) return { error: `${label}.steps 需要 1–6 个动作` };
+  if (o.steps.length > 6) return { error: `${label}.steps 最多 6 个动作，请自行精简或分成多段` };
   const steps: ActivityStep[] = [];
   const errors: string[] = [];
+  const requiredErrors: string[] = [];
   const dropped: string[] = [];
-  for (const [i, s0] of o.steps.slice(0, 6).entries()) {
+  for (const [i, s0] of o.steps.entries()) {
     const s = normalizeStep(s0) as Record<string, any>;
     const name = String(s?.skill ?? '');
     const skill = SKILLS[name];
     const raw = `${name} ${JSON.stringify(s?.args ?? {}).slice(0, 60)}`;
-    if (!skill || LLM_HIDDEN.has(name)) { errors.push(`steps[${i}] 没有 "${name}" 这个技能`); dropped.push(`${raw}（没有这个动作）`); continue; }
-    const v = validateSkill(skill, s?.args ?? {}, adapter);
-    if (!v.ok) { errors.push(`steps[${i}] ${name} 校验失败：${v.error}`); dropped.push(`${raw}（${v.error.slice(0, 300)}）`); continue; }
     const optional = !!s0 && typeof s0 === 'object' && ((s0 as any).optional === true || (s0 as any).opportunistic === true);
+    if (!skill || LLM_HIDDEN.has(name)) {
+      const error = `steps[${i}] 没有 "${name}" 这个技能`;
+      if (optional) { errors.push(error); dropped.push(`${raw}（没有这个动作）`); } else requiredErrors.push(error);
+      continue;
+    }
+    const v = validateSkill(skill, s?.args ?? {}, adapter);
+    if (!v.ok) {
+      const error = `steps[${i}] ${name} 校验失败：${v.error}`;
+      if (optional) { errors.push(error); dropped.push(`${raw}（${v.error.slice(0, 300)}）`); } else requiredErrors.push(error);
+      continue;
+    }
     steps.push({ skill: name, args: v.args, ...(optional ? { optional: true } : {}) });
   }
+  if (requiredErrors.length) return { error: `${label} 必需步骤无法执行，整段未安排：${requiredErrors.join('；')}。请修正、明确删去或重新决定` };
   if (!steps.length) return { error: `${label} 没有可执行的动作：${errors.join('；')}` };
   if (errors.length) notes.push(`${label} 里丢掉了不能执行的步骤：${errors.join('；')}`.slice(0, 300));
-  if (o.steps.length > 6) notes.push(`${label} 只保留前 6 步`);
   let doneWhen;
   if (o.done_when !== undefined && o.done_when !== null) {
     try {
@@ -157,7 +168,7 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
   let activity: ActivityDraft | undefined;
   if (o.activity !== undefined && o.activity !== null && kind !== 'continue') {
     const v = validateDraft(o.activity, adapter, memory, notes);
-    if ('error' in v) { if (NEEDS_ACTIVITY.has(kind)) return { error: v.error }; notes.push(v.error); }
+    if ('error' in v) return { error: v.error };
     else activity = v;
   }
   if (kind === 'rest' && !activity) {
@@ -172,6 +183,7 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
     const candidate = o.activity ?? o.next;
     const v = candidate ? validateDraft(candidate, adapter, memory, notes, o.activity ? 'activity' : 'next') : null;
     if (v && !('error' in v)) { activity = v; kind = 'new'; promotedNext = !o.activity; notes.push('手上没活，continue 按 new 处理'); }
+    else if (v && 'error' in v) return { error: v.error };
     else return { error: '手上没有正在做的活，不能 continue：请给出 decision=new 和一段 activity' };
   }
   if (kind === 'adjust' && !hasActivity) kind = 'new';
@@ -252,6 +264,7 @@ export class Thinker {
   designing: { brief: string; startedAt: number } | null = null;
   /** 收获账本：主动回想时也能想起拿某样东西花多少、在哪多 */
   ledger: LedgerView | null = null;
+  skillStats: ((name: string) => BehaviorStats | undefined) | null = null;
   constructor(private planner: Planner, private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private book: SkillBook | null = null, private knowledge: KnowledgeBase | null = null) {}
 
   get autonomous() { return this.planner.autonomous; }
@@ -339,7 +352,8 @@ export class Thinker {
       if (firstDraft && raw?.keep === true) { this.planner.stats.ok++; return { ...firstDraft, source: 'llm', tier, requestedAt }; }
       const parsed = parseDecision(raw, this.adapter, this.memory, !!ctx.activity, ctx.activity?.what, ctx.activity?.steps.map((st) => st.skill));
       if ('error' in parsed) {
-        if (firstDraft) return { ...firstDraft, source: 'llm', tier, requestedAt }; // 改的这版反而不能用：用第一版
+        // 模型已提出新决定，不能在新决定无效时擅自执行旧稿。
+        firstDraft = null;
         invalid++;
         this.planner.noteInvalid(ctx.reason, parsed.error);
         if (invalid >= 2) throw new Error(`INVALID_DECISION: ${parsed.error}`);
@@ -397,11 +411,38 @@ export class Thinker {
       }
       if (kind === 'skill') {
         const name = String(raw.name ?? '').trim();
+        if (!name) {
+          const query = String(raw.query ?? '').trim().toLowerCase();
+          const offset = Number.isSafeInteger(raw.offset) && raw.offset >= 0 ? raw.offset : 0;
+          const found = (this.book?.list() ?? []).filter((entry) => !query || `${entry.name} ${entry.description} ${entry.body}`.toLowerCase().includes(query));
+          const entries = found.slice(offset, offset + 30).map((entry) => {
+            const stats = this.skillStats?.(entry.name);
+            return { name: entry.name, description: entry.description, source: entry.source,
+              retired: stats?.retired ?? null, disabled: !!stats?.disabled, candidate: !!this.book?.candidate(entry.name) };
+          });
+          return JSON.stringify({ query, total: found.length, entries, nextOffset: offset + entries.length < found.length ? offset + entries.length : null });
+        }
+        if (raw.version !== undefined && (!Number.isSafeInteger(raw.version) || raw.version < 1)) return 'version 需要正整数；不指定 version 可查看已保存的历史版本';
         const candidate = this.book?.candidate(name);
-        const skill = raw.trial === true ? candidate : this.book?.get(name);
-        if (!skill) return `没有叫「${String(raw.name ?? '')}」的技能；有这些：${this.book?.index().join('；') ?? '（没有技能书）'}`;
+        const current = this.book?.get(name);
+        if (!current) return `没有叫「${String(raw.name ?? '')}」的技能；有这些：${this.book?.index().join('；') ?? '（没有技能书）'}`;
+        const version = raw.version as number | undefined;
+        const skill = version === undefined ? (raw.trial === true ? candidate : current)
+          : [current, candidate].find((entry) => Number((entry?.behavior as Record<string, unknown> | undefined)?.version) === version)
+            ?? this.book?.definitionVersion(name, version);
+        const code = version !== undefined && !skill ? this.book?.codeVersion(name, version) : null;
+        const versions = this.book?.versions(name) ?? [];
+        if (!skill && !code) return `没有「${name}」${version === undefined ? '的候选版本' : `的 v${version}`}；已保存历史：${JSON.stringify(versions)}`;
+        const stats = this.skillStats?.(name);
+        const evidence = stats ? { retired: stats.retired ?? null, disabled: !!stats.disabled, lastError: stats.lastError ?? null,
+          byVersion: version === undefined ? stats.byVersion ?? null : stats.byVersion?.[String(version)] ?? null,
+          recent: (stats.recent ?? []).filter((record) => version === undefined || record.version === version).slice(-5) } : null;
+        if (!skill) {
+          this.bus.publish('skill_read', 'P3', `翻开技能：${name} v${version}`, { name, version, source: current.source });
+          return `技能「${name}」v${version} 仅保存了历史代码，没有完整执行契约；读取不代表启用或验证：\n${code}\n当前收起/停用状态及按版本保存的运行记录（无记录为未知）：${JSON.stringify(evidence)}`;
+        }
         this.bus.publish('skill_read', 'P3', `翻开技能：${skill.name}`, { name: skill.name, source: skill.source });
-        return `技能「${skill.name}」：\n${skill.body}${!candidate && skill.behavior ? `\n完整执行契约（读取不代表当前已启用或已验证）：\n${JSON.stringify(skill.behavior)}` : ''}${candidate ? `\n\n候选 v${(candidate.behavior as Record<string, unknown>).version} 尚未启用；用 use_skill {name:"${name}",trial:true,args:{…}} 显式试用。候选的完整参数、触发、代码和验收：\n${JSON.stringify(candidate.behavior)}` : ''}`;
+        return `技能「${skill.name}」${version !== undefined ? `v${version}` : ''}（读取不代表启用或验证）：\n${skill.body}${skill.behavior ? `\n完整执行契约：\n${JSON.stringify(skill.behavior)}` : ''}${version === undefined && candidate ? `\n\n候选 v${(candidate.behavior as Record<string, unknown>).version} 尚未启用；用 use_skill {name:"${name}",trial:true,args:{…}} 显式试用。候选的完整参数、触发、代码和验收：\n${JSON.stringify(candidate.behavior)}` : ''}\n已保存历史版本：${JSON.stringify(versions)}；可指定 version 阅读。\n当前收起/停用状态及按版本保存的运行记录（无记录为未知）：${JSON.stringify(evidence)}`;
       }
       if (kind === 'design') {
         const brief = String(raw.brief ?? raw.request ?? '').trim().slice(0, 400);

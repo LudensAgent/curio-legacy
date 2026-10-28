@@ -6,8 +6,6 @@ import { hasPlaceable } from '../skills/survival.ts';
 import { measureLight, torchCount } from '../skills/light.ts';
 import { isSoftBlock, surroundings } from '../perception/surroundings.ts';
 
-/** 这些动作进行中可以顺手插支火把（插完接着做） */
-const TORCH_OK_DURING = new Set(['explore', 'gather', 'wander', 'excavate_path', 'search_structure']);
 /** 熟食、面包等正经食物（不含生肉生鱼） */
 const GOOD_FOOD = /^(cooked_|baked_potato|bread|golden_carrot|golden_apple|pumpkin_pie|cookie|apple|carrot|melon_slice|sweet_berries|glow_berries|beetroot|dried_kelp|mushroom_stew|rabbit_stew|beetroot_soup|suspicious_stew|honey_bottle|cake)/;
 
@@ -47,7 +45,7 @@ export class Reflex {
     const legacy = this.options.instincts !== 'skills';
     const care = this.options.routineCare !== false;
     return [...(legacy || care || this.options.habits?.().eat_below ? ['eat'] : []), ...(legacy ? ['creeper', 'losing-fight', 'low-hp-flee', 'fight-back'] : []),
-      ...(legacy && care ? ['night-shelter'] : []), ...(care || this.options.habits?.().torch_every ? ['torch'] : [])];
+      ...(legacy && care ? ['night-shelter'] : []), ...(this.options.habits?.().torch_every ? ['torch'] : [])];
   }
 
   start(intervalMs = 250) {
@@ -112,7 +110,7 @@ export class Reflex {
   tick() {
     if (!this.enabled || this.arbiter.paused) return;
     const s = this.adapter.state();
-    if (!s.connected || !s.alive || !s.observationReady) { this.darkSince = null; return; }
+    if (!s.connected || !s.alive || !s.observationReady) return;
     const cur = this.arbiter.info();
     // 只对看见/听见的威胁做反应（墙后的怪物不会触发反射）
     const hostiles = this.senses.perceivedEntities(12).filter((e) => e.kind === 'hostile' && !(cur?.skill === 'dragon_fight' && e.name === 'ender_dragon'));
@@ -120,7 +118,6 @@ export class Reflex {
     // 苦力怕：打还是跑由脑子决定；身体只在来不及想的时候躲——它已经在嘶嘶作响，或者贴到眼前而自己并没有在跟它打
     const fighting = !!cur && cur.source !== 'reflex' && cur.source !== 'filler' && ['defend', 'hit_entity', 'ranged_defend'].includes(cur.skill);
     const creeper = hostiles.find((e) => e.name === 'creeper' && (e.fusing ? e.dist < 4 : !fighting && e.dist < 2.5));
-    if (s.inWater || s.inLava || !s.onGround || (nearest && nearest.dist < 5) || (cur && !TORCH_OK_DURING.has(cur.skill))) this.darkSince = null;
 
     // 躲在避难所里：怪物进不来，不要出去打架/逃跑。
     if (cur?.skill === 'shelter') return;
@@ -180,12 +177,11 @@ export class Reflex {
       return this.fire({ skill: 'eat' }, 'P1', `饥饿 ${s.food} / 生命 ${s.hp}${urgent ? '（很饿了，有什么吃什么）' : ''}`, !urgent);
     }
 
-    if ((this.options.routineCare !== false || this.options.habits?.().torch_every) && instinct('torch')) this.autoTorch(s, cur, nearest?.dist ?? Infinity);
+    if (this.options.habits?.().torch_every && instinct('torch')) this.autoTorch(s, cur, nearest?.dist ?? Infinity);
     this.checkStuck(s.pos, cur);
   }
 
   private lastTorch: { x: number; y: number; z: number } | null = null;
-  private darkSince: number | null = null;
   private torchNear(x: number, y: number, z: number, r: number) {
     for (let dx = -r; dx <= r; dx++) for (let dy = -2; dy <= 2; dy++) for (let dz = -r; dz <= r; dz++) {
       const n = this.adapter.blockAt({ x: x + dx, y: y + dy, z: z + dz });
@@ -195,18 +191,13 @@ export class Reflex {
   }
   torchesPlaced = 0;
 
-  /** 走进有遮蔽的暗处就顺手补一支火把（不打断计划，计划会原样继续） */
+  /** Agent 明确设置照明习惯后，只在没有动作运行时消耗火把。 */
   private autoTorch(s: ReturnType<GameAdapter['state']>, cur: ReturnType<Arbiter['info']>, nearestHostile: number) {
-    if (s.inWater || !s.onGround || nearestHostile < 5 || torchCount(s.inventory) === 0) { this.darkSince = null; return; }
-    // 只在“走路/挖矿”这类可以顺手停一下的动作里插火把；打猎、合成、建造、爬坑这些做到一半被打断会坏事
-    if (cur && (!TORCH_OK_DURING.has(cur.skill) || cur.progress >= 0.85)) { this.darkSince = null; return; }
+    if (cur || s.inWater || s.inLava || !s.onGround || nearestHostile < 5 || torchCount(s.inventory) === 0) return;
     const x = Math.floor(s.pos.x), y = Math.floor(s.pos.y), z = Math.floor(s.pos.z);
     // 只在有遮蔽的暗处：头顶看得见天（尤其白天）不插；光照数据读不到/不可信时也不插
     const m = measureLight(this.adapter, s.pos, s.timeOfDay, s.isDay);
-    if (m.sky !== false || m.level === null || m.level > 4) { this.darkSince = null; return; }
-    // 从树荫/屋檐或跳跃里一闪而过不值得停下；闲着时可以直接照明，走路时先确认一直很暗。
-    this.darkSince ??= Date.now();
-    if (cur && Date.now() - this.darkSince < 750) return;
+    if (m.sky !== false || m.level === null || m.level > 4) return;
     const here = m.level;
     const spacing = this.options.habits?.().torch_every || 5;
     if (this.lastTorch && Math.hypot(x - this.lastTorch.x, y - this.lastTorch.y, z - this.lastTorch.z) < spacing) return;

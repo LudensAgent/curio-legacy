@@ -113,7 +113,7 @@ export const INSTINCTS: Record<string, { text: string; locked?: boolean; off?: s
   'fight-back': { text: '怪贴到 4 格内：血多就还手，血少就跑' },
   'night-shelter': { text: '夜里血少就地挖坑封顶（默认关闭）' },
   eat: { text: '很饿时有什么吃什么' },
-  torch: { text: '暗处顺手插火把（habits.torch_every 打开）' },
+  torch: { text: 'habits.torch_every 打开时，空闲且暗处消耗火把照明' },
 };
 
 /** 标出这次运行里哪些本能代码没开（由反射层的配置决定） */

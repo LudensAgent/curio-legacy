@@ -563,8 +563,14 @@ export class Vision {
       const optics = this.adapter.blockOptics(pos.x, pos.y, pos.z);
       if (!optics) continue;
       const boxes = optics.kind === 'solid' || optics.kind === 'foliage' ? optics.shapes ?? [[0, 0, 0, 1, 1, 1] as const] : undefined;
+      // A block's center may be hidden behind the edge of the block underfoot
+      // even though part of its top face is visible. Sample inside each actual
+      // collision box, and require a clear, in-view ray for every candidate.
       const points = boxes
-        ? boxes.slice(0, 16).map(([x0, y0, z0, x1, y1, z1]) => [pos.x + (x0 + x1) / 2, pos.y + (y0 + y1) / 2, pos.z + (z0 + z1) / 2])
+        ? boxes.slice(0, 16).flatMap(([x0, y0, z0, x1, y1, z1]) =>
+          [[pos.x + (x0 + x1) / 2, pos.y + (y0 + y1) / 2, pos.z + (z0 + z1) / 2],
+            ...[0.1, 0.9].flatMap((fx) => [0.1, 0.9].flatMap((fy) => [0.1, 0.9].map((fz) =>
+              [pos.x + x0 + (x1 - x0) * fx, pos.y + y0 + (y1 - y0) * fy, pos.z + z0 + (z1 - z0) * fz])))])
         : [[pos.x + .5, pos.y + .5, pos.z + .5]];
       const visible = points.some(([x, y, z]) => {
         const dx = x - eye.x, dy = y - eye.y, dz = z - eye.z, distance = Math.hypot(dx, dy, dz);

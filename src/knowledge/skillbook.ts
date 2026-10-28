@@ -100,7 +100,7 @@ export class SkillBook {
 
   /** 代码技能某个旧版本的代码（退回用） */
   codeVersion(name: string, version: number): string | null {
-    const k = this.skills.get(name);
+    const k = this.skills.get(name) ?? this.candidates.get(name);
     if (!k) return null;
     const file = path.join(path.dirname(k.file), 'versions', `v${version}.js`);
     if (fs.existsSync(file)) return fs.readFileSync(file, 'utf8');
@@ -121,6 +121,23 @@ export class SkillBook {
   get(name: string): KnowSkill | undefined { return this.skills.get(name) ?? this.candidates.get(name); }
   candidate(name: string): KnowSkill | undefined { return this.candidates.get(name); }
   pending(): KnowSkill[] { return [...this.candidates.values()]; }
+  /** 保存过的完整契约和旧代码；只有代码的历史不能当成完整契约。 */
+  versions(name: string): { version: number; definition: boolean; code: boolean }[] {
+    const skill = this.skills.get(name) ?? this.candidates.get(name);
+    if (!skill) return [];
+    const directory = path.join(path.dirname(skill.file), 'versions');
+    if (!fs.existsSync(directory)) return [];
+    const versions = new Map<number, { version: number; definition: boolean; code: boolean }>();
+    for (const entry of fs.readdirSync(directory)) {
+      const match = /^v([1-9]\d*)\.(json|js)$/.exec(entry);
+      if (!match) continue;
+      const version = Number(match[1]);
+      const record = versions.get(version) ?? { version, definition: false, code: false };
+      if (match[2] === 'json') record.definition = true; else record.code = true;
+      versions.set(version, record);
+    }
+    return [...versions.values()].sort((a, b) => a.version - b.version);
+  }
   versionCeiling(name: string): number {
     const current = this.skills.get(name), candidate = this.candidates.get(name);
     const file = current?.file ?? candidate?.file;

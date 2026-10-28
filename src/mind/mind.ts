@@ -221,6 +221,7 @@ export class Mind {
   constructor(private d: MindDeps) {
     this.timing = { ...DEFAULT_TIMING, ...(d.timing ?? {}) };
     d.memory.setWorld(d.adapter.state().worldId);
+    d.thinker.skillStats = (name) => d.behaviors?.statsOf(name);
   }
 
   get inFlight() { return !!this.thinking; }
