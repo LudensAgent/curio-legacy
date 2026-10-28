@@ -132,11 +132,12 @@ test('看到没了的地方记下来；窍门、议程里还写着那个坐标�
   const perception = new Perception(adapter, memory, new EventBus(), new Vision(adapter));
   perception.update();
   assert.ok(!memory.landmarks().some((l) => l.label === 'lava'));
-  const text = noteGoneSpots('做黑曜石：去开阔湖（y50 横巷或 3,64,1）；别处 (40,64,40) 不相干', memory, 'overworld');
-  assert.match(text, /3,64,1〔亲眼看过：这里的 lava 已经没了，现在是 air〕/);
+  const text = noteGoneSpots('做黑曜石：去开阔湖（y50 横巷或 3,64,0）；旁边 3,64,1；别处 (40,64,40) 不相干', memory, 'overworld');
+  assert.match(text, /3,64,0〔亲眼看过：当时这里的 lava 没了，变成 air；观察时间 .*，历史记录不代表当前状态〕/);
+  assert.doesNotMatch(text, /3,64,1〔亲眼看过/);
   assert.match(text, /\(40,64,40\) 不相干/);
   // 又看见岩浆了：不再注明
   memory.addLandmark('danger', 'lava', 'overworld', { x: 3, y: 64, z: 0 });
-  assert.doesNotMatch(noteGoneSpots('3,64,1', memory, 'overworld'), /已经没了/);
+  assert.doesNotMatch(noteGoneSpots('3,64,0', memory, 'overworld'), /亲眼看过/);
   memory.close();
 });

@@ -104,8 +104,8 @@ export type StepVerdict =
   | { kind: 'stuck'; why: string };
 
 /**
- * 一个动作结束后，身体自己能处理的就自己处理（像真人那样“没找到就换个地方找”“没走过去就再走一次”），
- * 处理不了才交给脑子想。返回这段活接下来怎么办。
+ * 一个动作结束后，处理同一动作的短暂失败；需要改变目标或增加探索时交给心智。
+ * 返回这段活接下来怎么办。
  */
 export function afterStep(a: Activity, step: Step, result: SkillResult, durationMs: number, state: AgentState, percept?: Percept): StepVerdict {
   const conditionReached = (): StepVerdict | null => {
@@ -177,17 +177,8 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   a.failures++;
   a.consecutiveFailures++;
   const code = result.failureCode ?? 'ERROR';
-  const args = (step.args ?? {}) as Record<string, unknown>;
-  const target = String(args.block ?? args.animal ?? args.for ?? '');
   const key = `${a.index - 1}:${step.skill}:${code}`;
   if (a.failures >= 5) return { kind: 'stuck', why: `这段活已经失败 ${a.failures} 次了（最近：${result.summary.slice(0, 80)}）` };
-  // 找不到要的东西：先换个地方找找（每段活一次）
-  if (code === 'NOT_FOUND' && target && ['gather', 'hunt', 'collect_seeds', 'forage'].includes(step.skill) && !a.adaptations.includes(`search:${target}`)) {
-    a.adaptations.push(`search:${target}`);
-    a.steps.splice(a.index - 1, 0, { skill: 'explore', args: { until: target.split('|')[0] === 'animal' ? 'animal' : target, distance: 64 } });
-    a.index = Math.max(0, a.index - 1);
-    return { kind: 'continue', adapted: `附近没找到 ${target}，换个方向找找` };
-  }
   if (NEEDS_THOUGHT.has(code)) return { kind: 'stuck', why: result.summary.slice(0, 160) };
   if (RETRYABLE.has(code) && !(step.skill === 'goto' && code === 'PATH_NOT_FOUND') && changed && a.consecutiveFailures === 1 && !a.adaptations.includes(`retry:${key}`)) {
     a.adaptations.push(`retry:${key}`);
@@ -204,7 +195,7 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
     ...(outcome === 'done' ? { completion: a.conditionTriggered ? 'condition' as const : 'steps' as const } : outcome === 'unmet' ? { completion: 'unmet' as const } : {}),
     durationSec: Math.round((Date.now() - a.startedAt) / 1000), gained, lost,
     ...(a.expect ? { expect: a.expect } : {}), ...(a.hypothesis ? { hypothesis: a.hypothesis } : {}),
-    at: Date.now(), signature: signatureOf(a.steps.filter((s) => !(a.adaptations.length && s.skill === 'explore' && (s.args as any)?.distance === 64))),
+    at: Date.now(), signature: signatureOf(a.steps),
     failures: a.failures,
   };
 }

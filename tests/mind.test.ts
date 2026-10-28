@@ -120,27 +120,27 @@ test('手动调用未产生动作的技能仍正常返回成功和 noop 证据',
   assert.equal(outcome.result.data?.noop, true);
 });
 
-test('身体自己应变：没找到换地方找、偶发失败再试一次、缺材料才叫脑子', () => {
+test('找不到目标时交回心智，不自动加探索或改目标', () => {
+  const adapter = new FakeAdapter();
+  for (const skill of ['gather', 'hunt', 'collect_seeds', 'forage']) {
+    const steps = [{ skill, args: { block: 'stone', count: 3 } }, { skill: 'craft', args: { item: 'stone_pickaxe' } }];
+    const a = createActivity({ what: '尝试采集', why: '', kind: 'gather', repeat: 1, steps }, '', 'llm', adapter.state());
+    const s = nextStep(a)!;
+    assert.deepEqual(afterStep(a, s, fail('NOT_FOUND', '当前没有看到目标'), 100, adapter.state()), { kind: 'stuck', why: '当前没有看到目标' });
+    assert.deepEqual(a.steps, steps, '失败不额外加入探索动作');
+    assert.equal(a.results.at(-1)?.summary, '当前没有看到目标');
+  }
+});
+
+test('动作失败后环境改变时可以重试原动作，缺材料交回心智', () => {
   const adapter = new FakeAdapter();
   const a = createActivity({ what: '挖石头', why: '做石镐', kind: 'gather', repeat: 1, steps: [{ skill: 'gather', args: { block: 'stone', count: 3 } }, { skill: 'craft', args: { item: 'stone_pickaxe' } }] }, '', 'llm', adapter.state());
-  const s1 = nextStep(a)!;
-  const v1 = afterStep(a, s1, fail('NOT_FOUND', '看不到石头'), 100, adapter.state());
-  assert.equal(v1.kind, 'continue');
-  assert.match((v1 as any).adapted, /换个方向找/);
-  assert.equal(nextStep(a)!.skill, 'explore');
-  const v2 = afterStep(a, { skill: 'explore' }, ok('找到了'), 100, adapter.state());
-  assert.equal(v2.kind, 'continue');
-  const s3 = nextStep(a)!;
-  assert.equal(s3.skill, 'gather');
-  // explore 之后人已经换了地方：同一目标的失败在新位置值得再试一次
-  for (const r of a.results) if (r.skill === 'gather') r.pos = { x: 99, y: 64, z: 99 };
-  const v3 = afterStep(a, s3, fail('PATH_NOT_FOUND', '路被挡住'), 100, adapter.state());
-  assert.match((v3 as any).adapted, /再试一次/);
+  const s = nextStep(a)!;
+  a.stepStart = { pos: { x: 99, y: 64, z: 99 } };
+  assert.match((afterStep(a, s, fail('PATH_NOT_FOUND', '路被挡住'), 100, adapter.state()) as { adapted?: string }).adapted ?? '', /再试一次/);
   assert.equal(nextStep(a)!.skill, 'gather');
-  afterStep(a, s3, ok('挖到了'), 100, adapter.state());
-  const s5 = nextStep(a)!;
-  const v5 = afterStep(a, s5, fail('MISSING_MATERIALS', '缺木棍'), 100, adapter.state());
-  assert.equal(v5.kind, 'stuck');
+  afterStep(a, s, ok('挖到了'), 100, adapter.state());
+  assert.equal(afterStep(a, nextStep(a)!, fail('MISSING_MATERIALS', '缺木棍'), 100, adapter.state()).kind, 'stuck');
 });
 
 test('routine 可以重复多轮，达到收工条件就提前结束', () => {
@@ -467,6 +467,9 @@ test('最后一步运行一段时间后提前想下一段，结果未知时不�
   const w = fixture(t);
   await w.tick();
   await w.reply(0, { decision: 'new', activity: { what: '砍树', steps: [step()] } });
+  (w.arbiter as any).current.startedAt = Date.now() - 4_000;
+  await w.tick();
+  assert.equal(w.pending.length, 1, '运行四秒时不提前规划');
   (w.arbiter as any).current.startedAt = Date.now() - Mind.NEAR_END_AFTER_MS;
   await w.tick();
   assert.equal(w.pending.length, 2);
@@ -481,6 +484,36 @@ test('最后一步运行一段时间后提前想下一段，结果未知时不�
   await w.tick();
   assert.equal(w.mind.activity?.what, '做工作台');
   assert.deepEqual(w.arbiter.info()?.args, { n: 2 });
+});
+
+test('刚开始动作时普通掉落物暂存，不单独触发瞥一眼', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { decision: 'new', activity: { what: '下行', steps: [step()] } });
+  (w.mind as any).lastThoughtAt = 0;
+  (w.arbiter as any).current.startedAt = Date.now() - 4_000;
+  w.mind.attention.notice('drops:dirt', '地上有泥土掉落物', 0.5, 0);
+  await w.tick();
+  assert.equal(w.pending.length, 1);
+  assert.equal(w.mind.attention.peek().some((n) => n.key === 'drops:dirt'), true);
+  assert.equal(w.arbiter.info()?.skill, 'mind_step');
+  (w.arbiter as any).current.startedAt = Date.now() - Mind.NEAR_END_AFTER_MS;
+  await w.tick();
+  assert.equal(w.pending.length, 2);
+  assert.match(JSON.stringify(w.pending[1].messages), /地上有泥土掉落物/);
+});
+
+test('刚开始动作时紧急通知仍立即思考，也带上暂存的掉落物', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { decision: 'new', activity: { what: '下行', steps: [step()] } });
+  w.mind.attention.notice('drops:dirt', '地上有泥土掉落物', 0.5, 0);
+  w.mind.attention.notice('urgent-test', '附近出现紧急事件', 0.8, 0);
+  await w.tick();
+  assert.equal(w.pending.length, 2);
+  assert.equal(w.pending[1].hint.tier, 'full');
+  assert.match(JSON.stringify(w.pending[1].messages), /地上有泥土掉落物/);
+  assert.match(JSON.stringify(w.pending[1].messages), /附近出现紧急事件/);
 });
 
 test('提前规划没写 next 也不反复追问', async (t) => {
@@ -507,6 +540,24 @@ test('提前规划时动作失败，过期的 next 不会执行，失败交给�
   assert.equal(w.mind.queuedNext, null);
   await w.tick();
   assert.match(JSON.stringify(w.pending.at(-1)!.messages), /缺少斧头/);
+});
+
+test('寻找目标失败时丢弃提前思考，不隐式探索，并把失败交还心智', async (t) => {
+  const w = fixture(t);
+  const original = SKILLS.gather;
+  SKILLS.gather = { ...SKILLS.mind_step, name: 'gather', validate: (raw) => ({ ok: true, args: raw }) };
+  t.after(() => { SKILLS.gather = original; });
+  await w.tick();
+  await w.reply(0, { decision: 'new', activity: { what: '采铁', steps: [{ skill: 'gather', args: { block: 'iron_ore', count: 8 } }] } });
+  (w.arbiter as any).current.startedAt = Date.now() - Mind.NEAR_END_AFTER_MS;
+  await w.tick();
+  await w.finish(fail('NOT_FOUND', '当前视野没有铁矿'));
+  await w.reply(1, { decision: 'experiment', activity: { what: '旧观察的实验', steps: [step(2)] } });
+  assert.equal(w.mind.activity, null);
+  assert.equal(w.mind.queuedNext, null);
+  assert.equal(w.bus.recent().filter((event) => event.type === 'task_start' && event.msg.includes('explore')).length, 0);
+  await w.tick();
+  assert.match(JSON.stringify(w.pending.at(-1)!.messages), /当前视野没有铁矿/);
 });
 
 test('提前规划已排队的 next 在当前动作失败后丢弃', async (t) => {

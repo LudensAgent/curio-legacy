@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { makeBridge } from '../src/codeskills/bridge.ts';
 import { digAt } from '../src/skills/primitives.ts';
+import { deliberateSystem, glanceSystem } from '../src/mind/prompt.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
 
@@ -14,12 +15,19 @@ test('digging an unseen empty cell reports an unconfirmed result to the caller',
   assert.equal(result.status, 'failed');
   assert.equal(result.failureCode, 'NOT_FOUND');
   assert.match(result.summary, /没有发生挖掘.*\(1,64,0\).*未在当前视野/);
+  assert.match(result.summary, /方块状态未知，未确认是空气还是其他方块/);
   assert.match(result.summary, /facing E 只定义坐标方向，不会转头/);
   assert.doesNotMatch(result.summary, /本来就是空/);
   assert.deepEqual(result.data?.targetCell, { x: 1, y: 64, z: 0 });
   const nested = await makeBridge(ctx)('act', ['dig_at', args]) as { ok: boolean };
   assert.equal(nested.ok, false, 'code skills must receive the unsuccessful result');
   assert.deepEqual(adapter.actions, []);
+});
+
+test('both thinking tiers distinguish an unseen cell from confirmed air', () => {
+  for (const system of [deliberateSystem(''), glanceSystem('', new Set())]) {
+    assert.match(system, /未看见的方块状态未知，未挖到不代表那里是空气/);
+  }
 });
 
 test('a visibly empty cell remains a confirmed no-op', async (t) => {

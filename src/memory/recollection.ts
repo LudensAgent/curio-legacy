@@ -25,8 +25,8 @@ export function noteGoneSpots(text: string, memory: Partial<Pick<WorldMemory, 'g
   return text.replace(/\(?(-?\d{1,7}),\s*(-?\d{1,3}),\s*(-?\d{1,7})\)?/g, (match: string, x: string, y: string, z: string, offset: number, whole: string) => {
     if (whole.lastIndexOf('〔历史容器区域：', offset) > whole.lastIndexOf('〕', offset) || /中心\s*$/.test(whole.slice(0, offset))) return match;
     if (whole.slice(offset + match.length).startsWith('〔亲眼看过：')) return match;
-    const gone = memory.goneNear?.(dim, { x: +x, y: +y, z: +z }, 3)[0];
-    return gone ? `${match}〔亲眼看过：这里的 ${gone.label} 已经没了，现在是 ${gone.now}〕` : match;
+    const gone = memory.goneNear?.(dim, { x: +x, y: +y, z: +z }, 0)[0];
+    return gone ? `${match}〔亲眼看过：当时这里的 ${gone.label} 没了，变成 ${gone.now}；观察时间 ${new Date(gone.ts).toISOString()}，历史记录不代表当前状态〕` : match;
   });
 }
 

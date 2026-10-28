@@ -211,7 +211,7 @@ test('Hindsight recall projects legacy container facts without rewriting the rem
   assert.equal(result.memories[0].worldId, adapter.worldId);
   assert.equal(result.memories[0].dimension, 'overworld');
   assert.match(result.memories[0].text, /区域/);
-  assert.match(result.memories[0].text, /lava 已经没了，现在是 obsidian/);
+  assert.match(result.memories[0].text, /当时这里的 lava 没了，变成 obsidian；观察时间 .*，历史记录不代表当前状态/);
   assert.doesNotMatch(result.memories[0].text, /123,67,-234|diamond×64/);
   assert.equal(writes, 0);
 });

@@ -189,7 +189,7 @@ export class Mind {
   private waitingSince: number | null = null;
   /** 干等时无聊到多少就想想“这段时间能做点什么” */
   static BORED_AT = 0.6;
-  static NEAR_END_AFTER_MS = 4000;
+  static NEAR_END_AFTER_MS = 15_000;
   static NEAR_END_REASON = NEAR_END_REASON;
   /** 要命的处境（窒息、被贴身围攻、水下没气）：用“瞥一眼”那档快速拿主意，几秒都等不起 */
   static DANGER_REASON = '有危险，马上拿主意';
@@ -453,7 +453,10 @@ export class Mind {
     // 躲着、等着的时候一般的事不值得爬起来想；但“干等得好无聊”本身就是要想一想的事（无聊让人找新鲜事做）
     const bored = this.attention.peek().some((n) => n.key === 'bored_waiting');
     if (bored && gapOk) return this.think('干等着好无聊，想想这段时间能做点什么', 'deliberate');
-    if (!resting && gapOk && this.attention.highest() >= RECONSIDER) return this.think('注意到了一些事', 'glance');
+    // 刚开始的一步先执行一会儿；普通掉落物暂存到下一次思考，不影响其他注意事项。
+    const youngStep = current?.planId === this.activity.id && Date.now() - current.startedAt < Mind.NEAR_END_AFTER_MS;
+    const reconsider = this.attention.peek().some((n) => n.salience >= RECONSIDER && (!youngStep || !n.key.startsWith('drops:')));
+    if (!resting && gapOk && reconsider) return this.think('注意到了一些事', 'glance');
     // 最后一步仍在执行、结果未知：可以提前想下一段，不把它当成已经完成。
     if (!this.queuedNext && this.nearEndAskedFor !== this.activity.id && current?.planId === this.activity.id
       && remainingSteps(this.activity) === 0 && Date.now() - current.startedAt >= Mind.NEAR_END_AFTER_MS) {

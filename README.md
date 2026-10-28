@@ -219,7 +219,7 @@ Mineflayer 本身知道已加载区块里的每一个方块、墙后的每一只
 
 | 概念 | 说明 | 位置 |
 |---|---|---|
-| **一段活 Activity** | 模型按“几分钟的一件事”来安排：`what/why` + 1–6 步 routine + `repeat` 轮数 + `done_when` 收工条件 + `expect` 预想 + `if_stuck` 备选。身体连续执行，没找到会自己换个方向找、偶发失败会再试一次，真卡住（缺材料/工具、反复失败）才叫脑子 | `mind/activity.ts` |
+| **一段活 Activity** | 模型按“几分钟的一件事”来安排：`what/why` + 1–6 步 routine + `repeat` 轮数 + `done_when` 收工条件 + `expect` 预想 + `if_stuck` 备选。身体连续执行；目标没找到时返回失败，由 Agent 决定下一步，部分偶发失败可在环境变化后重试原动作 | `mind/activity.ts` |
 | **边做边想** | 最后一个动作开始时就“瞥一眼”想下一段，模型可在任何决定里写好 `next`，干完立刻接上；做久了（默认 100 秒）抬头看看；思考期间身体从不停手 | `mind/mind.ts` |
 | **注意力** | 天黑、饿了、掉血、背包满、看见矿/新物品、有人说话、死亡……按显著度分成“记一下 / 边做边重新想 / 立刻认真想” | `mind/attention.ts` |
 | **两档思考** | `glance` 只带此刻要紧的信息，快速给出 continue/adjust/detour/next；需要时模型回 `{"kind":"deliberate"}` 升级为带全部记忆的认真思考。好久没认真想、做完好几段活、情绪到了临界或卡住时自动认真想 | `mind/thinker.ts`、`mind/prompt.ts` |
