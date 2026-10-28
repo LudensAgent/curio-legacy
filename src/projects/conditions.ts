@@ -42,9 +42,14 @@ export function validateCondition(raw: unknown, adapter: Pick<GameAdapter, 'isKn
     if (!known && !observed) throw new Error('位置必须来自当前观测或同一世界内已有的可信记忆');
     return { type: 'location_near', dimension: raw.dimension, pos: { x: raw.pos.x, y: raw.pos.y, z: raw.pos.z }, radius: raw.radius, ...(raw.landmarkId ? { landmarkId: String(raw.landmarkId) } : {}) };
   }
-  if (raw.type === 'all_of') {
-    if (!Array.isArray(raw.conditions) || !raw.conditions.length || raw.conditions.length > 16) throw new Error('all_of 须包含 1–16 个条件');
-    const condition: Condition = { type: 'all_of', conditions: raw.conditions.map((c: unknown) => validateCondition(c, adapter, memory, state, depth + 1)) };
+  if (raw.type === 'inventory_full') {
+    const free = raw.free_slots ?? raw.freeSlots ?? 0;
+    if (!finite(free, 0, 35) || !Number.isInteger(free)) throw new Error('inventory_full 的 free_slots 须为 0–35 的整数');
+    return { type: 'inventory_full', free_slots: free };
+  }
+  if (raw.type === 'all_of' || raw.type === 'any_of') {
+    if (!Array.isArray(raw.conditions) || !raw.conditions.length || raw.conditions.length > 16) throw new Error(`${raw.type} 须包含 1–16 个条件`);
+    const condition: Condition = { type: raw.type, conditions: raw.conditions.map((c: unknown) => validateCondition(c, adapter, memory, state, depth + 1)) };
     if (JSON.stringify(condition).length > 12_000) throw new Error('验收条件过大');
     return condition;
   }
@@ -80,7 +85,7 @@ export function validateCondition(raw: unknown, adapter: Pick<GameAdapter, 'isKn
 export function observeCondition(condition: Condition, senses?: Pick<Senses, 'observeBlocks'>): BlockObservation[] {
   const targets = new Map<string, Vec3Like>();
   const visit = (c: Condition) => {
-    if (c.type === 'all_of') c.conditions.forEach(visit);
+    if (c.type === 'all_of' || c.type === 'any_of') c.conditions.forEach(visit);
     else if (c.type === 'block_state' && targets.size < 32) targets.set(JSON.stringify(c.pos), c.pos);
   };
   visit(condition);
@@ -94,6 +99,11 @@ export function evaluateCondition(condition: Condition, state: AgentState, world
     const count = state.inventory.filter((i) => i.name === condition.item).reduce((sum, i) => sum + i.count, 0);
     if (!Number.isFinite(count) || count < 0) return { status: 'unknown', actual: null, reason: '背包数量无效' };
     return { status: count >= condition.count ? 'satisfied' : 'unsatisfied', actual: { item: condition.item, count, required: condition.count, missing: Math.max(0, condition.count - count) } };
+  }
+  if (condition.type === 'inventory_full') {
+    const free = state.emptySlots;
+    if (!Number.isFinite(free) || free < 0) return { status: 'unknown', actual: null, reason: '背包空格数无效' };
+    return { status: free <= condition.free_slots ? 'satisfied' : 'unsatisfied', actual: { emptySlots: free, required: condition.free_slots } };
   }
   if (condition.type === 'location_near') {
     const distance = dist3(state.pos, condition.pos);
@@ -129,6 +139,7 @@ export function evaluateCondition(condition: Condition, state: AgentState, world
     return { status: matches ? 'satisfied' : 'unsatisfied', actual: observed };
   }
   const children = condition.conditions.map((c) => evaluateCondition(c, state, worldId, observations, percept));
+  if (condition.type === 'any_of') return { status: children.some((r) => r.status === 'satisfied') ? 'satisfied' : children.some((r) => r.status === 'unknown') ? 'unknown' : 'unsatisfied', actual: children };
   return { status: children.every((r) => r.status === 'satisfied') ? 'satisfied' : children.some((r) => r.status === 'unknown') ? 'unknown' : 'unsatisfied', actual: children };
 }
 
@@ -137,6 +148,11 @@ export function conditionDeficit(condition: Condition, state: AgentState, worldI
   if (!observationReady(state) || state.worldId !== worldId) return null;
   if (condition.type === 'inventory_min') return Math.max(0, condition.count - state.inventory.filter((i) => i.name === condition.item).reduce((n, i) => n + i.count, 0)) / condition.count;
   if (condition.type === 'location_near') return state.dim === condition.dimension ? Math.max(0, dist3(state.pos, condition.pos) - condition.radius) : null;
+  if (condition.type === 'inventory_full') return Number.isFinite(state.emptySlots) ? Math.max(0, state.emptySlots - condition.free_slots) / 36 : null;
+  if (condition.type === 'any_of') {
+    const deficits = condition.conditions.map((c) => conditionDeficit(c, state, worldId, observations, percept)).filter((n): n is number => n !== null);
+    return deficits.length ? Math.min(...deficits) : null;
+  }
   if (condition.type !== 'all_of') {
     const result = evaluateCondition(condition, state, worldId, observations, percept);
     return result.status === 'unknown' ? null : result.status === 'satisfied' ? 0 : 1;

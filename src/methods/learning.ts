@@ -164,7 +164,7 @@ export function bindRelative(cond: unknown, state: Pick<AgentState, 'inventory'>
     const gain = Number.isInteger(c.count) && c.count >= 1 ? Math.min(2304, c.count) : 1;
     return { type: 'inventory_min', item: c.item, count: Math.min(2304, held + gain) };
   }
-  if (c.type === 'all_of' && Array.isArray(c.conditions)) return { ...c, conditions: c.conditions.map((x: unknown) => bindRelative(x, state, depth + 1)) };
+  if ((c.type === 'all_of' || c.type === 'any_of') && Array.isArray(c.conditions)) return { ...c, conditions: c.conditions.map((x: unknown) => bindRelative(x, state, depth + 1)) };
   return cond;
 }
 

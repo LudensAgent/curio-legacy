@@ -34,7 +34,7 @@ function normalizeDoneWhen(raw: unknown, depth = 0): unknown {
   const selfFields = ['held', 'riding', 'inWater', 'inLava', 'onGround', 'sky_visible', 'underground'];
   const fieldName = (field: unknown) => typeof field === 'string' ? aliases[field] ?? field : undefined;
   if (o.type === undefined) {
-    if (Array.isArray(o.conditions)) o.type = 'all_of';
+    if (Array.isArray(o.conditions)) o.type = o.any === true || o.mode === 'any' ? 'any_of' : 'all_of';
     else if (o.slot !== undefined && o.item !== undefined) o.type = 'equipment';
     else if (o.item !== undefined && o.count !== undefined) o.type = 'inventory_min';
     else if (o.pos !== undefined && o.radius !== undefined) o.type = 'location_near';
@@ -69,7 +69,8 @@ function normalizeDoneWhen(raw: unknown, depth = 0): unknown {
   }
   if ((o.type === 'sky_visible' || o.type === 'underground'
     || o.type === 'self_state' && ['inWater', 'inLava', 'onGround'].includes(o.field)) && ['true', 'false'].includes(o.equals)) o.equals = o.equals === 'true';
-  if (o.type === 'all_of' && Array.isArray(o.conditions)) o.conditions = o.conditions.map((c: unknown) => normalizeDoneWhen(c, depth + 1));
+  if (o.type === 'inventory_full' && o.free_slots === undefined) o.free_slots = o.freeSlots ?? o.slots ?? o.count ?? 0;
+  if ((o.type === 'all_of' || o.type === 'any_of') && Array.isArray(o.conditions)) o.conditions = o.conditions.map((c: unknown) => normalizeDoneWhen(c, depth + 1));
   return o;
 }
 

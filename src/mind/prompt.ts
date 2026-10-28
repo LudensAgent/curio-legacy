@@ -56,6 +56,8 @@ export interface MindContext {
   openedSkill?: { name: string; body: string };
   /** 刚才卡住、随后在同一带做成：值得写成技能 */
   learnFrom?: { stuck: { what: string; why: string; skill?: string; code?: string }; solved: { what: string; routine: string[] } };
+  /** 这一趟下地：下来多久、背包多了什么、是不是手上的活快收工了（给“下矿的账”） */
+  trip?: { minutes: number; gained: Record<string, number>; nearEnd: boolean };
   /** 主目标和清单 */
   plan?: FocusPlan | null;
   /** 阶段回顾：情绪或回想提醒它停下来看这一阶段在做什么（有这一项时才允许换主目标） */
@@ -105,7 +107,7 @@ export function moveDetails(names: string[]): string {
 }
 
 const CONDITIONS = `done_when 的写法（可选，写错会被忽略）：
-{"type":"inventory_min","item":"oak_log","count":20}｜{"type":"location_near","dimension":"overworld","pos":{"x":0,"y":64,"z":0},"radius":4}（坐标要来自观察或地标）｜{"type":"self_state","field":"inWater|inLava|onGround","equals":false}｜{"type":"self_state","field":"held|riding","equals":"物品名或 null"}｜{"type":"sky_visible","equals":true}｜{"type":"underground","equals":false}｜{"type":"equipment","slot":"hand","item":"stone_pickaxe"}｜{"type":"all_of","conditions":[…]}
+{"type":"inventory_min","item":"oak_log","count":20}｜{"type":"location_near","dimension":"overworld","pos":{"x":0,"y":64,"z":0},"radius":4}（坐标要来自观察或地标）｜{"type":"self_state","field":"inWater|inLava|onGround","equals":false}｜{"type":"self_state","field":"held|riding","equals":"物品名或 null"}｜{"type":"sky_visible","equals":true}｜{"type":"underground","equals":false}｜{"type":"equipment","slot":"hand","item":"stone_pickaxe"}｜{"type":"inventory_full","free_slots":2}（背包只剩 2 格空）｜{"type":"all_of","conditions":[…]}｜{"type":"any_of","conditions":[…]}（哪个先到就收工：“铁够 24 个，或背包装满”）
 写开工时还不成立、做完才成立的事（往下躲进地里 → {"type":"underground","equals":true}）；开工前就成立的条件会被当成没写。`;
 
 const OUTPUT = `只输出一个 JSON 对象：
@@ -170,7 +172,8 @@ repeat 每轮重做整套 steps：火把别写进重复的 steps，用 habits.to
 const EXAMPLE = `【例子】想有个家时：
 → {"kind":"design","brief":"湖边能住的小屋，云杉木，放得下床、箱子和工作台"}
 ← 已经请建筑师去画了……画好会告诉你
-→ {"monologue":"图纸要等一会儿，先去砍云杉攒木板，碰到羊顺手打。","decision":"new","activity":{"what":"砍够 12 根云杉原木","why":"盖小屋缺木板","kind":"gather","steps":[{"skill":"gather","args":{"block":"spruce_log","count":12}},{"skill":"hunt","args":{"animal":"sheep"},"optional":true}],"done_when":{"type":"inventory_min","item":"spruce_log","count":12}}}`;
+→ {"monologue":"图纸要等一会儿，先去砍云杉攒木板。小屋大概要 12 根，砍 20 根，省得工具、门、箱子再跑一趟；碰到羊顺手打。","decision":"new","activity":{"what":"砍 20 根云杉原木","why":"盖小屋缺木板，多备几根做工具和箱子","kind":"gather","steps":[{"skill":"gather","args":{"block":"spruce_log","count":20}},{"skill":"hunt","args":{"animal":"sheep"},"optional":true}],"done_when":{"type":"inventory_min","item":"spruce_log","count":20}}}
+下矿时同理：来一趟不容易，顺手的矿加 "optional":true 的 gather，done_when 用 any_of 写“够用 + 余量，或背包装满”。`;
 
 export function deliberateSystem(persona: string, skills: string[] = [], advanced = false): string {
   return `${persona}
@@ -280,6 +283,21 @@ export function situationalReminders(ctx: MindContext): string[] {
         ? `你现在就在自己${t.text.replace(/^挖过的通道：/, '挖过的通道里：')}；顺着走比重新挖省事：goto 通道里的坐标或设施会自己沿记下的路线一段段走，不用一格格挖`
         : `你${t.text}：${dy > 4 ? `${digVsWalk(dy, t.dist)}。` : ''}goto 入口会顺着记下的路线走下去；要去的地方离这条通道远，再就地新挖`);
     }
+  }
+  // 下矿的账：在地下、手上的活快收工或想回地面时，把这一趟的成本和身边还剩的矿摆出来（真人多挖几组是因为知道“再来一趟更贵”）；多挖不多挖它自己定
+  const trip = ctx.trip;
+  if (trip && trip.minutes >= 1.5 && (trip.nearEnd || !ctx.activity || SURFACE_INTENT.test(intent)) && (p.self.where?.kind === 'underground' || p.self.sky_visible === false)) {
+    const got = Object.entries(trip.gained).filter(([k]) => /raw_|_ore$|coal|diamond|emerald|lapis|redstone|amethyst|obsidian|debris|flint|gold_nugget|quartz/.test(k)).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, n]) => `${k}×${n}`);
+    const seen = p.nearby.resources.filter((r) => r.seen === 'now' && isResourceBlock(r.block)).sort((a, b) => a.nearest - b.nearest).slice(0, 4).map((r) => `${r.block}×${r.count}（最近 ${Math.round(r.nearest)} 格）`);
+    const remembered = oreSpotsNear(ctx.memory.landmarks(), { worldId: s.worldId, dim: p.self.dim, pos: here }, { radius: 48 }).length;
+    const picks = s.inventory.filter((i) => i.name.endsWith('_pickaxe') && i.durability).map((i) => `${i.name} 剩 ${Math.round(((i.durabilities?.[0] ?? i.durability!.left) / i.durability!.max) * 100)}%`);
+    const depth = p.self.depth_below_surface ?? 0;
+    const back = (() => {
+      const t = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).find((f) => f.inside);
+      if (t) { const walkSec = Math.round((Math.hypot(t.pos.x - here.x, t.pos.y - here.y, t.pos.z - here.z) * 1.5) / 4); return `沿通道走回入口约 ${walkSec < 90 ? `${walkSec} 秒` : `${Math.round(walkSec / 60)} 分钟`}`; }
+      return depth >= 6 ? `挖台阶回地面约 ${Math.round(depth * 3)} 格（约 ${Math.max(1, Math.round(depth * 3 / 60))} 分钟）` : '';
+    })();
+    out.push(`下矿的账：这趟下来 ${Math.round(trip.minutes)} 分钟${got.length ? `，挖到 ${got.join(' ')}` : '，还没挖到矿'}；背包空 ${p.emptySlots} 格${picks.length ? `；${picks.join('、')}` : ''}；身边${seen.length ? `看得见 ${seen.join('、')}` : '没看见矿'}${remembered ? `，48 格内记得 ${remembered} 处矿点` : ''}${back ? `；${back}，再下来一趟也差不多这个价` : ''}。清单后面几项还要不要这些料，一起掂量再决定收不收工`);
   }
   // 人在自己挖过的通道里、想回地面：原路就是现成的出口
   if (SURFACE_INTENT.test(intent) && p.self.sky_visible !== true) {

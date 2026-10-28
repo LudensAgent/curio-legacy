@@ -208,6 +208,8 @@ export class Mind {
   /** 上一次卡住的事，和随后在同一带做成的事：提醒模型把管用的做法写成技能 */
   private lastStuck: { what: string; why: string; pos: AgentState['pos']; at: number; skill?: string; code?: string } | null = null;
   private learnFrom: { stuck: NonNullable<Mind['lastStuck']>; solved: { what: string; routine: string[] } } | null = null;
+  /** 这一趟下地：从哪一刻起头顶没了天空、当时背包有什么。回到地面就清掉（给“下矿的账”算这趟花了多久、挖到了什么） */
+  private trip: { since: number; inventory: Record<string, number> } | null = null;
   private skillOpenedAt = new Map<string, number>();
 
   constructor(private d: MindDeps) {
@@ -879,6 +881,7 @@ export class Mind {
     if (!observationReady(state)) return;
     let percept: Percept;
     try { percept = this.d.perception.update(); } catch { return; }
+    this.trackTrip(percept, state);
     const generation = this.generation;
     const controller = new AbortController();
     const activityId = this.activity?.id ?? null;
@@ -918,6 +921,7 @@ export class Mind {
       skills: this.safe(() => this.d.thinker.skillBook?.index((n) => !!this.d.behaviors?.inactive(n)) ?? [], []),
       stuckHere: this.progressing() ? null : stuckHere(this.recentEnds, state.pos),
       recalled, ...(openedSkill ? { openedSkill } : {}), ...(learnFrom ? { learnFrom } : {}), plan,
+      ...(this.trip ? { trip: { minutes: (Date.now() - this.trip.since) / 60_000, gained: diffInventory(this.trip.inventory, inventoryOf(state)).gained, nearEnd: reason === Mind.NEAR_END_REASON } } : {}),
       ...(reviewing ? { stageReview: this.safe(() => this.stageReviewFacts(), { why: this.review?.why ?? '' }) } : {}),
       ...(this.d.behaviors && tier === 'deliberate' ? { learnedSkills: this.safe(() => this.d.behaviors!.overview().filter((l) => !/已收起|已停用/.test(l)), []), instincts: this.safe(() => instinctNote(), '') } : {}),
       ...(this.d.thinker.designing ? { designing: { brief: this.d.thinker.designing.brief, minutes: Math.round((Date.now() - this.d.thinker.designing.startedAt) / 60_000) } } : {}),
@@ -1178,6 +1182,14 @@ export class Mind {
   }
 
   /** 阶段回顾想完了：记下结果（换了，还是接着做），隔一阵才会再回顾 */
+  /** 下地那一刻记一笔；看见天空就算这趟结束 */
+  private trackTrip(p: Percept, state: AgentState) {
+    const below = p.self.where?.kind === 'underground' || p.self.where?.kind === 'pit' && (p.self.depth_below_surface ?? 0) >= 4
+      || p.self.sky_visible === false && (p.self.depth_below_surface ?? 0) >= 6;
+    if (below) { if (!this.trip) this.trip = { since: Date.now(), inventory: inventoryOf(state) }; }
+    else if (p.self.sky_visible === true || p.self.where?.kind === 'surface') this.trip = null;
+  }
+
   private closeReview(goalBefore: string | null) {
     const after = this.d.self.plan();
     const switched = !!after && after.agendaId !== goalBefore;

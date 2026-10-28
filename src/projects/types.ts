@@ -9,7 +9,11 @@ export type Condition =
   | { type: 'underground'; equals: boolean }
   | { type: 'equipment'; slot: 'hand' | 'off-hand' | 'head' | 'torso' | 'legs' | 'feet'; item: string | null }
   | { type: 'block_state'; dimension: string; pos: Vec3Like; name?: string; properties?: Record<string, string | number | boolean> }
-  | { type: 'all_of'; conditions: Condition[] };
+  /** 背包装满了（或只剩 free_slots 格空）：“挖到背包差不多满再上来”这种收工方式 */
+  | { type: 'inventory_full'; free_slots: number }
+  | { type: 'all_of'; conditions: Condition[] }
+  /** 哪个先成立就算成立：“铁够 20 个或背包满” */
+  | { type: 'any_of'; conditions: Condition[] };
 
 export type EvidenceStatus = 'satisfied' | 'unsatisfied' | 'unknown';
 
