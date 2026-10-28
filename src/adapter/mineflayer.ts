@@ -2874,7 +2874,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         } else drySince = null;
         // A brief breach of the water surface is not a landing. Keep ascending
         // until there is actual support, then release jump and let the body settle.
-        b.setControlState('jump', !dry);
+        // 只在水里按跳（上浮、借撞岸的那一下爬上去）。人已经出水、只是还没落稳时还按着，落地那一刻又起跳，
+        // 就会在岸上一下一下地跳个不停，一直跳到超时
+        b.setControlState('jump', !dry && (!!b.entity.isInWater || headUnder()));
         b.setControlState('sprint', false);
         if (!destination && opts.observeShore && Date.now() >= nextObservation) {
           destination = opts.observeShore();
@@ -2885,6 +2887,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           // Keep jump held while turning and refreshing the view; separate
           // jump/scan actions let the player sink during every camera turn.
           await this.afterAction(() => b.look(b.entity.yaw + Math.PI / 2, -0.1, true), check);
+    const headUnder = () => water(b.blockAt(b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0)));
           nextTurn = Date.now() + 1000;
         }
         const p = b.entity.position;
