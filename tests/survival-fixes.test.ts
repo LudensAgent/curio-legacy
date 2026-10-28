@@ -222,10 +222,11 @@ test('光照：露天白天读出 0 当作数据不可信；地下有顶的暗�
   const started: any[] = [];
   const arbiter: any = { paused: false, info: () => null, start: (step: any) => { started.push(step); return {}; }, cancel() {} };
   w.removed.clear(); w.blocks = []; w.inv.set('torch', 8);
-  new Reflex(w, arbiter, bus, { perceivedEntities: () => [], knownBlocks: () => [], refresh() {}, markSweep() {} }).tick();
+  const habits = () => ({ torch_every: 8 });
+  new Reflex(w, arbiter, bus, { perceivedEntities: () => [], knownBlocks: () => [], refresh() {}, markSweep() {} }, { habits }).tick();
   assert.ok(!started.some((s) => s.skill === 'place_torch'), '露天不插');
   cave.inv.set('torch', 8);
-  new Reflex(cave, arbiter, bus, { perceivedEntities: () => [], knownBlocks: () => [], refresh() {}, markSweep() {} }).tick();
+  new Reflex(cave, arbiter, bus, { perceivedEntities: () => [], knownBlocks: () => [], refresh() {}, markSweep() {} }, { habits }).tick();
   assert.ok(started.some((s) => s.skill === 'place_torch'), '地下暗处才插');
 });
 

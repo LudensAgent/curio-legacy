@@ -103,7 +103,7 @@ test('gather 不去挖水下的方块（看得见也不去）', async () => {
   assert.equal(adapter.inv.get('iron_ore') ?? 0, 0);
 });
 
-test('自动插火把：地下暗处顺手插火把，被打断的计划步骤继续且不消耗重试次数', async () => {
+test('地下探索期间不会自动插火把或抢占计划步骤', async () => {
   const { adapter, events, arbiter, reflex } = setup();
   adapter.pos = { x: 0, y: 55, z: 0 };
   for (let x = -20; x <= 20; x++) for (const y of [55, 56]) adapter.removed.add(`${x},${y},0`);
@@ -117,8 +117,8 @@ test('自动插火把：地下暗处顺手插火把，被打断的计划步骤�
   reflex.stop();
   arbiter.cancel('end');
   await sleep(100);
-  assert.ok(events.some((e) => e.type === 'reflex' && e.msg.includes('火把')), '应顺手插火把');
-  assert.ok(adapter.blocks.some((b) => b.name === 'torch'));
+  assert.ok(!events.some((e) => e.type === 'reflex' && e.msg.includes('火把')), '探索不会被照明抢占');
+  assert.ok(!adapter.blocks.some((b) => b.name === 'torch'));
   const interrupted = outcomes.find((o) => o.task.skill === 'explore' && o.preemptedBy === 'reflex');
-  assert.equal(interrupted?.gentle, true, '插火把属于轻量打断');
+  assert.equal(interrupted, undefined);
 });
