@@ -25,7 +25,11 @@ function setup() {
 
 test('a recovery skill that keeps failing is mostly handed back to the mind instead of being run again', () => {
   const engine = setup(), now = Date.now();
-  for (const n of ['lower-but-works', 'high-but-useless']) Object.assign(engine.statsOf(n)!, { ok: 2, fail: 20 }); // 历史上老失败（还没被停用）
+  ['lower-but-works', 'high-but-useless'].forEach((name) => {
+    const stats = engine.statsOf(name)!;
+    Object.assign(stats, { ok: 2, fail: 20 });
+    stats.byVersion![engine.versionOf(engine.get(name)!)] = { ok: 2, fail: 20 }; // 当前版本老失败（还没被停用）
+  });
   assert.equal(engine.recoveryFor(failure, new Set(), now), null, '成功机会抽到一成多：交给心智');
   let draw = 0; engine.rand = () => (draw++ < 2 ? 0.999 : 0.001); // 抽样偶尔抽到高的：照样给它机会（不判死刑）
   assert.ok(engine.recoveryFor(failure, new Set(), now + BehaviorEngine.RECOVERY_MISS_MS + 10_000));

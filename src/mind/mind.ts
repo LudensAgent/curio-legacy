@@ -9,6 +9,7 @@ import { DAWN_TICK, durationText, realSecondsToTicks, ticksUntil, type Perceptio
 import type { MySkillInfo } from '../planner/prompt.ts';
 import { evaluateCondition, observationReady } from '../projects/conditions.ts';
 import { SKILLS } from '../skills/index.ts';
+import { worldPoint } from '../skills/recovery.ts';
 import { causeName } from '../brain/habits.ts';
 import { pickFuel } from '../skills/economy.ts';
 import { pickVariant } from '../skills/work.ts';
@@ -96,13 +97,14 @@ const QUICK = new Set(['craft', 'eat', 'place_torch', 'pickup_items', 'equip', '
  * （比如 goto "NW 20" 实际要去的那一格）和失败时人在哪——以前只有一句话，恢复技能和它的核对都“没有目标坐标”
  */
 export function failureFor(step: { skill: string; args?: unknown }, result: { failureCode?: string | null; summary: string; data?: unknown }, pos: { x: number; y: number; z: number }) {
-  const d = (result.data ?? {}) as Record<string, any>;
-  const xyz = (v: any) => v && [v.x, v.y, v.z].every((n) => Number.isFinite(Number(n))) ? { x: Math.round(Number(v.x) * 10) / 10, y: Math.round(Number(v.y) * 10) / 10, z: Math.round(Number(v.z) * 10) / 10 } : undefined;
-  const target = xyz(d.target) ?? xyz(d.targetCell) ?? xyz(d.pos) ?? xyz(d.blockTarget?.pos);
+  const d = result.data && typeof result.data === 'object' ? result.data as Record<string, unknown> : {};
+  const blockTarget = d.blockTarget && typeof d.blockTarget === 'object' ? d.blockTarget as Record<string, unknown> : {};
+  const target = worldPoint(d.targetCell) ?? worldPoint(d.target) ?? worldPoint(blockTarget.pos) ?? (step.skill === 'dig' ? worldPoint(d.pos) : undefined);
   return {
     skill: step.skill, args: step.args ?? {}, code: result.failureCode ?? null, summary: result.summary.slice(0, 160),
-    ...(target ? { target } : {}),
-    position: xyz(d.position) ?? xyz(pos)!,
+    ...(target ? { target, coordinateFrame: 'world' } : {}),
+    ...(Number.isSafeInteger(d.targetId ?? d.entityId) ? { entityId: Number(d.targetId ?? d.entityId) } : {}),
+    position: worldPoint(d.position) ?? { ...pos },
     ...(d.waterAhead !== undefined ? { waterAhead: !!d.waterAhead } : {}),
   };
 }

@@ -121,11 +121,22 @@ export class SkillBook {
   get(name: string): KnowSkill | undefined { return this.skills.get(name) ?? this.candidates.get(name); }
   candidate(name: string): KnowSkill | undefined { return this.candidates.get(name); }
   pending(): KnowSkill[] { return [...this.candidates.values()]; }
-  promote(name: string): boolean {
+  versionCeiling(name: string): number {
+    const current = this.skills.get(name), candidate = this.candidates.get(name);
+    const file = current?.file ?? candidate?.file;
+    const directory = file ? path.join(path.dirname(file), 'versions') : this.selfDir ? path.join(this.selfDir, name, 'versions') : null;
+    const archived = directory && fs.existsSync(directory) ? fs.readdirSync(directory).flatMap((entry) => {
+      const matched = /^v([1-9]\d*)\.(?:json|js)$/.exec(entry);
+      return matched ? [Number(matched[1])] : [];
+    }) : [];
+    return Math.max(0, Number((current?.behavior as Record<string, unknown> | undefined)?.version) || (current?.behavior ? 1 : 0),
+      Number((candidate?.behavior as Record<string, unknown> | undefined)?.version) || 0, ...archived);
+  }
+  promote(name: string, previousVersion?: number): boolean {
     const candidate = this.candidates.get(name);
     if (!candidate) return false;
     const behavior = { ...candidate.behavior as Record<string, unknown>, candidate: undefined };
-    const r = this.write(name, candidate.description, candidate.body, behavior, { version: Number((candidate.behavior as Record<string, unknown>).version) });
+    const r = this.write(name, candidate.description, candidate.body, behavior, { version: Number((candidate.behavior as Record<string, unknown>).version), previousVersion });
     if (!r.ok) return false;
     return true;
   }
@@ -135,7 +146,7 @@ export class SkillBook {
   }
 
   /** 写一份自己的技能（或修订自己写过的）；不能改内置技能。behavior 是已经校验过的触发条件和步骤 */
-  write(name: string, description: string, body: string, behavior?: unknown, opts: { candidate?: boolean; version?: number } = {}): { ok: true; skill: KnowSkill; created: boolean } | { ok: false; error: string } {
+  write(name: string, description: string, body: string, behavior?: unknown, opts: { candidate?: boolean; version?: number; previousVersion?: number } = {}): { ok: true; skill: KnowSkill; created: boolean } | { ok: false; error: string } {
     if (!this.selfDir) return { ok: false, error: '没有地方保存自己写的技能' };
     const n = normalizeSkillName(name);
     if (!NAME.test(n)) return { ok: false, error: '技能名只能用小写英文、数字和连字符（2–41 个字符）' };
@@ -145,9 +156,8 @@ export class SkillBook {
     let text = body.replace(/\r\n/g, '\n').replace(BEHAVIOR_BLOCK, '').trim().slice(0, 6000);
     // 代码单独存成 code.js（换下来的旧版本留在 versions/ 里，退回时用）
     const code = hasCode(behavior) ? String((behavior as Record<string, unknown>).code) : null;
-    const previousVersion = (prev?.behavior as Record<string, unknown> | undefined)?.version;
-    const pendingVersion = (this.candidates.get(n)?.behavior as Record<string, unknown> | undefined)?.version;
-    const version = opts.version ?? Math.max(Number(previousVersion) || 0, Number(pendingVersion) || 0) + 1;
+    const previousVersion = opts.previousVersion ?? (Number((prev?.behavior as Record<string, unknown> | undefined)?.version) || 1);
+    const version = opts.version ?? Math.max(this.versionCeiling(n), prev?.behavior ? previousVersion : 0) + 1;
     const definition = behavior && typeof behavior === 'object' ? { ...behavior, version, ...(opts.candidate ? { candidate: true } : {}) } : undefined;
     const meta = code ? { ...definition, code: undefined, code_file: 'code.js' } : definition;
     if (meta !== undefined) text = `${text}${text ? '\n\n' : ''}\`\`\`behavior\n${JSON.stringify(meta, null, 1)}\n\`\`\``;
@@ -171,12 +181,13 @@ export class SkillBook {
     const file = path.join(dir, 'SKILL.md');
     if (prev?.behavior) {
       fs.mkdirSync(path.join(dir, 'versions'), { recursive: true });
-      fs.writeFileSync(path.join(dir, 'versions', `v${Number(previousVersion) || 1}.json`), JSON.stringify(prev, null, 1));
+      const snapshot = { ...prev, behavior: { ...prev.behavior as Record<string, unknown>, version: previousVersion } };
+      fs.writeFileSync(path.join(dir, 'versions', `v${previousVersion}.json`), JSON.stringify(snapshot, null, 1));
     }
     if (code) {
       const codeFile = path.join(dir, 'code.js');
       const old = fs.existsSync(codeFile) ? fs.readFileSync(codeFile, 'utf8') : hasCode(prev?.behavior) ? String((prev!.behavior as any).code) : null;
-      if (old !== null && version! > 1) { fs.mkdirSync(path.join(dir, 'versions'), { recursive: true }); fs.writeFileSync(path.join(dir, 'versions', `v${version! - 1}.js`), old); }
+      if (old !== null && prev?.behavior) { fs.mkdirSync(path.join(dir, 'versions'), { recursive: true }); fs.writeFileSync(path.join(dir, 'versions', `v${previousVersion}.js`), old); }
       fs.writeFileSync(codeFile, code);
     } else if (fs.existsSync(path.join(dir, 'code.js'))) {
       fs.unlinkSync(path.join(dir, 'code.js'));

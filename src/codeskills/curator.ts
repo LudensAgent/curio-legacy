@@ -75,7 +75,7 @@ export class SkillCurator {
   start() { this.timer = setInterval(() => void this.check(), this.opts.checkMs); this.timer.unref?.(); }
   stop() { if (this.timer) clearInterval(this.timer); this.timer = null; }
 
-  private active() { return this.engine.list().filter((b) => b.source === 'self' && !this.engine.statsOf(b.name)?.retired); }
+  private active() { return this.engine.list().filter((b) => b.source === 'self' && this.engine.enabled(b)); }
 
   /** 收起长期用不上的自己写的技能（不需要模型） */
   retireUnused(now = Date.now()): string[] {
@@ -252,7 +252,7 @@ export class SkillCurator {
       for (const r of Array.isArray(raw.rollback) ? raw.rollback.slice(0, 4) : []) {
         const name = String(r?.name ?? ''), to = Math.floor(Number(r?.to));
         const b = this.engine.get(name);
-        if (!names.has(name) || !b?.code || !(to >= 1) || to >= (b.version ?? 1)) continue;
+        if (!names.has(name) || !b || !(to >= 1) || to >= (b.version ?? 1)) continue;
         const old = this.book?.definitionVersion(name, to);
         if (!old) { errors.push(`${name} 没有 v${to} 的完整技能快照`); continue; }
         // 两个版本都要跑够几次才比：凭一两次的结果退回，只会让版本号越涨越多、没有一个版本攒够经验
@@ -262,7 +262,7 @@ export class SkillCurator {
         const w = this.engine.rollback(name, to, `整理时退回 v${to}：${why}`);
         if (!w.ok) { errors.push(`${name} 退回失败：${w.error}`); continue; }
         done.push(`${name} 退回 v${to}`);
-        this.bus.publish('skill_rollback', 'P2', `整理技能：「${name}」v${b.version ?? 1} 不如 v${to}，退回旧代码（现在是 v${w.version}）：${why}`, { name, from: b.version ?? 1, to, by: 'curator' });
+        this.bus.publish('skill_rollback', 'P2', `整理技能：「${name}」v${b.version ?? 1} 不如 v${to}，恢复完整契约（现在是 v${w.version}）：${why}`, { name, from: b.version ?? 1, to, by: 'curator' });
       }
       for (const r of Array.isArray(raw.improve) ? raw.improve.slice(0, 3) : []) {
         const name = String(r?.name ?? '');

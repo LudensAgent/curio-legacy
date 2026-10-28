@@ -4,6 +4,7 @@ import { evalPredicate, senseNow, type Predicate } from '../mind/predicate.ts';
 import { throwIfAborted } from '../util.ts';
 import { dirName } from '../perception/perception.ts';
 import { SKILLS } from './index.ts';
+import { constrainRecoveryAction, recoveryContext, type RecoveryContext } from './recovery.ts';
 import { fail, isAbort, obj, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 
 /** use_skill 只需要按名字取出步骤；注册表由 main 设置（行为引擎） */
@@ -20,7 +21,7 @@ export function setBehaviorRegistry(r: BehaviorLookup | null) { registry = r; }
  * 照着自己写的技能一步步做（技能书里带动作步骤的那种）。
  * 每一步开工前当场判断它的 if 条件；参数在开工时重新校验（朝向、坐标按当时站的位置算）。
  */
-export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<string, unknown>; failure?: Record<string, unknown> }> = {
+export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<string, unknown>; failure?: RecoveryContext }> = {
   name: 'use_skill',
   description: '用技能书里会动手的技能：带步骤的一步步做，代码技能在沙箱里运行（args 原样交给代码）',
   argsDoc: '{"name":"技能名","trial"?:true（显式试用尚未启用的候选版本）,"args"?:{给代码技能的参数}}',
@@ -42,7 +43,8 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
     const flat = Object.fromEntries(Object.entries(a).filter(([k]) => !['name', 'skill', 'args', 'failure', 'trial'].includes(k)));
     if (Object.keys(flat).length) extra = { ...flat, ...(extra ?? {}) };
     if (extra && JSON.stringify(extra).length > 2000) return { ok: false, error: 'args 太大了' };
-    const failure = a.failure && typeof a.failure === 'object' ? a.failure as Record<string, unknown> : undefined;
+    const failure = a.failure === undefined ? undefined : recoveryContext(a.failure);
+    if (failure && 'error' in failure) return { ok: false, error: failure.error };
     // 技能声明了要哪些参数：调用时没给就当场说清楚，别让代码跑到一半才报错
     const needs = registry?.get(name, trial)?.needs;
     // 说明里写了“默认…/不给就…/省略…/可选”的参数是可以不给的：以前一律当必填，报错又说“不给就按当前朝向”，自相矛盾
@@ -59,6 +61,8 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
     if (unavailable) return fail('BAD_ARGS', unavailable);
     const b = registry?.get(args.name, args.trial);
     if (!b) return fail('BAD_ARGS', `技能 ${args.name} 不存在或已停用`);
+    const recovery = ctx.recovery ?? (args.failure ? { ...args.failure, allowPlace: args.args?.allowPlace === true } : undefined);
+    ctx = { ...ctx, ...(recovery ? { recovery } : {}), ...(recovery?.args.make === false ? { make: false } : {}) };
     const result = await (async (): Promise<SkillResult> => {
       // 技能自己报的结果之外，身体实际挪了多少：一份叫“挖阶梯下去”的技能，实际是在地表平着走了几十格，靠这个才看得出来
       const from = ctx.adapter.state().pos;
@@ -122,7 +126,7 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
         let r: SkillResult;
         try {
           r = await skill.run({ ...ctx, senses: visibleActionSenses(ctx.senses), deadline: Math.min(ctx.deadline, Date.now() + skill.timeoutMs),
-            progress: (p, note) => ctx.progress((i + Math.max(0, Math.min(1, p))) / b.steps.length, note) }, v.args);
+            progress: (p, note) => ctx.progress((i + Math.max(0, Math.min(1, p))) / b.steps.length, note) }, constrainRecoveryAction(ctx, st.skill, v.args));
         } catch (e) {
           if (isAbort(e)) throw e;
           r = fail('ERROR', String((e as Error)?.message ?? e));
@@ -136,7 +140,12 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
       const judged = await verifyRun(b, bridge, { before, result: { done }, args: { ...args.args, ...(args.failure ? { failure: args.failure } : {}) } }, ctx);
       if (judged) return fail('ERROR', `技能「${b.name}」的步骤都做完了，但${judged}${moved().text}`, { done, verified: false });
       return ok(`照技能「${b.name}」做完了：${done.join('，')}${moved().text}`, { done, verified: !!b.verify, ...(completedSteps === 0 ? { noop: true } : {}) });
-    })();
+    })().catch((error: unknown) => {
+      if (isAbort(error) && ((ctx as SkillCtx & { skillDepth?: number }).skillDepth ?? 0) > 0) {
+        registry?.recordInvocation?.(b.name, { status: 'cancelled', summary: '嵌套技能调用被取消', data: { version: b.version ?? 1 } });
+      }
+      throw error;
+    });
     result.data = { ...result.data, version: b.version ?? 1 };
     if (((ctx as SkillCtx & { skillDepth?: number }).skillDepth ?? 0) > 0) registry?.recordInvocation?.(b.name, result);
     return result;

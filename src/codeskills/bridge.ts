@@ -5,6 +5,7 @@ import { dirName } from '../perception/perception.ts';
 import { AIR_BLOCKS, isSoftBlock, LIQUID_BLOCKS } from '../perception/surroundings.ts';
 import { SKILLS } from '../skills/index.ts';
 import { LLM_HIDDEN } from '../skills/index.ts';
+import { constrainRecoveryAction } from '../skills/recovery.ts';
 import type { Senses, SkillCtx } from '../skills/types.ts';
 import { sleep, throwIfAborted } from '../util.ts';
 import type { SandboxHandler } from './sandbox.ts';
@@ -17,6 +18,7 @@ export const READ_RADIUS = 48;
 
 /** 给模型看的 api 说明（写代码技能、后台改进时都用这一份） */
 export const API_DOC = `代码是一个 async 函数体，参数 api 和 args 已经给好（args 是 use_skill 的 args；恢复时 args.failure = {skill,args,code,summary,target?,position} 是刚失败的那一步：target 是那一步实际要去/要动的坐标（动作算出来的，比如 goto "NW 20" 的落点），position 是失败时人在哪）。所有 api 调用都要 await，返回普通 JSON。
+恢复的 target 是世界坐标，不是相对 at/to；原目标、实体ID、dig/avoid/make 和液体风险限制会传给步骤与嵌套技能。不能自行换目标或增加挖掘、合成和探索；超出原委托还需放方块时，先交回心智显式调用 use_skill args.allowPlace:true。缺少绝对目标就报告缺口，不能拿当前位置猜。
 - api.state() → {pos, feet:{x,y,z}, hp, food, oxygen, onGround, inWater, inLava, isDay, dim, yaw, facing, held, riding（载具名或 null）, inventory:[{name,count}]}
 - api.blockAt(x,y,z) → {name, kind}；kind = open（空气、草、雪层，能穿过）| solid | liquid | unknown；只读取身边 48 格内当前视野可见的格子。遮挡、视野外、黑暗或未加载时返回 {name:null,kind:"unknown"}，不透露隐藏的矿、液体或洞穴；先用 api.lookAt 转头，再读取。unknown 不能当空气或实心
 - api.region(x1,y1,z1,x2,y2,z2) → {min, size:[sx,sy,sz], palette:[名字或"?"], kinds:[同上], data:[下标]}；第 i 格：i = (y-min.y)*sx*sz + (z-min.z)*sx + (x-min.x)；最多 40000 格；与 blockAt 共用当前可见观测，未知格为 "?"/unknown，记忆不能冒充当前观测
@@ -114,7 +116,7 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
     const v = skill.validate(args ?? {}, ctx.adapter);
     if (!v.ok) throw new Error(`${name} 参数错误：${v.error}`);
     throwIfAborted(ctx.signal);
-    const r = await skill.run({ ...ctx, senses: actionSenses, deadline: Math.min(ctx.deadline, Date.now() + skill.timeoutMs), progress: () => {} }, v.args);
+    const r = await skill.run({ ...ctx, senses: actionSenses, deadline: Math.min(ctx.deadline, Date.now() + skill.timeoutMs), progress: () => {} }, constrainRecoveryAction(ctx, name, v.args));
     if (r.status === 'cancelled') throw Object.assign(new Error('task cancelled'), { name: 'AbortedError' });
     const { local: _local, around: _around, ...data } = r.data ?? {};
     return { ok: r.status === 'succeeded', code: r.failureCode ?? null, summary: r.summary.slice(0, 200), ...(Object.keys(data).length ? { data } : {}) };
@@ -230,8 +232,9 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
         const range = Math.max(0, Math.min(8, Number(a[3] ?? 1)));
         try {
           const o = (a[4] && typeof a[4] === 'object' ? a[4] : {}) as Record<string, unknown>;
-          const sprint = o.sprint === true;
-          const avoid = Array.isArray(o.avoid) ? o.avoid.map(String).slice(0, 16) : [];
+          const constrained = constrainRecoveryAction(ctx, 'goto', { target: `${p.x},${p.y},${p.z}`, sprint: o.sprint === true, avoid: Array.isArray(o.avoid) ? o.avoid.map(String).slice(0, 16) : [] });
+          const sprint = constrained.sprint === true;
+          const avoid = constrained.avoid as string[];
           await ctx.adapter.moveTo({ kind: 'near', pos: p, range }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(30_000, ctx.deadline - Date.now())), ...(sprint ? { sprint: true } : {}), ...(avoid.length ? { avoid } : {}) });
         } catch (e) { if ((e as Error)?.name === 'AbortedError') throw e; return { ok: false, error: String((e as Error)?.message ?? e).slice(0, 160), pos: ctx.adapter.state().pos }; }
         return { ok: true, pos: ctx.adapter.state().pos };
@@ -252,6 +255,7 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
         const o = (a[2] && typeof a[2] === 'object' ? a[2] : {}) as Record<string, unknown>;
         const face = o.face;
         if (typeof face === 'number') {
+          constrainRecoveryAction(ctx, 'hit_entity', { entity: face });
           ctx.senses.refresh();
           if (!ctx.senses.perceivedEntities(32).some((e) => e.id === face && e.perception !== 'heard')) return { ok: false, moved: 0, error: '看不见这个实体，不能精确跟踪；先转头确认' };
         }
@@ -261,6 +265,7 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
       }
       case 'attack': {
         const id = Number(a[0]);
+        constrainRecoveryAction(ctx, 'hit_entity', { entity: id });
         ctx.senses.refresh();
         const target = ctx.senses.perceivedEntities(8).find((e) => e.id === id && e.perception !== 'heard');
         if (!target) return { ok: false, error: '看不见这个实体（或者太远了）', sinceLastMs: Date.now() - lastSwingAt };
@@ -289,6 +294,7 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
         return { ok: r.ok, chargedMs: r.chargedMs, ...(r.reason ? { code: r.reason } : {}) };
       }
       case 'shoot': {
+        constrainRecoveryAction(ctx, 'hit_entity', { entity: Number(a[0]) });
         ctx.senses.refresh();
         if (!ctx.senses.perceivedEntities(32).some((e) => e.id === Number(a[0]) && e.perception !== 'heard')) return { ok: false, code: 'NOT_FOUND', error: '看不见这个实体，不能精确瞄准；先转头确认' };
         const r = await need(ctx.adapter.rangedAttack?.bind(ctx.adapter), 'shoot')(Number(a[0]), ctx.signal);

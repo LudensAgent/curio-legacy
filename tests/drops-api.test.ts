@@ -22,7 +22,7 @@ test('api.drops：眼前看得见的掉落物 + 刚才见过、转身后看不�
 test('交给恢复技能的失败带上动作算出的目标坐标和当时位置', () => {
   const f = failureFor({ skill: 'goto', args: { target: 'NW 20' } }, { failureCode: 'PATH_NOT_FOUND', summary: '没走通', data: { target: { x: 10, y: 64, z: -10 }, position: { x: 1.23, y: 64, z: 2 }, waterAhead: true } }, { x: 9, y: 9, z: 9 });
   assert.deepEqual(f.target, { x: 10, y: 64, z: -10 });
-  assert.deepEqual(f.position, { x: 1.2, y: 64, z: 2 });
+  assert.deepEqual(f.position, { x: 1.23, y: 64, z: 2 });
   assert.equal(f.waterAhead, true);
   const g = failureFor({ skill: 'step' }, { failureCode: 'PATH_NOT_FOUND', summary: 'x' }, { x: 3, y: 64, z: 4 });
   assert.equal(g.target, undefined);

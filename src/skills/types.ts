@@ -1,6 +1,7 @@
 import type { BlockHit, BlockObservation, EntityInfo, GameAdapter, Vec3Like } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
+import type { RecoveryContext } from './recovery.ts';
 
 export type FailureCode =
   | 'PATH_NOT_FOUND'
@@ -80,6 +81,8 @@ export interface SkillCtx {
   signal: AbortSignal;
   deadline: number;
   taskId: string;
+  /** Original delegation inherited by recovery and nested learned skills. */
+  recovery?: RecoveryContext;
   /** 上报进度 0..1，供预规划和控制台使用 */
   progress(p: number, note?: string): void;
 }
