@@ -189,7 +189,7 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     return { kind: 'continue', adapted: `附近没找到 ${target}，换个方向找找` };
   }
   if (NEEDS_THOUGHT.has(code)) return { kind: 'stuck', why: result.summary.slice(0, 160) };
-  if (RETRYABLE.has(code) && !(step.skill === 'goto' && code === 'PATH_NOT_FOUND') && changed && a.consecutiveFailures === 1 && !a.adaptations.includes(`retry:${key}`)) {
+  if (RETRYABLE.has(code) && !(step.skill === 'goto' && code === 'PATH_NOT_FOUND') && !(step.skill === 'surface' && state.inWater && state.oxygen > 14) && changed && a.consecutiveFailures === 1 && !a.adaptations.includes(`retry:${key}`)) {
     a.adaptations.push(`retry:${key}`);
     a.index = Math.max(0, a.index - 1);
     return { kind: 'continue', adapted: `${step.skill} 没成，再试一次` };

@@ -159,6 +159,8 @@ export class Mind {
   /** 指令最多挂这么久（模型忘了说做完也不会一直纠结） */
   static readonly ORDER_TTL_MS = 10 * 60_000;
   private lastFailure: { skill: string; code?: string; summary: string } | null = null;
+  private surfacePreemptions = new Map<string, { activity: Activity; steps: Activity['steps']; skill: string }>();
+  private surfaceInterruptedTasks = new Set<string>();
   private lastSay = { at: 0, text: '' };
   private lastDiaryAt = 0;
   private finishedSinceReflect = 0;
@@ -790,8 +792,21 @@ export class Mind {
       }
       if (o.task.skill === 'sleep' && o.result.status === 'succeeded') { this.d.self.feel({ type: 'sleep' }); this.maybeReflect('睡了一觉'); }
     }
-    if (o.task.source === 'reflex') return;
+    if (o.task.source === 'reflex') {
+      const preemption = this.surfacePreemptions.get(o.task.id);
+      this.surfacePreemptions.delete(o.task.id);
+      if (preemption && o.result.status !== 'cancelled' && this.activity === preemption.activity && this.activity.steps === preemption.steps) {
+        const a = preemption.activity;
+        a.interruptions = (a.interruptions ?? 0) + 1;
+        const inWater = this.d.adapter.state().inWater;
+        if (inWater || a.interruptions >= 3) {
+          this.finishActivity('stuck', `「${preemption.skill}」被防溺水反射中断（这段活已被反射打断 ${a.interruptions} 次）；surface 结果：${o.result.summary}；${inWater ? '现在仍在水中' : '现在已不在水中'}，请根据实际情况决定是否继续`);
+        }
+      }
+      return;
+    }
     const a = this.activity;
+    if (this.surfaceInterruptedTasks.delete(o.task.id)) return;
     if (!a || o.task.planId !== a.id) return;
     if (o.result.status === 'cancelled') {
       // 被反射打断：等身体安全了把这一步再做一遍
@@ -900,7 +915,12 @@ export class Mind {
   private onPreempt(o: TaskPreemption) {
     if (o.replacement.source !== 'reflex' || !this.activity || o.task.planId !== this.activity.id) return;
     // 是这一步把自己带进了水里：上岸后别原样再走一遍
-    if (o.replacement.skill === 'surface') this.attention.notice('into_water', `做「${o.task.skill}」时掉进水里差点淹死，这条路线或目标在水里`, 0.7, 30_000);
+    if (o.replacement.skill === 'surface') {
+      this.surfacePreemptions.set(o.replacement.id, { activity: this.activity, steps: this.activity.steps, skill: o.task.skill });
+      this.surfaceInterruptedTasks.add(o.task.id);
+      this.activity.index = Math.max(0, this.activity.index - 1);
+      this.attention.notice('into_water', `做「${o.task.skill}」时触发了防溺水反射`, 0.7, 30_000);
+    }
   }
 
   private onEvent(ev: AgentEvent) {

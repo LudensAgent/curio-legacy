@@ -655,7 +655,7 @@ type Vec = { x: number; y: number; z: number };
 /** escape：同一处上浮失败过时反射层换的打法——dig=优先找气穴/往上挖，shore=让寻路带着往岸上走 */
 export const surface: Skill<{ escape?: 'dig' | 'shore' }> = {
   name: 'surface',
-  description: '被水困住时游上岸站稳',
+  description: '被水困住时尝试上浮换气并游上岸；能呼吸但没能上岸时会说明仍在水中',
   argsDoc: '{}',
   timeoutMs: 35000,
   movement: true,
@@ -790,7 +790,7 @@ export const surface: Skill<{ escape?: 'dig' | 'shore' }> = {
     }
     const s = ctx.adapter.state();
     // 没找到岸，但已经浮在水面、能正常呼吸：溺水危险已解除，交还给原来的事情（由它决定怎么离开水面）
-    if (s.oxygen >= 18 && !ceilingAbove(ctx)) {
+    if (s.inWater && s.oxygen >= 18 && headInAir(ctx)) {
       const land = ctx.senses.nearestLand?.(s.pos, []);
       const shore = land ? shoreHint(s.pos, land) : null;
       return ok(`浮在水面能正常呼吸了（氧气 ${s.oxygen}/20），还没上岸${shore ? shore.text : '；附近没看到能上岸的地方'}`,
@@ -809,9 +809,9 @@ export function shoreHint(pos: Vec3Like, land: { dir: string; dist: number; pos:
   const dx = stand.x - feet.x, dz = stand.z - feet.z, dy = stand.y - feet.y;
   const height = dy > 0 ? `，落脚处比脚高 ${dy} 格` : dy < 0 ? `，落脚处比脚低 ${-dy} 格` : '，落脚处和脚一样高';
   const data = { dir: land.dir, dist: land.dist, dy, stand };
-  if (Math.abs(dx) + Math.abs(dz) === 1) {
+  if (Math.abs(dx) + Math.abs(dz) === 1 && dy >= -1 && dy <= 2) {
     const facing = dx === 1 ? 'E' : dx === -1 ? 'W' : dz === 1 ? 'S' : 'N';
-    return { text: `；岸就贴在身边（${facing}）${height}：step {"to":[1,0,0],"facing":"${facing}"} 会从水里爬上去`, data: { ...data, step: { to: [1, 0, 0], facing } } };
+    return { text: `；岸就贴在身边（${facing}）${height}：可以尝试 step {"to":[1,0,0],"facing":"${facing}"}，是否上岸以实际结果为准`, data: { ...data, step: { to: [1, 0, 0], facing } } };
   }
   return { text: `；最近看到的陆地在 ${land.dir} ${land.dist} 格${height}`, data };
 }

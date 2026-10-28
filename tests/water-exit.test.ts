@@ -5,7 +5,7 @@ import { MineflayerAdapter } from '../src/adapter/mineflayer.ts';
 import { config } from '../src/config.ts';
 import { EventBus } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
-import { shoreHint } from '../src/skills/movement.ts';
+import { shoreHint, surface } from '../src/skills/movement.ts';
 import { stepTo } from '../src/skills/primitives.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 
@@ -129,10 +129,36 @@ test('step from water reports honestly when the climb did not land', async () =>
 test('shore hint says how high the footing is and gives a copyable step when adjacent', () => {
   const near = shoreHint({ x: 0.5, y: 62.4, z: 0.5 }, { dir: 'E', dist: 1, pos: { x: 1, y: 63, z: 0 } });
   assert.match(near.text, /比脚高 2 格/);
+  assert.match(near.text, /可以尝试.*实际结果为准/);
   assert.match(near.text, /step \{"to":\[1,0,0\],"facing":"E"\}/);
+  const high = shoreHint({ x: 0.5, y: 62.4, z: 0.5 }, { dir: 'E', dist: 1, pos: { x: 1, y: 64, z: 0 } });
+  assert.match(high.text, /比脚高 3 格/);
+  assert.doesNotMatch(high.text, /step/);
+  assert.equal('step' in high.data, false);
   const far = shoreHint({ x: 0.5, y: 62.4, z: 0.5 }, { dir: 'NW', dist: 6, pos: { x: -4, y: 62, z: -4 } });
   assert.doesNotMatch(far.text, /step/);
   assert.match(far.text, /NW 6 格，落脚处比脚高 1 格/);
+});
+
+test('surface only reports breathing when the head is observed in air', async (t) => {
+  let now = 100000;
+  t.mock.method(Date, 'now', () => now);
+  for (const [head, inWater] of [['water', true], [null, true], ['air', true], ['air', false]] as const) {
+    const adapter = new FakeAdapter(), memory = new WorldMemory(null);
+    adapter.inWater = true;
+    adapter.oxygen = 18;
+    adapter.pos = { x: 0.5, y: 62.4, z: 0.5 };
+    Object.assign(adapter, { blockAt: (p: { y: number }) => Math.floor(p.y) === 64 ? head : 'air' });
+    adapter.swimTo = async () => { now += 100; adapter.inWater = inWater; return { ok: false, landed: false, oxygen: adapter.oxygen }; };
+    try {
+      const result = await surface.run({ adapter, memory, bus: new EventBus(), signal: new AbortController().signal,
+        deadline: now + 10, taskId: 'breathing-evidence', progress() {},
+        senses: { refresh() {}, markSweep() {}, perceivedEntities: () => [], knownBlocks: () => [] } }, {});
+      assert.equal(result.status, head === 'air' && inWater ? 'succeeded' : 'failed', `head=${head}, inWater=${inWater}: ${result.summary}`);
+      if (head === 'air' && inWater) assert.equal(result.data?.afloat, true);
+      else assert.doesNotMatch(result.summary, /正常呼吸/);
+    } finally { memory.close(); }
+  }
 });
 
 test('no sprinting in water: a sprint key pressed while swimming is not passed on', (t) => {

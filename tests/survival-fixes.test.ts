@@ -71,6 +71,12 @@ function submerged(feetY: number) {
 test('surface：水下头顶是石头 → 先往上挖开，再上浮换气', async () => {
   const w = submerged(60);
   w.setBlock({ x: 0, y: 60, z: 0 }, 'water'); w.setBlock({ x: 0, y: 61, z: 0 }, 'water'); // y=62 默认是石头
+  const swim = w.swimTo.bind(w);
+  w.swimTo = async (target, signal, opts) => {
+    const result = await swim(target, signal, opts);
+    if (!target) w.pos.y = 61; // 眼部到达刚挖开的空气，身体仍在水里
+    return result;
+  };
   const ctx = makeCtx(w);
   try {
     const r = await surface.run(ctx, {});

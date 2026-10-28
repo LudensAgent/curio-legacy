@@ -157,7 +157,7 @@ function explainBlocked(rej: Map<string, number>, near: Map<string, number>): st
 }
 
 // ------------------------------------------------------------------ travel
-type TravelArgs = { x: number; y?: number; z: number; label: string; noBoat?: boolean };
+type TravelArgs = { to: string; noBoat?: boolean };
 
 const parseTarget = (ctx: SkillCtx, raw: string): { x: number; y?: number; z: number; label: string } | null => {
   const nums = raw.match(/-?\d+(?:\.\d+)?/g);
@@ -181,12 +181,12 @@ export const travel: Skill<TravelArgs> = {
     const a = obj(raw);
     const to = String(a.to ?? a.target ?? '').trim();
     if (!to) return { ok: false, error: 'to 不能为空' };
-    return { ok: true, args: { x: NaN, z: NaN, label: to, ...(a.noBoat === true ? { noBoat: true } : {}) } };
+    return { ok: true, args: { to, ...(a.noBoat === true ? { noBoat: true } : {}) } };
   },
   async run(ctx, args) {
     const { adapter, signal } = ctx;
-    const target = Number.isFinite(args.x) && Number.isFinite(args.z) ? { x: args.x, y: args.y, z: args.z, label: args.label } : parseTarget(ctx, args.label);
-    if (!target) return fail('NOT_FOUND', `看不懂目标或找不到地标：${args.label}（写坐标 x,z 或记得的地标名）`);
+    const target = parseTarget(ctx, args.to);
+    if (!target) return fail('NOT_FOUND', `看不懂目标或找不到地标：${args.to}（写坐标 x,z 或记得的地标名）`);
     const s0 = adapter.state();
     const startPos = { ...s0.pos };
     const flat = (p: Vec3Like) => Math.hypot(p.x - target.x, p.z - target.z);

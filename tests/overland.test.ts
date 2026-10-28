@@ -4,7 +4,8 @@ import { Arbiter, type TaskOutcome } from '../src/arbiter/arbiter.ts';
 import { EventBus } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { Vision } from '../src/perception/vision.ts';
-import { planTravel, surveyColumn } from '../src/skills/overland.ts';
+import { planTravel, surveyColumn, travel } from '../src/skills/overland.ts';
+import { validateSkill } from '../src/skills/types.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 
 /** 地面 y=63 草地（站 y=64）；x=10..20 是一条横穿的河（水面 y=63） */
@@ -54,6 +55,27 @@ test('travel：未乘船时只走和游，不消耗背包船或木料', async ()
   assert.equal(a.inv.get('oak_log'), 8);
   assert.equal(a.riding, null);
   assert.ok(!a.actions.some((action) => /^(craft|use|interact|attack):/.test(action)));
+});
+
+test('travel：规划时的参数经仲裁器再次校验后仍能执行', async () => {
+  const a = new FakeAdapter();
+  const first = validateSkill(travel, { to: ' 5,64,0 ', noBoat: true }, a);
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  const again = validateSkill(travel, first.args, a);
+  assert.deepEqual(again, first);
+  const r = await run(a, 'travel', first.args);
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.ok(a.pos.x > 2.5, JSON.stringify(a.pos));
+});
+
+test('travel：地标和目标别名经二次校验保留目的地与选项', () => {
+  const a = new FakeAdapter();
+  for (const raw of [{ to: 'base' }, { target: 'death', noBoat: true }]) {
+    const first = validateSkill(travel, raw, a);
+    assert.equal(first.ok, true);
+    if (first.ok) assert.deepEqual(validateSkill(travel, first.args, a), first);
+  }
 });
 
 test('travel：已乘船时继续水面导航，不在重规划中下船', async () => {
