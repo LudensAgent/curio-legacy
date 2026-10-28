@@ -230,10 +230,10 @@ export class SelfModel {
     return p?.setDay !== undefined && Number.isFinite(day) ? Math.max(0, day - p.setDay) : 0;
   }
   /** 回顾后决定接着做：再给它 1–2 个游戏天，到时再回顾 */
-  postponeReview(): number | null {
+  postponeReview(day: number): number | null {
     const p = this.data.plan;
     if (!p) return null;
-    p.reviewDays = (p.reviewDays ?? SelfModel.REVIEW_DAYS[0]) + 1 + this.rand();
+    p.reviewDays = Math.max(p.reviewDays ?? SelfModel.REVIEW_DAYS[0], this.planDays(day)) + 1 + this.rand();
     this.touch();
     return p.reviewDays;
   }

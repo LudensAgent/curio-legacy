@@ -236,12 +236,15 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
 export const goTo: Skill<{ target: string; dig?: boolean; sprint?: boolean; avoid?: string[]; lead?: string }> = {
   name: 'goto',
   description: '沿看得见的落脚点步行去地标、坐标、作品或记得的功能方块；明确三维坐标须进入指定格，两维坐标须到指定水平格，地标到附近即可。绕开墙壁，遇到已观察的木门会开门。默认不挖墙、不搭柱；写 "dig":true 就像人一样挖穿挡路的土石、垫方块爬上坡坎直接过去（遇到水会在水面上垫方块架桥，走完会说垫了多少）。是否换用载具由你决定；上船后 ride 提供水面导航。"lead" 写一种看得见的生物：带着它走——几格一停，它掉队就等它跟上来；它跟不跟你得自己弄对（手里拿它爱吃的，它才跟）',
-  argsDoc: '{"target": "base（首选基地，不一定是最近的房子；回某栋房子直接写它的名字） | death | <地标id或名称> | <作品ID> | crafting_table | x,y,z | 方向 格数（如 \"E 20\" 往东 20 格）", "dig"?: true（挖穿/垫高直走）, "sprint"?: true（跑着去：快，但很耗饥饿；默认走路）, "avoid"?: ["绕开的方块"], "lead"?: "<带着走的生物名，如 cow>"}',
+  argsDoc: '{"target": "base（首选基地，不一定是最近的房子；回某栋房子直接写它的名字） | death | <地标id或名称> | <作品ID> | crafting_table | x,y,z | 方向 格数（如 \"E 20\" 往东 20 格）" 或 {"x": 数字, "y": 数字, "z": 数字}, "dig"?: true（挖穿/垫高直走）, "sprint"?: true（跑着去：快，但很耗饥饿；默认走路）, "avoid"?: ["绕开的方块"], "lead"?: "<带着走的生物名，如 cow>"}',
   timeoutMs: 600000,
   movement: true,
   validate(raw) {
-    const t = String(obj(raw).target ?? '').trim();
-    if (!t) return { ok: false, error: 'target 不能为空' };
+    const target = obj(raw).target;
+    const point = typeof target === 'object' && target !== null && !Array.isArray(target) ? target as Record<string, unknown> : null;
+    const t = typeof target === 'string' ? target.trim()
+      : point && [point.x, point.y, point.z].every((n) => typeof n === 'number' && Number.isFinite(n)) ? `${point.x},${point.y},${point.z}` : '';
+    if (!t) return { ok: false, error: 'target 需要地标、坐标字符串或包含数字 x、y、z 的坐标对象' };
     const avoid = Array.isArray(obj(raw).avoid) ? (obj(raw).avoid as unknown[]).map((n) => String(n).replace(/^minecraft:/, '')).filter((n) => /^[a-z_]+$/.test(n)).slice(0, 16) : [];
     const lead = typeof obj(raw).lead === 'string' ? String(obj(raw).lead).trim().toLowerCase().replace(/^minecraft:/, '') : '';
     if (obj(raw).lead !== undefined && !/^[a-z_]{2,40}$/.test(lead)) return { ok: false, error: 'lead 写生物名，比如 "cow"' };

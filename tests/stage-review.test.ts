@@ -111,3 +111,13 @@ test('主目标过了 3–5 个游戏天还没做成：不管心情都回顾一�
   assert.equal(thinks.length, 1);
   assert.ok(mind.reviewGapMs >= 45 * 60_000 && mind.reviewGapMs <= 90 * 60_000, '下次情绪提醒隔 45–90 分钟');
 });
+
+test('错过多个回顾期限后，继续目标仍从当前游戏天起宽限', () => {
+  const { mind, self, thinks } = fakeMind({ boredom: 0.3, lastMilestoneMinAgo: 30, progressMinAgo: 5, days: 10 });
+  mind.stageReviewCheck();
+  assert.equal(thinks.length, 1);
+  mind.closeReview(self.plan()!.agendaId);
+  assert.equal(self.data.plan!.reviewDays, 11.5);
+  mind.stageReviewCheck();
+  assert.equal(thinks.length, 1, '不会连续追补已经错过的回顾');
+});

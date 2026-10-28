@@ -3,6 +3,24 @@ import { test } from 'node:test';
 import { goTo } from '../src/skills/movement.ts';
 import { makeCtx, TestWorld } from './survival-helpers.ts';
 
+test('goto accepts coordinate objects without turning them into landmark names', async (t) => {
+  const adapter = new TestWorld();
+  adapter.pos = { x: 1381.5, y: 63, z: 305.5 };
+  const ctx = makeCtx(adapter);
+  t.after(() => ctx.memory.close());
+  const validated = goTo.validate({ target: { x: 1382, y: 63, z: 305 } }, adapter);
+  assert.equal(validated.ok, true);
+  if (!validated.ok) return;
+  assert.equal(validated.args.target, '1382,63,305');
+  t.mock.method(adapter, 'moveTo', async () => { adapter.pos = { x: 1382.5, y: 63, z: 305.5 }; });
+  const result = await goTo.run(ctx, validated.args);
+  assert.equal(result.status, 'succeeded');
+  assert.deepEqual(result.data?.targetCell, { x: 1382, y: 63, z: 305 });
+  for (const target of [{ x: 1, z: 2 }, { x: 1, y: '63', z: 2 }, [1, 63, 2], 123]) {
+    assert.equal(goTo.validate({ target }, adapter).ok, false);
+  }
+});
+
 test('goto reports path errors and measured progress when it stops beside an exact coordinate', async (t) => {
   const adapter = new TestWorld();
   adapter.pos = { x: 1381.5, y: 70, z: 285.5 };

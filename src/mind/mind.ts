@@ -1199,7 +1199,7 @@ export class Mind {
     const switched = !!after && after.agendaId !== goalBefore;
     this.d.bus.publish('stage_review_done', 'P2', switched ? `回顾后换了阶段目标：${after!.goal}` : `回顾后接着做：${after?.goal ?? '（还没有主目标）'}`, { switched, why: this.review?.why });
     // 接着做：给它再宽限一两天才因为“太久没做成”回顾；下次情绪提醒也隔一段随机的时间
-    if (!switched) this.d.self.postponeReview();
+    if (!switched) this.d.self.postponeReview(this.gameDay);
     this.review = null;
     this.lastReviewAt = Date.now();
     const [lo, hi] = Mind.REVIEW_GAP_MIN;
