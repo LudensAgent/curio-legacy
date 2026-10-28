@@ -1087,10 +1087,19 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       // 别的代码设置 jump（包括 clearControlStates）时，上浮键的所有权就交出去了
       const raw = b.setControlState.bind(b);
       b.__setControlRaw = raw;
-      b.setControlState = (k: string, v: boolean) => { if (k === 'jump' && b === this.bot) this.treading = false; return raw(k, v); };
+      // 水里没有“疾跑”：MC 里要么在水面慢慢划，要么整个人沉下去游泳。寻路器照样按疾跑键的话，服务器把人标成疾跑，
+      // 别人看到的就是在水面上跑步（水上漂）。物理模拟也不支持潜泳，所以泡在水里时疾跑键一律不按。
+      const wet = () => !!b.entity?.isInWater && !b.vehicle;
+      b.setControlState = (k: string, v: boolean) => {
+        if (k === 'jump' && b === this.bot) this.treading = false;
+        if (k === 'sprint' && v && wet()) v = false;
+        return raw(k, v);
+      };
       b.__treadWrapped = true;
     }
     const raw = b.__setControlRaw as (k: string, v: boolean) => void;
+    // 疾跑着冲进水里：键还按着，进水这一刻松开
+    if (e.isInWater && !b.vehicle && b.getControlState('sprint')) raw('sprint', false);
     const busy = this.inFlight > 0 || !!b.targetDigBlock || !!b.pathfinder?.goal || !!b.vehicle || !!b.isSleeping
       || ['forward', 'back', 'left', 'right', 'sneak', 'sprint'].some((k) => b.getControlState(k));
     let submerged = false;

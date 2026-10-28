@@ -124,3 +124,12 @@ test('shore hint says how high the footing is and gives a copyable step when adj
   assert.doesNotMatch(far.text, /step/);
   assert.match(far.text, /NW 6 格，落脚处比脚高 1 格/);
 });
+
+test('no sprinting in water: a sprint key pressed while swimming is not passed on', (t) => {
+  const { bot, controls, tick } = pond(t);
+  tick(5, true);
+  bot.setControlState('forward', true);
+  bot.setControlState('sprint', true);
+  assert.equal(controls.sprint, false, 'surface swimming must not be marked as sprinting (would look like running on water)');
+  bot.setControlState('forward', false);
+});
