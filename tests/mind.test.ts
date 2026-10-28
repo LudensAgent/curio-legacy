@@ -586,6 +586,38 @@ test('提前规划明确选择调整时仍执行新的动作', async (t) => {
   assert.deepEqual(w.arbiter.info()?.args, { n: 2 });
 });
 
+test('调整期间原步骤刚成功时先提供结果，重新决定后仍可明确重复', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { decision: 'new', activity: { what: '清理背包', steps: [step(1), step(2)] } });
+  w.mind.attention.notice('urgent-adjust', '注意到要紧的事', 0.9, 0);
+  await w.tick();
+  assert.equal(w.pending.length, 2);
+  await w.finish(ok('已经丢出 64 个圆石'));
+  await w.reply(1, { decision: 'adjust', activity: { what: '清理背包并继续', steps: [step(1), step(2), step(3)] } });
+  assert.equal(w.mind.activity?.what, '清理背包');
+  assert.equal(w.mind.activity?.index, 1, '不重置尚未完成的原计划');
+  assert.equal(w.arbiter.info()?.skill, undefined, '不能在未说明成功结果前重复执行');
+  await w.tick();
+  assert.equal(w.pending.length, 3);
+  assert.match(JSON.stringify(w.pending[2].messages), /已经丢出 64 个圆石/);
+  await w.reply(2, { decision: 'adjust', activity: { what: '明确再做一次', steps: [step(1), step(2)] } });
+  assert.equal(w.mind.activity?.what, '明确再做一次');
+  assert.deepEqual(w.arbiter.info()?.args, { n: 1 }, '看到实际结果后明确选择重复，应予执行');
+});
+
+test('思考期间完成的动作不阻止不同的明确调整', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { decision: 'new', activity: { what: '原计划', steps: [step(1), step(2)] } });
+  w.mind.attention.notice('urgent-adjust', '注意到要紧的事', 0.9, 0);
+  await w.tick();
+  await w.finish(ok('原步骤已完成'));
+  await w.reply(1, { decision: 'adjust', activity: { what: '明确改做法', steps: [step(3)] } });
+  assert.equal(w.mind.activity?.what, '明确改做法');
+  assert.deepEqual(w.arbiter.info()?.args, { n: 3 });
+});
+
 for (const kind of ['new', 'adjust'] as const) test(`注意到事情后明确 ${kind} 仍立即改变当前活动`, async (t) => {
   const w = fixture(t);
   await w.tick();

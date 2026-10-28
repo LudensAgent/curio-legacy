@@ -68,6 +68,17 @@ test('显式配置缺失或模式无效时报错，默认无 .env 仍可本地�
   assert.equal(config.dashboard.port, 3001);
 });
 
+test('界面展示默认不延迟实际操作，显式等待值仍然生效', async (t) => {
+  project(t);
+  const defaults = await loadConfig();
+  assert.deepEqual(defaults.config.ui, { pacingMs: 0, openHoldMs: 0, closeHoldMs: 0 });
+  process.env.UI_PACING_MS = '250';
+  process.env.UI_OPEN_HOLD_MS = '600';
+  process.env.UI_CLOSE_HOLD_MS = '800';
+  const overridden = await loadConfig();
+  assert.deepEqual(overridden.config.ui, { pacingMs: 250, openHoldMs: 600, closeHoldMs: 800 });
+});
+
 test('未填写目录时按模式读取独立角色与记忆身份，直播文件名保持直播默认值', async (t) => {
   const root = project(t);
   for (const mode of ['local', 'live']) {

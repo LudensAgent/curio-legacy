@@ -305,8 +305,7 @@ let inventoryUiHooked = false;
 function attachObserver() {
   if (!feed || !adapter.bot || adapter.bot === observedBot) return;
   observerInstall?.dispose();
-  // 合成/背包的节奏由适配器统一放慢（UI_PACING_MS 打在 Mineflayer 的 clickWindow 入口，craft/transfer/deposit/toss 全覆盖），
-  // 数据流这边不再另外包一层 bot.clickWindow，免得 bot.craft 那条路被放慢两次
+  // 如有配置，界面等待由适配器统一处理；数据流不再额外包装 clickWindow。
   observerInstall = installMineflayerObserver(adapter.bot as MineflayerBotLike, feed, { pacingMs: 0 });
   // 整批合成不经过 bot.craft，数据流看不到背包 2×2 合成的“界面打开/关闭”；由适配器在合成前后发事件
   if (!inventoryUiHooked) {

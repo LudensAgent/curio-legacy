@@ -174,8 +174,8 @@ export const config = {
   },
   /** Curio Observer 模组数据流（/api/observer/stream） */
   observerFeed: bool('OBSERVER_FEED', true),
-  /** 界面节奏（给直播观众看清用）：每次界面点击前停顿、窗口打开后停留、关闭前停留；都是毫秒，0 = 不放慢 */
-  ui: { pacingMs: num('UI_PACING_MS', 250), openHoldMs: num('UI_OPEN_HOLD_MS', 600), closeHoldMs: num('UI_CLOSE_HOLD_MS', 800) },
+  /** 界面展示的可选等待：点击前、打开后和关闭前的毫秒数；默认不延迟实际动作。 */
+  ui: { pacingMs: num('UI_PACING_MS', 0), openHoldMs: num('UI_OPEN_HOLD_MS', 0), closeHoldMs: num('UI_CLOSE_HOLD_MS', 0) },
   viewerPort: num('VIEWER_PORT', 0),
   actionChat: { enabled: bool('CHAT_ACTIONS', true), minIntervalMs: num('CHAT_ACTION_INTERVAL_MS', 1800) },
   dataDir,

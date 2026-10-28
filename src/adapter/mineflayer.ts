@@ -229,9 +229,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   private lastPacedClick = 0;
 
   /**
-   * 界面节奏（UI_PACING_MS / UI_OPEN_HOLD_MS / UI_CLOSE_HOLD_MS）：真人合成、整理箱子是一下一下点的，Mineflayer 几十毫秒就点完了，
-   * 直播观众根本看不清。打在 Mineflayer 里的补丁（scripts/patch-deps.mjs）让每次 clickWindow 都先过 bot.beforeWindowClick——
-   * craft / transfer / deposit / withdraw / toss / equip 内部的点击全走这里；打开容器、工作台、熔炉后再多停一会儿让人看见界面。
+   * 界面节奏（UI_PACING_MS / UI_OPEN_HOLD_MS / UI_CLOSE_HOLD_MS）：默认不等待，显式设置后才延迟点击或窗口开关。
+   * Mineflayer 补丁（scripts/patch-deps.mjs）让 craft / transfer / deposit / withdraw / toss / equip 的点击经过 beforeWindowClick。
    */
   private installUiPacing(bot: any) {
     const ui = this.cfg.ui ?? { pacingMs: 0, openHoldMs: 0, closeHoldMs: 0 };
@@ -1324,6 +1323,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   }
 
   /** 背包/界面里有没有残留（打断留下的半截交互） */
+  private tossCursorReturn: { bot: any; slot: number; identity: string } | null = null;
+
   private interactionDirty(): string[] {
     const b = this.bot;
     if (!this.ready || !b?.inventory?.slots) return [];
@@ -1337,6 +1338,31 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
 
   private async repairInteraction(reason: string) {
     const b = this.bot;
+    const pending = this.tossCursorReturn;
+    if (pending && pending.bot !== b) this.tossCursorReturn = null;
+    if (pending && pending.bot === b) {
+      // A cancelled click may still have a server response in flight. Do not
+      // move its cursor until that operation is finished.
+      const deadline = Date.now() + 3000;
+      while (this.inFlight > 0 && Date.now() < deadline) await sleep(25);
+      if (this.inFlight > 0) return;
+      if (b.currentWindow) return;
+      if (typeof b._syncWindow !== 'function') return;
+      const synced = await Promise.race([Promise.resolve(b._syncWindow(b.inventory)).then(() => true, () => false), sleep(3000).then(() => false)]);
+      if (!synced) return;
+      const cursor = b.inventory.selectedItem, source = b.inventory.slots[pending.slot];
+      const identity = (item: any) => JSON.stringify([item.type, item.metadata, item.nbt ?? null]);
+      if (cursor) {
+        if (identity(cursor) !== pending.identity || source && (identity(source) !== pending.identity || source.count + cursor.count > source.stackSize)) return;
+        const returnedName = cursor.name, returnedCount = cursor.count;
+        await b.clickWindow(pending.slot, 0, 0);
+        const returned = await Promise.race([Promise.resolve(b._syncWindow(b.inventory)).then(() => true, () => false), sleep(3000).then(() => false)]);
+        if (!returned) return;
+        if (b.inventory.selectedItem) return;
+        this.bus.publish('interaction_repaired', 'P3', `收拾交互残留（${reason}）：光标上的 ${returnedName}×${returnedCount} 已归还原槽`, { reason, slot: pending.slot, item: returnedName, count: returnedCount });
+      }
+      this.tossCursorReturn = null;
+    }
     const found = this.interactionDirty();
     if (!found.length) return;
     try {
@@ -1350,6 +1376,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   /** 碰背包/界面的动作开始前：等打断后的收拾做完；还有残留就先收拾 */
   private async interactionReady() {
     if (this.repairing) await this.repairing;
+    if (this.tossCursorReturn) await this.actionContext.exit(() => this.repairInteraction('恢复中断的丢弃'));
+    if (this.tossCursorReturn) throw new Error('INTERACTION_DIRTY: 丢弃操作遗留的光标物品尚未安全归还');
     if (this.interactionDirty().some((d) => !d.startsWith('窗口'))) await this.actionContext.exit(() => this.repairInteraction('动作开始前发现残留'));
   }
 
@@ -2056,12 +2084,69 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // 朝哪扔由调用的人定（toss_item 的 toward）；不指定就朝现在看的方向
     if (face) await this.afterAction(() => this.bot.lookAt(this.vec({ x: face.x, y: face.y + 1, z: face.z }), true), check);
     const yaw = e?.yaw ?? 0;
-    await this.withObservedInventory(signal, async () => {
-      if (opts.sourceSlot === undefined) await this.afterAction(() => this.bot.toss(item.type, null, want), check);
-      else if (want === item.count) await this.afterAction(() => this.bot.clickWindow(opts.sourceSlot, 1, 4), check);
-      else for (let n = 0; n < want; n++) await this.afterAction(() => this.bot.clickWindow(opts.sourceSlot, 0, 4), check);
-      await this.syncInventory(check);
-    });
+    const b = this.bot;
+    // The selected inventory slots and their NBT determine what was asked to
+    // be thrown. Prefer complete stacks only within the same identity quota.
+    const identity = (stack: Item) => JSON.stringify([stack.type, stack.metadata, stack.nbt ?? null]);
+    const stacks: Item[] = opts.sourceSlot === undefined ? b.inventory.items().filter((stack: Item) => stack.name === name) : [item];
+    const quotas = new Map<string, number>();
+    let remaining = want;
+    for (const stack of stacks) {
+      const take = Math.min(stack.count, remaining), key = identity(stack);
+      if (take) quotas.set(key, (quotas.get(key) ?? 0) + take);
+      remaining -= take;
+      if (!remaining) break;
+    }
+    if (b.inventory.selectedItem || b.currentWindow?.selectedItem || b.currentWindow && opts.sourceSlot !== undefined) return { ok: false, reason: 'INVENTORY_NOT_READY', tossed: 0 };
+    if (b.currentWindow) {
+      await this.withObservedInventory(signal, async () => {
+        await this.afterAction(() => b.toss(item.type, null, want), check);
+        await this.syncInventory(check);
+      });
+    } else {
+      try {
+        await this.withObservedInventory(signal, async () => {
+          for (const [key, quota] of quotas) {
+            let left = quota;
+            while (left > 0) {
+              check();
+              const candidates: Item[] = (opts.sourceSlot === undefined ? b.inventory.items() : [b.inventory.slots[opts.sourceSlot]])
+                .filter((stack: Item | null): stack is Item => !!stack && stack.name === name && identity(stack) === key);
+              const stack = candidates.filter((candidate) => candidate.count <= left).sort((a, c) => c.count - a.count)[0]
+                ?? candidates.sort((a, c) => a.count - c.count)[0];
+              if (!stack) throw new Error('SOURCE_ITEM_CHANGED');
+              const take = Math.min(left, stack.count), slot = stack.slot;
+              if (take === stack.count) {
+                await this.afterAction(() => b.clickWindow(slot, 1, 4), check);
+              } else {
+                const half = Math.ceil(stack.count / 2);
+                const wholeCost = 2 + stack.count - take, halfCost = take <= half ? 2 + half - take : Infinity;
+                const split = take > 1;
+                if (!split) {
+                  for (let n = 0; n < take; n++) await this.afterAction(() => b.clickWindow(slot, 0, 4), check);
+                } else {
+                  const pickHalf = halfCost < wholeCost, picked = pickHalf ? half : stack.count;
+                  this.tossCursorReturn = { bot: b, slot, identity: key };
+                  await this.afterAction(() => b.clickWindow(slot, pickHalf ? 1 : 0, 0), check);
+                  for (let n = picked - take; n > 0; n--) await this.afterAction(() => b.clickWindow(slot, 1, 0), check);
+                  await this.syncInventory(check);
+                  const cursor = b.inventory.selectedItem;
+                  if (!cursor || identity(cursor) !== key || cursor.count !== take) throw new Error('TOSS_STATE_CHANGED');
+                  await this.afterAction(() => b.clickWindow(-999, 0, 0), check);
+                  await this.syncInventory(check);
+                  if (b.inventory.selectedItem) throw new Error('TOSS_STATE_CHANGED');
+                  this.tossCursorReturn = null;
+                }
+              }
+              left -= take;
+            }
+          }
+          await this.syncInventory(check);
+        });
+      } finally {
+        if (this.tossCursorReturn) this.scheduleRepair('丢弃中断后归还光标', 250);
+      }
+    }
     const tossed = have - total();
     // 记住扔掉了什么、大概落在哪（只是事实：哪些掉落物是自己刚扔的，被捡回来时能说清；不替它决定捡不捡）
     if (tossed > 0 && !opts.gift && e?.position) {

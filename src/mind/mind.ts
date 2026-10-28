@@ -995,6 +995,8 @@ export class Mind {
     const generation = this.generation;
     const controller = new AbortController();
     const activityId = this.activity?.id ?? null;
+    const thoughtRunning = this.d.arbiter.info();
+    const knownResults = new Set(this.activity?.results ?? []);
     const noticed = this.attention.drain();
     this.thinking = { controller, reason, tier, startedAt: Date.now(), generation, activityId, noticed };
     const urgent = noticed.some((n) => n.level === 'urgent');
@@ -1056,6 +1058,27 @@ export class Mind {
         }
         return;
       }
+      // 刚收到的指令：照做时不受“专注”的限制（瞥一眼不能换、刚开工先不改）
+      // 刚收到的指令（或决定采纳的建议）：照做时不受专注的限制
+      const followsOperator = orderWasNew && (order?.kind === 'order' ? decision.operator?.status !== 'cannot' : decision.operator?.status === 'adopted');
+      // An adjustment can repeat the step that was still running when the
+      // model saw it, even though it completed before its answer arrived.
+      // Return the actual result for a fresh decision; do not silently remove
+      // a step that the agent may deliberately choose to repeat.
+      const completedDuringThought = activityId && this.activity?.id === activityId && thoughtRunning?.planId === activityId
+        ? this.activity.results.find((result) => !knownResults.has(result) && result.status === 'succeeded'
+          && result.skill === thoughtRunning.skill && isDeepStrictEqual(result.args ?? {}, thoughtRunning.args ?? {})) : undefined;
+      const first = decision.activity?.steps[0];
+      if (!followsOperator && decision.kind === 'adjust' && completedDuringThought && first && thoughtRunning && first.skill === thoughtRunning.skill
+        && isDeepStrictEqual(first.args ?? {}, thoughtRunning.args ?? {})) {
+        this.staleDropped++;
+        this.resumeCheck = activityId;
+        this.requestThink(`思考期间 ${completedDuringThought.skill} 已经成功：${completedDuringThought.summary}；刚才的调整以同一动作开头，请根据实际结果决定是否还要重复`, 'deliberate');
+        for (const notice of noticed) if (!this.attention.peek().some((pending) => pending.key === notice.key)) this.attention.notice(notice.key, notice.what, notice.salience, 0);
+        this.d.bus.publish('decision_stale', 'P3', `思考期间动作已成功，调整需要重新决定：${completedDuringThought.summary}`, { skill: completedDuringThought.skill, summary: completedDuringThought.summary, planId: activityId });
+        this.kick();
+        return;
+      }
       this.errors = 0; this.backoffUntil = 0;
       this.lastThoughtAt = Date.now();
       if (decision.tier === 'deliberate') { this.lastDeliberateAt = Date.now(); this.finishedSinceReflect = 0; }
@@ -1063,9 +1086,6 @@ export class Mind {
       this.lastSnapshot = this.snapshotNow();
       if (learnFrom && this.learnFrom === learnFrom) this.learnFrom = null; // 提醒过一次就够了
       if (order && order === this.order) this.answerOrder(order, orderWasNew, decision);
-      // 刚收到的指令：照做时不受“专注”的限制（瞥一眼不能换、刚开工先不改）
-      // 刚收到的指令（或决定采纳的建议）：照做时不受专注的限制
-      const followsOperator = orderWasNew && (order?.kind === 'order' ? decision.operator?.status !== 'cannot' : decision.operator?.status === 'adopted');
       const goalBefore = this.d.self.plan()?.agendaId ?? null;
       this.inReview = reviewing;
       try {
