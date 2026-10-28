@@ -1,6 +1,6 @@
 # Minecraft Curiosity Agent · MVP
 
-本地测试与直播可以使用独立配置：`npm run start:local` 读取 `.env.local`，`npm run start:live` 读取 `.env.live`。本地 `save:local` / `load:local` 管理测试世界，直播连接 Mac 服务并拒绝本地维护。配置准备和目录隔离见 [本地测试与直播配置分离](docs/local-live-profiles.md)。
+本地测试与直播可以使用独立配置：`npm run start:local` 读取 `.env.local`，`npm run start:live` 读取 `.env.live`，两者均默认启用守护进程（含 `:proxy` 版本）。本地 `save:local` / `load:local` 管理测试世界，直播连接 Mac 服务并拒绝本地维护。配置准备和目录隔离见 [本地测试与直播配置分离](docs/local-live-profiles.md)。
 
 一个**可验证、可观测**的最小版本，满足三件事：
 
@@ -143,10 +143,10 @@ NO_PROXY=localhost,127.0.0.1,::1
 
 ### 无人值守：崩溃或卡死后自动重启
 
-直播或长时间测试时用 `npm run supervise`（需要代理时用 `npm run supervise:proxy`）代替 `npm start`。外面多一层守护进程：
+`npm run start:local`、`npm run start:live` 及其 `:proxy` 版本默认使用守护进程，`supervise:local` / `supervise:live` 系列命令仍可使用。沿用根目录 `.env` 时，用 `npm run supervise`（需要代理时用 `npm run supervise:proxy`）代替 `npm start`。守护进程负责：
 
-- Agent 崩溃（包括内存耗尽）或卡死（10 秒一次的心跳 2 分钟没来）会被自动重启；连续崩溃时间隔从 3 秒逐步拉长到 2 分钟。
-- 每次异常都会在 `data/logs/` 留下 `crash-*.log`（当时 stderr 和 stdout 的最后几百行、最后一次内存读数），stderr 全量写进 `console-err-*.log`，Node 致命错误另有诊断报告 `report.*.json`；事件日志里记一条 `process_restart`。
+- Agent 崩溃（包括内存耗尽）或卡死（10 秒一次的心跳超过 45 秒没来，启动阶段首次心跳等待最多 5 分钟）会被自动重启；连续崩溃时间隔从 3 秒逐步拉长到 1 分钟。
+- 每次异常都会在所选配置的 `DATA_DIR/logs/` 留下 `crash-*.log`（当时 stderr 和 stdout 的最后几百行、最后一次内存读数），stderr 全量写进 `console-err-*.log`，Node 致命错误另有诊断报告 `report.*.json`；事件日志里记一条 `process_restart`。默认配置的日志目录为 `data/logs/`，local/live 示例分别为 `data-local/logs/`、`data-live/logs/`。
 - 堆内存用到 92% 时 Agent 会先存档再退出，让守护马上重启，不等到内存耗尽被直接中止；每 10 分钟的内存读数记在事件 `process_memory` 里。
 - Ctrl+C 照常存档退出，守护随之结束。
 
