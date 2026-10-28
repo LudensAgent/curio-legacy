@@ -295,7 +295,7 @@ const currentSpend = () => withMemory(llmSpend([planner, coderPlanner], { holida
   Date.now(), config.llm.priceHolidays);
 const observerTasks = feed ? installTaskObserver(feed, arbiter, {
   interests: () => perception.snapshot()?.drives ?? [],
-  stats: () => ({ deaths: metrics.counters.deaths, totalTokens: runStats.totalTokens(), ...currentSpend() }),
+  stats: () => ({ deaths: metrics.counters.deaths, totalTokens: runStats.totalTokens(), uptimeSec: metrics.uptimeSec(), ...currentSpend() }),
 }) : null;
 let observedBot: unknown = null;
 let observerInstall: MineflayerObserver | null = null;

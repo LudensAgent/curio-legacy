@@ -109,6 +109,9 @@ export class Metrics {
     }
   }
 
+  /** 这次测试累计运行了多少秒（RunStats 读回上次的时长后会把 startedAt 往前挪，所以重启不清零） */
+  uptimeSec(now = Date.now()) { return Math.max(0, Math.round((now - this.startedAt) / 1000)); }
+
   snapshot() {
     const now = Date.now();
     const win = this.samples.filter((x) => now - x.t <= 600_000);
@@ -128,7 +131,7 @@ export class Metrics {
     const t = this.counters.tasks;
     const done = t.succeeded + t.failed;
     return {
-      uptimeSec: Math.round((now - this.startedAt) / 1000),
+      uptimeSec: this.uptimeSec(now),
       window10m: byCat,
       idle10m: byCat.idle,
       llmContinuity: llmSamples.length ? llmActive / llmSamples.length : null,
