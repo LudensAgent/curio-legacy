@@ -228,13 +228,29 @@ export const dig: Skill<DigArgs> = {
         for (let i = 0; i < args.blocks; i++) {
           const me = floor(adapter.state().pos);
           const c = { x: me.x, y: me.y - 1, z: me.z };
+          targetCell = c;
           const under = adapter.blockAt({ x: c.x, y: c.y - 1, z: c.z });
-          if (isSoftBlock(under) || (under && LIQUID_BLOCKS.has(under))) return dug.length ? ok(`往下挖了 ${dug.length} 格，再下面是 ${under ?? '空的'}，停下`, { dug }) : fail('BAD_ARGS', `脚下再往下是 ${under ?? '空的'}，往下挖会掉下去`);
+          if (isSoftBlock(under) || (under && LIQUID_BLOCKS.has(under))) {
+            const position = adapter.state().pos;
+            const partialStop = { pos: c, below: under, completed: walked, requested: args.blocks };
+            const data = { dug, walked, partialStop, targetCell: c, position: { ...position }, effectEvidence: effectEvidence(position) };
+            return walked || dug.length ? ok(`挖掉 ${dug.length} 格，确认到达下一级 ${walked} 次；再下面是 ${under ?? '空的'}，停下`, data) : fail('BAD_ARGS', `脚下再往下是 ${under ?? '空的'}，往下挖会掉下去`, data);
+          }
           const n = await breakCell(ctx, c, false, undefined, { allowWater: args.wet, allowLava: args.lava });
           if (n) dug.push(n);
-          await adapter.moveTo({ kind: 'xyz', x: c.x, y: c.y, z: c.z }, { signal, timeoutMs: 4000 }).catch((e) => { if (isAbort(e)) throw e; });
+          let moveError: unknown;
+          try { await adapter.moveTo({ kind: 'xyz', x: c.x, y: c.y, z: c.z }, { signal, timeoutMs: 4000 }); }
+          catch (e) { if (isAbort(e)) throw e; moveError = e; }
+          throwIfAborted(signal);
+          const position = adapter.state().pos;
+          if (Math.floor(position.x) !== c.x || Math.floor(position.y + 0.05) !== c.y || Math.floor(position.z) !== c.z) {
+            return fail(moveError ? codeFromError(moveError) : 'PATH_NOT_FOUND', `已挖掉 ${dug.length} 格，确认到达下一级 ${walked} 次；没有进入目标格 (${c.x},${c.y},${c.z})，实际位置 (${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})${moveError ? `；${why(moveError)}` : ''}`,
+              { dug, walked, targetCell: c, position: { ...position }, effectEvidence: effectEvidence(position) });
+          }
+          walked++;
         }
-        return ok(`往下挖了 ${dug.length} 格（${dug.join('、')}）`, { dug });
+        const position = adapter.state().pos;
+        return ok(`挖掉 ${dug.length} 格（${dug.join('、') || '本来就空'}），确认到达下一级 ${walked} 次`, { dug, walked, position: { ...position }, effectEvidence: effectEvidence(position) });
       }
       const dirKey = args.dir === 'forward' ? dirOfYaw(adapter.eye()?.yaw ?? 0).replace(/^(N|S)[EW]$/, '$1') : args.dir;
       const [dx, dz] = DIR_OFFSETS[dirKey] ?? DIRS[dirKey] ?? [0, -1];
@@ -261,6 +277,11 @@ export const dig: Skill<DigArgs> = {
     } catch (e) {
       if (isAbort(e)) throw e;
       const msg = why(e);
+      if (args.dir === 'down') {
+        const position = adapter.state().pos;
+        const code = msg.includes('流进来') || msg.includes('基岩') || msg.startsWith('那边是') ? 'BAD_ARGS' : codeFromError(e);
+        return fail(code, `已挖掉 ${dug.length} 格，确认到达下一级 ${walked} 次；${msg}`, { dug, walked, ...(targetCell ? { targetCell } : {}), position: { ...position }, effectEvidence: effectEvidence(position) });
+      }
       if (args.dir !== 'up' && args.dir !== 'down') {
         const position = adapter.state().pos;
         const code = msg.includes('流进来') || msg.includes('基岩') || msg.startsWith('那边是') ? 'BAD_ARGS' : codeFromError(e);

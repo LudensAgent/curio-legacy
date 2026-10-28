@@ -33,7 +33,13 @@ test('descend requires fresh local geometry, sufficient health or observed water
   const unsafe = fixture(); unsafe.state.hp = 8;
   assert.equal((await descend.run(unsafe.ctx, { target: unsafe.option.target })).failureCode, 'LOW_HP'); assert.equal(unsafe.calls.length, 0);
   const occluded = fixture(); occluded.option.corridor = 'unknown';
-  assert.equal((await descend.run(occluded.ctx, { target: occluded.option.target })).status, 'failed'); assert.equal(occluded.calls.length, 0);
+  const unknown = await descend.run(occluded.ctx, { target: occluded.option.target });
+  assert.equal(unknown.status, 'failed'); assert.match(unknown.summary, /落体通道未看清/);
+  assert.deepEqual(unknown.data?.geometry, { clearance: 'clear', corridor: 'unknown', approach: 'adjacent', unknowns: [] });
+  assert.equal(occluded.calls.length, 0);
+  const blocked = fixture(); blocked.option.clearance = 'blocked';
+  const obstruction = await descend.run(blocked.ctx, { target: blocked.option.target });
+  assert.match(obstruction.summary, /落点净空观察到阻挡/); assert.equal(blocked.calls.length, 0);
   const shallow = fixture('water'); shallow.option.waterDepth = 'unknown';
   assert.equal((await descend.run(shallow.ctx, { target: shallow.option.target })).status, 'failed'); assert.equal(shallow.calls.length, 0);
   const water = fixture('water'), wet = await descend.run(water.ctx, { target: water.option.target });

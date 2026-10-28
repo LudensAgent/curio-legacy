@@ -64,6 +64,8 @@ export interface Activity {
   adaptations: string[];
   /** 同一个 dig_at 连着几轮挖到的都是空气（routine 没按设想的形状挖） */
   airDigs?: Record<string, number>;
+  /** 同一步多轮在同一个下行目标前停下时，保留实际停因交回心智。 */
+  partialStops?: Record<string, { pos: { x: number; y: number; z: number }; below: string | null; iteration: number; count: number }>;
   dropped?: string[];
   /** 被身体反射打断了几次 */
   interruptions?: number;

@@ -1,8 +1,35 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { stepTo } from '../src/skills/primitives.ts';
+import { makeBridge } from '../src/codeskills/bridge.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
+
+test('a downward step reports the selected support cell without revealing an unseen block', async (t) => {
+  const w = new FakeAdapter();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.removed.add('1,63,0');
+  w.removed.add('1,62,0');
+  let seeFloor = false;
+  const ctx = makeCtx(w, { senses: { observeBlocks: (positions) => positions.filter((pos) => seeFloor || pos.y !== 62).map((pos) => ({
+    name: w.blockAt(pos), pos, properties: {}, worldId: w.worldId, sessionId: w.sessionId,
+    dimension: w.dim, observationId: 1, observedAt: Date.now(), source: 'vision' as const,
+  })) } });
+  t.after(() => ctx.memory.close());
+  const move = t.mock.method(w, 'moveTo', async () => {});
+  const bridge = makeBridge(ctx);
+  const hidden = await bridge('stepTo', [1, 63, 0]) as { ok: boolean; summary: string; data: { landingSupport: { pos: unknown; observed: string | null } } };
+  assert.equal(hidden.ok, false);
+  assert.match(hidden.summary, /脚下 \(1,62,0\) 是 未看清的格子/);
+  assert.deepEqual(hidden.data.landingSupport, { pos: { x: 1, y: 62, z: 0 }, observed: null });
+  assert.equal(move.mock.callCount(), 0);
+
+  seeFloor = true;
+  const visible = await stepTo.run(ctx, { at: [1, -1, 0], facing: 'E' });
+  assert.match(visible.summary, /脚下 \(1,62,0\) 是 air/);
+  assert.deepEqual(visible.data?.landingSupport, { pos: { x: 1, y: 62, z: 0 }, observed: 'air' });
+  assert.equal(move.mock.callCount(), 0);
+});
 
 test('step rejects partial diagonal movement and reports actual location', async (t) => {
   const w = new FakeAdapter();

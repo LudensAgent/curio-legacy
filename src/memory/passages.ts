@@ -30,7 +30,7 @@ export class PassageTracker {
   private active: { rec: PassageRecord; existing: boolean } | null = null;
   private lastSurface: { pos: Vec3Like; dim: string; worldId: string; ts: number } | null = null;
   private lastPos: { pos: Vec3Like; dim: string; worldId: string } | null = null;
-  /** 最近一次在地下（或在自己挖的竖井、台阶里）的位置：挖上地表时，冒出来的那个点也是入口 */
+  /** 最近一次在地下的位置：回地表时用于记录地表参考点，未验证实际开口。 */
   private lastBelow: { pos: Vec3Like; ts: number } | null = null;
 
   constructor(private memory: Pick<WorldMemory, 'passages' | 'savePassage'> & Partial<Pick<WorldMemory, 'forgetPassage'>>, private newId: () => string = () => `psg_${Math.random().toString(36).slice(2, 8)}`) {}
@@ -43,7 +43,7 @@ export class PassageTracker {
     if (jumped) { this.finish(); this.lastSurface = null; }
 
     if (s.place === 'surface') {
-      // 从下面挖上来、冒出地表：这个点也是这条通道的入口（以前只记从地表下去的那头，挖上来的出口没记）
+      // 记录从地下回到地表的位置；这只是参考点，不保证是实际开口。
       const below = this.lastBelow;
       if (this.active && below && now - below.ts < 120_000 && flat(below.pos, pos) <= 16 && pos.y >= below.pos.y) {
         this.addEntrance(this.active.rec, pos);
@@ -75,11 +75,11 @@ export class PassageTracker {
       } else {
         this.active = { existing: false, rec: { id: this.newId(), worldId: s.worldId, dim: s.dim, entrances: [], path: [pos], deepestY: pos.y, dug: 0, ores: {}, createdAt: now, lastUsedAt: now, uses: 1 } };
       }
-      // 刚从地表下来：那个地表点就是入口
+      // 刚从地表下来：记录最后的地表位置，并未确认实际开口。
       const surf = this.lastSurface;
       if (surf && surf.dim === s.dim && surf.worldId === s.worldId && now - surf.ts < 120_000 && flat(surf.pos, pos) <= 16) this.addEntrance(this.active.rec, surf.pos);
     }
-    // 新挖的这一段走着走着接上了以前挖过的通道：并进那一条（多一个入口），不另记
+    // 新挖的这一段接近以前的路线：并进那一条（多一个地表参考点），不另记
     if (!this.active.existing) {
       const joined = this.memory.passages(s.dim).find((p) => p.worldId === s.worldId && p.id !== this.active!.rec.id && p.path.some((q) => d3(q, pos) <= 3));
       if (joined) {

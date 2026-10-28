@@ -281,25 +281,19 @@ export function situationalReminders(ctx: MindContext): string[] {
     if (layers) out.push(layers);
     const tunnels = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).filter((f) => f.dist <= 160).slice(0, 2);
     for (const t of tunnels) {
-      out.push(t.inside
-        ? `记得自己在${t.text.replace(/^挖过的通道：/, '挖过的通道里：')}；当前是否可通尚未确认`
-        : `记得自己${t.text}；当前是否可通尚未确认`);
+      out.push(`记得自己${t.text}`);
     }
   }
-  // 下矿的账：在地下、手上的活快收工或想回地面时，把这一趟的成本和身边还剩的矿摆出来（真人多挖几组是因为知道“再来一趟更贵”）；多挖不多挖它自己定
+  // 下矿的账：在地下、手上的活快收工或想回地面时，提供实际经历和当前所见。
   const trip = ctx.trip;
   if (trip && trip.minutes >= 1.5 && (trip.nearEnd || !ctx.activity || SURFACE_INTENT.test(intent)) && (p.self.where?.kind === 'underground' || p.self.sky_visible === false)) {
     const got = Object.entries(trip.gained).filter(([k]) => /raw_|_ore$|coal|diamond|emerald|lapis|redstone|amethyst|obsidian|debris|flint|gold_nugget|quartz/.test(k)).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, n]) => `${k}×${n}`);
     const seen = p.nearby.resources.filter((r) => r.seen === 'now' && isResourceBlock(r.block)).sort((a, b) => a.nearest - b.nearest).slice(0, 4).map((r) => `${r.block}×${r.count}（最近 ${Math.round(r.nearest)} 格）`);
     const remembered = oreSpotsNear(ctx.memory.landmarks(), { worldId: s.worldId, dim: p.self.dim, pos: here }, { radius: 48 }).length;
     const picks = s.inventory.filter((i) => i.name.endsWith('_pickaxe') && i.durability).map((i) => `${i.name} 剩 ${Math.round(((i.durabilities?.[0] ?? i.durability!.left) / i.durability!.max) * 100)}%`);
-    const depth = p.self.depth_below_surface ?? 0;
-    const back = (() => {
-      const t = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).find((f) => f.inside);
-      if (t) { const walkSec = Math.round((Math.hypot(t.pos.x - here.x, t.pos.y - here.y, t.pos.z - here.z) * 1.5) / 4); return `沿通道走回入口${durationText(realSecondsToTicks(walkSec))}（按正常速度估算的游戏时间）`; }
-      return depth >= 6 ? `挖台阶回地面约 ${Math.round(depth * 3)} 格（${durationText(realSecondsToTicks(depth * 3))}，按正常速度估算的游戏时间）` : '';
-    })();
-    out.push(`下矿的账：这趟下来${durationText(realSecondsToTicks(trip.minutes * 60))}（按正常速度估算的游戏时间）${got.length ? `，挖到 ${got.join(' ')}` : '，还没挖到矿'}；背包空 ${p.emptySlots} 格${picks.length ? `；${picks.join('、')}` : ''}；身边${seen.length ? `看得见 ${seen.join('、')}` : '没看见矿'}${remembered ? `，48 格内记得 ${remembered} 处矿点` : ''}${back ? `；${back}，再下来一趟也差不多这个价` : ''}。清单后面几项还要不要这些料，一起掂量再决定收不收工`);
+    const t = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).find((f) => f.inside);
+    const back = t ? `历史路线参考点直线距离约 ${Math.round(Math.hypot(t.pos.x - here.x, t.pos.y - here.y, t.pos.z - here.z))} 格，当前路线是否可通未知` : '';
+    out.push(`下矿的账：这趟下来${durationText(realSecondsToTicks(trip.minutes * 60))}（按正常速度估算的游戏时间）${got.length ? `，挖到 ${got.join(' ')}` : '，还没挖到矿'}；背包空 ${p.emptySlots} 格${picks.length ? `；${picks.join('、')}` : ''}；身边${seen.length ? `看得见 ${seen.join('、')}` : '没看见矿'}${remembered ? `，48 格内记得 ${remembered} 处矿点` : ''}${back ? `；${back}` : ''}。清单后面几项还要不要这些料，一起掂量再决定收不收工`);
   }
   // 养动物、村民交易：打算里提到了才把机制摆出来（模型对这些的记忆常是含糊或老版本的）
   const husbandry = husbandryFacts(intent);
@@ -318,10 +312,10 @@ export function situationalReminders(ctx: MindContext): string[] {
     const feed = s.inventory.filter((i) => /^(wheat|wheat_seeds|carrot|potato|beetroot|beetroot_seeds|melon_seeds|pumpkin_seeds)$/.test(i.name)).map((i) => `${i.name}×${i.count}`).slice(0, 4);
     out.push(`肉的账：这局已经打猎 ${hunting.trips} 次、大约 ${hunting.animals} 只，最近几次每次为了肉走 ${hunting.recentWalked ?? '?'} 格；现在看得见能吃的动物 ${seenNow} 只，128 格内记得的还有约 ${remembered} 只${feed.length ? `；背包里有 ${feed.join(' ')}` : ''}。动物不会再生，打一只少一只——是接着找，还是圈几只养起来，自己掂量`);
   }
-  // 回地面时提供记过的入口，实际是否可通仍需确认。
+  // 回地面时提供历史参考点，不把它当作已确认的开口。
   if (SURFACE_INTENT.test(intent) && p.self.sky_visible !== true) {
     const t = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).find((f) => f.inside);
-    if (t) out.push(`记得这条自己挖过的通道的入口在 (${Math.round(t.pos.x)},${Math.round(t.pos.y)},${Math.round(t.pos.z)})；当前是否可通尚未确认`);
+    if (t) out.push(`靠近自己挖过的通道的历史路线点；这条记录的参考点在 (${Math.round(t.pos.x)},${Math.round(t.pos.y)},${Math.round(t.pos.z)})，当前开口位置和路线是否可通尚未确认`);
   }
   if (where === 'indoors' && /坑|垫高|台阶|爬出|挖出去|出坑/.test(intent)) out.push(`你${p.self.where!.text}。刚才想的“坑”其实是屋子的墙`);
   if (trapped && where === 'pit') out.push(`你${p.self.where!.text}：看【身边】local 和背包，怎么上去自己定`);

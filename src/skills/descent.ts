@@ -20,8 +20,8 @@ export const descend: Skill<{ target: Vec3Like }> = {
     const { adapter, senses, signal } = ctx;
     throwIfAborted(signal);
     const initial = adapter.state();
-    const refused = (message: string, code: 'BAD_ARGS' | 'NOT_FOUND' | 'LOW_HP' | 'NOT_CONNECTED' = 'BAD_ARGS') => fail(code, message, {
-      target: args.target, effectEvidence: { verified: true, changed: false, reasons: ['没有执行下行动作'] },
+    const refused = (message: string, code: 'BAD_ARGS' | 'NOT_FOUND' | 'LOW_HP' | 'NOT_CONNECTED' = 'BAD_ARGS', details: Record<string, unknown> = {}) => fail(code, message, {
+      target: args.target, ...details, effectEvidence: { verified: true, changed: false, reasons: ['没有执行下行动作'] },
     });
     if (!initial.connected || !initial.alive || !initial.observationReady) return refused('下行前没有有效的存活观测', 'NOT_CONNECTED');
     if (!initial.onGround || initial.riding || initial.inWater || initial.inLava) return refused('下行需要先在干燥支撑面站稳，不能从乘骑、游泳或下落中再次起跳');
@@ -38,7 +38,11 @@ export const descend: Skill<{ target: Vec3Like }> = {
     const receipt = option.receipt, age = Date.now() - receipt.at;
     if (receipt.worldId !== initial.worldId || receipt.sessionId !== initial.sessionId || receipt.dimension !== initial.dim
       || receipt.observationId < initial.observationId || age < 0 || age > 1000 || dist3(receipt.from, initial.pos) > 0.35) return refused('落点观测已过期、站位改变或不在当前会话，未下行', 'NOT_FOUND');
-    if (option.clearance !== 'clear' || option.corridor !== 'clear' || option.approach !== 'adjacent') return refused('入口、落体通道或落点净空尚未确认可通行，未下行');
+    if (option.clearance !== 'clear' || option.corridor !== 'clear' || option.approach !== 'adjacent') {
+      const geometry = { clearance: option.clearance, corridor: option.corridor, approach: option.approach, unknowns: option.unknowns };
+      const state = (v: 'clear' | 'blocked' | 'unknown') => v === 'clear' ? '已确认畅通' : v === 'blocked' ? '观察到阻挡' : '未看清';
+      return refused(`未下行：落点净空${state(option.clearance)}，落体通道${state(option.corridor)}，落点${option.approach === 'adjacent' ? '在相邻位置' : '不在相邻位置'}`, 'BAD_ARGS', { geometry });
+    }
     const target = option.target;
     if (Math.abs(Math.floor(initial.pos.x) - Math.floor(target.x)) + Math.abs(Math.floor(initial.pos.z) - Math.floor(target.z)) !== 1
       || Math.abs(target.y - Math.round(target.y)) > 0.01) return refused('当前寻路器只支持相邻四向、整数脚位的单步下落；此落点需要其他方式接近');

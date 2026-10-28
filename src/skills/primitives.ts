@@ -260,11 +260,14 @@ export const stepTo: Skill<CellArgs> = {
     if (!free(head)) problems.push(describe(head) === '未看清的格子' ? '目标格上方是 未看清的格子，无法确认头部空间'
       : `目标格上方是 ${describe(head)}${describe(head).endsWith('_door') ? '（门的状态或碰撞形状阻碍通行）' : `（会碰头${LIQUID_BLOCKS.has(describe(head)) ? '' : `；先 dig_at [${args.at[0]},${args.at[1] + 1},${args.at[2]}]`}）`}`);
     // 能站住：实心方块；薄雪层下面有实心方块也能踩
-    if (!standable(floor)) problems.push(`目标格脚下是 ${describe(floor)}，目标高度没有确认可站的支撑；可查看落点后选择下行，或放置支撑`);
+    const hasSupport = standable(floor);
+    if (!hasSupport) problems.push(`目标格脚下 (${floor.x},${floor.y},${floor.z}) 是 ${describe(floor)}，目标高度没有确认可站的支撑；未执行迈步，可查看落点后选择下行，或放置支撑`);
     if (args.at[1] === 1 && !free({ ...feet, y: feet.y + 2 })) problems.push(describe({ ...feet, y: feet.y + 2 }) === '未看清的格子'
       ? '往上跳时自己头顶上方是 未看清的格子，无法确认跳跃空间'
       : `往上跳时自己头顶上方是 ${describe({ ...feet, y: feet.y + 2 })}（跳不起来；先 dig_at [0,2,0]）`);
-    if (problems.length) return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：${problems.join('；')}`, { problems, ...after(ctx, args.facing, target) });
+    if (problems.length) return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：${problems.join('；')}`, { problems,
+      ...(!hasSupport ? { landingSupport: { pos: floor, observed: seen.get(`${floor.x},${floor.y},${floor.z}`) ?? null } } : {}),
+      ...after(ctx, args.facing, target) });
     let movementError: unknown;
     try {
       await a.moveTo({ kind: 'xyz', x: target.x, y: target.y, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())) });

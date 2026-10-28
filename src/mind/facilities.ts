@@ -14,7 +14,7 @@ export const FACILITY_LABELS = new Set([...Object.values(STATION_LABEL), '我的
  * 这里是查它们的统一入口：认真想时列出来，需要的时候（缺材料、想下矿）按需提一句。
  */
 export type FacilityKind = 'chest' | 'station' | 'bed' | 'passage';
-export interface Facility { kind: FacilityKind; label: string; pos: Vec3Like; dist: number; text: string; radius?: number; precise?: boolean; observedAt?: number; /** 通道：人就在里面 */ inside?: boolean }
+export interface Facility { kind: FacilityKind; label: string; pos: Vec3Like; dist: number; text: string; radius?: number; precise?: boolean; observedAt?: number; /** 通道：靠近历史路线点，不代表当前在通道里 */ inside?: boolean }
 
 type State = { worldId: string; dim: string; pos: Vec3Like; worldDay?: number };
 const flat = (a: Vec3Like, b: Vec3Like) => Math.round(Math.hypot(a.x - b.x, a.z - b.z));
@@ -33,7 +33,7 @@ function myStations(memory: Pick<WorldMemory, 'landmarks'>, s: State): Landmark[
   return out;
 }
 
-/** 一条通道说成一句话：从哪下去、多深、横巷在哪几层、挖到过什么、底下有什么 */
+/** 历史通道记录：地表参考点、曾到达的高度以及附近记忆，不推断当前通路。 */
 export function describePassage(rec: PassageRecord, here: Vec3Like, stations: Landmark[] = [], resources: Landmark[] = []): { text: string; entrance: Vec3Like; dist: number; inside: boolean } {
   const entrance = [...rec.entrances].sort((a, b) => flat(a, here) - flat(b, here))[0]
     ?? [...rec.path].sort((a, b) => b.y - a.y)[0];
@@ -44,9 +44,9 @@ export function describePassage(rec: PassageRecord, here: Vec3Like, stations: La
   const near = (l: Landmark, r: number) => rec.path.some((p) => d3(p, l.pos) <= r);
   const things = [...new Set(stations.filter((l) => near(l, 4)).map((l) => l.label.replace(/^我的/, '')))];
   const seen = [...new Set(resources.filter((l) => isResourceBlock(l.label) && near(l, 6)).map((l) => l.label))].slice(0, 3);
-  const text = `${rec.entrances.length ? `入口 ${at(entrance)}` : `最高处 ${at(entrance)}`}${inside ? '' : `（${dist} 格外）`}，能走到 y${rec.deepestY}`
-    + `${levels.length ? `，横巷在 y${levels.join('、y')}` : ''}${ores.length ? `，挖到过 ${ores.join('、')}` : ''}`
-    + `${seen.length ? `，沿途见过 ${seen.join('、')}` : ''}${things.length ? `，里面有${things.join('、')}` : ''}`;
+  const text = `${rec.entrances.length ? `进出地下时记录的位置 ${at(entrance)}（不一定是开口）` : `历史路线最高记录点 ${at(entrance)}`}${inside ? '，当前位置靠近历史路线点' : `（水平 ${dist} 格外）`}，曾到达最低 y${rec.deepestY}`
+    + `${levels.length ? `，历史脚点较多的高度有 y${levels.join('、y')}` : ''}${ores.length ? `，挖到过 ${ores.join('、')}` : ''}`
+    + `${seen.length ? `，历史路线附近记得见过 ${seen.join('、')}` : ''}${things.length ? `，历史路线附近记得有${things.join('、')}` : ''}；当前开口位置和路线是否可通尚未确认`;
   return { text, entrance, dist, inside };
 }
 

@@ -143,6 +143,20 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     }
     const reached = conditionReached();
     if (reached) return reached;
+    // 挖了一部分后遇到空洞也算动作有实际效果，但重复回到同一格继续挖不能当作下行进展。
+    // 只记录身体明确报告的停点；交回心智决定是否继续，不能替它选路。
+    if (step.skill === 'dig' && a.repeat > 1) {
+      const key = `${a.index - 1}:${JSON.stringify(step.args ?? {})}`;
+      const stop = result.data?.partialStop as { pos: { x: number; y: number; z: number }; below: string | null; completed: number; requested: number } | undefined;
+      a.partialStops ??= {};
+      const prev = a.partialStops[key];
+      if (stop && stop.completed < stop.requested) {
+        const same = prev && prev.iteration === a.iteration - 1 && prev.pos.x === stop.pos.x && prev.pos.y === stop.pos.y && prev.pos.z === stop.pos.z && prev.below === stop.below;
+        const count = same ? prev.count + 1 : 1;
+        a.partialStops[key] = { pos: stop.pos, below: stop.below, iteration: a.iteration, count };
+        if (count >= 3 && remainingSteps(a) > 0) return { kind: 'stuck', why: `dig 连续 ${count} 轮在 (${stop.pos.x},${stop.pos.y},${stop.pos.z}) 上方停下：本轮确认到达下一级 ${stop.completed}/${stop.requested} 次，再下面是 ${stop.below ?? '未知'}；这几轮停在同一处，请根据实际情况决定下一步` };
+      } else delete a.partialStops[key];
+    }
     if (remainingSteps(a) === 0) {
       if (a.doneWhen) return { kind: 'done', met: false, why: `${a.repeat} 轮做完了${conditionUnmet()}` };
       return { kind: 'done', met: true, why: '这段活的步骤都做完了' };

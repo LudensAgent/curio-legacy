@@ -77,7 +77,7 @@ test('通道：从另一个口下到以前挖过的通道里，接着那一条�
   m.close();
 });
 
-test('我的设施：通道说得出入口多远、多深、横巷、矿和里面的床；箱子按数量说最多的几样；房子不混进来', () => {
+test('我的设施：通道说明历史位置和未知的当前通路；箱子按数量说最多的几样；房子不混进来', () => {
   const m = new WorldMemory(null); m.setWorld(W);
   digDown(new PassageTracker(m, () => 'p1'));
   m.addLandmark('discovery', '我的床', D, at(36, 40, 1), 2);
@@ -86,8 +86,12 @@ test('我的设施：通道说得出入口多远、多深、横巷、矿和里�
   m.setChest(D, at(2, 64, 2), [{ name: 'oak_sapling', count: 4 }, { name: 'string', count: 2 }, { name: 'spider_eye', count: 1 }, { name: 'dirt', count: 3 }, { name: 'sand', count: 5 }, { name: 'sandstone', count: 1 }, { name: 'iron_ingot', count: 1 }, { name: 'cobblestone', count: 344 }]);
   const list = myFacilities(m, { worldId: W, dim: D, pos: at(10, 64, 0) });
   const tunnel = list.find((f) => f.kind === 'passage')!;
-  assert.match(tunnel.text, /入口 \(0,64,0\)（10 格外），能走到 y40，横巷在 y40，挖到过 iron_ore×1/);
-  assert.match(tunnel.text, /里面有床/);
+  assert.match(tunnel.text, /进出地下时记录的位置 \(0,64,0\)（不一定是开口）（水平 10 格外），曾到达最低 y40，历史脚点较多的高度有 y40，挖到过 iron_ore×1/);
+  assert.match(tunnel.text, /历史路线附近记得有床.*当前开口位置和路线是否可通尚未确认/);
+  assert.doesNotMatch(tunnel.text, /能走到|入口/);
+  const withoutSurface = describePassage({ ...m.passages(D)[0], entrances: [] }, at(10, 64, 0));
+  assert.match(withoutSurface.text, /历史路线最高记录点 .*当前开口位置和路线是否可通尚未确认/);
+  assert.doesNotMatch(withoutSurface.text, /地表位置|入口/);
   assert.doesNotMatch(tunnel.text, /coal_ore/, '离通道太远的矿不算沿途');
   const chest = list.find((f) => f.kind === 'chest')!;
   assert.match(chest.text, /cobblestone×344/);
@@ -117,7 +121,7 @@ test('地标：同一格的“工作台”和“我的工作台”只留自己�
   loaded.close();
 });
 
-test('按需提醒：想下矿时说出现成的通道；人在通道里就说顺着走；没想下矿不提', async () => {
+test('按需提醒：想下矿或回地面时说明历史路线与当前通路未知', async () => {
   const { situationalReminders } = await import('../src/mind/prompt.ts');
   const { SelfModel } = await import('../src/mind/self.ts');
   const { Perception } = await import('../src/perception/perception.ts');
@@ -140,12 +144,18 @@ test('按需提醒：想下矿时说出现成的通道；人在通道里就说�
       noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', tier: 'glance' as const } as any;
   };
   const away = situationalReminders(ctx(at(20, 64, 30), '挖阶梯下到 y20 找铁'));
-  assert.ok(away.some((r) => /记得自己挖过的通道：入口 \(0,64,0\)（36 格外），能走到 y40.*里面有床.*当前是否可通尚未确认/.test(r)), away.join('\n'));
+  assert.ok(away.some((r) => /记得自己挖过的通道：进出地下时记录的位置 \(0,64,0\)（不一定是开口）（水平 36 格外），曾到达最低 y40.*历史路线附近记得有床.*当前开口位置和路线是否可通尚未确认/.test(r)), away.join('\n'));
   assert.ok(!away.some((r) => /goto 入口会顺着记下的路线走下去/.test(r)), away.join('\n'));
   const inside = situationalReminders(ctx(at(22, 42, 0), '顺着矿道往前找铁'));
-  assert.ok(inside.some((r) => /记得自己在挖过的通道里：.*当前是否可通尚未确认/.test(r)), inside.join('\n'));
+  assert.ok(inside.some((r) => /当前位置靠近历史路线点.*当前开口位置和路线是否可通尚未确认/.test(r)), inside.join('\n'));
   const up = situationalReminders(ctx(at(22, 42, 0), '挖台阶一路挖到见天回地面'));
-  assert.ok(up.some((r) => /记得这条自己挖过的通道的入口在 \(0,64,0\)；当前是否可通尚未确认/.test(r)), up.join('\n'));
+  assert.ok(up.some((r) => /历史路线点；这条记录的参考点在 \(0,64,0\)，当前开口位置和路线是否可通尚未确认/.test(r)), up.join('\n'));
+  const tripCtx = ctx(at(22, 42, 0), '回地面');
+  tripCtx.percept.self.sky_visible = false;
+  tripCtx.trip = { minutes: 2, gained: {}, nearEnd: true };
+  const trip = situationalReminders(tripCtx).find((r) => r.startsWith('下矿的账'))!;
+  assert.match(trip, /历史路线参考点直线距离约 \d+ 格，当前路线是否可通未知/);
+  assert.doesNotMatch(trip, /沿通道走回|挖台阶回地面|再下来一趟/);
   const busy = situationalReminders(ctx(at(20, 64, 30), '砍 16 根原木'));
   assert.ok(!busy.some((r) => /挖过的通道/.test(r)));
   m.close();
