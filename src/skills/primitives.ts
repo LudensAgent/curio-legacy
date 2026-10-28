@@ -7,7 +7,7 @@ import { OWN_BUILDING_HINT, ownBuildingAt, storedChestAt } from './build.ts';
 import { noteEdit } from '../mind/edits.ts';
 import { PLACEABLE } from './survival.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
-import { findStation } from './stations.ts';
+import { findStation, isStation, rememberStation } from './stations.ts';
 
 /**
  * 原子动作：模型说出确切是哪一格，身体只负责准确执行、检查安全、如实回报。
@@ -293,6 +293,8 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
     const now = a.blockAt(pos);
     if (!now || AIR.has(now)) return fail('EFFECT_NOT_CONFIRMED', `[${args.at}] 还是空的`, after(ctx, args.facing));
     noteEdit(ctx.taskId, 'place', pos);
+    // 亲手放下的功能方块（附魔台、铁砧、酿造台、工作台……）记成“我的X”：以前只有 craft/use_item_on 放的才记，place_at 放的就忘了
+    if (isStation(now)) rememberStation(ctx, now, pos);
     return ok(`在 [${args.at}] 放了 ${now}`, { placed: now, ...after(ctx, args.facing) });
   },
 };
