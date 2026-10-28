@@ -50,3 +50,39 @@ test('有对应的镐：照常挖，有掉落', async () => {
   assert.deepEqual(r, { ok: true });
   assert.deepEqual(dug, ['stone']);
 });
+
+/** 背包里铁镐、钻石镐都有，记下挖的时候拿的是哪把 */
+function twoPicks(held: string | null) {
+  const items = [{ name: 'iron_pickaxe', type: 257, count: 1 }, { name: 'diamond_pickaxe', type: 871, count: 1 }];
+  const used: string[] = [];
+  const block = { name: 'stone', position: new Vec3(1, 64, 0), diggable: true, hardness: 1.5,
+    harvestTools: { 257: true, 871: true }, digTime: (t: number | null) => t === 871 ? 300 : t === 257 ? 400 : 7500 };
+  const bot: any = {
+    entity: { position: new Vec3(0, 64, 0), onGround: true, isInWater: false, effects: {} },
+    heldItem: held ? items.find((i) => i.name === held) : null, inventory: { items: () => items, slots: [] }, game: { dimension: 'overworld' },
+    blockAt: () => block, canDigBlock: () => true,
+    equip: async (it: any) => { bot.heldItem = it; }, unequip: async () => { bot.heldItem = null; },
+    dig: async () => { used.push(bot.heldItem?.name ?? 'hand'); }, stopDigging() {},
+  };
+  return { bot, used };
+}
+
+test('手上拿着能挖的铁镐：就用铁镐，身体不替它换成挖得更快的钻石镐', async () => {
+  const { bot, used } = twoPicks('iron_pickaxe');
+  await adapterWith(bot).dig({ x: 1, y: 64, z: 0 }, new AbortController().signal);
+  assert.deepEqual(used, ['iron_pickaxe']);
+});
+
+test('它亲手拿过铁镐：之后手上换成别的东西，自动换工具时还拿铁镐', async () => {
+  const { bot, used } = twoPicks(null);
+  const adapter = adapterWith(bot);
+  (adapter as any).noteToolChoice('iron_pickaxe');
+  await adapter.dig({ x: 1, y: 64, z: 0 }, new AbortController().signal);
+  assert.deepEqual(used, ['iron_pickaxe']);
+});
+
+test('没挑过工具：按挖得最快的拿', async () => {
+  const { bot, used } = twoPicks(null);
+  await adapterWith(bot).dig({ x: 1, y: 64, z: 0 }, new AbortController().signal);
+  assert.deepEqual(used, ['diamond_pickaxe']);
+});

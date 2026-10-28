@@ -1197,6 +1197,13 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return this.bot.inventory.items().some((i: any) => ids.includes(i.type));
   }
 
+  /** 它亲手拿到主手的工具（按种类记：pickaxe → iron_pickaxe）：之后自动换工具时照它的选择来 */
+  private toolChoice = new Map<string, string>();
+  private noteToolChoice(name: string) {
+    const kind = name.match(/_(pickaxe|axe|shovel|hoe)$/)?.[1] ?? (name === 'shears' ? 'shears' : null);
+    if (kind) this.toolChoice.set(kind, name);
+  }
+
   private async equipBestTool(block: any, signal?: AbortSignal) {
     const check = this.actionCheckpoint(signal);
     const b = this.bot;
@@ -1206,7 +1213,21 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const timeFor = (type: number | null, ench: any[] = []) => {
       try { return block.digTime(type, false, !!e.isInWater, !e.onGround, ench, e.effects ?? {}); } catch { return Infinity; }
     };
-    if (!block.harvestTools) bestTime = timeFor(null);
+    const bare = timeFor(null);
+    // 手上这把能挖（能掉东西、比空手快）：就用手上的。用哪把镐是它自己的决定（“钻石镐留着，这次用铁镐”），身体不替它换
+    const held = b.heldItem;
+    if (held && (block.harvestTools ? !!block.harvestTools[held.type] : timeFor(held.type, held.enchants ?? []) < bare)) return;
+    // 手上的不行才去背包里找。它自己挑过这类工具（亲手拿过铁镐）就还拿那种；没挑过才按挖得最快的拿
+    const kindOf = (name: string) => name.match(/_(pickaxe|axe|shovel|hoe)$/)?.[1] ?? (name === 'shears' ? 'shears' : null);
+    for (const it of b.inventory.items()) {
+      const kind = kindOf(it.name);
+      if (!kind || this.toolChoice.get(kind) !== it.name) continue;
+      if (block.harvestTools ? !block.harvestTools[it.type] : timeFor(it.type, it.enchants ?? []) >= bare) continue;
+      const pick = this.bestInvItem(it.name) ?? it;
+      if (b.heldItem?.type !== pick.type) await this.afterAction(() => b.equip(pick, 'hand'), check);
+      return;
+    }
+    if (!block.harvestTools) bestTime = bare;
     for (const it of b.inventory.items()) {
       if (block.harvestTools && !block.harvestTools[it.type]) continue;
       const t = timeFor(it.type, it.enchants ?? []);
@@ -1462,6 +1483,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     await this.afterAction(() => this.bot.equip(item, destination), check);
     const slot = this.bot.getEquipmentDestSlot?.(destination);
     const actual = destination === 'hand' ? this.bot.heldItem : this.bot.inventory.slots?.[slot];
+    if (destination === 'hand' && actual?.name === name) this.noteToolChoice(name);
     return actual?.name === name ? { ok: true } : { ok: false, reason: 'EQUIP_NOT_CONFIRMED' };
   }
 
@@ -1681,7 +1703,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     }
     if (b.inventory.slots?.[target]?.name !== name) return { ok: false, reason: 'HOTBAR_NOT_CONFIRMED' };
     b.setQuickBarSlot(index);
-    return b.heldItem?.name === name ? { ok: true } : { ok: false, reason: 'HOTBAR_NOT_CONFIRMED' };
+    if (b.heldItem?.name !== name) return { ok: false, reason: 'HOTBAR_NOT_CONFIRMED' };
+    this.noteToolChoice(name);
+    return { ok: true };
   }
 
   async useBlockAt(pos: Vec3Like, item: string, signal: AbortSignal): Promise<ActionResult> {
