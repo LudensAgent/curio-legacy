@@ -76,7 +76,17 @@ export const config = {
     model: str('CODER_LLM_MODEL'),
     baseUrl: str('CODER_LLM_BASE_URL').replace(/\/+$/, ''),
     apiKey: str('CODER_LLM_API_KEY'),
-    reasoningEffort: str('CODER_LLM_REASONING_EFFORT', 'high').toLowerCase(),
+    /**
+     * 写代码的推理力度（DeepSeek：low|high|max）。默认 low：两天的调用记录对比下来，想得越久写出的技能反而越差
+     * （改进时想 2–10K token 的新版 76% 不比旧版差，想 13K+ 的只有 58%），长思考大多花在反复重写同一段代码上。
+     * 三类调用可以分别覆盖：CODER_LLM_REASONING_EFFORT_FORGE（总结新技能）/ _IMPROVE（改进）/ _CURATE（整理技能库）。
+     */
+    reasoningEffort: str('CODER_LLM_REASONING_EFFORT', 'low').toLowerCase(),
+    reasoningEffortBy: {
+      forge: str('CODER_LLM_REASONING_EFFORT_FORGE').toLowerCase(),
+      improve: str('CODER_LLM_REASONING_EFFORT_IMPROVE').toLowerCase(),
+      curate: str('CODER_LLM_REASONING_EFFORT_CURATE').toLowerCase(),
+    } as Record<string, string>,
     maxTokens: num('CODER_LLM_MAX_TOKENS', 32768),
     timeoutMs: num('CODER_LLM_TIMEOUT_MS', 300000),
     maxCallsPerHour: num('CODER_LLM_MAX_CALLS_PER_HOUR', 1000),
@@ -101,6 +111,8 @@ export const config = {
     skillImproveGapMin: num('SKILL_IMPROVE_GAP_MIN', 0),
     /** 后台改进代码技能每小时最多几次 */
     skillImproveMaxPerHour: num('SKILL_IMPROVE_MAX_PER_HOUR', 12),
+    /** 同一份代码技能最多改几轮：改了这么多版还不可靠就收起，别再无休止地改（上次测试有一份改了 34 次） */
+    skillImproveMaxRounds: num('SKILL_IMPROVE_MAX_ROUNDS', 5),
     /** 后台写技能每小时最多请模型几次（死亡不算）；同一件事多少分钟内不再请第二次 */
     skillForgeMaxPerHour: num('SKILL_FORGE_MAX_PER_HOUR', 24),
     skillForgeRepeatMin: num('SKILL_FORGE_REPEAT_MIN', 20),

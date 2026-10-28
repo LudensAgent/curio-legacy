@@ -167,7 +167,9 @@ export class Planner {
     try {
       const scale = opts.maxTokensScale && opts.maxTokensScale > 1 ? Math.min(8, opts.maxTokensScale) : 1;
       const timeout = AbortSignal.timeout(this.cfg.llm.timeoutMs * scale + this.cfg.llm.fakeDelayMs + 1000);
-      const c = await this.provider.complete(messages, signal ? AbortSignal.any([signal, timeout]) : timeout, { tier, ...(scale > 1 ? { maxTokensScale: scale } : {}), ...(opts.reasoningEffort ? { reasoningEffort: opts.reasoningEffort } : {}) }, onDelta);
+      // 推理力度：调用方指定的优先，其次按调用类别（写代码的三类各有配置），都没有就用模型配置的默认
+      const reasoningEffort = opts.reasoningEffort || this.cfg.coder?.reasoningEffortBy?.[llmCategory(opts.label)] || undefined;
+      const c = await this.provider.complete(messages, signal ? AbortSignal.any([signal, timeout]) : timeout, { tier, ...(scale > 1 ? { maxTokensScale: scale } : {}), ...(reasoningEffort ? { reasoningEffort } : {}) }, onDelta);
       this.recordUsage(c.usage);
       this.stats.lastLatencyMs = c.latencyMs;
       this.stats.tierLatency[tier].sum += c.latencyMs;
