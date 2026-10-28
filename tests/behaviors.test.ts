@@ -282,7 +282,7 @@ test('想起来：按关键词从做过的事、日记和技能书里挑出相�
   memory.close();
 });
 
-test('“快干完了想想接下来”每段活只问一次：模型没写 next 也不会被连着追问', async (t) => {
+test('最后一步仍在执行时，不自动反复询问下一段', async (t) => {
   const prev = SKILLS.t_slow2;
   t.after(() => { if (prev) SKILLS.t_slow2 = prev; else delete SKILLS.t_slow2; });
   SKILLS.t_slow2 = { name: 't_slow2', description: '慢活', argsDoc: '{}', timeoutMs: 60000, movement: false, validate: () => ({ ok: true, args: {} }),
@@ -294,18 +294,15 @@ test('“快干完了想想接下来”每段活只问一次：模型没写 next
   const cfg = { ...config, llm: { ...config.llm, provider: 'openai' as const, maxCallsPerHour: 1000, maxPromptTokens: 60000, timeoutMs: 60000 } };
   const planner = new Planner(cfg, { name: 'scripted', complete: (messages) => new Promise((resolve) => pending.push({ resolve, messages })) }, adapter, memory, bus, null);
   const mind = new Mind({ adapter, arbiter, perception, memory, bus, self: new SelfModel(null), persona: '你叫 Curio。', thinker: new Thinker(planner, adapter, memory, bus, null) });
-  const nearEnd = Mind.NEAR_END_AFTER_MS;
-  Mind.NEAR_END_AFTER_MS = 0; // 最后一步一开始就算“快干完了”（测试里不等 4 秒）
   mind.start(1_000_000);
-  t.after(() => { Mind.NEAR_END_AFTER_MS = nearEnd; mind.stop(); arbiter.cancel('end'); memory.close(); });
+  t.after(() => { mind.stop(); arbiter.cancel('end'); memory.close(); });
   const reply = async (body: object) => { pending.at(-1)!.resolve({ text: JSON.stringify(body), latencyMs: 10 }); await flush(); };
   mind.tick(); await flush();
   await reply({ monologue: '砍树', decision: 'new', activity: { what: '砍树', steps: [{ skill: 't_slow2' }] } });
   mind.tick(); await flush();
-  assert.equal(pending.length, 2, '快干完了，想一次接下来');
-  await reply({ monologue: '接着砍', decision: 'continue' });
+  assert.equal(pending.length, 1, '最后一步仍在执行，不预判快干完');
   for (let i = 0; i < 5; i++) { mind.tick(); await flush(); }
-  assert.equal(pending.length, 2, '没写 next 也不再追问');
+  assert.equal(pending.length, 1, '运行中不会追问下一段');
 });
 
 function reflexWorld(t: TestContext, blockAt: (p: { x: number; y: number; z: number }) => string) {

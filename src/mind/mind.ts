@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import type { AgentState, GameAdapter } from '../adapter/types.ts';
 import type { Arbiter, Step, TaskOutcome, TaskPreemption } from '../arbiter/arbiter.ts';
 import type { AgentEvent, EventBus } from '../events.ts';
@@ -13,7 +14,7 @@ import { worldPoint } from '../skills/recovery.ts';
 import { causeName } from '../brain/habits.ts';
 import { pickFuel } from '../skills/economy.ts';
 import { pickVariant } from '../skills/work.ts';
-import { afterStep, argsLabel, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, nextStep, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
+import { afterStep, argsLabel, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, nextStep, recordOf, signatureOf, targetKeyOf, viewOf } from './activity.ts';
 import { instinctNote, type BehaviorEngine } from './behaviors.ts';
 import { recallLocal } from './recall.ts';
 import { Attention, EXPERIENCE_MS, RECONSIDER, stuckHere, URGENT } from './attention.ts';
@@ -27,7 +28,7 @@ import { NEAR_END_REASON, type MindContext } from './prompt.ts';
 import { cleanPlanStep, moodWords, SelfModel } from './self.ts';
 import type { LedgerView } from './ledger.ts';
 import type { Thinker } from './thinker.ts';
-import type { Activity, ActivityDraft, ActivityEnd, ActivityOutcome, ActivityRecord, MindDecision } from './types.ts';
+import type { Activity, ActivityDraft, ActivityEnd, ActivityOutcome, ActivityRecord, MindDecision, Noticing } from './types.ts';
 
 export interface MindDeps {
   adapter: GameAdapter; arbiter: Arbiter; perception: Perception; memory: WorldMemory; bus: EventBus;
@@ -81,9 +82,6 @@ export const DEFAULT_TIMING = {
 
 interface Snapshot { at: number; sessionId: string; dim: string; pos: AgentState['pos']; hp: number; food: number; inv: Record<string, number>; inWater: boolean; hostiles: string[]; phase: string }
 
-/** 很快、原地完成的动作：在它开始时就可以想下一段活 */
-const QUICK = new Set(['craft', 'eat', 'place_torch', 'pickup_items', 'equip', 'smelt', 'store_items', 'take_items', 'inspect_block', 'interact_block', 'use_item']);
-
 /**
  * 心智（取代旧的 Executive）：感知 → 注意 → 思考 → 一段一段地干活 → 回看与学习。
  *
@@ -119,7 +117,7 @@ export class Mind {
   lastDecision: MindDecision | null = null;
   private timing: typeof DEFAULT_TIMING;
   private generation = 0;
-  private thinking: { controller: AbortController; reason: string; tier: 'glance' | 'deliberate'; startedAt: number; generation: number; activityId: string | null } | null = null;
+  private thinking: { controller: AbortController; reason: string; tier: 'glance' | 'deliberate'; startedAt: number; generation: number; activityId: string | null; noticed: Noticing[] } | null = null;
   private timer: NodeJS.Timeout | null = null;
   private listening = false;
   private suspendedBy = new Set<string>();
@@ -183,13 +181,9 @@ export class Mind {
   static FED_UP_REVIEW = 0.65;
   /** 游戏里现在是第几天（感知时更新） */
   private gameDay = NaN;
-  /** “这段活快干完了，想想接下来”每段活只问一次（模型没写 next 也不会一直追问） */
-  private nearEndAskedFor: string | null = null;
   private waitingSince: number | null = null;
   /** 干等时无聊到多少就想想“这段时间能做点什么” */
   static BORED_AT = 0.6;
-  /** 最后一步做了这么久才开始想“接下来做什么” */
-  static NEAR_END_AFTER_MS = 4000;
   static NEAR_END_REASON = NEAR_END_REASON;
   /** 要命的处境（窒息、被贴身围攻、水下没气）：用“瞥一眼”那档快速拿主意，几秒都等不起 */
   static DANGER_REASON = '有危险，马上拿主意';
@@ -457,13 +451,7 @@ export class Mind {
     const bored = this.attention.peek().some((n) => n.key === 'bored_waiting');
     if (bored && gapOk) return this.think('干等着好无聊，想想这段时间能做点什么', 'deliberate');
     if (!resting && gapOk && this.attention.highest() >= RECONSIDER) return this.think('注意到了一些事', 'glance');
-    // 边做边想：最后一步做了一会儿（模型想一次要好几秒）才琢磨下一段活；每段活只问一次。
-    // 以前“最后一轮一开始”就问：repeat=1 的活第一步一开工就问，模型常顺手把刚开工的活换掉，注意力几秒一换
-    if (!this.queuedNext && this.nearEndAskedFor !== this.activity.id && current?.planId === this.activity.id && remainingSteps(this.activity) === 0
-      && Date.now() - current.startedAt >= Mind.NEAR_END_AFTER_MS) {
-      this.nearEndAskedFor = this.activity.id;
-      return this.think(Mind.NEAR_END_REASON, this.needsBigPicture() ? 'deliberate' : 'glance');
-    }
+    // 没有待启动的步骤，不代表正在执行的最后一步快做完了；等结果回来再决定接下来做什么。
     if (Date.now() - Math.max(this.activityThoughtAt, this.lastThoughtAt) > this.timing.checkInMs) return this.think('做了一会儿了，抬头看看', 'glance');
   }
 
@@ -629,10 +617,6 @@ export class Mind {
     this.activity.stepStart = { pos: { ...state.pos }, view: viewOf(this.safe(() => this.d.perception.snapshot(), undefined)) };
     const r = this.d.arbiter.start(step, this.activity.source === 'rule' ? 'rule' : 'llm', { planId: this.activity.id });
     if ('error' in r) this.handleStepResult(step, { status: 'failed', failureCode: 'BAD_ARGS', summary: r.error }, 0);
-    else if (remainingSteps(this.activity) === 0 && !this.queuedNext && !this.thinking && QUICK.has(step.skill) && this.nearEndAskedFor !== this.activity.id) {
-      this.nearEndAskedFor = this.activity.id;
-      this.think(Mind.NEAR_END_REASON, this.needsBigPicture() ? 'deliberate' : 'glance');
-    }
   }
 
   /** 只检查眼下确实会用的物品；采集等前置动作的产出仍交给实际执行确认。 */
@@ -707,6 +691,17 @@ export class Mind {
     const a = this.activity;
     if (!a) return;
     this.activity = null;
+    // A thought started before this result cannot account for the failure. Retry with
+    // the actual result before starting another activity; preserve urgent and operator thoughts.
+    const thought = this.thinking;
+    if ((outcome === 'stuck' || outcome === 'unmet') && thought?.activityId === a.id
+      && thought.reason !== Mind.DANGER_REASON && !thought.noticed.some((n) => n.level === 'urgent') && !this.order && !this.userSuggestion) {
+      this.cancelThinking('activity_result');
+      for (const n of thought.noticed) {
+        if (!this.attention.peek().some((pending) => pending.key === n.key)) this.attention.notice(n.key, n.what, n.salience, 0);
+      }
+      if (outcome === 'unmet') this.requestThink(`「${a.what}」收工条件未满足：${summary}`, 'deliberate');
+    }
     // 收工条件只表示触发了停止，不能由此断言操作者的整条指令已经完成。
     if (this.order?.activityId === a.id) {
       if (outcome === 'done' && !a.doneWhen) {
@@ -952,8 +947,8 @@ export class Mind {
     const generation = this.generation;
     const controller = new AbortController();
     const activityId = this.activity?.id ?? null;
-    this.thinking = { controller, reason, tier, startedAt: Date.now(), generation, activityId };
     const noticed = this.attention.drain();
+    this.thinking = { controller, reason, tier, startedAt: Date.now(), generation, activityId, noticed };
     const urgent = noticed.some((n) => n.level === 'urgent');
     const reflect = tier === 'deliberate' && this.finishedSinceReflect >= 4;
     this.pruneFailures();
@@ -1195,11 +1190,18 @@ export class Mind {
     if (decision.kind === 'adjust' && this.activity) {
       if (!sameActivity) { this.staleDropped++; return; } // 对旧活的调整，活已经换了
       const a = this.activity;
-      // 做法真的变了（不只是改个数量）：正在做的那一步也停下，马上按新做法来。
-      // 以前只改了 routine、等手上这一步自己做完：掉进水里想“游上岸”，手上的 gather 却在水下又挖了两分钟，淹死了
-      const changedMethod = signatureOf(a.steps) !== signatureOf(draft.steps);
-      if (changedMethod && this.d.arbiter.info()?.planId === a.id) this.d.arbiter.cancel('改了做法');
-      Object.assign(a, { what: draft.what, why: draft.why || a.why, kind: draft.kind, steps: draft.steps, repeat: draft.repeat, iteration: 0, index: 0, adaptations: [], consecutiveFailures: 0,
+      const running = this.d.arbiter.info();
+      const sameStep = (step: Step | undefined, other: Step | undefined) => !!step && !!other
+        && step.skill === other.skill && isDeepStrictEqual(step.args ?? {}, other.args ?? {});
+      // 新计划可以从正在做的步骤开始，也可以保留已经做完的前缀。
+      // 只有当前步骤及其参数相同，且前面没有新动作时，才让它继续执行。
+      const currentIndex = a.index - 1;
+      const firstIsRunning = running?.planId === a.id && sameStep(draft.steps[0], running);
+      const keepsPrefix = running?.planId === a.id && currentIndex > 0 && sameStep(draft.steps[currentIndex], running)
+        && a.steps.slice(0, currentIndex).every((step, i) => sameStep(step, draft.steps[i]));
+      const runningIndex = keepsPrefix ? currentIndex : firstIsRunning ? 0 : -1;
+      if (running?.planId === a.id && runningIndex < 0) this.d.arbiter.cancel('改了做法');
+      Object.assign(a, { what: draft.what, why: draft.why || a.why, kind: draft.kind, steps: draft.steps, repeat: draft.repeat, iteration: 0, index: runningIndex + 1, adaptations: [], consecutiveFailures: 0,
         monologue: decision.monologue || a.monologue });
       if (draft.doneWhen) a.doneWhen = draft.doneWhen; else delete a.doneWhen;
       if (draft.expect) a.expect = draft.expect;
