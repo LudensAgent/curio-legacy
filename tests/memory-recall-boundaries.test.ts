@@ -55,6 +55,43 @@ test('mixed historical facts retain resource locations and quantities beside a c
   });
 });
 
+test('English container quantities use registered item names and display names', () => {
+  const memory = { chests: () => [], landmarks: () => [] }, now = Date.now(), ts = now - 121_000;
+  ['Chest', 'chests', 'BARREL', 'barrels', 'Shulker Box', 'Shulker Boxes', 'red_shulker_box',
+    'light_blue_shulker_box', 'trapped_chest', 'Ender_Chest', '潜影盒'].forEach((container) => {
+    const text = container + ' at (123,67,-234) held granite 64, 64 cobblestone, 32 iron ingots, minecraft:diamond 16 and 12 Torches';
+    const projected = recallText(text, memory, 'overworld', ts, now);
+    assert.match(projected, /历史容器区域/);
+    assert.match(projected, /granite（不少，历史印象）/);
+    assert.match(projected, /cobblestone（不少，历史印象）/);
+    assert.match(projected, /iron ingots（不少，历史印象）/);
+    assert.doesNotMatch(projected, /123,67,-234|granite 64|64 cobblestone|32 iron ingots|diamond 16|12 Torches/);
+    assert.equal(recallText(projected, memory, 'overworld', ts, now), projected);
+  });
+});
+
+test('English item quantities do not turn chestplates, dates or other numbers into container inventory', () => {
+  const memory = { chests: () => [], landmarks: () => [] }, now = Date.now(), ts = now - 121_000;
+  [
+    'I wore a diamond_chestplate at (123,67,-234), with 32 iron ingots and granite 64',
+    'A Chestplate at (123,67,-234) had durability 64',
+    'Chest record 2026-10-28 at 12:34:56, version 1.20.1, 64 attempts and 32 metres',
+    'Chest dated granite 2026-10-28, iron_ingot 32.5, Clock 12:34:56 and 1,024 cobblestone',
+  ].forEach((text) => assert.equal(recallText(text, memory, 'overworld', ts, now), text));
+});
+
+test('English mixed facts keep resource evidence precise while container quantities become impressions', () => {
+  const memory = { chests: () => [], landmarks: () => [] }, now = Date.now(), ts = now - 121_000;
+  const resource = 'Iron ore at (80,10,80), 32 iron_ore and granite 64';
+  const container = 'Chest at (123,67,-234) held 32 iron ingots and 64 cobblestone';
+  [';', '. ', '\n'].flatMap((separator) => [resource + separator + container, container + separator + resource]).forEach((text) => {
+    const projected = recallText(text, memory, 'overworld', ts, now);
+    assert.ok(projected.includes(resource));
+    assert.match(projected, /历史容器区域/);
+    assert.doesNotMatch(projected, /123,67,-234|32 iron ingots|64 cobblestone/);
+  });
+});
+
 test('old container locations do not leak through recall, dashboard or station name navigation', (t) => {
   const world = new TestWorld(), memory = new WorldMemory(null), ts = Date.now() - 121_000;
   t.after(() => memory.close());

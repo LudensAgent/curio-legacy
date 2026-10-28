@@ -1,7 +1,15 @@
 import { bucket, chestLocation, isContainerLandmark, qtyWord } from './chest-memory.ts';
 import type { WorldMemory } from './store.ts';
+import minecraftData from 'minecraft-data';
 
-const CONTAINER_WORD = /箱|木桶|chest|barrel|shulker|store_items|take_items|use_gui/;
+const CONTAINER_WORD = /箱|木桶|潜影盒|\b(?:chests?|(?:trapped|ender)_chest|barrels?|(?:[a-z]+_)*shulker_box(?:es)?|shulker[ -]box(?:es)?|store_items|take_items|use_gui)\b/i;
+const ITEM_WORDS = [...new Set(minecraftData('1.20.1').itemsArray.flatMap(({ name, displayName }) => {
+  const display = displayName.toLowerCase();
+  const plural = /(?:s|x|z|ch|sh)$/.test(display) ? display + 'es' : /[^aeiou]y$/.test(display) ? display.slice(0, -1) + 'ies' : display + 's';
+  return [name, 'minecraft:' + name, display, plural];
+}))].sort((a, b) => b.length - a.length).map((word) => word.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')).join('|');
+const ITEM_COUNT = '(?<![\\d:/+-])(?<!\\d[.,])\\d+(?!\\d|[.,:/+-]\\d)';
+const ENGLISH_QUANTITY = new RegExp('(?<![\\p{L}\\p{N}_:])(?:(' + ITEM_COUNT + ')\\s+(' + ITEM_WORDS + ')|(' + ITEM_WORDS + ')\\s+(' + ITEM_COUNT + '))(?![\\p{L}\\p{N}_:])', 'giu');
 
 /** Consolidated memories can contain several facts; only the container fact loses precision. */
 function containerFactAt(text: string, offset: number) {
@@ -51,6 +59,8 @@ export function recallText(text: string, memory: Pick<WorldMemory, 'chests' | 'l
       })
     .replace(/([\p{L}\p{N}_:]+)×(\d+)/gu, (match: string, item: string, count: string, offset: number, whole: string) => containerFactAt(whole, offset) ? `${item}（${qtyWord(bucket(Number(count)))}，历史印象）` : match)
     .replace(/(\d+) 个 ([a-z][a-z0-9_]*)/g, (match: string, count: string, item: string, offset: number, whole: string) => containerFactAt(whole, offset) ? `${qtyWord(bucket(Number(count)))} ${item}（历史印象）` : match)
+    .replace(ENGLISH_QUANTITY, (match: string, before: string | undefined, afterItem: string | undefined, beforeItem: string | undefined, after: string | undefined, offset: number, whole: string) =>
+      containerFactAt(whole, offset) ? (beforeItem ?? afterItem) + '（' + qtyWord(bucket(Number(before ?? after))) + '，历史印象）' : match)
     .replace(/("(?:name|item)"\s*:\s*"[^"]+"\s*,\s*)"count"\s*:\s*(\d+)/g,
       (match: string, name: string, count: string, offset: number, whole: string) => containerFactAt(whole, offset) ? `${name}"quantity":"${qtyWord(bucket(Number(count)))}（历史印象）"` : match);
 }
