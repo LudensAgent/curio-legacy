@@ -1604,9 +1604,27 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           if (got <= 0) return { ok: false, reason: `TAKE_REFUSED:${it.name}（产物取不出：可能经验不够、背包满或配方不成立）`, view: this.guiView(w), done };
           done.push(`从第 ${slot} 格取出 ${it.name}×${got}`);
         } else if ('button' in op) {
+          // 附魔台：选项要等服务器把等级发过来才有（刚放进东西的那一下还没有），没准备好就点，服务器会悄悄不理
+          const table = Array.isArray(w.enchantments);
+          if (table) {
+            const until = Date.now() + 1500;
+            while (Date.now() < until && !(w.enchantments[op.button]?.level > 0)) await this.afterAction(() => sleep(100, signal), check);
+          }
+          const key = () => JSON.stringify(w.slots.slice(0, size()).map((it: any) => it ? [it.name, it.count, this.itemEnchants(it) ?? null] : null));
+          const before = key(), xpBefore = b.experience?.level ?? 0;
           b._client.write('enchant_item', { windowId: w.id, enchantment: op.button });
-          await settle();
-          done.push(`点了按钮 ${op.button}`);
+          const until = Date.now() + 1500;
+          while (Date.now() < until && key() === before) await this.afterAction(() => sleep(100, signal), check);
+          if (key() === before) {
+            // 点了没反应：原样说出眼前的条件（要几级、身上几级、青金石几个），够不够、差什么由它自己看
+            const need = table ? w.enchantments[op.button]?.level : undefined;
+            const lapis = table ? (w.slots[1]?.name === 'lapis_lazuli' ? w.slots[1].count : 0) : undefined;
+            const why = table ? `（这个选项需 ${need > 0 ? `${need} 级` : '——还没有选项（放进去的东西不能附魔，或者没放青金石）'}，身上 ${xpBefore} 级，台上青金石 ${lapis} 个；选项 ${op.button} 要 ${op.button + 1} 个青金石、扣 ${op.button + 1} 级）` : '';
+            return { ok: false, reason: `BUTTON_NO_EFFECT:点了按钮 ${op.button}，界面里什么都没变${why}`, view: this.guiView(w), done };
+          }
+          const target = table ? w.slots[0] : null;
+          const got = target ? this.itemEnchants(target) : undefined;
+          done.push(table && got ? `附魔成功：${target.name} 得到 ${got.join('、')}（经验 ${xpBefore}→${b.experience?.level ?? '?'} 级）` : `点了按钮 ${op.button}，界面变了`);
         } else if ('rename' in op) {
           b._client.write('name_item', { name: op.rename });
           await settle();

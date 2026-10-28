@@ -121,11 +121,36 @@ test('use_gui 适配层：按格子放 1 个/全部，shift 取出产物，点�
   assert.deepEqual(r.view.slots.map((s: any) => s.role), ['要修/改名的物品', '材料或附魔书', '产物（消耗经验）']);
   assert.deepEqual(clicks, [[3, 0, 0], [0, 0, 0], [4, 0, 0], [1, 1, 0], [1, 1, 0], [4, 0, 0]]);
   slots[2] = { name: 'iron_sword', count: 1, type: data.itemsByName.iron_sword.id };
-  const t = await a.useGui({ x: 1, y: 64, z: 0 }, [{ take: { slot: 2 } }, { button: 1 }], new AbortController().signal);
+  const t = await a.useGui({ x: 1, y: 64, z: 0 }, [{ take: { slot: 2 } }], new AbortController().signal);
   assert.equal(t.ok, true, t.reason);
   assert.match(t.done.join(' '), /取出 iron_sword×1/);
+  // 点了按钮界面里什么都没变：不能说成“点了按钮”就算数
+  const noop = await a.useGui({ x: 1, y: 64, z: 0 }, [{ button: 1 }], new AbortController().signal);
+  assert.equal(noop.ok, false);
+  assert.match(noop.reason, /BUTTON_NO_EFFECT/);
   const bad = await a.useGui({ x: 1, y: 64, z: 0 }, [{ take: { slot: 0 } }, { put: { item: 'diamond', slot: 1 } }], new AbortController().signal);
   assert.equal(bad.ok, false);
+});
+
+test('附魔台：选项出来再点，物品真的带上附魔才算成；经验不够时说清要几级、身上几级', async () => {
+  const { a, w, slots } = guiBot('enchantment', 2, { 0: ['iron_pickaxe', 1], 1: ['lapis_lazuli', 5] });
+  w.enchantments = [{ level: 0, expected: { enchant: -1, level: -1 } }, { level: 0, expected: { enchant: -1, level: -1 } }, { level: 0, expected: { enchant: -1, level: -1 } }];
+  a.bot.experience = { level: 10 };
+  a.itemEnchants = (it: any) => it?.ench;
+  a.bot._client.write = (_: string, body: any) => {
+    if (a.bot.experience.level < w.enchantments[body.enchantment].level) return;
+    slots[0] = { ...slots[0], ench: ['efficiency 2'] }; slots[1].count -= body.enchantment + 1; a.bot.experience.level -= body.enchantment + 1;
+  };
+  const orig = a.bot.clickWindow;
+  a.bot.clickWindow = async (...args: any[]) => { await orig(...args); if (slots[0] && slots[1]) w.enchantments.forEach((e: any, i: number) => { e.level = [3, 8, 30][i]; }); };
+  const r = await a.useGui({ x: 1, y: 64, z: 0 }, [{ put: { item: 'iron_pickaxe', slot: 0 } }, { put: { item: 'lapis_lazuli', slot: 1 } }, { button: 2 }], new AbortController().signal);
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /需 30 级，身上 10 级/);
+  slots[0] = null; slots[1] = null; slots[2] = { name: 'iron_pickaxe', count: 1, type: data.itemsByName.iron_pickaxe.id }; slots[3] = { name: 'lapis_lazuli', count: 5, type: data.itemsByName.lapis_lazuli.id };
+  w.enchantments.forEach((e: any) => { e.level = 0; });
+  const ok = await a.useGui({ x: 1, y: 64, z: 0 }, [{ put: { item: 'iron_pickaxe', slot: 0 } }, { put: { item: 'lapis_lazuli', slot: 1 } }, { button: 1 }], new AbortController().signal);
+  assert.equal(ok.ok, true, ok.reason);
+  assert.match(ok.done.join(' '), /附魔成功：iron_pickaxe 得到 efficiency 2/);
 });
 
 test('trade 适配层：先看交易表，按序号交易并按背包变化确认', async () => {
