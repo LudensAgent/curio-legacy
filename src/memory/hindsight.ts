@@ -188,10 +188,13 @@ export function hindsightBankOps(settings: Pick<MemorySettings, 'baseUrl' | 'api
     async importFrom(file: string, bankId: string): Promise<void> {
       const fs = await import('node:fs');
       const archive = new Blob([fs.readFileSync(file)], { type: 'application/zip' });
-      const operationId = await client.importBank(bankId, archive, { targetBankId: bankId, includeData: true, includeBankConfig: true, signal: AbortSignal.timeout(120_000) });
+      // 导入任务必须挂在已存在的 bank 下，而恢复目标必须不存在；宿主只登记导入操作。
+      const importBankId = `${bankId}-import`;
+      await client.createBank(importBankId, { signal: AbortSignal.timeout(30_000) });
+      const operationId = await client.importBank(importBankId, archive, { targetBankId: bankId, includeData: true, includeBankConfig: true, signal: AbortSignal.timeout(120_000) });
       const until = Date.now() + timeoutMs;
       while (Date.now() < until) {
-        const st = await sdk.getOperationStatus({ client: raw, path: { bank_id: bankId, operation_id: operationId }, signal: AbortSignal.timeout(30_000) });
+        const st = await sdk.getOperationStatus({ client: raw, path: { bank_id: importBankId, operation_id: operationId }, signal: AbortSignal.timeout(30_000) });
         const status = st.data?.status;
         if (status === 'completed') return;
         if (status === 'failed' || status === 'cancelled' || status === 'not_found') throw new Error(`Hindsight 恢复没成（${status}）`);
