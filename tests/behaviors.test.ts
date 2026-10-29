@@ -107,6 +107,29 @@ for (const liquid of ['water', 'lava'] as const) test(`自学技能可在${liqui
   } finally { engine.dispose(); }
 });
 
+test('救命类候选技能在要命条件下也会自动接手（以 trial 试用），普通候选不自动接手', () => {
+  const adapter = new FakeAdapter(), bus = new EventBus();
+  adapter.hp = 6;
+  adapter.inv.set('oak_planks', 2);
+  const skeleton: Senses = { ...noSenses, perceivedEntities: () => [{ id: 1, name: 'skeleton', kind: 'hostile', dist: 12, pos: { x: 12, y: 64, z: 0 } } as EntityInfo] };
+  const starts: Step[] = [];
+  const current = { id: 'task', planVersion: 1, skill: 'dig_at', args: {}, source: 'llm', progress: 0, note: '', startedAt: Date.now(), deadline: Date.now() + 30000, movement: false } as TaskInfo;
+  const arbiter = { paused: false, info: () => current, on() {}, off() {},
+    start: (step: Step, source: TaskSource) => { starts.push(step); return { ...current, id: 'learned', skill: step.skill, args: step.args, source }; } } as unknown as Arbiter;
+  const book = new SkillBook(null, tmp());
+  book.write('shield-retreat-when-hurt', '血少被骷髅射时举盾后撤', '候选', { when: { hp_below: 8, hostile: { name: 'skeleton', within: 16 } }, steps: [{ skill: 'look_around' }] }, { candidate: true });
+  book.write('grab-planks', '有木板就收起来', '候选', { when: { has: { item: 'oak_planks', count: 1 } }, steps: [{ skill: 'look_around' }] }, { candidate: true });
+  const engine = new BehaviorEngine(book, adapter, arbiter, bus, skeleton);
+  try {
+    const reflex = new Reflex(adapter, arbiter, bus, skeleton, { instincts: 'skills', routineCare: false, behaviors: engine });
+    reflex.tick();
+    assert.equal(starts.at(-1)?.skill, 'use_skill');
+    assert.equal((starts.at(-1)?.args as { name: string }).name, 'shield-retreat-when-hurt', '救命候选自动接手');
+    assert.equal((starts.at(-1)?.args as { trial?: boolean }).trial, true, '候选以 trial 试用');
+    assert.ok(!starts.some((s) => (s.args as { name: string }).name === 'grab-planks'), '普通候选不自动接手');
+  } finally { engine.dispose(); }
+});
+
 test('样本技能读取：恢复类、调用类与写技能说明可用，引用隐藏动作的旧样本拒绝启用', () => {
   const book = new SkillBook(BUILTIN_SKILLS_DIR, FIXTURES);
   const engine = new BehaviorEngine(book, new FakeAdapter(), null, new EventBus(), noSenses);
