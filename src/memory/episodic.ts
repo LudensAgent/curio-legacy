@@ -185,7 +185,9 @@ export class EpisodicMemory implements MemoryRecall {
       const d = (event.data ?? {}) as Record<string, unknown>;
       const notable = event.type !== 'attempt_end' || d.outcome !== 'done' || Number(d.durationSec ?? 0) >= 60;
       if (this.remoteEnabled() && this.writable && notable && ['overworld', 'the_nether', 'the_end'].includes(state.dim)) {
-        this.queue.push({ episode: detail.length > 800 ? { ...episode, text: recallText(`${event.msg.slice(0, 4000)} @ ${state.dim} ${position.join(',')}\n${detail.slice(0, 800)}`, this.memory, state.dim, event.ts) } : episode, attempts: 0, nextAttemptAt: 0 });
+        // 远程只送「经历」叙事，不送结构化坐标：坐标由 WorldMemory（矿点/箱子/工作站）管，Hindsight 只管联想式经历
+        const experience = recallText(event.msg.slice(0, 4000), this.memory, state.dim, event.ts);
+        this.queue.push({ episode: { ...episode, text: experience }, attempts: 0, nextAttemptAt: 0 });
         if (this.persistQueue()) this.scheduleDrain();
       }
     } catch { this.warn('记忆事件处理失败；游戏继续运行。'); }
