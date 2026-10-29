@@ -473,6 +473,28 @@ export class Perception {
     }
   }
 
+  /** 自己挖的通道洞口：亲眼看那一格已变成实心（被封/塌了），就把这个洞口从记录里去掉；最后一个洞口也没了就整条通道作废 */
+  private forgetSealedEntrances(s: { dim: string; pos: Vec3Like }) {
+    const recs = this.memory.passages(s.dim);
+    const near = recs.flatMap((r) => r.entrances.map((e) => ({ id: r.id, e })))
+      .filter(({ e }) => Math.hypot(e.x - s.pos.x, e.y - s.pos.y, e.z - s.pos.z) <= this.vision.effectiveRange());
+    if (!near.length) return;
+    const positions = near.map(({ e }) => e);
+    const seen = new Map(Array.from({ length: Math.ceil(positions.length / 32) }, (_, i) => this.vision.observeBlocks(positions.slice(i * 32, (i + 1) * 32))).flat()
+      .map((o) => [`${o.pos.x},${o.pos.y},${o.pos.z}`, o]));
+    for (const { id, e } of near) {
+      const o = seen.get(`${e.x},${e.y},${e.z}`);
+      if (!o) continue; // 没看见（遮挡/未加载）：不猜，留着
+      if (isSoftBlock(o.name) || o.name === 'water' || o.name === 'lava' || o.name === 'bubble_column') continue; // 还空着/是水：洞口还在
+      const rec = this.memory.passages(s.dim).find((r) => r.id === id);
+      if (!rec) continue;
+      rec.entrances = rec.entrances.filter((p) => !(p.x === e.x && p.y === e.y && p.z === e.z));
+      if (rec.entrances.length) this.memory.savePassage(rec);
+      else this.memory.forgetPassage(id);
+      this.memory.markGone('矿口', s.dim, e, o.name);
+    }
+  }
+
   update(): Percept {
     const s = this.adapter.state();
     this.memory.setWorld(s.worldId);
@@ -524,6 +546,7 @@ export class Perception {
         } else if (STRUCTURE_HINT.has(b.name)) this.memory.addLandmark('discovery', b.name, s.dim, b.pos);
       }
       this.forgetVanishedOre(s);
+      this.forgetSealedEntrances(s);
       for (const e of v.seen) {
         if (e.kind === 'item' || e.kind === 'other') continue;
         const key = e.kind === 'player' ? 'player' : e.name;
