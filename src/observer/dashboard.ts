@@ -33,6 +33,10 @@ export interface DashboardHandlers {
   rescue?(): Promise<unknown>;
   /** 一键天亮：用 RCON /time set day 把游戏时间跳到白天 */
   dawn?(): Promise<{ ok: boolean; error?: string }>;
+  /** 给予物品：用 RCON /give 把物品塞进 Bot 背包 */
+  give?(item: string, count: number): Promise<{ ok: boolean; error?: string; item?: string; count?: number }>;
+  /** 所有已知物品（英文名 + 中文名，控制台「给予物品」搜索） */
+  listItems?(): { name: string; zh: string }[];
   /** 手动整理技能，运行中返回 busy，完成后返回可读结果。 */
   curateSkills?(): Promise<{ ok: true; result: string } | { ok: false; error: string; busy?: boolean }>;
   /** 列出当前技能（内置 + 自学）与禁用状态 */
@@ -213,6 +217,10 @@ export function startDashboard(
       if (!h.listSkills) return send(res, 404, '{"error":"not supported"}');
       return send(res, 200, JSON.stringify(h.listSkills()));
     }
+    if (req.method === 'GET' && p === '/api/items') {
+      if (!h.listItems) return send(res, 404, '{"error":"not supported"}');
+      return send(res, 200, JSON.stringify({ items: h.listItems() }));
+    }
     if (req.method === 'POST') {
       if (p === '/api/pause') { h.pause(); return send(res, 200, '{"ok":true}'); }
       if (p === '/api/resume') { h.resume(); return send(res, 200, '{"ok":true}'); }
@@ -271,6 +279,16 @@ export function startDashboard(
         if (!text) return send(res, 400, '{"error":"text required"}');
         h.suggest(text);
         return send(res, 200, '{"ok":true}');
+      }
+      if (p === '/api/give') {
+        if (!h.give) return send(res, 404, '{"error":"not supported"}');
+        const body = await readBody(req);
+        const item = String(body?.item ?? '').trim();
+        const count = Number(body?.count ?? 1);
+        if (!item) return send(res, 400, '{"error":"item required"}');
+        if (!Number.isInteger(count) || count < 1) return send(res, 400, '{"error":"count must be a positive integer"}');
+        const r = await h.give(item, Math.min(Math.floor(count), 640));
+        return send(res, r.ok ? 200 : 500, JSON.stringify(r));
       }
     }
     send(res, 404, '{"error":"not found"}');

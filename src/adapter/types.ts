@@ -322,6 +322,8 @@ export interface GameAdapter {
   /** 'log' → 所有原木；'iron_ore' → iron_ore + deepslate_iron_ore；精确名 → 自身 */
   resolveBlockNames(query: string): string[];
   isKnownItem(name: string): boolean;
+  /** 所有已知物品名（控制台「给予物品」搜索用） */
+  listItems?(): string[];
 
   moveTo(target: MoveTarget, opts: MoveOpts): Promise<void>;
   /** 释放一切：停止寻路、清除按键、停止挖掘/使用物品。 */

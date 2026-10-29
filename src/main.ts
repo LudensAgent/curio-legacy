@@ -48,6 +48,7 @@ import { Metrics } from './observer/metrics.ts';
 import { RunStats } from './observer/run-stats.ts';
 import { Spectator } from './observer/spectator.ts';
 import { findSurfaceSpot, type SurfaceSpot } from './observer/rescue.ts';
+import { ITEM_ZH } from './observer/item-zh.ts';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { Perception } from './perception/perception.ts';
 import { NOTABLE, Vision } from './perception/vision.ts';
@@ -580,6 +581,8 @@ const dashboard = startDashboard(config.dashboard.host, config.dashboard.port, b
   resume: () => executive.resume(),
   replan: () => executive.replan(),
   suggest: (t) => executive.suggest(t),
+  give: (item, count) => give(item, count),
+  listItems: () => (adapter.listItems?.() ?? []).map((name) => ({ name, zh: ITEM_ZH[name] ?? '' })),
   spectate: (on) => spectator.setActive(on),
   rescue: () => rescue(),
   dawn: () => dawn(),
@@ -707,6 +710,31 @@ async function dawn(): Promise<{ ok: boolean; error?: string }> {
     return { ok: true };
   } finally {
     dawning = false;
+  }
+}
+
+/**
+ * 给予物品（控制台）：用 RCON /give 把物品塞进 Bot 背包。
+ * 物品名先去 minecraft: 前缀、按已知物品校验；数量夹在 1–640。
+ */
+let giving = false;
+async function give(item: string, count: number): Promise<{ ok: boolean; error?: string; item?: string; count?: number }> {
+  if (giving) return { ok: false, error: '上一次给予还没做完' };
+  const s = adapter.state();
+  if (!s.connected) return { ok: false, error: 'Bot 没连上服务器' };
+  const name = item.toLowerCase().replace(/^minecraft:/, '');
+  if (!adapter.isKnownItem(name)) return { ok: false, error: `未知物品：${item}` };
+  const n = Math.max(1, Math.min(640, Math.floor(count)));
+  giving = true;
+  try {
+    await spectator.command(`give ${config.mc.username} ${name} ${n}`);
+    bus.publish('give', 'P2', `主包给予鱼鱼「${ITEM_ZH[name] ?? name}」×${n}`, { item: name, count: n });
+    return { ok: true, item: name, count: n };
+  } catch (e: any) {
+    bus.publish('give', 'P1', `给予失败：RCON 命令没发出去（${e?.message ?? e}）`);
+    return { ok: false, error: `RCON 失败：${e?.message ?? e}`, item: name, count: n };
+  } finally {
+    giving = false;
   }
 }
 

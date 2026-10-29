@@ -837,6 +837,13 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return !!this.mcData?.itemsByName?.[name];
   }
 
+  /** 控制台「给予物品」搜索用的物品名清单（去掉拿不到手的空气类方块） */
+  listItems(): string[] {
+    if (!this.mcData) return [];
+    const skip = new Set(['air', 'cave_air', 'void_air']);
+    return Object.keys(this.mcData.itemsByName).filter((n) => !skip.has(n)).sort();
+  }
+
   // ---------------------------------------------------------------- 动作
   /**
    * 挨打那一刻身上、身边是什么：脚和头所在的格子、脚下踩的、着没着火、贴身的怪、氧气和饥饿。
