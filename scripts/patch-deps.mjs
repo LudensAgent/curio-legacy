@@ -16,6 +16,30 @@ function patch(rel, mark, anchor, replacement, done, missing) {
   console.log(done);
 }
 
+// 清空主手只允许收纳，背包满或点击后仍有光标物品时不能隐式丢弃。
+{
+  const rel = 'mineflayer/lib/plugins/simple_inventory.js';
+  patch(rel, '/* curio-patch: unequip never tosses held items */',
+    `    if (!slot) {
+      await bot.tossStack(bot.heldItem)
+      return
+    }`,
+    `    if (slot === null) {
+      /* curio-patch: unequip never tosses held items */
+      throw new Error('INVENTORY_FULL: cannot empty hand without dropping the held item')
+    }`,
+    'mineflayer 满包清空主手时保留物品并报告失败', '检查 equipEmpty 的满包分支');
+  patch(rel, '/* curio-patch: unequip preserves cursor items */',
+    `    if (bot.inventory.selectedItem) {
+      await bot.clickWindow(-999, 0, 0)
+    }`,
+    `    if (bot.inventory.selectedItem) {
+      /* curio-patch: unequip preserves cursor items */
+      throw new Error('UNEQUIP_NOT_CONFIRMED: item remains on the cursor; no item was dropped')
+    }`,
+    'mineflayer 清空主手失败时不丢弃光标物品', '检查 equipEmpty 的光标清理');
+}
+
 // 寻路停止挖掘时只移除自己的监听；removeAllListeners 的第二个参数无效，
 // 会把通道记忆等外部订阅一起清空，之后成功挖掘也不再留下记录。
 {

@@ -1432,7 +1432,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (kind) this.toolChoice.set(kind, name);
   }
 
-  private async equipBestTool(block: any, signal?: AbortSignal) {
+  private async equipBestTool(block: any, signal: AbortSignal): Promise<ActionResult> {
     const check = this.actionCheckpoint(signal);
     const b = this.bot;
     const e = b.entity;
@@ -1444,7 +1444,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const bare = timeFor(null);
     // 手上这把能挖（能掉东西、比空手快）：就用手上的。用哪把镐是它自己的决定（“钻石镐留着，这次用铁镐”），身体不替它换
     const held = b.heldItem;
-    if (held && (block.harvestTools ? !!block.harvestTools[held.type] : timeFor(held.type, held.enchants ?? []) < bare)) return;
+    if (held && (block.harvestTools ? !!block.harvestTools[held.type] : timeFor(held.type, held.enchants ?? []) < bare)) return { ok: true };
     // 手上的不行才去背包里找。它自己挑过这类工具（亲手拿过铁镐）就还拿那种；没挑过才按挖得最快的拿
     const kindOf = (name: string) => name.match(/_(pickaxe|axe|shovel|hoe)$/)?.[1] ?? (name === 'shears' ? 'shears' : null);
     for (const it of b.inventory.items()) {
@@ -1453,7 +1453,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (block.harvestTools ? !block.harvestTools[it.type] : timeFor(it.type, it.enchants ?? []) >= bare) continue;
       const pick = this.bestInvItem(it.name) ?? it;
       if (b.heldItem?.type !== pick.type) await this.afterAction(() => b.equip(pick, 'hand'), check);
-      return;
+      return { ok: true };
     }
     if (!block.harvestTools) bestTime = bare;
     for (const it of b.inventory.items()) {
@@ -1465,10 +1465,17 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       }
     }
     if (best && b.heldItem?.type !== best.type) await this.afterAction(() => b.equip(best, 'hand'), check);
-    // 没有更快的工具：别拿着剑、镐这些会掉耐久又不加速的东西去挖（真人会收起来空手砍，或换斧子）
-    else if (!best && b.heldItem && /_(sword|pickaxe|axe|shovel|hoe)$|^(shears|bow|crossbow|trident|fishing_rod|flint_and_steel)$/.test(b.heldItem.name)) {
-      await this.afterAction(() => b.unequip('hand'), check).catch(() => {});
+    // 没有更快的工具：切到已有的非耐久物品来挖，满包也能换手，不能为了空手而丢掉武器。
+    else if (!best && held && this.mcData.itemsByName?.[held.name]?.maxDurability > 0) {
+      const replacement: Item | undefined = b.inventory.items().find((item: Item) => {
+        const data = this.mcData.itemsByName[item.name];
+        return data && !(data.maxDurability > 0);
+      });
+      const switched = await this.afterAction(() => this.equipItem(replacement?.name ?? null, 'hand', signal,
+        replacement ? { sourceSlot: replacement.slot } : {}), check);
+      if (!switched.ok) return { ok: false, reason: `${switched.reason}：无法安全切换挖掘时的手持物品，尚未挖掘` };
     }
+    return { ok: true };
   }
 
   async dig(pos: Vec3Like, signal: AbortSignal): Promise<ActionResult> {
@@ -1483,7 +1490,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // 清路、脱困只要把这一格挖开，用不着镐；要拿到圆石、矿石才得用镐（gather 自己会先检查）。
     // 以前这里一律拒绝（TOOL_MISSING），它就学成了“没镐石头动不了”，镐快断时宁可困在洞里也不敢挖
     const harvest = this.canHarvest(pos);
-    await this.afterAction(() => this.equipBestTool(block, signal), check);
+    const tool = await this.afterAction(() => this.equipBestTool(block, signal), check);
+    if (!tool.ok) return tool;
     throwIfAborted(signal);
     if (!b.canDigBlock(block)) return { ok: false, reason: 'OUT_OF_REACH' };
     const e = b.entity;
