@@ -46,6 +46,7 @@ export function viewOf(p?: Percept): string | undefined {
 export function createActivity(draft: ActivityDraft, monologue: string, source: Activity['source'], state: Pick<AgentState, 'inventory'>): Activity {
   return {
     id: shortId('act_'), what: draft.what, why: draft.why, kind: draft.kind, steps: draft.steps.map((s) => ({ ...s })),
+    ...(draft.facing ? { facing: draft.facing } : {}),
     repeat: Math.max(1, Math.min(12, draft.repeat || 1)), iteration: 0, index: 0,
     ...(draft.doneWhen ? { doneWhen: draft.doneWhen } : {}), ...(draft.expect ? { expect: draft.expect } : {}),
     ...(draft.ifStuck ? { ifStuck: draft.ifStuck } : {}), ...(draft.agendaId ? { agendaId: draft.agendaId } : {}),
@@ -222,6 +223,7 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
   const { gained, lost } = diffInventory(a.startInventory, inventoryOf(state));
   return {
     id: a.id, what: a.what, kind: a.kind, outcome, summary: summary.slice(0, 200),
+    ...(a.facing ? { facing: a.facing } : {}),
     ...(outcome === 'done' ? { completion: a.conditionTriggered ? 'condition' as const : 'steps' as const } : outcome === 'unmet' ? { completion: 'unmet' as const } : {}),
     durationSec: Math.round((Date.now() - a.startedAt) / 1000), gained, lost,
     ...(a.expect ? { expect: a.expect } : {}), ...(a.hypothesis ? { hypothesis: a.hypothesis } : {}),
@@ -247,6 +249,7 @@ export function describeActivity(a: Activity, state: AgentState, percept?: Perce
   const done = a.doneWhen ? evaluateCondition(a.doneWhen, state, state.worldId, [], percept) : null;
   return {
     what: a.what, why: a.why, kind: a.kind,
+    ...(a.facing ? { facing: a.facing } : {}),
     routine: a.steps.map((s) => `${s.skill} ${argsLabel(s)}${s.optional ? '（顺手）' : ''}`),
     round: `${a.iteration + 1}/${a.repeat}`, next_step: a.index,
     elapsed_real_s: Math.round((Date.now() - a.startedAt) / 1000),

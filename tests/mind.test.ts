@@ -947,7 +947,7 @@ test('被困地下时，模型用原子动作写一段挖阶梯的 routine，身
   assert.match(user, /"local":/, '身边方块图在提示词里');
   assert.match(w.pending[0].messages[0].content, /dig_at/, '模型可以自行选择挖掘动作');
   assert.doesNotMatch(user, /怎么上去自己定|一格一格自己出去/, '地形不会替模型决定要出去');
-  await w.reply(0, { monologue: '四面都是石头，朝北挖阶梯上去', decision: 'new', activity: { what: '朝北挖阶梯回地面', kind: 'survive', repeat: 10,
+  await w.reply(0, { monologue: '四面都是石头，朝北挖阶梯上去', decision: 'new', activity: { what: '朝北挖阶梯回地面', facing: 'N', kind: 'survive', repeat: 10,
     steps: [{ skill: 'dig_at', args: { at: [0, 2, 0], facing: 'N' } }, { skill: 'dig_at', args: { at: [1, 1, 0], facing: 'N' } }, { skill: 'dig_at', args: { at: [1, 2, 0], facing: 'N' } }, { skill: 'step', args: { to: [1, 1, 0], facing: 'N' } }],
     done_when: { type: 'sky_visible', equals: true } } });
   const deadline = Date.now() + 15000;

@@ -691,7 +691,7 @@ export class Mind {
     this.activity = a;
     this.activityThoughtAt = Date.now();
     if (this.d.arbiter.info()?.source === 'filler') this.d.arbiter.cancel('开始干活');
-    this.d.bus.publish('plan', 'P2', `[${source === 'rule' ? 'rule' : 'llm'}] ${a.what} —— ${monologue}`, { thought: monologue, source: source === 'rule' ? 'rule' : 'llm', steps: a.steps, planId: a.id, kind: a.kind, how, repeat: a.repeat, ...(hypothesis ? { hypothesis } : {}) });
+    this.d.bus.publish('plan', 'P2', `[${source === 'rule' ? 'rule' : 'llm'}] ${a.what} —— ${monologue}`, { thought: monologue, source: source === 'rule' ? 'rule' : 'llm', steps: a.steps, planId: a.id, kind: a.kind, how, repeat: a.repeat, ...(a.facing ? { facing: a.facing } : {}), ...(hypothesis ? { hypothesis } : {}) });
     this.d.bus.publish('goal', 'P2', `开始一段活：${a.what}`, { planId: a.id, source });
     this.d.bus.publish('activity_start', 'P2', `${how === 'next' ? '接着' : how === 'habit' ? '凭习惯' : '开始'}：${a.what}${a.why ? `（${a.why}）` : ''}`, { activity: describeActivity(a, state, this.safe(() => this.d.perception.snapshot(), undefined)) });
   }
@@ -1295,12 +1295,13 @@ export class Mind {
       if (running?.planId === a.id && runningIndex < 0) this.d.arbiter.cancel('改了做法');
       Object.assign(a, { what: draft.what, why: draft.why || a.why, kind: draft.kind, steps: draft.steps, repeat: draft.repeat, iteration: 0, index: runningIndex + 1, adaptations: [], consecutiveFailures: 0,
         monologue: decision.monologue || a.monologue });
+      if (draft.facing) a.facing = draft.facing; else delete a.facing;
       if (draft.doneWhen) a.doneWhen = draft.doneWhen; else delete a.doneWhen;
       if (draft.expect) a.expect = draft.expect;
       if (draft.ifStuck) a.ifStuck = draft.ifStuck;
       this.activityThoughtAt = Date.now();
       this.d.bus.publish('activity_adjust', 'P2', `改一改做法：${a.what}`, { activity: describeActivity(a, this.d.adapter.state(), this.safe(() => this.d.perception.snapshot(), undefined)) });
-      this.d.bus.publish('plan', 'P2', `[${decision.source}] ${a.what} —— ${decision.monologue}`, { thought: decision.monologue, source: decision.source, steps: a.steps, planId: a.id });
+      this.d.bus.publish('plan', 'P2', `[${decision.source}] ${a.what} —— ${decision.monologue}`, { thought: decision.monologue, source: decision.source, steps: a.steps, planId: a.id, ...(a.facing ? { facing: a.facing } : {}) });
       return;
     }
     if (decision.kind === 'detour' && this.activity) {

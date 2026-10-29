@@ -1,4 +1,5 @@
 import type { Step } from '../arbiter/arbiter.ts';
+import type { Facing } from '../perception/local.ts';
 import type { Condition } from '../projects/types.ts';
 
 /**
@@ -40,6 +41,8 @@ export interface Activity {
   what: string;
   why: string;
   kind: ActivityKind;
+  /** 相对坐标的前方参考系，独立于镜头朝向，不限定实际推进方向。 */
+  facing?: Facing;
   steps: ActivityStep[];
   /** routine 最多做几轮（done_when 先满足就提前收工） */
   repeat: number;
@@ -83,6 +86,8 @@ export type ActivityOutcome = 'done' | 'unmet' | 'stuck' | 'abandoned' | 'interr
 
 export interface ActivityRecord {
   id: string; what: string; kind: ActivityKind; outcome: ActivityOutcome; summary: string; durationSec: number;
+  /** 当时采用的相对坐标参考系，供下一段核对。 */
+  facing?: Facing;
   /** 收工条件只是中止这段活动的触发依据，不自动验证活动描述中的全部目标。 */
   completion?: 'condition' | 'steps' | 'unmet';
   gained: Record<string, number>; lost: Record<string, number>; expect?: string; hypothesis?: string; at: number;
@@ -210,6 +215,8 @@ export interface MindDecision {
 
 export interface ActivityDraft {
   what: string; why: string; kind: ActivityKind; steps: ActivityStep[]; repeat: number;
+  /** 相对坐标的前方参考系，独立于镜头朝向。 */
+  facing?: Facing;
   doneWhen?: Condition; expect?: string; ifStuck?: string; agendaId?: string;
   /** 写了但没法执行、被丢掉的步骤（让心智知道它们根本没做） */
   dropped?: string[];

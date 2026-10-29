@@ -1,4 +1,5 @@
 import type { GameAdapter } from '../adapter/types.ts';
+import { FACINGS, type Facing } from '../perception/local.ts';
 import type { Step } from '../arbiter/arbiter.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
@@ -102,6 +103,9 @@ export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldM
   if (!what) return { error: `${label}.what 不能为空` };
   if (!Array.isArray(o.steps) || !o.steps.length) return { error: `${label}.steps 需要 1–6 个动作` };
   if (o.steps.length > 6) return { error: `${label}.steps 最多 6 个动作，请自行精简或分成多段` };
+  const requestedFacing = typeof o.facing === 'string' ? o.facing.trim().toUpperCase() : undefined;
+  const facing = FACINGS.find((value) => value === requestedFacing);
+  if (o.facing !== undefined && !facing) return { error: `${label}.facing 必须是 N/E/S/W，表示本段相对坐标的前方，不是镜头朝向` };
   const steps: ActivityStep[] = [];
   const errors: string[] = [];
   const requiredErrors: string[] = [];
@@ -123,7 +127,17 @@ export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldM
       if (optional) { errors.push(error); dropped.push(`${raw}（${v.error.slice(0, 300)}）`); } else requiredErrors.push(error);
       continue;
     }
-    steps.push({ skill: name, args: v.args, ...(optional ? { optional: true } : {}) });
+    let args = v.args;
+    if (['dig_at', 'step', 'place_at'].includes(name)) {
+      // Primitive validation owns coordinate aliases and absolute-to-relative conversion.
+      const cell = args as { at: [number, number, number]; facing: Facing; xyz?: object };
+      if (!cell.xyz && (cell.at[0] !== 0 || cell.at[2] !== 0)) {
+        if (!facing) return { error: `${label}.steps[${i}] ${name} 使用水平相对坐标，必须显式声明 ${label}.facing（N/E/S/W）；文字描述和当前镜头不会自动确定本段坐标方向。请按实际意图补齐，或改用 xyz 世界坐标` };
+        if (s.args?.facing != null && cell.facing !== facing) return { error: `${label}.facing=${facing}，但 steps[${i}] ${name} 的 facing=${cell.facing} 与本段坐标参考方向冲突；未改写或执行该步骤。请统一坐标表达或改用 xyz，若要改变本段参考方向请明确修改 ${label}.facing` };
+        args = { ...args, facing };
+      } else if (!cell.xyz && facing && s.args?.facing == null) args = { ...args, facing };
+    }
+    steps.push({ skill: name, args, ...(optional ? { optional: true } : {}) });
   }
   if (requiredErrors.length) return { error: `${label} 必需步骤无法执行，整段未安排：${requiredErrors.join('；')}。请修正、明确删去或重新决定` };
   if (!steps.length) return { error: `${label} 没有可执行的动作：${errors.join('；')}` };
@@ -141,7 +155,7 @@ export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldM
   const repeat = Number.isFinite(repeatRaw) ? Math.max(1, Math.min(12, repeatRaw)) : 1;
   const kind = ACTIVITY_KINDS.includes(o.kind) ? o.kind as ActivityKind : inferKind(steps);
   return {
-    what, why: str(o.why, 120), kind, steps, repeat,
+    what, why: str(o.why, 120), kind, steps, repeat, ...(facing ? { facing } : {}),
     ...(doneWhen ? { doneWhen } : {}),
     ...(str(o.expect, 120) ? { expect: str(o.expect, 120) } : {}),
     ...(str(o.if_stuck, 120) ? { ifStuck: str(o.if_stuck, 120) } : {}),

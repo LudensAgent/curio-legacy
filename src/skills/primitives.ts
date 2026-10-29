@@ -400,10 +400,20 @@ function withAbsolute<A extends CellArgs>(skill: Skill<A>, bounds: { f: number; 
       return v.ok ? { ok: true, args: { ...v.args, xyz: p } } : v;
     },
     async run(ctx, args) {
-      if (!args.xyz) return skill.run(ctx, args);
-      const r = rel(feetCell(ctx.adapter.state().pos), args.facing, args.xyz);
-      if (typeof r === 'string') return fail('PATH_NOT_FOUND', far(args.xyz, r), after(ctx, args.facing, args.xyz));
-      return skill.run(ctx, { ...args, at: r });
+      const from = feetCell(ctx.adapter.state().pos);
+      const r = args.xyz ? rel(from, args.facing, args.xyz) : args.at;
+      const result = typeof r === 'string'
+        ? fail('PATH_NOT_FOUND', far(args.xyz!, r), after(ctx, args.facing, args.xyz))
+        : await skill.run(ctx, args.xyz ? { ...args, at: r } : args);
+      // The action may finish elsewhere; report its target relative to the starting feet,
+      // including the actual landing selected by the existing water-exit helper.
+      const target = (result.data?.targetCell as Vec3Like | undefined) ?? args.xyz ?? toWorld(from, args.facing, args.at);
+      const dx = target.x - from.x, dy = target.y - from.y, dz = target.z - from.z;
+      const horizontal = `${dx < 0 ? '西' : dx > 0 ? '东' : ''}${dz < 0 ? '北' : dz > 0 ? '南' : ''}`;
+      const vertical = dy ? `${dy > 0 ? '上' : '下'}${Math.abs(dy)}格` : '';
+      const direction = horizontal ? `${horizontal}方${vertical ? `、${vertical}` : ''}` : vertical ? `正${vertical}` : '原脚格';
+      return { ...result, summary: `目标${direction} (${target.x},${target.y},${target.z})；坐标前=${args.facing}；${result.summary}`,
+        data: { ...result.data, targetCell: target, targetFrom: from, coordinateFacing: args.facing } };
     },
   };
 }
