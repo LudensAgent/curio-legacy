@@ -126,7 +126,8 @@ async function recoverBlock(ctx: SkillCtx, args: TargetDigArgs) {
       const p = adapter.state().pos;
       return affected.some((c) => c.y >= p.y - 1.05 && c.y <= p.y + 0.01 && c.x < p.x + 0.3 && c.x + 1 > p.x - 0.3 && c.z < p.z + 0.3 && c.z + 1 > p.z - 0.3);
     };
-    if (supportsMe()) {
+    // 低方块（床、下半砖、地毯、雪层……）站在上面拆掉只是往下落不到一格，不会摔伤；别再走“先离开再拆”那一套（那一步在窄平台上常常走不动，导致一直拆不掉）
+    if (supportsMe() && !/_(bed|slab|carpet)$|^snow$|^daylight_detector$/.test(name)) {
       const me = floor(adapter.state().pos);
       const landing = Object.values(DIR_OFFSETS).map(([dx, dz]) => ({ x: me.x + dx, y: me.y, z: me.z + dz })).find((c) => {
         const below = adapter.blockAt({ ...c, y: c.y - 1 });
