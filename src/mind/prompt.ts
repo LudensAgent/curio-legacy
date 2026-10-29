@@ -377,7 +377,11 @@ export function situationalReminders(ctx: MindContext): string[] {
     const options = [bed ? `${bedLine}${bed.dist > 128 ? '，挺远' : ''}，去那儿睡写 sleep {"at":{"x":${bx},"y":${by},"z":${bz}}}` : '', bedInBag ? '背包里有床，就地放下睡写 sleep {"place":true}' : ''].filter(Boolean).join('；');
     const tod = ((p.time.timeOfDay % 24000) + 24000) % 24000;
     const head = tod < DARK_TICK ? `太阳在落山，${durationText(ticksUntil(tod, DARK_TICK))}后天黑刷怪` : `天黑了，离天亮还有${durationText(ticksUntil(tod, 23000))}`;
-    out.push(`${head}：想好今晚在哪过、这段时间做什么${options ? `（${options}）` : '（家、床，或者就地躲一晚）'}`);
+    // 地下点着灯夜里不刷怪：不催它睡/躲，可以接着挖，别为过夜停下手上的活
+    const undergroundLit = where === 'underground' && p.light?.level !== 'dark';
+    out.push(undergroundLit
+      ? `${head}；你在地下、点着灯，夜里不会刷怪，可以接着挖，真累了再回床睡`
+      : `${head}：想好今晚在哪过、这段时间做什么${options ? `（${options}）` : '（家、床，或者就地躲一晚）'}`);
   } else {
     // 像人一样掂量回程：离天黑不远、床又在远处，就该动身或另作打算
     const tod = ((p.time.timeOfDay % 24000) + 24000) % 24000;
