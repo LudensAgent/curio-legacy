@@ -156,7 +156,7 @@ const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。往�
 const ROUTINE_OF_THINKING = `【每次这样想】
 1. 【此刻】要紧的（危险、快饿死、卡住）先处理。
 2. 看【专注】：在推进清单就 continue。
-3. 看【身体】where：地表走路，坑里或地下才挖；身边一格的事对照 local 写坐标。
+3. 看【身体】where 和【身边】local 确认地形；地形分类不代表受困或需要离开，按当前目标和实际反馈选择动作，身边一格的操作写确切坐标。
 4. 拿不准就先查（knowledge / skill / moves / recipes / recall）；输出前核对动作名和参数。`;
 
 const CHOOSE = `【选动作】
@@ -232,7 +232,7 @@ ${OPERATOR}
 ${READING}
 - 先看【此刻】：没什么要紧的、手上的活还顺，就 continue（独白可以很短）。
 - 手上没活：直接 new 一段，接着【最近】的结果和议程往下玩；边做边想下一段可写 next，当前动作仍在执行、结果未知。小改用 adjust，插一件事用 detour，彻底换事用 switch/new。
-- 在地表就走路，在坑里或地下（看【身体】where）才挖；身边一格的事对照【身边】local 用 dig_at / step / place_at 写确切坐标。
+- 看【身体】where 和【身边】local 确认地形；地形分类不代表受困或需要离开，按当前目标和实际反馈选择动作，用 dig_at / step / place_at 写确切坐标。
 - 要翻技能书、请建筑师、查配方/游戏资料或想得更深：直接输出查询，如 {"kind":"knowledge","query":"问题"}、{"kind":"design","brief":"…"}、{"kind":"skill","name":"…"}、{"kind":"deliberate","reason":"…"}（转成认真想）。knowledge 先搜候选再读章节，摘录不等于读完或学会；资料不代表现场事实。
 ${skills.length ? `技能书：${skills.map((x) => x.replace(/］.*$/, '］')).join('、')}。需要时先用 skill 查询；文字做法不能用 use_skill 直接执行，只有已注册的可执行技能或可试用候选才能调用。` : ''}盖新房子先 design 拿图纸，再 build {"draft":"图纸ID"}；不要自己画图纸。
 - 有【专注】的主目标时，可用 detour 暂时插一段并自动回来；明确决定放下当前活动用 switch，想立即改做法用 adjust，瞥一眼也能选择。系统可能提示打断的影响，但不会把 switch/adjust 改成其它决定。做完清单一项写 "plan":{"done":[序号]}。
@@ -272,9 +272,7 @@ export function situationalReminders(ctx: MindContext): string[] {
   }
   const focusItem = ctx.self.activeAgenda();
   if (focusItem && !ctx.plan && ctx.tier === 'deliberate') out.push(`主目标「${focusItem.text}」还没有清单：写 "plan":{"focus":"${focusItem.id}","steps":[…3–6 项]}，之后一项项推进`);
-  const exits = Object.values(p.self.exits ?? {});
   const where = p.self.where?.kind;
-  const trapped = where ? where === 'underground' || where === 'pit' : p.self.sky_visible !== true && (p.self.overhead?.covered === 'rock' || p.light?.underground === true) || exits.length > 0 && exits.every((e) => !e.walk && !e.step_up);
   // 旧通道是历史记忆，不保证现在仍然可通。
   if (MINING_INTENT.test(intent)) {
     // 矿在哪一层是版本事实：模型记得的多是老版本（钻石 y12），摆出这个世界的版本对应的分布，下到哪层它自己定
@@ -319,9 +317,6 @@ export function situationalReminders(ctx: MindContext): string[] {
     if (t) out.push(`靠近自己挖过的通道的历史路线点；这条记录的参考点在 (${Math.round(t.pos.x)},${Math.round(t.pos.y)},${Math.round(t.pos.z)})，当前开口位置和路线是否可通尚未确认`);
   }
   if (where === 'indoors' && /坑|垫高|台阶|爬出|挖出去|出坑/.test(intent)) out.push(`你${p.self.where!.text}。刚才想的“坑”其实是屋子的墙`);
-  if (trapped && where === 'pit') out.push(`你${p.self.where!.text}：看【身边】local 和背包，怎么上去自己定`);
-  else if (trapped) out.push('你在地下或被围住了：看【身边】local，用 dig_at / step / place_at 一格一格自己出去，怎么出去自己定');
-  else if (where === 'surface' && p.self.sky_visible !== true) out.push(`你${p.self.where!.text}，不是在地下：直接走路，不用挖`);
   // 没盖完的房子：久没碰了才提一句；一直在补却补不动，就把事实摆出来让它掂量够不够住（不再每一念都催“接着盖”）
   const site = unfinished[0];
   if (site) {
