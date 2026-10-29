@@ -29,7 +29,7 @@ export interface VisionConfig {
   bandRows: number;
 }
 
-export const DEFAULT_VISION: VisionConfig = { range: 0, hFov: 100, vFov: 60, cols: 40, rows: 24, hearRadius: 10, bandCols: 160, bandRows: 8 };
+export const DEFAULT_VISION: VisionConfig = { range: 0, hFov: 120, vFov: 72, cols: 40, rows: 24, hearRadius: 10, bandCols: 160, bandRows: 8 };
 const FALLBACK_RANGE = 64;
 const MAX_RANGE = 64;
 
@@ -334,7 +334,7 @@ export class Vision {
       }
       return e;
     };
-    const seeRange = (l: number) => (l >= 4 ? range : l >= 2 ? 12 : l >= 1 ? 6 : 3);
+    const seeRange = (l: number) => (l >= 4 ? range : l >= 2 ? 14 : l >= 1 ? 8 : 5);
 
     const cats: number[] = new Array(cols * rows);
     const dists: number[] = new Array(cols * rows);
@@ -397,10 +397,10 @@ export class Vision {
     };
 
     for (let j = 0; j < rows; j++) {
-      const pitch = eye.pitch + (0.5 - (j + 0.5) / rows) * vFov;
+      const pitch = eye.pitch + (rows > 1 ? (0.5 - j / (rows - 1)) : 0) * vFov;
       const cp = Math.cos(pitch), sp = Math.sin(pitch);
       for (let i = 0; i < cols; i++) {
-        const yaw = eye.yaw + (0.5 - (i + 0.5) / cols) * hFov;
+        const yaw = eye.yaw + (cols > 1 ? (0.5 - i / (cols - 1)) : 0) * hFov;
         const { cat: c, dist } = cast(-Math.sin(yaw) * cp, sp, -Math.cos(yaw) * cp);
         const idx = j * cols + i;
         cats[idx] = CAT_INDEX[c];
@@ -584,7 +584,7 @@ export class Vision {
         const near = Math.max(0, hit - .1), l = this.adapter.lightAt(Math.floor(eye.x + dx / distance * near), Math.floor(eye.y + dy / distance * near), Math.floor(eye.z + dz / distance * near));
         const t = state.timeOfDay, darkness = t < 12000 ? 0 : t < 13800 || t >= 22200 ? 5 : 11;
         const light = Math.max(l?.block ?? 0, (l?.sky ?? 0) - darkness, state.dim === 'the_end' ? 4 : 0);
-        return hit <= (light >= 4 ? this.effectiveRange() : light >= 2 ? 12 : light >= 1 ? 6 : 3);
+        return hit <= (light >= 4 ? this.effectiveRange() : light >= 2 ? 14 : light >= 1 ? 8 : 5);
       });
       if (!visible) continue;
       const block = this.adapter.blockStateAt?.(pos);
