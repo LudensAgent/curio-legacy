@@ -390,7 +390,7 @@ export class Mind {
     const loop = this.attention.fromLoop(this.recentEnds, this.d.adapter.state().pos);
     const dangers = this.safe(() => this.sensedDanger(p), []).map((d) => this.attention.notice(d.key, d.what, 0.9, 4000)).filter((n): n is NonNullable<typeof n> => !!n);
     if (dangers.length) this.dangerUntil = Date.now() + 6000;
-    for (const n of [...dangers, ...this.attention.fromPercept(p), ...(loop ? [loop] : [])]) {
+    for (const n of [...dangers, ...this.attention.fromPercept(p, Date.now(), this.d.self.habits().pickup), ...(loop ? [loop] : [])]) {
       this.d.bus.publish('notice', n.level === 'note' ? 'P3' : 'P2', `注意到：${n.what}`, { salience: n.salience, level: n.level });
       if (/^(res|disc|item):/.test(n.key)) { this.d.self.feel({ type: 'novelty', strength: n.salience }); this.speechEventAt = Date.now(); }
     }
@@ -668,10 +668,7 @@ export class Mind {
     if (state.inWater || state.inLava || state.onGround === false) return;
     let knows = false;
     try { const p = this.d.perception.snapshot(); knows = p.nearby.resources.length > 0 || p.nearby.passive.length > 0; } catch { /* 感知暂不可用 */ }
-    // 边想边顺手捡起脚边看得见的掉落物（像人一样不闲着），否则原地张望
-    let drops = 0;
-    try { drops = ((this.d.perception.snapshot().vision as any)?.visible_drops ?? []).filter((d: any) => (d.dist ?? 99) <= 6).length; } catch { /* 感知暂不可用 */ }
-    if (drops && SKILLS.pickup_items && this.d.self.habits().pickup) { this.d.arbiter.start({ skill: 'pickup_items', args: { radius: 6 } }, 'filler'); return; }
+    // 掉落物交给轻量思考决定；等回复时只观察，不先移动去捡。
     if (!knows) this.d.arbiter.start({ skill: 'look_around', args: { seconds: 4 } }, 'filler');
     else if (SKILLS.glance) this.d.arbiter.start({ skill: 'glance', args: { seconds: 120 } }, 'filler');
   }

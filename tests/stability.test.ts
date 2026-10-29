@@ -166,7 +166,7 @@ test('掉落物：看见地上新出现的东西会注意到（捡不捡自己�
   const att = new Attention();
   const percept = (drops: any[]) => ({ time: { phase: 'day' }, self: { food: 20, hp: 20, inWater: false }, emptySlots: 10, nearby: { hostile: [], resources: [] }, light: null, vision: { visible_drops: drops } }) as any;
   att.fromPercept(percept([]));
-  const n = att.fromPercept(percept([{ item: 'beef', count: 2, dist: 3, dir: 'N' }]));
+  const n = att.fromPercept(percept([{ ids: [1], item: 'beef', count: 2, dist: 3, dir: 'N' }]));
   assert.ok(n.some((x) => /地上有掉落物：beef×2/.test(x.what)));
   const p = validatePredicate({ drops: { within: 6, item: ['beef', '*_log'] } });
   assert.ok(!('error' in p));

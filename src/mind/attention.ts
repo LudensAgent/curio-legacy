@@ -10,7 +10,7 @@ export const RECONSIDER = 0.5;
 
 const levelOf = (s: number): Noticing['level'] => s >= URGENT ? 'urgent' : s >= RECONSIDER ? 'reconsider' : 'note';
 
-interface Snapshot { effects: Set<string>; worn: Set<string>; tod: number; weather: string; phase: string; food: number; hp: number; emptySlots: number; hostiles: Set<string>; resources: Set<string>; light: string | null; inWater: boolean; drops: Map<string, { item: string; count: number; dist: number; dir: string; tossed_by_me?: boolean }> }
+interface Snapshot { effects: Set<string>; worn: Set<string>; tod: number; weather: string; phase: string; food: number; hp: number; emptySlots: number; hostiles: Set<string>; resources: Set<string>; light: string | null; inWater: boolean }
 
 /**
  * 注意力：把游戏里发生的事变成“我注意到了…”，并判断值不值得为它停下来重新想。
@@ -19,6 +19,7 @@ interface Snapshot { effects: Set<string>; worn: Set<string>; tod: number; weath
 export class Attention {
   private pending: Noticing[] = [];
   private seenAt = new Map<string, number>();
+  private seenDrops = new Set<number>();
   private last: Snapshot | null = null;
   private loopSeenThrough = 0;
 
@@ -67,7 +68,12 @@ export class Attention {
   }
 
   /** 比较前后两次感知，找出“变化”：天色、饥饿、生命、背包、新出现的怪和资源 */
-  fromPercept(p: Percept, now = Date.now()): Noticing[] {
+  fromPercept(p: Percept, now = Date.now(), considerPickup = false): Noticing[] {
+    const freshDrops = (p.vision?.visible_drops ?? []).flatMap((drop) => {
+      const ids = drop.ids.filter((id) => !this.seenDrops.has(id));
+      drop.ids.forEach((id) => this.seenDrops.add(id));
+      return ids.length && drop.dist <= 16 ? [{ ...drop, ids }] : [];
+    });
     const snap: Snapshot = {
       effects: new Set(p.effects ?? []),
       // 同名的全都快坏了才算“快坏了”：手里那把快坏、背包里还有好的，不是缺工具
@@ -76,7 +82,6 @@ export class Attention {
       hostiles: new Set(p.nearby.hostile.filter((h) => h.dist <= 16).map((h) => h.name)),
       resources: new Set(p.nearby.resources.filter((r) => r.seen === 'now').map((r) => r.block)),
       light: p.light?.level ?? null, inWater: p.self.inWater,
-      drops: new Map(((p.vision as any)?.visible_drops ?? []).map((d: { item: string; count: number; dist: number; dir: string; tossed_by_me?: boolean }) => [d.tossed_by_me ? `${d.item}:mine` : d.item, d])),
     };
     const prev = this.last;
     this.last = snap;
@@ -117,10 +122,10 @@ export class Attention {
       out.push(this.notice(`res:${r}`, `看见了 ${r}`, /diamond|emerald|ancient|spawner|portal/.test(r) ? 0.55 : 0.4, 180_000, now));
     }
     if (snap.light === 'dark' && prev.light !== 'dark') out.push(this.notice('dark', '周围很暗', 0.3, 120_000, now));
-    // 地上新出现的掉落物（猎物掉的肉、打怪掉的东西、炸出来的方块……）：看见了就知道，捡不捡它自己定
-    const fresh = [...snap.drops.entries()].filter(([k, d]) => !prev.drops.has(k) && d.dist <= 16).map(([, d]) => d);
-    if (fresh.length) out.push(this.notice(`drops:${fresh.map((d) => d.item).sort().join(',')}`,
-      `地上有掉落物：${fresh.slice(0, 4).map((d) => `${d.item}×${d.count}（${d.dir ?? ''}${d.dist}格${d.tossed_by_me ? '，自己刚扔的' : ''}）`).join('、')}——要不要捡（pickup_items），自己判断`, 0.5, 60_000, now));
+    // 转头后重见同一实体不再提醒；同种物品的新实体仍交给下一次思考判断。
+    // 同批合成一条，新批次保留到现有思考调度统一取走，不用物品名冷却吞掉新信息。
+    if (freshDrops.length) out.push(this.notice(`drops:${freshDrops.flatMap((d) => d.ids).sort((a, b) => a - b).join(',')}`,
+      `地上有掉落物：${freshDrops.slice(0, 4).map((d) => `${d.item}×${d.count}（${d.dir ?? ''}${d.dist}格${d.tossed_by_me ? '，自己刚扔的' : ''}）`).join('、')}——要不要捡（pickup_items），自己判断`, considerPickup ? 0.5 : 0.4, 0, now));
     return out.filter((n): n is Noticing => !!n);
   }
 
@@ -151,5 +156,5 @@ export class Attention {
   drain(): Noticing[] { const out = this.pending; this.pending = []; return out; }
   peek(): Noticing[] { return [...this.pending]; }
   highest(): number { return this.pending.reduce((m, n) => Math.max(m, n.salience), 0); }
-  reset() { this.pending = []; this.last = null; this.resetLoop(); }
+  reset() { this.pending = []; this.last = null; this.seenDrops.clear(); this.resetLoop(); }
 }

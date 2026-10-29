@@ -167,13 +167,13 @@ export interface Consolidation {
 export interface DiaryEntry { at: number; text: string; dim: string; pos: [number, number, number] }
 
 /** 模型输出、校验过的一次决定 */
-/** 模型给身体定下的顺手习惯：不定就不做（身体不会自作主张插火把、吃东西、捡东西） */
+/** 模型设定的身体习惯和注意偏好；拾取仍需当次明确选择动作。 */
 export interface Habits {
   /** 走路挖矿时，暗处（亮度 ≤7）每隔几格插一支火把；0 = 不插 */
   torch_every?: number;
   /** 饥饿降到多少就顺手吃（只吃正经食物）；0 = 不顺手吃 */
   eat_below?: number;
-  /** 想事情的空档捡脚边的掉落物 */
+  /** 看见新掉落物时用轻量思考决定是否捡；关闭时只随下次思考提供事实，不自动拾取。 */
   pickup?: boolean;
 }
 

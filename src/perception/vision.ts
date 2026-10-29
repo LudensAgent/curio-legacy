@@ -905,7 +905,7 @@ export class Vision {
       seen_entities: this.seen.filter((e) => e.kind !== 'item').slice(0, 8).map(ent),
       ...(() => {
         // 看得见的掉落物（按物品合并）：猎物掉的肉、挖掉的方块、死亡掉落……
-        const drops = new Map<string, { item: string; count: number; dist: number; dir: string; tossed_by_me?: boolean }>();
+        const drops = new Map<string, { ids: number[]; item: string; count: number; dist: number; dir: string; tossed_by_me?: boolean }>();
         for (const e of this.seen) {
           if (e.kind !== 'item') continue;
           const item = e.name.replace(/^item:/, '') || 'unknown';
@@ -913,8 +913,8 @@ export class Vision {
           const mine = !!(e.pos && this.adapter.isDiscarded?.(item, e.pos));
           const key = mine ? `${item}:mine` : item;
           const cur = drops.get(key);
-          if (!cur) drops.set(key, { item, count: e.count ?? 1, dist: Math.round(e.dist), dir: e.dir, ...(mine ? { tossed_by_me: true } : {}) });
-          else { cur.count += e.count ?? 1; if (e.dist < cur.dist) { cur.dist = Math.round(e.dist); cur.dir = e.dir; } }
+          if (!cur) drops.set(key, { ids: [e.id], item, count: e.count ?? 1, dist: Math.round(e.dist), dir: e.dir, ...(mine ? { tossed_by_me: true } : {}) });
+          else { cur.ids.push(e.id); cur.count += e.count ?? 1; if (e.dist < cur.dist) { cur.dist = Math.round(e.dist); cur.dir = e.dir; } }
         }
         const list = [...drops.values()].sort((a, b) => a.dist - b.dist).slice(0, 8);
         return list.length ? { visible_drops: list } : {};

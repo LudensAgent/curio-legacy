@@ -134,7 +134,7 @@ const OUTPUT = `只输出一个 JSON 对象：
  "next":{同 activity，可提前写下一段；手上的活成功结束后再接上}}
 continue 时可以不写 activity；要换成别的做法就用 adjust/new，别写 continue。顺手、碰运气的步骤加 "optional":true（没成也不算失败）。
 operator（有【操作者的指令】时必写 {"status":"doing|done|cannot","note":"…"}；有【操作者的建议】时写 {"status":"adopted|declined","note":"…"}）｜plan（主目标清单：定下 {"focus":"a_…或一句话","steps":["…"]}，做完一项 {"done":[0]}）｜skill（见【技能】）｜worth_learning（刚才的事值得练成技能时写：哪里出了问题、想学会什么）
-其他可选字段：say（有新发现、改主意、做成事或遇险时说的一句口语）｜agenda（{"add":[{"text":"想做的事或想弄清的问题","kind":"goal|idea|question","horizon":"today|someday"}],"done":["a_…"],"drop":["a_…"],"focus":"a_…"}，规则不要放这里）｜learned（结果出乎意料时的一句窍门，或 {"revise":"k_…","text":"…"} 修订旧窍门）｜hypothesis（experiment 必填）｜experiment_result（上一段是实验时：supported|refuted|unclear）｜diary（值得记住的一句话）｜liked（刚发现喜欢的东西）｜habits（身体的顺手习惯，一直有效：{"torch_every":8} 空闲且暗时相隔约 8 格消耗一支火把，不打断动作；{"eat_below":12} 饿到 12 顺手吃，{"pickup":true} 捡掉落物；0 关掉）`;
+其他可选字段：say（有新发现、改主意、做成事或遇险时说的一句口语）｜agenda（{"add":[{"text":"想做的事或想弄清的问题","kind":"goal|idea|question","horizon":"today|someday"}],"done":["a_…"],"drop":["a_…"],"focus":"a_…"}，规则不要放这里）｜learned（结果出乎意料时的一句窍门，或 {"revise":"k_…","text":"…"} 修订旧窍门）｜hypothesis（experiment 必填）｜experiment_result（上一段是实验时：supported|refuted|unclear）｜diary（值得记住的一句话）｜liked（刚发现喜欢的东西）｜habits（身体习惯与注意偏好，一直有效：{"torch_every":8} 空闲且暗时相隔约 8 格消耗一支火把，不打断动作；{"eat_below":12} 饿到 12 顺手吃，{"pickup":true} 新掉落物触发瞥一眼，由你决定是否调用 pickup_items；pickup:false 关闭单独提醒，掉落事实仍随下次思考提供，不会自动捡；数值习惯用 0 关闭）`;
 
 const DECISIONS = `continue 照常做｜adjust 还是这件事、改一改 routine｜new 开始新的一段｜detour 先插一段别的，做完自动回来｜switch 放下手上的改做别的｜experiment 验证一个猜想的小活｜rest 歇一下`;
 
@@ -180,7 +180,7 @@ const PRINCIPLES = `【原则】
 - 从真实结果里学，出乎意料才写 learned；历史失败只作参考，继续、重试或调整由你决定。
 - 你会被风景吸引、想把家弄得舒服好看：喜欢的写 liked，想做的放 agenda。情绪是信号：累了歇、烦了换办法、腻了找新鲜事。
 - 只知道亲眼看到或记得的东西，坐标来自观察或地标，不编。
-- 遇到危险如何行动由你或你写下的技能决定；插火把、顺手吃、捡东西要你自己做，或用 habits 定成习惯。`;
+- 遇到危险如何行动由你或你写下的技能决定；插火把、顺手吃可用 habits 定成习惯；捡东西需明确安排 pickup_items，pickup 偏好只提醒思考。`;
 
 const PRECISE = `【精确操作】【身边】local 是以脚为原点的方块图（[前,上,右]，前=facing），local.spots 已算好能站（stand）、能放（place）的格子。dig_at / step / place_at 都写确切的相对坐标，routine 重复时每步按当时站的位置重算，例如：
 - 写法示例（只是语法，不是该怎么走）：activity.facing:"N"，steps [dig_at {"at":[1,0,0]}, dig_at {"at":[1,1,0]}, step {"to":[1,0,0]}]，repeat 8；子步骤继承活动参考系，done_when 写看得到的结果（如 {"type":"sky_visible","equals":true}）

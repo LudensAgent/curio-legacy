@@ -354,20 +354,22 @@ export const hunt: Skill<{ animal?: string; count: number }> = {
 };
 
 // ------------------------------------------------------------------ pickup_items
-export const pickupItems: Skill<{ radius: number; item?: string }> = {
+export const pickupItems: Skill<{ radius: number; item?: string; remembered?: boolean }> = {
   name: 'pickup_items',
-  description: '捡起附近看得见的掉落物（可只捡某种物品 item），报告实际进了背包的东西',
-  argsDoc: '{"radius"?: 4-24, "item"?: "<物品名>"}',
+  description: '捡起调用起点 radius 范围内看得见的掉落物（可指定 item）；remembered:true 还会走回两分钟内见过的掉落位置查找，范围不变。报告实际进了背包的东西',
+  argsDoc: '{"radius"?: 4-24, "item"?: "<物品名>", "remembered"?: boolean（默认 false）}',
   timeoutMs: 60000,
   movement: true,
   outcomeBoundary: true,
   validate(raw) {
     const a = obj(raw);
     const item = typeof a.item === 'string' && a.item.trim() ? a.item.trim().replace(/^minecraft:/, '') : undefined;
-    return { ok: true, args: { radius: clampInt(a.radius, 4, 24, 12), ...(item ? { item } : {}) } };
+    if (a.remembered !== undefined && typeof a.remembered !== 'boolean') return { ok: false, error: 'remembered 必须是 boolean' };
+    return { ok: true, args: { radius: clampInt(a.radius, 4, 24, 12), ...(item ? { item } : {}), ...(a.remembered === true ? { remembered: true } : {}) } };
   },
   async run(ctx, args) {
     const { adapter, senses, signal } = ctx;
+    const origin = { ...adapter.state().pos };
     const tried = new Set<number>();
     const chased = new Map<number, number>();
     const inv = () => {
@@ -378,7 +380,8 @@ export const pickupItems: Skill<{ radius: number; item?: string }> = {
     const before = inv();
     // 指名要捡：哪怕是刚扔掉的，也是改主意了，捡回来不算“又捡回来了”
     if (args.item) adapter.forgetDiscarded?.(args.item);
-    const wanted = (name: string, _pos?: { x: number; y: number; z: number }) => !args.item || name.replace(/^item:/, '') === args.item;
+    const wanted = (name: string, pos?: typeof origin) => (!args.item || name.replace(/^item:/, '') === args.item)
+      && (!pos || Math.hypot(pos.x - origin.x, pos.y - origin.y, pos.z - origin.z) <= args.radius);
     let visits = 0;
     let looked = false;
     for (let i = 0; i < 30 && Date.now() < ctx.deadline; i++) {
@@ -392,11 +395,11 @@ export const pickupItems: Skill<{ radius: number; item?: string }> = {
         senses.refresh();
         item = senses.perceivedEntities(args.radius).find((e) => e.kind === 'item' && (chased.get(e.id) ?? 0) < 3 && wanted(e.name, e.pos));
       }
-      // 眼前没有，但刚才亲眼看见过掉在哪（转过身、走开几步就看不到了）：走回那里低头看一眼，走到跟前会自动捡起
-      if (!item && senses.recentDrops) {
+      // 显式允许追查记忆时，才走回最近亲眼见过的位置；仍限于调用起点的半径。
+      if (!item && args.remembered && senses.recentDrops) {
         const here = adapter.state().pos;
         const mem = senses.recentDrops(120_000)
-          .filter((d) => wanted(d.name) && (chased.get(d.id) ?? 0) < 2 && Math.hypot(d.pos.x - here.x, d.pos.y - here.y, d.pos.z - here.z) <= args.radius + 8)
+          .filter((d) => wanted(d.name, d.pos) && (chased.get(d.id) ?? 0) < 2)
           .sort((a, b) => Math.hypot(a.pos.x - here.x, a.pos.z - here.z) - Math.hypot(b.pos.x - here.x, b.pos.z - here.z))[0];
         if (mem) {
           chased.set(mem.id, (chased.get(mem.id) ?? 0) + 1);

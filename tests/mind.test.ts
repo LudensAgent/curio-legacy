@@ -52,7 +52,7 @@ function fixture(t: TestContext, opts: { autonomous?: boolean; book?: import('..
   const reply = async (i: number, body: object) => { pending[i].resolve({ text: JSON.stringify(body), latencyMs: 1200 }); await flush(); };
   const tick = async () => { mind.tick(); await flush(); };
   const finish = async (r?: SkillResult) => { finishes.shift()!(r); await flush(); };
-  return { adapter, memory, bus, arbiter, planner, self, mind, pending, reply, tick, finish, said, finishes };
+  return { adapter, memory, bus, arbiter, planner, perception, vision, self, mind, pending, reply, tick, finish, said, finishes };
 }
 
 const step = (n = 1) => ({ skill: 'mind_step', args: { n } });
@@ -501,6 +501,75 @@ test('刚开始动作时普通掉落物暂存，不单独触发瞥一眼', async
   await w.tick();
   assert.equal(w.pending.length, 2);
   assert.match(JSON.stringify(w.pending[1].messages), /地上有泥土掉落物/);
+});
+
+test('旧 pickup 习惯在等待模型回复时也不会启动 filler 拾取', async (t) => {
+  const w = fixture(t);
+  w.self.setHabits({ pickup: true });
+  w.adapter.entities = [{ id: 301, name: 'item:cobblestone', kind: 'item', count: 1, dist: 3, pos: { x: 3, y: 64, z: 0 } }];
+  const start = { ...w.adapter.pos };
+  await w.tick();
+  assert.equal(w.pending.length, 1);
+  assert.ok(w.perception.snapshot().vision?.visible_drops?.some((d) => d.item === 'cobblestone'), '眼前确实有可捡的掉落');
+  await w.tick();
+  assert.ok(w.bus.recent().every((e) => e.type !== 'task_start' || e.data?.skill !== 'pickup_items'));
+  assert.deepEqual(w.adapter.pos, start, '等待回复时不先走去捡');
+});
+
+for (const pick of [false, true]) test(`新掉落先触发轻量判断，模型${pick ? '选择拾取才执行' : '选择继续就不捡'}`, async (t) => {
+  const w = fixture(t);
+  w.self.setHabits({ pickup: true });
+  await w.tick();
+  await w.reply(0, { decision: 'new', activity: { what: '继续手上的工作', steps: [step(), step(2)] } });
+  const current = w.arbiter.info()!;
+  w.arbiter.current!.startedAt = Date.now() - Mind.NEAR_END_AFTER_MS;
+  Reflect.set(w.mind, 'lastThoughtAt', 0);
+  Reflect.set(w.mind, 'lastPerceptAt', 0);
+  w.adapter.entities = [{ id: 302, name: 'item:cobblestone', kind: 'item', count: 1, dist: 3, pos: { x: 3, y: 64, z: 0 } }];
+  w.adapter.yaw = -Math.PI / 2;
+  w.vision.scan();
+  const start = { ...w.adapter.pos };
+  await w.tick();
+  assert.equal(w.pending.length, 2);
+  assert.equal(w.pending[1].hint.tier, 'light');
+  assert.match(JSON.stringify(w.pending[1].messages), /地上有掉落物：cobblestone/);
+  assert.equal(w.arbiter.info()?.id, current.id, '判断期间手上的动作继续');
+  assert.deepEqual(w.adapter.pos, start);
+  assert.ok(w.bus.recent().every((e) => e.type !== 'task_start' || e.data?.skill !== 'pickup_items'));
+  await w.reply(1, pick
+    ? { decision: 'detour', activity: { what: '捡眼前的圆石', steps: [{ skill: 'pickup_items', args: { item: 'cobblestone', radius: 4 } }] } }
+    : { decision: 'continue', monologue: '先把手上的事做完，这块圆石不捡' });
+  await w.tick();
+  const pickups = w.bus.recent().filter((e) => e.type === 'task_start' && e.data?.skill === 'pickup_items');
+  if (pick) {
+    assert.equal(pickups.length, 1);
+    assert.equal(pickups[0].data?.source, 'llm');
+  } else {
+    Reflect.set(w.mind, 'lastThoughtAt', 0);
+    Reflect.set(w.mind, 'lastPerceptAt', 0);
+    await w.tick();
+    assert.equal(pickups.length, 0);
+    assert.equal(w.arbiter.info()?.id, current.id);
+    assert.deepEqual(w.adapter.pos, start);
+    assert.equal(w.pending.length, 2, '同一批掉落判断过后不再次提问');
+  }
+});
+
+test('关闭 pickup 注意偏好后，新掉落只留给下次思考，不另发请求', async (t) => {
+  const w = fixture(t);
+  w.self.setHabits({ pickup: false });
+  await w.tick();
+  await w.reply(0, { decision: 'new', activity: { what: '继续手上的工作', steps: [step(), step(2)] } });
+  w.arbiter.current!.startedAt = Date.now() - Mind.NEAR_END_AFTER_MS;
+  Reflect.set(w.mind, 'lastThoughtAt', 0);
+  Reflect.set(w.mind, 'lastPerceptAt', 0);
+  w.adapter.entities = [{ id: 303, name: 'item:cobblestone', kind: 'item', count: 1, dist: 3, pos: { x: 3, y: 64, z: 0 } }];
+  w.adapter.yaw = -Math.PI / 2;
+  w.vision.scan();
+  await w.tick();
+  assert.equal(w.pending.length, 1);
+  assert.ok(w.mind.attention.peek().some((n) => n.key.startsWith('drops:') && n.level === 'note'));
+  assert.ok(w.bus.recent().every((e) => e.type !== 'task_start' || e.data?.skill !== 'pickup_items'));
 });
 
 test('刚开始动作时紧急通知仍立即思考，也带上暂存的掉落物', async (t) => {
