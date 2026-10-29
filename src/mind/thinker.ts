@@ -73,6 +73,7 @@ function normalizeDoneWhen(raw: unknown, depth = 0): unknown {
   if ((o.type === 'sky_visible' || o.type === 'underground'
     || o.type === 'self_state' && ['inWater', 'inLava', 'onGround'].includes(o.field)) && ['true', 'false'].includes(o.equals)) o.equals = o.equals === 'true';
   if (o.type === 'inventory_full' && o.free_slots === undefined) o.free_slots = o.freeSlots ?? o.slots ?? o.count ?? 0;
+  if (o.type === 'inventory_space_min' && o.free_slots === undefined) o.free_slots = o.freeSlots ?? o.slots ?? o.count;
   if ((o.type === 'all_of' || o.type === 'any_of') && Array.isArray(o.conditions)) o.conditions = o.conditions.map((c: unknown) => normalizeDoneWhen(c, depth + 1));
   return o;
 }
@@ -414,11 +415,11 @@ export class Thinker {
         if (!name) {
           const query = String(raw.query ?? '').trim().toLowerCase();
           const offset = Number.isSafeInteger(raw.offset) && raw.offset >= 0 ? raw.offset : 0;
-          const found = (this.book?.list() ?? []).filter((entry) => !query || `${entry.name} ${entry.description} ${entry.body}`.toLowerCase().includes(query));
+          const found = (this.book?.list() ?? []).filter((entry) => !query || `${entry.name} ${entry.description} ${entry.body} ${entry.notes ?? ''}`.toLowerCase().includes(query));
           const entries = found.slice(offset, offset + 30).map((entry) => {
             const stats = this.skillStats?.(entry.name);
             return { name: entry.name, description: entry.description, source: entry.source,
-              retired: stats?.retired ?? null, disabled: !!stats?.disabled, candidate: !!this.book?.candidate(entry.name) };
+              retired: stats?.retired ?? null, disabled: !!stats?.disabled, candidate: !!this.book?.candidate(entry.name), candidateRetired: stats?.candidateRetired ?? null };
           });
           return JSON.stringify({ query, total: found.length, entries, nextOffset: offset + entries.length < found.length ? offset + entries.length : null });
         }
@@ -434,7 +435,7 @@ export class Thinker {
         const versions = this.book?.versions(name) ?? [];
         if (!skill && !code) return `没有「${name}」${version === undefined ? '的候选版本' : `的 v${version}`}；已保存历史：${JSON.stringify(versions)}`;
         const stats = this.skillStats?.(name);
-        const evidence = stats ? { retired: stats.retired ?? null, disabled: !!stats.disabled, lastError: stats.lastError ?? null,
+        const evidence = stats ? { retired: stats.retired ?? null, disabled: !!stats.disabled, candidateRetired: stats.candidateRetired ?? null, lastError: stats.lastError ?? null,
           byVersion: version === undefined ? stats.byVersion ?? null : stats.byVersion?.[String(version)] ?? null,
           recent: (stats.recent ?? []).filter((record) => version === undefined || record.version === version).slice(-5) } : null;
         if (!skill) {
@@ -442,7 +443,7 @@ export class Thinker {
           return `技能「${name}」v${version} 仅保存了历史代码，没有完整执行契约；读取不代表启用或验证：\n${code}\n当前收起/停用状态及按版本保存的运行记录（无记录为未知）：${JSON.stringify(evidence)}`;
         }
         this.bus.publish('skill_read', 'P3', `翻开技能：${skill.name}`, { name: skill.name, source: skill.source });
-        return `技能「${skill.name}」${version !== undefined ? `v${version}` : ''}（读取不代表启用或验证）：\n${skill.body}${skill.behavior ? `\n完整执行契约：\n${JSON.stringify(skill.behavior)}` : ''}${version === undefined && candidate ? `\n\n候选 v${(candidate.behavior as Record<string, unknown>).version} 尚未启用；用 use_skill {name:"${name}",trial:true,args:{…}} 显式试用。候选的完整参数、触发、代码和验收：\n${JSON.stringify(candidate.behavior)}` : ''}\n已保存历史版本：${JSON.stringify(versions)}；可指定 version 阅读。\n当前收起/停用状态及按版本保存的运行记录（无记录为未知）：${JSON.stringify(evidence)}`;
+        return `技能「${skill.name}」${version !== undefined ? `v${version}` : ''}（读取不代表启用或验证）：\n${skill.body}${current.notes ? `\n\n当前学习笔记（不代表该版本已验证）：\n${current.notes}` : ''}${skill.behavior ? `\n完整执行契约：\n${JSON.stringify(skill.behavior)}` : ''}${version === undefined && candidate ? `\n\n候选 v${(candidate.behavior as Record<string, unknown>).version} 尚未启用；用 use_skill {name:"${name}",trial:true,args:{…}} 显式试用。候选的完整参数、触发、代码和验收：\n${JSON.stringify(candidate.behavior)}` : ''}\n已保存历史版本：${JSON.stringify(versions)}；可指定 version 阅读。\n当前收起/停用状态及按版本保存的运行记录（无记录为未知）：${JSON.stringify(evidence)}`;
       }
       if (kind === 'design') {
         const brief = String(raw.brief ?? raw.request ?? '').trim().slice(0, 400);

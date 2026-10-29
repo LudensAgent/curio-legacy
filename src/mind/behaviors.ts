@@ -27,6 +27,7 @@ import { evalPredicate, isRecovery, isThreat, senseNow, situationOf, validatePre
 export interface BehaviorStep { skill: string; args?: unknown; if?: Predicate; optional?: boolean }
 export interface Behavior {
   name: string; description: string; source: KnowSkill['source']; mode: SkillMode;
+  body?: string; notes?: string;
   when?: Predicate; steps: BehaviorStep[]; priority: number; cooldownMs: number; overrides: string[];
   /** 代码技能：模型写的 JavaScript（在沙箱里跑，只能用 api.*），可以被后台自动改进出新版本 */
   code?: string; version?: number;
@@ -45,8 +46,10 @@ export interface BehaviorStats {
   /** Actual completed invocations since these counters were introduced; legacy totals are not inferred. */
   uses?: number;
   cancelled?: number;
-  usageByVersion?: Record<string, { uses: number; skipped: number; cancelled: number }>;
+  usageByVersion?: Record<string, { uses: number; skipped: number; cancelled: number; lastUsedAt?: number }>;
   candidatePermit?: number;
+  /** 收起的是这个候选版本，不影响同名稳定版和学习笔记。 */
+  candidateRetired?: { version: number; at: number; why: string };
   /** 恢复时自己判断“跟这事无关”跳过的次数（不算成败） */
   skipped?: number;
   /** 代码技能：每个版本各自的成败，和最近几次运行的记录（给改进用） */
@@ -246,6 +249,7 @@ function toBehavior(k: KnowSkill, adapter: GameAdapter): Behavior | { error: str
   const b = v.behavior as Record<string, any>;
   const version = Number((k.behavior as any).version) || (b.code ? 1 : undefined);
   return { name: k.name, description: k.description, source: k.source, mode: b.when ? (isRecovery(b.when) ? 'recover' : 'auto') : 'manual',
+    body: k.body.replace(/```behavior[\s\S]*?```/, '').trim(), notes: k.notes,
     ...(b.when ? { when: b.when } : {}), steps: b.steps ?? [], priority: b.priority, cooldownMs: b.cooldown_s * 1000, overrides: b.overrides ?? [],
     ...(b.code ? { code: b.code } : {}), version, ...((k.behavior as Record<string, unknown>).candidate === true ? { candidate: true } : {}), ...(b.verify ? { verify: b.verify } : {}), ...(b.args ? { needs: b.args } : {}) };
 }
@@ -330,12 +334,23 @@ export class BehaviorEngine {
     }
   }
 
-  list(): Behavior[] { return [...this.behaviors.values()].sort((a, b) => b.priority - a.priority || a.name.localeCompare(b.name)); }
+  list(trial = false): Behavior[] { return [...(trial ? this.candidates : this.behaviors).values()].sort((a, b) => b.priority - a.priority || a.name.localeCompare(b.name)); }
   get(name: string, trial = false): Behavior | undefined { return trial ? this.candidates.get(name) : this.behaviors.get(name); }
   statsOf(name: string): BehaviorStats | undefined { return this.stats[name]; }
   enabled(b: Behavior): boolean { return !b.candidate && !this.inactive(b.name); }
+  candidateRetirement(name: string) {
+    const retired = this.stats[name]?.candidateRetired;
+    return retired?.version === this.get(name, true)?.version ? retired : undefined;
+  }
+  /** 收起候选时仍展示同名稳定版或文字记录；明确修订后的候选也可以重新出现。 */
+  hidden(name: string): boolean {
+    if (this.inactive(name)) return !!this.executionError(name, true);
+    return !!this.candidateRetirement(name) && this.book?.get(name) === this.book?.candidate(name);
+  }
   executionError(name: string, trial = false): string | null {
     const b = this.get(name, trial);
+    const retiredCandidate = this.candidateRetirement(name);
+    if ((trial || b?.candidate) && retiredCandidate) return `技能 ${name} 候选 v${retiredCandidate.version} 已收起：${retiredCandidate.why}；可读取历史，由心智显式修订后再试`;
     if (this.inactive(name) && !(trial && b?.candidate && this.stats[name]?.candidatePermit === b.version)) return `技能 ${name} 已停用或收起；由心智显式修订后再试`;
     if (!b) {
       const invalid = trial ? this.invalidCandidates.get(name) : this.invalid.get(name);
@@ -350,7 +365,7 @@ export class BehaviorEngine {
   }
   editToken(name: string): string | undefined {
     const k = this.book?.get(name), candidate = this.book?.candidate(name), st = this.stats[name];
-    return k || candidate || st ? JSON.stringify([k?.updatedAt, k?.behavior, candidate?.updatedAt, candidate?.behavior, st?.disabled, st?.retired, st?.disabledAt, st?.retiredAt]) : undefined;
+    return k || candidate || st ? JSON.stringify([k?.updatedAt, k?.behavior, candidate?.updatedAt, candidate?.behavior, st?.disabled, st?.retired, st?.disabledAt, st?.retiredAt, st?.candidateRetired]) : undefined;
   }
 
   private sense(cur: TaskInfo | null, failure?: Sense['failure']): Sense {
@@ -487,9 +502,29 @@ export class BehaviorEngine {
 
   /** 整理：把技能收起来（停用并写明原因）；同名重写会恢复 */
   retire(name: string, why: string): boolean {
-    if (!this.behaviors.has(name)) return false;
+    if (!this.behaviors.has(name) && this.book?.get(name)?.source !== 'self') return false;
     this.touch(name, (st) => { st.disabled = true; st.retired = why.slice(0, 120); st.retiredAt = Date.now(); delete st.candidatePermit; });
     this.bus.publish('skill_retired', 'P2', `整理技能：收起「${name}」（${why.slice(0, 80)}）`, { name, why });
+    return true;
+  }
+
+  retireCandidate(name: string, version: number, why: string): boolean {
+    const candidate = this.get(name, true);
+    if (!candidate || candidate.version !== version || this.candidateRetirement(name)) return false;
+    this.touch(name, (st) => {
+      st.candidateRetired = { version, at: Date.now(), why: why.slice(0, 120) };
+      if (st.candidatePermit === version) delete st.candidatePermit;
+    });
+    this.bus.publish('skill_retired', 'P2', `整理技能：收起「${name}」候选 v${version}（${why.slice(0, 80)}）；同名稳定版保持原状态`, { name, version, why, candidate: true });
+    return true;
+  }
+
+  /** 文字记录没有游戏验收阶段，显式恢复只让它重回目录。 */
+  restoreNote(name: string): boolean {
+    const entry = this.book?.get(name);
+    if (!entry || entry.source !== 'self' || entry.behavior !== undefined || this.book?.candidate(name) || !this.inactive(name)) return false;
+    this.touch(name, (st) => { st.disabled = false; st.restoredAt = Date.now(); delete st.retired; delete st.retiredAt; delete st.disabledAt; });
+    this.bus.publish('skill_restored', 'P2', `恢复文字技能 ${name}；只恢复阅读目录，不代表已验证做法`, { name, knowledge: true });
     return true;
   }
 
@@ -574,11 +609,17 @@ export class BehaviorEngine {
   /**
    * 模型写出的版本先存候选，稳定版继续使用；disable 同时拦调度和直接调用。
    */
-  write(raw: unknown, opts: { by?: 'mind' | 'forge' | 'curator' | 'improve'; expectedToken?: string } = {}): { ok: true; name: string; created: boolean; mode: SkillMode; disabled?: boolean; improving?: boolean; candidate?: boolean } | { ok: false; error: string; gated?: boolean } {
+  write(raw: unknown, opts: { by?: 'mind' | 'forge' | 'curator' | 'improve'; expectedToken?: string } = {}): { ok: true; name: string; created: boolean; mode: SkillMode; disabled?: boolean; restored?: boolean; improving?: boolean; candidate?: boolean } | { ok: false; error: string; gated?: boolean } {
     const o = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
     const requestedName = normalizeSkillName(String(o.name ?? ''));
     if (Object.hasOwn(opts, 'expectedToken') && opts.expectedToken !== this.editToken(requestedName)) return { ok: false, error: '技能在生成期间已修订、停用或收起，忽略过期结果', gated: true };
+    if (o.restore === true) {
+      if (opts.by !== 'mind') return { ok: false, error: '恢复文字技能需要心智明确选择' };
+      return this.restoreNote(requestedName) ? { ok: true, name: requestedName, created: false, mode: 'manual', restored: true }
+        : { ok: false, error: '只能直接恢复已收起或停用的纯文字技能；行为技能需显式修订和试用' };
+    }
     if (opts.by && opts.by !== 'mind' && this.inactive(requestedName)) return { ok: false, error: '技能已停用或收起，后台结果不能重新启用它', gated: true };
+    if (opts.by && opts.by !== 'mind' && this.candidateRetirement(requestedName)) return { ok: false, error: '这份候选已收起，后台结果不能重新启用或重写它；由心智显式修订', gated: true };
     // {"name":…,"improve":"哪里不好"}：请后台改进这份代码技能（异步，改进器限频）
     if (typeof o.improve === 'string' && !o.code && !o.steps) {
       const name = normalizeSkillName(String(o.name ?? ''));
@@ -674,7 +715,8 @@ export class BehaviorEngine {
     if (!b || b.source !== 'self' || !st || st.disabled) return null;
     const cur = this.currentStats(name, !!b.candidate);
     const uses = cur.ok + cur.fail;
-    const codeBroke = /代码技能.*没成|参数错误|SyntaxError|TypeError|ReferenceError/.test(st.recent?.at(-1)?.summary ?? st.lastError ?? '');
+    const latest = st.recent?.filter((record) => record.version === b.version).at(-1);
+    const codeBroke = latest?.ok === false && /参数错误|SyntaxError|TypeError|ReferenceError/.test(latest.summary);
     // 刚换上（写下、改进、退回）的版本还没跑过：先让它跑几次（以前退回旧版本生成的新版本号马上又被改）
     if (uses === 0 && st.swappedAt && Date.now() - st.swappedAt < BehaviorEngine.FRESH_MS && !codeBroke)
       return `「${name}」当前版本 ${Math.round((Date.now() - st.swappedAt) / 60_000)} 分钟前才换上，还没用过：先让它跑几次，这次的经过已经记进它的成败`;
@@ -741,6 +783,7 @@ export class BehaviorEngine {
       if (b) {
         const usage = (st.usageByVersion ??= {})[this.versionOf(b)] ??= { uses: 0, skipped: 0, cancelled: 0 };
         usage.uses++;
+        usage.lastUsedAt = now;
         if (skipped) usage.skipped++;
         if (result.status === 'cancelled') usage.cancelled++;
       }
@@ -938,15 +981,17 @@ export class BehaviorEngine {
     this.list().forEach((b, i) => {
       const st = this.stats[b.name];
       const line = all[i];
-      if (!st?.retired) { active.push(line); return; }
+      const candidateRetired = b.candidate ? this.candidateRetirement(b.name) : undefined;
+      const retired = st?.retired ?? candidateRetired?.why;
+      if (!retired) { active.push(line); return; }
       const score = tombstoneRelevance(b, text, focus);
       if (score >= 2) {
-        const tag = idleRetirement(st.retired) && !this.tombstone(b.name) ? '；不是做不好，只是当时用不上，这次需要可以同名重写' : '';
-        scored.push({ line: line + tag, score, at: st.retiredAt ?? 0 });
+        const tag = idleRetirement(retired) && !this.tombstone(b.name) ? '；不是做不好，只是当时用不上，这次需要由心智显式修订' : '';
+        scored.push({ line: line + tag, score, at: st?.retiredAt ?? candidateRetired?.at ?? 0 });
       }
     });
     const picked = scored.sort((a, b) => b.score - a.score || b.at - a.at).slice(0, maxRetired);
-    const retired = names.filter((n) => this.stats[n]?.retired).length;
+    const retired = names.filter((n) => this.stats[n]?.retired || this.get(n)?.candidate && this.candidateRetirement(n)).length;
     const rest = retired - picked.length;
     return [...active, ...picked.map((x) => x.line), ...all.slice(names.length),
       ...(rest > 0 ? [`另有 ${rest} 份已收起的技能和这次的事不沾边，没列出`] : [])];
@@ -963,7 +1008,9 @@ export class BehaviorEngine {
       const here = st?.byDim?.[dim];
       const untested = st && st.ok + st.fail > 0 && st.byDim && !here && !(b.when?.dim && !b.when.dim.includes(dim)) ? `（在 ${dim} 还没用过）` : '';
       const candidate = this.candidates.get(b.name);
-      const trial = candidate ? `；候选 v${candidate.version} 尚未启用，用 use_skill {name:"${b.name}",trial:true} 试用，试用成${this.currentStats(b.name, true).ok}/败${this.currentStats(b.name, true).fail}` : '';
+      const retiredCandidate = this.candidateRetirement(b.name);
+      const trial = retiredCandidate ? `；候选 v${retiredCandidate.version} 已收起（${retiredCandidate.why}），可查历史，显式修订后再试`
+        : candidate ? `；候选 v${candidate.version} 尚未启用，用 use_skill {name:"${b.name}",trial:true} 试用，试用成${this.currentStats(b.name, true).ok}/败${this.currentStats(b.name, true).fail}` : '';
       return `${b.name}［${b.mode === 'auto' ? '自动' : b.mode === 'recover' ? '失败时先试' : '调用'}${b.code ? `，代码 v${b.version ?? 1}` : ''}${b.overrides.length ? `，代替本能 ${b.overrides.map((o) => INSTINCTS[o]?.off ? `${o}（这条本能本来就没开）` : o).join('/')}` : ''}${b.needs ? `，调用时给 args.${Object.keys(b.needs).join('/')}` : ''}］${st && st.ok + st.fail ? ` 成${st.ok}/败${st.fail}` : ''}${st?.retired ? ` 已收起（${st.retired.slice(0, 30)}）` : st?.disabled ? ' 已停用' : ''}${untested}${trial}`;
     }), ...[...this.invalid].map(([n, why]) => `${n}：${why}`),
       ...[...this.invalidCandidates].map(([n, why]) => `${n}：候选未通过校验：${why}`)];

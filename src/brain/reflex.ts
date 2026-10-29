@@ -214,7 +214,7 @@ export class Reflex {
   /** 移动型任务 20 秒内位移 < 1.5 格且进度没有变化 → STUCK；自主模式交回决策，兼容模式自动脱困。 */
   private checkStuck(pos: { x: number; y: number; z: number }, cur: ReturnType<Arbiter['info']>) {
     const now = Date.now();
-    if (!cur || !cur.movement) {
+    if (!cur || !cur.movement || cur.stationaryWait) {
       this.trail = [];
       return;
     }

@@ -15,6 +15,8 @@ import { fileURLToPath } from 'node:url';
 export type SkillMode = 'auto' | 'recover' | 'manual';
 export interface KnowSkill {
   name: string; description: string; body: string; source: 'builtin' | 'self'; file: string; updatedAt: number;
+  /** 学习笔记独立于执行契约，修订、晋升和回退不覆盖它。 */
+  notes?: string;
   /** 正文里 ```behavior 块的原始 JSON（校验交给行为引擎） */
   behavior?: unknown;
   /** auto：条件成立自动做；recover：某个动作失败时先试；manual：只在 routine 里 use_skill 调用 */
@@ -71,11 +73,13 @@ export class SkillBook {
         if (!entry.isDirectory()) continue;
         const file = path.join(dir, entry.name, 'SKILL.md');
         const candidateFile = path.join(dir, entry.name, 'candidate.json');
+        const notesFile = path.join(dir, entry.name, 'NOTES.md');
+        const notes = fs.existsSync(notesFile) ? fs.readFileSync(notesFile, 'utf8').trim() : undefined;
         if (source === 'self' && fs.existsSync(candidateFile)) {
           try {
             const candidate = JSON.parse(fs.readFileSync(candidateFile, 'utf8')) as { name: string; description: string; body: string; behavior: Record<string, unknown> };
             if (candidate.name === entry.name && NAME.test(candidate.name) && typeof candidate.description === 'string' && typeof candidate.body === 'string' && candidate.behavior && typeof candidate.behavior === 'object') {
-              this.candidates.set(candidate.name, { ...candidate, source, file: candidateFile, updatedAt: fs.statSync(candidateFile).mtimeMs, mode: modeOf(candidate.behavior) });
+              this.candidates.set(candidate.name, { ...candidate, notes, source, file: candidateFile, updatedAt: fs.statSync(candidateFile).mtimeMs, mode: modeOf(candidate.behavior) });
             }
           } catch { /* 损坏的候选不影响稳定技能加载 */ }
         }
@@ -90,7 +94,7 @@ export class SkillBook {
           let behavior = behaviorOf(parsed.body);
           const codeFile = path.join(dir, entry.name, 'code.js');
           if (fs.existsSync(codeFile) && !(behavior && typeof behavior === 'object' && 'steps' in behavior)) behavior = { ...(behavior && typeof behavior === 'object' ? behavior : {}), code: fs.readFileSync(codeFile, 'utf8') };
-          this.skills.set(name, { name, description: (parsed.description ?? '').slice(0, 200), body: parsed.body.slice(0, 12000), source, file, updatedAt: fs.statSync(file).mtimeMs,
+          this.skills.set(name, { name, description: (parsed.description ?? '').slice(0, 200), body: parsed.body.slice(0, 12000), notes, source, file, updatedAt: fs.statSync(file).mtimeMs,
             ...(behavior !== undefined ? { behavior, mode: modeOf(behavior) } : {}) });
         } catch { /* 读不了的技能跳过 */ }
       }
@@ -188,6 +192,17 @@ export class SkillBook {
     if (prev?.source === 'builtin' && !(hasCode(prev.behavior) && hasCode(behavior))) return { ok: false, error: `${n} 是内置技能，不能改；换个名字写自己的版本` };
     const desc = description.replace(/[\r\n]+/g, ' ').trim().slice(0, 200);
     let text = body.replace(/\r\n/g, '\n').replace(BEHAVIOR_BLOCK, '').trim().slice(0, 6000);
+    const pending = this.candidates.get(n);
+    const dir = path.join(this.selfDir, n);
+    const notesFile = path.join(dir, 'NOTES.md');
+    if (behavior === undefined && (prev?.behavior !== undefined || pending)) {
+      if (desc.length < 4 || text.length < 20) return { ok: false, error: '技能需要一句用途说明和至少几行做法' };
+      fs.writeFileSync(notesFile, text + '\n');
+      if (prev) this.skills.set(n, { ...prev, notes: text });
+      if (pending) this.candidates.set(n, { ...pending, notes: text });
+      this.changed();
+      return { ok: true, skill: this.get(n)!, created: false };
+    }
     // 代码单独存成 code.js（换下来的旧版本留在 versions/ 里，退回时用）
     const code = hasCode(behavior) ? String((behavior as Record<string, unknown>).code) : null;
     const previousVersion = opts.previousVersion ?? (Number((prev?.behavior as Record<string, unknown> | undefined)?.version) || 1);
@@ -197,8 +212,13 @@ export class SkillBook {
     if (meta !== undefined) text = `${text}${text ? '\n\n' : ''}\`\`\`behavior\n${JSON.stringify(meta, null, 1)}\n\`\`\``;
     if (desc.length < 4 || text.length < 20) return { ok: false, error: '技能需要一句用途说明和至少几行做法' };
     const created = !prev;
-    const dir = path.join(this.selfDir, n);
     fs.mkdirSync(dir, { recursive: true });
+    // 纯文字做法后来获得执行契约时，原笔记继续保留。
+    const notes = prev?.notes ?? pending?.notes ?? (behavior !== undefined && prev?.behavior === undefined ? prev?.body : undefined);
+    if (notes) {
+      fs.writeFileSync(notesFile, notes + '\n');
+      if (prev) this.skills.set(n, { ...prev, notes });
+    }
     if (opts.candidate) {
       const file = path.join(dir, 'candidate.json');
       const old = this.candidates.get(n);
@@ -206,7 +226,7 @@ export class SkillBook {
         fs.mkdirSync(path.join(dir, 'versions'), { recursive: true });
         fs.writeFileSync(path.join(dir, 'versions', `v${(old.behavior as Record<string, unknown>).version}.json`), JSON.stringify(old, null, 1));
       }
-      const skill: KnowSkill = { name: n, description: desc, body: text, source: 'self', file, updatedAt: Date.now(), behavior: definition, mode: modeOf(definition) };
+      const skill: KnowSkill = { name: n, description: desc, body: text, notes, source: 'self', file, updatedAt: Date.now(), behavior: definition, mode: modeOf(definition) };
       fs.writeFileSync(file, JSON.stringify({ name: n, description: desc, body: text, behavior: definition }, null, 1));
       this.candidates.set(n, skill);
       this.changed();
@@ -228,10 +248,9 @@ export class SkillBook {
     }
     fs.writeFileSync(file, `---\nname: ${n}\ndescription: ${desc}\n---\n\n${text}\n`);
     const stored = code ? { ...(meta as Record<string, unknown>), code } : definition;
-    const skill: KnowSkill = { name: n, description: desc, body: text, source: 'self', file, updatedAt: Date.now(),
+    const skill: KnowSkill = { name: n, description: desc, body: text, notes, source: 'self', file, updatedAt: Date.now(),
       ...(stored !== undefined ? { behavior: stored, mode: modeOf(stored) } : {}) };
     this.skills.set(n, skill);
-    const pending = this.candidates.get(n);
     if (pending) {
       fs.mkdirSync(path.join(dir, 'versions'), { recursive: true });
       fs.writeFileSync(path.join(dir, 'versions', `v${(pending.behavior as Record<string, unknown>).version}.json`), JSON.stringify(pending, null, 1));

@@ -84,7 +84,9 @@ export const fish: Skill<{ count: number }> = {
       while (caught.length < args.count && ctx.deadline - Date.now() > 8000) {
         casts++;
         ctx.progress(0.15 + 0.85 * (caught.length / args.count), `甩第 ${casts} 竿（已钓到 ${caught.length}）`);
+        ctx.setStationaryWait?.(true);
         const r = await adapter.fish(signal, { aim, timeoutMs: Math.min(CAST_MS, ctx.deadline - Date.now() - 4000) });
+        ctx.setStationaryWait?.(false);
         if (r.ok) { caught.push(r.caught ?? '东西（没看清是什么）'); misses = 0; continue; }
         if (r.reason === 'NO_ROD') { if (!caught.length) return fail('TOOL_MISSING', '钓鱼竿没了（可能用坏了）'); break; }
         if (r.reason === 'NO_BITE') { misses++; if (misses >= 4) break; continue; }
@@ -100,6 +102,8 @@ export const fish: Skill<{ count: number }> = {
     } catch (e) {
       if (isAbort(e)) throw e;
       return fail(codeFromError(e), `钓鱼出错：${(e as Error).message}`);
+    } finally {
+      ctx.setStationaryWait?.(false);
     }
   },
 };

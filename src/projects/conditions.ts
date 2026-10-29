@@ -47,6 +47,11 @@ export function validateCondition(raw: unknown, adapter: Pick<GameAdapter, 'isKn
     if (!finite(free, 0, 35) || !Number.isInteger(free)) throw new Error('inventory_full 的 free_slots 须为 0–35 的整数');
     return { type: 'inventory_full', free_slots: free };
   }
+  if (raw.type === 'inventory_space_min') {
+    const free = raw.free_slots ?? raw.freeSlots;
+    if (!finite(free, 1, 36) || !Number.isInteger(free)) throw new Error('inventory_space_min 的 free_slots 须明确指定为 1–36 的整数');
+    return { type: 'inventory_space_min', free_slots: free };
+  }
   if (raw.type === 'all_of' || raw.type === 'any_of') {
     if (!Array.isArray(raw.conditions) || !raw.conditions.length || raw.conditions.length > 16) throw new Error(`${raw.type} 须包含 1–16 个条件`);
     const condition: Condition = { type: raw.type, conditions: raw.conditions.map((c: unknown) => validateCondition(c, adapter, memory, state, depth + 1)) };
@@ -107,10 +112,11 @@ export function evaluateCondition(condition: Condition, state: AgentState, world
     if (!Number.isFinite(count) || count < 0) return { status: 'unknown', actual: null, reason: '背包数量无效' };
     return { status: count >= condition.count ? 'satisfied' : 'unsatisfied', actual: { item: condition.item, count, required: condition.count, missing: Math.max(0, condition.count - count) } };
   }
-  if (condition.type === 'inventory_full') {
+  if (condition.type === 'inventory_full' || condition.type === 'inventory_space_min') {
     const free = state.emptySlots;
     if (!Number.isFinite(free) || free < 0) return { status: 'unknown', actual: null, reason: '背包空格数无效' };
-    return { status: free <= condition.free_slots ? 'satisfied' : 'unsatisfied', actual: { emptySlots: free, required: condition.free_slots } };
+    const met = condition.type === 'inventory_space_min' ? free >= condition.free_slots : free <= condition.free_slots;
+    return { status: met ? 'satisfied' : 'unsatisfied', actual: { emptySlots: free, required: condition.free_slots } };
   }
   if (condition.type === 'location_near') {
     const distance = dist3(state.pos, condition.pos);
@@ -161,6 +167,7 @@ export function conditionDeficit(condition: Condition, state: AgentState, worldI
   if (condition.type === 'inventory_min') return Math.max(0, condition.count - state.inventory.filter((i) => i.name === condition.item).reduce((n, i) => n + i.count, 0)) / condition.count;
   if (condition.type === 'location_near') return state.dim === condition.dimension ? Math.max(0, dist3(state.pos, condition.pos) - condition.radius) : null;
   if (condition.type === 'inventory_full') return Number.isFinite(state.emptySlots) ? Math.max(0, state.emptySlots - condition.free_slots) / 36 : null;
+  if (condition.type === 'inventory_space_min') return Number.isFinite(state.emptySlots) && state.emptySlots >= 0 ? Math.max(0, condition.free_slots - state.emptySlots) / 36 : null;
   if (condition.type === 'any_of') {
     const deficits = condition.conditions.map((c) => conditionDeficit(c, state, worldId, observations, percept)).filter((n): n is number => n !== null);
     return deficits.length ? Math.min(...deficits) : null;

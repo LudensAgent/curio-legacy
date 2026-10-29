@@ -31,6 +31,8 @@ export interface DashboardHandlers {
   suggest(text: string): void;
   /** 紧急救援：找最近的露天平地，用 RCON 把 Bot 传送过去 */
   rescue?(): Promise<unknown>;
+  /** 手动整理技能，运行中返回 busy，完成后返回可读结果。 */
+  curateSkills?(): Promise<{ ok: true; result: string } | { ok: false; error: string; busy?: boolean }>;
   /** 切换自动旁观（附着到 Bot / 自由旁观） */
   spectate?(on: boolean): Promise<unknown> | unknown;
   /** 弹幕存档：?dates=1 列出有存档的日期；否则按 date / q / questions / blocked / limit 查询 */
@@ -201,6 +203,15 @@ export function startDashboard(
       if (p === '/api/pause') { h.pause(); return send(res, 200, '{"ok":true}'); }
       if (p === '/api/resume') { h.resume(); return send(res, 200, '{"ok":true}'); }
       if (p === '/api/replan') { h.replan(); return send(res, 200, '{"ok":true}'); }
+      if (p === '/api/skills/curate') {
+        if (!h.curateSkills) return send(res, 404, '{"ok":false,"error":"当前运行不支持手动整理技能"}');
+        try {
+          const result = await h.curateSkills();
+          return send(res, result.ok ? 200 : result.busy ? 409 : 500, JSON.stringify(result));
+        } catch (error) {
+          return send(res, 500, JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+        }
+      }
       if (p === '/api/rescue') {
         if (!h.rescue) return send(res, 404, '{"error":"not supported"}');
         const r = await h.rescue();

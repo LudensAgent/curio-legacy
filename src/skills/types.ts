@@ -89,6 +89,8 @@ export interface SkillCtx {
   recovery?: RecoveryContext;
   /** 上报进度 0..1，供预规划和控制台使用 */
   progress(p: number, note?: string): void;
+  /** Bounded stationary work suspends only the movement stall check, including nested calls. */
+  setStationaryWait?(waiting: boolean): void;
 }
 
 export type Validation<A> = { ok: true; args: A } | { ok: false; error: string };

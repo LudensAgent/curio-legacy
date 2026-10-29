@@ -525,10 +525,16 @@ function snapshot() {
     episodicMemory: episodic.snapshot(),
     metrics: metrics.snapshot(),
     memoryLlm: memoryLlm?.snapshot() ?? null,
-    skills: { list: behaviors.list().map((b) => ({ name: b.name, description: b.description, mode: b.mode, source: b.source, code: !!b.code, version: b.version ?? null,
-      overrides: b.overrides, priority: b.priority, stats: behaviors.statsOf(b.name) ? { ok: behaviors.statsOf(b.name)!.ok, fail: behaviors.statsOf(b.name)!.fail, disabled: !!behaviors.statsOf(b.name)!.disabled,
-        retired: behaviors.statsOf(b.name)!.retired ?? null, lastError: behaviors.statsOf(b.name)!.lastError ?? null } : null })),
-      knowledge: skillBook.list().filter((k) => k.behavior === undefined).map((k) => ({ name: k.name, description: k.description, source: k.source })),
+    skills: { list: [...behaviors.list().filter((b) => !b.candidate), ...behaviors.list(true)].map((b) => {
+      const stats = behaviors.statsOf(b.name);
+      const candidate = !!b.candidate;
+      const blocked = behaviors.executionError(b.name, candidate);
+      const retired = candidate ? behaviors.candidateRetirement(b.name)?.why ?? (blocked ? stats?.retired : null) ?? null : stats?.retired ?? null;
+      return { name: b.name, description: b.description, mode: b.mode, source: b.source, code: !!b.code, version: b.version ?? null, candidate,
+        overrides: b.overrides, priority: b.priority, stats: { ...behaviors.currentStats(b.name, candidate),
+          disabled: !retired && !!blocked, retired, lastError: stats?.recent?.filter((run) => run.version === (b.version ?? 1) && !run.ok).at(-1)?.summary ?? null } };
+    }),
+      knowledge: skillBook.list().filter((k) => k.behavior === undefined).map((k) => ({ name: k.name, description: k.description, source: k.source, retired: behaviors.statsOf(k.name)?.retired ?? null })),
       improving: improver.busy ? { name: improver.busy.name, sinceSec: Math.round((Date.now() - improver.busy.startedAt) / 1000) } : null,
       forging: smith.busy ? { kind: smith.busy.kind, sinceSec: Math.round((Date.now() - smith.busy.startedAt) / 1000) } : null,
       forged: smith.history.slice(-6), curating: curator.busy, curated: curator.history.slice(-4) },
@@ -575,6 +581,11 @@ const dashboard = startDashboard(config.dashboard.host, config.dashboard.port, b
   suggest: (t) => executive.suggest(t),
   spectate: (on) => spectator.setActive(on),
   rescue: () => rescue(),
+  curateSkills: async () => {
+    if (curator.busy) return { ok: false, busy: true, error: '正在整理技能，请等待本次完成' };
+    const result = await curator.check(Date.now(), { force: true });
+    return result === null ? { ok: false, error: curator.history.at(-1)?.result ?? '技能整理未完成，请查看运行日志' } : { ok: true, result };
+  },
 }, feed ? [createObserverHandler(feed)] : [], { llmTrace, mcVersion: config.mc.version, env: { file: envFile, backupDir: path.join(config.dataDir, 'env-backups') } });
 installSkillRestoreRequest(dashboard, behaviors, bus, path.join(config.dataDir, 'skill-restore-request.json'));
 

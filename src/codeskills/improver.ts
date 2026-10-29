@@ -50,6 +50,7 @@ export class CodeImprover {
     const b = this.engine.get(name, true) ?? this.engine.get(name);
     if (!b?.code) return '不是代码技能';
     if (this.engine.inactive(name)) return '这份技能已停用或收起，后台改进不重新启用它';
+    if (this.engine.candidateRetirement(name)) return '这份候选已收起，由心智显式修订后再试；后台不重新启用它';
     if (this.busy) {
       // 自己要求的、整理时发现费劲的：排队等这份改完再改（老失败的会再触发，不用排）
       if (why !== 'failures' && this.busy.name !== name && !this.waiting.some((w) => w.name === name)) { this.waiting.push({ name, why, note }); return `排队：正在改「${this.busy.name}」`; }
@@ -70,8 +71,9 @@ export class CodeImprover {
       const st = this.engine.statsOf(name);
       const per = st?.byVersion?.[String(b.version ?? 1)];
       if (!per || per.fail < this.opts.minFailures || per.fail < per.ok) return '失败还不够多';
-      // 代码本身报错（某一行抛错）可以马上修；只是“做了没成”的，刚换上的版本先多跑一阵
-      const codeBroke = /第 \d+ 行|SyntaxError|TypeError|ReferenceError/.test(st?.recent?.at(-1)?.summary ?? st?.lastError ?? '');
+      // 只有当前版本的程序错误可豁免观察期；旧版错误和主动报告的环境缺口不算。
+      const latest = st?.recent?.filter((record) => record.version === b.version).at(-1);
+      const codeBroke = latest?.ok === false && /参数错误|SyntaxError|TypeError|ReferenceError/.test(latest.summary);
       if (st?.swappedAt && now - st.swappedAt < MIN_VERSION_AGE_MS && !codeBroke) return '这一版刚换上不久';
     }
     this.busy = { name, startedAt: now };
@@ -105,7 +107,9 @@ ${API_DOC}
 记录里“说做完了，但判定没通过”的，是代码没真做成——改代码；判定本身写错了（明明做成了却判没过、或者判得太松什么都算成），连判定一起改。
 只输出一个 JSON 对象：{"skill":{"name":"原技能名","description":"用途","body":"目标、输入、停止与结果确认","when"?:{触发条件},"args"?:{参数声明},"steps"?:[动作步骤],"code"?:"完整函数体","verify":"完整判定函数体","priority"?:1-90,"cooldown_s"?:3-600,"overrides"?:[]},"change":"一句话说改了哪一层、依据是什么"}。skill 是同名完整契约，steps/code 只写一种，两者都必须带 verify。若无需改变契约，也兼容 {"code":"完整函数体","verify"?:"完整判定","change":"…"}。如果没有证据支持修订，输出 {"keep":true,"why":"…"}；模型复审和自报 ok 不能代替游戏观测。`;
     const user = {
-      skill: { name, description: b.description, mode: b.mode, version: b.version ?? 1, ...(b.when ? { when: b.when } : {}), ...(b.needs ? { args: b.needs } : {}) },
+      skill: { name, description: b.description, body: b.body, notes: b.notes, mode: b.mode, version: b.version ?? 1,
+        priority: b.priority, cooldown_s: b.cooldownMs / 1000, overrides: b.overrides,
+        ...(b.when ? { when: b.when } : {}), ...(b.needs ? { args: b.needs } : {}) },
       why: WHY_TEXT(why, note),
       ...(this.effect(name) ? { harvest_effect: this.effect(name) } : {}),
       stats: st?.byVersion ?? {},

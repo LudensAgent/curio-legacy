@@ -13,10 +13,10 @@ test('unused skills get a full running observation window after an offline gap',
     { fired: 0, ok: 0, fail: 0, lastAt: started - 8 * hour }]));
   const retired: string[] = [], reasons: string[] = [];
   const engine = {
-    list: () => skills,
+    list: (trial = false) => trial ? [] : skills,
     enabled: (skill: { name: string }) => !retired.includes(skill.name),
     statsOf: (name: string) => stats[name],
-    retire: (name: string, why: string) => { retired.push(name); reasons.push(why); return true; },
+    retire: (name: string, why: string) => { retired.push(name); reasons.push(why); stats[name].retired = why; return true; },
   } as unknown as BehaviorEngine;
   const book = { get: () => ({ updatedAt: started - 8 * hour }) } as unknown as SkillBook;
   const planner = { autonomous: false, noteInvalid() {}, async complete() { return { text: '{}', latencyMs: 0 }; } };
@@ -42,11 +42,11 @@ test('a restored skill receives the existing one-hour grace period before value-
     const stats: BehaviorStats = { fired: 7, ok: 0, fail: reason === 'failures' ? 7 : 0, lastAt: restored - 8 * hour, restoredAt: restored };
     let retired = false;
     const engine = {
-      list: () => [skill],
+      list: (trial = false) => trial ? [] : [skill],
       enabled: () => !retired,
       statsOf: () => stats,
       currentStats: () => stats,
-      retire: () => { retired = true; return true; },
+      retire: () => { retired = true; stats.retired = reason; return true; },
     } as unknown as BehaviorEngine;
     const book = { get: () => ({ updatedAt: restored - 8 * hour }) } as unknown as SkillBook;
     const planner = { autonomous: false, noteInvalid() {}, async complete() { return { text: '{}', latencyMs: 0 }; } };

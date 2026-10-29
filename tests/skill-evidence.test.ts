@@ -123,7 +123,7 @@ test('自动验收和恢复重试绑定调用版本，已取消调用不产生�
   assert.deepEqual(w.engine.currentStats(cancelledName), { ok: 0, fail: 0 }, '取消后状态自行解除也不归功给技能');
 });
 
-test('候选失败保留自己的版本证据，不改变稳定版的可靠性、竞争分或整理结果', (t) => {
+test('候选失败保留自己的版本证据，独立收起不改变稳定版的可靠性或竞争分', (t) => {
   const w = setup(t, (book, directory) => {
     assert.ok(book.write(definition.name, definition.description, '已使用过的原有做法', definition).ok);
     fs.writeFileSync(path.join(directory, 'stats.json'), JSON.stringify({ [definition.name]: { fired: 3, ok: 3, fail: 0, lastAt: 1 } }));
@@ -136,8 +136,11 @@ test('候选失败保留自己的版本证据，不改变稳定版的可靠性�
   assert.deepEqual(w.engine.currentStats(definition.name), { ok: 3, fail: 0 });
   assert.deepEqual(w.engine.currentStats(definition.name, true), { ok: 0, fail: 6 });
   const curator = new SkillCurator({ autonomous: false, noteInvalid() {}, async complete() { return { text: '{}', latencyMs: 0 }; } }, w.engine, w.book, w.bus);
-  assert.deepEqual(curator.retireLowValue(Date.now() + 2 * 3600_000), []);
+  assert.deepEqual(curator.retireLowValue(Date.now() + 2 * 3600_000), [definition.name]);
+  assert.equal(w.engine.candidateRetirement(definition.name)?.version, 2);
   assert.equal(w.engine.inactive(definition.name), false);
+  assert.equal(w.engine.executionError(definition.name), null);
+  assert.equal(w.engine.reliable(definition.name), null);
 });
 
 test('稳定版什么都没做的成功返回不累积成功或失败证据', async (t) => {

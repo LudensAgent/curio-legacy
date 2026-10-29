@@ -22,6 +22,10 @@
   button { background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; cursor: pointer; font: inherit; }
   button:hover { border-color: var(--text); }
   button.primary { background: var(--text); color: var(--card); border-color: var(--text); }
+  #curateSkillsBtn { flex: none; white-space: nowrap; }
+  #curateSkillsBtn:disabled { opacity: .65; cursor: progress; }
+  .skill-curate-result { margin: 0 0 10px; font-size: 12px; overflow-wrap: anywhere; }
+  .skill-curate-result.error { color: var(--bad); }
   input { background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font: inherit; outline: none; }
   input:focus { border-color: var(--text); }
   header { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 20px; background: var(--card); border-bottom: 1px solid var(--line); }
@@ -501,10 +505,11 @@
 
     <section class="pane" id="pane-skills">
       <div class="card">
-        <h2>会动手的技能 <span class="r dim">写下就生效 · 代码技能会在后台改进</span></h2>
+        <h2>会动手的技能 <span class="r dim">候选试用通过后启用</span><button id="curateSkillsBtn" type="button">整理技能</button></h2>
+        <div id="curateSkillsResult" class="skill-curate-result dim" role="status" aria-live="polite" hidden></div>
         <div id="improving"></div>
         <div class="filters" id="skillFilter"></div>
-        <table><thead><tr><th>技能</th><th>怎么用</th><th>成 / 败</th><th>说明</th></tr></thead><tbody id="skillRows"></tbody></table>
+        <table><thead><tr><th>技能</th><th>怎么用</th><th>当前版成 / 败</th><th>说明</th></tr></thead><tbody id="skillRows"></tbody></table>
       </div>
       <div class="card"><h2>做法说明（按需翻开）</h2><ul class="list" id="knowledge"></ul></div>
     </section>
@@ -850,11 +855,39 @@ function renderMind(mind) {
   $('mindDiary').innerHTML = list((mind.diary || []).slice().reverse(), (d) => `<li><span class="k">${ago(d.at)}前</span>${esc(d.text)}</li>`);
 }
 
-// 技能筛选：在用 / 已停用 / 已收起 / 全部；选了哪个记在本浏览器里
-const SKILL_VIEWS = [['active', '在用'], ['disabled', '已停用'], ['retired', '已收起'], ['all', '全部']];
+// 技能按版本展示状态；选了哪个筛选记在本浏览器里
+const SKILL_VIEWS = [['active', '在用'], ['candidate', '待试用'], ['disabled', '已停用'], ['retired', '已收起'], ['all', '全部']];
 let skillView = (() => { try { return localStorage.getItem('curio.skillView') || 'active'; } catch { return 'active'; } })();
 let lastSkills = null;
-const skillState = (b) => b.stats?.retired ? 'retired' : b.stats?.disabled ? 'disabled' : 'active';
+let curatePending = false;
+const skillState = (b) => b.stats?.retired ? 'retired' : b.stats?.disabled ? 'disabled' : b.candidate ? 'candidate' : 'active';
+function renderCurateButton() {
+  const busy = curatePending || !!lastSkills?.curating;
+  $('curateSkillsBtn').disabled = busy;
+  $('curateSkillsBtn').textContent = busy ? '整理中…' : '整理技能';
+}
+$('curateSkillsBtn').addEventListener('click', async () => {
+  if (curatePending || lastSkills?.curating) return;
+  curatePending = true;
+  renderCurateButton();
+  const status = $('curateSkillsResult');
+  status.hidden = false;
+  status.className = 'skill-curate-result dim';
+  status.textContent = '正在整理技能，请等待结果…';
+  try {
+    const response = await fetch('/api/skills/curate', { method: 'POST' });
+    const result = await response.json();
+    const ok = response.ok && result.ok;
+    status.textContent = ok ? result.result : result.error || '技能整理未完成，请查看运行日志';
+    status.className = 'skill-curate-result' + (ok ? '' : ' error');
+  } catch (error) {
+    status.textContent = `未能取得整理结果：${error.message}`;
+    status.className = 'skill-curate-result error';
+  } finally {
+    curatePending = false;
+    renderCurateButton();
+  }
+});
 $('skillFilter').addEventListener('click', (e) => {
   const v = e.target.closest('button[data-view]')?.dataset.view;
   if (!v) return;
@@ -866,8 +899,9 @@ $('skillFilter').addEventListener('click', (e) => {
 function renderSkills(sk) {
   if (!sk) return;
   lastSkills = sk;
+  renderCurateButton();
   const mode = { auto: ['条件成立自动做', 'info'], recover: ['动作失败时先试', 'warn'], manual: ['use_skill 调用', ''] };
-  const counts = { all: sk.list.length, active: 0, disabled: 0, retired: 0 };
+  const counts = { all: sk.list.length, active: 0, candidate: 0, disabled: 0, retired: 0 };
   for (const b of sk.list) counts[skillState(b)]++;
   $('nSkills').textContent = counts.active || '';
   $('skillFilter').innerHTML = SKILL_VIEWS.map(([v, zh]) => `<button class="chip${skillView === v ? ' sel' : ''}" data-view="${v}">${zh} ${counts[v]}</button>`).join('');
@@ -879,13 +913,13 @@ function renderSkills(sk) {
     + ((sk.curated || []).length ? `<div class="dim" style="font-size:11px;margin-bottom:4px">最近的整理：${(sk.curated || []).slice().reverse().map((c) => `${ago(c.at)}前 ${esc(c.result)}`).join('　')}</div>` : '')
     + ((sk.forged || []).length ? `<div class="dim" style="font-size:11px;margin-bottom:8px">最近的总结：${(sk.forged || []).slice().reverse().map((f) => `${ago(f.at)}前 ${kindZh[f.kind] || f.kind} → ${esc(f.result)}`).join('　')}</div>` : '');
   $('skillRows').innerHTML = shown.length ? shown.map((b) => {
-    const st = b.stats; const [m, c] = mode[b.mode] || [b.mode, ''];
-    return `<tr><td><b class="mono">${esc(b.name)}</b>${b.source === 'self' ? ' <span class="badge good">自己写的</span>' : ''}${b.code ? ` <span class="badge info">代码 v${b.version ?? 1}</span>` : ''}${st?.retired ? ` <span class="badge" title="${esc(st.retired)}">已收起</span>` : st?.disabled ? ' <span class="badge bad">已停用</span>' : ''}<div class="dim mono" style="font-size:10px">优先级 ${b.priority ?? '-'}</div></td>`
+    const st = b.stats; const [m, c] = b.candidate ? ['use_skill trial:true', 'warn'] : mode[b.mode] || [b.mode, ''];
+    return `<tr><td><b class="mono">${esc(b.name)}</b>${b.source === 'self' ? ' <span class="badge good">自己写的</span>' : ''} <span class="badge info">${b.code ? '代码' : '步骤'} v${b.version ?? 1}</span>${b.candidate ? ` <span class="badge warn">${skillState(b) === 'candidate' ? '待试用' : '候选'}</span>` : ''}${st?.retired ? ` <span class="badge" title="${esc(st.retired)}">已收起</span>` : st?.disabled ? ' <span class="badge bad">已停用</span>' : ''}<div class="dim mono" style="font-size:10px">优先级 ${b.priority ?? '-'}</div></td>`
       + `<td><span class="badge ${c}">${m}</span>${b.overrides?.length ? `<div class="dim" style="font-size:11px">代替本能 ${esc(b.overrides.join('、'))}</div>` : ''}</td>`
       + `<td class="mono">${st ? `${st.ok} / ${st.fail}` : '-'}</td>`
       + `<td>${esc(b.description)}${st?.lastError ? `<div class="err">${esc(st.lastError)}</div>` : ''}</td></tr>`;
   }).join('') : `<tr><td colspan="4" class="empty">${sk.list.length ? `没有${SKILL_VIEWS.find(([v]) => v === skillView)?.[1] ?? ''}的技能` : '还没有会动手的技能'}</td></tr>`;
-  $('knowledge').innerHTML = list(sk.knowledge, (k) => `<li><b class="mono">${esc(k.name)}</b>${k.source === 'self' ? ' <span class="badge good">自己写的</span>' : ''} <span class="dim">${esc(k.description)}</span></li>`);
+  $('knowledge').innerHTML = list(sk.knowledge, (k) => `<li><b class="mono">${esc(k.name)}</b>${k.source === 'self' ? ' <span class="badge good">自己写的</span>' : ''}${k.retired ? ` <span class="badge" title="${esc(k.retired)}">已收起</span>` : ''} <span class="dim">${esc(k.description)}</span></li>`);
 }
 
 const MEM_SCOPE = { memory: '写入抽取', consolidation: '合并观察', reflect: '反思', answer: '回答' };

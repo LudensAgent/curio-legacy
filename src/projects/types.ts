@@ -12,6 +12,8 @@ export type Condition =
   | { type: 'block_state'; dimension: string; pos: Vec3Like; name?: string; properties?: Record<string, string | number | boolean> }
   /** 背包装满了（或只剩 free_slots 格空）：“挖到背包差不多满再上来”这种收工方式 */
   | { type: 'inventory_full'; free_slots: number }
+  /** 清出至少 free_slots 格空位；与装满背包的收工条件分开。 */
+  | { type: 'inventory_space_min'; free_slots: number }
   | { type: 'all_of'; conditions: Condition[] }
   /** 哪个先成立就算成立：“铁够 20 个或背包满” */
   | { type: 'any_of'; conditions: Condition[] };

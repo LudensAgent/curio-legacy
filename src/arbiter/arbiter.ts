@@ -26,6 +26,7 @@ export interface TaskInfo {
   progress: number;
   note: string;
   movement: boolean;
+  stationaryWait?: boolean;
   planId?: string;
 }
 
@@ -225,6 +226,7 @@ export class Arbiter extends EventEmitter {
         task.progress = Math.max(0, Math.min(1, p));
         if (note) task.note = note;
       },
+      setStationaryWait: (waiting: boolean) => { task.stationaryWait = waiting; },
     };
 
     runSkill(ctx, skill, v.args as { make?: boolean })

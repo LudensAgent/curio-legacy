@@ -1,6 +1,6 @@
 import type { EventBus } from '../events.ts';
 import type { SkillBook } from '../knowledge/skillbook.ts';
-import { isEmergency, type BehaviorEngine } from '../mind/behaviors.ts';
+import { isEmergency, type Behavior, type BehaviorEngine } from '../mind/behaviors.ts';
 import type { LedgerView } from '../mind/ledger.ts';
 import type { ChatMessage } from '../planner/llm.ts';
 import { extractJson } from '../planner/plan.ts';
@@ -51,6 +51,29 @@ export function similarSkills(skills: { name: string; description?: string; when
   return out.sort((a, b) => b[2] - a[2]);
 }
 
+/** 模型回复只在这里归一化；执行阶段继续核对对应技能和版本。 */
+function parseCuration(text: string) {
+  const raw = extractJson(text);
+  const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
+  if (!object(raw)) throw new Error('整理结果需要 JSON 对象');
+  const rows = (key: string) => Array.isArray(raw[key]) ? raw[key].filter(object) : [];
+  return {
+    ok: raw.ok === true,
+    merge: rows('merge').slice(0, 4).map((entry) => {
+      const skill = object(entry.skill) ? entry.skill : {};
+      return { from: Array.isArray(entry.from) ? entry.from.map(String) : [], skill,
+        note: typeof skill.body === 'string' && !skill.code && !skill.steps && !skill.when
+          ? { name: String(skill.name ?? ''), description: String(skill.description ?? ''), body: skill.body } : undefined };
+    }),
+    priority: rows('priority').slice(0, 8).map((entry) => ({ name: String(entry.name ?? ''), priority: Number(entry.priority) })).filter((entry) => Number.isFinite(entry.priority)),
+    retire: rows('retire').slice(0, 8).map((entry) => ({ name: String(entry.name ?? ''), target: entry.target === undefined ? undefined : String(entry.target),
+      version: typeof entry.version === 'number' ? entry.version : undefined, why: String(entry.why ?? '整理时收起') })),
+    restore: rows('restore').slice(0, 8).map((entry) => ({ name: String(entry.name ?? '') })),
+    rollback: rows('rollback').slice(0, 4).map((entry) => ({ name: String(entry.name ?? ''), to: Math.floor(Number(entry.to)), why: String(entry.why ?? '').slice(0, 100) })),
+    improve: rows('improve').slice(0, 3).map((entry) => ({ name: String(entry.name ?? ''), why: String(entry.why ?? '').slice(0, 200) })),
+  };
+}
+
 export class SkillCurator {
   busy = false;
   lastRun = 0;
@@ -76,7 +99,33 @@ export class SkillCurator {
   start() { this.observationStartedAt = Date.now(); this.timer = setInterval(() => void this.check(), this.opts.checkMs); this.timer.unref?.(); }
   stop() { if (this.timer) clearInterval(this.timer); this.timer = null; }
 
-  private active() { return this.engine.list().filter((b) => b.source === 'self' && this.engine.enabled(b)); }
+  private active() {
+    return [...this.engine.list().filter((b) => !b.candidate), ...this.engine.list(true)]
+      .filter((b) => b.source === 'self' && (!this.engine.statsOf(b.name)?.retired || b.candidate && !this.engine.executionError(b.name, true))
+        && (!b.candidate || !this.engine.candidateRetirement(b.name)));
+  }
+
+  private notes() { return (this.book?.list() ?? []).filter((entry) => entry.source === 'self' && entry.behavior === undefined && !this.book?.candidate(entry.name)); }
+
+  private signature() {
+    return [...this.active().map((b) => `${b.name}@${b.candidate ? 'candidate' : 'stable'}:${b.version}:${this.written(b)}:${!!this.engine.statsOf(b.name)?.disabled}:${b.notes ?? ''}`),
+      ...this.notes().map((entry) => `${entry.name}@note:${entry.updatedAt}:${this.engine.inactive(entry.name)}`)].sort().join('|');
+  }
+
+  private written(b: Pick<Behavior, 'name' | 'candidate'>) {
+    return (b.candidate ? this.book?.candidate(b.name) : this.book?.get(b.name))?.updatedAt ?? Date.now();
+  }
+
+  private lastUse(b: Behavior) {
+    const st = this.engine.statsOf(b.name);
+    return b.candidate ? Math.max(st?.usageByVersion?.[String(b.version)]?.lastUsedAt ?? 0,
+      ...(st?.recent ?? []).filter((record) => record.version === b.version).map((record) => record.at))
+      : Math.max(st?.lastAt ?? 0, st?.lastUsedAt ?? 0, st?.restoredAt ?? 0, st?.recent?.at(-1)?.at ?? 0);
+  }
+
+  private retire(b: Behavior, why: string) {
+    return b.candidate ? this.engine.retireCandidate(b.name, b.version!, why) : this.engine.retire(b.name, why);
+  }
 
   /** 收起长期用不上的自己写的技能（不需要模型） */
   retireUnused(now = Date.now()): string[] {
@@ -89,23 +138,23 @@ export class SkillCurator {
       // 只在别的维度生效的技能（比如下界专用的）：人不在那儿时用不上是正常的，不算“长期不用”
       if (b.when?.dim && dim && !b.when.dim.includes(dim)) continue;
       const st = this.engine.statsOf(b.name);
-      const written = this.book?.get(b.name)?.updatedAt ?? now;
+      const written = this.written(b);
       // Offline time provides no opportunity to use a skill. After each start,
       // observe this process for the full idle window before retiring it.
-      const last = Math.max(this.observationStartedAt, written, st?.lastAt ?? 0, st?.lastUsedAt ?? 0, st?.restoredAt ?? 0, st?.recent?.at(-1)?.at ?? 0);
+      const last = Math.max(this.observationStartedAt, written, this.lastUse(b));
       if (now - last >= this.opts.unusedMs) {
         const hours = Math.round((now - last) / 3600_000);
         const why = st && st.ok + st.fail + st.fired > 0 ? `本次运行观察 ${hours} 小时没用上` : `本次运行观察 ${hours} 小时一次都没用上`;
-        if (this.engine.retire(b.name, why)) out.push(b.name);
+        if (this.retire(b, why)) out.push(b.name);
       }
     }
     return out;
   }
 
   /** 近一小时写下或恢复的还没机会用；只在别的维度用的不算。 */
-  private settled(b: { name: string; when?: { dim?: string[] } }, now: number, dim: string) {
+  private settled(b: Pick<Behavior, 'name' | 'when' | 'candidate'>, now: number, dim: string) {
     if (b.when?.dim && dim && !b.when.dim.includes(dim)) return false;
-    const since = Math.max(this.book?.get(b.name)?.updatedAt ?? now, this.engine.statsOf(b.name)?.restoredAt ?? 0);
+    const since = Math.max(this.written(b), b.candidate ? 0 : this.engine.statsOf(b.name)?.restoredAt ?? 0);
     return now - since >= 3600_000;
   }
 
@@ -120,38 +169,42 @@ export class SkillCurator {
     let dim = '';
     try { dim = this.dim(); } catch { /* 状态暂不可用 */ }
     for (const b of this.active()) {
-      const st = this.engine.currentStats(b.name);
+      const st = this.engine.currentStats(b.name, !!b.candidate);
       const tries = (st?.ok ?? 0) + (st?.fail ?? 0);
-      if (tries >= 6 && (st?.ok ?? 0) / tries < 0.2 && this.settled(b, now, dim) && this.engine.retire(b.name, `用了 ${tries} 次只成了 ${st?.ok ?? 0} 次，在添乱`)) out.push(b.name);
+      if (tries >= 6 && (st?.ok ?? 0) / tries < 0.2 && this.settled(b, now, dim) && this.retire(b, `当前版本用了 ${tries} 次只成了 ${st?.ok ?? 0} 次，在添乱`)) out.push(b.name);
     }
     // 救命的技能不占名额、也不因为技能太多被挤掉（它们在添乱时照样按上面那条收）
-    const left = this.active().filter((b) => !isEmergency(b));
+    const active = this.active();
+    const left = active.filter((b) => !isEmergency(b) && (!b.candidate || !active.some((other) => other.name === b.name && !other.candidate)));
     const over = left.length - this.opts.maxActive;
     if (over > 0) {
-      const value = (name: string) => { const st = this.engine.currentStats(name); return st.ok * 3 - st.fail; };
-      const last = (name: string) => Math.max(this.book?.get(name)?.updatedAt ?? 0, this.engine.statsOf(name)?.lastAt ?? 0);
-      const victims = left.filter((b) => this.settled(b, now, dim)).sort((a, b) => value(a.name) - value(b.name) || last(a.name) - last(b.name)).slice(0, over);
+      const value = (b: Behavior) => { const st = this.engine.currentStats(b.name, !!b.candidate); return st.ok * 3 - st.fail; };
+      const victims = left.filter((b) => this.settled(b, now, dim)).sort((a, b) => value(a) - value(b) || this.lastUse(a) - this.lastUse(b)).slice(0, over);
       for (const b of victims) {
-        const st = this.engine.statsOf(b.name);
-        if (this.engine.retire(b.name, `技能太多（${left.length} 份），它最少派上用场（成 ${st?.ok ?? 0} 败 ${st?.fail ?? 0}）`)) out.push(b.name);
+        const st = this.engine.currentStats(b.name, !!b.candidate);
+        if (this.retire(b, `技能太多（${left.length} 份），它最少派上用场（当前版本成 ${st.ok} 败 ${st.fail}）`)) out.push(b.name);
       }
     }
     return out;
   }
 
   /** 定时检查：先收起用不上的、没用的；技能够多、而且有新技能、冲突或看着重复的，才请模型合并 */
-  async check(now = Date.now()): Promise<string | null> {
-    if (this.busy) return null;
+  async check(now = Date.now(), opts: { force?: boolean } = {}): Promise<string | null> {
+    if (this.busy) return opts.force ? '正在整理技能，请等待本次完成' : null;
     const retired = [...this.retireUnused(now), ...this.retireLowValue(now)];
     const skills = this.active();
-    const signature = skills.map((b) => `${b.name}@${this.book?.get(b.name)?.updatedAt ?? 0}`).sort().join('|');
+    const notes = this.notes();
+    const signature = this.signature();
+    const retiredText = retired.length ? `已收起 ${retired.join('、')}；` : '';
+    if (!this.planner.autonomous) return opts.force ? `${retiredText}没有自主模型，无法进行模型整理` : retired.length ? retiredText : null;
+    if (!skills.length && !notes.length) return opts.force ? `${retiredText}没有可整理的自学技能或文字记录` : retired.length ? retiredText : null;
     // 冲突只看上次整理之后新增的
     const conflicted = skills.some((b) => Object.values(this.engine.statsOf(b.name)?.conflicts ?? {}).reduce((n, v) => n + v, 0) - (this.conflictSeen.get(b.name) ?? 0) >= 3);
     const evidence = this.safe(() => this.ledger?.skillEpisodes() ?? 0, 0);
     const newEvidence = evidence - this.evidenceSeen >= this.evidenceStep;
     // 只有效果证据的话，技能少也值得看（一两个技能也可能在拖后腿）
-    const enough = skills.length >= this.opts.minSkills || ((newEvidence || conflicted) && skills.length > 0);
-    if (!this.planner.autonomous || !enough || now - this.lastRun < this.opts.gapMs || (signature === this.lastSignature && !conflicted && !newEvidence)) {
+    const enough = new Set([...skills, ...notes].map((entry) => entry.name)).size >= this.opts.minSkills || ((newEvidence || conflicted) && skills.length > 0);
+    if (!opts.force && (!enough || now - this.lastRun < this.opts.gapMs || (signature === this.lastSignature && !conflicted && !newEvidence))) {
       return retired.length ? `收起 ${retired.join('、')}` : null;
     }
     this.busy = true;
@@ -159,16 +212,18 @@ export class SkillCurator {
     for (const b of skills) this.conflictSeen.set(b.name, Object.values(this.engine.statsOf(b.name)?.conflicts ?? {}).reduce((n, v) => n + v, 0));
     this.lastSignature = signature;
     this.evidenceSeen = evidence;
-    this.bus.publish('skill_curate_start', 'P3', `在后台整理技能（${skills.length} 份）`);
+    this.bus.publish('skill_curate_start', 'P3', `在后台整理技能（${skills.length} 个执行版本、${notes.length} 份文字记录）`, { forced: !!opts.force });
     try {
-      const r = await this.curate();
+      const r = retiredText + await this.curate();
       // 整理本身改写了技能：记下整理后的样子，免得下一轮把自己的改动当成“有新技能”
-      this.lastSignature = this.active().map((b) => `${b.name}@${this.book?.get(b.name)?.updatedAt ?? 0}`).sort().join('|');
+      this.lastSignature = this.signature();
       this.history = [...this.history, { at: Date.now(), result: r }].slice(-10);
+      this.bus.publish('skill_curated', 'P3', `技能整理完成：${r}`, { forced: !!opts.force });
       return r;
     } catch (e) {
       const why = String((e as Error)?.message ?? e).slice(0, 160);
-      this.history = [...this.history, { at: Date.now(), result: `出错：${why}` }].slice(-10);
+      const result = `${retiredText}整理出错：${why}`;
+      this.history = [...this.history, { at: Date.now(), result }].slice(-10);
       this.bus.publish('skill_curate_failed', 'P2', `整理技能没成：${why}`);
       return null;
     } finally { this.busy = false; }
@@ -176,12 +231,13 @@ export class SkillCurator {
 
   messages(): ChatMessage[] {
     const similar = new Map<string, string[]>();
-    for (const [a, b] of similarSkills(this.active())) { similar.set(a, [...(similar.get(a) ?? []), b]); similar.set(b, [...(similar.get(b) ?? []), a]); }
+    for (const [a, b] of similarSkills(this.active())) { if (a === b) continue; similar.set(a, [...(similar.get(a) ?? []), b]); similar.set(b, [...(similar.get(b) ?? []), a]); }
     const skills = this.active().map((b) => {
       const st = this.engine.statsOf(b.name);
-      return { name: b.name, description: b.description, mode: b.mode, priority: b.priority, ...(b.when ? { when: b.when } : {}), ...(isEmergency(b) ? { lifesaver: true } : {}),
+      return { name: b.name, target: b.candidate ? 'candidate' : 'skill', version: b.version ?? 1, disabled: !!st?.disabled,
+        description: b.description, body: b.body, notes: b.notes, mode: b.mode, priority: b.priority, ...(b.when ? { when: b.when } : {}), ...(isEmergency(b) ? { lifesaver: true } : {}),
         kind: b.code ? `代码 v${b.version ?? 1}（${b.code.length} 字符）` : `${b.steps.length} 步`,
-        uses: { ...this.engine.currentStats(b.name), fired: st?.fired ?? 0 },
+        uses: { ...this.engine.currentStats(b.name, !!b.candidate), ...(b.candidate ? {} : { fired: st?.fired ?? 0 }) },
         lifetime: st ? { ok: st.ok, fail: st.fail } : { ok: 0, fail: 0 },
         ...(st?.byVersion && Object.keys(st.byVersion).length > 1 ? { versions: st.byVersion } : {}),
         ...(this.effect(b.name) ? { harvest_effect: this.effect(b.name) } : {}),
@@ -192,9 +248,15 @@ export class SkillCurator {
         ...(st?.undoneBy && Object.keys(st.undoneBy).length ? { work_undone_by: st.undoneBy } : {}),
         ...(st?.loops?.length ? { see_sawed_with: st.loops.map((l) => `${l.with.startsWith('doing:') ? `手上的「${l.with.slice(6)}」` : `「${l.with}」`}（${l.times} 回）`) } : {}), ...(b.code ? { code: b.code.slice(0, 2500), ...(b.verify ? { verify: b.verify } : {}) } : { steps: b.steps }) };
     });
-    const system = `你在整理 Minecraft 机器人 Curio 自己写的技能（会动手的技能：条件成立时自动做、动作失败时先试、或被调用）。像人整理笔记一样：
+    const notes = this.notes().map((entry) => ({ name: entry.name, target: 'note', description: entry.description, body: entry.body, notes: entry.notes,
+      retired: this.engine.statsOf(entry.name)?.retired ?? null, disabled: this.engine.inactive(entry.name) }));
+    const system = `你在整理 Minecraft 机器人 Curio 自己写的技能及文字记录。像人整理笔记一样：
+- skills 分开列正式版本（target:skill）和候选（target:candidate）；同名两者的证据不能混用。retire 必须带 target；执行版本再带 version。收起候选不会收起同名稳定版，收起 skill 则是停用整个名字。
+- 已停用但未收起的技能也要评估；候选没有验收通过不等于已经会用。候选可保留试用、同名修订或依据证据收起，不强制心智做任何试验。
+- notes 是纯文字记录，不参与执行成败和闲置淘汰。可按内容重复或已被事实推翻来 retire（target:note），不能因为没有执行次数就收起。确有用途时可用 restore 恢复文字记录；读取不代表做法验证成功。
+- 合并纯文字记录也用 merge：from 只能写 notes 中的名字，skill 只写 name、description、body；先保留原记录，是否收起来源再明确决定。写入已收起的文字目标不会自动恢复，需要时另写 restore。已有行为技能的补充笔记保留在 notes 中，修订必须保留其仍适用的约束。
 - 说的是同一件事、触发条件大面积重叠的：合并成一份更好的（merge：from 写被合并的名字，skill 写合并后的完整技能，可以沿用其中一个名字）。合并时保留各自真正管用的部分（看 uses 的成败）。
-- merge 先保存候选，原技能保留；候选实际验收通过后再根据新证据决定是否 retire 来源技能。uses 是当前稳定版本的证据，lifetime 是历史总计，不混用。
+- 行为 merge 先保存候选，原技能保留；候选实际验收通过后再根据新证据决定是否 retire 来源技能。uses 是表中指定版本的证据，lifetime 是历史总计，不混用。
 - 来回拉锯的（see_sawed_with：一个做完另一个又把它推回去，或者技能一再打断手上同一件事）：这最要紧——找出两边条件为什么会轮流成立，
   收窄条件让它们不再互相触发（比如躲怪的技能加上“怪还在附近”、回地表的技能加上“附近没有怪”），或者合并成一份统一处理；
 - 动作上互相拆台的（undid_work_of：它挖掉了那个技能放的方块、或把那个技能挖开的地方又填上，数字是格数；work_undone_by 是反过来）：和拉锯一样要紧。
@@ -212,8 +274,8 @@ export class SkillCurator {
   · 数据太少（一两次）不下结论。
 - 没有要整理的就输出 {"ok":true}。不要为了整理而整理。
 技能格式和写法与原来相同（when / steps 或 code / priority / cooldown_s / args）；合并出来的代码技能要带 verify（判定：做完以后看一眼世界确认真的做成了，只能用 api.state/blockAt/region/entities/drops/nearestLand，return true 算成、return "原因" 算没成），可以沿用原来的判定。
-只输出一个 JSON 对象：{"merge":[{"from":["a","b"],"skill":{…}}],"priority":[{"name":"…","priority":1-90}],"retire":[{"name":"…","why":"…"}],"improve":[{"name":"…","why":"…"}],"rollback":[{"name":"…","to":1,"why":"…"}]}（用不到的键省略）或 {"ok":true}`;
-    return [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify({ skills }) }];
+只输出一个 JSON 对象：{"merge":[{"from":["a","b"],"skill":{…}}],"priority":[{"name":"…","priority":1-90}],"retire":[{"name":"…","target":"candidate|skill|note","version":1,"why":"…"}],"restore":[{"name":"文字记录名","why":"恢复理由"}],"improve":[{"name":"…","why":"…"}],"rollback":[{"name":"…","to":1,"why":"…"}]}（用不到的键省略；文字记录不写 version）或 {"ok":true}`;
+    return [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify({ skills, notes }) }];
   }
 
   private safe<T>(fn: () => T, fallback: T): T { try { return fn(); } catch { return fallback; } }
@@ -221,41 +283,62 @@ export class SkillCurator {
 
   private async curate(): Promise<string> {
     const messages = this.messages();
-    const names = new Set(this.active().map((b) => b.name));
+    const versions = this.active(), notes = this.notes();
+    const names = new Set([...versions, ...notes].map((entry) => entry.name));
+    const noteNames = new Set(notes.map((entry) => entry.name));
     for (let attempt = 0; attempt < 2; attempt++) {
       const c = await this.planner.complete(messages, { label: 'skill:整理', tier: 'full', signal: AbortSignal.timeout(10 * 60_000), attempt, maxTokensScale: 2 });
-      let raw: Record<string, any>;
-      try { raw = extractJson(c.text) as Record<string, any>; } catch (e) {
+      let raw: ReturnType<typeof parseCuration>;
+      try { raw = parseCuration(c.text); } catch (e) {
         this.planner.noteInvalid('整理技能', (e as Error).message);
         messages.push({ role: 'user', content: '刚才的回复不是合法 JSON，请只输出一个 JSON 对象。' });
         continue;
       }
-      if (raw.ok === true && !raw.merge && !raw.retire && !raw.priority && !raw.improve && !raw.rollback) return '不用整理';
+      if (raw.ok && !raw.merge.length && !raw.retire.length && !raw.restore.length && !raw.priority.length && !raw.improve.length && !raw.rollback.length) return '不用整理';
       const done: string[] = [], errors: string[] = [];
-      for (const m of Array.isArray(raw.merge) ? raw.merge.slice(0, 4) : []) {
-        const from = (Array.isArray(m?.from) ? m.from : []).map(String).filter((n: string) => names.has(n));
-        const w = this.engine.write(m?.skill, { by: 'curator' });
+      for (const m of raw.merge) {
+        const from = m.from.filter((name) => names.has(name));
+        if (from.length && from.every((name) => noteNames.has(name)) && m.note) {
+          const target = m.note.name;
+          if (this.book?.get(target) && !noteNames.has(target)) { errors.push(`${target} 不是纯文字记录，不能用文字合并覆盖`); continue; }
+          const saved = this.book?.write(target, m.note.description, m.note.body);
+          if (saved?.ok) { done.push(`${from.join('+')} → 文字记录 ${saved.skill.name}（保留来源${this.engine.inactive(saved.skill.name) ? '；目标仍收起，需要明确 restore' : ''}）`); }
+          else errors.push(`文字合并没存下：${saved && !saved.ok ? saved.error : '没有技能书'}`);
+          continue;
+        }
+        const w = this.engine.write(m.skill, { by: 'curator' });
         if (!w.ok) { errors.push(`合并 ${from.join('+')} 没存下：${w.error}`); continue; }
         done.push(`${from.join('+')} → 候选 ${w.name}（保留原技能，验收后再决定收起）`);
         this.bus.publish('skill_merged', 'P2', `整理技能：${from.join('、')} 生成合并候选「${w.name}」；原技能保持原状态`, { from, into: w.name, candidate: true });
       }
-      for (const p of Array.isArray(raw.priority) ? raw.priority.slice(0, 8) : []) {
-        if (names.has(String(p?.name)) && Number.isFinite(Number(p?.priority)) && this.engine.setPriority(String(p.name), Number(p.priority))) done.push(`${p.name} 优先级 ${p.priority}`);
+      for (const p of raw.priority) {
+        if (names.has(p.name) && this.engine.setPriority(p.name, p.priority)) done.push(`${p.name} 优先级 ${p.priority}`);
       }
-      for (const r of Array.isArray(raw.retire) ? raw.retire.slice(0, 8) : []) {
-        // 刚写下、当前版本还没用够几次的：数据太少不下结论（提示里这么说，代码里也守住）
-        const young = names.has(String(r?.name)) ? this.engine.rewriteGate(String(r.name)) : null;
-        if (young) { errors.push(`${r.name} 先不收：${young.slice(0, 60)}`); continue; }
-        // 救命的技能：只有在添乱（用了不少次几乎总失败）时才收；合并进别的技能走 merge
-        const eb = names.has(String(r?.name)) ? this.engine.get(String(r.name)) : undefined;
-        if (eb && isEmergency(eb)) {
-          const st = this.engine.currentStats(eb.name), tries = st.ok + st.fail;
-          if (!(tries >= 6 && (st?.ok ?? 0) / tries < 0.2)) { errors.push(`${r.name} 是救命的技能，用得少不收（要合并就用 merge）`); continue; }
+      for (const r of raw.retire) {
+        const { name, why } = r;
+        if (r.target === 'note' && noteNames.has(name)) {
+          if (this.book?.get(name)?.behavior !== undefined || this.book?.candidate(name)) { errors.push(`${name} 已有执行版本，不能按纯文字收起`); continue; }
+          if (!this.engine.inactive(name) && this.engine.retire(name, why)) done.push(`收起文字记录 ${name}`);
+          continue;
         }
-        if (names.has(String(r?.name)) && this.engine.retire(String(r.name), String(r?.why ?? '整理时收起'))) done.push(`收起 ${r.name}`);
+        const matches = versions.filter((b) => b.name === name && (r.target === undefined || (b.candidate ? 'candidate' : 'skill') === r.target));
+        if (matches.length !== 1 || matches[0].candidate && r.version !== matches[0].version) { errors.push(`${name} 收起目标不明确，需指定 target 和对应 version`); continue; }
+        const eb = matches[0];
+        if (r.version !== undefined && r.version !== eb.version || this.engine.get(name, !!eb.candidate)?.version !== eb.version) { errors.push(`${name} 版本已变化，未收起`); continue; }
+        const st = this.engine.currentStats(name, !!eb.candidate), tries = st.ok + st.fail;
+        if (tries > 0 && tries < 3 || tries === 0 && Date.now() - this.written(eb) < 10 * 60_000) { errors.push(`${name} 当前版本证据还少，先保留`); continue; }
+        // 救命的技能：只有在添乱（用了不少次几乎总失败）时才收；合并进别的技能走 merge
+        if (isEmergency(eb)) {
+          if (!(tries >= 6 && st.ok / tries < 0.2)) { errors.push(`${name} 是救命的技能，用得少不收（要合并就用 merge）`); continue; }
+        }
+        if (this.retire(eb, why)) done.push(`收起 ${name}${eb.candidate ? ` 候选 v${eb.version}` : ''}`);
       }
-      for (const r of Array.isArray(raw.rollback) ? raw.rollback.slice(0, 4) : []) {
-        const name = String(r?.name ?? ''), to = Math.floor(Number(r?.to));
+      for (const r of raw.restore) {
+        const name = r.name;
+        if (noteNames.has(name) && this.engine.restoreNote(name)) done.push(`恢复文字记录 ${name}`);
+      }
+      for (const r of raw.rollback) {
+        const { name, to, why } = r;
         const b = this.engine.get(name);
         if (!names.has(name) || !b || !(to >= 1) || to >= (b.version ?? 1)) continue;
         const old = this.book?.definitionVersion(name, to);
@@ -263,16 +346,16 @@ export class SkillCurator {
         // 两个版本都要跑够几次才比：凭一两次的结果退回，只会让版本号越涨越多、没有一个版本攒够经验
         const runs = (v: number) => { const x = this.engine.statsOf(name)?.byVersion?.[String(v)]; return x ? x.ok + x.fail : 0; };
         if (runs(b.version ?? 1) < 4 || runs(to) < 3) { errors.push(`${name} v${b.version ?? 1} 跑了 ${runs(b.version ?? 1)} 次、v${to} 跑了 ${runs(to)} 次，数据太少不退回`); continue; }
-        const why = String(r?.why ?? '').slice(0, 100);
         const w = this.engine.rollback(name, to, `整理时退回 v${to}：${why}`);
         if (!w.ok) { errors.push(`${name} 退回失败：${w.error}`); continue; }
         done.push(`${name} 退回 v${to}`);
         this.bus.publish('skill_rollback', 'P2', `整理技能：「${name}」v${b.version ?? 1} 不如 v${to}，恢复完整契约（现在是 v${w.version}）：${why}`, { name, from: b.version ?? 1, to, by: 'curator' });
       }
-      for (const r of Array.isArray(raw.improve) ? raw.improve.slice(0, 3) : []) {
-        const name = String(r?.name ?? '');
-        if (!names.has(name) || !this.engine.get(name)?.code || !this.engine.improve) continue;
-        this.engine.improve(name, 'slow', String(r?.why ?? '').slice(0, 200));
+      for (const r of raw.improve) {
+        const name = r.name;
+        const current = this.engine.get(name, true) ?? this.engine.get(name);
+        if (!names.has(name) || !current?.code || this.engine.candidateRetirement(name) || !this.engine.improve) continue;
+        this.engine.improve(name, 'slow', r.why);
         done.push(`改进 ${name}`);
       }
       if (errors.length && !done.length && attempt === 0) { messages.push({ role: 'assistant', content: c.text.slice(0, 6000) }, { role: 'user', content: `${errors.join('；')}。改正后只输出 JSON。` }); continue; }
