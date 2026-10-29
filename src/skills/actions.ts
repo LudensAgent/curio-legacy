@@ -319,7 +319,10 @@ export const ride: Skill<{ direction?: string; to?: { x: number; z: number }; di
       const found = seen as { what: string; dist: number } | null;
       if (found) return ok(`乘坐 ${s.riding} 前进 ${moved} 格，看见 ${found.what}（${found.dist} 格外），停下并保持乘坐`, { ...data, found: found.what });
       if (route?.reach === 'partial') return fail('PATH_NOT_FOUND', `水路尚不能到达目标，前进 ${moved} 格后停船，仍保持乘坐`, data);
-      if (route?.landing && r.arrived) return ok(`划了 ${moved} 格，停靠在可上岸处，仍保持乘坐；岸上落脚处 (${route.landing.x},${route.landing.y},${route.landing.z})`, data);
+      if (route?.landing && r.arrived) {
+        if (moved === 0) return fail('PATH_NOT_FOUND', '这里没有能往前划的水路（船已经在岸边，一桨都划不动）；下船走陆路，或换一段开阔水面再放船', data);
+        return ok(`划了 ${moved} 格，停靠在可上岸处，仍保持乘坐；岸上落脚处 (${route.landing.x},${route.landing.y},${route.landing.z})`, data);
+      }
       if (r.arrived) return ok(`乘坐 ${s.riding} 到了目标附近（${moved} 格），保持乘坐`, data);
       return ok(`乘坐 ${s.riding} 前进 ${moved} 格${r.blocked ? '后遇到障碍' : ''}，停下并保持乘坐`, data);
     } catch (e) {

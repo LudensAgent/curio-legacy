@@ -293,6 +293,7 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
     if (typeof at === 'string') return { ok: false, error: at };
     const item = String(a.item ?? a.block ?? 'any').replace(/^minecraft:/, '');
     if (item !== 'any' && !adapter.isKnownItem(item)) return { ok: false, error: `未知物品：${item}` };
+    if (/_(boat|raft)$/.test(item)) return { ok: false, error: `${item} 是船/筏（实体，不是方块），不能用 place_at 放；放船用 use_item {"item":"${item}","on":"water"}，坐上去用 interact {"entity":"boat"}` };
     if (at[0] === 0 && at[2] === 0 && at[1] === 1 && !attachmentFaces(item)) return { ok: false, error: '[0,1,0] 是自己的头，实心方块放不进去；往上垫高用 [0,0,0]（梯子、火把这类贴墙的东西才能放进自己站的格子）' };
     const facing = facingArg(a.facing, adapter);
     if (!FACINGS.includes(facing as Facing)) return { ok: false, error: facing };

@@ -13,7 +13,9 @@ export const interactBlock: Skill<{ target: string | Vec3Like; item?: string }> 
   movement: true,
   outcomeBoundary: true,
   validate(raw, adapter) {
-    const a = obj(raw), target = inspectBlock.validate({ target: a.target }, adapter);
+    const a = obj(raw);
+    if (typeof a.target === 'string' && /_(boat|raft)$/.test(a.target.replace(/^minecraft:/, ''))) return { ok: false, error: `${a.target} 是船/筏（实体，不是方块），不能用 interact_block 右键；坐上去用 interact {"entity":"boat"}，放船用 use_item {"item":"${a.target}","on":"water"}` };
+    const target = inspectBlock.validate({ target: a.target }, adapter);
     if (!target.ok) return target;
     if (a.item === undefined || a.item === '') return { ok: true, args: target.args };
     const item = typeof a.item === 'string' ? resolveItemAlias(a.item.trim().replace(/^minecraft:/, ''), adapter) : null;
