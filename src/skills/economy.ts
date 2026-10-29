@@ -336,7 +336,7 @@ export const takeItems: Skill<{ item: string; count: number; target?: ContainerT
 // ===================================================================== 查库存
 export const findItem: Skill<{ item: string }> = {
   name: 'find_item',
-  description: '查某样东西现在在哪：背包多少、哪些记得的箱子（按距离升序）各多少、合计多少。只读，不开箱不移动；没打开过的箱子内容未知',
+  description: '查某样东西现在在哪：背包多少、最近的那个箱子（距离优先、其次数量最多）多少、箱子合计与总计多少。只读，不开箱不移动；没打开过的箱子内容未知',
   argsDoc: '{"item":"<物品名>"}',
   timeoutMs: 3000,
   movement: false,
@@ -351,11 +351,13 @@ export const findItem: Skill<{ item: string }> = {
     const backpack = s.inventory.filter((i) => i.name === args.item).reduce((n, i) => n + i.count, 0);
     const recalls = ctx.memory.recallChests(args.item, { dim: s.dim, from: s.pos });
     const inChests = recalls.reduce((n, r) => n + r.count, 0);
-    const chests = recalls.map((r) => ({ pos: r.chest.pos, count: r.count, dist: r.dist ?? Math.round(Math.hypot(r.chest.pos.x - s.pos.x, r.chest.pos.z - s.pos.z)), note: r.chest.note, observedAt: r.observedAt }));
-    if (!backpack && !chests.length) return ok(`背包和记得的箱子里都没有 ${args.item}；没打开过的箱子内容未知`, { item: args.item, backpack: 0, chests: [], total: 0 });
-    const chestText = chests.map((c) => `${c.note ? `${c.note}的箱子` : '箱子'} (${c.pos.x},${c.pos.y},${c.pos.z}) 有 ${args.item}×${c.count}（${c.dist} 格外）`).join('；');
     const total = backpack + inChests;
-    return ok(`${args.item}：背包×${backpack}${chestText ? `；${chestText}` : ''}；合计×${total}`, { item: args.item, backpack, chests, total });
+    // 只返回最近的那个箱子，距离相同再挑数量最多的
+    const nearest = recalls.slice().sort((a, b) => (a.dist ?? Infinity) - (b.dist ?? Infinity) || b.count - a.count)[0];
+    if (!backpack && !nearest) return ok(`背包和记得的箱子里都没有 ${args.item}；没打开过的箱子内容未知`, { item: args.item, backpack: 0, chest: null, total: 0 });
+    const chest = nearest ? { pos: nearest.chest.pos, count: nearest.count, dist: nearest.dist ?? Math.round(Math.hypot(nearest.chest.pos.x - s.pos.x, nearest.chest.pos.z - s.pos.z)), note: nearest.chest.note, observedAt: nearest.observedAt } : null;
+    const chestText = chest ? `${chest.note ? `${chest.note}的箱子` : '箱子'} (${chest.pos.x},${chest.pos.y},${chest.pos.z}) 有 ${args.item}×${chest.count}（${chest.dist} 格外）` : '';
+    return ok(`${args.item}：背包×${backpack}${chestText ? `；最近的${chestText}` : ''}；箱子里合计×${inChests}、总计×${total}`, { item: args.item, backpack, chest, inChests, total });
   },
 };
 
