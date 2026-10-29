@@ -82,7 +82,7 @@ test('死亡追踪：回到原地但没有看见掉落物，不代表已确认�
   const p = perception.update();
   assert.equal(p.death_recovery?.dir, 'E');
   assert.equal(p.death_recovery?.dist, 30);
-  assert.equal(p.drives[0].drive, 'recover');
+  assert.equal(computeDrives(p, memory).drives[0].drive, 'recover');
   adapter.pos = { x: 30, y: 64, z: 1 };
   assert.ok(perception.update().death_recovery);
   assert.ok(memory.lastDeath());
@@ -100,7 +100,7 @@ test('死亡记录：经过现实五分钟不代表掉落物消失', () => {
   const p = perception.update();
   assert.ok(memory.lastDeath());
   assert.equal(p.death_recovery?.seconds_left, 0);
-  assert.ok(p.drives.some((d) => d.drive === 'recover' && d.why.includes('当前状态未知')));
+  assert.ok(computeDrives(p, memory).drives.some((d) => d.drive === 'recover' && d.why.includes('当前状态未知')));
   assert.ok(!events.some((e) => e.includes('死亡掉落物已经消失')));
 });
 
@@ -185,7 +185,7 @@ test('偷懒：空手砍了很多木头且很慢 → 效率洞察建议做斧头
   assert.equal(p.efficiency[0].block, 'oak_log');
   assert.equal(p.efficiency[0].better[0].tool, 'wooden_axe');
   assert.equal(p.efficiency[0].better[0].speedup, 2);
-  const eff = p.drives.find((d) => d.drive === 'efficiency');
+  const eff = computeDrives(p, memory).drives.find((d) => d.drive === 'efficiency');
   assert.ok(eff && eff.suggest.includes('wooden_axe'));
   const r = ruleProposal({ ...p, drives: [eff!] }, memory) as any;
   assert.deepEqual(r.steps[0], { skill: 'craft', args: { item: 'wooden_axe', count: 1 } });
@@ -204,7 +204,7 @@ test('亮度：地下很暗时感知到 dark + 会刷怪；有火把就插，插
   assert.equal(p.light?.level, 'dark');
   assert.equal(p.light?.underground, true);
   assert.equal(p.light?.mob_spawn_risk, true);
-  assert.equal(p.drives[0].drive, 'light');
+  assert.equal(computeDrives(p, memory).drives[0].drive, 'light');
   assert.equal((ruleProposal(p, memory) as any).steps[0].skill, 'place_torch');
   const { o } = await runSkill(a, 'place_torch', { count: 1 }, memory);
   assert.equal(o.result.status, 'succeeded', o.result.summary);

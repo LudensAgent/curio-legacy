@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { efficiencyInsights } from '../src/brain/efficiency.ts';
-import { computeDrives } from '../src/brain/drives.ts';
+import { computeDrives, observedNeeds } from '../src/brain/drives.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import type { Percept } from '../src/perception/perception.ts';
 
@@ -79,4 +79,21 @@ test('computeDrives：钻石充足（>6）时不给抠门 drive', () => {
   });
   const { drives } = computeDrives(p, m);
   assert.ok(!drives.some((d) => d.drive === 'frugal'), '钻石多就不用省');
+});
+
+test('observedNeeds：effort 事实带上更快/更省的替代与稀缺度（只报事实，不替它决定）', () => {
+  const p = P({
+    inventory: [{ name: 'diamond', count: 3 }, { name: 'diamond_pickaxe', count: 1 }, { name: 'iron_pickaxe', count: 1 }],
+    efficiency: [{ block: 'cobblestone', mined: 6, avg_s: 0.3, tool: 'diamond_pickaxe',
+      better: [{ tool: 'netherite_pickaxe', est_s: 0.2, speedup: 1.5, have: false, materials: '3 下界合金锭' }],
+      cheaper: [{ tool: 'iron_pickaxe', est_s: 0.5, slowdown: 1.7, savesItem: 'diamond', savesZh: '钻石', have: true }] }],
+  });
+  const effort = observedNeeds(p).find((n) => n.need === 'effort');
+  assert.ok(effort);
+  const facts = effort!.facts.join(' ');
+  assert.match(facts, /diamond_pickaxe/);
+  assert.match(facts, /netherite_pickaxe.*快 1.5 倍/);
+  assert.match(facts, /iron_pickaxe.*慢 70%/);
+  assert.match(facts, /钻石/);
+  assert.match(facts, /3 个/);
 });

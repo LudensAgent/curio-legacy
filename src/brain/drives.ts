@@ -70,7 +70,8 @@ export function observedNeeds(p: Percept): ObservedNeed[] {
       ...p.nearby.hostile.slice(0, 4).map((h) => `${h.how === 'seen' ? '看见' : '听见'} ${h.name}，距离 ${h.dist} 格`),
     ] });
   }
-  const food = stockOf(p).food;
+  const st = stockOf(p);
+  const food = st.food;
   if (p.self.food < 20 || food === 0) {
     needs.push({ need: 'hunger', facts: [`饥饿值 ${p.self.food}/20`, `背包食物类物品 ${food} 个`],
       ...(food === 0 ? { unknowns: ['当前观察以外的食物来源尚未确认'] } : {}) });
@@ -90,7 +91,13 @@ export function observedNeeds(p: Percept): ObservedNeed[] {
       d.seconds_left > 0 ? `按正常 TPS 且区块持续加载估算，最多还剩${durationText(realSecondsToTicks(d.seconds_left))}（现实时间）` : '按正常 TPS 且区块持续加载估算，常规寿命已过去；实际情况未知'], unknowns: ['掉落物的当前状态与前往路线尚未确认'] });
   }
   for (const e of (p.efficiency ?? []).slice(0, 2)) {
-    needs.push({ need: 'effort', facts: [`最近用${e.tool}挖了 ${e.mined} 个 ${e.block}，实测平均 ${e.avg_s} 秒/个`] });
+    const facts = [`最近用${e.tool}挖了 ${e.mined} 个 ${e.block}，实测平均 ${e.avg_s} 秒/个`];
+    for (const b of e.better.slice(0, 1)) facts.push(`${b.tool} 约 ${b.est_s} 秒/个（快 ${b.speedup} 倍）`);
+    for (const c of e.cheaper.slice(0, 1)) {
+      const scarce = c.savesItem === 'diamond' ? st.diamond : c.savesItem === 'iron_ingot' ? st.iron : null;
+      if (scarce != null) facts.push(`${c.tool} 约 ${c.est_s} 秒/个（慢 ${Math.round((c.slowdown - 1) * 100)}%），但不耗${c.savesZh}（背包 ${scarce} 个）`);
+    }
+    needs.push({ need: 'effort', facts });
   }
   return needs;
 }

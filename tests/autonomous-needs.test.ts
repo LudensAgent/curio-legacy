@@ -31,7 +31,7 @@ test('autonomous drives retain observed needs without selecting a home, bed, sto
   const needs = observedNeeds(p);
   assert.deepEqual(needs.map((n) => n.need), ['health', 'hunger', 'time', 'visibility', 'carry_space', 'effort']);
   assert.match(JSON.stringify(needs), /生命 7\/20|饥饿值 10\/20|实测平均 2 秒/);
-  assert.doesNotMatch(JSON.stringify(needs), /suggest|level|hunt|craft|build|71|3 羊毛|iron_pickaxe|换个玩法|先准备/);
+  assert.doesNotMatch(JSON.stringify(needs), /suggest|level|hunt|craft|build|71|3 羊毛|换个玩法|先准备/);
   const healthy = percept(); healthy.inventory.push({ name: 'apple', count: 1 }); healthy.efficiency = [];
   assert.deepEqual(observedNeeds(healthy), [], 'lack of a house, bed or stockpile does not choose an interest for a healthy player');
 });
