@@ -9,7 +9,7 @@ import { pressKeys } from '../src/skills/actions.ts';
 import { SKILLS } from '../src/skills/index.ts';
 import { SkillLibrary } from '../src/skills/library.ts';
 import { FakeAdapter } from './fake-adapter.ts';
-import { makeCtx } from './survival-helpers.ts';
+import { makeCtx, TestWorld } from './survival-helpers.ts';
 
 test('the key action and its ascent parameter are visible in ordinary and quick thinking', () => {
   for (const text of [movesCatalog(), glanceSystem('test', new Set())]) {
@@ -17,6 +17,7 @@ test('the key action and its ascent parameter are visible in ordinary and quick 
     assert.ok(line);
     assert.match(line, /jump/);
     assert.match(line, /水中.*jump|jump.*水中/);
+    assert.match(line, /方向键相对当前朝向/);
   }
 });
 
@@ -43,6 +44,44 @@ test('press_keys is available to plans and reports the observed outcome without 
   assert.ok(!adapter.actions.some((action) => /^(swim|move|dig|place):/.test(action)));
   assert.equal(pressKeys.validate({ keys: { jump: true }, ms: 10001 }, adapter).ok, false);
   assert.equal(pressKeys.validate({ keys: { jump: true, unknown: true }, ms: 500 }, adapter).ok, false);
+});
+
+for (const scenario of [
+  { name: 'briefly breaching the water', inWater: false, onGround: false, summary: /离水但未触地，尚未确认上岸/ },
+  { name: 'recovering oxygen while still swimming', inWater: true, onGround: false, summary: /在水中，未触地/ },
+  { name: 'touching ground outside the water', inWater: false, onGround: true, summary: /当前未接触水，当前触地/ },
+]) test(`key feedback reports the current state after ${scenario.name} without claiming a stable landing`, async (t) => {
+  const adapter = new TestWorld(), ctx = makeCtx(adapter);
+  t.after(() => ctx.memory.close());
+  adapter.inWater = true; adapter.onGround = false; adapter.oxygen = 3;
+  const drive = t.mock.method(adapter, 'drive', async () => {
+    adapter.inWater = scenario.inWater; adapter.onGround = scenario.onGround; adapter.oxygen = 20;
+    return { ok: true, ms: 1500, moved: 2 };
+  });
+  const result = await pressKeys.run(ctx, { keys: { jump: true }, ms: 1500, guard: true });
+  assert.equal(result.status, 'succeeded', 'success confirms the requested key press, not the surrounding activity');
+  assert.equal(result.data?.inWater, scenario.inWater);
+  assert.equal(result.data?.onGround, scenario.onGround);
+  assert.equal(result.data?.oxygenBefore, 3);
+  assert.equal(result.data?.oxygen, 20);
+  assert.match(result.summary, scenario.summary);
+  assert.match(result.summary, /氧气 20\/20（按键前 3\/20）/);
+  assert.doesNotMatch(result.summary, /已上岸|已换气|站稳|安全/);
+  assert.equal(drive.mock.callCount(), 1);
+  assert.deepEqual(adapter.actions, [], 'feedback does not add swimming or terrain work');
+});
+
+test('a land jump is reported as airborne without inventing a water exit', async (t) => {
+  const adapter = new TestWorld(), ctx = makeCtx(adapter);
+  t.after(() => ctx.memory.close());
+  t.mock.method(adapter, 'drive', async () => {
+    adapter.onGround = false;
+    return { ok: true, ms: 100, moved: 0.5 };
+  });
+  const result = await pressKeys.run(ctx, { keys: { jump: true }, ms: 100, guard: true });
+  assert.equal(result.data?.onGround, false);
+  assert.match(result.summary, /当前未接触水，未触地/);
+  assert.doesNotMatch(result.summary, /离水|上岸/);
 });
 
 test('the real key controller holds jump beyond one second and releases it on completion or cancellation', async () => {

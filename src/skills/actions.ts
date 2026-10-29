@@ -395,7 +395,7 @@ export const dive: Skill<{ xyz: { x: number; y: number; z: number }; min_oxygen:
 export const pressKeys: Skill<{ keys: DriveKeys; ms: number; guard: boolean }> = {
   name: 'press_keys',
   description: '按住所选方向、跳跃、潜行等按键 50–10000 毫秒后松开；水中按 jump 可上浮。默认移动时检测前方岩浆、火及地面高处边缘并停止，guard:false 关闭此保护；不自动选目标或确认换气。',
-  argsDoc: '{"keys":{"forward"?:boolean,"back"?:boolean,"left"?:boolean,"right"?:boolean,"jump"?:boolean（水中上浮）,"sprint"?:boolean,"sneak"?:boolean},"ms":50-10000,"guard"?:boolean（false 关闭地形保护）}',
+  argsDoc: '{"keys":{"forward"?:boolean,"back"?:boolean,"left"?:boolean,"right"?:boolean,"jump"?:boolean（水中上浮）,"sprint"?:boolean,"sneak"?:boolean},"ms":50-10000,"guard"?:boolean（false 关闭地形保护）}；方向键相对当前朝向，时间到后松键',
   timeoutMs: 12000,
   movement: true,
   validate(raw) {
@@ -414,11 +414,12 @@ export const pressKeys: Skill<{ keys: DriveKeys; ms: number; guard: boolean }> =
   async run(ctx, args) {
     const adapter = ctx.adapter;
     if (!adapter.drive) return fail('ERROR', '当前适配器不支持按键控制');
-    const before = { ...adapter.state().pos };
+    const initial = adapter.state();
+    const before = { ...initial.pos };
     const result = await adapter.drive(args.keys, args.ms, ctx.signal, { guard: args.guard });
     const after = adapter.state();
-    const data = { keys: args.keys, ms: result.ms, moved: result.moved, before, position: after.pos, inWater: after.inWater, oxygen: after.oxygen, ...(result.stopped ? { stopped: result.stopped } : {}) };
-    const detail = `位置 (${after.pos.x.toFixed(1)},${after.pos.y.toFixed(1)},${after.pos.z.toFixed(1)})，${after.inWater ? '在水中' : '不在水中'}，氧气 ${after.oxygen}/20`;
+    const data = { keys: args.keys, ms: result.ms, moved: result.moved, before, position: after.pos, inWater: after.inWater, onGround: after.onGround, oxygen: after.oxygen, oxygenBefore: initial.oxygen, ...(result.stopped ? { stopped: result.stopped } : {}) };
+    const detail = `松键时位置 (${after.pos.x.toFixed(1)},${after.pos.y.toFixed(1)},${after.pos.z.toFixed(1)})，${after.inWater ? '在水中' : '当前未接触水'}，${after.onGround ? '当前触地' : '未触地'}，氧气 ${after.oxygen}/20（按键前 ${initial.oxygen}/20）${initial.inWater && !after.inWater && !after.onGround ? '；离水但未触地，尚未确认上岸' : ''}`;
     return result.ok ? ok(`按键 ${Object.keys(args.keys).join('+')} 已松开；${detail}`, data) : fail('ERROR', `按键控制结束：${result.reason ?? '未知'}；${detail}`, data);
   },
 };

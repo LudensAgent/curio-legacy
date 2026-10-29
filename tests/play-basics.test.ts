@@ -80,5 +80,5 @@ test('心智看到的动作表：wander 是身体的填充动作，不列给心�
   const { LLM_HIDDEN } = await import('../src/skills/index.ts');
   assert.ok(LLM_HIDDEN.has('wander'));
   assert.ok(!/\bwander\b/.test(movesCatalog(28)));
-  assert.match(movesCatalog(28), /look（/, 'look 在其他动作里');
+  assert.match(movesCatalog(28), /^- look .*"dir".*"xyz"/m, 'look 提供完整参数');
 });
