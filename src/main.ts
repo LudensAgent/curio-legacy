@@ -583,6 +583,8 @@ const dashboard = startDashboard(config.dashboard.host, config.dashboard.port, b
   suggest: (t) => executive.suggest(t),
   give: (item, count) => give(item, count),
   listItems: () => (adapter.listItems?.() ?? []).map((name) => ({ name, zh: ITEM_ZH[name] ?? '' })),
+  killEntities: (type, radius) => killEntities(type, radius),
+  listEntities: () => listEntities(),
   spectate: (on) => spectator.setActive(on),
   rescue: () => rescue(),
   dawn: () => dawn(),
@@ -735,6 +737,60 @@ async function give(item: string, count: number): Promise<{ ok: boolean; error?:
     return { ok: false, error: `RCON 失败：${e?.message ?? e}`, item: name, count: n };
   } finally {
     giving = false;
+  }
+}
+
+/** 实体英文名 → 中文名：优先用刷怪蛋的中文翻译（zombie → 僵尸），没有就原样返回。 */
+const entityZh = (name: string): string => {
+  const zh = ITEM_ZH[`${name}_spawn_egg`] ?? ITEM_ZH[name];
+  return zh ? zh.replace(/刷怪蛋$/, '') : name;
+};
+
+/** 所有可处死的生物类型（有刷怪蛋的都能 /kill）：英文名 + 中文名，供控制台「清除实体」中英文搜索。 */
+function listEntities(): { name: string; zh: string }[] {
+  const out: { name: string; zh: string }[] = [];
+  for (const item of adapter.listItems?.() ?? []) {
+    if (!item.endsWith('_spawn_egg')) continue;
+    const name = item.slice(0, -'_spawn_egg'.length);
+    out.push({ name, zh: entityZh(name) });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * 清除实体（控制台按钮）：用 RCON /kill 杀掉 Bot 周围指定类型、指定半径内的所有实体。
+ * 类型要合法（防注入）、不能是玩家（会把 Bot 和旁观的人一起杀掉）；成功后给所有人弹字幕、发聊天。
+ */
+let killingEntities = false;
+async function killEntities(type: string, radius: number): Promise<{ ok: boolean; error?: string; type?: string; radius?: number }> {
+  if (killingEntities) return { ok: false, error: '上一次清除还没做完' };
+  const s = adapter.state();
+  if (!s.connected) return { ok: false, error: 'Bot 没连上服务器' };
+  const name = type.toLowerCase().replace(/^minecraft:/, '').trim();
+  if (!/^[a-z0-9_.:-]+$/.test(name)) return { ok: false, error: `非法的生物类型：${type}` };
+  if (name === 'player') return { ok: false, error: '别清除玩家：会把 Bot 和旁观的人一起杀掉' };
+  const r = Math.max(1, Math.min(128, Math.floor(radius)));
+  killingEntities = true;
+  try {
+    const p = s.pos;
+    await spectator.command(`kill @e[type=${name},x=${p.x.toFixed(1)},y=${p.y.toFixed(1)},z=${p.z.toFixed(1)},distance=..${r}]`);
+    const zh = entityZh(name);
+    const notice = `紧急救援：主包对「${zh}」大开杀戒了`;
+    for (const cmd of [
+      'title @a times 10 70 20',
+      `title @a subtitle ${JSON.stringify({ text: notice, color: 'gold', bold: true })}`,
+      `title @a title ${JSON.stringify({ text: '' })}`,
+      `tellraw @a ${JSON.stringify({ text: notice, color: 'gold' })}`,
+    ]) {
+      try { await spectator.command(cmd); } catch { /* ignore */ }
+    }
+    bus.publish('kill', 'P1', `清除实体：主包对周围 ${r} 格内的「${zh}」大开杀戒`, { type: name, radius: r });
+    return { ok: true, type: name, radius: r };
+  } catch (e: any) {
+    bus.publish('kill', 'P1', `清除实体失败：RCON 命令没发出去（${e?.message ?? e}）`);
+    return { ok: false, error: `RCON 失败：${e?.message ?? e}`, type: name, radius: r };
+  } finally {
+    killingEntities = false;
   }
 }
 

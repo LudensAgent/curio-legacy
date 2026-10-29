@@ -364,6 +364,18 @@
       <div class="chips" id="passive"></div>
       <div class="sub">资源（● 看得见 ○ 记得）</div>
       <ul class="list mono" id="res"></ul>
+      <div class="give" style="margin-top:10px">
+        <div class="label">清除实体（RCON /kill，谨慎）</div>
+        <div style="display:flex;gap:6px;margin-top:4px;align-items:flex-start">
+          <div style="position:relative;flex:1;min-width:0">
+            <input id="killType" placeholder="搜索生物（中英文），如 僵尸 / zombie" autocomplete="off" style="width:100%">
+            <ul id="killDrop" class="givedrop" hidden></ul>
+          </div>
+          <input id="killRadius" type="number" min="1" max="128" value="10" style="width:64px" title="清除半径（格）">
+          <button class="primary" id="killBtn" onclick="doKillEntities()">清除</button>
+        </div>
+        <div id="killResult" style="font-size:11px;margin-top:4px;color:var(--dim)"></div>
+      </div>
     </div>
     <div class="card">
       <h2>背包 <span class="r dim mono" id="slots"></span></h2>
@@ -723,6 +735,66 @@ async function doGive() {
 }
 $('giveCount').addEventListener('keydown', (e) => { if (e.key === 'Enter') doGive(); });
 loadItems();
+// 清除实体：类型在 Bot 连上后才拉得到（周围现有生物），点进搜索框时再补拉一次
+let killEntityTypes = [], entitiesLoaded = false;
+async function loadEntities(force) {
+  if (entitiesLoaded && !force) return;
+  try {
+    const r = await (await fetch('/api/entities')).json();
+    if (Array.isArray(r.entities) && r.entities.length) { killEntityTypes = r.entities; entitiesLoaded = true; }
+  } catch { /* 后台还没就绪，下次再试 */ }
+}
+function renderKillDrop() {
+  const q = $('killType').value.trim().toLowerCase();
+  const drop = $('killDrop');
+  if (!q) { drop.hidden = true; drop.innerHTML = ''; return; }
+  const scored = [];
+  for (const it of killEntityTypes) {
+    const n = it.name.toLowerCase(), z = (it.zh || '').toLowerCase();
+    let s;
+    if (n.startsWith(q)) s = 0; else if (z.startsWith(q)) s = 1; else if (n.includes(q)) s = 2; else if (z.includes(q)) s = 3; else continue;
+    scored.push([s, it]);
+  }
+  scored.sort((a, b) => a[0] - b[0] || a[1].name.localeCompare(b[1].name));
+  const hits = scored.slice(0, 14).map(([, it]) => it);
+  drop.innerHTML = hits.length
+    ? hits.map((it) => `<li data-name="${esc(it.name)}"><span class="zh">${esc(it.zh || it.name)}</span><span class="en">${esc(it.name)}</span></li>`).join('')
+    : '<li class="empty">没有匹配（可直接输入类型名）</li>';
+  drop.hidden = false;
+}
+$('killType').addEventListener('focus', () => loadEntities());
+$('killType').addEventListener('input', renderKillDrop);
+$('killType').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    const first = $('killDrop').querySelector('li[data-name]');
+    if (!$('killDrop').hidden && first) { $('killType').value = first.dataset.name; $('killDrop').hidden = true; }
+    doKillEntities();
+  } else if (e.key === 'Escape') { $('killDrop').hidden = true; }
+});
+$('killDrop').addEventListener('mousedown', (e) => {
+  const li = e.target.closest('li[data-name]');
+  if (li) { $('killType').value = li.dataset.name; $('killDrop').hidden = true; }
+});
+document.addEventListener('click', (e) => { if (e.target !== $('killType') && !$('killDrop').contains(e.target)) $('killDrop').hidden = true; });
+async function doKillEntities() {
+  const type = $('killType').value.trim();
+  const radius = parseInt($('killRadius').value, 10) || 10;
+  if (!type) { $('killType').focus(); return; }
+  if (!confirm(`清除周围 ${radius} 格内所有的「${type}」？会在游戏里显示「紧急救援：主包对「${type}」大开杀戒了」。`)) return;
+  const btn = $('killBtn'); btn.disabled = true;
+  const out = $('killResult');
+  let r;
+  try {
+    r = await (await fetch('/api/kill-entities', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type, radius }) })).json();
+  } catch (e) { r = { ok: false, error: e.message }; }
+  btn.disabled = false;
+  const zh = killEntityTypes.find((i) => i.name === r.type)?.zh || r.type;
+  out.textContent = r.ok ? `已对周围 ${r.radius} 格内的「${zh}」大开杀戒` : `没成：${r.error || '未知原因'}`;
+  out.style.color = r.ok ? 'var(--accent)' : 'var(--bad)';
+  if (r.ok) { $('killType').value = ''; $('killRadius').value = '10'; $('killDrop').hidden = true; }
+}
+$('killRadius').addEventListener('keydown', (e) => { if (e.key === 'Enter') doKillEntities(); });
+loadEntities();
 /** 紧急救援：确认后让后台找最近的地表并 /tp 过去；结果在按钮上显示几秒 */
 async function rescueBot() {
   const btn = $('rescueBtn');

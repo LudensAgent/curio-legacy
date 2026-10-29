@@ -37,6 +37,10 @@ export interface DashboardHandlers {
   give?(item: string, count: number): Promise<{ ok: boolean; error?: string; item?: string; count?: number }>;
   /** 所有已知物品（英文名 + 中文名，控制台「给予物品」搜索） */
   listItems?(): { name: string; zh: string }[];
+  /** 清除实体：用 RCON /kill 杀掉 Bot 周围指定类型、指定半径内的所有实体（不含玩家） */
+  killEntities?(type: string, radius: number): Promise<{ ok: boolean; error?: string; type?: string; radius?: number }>;
+  /** 周围现有的实体类型（英文名 + 中文名，控制台「清除实体」搜索） */
+  listEntities?(): { name: string; zh: string }[];
   /** 手动整理技能，运行中返回 busy，完成后返回可读结果。 */
   curateSkills?(): Promise<{ ok: true; result: string } | { ok: false; error: string; busy?: boolean }>;
   /** 列出当前技能（内置 + 自学）与禁用状态 */
@@ -221,6 +225,10 @@ export function startDashboard(
       if (!h.listItems) return send(res, 404, '{"error":"not supported"}');
       return send(res, 200, JSON.stringify({ items: h.listItems() }));
     }
+    if (req.method === 'GET' && p === '/api/entities') {
+      if (!h.listEntities) return send(res, 404, '{"error":"not supported"}');
+      return send(res, 200, JSON.stringify({ entities: h.listEntities() }));
+    }
     if (req.method === 'POST') {
       if (p === '/api/pause') { h.pause(); return send(res, 200, '{"ok":true}'); }
       if (p === '/api/resume') { h.resume(); return send(res, 200, '{"ok":true}'); }
@@ -288,6 +296,16 @@ export function startDashboard(
         if (!item) return send(res, 400, '{"error":"item required"}');
         if (!Number.isInteger(count) || count < 1) return send(res, 400, '{"error":"count must be a positive integer"}');
         const r = await h.give(item, Math.min(Math.floor(count), 640));
+        return send(res, r.ok ? 200 : 500, JSON.stringify(r));
+      }
+      if (p === '/api/kill-entities') {
+        if (!h.killEntities) return send(res, 404, '{"error":"not supported"}');
+        const body = await readBody(req);
+        const type = String(body?.type ?? '').trim();
+        const radius = Number(body?.radius ?? 10);
+        if (!type) return send(res, 400, '{"error":"type required"}');
+        if (!Number.isInteger(radius) || radius < 1) return send(res, 400, '{"error":"radius must be a positive integer"}');
+        const r = await h.killEntities(type, Math.min(Math.floor(radius), 128));
         return send(res, r.ok ? 200 : 500, JSON.stringify(r));
       }
     }
