@@ -40,7 +40,7 @@ const percept: Percept = {
   objective: '先做出石镐，再建一个小屋',
   drives: [{ drive: 'tools', level: 0.7, why: '当前镐子等级：none', suggest: 'gather log → craft wooden_pickaxe' }],
   stock: null,
-  efficiency: [{ block: 'oak_log', mined: 6, avg_s: 3, tool: '空手', better: [{ tool: 'wooden_axe', est_s: 1.5, speedup: 2, have: false, materials: '3 木板 + 2 木棍' }] }],
+  efficiency: [{ block: 'oak_log', mined: 6, avg_s: 3, tool: '空手', better: [{ tool: 'wooden_axe', est_s: 1.5, speedup: 2, have: false, materials: '3 木板 + 2 木棍' }], cheaper: [] }],
   light: { here: 15, block: 0, sky: 15, level: 'bright', mob_spawn_risk: false, dark_view_pct: 0, underground: false, torches: 0 },
   storage: null,
   farms: [],

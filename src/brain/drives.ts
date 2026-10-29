@@ -8,7 +8,7 @@ import { buildingArchiveFor } from '../skills/build.ts';
  * 每个驱动力 0..1，附带原因和建议，按强度排序。它们不直接控制动作，只影响“想做什么”。
  */
 export interface Drive {
-  drive: 'survive' | 'recover' | 'eat' | 'rest' | 'light' | 'tools' | 'efficiency' | 'home' | 'bed' | 'storage' | 'smelt' | 'farm' | 'stockpile' | 'expedition' | 'explore' | 'curiosity' | 'novelty' | 'automate';
+  drive: 'survive' | 'recover' | 'eat' | 'rest' | 'light' | 'tools' | 'efficiency' | 'frugal' | 'home' | 'bed' | 'storage' | 'smelt' | 'farm' | 'stockpile' | 'expedition' | 'explore' | 'curiosity' | 'novelty' | 'automate';
   level: number;
   why: string;
   suggest: string;
@@ -28,6 +28,10 @@ export interface Stock {
   blocks: number;
   hasBed: boolean;
   toolTier: 'none' | 'wood' | 'stone' | 'iron' | 'diamond';
+  /** 稀缺金属的锭数（用于"物资充足/稀缺"的量化） */
+  iron: number;
+  diamond: number;
+  gold: number;
 }
 
 export function stockOf(p: Percept): Stock {
@@ -43,6 +47,9 @@ export function stockOf(p: Percept): Stock {
     blocks: sum((n) => LOG(n) || PLANK(n) || n === 'cobblestone' || n === 'dirt'),
     hasBed: p.inventory.some((i) => i.name.endsWith('_bed')),
     toolTier,
+    iron: sum((n) => n === 'iron_ingot'),
+    diamond: sum((n) => n === 'diamond'),
+    gold: sum((n) => n === 'gold_ingot'),
   };
 }
 
@@ -157,6 +164,16 @@ export function computeDrives(p: Percept, memory: WorldMemory): { drives: Drive[
     if (!b) continue;
     const level = Math.min(0.85, 0.35 + 0.1 * Math.min(e.mined, 6) * (b.speedup - 1) / 2);
     out.push({ drive: 'efficiency', level, why: `最近用${e.tool}挖了 ${e.mined} 个 ${e.block}，平均 ${e.avg_s} 秒/个；${b.tool} 约 ${b.est_s} 秒/个（快 ${b.speedup} 倍）`, suggest: `craft ${b.tool}（${b.materials}），之后再继续` });
+    break;
+  }
+  // 抠门：用铁/钻石这类稀缺材料挖方块时，换把更便宜的工具只慢一点，却能省下稀缺材料
+  for (const e of p.efficiency ?? []) {
+    const c = e.cheaper.find((x) => x.have);
+    if (!c) continue;
+    const scarce = c.savesItem === 'diamond' ? st.diamond : c.savesItem === 'iron_ingot' ? st.iron : null;
+    if (scarce == null || scarce > 6) continue;
+    const level = Math.min(0.7, 0.35 + 0.1 * Math.min(e.mined, 6) * (scarce <= 3 ? 1 : 0.5));
+    out.push({ drive: 'frugal', level, why: `最近用${e.tool}挖了 ${e.mined} 个 ${e.block}；${c.tool} 约 ${c.est_s} 秒/个（慢 ${Math.round((c.slowdown - 1) * 100)}%），但不耗${c.savesZh}（背包只有 ${scarce} 个）`, suggest: `换回 ${c.tool} 继续挖` });
     break;
   }
   if (!homeBuilt && st.toolTier !== 'none' && !night) {

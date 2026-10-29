@@ -2,9 +2,10 @@ import type { GameAdapter, InvItem } from '../adapter/types.ts';
 import type { WorldMemory } from '../memory/store.ts';
 
 /**
- * 效率洞察（“偷懒”的依据）：根据真实挖掘耗时，估算换一把更好的工具能快多少。
- * 例如：最近空手砍了 8 块原木，平均 3.0 秒/块；做一把木斧约 1.5 秒/块（快 2 倍），石斧约 0.75 秒/块。
- * 只给出数据和建议，做不做由 LLM（或规则目标）权衡。
+ * 效率洞察（"偷懒 / 抠门"的依据）：根据真实挖掘耗时，给出两个方向的取舍——
+ * - better：换一把更快的工具能快多少（省时间）
+ * - cheaper：换一把更便宜的工具只慢多少、省下什么稀缺材料（省资源）
+ * 只给数据和建议，做不做由 LLM（或规则目标）权衡。
  */
 export interface EfficiencyInsight {
   block: string;
@@ -12,10 +13,13 @@ export interface EfficiencyInsight {
   avg_s: number;
   tool: string;
   better: { tool: string; est_s: number; speedup: number; have: boolean; materials: string }[];
+  cheaper: { tool: string; est_s: number; slowdown: number; savesItem: string; savesZh: string; have: boolean }[];
 }
 
 const TIERS = ['wooden', 'stone', 'iron', 'diamond'];
 const MATERIAL: Record<string, string> = { wooden: '木板', stone: '圆石', iron: '铁锭', diamond: '钻石' };
+/** 材料的物品注册名（用于查库存算稀缺度） */
+const MATERIAL_ITEM: Record<string, string> = { wooden: 'stick', stone: 'cobblestone', iron: 'iron_ingot', diamond: 'diamond' };
 const kindFor = (block: string): 'axe' | 'pickaxe' | 'shovel' | null => {
   if (/_log$|_planks$|_wood$|crafting_table|chest|pumpkin|melon/.test(block)) return 'axe';
   if (/stone|_ore$|deepslate|andesite|granite|diorite|tuff|cobble|netherrack|basalt/.test(block)) return 'pickaxe';
@@ -23,6 +27,7 @@ const kindFor = (block: string): 'axe' | 'pickaxe' | 'shovel' | null => {
   return null;
 };
 const BLOCK_FAMILY = (b: string) => (b.endsWith('_log') ? 'log' : b.replace(/^deepslate_/, ''));
+const tierOf = (tool: string) => TIERS.findIndex((t) => tool.startsWith(t));
 
 export function efficiencyInsights(adapter: GameAdapter, memory: WorldMemory, inventory: InvItem[]): EfficiencyInsight[] {
   const digs = memory.recentDigs();
@@ -54,7 +59,21 @@ export function efficiencyInsights(adapter: GameAdapter, memory: WorldMemory, in
       better.push({ tool: name, est_s: Math.round(est / 100) / 10, speedup: Math.round(speedup * 10) / 10, have: has(name), materials: `3 ${MATERIAL[tier]} + 2 木棍` });
       if (better.length >= 2) break;
     }
-    if (better.length) out.push({ block: g.block, mined: g.n, avg_s: Math.round(avg / 100) / 10, tool, better });
+    // 抠门：用铁/钻石这类稀缺材料挖方块时，换低一级的工具只慢一点，却能不耗稀缺材料
+    const cheaper: EfficiencyInsight['cheaper'] = [];
+    const curTier = tierOf(tool);
+    if (curTier >= 2) {
+      for (let t = curTier - 1; t >= 0; t--) {
+        const name = `${TIERS[t]}_${kind}`;
+        const est = adapter.digTimeEstimate(g.block, name);
+        if (!est) continue;
+        const slowdown = est / avg;
+        if (slowdown > 2) continue;
+        cheaper.push({ tool: name, est_s: Math.round(est / 100) / 10, slowdown: Math.round(slowdown * 10) / 10, savesItem: MATERIAL_ITEM[TIERS[curTier]], savesZh: MATERIAL[TIERS[curTier]], have: has(name) });
+        break;
+      }
+    }
+    if (better.length || cheaper.length) out.push({ block: g.block, mined: g.n, avg_s: Math.round(avg / 100) / 10, tool, better, cheaper });
   }
   return out.sort((a, b) => b.mined - a.mined).slice(0, 4);
 }

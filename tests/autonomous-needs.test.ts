@@ -16,7 +16,7 @@ function percept(): Percept {
     exploration: { visitedChunks: 1, noveltyByDir: { N: 1, S: 0 }, base: null },
     death_recovery: null, curiosities: [], objective: null, drives: [], stock: null,
     efficiency: [{ block: 'stone', mined: 4, avg_s: 2, tool: 'stone_pickaxe',
-      better: [{ tool: 'iron_pickaxe', est_s: 1, speedup: 2, have: false, materials: '3 铁锭 + 2 木棍' }] }],
+      better: [{ tool: 'iron_pickaxe', est_s: 1, speedup: 2, have: false, materials: '3 铁锭 + 2 木棍' }], cheaper: [] }],
     light: null, storage: null, farms: [], learn_candidates: [], reflection_due: false,
   };
 }
