@@ -24,6 +24,8 @@
   button.primary { background: var(--text); color: var(--card); border-color: var(--text); }
   #curateSkillsBtn { flex: none; white-space: nowrap; }
   #curateSkillsBtn:disabled { opacity: .65; cursor: progress; }
+  #skillAdminClear { color: var(--bad); border-color: var(--bad-soft); }
+  #skillAdminClear:disabled { opacity: .65; cursor: progress; }
   .skill-curate-result { margin: 0 0 10px; font-size: 12px; overflow-wrap: anywhere; }
   .skill-curate-result.error { color: var(--bad); }
   input { background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font: inherit; outline: none; }
@@ -513,6 +515,9 @@
             <input id="skillAdminSearch" placeholder="按名筛选，例如 boat / store_items" style="flex:1">
             <button id="skillAdminRefresh" type="button">刷新</button>
           </div>
+          <div class="row" style="gap:6px;margin:6px 0">
+            <button id="skillAdminClear" type="button" title="删除所有自学技能，内置技能不受影响；不可恢复">清除全部自学技能</button>
+          </div>
           <div id="skillAdminResult" class="skill-curate-result dim" role="status" hidden></div>
           <table><thead><tr><th>技能</th><th>类型</th><th>状态</th><th>操作</th></tr></thead><tbody id="skillAdminRows"></tbody></table>
         </details>
@@ -958,6 +963,25 @@ async function setSkill(name, action) {
     result.className = 'skill-curate-result error';
   }
 }
+async function clearAllSkills() {
+  const result = $('skillAdminResult');
+  if (!confirm('要清除全部自学技能吗？这会删除 agent 自己写的所有技能（内置技能不受影响），不可恢复。')) return;
+  if (!confirm('再次确认：真的清除全部自学技能吗？此操作不可恢复。')) return;
+  result.hidden = false;
+  result.className = 'skill-curate-result dim';
+  result.textContent = '正在清除全部自学技能…';
+  try {
+    const response = await fetch('/api/skills/clear', { method: 'POST' });
+    const r = await response.json();
+    result.textContent = r.ok ? `已清除全部自学技能（${r.cleared ?? 0} 个）` : r.error || '清除失败';
+    result.className = 'skill-curate-result' + (r.ok ? '' : ' error');
+    await loadSkillAdmin();
+  } catch (error) {
+    result.textContent = `清除失败：${error.message}`;
+    result.className = 'skill-curate-result error';
+  }
+}
+$('skillAdminClear').addEventListener('click', clearAllSkills);
 $('skillAdminRefresh').addEventListener('click', loadSkillAdmin);
 $('skillAdminSearch').addEventListener('input', renderSkillAdmin);
 $('skillAdminRows').addEventListener('click', (e) => {

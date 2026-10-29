@@ -41,6 +41,8 @@ export interface DashboardHandlers {
   setSkill?(name: string, disabled: boolean): { ok: boolean; error?: string };
   /** 删除一个自学技能（内置技能只能禁用，不能删除） */
   deleteSkill?(name: string): { ok: boolean; error?: string };
+  /** 清除所有自学技能（内置技能不受影响，只能禁用） */
+  clearSkills?(): Promise<{ ok: boolean; error?: string; cleared?: number }>;
   /** 切换自动旁观（附着到 Bot / 自由旁观） */
   spectate?(on: boolean): Promise<unknown> | unknown;
   /** 弹幕存档：?dates=1 列出有存档的日期；否则按 date / q / questions / blocked / limit 查询 */
@@ -234,6 +236,15 @@ export function startDashboard(
             : p.endsWith('/enable') ? h.setSkill(name, false)
               : h.deleteSkill ? h.deleteSkill(name) : { ok: false, error: '当前运行不支持删除技能' };
           return send(res, r.ok ? 200 : 400, JSON.stringify(r));
+        } catch (error) {
+          return send(res, 500, JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+        }
+      }
+      if (p === '/api/skills/clear') {
+        if (!h.clearSkills) return send(res, 404, '{"ok":false,"error":"当前运行不支持清除所有技能"}');
+        try {
+          const r = await h.clearSkills();
+          return send(res, r.ok ? 200 : 500, JSON.stringify(r));
         } catch (error) {
           return send(res, 500, JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }));
         }

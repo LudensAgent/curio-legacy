@@ -1,4 +1,4 @@
-import { appendFileSync, rmSync } from 'node:fs';
+import { appendFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { startStallProfiler } from './observer/stall-profiler.ts';
 import { runtime } from './runtime.ts';
@@ -604,6 +604,25 @@ const dashboard = startDashboard(config.dashboard.host, config.dashboard.port, b
     behaviors.retire(name, '控制台删除');
     try { rmSync(path.join(config.dataDir, 'skills', name), { recursive: true, force: true }); } catch (e) { return { ok: false, error: `删除文件失败：${(e as Error).message}` }; }
     return { ok: true };
+  },
+  clearSkills: async () => {
+    const skillsDir = path.join(config.dataDir, 'skills');
+    const names = new Set(skillBook.list().filter((k) => k.source === 'self').map((k) => k.name));
+    if (existsSync(skillsDir)) {
+      for (const entry of readdirSync(skillsDir, { withFileTypes: true })) if (entry.isDirectory()) names.add(entry.name);
+    }
+    if (!names.size) return { ok: true, cleared: 0 };
+    let cleared = 0;
+    const errors: string[] = [];
+    for (const name of names) {
+      try { rmSync(path.join(skillsDir, name), { recursive: true, force: true }); cleared++; }
+      catch (e) { errors.push(`${name}：${(e as Error).message}`); }
+    }
+    if (errors.length) return { ok: false, error: `部分技能删除失败（已删 ${cleared} 个）：${errors.join('；')}` };
+    behaviors.forgetStats(names);
+    skillBook.reload();
+    bus.publish('skills_cleared', 'P1', `控制台清除了全部 ${cleared} 个自学技能`, { cleared });
+    return { ok: true, cleared };
   },
 }, feed ? [createObserverHandler(feed)] : [], { llmTrace, mcVersion: config.mc.version, env: { file: envFile, backupDir: path.join(config.dataDir, 'env-backups') } });
 installSkillRestoreRequest(dashboard, behaviors, bus, path.join(config.dataDir, 'skill-restore-request.json'));

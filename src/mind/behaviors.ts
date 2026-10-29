@@ -543,6 +543,16 @@ export class BehaviorEngine {
     return true;
   }
 
+  /** 控制台清除自学技能后，删掉它们的统计（含墓碑），让同名技能将来能重新被写，而不是被 2 小时墓碑挡住。 */
+  forgetStats(names: Iterable<string>): number {
+    let removed = 0;
+    for (const name of names) if (delete this.stats[name]) removed++;
+    if (removed && this.statsFile) {
+      try { fs.mkdirSync(path.dirname(this.statsFile), { recursive: true }); fs.writeFileSync(this.statsFile, JSON.stringify(this.stats, null, 1)); } catch { /* 统计写不进去不影响游玩 */ }
+    }
+    return removed;
+  }
+
   /** 恢复明确指定且状态未变的闲置技能；保留版本与使用历史。 */
   restoreRetired(entries: { name: string; retiredAt: number }[], now = Date.now()): string[] {
     if (!this.statsFile) throw new Error('没有技能统计文件，不能持久化恢复');
