@@ -19,6 +19,8 @@ const PASS = new Set(['air', 'cave_air', 'void_air', 'short_grass', 'grass', 'ta
 const WATER = new Set(['water', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass']);
 const isLeaves = (n: string) => n.endsWith('_leaves');
 const DANGER = /^(lava|fire|soul_fire|magma_block|cactus|campfire|soul_campfire|powder_snow)$/;
+/** 建筑/家具：travel 只规划露天地形，这些不能当「能站的地」，否则把墙面/屋顶当成比脚下高的坡 */
+const STRUCTURE = /_log$|_wood$|_planks$|_slab$|_stairs$|_door$|_trapdoor$|_fence|_wall$|_fence_gate$|glass|_carpet$|chest$|crafting_table$|furnace$|smoker$|_bed$|sign$|^ladder$|_button$|_pressure_plate$|_anvil$|_shulker_box$|_barrel$|_hopper$|_dropper$|_dispenser$/;
 
 /** 一列地面：从 hintY 上方往下找第一块“实”的（树叶当树冠跳过），返回能站的高度，或水面高度 */
 export function surveyColumn(blockAt: BlockAt, x: number, z: number, hintY: number): Col {
@@ -36,7 +38,7 @@ export function surveyColumn(blockAt: BlockAt, x: number, z: number, hintY: numb
     if (n === null) return { kind: 'blocked', y: hintY, why: 'unloaded' };
     if (PASS.has(n) || isLeaves(n)) continue;
     if (WATER.has(n)) return { kind: 'water', y };
-    if (DANGER.test(n) || /_log$|_wood$|_fence|_wall$|_fence_gate$/.test(n)) return { kind: 'blocked', y, why: 'obstacle' };
+    if (DANGER.test(n) || STRUCTURE.test(n)) return { kind: 'blocked', y, why: 'obstacle' };
     const feet = at(y + 1), head = at(y + 2);
     if (feet === null || head === null || !PASS.has(feet) || !PASS.has(head)) return { kind: 'blocked', y: y + 1, why: 'obstacle' };
     return { kind: 'land', y: y + 1 };
