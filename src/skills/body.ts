@@ -186,7 +186,7 @@ async function recoverBlock(ctx: SkillCtx, args: TargetDigArgs) {
 // ------------------------------------------------------------------ dig
 export const dig: Skill<DigArgs> = {
   name: 'dig',
-  description: '定点拆除并拾取，或按 dir 开挖短通道；默认不制造工具，不挖开液体邻格。wet:true 接受进水，lava:true 接受进岩浆，分别显式选择。',
+  description: '定点拆除并拾取，或按 dir 开通道（dir:down 往下开竖井，每级挖脚下并落进去；N/E/S/W 挖水平通道；up 挖头顶）；默认不制造工具，不挖开液体邻格。wet:true 接受进水，lava:true 接受进岩浆，分别显式选择。',
   argsDoc: '{"target"?: "<方块ID|x,y,z|地标ID>" | {"x":0,"y":64,"z":0}, "block"?: "<目标方块类型约束>", "own"?: true, "dir"?: "up|down|N|E|S|W|forward", "blocks"?: 1-6, "wet"?:true, "lava"?:true}（target 与 dir 二选一）',
   timeoutMs: 60000,
   movement: true,

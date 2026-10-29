@@ -74,7 +74,7 @@ const KEEPSAKE = /_bed$|^(crafting_table|furnace|smoker|blast_furnace|chest|barr
 
 export const digAt: Skill<CellArgs> = {
   name: 'dig_at',
-  description: '挖掉身边指定的一格；目标不在视野时先转头看向它，仍看不见则返回未知，不挖其他位置。自动换现有工具，默认不造工具。液体邻格默认不挖；wet:true 接受进水，lava:true 接受进岩浆，分别显式选择。只挖不走，不能挖基岩。',
+  description: '挖掉身边指定的一格；目标不在视野时先转头看向它，仍看不见则返回未知，不挖其他位置。自动换现有工具，默认不造工具。液体邻格默认不挖；wet:true 接受进水，lava:true 接受进岩浆，分别显式选择。只挖不走，不能挖基岩。开阶梯井：dig_at [1,1,0]+[1,0,0] 挖两格高口 → step [1,0,0] 进去 → dig_at [0,-1,0] 挖脚下自动落一级；别挖斜格 [1,-1,0]（被前方挡住看不见），别 step 原地往下',
   argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "own"?:true, "wet"?:true（允许进水）, "lava"?:true（允许进岩浆）}（前后/左右 ±2，上下 -1..3；facing 定义相对坐标的方向，执行时可能转头观察固定的目标格；例：[1,1,0] 前方高一格，[0,2,0] 头顶上方，[0,-1,0] 脚下）',
   timeoutMs: 30000,
   movement: false,
