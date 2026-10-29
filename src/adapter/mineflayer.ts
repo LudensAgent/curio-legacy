@@ -3583,8 +3583,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (!block) return { ok: false, reason: 'NO_BLOCK' };
       if (this.mcData.blocksByName?.[item]) return await this.placeItemAgainst(item, block, check);
       if (/_boat$|_raft$/.test(item)) {
-        // 放船/筏：准星必须落在水面那一格的顶面上，服务器才落船；转头包和 block_place 之间偶有竞态，落船实体也可能
-        // 因区块/时序没进 b.entities。这里强制看向水面、多等 tick 再发 block_place，一次没确认就再试（最多 3 次），
+        // 放船/筏：船/筏是实体不是方块，服务器只认“右键用物品”（use_item）才落船，发 block_place（放方块）对它无效，
+        // 所以不能走 placeBlock/_genericPlace。准星得先落在水面那一格的顶面上；转头包和 use_item 之间偶有竞态，落船实体
+        // 也可能因区块/时序没进 b.entities。这里强制看向水面、多等 tick 再发 use_item，一次没确认就再试（最多 3 次），
         // 并同时核对背包是否扣船——扣了就算放成了。
         const ids = new Set(Object.keys(b.entities ?? {}));
         const count = () => (b.inventory.items() as InvItem[]).filter((held) => held.name === item).reduce((sum, held) => sum + held.count, 0);
@@ -3595,7 +3596,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         for (let attempt = 0; attempt < 3 && !entity && count() === before; attempt++) {
           await this.afterAction(() => b.lookAt(block.position.offset(0.5, 1.0, 0.5), true), check);
           await this.afterAction(() => this.lookSynced(), check);
-          await this.afterAction(() => b._genericPlace(block, new Vec3(0, 1, 0), { forceLook: 'ignore' }), check);
+          await this.afterAction(async () => { b.swingArm('right'); await b._client.write('use_item', { hand: 0 }); }, check);
           await this.waitForInteraction(() => !!appeared(), check, 1000);
           entity = appeared();
         }
