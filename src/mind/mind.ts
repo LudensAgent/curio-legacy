@@ -39,9 +39,6 @@ export interface MindDeps {
   onGoalEnd?: (status: string) => void;
   /** 主目标很久没进展：交给后台想“要做到它还缺什么能力” */
   onGoalStuck?: (goal: string, lines: string[]) => void;
-  /** 游戏进度（里程碑）：做到了哪些、接下来还有哪些没做到 */
-  /** 游戏进度（里程碑）：做到了哪些、还没做到哪些；lastAt = 最近一次做到新里程碑的时刻 */
-  progress?: () => { reached: string[]; next: string[]; lastAt?: number | null } | null;
   /** 想说话时（不以 / 开头） */
   say?: (text: string) => void;
   /** 后天学会的做法（行为技能）：失败时先试的恢复办法、模型写下就生效的新技能 */
@@ -148,7 +145,6 @@ export class Mind {
   private readonly startedAt = Date.now();
   /** 在线观察的计时基点只留在内存，累计值由 SelfModel 持久化。 */
   private onlineSince: number | null = null;
-  private milestoneSampleAt: number | null = null;
   private lastGameSample: { ticks: number; worldId: string; sessionId: string } | null = null;
   private lastLessonAt = 0;
   private reflecting: AbortController | null = null;
@@ -179,8 +175,6 @@ export class Mind {
   /** 两次因为情绪的阶段回顾至少隔多久（每次在这个范围里随机）：情绪只是提醒，不能一烦就换目标 */
   static REVIEW_GAP_MIN: [number, number] = [45, 90];
   private reviewGapMs = 45 * 60_000;
-  /** 多久没做到新的游戏进度，算“一直在同一带打转” */
-  static NO_MILESTONE_MIN = 90;
   /** 情绪到多少才提醒回顾 */
   static BORED_REVIEW = 0.75;
   static FED_UP_REVIEW = 0.65;
@@ -231,44 +225,21 @@ export class Mind {
   get autonomous() { return this.d.thinker.autonomous; }
 
   private setObservedOnline(online: boolean, now = Date.now()) {
-    if (!online && this.onlineSince !== null) this.observeMilestone(now);
     this.d.self.setOnline(online, now);
     if (online && this.onlineSince === null) {
       this.onlineSince = now;
-      this.milestoneSampleAt = now;
-      this.observeMilestone(now);
     }
     else if (!online && this.onlineSince !== null) {
       this.onlineSince = null;
-      this.milestoneSampleAt = null;
       this.lastGameSample = null;
       this.recentEnds = [];
       this.attention.resetLoop();
     }
   }
 
-  private observeMilestone(now: number) {
-    const progress = this.safe(() => this.d.progress?.() ?? null, null);
-    if (!progress) {
-      // 没有进度来源时无法判断中途是否出现了新里程碑，不抹掉已观察记录，也不推算缺口。
-      this.milestoneSampleAt = this.onlineSince === null ? null : now;
-      return { lastAt: null, observedMs: 0 };
-    }
-    const lastAt = progress.lastAt ?? null;
-    const current = this.d.self.observedProgress() ?? { milestoneAt: null, milestoneOnlineMs: 0, milestoneObservedSince: null, planId: null, planGameTicks: 0, planObservedSince: null };
-    const changed = lastAt !== current.milestoneAt;
-    const next = { ...current, milestoneAt: lastAt, milestoneOnlineMs: changed ? 0 : current.milestoneOnlineMs,
-      milestoneObservedSince: changed ? (this.onlineSince !== null ? now : null) : current.milestoneObservedSince };
-    if (lastAt !== null && this.onlineSince !== null && this.milestoneSampleAt !== null)
-      next.milestoneOnlineMs += Math.max(0, now - Math.max(lastAt, this.milestoneSampleAt));
-    this.milestoneSampleAt = this.onlineSince === null ? null : now;
-    if (changed || next.milestoneOnlineMs !== current.milestoneOnlineMs) this.d.self.setObservedProgress(next);
-    return { lastAt, observedMs: next.milestoneOnlineMs };
-  }
-
   private observePlanGameTime(p: Percept) {
     const plan = this.d.self.plan();
-    const current = this.d.self.observedProgress() ?? { milestoneAt: null, milestoneOnlineMs: 0, milestoneObservedSince: null, planId: null, planGameTicks: 0, planObservedSince: null };
+    const current = this.d.self.observedProgress() ?? { planId: null, planGameTicks: 0, planObservedSince: null };
     const changed = current.planId !== (plan?.agendaId ?? null);
     const next = { ...current, planId: plan?.agendaId ?? null, planGameTicks: changed ? 0 : current.planGameTicks,
       planObservedSince: changed ? Date.now() : current.planObservedSince };
@@ -513,7 +484,7 @@ export class Mind {
 
   /**
    * 情绪和目标联动：腻了、烦了（或回想觉得主目标可以放下），而且事情不是正顺利——
-   * 主目标很久没勾掉一项，或者很久没做到新的游戏进度（一直在同一类事上打转）——就停下来认真回顾一次阶段目标。
+   * 主目标很久没勾掉一项，就停下来认真回顾一次阶段目标。
    * 回顾只是给它看事实、让它自己决定换不换；平时一时的想法换不掉主目标（见 SelfModel.goalSwitchRefusal）。
    */
   private stageReviewCheck(now = Date.now()) {
@@ -525,43 +496,36 @@ export class Mind {
     const days = (this.d.self.observedProgress()?.planGameTicks ?? 0) / 24000;
     // 1) 主目标过了好几个游戏天（3–5 天里随机）还没做成：回顾一次，别一直钻牛角尖
     const overdue = !!plan && plan.reviewDays !== undefined && days >= plan.reviewDays;
-    // 2) 情绪提醒：腻透了或烦透了，而且确实没进展（主目标停滞、或很久没有新的游戏进度）；
+    // 2) 情绪提醒：腻透了或烦透了，而且确实没进展（主目标停滞）；
     //    目标至少做了一天、离上次回顾够久，才提醒——情绪会起伏，不能一烦就换
     const m = this.d.self.mood;
     const bored = m.boredom >= Mind.BORED_REVIEW, fed = m.frustration >= Mind.FED_UP_REVIEW;
     const stall = this.d.self.planStallInfo(now);
     const stalledMin = stall.minutes;
-    const milestone = this.observeMilestone(now);
-    const noMilestoneMin = milestone.lastAt ? milestone.observedMs / 60_000 : null;
-    const stale = !plan || stalledMin >= SelfModel.STALL_MIN || (noMilestoneMin !== null && noMilestoneMin >= Mind.NO_MILESTONE_MIN);
+    const stale = !plan || stalledMin >= SelfModel.STALL_MIN;
     const moody = (bored || fed || !!this.keptHint) && stale && (!plan || days >= 1) && now - this.lastReviewAt >= this.reviewGapMs;
     if (!overdue && !moody) return;
     const why = [overdue ? `已观察到主目标经过 ${Math.floor(days)} 个游戏天，仍未做成（更早未观察时间未知）` : '', bored ? '好无聊' : '', fed ? '很烦躁' : '',
       plan && stalledMin >= SelfModel.STALL_MIN ? `已观察到${stall.historyUnknown ? '至少 ' : ' '}${Math.round(stalledMin)} 在线分钟没勾掉一项${stall.historyUnknown ? '，更早的在线时长未知' : ''}` : '',
-      noMilestoneMin !== null && noMilestoneMin >= Mind.NO_MILESTONE_MIN ? `已观察到至少 ${Math.round(noMilestoneMin)} 在线分钟没有新的游戏进度，更早的在线时长未知` : '',
       this.keptHint ? '回想时觉得主目标可以放下了' : ''].filter(Boolean).join('、');
     this.review = { at: now, why };
-    this.d.bus.publish('stage_review', 'P2', `停下来回顾阶段目标：${why}`, { boredom: m.boredom, frustration: m.frustration, days, stalledMin: Math.round(stalledMin), noMilestoneMin: noMilestoneMin === null ? null : Math.round(noMilestoneMin) });
+    this.d.bus.publish('stage_review', 'P2', `停下来回顾阶段目标：${why}`, { boredom: m.boredom, frustration: m.frustration, days, stalledMin: Math.round(stalledMin) });
     this.requestThink(`${why}：停下来想想这一阶段到底在做什么，要不要换个阶段目标`, 'deliberate');
   }
 
   /** 阶段回顾时给模型看的事实：这一阶段做了多久、前几个阶段目标、游戏进度、搁着的想法 */
   private stageReviewFacts(now = Date.now()): Record<string, unknown> {
     const plan = this.d.self.plan();
-    const prog = this.safe(() => this.d.progress?.() ?? null, null);
     const min = (ms: number) => Math.round(ms / 60_000);
-    const milestone = this.observeMilestone(now);
     const outcome = { done: '做完', dropped: '放下', switched: '换掉' } as const;
     return {
       why: this.review?.why ?? '',
       feeling: moodWords(this.d.self.mood),
       ...(plan ? { current: `「${plan.goal}」制定至今世界日期相差 ${Math.floor(this.d.self.planDays(this.gameDay))} 个游戏天，包含未观察时段；已观察到至少 ${Math.floor((this.d.self.observedProgress()?.planGameTicks ?? 0) / 24000)} 个游戏天；已观察到${this.d.self.planStallInfo(now).historyUnknown ? '至少 ' : ' '}${Math.round(this.d.self.planStalledMin(now))} 在线分钟没勾掉一项，清单 ${plan.steps.filter((st) => st.done).length}/${plan.steps.length}` } : { current: '没有主目标' }),
       recent_stages: this.d.self.stages(6).map((r) => `「${r.goal.slice(0, 40)}」${min(r.endAt - r.setAt)} 现实分钟 → ${outcome[r.outcome]}（${r.stepsDone}/${r.steps}）`),
-      ...(prog ? { game_progress: { reached: prog.reached.slice(-10), not_yet: prog.next.slice(0, 10),
-        ...(prog.lastAt ? { last_new_wall_min_ago: min(now - prog.lastAt), observed_online_min_since_last_new: min(milestone.observedMs), online_history: '已观察值，更早在线时长可能未知' } : {}) } } : {}),
       ideas_waiting: this.d.self.agenda().filter((a) => a.status !== 'active').slice(-6).map((a) => `${a.id} ${a.kind === 'goal' ? '目标' : a.kind === 'idea' ? '点子' : '疑问'}：${a.text.slice(0, 40)}`),
       ...(this.keptHint ? { reflection: this.keptHint } : {}),
-      how: '情绪在提醒你停下来看看：recent_stages 是不是一直在同一类事上打转，game_progress 里还有什么没做到、手上的东西够不够去做。'
+      how: '情绪在提醒你停下来看看：recent_stages 是不是一直在同一类事上打转，手上的东西够不够去做。'
         + '值得接着做就 continue；想换就写 plan {"focus":"议程 id 或一句话的新目标","steps":[3–6 项],"switch_reason":"为什么"}。'
         + '新的主目标是这一阶段要拿到的成果，不是过夜、清包、补工具这类眼前事；平时一时的想法换不掉主目标，这种回顾时才能换。',
     };
@@ -1149,7 +1113,6 @@ export class Mind {
     this.d.bus.publish('reflect_start', 'P3', `回想一下这段时间（${why}）`);
     const strategy = this.safe(() => this.strategy.facts({
       agenda: this.d.self.data.agenda, builds: myBuilds(this.d.memory, this.d.adapter.state(), 8),
-      progress: this.safe(() => this.d.progress?.() ?? null, null),
     }), [] as string[]);
     this.d.thinker.reflect(this.d.self, this.d.persona, controller.signal, strategy).then((c) => {
       if (this.reflecting !== controller) return;

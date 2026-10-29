@@ -35,9 +35,6 @@ interface SelfData {
 
 export interface StageRecord { goal: string; setAt: number; endAt: number; outcome: 'done' | 'dropped' | 'switched'; stepsDone: number; steps: number }
 export interface ObservedProgress {
-  milestoneAt: number | null;
-  milestoneOnlineMs: number;
-  milestoneObservedSince: number | null;
   planId: string | null;
   planGameTicks: number;
   planObservedSince: number | null;

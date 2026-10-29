@@ -9,7 +9,7 @@ import type { WorldMemory } from '../memory/store.ts';
 import { dist3, effectiveLight, round1, lightAround } from '../util.ts';
 import { torchCount } from '../skills/light.ts';
 import { interactiveName, INTERACTIVE_BLOCKS, NOTABLE, type Vision, type VisionSummary } from './vision.ts';
-import { computeDrives, type Drive, type Stock } from '../brain/drives.ts';
+import { type Drive, type Stock } from '../brain/drives.ts';
 import { PassageTracker } from '../memory/passages.ts';
 import { isResourceBlock, oreKind } from '../memory/ore-spots.ts';
 import { EffectWatch } from '../brain/effects.ts';
@@ -687,9 +687,6 @@ export class Perception {
       reflection_due: reflectionDue(this.memory),
       exploration: { visitedChunks: this.memory.visitedChunkCount, noveltyByDir, base: baseInfo },
     };
-    const { drives, stock } = computeDrives(this.latest, this.memory);
-    this.latest.drives = drives;
-    this.latest.stock = stock;
     return this.latest;
   }
 }
