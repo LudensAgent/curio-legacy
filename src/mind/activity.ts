@@ -234,8 +234,9 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   }
   // 3) 头顶跳跃空间受阻：先挖开头顶再垫/迈
   if (step.skill === 'place_at' && data?.pillarFailure === 'NOT_PLACED:头顶跳跃空间受阻'
-    || step.skill === 'climb_up' && data?.failureCause === 'PILLAR_CLEARANCE') {
-    return adapt('dig_at', { at: [0, 2, 0], ...(facing ? { facing } : {}) }, '头顶被挡，先挖开再垫', 'clearance');
+    || step.skill === 'climb_up' && data?.failureCause === 'PILLAR_CLEARANCE'
+    || step.skill === 'goto' && data?.pillarClearance) {
+    return adapt('dig_at', { at: [0, 2, 0], ...(facing ? { facing } : {}) }, '头顶被挡，先挖开再走', 'clearance');
   }
   // 未加载 = 看不清：并入照亮分支
   if (step.skill === 'place_at' && data?.pillarFailure === 'NOT_PLACED:头顶跳跃空间未加载') {

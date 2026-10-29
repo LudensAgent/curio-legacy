@@ -510,6 +510,7 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
       const water = waterNear();
       return fail(codeFromError(e), `前往 ${label} 失败：${(e as Error).message}${water ? '；附近有水，尚未确认干燥步行通路' : ''}`, {
         ...measured(), waterAhead: water,
+        ...((e as Error).name === 'PillarClearanceError' ? { pillarClearance: true } : {}),
       });
     } finally {
       clearInterval(prog);

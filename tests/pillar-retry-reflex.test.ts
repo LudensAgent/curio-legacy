@@ -94,6 +94,18 @@ test('climb_up clears the head and retries a confirmed pillar obstruction', asyn
   assert.equal(activity.steps[0].skill, 'dig_at');
 });
 
+test('a goto blocked by pillar clearance clears the head before retrying', () => {
+  const adapter = new FakeAdapter();
+  const activity = createActivity({ what: '往东走', why: '', kind: 'explore', repeat: 1,
+    steps: [{ skill: 'goto', args: { target: 'E 120', dig: true } }] }, '', 'llm', adapter.state());
+  const step = nextStep(activity)!;
+  activity.stepStart = { pos: { x: 99, y: 64, z: 99 } };
+  const verdict = afterStep(activity, step, fail('PATH_NOT_FOUND', '前往 E 120 失败：No path: 原地搭柱头顶跳跃空间受阻', { pillarClearance: true }), 100, adapter.state());
+  assert.equal(verdict.kind, 'continue');
+  assert.ok(activity.adaptations.some((item) => item.startsWith('clearance:')));
+  assert.equal(activity.steps[0].skill, 'dig_at');
+});
+
 test('other climb_up failures retain the existing retry decision', () => {
   const adapter = new FakeAdapter();
   const activity = createActivity({ what: '爬升', why: '', kind: 'other', repeat: 1,
