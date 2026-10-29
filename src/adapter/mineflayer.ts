@@ -44,20 +44,24 @@ import type {
   SmeltResult,
 } from './types.ts';
 
-type PillarClearance = { kind: 'blocked' | 'unknown'; min: Vec3Like; max: Vec3Like };
+type PillarClearance = { kind: 'blocked' | 'unknown'; min: Vec3Like; max: Vec3Like; block?: { pos: Vec3Like } };
 
 function describePillarClearance(clearance: PillarClearance): string {
   const { min, max } = clearance;
   const range = `跳跃时身体扫过的方块范围 x=${min.x}..${max.x}, y=${min.y}..${max.y}, z=${min.z}..${max.z}`;
+  // 只报“挡在哪一格”，不报方块名：跳起来撞到的位置是身体能感知的（本体感觉），
+  // 方块名称属于看不到的透视信息，交给心智/技能自己看清或动手再确认。
   return clearance.kind === 'blocked'
-    ? `头顶跳跃空间受阻；${range}，具体障碍位置和方块名称未确认`
+    ? `头顶跳跃空间受阻；${range}，具体障碍格 ${clearance.block ? `(${clearance.block.pos.x},${clearance.block.pos.y},${clearance.block.pos.z})` : '未确认'}（方块名称未确认）`
     : `头顶跳跃空间未加载；${range}，具体未加载位置未确认`;
 }
 
 class PillarClearanceError extends Error {
   override name = 'PillarClearanceError';
+  readonly block?: { pos: Vec3Like };
   constructor(clearance: PillarClearance) {
     super(`No path: 原地搭柱${describePillarClearance(clearance)}，未放置方块`);
+    this.block = clearance.block;
   }
 }
 
@@ -1151,7 +1155,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           const shapes: number[][] = block.shapes ?? (block.boundingBox === 'empty' ? [] : [[0, 0, 0, 1, 1, 1]]);
           if (shapes.some((shape) => x + shape[3] > p.x - 0.3 + epsilon && x + shape[0] < p.x + 0.3 - epsilon
             && z + shape[5] > p.z - 0.3 + epsilon && z + shape[2] < p.z + 0.3 - epsilon
-            && y + shape[4] > p.y + 1.8 + epsilon && y + shape[1] < top - epsilon)) return { kind: 'blocked', min, max };
+            && y + shape[4] > p.y + 1.8 + epsilon && y + shape[1] < top - epsilon)) return { kind: 'blocked', min, max, block: { pos: { x, y, z } } };
         }
     return null;
   }

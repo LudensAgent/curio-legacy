@@ -335,17 +335,39 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
       const here = surroundings(adapter);
       if ((args.untilSky || args.untilExit) && reached(here)) break;
       const before = adapter.state().pos, me = floor(before);
+      const moveUp = () => adapter.moveTo({ kind: 'xyz', x: me.x, y: me.y + 1, z: me.z }, { signal, timeoutMs: Math.max(1, Math.min(8000, ctx.deadline - Date.now())), allowTerrainChanges: true });
+      // 头顶的方块先挖开（不挖液体旁边的）
       try {
-        // 头顶的方块先挖开（不挖液体旁边的）
         await breakCell(ctx, { x: me.x, y: me.y + 2, z: me.z });
-        await adapter.moveTo({ kind: 'xyz', x: me.x, y: me.y + 1, z: me.z }, { signal, timeoutMs: Math.max(1, Math.min(8000, ctx.deadline - Date.now())), allowTerrainChanges: true });
-        throwIfAborted(signal);
-        const after = adapter.state().pos;
-        if (Math.floor(after.y + 0.05) <= me.y || after.y <= before.y + 0.05) return finish('移动已结束，但脚下没有实际升到上一格');
       } catch (e) {
         if (isAbort(e)) throw e;
-        return finish(why(e), e instanceof Error && e.name === 'PillarClearanceError' ? 'PILLAR_CLEARANCE' : undefined);
+        return finish(why(e));
       }
+      try {
+        await moveUp();
+      } catch (e) {
+        if (isAbort(e)) throw e;
+        const name = e instanceof Error ? e.name : undefined;
+        if (name !== 'PillarClearanceError') return finish(why(e));
+        // 搭柱被头顶/侧上方挡住：适配器报告具体那一格，把它挖开再垫一次；挖不动（基岩、近液体）由 breakCell 抛错如实停下
+        const blocked = (e as { block?: { pos: Vec3Like } }).block?.pos;
+        if (!blocked) return finish(why(e), 'PILLAR_CLEARANCE');
+        try {
+          await breakCell(ctx, blocked);
+        } catch (e2) {
+          if (isAbort(e2)) throw e2;
+          return finish(why(e2), 'PILLAR_CLEARANCE');
+        }
+        try {
+          await moveUp();
+        } catch (e2) {
+          if (isAbort(e2)) throw e2;
+          return finish(why(e2), e2 instanceof Error && e2.name === 'PillarClearanceError' ? 'PILLAR_CLEARANCE' : undefined);
+        }
+      }
+      throwIfAborted(signal);
+      const after = adapter.state().pos;
+      if (Math.floor(after.y + 0.05) <= me.y || after.y <= before.y + 0.05) return finish('移动已结束，但脚下没有实际升到上一格');
       ctx.senses.refresh();
       if (!onLadder() && !hasPlaceable(adapter.state().inventory)) break;
     }
