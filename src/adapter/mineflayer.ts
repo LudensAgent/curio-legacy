@@ -1049,6 +1049,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       }
     }
     await this.gotoUnstalled(goal, opts, check);
+    check();
+    // Pathfinder can resolve an empty noPath result without reaching its goal.
+    // Following is measured against the entity's current cell, not its old one.
+    if (target.kind === 'follow_entity') {
+      const ent = b.entities[target.entityId];
+      if (!ent) throw new Error('ENTITY_GONE');
+      goal = new goals.GoalFollow(ent, target.range);
+    }
+    const position = b.entity.position;
+    if (!goal.isEnd(position.floored())) throw new Error(`No path: 寻路结束但尚未到达目标，实际位于 (${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})`);
   }
 
   private leafOnlyBreakable: Set<number> | null = null;

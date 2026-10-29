@@ -149,8 +149,8 @@ export function passageLevels(rec: Pick<PassageRecord, 'path'>): number[] {
 
 /**
  * 沿自己挖过、走过的通道找一条路：把各条通道记下的脚下点连成网（同一条里前后相邻的点、不同条里挨得很近的点），
- * 从离自己最近的点走到离目标最近的点。都是亲身站过的地方，比让寻路在石头里现找可靠。
- * 两头离通道太远、或者连不上，就返回 null（交给普通寻路）。
+ * 返回从离自己最近的点到离目标最近的点的几何连接；未验证点间通行或当前地形，不能作为自动导航路线。
+ * 两头离通道太远、或者连不上，就返回 null。
  */
 export function passageRoute(recs: Pick<PassageRecord, 'path'>[], from: Vec3Like, to: Vec3Like,
   opts: { near?: number; hop?: number; link?: number } = {}): Vec3Like[] | null {

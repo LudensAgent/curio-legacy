@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { test } from 'node:test';
+import { Vec3 } from 'vec3';
 import { MineflayerAdapter } from '../src/adapter/mineflayer.ts';
 import { config } from '../src/config.ts';
 import { EventBus } from '../src/events.ts';
@@ -45,7 +46,7 @@ test('goto forwards independent terrain permissions to its movement call', async
 test('moveTo retains legacy permissions but independently disables scaffolding and towers', async () => {
   const registry = require('minecraft-data')('1.20.1'), { Movements } = require('mineflayer-pathfinder');
   let selected: any;
-  const bot: any = { registry, game: { dimension: 'overworld' }, entity: {}, inventory: { items: () => [] },
+  const bot: any = { registry, game: { dimension: 'overworld' }, entity: { position: new Vec3(2.5, 64, 0.5) }, inventory: { items: () => [] },
     pathfinder: { setMovements: (m: unknown) => { selected = m; }, goto: async () => {} } };
   const adapter = new MineflayerAdapter(config, new EventBus());
   adapter.bot = bot; adapter.mcData = registry;
@@ -78,16 +79,18 @@ test('recovery cannot restore restrictions omitted by a nested goto or place a p
   assert.doesNotThrow(() => constrainRecoveryAction(ctx, 'place_at', { at: [0, 0, 0], item: 'torch' }));
 });
 
-test('a known pillar blockage ends a remembered-passage goto without replanning or door attempts', async (t) => {
+test('a known pillar blockage ends goto without trying an old passage or doors', async (t) => {
   const adapter = new TestWorld();
   adapter.pos = { x: 0.5, y: 40, z: 0.5 };
   const ctx = makeCtx(adapter);
   t.after(() => ctx.memory.close());
-  ctx.memory.savePassage({ id: 'p', dim: adapter.state().dim, entrances: [], deepestY: 40, dug: 12, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1,
-    path: [0, 3, 6, 9, 12].map((x) => ({ x, y: 40, z: 0 })) } as any);
+  ctx.memory.setWorld(adapter.worldId);
+  ctx.memory.savePassage({ id: 'p', worldId: adapter.worldId, dim: adapter.dim, entrances: [], deepestY: 40, dug: 12, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1,
+    path: [0, 3, 6, 9, 12].map((x) => ({ x, y: 40, z: 0 })) });
   let calls = 0;
-  t.mock.method(adapter, 'moveTo', async (_target, options) => {
+  t.mock.method(adapter, 'moveTo', async (target, options) => {
     calls++;
+    assert.deepEqual(target, { kind: 'near', pos: { x: 12, y: 40, z: 0 }, range: 0 });
     assert.equal(options.allowPlace, true);
     assert.equal(options.allowTower, false);
     const error = new Error('No path: 原地搭柱头顶跳跃空间受阻，未放置方块');
@@ -100,18 +103,19 @@ test('a known pillar blockage ends a remembered-passage goto without replanning 
   assert.match(result.summary, /原地搭柱头顶跳跃空间受阻/);
 });
 
-test('remembered-passage legs and the final movement preserve the same placement restrictions', async (t) => {
+test('goto preserves placement restrictions when historical passage points are nearby', async (t) => {
   const adapter = new TestWorld();
   adapter.pos = { x: 0.5, y: 40, z: 0.5 };
   const ctx = makeCtx(adapter);
   t.after(() => ctx.memory.close());
-  ctx.memory.savePassage({ id: 'p', dim: adapter.state().dim, entrances: [], deepestY: 40, dug: 12, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1,
-    path: [0, 3, 6, 9, 12].map((x) => ({ x, y: 40, z: 0 })) } as any);
+  ctx.memory.setWorld(adapter.worldId);
+  ctx.memory.savePassage({ id: 'p', worldId: adapter.worldId, dim: adapter.dim, entrances: [], deepestY: 40, dug: 12, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1,
+    path: [0, 3, 6, 9, 12].map((x) => ({ x, y: 40, z: 0 })) });
   const calls: { allowPlace?: boolean; allowTower?: boolean }[] = [];
   const original = adapter.moveTo.bind(adapter);
   t.mock.method(adapter, 'moveTo', async (target, options) => { calls.push(options); await original(target, options); });
   const result = await goTo.run(ctx, { target: '12,40,0', dig: true, place: false });
   assert.equal(result.status, 'succeeded', result.summary);
-  assert.ok(calls.length >= 2);
+  assert.equal(calls.length, 1);
   for (const call of calls) assert.deepEqual([call.allowPlace, call.allowTower], [false, false]);
 });

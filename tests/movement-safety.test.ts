@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { test } from 'node:test';
+import { Vec3 } from 'vec3';
 import { MineflayerAdapter } from '../src/adapter/mineflayer.ts';
 import { config } from '../src/config.ts';
 import { EventBus } from '../src/events.ts';
@@ -12,9 +13,10 @@ test('walking preserves terrain by default and only explicit terrain work restor
   const { Movements } = require('mineflayer-pathfinder');
   const selected: any[] = [];
   const bot: any = {
-    registry, entity: {}, game: { dimension: 'overworld' },
+    registry, entity: { position: new Vec3(0.5, 64, 0.5) }, game: { dimension: 'overworld' },
     inventory: { items: () => [{ type: registry.itemsByName.dirt.id, count: 32 }, { type: registry.itemsByName.cobblestone.id, count: 64 }] },
-    pathfinder: { setMovements: (movements: any) => selected.push(movements), goto: async () => {} },
+    pathfinder: { setMovements: (movements: any) => selected.push(movements),
+      goto: async (goal: { x: number; z: number }) => { bot.entity.position = new Vec3(goal.x + 0.5, 64, goal.z + 0.5); } },
   };
   const original = new Movements(bot);
   assert.equal(original.countScaffoldingItems(), 96);
@@ -118,7 +120,8 @@ async function doorMovements(name: string, open: boolean) {
         : Block.fromStateId(registry.blocksByName[p.y === 63 ? 'stone' : 'air'].defaultState, 0);
       block.position = p; return block;
     },
-    pathfinder: { setMovements: (m: any) => { selected = m; }, goto: async () => {} },
+    pathfinder: { setMovements: (m: any) => { selected = m; },
+      goto: async (goal: { x: number; z: number }) => { bot.entity.position = new Vec3(goal.x + 0.5, 64, goal.z + 0.5); } },
   };
   const adapter = new MineflayerAdapter(config, new EventBus());
   adapter.bot = bot; adapter.mcData = registry;
@@ -164,7 +167,8 @@ test('installed Pathfinder dry-walking permission blocks water steps and drops w
       const block = Block.fromStateId(registry.blocksByName[name].defaultState, 0);
       block.position = p; return block;
     },
-    pathfinder: { setMovements: (m: any) => selected.push(m), goto: async () => {} },
+    pathfinder: { setMovements: (m: any) => selected.push(m),
+      goto: async (goal: { x: number; z: number }) => { bot.entity.position = new Vec3(goal.x + 0.5, 64, goal.z + 0.5); } },
   };
   const original = new Movements(bot), adapter = new MineflayerAdapter(config, new EventBus());
   adapter.bot = bot; adapter.mcData = registry;
@@ -213,8 +217,9 @@ test('绕开哪些方块由调用的人说（avoid），身体默认不替它定
   const registry = require('minecraft-data')('1.20.1');
   const { Movements } = require('mineflayer-pathfinder');
   const selected: any[] = [];
-  const bot: any = { registry, entity: {}, game: { dimension: 'overworld' }, inventory: { items: () => [] },
-    pathfinder: { setMovements: (m: any) => selected.push(m), goto: async () => {} } };
+  const bot: any = { registry, entity: { position: new Vec3(0.5, 64, 0.5) }, game: { dimension: 'overworld' }, inventory: { items: () => [] },
+    pathfinder: { setMovements: (m: any) => selected.push(m),
+      goto: async (goal: { x: number; z: number }) => { bot.entity.position = new Vec3(goal.x + 0.5, 64, goal.z + 0.5); } } };
   const original = new Movements(bot);
   const adapter = new MineflayerAdapter(config, new EventBus());
   adapter.bot = bot; adapter.mcData = registry;

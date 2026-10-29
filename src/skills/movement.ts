@@ -7,7 +7,6 @@ import { DIRS, dirName } from '../perception/perception.ts';
 import { dist3, sleep, throwIfAborted } from '../util.ts';
 import type { EntityInfo, Vec3Like } from '../adapter/types.ts';
 import { feetCell } from '../perception/local.ts';
-import { passageRoute } from '../memory/passages.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type FailureCode, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 import { planTravel } from './overland.ts';
 
@@ -235,7 +234,7 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
 // ------------------------------------------------------------------ goto
 export const goTo: Skill<{ target: string; dig?: boolean; place?: boolean; tower?: boolean; sprint?: boolean; avoid?: string[]; lead?: string }> = {
   name: 'goto',
-  description: '沿看得见的落脚点步行去地标或坐标；明确三维坐标须进入指定格。遇到已观察的木门会开门。默认不挖墙、不放方块；dig:true 兼容旧行为，允许挖掘、垫路及原地搭柱。place:false 可禁止放置，tower:false 可禁止原地搭柱；也可单独设 place:true 授权垫路、tower:true 授权搭柱。搭建消耗方块，可能在水面架桥。lead 可带指定生物走。',
+  description: '步行去地标或坐标；普通步行按可见或近期亲历的落脚点引导，明确三维坐标须进入指定格。遇到已观察的木门会开门。默认不挖墙、不放方块；dig:true 兼容旧行为，允许挖掘、垫路及原地搭柱。place:false 可禁止放置，tower:false 可禁止原地搭柱；也可单独设 place:true 授权垫路、tower:true 授权搭柱。搭建消耗方块，可能在水面架桥。lead 可带指定生物走。',
   argsDoc: '{"target":"<地标、坐标或方向>" 或 {"x":数字,"y":数字,"z":数字}, "dig"?:boolean, "place"?:boolean（允许垫路，默认继承 dig）, "tower"?:boolean（允许原地搭柱，默认继承 dig 且需要 place）, "sprint"?:boolean, "avoid"?:["方块名"], "lead"?:"生物名"}',
   timeoutMs: 600000,
   movement: true,
@@ -358,7 +357,7 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
       const panel = shape ? shape[0] >= 0.75 ? '东' : shape[3] <= 0.25 ? '西' : shape[2] >= 0.75 ? '南' : shape[5] <= 0.25 ? '北' : null : null;
       const doorNote = observedDoor && (open === true || open === false || open === 'true' || open === 'false')
         ? `；目标格看到 ${observedDoor.name}，门目前${String(open) === 'true' ? '打开' : '关闭'}，门板${panel ? `位于该格${panel}侧，` : ''}仍有碰撞，尚未确认它是否挡住路线` : '';
-      return fail(code, `尚未到达 ${label} 的目标格：实际站在 (${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)})，紧挨着目标格，差 ${distance(p).toFixed(2)} 格（${why}）${doorNote}${routeNote}${terrainNote()}`, { ...measured(p), nextTo: true, ...(observedDoor ? { observedDoor } : {}) });
+      return fail(code, `尚未到达 ${label} 的目标格：实际站在 (${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)})，紧挨着目标格，差 ${distance(p).toFixed(2)} 格（${why}）${doorNote}${terrainNote()}`, { ...measured(p), nextTo: true, ...(observedDoor ? { observedDoor } : {}) });
     };
     const inScope = () => {
       throwIfAborted(signal);
@@ -423,36 +422,7 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
     const visited: Vec3Like[] = [s.pos];
     let bestDistance = startDist, detours = 0, memoryHops = 0;
     const prog = setInterval(() => ctx.progress(1 - Math.min(1, distance(adapter.state().pos) / Math.max(1, startDist))), 1000);
-    // 两头都在自己挖过的通道附近：先沿记下的脚下点一段段走（亲身站过的地方），比让寻路在石头里现找可靠
-    let routeNote = '';
-    try {
-      const recs = memory.passages?.(s.dim) ?? [];
-      const route = !alreadyHere && startDist > 6 ? passageRoute(recs, s.pos, pos) : null;
-      if (route && route.length >= 2) {
-        let legs = 0;
-        for (const w of route) {
-          if (!inScope()) return fail('WRONG_DIMENSION', '途中世界或会话已改变，需要重新规划');
-          if (Date.now() >= ctx.deadline) break;
-          const here = adapter.state().pos;
-          if (dist3(here, w) <= 1.5) continue;
-          if (distance(w) > distance(here) + 1 && legs > 0 && distance(here) < 6) break; // 已经比路线上的下一个点离目标还近
-          try {
-            await adapter.moveTo({ kind: 'near', pos: w, range: 1.2 }, { signal, timeoutMs: Math.max(1, Math.min(8000, ctx.deadline - Date.now())), allowSwimming: false, ...terrainPermission, ...(args.sprint ? { sprint: true } : {}) });
-          } catch (e) {
-            if (isAbort(e) || (e as Error).name === 'PillarClearanceError') throw e;
-            break;
-          }
-          if (dist3(adapter.state().pos, here) < 0.3) break;
-          legs++;
-          visited.push(w);
-        }
-        const now = adapter.state().pos;
-        if (legs) { routeNote = `；沿自己挖过的通道走了 ${legs} 段`; bestDistance = Math.min(bestDistance, distance(now)); }
-      }
-    } catch (e) {
-      if (isAbort(e)) { clearInterval(prog); throw e; }
-      if ((e as Error).name === 'PillarClearanceError') { clearInterval(prog); return fail('PATH_NOT_FOUND', `${(e as Error).message}${terrainNote()}`, measured()); }
-    }
+    // 稀疏历史脚点不是当前连通路线；本次只围绕指定目标选择落脚点。
     try {
       let leadId: number | null = null, leadWaited = 0;
       for (let hops = 0; !arrived(adapter.state().pos) && hops < (args.lead ? 400 : 160); hops++) {
@@ -531,12 +501,12 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
         const note = f ? `带着的 ${args.lead} 在 ${f.dist.toFixed(0)} 格外 (${Math.round(f.pos.x)},${Math.round(f.pos.y)},${Math.round(f.pos.z)})` : `带着的 ${args.lead} 已不在视野里`;
         return ok(`到达 ${label}；人站在 (${end.x.toFixed(2)},${end.y.toFixed(2)},${end.z.toFixed(2)})，${note}${terrainNote()}`, { ...measured(end), lead: args.lead, leadPos: f?.pos ?? null, leadDist: f?.dist ?? null });
       }
-      return ok(`${alreadyHere ? '已在' : '到达'} ${label}${nums ? ' 的目标格' : ' 附近'}；实际站在 (${end.x.toFixed(2)},${end.y.toFixed(2)},${end.z.toFixed(2)})，本次往 ${dirName(end.x - s.pos.x, end.z - s.pos.z)} 移动 ${dist3(s.pos, end).toFixed(2)} 格，距目标点 ${distance(end).toFixed(2)} 格${alreadyHere ? '；没有执行新的位移' : ''}${routeNote}${terrainNote()}`, { ...measured(end), alreadyHere });
+      return ok(`${alreadyHere ? '已在' : '到达'} ${label}${nums ? ' 的目标格' : ' 附近'}；实际站在 (${end.x.toFixed(2)},${end.y.toFixed(2)},${end.z.toFixed(2)})，本次往 ${dirName(end.x - s.pos.x, end.z - s.pos.z)} 净位移 ${dist3(s.pos, end).toFixed(2)} 格，距目标点 ${distance(end).toFixed(2)} 格${alreadyHere ? '；没有执行新的位移' : ''}${terrainNote()}`, { ...measured(end), alreadyHere });
     } catch (e) {
       if (isAbort(e)) throw e;
       // 寻路报错（想太久、换路失败）时人可能已经走到了：先看看实际在哪，别把到了的当成没到
       const now = adapter.state().pos;
-      if (inScope() && arrived(now)) { await face(); return ok(`到达 ${label}${nums ? ' 的目标格' : ' 附近'}；实际站在 (${now.x.toFixed(2)},${now.y.toFixed(2)},${now.z.toFixed(2)})，距目标点 ${distance(now).toFixed(2)} 格（寻路最后报了“${(e as Error).message.slice(0, 40)}”，但人已经到了）${routeNote}${terrainNote()}`, measured(now)); }
+      if (inScope() && arrived(now)) { await face(); return ok(`到达 ${label}${nums ? ' 的目标格' : ' 附近'}；实际站在 (${now.x.toFixed(2)},${now.y.toFixed(2)},${now.z.toFixed(2)})，距目标点 ${distance(now).toFixed(2)} 格（寻路最后报了“${(e as Error).message.slice(0, 40)}”，但人已经到了）${terrainNote()}`, measured(now)); }
       if (inScope() && nextTo(now)) return failedNear(now, `寻路报“${(e as Error).message}”，那一格没走进去`, codeFromError(e));
       const water = waterNear();
       return fail(codeFromError(e), `前往 ${label} 失败：${(e as Error).message}${water ? '；附近有水，尚未确认干燥步行通路' : ''}`, {

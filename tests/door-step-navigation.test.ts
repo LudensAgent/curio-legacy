@@ -23,7 +23,8 @@ async function ascent(name: string, open: boolean, blockedHead = false, facing =
         : Block.fromStateId(registry.blocksByName[p.y < 64 || (!level && p.x === 1 && p.z === 0 && p.y === 64) || (blockedHead && (level ? p.x === 1 && p.y === 65 : p.x === 0 && p.y === 66) && p.z === 0) ? 'stone' : 'air'].defaultState, 0);
       block.position = p; return block;
     },
-    pathfinder: { setMovements: (m: any) => { selected = m; }, goto: async () => {} },
+    pathfinder: { setMovements: (m: any) => { selected = m; },
+      goto: async (goal: { x: number; z: number }) => { bot.entity.position = new Vec3(goal.x + 0.5, 64, goal.z + 0.5); } },
   };
   const adapter = new MineflayerAdapter(config, new EventBus());
   adapter.bot = bot; adapter.mcData = registry;

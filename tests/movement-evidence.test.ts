@@ -64,6 +64,7 @@ test('coordinate goto requires the target cell and reports measured movement inc
     assert.equal(result.data?.moved === 0, !moves);
     if (moves) {
       assert.ok((result.data?.moved as number) > .9, 'half-block node centers are valid arrival positions');
+      assert.match(result.summary, /净位移/, 'endpoint displacement must not be described as distance walked');
       const again = await goTo.run(ctx, { target: '24,77,-22' });
       assert.equal(calls, 1); assert.equal(again.data?.alreadyHere, true); assert.equal(again.data?.moved, 0);
       assert.match(again.summary, /没有执行新的位移/);
