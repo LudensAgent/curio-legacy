@@ -5,7 +5,7 @@ import { sighted, yawOfDir } from './movement.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill } from './types.ts';
 import { resolveItemAlias } from './work.ts';
 import { isStation, rememberStation } from './stations.ts';
-import { planBoatRoute, type BoatRoute } from './vehicles.ts';
+import { openWater, planBoatRoute, type BoatRoute } from './vehicles.ts';
 
 /**
  * 通用基础动作：相当于玩家的“右键”和“方向键”。
@@ -51,9 +51,11 @@ export const useItem: Skill<{ item: string; on: string; dir?: string }> = {
       senses.refresh();
       const names = new Set([args.on, ...adapter.resolveBlockNames(args.on)]);
       const fluid = args.on === 'water' || args.on === 'lava';
-      // 只用看得见的方块；液体要选表面（上面是空气）的那一格
+      // 只用看得见的方块；液体要选表面（上面是空气）的那一格。放船还要选开阔水面：船身 1.375 格宽，贴岸的一格浅水放不下
+      const boat = /_boat$|_raft$/.test(args.item);
       const hits = senses.knownBlocks([...names], 32)
         .filter((h) => !fluid || AIRISH.has(adapter.blockAt({ x: h.pos.x, y: h.pos.y + 1, z: h.pos.z }) ?? 'air'))
+        .filter((h) => !fluid || !boat || openWater(ctx, h.pos, 2) >= 4)
         .filter((h) => dirOk(args.dir, s.pos, h.pos))
         .sort((a, b) => a.dist - b.dist);
       const target = hits[0];

@@ -106,18 +106,25 @@ test('boat and raft placement forces the look at the water surface then places a
   }
 });
 
-test('boat placement reports ENTITY_NOT_SPAWNED without treating an existing boat as new', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_700_000_000_000 });
+test('boat placement reports ENTITY_NOT_SPAWNED without treating an existing boat as new', async () => {
   const f = fixture('oak_boat'), water = new Vec3(3, 62, 0);
   f.put('water', water);
   f.bot.entities[77] = { id: 77, name: 'boat', position: water.offset(0.5, 0.9, 0.5) };
   f.bot._genericPlace = async () => {};
-  const pending = f.adapter.useItemOn('oak_boat', { kind: 'block', pos: water }, new AbortController().signal);
-  await flush(); t.mock.timers.tick(5000); await flush();
-  const result = await pending;
+  const result = await f.adapter.useItemOn('oak_boat', { kind: 'block', pos: water }, new AbortController().signal);
   assert.equal(result.ok, false);
   assert.match(result.reason ?? '', /ENTITY_NOT_SPAWNED/);
   assert.equal(result.effectEvidence?.changed, false);
+});
+
+test('boat placement succeeds when the item is consumed even if the entity is not yet tracked', async () => {
+  const f = fixture('oak_boat'), water = new Vec3(3, 62, 0);
+  f.put('water', water);
+  f.bot._genericPlace = async () => { f.consume(); };
+  const result = await f.adapter.useItemOn('oak_boat', { kind: 'block', pos: water }, new AbortController().signal);
+  assert.equal(result.ok, true, result.reason);
+  assert.equal(result.spawned, 'oak_boat', '没确认实体但背包已扣船，仍按放置成功并报物品名');
+  assert.equal(result.effectEvidence?.changed, true);
 });
 
 test('cancelled boat placement aborts without reporting a spawned boat', async () => {

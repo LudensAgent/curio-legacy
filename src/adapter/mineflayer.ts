@@ -3571,19 +3571,28 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (!block) return { ok: false, reason: 'NO_BLOCK' };
       if (this.mcData.blocksByName?.[item]) return await this.placeItemAgainst(item, block, check);
       if (/_boat$|_raft$/.test(item)) {
-        // 放船/筏：准星必须落在水面那一格的顶面上，服务器才落船。_genericPlace 里是“缓慢转头”（force 未给），
-        // 转头没到位就先发了 block_place，服务器按旧视线判定没对着水面，就不落船也不扣背包（日志 ENTITY_NOT_SPAWNED）。
-        // 这里先强制看向水面顶面中心，等两 tick 让服务器收到转头，再发 block_place。
+        // 放船/筏：准星必须落在水面那一格的顶面上，服务器才落船；转头包和 block_place 之间偶有竞态，落船实体也可能
+        // 因区块/时序没进 b.entities。这里强制看向水面、多等 tick 再发 block_place，一次没确认就再试（最多 3 次），
+        // 并同时核对背包是否扣船——扣了就算放成了。
         const ids = new Set(Object.keys(b.entities ?? {}));
+        const count = () => (b.inventory.items() as InvItem[]).filter((held) => held.name === item).reduce((sum, held) => sum + held.count, 0);
+        const before = count();
         const appeared = () => Object.values(b.entities ?? {}).find((en: any) => !ids.has(String(en.id))
           && /(^|_)(boat|raft)$/.test(String(en.name)) && en.position.distanceTo(block.position) < 4);
-        await this.afterAction(() => b.lookAt(block.position.offset(0.5, 1.0, 0.5), true), check);
-        await this.afterAction(() => this.lookSynced(), check);
-        await this.afterAction(() => b._genericPlace(block, new Vec3(0, 1, 0), { forceLook: 'ignore' }), check);
-        const confirmed = await this.waitForInteraction(() => !!appeared(), check, 5000);
-        const entity: any = appeared();
-        if (!confirmed || !entity) return { ok: false, reason: 'ENTITY_NOT_SPAWNED:没有确认放置的实体出现', effectEvidence: { verified: true, changed: false, reasons: ['放置后没有确认新船实体'] } };
-        return { ok: true, spawned: entity.name ?? item, effectEvidence: { verified: true, changed: true, reasons: [`服务器返回新实体 ${entity.name ?? item}`] } };
+        let entity: any = null;
+        for (let attempt = 0; attempt < 3 && !entity && count() === before; attempt++) {
+          await this.afterAction(() => b.lookAt(block.position.offset(0.5, 1.0, 0.5), true), check);
+          await this.afterAction(() => this.lookSynced(), check);
+          await this.afterAction(() => b._genericPlace(block, new Vec3(0, 1, 0), { forceLook: 'ignore' }), check);
+          await this.waitForInteraction(() => !!appeared(), check, 1000);
+          entity = appeared();
+        }
+        const consumed = before - count();
+        const reasons = [...(entity ? [`服务器返回新实体 ${entity.name}`] : ['放置后没有确认新船实体']),
+          ...(consumed > 0 ? [`背包 ${item} 减少 ${consumed}`] : [])];
+        const changed = !!entity || consumed > 0;
+        if (!changed) return { ok: false, reason: 'ENTITY_NOT_SPAWNED:多次放置后没有确认新船实体，背包里的船也未减少', effectEvidence: { verified: true, changed: false, reasons } };
+        return { ok: true, spawned: entity?.name ?? item, effectEvidence: { verified: true, changed, reasons } };
       }
       // Other entity items use their block-face placement API.
       if (/_spawn_egg$|^armor_stand$|^end_crystal$/.test(item)) {
