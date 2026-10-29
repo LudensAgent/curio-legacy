@@ -785,7 +785,12 @@ export class BehaviorEngine {
     // （10-26：stairway-up-when-water-blocks-climb 三分钟里被改写四次，一次都没用上）
     if (uses === 0 && !codeBroke && st.writtenAt && Date.now() - st.writtenAt < BehaviorEngine.REWRITE_GAP_MS)
       return `「${name}」${Math.max(1, Math.round((Date.now() - st.writtenAt) / 60_000))} 分钟前才写下、还没用过：先别急着改写，等它用上几次或过一会儿再看`;
-    if (uses === 0 || uses >= BehaviorEngine.MIN_EVIDENCE || codeBroke) return null;
+    if (uses === 0 || codeBroke) return null;
+    // 用了 3 次以上却一次没成：重写只是把一套坏代码换成另一套，计数还归零，抢在 curator 按 4 次失败收起它之前又换新版本，
+    // 于是零成功技能陷入「重写→再失败→再重写」的死循环。这里拦住重写，让 retireLowValue 有机会把它收起。
+    if (uses >= BehaviorEngine.MIN_EVIDENCE && cur.ok === 0)
+      return `「${name}」当前版本用了 ${uses} 次一次都没成（成 ${cur.ok} 败 ${cur.fail}）：重写多半还是同一套失败，先等整理收起，或由心智显式修订；这次的经过已经记进它的成败`;
+    if (uses >= BehaviorEngine.MIN_EVIDENCE) return null;
     return `「${name}」当前版本只用了 ${uses} 次（成 ${cur.ok} 败 ${cur.fail}），证据还不够，先不改写它；这次的经过已经记进它的成败，等用够 ${BehaviorEngine.MIN_EVIDENCE} 次再看要不要改`;
   }
 

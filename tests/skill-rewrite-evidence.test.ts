@@ -43,3 +43,16 @@ test('改进器的新版本观察期只由当前版程序错误豁免', (t) => {
   stats.recent!.push({ at: Date.now(), ok: false, version: 2, summary: 'TypeError: 当前代码调用失败' });
   assert.equal(improver.consider(definition.name, 'failures'), null);
 });
+
+test('零成功技能用够次数后不再自动重写，交给整理收起', (t) => {
+  const { engine } = setup(t);
+  const name = definition.name;
+  // 当前版本（v2 候选）连续失败、一次没成、且不是代码报错：重写只是换一套坏代码，应该拦住
+  for (const why of ['没走到目标格', '前方没有支撑', '被挡住过不去']) {
+    engine.recordInvocation(name, { status: 'failed', failureCode: 'PATH_NOT_FOUND', summary: `代码技能没成：${why}`, data: { version: 2 } });
+  }
+  assert.match(engine.rewriteGate(name)!, /一次都没成/);
+  // 有过成功、用够次数：允许重写
+  engine.recordInvocation(name, { status: 'succeeded', summary: '走到目标格', data: { version: 2, verified: true } });
+  assert.equal(engine.rewriteGate(name), null);
+});
