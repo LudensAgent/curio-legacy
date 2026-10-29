@@ -78,6 +78,7 @@ test('generic GUI preserves confirmed partial memory on cancellation and ignores
   t.after(() => ctx.memory.close());
   await assert.rejects(useGui.run(ctx, { target: pos, ops: [{ take: { slot: 0 } }] }), { name: 'AbortedError' });
   assert.equal(ctx.memory.chests()[0].contents.items.find((entry) => entry.name === 'coal')?.count, 7);
+  assert.equal(ctx.memory.chests()[0].block, 'barrel', '记录容器类型');
   const refused = guiWorld(async (): Promise<GuiResult> => ({ ok: false, reason: 'NOT_OPENABLE', done: [] }));
   t.after(() => refused.ctx.memory.close());
   await useGui.run(refused.ctx, { target: pos, ops: [{ put: { item: 'diamond', slot: 0 } }] });

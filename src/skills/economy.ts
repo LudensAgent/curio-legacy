@@ -269,7 +269,7 @@ export const storeItems: Skill<{ items: StoreSpec[]; target?: ContainerTarget; n
       ctx.adapter.state().inventory.forEach((item) => after.set(item.name, (after.get(item.name) ?? 0) + item.count));
       const put = container?.put ?? plan.map((item) => ({ name: item.name, count: Math.max(0, Math.min(item.count, (have.get(item.name) ?? 0) - (after.get(item.name) ?? 0))) })).filter((item) => item.count > 0);
       const seen = container?.after ?? contents;
-      if ((put.length || seen) && ctx.memory.worldId === state.worldId) ctx.memory.noteChestUse(state.dim, selected.pos, { put, ...(seen ? { seen } : {}), note: args.note, day: state.worldDay });
+      if ((put.length || seen) && ctx.memory.worldId === state.worldId) ctx.memory.noteChestUse(state.dim, selected.pos, { put, ...(seen ? { seen } : {}), note: args.note, day: state.worldDay, block: container?.block });
       return put;
     };
     try {
@@ -315,7 +315,7 @@ export const takeItems: Skill<{ item: string; count: number; target?: ContainerT
       const after = ctx.adapter.state().inventory.filter((item) => item.name === args.item).reduce((count, item) => count + item.count, 0);
       const moved = container ? container.took.filter((item) => item.name === args.item).reduce((count, item) => count + item.count, 0) : Math.max(0, Math.min(args.count, after - before));
       const seen = container?.after ?? contents;
-      if ((moved || seen) && ctx.memory.worldId === state.worldId) ctx.memory.noteChestUse(state.dim, selected.pos, { took: moved ? [{ name: args.item, count: moved }] : [], ...(seen ? { seen, sought: [args.item] } : {}), day: state.worldDay });
+      if ((moved || seen) && ctx.memory.worldId === state.worldId) ctx.memory.noteChestUse(state.dim, selected.pos, { took: moved ? [{ name: args.item, count: moved }] : [], ...(seen ? { seen, sought: [args.item] } : {}), day: state.worldDay, block: container?.block });
       return moved;
     };
     try {

@@ -115,7 +115,10 @@ export function chestRecollectionLocation(c: ChestRecord, _clock?: Clock) {
 }
 
 const BLOCK_ZH: Record<string, string> = { chest: '箱子', trapped_chest: '陷阱箱', barrel: '木桶', shulker_box: '潜影盒' };
-export const chestName = (c: ChestRecord) => `${c.note ? `${c.note}的` : ''}${BLOCK_ZH[c.block] ?? '箱子'} ${at(c.pos)}`;
+export const chestName = (c: ChestRecord) => {
+  const zh = BLOCK_ZH[c.block] ?? (c.block.endsWith('shulker_box') ? '潜影盒' : '箱子');
+  return `${c.note ? `${c.note}的` : ''}${zh} ${at(c.pos)}`;
+};
 
 /** 想找某样东西：记得哪些箱子里有、各多少，近的在前 */
 export function recall(chests: ChestRecord[], accept: (name: string) => boolean, _clock: Clock, from?: Vec3Like): ChestRecall[] {

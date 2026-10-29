@@ -85,12 +85,12 @@ export const interactBlock: Skill<{ target: string | Vec3Like; item?: string }> 
       if (!effectEvidence.changed) return fail('EFFECT_NOT_CONFIRMED', `已对 ${expected} 发起右键，但实际效果未确认`, data);
       // 打开的是箱子：顺便看清里面有什么、记下来（之前打开了也不知道里面有什么，取东西时还当它是空的）
       let contents = '';
-      if (/^(chest|trapped_chest|barrel)$/.test(expected) && !args.item) {
+      if ((/^(chest|trapped_chest|barrel)$/.test(expected) || expected.endsWith('shulker_box')) && !args.item) {
         try {
           const r = await adapter.useChest(pos, [], [], signal);
           if (r.ok) {
             // 看一眼只会留下“里面有啥”的大概印象（最多的几样），不是抄清单；要什么还得 take_items 去翻
-            ctx.memory.noteChestUse(origin.dim, pos, { seen: r.contents, day: origin.worldDay });
+            ctx.memory.noteChestUse(origin.dim, pos, { seen: r.contents, day: origin.worldDay, block: r.container?.block ?? expected });
             contents = `；里面有：${r.contents.length ? r.contents.slice(0, 12).map((i) => `${i.name}×${i.count}`).join('、') : '空的'}（留了个大概印象，要用 take_items 去翻）`;
           }
         } catch (e) { if (isAbort(e)) throw e; }
