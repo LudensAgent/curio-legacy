@@ -317,6 +317,8 @@ export function situationalReminders(ctx: MindContext): string[] {
     for (const t of tunnels) {
       out.push(`记得自己${t.text}`);
     }
+    // 下矿/找矿前先召回过去的经历（Hindsight 里存的历史），别重复踩坑、别漏了学过的教训
+    out.push('要下矿/找矿：先 recall 一下过去的经历（{"kind":"recall","query":"下矿吃过什么亏、怎么脱困、挖矿有什么教训"}），再决定怎么下、怎么挖');
   }
   // 下矿的账：在地下、手上的活快收工或想回地面时，提供实际经历和当前所见。
   const trip = ctx.trip;
