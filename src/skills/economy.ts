@@ -217,18 +217,18 @@ async function selectedContainer(ctx: SkillCtx, target: ContainerTarget) {
     const current = ctx.senses.observeBlocks?.([matches[0].pos])[0];
     if (current && !CONTAINERS.includes(current.name)) {
       forgetObservedContainer(ctx, matches[0].pos);
-      return { ok: false as const, result: fail('TARGET_GONE', `选定地点亲眼看见已是 ${current.name}，忘掉已失效的容器记忆；未改选其他容器`) };
+      return { ok: false as const, result: fail('TARGET_GONE', `选定地点亲眼看见已是 ${current.name}，忘掉已失效的容器记忆；未改选其他容器`, { candidates: containerCandidates(ctx) }) };
     }
-    if (!location.precise && !current) return { ok: false as const, result: fail('NOT_FOUND', `只记得${location.text}有容器，具体位置需重新看见；未按隐藏坐标前往`, { location }) };
+    if (!location.precise && !current) return { ok: false as const, result: fail('NOT_FOUND', `只记得${location.text}有容器，具体位置需重新看见；未按隐藏坐标前往`, { location, candidates: containerCandidates(ctx) }) };
     pos = matches[0].pos;
   } else pos = target;
   ctx.senses.refresh();
   let observed = ctx.senses.observeBlocks?.([pos])[0];
   if (!observed) { await glanceAt(ctx, pos); observed = ctx.senses.observeBlocks?.([pos])[0]; }
-  if (!observed) return { ok: false as const, result: fail('NOT_FOUND', '当前看不见选定容器；可能被遮挡、太远或未加载，未换箱或移动去搜索') };
+  if (!observed) return { ok: false as const, result: fail('NOT_FOUND', '当前看不见选定容器；可能被遮挡、太远或未加载，未换箱或移动去搜索', { candidates: containerCandidates(ctx) }) };
   if (!CONTAINERS.includes(observed.name)) {
     forgetObservedContainer(ctx, pos);
-    return { ok: false as const, result: fail('TARGET_GONE', `选定位置当前是 ${observed.name}，忘掉已失效的容器记忆；未改选其他容器`) };
+    return { ok: false as const, result: fail('TARGET_GONE', `选定位置当前是 ${observed.name}，忘掉已失效的容器记忆；未改选其他容器`, { candidates: containerCandidates(ctx) }) };
   }
   return { ok: true as const, pos };
 }
@@ -278,6 +278,7 @@ export const storeItems: Skill<{ items: StoreSpec[]; target?: ContainerTarget; n
       const put = record(result.ok || result.moved > 0 ? result.contents : undefined), moved = put.reduce((count, item) => count + item.count, 0);
       const actual = put.map((item) => `${item.name}×${item.count}`).join('、');
       if (!result.ok) return fail('ERROR', `选定容器存放未完成：${result.reason}${moved ? `；实际已存入 ${actual}` : ''}；未挖盖、造箱或更换容器`, { moved, put });
+      if (!moved) return fail('ERROR', '选定容器没有存入任何物品——箱子可能满了或放不下这种物品；未挖盖、造箱或更换容器', { moved: 0, put: [] });
       return ok(`在选定容器存入 ${actual || '0 件物品'}${moved < plan.reduce((count, item) => count + item.count, 0) ? '；只有这部分实际存入' : ''}${missing.length ? `；背包没有 ${missing.join('、')}` : ''}`, { moved, put, ...(missing.length ? { missing } : {}) });
     } catch (error) {
       const put = record();
