@@ -93,7 +93,7 @@ export const digAt: Skill<CellArgs> = {
     const pos = toWorld(feet, args.facing, args.at);
     const physical = ctx.adapter.blockAt(pos);
     // 自己站的两格通常是空的；但也可能有火把、花、雪层、蜘蛛网这类东西，那就照样拿掉
-    if (physical === null) return fail('NOT_FOUND', `[${args.at}] 那一格还没加载或看不见`, after(ctx, args.facing, pos));
+    if (physical === null) return fail('NOT_FOUND', `[${args.at}] 那一格还没加载或看不见`, { ...after(ctx, args.facing, pos), obscured: true });
     if (args.at[0] === 0 && args.at[2] === 0 && (args.at[1] === 0 || args.at[1] === 1) && AIR.has(physical)) return ok(`[${args.at}] 是自己站的地方，本来就空着；往上挖是 [0,2,0]`, { ...after(ctx, args.facing, pos), noop: true });
     const key = `${pos.x},${pos.y},${pos.z}`;
     let seenBefore = visibleCells(ctx, [pos]).get(key);
@@ -102,7 +102,7 @@ export const digAt: Skill<CellArgs> = {
       throwIfAborted(ctx.signal);
       seenBefore = visibleCells(ctx, [pos]).get(key);
     }
-    if (!seenBefore) return fail('NOT_FOUND', `[${args.at}] 没有发生挖掘；目标格 (${pos.x},${pos.y},${pos.z}) ${ctx.senses.observeBlocks ? '尝试看向后仍未在当前视野' : '当前没有视觉确认'}，可能被遮挡、太暗或未加载，方块状态未知，未确认是空气还是其他方块`, { ...after(ctx, args.facing, pos), noop: true });
+    if (!seenBefore) return fail('NOT_FOUND', `[${args.at}] 没有发生挖掘；目标格 (${pos.x},${pos.y},${pos.z}) ${ctx.senses.observeBlocks ? '尝试看向后仍未在当前视野' : '当前没有视觉确认'}，可能被遮挡、太暗或未加载，方块状态未知，未确认是空气还是其他方块`, { ...after(ctx, args.facing, pos), noop: true, obscured: true });
     const before = ctx.adapter.blockAt(pos);
     if (before !== seenBefore) return fail('TARGET_GONE', `[${args.at}] 目标格在观察后已改变或尚未加载，没有执行挖掘`, { ...after(ctx, args.facing, pos), noop: true });
     if (AIR.has(before)) return ok(`[${args.at}] 本来就是空的，不用挖`, { cell: [...args.at], was: 'air', ...after(ctx, args.facing, pos), noop: true });
@@ -267,7 +267,7 @@ export const stepTo: Skill<CellArgs> = {
     if (args.at[1] === 1 && !free({ ...feet, y: feet.y + 2 })) problems.push(describe({ ...feet, y: feet.y + 2 }) === '未看清的格子'
       ? '往上跳时自己头顶上方是 未看清的格子，无法确认跳跃空间'
       : `往上跳时自己头顶上方是 ${describe({ ...feet, y: feet.y + 2 })}（跳不起来；先 dig_at [0,2,0]）`);
-    if (problems.length) return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：${problems.join('；')}`, { problems, movementNotAttempted: true,
+    if (problems.length) return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：${problems.join('；')}`, { problems, movementNotAttempted: true, obscured: problems.every((p) => p.includes('未看清')),
       ...(!hasSupport ? { landingSupport: { pos: floor, at: supportAt, placeAtInRange, observed: seen.get(`${floor.x},${floor.y},${floor.z}`) ?? null } } : {}),
       ...after(ctx, args.facing, target) });
     let movementError: unknown;
@@ -331,7 +331,7 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
         }
       } else {
         const above = { ...feet, y: feet.y + 2 }, n = a.blockAt(above);
-        if (n === null || !AIR.has(n) && !isSoftBlock(n)) return fail('PATH_NOT_FOUND', `无法确认头顶跳跃空间足够（${seen.get(`${above.x},${above.y},${above.z}`) ?? '未看清的格子'}）`, after(ctx, args.facing, pos));
+        if (n === null || !AIR.has(n) && !isSoftBlock(n)) return fail('PATH_NOT_FOUND', `无法确认头顶跳跃空间足够（${seen.get(`${above.x},${above.y},${above.z}`) ?? '未看清的格子'}）`, { ...after(ctx, args.facing, pos), obscured: true });
         try {
           await a.moveTo({ kind: 'xyz', x: feet.x, y: feet.y + 1, z: feet.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(8000, ctx.deadline - Date.now())), allowTerrainChanges: true });
         } catch (e) {

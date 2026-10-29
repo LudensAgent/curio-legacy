@@ -9,9 +9,10 @@ import { fail } from '../src/skills/types.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
 
-test('confirmed pillar clearance and jump failures return control without an automatic repeat', () => {
+test('jump failures return control; a head-blocked pillar clears the head before retrying', () => {
   const adapter = new FakeAdapter();
-  for (const reason of ['NOT_PLACED:跳不起来', 'NOT_PLACED:头顶跳跃空间受阻', 'NOT_PLACED:头顶跳跃空间未加载']) {
+  // 跳不起来 / 头顶未加载（此处没有视觉信号）：无法就地应变，交回
+  for (const reason of ['NOT_PLACED:跳不起来', 'NOT_PLACED:头顶跳跃空间未加载']) {
     const activity = createActivity({ what: '垫高', why: '', kind: 'other', repeat: 1,
       steps: [{ skill: 'place_at', args: { at: [0, 0, 0], item: 'cobblestone' } }] }, '', 'llm', adapter.state());
     const step = nextStep(activity)!;
@@ -19,6 +20,17 @@ test('confirmed pillar clearance and jump failures return control without an aut
     const verdict = afterStep(activity, step, fail('EFFECT_NOT_CONFIRMED', `原地垫高没成：${reason}`, { pillarFailure: reason }), 100, adapter.state());
     assert.equal(verdict.kind, 'stuck', reason);
     assert.ok(!activity.adaptations.some((item) => item.startsWith('retry:')));
+  }
+  // 头顶被挡：先挖开头顶再垫（身体就地应变，不是盲目重试）
+  {
+    const activity = createActivity({ what: '垫高', why: '', kind: 'other', repeat: 1,
+      steps: [{ skill: 'place_at', args: { at: [0, 0, 0], item: 'cobblestone' } }] }, '', 'llm', adapter.state());
+    const step = nextStep(activity)!;
+    activity.stepStart = { pos: { x: 99, y: 64, z: 99 } };
+    const verdict = afterStep(activity, step, fail('EFFECT_NOT_CONFIRMED', '原地垫高没成：NOT_PLACED:头顶跳跃空间受阻', { pillarFailure: 'NOT_PLACED:头顶跳跃空间受阻' }), 100, adapter.state());
+    assert.equal(verdict.kind, 'continue');
+    assert.ok(activity.adaptations.some((item) => item.startsWith('clearance:')));
+    assert.equal(activity.steps[0].skill, 'dig_at');
   }
   const activity = createActivity({ what: '放置', why: '', kind: 'other', repeat: 1,
     steps: [{ skill: 'place_at', args: { at: [1, 0, 0], item: 'cobblestone' } }] }, '', 'llm', adapter.state());
@@ -54,7 +66,7 @@ test('place_at includes the checked head sweep in its failure feedback', async (
   assert.equal(result.data?.pillarFailure, 'NOT_PLACED:头顶跳跃空间受阻');
 });
 
-test('climb_up reports the actual ascent and stops retrying a confirmed pillar obstruction', async (t) => {
+test('climb_up clears the head and retries a confirmed pillar obstruction', async (t) => {
   const adapter = new FakeAdapter();
   adapter.pos = { x: 0.5, y: 64, z: 0.5 };
   adapter.inv.set('dirt', 4);
@@ -76,8 +88,10 @@ test('climb_up reports the actual ascent and stops retrying a confirmed pillar o
   assert.equal(result.data?.climbed, 1);
   assert.equal(result.data?.failureCause, 'PILLAR_CLEARANCE');
   assert.equal((result.data?.effectEvidence as { changed: boolean }).changed, true);
-  assert.equal(afterStep(activity, step, result, 100, adapter.state()).kind, 'stuck');
-  assert.ok(!activity.adaptations.some((item) => item.startsWith('retry:')));
+  const verdict = afterStep(activity, step, result, 100, adapter.state());
+  assert.equal(verdict.kind, 'continue');
+  assert.ok(activity.adaptations.some((item) => item.startsWith('clearance:')));
+  assert.equal(activity.steps[0].skill, 'dig_at');
 });
 
 test('other climb_up failures retain the existing retry decision', () => {

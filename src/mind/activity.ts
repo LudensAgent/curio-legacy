@@ -205,12 +205,46 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   const key = `${a.index - 1}:${step.skill}:${code}`;
   if (a.failures >= 5) return { kind: 'stuck', why: `这段活已经失败 ${a.failures} 次了（最近：${result.summary.slice(0, 80)}）` };
   if (NEEDS_THOUGHT.has(code)) return { kind: 'stuck', why: result.summary.slice(0, 160) };
-  // step 的落点检查发生在动作结束时；转头造成的视野变化不会改变刚确认的障碍。
-  if (step.skill === 'step' && result.data?.movementNotAttempted === true) return { kind: 'stuck', why: result.summary.slice(0, 160) };
-  if (step.skill === 'place_at' && ['NOT_PLACED:跳不起来', 'NOT_PLACED:头顶跳跃空间受阻', 'NOT_PLACED:头顶跳跃空间未加载'].includes(String(result.data?.pillarFailure))) {
+  // 机械执行失败先由身体就地应变（照亮、垫支撑、清头顶），补不动才交给脑子——脑子想不出“太暗/没支撑/头顶被挡”的新答案。
+  const data = result.data as Record<string, any> | undefined;
+  const stepArgs = (step.args ?? {}) as Record<string, any>;
+  const facing = stepArgs.facing ?? a.facing;
+  const hasItem = (re: RegExp) => state.inventory.some((i) => i.count > 0 && re.test(i.name));
+  const dark = percept?.light != null && percept.light.level !== 'bright';
+  const adapt = (skill: string, args: unknown, what: string, tag: string): StepVerdict => {
+    // 用稳定的步签名（不随 index 因插步而偏移）标记「同一逻辑步只应变一次」
+    const mark = `${tag}:${step.skill}:${code}:${JSON.stringify(step.args ?? {}).slice(0, 60)}`;
+    if (a.adaptations.includes(mark)) return { kind: 'stuck', why: result.summary.slice(0, 160) };
+    a.adaptations.push(mark);
+    a.steps.splice(Math.max(0, a.index - 1), 0, { skill, args });
+    a.index = Math.max(0, a.index - 1);
+    return { kind: 'continue', adapted: what };
+  };
+  // 1) 看不清：先照亮再看（没火把或不暗就照旧交回）
+  if (data?.obscured) {
+    if (dark && hasItem(/^torch$/)) return adapt('place_torch', {}, '看不清，先插火把照亮再试', 'light');
     return { kind: 'stuck', why: result.summary.slice(0, 160) };
   }
-  if (step.skill === 'climb_up' && result.data?.failureCause === 'PILLAR_CLEARANCE') return { kind: 'stuck', why: result.summary.slice(0, 160) };
+  // 2) step 脚下是 air（看得见、没支撑）：先垫一块再迈
+  if (step.skill === 'step' && data?.movementNotAttempted === true && data?.landingSupport?.placeAtInRange === true && data?.landingSupport?.observed === 'air') {
+    if (hasItem(/^(cobblestone|stone|andesite|granite|diorite|dirt|grass_block|sand|gravel|netherrack|cobbled_deepslate|deepslate|tuff|.*_planks|.*_log)$/)) {
+      return adapt('place_at', { at: data.landingSupport.at, item: 'any', ...(facing ? { facing } : {}) }, '脚下没支撑，先垫一块再迈', 'support');
+    }
+    return { kind: 'stuck', why: result.summary.slice(0, 160) };
+  }
+  // 3) 头顶跳跃空间受阻：先挖开头顶再垫/迈
+  if (step.skill === 'place_at' && data?.pillarFailure === 'NOT_PLACED:头顶跳跃空间受阻'
+    || step.skill === 'climb_up' && data?.failureCause === 'PILLAR_CLEARANCE') {
+    return adapt('dig_at', { at: [0, 2, 0], ...(facing ? { facing } : {}) }, '头顶被挡，先挖开再垫', 'clearance');
+  }
+  // 未加载 = 看不清：并入照亮分支
+  if (step.skill === 'place_at' && data?.pillarFailure === 'NOT_PLACED:头顶跳跃空间未加载') {
+    if (dark && hasItem(/^torch$/)) return adapt('place_torch', {}, '头顶跳跃空间未加载，先照亮再看', 'light');
+    return { kind: 'stuck', why: result.summary.slice(0, 160) };
+  }
+  if (step.skill === 'place_at' && data?.pillarFailure === 'NOT_PLACED:跳不起来') return { kind: 'stuck', why: result.summary.slice(0, 160) };
+  // 其余的 step 落点问题（目标格/头顶是看得见的 stone 等）仍交回：要先挖哪一格是规划决定。
+  if (step.skill === 'step' && data?.movementNotAttempted === true) return { kind: 'stuck', why: result.summary.slice(0, 160) };
   if (RETRYABLE.has(code) && !(step.skill === 'goto' && code === 'PATH_NOT_FOUND') && changed && a.consecutiveFailures === 1 && !a.adaptations.includes(`retry:${key}`)) {
     a.adaptations.push(`retry:${key}`);
     a.index = Math.max(0, a.index - 1);
