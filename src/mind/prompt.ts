@@ -146,7 +146,7 @@ const DECISIONS = `continue 照常做｜adjust 还是这件事、改一改 routi
 const OPERATOR = `【操作者】控制台里的操作者（直播的主人）说话分两种。【操作者的指令】：优先于自己的主目标、手上的活和弹幕，这一念就照做（可以直接 switch），做法自己想，不讨价还价；只有会马上送命才先保命再回来；写 operator doing / done / cannot。做完或做不到就说，别一直挂着。【操作者的建议】：只是提个想法，认真掂量一下，合适就采纳（adopted），不合适就说一句为什么（declined），然后照自己的节奏玩，不用一直惦记。建议涉及的游戏机制与自己的记忆不一致时，先查 knowledge；查不到就说明不确定。背包数量、计划和窍门的成败次数不能证明某次行动的具体工具或经过；讲自己的经历要有实际观察依据。`;
 
 /** 专注：主目标 + 清单，插曲用 detour */
-const FOCUS = `【专注】主目标是这一阶段要拿到的成果（有床有箱的家、整套铁甲、去下界），不是做法，也不是过夜、脱困这类眼前事（detour）。清单 3–6 项可验证的子任务，可写 {"text":"…","done_when":{…}} 自动勾；依次推进；久没推进就改清单，有【阶段回顾】时可换目标（写 switch_reason）。`;
+const FOCUS = `【专注】主目标是这一阶段要拿到的成果，不是做法，也不是过夜、脱困这类眼前事（detour）。清单 3–6 项可验证的子任务，可写 {"text":"…","done_when":{…}} 自动勾；依次推进；久没推进就改清单，有【阶段回顾】时可换目标（写 switch_reason）。`;
 
 /** 技能的生成、试用与正式使用分开，完整写法按需查。 */
 const SKILLS_DOC = () => `【技能】把做法写进 skill 会保存候选：{"name":"英文-连字符","description":"…","when":{条件},"steps":[…]或"code":"JS","verify":"观察原目标是否达成"}。你决定何时在 routine 用 use_skill {"name":"…","trial":true,"args":{…}} 显式试用；候选不自动接手、不替换稳定版，取得足够实际验收证据才启用。启用后 when 含 after_failure＝动作失败时先试；只有状态条件＝成立自动做；不写＝手动调用。方块只读当前视觉，unknown不能当作空气或已知矿物；只听到的实体没有精确坐标和可交互ID。写不出就用 worth_learning；写法先查 {"kind":"skill","name":"writing-skills"}。遇到岩浆或水下呼吸问题由你或你学会的技能处理。纯文字技能可用 skill {"name":"…","restore":true} 恢复到阅读目录；恢复不代表验证成功。技能目录和查询保留成功过的应急版本；可用 skill {"name":"…","from_version":1} 将指定完整历史契约另存新候选再试，保留稳定版和旧证据，新候选从零验收；历史成功不保证现在有效。`;
@@ -176,9 +176,8 @@ const ROUTINE_OF_THINKING = `【每次这样想】
 const CHOOSE = `【选动作】
 - 去记得的地方或坐标 → goto；找没见过的东西 → explore {"until":…}；拿看得见的方块 → gather；身边某一格 → dig_at / step / place_at
 - 坐船过水：船是实体，用 use_item {"item":"…_boat","on":"water"} 放到水面（别用 place_at），再 interact {"entity":"boat"} 上船；ride {"direction":"SW"} 划（ride 必须给 direction 或 to）。travel 提供步行和游泳寻路，已乘船时沿水路导航；吃 → eat（背包有吃的）/ hunt / forage / fish；做东西 → craft、smelt（会自己放下背包里的工作台/熔炉；拿不准查 recipes）
-- 有怪靠近 → defend {"target":"名字"} 打掉，或走开绕路（苦力怕也是你定：打就砍一下退一步）
-- 过夜 → sleep（有床，看参数选哪张）/ shelter / 自己挖坑封顶；在坑里或地下想上去 → 看【身边】local 和背包，用 dig_at / step / place_at 自己想办法（怎么上去由你定，背包里有什么用什么）
-- 盖新房子 → design 拿图纸 → 攒材料 → build {"draft":"图纸ID"}（料不全也能先盖，有多少盖多少）；没盖完的 → build {"projectId":"作品ID"}；不要自己画图纸
+- 在坑里或地下想上去 → 看【身边】local 和背包，用 dig_at / step / place_at 自己想办法（怎么上去由你定，背包里有什么用什么）
+- design 请建筑师画图纸，再 build（新盖 {"draft":"图纸ID"}，续建 {"projectId":"作品ID"}）；不要自己画图纸
 - goto 默认不挖墙、不垫路、不搭柱；dig:true 才额外允许挖掘、垫路和搭柱；place:false 禁止放置，tower:false 禁止原地搭柱。`;
 
 const PRINCIPLES = `【原则】

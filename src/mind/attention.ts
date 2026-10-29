@@ -91,7 +91,7 @@ export class Attention {
     if (snap.phase !== prev.phase) {
       if (snap.phase === 'dusk') out.push(this.notice('dusk', '太阳在落山，天快黑了', 0.55, 300_000, now));
       else if (snap.phase === 'night') out.push(this.notice('night', '天黑了，怪物会出来', 0.6, 300_000, now));
-      else if (snap.phase === 'dawn' || (snap.phase === 'day' && prev.phase !== 'dawn')) out.push(this.notice('morning', '天亮了，新的一天开始：想想今天要做成什么', 0.55, 300_000, now));
+      else if (snap.phase === 'dawn' || (snap.phase === 'day' && prev.phase !== 'dawn')) out.push(this.notice('morning', '天亮了', 0.55, 300_000, now));
     }
     // 身上多了状态效果（中毒、饥饿、凋零……）：像人看到心变绿了
     for (const e of snap.effects) if (!prev.effects.has(e)) out.push(this.notice(`effect:${e}`, `身上有了状态效果：${e}`, /中毒|凋零|饥饿|失明|黑暗|不祥/.test(e) ? 0.55 : 0.35, 60_000, now));

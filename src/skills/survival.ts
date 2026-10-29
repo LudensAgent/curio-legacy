@@ -27,7 +27,7 @@ const BED_NAMES = ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime',
 
 export const shelter: Skill<{ until: 'day' | 'healed' }> = {
   name: 'shelter',
-  description: '夜里保命：有床且附近没怪就先睡一觉；否则就地挖 3 格深的坑钻进去封顶，躲到天亮/回血（需要 1 个泥土/圆石/木板等方块）。躲进坑里、四面堵死是正常的，天亮后往上挖 3 格就回到原地',
+  description: '就地挖 3 格深的坑钻进去封顶，躲到天亮/回血（需要 1 个泥土/圆石/木板等方块）。躲进坑里、四面堵死是正常的，天亮后往上挖 3 格就回到原地',
   argsDoc: '{"until"?: "day|healed"}',
   timeoutMs: 150000,
   movement: false,

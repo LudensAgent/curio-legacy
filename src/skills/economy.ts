@@ -484,7 +484,7 @@ export const farm: Skill<{ crop: string; size: number }> = {
 // ===================================================================== 远征
 export const expedition: Skill<{ direction: string; distance: number; torches?: boolean; eat_below?: number }> = {
   name: 'expedition',
-  description: '远征：朝一个方向长距离行进（100-600 格），每约 64 格记一个路标，沿途记录新发现；路上要不要在路标插火把、饿到多少吃东西由你在参数里定。出发前带足食物、火把和工具。用 goto base 沿路标回家',
+  description: '远征：朝一个方向长距离行进（100-600 格），每约 64 格记一个路标，沿途记录新发现；路上要不要在路标插火把、饿到多少吃东西由你在参数里定。用 goto base 沿路标回家',
   argsDoc: '{"direction": "N|NE|E|SE|S|SW|W|NW", "distance"?: 100-600, "torches"?: true（路标处插火把）, "eat_below"?: 2-19（饿到这个数就吃）}',
   timeoutMs: 900000,
   movement: true,
