@@ -206,9 +206,16 @@ export function recall(chests: ChestRecord[], accept: (name: string) => boolean,
 
 const at = (p: Vec3Like) => `(${p.x},${p.y},${p.z})`;
 
+/**
+ * 位置记得比内容牢（“我有个箱子在屋里”几乎不忘）：内容印象按游戏日淡忘，位置按现实小时才淡化成区域。
+ * 一个游戏日 = 20 现实分钟，内容约 6 现实小时（18 个游戏日）忘光；位置按 24 现实小时才淡化成区域——
+ * 一个直播会话内箱子位置几乎始终精确，跨会话则由 worldId 隔离、不会拿旧世界的坐标去新世界。
+ */
+export const LOCATION_PRECISE_MS = 24 * 3600_000;
+
 /** 近期工作记忆保留位置；更久只记区域，中心是范围标记，不能作为箱子的精确交互坐标。 */
 export function chestLocation(c: Pick<ChestRecord, 'pos' | 'ts'>, clock: Pick<Clock, 'now'> = {}) {
-  const precise = Math.max(0, (clock.now ?? Date.now()) - c.ts) <= 120_000;
+  const precise = Math.max(0, (clock.now ?? Date.now()) - c.ts) <= LOCATION_PRECISE_MS;
   const pos = precise ? { ...c.pos } : { x: Math.floor(c.pos.x / 32) * 32 + 16, y: Math.floor(c.pos.y / 16) * 16 + 8, z: Math.floor(c.pos.z / 32) * 32 + 16 };
   const radius = precise ? 0 : 24;
   return { pos, radius, precise, observedAt: c.ts, text: precise ? at(pos) : `中心 ${at(pos)}、半径约 ${radius} 格的区域（范围中心，不是箱子坐标）` };

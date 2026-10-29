@@ -22,7 +22,7 @@ import { makeCtx, TestWorld } from './survival-helpers.ts';
 const pos = { x: 123, y: 67, z: -234 };
 
 test('historical container prose is scoped, fuzzy and idempotent without changing stored observations', (t) => {
-  const memory = new WorldMemory(null), now = Date.now(), ts = now - 121_000;
+  const memory = new WorldMemory(null), now = Date.now(), ts = now - 25 * 3600_000;
   t.after(() => memory.close());
   memory.setWorld('w');
   memory.noteChestUse('overworld', pos, { put: [{ name: 'diamond', count: 64 }], now: ts });
@@ -41,7 +41,7 @@ test('historical container prose is scoped, fuzzy and idempotent without changin
 });
 
 test('mixed historical facts retain resource locations and quantities beside a container fact', () => {
-  const memory = { chests: () => [], landmarks: () => [] }, now = Date.now(), ts = now - 121_000;
+  const memory = { chests: () => [], landmarks: () => [] }, now = Date.now(), ts = now - 25 * 3600_000;
   const resource = '铁矿 (80,10,80) @ overworld 80,10,80 iron_ore×32 {"name":"iron_ore","count":32}';
   const container = '箱子 (123,67,-234) @ overworld 123,67,-234 diamond×64 {"name":"diamond","count":64}';
   ['；', ';', '。', '\n', '. '].flatMap((separator) => [
@@ -56,7 +56,7 @@ test('mixed historical facts retain resource locations and quantities beside a c
 });
 
 test('English container quantities use registered item names and display names', () => {
-  const memory = { chests: () => [], landmarks: () => [] }, now = Date.now(), ts = now - 121_000;
+  const memory = { chests: () => [], landmarks: () => [] }, now = Date.now(), ts = now - 25 * 3600_000;
   ['Chest', 'chests', 'BARREL', 'barrels', 'Shulker Box', 'Shulker Boxes', 'red_shulker_box',
     'light_blue_shulker_box', 'trapped_chest', 'Ender_Chest', '潜影盒'].forEach((container) => {
     const text = container + ' at (123,67,-234) held granite 64, 64 cobblestone, 32 iron ingots, minecraft:diamond 16 and 12 Torches';
@@ -71,7 +71,7 @@ test('English container quantities use registered item names and display names',
 });
 
 test('English item quantities do not turn chestplates, dates or other numbers into container inventory', () => {
-  const memory = { chests: () => [], landmarks: () => [] }, now = Date.now(), ts = now - 121_000;
+  const memory = { chests: () => [], landmarks: () => [] }, now = Date.now(), ts = now - 25 * 3600_000;
   [
     'I wore a diamond_chestplate at (123,67,-234), with 32 iron ingots and granite 64',
     'A Chestplate at (123,67,-234) had durability 64',
@@ -81,7 +81,7 @@ test('English item quantities do not turn chestplates, dates or other numbers in
 });
 
 test('English mixed facts keep resource evidence precise while container quantities become impressions', () => {
-  const memory = { chests: () => [], landmarks: () => [] }, now = Date.now(), ts = now - 121_000;
+  const memory = { chests: () => [], landmarks: () => [] }, now = Date.now(), ts = now - 25 * 3600_000;
   const resource = 'Iron ore at (80,10,80), 32 iron_ore and granite 64';
   const container = 'Chest at (123,67,-234) held 32 iron ingots and 64 cobblestone';
   [';', '. ', '\n'].flatMap((separator) => [resource + separator + container, container + separator + resource]).forEach((text) => {
@@ -93,7 +93,7 @@ test('English mixed facts keep resource evidence precise while container quantit
 });
 
 test('old container locations do not leak through recall, dashboard or station name navigation', (t) => {
-  const world = new TestWorld(), memory = new WorldMemory(null), ts = Date.now() - 121_000;
+  const world = new TestWorld(), memory = new WorldMemory(null), ts = Date.now() - 25 * 3600_000;
   t.after(() => memory.close());
   memory.setWorld(world.worldId);
   const landmark = memory.addLandmark('discovery', '我的箱子', world.dim, pos)!;
@@ -117,7 +117,7 @@ test('dashboard notes, ended goals and reflection project old container prose wi
   const world = new TestWorld(), memory = new WorldMemory(null), self = new SelfModel(null);
   t.after(() => { memory.close(); self.close(); });
   memory.setWorld(world.worldId);
-  const ts = Date.now() - 121_000, text = '箱子 (123,67,-234) 存过 diamond×64';
+  const ts = Date.now() - 25 * 3600_000, text = '箱子 (123,67,-234) 存过 diamond×64';
   memory.noteChestUse(world.dim, pos, { put: [{ name: 'diamond', count: 64 }], now: ts });
   memory.addNote('fact', text, world.dim);
   memory.recentNotes().at(-1)!.ts = ts;
@@ -187,7 +187,7 @@ test('Agent can mark an arbitrary visible block without a resource or interactio
 
 test('Hindsight recall projects legacy container facts without rewriting the remote bank', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-recall-boundary-'));
-  const memory = new WorldMemory(null), adapter = new FakeAdapter(), ts = Date.now() - 121_000;
+  const memory = new WorldMemory(null), adapter = new FakeAdapter(), ts = Date.now() - 25 * 3600_000;
   t.after(() => { memory.close(); fs.rmSync(directory, { recursive: true, force: true }); });
   memory.setWorld(adapter.worldId);
   memory.noteChestUse('overworld', pos, { put: [{ name: 'diamond', count: 64 }], now: ts });

@@ -348,6 +348,13 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
       return name ? ok(`[${args.at}] 已经有 ${name} 了`, { already: name, ...after(ctx, args.facing, pos) })
         : fail('PATH_NOT_FOUND', `[${args.at}] 已被占用，未放置；当前未看清方块名称`, after(ctx, args.facing, pos));
     }
+    // 实心方块放在箱子/木桶正上方会盖住箱盖，之后 store_items 报 LID_BLOCKED 打不开。
+    if (!attachable) {
+      const below = a.blockAt({ x: pos.x, y: pos.y - 1, z: pos.z });
+      if (below && ['chest', 'trapped_chest', 'barrel'].includes(below)) {
+        return fail('BAD_ARGS', `[${args.at}] 正下方是 ${below}，放上实心方块会盖住箱盖、之后打不开；请换个位置，或先用 dig_at {"own":true} 把箱子挪走`);
+      }
+    }
     try {
       const r = await a.placeBlockAt(pos, names, ctx.signal);
       if (!r.ok) {

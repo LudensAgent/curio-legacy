@@ -5,11 +5,11 @@ import { repairMemoryData } from '../src/maintenance/memory-repair.ts';
 const now = 1_800_000_000_000;
 const world = {
   version: 3, worldId: 'w', unrelated: { keep: true },
-  landmarks: [{ id: 'box', kind: 'discovery', label: '箱子', worldId: 'w', dim: 'overworld', pos: { x: 17, y: 64, z: 19 }, ts: now - 3600_000 }],
-  chests: { 'w:overworld:17,64,19': { worldId: 'w', dim: 'overworld', pos: { x: 17, y: 64, z: 19 }, uses: 2, ts: now - 3600_000,
-    traces: [{ item: 'coal', kind: 'put', qty: 'some', ts: now - 3600_000, op: 1, times: 1 }] } },
-  notes: [{ worldId: 'w', dimension: 'overworld', ts: now - 3600_000, kind: 'fact', text: '箱子 (17,64,19) 放过 coal×12' }],
-  goals: [{ worldId: 'w', dimension: 'overworld', ts: now - 3600_000, goal: '翻箱子 (17,64,19)', summary: '箱子里 coal×12' }],
+  landmarks: [{ id: 'box', kind: 'discovery', label: '箱子', worldId: 'w', dim: 'overworld', pos: { x: 17, y: 64, z: 19 }, ts: now - 25 * 3600_000 }],
+  chests: { 'w:overworld:17,64,19': { worldId: 'w', dim: 'overworld', pos: { x: 17, y: 64, z: 19 }, uses: 2, ts: now - 25 * 3600_000,
+    traces: [{ item: 'coal', kind: 'put', qty: 'some', ts: now - 25 * 3600_000, op: 1, times: 1 }] } },
+  notes: [{ worldId: 'w', dimension: 'overworld', ts: now - 25 * 3600_000, kind: 'fact', text: '箱子 (17,64,19) 放过 coal×12' }],
+  goals: [{ worldId: 'w', dimension: 'overworld', ts: now - 25 * 3600_000, goal: '翻箱子 (17,64,19)', summary: '箱子里 coal×12' }],
   lessons: [{ worldId: 'w', ts: now, source: 'model', text: '箱子 (17,64,19) 有 coal×12' }],
 };
 
@@ -43,7 +43,7 @@ test('episode repair quarantines unknown scope and distant discoveries without i
 test('mind repair leaves current intentions, plans, code and action arguments unchanged', () => {
   const input = { version: 1, agenda: [{ text: '去箱子 (17,64,19)', args: { target: [17, 64, 19] } }], plan: { goal: '箱子 (17,64,19)', code: 'return 12;' },
     knowHow: [{ id: 'k', text: '箱子 (17,64,19) 有 coal×12', updatedAt: now }], diary: [{ at: now, text: '箱子 (17,64,19) 有 coal×12' }],
-    history: [{ at: now - 3600_000, what: '翻箱子 (17,64,19)', summary: '箱子有 coal×12', routine: [{ skill: 'take_items', args: { target: [17, 64, 19], count: 12 } }] }] };
+    history: [{ at: now - 25 * 3600_000, what: '翻箱子 (17,64,19)', summary: '箱子有 coal×12', routine: [{ skill: 'take_items', args: { target: [17, 64, 19], count: 12 } }] }] };
   const result = repairMemoryData(input, { kind: 'mind', worldId: 'w', worldMemory: world, now });
   const data = result.data as typeof input;
   assert.deepEqual(data.agenda, input.agenda); assert.deepEqual(data.plan, input.plan);

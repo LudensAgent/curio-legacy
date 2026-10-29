@@ -40,22 +40,22 @@ test('long-term resource landmarks remain addressable after the short visual cac
   assert.equal(memory.findLandmark(landmark.id, 'the_nether'), undefined);
 });
 
-test('chest location becomes an honest area and old item traces do not regain an exact association', (t) => {
+test('chest location stays precise within a session then becomes an honest area; old item traces are forgotten', (t) => {
   const memory = new WorldMemory(null), now = Date.now(), pos = { x: 123, y: 67, z: -234 };
   t.after(() => memory.close());
   memory.setWorld('w');
-  const record = memory.noteChestUse('overworld', pos, { put: [{ name: 'diamond', count: 64 }], now: now - 121_000 });
-  assert.equal(chestLocation(record, { now: now - 1000 }).precise, true);
+  // 一个直播会话内（< 24 现实小时）：位置精确
+  const record = memory.noteChestUse('overworld', pos, { put: [{ name: 'diamond', count: 64 }], now: now - 25 * 3600_000 });
+  assert.equal(chestLocation(record, { now: record.ts + 1000 }).precise, true);
+  // 超过 24 现实小时：位置淡化成诚实区域
   const area = chestLocation(record, { now });
   assert.equal(area.precise, false);
   assert.equal(area.radius, 24);
   assert.ok(Math.hypot(pos.x - area.pos.x, pos.y - area.pos.y, pos.z - area.pos.z) <= area.radius);
   assert.doesNotMatch(describeChest(record, { now, op: 1 }), /123,67,-234/);
   assert.match(describeChest(record, { now, op: 1 }), /范围中心，不是箱子坐标/);
-  record.ts = now;
-  const recall = memory.recallChests('diamond')[0];
-  assert.match(describeRecall(recall), /不确定是哪只箱子/);
-  assert.doesNotMatch(describeRecall(recall), /123,67,-234/);
+  // 物品印象按游戏日淡忘（比位置快）：25 小时前的 diamond 已经想不起、也不会重获精确关联
+  assert.equal(memory.recallChests('diamond').length, 0);
   assert.equal(chestRecollectionLocation(record, memory.chestClock()).precise, false);
   assert.doesNotMatch(describeChest(record, memory.chestClock()), /123,67,-234/);
   const facilities = myFacilities(memory, { worldId: 'w', dim: 'overworld', pos }, ['chest']);
@@ -65,7 +65,7 @@ test('chest location becomes an honest area and old item traces do not regain an
 
 test('v3 memory reads without rewriting history or claiming an old chest was just seen', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-memory-container-'));
-  const file = path.join(directory, 'world-memory.json'), ts = Date.now() - 600_000;
+  const file = path.join(directory, 'world-memory.json'), ts = Date.now() - 25 * 3600_000;
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   fs.writeFileSync(file, JSON.stringify({ version: 3, worldId: 'w', chests: { 'w:overworld:3,64,0': {
     worldId: 'w', dim: 'overworld', pos: box, ts, uses: 1, traces: [{ item: 'coal', kind: 'put', qty: 'some', ts, op: 1, times: 1 }],
@@ -83,7 +83,7 @@ test('unopened historical containers are candidates and facilities without autom
   const { world, memory, ctx } = fixture(), pos = { x: 123, y: 67, z: 234 };
   t.after(() => memory.close());
   const landmark = memory.addLandmark('discovery', '我的箱子', world.dim, pos, 1)!;
-  landmark.ts = Date.now() - 121_000;
+  landmark.ts = Date.now() - 25 * 3600_000;
   ctx.senses.knownBlocks = () => [];
   ctx.senses.observeBlocks = () => [];
   let opened = 0;
@@ -176,6 +176,21 @@ test('placing two adjacent containers keeps both, and digging one invalidates on
   assert.equal(memory.chestAt(world.dim, first), undefined);
   assert.ok(memory.chestAt(world.dim, adjacent));
   assert.deepEqual(memory.landmarks().filter((l) => l.label === '我的箱子').map((l) => l.pos), [adjacent]);
+});
+
+test('placing a solid block directly above a chest is refused to keep the lid usable', async (t) => {
+  const { world, memory, ctx } = fixture();
+  t.after(() => memory.close());
+  world.inv.set('cobblestone', 4);
+  world.setBlock({ x: 1, y: 64, z: 0 }, 'chest');
+  const result = await placeAt.run(ctx, { at: [1, 1, 0], facing: 'E', item: 'cobblestone' });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.failureCode, 'BAD_ARGS');
+  assert.equal(world.blockAt({ x: 1, y: 65, z: 0 }), 'air', '正上方没有被盖上');
+  // 火把这类贴墙挂件不挡箱盖，照常放
+  world.inv.set('torch', 1);
+  const torch = await placeAt.run(ctx, { at: [1, 1, 0], facing: 'E', item: 'torch' });
+  assert.equal(torch.status, 'succeeded');
 });
 
 test('loading own/plain container twins removes only the duplicate at the identical cell', (t) => {
