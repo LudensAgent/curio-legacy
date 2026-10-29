@@ -133,7 +133,7 @@ test('技能目录不列收起的；收起不久的技能后台不同名重写�
   assert.match(engine.reliable('dig-me-out') ?? '', /不够可靠/);
 });
 
-test('时间感：离天黑/天亮几分钟；中午、半夜、天亮各提醒一次；干等比干活无聊得快', async () => {
+test('时间感：只在昼夜变化时提醒（天快黑、天黑、天亮）；干等比干活无聊得快', async () => {
   const { clockOf } = await import('../src/perception/perception.ts');
   const { Attention } = await import('../src/mind/attention.ts');
   const { relaxMood, DEFAULT_MOOD } = await import('../src/mind/self.ts');
@@ -142,9 +142,8 @@ test('时间感：离天黑/天亮几分钟；中午、半夜、天亮各提醒�
   const att = new Attention();
   const p = (tod: number) => ({ time: { timeOfDay: tod, phase: tod < 12000 ? 'day' : tod < 13800 ? 'dusk' : tod < 22200 ? 'night' : 'dawn', day: 2 }, self: { food: 20, hp: 20, inWater: false }, emptySlots: 5, nearby: { hostile: [], resources: [] }, light: null } as any);
   att.fromPercept(p(5900));
-  assert.ok(att.fromPercept(p(6100)).some((n) => n.key === 'noon' && /第 3 天/.test(n.what)));
-  att.fromPercept(p(17900));
-  assert.ok(att.fromPercept(p(18100)).some((n) => n.key === 'midnight' && /离天亮约/.test(n.what)));
+  assert.ok(att.fromPercept(p(12000)).some((n) => n.key === 'dusk' && /天快黑/.test(n.what)));
+  assert.ok(att.fromPercept(p(14000)).some((n) => n.key === 'night' && /天黑了/.test(n.what)));
   const waited = relaxMood(DEFAULT_MOOD, 120, 'waiting').boredom, worked = relaxMood(DEFAULT_MOOD, 120, true).boredom;
   assert.ok(waited > worked + 0.2, `干等两分钟 ${waited} vs 干活两分钟 ${worked}`);
 });
@@ -175,33 +174,21 @@ test('天气：按群系说清下的是雨还是雪；雷雨随时能睡；变�
   assert.ok(att.fromPercept(p(weatherHere('thunder', 'plains'))).some((n) => n.key === 'weather' && n.level === 'reconsider'));
 });
 
-test('时间感用游戏钟点说：几点、太阳在哪、离天黑/能睡/天亮还有几个小时', async () => {
-  const { clockText, durationText, timeSense, ticksUntil } = await import('../src/perception/perception.ts');
+test('时间感只报太阳在哪，不报几点、离天黑/天亮还有多久', async () => {
+  const { clockText, durationText, sunText, ticksUntil } = await import('../src/perception/perception.ts');
   assert.equal(clockText(0), '早上 6 点');
   assert.equal(clockText(6000), '中午 12 点');
   assert.equal(clockText(9000), '下午 3 点');
   assert.equal(clockText(12500), '傍晚 6 点半');
   assert.equal(clockText(18000), '半夜 12 点');
-  assert.equal(durationText(4000), '约 4 个小时');
-  assert.equal(durationText(3500), '约 3 个半小时');
-  assert.equal(durationText(700), '约 40 分钟');
+  assert.equal(durationText(4000), '约 3 分半');
+  assert.equal(durationText(3500), '约 3 分');
+  assert.equal(durationText(700), '约 35 秒');
   assert.equal(ticksUntil(22000, 23000), 1000);
   assert.equal(ticksUntil(23500, 23000), 23500);
-  // 下午 3 点：离天黑还有 4 个小时，不再说“离天黑 2.5 分钟”
-  const afternoon = timeSense(9000);
-  assert.match(afternoon, /下午 3 点.*太阳偏西.*离天黑（晚上 7 点，开始刷怪）还有约 4 个小时/);
-  assert.doesNotMatch(afternoon, /\d+(\.\d+)? 分钟/);
-  assert.match(timeSense(12200), /傍晚 6 点.*约 20 分钟后能睡觉.*约 50 分钟后天黑刷怪/);
-  assert.match(timeSense(12600, { canSleep: true }), /已经能睡觉/);
-  assert.match(timeSense(17000), /晚上 11 点.*离天亮（早上 5 点）还有约 6 个小时/);
-});
-
-test('中午的提醒说“下午还长”，不再催着准备过夜', async () => {
-  const { Attention } = await import('../src/mind/attention.ts');
-  const att = new Attention();
-  const p = (tod: number) => ({ time: { timeOfDay: tod, phase: tod < 12000 ? 'day' : tod < 13800 ? 'dusk' : tod < 22200 ? 'night' : 'dawn', day: 0 }, self: { food: 20, hp: 20, inWater: false }, emptySlots: 5, nearby: { hostile: [], resources: [] }, light: null } as any);
-  att.fromPercept(p(5900));
-  const noon = att.fromPercept(p(6100)).find((n) => n.key === 'noon');
-  assert.ok(noon);
-  assert.match(noon!.what, /中午 12 点.*离天黑（晚上 7 点）还有约 7 个小时.*下午还长/);
+  // 太阳在哪就是唯一的时间感：不报几点，也不报“离天黑/天亮还有多久”
+  assert.equal(sunText(9000), '太阳偏西');
+  assert.equal(sunText(12200), '太阳在落山');
+  assert.equal(sunText(17000), '天黑着');
+  assert.equal(sunText(23500), '东边天开始亮了');
 });

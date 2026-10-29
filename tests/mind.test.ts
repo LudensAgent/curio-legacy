@@ -1425,7 +1425,7 @@ test('stopping on a condition preserves evidence while following the queued acti
   assert.equal(w.mind.activity?.what, '接下来的事');
 });
 
-test('提示词：太阳还高就想着躲起来过夜，提醒里把尺度摆出来；状态里的时间是游戏钟点', async () => {
+test('提示词：白天想着躲起来过夜不再报“离天黑还有多久”；状态里的时间只有太阳在哪', async () => {
   const { situationalReminders } = await import('../src/mind/prompt.ts');
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
@@ -1433,15 +1433,14 @@ test('提示词：太阳还高就想着躲起来过夜，提醒里把尺度摆�
   const base = { reason: '测试', percept: perception.update(), state: adapter.state(), self, memory, suspended: [], lastRecord: null,
     noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', tier: 'glance' as const };
   const hiding = situationalReminders({ ...base, activity: { what: '就地挖坑封顶过夜', why: '离天黑不远了' } } as any);
-  assert.ok(hiding.some((r) => /早上 7 点.*离天黑还有约 12 个小时.*挖个能封顶的窝估计要十几现实秒/.test(r)), hiding.join('\n'));
-  const working = situationalReminders({ ...base, activity: { what: '砍 16 个原木', why: '盖小屋' } } as any);
-  assert.ok(!working.some((r) => /别提前躲/.test(r)));
+  assert.ok(!hiding.some((r) => /离天黑|天黑还有|动身|躲/.test(r)), hiding.join('\n'));
   const [, user] = buildMindMessages({ ...base, activity: null } as any);
-  assert.match(user.content, /早上 7 点，太阳刚升起不久；离天黑（晚上 7 点，开始刷怪）还有约 12 个小时（游戏时间）/);
+  assert.match(user.content, /太阳刚升起不久/);
+  assert.ok(!/离天黑|时长是现实时间|早上 7 点/.test(user.content));
   const percept = { ...base.percept, death_recovery: { dir: 'N', dist: 20, lost: 'stone×1', seconds_left: 50 } };
   const [, timed] = buildMindMessages({ ...base, percept, state: { ...adapter.state(), effects: [{ name: 'speed', level: 1, seconds: 50 }] }, activity: null } as any);
-  assert.match(timed.content, /估计还剩约 1 个小时游戏时间；实际状态未知/);
-  assert.match(timed.content, /剩余时间按正常速度估算为约 1 个小时游戏时间/);
+  assert.match(timed.content, /估计还剩约 50 秒现实时间；实际状态未知/);
+  assert.match(timed.content, /剩余时间按正常速度估算为约 50 秒现实时间/);
   const [, expired] = buildMindMessages({ ...base, percept: { ...percept, death_recovery: { ...percept.death_recovery, seconds_left: 0 } }, activity: null } as any);
   assert.match(expired.content, /估算已过常规寿命；实际状态未知/);
   memory.close();

@@ -483,7 +483,7 @@ export const sleepSkill: Skill<{ at?: Vec3Like; place?: boolean }> = {
       const waitTicks = 12542 - tod;
       // 离天黑还早：说清楚还要多久，别白跑一趟
       if (waitTicks < 0 || waitTicks > 1600) {
-        return fail('ERROR', `现在是${clockText(tod)}，傍晚 6 点半以后才能睡（还有${durationText((waitTicks + 24000) % 24000)}，游戏时间）；先做别的事，太阳落山（time 里写着能睡觉）时再 sleep`);
+        return fail('ERROR', `现在是${clockText(tod)}，傍晚 6 点半以后才能睡（还有${durationText((waitTicks + 24000) % 24000)}，现实时间）；先做别的事，太阳落山（time 里写着能睡觉）时再 sleep`);
       }
     }
     try {

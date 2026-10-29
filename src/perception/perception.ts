@@ -127,7 +127,6 @@ export function clockOf(timeOfDay: number): { toDusk: number | null; toDawn: num
  * 0 刻 = 早上 6 点，1000 刻 = 1 小时（现实约 50 秒）；18 点日落，约 18 点半能睡，19 点天黑开始刷怪，5 点天亮。
  */
 export const SUNSET_TICK = 12000;
-export const SLEEP_TICK = 12542;
 export const DARK_TICK = 13000;
 export const DAWN_TICK = 23000;
 
@@ -155,15 +154,6 @@ export function sunText(timeOfDay: number): string {
   if (t < DARK_TICK) return '太阳在落山';
   if (t < DAWN_TICK) return '天黑着';
   return '东边天开始亮了';
-}
-
-/** 一句话的时间感，给【身体】用：几点、太阳在哪、离天黑 / 能睡 / 天亮还有多久（都是游戏时间） */
-export function timeSense(timeOfDay: number, opts: { canSleep?: boolean } = {}): string {
-  const t = tod24(timeOfDay);
-  const head = `${clockText(t)}，${sunText(t)}`;
-  if (t < SUNSET_TICK) return `${head}；离天黑（晚上 7 点，开始刷怪）还有${durationText(ticksUntil(t, DARK_TICK))}`;
-  if (t < DARK_TICK) return `${head}；${opts.canSleep ? '已经能睡觉，' : `${durationText(ticksUntil(t, SLEEP_TICK))}后能睡觉，`}${durationText(ticksUntil(t, DARK_TICK))}后天黑刷怪`;
-  return `${head}；离天亮（早上 5 点）还有${durationText(ticksUntil(t, DAWN_TICK))}${opts.canSleep ? '，能睡觉' : ''}`;
 }
 
 /** 原版：12542–23459 刻之间才能睡觉；雷雨时任何时候都能睡 */
@@ -230,7 +220,7 @@ export class Perception {
       if (o && !/^(furnace|blast_furnace|smoker)$/.test(o.name)) { this.memory.forgetFurnace(dim, r.pos); this.furnaceLit.delete(key); continue; }
       const elapsed = Math.max(0, (Date.now() - r.ts) / 1000);
       const inside = [r.input ? `没烧的 ${r.input.name}×${r.input.count}` : '', r.output ? `烧好的 ${r.output.name}×${r.output.count}` : ''].filter(Boolean).join('、');
-      const left = `${elapsed < 1 ? '刚才' : `${durationText(realSecondsToTicks(elapsed))}前（游戏时间，按正常运行速度估算）`}离开时里面有 ${inside}${r.why === 'out_of_fuel' ? '（当时燃料就烧完了）' : r.why === 'stalled' ? '（当时卡住不动）' : ''}`;
+      const left = `${elapsed < 1 ? '刚才' : `${durationText(realSecondsToTicks(elapsed))}前（现实时间）`}离开时里面有 ${inside}${r.why === 'out_of_fuel' ? '（当时燃料就烧完了）' : r.why === 'stalled' ? '（当时卡住不动）' : ''}`;
       let now = '';
       if (o) {
         const lit = String(o.properties?.lit) === 'true';
@@ -273,7 +263,7 @@ export class Perception {
         this.dropWarned.add(key);
         this.bus.publish('process_changed', 'P2', `地上的 ${g.name}×${g.count} ${at}已见过一段时间；掉落物存在 6000 个实体刻后消失，出生时间和加载情况未知`, { kind: 'drop', pos: key });
       }
-      return `地上的 ${g.name}×${g.count} ${at}：约 ${durationText(realSecondsToTicks(g.firstMs / 1000)).replace(/^约 /, '')}前第一次看到（按正常 TPS 折算的游戏时间）${g.visible ? '，现在看得见' : '，现在不在视野里'}；出生时间和区块加载情况未知，无法确定何时消失`;
+      return `地上的 ${g.name}×${g.count} ${at}：约 ${durationText(realSecondsToTicks(g.firstMs / 1000)).replace(/^约 /, '')}前第一次看到（现实时间）${g.visible ? '，现在看得见' : '，现在不在视野里'}；出生时间和区块加载情况未知，无法确定何时消失`;
     });
   }
 

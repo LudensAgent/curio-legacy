@@ -1,7 +1,7 @@
 import type { AgentState } from '../adapter/types.ts';
 import type { AudienceContext } from '../live/audience.ts';
 import type { WorldMemory } from '../memory/store.ts';
-import { DARK_TICK, durationText, realSecondsToTicks, ticksUntil, timeSense, type Percept } from '../perception/perception.ts';
+import { durationText, realSecondsToTicks, sunText, type Percept } from '../perception/perception.ts';
 import { audienceBlock, AUDIENCE_RULES, exploredAround, liveAudience, type MySkillInfo } from '../planner/prompt.ts';
 import type { ChatMessage } from '../planner/llm.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
@@ -162,8 +162,7 @@ const SKILL_INDEX = (skills: string[]) => skills.length ? `\n\n【技能书】\n
 /** 用户消息分块：越往后越要紧（模型对末尾注意力最强） */
 const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。往某方向走直接写 goto {"target":"E 20"}，别自己算坐标；[前,上,右] 按指定 facing 换算。
 【相对坐标】activity/next 含 dig_at、step、place_at 的水平相对操作时，必须声明活动的 facing:"N|E|S|W"，表示坐标的前方，不等于推进方向。子步骤省略 facing 就继承，显式冲突会退回；绝对 xyz 和纯竖直操作不要求这个字段。活动参考系独立于镜头朝向；转头、观察、插火把不会改变它，local 方块图仍按 local.facing 解读。输出前核对文字目标方向与坐标换算后的实际方向；例如 facing:"N" 的 [-1,0,0] 是向南。需要改变参考系时可明确声明新的 facing（包括 "S"），后退或换向仍由你决定。
-【消息怎么读】越往后越要紧：【我】性格心情、议程、窍门 →【记得的地方】→【想起来的】自动想起的旧事和技能 →【最近】→【手上的活】→【身边】方块图 local、生物、资源 →【身体】where、生命饥饿、时间、背包 →【专注】主目标和清单 →【此刻】为什么现在想、注意到什么 →【此刻要留意】。未看见的方块状态未知，未挖到不代表那里是空气。
-【时间】游戏里说「几点、离天黑/天亮/能睡还有多久」都是游戏时间：1 游戏小时 = 50 现实秒，1 个游戏日 = 20 现实分钟。说「我挖了/走了/卡了多久」是现实时间，要换算成游戏时间才是天过了多少——现实 10 分钟 ≈ 半个游戏日，现实 1 分钟 ≈ 1.2 游戏小时。别把两者混着算。`;
+【消息怎么读】越往后越要紧：【我】性格心情、议程、窍门 →【记得的地方】→【想起来的】自动想起的旧事和技能 →【最近】→【手上的活】→【身边】方块图 local、生物、资源 →【身体】where、生命饥饿、天色、背包 →【专注】主目标和清单 →【此刻】为什么现在想、注意到什么 →【此刻要留意】。未看见的方块状态未知，未挖到不代表那里是空气。`;
 
 const ROUTINE_OF_THINKING = `【每次这样想】
 1. 【此刻】要紧的（危险、快饿死、卡住）先处理。
@@ -325,7 +324,7 @@ export function situationalReminders(ctx: MindContext): string[] {
     const picks = s.inventory.filter((i) => i.name.endsWith('_pickaxe') && i.durability).map((i) => `${i.name} 剩 ${Math.round(((i.durabilities?.[0] ?? i.durability!.left) / i.durability!.max) * 100)}%`);
     const t = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).find((f) => f.inside);
     const back = t ? `历史路线参考点直线距离约 ${Math.round(Math.hypot(t.pos.x - here.x, t.pos.y - here.y, t.pos.z - here.z))} 格，当前路线是否可通未知` : '';
-    out.push(`下矿的账：这趟下来${durationText(realSecondsToTicks(trip.minutes * 60))}（按正常速度估算的游戏时间）${got.length ? `，挖到 ${got.join(' ')}` : '，还没挖到矿'}；背包空 ${p.emptySlots} 格${picks.length ? `；${picks.join('、')}` : ''}；身边${seen.length ? `看得见 ${seen.join('、')}` : '没看见矿'}${remembered ? `，48 格内记得 ${remembered} 处矿点` : ''}${back ? `；${back}` : ''}。清单后面几项还要不要这些料，一起掂量再决定收不收工`);
+    out.push(`下矿的账：${got.length ? `挖到 ${got.join(' ')}` : '还没挖到矿'}；背包空 ${p.emptySlots} 格${picks.length ? `；${picks.join('、')}` : ''}；身边${seen.length ? `看得见 ${seen.join('、')}` : '没看见矿'}${remembered ? `，48 格内记得 ${remembered} 处矿点` : ''}${back ? `；${back}` : ''}。清单后面几项还要不要这些料，一起掂量再决定收不收工`);
   }
   // 养动物、村民交易：打算里提到了才把机制摆出来（模型对这些的记忆常是含糊或老版本的）
   const husbandry = husbandryFacts(intent);
@@ -363,53 +362,16 @@ export function situationalReminders(ctx: MindContext): string[] {
       out.push(`「${site.name}」已经验收过 ${site.attempts} 次，最近几次只少了 ${Math.max(0, site.recentProgress)} 处，还差 ${site.missing} 处：想想是不是已经够住了（够了就 build {"projectId":"${site.id}","mode":"accept"} 收工去做别的；不想要了就 abandon）`);
     else if (idleMin >= 20) out.push(`「${site.name}」还没盖完（还差 ${site.missing} 处）：想接着盖写 build {"projectId":"${site.id}"}；够住了就 accept，不想要了就 abandon`);
   }
-  if (ctx.designing) out.push(`建筑师正在画「${ctx.designing.brief.slice(0, 40)}」（${ctx.designing.minutes} 现实分钟了），画好会告诉你：先攒常用的木头、石头，或做别的事`);
+  if (ctx.designing) out.push(`建筑师正在画「${ctx.designing.brief.slice(0, 40)}」，画好会告诉你：先攒常用的木头、石头，或做别的事`);
   else if (drafts.length) out.push(`图纸 ${drafts[0].id}「${drafts[0].name}」已经画好：按材料清单攒齐后 build {"draft":"${drafts[0].id}"}`);
   else if (!unfinished.length && /盖|建|房|屋|家|住处|庇护|前哨|据点|补给点|仓库|畜栏|围栏|瞭望|塔|围墙|平台/.test(intent))
     out.push('想盖要长期用的建筑（房子、前哨、仓库、畜栏、塔……）：现在就输出 {"kind":"design","brief":"…","where":"here|base"} 请建筑师——画图要几现实分钟，一边画一边去攒料，图到了按清单补齐就能盖；不要自己画图纸。施工只认露天干地：地下的落脚点自己挖、应急的几块自己搭');
-  const bed = nearestBed(ctx);
-  const bedInBag = s.inventory.some((i) => i.name.endsWith('_bed'));
-  const bedLine = bed ? `记得的床在 ${bed.dist} 格外（${bed.dir}，${bed.pos}）` : '';
   if (p.time.phase === 'dusk' || p.time.phase === 'night') {
-    const [bx, by, bz] = bed ? bed.pos.split(',') : [];
-    const options = [bed ? `${bedLine}${bed.dist > 128 ? '，挺远' : ''}，去那儿睡写 sleep {"at":{"x":${bx},"y":${by},"z":${bz}}}` : '', bedInBag ? '背包里有床，就地放下睡写 sleep {"place":true}' : ''].filter(Boolean).join('；');
-    const tod = ((p.time.timeOfDay % 24000) + 24000) % 24000;
-    const head = tod < DARK_TICK ? `太阳在落山，${durationText(ticksUntil(tod, DARK_TICK))}后天黑刷怪` : `天黑了，离天亮还有${durationText(ticksUntil(tod, 23000))}`;
-    // 地下点着灯夜里不刷怪：不催它睡/躲，可以接着挖，别为过夜停下手上的活
-    const undergroundLit = where === 'underground' && p.light?.level !== 'dark';
-    out.push(undergroundLit
-      ? `${head}；你在地下、点着灯，夜里不会刷怪，可以接着挖，真累了再回床睡`
-      : `${head}：想好今晚在哪过、这段时间做什么${options ? `（${options}）` : '（家、床，或者就地躲一晚）'}`);
-  } else {
-    // 像人一样掂量回程：离天黑不远、床又在远处，就该动身或另作打算
-    const tod = ((p.time.timeOfDay % 24000) + 24000) % 24000;
-    // 太阳还高就想着躲起来过夜：把尺度摆出来（挖窝十几秒、天黑还早），让它接着干活
-    const toDarkTicks = ticksUntil(tod, DARK_TICK);
-    if (tod < 11000 && toDarkTicks > 2000 && /过夜|躲|窝|封顶|天黑|等天/.test(intent))
-      out.push(`现在${timeSense(tod).split('；')[0]}，离天黑还有${durationText(toDarkTicks)}（游戏 1 小时≈现实 50 秒）：挖个能封顶的窝估计要十几现实秒`);
-    // 都换成游戏时间比：走回去要的时间（约 4 格/秒）加一个游戏小时的余量，够不着天黑前到床就提醒
-    const toDark = ticksUntil(tod, DARK_TICK);
-    const walk = realSecondsToTicks(bed ? bed.dist / 4 : 0);
-    if (bed && !bedInBag && bed.dist > 32 && toDark <= walk + 1000)
-      out.push(`离天黑（晚上 7 点）还有${durationText(toDark)}；${bedLine}，走回去估计要${durationText(walk)}（按正常速度估算的游戏时间）：要回去睡就该动身了，否则就近想办法过夜`);
+    // 只报“天快黑了/天黑了”。床的位置走【记得的地方】my_bed（记忆模块）；“睡觉跳过夜晚”是游戏知识
+    out.push(p.time.phase === 'dusk' ? '太阳在落山，天快黑了' : '天黑了');
   }
   if (p.self.food <= 8) out.push(`饿了（饥饿 ${p.self.food}）：留意吃的`);
   return out.slice(0, 5);
-}
-
-/** 记得的最近一张床（自己的或看见过的） */
-function nearestBed(ctx: MindContext): { dist: number; dir: string; pos: string } | null {
-  const p = ctx.percept, s = ctx.state;
-  const [x, , z] = p.self.pos;
-  let best: { dist: number; dir: string; pos: string } | null = null;
-  for (const l of ctx.memory.landmarks()) {
-    if ((l.label !== '床' && l.label !== '我的床') || l.dim !== p.self.dim || (l.worldId && l.worldId !== s.worldId)) continue;
-    const dx = l.pos.x - x, dz = l.pos.z - z, dist = Math.round(Math.hypot(dx, dz, l.pos.y - p.self.pos[1]));
-    if (best && best.dist <= dist) continue;
-    const ns = Math.abs(dz) > Math.abs(dx) * 0.4 ? (dz < 0 ? '北' : '南') : '', ew = Math.abs(dx) > Math.abs(dz) * 0.4 ? (dx < 0 ? '西' : '东') : '';
-    best = { dist, dir: `${ns}${ew}${ns && ew ? '' : '边'}`, pos: `${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}` };
-  }
-  return best;
 }
 
 const pos3 = (p: [number, number, number]) => p.map((n) => Math.round(n)).join(',');
@@ -450,9 +412,7 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
     // 血量保留一位小数：半颗心四舍五入成 0 会让模型以为自己已经死了
     hp: Math.round(p.self.hp * 10) / 10, food: p.self.food,
     ...(p.self.inWater ? { inWater: true, oxygen: s.oxygen } : {}), ...(p.self.inLava ? { inLava: true } : {}), ...(p.self.riding ? { riding: p.self.riding } : {}),
-    time: (() => {
-      return `${p.time.day !== undefined ? `第 ${p.time.day + 1} 天 ` : ''}${timeSense(p.time.timeOfDay, { canSleep: !!p.time.can_sleep })}（游戏时间）`;
-    })(),
+    time: sunText(p.time.timeOfDay),
     ...(p.time.weather ? { weather: p.time.weather } : {}),
     ...(p.light ? { light: `${{ bright: '亮', dim: '有点暗', dark: '很暗' }[p.light.level] ?? p.light.level}${p.light.mob_spawn_risk ? '，会刷怪' : ''}` } : {}),
     held: p.self.held ? `${p.self.held}${s.heldDurability ? `（耐久 ${s.heldDurability.left}/${s.heldDurability.max}${s.heldDurability.left / s.heldDurability.max < 0.15 ? `，快坏了${spareNote(s.inventory.find((i) => i.name === p.self.held), s.heldDurability)}` : ''}）` : ''}` : p.self.held,
@@ -470,7 +430,7 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
       return `${name}×${count}${it?.stackSize ? `（每叠上限 ${it.stackSize}${stacks}）` : ''}${durabilityText(it)}${it?.enchanted ? '（附魔）' : ''}`;
     }), empty_slots: s.emptySlots,
     ...(s.connected && s.emptySlots <= 5 ? { inventory_space: `空格数是空槽位数量，不是可携带物品数量；${s.emptySlots} 个空槽全部用来放同一种且数据相同的物品时，每叠上限为 64、16、1 的物品分别可放 ${s.emptySlots * 64}、${s.emptySlots * 16}、${s.emptySlots} 个。这些空槽由所有物品共用，并非各物品各有这些空间；当前空间可能随物品变化。已有未满堆的剩余空间只适用于与该堆数据相同的物品，同名物品的属性不同时也不一定能合并。` } : {}),
-    ...(s.effects?.length ? { effects: s.effects.map((e) => `${e.name}${e.level > 1 ? ` ${e.level} 级` : ''}，${e.seconds > 0 ? `剩余时间按正常速度估算为${durationText(realSecondsToTicks(e.seconds))}游戏时间` : '剩余时长未知或接近结束'}`) } : {}),
+    ...(s.effects?.length ? { effects: s.effects.map((e) => `${e.name}${e.level > 1 ? ` ${e.level} 级` : ''}，${e.seconds > 0 ? `剩余时间按正常速度估算为${durationText(realSecondsToTicks(e.seconds))}现实时间` : '剩余时长未知或接近结束'}`) } : {}),
     ...(s.xp ? { xp_level: s.xp.level } : {}),
     // 背包里的食物各值多少（生的顺带说烤熟后值多少）：只给事实，吃不吃、烤不烤由它自己定
     ...([...inv.keys()].some((n) => foodNote(n)) ? { food_values: Object.fromEntries([...inv.keys()].filter((n) => foodNote(n)).map((n) => [n, foodNote(n)])) } : {}),
@@ -495,7 +455,7 @@ function surroundingsOf(p: Percept, tier: 'glance' | 'deliberate') {
     ...(p.death_recovery ? { my_dropped_items: {
       dir: p.death_recovery.dir, dist: p.death_recovery.dist, lost: p.death_recovery.lost,
       lifetime: p.death_recovery.seconds_left > 0
-        ? `假设区块持续加载且正常速度，估计还剩${durationText(realSecondsToTicks(p.death_recovery.seconds_left))}游戏时间；实际状态未知`
+        ? `假设区块持续加载且正常速度，估计还剩${durationText(realSecondsToTicks(p.death_recovery.seconds_left))}现实时间；实际状态未知`
         : '按区块持续加载且正常速度估算已过常规寿命；实际状态未知',
     } } : {}),
   };
@@ -582,7 +542,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       current_activity: ctx.activity ? describeActivity(ctx.activity, s, p) : null,
       ...(ctx.activity?.why ? { activity_reason_source: '当前活动的 why 是先前选择的理由，不等于观测事实；动作反馈和当前观察可用于核对' } : {}),
       ...(ctx.suspended.length ? { will_resume_after: ctx.suspended.map((a) => a.what) } : {}),
-      ...(ctx.designing ? { architect_drawing: `${ctx.designing.brief.slice(0, 60)}（${ctx.designing.minutes} 现实分钟了）` } : {}),
+      ...(ctx.designing ? { architect_drawing: ctx.designing.brief.slice(0, 60) } : {}),
       ...(ctx.repeatedFailures?.length ? { repeated_failures: ctx.repeatedFailures } : {}),
       ...(ctx.notes.length ? { last_decision_corrections: ctx.notes } : {}),
     }],

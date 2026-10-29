@@ -1,5 +1,5 @@
 import type { AgentEvent } from '../events.ts';
-import { DARK_TICK, DAWN_TICK, durationText, ticksUntil, type Percept } from '../perception/perception.ts';
+import type { Percept } from '../perception/perception.ts';
 import type { ActivityEnd, Noticing } from './types.ts';
 
 export const EXPERIENCE_MS = 10 * 60_000;
@@ -10,7 +10,7 @@ export const RECONSIDER = 0.5;
 
 const levelOf = (s: number): Noticing['level'] => s >= URGENT ? 'urgent' : s >= RECONSIDER ? 'reconsider' : 'note';
 
-interface Snapshot { effects: Set<string>; worn: Set<string>; tod: number; weather: string; phase: string; food: number; hp: number; emptySlots: number; hostiles: Set<string>; resources: Set<string>; light: string | null; inWater: boolean }
+interface Snapshot { effects: Set<string>; worn: Set<string>; weather: string; phase: string; food: number; hp: number; emptySlots: number; hostiles: Set<string>; resources: Set<string>; light: string | null; inWater: boolean }
 
 /**
  * 注意力：把游戏里发生的事变成“我注意到了…”，并判断值不值得为它停下来重新想。
@@ -78,7 +78,7 @@ export class Attention {
       effects: new Set(p.effects ?? []),
       // 同名的全都快坏了才算“快坏了”：手里那把快坏、背包里还有好的，不是缺工具
       worn: new Set((p.inventory ?? []).filter((i) => i.durability && (i.durabilities?.[0] ?? i.durability.left) / i.durability.max < 0.15).map((i) => i.name)),
-      tod: ((p.time.timeOfDay % 24000) + 24000) % 24000, weather: p.time.weather ?? '', phase: p.time.phase, food: p.self.food, hp: p.self.hp, emptySlots: p.emptySlots,
+      weather: p.time.weather ?? '', phase: p.time.phase, food: p.self.food, hp: p.self.hp, emptySlots: p.emptySlots,
       hostiles: new Set(p.nearby.hostile.filter((h) => h.dist <= 16).map((h) => h.name)),
       resources: new Set(p.nearby.resources.filter((r) => r.seen === 'now').map((r) => r.block)),
       light: p.light?.level ?? null, inWater: p.self.inWater,
@@ -87,13 +87,11 @@ export class Attention {
     this.last = snap;
     if (!prev) return [];
     const out: (Noticing | null)[] = [];
-    // 时间感：一天里的几个节点各抬头想一次（像人看一眼天色：今天过了多少、晚上还有多久、新的一天要做什么）
-    const day = p.time.day !== undefined ? `第 ${p.time.day + 1} 天` : '';
-    const untilDark = durationText(ticksUntil(snap.tod, DARK_TICK)), untilDawn = durationText(ticksUntil(snap.tod, DAWN_TICK));
+    // 时间感：只在昼夜变化时抬头看一眼（天快黑了、天黑了、天亮了）；不报几点，也不报“离天黑/天亮还有多久”
     if (snap.phase !== prev.phase) {
-      if (snap.phase === 'dusk') out.push(this.notice('dusk', `${day}傍晚 6 点，太阳在落山：${untilDark}后天黑刷怪、半小时后就能睡；今晚在哪过，想好了就去`, 0.55, 300_000, now));
-      else if (snap.phase === 'night') out.push(this.notice('night', `晚上 7 点，天黑了，怪物会出来；离天亮约 ${untilDawn.replace(/^约 /, '')}`, 0.6, 300_000, now));
-      else if (snap.phase === 'dawn' || (snap.phase === 'day' && prev.phase !== 'dawn')) out.push(this.notice('morning', `天亮了，${day ? `新的一天（${day}）` : '新的一天'}开始：想想今天要做成什么`, 0.55, 300_000, now));
+      if (snap.phase === 'dusk') out.push(this.notice('dusk', '太阳在落山，天快黑了', 0.55, 300_000, now));
+      else if (snap.phase === 'night') out.push(this.notice('night', '天黑了，怪物会出来', 0.6, 300_000, now));
+      else if (snap.phase === 'dawn' || (snap.phase === 'day' && prev.phase !== 'dawn')) out.push(this.notice('morning', '天亮了，新的一天开始：想想今天要做成什么', 0.55, 300_000, now));
     }
     // 身上多了状态效果（中毒、饥饿、凋零……）：像人看到心变绿了
     for (const e of snap.effects) if (!prev.effects.has(e)) out.push(this.notice(`effect:${e}`, `身上有了状态效果：${e}`, /中毒|凋零|饥饿|失明|黑暗|不祥/.test(e) ? 0.55 : 0.35, 60_000, now));
@@ -107,9 +105,6 @@ export class Attention {
       else if (now2 === 'rain' && was === 'clear') out.push(this.notice('weather', `开始${snap.weather}`, 0.4, 120_000, now));
       else if (now2 === 'clear') out.push(this.notice('weather', `${was === 'thunder' ? '雷雨' : '雨'}停了，天晴了`, 0.35, 120_000, now));
     }
-    const crossed = (tick: number) => prev.tod < tick && snap.tod >= tick && snap.tod - prev.tod < 2400;
-    if (crossed(6000)) out.push(this.notice('noon', `中午 12 点了，${day}白天过了一半，离天黑（晚上 7 点）还有${untilDark}：下午还长，手上的活接着做`, 0.5, 300_000, now));
-    if (crossed(18000)) out.push(this.notice('midnight', `半夜 12 点了，离天亮约 ${untilDawn.replace(/^约 /, '')}`, 0.5, 300_000, now));
     if (snap.food <= 6 && prev.food > 6) out.push(this.notice('hungry', `饿了（饥饿值 ${snap.food}）`, 0.6, 120_000, now));
     else if (snap.food <= 12 && prev.food > 12) out.push(this.notice('peckish', `有点饿（饥饿值 ${snap.food}）`, 0.3, 300_000, now));
     if (prev.hp - snap.hp >= 4) out.push(this.notice('hp_drop', `掉了 ${Math.round(prev.hp - snap.hp)} 点血，现在 ${Math.round(snap.hp)}`, snap.hp <= 8 ? 0.7 : 0.5, 10_000, now));
