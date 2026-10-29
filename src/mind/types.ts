@@ -28,11 +28,11 @@ export interface ActivityEnd {
   pos: { x: number; y: number; z: number };
   outcome: ActivityOutcome;
   failureCode?: string;
+  skill?: string;
   what: string;
+  summary: string;
   at: number;
 }
-
-export interface StuckHere { minutes: number; tried: string[]; failureCode: string; lastAt: number }
 
 /** 一段活：模型给出 routine，身体负责连续执行、重复和小范围的应变 */
 export interface Activity {
@@ -62,8 +62,8 @@ export interface Activity {
   consecutiveFailures: number;
   /** 本段活里身体自己做过的应变（换个地方找、重试），每种只做一次 */
   adaptations: string[];
-  /** 同一个 dig_at 连着几轮挖到的都是空气（routine 没按设想的形状挖） */
-  airDigs?: Record<string, number>;
+  /** 同一实际目标格的重复空挖；移动、挖掘或放置取得进展后重新计数。 */
+  airDigs?: Record<string, { target: { x: number; y: number; z: number }; count: number }>;
   /** 同一步多轮在同一个下行目标前停下时，保留实际停因交回心智。 */
   partialStops?: Record<string, { pos: { x: number; y: number; z: number }; below: string | null; iteration: number; count: number }>;
   dropped?: string[];

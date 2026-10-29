@@ -17,7 +17,7 @@ import { pickVariant } from '../skills/work.ts';
 import { afterStep, argsLabel, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, nextStep, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
 import { instinctNote, type BehaviorEngine } from './behaviors.ts';
 import { recallLocal } from './recall.ts';
-import { Attention, EXPERIENCE_MS, RECONSIDER, stuckHere, URGENT } from './attention.ts';
+import { Attention, EXPERIENCE_MS, RECONSIDER, URGENT } from './attention.ts';
 import { headInWall } from './predicate.ts';
 import { homeOf, myBuilds } from './home.ts';
 import { settleBuild } from '../skills/build.ts';
@@ -242,6 +242,8 @@ export class Mind {
       this.onlineSince = null;
       this.milestoneSampleAt = null;
       this.lastGameSample = null;
+      this.recentEnds = [];
+      this.attention.resetLoop();
     }
   }
 
@@ -385,7 +387,7 @@ export class Mind {
     this.lastPerceptAt = Date.now();
     let p: Percept;
     try { p = this.d.perception.update(); } catch { return; }
-    const loop = this.progressing() ? null : this.attention.fromLoop(this.recentEnds, this.d.adapter.state().pos);
+    const loop = this.attention.fromLoop(this.recentEnds, this.d.adapter.state().pos);
     const dangers = this.safe(() => this.sensedDanger(p), []).map((d) => this.attention.notice(d.key, d.what, 0.9, 4000)).filter((n): n is NonNullable<typeof n> => !!n);
     if (dangers.length) this.dangerUntil = Date.now() + 6000;
     for (const n of [...dangers, ...this.attention.fromPercept(p), ...(loop ? [loop] : [])]) {
@@ -583,13 +585,6 @@ export class Mind {
   /** 观众劝“够了”多少才算共识：5 分钟内 3 位观众，或至少 2 位观众说了 3 条以上 */
   static AUDIENCE_ACCEPT = { windowMs: 5 * 60_000, viewers: 3, messages: 3 };
 
-  /** 事情在往前走：主目标清单最近勾掉过一项，或者刚做成了一段活。这时不算“卡在这一带” */
-  private progressing(): boolean {
-    const plan = this.d.self.plan();
-    if (plan && plan.steps.some((st) => st.done) && Date.now() - plan.updatedAt < 5 * 60_000) return true;
-    return this.lastRecord?.outcome === 'done' && Date.now() - this.lastRecord.at < 2 * 60_000;
-  }
-
   /** 需要看看全局了吗：好久没认真想过、做完了好几段活、情绪到了临界、刚卡住 */
   private needsBigPicture(): boolean {
     const m = this.d.self.mood;
@@ -727,8 +722,9 @@ export class Mind {
     if (a.dropped?.length) summary = `${summary}；计划里这些步骤未通过校验，没有执行：${a.dropped.join('、')}`;
     const record = recordOf(a, outcome, summary, state);
     const failed = [...a.results].reverse().find((r) => r.status === 'failed' && !(SKILLS[r.skill]?.readOnly && r.failureCode === 'NOT_FOUND'));
+    if (outcome === 'done') { this.recentEnds = []; this.attention.resetLoop(); }
     this.recentEnds = [...this.recentEnds.filter((r) => Date.now() - r.at <= EXPERIENCE_MS),
-      { pos: { ...state.pos }, outcome, failureCode: failed?.failureCode, what: `${a.what}（${signatureOf(a.steps)}）`, at: record.at }].slice(-256);
+      { pos: { ...state.pos }, outcome, skill: failed?.skill, failureCode: failed?.failureCode, what: `${a.what}（${signatureOf(a.steps)}）`, summary, at: record.at }].slice(-256);
     this.d.self.record(record);
     this.lastRecord = record;
     this.finishedSinceReflect++;
@@ -1039,7 +1035,6 @@ export class Mind {
       // 收起、停用的技能不进目录（翻技能书、回想时还看得到）：目录越长越难挑，还拖累缓存
       skills: this.safe(() => this.d.thinker.skillBook?.index((n) => !!this.d.behaviors?.hidden(n),
         this.d.behaviors ? (name, trial) => this.d.behaviors!.executionError(name, trial) : undefined) ?? [], []),
-      stuckHere: this.progressing() ? null : stuckHere(this.recentEnds, state.pos),
       recalled, ...(openedSkill ? { openedSkill } : {}), ...(learnFrom ? { learnFrom } : {}), plan,
       hunting: this.safe(() => this.d.ledger?.huntTally() ?? null, null),
       ...(this.trip ? { trip: { minutes: (Date.now() - this.trip.since) / 60_000, gained: diffInventory(this.trip.inventory, inventoryOf(state)).gained, nearEnd: reason === Mind.NEAR_END_REASON } } : {}),

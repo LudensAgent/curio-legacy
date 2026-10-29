@@ -1,29 +1,8 @@
 import type { AgentEvent } from '../events.ts';
 import { DARK_TICK, DAWN_TICK, durationText, ticksUntil, type Percept } from '../perception/perception.ts';
-import type { ActivityEnd, Noticing, StuckHere } from './types.ts';
+import type { ActivityEnd, Noticing } from './types.ts';
 
 export const EXPERIENCE_MS = 10 * 60_000;
-
-export function stuckHere(records: ActivityEnd[], here: ActivityEnd['pos'], now = Date.now()): StuckHere | null {
-  const local = records.filter((r) => now - r.at >= 0 && now - r.at <= EXPERIENCE_MS &&
-    Math.hypot(r.pos.x - here.x, r.pos.y - here.y, r.pos.z - here.z) <= 8);
-  const failures = new Map<string, ActivityEnd[]>();
-  for (const r of local) {
-    if (r.outcome !== 'stuck') continue;
-    const code = r.failureCode ?? 'STUCK';
-    const group = failures.get(code) ?? [];
-    group.push(r); failures.set(code, group);
-  }
-  const repeated = [...failures.entries()].filter(([, rs]) => rs.length >= 3)
-    .sort((a, b) => b[1].at(-1)!.at - a[1].at(-1)!.at)[0];
-  if (!repeated) return null;
-  return {
-    minutes: Math.max(0.1, Math.round((now - repeated[1][0].at) / 6000) / 10),
-    // 只列真正卡住的办法：这一带做成了的事不算“试过但不行”
-    tried: [...new Set(local.filter((r) => r.outcome === 'stuck').map((r) => r.what))].slice(-8),
-    failureCode: repeated[0], lastAt: repeated[1].at(-1)!.at,
-  };
-}
 
 /** 显著度阈值：≥0.75 立刻放下手上的事去想；≥0.5 边做边重新想一想；更低的只是“注意到了”，留给下一次思考 */
 export const URGENT = 0.75;
@@ -41,6 +20,7 @@ export class Attention {
   private pending: Noticing[] = [];
   private seenAt = new Map<string, number>();
   private last: Snapshot | null = null;
+  private loopSeenThrough = 0;
 
   /** 记一条注意到的事；同一件事在冷却时间内不重复提 */
   notice(key: string, what: string, salience: number, cooldownMs = 60_000, now = Date.now()): Noticing | null {
@@ -145,17 +125,31 @@ export class Attention {
   }
 
   fromLoop(records: ActivityEnd[], here: ActivityEnd['pos'], now = Date.now()): Noticing | null {
-    const stuck = stuckHere(records, here, now);
-    if (!stuck) return null;
-    // 同一带、同一种失败只提醒一次（冷却几分钟），否则每多失败一次就逼着重新深想一遍
-    return this.notice(`loop:${stuck.failureCode}`,
-      `在 (${Math.round(here.x)},${Math.round(here.y)},${Math.round(here.z)}) 一带已卡住 ${stuck.minutes} 现实分钟，试过：${stuck.tried.join('、')}；需要换完全不同的思路`,
-      0.8, 4 * 60_000, now);
+    // 完成一段活动后，先前的失败不再组成新的重复提醒；原始经历仍由心智保存。
+    const completedAt = records.filter((r) => r.outcome === 'done').reduce((at, r) => Math.max(at, r.at), 0);
+    if (completedAt > this.loopSeenThrough) {
+      this.resetLoop();
+      this.loopSeenThrough = completedAt;
+    }
+    const latest = records.at(-1);
+    if (!latest || latest.outcome !== 'stuck' || latest.at <= this.loopSeenThrough) return null;
+    const failures = records.filter((r) => r.outcome === 'stuck' && r.at > this.loopSeenThrough
+      && r.skill === latest.skill && r.failureCode === latest.failureCode
+      && now - r.at >= 0 && now - r.at <= EXPERIENCE_MS
+      && Math.hypot(r.pos.x - here.x, r.pos.y - here.y, r.pos.z - here.z) <= 8);
+    if (failures.length < 3 || !failures.includes(latest)) return null;
+    this.loopSeenThrough = latest.at;
+    // 只汇报这批新证据；时间流逝不等于继续失败，也不据此抢占动作或指定策略。
+    return this.notice(`loop:${latest.skill ?? 'activity'}:${latest.failureCode ?? 'STUCK'}`,
+      `附近新记录 ${failures.length} 次 ${latest.skill ?? '活动'} ${latest.failureCode ?? 'STUCK'} 失败；最近一次：${latest.summary}`,
+      0.45, 0, now);
   }
+
+  resetLoop() { this.loopSeenThrough = 0; this.pending = this.pending.filter((n) => !n.key.startsWith('loop:')); }
 
   /** 取走所有待处理的注意（交给思考），并返回其中最高的显著度 */
   drain(): Noticing[] { const out = this.pending; this.pending = []; return out; }
   peek(): Noticing[] { return [...this.pending]; }
   highest(): number { return this.pending.reduce((m, n) => Math.max(m, n.salience), 0); }
-  reset() { this.pending = []; this.last = null; }
+  reset() { this.pending = []; this.last = null; this.resetLoop(); }
 }

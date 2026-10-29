@@ -731,15 +731,92 @@ test('回想完全保留同一结论及做法时仍可合并成败记录', () =>
   assert.equal(first.signature, 'step');
 });
 
-test('打转提醒同一种失败只提一次，几分钟内不反复逼着深想', () => {
+test('附近失败提醒只报告新失败，等待冷却时间不会重复旧证据', () => {
   const att = new Attention();
   const here = { x: 0, y: 64, z: 0 };
   const now = Date.now();
-  const recs = [1, 2, 3].map((i) => ({ pos: here, outcome: 'stuck' as const, failureCode: 'PATH_NOT_FOUND', what: `试法${i}`, at: now - 60_000 + i * 1000 }));
-  assert.ok(att.fromLoop(recs, here, now));
-  recs.push({ pos: here, outcome: 'stuck', failureCode: 'PATH_NOT_FOUND', what: '试法4', at: now + 1000 });
+  const failure = (i: number) => ({ pos: here, outcome: 'stuck' as const, skill: 'step', failureCode: 'PATH_NOT_FOUND',
+    what: `迈上台阶 ${i}`, summary: `目标脚下是 air（尝试 ${i}）`, at: now - 4000 + i * 1000 });
+  const recs = [1, 2, 3].map(failure);
+  const timestamps = recs.map((r) => r.at);
+  const first = att.fromLoop(recs, here, now);
+  assert.ok(first);
+  assert.equal(first.level, 'note');
+  assert.equal(first.salience, 0.45);
+  assert.match(first.what, /3.*step.*PATH_NOT_FOUND|step.*PATH_NOT_FOUND.*3/);
+  assert.match(first.what, /目标脚下是 air/);
+  assert.doesNotMatch(first.what, /卡住.*分钟|换.*(思路|目标|办法)/);
+  att.drain();
+  recs.push(failure(4));
   assert.equal(att.fromLoop(recs, here, now + 2000), null);
-  assert.ok(att.fromLoop(recs, here, now + 5 * 60_000));
+  assert.equal(att.fromLoop(recs, here, now + 5 * 60_000), null, '同一批失败不会在四分钟后重新报警');
+  recs.push(failure(5));
+  assert.equal(att.fromLoop(recs, here, now + 5 * 60_000), null);
+  recs.push(failure(6));
+  assert.ok(att.fromLoop(recs, here, now + 5 * 60_000), '再有三次新失败才形成下一批');
+  assert.deepEqual(recs.slice(0, 3).map((r) => r.at), timestamps, '保留真实失败时间戳');
+});
+
+for (const boundary of ['pause', 'disconnect'] as const) test(`停止在线观察后旧失败不会再次报警：${boundary}`, async (t) => {
+  let now = 1_700_000_000_000;
+  t.mock.method(Date, 'now', () => now);
+  const w = fixture(t);
+  await w.tick();
+  const records = [1, 2, 3].map((i) => ({ pos: { ...w.adapter.pos }, outcome: 'stuck' as const, skill: 'step',
+    failureCode: 'PATH_NOT_FOUND', what: '迈上台阶', summary: '目标脚下是 air', at: now - 4000 + i * 1000 }));
+  Reflect.set(w.mind, 'recentEnds', records);
+  assert.ok(w.mind.attention.fromLoop(records, w.adapter.pos, now));
+  if (boundary === 'pause') w.mind.pause();
+  else { w.adapter.connected = false; w.mind.onDisconnected(); }
+  assert.deepEqual(Reflect.get(w.mind, 'recentEnds'), []);
+  assert.ok(w.mind.attention.peek().every((n) => !n.key.startsWith('loop:')));
+  now += 5 * 60_000;
+  if (boundary === 'pause') w.mind.resume();
+  else w.adapter.connected = true;
+  await w.tick();
+  assert.ok(w.bus.recent().every((e) => e.type !== 'notice' || !/附近.*失败|一带.*卡住/.test(e.msg)));
+});
+
+test('每轮思考保留实际失败详情，不再推断持续卡住或强制换目标', async (t) => {
+  let now = 1_700_000_000_000;
+  t.mock.method(Date, 'now', () => now);
+  const w = fixture(t), state = w.adapter.state();
+  const records = [1, 2, 3].map((i) => ({ pos: { ...state.pos }, outcome: 'stuck' as const, skill: 'step',
+    failureCode: 'PATH_NOT_FOUND', what: '迈上台阶', summary: '目标脚下是 air', at: now - 4000 + i * 1000 }));
+  Reflect.set(w.mind, 'recentEnds', records);
+  Reflect.set(w.mind, 'recentActionFailures', [{ step: { skill: 'step', args: { at: [1, 1, 0] } }, code: 'PATH_NOT_FOUND',
+    summary: '目标脚下是 air', pos: { ...state.pos }, worldId: state.worldId, sessionId: state.sessionId, dim: state.dim, at: records[2].at }]);
+  await w.tick();
+  const original = w.pending[0].messages.map((m) => m.content).join('\n');
+  assert.match(original, /recent_action_failures/);
+  assert.match(original, /目标脚下是 air/);
+  assert.match(original, /"at":\[1,1,0\]/);
+  assert.match(original, /observed_at/);
+  assert.doesNotMatch(original, /stuck_here|必须换完全不同|别碰 repeated_failures|换区域、换目标|一带已经卡了/);
+  await w.reply(0, { decision: 'new', activity: { what: '继续观察入口', steps: [step()] } });
+  now += 5 * 60_000;
+  w.mind.replan();
+  await w.tick();
+  const again = w.pending.at(-1)!.messages.map((m) => m.content).join('\n');
+  assert.doesNotMatch(again, /stuck_here|必须换完全不同|别碰 repeated_failures|换区域、换目标|一带已经卡了/);
+  const notices = w.bus.recent().filter((e) => e.type === 'notice' && /附近.*失败/.test(e.msg));
+  assert.equal(notices.length, 1, '每轮思考没有绕开事件去重再次提醒');
+});
+
+test('活动完成时立即撤掉旧失败提醒，不等下一次感知', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { decision: 'new', activity: { what: '走上台阶', steps: [step()] } });
+  await w.tick();
+  const now = Date.now();
+  const records = [1, 2, 3].map((i) => ({ pos: { ...w.adapter.pos }, outcome: 'stuck' as const, skill: 'step',
+    failureCode: 'PATH_NOT_FOUND', what: '迈上台阶', summary: '目标脚下是 air', at: now - 4000 + i * 1000 }));
+  Reflect.set(w.mind, 'recentEnds', records);
+  assert.ok(w.mind.attention.fromLoop(records, w.adapter.pos, now));
+  await w.finish(ok('已走上台阶'));
+  assert.ok(w.mind.attention.peek().every((n) => !n.key.startsWith('loop:')));
+  assert.equal(w.self.history(1)[0].outcome, 'done');
+  assert.equal(w.mind.attention.fromLoop(Reflect.get(w.mind, 'recentEnds'), w.adapter.pos, now + 5 * 60_000), null);
 });
 
 test('歇下来时在后台回想，整理窍门、写日记，不打断手上的事', async (t) => {

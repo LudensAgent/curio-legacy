@@ -12,7 +12,7 @@ import { describeBuild, homeOf, myBuilds } from './home.ts';
 import { FACILITY_LABELS, myFacilities } from './facilities.ts';
 import { activeDrafts } from '../building/drafts.ts';
 import { cleanLesson, moodWords, type SelfModel } from './self.ts';
-import type { Activity, ActivityRecord, Noticing, StuckHere } from './types.ts';
+import type { Activity, ActivityRecord, Noticing } from './types.ts';
 import type { FocusPlan } from './self.ts';
 import { RECALL_LABEL, type Recalled } from './recall.ts';
 import { foodNote } from '../skills/food.ts';
@@ -52,7 +52,6 @@ export interface MindContext {
   skills?: string[];
   /** 游戏自己的系统消息（死亡播报、成就、公告），原话 */
   gameMessages?: string[];
-  stuckHere?: StuckHere | null;
   repeatedFailures?: string[];
   /** 动作结束时实际观察到的失败；地形可能随后改变。 */
   recentActionFailures?: { skill: string; args: unknown; failure_code: string | null; summary: string; position: AgentState['pos']; observed_at: string }[];
@@ -171,7 +170,7 @@ const CHOOSE = `【选动作】
 const PRINCIPLES = `【原则】
 - 接着刚才的念头往下想，不反复换主意、不重复刚做完的事。
 - 一段活（如“砍 20 根木头”）：routine 1–6 步，可 repeat，done_when 写清何时收工；身体连续执行、自己应变，真卡住才叫你。
-- 从真实结果里学：出乎意料才写 learned；连续失败就换办法；有 stuck_here 必须换完全不同的思路，别碰 repeated_failures。
+- 从真实结果里学，出乎意料才写 learned；历史失败只作参考，继续、重试或调整由你决定。
 - 你会被风景吸引、想把家弄得舒服好看：喜欢的写 liked，想做的放 agenda。情绪是信号：累了歇、烦了换办法、腻了找新鲜事。
 - 只知道亲眼看到或记得的东西，坐标来自观察或地标，不编。
 - 遇到危险如何行动由你或你写下的技能决定；插火把、顺手吃、捡东西要你自己做，或用 habits 定成习惯。`;
@@ -271,7 +270,6 @@ export function situationalReminders(ctx: MindContext): string[] {
     const f = ctx.learnFrom;
     out.push(`刚才「${f.stuck.what}」卡住了（${f.stuck.why.slice(0, 50)}${f.stuck.skill ? `，失败的是 ${f.stuck.skill}${f.stuck.code ? ` ${f.stuck.code}` : ''}` : ''}），随后「${f.solved.what}」做成了（${f.solved.routine.slice(0, 4).join('；')}）：以后还会碰到的话，写 worth_learning 说清怎么回事，后台会把它练成技能`);
   }
-  if (ctx.stuckHere) out.push(`你在这一带已经卡了 ${ctx.stuckHere.minutes} 现实分钟：换一个和 tried 完全不同的办法（换区域、换目标、就地安家都行）`);
   const focusItem = ctx.self.activeAgenda();
   if (focusItem && !ctx.plan && ctx.tier === 'deliberate') out.push(`主目标「${focusItem.text}」还没有清单：写 "plan":{"focus":"${focusItem.id}","steps":[…3–6 项]}，之后一项项推进`);
   const exits = Object.values(p.self.exits ?? {});
@@ -548,7 +546,6 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       current_activity: ctx.activity ? describeActivity(ctx.activity, s, p) : null,
       ...(ctx.suspended.length ? { will_resume_after: ctx.suspended.map((a) => a.what) } : {}),
       ...(ctx.designing ? { architect_drawing: `${ctx.designing.brief.slice(0, 60)}（${ctx.designing.minutes} 现实分钟了）` } : {}),
-      ...(ctx.stuckHere ? { stuck_here: { real_minutes: ctx.stuckHere.minutes, tried: ctx.stuckHere.tried } } : {}),
       ...(ctx.repeatedFailures?.length ? { repeated_failures: ctx.repeatedFailures } : {}),
       ...(ctx.notes.length ? { last_decision_corrections: ctx.notes } : {}),
     }],

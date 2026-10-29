@@ -1,6 +1,7 @@
 import type { AgentState } from '../adapter/types.ts';
 import type { Step } from '../arbiter/arbiter.ts';
 import type { Percept } from '../perception/perception.ts';
+import { feetCell } from '../perception/local.ts';
 import { evaluateCondition } from '../projects/conditions.ts';
 import { SKILLS } from '../skills/index.ts';
 import type { SkillResult } from '../skills/types.ts';
@@ -125,21 +126,30 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   const baseline = previous?.pos ? previous : a.stepStart;
   const changed = !!baseline && (!!baseline.pos && Math.hypot(state.pos.x - baseline.pos.x, state.pos.y - baseline.pos.y, state.pos.z - baseline.pos.z) >= 0.5 ||
     baseline.view !== undefined && view !== undefined && baseline.view !== view);
+  const previousPosition = a.results.at(-1)?.pos;
+  if (previousPosition && JSON.stringify(feetCell(previousPosition)) !== JSON.stringify(feetCell(state.pos))) delete a.airDigs;
   a.results.push({ skill: step.skill, args: step.args, status: result.status, failureCode: result.failureCode, summary: result.summary.slice(0, 160), at: Date.now(), durationMs, pos: { ...state.pos }, ...(view !== undefined ? { view } : {}) });
   if (a.results.length > 16) a.results = a.results.slice(-16);
   if (result.status === 'succeeded') {
     a.consecutiveFailures = 0;
-    // 同一个 dig_at 一轮又一轮都挖到空气：照样“成功”，但这一步什么都没做——routine 多半没按设想的形状在挖
-    // （想挖阶梯往上，[前,上,右] 却写成了一直在平地上走）。说给心智听，由它改步骤
+    // 真实挖掘、放置或跨格移动是执行进展，不能沿用之前的空挖计数。
+    if (step.skill === 'place_at' && result.data?.placed
+      || step.skill === 'dig_at' && result.data?.was && result.data.was !== 'air'
+      || step.skill === 'dig' && (result.data?.dug as string[] | undefined)?.length) delete a.airDigs;
+    // 相对坐标会随身体移动；只统计同一实际目标格的重复空挖。
     if (step.skill === 'dig_at') {
       const key = JSON.stringify(step.args ?? {});
-      const air = (result.data as any)?.was === 'air';
+      const air = result.data?.was === 'air';
+      const target = result.data?.targetCell as AgentState['pos'] | undefined;
       a.airDigs ??= {};
-      if (air) a.airDigs[key] = (a.airDigs[key] ?? 0) + 1; else delete a.airDigs[key];
-      if (air && a.airDigs[key] >= 3) {
-        const at = (step.args as any)?.at;
-        return { kind: 'stuck', why: `dig_at ${Array.isArray(at) ? `[${at}]` : key} 连着 ${a.airDigs[key]} 轮挖到的都是空气，这一步什么都没做：按现在的步骤，身体没在挖你想挖的那几格；看看 [前,上,右] 写得对不对（往上挖阶梯是 dig_at [0,2,0]、[1,1,0]、[1,2,0] 再 step [1,1,0]）` };
+      if (air && target) {
+        const previous = a.airDigs[key];
+        const same = previous && previous.target.x === target.x && previous.target.y === target.y && previous.target.z === target.z;
+        const count = same ? previous.count + 1 : 1;
+        a.airDigs[key] = { target: { ...target }, count };
+        if (count >= 3) return { kind: 'stuck', why: `dig_at 连续 ${count} 次确认目标格 (${target.x},${target.y},${target.z}) 是空气，这几次未在该格发生挖掘` };
       }
+      else delete a.airDigs[key];
     }
     const reached = conditionReached();
     if (reached) return reached;
