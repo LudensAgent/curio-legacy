@@ -4,6 +4,12 @@ import { efficiencyInsights } from '../src/brain/efficiency.ts';
 import { computeDrives, observedNeeds } from '../src/brain/drives.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import type { Percept } from '../src/perception/perception.ts';
+import { buildMindMessages } from '../src/mind/prompt.ts';
+import { SelfModel } from '../src/mind/self.ts';
+import { Perception } from '../src/perception/perception.ts';
+import { Vision } from '../src/perception/vision.ts';
+import { EventBus } from '../src/events.ts';
+import { FakeAdapter } from './fake-adapter.ts';
 
 // 只实现 digTimeEstimate 的适配器存根：挖圆石，空手 7.5s、木镐 1.5s、石镐 0.75s、铁镐 0.5s、钻石镐 0.3s
 const adapter = {
@@ -96,4 +102,26 @@ test('observedNeeds：effort 事实带上更快/更省的替代与稀缺度（�
   assert.match(facts, /iron_pickaxe.*慢 70%/);
   assert.match(facts, /钻石/);
   assert.match(facts, /3 个/);
+});
+
+test('提示词：身体段带上挖矿的双面权衡事实（dig_effort）', async () => {
+  const adapter = new FakeAdapter();
+  adapter.inv.set('diamond', 3);
+  adapter.inv.set('diamond_pickaxe', 1);
+  adapter.inv.set('iron_pickaxe', 1);
+  const memory = new WorldMemory(null);
+  const perception = new Perception(adapter, memory, new EventBus(), new Vision(adapter));
+  const p = perception.update();
+  p.efficiency = [{ block: 'cobblestone', mined: 6, avg_s: 0.3, tool: 'diamond_pickaxe',
+    better: [{ tool: 'netherite_pickaxe', est_s: 0.2, speedup: 1.5, have: false, materials: '3 下界合金锭' }],
+    cheaper: [{ tool: 'iron_pickaxe', est_s: 0.5, slowdown: 1.7, savesItem: 'diamond', savesZh: '钻石', have: true }] }];
+  const ctx = { reason: '测试', percept: p, state: adapter.state(), self: new SelfModel(null), memory, activity: null, suspended: [], lastRecord: null,
+    noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', skills: [], tier: 'deliberate' };
+  const [, user] = buildMindMessages(ctx as any);
+  const body = JSON.stringify(user.content);
+  assert.match(body, /dig_effort/);
+  assert.match(body, /netherite_pickaxe.*快 1.5 倍/);
+  assert.match(body, /iron_pickaxe.*慢 70%/);
+  assert.match(body, /钻石/);
+  assert.match(body, /3 个/);
 });
