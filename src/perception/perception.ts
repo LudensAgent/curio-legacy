@@ -8,7 +8,7 @@ import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { dist3, effectiveLight, round1, lightAround } from '../util.ts';
 import { torchCount } from '../skills/light.ts';
-import { interactiveName, NOTABLE, type Vision, type VisionSummary } from './vision.ts';
+import { interactiveName, INTERACTIVE_BLOCKS, NOTABLE, type Vision, type VisionSummary } from './vision.ts';
 import { computeDrives, type Drive, type Stock } from '../brain/drives.ts';
 import { PassageTracker } from '../memory/passages.ts';
 import { isResourceBlock, oreKind } from '../memory/ore-spots.ts';
@@ -23,6 +23,12 @@ export const DIRS: Record<string, [number, number]> = {
 
 const DANGER = new Set(['lava', 'spawner']);
 const STRUCTURE_HINT = new Set(['chest', 'bell', 'hay_block', 'spawner', 'furnace']);
+/** 功能方块地标的标签（'工作台' 或 '我的工作台'）：拆掉/消失后也要从记忆里清掉 */
+const INTERACTIVE_LABELS = new Set(Object.values(INTERACTIVE_BLOCKS));
+const stationLabel = (label: string): string | undefined => {
+  const zh = label.startsWith('我的') ? label.slice(2) : label;
+  return INTERACTIVE_LABELS.has(zh) ? zh : undefined;
+};
 
 export interface Percept {
   ts: number;
@@ -422,7 +428,7 @@ export class Perception {
     // 记着的矿点、岩浆这类危险点：走近了、亲眼看那一格（视线真的够得着）已经不是它了——
     // 岩浆被水浇成了黑曜石、被舀走、矿被挖了——就忘掉，免得一直惦记一处早就没了的东西
     const watched = this.memory.landmarks().filter((l) => l.dim === s.dim && (l.kind === 'resource' ? isResourceBlock(l.label)
-      : l.kind === 'danger' ? DANGER.has(l.label) : isContainerLandmark(l.label))
+      : l.kind === 'danger' ? DANGER.has(l.label) : isContainerLandmark(l.label) || stationLabel(l.label) !== undefined)
       && Math.hypot(l.pos.x - s.pos.x, l.pos.y - s.pos.y, l.pos.z - s.pos.z) <= this.vision.effectiveRange());
     const boxes = this.memory.chests(s.dim).filter((c) => !watched.some((l) => dist3(l.pos, c.pos) < .1)
       && dist3(c.pos, s.pos) <= this.vision.effectiveRange());
@@ -440,6 +446,14 @@ export class Perception {
           this.memory.removeLandmark(l.id);
           this.memory.forgetChest(s.dim, l.pos);
           this.memory.markGone(l.label, s.dim, l.pos, now);
+        }
+        continue;
+      }
+      const zh = stationLabel(l.label);
+      if (zh !== undefined) {
+        if (now && interactiveName(now) !== zh) {
+          this.memory.removeLandmark(l.id);
+          this.memory.markGone(l.label, l.dim, l.pos, now);
         }
         continue;
       }
