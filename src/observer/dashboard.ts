@@ -35,6 +35,12 @@ export interface DashboardHandlers {
   dawn?(): Promise<{ ok: boolean; error?: string }>;
   /** 手动整理技能，运行中返回 busy，完成后返回可读结果。 */
   curateSkills?(): Promise<{ ok: true; result: string } | { ok: false; error: string; busy?: boolean }>;
+  /** 列出当前技能（内置 + 自学）与禁用状态 */
+  listSkills?(): { name: string; kind: 'builtin' | 'self'; disabled: boolean; retired?: string; description?: string; version?: number; candidate?: boolean }[];
+  /** 禁用/启用一个技能，作用到运行进程并持久化 */
+  setSkill?(name: string, disabled: boolean): { ok: boolean; error?: string };
+  /** 删除一个自学技能（内置技能只能禁用，不能删除） */
+  deleteSkill?(name: string): { ok: boolean; error?: string };
   /** 切换自动旁观（附着到 Bot / 自由旁观） */
   spectate?(on: boolean): Promise<unknown> | unknown;
   /** 弹幕存档：?dates=1 列出有存档的日期；否则按 date / q / questions / blocked / limit 查询 */
@@ -201,6 +207,10 @@ export function startDashboard(
       if (!h.danmaku) return send(res, 404, '{"error":"not supported"}');
       return send(res, 200, JSON.stringify(h.danmaku(url.searchParams)));
     }
+    if (req.method === 'GET' && p === '/api/skills') {
+      if (!h.listSkills) return send(res, 404, '{"error":"not supported"}');
+      return send(res, 200, JSON.stringify(h.listSkills()));
+    }
     if (req.method === 'POST') {
       if (p === '/api/pause') { h.pause(); return send(res, 200, '{"ok":true}'); }
       if (p === '/api/resume') { h.resume(); return send(res, 200, '{"ok":true}'); }
@@ -210,6 +220,20 @@ export function startDashboard(
         try {
           const result = await h.curateSkills();
           return send(res, result.ok ? 200 : result.busy ? 409 : 500, JSON.stringify(result));
+        } catch (error) {
+          return send(res, 500, JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+        }
+      }
+      if (p === '/api/skills/disable' || p === '/api/skills/enable' || p === '/api/skills/delete') {
+        if (!h.setSkill) return send(res, 404, '{"ok":false,"error":"当前运行不支持单独禁用技能"}');
+        const body = await readBody(req);
+        const name = String(body?.name ?? '').trim();
+        if (!name) return send(res, 400, '{"ok":false,"error":"name 不能为空"}');
+        try {
+          const r = p.endsWith('/disable') ? h.setSkill(name, true)
+            : p.endsWith('/enable') ? h.setSkill(name, false)
+              : h.deleteSkill ? h.deleteSkill(name) : { ok: false, error: '当前运行不支持删除技能' };
+          return send(res, r.ok ? 200 : 400, JSON.stringify(r));
         } catch (error) {
           return send(res, 500, JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }));
         }

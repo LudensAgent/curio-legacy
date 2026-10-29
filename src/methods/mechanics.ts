@@ -1,4 +1,5 @@
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
+import { isSkillDisabled } from '../skills/disabled.ts';
 
 // These are general operations exposed by the current registry, not recipes
 // for situations. Specialized workflows remain searchable as composites.
@@ -45,7 +46,7 @@ export function queryMechanics(query: string, limit = 6) {
     ...(normalized.match(/[a-z0-9]+/g) ?? []).filter((word) => !STOP_WORDS.has(word)),
     ...(normalized.match(/[\p{Script=Han}]+/gu) ?? []).flatMap((word) => word.length === 1 ? [word] : Array.from({ length: word.length - 1 }, (_, i) => word.slice(i, i + 2))),
   ])];
-  const candidates = Object.values(SKILLS).filter((skill) => !LLM_HIDDEN.has(skill.name)).map((skill) => {
+  const candidates = Object.values(SKILLS).filter((skill) => !LLM_HIDDEN.has(skill.name) && !isSkillDisabled(skill.name)).map((skill) => {
     const order = PRIMITIVES.indexOf(skill.name), primitive = order >= 0;
     if (!normalized) return { skill, primitive, order, score: primitive ? 1 : 0 };
     const name = normalize(skill.name), args = normalize(skill.argsDoc), description = normalize(skill.description);

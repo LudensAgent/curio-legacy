@@ -386,7 +386,9 @@ export class BehaviorEngine {
       const busy = this.running(cur)?.name === name;
       if (now - a.at >= BehaviorEngine.AFTERMATH_MS && (!busy || now - a.at >= 120_000)) this.judge(name, false);
     }
-    const auto = this.list().filter((b) => b.mode === 'auto' && this.enabled(b));
+    // 救命类的候选也允许在要命条件下自动接手（事后按结果判定启用还是收起），其余候选仍只显式试用
+    const auto = this.list().filter((b) => b.mode === 'auto' && this.enabled(b))
+      .concat(this.list(true).filter((b) => b.mode === 'auto' && isEmergency(b) && !this.inactive(b.name)));
     if (!auto.length) return false;
     const running = this.running(cur);
     // 天生的躲闪正在进行（逃跑、上浮）时，只有更要紧的技能才插手
@@ -423,7 +425,7 @@ export class BehaviorEngine {
       const trigger = { hp: Math.round(s.state.hp * 10) / 10, food: s.state.food, doing: s.doing, hurtAgoMs: Number.isFinite(s.hurtAgoMs) ? s.hurtAgoMs : null, cover: s.cover,
         hostiles: s.hostiles.slice(0, 4).map((h) => ({ name: h.name, dist: Math.round(h.dist * 10) / 10, ...(h.fusing ? { fusing: true } : {}) })),
         offHand: s.state.equipment?.find((e) => e.slot === 'off-hand')?.name ?? null };
-      const r = this.arbiter.start({ skill: 'use_skill', args: { name: b.name, args: { trigger } } }, 'reflex');
+      const r = this.arbiter.start({ skill: 'use_skill', args: { name: b.name, ...(b.candidate ? { trial: true } : {}), args: { trigger } } }, 'reflex');
       if ('error' in r) { this.lastFired.set(b.name, now); continue; }
       this.aftermath.set(b.name, { taskId: r.id, behavior: b, hp: s.state.hp, at: now, pos: { ...s.state.pos }, nearest: Math.min(Infinity, ...s.hostiles.map((h) => h.dist)), ...(s.doing && cur && cur.source !== 'filler' ? { interrupted: s.doing } : {}), context: `触发时血 ${trigger.hp}${trigger.hostiles.length ? `，${trigger.hostiles.map((h) => `${h.name} ${h.dist}格`).join('、')}` : ''}，${trigger.cover === 'open' ? '在空地' : trigger.cover === 'pit' ? '在坑里' : '在封好的坑里'}${s.doing ? `，当时在做 ${s.doing}` : ''}${trigger.offHand ? `，副手拿着 ${trigger.offHand}` : ''}` });
       this.lastFired.set(b.name, now);
@@ -529,6 +531,15 @@ export class BehaviorEngine {
     if (!entry || entry.source !== 'self' || entry.behavior !== undefined || this.book?.candidate(name) || !this.inactive(name)) return false;
     this.touch(name, (st) => { st.disabled = false; st.restoredAt = Date.now(); delete st.retired; delete st.retiredAt; delete st.disabledAt; });
     this.bus.publish('skill_restored', 'P2', `恢复文字技能 ${name}；只恢复阅读目录，不代表已验证做法`, { name, knowledge: true });
+    return true;
+  }
+
+  /** 控制台恢复一个被手动禁用的自学技能（行为或文字记录都行，取消 disabled/retired）。 */
+  restore(name: string): boolean {
+    const entry = this.book?.get(name);
+    if (!entry || entry.source !== 'self' || !this.inactive(name)) return false;
+    this.touch(name, (st) => { st.disabled = false; st.restoredAt = Date.now(); delete st.retired; delete st.retiredAt; delete st.disabledAt; });
+    this.bus.publish('skill_restored', 'P2', `控制台恢复技能 ${name}`, { name });
     return true;
   }
 

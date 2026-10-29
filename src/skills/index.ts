@@ -28,6 +28,7 @@ import { descend } from './descent.ts';
 import { assessLandings } from './landing.ts';
 import { useSkill } from './use-skill.ts';
 import { editBook, signText } from './text.ts';
+import { isSkillDisabled } from './disabled.ts';
 
 /** 技能白名单：LLM 只能从这里选择技能，参数必须通过各自的 validate。 */
 export const SKILLS: Record<string, Skill> = Object.fromEntries(
@@ -40,7 +41,7 @@ export const LLM_HIDDEN = new Set(['unstuck', 'glance', 'wander']);
 
 export function skillCatalog(): string {
   return Object.values(SKILLS)
-    .filter((s) => !LLM_HIDDEN.has(s.name))
+    .filter((s) => !LLM_HIDDEN.has(s.name) && !isSkillDisabled(s.name))
     .map((s) => `- ${s.name} ${s.argsDoc}：${s.description}`)
     .join('\n');
 }

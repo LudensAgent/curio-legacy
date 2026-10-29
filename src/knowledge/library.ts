@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
+import { isSkillDisabled } from '../skills/disabled.ts';
 
 type KnowledgeDocument = {
   id: string;
@@ -95,7 +96,7 @@ export class KnowledgeBase {
       aliases: ['操作', '接口', '动作', '身体', '工具参数', 'controls', 'mineflayer', 'mineflyer'],
       sources: [{ url: 'repo:src/skills/index.ts', title: '当前注册技能接口' }],
       versionNote: '按当前注册接口生成，包含基础操作和已有复合动作；接口存在不代表 Agent 已学会对应策略。moves/mechanics 可继续查询参数，recipes 可查结构化配方。',
-      sections: Object.values(SKILLS).filter((skill) => !LLM_HIDDEN.has(skill.name)).map((skill) => ({ id: skill.name, title: skill.name,
+      sections: Object.values(SKILLS).filter((skill) => !LLM_HIDDEN.has(skill.name) && !isSkillDisabled(skill.name)).map((skill) => ({ id: skill.name, title: skill.name,
         text: `${skill.description}\n参数：${skill.argsDoc}\n移动型：${skill.movement ? '是' : '否'}；只读：${skill.readOnly === true ? '是' : '否'}；时限：${skill.timeoutMs} 毫秒。` })) };
     const documents = [...this.documents.filter((document) => document.versions.includes(this.version)), controls];
     const offset = Number(input.offset ?? 0);

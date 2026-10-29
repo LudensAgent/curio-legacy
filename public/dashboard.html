@@ -507,6 +507,15 @@
 
     <section class="pane" id="pane-skills">
       <div class="card">
+        <details id="skillAdmin" style="margin-bottom:10px">
+          <summary>技能开关：禁用 / 启用 / 删除（内置技能只能禁用；自学技能可删文件）</summary>
+          <div class="row" style="gap:6px;margin:6px 0">
+            <input id="skillAdminSearch" placeholder="按名筛选，例如 boat / store_items" style="flex:1">
+            <button id="skillAdminRefresh" type="button">刷新</button>
+          </div>
+          <div id="skillAdminResult" class="skill-curate-result dim" role="status" hidden></div>
+          <table><thead><tr><th>技能</th><th>类型</th><th>状态</th><th>操作</th></tr></thead><tbody id="skillAdminRows"></tbody></table>
+        </details>
         <h2>会动手的技能 <span class="r dim">候选试用通过后启用</span><button id="curateSkillsBtn" type="button">整理技能</button></h2>
         <div id="curateSkillsResult" class="skill-curate-result dim" role="status" aria-live="polite" hidden></div>
         <div id="improving"></div>
@@ -904,6 +913,60 @@ $('curateSkillsBtn').addEventListener('click', async () => {
     renderCurateButton();
   }
 });
+// 技能开关：禁用 / 启用 / 删除（内置技能只能禁用；自学技能可删文件）
+let skillAdminList = [];
+function renderSkillAdmin() {
+  const q = ($('skillAdminSearch').value || '').trim().toLowerCase();
+  const rows = skillAdminList.filter((s) => !q || s.name.includes(q));
+  $('skillAdminRows').innerHTML = rows.length ? rows.map((s) => {
+    const state = s.disabled ? (s.retired ? '已收起' : '已禁用') : (s.candidate ? '候选' : '可用');
+    const kind = s.kind === 'builtin' ? '内置' : '自学';
+    return `<tr><td><b class="mono">${esc(s.name)}</b></td>`
+      + `<td><span class="badge ${s.kind === 'builtin' ? 'info' : 'good'}">${kind}</span></td>`
+      + `<td><span class="badge ${s.disabled ? 'bad' : ''}">${state}</span></td>`
+      + `<td><button data-skill="${esc(s.name)}" data-action="${s.disabled ? 'enable' : 'disable'}">${s.disabled ? '启用' : '禁用'}</button>`
+      + (s.kind === 'self' ? ` <button data-skill="${esc(s.name)}" data-action="delete">删除</button>` : '') + '</td></tr>';
+  }).join('') : '<tr><td colspan="4" class="empty">没有匹配的技能</td></tr>';
+}
+async function loadSkillAdmin() {
+  const result = $('skillAdminResult');
+  try {
+    const response = await fetch('/api/skills');
+    skillAdminList = await response.json();
+    renderSkillAdmin();
+    result.hidden = true;
+  } catch (error) {
+    result.hidden = false;
+    result.className = 'skill-curate-result error';
+    result.textContent = `读取技能失败：${error.message}`;
+  }
+}
+async function setSkill(name, action) {
+  const result = $('skillAdminResult');
+  const zh = { disable: '禁用', enable: '启用', delete: '删除' }[action] ?? action;
+  result.hidden = false;
+  result.className = 'skill-curate-result dim';
+  result.textContent = `正在${zh} ${name}…`;
+  try {
+    const response = await fetch(`/api/skills/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name }) });
+    const r = await response.json();
+    result.textContent = r.ok ? `已${zh} ${name}` : r.error || `${zh}失败`;
+    result.className = 'skill-curate-result' + (r.ok ? '' : ' error');
+    await loadSkillAdmin();
+  } catch (error) {
+    result.textContent = `${zh}失败：${error.message}`;
+    result.className = 'skill-curate-result error';
+  }
+}
+$('skillAdminRefresh').addEventListener('click', loadSkillAdmin);
+$('skillAdminSearch').addEventListener('input', renderSkillAdmin);
+$('skillAdminRows').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-skill]');
+  if (!btn) return;
+  setSkill(btn.dataset.skill, btn.dataset.action);
+});
+$('skillAdmin').addEventListener('toggle', () => { if ($('skillAdmin').open && !skillAdminList.length) loadSkillAdmin(); });
+
 $('skillFilter').addEventListener('click', (e) => {
   const v = e.target.closest('button[data-view]')?.dataset.view;
   if (!v) return;

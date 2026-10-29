@@ -3,6 +3,7 @@ import type { GameAdapter } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { SKILLS } from '../skills/index.ts';
+import { isSkillDisabled } from '../skills/disabled.ts';
 import { runSkill, validateSkill, type FailureCode, type Senses, type SkillResult } from '../skills/types.ts';
 import { AbortedError, shortId } from '../util.ts';
 import { availableInventoryFor, craftReservationConflict, reservationsFor } from '../projects/reservations.ts';
@@ -99,6 +100,7 @@ export class Arbiter extends EventEmitter {
   validate(step: Step): { ok: true; args: unknown } | { ok: false; error: string } {
     const skill = SKILLS[step.skill];
     if (!skill) return { ok: false, error: `未知技能：${step.skill}` };
+    if (isSkillDisabled(skill.name)) return { ok: false, error: `技能 ${step.skill} 已在控制台禁用；请启用或改用其他技能` };
     return validateSkill(skill, step.args ?? {}, this.adapter);
   }
 

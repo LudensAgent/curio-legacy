@@ -1,4 +1,4 @@
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { startStallProfiler } from './observer/stall-profiler.ts';
 import { runtime } from './runtime.ts';
@@ -38,6 +38,7 @@ import { ControlKnowledge } from './methods/controls.ts';
 import { RecipeBook } from './methods/recipes.ts';
 import { createMethodSkills } from './methods/skills.ts';
 import { SKILLS } from './skills/index.ts';
+import { disabledSkills, isSkillDisabled, loadDisabledSkills, setSkillDisabled } from './skills/disabled.ts';
 import { travelStore } from './travel/store.ts';
 import { ActionChat } from './observer/action-chat.ts';
 import { startDashboard } from './observer/dashboard.ts';
@@ -573,6 +574,7 @@ reflex.start();
 spectator.start();
 metrics.start();
 live?.start();
+loadDisabledSkills(config.dataDir);
 const dashboard = startDashboard(config.dashboard.host, config.dashboard.port, bus, {
   snapshot,
   danmaku: (q) => q.get('dates') === '1' ? { dates: danmakuLog.dates() } : danmakuLog.query({
@@ -590,6 +592,23 @@ const dashboard = startDashboard(config.dashboard.host, config.dashboard.port, b
     if (curator.busy) return { ok: false, busy: true, error: '正在整理技能，请等待本次完成' };
     const result = await curator.check(Date.now(), { force: true });
     return result === null ? { ok: false, error: curator.history.at(-1)?.result ?? '技能整理未完成，请查看运行日志' } : { ok: true, result };
+  },
+  listSkills: () => [
+    ...Object.values(SKILLS).map((s) => ({ name: s.name, kind: 'builtin' as const, disabled: isSkillDisabled(s.name), description: s.description.slice(0, 80) })),
+    ...behaviors.list().map((b) => { const st = behaviors.statsOf(b.name); return { name: b.name, kind: 'self' as const, disabled: !!st?.disabled || !!st?.retired, retired: st?.retired, description: b.description?.slice(0, 80), version: b.version, candidate: b.candidate }; }),
+  ].sort((a, b) => a.name.localeCompare(b.name)),
+  setSkill: (name, disabled) => {
+    if (SKILLS[name]) { setSkillDisabled(name, disabled); return { ok: true }; }
+    if (!behaviors.get(name)) return { ok: false, error: `未知技能：${name}` };
+    if (disabled) { behaviors.retire(name, '控制台手动禁用'); return { ok: true }; }
+    return behaviors.restore(name) ? { ok: true } : { ok: false, error: `${name} 当前未禁用` };
+  },
+  deleteSkill: (name) => {
+    if (SKILLS[name]) { setSkillDisabled(name, true); return { ok: true }; }
+    if (!behaviors.get(name)) return { ok: false, error: `没有可删除的自学技能 ${name}` };
+    behaviors.retire(name, '控制台删除');
+    try { rmSync(path.join(config.dataDir, 'skills', name), { recursive: true, force: true }); } catch (e) { return { ok: false, error: `删除文件失败：${(e as Error).message}` }; }
+    return { ok: true };
   },
 }, feed ? [createObserverHandler(feed)] : [], { llmTrace, mcVersion: config.mc.version, env: { file: envFile, backupDir: path.join(config.dataDir, 'env-backups') } });
 installSkillRestoreRequest(dashboard, behaviors, bus, path.join(config.dataDir, 'skill-restore-request.json'));
