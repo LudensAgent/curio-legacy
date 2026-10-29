@@ -606,7 +606,7 @@ async function rescue(): Promise<{ ok: boolean; error?: string; to?: SurfaceSpot
   if (s.dim !== 'overworld') return { ok: false, error: `现在在 ${s.dim}，那里没有地表，紧急救援只支持主世界` };
   const from = { x: Math.round(s.pos.x * 10) / 10, y: Math.round(s.pos.y * 10) / 10, z: Math.round(s.pos.z * 10) / 10 };
   const spot = findSurfaceSpot((p) => adapter.blockAt(p), s.pos);
-  if (!spot) return { ok: false, error: '周围 32 格内没找到露天平地（可能区块没加载，或全是水面/树冠）', from };
+  if (!spot) return { ok: false, error: '周围 80 格内没找到露天平地（可能区块没加载，或全是水面/树冠）', from };
   rescuing = true;
   try {
     arbiter.cancel('紧急救援');

@@ -35,7 +35,7 @@ function groundY(blockAt: BlockAt, x: number, z: number, top: number, bottom: nu
  * 一圈一圈往外找，同一圈里挑高度和现在最接近的。只适用于有天空的维度（主世界）。
  */
 export function findSurfaceSpot(blockAt: BlockAt, from: Vec3Like, opts: { radius?: number; top?: number; bottom?: number } = {}): SurfaceSpot | null {
-  const radius = opts.radius ?? 32, top = opts.top ?? 319, bottom = opts.bottom ?? -63;
+  const radius = opts.radius ?? 80, top = opts.top ?? 319, bottom = opts.bottom ?? -63;
   const fx = Math.floor(from.x), fz = Math.floor(from.z);
   const cache = new Map<string, { y: number; name: string } | null>();
   const ground = (x: number, z: number) => {
