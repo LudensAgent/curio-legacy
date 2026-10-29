@@ -34,8 +34,8 @@ test('通道：挖台阶下去、横着推一段，记下入口、最深处、�
   tr.observe({ worldId: W, dim: D, pos: at(36, 50, 0), place: 'surface' }, [], t + 9000);
   const [p] = m.passages(D);
   assert.equal(p.id, 'p1');
-  // 下去的口和挖上来冒出地表的口都是入口
-  assert.deepEqual(p.entrances, [at(0, 64, 0), at(36, 50, 0)]);
+  // 下去的口是亲手挖开的那一格，挖上来冒出地表的口（这次没挖开）仍记站的位置
+  assert.deepEqual(p.entrances, [at(1, 64, 0), at(36, 50, 0)]);
   assert.equal(p.deepestY, 40);
   assert.equal(p.ores.iron_ore, 1);
   assert.ok(p.dug >= 30);
@@ -86,16 +86,16 @@ test('我的设施：通道说明历史位置和未知的当前通路；箱子�
   m.setChest(D, at(2, 64, 2), [{ name: 'oak_sapling', count: 4 }, { name: 'string', count: 2 }, { name: 'spider_eye', count: 1 }, { name: 'dirt', count: 3 }, { name: 'sand', count: 5 }, { name: 'sandstone', count: 1 }, { name: 'iron_ingot', count: 1 }, { name: 'cobblestone', count: 344 }]);
   const list = myFacilities(m, { worldId: W, dim: D, pos: at(10, 64, 0) });
   const tunnel = list.find((f) => f.kind === 'passage')!;
-  assert.match(tunnel.text, /进出地下时记录的位置 \(0,64,0\)（不一定是开口）（水平 10 格外），曾到达最低 y40，历史脚点较多的高度有 y40，挖到过 iron_ore×1/);
-  assert.match(tunnel.text, /历史路线附近记得有床.*当前开口位置和路线是否可通尚未确认/);
-  assert.doesNotMatch(tunnel.text, /能走到|入口/);
+  assert.match(tunnel.text, /入口 \(1,64,0\)（水平 9 格外），曾到达最低 y40，历史脚点较多的高度有 y40，挖到过 iron_ore×1/);
+  assert.match(tunnel.text, /历史路线附近记得有床.*洞口可能被堵或地形变了，走到附近再确认/);
+  assert.doesNotMatch(tunnel.text, /能走到|会顺着/);
   const withoutSurface = describePassage({ ...m.passages(D)[0], entrances: [] }, at(10, 64, 0));
-  assert.match(withoutSurface.text, /历史路线最高记录点 .*当前开口位置和路线是否可通尚未确认/);
+  assert.match(withoutSurface.text, /历史路线最高记录点 .*当前路线是否可通尚未确认/);
   assert.doesNotMatch(withoutSurface.text, /地表位置|入口/);
   assert.doesNotMatch(tunnel.text, /coal_ore/, '离通道太远的矿不算沿途');
   const chest = list.find((f) => f.kind === 'chest')!;
-  assert.match(chest.text, /cobblestone×344/);
-  assert.match(chest.text, /等 8 样/);
+  assert.match(chest.text, /放过几个 oak_sapling、放过几个 string、放过几个 spider_eye、放过几个 dirt/);
+  assert.match(chest.text, /，8格$/);
   assert.ok(!list.some((f) => /小舍/.test(f.text)));
   // 人在通道里
   assert.equal(describePassage(m.passages(D)[0], at(30, 40, 0)).inside, true);
@@ -144,12 +144,12 @@ test('按需提醒：想下矿或回地面时说明历史路线与当前通路�
       noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', tier: 'glance' as const } as any;
   };
   const away = situationalReminders(ctx(at(20, 64, 30), '挖阶梯下到 y20 找铁'));
-  assert.ok(away.some((r) => /记得自己挖过的通道：进出地下时记录的位置 \(0,64,0\)（不一定是开口）（水平 36 格外），曾到达最低 y40.*历史路线附近记得有床.*当前开口位置和路线是否可通尚未确认/.test(r)), away.join('\n'));
+  assert.ok(away.some((r) => /记得自己挖过的通道：入口 \(1,63,0\)（水平 36 格外），曾到达最低 y40.*历史路线附近记得有床.*洞口可能被堵或地形变了，走到附近再确认/.test(r)), away.join('\n'));
   assert.ok(!away.some((r) => /goto 入口会顺着记下的路线走下去/.test(r)), away.join('\n'));
   const inside = situationalReminders(ctx(at(22, 42, 0), '顺着矿道往前找铁'));
-  assert.ok(inside.some((r) => /当前位置靠近历史路线点.*当前开口位置和路线是否可通尚未确认/.test(r)), inside.join('\n'));
+  assert.ok(inside.some((r) => /你正沿着这条旧矿道.*沿旧矿道回入口的下一个路点 \(\d+,\d+,\d+\)/.test(r)), inside.join('\n'));
   const up = situationalReminders(ctx(at(22, 42, 0), '挖台阶一路挖到见天回地面'));
-  assert.ok(up.some((r) => /历史路线点；这条记录的参考点在 \(0,64,0\)，当前开口位置和路线是否可通尚未确认/.test(r)), up.join('\n'));
+  assert.ok(up.some((r) => /历史路线点；这条记录的参考点在 \(1,63,0\)，当前开口位置和路线是否可通尚未确认/.test(r)), up.join('\n'));
   const tripCtx = ctx(at(22, 42, 0), '回地面');
   tripCtx.percept.self.sky_visible = false;
   tripCtx.trip = { minutes: 2, gained: {}, nearEnd: true };
@@ -191,7 +191,7 @@ test('通道：只在“坑里”的竖直垫高往上爬（全程没判断成�
   const [p] = m.passages(D);
   assert.equal(p?.id, 'shaft');
   assert.ok(p.path.some((q) => q.y <= 33) && p.path.some((q) => q.y >= 58));
-  assert.deepEqual(p.entrances, [at(50, 62, 50)]);
+  assert.deepEqual(p.entrances, [at(50, 61, 50)]);
   m.close();
 });
 

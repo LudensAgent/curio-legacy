@@ -32,6 +32,8 @@ export class PassageTracker {
   private lastPos: { pos: Vec3Like; dim: string; worldId: string } | null = null;
   /** 最近一次在地下的位置：回地表时用于记录地表参考点，未验证实际开口。 */
   private lastBelow: { pos: Vec3Like; ts: number } | null = null;
+  /** 这次行程里自己挖掉的格子：回地表时用最近的挖开格当洞口，而不是站的位置 */
+  private dugBlocks: DugBlock[] = [];
 
   constructor(private memory: Pick<WorldMemory, 'passages' | 'savePassage'> & Partial<Pick<WorldMemory, 'forgetPassage'>>, private newId: () => string = () => `psg_${Math.random().toString(36).slice(2, 8)}`) {}
 
@@ -41,12 +43,13 @@ export class PassageTracker {
     const jumped = !this.lastPos || this.lastPos.dim !== s.dim || this.lastPos.worldId !== s.worldId || d3(this.lastPos.pos, pos) > 24;
     this.lastPos = { pos, dim: s.dim, worldId: s.worldId };
     if (jumped) { this.finish(); this.lastSurface = null; }
+    for (const b of dug) { this.dugBlocks.push(b); if (this.dugBlocks.length > 160) this.dugBlocks.shift(); }
 
     if (s.place === 'surface') {
       // 记录从地下回到地表的位置；这只是参考点，不保证是实际开口。
       const below = this.lastBelow;
       if (this.active && below && now - below.ts < 120_000 && flat(below.pos, pos) <= 16 && pos.y >= below.pos.y) {
-        this.addEntrance(this.active.rec, pos);
+        this.addEntrance(this.active.rec, this.openingNear(pos));
         this.save();
       }
       this.finish();
@@ -77,7 +80,7 @@ export class PassageTracker {
       }
       // 刚从地表下来：记录最后的地表位置，并未确认实际开口。
       const surf = this.lastSurface;
-      if (surf && surf.dim === s.dim && surf.worldId === s.worldId && now - surf.ts < 120_000 && flat(surf.pos, pos) <= 16) this.addEntrance(this.active.rec, surf.pos);
+      if (surf && surf.dim === s.dim && surf.worldId === s.worldId && now - surf.ts < 120_000 && flat(surf.pos, pos) <= 16) this.addEntrance(this.active.rec, this.openingNear(surf.pos));
     }
     // 新挖的这一段接近以前的路线：并进那一条（多一个地表参考点），不另记
     if (!this.active.existing) {
@@ -111,6 +114,18 @@ export class PassageTracker {
   finish() {
     if (this.active) this.save();
     this.active = null;
+    this.dugBlocks = [];
+  }
+
+  /** 最近的挖开格（洞口）：回地表时优先记自己挖开的那一格，而不是站的位置；只找贴近地表那层的挖开格，找不到就退回站的位置 */
+  private openingNear(ref: Vec3Like): Vec3Like {
+    let best: Vec3Like | null = null, bd = Infinity;
+    for (const b of this.dugBlocks) {
+      if (Math.abs(b.pos.y - ref.y) > 4) continue;
+      const d = flat(b.pos, ref);
+      if (d <= 8 && (d < bd || (d === bd && (best === null || b.pos.y > best.y)))) { bd = d; best = b.pos; }
+    }
+    return best ?? ref;
   }
 
   private count(rec: PassageRecord, pos: Vec3Like, dug: DugBlock[]) {

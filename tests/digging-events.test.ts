@@ -98,7 +98,7 @@ for (const interruption of ['navigation cancellation', 'death and respawn'] as c
     }
     const [passage] = memory.passages('overworld');
     assert.ok(passage, 'the new mine is saved once enough actual digging is observed');
-    assert.deepEqual(passage.entrances, [{ x: 0, y: 64, z: 0 }]);
+    assert.deepEqual(passage.entrances, [{ x: 1, y: 63, z: 0 }], 'entrance records the dug opening, not the standing surface position');
     assert.equal(passage.deepestY, 58);
     assert.equal(passage.dug, 6);
     assert.equal(passage.ores.iron_ore, 1);

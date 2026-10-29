@@ -1,6 +1,6 @@
 import type { Vec3Like } from '../adapter/types.ts';
 import { isResourceBlock } from '../memory/ore-spots.ts';
-import { passageLevels } from '../memory/passages.ts';
+import { passageLevels, passageRoute } from '../memory/passages.ts';
 import type { Landmark, PassageRecord, WorldMemory } from '../memory/store.ts';
 import { STATION_LABEL } from '../skills/stations.ts';
 import { chestLocation, chestRecollectionLocation, describeChest, isContainerLandmark } from '../memory/chest-memory.ts';
@@ -34,20 +34,24 @@ function myStations(memory: Pick<WorldMemory, 'landmarks'>, s: State): Landmark[
 }
 
 /** 历史通道记录：地表参考点、曾到达的高度以及附近记忆，不推断当前通路。 */
-export function describePassage(rec: PassageRecord, here: Vec3Like, stations: Landmark[] = [], resources: Landmark[] = []): { text: string; entrance: Vec3Like; dist: number; inside: boolean } {
+export function describePassage(rec: PassageRecord, here: Vec3Like, stations: Landmark[] = [], resources: Landmark[] = []): { text: string; entrance: Vec3Like; dist: number; inside: boolean; next?: Vec3Like } {
   const entrance = [...rec.entrances].sort((a, b) => flat(a, here) - flat(b, here))[0]
     ?? [...rec.path].sort((a, b) => b.y - a.y)[0];
   const dist = flat(entrance, here);
   const inside = rec.path.some((p) => d3(p, here) <= 3);
+  // 站在旧矿道里时，沿它从脚下回到入口的几何路线（只给方向，未验证点间通行或当前地形）
+  const route = inside ? passageRoute([rec], here, entrance, { near: 6 }) : null;
+  const next = route && route.length > 1 ? route[1] : undefined;
   const levels = passageLevels(rec).filter((y) => y !== entrance.y);
   const ores = Object.entries(rec.ores).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([n, c]) => `${n}×${c}`);
   const near = (l: Landmark, r: number) => rec.path.some((p) => d3(p, l.pos) <= r);
   const things = [...new Set(stations.filter((l) => near(l, 4)).map((l) => l.label.replace(/^我的/, '')))];
   const seen = [...new Set(resources.filter((l) => isResourceBlock(l.label) && near(l, 6)).map((l) => l.label))].slice(0, 3);
-  const text = `${rec.entrances.length ? `进出地下时记录的位置 ${at(entrance)}（不一定是开口）` : `历史路线最高记录点 ${at(entrance)}`}${inside ? '，当前位置靠近历史路线点' : `（水平 ${dist} 格外）`}，曾到达最低 y${rec.deepestY}`
+  const where = `${rec.entrances.length ? `入口 ${at(entrance)}` : `历史路线最高记录点 ${at(entrance)}`}${inside ? '，你正沿着这条旧矿道' : `（水平 ${dist} 格外）`}${next ? `，沿旧矿道回入口的下一个路点 ${at(next)}` : ''}`;
+  const text = `${where}，曾到达最低 y${rec.deepestY}`
     + `${levels.length ? `，历史脚点较多的高度有 y${levels.join('、y')}` : ''}${ores.length ? `，挖到过 ${ores.join('、')}` : ''}`
-    + `${seen.length ? `，历史路线附近记得见过 ${seen.join('、')}` : ''}${things.length ? `，历史路线附近记得有${things.join('、')}` : ''}；当前开口位置和路线是否可通尚未确认`;
-  return { text, entrance, dist, inside };
+    + `${seen.length ? `，历史路线附近记得见过 ${seen.join('、')}` : ''}${things.length ? `，历史路线附近记得有${things.join('、')}` : ''}${rec.entrances.length ? '；洞口可能被堵或地形变了，走到附近再确认' : '；当前路线是否可通尚未确认'}`;
+  return { text, entrance, dist, inside, ...(next ? { next } : {}) };
 }
 
 /** 自己的设施，近的在前；kinds 不给就全要 */
