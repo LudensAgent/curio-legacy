@@ -35,7 +35,10 @@ function myStations(memory: Pick<WorldMemory, 'landmarks'>, s: State): Landmark[
 
 /** 历史通道记录：地表参考点、曾到达的高度以及附近记忆，不推断当前通路。 */
 export function describePassage(rec: PassageRecord, here: Vec3Like, stations: Landmark[] = [], resources: Landmark[] = []): { text: string; entrance: Vec3Like; dist: number; inside: boolean; next?: Vec3Like } {
-  const entrance = [...rec.entrances].sort((a, b) => flat(a, here) - flat(b, here))[0]
+  // 身体有时把地下误判成 surface，会记出过深的假入口（y 比通道地表低很多）；先滤掉，只留贴近地表的
+  const surfaceY = rec.path.length ? Math.max(...rec.path.map((p) => p.y)) : Math.max(...rec.entrances.map((e) => e.y));
+  const validEntrances = rec.entrances.filter((e) => surfaceY - e.y <= 6);
+  const entrance = [...validEntrances].sort((a, b) => flat(a, here) - flat(b, here))[0]
     ?? [...rec.path].sort((a, b) => b.y - a.y)[0];
   const dist = flat(entrance, here);
   const inside = rec.path.some((p) => d3(p, here) <= 3);
@@ -47,10 +50,13 @@ export function describePassage(rec: PassageRecord, here: Vec3Like, stations: La
   const near = (l: Landmark, r: number) => rec.path.some((p) => d3(p, l.pos) <= r);
   const things = [...new Set(stations.filter((l) => near(l, 4)).map((l) => l.label.replace(/^我的/, '')))];
   const seen = [...new Set(resources.filter((l) => isResourceBlock(l.label) && near(l, 6)).map((l) => l.label))].slice(0, 3);
-  const where = `${rec.entrances.length ? `入口 ${at(entrance)}` : `历史路线最高记录点 ${at(entrance)}`}${inside ? '，你正沿着这条旧矿道' : `（水平 ${dist} 格外）`}${next ? `，沿旧矿道回入口的下一个路点 ${at(next)}` : ''}`;
+  // 真实洞口：离入口最近的最高脚点（可能比记的地表入口低一两格），告诉心智要从地表往下挖几格
+  const opening = [...rec.path].filter((p) => flat(p, entrance) <= 6).sort((a, b) => b.y - a.y)[0];
+  const depthHint = opening && entrance.y - opening.y >= 2 ? `，通道脚点最高 y${opening.y}（比入口低 ${entrance.y - opening.y} 格，从地表往下挖）` : '';
+  const where = `${validEntrances.length ? `入口 ${at(entrance)}` : `历史路线最高记录点 ${at(entrance)}`}${depthHint}${inside ? '，你正沿着这条旧矿道' : `（水平 ${dist} 格外）`}${next ? `，沿旧矿道回入口的下一个路点 ${at(next)}` : ''}`;
   const text = `${where}，曾到达最低 y${rec.deepestY}`
     + `${levels.length ? `，历史脚点较多的高度有 y${levels.join('、y')}` : ''}${ores.length ? `，挖到过 ${ores.join('、')}` : ''}`
-    + `${seen.length ? `，历史路线附近记得见过 ${seen.join('、')}` : ''}${things.length ? `，历史路线附近记得有${things.join('、')}` : ''}${rec.entrances.length ? '；洞口可能被堵或地形变了，走到附近再确认' : '；当前路线是否可通尚未确认'}`;
+    + `${seen.length ? `，历史路线附近记得见过 ${seen.join('、')}` : ''}${things.length ? `，历史路线附近记得有${things.join('、')}` : ''}${validEntrances.length ? '；洞口可能被堵或地形变了，走到附近再确认' : '；当前路线是否可通尚未确认'}`;
   return { text, entrance, dist, inside, ...(next ? { next } : {}) };
 }
 

@@ -49,7 +49,7 @@ export class PassageTracker {
       // 记录从地下回到地表的位置；这只是参考点，不保证是实际开口。
       const below = this.lastBelow;
       if (this.active && below && now - below.ts < 120_000 && flat(below.pos, pos) <= 16 && pos.y >= below.pos.y) {
-        this.addEntrance(this.active.rec, this.openingNear(pos));
+        this.addEntrance(this.active.rec, this.openingNear(pos, this.active.rec));
         this.save();
       }
       this.finish();
@@ -80,7 +80,7 @@ export class PassageTracker {
       }
       // 刚从地表下来：记录最后的地表位置，并未确认实际开口。
       const surf = this.lastSurface;
-      if (surf && surf.dim === s.dim && surf.worldId === s.worldId && now - surf.ts < 120_000 && flat(surf.pos, pos) <= 16) this.addEntrance(this.active.rec, this.openingNear(surf.pos));
+      if (surf && surf.dim === s.dim && surf.worldId === s.worldId && now - surf.ts < 120_000 && flat(surf.pos, pos) <= 16) this.addEntrance(this.active.rec, this.openingNear(surf.pos, this.active.rec));
     }
     // 新挖的这一段接近以前的路线：并进那一条（多一个地表参考点），不另记
     if (!this.active.existing) {
@@ -117,15 +117,27 @@ export class PassageTracker {
     this.dugBlocks = [];
   }
 
-  /** 最近的挖开格（洞口）：回地表时优先记自己挖开的那一格，而不是站的位置；只找贴近地表那层的挖开格，找不到就退回站的位置 */
-  private openingNear(ref: Vec3Like): Vec3Like {
+  /** 最近的挖开格（洞口）：回地表时优先记自己挖开的那一格，而不是站的位置；只找贴近地表那层的挖开格。
+   * 复用旧通道时当次的挖开格里可能没有原始洞口，就退回这条通道自己记下、离地表最近的脚点（那才是真实洞口），最后才退回站的位置 */
+  private openingNear(ref: Vec3Like, rec?: PassageRecord): Vec3Like {
     let best: Vec3Like | null = null, bd = Infinity;
     for (const b of this.dugBlocks) {
       if (Math.abs(b.pos.y - ref.y) > 4) continue;
       const d = flat(b.pos, ref);
       if (d <= 16 && (d < bd || (d === bd && (best === null || b.pos.y > best.y)))) { bd = d; best = b.pos; }
     }
-    return best ?? ref;
+    if (best) return best;
+    if (rec?.path.length) {
+      let top: Vec3Like | null = null;
+      for (const p of rec.path) {
+        if (Math.abs(p.y - ref.y) > 4) continue;
+        const d = flat(p, ref);
+        if (d > 16) continue;
+        if (!top || p.y > top.y || (p.y === top.y && d < flat(top, ref))) top = p;
+      }
+      if (top) return top;
+    }
+    return ref;
   }
 
   private count(rec: PassageRecord, pos: Vec3Like, dug: DugBlock[]) {
