@@ -397,6 +397,7 @@
       <div class="kpi" id="k-lat"><b>-</b><small>LLM 平均 / P95</small></div>
       <div class="kpi" id="k-reflex"><b>-</b><small>反射触发</small></div>
       <div class="kpi" id="k-death"><b>-</b><small>死亡</small></div>
+      <div class="kpi" id="k-stuck"><b>-</b><small>卡住率</small></div>
     </div>
 
     <div class="card streamcard"><h2>念头流 <span class="r dim">最近的想法、注意到的事、结果和学到的</span></h2><ul class="list body" id="streamDock"></ul></div>
@@ -993,6 +994,10 @@ function render(s) {
   kpi('k-lat', m.llm.avgLatencyMs == null ? '-' : `${(m.llm.avgLatencyMs / 1000).toFixed(1)}/${(m.llm.p95LatencyMs / 1000).toFixed(1)}s`);
   kpi('k-reflex', String(m.reflexTriggers ?? 0));
   kpi('k-death', String(m.deaths ?? 0), m.deaths ? 'bad' : '');
+  const att = m.attempts ?? { succeeded: 0, failed: 0, other: 0 };
+  const attTotal = att.succeeded + att.failed + att.other;
+  const stuckRate = attTotal ? att.failed / attTotal : null;
+  kpi('k-stuck', pct(stuckRate), stuckRate == null ? '' : stuckRate >= 0.5 ? 'bad' : stuckRate >= 0.25 ? 'warn' : 'good');
 
   const th = m.llmThinkingBreakdown;
   $('thinking-breakdown').textContent = th ? `思考期：做事/反射 ${pct(th.taskReflexRatio)} · 观察填充 ${pct(th.fillerRatio)} · 发呆 ${pct(th.idleRatio)}` : '思考期构成：等待采样';
