@@ -181,7 +181,7 @@ async function stepOutOfWater(ctx: SkillCtx, args: CellArgs, feet: Vec3Like) {
 export const stepTo: Skill<CellArgs> = {
   name: 'step',
   description: '迈到身边相邻的一格（[前,上,右]）：可以平走、上一级台阶（上+1，会跳）、下一级（上-1）；脚下是梯子时 [0,1,0] 沿梯子爬一格。目标格和头顶需要有身体通行空间、脚下要有支撑；上台阶时自己头顶上方也要空。陆上只走指定高度的一格，不会自动下坎；更深的落点可用 assess_landings 查看并用 descend 明确选择。泡在水里时朝岸那边迈（[1,0,0] 就行），身体会游过去、贴着岸爬上去（岸比脚高一两格也行）',
-  argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W"}（前后/左右 ±1，上下 -1..1；例：[1,0,0] 往前一格，[1,1,0] 迈上前方台阶）',
+  argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W"}（前后/左右 ±1，上下 -1..1；to 是脚部目标格，须留空，支撑在它下面一格；例：[1,-1,0] 下一级，支撑在 [1,-2,0]）',
   timeoutMs: 8000,
   movement: true,
   validate(raw, adapter) {
@@ -261,12 +261,14 @@ export const stepTo: Skill<CellArgs> = {
       : `目标格上方是 ${describe(head)}${describe(head).endsWith('_door') ? '（门的状态或碰撞形状阻碍通行）' : `（会碰头${LIQUID_BLOCKS.has(describe(head)) ? '' : `；先 dig_at [${args.at[0]},${args.at[1] + 1},${args.at[2]}]`}）`}`);
     // 能站住：实心方块；薄雪层下面有实心方块也能踩
     const hasSupport = standable(floor);
-    if (!hasSupport) problems.push(`目标格脚下 (${floor.x},${floor.y},${floor.z}) 是 ${describe(floor)}，目标高度没有确认可站的支撑；未执行迈步，可查看落点后选择下行，或放置支撑`);
+    const supportAt = toRel(feet, args.facing, floor);
+    const placeAtInRange = supportAt[1] >= -1;
+    if (!hasSupport) problems.unshift(`目标格脚下 (${floor.x},${floor.y},${floor.z}) 是 ${describe(floor)}，无已确认支撑；支撑格 [${supportAt}]${placeAtInRange ? '' : ' 超出 place_at 上下 -1..3 范围'}；脚部目标格 [${args.at}] 须留空；未执行迈步`);
     if (args.at[1] === 1 && !free({ ...feet, y: feet.y + 2 })) problems.push(describe({ ...feet, y: feet.y + 2 }) === '未看清的格子'
       ? '往上跳时自己头顶上方是 未看清的格子，无法确认跳跃空间'
       : `往上跳时自己头顶上方是 ${describe({ ...feet, y: feet.y + 2 })}（跳不起来；先 dig_at [0,2,0]）`);
     if (problems.length) return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：${problems.join('；')}`, { problems, movementNotAttempted: true,
-      ...(!hasSupport ? { landingSupport: { pos: floor, observed: seen.get(`${floor.x},${floor.y},${floor.z}`) ?? null } } : {}),
+      ...(!hasSupport ? { landingSupport: { pos: floor, at: supportAt, placeAtInRange, observed: seen.get(`${floor.x},${floor.y},${floor.z}`) ?? null } } : {}),
       ...after(ctx, args.facing, target) });
     let movementError: unknown;
     try {
@@ -285,7 +287,7 @@ export const stepTo: Skill<CellArgs> = {
 export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
   name: 'place_at',
   description: '在身边指定的空格放一块方块（[前,上,右]）。实心方块放 [0,0,0] 表示原地垫一块站上去（跳起来往脚下放）；梯子、火把这类贴墙的东西可以放进自己站的格子 [0,0,0]/[0,1,0]，但旁边要有实心墙。item 写方块名，或 "any" 用背包里随便一种能垫的（泥土、圆石、木板…）',
-  argsDoc: '{"at":[前,上,右], "item"?:"<方块名>|any", "facing"?:"N|E|S|W"}（前后/左右 ±2，上下 -1..3；例：[0,0,0] 原地垫高一格，[1,-1,0] 填前方脚下的坑，{"at":[0,0,0],"item":"ladder"} 在自己脚边的墙上挂梯子）',
+  argsDoc: '{"at":[前,上,右], "item"?:"<方块名>|any", "facing"?:"N|E|S|W"}（前后/左右 ±2，上下 -1..3；at 是方块占据格；例：[0,0,0] 原地垫高，[1,-1,0] 支撑 step [1,0,0]，会挡住 step [1,-1,0]；{"at":[0,0,0],"item":"ladder"} 在脚边墙上挂梯子）',
   timeoutMs: 15000,
   movement: true,
   validate(raw, adapter) {

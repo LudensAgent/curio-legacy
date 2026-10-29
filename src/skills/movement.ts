@@ -622,7 +622,7 @@ export const unstuck: Skill<{}> = {
     const around = surroundings(adapter, s.pos);
     // 先试身边能走的方向（像玩家看一眼往空处走），每个方向走 3 格
     for (const exit of around.exits) {
-      const [dx, dz] = DIR_OFFSETS[exit.replace('↑', '')];
+      const [dx, dz] = DIR_OFFSETS[exit.replace(/[↑↓]/, '')];
       const before = adapter.state().pos;
       try {
         await adapter.moveTo({ kind: 'xz', x: s.pos.x + dx * 3, z: s.pos.z + dz * 3, range: 1 }, { signal, timeoutMs: 5000 });

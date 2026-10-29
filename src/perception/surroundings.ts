@@ -19,7 +19,7 @@ export function attachmentFaces(name: string): 'side' | 'floor_or_side' | null {
 
 
 export const DIR_OFFSETS: Record<string, [number, number]> = { N: [0, -1], E: [1, 0], S: [0, 1], W: [-1, 0] };
-export type ExitOptions = Record<string, { walk: boolean | null; step_up: boolean | null }>;
+export type ExitOptions = Record<string, { walk: boolean | null; step_down: boolean | null; step_up: boolean | null }>;
 
 const soft = (n: string | null) => n == null || SOFT.test(n);
 const solidFloor = (n: string | null) => n != null && !SOFT.test(n) && !LIQUID.has(n);
@@ -54,15 +54,16 @@ export function surroundings(adapter: GameAdapter, pos: Vec3Like = adapter.state
     const floor = at(dx, -1, dz), lowerFloor = at(dx, -2, dz), upperHead = at(dx, 2, dz);
     const unknown = feet === null || head === null;
     exitOptions[d] = {
-      walk: unknown ? null : !soft(feet) || !soft(head) ? false : floor === null ? null : LIQUID.has(floor) ? false : solidFloor(floor) ? true : lowerFloor === null ? null : solidFloor(lowerFloor),
+      walk: unknown ? null : !soft(feet) || !soft(head) ? false : floor === null ? null : solidFloor(floor),
+      step_down: unknown ? null : !soft(feet) || !soft(head) ? false : floor === null ? null : !soft(floor) || LIQUID.has(floor) ? false : lowerFloor === null ? null : solidFloor(lowerFloor),
       step_up: unknown ? null : soft(feet) || !solidFloor(feet) || !soft(head) ? false : upperHead === null || above === null ? null : soft(upperHead) && soft(above),
     };
     if (feet === null || head === null) blocked.push(`${d} 邻格未加载`);
     else if (soft(feet) && soft(head)) {
-      // 平走；或者往下一格
       if (exitOptions[d].walk) exits.push(d);
+      else if (exitOptions[d].step_down) exits.push(`${d}↓`);
       else if (LIQUID.has(floor ?? '')) blocked.push(`${d} ${floor}`);
-      else if (exitOptions[d].walk === null) blocked.push(`${d} 下方未知`);
+      else if (exitOptions[d].walk === null || exitOptions[d].step_down === null) blocked.push(`${d} 下方未知`);
       else blocked.push(`${d} 下方有落差，需观察落点`);
     } else if (exitOptions[d].step_up) exits.push(`${d}↑`); // 跳上一格
     else blocked.push(`${d} ${[feet, head].filter((n) => !soft(n)).join('/')}`);
@@ -71,7 +72,7 @@ export function surroundings(adapter: GameAdapter, pos: Vec3Like = adapter.state
     `脚下 ${below ?? '?'}`,
     soft(above) ? '头顶空着' : `头顶上方 ${above}`,
     sky ? '看得见天空' : '看不见天空',
-    exits.length ? `一步内可走：${exits.join('、')}` : '没有平走或一步跳跃出口（下行落点尚未评估）',
+    exits.length ? `一步内可走：${exits.join('、')}（↑ 上一级，↓ 下一级，无箭头为同层）` : '没有确认可走的一步落点',
     ...(blocked.length ? [`挡住：${blocked.join('，')}`] : []),
   ];
   return { text: parts.join('｜'), enclosed: exits.length === 0, exits, exitOptions, sky, below, above,

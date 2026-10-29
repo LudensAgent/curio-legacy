@@ -1216,7 +1216,7 @@ test('失败反馈只包含近期同一会话附近的最近六次', async (t) =
   assert.deepEqual(current.recent_action_failures.entries.map((e: { args: { n: number } }) => e.args.n), [2, 3, 4, 5, 6, 7]);
 });
 
-for (const scenario of ['same', 'position', 'direction', 'pitch', 'parameters', 'code', 'reason', 'danger'] as const) test(`重复失败的思考级别：${scenario}`, async (t) => {
+for (const scenario of ['same', 'position', 'direction', 'pitch', 'parameters', 'code', 'reason', 'world', 'session', 'dimension', 'expired', 'danger', 'water', 'lava', 'urgent'] as const) test(`重复失败的思考级别：${scenario}`, async (t) => {
   const w = fixture(t);
   await w.tick();
   const activity = { what: '尝试动作', steps: [step(3)] };
@@ -1225,21 +1225,56 @@ for (const scenario of ['same', 'position', 'direction', 'pitch', 'parameters', 
   await w.finish(fail('BAD_ARGS', '目标不在当前视野'));
   await w.tick();
   assert.equal(w.bus.recent().filter((e) => e.type === 'llm_request').at(-1)?.data?.tier, 'deliberate');
+  if (scenario === 'direction' || scenario === 'pitch') {
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 3001 });
+    await w.tick();
+    assert.equal(w.arbiter.info()?.source, 'filler', '等待答复时身体只在自动张望');
+    await w.adapter.look(w.adapter.yaw + (scenario === 'direction' ? 0.16 : 0), w.adapter.pitch + (scenario === 'pitch' ? 0.16 : 0));
+  }
   await w.reply(w.pending.length - 1, { decision: 'new', activity: scenario === 'parameters' ? { ...activity, steps: [step(4)] } : activity });
   await w.tick();
   if (scenario === 'position') w.adapter.pos.x += 1;
-  if (scenario === 'direction') w.adapter.yaw += Math.PI / 2;
-  if (scenario === 'pitch') w.adapter.pitch += Math.PI / 4;
+  if (scenario === 'world') w.adapter.worldId = 'other-world';
+  if (scenario === 'session') w.adapter.sessionId = 'other-session';
+  if (scenario === 'dimension') w.adapter.dim = 'the_nether';
+  if (scenario === 'expired') t.mock.timers.enable({ apis: ['Date'], now: Date.now() + Mind.SAME_FAIL_MS + 1 });
   if (scenario === 'danger') w.adapter.hp = 10;
+  if (scenario === 'water') w.adapter.inWater = true;
+  if (scenario === 'lava') w.adapter.inLava = true;
+  if (scenario === 'urgent') w.mind.attention.notice('test_urgent', '有紧急情况需要处理', 1, 0);
   await w.finish(fail(scenario === 'code' ? 'UNKNOWN_ITEM' : 'BAD_ARGS', scenario === 'reason' ? '目标已经消失' : '目标不在当前视野'));
   await w.tick();
   const request = w.bus.recent().filter((e) => e.type === 'llm_request').at(-1);
-  assert.equal(request?.data?.tier, scenario === 'same' ? 'glance' : 'deliberate');
-  if (scenario === 'same') {
+  const repeated = scenario === 'same' || scenario === 'direction' || scenario === 'pitch';
+  assert.equal(request?.data?.tier, repeated ? 'glance' : 'deliberate');
+  if (repeated) {
     assert.match(request?.msg ?? '', /刚才相同动作也失败：目标不在当前视野/);
     await w.reply(w.pending.length - 1, { kind: 'deliberate', reason: '需要想清楚' });
     assert.equal(w.bus.recent().filter((e) => e.type === 'llm_escalate').length, 1, 'Agent 可主动升级为认真想');
   }
+});
+
+for (const scenario of ['gaze', 'target', 'facing'] as const) test(`相对迈步重复失败按动作目标而非镜头判断：${scenario}`, async (t) => {
+  const w = fixture(t), previous = SKILLS.step;
+  SKILLS.step = { ...previous, run: SKILLS.mind_step.run };
+  t.after(() => { SKILLS.step = previous; });
+  const activity = { what: '尝试下一级', facing: 'N', steps: [{ skill: 'step', args: { at: [1, -1, 0] } }] };
+  const failure = fail('PATH_NOT_FOUND', '目标脚下没有支撑', { movementNotAttempted: true });
+  await w.tick();
+  await w.reply(0, { decision: 'new', activity });
+  await w.finish(failure);
+  await w.tick();
+  assert.equal(w.bus.recent().filter((event) => event.type === 'llm_request').at(-1)?.data?.tier, 'deliberate');
+  w.adapter.yaw += 0.16;
+  w.adapter.pitch += 0.16;
+  await w.reply(w.pending.length - 1, { decision: 'new', activity: {
+    ...activity,
+    ...(scenario === 'facing' ? { facing: 'W' } : {}),
+    ...(scenario === 'target' ? { steps: [{ skill: 'step', args: { at: [0, -1, 1] } }] } : {}),
+  } });
+  await w.finish(failure);
+  await w.tick();
+  assert.equal(w.bus.recent().filter((event) => event.type === 'llm_request').at(-1)?.data?.tier, scenario === 'gaze' ? 'glance' : 'deliberate');
 });
 
 test('盖房、走路这类事做着做着挨了打，又没有技能接手：先停下、马上认真想（不边挨打边砌墙）', async (t) => {

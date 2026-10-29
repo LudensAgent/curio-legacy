@@ -136,7 +136,7 @@ export class Mind {
   private recentActionFailures: { step: Step; code: string | null; summary: string; pos: AgentState['pos']; worldId: string; sessionId: string; dim: string; at: number }[] = [];
   /** 同一个动作、同样的参数、同样的失败：记录次数，供心智参考。 */
   private sameFails = new Map<string, { n: number; last: number; code: string; why: string; summary: string }>();
-  private lastStuckAttempt: { step: { skill: string; args?: unknown }; code: string; summary: string; pos: AgentState['pos']; worldId: string; sessionId: string; dim: string; yaw: number; pitch: number; at: number } | null = null;
+  private lastStuckAttempt: { step: { skill: string; args?: unknown }; code: string; summary: string; pos: AgentState['pos']; worldId: string; sessionId: string; dim: string; at: number } | null = null;
   static readonly SAME_FAIL_LIMIT = 3;
   static readonly SAME_FAIL_MS = 10 * 60_000;
   private learnedActivities = new Set<string>();
@@ -772,15 +772,16 @@ export class Mind {
     }
     if (outcome === 'stuck') {
       this.queuedNext = null; // 提前想好的下一步多半基于“这段会成功”的假设
-      const eye = this.d.adapter.eye();
       const previous = this.lastStuckAttempt;
-      const repeated = !!failed && !!failed.failureCode && !!eye && !!previous && Date.now() - previous.at < Mind.SAME_FAIL_MS
+      // 只降低重复失败的思考档位，不省略实际执行和结果。等待答复时的自动张望
+      // 会改变视线；它不改变已校验的动作参数，也不应让同一失败再次强制认真想。
+      const repeated = !!failed && !!failed.failureCode && !!previous && Date.now() - previous.at < Mind.SAME_FAIL_MS
         && previous.worldId === state.worldId && previous.sessionId === state.sessionId && previous.dim === state.dim
         && Math.hypot(state.pos.x - previous.pos.x, state.pos.y - previous.pos.y, state.pos.z - previous.pos.z) < 0.1
-        && previous.yaw === eye.yaw && previous.pitch === eye.pitch && previous.code === failed.failureCode && previous.summary === failed.summary
+        && previous.code === failed.failureCode && previous.summary === failed.summary
         && isDeepStrictEqual(previous.step, { skill: failed.skill, args: failed.args });
-      this.lastStuckAttempt = failed?.failureCode && eye ? { step: { skill: failed.skill, args: failed.args }, code: failed.failureCode,
-        summary: failed.summary, pos: { ...state.pos }, worldId: state.worldId, sessionId: state.sessionId, dim: state.dim, yaw: eye.yaw, pitch: eye.pitch, at: Date.now() } : null;
+      this.lastStuckAttempt = failed?.failureCode ? { step: { skill: failed.skill, args: failed.args }, code: failed.failureCode,
+        summary: failed.summary, pos: { ...state.pos }, worldId: state.worldId, sessionId: state.sessionId, dim: state.dim, at: Date.now() } : null;
       const urgent = this.attention.highest() >= URGENT || state.hp <= 12 || state.inWater || state.inLava;
       this.requestThink(`「${a.what}」卡住了：${summary}${repeated ? `；刚才相同动作也失败：${previous!.summary}` : ''}${a.ifStuck ? `；之前想过卡住时：${a.ifStuck}` : ''}`, repeated && !urgent ? 'glance' : 'deliberate');
     }

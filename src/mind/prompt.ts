@@ -185,10 +185,10 @@ const PRINCIPLES = `【原则】
 - 只知道亲眼看到或记得的东西，坐标来自观察或地标，不编。
 - 遇到危险如何行动由你或你写下的技能决定；插火把、顺手吃可用 habits 定成习惯；捡东西需明确安排 pickup_items，pickup 偏好只提醒思考。`;
 
-const PRECISE = `【精确操作】【身边】local 是以脚为原点的方块图（[前,上,右]，前=facing），local.spots 已算好能站（stand）、能放（place）的格子。dig_at / step / place_at 都写确切的相对坐标，routine 重复时每步按当时站的位置重算，例如：
-- 写法示例（只是语法，不是该怎么走）：activity.facing:"N"，steps [dig_at {"at":[1,0,0]}, dig_at {"at":[1,1,0]}, step {"to":[1,0,0]}]，repeat 8；子步骤继承活动参考系，done_when 写看得到的结果（如 {"type":"sky_visible","equals":true}）
-- [0,0,0] 是自己脚下那格、[0,1,0] 是自己头那格：place_at [0,0,0] 放实心方块会跳起来垫在脚下；梯子、火把这种贴墙的东西可以放进自己站的格子（要贴着实心墙）。挖空脚下 [0,-1,0] 人会自己掉下去，不用 step
-repeat 每轮重做整套 steps；需要照明时可主动调用 place_torch，也可选择 habits.torch_every 在空闲时照明。挖前看清那格。`;
+const PRECISE = `【精确操作】local 以脚部占据格为原点：[前,上,右]，前=local.facing。spots.stand/place 是当前可见的候选站位/放置格，仍需动作确认。step 指脚部目标格，place_at 指方块占据格，支撑在脚部目标下面一格。
+- [0,0,0] 是脚部格，[0,1,0] 是头部格，[0,-1,0] 是支撑格。place_at [0,0,0] 放实心方块会跳起垫高；梯子、火把可放进身体格（需有附着面）。挖空 [0,-1,0] 会下落，无需 step。
+- step [1,-1,0] 下一级需 [1,-2,0] 支撑；place_at [1,-1,0] 会堵住该脚部目标格。place_at 上下范围 -1..3，不能原位补 [1,-2,0]。
+repeat 每轮重做整套 steps；子步骤继承 activity.facing，每步相对坐标按当前位置重算。done_when 写可观察结果。照明可选 place_torch 或空闲习惯 habits.torch_every。挖前看清目标格。`;
 
 const EXAMPLE = `【例子】想有个家时：
 → {"kind":"design","brief":"湖边能住的小屋，云杉木，放得下床、箱子和工作台"}

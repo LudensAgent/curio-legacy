@@ -24,7 +24,7 @@ for (const tier of ['deliberate', 'glance'] as const) {
         if (terrain === 'unknown-exits') {
           delete percept.self.overhead;
           percept.light = null;
-          percept.self.exits = Object.fromEntries(['N', 'E', 'S', 'W'].map((direction) => [direction, { walk: null, step_up: null }]));
+          percept.self.exits = Object.fromEntries(['N', 'E', 'S', 'W'].map((direction) => [direction, { walk: null, step_down: null, step_up: null }]));
         }
       } else assert.equal(percept.self.where?.kind, terrain);
 

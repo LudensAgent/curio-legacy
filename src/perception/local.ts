@@ -3,7 +3,7 @@ import { isSoftBlock, LIQUID_BLOCKS } from './surroundings.ts';
 
 /**
  * 以身体为原点的局部坐标：[前, 上, 右]，前 = 指定的朝向（N/E/S/W）。
- * 模型用它说出“确切是哪一格”：[1,1,0] = 前方一格、高一格；[0,2,0] = 头顶上方那一格；[0,-1,0] = 脚下。
+ * 模型用它说出“确切是哪一格”：[1,1,0] = 前方一格、高一格；[0,2,0] = 头顶上方那一格；[0,-1,0] = 脚部下方支撑格。
  */
 export type Facing = 'N' | 'E' | 'S' | 'W';
 export const FACINGS: Facing[] = ['N', 'E', 'S', 'W'];
@@ -27,14 +27,14 @@ export function toWorld(feet: Vec3Like, facing: Facing, rel: [number, number, nu
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 
 /**
- * 身边的方块图（不透视）：以脚为原点的 5×5×5（上下 u=-1..3），
+ * 身边的方块图（不透视）：以脚为原点的 5×6×5（上下 u=-2..3），包含下一级落点的支撑层。
  * 只显示本次视觉确认的格子；身体所在的两格标 Y，其余未知标 ?。
  * 行从前（f=+2）到后（f=-2），列从左（r=-2）到右（r=+2），中间那列就是自己（Y）。
  */
 export function localMap(_adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like, facing: Facing,
   observe?: (positions: Vec3Like[]) => readonly { name: string; pos: Vec3Like }[]) {
   const feet = feetCell(pos);
-  const R = 2, U0 = -1, U1 = 3;
+  const R = 2, U0 = -2, U1 = 3;
   const key = (p: Vec3Like) => `${p.x},${p.y},${p.z}`;
   const positions: Vec3Like[] = [];
   for (let u = U0; u <= U1; u++) for (let f = -R; f <= R; f++) for (let r = -R; r <= R; r++) positions.push(toWorld(feet, facing, [f, u, r]));
@@ -88,7 +88,7 @@ export function localMap(_adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like, 
     if (touching) place.push(`[${f},${u},${r}] ${word(f, u, r)}`);
   }
   return { facing, source: 'current_vision', frame: '[前,上,右]；每层的行从前(f=+2)到后(f=-2)，列从左(r=-2)到右(r=+2)，中间是自己；只显示本次看见的格子，? 是未知', legend, layers,
-    spots: { stand: stand.slice(0, 8), place: place.slice(0, 8), note: 'stand/place 根据当前可见格估计，实际移动和放置仍需动作确认；[0,0,0] 是自己脚下那格' } };
+    spots: { stand: stand.slice(0, 8), place: place.slice(0, 8), note: 'stand 是脚部占据的目标格，place 是方块占据格；根据当前可见格估计，实际移动和放置仍需动作确认。[0,0,0] 是当前脚部占据格，[0,-1,0] 是其下方支撑格' } };
 }
 
 export function describeCell(adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like): string {
