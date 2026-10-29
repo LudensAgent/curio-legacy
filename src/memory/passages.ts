@@ -123,7 +123,7 @@ export class PassageTracker {
     for (const b of this.dugBlocks) {
       if (Math.abs(b.pos.y - ref.y) > 4) continue;
       const d = flat(b.pos, ref);
-      if (d <= 8 && (d < bd || (d === bd && (best === null || b.pos.y > best.y)))) { bd = d; best = b.pos; }
+      if (d <= 16 && (d < bd || (d === bd && (best === null || b.pos.y > best.y)))) { bd = d; best = b.pos; }
     }
     return best ?? ref;
   }
