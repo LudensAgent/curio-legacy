@@ -3571,24 +3571,18 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (!block) return { ok: false, reason: 'NO_BLOCK' };
       if (this.mcData.blocksByName?.[item]) return await this.placeItemAgainst(item, block, check);
       if (/_boat$|_raft$/.test(item)) {
-        // 放船/筏：要对着水面那一格发 block_place 再补 use_item，服务器才会真正落船；木筏（bamboo_raft）落下的实体也叫 boat。
-        // 之前用 activateItem/deactivateItem 只发“使用物品”、不发 block_place，服务器不落船也不扣背包（日志 ENTITY_NOT_SPAWNED）。
+        // 放船/筏：mineflayer 的 placeEntity 会按版本发正确的包（1.19+ 再补一个无效坐标的 block_place 才真正落船）。
+        // 之前手写 _genericPlace + use_item：1.20.1 没有 use_item 包，缺那第二下，服务器不落船也不扣背包（日志 ENTITY_NOT_SPAWNED）。
         const ids = new Set(Object.keys(b.entities ?? {}));
-        const count = () => (b.inventory.items() as InvItem[]).filter((held) => held.name === item).reduce((sum, held) => sum + held.count, 0);
-        const before = count();
-        const appeared = () => Object.values(b.entities as Record<number, Entity>).find((entity) => !ids.has(String(entity.id))
-          && /(^|_)(boat|raft)$/.test(entity.name ?? '') && entity.position.distanceTo(block.position) < 3);
-        await this.afterAction(async () => {
-          await b._genericPlace(block, new Vec3(0, 1, 0), {});
-          if (b.supportFeature('useItemWithOwnPacket')) b._client.write('use_item', { hand: 0 });
-        }, check);
-        const confirmed = await this.waitForInteraction(() => !!appeared(), check, 5000);
-        const entity = appeared(), consumed = before - count();
-        const reasons = [...(entity ? [`目标附近出现新实体 ${entity.name} #${entity.id}`] : ['目标附近没有确认新船实体']),
-          ...(consumed > 0 ? [`背包 ${item} 减少 ${consumed}`] : [])];
-        const effectEvidence = { verified: true, changed: !!entity || consumed > 0, reasons };
-        return confirmed && entity ? { ok: true, spawned: entity.name ?? item, effectEvidence }
-          : { ok: false, reason: `ENTITY_NOT_SPAWNED:目标附近没有确认新船${consumed > 0 ? '，但背包里的船已减少' : '，背包里的船未减少'}`, effectEvidence };
+        let entity: any;
+        try { entity = await this.afterAction(() => raceAbort(b.placeEntity(block, new Vec3(0, 1, 0)), signal, 6000, () => {}), check); }
+        catch (e) {
+          if (e instanceof AbortedError) throw e;
+          // placeEntity 可能因先冒出别的实体而提前抛错：自己再看一眼有没有新船
+          entity = Object.values(b.entities ?? {}).find((en: any) => !ids.has(String(en.id)) && /(^|_)(boat|raft)$/.test(String(en.name)) && en.position.distanceTo(block.position) < 4);
+        }
+        if (typeof entity?.id !== 'number') return { ok: false, reason: 'ENTITY_NOT_SPAWNED:没有确认放置的实体出现', effectEvidence: { verified: true, changed: false, reasons: ['放置后没有确认新船实体'] } };
+        return { ok: true, spawned: entity.name ?? item, effectEvidence: { verified: true, changed: true, reasons: [`服务器返回新实体 ${entity.name ?? item}`] } };
       }
       // Other entity items use their block-face placement API.
       if (/_spawn_egg$|^armor_stand$|^end_crystal$/.test(item)) {

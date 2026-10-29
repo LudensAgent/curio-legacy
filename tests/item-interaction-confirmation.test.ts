@@ -84,63 +84,44 @@ test('cancelled placement cannot send a late packet or report a confirmed block'
   assert.equal(packets, 0);
 });
 
-test('boat and raft use send block_place then use_item and wait past unrelated entity spawns', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_700_000_000_000 });
+test('boat and raft placement uses placeEntity and confirms the spawned boat', async () => {
   for (const item of ['oak_boat', 'bamboo_raft']) {
-    const f = fixture(item), water = new Vec3(3, 62, 0), order: string[] = [];
+    const f = fixture(item), water = new Vec3(3, 62, 0);
     f.put('water', water, { level: 0 });
-    f.bot.supportFeature = (name: string) => name === 'useItemWithOwnPacket';
-    f.bot._genericPlace = async (reference: any, face: any, options: any) => {
-      order.push('place');
+    f.bot.placeEntity = async (reference: any, face: any) => {
       assert.deepEqual(face, new Vec3(0, 1, 0));
       assert.equal(reference.position.toString(), water.toString());
-      assert.equal(typeof options, 'object', '_genericPlace 必须传 options，否则真实实现读 options.offhand 会抛错');
+      return { id: 88, name: 'boat', position: water.offset(0.5, 0.9, 0.5) };
     };
-    f.bot._client = { write(name: string) {
-      order.push(`write:${name}`);
-      if (name === 'use_item') {
-        // 先冒出一只无关实体，再落船：确认只等 boat，不会把牛当成新船
-        f.bot.entities[77] = { id: 77, name: 'cow', position: water.offset(0.5, 1, 0.5) };
-        setTimeout(() => { f.consume(); f.bot.entities[88] = { id: 88, name: 'boat', position: water.offset(0.5, 0.9, 0.5) }; }, 100);
-      }
-    } };
     const pending = f.adapter.useItemOn(item, { kind: 'block', pos: water }, new AbortController().signal);
-    await flush(); t.mock.timers.tick(100); await flush();
+    await flush();
     const result = await pending;
-    assert.deepEqual(order, ['place', 'write:use_item']);
     assert.equal(result.ok, true, result.reason);
     assert.equal(result.spawned, 'boat');
     assert.equal(result.effectEvidence?.changed, true);
   }
 });
 
-test('boat use reports consumption honestly without treating an existing boat as a new placement', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_700_000_000_000 });
-  for (const consumed of [false, true]) {
-    const f = fixture('oak_boat'), water = new Vec3(3, 62, 0);
-    f.put('water', water);
-    f.bot.entities[77] = { id: 77, name: 'boat', position: water.offset(0.5, 0.9, 0.5) };
-    f.bot._genericPlace = async () => { if (consumed) f.consume(); };
-    const pending = f.adapter.useItemOn('oak_boat', { kind: 'block', pos: water }, new AbortController().signal);
-    await flush(); t.mock.timers.tick(5000); await flush();
-    const result = await pending;
-    assert.equal(result.ok, false);
-    assert.match(result.reason ?? '', /ENTITY_NOT_SPAWNED/);
-    assert.equal(result.effectEvidence?.verified, true);
-    assert.equal(result.effectEvidence?.changed, consumed);
-  }
+test('boat placement reports ENTITY_NOT_SPAWNED without treating an existing boat as new', async () => {
+  const f = fixture('oak_boat'), water = new Vec3(3, 62, 0);
+  f.put('water', water);
+  f.bot.entities[77] = { id: 77, name: 'boat', position: water.offset(0.5, 0.9, 0.5) };
+  f.bot.placeEntity = async () => { throw new Error('Failed to place entity'); };
+  const pending = f.adapter.useItemOn('oak_boat', { kind: 'block', pos: water }, new AbortController().signal);
+  await flush();
+  const result = await pending;
+  assert.equal(result.ok, false);
+  assert.match(result.reason ?? '', /ENTITY_NOT_SPAWNED/);
+  assert.equal(result.effectEvidence?.changed, false);
 });
 
-test('cancelled boat use cannot send a late use-item packet after the place wait', async () => {
+test('cancelled boat placement aborts without reporting a spawned boat', async () => {
   const f = fixture('oak_boat'), water = new Vec3(3, 62, 0), controller = new AbortController();
   f.put('water', water);
-  let resume!: () => void, uses = 0;
-  f.bot.supportFeature = () => true;
-  f.bot._genericPlace = () => new Promise<void>((resolve) => { resume = resolve; });
-  f.bot._client = { write(name: string) { if (name === 'use_item') uses++; } };
+  let resume!: () => void;
+  f.bot.placeEntity = () => new Promise<void>((resolve) => { resume = resolve; });
   const pending = f.adapter.useItemOn('oak_boat', { kind: 'block', pos: water }, controller.signal);
   await flush(); controller.abort('replaced'); f.adapter.stopAll();
   await assert.rejects(pending, { name: 'AbortedError' });
   resume(); await flush();
-  assert.equal(uses, 0);
 });
