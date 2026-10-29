@@ -60,7 +60,12 @@ export function recallLocal(query: string, src: RecallSources, opts: { n?: numbe
     try { for (const n of src.memory.notesFor({ n: 30 })) push({ kind: 'note', text: `${n.text.slice(0, 120)}〔${n.kind}，${n.dimension ?? '维度未标注'}，${ago(n.ts, now)}的笔记〕`, worldId: n.worldId, dimension: n.dimension, source: `note:${n.kind}` }, score(n.text), n.ts); } catch { /* 记忆暂不可用 */ }
   }
   if (!skip.has('skill')) {
-    for (const s of src.book?.list() ?? []) push({ kind: 'skill', text: `${s.name}：${s.description}`, ref: s.name }, score(`${s.name.replace(/-/g, ' ')} ${s.description}`, [s.body.slice(0, 600)]) * 0.9);
+    for (const s of src.book?.list() ?? []) {
+      // 想起的是候选（还没验收成稳定版）时，把它从“知识标签”变成“现在就用”：催它当场 trial，别只记着「归它管」。
+      const candidate = src.book?.candidate(s.name);
+      const trial = candidate ? '（候选未启用：眼下正是它管的事，直接用 use_skill {trial:true} 调它试，别手写）' : '';
+      push({ kind: 'skill', text: `${s.name}：${s.description}${trial}`, ref: s.name }, score(`${s.name.replace(/-/g, ' ')} ${s.description}`, [s.body.slice(0, 600)]) * 0.9);
+    }
     for (const s of src.extraSkills ?? []) push({ kind: 'skill', text: s.text, ref: s.name }, score(s.text));
   }
   if (!skip.has('place')) {
