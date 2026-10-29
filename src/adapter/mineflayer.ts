@@ -1224,10 +1224,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         const remaining = deadline - Date.now();
         if (remaining <= 0) throw new Error('TIMEOUT');
         await this.afterAction(() => raceAbort(b.pathfinder.goto(goal), opts.signal, remaining, () => { if (ownsControls()) this.stopAll(); }), check);
-        if (blockedPillar) throw new PillarClearanceError(blockedPillar);
+        // 搭柱被头顶/侧上方挡住：先当成一次停滞，走下面的 nudge 退半步重新规划；只有退不动了才抛 PILLAR_CLEARANCE 让心智去挖头顶
+        if (blockedPillar) stalled = true;
         if (!stalled) return;
       } catch (e: any) {
-        if (blockedPillar && ownsControls() && e?.name !== 'AbortedError') throw new PillarClearanceError(blockedPillar);
+        if (blockedPillar && ownsControls() && e?.name !== 'AbortedError') stalled = true;
         if (!stalled || e?.name === 'AbortedError') throw e;
       } finally {
         clearInterval(watch);
@@ -1236,10 +1237,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       }
       check();
       if (opts.maxDropDown !== undefined) throw new Error('No path: 明确下行未能完成，未改走其他边缘');
-      if (corrections >= 3) throw new Error('No path: 附近连续调整后仍无法前进，换条路线');
+      if (corrections >= 3) throw blockedPillar ? new PillarClearanceError(blockedPillar) : new Error('No path: 附近连续调整后仍无法前进，换条路线');
       const action = await this.nudge(attempted, opts);
       check();
-      if (!action) throw new Error(b.entity.isInWater
+      if (!action) throw blockedPillar ? new PillarClearanceError(blockedPillar) : new Error(b.entity.isInWater
         ? 'No path: 当前在水中，寻路没有取得进展，未另选上岸位置'
         : 'No path: 附近没有可确认安全的调整空间，换条路线');
       corrections++;
