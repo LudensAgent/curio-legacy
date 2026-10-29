@@ -1,4 +1,5 @@
 import type { Vec3Like } from '../adapter/types.ts';
+import { DIRS } from '../perception/perception.ts';
 import { dist3 } from '../util.ts';
 import { ride } from './actions.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
@@ -160,12 +161,19 @@ function explainBlocked(rej: Map<string, number>, near: Map<string, number>): st
 type TravelArgs = { to: string; noBoat?: boolean };
 
 const parseTarget = (ctx: SkillCtx, raw: string): { x: number; y?: number; z: number; label: string } | null => {
+  const s = ctx.adapter.state();
+  // 方向+距离（和 goto 一致）："E 150" 按朝向和格数算出落点，免得模型自己算坐标
+  const heading = raw.trim().toUpperCase().match(/^(N|NE|E|SE|S|SW|W|NW)\s*(\d{1,3})$/);
+  if (heading) {
+    const [dx, dz] = DIRS[heading[1]];
+    const n = Math.min(200, Number(heading[2])), len = Math.hypot(dx, dz) || 1;
+    return { x: Math.round(s.pos.x + dx / len * n), z: Math.round(s.pos.z + dz / len * n), label: `往 ${heading[1]} ${n} 格` };
+  }
   const nums = raw.match(/-?\d+(?:\.\d+)?/g);
   if (nums && !/[a-z一-龥]{2,}/i.test(raw.replace(/\b[xyz]\s*[=:]/gi, ''))) {
     if (nums.length === 3) return { x: +nums[0], y: +nums[1], z: +nums[2], label: `${nums[0]},${nums[1]},${nums[2]}` };
     if (nums.length === 2) return { x: +nums[0], z: +nums[1], label: `${nums[0]},${nums[1]}` };
   }
-  const s = ctx.adapter.state();
   if (raw === 'death') { const d = ctx.memory.lastDeath(); return d && d.dim === s.dim ? { ...d.pos, label: '死亡地点' } : null; }
   const lm = ctx.memory.findLandmark(raw, s.dim);
   return lm && lm.dim === s.dim ? { ...lm.pos, label: /^(base|基地)$/i.test(raw.trim()) ? `${lm.label}（首选基地 base）` : lm.label } : null;
@@ -174,13 +182,22 @@ const parseTarget = (ctx: SkillCtx, raw: string): { x: number; y?: number; z: nu
 export const travel: Skill<TravelArgs> = {
   name: 'travel',
   description: '按地形步行和游泳前往目标；已乘船时沿水路停靠，保持乘坐并反馈落脚处，不制造或切换载具；三维目标核对实际高度',
-  argsDoc: '{"to": "x,z | x,y,z | 地标名 | base | death", "noBoat"?: true（只走和游，已乘船时需先自行下船）}；目标 2.5 格内算到达，带 y 时按三维距离核对',
+  argsDoc: '{"to": "x,z | x,y,z | 地标名 | base | death | 方向如 E 150", "noBoat"?: true（只走和游，已乘船时需先自行下船）}；目标 2.5 格内算到达，带 y 时按三维距离核对',
   timeoutMs: 600000,
   movement: true,
   validate(raw) {
     const a = obj(raw);
-    const to = String(a.to ?? a.target ?? '').trim();
-    if (!to) return { ok: false, error: 'to 不能为空' };
+    // 目标可能写成对象（{x,y,z}）或方向（"E 150"）：统一成字符串，避免把对象 String 成 "[object Object]"
+    const rawTo = a.to ?? a.target;
+    let to = '';
+    if (typeof rawTo === 'object' && rawTo !== null && !Array.isArray(rawTo)) {
+      const p = rawTo as Record<string, unknown>;
+      if ([p.x, p.y, p.z].every((n) => typeof n === 'number' && Number.isFinite(n))) to = `${p.x},${p.y},${p.z}`;
+      else if ([p.x, p.z].every((n) => typeof n === 'number' && Number.isFinite(n))) to = `${p.x},${p.z}`;
+    } else {
+      to = String(rawTo ?? '').trim();
+    }
+    if (!to) return { ok: false, error: 'to 需要 x,z / x,y,z 坐标、地标名、base、death，或方向如 "E 150"' };
     return { ok: true, args: { to, ...(a.noBoat === true ? { noBoat: true } : {}) } };
   },
   async run(ctx, args) {

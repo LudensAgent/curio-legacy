@@ -21,7 +21,7 @@ test('goto accepts coordinate objects without turning them into landmark names',
   }
 });
 
-test('goto reports path errors and measured progress when it stops beside an exact coordinate', async (t) => {
+test('goto reports arriving nearby with measured progress when it stops beside an exact coordinate', async (t) => {
   const adapter = new TestWorld();
   adapter.pos = { x: 1381.5, y: 70, z: 285.5 };
   const ctx = makeCtx(adapter);
@@ -31,13 +31,13 @@ test('goto reports path errors and measured progress when it stops beside an exa
     throw new Error('No path: 附近没有可确认安全的调整空间，换条路线');
   });
   const result = await goTo.run(ctx, { target: '1383,70,284', dig: true });
-  assert.equal(result.status, 'failed');
-  assert.equal(result.failureCode, 'PATH_NOT_FOUND');
-  assert.match(result.summary, /尚未到达.*No path: 附近没有可确认安全的调整空间/);
+  assert.equal(result.status, 'succeeded');
+  assert.match(result.summary, /到达 .*附近.*差 [\d.]+ 格.*No path: 附近没有可确认安全的调整空间/);
   assert.deepEqual(result.data?.targetCell, { x: 1383, y: 70, z: 284 });
   assert.deepEqual(result.data?.positionCell, { x: 1382, y: 70, z: 285 });
   assert.equal(result.data?.arrivedCell, false);
   assert.equal(result.data?.nextTo, true);
+  assert.equal(result.data?.arrivedNearby, true);
   assert.ok((result.data?.moved as number) > 1);
 });
 
@@ -56,7 +56,7 @@ test('goto preserves timeout and does not report an adjacent unknown cell as blo
   assert.equal(result.data?.moved, 0);
 });
 
-test('a failed adjacent goto reports a freshly observed target door without claiming why it blocked movement', async (t) => {
+test('an adjacent goto reports a freshly observed target door without claiming why it blocked movement', async (t) => {
   const adapter = new TestWorld();
   adapter.pos = { x: 0.5, y: 64, z: 0.5 };
   const s = adapter.state(), pos = { x: 1, y: 65, z: 0 };
@@ -66,6 +66,7 @@ test('a failed adjacent goto reports a freshly observed target door without clai
   t.mock.method(adapter, 'blockOptics', () => ({ name: 'oak_door', kind: 'solid', shapes: [[0, 0, 0.8125, 1, 1, 1]] }));
   t.mock.method(adapter, 'moveTo', async () => { throw new Error('No path'); });
   const result = await goTo.run(ctx, { target: '1,65,0', dig: true });
+  assert.equal(result.status, 'succeeded');
   assert.match(result.summary, /目标格看到 oak_door，门目前打开，尚未确认它是否挡住路线/);
   assert.equal((result.data?.observedDoor as { properties: { open: boolean } }).properties.open, true);
 });

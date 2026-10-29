@@ -189,7 +189,8 @@ const PRINCIPLES = `【原则】
 const PRECISE = `【精确操作】local 以脚部占据格为原点：[前,上,右]，前=local.facing。spots.stand/place 是当前可见的候选站位/放置格，仍需动作确认。step 指脚部目标格，place_at 指方块占据格，支撑在脚部目标下面一格。
 - [0,0,0] 是脚部格，[0,1,0] 是头部格，[0,-1,0] 是支撑格。place_at [0,0,0] 放实心方块会跳起垫高；梯子、火把可放进身体格（需有附着面）。挖空 [0,-1,0] 会下落，无需 step。
 - step [1,-1,0] 下一级需 [1,-2,0] 支撑；place_at [1,-1,0] 会堵住该脚部目标格。place_at 上下范围 -1..3，不能原位补 [1,-2,0]。
-repeat 每轮重做整套 steps；子步骤继承 activity.facing，每步相对坐标按当前位置重算。done_when 写可观察结果。照明可选 place_torch 或空闲习惯 habits.torch_every。挖前看清目标格。`;
+repeat 每轮重做整套 steps；子步骤继承 activity.facing，每步相对坐标按当前位置重算。done_when 写可观察结果。照明可选 place_torch 或空闲习惯 habits.torch_every。挖前看清目标格。
+- 机械性失败身体会就地应变再重试：太暗先插火把、脚下无支撑先垫一块、头顶被挡先挖开（会消耗方块/火把）；应变不动才交给你决定。`;
 
 const EXAMPLE = `【例子】想有个家时：
 → {"kind":"design","brief":"湖边能住的小屋，云杉木，放得下床、箱子和工作台"}

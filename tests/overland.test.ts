@@ -78,6 +78,31 @@ test('travel：地标和目标别名经二次校验保留目的地与选项', ()
   }
 });
 
+test('travel：对象或方向写法的目标都能解析，不把对象 String 成 [object Object]', () => {
+  const a = new FakeAdapter();
+  a.pos = { x: 0.5, y: 64, z: 0.5 };
+  const obj3 = validateSkill(travel, { to: { x: 30, y: 64, z: 0 } }, a);
+  assert.equal(obj3.ok, true);
+  if (obj3.ok) assert.equal(obj3.args.to, '30,64,0');
+  const obj2 = validateSkill(travel, { target: { x: 30, z: 0 } }, a);
+  assert.equal(obj2.ok, true);
+  if (obj2.ok) assert.equal(obj2.args.to, '30,0');
+  const head = validateSkill(travel, { to: 'E 150' }, a);
+  assert.equal(head.ok, true);
+  if (head.ok) assert.equal(head.args.to, 'E 150');
+  const bad = validateSkill(travel, { to: { x: 30 } }, a);
+  assert.equal(bad.ok, false);
+});
+
+test('travel：方向写法 "E 150" 按朝向算落点，不报看不懂目标', async () => {
+  const a = new FakeAdapter();
+  a.pos = { x: 0.5, y: 64, z: 0.5 };
+  const r = await run(a, 'travel', { to: 'E 150' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.ok(a.pos.x > 100, JSON.stringify(a.pos));
+  assert.doesNotMatch(r.summary, /看不懂目标/);
+});
+
 test('travel：三维目标不能只按水平距离报告到达', async () => {
   const a = new FakeAdapter();
   a.pos = { x: 1390.73, y: 58, z: 282.5 };

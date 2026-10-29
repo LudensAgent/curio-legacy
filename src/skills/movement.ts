@@ -234,7 +234,7 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
 // ------------------------------------------------------------------ goto
 export const goTo: Skill<{ target: string; dig?: boolean; place?: boolean; tower?: boolean; sprint?: boolean; avoid?: string[]; lead?: string }> = {
   name: 'goto',
-  description: '步行去地标或坐标；普通步行按可见或近期亲历的落脚点引导，明确三维坐标须进入指定格。遇到已观察的木门会开门。默认不挖墙、不放方块；dig:true 兼容旧行为，允许挖掘、垫路及原地搭柱。place:false 可禁止放置，tower:false 可禁止原地搭柱；也可单独设 place:true 授权垫路、tower:true 授权搭柱。搭建消耗方块，可能在水面架桥。lead 可带指定生物走。',
+  description: '步行去地标或坐标；普通步行按可见或近期亲历的落脚点引导，明确三维坐标尽量进入指定格，进不去时停在相邻格并说明差多少。遇到已观察的木门会开门。默认不挖墙、不放方块；dig:true 兼容旧行为，允许挖掘、垫路及原地搭柱。place:false 可禁止放置，tower:false 可禁止原地搭柱；也可单独设 place:true 授权垫路、tower:true 授权搭柱。搭建消耗方块，可能在水面架桥。lead 可带指定生物走。',
   argsDoc: '{"target":"<地标、坐标或方向>" 或 {"x":数字,"y":数字,"z":数字}, "dig"?:boolean, "place"?:boolean（允许垫路，默认继承 dig）, "tower"?:boolean（允许原地搭柱，默认继承 dig 且需要 place）, "sprint"?:boolean, "avoid"?:["方块名"], "lead"?:"生物名"}',
   timeoutMs: 600000,
   movement: true,
@@ -347,16 +347,26 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
       ...(flat ? { horizontalOnly: true } : {}) });
     // 邻格只是实际进展，不代表已到达指定格；不推断未见目标的障碍。
     const nextTo = (p: Vec3Like) => !flat && !!nums && !heading && Math.max(Math.abs(Math.floor(p.x) - Math.floor(pos!.x)), Math.abs(Math.floor(p.y) - Math.floor(pos!.y)), Math.abs(Math.floor(p.z) - Math.floor(pos!.z))) <= 1;
-    const failedNear = (p: Vec3Like, why: string, code: FailureCode = 'PATH_NOT_FOUND') => {
+    const doorNoteAt = () => {
       ctx.senses.refresh();
       const door = ctx.senses.observeBlocks?.([cell(pos!)])[0];
       const observedDoor = door?.source === 'vision' && door.worldId === s.worldId && door.dimension === s.dim && door.sessionId === s.sessionId
         && Math.abs(Date.now() - door.observedAt) <= 2000 && door.name.endsWith('_door') ? door : null;
       const open = observedDoor?.properties.open;
       // blockOptics 是禁用的透视接口，不能为诊断门板位置而调用它。
-      const doorNote = observedDoor && (open === true || open === false || open === 'true' || open === 'false')
+      const note = observedDoor && (open === true || open === false || open === 'true' || open === 'false')
         ? `；目标格看到 ${observedDoor.name}，门目前${String(open) === 'true' ? '打开' : '关闭'}，尚未确认它是否挡住路线` : '';
-      return fail(code, `尚未到达 ${label} 的目标格：实际站在 (${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)})，紧挨着目标格，差 ${distance(p).toFixed(2)} 格（${why}）${doorNote}${terrainNote()}`, { ...measured(p), nextTo: true, ...(observedDoor ? { observedDoor } : {}) });
+      return { note, observedDoor };
+    };
+    // 明确坐标那格走不进去（被挡/够不着）时，人已经停在相邻格：如实报告"到旁边了、差多少"，不算失败也不谎称进格。
+    const arrivedNearby = (p: Vec3Like, why: string) => {
+      const { note, observedDoor } = doorNoteAt();
+      return ok(`到达 ${label} 附近：站在相邻格 (${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)})，差 ${distance(p).toFixed(2)} 格，没能进入目标格（${why}）${note}${terrainNote()}`, { ...measured(p), nextTo: true, arrivedNearby: true, ...(observedDoor ? { observedDoor } : {}) });
+    };
+    // 一步都没挪动、还贴着目标格：这是卡住，不是"到附近"，照旧报失败。
+    const failedNear = (p: Vec3Like, why: string, code: FailureCode = 'PATH_NOT_FOUND') => {
+      const { note, observedDoor } = doorNoteAt();
+      return fail(code, `尚未到达 ${label} 的目标格：实际站在 (${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)})，紧挨着目标格，差 ${distance(p).toFixed(2)} 格（${why}）${note}${terrainNote()}`, { ...measured(p), nextTo: true, ...(observedDoor ? { observedDoor } : {}) });
     };
     const inScope = () => {
       throwIfAborted(signal);
@@ -488,12 +498,12 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
           return fail('PATH_NOT_FOUND', `前往 ${label} 没有取得进展，仍在 (${after.x.toFixed(2)},${after.y.toFixed(2)},${after.z.toFixed(2)})；尚未到达目标位置，需要换入口或路线${wet}`, measured(after));
         }
         if (distance(after) < bestDistance - 0.5) { bestDistance = distance(after); detours = 0; }
-        else if (++detours >= (args.dig || allowPlace ? 6 : 4)) return nextTo(after) ? failedNear(after, '绕了几次也没走进那一格') : fail('PATH_NOT_FOUND', `绕行后仍未接近 ${label}`, measured(after));
+        else if (++detours >= (args.dig || allowPlace ? 6 : 4)) return nextTo(after) ? arrivedNearby(after, '绕了几次也没走进那一格') : fail('PATH_NOT_FOUND', `绕行后仍未接近 ${label}`, measured(after));
         visited.push(waypoint ?? after);
       }
       if (!inScope()) return fail('WRONG_DIMENSION', '途中世界或会话已改变，需要重新规划');
       const end = adapter.state().pos;
-      if (!arrived(end)) return nextTo(end) ? failedNear(end, '那一格没走进去') : fail('PATH_NOT_FOUND', `尚未到达 ${label}，需要重新选择路线`, measured(end));
+      if (!arrived(end)) return nextTo(end) ? arrivedNearby(end, '那一格没走进去') : fail('PATH_NOT_FOUND', `尚未到达 ${label}，需要重新选择路线`, measured(end));
       await face();
       if (args.lead) {
         const f = follower(ctx, args.lead, leadId);
@@ -506,7 +516,13 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
       // 寻路报错（想太久、换路失败）时人可能已经走到了：先看看实际在哪，别把到了的当成没到
       const now = adapter.state().pos;
       if (inScope() && arrived(now)) { await face(); return ok(`到达 ${label}${nums ? ' 的目标格' : ' 附近'}；实际站在 (${now.x.toFixed(2)},${now.y.toFixed(2)},${now.z.toFixed(2)})，距目标点 ${distance(now).toFixed(2)} 格（寻路最后报了“${(e as Error).message.slice(0, 40)}”，但人已经到了）${terrainNote()}`, measured(now)); }
-      if (inScope() && nextTo(now)) return failedNear(now, `寻路报“${(e as Error).message}”，那一格没走进去`, codeFromError(e));
+      if (inScope() && nextTo(now)) {
+        const code = codeFromError(e);
+        // 只有"没路可走"才当"到附近"；超时这类临时失败仍按原失败码报，别谎称到了
+        return code === 'PATH_NOT_FOUND'
+          ? arrivedNearby(now, `寻路报“${(e as Error).message}”，那一格没走进去`)
+          : failedNear(now, `寻路报“${(e as Error).message}”，那一格没走进去`, code);
+      }
       const water = waterNear();
       return fail(codeFromError(e), `前往 ${label} 失败：${(e as Error).message}${water ? '；附近有水，尚未确认干燥步行通路' : ''}`, {
         ...measured(), waterAhead: water,
@@ -679,6 +695,12 @@ export const surface: Skill<{ escape?: 'dig' | 'shore' }> = {
     const notes: string[] = [];
     while (Date.now() < end) {
       ctx.signal.throwIfAborted();
+      // 头还没出水面、头顶又是通到水面的开阔水路：先原地按住上浮换气。
+      // 换气是 surface 的第一要务，也是任何 escape 战术（挖顶/找气穴/游上岸）的前提，不能让战术跳过这一步。
+      if (ctx.adapter.state().inWater && !headInAir(ctx) && !ceilingAbove(ctx)) {
+        await ctx.adapter.swimTo(null, ctx.signal, { timeoutMs: Math.max(300, Math.min(2000, end - Date.now())) });
+        continue;
+      }
       // 头顶被冰/石头封住时往上游没用：够得着就挖开（玩家在冰下、水洞里会这么做），够不着先往上游到够得着
       const lid = ceilingAbove(ctx);
       let sealed = false;
