@@ -68,10 +68,10 @@ test('显式配置缺失或模式无效时报错，默认无 .env 仍可本地�
   assert.equal(config.dashboard.port, 3001);
 });
 
-test('界面展示默认不延迟实际操作，显式等待值仍然生效', async (t) => {
+test('界面默认只在窗口边界短暂停留，显式等待值仍然生效', async (t) => {
   project(t);
   const defaults = await loadConfig();
-  assert.deepEqual(defaults.config.ui, { pacingMs: 0, openHoldMs: 0, closeHoldMs: 0 });
+  assert.deepEqual(defaults.config.ui, { pacingMs: 0, openHoldMs: 250, closeHoldMs: 450 });
   process.env.UI_PACING_MS = '250';
   process.env.UI_OPEN_HOLD_MS = '600';
   process.env.UI_CLOSE_HOLD_MS = '800';

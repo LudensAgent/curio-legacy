@@ -132,6 +132,25 @@ test('dedicated chest adapter reports acknowledged partial deposits for shulker 
   assert.deepEqual(result.contents, [{ name: 'diamond', count: 2 }]);
 });
 
+test('dedicated chest holds its opening and result once while depositing a whole stack in one transfer', async () => {
+  const f = containerFixture(), times: Record<string, number> = {}, calls: number[] = [];
+  Reflect.get(f.adapter, 'cfg').ui = { pacingMs: 0, openHoldMs: 45, closeHoldMs: 60 };
+  f.slots[27] = f.item('diamond', 64);
+  f.bot.openBlock = async () => { times.open = Date.now(); return f.window; };
+  f.bot.openContainer = async () => f.bot.openBlock();
+  f.window.close = () => { times.close = Date.now(); };
+  Object.assign(f.window, { async deposit(_type: number, _metadata: null, count: number) {
+    times.transfer = Date.now(); calls.push(count);
+    f.slots[0] = f.slots[27]; f.slots[27] = null;
+  } });
+  Reflect.get(f.adapter, 'installUiPacing').call(f.adapter, f.bot);
+  const result = await f.adapter.useChest(pos, [{ name: 'diamond', count: 64 }], [], new AbortController().signal);
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, [64]);
+  assert.ok(times.transfer - times.open >= 40, 'the viewer can see the opened chest before the transfer');
+  assert.ok(times.close - times.transfer >= 55, 'the viewer can see the result before the chest closes');
+});
+
 test('dedicated chest adapter preserves an acknowledged first transfer when the next is cancelled', async () => {
   const f = containerFixture(), observations: GuiContainerObservation[] = [];
   f.slots[27] = f.item('diamond', 10); f.slots[28] = f.item('coal', 3);
@@ -146,7 +165,8 @@ test('dedicated chest adapter preserves an acknowledged first transfer when the 
 });
 
 test('dig_at clears only the removed chest and its impressions, leaving an adjacent chest intact', async (t) => {
-  const world = new TestWorld(), ctx = makeCtx(world);
+  const world = new TestWorld(), ctx = makeCtx(world, { senses: { observeBlocks: (positions) => positions.map((p) => ({ name: world.blockAt(p) ?? 'air', properties: {}, pos: p,
+    worldId: world.worldId, dimension: world.dim, sessionId: world.sessionId, observationId: 1, observedAt: Date.now(), source: 'vision' })) } });
   t.after(() => ctx.memory.close()); ctx.memory.setWorld(world.worldId);
   const next = { ...pos, z: 1 };
   [pos, next].forEach((p) => {

@@ -239,7 +239,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   private lastPacedClick = 0;
 
   /**
-   * 界面节奏（UI_PACING_MS / UI_OPEN_HOLD_MS / UI_CLOSE_HOLD_MS）：默认不等待，显式设置后才延迟点击或窗口开关。
+   * 界面节奏（UI_PACING_MS / UI_OPEN_HOLD_MS / UI_CLOSE_HOLD_MS）：默认只在窗口开关时短暂停留，不逐次延迟点击。
    * Mineflayer 补丁（scripts/patch-deps.mjs）让 craft / transfer / deposit / withdraw / toss / equip 的点击经过 beforeWindowClick。
    */
   private installUiPacing(bot: any) {
@@ -2905,6 +2905,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       }
       await this.afterAction(() => raceAbort(b._syncWindow(window), signal, 8000, () => {}), check);
       if (window.slots[0]?.type === resultId) {
+        // 整批材料已经摆好：只停一次让观察端看到配方，不按产物数量放慢。
+        await this.afterAction(() => sleep(this.cfg.ui?.openHoldMs ?? 0, signal), check);
         await this.afterAction(() => b.clickWindow(0, 0, 1), check);
         await this.afterAction(() => raceAbort(b._syncWindow(window), signal, 8000, () => {}), check);
       }

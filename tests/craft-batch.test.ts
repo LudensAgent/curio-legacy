@@ -66,6 +66,20 @@ test('一次把料按格放齐，shift 点产物做完一整批，而不是一�
   assert.equal(clicks.filter((c) => c === 'click 0 mode1').length, 1, '产物只点一次');
 });
 
+test('整批合成在材料摆齐后停一次，再一次取走整批产物', async () => {
+  const { a, clicks } = rig({ oak_planks: 40 }, { name: 'stick', count: 4 });
+  a.cfg = { ...config, ui: { pacingMs: 0, openHoldMs: 40, closeHoldMs: 0 } };
+  const times: Record<string, number> = {};
+  const sync = a.bot._syncWindow, click = a.bot.clickWindow;
+  a.bot._syncWindow = async () => { if (!times.placed) times.placed = Date.now(); return sync(); };
+  a.bot.clickWindow = async (...args: number[]) => { if (args[0] === 0) times.output = Date.now(); return click(...args); };
+  const made = await a.craftBatch(recipe([['oak_planks'], ['oak_planks']], 'stick', 4), 16, null, new AbortController().signal);
+  assert.equal(made, 16);
+  assert.deepEqual(clicks.filter((c) => c.startsWith('put')), ['put 16@1', 'put 16@3']);
+  assert.equal(clicks.filter((c) => c === 'click 0 mode1').length, 1);
+  assert.ok(times.output - times.placed >= 35);
+});
+
 test('一批的上限按料的单组上限：鸡蛋一格最多放 16 个', async () => {
   const { a, clicks } = rig({ egg: 32, sugar: 32 }, { name: 'pumpkin_pie', count: 1 });
   const made = await a.craftBatch(recipe([['egg', 'sugar']], 'pumpkin_pie', 1), 30, null, new AbortController().signal);

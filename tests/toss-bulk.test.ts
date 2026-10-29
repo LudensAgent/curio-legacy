@@ -10,7 +10,7 @@ const registry = require('prismarine-registry')('1.20.1');
 const Item = require('prismarine-item')(registry), { createWindow } = require('prismarine-windows')(registry), { Vec3 } = require('vec3');
 const stone = registry.itemsByName.cobblestone.id;
 
-function fixture() {
+function fixture(ui = { pacingMs: 0, openHoldMs: 0, closeHoldMs: 0 }) {
   const inventory = createWindow(0, 'minecraft:inventory', ''), clicks: number[][] = [], dropped: { count: number; nbt: unknown }[] = [];
   const bot: any = { inventory, currentWindow: null, entity: { position: new Vec3(0, 64, 0), yaw: 0 }, game: { dimension: 'overworld' }, _syncWindow: async () => {} };
   bot.clickWindow = async (slot: number, button: number, mode: number) => {
@@ -23,12 +23,28 @@ function fixture() {
     if (slot === -999 || mode === 4) dropped.push({ count: previous - (after ?? 0), nbt: data });
     clicks.push([slot, button, mode]);
   };
-  const adapter = new MineflayerAdapter({ ...config, ui: { pacingMs: 0, openHoldMs: 0, closeHoldMs: 0 } }, new EventBus());
+  const adapter = new MineflayerAdapter({ ...config, ui }, new EventBus());
   adapter.bot = bot; adapter.mcData = registry; Reflect.set(adapter, 'connectedFlag', true);
   const put = (slot: number, count: number, nbt: unknown = null) => inventory.updateSlot(slot, new Item(stone, count, 0, nbt));
   const fill = () => { for (let slot = 9; slot <= 44; slot++) if (!inventory.slots[slot]) inventory.updateSlot(slot, new Item(registry.itemsByName.dirt.id, 64)); };
   return { adapter, inventory, bot, clicks, dropped, put, fill };
 }
+
+test('window holds apply once to a whole-stack toss, without splitting the stack', async () => {
+  const f = fixture({ pacingMs: 0, openHoldMs: 40, closeHoldMs: 50 });
+  f.put(9, 64);
+  const times: Record<string, number> = {};
+  f.adapter.on('inventory_open', () => { times.open = Date.now(); });
+  f.adapter.on('inventory_close', () => { times.close = Date.now(); });
+  const acceptClick = f.inventory.acceptClick.bind(f.inventory);
+  f.inventory.acceptClick = (...args: Parameters<typeof acceptClick>) => { times.click = Date.now(); return acceptClick(...args); };
+  const result = await f.adapter.tossItem('cobblestone', 64, new AbortController().signal);
+  assert.equal(result.tossed, 64);
+  assert.deepEqual(f.dropped.map((item) => item.count), [64]);
+  assert.deepEqual(f.clicks, [[9, 1, 4]]);
+  assert.ok(times.click - times.open >= 35);
+  assert.ok(times.close - times.click >= 45);
+});
 
 test('one complete identical stack is preferred over a partial stack for a 64-item request', async () => {
   const f = fixture(); f.put(9, 1); f.put(10, 64); f.fill();

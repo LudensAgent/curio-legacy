@@ -87,7 +87,7 @@
 | 数据流 | 新增 `src/observer/feed.ts` | 订阅 Mineflayer 事件，生成增量消息 |
 | 传输 | 复用 `src/observer/dashboard.ts` 的 HTTP 服务，新增 `GET /api/observer/stream` | SSE，只绑定 127.0.0.1 |
 | 演示 | `npm run observer:demo` | 不连服务器也能回放一段脚本化数据，方便单独开发模组 |
-| 节奏 | `UI_PACING_MS` | 可选的界面点击等待；默认不延迟实际操作 |
+| 节奏 | `UI_PACING_MS` | 可选的界面点击等待；默认不逐次放慢点击 |
 
 ## 5. 数据协议（v1）
 
@@ -152,12 +152,12 @@
 
 Mineflayer 的 `craft` / `transfer` / `deposit` / `withdraw` / `toss` / `equip` 内部调的是模块内的本地 `clickWindow`，不经过 `bot.clickWindow`，
 在外面包 `bot.clickWindow` 只能管到 `bot.craft` 那一条路；整批合成（每格放一叠、shift 点产物）和箱子整理几十下点击在几十毫秒内全部发完。
-Agent 的适配器可按配置增加等待（`scripts/patch-deps.mjs` 给 Mineflayer 打补丁，`MineflayerAdapter.installUiPacing`）。默认不延迟实际操作；显式设置非零值时：
+Agent 的适配器按配置增加等待（`scripts/patch-deps.mjs` 给 Mineflayer 打补丁，`MineflayerAdapter.installUiPacing`）。默认只在窗口打开和关闭时短暂停留：
 
 1. Mineflayer 的 `clickWindow` 入口每次先 `await bot.beforeWindowClick(slot, button, mode)`；适配器在这里 `sleep(UI_PACING_MS)`（默认 0ms，shift 点击按 60%），
    所有背包操作（合成、箱子、熔炉、交易、扔、换装备）都一下一下点。动作被打断时停顿立刻结束。
-2. `openBlock` / `openEntity`（所有窗口都从这两个入口打开）返回前停留 `UI_OPEN_HOLD_MS`；关窗前停留 `UI_CLOSE_HOLD_MS`，背包 2×2 合成结束时也停一下。两项默认均为 0ms。
-3. `installMineflayerObserver` 传 `pacingMs: 0`，数据流不再另外包 `bot.clickWindow`。
+2. `openBlock` / `openEntity`（所有窗口都从这两个入口打开）返回前停留 `UI_OPEN_HOLD_MS`（默认 250ms）；关窗前停留 `UI_CLOSE_HOLD_MS`（默认 450ms），背包 2×2 合成结束时也停一下。
+3. 批量合成的材料摆齐后额外停留 `UI_OPEN_HOLD_MS` 一次，再整批取出产物。`installMineflayerObserver` 传 `pacingMs: 0`，数据流不再另外包 `bot.clickWindow`。
 
 这些等待会延长实际技能执行时间；Observer 展示实际窗口变化。分别设为 0 可关闭对应等待，点击失控保护仍然生效。
 
