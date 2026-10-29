@@ -90,6 +90,8 @@ export class BuildingArchive {
   }
 
   list(): BuildingProject[] { return structuredClone(this.projects); }
+  /** 只读视图，不做深拷贝：逐格判断「是不是自己盖的」这类热路径用，别改返回值（改了会写进档案）。 */
+  listRef(): readonly BuildingProject[] { return this.projects; }
   get(id: string): BuildingProject | undefined { return structuredClone(this.projects.find((p) => p.id === id)); }
   private require(id: string) {
     const project = this.projects.find((p) => p.id === id);

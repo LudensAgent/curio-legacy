@@ -35,8 +35,8 @@ export function buildingArchiveFor(memory: WorldMemory): BuildingArchive {
 const footprints = new Map<string, Map<string, string>>();
 export function ownBuildingAt(memory: WorldMemory, state: { worldId: string; dim: string }, pos: Vec3Like, blockName?: string | null): { id: string; name: string } | null {
   const p = { x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z) };
-  let projects: BuildingProject[];
-  try { projects = buildingArchiveFor(memory).list(); } catch { return null; }
+  let projects: readonly BuildingProject[];
+  try { projects = buildingArchiveFor(memory).listRef(); } catch { return null; }
   for (const project of projects) {
     if (project.worldId !== state.worldId || project.dimension !== state.dim) continue;
     const spec = project.versions.at(-1)?.spec;
@@ -82,7 +82,7 @@ export const OWN_BUILDING_HINT = '拆了拿料，build 回头还会报缺这一�
 
 /** 自己别的作品占着的地（没盖完的、放弃的、盖好的都算）：新工地不和它们重叠；except 是正在续建的那座 */
 export function ownFootprints(archive: BuildingArchive, worldId: string, dim: string, except?: string): SiteRect[] {
-  return archive.list().filter((p) => p.worldId === worldId && p.dimension === dim && p.id !== except && p.versions.length)
+  return archive.listRef().filter((p) => p.worldId === worldId && p.dimension === dim && p.id !== except && p.versions.length)
     .map((p) => { const r = projectRect(p.origin, p.rotation, p.versions.at(-1)!.spec); return { minX: r.minX - 1, maxX: r.maxX + 1, minZ: r.minZ - 1, maxZ: r.maxZ + 1 }; });
 }
 
