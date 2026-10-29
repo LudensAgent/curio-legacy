@@ -192,6 +192,21 @@ test('仓储：存什么和存入哪个箱子由它点名，没点名的一样�
   assert.match(r.o.result.summary, /没有 gravel/);
 });
 
+test('仓储：箱子满了存入 0 件仍报失败，不假装成功、也不丢背包物品', async () => {
+  const a = new FakeAdapter();
+  a.inv.set('cobblestone', 64);
+  const memory = new WorldMemory(null);
+  memory.setWorld(a.state().worldId);
+  const target = { x: 2, y: 64, z: 0 };
+  a.blocks.push({ name: 'chest', pos: target });
+  a.chests.set('2,64,0', new Map([['cobblestone', 64]]));
+  a.chestFull = true;
+  const r = await runSkill(a, 'store_items', { items: ['cobblestone'], target }, memory);
+  assert.equal(r.o.result.status, 'failed', r.o.result.summary);
+  assert.match(r.o.result.summary, /没有存入任何物品/);
+  assert.equal(a.inv.get('cobblestone'), 64, '满了不能丢背包里的物品');
+});
+
 test('仓储未指定 target 只返回线索，make:true 也不制造或放置箱子', async (t) => {
   for (const preparation of ['chest', 'oak_planks']) for (const make of [false, true]) {
     const a = new FakeAdapter(), memory = new WorldMemory(null);

@@ -286,6 +286,8 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
   }
   isDay = true;
   chests = new Map<string, Map<string, number>>();
+  /** 模拟箱子装满：置为 true 时 useChest 不搬任何东西，moved 恒为 0 */
+  chestFull = false;
   crops = new Map<string, { age: number; crop: string }>();
   private take(name: string, n: number) {
     this.inv.set(name, Math.max(0, (this.inv.get(name) ?? 0) - n));
@@ -313,6 +315,7 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
     await sleep(50, signal);
     const c = this.chests.get(this.k(pos.x, pos.y, pos.z)) ?? new Map<string, number>();
     let moved = 0;
+    if (this.chestFull) return { ok: true, contents: [...c].filter(([, n]) => n > 0).map(([name, count]) => ({ name, count })), moved: 0 };
     for (const d of deposits) { const n = Math.min(d.count, this.inv.get(d.name) ?? 0); this.take(d.name, n); c.set(d.name, (c.get(d.name) ?? 0) + n); moved += n; }
     for (const w of withdraws) { const n = Math.min(w.count, c.get(w.name) ?? 0); c.set(w.name, (c.get(w.name) ?? 0) - n); this.inv.set(w.name, (this.inv.get(w.name) ?? 0) + n); moved += n; }
     this.chests.set(this.k(pos.x, pos.y, pos.z), c);

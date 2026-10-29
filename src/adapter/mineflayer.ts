@@ -2628,8 +2628,24 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         check();
         const it = this.invItem(d.name);
         if (!it) continue;
-        const n = Math.min(d.count, b.inventory.items().filter((i: any) => i.name === d.name).reduce((a: number, i: any) => a + i.count, 0));
-        try { await this.afterAction(() => chest.deposit(it.type, null, n), check); } catch (e) { if (e instanceof AbortedError) throw e; }
+        const have = b.inventory.items().filter((i: any) => i.name === d.name).reduce((a: number, i: any) => a + i.count, 0);
+        if (have <= 0) continue;
+        // 只存入箱子实际装得下的数量。mineflayer 的 deposit 会先把整叠捡到光标上，
+        // 放不下时抛 'destination full'，光标上那叠就丢了（日志里“顺带用掉了 cobblestone×64”）。
+        const stackSize = it.stackSize ?? this.mcData.itemsByName?.[it.name]?.stackSize ?? 64;
+        let free = 0;
+        for (let s = 0; s < chest.inventoryStart; s++) {
+          const slot = chest.slots[s];
+          if (!slot) free += stackSize;
+          else if (slot.type === it.type && slot.count < stackSize) free += stackSize - slot.count;
+        }
+        const n = Math.min(d.count, have, free);
+        if (n <= 0) continue; // 满了：一叠都放不进，避免捡起来再丢
+        try { await this.afterAction(() => chest.deposit(it.type, null, n), check); } catch (e) {
+          if (e instanceof AbortedError) throw e;
+          // 意外失败（例如服务器端被占位）：把光标上剩下的东西放回背包，别丢了
+          try { await this.afterAction(() => b.putSelectedItemRange(chest.inventoryStart, chest.inventoryEnd, chest, null), check); } catch { /* ignore */ }
+        }
         await synchronize();
         check();
       }
@@ -3555,20 +3571,17 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (!block) return { ok: false, reason: 'NO_BLOCK' };
       if (this.mcData.blocksByName?.[item]) return await this.placeItemAgainst(item, block, check);
       if (/_boat$|_raft$/.test(item)) {
-        // Boat use raycasts from the player's eyes. Aim inside the requested fluid
-        // surface instead of the air at y+1; placeEntity would overwrite this aim.
-        const level = Number(block.getProperties?.().level ?? 0);
-        const height = block.name === 'water' && b.blockAt(block.position.offset(0, 1, 0))?.name !== 'water'
-          ? 1 - ((level >= 8 ? 0 : level) + 1) / 9 : 1;
-        const aim = block.position.offset(0.5, height - 0.01, 0.5);
-        await this.afterAction(() => b.lookAt(aim, true), check);
-        await this.afterAction(() => this.lookSynced(), check);
+        // 放船/筏：要对着水面那一格发 block_place 再补 use_item，服务器才会真正落船；木筏（bamboo_raft）落下的实体也叫 boat。
+        // 之前用 activateItem/deactivateItem 只发“使用物品”、不发 block_place，服务器不落船也不扣背包（日志 ENTITY_NOT_SPAWNED）。
         const ids = new Set(Object.keys(b.entities ?? {}));
         const count = () => (b.inventory.items() as InvItem[]).filter((held) => held.name === item).reduce((sum, held) => sum + held.count, 0);
         const before = count();
         const appeared = () => Object.values(b.entities as Record<number, Entity>).find((entity) => !ids.has(String(entity.id))
-          && /(^|_)(boat|raft)$/.test(entity.name ?? '') && entity.position.distanceTo(aim) < 3);
-        await this.afterAction(async () => { b.activateItem(); b.deactivateItem(); }, check);
+          && /(^|_)(boat|raft)$/.test(entity.name ?? '') && entity.position.distanceTo(block.position) < 3);
+        await this.afterAction(async () => {
+          await b._genericPlace(block, new Vec3(0, 1, 0));
+          if (b.supportFeature('useItemWithOwnPacket')) b._client.write('use_item', { hand: 0 });
+        }, check);
         const confirmed = await this.waitForInteraction(() => !!appeared(), check, 5000);
         const entity = appeared(), consumed = before - count();
         const reasons = [...(entity ? [`目标附近出现新实体 ${entity.name} #${entity.id}`] : ['目标附近没有确认新船实体']),

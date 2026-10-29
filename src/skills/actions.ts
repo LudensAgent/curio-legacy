@@ -24,7 +24,7 @@ const dirOk = (dir: string | undefined, from: { x: number; z: number }, to: { x:
 // ------------------------------------------------------------------ use_item
 export const useItem: Skill<{ item: string; on: string; dir?: string }> = {
   name: 'use_item',
-  description: '手持物品右键：对着最近的看得见的某种方块、水面或岩浆（on 写方块名），或对自己（on:"self"，扔东西朝正看着的方向）；要对准确定的那一格用 interact_block（写坐标）；对生物用东西（喂、剪、挤奶）是 interact',
+  description: '手持物品右键：对着最近的看得见的某种方块、水面或岩浆（on 写方块名），或对自己（on:"self"，扔东西朝正看着的方向）；手持船/筏（*_boat/*_raft）对 on:"water" 是放船（生成实体，之后 interact 坐上去、ride 划走）；要对准确定的那一格用 interact_block（写坐标）；对生物用东西（喂、剪、挤奶）是 interact',
   argsDoc: '{"item": "<物品名>", "on"?: "self | water | lava | <方块名>", "dir"?: "N|NE|E|SE|S|SW|W|NW"}',
   timeoutMs: 30000,
   movement: true,
@@ -259,7 +259,7 @@ export const ride: Skill<{ direction?: string; to?: { x: number; z: number }; di
   name: 'ride',
   outcomeBoundary: true,
   description: '驾驶当前载具；船沿水面寻路并考虑船宽，陆上目标停靠可上岸处；遇障碍或 until 即停，保持乘坐',
-  argsDoc: '{"direction"?: "N|NE|E|SE|S|SW|W|NW", "to"?: "x,z", "distance"?: 8-240, "until"?: "<方块/生物>"}',
+  argsDoc: '{"direction"?: "N|NE|E|SE|S|SW|W|NW", "to"?: "x,z"|{"x","z"}, "distance"?: 8-240, "until"?: "<方块/生物>"}',
   timeoutMs: 120000,
   movement: true,
   validate(raw) {
@@ -269,8 +269,12 @@ export const ride: Skill<{ direction?: string; to?: { x: number; z: number }; di
     let to: { x: number; z: number } | undefined;
     if (typeof a.to === 'string') {
       const m = a.to.match(/^\s*(-?\d+(?:\.\d+)?)[ ,]+(-?\d+(?:\.\d+)?)\s*$/);
-      if (!m) return { ok: false, error: 'to 的格式是 "x,z"' };
+      if (!m) return { ok: false, error: 'to 的格式是 "x,z" 或 {"x","z"}' };
       to = { x: +m[1], z: +m[2] };
+    } else if (a.to && typeof a.to === 'object' && !Array.isArray(a.to)) {
+      const x = Number((a.to as any).x), z = Number((a.to as any).z);
+      if (!Number.isFinite(x) || !Number.isFinite(z)) return { ok: false, error: 'to 的格式是 {"x","z"} 或 "x,z"' };
+      to = { x, z };
     }
     if (!direction && !to) return { ok: false, error: '需要 direction 或 to' };
     const until = typeof a.until === 'string' && a.until.trim() ? a.until.trim().toLowerCase().slice(0, 80) : undefined;

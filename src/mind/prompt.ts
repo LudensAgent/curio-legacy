@@ -276,6 +276,23 @@ const MINING_INTENT = /下矿|矿道|矿洞|找铁|挖铁|找矿|挖矿|粗铁|�
 /** 打算里说要从地下回地面 */
 const SURFACE_INTENT = /回地面|回到地面|见天|爬出|挖出去|出矿|上到地面|挖(阶梯|台阶).{0,8}上|往上挖/;
 
+/** 打算里说要过水 / 到对岸 */
+const WATER_CROSS_INTENT = /过水|过河|渡河|过海|过湖|涉水|划船|坐船|游过去|游到|对岸|对面|跨过.{0,8}(水|河|海|湖)|去.{0,12}(对岸|对面)|到.{0,12}(对岸|对面)/;
+
+/** 过水时三条路的代价（站在水边/水里才说；不替它决定架桥还是坐船） */
+export function waterCrossingHint(p: Percept, s: AgentState): string | null {
+  if (p.self.riding) return null;
+  const localWater = !!p.self.local && Object.values(p.self.local.layers).some((rows) => rows.some((row) => row.includes('~')));
+  if (!p.self.inWater && !localWater) return null;
+  const inv = s.inventory;
+  const boat = inv.filter((i) => /(^|_)(boat|raft)$/.test(i.name)).reduce((n, i) => n + i.count, 0);
+  const planks = inv.filter((i) => /_planks$/.test(i.name)).reduce((n, i) => n + i.count, 0);
+  const blocks = inv.filter((i) => /^(cobblestone|cobbled_deepslate|deepslate|stone|dirt|sand|gravel|netherrack|.*_planks)$/.test(i.name)).reduce((n, i) => n + i.count, 0);
+  const bridge = blocks ? `架桥：goto {"dig":true} 沿途垫方块（有 ${blocks} 块能垫的）` : '架桥：背包没有能垫的方块';
+  const boatNote = boat ? `坐船：背包有船 ${boat} 只，放船→上船→ride` : planks >= 5 ? `坐船：有 ${planks} 块木板，够造一只船（5 木板）再 ride` : '坐船：没船也没够木板（造船要 5 块木板）';
+  return `过水三选一，自己权衡：①${bridge}；②${boatNote}；③直接游过去（慢，会被溺尸打、可能淹死）`;
+}
+
 /** 按情境追加在用户消息末尾的提醒：只说和眼下有关的 2–4 件事 */
 export function situationalReminders(ctx: MindContext): string[] {
   const out: string[] = [];
@@ -333,6 +350,11 @@ export function situationalReminders(ctx: MindContext): string[] {
   if (SURFACE_INTENT.test(intent) && p.self.sky_visible !== true) {
     const t = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).find((f) => f.inside);
     if (t) out.push(`靠近自己挖过的通道的历史路线点；这条记录的参考点在 (${Math.round(t.pos.x)},${Math.round(t.pos.y)},${Math.round(t.pos.z)})，当前开口位置和路线是否可通尚未确认`);
+  }
+  // 过水：站在水边/水里时，把三条路的代价摆出来，让它自己权衡（不替它决定架桥还是坐船）
+  if (p.self.inWater || WATER_CROSS_INTENT.test(intent)) {
+    const hint = waterCrossingHint(p, s);
+    if (hint) out.push(hint);
   }
   if (where === 'indoors' && /坑|垫高|台阶|爬出|挖出去|出坑/.test(intent)) out.push(`你${p.self.where!.text}。刚才想的“坑”其实是屋子的墙`);
   // 没盖完的房子：久没碰了才提一句；一直在补却补不动，就把事实摆出来让它掂量够不够住（不再每一念都催“接着盖”）

@@ -384,10 +384,13 @@ const WOOD_COST: Record<string, { planks: number; cobble?: number; table: boolea
   stone_pickaxe: { planks: 1, cobble: 3, table: true }, stone_axe: { planks: 1, cobble: 3, table: true }, stone_shovel: { planks: 1, cobble: 1, table: true },
   stone_hoe: { planks: 1, cobble: 2, table: true }, stone_sword: { planks: 0.5, cobble: 2, table: true }, furnace: { planks: 0, cobble: 8, table: true },
   torch: { planks: 0.5, table: false },
+  boat: { planks: 5, table: true }, raft: { planks: 5, table: true },
 };
 /** 用玩家的算法说清楚“还差多少”：木镐要 4 块木板的料，工作台还要 4 块；1 块原木 = 4 块木板 */
 export function woodShortfall(item: string, count: number, inv: { name: string; count: number }[], tableNearby: boolean): string | null {
-  const cost = WOOD_COST[item];
+  // 带木种名的船/筏（oak_boat、spruce_boat、bamboo_raft）折成通用键，好查 WOOD_COST
+  const key = item.endsWith('_boat') ? 'boat' : item.endsWith('_raft') ? 'raft' : item;
+  const cost = WOOD_COST[item] ?? WOOD_COST[key];
   if (!cost) return null;
   const have = (pred: (n: string) => boolean) => inv.filter((i) => pred(i.name)).reduce((a, i) => a + i.count, 0);
   const planksHave = have((n) => n.endsWith('_planks')) + 4 * have((n) => /_(log|stem|wood|hyphae)$/.test(n)) + have((n) => n === 'stick') / 2;

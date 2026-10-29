@@ -135,7 +135,9 @@ export function planBoatRoute(ctx: Ctx, from: Vec3Like, target: XZ, opts: { maxN
   // 所以四周 8 格都是水的格子才算“宽裕”，贴岸的格子代价高（只在不得不走、或者最后靠岸时才走）
   const narrowCost = (x: number, z: number) => {
     const w = !nav(x - 1, z), e = !nav(x + 1, z), n = !nav(x, z - 1), s = !nav(x, z + 1);
-    if ((w && e) || (n && s)) return 12; // 一格宽：挤不过去
+    // 一格宽（左右或前后都被方块夹住）：船身 1.375 格宽根本挤不过去，直接不可达，而不是“代价很高”。
+    // 以前给 12 的代价，绕路更远时 A* 仍会选这条一格宽水道，船卡在里面反复纠结。
+    if ((w && e) || (n && s)) return Infinity;
     let blocked = 0;
     for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) if ((dx || dz) && !nav(x + dx, z + dz)) blocked++;
     return blocked ? 3 + blocked * 0.5 : 0;

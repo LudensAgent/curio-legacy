@@ -24,6 +24,7 @@ function fixture(item = 'cobblestone') {
     async placeBlock(reference: any, face: any) { placements++; assert.deepEqual(face, new Vec3(0, 1, 0)); put(item, reference.position.plus(face)); count--; },
     async activateBlock() { activations++; },
     clearControlStates() {}, deactivateItem() {}, pathfinder: { stop() {}, setGoal() {} },
+    supportFeature: () => false, _genericPlace: async () => {},
   };
   const adapter = new MineflayerAdapter(config, new EventBus());
   adapter.bot = bot; adapter.mcData = registry; (adapter as any).connectedFlag = true;
@@ -83,26 +84,29 @@ test('cancelled placement cannot send a late packet or report a confirmed block'
   assert.equal(packets, 0);
 });
 
-test('boat and raft use preserve the fluid-surface aim and wait past unrelated entity spawns', async (t) => {
+test('boat and raft use send block_place then use_item and wait past unrelated entity spawns', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_700_000_000_000 });
   for (const item of ['oak_boat', 'bamboo_raft']) {
     const f = fixture(item), water = new Vec3(3, 62, 0), order: string[] = [];
     f.put('water', water, { level: 0 });
-    f.bot.lookAt = async (point: { x: number; y: number; z: number }, force: boolean) => {
-      order.push(`look:${force}`);
-      assert.equal(point.y, water.y + 8 / 9 - 0.01, 'aim just inside the actual source-water surface');
+    f.bot.supportFeature = (name: string) => name === 'useItemWithOwnPacket';
+    f.bot._genericPlace = async (reference: any, face: any) => {
+      order.push('place');
+      assert.deepEqual(face, new Vec3(0, 1, 0));
+      assert.equal(reference.position.toString(), water.toString());
     };
-    f.bot.waitForTicks = async (n: number) => { order.push(`ticks:${n}`); };
-    f.bot.placeEntity = async () => { assert.fail('placeEntity would aim at the block top again and rejects rafts'); };
-    f.bot.activateItem = () => {
-      order.push('use');
-      f.bot.entities[77] = { id: 77, name: 'cow', position: water.offset(0.5, 1, 0.5) };
-      setTimeout(() => { f.consume(); f.bot.entities[88] = { id: 88, name: 'boat', position: water.offset(0.5, 0.9, 0.5) }; }, 100);
-    };
+    f.bot._client = { write(name: string) {
+      order.push(`write:${name}`);
+      if (name === 'use_item') {
+        // 先冒出一只无关实体，再落船：确认只等 boat，不会把牛当成新船
+        f.bot.entities[77] = { id: 77, name: 'cow', position: water.offset(0.5, 1, 0.5) };
+        setTimeout(() => { f.consume(); f.bot.entities[88] = { id: 88, name: 'boat', position: water.offset(0.5, 0.9, 0.5) }; }, 100);
+      }
+    } };
     const pending = f.adapter.useItemOn(item, { kind: 'block', pos: water }, new AbortController().signal);
     await flush(); t.mock.timers.tick(100); await flush();
     const result = await pending;
-    assert.deepEqual(order, ['look:true', 'ticks:2', 'use']);
+    assert.deepEqual(order, ['place', 'write:use_item']);
     assert.equal(result.ok, true, result.reason);
     assert.equal(result.spawned, 'boat');
     assert.equal(result.effectEvidence?.changed, true);
@@ -115,9 +119,7 @@ test('boat use reports consumption honestly without treating an existing boat as
     const f = fixture('oak_boat'), water = new Vec3(3, 62, 0);
     f.put('water', water);
     f.bot.entities[77] = { id: 77, name: 'boat', position: water.offset(0.5, 0.9, 0.5) };
-    f.bot.lookAt = async () => {};
-    f.bot.waitForTicks = async () => {};
-    f.bot.activateItem = () => { if (consumed) f.consume(); };
+    f.bot._genericPlace = async () => { if (consumed) f.consume(); };
     const pending = f.adapter.useItemOn('oak_boat', { kind: 'block', pos: water }, new AbortController().signal);
     await flush(); t.mock.timers.tick(5000); await flush();
     const result = await pending;
@@ -128,13 +130,13 @@ test('boat use reports consumption honestly without treating an existing boat as
   }
 });
 
-test('cancelled boat use cannot send a late use-item packet after its look wait', async () => {
+test('cancelled boat use cannot send a late use-item packet after the place wait', async () => {
   const f = fixture('oak_boat'), water = new Vec3(3, 62, 0), controller = new AbortController();
   f.put('water', water);
-  f.bot.lookAt = async () => {};
   let resume!: () => void, uses = 0;
-  f.bot.waitForTicks = () => new Promise<void>((resolve) => { resume = resolve; });
-  f.bot.activateItem = () => { uses++; };
+  f.bot.supportFeature = () => true;
+  f.bot._genericPlace = () => new Promise<void>((resolve) => { resume = resolve; });
+  f.bot._client = { write(name: string) { if (name === 'use_item') uses++; } };
   const pending = f.adapter.useItemOn('oak_boat', { kind: 'block', pos: water }, controller.signal);
   await flush(); controller.abort('replaced'); f.adapter.stopAll();
   await assert.rejects(pending, { name: 'AbortedError' });
