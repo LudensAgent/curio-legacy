@@ -54,7 +54,7 @@ export interface MindContext {
   gameMessages?: string[];
   repeatedFailures?: string[];
   /** 动作结束时实际观察到的失败；地形可能随后改变。 */
-  recentActionFailures?: { skill: string; args: unknown; failure_code: string | null; summary: string; position: AgentState['pos']; observed_at: string }[];
+  recentActionFailures?: { skill: string; args: unknown; failure_code: string | null; summary: string; position: AgentState['pos']; observed_at: string; repeats?: number }[];
   /** 建筑师正在后台画的图纸 */
   designing?: { brief: string; minutes: number };
   /** 按关键词自动想起来的经历、教训、技能 */
@@ -100,16 +100,17 @@ function briefOf(d: string, n: number): string {
   return at > n / 2 ? cut.slice(0, at) : `${cut}…`;
 }
 
-export function movesCatalog(chars = 40, only?: Set<string>, advanced = true): string {
+export function movesCatalog(chars = 40, only?: Set<string>, advanced = true, nameOnly: Set<string> = new Set()): string {
   const visible = Object.values(SKILLS).filter((s) => !LLM_HIDDEN.has(s.name) && (!only || only.has(s.name)));
-  const detailed = visible.filter((s) => only !== undefined || COMMON_MOVES.includes(s.name)).map((s) => {
+  const detailed = visible.filter((s) => !nameOnly.has(s.name) && (only !== undefined || COMMON_MOVES.includes(s.name))).map((s) => {
     // Both thinking tiers need the movement mode and its possible side effects.
     const description = ['look', 'dive', 'surface', 'travel'].includes(s.name) ? s.description.replace(/\s+/g, ' ')
       : chars ? briefOf(s.description, chars) : '';
     return `- ${s.name} ${s.argsDoc}${description ? `：${description}` : ''}`;
   });
-  const rare = only ? [] : visible.filter((s) => !COMMON_MOVES.includes(s.name) && (advanced || !ADVANCED.test(s.name))).map((s) => `${s.name}（${briefOf(s.description, 14)}）`);
-  return `${detailed.join('\n')}${rare.length ? `\n其他动作（用 {"kind":"moves","names":["…"]} 查完整参数）：${rare.join('、')}` : ''}${only ? '' : '\n缺工具、熔炉、船、火把时动作会顺手做（结果里写用掉了什么）；不想让它做就加 "make":false，缺了会停下说缺什么'}`;
+  const onDemand = visible.filter((s) => nameOnly.has(s.name) || (!only && !COMMON_MOVES.includes(s.name) && (advanced || !ADVANCED.test(s.name)))).map((s) => `${s.name}（${briefOf(s.description, 14)}）`);
+  const demandLine = onDemand.length ? `\n其他动作（用 {"kind":"moves","names":["…"]} 查完整参数）：${onDemand.join('、')}` : '';
+  return `${detailed.join('\n')}${demandLine}${only ? '' : '\n缺工具、熔炉、船、火把等默认报告缺口；加 "make":true 才允许顺手制造/准备并消耗材料，加 "make":false 则禁止本动作及嵌套准备'}`;
 }
 
 /** 完整参数（moves 查询用） */
@@ -149,7 +150,7 @@ const SKILLS_DOC = () => `【技能】把做法写进 skill 会保存候选：{"
 
 const PASSAGES_QUERY = `{"kind":"passages"} 查当前世界和维度的矿道记录；加 "id":"记录ID","offset":0 分页读历史脚点，每页最多32点。脚点不代表连续或双向可走，当前通路需现场确认。`;
 
-const QUERIES = (skills: string[]) => `【先查再做】需要时先输出一个查询 JSON（不占游戏时间，每次思考最多 3 次），拿到结果再决定：
+const QUERIES = (skills: string[]) => `【先查再做】需要时先输出一个查询 JSON（查询本身不执行身体动作，但等待期间世界仍在运行、身体可能继续动作，每次思考最多 3 次；拿到结果后以最新状态为准），再决定：
 - {"kind":"skill","query":"关键词"} 查技能（空查询浏览目录，offset 分页，含收起和停用）；{"kind":"skill","name":"技能名"} 读技能及版本记录，加 "version":30 读历史版本；读取不代表启用或验证｜{"kind":"design","brief":"用途、多大、风格","where":"here|base|x,y,z"} 请建筑师画图纸：房子、前哨、仓库、畜栏、塔等要长期用的建筑（where：脚下、家旁或坐标）
 - {"kind":"recipes","item":"物品名","count":1} 看配方和缺口（"uses":"物品" 反查用途）｜{"kind":"moves","names":["动作名"]} 看动作参数
 - {"kind":"recall","query":"关键词"} 回想以前的经历、日记、教训和技能｜{"kind":"mechanics","query":"…"} 查底层操作接口
@@ -193,8 +194,7 @@ repeat 每轮重做整套 steps；子步骤继承 activity.facing，每步相对
 const EXAMPLE = `【例子】想有个家时：
 → {"kind":"design","brief":"湖边能住的小屋，云杉木，放得下床、箱子和工作台"}
 ← 已经请建筑师去画了……画好会告诉你
-→ {"monologue":"图纸要等一会儿，先去砍云杉攒木板。小屋大概要 12 根，砍 20 根，省得工具、门、箱子再跑一趟；碰到羊顺手打。","decision":"new","activity":{"what":"砍 20 根云杉原木","why":"盖小屋缺木板，多备几根做工具和箱子","kind":"gather","steps":[{"skill":"gather","args":{"block":"spruce_log","count":20}},{"skill":"hunt","args":{"animal":"sheep"},"optional":true}],"done_when":{"type":"inventory_min","item":"spruce_log","count":20}}}
-下矿时同理：来一趟不容易，顺手的矿加 "optional":true 的 gather，done_when 用 any_of 写“够用 + 余量，或背包装满”。`;
+→ {"monologue":"图纸要等一会儿，先去攒盖小屋要用的木板。","decision":"new","activity":{"what":"砍云杉原木","why":"盖小屋要木板","kind":"gather","steps":[{"skill":"gather","args":{"block":"spruce_log","count":12}}],"done_when":{"type":"inventory_min","item":"spruce_log","count":12}}}`;
 
 export function deliberateSystem(persona: string, skills: string[] = [], advanced = false): string {
   return `${persona}
@@ -232,6 +232,11 @@ ${liveAudience.enabled ? `\n${AUDIENCE_RULES}\n` : ''}
 ${movesCatalog(28, undefined, advanced)}${SKILL_INDEX(skills)}`;
 }
 
+/** 瞥一眼时给完整参数的常用动作；其余只列名字 + 用途，参数按需用 moves 查 */
+const GLANCE_CORE = ['dig_at', 'step', 'place_at', 'gather', 'goto', 'craft', 'eat', 'sleep', 'wait', 'look', 'look_around', 'defend', 'hunt', 'place_torch', 'dive', 'surface', 'travel', 'press_keys'];
+/** 瞥一眼时只列名字 + 用途的动作（完整参数按需查） */
+const GLANCE_SECONDARY = ['explore', 'forage', 'pickup_items', 'shelter', 'build', 'smelt', 'store_items', 'climb_up', 'use_skill'];
+
 export function glanceSystem(persona: string, inUse: Set<string>, skills: string[] = []): string {
   return `${persona}
 
@@ -257,7 +262,7 @@ ${CHOOSE}
 ${CONDITIONS}
 
 【常用动作】
-${movesCatalog(0, new Set([...inUse, 'dig_at', 'step', 'place_at', 'defend', 'gather', 'goto', 'explore', 'craft', 'eat', 'hunt', 'forage', 'look', 'look_around', 'dive', 'surface', 'travel', 'pickup_items', 'wait', 'place_torch', 'sleep', 'shelter', 'build', 'smelt', 'store_items', 'climb_up', 'press_keys', 'use_skill']))}`;
+${movesCatalog(0, new Set([...inUse, ...GLANCE_CORE, ...GLANCE_SECONDARY]), false, new Set([...GLANCE_SECONDARY].filter((n) => !inUse.has(n))))}`;
 }
 
 /** 打算里说要下矿、往下挖 */
@@ -355,7 +360,7 @@ export function situationalReminders(ctx: MindContext): string[] {
     // 太阳还高就想着躲起来过夜：把尺度摆出来（挖窝十几秒、天黑还早），让它接着干活
     const toDarkTicks = ticksUntil(tod, DARK_TICK);
     if (tod < 11000 && toDarkTicks > 2000 && /过夜|躲|窝|封顶|天黑|等天/.test(intent))
-      out.push(`现在${timeSense(tod).split('；')[0]}，离天黑还有${durationText(toDarkTicks)}（游戏 1 小时≈现实 50 秒）：挖个能封顶的窝估计要十几现实秒，下午 5 点以后再准备过夜就来得及，现在手上的活接着做，别提前躲起来干等`);
+      out.push(`现在${timeSense(tod).split('；')[0]}，离天黑还有${durationText(toDarkTicks)}（游戏 1 小时≈现实 50 秒）：挖个能封顶的窝估计要十几现实秒`);
     // 都换成游戏时间比：走回去要的时间（约 4 格/秒）加一个游戏小时的余量，够不着天黑前到床就提醒
     const toDark = ticksUntil(tod, DARK_TICK);
     const walk = realSecondsToTicks(bed ? bed.dist / 4 : 0);
@@ -363,11 +368,6 @@ export function situationalReminders(ctx: MindContext): string[] {
       out.push(`离天黑（晚上 7 点）还有${durationText(toDark)}；${bedLine}，走回去估计要${durationText(walk)}（按正常速度估算的游戏时间）：要回去睡就该动身了，否则就近想办法过夜`);
   }
   if (p.self.food <= 8) out.push(`饿了（饥饿 ${p.self.food}）：留意吃的`);
-  // 家已经有了、手上又没什么大目标：像玩家一样给自己找下一个更长的目标，而不是只做零碎的小事
-  const done = myBuilds(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }).some((b) => b.status === 'complete');
-  const planOpen = !!ctx.plan && ctx.plan.steps.some((st) => !st.done);
-  if (done && (!ctx.activity || !planOpen) && ctx.self.agenda().filter((x) => x.kind === 'goal' && x.status !== 'done' && x.status !== 'dropped').length < 2)
-    out.push('家已经盖好了：给自己定个更大的目标放进 agenda（比如下矿弄铁和铁工具、开一块农田养几只动物、扩建仓库、去远处探险）');
   return out.slice(0, 5);
 }
 
@@ -548,7 +548,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       ...(ctx.openedSkill ? { skill_opened: { name: ctx.openedSkill.name, text: ctx.openedSkill.body } } : {}),
     }] as [string, Record<string, unknown>]] : []),
     ['最近', {
-      ...(!glance ? { recent_activities: self.history(5).map((r) => recordLine(r, ctx.memory, s.dim)) } : {}),
+      ...(!glance ? { recent_activities: self.history(5).filter((r) => r !== ctx.lastRecord).map((r) => recordLine(r, ctx.memory, s.dim)) } : {}),
       ...(ctx.lastRecord ? { last_activity: recordLine(ctx.lastRecord, ctx.memory, s.dim) } : {}),
       stream: self.recentThoughts(glance ? 4 : 8).map((t) => `${t.kind === 'monologue' ? '[此前想法，未经核实]' : `[${t.kind}]`} ${recallText(t.text, ctx.memory, undefined, t.kind === 'outcome' || t.kind === 'notice' ? t.at : 0)}`),
     }],

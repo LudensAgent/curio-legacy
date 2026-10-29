@@ -80,7 +80,7 @@ test('both prompt tiers expose the current and previous reference frames separat
     const recent: { last_activity: { facing: string }; recent_activities?: { facing: string }[] } = JSON.parse(recentLine.slice('【最近】'.length));
     assert.equal(current.current_activity.facing, 'N');
     assert.equal(recent.last_activity.facing, 'S');
-    if (tier === 'deliberate') assert.equal(recent.recent_activities?.at(-1)?.facing, 'S');
+    if (tier === 'deliberate') assert.equal(recent.recent_activities?.length ?? 0, 0, '最近活动不再重复 last_activity');
     assert.equal(percept.self.local?.facing, 'S');
     assert.match(system.content, /"facing":"N\|E\|S\|W（含水平相对操作时必填）"/);
     assert.match(system.content, /子步骤省略 facing 就继承，显式冲突会退回/);

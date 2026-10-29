@@ -26,6 +26,8 @@ import { recallLocal, RECALL_LABEL } from './recall.ts';
 
 /** 思考时可以先做的只读查询（不占游戏时间） */
 const QUERY_KINDS = ['recipes', 'recall', 'mechanics', 'skill', 'design', 'moves', 'knowledge', 'passages'];
+/** 需要完整上下文（技能、图纸、Wiki 资料）才值得从瞥一眼升级成认真想的查询；其余轻量查询就地回答 */
+const HEAVY_QUERY_KINDS = ['skill', 'design', 'knowledge'];
 import { ACTIVITY_KINDS, DECISION_KINDS, type ActivityDraft, type ActivityKind, type ActivityStep, type Consolidation, type DecisionKind, type Habits, type MindDecision } from './types.ts';
 
 const str = (v: unknown, max: number) => typeof v === 'string' ? v.trim().slice(0, max) : '';
@@ -322,7 +324,7 @@ export class Thinker {
         continue;
       }
       const ask = String(raw?.kind ?? '');
-      if (ask === 'deliberate' || ask === 'need_full_context' || (tier === 'glance' && QUERY_KINDS.includes(ask))) {
+      if (ask === 'deliberate' || ask === 'need_full_context' || (tier === 'glance' && HEAVY_QUERY_KINDS.includes(ask))) {
         if (tier === 'deliberate' && !QUERY_KINDS.includes(ask)) {
           messages.push({ role: 'assistant', content: c.text.slice(0, 400) }, { role: 'user', content: '你已经有完整信息了，请直接给出决定。' });
           continue;

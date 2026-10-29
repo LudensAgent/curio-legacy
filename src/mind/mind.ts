@@ -1020,6 +1020,10 @@ export class Mind {
     const learnFrom = this.learnFrom;
     // 有等着的阶段回顾、而且不是危急关头：这一念认真想想阶段目标
     const reviewing = !!this.review && tier === 'deliberate' && !urgent;
+    const nearbyFailures = this.recentActionFailures.filter((f) => Date.now() - f.at < Mind.SAME_FAIL_MS
+      && f.worldId === state.worldId && f.sessionId === state.sessionId && f.dim === state.dim
+      && Math.hypot(f.pos.x - state.pos.x, f.pos.y - state.pos.y, f.pos.z - state.pos.z) <= 8).slice(-6);
+    const nearbyFailKeys = new Set(nearbyFailures.map((f) => targetKeyOf(f.step)));
     const ctx: MindContext = {
       tier, reason: reflect ? `${reason}；做完了好几段活，顺便回头看看哪些办法好用、哪些该改` : reason,
       percept, state, self: this.d.self, memory: this.d.memory, activity: this.activity, suspended: this.suspended,
@@ -1039,13 +1043,13 @@ export class Mind {
       ...(reviewing ? { stageReview: this.safe(() => this.stageReviewFacts(), { why: this.review?.why ?? '' }) } : {}),
       ...(this.d.behaviors && tier === 'deliberate' ? { learnedSkills: this.safe(() => this.d.behaviors!.overview().filter((l) => !/已收起|已停用/.test(l)), []), instincts: this.safe(() => instinctNote(), '') } : {}),
       ...(this.d.thinker.designing ? { designing: { brief: this.d.thinker.designing.brief, minutes: Math.round((Date.now() - this.d.thinker.designing.startedAt) / 60_000) } } : {}),
-      repeatedFailures: [...this.failuresByTarget].filter(([, f]) => f.n >= 2)
+      repeatedFailures: [...this.failuresByTarget].filter(([key, f]) => f.n >= 2 && !nearbyFailKeys.has(key))
         .sort((a, b) => b[1].n - a[1].n).slice(0, 10).map(([key, f]) => `${key.replace(':', ' ')} ×${f.n}（10 现实分钟内）`),
-      recentActionFailures: this.recentActionFailures.filter((f) => Date.now() - f.at < Mind.SAME_FAIL_MS
-        && f.worldId === state.worldId && f.sessionId === state.sessionId && f.dim === state.dim
-        && Math.hypot(f.pos.x - state.pos.x, f.pos.y - state.pos.y, f.pos.z - state.pos.z) <= 8).slice(-6)
-        .map((f) => ({ skill: f.step.skill, args: f.step.args ?? {}, failure_code: f.code, summary: f.summary,
-          position: f.pos, observed_at: new Date(f.at).toISOString() })),
+      recentActionFailures: nearbyFailures.map((f) => {
+        const repeats = this.failuresByTarget.get(targetKeyOf(f.step))?.n ?? 0;
+        return { skill: f.step.skill, args: f.step.args ?? {}, failure_code: f.code, summary: f.summary,
+          position: f.pos, observed_at: new Date(f.at).toISOString(), ...(repeats >= 2 ? { repeats } : {}) };
+      }),
     };
     const suggestion = this.userSuggestion;
     const order = this.order, orderWasNew = order?.status === 'new';

@@ -1433,7 +1433,7 @@ test('提示词：太阳还高就想着躲起来过夜，提醒里把尺度摆�
   const base = { reason: '测试', percept: perception.update(), state: adapter.state(), self, memory, suspended: [], lastRecord: null,
     noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', tier: 'glance' as const };
   const hiding = situationalReminders({ ...base, activity: { what: '就地挖坑封顶过夜', why: '离天黑不远了' } } as any);
-  assert.ok(hiding.some((r) => /早上 7 点.*离天黑还有约 12 个小时.*别提前躲起来干等/.test(r)), hiding.join('\n'));
+  assert.ok(hiding.some((r) => /早上 7 点.*离天黑还有约 12 个小时.*挖个能封顶的窝估计要十几现实秒/.test(r)), hiding.join('\n'));
   const working = situationalReminders({ ...base, activity: { what: '砍 16 个原木', why: '盖小屋' } } as any);
   assert.ok(!working.some((r) => /别提前躲/.test(r)));
   const [, user] = buildMindMessages({ ...base, activity: null } as any);
