@@ -12,6 +12,7 @@ import { Mind } from '../src/mind/mind.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 
 const hour = 3_600_000;
+const day = 24_000;
 const definition = { name: 'measured-craft', description: '按点名物品合成并核对背包变化', body: '输入点名物品；只完成指定合成，按实际背包变化确认结果。',
   code: 'return {worked:true};', verify: 'return true;' };
 
@@ -25,17 +26,28 @@ function setup(t: TestContext) {
   return { directory, statsFile, book, adapter, bus, engine, planner };
 }
 
+function gameTime(adapter: FakeAdapter, curator: SkillCurator) {
+  let now = Date.now(), worldAgeTicks = 0;
+  const advance = (ticks = 0) => {
+    now += 1000;
+    worldAgeTicks += ticks;
+    curator.observe({ ...adapter.state(), worldAgeTicks }, false, now);
+  };
+  advance();
+  return advance;
+}
+
 test('闲置候选独立收起，稳定版的实际使用不刷新候选，重载仍可读收起版本', async (t) => {
-  const w = setup(t), start = Date.now();
-  let now = start;
-  t.mock.method(Date, 'now', () => now);
+  const w = setup(t);
   assert.ok(w.engine.write(definition).ok);
   assert.ok(w.engine.write(definition, { by: 'mind' }).ok);
   const curator = new SkillCurator(w.planner, w.engine, w.book, w.bus);
-  now = start + 2 * hour;
+  const advance = gameTime(w.adapter, curator);
+  advance(2 * day);
   w.engine.recordInvocation(definition.name, { status: 'succeeded', summary: '实际完成指定合成', data: { version: 1, verified: true } });
-  now = start + 3 * hour;
-  assert.deepEqual(curator.retireUnused(now), [definition.name]);
+  advance();
+  advance(day);
+  assert.deepEqual(curator.retireUnused(), [definition.name]);
   assert.equal(w.engine.executionError(definition.name), null);
   assert.match(w.engine.executionError(definition.name, true)!, /候选 v2 已收起/);
   assert.equal(w.engine.hidden(definition.name), false);
@@ -46,8 +58,8 @@ test('闲置候选独立收起，稳定版的实际使用不刷新候选，重�
   assert.equal(reloaded.candidateRetirement(definition.name)?.version, 2);
   assert.equal(w.book.candidate(definition.name)?.body.includes(definition.body), true);
   assert.ok(w.book.write('report-note', '保存真实观察的文字记录', '已经看见的结果保存在这里，尚未得到足够证据的推断仍然只是待检验假设。').ok);
-  now += 3 * hour;
-  assert.match((await curator.check(now, { force: true }))!, /已收起.*不用整理/, '自动收起结果不会被模型的无需整理回复抹掉');
+  advance(6 * day);
+  assert.match((await curator.check(Date.now(), { force: true }))!, /已收起.*不用整理/, '自动收起结果不会被模型的无需整理回复抹掉');
   assert.ok(w.bus.recent().some((event) => event.type === 'skill_curated'));
 });
 
@@ -79,6 +91,11 @@ test('停用正式技能和纯文字进入模型整理，文字不按执行次�
   assert.ok(w.engine.write(definition).ok);
   for (let i = 0; i < 4; i++) w.engine.recordInvocation(definition.name, { status: 'failed', summary: '指定合成未完成', data: { version: 1 } });
   assert.equal(w.engine.statsOf(definition.name)?.disabled, true);
+  const emergencyName = 'worn-lifesaver';
+  assert.ok(w.engine.write({ ...definition, name: emergencyName, when: { hp_below: 8 } }).ok);
+  for (let i = 0; i < 3; i++) w.engine.recordInvocation(emergencyName, { status: 'succeeded', summary: '当前版实际解除过危险', data: { version: 1, verified: true } });
+  for (let i = 0; i < 10; i++) w.engine.recordInvocation(emergencyName, { status: 'failed', summary: '当前版未解除危险', data: { version: 1 } });
+  assert.equal(w.engine.statsOf(emergencyName)?.disabled, true);
   assert.ok(w.book.write('working-notes', '背包变化的观察记录', '这份文字记录说明了已见到的背包变化，以及尚未验证的假设。').ok);
   const planner = { ...w.planner, async complete() { return { text: JSON.stringify({ retire: [
     { name: definition.name, target: 'skill', version: 1, why: '当前版本连续失败' },
@@ -88,7 +105,8 @@ test('停用正式技能和纯文字进入模型整理，文字不按执行次�
   const payload = JSON.parse(curator.messages()[1].content);
   assert.equal(payload.skills[0].disabled, true);
   assert.equal(payload.notes[0].name, 'working-notes');
-  assert.deepEqual(curator.retireLowValue(Date.now() + 2 * hour), [], '四次失败由停用和模型评估处理；文字不参与运行低价值阈值');
+  assert.deepEqual(new Set(curator.retireLowValue()), new Set([definition.name, emergencyName]), '4 次全失败及成功率 3/13 的停用应急版立即收起，不等待墙钟一小时');
+  assert.deepEqual(w.engine.currentStats(emergencyName), { ok: 3, fail: 10 }, '收起仍保留已成功过的版本证据');
   assert.match((await curator.check(Date.now(), { force: true }))!, /收起文字记录/);
   assert.equal(w.engine.hidden('working-notes'), true);
   assert.ok(w.book.get('working-notes'));
@@ -108,7 +126,8 @@ test('文字可按内容合并和恢复，自动闲置与容量规则不淘汰�
   const curator = new SkillCurator({ ...w.planner, async complete() { return { text: JSON.stringify({
     merge: [{ from: ['first-note', 'second-note'], skill: { name: 'combined-note', description: '合并两次观察留下的事实', body } }],
     restore: [{ name: 'second-note', why: '这次仍有用' }],
-  }), latencyMs: 0 }; } }, w.engine, w.book, w.bus, { maxActive: 0, unusedMs: 1 });
+  }), latencyMs: 0 }; } }, w.engine, w.book, w.bus, { maxActive: 0, unusedDays: 1 });
+  gameTime(w.adapter, curator)(10 * day);
   assert.deepEqual(curator.retireUnused(Date.now() + 10 * hour), []);
   assert.deepEqual(curator.retireLowValue(Date.now() + 10 * hour), []);
   assert.match((await curator.check(Date.now(), { force: true }))!, /文字记录 combined-note/);
@@ -157,4 +176,23 @@ test('同名稳定加候选不重复占容量，模型不能省略版本误收�
   const improve = new SkillCurator({ ...w.planner, async complete() { return { text: '{"improve":[{"name":"noted-candidate","why":"按已有失败证据修订"}]}', latencyMs: 0 }; } }, w.engine, w.book, w.bus);
   assert.match((await improve.check(Date.now(), { force: true }))!, /改进 noted-candidate/);
   assert.deepEqual(requested, ['noted-candidate']);
+});
+
+test('模型整理保护已成功稳定应急版，但应急用途不阻止收起未验证候选', async (t) => {
+  const w = setup(t);
+  const rescue = { ...definition, name: 'proven-rescue', when: { hp_below: 8 } };
+  assert.ok(w.engine.write(rescue).ok);
+  for (let i = 0; i < 3; i++) w.engine.recordInvocation(rescue.name, { status: 'succeeded', summary: '观测确认危险解除', data: { version: 1, verified: true } });
+  assert.ok(w.engine.write({ ...rescue, name: 'untested-rescue' }, { by: 'mind' }).ok);
+  const curator = new SkillCurator({ ...w.planner, async complete() { return { text: JSON.stringify({ retire: [
+    { name: rescue.name, target: 'skill', version: 1, why: '最近没有触发' },
+    { name: 'untested-rescue', target: 'candidate', version: 1, why: '做法重复，保留已有稳定版' },
+  ] }), latencyMs: 0 }; } }, w.engine, w.book, w.bus);
+  gameTime(w.adapter, curator)(day / 2);
+  const result = await curator.check(Date.now(), { force: true });
+  assert.match(result!, /收起 untested-rescue/);
+  assert.equal(w.engine.executionError(rescue.name), null);
+  assert.equal(w.engine.statsOf(rescue.name)?.retired, undefined);
+  assert.deepEqual(w.engine.currentStats(rescue.name), { ok: 3, fail: 0 });
+  assert.equal(w.engine.candidateRetirement('untested-rescue')?.version, 1);
 });

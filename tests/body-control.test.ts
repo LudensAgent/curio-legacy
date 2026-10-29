@@ -127,9 +127,11 @@ test('新环境：第一次到下界是新环境（老存档里的主世界不�
   const engine = new BehaviorEngine(book, adapter, null, bus, noSenses);
   assert.ok(engine.write({ name: 'nether-lava-care', description: '下界里血少时贴墙走', when: { dim: 'the_nether', hp_below: 10 }, code: 'return 1;' }).ok);
   assert.ok(engine.write({ name: 'old-trick', description: '饿了先吃背包里的面包', when: { food_below: 8 }, code: 'return 1;' }).ok);
-  const curator = new SkillCurator({ autonomous: false } as any, engine, book, bus, { unusedMs: 1000 });
+  const curator = new SkillCurator({ autonomous: false } as any, engine, book, bus, { unusedDays: 1 });
   curator.dim = () => adapter.dim;
-  curator.retireUnused(Date.now() + 5000);
+  curator.observe({ ...adapter.state(), worldAgeTicks: 0 }, false, 0);
+  curator.observe({ ...adapter.state(), worldAgeTicks: 24_000 }, false, 1000);
+  curator.retireUnused();
   assert.equal(engine.statsOf('nether-lava-care')?.retired, undefined, '人不在下界，用不上是正常的');
   assert.match(engine.statsOf('old-trick')!.retired!, /没用上/);
 });

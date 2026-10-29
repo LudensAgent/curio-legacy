@@ -501,10 +501,14 @@ export class BehaviorEngine {
   }
 
   /** 整理：把技能收起来（停用并写明原因）；同名重写会恢复 */
-  retire(name: string, why: string): boolean {
+  retire(name: string, why: string, opts: { preserveCandidate?: boolean } = {}): boolean {
     if (!this.behaviors.has(name) && this.book?.get(name)?.source !== 'self') return false;
-    this.touch(name, (st) => { st.disabled = true; st.retired = why.slice(0, 120); st.retiredAt = Date.now(); delete st.candidatePermit; });
-    this.bus.publish('skill_retired', 'P2', `整理技能：收起「${name}」（${why.slice(0, 80)}）`, { name, why });
+    const candidate = opts.preserveCandidate && !this.candidateRetirement(name) ? this.get(name, true) : undefined;
+    this.touch(name, (st) => {
+      st.disabled = true; st.retired = why.slice(0, 120); st.retiredAt = Date.now();
+      if (candidate) st.candidatePermit = candidate.version; else delete st.candidatePermit;
+    });
+    this.bus.publish('skill_retired', 'P2', `整理技能：收起「${name}」（${why.slice(0, 80)}）${candidate ? `；候选 v${candidate.version} 仍可显式试用` : ''}`, { name, why, ...(candidate ? { candidateVersion: candidate.version } : {}) });
     return true;
   }
 
@@ -533,7 +537,7 @@ export class BehaviorEngine {
     if (!this.statsFile) throw new Error('没有技能统计文件，不能持久化恢复');
     for (const { name, retiredAt } of entries) {
       const b = this.behaviors.get(name), st = this.stats[name];
-      if (!b || b.source !== 'self' || b.candidate || !st?.retired || st.retiredAt !== retiredAt || !/小时没用上|一次都没用上/.test(st.retired)) {
+      if (!b || b.source !== 'self' || b.candidate || !st?.retired || st.retiredAt !== retiredAt || !/小时没用上|个有效游戏日没用上|一次都没用上/.test(st.retired)) {
         throw new Error(`技能 ${name} 不存在或收起状态已变化，未恢复任何技能`);
       }
     }
@@ -613,12 +617,26 @@ export class BehaviorEngine {
     const o = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
     const requestedName = normalizeSkillName(String(o.name ?? ''));
     if (Object.hasOwn(opts, 'expectedToken') && opts.expectedToken !== this.editToken(requestedName)) return { ok: false, error: '技能在生成期间已修订、停用或收起，忽略过期结果', gated: true };
+    if (o.from_version !== undefined) {
+      if (opts.by !== 'mind') return { ok: false, error: '选择历史版本再试需要心智明确选择' };
+      if (typeof o.from_version !== 'number' || !Number.isSafeInteger(o.from_version) || o.from_version < 1) return { ok: false, error: 'from_version 需要正整数' };
+      const version = o.from_version;
+      const current = this.get(requestedName), candidate = this.get(requestedName, true);
+      const old = current && !current.candidate && Number(this.versionOf(current)) === version ? this.book?.get(requestedName)
+        : candidate?.version === version ? this.book?.candidate(requestedName) : this.book?.definitionVersion(requestedName, version);
+      if (!old?.behavior || old.source !== 'self') return { ok: false, error: `v${version} 缺少自学技能的完整契约，不能仅凭历史代码生成候选` };
+      return this.write({ ...old.behavior as Record<string, unknown>, name: requestedName, description: old.description, body: old.body,
+        version: undefined, candidate: undefined, code_file: undefined }, opts);
+    }
     if (o.restore === true) {
       if (opts.by !== 'mind') return { ok: false, error: '恢复文字技能需要心智明确选择' };
       return this.restoreNote(requestedName) ? { ok: true, name: requestedName, created: false, mode: 'manual', restored: true }
         : { ok: false, error: '只能直接恢复已收起或停用的纯文字技能；行为技能需显式修订和试用' };
     }
-    if (opts.by && opts.by !== 'mind' && this.inactive(requestedName)) return { ok: false, error: '技能已停用或收起，后台结果不能重新启用它', gated: true };
+    const previousCandidate = this.get(requestedName, true);
+    const inheritCandidatePermit = opts.by === 'improve' && previousCandidate !== undefined
+      && this.stats[requestedName]?.candidatePermit === previousCandidate.version && this.executionError(requestedName, true) === null;
+    if (opts.by && opts.by !== 'mind' && this.inactive(requestedName) && !inheritCandidatePermit) return { ok: false, error: '技能已停用或收起，后台结果不能重新启用它', gated: true };
     if (opts.by && opts.by !== 'mind' && this.candidateRetirement(requestedName)) return { ok: false, error: '这份候选已收起，后台结果不能重新启用或重写它；由心智显式修订', gated: true };
     // {"name":…,"improve":"哪里不好"}：请后台改进这份代码技能（异步，改进器限频）
     if (typeof o.improve === 'string' && !o.code && !o.steps) {
@@ -654,7 +672,7 @@ export class BehaviorEngine {
     // 修订就是重新给它一次机会：新版本从零记，旧版本的成败留着（好拿来比）
     this.touch(b.name, (st) => {
       if (!opts.by) { st.disabled = false; delete st.lastError; delete st.retired; delete st.advisory; delete st.retiredAt; delete st.disabledAt; }
-      st.candidatePermit = opts.by === 'mind' ? b.version : undefined;
+      st.candidatePermit = opts.by === 'mind' || inheritCandidatePermit ? b.version : undefined;
       delete st.swappedAt; st.versionAt = Date.now(); st.writtenAt = Date.now();
       if (!b.code && !w.created && !b.version) st.rev = (st.rev ?? 1) + 1;
     });
@@ -674,6 +692,24 @@ export class BehaviorEngine {
     const b = this.get(name, trial);
     const st = this.stats[name];
     return (b && st?.byVersion?.[this.versionOf(b)]) ?? (b && st && !st.byVersion && !b.candidate ? { ok: st.ok, fail: st.fail } : { ok: 0, fail: 0 });
+  }
+  /** 完整契约与真实成功证据仍在的应急版本；仅供选择，不赋予新版成功或启用权限。 */
+  successfulEmergencyVersions(name: string) {
+    const stable = this.get(name), candidate = this.get(name, true);
+    const versions = [...new Set([
+      ...(stable && !stable.candidate ? [Number(this.versionOf(stable))] : []), ...(candidate ? [candidate.version!] : []),
+      ...(this.book?.versions(name) ?? []).filter((entry) => entry.definition).map((entry) => entry.version),
+    ])].sort((a, b) => b - a);
+    return versions.flatMap((version) => {
+      const location = stable && !stable.candidate && Number(this.versionOf(stable)) === version ? 'stable' as const
+        : candidate?.version === version ? 'candidate' as const : 'history' as const;
+      const evidence = this.stats[name]?.byVersion?.[String(version)];
+      if (!evidence?.ok) return [];
+      const saved = location === 'history' ? this.book?.definitionVersion(name, version) : undefined;
+      const behavior = location === 'stable' ? stable : location === 'candidate' ? candidate : saved ? toBehavior(saved, this.adapter) : null;
+      if (!behavior || 'error' in behavior || behavior.source !== 'self' || !isEmergency(behavior)) return [];
+      return [{ version, ok: evidence.ok, fail: evidence.fail, location }];
+    });
   }
   static readonly MIN_EVIDENCE = 3;
   /** 刚换上的版本保护多久 */
@@ -1011,14 +1047,16 @@ export class BehaviorEngine {
       const retiredCandidate = this.candidateRetirement(b.name);
       const trial = retiredCandidate ? `；候选 v${retiredCandidate.version} 已收起（${retiredCandidate.why}），可查历史，显式修订后再试`
         : candidate ? `；候选 v${candidate.version} 尚未启用，用 use_skill {name:"${b.name}",trial:true} 试用，试用成${this.currentStats(b.name, true).ok}/败${this.currentStats(b.name, true).fail}` : '';
-      return `${b.name}［${b.mode === 'auto' ? '自动' : b.mode === 'recover' ? '失败时先试' : '调用'}${b.code ? `，代码 v${b.version ?? 1}` : ''}${b.overrides.length ? `，代替本能 ${b.overrides.map((o) => INSTINCTS[o]?.off ? `${o}（这条本能本来就没开）` : o).join('/')}` : ''}${b.needs ? `，调用时给 args.${Object.keys(b.needs).join('/')}` : ''}］${st && st.ok + st.fail ? ` 成${st.ok}/败${st.fail}` : ''}${st?.retired ? ` 已收起（${st.retired.slice(0, 30)}）` : st?.disabled ? ' 已停用' : ''}${untested}${trial}`;
+      const successful = this.successfulEmergencyVersions(b.name);
+      const history = successful.length ? `；保留成功过的应急版本 ${successful.slice(0, 4).map((entry) => `v${entry.version}（成${entry.ok}/败${entry.fail}）`).join('、')}，可查技能历史，由心智用 from_version 选为新候选再试` : '';
+      return `${b.name}［${b.mode === 'auto' ? '自动' : b.mode === 'recover' ? '失败时先试' : '调用'}${b.code ? `，代码 v${b.version ?? 1}` : ''}${b.overrides.length ? `，代替本能 ${b.overrides.map((o) => INSTINCTS[o]?.off ? `${o}（这条本能本来就没开）` : o).join('/')}` : ''}${b.needs ? `，调用时给 args.${Object.keys(b.needs).join('/')}` : ''}］${st && st.ok + st.fail ? ` 成${st.ok}/败${st.fail}` : ''}${st?.retired ? ` 已收起（${st.retired.slice(0, 30)}）` : st?.disabled ? ' 已停用' : ''}${untested}${trial}${history}`;
     }), ...[...this.invalid].map(([n, why]) => `${n}：${why}`),
       ...[...this.invalidCandidates].map(([n, why]) => `${n}：候选未通过校验：${why}`)];
   }
 }
 
 /** 只是因为数量上限、太久没用上而收起的（不是做不好） */
-export function idleRetirement(why: string): boolean { return /^技能太多|小时没用上|一次都没用上/.test(why); }
+export function idleRetirement(why: string): boolean { return /^技能太多|小时没用上|个有效游戏日没用上|一次都没用上/.test(why); }
 
 const NAME_STOP = new Set(['and', 'the', 'then', 'when', 'with', 'from', 'into', 'out', 'for', 'off', 'low', 'get', 'use', 'first', 'skill']);
 /**

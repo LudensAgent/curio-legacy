@@ -5,6 +5,10 @@ import type { LedgerView } from '../mind/ledger.ts';
 import type { ChatMessage } from '../planner/llm.ts';
 import { extractJson } from '../planner/plan.ts';
 import type { Planner } from '../planner/planner.ts';
+import fs from 'node:fs';
+import path from 'node:path';
+import type { AgentState } from '../adapter/types.ts';
+import { ObservedGameClock } from './game-clock.ts';
 
 /**
  * 整理技能：技能多了以后像人整理笔记一样定期理一理。
@@ -12,11 +16,14 @@ import type { Planner } from '../planner/planner.ts';
  * - 说的是同一件事、触发条件重叠、常常抢着接手的：后台请一次模型合并成一份、调整谁先上、收起多余的。
  * - 升级：看收获账本里每个技能的实际效果（用它时拿东西每个花多少、和不用它比、各版本比），
  *   能用但让事情变慢的交给改进器去改（improve），新版本不如旧版本的退回旧版（rollback），没用还拖后腿的收起。
- * 收起不是删除：文件和成败都还在，同名重写就恢复。
+ * 收起不是删除：完整契约、笔记和成败都保留，显式修订或选择历史先成为候选，验收后再启用。
  * 什么时候请模型：有新技能、有新冲突、或者账本里又攒了一批用过技能的经历（够判断效果了）。
  */
-export interface CuratorOptions { checkMs: number; unusedMs: number; gapMs: number; minSkills: number; /** 同时留着的自己写的技能最多几份：多了就收起最没用的 */ maxActive: number }
-export const DEFAULT_CURATOR: CuratorOptions = { checkMs: 10 * 60_000, unusedMs: 3 * 3600_000, gapMs: 0, minSkills: 4, maxActive: 24 };
+export interface CuratorOptions { checkMs: number; unusedDays: number; candidateUnusedDays: number; disabledDays: number; gapMs: number; minSkills: number; /** 同时留着的自己写的技能最多几份：多了就收起最没用的 */ maxActive: number }
+export const DEFAULT_CURATOR: CuratorOptions = { checkMs: 60_000, unusedDays: 7, candidateUnusedDays: 3, disabledDays: 1, gapMs: 0, minSkills: 4, maxActive: 24 };
+const DAY_TICKS = 24_000;
+type Lifetime = { world: string; name: string; candidate: boolean; version: number; clock: number; age: number; idle: number; disabled: number;
+  activity: string; restoredAt: number; disabledAt: number; retired: boolean };
 
 /** 名字和说明里的词：名字按 - 拆，说明按相邻两个字（中文没有空格） */
 function words(name: string, description = ''): { name: Set<string>; text: Set<string> } {
@@ -80,7 +87,19 @@ export class SkillCurator {
   private lastSignature = '';
   private conflictSeen = new Map<string, number>();
   private timer: NodeJS.Timeout | null = null;
-  private observationStartedAt = Date.now();
+  private observationTimer: NodeJS.Timeout | null = null;
+  private lifetimes = new Map<string, Lifetime>();
+  private savedAt = 0;
+  observation: (() => { state: AgentState; paused: boolean }) | null = null;
+  private breakObservation = (event: { type: string; data?: Record<string, unknown> }) => {
+    if (['paused', 'resumed', 'disconnected', 'death', 'spawn'].includes(event.type)) this.gameClock.resetBaseline();
+    if (event.type === 'skill_promoted') for (const [key, entry] of this.lifetimes) {
+      if (entry.candidate && entry.name === event.data?.name) this.lifetimes.delete(key);
+    }
+    if (event.type === 'skill_disabled' || event.type === 'skill_retired') for (const entry of this.lifetimes.values()) {
+      if (entry.candidate && entry.name === event.data?.name && this.engine.executionError(entry.name, true)) entry.retired = true;
+    }
+  };
   readonly opts: CuratorOptions;
   history: { at: number; result: string }[] = [];
   /** 收获账本：每个技能对收获效率的实际影响 */
@@ -92,12 +111,97 @@ export class SkillCurator {
   evidenceStep = 15;
 
   constructor(private planner: Pick<Planner, 'complete' | 'autonomous' | 'noteInvalid'>, private engine: BehaviorEngine, private book: SkillBook | null,
-    private bus: EventBus, opts: Partial<CuratorOptions> = {}) {
+    private bus: EventBus, opts: Partial<CuratorOptions> = {}, private gameClock = new ObservedGameClock(), private lifetimeFile: string | null = null) {
     this.opts = { ...DEFAULT_CURATOR, ...opts };
+    if (lifetimeFile && fs.existsSync(lifetimeFile)) {
+      try {
+        const raw: unknown = JSON.parse(fs.readFileSync(lifetimeFile, 'utf8'));
+        if (!Array.isArray(raw)) throw new Error('技能游戏时间记录不是数组');
+        for (const value of raw as unknown[]) {
+          if (!value || typeof value !== 'object') continue;
+          const row = value as Record<string, unknown>;
+          if (typeof row.world !== 'string' || typeof row.name !== 'string' || typeof row.candidate !== 'boolean' || typeof row.activity !== 'string'
+            || typeof row.retired !== 'boolean' || !['version', 'clock', 'age', 'idle', 'disabled', 'restoredAt', 'disabledAt'].every((key) => typeof row[key] === 'number' && Number.isFinite(row[key]) && row[key] >= 0)) continue;
+          const entry = row as Lifetime;
+          this.lifetimes.set(JSON.stringify([entry.world, entry.name, entry.candidate]), entry);
+        }
+      } catch (error) { this.bus.publish('skill_clock_unknown', 'P2', `无法重建旧技能的有效游戏时间，从新观察开始：${String(error)}`); }
+    }
+    this.bus.on('event', this.breakObservation);
   }
 
-  start() { this.observationStartedAt = Date.now(); this.timer = setInterval(() => void this.check(), this.opts.checkMs); this.timer.unref?.(); }
-  stop() { if (this.timer) clearInterval(this.timer); this.timer = null; }
+  start() {
+    this.bus.off('event', this.breakObservation);
+    this.bus.on('event', this.breakObservation);
+    if (!this.timer) { this.timer = setInterval(() => void this.check(), this.opts.checkMs); this.timer.unref?.(); }
+    if (!this.observationTimer) {
+      this.observationTimer = setInterval(() => {
+        const observation = this.observation?.();
+        if (observation) this.observe(observation.state, observation.paused);
+        if (Date.now() - this.savedAt >= 30_000) this.saveTime();
+      }, 1000);
+      this.observationTimer.unref?.();
+    }
+  }
+  stop() {
+    if (this.timer) clearInterval(this.timer);
+    if (this.observationTimer) clearInterval(this.observationTimer);
+    this.timer = this.observationTimer = null;
+    this.gameClock.resetBaseline();
+    this.bus.off('event', this.breakObservation);
+    this.saveTime();
+  }
+
+  observe(state: AgentState, paused: boolean, now = Date.now()) {
+    this.gameClock.observe(state, paused, now);
+    this.syncLifetimes(state.dim);
+  }
+
+  private syncLifetimes(dim = this.safe(() => this.dim(), '')) {
+    const world = this.gameClock.worldId;
+    if (!world) return;
+    const clock = this.gameClock.ticks();
+    for (const [key, entry] of this.lifetimes) {
+      if (entry.candidate && !this.engine.get(entry.name, true)) this.lifetimes.delete(key);
+    }
+    for (const b of [...this.engine.list().filter((entry) => !entry.candidate), ...this.engine.list(true)].filter((entry) => entry.source === 'self')) {
+      const candidate = !!b.candidate, version = b.version ?? 1, st = this.engine.statsOf(b.name);
+      const key = JSON.stringify([world, b.name, candidate]);
+      const prev = this.lifetimes.get(key);
+      const per = st?.byVersion?.[String(version)];
+      // 只有有实际成败证据的调用刷新闲置；跳过、取消和后台改写均不刷新。
+      const activity = JSON.stringify([per?.ok ?? 0, per?.fail ?? 0]);
+      const retired = candidate ? !!this.engine.executionError(b.name, true) : !!st?.retired;
+      const disabledAt = !candidate && st?.disabled ? st.disabledAt ?? st.retiredAt ?? 1 : 0;
+      const restoredAt = candidate ? 0 : st?.restoredAt ?? 0;
+      const fresh = !prev || clock < prev.clock || prev.retired && !retired || restoredAt !== prev.restoredAt
+        || candidate && prev.version !== version && (st?.candidateRetired?.version === prev.version || this.engine.get(b.name)?.version === prev.version);
+      const delta = !fresh && (!b.when?.dim || b.when.dim.includes(dim)) ? Math.max(0, clock - prev.clock) : 0;
+      const changed = prev?.version !== version;
+      const used = prev && (!changed && prev.activity !== activity || changed && (per?.ok ?? 0) + (per?.fail ?? 0) > 0);
+      this.lifetimes.set(key, { world, name: b.name, candidate, version, clock, activity, retired, restoredAt, disabledAt,
+        age: fresh || changed ? 0 : prev.age + delta,
+        idle: fresh || used || changed && !candidate ? 0 : prev.idle + delta,
+        disabled: fresh || !disabledAt || prev.disabledAt !== disabledAt ? 0 : prev.disabled + delta });
+    }
+  }
+
+  private lifetime(b: Behavior) { return this.lifetimes.get(JSON.stringify([this.gameClock.worldId, b.name, !!b.candidate])); }
+
+  private saveTime() {
+    this.syncLifetimes();
+    this.gameClock.save();
+    if (this.lifetimeFile) {
+      fs.mkdirSync(path.dirname(this.lifetimeFile), { recursive: true });
+      fs.writeFileSync(this.lifetimeFile, JSON.stringify([...this.lifetimes.values()]));
+    }
+    this.savedAt = Date.now();
+  }
+
+  /** 应急用途本身不是免淘汰证据，只保护当前可用且本版确实成功过的稳定技能。 */
+  private protectedEmergency(b: Behavior) {
+    return !b.candidate && this.engine.enabled(b) && isEmergency(b) && (this.engine.statsOf(b.name)?.byVersion?.[String(b.version ?? 1)]?.ok ?? 0) > 0;
+  }
 
   private active() {
     return [...this.engine.list().filter((b) => !b.candidate), ...this.engine.list(true)]
@@ -116,70 +220,61 @@ export class SkillCurator {
     return (b.candidate ? this.book?.candidate(b.name) : this.book?.get(b.name))?.updatedAt ?? Date.now();
   }
 
-  private lastUse(b: Behavior) {
-    const st = this.engine.statsOf(b.name);
-    return b.candidate ? Math.max(st?.usageByVersion?.[String(b.version)]?.lastUsedAt ?? 0,
-      ...(st?.recent ?? []).filter((record) => record.version === b.version).map((record) => record.at))
-      : Math.max(st?.lastAt ?? 0, st?.lastUsedAt ?? 0, st?.restoredAt ?? 0, st?.recent?.at(-1)?.at ?? 0);
-  }
-
   private retire(b: Behavior, why: string) {
-    return b.candidate ? this.engine.retireCandidate(b.name, b.version!, why) : this.engine.retire(b.name, why);
+    return b.candidate ? this.engine.retireCandidate(b.name, b.version!, why) : this.engine.retire(b.name, why, { preserveCandidate: true });
   }
 
   /** 收起长期用不上的自己写的技能（不需要模型） */
-  retireUnused(now = Date.now()): string[] {
+  retireUnused(_now = Date.now()): string[] {
     const out: string[] = [];
     let dim = '';
     try { dim = this.dim(); } catch { /* 状态暂不可用 */ }
+    this.syncLifetimes(dim);
     for (const b of this.active()) {
-      // 救命的技能平时用不上是正常的：不按“好久没用”收
-      if (isEmergency(b)) continue;
+      if (this.protectedEmergency(b)) continue;
       // 只在别的维度生效的技能（比如下界专用的）：人不在那儿时用不上是正常的，不算“长期不用”
       if (b.when?.dim && dim && !b.when.dim.includes(dim)) continue;
-      const st = this.engine.statsOf(b.name);
-      const written = this.written(b);
-      // Offline time provides no opportunity to use a skill. After each start,
-      // observe this process for the full idle window before retiring it.
-      const last = Math.max(this.observationStartedAt, written, this.lastUse(b));
-      if (now - last >= this.opts.unusedMs) {
-        const hours = Math.round((now - last) / 3600_000);
-        const why = st && st.ok + st.fail + st.fired > 0 ? `本次运行观察 ${hours} 小时没用上` : `本次运行观察 ${hours} 小时一次都没用上`;
-        if (this.retire(b, why)) out.push(b.name);
-      }
+      const life = this.lifetime(b);
+      if (!life) continue; // 旧记录缺少在线游戏时间，不能从现实时间倒推。
+      const disabled = !b.candidate && !!this.engine.statsOf(b.name)?.disabled;
+      const ticks = disabled ? life.disabled : life.idle;
+      const limit = disabled ? this.opts.disabledDays : b.candidate ? this.opts.candidateUnusedDays : this.opts.unusedDays;
+      if (ticks >= limit * DAY_TICKS && this.retire(b, disabled
+        ? `已停用并观察 ${Math.floor(ticks / DAY_TICKS)} 个有效游戏日，收起执行版本；完整历史和成功证据保留`
+        : `在线观察 ${Math.floor(ticks / DAY_TICKS)} 个有效游戏日没用上`)) out.push(b.name);
     }
     return out;
   }
 
-  /** 近一小时写下或恢复的还没机会用；只在别的维度用的不算。 */
-  private settled(b: Pick<Behavior, 'name' | 'when' | 'candidate'>, now: number, dim: string) {
+  /** 容量整理给新版本半个有效游戏日；明确高失败证据不必等时钟。 */
+  private settled(b: Behavior, dim: string) {
     if (b.when?.dim && dim && !b.when.dim.includes(dim)) return false;
-    const since = Math.max(this.written(b), b.candidate ? 0 : this.engine.statsOf(b.name)?.restoredAt ?? 0);
-    return now - since >= 3600_000;
+    return (this.lifetime(b)?.age ?? 0) >= DAY_TICKS / 2;
   }
 
   /**
    * 收起不值得留的（不需要模型）：
-   * - 用了不少次却几乎总失败的（试过 6 次以上、成功不到两成）——它在添乱；
+   * - 与执行端停用一致：当前版本至少 4 次有效执行、成功不到 25%，不让停用版卡在另一套门槛；
    * - 技能太多（超过 maxActive）时，最没用的那些：从没成功过的、用得最少的、最久没用的先收。
-   * 刚写的、只在别的维度用的不动。
+   * 容量整理给新版本观察期；明确失败证据不因刚写或当前处于别的维度而永久挂起。
    */
-  retireLowValue(now = Date.now()): string[] {
+  retireLowValue(_now = Date.now()): string[] {
     const out: string[] = [];
     let dim = '';
     try { dim = this.dim(); } catch { /* 状态暂不可用 */ }
+    this.syncLifetimes(dim);
     for (const b of this.active()) {
       const st = this.engine.currentStats(b.name, !!b.candidate);
       const tries = (st?.ok ?? 0) + (st?.fail ?? 0);
-      if (tries >= 6 && (st?.ok ?? 0) / tries < 0.2 && this.settled(b, now, dim) && this.retire(b, `当前版本用了 ${tries} 次只成了 ${st?.ok ?? 0} 次，在添乱`)) out.push(b.name);
+      if (tries >= 4 && st.ok / tries < 0.25 && this.retire(b, `当前版本用了 ${tries} 次只成了 ${st.ok} 次，收起执行版本；完整历史和成功证据保留`)) out.push(b.name);
     }
-    // 救命的技能不占名额、也不因为技能太多被挤掉（它们在添乱时照样按上面那条收）
+    // 当前确实成功过的可用应急版不占容量；仅有应急用途的候选照常整理。
     const active = this.active();
-    const left = active.filter((b) => !isEmergency(b) && (!b.candidate || !active.some((other) => other.name === b.name && !other.candidate)));
+    const left = active.filter((b) => !this.protectedEmergency(b) && (!b.candidate || !active.some((other) => other.name === b.name && !other.candidate)));
     const over = left.length - this.opts.maxActive;
     if (over > 0) {
       const value = (b: Behavior) => { const st = this.engine.currentStats(b.name, !!b.candidate); return st.ok * 3 - st.fail; };
-      const victims = left.filter((b) => this.settled(b, now, dim)).sort((a, b) => value(a) - value(b) || this.lastUse(a) - this.lastUse(b)).slice(0, over);
+      const victims = left.filter((b) => this.settled(b, dim)).sort((a, b) => value(a) - value(b) || (this.lifetime(b)?.idle ?? 0) - (this.lifetime(a)?.idle ?? 0)).slice(0, over);
       for (const b of victims) {
         const st = this.engine.currentStats(b.name, !!b.candidate);
         if (this.retire(b, `技能太多（${left.length} 份），它最少派上用场（当前版本成 ${st.ok} 败 ${st.fail}）`)) out.push(b.name);
@@ -192,6 +287,7 @@ export class SkillCurator {
   async check(now = Date.now(), opts: { force?: boolean } = {}): Promise<string | null> {
     if (this.busy) return opts.force ? '正在整理技能，请等待本次完成' : null;
     const retired = [...this.retireUnused(now), ...this.retireLowValue(now)];
+    this.saveTime();
     const skills = this.active();
     const notes = this.notes();
     const signature = this.signature();
@@ -237,6 +333,8 @@ export class SkillCurator {
       return { name: b.name, target: b.candidate ? 'candidate' : 'skill', version: b.version ?? 1, disabled: !!st?.disabled,
         description: b.description, body: b.body, notes: b.notes, mode: b.mode, priority: b.priority, ...(b.when ? { when: b.when } : {}), ...(isEmergency(b) ? { lifesaver: true } : {}),
         kind: b.code ? `代码 v${b.version ?? 1}（${b.code.length} 字符）` : `${b.steps.length} 步`,
+        protectedEmergency: this.protectedEmergency(b), successfulEmergencyVersions: this.engine.successfulEmergencyVersions(b.name),
+        observedGameDays: this.lifetime(b) ? { age: this.lifetime(b)!.age / DAY_TICKS, idle: this.lifetime(b)!.idle / DAY_TICKS, disabled: this.lifetime(b)!.disabled / DAY_TICKS } : null,
         uses: { ...this.engine.currentStats(b.name, !!b.candidate), ...(b.candidate ? {} : { fired: st?.fired ?? 0 }) },
         lifetime: st ? { ok: st.ok, fail: st.fail } : { ok: 0, fail: 0 },
         ...(st?.byVersion && Object.keys(st.byVersion).length > 1 ? { versions: st.byVersion } : {}),
@@ -251,7 +349,7 @@ export class SkillCurator {
     const notes = this.notes().map((entry) => ({ name: entry.name, target: 'note', description: entry.description, body: entry.body, notes: entry.notes,
       retired: this.engine.statsOf(entry.name)?.retired ?? null, disabled: this.engine.inactive(entry.name) }));
     const system = `你在整理 Minecraft 机器人 Curio 自己写的技能及文字记录。像人整理笔记一样：
-- skills 分开列正式版本（target:skill）和候选（target:candidate）；同名两者的证据不能混用。retire 必须带 target；执行版本再带 version。收起候选不会收起同名稳定版，收起 skill 则是停用整个名字。
+- skills 分开列正式版本（target:skill）和候选（target:candidate）；同名两者的证据不能混用。retire 必须带 target；执行版本再带 version。收起候选不会收起同名稳定版；收起正式版时，未收起的同名候选仍可显式试用。
 - 已停用但未收起的技能也要评估；候选没有验收通过不等于已经会用。候选可保留试用、同名修订或依据证据收起，不强制心智做任何试验。
 - notes 是纯文字记录，不参与执行成败和闲置淘汰。可按内容重复或已被事实推翻来 retire（target:note），不能因为没有执行次数就收起。确有用途时可用 restore 恢复文字记录；读取不代表做法验证成功。
 - 合并纯文字记录也用 merge：from 只能写 notes 中的名字，skill 只写 name、description、body；先保留原记录，是否收起来源再明确决定。写入已收起的文字目标不会自动恢复，需要时另写 restore。已有行为技能的补充笔记保留在 notes 中，修订必须保留其仍适用的约束。
@@ -264,7 +362,9 @@ export class SkillCurator {
 - 白白打断的（idle_interrupts：条件成立接手了，代码却什么都没做就返回、人也没动，打断了手上的活的次数）：when 比代码里真正动手的判断宽，把 when 收窄到和代码一致。
 - 常常同时满足条件抢着接手的（clashed_with）：调整优先级（priority：更管用、更要紧的高），或者收窄某个的触发条件（用 merge 重写它）。
 - 明显没用、被别的技能完全覆盖的：收起（retire）。
-- lifesaver 是救命的技能（管掉血、挨打、窒息、溺水这类处境）：平时很少触发是正常的，不要因为 uses 少收起；只在它一再失败、或被别的技能完全覆盖（merge）时才动。
+- lifesaver 只描述应急用途，不代表已经有效。只有 protectedEmergency=true（当前可用且本版实际成功过的稳定应急技能）免闲置和容量收起；它的改进先成为候选，稳定版继续保留。未验证候选和已停用应急版照常整理，不能借同名旧版成功永久保留。
+- successfulEmergencyVersions 列出保留的成功应急版本；收起不会删除完整契约、笔记和证据，心智可用 skill {name,from_version:N} 显式生成新候选重新验收，不能把历史成功当作新候选成功。
+- observedGameDays 只累计在线、未暂停的有效游戏刻（每天24000tick）；未知历史为null，不能按现实时间或离线期间的世界日期差推断闲置。普通7日、候选3日、停用1日自动收起；纯改写不刷新候选闲置。
 - similar_to 是名字或说明看着相近的：逐对看是不是在做同一件事。是的话合并成一份，或者收起用得少、成得少的那份（uses 少的、fail 多的）；只是名字像、其实管的是两回事的就留着。
 - 技能越少越好记、越不容易互相抢：功能重复的、用了很少次还没成过的，宁可收起；真需要时还能再学。
 - 看 harvest_effect（用它时拿东西每个花多少秒、和不用它比、各版本比）：
@@ -326,11 +426,8 @@ export class SkillCurator {
         const eb = matches[0];
         if (r.version !== undefined && r.version !== eb.version || this.engine.get(name, !!eb.candidate)?.version !== eb.version) { errors.push(`${name} 版本已变化，未收起`); continue; }
         const st = this.engine.currentStats(name, !!eb.candidate), tries = st.ok + st.fail;
-        if (tries > 0 && tries < 3 || tries === 0 && Date.now() - this.written(eb) < 10 * 60_000) { errors.push(`${name} 当前版本证据还少，先保留`); continue; }
-        // 救命的技能：只有在添乱（用了不少次几乎总失败）时才收；合并进别的技能走 merge
-        if (isEmergency(eb)) {
-          if (!(tries >= 6 && st.ok / tries < 0.2)) { errors.push(`${name} 是救命的技能，用得少不收（要合并就用 merge）`); continue; }
-        }
+        if (tries > 0 && tries < 3 || tries === 0 && (this.lifetime(eb)?.age ?? 0) < DAY_TICKS / 2) { errors.push(`${name} 当前版本证据还少，先保留`); continue; }
+        if (this.protectedEmergency(eb)) { errors.push(`${name} 当前稳定应急版实际成功过，保留；改进先生成候选并验收，不因少用丢掉已验证能力`); continue; }
         if (this.retire(eb, why)) done.push(`收起 ${name}${eb.candidate ? ` 候选 v${eb.version}` : ''}`);
       }
       for (const r of raw.restore) {

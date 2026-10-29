@@ -224,6 +224,7 @@ export class Mind {
     this.timing = { ...DEFAULT_TIMING, ...(d.timing ?? {}) };
     d.memory.setWorld(d.adapter.state().worldId);
     d.thinker.skillStats = (name) => d.behaviors?.statsOf(name);
+    d.thinker.successfulEmergencyVersions = (name) => d.behaviors?.successfulEmergencyVersions(name) ?? [];
   }
 
   get inFlight() { return !!this.thinking; }
@@ -1327,7 +1328,7 @@ export class Mind {
   private applySkill(decision: MindDecision) {
     const raw = decision.skill as Record<string, any> | undefined;
     if (!raw) return;
-    const executable = Array.isArray(raw.steps) || typeof raw.code === 'string' || typeof raw.improve === 'string' || raw.when !== undefined || raw.disable === true || raw.disabled === true || raw.restore === true;
+    const executable = Array.isArray(raw.steps) || typeof raw.code === 'string' || typeof raw.improve === 'string' || raw.when !== undefined || raw.disable === true || raw.disabled === true || raw.restore === true || raw.from_version !== undefined;
     if (executable) {
       if (!this.d.behaviors) { decision.notes.push('这里没有行为引擎，带步骤的技能存不下'); return; }
       const w = this.safe(() => this.d.behaviors!.write(raw, { by: 'mind' }), { ok: false as const, error: '写技能时出错' });

@@ -109,29 +109,31 @@ test('整理技能：长期用不上的收起；说同一件事的后台合并�
   const adapter = new FakeAdapter(), bus = new EventBus();
   const book = new SkillBook(BUILTIN_SKILLS_DIR, tmp());
   const engine = new BehaviorEngine(book, adapter, null, bus, noSenses);
-  const mk = (name: string, priority = 50) => engine.write({ name, description: `${name} 的做法`, when: { hp_below: 8, hostile: { within: 8 } }, code: 'return 1;', priority });
+  const mk = (name: string, priority = 50) => engine.write({ name, description: `${name} 的做法`, when: { hp_below: 8, hostile: { within: 8 } }, code: 'return 1;', verify: 'return true;', priority });
   for (const n of ['run-away', 'flee-from-mobs', 'pillar-up']) assert.ok(mk(n).ok);
-  // 不是救命的技能才按“好久没用”收（救命的平时用不上是正常的）
+  // 实际成功过的可用稳定应急版不按闲置收；未验证的应急候选没有这种保护。
   assert.ok(engine.write({ name: 'never-used', description: '饿了先吃背包里的面包', when: { food_below: 8 }, code: 'return 1;' }).ok);
   // 成功率影响选择：同优先级下成功多的分更高
-  (engine as any).stats['run-away'] = { fired: 6, ok: 5, fail: 1, lastAt: Date.now() };
-  (engine as any).stats['flee-from-mobs'] = { fired: 6, ok: 1, fail: 5, lastAt: Date.now() };
+  (engine as any).stats['run-away'] = { fired: 6, ok: 5, fail: 1, lastAt: Date.now(), byVersion: { '1': { ok: 5, fail: 1 } } };
+  (engine as any).stats['flee-from-mobs'] = { fired: 6, ok: 1, fail: 5, lastAt: Date.now(), byVersion: { '1': { ok: 1, fail: 5 } } };
   assert.ok(engine.choiceScore(engine.get('run-away')!) > engine.choiceScore(engine.get('flee-from-mobs')!));
   let asked = 0;
   const planner = { autonomous: true, noteInvalid() {}, complete: async () => { asked++; return { text: JSON.stringify({
     merge: [{ from: ['run-away', 'flee-from-mobs'], skill: { name: 'run-away', description: '血少有怪时背对怪跑开', when: { hp_below: 8, hostile: { within: 8 } }, code: 'return 2;', verify: 'return true;' } }],
     priority: [{ name: 'pillar-up', priority: 70 }] }), latencyMs: 5 }; } };
-  const curator = new SkillCurator(planner as any, engine, book, bus, { unusedMs: 1000, gapMs: 0, minSkills: 2 });
-  // never-used 写下很久都没用过：收起（这里把“很久”设成 1 秒）
+  const curator = new SkillCurator(planner as any, engine, book, bus, { unusedDays: 1, gapMs: 0, minSkills: 2 });
+  // 通过实际观测刻数推进一个游戏日。
   const now = Date.now() + 5000;
-  (engine as any).stats['pillar-up'] = { fired: 1, ok: 1, fail: 0, lastAt: now };
+  (engine as any).stats['pillar-up'] = { fired: 1, ok: 1, fail: 0, lastAt: now, byVersion: { '1': { ok: 1, fail: 0 } } };
   (engine as any).stats['run-away'].lastAt = now; (engine as any).stats['flee-from-mobs'].lastAt = now;
+  curator.observe({ ...adapter.state(), worldAgeTicks: 0 }, false, 0);
+  curator.observe({ ...adapter.state(), worldAgeTicks: 24_000 }, false, 1000);
   const r = await curator.check(now);
   assert.equal(engine.statsOf('never-used')?.retired?.includes('没用上'), true);
   assert.equal(asked, 1);
   assert.match(r!, /run-away/);
-  assert.match(engine.statsOf('flee-from-mobs')!.retired!, /合并进 run-away/);
-  assert.equal(engine.get('pillar-up')?.priority, 70);
+  assert.match(engine.statsOf('flee-from-mobs')!.retired!, /当前版本用了/);
+  assert.equal(engine.get('pillar-up', true)?.priority, 70, '优先级修改先保存候选，不直接替换稳定版');
   assert.ok(engine.overview().some((l) => l.includes('flee-from-mobs') && l.includes('已收起')));
   // 没有新技能、也没有冲突：不再请模型
   await curator.check(now + 1);

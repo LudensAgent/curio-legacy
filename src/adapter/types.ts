@@ -117,6 +117,8 @@ export interface AgentState {
   weather?: 'clear' | 'rain' | 'thunder';
   /** 世界的第几天（从 0 起，服务端的 time.day） */
   worldDay?: number;
+  /** 累积服务器 tick（time.age）；睡觉或修改昼夜时间不会直接跳过这些 tick。 */
+  worldAgeTicks?: number;
   isDay: boolean;
   biome: string | null;
   onGround: boolean;

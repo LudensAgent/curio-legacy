@@ -78,12 +78,14 @@ test('整理技能：接同一种失败的、名字相近的标成相似交给�
   const book = new SkillBook(BUILTIN_SKILLS_DIR, tmp());
   const engine = new BehaviorEngine(book, adapter, null, bus, noSenses);
   for (let i = 0; i < 6; i++) assert.ok(engine.write({ name: `s${i}`, description: `技能 ${i}`, code: 'return 1;' }).ok);
-  const curator = new SkillCurator({ autonomous: false } as any, engine, book, bus, { maxActive: 4, unusedMs: 1e12 });
+  const curator = new SkillCurator({ autonomous: false } as any, engine, book, bus, { maxActive: 4, unusedDays: 1e6 });
   const st = (n: string) => engine.statsOf(n) as any;
   // s0 屡用屡败；s1、s2 有用；s3 用过成过；s4、s5 从没派上用场
   for (const [n, ok, fail] of [['s0', 1, 8], ['s1', 5, 0], ['s2', 3, 1], ['s3', 1, 0]] as const) { const x = st(n) ?? {}; Object.assign(x, { ok, fail, fired: ok + fail }); }
   for (const n of ['s0', 's1', 's2', 's3']) if (!st(n)) assert.fail(`没有 ${n} 的统计`);
   const later = Date.now() + 2 * 3600_000;
+  curator.observe({ ...adapter.state(), worldAgeTicks: 0 }, false, 0);
+  curator.observe({ ...adapter.state(), worldAgeTicks: 12_000 }, false, 1000);
   const out = curator.retireLowValue(later);
   assert.ok(out.includes('s0'), '屡用屡败的收起');
   assert.equal(engine.list().filter((b) => b.source === 'self' && !st(b.name)?.retired).length, 4, '收到上限');

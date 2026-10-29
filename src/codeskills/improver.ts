@@ -49,7 +49,7 @@ export class CodeImprover {
     if (!this.planner.autonomous) return '没有模型';
     const b = this.engine.get(name, true) ?? this.engine.get(name);
     if (!b?.code) return '不是代码技能';
-    if (this.engine.inactive(name)) return '这份技能已停用或收起，后台改进不重新启用它';
+    if (this.engine.inactive(name) && (!b.candidate || this.engine.executionError(name, true))) return '这份技能已停用或收起，后台改进不重新启用它';
     if (this.engine.candidateRetirement(name)) return '这份候选已收起，由心智显式修订后再试；后台不重新启用它';
     if (this.busy) {
       // 自己要求的、整理时发现费劲的：排队等这份改完再改（老失败的会再触发，不用排）

@@ -108,7 +108,8 @@ test('跳过和无动作自报成功不能晋级，子调用保留自己的实�
     signal: new AbortController().signal, taskId: 'nested-call', deadline: Date.now() + 4000, progress() {}, skillDepth: 1 } as Parameters<typeof useSkill.run>[0], { name: definition.name });
   assert.equal(result.status, 'succeeded');
   assert.equal(w.engine.currentStats(definition.name).ok, 1, '嵌套执行也为子技能记账');
-  const curator = new SkillCurator({ autonomous: false, noteInvalid() {}, async complete() { return { text: '{}', latencyMs: 0 }; } }, w.engine, w.book, w.bus, { unusedMs: 1 });
+  const curator = new SkillCurator({ autonomous: false, noteInvalid() {}, async complete() { return { text: '{}', latencyMs: 0 }; } }, w.engine, w.book, w.bus, { unusedDays: 1 });
+  curator.observe({ ...w.adapter.state(), worldAgeTicks: 0 }, false, 0);
   assert.deepEqual(curator.retireUnused(w.engine.statsOf(definition.name)!.lastUsedAt!), [], '实际手动使用不再被误判为从未使用');
 });
 

@@ -19,6 +19,7 @@ import { CodeImprover } from './codeskills/improver.ts';
 import { installSkillRestoreRequest } from './mind/restore-request.ts';
 import { SkillSmith } from './codeskills/smith.ts';
 import { SkillCurator } from './codeskills/curator.ts';
+import { ObservedGameClock } from './codeskills/game-clock.ts';
 import { Scorecard } from './observer/scorecard.ts';
 import { draftsFor } from './building/drafts.ts';
 import { config, envFile } from './config.ts';
@@ -226,9 +227,12 @@ smith.ledger = ledger;
 improver.ledger = ledger;
 ledger.start();
 /** 技能多了定期整理：收起长期用不上的，后台合并说同一件事的、调整谁先上 */
-const curator = new SkillCurator(coderPlanner, behaviors, skillBook, bus);
+const skillClock = new ObservedGameClock(path.join(config.dataDir, 'skill-game-clock.json'));
+if (skillClock.loadError) bus.publish('skill_clock_unknown', 'P2', `技能游戏时间记录无法读取，从新观察开始：${skillClock.loadError}`);
+const curator = new SkillCurator(coderPlanner, behaviors, skillBook, bus, {}, skillClock, path.join(config.dataDir, 'skill-lifetimes.json'));
 curator.ledger = ledger;
 curator.dim = () => adapter.state().dim;
+curator.observation = () => ({ state: adapter.state(), paused: arbiter.paused });
 curator.start();
 /** 学习曲线：给玩法打分（进度、生存、学习、效率），按每条命记到达里程碑的用时 */
 const scorecard = new Scorecard(bus, () => adapter.state(), path.join(config.dataDir, 'scorecard.json'), () => ({
@@ -648,6 +652,7 @@ function shutdown(code = 0) {
   void live?.stop();
   episodic.stop();
   ledger.stop();
+  curator.stop();
   methods.dispose();
   selfModel.close();
   observerInstall?.dispose();

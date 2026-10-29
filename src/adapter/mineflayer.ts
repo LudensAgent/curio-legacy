@@ -672,6 +672,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     let chunkReady = false;
     try { const block = b.blockAt(e.position); chunkReady = !!block; biome = block?.biome?.name ?? null; } catch { /* ignore */ }
     const observationReady = this.spawned && chunkReady && (b.health ?? 0) > 0 && dim !== 'unknown';
+    const worldAgeTicks = b.time?.age;
     return {
       connected: true,
       alive: (b.health ?? 0) > 0,
@@ -687,6 +688,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       oxygen: ownOxygen(b),
       timeOfDay: b.time?.timeOfDay ?? 0,
       ...(Number.isFinite(b.time?.day) ? { worldDay: b.time.day } : {}),
+      ...(typeof worldAgeTicks === 'number' && Number.isFinite(worldAgeTicks) && worldAgeTicks >= 0 ? { worldAgeTicks } : {}),
       weather: (b.thunderState ?? 0) > 0.5 && (b.isRaining || (b.rainState ?? 0) > 0.2) ? 'thunder' : b.isRaining || (b.rainState ?? 0) > 0.2 ? 'rain' : 'clear',
       isDay: b.time?.isDay ?? true,
       biome,

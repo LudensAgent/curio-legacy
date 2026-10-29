@@ -40,7 +40,7 @@ test('本能如实：技能模式下躲苦力怕、低血逃、还手代码里�
   setInstinctSource(() => reflex.activeInstincts());
 });
 
-test('救命的技能：平时用不上、技能太多都不收；一再失败照样收；模型要收也拦住', async () => {
+test('成功过的稳定应急技能不因闲置或容量收起，一再失败仍能收起', async () => {
   const adapter = new FakeAdapter(), bus = new EventBus();
   const book = new SkillBook(BUILTIN_SKILLS_DIR, tmp());
   const engine = new BehaviorEngine(book, adapter, null, bus, noSenses as any);
@@ -52,14 +52,18 @@ test('救命的技能：平时用不上、技能太多都不收；一再失败�
   for (let i = 0; i < 5; i++) w(`tool-${i}`, {});
   assert.ok(isEmergency(engine.get('dig-out-when-buried')!) && isEmergency(engine.get('flee-creeper')!));
   assert.ok(!isEmergency(engine.get('eat-when-hungry')!) && !isEmergency(engine.get('tool-0')!));
-  const curator = new SkillCurator({ autonomous: false } as any, engine, book, bus, { unusedMs: 1000, maxActive: 3 });
+  for (const name of ['dig-out-when-buried', 'swim-up-for-air', 'flee-creeper'])
+    engine.recordInvocation(name, { status: 'succeeded', summary: '实际成功避开危险', data: { version: 1, verified: true } });
+  const curator = new SkillCurator({ autonomous: false } as any, engine, book, bus, { unusedDays: 1, maxActive: 3 });
+  curator.observe({ ...adapter.state(), worldAgeTicks: 0 }, false, 0);
+  curator.observe({ ...adapter.state(), worldAgeTicks: 24_000 }, false, 1000);
   const later = Date.now() + 5 * 3600_000;
   const unused = curator.retireUnused(later);
   assert.ok(unused.includes('eat-when-hungry'));
   assert.ok(!unused.some((n) => ['dig-out-when-buried', 'swim-up-for-air', 'flee-creeper'].includes(n)), JSON.stringify(unused));
   curator.retireLowValue(later);
   for (const n of ['dig-out-when-buried', 'swim-up-for-air', 'flee-creeper']) assert.equal(engine.statsOf(n)?.retired, undefined, `${n} 不因技能太多被挤掉`);
-  Object.assign(engine.statsOf('swim-up-for-air') ?? {}, { ok: 0, fail: 7, fired: 7 });
+  Object.assign(engine.statsOf('swim-up-for-air') ?? {}, { ok: 1, fail: 7, fired: 8, byVersion: { '1': { ok: 1, fail: 7 } } });
   assert.ok(curator.retireLowValue(later).includes('swim-up-for-air'), '一再失败照样收');
   assert.match(curator.messages()[1].content, /"lifesaver":true/);
 });

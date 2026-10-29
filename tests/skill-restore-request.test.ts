@@ -17,7 +17,7 @@ test('explicit restore runs only after the dashboard listens and preserves other
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-restore-'));
   const statsFile = path.join(dir, 'stats.json'), requestFile = path.join(dir, 'request.json');
   const stats = {
-    'local-path': { fired: 2, ok: 3, fail: 1, lastAt: 123, lastUsedAt: 124, disabled: true, retired: '7 小时没用上', retiredAt: 100, byVersion: { '1': { ok: 3, fail: 1 } } },
+    'local-path': { fired: 2, ok: 3, fail: 1, lastAt: 123, lastUsedAt: 124, disabled: true, retired: '在线观察 7 个有效游戏日没用上', retiredAt: 100, byVersion: { '1': { ok: 3, fail: 1 } } },
     'pillar-out-of-pit': { fired: 0, ok: 0, fail: 0, lastAt: 0, disabled: true, retired: '合并进其他技能', retiredAt: 200 },
   };
   fs.writeFileSync(statsFile, JSON.stringify(stats));
@@ -33,7 +33,7 @@ test('explicit restore runs only after the dashboard listens and preserves other
   const after = JSON.parse(fs.readFileSync(statsFile, 'utf8'));
   assert.equal(after['local-path'].lastUsedAt, 124);
   assert.deepEqual(after['local-path'].byVersion, stats['local-path'].byVersion);
-  assert.equal(after['local-path'].lastRestoration.reason, '7 小时没用上');
+  assert.equal(after['local-path'].lastRestoration.reason, '在线观察 7 个有效游戏日没用上');
   assert.equal(after['local-path'].lastRestoration.retiredAt, 100);
   assert.equal(after['local-path'].restoredAt, after['local-path'].lastRestoration.at);
   assert.deepEqual(after['pillar-out-of-pit'], stats['pillar-out-of-pit']);

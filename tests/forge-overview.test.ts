@@ -59,6 +59,8 @@ test('墓碑最多列几条；只因数量上限收起的过了冷却期标明�
 test('收起原因分类与相关度打分', () => {
   assert.ok(idleRetirement('技能太多（28 份），它最少派上用场（成 6 败 2）'));
   assert.ok(idleRetirement('4 小时没用上'));
+  assert.ok(idleRetirement('在线观察 7 个有效游戏日没用上'));
+  assert.ok(!idleRetirement('已停用并观察 1 个有效游戏日，收起执行版本；完整历史和成功证据保留'));
   assert.ok(!idleRetirement('合并进 counter-hostile-at-low-hp'));
   assert.ok(!idleRetirement('用了 6 次只成了 1 次，在添乱'));
   const b = { name: 'breathe-first-in-water', description: '在水下氧气快没了先浮上去换气', overrides: ['low-hp-flee'] };

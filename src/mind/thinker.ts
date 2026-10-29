@@ -20,7 +20,7 @@ import type { SkillBook } from '../knowledge/skillbook.ts';
 import type { KnowledgeBase } from '../knowledge/library.ts';
 import { describeBuild, myBuilds } from './home.ts';
 import type { LedgerView } from './ledger.ts';
-import type { BehaviorStats } from './behaviors.ts';
+import type { BehaviorEngine, BehaviorStats } from './behaviors.ts';
 import { recallLocal, RECALL_LABEL } from './recall.ts';
 
 /** 思考时可以先做的只读查询（不占游戏时间） */
@@ -266,6 +266,7 @@ export class Thinker {
   /** 收获账本：主动回想时也能想起拿某样东西花多少、在哪多 */
   ledger: LedgerView | null = null;
   skillStats: ((name: string) => BehaviorStats | undefined) | null = null;
+  successfulEmergencyVersions: BehaviorEngine['successfulEmergencyVersions'] | null = null;
   constructor(private planner: Planner, private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private book: SkillBook | null = null, private knowledge: KnowledgeBase | null = null) {}
 
   get autonomous() { return this.planner.autonomous; }
@@ -419,7 +420,8 @@ export class Thinker {
           const entries = found.slice(offset, offset + 30).map((entry) => {
             const stats = this.skillStats?.(entry.name);
             return { name: entry.name, description: entry.description, source: entry.source,
-              retired: stats?.retired ?? null, disabled: !!stats?.disabled, candidate: !!this.book?.candidate(entry.name), candidateRetired: stats?.candidateRetired ?? null };
+              retired: stats?.retired ?? null, disabled: !!stats?.disabled, candidate: !!this.book?.candidate(entry.name), candidateRetired: stats?.candidateRetired ?? null,
+              successfulEmergencyVersions: this.successfulEmergencyVersions?.(entry.name) ?? [] };
           });
           return JSON.stringify({ query, total: found.length, entries, nextOffset: offset + entries.length < found.length ? offset + entries.length : null });
         }
@@ -443,7 +445,7 @@ export class Thinker {
           return `技能「${name}」v${version} 仅保存了历史代码，没有完整执行契约；读取不代表启用或验证：\n${code}\n当前收起/停用状态及按版本保存的运行记录（无记录为未知）：${JSON.stringify(evidence)}`;
         }
         this.bus.publish('skill_read', 'P3', `翻开技能：${skill.name}`, { name: skill.name, source: skill.source });
-        return `技能「${skill.name}」${version !== undefined ? `v${version}` : ''}（读取不代表启用或验证）：\n${skill.body}${current.notes ? `\n\n当前学习笔记（不代表该版本已验证）：\n${current.notes}` : ''}${skill.behavior ? `\n完整执行契约：\n${JSON.stringify(skill.behavior)}` : ''}${version === undefined && candidate ? `\n\n候选 v${(candidate.behavior as Record<string, unknown>).version} 尚未启用；用 use_skill {name:"${name}",trial:true,args:{…}} 显式试用。候选的完整参数、触发、代码和验收：\n${JSON.stringify(candidate.behavior)}` : ''}\n已保存历史版本：${JSON.stringify(versions)}；可指定 version 阅读。\n当前收起/停用状态及按版本保存的运行记录（无记录为未知）：${JSON.stringify(evidence)}`;
+        return `技能「${skill.name}」${version !== undefined ? `v${version}` : ''}（读取不代表启用或验证）：\n${skill.body}${current.notes ? `\n\n当前学习笔记（不代表该版本已验证）：\n${current.notes}` : ''}${skill.behavior ? `\n完整执行契约：\n${JSON.stringify(skill.behavior)}` : ''}${version === undefined && candidate ? `\n\n候选 v${(candidate.behavior as Record<string, unknown>).version} 尚未启用；用 use_skill {name:"${name}",trial:true,args:{…}} 显式试用。候选的完整参数、触发、代码和验收：\n${JSON.stringify(candidate.behavior)}` : ''}\n已保存历史版本：${JSON.stringify(versions)}；可指定 version 阅读。\n保留成功过的应急版本：${JSON.stringify(this.successfulEmergencyVersions?.(name) ?? [])}。历史成功不保证现在有效；可用 skill {"name":"${name}","from_version":版本号} 选择完整契约生成新候选，需显式试用重新验收，不会直接启用。\n当前收起/停用状态及按版本保存的运行记录（无记录为未知）：${JSON.stringify(evidence)}`;
       }
       if (kind === 'design') {
         const brief = String(raw.brief ?? raw.request ?? '').trim().slice(0, 400);
