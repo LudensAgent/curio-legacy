@@ -373,7 +373,7 @@ export class Mind {
     const out: { key: string; what: string }[] = [];
     const head = this.safe(() => this.d.adapter.blockAt({ x: Math.floor(s.pos.x), y: Math.floor(s.pos.y + 1.62), z: Math.floor(s.pos.z) }), null);
     if (hurtRecently && headInWall(head)) {
-      out.push({ key: 'danger:suffocate', what: `头被 ${head} 埋住了，正在窒息掉血（血 ${hp}）：马上挖开头这一格（dig_at [0,1,0]），或者退回能站的格子` });
+      out.push({ key: 'danger:suffocate', what: `头被 ${head} 埋住了，正在窒息掉血（血 ${hp}）` });
     }
     if (s.inWater && s.oxygen <= 5) out.push({ key: 'danger:drown', what: `在水下快没气了（氧气 ${s.oxygen}/20，血 ${hp}）` });
     const close = p.nearby.hostile.filter((h) => h.dist <= 3 && h.name !== 'creeper');

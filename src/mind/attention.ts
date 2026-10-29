@@ -115,9 +115,9 @@ export class Attention {
     if (prev.hp - snap.hp >= 4) out.push(this.notice('hp_drop', `掉了 ${Math.round(prev.hp - snap.hp)} 点血，现在 ${Math.round(snap.hp)}`, snap.hp <= 8 ? 0.7 : 0.5, 10_000, now));
     if (snap.emptySlots === 0 && prev.emptySlots > 0) out.push(this.notice('inv_full', '背包没有空格了；与已有未满物品堆兼容的物品仍可能装入', 0.55, 180_000, now));
     for (const h of snap.hostiles) if (!prev.hostiles.has(h) && h !== 'creeper') out.push(this.notice(`hostile:${h}`, `附近出现了 ${h}`, 0.4, 30_000, now));
-    // 苦力怕靠近是要立刻拿主意的事：打（defend {"target":"creeper"}，砍一下退一步）还是绕开跑远
+    // 苦力怕靠近是要立刻拿主意的事：只报事实（几格外、是否在嘶嘶作响），打还是跑由它定
     const creeper = p.nearby.hostile.find((h) => h.name === 'creeper' && h.dist <= 10);
-    if (creeper) out.push(this.notice('creeper_near', `苦力怕在 ${Math.round(creeper.dist)} 格外${creeper.fusing ? '，正在嘶嘶作响' : '靠过来'}：打掉它（defend {"target":"creeper"}）还是绕开跑远，现在拿主意`, creeper.dist <= 6 ? 0.8 : 0.6, 20_000, now));
+    if (creeper) out.push(this.notice('creeper_near', `苦力怕在 ${Math.round(creeper.dist)} 格外${creeper.fusing ? '，正在嘶嘶作响' : '靠过来'}`, creeper.dist <= 6 ? 0.8 : 0.6, 20_000, now));
     for (const r of snap.resources) if (!prev.resources.has(r) && /ore|diamond|emerald|ancient|amethyst|spawner|chest|portal|village|bell/.test(r)) {
       out.push(this.notice(`res:${r}`, `看见了 ${r}`, /diamond|emerald|ancient|spawner|portal/.test(r) ? 0.55 : 0.4, 180_000, now));
     }

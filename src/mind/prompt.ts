@@ -173,7 +173,7 @@ const ROUTINE_OF_THINKING = `【每次这样想】
 
 const CHOOSE = `【选动作】
 - 去记得的地方或坐标 → goto；找没见过的东西 → explore {"until":…}；拿看得见的方块 → gather；身边某一格 → dig_at / step / place_at
-- 坐船过水：附近已有船 → interact {"entity":"boat"} 直接坐，别再造；没有才 use_item {"item":"…_boat","on":"water"} 放船（船是实体，别用 place_at）。坐上后 ride {"direction":"SW"} 划（ride 必须给 direction 或 to，别空着）；下船 dismount；到岸后 hit_entity {"entity":"boat"} 把船打回来、pickup_items 收走（别把船留水里）。travel 提供步行和游泳寻路，已乘船时沿水路导航；吃 → eat（背包有吃的）/ hunt / forage / fish；做东西 → craft、smelt（会自己放下背包里的工作台/熔炉；拿不准查 recipes）
+- 坐船过水：船是实体，用 use_item {"item":"…_boat","on":"water"} 放到水面（别用 place_at），再 interact {"entity":"boat"} 上船；ride {"direction":"SW"} 划（ride 必须给 direction 或 to）。travel 提供步行和游泳寻路，已乘船时沿水路导航；吃 → eat（背包有吃的）/ hunt / forage / fish；做东西 → craft、smelt（会自己放下背包里的工作台/熔炉；拿不准查 recipes）
 - 有怪靠近 → defend {"target":"名字"} 打掉，或走开绕路（苦力怕也是你定：打就砍一下退一步）
 - 过夜 → sleep（有床，看参数选哪张）/ shelter / 自己挖坑封顶；在坑里或地下想上去 → 看【身边】local 和背包，用 dig_at / step / place_at 自己想办法（怎么上去由你定，背包里有什么用什么）
 - 盖新房子 → design 拿图纸 → 攒材料 → build {"draft":"图纸ID"}（料不全也能先盖，有多少盖多少）；没盖完的 → build {"projectId":"作品ID"}；不要自己画图纸
@@ -279,7 +279,7 @@ const SURFACE_INTENT = /回地面|回到地面|见天|爬出|挖出去|出矿|�
 /** 打算里说要过水 / 到对岸 */
 const WATER_CROSS_INTENT = /过水|过河|渡河|过海|过湖|涉水|划船|坐船|游过去|游到|对岸|对面|跨过.{0,8}(水|河|海|湖)|去.{0,12}(对岸|对面)|到.{0,12}(对岸|对面)/;
 
-/** 过水时三条路的代价（站在水边/水里才说；不替它决定架桥还是坐船） */
+/** 过水时的材料代价（站在水边/水里才说；怎么过由它定） */
 export function waterCrossingHint(p: Percept, s: AgentState): string | null {
   if (p.self.riding) return null;
   const localWater = !!p.self.local && Object.values(p.self.local.layers).some((rows) => rows.some((row) => row.includes('~')));
@@ -288,9 +288,7 @@ export function waterCrossingHint(p: Percept, s: AgentState): string | null {
   const boat = inv.filter((i) => /(^|_)(boat|raft)$/.test(i.name)).reduce((n, i) => n + i.count, 0);
   const planks = inv.filter((i) => /_planks$/.test(i.name)).reduce((n, i) => n + i.count, 0);
   const blocks = inv.filter((i) => /^(cobblestone|cobbled_deepslate|deepslate|stone|dirt|sand|gravel|netherrack|.*_planks)$/.test(i.name)).reduce((n, i) => n + i.count, 0);
-  const bridge = blocks ? `架桥：goto {"dig":true} 沿途垫方块（有 ${blocks} 块能垫的）` : '架桥：背包没有能垫的方块';
-  const boatNote = boat ? `坐船：背包有船 ${boat} 只，放船→上船→ride` : planks >= 5 ? `坐船：有 ${planks} 块木板，够造一只船（5 木板）再 ride` : '坐船：没船也没够木板（造船要 5 块木板）';
-  return `过水三选一，自己权衡：①${bridge}；②${boatNote}；③直接游过去（慢，会被溺尸打、可能淹死）`;
+  return `过水可用的材料：${blocks ? `能垫路的方块 ${blocks} 块` : '没有能垫路的方块'}；${boat ? `背包有船 ${boat} 只` : planks >= 5 ? `木板 ${planks} 块（够造一只船）` : '没有船，木板也不够造（要 5 块木板）'}`;
 }
 
 /** 按情境追加在用户消息末尾的提醒：只说和眼下有关的 2–4 件事 */
@@ -317,8 +315,6 @@ export function situationalReminders(ctx: MindContext): string[] {
     for (const t of tunnels) {
       out.push(`记得自己${t.text}`);
     }
-    // 下矿/找矿前先召回过去的经历（Hindsight 里存的历史），别重复踩坑、别漏了学过的教训
-    out.push('要下矿/找矿：先 recall 一下过去的经历（{"kind":"recall","query":"下矿吃过什么亏、怎么脱困、挖矿有什么教训"}），再决定怎么下、怎么挖');
   }
   // 下矿的账：在地下、手上的活快收工或想回地面时，提供实际经历和当前所见。
   const trip = ctx.trip;
@@ -346,14 +342,14 @@ export function situationalReminders(ctx: MindContext): string[] {
     const herds = creatureSpotsNear(ctx.memory.landmarks(), { worldId: s.worldId, dim: p.self.dim, pos: here }, { radius: 128, only: FOOD_ANIMAL_NAMES });
     const remembered = herds.reduce((n, h) => n + (Number(h.text.match(/(\d+) 只/)?.[1]) || 1), 0);
     const feed = s.inventory.filter((i) => /^(wheat|wheat_seeds|carrot|potato|beetroot|beetroot_seeds|melon_seeds|pumpkin_seeds)$/.test(i.name)).map((i) => `${i.name}×${i.count}`).slice(0, 4);
-    out.push(`肉的账：这局已经打猎 ${hunting.trips} 次、大约 ${hunting.animals} 只，最近几次每次为了肉走 ${hunting.recentWalked ?? '?'} 格；现在看得见能吃的动物 ${seenNow} 只，128 格内记得的还有约 ${remembered} 只${feed.length ? `；背包里有 ${feed.join(' ')}` : ''}。动物不会再生，打一只少一只——是接着找，还是圈几只养起来，自己掂量`);
+    out.push(`肉的账：这局已经打猎 ${hunting.trips} 次、大约 ${hunting.animals} 只，最近几次每次为了肉走 ${hunting.recentWalked ?? '?'} 格；现在看得见能吃的动物 ${seenNow} 只，128 格内记得的还有约 ${remembered} 只${feed.length ? `；背包里有 ${feed.join(' ')}` : ''}`);
   }
   // 回地面时提供历史参考点，不把它当作已确认的开口。
   if (SURFACE_INTENT.test(intent) && p.self.sky_visible !== true) {
     const t = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).find((f) => f.inside);
     if (t) out.push(`靠近自己挖过的通道的历史路线点；这条记录的参考点在 (${Math.round(t.pos.x)},${Math.round(t.pos.y)},${Math.round(t.pos.z)})，当前开口位置和路线是否可通尚未确认`);
   }
-  // 过水：站在水边/水里时，把三条路的代价摆出来，让它自己权衡（不替它决定架桥还是坐船）
+  // 过水：站在水边/水里时，把材料代价摆出来，怎么过由它定
   if (p.self.inWater || WATER_CROSS_INTENT.test(intent)) {
     const hint = waterCrossingHint(p, s);
     if (hint) out.push(hint);
