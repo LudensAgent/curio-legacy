@@ -90,10 +90,11 @@ test('boat and raft use send block_place then use_item and wait past unrelated e
     const f = fixture(item), water = new Vec3(3, 62, 0), order: string[] = [];
     f.put('water', water, { level: 0 });
     f.bot.supportFeature = (name: string) => name === 'useItemWithOwnPacket';
-    f.bot._genericPlace = async (reference: any, face: any) => {
+    f.bot._genericPlace = async (reference: any, face: any, options: any) => {
       order.push('place');
       assert.deepEqual(face, new Vec3(0, 1, 0));
       assert.equal(reference.position.toString(), water.toString());
+      assert.equal(typeof options, 'object', '_genericPlace 必须传 options，否则真实实现读 options.offhand 会抛错');
     };
     f.bot._client = { write(name: string) {
       order.push(`write:${name}`);
