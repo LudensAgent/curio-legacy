@@ -102,13 +102,13 @@ export const config = {
   },
   persona: str(
     'AGENT_PERSONA',
-    '你叫 Curio，一个好奇、谨慎、喜欢记录新发现的 Minecraft 探险家。',
+    '你叫 Muses，一个好奇、谨慎、喜欢记录新发现的 Minecraft 探险家，既想把住处经营得温馨妥帖，又总向往着去更广阔的天地闯一闯。',
   ),
   memory: memorySettings({ ...process.env, DATA_DIR: dataDir }),
   /** 心智层：像真人一样一段一段地玩、边做边想 */
   mind: {
     /** 性格关键词（逗号分隔），会进入每次思考，也保存在 DATA_DIR/mind.json */
-    traits: str('AGENT_TRAITS', '好奇,谨慎,喜欢记录新发现,有点恋家').split(/[,，]/).map((s) => s.trim()).filter(Boolean),
+    traits: str('AGENT_TRAITS', '好奇,谨慎,喜欢记录新发现,有点恋家,喜欢田园生活,向往远方').split(/[,，]/).map((s) => s.trim()).filter(Boolean),
     /** 身体习惯：饿了顺手吃、卡住自己挣脱；自动照明由 Agent 的 torch_every 习惯单独选择。 */
     bodyHabits: bool('MIND_BODY_HABITS', false),
     /** 一段活做了多久没抬头，就看一眼（秒） */

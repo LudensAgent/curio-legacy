@@ -12,7 +12,7 @@ import { constructBuilding } from '../building/engine.ts';
 import { compileBuilding, DEFAULT_SPEC, materialCost, normalizeSpec, rotatePosition, type BuildingSpec, type Rotation } from '../building/spec.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { sleep as delay, throwIfAborted } from '../util.ts';
-import { canSleepAt, clockText, durationText } from '../perception/perception.ts';
+import { canSleepAt } from '../perception/perception.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill } from './types.ts';
 import { compileDesign, DESIGN_EXAMPLE, DESIGN_EXAMPLE_RICH } from '../building/design.ts';
 
@@ -481,9 +481,9 @@ export const sleepSkill: Skill<{ at?: Vec3Like; place?: boolean }> = {
     const tod = ((s.timeOfDay % 24000) + 24000) % 24000;
     if (!canSleepAt(tod, s.weather)) {
       const waitTicks = 12542 - tod;
-      // 离天黑还早：说清楚还要多久，别白跑一趟
+      // 离能睡的时间还远：不给钟点/倒计时（时间感知已改成模糊的太阳位置），只说现在还不能睡
       if (waitTicks < 0 || waitTicks > 1600) {
-        return fail('ERROR', `现在是${clockText(tod)}，傍晚 6 点半以后才能睡（还有${durationText((waitTicks + 24000) % 24000)}，现实时间）；先做别的事，太阳落山（time 里写着能睡觉）时再 sleep`);
+        return fail('ERROR', `现在还不能睡，先做别的事，等天黑（太阳落山）后再 sleep`);
       }
     }
     try {

@@ -185,7 +185,7 @@ const PRINCIPLES = `【原则】
 - 接着刚才的念头往下想，不反复换主意、不重复刚做完的事。
 - 一段活（如“砍 20 根木头”）：routine 1–6 步，可 repeat，done_when 写清何时收工；身体连续执行、自己应变，真卡住才叫你。
 - 从真实结果里学，出乎意料才写 learned；历史失败只作参考，继续、重试或调整由你决定。
-- 你会被风景吸引、想把家弄得舒服好看：喜欢的写 liked，想做的放 agenda。情绪是信号：累了歇、烦了换办法、腻了找新鲜事。
+- 你既会被风景吸引、想把住处经营得温馨，也总向往着去更广阔的天地闯一闯。喜欢的写 liked，想做的放 agenda。情绪是信号：累了歇、烦了换办法、腻了找新鲜事。
 - 只知道亲眼看到或记得的东西，坐标来自观察或地标，不编。
 - 遇到危险如何行动由你或你写下的技能决定；插火把、顺手吃可用 habits 定成习惯；捡东西需明确安排 pickup_items，pickup 偏好只提醒思考。`;
 
@@ -416,6 +416,7 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
     hp: Math.round(p.self.hp * 10) / 10, food: p.self.food,
     ...(p.self.inWater ? { inWater: true, oxygen: s.oxygen } : {}), ...(p.self.inLava ? { inLava: true } : {}), ...(p.self.riding ? { riding: p.self.riding } : {}),
     time: sunText(p.time.timeOfDay),
+    ...(p.time.can_sleep === false ? { can_sleep: '还不能睡：要等天黑后（雷雨时随时能睡）' } : {}),
     ...(p.time.weather ? { weather: p.time.weather } : {}),
     ...(p.light ? { light: `${{ bright: '亮', dim: '有点暗', dark: '很暗' }[p.light.level] ?? p.light.level}${p.light.mob_spawn_risk ? '，会刷怪' : ''}` } : {}),
     held: p.self.held ? `${p.self.held}${s.heldDurability ? `（耐久 ${s.heldDurability.left}/${s.heldDurability.max}${s.heldDurability.left / s.heldDurability.max < 0.15 ? `，快坏了${spareNote(s.inventory.find((i) => i.name === p.self.held), s.heldDurability)}` : ''}）` : ''}` : p.self.held,

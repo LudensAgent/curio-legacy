@@ -348,7 +348,7 @@ export class SkillCurator {
     });
     const notes = this.notes().map((entry) => ({ name: entry.name, target: 'note', description: entry.description, body: entry.body, notes: entry.notes,
       retired: this.engine.statsOf(entry.name)?.retired ?? null, disabled: this.engine.inactive(entry.name) }));
-    const system = `你在整理 Minecraft 机器人 Curio 自己写的技能及文字记录。像人整理笔记一样：
+    const system = `你在整理 Minecraft 机器人 Muses 自己写的技能及文字记录。像人整理笔记一样：
 - skills 分开列正式版本（target:skill）和候选（target:candidate）；同名两者的证据不能混用。retire 必须带 target；执行版本再带 version。收起候选不会收起同名稳定版；收起正式版时，未收起的同名候选仍可显式试用。
 - 已停用但未收起的技能也要评估；候选没有验收通过不等于已经会用。候选可保留试用、同名修订或依据证据收起，不强制心智做任何试验。
 - notes 是纯文字记录，不参与执行成败和闲置淘汰。可按内容重复或已被事实推翻来 retire（target:note），不能因为没有执行次数就收起。确有用途时可用 restore 恢复文字记录；读取不代表做法验证成功。

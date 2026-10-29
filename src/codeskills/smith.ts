@@ -567,7 +567,7 @@ ${API_DOC}`;
 
   messages(incident: Incident): ChatMessage[] {
     const review = incident.kind === 'review';
-    const system = `你是 Minecraft 机器人 Curio 的“身体技能工程师”。${this.taskFor(incident)}
+    const system = `你是 Minecraft 机器人 Muses 的“身体技能工程师”。${this.taskFor(incident)}
 ${this.rules()}
 
 只输出一个 JSON 对象：{"skill":{…}}${review ? ' 或 {"skills":[{…},{…}]}' : ''} 或 {"none":true,"why":"…","covered_by":"管这件事的技能名（不是因为已有技能管着才不写就省略）","limitation":"身体做不到时才写"}。`;
@@ -578,7 +578,7 @@ ${this.rules()}
 
   /** 几件事攒成一批：一次请求看完，最多写 2 份技能 */
   batchMessages(incidents: Incident[]): ChatMessage[] {
-    const system = `你是 Minecraft 机器人 Curio 的“身体技能工程师”。下面是这几分钟里攒下的 ${incidents.length} 件事（events），每件带着编号（event）和该怎么看（how_to_look）。
+    const system = `你是 Minecraft 机器人 Muses 的“身体技能工程师”。下面是这几分钟里攒下的 ${incidents.length} 件事（events），每件带着编号（event）和该怎么看（how_to_look）。
 逐件判断：值得写技能就写，不值得就说为什么；几件说的是同一回事可以合写一份。整批最多写 2 份技能。
 ${this.rules()}
 

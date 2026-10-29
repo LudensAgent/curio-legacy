@@ -23,13 +23,13 @@ class Clock extends TestWorld {
   }
 }
 
-test('白天 sleep：不白跑，说清楚还要多久天黑', async () => {
+test('白天 sleep：不白跑，只说现在还不能睡、先做别的事', async () => {
   const w = new Clock(); w.inv.set('white_bed', 1); w.tod = 3000;
   const ctx = makeCtx(w);
   try {
     const r = await sleepSkill.run(ctx, {});
     assert.equal(r.status, 'failed');
-    assert.match(r.summary, /现在是上午 9 点，傍晚 6 点半以后才能睡（还有约 8 分/);
+    assert.match(r.summary, /现在还不能睡，先做别的事，等天黑（太阳落山）后再 sleep/);
     assert.ok(!w.actions.includes('slept'));
   } finally { ctx.memory.close(); }
 });
