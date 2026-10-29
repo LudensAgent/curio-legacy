@@ -647,7 +647,11 @@ export class BehaviorEngine {
     const previousCandidate = this.get(requestedName, true);
     const inheritCandidatePermit = opts.by === 'improve' && previousCandidate !== undefined
       && this.stats[requestedName]?.candidatePermit === previousCandidate.version && this.executionError(requestedName, true) === null;
-    if (opts.by && opts.by !== 'mind' && this.inactive(requestedName) && !inheritCandidatePermit) return { ok: false, error: '技能已停用或收起，后台结果不能重新启用它', gated: true };
+    // 停用/收起的技能给后台一个 2 小时墓碑期：期内同名结果仍被拦（防写→停用→重写循环）；过了墓碑期，后台可重新写成候选复活
+    if (opts.by && opts.by !== 'mind' && !inheritCandidatePermit) {
+      const tomb = this.tombstone(requestedName);
+      if (tomb) return { ok: false, error: tomb, gated: true };
+    }
     if (opts.by && opts.by !== 'mind' && this.candidateRetirement(requestedName)) return { ok: false, error: '这份候选已收起，后台结果不能重新启用或重写它；由心智显式修订', gated: true };
     // {"name":…,"improve":"哪里不好"}：请后台改进这份代码技能（异步，改进器限频）
     if (typeof o.improve === 'string' && !o.code && !o.steps) {
@@ -683,7 +687,7 @@ export class BehaviorEngine {
     // 修订就是重新给它一次机会：新版本从零记，旧版本的成败留着（好拿来比）
     this.touch(b.name, (st) => {
       if (!opts.by) { st.disabled = false; delete st.lastError; delete st.retired; delete st.advisory; delete st.retiredAt; delete st.disabledAt; }
-      st.candidatePermit = opts.by === 'mind' || inheritCandidatePermit ? b.version : undefined;
+      st.candidatePermit = opts.by === 'mind' || inheritCandidatePermit || (opts.by && this.inactive(requestedName)) ? b.version : undefined;
       delete st.swappedAt; st.versionAt = Date.now(); st.writtenAt = Date.now();
       if (!b.code && !w.created && !b.version) st.rev = (st.rev ?? 1) + 1;
     });

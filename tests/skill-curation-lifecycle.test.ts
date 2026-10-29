@@ -46,7 +46,7 @@ test('闲置候选独立收起，稳定版的实际使用不刷新候选，重�
   advance(2 * day);
   w.engine.recordInvocation(definition.name, { status: 'succeeded', summary: '实际完成指定合成', data: { version: 1, verified: true } });
   advance();
-  advance(day);
+  advance(3 * day);
   assert.deepEqual(curator.retireUnused(), [definition.name]);
   assert.equal(w.engine.executionError(definition.name), null);
   assert.match(w.engine.executionError(definition.name, true)!, /候选 v2 已收起/);
@@ -58,7 +58,7 @@ test('闲置候选独立收起，稳定版的实际使用不刷新候选，重�
   assert.equal(reloaded.candidateRetirement(definition.name)?.version, 2);
   assert.equal(w.book.candidate(definition.name)?.body.includes(definition.body), true);
   assert.ok(w.book.write('report-note', '保存真实观察的文字记录', '已经看见的结果保存在这里，尚未得到足够证据的推断仍然只是待检验假设。').ok);
-  advance(6 * day);
+  advance(9 * day);
   assert.match((await curator.check(Date.now(), { force: true }))!, /已收起.*不用整理/, '自动收起结果不会被模型的无需整理回复抹掉');
   assert.ok(w.bus.recent().some((event) => event.type === 'skill_curated'));
 });
