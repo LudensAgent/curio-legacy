@@ -73,7 +73,7 @@ export function storedChestAt(memory: WorldMemory, state: { dim: string }, pos: 
   const p = { x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z) };
   const rec = memory.chests(state.dim).find((c) => c.pos.x === p.x && c.pos.y === p.y && c.pos.z === p.z);
   if (!rec) return null;
-  const remembered = [...new Set(rec.traces.filter((t) => t.kind !== 'absent').map((t) => t.item))];
+  const remembered = [...new Set(rec.contents.items.map((i) => i.name))];
   const what = remembered.length ? `存着 ${remembered.slice(0, 4).join('、')}${remembered.length > 4 ? ' 等' : ''} ` : '自己用过、里面可能还有东西';
   return `(${p.x},${p.y},${p.z}) 是${what}的箱子，没拆。要拿东西可用 take_items 指定这个箱子，或 use_gui 查看；打不开时返回实际原因，不会自行挖盖。真要搬箱子写 "own":true，东西会洒一地`;
 }

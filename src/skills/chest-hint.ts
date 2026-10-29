@@ -1,6 +1,6 @@
 import type { Vec3Like } from '../adapter/types.ts';
 import type { WorldMemory } from '../memory/store.ts';
-import { chestLocation, describeRecall } from '../memory/chest-memory.ts';
+import { describeRecall } from '../memory/chest-memory.ts';
 
 /** 木头类：缺木板、木棍时，箱子里的原木也算（拿回来就能做） */
 const WOODISH = /_(log|wood|stem|hyphae|planks)$/;
@@ -24,21 +24,18 @@ export function chestHint(memory: Pick<WorldMemory, 'recallChests'>, state: { di
   const said = new Set<string>();
   for (const accept of wants) {
     let recalls: ReturnType<WorldMemory['recallChests']>;
-    try { recalls = memory.recallChests(accept, { dim: state.dim, day: state.worldDay }); } catch { continue; }
-    const best = recalls.sort((a, b) => b.score - a.score)[0];
+    try { recalls = memory.recallChests(accept, { dim: state.dim, day: state.worldDay, from: state.pos }); } catch { continue; }
+    const best = recalls[0];
     if (!best) continue;
     const key = `${best.chest.pos.x},${best.chest.pos.y},${best.chest.pos.z}:${best.item}`;
     if (said.has(key)) continue;
     said.add(key);
-    const location = chestLocation({ pos: best.chest.pos, ts: best.observedAt });
-    parts.push(describeRecall(best, location.precise ? dist(location.pos, state.pos) : undefined));
+    parts.push(describeRecall(best, best.dist));
     if (parts.length >= 2) break;
   }
   if (!parts.length) return '';
   return `；${parts.join('；')}——take_items 不带 target 可查看容器线索；选定并重新看见箱子后，用 target 指定这一只查看或取物`;
 }
-
-const dist = (a: Vec3Like, b: Vec3Like) => Math.round(Math.hypot(a.x - b.x, a.z - b.z));
 
 /** 从 craft 的缺料说明里读出缺什么：“stick 还差 1（有 0），cobblestone 还差 2（有 6）” */
 export function needsFromShortfall(text: string | undefined): Need[] {

@@ -333,6 +333,32 @@ export const takeItems: Skill<{ item: string; count: number; target?: ContainerT
   },
 };
 
+// ===================================================================== 查库存
+export const findItem: Skill<{ item: string }> = {
+  name: 'find_item',
+  description: '查某样东西现在在哪：背包多少、哪些记得的箱子（按距离升序）各多少、合计多少。只读，不开箱不移动；没打开过的箱子内容未知',
+  argsDoc: '{"item":"<物品名>"}',
+  timeoutMs: 3000,
+  movement: false,
+  readOnly: true,
+  validate(raw, adapter) {
+    const item = String(obj(raw).item ?? '').trim().replace(/^minecraft:/, '');
+    if (!adapter.isKnownItem(item)) return { ok: false, error: `未知物品：${item}` };
+    return { ok: true, args: { item } };
+  },
+  async run(ctx, args) {
+    const s = ctx.adapter.state();
+    const backpack = s.inventory.filter((i) => i.name === args.item).reduce((n, i) => n + i.count, 0);
+    const recalls = ctx.memory.recallChests(args.item, { dim: s.dim, from: s.pos });
+    const inChests = recalls.reduce((n, r) => n + r.count, 0);
+    const chests = recalls.map((r) => ({ pos: r.chest.pos, count: r.count, dist: r.dist ?? Math.round(Math.hypot(r.chest.pos.x - s.pos.x, r.chest.pos.z - s.pos.z)), note: r.chest.note, observedAt: r.observedAt }));
+    if (!backpack && !chests.length) return ok(`背包和记得的箱子里都没有 ${args.item}；没打开过的箱子内容未知`, { item: args.item, backpack: 0, chests: [], total: 0 });
+    const chestText = chests.map((c) => `${c.note ? `${c.note}的箱子` : '箱子'} (${c.pos.x},${c.pos.y},${c.pos.z}) 有 ${args.item}×${c.count}（${c.dist} 格外）`).join('；');
+    const total = backpack + inChests;
+    return ok(`${args.item}：背包×${backpack}${chestText ? `；${chestText}` : ''}；合计×${total}`, { item: args.item, backpack, chests, total });
+  },
+};
+
 // ===================================================================== 农业
 const SEEDS: Record<string, string> = { wheat: 'wheat_seeds', carrot: 'carrot', potato: 'potato', beetroot: 'beetroot_seeds' };
 

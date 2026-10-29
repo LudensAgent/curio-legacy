@@ -64,9 +64,9 @@ test('generic GUI memory records confirmed transfers even when a later operation
   t.after(() => ctx.memory.close());
   const result = await useGui.run(ctx, { target: pos, ops: [{ put: { item: 'diamond', count: 64, slot: 0 } }, { put: { item: 'coal', slot: 1 } }] });
   assert.equal(result.status, 'failed');
-  const trace = ctx.memory.chests()[0].traces.find((entry) => entry.item === 'diamond');
-  assert.equal(trace?.kind, 'put'); assert.equal(trace?.qty, 'few');
-  assert.ok(!ctx.memory.chests()[0].traces.some((entry) => entry.item === 'coal'));
+  const contents = ctx.memory.chests()[0].contents;
+  assert.ok(contents.items.some((entry) => entry.name === 'diamond' && entry.count === 2));
+  assert.ok(!contents.items.some((entry) => entry.name === 'coal'));
 });
 
 test('generic GUI preserves confirmed partial memory on cancellation and ignores unobserved requests', async (t) => {
@@ -77,7 +77,7 @@ test('generic GUI preserves confirmed partial memory on cancellation and ignores
   });
   t.after(() => ctx.memory.close());
   await assert.rejects(useGui.run(ctx, { target: pos, ops: [{ take: { slot: 0 } }] }), { name: 'AbortedError' });
-  assert.equal(ctx.memory.chests()[0].traces.find((entry) => entry.item === 'coal')?.kind, 'took');
+  assert.equal(ctx.memory.chests()[0].contents.items.find((entry) => entry.name === 'coal')?.count, 7);
   const refused = guiWorld(async (): Promise<GuiResult> => ({ ok: false, reason: 'NOT_OPENABLE', done: [] }));
   t.after(() => refused.ctx.memory.close());
   await useGui.run(refused.ctx, { target: pos, ops: [{ put: { item: 'diamond', slot: 0 } }] });

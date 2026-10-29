@@ -94,7 +94,7 @@ test('我的设施：通道说明历史位置和未知的当前通路；箱子�
   assert.doesNotMatch(withoutSurface.text, /地表位置|入口/);
   assert.doesNotMatch(tunnel.text, /coal_ore/, '离通道太远的矿不算沿途');
   const chest = list.find((f) => f.kind === 'chest')!;
-  assert.match(chest.text, /放过几个 oak_sapling、放过几个 string、放过几个 spider_eye、放过几个 dirt/);
+  assert.match(chest.text, /cobblestone×344、sand×5、oak_sapling×4、dirt×3、string×2、spider_eye×1/);
   assert.match(chest.text, /，8格$/);
   assert.ok(!list.some((f) => /小舍/.test(f.text)));
   // 人在通道里

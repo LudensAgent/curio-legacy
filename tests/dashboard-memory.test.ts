@@ -40,8 +40,7 @@ test('dashboard memory keeps identical coordinates in separate dimensions and ex
       });
     assert.equal(snapshot.chests.length, 1);
     assert.match(snapshot.chests[0].text, /coal/);
-    assert.match(snapshot.chests[0].text, /放过不少 coal/);
-    assert.doesNotMatch(snapshot.chests[0].text, /coal×|64 个/);
+    assert.match(snapshot.chests[0].text, /coal×64/);
     assert.deepEqual(snapshot.farms.map((farm) => farm.dim), [dim]);
     assert.deepEqual(snapshot.notes.map((note) => note.text), [`current-world:${dim}`]);
     assert.deepEqual(snapshot.goals.map((goal) => goal.goal), [`current-world:${dim}`]);

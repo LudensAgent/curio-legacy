@@ -40,43 +40,41 @@ test('long-term resource landmarks remain addressable after the short visual cac
   assert.equal(memory.findLandmark(landmark.id, 'the_nether'), undefined);
 });
 
-test('chest location stays precise within a session then becomes an honest area; old item traces are forgotten', (t) => {
+test('chestLocation（地标投影）超过 24 现实小时仍淡化成区域；精确账本不再淡忘', (t) => {
   const memory = new WorldMemory(null), now = Date.now(), pos = { x: 123, y: 67, z: -234 };
   t.after(() => memory.close());
   memory.setWorld('w');
-  // 一个直播会话内（< 24 现实小时）：位置精确
   const record = memory.noteChestUse('overworld', pos, { put: [{ name: 'diamond', count: 64 }], now: now - 25 * 3600_000 });
+  // 地标投影：会话内精确、超时成区域
   assert.equal(chestLocation(record, { now: record.ts + 1000 }).precise, true);
-  // 超过 24 现实小时：位置淡化成诚实区域
   const area = chestLocation(record, { now });
   assert.equal(area.precise, false);
   assert.equal(area.radius, 24);
   assert.ok(Math.hypot(pos.x - area.pos.x, pos.y - area.pos.y, pos.z - area.pos.z) <= area.radius);
-  assert.doesNotMatch(describeChest(record, { now, op: 1 }), /123,67,-234/);
-  assert.match(describeChest(record, { now, op: 1 }), /范围中心，不是箱子坐标/);
-  // 物品印象按游戏日淡忘（比位置快）：25 小时前的 diamond 已经想不起、也不会重获精确关联
-  assert.equal(memory.recallChests('diamond').length, 0);
-  assert.equal(chestRecollectionLocation(record, memory.chestClock()).precise, false);
-  assert.doesNotMatch(describeChest(record, memory.chestClock()), /123,67,-234/);
+  // 精确账本：内容与位置都精确、不淡忘
+  assert.match(describeChest(record, { now, op: 1 }), /123,67,-234/);
+  assert.equal(memory.recallChests('diamond').length, 1);
+  assert.equal(memory.recallChests('diamond')[0].count, 64);
+  assert.equal(chestRecollectionLocation(record, memory.chestClock()).precise, true);
+  assert.match(describeChest(record, memory.chestClock()), /123,67,-234/);
   const facilities = myFacilities(memory, { worldId: 'w', dim: 'overworld', pos }, ['chest']);
-  assert.equal(facilities[0].precise, false);
-  assert.notDeepEqual(facilities[0].pos, pos);
+  assert.equal(facilities[0].precise, true);
+  assert.deepEqual(facilities[0].pos, pos);
 });
 
-test('v3 memory reads without rewriting history or claiming an old chest was just seen', (t) => {
+test('v3 旧印象加载时直接丢弃，只保留箱子身份，不假装刚看过', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-memory-container-'));
   const file = path.join(directory, 'world-memory.json'), ts = Date.now() - 25 * 3600_000;
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   fs.writeFileSync(file, JSON.stringify({ version: 3, worldId: 'w', chests: { 'w:overworld:3,64,0': {
     worldId: 'w', dim: 'overworld', pos: box, ts, uses: 1, traces: [{ item: 'coal', kind: 'put', qty: 'some', ts, op: 1, times: 1 }],
   } } }));
-  const original = fs.readFileSync(file, 'utf8');
   const memory = new WorldMemory(file);
   assert.equal(memory.chests()[0].ts, ts);
-  assert.equal(memory.chests()[0].traces[0].ts, ts);
+  assert.deepEqual(memory.chests()[0].contents.items, []);
+  assert.equal(memory.chests()[0].contents.possiblyStale, true);
   assert.equal(chestLocation(memory.chests()[0]).precise, false);
   memory.close();
-  assert.equal(fs.readFileSync(file, 'utf8'), original);
 });
 
 test('unopened historical containers are candidates and facilities without automatically opening them', async (t) => {
@@ -220,8 +218,8 @@ test('partial storage records only the actual transfer even when the request fai
   const result = await storeItems.run(ctx, { target: box, items: [{ name: 'coal', count: 10 }, { name: 'diamond', count: 3 }] });
   assert.equal(result.status, 'failed');
   assert.deepEqual(result.data?.put, [{ name: 'coal', count: 2 }]);
-  assert.ok(memory.chests()[0].traces.some((trace) => trace.item === 'coal' && trace.kind === 'put' && trace.qty === 'few'));
-  assert.ok(!memory.chests()[0].traces.some((trace) => trace.item === 'diamond'));
+  assert.ok(memory.chests()[0].contents.items.some((i) => i.name === 'coal' && i.count === 2));
+  assert.ok(!memory.chests()[0].contents.items.some((i) => i.name === 'diamond'));
 });
 
 test('a confirmed partial transfer remains remembered when execution is cancelled', async (t) => {
@@ -233,5 +231,5 @@ test('a confirmed partial transfer remains remembered when execution is cancelle
     const error = new Error('cancelled'); error.name = 'AbortedError'; throw error;
   };
   await assert.rejects(storeItems.run(ctx, { target: box, items: [{ name: 'coal', count: 10 }] }), /cancelled/);
-  assert.ok(memory.chests()[0].traces.some((trace) => trace.item === 'coal' && trace.kind === 'put' && trace.qty === 'few'));
+  assert.ok(memory.chests()[0].contents.items.some((i) => i.name === 'coal' && i.count === 2));
 });

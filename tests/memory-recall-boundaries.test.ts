@@ -92,20 +92,23 @@ test('English mixed facts keep resource evidence precise while container quantit
   });
 });
 
-test('old container locations do not leak through recall, dashboard or station name navigation', (t) => {
+test('old container locations: landmark navigation stays fuzzy, the precise ledger keeps exact position', (t) => {
   const world = new TestWorld(), memory = new WorldMemory(null), ts = Date.now() - 25 * 3600_000;
   t.after(() => memory.close());
   memory.setWorld(world.worldId);
   const landmark = memory.addLandmark('discovery', '我的箱子', world.dim, pos)!;
   landmark.ts = ts;
   memory.noteChestUse(world.dim, pos, { put: [{ name: 'diamond', count: 32 }], now: ts });
+  // 历史地标（导航/回忆）不泄漏精确坐标
   const recalled = recallLocal('我的箱子', { self: new SelfModel(null), memory });
   assert.ok(recalled.some((entry) => entry.kind === 'place'));
   assert.doesNotMatch(JSON.stringify(recalled), /123,67,-234|"x":123/);
   const snapshot = dashboardMemory(memory, world.state(), null);
-  assert.equal(snapshot.chests[0].precise, false);
   assert.equal(snapshot.landmarks[0].precise, false);
-  assert.doesNotMatch(JSON.stringify(snapshot), /"x":123/);
+  assert.doesNotMatch(JSON.stringify(snapshot.landmarks), /"x":123/);
+  // 精确账本：箱子记录保留精确位置
+  assert.equal(snapshot.chests[0].precise, true);
+  assert.deepEqual(snapshot.chests[0].pos, pos);
   const ctx = makeCtx(world, { memory, senses: { knownBlocks: () => [], observeBlocks: () => [] } });
   const station = findStation(ctx, ['chest'], 500);
   assert.ok(station);
@@ -129,7 +132,8 @@ test('dashboard notes, ended goals and reflection project old container prose wi
   assert.match(snapshot.goals[0].goal, /历史容器区域/);
   assert.match(snapshot.goals[0].summary, /历史容器区域/);
   assert.equal('plan' in snapshot.goals[0], false);
-  assert.doesNotMatch(JSON.stringify(snapshot), /123,67,-234|"x":123|diamond×64|"count":64/);
+  // 历史叙述（笔记、目标）不泄漏精确坐标；精确账本（chests/facilities）保留精确位置是设计如此
+  assert.doesNotMatch(JSON.stringify([snapshot.notes[0], snapshot.goals[0]]), /123,67,-234|"x":123|diamond×64|"count":64/);
 
   self.data.knowHow.push({ id: 'old-observation', text, tags: [], wins: 1, losses: 0,
     createdAt: ts, updatedAt: Date.now(), source: 'observed' });

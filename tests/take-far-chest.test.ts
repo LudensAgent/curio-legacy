@@ -17,8 +17,8 @@ test('take_items：远处（或别的维度）的箱子不去开，记录不删�
   assert.equal(r.failureCode, 'BAD_ARGS', '未指定箱子就只列线索');
   const hints = r.data?.hints as { dimension: string; text: string }[];
   assert.deepEqual(new Set(hints.map((hint) => hint.dimension)), new Set([dim, 'the_nether']));
-  assert.ok(hints.every((hint) => /放过几个 obsidian/.test(hint.text)), '只说存过和模糊数量');
-  assert.doesNotMatch(JSON.stringify(hints), /obsidian×\d/);
+  assert.ok(hints.every((hint) => /obsidian×\d/.test(hint.text)), '精确数量和位置');
+  assert.doesNotMatch(JSON.stringify(hints), /"target"/, '远箱子不暴露精确 target');
   assert.match(r.summary, /未自动搜索/);
   assert.deepEqual(w.actions, []);
   assert.equal(w.inv.get('obsidian') ?? 0, 0);

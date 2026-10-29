@@ -5,9 +5,9 @@ import { dist3, shortId } from '../util.ts';
 import { reservationsFor } from '../projects/reservations.ts';
 import type { Decision, Intent, Preference } from '../intentions/types.ts';
 import type { Evidence, PauseReason, Project } from '../projects/types.ts';
-import { applyUse, chestLocation, isContainerLandmark, migrateRecord, prune, recall, type ChestRecall, type ChestRecord, type ChestUse, type Clock } from './chest-memory.ts';
+import { applyContents, chestLocation, isContainerLandmark, migrateChest, recall, type ChestRecall, type ChestRecord, type ChestContents, type ChestUse, type Clock } from './chest-memory.ts';
 
-export type { ChestRecord, ChestRecall, ChestTrace, ChestUse, ChestQty, Confidence } from './chest-memory.ts';
+export type { ChestRecord, ChestRecall, ChestContents, ChestUse } from './chest-memory.ts';
 
 export type LandmarkKind = 'base' | 'resource' | 'danger' | 'discovery' | 'death' | 'waypoint' | 'herd';
 
@@ -316,10 +316,10 @@ export class WorldMemory {
 
   /** 清理旧版本留下的“透视”数据 */
   private migrate() {
-    // 箱子：旧版整箱快照 → 印象（不看版本号，哪条还是旧样子就转哪条）
+    // 箱子：旧版模糊印象 → 直接丢弃内容，只留箱子身份；内容等下次打开再精确补上（不看版本号，旧样子就转）
     for (const [k, c] of Object.entries(this.data.chests ?? {})) {
-      if (!c || (c as ChestRecord).traces) continue;
-      this.data.chests[k] = migrateRecord(c as any, this.data.chestOps ?? 0);
+      if (!c || (c as ChestRecord).contents) continue;
+      this.data.chests[k] = migrateChest(c as any);
       this.touch();
     }
     const version = this.data.version ?? 1;
@@ -366,15 +366,17 @@ export class WorldMemory {
     const pf = path.join(path.dirname(file), 'memory-patch.json');
     if (!fs.existsSync(pf)) return;
     try {
-      const p = JSON.parse(fs.readFileSync(pf, 'utf8')) as { removeLandmarks?: string[]; removeChests?: string[]; setChests?: ChestRecord[]; removeFurnaces?: string[]; markGone?: { label: string; dim: string; pos: Vec3Like; now?: string }[]; selectBase?: string };
+      const p = JSON.parse(fs.readFileSync(pf, 'utf8')) as { removeLandmarks?: string[]; removeChests?: string[]; setChests?: (Partial<ChestRecord> & { items?: { name: string; count: number }[] })[]; removeFurnaces?: string[]; markGone?: { label: string; dim: string; pos: Vec3Like; now?: string }[]; selectBase?: string };
       const ids = new Set(p.removeLandmarks ?? []);
       const before = this.data.landmarks.length;
       this.data.landmarks = this.data.landmarks.filter((l) => !ids.has(l.id));
       if (before !== this.data.landmarks.length) this.patched.push(`删了 ${before - this.data.landmarks.length} 个地标`);
       for (const k of p.removeChests ?? []) if (this.data.chests?.[k]) { delete this.data.chests[k]; this.patched.push(`删了箱子 ${k}`); }
       for (const c of p.setChests ?? []) {
-        if (!c?.pos || !c.dim || (!Array.isArray(c.items) && !Array.isArray(c.traces))) continue;
-        (this.data.chests ??= {})[`${c.worldId ?? this.data.worldId}:${c.dim}:${c.pos.x},${c.pos.y},${c.pos.z}`] = migrateRecord({ ...c, worldId: c.worldId ?? this.data.worldId }, this.data.chestOps ?? 0);
+        if (!c?.pos || !c.dim) continue;
+        const rec = migrateChest({ ...c, worldId: c.worldId ?? this.data.worldId });
+        if (Array.isArray(c.items)) rec.contents = { items: c.items.filter((i) => i.count > 0).map((i) => ({ name: i.name, count: i.count })), observedAt: Date.now(), day: c.day };
+        (this.data.chests ??= {})[`${c.worldId ?? this.data.worldId}:${c.dim}:${c.pos.x},${c.pos.y},${c.pos.z}`] = rec;
         this.patched.push(`写入箱子 (${c.pos.x},${c.pos.y},${c.pos.z})`);
       }
       for (const k of p.removeFurnaces ?? []) if (this.data.furnaces?.[k]) { delete this.data.furnaces[k]; this.patched.push(`删了熔炉 ${k}`); }
@@ -854,10 +856,9 @@ export class WorldMemory {
     const k = this.chestKey(dim, pos);
     const all = (this.data.chests ??= {});
     this.data.chestOps = (this.data.chestOps ?? 0) + 1;
-    const rec = all[k] ?? (all[k] = { worldId: this.worldId, dim, pos: { x: pos.x, y: pos.y, z: pos.z }, uses: 0, ts: Date.now(), traces: [] });
+    const rec = all[k] ?? (all[k] = { worldId: this.worldId, dim, pos: { x: pos.x, y: pos.y, z: pos.z }, block: use.block ?? 'chest', uses: 0, ts: Date.now(), contents: { items: [], observedAt: 0, possiblyStale: true } });
     const clock = { ...this.chestClock(use.day), now: use.now ?? Date.now() };
-    applyUse(rec, use, clock);
-    prune(rec, clock);
+    applyContents(rec, use, clock);
     this.touch();
     return rec;
   }
@@ -882,10 +883,10 @@ export class WorldMemory {
     return c && this.inWorld(c) ? c : undefined;
   }
 
-  /** 想找某样东西：记得哪些箱子里可能有，确定的在前（accept 可以放宽：找木板时原木也算） */
-  recallChests(accept: string | ((name: string) => boolean), opts: { dim?: string; day?: number } = {}): ChestRecall[] {
+  /** 想找某样东西：记得哪些箱子里有、各多少，近的在前（accept 可以放宽：找木板时原木也算） */
+  recallChests(accept: string | ((name: string) => boolean), opts: { dim?: string; day?: number; from?: Vec3Like } = {}): ChestRecall[] {
     const fn = typeof accept === 'string' ? (n: string) => n === accept : accept;
-    return recall(this.chests(opts.dim), fn, this.chestClock(opts.day));
+    return recall(this.chests(opts.dim), fn, this.chestClock(opts.day), opts.from);
   }
 
   /** 熔炉里留下了东西就记着；取空了（或者那里不再是熔炉）就忘掉 */

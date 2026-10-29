@@ -42,7 +42,7 @@ export function dashboardMemory(memory: WorldMemory, state: Pick<AgentState, 'wo
     passages: passages.filter(inDimension).sort((a, b) => b.lastUsedAt - a.lastUsedAt).slice(0, 12),
     facilities: facilities.slice(0, 16).map((f) => ({ ...f, worldId: state.worldId, dim: state.dim })),
     chests: chests.filter(inDimension).map((c) => ({ worldId: c.worldId, dim: c.dim, ...chestRecollectionLocation(c, clock), note: c.note, uses: c.uses,
-      traces: c.traces.length, text: describeChest(c, clock) })),
+      items: c.contents.items.length, text: describeChest(c, clock) })),
     hazards: hazards.filter(inDimension).slice(-10),
     farms: farms.filter(inDimension).map((f) => ({ dim: f.dim, crop: f.crop, cells: f.cells.length, harvests: f.harvests })),
     notes: memory.notesFor({ dimension: state.dim, n: 8 }).filter(inWorld)

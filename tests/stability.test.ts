@@ -152,8 +152,9 @@ test('箱子：先返回候选，Agent 明确选定后才翻找，并留下所�
   const miss = await SKILLS.take_items.run(ctx, { item: 'apple', count: 4, target: chestPos });
   assert.equal(miss.failureCode, 'NOT_FOUND');
   assert.match(miss.summary, /未改选其他容器/);
-  assert.equal(memory.chests()[0].traces.find((t) => t.item === 'bread')?.kind, 'glimpsed', '留下了印象');
-  assert.equal(memory.chests()[0].traces.find((t) => t.item === 'apple')?.kind, 'absent', '也记得这里没有 apple');
+  const contents = memory.chests()[0].contents;
+  assert.ok(contents.items.some((t) => t.name === 'bread' && t.count === 5), '记录了箱子内容');
+  assert.ok(!contents.items.some((t) => t.name === 'apple'), 'apple 不在里面');
   const got = await SKILLS.take_items.run(ctx, { item: 'bread', count: 3, target: chestPos });
   assert.equal(got.status, 'succeeded', got.summary);
   assert.equal(adapter.inv.get('bread'), 3);
