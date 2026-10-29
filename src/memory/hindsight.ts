@@ -1,8 +1,8 @@
 import { HindsightClient, HindsightError, createClient, createConfig, sdk, type Client, type RecallResult } from '@vectorize-io/hindsight-client';
 import type { MemoryBackend, MemoryEntry, MemoryEpisode, MemorySettings, RecallRequest } from './types.ts';
 
-const MAX_RESULTS = 8;
-const MAX_TEXT = 800;
+const MAX_RESULTS = 4;
+const MAX_TEXT = 400;
 
 function scopeTags(worldId: string, dimension: string): string[] {
   if (!worldId.trim() || !dimension.trim()) throw new Error('Memory recall requires a world and dimension');

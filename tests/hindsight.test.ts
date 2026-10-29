@@ -97,12 +97,12 @@ test('Hindsight recall uses all_strict scope, rejects leaked results and bounds 
     ] });
   });
   const entries = await backend.recall({ worldId: episode.worldId, dimension: episode.dimension, query: 'Where is the village?' }, activeSignal());
-  assert.equal(entries.length, 8);
-  assert.deepEqual(entries.map(entry => entry.id), Array.from({ length: 8 }, (_, i) => `good-${i}`));
+  assert.equal(entries.length, 4);
+  assert.deepEqual(entries.map(entry => entry.id), Array.from({ length: 4 }, (_, i) => `good-${i}`));
   assert.equal(entries[0].kind, 'inference', 'Consolidation must not masquerade as an observed fact');
   assert.equal(entries[1].kind, 'experience');
   for (const entry of entries) {
-    assert.equal(entry.text.length, 800);
+    assert.equal(entry.text.length, 400);
     assert.equal(entry.source.length, 160);
     assert.equal(entry.observedAt?.length, 64);
   }

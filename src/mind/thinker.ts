@@ -536,7 +536,7 @@ export class Thinker {
       }
       const res = await recall.recall({ percept: { self: { dim: ctx.percept.self.dim, pos: ctx.percept.self.pos }, objective: null, nearby: ctx.percept.nearby },
         lastFailure: null, userSuggestion: ctx.userSuggestion }, String(raw.query ?? '').slice(0, 400));
-      return boundedJson(res.memories, 3500);
+      return boundedJson(res.memories, 1500);
     } catch (e) {
       return `查询失败：${e instanceof Error ? e.message : String(e)}`;
     }
