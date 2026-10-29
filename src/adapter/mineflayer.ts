@@ -659,6 +659,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const stackSize = this.mcData.itemsByName?.[it.name]?.stackSize;
       const cur: InvItem = inv.get(it.name) ?? { name: it.name, count: 0, ...(stackSize ? { stackSize } : {}) };
       cur.count += it.count;
+      if (Number.isInteger(it.slot)) cur.stacks = [...(cur.stacks ?? []), { slot: it.slot, count: it.count }];
       const max = this.mcData.itemsByName?.[it.name]?.maxDurability;
       if (max) {
         const left = Math.max(0, max - (it.durabilityUsed ?? 0));

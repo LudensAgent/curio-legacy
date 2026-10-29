@@ -1361,7 +1361,7 @@ test('提示词区分背包空槽与物品的堆叠上限', () => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
   const percept = { ...perception.update(), emptySlots: 4 };
-  const state = { ...adapter.state(), inventory: [{ name: 'raw_iron', count: 4, stackSize: 64 }, { name: 'bucket', count: 2, stackSize: 16 }] };
+  const state = { ...adapter.state(), emptySlots: 4, inventory: [{ name: 'raw_iron', count: 4, stackSize: 64 }, { name: 'bucket', count: 2, stackSize: 16 }] };
   const [, user] = buildMindMessages({ reason: '测试', percept, state, self: new SelfModel(null), memory, activity: null, suspended: [], lastRecord: null,
     noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', skills: [], tier: 'deliberate' } as any);
   const body = JSON.parse(user.content.match(/【身体】(.*)/)![1]);

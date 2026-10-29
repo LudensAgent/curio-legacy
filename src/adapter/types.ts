@@ -72,6 +72,8 @@ export interface InvItem {
   count: number;
   /** 此物品每叠的数量上限，不代表同名物品一定能合并 */
   stackSize?: number;
+  /** 普通背包和快捷栏中的实际分叠，不代表各叠数据相同 */
+  stacks?: { slot: number; count: number }[];
   /** 会磨损的东西（工具、武器、护甲）：同名里最旧那件还剩多少耐久 / 满耐久 */
   durability?: { left: number; max: number };
   /** 同名每一件各剩多少耐久（从好到差）：只看最旧那件，会以为 11 把镐全是快坏的 */

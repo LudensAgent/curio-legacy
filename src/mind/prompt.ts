@@ -432,9 +432,12 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
     // 工具、武器、护甲带上耐久（像物品栏里那条耐久条）；附魔的标出来
     inventory: [...inv].map(([name, count]) => {
       const it = s.inventory.find((i) => i.name === name);
-      return `${name}×${count}${it?.stackSize ? `（每叠上限 ${it.stackSize}）` : ''}${durabilityText(it)}${it?.enchanted ? '（附魔）' : ''}`;
-    }), empty_slots: p.emptySlots,
-    ...(p.emptySlots <= 5 ? { inventory_space: '空格数是空槽位数量，不是可携带物品数量；物品的每叠上限因物品而异，已有未满且可合并的叠也可能容纳更多。物品总数不表示各槽分布，同名物品的属性不同时也不一定能合并。' } : {}),
+      const stackSize = it?.stackSize;
+      const stacks = s.emptySlots <= 5 && stackSize && stackSize > 1 && it?.stacks?.length
+        ? `；${it.stacks.map((stack) => `槽${stack.slot} ${stack.count}/${stackSize}，该叠可再放 ${stackSize - stack.count} 个数据相同的物品`).join('；')}` : '';
+      return `${name}×${count}${it?.stackSize ? `（每叠上限 ${it.stackSize}${stacks}）` : ''}${durabilityText(it)}${it?.enchanted ? '（附魔）' : ''}`;
+    }), empty_slots: s.emptySlots,
+    ...(s.connected && s.emptySlots <= 5 ? { inventory_space: `空格数是空槽位数量，不是可携带物品数量；${s.emptySlots} 个空槽全部用来放同一种且数据相同的物品时，每叠上限为 64、16、1 的物品分别可放 ${s.emptySlots * 64}、${s.emptySlots * 16}、${s.emptySlots} 个。这些空槽由所有物品共用，并非各物品各有这些空间；当前空间可能随物品变化。已有未满堆的剩余空间只适用于与该堆数据相同的物品，同名物品的属性不同时也不一定能合并。` } : {}),
     ...(s.effects?.length ? { effects: s.effects.map((e) => `${e.name}${e.level > 1 ? ` ${e.level} 级` : ''}，${e.seconds > 0 ? `剩余时间按正常速度估算为${durationText(realSecondsToTicks(e.seconds))}游戏时间` : '剩余时长未知或接近结束'}`) } : {}),
     ...(s.xp ? { xp_level: s.xp.level } : {}),
     // 背包里的食物各值多少（生的顺带说烤熟后值多少）：只给事实，吃不吃、烤不烤由它自己定
@@ -540,10 +543,11 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
     ['最近', {
       ...(!glance ? { recent_activities: self.history(5).map((r) => recordLine(r, ctx.memory, s.dim)) } : {}),
       ...(ctx.lastRecord ? { last_activity: recordLine(ctx.lastRecord, ctx.memory, s.dim) } : {}),
-      stream: self.recentThoughts(glance ? 4 : 8).map((t) => `${t.kind === 'monologue' ? '' : `[${t.kind}] `}${recallText(t.text, ctx.memory, undefined, t.kind === 'outcome' || t.kind === 'notice' ? t.at : 0)}`),
+      stream: self.recentThoughts(glance ? 4 : 8).map((t) => `${t.kind === 'monologue' ? '[此前想法，未经核实]' : `[${t.kind}]`} ${recallText(t.text, ctx.memory, undefined, t.kind === 'outcome' || t.kind === 'notice' ? t.at : 0)}`),
     }],
     ['手上的活', {
       current_activity: ctx.activity ? describeActivity(ctx.activity, s, p) : null,
+      ...(ctx.activity?.why ? { activity_reason_source: '当前活动的 why 是先前选择的理由，不等于观测事实；动作反馈和当前观察可用于核对' } : {}),
       ...(ctx.suspended.length ? { will_resume_after: ctx.suspended.map((a) => a.what) } : {}),
       ...(ctx.designing ? { architect_drawing: `${ctx.designing.brief.slice(0, 60)}（${ctx.designing.minutes} 现实分钟了）` } : {}),
       ...(ctx.repeatedFailures?.length ? { repeated_failures: ctx.repeatedFailures } : {}),
