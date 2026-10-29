@@ -82,7 +82,7 @@ export function myFacilities(memory: Pick<WorldMemory, 'landmarks' | 'chests' | 
     for (const rec of memory.passages(s.dim)) {
       if (rec.worldId && rec.worldId !== s.worldId) continue;
       const d = describePassage(rec, s.pos, stations, resources);
-      out.push({ kind: 'passage', label: '我挖的通道', pos: d.entrance, dist: d.inside ? 0 : d.dist, text: `挖过的通道：${d.text}`, inside: d.inside });
+      out.push({ kind: 'passage', label: '我挖的通道', pos: d.entrance, dist: d.inside ? 0 : d.dist, text: `挖过的通道：${d.text}；记录 ${rec.id}（passages 查询可读历史脚点）`, inside: d.inside });
     }
   }
   return out.sort((a, b) => a.dist - b.dist);

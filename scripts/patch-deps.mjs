@@ -16,6 +16,35 @@ function patch(rel, mark, anchor, replacement, done, missing) {
   console.log(done);
 }
 
+// 寻路停止挖掘时只移除自己的监听；removeAllListeners 的第二个参数无效，
+// 会把通道记忆等外部订阅一起清空，之后成功挖掘也不再留下记录。
+{
+  const anchor = `    bot.removeAllListeners('diggingAborted', detectDiggingStopped)
+    bot.removeAllListeners('diggingCompleted', detectDiggingStopped)`;
+  patch('mineflayer-pathfinder/index.js', '/* curio-patch: preserve external digging listeners */', anchor,
+    `    /* curio-patch: preserve external digging listeners */
+    bot.removeListener('diggingAborted', detectDiggingStopped)
+    bot.removeListener('diggingCompleted', detectDiggingStopped)`,
+    'mineflayer-pathfinder 停止挖掘时保留外部挖掘记录监听', '检查 detectDiggingStopped 的监听清理');
+}
+
+// 死亡只取消当前挖掘；通道记录等跨生命订阅仍需接收重生后的挖掘事件。
+{
+  const anchor = `      bot.removeAllListeners('diggingAborted')
+      bot.removeAllListeners('diggingCompleted')`;
+  patch('mineflayer/lib/plugins/digging.js', '/* curio-patch: keep digging observers on death */', anchor,
+    '      /* curio-patch: keep digging observers on death */',
+    'mineflayer 死亡后保留外部挖掘记录监听', '检查 death 的挖掘清理');
+}
+
+// 完成事件报告本次挖掉的原方块；newBlock 是挖完后的空气，会丢失矿种。
+{
+  patch('mineflayer/lib/plugins/digging.js', '/* curio-patch: report mined block */',
+    `      bot.emit('diggingCompleted', newBlock)`,
+    `      bot.emit('diggingCompleted', block) /* curio-patch: report mined block */`,
+    'mineflayer 挖掘完成事件保留原方块类型和位置', '检查 onBlockUpdate 的完成事件');
+}
+
 // mineflayer-pathfinder 2.4.x：路上要开门时（useOne），开完门 toPlace 已经空了，placingBlock 变成 undefined，
 // placing 却还是 true；之后每个物理刻都读 placingBlock.y 抛错（日志里一次几十条 "reading 'y'"），寻路卡在原地。
 {
