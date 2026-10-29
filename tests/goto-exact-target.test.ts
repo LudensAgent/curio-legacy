@@ -66,7 +66,7 @@ test('a failed adjacent goto reports a freshly observed target door without clai
   t.mock.method(adapter, 'blockOptics', () => ({ name: 'oak_door', kind: 'solid', shapes: [[0, 0, 0.8125, 1, 1, 1]] }));
   t.mock.method(adapter, 'moveTo', async () => { throw new Error('No path'); });
   const result = await goTo.run(ctx, { target: '1,65,0', dig: true });
-  assert.match(result.summary, /目标格看到 oak_door，门目前打开，门板位于该格南侧，仍有碰撞，尚未确认/);
+  assert.match(result.summary, /目标格看到 oak_door，门目前打开，尚未确认它是否挡住路线/);
   assert.equal((result.data?.observedDoor as { properties: { open: boolean } }).properties.open, true);
 });
 

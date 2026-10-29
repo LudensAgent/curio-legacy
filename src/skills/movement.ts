@@ -353,10 +353,9 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
       const observedDoor = door?.source === 'vision' && door.worldId === s.worldId && door.dimension === s.dim && door.sessionId === s.sessionId
         && Math.abs(Date.now() - door.observedAt) <= 2000 && door.name.endsWith('_door') ? door : null;
       const open = observedDoor?.properties.open;
-      const shape = observedDoor ? adapter.blockOptics(observedDoor.pos.x, observedDoor.pos.y, observedDoor.pos.z)?.shapes?.[0] : null;
-      const panel = shape ? shape[0] >= 0.75 ? '东' : shape[3] <= 0.25 ? '西' : shape[2] >= 0.75 ? '南' : shape[5] <= 0.25 ? '北' : null : null;
+      // blockOptics 是禁用的透视接口，不能为诊断门板位置而调用它。
       const doorNote = observedDoor && (open === true || open === false || open === 'true' || open === 'false')
-        ? `；目标格看到 ${observedDoor.name}，门目前${String(open) === 'true' ? '打开' : '关闭'}，门板${panel ? `位于该格${panel}侧，` : ''}仍有碰撞，尚未确认它是否挡住路线` : '';
+        ? `；目标格看到 ${observedDoor.name}，门目前${String(open) === 'true' ? '打开' : '关闭'}，尚未确认它是否挡住路线` : '';
       return fail(code, `尚未到达 ${label} 的目标格：实际站在 (${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)})，紧挨着目标格，差 ${distance(p).toFixed(2)} 格（${why}）${doorNote}${terrainNote()}`, { ...measured(p), nextTo: true, ...(observedDoor ? { observedDoor } : {}) });
     };
     const inScope = () => {

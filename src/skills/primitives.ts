@@ -210,11 +210,8 @@ export const stepTo: Skill<CellArgs> = {
       if (AIR.has(n) || isSoftBlock(n)) return true;
       if (!n.endsWith('_door') || n === 'iron_door') return false;
       const open = a.blockStateAt?.(p)?.properties.open;
-      if (typeof open !== 'boolean') return false;
-      const shapes = a.blockOptics(p.x, p.y, p.z)?.shapes;
-      // Either door state can put its panel at the side of the cell. Check
-      // the centered footprint; the movement executor checks the actual route.
-      return !!shapes && !shapes.some(([x0, y0, z0, x1, y1, z1]) => x0 < .8 && x1 > .2 && z0 < .8 && z1 > .2 && y0 < 1 && y1 > 0);
+      // 打开的木门可穿行（门板贴格边、不挡中心通行）；blockOptics 是禁用的透视接口，不能用它取碰撞形状。
+      return open === true;
     };
     // 泡在水里：脚下那格是水、岸往往比脚高一两格，平地上的“上下 ±1”对不上。像玩家一样朝那边游、贴着岸按住跳爬上去
     if (a.state().inWater && a.swimTo) {
