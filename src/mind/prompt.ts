@@ -1,4 +1,5 @@
 import type { AgentState } from '../adapter/types.ts';
+import { effortFacts } from '../brain/efficiency.ts';
 import type { AudienceContext } from '../live/audience.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { durationText, realSecondsToTicks, sunText, type Percept } from '../perception/perception.ts';
@@ -424,15 +425,7 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
       : '没穿盔甲，副手空着',
     ...(digging && tool && !ownsTool ? { tool_note: `正在挖 ${material}，背包里没有 ${tool}（只能空手挖，很慢）` } : {}),
     // 效率/抠门的双面事实：最近挖了很多，更快/更省的工具各是什么（只给事实，换不换由它定）
-    ...(p.efficiency?.length ? { dig_effort: p.efficiency.slice(0, 2).map((e) => {
-      const parts = [`最近用 ${e.tool} 挖了 ${e.mined} 个 ${e.block}，平均 ${e.avg_s} 秒/个`];
-      for (const b of e.better.slice(0, 1)) parts.push(`${b.tool} 约 ${b.est_s} 秒/个（快 ${b.speedup} 倍）`);
-      for (const c of e.cheaper.slice(0, 1)) {
-        const scarce = c.savesItem === 'diamond' ? (inv.get('diamond') ?? 0) : c.savesItem === 'iron_ingot' ? (inv.get('iron_ingot') ?? 0) : null;
-        if (scarce != null) parts.push(`${c.tool} 约 ${c.est_s} 秒/个（慢 ${Math.round((c.slowdown - 1) * 100)}%），但不耗${c.savesZh}（背包 ${scarce} 个）`);
-      }
-      return parts.join('；');
-    }) } : {}),
+    ...(p.efficiency?.length ? { dig_effort: p.efficiency.slice(0, 2).map((e) => effortFacts(e, s.inventory).join('；')) } : {}),
     // 工具、武器、护甲带上耐久（像物品栏里那条耐久条）；附魔的标出来
     inventory: [...inv].map(([name, count]) => {
       const it = s.inventory.find((i) => i.name === name);

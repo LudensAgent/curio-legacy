@@ -2,6 +2,7 @@ import type { WorldMemory } from '../memory/store.ts';
 import type { Percept } from '../perception/perception.ts';
 import { durationText, realSecondsToTicks } from '../perception/time.ts';
 import { buildingArchiveFor } from '../skills/build.ts';
+import { effortFacts } from './efficiency.ts';
 
 /**
  * 兼容规则模式的游玩驱动力；自主模型改用 observedNeeds 的事实投影。
@@ -91,13 +92,7 @@ export function observedNeeds(p: Percept): ObservedNeed[] {
       d.seconds_left > 0 ? `按正常 TPS 且区块持续加载估算，最多还剩${durationText(realSecondsToTicks(d.seconds_left))}（现实时间）` : '按正常 TPS 且区块持续加载估算，常规寿命已过去；实际情况未知'], unknowns: ['掉落物的当前状态与前往路线尚未确认'] });
   }
   for (const e of (p.efficiency ?? []).slice(0, 2)) {
-    const facts = [`最近用${e.tool}挖了 ${e.mined} 个 ${e.block}，实测平均 ${e.avg_s} 秒/个`];
-    for (const b of e.better.slice(0, 1)) facts.push(`${b.tool} 约 ${b.est_s} 秒/个（快 ${b.speedup} 倍）`);
-    for (const c of e.cheaper.slice(0, 1)) {
-      const scarce = c.savesItem === 'diamond' ? st.diamond : c.savesItem === 'iron_ingot' ? st.iron : null;
-      if (scarce != null) facts.push(`${c.tool} 约 ${c.est_s} 秒/个（慢 ${Math.round((c.slowdown - 1) * 100)}%），但不耗${c.savesZh}（背包 ${scarce} 个）`);
-    }
-    needs.push({ need: 'effort', facts });
+    needs.push({ need: 'effort', facts: effortFacts(e, p.inventory) });
   }
   return needs;
 }

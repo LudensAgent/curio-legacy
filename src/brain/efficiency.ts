@@ -77,3 +77,14 @@ export function efficiencyInsights(adapter: GameAdapter, memory: WorldMemory, in
   }
   return out.sort((a, b) => b.mined - a.mined).slice(0, 4);
 }
+
+/** 把一条效率洞察说成事实（更快/更省两个方向 + 稀缺度），不处方；由调用方决定怎么摆进提示词 */
+export function effortFacts(e: EfficiencyInsight, inventory: { name: string; count: number }[]): string[] {
+  const count = (item: string) => inventory.filter((i) => i.name === item).reduce((n, i) => n + i.count, 0);
+  const facts = [`最近用${e.tool}挖了 ${e.mined} 个 ${e.block}，实测平均 ${e.avg_s} 秒/个`];
+  for (const b of e.better.slice(0, 1)) facts.push(`${b.tool} 约 ${b.est_s} 秒/个（快 ${b.speedup} 倍）`);
+  for (const c of e.cheaper.slice(0, 1)) {
+    facts.push(`${c.tool} 约 ${c.est_s} 秒/个（慢 ${Math.round((c.slowdown - 1) * 100)}%），但不耗${c.savesZh}（背包 ${count(c.savesItem)} 个）`);
+  }
+  return facts;
+}
