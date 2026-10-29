@@ -686,7 +686,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       dim,
       hp: b.health ?? 0,
       food: b.food ?? 0,
-      oxygen: ownOxygen(b),
+      oxygen: b.vehicle ? 20 : ownOxygen(b),
       timeOfDay: b.time?.timeOfDay ?? 0,
       ...(Number.isFinite(b.time?.day) ? { worldDay: b.time.day } : {}),
       ...(typeof worldAgeTicks === 'number' && Number.isFinite(worldAgeTicks) && worldAgeTicks >= 0 ? { worldAgeTicks } : {}),
@@ -694,7 +694,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       isDay: b.time?.isDay ?? true,
       biome,
       onGround: !!e.onGround,
-      inWater: !!e.isInWater,
+      inWater: !b.vehicle && !!e.isInWater,
       inLava: !!e.isInLava,
       inventory: [...inv.values()],
       ...(this.effectsOf(b).length ? { effects: this.effectsOf(b) } : {}),
@@ -3579,7 +3579,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         const appeared = () => Object.values(b.entities as Record<number, Entity>).find((entity) => !ids.has(String(entity.id))
           && /(^|_)(boat|raft)$/.test(entity.name ?? '') && entity.position.distanceTo(block.position) < 3);
         await this.afterAction(async () => {
-          await b._genericPlace(block, new Vec3(0, 1, 0));
+          await b._genericPlace(block, new Vec3(0, 1, 0), {});
           if (b.supportFeature('useItemWithOwnPacket')) b._client.write('use_item', { hand: 0 });
         }, check);
         const confirmed = await this.waitForInteraction(() => !!appeared(), check, 5000);
