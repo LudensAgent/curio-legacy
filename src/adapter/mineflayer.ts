@@ -3571,17 +3571,18 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (!block) return { ok: false, reason: 'NO_BLOCK' };
       if (this.mcData.blocksByName?.[item]) return await this.placeItemAgainst(item, block, check);
       if (/_boat$|_raft$/.test(item)) {
-        // 放船/筏：mineflayer 的 placeEntity 会按版本发正确的包（1.19+ 再补一个无效坐标的 block_place 才真正落船）。
-        // 之前手写 _genericPlace + use_item：1.20.1 没有 use_item 包，缺那第二下，服务器不落船也不扣背包（日志 ENTITY_NOT_SPAWNED）。
+        // 放船/筏：准星必须落在水面那一格的顶面上，服务器才落船。_genericPlace 里是“缓慢转头”（force 未给），
+        // 转头没到位就先发了 block_place，服务器按旧视线判定没对着水面，就不落船也不扣背包（日志 ENTITY_NOT_SPAWNED）。
+        // 这里先强制看向水面顶面中心，等两 tick 让服务器收到转头，再发 block_place。
         const ids = new Set(Object.keys(b.entities ?? {}));
-        let entity: any;
-        try { entity = await this.afterAction(() => raceAbort(b.placeEntity(block, new Vec3(0, 1, 0)), signal, 6000, () => {}), check); }
-        catch (e) {
-          if (e instanceof AbortedError) throw e;
-          // placeEntity 可能因先冒出别的实体而提前抛错：自己再看一眼有没有新船
-          entity = Object.values(b.entities ?? {}).find((en: any) => !ids.has(String(en.id)) && /(^|_)(boat|raft)$/.test(String(en.name)) && en.position.distanceTo(block.position) < 4);
-        }
-        if (typeof entity?.id !== 'number') return { ok: false, reason: 'ENTITY_NOT_SPAWNED:没有确认放置的实体出现', effectEvidence: { verified: true, changed: false, reasons: ['放置后没有确认新船实体'] } };
+        const appeared = () => Object.values(b.entities ?? {}).find((en: any) => !ids.has(String(en.id))
+          && /(^|_)(boat|raft)$/.test(String(en.name)) && en.position.distanceTo(block.position) < 4);
+        await this.afterAction(() => b.lookAt(block.position.offset(0.5, 1.0, 0.5), true), check);
+        await this.afterAction(() => this.lookSynced(), check);
+        await this.afterAction(() => b._genericPlace(block, new Vec3(0, 1, 0), { forceLook: 'ignore' }), check);
+        const confirmed = await this.waitForInteraction(() => !!appeared(), check, 5000);
+        const entity: any = appeared();
+        if (!confirmed || !entity) return { ok: false, reason: 'ENTITY_NOT_SPAWNED:没有确认放置的实体出现', effectEvidence: { verified: true, changed: false, reasons: ['放置后没有确认新船实体'] } };
         return { ok: true, spawned: entity.name ?? item, effectEvidence: { verified: true, changed: true, reasons: [`服务器返回新实体 ${entity.name ?? item}`] } };
       }
       // Other entity items use their block-face placement API.
