@@ -31,6 +31,8 @@ export interface DashboardHandlers {
   suggest(text: string): void;
   /** 紧急救援：找最近的露天平地，用 RCON 把 Bot 传送过去 */
   rescue?(): Promise<unknown>;
+  /** 一键天亮：用 RCON /time set day 把游戏时间跳到白天 */
+  dawn?(): Promise<{ ok: boolean; error?: string }>;
   /** 手动整理技能，运行中返回 busy，完成后返回可读结果。 */
   curateSkills?(): Promise<{ ok: true; result: string } | { ok: false; error: string; busy?: boolean }>;
   /** 切换自动旁观（附着到 Bot / 自由旁观） */
@@ -216,6 +218,11 @@ export function startDashboard(
         if (!h.rescue) return send(res, 404, '{"error":"not supported"}');
         const r = await h.rescue();
         return send(res, 200, JSON.stringify(r));
+      }
+      if (p === '/api/dawn') {
+        if (!h.dawn) return send(res, 404, '{"error":"not supported"}');
+        const r = await h.dawn();
+        return send(res, r.ok ? 200 : 500, JSON.stringify(r));
       }
       if (p === '/api/spectate') {
         const body = await readBody(req);

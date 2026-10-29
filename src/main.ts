@@ -585,6 +585,7 @@ const dashboard = startDashboard(config.dashboard.host, config.dashboard.port, b
   suggest: (t) => executive.suggest(t),
   spectate: (on) => spectator.setActive(on),
   rescue: () => rescue(),
+  dawn: () => dawn(),
   curateSkills: async () => {
     if (curator.busy) return { ok: false, busy: true, error: '正在整理技能，请等待本次完成' };
     const result = await curator.check(Date.now(), { force: true });
@@ -641,6 +642,41 @@ async function rescue(): Promise<{ ok: boolean; error?: string; to?: SurfaceSpot
 }
 
 let shuttingDown = false;
+
+/**
+ * 一键天亮（控制台按钮）：用 RCON /time set day 把游戏时间跳到白天。
+ * 顺手给所有人（主播的旁观客户端也在内）弹字幕、发聊天；然后让心智按“现在是白天”重新想。
+ */
+let dawning = false;
+async function dawn(): Promise<{ ok: boolean; error?: string }> {
+  if (dawning) return { ok: false, error: '上一次天亮还没做完' };
+  const s = adapter.state();
+  if (!s.connected) return { ok: false, error: 'Bot 没连上服务器' };
+  dawning = true;
+  try {
+    try {
+      await spectator.command('time set day');
+    } catch (e: any) {
+      bus.publish('dawn', 'P1', `天亮失败：RCON 命令没发出去（${e?.message ?? e}）`);
+      return { ok: false, error: `RCON 失败：${e?.message ?? e}` };
+    }
+    const notice = '天亮了：主包看不下去了';
+    for (const cmd of [
+      'title @a times 10 70 20',
+      `title @a subtitle ${JSON.stringify({ text: notice, color: 'gold', bold: true })}`,
+      `title @a title ${JSON.stringify({ text: '' })}`,
+      `tellraw @a ${JSON.stringify({ text: notice, color: 'gold' })}`,
+    ]) {
+      try { await spectator.command(cmd); } catch { /* ignore */ }
+    }
+    bus.publish('dawn', 'P1', `天亮：操作者把时间跳到了白天`, { notice });
+    executive.replan();
+    return { ok: true };
+  } finally {
+    dawning = false;
+  }
+}
+
 /** code：0 正常退出；RESTART_EXIT_CODE 请守护进程重启 */
 function shutdown(code = 0) {
   if (shuttingDown) return;

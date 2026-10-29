@@ -316,6 +316,7 @@
   <button id="specBtn" onclick="toggleSpectate()" title="自动旁观：你的客户端跟着 Bot 看；关掉后留在旁观模式自由飞">旁观</button>
   <button onclick="post('/api/replan')" title="让它马上重新想一想">重新想</button>
   <button id="rescueBtn" onclick="rescueBot()" title="卡在坑底、矿道、墙缝里出不来时：找周围最近的露天平地，用 RCON 把它传送过去">紧急救援</button>
+  <button id="dawnBtn" onclick="dawnBot()" title="把游戏时间跳到白天（RCON /time set day）">天亮</button>
   <button id="pauseBtn" onclick="togglePause()">暂停</button>
 </header>
 
@@ -638,6 +639,20 @@ async function rescueBot() {
   } catch (e) { msg = `没救成：${e.message}`; btn.classList.add('bad'); }
   btn.textContent = msg.length > 22 ? msg.slice(0, 22) + '…' : msg; btn.title = msg;
   setTimeout(() => { btn.disabled = false; btn.textContent = '紧急救援'; btn.classList.remove('bad'); btn.title = '卡在坑底、矿道、墙缝里出不来时：找周围最近的露天平地，用 RCON 把它传送过去'; }, 5000);
+}
+/** 一键天亮：确认后让后台 /time set day；结果在按钮上显示几秒 */
+async function dawnBot() {
+  const btn = $('dawnBtn');
+  if (btn.disabled || !confirm('把游戏时间跳到白天？会在游戏里显示「天亮了：主包看不下去了」。')) return;
+  btn.disabled = true; btn.textContent = '天亮中…';
+  let msg;
+  try {
+    const r = await (await fetch('/api/dawn', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).json();
+    msg = r.ok ? '天亮了' : `没成：${r.error || '未知原因'}`;
+    btn.classList.toggle('bad', !r.ok);
+  } catch (e) { msg = `没成：${e.message}`; btn.classList.add('bad'); }
+  btn.textContent = msg; btn.title = msg;
+  setTimeout(() => { btn.disabled = false; btn.textContent = '天亮'; btn.classList.remove('bad'); btn.title = '把游戏时间跳到白天（RCON /time set day）'; }, 5000);
 }
 function togglePause() { post(paused ? '/api/resume' : '/api/pause'); }
 let specActive = false;
