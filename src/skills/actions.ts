@@ -427,8 +427,10 @@ export const pressKeys: Skill<{ keys: DriveKeys; ms: number; guard: boolean }> =
     const before = { ...initial.pos };
     const result = await adapter.drive(args.keys, args.ms, ctx.signal, { guard: args.guard });
     const after = adapter.state();
-    const data = { keys: args.keys, ms: result.ms, moved: result.moved, before, position: after.pos, inWater: after.inWater, onGround: after.onGround, oxygen: after.oxygen, oxygenBefore: initial.oxygen, ...(result.stopped ? { stopped: result.stopped } : {}) };
-    const detail = `松键时位置 (${after.pos.x.toFixed(1)},${after.pos.y.toFixed(1)},${after.pos.z.toFixed(1)})，${after.inWater ? '在水中' : '当前未接触水'}，${after.onGround ? '当前触地' : '未触地'}，氧气 ${after.oxygen}/20（按键前 ${initial.oxygen}/20）${initial.inWater && !after.inWater && !after.onGround ? '；离水但未触地，尚未确认上岸' : ''}`;
+    const horizontal = Math.hypot(after.pos.x - before.x, after.pos.z - before.z);
+    const stuckJumping = !!args.keys.jump && !after.inWater && horizontal < 0.5;
+    const data = { keys: args.keys, ms: result.ms, moved: result.moved, horizontal: Math.round(horizontal * 100) / 100, before, position: after.pos, inWater: after.inWater, onGround: after.onGround, oxygen: after.oxygen, oxygenBefore: initial.oxygen, ...(result.stopped ? { stopped: result.stopped } : {}) };
+    const detail = `松键时位置 (${after.pos.x.toFixed(1)},${after.pos.y.toFixed(1)},${after.pos.z.toFixed(1)})，${after.inWater ? '在水中' : '当前未接触水'}，${after.onGround ? '当前触地' : '未触地'}，水平前进 ${horizontal.toFixed(1)} 格，氧气 ${after.oxygen}/20（按键前 ${initial.oxygen}/20）${initial.inWater && !after.inWater && !after.onGround ? '；离水但未触地，尚未确认上岸' : ''}${stuckJumping ? '；已不在水里，按 jump 只会原地跳、不前进——陆上走路松掉 jump 用 forward，上一两格高的坎用 step 或 climb_up' : ''}`;
     return result.ok ? ok(`按键 ${Object.keys(args.keys).join('+')} 已松开；${detail}`, data) : fail('ERROR', `按键控制结束：${result.reason ?? '未知'}；${detail}`, data);
   },
 };
