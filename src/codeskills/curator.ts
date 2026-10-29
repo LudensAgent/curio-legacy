@@ -20,7 +20,7 @@ import { ObservedGameClock } from './game-clock.ts';
  * 什么时候请模型：有新技能、有新冲突、或者账本里又攒了一批用过技能的经历（够判断效果了）。
  */
 export interface CuratorOptions { checkMs: number; unusedDays: number; candidateUnusedDays: number; disabledDays: number; gapMs: number; minSkills: number; /** 同时留着的自己写的技能最多几份：多了就收起最没用的 */ maxActive: number }
-export const DEFAULT_CURATOR: CuratorOptions = { checkMs: 60_000, unusedDays: 7, candidateUnusedDays: 3, disabledDays: 1, gapMs: 0, minSkills: 4, maxActive: 24 };
+export const DEFAULT_CURATOR: CuratorOptions = { checkMs: 60_000, unusedDays: 12, candidateUnusedDays: 5, disabledDays: 2, gapMs: 0, minSkills: 4, maxActive: 24 };
 const DAY_TICKS = 24_000;
 type Lifetime = { world: string; name: string; candidate: boolean; version: number; clock: number; age: number; idle: number; disabled: number;
   activity: string; restoredAt: number; disabledAt: number; retired: boolean };
