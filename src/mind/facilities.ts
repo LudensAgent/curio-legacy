@@ -91,6 +91,7 @@ export function myFacilities(memory: Pick<WorldMemory, 'landmarks' | 'chests' | 
     const resources = memory.landmarks().filter((l) => l.kind === 'resource' && mine(l, s));
     for (const rec of memory.passages(s.dim)) {
       if (rec.worldId && rec.worldId !== s.worldId) continue;
+      if (rec.kind === 'walked') continue; // 只是走过的天然洞穴，不算"我挖的通道"
       const d = describePassage(rec, s.pos, stations, resources);
       out.push({ kind: 'passage', label: '我挖的通道', pos: d.entrance, dist: d.inside ? 0 : d.dist, text: `挖过的通道：${d.text}；记录 ${rec.id}（passages 查询可读历史脚点）`, inside: d.inside, ...(d.next ? { next: d.next } : {}) });
     }

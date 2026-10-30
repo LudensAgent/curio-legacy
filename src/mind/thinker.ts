@@ -434,7 +434,7 @@ export class Thinker {
             const distance = Math.hypot(point.x - ctx.state.pos.x, point.y - ctx.state.pos.y, point.z - ctx.state.pos.z);
             return !best || distance < best.distance ? { index, distance } : best;
           }, null);
-          return { rec, summary: { id: rec.id, surfaceReferences: rec.entrances, deepestY: rec.deepestY, createdAt: rec.createdAt,
+          return { rec, summary: { id: rec.id, kind: rec.kind ?? 'dug', surfaceReferences: rec.entrances, deepestY: rec.deepestY, createdAt: rec.createdAt,
             lastUsedAt: rec.lastUsedAt, dug: rec.dug, ores: rec.ores, pointCount: rec.path.length,
             nearestPointIndex: nearest?.index ?? null, distance: nearest?.distance ?? null } };
         }).sort((a, b) => (a.summary.distance ?? Infinity) - (b.summary.distance ?? Infinity));

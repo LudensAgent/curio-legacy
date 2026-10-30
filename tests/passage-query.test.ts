@@ -65,7 +65,7 @@ test('passages lists only this world and dimension, sorts by nearest historical 
   assert.equal(listed.connectivity, 'unknown');
   const records = listed.records as Array<Record<string, unknown>>;
   assert.deepEqual(records.map((record) => record.id), ['nearby', 'farther'], 'sort by path proximity, not surface reference');
-  assert.deepEqual(records[0], { id: nearby.id, surfaceReferences: nearby.entrances, deepestY: nearby.deepestY,
+  assert.deepEqual(records[0], { id: nearby.id, kind: 'dug', surfaceReferences: nearby.entrances, deepestY: nearby.deepestY,
     createdAt: nearby.createdAt, lastUsedAt: nearby.lastUsedAt, dug: nearby.dug, ores: nearby.ores, pointCount: 2, nearestPointIndex: 1, distance: 1 });
   assert.equal(queryResult(w.calls, 2).error, '当前世界和维度没有这个矿道记录');
   assert.equal(queryResult(w.calls, 3).error, '当前世界和维度没有这个矿道记录');

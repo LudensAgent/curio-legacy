@@ -76,7 +76,7 @@ export class PassageTracker {
         old.lastUsedAt = now;
         this.active = { rec: old, existing: true };
       } else {
-        this.active = { existing: false, rec: { id: this.newId(), worldId: s.worldId, dim: s.dim, entrances: [], path: [pos], deepestY: pos.y, dug: 0, ores: {}, createdAt: now, lastUsedAt: now, uses: 1 } };
+        this.active = { existing: false, rec: { id: this.newId(), worldId: s.worldId, dim: s.dim, kind: 'walked', entrances: [], path: [pos], deepestY: pos.y, dug: 0, ores: {}, createdAt: now, lastUsedAt: now, uses: 1 } };
       }
       // 刚从地表下来：记录最后的地表位置，并未确认实际开口。
       const surf = this.lastSurface;
@@ -154,11 +154,12 @@ export class PassageTracker {
     if (rec.entrances.length > 3) rec.entrances.shift();
   }
 
-  /** 自己挖够了才存（走进天然洞穴不记）；接着以前那条走的，随时存 */
+  /** 走进去的天然洞穴也记（用于原路返回）；挖够了就升级成"我挖的通道"；接着以前那条走的随时存 */
   private save() {
     const a = this.active;
     if (!a) return;
-    if (a.existing || a.rec.dug >= MIN_DUG) this.memory.savePassage(a.rec);
+    a.rec.kind = a.rec.dug >= MIN_DUG ? 'dug' : 'walked';
+    if (a.existing || a.rec.dug >= MIN_DUG || a.rec.path.length >= 3) this.memory.savePassage(a.rec);
   }
 }
 

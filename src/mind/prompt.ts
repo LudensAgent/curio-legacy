@@ -12,7 +12,7 @@ import { myBed } from '../skills/stations.ts';
 import { travelStore } from '../travel/store.ts';
 import { describeActivity } from './activity.ts';
 import { describeBuild, homeOf, myBuilds } from './home.ts';
-import { FACILITY_LABELS, myFacilities } from './facilities.ts';
+import { describePassage, FACILITY_LABELS, myFacilities } from './facilities.ts';
 import { activeDrafts } from '../building/drafts.ts';
 import { cleanLesson, moodWords, type SelfModel } from './self.ts';
 import type { Activity, ActivityRecord, Noticing } from './types.ts';
@@ -286,21 +286,26 @@ const MINING_INTENT = /下矿|矿道|矿洞|找铁|挖铁|找矿|挖矿|粗铁|�
 /** 打算里说要从地下回地面 */
 const SURFACE_INTENT = /回地面|回到地面|见天|爬出|挖出去|出矿|上到地面|挖(阶梯|台阶).{0,8}上|往上挖/;
 
-/** 沿旧矿道回入口的下一步：找到正沿着的旧矿道，核对下一步那两格（脚下+头顶）现在是否还通，给出「可走/被堵」的当前事实。 */
+/** 沿来路回入口的下一步：找到正沿着的一段轨迹（自己挖的旧矿道或只是走过的天然洞穴），核对下一步那两格（脚下+头顶）现在是否还通，给出「可走/被堵」的当前事实。 */
 function passageWayBack(ctx: MindContext): string | null {
   const p = ctx.percept, s = ctx.state;
   const here = { x: p.self.pos[0], y: p.self.pos[1], z: p.self.pos[2] };
-  const t = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).find((f) => f.inside && f.next);
-  const next = t?.next;
-  if (!next) return null;
-  const at = (x: number, y: number, z: number) => ctx.blockAt?.({ x, y, z }) ?? null;
-  const foot = at(next.x, next.y, next.z);
-  const head = at(next.x, next.y + 1, next.z);
-  const open = (n: string | null) => n !== null && isSoftBlock(n);
-  const pos = `${Math.round(next.x)},${Math.round(next.y)},${Math.round(next.z)}`;
-  if (open(foot) && open(head)) return `你正沿着自己挖过的旧矿道；沿它回入口的下一步 (${pos}) 现在仍是 2 格高的空走廊，可以直接走过去`;
-  const reason = !open(foot) ? `脚下那格现在是 ${foot ?? '未加载'}` : `头顶那格现在是 ${head ?? '未加载'}`;
-  return `你正沿着自己挖过的旧矿道；沿它回入口的下一步 (${pos}) 被堵了：${reason}。挖开这一格、还是改走别的路，由你定`;
+  for (const rec of ctx.memory.passages(s.dim)) {
+    if (rec.worldId && rec.worldId !== s.worldId) continue;
+    const d = describePassage(rec, here);
+    if (!d.inside || !d.next) continue;
+    const next = d.next;
+    const at = (x: number, y: number, z: number) => ctx.blockAt?.({ x, y, z }) ?? null;
+    const foot = at(next.x, next.y, next.z);
+    const head = at(next.x, next.y + 1, next.z);
+    const open = (n: string | null) => n !== null && isSoftBlock(n);
+    const pos = `${Math.round(next.x)},${Math.round(next.y)},${Math.round(next.z)}`;
+    const kind = rec.kind === 'walked' ? '走过的路' : '自己挖过的旧矿道';
+    if (open(foot) && open(head)) return `你正沿着${kind}；沿它回入口的下一步 (${pos}) 现在仍是 2 格高的空走廊，可以直接走过去`;
+    const reason = !open(foot) ? `脚下那格现在是 ${foot ?? '未加载'}` : `头顶那格现在是 ${head ?? '未加载'}`;
+    return `你正沿着${kind}；沿它回入口的下一步 (${pos}) 被堵了：${reason}。挖开这一格、还是改走别的路，由你定`;
+  }
+  return null;
 }
 
 /** 打算里说要过水 / 到对岸 */

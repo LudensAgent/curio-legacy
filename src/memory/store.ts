@@ -56,6 +56,8 @@ export interface PassageRecord {
   id: string;
   worldId?: string;
   dim: string;
+  /** 'dug' = 自己挖出来的通道（台阶井/矿道）；'walked' = 只是走进去的天然洞穴，只用于原路返回，不算"我挖的通道" */
+  kind?: 'dug' | 'walked';
   /** 从地表钻下去的地方（可能有好几个口），不知道就空着 */
   entrances: Vec3Like[];
   /** 沿途脚下的点，每隔几格记一个 */
@@ -830,8 +832,10 @@ export class WorldMemory {
     if (i >= 0) all[i] = copy; else all.push(copy);
     const mine = all.filter((p) => this.inWorld(p));
     if (mine.length > 24) {
-      const oldest = mine.sort((a, b) => a.lastUsedAt - b.lastUsedAt)[0];
-      all.splice(all.indexOf(oldest), 1);
+      // 满了先忘"走过的路"（最久没走过的），再轮到最久没走过的"我挖的通道"
+      const walked = mine.filter((p) => p.kind === 'walked').sort((a, b) => a.lastUsedAt - b.lastUsedAt)[0];
+      const victim = walked ?? mine.sort((a, b) => a.lastUsedAt - b.lastUsedAt)[0];
+      all.splice(all.indexOf(victim), 1);
     }
     this.touch();
   }

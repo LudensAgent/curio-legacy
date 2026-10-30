@@ -43,18 +43,24 @@ test('通道：挖台阶下去、横着推一段，记下入口、最深处、�
   m.close();
 });
 
-test('通道：走进天然洞穴、没怎么挖，不记；死了被传送，前后不连成一条', () => {
+test('通道：走进天然洞穴、没怎么挖，记为走过的路（不算我挖的通道）；死了被传送，前后不连成一条', () => {
   const m = new WorldMemory(null); m.setWorld(W);
   const tr = new PassageTracker(m);
   tr.observe({ worldId: W, dim: D, pos: at(0, 64, 0), place: 'surface' }, [], 0);
   for (let i = 1; i <= 10; i++) tr.observe({ worldId: W, dim: D, pos: at(i * 2, 50, 0), place: 'underground' }, [], i * 1000);
   tr.observe({ worldId: W, dim: D, pos: at(20, 64, 0), place: 'surface' }, [], 20_000);
-  assert.equal(m.passages(D).length, 0, '天然洞穴');
+  // 天然洞穴：只走没挖 → 记为 walked，不是"我挖的通道"
+  const walked = m.passages(D).filter((p) => p.kind === 'walked');
+  assert.equal(walked.length, 1);
+  assert.equal(walked[0].dug, 0);
   digDown(tr, 30_000);
-  // 死了，重生在 300 格外的地下：不能接到刚才那条上
+  // 挖过的才是 dug
+  const dug = m.passages(D).find((p) => p.kind !== 'walked');
+  assert.ok(dug && dug.dug >= 30);
+  // 死了，重生在 300 格外的地下：不能接到刚才那条挖过的上
   tr.observe({ worldId: W, dim: D, pos: at(300, 30, 0), place: 'underground' }, [], 90_000);
-  const [p] = m.passages(D);
-  assert.ok(!p.path.some((q) => q.x === 300));
+  const after = m.passages(D).find((p) => p.kind !== 'walked' && (p.dug ?? 0) >= 30);
+  assert.ok(after && !after.path.some((q) => q.x === 300));
   m.close();
 });
 
@@ -149,12 +155,12 @@ test('按需提醒：想下矿或回地面时说明历史路线与当前通路�
   const inside = situationalReminders(ctx(at(22, 42, 0), '顺着矿道往前找铁'));
   assert.ok(inside.some((r) => /你正沿着这条旧矿道.*沿旧矿道回入口的下一个路点 \(\d+,\d+,\d+\)/.test(r)), inside.join('\n'));
   const up = situationalReminders(ctx(at(22, 42, 0), '挖台阶一路挖到见天回地面'));
-  assert.ok(up.some((r) => /历史路线点；这条记录的参考点在 \(1,63,0\)，当前开口位置和路线是否可通尚未确认/.test(r)), up.join('\n'));
+  assert.ok(up.some((r) => /你正沿着自己挖过的旧矿道；沿它回入口的下一步 \(\d+,\d+,\d+\)/.test(r)), up.join('\n'));
   const tripCtx = ctx(at(22, 42, 0), '回地面');
   tripCtx.percept.self.sky_visible = false;
   tripCtx.trip = { minutes: 2, gained: {}, nearEnd: true };
   const trip = situationalReminders(tripCtx).find((r) => r.startsWith('下矿的账'))!;
-  assert.match(trip, /历史路线参考点直线距离约 \d+ 格，当前路线是否可通未知/);
+  assert.match(trip, /你正沿着自己挖过的旧矿道；沿它回入口的下一步 \(\d+,\d+,\d+\)/);
   assert.doesNotMatch(trip, /沿通道走回|挖台阶回地面|再下来一趟/);
   const busy = situationalReminders(ctx(at(20, 64, 30), '砍 16 根原木'));
   assert.ok(!busy.some((r) => /挖过的通道/.test(r)));
