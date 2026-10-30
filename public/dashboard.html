@@ -160,6 +160,9 @@
   canvas#eye { width: 100%; aspect-ratio: 5 / 3; image-rendering: pixelated; border-radius: 8px; background: var(--soft); }
   .legend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px; font-size: 11px; color: var(--dim); }
   .legend span::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 4px; border-radius: 2px; background: var(--c); vertical-align: -1px; }
+  .depthlegend { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 11px; color: var(--dim); }
+  .depthlegend .ramp { flex: 1; height: 8px; border-radius: 4px; background: linear-gradient(to right, rgb(220,50,45), rgb(235,145,45), rgb(90,175,100), rgb(45,95,190)); }
+  #depthBtn.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
   .filters { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; font-size: 12px; color: var(--dim); }
   #log { height: 520px; overflow: auto; font: 12px/1.6 var(--mono); }
   #log div { white-space: pre-wrap; word-break: break-all; padding: 1px 0; }
@@ -569,7 +572,15 @@
       <div class="card">
         <h2>AI 视野 <span class="r mono dim" id="vmeta">-</span></h2>
         <div class="vision">
-          <div><canvas id="eye" width="480" height="288"></canvas><div class="legend" id="vlegend"></div></div>
+          <div>
+            <canvas id="eye" width="480" height="288"></canvas>
+            <div class="vctl" style="display:flex;gap:8px;align-items:center;margin-top:6px">
+              <button id="depthBtn" type="button" title="切换深度图：按视线到方块的距离上色，越近越暖；鼠标悬停可读任意一格的距离">深度图</button>
+              <span class="mono dim" id="vdepth" style="font-size:11px">-</span>
+            </div>
+            <div class="legend" id="vlegend"></div>
+            <div class="depthlegend" id="dlegend" hidden><span>近</span><div class="ramp"></div><span id="dlegendMax">64 格</span></div>
+          </div>
           <div>
             <div class="row"><span>视距</span><span class="mono" id="vopen">-</span></div>
             <div class="row"><span>画面</span><span class="mono" id="vview">-</span></div>
@@ -1562,12 +1573,47 @@ const CATS = ['unknown','sky','dark','water','lava','leaves','wood','grass','dir
 const CAT_ZH = { unknown:'未加载', sky:'天空', dark:'黑暗', water:'水', lava:'岩浆', leaves:'树叶', wood:'木头', grass:'草地', dirt:'泥土', sand:'沙/砾', stone:'石头', ore:'矿石', snow:'雪/冰', plant:'植物', built:'人造', other:'其他' };
 const PAL = { unknown:[236,236,236], sky:[226,236,246], dark:[34,34,34], water:[120,160,205], lava:[225,110,50], leaves:[110,150,90], wood:[130,95,60], grass:[150,185,110], dirt:[150,120,90], sand:[225,212,165], stone:[150,150,150], ore:[215,165,20], snow:[252,252,252], plant:[175,195,95], built:[195,150,105], other:[185,185,185] };
 $('vlegend').innerHTML = CATS.filter((c) => c !== 'unknown').map((c) => `<span style="--c:rgb(${PAL[c].join(',')})">${CAT_ZH[c]}</span>`).join('');
+// —— 深度显示：dists 已经是每条视线到第一块表面的距离（0..255 归一化），这里只是把它可读化 ——
+let depthMode = false, lastFrame = null, lastVs = null;
+const DEPTH_STOPS = [[0, [220, 50, 45]], [0.33, [235, 145, 45]], [0.66, [90, 175, 100]], [1, [45, 95, 190]]];
+function depthColor(t) {
+  for (let k = 1; k < DEPTH_STOPS.length; k++) {
+    if (t <= DEPTH_STOPS[k][0]) {
+      const [t0, c0] = DEPTH_STOPS[k - 1], [t1, c1] = DEPTH_STOPS[k];
+      const a = (t - t0) / (t1 - t0);
+      return [Math.round(c0[0] + (c1[0] - c0[0]) * a), Math.round(c0[1] + (c1[1] - c0[1]) * a), Math.round(c0[2] + (c1[2] - c0[2]) * a)];
+    }
+  }
+  return DEPTH_STOPS[DEPTH_STOPS.length - 1][1];
+}
+/** 画布上归一化坐标 (px,py ∈ 0..1) 定位到某条视线，读出类别和距离 */
+function frameRay(f, px, py) {
+  const col = Math.max(0, Math.min(f.cols - 1, Math.floor(px * f.cols)));
+  const row = Math.max(0, Math.min(f.rows - 1, Math.floor(py * f.rows)));
+  const i = row * f.cols + col;
+  return { i, cat: CATS[f.cats[i]] || 'other', dist: Math.round((f.dists[i] / 255) * f.range) };
+}
+function relBearing(u, v) {
+  const hz = u < 0.45 ? '偏左' : u > 0.55 ? '偏右' : '正前';
+  const vt = v < 0.45 ? '偏上' : v > 0.55 ? '偏下' : '';
+  return hz === '正前' && vt ? vt : hz + vt;
+}
+function depthText(f, u, v) {
+  const { cat, dist } = frameRay(f, u, v);
+  if (cat === 'sky') return '天空';
+  if (cat === 'dark') return `黑暗（${dist} 格外看不清）`;
+  return `${CAT_ZH[cat] ?? cat} ${dist} 格`;
+}
+function depthReadout(f, u, v) { return `${depthText(f, u, v)} · ${relBearing(u, v)}`; }
 const wide = () => innerWidth >= 1800;
 function drawVision(f, vs) {
+  lastFrame = f; lastVs = vs;
   // 宽屏时左栏“周围”里一直有一张小视野图和看见/听见列表
   if (wide()) {
-    if (f) paintFrame($('eyeMini'), f, 8);
-    $('vmetaMini').textContent = f ? `朝向 ${f.facing} · ${f.range} 格视距` : '无画面';
+    if (f) {
+      paintFrame($('eyeMini'), f, 8);
+      $('vmetaMini').textContent = `朝向 ${f.facing} · ${f.range} 格 · 正前 ${depthText(f, 0.5, 0.5)}`;
+    } else $('vmetaMini').textContent = '无画面';
     if (vs) {
       $('vseenMini').innerHTML = list(vs.seen_entities.slice(0, 8), (e) => `<li>${esc(e.name)} <span class="k">${e.rel} ${e.dist}格</span></li>`);
       $('vheardMini').innerHTML = list(vs.heard.slice(0, 8), (e) => `<li>${esc(e.name)} <span class="k">${esc(e.approx)}</span></li>`);
@@ -1575,9 +1621,11 @@ function drawVision(f, vs) {
   }
   if (!$('pane-vision').classList.contains('on')) return; // 视野页不在看就不画大图
   const cv = $('eye');
-  if (!f) { cv.getContext('2d').clearRect(0, 0, cv.width, cv.height); $('vmeta').textContent = '无画面'; return; }
-  paintFrame(cv, f, 12);
+  if (!f) { cv.getContext('2d').clearRect(0, 0, cv.width, cv.height); $('vmeta').textContent = '无画面'; $('vdepth').textContent = '-'; return; }
+  paintFrame(cv, f, 12, depthMode);
   $('vmeta').textContent = `朝向 ${f.facing} · ${f.cols}×${f.rows} · ${f.range} 格 · ${f.scanMs}ms`;
+  $('dlegendMax').textContent = `${f.range} 格`;
+  $('vdepth').textContent = `中心 ${depthText(f, 0.5, 0.5)}`;
   if (vs) {
     $('vopen').textContent = `左${vs.openness.left} 中${vs.openness.center} 右${vs.openness.right}`;
     $('vseen').innerHTML = list(vs.seen_entities, (e) => `<li>${esc(e.name)} · ${e.rel} ${e.dist} 格</li>`);
@@ -1586,15 +1634,21 @@ function drawVision(f, vs) {
     $('vland').textContent = `${vs.nearest_land ? vs.nearest_land.dir + ' ' + vs.nearest_land.dist + ' 格' : '未知'} / ${vs.last_look_around_s == null ? '未环顾' : vs.last_look_around_s + ' 秒前'}`;
   }
 }
-/** 把一帧视野画到画布上（scale：每条射线画几像素） */
-function paintFrame(cv, f, scale) {
+/** 把一帧视野画到画布上（scale：每条射线画几像素；depth：按距离上色而不是按类别） */
+function paintFrame(cv, f, scale, depth = false) {
   const g = cv.getContext('2d');
   if (cv.width !== f.cols * scale) { cv.width = f.cols * scale; cv.height = f.rows * scale; }
   const img = g.createImageData(f.cols, f.rows);
   for (let i = 0; i < f.cats.length; i++) {
-    const c = PAL[CATS[f.cats[i]]] || PAL.other;
-    const fog = CATS[f.cats[i]] === 'sky' || CATS[f.cats[i]] === 'dark' ? 0 : (f.dists[i] / 255) * 0.6;
-    img.data[i * 4] = c[0] + (255 - c[0]) * fog; img.data[i * 4 + 1] = c[1] + (255 - c[1]) * fog; img.data[i * 4 + 2] = c[2] + (255 - c[2]) * fog; img.data[i * 4 + 3] = 255;
+    let c;
+    if (depth) {
+      c = depthColor(f.dists[i] / 255);
+    } else {
+      c = PAL[CATS[f.cats[i]]] || PAL.other;
+      const fog = CATS[f.cats[i]] === 'sky' || CATS[f.cats[i]] === 'dark' ? 0 : (f.dists[i] / 255) * 0.6;
+      c = [c[0] + (255 - c[0]) * fog, c[1] + (255 - c[1]) * fog, c[2] + (255 - c[2]) * fog];
+    }
+    img.data[i * 4] = c[0]; img.data[i * 4 + 1] = c[1]; img.data[i * 4 + 2] = c[2]; img.data[i * 4 + 3] = 255;
   }
   const tmp = document.createElement('canvas'); tmp.width = f.cols; tmp.height = f.rows; tmp.getContext('2d').putImageData(img, 0, 0);
   g.imageSmoothingEnabled = false; g.drawImage(tmp, 0, 0, cv.width, cv.height);
@@ -1606,6 +1660,21 @@ function paintFrame(cv, f, scale) {
     g.fillText(`${e.name.replace('player:', '')} ${e.dist}`, x + 7, y + 4);
   }
 }
+// 深度图切换：类别色 ↔ 距离色阶（图例也跟着换）
+$('depthBtn').addEventListener('click', () => {
+  depthMode = !depthMode;
+  $('depthBtn').classList.toggle('on', depthMode);
+  $('vlegend').hidden = depthMode;
+  $('dlegend').hidden = !depthMode;
+  if (lastFrame) drawVision(lastFrame, lastVs);
+});
+// 鼠标悬停读深度：按画布坐标定位到那条视线，读出方块类别和距离
+$('eye').addEventListener('mousemove', (e) => {
+  if (!lastFrame) return;
+  const r = e.currentTarget.getBoundingClientRect();
+  $('vdepth').textContent = depthReadout(lastFrame, (e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
+});
+$('eye').addEventListener('mouseleave', () => { if (lastFrame) $('vdepth').textContent = `中心 ${depthText(lastFrame, 0.5, 0.5)}`; });
 
 // ------------------------------------------------------------ 事件
 const log = $('log');
