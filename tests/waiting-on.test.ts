@@ -25,7 +25,7 @@ test('地上没捡的东西：估计游戏时长并说明消失时间未知，�
   assert.ok(rec, '看见过就记下');
   rec.first -= 240_000;
   let p = perception.update();
-  assert.ok(p.waiting_on?.some((t) => /white_bed×1/.test(t) && /约 5 个小时前第一次看到/.test(t) && /无法确定何时消失/.test(t)), JSON.stringify(p.waiting_on));
+  assert.ok(p.waiting_on?.some((t) => /white_bed×1/.test(t) && /约 4 分前第一次看到/.test(t) && /无法确定何时消失/.test(t)), JSON.stringify(p.waiting_on));
   p = perception.update();
   assert.equal(events.filter((e) => e.startsWith('process_changed') && /white_bed/.test(e)).length, 1, '只提醒一次');
   rec.first -= 120_000;
