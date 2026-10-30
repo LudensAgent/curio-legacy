@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { computeDrives } from '../src/brain/drives.ts';
 import { EventBus } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { Perception } from '../src/perception/perception.ts';
@@ -25,5 +26,5 @@ test('农田提醒折算为现实时间，内部阈值仍使用现实分钟', ()
   const perception = new Perception(adapter, memory, new EventBus(), new Vision(adapter));
   const p = perception.update();
   assert.equal(p.farms[0].minutes_since_planted, 25);
-  assert.match(p.drives.find((d) => d.drive === 'farm')?.why ?? '', /约 25 分（现实时间）/);
+  assert.match(computeDrives(p, memory).drives.find((d) => d.drive === 'farm')?.why ?? '', /约 25 分（现实时间）/);
 });

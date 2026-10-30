@@ -38,7 +38,7 @@ test('a rejected parameter records the validator detail', (t) => {
     { skill: 'look_around', args: { seconds: 3 } },
   ] }, adapter, memory, []);
   assert.ok(!('error' in draft));
-  assert.match(draft.dropped?.[0] ?? '', /to 不能为空/);
+  assert.match(draft.dropped?.[0] ?? '', /to 需要 x,z/);
 });
 
 test('a required candidate skill without explicit trial rejects the whole activity', (t) => {
