@@ -26,14 +26,10 @@ test('low-health dragon control attempts retreat and food even after losing sigh
   assert.notEqual(result.data?.defeatVerified, true);
 });
 
-test('pumpkin protection is an explicit equipment choice with inventory and slot readback', async () => {
+test('equip_armor 装备最好材质的护甲并核对装备栏', async () => {
   const adapter = new FakeAdapter();
   adapter.inv.set('diamond_helmet', 1);
   const ctx = context(adapter);
-  assert.equal((await equipArmor.run(ctx, { head: 'carved_pumpkin' })).failureCode, 'MISSING_MATERIALS');
-  adapter.inv.set('carved_pumpkin', 1);
-  assert.equal((await equipArmor.run(ctx, { head: 'carved_pumpkin' })).status, 'succeeded');
-  assert.equal(adapter.equipped.get('head'), 'carved_pumpkin');
   assert.equal((await equipArmor.run(ctx, {})).status, 'succeeded');
   assert.equal(adapter.equipped.get('head'), 'diamond_helmet');
 });

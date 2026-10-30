@@ -164,7 +164,7 @@ test('candidate versions and evidence persist atomically, with verified fallback
 test('knowledge tools are explicitly read only and return structured evidence to the next decision', async (t) => {
   const { library, memory } = fixture(t);
   const tools = createMethodSkills(library, new ResourceKnowledge('1.20.1'));
-  assert.equal(tools.every((tool) => tool.readOnly === true && !tool.movement), true);
+  assert.equal(tools.filter((tool) => tool.name !== 'experiment_method').every((tool) => tool.readOnly === true && !tool.movement), true, '知识类方法只读；experiment_method 是执行类，可移动');
   const catalog = tools.find((tool) => tool.name === 'method_catalog')!;
   assert.deepEqual((await catalog.run({} as any, {})).data?.methods, []);
   const controller = new AbortController(); controller.abort('stale task');

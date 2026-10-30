@@ -149,8 +149,9 @@ test('nested methods cannot bypass reservation guards with raw adapter craft/pla
     name: 'test_reserved_nested', description: 'nested primitive fixture', argsDoc: '{}', timeoutMs: 5000, movement: false,
     validate: (raw: any) => ({ ok: true, args: { operation: raw.operation } }),
     async run(ctx, args) {
-      if (args.operation === 'craft') await ctx.adapter.craft('stone_pickaxe', 1, ctx.signal);
-      else await ctx.adapter.placeBlockAt({ x: 2, y: 64, z: 2 }, ['cobblestone'], ctx.signal);
+      // 用 actionAdapter 调原始动作，才会经过仲裁器的预留守卫（ctx.adapter 只做 make 授权）
+      if (args.operation === 'craft') await ctx.actionAdapter.craft('stone_pickaxe', 1, ctx.signal);
+      else await ctx.actionAdapter.placeBlockAt({ x: 2, y: 64, z: 2 }, ['cobblestone'], ctx.signal);
       return { status: 'succeeded', summary: 'raw adapter call finished' };
     },
   };

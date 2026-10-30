@@ -128,13 +128,13 @@ test('整理技能也管升级：账本显示拖慢了的交给改进器，新�
   const adapter = new FakeAdapter(), bus = new EventBus();
   const book = new SkillBook(BUILTIN_SKILLS_DIR, tmp());
   const engine = new BehaviorEngine(book, adapter, null, bus, noSenses);
-  assert.ok(engine.write({ name: 'strip-mine', description: '按间隔开支道挖', code: 'return 1;' }).ok);
+  assert.ok(engine.write({ name: 'strip-mine', description: '按间隔开支道挖', code: 'return 1;', verify: 'return true;' }).ok);
   // 两个版本都跑够几次才谈得上比较（数据太少不退回）
   const run = () => (engine as any).record(engine.get('strip-mine'), true, '挖完了', {});
   for (let i = 0; i < 3; i++) run();
   assert.equal(engine.replaceCode('strip-mine', 'return 2;', '换个间隔').ok, true);
   for (let i = 0; i < 4; i++) run();
-  assert.equal(engine.get('strip-mine')?.version, 2);
+  assert.equal(engine.get('strip-mine', true)?.version, 2);
   const improved: string[] = [];
   engine.improve = (name, why, note) => { improved.push(`${name}:${why}:${note}`); };
   const used: Record<number, string[]> = {};
