@@ -273,8 +273,6 @@ export class BehaviorEngine {
   static readonly RECOVERY_MISS_MS = 3 * 60_000;
   static readonly LOOP_WINDOW_MS = 5 * 60_000;
   static readonly HOLD_MS = 90_000;
-  /** 拉锯输掉的一方只提醒、不接手的时长 */
-  static readonly ADVISORY_MS = 5 * 60_000;
   private waitSaid = new Map<string, number>();
 
   /** 条件成立了但这次不接手：告诉心智一声（同一个技能两分钟说一次），由它决定要不要现在做 */
@@ -409,7 +407,8 @@ export class BehaviorEngine {
       const threat = isThreat(b.when);
       if (!threat && cur && (cur.source === 'llm' || cur.source === 'rule')) { this.waiting(b, cur, now); continue; }
       const adv = this.stats[b.name]?.advisory;
-      if (adv && now - adv.since < BehaviorEngine.ADVISORY_MS) { this.waiting(b, cur, now, adv.why); continue; }
+      // 拉锯里输掉的一直只提醒、不自动接手，直到它被改写（改了条件才恢复）；定时自动恢复会让两个技能过一阵又拉起来
+      if (adv) { this.waiting(b, cur, now, adv.why); continue; }
       if (now - (this.lastFired.get(b.name) ?? 0) < b.cooldownMs) continue;
       s ??= this.sense(cur);
       if (evalPredicate(b.when!, s)) matches.push(b);
@@ -454,10 +453,11 @@ export class BehaviorEngine {
 
   private noteFire(name: string, doing: string | null, now = Date.now()) {
     this.fires = [...this.fires.filter((f) => now - f.at < BehaviorEngine.LOOP_WINDOW_MS), { at: now, name, doing }].slice(-40);
-    const last = this.fires.slice(-4).map((f) => f.name);
+    const last = this.fires.slice(-3).map((f) => f.name);
     let loop: { kind: 'pingpong' | 'tug'; a: string; b: string; times: number } | null = null;
-    if (last.length === 4 && last[0] === last[2] && last[1] === last[3] && last[0] !== last[1]) {
-      loop = { kind: 'pingpong', a: last[3], b: last[2], times: this.fires.filter((f) => f.name === last[2] || f.name === last[3]).length };
+    // 三个就能认出 A、B、A 交替（不必等满 A、B、A、B）：早一轮识破，少来回几趟、少挨几下
+    if (last.length === 3 && last[0] === last[2] && last[0] !== last[1]) {
+      loop = { kind: 'pingpong', a: last[2], b: last[1], times: this.fires.filter((f) => f.name === last[0] || f.name === last[1]).length };
     } else {
       // 这个技能最近连着几次接手时，手上都是同一件事
       const same = this.fires.filter((f) => f.name === name);
@@ -480,7 +480,7 @@ export class BehaviorEngine {
       if (loser) {
         const why = `和「${loser.name === loop.a ? loop.b : loop.a}」来回拉锯`;
         this.holds.set(loser.name, { until: now + BehaviorEngine.HOLD_MS, why });
-        // 只歇一会儿压不住：降成“只提醒、不接手”，直到它被改写（整理时拆开条件）或者过了 5 分钟
+        // 只歇一会儿压不住：降成“只提醒、不接手”，直到它被改写（整理时拆开条件）才恢复
         this.touch(loser.name, (st) => { st.advisory = { since: now, why }; });
       }
       this.bus.publish('skill_loop', 'P1', `技能「${loop.a}」和「${loop.b}」在来回拉锯：一个做完另一个又把它推回去（几分钟里 ${loop.times} 回）${loser ? `；「${loser.name}」先改成只提醒、不自动接手，直到它被改写` : ''}`,
