@@ -1,6 +1,6 @@
 import type { AgentState } from '../adapter/types.ts';
 import { effortFacts } from '../brain/efficiency.ts';
-import { supplyFacts } from '../brain/supply.ts';
+import { durabilityFacts, supplyFacts } from '../brain/supply.ts';
 import type { AudienceContext } from '../live/audience.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { durationText, realSecondsToTicks, sunText, type Percept } from '../perception/perception.ts';
@@ -357,7 +357,7 @@ export function situationalReminders(ctx: MindContext): string[] {
     const got = Object.entries(trip.gained).filter(([k]) => /raw_|_ore$|coal|diamond|emerald|lapis|redstone|amethyst|obsidian|debris|flint|gold_nugget|quartz/.test(k)).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, n]) => `${k}×${n}`);
     const seen = p.nearby.resources.filter((r) => r.seen === 'now' && isResourceBlock(r.block)).sort((a, b) => a.nearest - b.nearest).slice(0, 4).map((r) => `${r.block}×${r.count}（最近 ${Math.round(r.nearest)} 格）`);
     const remembered = oreSpotsNear(ctx.memory.landmarks(), { worldId: s.worldId, dim: p.self.dim, pos: here }, { radius: 48 }).length;
-    const picks = s.inventory.filter((i) => i.name.endsWith('_pickaxe') && i.durability).map((i) => `${i.name} 剩 ${Math.round(((i.durabilities?.[0] ?? i.durability!.left) / i.durability!.max) * 100)}%`);
+    const picks = durabilityFacts(s.inventory, ['pickaxe']);
     const t = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).find((f) => f.inside);
     const back = t ? `历史路线参考点直线距离约 ${Math.round(Math.hypot(t.pos.x - here.x, t.pos.y - here.y, t.pos.z - here.z))} 格，当前路线是否可通未知` : '';
     out.push(`下矿的账：${got.length ? `挖到 ${got.join(' ')}` : '还没挖到矿'}；背包空 ${p.emptySlots} 格${picks.length ? `；${picks.join('、')}` : ''}；身边${seen.length ? `看得见 ${seen.join('、')}` : '没看见矿'}${remembered ? `，48 格内记得 ${remembered} 处矿点` : ''}${back ? `；${back}` : ''}。清单后面几项还要不要这些料，一起掂量再决定收不收工`);

@@ -1,4 +1,5 @@
 import type { AgentState } from '../adapter/types.ts';
+import { describePlan, materialPlan } from '../methods/shortfall.ts';
 
 /**
  * 消耗品预算：把「按可算单价消耗、中途耗尽代价高」的东西统一成事实——
@@ -73,6 +74,24 @@ export function supplyFacts(opts: SupplyFacts): string[] {
   if (want('blocks')) {
     const blocks = sum(inv, BRIDGE_BLOCKS);
     if (blocks > 0) out.push(`能垫路的方块 ${blocks} 块`);
+  }
+  return out;
+}
+
+/**
+ * 工具的耐久事实：剩余耐久合计 → 按「每挖一格耗 1 耐久」估算还能挖多少格，
+ * 并附换一把的材料缺口（materialPlan 按版本查，不写死配方）。
+ * kinds 缺省只看镐（下矿的账里最要紧）。
+ */
+export function durabilityFacts(inv: Inv, kinds: string[] = ['pickaxe']): string[] {
+  const out: string[] = [];
+  for (const kind of kinds) {
+    const tools = inv.filter((i) => i.name.endsWith(`_${kind}`) && i.durability);
+    if (!tools.length) continue;
+    const totalLeft = tools.reduce((n, t) => n + (t.durabilities?.length ? t.durabilities.reduce((a, b) => a + b, 0) : t.durability!.left), 0);
+    let gap = '';
+    try { gap = describePlan(materialPlan(tools[0].name, 1, inv)); } catch { /* 配方未知时略去换料 */ }
+    out.push(`${tools[0].name} ×${tools.length}，剩余耐久合计 ${totalLeft}（按每挖一格耗 1 耐久，约还能挖 ${totalLeft} 格）${gap ? `；换一把：${gap}` : ''}`);
   }
   return out;
 }
