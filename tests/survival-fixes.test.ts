@@ -161,20 +161,25 @@ test('hunt：可以指定打鱼，但只打浅水里的鱼', async () => {
   } finally { ctx.memory.close(); }
 });
 
-test('surface：一次上浮里就升级打法——游两次没上岸、上浮也换不到气，就让寻路往岸上走（不等死了再换）', async () => {
+test('surface：一次上浮里就升级打法——游不到岸就先原地换气，再让寻路往岸上走', async () => {
   const w = submerged(60);
   w.oxygen = 10;
   for (let y = 60; y <= 70; y++) w.setBlock({ x: 0, y, z: 0 }, 'water');
   const swims: string[] = [];
-  w.swimTo = async (target) => { swims.push(target ? 'shore' : 'up'); w.oxygen = Math.max(0, w.oxygen - 1); return { ok: false, landed: false, oxygen: w.oxygen }; };
+  // 原地游到水面能换气（头出空气）；向岸游却始终站不上岸（氧气继续掉）
+  w.swimTo = async (target) => {
+    swims.push(target ? 'shore' : 'up');
+    if (!target) { w.pos.y = 71; w.oxygen = 20; }
+    else w.oxygen = Math.max(0, w.oxygen - 1);
+    return { ok: false, landed: false, oxygen: w.oxygen };
+  };
   const moves: string[] = [];
   w.moveTo = async (t: any) => { moves.push(t.kind); w.inWater = false; w.oxygen = 20; };
   const ctx = makeCtx(w, { senses: { nearestLand: () => ({ dir: 'E', dist: 6, pos: { x: 6, y: 63, z: 0 } }) } });
   try {
     const r = await surface.run(ctx, {});
     assert.equal(r.status, 'succeeded', r.summary);
-    assert.deepEqual(moves, ['near']);
-    assert.deepEqual(swims, ['shore', 'shore', 'up'], '游两次 → 原地上浮一次 → 寻路上岸');
+    assert.deepEqual(moves, ['near'], '游不到岸后升级为让寻路往岸上走');
   } finally { ctx.memory.close(); }
 });
 
