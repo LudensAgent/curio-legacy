@@ -269,7 +269,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   private lastPacedClick = 0;
 
   /**
-   * 界面节奏（UI_PACING_MS / UI_OPEN_HOLD_MS / UI_CLOSE_HOLD_MS）：默认只在窗口开关时短暂停留，不逐次延迟点击。
+   * 界面节奏（UI_PACING_MS / UI_OPEN_HOLD_MS / UI_CLOSE_HOLD_MS）：默认逐次点击约 150ms 并在窗口开关时短暂停留，模拟真实玩家节奏。
    * Mineflayer 补丁（scripts/patch-deps.mjs）让 craft / transfer / deposit / withdraw / toss / equip 的点击经过 beforeWindowClick。
    */
   private installUiPacing(bot: any) {
