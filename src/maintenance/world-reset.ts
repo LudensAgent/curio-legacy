@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { parseEnv } from 'node:util';
 
 const KEEP_DIRECTORIES = new Set(['config', 'configs', 'defaultconfigs', 'mods', 'plugins', 'libraries', 'versions', '.fabric']);
 const KEEP_FILES = new Set([
@@ -43,13 +44,34 @@ function lstatIfPresent(target: string): fs.Stats | undefined {
   try { return fs.lstatSync(target); } catch (error) { if (missing(error)) return undefined; throw error; }
 }
 
+/** 外部部署根 CURIO_ROOT（可选）：优先进程环境变量，其次项目根目录 .env。不存在或不是目录时返回 null。 */
+function resolveCurioRoot(projectDir: string): { raw: string; real: string } | null {
+  let value = process.env.CURIO_ROOT?.trim();
+  if (!value) {
+    try { value = parseEnv(fs.readFileSync(path.join(projectDir, '.env'), 'utf8')).CURIO_ROOT?.trim() ?? ''; } catch { value = ''; }
+  }
+  if (!value) return null;
+  const raw = path.resolve(value);
+  try {
+    const real = fs.realpathSync(raw);
+    return fs.statSync(real).isDirectory() ? { raw, real } : null;
+  } catch { return null; }
+}
+
 function safeServerDirectory(serverDir: string, projectDir: string): string {
   const projectInput = path.resolve(projectDir);
   const project = fs.realpathSync(projectInput);
   const directory = path.resolve(serverDir);
   if (samePath(directory, path.parse(directory).root) || samePath(directory, projectInput)
-    || samePath(directory, project) || contains(directory, os.homedir())
-    || !contains(projectInput, directory)) {
+    || samePath(directory, project) || contains(directory, os.homedir())) {
+    throw new Error(`拒绝清理危险或项目之外的服务器目录：${directory}`);
+  }
+  // 可信根：默认项目目录；配置了 CURIO_ROOT（外部部署根）时，也允许服务器位于其下。
+  const curioRoot = resolveCurioRoot(projectInput);
+  const useCurio = !!curioRoot && contains(curioRoot.raw, directory);
+  const trustedRaw = useCurio ? curioRoot!.raw : projectInput;
+  const trustedReal = useCurio ? curioRoot!.real : project;
+  if (!contains(trustedRaw, directory)) {
     throw new Error(`拒绝清理危险或项目之外的服务器目录：${directory}`);
   }
   for (const name of PROTECTED_PROJECT_DIRECTORIES) {
@@ -58,15 +80,16 @@ function safeServerDirectory(serverDir: string, projectDir: string): string {
     }
   }
 
-  // 包括中间父目录：不能借助 junction 将项目内的路径解析到其他位置。
-  for (let ancestor = directory; !samePath(ancestor, projectInput); ancestor = path.dirname(ancestor)) {
+  // 包括中间父目录：不能借助 junction 将可信根内的路径解析到其他位置。
+  for (let ancestor = directory; !samePath(ancestor, trustedRaw); ancestor = path.dirname(ancestor)) {
+    if (samePath(ancestor, path.parse(ancestor).root)) throw new Error(`服务器目录越过可信根：${directory}`);
     const stat = fs.lstatSync(ancestor);
     if (stat.isSymbolicLink()) throw new Error(`服务器目录不能经过符号链接或 junction：${ancestor}`);
     if (!stat.isDirectory()) throw new Error(`服务器目录不是目录：${ancestor}`);
   }
   const realDirectory = fs.realpathSync(directory);
-  if (!contains(project, realDirectory) || samePath(project, realDirectory)) {
-    throw new Error(`服务器目录解析到项目之外，拒绝清理：${realDirectory}`);
+  if (!contains(trustedReal, realDirectory) || samePath(trustedReal, realDirectory)) {
+    throw new Error(`服务器目录解析到可信根之外，拒绝清理：${realDirectory}`);
   }
   for (const name of PROTECTED_PROJECT_DIRECTORIES) {
     if (contains(path.join(project, name), realDirectory)) {
