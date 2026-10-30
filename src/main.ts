@@ -731,6 +731,15 @@ async function give(item: string, count: number): Promise<{ ok: boolean; error?:
   giving = true;
   try {
     await spectator.command(`give ${config.mc.username} ${name} ${n}`);
+    const notice = `主包投喂了鱼鱼「${ITEM_ZH[name] ?? name}」×${n}`;
+    for (const cmd of [
+      'title @a times 10 70 20',
+      `title @a subtitle ${JSON.stringify({ text: notice, color: 'gold', bold: true })}`,
+      `title @a title ${JSON.stringify({ text: '' })}`,
+      `tellraw @a ${JSON.stringify({ text: notice, color: 'gold' })}`,
+    ]) {
+      try { await spectator.command(cmd); } catch { /* ignore */ }
+    }
     bus.publish('give', 'P2', `主包给予鱼鱼「${ITEM_ZH[name] ?? name}」×${n}`, { item: name, count: n });
     return { ok: true, item: name, count: n };
   } catch (e: any) {

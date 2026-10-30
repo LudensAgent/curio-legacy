@@ -90,7 +90,7 @@ export class Attention {
     // 时间感：只在昼夜变化时抬头看一眼（天快黑了、天黑了、天亮了）；不报几点，也不报“离天黑/天亮还有多久”
     if (snap.phase !== prev.phase) {
       if (snap.phase === 'dusk') out.push(this.notice('dusk', '太阳在落山，天快黑了', 0.55, 300_000, now));
-      else if (snap.phase === 'night') out.push(this.notice('night', '天黑了，怪物会出来', 0.6, 300_000, now));
+      else if (snap.phase === 'night') out.push(this.notice('night', '天黑了', 0.6, 300_000, now));
       else if (snap.phase === 'dawn' || (snap.phase === 'day' && prev.phase !== 'dawn')) out.push(this.notice('morning', '天亮了', 0.55, 300_000, now));
     }
     // 身上多了状态效果（中毒、饥饿、凋零……）：像人看到心变绿了

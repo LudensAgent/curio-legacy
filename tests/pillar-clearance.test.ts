@@ -35,7 +35,7 @@ function fixture(x = 0.8) {
 
 test('actual body width detects an adjacent ceiling even when the centre column is empty', () => {
   const w = fixture(); w.put(1, 66, 0, 'stone');
-  assert.deepEqual((w.adapter as any).pillarClearance(), { kind: 'blocked', min: { x: 0, y: 65, z: 0 }, max: { x: 1, y: 66, z: 0 }, block: { pos: { x: 1, y: 66, z: 0 } } });
+  assert.deepEqual((w.adapter as any).pillarClearance(), { kind: 'blocked', min: { x: 0, y: 65, z: 0 }, max: { x: 1, y: 66, z: 0 }, block: { pos: { x: 1, y: 66, z: 0 }, rel: [0, 2, 1], facing: 'N' } });
   w.bot.entity.position.x = 0.5;
   assert.equal((w.adapter as any).pillarClearance(), null);
   w.bot.entity.position.x = 0.8; w.put(1, 66, 0, null);
@@ -71,7 +71,7 @@ test('explicit pillar refuses an obstructed jump before toggling jump or placing
   const result = await w.adapter.pillarUp(['cobblestone'], new AbortController().signal);
   assert.equal(result.reason, 'NOT_PLACED:头顶跳跃空间受阻');
   assert.match(result.clearanceDetail!, /x=0\.\.1, y=65\.\.66, z=0\.\.0/);
-  assert.match(result.clearanceDetail!, /具体障碍格 \(1,66,0\)（方块名称未确认）/);
+  assert.match(result.clearanceDetail!, /具体障碍格 \(1,66,0\).*方块名称未确认/);
   assert.doesNotMatch(result.clearanceDetail!, /stone/);
   assert.notEqual(w.controls.jump, true);
 });
@@ -86,7 +86,7 @@ test('goto stops a blocked Pathfinder tower after its planned digging and before
   // The earlier Pathfinder physicsTick listener has finished the planned dig
   // and selected jump-to-place; the adjacent ceiling is still present.
   w.put(1, 66, 0, 'stone'); w.bot.setControlState('jump', true); w.bot.emit('physicsTick');
-  // 搭柱被头顶挡住：先停下寻路、清掉 jump，再退半步重规划；mock 的 pathfinder 不会二次前进，最终以超时收场
+  // 搭柱被头顶挡住：先停下寻路、清掉 jump，随即以 PillarClearanceError 收场（不再退半步重规划）
   await assert.rejects(pending);
   assert.equal(stopped, true);
   assert.equal(w.controls.jump, false);

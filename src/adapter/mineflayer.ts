@@ -1277,8 +1277,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         b.removeListener?.('path_update', onPathUpdate);
       }
       check();
+      // 搭柱被头顶/侧上方挡住是确定性失败：nudge 后重新寻路还会得到同一条搭柱，直接报障碍让心智挖头顶或换路线
+      if (blockedPillar) throw new PillarClearanceError(blockedPillar);
       if (opts.maxDropDown !== undefined) throw new Error('No path: 明确下行未能完成，未改走其他边缘');
-      if (corrections >= 3) throw blockedPillar ? new PillarClearanceError(blockedPillar) : new Error('No path: 附近连续调整后仍无法前进，换条路线');
+      if (corrections >= 3) throw new Error('No path: 附近连续调整后仍无法前进，换条路线');
       const action = await this.nudge(attempted, opts);
       check();
       if (!action) throw blockedPillar ? new PillarClearanceError(blockedPillar) : new Error(b.entity.isInWater

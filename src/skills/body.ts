@@ -158,17 +158,25 @@ async function recoverBlock(ctx: SkillCtx, args: TargetDigArgs) {
     // （只用眼睛看得到的：技能不能透视实体列表）
     if (/_(bed|door)$/.test(name) || ['crafting_table', 'furnace', 'blast_furnace', 'smoker', 'chest'].includes(name)) {
       const had = before.get(name) ?? 0;
-      for (let i = 0; i < 2 && (adapter.state().inventory.filter((it) => it.name === name).reduce((n, it) => n + it.count, 0) <= had) && Date.now() < ctx.deadline - 3000; i++) {
+      const stillMissing = () => adapter.state().inventory.filter((it) => it.name === name).reduce((n, it) => n + it.count, 0) <= had;
+      // 掉落物会弹到旁边、掉进屋里或坑底：先走到被拆的那格旁（掉落物多半就在 ±1 格）用身体扫一圈捡（不靠眼睛），
+      // 再低头环顾用眼睛找（不透视实体列表）。多试几轮，别拆完就当作已经拿到。
+      for (let i = 0; i < 3 && stillMissing() && Date.now() < ctx.deadline - 3000; i++) {
+        try { await adapter.moveTo({ kind: 'near', pos, range: 1 }, { signal, timeoutMs: Math.min(6000, Math.max(1000, ctx.deadline - Date.now() - 2000)) }); } catch (e) { if (isAbort(e)) throw e; }
+        await adapter.collectNearbyDrops(signal, 5, 2000);
+        throwIfAborted(signal);
+        if (!stillMissing()) break;
         const eye = adapter.eye();
         if (eye) {
-          const vx = pos.x + 0.5 - eye.x, vz = pos.z + 0.5 - eye.z, vy = pos.y + 0.2 - eye.y;
+          const vx = pos.x + 0.5 - eye.x, vz = pos.z + 0.5 - eye.z, vy = pos.y - 0.6 - eye.y;
           try { await adapter.look(Math.hypot(vx, vz) > 0.2 ? Math.atan2(-vx, -vz) : eye.yaw, Math.atan2(vy, Math.max(0.3, Math.hypot(vx, vz))), signal); } catch (e) { if (isAbort(e)) throw e; }
         }
         ctx.senses.refresh();
-        const drop = ctx.senses.perceivedEntities(10).filter((e) => e.kind === 'item' && e.name.replace(/^item:/, '') === name).sort((a, b) => dist3(a.pos, pos) - dist3(b.pos, pos))[0];
-        if (!drop) break;
-        try { await adapter.moveTo({ kind: 'near', pos: drop.pos, range: 1 }, { signal, timeoutMs: Math.min(6000, Math.max(1000, ctx.deadline - Date.now() - 2000)) }); } catch (e) { if (isAbort(e)) throw e; }
-        await adapter.collectNearbyDrops(signal, 2, 1500);
+        const drop = ctx.senses.perceivedEntities(12).filter((e) => e.kind === 'item' && e.name.replace(/^item:/, '') === name).sort((a, b) => dist3(a.pos, pos) - dist3(b.pos, pos))[0];
+        if (drop) {
+          try { await adapter.moveTo({ kind: 'near', pos: drop.pos, range: 1 }, { signal, timeoutMs: Math.min(6000, Math.max(1000, ctx.deadline - Date.now() - 2000)) }); } catch (e) { if (isAbort(e)) throw e; }
+          await adapter.collectNearbyDrops(signal, 3, 1500);
+        }
       }
     }
     const gained = adapter.state().inventory.map((item) => ({ name: item.name, count: item.count - (before.get(item.name) ?? 0) })).filter((item) => item.count > 0);
@@ -186,7 +194,7 @@ async function recoverBlock(ctx: SkillCtx, args: TargetDigArgs) {
 // ------------------------------------------------------------------ dig
 export const dig: Skill<DigArgs> = {
   name: 'dig',
-  description: '定点拆除并拾取，或按 dir 挖通道（dir:down 挖脚下的方块并落到下一级；N/E/S/W 挖水平通道；up 挖头顶）；默认不制造工具，不挖开液体邻格。wet:true 接受进水，lava:true 接受进岩浆，分别显式选择。',
+  description: '定点拆除并拾取，或按 dir 挖通道（dir:down 挖脚下的方块并落到下一级，下面最多 3 格落差内会继续往下、不掉血；N/E/S/W 挖水平通道；up 挖头顶）；默认不制造工具，不挖开液体邻格。wet:true 接受进水，lava:true 接受进岩浆，分别显式选择。',
   argsDoc: '{"target"?: "<方块ID|x,y,z|地标ID>" | {"x":0,"y":64,"z":0}, "block"?: "<目标方块类型约束>", "own"?: true, "dir"?: "up|down|N|E|S|W|forward", "blocks"?: 1-6, "wet"?:true, "lava"?:true}（target 与 dir 二选一）',
   timeoutMs: 60000,
   movement: true,
@@ -230,23 +238,39 @@ export const dig: Skill<DigArgs> = {
           const me = floor(adapter.state().pos);
           const c = { x: me.x, y: me.y - 1, z: me.z };
           targetCell = c;
-          const under = adapter.blockAt({ x: c.x, y: c.y - 1, z: c.z });
-          if (isSoftBlock(under) || (under && LIQUID_BLOCKS.has(under))) {
+          // 脚下这格挖空后，人往下掉多少格：向下扫最多 3 格找第一个实心落点（3 格以内不掉血）。
+          // 以前只看脚下 2 格是不是实心，等于只允许掉 1 格；现在放宽到「不掉血的 3 格安全余量」。
+          let drop = 0;                     // 会掉几格；0 = 没扫到安全落点（未加载或落差超过 3 格）
+          let landing: string | null = null; // 落点方块（实心）；液体单独处理
+          for (let d = 1; d <= 3; d++) {
+            const b = adapter.blockAt({ x: c.x, y: c.y - d, z: c.z });
+            if (b === null) break;                          // 未加载：落点未知，按不安全处理
+            if (LIQUID_BLOCKS.has(b)) { landing = b; drop = d; break; } // 会掉进液体
+            if (!isSoftBlock(b)) { landing = b; drop = d; break; }      // 实心落点
+            // 软的（空气/草/藤蔓/铁轨…）继续往下扫
+          }
+          if (drop === 0 || LIQUID_BLOCKS.has(landing ?? '')) {
             const position = adapter.state().pos;
-            const partialStop = { pos: c, below: under, completed: walked, requested: args.blocks };
+            const peek = adapter.blockAt({ x: c.x, y: c.y - 1, z: c.z });
+            const reason = drop === 0
+              ? (peek === null ? '下面的落点还没加载，未知能否安全落地' : '下面有超过 3 格的落差，跳下去会掉血')
+              : `下面 ${drop} 格是 ${landing}，往下挖会掉进去`;
+            const partialStop = { pos: c, below: landing ?? peek, drop, completed: walked, requested: args.blocks };
             const data = { dug, walked, partialStop, targetCell: c, position: { ...position }, effectEvidence: effectEvidence(position) };
-            return walked || dug.length ? ok(`挖掉 ${dug.length} 格，确认到达下一级 ${walked} 次；再下面是 ${under ?? '空的'}，停下`, data) : fail('BAD_ARGS', `脚下再往下是 ${under ?? '空的'}，往下挖会掉下去`, data);
+            return walked || dug.length ? ok(`挖掉 ${dug.length} 格，确认到达下一级 ${walked} 次；${reason}，停下`, data) : fail('BAD_ARGS', `${reason}，没有往下挖`, data);
           }
           const n = await breakCell(ctx, c, false, undefined, { allowWater: args.wet, allowLava: args.lava });
           if (n) dug.push(n);
+          // 掉 drop 格后落脚的那一格（实心落点方块上面）：人从 me.y 落到 me.y - drop
+          const landingCell = { x: c.x, y: c.y - drop + 1, z: c.z };
           let moveError: unknown;
-          try { await adapter.moveTo({ kind: 'xyz', x: c.x, y: c.y, z: c.z }, { signal, timeoutMs: 4000 }); }
+          try { await adapter.moveTo({ kind: 'xyz', x: landingCell.x, y: landingCell.y, z: landingCell.z }, { signal, timeoutMs: 4000 }); }
           catch (e) { if (isAbort(e)) throw e; moveError = e; }
           throwIfAborted(signal);
           const position = adapter.state().pos;
-          if (Math.floor(position.x) !== c.x || Math.floor(position.y + 0.05) !== c.y || Math.floor(position.z) !== c.z) {
-            return fail(moveError ? codeFromError(moveError) : 'PATH_NOT_FOUND', `已挖掉 ${dug.length} 格，确认到达下一级 ${walked} 次；没有进入目标格 (${c.x},${c.y},${c.z})，实际位置 (${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})${moveError ? `；${why(moveError)}` : ''}`,
-              { dug, walked, targetCell: c, position: { ...position }, effectEvidence: effectEvidence(position) });
+          if (Math.floor(position.x) !== landingCell.x || Math.floor(position.y + 0.05) !== landingCell.y || Math.floor(position.z) !== landingCell.z) {
+            return fail(moveError ? codeFromError(moveError) : 'PATH_NOT_FOUND', `已挖掉 ${dug.length} 格，确认到达下一级 ${walked} 次；没有落到 (${landingCell.x},${landingCell.y},${landingCell.z})，实际位置 (${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})${moveError ? `；${why(moveError)}` : ''}`,
+              { dug, walked, targetCell: c, drop, position: { ...position }, effectEvidence: effectEvidence(position) });
           }
           walked++;
         }

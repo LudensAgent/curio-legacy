@@ -7,25 +7,24 @@ import { deliberateSystem, glanceSystem } from '../src/mind/prompt.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
 
-test('digging an unseen empty cell reports an unconfirmed result to the caller', async (t) => {
+test('digging an already-empty cell is tolerated as a no-op even when unseen', async (t) => {
   const adapter = new FakeAdapter();
   const ctx = makeCtx(adapter, { senses: { observeBlocks: () => [] } });
   t.after(() => ctx.memory.close());
   const args = { at: [1, 0, 0] as [number, number, number], facing: 'E' as const };
   const result = await digAt.run(ctx, args);
-  assert.equal(result.status, 'failed');
-  assert.equal(result.failureCode, 'NOT_FOUND');
-  assert.match(result.summary, /没有发生挖掘.*\(1,64,0\).*未在当前视野/);
-  assert.match(result.summary, /方块状态未知，未确认是空气还是其他方块/);
-  assert.match(result.summary, /尝试看向后仍未在当前视野/);
-  assert.doesNotMatch(result.summary, /本来就是空/);
+  assert.equal(result.status, 'succeeded');
+  assert.equal(result.data?.noop, true);
+  assert.equal(result.data?.was, 'air');
+  assert.match(result.summary, /本来就是空的/);
+  assert.doesNotMatch(result.summary, /没有发生挖掘|未在当前视野/);
   assert.deepEqual(result.data?.targetCell, { x: 1, y: 64, z: 0 });
   const nested = await makeBridge(ctx)('act', ['dig_at', args]) as { ok: boolean };
-  assert.equal(nested.ok, false, 'code skills must receive the unsuccessful result');
+  assert.equal(nested.ok, true, 'code skills receive the tolerant no-op success');
   assert.deepEqual(adapter.actions, []);
 });
 
-test('an unseen empty target is looked at and confirmed without changing the chosen cell', async (t) => {
+test('an already-empty cell is confirmed as a no-op without turning to look', async (t) => {
   const adapter = new FakeAdapter();
   adapter.pos = { x: 0.5, y: 64, z: 0.5 };
   adapter.yaw = -Math.PI / 2;
@@ -39,7 +38,7 @@ test('an unseen empty target is looked at and confirmed without changing the cho
   assert.equal(result.data?.noop, true);
   assert.equal(result.data?.was, 'air');
   assert.deepEqual(result.data?.targetCell, pos);
-  assert.ok(Math.abs(adapter.yaw) < 0.01, 'turned to the requested cell');
+  assert.equal(adapter.yaw, -Math.PI / 2, 'a cell already known to be air needs no turn');
   assert.deepEqual(adapter.actions, [], 'observing empty air must not dig');
 });
 
@@ -82,13 +81,28 @@ test('a visible-after-looking solid target is dug at its original world position
   assert.deepEqual(adapter.actions, ['dig:stone']);
 });
 
-test('turning toward an occluded target does not reveal or dig hidden air or ore', async (t) => {
-  for (const hidden of ['air', 'diamond_ore']) {
+test('an occluded empty cell is tolerated as empty; an occluded ore is not revealed', async (t) => {
+  // Already-dug (air) cell behind an intact wall: synced world data confirms it is empty, so it is a no-op.
+  {
     const adapter = new FakeAdapter();
     adapter.pos = { x: 0.5, y: 64, z: 0.5 };
-    // An intact two-block-high wall blocks the ray to the exact target.
     for (const y of [64, 65, 66]) for (const z of [-1, 0, 1]) adapter.blocks.push({ name: 'stone', pos: { x: 1, y, z } });
-    if (hidden !== 'air') adapter.blocks.push({ name: hidden, pos: { x: 2, y: 65, z: 0 } });
+    const ctx = makeCtx(adapter);
+    ctx.senses = new Vision(adapter);
+    t.after(() => ctx.memory.close());
+    const result = await digAt.run(ctx, { at: [2, 1, 0], facing: 'E' });
+    assert.equal(result.status, 'succeeded');
+    assert.equal(result.data?.noop, true);
+    assert.equal(result.data?.was, 'air');
+    assert.match(result.summary, /本来就是空的/);
+    assert.deepEqual(adapter.actions, []);
+  }
+  // A hidden ore behind the wall must never be claimed as empty or revealed by name.
+  {
+    const adapter = new FakeAdapter();
+    adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+    for (const y of [64, 65, 66]) for (const z of [-1, 0, 1]) adapter.blocks.push({ name: 'stone', pos: { x: 1, y, z } });
+    adapter.blocks.push({ name: 'diamond_ore', pos: { x: 2, y: 65, z: 0 } });
     const ctx = makeCtx(adapter);
     ctx.senses = new Vision(adapter);
     t.after(() => ctx.memory.close());
@@ -103,6 +117,7 @@ test('turning toward an occluded target does not reveal or dig hidden air or ore
 test('cancelling the look cannot continue to dig or claim an observation', async (t) => {
   const adapter = new FakeAdapter(), controller = new AbortController();
   adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  adapter.blocks.push({ name: 'stone', pos: { x: 0, y: 64, z: -1 } }); // 实心目标才会走到“转头看”这一步
   const ctx = makeCtx(adapter, { senses: { observeBlocks: () => [] } });
   ctx.signal = controller.signal;
   t.after(() => ctx.memory.close());

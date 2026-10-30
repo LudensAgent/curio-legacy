@@ -95,6 +95,11 @@ export const digAt: Skill<CellArgs> = {
     // 自己站的两格通常是空的；但也可能有火把、花、雪层、蜘蛛网这类东西，那就照样拿掉
     if (physical === null) return fail('NOT_FOUND', `[${args.at}] 那一格还没加载或看不见`, { ...after(ctx, args.facing, pos), obscured: true });
     if (args.at[0] === 0 && args.at[2] === 0 && (args.at[1] === 0 || args.at[1] === 1) && AIR.has(physical)) return ok(`[${args.at}] 是自己站的地方，本来就空着；往上挖是 [0,2,0]`, { ...after(ctx, args.facing, pos), noop: true });
+    // 感知边界取舍：目标格已加载且 blockAt（服务器同步的世界数据，非透视）确认是 air 时，直接当“已经挖空”，
+    // 不再强求 raycast 视线亲眼确认——挖阶梯时斜下格 [1,-1,0] 被正前方那格挡住、永远看不见，却常常已经是空气，
+    // 硬报 NOT_FOUND 会让整段阶梯卡死。只认“已加载 + 确实是空气”这一种；未加载(null)仍报 NOT_FOUND，
+    // 矿石/实心格仍走视线确认、不泄露方块名，也不替 Agent 选目标或改手段。
+    if (AIR.has(physical)) return ok(`[${args.at}] 本来就是空的，不用挖`, { cell: [...args.at], was: 'air', ...after(ctx, args.facing, pos), noop: true });
     const key = `${pos.x},${pos.y},${pos.z}`;
     let seenBefore = visibleCells(ctx, [pos]).get(key);
     if (!seenBefore && ctx.senses.observeBlocks) {

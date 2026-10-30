@@ -431,6 +431,10 @@ export const pickupItems: Skill<{ radius: number; item?: string; remembered?: bo
       }
       await sleep(250, signal);
     }
+    // 指名要捡的东西（比如刚拆下的床）眼睛找不到：用身体在半径内扫一圈捡（掉落物可能掉进缝里/坑底/水里，不在视线内）
+    if (args.item) {
+      try { await adapter.collectNearbyDrops(signal, Math.max(4, args.radius), Math.min(4000, Math.max(1000, ctx.deadline - Date.now() - 500))); } catch (e) { if (isAbort(e)) throw e; }
+    }
     // 按背包实际变化报告捡到了什么
     const after = inv();
     const increases = [...after].filter(([n, c]) => c > (before.get(n) ?? 0)).map(([name, count]) => ({ name, count: count - (before.get(name) ?? 0) }));

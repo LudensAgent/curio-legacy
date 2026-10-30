@@ -44,14 +44,17 @@ test('downward digging preserves earlier excavation and descent when the next bl
 
 test('a partial downward dig reports its real stopping point and repeated stops return control to the mind', async (t) => {
   const world = new TestWorld();
+  // 下面 3 格都是空气：超过 3 格安全落差，会掉血，停下
   world.setBlock({ x: 0, y: 61, z: 0 }, 'air');
+  world.setBlock({ x: 0, y: 60, z: 0 }, 'air');
+  world.setBlock({ x: 0, y: 59, z: 0 }, 'air');
   const ctx = makeCtx(world);
   t.after(() => ctx.memory.close());
   t.mock.method(world, 'dig', async (pos) => { world.setBlock(pos, 'air'); return { ok: true }; });
   t.mock.method(world, 'moveTo', async () => { world.pos = { x: 0, y: 63, z: 0 }; });
   const result = await dig.run(ctx, { dir: 'down', blocks: 6 });
   assert.equal(result.status, 'succeeded');
-  assert.deepEqual(result.data?.partialStop, { pos: { x: 0, y: 62, z: 0 }, below: 'air', completed: 1, requested: 6 });
+  assert.deepEqual(result.data?.partialStop, { pos: { x: 0, y: 62, z: 0 }, below: 'air', drop: 0, completed: 1, requested: 6 });
   assert.match(result.summary, /确认到达下一级 1 次/);
   const a = createActivity({ what: '下矿', why: '', kind: 'explore', repeat: 6, steps: [{ skill: 'goto', args: { target: '0,64,0' } }, { skill: 'dig', args: { dir: 'down', blocks: 6 } }] }, '', 'llm', world.state());
   for (let i = 0; i < 3; i++) {
@@ -62,6 +65,20 @@ test('a partial downward dig reports its real stopping point and repeated stops 
     assert.equal(verdict.kind, i === 2 ? 'stuck' : 'continue');
     if (verdict.kind === 'stuck') assert.match(verdict.why, /连续 3 轮.*同一处/);
   }
+});
+
+test('downward digging falls 2-3 blocks when the drop is within the safe margin', async (t) => {
+  const world = new TestWorld();
+  // 挖掉 y=62 后脚下 y=61 是空气、y=60 是石头：会掉 2 格，落在 y=60 上，不掉血
+  world.setBlock({ x: 0, y: 61, z: 0 }, 'air');
+  const ctx = makeCtx(world);
+  t.after(() => ctx.memory.close());
+  t.mock.method(world, 'dig', async (pos) => { world.setBlock(pos, 'air'); return { ok: true }; });
+  t.mock.method(world, 'moveTo', async (target: { x: number; y: number; z: number }) => { world.pos = { x: target.x + 0.5, y: target.y, z: target.z + 0.5 }; });
+  const result = await dig.run(ctx, { dir: 'down', blocks: 2 });
+  assert.equal(result.status, 'succeeded');
+  assert.equal(result.data?.walked, 2);
+  assert.deepEqual(result.data?.dug, ['grass_block', 'stone']);
 });
 
 test('partial downward digs at new locations do not count as the same repeated stop', () => {
