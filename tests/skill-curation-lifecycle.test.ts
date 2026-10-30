@@ -41,7 +41,8 @@ test('闲置候选独立收起，稳定版的实际使用不刷新候选，重�
   const w = setup(t);
   assert.ok(w.engine.write(definition).ok);
   assert.ok(w.engine.write(definition, { by: 'mind' }).ok);
-  const curator = new SkillCurator(w.planner, w.engine, w.book, w.bus);
+  // 这个文件按观察到的游戏日验证候选收起，钉死门槛，不受 DEFAULT_CURATOR 放宽影响
+  const curator = new SkillCurator(w.planner, w.engine, w.book, w.bus, { unusedDays: 7, candidateUnusedDays: 3, disabledDays: 1 });
   const advance = gameTime(w.adapter, curator);
   advance(2 * day);
   w.engine.recordInvocation(definition.name, { status: 'succeeded', summary: '实际完成指定合成', data: { version: 1, verified: true } });

@@ -429,7 +429,8 @@ export class SkillCurator {
         if (r.version !== undefined && r.version !== eb.version || this.engine.get(name, !!eb.candidate)?.version !== eb.version) { errors.push(`${name} 版本已变化，未收起`); continue; }
         const st = this.engine.currentStats(name, !!eb.candidate), tries = st.ok + st.fail;
         if (tries > 0 && tries < 3 || tries === 0 && (this.lifetime(eb)?.age ?? 0) < DAY_TICKS / 2) { errors.push(`${name} 当前版本证据还少，先保留`); continue; }
-        if (this.protectedEmergency(eb)) { errors.push(`${name} 当前稳定应急版实际成功过，保留；改进先生成候选并验收，不因少用丢掉已验证能力`); continue; }
+        // 模型显式收起时只保护“实际成功过的稳定应急版”；未验证的应急候选仍可收起（借同名旧版成功不能永久保留）
+        if (!eb.candidate && this.protectedEmergency(eb) && (this.engine.currentStats(name)?.ok ?? 0) > 0) { errors.push(`${name} 当前稳定应急版实际成功过，保留；改进先生成候选并验收，不因少用丢掉已验证能力`); continue; }
         if (this.retire(eb, why)) done.push(`收起 ${name}${eb.candidate ? ` 候选 v${eb.version}` : ''}`);
       }
       for (const r of raw.restore) {

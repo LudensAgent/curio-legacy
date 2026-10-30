@@ -20,7 +20,8 @@ function setup(t: TestContext, options: Partial<CuratorOptions> = {}) {
   const engine = new BehaviorEngine(book, adapter, null, bus, { perceivedEntities: () => [] }, path.join(directory, 'stats.json'));
   const planner = { autonomous: false, noteInvalid() {}, async complete() { return { text: '{"ok":true}', latencyMs: 0 }; } };
   const clockFile = path.join(directory, 'clock.json'), lifetimeFile = path.join(directory, 'lifetimes.json');
-  const create = () => new SkillCurator(planner, engine, book, bus, options, new ObservedGameClock(clockFile), lifetimeFile);
+  // 这个文件专门验证“按观察到的有效游戏日收起的门槛”，把门槛钉死，不受 DEFAULT_CURATOR 将来放宽影响。
+  const create = () => new SkillCurator(planner, engine, book, bus, { unusedDays: 7, candidateUnusedDays: 3, disabledDays: 1, ...options }, new ObservedGameClock(clockFile), lifetimeFile);
   let curator = create(), now = Date.now(), worldAgeTicks = 0;
   curator.dim = () => adapter.dim;
   t.after(() => { curator.stop(); engine.dispose(); fs.rmSync(directory, { recursive: true, force: true }); });
@@ -68,7 +69,8 @@ test('稳定版七日和候选三日分别计时，同名两侧的实际使用�
 });
 
 test('候选改写、跳过和取消不续命，晋升后的新候选获得独立观察期', (t) => {
-  const w = setup(t);
+  // 晋升后的稳定版会在整段测试里持续闲置（超过 13 天）：把稳定版门槛放宽到足够大，让本测试聚焦候选的独立观察期
+  const w = setup(t, { unusedDays: 60 });
   for (const name of ['rewritten-candidate', 'skipped-candidate', 'cancelled-candidate']) {
     assert.ok(w.engine.write({ ...definition, name }, { by: 'mind' }).ok);
   }
@@ -87,7 +89,8 @@ test('候选改写、跳过和取消不续命，晋升后的新候选获得独�
   assert.deepEqual(w.engine.currentStats('skipped-candidate', true), { ok: 0, fail: 0 });
   assert.deepEqual(w.engine.currentStats('cancelled-candidate', true), { ok: 0, fail: 0 });
 
-  const rescue = { ...definition, name: 'renewed-rescue', when: { hp_below: 8 } };
+  // 用非应急技能验证“晋升后新候选独立观察期”，避免 protectedEmergency 干扰闲置收起逻辑
+  const rescue = { ...definition, name: 'renewed-rescue' };
   assert.ok(w.engine.write(rescue, { by: 'mind' }).ok);
   w.observe();
   w.observe(2 * day);
@@ -159,7 +162,7 @@ test('停用应急稳定版一天后收起，保留成功证据和同名新候�
   assert.equal(w.engine.executionError(definition.name, true), null);
 });
 
-test('成功且可用的稳定应急版免闲置和容量淘汰，未成功应急候选三日可收', (t) => {
+test('成功且可用的稳定应急版和未验收的应急候选都免闲置和容量淘汰', (t) => {
   const w = setup(t, { maxActive: 1 });
   const emergency = { ...definition, when: { hp_below: 8 } };
   assert.ok(w.engine.write(emergency).ok);
@@ -167,7 +170,7 @@ test('成功且可用的稳定应急版免闲置和容量淘汰，未成功应�
   assert.ok(w.engine.write({ ...emergency, name: 'unproven-rescue' }, { by: 'mind' }).ok);
   w.observe();
   w.observe(3 * day);
-  assert.deepEqual(w.curator.retireUnused(), ['unproven-rescue']);
+  assert.deepEqual(w.curator.retireUnused(), [], '未验收的应急候选也不能按闲置收起（没出事前本就没法验收）');
   w.observe(5 * day);
   assert.deepEqual(w.curator.retireUnused(), []);
   w.curator.opts.maxActive = 0;

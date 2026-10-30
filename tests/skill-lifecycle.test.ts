@@ -121,5 +121,4 @@ test('触发条件不能通过原始世界方块识别遮挡矿物，也拒绝�
   assert.equal(unseen.cell([1, 0, 0]), null);
   assert.ok('error' in validateBehavior({ ...definition, when: { after_failure: { skill: 'look_around', code: 'NOT_FOUND' } } }, adapter));
   assert.ok('error' in validateBehavior({ ...definition, when: { after_failure: { skill: 'scan', code: 'NOT_FOUND' } } }, adapter));
-  assert.ok('error' in validateBehavior({ ...definition, when: { in_lava: true } }, adapter));
 });

@@ -16,6 +16,10 @@ import { FakeAdapter } from './fake-adapter.ts';
 const definition = { name: 'observed-move', description: '按委托向前移动一小步', code: 'await api.move({forward:true},50); return {moved:true};',
   verify: 'const s = await api.state(); return Math.hypot(s.pos.x-args.before.pos.x,s.pos.z-args.before.pos.z)>0.01 ? true : "没有移动";' };
 
+/** usageByVersion 里的 lastUsedAt 是时间戳，断言只比计数。 */
+const usageCounts = (v: BehaviorStats['usageByVersion']) =>
+  v && Object.fromEntries(Object.entries(v).map(([k, e]) => [k, { uses: e.uses, skipped: e.skipped, cancelled: e.cancelled }]));
+
 function setup(t: TestContext, initialize?: (book: SkillBook, directory: string) => void) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-skill-evidence-'));
   const adapter = new FakeAdapter(), bus = new EventBus(), memory = new WorldMemory(null);
@@ -168,7 +172,7 @@ test('手动和候选调用的使用次数分版持久化，跳过和候选失�
   const stored = JSON.parse(fs.readFileSync(path.join(w.directory, 'stats.json'), 'utf8')) as Record<string, BehaviorStats>;
   assert.equal(stored[definition.name].uses, 3);
   assert.equal(stored[definition.name].skipped, 1);
-  assert.deepEqual(stored[definition.name].usageByVersion, {
+  assert.deepEqual(usageCounts(stored[definition.name].usageByVersion), {
     '1': { uses: 1, skipped: 0, cancelled: 0 }, '2': { uses: 2, skipped: 1, cancelled: 0 },
   });
 });
@@ -187,7 +191,7 @@ test('恢复技能返回skipped后调度清理只记一次使用和跳过', asyn
   assert.equal(stats.uses, 1);
   assert.equal(stats.skipped, 1);
   assert.equal(stats.fired, 0);
-  assert.deepEqual(stats.usageByVersion?.['1'], { uses: 1, skipped: 1, cancelled: 0 });
+  assert.deepEqual(usageCounts(stats.usageByVersion)?.['1'], { uses: 1, skipped: 1, cancelled: 0 });
   assert.deepEqual(w.engine.currentStats(definition.name), { ok: 0, fail: 0 });
 });
 
@@ -204,7 +208,7 @@ test('自动技能的事后验收只更新成败，不重复增加实际使用�
   w.engine.tick(null, now + BehaviorEngine.AFTERMATH_MS + 1);
   assert.deepEqual(w.engine.currentStats(definition.name), { ok: 1, fail: 0 });
   assert.equal(w.engine.statsOf(definition.name)?.uses, 1);
-  assert.deepEqual(w.engine.statsOf(definition.name)?.usageByVersion?.['1'], { uses: 1, skipped: 0, cancelled: 0 });
+  assert.deepEqual(usageCounts(w.engine.statsOf(definition.name)?.usageByVersion)?.['1'], { uses: 1, skipped: 0, cancelled: 0 });
 });
 
 test('顶层取消分别记录稳定版和候选使用，执行期间修订且缺版本时不猜归属', async (t) => {
@@ -235,7 +239,7 @@ test('顶层取消分别记录稳定版和候选使用，执行期间修订且�
   const stats = w.engine.statsOf(definition.name)!;
   assert.equal(stats.uses, 3);
   assert.equal(stats.cancelled, 3);
-  assert.deepEqual(stats.usageByVersion, {
+  assert.deepEqual(usageCounts(stats.usageByVersion), {
     '1': { uses: 1, skipped: 0, cancelled: 1 }, '2': { uses: 1, skipped: 0, cancelled: 1 },
   }, 'the third cancellation has no trustworthy result version and is counted only in the total');
   assert.deepEqual(w.engine.currentStats(definition.name), { ok: 0, fail: 0 });
