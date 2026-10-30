@@ -226,11 +226,11 @@ export function computeDrives(p: Percept, memory: WorldMemory): { drives: Drive[
     else if (grass && homeBuilt) out.push({ drive: 'farm', level: 0.3, why: '想种地但没有种子', suggest: 'collect_seeds（打草掉种子）' });
   }
 
-  // ---- 远征：家里安顿好了，就去远方看看
+  // ---- 远征：工具和食物齐了，就去远方看看
   const cooked = p.inventory.filter((i) => /cooked_|bread|baked_potato/.test(i.name)).reduce((a, i) => a + i.count, 0);
-  if (homeBuilt && (st.toolTier === 'stone' || st.toolTier === 'iron' || st.toolTier === 'diamond') && !night && !(p.curiosities ?? []).length) {
+  if ((st.toolTier === 'stone' || st.toolTier === 'iron' || st.toolTier === 'diamond') && !night && !(p.curiosities ?? []).length) {
     const ready = cooked >= 3;
-    out.push({ drive: 'expedition', level: ready ? 0.35 : 0.2, why: ready ? '家安顿好了，附近也看得差不多了' : `想去远方，但熟食只有 ${cooked} 个`, suggest: ready ? 'expedition {direction:"新颖度最高的方向", distance:240}，记得带火把' : '先准备 3 个以上熟食（smelt 生肉 / farm）' });
+    out.push({ drive: 'expedition', level: ready ? 0.35 : 0.2, why: ready ? '工具和熟食都齐了，去远方看看（找村庄、要塞、新群系）' : `想去远方，但熟食只有 ${cooked} 个`, suggest: ready ? 'expedition {direction:"新颖度最高的方向", distance:240}，记得带火把' : '先准备 3 个以上熟食（smelt 生肉 / farm）' });
   }
 
   // ---- 新鲜感：最近没做过的玩法
