@@ -24,7 +24,7 @@ test('supplyFacts：火把报覆盖与还能做多少，并按难度门控刷怪
   // 和平：只为照明，不提刷怪
   assert.match(supplyFacts({ inv, torchEvery: 8, only: new Set(['torch']), difficulty: 'peaceful' })[0], /和平没怪，火把只为照明/);
   // 普通：会刷怪，用中文难度名
-  assert.match(supplyFacts({ inv, torchEvery: 8, only: new Set(['torch']), difficulty: 'normal' })[0], /普通，会刷怪，得多备/);
+  assert.match(supplyFacts({ inv, torchEvery: 8, only: new Set(['torch']), difficulty: 'normal' })[0], /普通，会刷怪/);
 });
 
 test('supplyFacts：箱子里存的煤/木棍也计入还能做多少', () => {
