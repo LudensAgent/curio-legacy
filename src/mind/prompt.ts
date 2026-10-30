@@ -39,6 +39,8 @@ export interface MindContext {
   blockAt?: (p: { x: number; y: number; z: number }) => string | null;
   activity: Activity | null;
   suspended: Activity[];
+  /** 提前想好、手上的活做完就接上的下一段（模型自己写的 next，如实回显，不加引导） */
+  next?: { what: string; why?: string } | null;
   lastRecord: ActivityRecord | null;
   noticed: Noticing[];
   changes: string[];
@@ -62,6 +64,8 @@ export interface MindContext {
   designing?: { brief: string; minutes: number };
   /** 按关键词自动想起来的经历、教训、技能 */
   recalled?: Recalled[];
+  /** 后台预取的长期记忆（Hindsight 合并）：历史经历/推断，不等于当前现场事实 */
+  hindsightMemories?: { text: string; kind: 'experience' | 'inference' }[];
   /** 想起来、拿得准的技能：直接翻开的全文 */
   openedSkill?: { name: string; body: string };
   /** 刚才卡住、随后在同一带做成：值得写成技能 */
@@ -292,6 +296,24 @@ export function waterCrossingHint(p: Percept, s: AgentState): string | null {
   return `过水可用的材料：${blocks ? `能垫路的方块 ${blocks} 块` : '没有能垫路的方块'}；${boat ? `背包有船 ${boat} 只` : planks >= 5 ? `木板 ${planks} 块（够造一只船）` : '没有船，木板也不够造（要 5 块木板）'}`;
 }
 
+/** 主目标清单观察在线没进展、最近几段活还卡/没做成：提示可以改清单（不动主目标、不删做完的项、不重写已勾掉的项） */
+function planRevisionHint(ctx: MindContext): string | null {
+  if (ctx.tier !== 'deliberate') return null;
+  const plan = ctx.plan;
+  if (!plan) return null;
+  const stall = ctx.self.planStallInfo();
+  if (stall.minutes < 15) return null;
+  const since = plan.progressAt ?? plan.setAt;
+  const acts = ctx.self.history(60).filter((r) => r.at > since);
+  if (acts.length < 3) return null;
+  const stuck = acts.filter((r) => r.outcome === 'stuck' || r.outcome === 'unmet');
+  if (stuck.length < 2) return null;
+  const outcomeText = { done: '做成', stuck: '卡住', unmet: '没做成', abandoned: '放下', interrupted: '打断', replaced: '换掉' } as const;
+  const recent = acts.slice(-3).map((r) => `${r.what.slice(0, 18)}→${outcomeText[r.outcome] ?? r.outcome}`);
+  const doneSteps = plan.steps.filter((st) => st.done).map((st) => st.text);
+  return `主目标「${plan.goal.slice(0, 30)}」的清单已观察到 ${Math.round(stall.minutes)} 在线分钟没勾掉一项${stall.historyUnknown ? '（更早的在线时长未知）' : ''}，最近：${recent.join('；')}。主目标不用换（换目标要等阶段回顾）；但清单可以改：把反复卡住缺掉的那一步补成一项、或把卡住的项拆成能验证的小步，写 plan {"focus":"${plan.agendaId}","steps":[…] }${doneSteps.length ? `；已经勾掉的（${doneSteps.slice(0, 3).map((t) => `「${t.slice(0, 14)}」`).join('、')}）保留，别写成新步骤` : ''}`;
+}
+
 /** 按情境追加在用户消息末尾的提醒：只说和眼下有关的 2–4 件事 */
 export function situationalReminders(ctx: MindContext): string[] {
   const out: string[] = [];
@@ -306,6 +328,8 @@ export function situationalReminders(ctx: MindContext): string[] {
   }
   const focusItem = ctx.self.activeAgenda();
   if (focusItem && !ctx.plan && ctx.tier === 'deliberate') out.push(`主目标「${focusItem.text}」还没有清单：写 "plan":{"focus":"${focusItem.id}","steps":[…3–6 项]}，之后一项项推进`);
+  const revision = planRevisionHint(ctx);
+  if (revision) out.push(revision);
   const where = p.self.where?.kind;
   // 旧通道是历史记忆，不保证现在仍然可通。
   if (MINING_INTENT.test(intent)) {
@@ -534,8 +558,10 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       ...(!glance && ctx.researchContext ? { research: ctx.researchContext } : {}),
     }],
     ['记得的地方', worldKnowledge(ctx)],
-    ...(ctx.recalled?.length || ctx.openedSkill ? [['想起来的', {
+    ...(ctx.recalled?.length || ctx.hindsightMemories?.length || ctx.openedSkill ? [['想起来的', {
       ...(ctx.recalled?.length ? { memories: ctx.recalled.map((r) => `[${RECALL_LABEL[r.kind]}] ${r.text}`) } : {}),
+      ...(ctx.hindsightMemories?.length ? { long_term: ctx.hindsightMemories.map((m) => `[${m.kind === 'experience' ? '经历' : '推断'}·长期记忆] ${m.text}`) } : {}),
+      ...(ctx.hindsightMemories?.length ? { long_term_note: '长期记忆是合并后的历史经历或推断，不等于当前现场事实；现场以【身边】【身体】为准。' } : {}),
       ...(ctx.openedSkill ? { skill_opened: { name: ctx.openedSkill.name, text: ctx.openedSkill.body } } : {}),
     }] as [string, Record<string, unknown>]] : []),
     ['最近', {
@@ -547,6 +573,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       current_activity: ctx.activity ? describeActivity(ctx.activity, s, p) : null,
       ...(ctx.activity?.why ? { activity_reason_source: '当前活动的 why 是先前选择的理由，不等于观测事实；动作反馈和当前观察可用于核对' } : {}),
       ...(ctx.suspended.length ? { will_resume_after: ctx.suspended.map((a) => a.what) } : {}),
+      ...(ctx.next ? { queued_next: `已经想好接下来做「${ctx.next.what}」${ctx.next.why ? `（${ctx.next.why}）` : ''}` } : {}),
       ...(ctx.designing ? { architect_drawing: ctx.designing.brief.slice(0, 60) } : {}),
       ...(ctx.repeatedFailures?.length ? { repeated_failures: ctx.repeatedFailures } : {}),
       ...(ctx.notes.length ? { last_decision_corrections: ctx.notes } : {}),

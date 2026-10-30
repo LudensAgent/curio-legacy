@@ -195,6 +195,12 @@ export class Mind {
   /** 刚从绕路回到这段活：先想一想再动手（放下它的这段时间里情况可能变了，比如等的东西到了、要的已经够了） */
   private resumeCheck: string | null = null;
   private lastDim: string | null = null;
+  /** 后台预取的长期记忆（Hindsight 合并）：历史经历/推断，非现场事实。每念异步拉一次，结果留给下一念用。 */
+  private hindsightMemories: { at: number; items: { text: string; kind: 'experience' | 'inference' }[] } | null = null;
+  private hindsightPrefetchAt = 0;
+  private hindsightPrefetching = false;
+  static readonly HINDSIGHT_PREFETCH_INTERVAL = 30_000;
+  static readonly HINDSIGHT_FRESH_MS = 90_000;
 
   /**
    * 第一次到一个新维度：这是个新环境。不告诉它这里有什么危险（那是它自己要看、要学的），
@@ -948,6 +954,38 @@ export class Mind {
   }
 
   // ---------------------------------------------------------------- 思考
+  /** 取最近一次后台预取的长期记忆（过期就不给，避免拿旧事当现场） */
+  private freshHindsightMemories() {
+    const c = this.hindsightMemories;
+    return c && Date.now() - c.at < Mind.HINDSIGHT_FRESH_MS ? c.items : null;
+  }
+
+  /** 后台预取长期记忆：不阻塞思考，结果留给下一念的【想起来的】；失败静默回落本地回想 */
+  private async prefetchHindsight(query: string, percept: Percept, generation: number) {
+    const recall = this.d.thinker.recall;
+    if (!recall || this.hindsightPrefetching) return;
+    const now = Date.now();
+    if (now - this.hindsightPrefetchAt < Mind.HINDSIGHT_PREFETCH_INTERVAL) return;
+    this.hindsightPrefetching = true;
+    this.hindsightPrefetchAt = now;
+    try {
+      const res = await recall.recall({
+        percept: { self: { dim: percept.self.dim, pos: percept.self.pos }, objective: null, nearby: percept.nearby },
+        lastFailure: null,
+        userSuggestion: null,
+      }, query);
+      if (generation !== this.generation || this.paused) return;
+      if (res.source === 'hindsight' && res.memories.length) {
+        this.hindsightMemories = { at: Date.now(), items: res.memories.map((m) => ({
+          text: m.text.slice(0, 400), kind: m.kind === 'experience' ? 'experience' as const : 'inference' as const })) };
+      }
+    } catch {
+      // 拉不到长期记忆就继续用本地回想，不影响这一念
+    } finally {
+      this.hindsightPrefetching = false;
+    }
+  }
+
   private think(reason: string, tier: 'glance' | 'deliberate') {
     if (this.thinking || this.paused) return;
     const state = this.d.adapter.state();
@@ -971,6 +1009,8 @@ export class Mind {
       this.lastRecord?.what, this.lastRecord?.outcome === 'stuck' ? this.lastRecord.summary : '', this.lastFailure?.summary, ...noticed.map((n) => n.what), reason].filter(Boolean).join(' ');
     const book = this.d.thinker.skillBook;
     const recalled = this.safe(() => recallLocal(query, { self: this.d.self, memory: this.d.memory, book, ledger: this.d.ledger }, { n: tier === 'glance' ? 3 : 6, exclude: ['know_how'], excludeRefs: this.d.self.history(5).map((r) => r.id) }), []);
+    const hindsightMemories = this.freshHindsightMemories();
+    void this.prefetchHindsight(query, percept, generation);
     let openedSkill: MindContext['openedSkill'];
     const top = recalled.find((r) => r.kind === 'skill' && r.score >= 4 && r.ref);
     if (tier === 'deliberate' && top && book?.get(top.ref!) && Date.now() - (this.skillOpenedAt.get(top.ref!) ?? 0) > 5 * 60_000) {
@@ -989,6 +1029,7 @@ export class Mind {
     const ctx: MindContext = {
       tier, reason: reflect ? `${reason}；做完了好几段活，顺便回头看看哪些办法好用、哪些该改` : reason,
       percept, state, self: this.d.self, memory: this.d.memory, blockAt: (p) => this.d.adapter.blockAt(p), activity: this.activity, suspended: this.suspended,
+      next: this.queuedNext?.draft ?? null,
       lastRecord: this.lastRecord, noticed, changes: this.changesSinceLastThought(), userSuggestion: this.userSuggestion,
       operatorOrder: this.order ? { text: this.order.text, ageSec: Math.round((Date.now() - this.order.at) / 1000), status: this.order.status, kind: this.order.kind } : null,
       audience: this.d.audience?.context(tier === 'glance' ? 'light' : 'full') ?? null, notes: this.notes,
@@ -999,7 +1040,7 @@ export class Mind {
       // 收起、停用的技能不进目录（翻技能书、回想时还看得到）：目录越长越难挑，还拖累缓存
       skills: this.safe(() => this.d.thinker.skillBook?.index((n) => !!this.d.behaviors?.hidden(n),
         this.d.behaviors ? (name, trial) => this.d.behaviors!.executionError(name, trial) : undefined) ?? [], []),
-      recalled, ...(openedSkill ? { openedSkill } : {}), ...(learnFrom ? { learnFrom } : {}), plan,
+      recalled, ...(hindsightMemories ? { hindsightMemories } : {}), ...(openedSkill ? { openedSkill } : {}), ...(learnFrom ? { learnFrom } : {}), plan,
       hunting: this.safe(() => this.d.ledger?.huntTally() ?? null, null),
       ...(this.trip ? { trip: { minutes: (Date.now() - this.trip.since) / 60_000, gained: diffInventory(this.trip.inventory, inventoryOf(state)).gained, nearEnd: reason === Mind.NEAR_END_REASON } } : {}),
       ...(reviewing ? { stageReview: this.safe(() => this.stageReviewFacts(), { why: this.review?.why ?? '' }) } : {}),
