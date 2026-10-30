@@ -7,6 +7,7 @@ import { findStation, forgetStationAt, rememberStation } from './stations.ts';
 import { interactiveName } from '../perception/vision.ts';
 import { glanceAt } from './observation.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
+import { FUELS } from '../methods/fuel.ts';
 
 // ===================================================================== 冶炼
 export const SMELTABLE: Record<string, string> = {
@@ -17,8 +18,6 @@ export const SMELTABLE: Record<string, string> = {
   oak_log: 'charcoal', birch_log: 'charcoal', spruce_log: 'charcoal', jungle_log: 'charcoal', acacia_log: 'charcoal',
   dark_oak_log: 'charcoal', mangrove_log: 'charcoal', cherry_log: 'charcoal',
 };
-const FUELS = ['coal', 'charcoal', 'coal_block', 'oak_planks', 'birch_planks', 'spruce_planks', 'jungle_planks', 'acacia_planks', 'dark_oak_planks', 'mangrove_planks', 'cherry_planks', 'oak_log', 'birch_log', 'spruce_log', 'stick'];
-
 export function pickFuel(inv: InvItem[], input: string): string | null {
   for (const f of FUELS) if (f !== input && inv.some((i) => i.name === f && i.count > 0)) return f;
   return null;

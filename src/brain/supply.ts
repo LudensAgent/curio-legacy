@@ -1,4 +1,5 @@
 import type { AgentState } from '../adapter/types.ts';
+import { fuelBurn } from '../methods/fuel.ts';
 import { describePlan, materialPlan } from '../methods/shortfall.ts';
 
 /**
@@ -83,6 +84,22 @@ export function supplyFacts(opts: SupplyFacts): string[] {
  * 并附换一把的材料缺口（materialPlan 按版本查，不写死配方）。
  * kinds 缺省只看镐（下矿的账里最要紧）。
  */
+/** 冶炼燃料预算：烧 count 个 input 需要多少件燃料位、背包燃料合计够不够（按原版默认燃烧值，明标） */
+export function fuelFacts(inv: Inv, input: string, count: number): string | null {
+  const fuels: string[] = [];
+  let capacity = 0;
+  for (const i of inv) {
+    if (i.name === input || i.count <= 0) continue; // 原木既是原料也可是燃料，别烧自己
+    const per = fuelBurn(i.name);
+    if (per <= 0) continue;
+    capacity += i.count * per;
+    fuels.push(`${i.name}×${i.count} 可烧 ${Math.round(i.count * per)}`);
+  }
+  if (capacity <= 0) return `要烧 ${input}×${count}，但背包里没有燃料（煤/木炭/木板/原木）`;
+  const enough = capacity >= count;
+  return `要烧 ${input}×${count}，背包燃料合计能烧约 ${Math.round(capacity)} 件${enough ? '，够' : `，还差约 ${Math.round(count - capacity)}`}（${fuels.slice(0, 3).join('、')}；1 煤=8 件，原版默认）`;
+}
+
 export function durabilityFacts(inv: Inv, kinds: string[] = ['pickaxe']): string[] {
   const out: string[] = [];
   for (const kind of kinds) {

@@ -1,6 +1,6 @@
 import type { AgentState } from '../adapter/types.ts';
 import { effortFacts } from '../brain/efficiency.ts';
-import { durabilityFacts, supplyFacts } from '../brain/supply.ts';
+import { durabilityFacts, fuelFacts, supplyFacts } from '../brain/supply.ts';
 import type { AudienceContext } from '../live/audience.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { durationText, realSecondsToTicks, sunText, type Percept } from '../perception/perception.ts';
@@ -349,6 +349,16 @@ export function situationalReminders(ctx: MindContext): string[] {
     // 预算要有个规模可除：提醒它把挖多深/横多远说出来（不替它定）
     if (!/(y ?[=-]? ?\d+|挖到|下到|横着|横探|\d+ ?格)/.test(intent)) {
       out.push('要下矿先想好这次大概挖多深/横多远（挖到 y=某层、横着多少格），火把和镐的预算按这个来');
+    }
+  }
+  // 冶炼燃料预算：手上这段活要 smelt 时，先把燃料够不够摆出来（只报事实，燃料比走 methods/fuel 的原版默认）
+  const smeltStep = ctx.activity?.steps.find((st) => st.skill === 'smelt');
+  if (smeltStep) {
+    const a = (smeltStep.args ?? {}) as Record<string, unknown>;
+    const item = String(a.item ?? ''), count = Math.max(1, Math.min(64, Number(a.count ?? 8) || 8));
+    if (item) {
+      const f = fuelFacts(s.inventory, item, count);
+      if (f) out.push(f);
     }
   }
   // 下矿的账：在地下、手上的活快收工或想回地面时，提供实际经历和当前所见。

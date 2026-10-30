@@ -8,6 +8,7 @@ import { runSkill, validateSkill, type FailureCode, type Senses, type SkillResul
 import { AbortedError, shortId } from '../util.ts';
 import { availableInventoryFor, craftReservationConflict, reservationsFor } from '../projects/reservations.ts';
 import { config } from '../config.ts';
+import { fuelBurn } from '../methods/fuel.ts';
 
 export type TaskSource = 'llm' | 'rule' | 'filler' | 'reflex' | 'user';
 
@@ -141,7 +142,7 @@ export class Arbiter extends EventEmitter {
               else if (prop === 'smelt') {
                 const input = String(args[0]), amount = Number(args[1]), fuel = String(args[2]);
                 requireAvailable(input, amount);
-                const per = /coal$|charcoal/.test(fuel) ? 8 : /_planks$|_log$/.test(fuel) ? 1.5 : fuel === 'stick' ? 0.5 : 1;
+                const per = fuelBurn(fuel) || 1;
                 const fuelHeld = state.inventory.find((i) => i.name === fuel)?.count ?? 0;
                 requireAvailable(fuel, Math.min(fuelHeld, Math.ceil(amount / per)));
                 const furnaceKnown = this.senses.knownBlocks(['furnace', 'blast_furnace', 'smoker'], 5).length > 0;
