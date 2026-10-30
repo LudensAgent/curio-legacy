@@ -4,7 +4,7 @@ import path from 'node:path';
 /**
  * 控制台里的 .env 配置编辑。
  *
- * - 「有哪些配置、什么意思、默认值」以 .env.example 为准：按 `# ===== 标题 =====` 分组，紧挨着的注释就是说明，
+ * - 「有哪些配置、什么意思、默认值」以 example/.env 为准：按 `# ===== 标题 =====` 分组，紧挨着的注释就是说明，
  *   注释掉的 `# KEY=` 行算可选项。
  * - 写回时尽量保持 .env 原样：已有的行原地替换，注释掉的同名行原地启用，都没有才追加到末尾。
  * - 密钥类（API_KEY / SECRET / PASSWORD / COOKIE / TOKEN …）永远不回传给浏览器，只告诉它「设没设」。
@@ -15,9 +15,9 @@ export interface EnvItem {
   key: string;
   section: string;
   desc: string;
-  /** .env.example 里的示例值 */
+  /** example/.env 里的示例值 */
   example: string | null;
-  /** 在 .env.example 里是注释掉的（可选项） */
+  /** 在 example/.env 里是注释掉的（可选项） */
   optional: boolean;
   secret: boolean;
 }
@@ -110,7 +110,7 @@ function formatValue(v: string): string {
 export type EnvUpdates = Record<string, string | null>;
 
 /**
- * 校验浏览器发来的修改：只允许改 .env.example 里有的键、或者 .env 里本来就有的键；
+ * 校验浏览器发来的修改：只允许改 example/.env 里有的键、或者 .env 里本来就有的键；
  * 值必须是单行字符串（null = 注释掉这一项，回到默认值）。
  */
 export function validateUpdates(body: unknown, allowed: Set<string>): { ok: true; updates: EnvUpdates } | { ok: false; error: string } {
@@ -122,7 +122,7 @@ export function validateUpdates(body: unknown, allowed: Set<string>): { ok: true
   if (entries.length > 100) return { ok: false, error: '一次改太多了' };
   for (const [key, v] of entries) {
     if (!/^[A-Z][A-Z0-9_]*$/.test(key)) return { ok: false, error: `键名不合法：${key}` };
-    if (!allowed.has(key)) return { ok: false, error: `未知配置项：${key}（先写进 .env.example）` };
+    if (!allowed.has(key)) return { ok: false, error: `未知配置项：${key}（先写进 example/.env）` };
     if (v === null) { updates[key] = null; continue; }
     if (typeof v !== 'string' && typeof v !== 'number' && typeof v !== 'boolean') return { ok: false, error: `${key} 的值必须是字符串` };
     const s = String(v);
@@ -168,7 +168,7 @@ export interface EnvStoreOptions {
 /** 控制台用的读写封装 */
 export function envStore(opts: EnvStoreOptions = {}) {
   const file = path.resolve(opts.file ?? '.env');
-  const example = path.resolve(opts.example ?? '.env.example');
+  const example = path.resolve(opts.example ?? 'example/.env');
   const read = (f: string) => { try { return fs.readFileSync(f, 'utf8'); } catch { return ''; } };
   const startedWith = parseEnv(read(file));
   const mode = path.basename(file) === '.env.live' || startedWith.get('CURIO_MODE')?.trim() === 'live' ? 'live' : 'local';
@@ -201,7 +201,7 @@ export function envStore(opts: EnvStoreOptions = {}) {
       items: s.items.map((i) => { known.add(i.key); return { ...i, example: i.secret ? null : i.example, ...show(i.key) }; }),
     }));
     const extra = [...env.keys()].filter((k) => !known.has(k)).map((key) => ({ key, section: '其他', desc: '', example: null, optional: true, secret: isSecretKey(key), ...show(key) }));
-    if (extra.length) sections.push({ title: '其他（.env 里有、.env.example 里没写）', items: extra });
+    if (extra.length) sections.push({ title: '其他（.env 里有、example/.env 里没写）', items: extra });
     return { file: path.basename(file), exists: fs.existsSync(file), restartNeeded: sections.some((s) => s.items.some((i) => i.changed)), sections };
   }
 

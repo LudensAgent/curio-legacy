@@ -56,7 +56,7 @@ difficulty=easy
 
 ```powershell
 npm install
-copy .env.local.example .env.local  # macOS/Linux: cp .env.local.example .env.local
+copy example\.env.local .env.local  # macOS/Linux: cp example/.env.local .env.local
 npm test                    # 离线测试，不需要 Minecraft
 npm run start:local
 ```
