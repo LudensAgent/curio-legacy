@@ -354,7 +354,7 @@ export function situationalReminders(ctx: MindContext): string[] {
       out.push(`记得自己${t.text}`);
     }
     // 消耗品预算：下矿前把火把够不够、还能做多少摆出来（只报事实，备多少由它定）
-    out.push(...supplyFacts({ inv: s.inventory, torchEvery: ctx.self.habits().torch_every, only: new Set(['torch']), difficulty: s.difficulty, gamerules: s.gamerules }));
+    out.push(...supplyFacts({ inv: s.inventory, torchEvery: ctx.self.habits().torch_every, only: new Set(['torch']), difficulty: s.difficulty, gamerules: s.gamerules, stock: p.storage?.stock }));
     // 世界规则事实：keepInventory 开着时死亡不掉落（只是事实，怎么备仍由它定）
     const keepInv = s.gamerules?.keepInventory;
     if (keepInv === true || keepInv === 'true') out.push('keepInventory 开着（死亡不掉落）');
@@ -369,7 +369,7 @@ export function situationalReminders(ctx: MindContext): string[] {
     const a = (smeltStep.args ?? {}) as Record<string, unknown>;
     const item = String(a.item ?? ''), count = Math.max(1, Math.min(64, Number(a.count ?? 8) || 8));
     if (item) {
-      const f = fuelFacts(s.inventory, item, count);
+      const f = fuelFacts(s.inventory, item, count, p.storage?.stock);
       if (f) out.push(f);
     }
   }
@@ -379,7 +379,7 @@ export function situationalReminders(ctx: MindContext): string[] {
     const got = Object.entries(trip.gained).filter(([k]) => /raw_|_ore$|coal|diamond|emerald|lapis|redstone|amethyst|obsidian|debris|flint|gold_nugget|quartz/.test(k)).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, n]) => `${k}×${n}`);
     const seen = p.nearby.resources.filter((r) => r.seen === 'now' && isResourceBlock(r.block)).sort((a, b) => a.nearest - b.nearest).slice(0, 4).map((r) => `${r.block}×${r.count}（最近 ${Math.round(r.nearest)} 格）`);
     const remembered = oreSpotsNear(ctx.memory.landmarks(), { worldId: s.worldId, dim: p.self.dim, pos: here }, { radius: 48 }).length;
-    const picks = durabilityFacts(s.inventory, ['pickaxe']);
+    const picks = durabilityFacts(s.inventory, ['pickaxe'], p.storage?.stock);
     const t = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).find((f) => f.inside);
     const back = t ? `历史路线参考点直线距离约 ${Math.round(Math.hypot(t.pos.x - here.x, t.pos.y - here.y, t.pos.z - here.z))} 格，当前路线是否可通未知` : '';
     out.push(`下矿的账：${got.length ? `挖到 ${got.join(' ')}` : '还没挖到矿'}；背包空 ${p.emptySlots} 格${picks.length ? `；${picks.join('、')}` : ''}；身边${seen.length ? `看得见 ${seen.join('、')}` : '没看见矿'}${remembered ? `，48 格内记得 ${remembered} 处矿点` : ''}${back ? `；${back}` : ''}。清单后面几项还要不要这些料，一起掂量再决定收不收工`);
