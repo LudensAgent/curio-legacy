@@ -1701,8 +1701,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const check = this.actionCheckpoint(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
     const b = this.bot;
-    const door = name.endsWith('_door'), stairs = name.endsWith('_stairs'), slab = name.endsWith('_slab'), bed = name.endsWith('_bed');
-    if (!door && !stairs && !slab && !bed) return { ok: false, reason: 'UNSUPPORTED_BLOCK_STATE' };
+    const door = name.endsWith('_door'), stairs = name.endsWith('_stairs'), slab = name.endsWith('_slab'), bed = name.endsWith('_bed'), gate = name.endsWith('_fence_gate');
+    if (!door && !stairs && !slab && !bed && !gate) return { ok: false, reason: 'UNSUPPORTED_BLOCK_STATE' };
     const yaw: Record<string, number> = { north: 0, east: -Math.PI / 2, south: Math.PI, west: Math.PI / 2 };
     const facing = String(properties.facing);
     const directions: Record<string, Vec3Like> = { north: { x: 0, y: 0, z: -1 }, east: { x: 1, y: 0, z: 0 }, south: { x: 0, y: 0, z: 1 }, west: { x: -1, y: 0, z: 0 } };
@@ -1715,12 +1715,13 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (door) paired = { pos: { ...pos, y: pos.y + 1 }, properties: { ...properties, half: 'upper' } };
     const matches = () => matchesAt(pos, properties) && (!paired || matchesAt(paired.pos, paired.properties));
     if (matches()) return { ok: true };
-    if ((door || stairs || bed) && !(facing in yaw) || typeof b._placeBlockWithOptions !== 'function') return { ok: false, reason: 'UNSUPPORTED_BLOCK_STATE' };
+    if ((door || stairs || bed || gate) && !(facing in yaw) || typeof b._placeBlockWithOptions !== 'function') return { ok: false, reason: 'UNSUPPORTED_BLOCK_STATE' };
     if (String(properties.waterlogged ?? false) !== 'false') return { ok: false, reason: 'UNSUPPORTED_BLOCK_STATE' };
     if (door && (properties.half !== 'lower' || String(properties.open ?? false) !== 'false' || String(properties.powered ?? false) !== 'false')) return { ok: false, reason: 'UNSUPPORTED_BLOCK_STATE' };
     if (stairs && (!['top', 'bottom'].includes(String(properties.half)) || String(properties.shape ?? 'straight') !== 'straight')) return { ok: false, reason: 'UNSUPPORTED_BLOCK_STATE' };
     if (slab && !['top', 'bottom'].includes(String(properties.type))) return { ok: false, reason: 'UNSUPPORTED_BLOCK_STATE' };
     if (bed && (properties.part !== 'foot' || String(properties.occupied ?? false) !== 'false')) return { ok: false, reason: 'UNSUPPORTED_BLOCK_STATE' };
+    if (gate && (String(properties.open ?? false) !== 'false' || String(properties.powered ?? false) !== 'false')) return { ok: false, reason: 'UNSUPPORTED_BLOCK_STATE' };
     const item = this.invItem(name);
     if (!item) return { ok: false, reason: 'NO_ITEM' };
     const at = b.blockAt(this.vec(pos));
@@ -1732,7 +1733,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const half = stairs ? String(properties.half) : slab ? String(properties.type) : 'bottom';
     // A clicked top face produces a bottom half, a clicked underside a top
     // half. On horizontal faces the cursor height chooses the requested half.
-    const offsets: Vec3Like[] = door || bed ? [{ x: 0, y: -1, z: 0 }] : [
+    const offsets: Vec3Like[] = door || bed || gate ? [{ x: 0, y: -1, z: 0 }] : [
       { x: 0, y: half === 'top' ? 1 : -1, z: 0 },
       { x: 1, y: 0, z: 0 }, { x: -1, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }, { x: 0, y: 0, z: -1 },
     ];

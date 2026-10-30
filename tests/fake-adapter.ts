@@ -108,9 +108,9 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
   }
   async placeBlockStateAt(pos: Vec3Like, name: string, properties: Record<string, string | number | boolean>, signal: AbortSignal) {
     throwIfAborted(signal);
-    const door = name.endsWith('_door'), stairs = name.endsWith('_stairs'), slab = name.endsWith('_slab'), bed = name.endsWith('_bed');
+    const door = name.endsWith('_door'), stairs = name.endsWith('_stairs'), slab = name.endsWith('_slab'), bed = name.endsWith('_bed'), gate = name.endsWith('_fence_gate');
     const direction: Record<string, Vec3Like> = { north: { x: 0, y: 0, z: -1 }, east: { x: 1, y: 0, z: 0 }, south: { x: 0, y: 0, z: 1 }, west: { x: -1, y: 0, z: 0 } };
-    if (!door && !stairs && !slab && !bed || door && properties.half !== 'lower' || stairs && (!['top', 'bottom'].includes(String(properties.half)) || String(properties.shape ?? 'straight') !== 'straight') || slab && !['top', 'bottom'].includes(String(properties.type)) || bed && (properties.part !== 'foot' || !(String(properties.facing) in direction))) return { ok: false, reason: 'UNSUPPORTED_BLOCK_STATE' };
+    if (!door && !stairs && !slab && !bed && !gate || door && properties.half !== 'lower' || stairs && (!['top', 'bottom'].includes(String(properties.half)) || String(properties.shape ?? 'straight') !== 'straight') || slab && !['top', 'bottom'].includes(String(properties.type)) || bed && (properties.part !== 'foot' || !(String(properties.facing) in direction)) || gate && !(String(properties.facing) in direction)) return { ok: false, reason: 'UNSUPPORTED_BLOCK_STATE' };
     const offset = bed ? direction[String(properties.facing)] : { x: 0, y: 1, z: 0 };
     const paired = { x: pos.x + offset.x, y: pos.y + offset.y, z: pos.z + offset.z };
     if (this.blockAt(pos) !== 'air' || (door || bed) && this.blockAt(paired) !== 'air') return { ok: false, reason: 'BLOCKED' };

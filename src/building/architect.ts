@@ -168,7 +168,7 @@ export function logsFor(missing: ReadonlyArray<readonly [string, number]>): numb
     else if (/_stairs$/.test(n)) planks += m * 1.5;
     else if (/_slab$/.test(n)) planks += m / 2;
     else if (/_(log|wood)$/.test(n)) planks += m * 4;
-    else if (/_(door|fence|trapdoor)$/.test(n)) planks += m * 2;
+    else if (/_(door|fence|fence_gate|trapdoor)$/.test(n)) planks += m * 2;
   }
   return Math.ceil(planks / 4);
 }

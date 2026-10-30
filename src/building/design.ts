@@ -18,7 +18,7 @@ export interface CompiledDesign { width: number; depth: number; height: number; 
 
 const BLOCK_NAME = /^[a-z][a-z0-9_]{0,63}$/;
 /** 会掉落、需要复杂方块状态或放不稳的方块：设计里不用 */
-const UNSUPPORTED = /^(sand|red_sand|gravel|.*_concrete_powder|.*_fence_gate|.*_bed|.*_sign|.*_hanging_sign|.*_button|.*_pressure_plate|lever|water|lava|fire|scaffolding|anvil|.*_anvil|.*_banner|redstone.*|tnt)$/;
+const UNSUPPORTED = /^(sand|red_sand|gravel|.*_concrete_powder|.*_bed|.*_sign|.*_hanging_sign|.*_button|.*_pressure_plate|lever|water|lava|fire|scaffolding|anvil|.*_anvil|.*_banner|redstone.*|tnt)$/;
 /** 需要明确方块状态才能放对的：台阶（朝向、上下半）、半砖（上下半） */
 const STAIRS = /_stairs$/, SLAB = /_slab$/;
 const FACINGS = ['north', 'south', 'east', 'west'];
@@ -136,6 +136,14 @@ export function compileDesign(raw: DesignInput): CompiledDesign {
       for (const p of [out, inside]) for (const dy of [0, 1]) clearances.push({ x: p.x, y: y + dy, z: p.z });
       continue;
     }
+    if (name.endsWith('_fence_gate')) {
+      // 栅栏门是单块入口：朝向由它在围栏的哪条边决定（和门一样），不生成上半格、不留门前通道；
+      // 它自己就是通行口，进出检查会认它。开合状态留给放置时自然决定，只验收朝向。
+      const facing = z === fz0 ? 'north' : z === fz1 ? 'south' : x === fx0 ? 'west' : x === fx1 ? 'east' : 'north';
+      if (!edge(x, z)) throw new Error(`栅栏门要开在围栏边上（第 ${li} 层 x=${x}, z=${z} 在围栏里面）`);
+      add(pos, name, 'openings', ['entry', 'gate'], { facing });
+      continue;
+    }
     const below = at(li - 1, x, z), belowName = legend[below];
     const supportedBelow = !!belowName && belowName !== 'air';
     const phase: BuildingPhase = FACILITY.test(name) ? 'facilities' : WINDOW.test(name) ? 'openings'
@@ -143,8 +151,8 @@ export function compileDesign(raw: DesignInput): CompiledDesign {
     add(pos, name, phase, [phase === 'openings' ? 'window' : phase === 'roof' ? 'roof' : phase === 'facilities' ? 'facility' : 'wall'], stateFor(li, ch, name, x, z));
   }
   if (!components.some((c) => c.pos.y === -1)) throw new Error('第 0 层是地板：至少要有地板方块');
-  if (!components.some((c) => c.name.endsWith('_door')) && !clearances.some((p) => p.y === 0 && edge(p.x, p.z)))
-    throw new Error('房子要能进出：在外墙上放一扇门（legend 里写 oak_door 之类），或在外墙留 "." 的门洞');
+  if (!components.some((c) => c.name.endsWith('_door') || c.name.endsWith('_fence_gate')) && !clearances.some((p) => p.y === 0 && edge(p.x, p.z)))
+    throw new Error('房子要能进出：在外墙上放一扇门（legend 里写 oak_door 之类）、一扇栅栏门（fence_gate），或在外墙留 "." 的门洞');
   if (components.length > 900) throw new Error(`设计太大（${components.length} 块），控制在 900 块以内`);
   // 依赖：有下面的方块就等它；悬空的（屋顶、过梁）挂在同层旁边先放的方块上，按从外到内的顺序放
   // 有下面的方块就等它；悬空的（屋顶、过梁、屋檐）在同一层里从“有东西托着”的方块一格格往外接：

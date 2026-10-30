@@ -49,7 +49,7 @@ function setup(name: string, options: { neighborShape?: string; omitBedHead?: bo
     const material = bot.heldItem.name;
     const half = packet.direction === 0 || packet.direction > 1 && packet.cursorY > 0.5 ? 'top' : 'bottom';
     const left = facing() === 'north' ? packet.cursorX < 0.5 : facing() === 'east' ? packet.cursorZ < 0.5 : facing() === 'south' ? packet.cursorX > 0.5 : packet.cursorZ > 0.5;
-    const properties: Record<string, unknown> = material.endsWith('_stairs') ? { facing: facing(), half, shape: options.neighborShape ?? 'straight', waterlogged: false } : material.endsWith('_slab') ? { type: half, waterlogged: false } : material.endsWith('_bed') ? { facing: facing(), part: 'foot', occupied: false } : { facing: facing(), half: 'lower', hinge: left ? 'left' : 'right', open: false, powered: false };
+    const properties: Record<string, unknown> = material.endsWith('_stairs') ? { facing: facing(), half, shape: options.neighborShape ?? 'straight', waterlogged: false } : material.endsWith('_slab') ? { type: half, waterlogged: false } : material.endsWith('_bed') ? { facing: facing(), part: 'foot', occupied: false } : material.endsWith('_fence_gate') ? { facing: facing(), open: false, powered: false, in_wall: false } : { facing: facing(), half: 'lower', hinge: left ? 'left' : 'right', open: false, powered: false };
     setTimeout(() => {
       put(material, position, properties);
       if (material.endsWith('_bed') && !options.omitBedHead) {
@@ -142,6 +142,18 @@ test('door packets choose the requested hinge quarter at all four forced orienta
     assert.equal(adapter.blockStateAt(target)?.properties.hinge, hinge);
     assert.equal(adapter.blockStateAt(target.offset(0, 1, 0))?.properties.hinge, hinge);
   }
+});
+
+test('fence gate placement forces the requested facing and stays closed', async () => {
+  const { adapter, target, put, packets, turns } = setup('oak_fence_gate');
+  put('stone', target.offset(0, -1, 0));
+  const result = await adapter.placeBlockStateAt(target, 'oak_fence_gate', { facing: 'east' }, new AbortController().signal);
+  assert.equal(result.ok, true, result.reason);
+  assert.equal(turns[0], -Math.PI / 2);
+  assert.equal(packets[0].direction, 1, '贴着脚下的顶面放');
+  assert.equal(adapter.blockStateAt(target)?.properties.facing, 'east');
+  assert.equal(adapter.blockStateAt(target)?.properties.open, false);
+  assert.equal(adapter.blockStateAt(target)?.properties.half, undefined, '栅栏门没有上下半格');
 });
 
 test('enclosed door hinges relocate to an actually supported frontal landing and recheck the exact quarter', async () => {

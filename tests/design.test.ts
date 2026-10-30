@@ -22,6 +22,18 @@ test('字符画设计编译成方块清单：地板、门（朝外、上半格�
   assert.equal(at(2, 2, 2)?.phase, 'roof');
 });
 
+test('栅栏门：单块入口，朝向按所在边定，纯栅栏门也能算能进出', () => {
+  const pen = JSON.parse('{"legend":{"D":"dirt","F":"oak_fence","G":"oak_fence_gate","T":"torch",".":"air"},"layers":[["DDDDD","DDDDD","DDDDD","DDDDD","DDDDD"],["FFFFF","F...F","F.T.F","F...F","FFGFF"],["     ","     ","     ","     ","     "]]}');
+  const d = compileDesign(pen);
+  const gate = d.components.find((c) => c.name === 'oak_fence_gate');
+  assert.ok(gate, '有栅栏门组件');
+  assert.deepEqual(gate!.properties, { facing: 'south' }, '南面正中的门朝南');
+  assert.ok(gate!.tags.includes('entry') && gate!.tags.includes('gate'));
+  assert.ok(!d.components.some((c) => c.name === 'oak_fence_gate' && c.pos.y === 1), '栅栏门不生成上半格');
+  const inner = JSON.parse(JSON.stringify(pen)); inner.layers[1][1] = 'FGFFF';
+  assert.throws(() => compileDesign(inner), /栅栏门要开在围栏边上/);
+});
+
 test('设计校验：未定义字符、会掉落的方块、没有门/门洞都说清楚', () => {
   const bad = example(); bad.layers[1][0] = 'PPXPP';
   assert.throws(() => compileDesign(bad), /没在 legend 里定义的字符「X」/);

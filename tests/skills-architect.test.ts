@@ -51,9 +51,17 @@ test('设计手册里的参考作品都能直接施工，而且有坡顶/屋檐�
   assert.ok(designs.length >= 2);
   for (const d of designs) {
     const compiled = compileDesign(d);
-    assert.deepEqual(compiled.warnings, []);
     const spec = normalizeSpec({ name: 'ref', design: d });
-    assert.ok(compileBuilding(spec).cells.length > 50);
+    assert.ok(!compiled.warnings.some((w) => /悬在半空/.test(w)), `参考作品不能有悬空方块：${compiled.warnings.join('；')}`);
+    const cells = compileBuilding(spec).cells;
+    // 住处要完整（坡顶、窗户、面积）；畜栏这类露天围栏只要求有进出、盖得起来
+    const dwelling = Object.values(d.legend as Record<string, string>).some((n) => n.endsWith('_door'));
+    if (!dwelling) {
+      assert.ok(cells.some((c) => c.name.endsWith('_fence_gate') || c.name.endsWith('_door')), '露天围栏要有栅栏门或门');
+      continue;
+    }
+    assert.deepEqual(compiled.warnings, []);
+    assert.ok(cells.length > 50);
     assert.deepEqual(critique(spec), []);
   }
 });
