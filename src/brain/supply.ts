@@ -27,6 +27,8 @@ export interface SupplyProfile {
 type Inv = AgentState['inventory'];
 const sum = (items: Inv, re: RegExp) => items.filter((i) => re.test(i.name)).reduce((n, i) => n + i.count, 0);
 
+const DIFFICULTY_ZH: Record<string, string> = { peaceful: '和平', easy: '简单', normal: '普通', hard: '困难' };
+
 const FOOD = /^(bread|cooked_beef|cooked_porkchop|cooked_chicken|cooked_mutton|cooked_cod|cooked_salmon|apple|baked_potato|carrot|beef|porkchop|chicken|mutton|rabbit|cooked_rabbit|potato|sweet_berries|melon_slice|cookie|pumpkin_pie|beetroot|dried_kelp)$/;
 const BRIDGE_BLOCKS = /^(cobblestone|cobbled_deepslate|stone|dirt|sand|gravel|netherrack|.*_planks)$/;
 
@@ -65,7 +67,7 @@ export function supplyFacts(opts: SupplyFacts): string[] {
     const every = opts.torchEvery && opts.torchEvery > 0 ? opts.torchEvery : 8;
     const c = torchCraftable(inv);
     const craft = c.craftable > 0 ? `；煤/木炭 ${c.coal}、木棍 ${c.sticks}，还能直接做 ${c.craftable} 支` : `；煤/木炭 ${c.coal}、木棍 ${c.sticks}，眼下不够直接做火把`;
-    const spawn = opts.difficulty === 'peaceful' ? '（和平没怪，火把只为照明）' : opts.difficulty ? `（${opts.difficulty}，会刷怪，得多备）` : '';
+    const spawn = opts.difficulty === 'peaceful' ? '（和平没怪，火把只为照明）' : opts.difficulty ? `（${DIFFICULTY_ZH[opts.difficulty] ?? opts.difficulty}，会刷怪，得多备）` : '';
     out.push(`火把 ${torches} 支（torch_every≈${every} → 约能照亮 ${torches * every} 格暗处）${spawn}${craft}`);
   }
   if (want('food')) {
@@ -118,12 +120,12 @@ export function consumptionSummary(lost: Record<string, number>[]): string | nul
 export function durabilityFacts(inv: Inv, kinds: string[] = ['pickaxe']): string[] {
   const out: string[] = [];
   for (const kind of kinds) {
-    const tools = inv.filter((i) => i.name.endsWith(`_${kind}`) && i.durability);
-    if (!tools.length) continue;
-    const totalLeft = tools.reduce((n, t) => n + (t.durabilities?.length ? t.durabilities.reduce((a, b) => a + b, 0) : t.durability!.left), 0);
-    let gap = '';
-    try { gap = describePlan(materialPlan(tools[0].name, 1, inv)); } catch { /* 配方未知时略去换料 */ }
-    out.push(`${tools[0].name} ×${tools.length}，剩余耐久合计 ${totalLeft}（按每挖一格耗 1 耐久，约还能挖 ${totalLeft} 格）${gap ? `；换一把：${gap}` : ''}`);
+    for (const t of inv.filter((i) => i.name.endsWith(`_${kind}`) && i.durability)) {
+      const totalLeft = t.durabilities?.length ? t.durabilities.reduce((a, b) => a + b, 0) : t.durability!.left;
+      let gap = '';
+      try { gap = describePlan(materialPlan(t.name, 1, inv)); } catch { /* 配方未知时略去换料 */ }
+      out.push(`${t.name} ×${t.count}，剩余耐久合计 ${totalLeft}（按每挖一格耗 1 耐久，约还能挖 ${totalLeft} 格）${gap ? `；换一把：${gap}` : ''}`);
+    }
   }
   return out;
 }
