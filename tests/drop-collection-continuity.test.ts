@@ -24,13 +24,14 @@ function fixture(t: TestContext) {
   const bot: any = {
     username: 'CollectionTest', health: 20, food: 20, game: { dimension: 'overworld' },
     entity: { position: new Vec3(0, 64, 0), onGround: true, effects: {} },
+    world: { raycast: () => { const s = [...stones.values()][0]; return s ? { position: { x: s.position.x, y: s.position.y, z: s.position.z, face: 'top' } } : null; } },
     entities: { 42: { id: 42, name: 'item', position: new Vec3(2, 64, 0) } },
     inventory: { items: () => [...inventory].map(([name, count]) => ({ name, count })), emptySlotCount: () => 30 },
     _client: { write: (name: string) => packets.push(name) },
     blockAt: (pos: any) => pos.y === 64 && pos.z === 0 && stones.has(pos.x) ? stones.get(pos.x) : { name: 'air', position: pos },
     canDigBlock: () => true,
     async dig(block: any) { dug++; stones.delete(block.position.x); inventory.set('cobblestone', dug); },
-    clearControlStates() {}, deactivateItem() {},
+    clearControlStates() {}, deactivateItem() {}, look: async () => {}, lookAt: async () => {},
     pathfinder: {
       async goto(goal: any) {
         if (goal.constructor.name === 'GoalLookAtBlock') return;
@@ -45,6 +46,10 @@ function fixture(t: TestContext) {
   const senses: Senses = {
     perceivedEntities: () => [], refresh() {}, markSweep() {},
     knownBlocks: (names) => names.includes('stone') ? [...stones.values()].map((block) => ({ name: block.name, pos: block.position, dist: block.position.distanceTo(bot.entity.position) })) : [],
+    observeBlocks: (positions) => positions.map((pos: any) => {
+      const s = [...stones.values()].find((b) => Math.floor(b.position.x) === pos.x && Math.floor(b.position.y) === pos.y && Math.floor(b.position.z) === pos.z);
+      return s ? { name: 'stone', pos: s.position } : { name: 'air', pos };
+    }),
   };
   const arbiter = new Arbiter(adapter, memory, bus, senses);
   const advance = async (ms: number) => {
@@ -89,7 +94,7 @@ test('collection observes a delayed initial item_spawn before moving to pick it 
   const w = fixture(t), controller = new AbortController();
   w.bot.entities = {};
   let moves = 0;
-  w.bot.pathfinder.goto = async () => { moves++; delete w.bot.entities[42]; };
+  w.bot.pathfinder.goto = async () => { moves++; w.bot.entity.position = new Vec3(2, 64, 0); delete w.bot.entities[42]; };
   setTimeout(() => { w.bot.entities[42] = { id: 42, name: 'item', position: new Vec3(2, 64, 0) }; }, 150);
   let picked: number | undefined;
   const pending = w.adapter.collectNearbyDrops(controller.signal, 6, 3000).then((count) => { picked = count; });
