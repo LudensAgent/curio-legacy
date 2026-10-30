@@ -1,5 +1,6 @@
 import type { AgentState } from '../adapter/types.ts';
 import { effortFacts } from '../brain/efficiency.ts';
+import { supplyFacts } from '../brain/supply.ts';
 import type { AudienceContext } from '../live/audience.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { durationText, realSecondsToTicks, sunText, type Percept } from '../perception/perception.ts';
@@ -341,6 +342,12 @@ export function situationalReminders(ctx: MindContext): string[] {
     const tunnels = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).filter((f) => f.dist <= 160).slice(0, 2);
     for (const t of tunnels) {
       out.push(`记得自己${t.text}`);
+    }
+    // 消耗品预算：下矿前把火把够不够、还能做多少摆出来（只报事实，备多少由它定）
+    out.push(...supplyFacts({ inv: s.inventory, torchEvery: ctx.self.habits().torch_every, only: new Set(['torch']) }));
+    // 预算要有个规模可除：提醒它把挖多深/横多远说出来（不替它定）
+    if (!/(y ?[=-]? ?\d+|挖到|下到|横着|横探|\d+ ?格)/.test(intent)) {
+      out.push('要下矿先想好这次大概挖多深/横多远（挖到 y=某层、横着多少格），火把和镐的预算按这个来');
     }
   }
   // 下矿的账：在地下、手上的活快收工或想回地面时，提供实际经历和当前所见。

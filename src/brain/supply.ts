@@ -1,0 +1,78 @@
+import type { AgentState } from '../adapter/types.ts';
+
+/**
+ * 消耗品预算：把「按可算单价消耗、中途耗尽代价高」的东西统一成事实——
+ * 结构只测度（存量、覆盖、还能做多少），策略（备多少、何时采）由 Agent 定。
+ *
+ * 单价不写死：这里只给原版默认与常识估算；难度/规则门控与实测校正由后续阶段接入。
+ */
+
+export type ConsumeDriver =
+  | { kind: 'placement'; spacing: number }       // 每 spacing 格放一支（火把的 torch_every）
+  | { kind: 'per_use' }                           // 用一次少一个（箭、垫脚方块）
+  | { kind: 'game_time' }                         // 随游戏时长消耗（食物）
+  | { kind: 'durability'; per: 'block' | 'hit' }  // 每挖一格 / 每挨一下掉耐久（阶段 2）
+  | { kind: 'per_item_smelted' };                 // 每烧一件物品耗燃料（阶段 3）
+
+export interface SupplyProfile {
+  id: string;
+  match: RegExp;
+  driver: ConsumeDriver;
+  /** materialPlan 的补货目标物品 */
+  restock: string;
+}
+
+type Inv = AgentState['inventory'];
+const sum = (items: Inv, re: RegExp) => items.filter((i) => re.test(i.name)).reduce((n, i) => n + i.count, 0);
+
+const FOOD = /^(bread|cooked_beef|cooked_porkchop|cooked_chicken|cooked_mutton|cooked_cod|cooked_salmon|apple|baked_potato|carrot|beef|porkchop|chicken|mutton|rabbit|cooked_rabbit|potato|sweet_berries|melon_slice|cookie|pumpkin_pie|beetroot|dried_kelp)$/;
+const BRIDGE_BLOCKS = /^(cobblestone|cobbled_deepslate|stone|dirt|sand|gravel|netherrack|.*_planks)$/;
+
+export const SUPPLY_PROFILES: SupplyProfile[] = [
+  { id: 'torch', match: /^torch$/, driver: { kind: 'placement', spacing: 8 }, restock: 'torch' },
+  { id: 'food', match: FOOD, driver: { kind: 'game_time' }, restock: 'bread' },
+  { id: 'arrow', match: /arrow$/, driver: { kind: 'per_use' }, restock: 'arrow' },
+  { id: 'blocks', match: BRIDGE_BLOCKS, driver: { kind: 'per_use' }, restock: 'cobblestone' },
+];
+
+/** 背包里能直接做几支火把（1 煤/木炭 + 1 木棍 = 4 支；木棍不够可用原木补） */
+export function torchCraftable(inv: Inv): { coal: number; sticks: number; craftable: number } {
+  const coal = sum(inv, /^(coal|charcoal)$/), sticks = sum(inv, /^stick$/);
+  return { coal, sticks, craftable: Math.min(coal, sticks) * 4 };
+}
+
+export interface SupplyFacts {
+  inv: Inv;
+  /** torch_every 习惯；未设为 0/undefined 时用常识 8 格估算 */
+  torchEvery?: number;
+  /** 只生成这些 profile 的事实；缺省全部 */
+  only?: Set<string>;
+}
+
+export function supplyFacts(opts: SupplyFacts): string[] {
+  const { inv, only } = opts;
+  const out: string[] = [];
+  const want = (id: string) => !only || only.has(id);
+
+  if (want('torch')) {
+    const torches = sum(inv, /^torch$/);
+    const every = opts.torchEvery && opts.torchEvery > 0 ? opts.torchEvery : 8;
+    const c = torchCraftable(inv);
+    const craft = c.craftable > 0 ? `；煤/木炭 ${c.coal}、木棍 ${c.sticks}，还能直接做 ${c.craftable} 支` : `；煤/木炭 ${c.coal}、木棍 ${c.sticks}，眼下不够直接做火把`;
+    out.push(`火把 ${torches} 支（torch_every≈${every} → 约能照亮 ${torches * every} 格暗处）${craft}`);
+  }
+  if (want('food')) {
+    const cooked = sum(inv, /cooked_|bread|baked_potato/);
+    const food = sum(inv, FOOD);
+    out.push(`路上食物 ${food} 个（其中熟食 ${cooked} 个）`);
+  }
+  if (want('arrow')) {
+    const arrows = sum(inv, /arrow$/);
+    if (arrows > 0) out.push(`箭 ${arrows} 发`);
+  }
+  if (want('blocks')) {
+    const blocks = sum(inv, BRIDGE_BLOCKS);
+    if (blocks > 0) out.push(`能垫路的方块 ${blocks} 块`);
+  }
+  return out;
+}
