@@ -334,6 +334,12 @@ export function situationalReminders(ctx: MindContext): string[] {
   if (focusItem && !ctx.plan && ctx.tier === 'deliberate') out.push(`主目标「${focusItem.text}」还没有清单：写 "plan":{"focus":"${focusItem.id}","steps":[…3–6 项]}，之后一项项推进`);
   const revision = planRevisionHint(ctx);
   if (revision) out.push(revision);
+  // 同一动作在同一带反复失败：先想这一步怎么改，别整段推倒重来（卡住→整段重写的死循环）
+  const repeatFails = (ctx.recentActionFailures ?? []).filter((f) => (f.repeats ?? 0) >= 2);
+  if (repeatFails.length) {
+    const f = repeatFails[0];
+    out.push(`动作 ${f.skill} 在这一带反复 ${f.failure_code ?? '失败'}（${f.repeats} 次）：先想这一步怎么改——换方向、垫方块、改用辅助或换个站位；不必把整段活推倒重来`);
+  }
   const where = p.self.where?.kind;
   // 旧通道是历史记忆，不保证现在仍然可通。
   if (MINING_INTENT.test(intent)) {
