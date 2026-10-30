@@ -56,15 +56,27 @@ function relToBody(feet: Vec3Like, facing: string, block: Vec3Like): [number, nu
   return [dx * fw[0] + dz * fw[1], block.y - feet.y, dx * rt[0] + dz * rt[1]];
 }
 
+/** 相对坐标 → 自然语言方向（“身后 1 格、上方 2 格”）：心智对“前=-1”这类负向坐标解析不稳 */
+function relWords(rel: [number, number, number]): string {
+  const [f, u, r] = rel;
+  const parts: string[] = [];
+  if (f !== 0) parts.push(`${f > 0 ? '前方' : '身后'} ${Math.abs(f)} 格`);
+  if (u !== 0) parts.push(`${u > 0 ? '上方' : '下方'} ${Math.abs(u)} 格`);
+  if (r !== 0) parts.push(`${r > 0 ? '右侧' : '左侧'} ${Math.abs(r)} 格`);
+  return parts.join('、');
+}
+
 function describePillarClearance(clearance: PillarClearance): string {
   const { min, max } = clearance;
   const range = `跳跃时身体扫过的方块范围 x=${min.x}..${max.x}, y=${min.y}..${max.y}, z=${min.z}..${max.z}`;
   // 只报“挡在哪一格”，不报方块名：跳起来撞到的位置是身体能感知的（本体感觉），
   // 方块名称属于看不到的透视信息，交给心智/技能自己看清或动手再确认。
-  // 但补上相对身体的 [前,上,右] 坐标和朝向：否则心智要从绝对坐标反推相对坐标，窄竖井里容易挖错格。
+  // 但补上相对身体的 [前,上,右] 坐标、自然语言方向、朝向和 dig_at 参数：否则心智要从绝对坐标反推相对坐标，窄竖井里容易挖错格。
   if (clearance.kind === 'blocked') {
     const blk = clearance.block;
-    const rel = blk?.rel ? `，相对你的 [前,上,右]=[${blk.rel[0]},${blk.rel[1]},${blk.rel[2]}]（当前朝向 ${blk.facing}）` : '';
+    const rel = blk?.rel
+      ? `，在你【${relWords(blk.rel)}】，[前,上,右]=[${blk.rel[0]},${blk.rel[1]},${blk.rel[2]}]（当前朝向 ${blk.facing}），对应 dig_at {"at":[${blk.rel[0]},${blk.rel[1]},${blk.rel[2]}],"facing":"${blk.facing}"}`
+      : '';
     return `头顶跳跃空间受阻；${range}，具体障碍格 ${blk ? `(${blk.pos.x},${blk.pos.y},${blk.pos.z})${rel}` : '未确认'}（方块名称未确认）`;
   }
   return `头顶跳跃空间未加载；${range}，具体未加载位置未确认`;
