@@ -183,8 +183,8 @@ const parseTarget = (ctx: SkillCtx, raw: string): { x: number; y?: number; z: nu
 
 export const travel: Skill<TravelArgs> = {
   name: 'travel',
-  description: '按地形步行和游泳前往目标；已乘船时沿水路停靠，保持乘坐并反馈落脚处，不制造或切换载具；三维目标核对实际高度',
-  argsDoc: '{"to": "x,z | x,y,z | 地标名 | base | death | 方向如 E 150", "noBoat"?: true（只走和游，已乘船时需先自行下船）}；目标 2.5 格内算到达，带 y 时按三维距离核对',
+  description: '按地形在地表和水面步行、游泳前往目标（只在地表/水面，地下或悬空会失败）；已乘船时沿水路停靠，保持乘坐并反馈落脚处，不制造或切换载具；三维目标核对实际高度',
+  argsDoc: '{"to": "x,z | x,y,z | 地标名 | base | death | 方向如 E 150", "noBoat"?: true（只走和游，已乘船时需先自行下船）}；只在地表/水面用，地下或悬空先用 dig_at/climb_up 回地面；目标 2.5 格内算到达，带 y 时按三维距离核对',
   timeoutMs: 600000,
   movement: true,
   validate(raw) {
