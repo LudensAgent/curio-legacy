@@ -39,6 +39,9 @@ export function stockOf(p: Percept): Stock {
   const sum = (f: (n: string) => boolean) => p.inventory.filter((i) => f(i.name)).reduce((a, i) => a + i.count, 0);
   const has = (n: string) => p.inventory.some((i) => i.name === n);
   const toolTier = has('diamond_pickaxe') ? 'diamond' : has('iron_pickaxe') ? 'iron' : has('stone_pickaxe') ? 'stone' : has('wooden_pickaxe') ? 'wood' : 'none';
+  // 稀缺金属：优先用精确账本的总表（箱子+背包合计），没有箱子记忆时退回背包
+  const totals = p.storage?.stock ?? [];
+  const metal = (n: string) => totals.find((t) => t.item === n)?.total ?? sum((x) => x === n);
   return {
     logs: sum(LOG),
     planks: sum(PLANK),
@@ -48,9 +51,9 @@ export function stockOf(p: Percept): Stock {
     blocks: sum((n) => LOG(n) || PLANK(n) || n === 'cobblestone' || n === 'dirt'),
     hasBed: p.inventory.some((i) => i.name.endsWith('_bed')),
     toolTier,
-    iron: sum((n) => n === 'iron_ingot'),
-    diamond: sum((n) => n === 'diamond'),
-    gold: sum((n) => n === 'gold_ingot'),
+    iron: metal('iron_ingot'),
+    diamond: metal('diamond'),
+    gold: metal('gold_ingot'),
   };
 }
 
@@ -92,7 +95,7 @@ export function observedNeeds(p: Percept): ObservedNeed[] {
       d.seconds_left > 0 ? `按正常 TPS 且区块持续加载估算，最多还剩${durationText(realSecondsToTicks(d.seconds_left))}（现实时间）` : '按正常 TPS 且区块持续加载估算，常规寿命已过去；实际情况未知'], unknowns: ['掉落物的当前状态与前往路线尚未确认'] });
   }
   for (const e of (p.efficiency ?? []).slice(0, 2)) {
-    needs.push({ need: 'effort', facts: effortFacts(e, p.inventory) });
+    needs.push({ need: 'effort', facts: effortFacts(e, p.inventory, p.storage?.stock) });
   }
   return needs;
 }
@@ -179,7 +182,7 @@ export function computeDrives(p: Percept, memory: WorldMemory): { drives: Drive[
     const scarce = c.savesItem === 'diamond' ? st.diamond : c.savesItem === 'iron_ingot' ? st.iron : null;
     if (scarce == null || scarce > 6) continue;
     const level = Math.min(0.7, 0.35 + 0.1 * Math.min(e.mined, 6) * (scarce <= 3 ? 1 : 0.5));
-    out.push({ drive: 'frugal', level, why: `最近用${e.tool}挖了 ${e.mined} 个 ${e.block}；${c.tool} 约 ${c.est_s} 秒/个（慢 ${Math.round((c.slowdown - 1) * 100)}%），但不耗${c.savesZh}（背包只有 ${scarce} 个）`, suggest: `换回 ${c.tool} 继续挖` });
+    out.push({ drive: 'frugal', level, why: `最近用${e.tool}挖了 ${e.mined} 个 ${e.block}；${c.tool} 约 ${c.est_s} 秒/个（慢 ${Math.round((c.slowdown - 1) * 100)}%），但不耗${c.savesZh}（箱子和身上共 ${scarce} 个）`, suggest: `换回 ${c.tool} 继续挖` });
     break;
   }
   if (!homeBuilt && !st.hasBed && !bedPlaced && dusk) {

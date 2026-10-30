@@ -146,9 +146,18 @@ export function describeRecall(r: ChestRecall, dist?: number, _clock?: Pick<Cloc
   return `记得 ${where} 里有 ${r.item}×${r.count}（上次观察到的数量）`;
 }
 
+/** 总表里的一行：某样东西在箱子里多少、背包里多少、合计多少 */
+export interface StockRow {
+  item: string;
+  total: number;
+  inChests: number;
+  chestCount: number;
+  inBackpack: number;
+}
+
 /** 所有箱子 + 背包合起来的精确库存（给"家里/身上总共有多少"用） */
-export function totalStock(chests: ChestRecord[], backpack: { name: string; count: number }[]): { item: string; total: number; inChests: number; chestCount: number; inBackpack: number }[] {
-  const m = new Map<string, { item: string; total: number; inChests: number; chestCount: number; inBackpack: number }>();
+export function totalStock(chests: ChestRecord[], backpack: { name: string; count: number }[]): StockRow[] {
+  const m = new Map<string, StockRow>();
   for (const c of chests) for (const i of c.contents?.items ?? []) {
     const e = m.get(i.name) ?? { item: i.name, total: 0, inChests: 0, chestCount: 0, inBackpack: 0 };
     e.inChests += i.count; e.chestCount++;

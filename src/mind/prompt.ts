@@ -451,7 +451,7 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
       : '没穿盔甲，副手空着',
     ...(digging && tool && !ownsTool ? { tool_note: `正在挖 ${material}，背包里没有 ${tool}（只能空手挖，很慢）` } : {}),
     // 效率/抠门的双面事实：最近挖了很多，更快/更省的工具各是什么（只给事实，换不换由它定）
-    ...(p.efficiency?.length ? { dig_effort: p.efficiency.slice(0, 2).map((e) => effortFacts(e, s.inventory).join('；')) } : {}),
+    ...(p.efficiency?.length ? { dig_effort: p.efficiency.slice(0, 2).map((e) => effortFacts(e, s.inventory, p.storage?.stock).join('；')) } : {}),
     // 工具、武器、护甲带上耐久（像物品栏里那条耐久条）；附魔的标出来
     inventory: [...inv].map(([name, count]) => {
       const it = s.inventory.find((i) => i.name === name);
@@ -460,6 +460,8 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
         ? `；${it.stacks.map((stack) => `槽${stack.slot} ${stack.count}/${stackSize}，该叠可再放 ${stackSize - stack.count} 个数据相同的物品`).join('；')}` : '';
       return `${name}×${count}${it?.stackSize ? `（每叠上限 ${it.stackSize}${stacks}）` : ''}${durabilityText(it)}${it?.enchanted ? '（附魔）' : ''}`;
     }), empty_slots: s.emptySlots,
+    // 精确账本的总表（箱子+背包合计）：供"物资充足/稀缺"量化；箱子部分是最后打开时记的，之后世界可能变化
+    ...(p.storage?.stock?.length ? { stored_stock: `${p.storage.stored}；以上是「箱子+背包」合计，按最后一次打开各箱子时记录（之后世界可能变化，重新打开才更新）` } : {}),
     ...(s.connected && s.emptySlots <= 5 ? { inventory_space: `空格数是空槽位数量，不是可携带物品数量；${s.emptySlots} 个空槽全部用来放同一种且数据相同的物品时，每叠上限为 64、16、1 的物品分别可放 ${s.emptySlots * 64}、${s.emptySlots * 16}、${s.emptySlots} 个。这些空槽由所有物品共用，并非各物品各有这些空间；当前空间可能随物品变化。已有未满堆的剩余空间只适用于与该堆数据相同的物品，同名物品的属性不同时也不一定能合并。` } : {}),
     ...(s.effects?.length ? { effects: s.effects.map((e) => `${e.name}${e.level > 1 ? ` ${e.level} 级` : ''}，${e.seconds > 0 ? `剩余时间按正常速度估算为${durationText(realSecondsToTicks(e.seconds))}现实时间` : '剩余时长未知或接近结束'}`) } : {}),
     ...(s.xp ? { xp_level: s.xp.level } : {}),

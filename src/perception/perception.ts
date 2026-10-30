@@ -1,7 +1,7 @@
 import { durationText, realSecondsToTicks, TICKS_PER_GAME_HOUR } from './time.ts';
 export { durationText, realSecondsToTicks, TICKS_PER_GAME_HOUR } from './time.ts';
 import { isSoftBlock, surroundings, type ExitOptions, type Surroundings } from './surroundings.ts';
-import { isContainerLandmark, totalStock } from '../memory/chest-memory.ts';
+import { isContainerLandmark, totalStock, type StockRow } from '../memory/chest-memory.ts';
 import { facingOfYaw, localMap } from './local.ts';
 import type { GameAdapter, InvItem, Vec3Like } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
@@ -78,7 +78,7 @@ export interface Percept {
     torches: number;
   } | null;
   /** 仓储：记得的箱子与里面存了什么 */
-  storage: { chests: number; nearest: number | null; stored: string; source?: 'precise_inventory'; availability?: 'last_observed'; oldestObservedAt?: number; ageSeconds?: number } | null;
+  storage: { chests: number; nearest: number | null; stored: string; stock: StockRow[]; source?: 'precise_inventory'; availability?: 'last_observed'; oldestObservedAt?: number; ageSeconds?: number } | null;
   /** 农田：作物、格数、成熟数量（离得近时才能看清） */
   farms: { crop: string; cells: number; dist: number; mature: number | null; minutes_since_planted: number }[];
   /** 自己开了头、要等它自己变化的事（熔炉里烧着的东西……）：离开时的样子 + 现在看得见的样子 */
@@ -298,7 +298,7 @@ export class Perception {
     // 精确账本：最后一次打开时的内容，加上背包
     const stock = totalStock(chests, this.adapter.state().inventory ?? []);
     const oldestObservedAt = Math.min(...chests.map((chest) => chest.contents?.observedAt || chest.ts));
-    return { chests: chests.length, nearest, stored: stock.slice(0, 14).map((x) => `${x.item}×${x.total}`).join('、') || '（还没往箱子里存过东西）',
+    return { chests: chests.length, nearest, stored: stock.slice(0, 14).map((x) => `${x.item}×${x.total}`).join('、') || '（还没往箱子里存过东西）', stock,
       source: 'precise_inventory', availability: 'last_observed', oldestObservedAt,
       ageSeconds: Math.max(0, Math.round((Date.now() - oldestObservedAt) / 1000)) };
   }
