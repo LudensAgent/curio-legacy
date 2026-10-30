@@ -39,6 +39,8 @@ export interface Percept {
   self: { pos: [number, number, number]; dim: string; hp: number; food: number; biome: string | null; inWater: boolean; inLava: boolean; held: string | null; onGround?: boolean; riding?: string | null; equipment?: { slot: string; name: string }[]; around?: string;
     contacts?: Pick<ReturnType<typeof surroundings>, 'support' | 'feet' | 'head'>;
     sky_visible?: boolean | null; depth_below_surface?: number | null; exits?: ExitOptions;
+    /** 地下时四个水平方向哪边更早出现天光（可能更接近洞口/地表；未验证可通行） */
+    surface_dir?: { dir: string; dist: number } | null;
     /** 一句话说清自己在哪：地表 / 屋里 / 坑里（几格深）/ 地下 / 水里 */
     where?: { kind: WhereKind; text: string; depth?: number; building?: string };
     /** 抬头看到的第一个方块（只看正上方这一列，第一个实心方块之后的看不见）：分清“被树冠遮住”和“在地下” */
@@ -191,6 +193,8 @@ export class Perception {
   private surfaceScope = '';
   /** Only surface heights stood on and observed in this session; never hidden terrain. */
   private surfaceColumns = new Map<string, { y: number; at: number }>();
+  /** 地下时四个水平方向扫天光的最近方向（缓存几秒，避免每个快照都扫 32 格） */
+  private surfaceDir: { key: string; at: number; dir: string | null; dist: number | null } | null = null;
 
   constructor(private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private vision: Vision) {
     this.passages = new PassageTracker(memory);
@@ -357,6 +361,34 @@ export class Perception {
     return { block: null, up: null, covered: 'open' };
   }
 
+  /** 地下时：往四个水平方向扫天光，找最近的「有天光」方向。天光只沿空气/水传播（不穿实心方块），
+   *  所以 sky>0 的那格意味着那条方向几格内有露天的口子（可能是洞口/地表）。每个采样点再向上多看两层，
+   *  这样阶梯式通道（出口在上方）也能扫到。只给方向，不替它决定怎么走。 */
+  private surfaceDirection(s: ReturnType<GameAdapter['state']>): { dir: string; dist: number } | null {
+    if (s.dim !== 'overworld') return null;
+    const x = Math.floor(s.pos.x), y = Math.floor(s.pos.y) + 1, z = Math.floor(s.pos.z);
+    const key = `${s.worldId}:${s.sessionId}:${s.dim}:${x}:${Math.floor(s.pos.y)}:${z}`;
+    const now = Date.now();
+    if (this.surfaceDir && this.surfaceDir.key === key && now - this.surfaceDir.at < 3000) {
+      return this.surfaceDir.dir ? { dir: this.surfaceDir.dir, dist: this.surfaceDir.dist! } : null;
+    }
+    const dirs: [string, number, number][] = [['N', 0, -1], ['E', 1, 0], ['S', 0, 1], ['W', -1, 0]];
+    const lifts = [0, 2, 4];
+    let bestDir: string | null = null, bestDist = Infinity;
+    for (const [d, dx, dz] of dirs) {
+      for (let dist = 3; dist <= 24; dist += 3) {
+        let lit = false;
+        for (const dh of lifts) {
+          const l = this.adapter.lightAt(x + dx * dist, y + dh, z + dz * dist);
+          if (l && l.sky > 0) { lit = true; break; }
+        }
+        if (lit) { if (dist < bestDist) { bestDist = dist; bestDir = d; } break; }
+      }
+    }
+    this.surfaceDir = { key, at: now, dir: bestDir, dist: bestDist === Infinity ? null : bestDist };
+    return bestDir ? { dir: bestDir, dist: bestDist } : null;
+  }
+
   private bodyEnvironment(s: ReturnType<GameAdapter['state']>, contact: Surroundings | null, light: Percept['light']) {
     const scope = `${s.worldId}:${s.sessionId}:${s.dim}`;
     if (scope !== this.surfaceScope) { this.surfaceScope = scope; this.surfaceColumns.clear(); }
@@ -379,7 +411,8 @@ export class Perception {
       if (this.surfaceColumns.size > 256) this.surfaceColumns.delete(this.surfaceColumns.keys().next().value!);
     }
     const surface = this.surfaceColumns.get(key);
-    return { sky_visible: skyVisible, depth_below_surface: surface ? round1(Math.max(0, surface.y - s.pos.y)) : null };
+    const surfaceDir = skyVisible === false ? this.surfaceDirection(s) : null;
+    return { sky_visible: skyVisible, depth_below_surface: surface ? round1(Math.max(0, surface.y - s.pos.y)) : null, ...(surfaceDir ? { surface_dir: surfaceDir } : {}) };
   }
 
   /** 自己挖掉了矿：那一处记下的矿点就没了（同一片矿脉里还看得见的，下一次看见时会重新记） */

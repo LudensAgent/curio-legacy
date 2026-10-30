@@ -425,6 +425,7 @@ export function situationalReminders(ctx: MindContext): string[] {
     else {
       const t = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).find((f) => f.inside);
       if (t) out.push(`记得自己挖过的通道，入口参考点 (${Math.round(t.pos.x)},${Math.round(t.pos.y)},${Math.round(t.pos.z)})；当前开口是否可通尚未确认`);
+      if (p.self.surface_dir) out.push(`往 ${p.self.surface_dir.dir} 方向约 ${p.self.surface_dir.dist} 格外先有天光，可能更接近洞口/地表（这条路是否可通未确认，走过去再核实）`);
     }
   }
   // 过水：站在水边/水里时，把材料代价摆出来，怎么过由它定
