@@ -4,6 +4,7 @@ import { durabilityFacts, fuelFacts, supplyFacts } from '../brain/supply.ts';
 import type { AudienceContext } from '../live/audience.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { durationText, realSecondsToTicks, sunText, type Percept } from '../perception/perception.ts';
+import { isSoftBlock } from '../perception/surroundings.ts';
 import { audienceBlock, AUDIENCE_RULES, exploredAround, liveAudience, type MySkillInfo } from '../planner/prompt.ts';
 import type { ChatMessage } from '../planner/llm.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
@@ -285,6 +286,23 @@ const MINING_INTENT = /下矿|矿道|矿洞|找铁|挖铁|找矿|挖矿|粗铁|�
 /** 打算里说要从地下回地面 */
 const SURFACE_INTENT = /回地面|回到地面|见天|爬出|挖出去|出矿|上到地面|挖(阶梯|台阶).{0,8}上|往上挖/;
 
+/** 沿旧矿道回入口的下一步：找到正沿着的旧矿道，核对下一步那两格（脚下+头顶）现在是否还通，给出「可走/被堵」的当前事实。 */
+function passageWayBack(ctx: MindContext): string | null {
+  const p = ctx.percept, s = ctx.state;
+  const here = { x: p.self.pos[0], y: p.self.pos[1], z: p.self.pos[2] };
+  const t = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).find((f) => f.inside && f.next);
+  const next = t?.next;
+  if (!next) return null;
+  const at = (x: number, y: number, z: number) => ctx.blockAt?.({ x, y, z }) ?? null;
+  const foot = at(next.x, next.y, next.z);
+  const head = at(next.x, next.y + 1, next.z);
+  const open = (n: string | null) => n !== null && isSoftBlock(n);
+  const pos = `${Math.round(next.x)},${Math.round(next.y)},${Math.round(next.z)}`;
+  if (open(foot) && open(head)) return `你正沿着自己挖过的旧矿道；沿它回入口的下一步 (${pos}) 现在仍是 2 格高的空走廊，可以直接走过去`;
+  const reason = !open(foot) ? `脚下那格现在是 ${foot ?? '未加载'}` : `头顶那格现在是 ${head ?? '未加载'}`;
+  return `你正沿着自己挖过的旧矿道；沿它回入口的下一步 (${pos}) 被堵了：${reason}。挖开这一格、还是改走别的路，由你定`;
+}
+
 /** 打算里说要过水 / 到对岸 */
 const WATER_CROSS_INTENT = /过水|过河|渡河|过海|过湖|涉水|划船|坐船|游过去|游到|对岸|对面|跨过.{0,8}(水|河|海|湖)|去.{0,12}(对岸|对面)|到.{0,12}(对岸|对面)/;
 
@@ -380,8 +398,7 @@ export function situationalReminders(ctx: MindContext): string[] {
     const seen = p.nearby.resources.filter((r) => r.seen === 'now' && isResourceBlock(r.block)).sort((a, b) => a.nearest - b.nearest).slice(0, 4).map((r) => `${r.block}×${r.count}（最近 ${Math.round(r.nearest)} 格）`);
     const remembered = oreSpotsNear(ctx.memory.landmarks(), { worldId: s.worldId, dim: p.self.dim, pos: here }, { radius: 48 }).length;
     const picks = durabilityFacts(s.inventory, ['pickaxe'], p.storage?.stock);
-    const t = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).find((f) => f.inside);
-    const back = t ? `历史路线参考点直线距离约 ${Math.round(Math.hypot(t.pos.x - here.x, t.pos.y - here.y, t.pos.z - here.z))} 格，当前路线是否可通未知` : '';
+    const back = passageWayBack(ctx);
     out.push(`下矿的账：${got.length ? `挖到 ${got.join(' ')}` : '还没挖到矿'}；背包空 ${p.emptySlots} 格${picks.length ? `；${picks.join('、')}` : ''}；身边${seen.length ? `看得见 ${seen.join('、')}` : '没看见矿'}${remembered ? `，48 格内记得 ${remembered} 处矿点` : ''}${back ? `；${back}` : ''}。清单后面几项还要不要这些料，一起掂量再决定收不收工`);
   }
   // 养动物、村民交易：打算里提到了才把机制摆出来（模型对这些的记忆常是含糊或老版本的）
@@ -401,10 +418,14 @@ export function situationalReminders(ctx: MindContext): string[] {
     const feed = s.inventory.filter((i) => /^(wheat|wheat_seeds|carrot|potato|beetroot|beetroot_seeds|melon_seeds|pumpkin_seeds)$/.test(i.name)).map((i) => `${i.name}×${i.count}`).slice(0, 4);
     out.push(`肉的账：这局已经打猎 ${hunting.trips} 次、大约 ${hunting.animals} 只，最近几次每次为了肉走 ${hunting.recentWalked ?? '?'} 格；现在看得见能吃的动物 ${seenNow} 只，128 格内记得的还有约 ${remembered} 只${feed.length ? `；背包里有 ${feed.join(' ')}` : ''}`);
   }
-  // 回地面时提供历史参考点，不把它当作已确认的开口。
+  // 回地面时给出沿旧矿道回入口的下一步（并核对当前是否还通），不当作已确认的开口。
   if (SURFACE_INTENT.test(intent) && p.self.sky_visible !== true) {
-    const t = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).find((f) => f.inside);
-    if (t) out.push(`靠近自己挖过的通道的历史路线点；这条记录的参考点在 (${Math.round(t.pos.x)},${Math.round(t.pos.y)},${Math.round(t.pos.z)})，当前开口位置和路线是否可通尚未确认`);
+    const back = passageWayBack(ctx);
+    if (back) out.push(back);
+    else {
+      const t = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).find((f) => f.inside);
+      if (t) out.push(`记得自己挖过的通道，入口参考点 (${Math.round(t.pos.x)},${Math.round(t.pos.y)},${Math.round(t.pos.z)})；当前开口是否可通尚未确认`);
+    }
   }
   // 过水：站在水边/水里时，把材料代价摆出来，怎么过由它定
   if (p.self.inWater || WATER_CROSS_INTENT.test(intent)) {

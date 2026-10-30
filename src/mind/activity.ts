@@ -232,12 +232,13 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     }
     return { kind: 'stuck', why: result.summary.slice(0, 160) };
   }
-  // 3) 头顶跳跃空间受阻：先挖开头顶再垫/迈
+  // 3) 头顶跳跃空间受阻：先挖开头顶再垫/迈。place_at / climb_up 是 Agent 明确要「往上」，自动清头顶属于稳定执行已选动作。
   if (step.skill === 'place_at' && data?.pillarFailure === 'NOT_PLACED:头顶跳跃空间受阻'
-    || step.skill === 'climb_up' && data?.failureCause === 'PILLAR_CLEARANCE'
-    || step.skill === 'goto' && data?.pillarClearance) {
+    || step.skill === 'climb_up' && data?.failureCause === 'PILLAR_CLEARANCE') {
     return adapt('dig_at', { at: [0, 2, 0], ...(facing ? { facing } : {}) }, '头顶被挡，先挖开再走', 'clearance');
   }
+  // goto 是「委托寻路」：头顶被挡是路线事实，不替 Agent 决定挖哪一格——挖开、绕行还是退回去由它定。
+  if (step.skill === 'goto' && data?.pillarClearance) return { kind: 'stuck', why: result.summary.slice(0, 160) };
   // 未加载 = 看不清：并入照亮分支
   if (step.skill === 'place_at' && data?.pillarFailure === 'NOT_PLACED:头顶跳跃空间未加载') {
     if (dark && hasItem(/^torch$/)) return adapt('place_torch', {}, '头顶跳跃空间未加载，先照亮再看', 'light');

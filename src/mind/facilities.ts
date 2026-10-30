@@ -14,7 +14,7 @@ export const FACILITY_LABELS = new Set([...Object.values(STATION_LABEL), '我的
  * 这里是查它们的统一入口：认真想时列出来，需要的时候（缺材料、想下矿）按需提一句。
  */
 export type FacilityKind = 'chest' | 'station' | 'bed' | 'passage';
-export interface Facility { kind: FacilityKind; label: string; pos: Vec3Like; dist: number; text: string; radius?: number; precise?: boolean; observedAt?: number; /** 通道：靠近历史路线点，不代表当前在通道里 */ inside?: boolean }
+export interface Facility { kind: FacilityKind; label: string; pos: Vec3Like; dist: number; text: string; radius?: number; precise?: boolean; observedAt?: number; /** 通道：靠近历史路线点，不代表当前在通道里 */ inside?: boolean; /** 通道：沿旧矿道回入口的下一个路点（几何记忆，未验证当前地形） */ next?: Vec3Like }
 
 type State = { worldId: string; dim: string; pos: Vec3Like; worldDay?: number };
 const flat = (a: Vec3Like, b: Vec3Like) => Math.round(Math.hypot(a.x - b.x, a.z - b.z));
@@ -92,7 +92,7 @@ export function myFacilities(memory: Pick<WorldMemory, 'landmarks' | 'chests' | 
     for (const rec of memory.passages(s.dim)) {
       if (rec.worldId && rec.worldId !== s.worldId) continue;
       const d = describePassage(rec, s.pos, stations, resources);
-      out.push({ kind: 'passage', label: '我挖的通道', pos: d.entrance, dist: d.inside ? 0 : d.dist, text: `挖过的通道：${d.text}；记录 ${rec.id}（passages 查询可读历史脚点）`, inside: d.inside });
+      out.push({ kind: 'passage', label: '我挖的通道', pos: d.entrance, dist: d.inside ? 0 : d.dist, text: `挖过的通道：${d.text}；记录 ${rec.id}（passages 查询可读历史脚点）`, inside: d.inside, ...(d.next ? { next: d.next } : {}) });
     }
   }
   return out.sort((a, b) => a.dist - b.dist);
