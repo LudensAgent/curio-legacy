@@ -1,5 +1,5 @@
 import { chestHint, needsFromShortfall } from './chest-hint.ts';
-import { describePlan, materialPlan } from '../methods/shortfall.ts';
+import { describePlan, dropItemsOf, materialPlan } from '../methods/shortfall.ts';
 import { lookAround } from './movement.ts';
 import { findStation, myBed, rememberStation } from './stations.ts';
 import { ownBuildingAt } from './build.ts';
@@ -188,8 +188,10 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
       if (wanted.length) names = wanted;
       ctx.progress(0, `${describePlan(plan)}：先采 ${args.block}×${args.count}`);
     } else {
-      // 不写 for：count 是"要采到多少"，不是"再采多少"——先扣掉背包里已经有的
-      const have = names.reduce((sum, n) => sum + adapter.state().inventory.filter((i) => i.name === n).reduce((a, i) => a + i.count, 0), 0);
+      // 不写 for：count 是"要采到多少"，不是"再采多少"——先按方块掉落的物品扣掉背包里已经有的
+      const dropItems = new Set<string>();
+      for (const n of names) for (const item of dropItemsOf(n)) dropItems.add(item);
+      const have = [...dropItems].reduce((sum, item) => sum + adapter.state().inventory.filter((i) => i.name === item).reduce((a, i) => a + i.count, 0), 0);
       if (have >= args.count) return ok(`背包里已经有 ${have} 个 ${args.block}，不用再采`);
       args = { ...args, count: args.count - have };
     }

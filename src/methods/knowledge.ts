@@ -66,4 +66,17 @@ export class ResourceKnowledge {
     }
     return { item, target, source: `minecraft-data:${this.version}`, methods: methods.slice(0, 24), locations: 'unknown' as const, note: 'Mechanics only. Recipe outputs, drops and storage are not current inventory; locate resources through observation and verify action results.' };
   }
+
+  /** 一个方块挖掉会掉出哪些物品（把"采 stone"和"背包里的 cobblestone"对上账）；无掉落记录退回方块名本身 */
+  dropsOf(block: string): string[] {
+    const b = this.data.blocksByName?.[block];
+    if (!b) return [block];
+    const out = new Set<string>();
+    for (const drop of (b.drops ?? [])) {
+      const id = typeof drop === 'number' ? drop : (drop as any)?.id ?? (drop as any)?.drop;
+      const name = this.data.items[id]?.name;
+      if (name) out.add(name);
+    }
+    return out.size ? [...out] : [block];
+  }
 }

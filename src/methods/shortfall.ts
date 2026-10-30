@@ -104,3 +104,6 @@ export function describePlan(p: MaterialPlan): string {
   if (p.enough) return `做 ${p.item}×${p.count} 的材料已经够了${pre.length ? `（会顺带先做 ${pre.map((c) => `${c.item}×${c.count}`).join('、')}）` : ''}`;
   return `做 ${p.item}×${p.count} 还差：${p.raw.map((r) => r.anyWood ? `原木×${r.count}（哪种都行）` : `${r.item}×${r.count}${r.from.length && r.from[0] !== r.item ? `（采 ${r.from.slice(0, 2).join('/')}）` : ''}`).join('、')}${p.smelts.length ? `；要烧 ${p.smelts.map((s) => `${s.item}×${s.count}`).join('、')}` : ''}`;
 }
+
+/** 一个方块挖掉掉出的物品名（把"采 stone"和"背包里的 cobblestone"对上账）；无掉落记录退回方块名本身 */
+export const dropItemsOf = (block: string): string[] => knowledge().dropsOf(block);
