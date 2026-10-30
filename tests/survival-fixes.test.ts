@@ -249,7 +249,7 @@ test('surface 给 LLM 用：不在水里时直接说明已在干地上；gather 
 });
 
 // ------------------------------------------------------------ 第三轮：走着进水、自动做镐、沙滩避难、门材料
-test('gather：走向目标时进了水 → 放弃这一片、先上岸、换干燥的目标；之后的采集也绕开', async () => {
+test('gather：走向目标时进了水 → 停止采集并说清，不自动换干燥目标', async () => {
   const w = new TestWorld();
   w.pos = { x: 0.5, y: 64, z: 0.5 };
   w.setBlock({ x: 6, y: 64, z: 0 }, 'coal_ore'); // 看着干燥，实际要游过去
@@ -260,18 +260,14 @@ test('gather：走向目标时进了水 → 放弃这一片、先上岸、换干
   const ctx = makeCtx(w, { senses: { nearestLand: () => ({ dir: 'W', dist: 5, pos: { x: 1, y: 63, z: 0 } }) } });
   try {
     const r = await gather.run(ctx, { block: 'coal_ore', count: 1 });
-    assert.equal(r.status, 'succeeded', r.summary);
-    assert.equal(w.blockAt({ x: 6, y: 64, z: 0 }), 'coal_ore');
-    assert.equal(w.blockAt({ x: 0, y: 64, z: 9 }), 'air');
-    assert.match(r.summary, /挨着水/);
-    assert.equal(gatherTargetRisk(ctx, { name: 'coal_ore', pos: { x: 6, y: 64, z: 0 } }, 64), null, '本地检查看不出来');
-    const again = await gather.run(ctx, { block: 'coal_ore', count: 1 });
-    assert.equal(again.status, 'failed', '记得那块要下水，不再去');
-    assert.equal(w.blockAt({ x: 6, y: 64, z: 0 }), 'coal_ore');
+    assert.equal(r.status, 'failed', r.summary);
+    assert.match(r.summary, /进入水中，已停止采集/);
+    assert.equal(w.blockAt({ x: 6, y: 64, z: 0 }), 'coal_ore', '没挖到要下水的');
+    assert.equal(w.blockAt({ x: 0, y: 64, z: 9 }), 'coal_ore', '也不自动换去挖干燥的');
   } finally { ctx.memory.close(); }
 });
 
-test('gather：挖石头没镐子时，木料够就先做木镐；不够就说清楚要什么', async () => {
+test('gather：挖石头没镐子时，木料够也只是说清楚能显式做什么镐（不自动造）', async () => {
   const w = new TestWorld();
   w.canHarvest = () => (w.inv.get('wooden_pickaxe') ?? 0) > 0;
   w.setBlock({ x: -3, y: 64, z: -6 }, 'stone');
@@ -282,8 +278,9 @@ test('gather：挖石头没镐子时，木料够就先做木镐；不够就说�
     assert.match(r.summary, /手上没有能挖 stone 的镐子（需要 wooden_pickaxe 以上）/);
     w.inv.set('oak_log', 3);
     r = await gather.run(ctx, { block: 'stone', count: 1 });
-    assert.equal(r.status, 'succeeded', r.summary);
-    assert.ok(w.actions.includes('craft:wooden_pickaxe'));
+    assert.equal(r.failureCode, 'TOOL_MISSING', '不自动造镐，由心智显式选择');
+    assert.match(r.summary, /可先显式 craft wooden_pickaxe/);
+    assert.ok(!w.actions.includes('craft:wooden_pickaxe'));
   } finally { ctx.memory.close(); }
 });
 
@@ -320,7 +317,7 @@ test('建筑 spec：门写成木料时换成同木种的门，认不出就用橡
   assert.equal(normalizeSpec({ palette: { door: 'iron_door' } }).palette.door, 'oak_door');
 });
 
-test('dig：没有镐也能空手挖开石头（慢、不掉东西）；工作台在手边、有木料时顺手先做一把木镐', async () => {
+test('dig：没有镐也能空手挖开石头（慢、不掉东西），但不自动造镐', async () => {
   const w = new TestWorld();
   w.canHarvest = () => (w.inv.get('wooden_pickaxe') ?? 0) > 0;
   // 像真的身体一样：没有对应的镐也挖得掉，只是什么都不掉
@@ -346,7 +343,7 @@ test('dig：没有镐也能空手挖开石头（慢、不掉东西）；工作�
     w.setBlock({ x: Math.floor(p.x) + 1, y: Math.floor(p.y), z: Math.floor(p.z) }, 'crafting_table');
     r = await dig.run(ctx, { dir: 'up', blocks: 1 });
     assert.equal(r.status, 'succeeded', r.summary);
-    assert.ok(w.actions.includes('craft:wooden_pickaxe'), '工作台就在手边、有木料：顺手做一把木镐');
+    assert.ok(!w.actions.includes('craft:wooden_pickaxe'), '不自动造镐，由心智显式选择');
   } finally { ctx.memory.close(); }
 });
 

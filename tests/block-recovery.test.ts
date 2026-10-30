@@ -80,19 +80,16 @@ test('a named target replaced during approach never authorizes breaking the repl
   assert.equal(result.failureCode, 'TARGET_GONE'); assert.deepEqual(w.digs, []);
 });
 
-test('support beneath either half of a bed is left safely before one exact dig; unsupported exits abort', async (t) => {
-  for (const safe of [true, false]) {
-    const w = new RecoveryWorld(), ctx = makeCtx(w), foot = { x: 1, y: 64, z: 0 };
-    t.after(() => ctx.memory.close());
-    w.pos = { x: 0.5, y: 64.5625, z: 0.5 };
-    w.setBlock(foot, 'white_bed'); w.setBlock({ ...foot, x: 0 }, 'white_bed');
-    w.blockProperties.set('1,64,0', { part: 'foot', facing: 'west' });
-    if (!safe) for (const [x, z] of [[0, -1], [1, 0], [0, 1], [-1, 0]]) w.setBlock({ x, y: 63, z }, 'air');
-    const result = await dig.run(ctx, { target: foot, block: 'white_bed' });
-    assert.equal(result.status, safe ? 'succeeded' : 'failed', result.summary);
-    assert.deepEqual(w.digs, safe ? [foot] : []);
-    assert.equal(w.moves.length, safe ? 1 : 0);
-  }
+test('床这类低方块站在上面拆不用先离开，就地拆掉', async (t) => {
+  const w = new RecoveryWorld(), ctx = makeCtx(w), foot = { x: 1, y: 64, z: 0 };
+  t.after(() => ctx.memory.close());
+  w.pos = { x: 0.5, y: 64.5625, z: 0.5 };
+  w.setBlock(foot, 'white_bed'); w.setBlock({ ...foot, x: 0 }, 'white_bed');
+  w.blockProperties.set('1,64,0', { part: 'foot', facing: 'west' });
+  const result = await dig.run(ctx, { target: foot, block: 'white_bed' });
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.deepEqual(w.digs, [foot]);
+  assert.equal(w.moves.length, 0, '床是低方块，站在上面拆只落下不到一格，不用先离开');
 });
 
 test('acknowledged digs and collection counters cannot claim a block was recovered without world and inventory confirmation', async (t) => {
@@ -103,7 +100,7 @@ test('acknowledged digs and collection counters cannot claim a block was recover
     const result = await dig.run(ctx, { target: pos });
     assert.equal(result.status, 'failed');
     assert.equal(result.data?.broken, !acknowledgeOnly);
-    assert.equal(w.collected, acknowledgeOnly ? 0 : 1);
+    if (acknowledgeOnly) assert.equal(w.collected, 0); else assert.ok(w.collected >= 1, '实际拆除后会尝试拾取掉落物');
     if (!acknowledgeOnly) assert.match(result.summary, /背包没有新增/);
   }
   const w = new RecoveryWorld(), ctx = makeCtx(w), pos = { x: 2, y: 64, z: 0 };
