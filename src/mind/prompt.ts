@@ -143,7 +143,7 @@ const OUTPUT = `只输出一个 JSON 对象：
  "decision":"continue|adjust|new|detour|switch|experiment|rest",
  "activity":{"what":"具体要干什么","why":"为什么现在做","kind":"gather|craft|build|explore|survive|rest|experiment|tidy|social|other","facing":"N|E|S|W（含水平相对操作时必填）","steps":[{"skill":"动作名","args":{}}],"repeat":1,"done_when":{…},"expect":"预计会怎样","if_stuck":"卡住打算怎么办"},
  "next":{同 activity，可提前写下一段；手上的活成功结束后再接上}}
-continue 时可以不写 activity；要换成别的做法就用 adjust/new，别写 continue。顺手、碰运气的步骤加 "optional":true（没成也不算失败）。
+手上还有活要接着做就只写 decision:"continue"，不要写 activity；要做新的一段或换做法，写 decision:"new"/"adjust"/"switch"（不要写 continue）。routine 1–6 步。顺手、碰运气的步骤加 "optional":true（没成也不算失败）。
 operator（有【操作者的指令】时必写 {"status":"doing|done|cannot","note":"…"}；有【操作者的建议】时写 {"status":"adopted|declined","note":"…"}）｜plan（主目标清单：定下 {"focus":"a_…或一句话","steps":["…"]}，做完一项 {"done":[0]}）｜skill（见【技能】）｜worth_learning（刚才的事值得练成技能时写：哪里出了问题、想学会什么）
 其他可选字段：say（有新发现、改主意、做成事或遇险时说的一句口语）｜agenda（{"add":[{"text":"想做的事或想弄清的问题","kind":"goal|idea|question","horizon":"today|someday"}],"done":["a_…"],"drop":["a_…"],"focus":"a_…"}，规则不要放这里）｜learned（结果出乎意料时的一句窍门，或 {"revise":"k_…","text":"…"} 修订旧窍门）｜hypothesis（experiment 必填）｜experiment_result（上一段是实验时：supported|refuted|unclear）｜diary（值得记住的一句话）｜liked（刚发现喜欢的东西）｜habits（身体习惯与注意偏好，一直有效：{"torch_every":8} 空闲且暗时相隔约 8 格消耗一支火把，不打断动作；{"eat_below":12} 饿到 12 顺手吃，{"pickup":true} 新掉落物触发瞥一眼，由你决定是否调用 pickup_items；pickup:false 关闭单独提醒，掉落事实仍随下次思考提供，不会自动捡；数值习惯用 0 关闭）`;
 
@@ -172,6 +172,7 @@ const SKILL_INDEX = (skills: string[]) => skills.length ? `\n\n【技能书】\n
 /** 用户消息分块：越往后越要紧（模型对末尾注意力最强） */
 const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。往某方向走直接写 goto {"target":"E 20"}，别自己算坐标；[前,上,右] 按指定 facing 换算。
 【相对坐标】activity/next 含 dig_at、step、place_at 的水平相对操作时，必须声明活动的 facing:"N|E|S|W"，表示坐标的前方，不等于推进方向。子步骤省略 facing 就继承，显式冲突会退回；绝对 xyz 和纯竖直操作不要求这个字段。活动参考系独立于镜头朝向；转头、观察、插火把不会改变它，local 方块图仍按 local.facing 解读。输出前核对文字目标方向与坐标换算后的实际方向；例如 facing:"N" 的 [-1,0,0] 是向南。需要改变参考系时可明确声明新的 facing（包括 "S"），后退或换向仍由你决定。
+【上下移动】上下移动不用 step：往上只有脚下有梯子才能爬，否则用 place_at [0,0,0] 垫一块站上去；往下用 dig_at [0,-1,0]（挖空脚下人会自己掉下去，不需要再 step）。
 【消息怎么读】越往后越要紧：【我】性格心情、议程、窍门 →【记得的地方】→【进度】主线到哪了、下一个目标 →【想起来的】自动想起的旧事和技能 →【最近】→【手上的活】→【身边】方块图 local、生物、资源 →【身体】where、生命饥饿、天色、背包 →【专注】主目标和清单 →【此刻】为什么现在想、注意到什么 →【此刻要留意】。未看见的方块状态未知，未挖到不代表那里是空气。`;
 
 const ROUTINE_OF_THINKING = `【每次这样想】
