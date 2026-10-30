@@ -355,7 +355,7 @@ export function situationalReminders(ctx: MindContext): string[] {
     }
   }
   // 冶炼燃料预算：手上这段活要 smelt 时，先把燃料够不够摆出来（只报事实，燃料比走 methods/fuel 的原版默认）
-  const smeltStep = ctx.activity?.steps.find((st) => st.skill === 'smelt');
+  const smeltStep = ctx.activity?.steps?.find((st) => st.skill === 'smelt');
   if (smeltStep) {
     const a = (smeltStep.args ?? {}) as Record<string, unknown>;
     const item = String(a.item ?? ''), count = Math.max(1, Math.min(64, Number(a.count ?? 8) || 8));
