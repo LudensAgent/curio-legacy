@@ -704,6 +704,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     try { const block = b.blockAt(e.position); chunkReady = !!block; biome = block?.biome?.name ?? null; } catch { /* ignore */ }
     const observationReady = this.spawned && chunkReady && (b.health ?? 0) > 0 && dim !== 'unknown';
     const worldAgeTicks = b.time?.age;
+    const DIFFICULTY = ['peaceful', 'easy', 'normal', 'hard'] as const;
+    const difficulty = typeof b.game?.difficulty === 'string' && (DIFFICULTY as readonly string[]).includes(b.game.difficulty) ? b.game.difficulty as typeof DIFFICULTY[number] : undefined;
+    const gamerules = b.game?.rules && typeof b.game.rules === 'object' ? { ...b.game.rules } as Record<string, string | number | boolean> : undefined;
     return {
       connected: true,
       alive: (b.health ?? 0) > 0,
@@ -720,6 +723,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       timeOfDay: b.time?.timeOfDay ?? 0,
       ...(Number.isFinite(b.time?.day) ? { worldDay: b.time.day } : {}),
       ...(typeof worldAgeTicks === 'number' && Number.isFinite(worldAgeTicks) && worldAgeTicks >= 0 ? { worldAgeTicks } : {}),
+      ...(difficulty ? { difficulty } : {}),
+      ...(gamerules ? { gamerules } : {}),
       weather: (b.thunderState ?? 0) > 0.5 && (b.isRaining || (b.rainState ?? 0) > 0.2) ? 'thunder' : b.isRaining || (b.rainState ?? 0) > 0.2 ? 'rain' : 'clear',
       isDay: b.time?.isDay ?? true,
       biome,

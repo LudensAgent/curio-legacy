@@ -121,6 +121,10 @@ export interface AgentState {
   worldDay?: number;
   /** 累积服务器 tick（time.age）；睡觉或修改昼夜时间不会直接跳过这些 tick。 */
   worldAgeTicks?: number;
+  /** 服务器当前的游戏难度（peaceful | easy | normal | hard）；未就绪时不提供 */
+  difficulty?: 'peaceful' | 'easy' | 'normal' | 'hard';
+  /** 服务端广播的规则（keepInventory、doDaylightCycle、mobGriefing 等）；值为字符串或数字 */
+  gamerules?: Record<string, string | number | boolean>;
   isDay: boolean;
   biome: string | null;
   onGround: boolean;
