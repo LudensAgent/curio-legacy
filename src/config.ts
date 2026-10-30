@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { parseEnv } from 'node:util';
 import { memorySettings } from './memory/settings.ts';
 
 const selectedEnv = process.execArgv.find((arg) => arg.startsWith('--env-file='))?.slice('--env-file='.length)
@@ -7,7 +8,14 @@ const selectedEnv = process.execArgv.find((arg) => arg.startsWith('--env-file=')
 export const envFile = path.resolve(selectedEnv || '.env');
 const hasEnv = fs.existsSync(envFile);
 if (selectedEnv && !hasEnv) throw new Error(`找不到配置文件：${envFile}`);
-if (hasEnv) process.loadEnvFile(envFile);
+
+// 公共 .env + 模式覆盖文件（.env.local / .env.live / 自定义）合并。
+// 优先级：进程环境变量 > 模式文件 > 公共 .env（process.loadEnvFile 会覆盖已存在的变量，故手动合并再按序回填）。
+const readVars = (file: string) => (fs.existsSync(file) ? parseEnv(fs.readFileSync(file, 'utf8')) : {});
+const merged = { ...readVars(path.join(path.dirname(envFile), '.env')), ...readVars(envFile) };
+for (const [k, v] of Object.entries(merged)) {
+  if (v !== undefined && process.env[k] === undefined) process.env[k] = v;
+}
 
 const str = (k: string, d = '') => (process.env[k] ?? d).trim();
 const num = (k: string, d: number) => {

@@ -25,17 +25,19 @@ function project(t: TestContext) {
   return root;
 }
 
-test('所选本地配置不混入默认 .env 的模型、服务和数据目录', async (t) => {
+test('模式文件在公共 .env 之上覆盖，公共值仍然生效', async (t) => {
   const root = project(t);
-  fs.writeFileSync(path.join(root, '.env'), 'LLM_MODEL=base-model\nHINDSIGHT_URL=http://base-host:8888\nDATA_DIR=./base-data\n');
+  fs.writeFileSync(path.join(root, '.env'), 'LLM_MODEL=base-model\nHINDSIGHT_URL=http://base-host:8888\nDATA_DIR=./base-data\nMC_HOST=192.168.1.50\n');
   fs.writeFileSync(path.join(root, '.env.local'), 'MC_HOST=127.0.0.1\nDATA_DIR=./data/local\n');
   process.env.ENV_FILE = '.env.local';
   const { config, envFile, requireLocalMode } = await loadConfig();
   assert.equal(envFile, path.join(root, '.env.local'));
   assert.equal(config.mode, 'local');
-  assert.equal(config.dataDir, path.join(root, 'data', 'local'));
-  assert.equal(config.memory.baseUrl, 'http://127.0.0.1:8888');
-  assert.equal(process.env.LLM_MODEL, undefined);
+  assert.equal(config.dataDir, path.join(root, 'data', 'local'));      // 模式文件覆盖公共
+  assert.equal(config.mc.host, '127.0.0.1');                            // 模式文件覆盖公共
+  assert.equal(config.llm.model, 'base-model');                         // 公共值仍然生效
+  assert.equal(config.memory.baseUrl, 'http://base-host:8888');         // 公共值仍然生效
+  assert.equal(process.env.LLM_MODEL, 'base-model');                    // 公共配置已合并进进程
   assert.doesNotThrow(() => requireLocalMode('存读档'));
 });
 

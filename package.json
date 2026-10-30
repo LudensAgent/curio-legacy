@@ -29,7 +29,7 @@
     "memory:clear": "tsx scripts/clear-memory.ts",
     "memory:reset": "tsx scripts/clear-memory.ts --full",
     "memory:serve": "docker compose -f compose.memory.yaml up -d",
-    "memory:serve:local": "docker compose --env-file .env.local -f compose.memory.yaml up -d",
+    "memory:serve:local": "docker compose --env-file .env --env-file .env.local -f compose.memory.yaml up -d",
     "check:memory": "tsx scripts/check-memory.ts",
     "check:memory:local": "node --env-file=.env.local --import tsx scripts/check-memory.ts",
     "check:memory:live": "node --env-file=.env.live --import tsx scripts/check-memory.ts",
