@@ -20,7 +20,7 @@ import { ObservedGameClock } from './game-clock.ts';
  * 什么时候请模型：有新技能、有新冲突、或者账本里又攒了一批用过技能的经历（够判断效果了）。
  */
 export interface CuratorOptions { checkMs: number; unusedDays: number; candidateUnusedDays: number; disabledDays: number; gapMs: number; minSkills: number; /** 同时留着的自己写的技能最多几份：多了就收起最没用的 */ maxActive: number }
-export const DEFAULT_CURATOR: CuratorOptions = { checkMs: 60_000, unusedDays: 12, candidateUnusedDays: 5, disabledDays: 2, gapMs: 0, minSkills: 4, maxActive: 24 };
+export const DEFAULT_CURATOR: CuratorOptions = { checkMs: 60_000, unusedDays: 60, candidateUnusedDays: 15, disabledDays: 5, gapMs: 0, minSkills: 4, maxActive: 24 };
 const DAY_TICKS = 24_000;
 type Lifetime = { world: string; name: string; candidate: boolean; version: number; clock: number; age: number; idle: number; disabled: number;
   activity: string; restoredAt: number; disabledAt: number; retired: boolean };
@@ -198,9 +198,11 @@ export class SkillCurator {
     this.savedAt = Date.now();
   }
 
-  /** 应急用途本身不是免淘汰证据，只保护当前可用且本版确实成功过的稳定技能。 */
+  /** 救命技能平时很少触发是正常的（岩浆、窒息、埋身这类不天天发生），
+   * 不能因为“好久没用上”或“技能太多”就收起——候选和未验收的也一样：没出事前本就没法验收。
+   * 真正坏掉的（用了 ≥4 次却很少成功）仍由 retireLowValue 第一段收起；重复的仍由整理模型合并/收起。 */
   private protectedEmergency(b: Behavior) {
-    return !b.candidate && this.engine.enabled(b) && isEmergency(b) && (this.engine.statsOf(b.name)?.byVersion?.[String(b.version ?? 1)]?.ok ?? 0) > 0;
+    return isEmergency(b) && (b.candidate || this.engine.enabled(b));
   }
 
   private active() {
@@ -362,9 +364,9 @@ export class SkillCurator {
 - 白白打断的（idle_interrupts：条件成立接手了，代码却什么都没做就返回、人也没动，打断了手上的活的次数）：when 比代码里真正动手的判断宽，把 when 收窄到和代码一致。
 - 常常同时满足条件抢着接手的（clashed_with）：调整优先级（priority：更管用、更要紧的高），或者收窄某个的触发条件（用 merge 重写它）。
 - 明显没用、被别的技能完全覆盖的：收起（retire）。
-- lifesaver 只描述应急用途，不代表已经有效。只有 protectedEmergency=true（当前可用且本版实际成功过的稳定应急技能）免闲置和容量收起；它的改进先成为候选，稳定版继续保留。未验证候选和已停用应急版照常整理，不能借同名旧版成功永久保留。
+- lifesaver 只描述应急用途，不代表已经有效。protectedEmergency=true 的应急技能（稳定版和候选都算）免闲置和容量收起——救命的技能平时很少触发、没法预先验收，不能因为“好久没用上”就收；但真正坏掉的（本版用了 ≥4 次却很少成功）仍照常收起。未验证候选和已停用应急版不能借同名旧版成功永久保留。
 - successfulEmergencyVersions 列出保留的成功应急版本；收起不会删除完整契约、笔记和证据，心智可用 skill {name,from_version:N} 显式生成新候选重新验收，不能把历史成功当作新候选成功。
-- observedGameDays 只累计在线、未暂停的有效游戏刻（每天24000tick）；未知历史为null，不能按现实时间或离线期间的世界日期差推断闲置。普通7日、候选3日、停用1日自动收起；纯改写不刷新候选闲置。
+- observedGameDays 只累计在线、未暂停的有效游戏刻（每天24000tick）；未知历史为null，不能按现实时间或离线期间的世界日期差推断闲置。普通${this.opts.unusedDays}日、候选${this.opts.candidateUnusedDays}日、停用${this.opts.disabledDays}日自动收起；纯改写不刷新候选闲置。
 - similar_to 是名字或说明看着相近的：逐对看是不是在做同一件事。是的话合并成一份，或者收起用得少、成得少的那份（uses 少的、fail 多的）；只是名字像、其实管的是两回事的就留着。
 - 技能越少越好记、越不容易互相抢：功能重复的、用了很少次还没成过的，宁可收起；真需要时还能再学。
 - 看 harvest_effect（用它时拿东西每个花多少秒、和不用它比、各版本比）：
