@@ -184,7 +184,7 @@ const ROUTINE_OF_THINKING = `【每次这样想】
 const CHOOSE = `【选动作】
 - 去记得的地方或坐标 → goto；找没见过的东西 → explore {"until":…}；拿看得见的方块 → gather；身边某一格 → dig_at / step / place_at
 - 坐船过水：船是实体，用 use_item {"item":"…_boat","on":"water"} 放到水面（别用 place_at），再 interact {"entity":"boat"} 上船；ride {"direction":"SW"} 划（ride 必须给 direction 或 to）。travel 提供步行和游泳寻路，已乘船时沿水路导航；吃 → eat（背包有吃的）/ hunt / forage / fish；做东西 → craft、smelt（会自己放下背包里的工作台/熔炉；拿不准查 recipes）
-- 在坑里或地下想上去 → 看【身边】local 和背包，用 dig_at / step / place_at 自己想办法（怎么上去由你定，背包里有什么用什么）
+- 在坑里或地下想上去 → 看【身边】local 和背包，用 dig_at / step / place_at 自己想办法（怎么上去由你定，背包里有什么用什么）；想往下深挖 → 用 excavate_path {"entry":"current","mode":"stairs"} 或 assess_landings + descend（手工 dig_at+step 阶梯会卡死）
 - design 请建筑师画图纸，再 build（新盖 {"draft":"图纸ID"}，续建 {"projectId":"作品ID"}）；不要自己画图纸
 - goto 默认不挖墙、不垫路、不搭柱；dig:true 才额外允许挖掘、垫路和搭柱；place:false 禁止放置，tower:false 禁止原地搭柱。`;
 
@@ -246,7 +246,7 @@ ${movesCatalog(28, undefined, advanced)}${SKILL_INDEX(skills)}`;
 /** 瞥一眼时给完整参数的常用动作；其余只列名字 + 用途，参数按需用 moves 查 */
 const GLANCE_CORE = ['dig_at', 'step', 'place_at', 'gather', 'goto', 'craft', 'eat', 'sleep', 'wait', 'look', 'look_around', 'defend', 'hunt', 'place_torch', 'dive', 'surface', 'travel', 'press_keys'];
 /** 瞥一眼时只列名字 + 用途的动作（完整参数按需查） */
-const GLANCE_SECONDARY = ['explore', 'forage', 'pickup_items', 'shelter', 'build', 'smelt', 'store_items', 'climb_up', 'use_skill'];
+const GLANCE_SECONDARY = ['explore', 'forage', 'pickup_items', 'shelter', 'build', 'smelt', 'store_items', 'climb_up', 'use_skill', 'excavate_path', 'descend', 'assess_landings'];
 
 export function glanceSystem(persona: string, inUse: Set<string>, skills: string[] = []): string {
   return `${persona}
@@ -340,6 +340,9 @@ export function situationalReminders(ctx: MindContext): string[] {
     // 矿在哪一层是版本事实：模型记得的多是老版本（钻石 y12），摆出这个世界的版本对应的分布，下到哪层它自己定
     const layers = oreLayerFacts(config.mc.version, intent);
     if (layers) out.push(layers);
+    // 往下挖有稳定辅助：手工 dig_at[1,-1,0]+step 的斜下格支撑超出 place_at 范围会卡死，能不用就不用
+    const stairFails = (ctx.recentActionFailures ?? []).filter((f) => (f.skill === 'step' || f.skill === 'dig_at') && f.failure_code === 'PATH_NOT_FOUND');
+    out.push(`下矿有稳定下行辅助：excavate_path {"entry":"current","mode":"stairs","direction":"…","steps":4}（逐格确认工具、地板、头部空间、干燥和真实落地，遇水/岩浆/沙砾不冒险）或 assess_landings + descend${stairFails.length >= 2 ? '；刚才 step/dig_at 连续走不通——这是手工阶梯的固有限制，改用 excavate_path 或 descend' : ''}`);
     const tunnels = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).filter((f) => f.dist <= 160).slice(0, 2);
     for (const t of tunnels) {
       out.push(`记得自己${t.text}`);
