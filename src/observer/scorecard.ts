@@ -212,6 +212,13 @@ export class Scorecard {
     return { total, progress, survival, learning, efficiency };
   }
 
+  /** 给心智看的进度事实：已达成多少、下一个未达成的里程碑（只作方向参考，不是硬目标；怎么推进由心智定）。 */
+  progressFacts(): { reached: number; total: number; done: string[]; next: string | null } {
+    const reached = MILESTONES.filter((m) => this.data.ever[m.key] !== undefined);
+    const next = MILESTONES.find((m) => this.data.ever[m.key] === undefined);
+    return { reached: reached.length, total: MILESTONES.length, done: reached.slice(-4).map((m) => m.label), next: next?.label ?? null };
+  }
+
   flush() {
     if (!this.file || !this.dirty) return;
     this.dirty = false;

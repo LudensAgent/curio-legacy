@@ -53,6 +53,8 @@ export interface MindContext {
   mySkills: MySkillInfo[];
   researchContext?: unknown;
   persona: string;
+  /** 主线进度事实：已达成里程碑与下一个未达成的目标（只作方向参考，不是硬目标） */
+  progress?: { reached: number; total: number; done: string[]; next: string | null } | null;
   /** 技能书索引（每份一行） */
   skills?: string[];
   /** 游戏自己的系统消息（死亡播报、成就、公告），原话 */
@@ -169,7 +171,7 @@ const SKILL_INDEX = (skills: string[]) => skills.length ? `\n\n【技能书】\n
 /** 用户消息分块：越往后越要紧（模型对末尾注意力最强） */
 const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。往某方向走直接写 goto {"target":"E 20"}，别自己算坐标；[前,上,右] 按指定 facing 换算。
 【相对坐标】activity/next 含 dig_at、step、place_at 的水平相对操作时，必须声明活动的 facing:"N|E|S|W"，表示坐标的前方，不等于推进方向。子步骤省略 facing 就继承，显式冲突会退回；绝对 xyz 和纯竖直操作不要求这个字段。活动参考系独立于镜头朝向；转头、观察、插火把不会改变它，local 方块图仍按 local.facing 解读。输出前核对文字目标方向与坐标换算后的实际方向；例如 facing:"N" 的 [-1,0,0] 是向南。需要改变参考系时可明确声明新的 facing（包括 "S"），后退或换向仍由你决定。
-【消息怎么读】越往后越要紧：【我】性格心情、议程、窍门 →【记得的地方】→【想起来的】自动想起的旧事和技能 →【最近】→【手上的活】→【身边】方块图 local、生物、资源 →【身体】where、生命饥饿、天色、背包 →【专注】主目标和清单 →【此刻】为什么现在想、注意到什么 →【此刻要留意】。未看见的方块状态未知，未挖到不代表那里是空气。`;
+【消息怎么读】越往后越要紧：【我】性格心情、议程、窍门 →【记得的地方】→【进度】主线到哪了、下一个目标 →【想起来的】自动想起的旧事和技能 →【最近】→【手上的活】→【身边】方块图 local、生物、资源 →【身体】where、生命饥饿、天色、背包 →【专注】主目标和清单 →【此刻】为什么现在想、注意到什么 →【此刻要留意】。未看见的方块状态未知，未挖到不代表那里是空气。`;
 
 const ROUTINE_OF_THINKING = `【每次这样想】
 1. 【此刻】要紧的（危险、快饿死、卡住）先处理。
@@ -188,7 +190,7 @@ const PRINCIPLES = `【原则】
 - 接着刚才的念头往下想，不反复换主意、不重复刚做完的事。
 - 一段活（如“砍 20 根木头”）：routine 1–6 步，可 repeat，done_when 写清何时收工；身体连续执行、自己应变，真卡住才叫你。
 - 从真实结果里学，出乎意料才写 learned；历史失败只作参考，继续、重试或调整由你决定。
-- 你既会被风景吸引、想把住处经营得温馨，也总向往着去更广阔的天地闯一闯。喜欢的写 liked，想做的放 agenda。情绪是信号：累了歇、烦了换办法、腻了找新鲜事。
+- 你既会被风景吸引、想把一路的见闻记下来，也总惦记着把进度往前推——升级装备、进下界、找要塞、打败末影龙。喜欢的写 liked，想做的放 agenda。情绪是信号：累了歇、烦了换办法、腻了找新鲜事。
 - 只知道亲眼看到或记得的东西，坐标来自观察或地标，不编。
 - 遇到危险如何行动由你或你写下的技能决定；插火把、顺手吃可用 habits 定成习惯；捡东西需明确安排 pickup_items，pickup 偏好只提醒思考。`;
 
@@ -198,10 +200,10 @@ const PRECISE = `【精确操作】local 以脚部占据格为原点：[前,上,
 repeat 每轮重做整套 steps；子步骤继承 activity.facing，每步相对坐标按当前位置重算。done_when 写可观察结果。照明可选 place_torch 或空闲习惯 habits.torch_every。挖前看清目标格。
 - 机械性失败身体会就地应变再重试：太暗先插火把、脚下无支撑先垫一块、头顶被挡先挖开（会消耗方块/火把）；应变不动才交给你决定。`;
 
-const EXAMPLE = `【例子】想有个家时：
-→ {"kind":"design","brief":"湖边能住的小屋，云杉木，放得下床、箱子和工作台"}
-← 已经请建筑师去画了……画好会告诉你
-→ {"monologue":"图纸要等一会儿，先去攒盖小屋要用的木板。","decision":"new","activity":{"what":"砍云杉原木","why":"盖小屋要木板","kind":"gather","steps":[{"skill":"gather","args":{"block":"spruce_log","count":12}}],"done_when":{"type":"inventory_min","item":"spruce_log","count":12}}}`;
+const EXAMPLE = `【例子】想进下界时：
+→ {"kind":"knowledge","query":"怎么建下界传送门"}
+← 已经查到资料了……黑曜石要用铁镐或钻石镐挖，岩浆浇上水就变成黑曜石
+→ {"monologue":"先凑够黑曜石把传送门点起来。","decision":"new","activity":{"what":"采黑曜石","why":"要建下界传送门","kind":"gather","steps":[{"skill":"gather","args":{"block":"obsidian","count":10}}],"done_when":{"type":"inventory_min","item":"obsidian","count":10}}}`;
 
 export function deliberateSystem(persona: string, skills: string[] = [], advanced = false): string {
   return `${persona}
@@ -558,6 +560,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       ...(!glance && ctx.researchContext ? { research: ctx.researchContext } : {}),
     }],
     ['记得的地方', worldKnowledge(ctx)],
+    ...(ctx.progress ? [['进度', { mainline: `主线进度 ${ctx.progress.reached}/${ctx.progress.total}${ctx.progress.done.length ? `（已达成：${ctx.progress.done.join('、')}）` : ''}，下一个目标：${ctx.progress.next ?? '已全部达成'}` }] as [string, Record<string, unknown>]] : []),
     ...(ctx.recalled?.length || ctx.hindsightMemories?.length || ctx.openedSkill ? [['想起来的', {
       ...(ctx.recalled?.length ? { memories: ctx.recalled.map((r) => `[${RECALL_LABEL[r.kind]}] ${r.text}`) } : {}),
       ...(ctx.hindsightMemories?.length ? { long_term: ctx.hindsightMemories.map((m) => `[${m.kind === 'experience' ? '经历' : '推断'}·长期记忆] ${m.text}`) } : {}),
@@ -630,7 +633,7 @@ export function buildReflectionMessages(self: SelfModel, persona: string, mySkil
 - 再退一步看看日子是怎么过的（strategy：夜里在哪过、怎么死的、哪些目标耗了很多段活、盖房花了多少工夫、游戏进度到哪了）：
   找出最大的、一再出现的麻烦，问自己“有没有一种根本不同的玩法能让它不再发生”——不是把同一件事做得更用力，而是换个思路（出门时带上什么、把什么搬到哪、换个地方住、先去弄某样东西、干脆放下某件事）。
   换玩法多半是做法上的改变（出门带什么、什么时候收工、在哪冶炼、一次挖多少）：写成一条窍门 add，不进议程。
-  只有它要专门花几段活去做成一件事（比如在矿口搭个前哨、开一片农田）时，才放进议程 agenda_add（{"text":"要做成的事","kind":"idea|goal"}，最多 3 条，写成“做成什么”，不要写成“以后要怎样”）；没想到就不写，不要硬凑。
+  只有它要专门花几段活去做成一件事（比如去下界要塞拿烈焰棒、合成末影之眼找要塞）时，才放进议程 agenda_add（{"text":"要做成的事","kind":"idea|goal"}，最多 3 条，写成“做成什么”，不要写成“以后要怎样”）；没想到就不写，不要硬凑。
 - 用一句话写日记（diary）记下这段时间最值得记住的事，再用一句独白（monologue）说说现在的感受。
 只输出一个 JSON 对象：
 {"merge":[{"ids":["k_…","k_…"],"text":"…"}],"rewrite":[{"id":"k_…","text":"…"}],"drop":["k_…"],"add":["…"],"agenda_drop":["a_…"],"agenda_add":[{"text":"…","kind":"idea"}],"skill":{"name":"…","description":"…","body":"…"},"diary":"…","monologue":"…"}`;

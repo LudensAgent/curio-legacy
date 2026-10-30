@@ -9,7 +9,7 @@ import { effortFacts } from './efficiency.ts';
  * 每个驱动力 0..1，附带原因和建议，按强度排序。它们不直接控制动作，只影响“想做什么”。
  */
 export interface Drive {
-  drive: 'survive' | 'recover' | 'eat' | 'rest' | 'light' | 'tools' | 'efficiency' | 'frugal' | 'home' | 'bed' | 'storage' | 'smelt' | 'farm' | 'stockpile' | 'expedition' | 'explore' | 'curiosity' | 'novelty' | 'automate';
+  drive: 'survive' | 'recover' | 'eat' | 'rest' | 'light' | 'tools' | 'efficiency' | 'frugal' | 'home' | 'bed' | 'storage' | 'smelt' | 'farm' | 'stockpile' | 'expedition' | 'explore' | 'curiosity' | 'novelty' | 'automate' | 'advance';
   level: number;
   why: string;
   suggest: string;
@@ -160,6 +160,10 @@ export function computeDrives(p: Percept, memory: WorldMemory): { drives: Drive[
           : '先判断当前兴趣是否需要工具，并比较获取材料、调整方法或暂缓的代价；缺镐子不指定下一目标',
     });
   }
+  // 通关主线：石器之后往上推（铁 → 钻石 → 下界 → 末地），只给方向，怎么走由它定
+  if (st.toolTier === 'stone' && !night) {
+    out.push({ drive: 'advance', level: 0.6, why: '有石镐了，主线往下是铁器（挖铁、炼铁、铁镐/铁甲），再往后是钻石、下界、末地', suggest: 'gather iron 挖铁 → smelt raw_iron 炼铁 → craft iron_pickaxe 做铁镐' });
+  }
   // 偷懒：同一种东西挖得多又慢，换把好工具更划算
   for (const e of p.efficiency ?? []) {
     const b = e.better.find((x) => !x.have);
@@ -178,11 +182,11 @@ export function computeDrives(p: Percept, memory: WorldMemory): { drives: Drive[
     out.push({ drive: 'frugal', level, why: `最近用${e.tool}挖了 ${e.mined} 个 ${e.block}；${c.tool} 约 ${c.est_s} 秒/个（慢 ${Math.round((c.slowdown - 1) * 100)}%），但不耗${c.savesZh}（背包只有 ${scarce} 个）`, suggest: `换回 ${c.tool} 继续挖` });
     break;
   }
-  if (!homeBuilt && st.toolTier !== 'none' && !night) {
+  if (!homeBuilt && !st.hasBed && !bedPlaced && dusk) {
     const need = 71;
     const enough = st.blocks + st.logs * 3 >= need;
     const woodAround = p.nearby.resources.some((r) => r.block.endsWith('_log'));
-    out.push({ drive: 'home', level: enough ? 0.65 : woodAround ? 0.6 : 0.45, why: '还没有自己的房子，晚上只能挖坑', suggest: st.blocks + st.logs * 3 >= need ? '自己设计一间小屋：build {spec:{name, design:{legend, layers}}}' : `先备 ${need} 个方块（约 ${Math.ceil((need - st.blocks) / 4)} 个原木做木板）再自己设计一间小屋 build` });
+    out.push({ drive: 'home', level: 0.5, why: '天快黑了，还没有自己的房子，晚上只能挖坑', suggest: st.blocks + st.logs * 3 >= need ? '搭个能挡住怪的过夜小屋 build（简单够用就行，不用讲究）' : `先备 ${need} 个方块（约 ${Math.ceil((need - st.blocks) / 4)} 个原木做木板）搭个过夜的小屋` });
   }
   if (!st.hasBed && !bedPlaced) {
     const sheep = animals.some((a) => a.name === 'sheep');

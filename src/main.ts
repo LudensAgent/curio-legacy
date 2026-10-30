@@ -269,6 +269,7 @@ const mind = new Mind({
   ...(audience ? { audience } : {}),
   mySkills,
   researchContext: () => methods.researchContext(),
+  progress: () => scorecard.progressFacts(),
   onGoalEnd,
   say: (text) => { if (config.actionChat.enabled) adapter.chat(text); },
   timing: { checkInMs: config.mind.checkInSec * 1000, deliberateEveryMs: config.mind.deliberateEverySec * 1000 },

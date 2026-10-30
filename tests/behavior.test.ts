@@ -50,17 +50,16 @@ test('欲望：夜里没床没房子、身上有方块 → 挖坑过夜；有床
   assert.equal(plan(p).steps[0].skill, 'sleep');
 });
 
-test('欲望：石器之后、材料够 → 盖小屋；不够 → 先备料', () => {
+test('欲望：石器之后 → 主线推进到铁器（挖铁，够了就炼铁做铁镐）', () => {
   const p = P();
-  p.inventory.push({ name: 'oak_planks', count: 80 });
-  p.nearby.resources = [{ block: 'oak_log', count: 20, nearest: 10, dir: 'E', seen: 'now' }];
-  assert.equal(plan(p).steps.at(-1).skill, 'build');
+  const r = plan(p);
+  assert.equal(r.steps[0].skill, 'gather');
+  assert.equal(r.steps[0].args.block, 'iron');
   const q = P();
-  q.nearby.resources = [{ block: 'oak_log', count: 20, nearest: 10, dir: 'E', seen: 'now' }];
-  q.inventory.push({ name: 'oak_log', count: 2 });
-  const r = plan(q);
-  assert.equal(r.goal, '为小屋备料');
-  assert.ok(r.steps[0].args.count >= 16, '一次多砍一些');
+  q.inventory.push({ name: 'raw_iron', count: 3 });
+  const s = plan(q);
+  assert.equal(s.goal, '炼铁做铁镐');
+  assert.equal(s.steps[0].skill, 'smelt');
 });
 
 test('无聊：连续多次采集后，欲望会转向建造/探索等别的事', () => {

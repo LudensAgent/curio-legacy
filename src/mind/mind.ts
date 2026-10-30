@@ -35,6 +35,8 @@ export interface MindDeps {
   thinker: Thinker; self: SelfModel; persona: string;
   mySkills?: () => MySkillInfo[];
   researchContext?: () => unknown;
+  /** 主线进度事实（已达成里程碑 + 下一个未达成的目标）：来自 scorecard，只作方向参考，不是硬目标 */
+  progress?: () => { reached: number; total: number; done: string[]; next: string | null };
   audience?: { context(tier?: 'light' | 'full'): AudienceContext | null; buildConsensus?(windowMs?: number): { viewers: number; messages: number; samples: string[] }; clearBuildConsensus?(): void };
   onGoalEnd?: (status: string) => void;
   /** 主目标很久没进展：交给后台想“要做到它还缺什么能力” */
@@ -1036,6 +1038,7 @@ export class Mind {
       mySkills: tier === 'deliberate' ? this.safe(() => this.d.mySkills?.() ?? [], []) : [],
       researchContext: tier === 'deliberate' && reflect ? this.safe(() => this.d.researchContext?.(), undefined) : undefined,
       persona: this.d.persona,
+      progress: this.d.progress?.() ?? null,
       gameMessages: this.recentGameMessages(),
       // 收起、停用的技能不进目录（翻技能书、回想时还看得到）：目录越长越难挑，还拖累缓存
       skills: this.safe(() => this.d.thinker.skillBook?.index((n) => !!this.d.behaviors?.hidden(n),

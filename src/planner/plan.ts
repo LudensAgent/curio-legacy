@@ -216,6 +216,11 @@ function baseRule(p: Percept, memory?: WorldMemory): Record<string, unknown> {
       }
       case 'tools':
         return toolsChain();
+      case 'advance': {
+        const raw = count(p, (x) => x === 'raw_iron');
+        if (raw >= 3) return mk('铁矿石够了，炼成铁锭再做铁镐。', '炼铁做铁镐', 'craft', [{ skill: 'smelt', args: { item: 'raw_iron', count: 3 } }, { skill: 'craft', args: { item: 'iron_pickaxe', count: 1 } }]);
+        return mk('有石镐了，下矿挖铁升级铁器。', '挖铁', 'gather', [{ skill: 'gather', args: { block: 'iron', count: 6 } }]);
+      }
       case 'efficiency': {
         const e = (p.efficiency ?? []).find((x) => x.better.some((b) => !b.have));
         const b = e?.better.find((x) => !x.have);
