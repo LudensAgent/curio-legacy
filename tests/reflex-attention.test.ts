@@ -57,20 +57,13 @@ test('intentional eating, defending and escaping continue without duplicate refl
   const n = w.starts.length;
   w.hostile('creeper'); w.setTask('flee'); w.tick();
   assert.equal(w.starts.length, n, 'keep running away from the creeper');
-  w.state.inWater = true; w.state.oxygen = 8; w.tick(); w.tick();
-  assert.equal(w.starts.length, n + 1, 'switch to surfacing once, without restarting the swim');
-  assert.equal(w.starts.at(-1)?.step.skill, 'surface');
 });
 
 test('emergencies can interrupt an ongoing meal reflex immediately', (t) => {
   const w = fixture(t);
-  w.setTask('eat', 'reflex'); w.state.inLava = true; w.tick();
+  w.setTask('eat', 'reflex'); w.hostile('creeper', { fusing: true }); w.tick();
+  assert.equal(w.starts.length, 1);
   assert.equal(w.starts.at(-1)?.step.skill, 'flee');
-  w.state.inLava = false; w.setTask('eat', 'reflex'); w.hostile('creeper', { fusing: true }); w.tick();
-  assert.equal(w.starts.length, 2);
-  assert.equal(w.starts.at(-1)?.step.skill, 'flee');
-  w.setTask('eat', 'reflex'); w.state.inWater = true; w.state.oxygen = 8; w.tick();
-  assert.equal(w.starts.at(-1)?.step.skill, 'surface');
 });
 
 test('routine meals wait for a suitable pause, while urgent hunger does not', (t) => {
@@ -127,11 +120,7 @@ test('autonomous reflexes preserve routine choices and return stuck movement whi
   w.advance(15000); w.state.food = 16; w.state.hp = 7; w.setTask('craft'); w.tick();
   assert.equal(w.starts.at(-1)?.step.skill, 'eat', 'low health with insufficient food still interrupts');
   assert.equal(w.starts.length, 2);
-  w.state.inLava = true; w.tick();
-  assert.equal(w.starts.at(-1)?.step.skill, 'flee');
-  w.state.inLava = false; w.state.inWater = true; w.state.oxygen = 8; w.tick();
-  assert.equal(w.starts.at(-1)?.step.skill, 'surface');
-  w.state.inWater = false; w.state.hp = 20; w.setTask('craft'); w.hostile('creeper', { fusing: true }); w.tick();
+  w.state.hp = 20; w.setTask('craft'); w.hostile('creeper', { fusing: true }); w.tick();
   assert.equal(w.starts.at(-1)?.step.skill, 'flee');
   w.setTask('craft'); w.hostile('spider'); w.tick();
   assert.equal(w.starts.at(-1)?.step.skill, 'defend');

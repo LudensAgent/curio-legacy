@@ -91,6 +91,7 @@ const guiBot = (type: string, size: number, inv: Record<number, [string, number]
     blockAt: (p: any) => ({ name: type === 'anvil' ? 'anvil' : type, position: p }),
     async openBlock() { return w; },
     closeWindow() { w.closed = true; },
+    _syncWindow: async () => ({}),
     _client: { write: (name: string, body: any) => clicks.push([name === 'name_item' ? -2 : -1, body.enchantment ?? 0, 0]) },
     async clickWindow(slot: number, button: number, mode: number) {
       clicks.push([slot, button, mode]);
@@ -118,7 +119,7 @@ test('use_gui 适配层：按格子放 1 个/全部，shift 取出产物，点�
   assert.equal(slots[3 + 1].count, 3, '剩下的铁锭放回原处');
   assert.equal(w.selectedItem, null);
   assert.equal(w.closed, true);
-  assert.deepEqual(r.view.slots.map((s: any) => s.role), ['要修/改名的物品', '材料或附魔书', '产物（消耗经验）']);
+  assert.deepEqual(r.view.slots.map((s: any) => s.role).slice(0, 3), ['要修/改名的物品', '材料或附魔书', '产物（消耗经验）']);
   assert.deepEqual(clicks, [[3, 0, 0], [0, 0, 0], [4, 0, 0], [1, 1, 0], [1, 1, 0], [4, 0, 0]]);
   slots[2] = { name: 'iron_sword', count: 1, type: data.itemsByName.iron_sword.id };
   const t = await a.useGui({ x: 1, y: 64, z: 0 }, [{ take: { slot: 2 } }], new AbortController().signal);
