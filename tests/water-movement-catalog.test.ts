@@ -13,7 +13,7 @@ test('both thinking tiers expose direction and water movement tools with their e
     assert.match(look, /"dir".*NW.*只转头不走/);
     assert.match(dive, /"xyz".*min_oxygen.*停下回报/);
     assert.match(surface, /上浮换气并游上岸.*挖开头顶方块/);
-    assert.match(travel, /步行和游泳.*不制造或切换载具/);
+    assert.match(travel, /步行、游泳.*不制造或切换载具/);
   }
 });
 

@@ -41,9 +41,11 @@ test('技能改写不清空历史：成败按版本记；后台总结推翻不�
   assert.match((gated as any).error, /证据还不够/);
   assert.ok(e.write(skill('原地垫高'), { by: 'mind' }).ok, '心智自己（或整理）可以改');
   assert.equal(e.statsOf('dodge-zombie')!.fail, 1, '改写不清零');
-  assert.deepEqual(e.currentStats('dodge-zombie'), { ok: 0, fail: 0 }, '新版本从零记');
+  assert.deepEqual(e.currentStats('dodge-zombie', true), { ok: 0, fail: 0 }, '新版本从零记');
   assert.deepEqual(e.statsOf('dodge-zombie')!.byVersion!['1'], { ok: 0, fail: 1 }, '旧版本的成败留着');
-  rec(true); rec(true); rec(false);
+  // 新版本（候选 v2）用够三次：改写不再被拦（rewriteGate 看的是候选）
+  const recNew = (ok: boolean) => (e as any).record(e.get('dodge-zombie', true), ok, ok ? '躲开了' : '还是被打', {});
+  recNew(true); recNew(true); recNew(false);
   assert.equal(e.rewriteGate('dodge-zombie'), null, '用够三次了，可以改');
   // 当前版本大多失败才停用（看这一版，不看历史）
   for (let i = 0; i < 6; i++) rec(false);
@@ -54,7 +56,7 @@ test('自动技能管没管用：触发它的情况解除了才算（饿了的�
   const { adapter, engine: e } = engine();
   assert.ok(e.write({ name: 'eat-something', description: '饿了就找东西吃', when: { food_below: 10, not_doing: ['eat'] }, steps: [{ skill: 'eat' }] }).ok);
   assert.deepEqual(situationOf({ food_below: 10, not_doing: ['eat'] }), { food_below: 10 }, '判断时去掉“正在做什么”');
-  const judge = (food: number) => { adapter.food = food; (e as any).aftermath.set('eat-something', { hp: 20, at: Date.now() - 13_000, context: '' }); (e as any).judge('eat-something', false); };
+  const judge = (food: number) => { adapter.food = food; (e as any).aftermath.set('eat-something', { behavior: e.get('eat-something'), hp: 20, at: Date.now() - 13_000, context: '' }); (e as any).judge('eat-something', false); };
   judge(5);
   assert.equal(e.statsOf('eat-something')!.fail, 1);
   assert.match(e.statsOf('eat-something')!.lastError!, /情况还在/);
@@ -91,7 +93,7 @@ test('拉锯里输掉的一方降成只提醒、不接手，直到被改写', ()
   (e as any).stats['hide-in-hole'] = { fired: 5, ok: 4, fail: 1, lastAt: 0 };
   for (const n of ['hide-in-hole', 'go-to-surface', 'hide-in-hole', 'go-to-surface']) (e as any).noteFire(n, null);
   assert.ok(e.statsOf('go-to-surface')!.advisory);
-  assert.ok(e.write({ name: 'go-to-surface', description: '附近没有怪时回地表', when: { hp_below: 15, not: { hostile: { within: 10 } } }, steps: [{ skill: 'wait', args: { seconds: 1 } }] }, { by: 'curator' }).ok);
+  assert.ok(e.write({ name: 'go-to-surface', description: '附近没有怪时回地表', when: { hp_below: 15, not: { hostile: { within: 10 } } }, steps: [{ skill: 'wait', args: { seconds: 1 } }] }).ok);
   assert.equal(e.statsOf('go-to-surface')!.advisory, undefined, '拆开条件改写后恢复');
 });
 

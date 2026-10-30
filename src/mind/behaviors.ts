@@ -681,7 +681,7 @@ export class BehaviorEngine {
     }
     if (!this.book) return { ok: false, error: '没有技能书，存不下技能' };
     // 模型新写、改写代码技能（心智、技能工程师、整理）必须带判定：代码跑完不抛错不等于做成了（“脱船”技能人还在船上，也报“做完了”）
-    if (opts.by && !v.behavior.verify) return { ok: false, error: VERIFY_REQUIRED };
+    if (opts.by && v.behavior.code && !v.behavior.verify) return { ok: false, error: VERIFY_REQUIRED };
     // 后台总结（每死一次、每吃一次亏都会来一遍）不能推翻一个还没攒够证据的版本：
     // 否则同一个技能在几种打法之间来回改，没有一个版本用够几次，永远不知道哪个管用
     if (opts.by === 'forge') {
