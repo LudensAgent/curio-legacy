@@ -5,6 +5,7 @@ import { runtime } from './runtime.ts';
 import { MineflayerAdapter } from './adapter/mineflayer.ts';
 import { Arbiter } from './arbiter/arbiter.ts';
 import { Reflex } from './brain/reflex.ts';
+import { supplyReading } from './brain/supply.ts';
 import { Mind } from './mind/mind.ts';
 import { parseGameMessage, type ParsedGameMessage } from './memory/game-messages.ts';
 import { SelfModel } from './mind/self.ts';
@@ -154,6 +155,7 @@ const live = config.live.bilibili.enabled ? new BilibiliLive(config.live.bilibil
 const danmakuLog = new DanmakuLog(config.danmakuArchiveDir, (msg) => bus.publish('live', 'P1', msg));
 if (live && audience) {
   liveAudience.enabled = true;
+  liveAudience.inPrompt = config.live.audience.inPrompt;
   live.on('message', (m: LiveMessage) => { danmakuLog.record(m, audience.ingest(m)); });
   live.on('status', (st: LiveStatus) => bus.publish('live_status', st.state === 'error' ? 'P1' : 'P3', `B 站直播间：${st.state}${st.detail ? `（${st.detail}）` : ''}`));
 }
@@ -517,6 +519,7 @@ function snapshot() {
     },
     state,
     percept: perception.snapshot(),
+    supply: supplyReading(state.inventory, { stock: perception.snapshot()?.storage?.stock, torchEvery: selfModel.habits().torch_every, difficulty: state.difficulty }),
     vision: vision.frame,
     task: arbiter.info(),
     planVersion: arbiter.planVersion,

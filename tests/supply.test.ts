@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { InvItem } from '../src/adapter/types.ts';
 import type { StockRow } from '../src/memory/chest-memory.ts';
-import { consumptionSummary, durabilityFacts, fuelFacts, supplyFacts, torchCraftable } from '../src/brain/supply.ts';
+import { consumptionSummary, durabilityFacts, fuelFacts, supplyFacts, supplyReading, torchCraftable } from '../src/brain/supply.ts';
 
 const item = (name: string, count: number, extra?: Partial<InvItem>): InvItem => ({ name, count, ...extra });
 const row = (item: string, inChests: number): StockRow => ({ item, total: inChests, inChests, chestCount: 1, inBackpack: 0 });
@@ -64,6 +64,30 @@ test('durabilityFacts：剩余耐久合计投影成还能挖的格数，换料�
   // 箱子里有圆石+木棍时，换料不再报"还差"
   const withChest = durabilityFacts(inv, ['pickaxe'], [row('cobblestone', 3), row('stick', 2)]);
   assert.match(withChest[0], /材料已经够了/);
+});
+
+test('supplyReading：常驻基线，各消耗品的存量/覆盖/缺口', () => {
+  const inv = [
+    item('torch', 12), item('coal', 3), item('stick', 6),
+    item('apple', 2), item('cooked_beef', 1),
+    item('arrow', 5), item('cobblestone', 40),
+    item('stone_pickaxe', 2, { durability: { left: 40, max: 131 }, durabilities: [50, 40] }),
+  ];
+  const rows = supplyReading(inv, { torchEvery: 8 });
+  const by = (id: string) => rows.find((r) => r.id === id)!;
+  assert.equal(by('torch').reserve, 12);
+  assert.match(by('torch').note, /约能照亮 96 格暗处/);
+  assert.match(by('torch').note, /还能直接做 12 支/);
+  assert.equal(by('food').reserve, 3);
+  assert.match(by('food').note, /熟食 1 个/);
+  assert.equal(by('pickaxe').reserve, 90);
+  assert.match(by('pickaxe').note, /还能挖约 90 格/);
+  assert.equal(by('arrow').reserve, 5);
+  assert.equal(by('blocks').reserve, 40);
+  assert.ok(by('fuel').reserve > 0);
+  assert.match(by('fuel').note, /能烧约/);
+  // 和平：火把只照明，不提刷怪
+  assert.match(supplyReading(inv, { torchEvery: 8, difficulty: 'peaceful' }).find((r) => r.id === 'torch')!.note, /和平没怪/);
 });
 
 test('consumptionSummary：聚合最近消耗的消耗品，非消耗品不计', () => {

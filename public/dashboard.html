@@ -542,6 +542,8 @@
         <div class="card"><h2>情绪</h2><div class="body"><div id="mindMood"></div><div class="row" style="margin-top:8px"><span>擅长</span><span class="mono" id="mindGoodAt">-</span></div><div class="row"><span>苦手</span><span class="mono" id="mindStruggle">-</span></div></div></div>
         <div class="card"><h2>窍门</h2><ul class="list body" id="mindKnowHow"></ul></div>
         <div class="card"><h2>日记 · 实验</h2><div class="body"><ul class="list" id="mindDiary"></ul><div class="sub">实验</div><ul class="list" id="mindExperiments"></ul></div></div>
+        <div class="card"><h2>权衡 <span class="r dim">精确库存 · 贪心/奢侈</span></h2><div class="body"><div id="mindStock"></div><div class="sub">贪心 / 抠门（时间 ↔ 稀缺材料）</div><div id="mindTrade"></div></div></div>
+        <div class="card"><h2>消耗品预算 <span class="r dim">存量 · 覆盖 · 缺口</span></h2><div class="body"><ul class="list" id="mindSupply"></ul></div></div>
       </div>
     </section>
 
@@ -1080,6 +1082,48 @@ function renderMind(mind) {
   $('mindDiary').innerHTML = list((mind.diary || []).slice().reverse(), (d) => `<li><span class="k">${ago(d.at)}前</span>${esc(d.text)}</li>`);
 }
 
+// 权衡（精确库存 · 贪心/奢侈）：物资充足/稀缺的精确计数 + 换快工具 vs 省稀缺材料两个方向。
+// 数据都在 percept 里，纯前端渲染。背包是「第 0 个容器」，永远精确；有箱子记忆时用 totalStock 合算。
+function renderTradeoff(p) {
+  const st = p.storage;
+  const rows = st?.stock || [];
+  const invCount = (name) => (p.inventory || []).filter((i) => i.name === name).reduce((n, i) => n + i.count, 0);
+  const age = st?.ageSeconds;
+  const ageText = age == null ? '' : age < 60 ? `${age} 秒前` : age < 3600 ? `${Math.round(age / 60)} 分前` : `${Math.round(age / 3600)} 时前`;
+  const stale = age != null && age > 1800 ? ' <span class="badge warn">可能已变</span>' : '';
+  const scarce = [['iron_ingot', '铁锭'], ['diamond', '钻石'], ['gold_ingot', '金锭']];
+  $('mindStock').innerHTML = (st?.chests
+    ? `<div class="row"><span>箱子 ${st.chests} 个</span><span class="dim">计数 ${ageText || '未确认'}${stale}</span></div>` : '')
+    + scarce.map(([item, zh]) => {
+      const r = rows.find((x) => x.item === item);
+      const backpack = r ? r.inBackpack : invCount(item);
+      const chest = r?.inChests ?? 0;
+      const total = r ? r.total : backpack;
+      const badge = total === 0 ? '<span class="badge bad">无</span>' : total <= 6 ? '<span class="badge warn">稀缺</span>' : '<span class="badge good">充足</span>';
+      const brk = chest ? ` · 背包 ${backpack} 箱 ${chest}` : (st ? ` · 背包 ${backpack}` : '');
+      return `<div class="row"><span>${zh}</span><span class="mono">${total}${brk} ${badge}</span></div>`;
+    }).join('');
+  // 贪心 / 抠门：换快工具（省时间）vs 换便宜工具（省稀缺材料）
+  const lines = [];
+  for (const e of p.efficiency || []) {
+    const b = e.better?.[0], c = e.cheaper?.[0];
+    if (!b && !c) continue;
+    const parts = [];
+    if (b) parts.push(`换 <b>${esc(b.tool)}</b> 快 ${b.speedup}×`);
+    if (c) parts.push(`换 <b>${esc(c.tool)}</b> 慢 ${Math.round((c.slowdown - 1) * 100)}% 但省 ${esc(c.savesZh)}`);
+    lines.push(`<li>${esc(e.block)}（挖 ${e.mined} 个，${e.avg_s}s/个）：${parts.join('；')}</li>`);
+  }
+  $('mindTrade').innerHTML = `<ul class="list">${lines.length ? lines.join('') : '<li class="empty">还没有效率对比</li>'}</ul>`;
+}
+
+// 消耗品预算：存量 + 单价投影 + 补货缺口（结构只测度，够不够由 Agent 定）
+function renderSupply(rows) {
+  $('mindSupply').innerHTML = list(rows, (r) => {
+    const badge = r.tone ? ` <span class="badge ${r.tone === 'bad' ? 'bad' : 'warn'}">${r.tone === 'bad' ? '没了' : '偏少'}</span>` : '';
+    return `<li><span class="k">${esc(r.label)}</span><b class="mono">${r.reserve}</b> <span class="k">${esc(r.unit)}</span>${badge}${r.note ? ` <span class="k">· ${esc(r.note)}</span>` : ''}</li>`;
+  }, '还没有消耗品数据');
+}
+
 // 技能按版本展示状态；选了哪个筛选记在本浏览器里
 const SKILL_VIEWS = [['active', '在用'], ['candidate', '待试用'], ['disabled', '已停用'], ['retired', '已收起'], ['all', '全部']];
 let skillView = (() => { try { return localStorage.getItem('curio.skillView') || 'active'; } catch { return 'active'; } })();
@@ -1278,6 +1322,8 @@ function render(s) {
 
   renderNow(ex, t, s);
   renderMind(ex.mind);
+  renderTradeoff(p);
+  renderSupply(s.supply);
   renderSkills(s.skills);
   renderLearning(s.learning);
   const sp = s.spectator;

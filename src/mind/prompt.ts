@@ -239,7 +239,7 @@ ${CONDITIONS}
 ${PRECISE}
 
 ${EXAMPLE}
-${liveAudience.enabled ? `\n${AUDIENCE_RULES}\n` : ''}
+${liveAudience.enabled && liveAudience.inPrompt !== false ? `\n${AUDIENCE_RULES}\n` : ''}
 【动作】参数必须合法：
 ${movesCatalog(28, undefined, advanced)}${SKILL_INDEX(skills)}`;
 }

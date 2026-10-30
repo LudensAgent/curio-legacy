@@ -30,6 +30,23 @@ export interface LlmProvider {
 /** hint.maxTokensScale：1–8 倍 */
 const scaleOf = (hint: unknown) => { const n = Number((hint as any)?.maxTokensScale); return Number.isFinite(n) && n > 1 ? Math.min(8, n) : 1; };
 
+/** DNS / 连接层的瞬时故障（如 Clash TUN DNS 间歇失效）：请求根本没到服务端，短暂退避重试通常能成 */
+function isTransient(error: unknown): boolean {
+  let cur: unknown = error;
+  for (let depth = 0; cur != null && depth < 4; depth++) {
+    const e = cur as { message?: unknown; code?: unknown; syscall?: unknown };
+    const msg = String(e?.message ?? '');
+    const code = String(e?.code ?? '');
+    // getaddrinfo 全家（ENOTFOUND/EAI_AGAIN/…）都是 DNS 瞬时失败
+    if (e?.syscall === 'getaddrinfo') return true;
+    if (/getaddrinfo\s+(ENOTFOUND|EAI_AGAIN|ENONET|ECONNREFUSED)/.test(msg)) return true;
+    if (/^(ENOTFOUND|EAI_AGAIN|ENONET|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|ECONNABORTED)$/.test(code)) return true;
+    if (/^HTTP (429|502|503|504)/.test(msg)) return true;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 export class OpenAICompatibleProvider implements LlmProvider {
   readonly name: string;
   constructor(private cfg: Omit<Config['llm'], 'maxPromptTokens' | 'maxRecallRounds' | 'visionInput' | 'contextWindowTokens' | 'compactAtRatio' | 'lightThinking' | 'reasoningEffort' | 'price' | 'priceHolidays'> & { lightThinking?: string; reasoningEffort?: string }) {
@@ -65,15 +82,26 @@ export class OpenAICompatibleProvider implements LlmProvider {
   }
 
   async complete(messages: ChatMessage[], signal: AbortSignal, hint?: unknown, onDelta?: OnDelta): Promise<Completion> {
+    let transient = 0;
+    let streamed = false;
+    const safeDelta = onDelta ? (d: { content?: string; reasoning?: string }) => { streamed = true; onDelta(d); } : undefined;
     try {
-      try {
-        return await this.completeOnce(messages, signal, hint, onDelta);
-      } catch (e: any) {
-        const msg = String(e?.message);
-        if (/^HTTP 4\d\d/.test(msg) && /reasoning_effort/i.test(msg) && this.effort(hint)) { this.effortParamRejected = true; return await this.completeOnce(messages, signal, hint, onDelta); }
-        if (!this.noThinking(hint) || !/^HTTP 4\d\d/.test(msg) || !/thinking/i.test(msg)) throw e;
-        this.thinkingParamRejected = true;
-        return await this.completeOnce(messages, signal, hint, onDelta);
+      for (;;) {
+        try {
+          return await this.completeOnce(messages, signal, hint, safeDelta);
+        } catch (e: any) {
+          const msg = String(e?.message);
+          // 服务端不认识参数（reasoning_effort / thinking）：记住后各重试一次
+          if (/^HTTP 4\d\d/.test(msg) && /reasoning_effort/i.test(msg) && this.effort(hint)) { this.effortParamRejected = true; continue; }
+          if (this.noThinking(hint) && /^HTTP 4\d\d/.test(msg) && /thinking/i.test(msg)) { this.thinkingParamRejected = true; continue; }
+          // DNS / 连接层瞬时故障：请求根本没到服务端，短暂退避重试通常能成。已经 stream 出内容就不再重试（会重复输出）。
+          if (isTransient(e) && !streamed && transient < 3 && !signal.aborted) {
+            transient++;
+            await sleep(Math.min(5000, 500 * 2 ** (transient - 1)), signal);
+            continue;
+          }
+          throw e;
+        }
       }
     } catch (error: any) {
       if (signal.aborted || ['AbortError', 'AbortedError', 'TimeoutError'].includes(error?.name)) throw error;

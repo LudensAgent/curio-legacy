@@ -156,3 +156,66 @@ export function durabilityFacts(inv: Inv, kinds: string[] = ['pickaxe'], stock?:
   }
   return out;
 }
+
+/**
+ * 控制台「消耗品预算」卡的结构化读数：常驻基线，不看具体意图。
+ * 每样消耗品一条：存量 + 单价投影（还能覆盖多少）+ 补货缺口。只报事实，
+ * 不替 Agent 判「够不够」（那需要它说出的规模 extent，见 supply-budget.md 分工边界）。
+ */
+export interface SupplyReading {
+  id: string;
+  label: string;
+  /** 现有数量（支 / 个 / 发 / 块 / 耐久格 / 可烧件数） */
+  reserve: number;
+  unit: string;
+  /** 单价投影 + 补货缺口，一句话 */
+  note: string;
+  /** 稀缺 / 不足提示：bad = 归零，warn = 偏少 */
+  tone: 'ok' | 'warn' | 'bad' | null;
+}
+
+export function supplyReading(inv: Inv, opts: { stock?: Stock; torchEvery?: number; difficulty?: AgentState['difficulty'] } = {}): SupplyReading[] {
+  const { stock, torchEvery, difficulty } = opts;
+  const sum = (re: RegExp) => inv.filter((i) => re.test(i.name)).reduce((n, i) => n + i.count, 0);
+  const rows: SupplyReading[] = [];
+
+  // 火把：存量 × torch_every = 能照亮多少格；煤/木棍还能直接做多少支
+  const torches = sum(/^torch$/);
+  const every = torchEvery && torchEvery > 0 ? torchEvery : 8;
+  const c = torchCraftable(inv, stock);
+  const torchNote = [`约能照亮 ${torches * every} 格暗处`];
+  if (c.coal || c.sticks) torchNote.push(`煤/木炭 ${c.coal}、木棍 ${c.sticks}，还能直接做 ${c.craftable} 支`);
+  if (difficulty === 'peaceful') torchNote.push('和平没怪，火把只为照明');
+  rows.push({ id: 'torch', label: '火把', reserve: torches, unit: '支', note: torchNote.join('；'),
+    tone: torches === 0 ? 'bad' : torches <= 4 ? 'warn' : null });
+
+  // 食物：路上能吃的，以及其中能回饱食度的熟食
+  const food = sum(FOOD), cooked = sum(/cooked_|bread|baked_potato/);
+  rows.push({ id: 'food', label: '食物', reserve: food, unit: '个', note: cooked ? `其中熟食 ${cooked} 个` : '没有熟食',
+    tone: food === 0 ? 'bad' : food <= 3 ? 'warn' : null });
+
+  // 箭 / 垫脚方块：per_use，就是存量本身
+  const arrows = sum(/arrow$/);
+  if (arrows > 0) rows.push({ id: 'arrow', label: '箭', reserve: arrows, unit: '发', note: '', tone: null });
+  const blocks = sum(BRIDGE_BLOCKS);
+  if (blocks > 0) rows.push({ id: 'blocks', label: '垫脚方块', reserve: blocks, unit: '块', note: '', tone: null });
+
+  // 镐：剩余耐久合计 → 按每挖一格耗 1 耐久估算还能挖多少格；附换一把的材料缺口
+  const picks = inv.filter((i) => i.name.endsWith('_pickaxe'));
+  if (picks.length) {
+    const total = picks.reduce((n, i) => n + (i.durabilities?.length ? i.durabilities.reduce((a, b) => a + b, 0) : i.durability?.left ?? 0), 0);
+    const primary = picks.reduce((a, b) => (b.count ?? 1) > (a.count ?? 1) ? b : a);
+    let gap = '';
+    try { gap = describePlan(materialPlan(primary.name, 1, withChests(inv, stock))); } catch { /* 配方未知略去换料 */ }
+    rows.push({ id: 'pickaxe', label: '镐耐久', reserve: total, unit: '格', note: `还能挖约 ${total} 格${gap ? `；换一把：${gap}` : ''}`,
+      tone: total === 0 ? 'bad' : total <= 30 ? 'warn' : null });
+  }
+
+  // 燃料：现有燃料（背包 + 箱子）合计能烧多少件，不针对某次冶炼
+  let capacity = 0; const fuels: string[] = [];
+  for (const i of inv) { const per = fuelBurn(i.name); if (per > 0 && i.count > 0) { capacity += i.count * per; fuels.push(`${i.name}×${i.count}`); } }
+  for (const s of stock ?? []) { const per = fuelBurn(s.item); if (per > 0 && s.inChests > 0) { capacity += s.inChests * per; fuels.push(`${s.item}×${s.inChests}（箱子）`); } }
+  if (capacity > 0) rows.push({ id: 'fuel', label: '燃料', reserve: Math.round(capacity), unit: '件', note: `现有燃料能烧约 ${Math.round(capacity)} 件${fuels.length ? `（${fuels.slice(0, 3).join('、')}）` : ''}`, tone: null });
+
+  return rows;
+}

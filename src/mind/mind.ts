@@ -1699,7 +1699,7 @@ export class Mind {
       autonomy: { intent: focus ? { id: focus.id, text: focus.text, whyNow: this.activity?.why ?? '' } : this.activity ? { text: this.activity.what, whyNow: this.activity.why } : null, project: null, evidence: [] },
       mode: this.autonomous ? 'mind' : 'mind-rules',
       mind: {
-        mood: self.mood, feeling: moodWords(self.mood), traits: self.data.traits, likes: self.tastes(),
+        mood: self.mood, feeling: moodWords(self.mood), traits: self.data.traits, likes: self.tastes(), habits: self.habits(),
         activity: this.activity ? describeActivity(this.activity, state, this.safe(() => this.d.perception.snapshot(), undefined)) : null,
         suspended: this.suspended.map((a) => a.what),
         next: this.queuedNext?.draft.what ?? null,
