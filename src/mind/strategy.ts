@@ -39,7 +39,7 @@ export class StrategyLog {
     this.phase = phase;
   }
 
-  facts(input: { agenda: AgendaItem[]; builds: BuildNote[]; skills?: { total: number; forged: number; retired: number } }, now = Date.now()): string[] {
+  facts(input: { agenda: AgendaItem[]; builds: BuildNote[]; skills?: { total: number; forged: number; retired: number }; supply?: string | null }, now = Date.now()): string[] {
     const out: string[] = [];
     const nights = this.nights.slice(-8);
     if (nights.length) {
@@ -61,6 +61,7 @@ export class StrategyLog {
       out.push(`盖房：${b.length} 座作品，${b.filter((x) => x.status === 'complete').length} 座收工/盖好，验收合计 ${b.reduce((n, x) => n + x.attempts, 0)} 次；没收工的：${b.filter((x) => x.status !== 'complete').map((x) => `${x.name}还差${x.missing}处`).slice(0, 3).join('、') || '无'}`);
     }
     if (input.skills) out.push(`身体技能：现有 ${input.skills.total} 个（这段时间新写 ${input.skills.forged}、收起 ${input.skills.retired}）`);
+    if (input.supply) out.push(input.supply);
     return out;
   }
 }

@@ -105,6 +105,16 @@ export function fuelFacts(inv: Inv, input: string, count: number): string | null
   return `要烧 ${input}×${count}，背包燃料合计能烧约 ${Math.round(capacity)} 件${enough ? '，够' : `，还差约 ${Math.round(count - capacity)}`}（${fuels.slice(0, 3).join('、')}；1 煤=8 件，原版默认）`;
 }
 
+/** 最近几段活消耗掉的消耗品（火把/食物/箭/方块），给回想看「出门带没带够」；只报事实，不给结论 */
+export function consumptionSummary(lost: Record<string, number>[]): string | null {
+  const totals = new Map<string, number>();
+  for (const l of lost) for (const [k, v] of Object.entries(l)) {
+    if (v > 0 && SUPPLY_PROFILES.some((p) => p.match.test(k))) totals.set(k, (totals.get(k) ?? 0) + v);
+  }
+  const parts = [...totals].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([k, v]) => `${k}×${v}`);
+  return parts.length ? `最近消耗的消耗品：${parts.join('、')}` : null;
+}
+
 export function durabilityFacts(inv: Inv, kinds: string[] = ['pickaxe']): string[] {
   const out: string[] = [];
   for (const kind of kinds) {

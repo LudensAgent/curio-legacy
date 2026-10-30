@@ -12,6 +12,7 @@ import { evaluateCondition, observationReady } from '../projects/conditions.ts';
 import { SKILLS } from '../skills/index.ts';
 import { worldPoint } from '../skills/recovery.ts';
 import { causeName } from '../brain/habits.ts';
+import { consumptionSummary } from '../brain/supply.ts';
 import { pickFuel } from '../skills/economy.ts';
 import { pickVariant } from '../skills/work.ts';
 import { afterStep, argsLabel, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, nextStep, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
@@ -1161,6 +1162,7 @@ export class Mind {
     this.d.bus.publish('reflect_start', 'P3', `回想一下这段时间（${why}）`);
     const strategy = this.safe(() => this.strategy.facts({
       agenda: this.d.self.data.agenda, builds: myBuilds(this.d.memory, this.d.adapter.state(), 8),
+      supply: consumptionSummary(this.d.self.history(20).map((r) => r.lost)),
     }), [] as string[]);
     this.d.thinker.reflect(this.d.self, this.d.persona, controller.signal, strategy).then((c) => {
       if (this.reflecting !== controller) return;
