@@ -37,7 +37,7 @@ export function measureLight(adapter: Pick<GameAdapter, 'blockAt' | 'lightAt'>, 
 export const torchCount = (inv: { name: string; count: number }[]) => inv.filter((i) => i.name === 'torch').reduce((n, i) => n + i.count, 0);
 
 /** 实际火把已存在但光照回包迟到时，只认能直接照到身边的近处光源；墙后的火把不算。 */
-function nearbyTorchLight(adapter: Pick<GameAdapter, 'blockAt'>, pos: { x: number; y: number; z: number }) {
+export function nearbyTorchLight(adapter: Pick<GameAdapter, 'blockAt'>, pos: { x: number; y: number; z: number }) {
   const x = Math.floor(pos.x), y = Math.floor(pos.y), z = Math.floor(pos.z);
   let light = 0;
   for (let dx = -4; dx <= 4; dx++) for (let dy = -1; dy <= 2; dy++) for (let dz = -4; dz <= 4; dz++) {

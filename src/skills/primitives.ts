@@ -102,7 +102,14 @@ export const digAt: Skill<CellArgs> = {
       throwIfAborted(ctx.signal);
       seenBefore = visibleCells(ctx, [pos]).get(key);
     }
-    if (!seenBefore) return fail('NOT_FOUND', `[${args.at}] 没有发生挖掘；目标格 (${pos.x},${pos.y},${pos.z}) ${ctx.senses.observeBlocks ? '尝试看向后仍未在当前视野' : '当前没有视觉确认'}，可能被遮挡、太暗或未加载，方块状态未知，未确认是空气还是其他方块`, { ...after(ctx, args.facing, pos), noop: true, obscured: true });
+    if (!seenBefore) {
+      const [df, du, dr] = args.at;
+      const diagonalDown = du === -1 && (df !== 0 || dr !== 0);
+      const hint = diagonalDown
+        ? `；斜下格在正前方/侧方那格后面，本来就看不见也挖不到——先挖 [${df},0,${dr}] 让这格露出来，再挖 [${df},-1,${dr}]，或直接往下挖 [0,-1,0]`
+        : '';
+      return fail('NOT_FOUND', `[${args.at}] 没有发生挖掘；目标格 (${pos.x},${pos.y},${pos.z}) ${ctx.senses.observeBlocks ? '尝试看向后仍未在当前视野' : '当前没有视觉确认'}，可能被遮挡、太暗或未加载，方块状态未知，未确认是空气还是其他方块${hint}`, { ...after(ctx, args.facing, pos), noop: true, obscured: true });
+    }
     const before = ctx.adapter.blockAt(pos);
     if (before !== seenBefore) return fail('TARGET_GONE', `[${args.at}] 目标格在观察后已改变或尚未加载，没有执行挖掘`, { ...after(ctx, args.facing, pos), noop: true });
     if (AIR.has(before)) return ok(`[${args.at}] 本来就是空的，不用挖`, { cell: [...args.at], was: 'air', ...after(ctx, args.facing, pos), noop: true });

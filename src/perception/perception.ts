@@ -7,7 +7,7 @@ import type { GameAdapter, InvItem, Vec3Like } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { dist3, effectiveLight, round1, lightAround } from '../util.ts';
-import { torchCount } from '../skills/light.ts';
+import { torchCount, nearbyTorchLight } from '../skills/light.ts';
 import { interactiveName, INTERACTIVE_BLOCKS, NOTABLE, type Vision, type VisionSummary } from './vision.ts';
 import { type Drive, type Stock } from '../brain/drives.ts';
 import { PassageTracker } from '../memory/passages.ts';
@@ -325,16 +325,18 @@ export class Perception {
     const x = Math.floor(s.pos.x), y = Math.floor(s.pos.y), z = Math.floor(s.pos.z);
     const l = lightAround(this.adapter, x, y, z);
     if (!l) return null;
-    const here = effectiveLight(l, s.timeOfDay);
+    // 客户端方块光（getBlockLight）插火把后可能没及时更新：合并近处火把的估算光，避免插了火把仍报“很暗”
+    const block = Math.max(l.block, nearbyTorchLight(this.adapter, s.pos));
+    const here = effectiveLight({ block, sky: l.sky }, s.timeOfDay);
     const comp = this.vision.composition;
     const total = Object.values(comp).reduce((a, b) => a + b, 0) || 1;
     return {
       here,
-      block: l.block,
+      block,
       sky: l.sky,
       level: here >= 10 ? 'bright' : here >= 4 ? 'dim' : 'dark',
       // 1.18+：方块光为 0 且足够暗时会刷敌对生物
-      mob_spawn_risk: l.block === 0 && here <= 7,
+      mob_spawn_risk: block === 0 && here <= 7,
       dark_view_pct: Math.round(((comp.dark ?? 0) / total) * 100),
       underground: l.sky <= 4,
       torches: torchCount(s.inventory),

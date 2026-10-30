@@ -11,6 +11,7 @@ import { AbortedError, raceAbort, shortId, sleep, throwIfAborted, TimeoutError }
 import { installClientGuard } from './click-guard.ts';
 import { cornerSafe } from './corner-safe.ts';
 import { AIR_BLOCKS, attachmentFaces } from '../perception/surroundings.ts';
+import { feetCell, facingOfYaw } from '../perception/local.ts';
 
 import type {
   InvItem,
@@ -44,16 +45,29 @@ import type {
   SmeltResult,
 } from './types.ts';
 
-type PillarClearance = { kind: 'blocked' | 'unknown'; min: Vec3Like; max: Vec3Like; block?: { pos: Vec3Like } };
+type PillarClearance = { kind: 'blocked' | 'unknown'; min: Vec3Like; max: Vec3Like; block?: { pos: Vec3Like; rel?: [number, number, number]; facing?: string } };
+
+/** 世界坐标 → 以脚为原点的 [前,上,右]（与 dig_at 的 toWorld 互为逆运算），让心智能直接对着障碍格下 dig_at */
+const REL_FORWARD: Record<string, [number, number]> = { N: [0, -1], E: [1, 0], S: [0, 1], W: [-1, 0] };
+const REL_RIGHT: Record<string, [number, number]> = { N: [1, 0], E: [0, 1], S: [-1, 0], W: [0, -1] };
+function relToBody(feet: Vec3Like, facing: string, block: Vec3Like): [number, number, number] {
+  const dx = block.x - feet.x, dz = block.z - feet.z;
+  const fw = REL_FORWARD[facing] ?? [0, -1], rt = REL_RIGHT[facing] ?? [1, 0];
+  return [dx * fw[0] + dz * fw[1], block.y - feet.y, dx * rt[0] + dz * rt[1]];
+}
 
 function describePillarClearance(clearance: PillarClearance): string {
   const { min, max } = clearance;
   const range = `跳跃时身体扫过的方块范围 x=${min.x}..${max.x}, y=${min.y}..${max.y}, z=${min.z}..${max.z}`;
   // 只报“挡在哪一格”，不报方块名：跳起来撞到的位置是身体能感知的（本体感觉），
   // 方块名称属于看不到的透视信息，交给心智/技能自己看清或动手再确认。
-  return clearance.kind === 'blocked'
-    ? `头顶跳跃空间受阻；${range}，具体障碍格 ${clearance.block ? `(${clearance.block.pos.x},${clearance.block.pos.y},${clearance.block.pos.z})` : '未确认'}（方块名称未确认）`
-    : `头顶跳跃空间未加载；${range}，具体未加载位置未确认`;
+  // 但补上相对身体的 [前,上,右] 坐标和朝向：否则心智要从绝对坐标反推相对坐标，窄竖井里容易挖错格。
+  if (clearance.kind === 'blocked') {
+    const blk = clearance.block;
+    const rel = blk?.rel ? `，相对你的 [前,上,右]=[${blk.rel[0]},${blk.rel[1]},${blk.rel[2]}]（当前朝向 ${blk.facing}）` : '';
+    return `头顶跳跃空间受阻；${range}，具体障碍格 ${blk ? `(${blk.pos.x},${blk.pos.y},${blk.pos.z})${rel}` : '未确认'}（方块名称未确认）`;
+  }
+  return `头顶跳跃空间未加载；${range}，具体未加载位置未确认`;
 }
 
 class PillarClearanceError extends Error {
@@ -1155,7 +1169,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           const shapes: number[][] = block.shapes ?? (block.boundingBox === 'empty' ? [] : [[0, 0, 0, 1, 1, 1]]);
           if (shapes.some((shape) => x + shape[3] > p.x - 0.3 + epsilon && x + shape[0] < p.x + 0.3 - epsilon
             && z + shape[5] > p.z - 0.3 + epsilon && z + shape[2] < p.z + 0.3 - epsilon
-            && y + shape[4] > p.y + 1.8 + epsilon && y + shape[1] < top - epsilon)) return { kind: 'blocked', min, max, block: { pos: { x, y, z } } };
+            && y + shape[4] > p.y + 1.8 + epsilon && y + shape[1] < top - epsilon)) {
+            const feet = feetCell({ x: p.x, y: p.y, z: p.z });
+            const facing = facingOfYaw(b.entity.yaw);
+            return { kind: 'blocked', min, max, block: { pos: { x, y, z }, rel: relToBody(feet, facing, { x, y, z }), facing } };
+          }
         }
     return null;
   }
@@ -1618,6 +1636,23 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         return { ok: true };
       } catch (e: any) {
         if (e?.name === 'AbortedError') throw e;
+      }
+    }
+    // 窄竖井里往自己脚下/头那一格插火把：脚下那块顶面无论如何都够得着，射线门禁在身体格上容易误拒，直接贴着脚下放
+    if (item && b.entity?.position && /(^|_)torch$/.test(item.name)) {
+      const feet = feetCell({ x: b.entity.position.x, y: b.entity.position.y, z: b.entity.position.z });
+      const ownCell = target.x === feet.x && target.z === feet.z && (target.y === feet.y || target.y === feet.y + 1);
+      if (ownCell) {
+        const floor = b.blockAt(target.offset(0, -1, 0));
+        if (floor && floor.boundingBox === 'block') {
+          try {
+            await this.afterAction(() => b.equip(item, 'hand'), check);
+            await this.afterAction(() => raceAbort(b.placeBlock(floor, new Vec3(0, 1, 0)), signal, 5000, () => {}), check);
+            return { ok: true };
+          } catch (e: any) {
+            if (e?.name === 'AbortedError') throw e;
+          }
+        }
       }
     }
     return { ok: false, reason: 'NO_REFERENCE' };
