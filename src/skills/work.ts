@@ -141,8 +141,8 @@ function inDeepWater(ctx: SkillCtx): boolean {
 
 export const gather: Skill<{ block: string; count: number; for?: { item: string; count: number }; note?: string; dig?: boolean }> = {
   name: 'gather',
-  description: '前往【看见过或正看见】的指定方块并挖掘、拾取。写 for（要做的东西和数量）时按背包缺口算该采几个，已经够了就不采；看不见的不会去挖（没有透视），也不会自己往下挖。block 可用别名：log(任意原木)、stone、dirt、coal、iron、ore',
-  argsDoc: '{"block": "log|stone|coal|iron|<方块名>", "for"?: {"item":"要做的东西（物品 ID）","count":1} | "物品名", "count"?: 1-32（不写 for 时用）, "dig"?: true（路上挡着的土石挖穿、垫方块过去）}',
+  description: '前往【看见过或正看见】的指定方块并挖掘、拾取。count 是采到背包里一共有多少个（先扣掉已有的，只采缺口）；写 for（要做的东西和数量）时按配方算缺多少原材料，已经够了就不采；看不见的不会去挖（没有透视），也不会自己往下挖。block 可用别名：log(任意原木)、stone、dirt、coal、iron、ore',
+  argsDoc: '{"block": "log|stone|coal|iron|<方块名>", "count"?: 1-32（目标总数，会扣掉背包已有的）, "for"?: {"item":"要做的东西（物品 ID）","count":1} | "物品名", "dig"?: true（路上挡着的土石挖穿、垫方块过去）}',
   timeoutMs: 180000,
   movement: true,
   outcomeBoundary: true,
@@ -187,6 +187,11 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
       const wanted = names.filter((n) => mine.some((r) => r.item === n || r.from.includes(n) || (r.anyWood && n.endsWith('_log'))));
       if (wanted.length) names = wanted;
       ctx.progress(0, `${describePlan(plan)}：先采 ${args.block}×${args.count}`);
+    } else {
+      // 不写 for：count 是"要采到多少"，不是"再采多少"——先扣掉背包里已经有的
+      const have = names.reduce((sum, n) => sum + adapter.state().inventory.filter((i) => i.name === n).reduce((a, i) => a + i.count, 0), 0);
+      if (have >= args.count) return ok(`背包里已经有 ${have} 个 ${args.block}，不用再采`);
+      args = { ...args, count: args.count - have };
     }
     const canDigDown = names.some((n) => UNDERFOOT.has(n));
     const skip = new Set<string>();
