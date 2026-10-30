@@ -145,8 +145,26 @@ const mb = (n) => (typeof n === 'number' ? `${Math.round(n / 1048576)} MB` : '?'
 // ------------------------------------------------------------ 命令行入口
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-  const selectedEnv = process.execArgv.find((arg) => arg.startsWith('--env-file='))?.slice('--env-file='.length)
-    || process.env.ENV_FILE?.trim();
+  // CURIO_ROOT：数据 + env 文件放在项目外（如 /path/to/curio）时，用它定位模式文件。
+  // 优先进程环境变量，其次读项目根目录 .env（与子进程加载顺序一致）。
+  const rootEnvVars = (() => {
+    const f = path.join(root, '.env');
+    return fs.existsSync(f) ? parseEnv(fs.readFileSync(f, 'utf8')) : {};
+  })();
+  const curioRoot = (process.env.CURIO_ROOT || rootEnvVars.CURIO_ROOT || '').trim();
+  const curioArg = process.argv.find((a) => a.startsWith('--curio='))?.slice('--curio='.length);
+  if (curioArg) {
+    if (curioArg !== 'live' && curioArg !== 'local') throw new Error(`--curio 只支持 live / local，收到：${curioArg}`);
+    if (!curioRoot) throw new Error('--curio 需要 CURIO_ROOT（进程环境变量或项目根目录 .env 里设置）');
+  }
+  let selectedEnv = curioArg
+    ? path.join(curioRoot, `.env.${curioArg}`)
+    : process.execArgv.find((arg) => arg.startsWith('--env-file='))?.slice('--env-file='.length)
+      || process.env.ENV_FILE?.trim();
+  if (selectedEnv === 'live' || selectedEnv === 'local') {
+    if (!curioRoot) throw new Error(`裸模式 ${selectedEnv} 需要 CURIO_ROOT（进程环境变量或项目根目录 .env 里设置）`);
+    selectedEnv = path.join(curioRoot, `.env.${selectedEnv}`);
+  }
   const envFile = path.resolve(root, selectedEnv || '.env');
   const hasEnv = fs.existsSync(envFile);
   if (selectedEnv && !hasEnv) throw new Error(`找不到配置文件：${envFile}`);

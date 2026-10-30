@@ -21,6 +21,8 @@
     "supervise:live": "node --env-file=.env.live scripts/supervise.mjs",
     "supervise:local:proxy": "node --env-file=.env.local scripts/supervise.mjs --proxy",
     "supervise:live:proxy": "node --env-file=.env.live scripts/supervise.mjs --proxy",
+    "supervise:curio:live": "node scripts/supervise.mjs --curio=live",
+    "supervise:curio:local": "node scripts/supervise.mjs --curio=local",
     "dev": "tsx watch src/main.ts",
     "check:llm": "tsx scripts/check-llm.ts",
     "check:rcon": "tsx scripts/check-rcon.ts",

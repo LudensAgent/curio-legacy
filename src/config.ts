@@ -3,11 +3,25 @@ import path from 'node:path';
 import { parseEnv } from 'node:util';
 import { memorySettings } from './memory/settings.ts';
 
-const selectedEnv = process.execArgv.find((arg) => arg.startsWith('--env-file='))?.slice('--env-file='.length)
+// CURIO_ROOT：env + 数据放在项目外（如 /path/to/curio）时，用裸关键字 live / local 定位 $CURIO_ROOT/.env.<mode>。
+// 优先进程环境变量，其次读项目根目录 .env（与 scripts/supervise.mjs 保持一致）。
+const curioRoot = (() => {
+  const fromEnv = process.env.CURIO_ROOT?.trim();
+  if (fromEnv) return fromEnv;
+  const f = path.resolve('.env');
+  return fs.existsSync(f) ? (parseEnv(fs.readFileSync(f, 'utf8')).CURIO_ROOT?.trim() ?? '') : '';
+})();
+const curioArg = process.argv.find((arg) => arg.startsWith('--curio='))?.slice('--curio='.length);
+if (curioArg && curioArg !== 'live' && curioArg !== 'local') throw new Error(`--curio 只支持 live / local，收到：${curioArg}`);
+const selectedEnvRaw = curioArg
+  || process.execArgv.find((arg) => arg.startsWith('--env-file='))?.slice('--env-file='.length)
   || process.env.ENV_FILE?.trim();
+const isBareMode = selectedEnvRaw === 'live' || selectedEnvRaw === 'local';
+if (isBareMode && !curioRoot) throw new Error(`裸模式 ${selectedEnvRaw} 需要 CURIO_ROOT（进程环境变量或项目根目录 .env 里设置）`);
+const selectedEnv = isBareMode ? path.join(curioRoot, `.env.${selectedEnvRaw}`) : selectedEnvRaw;
 export const envFile = path.resolve(selectedEnv || '.env');
 const hasEnv = fs.existsSync(envFile);
-if (selectedEnv && !hasEnv) throw new Error(`找不到配置文件：${envFile}`);
+if (selectedEnvRaw && !hasEnv) throw new Error(`找不到配置文件：${envFile}`);
 
 // 公共 .env + 模式覆盖文件（.env.local / .env.live / 自定义）合并。
 // 优先级：进程环境变量 > 模式文件 > 公共 .env（process.loadEnvFile 会覆盖已存在的变量，故手动合并再按序回填）。
