@@ -41,8 +41,8 @@ function parseRel(v: unknown, bounds: { f: number; u: [number, number]; r: numbe
 
 function facingArg(raw: unknown, adapter: { eye(): { yaw: number } | null }): Facing | string {
   if (raw === undefined || raw === null) { const eye = adapter.eye(); return eye ? facingOfYaw(eye.yaw) : 'N'; }
-  const f = String(raw).toUpperCase().slice(0, 1) as Facing;
-  return FACINGS.includes(f) ? f : 'facing 只能是 N/E/S/W';
+  const f = String(raw).trim().toUpperCase();
+  return FACINGS.includes(f as Facing) ? (f as Facing) : 'facing 只能是 N/E/S/W';
 }
 
 /** 执行后附上身边的新样子，模型下一步就知道该挖哪格 */
