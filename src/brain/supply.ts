@@ -49,6 +49,10 @@ export interface SupplyFacts {
   torchEvery?: number;
   /** 只生成这些 profile 的事实；缺省全部 */
   only?: Set<string>;
+  /** 世界难度：和平下火把只为照明，不压刷怪 */
+  difficulty?: AgentState['difficulty'];
+  /** 世界规则：keepInventory 开时风险前提不同 */
+  gamerules?: AgentState['gamerules'];
 }
 
 export function supplyFacts(opts: SupplyFacts): string[] {
@@ -61,7 +65,8 @@ export function supplyFacts(opts: SupplyFacts): string[] {
     const every = opts.torchEvery && opts.torchEvery > 0 ? opts.torchEvery : 8;
     const c = torchCraftable(inv);
     const craft = c.craftable > 0 ? `；煤/木炭 ${c.coal}、木棍 ${c.sticks}，还能直接做 ${c.craftable} 支` : `；煤/木炭 ${c.coal}、木棍 ${c.sticks}，眼下不够直接做火把`;
-    out.push(`火把 ${torches} 支（torch_every≈${every} → 约能照亮 ${torches * every} 格暗处）${craft}`);
+    const spawn = opts.difficulty === 'peaceful' ? '（和平没怪，火把只为照明）' : opts.difficulty ? `（${opts.difficulty}，会刷怪，得多备）` : '';
+    out.push(`火把 ${torches} 支（torch_every≈${every} → 约能照亮 ${torches * every} 格暗处）${spawn}${craft}`);
   }
   if (want('food')) {
     const cooked = sum(inv, /cooked_|bread|baked_potato/);

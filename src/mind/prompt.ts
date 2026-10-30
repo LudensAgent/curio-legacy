@@ -315,7 +315,7 @@ function planRevisionHint(ctx: MindContext): string | null {
   const outcomeText = { done: '做成', stuck: '卡住', unmet: '没做成', abandoned: '放下', interrupted: '打断', replaced: '换掉' } as const;
   const recent = acts.slice(-3).map((r) => `${r.what.slice(0, 18)}→${outcomeText[r.outcome] ?? r.outcome}`);
   const doneSteps = plan.steps.filter((st) => st.done).map((st) => st.text);
-  return `主目标「${plan.goal.slice(0, 30)}」的清单已观察到 ${Math.round(stall.minutes)} 在线分钟没勾掉一项${stall.historyUnknown ? '（更早的在线时长未知）' : ''}，最近：${recent.join('；')}。主目标不用换（换目标要等阶段回顾）；但清单可以改：把反复卡住缺掉的那一步补成一项、或把卡住的项拆成能验证的小步，写 plan {"focus":"${plan.agendaId}","steps":[…] }${doneSteps.length ? `；已经勾掉的（${doneSteps.slice(0, 3).map((t) => `「${t.slice(0, 14)}」`).join('、')}）保留，别写成新步骤` : ''}`;
+  return `主目标「${plan.goal.slice(0, 30)}」的清单已观察到 ${Math.round(stall.minutes)} 在线分钟没勾掉一项${stall.historyUnknown ? '（更早的在线时长未知）' : ''}，最近：${recent.join('；')}。主目标不用换（换目标要等阶段回顾）；但清单可以改：把反复卡住缺掉的那一步补成一项、把卡住的项拆成能验证的小步，或删掉做不成的项（删项要在 plan 里写 "switch_reason" 说明为什么），写 plan {"focus":"${plan.agendaId}","steps":[…] }${doneSteps.length ? `；已经勾掉的（${doneSteps.slice(0, 3).map((t) => `「${t.slice(0, 14)}」`).join('、')}）保留，别写成新步骤` : ''}`;
 }
 
 /** 按情境追加在用户消息末尾的提醒：只说和眼下有关的 2–4 件事 */
@@ -345,7 +345,10 @@ export function situationalReminders(ctx: MindContext): string[] {
       out.push(`记得自己${t.text}`);
     }
     // 消耗品预算：下矿前把火把够不够、还能做多少摆出来（只报事实，备多少由它定）
-    out.push(...supplyFacts({ inv: s.inventory, torchEvery: ctx.self.habits().torch_every, only: new Set(['torch']) }));
+    out.push(...supplyFacts({ inv: s.inventory, torchEvery: ctx.self.habits().torch_every, only: new Set(['torch']), difficulty: s.difficulty, gamerules: s.gamerules }));
+    // 世界规则事实：keepInventory 开着时死亡不掉落（只是事实，怎么备仍由它定）
+    const keepInv = s.gamerules?.keepInventory;
+    if (keepInv === true || keepInv === 'true') out.push('keepInventory 开着（死亡不掉落）');
     // 预算要有个规模可除：提醒它把挖多深/横多远说出来（不替它定）
     if (!/(y ?[=-]? ?\d+|挖到|下到|横着|横探|\d+ ?格)/.test(intent)) {
       out.push('要下矿先想好这次大概挖多深/横多远（挖到 y=某层、横着多少格），火把和镐的预算按这个来');
