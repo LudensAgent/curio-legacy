@@ -420,6 +420,11 @@ export interface GameAdapter {
    */
   ride?(target: { x: number; z: number }, signal: AbortSignal, opts: { timeoutMs: number; stop?: () => boolean; via?: { x: number; z: number }[]; arriveWithin?: number }): Promise<ActionResult & { arrived: boolean; blocked?: boolean; moved: number }>;
   /**
+   * 鞘翅滑翔到已知坐标：起飞/巡航/避障/着陆在一趟连续控制里完成（速度约 30 格/秒，不逐格问）。
+   * 只执行 Agent 已选定的目的地与火箭预算，报告真实结果：是否落地、是否到达、是否撞伤、消耗几发火箭。
+   */
+  glideTo?(target: Vec3Like, signal: AbortSignal, opts: { timeoutMs: number; allowRockets?: boolean; maxRockets?: number }): Promise<ActionResult & { arrived: boolean; landed: boolean; crashed: boolean; rocketsUsed: number; distance: number; position: Vec3Like; hpLost: number }>;
+  /**
    * 甩一次竿钓鱼：手持 fishing_rod 朝 aim（水面方块）甩出，咬钩自动收竿；timeoutMs 内没咬钩就收竿（reason NO_BITE）。
    * caught = 实际进了背包的东西（cod、salmon…）；没有钓鱼竿 reason = NO_ROD
    */

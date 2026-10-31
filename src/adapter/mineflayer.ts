@@ -3550,6 +3550,117 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     }
   }
 
+  /**
+   * 鞘翅滑翔到已知坐标：起飞/巡航/避障/着陆在一趟连续控制里完成（速度约 30 格/秒，远超 LLM 反应窗口，所以不逐格问）。
+   * 只执行 Agent 已选定的目的地与火箭预算；如实报告：是否落地、是否到达、是否撞伤、消耗几发火箭。
+   * 俯仰控制是身体控制律（俯冲=加速下降、抬头=减速/短暂爬升），不是替 Agent 选目的地或手段。
+   */
+  async glideTo(target: Vec3Like, signal: AbortSignal, opts: { timeoutMs: number; allowRockets?: boolean; maxRockets?: number }): Promise<ActionResult & { arrived: boolean; landed: boolean; crashed: boolean; rocketsUsed: number; distance: number; position: Vec3Like; hpLost: number }> {
+    const check = this.actionCheckpoint(signal);
+    const b = this.bot;
+    const pv = (p: Vec3Like) => ({ x: p.x, y: p.y, z: p.z });
+    const out = (o: { ok?: boolean; reason?: string; arrived?: boolean; landed?: boolean; crashed?: boolean; rocketsUsed?: number; distance?: number; position?: Vec3Like; hpLost?: number }) => ({
+      ok: o.ok ?? false, ...(o.reason ? { reason: o.reason } : {}),
+      arrived: o.arrived ?? false, landed: o.landed ?? false, crashed: o.crashed ?? false,
+      rocketsUsed: o.rocketsUsed ?? 0, distance: o.distance ?? 0, position: pv(o.position ?? this.state().pos), hpLost: o.hpLost ?? 0,
+    });
+    if (!this.ready) return out({ reason: 'NOT_CONNECTED' });
+    const epoch = this.actionEpoch, dimension = this.currentDimension();
+    const ownsControls = () => epoch === this.actionEpoch && b === this.bot && dimension === this.currentDimension();
+    const goal = this.vec(target);
+    const start = b.entity.position.clone();
+    const hp0 = b.health ?? 0;
+    const allowRockets = opts.allowRockets === true;
+    const maxRockets = Math.max(0, Math.min(64, Math.floor(opts.maxRockets ?? 0)));
+    let rocketsUsed = 0;
+    const end = Date.now() + Math.max(500, Math.min(120000, opts.timeoutMs ?? 60000));
+    const distTo = (p: any) => Math.hypot(p.x - goal.x, p.z - goal.z);
+
+    if (this.state().equipment?.find((e) => e.slot === 'torso')?.name !== 'elytra') return out({ reason: 'NO_ELYTRA', distance: Math.round(start.distanceTo(goal)), position: start });
+
+    // 目标列向下找第一块实心方块作为“地平面”估计；找不到退化成目标 y。用于判断高度余量，不是精确地表。
+    const groundY = () => {
+      for (let y = Math.ceil(goal.y); y >= Math.ceil(goal.y) - 64; y--) {
+        const blk = b.blockAt(new Vec3(Math.floor(goal.x), y, Math.floor(goal.z)));
+        if (blk && blk.boundingBox === 'block') return y + 1;
+      }
+      return Math.ceil(goal.y);
+    };
+
+    const armRocket = async () => {
+      const rocket = this.invItem('firework_rocket');
+      if (!rocket) return false;
+      if (b.heldItem?.name !== 'firework_rocket') await this.afterAction(() => b.equip(rocket, 'hand'), check);
+      return b.heldItem?.name === 'firework_rocket';
+    };
+    const boost = async () => {
+      if (!allowRockets || rocketsUsed >= maxRockets) return false;
+      if (!(await armRocket())) return false;
+      this.actionContext.run(check, () => b.activateItem());
+      rocketsUsed++;
+      return true;
+    };
+
+    b.pathfinder?.setGoal(null);
+    b.clearControlStates();
+    try {
+      // 起飞：跳起离地；允许火箭时补一发获得高度并进入滑翔。
+      check();
+      b.setControlState('jump', true);
+      if (allowRockets && maxRockets > 0 && b.entity.onGround) await boost();
+      await this.afterAction(() => sleep(350, signal), check);
+      if (ownsControls()) b.setControlState('jump', false);
+
+      let lastHp = hp0;
+      let freeFallSince = 0;
+      while (Date.now() < end) {
+        check();
+        const p = b.entity.position;
+        const air = !b.entity.onGround && !b.entity.isInWater;
+        const horiz = distTo(p);
+        const hp = b.health ?? 0;
+
+        // 撞墙/天花板：空中突然掉血是致命危险，立即停，如实报撞了。
+        if (air && lastHp - hp >= 3) {
+          return out({ reason: 'CRASHED', crashed: true, rocketsUsed, distance: Math.round(start.distanceTo(p)), position: p, hpLost: Math.max(0, hp0 - hp) });
+        }
+        lastHp = hp;
+
+        // 落地或落水：飞行结束。
+        if (b.entity.onGround || b.entity.isInWater) {
+          const arrived = horiz <= 4;
+          return out({ ok: arrived, ...(arrived ? {} : { reason: 'LANDED_SHORT' }), arrived, landed: true, crashed: false, rocketsUsed, distance: Math.round(start.distanceTo(p)), position: p, hpLost: Math.max(0, hp0 - hp) });
+        }
+
+        // 起飞失败：一直在原地附近自由落体（没进入滑翔、水平没前进），没有高度来源，判定没飞起来。
+        const v = b.entity.velocity ?? { x: 0, y: 0, z: 0 };
+        if (air && v.y < -1.6 && Math.hypot(v.x, v.z) < 4 && start.distanceTo(p) < 3) {
+          freeFallSince ||= Date.now();
+          if (Date.now() - freeFallSince > 1500) return out({ reason: 'GLIDE_NOT_ENGAGED', distance: Math.round(start.distanceTo(p)), position: p, hpLost: Math.max(0, hp0 - hp) });
+        } else freeFallSince = 0;
+
+        // 转向 + 俯仰策略（身体控制律）：朝目标，低空/进近时抬升减速，高空巡航略俯冲。
+        const yaw = Math.atan2(-(goal.x - p.x), -(goal.z - p.z));
+        const altitude = p.y - groundY();
+        let pitch = -0.35;
+        if (altitude < 4 || (horiz <= 20 && altitude < 8)) pitch = 0.45;
+        else if (horiz <= 30) pitch = Math.max(-0.3, (altitude - 12) / 30);
+        pitch = Math.max(-0.6, Math.min(0.6, pitch));
+        await this.afterAction(() => b.look(yaw, pitch, true), check);
+
+        // 需要高度（低空/前方大概率未知）时，允许火箭就补一发。
+        if (allowRockets && rocketsUsed < maxRockets && (altitude < 2 || (horiz > 40 && altitude < 6))) await boost();
+
+        await this.afterAction(() => sleep(80, signal), check);
+      }
+      const p = b.entity.position;
+      const hp = b.health ?? 0;
+      return out({ reason: 'TIMEOUT', arrived: false, landed: b.entity.onGround || b.entity.isInWater, crashed: false, rocketsUsed, distance: Math.round(start.distanceTo(p)), position: p, hpLost: Math.max(0, hp0 - hp) });
+    } finally {
+      if (ownsControls()) b.clearControlStates();
+    }
+  }
+
   async swimTo(target: Vec3Like | null, signal: AbortSignal, opts: SwimOptions = {}): Promise<ActionResult & { landed: boolean; oxygen: number }> {
     const check = this.actionCheckpoint(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', landed: false, oxygen: 0 };
