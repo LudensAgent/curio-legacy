@@ -37,6 +37,8 @@ export interface MindContext {
   state: AgentState;
   self: SelfModel;
   memory: WorldMemory;
+  /** 结构性事实的审计出口（notice 级低噪）：只在顺手采集/不可替代工具等事实触发时打点，便于核对提示词是否生效 */
+  log?: (msg: string, data?: Record<string, unknown>) => void;
   /** 读一格方块：给 my_bed 就近核对床还在不在（离得近、看得见不是床就把旧地标删掉） */
   blockAt?: (p: { x: number; y: number; z: number }) => string | null;
   activity: Activity | null;
@@ -410,9 +412,9 @@ export function situationalReminders(ctx: MindContext): string[] {
   // 只报事实，采不采、做不做备用工具都由它定（不替它写 gather 或 craft）
   if (ctx.tier === 'deliberate') {
     const ore = oreOpportunityFact(p.nearby.resources, p.storage?.stock, s.inventory);
-    if (ore) out.push(ore);
+    if (ore) { out.push(ore); ctx.log?.(ore, { kind: 'ore_opportunity' }); }
     const backup = toolBackupFact(s.inventory, p.storage?.stock);
-    if (backup) out.push(backup);
+    if (backup) { out.push(backup); ctx.log?.(backup, { kind: 'tool_backup' }); }
   }
   // 养动物、村民交易：打算里提到了才把机制摆出来（模型对这些的记忆常是含糊或老版本的）
   const husbandry = husbandryFacts(intent);

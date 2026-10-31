@@ -1038,6 +1038,7 @@ export class Mind {
     const ctx: MindContext = {
       tier, reason: reflect ? `${reason}；做完了好几段活，顺便回头看看哪些办法好用、哪些该改` : reason,
       percept, state, self: this.d.self, memory: this.d.memory, blockAt: (p) => this.d.adapter.blockAt(p), activity: this.activity, suspended: this.suspended,
+      log: (msg, data) => this.d.bus.publish('notice', 'P3', msg, { level: 'note', salience: 0.3, ...(data ?? {}) }),
       next: this.queuedNext?.draft ?? null,
       lastRecord: this.lastRecord, noticed, changes: this.changesSinceLastThought(), userSuggestion: this.userSuggestion,
       operatorOrder: this.order ? { text: this.order.text, ageSec: Math.round((Date.now() - this.order.at) / 1000), status: this.order.status, kind: this.order.kind } : null,
