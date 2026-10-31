@@ -640,7 +640,7 @@ export class Mind {
     return null;
   }
 
-  /** 没有活可干时（正在想事情）：原地看看四周，不乱跑也不消耗东西 */
+  /** 没有活可干时（正在想事情）：原地维持当前视野、偶尔轻扫，不乱跑也不消耗东西 */
   private idle() {
     if (this.d.arbiter.info() || !this.thinking) return;
     // 危险还在：别去张望、捡东西（站着等想法，比走到怪堆里强）
@@ -650,11 +650,9 @@ export class Mind {
     this.fillerAt = Date.now();
     const state = this.d.adapter.state();
     if (state.inWater || state.inLava || state.onGround === false) return;
-    let knows = false;
-    try { const p = this.d.perception.snapshot(); knows = p.nearby.resources.length > 0 || p.nearby.passive.length > 0; } catch { /* 感知暂不可用 */ }
-    // 掉落物交给轻量思考决定；等回复时只观察，不先移动去捡。
-    if (!knows) this.d.arbiter.start({ skill: 'look_around', args: { seconds: 4 } }, 'filler');
-    else if (SKILLS.glance) this.d.arbiter.start({ skill: 'glance', args: { seconds: 120 } }, 'filler');
+    // 掉落物交给轻量思考决定；等回复时只维持视野、偶尔轻扫，不做整圈主动搜索。
+    // 主动搜索（look_around / explore）由 Agent 自己决定，反射层只保持身体有感知。
+    if (SKILLS.glance) this.d.arbiter.start({ skill: 'glance', args: { seconds: 120 } }, 'filler');
   }
 
   private beginActivity(draft: ActivityDraft, monologue: string, source: Activity['source'], how: string, hypothesis?: string) {
