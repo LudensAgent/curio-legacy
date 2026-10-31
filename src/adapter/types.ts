@@ -382,9 +382,9 @@ export interface GameAdapter {
   /** 自己挖掉的方块（动作、代码技能、寻路挖穿的都算），since 之后的；用来记自己挖过的通道 */
   recentDug?(since: number): { pos: Vec3Like; name: string; ts: number }[];
   collectNearbyDrops(signal: AbortSignal, radius: number, timeoutMs: number): Promise<number>;
-  /** 只合成指定目标；prepare:true 才补做两层前置材料并制造/放置工作台。tablePos = 已知工作台位置 */
+  /** 只合成指定目标；prepare:true 才补做两层前置材料并制造/放置工作台。tablePos = 已知工作台位置；batchSize = 每批最多执行配方的次数（1–64），不是产物个数 */
   /** detail：失败时具体缺什么；tablePos：这次用到的工作台位置（便于记住、下次复用） */
-  craft(item: string, count: number, signal: AbortSignal, opts?: { tablePos?: Vec3Like; prepare?: boolean }): Promise<ActionResult & { crafted: number; detail?: string; tablePos?: Vec3Like }>;
+  craft(item: string, count: number, signal: AbortSignal, opts?: { tablePos?: Vec3Like; prepare?: boolean; batchSize?: number }): Promise<ActionResult & { crafted: number; detail?: string; tablePos?: Vec3Like }>;
   /** 睡在身边的床上（没有就把背包里的床放下）；一直睡到醒来 */
   /** at：要睡的那张床（村子里几张床挨着时用来认准）；床被村民睡着会先把它叫醒 */
   sleepInBed(signal: AbortSignal, opts?: { at?: Vec3Like }): Promise<ActionResult & { bedPos?: Vec3Like }>;

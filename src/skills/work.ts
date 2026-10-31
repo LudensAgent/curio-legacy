@@ -484,10 +484,10 @@ export function gearAlreadyHeld(item: string, inv: InvItem[], worn: { name: stri
   return usable >= limit ? `已经有 ${have.join('、')}，还经用` : null;
 }
 
-export const craft: Skill<{ item: string; count: number; extra?: boolean }> = {
+export const craft: Skill<{ item: string; count: number; batchSize?: number; extra?: boolean }> = {
   name: 'craft',
-  description: '合成指定物品，默认只使用现有材料和已放好的工作台；缺少前置材料或工作台就报告缺口。make:true 显式允许补做两层以内的材料并制造、放置临时工作台，用完收回。count 是本次产物个数。',
-  argsDoc: '{"item": "<物品名>", "count"?: 1-64, "make"?: true（允许补材料和准备工作台）, "extra"?: true（已有同类设施、床或经用装备仍要再做）}',
+  description: '合成指定物品，默认只使用现有材料和已放好的工作台；缺少前置材料或工作台就报告缺口。make:true 显式允许补做两层以内的材料并制造、放置临时工作台，用完收回。count 是本次产物总个数；batchSize 可自主指定每批执行配方的次数（一次配方可能产出多个物品），省略时按材料容量批量执行。',
+  argsDoc: '{"item": "<物品名>", "count"?: 1-64, "batchSize"?: 1-64（每批配方次数）, "make"?: true（允许补材料和准备工作台）, "extra"?: true（已有同类设施、床或经用装备仍要再做）}',
   timeoutMs: 60000,
   movement: false,
   validate(raw, adapter) {
@@ -495,7 +495,7 @@ export const craft: Skill<{ item: string; count: number; extra?: boolean }> = {
     const raw0 = String(a.item ?? '').trim().replace(/^minecraft:/, '');
     const item = resolveItemAlias(raw0, adapter);
     if (!item) return { ok: false, error: `未知物品：${raw0}（请用完整物品 ID，如 white_bed、oak_planks）` };
-    return { ok: true, args: { item, count: clampInt(a.count, 1, 64, 1), ...(a.extra === true ? { extra: true } : {}) } };
+    return { ok: true, args: { item, count: clampInt(a.count, 1, 64, 1), ...(a.batchSize !== undefined ? { batchSize: clampInt(a.batchSize, 1, 64, 64) } : {}), ...(a.extra === true ? { extra: true } : {}) } };
   },
   async run(ctx, args) {
     // 已经有床（背包里，或者放在了某处）还要再做：多半是忘了自己的床。说清楚床在哪；真要第二张写 extra:true
@@ -541,7 +541,7 @@ export const craft: Skill<{ item: string; count: number; extra?: boolean }> = {
       const table = findStation(ctx, ['crafting_table'], 48);
       const conflict = craftReservationConflict(ctx.memory, ctx.adapter.state(), args.item, args.count, config.mc.version, !!table);
       if (conflict) return fail('MISSING_MATERIALS', `预留保护：${conflict.reason}`, { conflict });
-      const r = await ctx.adapter.craft(args.item, args.count, ctx.signal, { tablePos: table?.pos });
+      const r = await ctx.adapter.craft(args.item, args.count, ctx.signal, { tablePos: table?.pos, ...(args.batchSize !== undefined ? { batchSize: args.batchSize } : {}) });
       const placedFresh = !!r.tablePos && (!table || dist3(table.pos, r.tablePos) >= 1);
       if (r.tablePos && (!placedFresh || nearHome(ctx, r.tablePos))) rememberStation(ctx, 'crafting_table', r.tablePos);
       const reused = table && r.tablePos && dist3(table.pos, r.tablePos) < 1 && table.dist > 4 ? `（用了 ${table.dist} 格外${table.from === 'memory' ? '记得' : '看到'}的工作台）` : '';

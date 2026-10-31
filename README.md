@@ -98,7 +98,7 @@ RCON_PASSWORD=和 server.properties 一致
 4. 进服务器旁观并 `/spectate Curio`（或让 Agent 自动旁观），切到第一人称即可。H 开关 HUD，J 开关思考字幕，K 重连。
 
 - 每个新目标会作为“思考字幕”推给模组。
-- Observer 按 Agent 的实际操作展示背包和合成界面；默认打开后停留 250ms、关闭前停留 450ms，不逐次延迟点击。批量合成材料摆齐后也停留 250ms，再一次取出产物。可通过 `UI_PACING_MS`、`UI_OPEN_HOLD_MS`、`UI_CLOSE_HOLD_MS` 调整（单位毫秒，0 表示不等待）。
+- Observer 按 Agent 的实际操作展示背包和合成界面；默认点击移动 300ms（Shift 点击 180ms）、打开后停留 600ms、关闭前停留 800ms。点击前发送真实目标格，光标携带物品和数量移动，抵达后才操作；整叠丢弃只展示一次。批量合成材料摆齐后停留 600ms，取出后显示服务器确认的本批产量。`craft` 的 `count` 是产物总量，`batchSize` 是 Agent 自选的每批配方次数（1–64，省略按材料容量），例如木棍 `count:40,batchSize:4` 分为 16、16、8 个产物。可通过 `UI_PACING_MS`、`UI_OPEN_HOLD_MS`、`UI_CLOSE_HOLD_MS` 调整（单位毫秒，0 表示不等待）。
 - 不需要时设 `OBSERVER_FEED=false`。
 - HUD 配置按环境隔离：本地使用 `/path/to/curio/observer-hud.local.json`，直播沿用 `/path/to/curio/observer-hud.json`，两者互不共用，也不跟随角色存读档。
 - 控制台「直播」页的 HUD 布局由新版观察者模组每秒通过本机 `POST /api/observer/layout` 回传实际画布、GUI 缩放和已绘制面板的边界，预览和拖动使用同一套 GUI 坐标。4K、Windows 125% 显示缩放或 Iris 光影环境无需手动校准；调整 HUD 大小、想法行数和面板开关后，预览会跟随实际绘制结果更新。布局只保存在内存中，不控制 Bot。升级后需要重启 Agent，并将重新构建的模组 JAR 安装到观察者客户端再重启客户端；旧版模组会显示「等待游戏实际布局」，不再使用固定比例的示意框。

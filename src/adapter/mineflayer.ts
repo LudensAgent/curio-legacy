@@ -272,12 +272,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   private lastPacedClick = 0;
 
   /**
-   * 界面节奏（UI_PACING_MS / UI_OPEN_HOLD_MS / UI_CLOSE_HOLD_MS）：默认逐次点击约 150ms 并在窗口开关时短暂停留，模拟真实玩家节奏。
+   * 界面节奏（UI_PACING_MS / UI_OPEN_HOLD_MS / UI_CLOSE_HOLD_MS）：默认逐次点击约 300ms 并在窗口开关时短暂停留，模拟真实玩家节奏。
    * Mineflayer 补丁（scripts/patch-deps.mjs）让 craft / transfer / deposit / withdraw / toss / equip 的点击经过 beforeWindowClick。
    */
   private installUiPacing(bot: any) {
     const ui = this.cfg.ui ?? { pacingMs: 0, openHoldMs: 0, closeHoldMs: 0 };
-    bot.beforeWindowClick = async (_slot: number, _button: number, mode: number) => {
+    bot.beforeWindowClick = async (slot: number, _button: number, mode: number) => {
       const now = Date.now();
       this.pacedClicks = now - this.lastPacedClick > 1000 ? 1 : this.pacedClicks + 1;
       this.lastPacedClick = now;
@@ -287,10 +287,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         this.scheduleRepair('界面点击失控（慢速）', 500);
         throw new Error('CLICK_LOOP: 连续点了 400 下界面还没停（多半是窗口已经关了），中止这次界面操作');
       }
-      if (ui.pacingMs <= 0) return;
-      // shift 点击是一下整叠移走，真人也点得快些
-      const ms = mode === 1 ? Math.round(ui.pacingMs * 0.6) : ui.pacingMs;
-      await sleep(ms, this.actionContext.getStore()?.signal);
+      // Publish the target before waiting: the observer moves the still-held
+      // stack to this slot while the real action waits, then sees the click.
+      const ms = Math.max(0, mode === 1 ? Math.round(ui.pacingMs * 0.6) : ui.pacingMs);
+      bot.emit?.('observerWindowClick', slot, ms);
+      if (ms > 0) await sleep(ms, this.actionContext.getStore()?.signal);
     };
     if (ui.openHoldMs > 0) {
       // 开窗后停一下；附魔台和熔炉先安装属性监听，再执行停留。
@@ -3021,6 +3022,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (n <= 0) return 0;
     const resultId = recipe.result?.id;
     const before = this.invCount(resultId);
+    let produced = 0;
     let window: any = b.inventory;
     if (table) window = await this.afterAction(() => raceAbort(b.openBlock(table), signal, 8000, () => {}), check);
     try {
@@ -3038,6 +3040,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         await this.afterAction(() => sleep(this.cfg.ui?.openHoldMs ?? 0, signal), check);
         await this.afterAction(() => b.clickWindow(0, 0, 1), check);
         await this.afterAction(() => raceAbort(b._syncWindow(window), signal, 8000, () => {}), check);
+        produced = Math.max(0, this.invCount(resultId) - before);
       }
     } finally {
       // 剩在格子里的料（产物放不下、或桶这种合成后留下的容器）收回背包
@@ -3047,6 +3050,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         await raceAbort(b._syncWindow(window), signal, 5000, () => {}).catch(() => {});
       } catch { /* 交给收拾残局 */ this.scheduleRepair('批量合成后残留', 250); }
       // 做完停一下再关（背包 2×2 合成没有窗口，也停一下，让观众看到产物进了背包）
+      // Keep the confirmed batch total visible during the closing hold, after material cleanup.
+      if (produced > 0) b.emit?.('observerCraft', produced, { name: this.mcData.items[resultId].name });
       await this.uiCloseHold(signal);
       if (table) { try { b.closeWindow(window); } catch { /* ignore */ } } else this.emit('inventory_close');
     }
@@ -3123,7 +3128,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   }
 
   /** 尽量一次合成所需数量（一次打开工作台），不行再逐个合成 */
-  private async craftUpTo(id: number, count: number, table: any, signal: AbortSignal): Promise<number> {
+  private async craftUpTo(id: number, count: number, table: any, signal: AbortSignal, batchSize = 64): Promise<number> {
     const check = this.actionCheckpoint(signal);
     const b = this.bot;
     let made = 0;
@@ -3132,7 +3137,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const any = b.recipesFor(id, null, 1, table)[0];
       if (!any) break;
       const per = any.result?.count ?? 1;
-      const times = Math.max(1, Math.ceil((count - made) / per));
+      const times = Math.min(batchSize, Math.max(1, Math.ceil((count - made) / per)));
       const bulk = times > 1 ? b.recipesFor(id, null, times * per, table)[0] : null;
       const before = this.invCount(id);
       // 先按玩家的做法整批做（每格放一叠料、shift 点产物）；不行再退回一次一个
@@ -3239,7 +3244,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return table;
   }
 
-  async craft(item: string, count: number, signal: AbortSignal, opts: { tablePos?: Vec3Like; prepare?: boolean } = {}): Promise<ActionResult & { crafted: number; detail?: string; tablePos?: Vec3Like }> {
+  async craft(item: string, count: number, signal: AbortSignal, opts: { tablePos?: Vec3Like; prepare?: boolean; batchSize?: number } = {}): Promise<ActionResult & { crafted: number; detail?: string; tablePos?: Vec3Like }> {
     const check = this.actionCheckpoint(signal);
     throwIfAborted(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', crafted: 0 };
@@ -3256,7 +3261,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const tablePos = table?.position ? { x: table.position.x, y: table.position.y, z: table.position.z } : undefined;
     const before = this.invCount(data.id);
     if (opts.prepare) await this.afterAction(() => this.ensureIngredients(data.id, count, table, signal, 2), check);
-    let crafted = await this.afterAction(() => this.craftUpTo(data.id, count, table, signal), check);
+    let crafted = await this.afterAction(() => this.craftUpTo(data.id, count, table, signal, opts.batchSize), check);
     crafted = Math.max(crafted, this.invCount(data.id) - before);
     // 同种木板凑不齐但混着几种木板够用：按实际的木板拼配方（原版允许）
     for (let tries = 0; crafted < count && tries < 8; tries++) {

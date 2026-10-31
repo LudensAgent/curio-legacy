@@ -194,8 +194,8 @@ export const config = {
   },
   /** Curio Observer 模组数据流（/api/observer/stream） */
   observerFeed: bool('OBSERVER_FEED', true),
-  /** 界面点击、打开和关闭的等待；逐次点击默认约 150ms，模拟真实玩家节奏（0 关闭）。 */
-  ui: { pacingMs: num('UI_PACING_MS', 150), openHoldMs: num('UI_OPEN_HOLD_MS', 250), closeHoldMs: num('UI_CLOSE_HOLD_MS', 450) },
+  /** 界面点击、打开和关闭的等待；逐次点击默认约 300ms，模拟真实玩家节奏（0 关闭）。 */
+  ui: { pacingMs: num('UI_PACING_MS', 300), openHoldMs: num('UI_OPEN_HOLD_MS', 600), closeHoldMs: num('UI_CLOSE_HOLD_MS', 800) },
   viewerPort: num('VIEWER_PORT', 0),
   actionChat: { enabled: bool('CHAT_ACTIONS', true), minIntervalMs: num('CHAT_ACTION_INTERVAL_MS', 1800) },
   dataDir,

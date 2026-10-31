@@ -176,3 +176,50 @@ test('逐个合成的工作台在打开和关闭前停留，并恢复钩子', as
   assert.equal(a.bot.closeWindow, closeWindow);
   assert.equal(a.bot.listenerCount('windowOpen'), 0);
 });
+
+
+test('agent-selected batch size limits each recipe group without changing the requested total', async () => {
+  const { a, clicks } = rig({ oak_planks: 40 }, { name: 'stick', count: 4 });
+  a.cfg = { ...config, ui: { pacingMs: 0, openHoldMs: 0, closeHoldMs: 0 } };
+  a.bot = Object.assign(new EventEmitter(), a.bot, { entity: {} });
+  const r = { ...recipe([['oak_planks'], ['oak_planks']], 'stick', 4), delta: [{ id: id('oak_planks'), count: -2 }] };
+  a.bot.recipesFor = () => [r];
+  a.bot.recipesAll = () => [r];
+  const batches: number[] = [];
+  a.bot.on('observerCraft', (count: number) => batches.push(count));
+  const result = await a.craft('stick', 40, new AbortController().signal, { batchSize: 4 });
+  assert.equal(result.crafted, 40);
+  assert.deepEqual(batches, [16, 16, 8]);
+  assert.deepEqual(clicks.filter((c) => c.startsWith('put')), ['put 4@1', 'put 4@3', 'put 4@1', 'put 4@3', 'put 2@1', 'put 2@3']);
+  assert.equal(clicks.filter((c) => c === 'click 0 mode1').length, 3);
+});
+
+test('server-confirmed partial output is shown instead of planned batch quantity', async () => {
+  const { a } = rig({ oak_planks: 40 }, { name: 'stick', count: 4 });
+  a.cfg = { ...config, ui: { pacingMs: 0, openHoldMs: 0, closeHoldMs: 0 } };
+  a.bot = Object.assign(new EventEmitter(), a.bot);
+  const batches: number[] = [];
+  a.bot.on('observerCraft', (count: number) => batches.push(count));
+  let syncs = 0;
+  a.bot._syncWindow = async () => {
+    if (++syncs === 2) {
+      const output = a.bot.inventory.items().find((item: { type: number }) => item.type === id('stick'));
+      output.count = 12;
+    }
+  };
+  await a.craftBatch(recipe([['oak_planks'], ['oak_planks']], 'stick', 4), 16, null, new AbortController().signal);
+  assert.deepEqual(batches, [12]);
+});
+
+test('fallback crafting also honors the selected recipe batch size', async () => {
+  const { a } = rig({ oak_planks: 40 }, { name: 'stick', count: 4 });
+  const r = { ...recipe([['oak_planks'], ['oak_planks']], 'stick', 4), delta: [{ id: id('oak_planks'), count: -2 }] };
+  a.bot.recipesFor = () => [r];
+  a.bot.transfer = undefined;
+  let made = 0;
+  const calls: number[] = [];
+  a.invCount = (type: number) => type === id('stick') ? made : 40;
+  a.craftOnce = async (_recipe: unknown, _table: unknown, _signal: AbortSignal, times: number) => { calls.push(times); made += times * 4; };
+  assert.equal(await a.craftUpTo(id('stick'), 40, null, new AbortController().signal, 4), 40);
+  assert.deepEqual(calls, [4, 4, 2]);
+});

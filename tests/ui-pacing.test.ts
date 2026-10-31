@@ -115,3 +115,17 @@ test('慢速点击失控保护：连着点 400 下还不停就中止', async () 
   for (let i = 0; i < 400; i++) await bot.beforeWindowClick(1, 0, 0);
   await assert.rejects(bot.beforeWindowClick(1, 0, 0), /CLICK_LOOP/);
 });
+
+
+test('the real click target is announced at the start of its pacing wait', async () => {
+  const { bot } = rig({ pacingMs: 80, openHoldMs: 0, closeHoldMs: 0 });
+  const seen: { event: string; slot: number; duration: number; at: number }[] = [];
+  bot.emit = (event: string, slot: number, duration: number) => seen.push({ event, slot, duration, at: Date.now() });
+  const pending = bot.beforeWindowClick(36, 0, 0);
+  assert.equal(seen.length, 1, 'the observer can move before the click executes');
+  assert.equal(seen[0].event, 'observerWindowClick');
+  assert.equal(seen[0].slot, 36);
+  assert.equal(seen[0].duration, 80);
+  await pending;
+  assert.ok(Date.now() - seen[0].at >= 70);
+});
