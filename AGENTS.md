@@ -75,3 +75,13 @@ LLM 请求走 OpenAI 兼容 `/chat/completions`（DeepSeek / OpenAI / Ollama 等
 - 正文（可选）用中文说明为什么改、改了什么，必要时分点。
 - 结尾加 `Co-Authored-By: Claude <noreply@anthropic.com>`。
 - 每次完成用户确认的修改后自动提交，提交信息遵循以上格式。
+
+## 并行修改
+
+多个 agent 常在同一仓库、同一工作区并行改动，为减少相互踩踏，遵循：
+
+- 只提交自己改的文件。用 `git add <具体文件>`，不要 `git add -A` / `git add .`，避免把其他 agent 的半成品一起提交。
+- 同一文件不要并行改。开工前用 `git status --short`、`git diff --stat` 看目标文件是否已有他人未提交的改动；已有就先协调或另选方案。git 按文件提交，若目标文件已带无关的未提交改动，先向用户说明，不静默替别人提交。
+- 不用会毁掉他人未提交改动的命令，如 `git restore .`、`git checkout .`、`git reset --hard`；只针对自己改的具体文件操作。
+- 改完立即提交。缩小未提交窗口、减少冲突面，不让半成品长期堆在工作区。
+- 提交前自查暂存区。`git status --short` 确认 staged 的只有自己的文件；发现混入他人改动时先用 `git restore --staged <file>` 拆出再提交。
