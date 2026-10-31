@@ -193,7 +193,7 @@ export class Reflex {
 
   /** Agent 明确设置照明习惯后，只在没有动作运行时消耗火把。 */
   private autoTorch(s: ReturnType<GameAdapter['state']>, cur: ReturnType<Arbiter['info']>, nearestHostile: number) {
-    if (cur || s.inWater || s.inLava || !s.onGround || nearestHostile < 5 || torchCount(s.inventory) === 0) return;
+    if (cur || s.inWater || s.inLava || !s.onGround || nearestHostile < 5 || torchCount(s.inventory) === 0 || s.dim !== 'overworld') return;
     const x = Math.floor(s.pos.x), y = Math.floor(s.pos.y), z = Math.floor(s.pos.z);
     // 只在有遮蔽的暗处：头顶看得见天（尤其白天）不插；光照数据读不到/不可信时也不插
     const m = measureLight(this.adapter, s.pos, s.timeOfDay, s.isDay);

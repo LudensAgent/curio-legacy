@@ -560,7 +560,7 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
     // 血量保留一位小数：半颗心四舍五入成 0 会让模型以为自己已经死了
     hp: Math.round(p.self.hp * 10) / 10, food: p.self.food,
     ...(p.self.inWater ? { inWater: true, oxygen: s.oxygen } : {}), ...(p.self.inLava ? { inLava: true } : {}), ...(p.self.riding ? { riding: p.self.riding } : {}),
-    time: sunText(p.time.timeOfDay),
+    ...(s.dim === 'overworld' ? { time: sunText(p.time.timeOfDay) } : { time: `${DIM_ZH[s.dim] ?? '这里'}没有昼夜（光照恒定）` }),
     ...(p.time.can_sleep === false ? { can_sleep: '还不能睡：要等天黑后（雷雨时随时能睡）' } : {}),
     ...(p.time.weather ? { weather: p.time.weather } : {}),
     ...(p.light ? { light: `${{ bright: '亮', dim: '有点暗', dark: '很暗' }[p.light.level] ?? p.light.level}${p.light.mob_spawn_risk ? '，会刷怪' : ''}` } : {}),

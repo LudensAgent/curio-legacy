@@ -341,8 +341,8 @@ export class Perception {
       block,
       sky: l.sky,
       level: here >= 10 ? 'bright' : here >= 4 ? 'dim' : 'dark',
-      // 1.18+：方块光为 0 且足够暗时会刷敌对生物
-      mob_spawn_risk: block === 0 && here <= 7,
+      // 1.18+ 主世界：方块光为 0 且足够暗时会刷敌对生物；下界/末地的刷怪规则不同，不套这条
+      mob_spawn_risk: s.dim === 'overworld' && block === 0 && here <= 7,
       dark_view_pct: Math.round(((comp.dark ?? 0) / total) * 100),
       underground: l.sky <= 4,
       torches: torchCount(s.inventory),
@@ -655,7 +655,7 @@ export class Perception {
       ts: Date.now(),
       connected: s.connected,
       observation: { ready: s.observationReady, worldId: s.worldId, sessionId: s.sessionId, id: s.observationId },
-      time: { timeOfDay: s.timeOfDay, phase: phaseOf(s.timeOfDay), isDay: s.isDay, can_sleep: canSleepAt(s.timeOfDay, s.weather), ...(s.worldDay !== undefined ? { day: s.worldDay } : {}), ...(s.weather ? { weather: weatherHere(s.weather, s.biome) } : {}) },
+      time: { timeOfDay: s.timeOfDay, phase: s.dim === 'overworld' ? phaseOf(s.timeOfDay) : 'day', isDay: s.isDay, can_sleep: s.dim === 'overworld' && canSleepAt(s.timeOfDay, s.weather), ...(s.worldDay !== undefined ? { day: s.worldDay } : {}), ...(s.weather ? { weather: weatherHere(s.weather, s.biome) } : {}) },
       self: {
         pos: [round1(s.pos.x), round1(s.pos.y), round1(s.pos.z)],
         dim: s.dim,
