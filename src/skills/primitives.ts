@@ -3,7 +3,7 @@ import { FACINGS, facingOfYaw, feetCell, localMap, toWorld, type Facing } from '
 import { attachmentFaces, isSoftBlock, LIQUID_BLOCKS, surroundings } from '../perception/surroundings.ts';
 import { sleep, throwIfAborted } from '../util.ts';
 import { breakCell, why } from './body.ts';
-import { OWN_BUILDING_HINT, ownBuildingAt, storedChestAt } from './build.ts';
+import { classifyBlock, MAN_MADE_NOTE, OWN_BUILDING_HINT, ownBuildingAt, storedChestAt } from './build.ts';
 import { noteEdit } from '../mind/edits.ts';
 import { glanceAt } from './observation.ts';
 import { PLACEABLE } from './survival.ts';
@@ -130,6 +130,8 @@ export const digAt: Skill<CellArgs> = {
     }
     const mine = args.own ? null : ownBuildingAt(ctx.memory, ctx.adapter.state(), pos, before);
     if (mine) return fail('BAD_ARGS', `[${args.at}] 的 ${before} 是自己盖的「${mine.name}」的一部分；${OWN_BUILDING_HINT}`, { own: mine, ...after(ctx, args.facing, pos) });
+    // 不是自己的房子、也不是自己的矿道，但看起来是人造建材（村庄/别人家）：只报事实，拆不拆由它定
+    const structure = classifyBlock(ctx.memory, ctx.adapter.state(), pos, before);
     const stash = args.own ? null : storedChestAt(ctx.memory, ctx.adapter.state(), pos, before);
     if (stash) return fail('BAD_ARGS', stash, after(ctx, args.facing, pos));
     const how: { noDrop?: boolean; ms?: number } = {};
@@ -160,7 +162,8 @@ export const digAt: Skill<CellArgs> = {
       inBag = countOf(keepsake) > had;
       got = inBag ? `；${keepsake} 已经进了背包（现在共 ${countOf(keepsake)} 个）` : `；${keepsake} 掉在地上，还没进背包——要拿回来写 pickup_items {"item":"${keepsake}"}，别当成已经拿到了`;
     }
-    return ok(`挖掉了 [${args.at}] 的 ${before}${hand}${got}`, { cell: [...args.at], was: before, ...(how.noDrop ? { noDrop: true } : {}), ...(inBag !== undefined ? { inBag } : {}), ...after(ctx, args.facing, pos) });
+    const manMade = structure === 'man-made' ? `；${MAN_MADE_NOTE}` : '';
+    return ok(`挖掉了 [${args.at}] 的 ${before}${hand}${got}${manMade}`, { cell: [...args.at], was: before, ...(how.noDrop ? { noDrop: true } : {}), ...(inBag !== undefined ? { inBag } : {}), ...after(ctx, args.facing, pos) });
   },
 };
 

@@ -2,7 +2,7 @@ import { chestHint, needsFromShortfall } from './chest-hint.ts';
 import { describePlan, dropItemsOf, materialPlan } from '../methods/shortfall.ts';
 import { lookAround } from './movement.ts';
 import { findStation, myBed, rememberStation } from './stations.ts';
-import { ownBuildingAt } from './build.ts';
+import { classifyBlock, MAN_MADE_NOTE, ownBuildingAt } from './build.ts';
 import { AbortedError, dist3, sleep } from '../util.ts';
 import { codeFromError, clampInt, fail, isAbort, obj, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 import { craftReservationConflict } from '../projects/reservations.ts';
@@ -202,6 +202,7 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
     for (const [k, failed] of unreachable) if (Date.now() - failed.at > UNREACHABLE_TTL_MS) unreachable.delete(k);
     const skippedUnreachable = new Set<string>();
     let dug = 0;
+    let manMade = 0;
     let failsInRow = 0;
     let underNote = '';
     let searched = false;
@@ -279,13 +280,14 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
         const looked = searched ? '（已转头找过）' : '';
         const skipped = risky.hazard + risky.wet + risky.deep;
         const ownNote = ownSkipped.size ? `；另有 ${ownSkipped.size} 块是自己房子上的，没拆（拆了还得补）` : '';
+        const manMadeNote = manMade ? `；其中 ${manMade} 块${MAN_MADE_NOTE}` : '';
         // 眼前看不见，但长期记着别处有：说出在哪（去不去由心智定）；“记忆里没有”只在真没记过时才说
         const spots = names.some((n) => isResourceBlock(n)) ? oreSpotsNear(ctx.memory.landmarks(), { worldId: s.worldId, dim: s.dim, pos: s.pos }, { only: names, excludeWithin: 6 }).slice(0, 3) : [];
         const remembered = spots.length
           ? `；不过记得别处有 ${args.block}：${spots.map((o) => o.text).join('；')}——要去就 goto {"target":"${spots[0].pos.x},${spots[0].pos.y},${spots[0].pos.z}","dig":true} 走到跟前再 gather`
           : !unconfirmed.length && isResourceBlock(args.block) ? `；长期记忆里也没记过哪里有 ${args.block}` : '';
         return dug > 0
-          ? ok(`看不到更多 ${args.block}${looked}，采集了 ${dug}/${args.count}${ownNote}${staleNote}${riskNote()}${remembered}${underNote}`, { searched, ...(skipped ? { skippedUnsafe: { ...risky } } : {}) })
+          ? ok(`看不到更多 ${args.block}${looked}，采集了 ${dug}/${args.count}${ownNote}${manMadeNote}${staleNote}${riskNote()}${remembered}${underNote}`, { searched, ...(skipped ? { skippedUnsafe: { ...risky } } : {}) })
           : fail('NOT_FOUND', skipped
             ? `能看见的 ${args.block} 都不安全，没有去挖${riskNote()}${looked}${staleNote}`
             : ownSkipped.size ? `附近能看到的 ${args.block} 都是自己房子上的（${ownSkipped.size} 块），拆了还得补，没去挖；要去别处找${staleNote}`
@@ -304,6 +306,7 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
 
       const invTotal = () => adapter.state().inventory.reduce((a, i) => a + i.count, 0);
       const before = invTotal();
+      if (classifyBlock(ctx.memory, s, target.pos, target.name) === 'man-made') manMade++;
       try {
         ctx.progress(dug / args.count, `前往 ${target.name}（${Math.round(target.dist)} 格）`);
         await moveWithWatchdog(ctx, target.pos, args.dig === true);

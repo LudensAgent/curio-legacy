@@ -6,7 +6,7 @@ import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type Skill
 import { hasPlaceable } from './survival.ts';
 import { ensureToolFor } from './work.ts';
 import { findStation, forgetStationAt } from './stations.ts';
-import { OWN_BUILDING_HINT, ownBuildingAt, storedChestAt } from './build.ts';
+import { classifyBlock, MAN_MADE_NOTE, OWN_BUILDING_HINT, ownBuildingAt, storedChestAt } from './build.ts';
 import { noteEdit } from '../mind/edits.ts';
 import type { Vec3Like } from '../adapter/types.ts';
 import { dist3, throwIfAborted } from '../util.ts';
@@ -143,6 +143,8 @@ async function recoverBlock(ctx: SkillCtx, args: TargetDigArgs) {
     if (adapter.blockAt(pos) !== name) return fail('TARGET_GONE', '目标方块已经改变，未拆除');
     const mine = args.own ? null : ownBuildingAt(memory, adapter.state(), pos, name);
     if (mine) return fail('BAD_ARGS', `(${pos.x},${pos.y},${pos.z}) 的 ${name} 是自己盖的「${mine.name}」的一部分，未拆除；${OWN_BUILDING_HINT}`, { target: name, pos, own: mine });
+    // 不是自己的房子/矿道，但看起来是人造建材（村庄/别人家）：只报事实，拆不拆由它定
+    const structure = classifyBlock(memory, adapter.state(), pos, name);
     const stash = args.own ? null : storedChestAt(memory, adapter.state(), pos, name);
     if (stash) return fail('BAD_ARGS', stash, { target: name, pos });
     const before = new Map(adapter.state().inventory.map((item) => [item.name, item.count]));
@@ -184,7 +186,7 @@ async function recoverBlock(ctx: SkillCtx, args: TargetDigArgs) {
     if (!gained.length) return fail('ERROR', `已拆下 ${name}，但背包没有新增物品；${whereDropsWent(ctx, pos)}`, { ...data, drops: dropsNear(ctx, pos) });
     const dropsItself = /_(bed|door)$/.test(name) || ['crafting_table', 'furnace', 'blast_furnace', 'smoker'].includes(name);
     if (dropsItself && !gained.some((item) => item.name === name)) return fail('ERROR', `已拆下 ${name}，但背包没有新增 ${name}；顺带拾取了 ${gained.map((item) => `${item.name}×${item.count}`).join('、')}，目标掉落物尚未拿到；${whereDropsWent(ctx, pos)}`, data);
-    return ok(`已拆下 ${name}；背包新增 ${gained.map((item) => `${item.name}×${item.count}`).join('、')}`, data);
+    return ok(`已拆下 ${name}；背包新增 ${gained.map((item) => `${item.name}×${item.count}`).join('、')}${structure === 'man-made' ? `；${MAN_MADE_NOTE}` : ''}`, data);
   } catch (error) {
     if (isAbort(error)) throw error;
     return fail(codeFromError(error), `拆除目标失败：${why(error)}`);
