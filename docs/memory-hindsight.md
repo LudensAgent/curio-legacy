@@ -70,7 +70,6 @@ docker compose -f compose.memory.yaml down
 | `MEMORY_TIMEOUT_MS` | `1500` | 召回超时，失败后使用本地记忆 |
 | `MEMORY_RETAIN_TIMEOUT_MS` | `60000` | 后台写入等待上限 |
 | `MEMORY_CONTEXT_MAX_BYTES` | `6000` | 回忆上下文的 UTF-8 字节上限 |
-| `LLM_MAX_RECALL_ROUNDS` | `2` | 一次规划中模型主动回忆的最大轮数 |
 | `LLM_MAX_PROMPT_TOKENS` | `24000` | 包含回忆与重试的总提示词保守预算 |
 
 bank ID 根据世界 ID 和角色名计算，无需手填共享 bank。改名、换服务器、换存档之前要明确这些身份：同一角色在同一存档恢复游玩应继续使用原值；新存档应换一个新的 `MEMORY_WORLD_ID`。服务端 bank 的隔离不取代本地项目、世界状态的备份和身份管理。

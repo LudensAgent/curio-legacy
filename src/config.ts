@@ -79,12 +79,8 @@ export const config = {
     maxTokens: num('LLM_MAX_TOKENS', 16384),
     /** Conservative serialized prompt budget, checked after memory/tool/retry messages. */
     maxPromptTokens: num('LLM_MAX_PROMPT_TOKENS', 128000),
-    /** Soft compaction starts before either the input budget or model context is full. */
+    /** 模型上下文窗口大小，用作 maxPromptTokens 的上界（当前没有压缩机制，只做硬上限） */
     contextWindowTokens: num('LLM_CONTEXT_WINDOW_TOKENS', 1000000),
-    compactAtRatio: num('LLM_COMPACT_AT_RATIO', 0.75),
-    maxRecallRounds: num('LLM_MAX_RECALL_ROUNDS', 2),
-    /** Enable only for a configured model that accepts image_url inputs. */
-    visionInput: bool('LLM_VISION_INPUT', false),
     /** 流式请求：控制台能实时看到模型的输出；服务端不支持会自动回退 */
     stream: bool('LLM_STREAM', true),
     /** 小决策是否让模型先长篇思考：auto = DeepSeek 时关闭（小决策要快，信息才不会过时）；on = 不干预；off = 总是发送关闭思考的参数 */

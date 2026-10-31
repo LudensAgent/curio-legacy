@@ -45,10 +45,22 @@ export function boundedJson(value: unknown, maxBytes: number): string {
   return `[${rows.join(',')}]`;
 }
 
-export const promptCost = (messages: ChatMessage[]) => Buffer.byteLength(JSON.stringify(messages), 'utf8') + messages.length * 64
-  + messages.reduce((sum, m) => sum + (m.images?.length ?? 0) * 1024, 0);
+/** 粗略估 token：中文按 1 字 1 token，其余按约 4 字符 1 token。比纯字节数更贴近真实（中文 1 字 3 字节，纯字节会把预算提前约 3 倍触发）。 */
+function estimateTokens(s: string): number {
+  let cjk = 0, other = 0;
+  for (const ch of s) {
+    const code = ch.codePointAt(0)!;
+    if ((code >= 0x4E00 && code <= 0x9FFF) || (code >= 0x3400 && code <= 0x4DBF) || (code >= 0x3000 && code <= 0x303F)
+      || (code >= 0x3040 && code <= 0x30FF) || (code >= 0xFF00 && code <= 0xFFEF)) cjk++;
+    else other++;
+  }
+  return cjk + Math.ceil(other / 4);
+}
 
-/** Conservative byte bound across model tokenizers, including Chinese and tool/retry turns. */
+export const promptCost = (messages: ChatMessage[]) => messages.reduce((sum, m) => sum + estimateTokens(m.content) + (m.images?.length ?? 0) * 1024, 0)
+  + messages.length * 8;
+
+/** Conservative token estimate across model tokenizers, including Chinese and tool/retry turns. */
 export function enforcePromptBudget(messages: ChatMessage[], maxTokens: number): ChatMessage[] {
   if (!Number.isFinite(maxTokens) || maxTokens < 1024) throw new Error('PROMPT_BUDGET_INVALID');
   // Preserve the newest query/result or validation feedback as a complete exchange.

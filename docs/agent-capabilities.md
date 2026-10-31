@@ -42,10 +42,7 @@ npm start
 | `LLM_MAX_PROMPT_TOKENS` | `128000` | 整个序列化上下文的保守 UTF-8 字节上界，包含元数据、记忆、重试及工具返回；它不是精确分词计数 |
 | `LLM_MAX_TOKENS` | `16384` | API 的实际输出 token 上限，推理型模型可能把思考计入其中 |
 | `LLM_TIMEOUT_MS` | `120000` | 请求超时，给推理与长输出留出时间 |
-| `LLM_CONTEXT_WINDOW_TOKENS` | `1000000` | 模型上下文容量配置；输入仍受上面的单次请求预算限制，并为输出预留空间 |
-| `LLM_COMPACT_AT_RATIO` | `0.75` | 接近较小有效预算的 75% 就开始压缩，并为回想/格式修正保留余量 |
-| `LLM_MAX_RECALL_ROUNDS` | `2` | 主动只读回想轮数，上限为 2 |
-| `LLM_VISION_INPUT` | `false` | 启用配置模型的 `image_url` 输入，只附本世界作品的实际射线 PNG；模型须支持图像 |
+| `LLM_CONTEXT_WINDOW_TOKENS` | `1000000` | 模型上下文容量配置；用作单次请求预算的上界，并为输出预留空间 |
 | `LEARNING_TEST_WORLD_IDS` | 空 | 可为候选方法提供晋升证据的独立试验世界 ID，逗号分隔；模型不能自行宣称当前世界已隔离 |
 | `CHAT_ACTIONS` | `true` | 将 AI 的简短想法写到游戏聊天，供 ServerReplay 捕捉（沿用原配置名） |
 | `CHAT_ACTION_INTERVAL_MS` | `1800` | 聊天播报最小间隔；超过十秒的待发内容会丢弃 |
