@@ -45,7 +45,7 @@ import type {
   SmeltResult,
 } from './types.ts';
 
-type PillarClearance = { kind: 'blocked' | 'unknown'; min: Vec3Like; max: Vec3Like; block?: { pos: Vec3Like; rel?: [number, number, number]; facing?: string } };
+type PillarClearance = { kind: 'blocked' | 'unknown'; min: Vec3Like; max: Vec3Like; blocks: { pos: Vec3Like; rel?: [number, number, number]; facing?: string }[] };
 
 /** 世界坐标 → 以脚为原点的 [前,上,右]（与 dig_at 的 toWorld 互为逆运算），让心智能直接对着障碍格下 dig_at */
 const REL_FORWARD: Record<string, [number, number]> = { N: [0, -1], E: [1, 0], S: [0, 1], W: [-1, 0] };
@@ -69,15 +69,15 @@ function relWords(rel: [number, number, number]): string {
 function describePillarClearance(clearance: PillarClearance): string {
   const { min, max } = clearance;
   const range = `跳跃时身体扫过的方块范围 x=${min.x}..${max.x}, y=${min.y}..${max.y}, z=${min.z}..${max.z}`;
-  // 只报“挡在哪一格”，不报方块名：跳起来撞到的位置是身体能感知的（本体感觉），
+  // 只报“挡在哪几格”，不报方块名：跳起来撞到的位置是身体能感知的（本体感觉），
   // 方块名称属于看不到的透视信息，交给心智/技能自己看清或动手再确认。
   // 但补上相对身体的 [前,上,右] 坐标、自然语言方向、朝向和 dig_at 参数：否则心智要从绝对坐标反推相对坐标，窄竖井里容易挖错格。
   if (clearance.kind === 'blocked') {
-    const blk = clearance.block;
-    const rel = blk?.rel
-      ? `，在你【${relWords(blk.rel)}】，[前,上,右]=[${blk.rel[0]},${blk.rel[1]},${blk.rel[2]}]（当前朝向 ${blk.facing}），对应 dig_at {"at":[${blk.rel[0]},${blk.rel[1]},${blk.rel[2]}],"facing":"${blk.facing}"}`
-      : '';
-    return `头顶跳跃空间受阻；${range}，具体障碍格 ${blk ? `(${blk.pos.x},${blk.pos.y},${blk.pos.z})${rel}` : '未确认'}（方块名称未确认）`;
+    const cells = clearance.blocks.slice(0, 4).map((blk) => blk.rel
+      ? `(${blk.pos.x},${blk.pos.y},${blk.pos.z})【${relWords(blk.rel)}】[前,上,右]=[${blk.rel[0]},${blk.rel[1]},${blk.rel[2]}]（朝向 ${blk.facing}）→ dig_at {"at":[${blk.rel[0]},${blk.rel[1]},${blk.rel[2]}],"facing":"${blk.facing}"}`
+      : `(${blk.pos.x},${blk.pos.y},${blk.pos.z})`);
+    const more = clearance.blocks.length > 4 ? `；还有 ${clearance.blocks.length - 4} 格` : '';
+    return `头顶跳跃空间受阻；${range}，要跳起来得先把这几格都挖空（方块名未确认）：${cells.join('；')}${more}`;
   }
   return `头顶跳跃空间未加载；${range}，具体未加载位置未确认`;
 }
@@ -87,7 +87,7 @@ class PillarClearanceError extends Error {
   readonly block?: { pos: Vec3Like };
   constructor(clearance: PillarClearance) {
     super(`No path: 原地搭柱${describePillarClearance(clearance)}，未放置方块`);
-    this.block = clearance.block;
+    this.block = clearance.blocks[0];
   }
 }
 
@@ -1200,21 +1200,22 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const top = feetY + 1.02 + 1.8;
     const min = { x: Math.floor(p.x - 0.3 + epsilon), y: Math.floor(p.y + 1.8), z: Math.floor(p.z - 0.3 + epsilon) };
     const max = { x: Math.floor(p.x + 0.3 - epsilon), y: Math.floor(top - epsilon), z: Math.floor(p.z + 0.3 - epsilon) };
+    const feet = feetCell({ x: p.x, y: p.y, z: p.z });
+    const facing = facingOfYaw(b.entity.yaw);
+    const blocks: PillarClearance['blocks'] = [];
     for (let x = min.x; x <= max.x; x++)
       for (let y = min.y; y <= max.y; y++)
         for (let z = min.z; z <= max.z; z++) {
           const block = b.blockAt(p.offset(x - p.x, y - p.y, z - p.z));
-          if (!block) return { kind: 'unknown', min, max };
+          if (!block) return { kind: 'unknown', min, max, blocks };
           const shapes: number[][] = block.shapes ?? (block.boundingBox === 'empty' ? [] : [[0, 0, 0, 1, 1, 1]]);
           if (shapes.some((shape) => x + shape[3] > p.x - 0.3 + epsilon && x + shape[0] < p.x + 0.3 - epsilon
             && z + shape[5] > p.z - 0.3 + epsilon && z + shape[2] < p.z + 0.3 - epsilon
             && y + shape[4] > p.y + 1.8 + epsilon && y + shape[1] < top - epsilon)) {
-            const feet = feetCell({ x: p.x, y: p.y, z: p.z });
-            const facing = facingOfYaw(b.entity.yaw);
-            return { kind: 'blocked', min, max, block: { pos: { x, y, z }, rel: relToBody(feet, facing, { x, y, z }), facing } };
+            blocks.push({ pos: { x, y, z }, rel: relToBody(feet, facing, { x, y, z }), facing });
           }
         }
-    return null;
+    return blocks.length ? { kind: 'blocked', min, max, blocks } : null;
   }
 
   /** Inspect the nearby obstruction before trying a short correction, then replan. */
@@ -3344,7 +3345,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
 
   private drawStartedAt: number | null = null;
 
-  async pillarUp(itemNames: string[], signal: AbortSignal): Promise<ActionResult & { y?: number; clearanceDetail?: string; clearance?: { at?: [number, number, number]; facing?: string }; waterDepth?: number }> {
+  async pillarUp(itemNames: string[], signal: AbortSignal): Promise<ActionResult & { y?: number; clearanceDetail?: string; clearance?: { at?: [number, number, number]; facing?: string; cells?: { at: [number, number, number]; facing: string }[] }; waterDepth?: number }> {
     const check = this.actionCheckpoint(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
     const b = this.bot, epoch = this.actionEpoch;
@@ -3376,7 +3377,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // 站在浅水里（脚泡在水里、脚下是实底）：水格可以直接放方块，不用跳，直接贴着脚下池底放进去
     if (inWater) {
       const clearance = this.pillarClearance();
-      if (clearance) return { ok: false, reason: `NOT_PLACED:头顶跳跃空间${clearance.kind === 'blocked' ? '受阻' : '未加载'}`, clearanceDetail: describePillarClearance(clearance), clearance: clearance.block?.rel ? { at: clearance.block.rel, facing: clearance.block.facing } : undefined };
+      if (clearance) return { ok: false, reason: `NOT_PLACED:头顶跳跃空间${clearance.kind === 'blocked' ? '受阻' : '未加载'}`, clearanceDetail: describePillarClearance(clearance), clearance: clearance.kind === 'blocked' && clearance.blocks.length ? { at: clearance.blocks[0].rel, facing: clearance.blocks[0].facing, cells: clearance.blocks.flatMap((blk) => (blk.rel && blk.facing ? [{ at: blk.rel, facing: blk.facing }] : [])) } : undefined };
       try {
         await this.afterAction(() => raceAbort(b.placeBlock(below, new Vec3(0, 1, 0)), signal, 2500, () => {}), check);
       } catch (e: any) {
@@ -3391,7 +3392,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     for (let i = 0; i < 20 && !b.entity.onGround; i++) await this.afterAction(() => sleep(25, signal), check);
     if (!b.entity.onGround) return { ok: false, reason: 'NOT_PLACED:尚未站稳' };
     const clearance = this.pillarClearance();
-    if (clearance) return { ok: false, reason: `NOT_PLACED:头顶跳跃空间${clearance.kind === 'blocked' ? '受阻' : '未加载'}`, clearanceDetail: describePillarClearance(clearance), clearance: clearance.block?.rel ? { at: clearance.block.rel, facing: clearance.block.facing } : undefined };
+    if (clearance) return { ok: false, reason: `NOT_PLACED:头顶跳跃空间${clearance.kind === 'blocked' ? '受阻' : '未加载'}`, clearanceDetail: describePillarClearance(clearance), clearance: clearance.kind === 'blocked' && clearance.blocks.length ? { at: clearance.blocks[0].rel, facing: clearance.blocks[0].facing, cells: clearance.blocks.flatMap((blk) => (blk.rel && blk.facing ? [{ at: blk.rel, facing: blk.facing }] : [])) } : undefined };
     let placed = false, lastError = '';
     {
       b.setControlState('jump', true);

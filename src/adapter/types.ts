@@ -362,7 +362,7 @@ export interface GameAdapter {
    * 原地垫高一格：跳起来、等身体真的离开脚下那格再往脚下放方块、落地后确认真的站在新方块上。
    * （交给寻路去“走到上面一格”时，寻路在跳到最高点就认为到了、方块还没放，人又掉回去——看起来垫了，其实没有）
    */
-  pillarUp?(itemNames: string[], signal: AbortSignal): Promise<ActionResult & { y?: number; clearanceDetail?: string; clearance?: { at?: [number, number, number]; facing?: string }; waterDepth?: number }>;
+  pillarUp?(itemNames: string[], signal: AbortSignal): Promise<ActionResult & { y?: number; clearanceDetail?: string; clearance?: { at?: [number, number, number]; facing?: string; cells?: { at: [number, number, number]; facing: string }[] }; waterDepth?: number }>;
   /** 按住移动键 ms 毫秒（≤1000）：拉开距离、侧移绕圈、跳劈、潜行都靠它 */
   drive?(keys: DriveKeys, ms: number, signal: AbortSignal, opts?: DriveOptions): Promise<DriveResult>;
   /** 举起/放下副手的盾 */

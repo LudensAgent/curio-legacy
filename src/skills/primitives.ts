@@ -93,8 +93,8 @@ export const digAt: Skill<CellArgs> = {
     const pos = toWorld(feet, args.facing, args.at);
     const physical = ctx.adapter.blockAt(pos);
     // 自己站的两格通常是空的；但也可能有火把、花、雪层、蜘蛛网这类东西，那就照样拿掉
-    if (physical === null) return fail('NOT_FOUND', `[${args.at}] 那一格还没加载或看不见`, { ...after(ctx, args.facing, pos), obscured: true });
-    if (args.at[0] === 0 && args.at[2] === 0 && (args.at[1] === 0 || args.at[1] === 1) && AIR.has(physical)) return ok(`[${args.at}] 是自己站的地方，本来就空着；往上挖是 [0,2,0]`, { ...after(ctx, args.facing, pos), noop: true });
+    if (physical === null) return fail('NOT_FOUND', `[${args.at}] 那一格还没加载（区块没载入），看不见也没法挖`, { ...after(ctx, args.facing, pos) });
+    if (args.at[0] === 0 && args.at[2] === 0 && (args.at[1] === 0 || args.at[1] === 1) && AIR.has(physical)) return ok(`[${args.at}] 是${args.at[1] === 0 ? '自己站的脚' : '自己的头'}，本来就空着，别挖这里；往上挖是 [0,2,0]`, { ...after(ctx, args.facing, pos), noop: true });
     // 感知边界取舍：目标格已加载且 blockAt（服务器同步的世界数据，非透视）确认是 air 时，直接当“已经挖空”，
     // 不再强求 raycast 视线亲眼确认——挖阶梯时斜下格 [1,-1,0] 被正前方那格挡住、永远看不见，却常常已经是空气，
     // 硬报 NOT_FOUND 会让整段阶梯卡死。只认“已加载 + 确实是空气”这一种；未加载(null)仍报 NOT_FOUND，
@@ -113,7 +113,7 @@ export const digAt: Skill<CellArgs> = {
       const hint = diagonalDown
         ? `；斜下格在正前方/侧方那格后面，本来就看不见也挖不到——先挖 [${df},0,${dr}] 让这格露出来，再挖 [${df},-1,${dr}]，或直接往下挖 [0,-1,0]`
         : '';
-      return fail('NOT_FOUND', `[${args.at}] 没有发生挖掘；目标格 (${pos.x},${pos.y},${pos.z}) ${ctx.senses.observeBlocks ? '尝试看向后仍未在当前视野' : '当前没有视觉确认'}，可能被遮挡、太暗或未加载，方块状态未知，未确认是空气还是其他方块${hint}`, { ...after(ctx, args.facing, pos), noop: true, obscured: true });
+      return fail('NOT_FOUND', `[${args.at}] 没有发生挖掘：目标格 (${pos.x},${pos.y},${pos.z}) 不是空气，但转头也看不见它朝你的那一面（被前面的方块挡住），没法下镐；换个站位或先挖掉挡着的那一格${hint}`, { ...after(ctx, args.facing, pos), noop: true });
     }
     const before = ctx.adapter.blockAt(pos);
     if (before !== seenBefore) return fail('TARGET_GONE', `[${args.at}] 目标格在观察后已改变或尚未加载，没有执行挖掘`, { ...after(ctx, args.facing, pos), noop: true });
@@ -342,7 +342,7 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
             : '脚下是空的（悬着、在水里或梯子上），没有能贴着放的面')
             : r.reason === 'OCCUPIED' ? '脚下这格已经有东西'
             : String(r.reason).startsWith('BLOCKED:') ? `脚下这格有 ${seen.get(`${feet.x},${feet.y},${feet.z}`) ?? '未看清的阻挡'}，方块放不进去；先 dig_at [0,0,0] 把它拿掉` : r.reason === 'NO_ITEM' ? '背包里没有能垫的方块' : `方块没放上（${r.reason}）`;
-          return fail(r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS' : r.reason === 'NO_REFERENCE' ? 'PATH_NOT_FOUND' : 'EFFECT_NOT_CONFIRMED', `原地垫高没成：${why}${r.clearanceDetail ? `；${r.clearanceDetail}` : ''}`, { ...after(ctx, args.facing, pos), pillarFailure: r.reason, ...(r.clearance?.at ? { pillarClearance: r.clearance } : {}) });
+          return fail(r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS' : r.reason === 'NO_REFERENCE' ? 'PATH_NOT_FOUND' : 'EFFECT_NOT_CONFIRMED', `原地垫高没成：${why}${r.clearanceDetail ? `；${r.clearanceDetail}` : ''}`, { ...after(ctx, args.facing, pos), pillarFailure: r.reason, ...(r.clearance?.cells?.length ? { pillarClearance: r.clearance } : {}) });
         }
       } else {
         const above = { ...feet, y: feet.y + 2 }, n = a.blockAt(above);
