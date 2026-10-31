@@ -395,7 +395,7 @@ export function situationalReminders(ctx: MindContext): string[] {
   const out: string[] = [];
   const p = ctx.percept, s = ctx.state;
   const here = { x: p.self.pos[0], y: p.self.pos[1], z: p.self.pos[2] };
-  if (p.self.dim !== 'overworld') out.push(`你在${DIM_ZH[p.self.dim] ?? p.self.dim}，不是主世界；记得的地标、矿道、箱子都按维度分开，主世界的东西在这里看不到`);
+  if (p.self.dim !== 'overworld') out.push(`你在${DIM_ZH[p.self.dim] ?? p.self.dim}，不是主世界；记得的地标、矿道、箱子都按维度分开，主世界的东西在这里看不到。这里没有昼夜、始终昏暗，火把只能照明，不能像主世界那样靠光拦住刷怪`);
   const drafts = activeDrafts()?.list(4).filter((d) => !d.usedBy) ?? [];
   const unfinished = myBuilds(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }).filter((b) => b.status !== 'complete' && b.dist <= 96);
   const intent = [ctx.activity?.what, ctx.activity?.why, ...ctx.self.agenda().map((a) => a.text), ...ctx.self.recentThoughts(3).map((t) => t.text)].filter(Boolean).join(' ');

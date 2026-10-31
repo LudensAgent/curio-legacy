@@ -1489,6 +1489,7 @@ test('维度名译成中文，非主世界时额外提醒不是主世界', () =>
     assert.equal(body.dim, `${zh}（${dim}）`);
     assert.equal(body.time, `${zh}没有昼夜（光照恒定）`);
     assert.match(user.content, new RegExp(`你在${zh}，不是主世界`));
+    assert.match(user.content, /火把只能照明，不能像主世界那样靠光拦住刷怪/);
     memory.close();
   }
 });
