@@ -130,15 +130,24 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       entryId = landmark?.id ?? ctx.memory.landmarks().find((item) => item.kind === 'waypoint' && item.dim === origin.dim && item.label === EXCAVATION_ENTRY_LABEL && dist3(item.pos, initial) < 1)?.id;
     }
     path.push({ pos: { ...origin.pos }, observationId: origin.observationId });
+    const peek = async (direction: 'north' | 'east' | 'south' | 'west') => {
+      assertSession(ctx, origin);
+      await adapter.look(YAW[direction], -0.15, signal);
+      assertSession(ctx, origin);
+      const scanner = senses as typeof senses & { scan?: () => unknown };
+      if (typeof scanner.scan === 'function') scanner.scan();
+      else { await sleep(160, signal); assertSession(ctx, origin); senses.refresh(); }
+    };
+    // 结构搜索才需要四向环顾（捕捉任意方向刚挖出的门框）；纯开挖只看挖掘方向一眼刷新工作面，
+    // 其余朝向交给 700ms 的感知循环，安全预检本就走 blockAt 实时查询、不依赖这次扫。
     const observe = async () => {
+      if (!stopOnObservation) {
+        await peek(args.direction);
+        return false;
+      }
       for (const direction of ['north', 'east', 'south', 'west'] as const) {
-        assertSession(ctx, origin);
-        await adapter.look(YAW[direction], -0.15, signal);
-        assertSession(ctx, origin);
-        const scanner = senses as typeof senses & { scan?: () => unknown };
-        if (typeof scanner.scan === 'function') scanner.scan();
-        else { await sleep(160, signal); assertSession(ctx, origin); senses.refresh(); }
-        if (stopOnObservation?.()) return true;
+        await peek(direction);
+        if (stopOnObservation()) return true;
       }
       senses.markSweep();
       return false;

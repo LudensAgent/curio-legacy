@@ -86,7 +86,7 @@ test('stairs clear the three-cell transition and verify each real landing; resul
   assert.ok(world.digs.some((pos) => pos.x === 3 && pos.y === 63), 'the descending third step clears its upper transition cell too');
   assert.deepEqual(result.data?.actualOffset, { x: 3, y: -3, z: 0 });
   assert.equal((result.data?.path as unknown[]).length, 4);
-  assert.ok(senses.scans >= 16, 'the actual entry and every landing get four directional observations');
+  assert.equal(senses.scans, 4, 'pure excavation peeks the dig direction once per entry and landing, not four-way');
   const next = ctx.memory.landmarks().find((landmark) => landmark.id === result.data?.nextEntryId)!;
   assert.deepEqual(next.pos, { x: 3, y: 61, z: 0 });
   assert.equal(ctx.memory.landmarks().filter((landmark) => landmark.label.startsWith(EXCAVATION_CHECKPOINT_LABEL)).length, 1, 'the call updates one checkpoint rather than inventing intermediate discoveries');
