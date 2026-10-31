@@ -36,14 +36,16 @@ export const buildPortal: Skill<{ origin: Vec3Like; axis: 'x' | 'z' }> = {
     const at = (u: number, y: number): Vec3Like => ({ x: args.origin.x + (args.axis === 'x' ? u : 0), y: args.origin.y + y, z: args.origin.z + (args.axis === 'z' ? u : 0) });
     const frame = [[1, 0], [2, 0], ...[1, 2, 3].flatMap((y) => [[0, y], [3, y]]), [1, 4], [2, 4]].map(([u, y]) => at(u, y));
     const needed = frame.filter((p) => adapter.blockAt(p) !== 'obsidian').length;
+    const partialLabel = `未完成的下界门框（axis=${args.axis}）`;
+    // 这里已经摆过黑曜石（部分/完整门框）：无论这次缺不缺料都先记下位置，回来能补全；点着后清掉
+    if (needed < frame.length) ctx.memory.addLandmark('discovery', partialLabel, state.dim, args.origin, 1);
     if ((state.inventory.find((i) => i.name === 'obsidian')?.count ?? 0) < needed) return fail('MISSING_MATERIALS', `还缺 ${needed} 块黑曜石用于门框（背包现有 ${state.inventory.find((i) => i.name === 'obsidian')?.count ?? 0} 块；之前失败的门框上可能还摆着黑曜石，先用钻石镐挖回来凑数）`);
     for (let y = 1; y <= 4; y++) for (let u = 0; u <= 3; u++) {
       const name = adapter.blockAt(at(u, y));
       const isFrame = frame.some((p) => dist3(p, at(u, y)) === 0);
       if (!name || (!AIR.has(name) && !(isFrame && name === 'obsidian'))) return fail('BAD_ARGS', '门框或内部空间被占用，换一个已观察到的空地');
     }
-    // 记下门框位置：中途失败也能回同一处补全（点着后转成正式「下界门」地标）
-    const partialLabel = `未完成的下界门框（axis=${args.axis}）`;
+    // 这次要开始立框（新开工），也记下：中途失败/被中断都能回同一处补全
     ctx.memory.addLandmark('discovery', partialLabel, state.dim, args.origin, 1);
     let placed = 0;
     const place = async (pos: Vec3Like, name: string) => {

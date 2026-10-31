@@ -91,6 +91,20 @@ test('successful ignition clears the partial-frame landmark', async () => {
   assert.equal(memory.landmarks().filter((l) => l.label === '未完成的下界门框（axis=x）').length, 0, '点着后清掉未完成地标');
 });
 
+test('a partial frame is recorded even when obsidian is insufficient to finish', async () => {
+  const { adapter, memory, run } = setup();
+  adapter.inv.set('flint_and_steel', 1);
+  // 预摆两块黑曜石（部分门框），背包 0 块：缺料也要记下门框位置，便于回来补全
+  adapter.blocks.push({ name: 'obsidian', pos: { x: 4, y: 63, z: 0 } });
+  adapter.blocks.push({ name: 'obsidian', pos: { x: 5, y: 63, z: 0 } });
+  const outcome = await run('build_portal', { origin: { x: 3, y: 63, z: 0 } });
+  assert.equal(outcome.result.status, 'failed');
+  assert.equal(outcome.result.failureCode, 'MISSING_MATERIALS');
+  const partial = memory.landmarks().filter((l) => l.label === '未完成的下界门框（axis=x）');
+  assert.equal(partial.length, 1, '缺料也记下部分门框');
+  assert.deepEqual(partial[0].pos, { x: 3, y: 63, z: 0 });
+});
+
 test('portal travel records observed coordinates in both dimensions and verifies a return only after returning', async () => {
   const { adapter, memory, vision, run } = setup();
   const sourcePos = { x: 3, y: 64, z: 0 };
