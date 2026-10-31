@@ -46,6 +46,11 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
     const on = coord ?? (typeof a.on === 'string' && a.on.trim() ? a.on.trim().toLowerCase() : 'self');
     const dir = typeof a.dir === 'string' ? a.dir.toUpperCase() : undefined;
     if (dir && !DIRS[dir]) return { ok: false, error: `dir 必须是 ${Object.keys(DIRS).join('/')}` };
+    // 满的流体桶（水桶/岩浆桶）不能对着流体本体右键：服务器不会把水倒进岩浆源或水格里，只会 NO_EFFECT。
+    // 要倒流体：on 写那一格空气的坐标（水桶浇岩浆做黑曜石就写岩浆旁的那格空气，水会流过去），或 on:"self" 往自己脚边倒。
+    if (FLUID_BUCKETS.has(item) && (on === 'water' || on === 'lava')) {
+      return { ok: false, error: `满的 ${item} 不能对着 ${on} 本体右键（会 NO_EFFECT，倒不进流体源格）；把 on 写成那格空气的坐标 {"x","y","z"}（浇岩浆做黑曜石写岩浆旁那格空气，水会流过去），或 on:"self" 倒自己脚边` };
+    }
     return { ok: true, args: { item, on, ...(dir ? { dir } : {}) } };
   },
   async run(ctx, args) {
