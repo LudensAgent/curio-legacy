@@ -113,17 +113,44 @@ function briefOf(d: string, n: number): string {
   return at > n / 2 ? cut.slice(0, at) : `${cut}…`;
 }
 
-export function movesCatalog(chars = 40, only?: Set<string>, advanced = true, nameOnly: Set<string> = new Set()): string {
-  const visible = Object.values(SKILLS).filter((s) => !LLM_HIDDEN.has(s.name) && (!only || only.has(s.name)));
-  const detailed = visible.filter((s) => !nameOnly.has(s.name) && (only !== undefined || COMMON_MOVES.includes(s.name))).map((s) => {
-    // Both thinking tiers need the movement mode and its possible side effects.
-    const description = ['look', 'dive', 'surface', 'travel'].includes(s.name) ? s.description.replace(/\s+/g, ' ')
-      : chars ? briefOf(s.description, chars) : '';
-    return `- ${s.name} ${s.argsDoc}${description ? `：${description}` : ''}`;
-  });
-  const onDemand = visible.filter((s) => nameOnly.has(s.name) || (!only && !COMMON_MOVES.includes(s.name) && (advanced || !ADVANCED.test(s.name)))).map((s) => `${s.name}（${briefOf(s.description, 14)}）`);
+/** 移动/潜水上浮这类动作在两种思考档位里都要给足副作用说明 */
+function descOf(s: { name: string; description: string }, chars: number): string {
+  return ['look', 'dive', 'surface', 'travel'].includes(s.name) ? s.description.replace(/\s+/g, ' ')
+    : chars ? briefOf(s.description, chars) : '';
+}
+
+/**
+ * 静态动作目录：core 里的动作给完整参数，其余非进阶动作只列名字 + 一句用途（需要时用 {"kind":"moves"} 查完整参数）。
+ * 不再随 advanced（是否下界/末地）或 inUse（当前活动用到哪些动作）变化：进阶动作单独走 advancedMovesLine() 作为 user 提醒，
+ * 当前活动用到的动作单独作为 user 提醒，这样 system 前缀保持字节稳定，最大程度命中服务端前缀缓存。
+ */
+export function movesCatalog(chars = 40, core: Set<string> = new Set(COMMON_MOVES)): string {
+  const visible = Object.values(SKILLS).filter((s) => !LLM_HIDDEN.has(s.name) && !ADVANCED.test(s.name));
+  const detailed = visible.filter((s) => core.has(s.name)).map((s) => `- ${s.name} ${s.argsDoc}${descOf(s, chars) ? `：${descOf(s, chars)}` : ''}`);
+  const onDemand = visible.filter((s) => !core.has(s.name)).map((s) => `${s.name}（${briefOf(s.description, 14)}）`);
   const demandLine = onDemand.length ? `\n其他动作（用 {"kind":"moves","names":["…"]} 查完整参数）：${onDemand.join('、')}` : '';
-  return `${detailed.join('\n')}${demandLine}${only ? '' : '\n缺工具、熔炉、船、火把等默认报告缺口；加 "make":true 才允许顺手制造/准备并消耗材料，加 "make":false 则禁止本动作及嵌套准备'}`;
+  return `${detailed.join('\n')}${demandLine}\n缺工具、熔炉、船、火把等默认报告缺口；加 "make":true 才允许顺手制造/准备并消耗材料，加 "make":false 则禁止本动作及嵌套准备`;
+}
+
+/** 瞥一眼时给完整参数的常用动作；其余只列名字 + 用途，参数按需用 moves 查 */
+const GLANCE_CORE = ['dig_at', 'step', 'place_at', 'gather', 'goto', 'craft', 'eat', 'sleep', 'wait', 'look', 'look_around', 'defend', 'hunt', 'place_torch', 'dive', 'surface', 'travel', 'press_keys'];
+/** 瞥一眼时只列名字 + 用途的动作（完整参数按需查） */
+const GLANCE_SECONDARY = ['explore', 'forage', 'pickup_items', 'shelter', 'build', 'smelt', 'store_items', 'climb_up', 'use_skill', 'excavate_path', 'descend', 'assess_landings'];
+
+/** 抬头看（glance）的动作目录：只列少数完整参数 + 常用名字，隐藏长尾，保持轻量 */
+export function glanceCatalog(): string {
+  const core = new Set(GLANCE_CORE);
+  const visible = Object.values(SKILLS).filter((s) => !LLM_HIDDEN.has(s.name) && (GLANCE_CORE.includes(s.name) || GLANCE_SECONDARY.includes(s.name)));
+  const detailed = visible.filter((s) => core.has(s.name)).map((s) => `- ${s.name} ${s.argsDoc}${descOf(s, 0) ? `：${descOf(s, 0)}` : ''}`);
+  const onDemand = visible.filter((s) => !core.has(s.name)).map((s) => `${s.name}（${briefOf(s.description, 14)}）`);
+  const demandLine = onDemand.length ? `\n其他动作（用 {"kind":"moves","names":["…"]} 查完整参数）：${onDemand.join('、')}` : '';
+  return `${detailed.join('\n')}${demandLine}`;
+}
+
+/** 进阶动作（portal/end_/dragon/…）：不进静态目录，按需作为 user 提醒给出，避免平时噪音、也不破坏 system 前缀缓存 */
+export function advancedMovesLine(): string {
+  const names = Object.values(SKILLS).filter((s) => !LLM_HIDDEN.has(s.name) && ADVANCED.test(s.name)).map((s) => s.name);
+  return names.length ? `进阶动作可用（参数用 moves 查）：${names.map((n) => `${n}（${briefOf(SKILLS[n].description, 14)}）`).join('、')}` : '';
 }
 
 /** 完整参数（moves 查询用） */
@@ -159,7 +186,7 @@ const OPERATOR = `【操作者】控制台里的操作者（直播的主人）�
 const FOCUS = `【专注】主目标是这一阶段要拿到的成果，不是做法，也不是过夜、脱困这类眼前事（detour）。清单 3–6 项可验证的子任务，可写 {"text":"…","done_when":{…}} 自动勾；依次推进；久没推进就改清单，有【阶段回顾】时可换目标（写 switch_reason）。`;
 
 /** 技能的生成、试用与正式使用分开，完整写法按需查。 */
-const SKILLS_DOC = () => `【技能】把做法写进 skill 会保存候选：{"name":"英文-连字符","description":"…","when":{条件},"steps":[…]或"code":"JS","verify":"观察原目标是否达成"}。你决定何时在 routine 用 use_skill {"name":"…","trial":true,"args":{…}} 显式试用；候选不自动接手、不替换稳定版，取得足够实际验收证据才启用。启用后 when 含 after_failure＝动作失败时先试；只有状态条件＝成立自动做；不写＝手动调用。方块只读当前视觉，unknown不能当作空气或已知矿物；只听到的实体没有精确坐标和可交互ID。写不出就用 worth_learning；写法先查 {"kind":"skill","name":"writing-skills"}。遇到岩浆或水下呼吸问题由你或你学会的技能处理。纯文字技能可用 skill {"name":"…","restore":true} 恢复到阅读目录；恢复不代表验证成功。技能目录和查询保留成功过的应急版本；可用 skill {"name":"…","from_version":1} 将指定完整历史契约另存新候选再试，保留稳定版和旧证据，新候选从零验收；历史成功不保证现在有效。`;
+const SKILLS_DOC = () => `【技能】把做法写进 skill 会保存候选：{"name":"英文-连字符","description":"…","when":{条件},"steps":[…]或"code":"JS","verify":"观察原目标是否达成"}。你决定何时在 routine 用 use_skill {"name":"…","trial":true,"args":{…}} 显式试用；候选不自动接手、不替换稳定版，取得足够实际验收证据才启用。启用后 when 含 after_failure＝动作失败时先试；只有状态条件＝成立自动做；不写＝手动调用。方块只读当前视觉，unknown不能当作空气或已知矿物；只听到的实体没有精确坐标和可交互ID（写 hostile 条件时加 seen:true 只看看得见的怪）。写不出就用 worth_learning；写法先查 {"kind":"skill","name":"writing-skills"}。遇到岩浆或水下呼吸问题由你或你学会的技能处理。纯文字技能可用 skill {"name":"…","restore":true} 恢复到阅读目录；恢复不代表验证成功。技能目录和查询保留成功过的应急版本；可用 skill {"name":"…","from_version":1} 将指定完整历史契约另存新候选再试，保留稳定版和旧证据，新候选从零验收；历史成功不保证现在有效。`;
 
 const PASSAGES_QUERY = `{"kind":"passages"} 查当前世界和维度的矿道记录；加 "id":"记录ID","offset":0 分页读历史脚点，每页最多32点。脚点不代表连续或双向可走，当前通路需现场确认。`;
 
@@ -210,7 +237,7 @@ const EXAMPLE = `【例子】想进下界时：
 ← 已经查到资料了……黑曜石要用铁镐或钻石镐挖，岩浆浇上水就变成黑曜石
 → {"monologue":"先凑够黑曜石把传送门点起来。","decision":"new","activity":{"what":"采黑曜石","why":"要建下界传送门","kind":"gather","steps":[{"skill":"gather","args":{"block":"obsidian","count":10}}],"done_when":{"type":"inventory_min","item":"obsidian","count":10}}}`;
 
-export function deliberateSystem(persona: string, skills: string[] = [], advanced = false): string {
+export function deliberateSystem(persona: string, skills: string[] = []): string {
   return `${persona}
 
 游戏版本：Minecraft Java Edition ${config.mc.version}。
@@ -243,15 +270,10 @@ ${PRECISE}
 ${EXAMPLE}
 ${liveAudience.enabled && liveAudience.inPrompt !== false ? `\n${AUDIENCE_RULES}\n` : ''}
 【动作】参数必须合法：
-${movesCatalog(28, undefined, advanced)}${SKILL_INDEX(skills)}`;
+${movesCatalog(28)}${SKILL_INDEX(skills)}`;
 }
 
-/** 瞥一眼时给完整参数的常用动作；其余只列名字 + 用途，参数按需用 moves 查 */
-const GLANCE_CORE = ['dig_at', 'step', 'place_at', 'gather', 'goto', 'craft', 'eat', 'sleep', 'wait', 'look', 'look_around', 'defend', 'hunt', 'place_torch', 'dive', 'surface', 'travel', 'press_keys'];
-/** 瞥一眼时只列名字 + 用途的动作（完整参数按需查） */
-const GLANCE_SECONDARY = ['explore', 'forage', 'pickup_items', 'shelter', 'build', 'smelt', 'store_items', 'climb_up', 'use_skill', 'excavate_path', 'descend', 'assess_landings'];
-
-export function glanceSystem(persona: string, inUse: Set<string>, skills: string[] = []): string {
+export function glanceSystem(persona: string, skills: string[] = []): string {
   return `${persona}
 
 游戏版本：Minecraft Java Edition ${config.mc.version}。
@@ -276,7 +298,7 @@ ${CHOOSE}
 ${CONDITIONS}
 
 【常用动作】
-${movesCatalog(0, new Set([...inUse, ...GLANCE_CORE, ...GLANCE_SECONDARY]), false, new Set([...GLANCE_SECONDARY].filter((n) => !inUse.has(n))))}`;
+${glanceCatalog()}`;
 }
 
 /** 打算里说要下矿、往下挖 */
@@ -669,9 +691,15 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
     }],
   ];
   const advanced = p.self.dim !== 'overworld' || s.inventory.some((i) => /ender_(eye|pearl)|obsidian|blaze/.test(i.name));
-  const inUse = new Set((ctx.activity?.steps ?? []).map((s) => s.skill));
-  const system = glance ? glanceSystem(ctx.persona, inUse, ctx.skills ?? []) : deliberateSystem(ctx.persona, ctx.skills ?? [], advanced);
+  const system = glance ? glanceSystem(ctx.persona, ctx.skills ?? []) : deliberateSystem(ctx.persona, ctx.skills ?? []);
   const reminders = situationalReminders(ctx);
+  // 进阶动作（下界/末地或已有末影物品才出现）和当前活动用到、目录里没给完整参数的动作：作为提醒补在 user 消息里，
+  // system 目录保持字节稳定以命中前缀缓存（见 movesCatalog 注释）。
+  if (!glance && advanced) reminders.push(advancedMovesLine());
+  else if (glance) {
+    const active = [...new Set((ctx.activity?.steps ?? []).map((st) => st.skill))].filter((n) => !GLANCE_CORE.includes(n) && !GLANCE_SECONDARY.includes(n));
+    if (active.length) reminders.push(`正在用的动作参数：\n${moveDetails(active)}`);
+  }
   // 操作者的指令放在最前面，最后的提醒里再说一遍（开头和结尾模型最不容易忽略）
   const order = ctx.operatorOrder;
   if (order && order.kind === 'suggestion') {

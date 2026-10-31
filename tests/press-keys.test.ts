@@ -12,7 +12,7 @@ import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx, TestWorld } from './survival-helpers.ts';
 
 test('the key action and its ascent parameter are visible in ordinary and quick thinking', () => {
-  for (const text of [movesCatalog(), glanceSystem('test', new Set())]) {
+  for (const text of [movesCatalog(), glanceSystem('test')]) {
     const line = text.split('\n').find((entry) => entry.startsWith('- press_keys '));
     assert.ok(line);
     assert.match(line, /jump/);

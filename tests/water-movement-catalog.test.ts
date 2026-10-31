@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { deliberateSystem, glanceSystem, movesCatalog } from '../src/mind/prompt.ts';
+import { deliberateSystem, glanceCatalog, glanceSystem, moveDetails } from '../src/mind/prompt.ts';
 
 test('both thinking tiers expose direction and water movement tools with their effects and limits', () => {
-  for (const system of [deliberateSystem(''), glanceSystem('', new Set())]) {
+  for (const system of [deliberateSystem(''), glanceSystem('')]) {
     const lines = system.split('\n');
     const look = lines.find((line) => line.startsWith('- look '));
     const dive = lines.find((line) => line.startsWith('- dive '));
@@ -17,16 +17,15 @@ test('both thinking tiers expose direction and water movement tools with their e
   }
 });
 
-test('explicit and active uncommon tools remain in the light catalog without exposing hidden tools', () => {
-  const selected = movesCatalog(0, new Set(['ride', 'glance']), false);
-  assert.match(selected, /^- ride .*"direction".*"to"/m);
-  assert.doesNotMatch(selected, /^- (?:goto|glance) /m);
-  const active = glanceSystem('', new Set(['ride']));
-  assert.match(active, /^- ride .*"direction".*"to"/m);
+test('active uncommon tools like ride get full args on demand, and hidden tools stay out of the catalogs', () => {
+  // 当前活动用到的、目录里没给完整参数的动作（如 ride）由 user 提醒用 moveDetails 给完整参数
+  assert.match(moveDetails(['ride']), /^- ride .*"direction".*"to"/m);
+  // 静态 glance 目录不暴露隐藏动作，也不把非常用动作塞进来
+  assert.doesNotMatch(glanceCatalog(), /^- (?:glance|wander|ride) /m);
 });
 
 test('both thinking tiers distinguish current water contact, ground contact, and oxygen', () => {
-  for (const system of [deliberateSystem(''), glanceSystem('', new Set())]) {
+  for (const system of [deliberateSystem(''), glanceSystem('')]) {
     assert.match(system, /身体状态仅表示当前快照：inWater=false.*不证明已上岸、持续站稳或完成换气/);
     assert.match(system, /onGround=true 只表示当前触地，也可能在水底/);
     assert.match(system, /氧气恢复程度看 oxygen 数值；条件及其组合由你按实际目标选择/);

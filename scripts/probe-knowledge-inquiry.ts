@@ -43,7 +43,7 @@ if (!['low', 'high', 'off'].includes(effort)) throw new Error('--effort must be 
 const selected = process.argv.find((arg) => arg.startsWith('--cases='))?.slice(8).split(',');
 if (selected?.some((id) => !cases.some((scenario) => scenario.id === id))) throw new Error('Unknown case ID');
 const scenarios = cases.filter((scenario) => !selected || selected.includes(scenario.id));
-const system = tier === 'light' ? glanceSystem(config.persona, new Set()) : deliberateSystem(config.persona, [], true);
+const system = tier === 'light' ? glanceSystem(config.persona) : deliberateSystem(config.persona);
 const jobs = scenarios.flatMap((scenario, index) => arms.map((_, offset) => ({ scenario, arm: arms[(index + offset) % arms.length] })));
 const runId = `${new Date().toISOString().replace(/[:.]/g, '-')}-${tier}-${effort}`;
 const directory = path.resolve('archives/knowledge-inquiry', runId);
