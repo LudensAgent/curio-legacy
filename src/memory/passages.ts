@@ -231,3 +231,31 @@ export function passageRoute(recs: Pick<PassageRecord, 'path'>[], from: Vec3Like
   for (let v = b; v >= 0; v = prevOf[v]) route.unshift(nodes[v]);
   return route;
 }
+
+/** 想回地面时，从全部记下的通道里挑一个要朝它走的地表锚点：全网离自己最近的有效地表入口；没有入口就退回全网最高的脚点（最接近地表）。 */
+export function passageSurfaceAnchor(recs: Pick<PassageRecord, 'path' | 'entrances'>[], here: Vec3Like): Vec3Like | null {
+  const anchors: Vec3Like[] = [];
+  for (const r of recs) {
+    const surfaceY = r.path.length ? Math.max(...r.path.map((p) => p.y)) : Math.max(...r.entrances.map((e) => e.y));
+    for (const e of r.entrances) if (surfaceY - e.y <= 6) anchors.push(e);
+  }
+  if (anchors.length) return [...anchors].sort((a, b) => flat(a, here) - flat(b, here))[0];
+  const all = recs.flatMap((r) => r.path);
+  return all.length ? [...all].sort((a, b) => b.y - a.y)[0] : null;
+}
+
+/** 想下更深时，取全部通道里最深的脚点当目标。 */
+export function passageDeepestAnchor(recs: Pick<PassageRecord, 'path'>[]): Vec3Like | null {
+  const all = recs.flatMap((r) => r.path);
+  return all.length ? [...all].sort((a, b) => a.y - b.y)[0] : null;
+}
+
+/** 沿全部记下的通道连成的网，取朝 to 走的下一个路点（几何记忆，未验证当前地形）；连不上返回 null。
+ * 以前回入口/下更深只对单条通道路由，碎片一多就接不回地表；这里把全部通道一起连网。 */
+export function passageNext(recs: Pick<PassageRecord, 'path' | 'kind'>[], here: Vec3Like, to: Vec3Like): { next: Vec3Like; inside: boolean; kind: 'dug' | 'walked' } | null {
+  const route = passageRoute(recs, here, to, { near: 6 });
+  if (!route || route.length < 2) return null;
+  const inside = recs.some((r) => r.path.some((q) => d3(q, here) <= 3));
+  const nearest = recs.map((r) => ({ r, d: Math.min(...r.path.map((q) => d3(q, here))) })).sort((a, b) => a.d - b.d)[0]?.r;
+  return { next: route[1], inside, kind: nearest?.kind === 'dug' ? 'dug' : 'walked' };
+}

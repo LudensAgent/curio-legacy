@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { MoveTarget } from '../src/adapter/types.ts';
-import { passageRoute } from '../src/memory/passages.ts';
+import { passageDeepestAnchor, passageNext, passageRoute, passageSurfaceAnchor } from '../src/memory/passages.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { goTo } from '../src/skills/movement.ts';
 import { makeCtx, TestWorld } from './survival-helpers.ts';
@@ -37,6 +37,25 @@ test('goto does not detour through historical passage points to reach a nearby l
   assert.equal(result.status, 'succeeded', result.summary);
   assert.deepEqual(moves, [{ kind: 'near', pos: target, range: 0 }], 'navigate toward the requested target without a historical route prelude');
   assert.doesNotMatch(result.summary, /沿自己挖过的通道/);
+});
+
+test('碎片化通道：站在接不回地表的支巷里，把全部通道连成网后仍能给出通向地表的下一步', () => {
+  // 主竖井：地表 y64 一路下到 y32；支巷：在井底 y40 横向岔出去、最远 10 格，自己没记入口
+  const shaft = { path: [{ x: 0, y: 64, z: 0 }, { x: 0, y: 60, z: 0 }, { x: 0, y: 56, z: 0 }, { x: 0, y: 52, z: 0 }, { x: 0, y: 48, z: 0 }, { x: 0, y: 44, z: 0 }, { x: 0, y: 40, z: 0 }, { x: 0, y: 36, z: 0 }, { x: 0, y: 32, z: 0 }], entrances: [{ x: 0, y: 66, z: 0 }] };
+  const branch = { path: [{ x: 2, y: 40, z: 0 }, { x: 6, y: 40, z: 0 }, { x: 10, y: 40, z: 0 }], entrances: [] };
+  const here = { x: 10, y: 40, z: 0 };
+  // 单条支巷自己最高只有 y40，走不回地表
+  assert.ok(passageRoute([branch], here, { x: 2, y: 40, z: 0 })!.every((p) => p.y === 40), '单条支巷的路线到不了地表');
+  // 全网锚点取到主竖井的地表入口，路线一路回到 y64
+  const anchor = passageSurfaceAnchor([shaft, branch], here);
+  assert.deepEqual(anchor, { x: 0, y: 66, z: 0 });
+  assert.ok(passageRoute([shaft, branch], here, anchor!)!.some((p) => p.y >= 64), '连网后的路线通到地表');
+  const g = passageNext([shaft, branch], here, anchor!);
+  assert.ok(g, '连网后能给出下一步');
+  assert.deepEqual(g!.next, { x: 6, y: 40, z: 0 });
+  assert.equal(g!.inside, true);
+  // 下更深则取全网最深的脚点
+  assert.deepEqual(passageDeepestAnchor([shaft, branch]), { x: 0, y: 32, z: 0 });
 });
 
 test('goto cannot use old passage points to bypass missing visual navigation', async (t) => {
