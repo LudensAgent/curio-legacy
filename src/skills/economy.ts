@@ -224,7 +224,13 @@ async function selectedContainer(ctx: SkillCtx, target: ContainerTarget) {
   ctx.senses.refresh();
   let observed = ctx.senses.observeBlocks?.([pos])[0];
   if (!observed) { await glanceAt(ctx, pos); observed = ctx.senses.observeBlocks?.([pos])[0]; }
-  if (!observed) return { ok: false as const, result: fail('NOT_FOUND', '当前看不见选定容器；可能被遮挡、太远或未加载，未换箱或移动去搜索', { candidates: containerCandidates(ctx) }) };
+  if (!observed) {
+    const dist = Math.round(Math.hypot(pos.x - state.pos.x, pos.y - state.pos.y, pos.z - state.pos.z));
+    const why = dist > 48
+      ? `离你约 ${dist} 格（超出 48 格视野，store_items 不会自己走过去）`
+      : `离你约 ${dist} 格，转头看仍看不见（可能被遮挡或未加载）`;
+    return { ok: false as const, result: fail('NOT_FOUND', `选定容器在 (${pos.x},${pos.y},${pos.z})，${why}；先 goto 过去、或改选看得见的容器再存`, { candidates: containerCandidates(ctx), pos, distance: dist }) };
+  }
   if (!CONTAINERS.includes(observed.name)) {
     forgetObservedContainer(ctx, pos);
     return { ok: false as const, result: fail('TARGET_GONE', `选定位置当前是 ${observed.name}，忘掉已失效的容器记忆；未改选其他容器`, { candidates: containerCandidates(ctx) }) };
