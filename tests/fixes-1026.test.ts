@@ -55,7 +55,7 @@ test('goto 可以写方向和格数：E 20 是往 x 变大的方向走 20 格，
   assert.equal(r.status, 'succeeded', r.summary);
   assert.ok(w.pos.x > 28 && Math.abs(w.pos.z - 10.5) < 1.5, `到了 ${JSON.stringify(w.pos)}`);
   assert.match(r.summary, /往 E 20 格/);
-  assert.match(r.summary, /本次往 E 移动/);
+  assert.match(r.summary, /本次往 E 净位移/);
   w.pos = { x: 0.5, y: 64, z: 0.5 };
   const r2 = await goto.run(ctx, (goto.validate({ target: 'n 8' }, w) as any).args);
   assert.ok(w.pos.z < -6, `北是 z 变小：${JSON.stringify(w.pos)} ${r2.summary}`);

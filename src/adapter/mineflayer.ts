@@ -1292,7 +1292,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       try {
         const remaining = deadline - Date.now();
         if (remaining <= 0) throw new Error('TIMEOUT');
-        await this.afterAction(() => raceAbort(b.pathfinder.goto(goal), opts.signal, remaining, () => { if (ownsControls()) this.stopAll(); }), check);
+        await this.afterAction(() => raceAbort(b.pathfinder.goto(goal), opts.signal, remaining, () => { if (ownsControls()) this.stopAll(); else this.actionEpoch++; }), check);
         // 搭柱被头顶/侧上方挡住：先当成一次停滞，走下面的 nudge 退半步重新规划；只有退不动了才抛 PILLAR_CLEARANCE 让心智去挖头顶
         if (blockedPillar) stalled = true;
         if (!stalled) return;
@@ -1618,6 +1618,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           throwIfAborted(signal);
           if (bot !== this.bot || session !== this.sessionId || dimension !== this.currentDimension()) throw new AbortedError('action ownership changed');
           check = this.actionCheckpoint(signal);
+        } else if (e instanceof TimeoutError && this.actionEpoch !== moveEpoch) {
+          // 还有别处也 stopAll 了（外部停止，epoch 不止 +1）：本次拾取作废，别继续追
+          throw new AbortedError('action ownership changed');
         }
       }
       const waitMs = Math.min(200, deadline - Date.now());

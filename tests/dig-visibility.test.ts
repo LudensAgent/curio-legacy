@@ -108,7 +108,7 @@ test('an occluded empty cell is tolerated as empty; an occluded ore is not revea
     t.after(() => ctx.memory.close());
     const result = await digAt.run(ctx, { at: [2, 1, 0], facing: 'E' });
     assert.equal(result.failureCode, 'NOT_FOUND');
-    assert.match(result.summary, /方块状态未知/);
+    assert.match(result.summary, /转头也看不见|被前面的方块挡住/);
     assert.doesNotMatch(result.summary, /diamond_ore|本来就是空/);
     assert.deepEqual(adapter.actions, []);
   }
@@ -127,7 +127,7 @@ test('cancelling the look cannot continue to dig or claim an observation', async
 });
 
 test('both thinking tiers distinguish an unseen cell from confirmed air', () => {
-  for (const system of [deliberateSystem(''), glanceSystem('', new Set())]) {
+  for (const system of [deliberateSystem(''), glanceSystem('')]) {
     assert.match(system, /未看见的方块状态未知，未挖到不代表那里是空气/);
   }
 });

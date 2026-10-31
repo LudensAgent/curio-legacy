@@ -106,8 +106,10 @@ export const digAt: Skill<CellArgs> = {
     // 矿石/实心格仍走视线确认、不泄露方块名，也不替 Agent 选目标或改手段。
     if (AIR.has(physical)) return ok(`[${args.at}] 本来就是空的，不用挖`, { cell: [...args.at], was: 'air', ...after(ctx, args.facing, pos), noop: true });
     const key = `${pos.x},${pos.y},${pos.z}`;
-    let seenBefore = visibleCells(ctx, [pos]).get(key);
-    if (!seenBefore && ctx.senses.observeBlocks) {
+    // 自己站的那格（脚/头）谈不上“看不见”——人就在里面，火把、雪层这类东西直接够得着，不用走视线确认
+    const ownCell = args.at[0] === 0 && args.at[2] === 0 && (args.at[1] === 0 || args.at[1] === 1);
+    let seenBefore = ownCell ? physical : visibleCells(ctx, [pos]).get(key);
+    if (!seenBefore && !ownCell && ctx.senses.observeBlocks) {
       await glanceAt(ctx, pos);
       throwIfAborted(ctx.signal);
       seenBefore = visibleCells(ctx, [pos]).get(key);
@@ -346,7 +348,7 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
             ? `脚下是水，池底在下方 ${r.waterDepth} 格，超出贴面放置范围；要垫高得先潜到池底贴着放，或改上浮/游上岸`
             : '脚下是空的（悬着、在水里或梯子上），没有能贴着放的面')
             : r.reason === 'OCCUPIED' ? '脚下这格已经有东西'
-            : String(r.reason).startsWith('BLOCKED:') ? `脚下这格有 ${seen.get(`${feet.x},${feet.y},${feet.z}`) ?? '未看清的阻挡'}，方块放不进去；先 dig_at [0,0,0] 把它拿掉` : r.reason === 'NO_ITEM' ? '背包里没有能垫的方块' : `方块没放上（${r.reason}）`;
+            : String(r.reason).startsWith('BLOCKED:') ? `脚下这格有 ${String(r.reason).slice('BLOCKED:'.length)}，方块放不进去；先 dig_at [0,0,0] 把它拿掉` : r.reason === 'NO_ITEM' ? '背包里没有能垫的方块' : `方块没放上（${r.reason}）`;
           return fail(r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS' : r.reason === 'NO_REFERENCE' ? 'PATH_NOT_FOUND' : 'EFFECT_NOT_CONFIRMED', `原地垫高没成：${why}${r.clearanceDetail ? `；${r.clearanceDetail}` : ''}`, { ...after(ctx, args.facing, pos), pillarFailure: r.reason, ...(r.clearance?.cells?.length ? { pillarClearance: r.clearance } : {}) });
         }
       } else {
