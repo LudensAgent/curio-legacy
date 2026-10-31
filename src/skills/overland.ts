@@ -3,6 +3,7 @@ import { DIRS } from '../perception/perception.ts';
 import { dist3 } from '../util.ts';
 import { ride } from './actions.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
+import { PLACEABLE } from './survival.ts';
 
 /**
  * 出行：步行与游泳的水陆寻路；已经乘船时委托水面导航，不隐式切换载具。
@@ -47,7 +48,7 @@ export function surveyColumn(blockAt: BlockAt, x: number, z: number, hintY: numb
 }
 
 export type Leg = { mode: 'walk' | 'water'; cells: { x: number; y: number; z: number }[] };
-export type TravelPlan = { legs: Leg[]; reached: boolean; cells: number; /** 没到时：周围路走不通的主要原因（给身体和心智看） */ why?: string };
+export type TravelPlan = { legs: Leg[]; reached: boolean; cells: number; /** 没到时：周围路走不通的主要原因（给身体和心智看） */ why?: string; /** 没到时且主因是要爬 2 格以上：可以垫高 1 格再试 */ climbed?: boolean };
 
 /**
  * 在已加载的地形上找一条水陆路线（A*，8 邻接，不切角）：
@@ -131,7 +132,8 @@ export function planTravel(blockAt: BlockAt, from: Vec3Like, to: { x: number; z:
   }
   const end = found ?? closest;
   const why = found ? undefined : explainBlocked(end && Math.hypot(end.x - sx, end.z - sz) < 3 ? rejNear : rejAll, rejNear);
-  if (!end || (end.x === sx && end.z === sz)) return { legs: [], reached: !!found, cells: 0, ...(why ? { why } : {}) };
+  const climbed = !found && (rejAll.get('climb') ?? 0) > 0 && (rejAll.get('climb') ?? 0) >= (rejAll.get('drop') ?? 0);
+  if (!end || (end.x === sx && end.z === sz)) return { legs: [], reached: !!found, cells: 0, ...(why ? { why } : {}), ...(climbed ? { climbed } : {}) };
   const path: Node[] = [];
   for (let n: Node | null = end; n; n = n.parent) path.push(n);
   path.reverse();
@@ -142,7 +144,7 @@ export function planTravel(blockAt: BlockAt, from: Vec3Like, to: { x: number; z:
     if (legs.length && legs[legs.length - 1].mode === mode) legs[legs.length - 1].cells.push(cell);
     else legs.push({ mode, cells: [cell] });
   }
-  return { legs, reached: !!found, cells: path.length - 1, ...(why ? { why } : {}) };
+  return { legs, reached: !!found, cells: path.length - 1, ...(why ? { why } : {}), ...(climbed ? { climbed } : {}) };
 }
 
 const WHY_ZH: Record<string, string> = {
@@ -160,7 +162,7 @@ function explainBlocked(rej: Map<string, number>, near: Map<string, number>): st
 }
 
 // ------------------------------------------------------------------ travel
-type TravelArgs = { to: string; noBoat?: boolean };
+type TravelArgs = { to: string; noBoat?: boolean; place?: boolean };
 
 const parseTarget = (ctx: SkillCtx, raw: string): { x: number; y?: number; z: number; label: string } | null => {
   const s = ctx.adapter.state();
@@ -183,8 +185,8 @@ const parseTarget = (ctx: SkillCtx, raw: string): { x: number; y?: number; z: nu
 
 export const travel: Skill<TravelArgs> = {
   name: 'travel',
-  description: '按地形在地表和水面步行、游泳前往目标（只在地表/水面，地下或悬空会失败）；已乘船时沿水路停靠，保持乘坐并反馈落脚处，不制造或切换载具；三维目标核对实际高度',
-  argsDoc: '{"to": "x,z | x,y,z | 地标名 | base | death | 方向如 E 150", "noBoat"?: true（只走和游，已乘船时需先自行下船）}；只在地表/水面用，地下或悬空先用 dig_at/climb_up 回地面；目标 2.5 格内算到达，带 y 时按三维距离核对',
+  description: '按地形在地表和水面步行、游泳前往目标（只在地表/水面，地下或悬空会失败）；已乘船时沿水路停靠，保持乘坐并反馈落脚处，不制造或切换载具；三维目标核对实际高度；place:true 授权原地垫方块爬上 2 格以上的陡坡/高墙（消耗垫脚方块）',
+  argsDoc: '{"to": "x,z | x,y,z | 地标名 | base | death | 方向如 E 150", "noBoat"?: true（只走和游，已乘船时需先自行下船）, "place"?: true（允许垫方块爬 2 格以上的坡）}；只在地表/水面用，地下或悬空先用 dig_at/climb_up 回地面；目标 2.5 格内算到达，带 y 时按三维距离核对',
   timeoutMs: 600000,
   movement: true,
   validate(raw) {
@@ -200,7 +202,7 @@ export const travel: Skill<TravelArgs> = {
       to = String(rawTo ?? '').trim();
     }
     if (!to) return { ok: false, error: 'to 需要 x,z / x,y,z 坐标、地标名、base、death，或方向如 "E 150"' };
-    return { ok: true, args: { to, ...(a.noBoat === true ? { noBoat: true } : {}) } };
+    return { ok: true, args: { to, ...(a.noBoat === true ? { noBoat: true } : {}), ...(a.place === true ? { place: true } : {}) } };
   },
   async run(ctx, args) {
     const { adapter, signal } = ctx;
@@ -225,7 +227,7 @@ export const travel: Skill<TravelArgs> = {
     }
     const avoid = new Set<string>();
     const done: string[] = [];
-    let walked = 0, swum = 0, replans = 0, lastErr = '';
+    let walked = 0, swum = 0, replans = 0, climbed = 0, lastErr = '';
     const blockAt: BlockAt = (p) => adapter.blockAt(p);
     try {
       for (let round = 0; round < 12 && Date.now() < ctx.deadline - 5000; round++) {
@@ -233,6 +235,18 @@ export const travel: Skill<TravelArgs> = {
         if (flat(here) <= 2.5) break;
         const plan = planTravel(blockAt, here, target, { canBoat: false, avoid });
         if (!plan) return fail('PATH_NOT_FOUND', `travel 只管地面上的路：现在脚下不是地面（在地下、悬空或站不住），先回到地面再走；${done.length ? `已经${done.join('，')}` : ''}`);
+        // 陡坡/高墙（要一次往上爬 2 格以上）：授权垫路且手里有方块时，原地垫高 1 格，把 2 格墙变成 1 格台阶再重规划
+        if (plan.climbed && args.place && climbed < 3 && adapter.pillarUp) {
+          const inv = adapter.state().inventory ?? [];
+          const blocks = PLACEABLE.filter((n) => inv.some((i) => i.name === n && i.count > 0));
+          if (blocks.length) {
+            const r = await adapter.pillarUp(blocks, signal);
+            if (r.ok) { climbed++; done.push('垫高上坡'); continue; }
+            lastErr = lastErr || `垫高上坡没成：${String((r as { reason?: string }).reason ?? '')}`;
+          } else {
+            lastErr = lastErr || '要爬 2 格以上的坡，但手里没有能垫的方块';
+          }
+        }
         if (!plan.legs.length) { lastErr = lastErr || `看得到的地形里找不到更近的路：${plan.why ?? '远处没加载、或被墙/悬崖/岩浆挡住'}`; break; }
         if (!plan.reached && plan.why && round === 0) lastErr = `路只能规划到一半：${plan.why}`;
         ctx.progress(1 - Math.min(1, flat(here) / Math.max(1, flat(startPos))), `规划了 ${plan.legs.map((l) => `${l.mode === 'walk' ? '走' : '水'}${l.cells.length}`).join('→')}`);
