@@ -9,6 +9,7 @@ import type { EntityInfo, Vec3Like } from '../adapter/types.ts';
 import { feetCell } from '../perception/local.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type FailureCode, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 import { planTravel } from './overland.ts';
+import { passageDeepestAnchor, passageRoute, passageSurfaceAnchor } from '../memory/passages.ts';
 
 // ------------------------------------------------------------------ 寻找与张望（人眼式：不透视，只是转头看）
 /** 朝 (dx,dz) 方向的 yaw（0 = 北/-Z，正值向左/西） */
@@ -536,6 +537,61 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
     }
   }
 }
+
+// ------------------------------------------------------------------ follow_passage
+/** 沿自己记下的旧矿道（把全部通道连成网的脚点）逐段走：entrance 回地表入口，deepest 下到最深处。 */
+export const followPassage: Skill<{ to: 'entrance' | 'deepest'; dig?: boolean }> = {
+  name: 'follow_passage',
+  description: '沿自己记下的旧矿道（全部通道连成网的脚点）逐段走：to:"entrance" 回地表入口，to:"deepest" 下到最深处。每段用步行寻路，dig:true 才允许挖开挡路、垫方块；走不通就停在原地并说明走到第几段、离目标还差多少',
+  argsDoc: '{"to":"entrance"|"deepest", "dig"?:boolean}',
+  timeoutMs: 600000,
+  movement: true,
+  outcomeBoundary: true,
+  validate(raw) {
+    const a = obj(raw);
+    const to = a.to === 'deepest' ? 'deepest' : a.to === 'entrance' ? 'entrance' : null;
+    if (!to) return { ok: false, error: 'to 必须是 entrance（回入口）或 deepest（下最深）' };
+    if (a.dig !== undefined && typeof a.dig !== 'boolean') return { ok: false, error: 'dig 需要布尔值' };
+    return { ok: true, args: { to, ...(a.dig === true ? { dig: true } : {}) } };
+  },
+  async run(ctx, args) {
+    const { adapter, memory, signal } = ctx;
+    const s = adapter.state();
+    if (!s.connected) return fail('NOT_CONNECTED', '未连接');
+    const here = { x: s.pos.x, y: s.pos.y, z: s.pos.z };
+    const recs = memory.passages(s.dim).filter((r) => !r.worldId || r.worldId === s.worldId);
+    if (!recs.length) return fail('NOT_FOUND', '没有记下的旧矿道；要先下矿走过/挖过一段，或改用 goto / excavate_path');
+    const back = args.to === 'entrance';
+    const target = back ? passageSurfaceAnchor(recs, here) : passageDeepestAnchor(recs);
+    if (!target) return fail('NOT_FOUND', '旧矿道里没有可用的目标点');
+    const route = passageRoute(recs, here, target, { near: 6 });
+    if (!route || route.length < 2) return fail('PATH_NOT_FOUND', `旧矿道连不到${back ? '地表入口' : '最深处'}（当前脚点离成网的通道太远，或通道断开）；先回到通道附近，或改走别的路`);
+    const kind = recs.some((r) => r.kind === 'dug') ? '挖过的旧矿道' : '走过的路';
+    const allowDig = !!args.dig;
+    const terrainPermission = { ...(allowDig ? { allowTerrainChanges: true } : {}), allowPlace: allowDig, allowTower: allowDig };
+    const goal = back ? '入口' : '最深处';
+    ctx.progress(0, `沿${kind}${back ? '回入口' : '下最深'}，共 ${route.length} 段`);
+    let last = here;
+    for (let i = 0; i < route.length; i++) {
+      throwIfAborted(signal);
+      if (Date.now() >= ctx.deadline) return fail('TIMEOUT', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段时间用完；人停在 (${last.x.toFixed(1)},${last.y.toFixed(1)},${last.z.toFixed(1)})，离目标约 ${Math.round(dist3(last, target))} 格`, { position: last, reachedWaypoint: i, totalWaypoints: route.length - 1 });
+      const wp = route[i];
+      if (dist3(last, wp) <= 1.2) continue;
+      ctx.progress(i / route.length, `沿${kind}${back ? '回入口' : '下最深'}：第 ${i}/${route.length - 1} 段`);
+      try {
+        await adapter.moveTo({ kind: 'near', pos: wp, range: 1.2 }, { signal, timeoutMs: Math.max(2000, Math.min(20000, ctx.deadline - Date.now())), allowSwimming: false, ...terrainPermission });
+      } catch (e) {
+        if (isAbort(e)) throw e;
+        const now = adapter.state().pos;
+        return fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段卡住：下一路点 (${Math.round(wp.x)},${Math.round(wp.y)},${Math.round(wp.z)}) 过不去（${(e as Error).message.slice(0, 50)}）。人停在 (${now.x.toFixed(1)},${now.y.toFixed(1)},${now.z.toFixed(1)})，离${goal}约 ${Math.round(dist3(now, target))} 格${allowDig ? '' : '；可加 dig:true 授权挖开挡路'}`, { position: now, reachedWaypoint: i, totalWaypoints: route.length - 1, remaining: Math.round(dist3(now, target)), target });
+      }
+      last = adapter.state().pos;
+    }
+    const end = adapter.state().pos;
+    const remaining = Math.round(dist3(end, target));
+    return ok(`沿${kind}${back ? '回入口' : '下最深'}走完了记下的 ${route.length} 个脚点，现在站在 (${end.x.toFixed(1)},${end.y.toFixed(1)},${end.z.toFixed(1)})，离${goal}参考点约 ${remaining} 格（再往前没有记过的路，剩下的自己看）`, { position: end, remaining, target, walkedWaypoints: route.length });
+  },
+};
 
 const BED_NAMES = ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black'].map((c) => `${c}_bed`);
 

@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { MoveTarget } from '../src/adapter/types.ts';
+import type { MoveTarget, Vec3Like } from '../src/adapter/types.ts';
 import { passageDeepestAnchor, passageNext, passageRoute, passageSurfaceAnchor } from '../src/memory/passages.ts';
 import { WorldMemory } from '../src/memory/store.ts';
-import { goTo } from '../src/skills/movement.ts';
+import { followPassage, goTo } from '../src/skills/movement.ts';
 import { makeCtx, TestWorld } from './survival-helpers.ts';
 
 // 一条 L 形矿道：从 (0,40,0) 往东到 (12,40,0)，再往南到 (12,40,12)；另一条从 (12,40,6) 往东岔出去
@@ -56,6 +56,44 @@ test('碎片化通道：站在接不回地表的支巷里，把全部通道连�
   assert.equal(g!.inside, true);
   // 下更深则取全网最深的脚点
   assert.deepEqual(passageDeepestAnchor([shaft, branch]), { x: 0, y: 32, z: 0 });
+});
+
+test('follow_passage 沿旧矿道逐段走回入口（碎片连成网）', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 10, y: 40, z: 0 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  const save = (id: string, entrances: Vec3Like[], path: Vec3Like[]) =>
+    memory.savePassage({ id, worldId: w.worldId, dim: w.dim, kind: 'dug', entrances, deepestY: Math.min(...path.map((p) => p.y)), dug: 30, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1, path });
+  // 主竖井（地表→深）+ 支巷（井底岔出、没记入口）
+  save('shaft', [{ x: 0, y: 66, z: 0 }], [{ x: 0, y: 64, z: 0 }, { x: 0, y: 60, z: 0 }, { x: 0, y: 56, z: 0 }, { x: 0, y: 52, z: 0 }, { x: 0, y: 48, z: 0 }, { x: 0, y: 44, z: 0 }, { x: 0, y: 40, z: 0 }, { x: 0, y: 36, z: 0 }, { x: 0, y: 32, z: 0 }]);
+  save('branch', [], [{ x: 2, y: 40, z: 0 }, { x: 6, y: 40, z: 0 }, { x: 10, y: 40, z: 0 }]);
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  const visited: Vec3Like[] = [];
+  t.mock.method(w, 'moveTo', async (goal: any) => {
+    if (goal.kind === 'near') { visited.push(goal.pos); w.pos = { x: goal.pos.x, y: goal.pos.y, z: goal.pos.z }; }
+  });
+  const result = await followPassage.run(ctx, { to: 'entrance' });
+  assert.equal(result.status, 'succeeded', result.summary);
+  // 支巷 → 竖井 → 一路回到地表脚点
+  assert.ok(visited.some((p) => p.y >= 64), `走过的路点应该通到地表，实际最高 y${Math.max(...visited.map((p) => p.y))}`);
+  assert.deepEqual(visited[0], { x: 6, y: 40, z: 0 }, '先从支巷往里走回竖井');
+  assert.deepEqual(visited[visited.length - 1], { x: 0, y: 64, z: 0 }, '最后走到竖井顶部');
+});
+
+test('follow_passage 旧矿道连不到目标时报失败', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 50, y: 30, z: 0 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  // 只有一条孤立支巷，且 agent 站得离它很远（超过 near）
+  memory.savePassage({ id: 'branch', worldId: w.worldId, dim: w.dim, kind: 'dug', entrances: [], deepestY: 40, dug: 4, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1, path: [{ x: 2, y: 40, z: 0 }, { x: 6, y: 40, z: 0 }, { x: 10, y: 40, z: 0 }] });
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  const result = await followPassage.run(ctx, { to: 'entrance' });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.failureCode, 'PATH_NOT_FOUND');
 });
 
 test('goto cannot use old passage points to bypass missing visual navigation', async (t) => {
