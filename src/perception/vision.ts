@@ -554,6 +554,10 @@ export class Vision {
     if (!state.connected || !state.alive || !state.observationReady || !eye) return [];
     const now = Date.now(), seen = new Set<string>(), out: BlockObservation[] = [];
     const hFov = this.cfg.hFov * Math.PI / 180, vFov = this.cfg.vFov * Math.PI / 180;
+    // 身体纵轴（接触/本体感觉）：正头顶、脚下、以及身体占据的这几格，站着就能摸到、感知到，
+    // 不再要求落在 yaw/pitch 视锥内；但仍要射线无遮挡。水平方向（前后左右）的格子仍严格按朝向看，
+    // 不因“贴身”就免视线——那会破坏“没转头就看不见”的诚实视觉。
+    const fx = Math.floor(state.pos.x), fy = Math.floor(state.pos.y + 0.05), fz = Math.floor(state.pos.z);
     for (const pos of positions.slice(0, 32)) {
       if (![pos.x, pos.y, pos.z].every((n) => Number.isFinite(n) && Number.isInteger(n))) continue;
       const key = keyOf(pos.x, pos.y, pos.z);
@@ -572,10 +576,11 @@ export class Vision {
             ...[0.1, 0.9].flatMap((fx) => [0.1, 0.9].flatMap((fy) => [0.1, 0.9].map((fz) =>
               [pos.x + x0 + (x1 - x0) * fx, pos.y + y0 + (y1 - y0) * fy, pos.z + z0 + (z1 - z0) * fz])))])
         : [[pos.x + .5, pos.y + .5, pos.z + .5]];
+      const isContact = pos.x === fx && pos.z === fz && pos.y - fy >= -1 && pos.y - fy <= 2;
       const visible = points.some(([x, y, z]) => {
         const dx = x - eye.x, dy = y - eye.y, dz = z - eye.z, distance = Math.hypot(dx, dy, dz);
         if (distance < .01 || distance > this.effectiveRange()) return false;
-        if (Math.abs(norm(yawTo(dx, dz) - eye.yaw)) > hFov / 2 || Math.abs(Math.atan2(dy, Math.hypot(dx, dz)) - eye.pitch) > vFov / 2) return false;
+        if (!isContact && (Math.abs(norm(yawTo(dx, dz) - eye.yaw)) > hFov / 2 || Math.abs(Math.atan2(dy, Math.hypot(dx, dz)) - eye.pitch) > vFov / 2)) return false;
         // Thin doors/fences must expose an actual shape, not merely an empty
         // part of their grid cell. Other blocks still occlude the entire ray.
         const hit = boxes ? shapeHitDistance(boxes, eye, dx / distance, dy / distance, dz / distance, pos.x, pos.y, pos.z, distance) : distance;
