@@ -79,7 +79,7 @@ test('个别任务可以放大输出上限（建筑设计 4 倍），其余照�
   assert.deepEqual(seen, [400, 100]);
 });
 
-test('推理力度：DeepSeek 认真想和瞥一眼都关思考，显式要 high 的任务保留力度', async () => {
+test('推理力度：DeepSeek 认真想默认 low，瞥一眼关掉思考不带力度，建筑设计可以要 high', async () => {
   const seen: any[] = [];
   const srv = http.createServer((req, res) => {
     let body = '';
@@ -97,5 +97,5 @@ test('推理力度：DeepSeek 认真想和瞥一眼都关思考，显式要 high
   await p.complete([{ role: 'user', content: 'hi' }], AbortSignal.timeout(5000), { tier: 'light' });
   await p.complete([{ role: 'user', content: 'hi' }], AbortSignal.timeout(5000), { tier: 'full', reasoningEffort: 'high' });
   srv.close();
-  assert.deepEqual(seen, [{ effort: undefined, thinking: 'disabled' }, { effort: undefined, thinking: 'disabled' }, { effort: 'high', thinking: undefined }]);
+  assert.deepEqual(seen, [{ effort: 'low', thinking: undefined }, { effort: undefined, thinking: 'disabled' }, { effort: 'high', thinking: undefined }]);
 });
