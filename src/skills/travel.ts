@@ -36,7 +36,7 @@ export const buildPortal: Skill<{ origin: Vec3Like; axis: 'x' | 'z' }> = {
     const at = (u: number, y: number): Vec3Like => ({ x: args.origin.x + (args.axis === 'x' ? u : 0), y: args.origin.y + y, z: args.origin.z + (args.axis === 'z' ? u : 0) });
     const frame = [[1, 0], [2, 0], ...[1, 2, 3].flatMap((y) => [[0, y], [3, y]]), [1, 4], [2, 4]].map(([u, y]) => at(u, y));
     const needed = frame.filter((p) => adapter.blockAt(p) !== 'obsidian').length;
-    if ((state.inventory.find((i) => i.name === 'obsidian')?.count ?? 0) < needed) return fail('MISSING_MATERIALS', `还缺 ${needed} 块黑曜石用于门框`);
+    if ((state.inventory.find((i) => i.name === 'obsidian')?.count ?? 0) < needed) return fail('MISSING_MATERIALS', `还缺 ${needed} 块黑曜石用于门框（背包现有 ${state.inventory.find((i) => i.name === 'obsidian')?.count ?? 0} 块；之前失败的门框上可能还摆着黑曜石，先用钻石镐挖回来凑数）`);
     for (let y = 1; y <= 4; y++) for (let u = 0; u <= 3; u++) {
       const name = adapter.blockAt(at(u, y));
       const isFrame = frame.some((p) => dist3(p, at(u, y)) === 0);
@@ -62,6 +62,21 @@ export const buildPortal: Skill<{ origin: Vec3Like; axis: 'x' | 'z' }> = {
         }
       }
       const scaffold = () => adapter.state().inventory.find((i) => ['dirt', 'cobblestone', 'netherrack', 'cobbled_deepslate'].includes(i.name) && i.count > 0)?.name;
+      // 斜坡/坑地上底座悬空：给底座 4 列从实心地往上垫到 y=-1，让底座方块有处可贴
+      for (let u = 0; u <= 3; u++) {
+        let solid: number | null = null;
+        for (let yy = 0; yy >= -8; yy--) {
+          const n = adapter.blockAt(at(u, yy));
+          if (n === null) continue;
+          if (!AIR.has(n)) { solid = yy; break; }
+        }
+        if (solid === null) return fail('NOT_FOUND', `底座第 ${u} 列下方 8 格都是空的（太陡或悬空），换一块更平的地再立门`);
+        for (let yy = solid + 1; yy <= -1; yy++) {
+          const m = scaffold();
+          if (!m) return fail('MISSING_MATERIALS', '底座悬空，缺脚手架方块（圆石/泥土）垫平');
+          await place(at(u, yy), m);
+        }
+      }
       for (const [u, y] of [[0, 0], [3, 0]]) {
         const pos = at(u, y);
         const current = adapter.blockAt(pos);

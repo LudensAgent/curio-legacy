@@ -56,6 +56,20 @@ test('a refused ignition cannot produce a successful portal record', async () =>
   assert.deepEqual(travelStore(memory).snapshot(adapter.worldId).endpoints, []);
 });
 
+test('build_portal on a suspended base fills the gap with scaffold first', async () => {
+  const { adapter, run } = setup();
+  adapter.inv.set('obsidian', 10);
+  adapter.inv.set('flint_and_steel', 1);
+  adapter.inv.set('cobblestone', 20);
+  // 底座中间两列下方挖空（斜坡悬空），应先用脚手架垫平再立框
+  adapter.removed.add('4,62,0');
+  adapter.removed.add('5,62,0');
+  const outcome = await run('build_portal', { origin: { x: 3, y: 63, z: 0 }, axis: 'x' });
+  assert.equal(outcome.result.status, 'succeeded', outcome.result.summary);
+  assert.equal(adapter.blockAt({ x: 4, y: 62, z: 0 }), 'cobblestone', '底座悬空处被脚手架填上');
+  assert.equal(adapter.blockAt({ x: 5, y: 62, z: 0 }), 'cobblestone');
+});
+
 test('portal travel records observed coordinates in both dimensions and verifies a return only after returning', async () => {
   const { adapter, memory, vision, run } = setup();
   const sourcePos = { x: 3, y: 64, z: 0 };
