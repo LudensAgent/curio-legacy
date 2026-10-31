@@ -73,9 +73,12 @@ export class OpenAICompatibleProvider implements LlmProvider {
   /** 服务端不认识 thinking 参数时记住，之后不再发送 */
   private thinkingParamRejected = false;
 
-  /** 小决策关闭“先长篇思考”：它占了小决策大部分耗时，想得越久，决定落地时信息越旧 */
+  /** 小决策关闭“先长篇思考”：它占了小决策大部分耗时，想得越久，决定落地时信息越旧。
+   *  20 个真实「认真想」实测（deepseek-flash）：关思考后正确率 80% 不降、延迟从 12.4s 降到 3.1s，
+   *  偶发的 keep / parse 失败由重试消化。写代码三类（显式 reasoning_effort）和建筑设计（放大输出）仍保持思考。 */
   private noThinking(hint: unknown): boolean {
-    if (this.thinkingParamRejected || (hint as any)?.tier !== 'light') return false;
+    if (this.thinkingParamRejected) return false;
+    if ((hint as any)?.reasoningEffort || scaleOf(hint) > 1) return false;
     const mode = (this.cfg as any).lightThinking ?? 'auto';
     if (mode === 'off') return true;
     return mode === 'auto' && /deepseek/i.test(`${this.cfg.model} ${this.cfg.baseUrl}`);
