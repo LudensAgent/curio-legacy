@@ -1,6 +1,6 @@
 import { DIRS } from '../perception/perception.ts';
 import { dist3, sleep, throwIfAborted } from '../util.ts';
-import type { DriveKeys, EntityInfo } from '../adapter/types.ts';
+import type { DriveKeys, EntityInfo, Vec3Like } from '../adapter/types.ts';
 import { sighted, yawOfDir } from './movement.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill } from './types.ts';
 import { resolveItemAlias } from './work.ts';
@@ -13,6 +13,15 @@ import { openWater, planBoatRoute, type BoatRoute } from './vehicles.ts';
  */
 
 const AIRISH = new Set(['air', 'cave_air', 'void_air']);
+/** 能往空气格里倒的桶：on 写坐标时用 */
+const FLUID_BUCKETS = new Set(['water_bucket', 'lava_bucket']);
+/** "x,y,z" / [x,y,z] / {x,y,z} → 整数坐标；不是坐标返回 null */
+const coordValue = (v: unknown): Vec3Like | null => {
+  const arr = typeof v === 'string' ? v.split(/[,\s]+/).filter(Boolean).map(Number)
+    : Array.isArray(v) ? v.map(Number)
+    : v && typeof v === 'object' ? ['x', 'y', 'z'].map((k) => Number((v as Record<string, unknown>)[k])) : null;
+  return arr && arr.length === 3 && arr.every(Number.isInteger) ? { x: arr[0], y: arr[1], z: arr[2] } : null;
+};
 const dirOk = (dir: string | undefined, from: { x: number; z: number }, to: { x: number; z: number }) => {
   if (!dir || !DIRS[dir]) return true;
   const want = yawOfDir(DIRS[dir][0], DIRS[dir][1]);
@@ -22,10 +31,10 @@ const dirOk = (dir: string | undefined, from: { x: number; z: number }, to: { x:
 };
 
 // ------------------------------------------------------------------ use_item
-export const useItem: Skill<{ item: string; on: string; dir?: string }> = {
+export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string }> = {
   name: 'use_item',
-  description: '手持物品右键：对着最近的看得见的某种方块、水面或岩浆（on 写方块名），或对自己（on:"self"，扔东西朝正看着的方向）；手持船/筏（*_boat/*_raft）对 on:"water" 是放船（生成实体，之后 interact 坐上去、ride 划走）；要对准确定的那一格用 interact_block（写坐标）；对生物用东西（喂、剪、挤奶）是 interact',
-  argsDoc: '{"item": "<物品名>", "on"?: "self | water | lava | <方块名>", "dir"?: "N|NE|E|SE|S|SW|W|NW"}',
+  description: '手持物品右键：对着最近的看得见的某种方块、水面或岩浆（on 写方块名），或对自己（on:"self"，扔东西朝正看着的方向）；on 写坐标（"x,y,z" 或 {"x","y","z"}）时把水桶/岩浆桶倒进那一格空气（浇岩浆做黑曜石用它）；手持船/筏（*_boat/*_raft）对 on:"water" 是放船（生成实体，之后 interact 坐上去、ride 划走）；要对准确定的那一格用 interact_block（写坐标）；对生物用东西（喂、剪、挤奶）是 interact',
+  argsDoc: '{"item": "<物品名>", "on"?: "self | water | lava | <方块名> | {x,y,z}坐标（倒水桶/岩浆桶进这格空气）", "dir"?: "N|NE|E|SE|S|SW|W|NW"}',
   timeoutMs: 30000,
   movement: true,
   validate(raw, adapter) {
@@ -33,7 +42,8 @@ export const useItem: Skill<{ item: string; on: string; dir?: string }> = {
     const name = String(a.item ?? '').trim().replace(/^minecraft:/, '');
     const item = resolveItemAlias(name, adapter);
     if (!item) return { ok: false, error: `未知物品：${name}` };
-    const on = typeof a.on === 'string' && a.on.trim() ? a.on.trim().toLowerCase() : 'self';
+    const coord = coordValue(a.on);
+    const on = coord ?? (typeof a.on === 'string' && a.on.trim() ? a.on.trim().toLowerCase() : 'self');
     const dir = typeof a.dir === 'string' ? a.dir.toUpperCase() : undefined;
     if (dir && !DIRS[dir]) return { ok: false, error: `dir 必须是 ${Object.keys(DIRS).join('/')}` };
     return { ok: true, args: { item, on, ...(dir ? { dir } : {}) } };
@@ -43,6 +53,21 @@ export const useItem: Skill<{ item: string; on: string; dir?: string }> = {
     if (!adapter.useItemOn) return fail('ERROR', '当前适配器不支持使用物品');
     const s = adapter.state();
     if (!s.inventory.some((i) => i.name === args.item)) return fail('MISSING_MATERIALS', `背包里没有 ${args.item}`);
+    if (typeof args.on !== 'string') {
+      if (!FLUID_BUCKETS.has(args.item)) return fail('BAD_ARGS', 'on 写坐标只能用来倒水/倒岩浆（water_bucket / lava_bucket）；对其他物品请写方块名或 "self"');
+      const pos = args.on;
+      const cur = adapter.blockAt(pos);
+      if (cur !== null && !AIRISH.has(cur)) return fail('EFFECT_NOT_CONFIRMED', `(${pos.x},${pos.y},${pos.z}) 不是空气（现在是 ${cur}），水/岩浆只能倒进空格`, { pos });
+      try {
+        const r = await adapter.placeBlockAt(pos, [args.item], signal);
+        if (!r.ok) return fail(r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS' : 'PATH_NOT_FOUND', `往 (${pos.x},${pos.y},${pos.z}) 倒 ${args.item} 没成：${r.reason}`, { pos, reason: r.reason });
+        const now = adapter.blockAt(pos);
+        return ok(`往 (${pos.x},${pos.y},${pos.z}) 倒了 ${args.item}（现在这格是 ${now ?? '未知'}）`, { pos, placed: now });
+      } catch (e) {
+        if (isAbort(e)) throw e;
+        return fail(codeFromError(e), `倒 ${args.item} 出错：${(e as Error).message}`);
+      }
+    }
     try {
       if (args.on === 'self') {
         const r = await adapter.useItemOn(args.item, { kind: 'self' }, signal);
@@ -61,8 +86,9 @@ export const useItem: Skill<{ item: string; on: string; dir?: string }> = {
       const target = hits[0];
       if (!target) {
         // on 写的是生物（牛、猪、羊……）不是方块：拿着东西右键生物就是 interact
-        const creature = !fluid && senses.perceivedEntities(32).some((e) => e.kind !== 'item' && e.perception !== 'heard' && matchesEntity(e.name, args.on));
-        if (creature) return interact.run(ctx, { entity: args.on, with: args.item });
+        const on = args.on;
+        const creature = !fluid && senses.perceivedEntities(32).some((e) => e.kind !== 'item' && e.perception !== 'heard' && matchesEntity(e.name, on));
+        if (creature) return interact.run(ctx, { entity: on, with: args.item });
         return fail('NOT_FOUND', `看不见可以对着用的 ${args.on}${args.dir ? `（${args.dir} 方向）` : ''}${fluid ? '' : '（on 只认方块；对生物用东西写 interact {"entity":…,"with":…}）'}`);
       }
       if (dist3(adapter.state().pos, target.pos) > 4.2) {

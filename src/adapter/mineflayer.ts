@@ -1676,7 +1676,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const faces = attach === 'side' ? sides : attach === 'floor_or_side' ? [...sides, new Vec3(0, -1, 0)]
       : [new Vec3(0, -1, 0), new Vec3(0, 1, 0), ...sides];
     // 贴着箱子、工作台、门这类一点就打开的方块放：先试别的面；只能贴着它时按住潜行再放（不然是打开它，不是放方块）
-    const refs = faces.map((f) => ({ f, ref: b.blockAt(target.plus(f)) })).filter((x) => x.ref && x.ref.boundingBox === 'block')
+    // 桶（水/岩浆）能贴着流体块的面放：往岩浆源上方/旁边的空气格倒水生成黑曜石，靠的就是把水桶贴在岩浆块的面（流体没有 boundingBox:'block'，单独放行）
+    const fluidRef = /^(water|lava)_bucket$/.test(item.name);
+    const refs = faces.map((f) => ({ f, ref: b.blockAt(target.plus(f)) }))
+      .filter((x) => x.ref && (x.ref.boundingBox === 'block' || (fluidRef && (x.ref.name === 'lava' || x.ref.name === 'water'))))
       .sort((x, y) => Number(OPENS_ON_CLICK.test(x.ref.name)) - Number(OPENS_ON_CLICK.test(y.ref.name)));
     if (!refs.length && attach) return { ok: false, reason: attach === 'side' ? 'NO_WALL' : 'NO_FLOOR_OR_WALL' };
     for (const { f, ref } of refs) {
