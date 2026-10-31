@@ -182,6 +182,8 @@ export type OwnBuiltLookup = (pos: Vec3Like, block: string) => { name: string } 
 export class Perception {
   /** 判断“围着我的是不是自己盖的墙”，用来区分屋里和坑里 */
   ownBuilt?: OwnBuiltLookup;
+  /** 这一格是不是在“自己挖过/走过的通道”里（用来区分矿道和别人的人造建筑） */
+  inPassage?: (pos: Vec3Like) => boolean;
   /** 跟着身体记自己挖过的通道（矿道、台阶井） */
   private passages: PassageTracker;
   private lastDugAt = 0;
@@ -355,7 +357,7 @@ export class Perception {
       if (name === null) return { block: null, up: null, covered: 'open' };
       if (isSoftBlock(name)) continue;
       const covered = /(_leaves|_log|_wood|vine|mushroom_block|azalea|mangrove_roots)$/.test(name) ? 'canopy'
-        : /(planks|glass|_slab|_stairs|wool|terracotta|bricks|concrete|_door|_trapdoor|fence)/.test(name) ? 'roof' : 'rock';
+        : /(planks|glass|_slab|_stairs|wool|terracotta|bricks|concrete|_door|_trapdoor|fence|cobblestone|cobbled_deepslate|smooth_|polished_|chiseled_)/.test(name) ? 'roof' : 'rock';
       return { block: name, up, covered };
     }
     return { block: null, up: null, covered: 'open' };
@@ -625,7 +627,7 @@ export class Perception {
     const light = s.connected && s.alive && s.observationReady ? this.lightInfo(s) : null;
     const overhead = s.connected && s.alive && s.observationReady ? this.overheadInfo(s) : null;
     // 树冠下天光也会很弱，但人一抬头就知道是树叶，不会以为自己在地下
-    const where = overhead && contact ? whereAmI(this.adapter, s, overhead, { ownBuilt: this.ownBuilt }) : null;
+    const where = overhead && contact ? whereAmI(this.adapter, s, overhead, { ownBuilt: this.ownBuilt, inPassage: this.inPassage }) : null;
     if (where) {
       try {
         const dug = this.adapter.recentDug?.(this.lastDugAt) ?? [];
@@ -717,7 +719,7 @@ export class Perception {
 }
 
 /** 人砌出来的方块：围着自己的“高地面”如果是这些，多半是墙，不是坑壁（圆石、泥土不算：挖坑垫脚也用它们） */
-const MAN_MADE = /(_planks|_stairs|_slab|glass|_pane|_door|_trapdoor|_fence|_fence_gate|_wall|bricks|_wool|terracotta|concrete|smooth_stone|chiseled_|polished_)$/;
+const MAN_MADE = /(_planks|_stairs|_slab|glass|_pane|_door|_trapdoor|_fence|_fence_gate|_wall|bricks|_wool|terracotta|concrete|smooth_stone|cobblestone|cobbled_deepslate|chiseled_|polished_)$/;
 
 /**
  * 自己在哪：看头顶，再看身边两格外那一圈的地面比脚下高多少（站在坑里一眼就看得出四周比自己高），
@@ -727,7 +729,7 @@ const MAN_MADE = /(_planks|_stairs|_slab|glass|_pane|_door|_trapdoor|_fence|_fen
  */
 export function whereAmI(adapter: Pick<GameAdapter, 'blockAt'>, s: { pos: { x: number; y: number; z: number }; inWater?: boolean },
   overhead: { block: string | null; up: number | null; covered: 'open' | 'canopy' | 'roof' | 'rock' },
-  opts: { ownBuilt?: OwnBuiltLookup } = {}): { kind: WhereKind; text: string; depth?: number; building?: string } {
+  opts: { ownBuilt?: OwnBuiltLookup; inPassage?: (pos: Vec3Like) => boolean } = {}): { kind: WhereKind; text: string; depth?: number; building?: string } {
   const x = Math.floor(s.pos.x), y = Math.floor(s.pos.y), z = Math.floor(s.pos.z);
   if (s.inWater) return { kind: 'water', text: '在水里' };
   const own = (pos: Vec3Like, block: string) => { try { return opts.ownBuilt?.(pos, block) ?? null; } catch { return null; } };
@@ -739,6 +741,10 @@ export function whereAmI(adapter: Pick<GameAdapter, 'blockAt'>, s: { pos: { x: n
     if (!isSoftBlock(b)) roof = { block: b, owner: own({ x, y: y + h, z }, b) };
   }
   if (overhead.covered === 'rock' && !roof?.owner) return { kind: 'underground', text: `在地下：头顶 ${overhead.up} 格是 ${overhead.block}` };
+  // 自己挖/走过的矿道里，头顶哪怕是自己铺上去的人造建材（圆石/木板），也是矿道不是房子
+  if (overhead.covered === 'roof' && (() => { try { return opts.inPassage?.({ x, y, z }) ?? false; } catch { return false; } })()) {
+    return { kind: 'underground', text: `在矿道里：头顶 ${overhead.up} 格是 ${overhead.block}` };
+  }
   // 两格外一圈：每列地表比脚下高几格（列顶被挡住就不算）
   const cols: { rise: number; block: string; owner: { name: string } | null }[] = [];
   for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {

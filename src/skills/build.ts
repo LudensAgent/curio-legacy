@@ -84,7 +84,7 @@ export const OWN_BUILDING_HINT = '拆了拿料，build 回头还会报缺这一�
 const MAN_MADE = /cobblestone|cobbled_deepslate|_stone_bricks|mossy_|cracked_|chiseled_|_planks|bricks|glass|_wool|terracotta|concrete|_door|_trapdoor|fence|_wall|_slab|_stairs|crafting_table|furnace|smoker|blast_furnace|chest|barrel|_bed|anvil|enchanting_table|_torch|lantern|_sign|_banner|_head|smooth_|polished_|hay_block|_carpet/;
 
 /** 这一格是不是在"自己走过/挖过的通道"里：在里面的人造建材是"自己的施工"，不当成要提醒的别人建筑。 */
-function insidePassage(memory: WorldMemory, state: { worldId: string; dim: string }, pos: Vec3Like): boolean {
+export function insidePassage(memory: WorldMemory, state: { worldId: string; dim: string }, pos: Vec3Like): boolean {
   const p = { x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z) };
   for (const rec of memory.passages(state.dim)) {
     if (rec.worldId && rec.worldId !== state.worldId) continue;

@@ -32,7 +32,7 @@ import { HindsightBackend } from './memory/hindsight.ts';
 import { HindsightUsage } from './memory/hindsight-usage.ts';
 import { installProcessHealth, RESTART_EXIT_CODE } from './observer/process-health.ts';
 import { sandboxStats } from './codeskills/sandbox.ts';
-import { buildingArchiveFor, ownBuildingAt } from './skills/build.ts';
+import { buildingArchiveFor, insidePassage, ownBuildingAt } from './skills/build.ts';
 import { flattenProgram, MethodLibrary, simpleToMethod } from './methods/learning.ts';
 import { ResourceKnowledge } from './methods/knowledge.ts';
 import { ControlKnowledge } from './methods/controls.ts';
@@ -88,6 +88,7 @@ const arbiter = new Arbiter(adapter, memory, bus, vision);
 const perception = new Perception(adapter, memory, bus, vision);
 // 区分“在自家屋里”和“在坑里”：围着自己的墙是不是自己盖的房子
 perception.ownBuilt = (pos, block) => { const st = adapter.state(); return ownBuildingAt(memory, { worldId: st.worldId, dim: st.dim }, pos, block); };
+perception.inPassage = (pos) => { const st = adapter.state(); return insidePassage(memory, { worldId: st.worldId, dim: st.dim }, pos); };
 const episodic = new EpisodicMemory(config.memory, memory, bus, () => adapter.state(), config.dataDir,
   config.memory.provider === 'hindsight' ? new HindsightBackend(config.memory) : undefined);
 episodic.start();
