@@ -243,6 +243,20 @@ test('dig_at 自己站的两格不算写错，说明一下就好', async (t) => 
   assert.match(r.summary, /\[0,2,0\]/);
 });
 
+test('站在半砖上：向下挖 [0,-1,0] 挖到脚下的半砖本身，不是它下面的空气', async (t) => {
+  const w = new FakeAdapter();
+  w.groundY = 60; // 让 y63、y64 都是空中，模拟「站在屋顶半砖上、下面是小屋内部」
+  w.pos = { x: 0.5, y: 64.5, z: 0.5 }; // 脚在 64.5 = 站在 y64 的下半砖上
+  w.blocks.push({ name: 'oak_slab', pos: { x: 0, y: 64, z: 0 } });
+  const ctx = makeCtx(w, { senses: { observeBlocks: visibleTargets(w) } });
+  t.after(() => ctx.memory.close());
+  const r = await digAt.run(ctx, { at: [0, -1, 0], facing: 'N' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.match(r.summary, /oak_slab/);
+  assert.ok(w.actions.includes('dig:oak_slab'), `真的挖到了脚下的半砖（实际动作 ${w.actions.join(',')}）`);
+  assert.equal(w.blockAt({ x: 0, y: 64, z: 0 }), 'air', '半砖被挖掉，人才落得下去');
+});
+
 test('dig_at 液体邻格默认不挖；wet:true 与 lava:true 分别授权进水和进岩浆', async (t) => {
   const w = pocket();
   // 前方那格（0,60,-1）是石头，它再往前一格（0,60,-2）是水

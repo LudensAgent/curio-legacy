@@ -19,6 +19,12 @@ export function facingOfYaw(yaw: number): Facing {
 
 export const feetCell = (pos: Vec3Like): Vec3Like => ({ x: Math.floor(pos.x), y: Math.floor(pos.y + 0.05), z: Math.floor(pos.z) });
 
+/**
+ * 脚下实际支撑的那一格：半砖、耕地、床这类高度不足一格的方块，支撑就在脚所在那格本身（脚高是 x.5 之类），
+ * 而整块方块的支撑在脚下一格。所以“往下挖一格”要挖的是这一格，不能拿 feetCell 的 y-1 直接套。
+ */
+export const supportCell = (pos: Vec3Like): Vec3Like => ({ x: Math.floor(pos.x), y: Math.floor(pos.y - 0.05), z: Math.floor(pos.z) });
+
 export function toWorld(feet: Vec3Like, facing: Facing, rel: [number, number, number]): Vec3Like {
   const [f, u, r] = rel;
   return { x: feet.x + FORWARD[facing][0] * f + RIGHT[facing][0] * r, y: feet.y + u, z: feet.z + FORWARD[facing][1] * f + RIGHT[facing][1] * r };

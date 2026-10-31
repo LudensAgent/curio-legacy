@@ -1,5 +1,5 @@
 import type { Vec3Like } from '../adapter/types.ts';
-import { FACINGS, facingOfYaw, feetCell, localMap, toWorld, type Facing } from '../perception/local.ts';
+import { FACINGS, facingOfYaw, feetCell, localMap, supportCell, toWorld, type Facing } from '../perception/local.ts';
 import { attachmentFaces, isSoftBlock, LIQUID_BLOCKS, surroundings } from '../perception/surroundings.ts';
 import { sleep, throwIfAborted } from '../util.ts';
 import { breakCell, why } from './body.ts';
@@ -74,8 +74,8 @@ const KEEPSAKE = /_bed$|^(crafting_table|furnace|smoker|blast_furnace|chest|barr
 
 export const digAt: Skill<CellArgs> = {
   name: 'dig_at',
-  description: '挖掉身边指定的一格；目标不在视野时先转头看向它，仍看不见则返回未知，不挖其他位置。自动换现有工具，默认不造工具。液体邻格默认不挖；wet:true 接受进水，lava:true 接受进岩浆，分别显式选择。只挖不走，不能挖基岩。斜下格 [1,-1,0] 在正前方那格后面，看不见也挖不到；往下挖一格是 [0,-1,0]（挖空后自己会落下）',
-  argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "own"?:true, "wet"?:true（允许进水）, "lava"?:true（允许进岩浆）}（前后/左右 ±2，上下 -1..3；facing 定义相对坐标的方向，执行时可能转头观察固定的目标格；例：[1,1,0] 前方高一格，[0,2,0] 头顶上方（往上挖用这个；[0,1,0] 是自己站的头那格、本来就空），[0,-1,0] 脚下）',
+  description: '挖掉身边指定的一格；目标不在视野时先转头看向它，仍看不见则返回未知，不挖其他位置。自动换现有工具，默认不造工具。液体邻格默认不挖；wet:true 接受进水，lava:true 接受进岩浆，分别显式选择。只挖不走，不能挖基岩。斜下格 [1,-1,0] 在正前方那格后面，看不见也挖不到；往下挖 [0,-1,0] 挖的是脚下支撑块（半砖、耕地这类矮方块就在脚这一格，挖空后自己会落下）',
+  argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "own"?:true, "wet"?:true（允许进水）, "lava"?:true（允许进岩浆）}（前后/左右 ±2，上下 -1..3；facing 定义相对坐标的方向，执行时可能转头观察固定的目标格；例：[1,1,0] 前方高一格，[0,2,0] 头顶上方（往上挖用这个；[0,1,0] 是自己站的头那格、本来就空），[0,-1,0] 脚下的支撑块（半砖等矮方块就在脚这一格））',
   timeoutMs: 30000,
   movement: false,
   validate(raw, adapter) {
@@ -89,8 +89,13 @@ export const digAt: Skill<CellArgs> = {
   },
   async run(ctx, args) {
     throwIfAborted(ctx.signal);
-    const feet = feetCell(ctx.adapter.state().pos);
-    const pos = toWorld(feet, args.facing, args.at);
+    const raw = ctx.adapter.state().pos;
+    const feet = feetCell(raw);
+    // [0,-1,0] 是“挖掉脚下的支撑格”：半砖、耕地、床这类不满一格的方块，支撑就在脚所在那格本身，
+    // 直接套 feetCell 的 y-1 会挖到它下面的空气，永远挖不到脚下的台阶。用 supportCell 按脚高落到真正的支撑格。
+    const pos = args.at[0] === 0 && args.at[2] === 0 && args.at[1] === -1
+      ? supportCell(raw)
+      : toWorld(feet, args.facing, args.at);
     const physical = ctx.adapter.blockAt(pos);
     // 自己站的两格通常是空的；但也可能有火把、花、雪层、蜘蛛网这类东西，那就照样拿掉
     if (physical === null) return fail('NOT_FOUND', `[${args.at}] 那一格还没加载（区块没载入），看不见也没法挖`, { ...after(ctx, args.facing, pos) });
