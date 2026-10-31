@@ -86,17 +86,26 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
       const fluid = args.on === 'water' || args.on === 'lava';
       // 只用看得见的方块；液体要选表面（上面是空气）的那一格。放船还要选开阔水面：船身 1.375 格宽，贴岸的一格浅水放不下
       const boat = /_boat$|_raft$/.test(args.item);
-      const hits = senses.knownBlocks([...names], 32)
+      // 空桶装水/装岩浆只能从源方块（level=0）取，流动的取不了；放船不挑源
+      const collectSource = fluid && args.item === 'bucket';
+      let hits = senses.knownBlocks([...names], 32)
         .filter((h) => !fluid || AIRISH.has(adapter.blockAt({ x: h.pos.x, y: h.pos.y + 1, z: h.pos.z }) ?? 'air'))
         .filter((h) => !fluid || !boat || openWater(ctx, h.pos, 2) >= 4)
-        .filter((h) => dirOk(args.dir, s.pos, h.pos))
-        .sort((a, b) => a.dist - b.dist);
+        .filter((h) => dirOk(args.dir, s.pos, h.pos));
+      const hadSurface = hits.length > 0;
+      if (collectSource && hadSurface) {
+        const levels = new Map((senses.observeBlocks?.(hits.map((h) => h.pos)) ?? [])
+          .map((o) => [`${o.pos.x},${o.pos.y},${o.pos.z}`, Number(o.properties.level ?? 0)]));
+        hits = hits.filter((h) => (levels.get(`${h.pos.x},${h.pos.y},${h.pos.z}`) ?? 1) === 0);
+      }
+      hits.sort((a, b) => a.dist - b.dist);
       const target = hits[0];
       if (!target) {
         // on 写的是生物（牛、猪、羊……）不是方块：拿着东西右键生物就是 interact
         const on = args.on;
         const creature = !fluid && senses.perceivedEntities(32).some((e) => e.kind !== 'item' && e.perception !== 'heard' && matchesEntity(e.name, on));
         if (creature) return interact.run(ctx, { entity: on, with: args.item });
+        if (collectSource && hadSurface) return fail('NOT_FOUND', `附近能看见的 ${args.on} 都是流动的，没有源方块（空桶只能从源方块取）；去源头装，或自己倒一桶水先造源`);
         return fail('NOT_FOUND', `看不见可以对着用的 ${args.on}${args.dir ? `（${args.dir} 方向）` : ''}${fluid ? '' : '（on 只认方块；对生物用东西写 interact {"entity":…,"with":…}）'}`);
       }
       if (dist3(adapter.state().pos, target.pos) > 4.2) {

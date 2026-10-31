@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { ActionResult } from '../src/adapter/types.ts';
+import type { ActionResult, Vec3Like } from '../src/adapter/types.ts';
 import { useItem } from '../src/skills/actions.ts';
 import { TestWorld, makeCtx } from './survival-helpers.ts';
 
@@ -39,4 +39,22 @@ test('非装流体的失败不追加取水指引', async () => {
   const r = await useItem.run(makeCtx(w), { item: 'flint_and_steel', on: 'stone' });
   assert.equal(r.status, 'failed');
   assert.doesNotMatch(r.summary, /只能从源方块取/);
+});
+
+test('装水只选源方块：附近只有流动水时报没有源', async () => {
+  const w = new FeedbackWorld();
+  w.inv.set('bucket', 4);
+  w.setBlock({ x: 2, y: 63, z: 0 }, 'water');
+  const ctx = makeCtx(w, {
+    senses: {
+      observeBlocks: (positions: Vec3Like[]) => positions.map((pos) => ({
+        pos, name: 'water', properties: { level: 1 },
+        worldId: w.worldId, sessionId: w.sessionId, dimension: w.dim, observationId: 1, observedAt: Date.now(), source: 'vision' as const,
+      })),
+    },
+  });
+  const r = await useItem.run(ctx, { item: 'bucket', on: 'water' });
+  assert.equal(r.status, 'failed');
+  assert.equal(r.failureCode, 'NOT_FOUND');
+  assert.match(r.summary, /都是流动的/);
 });
