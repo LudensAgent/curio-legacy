@@ -157,6 +157,19 @@ test('稳定版什么都没做的成功返回不累积成功或失败证据', as
   assert.equal(w.engine.statsOf(definition.name)?.skipped, 1);
 });
 
+test('反射触发的空转独立于是否打断：记 idle、歇一会儿、不计成败', async (t) => {
+  const w = setup(t);
+  assert.ok(w.engine.write({ ...definition, when: { hp_below: 8 }, code: 'return {ok:true};', verify: 'return true;' }).ok);
+  w.adapter.hp = 6;
+  const done = new Promise<TaskOutcome>((resolve) => w.arbiter.once('done', resolve));
+  const now = Date.now();
+  assert.equal(w.engine.tick(null, now), true);
+  assert.equal((await done).result.data?.noop, true);
+  assert.equal(w.engine.statsOf(definition.name)?.idleInterrupts, 1, '独立触发的空转也要记 idle');
+  assert.deepEqual(w.engine.currentStats(definition.name), { ok: 0, fail: 0 });
+  assert.ok(w.engine.heldNow(now + 1).includes(definition.name), '空转后先歇一会儿，别反复空转');
+});
+
 test('手动和候选调用的使用次数分版持久化，跳过和候选失败不污染稳定版成败', async (t) => {
   const w = setup(t);
   assert.ok(w.engine.write(definition).ok);

@@ -347,6 +347,7 @@ export class SkillCurator {
         ...(similar.get(b.name)?.length ? { similar_to: similar.get(b.name) } : {}),
         ...(st?.undid && Object.keys(st.undid).length ? { undid_work_of: st.undid } : {}),
         ...(st?.idleInterrupts ? { idle_interrupts: st.idleInterrupts } : {}),
+        ...(st?.advisory ? { advisory: st.advisory.why } : {}),
         ...(st?.undoneBy && Object.keys(st.undoneBy).length ? { work_undone_by: st.undoneBy } : {}),
         ...(st?.loops?.length ? { see_sawed_with: st.loops.map((l) => `${l.with.startsWith('doing:') ? `手上的「${l.with.slice(6)}」` : `「${l.with}」`}（${l.times} 回）`) } : {}), ...(b.code ? { code: b.code.slice(0, 2500), ...(b.verify ? { verify: b.verify } : {}) } : { steps: b.steps }) };
     });
@@ -364,7 +365,8 @@ export class SkillCurator {
   收窄条件让它们不再互相触发（比如躲怪的技能加上“怪还在附近”、回地表的技能加上“附近没有怪”），或者合并成一份统一处理；
 - 动作上互相拆台的（undid_work_of：它挖掉了那个技能放的方块、或把那个技能挖开的地方又填上，数字是格数；work_undone_by 是反过来）：和拉锯一样要紧。
   看两边各自想达到什么，让它们不再在同一处反着做：收窄其中一个的条件、让一个先检查另一个的成果（比如“脚下是自己刚垫的块就不挖”）、或者合并成一份；
-- 白白打断的（idle_interrupts：条件成立接手了，代码却什么都没做就返回、人也没动，打断了手上的活的次数）：when 比代码里真正动手的判断宽，把 when 收窄到和代码一致。
+- 白白触发的（idle_interrupts：条件成立接手了，代码却什么都没做就返回、人也没动的次数——包括没打断任何事）：when 比代码里真正动手的判断宽，把 when 收窄到和代码一致，或者收起这份用不上的。
+- 只提醒不接手的（advisory：来回拉锯里输掉、被改成不自动做的技能）：定期复查——触发条件还和别的技能重叠就合并/收窄；已经不再重叠、又有真实成功证据的，改写它恢复自动接手。别让这些"只喊不干"的技能一直占着位置。
 - 常常同时满足条件抢着接手的（clashed_with）：调整优先级（priority：更管用、更要紧的高），或者收窄某个的触发条件（用 merge 重写它）。
 - 明显没用、被别的技能完全覆盖的：收起（retire）。
 - lifesaver 只描述应急用途，不代表已经有效。protectedEmergency=true 的应急技能（稳定版和候选都算）免闲置和容量收起——救命的技能平时很少触发、没法预先验收，不能因为“好久没用上”就收；但真正坏掉的（本版用了 ≥4 次却很少成功）仍照常收起。未验证候选和已停用应急版不能借同名旧版成功永久保留。

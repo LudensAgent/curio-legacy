@@ -75,13 +75,24 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
       // 背包的样子：和位置一起看这次到底有没有做任何事
       const invSig = () => ctx.adapter.state().inventory.map((i) => `${i.name}:${i.count}`).sort().join('|');
       const invBefore = invSig();
+      // 战斗状态（举盾/拉弓）单独比：这类防御动作不动、不改背包，却是真实效果，不能当成空转
+      const combatSig = () => { const c = ctx.adapter.combatState?.() ?? { usingItem: false, offHand: null }; return `${c.usingItem ? 1 : 0}:${c.offHand ?? ''}`; };
+      const combatBefore = combatSig();
       let acted = false;
       const handle = makeBridge(ctx);
       const bridge: SandboxHandler = async (method, values) => {
         const value = await handle(method, values);
-        const receipt = value as { ok?: boolean; data?: { noop?: boolean; effectEvidence?: { verified?: boolean; changed?: boolean } } } | null;
-        if (!VERIFY_METHODS.includes(method as typeof VERIFY_METHODS[number]) && !['log', 'sleep'].includes(method)
-          && (receipt?.ok === true && receipt.data?.noop !== true || receipt?.data?.effectEvidence?.verified === true && receipt.data.effectEvidence.changed === true)) acted = true;
+        const receipt = value as { ok?: boolean; moved?: number; data?: { noop?: boolean; effectEvidence?: { verified?: boolean; changed?: boolean } } } | null;
+        const okEffect = receipt?.ok === true && receipt.data?.noop !== true;
+        // 有的动作自己报 ok 但没真做（move moved=0、shield 没举、look/lookAt 只转头）；有的报没成却真改了世界（挖到一半）
+        // ——只有真正改变了身体/世界才算"动了"：effectEvidence 是通用真效果信号；move 看 moved>0；look/lookAt/shield 不算
+        const evidence = receipt?.data?.effectEvidence?.verified === true && receipt.data.effectEvidence.changed === true;
+        const effectful = evidence
+          || (method === 'move' ? (receipt?.moved ?? 0) > 0
+            : !['look', 'lookAt', 'shield', 'log', 'sleep', 'progress'].includes(method)
+              && !VERIFY_METHODS.includes(method as typeof VERIFY_METHODS[number])
+              && okEffect);
+        if (effectful) acted = true;
         return value;
       };
       // 开工前的样子：给判定代码对照（做完以后真的变了没有）
@@ -108,7 +119,8 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
         if (judged) return fail('ERROR', `代码技能「${b.name}」v${b.version ?? 1} 说做完了，但${judged}${m.text}`, { ...data, result: r.result, verified: false, displacement: { horizontal: m.h, dy: m.dy } });
         // 代码没报错，但身体一点没动、背包没变、也没挖没放：说清楚这次什么都没做（可能是条件不满足就跳过了，也可能是技能没起作用），别当成“做成了”
         const still = Math.abs(ctx.adapter.state().pos.x - from.x) + Math.abs(ctx.adapter.state().pos.z - from.z) < 0.3 && Math.floor(ctx.adapter.state().pos.y) === Math.floor(from.y);
-        const noop = still && invSig() === invBefore && !acted;
+        const combatChanged = combatSig() !== combatBefore;
+        const noop = still && invSig() === invBefore && !acted && !combatChanged;
         const noopText = noop ? '（身体这次什么都没做：没挪动、背包没变、没挖也没放。是条件不满足跳过了，还是技能没起作用，看上面的结果；要的事并没有发生）' : '';
         return ok(`代码技能「${b.name}」做完了${m.text}${r.result !== null && r.result !== undefined ? `：${JSON.stringify(r.result).slice(0, 160)}` : ''}${noopText}`, { ...data, result: r.result, verified: !!b.verify, displacement: { horizontal: m.h, dy: m.dy }, ...(noop ? { noop: true } : {}) });
       }

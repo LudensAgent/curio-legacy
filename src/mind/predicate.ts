@@ -21,7 +21,7 @@ export interface Predicate {
   in_water?: boolean; in_lava?: boolean; on_ground?: boolean; night?: boolean; dark?: boolean;
   /** 头那一格是实心方块（被沙砾埋住、卡进墙里，会窒息掉血） */
   in_wall?: boolean;
-  hostile?: { name?: string[]; within: number; fusing?: boolean };
+  hostile?: { name?: string[]; within: number; fusing?: boolean; seen?: boolean };
   no_hostile_within?: number;
   has?: { item: string; count: number };
   lacks?: string;
@@ -44,7 +44,7 @@ export interface Predicate {
 /** 判断时身体能感觉到的一切 */
 export interface Sense {
   state: AgentState;
-  hostiles: { name: string; dist: number; fusing?: boolean }[];
+  hostiles: { name: string; dist: number; fusing?: boolean; perception?: 'seen' | 'heard' }[];
   lightLevel: number | null;
   facing: Facing;
   cell(rel: [number, number, number]): string | null;
@@ -92,12 +92,13 @@ export function validatePredicate(raw: unknown, depth = 0): Predicate | { error:
   }
   if (o.hostile !== undefined) {
     const h = typeof o.hostile === 'string' ? { name: o.hostile, within: 8 } : o.hostile;
-    if (!h || typeof h !== 'object') return { error: 'hostile 写 {"name"?:"skeleton","within":8,"fusing"?:true}' };
+    if (!h || typeof h !== 'object') return { error: 'hostile 写 {"name"?:"skeleton","within":8,"fusing"?:true,"seen"?:true}' };
     const within = h.within ?? h.dist ?? h.distance ?? 8;
     if (!num(within, 1, 32)) return { error: 'hostile.within 要写 1–32 格' };
     const names = h.name === undefined ? undefined : list(h.name);
     if (h.name !== undefined && !names) return { error: 'hostile.name 要写生物名，比如 "skeleton" 或 ["zombie","husk"]' };
-    out.hostile = { within, ...(names ? { name: names } : {}), ...(typeof h.fusing === 'boolean' ? { fusing: h.fusing } : {}) };
+    if (h.seen !== undefined && typeof h.seen !== 'boolean') return { error: 'hostile.seen 写 true（只算看得见的怪）或 false（只算听见的怪）' };
+    out.hostile = { within, ...(names ? { name: names } : {}), ...(typeof h.fusing === 'boolean' ? { fusing: h.fusing } : {}), ...(typeof h.seen === 'boolean' ? { seen: h.seen } : {}) };
   }
   if (o.no_hostile_within !== undefined) {
     if (!num(o.no_hostile_within, 1, 32)) return { error: 'no_hostile_within 要写 1–32 格' };
@@ -215,7 +216,8 @@ export function evalPredicate(p: Predicate, s: Sense): boolean {
   if (p.dark !== undefined && ((s.lightLevel !== null && s.lightLevel <= 7) !== p.dark)) return false;
   if (p.in_wall !== undefined && headInWall(s.cell([0, 1, 0])) !== p.in_wall) return false;
   if (p.hostile && !s.hostiles.some((h) => h.dist <= p.hostile!.within && (!p.hostile!.name || p.hostile!.name.some((n) => glob(n, h.name)))
-    && (p.hostile!.fusing === undefined || !!h.fusing === p.hostile!.fusing))) return false;
+    && (p.hostile!.fusing === undefined || !!h.fusing === p.hostile!.fusing)
+    && (p.hostile!.seen === undefined || (h.perception === 'seen') === p.hostile!.seen))) return false;
   if (p.no_hostile_within !== undefined && s.hostiles.some((h) => h.dist <= p.no_hostile_within!)) return false;
   if (p.has && st.inventory.filter((i) => glob(p.has!.item, i.name)).reduce((n, i) => n + i.count, 0) < p.has.count) return false;
   if (p.lacks && st.inventory.some((i) => i.count > 0 && glob(p.lacks!, i.name))) return false;
@@ -252,7 +254,7 @@ export function senseNow(adapter: Pick<GameAdapter, 'state' | 'blockAt' | 'eye'>
   let drops: NonNullable<Sense['drops']> = [];
   try {
     const ents = senses.perceivedEntities(32);
-    hostiles = ents.filter((e) => e.kind === 'hostile').map((e) => ({ name: e.name, dist: e.dist, ...(e.fusing ? { fusing: true } : {}) }));
+    hostiles = ents.filter((e) => e.kind === 'hostile').map((e) => ({ name: e.name, dist: e.dist, ...(e.fusing ? { fusing: true } : {}), ...(e.perception ? { perception: e.perception } : {}) }));
     drops = ents.filter((e) => e.kind === 'item' && e.perception !== 'heard').map((e) => ({ item: e.name.replace(/^item:/, ''), dist: e.dist }));
   } catch { /* 感官暂不可用 */ }
   let lightLevel: number | null = null;

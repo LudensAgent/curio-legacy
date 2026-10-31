@@ -937,32 +937,31 @@ export class BehaviorEngine {
       recovery.ignored = !okRun || o.result.data?.noop === true;
     }
     if (skipped) {
+      // no-op（身体什么都没做）：不记 ok/fail；反射触发的记 idle 信号（收窄 when、歇一会儿别反复空转），非反射的只是这次没成
+      if (o.task.source === 'reflex') this.noteIdle(name, pending?.nearest, pending?.interrupted);
       if (pending) this.aftermath.delete(name);
       if (recovery) recovery.ignored = true;
       return;
     }
     // 恢复时用的：做完了先不算成功，等重做的那一步出结果（creditRecovery）；自己就出错了才直接算失败
     if ((o.task.args as any)?.failure && okRun) return;
-    // 自动技能（后天的反射）：做没做完不算数，十几秒后看结果（judge）；代码本身出错才马上算失败
+    // 自动技能（后天的反射）：做没做完不算数，十几秒后看结果（judge）；代码本身出错才马上算失败。
+    // no-op 已在上面 skipped 分支统一处理（走 use-skill 的 noop 信号），这里不再用位移启发式补判——那会把 0.2 格的小位移也误判成空转。
     if (pending && o.task.source === 'reflex') pending.behavior = b;
-    // 接手了却一下子就返回、人也没动：多半是 when 写得比代码里的判断宽（条件说“苦力怕 10 格内”，代码却觉得 7 格外不算威胁），
-    // 白白打断了手上的活。先让它歇一会儿，记下来给整理技能的看（收窄条件是它自己的事）
-    const here = this.adapter.state().pos;
-    if (okRun && o.task.source === 'reflex' && pending?.interrupted && o.durationMs < 600 && pending.pos
-      && Math.hypot(here.x - pending.pos.x, here.y - pending.pos.y, here.z - pending.pos.z) < 0.3) {
-      const now = Date.now();
-      this.touch(name, (st) => { st.idleInterrupts = (st.idleInterrupts ?? 0) + 1; st.idleAt = now; });
-      this.holds.set(name, { until: now + BehaviorEngine.HOLD_MS, why: '条件成立接手后什么都没做就返回，打断了手上的事', closer: Number.isFinite(pending.nearest) ? pending.nearest : Infinity });
-      this.bus.publish('instinct_idle', 'P3', `技能「${name}」接手后什么都没做就返回（打断了「${pending.interrupted}」），先歇 ${BehaviorEngine.HOLD_MS / 1000} 秒（怪更近或挨打时照常接手）；它的 when 可能比代码里的判断宽`, { name, interrupted: pending.interrupted, times: this.stats[name]?.idleInterrupts });
-      this.aftermath.delete(name);
-      return;
-    }
     if (pending && o.task.source === 'reflex') {
       pending.summary = o.result.summary; pending.data = o.result.data ?? {};
       if (okRun || !['ERROR', 'BAD_ARGS'].includes(String(o.result.failureCode))) return;
       this.aftermath.delete(name);
     }
     this.record(b, okRun, o.result.summary, (o.result.data ?? {}) as Record<string, any>);
+  }
+
+  /** 反射技能触发后什么都没做：记 idle（整理技能的据此收窄 when）、歇一会儿，怪更近或挨打时照常接手 */
+  private noteIdle(name: string, nearest: number | undefined, interrupted?: string) {
+    const now = Date.now();
+    this.touch(name, (st) => { st.idleInterrupts = (st.idleInterrupts ?? 0) + 1; st.idleAt = now; });
+    this.holds.set(name, { until: now + BehaviorEngine.HOLD_MS, why: '条件成立接手后什么都没做就返回', closer: Number.isFinite(nearest) ? nearest : Infinity });
+    this.bus.publish('instinct_idle', 'P3', `技能「${name}」接手后什么都没做就返回${interrupted ? `（打断了「${interrupted}」）` : ''}，先歇 ${BehaviorEngine.HOLD_MS / 1000} 秒（怪更近或挨打时照常接手）；它的 when 可能比代码里的判断宽`, { name, ...(interrupted ? { interrupted } : {}), times: this.stats[name]?.idleInterrupts });
   }
 
   /** 自动技能的事后评判：死了、或者又掉了 6 点以上的血，就是没管用 */

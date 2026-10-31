@@ -33,14 +33,14 @@ description: 怎么把管用的做法写成技能：触发条件、动作步骤�
 - 参数 `api` 和 `args` 已经给好；恢复时 `args.failure = {skill,args,code,summary,target?,position,entityId?}` 是刚失败的那一步（`target` 是动作确认的绝对目标，`position` 是失败时身体的位置）；`use_skill {"name":…,"args":{…}}` 调用时 args 就是那个对象（比如 `args.y`）。调用类技能要在 skill 里写 `"args":{"y":"要挖到的高度"}` 声明参数名和意思：心智调用时会看到，写错名字会被当场提醒。
 - `api.state()`、`api.blockAt(x,y,z)`、`api.region(x1,y1,z1,x2,y2,z2)`（返回 palette/kinds/data，第 i 格 i = (y-min.y)*sx*sz + (z-min.z)*sx + (x-min.x)，kind = open|solid|liquid|unknown）、`api.entities(r)`、`api.nearestLand()`（最近见过的能站的干地，和身体上岸判断同一个标准；自己判断“哪里是干地”时用它，别另写一套）、`api.stepTo(x,y,z)`、`api.digAt(x,y,z)`、`api.placeAt(x,y,z,item)`、`api.moveTo(x,y,z,range,{sprint})`（默认走路，sprint:true 跑：快但很耗饥饿）、`api.act("动作",{参数})`、`api.look(yaw,pitch)`、`api.lookAt(x,y,z)`、`api.sleep(ms)`、`api.log(…)`、`api.progress(p)`；全部要 await。
 - 身体的细动作：`api.move({forward,back,left,right,jump,sprint,sneak}, ms≤1000, {face: 实体id或[x,y,z]})`（按住这些键一小会儿、一直盯着目标；前面是岩浆或高崖会自己停下）、`api.attack(id)`（返回距上次挥了多久）、`api.equip(物品, 位置)`、`api.shield(true/false)`、`api.draw("bow")` + `api.release([x,y,z])`、`api.shoot(id)`。`api.state()` 里有 offHand、armor、usingItem、hurtAgoMs、deathDrop；`api.entities(r)` 里有 velocity、height、hp。
-- 方块查询只返回当前视觉确认的格子；未看见、遮挡、黑暗或未加载均为 `name:null,kind:"unknown"`，连实心/空气/液体也不能猜。48 格是查询上限，不代表这个范围全都看得见。region 的第 i 格是 `palette[data[i]]` 和 `kinds[data[i]]`，unknown 不代表空气，更不代表没有矿。听到的实体只给粗略方向和距离，没有真实 ID/坐标；精确攻击/射击只接受当前看见的实体。
+- 方块查询只返回当前视觉确认的格子；未看见、遮挡、黑暗或未加载均为 `name:null,kind:"unknown"`，连实心/空气/液体也不能猜。48 格是查询上限，不代表这个范围全都看得见。region 的第 i 格是 `palette[data[i]]` 和 `kinds[data[i]]`，unknown 不代表空气，更不代表没有矿。听到的实体只给粗略方向和距离，没有真实 ID/坐标；精确攻击/射击只接受当前看见的实体。`when` 里的 `hostile` 也会匹配听见的怪——如果你的代码按位置/ID 行动，写 `hostile {... ,"seen":true}` 只触发看得见的，或在代码里对 heard 先转头/举盾再扫。
 - region 最多 40000 格；不能 require/import/eval、网络/文件访问或接触 adapter/宿主世界对象；每次唤醒最多 1.5 秒同步计算，总共最多 12000 次 api 调用；做不成就 `throw new Error("原因")`。
 - 恢复用 `args.failure.target` 的绝对坐标；失败动作的 `at/to` 是相对坐标，不能当世界坐标。保留原目标和允许手段，缺材料/接口就报告缺口，不擅自换实体、开采范围或新增探索。原 `dig/avoid/make`、实体 ID 和 `wet/lava/own` 限制在步骤和嵌套调用中继续生效；不能隐式增加挖掘、合成或探索，额外放块要交回心智显式用 `use_skill args.allowPlace:true` 选择。修改 `when/args/verify` 也属于完整版本修订。
 - **会自己变好**：代码技能老失败时，会在后台单独请一次模型拿着出错记录修订候选（v2、v3…）；候选不自动接手，需心智显式试用并积累真实验收证据才启用。回退恢复触发条件、参数、代码与验收的完整快照，并分配新版本号。改进有间隔、不会频繁发生。你也可以写 `{"name":"…","improve":"哪里不好"}` 主动要求改进（同样排队、限频）。
 
 ## 条件写法（并列的键都要成立）
 - 自己：`hp_below` `food_below` `oxygen_below`（数字），`in_water` `in_lava` `on_ground` `night` `dark`（true/false），`in_wall`（true：头那一格是实心方块——被沙砾埋住或卡进墙里，正在窒息掉血）
-- 怪：`hostile` `{"name"?:"skeleton"或["zombie","husk"],"within":16,"fusing"?:true}`；`no_hostile_within` 数字
+- 怪：`hostile` `{"name"?:"skeleton"或["zombie","husk"],"within":16,"fusing"?:true,"seen"?:true}`（`seen:true` 只看看得见的怪；不写则听见的也算）；`no_hostile_within` 数字
 - 背包：`has` `"cobblestone"` 或 `{"item":"*_planks","count":4}`（* 通配）；`lacks` `"torch"`
 - 正在做：`doing` / `not_doing` 动作名或数组
 - 身边的方块：`cell` `{"at":[前,上,右],"is":"air|open|solid|liquid|方块名"}`，可写数组；open = 能穿过（空气、草、雪层）
