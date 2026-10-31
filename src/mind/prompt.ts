@@ -56,7 +56,7 @@ export interface MindContext {
   researchContext?: unknown;
   persona: string;
   /** 主线进度事实：已达成里程碑与下一个未达成的目标（只作方向参考，不是硬目标） */
-  progress?: { reached: number; total: number; done: string[]; next: string | null } | null;
+  progress?: { reached: number; total: number; done: string[]; next: string | null; branches: { group: string; done: number; total: number; next: string[] }[] } | null;
   /** 技能书索引（每份一行） */
   skills?: string[];
   /** 游戏自己的系统消息（死亡播报、成就、公告），原话 */
@@ -619,7 +619,10 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       ...(!glance && ctx.researchContext ? { research: ctx.researchContext } : {}),
     }],
     ['记得的地方', worldKnowledge(ctx)],
-    ...(ctx.progress ? [['进度', { mainline: `主线进度 ${ctx.progress.reached}/${ctx.progress.total}${ctx.progress.done.length ? `（已达成：${ctx.progress.done.join('、')}）` : ''}，下一个目标：${ctx.progress.next ?? '已全部达成'}` }] as [string, Record<string, unknown>]] : []),
+    ...(ctx.progress ? [['进度', {
+      mainline: `已完成 ${ctx.progress.reached}/${ctx.progress.total} 个里程碑${ctx.progress.done.length ? `（最近达成：${ctx.progress.done.join('、')}）` : ''}`,
+      branches: ctx.progress.branches.map((b) => ({ group: b.group, reached: `${b.done}/${b.total}`, ...(b.next.length ? { untouched: b.next } : {}) })),
+    }] as [string, Record<string, unknown>]] : []),
     ...(ctx.recalled?.length || ctx.hindsightMemories?.length || ctx.openedSkill ? [['想起来的', {
       ...(ctx.recalled?.length ? { memories: ctx.recalled.map((r) => `[${RECALL_LABEL[r.kind]}] ${r.text}`) } : {}),
       ...(ctx.hindsightMemories?.length ? { long_term: ctx.hindsightMemories.map((m) => `[${m.kind === 'experience' ? '经历' : '推断'}·长期记忆] ${m.text}`) } : {}),

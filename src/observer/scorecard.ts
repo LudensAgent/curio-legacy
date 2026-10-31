@@ -45,6 +45,8 @@ export const MILESTONES: Milestone[] = [
   { key: 'fish', label: '钓到鱼（腥味十足的生意）', group: '过日子', weight: 3, adv: ['Fishy Business'] },
   { key: 'breed', label: '繁殖动物（我从哪儿来？）', group: '过日子', weight: 3, adv: ['The Parrots and the Bats'] },
   { key: 'bread', label: '面包', group: '过日子', weight: 2, item: /^bread$/ },
+  { key: 'trade', label: '村民交易（一个不错的交易）', group: '过日子', weight: 3, adv: ['What a Deal!'] },
+  { key: 'bee', label: '养蜂取蜜', group: '过日子', weight: 3, item: /^(honey_bottle|honeycomb|beehive)$/, adv: ['Bee Our Guest', 'Wax On'] },
   // 铁器时代（Acquire Hardware / Suit Up / Hot Stuff / Isn't It Iron Pick / Not Today, Thank You / Ice Bucket Challenge）
   { key: 'iron_ingot', label: '铁锭（来硬的）', group: '铁器', weight: 6, item: /^iron_ingot$/, adv: ['Acquire Hardware'] },
   { key: 'iron_pickaxe', label: '铁镐（这不是铁镐么）', group: '铁器', weight: 6, item: /^iron_pickaxe$/, adv: ["Isn't It Iron Pick"] },
@@ -58,6 +60,7 @@ export const MILESTONES: Milestone[] = [
   { key: 'diamond_pickaxe', label: '钻石镐', group: '钻石', weight: 6, item: /^diamond_pickaxe$/ },
   { key: 'diamond_armor', label: '钻石甲（用钻石包裹我）', group: '钻石', weight: 6, item: /^diamond_(helmet|chestplate|leggings|boots)$/, adv: ['Cover Me with Diamonds'] },
   { key: 'enchanting_table', label: '附魔台（附魔师）', group: '钻石', weight: 6, item: /^enchanting_table$/, adv: ['Enchanter'] },
+  { key: 'netherite', label: '下界合金（远古残骸）', group: '钻石', weight: 7, item: /^(netherite_ingot|netherite_scrap|ancient_debris)$/, adv: ['Hidden in the Depths'] },
   // 下界与末地（We Need to Go Deeper / Into Fire / Eye Spy / The End? / Free the End）
   { key: 'nether', label: '进入下界（勇往直下）', group: '下界与末地', weight: 8, adv: ['We Need to Go Deeper'] },
   { key: 'blaze_rod', label: '烈焰棒（与火共舞）', group: '下界与末地', weight: 5, item: /^blaze_rod$/, adv: ['Into Fire'] },
@@ -65,6 +68,20 @@ export const MILESTONES: Milestone[] = [
   { key: 'stronghold', label: '找到要塞（隔墙有眼）', group: '下界与末地', weight: 6, adv: ['Eye Spy'] },
   { key: 'end', label: '进入末地（结束了？）', group: '下界与末地', weight: 8, adv: ['The End?'] },
   { key: 'dragon', label: '击败末影龙（解放末地）', group: '下界与末地', weight: 15, adv: ['Free the End'] },
+  { key: 'end_city', label: '末地城（潜影贝）', group: '下界与末地', weight: 6, item: /^(shulker_shell|shulker_box)$/, adv: ['The City at the End of the Game'] },
+  { key: 'elytra', label: '鞘翅（天空的极限）', group: '下界与末地', weight: 8, item: /^elytra$/, adv: ["Sky's the Limit"] },
+  { key: 'purpur', label: '紫珀', group: '下界与末地', weight: 4, item: /^(purpur_block|purpur_pillar|end_rod)$/ },
+  // 海洋（海龟、海晶石、潮涌核心、三叉戟）
+  { key: 'turtle', label: '海龟（海龟蛋/鳞甲）', group: '海洋', weight: 4, item: /^(turtle_egg|turtle_helmet|scute)$/ },
+  { key: 'prismarine', label: '海晶石/守卫者', group: '海洋', weight: 5, item: /^(prismarine|prismarine_bricks|dark_prismarine|prismarine_shard|prismarine_crystals|sea_lantern)$/ },
+  { key: 'conduit', label: '潮涌核心（海底神殿）', group: '海洋', weight: 5, item: /^(heart_of_the_sea|conduit)$/, adv: ['Moskstraumen'] },
+  { key: 'trident', label: '三叉戟', group: '海洋', weight: 4, item: /^trident$/, adv: ['A Throwaway Joke'] },
+  // 建筑与红石（信标、凋零、红石机关）
+  { key: 'beacon', label: '信标', group: '建筑与红石', weight: 6, item: /^beacon$/, adv: ['Bring Home the Beacon'] },
+  { key: 'wither', label: '凋零（下界之星）', group: '建筑与红石', weight: 6, item: /^nether_star$/, adv: ['Withering Heights'] },
+  { key: 'redstone', label: '红石机关', group: '建筑与红石', weight: 3, item: /^(redstone_block|observer|dispenser|dropper|sticky_piston|piston|repeater|comparator)$/ },
+  // 酿造
+  { key: 'brewing', label: '酿造台（药水）', group: '酿造', weight: 5, item: /^brewing_stand$/, adv: ['Local Brewery'] },
 ];
 const TOTAL_WEIGHT = MILESTONES.reduce((n, m) => n + m.weight, 0);
 const ADV_KEY = new Map(MILESTONES.flatMap((m) => (m.adv ?? []).map((a) => [a.toLowerCase(), m.key] as const)));
@@ -84,6 +101,8 @@ const clamp = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
 /** 活了多久 → 0..1 的 S 形曲线：中点是一个游戏日（20 分钟），坡度 6 分钟（10 分钟约 0.16，40 分钟约 0.97） */
 export const LIFE_MIDPOINT_MIN = 20, LIFE_SLOPE_MIN = 6;
 export const lifeCurve = (minutes: number) => 1 / (1 + Math.exp(-(minutes - LIFE_MIDPOINT_MIN) / LIFE_SLOPE_MIN));
+
+export interface ProgressBranch { group: string; done: number; total: number; next: string[] }
 
 export class Scorecard {
   data: Data;
@@ -212,11 +231,20 @@ export class Scorecard {
     return { total, progress, survival, learning, efficiency };
   }
 
-  /** 给心智看的进度事实：已达成多少、下一个未达成的里程碑（只作方向参考，不是硬目标；怎么推进由心智定）。 */
-  progressFacts(): { reached: number; total: number; done: string[]; next: string | null } {
+  /** 给心智看的进度事实：已达成多少、每个分支各达成几项、还没碰过的（只作方向参考，不是硬目标；怎么推进由心智定）。 */
+  progressFacts(): { reached: number; total: number; done: string[]; next: string | null; branches: ProgressBranch[] } {
     const reached = MILESTONES.filter((m) => this.data.ever[m.key] !== undefined);
     const next = MILESTONES.find((m) => this.data.ever[m.key] === undefined);
-    return { reached: reached.length, total: MILESTONES.length, done: reached.slice(-4).map((m) => m.label), next: next?.label ?? null };
+    // 按分支归组：让心智看到“哪一类已经玩过、哪一类还没碰”，而不是只有一根主线上的下一个。
+    const byGroup = new Map<string, Milestone[]>();
+    for (const m of MILESTONES) { const g = byGroup.get(m.group) ?? []; g.push(m); byGroup.set(m.group, g); }
+    const branches: ProgressBranch[] = [...byGroup].map(([group, list]) => ({
+      group,
+      done: list.filter((m) => this.data.ever[m.key] !== undefined).length,
+      total: list.length,
+      next: list.filter((m) => this.data.ever[m.key] === undefined).slice(0, 2).map((m) => m.label),
+    }));
+    return { reached: reached.length, total: MILESTONES.length, done: reached.slice(-4).map((m) => m.label), next: next?.label ?? null, branches };
   }
 
   flush() {

@@ -37,7 +37,7 @@ export interface MindDeps {
   mySkills?: () => MySkillInfo[];
   researchContext?: () => unknown;
   /** 主线进度事实（已达成里程碑 + 下一个未达成的目标）：来自 scorecard，只作方向参考，不是硬目标 */
-  progress?: () => { reached: number; total: number; done: string[]; next: string | null };
+  progress?: () => { reached: number; total: number; done: string[]; next: string | null; branches: { group: string; done: number; total: number; next: string[] }[] };
   audience?: { context(tier?: 'light' | 'full'): AudienceContext | null; buildConsensus?(windowMs?: number): { viewers: number; messages: number; samples: string[] }; clearBuildConsensus?(): void };
   onGoalEnd?: (status: string) => void;
   /** 主目标很久没进展：交给后台想“要做到它还缺什么能力” */
