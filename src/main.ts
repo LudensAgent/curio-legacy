@@ -244,7 +244,7 @@ const scorecard = new Scorecard(bus, () => adapter.state(), path.join(config.dat
   skills: behaviors.list().map((b) => behaviors.statsOf(b.name) ?? { ok: 0, fail: 0 }),
   knowHow: selfModel.data.knowHow, // 回调在定时取样时才执行，那时 selfModel 已经建好
   housesComplete: (() => { try { return buildingArchiveFor(memory).list().filter((p) => p.status === 'complete').length; } catch { return 0; } })(),
-}));
+}), () => arbiter.paused);
 scorecard.start();
 behaviors.drops = () => {
   const d = memory.lastDeath(), s = adapter.state();

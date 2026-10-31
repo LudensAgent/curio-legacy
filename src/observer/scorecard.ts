@@ -7,10 +7,10 @@ import type { AgentEvent, EventBus } from '../events.ts';
  * 学习曲线：给它的玩法打分，看它是不是在变好。
  *
  * 四个分项（0–100），加权成总分：
- * - 进度 40%：游戏里的里程碑（原木 → 工作台 → 木镐 → 石镐 → 熔炉 → 火把 → 床 → 盖好房子 → 铁器 → 钻石…），按权重累计，只增不减；
- * - 生存 20%：最近一小时死了几次；
- * - 学习 25%：用得上、成功率过半的技能有几份，被事实验证过的窍门有几条，技能平均成功率；
- * - 效率 15%：最近半小时动作的成功率、卡住的比例。
+ * - 进度 20%：里程碑按权重累计，只增不减（「广度」地板，不会因为退步而回落）；
+ * - 生存 25%：按「活跃时长」走 S 形曲线——活着、连着、没暂停才累积，暂停/离线/纯发呆不涨分；
+ * - 学习 30%：技能与窍门的成功率（Laplace 平滑 + 置信度加权，小样本往 50% 收缩）+「越学越快」的进步速率；
+ * - 效率 25%：最近半小时动作成功率与卡住比例（同样置信度加权）；样本不足返回 null，总分按 0 计、仪表盘显示「—」。
  *
  * 另外按“每一条命”记从复活到各个里程碑用了几分钟：同样从空手开始，越来越快就是学到了东西——这是最直接的学习曲线。
  */
@@ -88,8 +88,8 @@ const ADV_KEY = new Map(MILESTONES.flatMap((m) => (m.adv ?? []).map((a) => [a.to
 /** 每条命都会重新经过、最能看出“熟练度”的几个 */
 export const LIFE_MILESTONES = ['crafting_table', 'stone_pickaxe', 'furnace', 'torch', 'bed', 'shelter'];
 
-export interface Life { n: number; start: number; end?: number; cause?: string; reached: Record<string, number>; nights: number }
-export interface Sample { t: number; total: number; progress: number; survival: number; learning: number; efficiency: number }
+export interface Life { n: number; start: number; end?: number; cause?: string; reached: Record<string, number>; nights: number; activeMs?: number }
+export interface Sample { t: number; total: number; progress: number; survival: number; learning: number; efficiency: number | null }
 interface Data { version: 1; world: string; startedAt: number; ever: Record<string, number>; lives: Life[]; samples: Sample[]; deaths: number[];
   /** 游戏播报过的所有成就（含不在里程碑表里的） */
   advancements?: { title: string; at: number }[] }
@@ -101,6 +101,24 @@ const clamp = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
 /** 活了多久 → 0..1 的 S 形曲线：中点是一个游戏日（20 分钟），坡度 6 分钟（10 分钟约 0.16，40 分钟约 0.97） */
 export const LIFE_MIDPOINT_MIN = 20, LIFE_SLOPE_MIN = 6;
 export const lifeCurve = (minutes: number) => 1 / (1 + Math.exp(-(minutes - LIFE_MIDPOINT_MIN) / LIFE_SLOPE_MIN));
+/** Laplace 成功率（Beta(1,1) 后验均值）：把小数量的成功率往 50% 收缩——0/0 → 50、1/0 → 67、50/50 → 98。 */
+const laplaceRate = (ok: number, fail: number) => (ok + 1) / (ok + fail + 2);
+/** 置信度：样本量 n 多大才信这个成功率（5 次信一半、25 次信 83%）。 */
+const conf = (n: number) => n / (n + 5);
+/** 中位数（比较早期/近期到达里程碑的用时）。 */
+const medianOf = (a: number[]) => { if (!a.length) return 0; const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
+/** 若干 [成功,失败] 记录合成一个 0..100 的置信度加权成功率；全都没有样本时返回 null。 */
+function confidenceMean(rows: { ok: number; fail: number }[]): number | null {
+  const withData = rows.filter((r) => r.ok + r.fail > 0);
+  if (!withData.length) return null;
+  let wsum = 0, vsum = 0;
+  for (const r of withData) { const w = conf(r.ok + r.fail); wsum += w; vsum += w * laplaceRate(r.ok, r.fail) * 100; }
+  return vsum / wsum;
+}
+/** 单条记录的成功率（效率分用），没样本时返回 null。 */
+const weightedRate = (ok: number, fail: number) => confidenceMean([{ ok, fail }]);
+/** 把若干 [值(0..100|null), 权重] 合成 0..100；null 按 0 计，缺数据就不贡献分。 */
+const blend = (...parts: [number | null, number][]) => clamp(parts.reduce((s, [v, w]) => s + (v ?? 0) * w, 0));
 
 export interface ProgressBranch { group: string; done: number; total: number; next: string[] }
 
@@ -110,9 +128,10 @@ export class Scorecard {
   private attempts: { t: number; stuck: boolean }[] = [];
   private wasDay: boolean | null = null;
   private dirty = false;
+  private lastSampleAt: number | null = null;
   private listener = (ev: AgentEvent) => this.onEvent(ev);
 
-  constructor(private bus: EventBus, private state: () => AgentState, private file: string | null, private learning: () => LearningInput) {
+  constructor(private bus: EventBus, private state: () => AgentState, private file: string | null, private learning: () => LearningInput, private paused: () => boolean = () => false) {
     this.data = { version: 1, world: '', startedAt: Date.now(), ever: {}, lives: [], samples: [], deaths: [] };
     if (file && fs.existsSync(file)) { try { const d = JSON.parse(fs.readFileSync(file, 'utf8')); if (d?.version === 1) this.data = { ...this.data, ...d }; } catch { /* 坏了就重新记 */ } }
   }
@@ -126,7 +145,7 @@ export class Scorecard {
 
   private life(now = Date.now()): Life {
     let l = this.data.lives.at(-1);
-    if (!l || l.end) { l = { n: (l?.n ?? 0) + 1, start: now, reached: {}, nights: 0 }; this.data.lives.push(l); if (this.data.lives.length > 200) this.data.lives.shift(); this.dirty = true; }
+    if (!l || l.end) { l = { n: (l?.n ?? 0) + 1, start: now, reached: {}, nights: 0, activeMs: 0 }; this.data.lives.push(l); if (this.data.lives.length > 200) this.data.lives.shift(); this.dirty = true; }
     return l;
   }
 
@@ -196,6 +215,13 @@ export class Scorecard {
       if (/the_end|^end$/.test(s.dim)) this.reach('end', now);
       this.wasDay = s.isDay;
     }
+    // 累计「活跃时长」：只有活着、连着、没暂停才算生存时间；暂停/离线不累积，两次取样间隔太长（进程被挂起）也不计。
+    const cur = this.data.lives.at(-1);
+    if (cur && !cur.end && this.lastSampleAt !== null) {
+      const dt = now - this.lastSampleAt;
+      if (s?.connected && s.alive && !this.paused() && dt > 0 && dt < 120_000) cur.activeMs = (cur.activeMs ?? 0) + dt;
+    }
+    this.lastSampleAt = now;
     const learn = this.learning();
     if (learn.housesComplete > 0) this.reach('shelter', now);
     const sc = this.scores(now, learn);
@@ -206,29 +232,48 @@ export class Scorecard {
   }
 
   scores(now = Date.now(), learn = this.learning()) {
-    // 进度：里程碑按权重累计；里程碑表以外的游戏成就每个再加一点（最多 10 分）
-    const known = new Set(MILESTONES.flatMap((m) => (m.adv ?? []).map((a) => a.toLowerCase())));
-    const extra = Math.min(10, (this.data.advancements ?? []).filter((a) => !known.has(a.title.toLowerCase())).length * 1.5);
-    const progress = clamp(MILESTONES.filter((m) => this.data.ever[m.key] !== undefined).reduce((n, m) => n + m.weight, 0) / TOTAL_WEIGHT * 100 + extra);
-    const deathsLastHour = this.data.deaths.filter((t) => now - t < 3600_000).length;
-    // 生存：按“活了多久”打分，用 S 形曲线——刚复活几分钟几乎不得分，撑过一整个游戏日（20 分钟）正好一半，
-    // 再往后很快接近满分、不再无限加分。当前这条命占六成；最近几条已经结束的命的中位数占四成（稳定地活得久才高）。
+    // 进度：里程碑按权重累计，只增不减（广度，是地板）；表外成就并入里程碑表，不再单独加分。
+    const progress = clamp(MILESTONES.filter((m) => this.data.ever[m.key] !== undefined).reduce((n, m) => n + m.weight, 0) / TOTAL_WEIGHT * 100);
+
+    // 生存：按「活跃时长」走 S 形曲线（活着、连着、没暂停才累积，见 sample()），刚复活几乎不得分、撑过一个游戏日得一半；
+    // 当前这条命占六成，最近几条已结束的命的中位数占四成（稳定活得久才高）。
     const cur = this.data.lives.at(-1);
-    const curMin = cur && !cur.end ? (now - cur.start) / 60000 : 0;
-    const ended = this.data.lives.filter((l) => l.end).slice(-5).map((l) => (l.end! - l.start) / 60000).sort((a, b) => a - b);
-    const median = ended.length ? ended[Math.floor(ended.length / 2)] : curMin;
+    const curMin = cur && !cur.end ? (cur.activeMs ?? 0) / 60000 : 0;
+    const ended = this.data.lives.filter((l) => l.end).slice(-5).map((l) => (l.activeMs ?? 0) / 60000);
+    const median = ended.length ? medianOf(ended) : curMin;
     const survival = clamp(100 * (0.6 * lifeCurve(curMin) + 0.4 * lifeCurve(median)));
-    const used = learn.skills.filter((k) => k.ok + k.fail >= 2 && !k.disabled);
-    const useful = used.filter((k) => k.ok / (k.ok + k.fail) >= 0.5).length;
-    const rate = used.length ? used.reduce((n, k) => n + k.ok / (k.ok + k.fail), 0) / used.length : 0;
-    const verified = learn.knowHow.filter((k) => k.wins >= 1 && k.wins > k.losses).length;
-    const learning = clamp(Math.min(useful * 15, 60) + Math.min(verified * 4, 20) + rate * 20);
-    const acts = this.actions.filter((a) => now - a.t < 30 * 60_000), tries = this.attempts.filter((a) => now - a.t < 30 * 60_000);
-    const okRate = acts.length >= 5 ? acts.filter((a) => a.ok).length / acts.length : null;
-    const stuckRate = tries.length >= 3 ? tries.filter((a) => a.stuck).length / tries.length : null;
-    const efficiency = okRate === null && stuckRate === null ? 50 : clamp((okRate ?? 0.5) * 70 + (1 - (stuckRate ?? 0.5)) * 30);
-    const total = clamp(progress * 0.4 + survival * 0.2 + learning * 0.25 + efficiency * 0.15);
+
+    // 学习：技能与窍门的成功率（Laplace 平滑 + 置信度加权，小样本往 50% 收缩），加「越学越快」的进步速率。
+    const skillScore = confidenceMean(learn.skills.filter((k) => !k.disabled).map((k) => ({ ok: k.ok, fail: k.fail })));
+    const knowHowScore = confidenceMean(learn.knowHow.map((k) => ({ ok: k.wins, fail: k.losses })));
+    const learning = blend([skillScore, 0.45], [knowHowScore, 0.25], [this.learningTrend(), 0.30]);
+
+    // 效率：最近半小时动作成功率 + 卡住比例，同样置信度加权；样本不足返回 null，总分按 0 计、仪表盘显示「—」。
+    const acts = this.actions.filter((a) => now - a.t < 30 * 60_000);
+    const tries = this.attempts.filter((a) => now - a.t < 30 * 60_000);
+    const ok = acts.filter((a) => a.ok).length, fail = acts.filter((a) => !a.ok).length;
+    const actionRate = acts.length ? weightedRate(ok, fail) : null;
+    const stuckRate = tries.length ? tries.filter((a) => a.stuck).length / tries.length : null;
+    const efficiency = actionRate === null && stuckRate === null
+      ? null
+      : clamp(0.6 * (actionRate ?? 50) + 0.4 * (stuckRate === null ? 50 : (1 - stuckRate) * 100));
+
+    const total = clamp(progress * 0.20 + survival * 0.25 + learning * 0.30 + (efficiency ?? 0) * 0.25);
     return { total, progress, survival, learning, efficiency };
+  }
+
+  /** 进步速率：每条命到达同一个里程碑的用时，后半段比前半段快了多少（0..100，50 = 没变化）；没有可比历史时返回 null。 */
+  private learningTrend(): number | null {
+    const speedups: number[] = [];
+    for (const key of LIFE_MILESTONES) {
+      const times = this.data.lives.filter((l) => l.reached[key] !== undefined).map((l) => l.reached[key]!);
+      if (times.length < 2) continue;
+      const mid = Math.floor(times.length / 2);
+      const early = medianOf(times.slice(0, mid)), recent = medianOf(times.slice(mid));
+      if (early > 0) speedups.push(Math.max(-1, Math.min(1, (early - recent) / early)));
+    }
+    if (!speedups.length) return null;
+    return clamp(50 + 50 * speedups.reduce((a, b) => a + b, 0) / speedups.length);
   }
 
   /** 给心智看的进度事实：已达成多少、每个分支各达成几项、还没碰过的（只作方向参考，不是硬目标；怎么推进由心智定）。 */
