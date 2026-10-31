@@ -9,7 +9,7 @@ import type { EntityInfo, Vec3Like } from '../adapter/types.ts';
 import { feetCell } from '../perception/local.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type FailureCode, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 import { planTravel } from './overland.ts';
-import { passageDeepestAnchor, passageRoute, passageSurfaceAnchor } from '../memory/passages.ts';
+import { passageDeepestAnchor, passageNearestNode, passageRoute, passageSurfaceAnchor } from '../memory/passages.ts';
 
 // ------------------------------------------------------------------ 寻找与张望（人眼式：不透视，只是转头看）
 /** 朝 (dx,dz) 方向的 yaw（0 = 北/-Z，正值向左/西） */
@@ -564,14 +564,30 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; dig?: boolean }>
     const back = args.to === 'entrance';
     const target = back ? passageSurfaceAnchor(recs, here) : passageDeepestAnchor(recs);
     if (!target) return fail('NOT_FOUND', '旧矿道里没有可用的目标点');
-    const route = passageRoute(recs, here, target, { near: 6 });
-    if (!route || route.length < 2) return fail('PATH_NOT_FOUND', `旧矿道连不到${back ? '地表入口' : '最深处'}（当前脚点离成网的通道太远，或通道断开）；先回到通道附近，或改走别的路`);
     const kind = recs.some((r) => r.kind === 'dug') ? '挖过的旧矿道' : '走过的路';
     const allowDig = !!args.dig;
     const terrainPermission = { ...(allowDig ? { allowTerrainChanges: true } : {}), allowPlace: allowDig, allowTower: allowDig };
     const goal = back ? '入口' : '最深处';
+    let route = passageRoute(recs, here, target, { near: 6 });
+    let start = here;
+    // 离矿道网太远连不上：先走到最近的脚点把 agent 接回网里，再沿路由走；dig:true 才授权挖开挡路
+    if (!route || route.length < 2) {
+      const nearest = passageNearestNode(recs, start);
+      if (!nearest) return fail('PATH_NOT_FOUND', `旧矿道连不到${back ? '地表入口' : '最深处'}（没有可接的脚点）；改走别的路`);
+      const np = `${Math.round(nearest.x)},${Math.round(nearest.y)},${Math.round(nearest.z)}`;
+      try {
+        await adapter.moveTo({ kind: 'near', pos: nearest, range: 2 }, { signal, timeoutMs: Math.max(2000, Math.min(20000, ctx.deadline - Date.now())), allowSwimming: false, ...terrainPermission });
+      } catch (e) {
+        if (isAbort(e)) throw e;
+        const now = adapter.state().pos;
+        return fail('PATH_NOT_FOUND', `先走到最近的旧矿道脚点 (${np}) 没成（${(e as Error).message.slice(0, 50)}）。人停在 (${now.x.toFixed(1)},${now.y.toFixed(1)},${now.z.toFixed(1)})${allowDig ? '' : '；可加 dig:true 授权挖开挡路'}`);
+      }
+      start = adapter.state().pos;
+      route = passageRoute(recs, start, target, { near: 6 });
+      if (!route || route.length < 2) return fail('PATH_NOT_FOUND', `到了脚点 (${np}) 附近，但仍连不到${back ? '地表入口' : '最深处'}（通道断开）；改走别的路`);
+    }
     ctx.progress(0, `沿${kind}${back ? '回入口' : '下最深'}，共 ${route.length} 段`);
-    let last = here;
+    let last = start;
     for (let i = 0; i < route.length; i++) {
       throwIfAborted(signal);
       if (Date.now() >= ctx.deadline) return fail('TIMEOUT', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段时间用完；人停在 (${last.x.toFixed(1)},${last.y.toFixed(1)},${last.z.toFixed(1)})，离目标约 ${Math.round(dist3(last, target))} 格`, { position: last, reachedWaypoint: i, totalWaypoints: route.length - 1 });

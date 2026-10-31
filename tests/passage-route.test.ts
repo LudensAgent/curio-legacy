@@ -82,7 +82,7 @@ test('follow_passage 沿旧矿道逐段走回入口（碎片连成网）', async
   assert.deepEqual(visited[visited.length - 1], { x: 0, y: 64, z: 0 }, '最后走到竖井顶部');
 });
 
-test('follow_passage 旧矿道连不到目标时报失败', async (t) => {
+test('follow_passage 离矿道远时先走到最近脚点接回网里，再沿路由走', async (t) => {
   const w = new TestWorld();
   w.pos = { x: 50, y: 30, z: 0 };
   const memory = new WorldMemory(null);
@@ -91,6 +91,26 @@ test('follow_passage 旧矿道连不到目标时报失败', async (t) => {
   memory.savePassage({ id: 'branch', worldId: w.worldId, dim: w.dim, kind: 'dug', entrances: [], deepestY: 40, dug: 4, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1, path: [{ x: 2, y: 40, z: 0 }, { x: 6, y: 40, z: 0 }, { x: 10, y: 40, z: 0 }] });
   const ctx = makeCtx(w, { memory });
   t.after(() => memory.close());
+  const visited: Vec3Like[] = [];
+  t.mock.method(w, 'moveTo', async (goal: any) => {
+    if (goal.kind === 'near') { visited.push(goal.pos); w.pos = { x: goal.pos.x, y: goal.pos.y, z: goal.pos.z }; }
+  });
+  const result = await followPassage.run(ctx, { to: 'entrance' });
+  assert.equal(result.status, 'succeeded', result.summary);
+  // 先接到最近的脚点 (10,40,0)，再沿支巷走回地表参考点 (2,40,0)
+  assert.deepEqual(visited[0], { x: 10, y: 40, z: 0 }, '先走到最近的脚点接回网里');
+  assert.deepEqual(visited[visited.length - 1], { x: 2, y: 40, z: 0 }, '最后走到地表参考点');
+});
+
+test('follow_passage 接不到矿道（moveTo 过不去）时报失败', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 50, y: 30, z: 0 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  memory.savePassage({ id: 'branch', worldId: w.worldId, dim: w.dim, kind: 'dug', entrances: [], deepestY: 40, dug: 4, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1, path: [{ x: 2, y: 40, z: 0 }, { x: 6, y: 40, z: 0 }, { x: 10, y: 40, z: 0 }] });
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  t.mock.method(w, 'moveTo', async () => { throw new Error('No path'); });
   const result = await followPassage.run(ctx, { to: 'entrance' });
   assert.equal(result.status, 'failed');
   assert.equal(result.failureCode, 'PATH_NOT_FOUND');

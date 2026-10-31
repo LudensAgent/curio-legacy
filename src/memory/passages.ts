@@ -267,3 +267,14 @@ export function passageNext(recs: Pick<PassageRecord, 'path' | 'kind'>[], here: 
   const nearest = recs.map((r) => ({ r, d: Math.min(...r.path.map((q) => d3(q, here))) })).sort((a, b) => a.d - b.d)[0]?.r;
   return { next: route[1], inside, kind: nearest?.kind === 'dug' ? 'dug' : 'walked' };
 }
+
+/** 全部记下的通道里离 pos 最近的一个脚点：离矿道网太远时，先走到它把 agent 接回网里；没有脚点返回 null */
+export function passageNearestNode(recs: Pick<PassageRecord, 'path'>[], pos: Vec3Like): Vec3Like | null {
+  let best: Vec3Like | null = null;
+  let bestD = Infinity;
+  for (const r of recs) for (const p of r.path) {
+    const d = d3(p, pos);
+    if (d < bestD) { bestD = d; best = p; }
+  }
+  return best;
+}
