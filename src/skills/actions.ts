@@ -105,12 +105,19 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
       }
       const before = adapter.state().inventory.find((i) => i.name === args.item)?.count ?? 0;
       const r = await adapter.useItemOn(args.item, { kind: 'block', pos: target.pos }, signal);
-      if (!r.ok) return fail(codeFromError({ message: r.reason }), `对着 ${target.name} 使用 ${args.item} 失败：${r.reason}`, { target: target.name, pos: target.pos, effectEvidence: r.effectEvidence });
+      if (!r.ok) {
+        // 空桶装水/装岩浆失败：说清常见原因和该怎么做，别只留一句 NO_EFFECT 让心智瞎猜
+        const collect = args.item === 'bucket' && (args.on === 'water' || args.on === 'lava');
+        const hint = collect ? `（空桶只能从源方块取${args.on === 'water' ? '水' : '岩浆'}——流动的取不了；也可能是准星没落在那格液面上，走到液面边、低头对准再试）` : '';
+        return fail(codeFromError({ message: r.reason }), `对着 ${target.name} 使用 ${args.item} 失败：${r.reason}${hint}`, { target: target.name, pos: target.pos, effectEvidence: r.effectEvidence });
+      }
       const after = adapter.state().inventory.find((i) => i.name === args.item)?.count ?? 0;
       // 自己放下的工作台/熔炉记住位置，下次复用
       if (isStation(args.item) && r.placed) rememberStation(ctx, args.item, r.placed);
       const location = r.placed ? `，确认放置在 ${r.placed.x},${r.placed.y},${r.placed.z}（本次只放置这一块）` : '';
-      return ok(`对着 ${target.name} 使用了 ${args.item}${location}${r.spawned ? `，放出了 ${r.spawned}` : ''}${after < before ? `（背包里的 ${args.item} 少了 ${before - after} 个）` : ''}`,
+      // 适配器观察到的实际变化（哪格从什么变成什么、背包哪样多了少了）一并给回去：装水会明确看到 water_bucket+1、water→air
+      const evidence = r.effectEvidence?.reasons?.length ? `；${r.effectEvidence.reasons.join('；')}` : '';
+      return ok(`对着 ${target.name} 使用了 ${args.item}${location}${r.spawned ? `，放出了 ${r.spawned}` : ''}${after < before ? `（背包里的 ${args.item} 少了 ${before - after} 个）` : ''}${evidence}`,
         { target: target.name, pos: r.placed ?? target.pos, effectEvidence: r.effectEvidence, ...(r.placed ? { placed: r.placed } : {}), ...(r.spawned ? { spawned: r.spawned } : {}) });
     } catch (e) {
       if (isAbort(e)) throw e;
