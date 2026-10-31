@@ -25,7 +25,7 @@ test('goto preserves explicit terrain restrictions and rejects inconsistent comb
 
 test('goto forwards independent terrain permissions to its movement call', async (t) => {
   for (const [args, expected] of [
-    [{ dig: true }, [true, true, false]],
+    [{ dig: true }, [true, true, true]],
     [{ dig: true, place: false }, [true, false, false]],
     [{ dig: true, tower: false }, [true, true, false]],
     [{ place: true }, [false, true, false]],

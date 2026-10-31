@@ -234,8 +234,8 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
 // ------------------------------------------------------------------ goto
 export const goTo: Skill<{ target: string; dig?: boolean; place?: boolean; tower?: boolean; sprint?: boolean; avoid?: string[]; lead?: string }> = {
   name: 'goto',
-  description: '步行去地标或坐标；普通步行按可见或近期亲历的落脚点引导，明确三维坐标尽量进入指定格，进不去时停在相邻格并说明差多少。遇到已观察的木门会开门。默认不挖墙、不放方块；dig:true 兼容旧行为，允许挖掘、垫路；原地搭柱需另设 tower:true。place:false 可禁止放置，tower:false 可禁止原地搭柱；也可单独设 place:true 授权垫路、tower:true 授权搭柱。搭建消耗方块，可能在水面架桥。lead 可带指定生物走。',
-  argsDoc: '{"target":"<地标、坐标或方向>" 或 {"x":数字,"y":数字,"z":数字}, "dig"?:boolean, "place"?:boolean（允许垫路，默认继承 dig）, "tower"?:boolean（允许原地搭柱，默认关闭，需要 place）, "sprint"?:boolean, "avoid"?:["方块名"], "lead"?:"生物名"}',
+  description: '步行去地标或坐标；普通步行按可见或近期亲历的落脚点引导，明确三维坐标尽量进入指定格，进不去时停在相邻格并说明差多少。遇到已观察的木门会开门。默认不挖墙、不放方块；dig:true 兼容旧行为，允许挖掘、垫路，并默认允许原地搭柱爬坡（可 tower:false 关闭）。place:false 可禁止放置，tower:false 可禁止原地搭柱；也可单独设 place:true 授权垫路、tower:true 授权搭柱。搭建消耗方块，可能在水面架桥。lead 可带指定生物走。',
+  argsDoc: '{"target":"<地标、坐标或方向>" 或 {"x":数字,"y":数字,"z":数字}, "dig"?:boolean, "place"?:boolean（允许垫路，默认继承 dig）, "tower"?:boolean（允许原地搭柱；dig:true 时默认开启，可 tower:false 关闭）, "sprint"?:boolean, "avoid"?:["方块名"], "lead"?:"生物名"}',
   timeoutMs: 600000,
   movement: true,
   validate(raw) {
@@ -260,7 +260,7 @@ export const goTo: Skill<{ target: string; dig?: boolean; place?: boolean; tower
         const here = ctx.adapter.state().pos;
         const plan = planTravel((p) => ctx.adapter.blockAt(p), here, d.target, { canBoat: false, maxNodes: 8000, margin: 16 });
         if (plan && !plan.reached && plan.why) {
-          const climbHint = plan.climbed && args.place !== true && args.dig !== true ? '；可加 place:true（或 dig:true）授权垫方块爬坡' : '';
+          const climbHint = plan.climbed && args.place !== true && args.dig !== true ? '；可加 dig:true 授权挖墙和垫方块爬坡' : '';
           return { ...r, summary: `${r.summary}（看地形：${plan.why}${climbHint}）` };
         }
       } catch { /* 诊断不了就照原样 */ }
@@ -282,7 +282,7 @@ function follower(ctx: SkillCtx, name: string, id: number | null): EntityInfo | 
 async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; place?: boolean; tower?: boolean; sprint?: boolean; avoid?: string[]; lead?: string }): Promise<SkillResult> {
   {
     const { adapter, memory, signal } = ctx;
-    const allowPlace = args.place ?? !!args.dig, allowTower = allowPlace && args.tower === true;
+    const allowPlace = args.place ?? !!args.dig, allowTower = allowPlace && (args.tower ?? !!args.dig);
     const terrainPermission = { ...(args.dig ? { allowTerrainChanges: true } : {}), allowPlace, allowTower };
     const s = adapter.state();
     let pos: { x: number; y: number; z: number } | null = null;
