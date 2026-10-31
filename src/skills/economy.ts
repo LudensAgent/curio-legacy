@@ -1,5 +1,5 @@
 import { chestHint } from './chest-hint.ts';
-import { chestLocation, chestRecollectionLocation, describeChest, describeRecall, isContainerLandmark } from '../memory/chest-memory.ts';
+import { chestLocation, describeChest, describeRecall, isContainerLandmark } from '../memory/chest-memory.ts';
 import type { GuiContainerObservation, InvItem, Vec3Like } from '../adapter/types.ts';
 import { DIRS } from '../perception/perception.ts';
 import { shortId, sleep } from '../util.ts';
@@ -200,8 +200,14 @@ function containerCandidates(ctx: SkillCtx) {
       distance: Math.round(Math.hypot(location.pos.x - state.pos.x, location.pos.y - state.pos.y, location.pos.z - state.pos.z)),
       ...(location.precise ? { target: candidate.id ?? candidate.pos } : {}),
       source: seen ? 'current_visual_observation' : 'historical_observation',
-      contents: record ? chestRecollectionLocation(record, clock).precise ? describeChest(record, clock) : '用过，物品印象只记得这一带，无法对应到具体箱子' : '未打开过，内容未知' };
+      contents: record ? describeChest(record, clock) : '未打开过，内容未知' };
   }).sort((a, b) => a.distance - b.distance).slice(0, 24);
+}
+
+/** 报错时把记下的容器精确坐标顺口说给心智：坐标错了就照着改，而不是继续从方位心算。 */
+function knownContainersHint(ctx: SkillCtx): string {
+  const candidates = containerCandidates(ctx).slice(0, 3);
+  return candidates.length ? `；记得的容器：${candidates.map((c) => `${c.label} ${c.location.text}`).join('、')}` : '';
 }
 
 /** A historical area is a cue to look again, never a concealed exact interaction target. */
@@ -211,14 +217,12 @@ async function selectedContainer(ctx: SkillCtx, target: ContainerTarget) {
   if (typeof target === 'string') {
     const matches = ctx.memory.landmarks().filter((l) => (l.worldId ?? 'default') === state.worldId && l.dim === state.dim && isContainerLandmark(l.label) && (l.id === target || l.label === target));
     if (matches.length !== 1) return { ok: false as const, result: fail('BAD_ARGS', 'target 需要明确的容器地标 ID 或坐标；同名多个容器不能自动代选', { candidates: containerCandidates(ctx) }) };
-    const location = chestLocation(matches[0]);
     ctx.senses.refresh();
     const current = ctx.senses.observeBlocks?.([matches[0].pos])[0];
     if (current && !CONTAINERS.includes(current.name)) {
       forgetObservedContainer(ctx, matches[0].pos);
-      return { ok: false as const, result: fail('TARGET_GONE', `选定地点亲眼看见已是 ${current.name}，忘掉已失效的容器记忆；未改选其他容器`, { candidates: containerCandidates(ctx) }) };
+      return { ok: false as const, result: fail('TARGET_GONE', `选定地点亲眼看见已是 ${current.name}，忘掉已失效的容器记忆；未改选其他容器${knownContainersHint(ctx)}`, { candidates: containerCandidates(ctx) }) };
     }
-    if (!location.precise && !current) return { ok: false as const, result: fail('NOT_FOUND', `只记得${location.text}有容器，具体位置需重新看见；未按隐藏坐标前往`, { location, candidates: containerCandidates(ctx) }) };
     pos = matches[0].pos;
   } else pos = target;
   ctx.senses.refresh();
@@ -229,11 +233,11 @@ async function selectedContainer(ctx: SkillCtx, target: ContainerTarget) {
     const why = dist > 48
       ? `离你约 ${dist} 格（超出 48 格视野，store_items 不会自己走过去）`
       : `离你约 ${dist} 格，转头看仍看不见（可能被遮挡或未加载）`;
-    return { ok: false as const, result: fail('NOT_FOUND', `选定容器在 (${pos.x},${pos.y},${pos.z})，${why}；先 goto 过去、或改选看得见的容器再存`, { candidates: containerCandidates(ctx), pos, distance: dist }) };
+    return { ok: false as const, result: fail('NOT_FOUND', `选定容器在 (${pos.x},${pos.y},${pos.z})，${why}；先 goto 过去、或改选看得见的容器再存${knownContainersHint(ctx)}`, { candidates: containerCandidates(ctx), pos, distance: dist }) };
   }
   if (!CONTAINERS.includes(observed.name)) {
     forgetObservedContainer(ctx, pos);
-    return { ok: false as const, result: fail('TARGET_GONE', `选定位置当前是 ${observed.name}，忘掉已失效的容器记忆；未改选其他容器`, { candidates: containerCandidates(ctx) }) };
+    return { ok: false as const, result: fail('TARGET_GONE', `选定位置当前是 ${observed.name}，忘掉已失效的容器记忆；未改选其他容器${knownContainersHint(ctx)}`, { candidates: containerCandidates(ctx) }) };
   }
   // 带精确坐标直接指定容器时，也把记忆里这箱子的空余格数一并给出（不带 target 列候选时才看得到「还剩 N 格空」）。
   // 全量快照才记 freeSlots，增量操作会标 possiblyStale 并丢字段，所以 freeSlots 存在即代表可靠的满空线索。

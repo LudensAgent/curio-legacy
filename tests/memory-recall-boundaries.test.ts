@@ -21,26 +21,22 @@ import { makeCtx, TestWorld } from './survival-helpers.ts';
 
 const pos = { x: 123, y: 67, z: -234 };
 
-test('historical container prose is scoped, fuzzy and idempotent without changing stored observations', (t) => {
+test('historical container prose keeps precise location but fades quantities, without changing stored observations', (t) => {
   const memory = new WorldMemory(null), now = Date.now(), ts = now - 25 * 3600_000;
   t.after(() => memory.close());
   memory.setWorld('w');
   memory.noteChestUse('overworld', pos, { put: [{ name: 'diamond', count: 64 }], now: ts });
   const text = `往箱子 (123,67,-234) 放过 diamond×64 @ overworld 123,67,-234\n{"container":"chest","pos":{"x":123,"y":67,"z":-234},"items":[{"name":"diamond","count":64}]}`;
   const projected = recallText(text, memory, 'overworld', ts, now);
-  assert.match(projected, /区域/);
+  assert.match(projected, /123,67,-234/, '位置不再淡忘，坐标保留');
   assert.match(projected, /不少/);
-  assert.doesNotMatch(projected, /123,67,-234|"x":123|diamond×64|"count":64/);
+  assert.doesNotMatch(projected, /diamond×64|"count":64/);
   assert.equal(recallText(projected, memory, 'overworld', ts, now), projected);
-  const otherDimension = recallText(text, memory, 'the_end', ts, now);
-  assert.doesNotMatch(otherDimension, /123,67,-234|"x":123/);
-  assert.equal(otherDimension, recallText(text, { chests: () => [], landmarks: () => [] }, 'the_end', ts, now),
-    'unknown local containers still lose historical precision without borrowing another dimension record');
   assert.deepEqual(memory.chests()[0].pos, pos);
   assert.equal(memory.chests()[0].ts, ts);
 });
 
-test('mixed historical facts retain resource locations and quantities beside a container fact', () => {
+test('mixed historical facts retain resource and container locations while quantities become impressions', () => {
   const memory = { chests: () => [], landmarks: () => [] }, now = Date.now(), ts = now - 25 * 3600_000;
   const resource = '铁矿 (80,10,80) @ overworld 80,10,80 iron_ore×32 {"name":"iron_ore","count":32}';
   const container = '箱子 (123,67,-234) @ overworld 123,67,-234 diamond×64 {"name":"diamond","count":64}';
@@ -49,8 +45,8 @@ test('mixed historical facts retain resource locations and quantities beside a c
   ]).forEach((text) => {
     const projected = recallText(text, memory, 'overworld', ts, now);
     assert.ok(projected.includes(resource), `resource evidence changed in ${JSON.stringify(text)}`);
-    assert.match(projected, /历史容器区域/);
-    assert.doesNotMatch(projected, /123,67,-234|diamond×64|"count":64/);
+    assert.match(projected, /123,67,-234/);
+    assert.doesNotMatch(projected, /diamond×64|"count":64/);
     assert.equal(recallText(projected, memory, 'overworld', ts, now), projected);
   });
 });
@@ -61,11 +57,10 @@ test('English container quantities use registered item names and display names',
     'light_blue_shulker_box', 'trapped_chest', 'Ender_Chest', '潜影盒'].forEach((container) => {
     const text = container + ' at (123,67,-234) held granite 64, 64 cobblestone, 32 iron ingots, minecraft:diamond 16 and 12 Torches';
     const projected = recallText(text, memory, 'overworld', ts, now);
-    assert.match(projected, /历史容器区域/);
     assert.match(projected, /granite（不少，历史印象）/);
     assert.match(projected, /cobblestone（不少，历史印象）/);
     assert.match(projected, /iron ingots（不少，历史印象）/);
-    assert.doesNotMatch(projected, /123,67,-234|granite 64|64 cobblestone|32 iron ingots|diamond 16|12 Torches/);
+    assert.doesNotMatch(projected, /granite 64|64 cobblestone|32 iron ingots|diamond 16|12 Torches/);
     assert.equal(recallText(projected, memory, 'overworld', ts, now), projected);
   });
 });
@@ -87,33 +82,30 @@ test('English mixed facts keep resource evidence precise while container quantit
   [';', '. ', '\n'].flatMap((separator) => [resource + separator + container, container + separator + resource]).forEach((text) => {
     const projected = recallText(text, memory, 'overworld', ts, now);
     assert.ok(projected.includes(resource));
-    assert.match(projected, /历史容器区域/);
-    assert.doesNotMatch(projected, /123,67,-234|32 iron ingots|64 cobblestone/);
+    assert.doesNotMatch(projected, /32 iron ingots|64 cobblestone/);
   });
 });
 
-test('old container locations: landmark navigation stays fuzzy, the precise ledger keeps exact position', (t) => {
+test('old container locations: landmark navigation and ledger both keep exact position', (t) => {
   const world = new TestWorld(), memory = new WorldMemory(null), ts = Date.now() - 25 * 3600_000;
   t.after(() => memory.close());
   memory.setWorld(world.worldId);
   const landmark = memory.addLandmark('discovery', '我的箱子', world.dim, pos)!;
   landmark.ts = ts;
   memory.noteChestUse(world.dim, pos, { put: [{ name: 'diamond', count: 32 }], now: ts });
-  // 历史地标（导航/回忆）不泄漏精确坐标
+  // 位置不再淡忘：地标（导航/回忆）也保留精确坐标
   const recalled = recallLocal('我的箱子', { self: new SelfModel(null), memory });
   assert.ok(recalled.some((entry) => entry.kind === 'place'));
-  assert.doesNotMatch(JSON.stringify(recalled), /123,67,-234|"x":123/);
+  assert.match(JSON.stringify(recalled), /123,67,-234/);
   const snapshot = dashboardMemory(memory, world.state(), null);
-  assert.equal(snapshot.landmarks[0].precise, false);
-  assert.doesNotMatch(JSON.stringify(snapshot.landmarks), /"x":123/);
-  // 精确账本：箱子记录保留精确位置
+  assert.equal(snapshot.landmarks[0].precise, true);
   assert.equal(snapshot.chests[0].precise, true);
   assert.deepEqual(snapshot.chests[0].pos, pos);
   const ctx = makeCtx(world, { memory, senses: { knownBlocks: () => [], observeBlocks: () => [] } });
   const station = findStation(ctx, ['chest'], 500);
   assert.ok(station);
-  assert.equal(station.radius, 24);
-  assert.notDeepEqual(station.pos, pos);
+  assert.equal(station.radius, 0);
+  assert.deepEqual(station.pos, pos);
 });
 
 test('dashboard notes, ended goals and reflection project old container prose without rewriting history', (t) => {
@@ -128,12 +120,13 @@ test('dashboard notes, ended goals and reflection project old container prose wi
     plan: [{ skill: 'take_items', args: { target: pos, item: 'diamond', count: 64 } }] });
   memory.recentGoals().at(-1)!.ts = ts;
   const snapshot = dashboardMemory(memory, world.state(), null);
-  assert.match(snapshot.notes[0].text, /历史容器区域/);
-  assert.match(snapshot.goals[0].goal, /历史容器区域/);
-  assert.match(snapshot.goals[0].summary, /历史容器区域/);
+  assert.match(snapshot.notes[0].text, /123,67,-234/);
+  assert.match(snapshot.notes[0].text, /不少/);
+  assert.match(snapshot.goals[0].goal, /123,67,-234/);
+  assert.match(snapshot.goals[0].summary, /不少/);
   assert.equal('plan' in snapshot.goals[0], false);
-  // 历史叙述（笔记、目标）不泄漏精确坐标；精确账本（chests/facilities）保留精确位置是设计如此
-  assert.doesNotMatch(JSON.stringify([snapshot.notes[0], snapshot.goals[0]]), /123,67,-234|"x":123|diamond×64|"count":64/);
+  // 位置不再淡忘：坐标保留；数量仍模糊
+  assert.doesNotMatch(JSON.stringify([snapshot.notes[0], snapshot.goals[0]]), /diamond×64|"count":64/);
 
   self.data.knowHow.push({ id: 'old-observation', text, tags: [], wins: 1, losses: 0,
     createdAt: ts, updatedAt: Date.now(), source: 'observed' });
@@ -142,8 +135,8 @@ test('dashboard notes, ended goals and reflection project old container prose wi
   self.data.insights = [{ at: Date.now(), text }];
   self.data.diary.push({ at: ts, text, dim: world.dim, pos: [123, 67, -234] });
   const reflected = buildReflectionMessages(self, 'test', [], [], memory)[1].content;
-  assert.match(reflected, /历史容器区域/);
-  assert.doesNotMatch(reflected, /123,67,-234|345,66,-456|diamond×64|emerald×32/);
+  assert.match(reflected, /123,67,-234|345,66,-456/);
+  assert.doesNotMatch(reflected, /diamond×64|emerald×32/);
   assert.equal(memory.recentNotes()[0].text, text);
   assert.equal(memory.recentGoals()[0].summary, text);
   assert.deepEqual(memory.recentGoals()[0].plan?.[0].args, { target: pos, item: 'diamond', count: 64 });
@@ -214,9 +207,9 @@ test('Hindsight recall projects legacy container facts without rewriting the rem
   assert.equal(result.memories[0].historical, true);
   assert.equal(result.memories[0].worldId, adapter.worldId);
   assert.equal(result.memories[0].dimension, 'overworld');
-  assert.match(result.memories[0].text, /区域/);
+  assert.match(result.memories[0].text, /123,67,-234/);
   assert.match(result.memories[0].text, /当时这里的 lava 没了，变成 obsidian；观察时间 .*，历史记录不代表当前状态/);
-  assert.doesNotMatch(result.memories[0].text, /123,67,-234|diamond×64/);
+  assert.doesNotMatch(result.memories[0].text, /diamond×64/);
   assert.equal(writes, 0);
 });
 
@@ -243,8 +236,8 @@ test('Hindsight inference never refreshes container precision and keeps mention 
   assert.equal(entry.historical, true);
   assert.equal(entry.observedAt, mentionedAt);
   assert.equal(entry.mentionedAt, mentionedAt);
-  assert.match(entry.text, /历史容器区域/);
-  assert.doesNotMatch(entry.text, /123,67,-234|diamond×64/);
+  assert.match(entry.text, /123,67,-234/);
+  assert.doesNotMatch(entry.text, /diamond×64/);
   assert.equal(writes, 0);
   assert.ok(Buffer.byteLength(JSON.stringify(result.memories)) <= settings.maxContextBytes);
 });

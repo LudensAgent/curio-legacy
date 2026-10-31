@@ -20,8 +20,8 @@ test('world repair projects only historical prose and preserves structured obser
   assert.deepEqual(data.chests, world.chests); assert.deepEqual(data.landmarks, world.landmarks);
   assert.deepEqual(data.unrelated, world.unrelated);
   assert.equal(data.notes[0].ts, world.notes[0].ts);
-  assert.match(data.notes[0].text, /历史容器区域/); assert.doesNotMatch(data.notes[0].text, /coal×12|\(17,64,19\)/);
-  assert.equal(result.changed.texts, 4); assert.equal(result.changed.quarantined, 0);
+  assert.match(data.notes[0].text, /\(17,64,19\)/); assert.doesNotMatch(data.notes[0].text, /coal×12/);
+  assert.equal(result.changed.texts, 3); assert.equal(result.changed.quarantined, 0);
   const twice = repairMemoryData(data, { kind: 'world', worldId: 'w', now });
   assert.deepEqual(twice.data, data); assert.equal(twice.changed.texts, 0);
 });
@@ -33,7 +33,7 @@ test('episode repair quarantines unknown scope and distant discoveries without i
   const result = repairMemoryData(input, { kind: 'episodes', worldId: 'w', worldMemory: world, now });
   const data = result.data as typeof input;
   assert.equal(data.length, 1); assert.equal(data[0].id, 'e'); assert.equal(data[0].ts, now);
-  assert.equal(data[0].sourceObservation, 'original'); assert.match(data[0].text, /历史容器区域/);
+  assert.equal(data[0].sourceObservation, 'original'); assert.match(data[0].text, /\(17,64,19\)/);
   assert.deepEqual(result.quarantine.map((entry) => entry.reason), ['unverified_dimension', 'unverified_world', 'discovery_beyond_64_blocks']);
   assert.deepEqual(result.quarantine[0].value, input[1]);
   const twice = repairMemoryData(data, { kind: 'episodes', worldId: 'w', worldMemory: world, now });
@@ -48,7 +48,7 @@ test('mind repair leaves current intentions, plans, code and action arguments un
   const data = result.data as typeof input;
   assert.deepEqual(data.agenda, input.agenda); assert.deepEqual(data.plan, input.plan);
   assert.deepEqual(data.history[0].routine, input.history[0].routine);
-  assert.equal(data.knowHow[0].updatedAt, now); assert.match(data.knowHow[0].text, /历史容器区域/);
+  assert.equal(data.knowHow[0].updatedAt, now); assert.match(data.knowHow[0].text, /\(17,64,19\)/);
   assert.deepEqual(repairMemoryData(data, { kind: 'mind', worldId: 'w', worldMemory: world, now }).data, data);
 });
 

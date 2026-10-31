@@ -1,5 +1,5 @@
 import type { AgentState } from '../adapter/types.ts';
-import { chestLocation, chestRecollectionLocation, describeChest, isContainerLandmark } from '../memory/chest-memory.ts';
+import { chestLocation, describeChest, isContainerLandmark } from '../memory/chest-memory.ts';
 import { oreKind } from '../memory/ore-spots.ts';
 import { recallText } from '../memory/recollection.ts';
 import type { WorldMemory } from '../memory/store.ts';
@@ -41,7 +41,7 @@ export function dashboardMemory(memory: WorldMemory, state: Pick<AgentState, 'wo
       .sort((a, b) => a.dist - b.dist),
     passages: passages.filter(inDimension).sort((a, b) => b.lastUsedAt - a.lastUsedAt).slice(0, 12),
     facilities: facilities.slice(0, 16).map((f) => ({ ...f, worldId: state.worldId, dim: state.dim })),
-    chests: chests.filter(inDimension).map((c) => ({ worldId: c.worldId, dim: c.dim, ...chestRecollectionLocation(c, clock), note: c.note, uses: c.uses,
+    chests: chests.filter(inDimension).map((c) => ({ worldId: c.worldId, dim: c.dim, ...chestLocation(c, clock), note: c.note, uses: c.uses,
       items: c.contents.items.length, text: describeChest(c, clock) })),
     hazards: hazards.filter(inDimension).slice(-10),
     farms: farms.filter(inDimension).map((f) => ({ dim: f.dim, crop: f.crop, cells: f.cells.length, harvests: f.harvests })),

@@ -3,7 +3,7 @@ import { isResourceBlock } from '../memory/ore-spots.ts';
 import { passageLevels, passageRoute } from '../memory/passages.ts';
 import type { Landmark, PassageRecord, WorldMemory } from '../memory/store.ts';
 import { STATION_LABEL } from '../skills/stations.ts';
-import { chestLocation, chestRecollectionLocation, describeChest, isContainerLandmark } from '../memory/chest-memory.ts';
+import { chestLocation, describeChest, isContainerLandmark } from '../memory/chest-memory.ts';
 
 /** 算“设施”的地标：工作台、熔炉、床、箱子这些功能方块，加上农田；盖的房子在 my_builds 里另说 */
 export const FACILITY_LABELS = new Set([...Object.values(STATION_LABEL), '我的床', '我的农田']);
@@ -73,7 +73,7 @@ export function myFacilities(memory: Pick<WorldMemory, 'landmarks' | 'chests' | 
     const clock = memory.chestClock(s.worldDay);
     for (const c of memory.chests(s.dim)) {
       if ((c.worldId ?? 'default') !== s.worldId) continue;
-      const location = chestRecollectionLocation(c, clock);
+      const location = chestLocation(c, clock);
       out.push({ kind: 'chest', label: '用过的容器', pos: location.pos, dist: flat(location.pos, s.pos), radius: location.radius,
         precise: location.precise, observedAt: location.observedAt, text: `${describeChest(c, clock)}${location.precise ? `，${flat(location.pos, s.pos)}格` : ''}` });
     }

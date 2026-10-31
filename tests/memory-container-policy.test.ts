@@ -5,7 +5,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import type { BlockObservation, Vec3Like } from '../src/adapter/types.ts';
 import { EventBus } from '../src/events.ts';
-import { chestLocation, chestRecollectionLocation, describeChest, describeRecall } from '../src/memory/chest-memory.ts';
+import { chestLocation, describeChest, describeRecall } from '../src/memory/chest-memory.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { myFacilities } from '../src/mind/facilities.ts';
 import { Perception } from '../src/perception/perception.ts';
@@ -40,23 +40,19 @@ test('long-term resource landmarks remain addressable after the short visual cac
   assert.equal(memory.findLandmark(landmark.id, 'the_nether'), undefined);
 });
 
-test('chestLocation（地标投影）超过 24 现实小时仍淡化成区域；精确账本不再淡忘', (t) => {
+test('chestLocation 位置恒精确，不再按时间淡化成区域', (t) => {
   const memory = new WorldMemory(null), now = Date.now(), pos = { x: 123, y: 67, z: -234 };
   t.after(() => memory.close());
   memory.setWorld('w');
   const record = memory.noteChestUse('overworld', pos, { put: [{ name: 'diamond', count: 64 }], now: now - 25 * 3600_000 });
-  // 地标投影：会话内精确、超时成区域
-  assert.equal(chestLocation(record, { now: record.ts + 1000 }).precise, true);
+  // 位置恒精确：25 小时后仍是精确坐标，不再淡化成区域
   const area = chestLocation(record, { now });
-  assert.equal(area.precise, false);
-  assert.equal(area.radius, 24);
-  assert.ok(Math.hypot(pos.x - area.pos.x, pos.y - area.pos.y, pos.z - area.pos.z) <= area.radius);
-  // 精确账本：内容与位置都精确、不淡忘
+  assert.equal(area.precise, true);
+  assert.equal(area.radius, 0);
+  assert.deepEqual(area.pos, pos);
   assert.match(describeChest(record, { now, op: 1 }), /123,67,-234/);
   assert.equal(memory.recallChests('diamond').length, 1);
   assert.equal(memory.recallChests('diamond')[0].count, 64);
-  assert.equal(chestRecollectionLocation(record, memory.chestClock()).precise, true);
-  assert.match(describeChest(record, memory.chestClock()), /123,67,-234/);
   const facilities = myFacilities(memory, { worldId: 'w', dim: 'overworld', pos }, ['chest']);
   assert.equal(facilities[0].precise, true);
   assert.deepEqual(facilities[0].pos, pos);
@@ -73,7 +69,7 @@ test('v3 旧印象加载时直接丢弃，只保留箱子身份，不假装刚�
   assert.equal(memory.chests()[0].ts, ts);
   assert.deepEqual(memory.chests()[0].contents.items, []);
   assert.equal(memory.chests()[0].contents.possiblyStale, true);
-  assert.equal(chestLocation(memory.chests()[0]).precise, false);
+  assert.equal(chestLocation(memory.chests()[0]).precise, true);
   memory.close();
 });
 
@@ -91,22 +87,21 @@ test('unopened historical containers are candidates and facilities without autom
   assert.equal(opened, 0);
   const candidates = result.data?.candidates as { location: { precise: boolean }; contents: string; target?: unknown }[];
   assert.equal(candidates.length, 1);
-  assert.equal(candidates[0].location.precise, false);
-  assert.equal(candidates[0].target, undefined);
+  assert.equal(candidates[0].location.precise, true);
+  assert.equal(candidates[0].target, landmark.id);
   assert.match(candidates[0].contents, /内容未知/);
-  assert.doesNotMatch(JSON.stringify(result.data), /"x":123/);
   const facilities = myFacilities(memory, world.state(), ['chest']);
   assert.equal(facilities.length, 1);
-  assert.equal(facilities[0].precise, false);
+  assert.equal(facilities[0].precise, true);
   assert.match(facilities[0].text, /内容未知/);
   const recalledLandmark = memory.findLandmark(landmark.id, world.dim)!;
-  assert.equal(recalledLandmark.precise, false);
-  assert.equal(recalledLandmark.radius, 24);
-  assert.notDeepEqual(recalledLandmark.pos, pos);
+  assert.equal(recalledLandmark.precise, true);
+  assert.equal(recalledLandmark.radius, 0);
+  assert.deepEqual(recalledLandmark.pos, pos);
   assert.deepEqual(memory.landmarks().find((l) => l.id === landmark.id)?.pos, pos, 'raw observation stays unchanged for identity and later confirmation');
   const selected = await takeItems.run(ctx, { item: 'coal', count: 1, target: landmark.id });
   assert.equal(selected.failureCode, 'NOT_FOUND');
-  assert.equal(opened, 0, 'an old landmark ID cannot smuggle its private exact position into execution');
+  assert.equal(opened, 0, 'still must re-see a container before its remembered position is used for execution');
 });
 
 test('explicit container selection neither breaks a blocked lid nor substitutes another box', async (t) => {

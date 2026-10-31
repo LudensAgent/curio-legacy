@@ -1,4 +1,4 @@
-import { bucket, chestLocation, isContainerLandmark, qtyWord } from './chest-memory.ts';
+import { bucket, qtyWord } from './chest-memory.ts';
 import type { WorldMemory } from './store.ts';
 import minecraftData from 'minecraft-data';
 
@@ -34,29 +34,7 @@ export function noteGoneSpots(text: string, memory: Partial<Pick<WorldMemory, 'g
 export function recallText(text: string, memory: Pick<WorldMemory, 'chests' | 'landmarks'> & Partial<Pick<WorldMemory, 'goneNear'>>, dimension?: string, observedAt?: number, now = Date.now()): string {
   if (dimension) text = noteGoneSpots(text, memory, dimension);
   if (!CONTAINER_WORD.test(text)) return text;
-  const containers = [
-    ...memory.chests(dimension),
-    ...memory.landmarks().filter((l) => (!dimension || l.dim === dimension) && isContainerLandmark(l.label)),
-  ];
-  const locations = new Map(containers.map((c) => [`${c.pos.x},${c.pos.y},${c.pos.z}`,
-    chestLocation({ pos: c.pos, ts: observedAt === undefined ? c.ts : Math.min(observedAt, c.ts) }, { now })]));
-  const replaceLocation = (match: string, x: string, y: string, z: string, offset: number, whole: string) => {
-    // A projected region is an honest range, not another point to project again.
-    if (whole.lastIndexOf('〔历史容器区域：', offset) > whole.lastIndexOf('〕', offset)) return match;
-    const location = locations.get(`${Number(x)},${Number(y)},${Number(z)}`)
-      ?? (observedAt === undefined || !containerFactAt(whole, offset) ? undefined : chestLocation({ pos: { x: Number(x), y: Number(y), z: Number(z) }, ts: observedAt }, { now }));
-    return location && !location.precise ? `〔历史容器区域：${location.text}〕` : match;
-  };
   return text
-    .replace(/(?:\(|\[|（)\s*(-?\d+(?:\.\d+)?)\s*[,，]\s*(-?\d+(?:\.\d+)?)\s*[,，]\s*(-?\d+(?:\.\d+)?)\s*(?:\)|\]|）)/g, replaceLocation)
-    .replace(/\{\s*"x"\s*:\s*(-?\d+(?:\.\d+)?)\s*,\s*"y"\s*:\s*(-?\d+(?:\.\d+)?)\s*,\s*"z"\s*:\s*(-?\d+(?:\.\d+)?)\s*\}/g, replaceLocation)
-    .replace(/(?<![\d.])(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)(?![\d.])/g, replaceLocation)
-    .replace(/@ ([a-z][a-z0-9_:]*) (-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/g,
-      (match: string, dim: string, x: string, y: string, z: string, offset: number, whole: string) => {
-        if (!containerFactAt(whole, offset)) return match;
-        const location = chestLocation({ pos: { x: Number(x), y: Number(y), z: Number(z) }, ts: observedAt ?? 0 }, { now });
-        return location.precise ? match : `@ ${dim} 〔历史容器区域：${location.text}〕`;
-      })
     .replace(/([\p{L}\p{N}_:]+)×(\d+)/gu, (match: string, item: string, count: string, offset: number, whole: string) => containerFactAt(whole, offset) ? `${item}（${qtyWord(bucket(Number(count)))}，历史印象）` : match)
     .replace(/(\d+) 个 ([a-z][a-z0-9_]*)/g, (match: string, count: string, item: string, offset: number, whole: string) => containerFactAt(whole, offset) ? `${qtyWord(bucket(Number(count)))} ${item}（历史印象）` : match)
     .replace(ENGLISH_QUANTITY, (match: string, before: string | undefined, afterItem: string | undefined, beforeItem: string | undefined, after: string | undefined, offset: number, whole: string) =>

@@ -109,17 +109,8 @@ export function migrateChest(raw: Partial<ChestRecord> & { items?: unknown; trac
 
 const at = (p: Vec3Like) => `(${p.x},${p.y},${p.z})`;
 
-/** 一个直播会话内位置精确，超过 24 现实小时淡化成区域。用于地标导航与历史叙述的安全投影，不用于精确账本。 */
-const LOCATION_PRECISE_MS = 24 * 3600_000;
-export function chestLocation(c: Pick<ChestRecord, 'pos' | 'ts'>, clock: Pick<Clock, 'now'> = {}) {
-  const precise = Math.max(0, (clock.now ?? Date.now()) - c.ts) <= LOCATION_PRECISE_MS;
-  const pos = precise ? { ...c.pos } : { x: Math.floor(c.pos.x / 32) * 32 + 16, y: Math.floor(c.pos.y / 16) * 16 + 8, z: Math.floor(c.pos.z / 32) * 32 + 16 };
-  const radius = precise ? 0 : 24;
-  return { pos, radius, precise, observedAt: c.ts, text: precise ? at(c.pos) : `中心 ${at(pos)}、半径约 ${radius} 格的区域（范围中心，不是箱子坐标）` };
-}
-
-/** 精确账本的箱子位置：恒精确（内容与位置都不淡忘） */
-export function chestRecollectionLocation(c: ChestRecord, _clock?: Clock) {
+/** 精确账本：容器位置恒精确（内容与位置都不再按时间/次数衰减）。 */
+export function chestLocation(c: Pick<ChestRecord, 'pos' | 'ts'>, _clock?: Clock) {
   return { pos: { ...c.pos }, radius: 0, precise: true, observedAt: c.ts, text: at(c.pos) };
 }
 
