@@ -74,12 +74,14 @@ export class OpenAICompatibleProvider implements LlmProvider {
   private thinkingParamRejected = false;
 
   /** 小决策关闭“先长篇思考”：它占了小决策大部分耗时，想得越久，决定落地时信息越旧。
-   *  实测 deepseek-flash：mind 决策、写代码、建筑设计关思考后正确率不降、延迟降 4-7.6 倍。
-   *  只有显式指定 low/high/max 的任务（个别要 high 的）才开思考；其余默认关。 */
+   *  实测 deepseek-flash：瞥一眼、写代码、建筑设计关思考正确率不降、延迟降 4-7.6 倍；
+   *  但「认真想」关思考会想得浅、活的执行质量差（参数/维度错、频繁卡住），故认真想保留 low。 */
   private noThinking(hint: unknown): boolean {
     if (this.thinkingParamRejected) return false;
     const want = (hint as any)?.reasoningEffort as string | undefined;
     if (want && want !== 'off' && want !== 'none') return false;
+    // 认真想（mind 的 full、非放大输出）保留思考；瞥一眼和写代码/建筑（放大输出）关思考
+    if ((hint as any)?.tier === 'full' && scaleOf(hint) === 1) return false;
     const mode = (this.cfg as any).lightThinking ?? 'auto';
     if (mode === 'off') return true;
     return mode === 'auto' && /deepseek/i.test(`${this.cfg.model} ${this.cfg.baseUrl}`);
