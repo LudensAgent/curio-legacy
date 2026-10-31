@@ -103,8 +103,8 @@ export const config = {
     baseUrl: str('CODER_LLM_BASE_URL').replace(/\/+$/, ''),
     apiKey: str('CODER_LLM_API_KEY'),
     /**
-     * 写代码的推理力度（DeepSeek：low|high|max）。默认 low：两天的调用记录对比下来，想得越久写出的技能反而越差
-     * （改进时想 2–10K token 的新版 76% 不比旧版差，想 13K+ 的只有 58%），长思考大多花在反复重写同一段代码上。
+     * 写代码的推理力度（DeepSeek：low|high|max）。实测 reasoning 越长写出的技能反而越差（见 docs/llm-effort-testing-2026-11-01.md），
+     * 故写代码类默认关思考（由 llm.ts 的 noThinking 统一处理），此配置只在显式指定 reasoningEffort 的覆盖时生效。
      * 三类调用可以分别覆盖：CODER_LLM_REASONING_EFFORT_FORGE（总结新技能）/ _IMPROVE（改进）/ _CURATE（整理技能库）。
      */
     reasoningEffort: str('CODER_LLM_REASONING_EFFORT', 'low').toLowerCase(),
