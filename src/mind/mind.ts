@@ -204,6 +204,10 @@ export class Mind {
   /** 刚从绕路回到这段活：先想一想再动手（放下它的这段时间里情况可能变了，比如等的东西到了、要的已经够了） */
   private resumeCheck: string | null = null;
   private lastDim: string | null = null;
+  /** 后台预取的长期记忆缓存：deliberate 触发预取、下一次 deliberate 用（间隔 2-6min，新鲜期要覆盖） */
+  private hindsightMemories: { at: number; items: { text: string; kind: 'experience' | 'inference' }[] } | null = null;
+  private hindsightPrefetching = false;
+  static readonly HINDSIGHT_FRESH_MS = 10 * 60_000;
 
   /**
    * 第一次到一个新维度：这是个新环境。不告诉它这里有什么危险（那是它自己要看、要学的），
@@ -969,26 +973,36 @@ export class Mind {
   }
 
   // ---------------------------------------------------------------- 思考
-  /** deliberate 时同步查长期记忆（先查记忆，再认真想）；glance 不查、只靠本地回想。失败静默回落 */
-  private async recallHindsight(query: string, percept: Percept): Promise<{ text: string; kind: 'experience' | 'inference' }[] | null> {
+  /** 取最近一次后台预取的长期记忆（过期就不给，避免拿旧事当现场） */
+  private freshHindsightMemories() {
+    const c = this.hindsightMemories;
+    return c && Date.now() - c.at < Mind.HINDSIGHT_FRESH_MS ? c.items : null;
+  }
+
+  /** 后台预取长期记忆：deliberate 触发、不阻塞思考，结果留给下一次 deliberate；失败静默回落本地回想 */
+  private async prefetchHindsight(query: string, percept: Percept, generation: number) {
     const recall = this.d.thinker.recall;
-    if (!recall) return null;
+    if (!recall || this.hindsightPrefetching) return;
+    this.hindsightPrefetching = true;
     try {
       const res = await recall.recall({
         percept: { self: { dim: percept.self.dim, pos: percept.self.pos }, objective: null, nearby: percept.nearby },
         lastFailure: null,
         userSuggestion: null,
       }, query);
+      if (generation !== this.generation || this.paused) return;
       if (res.source === 'hindsight' && res.memories.length) {
-        return res.memories.map((m) => ({ text: m.text.slice(0, 400), kind: m.kind === 'experience' ? 'experience' as const : 'inference' as const }));
+        this.hindsightMemories = { at: Date.now(), items: res.memories.map((m) => ({
+          text: m.text.slice(0, 400), kind: m.kind === 'experience' ? 'experience' as const : 'inference' as const })) };
       }
-      return null;
     } catch {
-      return null;
+      // 拉不到长期记忆就继续用本地回想，不影响这一念
+    } finally {
+      this.hindsightPrefetching = false;
     }
   }
 
-  private async think(reason: string, tier: 'glance' | 'deliberate') {
+  private think(reason: string, tier: 'glance' | 'deliberate') {
     if (this.thinking || this.paused) return;
     const state = this.d.adapter.state();
     if (!observationReady(state)) return;
@@ -1011,7 +1025,8 @@ export class Mind {
       this.lastRecord?.what, this.lastRecord?.outcome === 'stuck' ? this.lastRecord.summary : '', this.lastFailure?.summary, ...noticed.map((n) => n.what), reason].filter(Boolean).join(' ');
     const book = this.d.thinker.skillBook;
     const recalled = this.safe(() => recallLocal(query, { self: this.d.self, memory: this.d.memory, book, ledger: this.d.ledger }, { n: tier === 'glance' ? 3 : 6, exclude: ['know_how'], excludeRefs: this.d.self.history(5).map((r) => r.id) }), []);
-    const hindsightMemories = tier === 'deliberate' ? await this.recallHindsight(query, percept) : null;
+    const hindsightMemories = tier === 'deliberate' ? this.freshHindsightMemories() : null;
+    if (tier === 'deliberate') void this.prefetchHindsight(query, percept, generation);
     let openedSkill: MindContext['openedSkill'];
     const top = recalled.find((r) => r.kind === 'skill' && r.score >= 4 && r.ref);
     if (tier === 'deliberate' && top && book?.get(top.ref!) && Date.now() - (this.skillOpenedAt.get(top.ref!) ?? 0) > 5 * 60_000) {
