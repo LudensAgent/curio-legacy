@@ -3402,16 +3402,19 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const clearance = this.pillarClearance();
     if (clearance) return { ok: false, reason: `NOT_PLACED:头顶跳跃空间${clearance.kind === 'blocked' ? '受阻' : '未加载'}`, clearanceDetail: describePillarClearance(clearance), clearance: clearance.kind === 'blocked' && clearance.blocks.length ? { at: clearance.blocks[0].rel, facing: clearance.blocks[0].facing, cells: clearance.blocks.flatMap((blk) => (blk.rel && blk.facing ? [{ at: blk.rel, facing: blk.facing }] : [])) } : undefined };
     let placed = false, lastError = '';
-    {
+    // 贴面放置常被服务器拒绝（方块和身体重叠、或客户端拿的参考块已陈旧）：重试一次，每次重新抓脚下的参考方块
+    for (let attempt = 0; attempt < 2 && !placed; attempt++) {
+      const ref = b.blockAt(feet.offset(0, -1, 0));
+      if (!ref || ref.boundingBox !== 'block') { lastError = lastError || '脚下贴面方块变了，没地方放'; break; }
       b.setControlState('jump', true);
       try {
         const t0 = Date.now();
         // 等脚底离开那一格（身体的底面高过方块顶面）才放，否则方块会和自己重叠，服务器不认
         while (b.entity.position.y < feet.y + 1.02 && Date.now() - t0 < 700) await this.afterAction(() => sleep(15, signal), check);
         if (b.entity.position.y >= feet.y + 1.02) {
-          try { await this.afterAction(() => raceAbort(b.placeBlock(below, new Vec3(0, 1, 0)), signal, 2500, () => {}), check); placed = true; }
+          try { await this.afterAction(() => raceAbort(b.placeBlock(ref, new Vec3(0, 1, 0)), signal, 2500, () => {}), check); }
           catch (e: any) { if (e?.name === 'AbortedError') throw e; lastError = String(e?.message ?? e).slice(0, 80); }
-        } else lastError = '跳不起来';
+        } else { lastError = '跳不起来'; break; }
       } finally {
         if (epoch === this.actionEpoch && b === this.bot) b.setControlState('jump', false);
       }
