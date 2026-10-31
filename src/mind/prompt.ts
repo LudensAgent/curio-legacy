@@ -308,7 +308,7 @@ export const NEAR_END_REASON = '手上这段活的最后一步正在执行，结
 const MINING_INTENT = /下矿|矿道|矿洞|找铁|挖铁|找矿|挖矿|粗铁|铁矿|往下挖|下挖|下到 ?y|挖(阶梯|台阶)[^上]{0,6}(下|降)|石层|深层/;
 
 /** 打算里说要从地下回地面 */
-const SURFACE_INTENT = /回地面|回到地面|见天|爬出|挖出去|出矿|上到地面|挖(阶梯|台阶).{0,8}上|往上挖/;
+const SURFACE_INTENT = /回地面|回到地面|回前哨|回基地|回入口|退回入口|回地表|见天|爬出|挖出去|出矿|上地面|上到地面|往上爬|往上走|往上挖|挖(阶梯|台阶).{0,8}上/;
 
 /** 沿来路回入口的下一步：找到正沿着的一段轨迹（自己挖的旧矿道或只是走过的天然洞穴），核对下一步那两格（脚下+头顶）现在是否还通，给出「可走/被堵」的当前事实。 */
 function passageWayBack(ctx: MindContext): string | null {
@@ -317,7 +317,7 @@ function passageWayBack(ctx: MindContext): string | null {
   for (const rec of ctx.memory.passages(s.dim)) {
     if (rec.worldId && rec.worldId !== s.worldId) continue;
     const d = describePassage(rec, here);
-    if (!d.inside || !d.next) continue;
+    if (!d.next) continue;
     const next = d.next;
     const at = (x: number, y: number, z: number) => ctx.blockAt?.({ x, y, z }) ?? null;
     const foot = at(next.x, next.y, next.z);
@@ -325,9 +325,10 @@ function passageWayBack(ctx: MindContext): string | null {
     const open = (n: string | null) => n !== null && isSoftBlock(n);
     const pos = `${Math.round(next.x)},${Math.round(next.y)},${Math.round(next.z)}`;
     const kind = rec.kind === 'walked' ? '走过的路' : '自己挖过的旧矿道';
-    if (open(foot) && open(head)) return `你正沿着${kind}；沿它回入口的下一步 (${pos}) 现在仍是 2 格高的空走廊，可以直接走过去`;
+    const along = d.inside ? `你正沿着${kind}` : `附近有${kind}，朝它回入口的方向走`;
+    if (open(foot) && open(head)) return `${along}；沿它回入口的下一步 (${pos}) 现在仍是 2 格高的空走廊，可以直接走过去`;
     const reason = !open(foot) ? `脚下那格现在是 ${foot ?? '未加载'}` : `头顶那格现在是 ${head ?? '未加载'}`;
-    return `你正沿着${kind}；沿它回入口的下一步 (${pos}) 被堵了：${reason}。挖开这一格、还是改走别的路，由你定`;
+    return `${along}；沿它回入口的下一步 (${pos}) 被堵了：${reason}。挖开这一格、还是改走别的路，由你定`;
   }
   return null;
 }

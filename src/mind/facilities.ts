@@ -43,7 +43,7 @@ export function describePassage(rec: PassageRecord, here: Vec3Like, stations: La
   const dist = flat(entrance, here);
   const inside = rec.path.some((p) => d3(p, here) <= 3);
   // 站在旧矿道里时，沿它从脚下回到入口的几何路线（只给方向，未验证点间通行或当前地形）
-  const route = inside ? passageRoute([rec], here, entrance, { near: 6 }) : null;
+  const route = passageRoute([rec], here, entrance, { near: 6 });
   const next = route && route.length > 1 ? route[1] : undefined;
   const levels = passageLevels(rec).filter((y) => y !== entrance.y);
   const ores = Object.entries(rec.ores).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([n, c]) => `${n}×${c}`);

@@ -83,6 +83,32 @@ test('通道：从另一个口下到以前挖过的通道里，接着那一条�
   m.close();
 });
 
+test('两条已记下的通道，从一条走进另一条时并成一条（碎片自愈）', () => {
+  const m = new WorldMemory(null); m.setWorld(W);
+  let n = 0;
+  const tr = new PassageTracker(m, () => `p${++n}`);
+  // 浅层横巷（y=60），点之间隔 4 格（≥ STEP=3 才会各记一个脚点），每点挖两格让它成"我挖的通道"
+  const tunnel = (xs: number[], t0: number) => {
+    tr.observe({ worldId: W, dim: D, pos: at(xs[0], 64, 0), place: 'surface' }, [], t0);
+    let t = t0 + 1000;
+    for (const x of xs) {
+      tr.observe({ worldId: W, dim: D, pos: at(x, 60, 0), place: 'underground' }, [{ pos: at(x, 60, 0), name: 'stone', ts: t }, { pos: at(x, 61, 0), name: 'stone', ts: t }], t);
+      t += 500;
+    }
+    tr.observe({ worldId: W, dim: D, pos: at(xs[xs.length - 1], 64, 0), place: 'surface' }, [], t + 9000);
+  };
+  tunnel([0, 4, 8], 0);          // A
+  tunnel([12, 16, 20], 30_000);  // B，和 A 隔 4 格，创建时不合并
+  assert.equal(m.passages(D).length, 2);
+  // 从 B 走回 A：x=8 进入 A 的 3 格内，两条并成一条
+  tr.observe({ worldId: W, dim: D, pos: at(20, 64, 0), place: 'surface' }, [], 50_000);
+  for (const x of [16, 12, 8]) tr.observe({ worldId: W, dim: D, pos: at(x, 60, 0), place: 'underground' }, [], 51_000 + (20 - x) * 500);
+  const ps = m.passages(D);
+  assert.equal(ps.length, 1, '并成一条');
+  assert.ok(ps[0].path.some((q) => q.x <= 1) && ps[0].path.some((q) => q.x >= 19), '脚点覆盖两头');
+  m.close();
+});
+
 test('我的设施：通道说明历史位置和未知的当前通路；箱子按数量说最多的几样；房子不混进来', () => {
   const m = new WorldMemory(null); m.setWorld(W);
   digDown(new PassageTracker(m, () => 'p1'));

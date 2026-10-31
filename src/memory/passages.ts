@@ -82,20 +82,13 @@ export class PassageTracker {
       const surf = this.lastSurface;
       if (surf && surf.dim === s.dim && surf.worldId === s.worldId && now - surf.ts < 120_000 && flat(surf.pos, pos) <= 16) this.addEntrance(this.active.rec, this.openingNear(surf.pos, this.active.rec));
     }
-    // 新挖的这一段接近以前的路线：并进那一条（多一个地表参考点），不另记
-    if (!this.active.existing) {
-      const joined = this.memory.passages(s.dim).find((p) => p.worldId === s.worldId && p.id !== this.active!.rec.id && p.path.some((q) => d3(q, pos) <= 3));
-      if (joined) {
-        const fresh = this.active.rec;
-        for (const e of fresh.entrances) this.addEntrance(joined, e);
-        for (const q of fresh.path) if (!joined.path.some((o) => d3(o, q) < STEP)) joined.path.push(q);
-        joined.dug += fresh.dug;
-        for (const [n, c] of Object.entries(fresh.ores)) joined.ores[n] = (joined.ores[n] ?? 0) + c;
-        joined.deepestY = Math.min(joined.deepestY, fresh.deepestY);
-        joined.uses += 1;
-        this.memory.forgetPassage?.(fresh.id);
-        this.active = { rec: joined, existing: true };
-      }
+    // 接进了另一条已经记下的通道：两条其实是同一条，并成一条（多一个地表参考点），不另记。
+    // observe 记的是脚下真实站过的点，能从一条走到另一条的 3 格内，就证明这一段连通，不是臆造。
+    const neighbor = this.memory.passages(s.dim).find((p) => p.worldId === s.worldId && p.id !== this.active!.rec.id && p.path.some((q) => d3(q, pos) <= 3));
+    if (neighbor) {
+      const keep = neighbor.uses > this.active!.rec.uses || (neighbor.uses === this.active!.rec.uses && neighbor.path.length > this.active!.rec.path.length) ? neighbor : this.active!.rec;
+      this.mergeInto(keep, keep === neighbor ? this.active!.rec : neighbor);
+      this.active = { rec: keep, existing: true };
     }
     const rec = this.active.rec;
     const last = rec.path[rec.path.length - 1];
@@ -152,6 +145,17 @@ export class PassageTracker {
     if (rec.entrances.some((e) => d3(e, p) <= 4)) return;
     rec.entrances.push(p);
     if (rec.entrances.length > 3) rec.entrances.shift();
+  }
+
+  /** 把 drop 并进 keep：合并脚点、入口、挖格、矿、最深处和次数，drop 不再单列 */
+  private mergeInto(keep: PassageRecord, drop: PassageRecord) {
+    for (const e of drop.entrances) this.addEntrance(keep, e);
+    for (const q of drop.path) if (!keep.path.some((o) => d3(o, q) < STEP)) keep.path.push(q);
+    keep.dug += drop.dug;
+    for (const [n, c] of Object.entries(drop.ores)) keep.ores[n] = (keep.ores[n] ?? 0) + c;
+    keep.deepestY = Math.min(keep.deepestY, drop.deepestY);
+    keep.uses += 1;
+    this.memory.forgetPassage?.(drop.id);
   }
 
   /** 走进去的天然洞穴也记（用于原路返回）；挖够了就升级成"我挖的通道"；接着以前那条走的随时存 */
