@@ -34,7 +34,7 @@ function myStations(memory: Pick<WorldMemory, 'landmarks'>, s: State): Landmark[
 }
 
 /** 历史通道记录：地表参考点、曾到达的高度以及附近记忆，不推断当前通路。 */
-export function describePassage(rec: PassageRecord, here: Vec3Like, stations: Landmark[] = [], resources: Landmark[] = []): { text: string; entrance: Vec3Like; dist: number; inside: boolean; next?: Vec3Like } {
+export function describePassage(rec: PassageRecord, here: Vec3Like, stations: Landmark[] = [], resources: Landmark[] = []): { text: string; entrance: Vec3Like; dist: number; inside: boolean; next?: Vec3Like; nextDown?: Vec3Like } {
   // 身体有时把地下误判成 surface，会记出过深的假入口（y 比通道地表低很多）；先滤掉，只留贴近地表的
   const surfaceY = rec.path.length ? Math.max(...rec.path.map((p) => p.y)) : Math.max(...rec.entrances.map((e) => e.y));
   const validEntrances = rec.entrances.filter((e) => surfaceY - e.y <= 6);
@@ -45,6 +45,10 @@ export function describePassage(rec: PassageRecord, here: Vec3Like, stations: La
   // 站在旧矿道里时，沿它从脚下回到入口的几何路线（只给方向，未验证点间通行或当前地形）
   const route = passageRoute([rec], here, entrance, { near: 6 });
   const next = route && route.length > 1 ? route[1] : undefined;
+  // 下行方向：朝这条通道记下的最深脚点走（想下更深时给下一步；已在最深点下面则不给）
+  const deepest = [...rec.path].sort((a, b) => a.y - b.y)[0];
+  const routeDown = passageRoute([rec], here, deepest, { near: 6 });
+  const nextDown = routeDown && routeDown.length > 1 ? routeDown[1] : undefined;
   const levels = passageLevels(rec).filter((y) => y !== entrance.y);
   const ores = Object.entries(rec.ores).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([n, c]) => `${n}×${c}`);
   const near = (l: Landmark, r: number) => rec.path.some((p) => d3(p, l.pos) <= r);
@@ -57,7 +61,7 @@ export function describePassage(rec: PassageRecord, here: Vec3Like, stations: La
   const text = `${where}，曾到达最低 y${rec.deepestY}`
     + `${levels.length ? `，历史脚点较多的高度有 y${levels.join('、y')}` : ''}${ores.length ? `，挖到过 ${ores.join('、')}` : ''}`
     + `${seen.length ? `，历史路线附近记得见过 ${seen.join('、')}` : ''}${things.length ? `，历史路线附近记得有${things.join('、')}` : ''}${validEntrances.length ? '；洞口可能被堵或地形变了，走到附近再确认' : '；当前路线是否可通尚未确认'}`;
-  return { text, entrance, dist, inside, ...(next ? { next } : {}) };
+  return { text, entrance, dist, inside, ...(next ? { next } : {}), ...(nextDown ? { nextDown } : {}) };
 }
 
 /** 自己的设施，近的在前；kinds 不给就全要 */

@@ -109,6 +109,22 @@ test('两条已记下的通道，从一条走进另一条时并成一条（碎�
   m.close();
 });
 
+test('通道给双向路线：回入口向上、朝最深处向下', () => {
+  const m = new WorldMemory(null); m.setWorld(W);
+  const tr = new PassageTracker(m, () => 'p1');
+  digDown(tr);
+  tr.observe({ worldId: W, dim: D, pos: at(36, 41, 0), place: 'other' }, [], 50_000);
+  tr.observe({ worldId: W, dim: D, pos: at(36, 50, 0), place: 'surface' }, [], 60_000);
+  const [p] = m.passages(D);
+  const mid = at(18, 46, 0);
+  const d = describePassage(p, mid);
+  assert.equal(d.inside, true);
+  assert.ok(d.next && d.nextDown, '双向都有下一步');
+  assert.ok(d.next.y > mid.y, '回入口是向上');
+  assert.ok(d.nextDown.y < mid.y, '朝最深处是向下');
+  m.close();
+});
+
 test('我的设施：通道说明历史位置和未知的当前通路；箱子按数量说最多的几样；房子不混进来', () => {
   const m = new WorldMemory(null); m.setWorld(W);
   digDown(new PassageTracker(m, () => 'p1'));

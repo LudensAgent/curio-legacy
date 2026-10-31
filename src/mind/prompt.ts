@@ -333,6 +333,29 @@ function passageWayBack(ctx: MindContext): string | null {
   return null;
 }
 
+/** 沿旧矿道往最深处走的下一步：和 passageWayBack 对称，但方向朝最深脚点，供想下更深时接上旧通道 */
+function passageWayDown(ctx: MindContext): string | null {
+  const p = ctx.percept, s = ctx.state;
+  const here = { x: p.self.pos[0], y: p.self.pos[1], z: p.self.pos[2] };
+  for (const rec of ctx.memory.passages(s.dim)) {
+    if (rec.worldId && rec.worldId !== s.worldId) continue;
+    const d = describePassage(rec, here);
+    if (!d.nextDown) continue;
+    const next = d.nextDown;
+    const at = (x: number, y: number, z: number) => ctx.blockAt?.({ x, y, z }) ?? null;
+    const foot = at(next.x, next.y, next.z);
+    const head = at(next.x, next.y + 1, next.z);
+    const open = (n: string | null) => n !== null && isSoftBlock(n);
+    const pos = `${Math.round(next.x)},${Math.round(next.y)},${Math.round(next.z)}`;
+    const kind = rec.kind === 'walked' ? '走过的路' : '自己挖过的旧矿道';
+    const along = d.inside ? `你正沿着${kind}` : `附近有${kind}，朝它最深处走`;
+    if (open(foot) && open(head)) return `${along}；沿它往最深处走的下一步 (${pos}) 现在仍是 2 格高的空走廊，可以直接走过去`;
+    const reason = !open(foot) ? `脚下那格现在是 ${foot ?? '未加载'}` : `头顶那格现在是 ${head ?? '未加载'}`;
+    return `${along}；沿它往最深处走的下一步 (${pos}) 被堵了：${reason}。挖开这一格、还是改走别的路，由你定`;
+  }
+  return null;
+}
+
 /** 打算里说要过水 / 到对岸 */
 const WATER_CROSS_INTENT = /过水|过河|渡河|过海|过湖|涉水|划船|坐船|游过去|游到|对岸|对面|跨过.{0,8}(水|河|海|湖)|去.{0,12}(对岸|对面)|到.{0,12}(对岸|对面)/;
 
@@ -401,6 +424,9 @@ export function situationalReminders(ctx: MindContext): string[] {
     for (const t of tunnels) {
       out.push(`记得自己${t.text}`);
     }
+    // 想下更深时：有旧矿道就给出朝最深处走的下一步（和回入口的下一步对称）
+    const down = passageWayDown(ctx);
+    if (down) out.push(down);
     // 消耗品预算：下矿前把火把够不够、还能做多少摆出来（只报事实，备多少由它定）
     out.push(...supplyFacts({ inv: s.inventory, torchEvery: ctx.self.habits().torch_every, only: new Set(['torch']), difficulty: s.difficulty, gamerules: s.gamerules, stock: p.storage?.stock }));
     // 世界规则事实：keepInventory 开着时死亡不掉落（只是事实，怎么备仍由它定）
