@@ -2,10 +2,21 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Vec3Like } from '../src/adapter/types.ts';
 import { FACINGS, localMap, toWorld } from '../src/perception/local.ts';
-import { surroundings } from '../src/perception/surroundings.ts';
+import { isSoftBlock, surroundings } from '../src/perception/surroundings.ts';
 import { unstuck } from '../src/skills/movement.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
+
+test('传送门方块算可通行：isSoftBlock 认下界门，surroundings 不再把门当墙', () => {
+  assert.equal(isSoftBlock('nether_portal'), true);
+  assert.equal(isSoftBlock('end_portal'), true);
+  assert.equal(isSoftBlock('end_gateway'), true);
+  const adapter = new FakeAdapter();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  adapter.blocks.push({ name: 'nether_portal', pos: { x: 0, y: 64, z: -1 } }, { name: 'nether_portal', pos: { x: 0, y: 65, z: -1 } });
+  const around = surroundings(adapter);
+  assert.ok(around.exits.includes('N'), `下界门应该能走进去：${around.text}`);
+});
 
 test('localMap 半径可配置：默认 9×9，传 radius 可调大调小', () => {
   const pos = { x: 0, y: 64, z: 0 };

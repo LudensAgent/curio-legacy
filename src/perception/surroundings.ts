@@ -6,8 +6,8 @@ import type { GameAdapter, Vec3Like } from '../adapter/types.ts';
  */
 
 const AIR = new Set(['air', 'cave_air', 'void_air']);
-/** 能直接穿过去的（不挡路） */
-const SOFT = /^(air|cave_air|void_air|ladder|short_grass|grass|tall_grass|fern|large_fern|dead_bush|snow|torch|wall_torch|.*_torch|.*_flower|dandelion|poppy|.*_tulip|azure_bluet|oxeye_daisy|cornflower|lily_of_the_valley|allium|blue_orchid|.*_sapling|.*_mushroom|sugar_cane|vine|.*_carpet|rail|.*_rail|redstone_wire|.*_button|lever|tripwire|.*_pressure_plate|sweet_berry_bush|seagrass|tall_seagrass|kelp|kelp_plant)$/;
+/** 能直接穿过去的（不挡路）；传送门（下界门/末地门/折跃门）也是能走进去的，算可通行 */
+const SOFT = /^(air|cave_air|void_air|nether_portal|end_portal|end_gateway|ladder|short_grass|grass|tall_grass|fern|large_fern|dead_bush|snow|torch|wall_torch|.*_torch|.*_flower|dandelion|poppy|.*_tulip|azure_bluet|oxeye_daisy|cornflower|lily_of_the_valley|allium|blue_orchid|.*_sapling|.*_mushroom|sugar_cane|vine|.*_carpet|rail|.*_rail|redstone_wire|.*_button|lever|tripwire|.*_pressure_plate|sweet_berry_bush|seagrass|tall_seagrass|kelp|kelp_plant)$/;
 const LIQUID = new Set(['water', 'lava', 'bubble_column']);
 
 /** 贴墙放的东西能挂在哪一面：梯子只能挂在实心方块的侧面；火把、告示牌、杠杆可以立在地上或挂墙；其余整块方块哪面都行（null） */
