@@ -1,6 +1,6 @@
 import type { AgentState } from '../adapter/types.ts';
 import { effortFacts } from '../brain/efficiency.ts';
-import { durabilityFacts, fuelFacts, supplyFacts } from '../brain/supply.ts';
+import { durabilityFacts, fuelFacts, oreOpportunityFact, supplyFacts, toolBackupFact } from '../brain/supply.ts';
 import type { AudienceContext } from '../live/audience.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { durationText, realSecondsToTicks, sunText, type Percept } from '../perception/perception.ts';
@@ -405,6 +405,14 @@ export function situationalReminders(ctx: MindContext): string[] {
     const picks = durabilityFacts(s.inventory, ['pickaxe'], p.storage?.stock);
     const back = passageWayBack(ctx);
     out.push(`下矿的账：${got.length ? `挖到 ${got.join(' ')}` : '还没挖到矿'}；背包空 ${p.emptySlots} 格${picks.length ? `；${picks.join('、')}` : ''}；身边${seen.length ? `看得见 ${seen.join('、')}` : '没看见矿'}${remembered ? `，48 格内记得 ${remembered} 处矿点` : ''}${back ? `；${back}` : ''}。清单后面几项还要不要这些料，一起掂量再决定收不收工`);
+  }
+  // 顺手采集与不可替代工具：把「看见什么矿 + 现在这类料有多少 + 能做什么」摆成事实，让它在路过矿石时能自己掂量要不要顺手采；
+  // 只报事实，采不采、做不做备用工具都由它定（不替它写 gather 或 craft）
+  if (ctx.tier === 'deliberate') {
+    const ore = oreOpportunityFact(p.nearby.resources, p.storage?.stock, s.inventory);
+    if (ore) out.push(ore);
+    const backup = toolBackupFact(s.inventory, p.storage?.stock);
+    if (backup) out.push(backup);
   }
   // 养动物、村民交易：打算里提到了才把机制摆出来（模型对这些的记忆常是含糊或老版本的）
   const husbandry = husbandryFacts(intent);

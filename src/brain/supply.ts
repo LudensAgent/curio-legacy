@@ -219,3 +219,75 @@ export function supplyReading(inv: Inv, opts: { stock?: Stock; torchEvery?: numb
 
   return rows;
 }
+
+// ---------------------------------------------------------------------------
+// 顺手采集与不可替代工具：把「看见什么 + 现在这类料有多少 + 能拿来做啥」摆成中性事实。
+// 只测度与查配方，采不采、采多少、做不做备用工具，全部由 Agent 按当前目标和余力权衡（AGENTS.md）。
+// ---------------------------------------------------------------------------
+
+/** 矿石 → 主要产物 + 一句客观用途（能做什么）。配方/材料事实，稳定原版知识。 */
+const ORE_DEFS: Record<string, { out: string; raw?: string; use: string }> = {
+  coal: { out: 'coal', use: '火把/燃料' },
+  iron: { out: 'iron_ingot', raw: 'raw_iron', use: '铁工具/盔甲/桶/盾' },
+  copper: { out: 'copper_ingot', raw: 'raw_copper', use: '避雷针/望远镜/铜块' },
+  gold: { out: 'gold_ingot', raw: 'raw_gold', use: '金苹果/动力铁轨/与猪灵交易' },
+  diamond: { out: 'diamond', use: '钻石工具/盔甲/附魔台' },
+  redstone: { out: 'redstone', use: '红石机械' },
+  lapis: { out: 'lapis_lazuli', use: '附魔' },
+  emerald: { out: 'emerald', use: '与村民交易' },
+};
+const ORE_INFO = new Map<string, { out: string; raw?: string; use: string }>();
+for (const [kind, info] of Object.entries(ORE_DEFS)) {
+  ORE_INFO.set(`${kind}_ore`, info);
+  ORE_INFO.set(`deepslate_${kind}_ore`, info);
+}
+ORE_INFO.set('nether_gold_ore', ORE_DEFS.gold);
+ORE_INFO.set('ancient_debris', { out: 'netherite_scrap', use: '下界合金（配金锭）' });
+
+/** 附近资源里可顺手采集的矿石，最多两块、按距离近的优先。没有可采的矿返回 null。 */
+export function oreOpportunityFact(
+  resources: readonly { block: string; count: number; nearest: number; dir?: string; seen?: 'now' | 'memory' }[],
+  stock: readonly StockRow[] | undefined,
+  inventory: readonly { name: string; count: number }[],
+): string | null {
+  const candidates = resources.filter((r) => ORE_INFO.has(r.block)).sort((a, b) => a.nearest - b.nearest);
+  if (!candidates.length) return null;
+  const have = (name: string) => {
+    const row = stock?.find((s) => s.item === name);
+    if (row) return row.total;
+    return inventory.filter((i) => i.name === name).reduce((n, i) => n + i.count, 0);
+  };
+  const parts = candidates.slice(0, 2).map((r) => {
+    const info = ORE_INFO.get(r.block)!;
+    const items = [info.out, ...(info.raw ? [info.raw] : [])];
+    const haveText = items.map((n) => `${n}×${have(n)}`).join('、');
+    return `${r.seen === 'memory' ? '记得' : '看见'}${r.block}×${r.count}（${r.dir ?? ''}${r.nearest}格），现在有 ${haveText}；可做${info.use}`;
+  });
+  return `顺手采集：${parts.join('；')}（采不采、采多少由你按当前目标和余力权衡）`;
+}
+
+/** 唯一一把镐是铁/钻石镐、又做不出备用的（材料 < 3）：把它挖普通方块会耗耐久的事实摆出来，做不做备用由 Agent 定。 */
+export function toolBackupFact(
+  inventory: readonly { name: string; count: number }[],
+  stock: readonly StockRow[] | undefined,
+): string | null {
+  const havePick = (t: string) => inventory.some((i) => i.name === `${t}_pickaxe`);
+  const have = (name: string) => {
+    const row = stock?.find((s) => s.item === name);
+    if (row) return row.total;
+    return inventory.filter((i) => i.name === name).reduce((n, i) => n + i.count, 0);
+  };
+  for (const [t, mat, zh, cheap] of [
+    ['diamond', 'diamond', '钻石', '铁镐或石镐'] as const,
+    ['iron', 'iron_ingot', '铁锭', '石镐（3 圆石 + 2 木棍）'] as const,
+  ]) {
+    if (!havePick(t)) continue;
+    // 没有比它更便宜的镐子：它就是唯一一把能挖矿的镐
+    const cheaper = t === 'diamond' ? ['iron', 'stone', 'wooden'] : ['stone', 'wooden'];
+    if (cheaper.some((c) => havePick(c))) continue;
+    const n = have(mat);
+    if (n >= 3) continue; // 材料够再做一把，不算不可替代
+    return `你现在唯一一把镐是${t === 'iron' ? '铁镐' : '钻石镐'}，而${zh}只有 ${n} 个（做一把新的要 3 个）：它挖普通石头/煤/泥土也耗耐久，坏了就没镐可用了。要不要先做把${cheap}备用，由你定`;
+  }
+  return null;
+}

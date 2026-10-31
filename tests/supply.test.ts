@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { InvItem } from '../src/adapter/types.ts';
 import type { StockRow } from '../src/memory/chest-memory.ts';
-import { consumptionSummary, durabilityFacts, fuelFacts, supplyFacts, supplyReading, torchCraftable } from '../src/brain/supply.ts';
+import { consumptionSummary, durabilityFacts, fuelFacts, oreOpportunityFact, supplyFacts, supplyReading, toolBackupFact, torchCraftable } from '../src/brain/supply.ts';
 
 const item = (name: string, count: number, extra?: Partial<InvItem>): InvItem => ({ name, count, ...extra });
 const row = (item: string, inChests: number): StockRow => ({ item, total: inChests, inChests, chestCount: 1, inBackpack: 0 });
@@ -98,4 +98,43 @@ test('consumptionSummary：聚合最近消耗的消耗品，非消耗品不计',
   assert.ok(!/stone_pickaxe/.test(summary!));
   // 没有消耗品消耗时返回 null
   assert.equal(consumptionSummary([{ stone_pickaxe: 1 }, { iron_ingot: 2 }]), null);
+});
+
+test('oreOpportunityFact：看见矿 + 现有存量 + 用途，采不采由它定；无矿返回 null', () => {
+  const res = (block: string, seen: 'now' | 'memory' = 'now') => ({ block, count: 3, nearest: 4, dir: 'E', seen });
+  // 看见铜，身上没有铜：报出铜锭/粗铜 ×0 与用途
+  const f = oreOpportunityFact([res('copper_ore')], undefined, [item('iron_ingot', 2)]);
+  assert.match(f!, /看见copper_ore×3（E4格）/);
+  assert.match(f!, /copper_ingot×0、raw_copper×0/);
+  assert.match(f!, /避雷针\/望远镜\/铜块/);
+  assert.match(f!, /采不采、采多少由你/);
+  // 深板岩变体算同一种矿
+  assert.match(oreOpportunityFact([res('deepslate_iron_ore')], undefined, [])!, /iron_ingot×0/);
+  // 箱子里的料也算进存量
+  const withChest = oreOpportunityFact([res('coal_ore')], [row('coal', 5)], []);
+  assert.match(withChest!, /coal×5/);
+  // 没有矿石资源返回 null；非矿的方块不算
+  assert.equal(oreOpportunityFact([res('oak_log')], undefined, []), null);
+  assert.equal(oreOpportunityFact([], undefined, []), null);
+  // 多块矿只挑最近的两块
+  const two = oreOpportunityFact([res('copper_ore'), res('iron_ore'), res('gold_ore')], undefined, []);
+  assert.ok(!two!.includes('gold_ore'), '只报最近的两块矿');
+});
+
+test('toolBackupFact：唯一铁镐且铁锭不足时才提醒，做不做备用由它定', () => {
+  // 唯一一把镐是铁镐、铁锭 0 → 提醒
+  const f = toolBackupFact([item('iron_pickaxe', 1), item('iron_ingot', 0)], undefined);
+  assert.match(f!, /唯一一把镐是铁镐/);
+  assert.match(f!, /铁锭只有 0 个/);
+  assert.match(f!, /石镐（3 圆石 \+ 2 木棍）/);
+  assert.match(f!, /由你定/);
+  // 铁锭够 3 个能再做一把 → 不算不可替代，不提醒
+  assert.equal(toolBackupFact([item('iron_pickaxe', 1), item('iron_ingot', 3)], undefined), null);
+  // 有石镐备用 → 不提醒
+  assert.equal(toolBackupFact([item('iron_pickaxe', 1), item('stone_pickaxe', 1), item('iron_ingot', 0)], undefined), null);
+  // 箱子里的铁锭也算
+  assert.equal(toolBackupFact([item('iron_pickaxe', 1)], [row('iron_ingot', 4)]), null);
+  assert.match(toolBackupFact([item('iron_pickaxe', 1)], [row('iron_ingot', 1)])!, /铁锭只有 1 个/);
+  // 没有铁镐 → null
+  assert.equal(toolBackupFact([item('stone_pickaxe', 1)], undefined), null);
 });
