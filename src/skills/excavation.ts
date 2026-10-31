@@ -69,7 +69,9 @@ function preflightColumn(ctx: SkillCtx, feet: Vec3Like, height: number) {
     if (!name || hazard(name)) throw new ExcavationStop('ERROR', '局部工作面未知或有液体/下落方块等危险');
     if (!AIR.has(name)) {
       const block = registry.blocksByName[name];
-      if (PROTECTED.has(name) || name.endsWith('_bed') || !fullStableBlock(name) || !block?.diggable || !Number.isFinite(block.hardness) || block.hardness! < 0) throw new ExcavationStop('ERROR', `工作面 ${name} 不能作为普通安全通道挖除`);
+      // 工作面只要求「可挖、非保护、非危险」：火把/梯子/告示牌这类透明方块不是完整立方，却一样能瞬挖通过，
+      // 不能再拿 fullStableBlock（完整立方）去卡它，否则 agent 自己插的火把会反过来堵死开挖通道
+      if (PROTECTED.has(name) || name.endsWith('_bed') || !block?.diggable || !Number.isFinite(block.hardness) || block.hardness! < 0) throw new ExcavationStop('ERROR', `工作面 ${name} 不能作为普通安全通道挖除`);
       const tools = Object.keys(block.harvestTools ?? {});
       const held = adapter.state().inventory.some((item) => item.count > 0 && tools.includes(String(registry.itemsByName[item.name]?.id)));
       if (!adapter.canHarvest(pos) || tools.length && !held) throw new ExcavationStop('TOOL_MISSING', `缺少实际可采掘 ${name} 的工具`);

@@ -109,6 +109,14 @@ test('excavation refuses unsafe, partial or unknown floors and adjacent liquids 
   assert.equal(world.digs.length, 0);
 });
 
+test('transparent diggable blocks in the work face (wall_torch) are cleared, not rejected', async () => {
+  const world = new ExcavationWorld();
+  world.setBlock({ x: 1, y: 63, z: 0 }, 'wall_torch');
+  const result = await excavationSkill.run(context(world), args({ steps: 1 }));
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.ok(world.digs.some((pos) => pos.x === 1 && pos.y === 63), 'the torch cell is dug instead of aborting excavation');
+});
+
 test('excavation checks actual registry harvest tools, hardness, falling roofs and protected blocks', async () => {
   for (const mode of ['tool', 'bedrock', 'roof', 'frame']) {
     const world = new ExcavationWorld();
