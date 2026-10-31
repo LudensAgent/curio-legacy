@@ -128,6 +128,7 @@ test('portal travel records observed coordinates in both dimensions and verifies
   assert.equal(vision.observeBlocks([destinationPos])[0]?.name, 'nether_portal');
   assert.equal((await run('observe_portal')).result.status, 'succeeded');
   assert.equal(travelStore(memory).get(destination.id, adapter.worldId)?.portalObserved, true);
+  assert.ok(memory.landmarks().some((l) => l.label.includes('下界门') && l.dim === 'the_nether'), '观察到的下界门也记进常规地标');
   const returned = await run('recall_portal', { returnId: destination.id });
   assert.equal(returned.result.status, 'succeeded', returned.result.summary);
   assert.equal(adapter.dim, 'overworld');

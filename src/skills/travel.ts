@@ -5,6 +5,8 @@ import { codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from
 
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 const TERRAIN = new Set(['dirt', 'grass_block', 'stone', 'cobblestone', 'deepslate', 'netherrack', 'sand', 'gravel']);
+/** 传送门记进常规记忆（地标）时用的中文名 */
+const PORTAL_LABEL: Record<PortalEndpoint['kind'], string> = { nether_portal: '下界门', end_portal: '末地门', end_gateway: '末地折跃门' };
 
 function visiblePortal(ctx: SkillCtx, positions: Vec3Like[], kinds: string[]) {
   for (let offset = 0; offset < positions.length; offset += 32) {
@@ -125,6 +127,8 @@ export const observePortal: Skill<{}> = {
     const portal = visiblePortal(ctx, ctx.senses.knownBlocks(kinds, 8).map((block) => block.pos), kinds);
     if (!portal) return fail('NOT_FOUND', '附近没有已观察并能核对的传送门');
     const endpoint = travelStore(ctx.memory).observe(state, portal.pos, portal.name as PortalEndpoint['kind']);
+    // 也记进常规记忆（地标），让 recall / places 能找回来，不只是 travelStore 里的一份；下界门在下界这一端尤其要靠它记住
+    ctx.memory.addLandmark('discovery', `${PORTAL_LABEL[endpoint.kind]} ${endpoint.id}`, state.dim, endpoint.pos, 4);
     return ok(`记录传送门 ${endpoint.id}`, { portalId: endpoint.id, endpoint });
   },
 };
