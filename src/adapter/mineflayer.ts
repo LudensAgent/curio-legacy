@@ -3340,14 +3340,27 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
 
   private drawStartedAt: number | null = null;
 
-  async pillarUp(itemNames: string[], signal: AbortSignal): Promise<ActionResult & { y?: number; clearanceDetail?: string; clearance?: { at?: [number, number, number]; facing?: string } }> {
+  async pillarUp(itemNames: string[], signal: AbortSignal): Promise<ActionResult & { y?: number; clearanceDetail?: string; clearance?: { at?: [number, number, number]; facing?: string }; waterDepth?: number }> {
     const check = this.actionCheckpoint(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
     const b = this.bot, epoch = this.actionEpoch;
     const feet = b.entity.position.floored();
     const below = b.blockAt(feet.offset(0, -1, 0));
-    if (!below || below.boundingBox !== 'block') return { ok: false, reason: 'NO_REFERENCE' };
     const here = b.blockAt(feet);
+    const inWater = !!here && here.name === 'water';
+    if (!below || below.boundingBox !== 'block') {
+      // 没贴着实心方块：悬空、在水里或梯子上。泡在水里就往下找最近池底，把事实带回去（够不着贴面时别只回一句“没有面”）
+      if (inWater) {
+        let floorBelow = 0;
+        for (let dy = 1; dy <= 4; dy++) {
+          const n = b.blockAt(feet.offset(0, -1 - dy, 0));
+          if (n && n.boundingBox === 'block') { floorBelow = dy + 1; break; }
+          if (n && n.name !== 'water') break; // 往下不是水了还没见实底，别继续猜
+        }
+        return { ok: false, reason: 'NO_REFERENCE', ...(floorBelow ? { waterDepth: floorBelow } : {}) };
+      }
+      return { ok: false, reason: 'NO_REFERENCE' };
+    }
     if (here && here.boundingBox === 'block') return { ok: false, reason: 'OCCUPIED' };
     // 脚下这格有火把、花、铁轨、按钮这类没碰撞但也不会被顶掉的东西：服务器不让往里放方块
     if (here && !/^(air|cave_air|void_air|water|short_grass|grass|tall_grass|fern|large_fern|dead_bush|seagrass|tall_seagrass|snow)$/.test(here.name)) return { ok: false, reason: `BLOCKED:${here.name}` };
@@ -3356,6 +3369,20 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     await this.afterAction(() => b.equip(item, 'hand'), check);
     b.clearControlStates();
     await this.afterAction(() => b.look(b.entity.yaw, -Math.PI / 2, true), check);
+    // 站在浅水里（脚泡在水里、脚下是实底）：水格可以直接放方块，不用跳，直接贴着脚下池底放进去
+    if (inWater) {
+      const clearance = this.pillarClearance();
+      if (clearance) return { ok: false, reason: `NOT_PLACED:头顶跳跃空间${clearance.kind === 'blocked' ? '受阻' : '未加载'}`, clearanceDetail: describePillarClearance(clearance), clearance: clearance.block?.rel ? { at: clearance.block.rel, facing: clearance.block.facing } : undefined };
+      try {
+        await this.afterAction(() => raceAbort(b.placeBlock(below, new Vec3(0, 1, 0)), signal, 2500, () => {}), check);
+      } catch (e: any) {
+        if (e?.name === 'AbortedError') throw e;
+        return { ok: false, reason: `NOT_PLACED:${String(e?.message ?? e).slice(0, 80)}`, y: Math.floor(b.entity.position.y) };
+      }
+      const block = b.blockAt(feet);
+      if (!block || block.boundingBox !== 'block') return { ok: false, reason: 'NOT_PLACED', y: Math.floor(b.entity.position.y) };
+      return { ok: true, y: Math.floor(b.entity.position.y) };
+    }
     // 站稳了再跳
     for (let i = 0; i < 20 && !b.entity.onGround; i++) await this.afterAction(() => sleep(25, signal), check);
     if (!b.entity.onGround) return { ok: false, reason: 'NOT_PLACED:尚未站稳' };

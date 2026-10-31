@@ -127,3 +127,22 @@ test('aborting before a tower jump removes the clearance listener and cannot sto
   w.bot.emit('physicsTick');
   assert.equal(w.controls.jump, true);
 });
+
+test('pillar in shallow water places directly against the floor without jumping', async () => {
+  const w = fixture();
+  w.put(0, 64, 0, 'water'); // 脚泡在水里、脚下是实底（63 格默认 stone）
+  w.bot.placeBlock = async () => { w.put(0, 64, 0, 'cobblestone'); };
+  const result = await w.adapter.pillarUp(['cobblestone'], new AbortController().signal);
+  assert.equal(result.ok, true);
+  assert.equal(w.controls.jump, undefined, '水里垫高不按跳');
+});
+
+test('pillar in deep water reports the floor depth instead of a bare NO_REFERENCE', async () => {
+  const w = fixture();
+  w.put(0, 64, 0, 'water'); // 脚
+  w.put(0, 63, 0, 'water'); // 脚下也是水；62 格默认 stone 即池底
+  const result = await w.adapter.pillarUp(['cobblestone'], new AbortController().signal);
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'NO_REFERENCE');
+  assert.equal(result.waterDepth, 2);
+});
