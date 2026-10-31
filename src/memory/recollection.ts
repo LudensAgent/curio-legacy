@@ -23,14 +23,13 @@ function containerFactAt(text: string, offset: number) {
 export function noteGoneSpots(text: string, memory: Partial<Pick<WorldMemory, 'goneNear'>> | undefined, dim: string): string {
   if (!memory?.goneNear) return text;
   return text.replace(/\(?(-?\d{1,7}),\s*(-?\d{1,3}),\s*(-?\d{1,7})\)?/g, (match: string, x: string, y: string, z: string, offset: number, whole: string) => {
-    if (whole.lastIndexOf('〔历史容器区域：', offset) > whole.lastIndexOf('〕', offset) || /中心\s*$/.test(whole.slice(0, offset))) return match;
     if (whole.slice(offset + match.length).startsWith('〔亲眼看过：')) return match;
     const gone = memory.goneNear?.(dim, { x: +x, y: +y, z: +z }, 0)[0];
     return gone ? `${match}〔亲眼看过：当时这里的 ${gone.label} 没了，变成 ${gone.now}；观察时间 ${new Date(gone.ts).toISOString()}，历史记录不代表当前状态〕` : match;
   });
 }
 
-/** Historical prose must not reconstruct a precise container inventory or location. */
+/** Historical prose fades container quantities to impressions; locations stay precise. */
 export function recallText(text: string, memory: Pick<WorldMemory, 'chests' | 'landmarks'> & Partial<Pick<WorldMemory, 'goneNear'>>, dimension?: string, observedAt?: number, now = Date.now()): string {
   if (dimension) text = noteGoneSpots(text, memory, dimension);
   if (!CONTAINER_WORD.test(text)) return text;
