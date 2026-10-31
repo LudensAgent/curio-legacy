@@ -1018,6 +1018,25 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           if (openDoor) for (const move of neighbors.slice(before)) move.toPlace.unshift({ x: door.position.x, y: door.position.y, z: door.position.z, dx: 0, dy: 0, dz: 0, useOne: true });
         };
       }
+      // 架桥可以跨沟壑/悬崖（高处搭桥），但不往水里放方块：过水只剩 travel 游泳 / 坐船两条路。
+      // 只拦目标格是水的放置；useOne（开门/门栏）不是放方块，岩浆不是水，都不拦。
+      const isWaterBlock = (block: any) => !!block && (
+        block.name === 'water' || block.name === 'bubble_column' || block.name === 'kelp'
+        || block.name === 'kelp_plant' || block.name === 'seagrass' || block.name === 'tall_seagrass'
+        || String(block.getProperties?.().waterlogged) === 'true');
+      for (const method of ['getMoveForward', 'getMoveJumpUp'] as const) {
+        const getMove = movements[method];
+        movements[method] = function (node: any, dir: any, neighbors: any[]) {
+          const before = neighbors.length;
+          getMove.call(this, node, dir, neighbors);
+          for (let i = neighbors.length - 1; i >= before; i--) {
+            const move = neighbors[i];
+            if (move.toPlace?.some((p: any) => !p.useOne && isWaterBlock(this.getBlock({ x: p.x, y: p.y, z: p.z }, 0, 0, 0)))) {
+              neighbors.splice(i, 1);
+            }
+          }
+        };
+      }
       b.pathfinder.setMovements(movements);
     }
     const goals = goalsLib();
