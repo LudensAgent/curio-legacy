@@ -460,6 +460,15 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           if (b) mv.liquids.add(b.id);
         }
         mv.liquidCost = 10; // 能走陆路就别游泳：海岸边绕一点陆路也比下水强（游泳慢、会被溺尸打、会淹死）
+        // 岩浆是危险流体，不是可游泳的水：寻路绝不能穿过去。默认 Movements 把 lava 加进 liquids（当水游）
+        // 和 replaceables（当空气在上面垫方块）——这里都删掉，并列为不可采掘，让 safeToBreak 返回 false，
+        // 寻路会绕开岩浆而不是游进去或往岩浆上垫路（在岩浆源上放方块会失败，人直接掉进去）。
+        const lava = this.mcData.blocksByName.lava;
+        if (lava) {
+          mv.liquids.delete(lava.id);
+          mv.replaceables.delete(lava.id);
+          mv.blocksCantBreak.add(lava.id);
+        }
         try {
           for (const n of PROTECTED_BLOCKS) {
             const b = this.mcData.blocksByName[n];
