@@ -122,6 +122,8 @@ export class Mind {
   private listening = false;
   private suspendedBy = new Set<string>();
   private lastSession = '';
+  /** 这次进程里是否已经观测到「活着」（spawn 且生命值 >0）：区分「首次启动还没刷出生命值」和「真死了」 */
+  private seenAlive = false;
   private settleUntil = 0;
   private backoffUntil = 0;
   private errors = 0;
@@ -308,7 +310,12 @@ export class Mind {
     const task = this.d.arbiter.info();
     const travelling = !!task && ['travel_portal', 'recall_portal'].includes(task.skill);
     if (travelling && !observationReady(state)) return; // 传送技能自己等落地
-    if (!observationReady(state)) { this.suspend(state.alive ? 'disconnected' : 'death'); return; }
+    if (!observationReady(state)) {
+      // 首次启动还没刷出生命值（alive 仍是 false）不算死亡：不打扰，等 spawn 后直接接着上次的议程
+      if (this.seenAlive) this.suspend(state.alive ? 'disconnected' : 'death');
+      return;
+    }
+    this.seenAlive = true;
     this.d.memory.setWorld(state.worldId);
     if (this.lastSession && this.lastSession !== state.sessionId && !travelling) {
       // 换了世界/维度：手上的活里的坐标都不再适用；心思（议程、念头）还在
