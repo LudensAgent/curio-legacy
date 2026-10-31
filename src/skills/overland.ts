@@ -247,8 +247,10 @@ export const travel: Skill<TravelArgs> = {
             lastErr = lastErr || '要爬 2 格以上的坡，但手里没有能垫的方块';
           }
         }
-        if (!plan.legs.length) { lastErr = lastErr || `看得到的地形里找不到更近的路：${plan.why ?? '远处没加载、或被墙/悬崖/岩浆挡住'}`; break; }
-        if (!plan.reached && plan.why && round === 0) lastErr = `路只能规划到一半：${plan.why}`;
+        // 没授权垫路：把「身体能垫」这个能力事实跟着地形原因一起留在失败回执里，开不开（会消耗方块）由 Agent 定
+        const climbHint = plan.climbed && !args.place ? '；travel 加 place:true 可授权原地垫方块爬坡（会消耗垫脚方块）' : '';
+        if (!plan.legs.length) { lastErr = lastErr || `看得到的地形里找不到更近的路：${plan.why ?? '远处没加载、或被墙/悬崖/岩浆挡住'}${climbHint}`; break; }
+        if (!plan.reached && plan.why && round === 0) lastErr = `路只能规划到一半：${plan.why}${climbHint}`;
         ctx.progress(1 - Math.min(1, flat(here) / Math.max(1, flat(startPos))), `规划了 ${plan.legs.map((l) => `${l.mode === 'walk' ? '走' : '水'}${l.cells.length}`).join('→')}`);
         // 一次最多走 ~120 格，再按新看到的地形重新规划
         let budget = 120, failed = false;

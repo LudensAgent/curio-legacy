@@ -259,7 +259,10 @@ export const goTo: Skill<{ target: string; dig?: boolean; place?: boolean; tower
       try {
         const here = ctx.adapter.state().pos;
         const plan = planTravel((p) => ctx.adapter.blockAt(p), here, d.target, { canBoat: false, maxNodes: 8000, margin: 16 });
-        if (plan && !plan.reached && plan.why) return { ...r, summary: `${r.summary}（看地形：${plan.why}）` };
+        if (plan && !plan.reached && plan.why) {
+          const climbHint = plan.climbed && args.place !== true && args.dig !== true ? '；可加 place:true（或 dig:true）授权垫方块爬坡' : '';
+          return { ...r, summary: `${r.summary}（看地形：${plan.why}${climbHint}）` };
+        }
       } catch { /* 诊断不了就照原样 */ }
     }
     return r;
@@ -470,7 +473,7 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
         }
         if (ctx.senses.navigationWaypoint && !waypoint && !args.dig && !allowPlace && !args.lead) {
           const water = waterNear();
-          return fail('PATH_NOT_FOUND', `前往 ${label}：眼前没有可确认的${water ? '陆地落脚点，附近有水' : '通路'}；没有挖墙或搭柱`, { ...measured(cur), waterAhead: water });
+          return fail('PATH_NOT_FOUND', `前往 ${label}：眼前没有可确认的${water ? '陆地落脚点，附近有水' : '通路'}；没有挖墙或搭柱（可加 place:true 或 dig:true 授权垫路）`, { ...measured(cur), waterAhead: water });
         }
         const dxz = Math.hypot(pos.x - cur.x, pos.z - cur.z);
         const target = waypoint ? { kind: 'near' as const, pos: waypoint, range: fromMemory ? 1.2 : 0.7 }
