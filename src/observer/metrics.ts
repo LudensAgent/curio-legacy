@@ -38,6 +38,8 @@ export class Metrics {
     plansRule: 0,
     intentions: { continued: 0, changed: 0, deferred: 0, abandoned: 0, subjectiveEnded: 0 },
   };
+  /** 本次启动（进程启动以来）的「一段活」次数与卡住次数：不随 run-stats 累加，重启清零 */
+  launchAttempts = { total: 0, stuck: 0 };
 
   constructor(
     private adapter: GameAdapter,
@@ -68,6 +70,8 @@ export class Metrics {
       if (d.status === 'succeeded') this.counters.attempts.succeeded++;
       else if (d.status === 'failed') this.counters.attempts.failed++;
       else this.counters.attempts.other++;
+      this.launchAttempts.total++;
+      if (d.outcome === 'stuck') this.launchAttempts.stuck++;
     } else if (ev.type === 'goal_end') {
       if (d.status === 'succeeded') this.counters.goals.succeeded++;
       else if (d.status === 'failed') this.counters.goals.failed++;
@@ -142,6 +146,8 @@ export class Metrics {
       tasks: t,
       failCodes: this.counters.failCodes,
       attempts: this.counters.attempts,
+      launchStuckRate: this.launchAttempts.total ? this.launchAttempts.stuck / this.launchAttempts.total : null,
+      launchAttempts: this.launchAttempts,
       goals: this.counters.goals,
       plans: { llm: this.counters.plansLlm, rule: this.counters.plansRule },
       discoveries: this.counters.discoveries,
