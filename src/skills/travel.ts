@@ -42,6 +42,9 @@ export const buildPortal: Skill<{ origin: Vec3Like; axis: 'x' | 'z' }> = {
       const isFrame = frame.some((p) => dist3(p, at(u, y)) === 0);
       if (!name || (!AIR.has(name) && !(isFrame && name === 'obsidian'))) return fail('BAD_ARGS', '门框或内部空间被占用，换一个已观察到的空地');
     }
+    // 记下门框位置：中途失败也能回同一处补全（点着后转成正式「下界门」地标）
+    const partialLabel = `未完成的下界门框（axis=${args.axis}）`;
+    ctx.memory.addLandmark('discovery', partialLabel, state.dim, args.origin, 1);
     let placed = 0;
     const place = async (pos: Vec3Like, name: string) => {
       throwIfAborted(signal);
@@ -98,6 +101,9 @@ export const buildPortal: Skill<{ origin: Vec3Like; axis: 'x' | 'z' }> = {
         if (adapter.blockAt(at(1, 1)) === 'nether_portal') {
           const portal = travelStore(ctx.memory).observe(adapter.state(), at(1, 1), 'nether_portal');
           ctx.memory.addLandmark('discovery', `下界门 ${portal.id}`, state.dim, portal.pos, 4);
+          for (const l of ctx.memory.landmarks()) {
+            if (l.label === partialLabel && l.dim === state.dim && dist3(l.pos, args.origin) <= 1) ctx.memory.removeLandmark(l.id);
+          }
           return ok(`下界门已点燃并验收：${portal.id}`, { portalId: portal.id, placed, obsidianFrame: frame });
         }
         await sleep(200, signal);

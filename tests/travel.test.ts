@@ -70,6 +70,27 @@ test('build_portal on a suspended base fills the gap with scaffold first', async
   assert.equal(adapter.blockAt({ x: 5, y: 62, z: 0 }), 'cobblestone');
 });
 
+test('a refused ignition still leaves a resumable partial-frame landmark', async () => {
+  const { adapter, memory, run } = setup();
+  adapter.inv.set('obsidian', 10);
+  adapter.inv.set('flint_and_steel', 1);
+  adapter.useBlockAt = async () => ({ ok: false, reason: 'NO_FIRE' });
+  const outcome = await run('build_portal', { origin: { x: 3, y: 63, z: 0 } });
+  assert.equal(outcome.result.status, 'failed');
+  const partial = memory.landmarks().filter((l) => l.label === '未完成的下界门框（axis=x）');
+  assert.equal(partial.length, 1, '点火失败仍留下未完成门框地标，可回来补全');
+  assert.deepEqual(partial[0].pos, { x: 3, y: 63, z: 0 });
+});
+
+test('successful ignition clears the partial-frame landmark', async () => {
+  const { adapter, memory, run } = setup();
+  adapter.inv.set('obsidian', 10);
+  adapter.inv.set('flint_and_steel', 1);
+  const outcome = await run('build_portal', { origin: { x: 3, y: 63, z: 0 } });
+  assert.equal(outcome.result.status, 'succeeded', outcome.result.summary);
+  assert.equal(memory.landmarks().filter((l) => l.label === '未完成的下界门框（axis=x）').length, 0, '点着后清掉未完成地标');
+});
+
 test('portal travel records observed coordinates in both dimensions and verifies a return only after returning', async () => {
   const { adapter, memory, vision, run } = setup();
   const sourcePos = { x: 3, y: 64, z: 0 };
