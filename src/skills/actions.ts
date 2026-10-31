@@ -65,7 +65,10 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
       if (cur !== null && !AIRISH.has(cur)) return fail('EFFECT_NOT_CONFIRMED', `(${pos.x},${pos.y},${pos.z}) 不是空气（现在是 ${cur}），水/岩浆只能倒进空格`, { pos });
       try {
         const r = await adapter.placeBlockAt(pos, [args.item], signal);
-        if (!r.ok) return fail(r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS' : 'PATH_NOT_FOUND', `往 (${pos.x},${pos.y},${pos.z}) 倒 ${args.item} 没成：${r.reason}`, { pos, reason: r.reason });
+        if (!r.ok) {
+          if (r.reason === 'NO_REFERENCE') return fail('PATH_NOT_FOUND', `往 (${pos.x},${pos.y},${pos.z}) 倒 ${args.item} 没成：这格空气旁边没有能贴住水桶的面（实心方块或岩浆/水面），或你站太远/视线被挡看不到那个面；走到能看见岩浆面或墙面的位置，让目标空气格贴着那个面再倒`, { pos, reason: r.reason });
+          return fail(r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS' : 'PATH_NOT_FOUND', `往 (${pos.x},${pos.y},${pos.z}) 倒 ${args.item} 没成：${r.reason}`, { pos, reason: r.reason });
+        }
         const now = adapter.blockAt(pos);
         return ok(`往 (${pos.x},${pos.y},${pos.z}) 倒了 ${args.item}（现在这格是 ${now ?? '未知'}）`, { pos, placed: now });
       } catch (e) {
