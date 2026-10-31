@@ -518,11 +518,11 @@ export class Mind {
     const stalledMin = stall.minutes;
     const stale = !plan || stalledMin >= SelfModel.STALL_MIN;
     const moody = (bored || fed || !!this.keptHint) && stale && (!plan || days >= 1) && now - this.lastReviewAt >= this.reviewGapMs;
-    // 3) 卡住：主目标停滞，而且最近几段活反复卡住/没做成——不是单纯没进展，是这条路真做不成；早一点给回顾的机会换思路或换目标
+    // 3) 卡住：最近几段活反复卡住/没做成——不是单纯没进展，是这条路真做不成；早一点给回顾的机会换思路或换目标
     const since = plan?.progressAt ?? plan?.setAt ?? 0;
     const recent = this.d.self.history(40).filter((r) => r.at > since);
     const stuckRuns = recent.filter((r) => r.outcome === 'stuck' || r.outcome === 'unmet').length;
-    const stuck = !!plan && stalledMin >= SelfModel.STALL_MIN && recent.length >= 6 && stuckRuns >= 3 && now - this.lastReviewAt >= this.reviewGapMs;
+    const stuck = !!plan && recent.length >= 6 && stuckRuns >= 3 && now - this.lastReviewAt >= this.reviewGapMs;
     if (!overdue && !moody && !stuck) return;
     const why = [overdue ? `已观察到主目标经过 ${Math.floor(days)} 个游戏天，仍未做成（更早未观察时间未知）` : '', bored ? '好无聊' : '', fed ? '很烦躁' : '',
       plan && stalledMin >= SelfModel.STALL_MIN ? `已观察到${stall.historyUnknown ? '至少 ' : ' '}${Math.round(stalledMin)} 在线分钟没勾掉一项${stall.historyUnknown ? '，更早的在线时长未知' : ''}` : '',

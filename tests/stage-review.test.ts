@@ -121,3 +121,17 @@ test('错过多个回顾期限后，继续目标仍从当前游戏天起宽限',
   mind.stageReviewCheck();
   assert.equal(thinks.length, 1, '不会连续追补已经错过的回顾');
 });
+
+test('最近反复卡住也会停下来回顾，哪怕清单还在微推进', () => {
+  const { mind, self, thinks } = fakeMind({ boredom: 0.3, progressMinAgo: 5, days: 1 });
+  const now = Date.now();
+  // 清单还在推进（progressMinAgo=5 < STALL_MIN），但最近 8 段活里 5 段卡住/没做成
+  self.data.history = Array.from({ length: 8 }, (_, i) => ({
+    id: `r${i}`, what: '挖矿', kind: 'gather', outcome: i >= 3 ? 'stuck' : 'done',
+    summary: 's', durationSec: 1, gained: {}, lost: {}, at: now - (8 - i) * 30_000, signature: 's', failures: 0,
+  })) as unknown as typeof self.data.history;
+  mind.stageReviewCheck();
+  assert.equal(thinks.length, 1);
+  assert.equal(thinks[0].tier, 'deliberate');
+  assert.match(thinks[0].reason, /卡住/);
+});
