@@ -216,7 +216,8 @@ export interface GuiContainerObservation {
   block: string;
   /** 容器总格数：单箱/木桶 27、双箱 54、潜影盒 27（开箱时同步得到才有） */
   capacity?: number;
-  /** 完全空着的格数（不含未满但可继续堆叠的格子） */
+  /** 完全空着的格子数。注意不是「还能塞多少」也不是总容量（总容量看 capacity）：
+   *  0 格空时，箱里已有的未满同名堆叠仍能继续补满同类物品 */
   freeSlots?: number;
   before: { name: string; count: number }[];
   after: { name: string; count: number }[];

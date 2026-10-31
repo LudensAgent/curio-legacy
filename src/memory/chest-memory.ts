@@ -24,7 +24,8 @@ export interface ChestContents {
   possiblyStale?: boolean;
   /** 容器总格数（双箱 54、单箱/木桶 27、潜影盒 27）；全量快照才有 */
   capacity?: number;
-  /** 全量确认时空着的格数；增量操作后不再可靠，随 possiblyStale 一起弃用 */
+  /** 全量确认时完全空着的格子数；增量操作后不再可靠，随 possiblyStale 一起弃用。
+   *  注意不是「还能塞多少」也不是总容量：0 格空时已有未满同名堆叠仍能补同类 */
   freeSlots?: number;
 }
 
