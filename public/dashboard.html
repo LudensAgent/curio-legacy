@@ -467,7 +467,7 @@
             <div class="meter"><span class="dim">生存</span><div class="bar"><i id="lsSurvival"></i></div><span class="mono" id="lsSurvivalV">-</span></div>
             <div class="meter"><span class="dim">学习</span><div class="bar info"><i id="lsLearning"></i></div><span class="mono" id="lsLearningV">-</span></div>
             <div class="meter"><span class="dim">效率</span><div class="bar warn"><i id="lsEfficiency"></i></div><span class="mono" id="lsEfficiencyV">-</span></div>
-            <div class="dim" style="font-size:11px;margin-top:8px">总分 = 进度 40% + 生存 20% + 学习 25% + 效率 15%。进度看里程碑（只增不减）；生存看活了多久（S 形曲线，撑过一个游戏日得一半，当前这条命和最近几条命一起算）；学习看用得上的技能和验证过的窍门；效率看最近半小时动作成功率和卡住的比例。</div>
+            <div class="dim" style="font-size:11px;margin-top:8px">总分 = 进度 20% + 生存 25% + 学习 30% + 效率 25%。进度看里程碑（只增不减，是广度地板）；生存看「活跃时长」（活着且没暂停才算，暂停/发呆不涨分）；学习看技能与窍门的成功率（小样本往 50% 收缩）加上「越学越快」；效率看最近半小时动作成功率和卡住比例，样本不足显示「—」。</div>
           </div>
         </div>
         <div class="card cols2"><h2>分数曲线 <span class="r dim" id="lsSpan"></span></h2><div class="body" style="display:flex;flex-direction:column"><div class="chart" id="lsCurve" style="flex:1"></div><div class="zoomrow"><span class="dim">缩放</span><input type="range" id="lsZoom" min="5" max="100" step="1" value="100" title="只显示最近这一段时间的曲线"><span class="mono dim" id="lsZoomV">100%</span></div></div></div>
@@ -497,7 +497,7 @@
               <span>HUD 整体大小</span><input type="range" id="hudScale" min="0.5" max="3" step="0.05"><span class="v" id="hudScaleV"></span>
               <span>文字卡片大小</span><input type="range" id="hudInfoScale" min="0.5" max="1.5" step="0.05"><span class="v" id="hudInfoScaleV"></span>
               <span>右侧轮换间隔</span><input type="range" id="hudRotate" min="0" max="30" step="1"><span class="v" id="hudRotateV"></span>
-              <span class="full hudnote">右侧在「兴趣信号」和「运行统计（死亡、Token、开销）」之间轮换；0 = 两页叠在一起常驻。</span>
+              <span class="full hudnote">右侧在「兴趣信号」「运行统计（死亡、Token、开销）」「完整背包」之间轮换；0 = 各页叠在一起常驻。</span>
             </div>
             <div class="hudnote" id="hudNote">改动立即发给游戏里的观察者模组（不需要快捷键），并记在当前配置的 HUD 文件。</div>
             <div class="hudnote">预览按游戏实际分辨率、GUI 缩放和面板尺寸同步，每秒刷新。Windows 显示缩放无需手填；关闭的面板、容器打开时暂时隐藏的面板不会显示。</div>
@@ -995,7 +995,7 @@ function renderLearning(L) {
   if (!L) return;
   const n = L.now;
   $('lsTotal').textContent = n.total;
-  for (const k of ['progress', 'survival', 'learning', 'efficiency']) { const id = 'ls' + k[0].toUpperCase() + k.slice(1); $(id).style.width = n[k] + '%'; $(id + 'V').textContent = n[k]; }
+  for (const k of ['progress', 'survival', 'learning', 'efficiency']) { const id = 'ls' + k[0].toUpperCase() + k.slice(1); const v = n[k]; $(id).style.width = (v == null ? 0 : v) + '%'; $(id + 'V').textContent = v == null ? '—' : v; }
   $('lsDeaths').textContent = `最近一小时死了 ${L.deathsLastHour} 次`;
   renderLedger(L.ledger);
   // 里程碑按原版成就的路线分组；游戏播报过、但不在表里的成就单独列出
@@ -1032,7 +1032,7 @@ function renderCurve(L) {
     pts = pts.filter((p) => p.t >= from);
     if (pts.length < 2) pts = L.curve.slice(-2); // 至少留两个点，避免坐标轴塌掉
   }
-  const pick = (k) => pts.map((p) => ({ x: p.t, y: p[k] }));
+  const pick = (k) => pts.map((p) => ({ x: p.t, y: p[k] })).filter((p) => p.y != null);
   const series = [
     { name: '总分', color: css('--text'), width: 2.5, points: pick('total') },
     { name: '进度', color: css('--accent'), points: pick('progress') },
@@ -1842,7 +1842,7 @@ es.onerror = () => { $('conn').textContent = '控制台断开'; $('connDot').cla
     // 运行统计和兴趣信号共用右侧同一块位置：两个都开才轮换（或叠放），只开一个就只显示那一页
     { id: 'stats', name: '运行统计（与兴趣信号同位，都开才轮换）', toggleOnly: true },
     { id: 'vitals', name: '快捷栏 / 血条' },
-    { id: 'inventory', name: '完整背包' },
+    { id: 'inventory', name: '完整背包（与兴趣信号同位，都开才轮换）', toggleOnly: true },
     { id: 'landmarks', name: '记得的地点' },
     { id: 'view', name: '视角 / 增亮状态' },
     { id: 'containers', name: '容器界面（居中）', toggleOnly: true },
@@ -1903,7 +1903,7 @@ es.onerror = () => { $('conn').textContent = '控制台断开'; $('connDot').cla
       Object.assign(el.style, { left: bounds.x / viewport.guiWidth * 100 + '%', top: bounds.y / viewport.guiHeight * 100 + '%',
         width: bounds.width / viewport.guiWidth * 100 + '%', height: bounds.height / viewport.guiHeight * 100 + '%' });
       el.classList.toggle('def', !custom);
-      el.textContent = p.id === 'interests' ? '兴趣 / 运行统计' : p.name;
+      el.textContent = p.id === 'interests' ? '兴趣 / 统计 / 背包' : p.name;
       el.title = `${p.name} · GUI 坐标 ${bounds.x.toFixed(1)}, ${bounds.y.toFixed(1)} · ${bounds.width.toFixed(1)}×${bounds.height.toFixed(1)}${custom ? '' : ' · 默认位置'}`;
     }
     if (requestedPosition && fresh) {
