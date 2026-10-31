@@ -266,28 +266,34 @@ export function oreOpportunityFact(
   return `顺手采集：${parts.join('；')}（采不采、采多少由你按当前目标和余力权衡）`;
 }
 
-/** 唯一一把镐是铁/钻石镐、又做不出备用的（材料 < 3）：把它挖普通方块会耗耐久的事实摆出来，做不做备用由 Agent 定。 */
+/** 有铁/钻石镐、材料又不够再做一把（< 3），且没有「还耐用」的更便宜镐：把工具分级的事实摆出来，做不做备用由 Agent 定。 */
 export function toolBackupFact(
-  inventory: readonly { name: string; count: number }[],
+  inventory: readonly { name: string; count: number; durability?: { left: number; max: number }; durabilities?: number[] }[],
   stock: readonly StockRow[] | undefined,
 ): string | null {
-  const havePick = (t: string) => inventory.some((i) => i.name === `${t}_pickaxe`);
   const have = (name: string) => {
     const row = stock?.find((s) => s.item === name);
     if (row) return row.total;
     return inventory.filter((i) => i.name === name).reduce((n, i) => n + i.count, 0);
   };
-  for (const [t, mat, zh, cheap] of [
-    ['diamond', 'diamond', '钻石', '铁镐或石镐'] as const,
-    ['iron', 'iron_ingot', '铁锭', '石镐（3 圆石 + 2 木棍）'] as const,
+  // 有一把「还耐用」的便宜镐（最好那件耐久 ≥ 15%）：不算没得用，别啰嗦；1 点耐久的等于没有
+  const hasUsable = (...tiers: string[]) => tiers.some((t) => inventory.some((i) => {
+    if (i.name !== `${t}_pickaxe`) return false;
+    const d = i.durability;
+    if (!d || !d.max) return true; // 没耐久信息：默认当它可用，避免误报
+    const best = i.durabilities?.length ? Math.max(...i.durabilities) : d.left;
+    return best >= d.max * 0.15;
+  }));
+  for (const [t, mat, zh, cheap, need] of [
+    ['diamond', 'diamond', '钻石', '铁镐或石镐', '远古残骸/黑曜石'] as const,
+    ['iron', 'iron_ingot', '铁锭', '石镐（3 圆石 + 2 木棍）', '红石/金/钻石/绿宝石'] as const,
   ]) {
-    if (!havePick(t)) continue;
-    // 没有比它更便宜的镐子：它就是唯一一把能挖矿的镐
-    const cheaper = t === 'diamond' ? ['iron', 'stone', 'wooden'] : ['stone', 'wooden'];
-    if (cheaper.some((c) => havePick(c))) continue;
+    const owned = inventory.some((i) => i.name === `${t}_pickaxe`);
+    if (!owned) continue;
     const n = have(mat);
-    if (n >= 3) continue; // 材料够再做一把，不算不可替代
-    return `你现在唯一一把镐是${t === 'iron' ? '铁镐' : '钻石镐'}，而${zh}只有 ${n} 个（做一把新的要 3 个）：它挖普通石头/煤/泥土也耗耐久，坏了就没镐可用了。要不要先做把${cheap}备用，由你定`;
+    if (n >= 3) continue; // 材料还够再做一把，不算紧缺
+    if (t === 'diamond' ? hasUsable('iron', 'stone', 'wooden') : hasUsable('stone', 'wooden')) continue;
+    return `你包里有${t === 'iron' ? '铁镐' : '钻石镐'}，而${zh}只有 ${n} 个（做一把新的要 3 个）：挖石头/煤/铜/铁/青金石用石镐就够，只有${need}才必须${t === 'iron' ? '铁镐' : '钻石镐'}。要不要先做把${cheap}挖普通方块、把${t === 'iron' ? '铁镐' : '钻石镐'}耐久留给${need}，由你定`;
   }
   return null;
 }
