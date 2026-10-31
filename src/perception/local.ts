@@ -1,4 +1,5 @@
 import type { GameAdapter, Vec3Like } from '../adapter/types.ts';
+import { config } from '../config.ts';
 import { isSoftBlock, LIQUID_BLOCKS } from './surroundings.ts';
 
 /**
@@ -33,14 +34,14 @@ export function toWorld(feet: Vec3Like, facing: Facing, rel: [number, number, nu
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 
 /**
- * 身边的方块图（不透视）：以脚为原点的 9×6×9（上下 u=-2..3），包含下一级落点的支撑层。
- * 只显示本次视觉确认的格子；身体所在的两格标 Y，其余未知标 ?（视野外、被挡或没加载的格子都是 ?）。
- * 行从前（f=+4）到后（f=-4），列从左（r=-4）到右（r=+4），中间那列就是自己（Y）。
+ * 身边的方块图（不透视）：以脚为原点的 (2R+1)×6×(2R+1)（上下 u=-2..3），包含下一级落点的支撑层。
+ * R 由 LOCAL_MAP_RADIUS 配置（默认 4，即 9×9）。只显示本次视觉确认的格子；身体所在的两格标 Y，
+ * 其余未知标 ?（视野外、被挡或没加载的格子都是 ?）。行从前（f=+R）到后（f=-R），列从左（r=-R）到右（r=+R）。
  */
 export function localMap(_adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like, facing: Facing,
-  observe?: (positions: Vec3Like[]) => readonly { name: string; pos: Vec3Like }[]) {
+  observe?: (positions: Vec3Like[]) => readonly { name: string; pos: Vec3Like }[], radius = config.vision.localRadius) {
   const feet = feetCell(pos);
-  const R = 4, U0 = -2, U1 = 3;
+  const R = Math.max(1, Math.min(8, Math.floor(radius))), U0 = -2, U1 = 3;
   const key = (p: Vec3Like) => `${p.x},${p.y},${p.z}`;
   const positions: Vec3Like[] = [];
   for (let u = U0; u <= U1; u++) for (let f = -R; f <= R; f++) for (let r = -R; r <= R; r++) positions.push(toWorld(feet, facing, [f, u, r]));
@@ -93,7 +94,7 @@ export function localMap(_adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like, 
     const touching = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].some(([df, du, dr]) => isSolid(known(f + df, u + du, r + dr)));
     if (touching) place.push(`[${f},${u},${r}] ${word(f, u, r)}`);
   }
-  return { facing, source: 'current_vision', frame: '[前,上,右]；每层的行从前(f=+4)到后(f=-4)，列从左(r=-4)到右(r=+4)，中间是自己；只显示本次看见的格子，? 是未知', legend, layers,
+  return { facing, source: 'current_vision', frame: `[前,上,右]；每层的行从前(f=+${R})到后(f=-${R})，列从左(r=-${R})到右(r=+${R})，中间是自己；只显示本次看见的格子，? 是未知`, legend, layers,
     spots: { stand: stand.slice(0, 8), place: place.slice(0, 8), note: 'stand 是脚部占据的目标格，place 是方块占据格；根据当前可见格估计，实际移动和放置仍需动作确认。[0,0,0] 是当前脚部占据格，[0,-1,0] 是其下方支撑格' } };
 }
 

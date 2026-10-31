@@ -7,6 +7,21 @@ import { unstuck } from '../src/skills/movement.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
 
+test('localMap 半径可配置：默认 9×9，传 radius 可调大调小', () => {
+  const pos = { x: 0, y: 64, z: 0 };
+  const adapter = { blockAt: () => { throw new Error('不能用隐藏世界补全视觉'); } };
+  const empty = () => [];
+  const def = localMap(adapter, pos, 'N', empty);
+  assert.equal(def.layers['u+0'].length, 9, '默认 9×9（每层 9 行）');
+  assert.equal(def.layers['u+0'][0].length, 9, '每行 9 字符');
+  const small = localMap(adapter, pos, 'N', empty, 2);
+  assert.equal(small.layers['u+0'].length, 5);
+  assert.equal(small.layers['u+0'][0].length, 5);
+  const big = localMap(adapter, pos, 'N', empty, 6);
+  assert.equal(big.layers['u+0'].length, 13);
+  assert.equal(big.layers['u+0'][0].length, 13);
+});
+
 test('局部地图在各朝向列出已看见且有支撑的下一级脚部落点', () => {
   const pos = { x: 0, y: 64, z: 0 };
   const adapter = { blockAt: () => { throw new Error('不能用隐藏世界补全视觉'); } };

@@ -191,6 +191,8 @@ export const config = {
     hearRadius: num('VISION_HEAR', 10),
     bandCols: num('VISION_BAND_COLS', 160),
     bandRows: num('VISION_BAND_ROWS', 8),
+    /** 身边方块图（localMap）的水平半径：2=5×5，4=9×9，最大 8=17×17 */
+    localRadius: num('LOCAL_MAP_RADIUS', 4),
   },
   /** Curio Observer 模组数据流（/api/observer/stream） */
   observerFeed: bool('OBSERVER_FEED', true),
