@@ -153,3 +153,20 @@ test('planTravel：站在自己垫的高柱子上下不去时，说清楚是落�
   assert.equal(plan.reached, false);
   assert.match(plan.why ?? '', /站在高处/);
 });
+
+test('travel：要爬 2 格以上的坡却没授权垫路时，失败回执提示 place:true', async () => {
+  const a = new FakeAdapter();
+  // x=10 一堵 2 格高的墙（z 横贯搜索范围），从平地 y=64 到墙顶要一次爬 2 格，绕不过去
+  for (let z = -40; z <= 40; z++) a.blocks.push({ name: 'stone', pos: { x: 10, y: 64, z } }, { name: 'stone', pos: { x: 10, y: 65, z } });
+  const plan = planTravel((p) => a.blockAt(p), { x: 0.5, y: 64, z: 0.5 }, { x: 20, z: 0 }, { canBoat: false });
+  assert.equal(plan?.climbed, true, '唯一的走法是要爬 2 格以上');
+  const r = await run(a, 'travel', { to: '20,0' });
+  assert.equal(r.status, 'failed', r.summary);
+  assert.match(r.summary, /place:true 可授权原地垫方块爬坡/);
+  // 授权了垫路就不再只是报地形，而是真的去垫（消耗方块），不应再出现“加 place:true”的提示
+  const a2 = new FakeAdapter();
+  a2.inv.set('cobblestone', 16);
+  for (let z = -40; z <= 40; z++) a2.blocks.push({ name: 'stone', pos: { x: 10, y: 64, z } }, { name: 'stone', pos: { x: 10, y: 65, z } });
+  const r2 = await run(a2, 'travel', { to: '20,0', place: true });
+  assert.doesNotMatch(r2.status === 'failed' ? r2.summary : '', /加 place:true|可授权原地垫方块爬坡/);
+});
