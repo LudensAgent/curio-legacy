@@ -186,7 +186,13 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
     return ok(`实际探索 ${completed} 格${args.mode === 'stairs' ? '下降阶梯' : args.mode === 'stairs_up' ? '上升阶梯' : '水平通道'}，保留下一入口；尚未证明找到结构`, details());
   } catch (error) {
     if (isAbort(error)) throw error;
-    return fail(error instanceof ExcavationStop ? error.code : codeFromError(error), `有界开挖停止：${(error as Error).message}`, details());
+    const msg = (error as Error).message;
+    // 拒绝时把「为什么 + 能怎么办」一起报，别只留一句 ERROR 让它盲试
+    const hint = /液体|水|lava|water/.test(msg) ? '（先换方向避开液体，或先 place_at 堵上再挖）'
+      : /未知|未加载/.test(msg) ? '（先照亮/转头看清那一格再挖，或换方向）'
+      : /身体空间|干燥|站稳/.test(msg) ? '（先挖开落点那两格的脚/头空间，或换方向）'
+      : '';
+    return fail(error instanceof ExcavationStop ? error.code : codeFromError(error), `有界开挖停止：${msg}${hint}`, details());
   }
 }
 

@@ -248,6 +248,14 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     return { kind: 'stuck', why: result.summary.slice(0, 160) };
   }
   if (step.skill === 'place_at' && data?.pillarFailure === 'NOT_PLACED:跳不起来') return { kind: 'stuck', why: result.summary.slice(0, 160) };
+  // 4) 脚下有非空气的可替换物（火把/草/雪层…）：先拿掉再垫（同头顶清障，属于稳定执行已选动作）
+  if (step.skill === 'place_at' && typeof data?.pillarFailure === 'string' && data.pillarFailure.startsWith('BLOCKED:')) {
+    return adapt('dig_at', { at: [0, 0, 0], ...(facing ? { facing } : {}) }, '脚下有东西挡住垫高，先拿掉再垫', 'clearance');
+  }
+  // 5) 脚下没有实心地面（悬空/水里/梯子上）或服务器拒放：原地垫高垫不了，别白重试，把事实交回脑子
+  if (step.skill === 'place_at' && (data?.pillarFailure === 'NO_REFERENCE' || typeof data?.pillarFailure === 'string' && data.pillarFailure.startsWith('NOT_PLACED:Server'))) {
+    return { kind: 'stuck', why: result.summary.slice(0, 160) };
+  }
   // 其余的 step 落点问题（目标格/头顶是看得见的 stone 等）仍交回：要先挖哪一格是规划决定。
   if (step.skill === 'step' && data?.movementNotAttempted === true) return { kind: 'stuck', why: result.summary.slice(0, 160) };
   if (RETRYABLE.has(code) && !(step.skill === 'goto' && code === 'PATH_NOT_FOUND') && changed && a.consecutiveFailures === 1 && !a.adaptations.includes(`retry:${key}`)) {

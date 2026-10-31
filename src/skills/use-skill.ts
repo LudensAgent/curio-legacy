@@ -61,7 +61,7 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
     if (unavailable) return fail('BAD_ARGS', unavailable);
     const b = registry?.get(args.name, args.trial);
     if (!b) return fail('BAD_ARGS', `技能 ${args.name} 不存在或已停用`);
-    const recovery = ctx.recovery ?? (args.failure ? { ...args.failure, allowPlace: args.args?.allowPlace === true } : undefined);
+    const recovery = ctx.recovery ?? (args.failure ? { ...args.failure, allowPlace: args.args?.allowPlace === true, allowDig: args.args?.allowDig === true } : undefined);
     ctx = { ...ctx, ...(recovery ? { recovery } : {}), ...(recovery?.args.make === false ? { make: false } : {}) };
     const result = await (async (): Promise<SkillResult> => {
       // 技能自己报的结果之外，身体实际挪了多少：一份叫“挖阶梯下去”的技能，实际是在地表平着走了几十格，靠这个才看得出来

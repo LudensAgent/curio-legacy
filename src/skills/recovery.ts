@@ -3,7 +3,7 @@ import { facingOfYaw, feetCell, toWorld, type Facing } from '../perception/local
 import { attachmentFaces } from '../perception/surroundings.ts';
 import type { SkillCtx } from './types.ts';
 
-export type RecoveryContext = { skill: string; args: Record<string, unknown>; target?: Vec3Like; position?: Vec3Like; entityId?: number; allowPlace?: boolean };
+export type RecoveryContext = { skill: string; args: Record<string, unknown>; target?: Vec3Like; position?: Vec3Like; entityId?: number; allowPlace?: boolean; allowDig?: boolean };
 
 /** World coordinates only; never guess at/to relative arrays or coerce null into zero. */
 export function worldPoint(value: unknown): Vec3Like | undefined {
@@ -49,7 +49,7 @@ export function constrainRecoveryAction(ctx: SkillCtx, name: string, values: Rec
     args.avoid = [...new Set([...avoid, ...(Array.isArray(args.avoid) ? args.avoid : [])])];
   }
   if (name === 'dig_at' || name === 'place_at' || name === 'step') {
-    if (name === 'dig_at' && scope.skill !== 'dig_at' && !terrain) throw new Error('原委托没有授权挖掘，恢复不能改挖其他方块');
+    if (name === 'dig_at' && scope.skill !== 'dig_at' && !terrain && scope.allowDig !== true) throw new Error('原委托没有授权挖掘，恢复不能改挖其他方块');
     if (name === 'place_at' && scope.skill !== 'place_at' && !placement) throw new Error('原委托没有授权支出方块；需要心智显式选择 allowPlace 才能放置');
     if (name === 'place_at' && scope.skill === 'goto' && !tower && Array.isArray(args.at) && args.at[0] === 0 && args.at[1] === 0 && args.at[2] === 0
       && !(typeof args.item === 'string' && args.item !== 'any' && attachmentFaces(args.item))) throw new Error('原动作没有授权搭柱，恢复不能原地垫高');

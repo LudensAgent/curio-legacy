@@ -18,7 +18,7 @@ export const READ_RADIUS = 48;
 
 /** 给模型看的 api 说明（写代码技能、后台改进时都用这一份） */
 export const API_DOC = `代码是一个 async 函数体，参数 api 和 args 已经给好（args 是 use_skill 的 args；恢复时 args.failure = {skill,args,code,summary,target?,position} 是刚失败的那一步：target 是那一步实际要去/要动的坐标（动作算出来的，比如 goto "NW 20" 的落点），position 是失败时人在哪）。所有 api 调用都要 await，返回普通 JSON。
-恢复的 target 是世界坐标，不是相对 at/to；原目标、实体ID、dig/avoid/make 和液体风险限制会传给步骤与嵌套技能。不能自行换目标或增加挖掘、合成和探索；超出原委托还需放方块时，先交回心智显式调用 use_skill args.allowPlace:true。缺少绝对目标就报告缺口，不能拿当前位置猜。
+恢复的 target 是世界坐标，不是相对 at/to；原目标、实体ID、dig/avoid/make 和液体风险限制会传给步骤与嵌套技能。不能自行换目标或增加挖掘、合成和探索；超出原委托还需放方块或挖方块时，先交回心智显式调用 use_skill args.allowPlace:true 或 args.allowDig:true。缺少绝对目标就报告缺口，不能拿当前位置猜。
 - api.state() → {pos, feet:{x,y,z}, hp, food, oxygen, onGround, inWater, inLava, isDay, dim, yaw, facing, held, riding（载具名或 null）, inventory:[{name,count}]}
 - api.blockAt(x,y,z) → {name, kind}；kind = open（空气、草、雪层，能穿过）| solid | liquid | unknown；只读取身边 48 格内当前视野可见的格子。遮挡、视野外、黑暗或未加载时返回 {name:null,kind:"unknown"}，不透露隐藏的矿、液体或洞穴；先用 api.lookAt 转头，再读取。unknown 不能当空气或实心
 - api.region(x1,y1,z1,x2,y2,z2) → {min, size:[sx,sy,sz], palette:[名字或"?"], kinds:[同上], data:[下标]}；第 i 格：i = (y-min.y)*sx*sz + (z-min.z)*sx + (x-min.x)；最多 40000 格；与 blockAt 共用当前可见观测，未知格为 "?"/unknown，记忆不能冒充当前观测
