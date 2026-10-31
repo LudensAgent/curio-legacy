@@ -172,7 +172,7 @@ export function computeDrives(p: Percept, memory: WorldMemory): { drives: Drive[
     const b = e.better.find((x) => !x.have);
     if (!b) continue;
     const level = Math.min(0.85, 0.35 + 0.1 * Math.min(e.mined, 6) * (b.speedup - 1) / 2);
-    out.push({ drive: 'efficiency', level, why: `最近用${e.tool}挖了 ${e.mined} 个 ${e.block}，平均 ${e.avg_s} 秒/个；${b.tool} 约 ${b.est_s} 秒/个（快 ${b.speedup} 倍）`, suggest: `craft ${b.tool}（${b.materials}），之后再继续` });
+    out.push({ drive: 'efficiency', level, why: `最近用${e.tool}挖了 ${e.mined} 个 ${e.block}，约 ${e.avg_s} 秒/个；${b.tool} 约 ${b.est_s} 秒/个（快 ${b.speedup} 倍）`, suggest: `craft ${b.tool}（${b.materials}），之后再继续` });
     break;
   }
   // 抠门：用铁/钻石这类稀缺材料挖方块时，换把更便宜的工具只慢一点，却能省下稀缺材料

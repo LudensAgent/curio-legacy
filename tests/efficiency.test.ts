@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { efficiencyInsights } from '../src/brain/efficiency.ts';
+import { efficiencyInsights, effortFacts } from '../src/brain/efficiency.ts';
 import { computeDrives, observedNeeds } from '../src/brain/drives.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import type { Percept } from '../src/perception/perception.ts';
@@ -124,4 +124,48 @@ test('提示词：身体段带上挖矿的双面权衡事实（dig_effort）', a
   assert.match(body, /iron_pickaxe.*慢 70%/);
   assert.match(body, /钻石/);
   assert.match(body, /3 个/);
+});
+
+test('efficiencyInsights：实测含延迟时，快慢倍数按理论耗时比（延迟不混入）', () => {
+  const m = new WorldMemory(null);
+  m.setWorld('w');
+  // 石镐挖铁矿石：实测 1153ms（含 ~400ms 延迟），理论石 750、铁 500
+  for (let i = 0; i < 4; i++) m.recordDig('iron_ore', 'stone_pickaxe', 1153);
+  const oreAdapter = {
+    digTimeEstimate: (block: string, tool: string | null) => {
+      if (block !== 'iron_ore') return null;
+      if (tool === 'stone_pickaxe') return 750;
+      if (tool === 'iron_pickaxe') return 500;
+      if (tool === 'diamond_pickaxe') return 375;
+      return null;
+    },
+  };
+  const ins = efficiencyInsights(oreAdapter as any, m, []);
+  assert.equal(ins[0].tool, 'stone_pickaxe');
+  assert.equal(ins[0].better[0].tool, 'iron_pickaxe');
+  assert.equal(ins[0].better[0].speedup, 1.5); // 750/500，不是 1153/500≈2.3
+});
+
+test('efficiencyInsights：首挖离群样本只抬高平均、不抬高中位', () => {
+  const m = new WorldMemory(null);
+  m.setWorld('w');
+  // 9 次正常 ~1150ms + 1 次首挖离群 5655ms；中位仍是 1150
+  for (let i = 0; i < 9; i++) m.recordDig('cobblestone', 'wooden_pickaxe', 1150);
+  m.recordDig('cobblestone', 'wooden_pickaxe', 5655);
+  const ins = efficiencyInsights(adapter as any, m, []);
+  const stone = ins.find((e) => e.block === 'cobblestone');
+  assert.equal(stone!.mined, 10);
+  assert.equal(stone!.avg_s, 1.2); // 中位 1150ms，不是平均 ~1600ms
+});
+
+test('effortFacts：升级方向带上成本与可行性（没有则说要什么料，有则说已有）', () => {
+  const e = {
+    block: 'stone', mined: 6, avg_s: 1.2, tool: 'stone_pickaxe',
+    better: [{ tool: 'iron_pickaxe', est_s: 0.4, speedup: 1.5, have: false, materials: '3 铁锭 + 2 木棍' }],
+    cheaper: [],
+  };
+  const facts = effortFacts(e as any, [], undefined).join(' ');
+  assert.match(facts, /快 1.5 倍，做一把要 3 铁锭/);
+  const owned = effortFacts({ ...e, better: [{ ...e.better[0], have: true }] } as any, [], undefined).join(' ');
+  assert.match(owned, /快 1.5 倍，已有/);
 });

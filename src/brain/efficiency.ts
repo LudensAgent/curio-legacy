@@ -3,9 +3,10 @@ import type { WorldMemory } from '../memory/store.ts';
 import type { StockRow } from '../memory/chest-memory.ts';
 
 /**
- * 效率洞察（"偷懒 / 抠门"的依据）：根据真实挖掘耗时，给出两个方向的取舍——
+ * 效率洞察（"偷懒 / 抠门"的依据）：给出两个方向的取舍——
  * - better：换一把更快的工具能快多少（省时间）
  * - cheaper：换一把更便宜的工具只慢多少、省下什么稀缺材料（省资源）
+ * avg_s 用实测中位（去首挖离群），快慢倍数按「理论耗时比」（延迟相互抵消，不被网络/走位延迟夸大）；
  * 只给数据和建议，做不做由 LLM（或规则目标）权衡。
  */
 export interface EfficiencyInsight {
@@ -32,30 +33,35 @@ const tierOf = (tool: string) => TIERS.findIndex((t) => tool.startsWith(t));
 
 export function efficiencyInsights(adapter: GameAdapter, memory: WorldMemory, inventory: InvItem[]): EfficiencyInsight[] {
   const digs = memory.recentDigs();
-  const groups = new Map<string, { block: string; n: number; ms: number; tools: Map<string, number> }>();
+  const groups = new Map<string, { block: string; times: number[]; tools: Map<string, number> }>();
   for (const d of digs) {
     const fam = BLOCK_FAMILY(d.block);
-    const g = groups.get(fam) ?? { block: d.block, n: 0, ms: 0, tools: new Map<string, number>() };
-    g.n++;
-    g.ms += d.ms;
+    const g = groups.get(fam) ?? { block: d.block, times: [], tools: new Map<string, number>() };
+    g.times.push(d.ms);
     g.tools.set(d.tool ?? '空手', (g.tools.get(d.tool ?? '空手') ?? 0) + 1);
     groups.set(fam, g);
   }
   const has = (n: string) => inventory.some((i) => i.name === n);
   const out: EfficiencyInsight[] = [];
   for (const g of groups.values()) {
-    if (g.n < 3) continue;
+    if (g.times.length < 3) continue;
     const kind = kindFor(g.block);
     if (!kind) continue;
-    const avg = g.ms / g.n;
+    // 用中位而非平均：首挖常含接近/走位，一个离群样本会把均值抬高（日志里出现过 5.6s 的首挖）
+    const sorted = [...g.times].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    const avg = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
     const tool = [...g.tools].sort((a, b) => b[1] - a[1])[0][0];
+    // 快慢倍数按「理论耗时比」算：当前工具的 estCur 与候选 est 同为理论值，延迟相互抵消，
+    // 不把网络/走位延迟算进「快多少倍」。空手/挖不动时退回实测中位。
+    const estCur = adapter.digTimeEstimate(g.block, tool === '空手' ? null : tool) ?? avg;
     const better: EfficiencyInsight['better'] = [];
     for (const tier of TIERS) {
       const name = `${tier}_${kind}`;
       if (name === tool) continue;
       const est = adapter.digTimeEstimate(g.block, name);
       if (!est) continue;
-      const speedup = avg / est;
+      const speedup = estCur / est;
       if (speedup < 1.4) continue;
       better.push({ tool: name, est_s: Math.round(est / 100) / 10, speedup: Math.round(speedup * 10) / 10, have: has(name), materials: `3 ${MATERIAL[tier]} + 2 木棍` });
       if (better.length >= 2) break;
@@ -68,13 +74,13 @@ export function efficiencyInsights(adapter: GameAdapter, memory: WorldMemory, in
         const name = `${TIERS[t]}_${kind}`;
         const est = adapter.digTimeEstimate(g.block, name);
         if (!est) continue;
-        const slowdown = est / avg;
+        const slowdown = est / estCur;
         if (slowdown > 2) continue;
         cheaper.push({ tool: name, est_s: Math.round(est / 100) / 10, slowdown: Math.round(slowdown * 10) / 10, savesItem: MATERIAL_ITEM[TIERS[curTier]], savesZh: MATERIAL[TIERS[curTier]], have: has(name) });
         break;
       }
     }
-    if (better.length || cheaper.length) out.push({ block: g.block, mined: g.n, avg_s: Math.round(avg / 100) / 10, tool, better, cheaper });
+    if (better.length || cheaper.length) out.push({ block: g.block, mined: g.times.length, avg_s: Math.round(avg / 100) / 10, tool, better, cheaper });
   }
   return out.sort((a, b) => b.mined - a.mined).slice(0, 4);
 }
@@ -83,8 +89,8 @@ export function efficiencyInsights(adapter: GameAdapter, memory: WorldMemory, in
  * `totals` 是精确账本的总表（箱子+背包）：给出来就把箱子里的也算进去，并按「最后打开时」诚实标注；不给就只看背包。 */
 export function effortFacts(e: EfficiencyInsight, inventory: { name: string; count: number }[], totals?: readonly StockRow[]): string[] {
   const count = (item: string) => inventory.filter((i) => i.name === item).reduce((n, i) => n + i.count, 0);
-  const facts = [`最近用${e.tool}挖了 ${e.mined} 个 ${e.block}，实测平均 ${e.avg_s} 秒/个`];
-  for (const b of e.better.slice(0, 1)) facts.push(`${b.tool} 约 ${b.est_s} 秒/个（快 ${b.speedup} 倍）`);
+  const facts = [`最近用${e.tool}挖了 ${e.mined} 个 ${e.block}，实测约 ${e.avg_s} 秒/个`];
+  for (const b of e.better.slice(0, 1)) facts.push(`${b.tool} 约 ${b.est_s} 秒/个（快 ${b.speedup} 倍${b.have ? '，已有' : `，做一把要 ${b.materials}`}）`);
   for (const c of e.cheaper.slice(0, 1)) {
     const row = totals?.find((t) => t.item === c.savesItem);
     const scarce = row && row.inChests > 0
