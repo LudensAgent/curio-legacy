@@ -3,6 +3,7 @@ import type { AgentState, Vec3Like } from '../adapter/types.ts';
 import { config } from '../config.ts';
 import { AbortedError, dist3, sleep, throwIfAborted } from '../util.ts';
 import { codeFromError, fail, isAbort, obj, ok, type FailureCode, type Skill, type SkillCtx } from './types.ts';
+import { EXCAVATION_WAYPOINT_CAP } from '../memory/store.ts';
 
 export interface ExcavationArgs {
   entry: string;
@@ -89,6 +90,15 @@ export function trustedExcavationEntry(ctx: SkillCtx, id: string, strongholdOnly
   return entry;
 }
 
+/** 开挖入口/进度恢复点只留最近几个：每次开挖都净增两条，不清理会无限堆积、挤占地标容量 */
+function pruneExcavationWaypoints(ctx: SkillCtx) {
+  const dim = ctx.adapter.state().dim;
+  const waypoints = ctx.memory.landmarks().filter((l) => l.kind === 'waypoint' && l.dim === dim
+    && (l.label === EXCAVATION_ENTRY_LABEL || l.label.startsWith(EXCAVATION_CHECKPOINT_LABEL)));
+  const stale = waypoints.sort((a, b) => a.ts - b.ts).slice(0, Math.max(0, waypoints.length - EXCAVATION_WAYPOINT_CAP));
+  for (const landmark of stale) ctx.memory.removeLandmark(landmark.id);
+}
+
 /** The callback is internal code supplied by a structure skill, never model code. */
 export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnObservation?: () => boolean) {
   const { adapter, senses, signal } = ctx;
@@ -115,9 +125,9 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
         || !entry.label.startsWith(EYE_DESCENT_LABEL) && Math.abs(entry.pos.y - origin.pos.y) > 2) throw new ExcavationStop('BAD_ARGS', 'entry 必须是当前世界、维度附近的可信入口；先实际到达该入口再开挖');
       entryId = entry.id;
     } else {
+      pruneExcavationWaypoints(ctx);
       const landmark = ctx.memory.addLandmark('waypoint', EXCAVATION_ENTRY_LABEL, origin.dim, initial, 1);
       entryId = landmark?.id ?? ctx.memory.landmarks().find((item) => item.kind === 'waypoint' && item.dim === origin.dim && item.label === EXCAVATION_ENTRY_LABEL && dist3(item.pos, initial) < 1)?.id;
-      if (!entryId) throw new ExcavationStop('ERROR', '无法保留实际开挖入口，未开始挖掘');
     }
     path.push({ pos: { ...origin.pos }, observationId: origin.observationId });
     const observe = async () => {
@@ -175,10 +185,12 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       path.push({ pos: { ...landed.pos }, observationId: landed.observationId });
       assertSession(ctx, origin);
       checkpointId = ctx.memory.transaction(() => {
-        if (checkpointId) ctx.memory.removeLandmark(checkpointId);
         const checkpoint = ctx.memory.addLandmark('waypoint', `${EXCAVATION_CHECKPOINT_LABEL}（${args.mode}/${args.direction}）`, origin.dim, next, 0);
-        if (!checkpoint) throw new ExcavationStop('ERROR', '无法保存实际开挖进度');
-        return checkpoint.id;
+        if (checkpoint) {
+          if (checkpointId) ctx.memory.removeLandmark(checkpointId);
+          return checkpoint.id;
+        }
+        return checkpointId; // 存不下恢复点就保留上一入口，不影响继续挖
       });
       ctx.progress(completed / args.steps, `实际推进 ${completed}/${args.steps} 格，${args.mode === 'stairs' ? '沿阶梯下降' : args.mode === 'stairs_up' ? '沿阶梯上升' : '搜索当前层通道'}`);
       if (await observe()) return ok('有界开挖中观察到目标，保留实际入口与路径', { ...details(), stoppedByObservation: true });

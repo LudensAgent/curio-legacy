@@ -208,7 +208,13 @@ interface MemoryData {
 }
 
 /** v2：地标只来自 Vision 亲眼所见。v1 的早期版本用 findBlocks（穿墙）写过矿物地标，加载时清掉 */
-const MEMORY_VERSION = 3;
+const MEMORY_VERSION = 4;
+/** 地标总量软上限：超过后按价值阶梯淘汰；base 与「我的X」设施永不淘汰，总量仍由各自上限约束 */
+const LANDMARK_CAP = 200;
+/** discovery 同 label 上限：压住「73 个工作台」这类冗余，只留最近的一批 */
+const DISCOVERY_LABEL_CAP = 8;
+/** 开挖入口/进度 waypoint 上限：恢复点只留最近几个，避免每次开挖都净增两条 */
+export const EXCAVATION_WAYPOINT_CAP = 8;
 
 const empty = (): MemoryData => ({
   version: MEMORY_VERSION,
@@ -334,6 +340,24 @@ export class WorldMemory {
     this.migrated = before - this.data.landmarks.length;
     // “首次见过”的方块也可能是穿墙得来的，重新计
     this.data.seen.blocks = {};
+    }
+    if (version < 4) {
+      // 一次性把膨胀的地标压回健康：discovery 每 label 留最近 8、开挖入口/进度 waypoint 只留最近 8
+      const capGroup = (keep: (l: Landmark) => boolean, cap: number) => {
+        const groups = new Map<string, Landmark[]>();
+        for (const l of this.data.landmarks) if (keep(l)) {
+          const key = `${l.worldId ?? 'default'}|${l.dim}|${l.label}`;
+          (groups.get(key) ?? groups.set(key, []).get(key)!).push(l);
+        }
+        const drop = new Set<Landmark>();
+        for (const list of groups.values()) {
+          list.sort((a, b) => b.ts - a.ts);
+          for (const l of list.slice(cap)) drop.add(l);
+        }
+        if (drop.size) this.data.landmarks = this.data.landmarks.filter((l) => !drop.has(l));
+      };
+      capGroup((l) => l.kind === 'discovery', DISCOVERY_LABEL_CAP);
+      capGroup((l) => l.kind === 'waypoint' && l.label.startsWith('实际开挖'), EXCAVATION_WAYPOINT_CAP);
     }
     // A legacy objective is a suggestion to revisit, never a fabricated project.
     if (this.data.objective?.text && !this.data.intents.some((i) => i.source === 'legacy')) {
@@ -488,14 +512,34 @@ export class WorldMemory {
       worldId: this.worldId,
     };
     this.data.landmarks.push(lm);
-    if (this.data.landmarks.length > 200) {
-      const disposable = this.data.landmarks.map((landmark, index) => ({ landmark, index }))
-        .filter(({ landmark }) => ['herd', 'resource', 'danger', 'death'].includes(landmark.kind)).sort((a, b) => a.landmark.ts - b.landmark.ts)[0];
-      if (disposable) this.data.landmarks.splice(disposable.index, 1);
-      else { this.data.landmarks.pop(); return null; }
+    // 设施/发现类同 label 限流：同世界同维同 label 超过上限就挤掉最旧，避免「73 个工作台」这类冗余无限堆积
+    if (kind === 'discovery') {
+      const same = this.data.landmarks.filter((l) => this.inWorld(l) && l.kind === 'discovery' && l.dim === dim && l.label === label);
+      if (same.length > DISCOVERY_LABEL_CAP) {
+        const oldest = same.sort((a, b) => a.ts - b.ts)[0];
+        this.data.landmarks = this.data.landmarks.filter((l) => l !== oldest);
+      }
     }
+    this.evictOverCap(lm);
     this.touch();
     return lm;
+  }
+
+  /**
+   * 超过容量时按价值从低到高淘汰一条最旧的现有地标：herd/danger/death → resource → waypoint → 非「我的」非容器的 discovery。
+   * base 与「我的X」设施/容器永不淘汰——设施由上面的 label 限流约束、base 有 64 上限，总量因此有界；
+   * 四档都为空（只剩 base + 「我的X」设施）时允许暂时超限，不淘汰、不失败，不会因为「放不下」拒绝记录。
+   */
+  private evictOverCap(exclude: Landmark) {
+    if (this.data.landmarks.length <= LANDMARK_CAP) return;
+    const pool = this.data.landmarks.filter((l) => this.inWorld(l) && l !== exclude);
+    const tier = (accept: (l: Landmark) => boolean) => pool.filter(accept).sort((a, b) => a.ts - b.ts)[0];
+    const candidate = tier((l) => ['herd', 'danger', 'death'].includes(l.kind))
+      ?? tier((l) => l.kind === 'resource')
+      ?? tier((l) => l.kind === 'waypoint')
+      ?? tier((l) => l.kind === 'discovery' && !l.label.startsWith('我的') && !isContainerLandmark(l.label));
+    if (!candidate) return;
+    this.data.landmarks.splice(this.data.landmarks.indexOf(candidate), 1);
   }
 
   /** Containers only dedupe in the same cell; existing multi-block station rules remain unchanged. */
