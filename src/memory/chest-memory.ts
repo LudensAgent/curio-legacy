@@ -22,6 +22,10 @@ export interface ChestContents {
   day?: number;
   /** 世界在此之后推进且可能未观察 → 内容可能变了（只标记，不衰减） */
   possiblyStale?: boolean;
+  /** 容器总格数（双箱 54、单箱/木桶 27、潜影盒 27）；全量快照才有 */
+  capacity?: number;
+  /** 全量确认时空着的格数；增量操作后不再可靠，随 possiblyStale 一起弃用 */
+  freeSlots?: number;
 }
 
 export interface ChestRecord {
@@ -52,6 +56,9 @@ export interface ChestUse {
   now?: number;
   /** 容器方块名 */
   block?: string;
+  /** 全量快照时顺带记下的容器总格数与空余格数 */
+  capacity?: number;
+  freeSlots?: number;
 }
 
 export interface Clock { day?: number; now?: number; op?: number }
@@ -79,7 +86,8 @@ export function applyContents(chest: ChestRecord, use: ChestUse, clock: Clock) {
   const now = clock.now ?? Date.now();
   if (use.seen) {
     // 完整快照：整表覆盖，内容精确、不再陈旧
-    chest.contents = { items: [...use.seen].filter((i) => i.count > 0).map((i) => ({ name: i.name, count: i.count })), observedAt: now, day: clock.day };
+    chest.contents = { items: [...use.seen].filter((i) => i.count > 0).map((i) => ({ name: i.name, count: i.count })), observedAt: now, day: clock.day,
+      ...(use.capacity !== undefined ? { capacity: use.capacity } : {}), ...(use.freeSlots !== undefined ? { freeSlots: use.freeSlots } : {}) };
   } else {
     // 只有增量：在已有账本上加减；没有全量快照就标陈旧
     const map = new Map((chest.contents?.items ?? []).map((i) => [i.name, i.count]));
@@ -132,12 +140,15 @@ export function recall(chests: ChestRecord[], accept: (name: string) => boolean,
   return out.sort((a, b) => (a.dist ?? 0) - (b.dist ?? 0));
 }
 
-/** 一个箱子现在精确的样子："放矿的箱子 (293,68,-369)：raw_iron×9" */
+/** 一个箱子现在精确的样子："放矿的箱子 (293,68,-369)：raw_iron×9（还剩 3 格空）" */
 export function describeChest(c: ChestRecord, _clock?: Clock, max = 6): string {
   const items = (c.contents?.items ?? []).slice().sort((a, b) => b.count - a.count).slice(0, max);
   const body = items.map((i) => `${i.name}×${i.count}`).join('、');
   const stale = c.contents?.possiblyStale ? '（最近一次是增量操作，未确认全量）' : '';
-  return `${chestName(c)}：${body || '内容未知（重新打开才确认）'}${stale}`;
+  const known = c.contents?.freeSlots != null;
+  const free = known ? `（还剩 ${c.contents!.freeSlots} 格空）` : '';
+  const label = body || (known ? '空的' : '内容未知（重新打开才确认）');
+  return `${chestName(c)}：${label}${free}${stale}`;
 }
 
 /** 一条精确回忆说成人话 */

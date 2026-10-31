@@ -113,7 +113,7 @@ export const useGui: Skill<{ target: string | Vec3Like | { entityId: number }; o
       let recorded = false;
       const rememberContainer = (observation: GuiContainerObservation) => {
         if (typeof pos !== 'object' || !('x' in pos) || ctx.memory.worldId !== origin.worldId) return;
-        ctx.memory.noteChestUse(origin.dim, pos, { put: observation.put, took: observation.took, seen: observation.after, day: origin.worldDay, block: observation.block });
+        ctx.memory.noteChestUse(origin.dim, pos, { put: observation.put, took: observation.took, seen: observation.after, day: origin.worldDay, block: observation.block, capacity: observation.capacity, freeSlots: observation.freeSlots });
         recorded = true;
       };
       const r = await adapter.useGui(target, args.ops, signal, { onContainer: rememberContainer });

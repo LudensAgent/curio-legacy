@@ -105,11 +105,14 @@ const OPENS_ON_CLICK = /chest$|barrel|crafting_table|furnace|smoker|_door$|_trap
 const isLocalStorage = (name: string) => ['chest', 'trapped_chest', 'barrel'].includes(name) || name.endsWith('shulker_box');
 
 /** Call only with acknowledged container slots, so partial operations remain factual. */
-function observeStorage(block: string, items: { name: string; count: number }[], previous?: GuiContainerObservation): GuiContainerObservation {
+function observeStorage(block: string, items: { name: string; count: number }[], previous?: GuiContainerObservation, containerSlots?: (Item | null)[]): GuiContainerObservation {
   const totals = new Map<string, number>();
   items.forEach((item) => totals.set(item.name, (totals.get(item.name) ?? 0) + item.count));
   const after = [...totals].map(([name, count]) => ({ name, count }));
-  if (!previous) return { block, before: after, after, put: [], took: [] };
+  const capacity = containerSlots ? containerSlots.length : undefined;
+  const freeSlots = containerSlots ? containerSlots.filter((s) => !s).length : undefined;
+  const cap = capacity !== undefined && freeSlots !== undefined ? { capacity, freeSlots } : {};
+  if (!previous) return { block, ...cap, before: after, after, put: [], took: [] };
   const before = new Map(previous.after.map((item) => [item.name, item.count]));
   const put = new Map(previous.put.map((item) => [item.name, item.count]));
   const took = new Map(previous.took.map((item) => [item.name, item.count]));
@@ -118,7 +121,7 @@ function observeStorage(block: string, items: { name: string; count: number }[],
     if (delta > 0) put.set(name, (put.get(name) ?? 0) + delta);
     if (delta < 0) took.set(name, (took.get(name) ?? 0) - delta);
   });
-  return { block, before: previous.before, after, put: [...put].map(([name, count]) => ({ name, count })), took: [...took].map(([name, count]) => ({ name, count })) };
+  return { block, ...cap, before: previous.before, after, put: [...put].map(([name, count]) => ({ name, count })), took: [...took].map(([name, count]) => ({ name, count })) };
 }
 
 const HOSTILE = new Set([
@@ -1933,7 +1936,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     let container: GuiContainerObservation | undefined;
     const observeContainer = () => {
       if (!storageBlock) return;
-      container = observeStorage(storageBlock, (w.slots.slice(0, size()) as (Item | null)[]).filter((item): item is Item => item !== null), container);
+      const slots = w.slots.slice(0, size()) as (Item | null)[];
+      container = observeStorage(storageBlock, slots.filter((item): item is Item => item !== null), container, slots);
     };
     const finish = (result: ActionResult & { view?: GuiView }): GuiResult => ({ ...result, done, ...(container ? { container } : {}) });
     const click = async (slot: number, button: number, mode: number) => {
@@ -2705,7 +2709,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const chest: any = await this.afterAction(() => raceAbort(b.openContainer(block), signal, 8000, () => {}), check);
     let container: GuiContainerObservation | undefined;
     const synchronize = () => this.afterAction(() => raceAbort(b._syncWindow(chest), signal, 3000, () => {}).then((result) => {
-      container = observeStorage(block.name, chest.containerItems() as Item[], container);
+      container = observeStorage(block.name, chest.containerItems() as Item[], container, chest.slots.slice(0, chest.inventoryStart) as (Item | null)[]);
       return result;
     }), check);
     try {

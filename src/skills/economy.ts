@@ -232,6 +232,15 @@ async function selectedContainer(ctx: SkillCtx, target: ContainerTarget) {
   return { ok: true as const, pos };
 }
 
+/** useChest 的失败原因说成人话；LID_BLOCKED 说明盖子被压着，得先把上面的方块挖掉 */
+function chestFailText(reason: string | undefined): string {
+  if (!reason) return '未知原因';
+  if (reason.startsWith('LID_BLOCKED:')) return `箱子上压着 ${reason.slice('LID_BLOCKED:'.length)}，盖子打不开`;
+  if (reason === 'UNLOADED') return '那一片没加载（离太远）';
+  if (reason === 'NO_CHEST') return '那里已经不是容器';
+  return reason;
+}
+
 export const storeItems: Skill<{ items: StoreSpec[]; target?: ContainerTarget; note?: string }> = {
   name: 'store_items',
   description: '把点名物品存入 target 指定、重新看见的容器；不带 target 只返回容器线索让你选择。不会制造箱子、挖盖或更换目标；note 可记录用途',
@@ -268,7 +277,7 @@ export const storeItems: Skill<{ items: StoreSpec[]; target?: ContainerTarget; n
       ctx.adapter.state().inventory.forEach((item) => after.set(item.name, (after.get(item.name) ?? 0) + item.count));
       const put = container?.put ?? plan.map((item) => ({ name: item.name, count: Math.max(0, Math.min(item.count, (have.get(item.name) ?? 0) - (after.get(item.name) ?? 0))) })).filter((item) => item.count > 0);
       const seen = container?.after ?? contents;
-      if ((put.length || seen) && ctx.memory.worldId === state.worldId) ctx.memory.noteChestUse(state.dim, selected.pos, { put, ...(seen ? { seen } : {}), note: args.note, day: state.worldDay, block: container?.block });
+      if ((put.length || seen) && ctx.memory.worldId === state.worldId) ctx.memory.noteChestUse(state.dim, selected.pos, { put, ...(seen ? { seen } : {}), note: args.note, day: state.worldDay, block: container?.block, ...(container?.capacity !== undefined ? { capacity: container.capacity } : {}), ...(container?.freeSlots !== undefined ? { freeSlots: container.freeSlots } : {}) });
       return put;
     };
     try {
@@ -276,9 +285,13 @@ export const storeItems: Skill<{ items: StoreSpec[]; target?: ContainerTarget; n
       container ??= result.container;
       const put = record(result.ok || result.moved > 0 ? result.contents : undefined), moved = put.reduce((count, item) => count + item.count, 0);
       const actual = put.map((item) => `${item.name}×${item.count}`).join('、');
-      if (!result.ok) return fail('ERROR', `选定容器存放未完成：${result.reason}${moved ? `；实际已存入 ${actual}` : ''}；未挖盖、造箱或更换容器`, { moved, put });
-      if (!moved) return fail('ERROR', '选定容器没有存入任何物品——箱子可能满了或放不下这种物品；未挖盖、造箱或更换容器', { moved: 0, put: [] });
-      return ok(`在选定容器存入 ${actual || '0 件物品'}${moved < plan.reduce((count, item) => count + item.count, 0) ? '；只有这部分实际存入' : ''}${missing.length ? `；背包没有 ${missing.join('、')}` : ''}`, { moved, put, ...(missing.length ? { missing } : {}) });
+      const free = container?.freeSlots != null ? `；箱子还剩 ${container.freeSlots} 格空` : '';
+      if (!result.ok) return fail('ERROR', `选定容器存放未完成：${chestFailText(result.reason)}${moved ? `；实际已存入 ${actual}` : ''}${free}；未挖盖、造箱或更换容器`, { moved, put, ...(container?.freeSlots != null ? { freeSlots: container.freeSlots } : {}) });
+      if (!moved) {
+        const why = container?.freeSlots === 0 ? '箱子已经满了（0 格空）' : container?.freeSlots != null ? `箱子还有 ${container.freeSlots} 格空，但这种物品堆叠已满、放不进去` : '箱子可能满了或放不下这种物品';
+        return fail('ERROR', `选定容器没有存入任何物品——${why}；未挖盖、造箱或更换容器`, { moved: 0, put: [], ...(container?.freeSlots != null ? { freeSlots: container.freeSlots } : {}) });
+      }
+      return ok(`在选定容器存入 ${actual || '0 件物品'}${moved < plan.reduce((count, item) => count + item.count, 0) ? '；只有这部分实际存入' : ''}${missing.length ? `；背包没有 ${missing.join('、')}` : ''}${free}`, { moved, put, ...(missing.length ? { missing } : {}), ...(container?.freeSlots != null ? { freeSlots: container.freeSlots } : {}) });
     } catch (error) {
       const put = record();
       if (isAbort(error)) throw error;
@@ -314,7 +327,7 @@ export const takeItems: Skill<{ item: string; count: number; target?: ContainerT
       const after = ctx.adapter.state().inventory.filter((item) => item.name === args.item).reduce((count, item) => count + item.count, 0);
       const moved = container ? container.took.filter((item) => item.name === args.item).reduce((count, item) => count + item.count, 0) : Math.max(0, Math.min(args.count, after - before));
       const seen = container?.after ?? contents;
-      if ((moved || seen) && ctx.memory.worldId === state.worldId) ctx.memory.noteChestUse(state.dim, selected.pos, { took: moved ? [{ name: args.item, count: moved }] : [], ...(seen ? { seen, sought: [args.item] } : {}), day: state.worldDay, block: container?.block });
+      if ((moved || seen) && ctx.memory.worldId === state.worldId) ctx.memory.noteChestUse(state.dim, selected.pos, { took: moved ? [{ name: args.item, count: moved }] : [], ...(seen ? { seen, sought: [args.item] } : {}), day: state.worldDay, block: container?.block, ...(container?.capacity !== undefined ? { capacity: container.capacity } : {}), ...(container?.freeSlots !== undefined ? { freeSlots: container.freeSlots } : {}) });
       return moved;
     };
     try {
