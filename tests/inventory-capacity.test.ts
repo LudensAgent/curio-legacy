@@ -43,7 +43,7 @@ test('both thinking tiers receive conditional per-stack space and shared empty-s
     const [, user] = buildMindMessages({ reason: '测试', percept, state, self: new SelfModel(null), memory, activity: null, suspended: [], lastRecord: null,
       noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', skills: [], tier } as any);
     const body = JSON.parse(user.content.match(/【身体】(\{.*)/)![1]);
-    assert.equal(body.empty_slots, 4, '空槽与背包来自同一个状态快照');
+    assert.equal(body.empty_slots, '4 个空槽（每槽放一叠，不是一件）', '空槽自带叠放语义，且与背包来自同一个状态快照');
     assert.match(body.inventory[0], /槽9 2\/64，该叠可再放 62 个数据相同的物品；槽10 5\/64，该叠可再放 59 个数据相同的物品/);
     assert.match(body.inventory[1], /槽11 2\/16，该叠可再放 14 个数据相同的物品/);
     assert.equal(body.inventory[2], 'pickaxe×1（每叠上限 1）');
@@ -58,5 +58,22 @@ test('both thinking tiers receive conditional per-stack space and shared empty-s
   const full = JSON.parse(noSpace.content.match(/【身体】(\{.*)/)![1]);
   assert.match(full.inventory[0], /槽9 64\/64，该叠可再放 0 个/);
   assert.match(full.inventory_space, /分别可放 0、0、0 个/);
+  memory.close();
+});
+
+test('跨叠的物品标出共几叠，消除「×70（上限64）」的歧义', () => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  const perception = new Perception(adapter, memory, bus, new Vision(adapter));
+  const percept = { ...perception.update(), emptySlots: 10 };
+  const state = { ...adapter.state(), emptySlots: 10, inventory: [
+    { name: 'raw_iron', count: 70, stackSize: 64, stacks: [{ slot: 9, count: 64 }, { slot: 10, count: 6 }] },
+    { name: 'bucket', count: 2, stackSize: 16, stacks: [{ slot: 11, count: 2 }] },
+  ] };
+  const [, user] = buildMindMessages({ reason: '测试', percept, state, self: new SelfModel(null), memory, activity: null, suspended: [], lastRecord: null,
+    noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', skills: [], tier: 'deliberate' } as any);
+  const body = JSON.parse(user.content.match(/【身体】(\{.*)/)![1]);
+  assert.equal(body.inventory[0], 'raw_iron×70（每叠上限 64，共 2 叠）');
+  assert.equal(body.inventory[1], 'bucket×2（每叠上限 16）');
+  assert.equal(body.empty_slots, '10 个空槽（每槽放一叠，不是一件）');
   memory.close();
 });

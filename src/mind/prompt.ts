@@ -574,10 +574,11 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
     inventory: [...inv].map(([name, count]) => {
       const it = s.inventory.find((i) => i.name === name);
       const stackSize = it?.stackSize;
+      const multi = stackSize && count > stackSize && it?.stacks?.length ? `，共 ${it.stacks.length} 叠` : '';
       const stacks = s.emptySlots <= 5 && stackSize && stackSize > 1 && it?.stacks?.length
         ? `；${it.stacks.map((stack) => `槽${stack.slot} ${stack.count}/${stackSize}，该叠可再放 ${stackSize - stack.count} 个数据相同的物品`).join('；')}` : '';
-      return `${name}×${count}${it?.stackSize ? `（每叠上限 ${it.stackSize}${stacks}）` : ''}${durabilityText(it)}${it?.enchanted ? '（附魔）' : ''}`;
-    }), empty_slots: s.emptySlots,
+      return `${name}×${count}${it?.stackSize ? `（每叠上限 ${it.stackSize}${multi}${stacks}）` : ''}${durabilityText(it)}${it?.enchanted ? '（附魔）' : ''}`;
+    }), empty_slots: `${s.emptySlots} 个空槽（每槽放一叠，不是一件）`,
     // 精确账本的总表（箱子+背包合计）：供"物资充足/稀缺"量化；箱子部分是最后打开时记的，之后世界可能变化
     ...(p.storage?.stock?.length ? { stored_stock: `${p.storage.stored}；以上是「箱子+背包」合计，按最后一次打开各箱子时记录（之后世界可能变化，重新打开才更新）` } : {}),
     ...(s.connected && s.emptySlots <= 5 ? { inventory_space: `空格数是空槽位数量，不是可携带物品数量；${s.emptySlots} 个空槽全部用来放同一种且数据相同的物品时，每叠上限为 64、16、1 的物品分别可放 ${s.emptySlots * 64}、${s.emptySlots * 16}、${s.emptySlots} 个。这些空槽由所有物品共用，并非各物品各有这些空间；当前空间可能随物品变化。已有未满堆的剩余空间只适用于与该堆数据相同的物品，同名物品的属性不同时也不一定能合并。` } : {}),

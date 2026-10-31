@@ -1469,7 +1469,7 @@ test('提示词区分背包空槽与物品的堆叠上限', () => {
   const [, user] = buildMindMessages({ reason: '测试', percept, state, self: new SelfModel(null), memory, activity: null, suspended: [], lastRecord: null,
     noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', skills: [], tier: 'deliberate' } as any);
   const body = JSON.parse(user.content.match(/【身体】(.*)/)![1]);
-  assert.equal(body.empty_slots, 4);
+  assert.equal(body.empty_slots, '4 个空槽（每槽放一叠，不是一件）');
   assert.deepEqual(body.inventory, ['raw_iron×4（每叠上限 64）', 'bucket×2（每叠上限 16）']);
   assert.match(body.inventory_space, /空格数是空槽位数量，不是可携带物品数量/);
   assert.match(body.inventory_space, /同名物品的属性不同时也不一定能合并/);
