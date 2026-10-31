@@ -31,6 +31,18 @@ test('持续效果：扔掉的东西被自己捡回来，说清楚之后做过�
   assert.match(n!.what, /刚做完的事又被打破了/);
 });
 
+test('持续效果：expect 带 by 时按 by 记（代码技能套用 toss_item），而不是动作名', () => {
+  const bus = new EventBus();
+  const seen: { msg: string; data: any }[] = [];
+  bus.on('event', (ev: any) => { if (ev.type === 'effect_broken') seen.push(ev); });
+  const fx = new EffectWatch(bus);
+  bus.publish('task_end', 'P2', 'use_skill', { taskId: 't1', status: 'succeeded', skill: 'use_skill', expect: { discarded: ['diorite'], forMs: 180_000, what: '扔掉了 diorite×24', by: 'toss-verified-behind' } });
+  fx.recollected('diorite', 24);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].data.by, 'toss-verified-behind');
+  assert.match(seen[0].msg, /toss-verified-behind「扔掉了 diorite×24」，又捡回来了 diorite×24/);
+});
+
 test('toss_item：往哪扔由它自己选（toward），结果里声明扔掉的东西；扔给别人的不算扔掉', () => {
   const adapter = new FakeAdapter();
   assert.deepEqual((tossItem.validate({ item: 'dirt', toward: 'back' }, adapter) as any).args.toward, 'back');

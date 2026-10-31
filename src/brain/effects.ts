@@ -11,6 +11,8 @@ export interface EffectExpect {
   forMs?: number;
   /** 一句话说这是什么效果（“扔掉了 dirt×32”） */
   what?: string;
+  /** 声明这个效果的是谁（默认取 task_end 的动作名；代码技能里套用 toss_item 时，由外层把技能名传进来，好把“被打破”记到这份技能头上） */
+  by?: string;
 }
 
 interface Claim { item: string; what: string; by: string; at: number; until: number; tasks: string[]; reported: number }
@@ -34,7 +36,7 @@ export class EffectWatch {
       const e = d.expect as EffectExpect;
       for (const item of e.discarded ?? []) {
         this.claims = this.claims.filter((c) => c.item !== item);
-        this.claims.push({ item, what: e.what ?? `扔掉了 ${item}`, by: String(d.skill ?? '动作'), at: now, until: now + (e.forMs ?? 180_000), tasks: [], reported: 0 });
+        this.claims.push({ item, what: e.what ?? `扔掉了 ${item}`, by: e.by ?? String(d.skill ?? '动作'), at: now, until: now + (e.forMs ?? 180_000), tasks: [], reported: 0 });
       }
     }
     if (ev.type === 'task_end' && d.taskId) this.running.delete(String(d.taskId));

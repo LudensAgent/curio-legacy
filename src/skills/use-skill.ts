@@ -79,10 +79,14 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
       const combatSig = () => { const c = ctx.adapter.combatState?.() ?? { usingItem: false, offHand: null }; return `${c.usingItem ? 1 : 0}:${c.offHand ?? ''}`; };
       const combatBefore = combatSig();
       let acted = false;
+      let effectExpect: { discarded?: string[]; forMs?: number; what?: string; by: string } | null = null;
       const handle = makeBridge(ctx);
       const bridge: SandboxHandler = async (method, values) => {
         const value = await handle(method, values);
-        const receipt = value as { ok?: boolean; moved?: number; data?: { noop?: boolean; effectEvidence?: { verified?: boolean; changed?: boolean } } } | null;
+        const receipt = value as { ok?: boolean; moved?: number; data?: { noop?: boolean; expect?: { discarded?: string[]; forMs?: number; what?: string }; effectEvidence?: { verified?: boolean; changed?: boolean } } } | null;
+        // 嵌套动作声明的持续效果（toss_item 的 discarded）要带上去：做完以后被自己打破，才能把失败记到这份技能头上
+        const nested = receipt?.data?.expect;
+        if (nested && !effectExpect) effectExpect = { ...nested, by: b.name };
         const okEffect = receipt?.ok === true && receipt.data?.noop !== true;
         // 有的动作自己报 ok 但没真做（move moved=0、shield 没举、look/lookAt 只转头）；有的报没成却真改了世界（挖到一半）
         // ——只有真正改变了身体/世界才算"动了"：effectEvidence 是通用真效果信号；move 看 moved>0；look/lookAt/shield 不算
@@ -122,7 +126,7 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
         const combatChanged = combatSig() !== combatBefore;
         const noop = still && invSig() === invBefore && !acted && !combatChanged;
         const noopText = noop ? '（身体这次什么都没做：没挪动、背包没变、没挖也没放。是条件不满足跳过了，还是技能没起作用，看上面的结果；要的事并没有发生）' : '';
-        return ok(`代码技能「${b.name}」做完了${m.text}${r.result !== null && r.result !== undefined ? `：${JSON.stringify(r.result).slice(0, 160)}` : ''}${noopText}`, { ...data, result: r.result, verified: !!b.verify, displacement: { horizontal: m.h, dy: m.dy }, ...(noop ? { noop: true } : {}) });
+        return ok(`代码技能「${b.name}」做完了${m.text}${r.result !== null && r.result !== undefined ? `：${JSON.stringify(r.result).slice(0, 160)}` : ''}${noopText}`, { ...data, result: r.result, verified: !!b.verify, displacement: { horizontal: m.h, dy: m.dy }, ...(effectExpect ? { expect: effectExpect } : {}), ...(noop ? { noop: true } : {}) });
       }
       const done: string[] = [];
       let completedSteps = 0;

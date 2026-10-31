@@ -304,9 +304,10 @@ export class BehaviorEngine {
     const normalized = normalizeSkillStates(this.stats);
     if (normalized.length) this.touch(normalized[0], () => {});
     book?.onChange(() => this.reload());
-    bus.on('event', (ev: { type: string }) => {
+    bus.on('event', (ev: { type: string; msg?: string; data?: Record<string, unknown> }) => {
       if (ev.type === 'hurt') this.lastHurtAt = Date.now();
       else if (ev.type === 'death') for (const name of [...this.aftermath.keys()]) this.judge(name, true);
+      else if (ev.type === 'effect_broken') this.noteBroken(String((ev.data as any)?.by ?? ''), ev.msg ?? '');
     });
     arbiter?.on('done', this.doneListener);
     this.reload();
@@ -1028,6 +1029,18 @@ export class BehaviorEngine {
       const r = this.rollback(name, to, `v${from} 比 v${to} 差`);
       if (r?.ok) this.bus.publish('skill_rollback', 'P2', `代码技能「${name}」的 v${from} 不如 v${to}，退回旧代码（现在是 v${r.version}）`, { name, from, to });
     } else if (b.code && !okRun && isCurrentStable) this.improve?.(name, 'failures');
+  }
+
+  /** 做完的事过一会儿被自己打破（比如扔掉的东西又捡回来）：那一次“成功”其实是假阳性，记成一次失败，让停用/整理按真实成败来 */
+  noteBroken(name: string, summary: string) {
+    const b = this.behaviors.get(name);
+    if (!b || b.candidate) return;
+    this.touch(name, (st) => {
+      st.fail++;
+      st.lastError = summary.slice(0, 120);
+      const per = (st.byVersion ??= {})[this.versionOf(b)] ??= { ok: 0, fail: 0 };
+      per.fail++;
+    });
   }
 
   /** 这段时间里用过的技能（名字@版本） */
