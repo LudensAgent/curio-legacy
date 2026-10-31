@@ -20,8 +20,8 @@ test('局部地图在各朝向列出已看见且有支撑的下一级脚部落�
       return name ? [{ pos: cell, name }] : [];
     }));
     assert.ok(map.spots.stand.includes('[1,-1,0] 前下1'), facing);
-    assert.equal(map.layers['u-2'][1][2], 'S');
-    assert.equal(map.layers['u-2'][0][2], '?', '没看见的下方格仍是未知');
+    assert.equal(map.layers['u-2'][3][4], 'S');
+    assert.equal(map.layers['u-2'][2][4], '?', '没看见的下方格仍是未知');
     assert.ok(!map.spots.stand.some((spot) => spot.startsWith('[1,0,0]')), '下一级不冒充平走');
   }
 });

@@ -89,7 +89,7 @@ test('the local map uses actual vision and leaves cells behind a wall unknown', 
   adapter.blocks.push({ name: 'diamond_ore', pos: { x: 2, y: 65, z: 0 } });
   const vision = new Vision(adapter);
   const map = localMap(adapter, adapter.pos, 'E', vision.observeBlocks.bind(vision));
-  assert.equal(map.layers['u+1'][0][2], '?');
+  assert.equal(map.layers['u+1'][2][4], '?');
   assert.ok(!Object.values(map.legend).includes('diamond_ore'));
 });
 

@@ -38,14 +38,14 @@ test('身边方块图只显示当前观察，连通但未看见的格子仍是�
   w.blocks.push({ name: 'gravel', pos: { x: 0, y: 61, z: -1 } });
   const m = localMap(w, w.pos, 'N', (positions) => positions.filter((pos) => pos.x === 0 && pos.y === 61 && pos.z === -1)
     .map((pos) => ({ pos, name: 'gravel' })));
-  assert.equal(m.layers['u+1'][1][2], 'G', '前方头高那格是沙砾');
+  assert.equal(m.layers['u+1'][3][4], 'G', '前方头高那格是沙砾');
   assert.equal(m.legend.G, 'gravel');
   assert.equal(m.source, 'current_vision');
-  assert.equal(m.layers['u+0'][2][2], 'Y');
-  assert.equal(m.layers['u+0'][0][2], '?', '隔着石头的格子看不见');
-  assert.equal(m.layers['u+3'][2][2], '?');
+  assert.equal(m.layers['u+0'][4][4], 'Y');
+  assert.equal(m.layers['u+0'][2][4], '?', '隔着石头的格子看不见');
+  assert.equal(m.layers['u+3'][4][4], '?');
   const fallback = localMap({ blockAt: () => { throw new Error('local map must not read hidden blocks'); } }, w.pos, 'N');
-  assert.equal(fallback.layers['u+1'][1][2], '?', '缺少视觉后端也不能退回读取隐藏世界');
+  assert.equal(fallback.layers['u+1'][3][4], '?', '缺少视觉后端也不能退回读取隐藏世界');
 });
 
 test('LLM 自己组合原子动作：挖开头顶和前上方两格、迈上去，重复几轮就是一道回到地面的阶梯', async (t) => {
