@@ -85,3 +85,5 @@ LLM 请求走 OpenAI 兼容 `/chat/completions`（DeepSeek / OpenAI / Ollama 等
 - 不用会毁掉他人未提交改动的命令，如 `git restore .`、`git checkout .`、`git reset --hard`；只针对自己改的具体文件操作。
 - 改完立即提交。缩小未提交窗口、减少冲突面，不让半成品长期堆在工作区。
 - 提交前自查暂存区。`git status --short` 确认 staged 的只有自己的文件；发现混入他人改动时先用 `git restore --staged <file>` 拆出再提交。
+
+冲突频繁时，用 `git worktree` 给每个 agent 一个独立工作目录 + 独立分支，从根上避免同目录互相污染；各自独立提交后再集中合并。
