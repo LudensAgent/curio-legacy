@@ -93,6 +93,8 @@ export class SkillCurator {
   observation: (() => { state: AgentState; paused: boolean }) | null = null;
   private breakObservation = (event: { type: string; data?: Record<string, unknown> }) => {
     if (['paused', 'resumed', 'disconnected', 'death', 'spawn'].includes(event.type)) this.gameClock.resetBaseline();
+    // 死亡是冲突/拉锯技能的致命证据：等死亡播报落定后，强制做一次「合并替代」整理（合并冲突技能并收起来源）
+    if (event.type === 'death') setTimeout(() => void this.check(Date.now(), { force: true, mergeReplace: true }), 4000).unref?.();
     if (event.type === 'skill_promoted') for (const [key, entry] of this.lifetimes) {
       if (entry.candidate && entry.name === event.data?.name) this.lifetimes.delete(key);
     }
@@ -286,7 +288,7 @@ export class SkillCurator {
   }
 
   /** 定时检查：先收起用不上的、没用的；技能够多、而且有新技能、冲突或看着重复的，才请模型合并 */
-  async check(now = Date.now(), opts: { force?: boolean } = {}): Promise<string | null> {
+  async check(now = Date.now(), opts: { force?: boolean; mergeReplace?: boolean } = {}): Promise<string | null> {
     if (this.busy) return opts.force ? '正在整理技能，请等待本次完成' : null;
     const retired = [...this.retireUnused(now), ...this.retireLowValue(now)];
     this.saveTime();
@@ -312,7 +314,7 @@ export class SkillCurator {
     this.evidenceSeen = evidence;
     this.bus.publish('skill_curate_start', 'P3', `在后台整理技能（${skills.length} 个执行版本、${notes.length} 份文字记录）`, { forced: !!opts.force });
     try {
-      const r = retiredText + await this.curate();
+      const r = retiredText + await this.curate(opts.mergeReplace);
       // 整理本身改写了技能：记下整理后的样子，免得下一轮把自己的改动当成“有新技能”
       this.lastSignature = this.signature();
       this.history = [...this.history, { at: Date.now(), result: r }].slice(-10);
@@ -327,7 +329,7 @@ export class SkillCurator {
     } finally { this.busy = false; }
   }
 
-  messages(): ChatMessage[] {
+  messages(mergeReplace = false): ChatMessage[] {
     const similar = new Map<string, string[]>();
     for (const [a, b] of similarSkills(this.active())) { if (a === b) continue; similar.set(a, [...(similar.get(a) ?? []), b]); similar.set(b, [...(similar.get(b) ?? []), a]); }
     const skills = this.active().map((b) => {
@@ -356,7 +358,8 @@ export class SkillCurator {
 - notes 是纯文字记录，不参与执行成败和闲置淘汰。可按内容重复或已被事实推翻来 retire（target:note），不能因为没有执行次数就收起。确有用途时可用 restore 恢复文字记录；读取不代表做法验证成功。
 - 合并纯文字记录也用 merge：from 只能写 notes 中的名字，skill 只写 name、description、body；先保留原记录，是否收起来源再明确决定。写入已收起的文字目标不会自动恢复，需要时另写 restore。已有行为技能的补充笔记保留在 notes 中，修订必须保留其仍适用的约束。
 - 说的是同一件事、触发条件大面积重叠的：合并成一份更好的（merge：from 写被合并的名字，skill 写合并后的完整技能，可以沿用其中一个名字）。合并时保留各自真正管用的部分（看 uses 的成败）。
-- 行为 merge 先保存候选，原技能保留；候选实际验收通过后再根据新证据决定是否 retire 来源技能。uses 是表中指定版本的证据，lifetime 是历史总计，不混用。
+- 行为 merge 先保存候选，原技能保留；候选实际验收通过后再根据新证据决定是否 retire 来源技能。uses 是表中指定版本的证据，lifetime 是历史总计，不混用。${mergeReplace ? `
+- 【死亡刚发生】刚死了一次：优先把导致这次死亡的来回拉锯（see_sawed_with）、互相拆台（undid_work_of）、抢着接手（clashed_with）的技能合并成一份统一处理，并在同一轮 retire 掉被合并的来源技能——死亡就是证据，它们已被证明致命，用合并后的技能替代，别再保留。` : ''}
 - 来回拉锯的（see_sawed_with：一个做完另一个又把它推回去，或者技能一再打断手上同一件事）：这最要紧——找出两边条件为什么会轮流成立，
   收窄条件让它们不再互相触发（比如躲怪的技能加上“怪还在附近”、回地表的技能加上“附近没有怪”），或者合并成一份统一处理；
 - 动作上互相拆台的（undid_work_of：它挖掉了那个技能放的方块、或把那个技能挖开的地方又填上，数字是格数；work_undone_by 是反过来）：和拉锯一样要紧。
@@ -383,8 +386,8 @@ export class SkillCurator {
   private safe<T>(fn: () => T, fallback: T): T { try { return fn(); } catch { return fallback; } }
   private effect(name: string): string { return this.safe(() => this.ledger?.skillEffect(name) ?? '', ''); }
 
-  private async curate(): Promise<string> {
-    const messages = this.messages();
+  private async curate(mergeReplace = false): Promise<string> {
+    const messages = this.messages(mergeReplace);
     const versions = this.active(), notes = this.notes();
     const names = new Set([...versions, ...notes].map((entry) => entry.name));
     const noteNames = new Set(notes.map((entry) => entry.name));
@@ -410,8 +413,20 @@ export class SkillCurator {
         }
         const w = this.engine.write(m.skill, { by: 'curator' });
         if (!w.ok) { errors.push(`合并 ${from.join('+')} 没存下：${w.error}`); continue; }
-        done.push(`${from.join('+')} → 候选 ${w.name}（保留原技能，验收后再决定收起）`);
-        this.bus.publish('skill_merged', 'P2', `整理技能：${from.join('、')} 生成合并候选「${w.name}」；原技能保持原状态`, { from, into: w.name, candidate: true });
+        if (mergeReplace && from.length > 1) {
+          // 死亡触发的「合并替代」：来源技能已被证明致命/拉锯，合并后直接收起，用合并技能替代
+          const retired: string[] = [];
+          for (const n of from) {
+            if (n === w.name) continue;
+            const eb = versions.find((b) => b.name === n);
+            if (eb && this.retire(eb, `被合并进 ${w.name} 替代（死亡证据）`)) retired.push(n);
+          }
+          done.push(`${from.join('+')} → ${w.name}（替代：已收起 ${retired.length ? retired.join('、') : '无'}）`);
+          this.bus.publish('skill_merged', 'P2', `整理技能（死亡替代）：${from.join('、')} 合并为「${w.name}」${retired.length ? `，已收起 ${retired.join('、')}` : ''}`, { from, into: w.name, candidate: true, replaced: retired });
+        } else {
+          done.push(`${from.join('+')} → 候选 ${w.name}（保留原技能，验收后再决定收起）`);
+          this.bus.publish('skill_merged', 'P2', `整理技能：${from.join('、')} 生成合并候选「${w.name}」；原技能保持原状态`, { from, into: w.name, candidate: true });
+        }
       }
       for (const p of raw.priority) {
         if (names.has(p.name) && this.engine.setPriority(p.name, p.priority)) done.push(`${p.name} 优先级 ${p.priority}`);

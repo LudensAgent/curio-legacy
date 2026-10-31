@@ -235,7 +235,10 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   // 3) 头顶跳跃空间受阻：先挖开头顶再垫/迈。place_at / climb_up 是 Agent 明确要「往上」，自动清头顶属于稳定执行已选动作。
   if (step.skill === 'place_at' && data?.pillarFailure === 'NOT_PLACED:头顶跳跃空间受阻'
     || step.skill === 'climb_up' && data?.failureCause === 'PILLAR_CLEARANCE') {
-    return adapt('dig_at', { at: [0, 2, 0], ...(facing ? { facing } : {}) }, '头顶被挡，先挖开再走', 'clearance');
+    // 障碍格可能不在正上方（身后/侧上方）；用 pillarClearance 给的具体相对坐标挖，别再硬编码 [0,2,0]
+    const at = data?.pillarClearance?.at ?? [0, 2, 0];
+    const cf = data?.pillarClearance?.facing ?? facing;
+    return adapt('dig_at', { at, ...(cf ? { facing: cf } : {}) }, '头顶被挡，先挖开再走', 'clearance');
   }
   // goto 是「委托寻路」：头顶被挡是路线事实，不替 Agent 决定挖哪一格——挖开、绕行还是退回去由它定。
   if (step.skill === 'goto' && data?.pillarClearance) return { kind: 'stuck', why: result.summary.slice(0, 160) };

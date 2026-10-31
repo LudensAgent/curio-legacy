@@ -120,7 +120,11 @@ export class Arbiter extends EventEmitter {
         if (ACTION_METHODS.has(String(prop))) {
           return (...args: unknown[]) => {
             const state = this.adapter.state();
-            if (signal.aborted || this.pausedFlag || this.current?.controller.signal !== signal || !state.observationReady || state.worldId !== origin.worldId || state.dim !== origin.dim || state.sessionId !== origin.sessionId) {
+            // 收盾（raiseShield(false)）是纯复位动作：guard 技能在 finally 里收盾，任务被取消/抢占后也必须放行，
+            // 否则盾卡在举起状态再也放不下（日志「已取消任务试图调用 raiseShield，已拦截」）。只豁免「任务已不再当前」这一层，暂停/换世界等照旧拦截。
+            const isShieldLower = String(prop) === 'raiseShield' && args[0] === false;
+            const taskGone = signal.aborted || this.current?.controller.signal !== signal;
+            if ((taskGone && !isShieldLower) || this.pausedFlag || !state.observationReady || state.worldId !== origin.worldId || state.dim !== origin.dim || state.sessionId !== origin.sessionId) {
               this.blockedActions++;
               this.bus.publish('blocked_action', 'P1', `已取消任务试图调用 ${String(prop)}，已拦截`);
               throw new AbortedError('task cancelled');

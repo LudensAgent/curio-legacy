@@ -3321,7 +3321,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
 
   private drawStartedAt: number | null = null;
 
-  async pillarUp(itemNames: string[], signal: AbortSignal): Promise<ActionResult & { y?: number; clearanceDetail?: string }> {
+  async pillarUp(itemNames: string[], signal: AbortSignal): Promise<ActionResult & { y?: number; clearanceDetail?: string; clearance?: { at?: [number, number, number]; facing?: string } }> {
     const check = this.actionCheckpoint(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
     const b = this.bot, epoch = this.actionEpoch;
@@ -3341,7 +3341,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     for (let i = 0; i < 20 && !b.entity.onGround; i++) await this.afterAction(() => sleep(25, signal), check);
     if (!b.entity.onGround) return { ok: false, reason: 'NOT_PLACED:尚未站稳' };
     const clearance = this.pillarClearance();
-    if (clearance) return { ok: false, reason: `NOT_PLACED:头顶跳跃空间${clearance.kind === 'blocked' ? '受阻' : '未加载'}`, clearanceDetail: describePillarClearance(clearance) };
+    if (clearance) return { ok: false, reason: `NOT_PLACED:头顶跳跃空间${clearance.kind === 'blocked' ? '受阻' : '未加载'}`, clearanceDetail: describePillarClearance(clearance), clearance: clearance.block?.rel ? { at: clearance.block.rel, facing: clearance.block.facing } : undefined };
     let placed = false, lastError = '';
     {
       b.setControlState('jump', true);
