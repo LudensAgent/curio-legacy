@@ -1476,6 +1476,20 @@ test('提示词区分背包空槽与物品的堆叠上限', () => {
   memory.close();
 });
 
+test('维度名译成中文，非主世界时额外提醒不是主世界', () => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  adapter.dim = 'the_nether';
+  const perception = new Perception(adapter, memory, bus, new Vision(adapter));
+  const percept = perception.update();
+  const state = adapter.state();
+  const [, user] = buildMindMessages({ reason: '测试', percept, state, self: new SelfModel(null), memory, activity: null, suspended: [], lastRecord: null,
+    noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', skills: [], tier: 'deliberate' } as any);
+  const body = JSON.parse(user.content.match(/【身体】(.*)/)![1]);
+  assert.equal(body.dim, '下界（the_nether）');
+  assert.match(user.content, /你在下界，不是主世界/);
+  memory.close();
+});
+
 test('要命的处境（头被沙砾埋住、正在掉血）：撤掉正在慢慢想的，马上快想一次，并告诉它眼前的事实', async (t) => {
   const w = fixture(t);
   await w.tick();

@@ -395,6 +395,7 @@ export function situationalReminders(ctx: MindContext): string[] {
   const out: string[] = [];
   const p = ctx.percept, s = ctx.state;
   const here = { x: p.self.pos[0], y: p.self.pos[1], z: p.self.pos[2] };
+  if (p.self.dim !== 'overworld') out.push(`你在${DIM_ZH[p.self.dim] ?? p.self.dim}，不是主世界；记得的地标、矿道、箱子都按维度分开，主世界的东西在这里看不到`);
   const drafts = activeDrafts()?.list(4).filter((d) => !d.usedBy) ?? [];
   const unfinished = myBuilds(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }).filter((b) => b.status !== 'complete' && b.dist <= 96);
   const intent = [ctx.activity?.what, ctx.activity?.why, ...ctx.self.agenda().map((a) => a.text), ...ctx.self.recentThoughts(3).map((t) => t.text)].filter(Boolean).join(' ');
@@ -542,6 +543,7 @@ function focusBlock(ctx: MindContext): Record<string, unknown> | null {
 }
 
 const WEAR_SLOT: Record<string, string> = { head: '头', torso: '胸', legs: '腿', feet: '脚', 'off-hand': '副手' };
+const DIM_ZH: Record<string, string> = { overworld: '主世界', the_nether: '下界', the_end: '末地' };
 /** 【身体】：自己在哪、状态、时间、亮度、背包 */
 function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits: object) {
   const inv = new Map<string, number>();
@@ -554,7 +556,7 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
   const ownsTool = tool ? [...inv.keys()].some((n) => n.endsWith(`_${tool}`)) : true;
   return {
     ...(p.self.where ? { where: p.self.where.text } : p.self.overhead ? { overhead: p.self.overhead.block ? `头顶 ${p.self.overhead.up} 格是 ${p.self.overhead.block}` : '头顶一直空着' } : {}),
-    pos: pos3(p.self.pos), dim: p.self.dim, biome: p.self.biome, sky_visible: p.self.sky_visible ?? null,
+    pos: pos3(p.self.pos), dim: `${DIM_ZH[p.self.dim] ?? p.self.dim}（${p.self.dim}）`, biome: p.self.biome, sky_visible: p.self.sky_visible ?? null,
     // 血量保留一位小数：半颗心四舍五入成 0 会让模型以为自己已经死了
     hp: Math.round(p.self.hp * 10) / 10, food: p.self.food,
     ...(p.self.inWater ? { inWater: true, oxygen: s.oxygen } : {}), ...(p.self.inLava ? { inLava: true } : {}), ...(p.self.riding ? { riding: p.self.riding } : {}),
