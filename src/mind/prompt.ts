@@ -328,9 +328,10 @@ function passageWayBack(ctx: MindContext): string | null {
   const pos = `${Math.round(next.x)},${Math.round(next.y)},${Math.round(next.z)}`;
   const kind = g.kind === 'walked' ? '走过的路' : '自己挖过的旧矿道';
   const along = g.inside ? `你正沿着${kind}` : `附近有${kind}，朝它回入口的方向走`;
-  if (open(foot) && open(head)) return `${along}；沿它回入口的下一步 (${pos}) 现在仍是 2 格高的空走廊，可以直接走过去`;
+  const follow = '；也可以 follow_passage {"to":"entrance"} 让我沿这条旧矿道带路';
+  if (open(foot) && open(head)) return `${along}；沿它回入口的下一步 (${pos}) 现在仍是 2 格高的空走廊，可以直接走过去${follow}`;
   const reason = !open(foot) ? `脚下那格现在是 ${foot ?? '未加载'}` : `头顶那格现在是 ${head ?? '未加载'}`;
-  return `${along}；沿它回入口的下一步 (${pos}) 被堵了：${reason}。挖开这一格、还是改走别的路，由你定`;
+  return `${along}；沿它回入口的下一步 (${pos}) 被堵了：${reason}。挖开这一格、还是改走别的路，由你定${follow}`;
 }
 
 /** 沿旧矿道往最深处走的下一步：和 passageWayBack 对称，但方向朝全网最深的脚点，供想下更深时接上旧通道 */
@@ -350,9 +351,10 @@ function passageWayDown(ctx: MindContext): string | null {
   const pos = `${Math.round(next.x)},${Math.round(next.y)},${Math.round(next.z)}`;
   const kind = g.kind === 'walked' ? '走过的路' : '自己挖过的旧矿道';
   const along = g.inside ? `你正沿着${kind}` : `附近有${kind}，朝它最深处走`;
-  if (open(foot) && open(head)) return `${along}；沿它往最深处走的下一步 (${pos}) 现在仍是 2 格高的空走廊，可以直接走过去`;
+  const follow = '；也可以 follow_passage {"to":"deepest"} 让我沿这条旧矿道带路';
+  if (open(foot) && open(head)) return `${along}；沿它往最深处走的下一步 (${pos}) 现在仍是 2 格高的空走廊，可以直接走过去${follow}`;
   const reason = !open(foot) ? `脚下那格现在是 ${foot ?? '未加载'}` : `头顶那格现在是 ${head ?? '未加载'}`;
-  return `${along}；沿它往最深处走的下一步 (${pos}) 被堵了：${reason}。挖开这一格、还是改走别的路，由你定`;
+  return `${along}；沿它往最深处走的下一步 (${pos}) 被堵了：${reason}。挖开这一格、还是改走别的路，由你定${follow}`;
 }
 
 /** 打算里说要过水 / 到对岸 */

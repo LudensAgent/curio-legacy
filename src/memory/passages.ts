@@ -19,11 +19,19 @@ const cell = (p: Vec3Like): Vec3Like => ({ x: Math.floor(p.x), y: Math.floor(p.y
 /** 自己挖掉至少这么多格，才算“我挖的通道”（走进天然洞穴不算） */
 export const MIN_DUG = 4;
 const STEP = 3;
+/** 两条通道脚点挨到多近算「同一条」；和 passageRoute 跨通道连网的 link 保持一致 */
+export const PASSAGE_LINK = 3.5;
 const MAX_POINTS = 160;
+
+/** 这一下站的位置、或刚挖开的格子，落在另一条通道脚点附近（亲身的证据，不是臆造） */
+const touchesPassage = (rec: Pick<PassageRecord, 'path'>, pos: Vec3Like, dug: DugBlock[]) => {
+  const near = (p: Vec3Like) => rec.path.some((q) => d3(q, p) <= PASSAGE_LINK);
+  return near(pos) || dug.some((b) => near(cell(b.pos)));
+};
 
 /**
  * 跟着身体记通道：进了地下就开始一段，一路记脚下的点和自己挖掉的格子，回到地表就收尾。
- * 走进以前挖过的通道（离它的路线 3 格以内）就接着那一条记，算又用了一次。
+ * 走进以前挖过的通道（站的位置或刚挖开的格子，挨到它脚点 3.5 格内）就接着那一条记，算又用了一次。
  * 只看亲身走过、亲手挖过的；死了被传送、换了世界，就不把两头连起来。
  */
 export class PassageTracker {
@@ -70,7 +78,7 @@ export class PassageTracker {
     this.lastBelow = { pos, ts: now };
 
     if (!this.active) {
-      const old = this.memory.passages(s.dim).find((p) => p.worldId === s.worldId && p.path.some((q) => d3(q, pos) <= 3));
+      const old = this.memory.passages(s.dim).find((p) => p.worldId === s.worldId && touchesPassage(p, pos, dug));
       if (old) {
         old.uses += 1;
         old.lastUsedAt = now;
@@ -84,7 +92,7 @@ export class PassageTracker {
     }
     // 接进了另一条已经记下的通道：两条其实是同一条，并成一条（多一个地表参考点），不另记。
     // observe 记的是脚下真实站过的点，能从一条走到另一条的 3 格内，就证明这一段连通，不是臆造。
-    const neighbor = this.memory.passages(s.dim).find((p) => p.worldId === s.worldId && p.id !== this.active!.rec.id && p.path.some((q) => d3(q, pos) <= 3));
+    const neighbor = this.memory.passages(s.dim).find((p) => p.worldId === s.worldId && p.id !== this.active!.rec.id && touchesPassage(p, pos, dug));
     if (neighbor) {
       const keep = neighbor.uses > this.active!.rec.uses || (neighbor.uses === this.active!.rec.uses && neighbor.path.length > this.active!.rec.path.length) ? neighbor : this.active!.rec;
       this.mergeInto(keep, keep === neighbor ? this.active!.rec : neighbor);
@@ -186,7 +194,7 @@ export function passageLevels(rec: Pick<PassageRecord, 'path'>): number[] {
  */
 export function passageRoute(recs: Pick<PassageRecord, 'path'>[], from: Vec3Like, to: Vec3Like,
   opts: { near?: number; hop?: number; link?: number } = {}): Vec3Like[] | null {
-  const near = opts.near ?? 5, hop = opts.hop ?? 7, link = opts.link ?? 3.5;
+  const near = opts.near ?? 5, hop = opts.hop ?? 7, link = opts.link ?? PASSAGE_LINK;
   const nodes: Vec3Like[] = [];
   const edges = new Map<number, Set<number>>();
   const add = (a: number, b: number) => { if (a === b) return; (edges.get(a) ?? edges.set(a, new Set()).get(a)!).add(b); (edges.get(b) ?? edges.set(b, new Set()).get(b)!).add(a); };

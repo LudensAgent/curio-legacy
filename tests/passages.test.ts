@@ -109,6 +109,29 @@ test('两条已记下的通道，从一条走进另一条时并成一条（碎�
   m.close();
 });
 
+test('刚挖开的格子挨着另一条通道（人还没站进去）也并成一条（放宽到挖开的点）', () => {
+  const m = new WorldMemory(null); m.setWorld(W);
+  let n = 0;
+  const tr = new PassageTracker(m, () => `p${++n}`);
+  // A：浅层横巷 x=[0,4,8]，每点挖两格让它成"我挖的通道"
+  const tunnel = (xs: number[], t0: number) => {
+    tr.observe({ worldId: W, dim: D, pos: at(xs[0], 64, 0), place: 'surface' }, [], t0);
+    let t = t0 + 1000;
+    for (const x of xs) {
+      tr.observe({ worldId: W, dim: D, pos: at(x, 60, 0), place: 'underground' }, [{ pos: at(x, 60, 0), name: 'stone', ts: t }, { pos: at(x, 61, 0), name: 'stone', ts: t }], t);
+      t += 500;
+    }
+    tr.observe({ worldId: W, dim: D, pos: at(xs[xs.length - 1], 64, 0), place: 'surface' }, [], t + 9000);
+  };
+  tunnel([0, 4, 8], 0);
+  assert.equal(m.passages(D).length, 1);
+  // 从地表在 x=12 挖下来（站的位置离 A 的 x=8 还差 4 格 > PASSAGE_LINK），但挖开的那格 x=10 挨着 A 的 x=8（2 格）
+  tr.observe({ worldId: W, dim: D, pos: at(12, 64, 0), place: 'surface' }, [], 30_000);
+  tr.observe({ worldId: W, dim: D, pos: at(12, 60, 0), place: 'underground' }, [{ pos: at(10, 60, 0), name: 'stone', ts: 30_000 }], 31_000);
+  assert.equal(m.passages(D).length, 1, '挖开的点挨着 A，并进 A 而不是另起一条');
+  m.close();
+});
+
 test('通道给双向路线：回入口向上、朝最深处向下', () => {
   const m = new WorldMemory(null); m.setWorld(W);
   const tr = new PassageTracker(m, () => 'p1');
@@ -198,6 +221,7 @@ test('按需提醒：想下矿或回地面时说明历史路线与当前通路�
   assert.ok(inside.some((r) => /你正沿着这条旧矿道.*沿旧矿道回入口的下一个路点 \(\d+,\d+,\d+\)/.test(r)), inside.join('\n'));
   const up = situationalReminders(ctx(at(22, 42, 0), '挖台阶一路挖到见天回地面'));
   assert.ok(up.some((r) => /你正沿着自己挖过的旧矿道；沿它回入口的下一步 \(\d+,\d+,\d+\)/.test(r)), up.join('\n'));
+  assert.ok(up.some((r) => /follow_passage \{"to":"entrance"\}/.test(r)), up.join('\n'));
   const tripCtx = ctx(at(22, 42, 0), '回地面');
   tripCtx.percept.self.sky_visible = false;
   tripCtx.trip = { minutes: 2, gained: {}, nearEnd: true };
