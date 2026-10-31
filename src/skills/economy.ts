@@ -235,7 +235,10 @@ async function selectedContainer(ctx: SkillCtx, target: ContainerTarget) {
     forgetObservedContainer(ctx, pos);
     return { ok: false as const, result: fail('TARGET_GONE', `选定位置当前是 ${observed.name}，忘掉已失效的容器记忆；未改选其他容器`, { candidates: containerCandidates(ctx) }) };
   }
-  return { ok: true as const, pos };
+  // 带精确坐标直接指定容器时，也把记忆里这箱子的空余格数一并给出（不带 target 列候选时才看得到「还剩 N 格空」）。
+  // 全量快照才记 freeSlots，增量操作会标 possiblyStale 并丢字段，所以 freeSlots 存在即代表可靠的满空线索。
+  const remembered = ctx.memory.chestAt(state.dim, pos);
+  return { ok: true as const, pos, ...(remembered && remembered.contents.freeSlots != null ? { rememberedFree: remembered.contents.freeSlots } : {}) };
 }
 
 /** useChest 的失败原因说成人话；LID_BLOCKED 说明盖子被压着，得先把上面的方块挖掉 */
@@ -266,6 +269,7 @@ export const storeItems: Skill<{ items: StoreSpec[]; target?: ContainerTarget; n
     if (args.target === undefined) return fail('BAD_ARGS', '尚未指定存入哪只容器；这些是地点线索，内容与位置可能已经变化，请自行选择 target', { candidates: containerCandidates(ctx) });
     const selected = await selectedContainer(ctx, args.target);
     if (!selected.ok) return selected.result;
+    const rememberedFree = selected.rememberedFree;
     const state = ctx.adapter.state(), have = new Map<string, number>();
     state.inventory.forEach((item) => have.set(item.name, (have.get(item.name) ?? 0) + item.count));
     const requested = new Map<string, number>();
@@ -292,12 +296,14 @@ export const storeItems: Skill<{ items: StoreSpec[]; target?: ContainerTarget; n
       const put = record(result.ok || result.moved > 0 ? result.contents : undefined), moved = put.reduce((count, item) => count + item.count, 0);
       const actual = put.map((item) => `${item.name}×${item.count}`).join('、');
       const free = container?.freeSlots != null ? `；箱子还剩 ${container.freeSlots} 格空` : '';
-      if (!result.ok) return fail('ERROR', `选定容器存放未完成：${chestFailText(result.reason)}${moved ? `；实际已存入 ${actual}` : ''}${free}；未挖盖、造箱或更换容器`, { moved, put, ...(container?.freeSlots != null ? { freeSlots: container.freeSlots } : {}) });
+      // 存之前记得的满空线索：只在它和本次亲眼看到的空余格数不一致时补充，避免重复同一句话。
+      const before = rememberedFree !== undefined && rememberedFree !== container?.freeSlots ? `；存之前记得这箱子还剩 ${rememberedFree} 格空` : '';
+      if (!result.ok) return fail('ERROR', `选定容器存放未完成：${chestFailText(result.reason)}${moved ? `；实际已存入 ${actual}` : ''}${free}${before}；未挖盖、造箱或更换容器`, { moved, put, ...(container?.freeSlots != null ? { freeSlots: container.freeSlots } : {}), ...(rememberedFree !== undefined ? { rememberedFree } : {}) });
       if (!moved) {
         const why = container?.freeSlots === 0 ? '箱子已经满了（0 格空）' : container?.freeSlots != null ? `箱子还有 ${container.freeSlots} 格空，但这种物品堆叠已满、放不进去` : '箱子可能满了或放不下这种物品';
-        return fail('ERROR', `选定容器没有存入任何物品——${why}；未挖盖、造箱或更换容器`, { moved: 0, put: [], ...(container?.freeSlots != null ? { freeSlots: container.freeSlots } : {}) });
+        return fail('ERROR', `选定容器没有存入任何物品——${why}${before}；未挖盖、造箱或更换容器`, { moved: 0, put: [], ...(container?.freeSlots != null ? { freeSlots: container.freeSlots } : {}), ...(rememberedFree !== undefined ? { rememberedFree } : {}) });
       }
-      return ok(`在选定容器存入 ${actual || '0 件物品'}${moved < plan.reduce((count, item) => count + item.count, 0) ? '；只有这部分实际存入' : ''}${missing.length ? `；背包没有 ${missing.join('、')}` : ''}${free}`, { moved, put, ...(missing.length ? { missing } : {}), ...(container?.freeSlots != null ? { freeSlots: container.freeSlots } : {}) });
+      return ok(`在选定容器存入 ${actual || '0 件物品'}${moved < plan.reduce((count, item) => count + item.count, 0) ? '；只有这部分实际存入' : ''}${missing.length ? `；背包没有 ${missing.join('、')}` : ''}${free}${before}`, { moved, put, ...(missing.length ? { missing } : {}), ...(container?.freeSlots != null ? { freeSlots: container.freeSlots } : {}), ...(rememberedFree !== undefined ? { rememberedFree } : {}) });
     } catch (error) {
       const put = record();
       if (isAbort(error)) throw error;

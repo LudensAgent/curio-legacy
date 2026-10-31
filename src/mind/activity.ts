@@ -169,7 +169,7 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
       } else delete a.partialStops[key];
     }
     if (remainingSteps(a) === 0) {
-      if (a.doneWhen) return { kind: 'done', met: false, why: `${a.repeat} 轮做完了${conditionUnmet()}` };
+      if (a.doneWhen) return { kind: 'done', met: false, why: `${a.repeat} 轮做完了（最后一步：${result.summary.slice(0, 160)}）${conditionUnmet()}` };
       return { kind: 'done', met: true, why: '这段活的步骤都做完了' };
     }
     return { kind: 'continue' };

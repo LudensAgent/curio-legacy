@@ -82,3 +82,20 @@ test('cleanup steps finishing with a full bag leave the completion condition unm
     assert.match(verdict.why, /未满足/);
   }
 });
+
+test('a succeeded final step whose condition is unmet keeps the step caveat in the unmet reason', () => {
+  const state = { ...new FakeAdapter().state(), emptySlots: 0 };
+  const activity = createActivity({ what: '把石块存进箱子腾出空间', why: '', kind: 'tidy', repeat: 1,
+    steps: [{ skill: 'store_items', args: { items: ['granite', 'gravel'] } }],
+    doneWhen: { type: 'inventory_space_min', free_slots: 3 } }, '', 'llm', state);
+  const step = nextStep(activity);
+  assert.ok(step);
+  const verdict = afterStep(activity, step, ok('在选定容器存入 granite×3、gravel×4，箱子还剩 0 格空'), 10, state);
+  assert.equal(verdict.kind, 'done');
+  if (verdict.kind === 'done') {
+    assert.equal(verdict.met, false);
+    // 部分成功（status=succeeded 但收工条件没达成）时，最后一步的 caveat 要跟着 unmet 反馈一起送回去
+    assert.match(verdict.why, /最后一步：在选定容器存入 granite×3、gravel×4，箱子还剩 0 格空/);
+    assert.match(verdict.why, /未满足/);
+  }
+});
