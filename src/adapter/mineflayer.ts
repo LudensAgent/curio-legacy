@@ -2325,6 +2325,55 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return { ok: true };
   }
 
+  /** 找一对可以合并的同名散叠：把 src 并进 dst（dst 有空间且非同一格），没有就返回 null。 */
+  private nextStackMerge(item?: string): { src: number; dst: number } | null {
+    const b = this.bot;
+    const groups = new Map<string, { size: number; slots: { slot: number; count: number }[] }>();
+    for (const it of (b.inventory.items() ?? []) as any[]) {
+      const size = this.mcData.itemsByName?.[it.name]?.stackSize ?? 1;
+      if (size <= 1 || it.slot < 9 || it.slot > 44) continue;
+      if (item && it.name !== item) continue;
+      const key = JSON.stringify([it.type, it.metadata, it.nbt ?? null]);
+      const g = groups.get(key) ?? { size, slots: [] as { slot: number; count: number }[] };
+      g.slots.push({ slot: it.slot, count: it.count });
+      groups.set(key, g);
+    }
+    for (const g of groups.values()) {
+      const partial = g.slots.filter((s) => s.count < g.size);
+      if (partial.length < 2) continue;
+      partial.sort((a, b) => a.count - b.count);
+      return { src: partial[0].slot, dst: partial[partial.length - 1].slot };
+    }
+    return null;
+  }
+
+  /** 把背包和快捷栏里同名可堆叠物品的散叠两两合并到堆叠上限，腾出空槽。 */
+  async mergeStacks(signal: AbortSignal, item?: string): Promise<ActionResult & { merged: number; freed: number }> {
+    const check = this.actionCheckpoint(signal);
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', merged: 0, freed: 0 };
+    if (typeof this.bot.clickWindow !== 'function') return { ok: false, reason: 'NO_CLICK', merged: 0, freed: 0 };
+    await this.interactionReady();
+    check();
+    const b = this.bot;
+    const occupied = () => (b.inventory.items() as any[]).filter((it) => it.slot >= 9 && it.slot <= 44).length;
+    const before = occupied();
+    let merged = 0;
+    await this.withObservedInventory(signal, async () => {
+      for (let guard = 0; guard < 256; guard++) {
+        const pair = this.nextStackMerge(item);
+        if (!pair) break;
+        // 左键 src 拿起 → 左键 dst 并入（dst 满则多余留在光标）→ 左键 src 把多余放回已掏空的源格
+        await this.afterAction(() => b.clickWindow(pair.src, 0, 0), check);
+        await this.afterAction(() => b.clickWindow(pair.dst, 0, 0), check);
+        await this.afterAction(() => b.clickWindow(pair.src, 0, 0), check);
+        merged++;
+        await this.syncInventory(check);
+      }
+    });
+    const freed = Math.max(0, before - occupied());
+    return { ok: true, merged, freed };
+  }
+
   async useBlockAt(pos: Vec3Like, item: string, signal: AbortSignal): Promise<ActionResult> {
     const check = this.actionCheckpoint(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };

@@ -6,7 +6,7 @@ import { collectFurnace, collectSeeds, expedition, farm, findItem, smelt, storeI
 import { hunt, pickupItems, shelter } from './survival.ts';
 import type { Skill } from './types.ts';
 import { craft, eat, gather } from './work.ts';
-import { mergeTools } from './merge.ts';
+import { mergeStacks, mergeTools } from './merge.ts';
 import { travelSkills } from './travel.ts';
 import { overlandSkills } from './overland.ts';
 import { equipmentSkills } from './equipment.ts';
@@ -34,7 +34,7 @@ import { isSkillDisabled } from './disabled.ts';
 
 /** 技能白名单：LLM 只能从这里选择技能，参数必须通过各自的 validate。 */
 export const SKILLS: Record<string, Skill> = Object.fromEntries(
-  [explore, gather, goTo, followPassage, craft, mergeTools, eat, hunt, pickupItems, shelter, build, buildingArchive, buildingReview, sleepSkill, placeTorch, smelt, collectFurnace, storeItems, takeItems, findItem, collectSeeds, farm, expedition, flee, defend, wander, lookAround, unstuck, surface, ...Object.values(travelSkills), ...Object.values(equipmentSkills), ...Object.values(dragonSkills), ...Object.values(structureSkills), ...reservationSkills, ...baseSkills, ...actionSkills, ...handSkills, ...guiSkills, ...bodySkills, ...primitiveSkills, ...overlandSkills, fish, wait, glance, forage, inspectBlock, rememberPlace, interactBlock, assessLandings, descend, ...Object.values(flightSkills), useSkill, signText, editBook].map((s) => [s.name, s]),
+  [explore, gather, goTo, followPassage, craft, mergeTools, mergeStacks, eat, hunt, pickupItems, shelter, build, buildingArchive, buildingReview, sleepSkill, placeTorch, smelt, collectFurnace, storeItems, takeItems, findItem, collectSeeds, farm, expedition, flee, defend, wander, lookAround, unstuck, surface, ...Object.values(travelSkills), ...Object.values(equipmentSkills), ...Object.values(dragonSkills), ...Object.values(structureSkills), ...reservationSkills, ...baseSkills, ...actionSkills, ...handSkills, ...guiSkills, ...bodySkills, ...primitiveSkills, ...overlandSkills, fish, wait, glance, forage, inspectBlock, rememberPlace, interactBlock, assessLandings, descend, ...Object.values(flightSkills), useSkill, signText, editBook].map((s) => [s.name, s]),
 );
 
 /** 只给反射层/填充行为使用、不让 LLM 主动规划的技能 */

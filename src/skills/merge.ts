@@ -86,3 +86,28 @@ export const mergeTools: Skill<{ item: string; station: 'crafting_table' | 'grin
     }
   },
 };
+
+/** 把背包和快捷栏里同名可堆叠物品的散叠两两合并到堆叠上限，腾出空槽；不制造、不丢弃任何东西。 */
+export const mergeStacks: Skill<{ item?: string }> = {
+  name: 'merge_stacks',
+  description: '把背包和快捷栏里同名可堆叠物品的散叠两两合并到堆叠上限，腾出空槽；item 可指定只整理这一种（如 cobblestone）。不会制造或丢弃任何东西',
+  argsDoc: '{"item"?: "<物品名，只整理这一种；不写整理所有可堆叠物品>"}',
+  timeoutMs: 60000,
+  movement: false,
+  validate(raw, adapter) {
+    const a = obj(raw);
+    if (a.item === undefined || a.item === null || a.item === '') return { ok: true, args: {} };
+    const item = resolveItemAlias(String(a.item).trim().replace(/^minecraft:/, ''), adapter);
+    if (!item) return { ok: false, error: `未知物品：${String(a.item)}` };
+    return { ok: true, args: { item } };
+  },
+  async run(ctx, args) {
+    const { adapter, signal } = ctx;
+    if (!adapter.mergeStacks) return fail('ERROR', '当前适配器不支持合并堆叠');
+    const r = await adapter.mergeStacks(signal, args.item);
+    if (!r.ok) return fail(codeFromError({ message: r.reason }), `合并堆叠没成：${r.reason}`);
+    return ok(r.freed > 0
+      ? `合并了 ${r.merged} 次，腾出 ${r.freed} 格空槽`
+      : `合并了 ${r.merged} 次，没有腾出空槽（散叠本来就不多或已经满叠）`, { merged: r.merged, freed: r.freed });
+  },
+};
