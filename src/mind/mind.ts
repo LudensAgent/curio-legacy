@@ -70,6 +70,10 @@ export const DEFAULT_TIMING = {
   checkInMs: 100_000,
   /** 连续只“瞥一眼”这么久，下次就认真想一想全局 */
   deliberateEveryMs: 6 * 60_000,
+  /** 完成这么多段活后，可以提前触发一次大图（不必等满 deliberateEveryMs） */
+  finishedForReview: 8,
+  /** 即使活做得快，两次大图之间也至少隔这么久，防止琐碎活导致频繁认真想 */
+  deliberateMinGapMs: 2 * 60_000,
   /** 两句话之间至少隔这么久 */
   sayGapMs: 45_000,
   /** 模型出错后的退避上限 */
@@ -572,7 +576,9 @@ export class Mind {
   /** 需要看看全局了吗：好久没认真想过、做完了好几段活、情绪到了临界、刚卡住 */
   private needsBigPicture(): boolean {
     const m = this.d.self.mood;
-    return Date.now() - this.lastDeliberateAt > this.timing.deliberateEveryMs || this.finishedSinceReflect >= 4
+    const since = Date.now() - this.lastDeliberateAt;
+    return since > this.timing.deliberateEveryMs
+      || (this.finishedSinceReflect >= this.timing.finishedForReview && since > this.timing.deliberateMinGapMs)
       || m.boredom > 0.65 || m.frustration > 0.55 || m.energy < 0.25 || this.lastRecord?.outcome === 'stuck';
   }
 
