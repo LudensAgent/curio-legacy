@@ -291,9 +291,9 @@ export function toolBackupFact(
     const owned = inventory.some((i) => i.name === `${t}_pickaxe`);
     if (!owned) continue;
     const n = have(mat);
-    if (n >= 3) continue; // 材料还够再做一把，不算紧缺
+    if (n > 6) continue; // 材料宽裕（>6），不算紧缺；≤6 与 frugal 的稀缺线一致
     if (t === 'diamond' ? hasUsable('iron', 'stone', 'wooden') : hasUsable('stone', 'wooden')) continue;
-    return `你包里有${t === 'iron' ? '铁镐' : '钻石镐'}，而${zh}只有 ${n} 个（做一把新的要 3 个）：挖石头/煤/铜/铁/青金石用石镐就够，只有${need}才必须${t === 'iron' ? '铁镐' : '钻石镐'}。要不要先做把${cheap}挖普通方块、把${t === 'iron' ? '铁镐' : '钻石镐'}耐久留给${need}，由你定`;
+    return `你包里有${t === 'iron' ? '铁镐' : '钻石镐'}，而${zh}只剩 ${n} 个（做一把新的要 3 个）：挖石头/煤/铜/铁/青金石用石镐就够，只有${need}才必须${t === 'iron' ? '铁镐' : '钻石镐'}。要不要先做把${cheap}挖普通方块、把${t === 'iron' ? '铁镐' : '钻石镐'}耐久留给${need}，由你定`;
   }
   return null;
 }

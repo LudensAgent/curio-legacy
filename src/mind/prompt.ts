@@ -413,9 +413,10 @@ export function situationalReminders(ctx: MindContext): string[] {
   if (ctx.tier === 'deliberate') {
     const ore = oreOpportunityFact(p.nearby.resources, p.storage?.stock, s.inventory);
     if (ore) { out.push(ore); ctx.log?.(ore, { kind: 'ore_opportunity' }); }
-    const backup = toolBackupFact(s.inventory, p.storage?.stock);
-    if (backup) { out.push(backup); ctx.log?.(backup, { kind: 'tool_backup' }); }
   }
+  // 工具备份：铁镐 + 铁锭不足 + 没有耐用石镐，这个状态快反应（glance）时也该知道，别等停下来想才说
+  const backup = toolBackupFact(s.inventory, p.storage?.stock);
+  if (backup) { out.push(backup); ctx.log?.(backup, { kind: 'tool_backup' }); }
   // 养动物、村民交易：打算里提到了才把机制摆出来（模型对这些的记忆常是含糊或老版本的）
   const husbandry = husbandryFacts(intent);
   if (husbandry) out.push(husbandry);

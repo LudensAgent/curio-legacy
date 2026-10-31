@@ -121,16 +121,19 @@ test('oreOpportunityFact：看见矿 + 现有存量 + 用途，采不采由它�
   assert.ok(!two!.includes('gold_ore'), '只报最近的两块矿');
 });
 
-test('toolBackupFact：铁镐 + 铁锭不足 + 没有耐用石镐时才提醒，做不做备用由它定', () => {
+test('toolBackupFact：铁镐 + 铁锭不足（≤6）+ 没有耐用石镐时才提醒，做不做备用由它定', () => {
   // 有铁镐、铁锭 0、没有石镐 → 提醒
   const f = toolBackupFact([item('iron_pickaxe', 1), item('iron_ingot', 0)], undefined);
   assert.match(f!, /你包里有铁镐/);
-  assert.match(f!, /铁锭只有 0 个/);
+  assert.match(f!, /铁锭只剩 0 个/);
   assert.match(f!, /石镐（3 圆石 \+ 2 木棍）/);
   assert.match(f!, /红石\/金\/钻石\/绿宝石/);
   assert.match(f!, /由你定/);
-  // 铁锭够 3 个能再做一把 → 不提醒
-  assert.equal(toolBackupFact([item('iron_pickaxe', 1), item('iron_ingot', 3)], undefined), null);
+  // 铁锭 3、6 仍算紧缺（≤6，与 frugal 稀缺线一致）→ 提醒
+  assert.match(toolBackupFact([item('iron_pickaxe', 1), item('iron_ingot', 3)], undefined)!, /铁锭只剩 3 个/);
+  assert.match(toolBackupFact([item('iron_pickaxe', 1), item('iron_ingot', 6)], undefined)!, /铁锭只剩 6 个/);
+  // 铁锭 7 → 宽裕，不提醒
+  assert.equal(toolBackupFact([item('iron_pickaxe', 1), item('iron_ingot', 7)], undefined), null);
   // 有耐用的石镐（耐久 100/131）→ 不提醒
   assert.equal(toolBackupFact([item('iron_pickaxe', 1), item('stone_pickaxe', 1, { durability: { left: 100, max: 131 } }), item('iron_ingot', 0)], undefined), null);
   // 石镐快坏了（耐久 1/131）→ 等于没有，提醒
@@ -138,8 +141,8 @@ test('toolBackupFact：铁镐 + 铁锭不足 + 没有耐用石镐时才提醒，
   // 没耐久信息的石镐默认当可用 → 不误报
   assert.equal(toolBackupFact([item('iron_pickaxe', 1), item('stone_pickaxe', 1), item('iron_ingot', 0)], undefined), null);
   // 箱子里的铁锭也算
-  assert.equal(toolBackupFact([item('iron_pickaxe', 1)], [row('iron_ingot', 4)]), null);
-  assert.match(toolBackupFact([item('iron_pickaxe', 1)], [row('iron_ingot', 1)])!, /铁锭只有 1 个/);
+  assert.equal(toolBackupFact([item('iron_pickaxe', 1)], [row('iron_ingot', 7)]), null);
+  assert.match(toolBackupFact([item('iron_pickaxe', 1)], [row('iron_ingot', 1)])!, /铁锭只剩 1 个/);
   // 没有铁镐 → null
   assert.equal(toolBackupFact([item('stone_pickaxe', 1)], undefined), null);
 });
