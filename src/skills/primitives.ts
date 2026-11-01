@@ -182,7 +182,7 @@ export const digAt: Skill<CellArgs> = {
       got = inBag ? `；${keepsake} 已经进了背包（现在共 ${countOf(keepsake)} 个）` : `；${keepsake} 掉在地上，还没进背包——要拿回来写 pickup_items {"item":"${keepsake}"}，别当成已经拿到了`;
     }
     const manMade = structure === 'man-made' ? `；${MAN_MADE_NOTE}` : '';
-    return ok(`挖掉了 [${args.at}] 的 ${before}${hand}${got}${manMade}`, { cell: [...args.at], was: before, ...(how.noDrop ? { noDrop: true } : {}), ...(inBag !== undefined ? { inBag } : {}), ...after(ctx, args.facing, pos) });
+    return ok(`挖掉了 [${args.at}] 的 ${before}${hand}${got}${manMade}`, { cell: [...args.at], was: before, ...(how.noDrop ? { noDrop: true } : {}), ...(inBag !== undefined ? { inBag } : {}), ...after(ctx, args.facing, pos) }, structure === 'man-made' ? MAN_MADE_NOTE : undefined);
   },
 };
 

@@ -29,6 +29,10 @@ export interface SkillResult {
   summary: string;
   failureCode?: FailureCode;
   data?: Record<string, unknown>;
+  /** 动作成功但附带、需要心智掂量的事实（如“这格是人造建材，可能是村庄房子”）。
+   *  不进摘要：摘要会被 160/80 字符截断、又在活动收工时被通用句替换，进不了决策提示词；
+   *  caveat 单独透给决策提示词，避免被截断或埋进活动摘要。 */
+  caveat?: string;
 }
 
 export interface LandingOption {
@@ -143,7 +147,7 @@ export function runSkill<A>(ctx: SkillCtx, skill: Skill<A>, args: A & { make?: b
   });
 }
 
-export const ok = (summary: string, data?: Record<string, unknown>): SkillResult => ({ status: 'succeeded', summary, data });
+export const ok = (summary: string, data?: Record<string, unknown>, caveat?: string): SkillResult => ({ status: 'succeeded', summary, data, ...(caveat ? { caveat } : {}) });
 export const fail = (failureCode: FailureCode, summary: string, data?: Record<string, unknown>): SkillResult => ({
   status: 'failed',
   failureCode,

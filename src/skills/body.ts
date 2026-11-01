@@ -186,7 +186,7 @@ async function recoverBlock(ctx: SkillCtx, args: TargetDigArgs) {
     if (!gained.length) return fail('ERROR', `已拆下 ${name}，但背包没有新增物品；${whereDropsWent(ctx, pos)}`, { ...data, drops: dropsNear(ctx, pos) });
     const dropsItself = /_(bed|door)$/.test(name) || ['crafting_table', 'furnace', 'blast_furnace', 'smoker'].includes(name);
     if (dropsItself && !gained.some((item) => item.name === name)) return fail('ERROR', `已拆下 ${name}，但背包没有新增 ${name}；顺带拾取了 ${gained.map((item) => `${item.name}×${item.count}`).join('、')}，目标掉落物尚未拿到；${whereDropsWent(ctx, pos)}`, data);
-    return ok(`已拆下 ${name}；背包新增 ${gained.map((item) => `${item.name}×${item.count}`).join('、')}${structure === 'man-made' ? `；${MAN_MADE_NOTE}` : ''}`, data);
+    return ok(`已拆下 ${name}；背包新增 ${gained.map((item) => `${item.name}×${item.count}`).join('、')}${structure === 'man-made' ? `；${MAN_MADE_NOTE}` : ''}`, data, structure === 'man-made' ? MAN_MADE_NOTE : undefined);
   } catch (error) {
     if (isAbort(error)) throw error;
     return fail(codeFromError(error), `拆除目标失败：${why(error)}`);

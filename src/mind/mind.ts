@@ -140,6 +140,8 @@ export class Mind {
   private failuresByTarget = new Map<string, { n: number; last: number; at: number[] }>();
   /** 近期动作失败的实际反馈，只在同一会话、附近再次决策时提供。 */
   private recentActionFailures: { step: Step; code: string | null; summary: string; pos: AgentState['pos']; worldId: string; sessionId: string; dim: string; at: number }[] = [];
+  /** 近期动作成功但附带、要心智掂量的事实（如挖到人造建材），同样只在同一会话、附近决策时提供。 */
+  private recentActionCaveats: { step: Step; caveat: string; pos: AgentState['pos']; worldId: string; sessionId: string; dim: string; at: number }[] = [];
   /** 同一个动作、同样的参数、同样的失败：记录次数，供心智参考。 */
   private sameFails = new Map<string, { n: number; last: number; code: string; why: string; summary: string }>();
   private lastStuckAttempt: { step: { skill: string; args?: unknown }; code: string; summary: string; pos: AgentState['pos']; worldId: string; sessionId: string; dim: string; at: number } | null = null;
@@ -815,7 +817,7 @@ export class Mind {
     this.handleStepResult({ skill: o.task.skill, args: o.task.args }, o.result, o.durationMs);
   }
 
-  private handleStepResult(step: Step, result: { status: 'succeeded' | 'failed' | 'cancelled'; failureCode?: any; summary: string; data?: Record<string, unknown> }, durationMs: number) {
+  private handleStepResult(step: Step, result: { status: 'succeeded' | 'failed' | 'cancelled'; failureCode?: any; summary: string; data?: Record<string, unknown>; caveat?: string }, durationMs: number) {
     const a = this.activity;
     if (!a) return;
     if (this.recoverySkipped(a, step, result)) return;
@@ -834,7 +836,14 @@ export class Mind {
       const sig = exactSig(step), why = reasonKey(result.summary), prev = this.sameFails.get(sig);
       const same = prev && prev.code === String(result.failureCode ?? '') && prev.why === why && Date.now() - prev.last < Mind.SAME_FAIL_MS;
       this.sameFails.set(sig, { n: same ? prev!.n + 1 : 1, last: Date.now(), code: String(result.failureCode ?? ''), why, summary: result.summary.slice(0, 120) });
-    } else if (result.status === 'succeeded') this.sameFails.delete(exactSig(step));
+    } else if (result.status === 'succeeded') {
+      this.sameFails.delete(exactSig(step));
+      if (result.caveat) {
+        const st = this.d.adapter.state();
+        this.recentActionCaveats.push({ step: structuredClone(step), caveat: result.caveat, pos: { ...st.pos }, worldId: st.worldId, sessionId: st.sessionId, dim: st.dim, at: Date.now() });
+        this.recentActionCaveats = this.recentActionCaveats.filter((c) => Date.now() - c.at < Mind.SAME_FAIL_MS).slice(-30);
+      }
+    }
     if (a.awaitingRecovery && step.skill !== 'use_skill') {
       const name = a.awaitingRecovery;
       delete a.awaitingRecovery;
@@ -1042,6 +1051,9 @@ export class Mind {
       && f.worldId === state.worldId && f.sessionId === state.sessionId && f.dim === state.dim
       && Math.hypot(f.pos.x - state.pos.x, f.pos.y - state.pos.y, f.pos.z - state.pos.z) <= 8).slice(-6);
     const nearbyFailKeys = new Set(nearbyFailures.map((f) => targetKeyOf(f.step)));
+    const nearbyCaveats = this.recentActionCaveats.filter((c) => Date.now() - c.at < Mind.SAME_FAIL_MS
+      && c.worldId === state.worldId && c.sessionId === state.sessionId && c.dim === state.dim
+      && Math.hypot(c.pos.x - state.pos.x, c.pos.y - state.pos.y, c.pos.z - state.pos.z) <= 8).slice(-6);
     const ctx: MindContext = {
       tier, reason: reflect ? `${reason}；做完了好几段活，顺便回头看看哪些办法好用、哪些该改` : reason,
       percept, state, self: this.d.self, memory: this.d.memory, blockAt: (p) => this.d.adapter.blockAt(p), activity: this.activity, suspended: this.suspended,
@@ -1071,6 +1083,7 @@ export class Mind {
         return { skill: f.step.skill, args: f.step.args ?? {}, failure_code: f.code, summary: f.summary,
           position: f.pos, observed_at: new Date(f.at).toISOString(), ...(repeats >= 2 ? { repeats } : {}) };
       }),
+      recentActionCaveats: nearbyCaveats.map((c) => ({ skill: c.step.skill, args: c.step.args ?? {}, caveat: c.caveat, position: c.pos, observed_at: new Date(c.at).toISOString() })),
     };
     const suggestion = this.userSuggestion;
     const order = this.order, orderWasNew = order?.status === 'new';
