@@ -584,7 +584,12 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; dig?: boolean }>
       }
       start = adapter.state().pos;
       route = passageRoute(recs, start, target, { near: 6 });
-      if (!route || route.length < 2) return fail('PATH_NOT_FOUND', `到了脚点 (${np}) 附近，但仍连不到${back ? '地表入口' : '最深处'}（通道断开）；改走别的路`);
+      if (!route || route.length < 2) {
+        const tgtNode = passageNearestNode(recs, target);
+        const tgtStr = tgtNode ? `(${Math.round(tgtNode.x)},${Math.round(tgtNode.y)},${Math.round(tgtNode.z)})` : '未知位置';
+        const gap = tgtNode ? Math.round(dist3(start, tgtNode)) : null;
+        return fail('PATH_NOT_FOUND', `到了脚点 (${np}) 附近，但仍连不到${back ? '地表入口' : '最深处'}：离${goal}最近的旧矿道脚点在 ${tgtStr}，从你脚下直线约 ${gap ?? '未知'} 格（通道在这中间断开；可朝它垫/挖过去接上，或改走别的路）`);
+      }
     }
     ctx.progress(0, `沿${kind}${back ? '回入口' : '下最深'}，共 ${route.length} 段`);
     let last = start;
