@@ -24,22 +24,27 @@ export const EYE_DESCENT_LABEL = '末影之眼下降搜索点';
 
 const falling = (name: string) => ['sand', 'red_sand', 'gravel', 'suspicious_sand', 'suspicious_gravel', 'dragon_egg', 'anvil', 'chipped_anvil', 'damaged_anvil'].includes(name) || name.endsWith('_concrete_powder');
 const hazard = (name: string) => HAZARDS.has(name) || falling(name) || name.startsWith('infested_');
+/** 危险方块的类型，决定 hint 是「避液体」还是「堵下落」还是只报名字 */
+const hazardLabel = (name: string) => name === 'water' || name === 'lava' || name === 'bubble_column' ? '液体' : falling(name) ? '下落方块' : '危险方块';
 const voxel = (pos: Vec3Like): Vec3Like => ({ x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z) });
-
-/** Registry geometry is material knowledge, never a query for world locations. */
-function fullStableBlock(name: string | null) {
-  if (!name || hazard(name)) return false;
-  const collisions = (registry as any).blockCollisionShapes;
-  const shapes = collisions?.blocks[name];
-  const ids = Array.isArray(shapes) ? shapes : [shapes];
-  return ids.length > 0 && ids.every((id: number) => {
-    const boxes = collisions.shapes[id];
-    return boxes?.length === 1 && boxes[0].length === 6 && boxes[0].every((value: number, index: number) => value === (index < 3 ? 0 : 1));
-  });
-}
 
 class ExcavationStop extends Error {
   constructor(public code: FailureCode, message: string) { super(message); }
+}
+
+/** 地板可站性判定：null=未加载、hazard=液体/下落方块、非整块=能站但不稳定。三类分别报对症消息，
+ * 否则日志与 Agent 分不清「未加载」和「真水」，hint 一律说避液体。注册表几何是材质知识，绝不对世界位置做查询。 */
+function floorProblem(name: string | null): ExcavationStop | null {
+  if (name === null) return new ExcavationStop('NOT_FOUND', '下一落点地板未加载/未知，不能确认支撑');
+  if (hazard(name)) return new ExcavationStop('ERROR', `下一落点地板是 ${name}（${hazardLabel(name)}），不能冒险下落`);
+  const collisions = (registry as any).blockCollisionShapes;
+  const shapes = collisions?.blocks[name];
+  const ids = Array.isArray(shapes) ? shapes : [shapes];
+  const full = ids.length > 0 && ids.every((id: number) => {
+    const boxes = collisions.shapes[id];
+    return boxes?.length === 1 && boxes[0].length === 6 && boxes[0].every((value: number, index: number) => value === (index < 3 ? 0 : 1));
+  });
+  return full ? null : new ExcavationStop('ERROR', `下一落点地板是 ${name}（不是完整方块，站不稳），不能冒险下落`);
 }
 
 function assertSession(ctx: SkillCtx, origin: AgentState) {
@@ -54,7 +59,8 @@ function assertSession(ctx: SkillCtx, origin: AgentState) {
 
 function standingCell(ctx: SkillCtx, feet: Vec3Like) {
   const { adapter } = ctx;
-  if (!fullStableBlock(adapter.blockAt({ ...feet, y: feet.y - 1 }))) throw new ExcavationStop('ERROR', '下一落点没有已知稳定完整地板，不能冒险下落');
+  const problem = floorProblem(adapter.blockAt({ ...feet, y: feet.y - 1 }));
+  if (problem) throw problem;
   for (const level of [0, 1]) if (!AIR.has(adapter.blockAt({ ...feet, y: feet.y + level }) ?? '')) throw new ExcavationStop('ERROR', '落点没有已确认的两格干燥身体空间');
 }
 
@@ -62,15 +68,17 @@ function standingCell(ctx: SkillCtx, feet: Vec3Like) {
  * These reads never discover structures or choose an underground direction. */
 function preflightColumn(ctx: SkillCtx, feet: Vec3Like, height: number) {
   const { adapter } = ctx;
-  if (!fullStableBlock(adapter.blockAt({ ...feet, y: feet.y - 1 }))) throw new ExcavationStop('ERROR', '下一落点地板未知、不完整或存在液体/下落风险');
+  const problem = floorProblem(adapter.blockAt({ ...feet, y: feet.y - 1 }));
+  if (problem) throw problem;
   const cells = Array.from({ length: height }, (_, level) => ({ ...feet, y: feet.y + level }));
   for (const pos of cells) {
     const name = adapter.blockAt(pos);
-    if (!name || hazard(name)) throw new ExcavationStop('ERROR', '局部工作面未知或有液体/下落方块等危险');
+    if (name === null) throw new ExcavationStop('NOT_FOUND', '局部工作面未加载/未知');
+    if (hazard(name)) throw new ExcavationStop('ERROR', `局部工作面是 ${name}（${hazardLabel(name)}）`);
     if (!AIR.has(name)) {
       const block = registry.blocksByName[name];
       // 工作面只要求「可挖、非保护、非危险」：火把/梯子/告示牌这类透明方块不是完整立方，却一样能瞬挖通过，
-      // 不能再拿 fullStableBlock（完整立方）去卡它，否则 agent 自己插的火把会反过来堵死开挖通道
+      // 不能再拿整块判定（完整立方）去卡它，否则 agent 自己插的火把会反过来堵死开挖通道
       if (PROTECTED.has(name) || name.endsWith('_bed') || !block?.diggable || !Number.isFinite(block.hardness) || block.hardness! < 0) throw new ExcavationStop('ERROR', `工作面 ${name} 不能作为普通安全通道挖除`);
       const tools = Object.keys(block.harvestTools ?? {});
       const held = adapter.state().inventory.some((item) => item.count > 0 && tools.includes(String(registry.itemsByName[item.name]?.id)));
@@ -78,7 +86,8 @@ function preflightColumn(ctx: SkillCtx, feet: Vec3Like, height: number) {
     }
     for (const offset of [{ x: 1, y: 0, z: 0 }, { x: -1, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }, { x: 0, y: 0, z: -1 }, { x: 0, y: 1, z: 0 }]) {
       const neighbor = adapter.blockAt({ x: pos.x + offset.x, y: pos.y + offset.y, z: pos.z + offset.z });
-      if (!neighbor || hazard(neighbor)) throw new ExcavationStop('ERROR', '紧邻开挖面的液体、下落方块或未知区域阻止继续开挖');
+      if (neighbor === null) throw new ExcavationStop('NOT_FOUND', '紧邻开挖面的方块未加载/未知');
+      if (hazard(neighbor)) throw new ExcavationStop('ERROR', `紧邻开挖面是 ${neighbor}（${hazardLabel(neighbor)}）`);
     }
   }
   return cells;
@@ -212,7 +221,9 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
     const msg = (error as Error).message;
     // 拒绝时把「为什么 + 能怎么办」一起报，别只留一句 ERROR 让它盲试
     const hint = /液体|水|lava|water/.test(msg) ? '（先换方向避开液体，或先 place_at 堵上再挖）'
+      : /下落方块/.test(msg) ? '（下面是沙子/沙砾这类下落方块，换方向或先堵住再挖）'
       : /未知|未加载/.test(msg) ? '（先照亮/转头看清那一格再挖，或换方向）'
+      : /不是完整方块|站不稳/.test(msg) ? '（下面是能站但不完整的地板，确认落点高度或换方向）'
       : /身体空间|干燥|站稳/.test(msg) ? '（先挖开落点那两格的脚/头空间，或换方向）'
       : '';
     return fail(error instanceof ExcavationStop ? error.code : codeFromError(error), `有界开挖停止：${msg}${hint}`, details());
