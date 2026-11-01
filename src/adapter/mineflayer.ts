@@ -2543,11 +2543,29 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (!from.observationReady) return { ok: false, reason: 'NOT_CONNECTED' };
     const name = this.blockAt(pos);
     if (name !== 'nether_portal' && name !== 'end_portal') return { ok: false, reason: 'NO_PORTAL' };
+    // 传送要「脚落在门格上」才触发。下界门脚格站在黑曜石上、pathfinder 能直接走到；
+    // 末地门是横铺的一层、脚下常是岩浆/虚空，pathfinder 到不了门格，就走到门附近后
+    // 面向门中心短促前进，让身体自己落进门格。
+    const onPortal = () => {
+      const f = this.bot.entity.position.floored();
+      return f.x === Math.floor(pos.x) && f.y === Math.floor(pos.y) && f.z === Math.floor(pos.z);
+    };
     try {
       await this.moveTo({ kind: 'near', pos, range: 0 }, { signal, timeoutMs: 20000 });
     } catch (error) {
       throwIfAborted(signal);
-      if (this.currentDimension() === from.dim) throw error;
+      if (this.currentDimension() === from.dim) {
+        await this.moveTo({ kind: 'near', pos, range: 1.5 }, { signal, timeoutMs: 20000 });
+        const center = { x: pos.x + 0.5, y: pos.y + 0.5, z: pos.z + 0.5 };
+        const stepDeadline = Date.now() + 12000;
+        while (Date.now() < stepDeadline) {
+          throwIfAborted(signal);
+          const cur = this.state();
+          if (!cur.connected || !cur.alive) return { ok: false, reason: 'TRANSITION_INTERRUPTED' };
+          if (cur.dim !== from.dim || onPortal()) break;
+          await this.drive({ forward: true }, 350, signal, { facePoint: center });
+        }
+      }
     }
     const deadline = Date.now() + 20000;
     while (Date.now() < deadline) {
