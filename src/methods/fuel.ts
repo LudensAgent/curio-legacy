@@ -5,14 +5,14 @@
  */
 
 /** 可选燃料（按优先级：煤类 → 木板 → 原木 → 木棍） */
-export const FUELS = ['coal', 'charcoal', 'coal_block', 'oak_planks', 'birch_planks', 'spruce_planks', 'jungle_planks', 'acacia_planks', 'dark_oak_planks', 'mangrove_planks', 'cherry_planks', 'oak_log', 'birch_log', 'spruce_log', 'stick'];
+export const FUELS = ['coal', 'charcoal', 'coal_block', 'oak_planks', 'birch_planks', 'spruce_planks', 'jungle_planks', 'acacia_planks', 'dark_oak_planks', 'mangrove_planks', 'cherry_planks', 'oak_log', 'birch_log', 'spruce_log', 'warped_stem', 'crimson_stem', 'warped_hyphae', 'crimson_hyphae', 'stick'];
 
 /** 一份燃料能烧几件物品；不是燃料返回 0 */
 export function fuelBurn(fuel: string): number {
   const name = fuel.replace(/^minecraft:/, '');
   if (/^coal_block$/.test(name)) return 80;
   if (/^(coal|charcoal)$/.test(name)) return 8;
-  if (/_planks$|_log$/.test(name)) return 1.5;
+  if (/_planks$|_log$|_stem$|_hyphae$/.test(name)) return 1.5;
   if (/^stick$/.test(name)) return 0.5;
   return 0;
 }

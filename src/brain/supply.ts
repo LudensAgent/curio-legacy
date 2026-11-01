@@ -85,9 +85,10 @@ export function supplyFacts(opts: SupplyFacts): string[] {
     const every = opts.torchEvery && opts.torchEvery > 0 ? opts.torchEvery : 8;
     const c = torchCraftable(inv, opts.stock);
     const craft = c.craftable > 0 ? `；煤/木炭 ${c.coal}、木棍 ${c.sticks}，还能直接做 ${c.craftable} 支` : `；煤/木炭 ${c.coal}、木棍 ${c.sticks}，眼下不够直接做火把`;
+    const charcoalNote = c.coal === 0 ? '；火把要煤或木炭，木炭只能烧原木/木头得到，菌柄/菌核不是原木、烧不出木炭' : '';
     const chestNote = (c.chestCoal > 0 || c.chestSticks > 0) ? `（其中箱子里 煤/木炭 ${c.chestCoal}、木棍 ${c.chestSticks}）` : '';
     const spawn = opts.difficulty === 'peaceful' ? '（和平没怪，火把只为照明）' : opts.difficulty ? `（${DIFFICULTY_ZH[opts.difficulty] ?? opts.difficulty}，会刷怪）` : '';
-    out.push(`火把 ${torches} 支（torch_every≈${every} → 约能照亮 ${torches * every} 格暗处）${spawn}${craft}${chestNote}`);
+    out.push(`火把 ${torches} 支（torch_every≈${every} → 约能照亮 ${torches * every} 格暗处）${spawn}${craft}${charcoalNote}${chestNote}`);
   }
   if (want('food')) {
     const cooked = sum(inv, /cooked_|bread|baked_potato/);
