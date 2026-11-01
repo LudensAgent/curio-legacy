@@ -277,3 +277,28 @@ test('通道：在地表平整地基、挖个浅坑不算通道', () => {
   assert.equal(m.passages(D).length, 0);
   m.close();
 });
+
+test('通道：亲自一步步走过的相邻格记成 link，反复走不重复；跳跃跨格不连', () => {
+  const m = new WorldMemory(null); m.setWorld(W);
+  const tr = new PassageTracker(m, () => 'p1');
+  let t = 0;
+  tr.observe({ worldId: W, dim: D, pos: at(0, 64, 0), place: 'surface' }, [], t);
+  // 一级级对角往下：每步相邻，连成 4 条 link
+  for (let i = 1; i <= 5; i++) {
+    t += 1000;
+    tr.observe({ worldId: W, dim: D, pos: at(i, 64 - i, 0), place: 'underground' }, [{ pos: at(i, 64 - i, 0), name: 'stone', ts: t }], t);
+  }
+  const [p] = m.passages(D);
+  assert.equal(p.links?.length, 4, `记了 ${p.links?.length ?? 0} 条 link（应 4）`);
+  const has = (a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }) => p.links!.some((l) =>
+    (l.a.x === a.x && l.a.y === a.y && l.a.z === a.z && l.b.x === b.x && l.b.y === b.y && l.b.z === b.z)
+    || (l.a.x === b.x && l.a.y === b.y && l.a.z === b.z && l.b.x === a.x && l.b.y === a.y && l.b.z === a.z));
+  assert.ok(has(at(1, 63, 0), at(2, 62, 0)), '有 (1,63,0)-(2,62,0) 这条边');
+  // 从 (5,59,0) 直接跳到 (1,63,0)：跨 4 格，不连（不是相邻单步）
+  tr.observe({ worldId: W, dim: D, pos: at(1, 63, 0), place: 'underground' }, [], t + 100000);
+  assert.equal(m.passages(D)[0].links?.length, 4, '跨格跳跃不新增 link');
+  // 再从 (1,63,0) 走回 (2,62,0)：这条边已经记过，去重不新增
+  tr.observe({ worldId: W, dim: D, pos: at(2, 62, 0), place: 'underground' }, [], t + 101000);
+  assert.equal(m.passages(D)[0].links?.length, 4, '反复走同一条边不重复');
+  m.close();
+});

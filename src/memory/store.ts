@@ -62,6 +62,8 @@ export interface PassageRecord {
   entrances: Vec3Like[];
   /** 沿途脚下的点，每隔几格记一个 */
   path: Vec3Like[];
+  /** 亲自一步步走过的相邻格对（无瞬移、Chebyshev 相邻）：真实可走的边，passageRoute 优先沿这些边走，有它就不用 hop/link 几何推断 */
+  links?: { a: Vec3Like; b: Vec3Like }[];
   deepestY: number;
   /** 这条通道里自己挖掉了多少格 */
   dug: number;

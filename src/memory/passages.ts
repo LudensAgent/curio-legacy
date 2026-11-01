@@ -15,6 +15,8 @@ export interface DugBlock { pos: Vec3Like; name: string; ts: number }
 const flat = (a: Vec3Like, b: Vec3Like) => Math.hypot(a.x - b.x, a.z - b.z);
 const d3 = (a: Vec3Like, b: Vec3Like) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 const cell = (p: Vec3Like): Vec3Like => ({ x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) });
+/** 两个脚点是否 Chebyshev 相邻（单步/斜步/上下一格）；link 只记这种亲自走过的单步边，不把冲刺跨格或绕墙的位移误当直边 */
+const adjacent = (a: Vec3Like, b: Vec3Like) => Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y), Math.abs(a.z - b.z)) <= 1 && d3(a, b) > 0;
 
 /** 自己挖掉至少这么多格，才算“我挖的通道”（走进天然洞穴不算） */
 export const MIN_DUG = 4;
@@ -40,6 +42,8 @@ export class PassageTracker {
   private lastPos: { pos: Vec3Like; dim: string; worldId: string } | null = null;
   /** 最近一次在地下的位置：回地表时用于记录地表参考点，未验证实际开口。 */
   private lastBelow: { pos: Vec3Like; ts: number } | null = null;
+  /** 最近一次在通道里的脚点：用来记「亲自走过的相邻格对」（links） */
+  private lastPassage: { pos: Vec3Like; dim: string; worldId: string } | null = null;
   /** 这次行程里自己挖掉的格子：回地表时用最近的挖开格当洞口，而不是站的位置 */
   private dugBlocks: DugBlock[] = [];
 
@@ -99,6 +103,11 @@ export class PassageTracker {
       this.active = { rec: keep, existing: true };
     }
     const rec = this.active.rec;
+    // 记「亲自走过的相邻格对」：和上一次通道脚点 Chebyshev 相邻且无瞬移，就是一条真实可走的边
+    if (this.lastPassage && this.lastPassage.dim === s.dim && this.lastPassage.worldId === s.worldId && adjacent(this.lastPassage.pos, pos)) {
+      this.addLink(rec, this.lastPassage.pos, pos);
+    }
+    this.lastPassage = { pos, dim: s.dim, worldId: s.worldId };
     const last = rec.path[rec.path.length - 1];
     if (!last || d3(last, pos) >= STEP) {
       // 走回已经记过的那段路上，不重复记点
@@ -116,6 +125,7 @@ export class PassageTracker {
     if (this.active) this.save();
     this.active = null;
     this.dugBlocks = [];
+    this.lastPassage = null;
   }
 
   /** 最近的挖开格（洞口）：回地表时优先记自己挖开的那一格，而不是站的位置；只找贴近地表那层的挖开格。
@@ -159,11 +169,20 @@ export class PassageTracker {
   private mergeInto(keep: PassageRecord, drop: PassageRecord) {
     for (const e of drop.entrances) this.addEntrance(keep, e);
     for (const q of drop.path) if (!keep.path.some((o) => d3(o, q) < STEP)) keep.path.push(q);
+    for (const l of drop.links ?? []) this.addLink(keep, l.a, l.b);
     keep.dug += drop.dug;
     for (const [n, c] of Object.entries(drop.ores)) keep.ores[n] = (keep.ores[n] ?? 0) + c;
     keep.deepestY = Math.min(keep.deepestY, drop.deepestY);
     keep.uses += 1;
     this.memory.forgetPassage?.(drop.id);
+  }
+
+  /** 记一条亲自走过的相邻格对（无向、去重）。反复走同一条走廊不会新增，links 只随真正走过的新格子增长，天然有界。 */
+  private addLink(rec: PassageRecord, a: Vec3Like, b: Vec3Like) {
+    const links = (rec.links ??= []);
+    const same = (u: Vec3Like, v: Vec3Like) => u.x === v.x && u.y === v.y && u.z === v.z;
+    if (links.some((l) => (same(l.a, a) && same(l.b, b)) || (same(l.a, b) && same(l.b, a)))) return;
+    links.push({ a, b });
   }
 
   /** 走进去的天然洞穴也记（用于原路返回）；挖够了就升级成"我挖的通道"；接着以前那条走的随时存 */
@@ -188,31 +207,41 @@ export function passageLevels(rec: Pick<PassageRecord, 'path'>): number[] {
 }
 
 /**
- * 沿自己挖过、走过的通道找一条路：把各条通道记下的脚下点连成网（同一条里前后相邻的点、不同条里挨得很近的点），
- * 返回从离自己最近的点到离目标最近的点的几何连接；未验证点间通行或当前地形，不能作为自动导航路线。
+ * 沿自己挖过、走过的通道找一条路：优先沿亲自走过的相邻格对（links，真实可走的边）连成网；
+ * 旧数据没有 links 时退回「同一条里前后相邻的脚点」的推断；不同条之间仍按几何距离做碎片自愈（挨得很近就当接得上）。
+ * 返回从离自己最近的点到离目标最近的点的连接；未验证点间通行或当前地形，不能作为自动导航路线。
  * 两头离通道太远、或者连不上，就返回 null。
  */
-export function passageRoute(recs: Pick<PassageRecord, 'path'>[], from: Vec3Like, to: Vec3Like,
+export function passageRoute(recs: Pick<PassageRecord, 'path' | 'links'>[], from: Vec3Like, to: Vec3Like,
   opts: { near?: number; hop?: number; link?: number } = {}): Vec3Like[] | null {
   const near = opts.near ?? 5, hop = opts.hop ?? 7, link = opts.link ?? PASSAGE_LINK;
   const nodes: Vec3Like[] = [];
+  const owner: number[] = [];
   const edges = new Map<number, Set<number>>();
   const add = (a: number, b: number) => { if (a === b) return; (edges.get(a) ?? edges.set(a, new Set()).get(a)!).add(b); (edges.get(b) ?? edges.set(b, new Set()).get(b)!).add(a); };
-  const indexOf = (p: Vec3Like) => {
+  const indexOf = (p: Vec3Like, recIdx: number) => {
     const i = nodes.findIndex((q) => q.x === p.x && q.y === p.y && q.z === p.z);
     if (i >= 0) return i;
     nodes.push(p);
+    owner.push(recIdx);
     return nodes.length - 1;
   };
-  for (const r of recs) {
-    let prev = -1;
-    for (const p of r.path) {
-      const i = indexOf(p);
-      if (prev >= 0 && d3(nodes[prev], p) <= hop) add(prev, i);
-      prev = i;
+  recs.forEach((r, recIdx) => {
+    if (r.links?.length) {
+      // 有真实边：只沿亲自走过的相邻格对连，不做同一条内部的几何硬连（那会穿墙/穿落差）
+      for (const { a, b } of r.links) add(indexOf(a, recIdx), indexOf(b, recIdx));
+    } else {
+      // 旧数据没有 links：退回时间相邻脚点的推断（原行为）
+      let prev = -1;
+      for (const p of r.path) {
+        const i = indexOf(p, recIdx);
+        if (prev >= 0 && d3(nodes[prev], p) <= hop) add(prev, i);
+        prev = i;
+      }
     }
-  }
-  for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) if (d3(nodes[i], nodes[j]) <= link) add(i, j);
+  });
+  // 碎片自愈只跨 record：不同 record 之间挨得近的点连起来，同一条 record 内部不靠几何距离硬连
+  for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) if (owner[i] !== owner[j] && d3(nodes[i], nodes[j]) <= link) add(i, j);
   const closest = (p: Vec3Like) => {
     let best = -1, bd = Infinity;
     nodes.forEach((q, i) => { const d = d3(q, p); if (d < bd) { bd = d; best = i; } });

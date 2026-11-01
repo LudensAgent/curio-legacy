@@ -17,6 +17,20 @@ test('沿记下的脚下点找路：同一条里前后相邻、不同条挨得�
   assert.equal(passageRoute([main], { x: 0, y: 80, z: 0 }, { x: 12, y: 40, z: 12 }), null, '自己离通道太远');
 });
 
+test('有 links 的通道：路由只沿真实走过的边，不因 ≤3.5 而几何抄近道', () => {
+  const rec = {
+    path: [] as Vec3Like[],
+    links: [
+      { a: { x: 0, y: 40, z: 0 }, b: { x: 1, y: 40, z: 0 } },
+      { a: { x: 1, y: 40, z: 0 }, b: { x: 2, y: 40, z: 0 } },
+      { a: { x: 2, y: 40, z: 0 }, b: { x: 3, y: 40, z: 0 } },
+    ],
+  };
+  // (0,40,0) 和 (3,40,0) 直线相距 3（≤ link=3.5），但没走过这条边：路由应沿 0→1→2→3，不抄近道
+  const r = passageRoute([rec], { x: 0, y: 40, z: 0 }, { x: 3, y: 40, z: 0 });
+  assert.deepEqual(r!.map((p) => `${p.x},${p.z}`), ['0,0', '1,0', '2,0', '3,0']);
+});
+
 test('goto does not detour through historical passage points to reach a nearby lower target', async (t) => {
   const w = new TestWorld();
   w.pos = { x: 0.5, y: 64, z: 0.5 };
