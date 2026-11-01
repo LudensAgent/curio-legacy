@@ -15,6 +15,8 @@ import { openWater, planBoatRoute, type BoatRoute } from './vehicles.ts';
 const AIRISH = new Set(['air', 'cave_air', 'void_air']);
 /** 能往空气格里倒的桶：on 写坐标时用 */
 const FLUID_BUCKETS = new Set(['water_bucket', 'lava_bucket']);
+/** 能对指定坐标右键点火（点下界门框内/生火）的物品 */
+const IGNITE_ITEMS = new Set(['flint_and_steel', 'fire_charge']);
 /** "x,y,z" / [x,y,z] / {x,y,z} → 整数坐标；不是坐标返回 null */
 const coordValue = (v: unknown): Vec3Like | null => {
   const arr = typeof v === 'string' ? v.split(/[,\s]+/).filter(Boolean).map(Number)
@@ -33,8 +35,8 @@ const dirOk = (dir: string | undefined, from: { x: number; z: number }, to: { x:
 // ------------------------------------------------------------------ use_item
 export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string }> = {
   name: 'use_item',
-  description: '手持物品右键：对着最近的看得见的某种方块、水面或岩浆（on 写方块名），或对自己（on:"self"，扔东西朝正看着的方向）；on 写坐标（"x,y,z" 或 {"x","y","z"}）时把水桶/岩浆桶倒进那一格空气（浇岩浆做黑曜石用它）；手持船/筏（*_boat/*_raft）对 on:"water" 是放船（生成实体，之后 interact 坐上去、ride 划走）；要对准确定的那一格用 interact_block（写坐标）；对生物用东西（喂、剪、挤奶）是 interact',
-  argsDoc: '{"item": "<物品名>", "on"?: "self | water | lava | <方块名> | {x,y,z}坐标（倒水桶/岩浆桶进这格空气）", "dir"?: "N|NE|E|SE|S|SW|W|NW"}',
+  description: '手持物品右键：对着最近的看得见的某种方块、水面或岩浆（on 写方块名），或对自己（on:"self"，扔东西朝正看着的方向）；on 写坐标（"x,y,z" 或 {"x","y","z"}）时：水桶/岩浆桶倒进那一格空气（浇岩浆做黑曜石用它），打火石/火焰弹对这格右键点火（点下界门框内空气用它）；手持船/筏（*_boat/*_raft）对 on:"water" 是放船（生成实体，之后 interact 坐上去、ride 划走）；要对准确定的那一格用 interact_block（写坐标）；对生物用东西（喂、剪、挤奶）是 interact',
+  argsDoc: '{"item": "<物品名>", "on"?: "self | water | lava | <方块名> | {x,y,z}坐标（倒水桶/岩浆桶进这格空气 / 打火石·火焰弹对这格点火）", "dir"?: "N|NE|E|SE|S|SW|W|NW"}',
   timeoutMs: 30000,
   movement: true,
   validate(raw, adapter) {
@@ -59,8 +61,15 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
     const s = adapter.state();
     if (!s.inventory.some((i) => i.name === args.item)) return fail('MISSING_MATERIALS', `背包里没有 ${args.item}`);
     if (typeof args.on !== 'string') {
-      if (!FLUID_BUCKETS.has(args.item)) return fail('BAD_ARGS', 'on 写坐标只能用来倒水/倒岩浆（water_bucket / lava_bucket）；对其他物品请写方块名或 "self"');
       const pos = args.on;
+      if (IGNITE_ITEMS.has(args.item)) {
+        if (!adapter.useBlockAt) return fail('ERROR', '当前适配器不支持对坐标使用物品');
+        const r = await adapter.useBlockAt(pos, args.item, signal);
+        if (!r.ok) return fail('ERROR', `对 (${pos.x},${pos.y},${pos.z}) 使用 ${args.item} 点火失败：${r.reason}`, { pos, reason: r.reason });
+        const now = adapter.blockAt(pos);
+        return ok(`对 (${pos.x},${pos.y},${pos.z}) 使用 ${args.item}（现在这格是 ${now ?? '未知'}）`, { pos, changed: now });
+      }
+      if (!FLUID_BUCKETS.has(args.item)) return fail('BAD_ARGS', 'on 写坐标只支持倒水/倒岩浆（water_bucket / lava_bucket）或点火（flint_and_steel / fire_charge）；对其他物品请写方块名或 "self"');
       const cur = adapter.blockAt(pos);
       if (cur !== null && !AIRISH.has(cur)) return fail('EFFECT_NOT_CONFIRMED', `(${pos.x},${pos.y},${pos.z}) 不是空气（现在是 ${cur}），水/岩浆只能倒进空格`, { pos });
       try {
