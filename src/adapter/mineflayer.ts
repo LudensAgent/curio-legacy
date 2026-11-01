@@ -252,13 +252,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   private guardedClients = new WeakSet<object>();
   private dragonDeath: BossDeathObservation | null = null;
   private normalMovements: any = null;
+  /** 正在等一次跨维度传送落地：newSession 不打断这个动作，让 enterPortalAt 自己确认切换成功 */
+  private inPortalTransition = false;
 
   private newSession() {
     this.dragonDeath = null;
     this.spawned = false;
     this.sessionId = shortId('session_');
     this.observationId = 0;
-    this.stopAll();
+    // 跨维度传送会等维度真正切过去再自己验收；这里不 stopAll，否则把正在等落地的动作掐成「断线」
+    if (!this.inPortalTransition) this.stopAll();
   }
 
   private currentDimension() {
@@ -2550,38 +2553,43 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const f = this.bot.entity.position.floored();
       return f.x === Math.floor(pos.x) && f.y === Math.floor(pos.y) && f.z === Math.floor(pos.z);
     };
+    this.inPortalTransition = true;
     try {
-      await this.moveTo({ kind: 'near', pos, range: 0 }, { signal, timeoutMs: 20000 });
-    } catch (error) {
-      throwIfAborted(signal);
-      if (this.currentDimension() === from.dim) {
-        await this.moveTo({ kind: 'near', pos, range: 1.5 }, { signal, timeoutMs: 20000 });
-        const center = { x: pos.x + 0.5, y: pos.y + 0.5, z: pos.z + 0.5 };
-        const stepDeadline = Date.now() + 12000;
-        while (Date.now() < stepDeadline) {
-          throwIfAborted(signal);
-          const cur = this.state();
-          if (!cur.connected || !cur.alive) return { ok: false, reason: 'TRANSITION_INTERRUPTED' };
-          if (cur.dim !== from.dim || onPortal()) break;
-          await this.drive({ forward: true }, 350, signal, { facePoint: center });
+      try {
+        await this.moveTo({ kind: 'near', pos, range: 0 }, { signal, timeoutMs: 20000 });
+      } catch (error) {
+        throwIfAborted(signal);
+        if (this.currentDimension() === from.dim) {
+          await this.moveTo({ kind: 'near', pos, range: 1.5 }, { signal, timeoutMs: 20000 });
+          const center = { x: pos.x + 0.5, y: pos.y + 0.5, z: pos.z + 0.5 };
+          const stepDeadline = Date.now() + 12000;
+          while (Date.now() < stepDeadline) {
+            throwIfAborted(signal);
+            const cur = this.state();
+            if (!cur.connected || !cur.alive) return { ok: false, reason: 'TRANSITION_INTERRUPTED' };
+            if (cur.dim !== from.dim || onPortal()) break;
+            await this.drive({ forward: true }, 350, signal, { facePoint: center });
+          }
         }
       }
-    }
-    const deadline = Date.now() + 20000;
-    while (Date.now() < deadline) {
-      throwIfAborted(signal);
-      const to = this.state();
-      if (!to.connected || !to.alive) return { ok: false, reason: 'TRANSITION_INTERRUPTED' };
-      if (to.dim !== from.dim && to.sessionId !== from.sessionId && to.observationReady) {
-        if (expectedDim && to.dim !== expectedDim) return { ok: false, reason: `WRONG_DIMENSION:${to.dim}`, from, to };
-        return { ok: true, from, to };
+      const deadline = Date.now() + 20000;
+      while (Date.now() < deadline) {
+        throwIfAborted(signal);
+        const to = this.state();
+        if (!to.connected || !to.alive) return { ok: false, reason: 'TRANSITION_INTERRUPTED' };
+        if (to.dim !== from.dim && to.sessionId !== from.sessionId && to.observationReady) {
+          if (expectedDim && to.dim !== expectedDim) return { ok: false, reason: `WRONG_DIMENSION:${to.dim}`, from, to };
+          return { ok: true, from, to };
+        }
+        // No further world action is issued after the dimension changes. Loading
+        // and the fresh spawn observation are the only evidence of arrival.
+        if (to.dim === from.dim) check();
+        await sleep(200, signal);
       }
-      // No further world action is issued after the dimension changes. Loading
-      // and the fresh spawn observation are the only evidence of arrival.
-      if (to.dim === from.dim) check();
-      await sleep(200, signal);
+      return { ok: false, reason: 'PORTAL_TRANSITION_TIMEOUT' };
+    } finally {
+      this.inPortalTransition = false;
     }
-    return { ok: false, reason: 'PORTAL_TRANSITION_TIMEOUT' };
   }
 
   bossStatus() {
