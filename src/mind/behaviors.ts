@@ -153,7 +153,7 @@ const MAX_STEPS = 8;
 type Validated = { name: string; description: string; body: string; behavior: Record<string, unknown>; disable?: boolean };
 
 /** 校验模型写的技能：动作必须是会的、参数合法，条件必须是能感觉到的事 */
-export function validateBehavior(raw: unknown, adapter?: GameAdapter): Validated | { error: string } {
+export function validateBehavior(raw: unknown, adapter?: GameAdapter, opts?: { deferCompile?: boolean }): Validated | { error: string } {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: 'skill 必须是对象 {"name","description","when"?,"steps"}' };
   const o = raw as Record<string, any>;
   const name = normalizeSkillName(String(o.name ?? ''));
@@ -164,7 +164,8 @@ export function validateBehavior(raw: unknown, adapter?: GameAdapter): Validated
   const code = typeof o.code === 'string' ? o.code.replace(/\r\n/g, '\n') : undefined;
   if (code !== undefined) {
     if (Array.isArray(o.steps) && o.steps.length) return { error: 'skill 里 steps 和 code 只写一种' };
-    const bad = compileCheck(code);
+    // 启动时批量加载候选可推迟编译：真正被 use_skill 调用时 runSandboxed 还会再查一遍，这里不预先花 TypeScript 编译的时间
+    const bad = opts?.deferCompile ? null : compileCheck(code);
     if (bad) return { error: `skill.code：${bad}` };
   } else {
     if (!Array.isArray(o.steps) || !o.steps.length) return { error: 'skill.steps 至少一步动作（或者写 code：一段 JavaScript）' };
@@ -193,7 +194,7 @@ export function validateBehavior(raw: unknown, adapter?: GameAdapter): Validated
   const behavior: Record<string, unknown> = code !== undefined ? { code: code.slice(0, MAX_CODE) } : { steps };
   if (o.verify !== undefined && o.verify !== null && o.verify !== '') {
     const verify = String(o.verify).replace(/\r\n/g, '\n');
-    const bad = compileCheck(verify, { allowed: VERIFY_METHODS, maxLen: MAX_VERIFY });
+    const bad = opts?.deferCompile ? null : compileCheck(verify, { allowed: VERIFY_METHODS, maxLen: MAX_VERIFY });
     if (bad) return { error: `skill.verify：${bad}（判定只能看：${VERIFY_METHODS.map((m) => `api.${m}`).join('、')}）` };
     behavior.verify = verify;
   }
@@ -241,9 +242,9 @@ export function validateBehavior(raw: unknown, adapter?: GameAdapter): Validated
 }
 
 /** 把技能书里一份带 behavior 的技能变成可执行的行为；格式不对就跳过 */
-function toBehavior(k: KnowSkill, adapter: GameAdapter): Behavior | { error: string } | null {
+function toBehavior(k: KnowSkill, adapter: GameAdapter, deferCompile = false): Behavior | { error: string } | null {
   if (!k.behavior || typeof k.behavior !== 'object') return null;
-  const v = validateBehavior({ name: k.name, description: k.description || k.name, ...(k.behavior as object) }, adapter);
+  const v = validateBehavior({ name: k.name, description: k.description || k.name, ...(k.behavior as object) }, adapter, { deferCompile });
   if ('error' in v) return v;
   if (v.disable) return null;
   const b = v.behavior as Record<string, any>;
@@ -322,12 +323,12 @@ export class BehaviorEngine {
     this.invalidCandidates.clear();
     for (const k of this.book?.list() ?? []) {
       if (k.behavior === undefined) continue;
-      const b = toBehavior(k, this.adapter);
+      const b = toBehavior(k, this.adapter, (k.behavior as Record<string, unknown>).candidate === true);
       if (b && !('error' in b)) { b.version ??= this.stats[b.name]?.rev ?? 1; this.behaviors.set(b.name, b); }
       else if ((k.behavior as Record<string, unknown>).candidate !== true) this.invalid.set(k.name, b?.error ?? '格式不对，没有生效');
     }
     for (const k of this.book?.pending() ?? []) {
-      const b = toBehavior(k, this.adapter);
+      const b = toBehavior(k, this.adapter, true);
       if (b && !('error' in b)) this.candidates.set(b.name, b);
       else this.invalidCandidates.set(k.name, b?.error ?? '格式不对');
     }
