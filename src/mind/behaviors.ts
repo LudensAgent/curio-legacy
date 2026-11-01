@@ -388,7 +388,7 @@ export class BehaviorEngine {
     }
     // 救命类的候选也允许在要命条件下自动接手（事后按结果判定启用还是收起），其余候选仍只显式试用
     const auto = this.list().filter((b) => b.mode === 'auto' && this.enabled(b))
-      .concat(this.list(true).filter((b) => b.mode === 'auto' && isEmergency(b) && !this.inactive(b.name)));
+      .concat(this.list(true).filter((b) => b.mode === 'auto' && isEmergency(b) && !this.inactive(b.name) && !this.candidateRetirement(b.name)));
     if (!auto.length) return false;
     const running = this.running(cur);
     // 天生的躲闪正在进行（逃跑、上浮）时，只有更要紧的技能才插手
