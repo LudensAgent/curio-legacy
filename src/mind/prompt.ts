@@ -632,7 +632,11 @@ function worldKnowledge(ctx: MindContext) {
   const danger = m.hazards(p.self.dim).map((h) => ({ h, d: Math.round(Math.hypot(h.pos.x - here.x, h.pos.z - here.z)) })).filter((e) => e.d < 96).slice(0, 4)
     .map(({ h, d }) => `${h.kind} @(${h.pos.x},${h.pos.y},${h.pos.z}) ${d}格，出过 ${h.count} 次事`);
   const bed = myBed(m, { dim: p.self.dim, worldId: s.worldId, pos: here }, ctx.blockAt);
-  const portals = travelStore(m).snapshot(s.worldId).endpoints.slice(-4);
+  const portalSnapshot = travelStore(m).snapshot(s.worldId);
+  const portals = portalSnapshot.endpoints.slice(-4).map((e) => {
+    const leadsTo = portalSnapshot.routes.filter((r) => r.fromId === e.id).map((r) => ({ to: r.toId, return_verified: r.returnVerified }));
+    return { id: e.id, dim: e.dim, kind: e.kind, pos: e.pos, ...(leadsTo.length ? { leads_to: leadsTo } : {}) };
+  });
   const builds = myBuilds(m, { worldId: s.worldId, dim: p.self.dim, pos: here });
   const home = homeOf(m, { worldId: s.worldId, dim: p.self.dim, pos: here });
   const drafts = activeDrafts()?.list(4).filter((d) => !d.usedBy) ?? [];
