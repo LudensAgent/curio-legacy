@@ -429,6 +429,25 @@ export class Perception {
     }
   }
 
+  /** 刚挖开一格后，这一格的上下左右前后 6 个邻面贴脸可见（不转头、不透视）：把其中的矿/危险方块记进视野和记忆。 */
+  private noteExposedNeighbors(s: { dim: string; pos: Vec3Like }, dug: { pos: Vec3Like }[]) {
+    if (!dug.length) return;
+    const range = this.vision.effectiveRange();
+    const off = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]] as const;
+    for (const d of dug) {
+      const { x, y, z } = d.pos;
+      for (const [dx, dy, dz] of off) {
+        const pos = { x: x + dx, y: y + dy, z: z + dz };
+        if (Math.hypot(pos.x + 0.5 - s.pos.x, pos.y + 0.5 - s.pos.y, pos.z + 0.5 - s.pos.z) > range + 1) continue;
+        const name = this.vision.expose(pos);
+        if (!name) continue;
+        if (this.memory.markSeen('blocks', name)) this.bus.publish('discovery', 'P2', `首次看见方块：${name}（刚挖开的邻面）`, { category: 'block', name, pos });
+        if (DANGER.has(name)) this.memory.addLandmark('danger', name, s.dim, pos);
+        if (isResourceBlock(name) && name !== 'lava') this.memory.addLandmark('resource', name, s.dim, pos);
+      }
+    }
+  }
+
   /**
    * 同种生物按实际所见的位置分群；一次短暂目击也留下历史线索。
    * 没看见不证明离开或消失，旧点只由已有的历史时间规则控制召回。
@@ -634,6 +653,7 @@ export class Perception {
         const dug = this.adapter.recentDug?.(this.lastDugAt) ?? [];
         if (dug.length) this.lastDugAt = dug[dug.length - 1].ts;
         this.forgetMinedOre(s, dug);
+        this.noteExposedNeighbors(s, dug);
         const place = where.kind === 'surface' || where.kind === 'indoors' ? 'surface' : where.kind === 'underground' ? 'underground' : 'other';
         this.passages.observe({ worldId: s.worldId, dim: s.dim, pos: s.pos, place }, dug);
         // 自己放置的方块：放→记进 LRU；挖→从 LRU 移除（保持与当前世界一致）

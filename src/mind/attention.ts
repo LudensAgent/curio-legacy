@@ -10,7 +10,7 @@ export const RECONSIDER = 0.5;
 
 const levelOf = (s: number): Noticing['level'] => s >= URGENT ? 'urgent' : s >= RECONSIDER ? 'reconsider' : 'note';
 
-interface Snapshot { effects: Set<string>; worn: Set<string>; weather: string; phase: string; food: number; hp: number; emptySlots: number; hostiles: Set<string>; resources: Set<string>; light: string | null; inWater: boolean }
+interface Snapshot { effects: Set<string>; worn: Set<string>; weather: string; phase: string; food: number; hp: number; emptySlots: number; hostiles: Set<string>; resources: Set<string>; oresNear: Set<string>; light: string | null; inWater: boolean }
 
 /**
  * 注意力：把游戏里发生的事变成“我注意到了…”，并判断值不值得为它停下来重新想。
@@ -81,6 +81,7 @@ export class Attention {
       weather: p.time.weather ?? '', phase: p.time.phase, food: p.self.food, hp: p.self.hp, emptySlots: p.emptySlots,
       hostiles: new Set(p.nearby.hostile.filter((h) => h.dist <= 16).map((h) => h.name)),
       resources: new Set(p.nearby.resources.filter((r) => r.seen === 'now').map((r) => r.block)),
+      oresNear: new Set(p.nearby.resources.filter((r) => r.seen === 'memory' && r.nearest <= 12 && /_ore$|ancient_debris|budding_amethyst|amethyst_cluster/.test(r.block)).map((r) => r.block)),
       light: p.light?.level ?? null, inWater: p.self.inWater,
     };
     const prev = this.last;
@@ -114,7 +115,11 @@ export class Attention {
     const creeper = p.nearby.hostile.find((h) => h.name === 'creeper' && h.dist <= 10);
     if (creeper) out.push(this.notice('creeper_near', `苦力怕在 ${Math.round(creeper.dist)} 格外${creeper.fusing ? '，正在嘶嘶作响' : '靠过来'}`, creeper.dist <= 6 ? 0.8 : 0.6, 20_000, now));
     for (const r of snap.resources) if (!prev.resources.has(r) && /ore|diamond|emerald|ancient|amethyst|spawner|chest|portal|village|bell/.test(r)) {
-      out.push(this.notice(`res:${r}`, `看见了 ${r}`, /diamond|emerald|ancient|spawner|portal/.test(r) ? 0.55 : 0.4, 180_000, now));
+      out.push(this.notice(`res:${r}`, `看见了 ${r}`, /diamond|emerald|ancient|spawner|portal|iron|gold|redstone|lapis/.test(r) ? 0.55 : 0.4, 180_000, now));
+    }
+    // 顺路：脚边（≤12 格）就记得有高价值矿点——采不采、顺不顺路由它自己掂量
+    for (const r of snap.oresNear) if (!prev.oresNear.has(r)) {
+      out.push(this.notice(`ore_near:${r}`, `脚边就记得有 ${r}：要不要顺路挖掉，自己掂量`, 0.55, 180_000, now));
     }
     if (snap.light === 'dark' && prev.light !== 'dark') out.push(this.notice('dark', '周围很暗', 0.3, 120_000, now));
     // 转头后重见同一实体不再提醒；同种物品的新实体仍交给下一次思考判断。

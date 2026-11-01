@@ -633,6 +633,22 @@ export class Vision {
     return k && Date.now() - k.lastSeen <= RESOURCE_MEMORY_TTL_MS ? k.name : null;
   }
 
+  /** 刚挖开一格后，这一格暴露出的邻面是贴脸可见的（不用转头、不用视线确认）：把值得注意的方块直接记进视野记忆。返回记下的方块名。 */
+  expose(pos: Vec3Like): string | null {
+    const state = this.adapter.state();
+    if (!state.observationReady) return null;
+    const name = this.adapter.blockStateAt?.(pos)?.name ?? this.adapter.blockOptics(pos.x, pos.y, pos.z)?.name;
+    if (!name || name === 'air' || name === 'cave_air' || name === 'void_air') return null;
+    if (!NOTABLE.has(name) && !GROUND.has(name)) return null;
+    const now = Date.now();
+    const k = keyOf(pos.x, pos.y, pos.z);
+    this.visibleSurfaces.set(k, { name, pos: { ...pos }, at: now });
+    const dist = Math.round(Math.hypot(pos.x + 0.5 - state.pos.x, pos.y + 0.5 - state.pos.y, pos.z + 0.5 - state.pos.z));
+    if (!this.visibleNow.has(k)) this.visibleNow.set(k, { name, pos: { ...pos }, dist });
+    this.remember(k, name, { ...pos }, now);
+    return name;
+  }
+
   /** 让最近扫描一次（例如转头之后）。距离上次不足 150ms 则跳过。 */
   refresh() {
     this.syncScope();
