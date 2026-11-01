@@ -32,3 +32,13 @@ test('defend 在低血量时执行已选择的目标；旧 stay 参数仍可用'
   assert.equal(hits, 2);
   assert.deepEqual(defend.validate({ stay: true }, w as any), { ok: true, args: { stay: true } });
 });
+
+test('defend 把 entityId 0/负数当占位，回退到按 target 名字匹配', () => {
+  const w = new TestWorld();
+  // 模型不知道真实实体 id 时常写 0：若保留 0，pick() 按 e.id===0 找、贴身也报 NOT_FOUND
+  assert.deepEqual(defend.validate({ entityId: 0, target: 'hoglin' }, w as any), { ok: true, args: { target: 'hoglin' } });
+  assert.deepEqual(defend.validate({ entityId: -1, target: 'hoglin' }, w as any), { ok: true, args: { target: 'hoglin' } });
+  assert.deepEqual(defend.validate({ entityId: 0 }, w as any), { ok: true, args: {} });
+  // 正整数才是真实实体 ID，予以保留
+  assert.deepEqual(defend.validate({ entityId: 7, target: 'hoglin' }, w as any), { ok: true, args: { entityId: 7, target: 'hoglin' } });
+});

@@ -52,7 +52,9 @@ export const defend: Skill<{ entityId?: number; target?: string; stay?: boolean 
     const a = obj(raw);
     const id = Number(a.entityId);
     const target = typeof a.target === 'string' && a.target.trim() ? a.target.trim().toLowerCase().replace(/^minecraft:/, '') : undefined;
-    return { ok: true, args: { ...(Number.isFinite(id) ? { entityId: id } : {}), ...(target ? { target } : {}), ...(a.stay === true ? { stay: true } : {}) } };
+    // entityId 只在是正整数时生效：模型不知道真实实体 id 时常写 0 当占位，0/负数/NaN 都视为「未指定」，
+    // 回退到按 target 名字匹配，否则 pick() 里 e.id === 0 永远找不到、明明贴身却报 NOT_FOUND。
+    return { ok: true, args: { ...(Number.isFinite(id) && id > 0 ? { entityId: id } : {}), ...(target ? { target } : {}), ...(a.stay === true ? { stay: true } : {}) } };
   },
   async run(ctx, args) {
     const { adapter, signal, senses } = ctx;
