@@ -12,7 +12,7 @@ import { FakeAdapter } from './fake-adapter.ts';
 
 const day = 24_000;
 const definition = { name: 'observed-work', description: '按委托完成动作并核对真实结果', body: '只执行指定动作，返回观测结果，不把尚未验证的推断当作成功。',
-  code: 'return {worked:true};', verify: 'return true;' };
+  code: 'return {worked:true};', verify: 'const s = await api.state(); return true;' };
 
 function setup(t: TestContext, options: Partial<CuratorOptions> = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-game-idle-'));

@@ -28,7 +28,7 @@ function rig(t: any, dir = tmp()) {
 
 test('声明了参数的技能：传了不认识的参数名当场说清楚它要什么；没声明的照旧不管', (t) => {
   const { engine, adapter } = rig(t);
-  assert.ok(engine.write({ name: 'echo-y', description: '把要到的高度原样报回来', args: { y: '要挖到的高度' }, code: 'return { y: args.y };', verify: 'return true;' }).ok);
+  assert.ok(engine.write({ name: 'echo-y', description: '把要到的高度原样报回来', args: { y: '要挖到的高度' }, code: 'return { y: args.y };', verify: 'const s = await api.state(); return true;' }).ok);
   const bad = useSkill.validate({ name: 'echo-y', args: { targetY: 30 } }, adapter as any) as any;
   assert.equal(bad.ok, false);
   assert.match(bad.error, /不认识参数 args\.targetY；它要的是：args\.y（要挖到的高度）/);
@@ -59,7 +59,7 @@ test('dig-down-to-depth v11：声明了 y，判定拿调用方给的 y 核对', 
 
 test('参数摊平写也认；说明里写了默认值的参数可以不给', (t) => {
   const { engine, adapter } = rig(t);
-  assert.ok(engine.write({ name: 'echo-y', description: '把要到的高度原样报回来', args: { y: '要挖到的高度', dir: '方向 N/S/E/W，不给就按当前朝向' }, code: 'return { y: args.y };', verify: 'return true;' }).ok);
+  assert.ok(engine.write({ name: 'echo-y', description: '把要到的高度原样报回来', args: { y: '要挖到的高度', dir: '方向 N/S/E/W，不给就按当前朝向' }, code: 'return { y: args.y };', verify: 'const s = await api.state(); return true;' }).ok);
   const flat = useSkill.validate({ name: 'echo-y', y: 30, dir: 'E' }, adapter as any) as any;
   assert.equal(flat.ok, true, flat.error);
   assert.deepEqual(flat.args.args, { y: 30, dir: 'E' });
@@ -72,7 +72,7 @@ test('参数摊平写也认；说明里写了默认值的参数可以不给', (t
 
 test('漏参时说明完整契约并指出已经提供的参数，避免补一项时丢掉另一项', (t) => {
   const { engine, adapter } = rig(t);
-  assert.ok(engine.write({ name: 'toss-items', description: '丢弃指定物品', args: { items: '物品名列表', count: '每种最多扔多少个' }, code: 'return {};', verify: 'return true;' }).ok);
+  assert.ok(engine.write({ name: 'toss-items', description: '丢弃指定物品', args: { items: '物品名列表', count: '每种最多扔多少个' }, code: 'return {};', verify: 'const s = await api.state(); return true;' }).ok);
   const result = useSkill.validate({ name: 'toss-items', args: { items: ['private-item'] } }, adapter);
   assert.equal(result.ok, false);
   if (result.ok) return;
@@ -89,8 +89,8 @@ test('技能调用分别报告文字记录、无效定义、候选、停用及�
   assert.ok(book.write('notes-only', '文字记录做法', '这是一份没有可执行行为的文字记录，用于阅读和参考。').ok);
   assert.ok(book.write('bad-behavior', '无效定义示例', '这份记录包含一个无法注册的动作定义。', { steps: [{ skill: 'no-such-action' }] }).ok);
   assert.ok(book.write('bad-candidate', '无效候选示例', '这份候选记录包含一个无法注册的动作定义。', { steps: [{ skill: 'no-such-action' }] }, { candidate: true }).ok);
-  assert.ok(engine.write({ name: 'candidate-only', description: '候选做法', code: 'return {};', verify: 'return true;' }, { by: 'forge' }).ok);
-  assert.ok(engine.write({ name: 'retired-skill', description: '停用做法', code: 'return {};', verify: 'return true;' }).ok);
+  assert.ok(engine.write({ name: 'candidate-only', description: '候选做法', code: 'return {};', verify: 'const s = await api.state(); return true;' }, { by: 'forge' }).ok);
+  assert.ok(engine.write({ name: 'retired-skill', description: '停用做法', code: 'return {};', verify: 'const s = await api.state(); return true;' }).ok);
   engine.retire('retired-skill', '不再使用');
   const error = (name: string, trial = false) => {
     const result = useSkill.validate({ name, trial }, adapter);

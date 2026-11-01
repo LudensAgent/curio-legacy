@@ -8,7 +8,7 @@ import { SkillBook } from '../src/knowledge/skillbook.ts';
 import { BehaviorEngine } from '../src/mind/behaviors.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 
-const def = { name: 'toss-verified-behind', description: '扔杂石并核对', body: '扔杂石', code: 'return {dropped:1};', verify: 'return true;' };
+const def = { name: 'toss-verified-behind', description: '扔杂石并核对', body: '扔杂石', code: 'return {dropped:1};', verify: 'const s = await api.state(); return true;' };
 
 function setup(t: TestContext) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-broken-'));

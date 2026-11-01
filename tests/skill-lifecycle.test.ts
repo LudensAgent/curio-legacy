@@ -93,14 +93,14 @@ test('停用同时约束校验和已排队执行，后台修订也不能复活',
 
 test('跳过和无动作自报成功不能晋级，子调用保留自己的实际使用证据', async (t) => {
   const w = setup(t);
-  assert.ok(w.engine.write({ ...definition, code: 'return {skipped:"不用做"};', verify: 'return true;' }, { by: 'mind' }).ok);
+  assert.ok(w.engine.write({ ...definition, code: 'return {skipped:"不用做"};', verify: 'const s = await api.state(); return true;' }, { by: 'mind' }).ok);
   for (let i = 0; i < 3; i++) await w.run(true);
   assert.equal(w.engine.currentStats(definition.name, true).ok, 0);
-  assert.ok(w.engine.write({ ...definition, code: 'return {ok:true};', verify: 'return true;' }, { by: 'mind' }).ok);
+  assert.ok(w.engine.write({ ...definition, code: 'return {ok:true};', verify: 'const s = await api.state(); return true;' }, { by: 'mind' }).ok);
   for (let i = 0; i < 3; i++) await w.run(true);
   assert.equal(w.engine.currentStats(definition.name, true).ok, 0);
   assert.ok(w.engine.get(definition.name, true));
-  assert.ok(w.engine.write({ ...definition, code: undefined, steps: [{ skill: 'step', args: { to: [1, 0, 0] }, if: { hp_below: 1 } }], verify: 'return true;' }, { by: 'mind' }).ok);
+  assert.ok(w.engine.write({ ...definition, code: undefined, steps: [{ skill: 'step', args: { to: [1, 0, 0] }, if: { hp_below: 1 } }], verify: 'const s = await api.state(); return true;' }, { by: 'mind' }).ok);
   for (let i = 0; i < 3; i++) await w.run(true);
   assert.equal(w.engine.currentStats(definition.name, true).ok, 0, '步骤全部跳过不能累积晋级证据');
   assert.ok(w.engine.write(definition).ok);

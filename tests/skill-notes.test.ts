@@ -19,7 +19,7 @@ function setup(t: TestContext) {
 
 const body = '只观察当前脚下位置，不移动、不挖掘、不放置，读完即停止。';
 const notes = '这份做法只确认当前脚下的观察结果，不能把未知格子当作空气。';
-const behavior = { code: 'return (await api.state()).feet;', verify: 'return true;' };
+const behavior = { code: 'return (await api.state()).feet;', verify: 'const s = await api.state(); return true;' };
 
 test('补充笔记保留候选契约和版本，重载、晋升后仍可读', (t) => {
   const { directory, book, engine } = setup(t);

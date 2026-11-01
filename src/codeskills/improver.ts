@@ -101,11 +101,11 @@ export class CodeImprover {
 先分清问题在触发条件 when、参数声明 args、执行步骤/代码还是验收 verify；不要只改代码来绕过触发和参数错误。保持调用方的目标、允许手段和资源范围；缺准备条件就返回事实，不代替它另选玩法。
 body 说明输入的含义和坐标基准、原目标、允许的副作用、停止条件与可观察的后置条件。优先组合已可靠的技能，固定几步可改成 steps；需要计算和循环时继续使用 code，每个循环有次数/时间边界。保存的新版本仍是待验证候选，不把编译通过叫作已经学会。
 ${API_DOC}
-它还带一段判定（verify）：做完以后看一眼世界确认真的做成了（只能用 api.state/blockAt/region/entities/drops/nearestLand；args.before 是开工前的 api.state()，args.result 是代码的返回值，args.args 是调用参数；return true 算成，return "原因" 算没成）。
+它还带一段判定（verify）：做完以后看一眼世界确认真的做成了（只能用 api.state/blockAt/region/entities/drops/nearestLand；args.before 是开工前的 api.state()，args.result 是代码的返回值，args.args 是调用参数；return true 算成，return "原因" 算没成）。改代码就必须同时复核 verify，不能沿用旧判定；判定至少要调用一次 api.* 观察世界，不能写成恒真（return true）。
 判定的目标要拿调用参数 args.args 来核对，不能拿 args.result 里代码自己算出来的目标比——不然代码读错参数，判定也跟着错，记录全是“成功”。
 代码里调用参数就是 args 本身（args.y），判定里才是 args.args.y；调用类技能声明了参数（needs）的，代码要读的就是这些名字。
 记录里“说做完了，但判定没通过”的，是代码没真做成——改代码；判定本身写错了（明明做成了却判没过、或者判得太松什么都算成），连判定一起改。
-只输出一个 JSON 对象：{"skill":{"name":"原技能名","description":"用途","body":"目标、输入、停止与结果确认","when"?:{触发条件},"args"?:{参数声明},"steps"?:[动作步骤],"code"?:"完整函数体","verify":"完整判定函数体","priority"?:1-90,"cooldown_s"?:3-600,"overrides"?:[]},"change":"一句话说改了哪一层、依据是什么"}。skill 是同名完整契约，steps/code 只写一种，两者都必须带 verify。若无需改变契约，也兼容 {"code":"完整函数体","verify"?:"完整判定","change":"…"}。如果没有证据支持修订，输出 {"keep":true,"why":"…"}；模型复审和自报 ok 不能代替游戏观测。`;
+只输出一个 JSON 对象：{"skill":{"name":"原技能名","description":"用途","body":"目标、输入、停止与结果确认","when"?:{触发条件},"args"?:{参数声明},"steps"?:[动作步骤],"code"?:"完整函数体","verify":"完整判定函数体","priority"?:1-90,"cooldown_s"?:3-600,"overrides"?:[]},"change":"一句话说改了哪一层、依据是什么"}。skill 是同名完整契约，steps/code 只写一种，两者都必须带 verify。若无需改变契约，也兼容 {"code":"完整函数体","verify":"完整判定","change":"…"}（改 code 就必须带 verify）。如果没有证据支持修订，输出 {"keep":true,"why":"…"}；模型复审和自报 ok 不能代替游戏观测。`;
     const user = {
       skill: { name, description: b.description, body: b.body, notes: b.notes, mode: b.mode, version: b.version ?? 1,
         priority: b.priority, cooldown_s: b.cooldownMs / 1000, overrides: b.overrides,

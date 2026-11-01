@@ -380,7 +380,7 @@ export class SkillCurator {
   · 不是代码的技能拖慢了事情：用 merge 重写它（from 写它自己）；既没用又拖后腿：收起。
   · 数据太少（一两次）不下结论。
 - 没有要整理的就输出 {"ok":true}。不要为了整理而整理。
-技能格式和写法与原来相同（when / steps 或 code / priority / cooldown_s / args）；合并出来的代码技能要带 verify（判定：做完以后看一眼世界确认真的做成了，只能用 api.state/blockAt/region/entities/drops/nearestLand，return true 算成、return "原因" 算没成），可以沿用原来的判定。
+技能格式和写法与原来相同（when / steps 或 code / priority / cooldown_s / args）；合并出来的代码技能要带 verify（判定：做完以后看一眼世界确认真的做成了，只能用 api.state/blockAt/region/entities/drops/nearestLand，return true 算成、return "原因" 算没成）；合并/重写导致代码变了，就必须重新复核 verify，不能直接沿用旧判定，判定不能写成恒真（至少要调用一次 api.* 观察世界）。
 只输出一个 JSON 对象：{"merge":[{"from":["a","b"],"skill":{…}}],"priority":[{"name":"…","priority":1-90}],"retire":[{"name":"…","target":"candidate|skill|note","version":1,"why":"…"}],"restore":[{"name":"文字记录名","why":"恢复理由"}],"improve":[{"name":"…","why":"…"}],"rollback":[{"name":"…","to":1,"why":"…"}]}（用不到的键省略；文字记录不写 version）或 {"ok":true}`;
     return [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify({ skills, notes }) }];
   }

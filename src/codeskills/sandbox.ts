@@ -97,6 +97,15 @@ export function compileCheck(code: string, opts: { allowed?: readonly string[]; 
   return finish(null);
 }
 
+/** 校验 verify：语法 + 只读 api 白名单 + 不能过宽（不能是字面恒真）。返回错误信息或 null。 */
+export function compileVerify(code: string): string | null {
+  const bad = compileCheck(code, { allowed: VERIFY_METHODS, maxLen: MAX_VERIFY });
+  if (bad) return bad;
+  const stripped = code.replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, '').replace(/\s+/g, '');
+  if (/^return(true|!0|1);?$/.test(stripped)) return '判定不能是恒真（return true）：做完以后要真的看一眼世界再确认';
+  return null;
+}
+
 let liveWorkers = 0;
 /** 现在活着的沙箱线程数（每个线程有自己的 V8 堆；正常最多一两个，越来越多就是没被收掉） */
 export function sandboxStats() { return { sandboxWorkers: liveWorkers }; }

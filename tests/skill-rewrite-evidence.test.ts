@@ -9,7 +9,7 @@ import { SkillBook } from '../src/knowledge/skillbook.ts';
 import { BehaviorEngine } from '../src/mind/behaviors.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 
-const definition = { name: 'observe-again', description: '重新观察当前位置', code: 'return (await api.state()).feet;', verify: 'return true;' };
+const definition = { name: 'observe-again', description: '重新观察当前位置', code: 'return (await api.state()).feet;', verify: 'const s = await api.state(); return true;' };
 
 function setup(t: TestContext) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-rewrite-evidence-'));

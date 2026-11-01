@@ -127,7 +127,7 @@ test('写技能：攒批——几分钟里的几件事一次请模型看完，�
     if (!u.events) return { none: true, why: '单件' };
     return { results: [
       { event: 1, none: true, why: '归它管', covered_by: 'dig-and-climb-stairs-up' },
-      { event: 2, skill: { name: 'plug-water-first', description: '旁边有水先堵上再挖', code: 'return 1;', verify: 'return true;' } },
+      { event: 2, skill: { name: 'plug-water-first', description: '旁边有水先堵上再挖', code: 'return 1;', verify: 'const s = await api.state(); return true;' } },
     ] };
   }, { batchMs: 60_000 });
   r.smith.report('recurring', Date.now(), 'step 半小时内第 3 次因为 PATH_NOT_FOUND 失败', 0, undefined, ['失败：step PATH_NOT_FOUND'], undefined, 'recurring:step:PATH_NOT_FOUND');

@@ -14,7 +14,7 @@ import { FakeAdapter } from './fake-adapter.ts';
 const hour = 3_600_000;
 const day = 24_000;
 const definition = { name: 'measured-craft', description: '按点名物品合成并核对背包变化', body: '输入点名物品；只完成指定合成，按实际背包变化确认结果。',
-  code: 'return {worked:true};', verify: 'return true;' };
+  code: 'return {worked:true};', verify: 'const s = await api.state(); return true;' };
 
 function setup(t: TestContext) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-curation-'));

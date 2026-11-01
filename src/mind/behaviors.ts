@@ -8,7 +8,7 @@ import { normalizeSkillName, type KnowSkill, type SkillBook, type SkillMode } fr
 import { normalizeStep } from '../planner/plan.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 import type { Senses, SkillResult } from '../skills/types.ts';
-import { compileCheck, MAX_CODE, MAX_VERIFY, VERIFY_METHODS } from '../codeskills/sandbox.ts';
+import { compileCheck, compileVerify, MAX_CODE, VERIFY_METHODS } from '../codeskills/sandbox.ts';
 import { evalPredicate, isRecovery, isThreat, senseNow, situationOf, validatePredicate, type Predicate, type Sense } from './predicate.ts';
 
 /**
@@ -194,7 +194,7 @@ export function validateBehavior(raw: unknown, adapter?: GameAdapter, opts?: { d
   const behavior: Record<string, unknown> = code !== undefined ? { code: code.slice(0, MAX_CODE) } : { steps };
   if (o.verify !== undefined && o.verify !== null && o.verify !== '') {
     const verify = String(o.verify).replace(/\r\n/g, '\n');
-    const bad = opts?.deferCompile ? null : compileCheck(verify, { allowed: VERIFY_METHODS, maxLen: MAX_VERIFY });
+    const bad = opts?.deferCompile ? null : compileVerify(verify);
     if (bad) return { error: `skill.verify：${bad}（判定只能看：${VERIFY_METHODS.map((m) => `api.${m}`).join('、')}）` };
     behavior.verify = verify;
   }
@@ -802,11 +802,13 @@ export class BehaviorEngine {
     if (!b?.code || !k || !this.book) return { ok: false, error: `${name} 不是代码技能` };
     const bad = compileCheck(code);
     if (bad) return { ok: false, error: bad };
-    if (verify !== undefined) {
-      const badVerify = compileCheck(verify, { allowed: VERIFY_METHODS, maxLen: MAX_VERIFY });
+    const codeChanged = code.trim() !== b.code.trim();
+    if (codeChanged && (!verify || !verify.trim())) return { ok: false, error: '代码变了必须同时复核 verify：改进不能沿用旧判定' };
+    if (verify !== undefined && verify.trim()) {
+      const badVerify = compileVerify(verify);
       if (badVerify) return { ok: false, error: `verify：${badVerify}` };
     }
-    const raw = { ...(k.behavior as Record<string, unknown>), code, code_file: undefined, version: undefined, ...(verify !== undefined ? { verify } : {}) };
+    const raw = { ...(k.behavior as Record<string, unknown>), code, code_file: undefined, version: undefined, ...(verify !== undefined && verify.trim() ? { verify } : {}) };
     const body = `${k.body.replace(/```behavior[\s\S]*?```/, '').trim()}`.replace(/\n*（最近一次改进：[^）]*）$/, '') + `\n\n（最近一次改进：${note.slice(0, 100)}）`;
     const w = this.write({ name, description: k.description, body, ...raw }, { by: 'improve', ...(expectedToken !== undefined ? { expectedToken } : {}) });
     if (!w.ok) return w;

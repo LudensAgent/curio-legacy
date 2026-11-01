@@ -109,7 +109,7 @@ test('整理技能：长期用不上的收起；说同一件事的后台合并�
   const adapter = new FakeAdapter(), bus = new EventBus();
   const book = new SkillBook(BUILTIN_SKILLS_DIR, tmp());
   const engine = new BehaviorEngine(book, adapter, null, bus, noSenses);
-  const mk = (name: string, priority = 50) => engine.write({ name, description: `${name} 的做法`, when: { hp_below: 8, hostile: { within: 8 } }, code: 'return 1;', verify: 'return true;', priority });
+  const mk = (name: string, priority = 50) => engine.write({ name, description: `${name} 的做法`, when: { hp_below: 8, hostile: { within: 8 } }, code: 'return 1;', verify: 'const s = await api.state(); return true;', priority });
   for (const n of ['run-away', 'flee-from-mobs', 'pillar-up']) assert.ok(mk(n).ok);
   // 实际成功过的可用稳定应急版不按闲置收；未验证的应急候选没有这种保护。
   assert.ok(engine.write({ name: 'never-used', description: '饿了先吃背包里的面包', when: { food_below: 8 }, code: 'return 1;' }).ok);
@@ -119,7 +119,7 @@ test('整理技能：长期用不上的收起；说同一件事的后台合并�
   assert.ok(engine.choiceScore(engine.get('run-away')!) > engine.choiceScore(engine.get('flee-from-mobs')!));
   let asked = 0;
   const planner = { autonomous: true, noteInvalid() {}, complete: async () => { asked++; return { text: JSON.stringify({
-    merge: [{ from: ['run-away', 'flee-from-mobs'], skill: { name: 'run-away', description: '血少有怪时背对怪跑开', when: { hp_below: 8, hostile: { within: 8 } }, code: 'return 2;', verify: 'return true;' } }],
+    merge: [{ from: ['run-away', 'flee-from-mobs'], skill: { name: 'run-away', description: '血少有怪时背对怪跑开', when: { hp_below: 8, hostile: { within: 8 } }, code: 'return 2;', verify: 'const s = await api.state(); return true;' } }],
     priority: [{ name: 'pillar-up', priority: 70 }] }), latencyMs: 5 }; } };
   const curator = new SkillCurator(planner as any, engine, book, bus, { unusedDays: 1, gapMs: 0, minSkills: 2 });
   // 通过实际观测刻数推进一个游戏日。

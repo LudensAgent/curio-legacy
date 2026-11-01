@@ -149,7 +149,7 @@ test('候选失败保留自己的版本证据，独立收起不改变稳定版�
 
 test('稳定版什么都没做的成功返回不累积成功或失败证据', async (t) => {
   const w = setup(t);
-  assert.ok(w.engine.write({ ...definition, code: 'return {ok:true};', verify: 'return true;' }).ok);
+  assert.ok(w.engine.write({ ...definition, code: 'return {ok:true};', verify: 'const s = await api.state(); return true;' }).ok);
   const result = await w.run(definition.name);
   assert.equal(result.result.status, 'succeeded');
   assert.equal(result.result.data?.noop, true);
@@ -159,7 +159,7 @@ test('稳定版什么都没做的成功返回不累积成功或失败证据', as
 
 test('反射触发的空转独立于是否打断：记 idle、歇一会儿、不计成败', async (t) => {
   const w = setup(t);
-  assert.ok(w.engine.write({ ...definition, when: { hp_below: 8 }, code: 'return {ok:true};', verify: 'return true;' }).ok);
+  assert.ok(w.engine.write({ ...definition, when: { hp_below: 8 }, code: 'return {ok:true};', verify: 'const s = await api.state(); return true;' }).ok);
   w.adapter.hp = 6;
   const done = new Promise<TaskOutcome>((resolve) => w.arbiter.once('done', resolve));
   const now = Date.now();
@@ -174,7 +174,7 @@ test('手动和候选调用的使用次数分版持久化，跳过和候选失�
   const w = setup(t);
   assert.ok(w.engine.write(definition).ok);
   assert.equal((await w.run(definition.name)).result.status, 'succeeded');
-  assert.ok(w.engine.write({ ...definition, code: 'return {skipped:"当前不用做"};', verify: 'return true;' }, { by: 'mind' }).ok);
+  assert.ok(w.engine.write({ ...definition, code: 'return {skipped:"当前不用做"};', verify: 'const s = await api.state(); return true;' }, { by: 'mind' }).ok);
   const done = new Promise<TaskOutcome>((resolve) => w.arbiter.once('done', resolve));
   const started = w.arbiter.start({ skill: 'use_skill', args: { name: definition.name, trial: true } }, 'llm');
   assert.ok(!('error' in started));
@@ -193,7 +193,7 @@ test('手动和候选调用的使用次数分版持久化，跳过和候选失�
 test('恢复技能返回skipped后调度清理只记一次使用和跳过', async (t) => {
   const w = setup(t), failure = { skill: 'goto', code: 'PATH_NOT_FOUND' };
   assert.ok(w.engine.write({ ...definition, when: { after_failure: { skill: ['goto'], code: ['PATH_NOT_FOUND'] } },
-    code: 'return {skipped:"不符合本次条件"};', verify: 'return true;' }).ok);
+    code: 'return {skipped:"不符合本次条件"};', verify: 'const s = await api.state(); return true;' }).ok);
   assert.equal(w.engine.recoveryFor(failure)?.name, definition.name);
   const done = new Promise<TaskOutcome>((resolve) => w.arbiter.once('done', resolve));
   const started = w.arbiter.start({ skill: 'use_skill', args: { name: definition.name, failure: { ...failure, args: {} } } }, 'llm');
