@@ -2540,39 +2540,70 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return { ok: true };
   }
 
+  /** 下界门：读 axis 推导门面法线，返回门面正前那个可站立的接近格 + 门中心（用来面向走入） */
+  private portalApproach(pos: Vec3Like, kind: string): { cell: Vec3Like; center: Vec3Like } | null {
+    if (kind !== 'nether_portal') return null;
+    const axis = this.blockStateAt(pos)?.properties?.axis;
+    // axis=x → 门面法线沿 Z；axis=z → 法线沿 X（从法线一侧走入）
+    const normal = axis === 'x' ? { x: 0, z: 1 } : axis === 'z' ? { x: 1, z: 0 } : null;
+    if (!normal) return null;
+    // 观察到的可能是门柱任一高度，找到脚部那一行（可站立走入的最底行）
+    let bottomY = pos.y;
+    while (this.blockAt({ x: pos.x, y: bottomY - 1, z: pos.z }) === 'nether_portal') bottomY--;
+    const standable = (c: Vec3Like) => {
+      const foot = this.blockAt(c), below = this.blockAt({ x: c.x, y: c.y - 1, z: c.z });
+      return (foot === null || AIR_BLOCKS.has(foot) || foot === 'nether_portal') && below !== null && !AIR_BLOCKS.has(below);
+    };
+    const cell = [1, -1].map((s) => ({ x: pos.x + normal.x * s, y: bottomY, z: pos.z + normal.z * s })).find(standable);
+    return cell ? { cell, center: { x: pos.x + 0.5, y: bottomY + 0.5, z: pos.z + 0.5 } } : null;
+  }
+
   async enterPortalAt(pos: Vec3Like, signal: AbortSignal, expectedDim?: string): Promise<ActionResult & { from?: AgentState; to?: AgentState }> {
     const check = this.actionCheckpoint(signal);
     const from = this.state();
     if (!from.observationReady) return { ok: false, reason: 'NOT_CONNECTED' };
     const name = this.blockAt(pos);
     if (name !== 'nether_portal' && name !== 'end_portal') return { ok: false, reason: 'NO_PORTAL' };
-    // 传送要「脚落在门格上」才触发。下界门脚格站在黑曜石上、pathfinder 能直接走到；
-    // 末地门是横铺的一层、脚下常是岩浆/虚空，pathfinder 到不了门格，就走到门附近后
-    // 面向门中心短促前进，让身体自己落进门格。
+    // 下界门：读 axis 推导门面法线，走到门面正前那个可站立的格再面向走入；别对着不可站立的门块寻路
+    // （pathfinder 不会为 nether_portal 生成节点，GoalNear(range:0) 永远无解）。
+    // 末地门：横铺一层、脚下常是岩浆/虚空，退回「走到门附近再短促前进」，让身体落进门格。
     const onPortal = () => {
       const f = this.bot.entity.position.floored();
       return f.x === Math.floor(pos.x) && f.y === Math.floor(pos.y) && f.z === Math.floor(pos.z);
     };
+    const approach = this.portalApproach(pos, name);
     this.inPortalTransition = true;
     try {
-      try {
-        await this.moveTo({ kind: 'near', pos, range: 0 }, { signal, timeoutMs: 20000 });
-      } catch (error) {
-        throwIfAborted(signal);
-        if (this.currentDimension() === from.dim) {
-          await this.moveTo({ kind: 'near', pos, range: 1.5 }, { signal, timeoutMs: 20000 });
-          const center = { x: pos.x + 0.5, y: pos.y + 0.5, z: pos.z + 0.5 };
-          const stepDeadline = Date.now() + 12000;
-          while (Date.now() < stepDeadline) {
-            throwIfAborted(signal);
-            const cur = this.state();
-            if (!cur.connected || !cur.alive) return { ok: false, reason: 'TRANSITION_INTERRUPTED' };
-            if (cur.dim !== from.dim || onPortal()) break;
-            await this.drive({ forward: true }, 350, signal, { facePoint: center });
+      if (approach) {
+        await this.moveTo({ kind: 'near', pos: approach.cell, range: 0.5 }, { signal, timeoutMs: 20000 });
+        const stepDeadline = Date.now() + 12000;
+        while (Date.now() < stepDeadline) {
+          throwIfAborted(signal);
+          const cur = this.state();
+          if (!cur.connected || !cur.alive) return { ok: false, reason: 'TRANSITION_INTERRUPTED' };
+          if (cur.dim !== from.dim) break;
+          await this.drive({ forward: true }, 350, signal, { facePoint: approach.center });
+        }
+      } else {
+        try {
+          await this.moveTo({ kind: 'near', pos, range: 0 }, { signal, timeoutMs: 20000 });
+        } catch (error) {
+          throwIfAborted(signal);
+          if (this.currentDimension() === from.dim) {
+            await this.moveTo({ kind: 'near', pos, range: 1.5 }, { signal, timeoutMs: 20000 });
+            const center = { x: pos.x + 0.5, y: pos.y + 0.5, z: pos.z + 0.5 };
+            const stepDeadline = Date.now() + 12000;
+            while (Date.now() < stepDeadline) {
+              throwIfAborted(signal);
+              const cur = this.state();
+              if (!cur.connected || !cur.alive) return { ok: false, reason: 'TRANSITION_INTERRUPTED' };
+              if (cur.dim !== from.dim || onPortal()) break;
+              await this.drive({ forward: true }, 350, signal, { facePoint: center });
+            }
           }
         }
       }
-      const deadline = Date.now() + 20000;
+      const deadline = Date.now() + 30000;
       while (Date.now() < deadline) {
         throwIfAborted(signal);
         const to = this.state();

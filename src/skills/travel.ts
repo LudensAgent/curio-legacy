@@ -151,7 +151,6 @@ async function traverse(ctx: SkillCtx, endpoint: PortalEndpoint) {
   if (!endpoint.portalObserved) return fail('NOT_FOUND', '该端只有到达位置，尚未观察到可返回的门');
   if (!adapter.enterPortalAt) return fail('ERROR', '适配器没有传送门进入能力');
   try {
-    await adapter.moveTo({ kind: 'near', pos: endpoint.pos, range: 2 }, { signal, timeoutMs: 20000 });
     if (adapter.blockAt(endpoint.pos) !== endpoint.kind) return fail('NOT_FOUND', '记忆中的传送门已改变或尚未加载');
     ctx.setStationaryWait?.(true);
     const result = await adapter.enterPortalAt(endpoint.pos, signal);
