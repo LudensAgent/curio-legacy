@@ -16,6 +16,11 @@ function visiblePortal(ctx: SkillCtx, positions: Vec3Like[], kinds: string[]) {
   return undefined;
 }
 
+/** 把当前世界已记录的门列成一行，供 agent 自己挑（不替它改选目标） */
+function knownPortals(store: ReturnType<typeof travelStore>, worldId: string) {
+  return store.snapshot(worldId).endpoints.map((e) => `${e.id}（${e.dim} ${e.pos.x},${e.pos.y},${e.pos.z}）`).join('；') || '（还没有记录任何门）';
+}
+
 export const buildPortal: Skill<{ origin: Vec3Like; axis: 'x' | 'z' }> = {
   name: 'build_portal',
   description: '在身边用 10 块黑曜石建最小下界门并用打火石点燃；逐块验收，记录实际门位置。需要少量施工支撑块。',
@@ -141,8 +146,9 @@ async function traverse(ctx: SkillCtx, endpoint: PortalEndpoint) {
   if (!endpoint.portalObserved) return fail('NOT_FOUND', '该端只有到达位置，尚未观察到可返回的门');
   if (!adapter.enterPortalAt) return fail('ERROR', '适配器没有传送门进入能力');
   try {
-    await adapter.moveTo({ kind: 'near', pos: endpoint.pos, range: 2 }, { signal, timeoutMs: 60000 });
+    await adapter.moveTo({ kind: 'near', pos: endpoint.pos, range: 2 }, { signal, timeoutMs: 20000 });
     if (adapter.blockAt(endpoint.pos) !== endpoint.kind) return fail('NOT_FOUND', '记忆中的传送门已改变或尚未加载');
+    ctx.setStationaryWait?.(true);
     const result = await adapter.enterPortalAt(endpoint.pos, signal);
     throwIfAborted(signal);
     if (!result.ok || !result.from || !result.to) return fail('ERROR', `传送未验收：${result.reason}`);
@@ -159,19 +165,19 @@ async function traverse(ctx: SkillCtx, endpoint: PortalEndpoint) {
     ctx.memory.setWorld(to.worldId);
     ctx.memory.addLandmark('waypoint', `传送到达 ${destination.id}`, to.dim, to.pos, 3);
     return ok(`已通过实际传送到达 ${to.dim}，记录两端位置；返程入口 ${destination.id}${observed ? '' : ' 尚需寻找'}`, { fromId: endpoint.id, toId: destination.id, from: result.from, to, transition: true });
-  } catch (error) { if (isAbort(error)) throw error; return fail(codeFromError(error), `传送失败：${(error as Error).message}`); }
+  } catch (error) { if (isAbort(error)) throw error; return fail(codeFromError(error), `传送失败：${(error as Error).message}（门离你约 ${Math.round(dist3(state.pos, endpoint.pos))} 格，在 ${endpoint.pos.x},${endpoint.pos.y},${endpoint.pos.z}）`); } finally { ctx.setStationaryWait?.(false); }
 }
 
 export const travelPortal: Skill<{ portalId: string }> = {
   name: 'travel_portal', description: '进入一个已观察的传送门，等待实际维度切换和新出生观察后记录真实出口。', argsDoc: '{"portalId":"portal_id"}', timeoutMs: 100000, movement: true,
   validate(raw) { const portalId = String(obj(raw).portalId ?? '').trim(); return portalId ? { ok: true, args: { portalId } } : { ok: false, error: '缺少 portalId' }; },
-  async run(ctx, args) { const endpoint = travelStore(ctx.memory).get(args.portalId, ctx.adapter.state().worldId); return endpoint ? traverse(ctx, endpoint) : fail('NOT_FOUND', '没有该世界的传送门记录'); },
+  async run(ctx, args) { const store = travelStore(ctx.memory); const worldId = ctx.adapter.state().worldId; const endpoint = store.get(args.portalId, worldId); return endpoint ? traverse(ctx, endpoint) : fail('NOT_FOUND', `没有传送门 ${args.portalId}；当前世界记得的门：${knownPortals(store, worldId)}`); },
 };
 
 export const recallPortal: Skill<{ returnId: string }> = {
   name: 'recall_portal', description: '从当前维度中已实际观察的返程门返回；反向穿越成功后才标记已验证往返。', argsDoc: '{"returnId":"portal_id"}', timeoutMs: 100000, movement: true,
   validate(raw) { const returnId = String(obj(raw).returnId ?? '').trim(); return returnId ? { ok: true, args: { returnId } } : { ok: false, error: '缺少 returnId' }; },
-  async run(ctx, args) { const endpoint = travelStore(ctx.memory).get(args.returnId, ctx.adapter.state().worldId); return endpoint ? traverse(ctx, endpoint) : fail('NOT_FOUND', '没有返程门记录'); },
+  async run(ctx, args) { const store = travelStore(ctx.memory); const worldId = ctx.adapter.state().worldId; const endpoint = store.get(args.returnId, worldId); return endpoint ? traverse(ctx, endpoint) : fail('NOT_FOUND', `没有返程门 ${args.returnId}；当前世界记得的门：${knownPortals(store, worldId)}`); },
 };
 
 export const activateEndPortal: Skill<{}> = {
