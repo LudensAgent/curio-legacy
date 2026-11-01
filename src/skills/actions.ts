@@ -53,6 +53,10 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
     if (FLUID_BUCKETS.has(item) && (on === 'water' || on === 'lava')) {
       return { ok: false, error: `满的 ${item} 不能对着 ${on} 本体右键（会 NO_EFFECT，倒不进流体源格）；把 on 写成那格空气的坐标 {"x","y","z"}（浇岩浆做黑曜石写岩浆旁那格空气，水会流过去），或 on:"self" 倒自己脚边` };
     }
+    // 打火石/火焰弹点下界门：要点门框内侧那格空气（on 写坐标），对着 obsidian 等方块本体右键会 NO_EFFECT 点不着。
+    if (IGNITE_ITEMS.has(item) && typeof on === 'string' && on !== 'self') {
+      return { ok: false, error: `${item} 点下界门要点门框内侧那格空气：on 写内腔空气的坐标 {"x","y","z"}，不能写方块名（对着 obsidian 等方块本体右键点不着门，会 NO_EFFECT）` };
+    }
     return { ok: true, args: { item, on, ...(dir ? { dir } : {}) } };
   },
   async run(ctx, args) {
