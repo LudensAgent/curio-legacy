@@ -303,7 +303,7 @@ export const stepTo: Skill<CellArgs> = {
       ...after(ctx, args.facing, target) });
     let movementError: unknown;
     try {
-      await a.moveTo({ kind: 'xyz', x: target.x, y: target.y, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())) });
+      await a.moveTo({ kind: 'xyz', x: target.x, y: target.y, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())), ...(args.at[1] === -1 ? { maxDropDown: 1 } : {}) });
     } catch (e) {
       if (isAbort(e)) throw e;
       movementError = e;
