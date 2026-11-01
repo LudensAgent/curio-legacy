@@ -15,11 +15,12 @@ function fixture(ui = { pacingMs: 0, openHoldMs: 0, closeHoldMs: 0 }) {
   const bot: any = { inventory, currentWindow: null, entity: { position: new Vec3(0, 64, 0), yaw: 0 }, game: { dimension: 'overworld' }, _syncWindow: async () => {} };
   bot.clickWindow = async (slot: number, button: number, mode: number) => {
     await bot.beforeWindowClick?.(slot, button, mode);
-    const source = slot === -999 ? inventory.selectedItem : inventory.slots[slot];
-    const previous = slot === -999 ? inventory.selectedItem?.count : inventory.slots[slot]?.count;
+    const window = bot.currentWindow ?? inventory;
+    const source = slot === -999 ? window.selectedItem : window.slots[slot];
+    const previous = slot === -999 ? window.selectedItem?.count : window.slots[slot]?.count;
     const data = source?.nbt;
-    inventory.acceptClick({ slot, mouseButton: button, mode, item: slot === -999 ? null : inventory.slots[slot] });
-    const after = slot === -999 ? inventory.selectedItem?.count : inventory.slots[slot]?.count;
+    window.acceptClick({ slot, mouseButton: button, mode, item: slot === -999 ? null : window.slots[slot] });
+    const after = slot === -999 ? window.selectedItem?.count : window.slots[slot]?.count;
     if (slot === -999 || mode === 4) dropped.push({ count: previous - (after ?? 0), nbt: data });
     clicks.push([slot, button, mode]);
   };
@@ -76,6 +77,75 @@ test('small partial quantities are discarded as one exact stack', async () => {
     assert.equal(f.inventory.selectedItem, null); assert.deepEqual(f.dropped.map((x) => x.count), [count]);
     assert.equal(f.clicks.filter(([slot]) => slot === -999).length, 1);
   }
+});
+
+test('an open chest tosses one partial player stack and never takes its storage or stale inventory', async () => {
+  const f = fixture();
+  const chest = createWindow(7, 'minecraft:generic_9x3', 'Chest');
+  const nbt = { type: 'compound', value: { variant: { type: 'string', value: 'player' } } };
+  chest.updateSlot(0, new Item(stone, 64));
+  chest.updateSlot(chest.inventoryStart, new Item(stone, 64, 0, nbt));
+  f.put(9, 1); // The old inventory model remains stale while the chest is open.
+  f.bot.currentWindow = chest;
+  f.bot.toss = async () => assert.fail('partial container drops must not use Mineflayer single-item toss');
+  const syncs: unknown[] = [], lifecycle: string[] = [];
+  f.bot._syncWindow = async (window: unknown) => { syncs.push(window); };
+  f.adapter.on('inventory_open', () => lifecycle.push('open'));
+  f.adapter.on('inventory_close', () => lifecycle.push('close'));
+  const result = await f.adapter.tossItem('cobblestone', 40, new AbortController().signal);
+  assert.deepEqual(result, { ok: true, tossed: 40 });
+  assert.deepEqual(f.dropped, [{ count: 40, nbt }]);
+  assert.equal(chest.slots[chest.inventoryStart].count, 24);
+  assert.equal(chest.slots[0].count, 64);
+  assert.equal(f.inventory.slots[9].count, 1);
+  assert.equal(chest.selectedItem, null);
+  assert.ok(syncs.length > 0 && syncs.every(window => window === chest));
+  assert.deepEqual(lifecycle, [], 'the existing server window stays visible');
+});
+
+test('cancelling a partial toss in an open chest restores its original player slot', async () => {
+  const f = fixture();
+  const chest = createWindow(7, 'minecraft:generic_9x3', 'Chest');
+  chest.updateSlot(chest.inventoryStart, new Item(stone, 64));
+  f.bot.currentWindow = chest;
+  const controller = new AbortController(), click = f.bot.clickWindow;
+  f.bot.clickWindow = async (...args: number[]) => { await click(...args); if (f.clicks.length === 1) controller.abort(); };
+  await assert.rejects(f.adapter.tossItem('cobblestone', 32, controller.signal), { name: 'AbortedError' });
+  await Reflect.get(f.adapter, 'interactionReady').call(f.adapter);
+  assert.equal(chest.slots[chest.inventoryStart].count, 64);
+  assert.equal(chest.selectedItem, null);
+  assert.deepEqual(f.dropped, []);
+});
+
+test('closing a chest during a paced split blocks the stale click and restores the mapped player slot', async () => {
+  const f = fixture({ pacingMs: 80, openHoldMs: 0, closeHoldMs: 0 });
+  const chest = createWindow(7, 'minecraft:generic_9x3', 'Chest');
+  chest.updateSlot(chest.inventoryStart, new Item(stone, 64));
+  const other = new Item(registry.itemsByName.dirt.id, 12);
+  f.inventory.updateSlot(chest.inventoryStart, other);
+  f.bot.currentWindow = chest;
+  Reflect.get(f.adapter, 'installUiPacing').call(f.adapter, f.bot);
+  let targets = 0;
+  f.bot.emit = (event: string) => {
+    if (event !== 'observerWindowClick' || ++targets !== 2) return;
+    setTimeout(() => {
+      // Mirror a window close while its next click is waiting. The remaining
+      // cursor belongs to player slot 9, not the old chest-relative slot 27.
+      f.inventory.updateSlot(9, chest.slots[chest.inventoryStart]);
+      f.inventory.selectedItem = chest.selectedItem;
+      f.bot.currentWindow = null;
+    }, 0);
+  };
+  await assert.rejects(f.adapter.tossItem('cobblestone', 40, new AbortController().signal), /WINDOW_CHANGED/);
+  assert.deepEqual(f.clicks, [[chest.inventoryStart, 0, 0]], 'the click that waited across the close was never accepted');
+  assert.equal(f.inventory.slots[chest.inventoryStart], other);
+  assert.equal(other.count, 12);
+  await Reflect.get(f.adapter, 'interactionReady').call(f.adapter);
+  assert.deepEqual(f.clicks, [[chest.inventoryStart, 0, 0], [9, 0, 0]]);
+  assert.equal(f.inventory.slots[9].count, 64);
+  assert.equal(f.inventory.selectedItem, null);
+  assert.equal(f.inventory.slots[chest.inventoryStart], other);
+  assert.deepEqual(f.dropped, []);
 });
 
 test('bulk selection preserves the original NBT-specific requested quantities', async () => {

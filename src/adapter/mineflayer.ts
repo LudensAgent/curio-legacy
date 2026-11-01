@@ -3,6 +3,7 @@ import { createRequire } from 'node:module';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Entity } from 'prismarine-entity';
 import type { Item } from 'prismarine-item';
+import type { Window } from 'prismarine-windows';
 import { simplify } from 'prismarine-nbt';
 import { crystalArrowShot } from '../combat/ballistics.ts';
 import type { Config } from '../config.ts';
@@ -283,6 +284,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   private installUiPacing(bot: any) {
     const ui = this.cfg.ui ?? { pacingMs: 0, openHoldMs: 0, closeHoldMs: 0 };
     bot.beforeWindowClick = async (slot: number, _button: number, mode: number) => {
+      const window = bot.currentWindow ?? bot.inventory;
       const now = Date.now();
       this.pacedClicks = now - this.lastPacedClick > 1000 ? 1 : this.pacedClicks + 1;
       this.lastPacedClick = now;
@@ -297,7 +299,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const ms = Math.max(0, mode === 1 ? Math.round(ui.pacingMs * 0.6) : ui.pacingMs);
       bot.emit?.('observerWindowClick', slot, ms);
       if (ms > 0) await sleep(ms, this.actionContext.getStore()?.signal);
+      if ((bot.currentWindow ?? bot.inventory) !== window) throw new Error('WINDOW_CHANGED: 点击等待期间窗口已改变');
     };
+    // Internal item-use and placement paths equip directly too. Observe their
+    // actual inventory clicks without opening a GUI for hotbar-only selection.
+    for (const name of ['equip', 'unequip']) {
+      const original: ((...args: unknown[]) => Promise<unknown>) | undefined = bot[name];
+      if (typeof original !== 'function') continue;
+      bot[name] = (...args: unknown[]) => this.withObservedInventory(this.actionContext.getStore()?.signal,
+        () => original.apply(bot, args));
+    }
     if (ui.openHoldMs > 0) {
       // 开窗后停一下；附魔台和熔炉先安装属性监听，再执行停留。
       const specializedOpen = new AsyncLocalStorage<boolean>();
@@ -322,9 +333,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     await sleep(ms, signal).catch(() => {});
   }
 
+  private readonly inventoryObservation = new AsyncLocalStorage<object>();
+
   /** Present inventory clicks as a virtual window, but leave hotbar-only changes invisible. */
-  private async withObservedInventory<T>(signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
+  private async withObservedInventory<T>(signal: AbortSignal | undefined, operation: () => Promise<T>): Promise<T> {
     const b = this.bot, beforeClick = b.beforeWindowClick;
+    if (this.inventoryObservation.getStore() === b) return operation();
     let opened = false;
     const observeClick = async (...args: any[]) => {
       if (!opened && !b.currentWindow) {
@@ -335,7 +349,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (beforeClick) await beforeClick.apply(b, args);
     };
     b.beforeWindowClick = observeClick;
-    try { return await operation(); }
+    try { return await this.inventoryObservation.run(b, operation); }
     finally {
       if (b.beforeWindowClick === observeClick) b.beforeWindowClick = beforeClick;
       if (opened) { await this.uiCloseHold(signal); this.emit('inventory_close'); }
@@ -1436,7 +1450,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   }
 
   /** 背包/界面里有没有残留（打断留下的半截交互） */
-  private tossCursorReturn: { bot: any; slot: number; identity: string } | null = null;
+  private tossCursorReturn: { bot: any; window: Window; slot: number; identity: string } | null = null;
 
   private interactionDirty(): string[] {
     const b = this.bot;
@@ -1459,20 +1473,23 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const deadline = Date.now() + 3000;
       while (this.inFlight > 0 && Date.now() < deadline) await sleep(25);
       if (this.inFlight > 0) return;
-      if (b.currentWindow) return;
+      if (b.currentWindow && b.currentWindow !== pending.window) return;
+      const window: Window = b.currentWindow ?? b.inventory;
+      const slot = window === pending.window ? pending.slot
+        : pending.slot - pending.window.inventoryStart + window.inventoryStart;
       if (typeof b._syncWindow !== 'function') return;
-      const synced = await Promise.race([Promise.resolve(b._syncWindow(b.inventory)).then(() => true, () => false), sleep(3000).then(() => false)]);
+      const synced = await Promise.race([Promise.resolve(b._syncWindow(window)).then(() => true, () => false), sleep(3000).then(() => false)]);
       if (!synced) return;
-      const cursor = b.inventory.selectedItem, source = b.inventory.slots[pending.slot];
+      const cursor = window.selectedItem, source = window.slots[slot];
       const identity = (item: any) => JSON.stringify([item.type, item.metadata, item.nbt ?? null]);
       if (cursor) {
         if (identity(cursor) !== pending.identity || source && (identity(source) !== pending.identity || source.count + cursor.count > source.stackSize)) return;
         const returnedName = cursor.name, returnedCount = cursor.count;
-        await b.clickWindow(pending.slot, 0, 0);
-        const returned = await Promise.race([Promise.resolve(b._syncWindow(b.inventory)).then(() => true, () => false), sleep(3000).then(() => false)]);
+        await b.clickWindow(slot, 0, 0);
+        const returned = await Promise.race([Promise.resolve(b._syncWindow(window)).then(() => true, () => false), sleep(3000).then(() => false)]);
         if (!returned) return;
-        if (b.inventory.selectedItem) return;
-        this.bus.publish('interaction_repaired', 'P3', `收拾交互残留（${reason}）：光标上的 ${returnedName}×${returnedCount} 已归还原槽`, { reason, slot: pending.slot, item: returnedName, count: returnedCount });
+        if (window.selectedItem) return;
+        this.bus.publish('interaction_repaired', 'P3', `收拾交互残留（${reason}）：光标上的 ${returnedName}×${returnedCount} 已归还原槽`, { reason, slot, item: returnedName, count: returnedCount });
       }
       this.tossCursorReturn = null;
     }
@@ -1885,8 +1902,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     } catch { return undefined; }
   }
 
-  private async syncInventory(check: ReturnType<MineflayerAdapter['actionCheckpoint']>) {
-    await this.afterAction(() => raceAbort(this.bot._syncWindow(this.bot.inventory), check.signal, 3000, () => {}), check);
+  private async syncInventory(check: ReturnType<MineflayerAdapter['actionCheckpoint']>, window = this.bot.inventory) {
+    await this.afterAction(() => raceAbort(this.bot._syncWindow(window), check.signal, 3000, () => {}), check);
   }
 
   private guiView(w: any): GuiView {
@@ -2218,13 +2235,23 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
 
   /** 扔出背包里的物品（Q 键）；可先转向某个位置，丢给村民/猪灵/队友或者清背包。按真实背包变化确认。 */
   async tossItem(name: string, count: number | null, signal: AbortSignal, face?: Vec3Like, opts: { gift?: boolean; sourceSlot?: number } = {}): Promise<ActionResult & { tossed: number }> {
-    const check = this.actionCheckpoint(signal);
+    const checkpoint = this.actionCheckpoint(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', tossed: 0 };
     await this.interactionReady();
-    check();
-    const total = () => (opts.sourceSlot === undefined ? this.bot.inventory.items() : this.bot.inventory.slots.slice(5, 46)).filter((item: Item | null) => item?.name === name).reduce((n: number, item: Item) => n + item.count, 0);
+    checkpoint();
+    const b = this.bot;
+    if (b.inventory.selectedItem || b.currentWindow?.selectedItem || b.currentWindow && opts.sourceSlot !== undefined) return { ok: false, reason: 'INVENTORY_NOT_READY', tossed: 0 };
+    // An open container owns the authoritative player slots until it closes.
+    // Its storage slots are never eligible for this inventory-only action.
+    const window: Window = b.currentWindow ?? b.inventory;
+    const check = Object.assign(() => {
+      checkpoint();
+      if ((b.currentWindow ?? b.inventory) !== window) throw new Error('TOSS_WINDOW_CHANGED');
+    }, { signal });
+    const total = () => (opts.sourceSlot === undefined ? window.items() : window.slots.slice(5, 46))
+      .filter((item): item is Item => item?.name === name).reduce((n, item) => n + item.count, 0);
     const have = total();
-    const item = opts.sourceSlot === undefined ? this.invItem(name) : this.bot.inventory.slots?.[opts.sourceSlot];
+    const item = opts.sourceSlot === undefined ? window.items().find((item) => item.name === name) : window.slots[opts.sourceSlot];
     if (!item || have <= 0) return { ok: false, reason: 'NO_ITEM', tossed: 0 };
     if (item.name !== name) return { ok: false, reason: 'SOURCE_ITEM_CHANGED', tossed: 0 };
     const available = opts.sourceSlot === undefined ? have : item.count;
@@ -2233,11 +2260,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // 朝哪扔由调用的人定（toss_item 的 toward）；不指定就朝现在看的方向
     if (face) await this.afterAction(() => this.bot.lookAt(this.vec({ x: face.x, y: face.y + 1, z: face.z }), true), check);
     const yaw = e?.yaw ?? 0;
-    const b = this.bot;
     // The selected inventory slots and their NBT determine what was asked to
     // be thrown. Prefer complete stacks only within the same identity quota.
     const identity = (stack: Item) => JSON.stringify([stack.type, stack.metadata, stack.nbt ?? null]);
-    const stacks: Item[] = opts.sourceSlot === undefined ? b.inventory.items().filter((stack: Item) => stack.name === name) : [item];
+    const stacks = opts.sourceSlot === undefined ? window.items().filter((stack) => stack.name === name) : [item];
     const quotas = new Map<string, number>();
     let remaining = want;
     for (const stack of stacks) {
@@ -2246,55 +2272,47 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       remaining -= take;
       if (!remaining) break;
     }
-    if (b.inventory.selectedItem || b.currentWindow?.selectedItem || b.currentWindow && opts.sourceSlot !== undefined) return { ok: false, reason: 'INVENTORY_NOT_READY', tossed: 0 };
-    if (b.currentWindow) {
+    try {
       await this.withObservedInventory(signal, async () => {
-        await this.afterAction(() => b.toss(item.type, null, want), check);
-        await this.syncInventory(check);
-      });
-    } else {
-      try {
-        await this.withObservedInventory(signal, async () => {
-          for (const [key, quota] of quotas) {
-            let left = quota;
-            while (left > 0) {
-              check();
-              const candidates: Item[] = (opts.sourceSlot === undefined ? b.inventory.items() : [b.inventory.slots[opts.sourceSlot]])
-                .filter((stack: Item | null): stack is Item => !!stack && stack.name === name && identity(stack) === key);
-              const stack = candidates.filter((candidate) => candidate.count <= left).sort((a, c) => c.count - a.count)[0]
-                ?? candidates.sort((a, c) => a.count - c.count)[0];
-              if (!stack) throw new Error('SOURCE_ITEM_CHANGED');
-              const take = Math.min(left, stack.count), slot = stack.slot;
-              if (take === stack.count) {
-                await this.afterAction(() => b.clickWindow(slot, 1, 4), check);
+        for (const [key, quota] of quotas) {
+          let left = quota;
+          while (left > 0) {
+            check();
+            const candidates = (opts.sourceSlot === undefined ? window.items() : [window.slots[opts.sourceSlot]])
+              .filter((stack: Item | null): stack is Item => !!stack && stack.name === name && identity(stack) === key);
+            const stack = candidates.filter((candidate) => candidate.count <= left).sort((a, c) => c.count - a.count)[0]
+              ?? candidates.sort((a, c) => a.count - c.count)[0];
+            if (!stack) throw new Error('SOURCE_ITEM_CHANGED');
+            const take = Math.min(left, stack.count), slot = stack.slot;
+            if (take === stack.count) {
+              await this.afterAction(() => b.clickWindow(slot, 1, 4), check);
+            } else {
+              const half = Math.ceil(stack.count / 2);
+              const wholeCost = 2 + stack.count - take, halfCost = take <= half ? 2 + half - take : Infinity;
+              const split = take > 1;
+              if (!split) {
+                for (let n = 0; n < take; n++) await this.afterAction(() => b.clickWindow(slot, 0, 4), check);
               } else {
-                const half = Math.ceil(stack.count / 2);
-                const wholeCost = 2 + stack.count - take, halfCost = take <= half ? 2 + half - take : Infinity;
-                const split = take > 1;
-                if (!split) {
-                  for (let n = 0; n < take; n++) await this.afterAction(() => b.clickWindow(slot, 0, 4), check);
-                } else {
-                  const pickHalf = halfCost < wholeCost, picked = pickHalf ? half : stack.count;
-                  this.tossCursorReturn = { bot: b, slot, identity: key };
-                  await this.afterAction(() => b.clickWindow(slot, pickHalf ? 1 : 0, 0), check);
-                  for (let n = picked - take; n > 0; n--) await this.afterAction(() => b.clickWindow(slot, 1, 0), check);
-                  await this.syncInventory(check);
-                  const cursor = b.inventory.selectedItem;
-                  if (!cursor || identity(cursor) !== key || cursor.count !== take) throw new Error('TOSS_STATE_CHANGED');
-                  await this.afterAction(() => b.clickWindow(-999, 0, 0), check);
-                  await this.syncInventory(check);
-                  if (b.inventory.selectedItem) throw new Error('TOSS_STATE_CHANGED');
-                  this.tossCursorReturn = null;
-                }
+                const pickHalf = halfCost < wholeCost, picked = pickHalf ? half : stack.count;
+                this.tossCursorReturn = { bot: b, window, slot, identity: key };
+                await this.afterAction(() => b.clickWindow(slot, pickHalf ? 1 : 0, 0), check);
+                for (let n = picked - take; n > 0; n--) await this.afterAction(() => b.clickWindow(slot, 1, 0), check);
+                await this.syncInventory(check, window);
+                const cursor = window.selectedItem;
+                if (!cursor || identity(cursor) !== key || cursor.count !== take) throw new Error('TOSS_STATE_CHANGED');
+                await this.afterAction(() => b.clickWindow(-999, 0, 0), check);
+                await this.syncInventory(check, window);
+                if (window.selectedItem) throw new Error('TOSS_STATE_CHANGED');
+                this.tossCursorReturn = null;
               }
-              left -= take;
             }
+            left -= take;
           }
-          await this.syncInventory(check);
-        });
-      } finally {
-        if (this.tossCursorReturn) this.scheduleRepair('丢弃中断后归还光标', 250);
-      }
+        }
+        await this.syncInventory(check, window);
+      });
+    } finally {
+      if (this.tossCursorReturn) this.scheduleRepair('丢弃中断后归还光标', 250);
     }
     const tossed = have - total();
     // 记住扔掉了什么、大概落在哪（只是事实：哪些掉落物是自己刚扔的，被捡回来时能说清；不替它决定捡不捡）

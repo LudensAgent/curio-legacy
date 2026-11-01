@@ -53,7 +53,7 @@ test('real inventory model sends a carried stack to the hotbar and one group for
     assert.equal(tossed.tossed, 40);
     assert.equal(inventory.slots[36].count, 24);
     assert.equal(drops, 1);
-    assert.deepEqual(transfers.map(t => [t.kind, t.item.count]), [['drop', 40]]);
+    assert.deepEqual(transfers.filter(t => t.kind === 'drop').map(t => [t.kind, t.item.count]), [['drop', 40]]);
     assert.equal(pointers.at(-1)?.slot, -999);
     assert.equal(pointers.at(-1)?.item?.count, 40);
   } finally {
