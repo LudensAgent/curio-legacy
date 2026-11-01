@@ -63,6 +63,22 @@ export const why = (e: unknown) => {
   return m;
 };
 
+/**
+ * 挖掉 pos 这格（通常是脚下支撑块）后身体会往下掉几格：向下扫最多 3 格找第一个实心落点（3 格以内不掉血）。
+ * 0 = 未加载或落差超过 3 格（不安全）；landing 为液体时也属于「会掉进去」的不安全落点。
+ */
+export function dropBelow(adapter: { blockAt(pos: Vec3Like): string | null }, pos: Vec3Like): { drop: number; landing: string | null } {
+  let drop = 0, landing: string | null = null;
+  for (let d = 1; d <= 3; d++) {
+    const b = adapter.blockAt({ x: pos.x, y: pos.y - d, z: pos.z });
+    if (b === null) break;                          // 未加载：落点未知，按不安全处理
+    if (LIQUID_BLOCKS.has(b)) { landing = b; drop = d; break; } // 会掉进液体
+    if (!isSoftBlock(b)) { landing = b; drop = d; break; }      // 实心落点
+    // 软的（空气/草/藤蔓/铁轨…）继续往下扫
+  }
+  return { drop, landing };
+}
+
 type TargetDigArgs = { target: string | Vec3Like; block?: string; own?: boolean; dir?: undefined; blocks?: undefined; wet?: boolean; lava?: boolean };
 type DigArgs = ({ dir: string; blocks: number; target?: undefined; block?: undefined } | TargetDigArgs) & { wet?: boolean; lava?: boolean };
 const AIR = new Set(['air', 'cave_air', 'void_air']);
@@ -242,15 +258,7 @@ export const dig: Skill<DigArgs> = {
           targetCell = c;
           // 脚下这格挖空后，人往下掉多少格：向下扫最多 3 格找第一个实心落点（3 格以内不掉血）。
           // 以前只看脚下 2 格是不是实心，等于只允许掉 1 格；现在放宽到「不掉血的 3 格安全余量」。
-          let drop = 0;                     // 会掉几格；0 = 没扫到安全落点（未加载或落差超过 3 格）
-          let landing: string | null = null; // 落点方块（实心）；液体单独处理
-          for (let d = 1; d <= 3; d++) {
-            const b = adapter.blockAt({ x: c.x, y: c.y - d, z: c.z });
-            if (b === null) break;                          // 未加载：落点未知，按不安全处理
-            if (LIQUID_BLOCKS.has(b)) { landing = b; drop = d; break; } // 会掉进液体
-            if (!isSoftBlock(b)) { landing = b; drop = d; break; }      // 实心落点
-            // 软的（空气/草/藤蔓/铁轨…）继续往下扫
-          }
+          const { drop, landing } = dropBelow(adapter, c);
           if (drop === 0 || LIQUID_BLOCKS.has(landing ?? '')) {
             const position = adapter.state().pos;
             const peek = adapter.blockAt({ x: c.x, y: c.y - 1, z: c.z });

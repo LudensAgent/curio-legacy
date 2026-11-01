@@ -2,7 +2,7 @@ import type { Vec3Like } from '../adapter/types.ts';
 import { FACINGS, facingOfYaw, feetCell, localMap, supportCell, toWorld, type Facing } from '../perception/local.ts';
 import { attachmentFaces, isSoftBlock, LIQUID_BLOCKS, surroundings } from '../perception/surroundings.ts';
 import { sleep, throwIfAborted } from '../util.ts';
-import { breakCell, why } from './body.ts';
+import { breakCell, dropBelow, why } from './body.ts';
 import { classifyBlock, MAN_MADE_NOTE, OWN_BUILDING_HINT, ownBuildingAt, storedChestAt } from './build.ts';
 import { noteEdit } from '../mind/edits.ts';
 import { glanceAt } from './observation.ts';
@@ -134,6 +134,18 @@ export const digAt: Skill<CellArgs> = {
       const fix = blocked.some((w) => /lava/.test(w.name)) ? '可以先堵上，或写 "lava":true 明确接受岩浆流入的风险后照挖'
         : `可以先 place_at 往那几格放方块把水堵上（水格可以直接放方块），或者写 "wet":true 照挖、让水流进来（水只会漫过来，不会伤人，挖完可以再堵）；也可以换个方向`;
       return fail('BAD_ARGS', `[${args.at}] 挖开会有液体流进来：${cells}。${fix}`, { wet: wets[0].name, wetCells: wets.map((w) => toRel(feet, args.facing, w.pos)), ...after(ctx, args.facing, pos) });
+    }
+    // [0,-1,0] 挖的是脚下支撑块：挖前先向下扫 3 格确认有安全落点（和 dig dir:down 同一套），
+    // 落差未知/超过 3 格、或下面就是液体时拒绝，避免挖掉自己的支撑直接坠落。
+    if (args.at[0] === 0 && args.at[2] === 0 && args.at[1] === -1) {
+      const { drop, landing } = dropBelow(ctx.adapter, pos);
+      if (drop === 0 || LIQUID_BLOCKS.has(landing ?? '')) {
+        const peek = ctx.adapter.blockAt({ x: pos.x, y: pos.y - 1, z: pos.z });
+        const reason = drop === 0
+          ? (peek === null ? '下面的落点还没加载，未知能否安全落地' : '下面有超过 3 格的落差，跳下去会掉血')
+          : `下面 ${drop} 格是 ${landing}，往下挖会掉进去`;
+        return fail('BAD_ARGS', `[${args.at}] 挖的是脚下支撑块：${reason}，没有往下挖`, { ...after(ctx, args.facing, pos), below: landing ?? peek, drop });
+      }
     }
     const mine = args.own ? null : ownBuildingAt(ctx.memory, ctx.adapter.state(), pos, before);
     if (mine) return fail('BAD_ARGS', `[${args.at}] 的 ${before} 是自己盖的「${mine.name}」的一部分；${OWN_BUILDING_HINT}`, { own: mine, ...after(ctx, args.facing, pos) });

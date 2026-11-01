@@ -245,7 +245,7 @@ test('dig_at 自己站的两格不算写错，说明一下就好', async (t) => 
 
 test('站在半砖上：向下挖 [0,-1,0] 挖到脚下的半砖本身，不是它下面的空气', async (t) => {
   const w = new FakeAdapter();
-  w.groundY = 60; // 让 y63、y64 都是空中，模拟「站在屋顶半砖上、下面是小屋内部」
+  w.groundY = 62; // y63 是空气（半砖下面没有紧贴的方块），y62 是草方块：挖掉半砖后落 2 格，安全
   w.pos = { x: 0.5, y: 64.5, z: 0.5 }; // 脚在 64.5 = 站在 y64 的下半砖上
   w.blocks.push({ name: 'oak_slab', pos: { x: 0, y: 64, z: 0 } });
   const ctx = makeCtx(w, { senses: { observeBlocks: visibleTargets(w) } });
@@ -255,6 +255,31 @@ test('站在半砖上：向下挖 [0,-1,0] 挖到脚下的半砖本身，不是�
   assert.match(r.summary, /oak_slab/);
   assert.ok(w.actions.includes('dig:oak_slab'), `真的挖到了脚下的半砖（实际动作 ${w.actions.join(',')}）`);
   assert.equal(w.blockAt({ x: 0, y: 64, z: 0 }), 'air', '半砖被挖掉，人才落得下去');
+});
+
+test('dig_at [0,-1,0] 脚下有安全落点时照挖支撑块', async (t) => {
+  const w = new FakeAdapter();
+  w.pos = { x: 0.5, y: 64, z: 0.5 }; // 站在 y63 的草方块上，下面 y62 是石头（1 格落差，安全）
+  const ctx = makeCtx(w, { senses: { observeBlocks: visibleTargets(w) } });
+  t.after(() => ctx.memory.close());
+  const r = await digAt.run(ctx, { at: [0, -1, 0], facing: 'N' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.match(r.summary, /grass_block/);
+  assert.ok(w.actions.includes('dig:grass_block'));
+});
+
+test('dig_at [0,-1,0] 脚下支撑下面是深坑（落差超过 3 格）时拒绝，不拆自己的支撑', async (t) => {
+  const w = new FakeAdapter();
+  w.groundY = 63;
+  w.pos = { x: 0.5, y: 64, z: 0.5 }; // 站在 y63 的草方块上
+  w.removed.add('0,62,0'); w.removed.add('0,61,0'); w.removed.add('0,60,0'); w.removed.add('0,59,0'); // 下面掏空成深坑
+  const ctx = makeCtx(w, { senses: { observeBlocks: visibleTargets(w) } });
+  t.after(() => ctx.memory.close());
+  const r = await digAt.run(ctx, { at: [0, -1, 0], facing: 'N' });
+  assert.equal(r.status, 'failed', r.summary);
+  assert.equal(r.failureCode, 'BAD_ARGS');
+  assert.match(r.summary, /落差|掉血/);
+  assert.ok(!w.actions.includes('dig:grass_block'), '没有挖掉脚下的支撑');
 });
 
 test('dig_at 液体邻格默认不挖；wet:true 与 lava:true 分别授权进水和进岩浆', async (t) => {
