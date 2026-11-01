@@ -358,7 +358,7 @@ export class SkillCurator {
 - 已停用但未收起的技能也要评估；候选没有验收通过不等于已经会用。候选可保留试用、同名修订或依据证据收起，不强制心智做任何试验。
 - notes 是纯文字记录，不参与执行成败和闲置淘汰。可按内容重复或已被事实推翻来 retire（target:note），不能因为没有执行次数就收起。确有用途时可用 restore 恢复文字记录；读取不代表做法验证成功。
 - 合并纯文字记录也用 merge：from 只能写 notes 中的名字，skill 只写 name、description、body；先保留原记录，是否收起来源再明确决定。写入已收起的文字目标不会自动恢复，需要时另写 restore。已有行为技能的补充笔记保留在 notes 中，修订必须保留其仍适用的约束。
-- 说的是同一件事、触发条件大面积重叠的：合并成一份更好的（merge：from 写被合并的名字，skill 写合并后的完整技能，可以沿用其中一个名字）。合并时保留各自真正管用的部分（看 uses 的成败）。
+- 说的是同一件事、触发条件大面积重叠的：合并成一份更好的（merge：from 写被合并的名字，skill 写合并后的完整技能，必须沿用其中一个 from 名字，不要起 merged/unified/consolidated 这类新名）。合并时保留各自真正管用的部分（看 uses 的成败）。
 - 行为 merge 先保存候选，原技能保留；候选实际验收通过后再根据新证据决定是否 retire 来源技能。uses 是表中指定版本的证据，lifetime 是历史总计，不混用。${postDeath ? `
 - 【死亡刚发生】刚死了一次：优先处理导致这次死亡的来回拉锯（see_sawed_with）、互相拆台（undid_work_of）、抢着接手（clashed_with）的技能，由你判断怎么处理——若是同一件事、条件大面积重叠，合并成一份并 retire 冗余来源；若其实是不同场景、只是条件重叠才互相触发，就收窄各自的 when 划分互不重叠的场景，保留它们、不合并、不删除。` : ''}
 - 来回拉锯的（see_sawed_with：一个做完另一个又把它推回去，或者技能一再打断手上同一件事）：这最要紧——找出两边条件为什么会轮流成立，
@@ -413,6 +413,8 @@ export class SkillCurator {
           else errors.push(`文字合并没存下：${saved && !saved.ok ? saved.error : '没有技能书'}`);
           continue;
         }
+        // 合并必须沿用被合并技能之一的名字（保留其中一个），避免每次都起 merged/unified/consolidated 新名、让同一族越并越多
+        if (from.length && (typeof m.skill.name !== 'string' || !from.includes(m.skill.name))) m.skill.name = from[0];
         const w = this.engine.write(m.skill, { by: 'curator' });
         if (!w.ok) { errors.push(`合并 ${from.join('+')} 没存下：${w.error}`); continue; }
         done.push(`${from.join('+')} → 候选 ${w.name}（保留原技能，验收后再决定收起）`);
@@ -435,7 +437,8 @@ export class SkillCurator {
         const st = this.engine.currentStats(name, !!eb.candidate), tries = st.ok + st.fail;
         if (tries > 0 && tries < 3 || tries === 0 && (this.lifetime(eb)?.age ?? 0) < DAY_TICKS / 2) { errors.push(`${name} 当前版本证据还少，先保留`); continue; }
         // 模型显式收起时只保护“实际成功过的稳定应急版”；未验证的应急候选仍可收起（借同名旧版成功不能永久保留）
-        if (!eb.candidate && this.protectedEmergency(eb) && (this.engine.currentStats(name)?.ok ?? 0) > 0) { errors.push(`${name} 当前稳定应急版实际成功过，保留；改进先生成候选并验收，不因少用丢掉已验证能力`); continue; }
+        const emergencyStats = this.engine.currentStats(name);
+        if (!eb.candidate && this.protectedEmergency(eb) && (emergencyStats?.ok ?? 0) > (emergencyStats?.fail ?? 0)) { errors.push(`${name} 当前稳定应急版成功多于失败，保留；改进先生成候选并验收，不因少用丢掉已验证能力`); continue; }
         if (this.retire(eb, why)) done.push(`收起 ${name}${eb.candidate ? ` 候选 v${eb.version}` : ''}`);
       }
       for (const r of raw.restore) {
