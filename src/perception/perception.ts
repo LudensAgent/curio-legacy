@@ -187,6 +187,7 @@ export class Perception {
   /** 跟着身体记自己挖过的通道（矿道、台阶井） */
   private passages: PassageTracker;
   private lastDugAt = 0;
+  private lastPlacedAt = 0;
   /** 第一次拿到某个物品时回调（heldBefore 是之前拿到过的物品） */
   onNewItem?: (item: string, heldBefore: Set<string>) => void;
   private latest: Percept | null = null;
@@ -635,6 +636,13 @@ export class Perception {
         this.forgetMinedOre(s, dug);
         const place = where.kind === 'surface' || where.kind === 'indoors' ? 'surface' : where.kind === 'underground' ? 'underground' : 'other';
         this.passages.observe({ worldId: s.worldId, dim: s.dim, pos: s.pos, place }, dug);
+        // 自己放置的方块：放→记进 LRU；挖→从 LRU 移除（保持与当前世界一致）
+        const placed = this.adapter.recentPlaced?.(this.lastPlacedAt) ?? [];
+        if (placed.length) {
+          this.lastPlacedAt = placed[placed.length - 1].ts;
+          for (const p of placed) this.memory.putPlaced(p.pos, p.name);
+        }
+        for (const d of dug) this.memory.removePlaced(d.pos);
       } catch { /* 记不下来不影响感知 */ }
     }
     if (light && overhead && (overhead.covered === 'canopy' || overhead.covered === 'open')) {

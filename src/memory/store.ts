@@ -215,6 +215,14 @@ const LANDMARK_CAP = 200;
 const DISCOVERY_LABEL_CAP = 8;
 /** 开挖入口/进度 waypoint 上限：恢复点只留最近几个，避免每次开挖都净增两条 */
 export const EXCAVATION_WAYPOINT_CAP = 8;
+/** 自己放置的方块（路、桥、门框、脚手架…）LRU 上限：环境变量可调；超出淘汰最久未用的 */
+const PLACED_BLOCKS_CAP = (() => {
+  const raw = process.env.PLACED_BLOCKS_CAP;
+  const n = raw ? Number(raw) : 4096;
+  return Number.isInteger(n) && n > 0 ? n : 4096;
+})();
+/** 空间哈希格边长（格）：queryPlacedNear 只扫附近格子 */
+const PLACED_CELL = 16;
 
 const empty = (): MemoryData => ({
   version: MEMORY_VERSION,
@@ -251,6 +259,12 @@ export class WorldMemory {
   private timer: NodeJS.Timeout | null = null;
   private lastChunk = '';
   private transactionDepth = 0;
+  /** 自己放置的方块：位置 → { 方块名, 最近使用 }；byCell 是空间哈希（不落盘） */
+  private placedByPos = new Map<string, { name: string; at: number }>();
+  private placedByCell = new Map<string, Set<string>>();
+  private placedClock = 0;
+  private placedDirty = false;
+  private placedTimer: NodeJS.Timeout | null = null;
 
   constructor(private file: string | null) {
     this.data = empty();
@@ -273,6 +287,56 @@ export class WorldMemory {
       this.timer = setInterval(() => this.flush(), 10000);
       this.timer.unref?.();
       this.flush();
+      this.loadPlaced(file + '.placed');
+      this.placedTimer = setInterval(() => this.flushPlaced(), 30000);
+      this.placedTimer.unref?.();
+    }
+  }
+
+  private placedKey(x: number, y: number, z: number) { return `${x},${y},${z}`; }
+  private placedCell(x: number, y: number, z: number) {
+    return `${Math.floor(x / PLACED_CELL)},${Math.floor(y / PLACED_CELL)},${Math.floor(z / PLACED_CELL)}`;
+  }
+  private placedInsert(key: string, cell: string) {
+    let set = this.placedByCell.get(cell);
+    if (!set) { set = new Set(); this.placedByCell.set(cell, set); }
+    set.add(key);
+  }
+  private placedDelete(key: string, cell: string) {
+    const set = this.placedByCell.get(cell);
+    if (!set) return;
+    set.delete(key);
+    if (set.size === 0) this.placedByCell.delete(cell);
+  }
+
+  private loadPlaced(file: string) {
+    if (!fs.existsSync(file)) return;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const entries: Record<string, { name: string; at: number }> = parsed?.byPos ?? {};
+      let maxAt = 0;
+      for (const [key, v] of Object.entries(entries)) {
+        if (typeof v?.name !== 'string' || typeof v?.at !== 'number') continue;
+        this.placedByPos.set(key, { name: v.name, at: v.at });
+        if (v.at > maxAt) maxAt = v.at;
+        const [x, y, z] = key.split(',').map(Number);
+        this.placedInsert(key, this.placedCell(x, y, z));
+      }
+      this.placedClock = maxAt + 1;
+      this.evictPlaced();
+    } catch { /* 放置记录坏了就不加载，不影响主记忆 */ }
+  }
+
+  /** LRU：超出上限淘汰最久未用（at 最小）的 */
+  private evictPlaced() {
+    while (this.placedByPos.size > PLACED_BLOCKS_CAP) {
+      let worstKey: string | null = null;
+      let worstAt = Infinity;
+      for (const [key, v] of this.placedByPos) if (v.at < worstAt) { worstAt = v.at; worstKey = key; }
+      if (worstKey === null) break;
+      const [x, y, z] = worstKey.split(',').map(Number);
+      this.placedDelete(worstKey, this.placedCell(x, y, z));
+      this.placedByPos.delete(worstKey);
     }
   }
 
@@ -430,6 +494,66 @@ export class WorldMemory {
     fs.writeFileSync(tmp, JSON.stringify(this.data, null, 1));
     fs.renameSync(tmp, this.file);
     this.dirty = false;
+  }
+
+  // ------------------------------------------------ 自己放置的方块（LRU + 空间哈希）
+
+  /** 放置成功时记一笔：同一格再放会更新方块名。 */
+  putPlaced(pos: Vec3Like, name: string) {
+    const x = Math.floor(pos.x), y = Math.floor(pos.y), z = Math.floor(pos.z);
+    const key = this.placedKey(x, y, z);
+    const cell = this.placedCell(x, y, z);
+    const prev = this.placedByPos.get(key);
+    this.placedByPos.set(key, { name, at: this.placedClock++ });
+    if (!prev) this.placedInsert(key, cell);
+    this.placedDirty = true;
+    this.evictPlaced();
+  }
+
+  /** 挖掉时移除：不是自己放的格是无害 no-op。 */
+  removePlaced(pos: Vec3Like) {
+    const x = Math.floor(pos.x), y = Math.floor(pos.y), z = Math.floor(pos.z);
+    const key = this.placedKey(x, y, z);
+    if (!this.placedByPos.delete(key)) return;
+    this.placedDelete(key, this.placedCell(x, y, z));
+    this.placedDirty = true;
+  }
+
+  /** 这一格是不是自己放的；是则返回方块名，否则 null。O(1)。 */
+  getPlaced(pos: Vec3Like): string | null {
+    return this.placedByPos.get(this.placedKey(Math.floor(pos.x), Math.floor(pos.y), Math.floor(pos.z)))?.name ?? null;
+  }
+
+  /** 附近自己放的方块（按 3D 距离 ≤ radius），只扫空间哈希里的附近格子。 */
+  queryPlacedNear(pos: Vec3Like, radius: number): { pos: Vec3Like; name: string; dist: number }[] {
+    const fx = Math.floor(pos.x), fy = Math.floor(pos.y), fz = Math.floor(pos.z);
+    const cr = Math.ceil(radius / PLACED_CELL);
+    const cx0 = Math.floor(fx / PLACED_CELL), cy0 = Math.floor(fy / PLACED_CELL), cz0 = Math.floor(fz / PLACED_CELL);
+    const out: { pos: Vec3Like; name: string; dist: number }[] = [];
+    for (let dcx = -cr; dcx <= cr; dcx++) for (let dcy = -cr; dcy <= cr; dcy++) for (let dcz = -cr; dcz <= cr; dcz++) {
+      const set = this.placedByCell.get(`${cx0 + dcx},${cy0 + dcy},${cz0 + dcz}`);
+      if (!set) continue;
+      for (const key of set) {
+        const v = this.placedByPos.get(key);
+        if (!v) continue;
+        const [x, y, z] = key.split(',').map(Number);
+        const dist = Math.hypot(x - fx, y - fy, z - fz);
+        if (dist > radius) continue;
+        v.at = this.placedClock++; // 正在用：刷新 LRU，不淘汰
+        out.push({ pos: { x, y, z }, name: v.name, dist });
+      }
+    }
+    return out;
+  }
+
+  private flushPlaced() {
+    if (!this.file || !this.placedDirty) return;
+    const byPos: Record<string, { name: string; at: number }> = {};
+    for (const [key, v] of this.placedByPos) byPos[key] = v;
+    const tmp = this.file + '.placed.tmp';
+    fs.writeFileSync(tmp, JSON.stringify({ byPos }));
+    fs.renameSync(tmp, this.file + '.placed');
+    this.placedDirty = false;
   }
 
   // ------------------------------------------------ 空间记忆 / 新颖性
@@ -1127,6 +1251,8 @@ export class WorldMemory {
 
   close() {
     if (this.timer) clearInterval(this.timer);
+    if (this.placedTimer) clearInterval(this.placedTimer);
     this.flush();
+    this.flushPlaced();
   }
 }

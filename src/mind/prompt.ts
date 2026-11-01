@@ -593,15 +593,18 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
   };
 }
 
-function surroundingsOf(p: Percept, tier: 'glance' | 'deliberate') {
+function surroundingsOf(p: Percept, tier: 'glance' | 'deliberate', memory: WorldMemory) {
   const v = p.vision;
   const n = tier === 'glance' ? 5 : 10;
+  const here = p.self.pos;
+  const placed = memory.queryPlacedNear({ x: here[0], y: here[1], z: here[2] }, 8);
   return {
     ...(p.self.local ? { local: p.self.local } : {}),
     ...(p.self.around ? { around: p.self.around } : {}),
     exits: p.self.exits ?? null,
     hostile: p.nearby.hostile.slice(0, 5), passive: p.nearby.passive.slice(0, 6), players: p.nearby.players,
     see_now: p.nearby.resources.filter((r) => r.seen === 'now').slice(0, n).map((r) => `${r.block}×${r.count} ${r.dir ?? ''}${r.nearest}格`),
+    ...(placed.length ? { nearby_placed: placed.slice(0, 5).map((b) => `${b.name}（${Math.round(b.dist)}格）`).join('、') } : {}),
     ...(v ? { facing: v.facing, view: v.view, ...((v as any).visible_drops?.length ? { drops: (v as any).visible_drops.slice(0, 4) } : {}),
       ...(v.nearest_land ? { nearest_land: v.nearest_land } : {}),
       ...(v.recent_sightings?.length ? { recent_sightings: { dimension: p.self.dim, source: 'past_visual_observation',
@@ -708,7 +711,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       ...(ctx.repeatedFailures?.length ? { repeated_failures: ctx.repeatedFailures } : {}),
       ...(ctx.notes.length ? { last_decision_corrections: ctx.notes } : {}),
     }],
-    ['身边', surroundingsOf(p, ctx.tier)],
+    ['身边', surroundingsOf(p, ctx.tier, ctx.memory)],
     ['身体', bodyState(p, s, ctx.activity, self.habits())],
     ...(focusBlock(ctx) ? [['专注', focusBlock(ctx)!] as [string, Record<string, unknown>]] : []),
     ...(ctx.stageReview ? [['阶段回顾', ctx.stageReview] as [string, Record<string, unknown>]] : []),

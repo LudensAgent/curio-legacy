@@ -383,6 +383,8 @@ export interface GameAdapter {
   forgetDiscarded?(item: string): void;
   /** 自己挖掉的方块（动作、代码技能、寻路挖穿的都算），since 之后的；用来记自己挖过的通道 */
   recentDug?(since: number): { pos: Vec3Like; name: string; ts: number }[];
+  /** 自己放置的方块（placeBlockAt 成功才算），since 之后的；用来记自己放过哪些格 */
+  recentPlaced?(since: number): { pos: Vec3Like; name: string; ts: number }[];
   collectNearbyDrops(signal: AbortSignal, radius: number, timeoutMs: number): Promise<number>;
   /** 只合成指定目标；prepare:true 才补做两层前置材料并制造/放置工作台。tablePos = 已知工作台位置；batchSize = 每批最多执行配方的次数（1–64），不是产物个数 */
   /** detail：失败时具体缺什么；tablePos：这次用到的工作台位置（便于记住、下次复用） */

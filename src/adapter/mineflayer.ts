@@ -1691,6 +1691,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         try {
           await this.afterAction(() => raceAbort(b.placeBlock(ref, f.scaled(-1)), signal, 5000, () => {}), check);
         } finally { if (sneak) b.setControlState('sneak', false); }
+        this.notePlaced({ x: target.x, y: target.y, z: target.z }, item.name);
         return { ok: true };
       } catch (e: any) {
         if (e?.name === 'AbortedError') throw e;
@@ -1706,6 +1707,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           try {
             await this.afterAction(() => b.equip(item, 'hand'), check);
             await this.afterAction(() => raceAbort(b.placeBlock(floor, new Vec3(0, 1, 0)), signal, 5000, () => {}), check);
+            this.notePlaced({ x: target.x, y: target.y, z: target.z }, item.name);
             return { ok: true };
           } catch (e: any) {
             if (e?.name === 'AbortedError') throw e;
@@ -4004,6 +4006,13 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
 
   private dugLog: { pos: Vec3Like; name: string; ts: number }[] = [];
   recentDug(since: number) { return this.dugLog.filter((d) => d.ts > since); }
+
+  private placedLog: { pos: Vec3Like; name: string; ts: number }[] = [];
+  recentPlaced(since: number) { return this.placedLog.filter((d) => d.ts > since); }
+  private notePlaced(pos: Vec3Like, name: string) {
+    this.placedLog.push({ pos: { x: pos.x, y: pos.y, z: pos.z }, name, ts: Date.now() });
+    if (this.placedLog.length > 512) this.placedLog.splice(0, this.placedLog.length - 512);
+  }
 
   /** 服务器说某载具的乘客里已经没有自己：清掉残留的 bot.vehicle，恢复物理，补发 dismount（见 connect 里的说明） */
   private syncDismount(b: any, pk: { entityId?: number; passengers?: number[] }) {
