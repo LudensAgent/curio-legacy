@@ -116,6 +116,54 @@ test('follow_passage 离矿道远时先走到最近脚点接回网里，再沿�
   assert.deepEqual(visited[visited.length - 1], { x: 2, y: 40, z: 0 }, '最后走到地表参考点');
 });
 
+test('follow_passage dig:true 在上台阶时先挖开头顶再迈', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0, y: 40, z: 0 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  // 一条 1 格上台阶的旧矿道：links 记真实相邻格对，入口在台阶顶
+  memory.savePassage({
+    id: 'p1', worldId: w.worldId, dim: w.dim, kind: 'dug',
+    entrances: [{ x: 1, y: 42, z: 0 }],
+    deepestY: 40, dug: 30, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1,
+    path: [{ x: 0, y: 40, z: 0 }, { x: 1, y: 41, z: 0 }],
+    links: [{ a: { x: 0, y: 40, z: 0 }, b: { x: 1, y: 41, z: 0 } }],
+  });
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  const digs: Vec3Like[] = [];
+  t.mock.method(w, 'dig', async (pos: Vec3Like) => { digs.push(pos); w.setBlock(pos, 'air'); return { ok: true }; });
+  t.mock.method(w, 'moveTo', async (goal: any) => { if (goal.kind === 'near') w.pos = { x: goal.pos.x, y: goal.pos.y, z: goal.pos.z }; });
+  const result = await followPassage.run(ctx, { to: 'entrance', dig: true });
+  assert.equal(result.status, 'succeeded', result.summary);
+  // 起跳头顶 (0,42,0) 和新头 (1,42,0) 都要先挖开（2 格高隧道里跳不上去）
+  assert.ok(digs.some((d) => d.x === 0 && d.y === 42 && d.z === 0), `挖了起跳头顶 (0,42,0)：${JSON.stringify(digs)}`);
+  assert.ok(digs.some((d) => d.x === 1 && d.y === 42 && d.z === 0), `挖了新头 (1,42,0)：${JSON.stringify(digs)}`);
+});
+
+test('follow_passage 无 dig 在上台阶被头顶挡时停下并提示 dig:true', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0, y: 40, z: 0 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  memory.savePassage({
+    id: 'p1', worldId: w.worldId, dim: w.dim, kind: 'dug',
+    entrances: [{ x: 1, y: 42, z: 0 }],
+    deepestY: 40, dug: 30, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1,
+    path: [{ x: 0, y: 40, z: 0 }, { x: 1, y: 41, z: 0 }],
+    links: [{ a: { x: 0, y: 40, z: 0 }, b: { x: 1, y: 41, z: 0 } }],
+  });
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  const digs: Vec3Like[] = [];
+  t.mock.method(w, 'dig', async (pos: Vec3Like) => { digs.push(pos); w.setBlock(pos, 'air'); return { ok: true }; });
+  const result = await followPassage.run(ctx, { to: 'entrance' });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.failureCode, 'PATH_NOT_FOUND');
+  assert.match(result.summary, /可加 dig:true/);
+  assert.equal(digs.length, 0, '没授权 dig 不挖');
+});
+
 test('follow_passage 接不到矿道（moveTo 过不去）时报失败', async (t) => {
   const w = new TestWorld();
   w.pos = { x: 50, y: 30, z: 0 };

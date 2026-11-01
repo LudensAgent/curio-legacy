@@ -1,7 +1,7 @@
 import { buildingArchiveFor } from './build.ts';
 import { findStation, isStation } from './stations.ts';
-import { DIR_OFFSETS, surroundings } from '../perception/surroundings.ts';
-import { climbUp } from './body.ts';
+import { AIR_BLOCKS, DIR_OFFSETS, LIQUID_BLOCKS, isSoftBlock, surroundings } from '../perception/surroundings.ts';
+import { breakCell, climbUp, why } from './body.ts';
 import { hasPlaceable, PLACEABLE } from './survival.ts';
 import { DIRS, dirName } from '../perception/perception.ts';
 import { dist3, sleep, throwIfAborted } from '../util.ts';
@@ -598,6 +598,24 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; dig?: boolean }>
       if (Date.now() >= ctx.deadline) return fail('TIMEOUT', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段时间用完；人停在 (${last.x.toFixed(1)},${last.y.toFixed(1)},${last.z.toFixed(1)})，离目标约 ${Math.round(dist3(last, target))} 格`, { position: last, reachedWaypoint: i, totalWaypoints: route.length - 1 });
       const wp = route[i];
       if (dist3(last, wp) <= 1.2) continue;
+      // 上 1 格台阶：两格高隧道里跳不起来。先把「起跳头顶」「新头」两格挖开（dig:true 才授权挖），再迈。
+      const lc = feetCell(last);
+      if (wp.y === lc.y + 1 && Math.abs(wp.x - lc.x) <= 1 && Math.abs(wp.z - lc.z) <= 1) {
+        for (const h of [{ x: lc.x, y: lc.y + 2, z: lc.z }, { x: wp.x, y: wp.y + 1, z: wp.z }]) {
+          const b = adapter.blockAt(h);
+          if (b === null || AIR_BLOCKS.has(b) || isSoftBlock(b) || LIQUID_BLOCKS.has(b)) continue;
+          if (!allowDig) {
+            return fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段：下一路点 (${Math.round(wp.x)},${Math.round(wp.y)},${Math.round(wp.z)}) 是 1 格上台阶，头顶 (${h.x},${h.y},${h.z}) 是 ${b}，两格高隧道里跳不上去；可加 dig:true 让我先挖开头顶再迈，或自己 dig_at 阶梯`, { position: last, reachedWaypoint: i, totalWaypoints: route.length - 1, blockedHead: h });
+          }
+          try {
+            await breakCell(ctx, h);
+          } catch (e) {
+            if (isAbort(e)) throw e;
+            const now = adapter.state().pos;
+            return fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段：要挖开头顶 (${h.x},${h.y},${h.z}) 迈上台阶，没成（${why(e)}）。人停在 (${now.x.toFixed(1)},${now.y.toFixed(1)},${now.z.toFixed(1)})`, { position: now, reachedWaypoint: i, totalWaypoints: route.length - 1, blockedHead: h });
+          }
+        }
+      }
       ctx.progress(i / route.length, `沿${kind}${back ? '回入口' : '下最深'}：第 ${i}/${route.length - 1} 段`);
       try {
         await adapter.moveTo({ kind: 'near', pos: wp, range: 1.2 }, { signal, timeoutMs: Math.max(2000, Math.min(20000, ctx.deadline - Date.now())), allowSwimming: false, ...terrainPermission });
