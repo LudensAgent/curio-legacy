@@ -129,7 +129,12 @@ export const observePortal: Skill<{}> = {
     ctx.senses.refresh();
     const state = ctx.adapter.state();
     const kinds = ['nether_portal', 'end_portal', 'end_gateway'];
-    const portal = visiblePortal(ctx, ctx.senses.knownBlocks(kinds, 8).map((block) => block.pos), kinds);
+    // 先扫当前视野里看得见的门（记忆可能因死亡/换维度而失效，眼前看得见的才是此刻能核对的），再看记忆里的门位置重验
+    const here = state.pos;
+    const around = [-2, -1, 0, 1, 2].flatMap((dx) => [-1, 0, 1].flatMap((dy) => [-2, -1, 0, 1, 2].map((dz) =>
+      ({ x: Math.floor(here.x) + dx, y: Math.floor(here.y) + dy, z: Math.floor(here.z) + dz }))));
+    const portal = visiblePortal(ctx, around, kinds)
+      ?? visiblePortal(ctx, ctx.senses.knownBlocks(kinds, 8).map((block) => block.pos), kinds);
     if (!portal) return fail('NOT_FOUND', '附近没有已观察并能核对的传送门');
     const endpoint = travelStore(ctx.memory).observe(state, portal.pos, portal.name as PortalEndpoint['kind']);
     // 也记进常规记忆（地标），让 recall / places 能找回来，不只是 travelStore 里的一份；下界门在下界这一端尤其要靠它记住
