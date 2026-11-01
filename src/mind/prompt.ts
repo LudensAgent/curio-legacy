@@ -635,7 +635,9 @@ function worldKnowledge(ctx: MindContext) {
   const portalSnapshot = travelStore(m).snapshot(s.worldId);
   const portals = portalSnapshot.endpoints.slice(-4).map((e) => {
     const leadsTo = portalSnapshot.routes.filter((r) => r.fromId === e.id).map((r) => ({ to: r.toId, return_verified: r.returnVerified }));
-    return { id: e.id, dim: e.dim, kind: e.kind, pos: e.pos, ...(leadsTo.length ? { leads_to: leadsTo } : {}) };
+    const nowBlock = ctx.blockAt?.(e.pos) ?? null;
+    const now = nowBlock === e.kind ? '亮着' : nowBlock === null ? '未加载(未知)' : `已变(现为 ${nowBlock})`;
+    return { id: e.id, dim: e.dim, kind: e.kind, pos: e.pos, ...(leadsTo.length ? { leads_to: leadsTo } : {}), now };
   });
   const builds = myBuilds(m, { worldId: s.worldId, dim: p.self.dim, pos: here });
   const home = homeOf(m, { worldId: s.worldId, dim: p.self.dim, pos: here });
