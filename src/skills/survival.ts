@@ -380,8 +380,11 @@ export const pickupItems: Skill<{ radius: number; item?: string; remembered?: bo
     const before = inv();
     // 指名要捡：哪怕是刚扔掉的，也是改主意了，捡回来不算“又捡回来了”
     if (args.item) adapter.forgetDiscarded?.(args.item);
-    const wanted = (name: string, pos?: typeof origin) => (!args.item || name.replace(/^item:/, '') === args.item)
-      && (!pos || Math.hypot(pos.x - origin.x, pos.y - origin.y, pos.z - origin.z) <= args.radius);
+    const wanted = (name: string, pos?: typeof origin) => {
+      const raw = name.replace(/^item:/, '');
+      if (!args.item && pos && adapter.isDiscarded?.(raw, pos)) return false;
+      return (!args.item || raw === args.item) && (!pos || Math.hypot(pos.x - origin.x, pos.y - origin.y, pos.z - origin.z) <= args.radius);
+    };
     let visits = 0;
     let looked = false;
     for (let i = 0; i < 30 && Date.now() < ctx.deadline; i++) {

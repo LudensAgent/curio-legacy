@@ -1606,7 +1606,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     while (Date.now() < deadline) {
       throwIfAborted(signal);
       // 第一次只捡身边的；追过一次的，漂远一点（多 6 格）也接着追
-      const item = this.nearbyEntities(radius + 6).find((e) => e.kind === 'item' && !tried.has(e.id) && (tries.has(e.id) || e.dist <= radius));
+      const item = this.nearbyEntities(radius + 6).find((e) => e.kind === 'item' && !tried.has(e.id) && (tries.has(e.id) || e.dist <= radius) && !this.isDiscarded(e.name.replace(/^item:/, ''), e.pos));
       if (!item) {
         // block_update can arrive before item_spawn; briefly allow that first
         // drop to become observable without turning collection into a long wait.
