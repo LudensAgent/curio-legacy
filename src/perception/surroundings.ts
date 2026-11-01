@@ -24,6 +24,22 @@ export type ExitOptions = Record<string, { walk: boolean | null; step_down: bool
 const soft = (n: string | null) => n == null || SOFT.test(n);
 const solidFloor = (n: string | null) => n != null && !SOFT.test(n) && !LIQUID.has(n);
 
+/**
+ * 挖掉 pos 这格（通常是脚下支撑块）后身体会往下掉几格：向下扫最多 3 格找第一个实心落点（3 格以内不掉血）。
+ * 0 = 未加载或落差超过 3 格（不安全）；landing 为液体时也属于「会掉进去」的不安全落点。
+ */
+export function dropBelow(adapter: { blockAt(pos: Vec3Like): string | null }, pos: Vec3Like): { drop: number; landing: string | null } {
+  let drop = 0, landing: string | null = null;
+  for (let d = 1; d <= 3; d++) {
+    const b = adapter.blockAt({ x: pos.x, y: pos.y - d, z: pos.z });
+    if (b === null) break;                          // 未加载：落点未知，按不安全处理
+    if (LIQUID.has(b)) { landing = b; drop = d; break; } // 会掉进液体
+    if (!soft(b)) { landing = b; drop = d; break; }      // 实心落点
+    // 软的（空气/草/藤蔓/铁轨…）继续往下扫
+  }
+  return { drop, landing };
+}
+
 export interface Surroundings {
   /** 一句话：脚下｜头顶｜天空｜能走的方向｜挡路的方向 */
   text: string;
@@ -38,6 +54,8 @@ export interface Surroundings {
   support: { block: string | null; pos: Vec3Like };
   feet: { block: string | null; pos: Vec3Like };
   head: { block: string | null; pos: Vec3Like };
+  /** 脚下这一列向下最近的落点：null = 正站在实心地板上；{depth, block} = 悬空时向下最近的实心/液体落点（depth 0 = 超过 3 格或未加载看不清） */
+  drop: { depth: number; block: string | null } | null;
 }
 
 export function surroundings(adapter: GameAdapter, pos: Vec3Like = adapter.state().pos): Surroundings {
@@ -45,6 +63,12 @@ export function surroundings(adapter: GameAdapter, pos: Vec3Like = adapter.state
   const at = (dx: number, dy: number, dz: number) => adapter.blockAt({ x: x + dx, y: y + dy, z: z + dz });
   const supportPos = { x, y: Math.floor(pos.y - .01), z };
   const below = adapter.blockAt(supportPos), above = at(0, 2, 0);
+  // 脚下这一列向下最近的落点：站在实心地板上是 null；悬空（脚下是空气/液体/不满一格的东西）时向下扫
+  // 最多 3 格（空气透明、看得见），报告离脚底最近的实心/液体落点；超过 3 格或未加载则 depth=0。
+  const drop = below !== null && !solidFloor(below) ? (() => {
+    const scan = dropBelow(adapter, supportPos);
+    return scan.drop > 0 ? { depth: scan.drop, block: scan.landing } : { depth: 0, block: null };
+  })() : null;
   // 天光 ≥ 12：露天（树冠、草叶只会挡掉一两级）
   const sky = (adapter.lightAt(x, y + 1, z)?.sky ?? 0) >= 12;
   const exits: string[] = [], blocked: string[] = [];
@@ -70,12 +94,13 @@ export function surroundings(adapter: GameAdapter, pos: Vec3Like = adapter.state
   }
   const parts = [
     `脚下 ${below ?? '?'}`,
+    ...(drop ? [drop.depth > 0 ? `悬空，向下 ${drop.depth} 格是 ${drop.block}` : '悬空，向下超过 3 格看不清落点'] : []),
     soft(above) ? '头顶空着' : `头顶上方 ${above}`,
     sky ? '看得见天空' : '看不见天空',
     exits.length ? `一步内可走：${exits.join('、')}（↑ 上一级，↓ 下一级，无箭头为同层）` : '没有确认可走的一步落点',
     ...(blocked.length ? [`挡住：${blocked.join('，')}`] : []),
   ];
-  return { text: parts.join('｜'), enclosed: exits.length === 0, exits, exitOptions, sky, below, above,
+  return { text: parts.join('｜'), enclosed: exits.length === 0, exits, exitOptions, sky, below, above, drop,
     support: { block: below, pos: supportPos }, feet: { block: at(0, 0, 0), pos: { x, y, z } },
     head: { block: at(0, 1, 0), pos: { x, y: y + 1, z } } };
 }

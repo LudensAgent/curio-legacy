@@ -1,5 +1,5 @@
 import { DIRS } from '../perception/perception.ts';
-import { DIR_OFFSETS, isSoftBlock, LIQUID_BLOCKS, surroundings } from '../perception/surroundings.ts';
+import { DIR_OFFSETS, dropBelow, isSoftBlock, LIQUID_BLOCKS, surroundings } from '../perception/surroundings.ts';
 import { dirOfYaw, interactiveName } from '../perception/vision.ts';
 import { isContainerLandmark } from '../memory/chest-memory.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
@@ -62,22 +62,6 @@ export const why = (e: unknown) => {
   if (m === 'TOOL_MISSING') return '适配器报告当前工具条件不足；检查具体方块、工具和动作时间预算';
   return m;
 };
-
-/**
- * 挖掉 pos 这格（通常是脚下支撑块）后身体会往下掉几格：向下扫最多 3 格找第一个实心落点（3 格以内不掉血）。
- * 0 = 未加载或落差超过 3 格（不安全）；landing 为液体时也属于「会掉进去」的不安全落点。
- */
-export function dropBelow(adapter: { blockAt(pos: Vec3Like): string | null }, pos: Vec3Like): { drop: number; landing: string | null } {
-  let drop = 0, landing: string | null = null;
-  for (let d = 1; d <= 3; d++) {
-    const b = adapter.blockAt({ x: pos.x, y: pos.y - d, z: pos.z });
-    if (b === null) break;                          // 未加载：落点未知，按不安全处理
-    if (LIQUID_BLOCKS.has(b)) { landing = b; drop = d; break; } // 会掉进液体
-    if (!isSoftBlock(b)) { landing = b; drop = d; break; }      // 实心落点
-    // 软的（空气/草/藤蔓/铁轨…）继续往下扫
-  }
-  return { drop, landing };
-}
 
 type TargetDigArgs = { target: string | Vec3Like; block?: string; own?: boolean; dir?: undefined; blocks?: undefined; wet?: boolean; lava?: boolean };
 type DigArgs = ({ dir: string; blocks: number; target?: undefined; block?: undefined } | TargetDigArgs) & { wet?: boolean; lava?: boolean };

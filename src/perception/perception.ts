@@ -681,7 +681,7 @@ export class Perception {
             : overhead?.covered === 'canopy' ? `头顶 ${overhead.up} 格是 ${overhead.block}（被树冠遮住，人在地表，不是地下）`
             : overhead?.covered === 'roof' ? `头顶 ${overhead.up} 格是 ${overhead.block}（屋顶/搭出来的遮挡）`
             : environment.sky_visible === false ? `头顶被 ${overhead?.block ?? '方块'} 遮挡` : '天空可见性尚未确认'),
-          contacts: { support: contact.support, feet: contact.feet, head: contact.head } } : {}),
+          contacts: { support: contact.support, feet: contact.feet, head: contact.head, ...(contact.drop ? { drop: contact.drop } : {}) } } : {}),
         ...environment,
         ...(overhead ? { overhead } : {}),
         ...(where ? { where } : {}),

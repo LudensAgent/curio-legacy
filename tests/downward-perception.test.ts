@@ -121,3 +121,18 @@ test('现有脱困寻路能读取带下行箭头的出口方向', async (t) => {
   assert.equal(result.status, 'succeeded', result.summary);
   assert.equal(move.mock.callCount(), 1);
 });
+
+test('悬空时 surroundings 报告脚下向下最近的落点，站在实心地板上不报', () => {
+  // 站在实心地板上（支撑 y63 是草方块）：不报悬空
+  const grounded = new FakeAdapter();
+  grounded.pos = { x: 0.5, y: 64, z: 0.5 };
+  assert.equal(surroundings(grounded).drop, null);
+  assert.doesNotMatch(surroundings(grounded).text, /悬空/);
+  // 悬空：脚下 y63、y62、y61 掏空，y60 是石头 → 向下 3 格是 stone
+  const floating = new FakeAdapter();
+  floating.pos = { x: 0.5, y: 64, z: 0.5 };
+  floating.removed.add('0,63,0'); floating.removed.add('0,62,0'); floating.removed.add('0,61,0');
+  const around = surroundings(floating);
+  assert.deepEqual(around.drop, { depth: 3, block: 'stone' });
+  assert.match(around.text, /悬空，向下 3 格是 stone/);
+});
