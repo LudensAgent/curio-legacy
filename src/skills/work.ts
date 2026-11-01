@@ -1,5 +1,5 @@
 import { chestHint, needsFromShortfall } from './chest-hint.ts';
-import { describePlan, dropItemsOf, materialPlan } from '../methods/shortfall.ts';
+import { canAcceptItem, describePlan, dropItemsOf, materialPlan } from '../methods/shortfall.ts';
 import { lookAround } from './movement.ts';
 import { findStation, myBed, rememberStation } from './stations.ts';
 import { classifyBlock, MAN_MADE_NOTE, ownBuildingAt } from './build.ts';
@@ -215,10 +215,11 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
     };
     ctx.progress(0, `采集 ${args.block} x${args.count}`);
     const ownSkipped = new Set<string>();
+    const drops = new Set(names.flatMap((n) => dropItemsOf(n)));
     while (dug < args.count) {
       const s = adapter.state();
       if (!s.connected) return fail('NOT_CONNECTED', '连接断开');
-      if (s.emptySlots === 0) {
+      if (![...drops].some((item) => canAcceptItem(s.inventory, s.emptySlots, item))) {
         return dug > 0 ? ok(`背包已满，采集了 ${dug}/${args.count} 个 ${args.block}`) : fail('INVENTORY_FULL', '背包已满');
       }
       senses.refresh();

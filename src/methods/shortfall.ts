@@ -107,3 +107,13 @@ export function describePlan(p: MaterialPlan): string {
 
 /** 一个方块挖掉掉出的物品名（把"采 stone"和"背包里的 cobblestone"对上账）；无掉落记录退回方块名本身 */
 export const dropItemsOf = (block: string): string[] => knowledge().dropsOf(block);
+
+/** 背包还能不能再装一件 item：有空槽，或已有一叠没堆满的同名物品（堆叠上限以内）。 */
+export const canAcceptItem = (inv: InvItem[], emptySlots: number, item: string): boolean => {
+  if (emptySlots > 0) return true;
+  const entry = inv.find((i) => i.name === item);
+  if (!entry) return false;
+  const stackSize = entry.stackSize ?? 64;
+  if (entry.stacks?.length) return entry.stacks.some((st) => st.count < stackSize);
+  return entry.count < stackSize;
+};

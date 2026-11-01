@@ -1,4 +1,5 @@
 import type { BlockHit } from '../adapter/types.ts';
+import { canAcceptItem } from '../methods/shortfall.ts';
 import { lookAround } from './movement.ts';
 import { clampInt, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
 
@@ -65,7 +66,7 @@ export const forage: Skill<{ count: number }> = {
     while (total() < args.count && Date.now() < ctx.deadline - 3000) {
       signal.throwIfAborted();
       const s = adapter.state();
-      if (s.emptySlots === 0) break;
+      if (![...FOODS].some((f) => canAcceptItem(s.inventory, s.emptySlots, f))) break;
       senses.refresh();
       const feetY = Math.floor(s.pos.y);
       const seen = senses.knownBlocks(TARGETS, 48)
