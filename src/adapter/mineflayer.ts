@@ -244,6 +244,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   private dimension = 'unknown';
   private actionEpoch = 0;
   private actionContext = new AsyncLocalStorage<(() => void) & { signal?: AbortSignal }>();
+  /** 举盾的持续按住：mineflayer 在 entity_status/set_cooldown 时清 usingHeldItem，盾一挨打就掉；这里定时重举，直到 raiseShield(false) 或动作换主 */
+  private shieldHold: { interval: NodeJS.Timeout; epoch: number } | null = null;
   /** 正在进行的底层动作数（afterAction 包着的）；为 0 时才算空闲 */
   private inFlight = 0;
   /** 打断后的“收拾残局”：下一个碰背包/界面的动作要等它做完，免得两边的点击交错 */
@@ -3597,11 +3599,37 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const check = this.actionCheckpoint(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
     const b = this.bot;
-    if (!on) { this.actionContext.run(check, () => b.deactivateItem()); return { ok: true }; }
+    if (!on) {
+      this.stopShieldHold();
+      this.actionContext.run(check, () => b.deactivateItem());
+      return { ok: true };
+    }
     const off = b.inventory.slots?.[45];
     if (off?.name !== 'shield') return { ok: false, reason: 'NO_SHIELD' };
-    this.actionContext.run(check, () => b.activateItem(true));
+    this.holdShield();
     return { ok: true };
+  }
+
+  private stopShieldHold() {
+    if (!this.shieldHold) return;
+    clearInterval(this.shieldHold.interval);
+    this.shieldHold = null;
+  }
+
+  /** 盾举起来后持续按住：mineflayer 在 entity_status（挨打/格挡）/set_cooldown 时会把 usingHeldItem 清掉，盾就掉了；
+   * 定时补举，直到 raiseShield(false) 或动作换主（stopAll 递增 actionEpoch）。只在 usingHeldItem 已掉时重举，避免重复 use_item。 */
+  private holdShield() {
+    this.stopShieldHold();
+    const b = this.bot, epoch = this.actionEpoch;
+    const raise = () => {
+      if (this.actionEpoch !== epoch) { this.stopShieldHold(); return; }
+      if (b.inventory.slots?.[45]?.name !== 'shield') { this.stopShieldHold(); return; }
+      if (!b.usingHeldItem) { try { b.activateItem(true); } catch { /* ignore */ } }
+    };
+    raise();
+    const interval = setInterval(raise, 250);
+    interval.unref?.();
+    this.shieldHold = { interval, epoch };
   }
 
   async startDraw(item: string, signal: AbortSignal): Promise<ActionResult> {
