@@ -323,7 +323,9 @@ export const stepTo: Skill<CellArgs> = {
       ...after(ctx, args.facing, target) });
     let movementError: unknown;
     try {
-      await a.moveTo({ kind: 'xyz', x: target.x, y: target.y, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())), ...(args.at[1] === -1 ? { maxDropDown: 1 } : {}) });
+      // 下行（下一级）：pathfinder 的 maxDropDown 对比的是「脚高 → 落点地板」的落差，一步下降（脚 73→72，地板 71）是 2，不是 1。
+      // 传 1 会让原版 getLandingBlock 直接判 null、一步都下不去（和 descend 的 drop+1 同一套语义）。
+      await a.moveTo({ kind: 'xyz', x: target.x, y: target.y, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())), ...(args.at[1] === -1 ? { maxDropDown: 2 } : {}) });
     } catch (e) {
       if (isAbort(e)) throw e;
       movementError = e;
