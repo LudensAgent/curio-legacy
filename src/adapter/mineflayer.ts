@@ -1691,6 +1691,13 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const target = this.vec(pos);
     const cur = b.blockAt(target);
     if (cur && cur.boundingBox === 'block') return { ok: true }; // 已经有方块了
+    // 树苗只能种在草地/泥土类方块上：先查目标格下方，种不了就报清楚（别让服务器拒绝后只回一句 still air）
+    if (/_sapling$/.test(item.name)) {
+      const below = b.blockAt(target.offset(0, -1, 0));
+      if (!below || !/^(grass_block|dirt|coarse_dirt|podzol|mycelium|moss_block|rooted_dirt|mud|muddy_mangrove_roots)$/.test(below.name)) {
+        return { ok: false, reason: `BAD_SUPPORT:树苗要种在草方块/泥土/灰化土等上面，下面是 ${below?.name ?? '未加载的方块'}` };
+      }
+    }
     // 贴墙的东西（梯子、火把、按钮……）要以它能挂住的那一面为参照：梯子只能挂在实心墙的侧面，火把可以立在地上或挂在墙上；
     // 以前对什么方块都先试脚下那块的顶面，梯子就放不上，还只报“没有参照”，学不到“要贴墙放”
     const attach = attachmentFaces(item.name);
