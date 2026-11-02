@@ -2578,6 +2578,17 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return cell ? { cell, center: { x: pos.x + 0.5, y: bottomY + 0.5, z: pos.z + 0.5 } } : null;
   }
 
+  /** 传送循环专用轻量探针：只取维度/会话/存活/观测就绪，跳过全量背包与 structuredClone，避免饿死心跳 */
+  private transitionProbe() {
+    const b = this.bot;
+    if (!this.ready || !b) return { connected: false, alive: false, dim: 'unknown', sessionId: this.sessionId, observationReady: false };
+    const dim = this.currentDimension();
+    const alive = (b.health ?? 0) > 0;
+    let chunkReady = false;
+    try { chunkReady = !!b.blockAt(b.entity.position); } catch { /* ignore */ }
+    return { connected: true, alive, dim, sessionId: this.sessionId, observationReady: this.spawned && chunkReady && alive && dim !== 'unknown' };
+  }
+
   async enterPortalAt(pos: Vec3Like, signal: AbortSignal, expectedDim?: string): Promise<ActionResult & { from?: AgentState; to?: AgentState }> {
     const check = this.actionCheckpoint(signal);
     const from = this.state();
@@ -2599,7 +2610,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         const stepDeadline = Date.now() + 12000;
         while (Date.now() < stepDeadline) {
           throwIfAborted(signal);
-          const cur = this.state();
+          const cur = this.transitionProbe();
           if (!cur.connected || !cur.alive) return { ok: false, reason: 'TRANSITION_INTERRUPTED' };
           if (cur.dim !== from.dim) break;
           await this.drive({ forward: true }, 350, signal, { facePoint: approach.center });
@@ -2615,7 +2626,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
             const stepDeadline = Date.now() + 12000;
             while (Date.now() < stepDeadline) {
               throwIfAborted(signal);
-              const cur = this.state();
+              const cur = this.transitionProbe();
               if (!cur.connected || !cur.alive) return { ok: false, reason: 'TRANSITION_INTERRUPTED' };
               if (cur.dim !== from.dim || onPortal()) break;
               await this.drive({ forward: true }, 350, signal, { facePoint: center });
@@ -2626,15 +2637,17 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const deadline = Date.now() + 30000;
       while (Date.now() < deadline) {
         throwIfAborted(signal);
-        const to = this.state();
-        if (!to.connected || !to.alive) return { ok: false, reason: 'TRANSITION_INTERRUPTED' };
-        if (to.dim !== from.dim && to.sessionId !== from.sessionId && to.observationReady) {
+        const probe = this.transitionProbe();
+        if (!probe.connected || !probe.alive) return { ok: false, reason: 'TRANSITION_INTERRUPTED' };
+        if (probe.dim !== from.dim && probe.sessionId !== from.sessionId && probe.observationReady) {
+          // 只在确认跨维度成功后取一次完整 state（给上层返回真实出生观察），平时只用轻量探针
+          const to = this.state();
           if (expectedDim && to.dim !== expectedDim) return { ok: false, reason: `WRONG_DIMENSION:${to.dim}`, from, to };
           return { ok: true, from, to };
         }
         // No further world action is issued after the dimension changes. Loading
         // and the fresh spawn observation are the only evidence of arrival.
-        if (to.dim === from.dim) check();
+        if (probe.dim === from.dim) check();
         await sleep(200, signal);
       }
       return { ok: false, reason: 'PORTAL_TRANSITION_TIMEOUT' };
