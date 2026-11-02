@@ -9,6 +9,7 @@ import { audienceBlock, AUDIENCE_RULES, exploredAround, liveAudience, type MySki
 import type { ChatMessage } from '../planner/llm.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 import { myBed } from '../skills/stations.ts';
+import { gearAlreadyHeldInText } from '../skills/work.ts';
 import { travelStore } from '../travel/store.ts';
 import { describeActivity } from './activity.ts';
 import { describeBuild, homeOf, myBuilds } from './home.ts';
@@ -536,7 +537,10 @@ function focusBlock(ctx: MindContext): Record<string, unknown> | null {
   const stall = plan ? ctx.self.planStallInfo() : null;
   return {
     goal, agenda_id: plan?.agendaId ?? item!.id,
-    ...(plan ? { goal_age_wall_clock_min: Math.round((Date.now() - plan.setAt) / 60000), checklist: plan.steps.map((st, i) => `${i}. [${st.done ? 'x' : ' '}] ${st.text}${st.done && st.auto ? '（条件达成，自动勾的）' : !st.done && st.doneWhen ? '（条件达成会自动勾）' : ''}`), ...(next >= 0 ? { next_item: next } : {}),
+    ...(plan ? { goal_age_wall_clock_min: Math.round((Date.now() - plan.setAt) / 60000), checklist: plan.steps.map((st, i) => {
+      const held = !st.done ? gearAlreadyHeldInText(st.text, ctx.state.inventory, ctx.state.equipment) : null;
+      return `${i}. [${st.done ? 'x' : ' '}] ${st.text}${held ? `（其实不用做：${held}）` : ''}${st.done && st.auto ? '（条件达成，自动勾的）' : !st.done && st.doneWhen ? '（条件达成会自动勾）' : ''}`;
+    }), ...(next >= 0 ? { next_item: next } : {}),
       // 进展的事实交给它自己判断：多久没勾掉一项、这期间做了几段活
       no_progress_observed_online_min: Math.round(stall!.minutes), ...(stall!.historyUnknown ? { earlier_online_time: '未知' } : {}),
       activities_since_progress: ctx.self.history(60).filter((r) => r.at > (plan.progressAt ?? plan.setAt)).length } : { checklist: '还没有：写 plan' }),

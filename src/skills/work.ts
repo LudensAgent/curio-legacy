@@ -9,6 +9,7 @@ import { craftReservationConflict } from '../projects/reservations.ts';
 import { isResourceBlock, oreSpotsNear } from '../memory/ore-spots.ts';
 import { config } from '../config.ts';
 import { FOOD_VALUE, foodNote } from './food.ts';
+import { ITEM_ZH } from '../observer/item-zh.ts';
 import type { InvItem } from '../adapter/types.ts';
 
 const key = (p: { x: number; y: number; z: number }) => `${p.x},${p.y},${p.z}`;
@@ -484,6 +485,43 @@ export function gearAlreadyHeld(item: string, inv: InvItem[], worn: { name: stri
   }
   const limit = ['pickaxe', 'axe', 'shovel'].includes(want.kind) ? 2 : 1;
   return usable >= limit ? `已经有 ${have.join('、')}，还经用` : null;
+}
+
+/**
+ * 装备中文名 → item ID（含“铁靴”这类简称，以及清单里常写的“盾”而不是物品名的“盾牌”）。
+ * 按名字从长到短排，扫描时先匹配最长的，避免“钻石剑”被误拆成“石剑”、“下界合金剑”被拆成“金剑”。
+ */
+const GEAR_ZH: [string, string][] = (() => {
+  const m = new Map<string, string>();
+  for (const [id, zh] of Object.entries(ITEM_ZH)) {
+    if (!gearKind(id)) continue;
+    m.set(zh, id);
+    if (zh.endsWith('子')) m.set(zh.slice(0, -1), id);
+  }
+  m.set('盾', 'shield');
+  return [...m.entries()].sort((a, b) => b[0].length - a[0].length);
+})();
+
+/**
+ * 一段清单/想法文字里提到的装备，哪些其实已经拿在手上或穿在身上（同级或更好、还经用）。
+ * 给「清单里写着要做铁剑、身上却有钻石剑」这类忘了自己有什么的情况做交叉核对。返回一句话说明，没有返回 null。
+ */
+export function gearAlreadyHeldInText(text: string, inv: InvItem[], worn: { name: string; durabilityRemaining?: number }[] = []): string | null {
+  const ids = new Set<string>();
+  let i = 0;
+  while (i < text.length) {
+    let advanced = false;
+    for (const [zh, id] of GEAR_ZH) {
+      if (text.startsWith(zh, i)) { ids.add(id); i += zh.length; advanced = true; break; }
+    }
+    if (!advanced) i++;
+  }
+  const held = new Set<string>();
+  for (const id of ids) {
+    const note = gearAlreadyHeld(id, inv, worn);
+    if (note) held.add(note);
+  }
+  return held.size ? [...held].join('；') : null;
 }
 
 export const craft: Skill<{ item: string; count: number; batchSize?: number; extra?: boolean }> = {
