@@ -65,9 +65,14 @@ export function planTravel(blockAt: BlockAt, from: Vec3Like, to: { x: number; z:
     return c;
   };
   const sx = Math.floor(from.x), sz = Math.floor(from.z), tx = Math.floor(to.x), tz = Math.floor(to.z);
-  const start = col(sx, sz, from.y);
-  // 起点：站在地上（脚下那列的地面就是自己站的高度）或者泡在水里
-  if (start.kind === 'blocked' || (start.kind === 'land' && Math.abs(start.y - Math.floor(from.y)) > 2)) return null;
+  let start = col(sx, sz, from.y);
+  // 起点：站在地上（脚下那列的地面就是自己站的高度）或者泡在水里。
+  // surveyColumn 为了从树下方找到地面，会把树叶当空气跳过；于是站在树冠上的 agent 被误判成「悬空/地下」。
+  // 脚下直接踩着实心方块（含树叶、原木）时，按当前脚高当地面，不依赖往下扫。
+  const feetY = Math.floor(from.y);
+  const underFoot = blockAt({ x: sx, y: Math.floor(from.y - 0.05), z: sz });
+  if (underFoot !== null && !PASS.has(underFoot) && !WATER.has(underFoot)) start = { kind: 'land', y: feetY };
+  if (start.kind === 'blocked' || (start.kind === 'land' && Math.abs(start.y - feetY) > 2)) return null;
   const margin = opts.margin ?? 40;
   const minX = Math.min(sx, tx) - margin, maxX = Math.max(sx, tx) + margin, minZ = Math.min(sz, tz) - margin, maxZ = Math.max(sz, tz) + margin;
   const h = (x: number, z: number) => Math.hypot(x - tx, z - tz);
