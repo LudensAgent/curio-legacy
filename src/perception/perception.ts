@@ -337,7 +337,9 @@ export class Perception {
     if (!l) return null;
     // 客户端方块光（getBlockLight）插火把后可能没及时更新：合并近处火把的估算光，避免插了火把仍报“很暗”
     const block = Math.max(l.block, nearbyTorchLight(this.adapter, s.pos));
-    const here = effectiveLight({ block, sky: l.sky }, s.timeOfDay);
+    // 下界有维度环境光（约 7）：原始区块光照是 0，但下界昏暗可见、不是漆黑，别把「看不见」当插火把的理由。
+    // 末地有天空光（固定正午，sky≈15），本身已经亮，不用补环境光。
+    const here = Math.max(effectiveLight({ block, sky: l.sky }, s.timeOfDay), s.dim === 'the_nether' ? 7 : 0);
     const comp = this.vision.composition;
     const total = Object.values(comp).reduce((a, b) => a + b, 0) || 1;
     return {
