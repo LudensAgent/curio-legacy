@@ -2567,22 +2567,46 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return { ok: true };
   }
 
-  /** 下界门：读 axis 推导门面法线，返回门面正前那个可站立的接近格 + 门中心（用来面向走入） */
+  /** 下界门：找到门面正前可站立的接近格 + 面向走入的目标点。
+   *  门是 2 宽 × 3 高，axis 只读一个方块可能还没流到；就近多读几个门块，读不到再按四个水平方向扫能站的格。
+   *  center 必须落在「接近格 → 门」这条 walk 进线上（法线方向），否则 lookAt 会斜着撞黑曜石框。 */
   private portalApproach(pos: Vec3Like, kind: string): { cell: Vec3Like; center: Vec3Like } | null {
     if (kind !== 'nether_portal') return null;
-    const axis = this.blockStateAt(pos)?.properties?.axis;
-    // axis=x → 门面法线沿 Z；axis=z → 法线沿 X（从法线一侧走入）
-    const normal = axis === 'x' ? { x: 0, z: 1 } : axis === 'z' ? { x: 1, z: 0 } : null;
-    if (!normal) return null;
-    // 观察到的可能是门柱任一高度，找到脚部那一行（可站立走入的最底行）
+    // 找到脚部那一行（可站立走入的最底行）
     let bottomY = pos.y;
     while (this.blockAt({ x: pos.x, y: bottomY - 1, z: pos.z }) === 'nether_portal') bottomY--;
+    // 从附近的已加载门块里读出 axis（门宽只有 2，y 高 3，扫这个小盒就够）
+    let axis: string | undefined;
+    for (const dx of [0, -1, 1]) {
+      for (const dz of [0, -1, 1]) {
+        for (const dy of [0, 1, 2]) {
+          const properties = this.blockStateAt({ x: pos.x + dx, y: bottomY + dy, z: pos.z + dz })?.properties;
+          if (properties?.axis) { axis = String(properties.axis); break; }
+        }
+        if (axis) break;
+      }
+      if (axis) break;
+    }
     const standable = (c: Vec3Like) => {
       const foot = this.blockAt(c), below = this.blockAt({ x: c.x, y: c.y - 1, z: c.z });
       return (foot === null || AIR_BLOCKS.has(foot) || foot === 'nether_portal') && below !== null && !AIR_BLOCKS.has(below);
     };
-    const cell = [1, -1].map((s) => ({ x: pos.x + normal.x * s, y: bottomY, z: pos.z + normal.z * s })).find(standable);
-    return cell ? { cell, center: { x: pos.x + 0.5, y: bottomY + 0.5, z: pos.z + 0.5 } } : null;
+    // axis=x → 门面法线沿 Z；axis=z → 法线沿 X（从法线一侧走入）。读不到就四个方向都试。
+    const normals = axis === 'x' ? [{ x: 0, z: 1 }, { x: 0, z: -1 }]
+      : axis === 'z' ? [{ x: 1, z: 0 }, { x: -1, z: 0 }]
+      : [{ x: 1, z: 0 }, { x: -1, z: 0 }, { x: 0, z: 1 }, { x: 0, z: -1 }];
+    for (const normal of normals) {
+      const cell = { x: pos.x + normal.x, y: bottomY, z: pos.z + normal.z };
+      if (!standable(cell)) continue;
+      // 面点：法线方向对准门块中心、法线的垂直方向保持与接近格一致，这样 yaw 直指门面而不是斜 45°
+      const center = {
+        x: normal.x !== 0 ? pos.x + 0.5 : cell.x,
+        y: bottomY + 1.6,
+        z: normal.z !== 0 ? pos.z + 0.5 : cell.z,
+      };
+      return { cell, center };
+    }
+    return null;
   }
 
   /** 传送循环专用轻量探针：只取维度/会话/存活/观测就绪，跳过全量背包与 structuredClone，避免饿死心跳 */
@@ -2602,13 +2626,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (!from.observationReady) return { ok: false, reason: 'NOT_CONNECTED' };
     const name = this.blockAt(pos);
     if (name !== 'nether_portal' && name !== 'end_portal') return { ok: false, reason: 'NO_PORTAL' };
-    // 下界门：读 axis 推导门面法线，走到门面正前那个可站立的格再面向走入；别对着不可站立的门块寻路
+    // 下界门：走到门面正前那个可站立的格再面向走入；别对着不可站立的门块寻路
     // （pathfinder 不会为 nether_portal 生成节点，GoalNear(range:0) 永远无解）。
     // 末地门：横铺一层、脚下常是岩浆/虚空，退回「走到门附近再短促前进」，让身体落进门格。
-    const onPortal = () => {
-      const f = this.bot.entity.position.floored();
-      return f.x === Math.floor(pos.x) && f.y === Math.floor(pos.y) && f.z === Math.floor(pos.z);
-    };
+    // 门是 2 宽，onPortal 以「脚正踩在门块上」为准，不绑死观察到的单个门块坐标。
+    const onPortal = () => this.blockAt(this.bot.entity.position.floored()) === name;
     const approach = this.portalApproach(pos, name);
     this.inPortalTransition = true;
     try {
@@ -2619,26 +2641,21 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           throwIfAborted(signal);
           const cur = this.transitionProbe();
           if (!cur.connected || !cur.alive) return { ok: false, reason: 'TRANSITION_INTERRUPTED' };
-          if (cur.dim !== from.dim) break;
+          // 脚踩上门块也算「进到门里」：停止前进，交给下面的 30s 落地等待，别在门面上继续顶
+          if (cur.dim !== from.dim || onPortal()) break;
           await this.drive({ forward: true }, 350, signal, { facePoint: approach.center });
         }
       } else {
-        try {
-          await this.moveTo({ kind: 'near', pos, range: 0 }, { signal, timeoutMs: 20000 });
-        } catch (error) {
+        // 没有可站立的接近格（门贴着崖/墙）：走到门附近再短促朝门面冲，让身体落进门格
+        await this.moveTo({ kind: 'near', pos, range: 1.5 }, { signal, timeoutMs: 20000 });
+        const center = { x: pos.x + 0.5, y: pos.y + 0.5, z: pos.z + 0.5 };
+        const stepDeadline = Date.now() + 12000;
+        while (Date.now() < stepDeadline) {
           throwIfAborted(signal);
-          if (this.currentDimension() === from.dim) {
-            await this.moveTo({ kind: 'near', pos, range: 1.5 }, { signal, timeoutMs: 20000 });
-            const center = { x: pos.x + 0.5, y: pos.y + 0.5, z: pos.z + 0.5 };
-            const stepDeadline = Date.now() + 12000;
-            while (Date.now() < stepDeadline) {
-              throwIfAborted(signal);
-              const cur = this.transitionProbe();
-              if (!cur.connected || !cur.alive) return { ok: false, reason: 'TRANSITION_INTERRUPTED' };
-              if (cur.dim !== from.dim || onPortal()) break;
-              await this.drive({ forward: true }, 350, signal, { facePoint: center });
-            }
-          }
+          const cur = this.transitionProbe();
+          if (!cur.connected || !cur.alive) return { ok: false, reason: 'TRANSITION_INTERRUPTED' };
+          if (cur.dim !== from.dim || onPortal()) break;
+          await this.drive({ forward: true }, 350, signal, { facePoint: center });
         }
       }
       const deadline = Date.now() + 30000;
