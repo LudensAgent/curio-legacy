@@ -2634,6 +2634,19 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const approach = this.portalApproach(pos, name);
     this.inPortalTransition = true;
     try {
+      // 已经站在门方块上（重连出生在门旁、或刚穿过来）：门不会对「已在门里」的人重新触发传送，
+      // 得先退出门再重新踏入。门块不参与寻路，站在门里 moveTo 起步不了，只能用 drive 直接往门外走。
+      if (onPortal() && approach) {
+        const out = { x: approach.cell.x + 0.5, y: approach.cell.y + 1.0, z: approach.cell.z + 0.5 };
+        const backDeadline = Date.now() + 5000;
+        while (onPortal() && Date.now() < backDeadline) {
+          throwIfAborted(signal);
+          const cur = this.transitionProbe();
+          if (!cur.connected || !cur.alive) return { ok: false, reason: 'TRANSITION_INTERRUPTED' };
+          if (cur.dim !== from.dim) break; // 已经切走，交给下面的落地等待验收
+          await this.drive({ forward: true }, 300, signal, { facePoint: out });
+        }
+      }
       if (approach) {
         await this.moveTo({ kind: 'near', pos: approach.cell, range: 0.5 }, { signal, timeoutMs: 20000 });
         const stepDeadline = Date.now() + 12000;
