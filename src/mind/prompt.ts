@@ -103,7 +103,7 @@ export interface MindContext {
 
 /** 常用动作：给完整参数；其余只列名字和一句用途，需要时用 {"kind":"moves"} 查完整参数 */
 export const COMMON_MOVES = ['dig_at', 'step', 'place_at', 'defend', 'gather', 'goto', 'explore', 'look', 'look_around', 'dive', 'surface', 'craft', 'smelt', 'collect_furnace', 'eat', 'hunt', 'forage', 'fish', 'farm', 'collect_seeds',
-  'pickup_items', 'store_items', 'take_items', 'place_torch', 'shelter', 'sleep', 'wait', 'dig', 'excavate_path', 'climb_up', 'press_keys', 'build', 'travel', 'inspect_block', 'interact_block', 'use_item', 'use_skill'];
+  'pickup_items', 'store_items', 'take_items', 'place_torch', 'shelter', 'sleep', 'wait', 'dig', 'excavate_path', 'follow_passage', 'climb_up', 'press_keys', 'build', 'travel', 'inspect_block', 'interact_block', 'use_item', 'use_skill'];
 
 /** 远行、传送门、末地这些只在用得上时列出来，平时是噪音 */
 const ADVANCED = /portal|end_|dragon|stronghold|search_structure|reservations|base_memory|building_archive|building_review|ranged_defend|equip_armor/;
