@@ -17,6 +17,8 @@ const registry = minecraftData(config.mc.version);
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 const HAZARDS = new Set(['water', 'lava', 'bubble_column', 'powder_snow', 'fire', 'soul_fire', 'magma_block', 'campfire', 'soul_campfire', 'cactus', 'sweet_berry_bush', 'cobweb', 'pointed_dripstone']);
 const PROTECTED = new Set(['end_portal_frame', 'end_portal', 'nether_portal', 'end_gateway', 'chest', 'trapped_chest', 'barrel', 'spawner', 'crafting_table', 'furnace', 'blast_furnace', 'smoker']);
+/** 传送门方块：软块（薄片、可穿过），不是「半砖/台阶」这类能站但不稳的方块，也不是液体/坑 */
+const PORTAL_BLOCKS = new Set(['nether_portal', 'end_portal', 'end_gateway']);
 /** 垫空腔坑用的支撑方块：就地用背包里现成的建材，不制造、不另选玩法 */
 const SCAFFOLD_BLOCKS = ['cobblestone', 'dirt', 'netherrack', 'cobbled_deepslate', 'stone', 'deepslate', 'andesite', 'granite', 'diorite', 'tuff'];
 const DIRECTIONS = { north: { x: 0, z: -1 }, east: { x: 1, z: 0 }, south: { x: 0, z: 1 }, west: { x: -1, z: 0 } };
@@ -43,6 +45,8 @@ function floorProblem(name: string | null): ExcavationStop | null {
   // 空腔/虚空和「半砖这类不完整方块」是两码事：前者说明这条阶梯到头了、下面是洞穴，别在原地反复试；
   // 后者才是「能站但不稳」。分开报，Agent 才知道是换方向还是确认落点高度。
   if (AIR.has(name)) return new ExcavationStop('ERROR', `下一落点下面是空的（${name}）：前面脚下是个坑/洞穴`);
+  // 传送门是软块、可穿过，不是「半砖/台阶」：不当成站不稳的坑拦下开挖；真踩进去会传送，由 assertSession 按会话变化中止
+  if (PORTAL_BLOCKS.has(name)) return null;
   const collisions = (registry as any).blockCollisionShapes;
   const shapes = collisions?.blocks[name];
   const ids = Array.isArray(shapes) ? shapes : [shapes];
