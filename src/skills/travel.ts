@@ -151,7 +151,11 @@ async function traverse(ctx: SkillCtx, endpoint: PortalEndpoint) {
   if (!endpoint.portalObserved) return fail('NOT_FOUND', '该端只有到达位置，尚未观察到可返回的门');
   if (!adapter.enterPortalAt) return fail('ERROR', '适配器没有传送门进入能力');
   try {
-    if (adapter.blockAt(endpoint.pos) !== endpoint.kind) return fail('NOT_FOUND', '记忆中的传送门已改变或尚未加载');
+    const nowBlock = adapter.blockAt(endpoint.pos);
+    if (nowBlock !== endpoint.kind) {
+      const unlit = endpoint.kind === 'nether_portal' && (AIR.has(nowBlock ?? '') || nowBlock === 'torch' || nowBlock === 'wall_torch');
+      return fail('NOT_FOUND', unlit ? `门方块现在是 ${nowBlock}，多半只是被熄灭，黑曜石框还在` : '记忆中的传送门已改变或尚未加载');
+    }
     ctx.setStationaryWait?.(true);
     const result = await adapter.enterPortalAt(endpoint.pos, signal);
     throwIfAborted(signal);

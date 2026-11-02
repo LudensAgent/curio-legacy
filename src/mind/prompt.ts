@@ -647,7 +647,11 @@ function worldKnowledge(ctx: MindContext) {
   const portals = portalSnapshot.endpoints.slice(-4).map((e) => {
     const leadsTo = portalSnapshot.routes.filter((r) => r.fromId === e.id).map((r) => ({ to: r.toId, return_verified: r.returnVerified }));
     const nowBlock = ctx.blockAt?.(e.pos) ?? null;
-    const now = nowBlock === e.kind ? '亮着' : nowBlock === null ? '未加载(未知)' : `已变(现为 ${nowBlock})`;
+    const now = nowBlock === e.kind ? '亮着'
+      : nowBlock === null ? '未加载(未知)'
+      : e.kind === 'nether_portal' && (nowBlock === 'air' || nowBlock === 'cave_air' || nowBlock === 'void_air') ? '门未点亮（黑曜石框多半还在）'
+      : e.kind === 'nether_portal' && (nowBlock === 'torch' || nowBlock === 'wall_torch') ? '门未点亮（框里插了火把）'
+      : `已变(现为 ${nowBlock})`;
     return { id: e.id, dim: e.dim, kind: e.kind, pos: e.pos, ...(leadsTo.length ? { leads_to: leadsTo } : {}), now };
   });
   const builds = myBuilds(m, { worldId: s.worldId, dim: p.self.dim, pos: here });
