@@ -222,6 +222,7 @@ const ledger = new Ledger(path.join(config.dataDir, 'ledger.json'), bus, () => a
   () => ({ blocks: [...vision.visibleNow.values()].filter((b) => NOTABLE.has(b.name)), entities: vision.perceivedEntities(24) }),
   (from, to) => behaviors.usedBetween(from, to));
 ledger.onSignal = (sig) => smith.efficiency(sig);
+ledger.onConsumeSignal = (sig) => smith.consume(sig);
 let loopCurateAt = 0;
 bus.on('event', (ev: { type: string; msg: string; data?: Record<string, unknown> }) => {
   // 拉锯要尽快理清，但至少隔 10 分钟（拉锯越多整理越勤，整理本身又在制造拉锯）

@@ -4,7 +4,7 @@ import type { AgentState } from '../adapter/types.ts';
 import type { AgentEvent, EventBus } from '../events.ts';
 import { normalizeSkillName, type SkillBook } from '../knowledge/skillbook.ts';
 import { instinctNote, type BehaviorEngine } from '../mind/behaviors.ts';
-import type { LedgerSignal, LedgerView } from '../mind/ledger.ts';
+import type { ConsumeSignal, LedgerSignal, LedgerView } from '../mind/ledger.ts';
 import type { ChatMessage } from '../planner/llm.ts';
 import { extractJson } from '../planner/plan.ts';
 import type { Planner } from '../planner/planner.ts';
@@ -79,7 +79,7 @@ export const reasonOf = (summary: string) => summary.split(/[；;]/).map((seg, i
   .map((r) => r.replace(/\[[^\]]*\]/g, '[…]').replace(/\([^)]*\d[^)]*\)/g, '').replace(/-?\d+(\.\d+)?/g, '#').trim()).filter(Boolean).map((r) => r.slice(0, 60));
 
 interface Incident {
-  kind: ForgeKind; at: number; headline: string; lines: string[]; context: Record<string, unknown>; note?: string; signal?: LedgerSignal;
+  kind: ForgeKind; at: number; headline: string; lines: string[]; context: Record<string, unknown>; note?: string; signal?: LedgerSignal | ConsumeSignal;
   /** 这是哪一件事（结构化的：同一个动作同一种失败、同一串动作、同一样东西……），用来认“这事归谁管” */
   key?: string;
   /** 进队列的时刻（攒批用） */
@@ -286,6 +286,19 @@ export class SkillSmith {
   }
 
   /**
+   * 消耗账本报告：一段活用某样照明资源（火把）明显比它自己平时费（每走一格用得多）。
+   * 这是「投入」的另一半——收获效率只盯「拿到多少」，这里盯「用掉多少」。
+   */
+  consume(sig: ConsumeSignal, now = Date.now()) {
+    const key = `consume:${sig.item}`;
+    if (now - (this.lastEfficiency.get(key) ?? 0) < 10 * 60_000) return;
+    this.lastEfficiency.set(key, now);
+    const ep = sig.episode;
+    const headline = `用 ${sig.item} 比平时费：这段活每走一格用 ${sig.perBlock} 个，平时 ${sig.usualPerBlock} 个`;
+    this.report('efficiency', ep.at, headline, Math.max(60_000, ep.sec * 1000 + 10_000), undefined, undefined, sig, `efficiency:${key}`);
+  }
+
+  /**
    * 同一个动作、同一种失败码又来了：半小时内攒到几次（而且上次为它学过之后又过了一阵）就当成一件值得学的事，
    * 把这些失败的原文和归好类的原因一起交给模型——它能看出是“踩不住”还是“碰头”，该垫脚还是该挖。
    */
@@ -377,7 +390,7 @@ export class SkillSmith {
     this.report('review', now, `${why}，回顾这段时间做过的事`, 0, undefined, lines);
   }
 
-  report(kind: ForgeKind, at: number, headline: string, windowMs: number, note?: string, journal?: string[], signal?: LedgerSignal, key?: string) {
+  report(kind: ForgeKind, at: number, headline: string, windowMs: number, note?: string, journal?: string[], signal?: LedgerSignal | ConsumeSignal, key?: string) {
     const lines = journal ?? this.recent.filter((e) => e.ts >= at - windowMs && e.ts <= at + 5000).slice(-90)
       .map((e) => `[${((e.ts - at) / 1000).toFixed(0)}s] ${e.type} ${e.msg.replace(/\s+/g, ' ').slice(0, 170)}`);
     let st: AgentState | null = null;
@@ -501,6 +514,9 @@ chronic_shortages 是这两个小时里一再缺的东西：想想能不能把�
         ? `同一个动作一再因为同一种原因失败（下面是这些失败的原文、归好类的原因，和最后一次前后的经过）。
 别只看最后一次的位置：找出根本原因（比如目标格脚下踩不住、头顶碰头、路被挡、缺材料），想清楚每种原因真人会怎么处理（垫一块落脚、先挖开头顶、搭一级台阶、绕一下……）。
 写一个恢复类技能：when 写 after_failure 这个动作和失败码（需要区分原因就加 cell 条件，或者写成代码技能按原因分别处理），失败时先把原因处理掉，身体再重做那一步。existing_skills 里已经有管这件事、却老不成或被停用的，用同一个名字重写。`
+      : sig && 'perBlock' in sig
+        ? `消耗账本发现：它刚才用 ${sig.item} 比自己平时明显费——这段活每走一格用 ${sig.perBlock} 个，平时 ${sig.usualPerBlock} 个。下面有这次的经过。
+想想是不是插得太密、或者有更省的做法（比如隔更远插一支、只在要压刷怪或标记路口时才插）。能写成技能就改写现有那个推进技能（把它的插火把间隔调稀），已有技能管这件事却费火把的，就用同名改写。纯属这次地形特别黑就输出 {"none":true,"why":"…"}。`
       : sig?.direction === 'slow'
         ? `收获账本发现：它刚才拿 ${sig.item} 比自己平时明显费劲。下面有这次的经过，和账本里拿这样东西最省的几次是怎么做的、它通常出现在哪。
 对比这次和省的那几次哪里不一样（地方、顺序、找法、走了多少冤枉路、失败了几次），如果有一个技能能让它以后稳定地按省的方式做，写出来；已有技能管这件事却让它变慢了，就用同名改写。`

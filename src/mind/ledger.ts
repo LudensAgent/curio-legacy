@@ -24,12 +24,17 @@ export interface Dist { n: number; y: Record<string, number>; biome: Record<stri
 export interface Episode {
   at: number; what: string; kind: string; signature: string; outcome: string;
   sec: number; actions: number; failures: number; walked: number; hpLost: number; gained: Record<string, number>;
+  /** 这段活里从背包减少的可消耗资源（火把、食物、垫料…）：投入的另一半，和 gained 对称 */
+  consumed?: Record<string, number>;
   /** 这段活里身体用过的技能（名字@版本） */
   skills?: string[];
 }
 interface LedgerData { version: 1; seen: Record<string, Dist>; got: Record<string, Dist>; episodes: Episode[]; seenKeys: string[] }
 
 export interface LedgerSignal { item: string; direction: 'slow' | 'fast'; ratio: number; usualSec: number; thisSec: number; episode: Episode }
+
+/** 一段活消耗某样可消耗资源（如火把）明显比它自己平时费：每走一格的消耗量离群，交给造技能的对比 */
+export interface ConsumeSignal { item: string; perBlock: number; usualPerBlock: number; episode: Episode }
 
 /** 心智和造技能的看到的账（只读） */
 export interface LedgerView { names(): string[]; describe(name: string): string; digest(n?: number): string[]; skillEffect(name: string): string; aliases(name: string): string[]; huntTally(): HuntTally }
@@ -38,6 +43,8 @@ export interface LedgerView { names(): string[]; describe(name: string): string;
 export interface HuntTally { trips: number; animals: number; walked: number; recentWalked: number | null; lastAt: number | null }
 /** 动物身上掉的生肉：一块肉算一只（鸡掉 1，牛猪羊 1–3 都按 1 只估，宁可少算） */
 const RAW_MEAT = new Set(['beef', 'porkchop', 'mutton', 'chicken', 'rabbit']);
+/** 照明类可消耗资源：放了就没了，插得密不密直接反映在「每走一格用多少」上（垫料/食物不算浪费，不盯） */
+const WASTE_WATCH = new Set(['torch', 'wall_torch', 'soul_torch', 'soul_wall_torch', 'lantern', 'soul_lantern']);
 
 export interface ItemStats {
   item: string; episodes: number; units: number; perUnitSec: number;
@@ -78,8 +85,9 @@ export function describeDist(d: Dist | undefined): string {
 export class Ledger implements LedgerView {
   data: LedgerData;
   onSignal?: (s: LedgerSignal) => void;
+  onConsumeSignal?: (s: ConsumeSignal) => void;
   private seenKeys: Set<string>;
-  private cur = { actions: 0, failures: 0, walked: 0, hpLost: 0 };
+  private cur = { actions: 0, failures: 0, walked: 0, hpLost: 0, consumed: {} as Record<string, number> };
   private lastPos: Vec3Like | null = null;
   private lastHp: number | null = null;
   private lastInv: Map<string, number> | null = null;
@@ -129,6 +137,7 @@ export class Ledger implements LedgerView {
       for (const [name, n] of inv) {
         const before = this.lastInv.get(name) ?? 0;
         if (n > before) this.note('got', name, n - before, s, via, now);
+        else if (n < before) this.cur.consumed[name] = (this.cur.consumed[name] ?? 0) + (before - n);
       }
     }
     this.lastInv = inv;
@@ -189,8 +198,9 @@ export class Ledger implements LedgerView {
     let skills: string[] = [];
     try { skills = [...new Set(this.skillsUsed(at - e.sec * 1000 - 2000, at + 1000))].slice(0, 12); } catch { /* 技能统计暂不可用 */ }
     const ep: Episode = { at, ...e, gained: Object.fromEntries(Object.entries(e.gained).filter(([, v]) => v > 0)),
+      consumed: Object.fromEntries(Object.entries(this.cur.consumed).filter(([, v]) => v > 0)),
       actions: this.cur.actions, failures: this.cur.failures, walked: Math.round(this.cur.walked), hpLost: r1(this.cur.hpLost), ...(skills.length ? { skills } : {}) };
-    this.cur = { actions: 0, failures: 0, walked: 0, hpLost: 0 };
+    this.cur = { actions: 0, failures: 0, walked: 0, hpLost: 0, consumed: {} };
     const prior = this.data.episodes;
     this.data.episodes = [...prior, ep].slice(-MAX_EPISODES);
     this.dirty = true;
@@ -198,6 +208,11 @@ export class Ledger implements LedgerView {
     if (sig) {
       this.bus.publish('ledger_signal', 'P2', `拿 ${sig.item} ${sig.direction === 'slow' ? '比平时费劲' : '比平时省事'}：这次每个 ${fmtSec(sig.thisSec)}，平时 ${fmtSec(sig.usualSec)}`, { ...sig, episode: undefined, what: ep.what });
       try { this.onSignal?.(sig); } catch { /* 下游出错不影响记账 */ }
+    }
+    const csig = this.consumeJudge(ep, prior);
+    if (csig) {
+      this.bus.publish('ledger_consume_signal', 'P2', `用 ${csig.item} 比平时费：这段活每走一格用 ${csig.perBlock} 个，平时 ${csig.usualPerBlock} 个`, { ...csig, episode: undefined, what: ep.what });
+      try { this.onConsumeSignal?.(csig); } catch { /* 下游出错不影响记账 */ }
     }
     this.save();
     return ep;
@@ -222,6 +237,25 @@ export class Ledger implements LedgerView {
       }
     }
     return best;
+  }
+
+  /**
+   * 这次消耗某样照明资源（如火把）是不是明显偏离它自己的平时：对「每走一格用多少」取对数，
+   * 和最近二十次比，超出平时波动两倍才算（波动有个下限，免得前几次碰巧差不多就对一点点变化大惊小怪）。只报偏费的一样。
+   */
+  consumeJudge(ep: Episode, prior: Episode[]): ConsumeSignal | null {
+    for (const item of Object.keys(ep.consumed ?? {})) {
+      if (!WASTE_WATCH.has(item)) continue;
+      const perBlock = (e: Episode) => (e.consumed?.[item] ?? 0) / Math.max(1, e.walked);
+      const xs = prior.filter((p) => p.consumed?.[item]).slice(-20).map(perBlock);
+      if (xs.length < 4) continue;
+      const mean = xs.reduce((a, b) => a + b, 0) / xs.length;
+      const sd = Math.max(0.35, Math.sqrt(xs.reduce((a, b) => a + (b - mean) ** 2, 0) / xs.length));
+      const x = perBlock(ep);
+      const z = (x - mean) / sd;
+      if (z > 2 && x > mean) return { item, perBlock: r1(x), usualPerBlock: r1(mean), episode: ep };
+    }
+    return null;
   }
 
   // ---------------------------------------------------------------- 看账
