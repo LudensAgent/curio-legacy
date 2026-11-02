@@ -19,6 +19,8 @@ import { findStation, isStation, rememberStation } from './stations.ts';
 type Rel = [number, number, number];
 interface CellArgs { at: Rel; facing: Facing; own?: boolean; wet?: boolean; lava?: boolean }
 const AIR = new Set(['air', 'cave_air', 'void_air']);
+/** 垫浅坑用的支撑方块：就地用背包现成的建材 */
+const SCAFFOLD = ['cobblestone', 'dirt', 'netherrack', 'cobbled_deepslate', 'stone', 'deepslate', 'andesite', 'granite', 'diorite', 'tuff'];
 
 /** 模型常用的几种写法都认：at / to / pos / offset / rel / cell，数组 [1,1,0]、字符串 "1,1,0"、对象 {"f":1,"u":1,"r":0} */
 function relValue(a: Record<string, any>): unknown {
@@ -296,9 +298,22 @@ export const stepTo: Skill<CellArgs> = {
     if (!free(head)) problems.push(describe(head) === '未看清的格子' ? '目标格上方是 未看清的格子，无法确认头部空间'
       : `目标格上方是 ${describe(head)}${describe(head).endsWith('_door') ? '（门的状态或碰撞形状阻碍通行）' : `（会碰头${LIQUID_BLOCKS.has(describe(head)) ? '' : `；先 dig_at [${args.at[0]},${args.at[1] + 1},${args.at[2]}]`}）`}`);
     // 能站住：实心方块；薄雪层下面有实心方块也能踩
-    const hasSupport = standable(floor);
+    let hasSupport = standable(floor);
     const supportAt = toRel(feet, args.facing, floor);
     const placeAtInRange = supportAt[1] >= -1;
+    // 浅坑自动垫：目标格地板是空气、再下面一格是实心时，先垫一块支撑再迈，让破碎空腔地形里能正常走路。
+    // 深洞（再下面还是空气）/液体/下落方块照旧停下，交给 Agent 决定下去探还是换方向。
+    if (!hasSupport && placeAtInRange) {
+      const floorName = a.blockAt(floor);
+      const under = { ...floor, y: floor.y - 1 };
+      if (AIR.has(floorName ?? '') && solid(under)) {
+        const material = a.state().inventory.find((i) => SCAFFOLD.includes(i.name) && i.count > 0)?.name;
+        if (material) {
+          const placed = await a.placeBlockAt(floor, [material], ctx.signal);
+          if (placed.ok && standable(floor)) hasSupport = true;
+        }
+      }
+    }
     if (!hasSupport) problems.unshift(`目标格脚下 (${floor.x},${floor.y},${floor.z}) 是 ${describe(floor)}，无已确认支撑；支撑格 [${supportAt}]${placeAtInRange ? '' : ' 超出 place_at 上下 -1..3 范围'}；脚部目标格 [${args.at}] 须留空；未执行迈步`);
     if (args.at[1] === 1 && !free({ ...feet, y: feet.y + 2 })) problems.push(describe({ ...feet, y: feet.y + 2 }) === '未看清的格子'
       ? '往上跳时自己头顶上方是 未看清的格子，无法确认跳跃空间'

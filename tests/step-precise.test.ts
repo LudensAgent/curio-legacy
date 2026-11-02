@@ -42,6 +42,7 @@ test('support feedback identifies the floor to fill while keeping the selected f
   w.pos = { x: 0.5, y: 64, z: 0.5 };
   w.speed = 100000;
   w.removed.add('0,63,-1');
+  w.removed.add('0,62,-1');
   w.inv.set('cobblestone', 1);
   const ctx = makeCtx(w, { senses: { observeBlocks: (positions) => positions.map((pos) => ({
     name: w.blockAt(pos), pos, properties: {}, worldId: w.worldId, sessionId: w.sessionId,
@@ -62,6 +63,23 @@ test('support feedback identifies the floor to fill while keeping the selected f
   const entered = await stepTo.run(ctx, { at: [1, 0, 0], facing: 'N' });
   assert.equal(entered.status, 'succeeded', entered.summary);
   assert.deepEqual(w.pos, { x: 0.5, y: 64, z: -0.5 });
+});
+
+test('step auto-fills a shallow air gap and steps across it', async (t) => {
+  const w = new FakeAdapter();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.speed = 100000;
+  w.removed.add('0,63,-1'); // 浅坑：目标格脚下是空气、再下面一格是实心
+  w.inv.set('cobblestone', 1);
+  const ctx = makeCtx(w, { senses: { observeBlocks: (positions) => positions.map((pos) => ({
+    name: w.blockAt(pos), pos, properties: {}, worldId: w.worldId, sessionId: w.sessionId,
+    dimension: w.dim, observationId: 1, observedAt: Date.now(), source: 'vision' as const,
+  })) } });
+  t.after(() => ctx.memory.close());
+  const stepped = await stepTo.run(ctx, { at: [1, 0, 0], facing: 'N' });
+  assert.equal(stepped.status, 'succeeded', stepped.summary);
+  assert.deepEqual(w.pos, { x: 0.5, y: 64, z: -0.5 });
+  assert.equal(w.inv.get('cobblestone'), 0, 'auto-fill spends the scaffold block');
 });
 
 test('step rejects partial diagonal movement and reports actual location', async (t) => {
