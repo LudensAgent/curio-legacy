@@ -1,6 +1,7 @@
 import type { AgentState } from '../adapter/types.ts';
 import { chestLocation, describeChest, isContainerLandmark } from '../memory/chest-memory.ts';
 import { oreKind } from '../memory/ore-spots.ts';
+import { passageFragmentation } from '../memory/passages.ts';
 import { recallText } from '../memory/recollection.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { myFacilities } from '../mind/facilities.ts';
@@ -40,6 +41,7 @@ export function dashboardMemory(memory: WorldMemory, state: Pick<AgentState, 'wo
         dist: Math.round(Math.hypot(l.pos.x - state.pos.x, l.pos.y - state.pos.y, l.pos.z - state.pos.z)) }))
       .sort((a, b) => a.dist - b.dist),
     passages: passages.filter(inDimension).sort((a, b) => b.lastUsedAt - a.lastUsedAt).slice(0, 12),
+    passageFragments: passageFragmentation(passages.filter(inDimension)),
     facilities: facilities.slice(0, 16).map((f) => ({ ...f, worldId: state.worldId, dim: state.dim })),
     chests: chests.filter(inDimension).map((c) => ({ worldId: c.worldId, dim: c.dim, ...chestLocation(c, clock), note: c.note, uses: c.uses,
       items: c.contents.items.length, text: describeChest(c, clock) })),

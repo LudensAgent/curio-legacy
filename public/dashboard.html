@@ -609,6 +609,7 @@
         </div></div>
         <div class="card"><h2>资源点记忆 <span class="r dim" id="resCount"></span></h2><ul class="list body" id="resList"></ul></div>
         <div class="card cols2 rows2"><h2>挖过的通道 · 我的设施 <span class="r dim">一格一方块，北在上 · 滚轮缩放、拖动平移、双击看全貌</span></h2>
+          <div class="sub" id="passageFrag" style="margin-top:4px;color:var(--dim)"></div>
           <div class="body">
             <div class="tmap">
               <canvas id="tunnelMap" class="tunnel-map" role="img" aria-label="挖过的通道和设施的方块格子地图"></canvas>
@@ -1608,6 +1609,8 @@ function renderTunnels(mem, st) {
   $('tunnelList').innerHTML = list(fac, (f) => `<li><span class="k">${f.kind === 'passage' ? '通道' : f.kind === 'chest' ? '箱子' : f.kind === 'bed' ? '床' : '设施'}</span>${esc(f.text)}</li>`);
   const empty = !mem.passages ? '进程重启后开始记录自己挖的通道' : !mem.passages.length && !fac.length ? '还没有挖过的通道（自己挖够 4 格的地下通道才记），也没有设施' : '';
   $('tmEmpty').textContent = empty; $('tmEmpty').hidden = !empty;
+  const frag = mem.passageFragments;
+  $('passageFrag').textContent = frag && frag.records ? `旧矿道碎片化：${frag.records} 条 · ${frag.points} 脚点 · ${frag.components} 个碎片${frag.components > 1 ? `（${frag.pieces.slice(0, 4).map((p) => `${p.points}点`).join(' / ')}${frag.pieces.length > 4 ? ' …' : ''}）` : '（已连成一张网）'}` : '';
   renderResources(mem, st);
   tmap.data = tmBuild(mem, st);
   // 第一次打开：看自己周围 96 格内的通道和设施；“全貌”/双击才看全部

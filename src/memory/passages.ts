@@ -244,9 +244,9 @@ export function passageLevels(rec: Pick<PassageRecord, 'path'>): number[] {
  * 返回从离自己最近的点到离目标最近的点的连接；未验证点间通行或当前地形，不能作为自动导航路线。
  * 两头离通道太远、或者连不上，就返回 null。
  */
-export function passageRoute(recs: Pick<PassageRecord, 'path' | 'links'>[], from: Vec3Like, to: Vec3Like,
-  opts: { near?: number; hop?: number; link?: number } = {}): Vec3Like[] | null {
-  const near = opts.near ?? 5, hop = opts.hop ?? 7, link = opts.link ?? PASSAGE_LINK;
+/** 通道脚点 + 真实边走成的无向图：节点是脚点（path 或 links 端点），边是 links（或旧数据的时间相邻脚点）+ 跨 record 的碎片自愈。 */
+export function passageGraph(recs: Pick<PassageRecord, 'path' | 'links'>[], opts: { hop?: number; link?: number } = {}): { nodes: Vec3Like[]; owner: number[]; edges: Map<number, Set<number>> } {
+  const hop = opts.hop ?? 7, link = opts.link ?? PASSAGE_LINK;
   const nodes: Vec3Like[] = [];
   const owner: number[] = [];
   const edges = new Map<number, Set<number>>();
@@ -274,6 +274,37 @@ export function passageRoute(recs: Pick<PassageRecord, 'path' | 'links'>[], from
   });
   // 碎片自愈只跨 record：不同 record 之间挨得近的点连起来，同一条 record 内部不靠几何距离硬连
   for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) if (owner[i] !== owner[j] && d3(nodes[i], nodes[j]) <= link) add(i, j);
+  return { nodes, owner, edges };
+}
+
+/** 通道网的碎片化：所有脚点按真实边连起来，数有几个连通分量（碎片）；>1 说明有互不相连的旧矿道岛。 */
+export function passageFragmentation(recs: Pick<PassageRecord, 'path' | 'links'>[]): { records: number; points: number; components: number; pieces: { points: number; records: number }[] } {
+  const { nodes, owner, edges } = passageGraph(recs);
+  const comp = new Array<number>(nodes.length).fill(-1);
+  const pieces: { points: number; records: number }[] = [];
+  for (let i = 0; i < nodes.length; i++) {
+    if (comp[i] >= 0) continue;
+    const id = pieces.length;
+    let points = 0;
+    const recs = new Set<number>();
+    const q = [i];
+    comp[i] = id;
+    while (q.length) {
+      const u = q.pop()!;
+      points++;
+      recs.add(owner[u]);
+      for (const v of edges.get(u) ?? []) if (comp[v] < 0) { comp[v] = id; q.push(v); }
+    }
+    pieces.push({ points, records: recs.size });
+  }
+  pieces.sort((a, b) => b.points - a.points);
+  return { records: recs.length, points: nodes.length, components: pieces.length, pieces };
+}
+
+export function passageRoute(recs: Pick<PassageRecord, 'path' | 'links'>[], from: Vec3Like, to: Vec3Like,
+  opts: { near?: number; hop?: number; link?: number } = {}): Vec3Like[] | null {
+  const near = opts.near ?? 5, hop = opts.hop ?? 7, link = opts.link ?? PASSAGE_LINK;
+  const { nodes, edges } = passageGraph(recs, { hop, link });
   const closest = (p: Vec3Like) => {
     let best = -1, bd = Infinity;
     nodes.forEach((q, i) => { const d = d3(q, p); if (d < bd) { bd = d; best = i; } });
