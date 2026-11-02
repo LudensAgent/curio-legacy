@@ -25,10 +25,24 @@ const STEP = 3;
 export const PASSAGE_LINK = 3.5;
 const MAX_POINTS = 160;
 
-/** 这一下站的位置、或刚挖开的格子，落在另一条通道脚点附近（亲身的证据，不是臆造） */
-const touchesPassage = (rec: Pick<PassageRecord, 'path'>, pos: Vec3Like, dug: DugBlock[]) => {
-  const near = (p: Vec3Like) => rec.path.some((q) => d3(q, p) <= PASSAGE_LINK);
+/** 这一下站的位置、或刚挖开的格子，落在另一条通道脚点附近（亲身的证据，不是臆造）。
+ * 脚点既看稀疏的 path、也看亲手一步步走过的 links 端点：path 每隔几格才记一个，大矿道里大片走过的地方没有 path 点，
+ * 只看 path 会把重进同一段矿道误判成新矿道、越记越碎。 */
+const touchesPassage = (rec: Pick<PassageRecord, 'path' | 'links'>, pos: Vec3Like, dug: DugBlock[]) => {
+  const near = (p: Vec3Like) =>
+    rec.path.some((q) => d3(q, p) <= PASSAGE_LINK) ||
+    (rec.links ?? []).some((l) => d3(l.a, p) <= PASSAGE_LINK || d3(l.b, p) <= PASSAGE_LINK);
   return near(pos) || dug.some((b) => near(cell(b.pos)));
+};
+
+/** 通道里离 pos 最近、且 Chebyshev 相邻的脚点（path 或 links 端点）；并进/重进旧道时用它补一条连接边 */
+const bridgeNode = (rec: Pick<PassageRecord, 'path' | 'links'>, pos: Vec3Like): Vec3Like | null => {
+  for (const q of rec.path) if (adjacent(q, pos)) return q;
+  for (const l of rec.links ?? []) {
+    if (adjacent(l.a, pos)) return l.a;
+    if (adjacent(l.b, pos)) return l.b;
+  }
+  return null;
 };
 
 /**
@@ -46,6 +60,8 @@ export class PassageTracker {
   private lastPassage: { pos: Vec3Like; dim: string; worldId: string } | null = null;
   /** 这次行程里自己挖掉的格子：回地表时用最近的挖开格当洞口，而不是站的位置 */
   private dugBlocks: DugBlock[] = [];
+  /** 并进/重进旧道时脚下还没挨到旧脚点：接下来几步里一旦挨到就补一条连接边，让 links 连成一体（不是两团互不相连的岛） */
+  private pendingBridge: { dim: string; worldId: string; steps: number } | null = null;
 
   constructor(private memory: Pick<WorldMemory, 'passages' | 'savePassage'> & Partial<Pick<WorldMemory, 'forgetPassage'>>, private newId: () => string = () => `psg_${Math.random().toString(36).slice(2, 8)}`) {}
 
@@ -87,6 +103,7 @@ export class PassageTracker {
         old.uses += 1;
         old.lastUsedAt = now;
         this.active = { rec: old, existing: true };
+        this.beginBridge(old, pos, s.dim, s.worldId);
       } else {
         this.active = { existing: false, rec: { id: this.newId(), worldId: s.worldId, dim: s.dim, kind: 'walked', entrances: [], path: [pos], deepestY: pos.y, dug: 0, ores: {}, createdAt: now, lastUsedAt: now, uses: 1 } };
       }
@@ -101,6 +118,7 @@ export class PassageTracker {
       const keep = neighbor.uses > this.active!.rec.uses || (neighbor.uses === this.active!.rec.uses && neighbor.path.length > this.active!.rec.path.length) ? neighbor : this.active!.rec;
       this.mergeInto(keep, keep === neighbor ? this.active!.rec : neighbor);
       this.active = { rec: keep, existing: true };
+      this.beginBridge(keep, pos, s.dim, s.worldId);
     }
     const rec = this.active.rec;
     // 记「亲自走过的相邻格对」：和上一次通道脚点 Chebyshev 相邻且无瞬移，就是一条真实可走的边
@@ -108,6 +126,12 @@ export class PassageTracker {
       this.addLink(rec, this.lastPassage.pos, pos);
     }
     this.lastPassage = { pos, dim: s.dim, worldId: s.worldId };
+    // 上一步并进/重进旧道、脚下还没挨到旧脚点：现在挨到了就补连接边，让 links 连成一体；几步还没挨到就放弃
+    if (this.pendingBridge && this.pendingBridge.dim === s.dim && this.pendingBridge.worldId === s.worldId) {
+      const bridge = bridgeNode(rec, pos);
+      if (bridge) { this.addLink(rec, bridge, pos); this.pendingBridge = null; }
+      else if (--this.pendingBridge.steps <= 0) this.pendingBridge = null;
+    }
     const last = rec.path[rec.path.length - 1];
     if (!last || d3(last, pos) >= STEP) {
       // 走回已经记过的那段路上，不重复记点
@@ -126,6 +150,7 @@ export class PassageTracker {
     this.active = null;
     this.dugBlocks = [];
     this.lastPassage = null;
+    this.pendingBridge = null;
   }
 
   /** 最近的挖开格（洞口）：回地表时优先记自己挖开的那一格，而不是站的位置；只找贴近地表那层的挖开格。
@@ -183,6 +208,13 @@ export class PassageTracker {
     const same = (u: Vec3Like, v: Vec3Like) => u.x === v.x && u.y === v.y && u.z === v.z;
     if (links.some((l) => (same(l.a, a) && same(l.b, b)) || (same(l.a, b) && same(l.b, a)))) return;
     links.push({ a, b });
+  }
+
+  /** 并进/重进旧道时，把当下脚点和旧道里相邻的脚点连起来：不补这条边，合并后的 links 就是两团互不相连的岛，passageRoute 走不通 */
+  private beginBridge(rec: PassageRecord, pos: Vec3Like, dim: string, worldId: string) {
+    const n = bridgeNode(rec, pos);
+    if (n) { this.addLink(rec, n, pos); this.pendingBridge = null; }
+    else this.pendingBridge = { dim, worldId, steps: 8 };
   }
 
   /** 走进去的天然洞穴也记（用于原路返回）；挖够了就升级成"我挖的通道"；接着以前那条走的随时存 */

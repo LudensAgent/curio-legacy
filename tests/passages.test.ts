@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { PassageTracker, passageLevels } from '../src/memory/passages.ts';
+import { PassageTracker, passageLevels, passageRoute } from '../src/memory/passages.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { describePassage, myFacilities } from '../src/mind/facilities.ts';
 
@@ -300,5 +300,39 @@ test('通道：亲自一步步走过的相邻格记成 link，反复走不重复
   // 再从 (1,63,0) 走回 (2,62,0)：这条边已经记过，去重不新增
   tr.observe({ worldId: W, dim: D, pos: at(2, 62, 0), place: 'underground' }, [], t + 101000);
   assert.equal(m.passages(D)[0].links?.length, 4, '反复走同一条边不重复');
+  m.close();
+});
+
+test('重进大矿道：只挨着 links 端点、离 path 脚点远，也接着旧道记（不是新碎片）', () => {
+  const m = new WorldMemory(null); m.setWorld(W);
+  // 大矿道：path 稀疏（只有 x=0 一个点），links 密集（x=0..20 每格一条边）
+  m.savePassage({ id: 'big', worldId: W, dim: D, kind: 'dug', entrances: [], deepestY: 40, dug: 30, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1,
+    path: [{ x: 0, y: 40, z: 0 }],
+    links: Array.from({ length: 20 }, (_, i) => ({ a: { x: i, y: 40, z: 0 }, b: { x: i + 1, y: 40, z: 0 } })) });
+  const tr = new PassageTracker(m, () => 'new');
+  tr.observe({ worldId: W, dim: D, pos: at(15, 64, 0), place: 'surface' }, [], 0);
+  // 挖了几格（dug>=4），站在 x=15：挨 links 端点 x=14/16，但离 path 点 x=0 有 15 格
+  tr.observe({ worldId: W, dim: D, pos: at(15, 40, 0), place: 'underground' }, [
+    { pos: at(15, 40, 0), name: 'stone', ts: 1000 }, { pos: at(15, 41, 0), name: 'stone', ts: 1000 },
+    { pos: at(15, 42, 0), name: 'stone', ts: 1000 }, { pos: at(15, 43, 0), name: 'stone', ts: 1000 },
+  ], 1000);
+  assert.equal(m.passages(D).length, 1, '挨着 links 端点就该接着旧道，不再另起碎片');
+  assert.equal(m.passages(D)[0].id, 'big');
+  m.close();
+});
+
+test('重进旧道脚下挨着旧脚点时补一条连接边，links 连成一体、passageRoute 能走通', () => {
+  const m = new WorldMemory(null); m.setWorld(W);
+  // 旧道 links 只到 x=5；重进站在 x=6（挨着 x=5），再往前走一步到 x=7
+  m.savePassage({ id: 'big', worldId: W, dim: D, kind: 'dug', entrances: [], deepestY: 40, dug: 30, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1,
+    path: [{ x: 0, y: 40, z: 0 }],
+    links: Array.from({ length: 5 }, (_, i) => ({ a: { x: i, y: 40, z: 0 }, b: { x: i + 1, y: 40, z: 0 } })) });
+  const tr = new PassageTracker(m, () => 'new');
+  tr.observe({ worldId: W, dim: D, pos: at(6, 64, 0), place: 'surface' }, [], 0);
+  tr.observe({ worldId: W, dim: D, pos: at(6, 40, 0), place: 'underground' }, [{ pos: at(6, 40, 0), name: 'stone', ts: 1000 }], 1000);
+  tr.observe({ worldId: W, dim: D, pos: at(7, 40, 0), place: 'underground' }, [], 2000);
+  const p = m.passages(D)[0];
+  const route = passageRoute([p], { x: 0, y: 40, z: 0 }, { x: 7, y: 40, z: 0 });
+  assert.ok(route, '重进补桥后 links 连通，能从 x=0 路由到 x=7');
   m.close();
 });
