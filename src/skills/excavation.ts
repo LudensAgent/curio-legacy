@@ -2,6 +2,7 @@ import minecraftData from 'minecraft-data';
 import type { AgentState, Vec3Like } from '../adapter/types.ts';
 import { config } from '../config.ts';
 import { AbortedError, dist3, sleep, throwIfAborted } from '../util.ts';
+import { isSoftBlock } from '../perception/surroundings.ts';
 import { codeFromError, fail, isAbort, obj, ok, type FailureCode, type Skill, type SkillCtx } from './types.ts';
 import { EXCAVATION_WAYPOINT_CAP } from '../memory/store.ts';
 
@@ -66,7 +67,7 @@ function standingCell(ctx: SkillCtx, feet: Vec3Like) {
   const { adapter } = ctx;
   const problem = floorProblem(adapter.blockAt({ ...feet, y: feet.y - 1 }));
   if (problem) throw problem;
-  for (const level of [0, 1]) if (!AIR.has(adapter.blockAt({ ...feet, y: feet.y + level }) ?? '')) throw new ExcavationStop('ERROR', '落点没有已确认的两格干燥身体空间');
+  for (const level of [0, 1]) { const n = adapter.blockAt({ ...feet, y: feet.y + level }); if (n !== null && !AIR.has(n) && !isSoftBlock(n)) throw new ExcavationStop('ERROR', '落点没有已确认的两格干燥身体空间'); }
 }
 
 /** Only this adjacent work column and its touching hazard boundaries are read.
