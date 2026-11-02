@@ -637,6 +637,11 @@ function worldKnowledge(ctx: MindContext) {
   const facilities = ctx.tier === 'deliberate' ? myFacilities(m, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['chest', 'station', 'passage']).slice(0, 8).map((f) => f.text) : [];
   const danger = m.hazards(p.self.dim).map((h) => ({ h, d: Math.round(Math.hypot(h.pos.x - here.x, h.pos.z - here.z)) })).filter((e) => e.d < 96).slice(0, 4)
     .map(({ h, d }) => `${h.kind} @(${h.pos.x},${h.pos.y},${h.pos.z}) ${d}格，出过 ${h.count} 次事`);
+  // 最近几次死亡地点（事实，不分维度）：Agent 自己判断要不要回到最远点继续，还是绕开
+  const lastDeaths = (p.last_deaths ?? []).map((death) => {
+    const ago = death.seconds_ago < 90 ? `${death.seconds_ago} 秒前` : death.seconds_ago < 3600 ? `${Math.round(death.seconds_ago / 60)} 分钟前` : `${Math.round(death.seconds_ago / 3600)} 小时前`;
+    return `${death.dim} (${death.pos[0]},${death.pos[1]},${death.pos[2]})，${death.cause}，${ago}`;
+  });
   const bed = myBed(m, { dim: p.self.dim, worldId: s.worldId, pos: here }, ctx.blockAt);
   const portalSnapshot = travelStore(m).snapshot(s.worldId);
   const portals = portalSnapshot.endpoints.slice(-4).map((e) => {
@@ -664,6 +669,7 @@ function worldKnowledge(ctx: MindContext) {
     ...(Object.keys(herds).length ? { animal_spots: herds } : {}),
     ...(ctx.tier === 'deliberate' ? { places, ...(facilities.length ? { my_facilities: facilities } : {}), ...(portals.length ? { portals } : {}), explored_around: exploredAround(m, p.self.dim, p.self.pos) } : {}),
     ...(danger.length ? { danger_zones: danger } : {}),
+    ...(lastDeaths.length ? { last_deaths: lastDeaths } : {}),
     // 自己开了头、要等它自己变化的事：离开时留下的样子和现在看得到的样子
     ...(p.waiting_on?.length ? { waiting_on: p.waiting_on } : {}),
   };

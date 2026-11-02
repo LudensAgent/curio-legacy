@@ -10,6 +10,7 @@ import { dist3, effectiveLight, round1, lightAround } from '../util.ts';
 import { torchCount, nearbyTorchLight } from '../skills/light.ts';
 import { interactiveName, INTERACTIVE_BLOCKS, NOTABLE, type Vision, type VisionSummary } from './vision.ts';
 import { type Drive, type Stock } from '../brain/drives.ts';
+import { causeName } from '../brain/habits.ts';
 import { PassageTracker } from '../memory/passages.ts';
 import { isResourceBlock, oreKind } from '../memory/ore-spots.ts';
 import { EffectWatch } from '../brain/effects.ts';
@@ -62,6 +63,8 @@ export interface Percept {
   vision: VisionSummary | null;
   /** 死亡掉落记录：剩余秒数是按正常 TPS 且持续加载估算的现实秒，不代表物品当前状态 */
   death_recovery: { dir: string; dist: number; lost: string; seconds_left: number } | null;
+  /** 最近几次死亡地点（事实，与是否掉东西无关）：Agent 自己判断要不要回到最远点继续，或避开 */
+  last_deaths?: { dim: string; pos: [number, number, number]; cause: string; seconds_ago: number }[];
   /** 看见过但还没去过的有趣东西（好奇心候选） */
   curiosities: { what: string; dir: string; dist: number }[];
   objective: string | null;
@@ -628,6 +631,13 @@ export class Perception {
         };
       }
     }
+    // ---- 最近几次死亡地点（事实，与是否掉东西无关）：keepInventory 时死亡掉落为空，但仍要知道自己死在哪、到过多远
+    const lastDeaths = this.memory.recentDeaths(3).map((death) => ({
+      dim: death.dim,
+      pos: [death.pos.x, death.pos.y, death.pos.z] as [number, number, number],
+      cause: causeName(death.cause ?? 'unknown'),
+      seconds_ago: Math.max(0, Math.round((Date.now() - death.ts) / 1000)),
+    }));
 
     // ---- 好奇心候选：记得但没去过的结构/稀有资源
     const visited = (p: { x: number; z: number }) => this.memory.chunkVisits(s.dim, p.x, p.z) > 0;
@@ -729,6 +739,7 @@ export class Perception {
       },
       vision: vs,
       death_recovery: deathRecovery,
+      last_deaths: lastDeaths,
       curiosities,
       objective: this.memory.objective()?.text ?? null,
       drives: [],

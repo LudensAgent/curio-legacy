@@ -180,7 +180,8 @@ export interface DeathRecord {
 interface MemoryData {
   version: number;
   lastDeath: DeathRecord | null;
-  deaths: Record<string, DeathRecord>;
+  /** 每个 world 最近几次死亡（数组，最新在末尾）；旧版只有单条对象，加载时归一成数组 */
+  deaths: Record<string, DeathRecord[]>;
   /** 跨计划的长期目标（由 LLM 设定/更新） */
   objective: { text: string; ts: number } | null;
   digs: DigRecord[];
@@ -357,7 +358,8 @@ export class WorldMemory {
       for (const f of this.data.farms) f.worldId ??= worldId;
       if (this.data.lastDeath && !this.data.lastDeath.worldId) {
         this.data.lastDeath.worldId = worldId;
-        this.data.deaths[worldId] = this.data.lastDeath;
+        const existing = this.data.deaths[worldId];
+        this.data.deaths[worldId] = Array.isArray(existing) ? [...existing, this.data.lastDeath].slice(-3) : [this.data.lastDeath];
       }
       this.data.visitedChunks = Object.fromEntries(Object.entries(this.data.visitedChunks).map(([key, count]) => [key.startsWith('default:') ? `${worldId}:${key.slice('default:'.length)}` : `${worldId}:${key}`, count]));
       for (const category of ['blocks', 'entities', 'biomes'] as const) {
@@ -395,6 +397,10 @@ export class WorldMemory {
       if (!c || (c as ChestRecord).contents) continue;
       this.data.chests[k] = migrateChest(c as any);
       this.touch();
+    }
+    // 死亡记录：旧版一个 world 只存一条对象，现改成按 world 存最近若干条（数组）
+    for (const [k, v] of Object.entries(this.data.deaths ?? {})) {
+      if (!Array.isArray(v)) this.data.deaths[k] = v ? [v] : [];
     }
     const version = this.data.version ?? 1;
     if (version >= MEMORY_VERSION) return;
@@ -885,8 +891,9 @@ export class WorldMemory {
 
   // ------------------------------------------------ 死亡与掉落物
   setDeath(d: DeathRecord) {
-    this.data.lastDeath = { ...d, worldId: this.worldId, pos: { x: Math.round(d.pos.x), y: Math.round(d.pos.y), z: Math.round(d.pos.z) } };
-    this.data.deaths[this.worldId] = this.data.lastDeath;
+    const rec = { ...d, worldId: this.worldId, pos: { x: Math.round(d.pos.x), y: Math.round(d.pos.y), z: Math.round(d.pos.z) } };
+    this.data.lastDeath = rec;
+    this.data.deaths[this.worldId] = [...(this.data.deaths[this.worldId] ?? []), rec].slice(-3);
     this.touch();
   }
 
@@ -907,7 +914,14 @@ export class WorldMemory {
   }
 
   lastDeath(): DeathRecord | null {
-    return this.data.deaths[this.worldId] ?? (this.data.lastDeath && this.inWorld(this.data.lastDeath) ? this.data.lastDeath : null);
+    const list = this.data.deaths[this.worldId];
+    if (list?.length) return list[list.length - 1];
+    return (this.data.lastDeath && this.inWorld(this.data.lastDeath)) ? this.data.lastDeath : null;
+  }
+
+  /** 最近几次死亡（最新在末尾），最多 limit 条；Agent 自己判断要不要回到最远点继续 */
+  recentDeaths(limit = 3): DeathRecord[] {
+    return (this.data.deaths[this.worldId] ?? []).slice(-limit);
   }
 
   clearDeath() {
