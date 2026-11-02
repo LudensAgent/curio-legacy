@@ -6,12 +6,12 @@ import { facingOfYaw, localMap } from './local.ts';
 import type { GameAdapter, InvItem, Vec3Like } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
 import type { PassageRecord, WorldMemory } from '../memory/store.ts';
-import { dist3, effectiveLight, round1, lightAround } from '../util.ts';
+import { dist3, effectiveLight, round1, lightAround, shortId } from '../util.ts';
 import { torchCount, nearbyTorchLight } from '../skills/light.ts';
 import { interactiveName, INTERACTIVE_BLOCKS, NOTABLE, type Vision, type VisionSummary } from './vision.ts';
 import { type Drive, type Stock } from '../brain/drives.ts';
 import { causeName } from '../brain/habits.ts';
-import { PassageTracker, passageEntranceDescent } from '../memory/passages.ts';
+import { PassageTracker, bridgeRuns, MIN_BRIDGE, passageEntranceDescent } from '../memory/passages.ts';
 import { isResourceBlock, oreKind } from '../memory/ore-spots.ts';
 import { EffectWatch } from '../brain/effects.ts';
 import { efficiencyInsights, type EfficiencyInsight } from '../brain/efficiency.ts';
@@ -191,6 +191,8 @@ export class Perception {
   private passages: PassageTracker;
   private lastDugAt = 0;
   private lastPlacedAt = 0;
+  /** 最近一次从 placed 里扫桥/路的时间：节流扫描，桥搭完几秒内被升格 */
+  private bridgeScanAt = 0;
   /** 第一次拿到某个物品时回调（heldBefore 是之前拿到过的物品） */
   onNewItem?: (item: string, heldBefore: Set<string>) => void;
   private latest: Percept | null = null;
@@ -560,6 +562,57 @@ export class Perception {
     return isSoftBlock(floor.name) || floor.name === 'water' || floor.name === 'lava' || floor.name === 'bubble_column';
   }
 
+  /** 节流扫一遍自己放下的方块，把连续成片的桥/路升格成可路由的「我搭的桥」记录（放进 passages，kind='bridge'）。 */
+  private maybeSyncBridges(s: { worldId: string; dim: string }) {
+    const now = Date.now();
+    if (this.bridgeScanAt !== 0 && now - this.bridgeScanAt < 2000) return;
+    this.bridgeScanAt = now;
+    const runs = bridgeRuns(this.memory.placedBlocks());
+    const bridges = this.memory.passages(s.dim).filter((r) => r.kind === 'bridge');
+    const blocksKey = (path: Vec3Like[]) => [...path].map((f) => `${f.x},${f.y - 1},${f.z}`).sort().join('|');
+    const claimed = new Set<string>();
+    for (const run of runs) {
+      const match = bridges.find((b) => !claimed.has(b.id) && b.path.some((f) => run.path.some((g) => f.x === g.x && f.y === g.y && f.z === g.z)));
+      if (match) {
+        claimed.add(match.id);
+        if (blocksKey(match.path) === blocksKey(run.path)) continue; // 桥块没变化，不重写
+        match.path = run.path;
+        match.entrances = [run.path[0], run.path[run.path.length - 1]];
+        match.deepestY = Math.min(...run.path.map((f) => f.y));
+        this.memory.savePassage(match);
+      } else {
+        this.memory.savePassage({
+          id: shortId('brg_'), worldId: s.worldId, dim: s.dim, kind: 'bridge',
+          entrances: [run.path[0], run.path[run.path.length - 1]],
+          path: run.path, deepestY: Math.min(...run.path.map((f) => f.y)),
+          dug: 0, ores: {}, createdAt: now, lastUsedAt: now, uses: 1,
+        });
+      }
+    }
+  }
+
+  /** 自己搭的桥：亲眼看桥块（path.y-1）已经没了（被拆/被炸成空），就把那块从记录里去掉，桥短到不足一条就整条作废。 */
+  private forgetBrokenBridges(s: { dim: string; pos: Vec3Like }) {
+    const bridges = this.memory.passages(s.dim).filter((r) => r.kind === 'bridge' && r.path.some((f) => dist3(f, s.pos) <= this.vision.effectiveRange()));
+    for (const rec of bridges) {
+      const blocks = rec.path.map((f) => ({ x: f.x, y: f.y - 1, z: f.z }));
+      const seen = new Map(Array.from({ length: Math.ceil(blocks.length / 32) }, (_, i) => this.vision.observeBlocks(blocks.slice(i * 32, (i + 1) * 32))).flat()
+        .map((o) => [`${o.pos.x},${o.pos.y},${o.pos.z}`, o]));
+      const kept = rec.path.filter((f) => {
+        const o = seen.get(`${f.x},${f.y - 1},${f.z}`);
+        if (!o) return true; // 没看见：留着
+        const gone = isSoftBlock(o.name) || o.name === 'water' || o.name === 'lava' || o.name === 'bubble_column';
+        if (gone) this.memory.removePlaced({ x: f.x, y: f.y - 1, z: f.z });
+        return !gone;
+      });
+      if (kept.length === rec.path.length) continue;
+      if (kept.length < MIN_BRIDGE) { this.memory.forgetPassage(rec.id); continue; }
+      rec.path = kept;
+      rec.entrances = [kept[0], kept[kept.length - 1]];
+      this.memory.savePassage(rec);
+    }
+  }
+
   update(): Percept {
     const s = this.adapter.state();
     this.memory.setWorld(s.worldId);
@@ -612,6 +665,7 @@ export class Perception {
       }
       this.forgetVanishedOre(s);
       this.forgetSealedEntrances(s);
+      this.forgetBrokenBridges(s);
       for (const e of v.seen) {
         if (e.kind === 'item' || e.kind === 'other') continue;
         const key = e.kind === 'player' ? 'player' : e.name;
@@ -688,6 +742,7 @@ export class Perception {
           for (const p of placed) this.memory.putPlaced(p.pos, p.name);
         }
         for (const d of dug) this.memory.removePlaced(d.pos);
+        this.maybeSyncBridges(s);
       } catch { /* 记不下来不影响感知 */ }
     }
     if (light && overhead && (overhead.covered === 'canopy' || overhead.covered === 'open')) {

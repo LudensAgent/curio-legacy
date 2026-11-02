@@ -564,7 +564,7 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; dig?: boolean }>
     const back = args.to === 'entrance';
     const target = back ? passageSurfaceAnchor(recs, here) : passageDeepestAnchor(recs, here);
     if (!target) return fail('NOT_FOUND', '旧矿道里没有可用的目标点');
-    const kind = recs.some((r) => r.kind === 'dug') ? '挖过的旧矿道' : '走过的路';
+    const kind = recs.some((r) => r.kind === 'dug') ? '挖过的旧矿道' : recs.some((r) => r.kind === 'bridge') ? '我搭的桥' : '走过的路';
     const allowDig = !!args.dig;
     const terrainPermission = { ...(allowDig ? { allowTerrainChanges: true } : {}), allowPlace: allowDig, allowTower: allowDig };
     const goal = back ? '入口' : '最深处';

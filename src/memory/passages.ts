@@ -1,5 +1,6 @@
 import type { Vec3Like } from '../adapter/types.ts';
 import type { PassageRecord, WorldMemory } from './store.ts';
+import { isSoftBlock, LIQUID_BLOCKS } from '../perception/surroundings.ts';
 
 /** 一次观察：身体在哪、是在地表还是在地下（看【身体】where 的判断） */
 export interface PassageSample {
@@ -379,12 +380,12 @@ export function passageDeepestAnchor(recs: Pick<PassageRecord, 'path' | 'links'>
 
 /** 沿全部记下的通道连成的网，取朝 to 走的下一个路点（几何记忆，未验证当前地形）；连不上返回 null。
  * 以前回入口/下更深只对单条通道路由，碎片一多就接不回地表；这里把全部通道一起连网。 */
-export function passageNext(recs: Pick<PassageRecord, 'path' | 'kind'>[], here: Vec3Like, to: Vec3Like): { next: Vec3Like; inside: boolean; kind: 'dug' | 'walked' } | null {
+export function passageNext(recs: Pick<PassageRecord, 'path' | 'kind'>[], here: Vec3Like, to: Vec3Like): { next: Vec3Like; inside: boolean; kind: 'dug' | 'walked' | 'bridge' } | null {
   const route = passageRoute(recs, here, to, { near: 6 });
   if (!route || route.length < 2) return null;
   const inside = recs.some((r) => r.path.some((q) => d3(q, here) <= 3));
   const nearest = recs.map((r) => ({ r, d: Math.min(...r.path.map((q) => d3(q, here))) })).sort((a, b) => a.d - b.d)[0]?.r;
-  return { next: route[1], inside, kind: nearest?.kind === 'dug' ? 'dug' : 'walked' };
+  return { next: route[1], inside, kind: nearest?.kind === 'bridge' ? 'bridge' : nearest?.kind === 'dug' ? 'dug' : 'walked' };
 }
 
 /** 全部记下的通道里离 pos 最近的一个脚点：离矿道网太远时，先走到它把 agent 接回网里；没有脚点返回 null */
@@ -396,4 +397,68 @@ export function passageNearestNode(recs: Pick<PassageRecord, 'path'>[], pos: Vec
     if (d < bestD) { bestD = d; best = p; }
   }
   return best;
+}
+
+// ------------------------------------------------------------------ 自己搭的桥/路
+
+/** 连续自放方块至少这么多块，才算一条「我搭的桥/路」（再短的多半是垫高、门框这类散块） */
+export const MIN_BRIDGE = 5;
+/** 短轴超过这个宽度就不算「一条路」而算成片的平台/地板，不纳入（避免把房子地面、满铺平台误判成桥） */
+export const MAX_BRIDGE_WIDTH = 3;
+
+/** 桥面脚点（人站上去那格）沿主轴排成端点→端点；主轴取水平跨度更大的那根轴。 */
+export function orderBridgeFoot(foot: Vec3Like[]): Vec3Like[] {
+  if (foot.length < 2) return foot;
+  const xs = foot.map((f) => f.x), zs = foot.map((f) => f.z);
+  const longAxis = (Math.max(...xs) - Math.min(...xs)) >= (Math.max(...zs) - Math.min(...zs)) ? 'x' : 'z';
+  const key = (f: Vec3Like) => longAxis === 'x' ? f.x - f.z - f.y : f.z - f.x - f.y;
+  return [...foot].sort((a, b) => key(a) - key(b));
+}
+
+/**
+ * 从自己放下的方块里找出「长条、不成片」的连续段（桥/路）：只算实心桥料（火把、梯子、草、水不算），
+ * 水平相邻（Chebyshev x/z ≤1、|Δy|≤1）连成一段，再要求主轴跨度 ≥ minLen、短轴 ≤ maxWidth。
+ * 返回每条桥的有序脚点（人站上去那格）和主材料名。
+ */
+export function bridgeRuns(placed: { pos: Vec3Like; name: string }[], minLen = MIN_BRIDGE, maxWidth = MAX_BRIDGE_WIDTH): { path: Vec3Like[]; material: string }[] {
+  const cells = new Map<string, Vec3Like>();
+  const names = new Map<string, string>();
+  for (const { pos, name } of placed) {
+    if (LIQUID_BLOCKS.has(name) || isSoftBlock(name)) continue;
+    const b = { x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z) };
+    const k = `${b.x},${b.y},${b.z}`;
+    if (!cells.has(k)) { cells.set(k, b); names.set(k, name); }
+  }
+  const seen = new Set<string>();
+  const runs: { path: Vec3Like[]; material: string }[] = [];
+  for (const key of cells.keys()) {
+    if (seen.has(key)) continue;
+    const comp = new Set<string>();
+    const q = [key];
+    seen.add(key);
+    while (q.length) {
+      const k = q.pop()!;
+      comp.add(k);
+      const [x, y, z] = k.split(',').map(Number);
+      for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+        if (!dx && !dz) continue;
+        for (let dy = -1; dy <= 1; dy++) {
+          const nk = `${x + dx},${y + dy},${z + dz}`;
+          if (cells.has(nk) && !seen.has(nk)) { seen.add(nk); q.push(nk); }
+        }
+      }
+    }
+    if (comp.size < minLen) continue;
+    const blocks = [...comp].map((k) => cells.get(k)!);
+    const xs = blocks.map((b) => b.x), zs = blocks.map((b) => b.z);
+    const xSpan = Math.max(...xs) - Math.min(...xs), zSpan = Math.max(...zs) - Math.min(...zs);
+    const longSpan = Math.max(xSpan, zSpan), shortSpan = Math.min(xSpan, zSpan);
+    if (longSpan + 1 < minLen || shortSpan + 1 > maxWidth) continue;
+    const tally = new Map<string, number>();
+    for (const k of comp) { const n = names.get(k)!; tally.set(n, (tally.get(n) ?? 0) + 1); }
+    const material = [...tally].sort((a, b) => b[1] - a[1])[0][0];
+    const path = orderBridgeFoot(blocks.map((b) => ({ x: b.x, y: b.y + 1, z: b.z })));
+    runs.push({ path, material });
+  }
+  return runs;
 }

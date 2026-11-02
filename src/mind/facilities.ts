@@ -35,6 +35,18 @@ function myStations(memory: Pick<WorldMemory, 'landmarks'>, s: State): Landmark[
 
 /** 历史通道记录：地表参考点、曾到达的高度以及附近记忆，不推断当前通路。 */
 export function describePassage(rec: PassageRecord, here: Vec3Like, stations: Landmark[] = [], resources: Landmark[] = []): { text: string; entrance: Vec3Like; dist: number; inside: boolean; next?: Vec3Like; nextDown?: Vec3Like } {
+  // 桥/路：没有挖矿专属字段，只给两端、长度和沿桥回近端的下一步
+  if (rec.kind === 'bridge') {
+    const ends = rec.path.length ? [rec.path[0], rec.path[rec.path.length - 1]] : rec.entrances;
+    const entrance = [...ends].sort((a, b) => flat(a, here) - flat(b, here))[0];
+    const dist = flat(entrance, here);
+    const inside = rec.path.some((p) => d3(p, here) <= 2);
+    const route = passageRoute([rec], here, entrance, { near: 6 });
+    const next = route && route.length > 1 ? route[1] : undefined;
+    const otherEnd = ends.find((e) => d3(e, entrance) > 1);
+    const text = `我搭的桥${ends.length >= 2 ? `，两端 ${at(ends[0])} 和 ${at(ends[1])}` : ''}${inside ? '，你正站在桥上' : `，近端 ${at(entrance)}（水平 ${dist} 格外）`}，桥面约 ${rec.path.length} 格${next ? `，沿桥往近端的下一步 ${at(next)}` : ''}${otherEnd ? `，另一端 ${at(otherEnd)}` : ''}；桥块被拆/被炸会自己清掉`;
+    return { text, entrance, dist, inside, ...(next ? { next } : {}) };
+  }
   // 身体有时把地下误判成 surface，会记出过深的假入口（y 比通道地表低很多）；先滤掉，只留贴近地表的
   const surfaceY = rec.path.length ? Math.max(...rec.path.map((p) => p.y)) : Math.max(...rec.entrances.map((e) => e.y));
   const validEntrances = rec.entrances.filter((e) => surfaceY - e.y <= 6);
@@ -97,7 +109,9 @@ export function myFacilities(memory: Pick<WorldMemory, 'landmarks' | 'chests' | 
       if (rec.worldId && rec.worldId !== s.worldId) continue;
       if (rec.kind === 'walked') continue; // 只是走过的天然洞穴，不算"我挖的通道"
       const d = describePassage(rec, s.pos, stations, resources);
-      out.push({ kind: 'passage', label: '我挖的通道', pos: d.entrance, dist: d.inside ? 0 : d.dist, text: `挖过的通道：${d.text}；记录 ${rec.id}（passages 查询可读历史脚点）`, inside: d.inside, ...(d.next ? { next: d.next } : {}) });
+      const isBridge = rec.kind === 'bridge';
+      out.push({ kind: 'passage', label: isBridge ? '我搭的桥' : '我挖的通道', pos: d.entrance, dist: d.inside ? 0 : d.dist,
+        text: `${isBridge ? '我搭的桥' : '挖过的通道'}：${d.text}${isBridge ? '' : `；记录 ${rec.id}（passages 查询可读历史脚点）`}`, inside: d.inside, ...(d.next ? { next: d.next } : {}) });
     }
   }
   return out.sort((a, b) => a.dist - b.dist);

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { PassageTracker, passageEntranceDescent, passageLevels, passageRoute } from '../src/memory/passages.ts';
+import { PassageTracker, bridgeRuns, passageEntranceDescent, passageLevels, passageRoute } from '../src/memory/passages.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { describePassage, myFacilities } from '../src/mind/facilities.ts';
 
@@ -353,4 +353,32 @@ test('通道：洞口正下方的下降脚点——验证被炸后地板还在�
   // 没有下降脚点：返回 null
   assert.equal(passageEntranceDescent({ path: [] }, e), null);
   m.close();
+});
+
+test('桥/路：连续自放方块升格成一条可路由的桥；成片的平台/柱子/火把不算', () => {
+  const placed = (list: [number, number, number, string][]) => list.map(([x, y, z, name]) => ({ pos: at(x, y, z), name }));
+  // 1 宽横桥 x=0..6（7 块 netherrack）→ 一条桥，脚点 = 桥块 +1，沿 x 排端点→端点
+  const straight = bridgeRuns(placed(Array.from({ length: 7 }, (_, i) => [i, 64, 0, 'netherrack'] as [number, number, number, string])));
+  assert.equal(straight.length, 1);
+  assert.equal(straight[0].material, 'netherrack');
+  assert.equal(straight[0].path.length, 7);
+  assert.deepEqual(straight[0].path[0], at(0, 65, 0), '桥面脚点 = 桥块上方那格');
+  assert.deepEqual(straight[0].path[6], at(6, 65, 0));
+  // 2 宽路（x 长 6、z 宽 2）也算一条路
+  const road = bridgeRuns(placed(Array.from({ length: 6 }, (_, i) => [[i, 64, 0, 'cobblestone'], [i, 64, 1, 'cobblestone']] as [number, number, number, string][]).flat()));
+  assert.equal(road.length, 1);
+  assert.equal(road[0].path.length, 12);
+  // 太短（4 块）不算
+  assert.equal(bridgeRuns(placed([[0, 64, 0, 'dirt'], [1, 64, 0, 'dirt'], [2, 64, 0, 'dirt'], [3, 64, 0, 'dirt']])).length, 0);
+  // 成片的 5×5 地板（太宽）不算
+  const floor = bridgeRuns(placed(Array.from({ length: 5 }, (_, x) => Array.from({ length: 5 }, (_, z) => [x, 64, z, 'oak_planks'] as [number, number, number, string])).flat()));
+  assert.equal(floor.length, 0);
+  // 竖直柱（同一 x/z，不同 y）不算
+  assert.equal(bridgeRuns(placed([[0, 64, 0, 'cobblestone'], [0, 65, 0, 'cobblestone'], [0, 66, 0, 'cobblestone'], [0, 67, 0, 'cobblestone'], [0, 68, 0, 'cobblestone']])).length, 0);
+  // 火把不参与（软方块被过滤）：6 块桥料 + 一串火把仍只算桥料那条
+  const withTorch = placed(Array.from({ length: 6 }, (_, i) => [i, 64, 0, 'cobblestone'] as [number, number, number, string]).concat([[0, 65, 1, 'torch'], [1, 65, 1, 'torch'], [2, 65, 1, 'torch'], [3, 65, 1, 'torch'], [4, 65, 1, 'torch'], [5, 65, 1, 'torch']]));
+  assert.equal(bridgeRuns(withTorch).length, 1, '火把不算桥料，不连成第二条桥');
+  // 两条隔开的桥 → 两条记录
+  const two = bridgeRuns(placed([...Array.from({ length: 6 }, (_, i) => [i, 64, 0, 'netherrack'] as [number, number, number, string]), ...Array.from({ length: 6 }, (_, i) => [i + 20, 64, 0, 'netherrack'] as [number, number, number, string])]));
+  assert.equal(two.length, 2);
 });

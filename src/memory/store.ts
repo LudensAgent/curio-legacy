@@ -56,8 +56,8 @@ export interface PassageRecord {
   id: string;
   worldId?: string;
   dim: string;
-  /** 'dug' = 自己挖出来的通道（台阶井/矿道）；'walked' = 只是走进去的天然洞穴，只用于原路返回，不算"我挖的通道" */
-  kind?: 'dug' | 'walked';
+  /** 'dug' = 自己挖出来的通道（台阶井/矿道）；'walked' = 只是走进去的天然洞穴，只用于原路返回；'bridge' = 自己搭的桥/路（连续放下的方块） */
+  kind?: 'dug' | 'walked' | 'bridge';
   /** 从地表钻下去的地方（可能有好几个口），不知道就空着 */
   entrances: Vec3Like[];
   /** 沿途脚下的点，每隔几格记一个 */
@@ -550,6 +550,16 @@ export class WorldMemory {
         v.at = this.placedClock++; // 正在用：刷新 LRU，不淘汰
         out.push({ pos: { x, y, z }, name: v.name, dist });
       }
+    }
+    return out;
+  }
+
+  /** 全部自己放下的方块（位置 + 方块名）：检测桥/路这类自建连续结构时枚举用。 */
+  placedBlocks(): { pos: Vec3Like; name: string }[] {
+    const out: { pos: Vec3Like; name: string }[] = [];
+    for (const [key, v] of this.placedByPos) {
+      const [x, y, z] = key.split(',').map(Number);
+      out.push({ pos: { x, y, z }, name: v.name });
     }
     return out;
   }
