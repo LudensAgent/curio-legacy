@@ -30,6 +30,17 @@ test('surveyColumn：分得清地面、水面、树干和没加载的地方', ()
   assert.equal(surveyColumn(() => null, 0, 0, 64).kind, 'blocked');
 });
 
+test('surveyColumn：脚下踩的是树叶就算能站的地面，头顶上方的树叶跳过', () => {
+  const a = new FakeAdapter();
+  // 树冠：y=69 树叶是脚下踩的那层，68..64 是空气，y=63 才是地面
+  a.blocks.push({ name: 'oak_leaves', pos: { x: 5, y: 69, z: 0 } });
+  const at = (p: any) => a.blockAt(p);
+  // 站在树冠上（脚高 70）：树叶在脚下，是能站的地面，别当成悬空
+  assert.deepEqual(surveyColumn(at, 5, 0, 70), { kind: 'land', y: 70 });
+  // 站在树冠底下（脚高 64）：头顶 y=69 的树叶是树冠，跳过往下找地面 y=63
+  assert.deepEqual(surveyColumn(at, 5, 0, 64), { kind: 'land', y: 64 });
+});
+
 test('planTravel：隔着河——有船就坐船过去，没船就游过去', () => {
   const a = new FakeAdapter();
   river(a);

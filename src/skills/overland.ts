@@ -34,10 +34,14 @@ export function surveyColumn(blockAt: BlockAt, x: number, z: number, hintY: numb
     if (PASS.has(n) || isLeaves(n)) break;
     y++;
   }
+  const feetY = Math.floor(hintY);
   for (let i = 0; i < 40; i++, y--) {
     const n = at(y);
     if (n === null) return { kind: 'blocked', y: hintY, why: 'unloaded' };
-    if (PASS.has(n) || isLeaves(n)) continue;
+    if (PASS.has(n)) continue;
+    // 树叶分两种情况：头顶上方是树冠（跳过，往下找地面）；脚下这层（y 低于脚高）就是能站的地面。
+    // 不区分的话，站在树冠上会被当成悬空（往下扫到地面），把整片树冠当「能站」又会让森林里的树变成墙。
+    if (isLeaves(n) && y >= feetY) continue;
     if (WATER.has(n)) return { kind: 'water', y };
     if (DANGER.test(n) || STRUCTURE.test(n)) return { kind: 'blocked', y, why: 'obstacle' };
     const feet = at(y + 1), head = at(y + 2);
