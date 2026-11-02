@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { PassageTracker, passageLevels, passageRoute } from '../src/memory/passages.ts';
+import { PassageTracker, passageEntranceDescent, passageLevels, passageRoute } from '../src/memory/passages.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { describePassage, myFacilities } from '../src/mind/facilities.ts';
 
@@ -334,5 +334,23 @@ test('重进旧道脚下挨着旧脚点时补一条连接边，links 连成一�
   const p = m.passages(D)[0];
   const route = passageRoute([p], { x: 0, y: 40, z: 0 }, { x: 7, y: 40, z: 0 });
   assert.ok(route, '重进补桥后 links 连通，能从 x=0 路由到 x=7');
+  m.close();
+});
+
+test('通道：洞口正下方的下降脚点——验证被炸后地板还在不在时用', () => {
+  const m = new WorldMemory(null); m.setWorld(W);
+  const tr = new PassageTracker(m, () => 'p1');
+  digDown(tr);
+  const [p] = m.passages(D);
+  const e = p.entrances[0];
+  assert.deepEqual(e, at(1, 64, 0), '下去的口是亲手挖开的那一格');
+  // 洞口正下方、离它最近的脚点是下一级台阶
+  assert.deepEqual(passageEntranceDescent(p, e), at(1, 63, 0));
+  // 洞口本身恰好也是一个脚点时，不算下降脚点
+  assert.deepEqual(passageEntranceDescent({ ...p, path: [e, ...p.path] }, e), at(1, 63, 0));
+  // 同高取水平最近的
+  assert.deepEqual(passageEntranceDescent({ path: [at(3, 63, 0), at(1, 63, 0)] }, e), at(1, 63, 0));
+  // 没有下降脚点：返回 null
+  assert.equal(passageEntranceDescent({ path: [] }, e), null);
   m.close();
 });

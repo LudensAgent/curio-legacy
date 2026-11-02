@@ -5,13 +5,13 @@ import { isContainerLandmark, totalStock, type StockRow } from '../memory/chest-
 import { facingOfYaw, localMap } from './local.ts';
 import type { GameAdapter, InvItem, Vec3Like } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
-import type { WorldMemory } from '../memory/store.ts';
+import type { PassageRecord, WorldMemory } from '../memory/store.ts';
 import { dist3, effectiveLight, round1, lightAround } from '../util.ts';
 import { torchCount, nearbyTorchLight } from '../skills/light.ts';
 import { interactiveName, INTERACTIVE_BLOCKS, NOTABLE, type Vision, type VisionSummary } from './vision.ts';
 import { type Drive, type Stock } from '../brain/drives.ts';
 import { causeName } from '../brain/habits.ts';
-import { PassageTracker } from '../memory/passages.ts';
+import { PassageTracker, passageEntranceDescent } from '../memory/passages.ts';
 import { isResourceBlock, oreKind } from '../memory/ore-spots.ts';
 import { EffectWatch } from '../brain/effects.ts';
 import { efficiencyInsights, type EfficiencyInsight } from '../brain/efficiency.ts';
@@ -525,7 +525,8 @@ export class Perception {
     }
   }
 
-  /** 自己挖的通道洞口：亲眼看那一格已变成实心（被封/塌了），就把这个洞口从记录里去掉；最后一个洞口也没了就整条通道作废 */
+  /** 自己挖的通道洞口：亲眼看那一格已变成实心（被封/塌了），或洞口虽还空着但往里一步的通道地板已被炸掉（被炸成坑），
+   *  就把这个洞口从记录里去掉；最后一个洞口也没了就整条通道作废 */
   private forgetSealedEntrances(s: { dim: string; pos: Vec3Like }) {
     const recs = this.memory.passages(s.dim);
     const near = recs.flatMap((r) => r.entrances.map((e) => ({ id: r.id, e })))
@@ -537,14 +538,26 @@ export class Perception {
     for (const { id, e } of near) {
       const o = seen.get(`${e.x},${e.y},${e.z}`);
       if (!o) continue; // 没看见（遮挡/未加载）：不猜，留着
-      if (isSoftBlock(o.name) || o.name === 'water' || o.name === 'lava' || o.name === 'bubble_column') continue; // 还空着/是水：洞口还在
       const rec = this.memory.passages(s.dim).find((r) => r.id === id);
       if (!rec) continue;
+      const open = isSoftBlock(o.name) || o.name === 'water' || o.name === 'lava' || o.name === 'bubble_column';
+      // 洞口本身没封，但被炸成坑时往里一步的通道地板会一起没了——那也不再是能进矿道的入口
+      if (open && !this.descentBlownOut(rec, e)) continue;
       rec.entrances = rec.entrances.filter((p) => !(p.x === e.x && p.y === e.y && p.z === e.z));
       if (rec.entrances.length) this.memory.savePassage(rec);
       else this.memory.forgetPassage(id);
       this.memory.markGone('矿口', s.dim, e, o.name);
     }
+  }
+
+  /** 洞口还空着时，往里一步的通道地板是不是被炸没了：取离洞口最近、且不高于洞口的脚点（亲脚站过的地方），
+   *  看它脚下 y-1 那格现在是否也空了。脚点记录时脚下必是实心地板，现在空了就是被炸成坑；没看见地板就不猜。 */
+  private descentBlownOut(rec: Pick<PassageRecord, 'path'>, e: Vec3Like): boolean {
+    const d = passageEntranceDescent(rec, e);
+    if (!d) return false;
+    const floor = this.vision.observeBlocks([{ x: d.x, y: d.y - 1, z: d.z }])[0];
+    if (!floor) return false;
+    return isSoftBlock(floor.name) || floor.name === 'water' || floor.name === 'lava' || floor.name === 'bubble_column';
   }
 
   update(): Percept {

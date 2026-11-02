@@ -346,6 +346,14 @@ export function passageSurfaceAnchor(recs: Pick<PassageRecord, 'path' | 'entranc
   return all.length ? [...all].sort((a, b) => b.y - a.y)[0] : null;
 }
 
+/** 洞口正下方、离它最近的一个下降脚点：洞口还空着时，用它往里一步验证通道地板是否还在（被炸成坑时地板会一起没了）。
+ *  取 path 里不高于洞口、水平 4 格内最高的脚点（优先最高，同高取最近的）；没有就返回 null。 */
+export function passageEntranceDescent(rec: Pick<PassageRecord, 'path'>, entrance: Vec3Like): Vec3Like | null {
+  const below = rec.path.filter((p) => p.y <= entrance.y && !(p.x === entrance.x && p.y === entrance.y && p.z === entrance.z) && Math.hypot(p.x - entrance.x, p.z - entrance.z) <= 4);
+  if (!below.length) return null;
+  return below.reduce((a, b) => b.y > a.y || (b.y === a.y && Math.hypot(b.x - entrance.x, b.z - entrance.z) < Math.hypot(a.x - entrance.x, a.z - entrance.z)) ? b : a);
+}
+
 /** 想下更深时，取全部通道里最深的脚点当目标。 */
 export function passageDeepestAnchor(recs: Pick<PassageRecord, 'path'>[]): Vec3Like | null {
   const all = recs.flatMap((r) => r.path);
