@@ -354,10 +354,27 @@ export function passageEntranceDescent(rec: Pick<PassageRecord, 'path'>, entranc
   return below.reduce((a, b) => b.y > a.y || (b.y === a.y && Math.hypot(b.x - entrance.x, b.z - entrance.z) < Math.hypot(a.x - entrance.x, a.z - entrance.z)) ? b : a);
 }
 
-/** 想下更深时，取全部通道里最深的脚点当目标。 */
-export function passageDeepestAnchor(recs: Pick<PassageRecord, 'path'>[]): Vec3Like | null {
+/** 想下更深时，取「从 here 能连到的脚点里最深」的脚点当目标；here 没给（或离网太远）时退回全网最深。
+ * 碎片化时全网最深可能在另一团互不相连的岛里，直接当目标会 route 不通；这里按连通分量挑，只给够得着的。 */
+export function passageDeepestAnchor(recs: Pick<PassageRecord, 'path' | 'links'>[], here?: Vec3Like, opts: { near?: number } = {}): Vec3Like | null {
   const all = recs.flatMap((r) => r.path);
-  return all.length ? [...all].sort((a, b) => a.y - b.y)[0] : null;
+  if (!all.length) return null;
+  const globalDeepest = () => [...all].sort((a, b) => a.y - b.y)[0]!;
+  if (!here) return globalDeepest();
+  const { nodes, edges } = passageGraph(recs);
+  const near = opts.near ?? 6;
+  let start = -1, bd = near;
+  nodes.forEach((q, i) => { const d = d3(q, here); if (d < bd) { bd = d; start = i; } });
+  if (start < 0) return globalDeepest();
+  const seen = new Set<number>([start]);
+  const stack = [start];
+  while (stack.length) {
+    const u = stack.pop()!;
+    for (const v of edges.get(u) ?? []) if (!seen.has(v)) { seen.add(v); stack.push(v); }
+  }
+  let best: Vec3Like | null = null;
+  for (let i = 0; i < nodes.length; i++) if (seen.has(i) && (!best || nodes[i].y < best.y)) best = nodes[i];
+  return best ?? globalDeepest();
 }
 
 /** 沿全部记下的通道连成的网，取朝 to 走的下一个路点（几何记忆，未验证当前地形）；连不上返回 null。

@@ -344,7 +344,7 @@ function passageWayDown(ctx: MindContext): string | null {
   const p = ctx.percept, s = ctx.state;
   const here = { x: p.self.pos[0], y: p.self.pos[1], z: p.self.pos[2] };
   const recs = ctx.memory.passages(s.dim).filter((r) => !r.worldId || r.worldId === s.worldId);
-  const to = passageDeepestAnchor(recs);
+  const to = passageDeepestAnchor(recs, here);
   if (!to) return null;
   const g = passageNext(recs, here, to);
   if (!g) return null;

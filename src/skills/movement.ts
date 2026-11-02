@@ -562,7 +562,7 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; dig?: boolean }>
     const recs = memory.passages(s.dim).filter((r) => !r.worldId || r.worldId === s.worldId);
     if (!recs.length) return fail('NOT_FOUND', '没有记下的旧矿道；要先下矿走过/挖过一段，或改用 goto / excavate_path');
     const back = args.to === 'entrance';
-    const target = back ? passageSurfaceAnchor(recs, here) : passageDeepestAnchor(recs);
+    const target = back ? passageSurfaceAnchor(recs, here) : passageDeepestAnchor(recs, here);
     if (!target) return fail('NOT_FOUND', '旧矿道里没有可用的目标点');
     const kind = recs.some((r) => r.kind === 'dug') ? '挖过的旧矿道' : '走过的路';
     const allowDig = !!args.dig;
@@ -628,7 +628,12 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; dig?: boolean }>
     }
     const end = adapter.state().pos;
     const remaining = Math.round(dist3(end, target));
-    return ok(`沿${kind}${back ? '回入口' : '下最深'}走完了记下的 ${route.length} 个脚点，现在站在 (${end.x.toFixed(1)},${end.y.toFixed(1)},${end.z.toFixed(1)})，离${goal}参考点约 ${remaining} 格（再往前没有记过的路，剩下的自己看）`, { position: end, remaining, target, walkedWaypoints: route.length });
+    // 下更深时：目标只取「从脚下连得上的最深处」，还有更深但互不相连的碎片要如实讲，别让 agent 以为全网最深已经到了
+    const deeper = back ? '' : (() => {
+      const g = passageDeepestAnchor(recs);
+      return g && g.y < target.y - 2 ? `；还记着更深的旧矿道脚点 (${Math.round(g.x)},${Math.round(g.y)},${Math.round(g.z)})，和当前这段不连通，接不进去（要下去得先朝它垫/挖一段接上）` : '';
+    })();
+    return ok(`沿${kind}${back ? '回入口' : '下最深'}走完了记下的 ${route.length} 个脚点，现在站在 (${end.x.toFixed(1)},${end.y.toFixed(1)},${end.z.toFixed(1)})，离${goal}参考点约 ${remaining} 格（再往前没有记过的路，剩下的自己看）${deeper}`, { position: end, remaining, target, walkedWaypoints: route.length });
   },
 };
 

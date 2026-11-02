@@ -72,6 +72,18 @@ test('碎片化通道：站在接不回地表的支巷里，把全部通道连�
   assert.deepEqual(passageDeepestAnchor([shaft, branch]), { x: 0, y: 32, z: 0 });
 });
 
+test('passageDeepestAnchor 只取从 here 连得上的最深处，另一团互不相连的碎片不算', () => {
+  // 深井在原点附近，浅巷在 100 格外，两团相隔很远、连不上
+  const deep = { path: [{ x: 0, y: 20, z: 0 }, { x: 0, y: 15, z: 0 }, { x: 0, y: 10, z: 0 }] };
+  const shallow = { path: [{ x: 100, y: 55, z: 0 }, { x: 100, y: 50, z: 0 }] };
+  // 不带 here：全网最深
+  assert.deepEqual(passageDeepestAnchor([deep, shallow]), { x: 0, y: 10, z: 0 });
+  // 站在浅巷附近：只取浅巷那团的最深（50），不取连不上的深井（10）
+  assert.deepEqual(passageDeepestAnchor([deep, shallow], { x: 100, y: 52, z: 0 }), { x: 100, y: 50, z: 0 });
+  // 站在深井附近：取深井那团的最深
+  assert.deepEqual(passageDeepestAnchor([deep, shallow], { x: 0, y: 15, z: 0 }), { x: 0, y: 10, z: 0 });
+});
+
 test('follow_passage 沿旧矿道逐段走回入口（碎片连成网）', async (t) => {
   const w = new TestWorld();
   w.pos = { x: 10, y: 40, z: 0 };
