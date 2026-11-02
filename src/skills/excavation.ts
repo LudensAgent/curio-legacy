@@ -16,6 +16,8 @@ const registry = minecraftData(config.mc.version);
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 const HAZARDS = new Set(['water', 'lava', 'bubble_column', 'powder_snow', 'fire', 'soul_fire', 'magma_block', 'campfire', 'soul_campfire', 'cactus', 'sweet_berry_bush', 'cobweb', 'pointed_dripstone']);
 const PROTECTED = new Set(['end_portal_frame', 'end_portal', 'nether_portal', 'end_gateway', 'chest', 'trapped_chest', 'barrel', 'spawner', 'crafting_table', 'furnace', 'blast_furnace', 'smoker']);
+/** 垫空腔坑用的支撑方块：就地用背包里现成的建材，不制造、不另选玩法 */
+const SCAFFOLD_BLOCKS = ['cobblestone', 'dirt', 'netherrack', 'cobbled_deepslate', 'stone', 'deepslate', 'andesite', 'granite', 'diorite', 'tuff'];
 const DIRECTIONS = { north: { x: 0, z: -1 }, east: { x: 1, z: 0 }, south: { x: 0, z: 1 }, west: { x: -1, z: 0 } };
 const YAW = { north: 0, east: -Math.PI / 2, south: Math.PI, west: Math.PI / 2 };
 export const EXCAVATION_ENTRY_LABEL = '实际开挖入口';
@@ -173,6 +175,22 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       if (!current.onGround || Math.abs(current.pos.y - here.y) > 0.1) throw new ExcavationStop('ERROR', '尚未站稳，不能继续开挖下一格');
       standingCell(ctx, here);
       const next = { x: here.x + direction.x, y: here.y + (args.mode === 'stairs' ? -1 : args.mode === 'stairs_up' ? 1 : 0), z: here.z + direction.z };
+      // 破碎空腔地形里「下一落脚下面是空气」很常见：若是「一格空气、再下面有实心」的可垫坑，先垫一块支撑再继续，
+      // 别让有界开挖在每个小洞里都停一次（这和 Agent 手工「先垫一块圆石再迈」是同一件事）。只垫能垫的浅坑，深洞照旧停下。
+      if (args.mode !== 'stairs_up') {
+        const support = { x: next.x, y: next.y - 1, z: next.z };
+        if (AIR.has(adapter.blockAt(support) ?? '')) {
+          const under = adapter.blockAt({ x: support.x, y: support.y - 1, z: support.z });
+          const material = adapter.state().inventory.find((i) => SCAFFOLD_BLOCKS.includes(i.name) && i.count > 0)?.name;
+          if (material && under !== null && !AIR.has(under) && !hazard(under)) {
+            await adapter.moveTo({ kind: 'place_block', pos: support }, { signal, timeoutMs: 10000, constructionSafe: true });
+            assertSession(ctx, origin);
+            const placed = await adapter.placeBlockAt(support, [material], signal);
+            assertSession(ctx, origin);
+            if (!placed.ok) throw new ExcavationStop('ERROR', `给下一落脚垫支撑失败：${placed.reason}`);
+          }
+        }
+      }
       const height = args.mode === 'stairs' ? 3 : 2;
       const cells = preflightColumn(ctx, next, height).reverse();
       // A one-block jump needs extra clearance above the current head before
