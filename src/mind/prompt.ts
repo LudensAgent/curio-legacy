@@ -3,7 +3,7 @@ import { effortFacts } from '../brain/efficiency.ts';
 import { durabilityFacts, fuelFacts, oreOpportunityFact, supplyFacts, toolBackupFact } from '../brain/supply.ts';
 import type { AudienceContext } from '../live/audience.ts';
 import type { WorldMemory } from '../memory/store.ts';
-import { durationText, realSecondsToTicks, sunText, type Percept } from '../perception/perception.ts';
+import { dirName, durationText, realSecondsToTicks, sunText, type Percept } from '../perception/perception.ts';
 import { isSoftBlock } from '../perception/surroundings.ts';
 import { audienceBlock, AUDIENCE_RULES, exploredAround, liveAudience, type MySkillInfo } from '../planner/prompt.ts';
 import type { ChatMessage } from '../planner/llm.ts';
@@ -610,7 +610,7 @@ function surroundingsOf(p: Percept, tier: 'glance' | 'deliberate', memory: World
     exits: p.self.exits ?? null,
     hostile: p.nearby.hostile.slice(0, 5), passive: p.nearby.passive.slice(0, 6), players: p.nearby.players,
     see_now: p.nearby.resources.filter((r) => r.seen === 'now').slice(0, n).map((r) => `${r.block}×${r.count} ${r.dir ?? ''}${r.nearest}格`),
-    ...(placed.length ? { nearby_placed: placed.slice(0, 5).map((b) => `${b.name}（${Math.round(b.dist)}格）`).join('、') } : {}),
+    ...(placed.length ? { nearby_placed: placed.slice(0, 5).map((b) => `${b.name}（${dirName(b.pos.x - here[0], b.pos.z - here[2])} ${Math.round(b.dist)}格，自己放的）`).join('、') } : {}),
     ...(v ? { facing: v.facing, view: v.view, ...((v as any).visible_drops?.length ? { drops: (v as any).visible_drops.slice(0, 4) } : {}),
       ...(v.nearest_land ? { nearest_land: v.nearest_land } : {}),
       ...(v.recent_sightings?.length ? { recent_sightings: { dimension: p.self.dim, source: 'past_visual_observation',
