@@ -166,9 +166,10 @@ async function traverse(ctx: SkillCtx, endpoint: PortalEndpoint) {
     const store = travelStore(ctx.memory);
     const destination = store.observe(to, observed?.pos ?? to.pos, endpoint.kind, !!observed);
     store.record(endpoint.id, destination.id, result.from, to);
+    const roundTripVerified = store.snapshot(to.worldId).routes.some((r) => r.fromId === endpoint.id && r.toId === destination.id && r.returnVerified);
     ctx.memory.setWorld(to.worldId);
     ctx.memory.addLandmark('waypoint', `传送到达 ${destination.id}`, to.dim, to.pos, 3);
-    return ok(`已通过实际传送到达 ${to.dim}，记录两端位置；返程入口 ${destination.id}${observed ? '' : ' 尚需寻找'}`, { fromId: endpoint.id, toId: destination.id, from: result.from, to, transition: true });
+    return ok(`已通过实际传送到达 ${to.dim}，记录两端位置；返程入口 ${destination.id}${observed ? '' : ' 尚需寻找'}${roundTripVerified ? '；往返已验证' : ''}`, { fromId: endpoint.id, toId: destination.id, from: result.from, to, transition: true, roundTripVerified });
   } catch (error) { if (isAbort(error)) throw error; return fail(codeFromError(error), `传送失败：${(error as Error).message}（门离你约 ${Math.round(dist3(state.pos, endpoint.pos))} 格，在 ${endpoint.pos.x},${endpoint.pos.y},${endpoint.pos.z}）`); } finally { ctx.setStationaryWait?.(false); }
 }
 
