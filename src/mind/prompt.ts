@@ -103,7 +103,7 @@ export interface MindContext {
 
 /** 常用动作：给完整参数；其余只列名字和一句用途，需要时用 {"kind":"moves"} 查完整参数 */
 export const COMMON_MOVES = ['dig_at', 'step', 'place_at', 'defend', 'gather', 'goto', 'explore', 'look', 'look_around', 'dive', 'surface', 'craft', 'smelt', 'collect_furnace', 'eat', 'hunt', 'forage', 'fish', 'farm', 'collect_seeds',
-  'pickup_items', 'store_items', 'take_items', 'place_torch', 'shelter', 'sleep', 'wait', 'dig', 'excavate_path', 'follow_passage', 'climb_up', 'press_keys', 'build', 'travel', 'inspect_block', 'interact_block', 'use_item', 'use_skill'];
+  'pickup_items', 'store_items', 'take_items', 'find_item', 'place_torch', 'shelter', 'sleep', 'wait', 'dig', 'excavate_path', 'follow_passage', 'climb_up', 'press_keys', 'build', 'travel', 'inspect_block', 'interact_block', 'use_item', 'use_skill'];
 
 /** 远行、传送门、末地这些只在用得上时列出来，平时是噪音 */
 const ADVANCED = /portal|end_|dragon|stronghold|search_structure|reservations|base_memory|building_archive|building_review|ranged_defend|equip_armor/;
@@ -218,6 +218,7 @@ const ROUTINE_OF_THINKING = `【每次这样想】
 const CHOOSE = `【选动作】
 - 去记得的地方或坐标 → goto；找没见过的东西 → explore {"until":…}；拿看得见的方块 → gather；身边某一格 → dig_at / step / place_at
 - 坐船过水：船是实体，用 use_item {"item":"…_boat","on":"water"} 放到水面（别用 place_at），再 interact {"entity":"boat"} 上船；ride {"direction":"SW"} 划（ride 必须给 direction 或 to）。travel 提供步行和游泳寻路，已乘船时沿水路导航；吃 → eat（背包有吃的）/ hunt / forage / fish；做东西 → craft、smelt（会自己放下背包里的工作台/熔炉；拿不准查 recipes）
+- 从箱子取/存东西 → 先 find_item {"item":"…"} 查它在哪个箱子，再 take_items / store_items 指定那只箱子（target 写坐标或容器地标 ID）
 - 在坑里或地下想上去 → 看【身边】local 和背包，用 dig_at / step / place_at 自己想办法（怎么上去由你定，背包里有什么用什么）；想往下深挖 → 有稳定辅助 excavate_path {"entry":"current","mode":"stairs"} 或 assess_landings + descend（手工 dig_at+step 阶梯的斜下格支撑超出 place_at 范围，容易卡住）
 - 穿下界门/末地门 → 先 observe_portal 拿 portalId，再 travel_portal {"portalId":"…"} 穿过去；travel_portal 不行时，自己走到门面正前那一格、面向门面走进去（走进紫色门面等传送是可行的；portal 方块站不住也挖不掉，所以别用 step/dig 去动它）
 - design 请建筑师画图纸，再 build（新盖 {"draft":"图纸ID"}，续建 {"projectId":"作品ID"}）；不要自己画图纸

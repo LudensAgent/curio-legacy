@@ -270,7 +270,7 @@ export const storeItems: Skill<{ items: StoreSpec[]; target?: ContainerTarget; n
     return { ok: true, args: { items, ...(target !== undefined ? { target } : {}), ...(note ? { note } : {}) } };
   },
   async run(ctx, args) {
-    if (args.target === undefined) return fail('BAD_ARGS', '尚未指定存入哪只容器；这些是地点线索，内容与位置可能已经变化，请自行选择 target', { candidates: containerCandidates(ctx) });
+    if (args.target === undefined) return fail('BAD_ARGS', `尚未指定存入哪只容器${knownContainersHint(ctx)}；选定并重新看见后，用 target 指定这一只存入`, { candidates: containerCandidates(ctx) });
     const selected = await selectedContainer(ctx, args.target);
     if (!selected.ok) return selected.result;
     const rememberedFree = selected.rememberedFree;
@@ -332,8 +332,9 @@ export const takeItems: Skill<{ item: string; count: number; target?: ContainerT
   async run(ctx, args) {
     const state = ctx.adapter.state();
     if (args.target === undefined) {
-      const hints = ctx.memory.recallChests(args.item, { day: state.worldDay }).slice(0, 8).map((recall) => ({ dimension: recall.chest.dim, text: describeRecall(recall) }));
-      return fail('BAD_ARGS', '尚未指定翻哪只容器；请根据地点线索自行观察、选择 target 和停止时机，未自动搜索', { candidates: containerCandidates(ctx), hints });
+      const hints = ctx.memory.recallChests(args.item, { dim: state.dim, from: state.pos }).slice(0, 8).map((recall) => ({ dimension: recall.chest.dim, text: describeRecall(recall, recall.dist) }));
+      const hintText = hints.length ? `；${hints.map((h) => h.text).join('；')}` : '；不记得哪个箱子里有它';
+      return fail('BAD_ARGS', `尚未指定翻哪只容器${hintText}；选定并重新看见后，用 target 指定这一只查看或取物`, { candidates: containerCandidates(ctx), hints });
     }
     const selected = await selectedContainer(ctx, args.target);
     if (!selected.ok) return selected.result;

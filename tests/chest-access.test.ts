@@ -60,3 +60,24 @@ test('存着东西的箱子：dig 不拆，告诉它怎么取', async () => {
   assert.match(r.summary, /存着 iron_ingot 的箱子，没拆/);
   assert.equal(a.blockAt({ x: 3, y: 64, z: 3 }), 'chest');
 });
+
+test('take_items 不带 target：把记得的箱子坐标和数量写进失败说明，不吞掉线索', async (t) => {
+  const a = new FakeAdapter(), m = new WorldMemory(null);
+  t.after(() => m.close()); m.setWorld(a.state().worldId);
+  m.setChest('overworld', { x: 7, y: 64, z: 0 }, [{ name: 'iron_ingot', count: 5 }]);
+  const r = await runSkill(a, 'take_items', { item: 'iron_ingot' }, m);
+  assert.equal(r.status, 'failed');
+  assert.equal(r.failureCode, 'BAD_ARGS');
+  assert.match(r.summary, /iron_ingot×5/, '把物品和数量写进失败说明');
+  assert.match(r.summary, /7,64,0/, '把箱子坐标写进失败说明');
+});
+
+test('store_items 不带 target：把记得的容器坐标写进失败说明', async (t) => {
+  const a = new FakeAdapter(), m = new WorldMemory(null);
+  t.after(() => m.close()); m.setWorld(a.state().worldId);
+  chestAt(a, m, { x: 7, y: 64, z: 0 }, { cobblestone: 10 });
+  const r = await runSkill(a, 'store_items', { items: ['cobblestone'] }, m);
+  assert.equal(r.status, 'failed');
+  assert.equal(r.failureCode, 'BAD_ARGS');
+  assert.match(r.summary, /7,64,0/, '把容器坐标写进失败说明');
+});
