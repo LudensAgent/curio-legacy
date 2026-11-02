@@ -277,7 +277,12 @@ export const stepTo: Skill<CellArgs> = {
     }
     const head = { ...target, y: target.y + 1 }, floor = { ...target, y: target.y - 1 };
     const solid = (p: Vec3Like) => { const n = a.blockAt(p); return n !== null && !LIQUID_BLOCKS.has(n) && !free(p); };
-    const standable = (p: Vec3Like) => solid(p) || (a.blockAt(p) === 'snow' && solid({ ...p, y: p.y - 1 }));
+    // 软方块（火把、雪、地毯、花草…）没有碰撞、可穿过：只要它下面有实心方块，就能站——别再把自己插的火把当成「没支撑」。
+    // 空气不在此列：空气是空腔/落差，不是「叠在实心上的薄层」。
+    const standable = (p: Vec3Like) => {
+      const n = a.blockAt(p);
+      return solid(p) || (n !== null && !AIR.has(n) && isSoftBlock(n) && solid({ ...p, y: p.y - 1 }));
+    };
     const ownHead = { ...feet, y: feet.y + 2 };
     const unseenBlock = [!free(target) ? target : null, !free(head) ? head : null, !standable(floor) ? floor : null,
       args.at[1] === 1 && !free(ownHead) ? ownHead : null].find((p) => p && describe(p) === '未看清的格子');
