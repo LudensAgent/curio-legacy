@@ -35,14 +35,16 @@ const touchesPassage = (rec: Pick<PassageRecord, 'path' | 'links'>, pos: Vec3Lik
   return near(pos) || dug.some((b) => near(cell(b.pos)));
 };
 
-/** 通道里离 pos 最近、且 Chebyshev 相邻的脚点（path 或 links 端点）；并进/重进旧道时用它补一条连接边 */
+/** 通道里离 pos 最近、且在 PASSAGE_LINK 内的脚点（path 或 links 端点）；并进/重进旧道时用它补一条连接边。
+ *  阈值必须和 touchesPassage 一致（3.5 格）：以前用 adjacent（1 格）过严，并进了旧道（3.5 格内）却补不上边（要 1 格内），
+ *  于是同一条 record 里碎成几百个互不相连的岛。 */
 const bridgeNode = (rec: Pick<PassageRecord, 'path' | 'links'>, pos: Vec3Like): Vec3Like | null => {
-  for (const q of rec.path) if (adjacent(q, pos)) return q;
+  let best: Vec3Like | null = null, bd = PASSAGE_LINK;
+  for (const q of rec.path) { const d = d3(q, pos); if (d > 0 && d <= bd) { bd = d; best = q; } }
   for (const l of rec.links ?? []) {
-    if (adjacent(l.a, pos)) return l.a;
-    if (adjacent(l.b, pos)) return l.b;
+    for (const p of [l.a, l.b]) { const d = d3(p, pos); if (d > 0 && d <= bd) { bd = d; best = p; } }
   }
-  return null;
+  return best;
 };
 
 /**
