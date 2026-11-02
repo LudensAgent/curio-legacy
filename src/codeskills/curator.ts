@@ -1,6 +1,6 @@
 import type { EventBus } from '../events.ts';
 import type { SkillBook } from '../knowledge/skillbook.ts';
-import { isEmergency, type Behavior, type BehaviorEngine } from '../mind/behaviors.ts';
+import { emergencyKind, isEmergency, type Behavior, type BehaviorEngine } from '../mind/behaviors.ts';
 import type { LedgerView } from '../mind/ledger.ts';
 import type { ChatMessage } from '../planner/llm.ts';
 import { extractJson } from '../planner/plan.ts';
@@ -200,11 +200,14 @@ export class SkillCurator {
     this.savedAt = Date.now();
   }
 
-  /** 救命技能平时很少触发是正常的（岩浆、窒息、埋身这类不天天发生），
-   * 不能因为“好久没用上”或“技能太多”就收起——候选和未验收的也一样：没出事前本就没法验收。
+  /** 救命技能平时很少触发是正常的（岩浆、窒息、埋身这类不天天发生），不能因为“好久没用上”或“技能太多”就收起。
+   * 但只保护「已验证成功过的」这一版——没验证过的候选只是假设，照常参与闲置淘汰和去重；
+   * 稳定版还得是启用中的（被停用的照常按停用天数收起，不因旧成功赖着）。
    * 真正坏掉的（用了 ≥4 次却很少成功）仍由 retireLowValue 第一段收起；重复的仍由整理模型合并/收起。 */
   private protectedEmergency(b: Behavior) {
-    return isEmergency(b) && (b.candidate || this.engine.enabled(b));
+    if (!isEmergency(b)) return false;
+    const ok = (this.engine.currentStats(b.name, !!b.candidate).ok ?? 0) > 0;
+    return b.candidate ? ok : this.engine.enabled(b) && ok;
   }
 
   private active() {
@@ -287,10 +290,44 @@ export class SkillCurator {
     return out;
   }
 
+  /**
+   * 应急技能去重（不需要模型）：按「威胁谓词 key」粗分，同一处境下的未验证候选大多是从没触发过的重复。
+   * 只留已验证成功过的；若一簇都没有验证过，留一个最新候选当种子（别把某处境一锅端成零覆盖）。
+   * 其余收起——契约和证据都留在历史里，真需要时可用 skill {name, from_version:N} 重新验证找回。
+   */
+  retireRedundantEmergency(_now = Date.now()): string[] {
+    const out: string[] = [];
+    let dim = '';
+    try { dim = this.dim(); } catch { /* 状态暂不可用 */ }
+    this.syncLifetimes(dim);
+    const byKind = new Map<string, Behavior[]>();
+    for (const b of this.active().filter((b) => isEmergency(b))) {
+      // 只在别的维度生效的（比如下界专用）：人不在那儿时用不上是正常的，不在这一趟去重里收
+      if (b.when?.dim && dim && !b.when.dim.includes(dim)) continue;
+      const key = emergencyKind(b);
+      const group = byKind.get(key);
+      if (group) group.push(b); else byKind.set(key, [b]);
+    }
+    for (const group of byKind.values()) {
+      if (group.length <= 1) continue; // 唯一代表不在这步收：出事时还得有招
+      const validated = (b: Behavior) => (this.engine.currentStats(b.name, !!b.candidate).ok ?? 0) > 0;
+      const keep = group.filter(validated);
+      // 一簇全都没验证过：留最新一个当种子，其余才收（半个游戏日观察期由下面的 settled 把关）
+      const seeds = keep.length ? [] : group.filter((b) => this.settled(b, dim)).sort((a, b) => (this.lifetime(a)?.age ?? 0) - (this.lifetime(b)?.age ?? 0)).slice(0, 1);
+      const keepNames = new Set([...keep, ...seeds].map((b) => b.name));
+      for (const b of group) {
+        if (keepNames.has(b.name)) continue;
+        if (!this.settled(b, dim)) continue; // 刚写的给半个游戏日观察
+        if (this.retire(b, `应急去重：这一处境已有${keep.length ? '已验证的代表' : '更新的候选'}（${[...keepNames].join('、')}），这份未验证过，收起；完整契约留在历史可找回`)) out.push(b.name);
+      }
+    }
+    return out;
+  }
+
   /** 定时检查：先收起用不上的、没用的；技能够多、而且有新技能、冲突或看着重复的，才请模型合并 */
   async check(now = Date.now(), opts: { force?: boolean; postDeath?: boolean } = {}): Promise<string | null> {
     if (this.busy) return opts.force ? '正在整理技能，请等待本次完成' : null;
-    const retired = [...this.retireUnused(now), ...this.retireLowValue(now)];
+    const retired = [...this.retireUnused(now), ...this.retireLowValue(now), ...this.retireRedundantEmergency(now)];
     this.saveTime();
     const skills = this.active();
     const notes = this.notes();
@@ -369,7 +406,7 @@ export class SkillCurator {
 - 只提醒不接手的（advisory：来回拉锯里输掉、被改成不自动做的技能）：定期复查——触发条件还和别的技能重叠就合并/收窄；已经不再重叠、又有真实成功证据的，改写它恢复自动接手。别让这些"只喊不干"的技能一直占着位置。
 - 常常同时满足条件抢着接手的（clashed_with）：调整优先级（priority：更管用、更要紧的高），或者收窄某个的触发条件（用 merge 重写它）。
 - 明显没用、被别的技能完全覆盖的：收起（retire）。
-- lifesaver 只描述应急用途，不代表已经有效。protectedEmergency=true 的应急技能（稳定版和候选都算）免闲置和容量收起——救命的技能平时很少触发、没法预先验收，不能因为“好久没用上”就收；但真正坏掉的（本版用了 ≥4 次却很少成功）仍照常收起。未验证候选和已停用应急版不能借同名旧版成功永久保留。
+- lifesaver 只描述应急用途，不代表已经有效。protectedEmergency=true 的应急技能是「当前版本已验证成功过」的，免闲置和容量收起——救命的技能平时很少触发、没法预先验收，不能因为“好久没用上”就收；但真正坏掉的（本版用了 ≥4 次却很少成功）仍照常收起。未验证的应急候选不再免闲置/容量收起，会按「威胁谓词 key」粗分去重：同一处境（举盾后撤、溺水、岩浆、窒息、覆盖同一本能）只留已验证的，一簇全未验证就留一个最新候选当种子，其余收起（契约和证据留在历史，可 from_version 找回）。未验证候选和已停用应急版不能借同名旧版成功永久保留。
 - successfulEmergencyVersions 列出保留的成功应急版本；收起不会删除完整契约、笔记和证据，心智可用 skill {name,from_version:N} 显式生成新候选重新验收，不能把历史成功当作新候选成功。
 - observedGameDays 只累计在线、未暂停的有效游戏刻（每天24000tick）；未知历史为null，不能按现实时间或离线期间的世界日期差推断闲置。普通${this.opts.unusedDays}日、候选${this.opts.candidateUnusedDays}日、停用${this.opts.disabledDays}日自动收起；纯改写不刷新候选闲置。
 - similar_to 是名字或说明看着相近的：逐对看是不是在做同一件事。是的话合并成一份，或者收起用得少、成得少的那份（uses 少的、fail 多的）；只是名字像、其实管的是两回事的就留着。

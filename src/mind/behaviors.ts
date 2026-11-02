@@ -146,6 +146,27 @@ export function isEmergency(b: Pick<Behavior, 'mode' | 'when' | 'overrides'>): b
   return (b.mode === 'auto' || b.mode === 'recover') && (isThreat(b.when) || (b.overrides?.length ?? 0) > 0);
 }
 
+/**
+ * 应急技能按「威胁谓词 key」粗分：管同一处境的归到一簇，给后台去重/合并用。
+ * - override:覆盖哪个本能（覆盖不同本能算不同簇）；
+ * - lava（岩浆）/ drown（氧气不足）/ suffocate（卡墙窒息）/ combat（怪在附近、挨打、血少）。
+ * 只看谓词的键、不看阈值数值，所以「hostile.within 8」和「hostile.within 5」同属 combat。
+ */
+export function emergencyKind(b: { when?: Predicate; overrides?: string[] }): string {
+  const ov = (b.overrides ?? []).slice().sort().join('+');
+  if (ov) return `override:${ov}`;
+  const has = (p: Predicate | undefined, ...keys: (keyof Predicate)[]): boolean => {
+    if (!p) return false;
+    if (keys.some((k) => p[k] !== undefined)) return true;
+    return (p.any ?? []).some((x) => has(x, ...keys)) || (p.all ?? []).some((x) => has(x, ...keys));
+  };
+  if (has(b.when, 'in_lava')) return 'lava';
+  if (has(b.when, 'oxygen_below')) return 'drown';
+  if (has(b.when, 'in_wall')) return 'suffocate';
+  if (has(b.when, 'hostile', 'hurt_within', 'hp_below')) return 'combat';
+  return 'other';
+}
+
 /** 代码技能必须带判定时的说明（写技能、改技能时都用这一句） */
 export const VERIFY_REQUIRED = 'skill.verify：代码技能要同时写 verify——一段 JavaScript 函数体，做完以后看一眼世界确认真的做成了。参数 api 和 args：args.before 是开工前的 api.state()，args.result 是 code 的返回值，args.args 是调用参数（目标要拿它核对，别拿 args.result 里代码自己算的值）；只能用 api.state/blockAt/region/entities/nearestLand；做成了 return true，没做成 return "原因"（比如 const s = await api.state(); return s.inWater ? "还在水里" : true）';
 

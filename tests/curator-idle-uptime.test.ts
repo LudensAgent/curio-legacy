@@ -162,7 +162,7 @@ test('停用应急稳定版一天后收起，保留成功证据和同名新候�
   assert.equal(w.engine.executionError(definition.name, true), null);
 });
 
-test('成功且可用的稳定应急版和未验收的应急候选都免闲置和容量淘汰', (t) => {
+test('已验证的稳定应急版仍免闲置和容量淘汰；未验证的应急候选照常参与', (t) => {
   const w = setup(t, { maxActive: 1 });
   const emergency = { ...definition, when: { hp_below: 8 } };
   assert.ok(w.engine.write(emergency).ok);
@@ -170,7 +170,10 @@ test('成功且可用的稳定应急版和未验收的应急候选都免闲置�
   assert.ok(w.engine.write({ ...emergency, name: 'unproven-rescue' }, { by: 'mind' }).ok);
   w.observe();
   w.observe(3 * day);
-  assert.deepEqual(w.curator.retireUnused(), [], '未验收的应急候选也不能按闲置收起（没出事前本就没法验收）');
+  // 未验证的应急候选不再一刀切豁免：按候选闲置门槛收起（已验证的那份仍留着）
+  assert.deepEqual(w.curator.retireUnused(), ['unproven-rescue'], '未验证的应急候选照常按闲置收起');
+  assert.ok(w.engine.candidateRetirement('unproven-rescue'), '收起的是候选');
+  assert.equal(w.engine.executionError(definition.name), null, '已验证的稳定应急版不被闲置收起');
   w.observe(5 * day);
   assert.deepEqual(w.curator.retireUnused(), []);
   w.curator.opts.maxActive = 0;
