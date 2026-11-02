@@ -39,7 +39,7 @@ function floorProblem(name: string | null): ExcavationStop | null {
   if (hazard(name)) return new ExcavationStop('ERROR', `下一落点地板是 ${name}（${hazardLabel(name)}），不能冒险下落`);
   // 空腔/虚空和「半砖这类不完整方块」是两码事：前者说明这条阶梯到头了、下面是洞穴，别在原地反复试；
   // 后者才是「能站但不稳」。分开报，Agent 才知道是换方向还是确认落点高度。
-  if (AIR.has(name)) return new ExcavationStop('ERROR', `下一落点下面是空的（${name}）：这条阶梯/通道到头了，下面是洞穴或虚空`);
+  if (AIR.has(name)) return new ExcavationStop('ERROR', `下一落点下面是空的（${name}）：前面脚下是个坑/洞穴`);
   const collisions = (registry as any).blockCollisionShapes;
   const shapes = collisions?.blocks[name];
   const ids = Array.isArray(shapes) ? shapes : [shapes];
@@ -226,7 +226,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
     const hint = /液体|水|lava|water/.test(msg) ? '（先换方向避开液体，或先 place_at 堵上再挖）'
       : /下落方块/.test(msg) ? '（下面是沙子/沙砾这类下落方块，换方向或先堵住再挖）'
       : /未知|未加载/.test(msg) ? '（先照亮/转头看清那一格再挖，或换方向）'
-      : /下面是空的|洞穴|虚空/.test(msg) ? '（这条阶梯到头了：下面就是洞穴/虚空，别在原地反复重试，换方向或从旁边的洞口下去探）'
+      : /下面是空的|洞穴|虚空/.test(msg) ? '（前面脚下是空的：先 place_at 垫一块支撑方块再往前走，或下去探这个洞；别原地反复重试）'
       : /不完整方块|半砖|台阶|站不稳/.test(msg) ? '（下面是半砖/台阶这类不完整方块，确认落点高度或换方向）'
       : /身体空间|干燥|站稳/.test(msg) ? '（先挖开落点那两格的脚/头空间，或换方向）'
       : '';
