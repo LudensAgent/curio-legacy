@@ -97,7 +97,7 @@ export function cycleKey(names: string[]): string {
 interface Owner { skill: string; version: string; at: number; kind: ForgeKind; headline: string }
 
 const KEEP = new Set(['task_start', 'task_end', 'hurt', 'notice', 'reflex', 'reflex_gaveup', 'instinct', 'thought', 'attempt_end', 'activity_start', 'activity_adjust',
-  'death', 'death_items', 'game_message', 'body_adapt', 'stuck', 'skill_written', 'skill_forged', 'skill_disabled', 'new_environment', 'activity_suspend']);
+  'death', 'death_items', 'game_message', 'body_adapt', 'stuck', 'skill_written', 'skill_forged', 'skill_disabled', 'skill_aftermath', 'new_environment', 'activity_suspend']);
 
 /** 吃亏的程度：自适应的阈值（看它平时痛到什么程度） */
 export class PainMeter {
@@ -202,7 +202,8 @@ export class SkillSmith {
     const st = this.engine.statsOf(o.skill);
     const cur = this.engine.currentStats(o.skill);
     const last = st?.recent?.at(-1);
-    const stale = now - o.at > SkillSmith.OWNER_TTL_MS || !b || this.engine.inactive(o.skill) || this.engine.versionOf(b) !== o.version
+    // 读取旧记录也复用和新建一致的覆盖资格（候选/收起/停用/拉锯只提醒都不算覆盖），不因版本匹配就继续生效。
+    const stale = now - o.at > SkillSmith.OWNER_TTL_MS || !!this.engine.handlesNow(o.skill) || !b || this.engine.versionOf(b) !== o.version
       || (cur.fail >= 3 && cur.fail > cur.ok) || (!!last && !last.ok && now - last.at < 10 * 60_000);
     if (!stale) return o;
     this.owners.delete(key);
@@ -212,7 +213,7 @@ export class SkillSmith {
 
   private setOwner(incident: Incident, skill: string) {
     const b = incident.key ? this.engine.get(skill) : undefined;
-    if (!b || !incident.key || this.engine.inactive(skill)) return;
+    if (!b || !incident.key || this.engine.handlesNow(skill)) return;
     this.owners.set(incident.key, { skill, version: this.engine.versionOf(b), at: Date.now(), kind: incident.kind, headline: incident.headline.slice(0, 120) });
     if (this.owners.size > 300) this.owners.delete(this.owners.keys().next().value!);
     this.saveOwners();
@@ -643,7 +644,7 @@ ${this.rules()}
         if (r.none) {
           settled.add(idx);
           const why = String(r.why ?? '').slice(0, 160);
-          const by = typeof r.covered_by === 'string' && this.engine.get(r.covered_by) && !this.engine.inactive(r.covered_by) ? r.covered_by : null;
+          const by = typeof r.covered_by === 'string' && !this.engine.handlesNow(r.covered_by) ? r.covered_by : null;
           if (by) this.setOwner(inc, by);
           const limitation = typeof r.limitation === 'string' && r.limitation.trim() ? r.limitation.trim().slice(0, 200) : null;
           if (limitation) this.bus.publish('body_limit', 'P2', `身体做不到的事（报给开发者）：${limitation}`, { kind: inc.kind, limitation, headline: inc.headline.slice(0, 200) });

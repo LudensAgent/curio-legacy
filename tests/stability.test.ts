@@ -52,16 +52,21 @@ test('技能改写不清空历史：成败按版本记；后台总结推翻不�
   assert.equal(e.statsOf('dodge-zombie')!.disabled, true);
 });
 
-test('自动技能管没管用：触发它的情况解除了才算（饿了的还饿就不算），死了、掉一大截血也不算', () => {
-  const { adapter, engine: e } = engine();
+test('自动技能的事后观测只报事实：触发处境还在/解除、掉血、死亡都单独说明，不替技能目标定成败', () => {
+  const { adapter, bus, engine: e } = engine();
+  const after: { data: { name: string; died: boolean; still: boolean; lost: number } }[] = [];
+  bus.on('event', (ev: any) => { if (ev.type === 'skill_aftermath') after.push(ev); });
   assert.ok(e.write({ name: 'eat-something', description: '饿了就找东西吃', when: { food_below: 10, not_doing: ['eat'] }, steps: [{ skill: 'eat' }] }).ok);
   assert.deepEqual(situationOf({ food_below: 10, not_doing: ['eat'] }), { food_below: 10 }, '判断时去掉“正在做什么”');
   const judge = (food: number) => { adapter.food = food; (e as any).aftermath.set('eat-something', { behavior: e.get('eat-something'), hp: 20, at: Date.now() - 13_000, context: '' }); (e as any).judge('eat-something', false); };
   judge(5);
-  assert.equal(e.statsOf('eat-something')!.fail, 1);
-  assert.match(e.statsOf('eat-something')!.lastError!, /情况还在/);
+  assert.equal(e.statsOf('eat-something')!.ok, 0, '触发处境还在不再自动算失败');
+  assert.equal(e.statsOf('eat-something')!.fail, 0);
+  assert.ok(after.some((x) => x.data.name === 'eat-something' && x.data.still === true), '“处境还在”作为事实报出');
   judge(18);
-  assert.equal(e.statsOf('eat-something')!.ok, 1);
+  assert.equal(e.statsOf('eat-something')!.ok, 0, '处境解除也不再自动算成功');
+  assert.equal(e.statsOf('eat-something')!.fail, 0);
+  assert.ok(after.some((x) => x.data.name === 'eat-something' && x.data.still === false), '“处境解除”作为事实报出');
 });
 
 test('只有眼下的危险能打断心智手上的事；饿了、天黑这类等手上的事做完再接手（先告诉心智一声）', async (t) => {

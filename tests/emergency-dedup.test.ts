@@ -44,7 +44,7 @@ test('emergencyKind 按威胁谓词 key 粗分，只看键不看阈值', () => {
   assert.equal(emergencyKind({ overrides: ['surface', 'dodge_creeper'] }), 'override:dodge_creeper+surface');
 });
 
-test('应急去重：同一处境留已验证的，未验证的重复候选收起', (t) => {
+test('未验证的应急候选不再按「处境 × 动作签名」自动去重，留给整理模型判断', (t) => {
   const w = setup(t);
   const combat = { ...definition, when: { hostile: { within: 8 } } };
   assert.ok(w.engine.write({ ...combat, name: 'shield-validated' }).ok);
@@ -53,31 +53,8 @@ test('应急去重：同一处境留已验证的，未验证的重复候选收�
   assert.ok(w.engine.write({ ...combat, name: 'shield-dupe-b' }, { by: 'mind' }).ok);
   w.observe();
   w.observe(day);
-  assert.deepEqual(new Set(w.curator.retireRedundantEmergency()), new Set(['shield-dupe-a', 'shield-dupe-b']));
-  assert.equal(w.engine.executionError('shield-validated'), null, '已验证的应急代表保留');
-  assert.ok(w.engine.candidateRetirement('shield-dupe-a'), '收起的是候选，完整契约留在历史');
-  assert.ok(w.engine.candidateRetirement('shield-dupe-b'));
-});
-
-test('应急去重：一簇全未验证时留一个最新候选当种子，其余收起', (t) => {
-  const w = setup(t);
-  const drown = { ...definition, when: { oxygen_below: 10 } };
-  for (const name of ['swim-a', 'swim-b', 'swim-c']) assert.ok(w.engine.write({ ...drown, name }, { by: 'mind' }).ok);
-  w.observe();
-  w.observe(day);
-  assert.equal(w.curator.retireRedundantEmergency().length, 2, '收起两份，留一份种子');
-  const live = w.engine.list(true).filter((b) => b.source === 'self' && !w.engine.candidateRetirement(b.name)).map((b) => b.name);
-  assert.equal(live.length, 1, '这一处境仍有一份候选兜底');
-  assert.ok(['swim-a', 'swim-b', 'swim-c'].includes(live[0]));
-});
-
-test('应急去重：唯一代表不在这步收起，不同处境互不合并', (t) => {
-  const w = setup(t);
-  assert.ok(w.engine.write({ ...definition, name: 'only-combat', when: { hostile: { within: 8 } } }, { by: 'mind' }).ok);
-  assert.ok(w.engine.write({ ...definition, name: 'only-drown', when: { oxygen_below: 10 } }, { by: 'mind' }).ok);
-  w.observe();
-  w.observe(day);
-  assert.deepEqual(w.curator.retireRedundantEmergency(), [], '两个不同处境的唯一代表都不收');
-  assert.equal(w.engine.candidateRetirement('only-combat'), undefined);
-  assert.equal(w.engine.candidateRetirement('only-drown'), undefined);
+  // 不再有非模型的应急去重：未验证候选是否重复由整理模型按代码/证据判断，不因同属 combat、代码同源就自动收起。
+  assert.equal(w.engine.candidateRetirement('shield-dupe-a'), undefined, '不自动收起未验证候选');
+  assert.equal(w.engine.candidateRetirement('shield-dupe-b'), undefined);
+  assert.equal(w.engine.inactive('shield-validated'), false, '已验证的应急版保持启用');
 });

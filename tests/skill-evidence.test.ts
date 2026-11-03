@@ -208,20 +208,26 @@ test('恢复技能返回skipped后调度清理只记一次使用和跳过', asyn
   assert.deepEqual(w.engine.currentStats(definition.name), { ok: 0, fail: 0 });
 });
 
-test('自动技能的事后验收只更新成败，不重复增加实际使用次数', async (t) => {
+test('自动技能的成败在完成时按执行结果记一次，事后观测只补事实不重复记成败', async (t) => {
   const w = setup(t);
   assert.ok(w.engine.write({ ...definition, when: { hp_below: 8 } }).ok);
   w.adapter.hp = 6;
+  const after: AgentEvent[] = [];
+  const onAftermath = (event: AgentEvent) => { if (event.type === 'skill_aftermath') after.push(event); };
+  w.bus.on('event', onAftermath);
+  t.after(() => w.bus.off('event', onAftermath));
   const now = Date.now(), done = new Promise<TaskOutcome>((resolve) => w.arbiter.once('done', resolve));
   assert.equal(w.engine.tick(null, now), true);
   assert.equal((await done).result.status, 'succeeded');
   assert.equal(w.engine.statsOf(definition.name)?.uses, 1);
-  assert.deepEqual(w.engine.currentStats(definition.name), { ok: 0, fail: 0 });
+  assert.deepEqual(w.engine.currentStats(definition.name), { ok: 1, fail: 0 }, '完成即按执行结果记成败');
   w.adapter.hp = 10;
   w.engine.tick(null, now + BehaviorEngine.AFTERMATH_MS + 1);
-  assert.deepEqual(w.engine.currentStats(definition.name), { ok: 1, fail: 0 });
+  assert.deepEqual(w.engine.currentStats(definition.name), { ok: 1, fail: 0 }, '事后观测不再重复记成败');
   assert.equal(w.engine.statsOf(definition.name)?.uses, 1);
   assert.deepEqual(usageCounts(w.engine.statsOf(definition.name)?.usageByVersion)?.['1'], { uses: 1, skipped: 0, cancelled: 0 });
+  assert.equal(after.length, 1, '一次试验只补一条事后观测');
+  assert.equal((after[0].data as Record<string, unknown>).still, false);
 });
 
 test('顶层取消分别记录稳定版和候选使用，执行期间修订且缺版本时不猜归属', async (t) => {
