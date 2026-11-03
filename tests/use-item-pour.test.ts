@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { EffectEvidence } from '../src/adapter/types.ts';
 import { useItem } from '../src/skills/actions.ts';
 import { TestWorld, makeCtx } from './survival-helpers.ts';
 
@@ -71,6 +72,7 @@ test('use_item 空桶对坐标流体源收集：bucket→water_bucket、源格�
   t.after(() => ctx.memory.close());
   w.inv.set('bucket', 1);
   w.setBlock({ x: 0, y: 64, z: 2 }, 'water');
+  w.blockProperties.set('0,64,2', { level: 0 });
   const r = await useItem.run(ctx, { item: 'bucket', on: { x: 0, y: 64, z: 2 } });
   assert.equal(r.status, 'succeeded', r.summary);
   assert.equal(w.blockAt({ x: 0, y: 64, z: 2 }), 'air');
@@ -84,6 +86,7 @@ test('use_item 空桶对流动水收集：报 BAD_ARGS，不装', async (t) => {
   t.after(() => ctx.memory.close());
   w.inv.set('bucket', 1);
   w.setBlock({ x: 0, y: 64, z: 2 }, 'water');
+  w.blockProperties.set('0,64,2', { level: 0 });
   w.blockProperties.set('0,64,2', { level: 1 });
   const r = await useItem.run(ctx, { item: 'bucket', on: { x: 0, y: 64, z: 2 } });
   assert.equal(r.status, 'failed');
@@ -109,6 +112,7 @@ test('use_item 空桶收集无限水源：源格被邻近源重新填回也算�
   const w = new TestWorld();
   w.inv.set('bucket', 1);
   w.setBlock({ x: 0, y: 64, z: 2 }, 'water');
+  w.blockProperties.set('0,64,2', { level: 0 });
   // 模拟无限水源：取走后源格仍被填回 water，但 bucket→water_bucket 已发生
   w.useItemOn = async (item: string, target: { kind: string; pos?: { x: number; y: number; z: number } }) => {
     if (item === 'bucket' && target.kind === 'block' && target.pos) {
@@ -146,4 +150,104 @@ test('use_item on:"self" 对不消耗物品的工具（鱼竿）不算失败', a
   const r = await useItem.run(ctx, { item: 'fishing_rod', on: 'self' });
   assert.equal(r.status, 'succeeded', r.summary);
   assert.equal(r.failureCode, undefined);
+});
+
+
+test('coordinate collection rejects stale, cross-session and out-of-range observations before using the bucket', async (t) => {
+  for (const mode of ['old', 'world', 'session', 'dimension', 'not-ready', 'far', 'unknown-level']) {
+    const w = new TestWorld();
+    const pos = { x: mode === 'far' ? 10 : 0, y: 64, z: 2 };
+    w.inv.set('bucket', 1);
+    let uses = 0;
+    w.useItemOn = async () => { uses++; return { ok: true }; };
+    if (mode === 'not-ready') w.observationReady = false;
+    const properties: Record<string, number> = mode === 'unknown-level' ? {} : { level: 0 };
+    const ctx = makeCtx(w, { senses: { observeBlocks: () => [{
+      name: 'water', pos, properties, source: 'vision',
+      worldId: mode === 'world' ? 'other-world' : w.worldId,
+      sessionId: mode === 'session' ? 'old-session' : w.sessionId,
+      dimension: mode === 'dimension' ? 'the_nether' : w.dim,
+      observationId: 1, observedAt: Date.now() - (mode === 'old' ? 5000 : 0),
+    }] } });
+    t.after(() => ctx.memory.close());
+    const r = await useItem.run(ctx, { item: 'bucket', on: pos });
+    assert.equal(r.status, 'failed', mode);
+    assert.equal(uses, 0, mode);
+    assert.equal(w.inv.get('bucket'), 1, mode);
+  }
+});
+
+test('collection reports only current observations after use, without reading a newly hidden cell', async (t) => {
+  const w = new TestWorld(), pos = { x: 0, y: 64, z: 2 };
+  w.inv.set('bucket', 1);
+  let used = false;
+  const ctx = makeCtx(w, { senses: { observeBlocks: () => used ? [] : [{
+    name: 'water', pos, properties: { level: 0 }, source: 'vision',
+    worldId: w.worldId, sessionId: w.sessionId, dimension: w.dim, observationId: 1, observedAt: Date.now(),
+  }] } });
+  t.after(() => ctx.memory.close());
+  w.blockAt = () => { throw new Error('must not read raw world cells'); };
+  w.useItemOn = async () => {
+    used = true;
+    w.inv.set('bucket', 0); w.inv.set('water_bucket', 1);
+    return { ok: true };
+  };
+  const r = await useItem.run(ctx, { item: 'bucket', on: pos });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.actual, null);
+  assert.match(r.summary, /后续状态未知/);
+});
+
+test('collection requires both sides of the expected container conversion and preserves partial changes', async (t) => {
+  for (const mode of ['spent-only', 'filled-only', 'wrong-fluid', 'water-refilled', 'water-flowing', 'lava']) {
+    const w = new TestWorld(), pos = { x: 0, y: 64, z: 2 };
+    const fluid = mode === 'lava' ? 'lava' : 'water';
+    w.inv.set('bucket', 1);
+    w.setBlock(pos, fluid); w.blockProperties.set('0,64,2', { level: 0 });
+    w.useItemOn = async () => {
+      if (mode !== 'filled-only') w.inv.set('bucket', 0);
+      if (mode !== 'spent-only') w.inv.set(mode === 'wrong-fluid' ? 'lava_bucket' : `${fluid}_bucket`, 1);
+      if (mode === 'water-flowing') w.blockProperties.set('0,64,2', { level: 3 });
+      return { ok: true };
+    };
+    const ctx = makeCtx(w);
+    t.after(() => ctx.memory.close());
+    const r = await useItem.run(ctx, { item: 'bucket', on: pos });
+    const succeeds = ['water-refilled', 'water-flowing', 'lava'].includes(mode);
+    assert.equal(r.status, succeeds ? 'succeeded' : 'failed', `${mode}: ${r.summary}`);
+    assert.equal((r.data?.effectEvidence as EffectEvidence | undefined)?.changed, true, `${mode}: partial changes must not be erased`);
+    if (!succeeds) assert.equal(r.failureCode, 'EFFECT_NOT_CONFIRMED');
+    if (succeeds) assert.equal(r.data?.collected, `${fluid}_bucket`);
+  }
+});
+
+test('collection interrupted by cancellation or a session change cannot report success', async (t) => {
+  for (const mode of ['cancel', 'session']) {
+    const w = new TestWorld(), pos = { x: 0, y: 64, z: 2 };
+    w.inv.set('bucket', 1); w.setBlock(pos, 'water'); w.blockProperties.set('0,64,2', { level: 0 });
+    const ctx = makeCtx(w), controller = new AbortController();
+    ctx.signal = controller.signal;
+    t.after(() => ctx.memory.close());
+    w.useItemOn = async () => {
+      w.inv.set('bucket', 0); w.inv.set('water_bucket', 1);
+      if (mode === 'cancel') controller.abort();
+      else w.sessionId = 'new-session';
+      return { ok: true };
+    };
+    await assert.rejects(useItem.run(ctx, { item: 'bucket', on: pos }), { name: 'AbortedError' });
+  }
+});
+
+test('self distinguishes completed input from unknown effect for consumable and reusable items', async (t) => {
+  for (const item of ['water_bucket', 'fishing_rod']) {
+    const w = new TestWorld(); w.inv.set(item, 1);
+    w.useItemOn = async () => ({ ok: true, effectEvidence: { verified: false, changed: false, reasons: ['输入完成，效果未知'] } });
+    const ctx = makeCtx(w); t.after(() => ctx.memory.close());
+    const r = await useItem.run(ctx, { item, on: 'self' });
+    assert.equal(r.status, 'succeeded', r.summary);
+    assert.equal(r.data?.inputCompleted, true);
+    assert.equal((r.data?.effectEvidence as EffectEvidence | undefined)?.verified, false);
+    assert.equal((r.data?.effectEvidence as EffectEvidence | undefined)?.changed, false);
+    assert.equal(r.data?.poured_unconfirmed, undefined);
+  }
 });

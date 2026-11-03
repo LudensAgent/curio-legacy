@@ -28,7 +28,7 @@ const basePercept = (over: Partial<Percept> = {}): Percept => ({
 test('规则目标：在水里且看见过陆地 → 朝陆地方向上岸', () => {
   const p = basePercept();
   p.self.inWater = true;
-  p.vision!.nearest_land = { dir: 'NE', dist: 30 };
+  p.vision!.nearest_land = { dir: 'NE', dist: 30, foot: { x: 21, y: 62, z: -21 }, relative_height: 0, path_confirmed: false, note: '测试候选落脚点，尚未确认路径' };
   const r = ruleProposal(p) as any;
   assert.equal(r.goal, '游回陆地');
   assert.deepEqual(r.steps[0], { skill: 'explore', args: { direction: 'NE', distance: 36 } });

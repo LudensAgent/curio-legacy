@@ -181,6 +181,7 @@ test('useBucketAt cannot consume another project reserved bucket, owner can', as
     name: 'test_reserved_bucket', description: 'bucket reservation fixture', argsDoc: '{}', timeoutMs: 5000, movement: false,
     validate: () => ({ ok: true, args: {} }),
     async run(ctx) {
+      assert.ok(ctx.actionAdapter?.useBucketAt, 'arbiter supplies the guarded bucket action');
       await ctx.actionAdapter.useBucketAt({ x: 0, y: 64, z: 2 }, 'water_bucket', ctx.signal);
       return { status: 'succeeded', summary: 'bucket poured' };
     },

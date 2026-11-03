@@ -2,6 +2,8 @@ import { EventEmitter, once } from 'node:events';
 import { createRequire } from 'node:module';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Entity } from 'prismarine-entity';
+import type { Block } from 'prismarine-block';
+import type { iterators } from 'prismarine-world';
 import type { Item } from 'prismarine-item';
 import type { Window } from 'prismarine-windows';
 import { simplify } from 'prismarine-nbt';
@@ -1860,46 +1862,44 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       .filter((x) => x.ref && x.ref.boundingBox === 'block')
       .sort((x, y) => Number(OPENS_ON_CLICK.test(x.ref.name)) - Number(OPENS_ON_CLICK.test(y.ref.name)));
     if (!refs.length) return { ok: false, reason: `NO_REFERENCE:(${target.x},${target.y},${target.z}) 四周没有实心方块可贴面，倒不进去` };
-    const count = () => this.invCountOf(item);
-    const before = count();
-    let sawFace = false;
-    for (const { f, ref } of refs) {
-      if (!this.canClickPlacementFace(ref, f.scaled(-1))) continue;
-      sawFace = true;
-      const sneak = OPENS_ON_CLICK.test(ref.name);
-      if (sneak) b.setControlState('sneak', true);
-      try {
-        await this.afterAction(() => b.lookAt(ref.position.offset(0.5 - f.x * 0.5, 0.5 - f.y * 0.5, 0.5 - f.z * 0.5), true), check);
-        await this.afterAction(() => this.lookSynced(), check);
-        await this.afterAction(async () => { b.activateItem(); await sleep(200, signal); b.deactivateItem(); }, check);
-      } catch (e: any) {
-        if (e?.name === 'AbortedError') throw e;
-      } finally {
-        if (sneak) b.setControlState('sneak', false);
-      }
-      // 桶一旦被消耗就说明服务器接受了这次 use_item：不再重发别的面，只继续等目标格出现流体。
-      if (await this.waitForInteraction(() => count() < before, check, 600)) break;
+    const before = this.invCountOf(item), beforeEmpty = this.invCountOf('bucket');
+    // 水桶命中未含水的可含水块时，会填入参照块自身；这不是本次指定的相邻空气格。
+    const face = typeof b.world?.raycast === 'function' ? refs.find(({ f, ref }) => (item !== 'water_bucket' || ref.getProperties().waterlogged !== false) && this.canClickPlacementFace(ref, f.scaled(-1))) : undefined;
+    if (!face) return { ok: false, reason: 'NO_PLACEMENT_FACE:没有确认可点击的目标面，未发送使用动作', effectEvidence: { verified: true, changed: false, reasons: ['目标面被挡、太远、参照块会吸收水或射线不可用'] } };
+    const { f, ref } = face;
+    const sneak = OPENS_ON_CLICK.test(ref.name);
+    if (sneak) b.setControlState('sneak', true);
+    try {
+      await this.afterAction(() => b.lookAt(ref.position.offset(0.5 - f.x * 0.5, 0.5 - f.y * 0.5, 0.5 - f.z * 0.5), true), check);
+      await this.afterAction(() => this.lookSynced(), check);
+      if (!this.canClickPlacementFace(ref, f.scaled(-1), undefined, true)) return { ok: false, reason: 'NO_PLACEMENT_FACE:使用前实际视线已不能命中目标面，未发送使用动作' };
+      await this.afterAction(async () => { b.activateItem(); await sleep(200, signal); b.deactivateItem(); }, check);
+    } finally {
+      if (sneak) b.setControlState('sneak', false);
     }
-    const consumed = count() < before;
-    // 方块更新往往晚于背包更新：桶消耗后再等一段，别在目标格还没出现水时就过早判失败。
-    if (consumed) await this.waitForInteraction(() => b.blockAt(target)?.name === fluidName, check, 800);
-    const now = b.blockAt(target);
-    const placed = !!now && now.name === fluidName;
+    const sourcePlaced = () => {
+      const now = b.blockAt(target);
+      return now?.name === fluidName && Number(now.getProperties().level) === 0;
+    };
+    // 背包和区块消息可按任意顺序到达。一次使用后在同一窗口等待完整证据，不因部分证据重发使用。
+    await this.waitForInteraction(() => this.invCountOf(item) < before && this.invCountOf('bucket') > beforeEmpty && sourcePlaced(), check, 800);
+    const consumed = before - this.invCountOf(item), emptyAdded = this.invCountOf('bucket') - beforeEmpty;
+    const placed = sourcePlaced();
     const reasons = [
-      ...(placed ? [`(${target.x},${target.y},${target.z}) 出现了 ${now.name}`] : []),
-      ...(consumed ? [`背包 ${item} 减少 ${before - count()}`] : []),
+      ...(placed ? [`(${target.x},${target.y},${target.z}) 出现了 ${fluidName} 源`] : []),
+      ...(consumed > 0 ? [`背包 ${item} 减少 ${consumed}`] : []),
+      ...(emptyAdded > 0 ? [`背包 bucket 增加 ${emptyAdded}`] : []),
     ];
-    const effectEvidence = { verified: true, changed: reasons.length > 0, reasons: reasons.length ? reasons : ['没有确认桶被消耗或目标格出现流体'] };
-    if (placed && consumed) {
-      this.notePlaced({ x: target.x, y: target.y, z: target.z }, item);
+    const effectEvidence = { verified: true, changed: reasons.length > 0, reasons: reasons.length ? reasons : ['没有确认桶转换或目标源格变化'] };
+    if (placed && consumed > 0 && emptyAdded > 0) {
+      this.notePlaced({ x: target.x, y: target.y, z: target.z }, fluidName);
       return { ok: true, placed: { x: target.x, y: target.y, z: target.z }, effectEvidence };
     }
-    if (consumed) return { ok: false, reason: `PLACEMENT_NOT_CONFIRMED:${item} 已消耗，但目标格没有出现 ${fluidName}（可能倒进了别的格，或在下界蒸发了）`, effectEvidence };
-    if (!sawFace) return { ok: false, reason: 'NO_PLACEMENT_FACE:目标空气格四周的面都看不见或够不到（被挡/太远），未发送使用动作', effectEvidence: { verified: true, changed: false, reasons: ['没有可点击的空置面，未发送使用动作'] } };
-    return { ok: false, reason: `NO_EFFECT:服务器没有消耗 ${item}，目标格也没变化（可能仍不是可倒流体的空格）`, effectEvidence };
+    if (reasons.length) return { ok: false, reason: `PLACEMENT_NOT_CONFIRMED:没有同时确认 ${item}→bucket 和目标格出现 ${fluidName} 源`, effectEvidence };
+    return { ok: false, reason: `NO_EFFECT:没有确认 ${item} 的容器转换或目标源格变化`, effectEvidence };
   }
 
-  private canClickPlacementFace(reference: any, face: any, delta?: any) {
+  private canClickPlacementFace(reference: any, face: any, delta?: any, currentView = false) {
     const b = this.bot;
     if (!b.entity?.position?.offset) return false;
     const from = b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0);
@@ -1908,7 +1908,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const distance = direction.norm();
     if (distance > 4.4 || distance < 0.01) return false;
     if (typeof b.world?.raycast !== 'function') return true;
-    const hit = b.world.raycast(from, direction.normalize(), distance + 0.05);
+    const view = currentView ? new Vec3(-Math.sin(b.entity.yaw) * Math.cos(b.entity.pitch), Math.sin(b.entity.pitch), -Math.cos(b.entity.yaw) * Math.cos(b.entity.pitch)) : direction.normalize();
+    const hit = b.world.raycast(from, view, distance + 0.05);
     if (!hit?.position || !hit.position.equals(reference.position)) return false;
     // 除了命中参照方块，还要确认命中「请求的那一面」。否则射线斜穿侧壁时，use_item 会把水倒进别的相邻格
     // （例如请求倒进石块上方，实际命中西侧，倒进旁边一格），桶照样被消耗、目标格却没有任何流体。
@@ -4179,12 +4180,20 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (!(await this.equipNamed(item, check))) return { ok: false, reason: `NO_ITEM:${item}` };
     try {
       if (target.kind === 'self') {
-        // 沿当前准星使用，不自动低头、不选点。只核对「本物品」是否被消耗（满桶转空桶、扔东西/喝药都会减少），
-        // 不把顺路捡起的其他物品变化当成本动作效果；鱼竿这类使用不消耗物品的工具，数量不变也是正常输入完成。
+        // 原始使用完成不代表已确认玩法效果；只记录与该物品关联的变化，不把附带拾取当作使用证据。
         const before = this.invCountOf(item);
+        const containers = item === 'bucket' ? ['water_bucket', 'lava_bucket', 'milk_bucket'] : ['water_bucket', 'lava_bucket'].includes(item) ? ['bucket'] : [];
+        const beforeContainers = containers.map((name) => ({ name, count: this.invCountOf(name) }));
         await this.afterAction(async () => { b.activateItem(); await sleep(400, signal); b.deactivateItem(); }, check);
-        const after = this.invCountOf(item);
-        return { ok: true, effectEvidence: { verified: true, changed: after < before, reasons: after < before ? [`背包 ${item} 减少 ${before - after}`] : [`已沿当前准星使用 ${item}，${item} 数量未变（该物品使用不消耗，或未生效）`] } };
+        const consumed = before - this.invCountOf(item);
+        const received = beforeContainers.filter(({ name, count }) => this.invCountOf(name) > count);
+        const changed = consumed > 0 && (!containers.length || received.length > 0);
+        const reasons = [
+          ...(consumed > 0 ? [`背包 ${item} 减少 ${consumed}`] : []),
+          ...received.map(({ name, count }) => `背包 ${name} 增加 ${this.invCountOf(name) - count}`),
+          ...(!changed ? [`已沿当前准星使用 ${item}，效果未确认`] : []),
+        ];
+        return { ok: true, effectEvidence: { verified: changed, changed, reasons } };
       }
       const block = b.blockAt(this.vec(target.pos));
       if (!block) return { ok: false, reason: 'NO_BLOCK' };
@@ -4233,6 +4242,42 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         await this.afterAction(() => b.activateBlock(block), check);
         const appeared = await this.waitForInteraction(() => Object.values(b.entities ?? {}).some((entity: any) => !ids.has(String(entity.id)) && /minecart/.test(entity.name) && entity.position.distanceTo(block.position) < 3), check);
         return appeared ? { ok: true, spawned: 'minecart', effectEvidence: { verified: true, changed: true, reasons: ['目标附近实际出现新矿车'] } } : { ok: false, reason: 'ENTITY_NOT_SPAWNED:没有确认矿车出现', effectEvidence: { verified: true, changed: false, reasons: ['未出现新矿车'] } };
+      }
+      if (item === 'bucket' && ['water', 'lava'].includes(block.name)) {
+        if (Number(block.getProperties().level) !== 0) return { ok: false, reason: 'NOT_SOURCE:指定流体不是源方块' };
+        const from = b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0);
+        const aim = block.position.offset(0.5, 0.85, 0.5), direction = aim.minus(from), distance = direction.norm();
+        if (distance > 4.4 || distance < 0.01) return { ok: false, reason: 'OUT_OF_RANGE:指定流体源不在交互范围内' };
+        if (typeof b.world?.raycast !== 'function') return { ok: false, reason: 'TARGET_NOT_CONFIRMED:当前无法确认流体源的射线' };
+        // SOURCE_ONLY 也会命中含水方块和水生植物中的水源，不只是名为 water 的格子。
+        const waterSources = new Set(['seagrass', 'tall_seagrass', 'kelp', 'kelp_plant', 'bubble_column']);
+        const fluidAt = (cell: Block | null) => {
+          if (!cell) return null;
+          if (cell.name === 'water' || cell.name === 'lava') return { name: cell.name, source: Number(cell.getProperties().level) === 0 };
+          return cell.getProperties().waterlogged === true || waterSources.has(cell.name) ? { name: 'water', source: true } : null;
+        };
+        const sourceOrBlock = (candidate: Block, ray: iterators.RaycastIterator) => {
+          const fluid = fluidAt(candidate);
+          const height = fluid && fluidAt(b.blockAt(candidate.position.offset(0, 1, 0)))?.name === fluid.name ? 1 : 8 / 9;
+          // 保留实心部分：含水顶半砖等实体形状可能高于液面；流水自身不挡源射线。
+          return !!ray.intersect(fluid?.source ? [...candidate.shapes, [0, 0, 0, 1, height, 1]] : candidate.shapes, candidate.position);
+        };
+        const hit = b.world.raycast(from, direction.normalize(), distance + 0.05, sourceOrBlock);
+        if (!hit?.position.equals(block.position)) return { ok: false, reason: 'TARGET_NOT_CONFIRMED:视线不能首先命中指定流体源，未发送使用动作' };
+        const filled = `${block.name}_bucket`, beforeEmpty = this.invCountOf('bucket'), beforeFilled = this.invCountOf(filled);
+        await this.afterAction(() => b.lookAt(aim, true), check);
+        await this.afterAction(() => this.lookSynced(), check);
+        // 等待转头同步期间可能被水流推走。使用当前眼位和真实准星，不能重算一条尚未转向的理想射线。
+        const currentEye = b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0);
+        const view = new Vec3(-Math.sin(b.entity.yaw) * Math.cos(b.entity.pitch), Math.sin(b.entity.pitch), -Math.cos(b.entity.yaw) * Math.cos(b.entity.pitch));
+        const currentHit = b.world.raycast(currentEye, view, 4.4, sourceOrBlock);
+        if (!currentHit?.position.equals(block.position)) return { ok: false, reason: 'TARGET_NOT_CONFIRMED:使用前实际视线已不能命中指定流体源，未发送使用动作' };
+        await this.afterAction(async () => { b.activateItem(); await sleep(250, signal); b.deactivateItem(); }, check);
+        const converted = await this.waitForInteraction(() => this.invCountOf('bucket') < beforeEmpty && this.invCountOf(filled) > beforeFilled, check);
+        const spent = beforeEmpty - this.invCountOf('bucket'), gained = this.invCountOf(filled) - beforeFilled;
+        const reasons = [...(spent > 0 ? [`背包 bucket 减少 ${spent}`] : []), ...(gained > 0 ? [`背包 ${filled} 增加 ${gained}`] : [])];
+        const effectEvidence = { verified: true, changed: reasons.length > 0, reasons: reasons.length ? reasons : ['没有确认桶的容器转换'] };
+        return converted ? { ok: true, effectEvidence } : { ok: false, reason: 'COLLECTION_NOT_CONFIRMED:没有确认空桶转成对应流体桶', effectEvidence };
       }
       // 对着液体用（水桶装水/倒水等）：先看向液面再“使用物品”；其他情况按“对方块右键”
       const fluid = ['water', 'lava'].includes(block.name);

@@ -147,17 +147,23 @@ export const digAt: Skill<CellArgs> = {
         : `可以先 place_at 往那几格放方块把水堵上（水格可以直接放方块），或者写 "wet":true 照挖、让水流进来（水只会漫过来，不会伤人，挖完可以再堵）；也可以换个方向`;
       return fail('BAD_ARGS', `[${args.at}] 挖开会有液体流进来：${cells}。${fix}`, { wet: wets[0].name, wetCells: wets.map((w) => toRel(feet, args.facing, w.pos)), ...after(ctx, args.facing, pos) });
     }
+    let fallFacts: { below: string | null; drop: number | null; fallRisk: string } | undefined;
     // 挖的是脚下支撑块（相对 [0,-1,0] 或绝对坐标正好落在支撑格）：挖前先向下扫 3 格确认有安全落点
     // （和 dig dir:down 同一套），落差未知/超过 3 格、或下面就是液体时拒绝，避免挖掉自己的支撑直接坠落。
     if (digsSupport) {
       const { drop, landing } = dropBelow(ctx.adapter, pos);
       if (drop === 0 || LIQUID_BLOCKS.has(landing ?? '')) {
-        const peek = ctx.adapter.blockAt({ x: pos.x, y: pos.y - 1, z: pos.z });
-        const reason = drop === 0
-          ? (peek === null ? '下面的落点还没加载，未知能否安全落地' : '下面有超过 3 格的落差，跳下去会掉血')
-          : `下面 ${drop} 格是 ${landing}，往下挖会掉进去`;
-        // 风险如实报告，挖不挖由 Agent 明确选择：fall:true 才接受坠落风险照挖，不默认替它拦下合法基础挖掘。
-        if (!args.fall) return fail('BAD_ARGS', `[${args.at}] 挖的是脚下支撑块：${reason}，没有往下挖；如果确认接受这个坠落风险，写 "fall":true 再挖`, { ...after(ctx, args.facing, pos), below: landing ?? peek, drop, fallRisk: reason });
+        // 物理检查可以阻止未授权动作，但反馈只说明当前观察支持的事实，不能透露支撑格遮住的落点。
+        const below = [1, 2, 3].map((d) => ({ x: pos.x, y: pos.y - d, z: pos.z }));
+        const seen = visibleCells(ctx, below);
+        const observed = dropBelow({ blockAt: (p) => seen.get(`${p.x},${p.y},${p.z}`) ?? null }, pos);
+        const reason = observed.drop > 0
+          ? `已观察到下方 ${observed.drop} 格是 ${observed.landing}，移除支撑后会向下坠落`
+          : below.every((p) => seen.has(`${p.x},${p.y},${p.z}`))
+            ? '下方已观察的 3 格内未见落点，移除支撑后有较大落差风险'
+            : '下方落点未看清，移除脚下支撑后存在未知的坠落风险';
+        fallFacts = { below: observed.landing, drop: observed.drop || null, fallRisk: reason };
+        if (!args.fall) return fail('BAD_ARGS', `[${args.at}] 挖的是脚下支撑块：${reason}，没有往下挖；如果确认接受这个坠落风险，写 "fall":true 再挖`, { ...after(ctx, args.facing, pos), ...fallFacts });
       }
     }
     const mine = args.own ? null : ownBuildingAt(ctx.memory, ctx.adapter.state(), pos, before);
@@ -176,12 +182,12 @@ export const digAt: Skill<CellArgs> = {
       if (isAbort(e)) throw e;
       const m = String((e as Error).message);
       const code = m.startsWith('NEED_TOOL') || m === 'TOOL_MISSING' ? 'TOOL_MISSING' : codeFromError(e);
-      return fail(code, seenBefore ? `挖 [${args.at}] 的 ${seenBefore} 没成：${why(e)}` : `挖 [${args.at}] 没成（${code}）；未触碰或看清目标，不能确认方块名称`, after(ctx, args.facing, pos));
+      return fail(code, seenBefore ? `挖 [${args.at}] 的 ${seenBefore} 没成：${why(e)}` : `挖 [${args.at}] 没成（${code}）；未触碰或看清目标，不能确认方块名称`, { ...after(ctx, args.facing, pos), ...fallFacts });
     }
     const now = ctx.adapter.blockAt(pos);
     if (now && !AIR.has(now) && !isSoftBlock(now)) {
       // 沙子、沙砾会从上面掉下来补上
-      return ok(`挖掉了 [${args.at}] 的 ${before}，但上面掉下来的 ${now} 又填上了`, { cell: [...args.at], was: before, now, ...after(ctx, args.facing, pos) });
+      return ok(`挖掉了 [${args.at}] 的 ${before}，但上面掉下来的 ${now} 又填上了`, { cell: [...args.at], was: before, now, ...after(ctx, args.facing, pos), ...fallFacts });
     }
     noteEdit(ctx.taskId, 'dig', pos);
     // 空手挖的：挖开了，但慢、不掉东西（要拿到圆石、矿石得用镐）
@@ -195,7 +201,7 @@ export const digAt: Skill<CellArgs> = {
       got = inBag ? `；${keepsake} 已经进了背包（现在共 ${countOf(keepsake)} 个）` : `；${keepsake} 掉在地上，还没进背包——要拿回来写 pickup_items {"item":"${keepsake}"}，别当成已经拿到了`;
     }
     const manMade = structure === 'man-made' ? `；${MAN_MADE_NOTE}` : '';
-    return ok(`挖掉了 [${args.at}] 的 ${before}${hand}${got}${manMade}`, { cell: [...args.at], was: before, ...(how.noDrop ? { noDrop: true } : {}), ...(inBag !== undefined ? { inBag } : {}), ...after(ctx, args.facing, pos) }, structure === 'man-made' ? MAN_MADE_NOTE : undefined);
+    return ok(`挖掉了 [${args.at}] 的 ${before}${hand}${got}${manMade}`, { cell: [...args.at], was: before, ...(how.noDrop ? { noDrop: true } : {}), ...(inBag !== undefined ? { inBag } : {}), ...after(ctx, args.facing, pos), ...fallFacts }, structure === 'man-made' ? MAN_MADE_NOTE : undefined);
   },
 };
 

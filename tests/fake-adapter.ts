@@ -477,7 +477,7 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
     return { ok: !this.inWater, landed: !this.inWater, oxygen: this.oxygen, ...(!target && this.inWater ? { reason: 'WATER_ESCAPE_TIMEOUT' } : {}) };
   }
   // ---- 通用基础动作（测试用的简化世界：船只能在 water 方块上行驶）
-  async useItemOn(item: string, target: { kind: 'block'; pos: Vec3Like } | { kind: 'self' }, signal: AbortSignal) {
+  async useItemOn(item: string, target: { kind: 'block'; pos: Vec3Like } | { kind: 'self' }, signal: AbortSignal): Promise<ActionResult & { spawned?: string; placed?: Vec3Like }> {
     await sleep(20, signal);
     if (!(this.inv.get(item) ?? 0)) return { ok: false, reason: `NO_ITEM:${item}` };
     this.actions.push(`use:${item}:${target.kind === 'block' ? this.nameAt(target.pos.x, target.pos.y, target.pos.z) : 'self'}`);

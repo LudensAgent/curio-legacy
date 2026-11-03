@@ -857,6 +857,8 @@ export class BehaviorEngine {
     if (result.status === 'cancelled') { this.noteInvocation(name, result.data?.version !== undefined ? b : undefined, result); return; }
     if (!b) return;
     if (this.noteInvocation(name, b, result)) return;
+    // 输入完成但效果未知既不是跳过，也不是技能成功/失败证据。
+    if (result.status === 'succeeded' && result.data?.effectUnconfirmed === true) return;
     const succeeded = result.status === 'succeeded' && (!b.candidate || result.data?.verified === true);
     this.record(b, succeeded, result.summary, result.data ?? {});
   }
@@ -978,6 +980,8 @@ export class BehaviorEngine {
       if (okRun || !['ERROR', 'BAD_ARGS'].includes(String(o.result.failureCode))) return;
       this.aftermath.delete(name);
     }
+    // 恢复/反射仍由上面的独立结果评判；普通调用的未知效果只保留使用记录。
+    if (okRun && o.result.data?.effectUnconfirmed === true) return;
     this.record(b, okRun, o.result.summary, (o.result.data ?? {}) as Record<string, any>);
   }
 
