@@ -4,6 +4,7 @@ import type { Percept } from '../perception/perception.ts';
 import { feetCell } from '../perception/local.ts';
 import { evaluateCondition } from '../projects/conditions.ts';
 import { SKILLS } from '../skills/index.ts';
+import { relativeCellAction, STANCE_MOVES } from '../skills/stance.ts';
 import type { SkillResult } from '../skills/types.ts';
 import { shortId } from '../util.ts';
 import type { Activity, ActivityDraft, ActivityOutcome, ActivityRecord, ActivityStep } from './types.ts';
@@ -74,18 +75,6 @@ export function softMiss(a: Activity | null | undefined, step: Step, result: Pic
   if (result.status !== 'failed') return false;
   if (SKILLS[step.skill]?.readOnly && result.failureCode === 'NOT_FOUND') return true;
   return !!a && ownStep(a, step)?.optional === true;
-}
-
-/** 会改变身体站位的移动步骤；失败后身体仍在旧站位，后续相对动作会打错地方。 */
-const STANCE_MOVES = new Set(['step', 'goto', 'descend', 'climb_up', 'follow_passage', 'travel', 'ride']);
-
-/** 相对坐标里带水平分量（依赖当前站位）的挖掘/放置/交互动作。 */
-function relativeHorizontal(skill: string, args: unknown): boolean {
-  if (!['dig_at', 'place_at', 'interact', 'use_block'].includes(skill)) return false;
-  const at = (args as Record<string, unknown> | undefined)?.at;
-  if (!Array.isArray(at) || at.length !== 3) return false;
-  const dx = Number(at[0]), dz = Number(at[2]);
-  return Number.isFinite(dx) && Number.isFinite(dz) && (dx !== 0 || dz !== 0);
 }
 
 /** 下一个动作；这一轮做完了就开始下一轮；都做完返回 null */
@@ -209,11 +198,11 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     a.consecutiveFailures = 0;
     const own = ownStep(a, step);
     const optional = own?.optional === true;
-    // optional 移动没到新站位：后面紧跟的相对挖掘/放置会按旧站位解析、打到错的地方，中止并报告依赖缺口。
+    // optional 移动没到新站位：后面紧跟的相对挖掘/放置会按当前（可能已部分位移的）站位解析、打到错的地方，中止并报告依赖缺口。
     if (optional && STANCE_MOVES.has(step.skill)) {
       const next = a.steps[a.index];
-      if (next && relativeHorizontal(next.skill, next.args)) {
-        return { kind: 'stuck', why: `顺手的「${step.skill}」没到新站位，接着的「${next.skill}」是相对坐标、会在旧位置动手；先确认站位或改用绝对坐标` };
+      if (next && relativeCellAction(next.skill, next.args)) {
+        return { kind: 'stuck', why: `顺手的「${step.skill}」没到新站位，身体现在在 (${state.pos.x.toFixed(2)},${state.pos.y.toFixed(2)},${state.pos.z.toFixed(2)})；接着的「${next.skill}」是相对坐标，会打到错误位置。先确认实际站位或改用绝对坐标` };
       }
     }
     // 顺手的一步这次是“再试也不会成”的失败（要挖的已经没了、参数本身就不对；找不到连着两轮）：后面几轮不再做它

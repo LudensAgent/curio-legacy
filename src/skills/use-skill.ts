@@ -4,6 +4,7 @@ import { evalPredicate, senseNow, type Predicate } from '../mind/predicate.ts';
 import { throwIfAborted } from '../util.ts';
 import { dirName } from '../perception/perception.ts';
 import { SKILLS } from './index.ts';
+import { relativeCellAction, STANCE_MOVES } from './stance.ts';
 import { constrainRecoveryAction, recoveryContext, type RecoveryContext } from './recovery.ts';
 import { fail, isAbort, obj, ok, runSkill, validateSkill, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 
@@ -158,6 +159,14 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
         if (r.status === 'succeeded' && r.data?.noop !== true) completedSteps++;
         if (typeof r.data?.climbed === 'number') climbedTotal += r.data.climbed;
         done.push(`${st.skill} → ${r.status === 'succeeded' ? '成' : `没成(${r.failureCode ?? ''})`}`);
+        // optional 移动没到新站位，紧跟的相对挖掘/放置会按当前站位解析、打到错的地方：中止并报告依赖缺口。
+        if (r.status === 'failed' && st.optional && STANCE_MOVES.has(st.skill)) {
+          const next = b.steps[i + 1];
+          if (next && relativeCellAction(next.skill, next.args)) {
+            const pos = ctx.adapter.state().pos;
+            return fail('ERROR', `技能「${b.name}」第 ${i + 1} 步「${st.skill}」没到新站位，身体现在在 (${pos.x.toFixed(2)},${pos.y.toFixed(2)},${pos.z.toFixed(2)})；第 ${i + 2} 步「${next.skill}」是相对坐标，会打到错误位置。先确认实际站位或改用绝对坐标`, { done });
+          }
+        }
         if (r.status === 'failed' && !st.optional) return fail(r.failureCode ?? 'ERROR', `技能「${b.name}」第 ${i + 1} 步 ${st.skill} 没成：${r.summary.slice(0, 120)}`,
           { done, ...(r.data?.effectEvidence ? { effectEvidence: r.data.effectEvidence } : {}),
             ...(r.data?.dug ? { dug: r.data.dug } : {}), ...(r.data?.walked !== undefined ? { walked: r.data.walked } : {}) });
