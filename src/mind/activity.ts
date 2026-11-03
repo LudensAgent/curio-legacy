@@ -38,9 +38,9 @@ export function targetKeyOf(step: Step): string {
   return `${step.skill}:${typeof target === 'object' && target ? JSON.stringify(target) : String(target)}`;
 }
 
-/** 不包含时间、背包和朝向，只有实际看见的环境改变才算新的重试依据。 */
+/** 只有位置相关的接触/支撑事实（around）变化才算新的重试依据；转头会改变 vision.view 与 nearby.resources（无关资源），不能当作环境变化触发原样重试。 */
 export function viewOf(p?: Percept): string | undefined {
-  return p ? JSON.stringify({ around: p.self.around, view: p.vision?.view, resources: p.nearby.resources.filter((r) => r.seen === 'now') }) : undefined;
+  return p ? JSON.stringify({ around: p.self.around }) : undefined;
 }
 
 export function createActivity(draft: ActivityDraft, monologue: string, source: Activity['source'], state: Pick<AgentState, 'inventory'>): Activity {
@@ -74,6 +74,18 @@ export function softMiss(a: Activity | null | undefined, step: Step, result: Pic
   if (result.status !== 'failed') return false;
   if (SKILLS[step.skill]?.readOnly && result.failureCode === 'NOT_FOUND') return true;
   return !!a && ownStep(a, step)?.optional === true;
+}
+
+/** 会改变身体站位的移动步骤；失败后身体仍在旧站位，后续相对动作会打错地方。 */
+const STANCE_MOVES = new Set(['step', 'goto', 'descend', 'climb_up', 'follow_passage', 'travel', 'ride']);
+
+/** 相对坐标里带水平分量（依赖当前站位）的挖掘/放置/交互动作。 */
+function relativeHorizontal(skill: string, args: unknown): boolean {
+  if (!['dig_at', 'place_at', 'interact', 'use_block'].includes(skill)) return false;
+  const at = (args as Record<string, unknown> | undefined)?.at;
+  if (!Array.isArray(at) || at.length !== 3) return false;
+  const dx = Number(at[0]), dz = Number(at[2]);
+  return Number.isFinite(dx) && Number.isFinite(dz) && (dx !== 0 || dz !== 0);
 }
 
 /** 下一个动作；这一轮做完了就开始下一轮；都做完返回 null */
@@ -197,6 +209,13 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     a.consecutiveFailures = 0;
     const own = ownStep(a, step);
     const optional = own?.optional === true;
+    // optional 移动没到新站位：后面紧跟的相对挖掘/放置会按旧站位解析、打到错的地方，中止并报告依赖缺口。
+    if (optional && STANCE_MOVES.has(step.skill)) {
+      const next = a.steps[a.index];
+      if (next && relativeHorizontal(next.skill, next.args)) {
+        return { kind: 'stuck', why: `顺手的「${step.skill}」没到新站位，接着的「${next.skill}」是相对坐标、会在旧位置动手；先确认站位或改用绝对坐标` };
+      }
+    }
     // 顺手的一步这次是“再试也不会成”的失败（要挖的已经没了、参数本身就不对；找不到连着两轮）：后面几轮不再做它
     const code = result.failureCode ?? 'ERROR';
     const missKey = `optmiss:${step.skill}:${JSON.stringify(step.args ?? {}).slice(0, 80)}`;
@@ -223,12 +242,13 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   const key = `${a.index - 1}:${step.skill}:${code}`;
   if (a.failures >= 5) return { kind: 'stuck', why: `这段活已经失败 ${a.failures} 次了（最近：${result.summary.slice(0, 80)}）` };
   if (NEEDS_THOUGHT.has(code)) return { kind: 'stuck', why: result.summary.slice(0, 160) };
-  // 机械执行失败先由身体就地应变（照亮、垫支撑、清头顶），补不动才交给脑子——脑子想不出“太暗/没支撑/头顶被挡”的新答案。
+  // 机械执行失败先由身体就地应变（清脚下、垫支撑、清头顶），补不动才交给脑子——脑子想不出“没支撑/头顶被挡”的新答案。
   const data = result.data as Record<string, any> | undefined;
+  // 确定性预检拒绝先于任何自动照明/清障处理：暗处未知支撑、预检一步未推进，交回事实，不自动耗火把或原样重试。
+  if (step.skill === 'step' && data?.movementNotAttempted === true) return { kind: 'stuck', why: result.summary.slice(0, 160) };
+  if (step.skill === 'excavate_path' && data?.completedSteps === 0 && (data?.excavatedBlocks ?? 0) === 0) return { kind: 'stuck', why: result.summary.slice(0, 160) };
   const stepArgs = (step.args ?? {}) as Record<string, any>;
   const facing = stepArgs.facing ?? a.facing;
-  const hasItem = (re: RegExp) => state.inventory.some((i) => i.count > 0 && re.test(i.name));
-  const dark = percept?.light != null && percept.light.level !== 'bright';
   const adapt = (skill: string, args: unknown, what: string, tag: string): StepVerdict => {
     // 用稳定的步签名（不随 index 因插步而偏移）标记「同一逻辑步只应变一次」
     const mark = `${tag}:${step.skill}:${code}:${JSON.stringify(step.args ?? {}).slice(0, 60)}`;
@@ -238,14 +258,10 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     a.index = Math.max(0, a.index - 1);
     return { kind: 'continue', adapted: what };
   };
-  // 1) 看不清：先照亮再看（没火把或不暗就照旧交回）
-  if (data?.obscured) {
-    if (dark && hasItem(/^torch$/)) return adapt('place_torch', {}, '看不清，先插火把照亮再试', 'light');
-    return { kind: 'stuck', why: result.summary.slice(0, 160) };
-  }
-  // 3) 头顶跳跃空间受阻：先挖开头顶再垫/迈。place_at / climb_up 是 Agent 明确要「往上」，自动清头顶属于稳定执行已选动作。
-  if (step.skill === 'place_at' && data?.pillarFailure === 'NOT_PLACED:头顶跳跃空间受阻'
-    || step.skill === 'climb_up' && data?.failureCause === 'PILLAR_CLEARANCE') {
+  // 1) 看不清：交回事实，不自动插火把（照明是耗材，未授权不支出）
+  if (data?.obscured) return { kind: 'stuck', why: result.summary.slice(0, 160) };
+  // 3) climb_up 明确授权「往上」与清障：头顶被挡先挖开（属于稳定执行已选动作）。
+  if (step.skill === 'climb_up' && data?.failureCause === 'PILLAR_CLEARANCE') {
     // 障碍格可能有多格（身后/侧上方）：一次全挖空，别再一格一格挤牙膏、也别硬编码 [0,2,0]
     const cells: { at: [number, number, number]; facing?: string }[] = data?.pillarClearance?.cells?.length
       ? data.pillarClearance.cells
@@ -259,11 +275,9 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   }
   // goto 是「委托寻路」：头顶被挡是路线事实，不替 Agent 决定挖哪一格——挖开、绕行还是退回去由它定。
   if (step.skill === 'goto' && data?.pillarClearance) return { kind: 'stuck', why: result.summary.slice(0, 160) };
-  // 未加载 = 看不清：并入照亮分支
-  if (step.skill === 'place_at' && data?.pillarFailure === 'NOT_PLACED:头顶跳跃空间未加载') {
-    if (dark && hasItem(/^torch$/)) return adapt('place_torch', {}, '头顶跳跃空间未加载，先照亮再看', 'light');
-    return { kind: 'stuck', why: result.summary.slice(0, 160) };
-  }
+  // place_at 是普通放置/搭柱：不隐式清顶；头顶被挡/未加载交回事实，挖哪一格由 Agent 决定。
+  if (step.skill === 'place_at' && data?.pillarFailure === 'NOT_PLACED:头顶跳跃空间受阻') return { kind: 'stuck', why: result.summary.slice(0, 160) };
+  if (step.skill === 'place_at' && data?.pillarFailure === 'NOT_PLACED:头顶跳跃空间未加载') return { kind: 'stuck', why: result.summary.slice(0, 160) };
   if (step.skill === 'place_at' && data?.pillarFailure === 'NOT_PLACED:跳不起来') return { kind: 'stuck', why: result.summary.slice(0, 160) };
   // 4) 脚下有非空气的可替换物（火把/草/雪层…）：先拿掉再垫（同头顶清障，属于稳定执行已选动作）
   if (step.skill === 'place_at' && typeof data?.pillarFailure === 'string' && data.pillarFailure.startsWith('BLOCKED:')) {
@@ -273,10 +287,6 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   if (step.skill === 'place_at' && (data?.pillarFailure === 'NO_REFERENCE' || typeof data?.pillarFailure === 'string' && data.pillarFailure.startsWith('NOT_PLACED:Server'))) {
     return { kind: 'stuck', why: result.summary.slice(0, 160) };
   }
-  // 其余的 step 落点问题（目标格/头顶是看得见的 stone 等）仍交回：要先挖哪一格是规划决定。
-  if (step.skill === 'step' && data?.movementNotAttempted === true) return { kind: 'stuck', why: result.summary.slice(0, 160) };
-  // excavate_path 预检阶段就拒绝（一步没推进、一铲没挖）：确定性缺口不能只靠转头/视图变化原样重试，交回事实由心智决定。
-  if (step.skill === 'excavate_path' && data?.completedSteps === 0 && (data?.excavatedBlocks ?? 0) === 0) return { kind: 'stuck', why: result.summary.slice(0, 160) };
   if (RETRYABLE.has(code) && !(step.skill === 'goto' && code === 'PATH_NOT_FOUND') && changed && a.consecutiveFailures === 1 && !a.adaptations.includes(`retry:${key}`)) {
     a.adaptations.push(`retry:${key}`);
     a.index = Math.max(0, a.index - 1);

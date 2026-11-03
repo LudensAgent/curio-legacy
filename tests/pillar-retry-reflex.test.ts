@@ -9,7 +9,7 @@ import { fail, ok, runSkill } from '../src/skills/types.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx, TestWorld } from './survival-helpers.ts';
 
-test('jump failures return control; a head-blocked pillar clears the head before retrying', () => {
+test('jump failures return control; a head-blocked pillar reports the fact (no implicit clearing)', () => {
   const adapter = new FakeAdapter();
   // 跳不起来 / 头顶未加载（此处没有视觉信号）：无法就地应变，交回
   for (const reason of ['NOT_PLACED:跳不起来', 'NOT_PLACED:头顶跳跃空间未加载']) {
@@ -21,16 +21,16 @@ test('jump failures return control; a head-blocked pillar clears the head before
     assert.equal(verdict.kind, 'stuck', reason);
     assert.ok(!activity.adaptations.some((item) => item.startsWith('retry:')));
   }
-  // 头顶被挡：先挖开头顶再垫（身体就地应变，不是盲目重试）
+  // 头顶被挡：place_at 不隐式清顶，交回事实由 Agent 决定挖哪一格（climb_up 才授权清障）
   {
     const activity = createActivity({ what: '垫高', why: '', kind: 'other', repeat: 1,
       steps: [{ skill: 'place_at', args: { at: [0, 0, 0], item: 'cobblestone' } }] }, '', 'llm', adapter.state());
     const step = nextStep(activity)!;
     activity.stepStart = { pos: { x: 99, y: 64, z: 99 } };
     const verdict = afterStep(activity, step, fail('EFFECT_NOT_CONFIRMED', '原地垫高没成：NOT_PLACED:头顶跳跃空间受阻', { pillarFailure: 'NOT_PLACED:头顶跳跃空间受阻' }), 100, adapter.state());
-    assert.equal(verdict.kind, 'continue');
-    assert.ok(activity.adaptations.some((item) => item.startsWith('clearance:')));
-    assert.equal(activity.steps[0].skill, 'dig_at');
+    assert.equal(verdict.kind, 'stuck');
+    assert.ok(!activity.adaptations.some((item) => item.startsWith('clearance:')));
+    assert.equal(activity.steps[0].skill, 'place_at');
   }
   const activity = createActivity({ what: '放置', why: '', kind: 'other', repeat: 1,
     steps: [{ skill: 'place_at', args: { at: [1, 0, 0], item: 'cobblestone' } }] }, '', 'llm', adapter.state());
