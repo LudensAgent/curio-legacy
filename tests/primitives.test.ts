@@ -382,3 +382,33 @@ test('place_at reports a wrong-material occupant instead of treating any solid a
   assert.equal(w.inv.get('dirt'), 1, '没有消耗材料');
   assert.deepEqual(w.actions, [], '没有放置动作');
 });
+
+test('place_at does not treat an unobserved block as already satisfied', async (t) => {
+  const w = new FakeAdapter();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.blocks.push({ name: 'diamond_block', pos: { x: 0, y: 64, z: -1 } }); // 墙后，看不见
+  const ctx = makeCtx(w, { senses: { observeBlocks: () => [] } }); // 遮挡：什么都看不见
+  t.after(() => ctx.memory.close());
+  const r = await placeAt.run(ctx, { at: [1, 0, 0], facing: 'N', item: 'diamond_block' });
+  assert.equal(r.status, 'failed', '未观察到的已占位格不能报幂等成功');
+  assert.equal(r.data?.already, undefined, '不泄露未观察方块名');
+  assert.equal(r.data?.placed, undefined);
+});
+
+test('place_at [0,0,0] on a half-slab still pillars instead of short-circuiting', async (t) => {
+  const w = new FakeAdapter();
+  w.groundY = 62;
+  w.pos = { x: 0.5, y: 64.5, z: 0.5 }; // 站在 y64 的下半砖上
+  w.blocks.push({ name: 'oak_slab', pos: { x: 0, y: 64, z: 0 } });
+  w.inv.set('cobblestone', 1);
+  const ctx = makeCtx(w, { senses: { observeBlocks: visibleTargets(w) } });
+  t.after(() => ctx.memory.close());
+  const pillar = t.mock.method(w, 'pillarUp', async (names: string[]) => {
+    w.inv.set(names[0], (w.inv.get(names[0]) ?? 1) - 1);
+    w.pos = { ...w.pos, y: 65.5 };
+    return { ok: true, y: 65 };
+  });
+  const r = await placeAt.run(ctx, { at: [0, 0, 0], facing: 'N', item: 'any' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(pillar.mock.callCount(), 1, '搭柱被调用，而非被幂等检查截断');
+});

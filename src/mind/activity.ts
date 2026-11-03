@@ -225,6 +225,19 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     if (dark && hasItem(/^torch$/)) return adapt('place_torch', {}, '看不清，先插火把照亮再试', 'light');
     return { kind: 'stuck', why: result.summary.slice(0, 160) };
   }
+  // climb_up 已实际爬升但未满足停止条件：把已用掉的高度额度从本步参数里扣掉，后续清障/重试/恢复都只爬剩余额度；
+  // 额度耗尽就交回心智，不能再给一次完整高度（18 格变 36 格）。
+  if (step.skill === 'climb_up' && typeof data?.climbed === 'number' && data.climbed > 0 && data?.goalReached === false) {
+    const own = a.steps[Math.max(0, a.index - 1)];
+    if (own?.skill === 'climb_up' && own.args && typeof own.args === 'object') {
+      const height = (own.args as Record<string, unknown>).height;
+      if (typeof height === 'number') {
+        const remaining = height - data.climbed;
+        if (remaining <= 0) return { kind: 'stuck', why: result.summary.slice(0, 160) };
+        (own.args as Record<string, unknown>).height = remaining;
+      }
+    }
+  }
   // 3) 头顶跳跃空间受阻：先挖开头顶再垫/迈。place_at / climb_up 是 Agent 明确要「往上」，自动清头顶属于稳定执行已选动作。
   if (step.skill === 'place_at' && data?.pillarFailure === 'NOT_PLACED:头顶跳跃空间受阻'
     || step.skill === 'climb_up' && data?.failureCause === 'PILLAR_CLEARANCE') {
@@ -257,8 +270,6 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   }
   // 其余的 step 落点问题（目标格/头顶是看得见的 stone 等）仍交回：要先挖哪一格是规划决定。
   if (step.skill === 'step' && data?.movementNotAttempted === true) return { kind: 'stuck', why: result.summary.slice(0, 160) };
-  // climb_up 已实际爬升但未满足停止条件：原样重试会再给一次完整高度额度（18 格变 36 格），把部分进展交回心智决定是否继续、加高或换法。
-  if (step.skill === 'climb_up' && typeof data?.climbed === 'number' && data.climbed > 0 && data?.goalReached === false) return { kind: 'stuck', why: result.summary.slice(0, 160) };
   // excavate_path 预检阶段就拒绝（一步没推进、一铲没挖）：确定性缺口不能只靠转头/视图变化原样重试，交回事实由心智决定。
   if (step.skill === 'excavate_path' && data?.completedSteps === 0 && (data?.excavatedBlocks ?? 0) === 0) return { kind: 'stuck', why: result.summary.slice(0, 160) };
   if (RETRYABLE.has(code) && !(step.skill === 'goto' && code === 'PATH_NOT_FOUND') && changed && a.consecutiveFailures === 1 && !a.adaptations.includes(`retry:${key}`)) {

@@ -117,6 +117,17 @@ test('climb_up with partial progress is not auto-retried for another full height
   assert.ok(!activity.adaptations.some((item) => item.startsWith('retry:')), '不会原样重试再爬一次完整高度');
 });
 
+test('climb_up partial progress reduces the remaining height for the re-run', () => {
+  const adapter = new FakeAdapter();
+  const activity = createActivity({ what: '爬升', why: '', kind: 'other', repeat: 1,
+    steps: [{ skill: 'climb_up', args: { height: 3, untilSky: false } }] }, '', 'llm', adapter.state());
+  const step = nextStep(activity)!;
+  activity.stepStart = { pos: { x: 0.5, y: 64, z: 0.5 } };
+  const verdict = afterStep(activity, step, fail('STUCK', '往上爬了 1 格后停下', { climbed: 1, goalReached: false }), 100, adapter.state());
+  assert.equal(verdict.kind, 'continue', '剩余额度下继续爬，而不是重试完整高度');
+  assert.equal((activity.steps[0].args as { height: number }).height, 2, '剩余高度额度写回本步参数');
+});
+
 test('excavate_path preflight rejection is not auto-retried for another identical gap', () => {
   const adapter = new FakeAdapter();
   const activity = createActivity({ what: '开挖', why: '', kind: 'other', repeat: 1,

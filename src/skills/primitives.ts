@@ -351,20 +351,27 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
     throwIfAborted(ctx.signal);
     const a = ctx.adapter;
     const feet = feetCell(a.state().pos);
-    // 相对 [0,0,0] 才表示“原地垫高”搭柱；绝对 xyz 落到脚这一格不能被重新解释成搭柱，仍按普通放置处理。
+    // 相对 [0,0,0] 的实心块是“原地垫高”搭柱；绝对 xyz 落到脚这一格仍按普通放置，不套搭柱。
     const pos = args.xyz !== undefined ? { x: args.xyz.x, y: args.xyz.y, z: args.xyz.z } : toWorld(feet, args.facing, args.at);
     const seen = visibleCells(ctx, [pos, { ...feet, y: feet.y + 2 }]);
-    // 目标已经是要放的东西：幂等成功，无需额外持有材料，也不虚报本次发生了放置。
-    const cur = a.blockAt(pos);
-    const sameItem = args.item !== 'any' && (cur === args.item || (args.item === 'torch' && cur === 'wall_torch'));
-    const anySolid = args.item === 'any' && cur !== null && !AIR.has(cur) && !isSoftBlock(cur) && !LIQUID_BLOCKS.has(cur);
-    if (sameItem || anySolid) return ok(`[${args.at}] 已经有 ${cur} 了`, { already: cur, noop: true, ...after(ctx, args.facing, pos) });
-    // 目标被别的方块占据：不能把任意实心物当成“目标已满足”，报出实际占用者，不消耗材料。
-    if (cur !== null && !AIR.has(cur) && !LIQUID_BLOCKS.has(cur) && !isSoftBlock(cur)) {
-      const name = seen.get(`${pos.x},${pos.y},${pos.z}`);
-      return name
-        ? fail('PATH_NOT_FOUND', `[${args.at}] 已被 ${name} 占据，不是要放的 ${args.item}；先 dig_at 清掉，或改放 ${name}`, { occupied: name, ...after(ctx, args.facing, pos) })
-        : fail('PATH_NOT_FOUND', `[${args.at}] 已被占用，未放置；当前未看清方块名称`, after(ctx, args.facing, pos));
+    const attachable = args.item !== 'any' && attachmentFaces(args.item);
+    // 搭柱是“站高一格”的动作模式，目标不是“把方块放进这一格”，不做普通放置的“已满足”幂等判断。
+    const pillar = args.xyz === undefined && args.at[0] === 0 && args.at[1] === 0 && args.at[2] === 0 && !attachable;
+    if (!pillar) {
+      // 普通放置：目标已经是要放的东西（必须亲眼看见才算，不能拿服务器 blockAt 的墙后数据泄露方块名或当成已满足）。
+      const observed = seen.get(`${pos.x},${pos.y},${pos.z}`);
+      if (observed !== undefined) {
+        const sameItem = args.item !== 'any' && (observed === args.item || (args.item === 'torch' && observed === 'wall_torch'));
+        const anySolid = args.item === 'any' && !AIR.has(observed) && !isSoftBlock(observed) && !LIQUID_BLOCKS.has(observed);
+        if (sameItem || anySolid) return ok(`[${args.at}] 已经有 ${observed} 了`, { already: observed, noop: true, ...after(ctx, args.facing, pos) });
+        if (!AIR.has(observed) && !isSoftBlock(observed) && !LIQUID_BLOCKS.has(observed)) {
+          return fail('PATH_NOT_FOUND', `[${args.at}] 已被 ${observed} 占据，不是要放的 ${args.item}；先 dig_at 清掉，或改放 ${observed}`, { occupied: observed, ...after(ctx, args.facing, pos) });
+        }
+      } else {
+        const cur = a.blockAt(pos);
+        // 没看清、但服务器同步数据说明这一格已实心占用：如实说“已被占用、未看清名称”，不泄露方块名，也不当作可放置。
+        if (cur !== null && !AIR.has(cur) && !LIQUID_BLOCKS.has(cur) && !isSoftBlock(cur)) return fail('PATH_NOT_FOUND', `[${args.at}] 已被占用，未放置；当前未看清方块名称`, after(ctx, args.facing, pos));
+      }
     }
     const inv = a.state().inventory;
     const names = args.item === 'any' ? PLACEABLE.filter((n) => inv.some((i) => i.name === n && i.count > 0)) : [args.item];
@@ -378,8 +385,7 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
       }
     }
     // 梯子、火把这类贴墙的东西放进自己站的格子：不是垫高，是挂在旁边的墙上（人站在里面不碍事）
-    const attachable = args.item !== 'any' && attachmentFaces(args.item);
-    if (args.xyz === undefined && args.at[0] === 0 && args.at[1] === 0 && args.at[2] === 0 && !attachable) {
+    if (pillar) {
       // 原地垫高：跳起来往脚下放一块，站上去
       if (a.pillarUp) {
         const r = await a.pillarUp(names, ctx.signal);

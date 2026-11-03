@@ -110,10 +110,10 @@ test('excavation refuses unsafe, partial or unknown floors and adjacent liquids 
 });
 
 test('excavation refuses an unknown body cell instead of treating it as clear', async () => {
-  const world = new ExcavationWorld();
-  const read = world.blockAt.bind(world);
-  world.blockAt = (pos) => pos.x === 0 && pos.y === 64 ? null : read(pos);
-  const result = await excavationSkill.run(context(world), args({ steps: 1 }));
+  const world = new ExcavationWorld(), adapter: GameAdapter = world;
+  const read = adapter.blockAt.bind(adapter);
+  adapter.blockAt = (pos) => pos.x === 0 && pos.y === 64 ? null : read(pos);
+  const result = await excavationSkill.run(context(adapter), args({ steps: 1 }));
   assert.equal(result.status, 'failed');
   assert.equal(result.failureCode, 'NOT_FOUND');
   assert.equal(world.digs.length, 0);

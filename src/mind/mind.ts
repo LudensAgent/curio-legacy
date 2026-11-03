@@ -102,8 +102,14 @@ export function failureFor(step: { skill: string; args?: unknown }, result: { fa
   const d = result.data && typeof result.data === 'object' ? result.data as Record<string, unknown> : {};
   const blockTarget = d.blockTarget && typeof d.blockTarget === 'object' ? d.blockTarget as Record<string, unknown> : {};
   const target = worldPoint(d.targetCell) ?? worldPoint(d.target) ?? worldPoint(blockTarget.pos) ?? (step.skill === 'dig' ? worldPoint(d.pos) : undefined);
+  // climb_up 已实际爬升：把已用掉的高度额度写回恢复参数，恢复重放也只爬剩余额度，不重置完整高度。
+  let args = step.args ?? {};
+  if (step.skill === 'climb_up' && typeof d.climbed === 'number' && d.climbed > 0 && args && typeof args === 'object' && !Array.isArray(args)) {
+    const height = (args as Record<string, unknown>).height;
+    if (typeof height === 'number') args = { ...args, height: Math.max(1, height - d.climbed) };
+  }
   return {
-    skill: step.skill, args: step.args ?? {}, code: result.failureCode ?? null, summary: result.summary.slice(0, 160),
+    skill: step.skill, args, code: result.failureCode ?? null, summary: result.summary.slice(0, 160),
     ...(target ? { target, coordinateFrame: 'world' } : {}),
     ...(Number.isSafeInteger(d.targetId ?? d.entityId) ? { entityId: Number(d.targetId ?? d.entityId) } : {}),
     position: worldPoint(d.position) ?? { ...pos },
