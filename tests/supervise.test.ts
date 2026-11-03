@@ -2,9 +2,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 // @ts-ignore 纯 JS 脚本
-import { supervise } from '../scripts/supervise.mjs';
+import { dataDirFrom, envVars, modeFrom, preflightConfig, supervise } from '../scripts/supervise.mjs';
+
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const FAKE = path.resolve('tests/fixtures/fake-agent.mjs');
 function run(plan: string[], extra: Record<string, unknown> = {}) {
@@ -60,4 +63,37 @@ test('an agent that announced it will be busy (heap snapshot) is not killed for 
   await r.s.done;
   assert.equal(r.runs(), 1);
   assert.deepEqual(r.events(), []);
+});
+
+test('dataDirFrom 合并公共 .env 与模式文件，与子进程解析一致', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'supervise-cfg-'));
+  fs.writeFileSync(path.join(root, '.env'), 'DATA_DIR=./data/common\nCURIO_MODE=local\n');
+  fs.writeFileSync(path.join(root, '.env.test'), 'CURIO_MODE=test\n');
+  const envFile = path.join(root, '.env.test');
+  assert.equal(modeFrom(envFile, envVars(envFile)), 'test');
+  assert.equal(dataDirFrom(envFile), path.join(root, 'data', 'common'));
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('preflightConfig 对沿用 local 目录的 test 配置返回非零（隔离校验提前失败）', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'supervise-pre-'));
+  fs.writeFileSync(path.join(root, '.env'), 'DATA_DIR=./data/local\nSERVER_DIR=./world\nMC_PORT=25565\nRCON_PORT=25575\n');
+  fs.writeFileSync(path.join(root, '.env.test'), 'MEMORY_WORLD_ID=curio-test-01\n');
+  const r = preflightConfig(path.join(root, '.env.test'), REPO, { CURIO_ROOT: root });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr || r.stdout || '', /冲突|隔离|MEMORY_WORLD_ID|可写目录/);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('preflightConfig 对独立合法的 test 配置返回 0', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'supervise-pre-'));
+  fs.writeFileSync(path.join(root, '.env'), 'DATA_DIR=./data/local\nSERVER_DIR=./world\nMC_PORT=25565\nRCON_PORT=25575\n');
+  fs.writeFileSync(path.join(root, '.env.test'), [
+    'MEMORY_WORLD_ID=curio-test-01', 'DATA_DIR=./data/test', 'SERVER_DIR=./world-test', 'MC_PORT=25566',
+    'RCON_PORT=25576', 'DASHBOARD_PORT=3002', 'AGENTS_DIR=./agents/test', 'LLM_ARCHIVE_DIR=./archives/test/llm-calls',
+    'DANMAKU_ARCHIVE_DIR=./archives/test/danmaku', 'OBSERVER_HUD_CONFIG=./live/observer-hud.test.json',
+  ].join('\n') + '\n');
+  const r = preflightConfig(path.join(root, '.env.test'), REPO, { CURIO_ROOT: root });
+  assert.equal(r.status, 0, r.stderr || r.stdout);
+  fs.rmSync(root, { recursive: true, force: true });
 });

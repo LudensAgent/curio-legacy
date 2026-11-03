@@ -118,3 +118,39 @@ test('peerLayouts 合并公共 .env 与模式文件，缺少的 peer 跳过', ()
   assert.equal(live.worldId, '127.0.0.1:25565'); // 继承公共 .env
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+test('peerLayouts 把仅由公共 .env 构成的默认 local 纳入比较（缺 .env.local 不跳过）', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-iso-'));
+  fs.writeFileSync(path.join(root, '.env'), 'SERVER_DIR=./world\nDATA_DIR=./data/local\nMC_PORT=25565\nRCON_PORT=25575\n');
+  // 没有 .env.local / .env.live：默认运行环境仍存在。
+  const peers = peerLayouts(root, '', 'test');
+  assert.equal(peers.length, 1);
+  assert.equal(peers[0].mode, 'local');
+  assert.equal(peers[0].dataDir, path.join(root, 'data', 'local'));
+  assert.equal(peers[0].serverDir, path.join(root, 'world'));
+  assert.equal(peers[0].mcPort, 25565);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('test 沿用公共 .env 的 local 目录时，与默认 local peer 冲突被拒绝', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-iso-'));
+  fs.writeFileSync(path.join(root, '.env'), 'SERVER_DIR=./world\nDATA_DIR=./data/local\nMC_PORT=25565\nRCON_PORT=25575\nMEMORY_WORLD_ID=curio-local\n');
+  const peers = peerLayouts(root, '', 'test');
+  // test 只显式指定世界身份，其它沿用公共 .env 的 local 配置。
+  const test = resolveLayout('test', { MEMORY_WORLD_ID: 'curio-test-01' }, root);
+  assert.throws(() => assertTestIsolation(test, peers, { worldIdExplicit: true }), /可写目录.*冲突/);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('resolveLayout 对显式相对路径也以 baseDir 为锚点，与调用进程的工作目录无关', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-iso-'));
+  const l = resolveLayout('test', {
+    DATA_DIR: './data/test', SERVER_DIR: './world-test', AGENTS_DIR: './agents/test',
+    SPATIAL_DB_PATH: './data/test/spatial/spatial.sqlite',
+  }, base);
+  assert.equal(l.dataDir, path.join(base, 'data', 'test'));
+  assert.equal(l.serverDir, path.join(base, 'world-test'));
+  assert.equal(l.agentsDir, path.join(base, 'agents', 'test'));
+  assert.equal(l.spatialDbPath, path.join(base, 'data', 'test', 'spatial', 'spatial.sqlite'));
+  fs.rmSync(base, { recursive: true, force: true });
+});

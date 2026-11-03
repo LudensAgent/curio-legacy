@@ -79,15 +79,22 @@ function readVars(file: string): Record<string, string | undefined> {
 
 /** 读取当前模式之外其它环境的最终布局（公共 .env + 模式文件合并，不含本进程变量覆盖）。 */
 export function peerLayouts(projectDir: string, curioRoot: string, currentMode: EnvMode): Layout[] {
-  const out: Layout[] = [];
+  const root = curioRoot || projectDir;
+  const common = readVars(path.join(root, '.env'));
+  // 默认运行环境（仅由公共 .env 构成，CURIO_MODE 缺省为 local）始终存在：
+  // 不能因为缺少 .env.local 就跳过它，否则 test 会静默沿用公共 .env 里 local 的目录与端口。
+  const rawMode = (common.CURIO_MODE ?? '').trim();
+  const defaultMode: EnvMode = rawMode === 'live' || rawMode === 'test' ? rawMode : 'local';
+  const peers = new Map<EnvMode, Layout>();
+  if (defaultMode !== currentMode) peers.set(defaultMode, resolveLayout(defaultMode, common, root));
   for (const mode of ENV_MODES) {
     if (mode === currentMode) continue;
-    const modeFile = curioRoot ? path.join(curioRoot, `.env.${mode}`) : path.join(projectDir, `.env.${mode}`);
+    const modeFile = path.join(root, `.env.${mode}`);
     if (!fs.existsSync(modeFile)) continue;
-    const vars = { ...readVars(path.join(path.dirname(modeFile), '.env')), ...readVars(modeFile) };
-    out.push(resolveLayout(mode, vars, projectDir));
+    // 有模式文件时以「公共 .env + 模式文件」的合并为准（覆盖默认环境同名的布局）。
+    peers.set(mode, resolveLayout(mode, { ...common, ...readVars(modeFile) }, root));
   }
-  return out;
+  return [...peers.values()];
 }
 
 /** parent 与 child 相同，或 child 位于 parent 内部。 */

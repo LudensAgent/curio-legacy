@@ -13,8 +13,6 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertResetOffline } from '../src/maintenance/offline.ts';
 
-const projectDir = fileURLToPath(new URL('../', import.meta.url));
-
 type ConfigModule = typeof import('../src/config.ts');
 
 async function loadConfig(): Promise<ConfigModule> {
@@ -31,11 +29,7 @@ function argvFlag(name: string): string | undefined {
   return undefined;
 }
 
-function serverDir(): string {
-  return path.resolve(process.env.SERVER_DIR?.trim() || path.join(projectDir, 'world'));
-}
-
-function readServerProperty(file: string, key: string): string | undefined {
+export function readServerProperty(file: string, key: string): string | undefined {
   for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
     const t = line.trim();
     if (!t || t.startsWith('#')) continue;
@@ -46,7 +40,7 @@ function readServerProperty(file: string, key: string): string | undefined {
   return undefined;
 }
 
-function setServerProperty(file: string, key: string, value: string): void {
+export function setServerProperty(file: string, key: string, value: string): void {
   const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
   let found = false;
   const out = lines.map((line) => {
@@ -59,6 +53,35 @@ function setServerProperty(file: string, key: string, value: string): void {
   });
   if (!found) out.push(`${key}=${value}`);
   fs.writeFileSync(file, out.join('\n'));
+}
+
+/** 目录里是否存在任何世界（任意子目录含 level.dat）。空目录、只有 server.properties 不算已初始化。 */
+export function hasWorldData(dir: string): boolean {
+  if (!fs.existsSync(dir)) return false;
+  return fs.readdirSync(dir, { withFileTypes: true })
+    .some((e) => e.isDirectory() && fs.existsSync(path.join(dir, e.name, 'level.dat')));
+}
+
+/** 目标自身已有测试状态时的标记列表；空数组 = 尚未初始化。只读，不写盘。 */
+export function existingTestState(config: { dataDir: string; spatialDbPath: string }, targetServerDir: string): string[] {
+  const markers: string[] = [];
+  if (fs.existsSync(path.join(config.dataDir, 'init.json'))) markers.push('初始化标记 init.json');
+  if (fs.existsSync(path.join(config.dataDir, 'world-memory.json'))) markers.push('情境记忆 world-memory.json');
+  if (fs.existsSync(config.spatialDbPath)) markers.push(`空间数据库 ${config.spatialDbPath}`);
+  const targetProps = path.join(targetServerDir, 'server.properties');
+  const targetLevelName = fs.existsSync(targetProps) ? (readServerProperty(targetProps, 'level-name') ?? 'world') : null;
+  if (targetLevelName && fs.existsSync(path.join(targetServerDir, targetLevelName, 'level.dat'))) markers.push(`世界 ${targetLevelName}/level.dat`);
+  else if (!targetLevelName && hasWorldData(targetServerDir)) markers.push('世界 level.dat');
+  return markers;
+}
+
+/** 让副本的游戏与 RCON 服务配置和最终 test 配置一致；只改目标 server.properties，不改种子源，也不打印密码。 */
+export function syncServerForTest(targetServerDir: string, config: { mcPort: number; rconPort: number; rconPassword: string }): void {
+  const props = path.join(targetServerDir, 'server.properties');
+  setServerProperty(props, 'server-port', String(config.mcPort));
+  setServerProperty(props, 'enable-rcon', config.rconPassword ? 'true' : 'false');
+  setServerProperty(props, 'rcon.port', String(config.rconPort));
+  setServerProperty(props, 'rcon.password', config.rconPassword);
 }
 
 /** 复制服务器目录作为世界种子；跳过运行期目录、锁定文件与链接，保证可写世界是真实副本。 */
@@ -78,7 +101,7 @@ function copySeed(src: string, dst: string): void {
 
 async function showConfig(): Promise<void> {
   const { config, envFile } = await loadConfig();
-  const targetServerDir = serverDir();
+  const targetServerDir = config.serverDir;
   const rows: [string, string][] = [
     ['环境名称', config.mode],
     ['配置文件', envFile],
@@ -103,7 +126,7 @@ async function initTest(): Promise<void> {
   }
   const { config } = await loadConfig();
   const seedDir = path.resolve(seed);
-  const targetServerDir = serverDir();
+  const targetServerDir = config.serverDir;
 
   const seedProps = path.join(seedDir, 'server.properties');
   if (!fs.existsSync(seedProps)) throw new Error(`种子源不是 Minecraft 服务器目录（缺 server.properties）：${seedDir}`);
@@ -119,13 +142,12 @@ async function initTest(): Promise<void> {
   // 源服务器仍在写入时不做普通目录复制（副本会不一致）。
   await assertResetOffline([{ host: seedHost, port: seedPort, label: `种子源服务器 ${path.basename(seedDir)}` }]);
 
-  // 已有测试状态不静默覆盖。
-  if (fs.existsSync(path.join(targetServerDir, levelName, 'level.dat')) || fs.existsSync(path.join(config.dataDir, 'world-memory.json'))) {
-    throw new Error(`test 环境已初始化（${targetServerDir} 或 ${config.dataDir} 已有状态）。若要重来请另建实例目录或手动重置。`);
-  }
+  // 已有测试状态不静默覆盖：按目标自身的配置与实际状态判断，不能拿种子的 level-name 去查目标。
+  const existing = existingTestState({ dataDir: config.dataDir, spatialDbPath: config.spatial.databasePath }, targetServerDir);
+  if (existing.length) throw new Error(`test 环境已初始化（${existing.join('、')}）。若要重来请另建实例目录或手动重置。`);
 
   copySeed(seedDir, targetServerDir);
-  setServerProperty(path.join(targetServerDir, 'server.properties'), 'server-port', String(config.mc.port));
+  syncServerForTest(targetServerDir, { mcPort: config.mc.port, rconPort: config.observer.rconPort, rconPassword: config.observer.rconPassword });
   fs.mkdirSync(path.join(config.dataDir, 'logs'), { recursive: true });
   fs.mkdirSync(path.dirname(config.spatial.databasePath), { recursive: true });
   fs.writeFileSync(path.join(config.dataDir, 'init.json'), JSON.stringify({
@@ -134,6 +156,7 @@ async function initTest(): Promise<void> {
 
   console.log('test 环境已初始化：');
   console.log(`  世界目录：${targetServerDir}（server-port=${config.mc.port}）`);
+  console.log(`  RCON：${config.observer.rconHost}:${config.observer.rconPort}`);
   console.log(`  数据目录：${config.dataDir}`);
   console.log(`  空间数据库：${config.spatial.databasePath}`);
   console.log(`  世界身份：${config.memory.worldId}`);
@@ -156,4 +179,4 @@ async function main(): Promise<void> {
   }
 }
 
-void main();
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) void main();

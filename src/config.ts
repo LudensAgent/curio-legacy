@@ -5,7 +5,7 @@ import { parseEnv } from 'node:util';
 import { assertTestIsolation, peerLayouts } from './config/isolation.ts';
 import { memorySettings } from './memory/settings.ts';
 
-/** 仓库根：隔离校验与各脚本按同一锚点解析相对路径。 */
+/** 仓库根：用于定位 peer 环境配置文件（隔离校验）；数据路径统一以配置文件所在目录为锚点。 */
 const projectDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 // CURIO_ROOT：env + 数据放在项目外（如 /path/to/curio）时，用裸关键字 live / local 定位 $CURIO_ROOT/.env.<mode>。
@@ -27,6 +27,8 @@ const selectedEnv = isBareMode ? path.join(curioRoot, `.env.${selectedEnvRaw}`) 
 export const envFile = path.resolve(selectedEnv || '.env');
 const hasEnv = fs.existsSync(envFile);
 if (selectedEnvRaw && !hasEnv) throw new Error(`找不到配置文件：${envFile}`);
+// 相对路径以配置文件所在目录为锚点（仓库内部署 = 仓库根，CURIO_ROOT 部署 = $CURIO_ROOT）；绝对路径保持不变。
+const res = (p: string) => path.resolve(path.dirname(envFile), p);
 
 // 公共 .env + 模式覆盖文件（.env.local / .env.live / .env.test / 自定义）合并。
 // 优先级：进程环境变量 > 模式文件 > 公共 .env（process.loadEnvFile 会覆盖已存在的变量，故手动合并再按序回填）。
@@ -56,7 +58,7 @@ const MODES: readonly string[] = ['local', 'live', 'test'];
 if (!MODES.includes(configuredMode)) throw new Error('CURIO_MODE 必须为 local、live 或 test');
 const modeByFile = path.basename(envFile) === '.env.live' ? 'live' : path.basename(envFile) === '.env.test' ? 'test' : null;
 const mode = (modeByFile ?? configuredMode) as 'local' | 'live' | 'test';
-const dataDir = path.resolve(str('DATA_DIR') || `./data/${mode}`);
+const dataDir = res(str('DATA_DIR') || path.join('data', mode));
 
 export const config = {
   mode,
@@ -138,7 +140,7 @@ export const config = {
    * 默认放在 DATA_DIR 下，随数据目录一起隔离；首轮只提供路径，尚未由 Curio 主流程打开（walk 闭环仍是离线接线）。
    */
   spatial: {
-    databasePath: path.resolve(str('SPATIAL_DB_PATH') || path.join(dataDir, 'spatial', 'spatial.sqlite')),
+    databasePath: res(str('SPATIAL_DB_PATH') || path.join(dataDir, 'spatial', 'spatial.sqlite')),
   },
   /** 心智层：像真人一样一段一段地玩、边做边想 */
   mind: {
@@ -218,27 +220,29 @@ export const config = {
   viewerPort: num('VIEWER_PORT', 0),
   actionChat: { enabled: bool('CHAT_ACTIONS', true), minIntervalMs: num('CHAT_ACTION_INTERVAL_MS', 1800) },
   dataDir,
+  /** Minecraft 服务器根目录（含世界与 server.properties）：相对路径以配置文件所在目录为锚点，脚本直接复用，不再各自推导。 */
+  serverDir: res(str('SERVER_DIR') || 'world'),
+  /** 角色档案目录。 */
+  agentsDir: res(str('AGENTS_DIR') || path.join('agents', mode)),
   /** 堆用到这么多 MB 时写一份堆快照到 DATA_DIR/logs（每个进程一次），查内存是谁占的；0 = 不写。平时堆只有一两百 MB */
   heapSnapshotMb: num('HEAP_SNAPSHOT_MB', 1024),
   /** 每次 LLM 调用的完整记录（提示词、思考过程、完整回复）：放在数据目录外面，清空记忆、重置世界都不会删 */
-  llmArchiveDir: path.resolve(str('LLM_ARCHIVE_DIR', `./archives/${mode}/llm-calls`)),
+  llmArchiveDir: res(str('LLM_ARCHIVE_DIR', `./archives/${mode}/llm-calls`)),
   /** 收到的每条弹幕（含被拦下的）按天存档，方便复盘和找观众的问题：同样放在数据目录外 */
-  danmakuArchiveDir: path.resolve(str('DANMAKU_ARCHIVE_DIR', `./archives/${mode}/danmaku`)),
+  danmakuArchiveDir: res(str('DANMAKU_ARCHIVE_DIR', `./archives/${mode}/danmaku`)),
   /** 记忆服务（Hindsight）所用模型的价格覆盖，格式同 LLM_PRICE；不写就按它上报的模型名查内置价格表 */
   memoryLlmPrice: str('MEMORY_LLM_PRICE'),
   /** 观察者模组 HUD 的布局和开关（控制台「直播」页修改）：直播设置，不跟着角色存档走 */
-  observerHudConfig: path.resolve(str('OBSERVER_HUD_CONFIG', `./live/${mode === 'live' ? 'observer-hud.json' : `observer-hud.${mode}.json`}`)),
+  observerHudConfig: res(str('OBSERVER_HUD_CONFIG', `./live/${mode === 'live' ? 'observer-hud.json' : `observer-hud.${mode}.json`}`)),
 };
 
 // test 是宿主运行环境：在连接游戏、打开数据库等任何副作用之前，先确认它不会踩到 local/live 的地址、数据库或数据目录。
 if (mode === 'test') {
-  const serverDir = path.resolve(projectDir, str('SERVER_DIR') || 'world');
-  const agentsDir = path.resolve(projectDir, str('AGENTS_DIR') || path.join('agents', mode));
   assertTestIsolation({
     mode: 'test',
     dataDir,
-    serverDir,
-    agentsDir,
+    serverDir: config.serverDir,
+    agentsDir: config.agentsDir,
     llmArchiveDir: config.llmArchiveDir,
     danmakuArchiveDir: config.danmakuArchiveDir,
     observerHudConfig: config.observerHudConfig,

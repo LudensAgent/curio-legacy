@@ -279,6 +279,9 @@ const mind = new Mind({
   timing: { checkInMs: config.mind.checkInSec * 1000, deliberateEveryMs: config.mind.deliberateEverySec * 1000 },
 });
 const executive = mind;
+// test 默认等待显式验收指令：连接、观察、控制台照常可用，但不自动发起决策、反射或任何游戏动作。
+// 操作者通过控制台「恢复」按钮或聊天 !resume 明确开始后才进入执行流程（沿用现有的暂停/恢复能力）。
+if (config.mode === 'test') executive.pause();
 /** 已经学过（宏或方法库里）的步骤签名：不再重复提示/提议 */
 const knownSigs = () => new Set([...library.list().filter((d) => !d.disabled).map((d) => signatureOf(d.steps)),
   ...methods.list().filter((d) => d.status !== 'retired').map((d) => signatureOf(flattenProgram(d.program))), ...proposedHabits]);

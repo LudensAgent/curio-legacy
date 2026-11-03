@@ -24,6 +24,8 @@
 - 数据/世界/归档目录不得与 local/live 相同或相互包含；`SERVER_DIR` 必须指向 test 专属目录（不能沿用公共 `.env` 的 `SERVER_DIR`）。
 - `MC_PORT` / `RCON_PORT` / `DASHBOARD_PORT` 不得与其它本机环境冲突。
 
+相对路径（`DATA_DIR`、`SERVER_DIR`、`AGENTS_DIR`、`LLM_ARCHIVE_DIR`、`DANMAKU_ARCHIVE_DIR`、`OBSERVER_HUD_CONFIG`、`SPATIAL_DB_PATH`）一律以配置文件所在目录（`.env.<mode>` 所在目录）为锚点解析：仓库内部署就是仓库根，`CURIO_ROOT` 部署就是 `$CURIO_ROOT`。检查与实际读写使用同一个最终绝对路径，与从哪个工作目录调用脚本无关。使用 `CURIO_ROOT` 部署时建议写绝对路径。
+
 这些校验在游戏连接、数据库打开等任何副作用之前完成（`src/config.ts` 加载时）。config 检查入口不连接游戏、不启动服务器、不创建数据库，输出也不含密码、令牌等秘密。
 
 ## 命令
@@ -39,7 +41,9 @@ npm run test:init -- --seed /path/to/curio/data/world
 npm run test:start
 ```
 
-启动顺序：先单独启动 test 的 Minecraft 服务器（test 世界目录下的 `fabric-server-mc.…jar` 或 `server.jar`，端口与 `.env.test` 的 `MC_PORT` 一致），再 `npm run test:start`。Curio 只连接、不代为启动服务器；本轮也不自动启动 LLM 自主活动或发起游戏动作。
+启动顺序：先单独启动 test 的 Minecraft 服务器（test 世界目录下的 `fabric-server-mc.…jar` 或 `server.jar`，端口与 `.env.test` 的 `MC_PORT` 一致），再 `npm run test:start`。Curio 只连接、不代为启动服务器。
+
+test 启动后**默认等待显式验收指令**：连接、观察、控制台照常可用，但不会自动发起自主决策、生存反射或任何游戏动作（不会出现 glance/explore 等自动行为）。操作者通过控制台「恢复」按钮，或让管理员在游戏聊天里发 `!resume`，明确开始后才会进入执行流程；`!pause` 可随时回到等待状态。local/live 的启动行为不受影响。
 
 关闭：在 `npm run test:start` 的终端按 Ctrl+C（Curio 存档后结束守护），再在 Minecraft 服务器控制台执行 `stop`（或经 RCON）。
 
@@ -48,7 +52,7 @@ npm run test:start
 - 种子来源必须显式指定（`--seed`），通常用已有的 local 世界目录（如 `/path/to/curio/data/world`，即公共 `.env` 的 `SERVER_DIR`）。
 - 种子源服务器仍在写入时**不做普通目录复制**：`test:init` 会先探测源服务器端口，源服务器运行中会拒绝执行。请先停止 local/live 服务再复制。
 - 复制到 test 专属目录（`.env.test` 的 `SERVER_DIR`），跳过 `logs/`、`recordings/`、`.cache/`、`session.lock` 和链接；世界本体（`world/`）作为真实副本复制，不通过符号链接或目录联接共享可写世界。
-- 服务器版本、模组、插件与种子世界核对后原样复制，不自动升级世界；`test:init` 只改写目标 `server.properties` 的 `server-port` 为 test 端口。
+- 服务器版本、模组、插件与种子世界核对后原样复制，不自动升级世界；`test:init` 只改写**目标** `server.properties` 的服务配置，使副本与 test 配置一致：`server-port` = `MC_PORT`，`enable-rcon` = true（`RCON_PASSWORD` 为空则为 false），`rcon.port` = `RCON_PORT`，`rcon.password` = `RCON_PASSWORD`。种子源文件不被修改，密码不会写入日志或输出。
 - 新副本有独立的世界身份（`MEMORY_WORLD_ID`），不因为来自 local/live 副本就混用原环境的空间记录。
 
 ## 重启与重置
