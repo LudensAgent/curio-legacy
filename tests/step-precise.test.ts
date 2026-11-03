@@ -65,7 +65,7 @@ test('support feedback identifies the floor to fill while keeping the selected f
   assert.deepEqual(w.pos, { x: 0.5, y: 64, z: -0.5 });
 });
 
-test('step auto-fills a shallow air gap and steps across it', async (t) => {
+test('step does not auto-fill a shallow air gap; it reports the missing support without spending blocks', async (t) => {
   const w = new FakeAdapter();
   w.pos = { x: 0.5, y: 64, z: 0.5 };
   w.speed = 100000;
@@ -76,10 +76,19 @@ test('step auto-fills a shallow air gap and steps across it', async (t) => {
     dimension: w.dim, observationId: 1, observedAt: Date.now(), source: 'vision' as const,
   })) } });
   t.after(() => ctx.memory.close());
+  const blocked = await stepTo.run(ctx, { at: [1, 0, 0], facing: 'N' });
+  assert.equal(blocked.status, 'failed', blocked.summary);
+  assert.equal(blocked.data?.movementNotAttempted, true);
+  assert.match(blocked.summary, /无已确认支撑/);
+  assert.deepEqual(w.actions, [], 'pure step must not place a scaffold or move');
+  assert.equal(w.inv.get('cobblestone'), 1, 'pure step must not spend blocks');
+  // 显式 place_at 之后，step 才迈得过去
+  const placed = await placeAt.run(ctx, { at: [1, -1, 0], facing: 'N', item: 'cobblestone' });
+  assert.equal(placed.status, 'succeeded', placed.summary);
   const stepped = await stepTo.run(ctx, { at: [1, 0, 0], facing: 'N' });
   assert.equal(stepped.status, 'succeeded', stepped.summary);
   assert.deepEqual(w.pos, { x: 0.5, y: 64, z: -0.5 });
-  assert.equal(w.inv.get('cobblestone'), 0, 'auto-fill spends the scaffold block');
+  assert.equal(w.inv.get('cobblestone'), 0, 'the explicit place_at spends the block');
 });
 
 test('step rejects partial diagonal movement and reports actual location', async (t) => {

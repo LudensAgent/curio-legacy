@@ -96,7 +96,7 @@ test('stairs clear the three-cell transition and verify each real landing; resul
 });
 
 test('excavation refuses unsafe, partial or unknown floors and adjacent liquids before digging', async () => {
-  for (const name of ['air', 'water', 'lava', 'gravel', 'magma_block', 'stone_slab', null]) {
+  for (const name of ['air', 'water', 'lava', 'gravel', 'magma_block', 'stone_slab', 'nether_portal', null]) {
     const world = new ExcavationWorld(), adapter: GameAdapter = world;
     if (name === null) { const read = adapter.blockAt.bind(adapter); adapter.blockAt = (pos) => pos.x === 1 && pos.y === 62 ? null : read(pos); }
     else world.setBlock({ x: 1, y: 62, z: 0 }, name);
@@ -107,6 +107,17 @@ test('excavation refuses unsafe, partial or unknown floors and adjacent liquids 
   const world = new ExcavationWorld(); world.setBlock({ x: 2, y: 63, z: 0 }, 'water');
   assert.equal((await excavationSkill.run(context(world), args({ steps: 1 }))).status, 'failed');
   assert.equal(world.digs.length, 0);
+});
+
+test('excavation refuses an unknown body cell instead of treating it as clear', async () => {
+  const world = new ExcavationWorld();
+  const read = world.blockAt.bind(world);
+  world.blockAt = (pos) => pos.x === 0 && pos.y === 64 ? null : read(pos);
+  const result = await excavationSkill.run(context(world), args({ steps: 1 }));
+  assert.equal(result.status, 'failed');
+  assert.equal(result.failureCode, 'NOT_FOUND');
+  assert.equal(world.digs.length, 0);
+  assert.equal(world.moves.length, 0);
 });
 
 test('transparent diggable blocks in the work face (wall_torch) are cleared, not rejected', async () => {

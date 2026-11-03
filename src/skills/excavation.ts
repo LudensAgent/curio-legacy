@@ -45,8 +45,8 @@ function floorProblem(name: string | null): ExcavationStop | null {
   // 空腔/虚空和「半砖这类不完整方块」是两码事：前者说明这条阶梯到头了、下面是洞穴，别在原地反复试；
   // 后者才是「能站但不稳」。分开报，Agent 才知道是换方向还是确认落点高度。
   if (AIR.has(name)) return new ExcavationStop('ERROR', `下一落点下面是空的（${name}）：前面脚下是个坑/洞穴`);
-  // 传送门是软块、可穿过，不是「半砖/台阶」：不当成站不稳的坑拦下开挖；真踩进去会传送，由 assertSession 按会话变化中止
-  if (PORTAL_BLOCKS.has(name)) return null;
+  // 传送门是可穿过、不能承重的方块：不能作为站立支撑。它和「半砖/台阶」不同，但同样不能当落点地板。
+  if (PORTAL_BLOCKS.has(name)) return new ExcavationStop('ERROR', `下一落点地板是 ${name}（传送门，不能承重），不能作为站立支撑`);
   const collisions = (registry as any).blockCollisionShapes;
   const shapes = collisions?.blocks[name];
   const ids = Array.isArray(shapes) ? shapes : [shapes];
@@ -71,7 +71,11 @@ function standingCell(ctx: SkillCtx, feet: Vec3Like) {
   const { adapter } = ctx;
   const problem = floorProblem(adapter.blockAt({ ...feet, y: feet.y - 1 }));
   if (problem) throw problem;
-  for (const level of [0, 1]) { const n = adapter.blockAt({ ...feet, y: feet.y + level }); if (n !== null && !AIR.has(n) && !isSoftBlock(n)) throw new ExcavationStop('ERROR', '落点没有已确认的两格干燥身体空间'); }
+  for (const level of [0, 1]) {
+    const n = adapter.blockAt({ ...feet, y: feet.y + level });
+    if (n === null) throw new ExcavationStop('NOT_FOUND', '落点身体空间未加载/未知，不能确认两格干燥身体空间');
+    if (!AIR.has(n) && !isSoftBlock(n)) throw new ExcavationStop('ERROR', '落点没有已确认的两格干燥身体空间');
+  }
 }
 
 /** Only this adjacent work column and its touching hazard boundaries are read.

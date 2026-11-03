@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Vec3Like } from '../src/adapter/types.ts';
 import { facingOfYaw, localMap, toWorld } from '../src/perception/local.ts';
-import { digAt, placeAt, stepTo } from '../src/skills/primitives.ts';
+import { digAt, placeAt, primitiveSkills, stepTo } from '../src/skills/primitives.ts';
 import { dig } from '../src/skills/body.ts';
 import { makeBridge } from '../src/codeskills/bridge.ts';
 import { afterStep, createActivity, nextStep } from '../src/mind/activity.ts';
@@ -336,4 +336,49 @@ test('explicit lava permission reaches dig validation and the code skill bridge'
     }
     assert.deepEqual(adapter.actions, ['dig:stone']);
   }
+});
+
+test('absolute dig_at keeps its world cell instead of re-interpreting it as a support dig', async (t) => {
+  const w = new FakeAdapter();
+  w.groundY = 63; // y63 是草方块，站在 y64 的下半砖上
+  w.pos = { x: 0.5, y: 64.5, z: 0.5 };
+  w.blocks.push({ name: 'oak_slab', pos: { x: 0, y: 64, z: 0 } });
+  const ctx = makeCtx(w, { senses: { observeBlocks: visibleTargets(w) } });
+  t.after(() => ctx.memory.close());
+  const dig = primitiveSkills.find((skill) => skill.name === 'dig_at')!;
+  const parsed = dig.validate({ xyz: [0, 63, 0], facing: 'N' }, w);
+  assert.ok(parsed.ok, !parsed.ok ? parsed.error : '');
+  const r = await dig.run(ctx, parsed.args);
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.ok(w.actions.includes('dig:grass_block'), `挖到绝对坐标 (0,63,0)（实际 ${w.actions.join(',')}）`);
+  assert.ok(!w.actions.includes('dig:oak_slab'), '没有把绝对坐标重解释成挖脚下的半砖');
+  assert.equal(w.blockAt({ x: 0, y: 64, z: 0 }), 'oak_slab', '脚下的半砖仍在');
+});
+
+test('place_at already holds the requested block: idempotent success without material', async (t) => {
+  const w = new FakeAdapter();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.blocks.push({ name: 'dirt', pos: { x: 0, y: 64, z: -1 } });
+  const ctx = makeCtx(w, { senses: { observeBlocks: visibleTargets(w) } });
+  t.after(() => ctx.memory.close());
+  const r = await placeAt.run(ctx, { at: [1, 0, 0], facing: 'N', item: 'dirt' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.noop, true);
+  assert.equal(r.data?.placed, undefined, '没有虚报本次发生了放置');
+  assert.deepEqual(w.actions, [], '没有真正放置');
+});
+
+test('place_at reports a wrong-material occupant instead of treating any solid as success', async (t) => {
+  const w = new FakeAdapter();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.blocks.push({ name: 'stone', pos: { x: 0, y: 64, z: -1 } });
+  w.inv.set('dirt', 1);
+  const ctx = makeCtx(w, { senses: { observeBlocks: visibleTargets(w) } });
+  t.after(() => ctx.memory.close());
+  const r = await placeAt.run(ctx, { at: [1, 0, 0], facing: 'N', item: 'dirt' });
+  assert.equal(r.status, 'failed', r.summary);
+  assert.equal(r.failureCode, 'PATH_NOT_FOUND');
+  assert.match(r.summary, /已被 stone 占据/);
+  assert.equal(w.inv.get('dirt'), 1, '没有消耗材料');
+  assert.deepEqual(w.actions, [], '没有放置动作');
 });

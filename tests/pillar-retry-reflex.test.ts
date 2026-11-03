@@ -106,6 +106,28 @@ test('a goto blocked by pillar clearance reports the fact and lets the mind deci
   assert.equal(activity.steps[0].skill, 'goto');
 });
 
+test('climb_up with partial progress is not auto-retried for another full height budget', () => {
+  const adapter = new FakeAdapter();
+  const activity = createActivity({ what: '爬升', why: '', kind: 'other', repeat: 1,
+    steps: [{ skill: 'climb_up', args: { height: 16, untilSky: true } }] }, '', 'llm', adapter.state());
+  const step = nextStep(activity)!;
+  activity.stepStart = { pos: { x: 0.5, y: 64, z: 0.5 } };
+  const verdict = afterStep(activity, step, fail('STUCK', '往上爬了 16 格后停下：仍未满足停止条件', { climbed: 16, goalReached: false }), 100, adapter.state());
+  assert.equal(verdict.kind, 'stuck');
+  assert.ok(!activity.adaptations.some((item) => item.startsWith('retry:')), '不会原样重试再爬一次完整高度');
+});
+
+test('excavate_path preflight rejection is not auto-retried for another identical gap', () => {
+  const adapter = new FakeAdapter();
+  const activity = createActivity({ what: '开挖', why: '', kind: 'other', repeat: 1,
+    steps: [{ skill: 'excavate_path', args: { entry: 'current', mode: 'stairs', direction: 'east', steps: 3 } }] }, '', 'llm', adapter.state());
+  const step = nextStep(activity)!;
+  activity.stepStart = { pos: { x: 0.5, y: 64, z: 0.5 }, view: '先前视野' };
+  const verdict = afterStep(activity, step, fail('ERROR', '有界开挖停止：下一落点下面是空的（air）：前面脚下是个坑/洞穴', { completedSteps: 0, excavatedBlocks: 0 }), 100, adapter.state());
+  assert.equal(verdict.kind, 'stuck');
+  assert.ok(!activity.adaptations.some((item) => item.startsWith('retry:')), '确定性预检失败不会原样重试');
+});
+
 test('other climb_up failures retain the existing retry decision', () => {
   const adapter = new FakeAdapter();
   const activity = createActivity({ what: '爬升', why: '', kind: 'other', repeat: 1,

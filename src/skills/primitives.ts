@@ -17,10 +17,8 @@ import { findStation, isStation, rememberStation } from './stations.ts';
  *   dig_at [0,2,0] → dig_at [1,1,0] → dig_at [1,2,0] → step [1,1,0]   重复几轮就是一道往前上方的阶梯。
  */
 type Rel = [number, number, number];
-interface CellArgs { at: Rel; facing: Facing; own?: boolean; wet?: boolean; lava?: boolean }
+interface CellArgs { at: Rel; facing: Facing; own?: boolean; wet?: boolean; lava?: boolean; xyz?: Vec3Like }
 const AIR = new Set(['air', 'cave_air', 'void_air']);
-/** 垫浅坑用的支撑方块：就地用背包现成的建材 */
-const SCAFFOLD = ['cobblestone', 'dirt', 'netherrack', 'cobbled_deepslate', 'stone', 'deepslate', 'andesite', 'granite', 'diorite', 'tuff'];
 
 /** 模型常用的几种写法都认：at / to / pos / offset / rel / cell，数组 [1,1,0]、字符串 "1,1,0"、对象 {"f":1,"u":1,"r":0} */
 function relValue(a: Record<string, any>): unknown {
@@ -95,9 +93,14 @@ export const digAt: Skill<CellArgs> = {
     const feet = feetCell(raw);
     // [0,-1,0] 是“挖掉脚下的支撑格”：半砖、耕地、床这类不满一格的方块，支撑就在脚所在那格本身，
     // 直接套 feetCell 的 y-1 会挖到它下面的空气，永远挖不到脚下的台阶。用 supportCell 按脚高落到真正的支撑格。
-    const pos = args.at[0] === 0 && args.at[2] === 0 && args.at[1] === -1
-      ? supportCell(raw)
-      : toWorld(feet, args.facing, args.at);
+    // 绝对坐标 xyz 只解析一次，是明确的世界方块格，不能再被这个相对特例重解释成“挖当前支撑”。
+    const support = supportCell(raw);
+    const digsSupport = args.xyz !== undefined
+      ? args.xyz.x === support.x && args.xyz.y === support.y && args.xyz.z === support.z
+      : args.at[0] === 0 && args.at[2] === 0 && args.at[1] === -1;
+    const pos = args.xyz !== undefined
+      ? { x: args.xyz.x, y: args.xyz.y, z: args.xyz.z }
+      : digsSupport ? support : toWorld(feet, args.facing, args.at);
     const physical = ctx.adapter.blockAt(pos);
     // 自己站的两格通常是空的；但也可能有火把、花、雪层、蜘蛛网这类东西，那就照样拿掉
     if (physical === null) return fail('NOT_FOUND', `[${args.at}] 那一格还没加载（区块没载入），看不见也没法挖`, { ...after(ctx, args.facing, pos) });
@@ -137,9 +140,9 @@ export const digAt: Skill<CellArgs> = {
         : `可以先 place_at 往那几格放方块把水堵上（水格可以直接放方块），或者写 "wet":true 照挖、让水流进来（水只会漫过来，不会伤人，挖完可以再堵）；也可以换个方向`;
       return fail('BAD_ARGS', `[${args.at}] 挖开会有液体流进来：${cells}。${fix}`, { wet: wets[0].name, wetCells: wets.map((w) => toRel(feet, args.facing, w.pos)), ...after(ctx, args.facing, pos) });
     }
-    // [0,-1,0] 挖的是脚下支撑块：挖前先向下扫 3 格确认有安全落点（和 dig dir:down 同一套），
-    // 落差未知/超过 3 格、或下面就是液体时拒绝，避免挖掉自己的支撑直接坠落。
-    if (args.at[0] === 0 && args.at[2] === 0 && args.at[1] === -1) {
+    // 挖的是脚下支撑块（相对 [0,-1,0] 或绝对坐标正好落在支撑格）：挖前先向下扫 3 格确认有安全落点
+    // （和 dig dir:down 同一套），落差未知/超过 3 格、或下面就是液体时拒绝，避免挖掉自己的支撑直接坠落。
+    if (digsSupport) {
       const { drop, landing } = dropBelow(ctx.adapter, pos);
       if (drop === 0 || LIQUID_BLOCKS.has(landing ?? '')) {
         const peek = ctx.adapter.blockAt({ x: pos.x, y: pos.y - 1, z: pos.z });
@@ -249,8 +252,9 @@ export const stepTo: Skill<CellArgs> = {
       // 打开的木门可穿行（门板贴格边、不挡中心通行）；blockOptics 是禁用的透视接口，不能用它取碰撞形状。
       return open === true;
     };
-    // 泡在水里：脚下那格是水、岸往往比脚高一两格，平地上的“上下 ±1”对不上。像玩家一样朝那边游、贴着岸按住跳爬上去
-    if (a.state().inWater && a.swimTo) {
+    // 泡在水里：脚下那格是水、岸往往比脚高一两格，平地上的“上下 ±1”对不上。像玩家一样朝那边游、贴着岸按住跳爬上去。
+    // 这项“邻列内多高度选出口”的辅助只属于相对 step；绝对 xyz/stepTo 保持所选脚高，不套用多高度搜索。
+    if (a.state().inWater && a.swimTo && args.xyz === undefined) {
       const out = await stepOutOfWater(ctx, args, feet);
       if (out) return out;
     }
@@ -298,22 +302,10 @@ export const stepTo: Skill<CellArgs> = {
     if (!free(head)) problems.push(describe(head) === '未看清的格子' ? '目标格上方是 未看清的格子，无法确认头部空间'
       : `目标格上方是 ${describe(head)}${describe(head).endsWith('_door') ? '（门的状态或碰撞形状阻碍通行）' : `（会碰头${LIQUID_BLOCKS.has(describe(head)) ? '' : `；先 dig_at [${args.at[0]},${args.at[1] + 1},${args.at[2]}]`}）`}`);
     // 能站住：实心方块；薄雪层下面有实心方块也能踩
-    let hasSupport = standable(floor);
+    const hasSupport = standable(floor);
     const supportAt = toRel(feet, args.facing, floor);
     const placeAtInRange = supportAt[1] >= -1;
-    // 浅坑自动垫：目标格地板是空气、再下面一格是实心时，先垫一块支撑再迈，让破碎空腔地形里能正常走路。
-    // 深洞（再下面还是空气）/液体/下落方块照旧停下，交给 Agent 决定下去探还是换方向。
-    if (!hasSupport && placeAtInRange) {
-      const floorName = a.blockAt(floor);
-      const under = { ...floor, y: floor.y - 1 };
-      if (AIR.has(floorName ?? '') && solid(under)) {
-        const material = a.state().inventory.find((i) => SCAFFOLD.includes(i.name) && i.count > 0)?.name;
-        if (material) {
-          const placed = await a.placeBlockAt(floor, [material], ctx.signal);
-          if (placed.ok && standable(floor)) hasSupport = true;
-        }
-      }
-    }
+    // 纯 step 不默认补坑、清障或消耗材料：缺支撑就如实报出支撑格，由 Agent 显式 place_at 或换方向。
     if (!hasSupport) problems.unshift(`目标格脚下 (${floor.x},${floor.y},${floor.z}) 是 ${describe(floor)}，无已确认支撑；支撑格 [${supportAt}]${placeAtInRange ? '' : ' 超出 place_at 上下 -1..3 范围'}；脚部目标格 [${args.at}] 须留空；未执行迈步`);
     if (args.at[1] === 1 && !free({ ...feet, y: feet.y + 2 })) problems.push(describe({ ...feet, y: feet.y + 2 }) === '未看清的格子'
       ? '往上跳时自己头顶上方是 未看清的格子，无法确认跳跃空间'
@@ -358,8 +350,22 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
   async run(ctx, args) {
     throwIfAborted(ctx.signal);
     const a = ctx.adapter;
-    const feet = feetCell(a.state().pos), pos = toWorld(feet, args.facing, args.at);
+    const feet = feetCell(a.state().pos);
+    // 相对 [0,0,0] 才表示“原地垫高”搭柱；绝对 xyz 落到脚这一格不能被重新解释成搭柱，仍按普通放置处理。
+    const pos = args.xyz !== undefined ? { x: args.xyz.x, y: args.xyz.y, z: args.xyz.z } : toWorld(feet, args.facing, args.at);
     const seen = visibleCells(ctx, [pos, { ...feet, y: feet.y + 2 }]);
+    // 目标已经是要放的东西：幂等成功，无需额外持有材料，也不虚报本次发生了放置。
+    const cur = a.blockAt(pos);
+    const sameItem = args.item !== 'any' && (cur === args.item || (args.item === 'torch' && cur === 'wall_torch'));
+    const anySolid = args.item === 'any' && cur !== null && !AIR.has(cur) && !isSoftBlock(cur) && !LIQUID_BLOCKS.has(cur);
+    if (sameItem || anySolid) return ok(`[${args.at}] 已经有 ${cur} 了`, { already: cur, noop: true, ...after(ctx, args.facing, pos) });
+    // 目标被别的方块占据：不能把任意实心物当成“目标已满足”，报出实际占用者，不消耗材料。
+    if (cur !== null && !AIR.has(cur) && !LIQUID_BLOCKS.has(cur) && !isSoftBlock(cur)) {
+      const name = seen.get(`${pos.x},${pos.y},${pos.z}`);
+      return name
+        ? fail('PATH_NOT_FOUND', `[${args.at}] 已被 ${name} 占据，不是要放的 ${args.item}；先 dig_at 清掉，或改放 ${name}`, { occupied: name, ...after(ctx, args.facing, pos) })
+        : fail('PATH_NOT_FOUND', `[${args.at}] 已被占用，未放置；当前未看清方块名称`, after(ctx, args.facing, pos));
+    }
     const inv = a.state().inventory;
     const names = args.item === 'any' ? PLACEABLE.filter((n) => inv.some((i) => i.name === n && i.count > 0)) : [args.item];
     if (!names.length || !inv.some((i) => names.includes(i.name) && i.count > 0)) return fail('MISSING_MATERIALS', `背包里没有 ${args.item === 'any' ? '能垫的方块（泥土/圆石/木板…）' : args.item}`, after(ctx, args.facing, pos));
@@ -373,7 +379,7 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
     }
     // 梯子、火把这类贴墙的东西放进自己站的格子：不是垫高，是挂在旁边的墙上（人站在里面不碍事）
     const attachable = args.item !== 'any' && attachmentFaces(args.item);
-    if (args.at[0] === 0 && args.at[1] === 0 && args.at[2] === 0 && !attachable) {
+    if (args.xyz === undefined && args.at[0] === 0 && args.at[1] === 0 && args.at[2] === 0 && !attachable) {
       // 原地垫高：跳起来往脚下放一块，站上去
       if (a.pillarUp) {
         const r = await a.pillarUp(names, ctx.signal);
@@ -400,12 +406,6 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
       const under = a.blockAt(feet);
       if (end.y <= feet.y || !under || AIR.has(under) || isSoftBlock(under)) return fail('EFFECT_NOT_CONFIRMED', '没有站高一格：方块没留在脚下', after(ctx, args.facing, pos));
       return ok(`原地垫了一块，站高了一格（现在 y=${end.y}）`, after(ctx, args.facing, pos));
-    }
-    const cur = a.blockAt(pos);
-    if (cur !== null && ((!AIR.has(cur) && !isSoftBlock(cur) && !LIQUID_BLOCKS.has(cur)) || cur === args.item || (args.item === 'torch' && cur === 'wall_torch'))) {
-      const name = seen.get(`${pos.x},${pos.y},${pos.z}`);
-      return name ? ok(`[${args.at}] 已经有 ${name} 了`, { already: name, ...after(ctx, args.facing, pos) })
-        : fail('PATH_NOT_FOUND', `[${args.at}] 已被占用，未放置；当前未看清方块名称`, after(ctx, args.facing, pos));
     }
     // 实心方块放在箱子/木桶正上方会盖住箱盖，之后 store_items 报 LID_BLOCKED 打不开。
     if (!attachable) {

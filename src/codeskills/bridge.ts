@@ -108,8 +108,6 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
     }
     return observed;
   };
-  /** 绝对坐标 → 以脚为原点、面朝北的 [前,上,右]（给 step/dig_at/place_at 用） */
-  const rel = (x: number, y: number, z: number): [number, number, number] => { const f = feetCell(ctx.adapter.state().pos); return [f.z - z, y - f.y, x - f.x]; };
   const runSkill = async (name: string, args: unknown) => {
     const skill = SKILLS[name];
     if (!skill || LLM_HIDDEN.has(name) || name === 'use_skill') throw new Error(`没有 "${name}" 这个动作（代码里不能再调用 use_skill）`);
@@ -221,14 +219,15 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
         throwIfAborted(ctx.signal);
         const r = await executeSkill({ ...ctx, skillDepth: depth + 1, deadline: Math.min(ctx.deadline, Date.now() + skill.timeoutMs), progress: () => {} } as SkillCtx, skill, v.args);
         if (r.status === 'cancelled') throw Object.assign(new Error('task cancelled'), { name: 'AbortedError' });
-        return { ok: r.status === 'succeeded', code: r.failureCode ?? null, summary: r.summary.slice(0, 200) };
+        const { local: _local, around: _around, ...data } = r.data ?? {};
+        return { ok: r.status === 'succeeded', code: r.failureCode ?? null, summary: r.summary.slice(0, 200), ...(Object.keys(data).length ? { data } : {}) };
       }
-      case 'stepTo': return runSkill('step', { to: rel(int(a[0], 'x'), int(a[1], 'y'), int(a[2], 'z')), facing: 'N' });
+      case 'stepTo': return runSkill('step', { xyz: { x: int(a[0], 'x'), y: int(a[1], 'y'), z: int(a[2], 'z') }, facing: 'N' });
       case 'digAt': {
         const options = a[3] && typeof a[3] === 'object' ? a[3] as Record<string, unknown> : {};
-        return runSkill('dig_at', { at: rel(int(a[0], 'x'), int(a[1], 'y'), int(a[2], 'z')), facing: 'N', ...(options.wet === true ? { wet: true } : {}), ...(options.lava === true ? { lava: true } : {}) });
+        return runSkill('dig_at', { xyz: { x: int(a[0], 'x'), y: int(a[1], 'y'), z: int(a[2], 'z') }, facing: 'N', ...(options.wet === true ? { wet: true } : {}), ...(options.lava === true ? { lava: true } : {}) });
       }
-      case 'placeAt': return runSkill('place_at', { at: rel(int(a[0], 'x'), int(a[1], 'y'), int(a[2], 'z')), item: String(a[3] ?? 'any'), facing: 'N' });
+      case 'placeAt': return runSkill('place_at', { xyz: { x: int(a[0], 'x'), y: int(a[1], 'y'), z: int(a[2], 'z') }, item: String(a[3] ?? 'any'), facing: 'N' });
       case 'moveTo': {
         const p = { x: Number(a[0]), y: Number(a[1]), z: Number(a[2]) };
         if (![p.x, p.y, p.z].every(Number.isFinite)) throw new Error('moveTo 要写 x,y,z');
