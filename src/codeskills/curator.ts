@@ -5,6 +5,7 @@ import type { LedgerView } from '../mind/ledger.ts';
 import type { ChatMessage } from '../planner/llm.ts';
 import { extractJson } from '../planner/plan.ts';
 import type { Planner } from '../planner/planner.ts';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AgentState } from '../adapter/types.ts';
@@ -33,6 +34,10 @@ function words(name: string, description = ''): { name: Set<string>; text: Set<s
   return { name: new Set(name.toLowerCase().split(/[-_]/).filter((w) => w.length > 1)), text };
 }
 const jaccard = (a: Set<string>, b: Set<string>) => { if (!a.size || !b.size) return 0; let n = 0; for (const x of a) if (b.has(x)) n++; return n / (a.size + b.size - n); };
+
+/** 文字记录内容标识：跨重载稳定，覆盖实际参与合并的名字、说明、正文和学习笔记。 */
+const noteFingerprint = (entry: { name: string; description: string; body: string; notes?: string }) =>
+  createHash('sha256').update(JSON.stringify([entry.name, entry.description, entry.body, entry.notes ?? ''])).digest('hex');
 
 function catches(a: unknown, b: unknown): boolean {
   const fa = (a as any)?.after_failure, fb = (b as any)?.after_failure;
@@ -89,7 +94,7 @@ export class SkillCurator {
   private conflictSeen = new Map<string, number>();
   /** 合并生成的替代关系：来源技能 → 并入哪个候选及版本。替代候选还没验收晋升前，来源不能按“被替代”收起（持久化到磁盘，重建整理器后仍生效）。
    *  version 是被并入目标的版本；fromVersion 是来源合并当时的版本——来源后来独立改版后，旧关系不能覆盖新版（不能用覆盖 B1 的证据处理 B2）。文字记录合并用 version/fromVersion=0（文字无版本）。 */
-  private substitutions = new Map<string, { into: string; version: number; fromVersion: number; at: number }>();
+  private substitutions = new Map<string, { into: string; version: number; fromVersion: number; at: number; sourceText?: string; targetText?: string }>();
   private substitutionsFile: string | null = null;
   /** 最近的事后观测事实（技能名 → 最近几条死亡/掉血/处境，带观测版本），喂给整理模型判断该不该收起。 */
   private aftermath = new Map<string, { version?: number; died: boolean; lost: number; still: boolean | null; context: string }[]>();
@@ -148,8 +153,10 @@ export class SkillCurator {
       try {
         const raw: unknown = JSON.parse(fs.readFileSync(this.substitutionsFile, 'utf8'));
         if (raw && typeof raw === 'object' && !Array.isArray(raw)) for (const [source, sub] of Object.entries(raw as Record<string, unknown>)) {
-          const s = sub as { into?: unknown; version?: unknown; fromVersion?: unknown; at?: unknown };
-          if (typeof s?.into === 'string' && typeof s?.version === 'number' && typeof s?.fromVersion === 'number' && typeof s?.at === 'number') this.substitutions.set(source, { into: s.into, version: s.version, fromVersion: s.fromVersion, at: s.at });
+          const s = sub as { into?: unknown; version?: unknown; fromVersion?: unknown; at?: unknown; sourceText?: unknown; targetText?: unknown };
+          if (typeof s?.into === 'string' && typeof s?.version === 'number' && typeof s?.fromVersion === 'number' && typeof s?.at === 'number')
+            this.substitutions.set(source, { into: s.into, version: s.version, fromVersion: s.fromVersion, at: s.at,
+              ...(typeof s.sourceText === 'string' ? { sourceText: s.sourceText } : {}), ...(typeof s.targetText === 'string' ? { targetText: s.targetText } : {}) });
         }
       } catch { /* 坏了就从头记 */ }
     }
@@ -398,7 +405,7 @@ export class SkillCurator {
 - skills 分开列正式版本（target:skill）和候选（target:candidate）；同名两者的证据不能混用。retire 必须带 target；执行版本再带 version。收起候选不会收起同名稳定版；收起正式版时，未收起的同名候选仍可显式试用。
 - 已停用但未收起的技能也要评估；候选没有验收通过不等于已经会用。候选可保留试用、同名修订或依据证据收起，不强制心智做任何试验。
 - notes 是纯文字记录，不参与执行成败和闲置淘汰。可按内容重复或已被事实推翻来 retire（target:note），不能因为没有执行次数就收起。确有用途时可用 restore 恢复文字记录；读取不代表做法验证成功。
-- 合并纯文字记录也用 merge：from 只能写 notes 中的名字，skill 只写 name、description、body；先保留原记录，是否收起来源再明确决定。写入已收起的文字目标不会自动恢复，需要时另写 restore。已有行为技能的补充笔记保留在 notes 中，修订必须保留其仍适用的约束。文字来源按替代收起（subsumed_by）时，只有 merge 确实成功写进目标后才算替代成立；合并失败过的来源，下一轮也不能凭 subsumed_by 收起。
+- 合并纯文字记录也用 merge：from 只能写 notes 中的名字，skill 只写 name、description、body；先保留原记录，是否收起来源再明确决定。写入已收起的文字目标不会自动恢复，需要时另写 restore。已有行为技能的补充笔记保留在 notes 中，修订必须保留其仍适用的约束。文字来源按替代收起（subsumed_by）时，只有 merge 确实成功写进目标后才算替代成立；合并失败过的来源，下一轮也不能凭 subsumed_by 收起。来源或目标在合并后又改了内容，旧合并关系也不再授权收起，需重新合并或改用不带 subsumed_by 的独立 retire。
 - 说的是同一件事、触发条件大面积重叠的：合并成一份更好的（merge：from 写被合并的名字，skill 写合并后的完整技能，必须沿用其中一个 from 名字，不要起 merged/unified/consolidated 这类新名）。合并时保留各自真正管用的部分（看 uses 的成败）。
 - 行为 merge 先保存候选，原技能保留；候选实际验收通过后再根据新证据决定是否 retire 来源技能。uses 是表中指定版本的证据，lifetime 是历史总计，不混用。aftermath 是这份技能当前版本最近几次事后观测（died 是否死亡、lost 从触发到判断净掉的血、still 触发处境还在/解除/未知），只是事实，成败已按 uses 记下，不要拿它再定一次成败；aftermath_other_versions 是别的版本观测到的，不能当成当前版本的经历。${postDeath ? `
 - 【死亡刚发生】刚死了一次：优先处理导致这次死亡的来回拉锯（see_sawed_with）、互相拆台（undid_work_of）、抢着接手（clashed_with）的技能，由你判断怎么处理——若是同一件事、条件大面积重叠，合并成一份并 retire 冗余来源；若其实是不同场景、只是条件重叠才互相触发，就收窄各自的 when 划分互不重叠的场景，保留它们、不合并、不删除。` : ''}
@@ -462,7 +469,13 @@ export class SkillCurator {
           const saved = this.book?.write(target, m.note.description, m.note.body);
           if (saved?.ok) {
             // 文字确实成功保存进替代记录后，才记录“来源 → 目标”的替代关系；后续按替代收起文字来源据此校验。
-            for (const n of from) this.substitutions.set(n, { into: saved.skill.name, version: 0, fromVersion: 0, at: Date.now() });
+            // 关系绑定双方当时的内容标识：来源后来加料、或目标改写移除原合并内容后，旧关系都不能继续授权收起来源。
+            const targetText = noteFingerprint(saved.skill);
+            for (const n of from) {
+              const source = this.book?.get(n);
+              this.substitutions.set(n, { into: saved.skill.name, version: 0, fromVersion: 0, at: Date.now(),
+                ...(source ? { sourceText: noteFingerprint(source) } : {}), targetText });
+            }
             this.saveSubstitutions();
             done.push(`${from.join('+')} → 文字记录 ${saved.skill.name}（保留来源${this.engine.inactive(saved.skill.name) ? '；目标仍收起，需要明确 restore' : ''}）`);
           } else { errors.push(`文字合并没存下：${saved && !saved.ok ? saved.error : '没有技能书'}`); for (const n of from) mergeSources.set(n, '文字合并没存下'); }
@@ -499,8 +512,13 @@ export class SkillCurator {
           if (r.subsumed_by !== undefined) {
             const sub = this.substitutions.get(name);
             const target = this.book?.get(r.subsumed_by);
-            const valid = !!sub && sub.into === r.subsumed_by && sub.into !== name && !!target && target.behavior === undefined && !this.book?.candidate(r.subsumed_by);
-            if (!valid) { errors.push(`「${name}」没有记录成功并入「${r.subsumed_by}」的文字合并关系，不能按替代收起；确有独立理由时去掉 subsumed_by 单独 retire`); continue; }
+            const bound = !!sub && sub.into === r.subsumed_by && sub.into !== name && !!target && target.behavior === undefined && !this.book?.candidate(r.subsumed_by);
+            if (!bound) { errors.push(`「${name}」没有记录成功并入「${r.subsumed_by}」的文字合并关系，不能按替代收起；确有独立理由时去掉 subsumed_by 单独 retire`); continue; }
+            // 关系还要覆盖当时实际并入的内容：缺内容标识的旧关系不能猜它覆盖当前内容；任一侧改写后旧关系都不能继续授权。
+            if (typeof sub.sourceText !== 'string' || typeof sub.targetText !== 'string') { errors.push(`「${name}」并入「${r.subsumed_by}」的旧文字合并关系缺少内容标识，不能按替代收起；确有独立理由时去掉 subsumed_by 单独 retire`); continue; }
+            const source = this.book?.get(name);
+            if (!source || sub.sourceText !== noteFingerprint(source)) { errors.push(`「${name}」在并入「${r.subsumed_by}」后又改了内容，旧合并关系不覆盖新内容，不能按替代收起；确有独立理由时去掉 subsumed_by 单独 retire`); continue; }
+            if (sub.targetText !== noteFingerprint(target)) { errors.push(`「${r.subsumed_by}」在并入「${name}」后已改写（原合并内容已不在），旧合并关系不能授权收起来源；确有独立理由时去掉 subsumed_by 单独 retire`); continue; }
           }
           if (!this.engine.inactive(name) && this.engine.retire(name, why)) done.push(`收起文字记录 ${name}`);
           continue;
@@ -511,14 +529,12 @@ export class SkillCurator {
         if (r.version !== undefined && r.version !== eb.version || this.engine.get(name, !!eb.candidate)?.version !== eb.version) { errors.push(`${name} 版本已变化，未收起`); continue; }
         const st = this.engine.currentStats(name, !!eb.candidate), tries = st.ok + st.fail;
         if (tries > 0 && tries < 3 || tries === 0 && (this.lifetime(eb)?.age ?? 0) < DAY_TICKS / 2) { errors.push(`${name} 当前版本证据还少，先保留`); continue; }
-        // 模型显式收起时只保护“实际成功过的稳定应急版”；未验证的应急候选仍可收起（借同名旧版成功不能永久保留）
-        const emergencyStats = this.engine.currentStats(name);
-        if (!eb.candidate && this.protectedEmergency(eb) && (emergencyStats?.ok ?? 0) > (emergencyStats?.fail ?? 0)) { errors.push(`${name} 当前稳定应急版成功多于失败，保留；改进先生成候选并验收，不因少用丢掉已验证能力`); continue; }
         // 本轮被列为合并来源的：合并只生成候选，替代还没验收成立，不能同轮收起；独立放弃旧技能（不带 merge）仍照常执行。
         const sameRound = mergeSources.get(name);
         if (sameRound) { errors.push(`「${name}」本轮被列为合并来源（${sameRound}），不能同轮收起；等候选验收通过或确有独立证据后，再单独发起不带 merge 的 retire`); continue; }
         // 按替代收起（模型明确写 subsumed_by）才检查替代关系：该版本已验收晋升且当前可执行，才允许；
         // 不带 subsumed_by 的 retire 是独立放弃（闲置、低价值、证据少），照常执行，不再从 why 里解析“并入/替代/合并”之类的词。
+        let subsumed = false;
         if (r.subsumed_by !== undefined) {
           const claimed = r.subsumed_by;
           const sub = this.substitutions.get(name);
@@ -531,6 +547,13 @@ export class SkillCurator {
           const promoted = !!stable && !stable.candidate && this.engine.versionOf(stable) === String(sub.version);
           const executable = this.engine.handlesNow(sub.into) === null;
           if (!promoted || !executable) { errors.push(`「${name}」并入的「${sub.into}」v${sub.version} 还没验收晋升为当前可执行版本，不能按替代收起；等它验收通过，或确有独立证据时去掉 subsumed_by 单独 retire`); continue; }
+          subsumed = true;
+        }
+        // 模型显式收起时只保护“实际成功过的稳定应急版”；未验证的应急候选仍可收起（借同名旧版成功不能永久保留）。
+        // 明确提出的替代收起，只有关系完整有效（已验收晋升、当前可执行）才放行；否则继续保护来源。
+        if (!subsumed) {
+          const emergencyStats = this.engine.currentStats(name);
+          if (!eb.candidate && this.protectedEmergency(eb) && (emergencyStats?.ok ?? 0) > (emergencyStats?.fail ?? 0)) { errors.push(`${name} 当前稳定应急版成功多于失败，保留；改进先生成候选并验收，不因少用丢掉已验证能力`); continue; }
         }
         if (this.retire(eb, why)) done.push(`收起 ${name}${eb.candidate ? ` 候选 v${eb.version}` : ''}`);
       }
