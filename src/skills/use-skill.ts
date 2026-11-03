@@ -179,7 +179,7 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
       }
       throw error;
     });
-    result.data = { ...result.data, version: b.version ?? 1 };
+    result.data = { ...result.data, ...climbFacts(), version: b.version ?? 1 };
     if (((ctx as SkillCtx & { skillDepth?: number }).skillDepth ?? 0) > 0) registry?.recordInvocation?.(b.name, result);
     return result;
   },
