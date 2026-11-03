@@ -63,6 +63,8 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
     if (!b) return fail('BAD_ARGS', `技能 ${args.name} 不存在或已停用`);
     const recovery = ctx.recovery ?? (args.failure ? { ...args.failure, allowPlace: args.args?.allowPlace === true, allowDig: args.args?.allowDig === true } : undefined);
     ctx = { ...ctx, ...(recovery ? { recovery } : {}), ...(recovery?.args.make === false ? { make: false } : {}) };
+    // 整个技能执行实例累计的爬升级数，跨取消/失败保留，避免“缺少回执”被当成“没有进展”。
+    let climbedTotal = 0;
     const result = await (async (): Promise<SkillResult> => {
       // 技能自己报的结果之外，身体实际挪了多少：一份叫“挖阶梯下去”的技能，实际是在地表平着走了几十格，靠这个才看得出来
       const from = ctx.adapter.state().pos;
@@ -150,6 +152,7 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
         }
         if (r.status === 'cancelled') return r;
         if (r.status === 'succeeded' && r.data?.noop !== true) completedSteps++;
+        if (typeof r.data?.climbed === 'number') climbedTotal += r.data.climbed;
         done.push(`${st.skill} → ${r.status === 'succeeded' ? '成' : `没成(${r.failureCode ?? ''})`}`);
         if (r.status === 'failed' && !st.optional) return fail(r.failureCode ?? 'ERROR', `技能「${b.name}」第 ${i + 1} 步 ${st.skill} 没成：${r.summary.slice(0, 120)}`,
           { done, ...(r.data?.effectEvidence ? { effectEvidence: r.data.effectEvidence } : {}),
@@ -160,6 +163,11 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
       if (judged) return fail('ERROR', `技能「${b.name}」的步骤都做完了，但${judged}${moved().text}`, { done, verified: false });
       return ok(`照技能「${b.name}」做完了：${done.join('，')}${moved().text}`, { done, verified: !!b.verify, ...(completedSteps === 0 ? { noop: true } : {}) });
     })().catch((error: unknown) => {
+      // 取消/失败也保留已累计的爬升进展：把已完成步骤的爬升合并进回执，供调度层判断是否续跑。
+      if (climbedTotal > 0 && error && typeof error === 'object') {
+        const prev = (error as { partial?: Record<string, unknown> }).partial ?? {};
+        (error as { partial?: Record<string, unknown> }).partial = { ...prev, climbed: climbedTotal + (typeof prev.climbed === 'number' ? prev.climbed : 0), spent: climbedTotal + (typeof prev.spent === 'number' ? prev.spent : 0) };
+      }
       if (isAbort(error) && ((ctx as SkillCtx & { skillDepth?: number }).skillDepth ?? 0) > 0) {
         registry?.recordInvocation?.(b.name, { status: 'cancelled', summary: '嵌套技能调用被取消', data: { version: b.version ?? 1 } });
       }

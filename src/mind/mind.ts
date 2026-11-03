@@ -816,7 +816,7 @@ export class Mind {
         const climbed = o.result.data?.climbed;
         if (o.task.skill !== 'climb_up' && typeof climbed === 'number' && climbed > 0) {
           const spent = o.result.data?.spent;
-          this.finishActivity('stuck', `${o.task.skill} 被反射打断，之前已完成部分爬升（净 ${climbed} 格${typeof spent === 'number' ? `，消耗 ${spent} 块` : ''}）；没有可靠的续跑状态，是否继续由你决定`);
+          this.finishActivity('stuck', `${o.task.skill} 被反射打断，之前已完成部分爬升（净 ${climbed} 格${typeof spent === 'number' ? `，累计爬升 ${spent} 格` : ''}）；没有可靠的续跑状态，是否继续由你决定`);
           return;
         }
         a.index = Math.max(0, a.index - 1);
@@ -1348,10 +1348,14 @@ export class Mind {
       const oldRunning = runningIndex >= 0 ? a.steps[currentIndex] : undefined;
       // 恢复包装（use_skill）里携带父执行实例的 ID 与账本引用，调整时一并保留给待续跑的 climb_up。
       const recoveryClimb = oldRunning?.skill === 'use_skill' ? (oldRunning.args as Record<string, unknown> | undefined)?.failure as { climbId?: string; climb?: { height: number; spent: number; startY: number }; args?: unknown } | undefined : undefined;
-      // 待续跑的父实例紧跟恢复包装之后（runningIndex + 1）；已完成的前缀不得参与父 ID 重绑定，避免父 ID 落到历史步骤。
+      // 待续跑的父实例位于恢复包装之后（索引 > runningIndex）；已完成前缀（< runningIndex）不得参与父 ID 重绑定。
+      let assignedRecoveryId = false;
       const steps = draft.steps.map((s, i) => {
         if (i === runningIndex && oldRunning) return { ...s, id: oldRunning.id };
-        if (i === runningIndex + 1 && recoveryClimb?.climbId && s.skill === 'climb_up' && isDeepStrictEqual(s.args ?? {}, recoveryClimb.args ?? {})) return { ...s, id: recoveryClimb.climbId };
+        if (!assignedRecoveryId && i > runningIndex && recoveryClimb?.climbId && s.skill === 'climb_up' && isDeepStrictEqual(s.args ?? {}, recoveryClimb.args ?? {})) {
+          assignedRecoveryId = true;
+          return { ...s, id: recoveryClimb.climbId };
+        }
         return { ...s, id: shortId('st_') };
       });
       const preservedClimb: Record<string, { height: number; spent: number; startY: number }> = {};
