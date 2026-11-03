@@ -196,7 +196,7 @@ test('handlesNow 区分候选与可复用的稳定版', (t) => {
   assert.match(engine.handlesNow('manual-skill')!, /收起或停用/, '收起后不算覆盖');
 });
 
-test('跨轮次：替代候选未验收，下一次整理不能以“已并入”收起来源', async (t) => {
+test('跨轮次：替代候选未验收，下一次整理不能以“subsumed_by”收起来源', async (t) => {
   const directory = tmp(), adapter = new FakeAdapter(), bus = new EventBus();
   const book = new SkillBook(null, directory);
   const engine = new BehaviorEngine(book, adapter, null, bus, senses0, path.join(directory, 'stats.json'));
@@ -207,12 +207,12 @@ test('跨轮次：替代候选未验收，下一次整理不能以“已并入�
   const planner = { autonomous: true, noteInvalid() {}, complete: async () => {
     const text = round++ === 0
       ? JSON.stringify({ merge: [{ from: ['skill-a', 'skill-b'], skill: { name: 'skill-a', description: '合并 AB', code: 'return {worked:true};', verify: 'const s = await api.state(); return true;' } }] })
-      : JSON.stringify({ retire: [{ name: 'skill-b', target: 'skill', version: 1, why: '已并入 skill-a' }] });
+      : JSON.stringify({ retire: [{ name: 'skill-b', target: 'skill', version: 1, why: '已并入', subsumed_by: 'skill-a' }] });
     return { text, latencyMs: 0 };
   } };
   const curator = new SkillCurator(planner, engine, book, bus);
   await curator.check(Date.now(), { force: true }); // 第一轮：生成替代候选
-  const result = await curator.check(Date.now(), { force: true }); // 第二轮：以“已并入”收起
+  const result = await curator.check(Date.now(), { force: true }); // 第二轮：以 subsumed_by 收起
   assert.equal(engine.inactive('skill-b'), false, '替代候选未验收，不能跨轮次收起来源');
   assert.match(result!, /未完成/);
 });
@@ -289,10 +289,131 @@ test('事后观测按真实执行阶段描述：版本、触发以来的净掉�
 test('整理模型能看到技能最近的事后观测事实', (t) => {
   const w = curatorSetup(t);
   assert.ok(w.engine.write({ name: 'guard-skill', description: '举盾应对', when: { hostile: { within: 8 } }, code: 'return {worked:true};', verify: 'const s = await api.state(); return true;' }).ok);
-  (w.curator as any).breakObservation({ type: 'skill_aftermath', data: { name: 'guard-skill', died: true, lost: 5, still: null, context: '血少又有怪' } });
+  (w.curator as any).breakObservation({ type: 'skill_aftermath', data: { name: 'guard-skill', version: 1, died: true, lost: 5, still: null, context: '血少又有怪' } });
   const user = JSON.parse(w.curator.messages(false)[1].content);
   const entry = user.skills.find((s: any) => s.name === 'guard-skill');
   assert.ok(entry.aftermath, '整理模型能看到事后观测事实');
   assert.equal(entry.aftermath[0].died, true);
   assert.equal(entry.aftermath[0].lost, 5);
+});
+
+test('事后观测事实按版本归属：v1 的观测不挂到候选 v2，跨版本明确标注', (t) => {
+  const w = curatorSetup(t);
+  assert.ok(w.engine.write({ name: 'guard-skill', description: '举盾应对', when: { hostile: { within: 8 } }, code: 'return {worked:true};', verify: 'const s = await api.state(); return true;' }).ok);
+  assert.ok(w.engine.write({ name: 'guard-skill', description: '举盾应对改版', when: { hostile: { within: 8 } }, code: 'return {worked:true};', verify: 'const s = await api.state(); return true;' }, { by: 'mind' }).ok);
+  (w.curator as any).breakObservation({ type: 'skill_aftermath', data: { name: 'guard-skill', version: 1, died: true, lost: 5, still: null, context: '血少又有怪' } });
+  const user = JSON.parse(w.curator.messages(false)[1].content);
+  const stable = user.skills.find((s: any) => s.name === 'guard-skill' && s.target === 'skill');
+  const candidate = user.skills.find((s: any) => s.name === 'guard-skill' && s.target === 'candidate');
+  assert.ok(stable.aftermath, '稳定版当前版本（v1）能看到观测');
+  assert.equal(stable.aftermath[0].version, 1);
+  assert.equal(stable.aftermath_other_versions, undefined, '稳定版没有别的版本的观测');
+  assert.equal(candidate.aftermath, undefined, '候选 v2 不被挂上 v1 的经历');
+  assert.ok(candidate.aftermath_other_versions, '候选明确标注别的版本的观测');
+  assert.equal(candidate.aftermath_other_versions[0].version, 1);
+});
+
+test('替代候选只成功 1 次、未晋升：subsumed_by 仍不能收起来源', async (t) => {
+  const directory = tmp(), adapter = new FakeAdapter(), bus = new EventBus();
+  const book = new SkillBook(null, directory);
+  const engine = new BehaviorEngine(book, adapter, null, bus, senses0, path.join(directory, 'stats.json'));
+  t.after(() => { engine.dispose(); fs.rmSync(directory, { recursive: true, force: true }); });
+  for (const name of ['skill-a', 'skill-b']) assert.ok(engine.write(codeSkill(name)).ok);
+  for (let i = 0; i < 3; i++) engine.recordInvocation('skill-b', { status: 'succeeded', summary: '实际做成', data: { version: 1, verified: true } });
+  let round = 0;
+  const planner = { autonomous: true, noteInvalid() {}, complete: async () => {
+    const text = round++ === 0
+      ? JSON.stringify({ merge: [{ from: ['skill-a', 'skill-b'], skill: { name: 'skill-a', description: '合并 AB', code: 'return {worked:true};', verify: 'const s = await api.state(); return true;' } }] })
+      : JSON.stringify({ retire: [{ name: 'skill-b', target: 'skill', version: 1, why: '已并入', subsumed_by: 'skill-a' }] });
+    return { text, latencyMs: 0 };
+  } };
+  const curator = new SkillCurator(planner, engine, book, bus);
+  await curator.check(Date.now(), { force: true }); // 第一轮：生成替代候选 skill-a v2
+  engine.recordInvocation('skill-a', { status: 'succeeded', summary: '做成一次', data: { version: 2, verified: true } }); // 替代候选只成 1 次，未晋升
+  const result = await curator.check(Date.now(), { force: true });
+  assert.equal(engine.inactive('skill-b'), false, '替代候选只成 1 次、未晋升，不能按替代收起来源');
+  assert.match(result!, /未完成/);
+});
+
+test('独立放弃不看 why 关键词；subsumed_by 零成功仍被拦', async (t) => {
+  const directory = tmp(), adapter = new FakeAdapter(), bus = new EventBus();
+  const book = new SkillBook(null, directory);
+  const engine = new BehaviorEngine(book, adapter, null, bus, senses0, path.join(directory, 'stats.json'));
+  t.after(() => { engine.dispose(); fs.rmSync(directory, { recursive: true, force: true }); });
+  for (const name of ['skill-a', 'skill-b', 'skill-c']) assert.ok(engine.write(codeSkill(name)).ok);
+  for (const name of ['skill-b', 'skill-c']) for (let i = 0; i < 3; i++) engine.recordInvocation(name, { status: 'succeeded', summary: '实际做成', data: { version: 1, verified: true } });
+  let round = 0;
+  const planner = { autonomous: true, noteInvalid() {}, complete: async () => {
+    const text = round++ === 0
+      ? JSON.stringify({ merge: [{ from: ['skill-a', 'skill-b', 'skill-c'], skill: { name: 'skill-a', description: '合并 ABC', code: 'return {worked:true};', verify: 'const s = await api.state(); return true;' } }] })
+      : JSON.stringify({ retire: [
+        { name: 'skill-b', target: 'skill', version: 1, why: '已完整覆盖这份做法', subsumed_by: 'skill-a' },
+        { name: 'skill-c', target: 'skill', version: 1, why: '已并入 skill-a' },
+      ] });
+    return { text, latencyMs: 0 };
+  } };
+  const curator = new SkillCurator(planner, engine, book, bus);
+  await curator.check(Date.now(), { force: true }); // 第一轮：合并生成替代候选（零成功）
+  const result = await curator.check(Date.now(), { force: true });
+  assert.equal(engine.inactive('skill-b'), false, 'subsumed_by 且替代零成功，无论 why 怎么写都不能收起');
+  assert.equal(engine.inactive('skill-c'), true, '不带 subsumed_by 的 retire 是独立放弃，不看 why 关键词，照常收起');
+  assert.match(result!, /未完成/);
+});
+
+test('重建整理器后替代关系仍持久化：零成功替代请求仍不能收起', async (t) => {
+  const directory = tmp(), adapter = new FakeAdapter(), bus = new EventBus();
+  const book = new SkillBook(null, directory);
+  const engine = new BehaviorEngine(book, adapter, null, bus, senses0, path.join(directory, 'stats.json'));
+  t.after(() => { engine.dispose(); fs.rmSync(directory, { recursive: true, force: true }); });
+  for (const name of ['skill-a', 'skill-b']) assert.ok(engine.write(codeSkill(name)).ok);
+  for (let i = 0; i < 3; i++) engine.recordInvocation('skill-b', { status: 'succeeded', summary: '实际做成', data: { version: 1, verified: true } });
+  let calls = 0;
+  const planner = { autonomous: true, noteInvalid() {}, complete: async () => {
+    const text = calls++ === 0
+      ? JSON.stringify({ merge: [{ from: ['skill-a', 'skill-b'], skill: { name: 'skill-a', description: '合并 AB', code: 'return {worked:true};', verify: 'const s = await api.state(); return true;' } }] })
+      : JSON.stringify({ retire: [{ name: 'skill-b', target: 'skill', version: 1, why: '已并入', subsumed_by: 'skill-a' }] });
+    return { text, latencyMs: 0 };
+  } };
+  const clockFile = path.join(directory, 'clock.json');
+  const lifetimeFile = path.join(directory, 'lifetimes.json');
+  const first = new SkillCurator(planner, engine, book, bus, {}, new ObservedGameClock(clockFile), lifetimeFile);
+  await first.check(Date.now(), { force: true }); // 生成替代候选并落盘
+  const second = new SkillCurator(planner, engine, book, bus, {}, new ObservedGameClock(clockFile), lifetimeFile); // 重建整理器
+  const result = await second.check(Date.now(), { force: true });
+  assert.equal(engine.inactive('skill-b'), false, '重建整理器后，零成功替代请求仍不能收起来源');
+  assert.match(result!, /未完成/);
+});
+
+test('文字合并目标名被行为技能占用时，来源仍受保护，不能同轮收起', async (t) => {
+  const directory = tmp(), adapter = new FakeAdapter(), bus = new EventBus();
+  const book = new SkillBook(null, directory);
+  const engine = new BehaviorEngine(book, adapter, null, bus, senses0, path.join(directory, 'stats.json'));
+  t.after(() => { engine.dispose(); fs.rmSync(directory, { recursive: true, force: true }); });
+  assert.ok(engine.write({ name: 'target-skill', description: '已有执行版本', code: 'return {worked:true};', verify: 'const s = await api.state(); return true;' }).ok);
+  assert.ok(book.write('note-a', '做法 A 的说明', '做法 A 的内容，至少要二十个字才能写下来').ok);
+  assert.ok(book.write('note-b', '做法 B 的说明', '做法 B 的内容，至少要二十个字才能写下来').ok);
+  const planner = { autonomous: true, noteInvalid() {}, complete: async () => ({ text: JSON.stringify({
+    merge: [{ from: ['note-a', 'note-b'], skill: { name: 'target-skill', description: '合并成已有技能名', body: '合并后的正文，至少要二十个字才能写下来' } }],
+    retire: [{ name: 'note-b', target: 'note', why: '已并入 target-skill' }],
+  }), latencyMs: 0 }) };
+  const curator = new SkillCurator(planner, engine, book, bus);
+  const result = await curator.check(Date.now(), { force: true });
+  assert.equal(engine.inactive('note-b'), false, '文字合并目标名被占用，来源仍受保护，不能同轮收起');
+  assert.match(result!, /未完成/);
+});
+
+test('已完成候选（reflex 验收）后死亡，事后观测报“做完后”，不报“执行期间”', (t) => {
+  const w = runtime(t);
+  assert.ok(w.engine.write({ name: 'guard-candidate', description: '举盾应对', when: { hostile: { within: 8 } }, code: 'return {worked:true};', verify: 'const s = await api.state(); return true;' }, { by: 'mind' }).ok);
+  const after: { data: any; msg: string }[] = [];
+  w.bus.on('event', (ev: any) => { if (ev.type === 'skill_aftermath') after.push(ev); });
+  const candidate = w.engine.get('guard-candidate', true)!;
+  (w.engine as any).aftermath.set('guard-candidate', { taskId: 't9', behavior: candidate, hp: 20, at: Date.now() - 1000, context: '' });
+  w.adapter.hp = 10;
+  const outcome: TaskOutcome = { task: { id: 't9', planVersion: 1, skill: 'use_skill', args: { name: 'guard-candidate', trial: true }, source: 'reflex', startedAt: Date.now(), deadline: Date.now() + 1000, progress: 1, note: '', movement: false }, result: { status: 'succeeded', summary: '举盾', data: { version: 1, verified: true } } as SkillResult, durationMs: 1 };
+  w.arbiter.emit('done', outcome);
+  (w.engine as any).judge('guard-candidate', true);
+  assert.equal(after.length, 1);
+  assert.match(after[0].msg, /做完后不久就死了/, '已完成候选报做完后死亡');
+  assert.doesNotMatch(after[0].msg, /执行期间就死了/);
 });

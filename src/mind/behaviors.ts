@@ -999,11 +999,18 @@ export class BehaviorEngine {
     this.noteUndo(name, o.task.id);
     const recoveryRun = !!args.failure && !!recovery;
     if (recoveryRun) recovery.invocationRecorded = true;
+    // 成败只看“目标是否真的达成”：恢复技能由 creditRecovery 按“重做失败的那一步”定成败；
+    // 普通技能只有 verify 通过（verified:true）才算成功；没写 verify 的“跑完了”是目标达成未知，只记使用、不记成败。
+    const okRun = this.runOutcome(o.result, recoveryRun);
+    // 公共完成路径：无论候选还是稳定版，先记下这次执行已结束（事后观测据此区分“做完后”还是“执行期间”），再分别处理候选与稳定版记账。
+    if (pending && o.task.source === 'reflex') {
+      pending.behavior = b;
+      pending.summary = o.result.summary; pending.data = o.result.data ?? {};
+      // 代码本身出错（参数、异常）才不等事后观测：马上记失败；其余保留 aftermath 供 judge 补记死亡、掉血、处境等事实。
+      if (okRun === false && ['ERROR', 'BAD_ARGS'].includes(String(o.result.failureCode))) this.aftermath.delete(name);
+    }
     if (b.candidate) { this.recordInvocation(name, o.result, b); return; }
     const skipped = this.noteInvocation(name, b, o.result);
-    // 成败只看“目标是否真的达成”：恢复技能由 creditRecovery 按“重做失败的那一步”定成败；
-    // 普通稳定技能只有 verify 通过（verified:true）才算成功；没写 verify 的“跑完了”是目标达成未知，只记使用、不记成败。
-    const okRun = this.runOutcome(o.result, recoveryRun);
     if (recoveryRun) {
       recovery.behavior = b;
       recovery.data = o.result.data;
@@ -1018,12 +1025,6 @@ export class BehaviorEngine {
     }
     // 恢复时用的：做完了先不算成功，等重做的那一步出结果（creditRecovery）；自己就出错了才直接算失败
     if (recoveryRun && okRun) return;
-    if (pending && o.task.source === 'reflex') {
-      pending.behavior = b;
-      pending.summary = o.result.summary; pending.data = o.result.data ?? {};
-      // 代码本身出错（参数、异常）才不等事后观测：马上记失败；其余保留 aftermath 供 judge 补记死亡、掉血、处境等事实。
-      if (okRun === false && ['ERROR', 'BAD_ARGS'].includes(String(o.result.failureCode))) this.aftermath.delete(name);
-    }
     // 跑完了但没有 verify 判定：目标达成未知——只记使用与经过，不记成败（不把“运行完成”冒充成“成功证据”）。
     if (okRun === null) return;
     this.record(b, okRun, o.result.summary, (o.result.data ?? {}) as Record<string, any>);
