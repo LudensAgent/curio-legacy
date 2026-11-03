@@ -5,7 +5,7 @@ import { EventBus } from '../src/events.ts';
 import { afterStep, createActivity, nextStep } from '../src/mind/activity.ts';
 import { placeAt } from '../src/skills/primitives.ts';
 import { climbUp } from '../src/skills/body.ts';
-import { fail } from '../src/skills/types.ts';
+import { fail, ok, runSkill } from '../src/skills/types.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
 
@@ -112,72 +112,75 @@ test('climb_up exhausts its budget and terminates instead of re-climbing the ful
     steps: [{ skill: 'climb_up', args: { height: 16, untilSky: true } }] }, '', 'llm', adapter.state());
   const step = nextStep(activity)!;
   activity.stepStart = { pos: { x: 0.5, y: 64, z: 0.5 } };
-  const verdict = afterStep(activity, step, fail('STUCK', '往上爬了 16 格后停下：仍未满足停止条件', { climbed: 16, goalReached: false }), 100, adapter.state());
+  const key = JSON.stringify(step.args ?? {});
+  activity.climb![key].spent = 16; // climbUp.run 已把 16 格实时入账
+  const verdict = afterStep(activity, step, fail('STUCK', '往上爬了 16 格后停下：仍未满足停止条件', { goalReached: false }), 100, adapter.state());
   assert.equal(verdict.kind, 'stuck');
   assert.equal(verdict.exhausted, true, '额度耗尽须标记，调度器据此终止自动推进');
   assert.ok(!activity.adaptations.some((item) => item.startsWith('retry:')), '不会原样重试再爬一次完整高度');
 });
 
-test('climb_up partial progress reduces the dispatched height without mutating the template', () => {
+test('climb_up partial progress is tracked in the shared budget without mutating the template', () => {
   const adapter = new FakeAdapter();
   const activity = createActivity({ what: '爬升', why: '', kind: 'other', repeat: 1,
     steps: [{ skill: 'climb_up', args: { height: 3, untilSky: false } }] }, '', 'llm', adapter.state());
   const step = nextStep(activity)!;
   activity.stepStart = { pos: { x: 0.5, y: 64, z: 0.5 } };
-  const verdict = afterStep(activity, step, fail('STUCK', '往上爬了 1 格后停下', { climbed: 1, goalReached: false }), 100, adapter.state());
-  assert.equal(verdict.kind, 'continue', '剩余额度下继续爬，而不是重试完整高度');
+  const key = JSON.stringify(step.args ?? {});
+  activity.climb![key].spent = 1; // climbUp.run 已把 1 格实时入账
+  const verdict = afterStep(activity, step, fail('STUCK', '往上爬了 1 格后停下', { goalReached: false }), 100, adapter.state());
+  assert.equal(verdict.kind, 'continue', '剩余额度下继续，而不是重试完整高度');
   assert.equal((activity.steps[0].args as { height: number }).height, 3, '模板参数保持不变');
-  const next = nextStep(activity)!;
-  assert.equal(next.skill, 'climb_up');
-  assert.equal((next.args as { height: number }).height, 2, '派发时按剩余额度扣减');
+  assert.equal(activity.climb[key].spent, 1, '已确认进展入账');
 });
 
-test('climb_up repeat:2 starts each round from the original height', () => {
+test('climb_up repeat:2 starts each round from the original budget', () => {
   const adapter = new FakeAdapter();
   const activity = createActivity({ what: '爬升', why: '', kind: 'other', repeat: 2,
     steps: [{ skill: 'climb_up', args: { height: 3, untilSky: false } }] }, '', 'llm', adapter.state());
-  // 第一轮：爬 1 格失败 → 重试派发 height 2 → 成功
-  let step = nextStep(activity)!;
-  activity.stepStart = { pos: { x: 0.5, y: 64, z: 0.5 } };
-  assert.equal(afterStep(activity, step, fail('STUCK', '往上爬了 1 格后停下', { climbed: 1, goalReached: false }), 100, adapter.state()).kind, 'continue');
-  const retry = nextStep(activity)!;
-  assert.equal((retry.args as { height: number }).height, 2);
-  assert.equal(afterStep(activity, retry, { status: 'succeeded', summary: '往上爬了 2 格', data: { climbed: 2 } }, 100, adapter.state()).kind, 'continue');
-  // 第一轮做完，进入第二轮：reset 累计额度，重新派发原始 height 3
-  const round2 = nextStep(activity)!;
-  assert.equal(round2.skill, 'climb_up');
-  assert.equal((round2.args as { height: number }).height, 3, '第二轮从原始参数开始');
-  assert.equal((activity.steps[0].args as { height: number }).height, 3, '模板从未被改写');
+  const step1 = nextStep(activity)!;
+  const key = JSON.stringify(step1.args ?? {});
+  assert.equal(activity.climb[key].height, 3, '第一轮建立原始高度账本');
+  assert.equal(activity.climb[key].spent, 0);
+  // 第一轮成功：删除账本
+  assert.equal(afterStep(activity, step1, { status: 'succeeded', summary: '往上爬了 3 格', data: { goalReached: true } }, 100, adapter.state()).kind, 'continue');
+  assert.equal(activity.climb[key], undefined, '成功后删除账本');
+  // 第二轮：reset 账本，从原始高度重新开始
+  const step2 = nextStep(activity)!;
+  assert.equal(step2.skill, 'climb_up');
+  assert.equal((step2.args as { height: number }).height, 3, '第二轮从原始参数开始');
+  assert.equal(activity.climb[JSON.stringify(step2.args ?? {})].height, 3);
+  assert.equal(activity.climb[JSON.stringify(step2.args ?? {})].spent, 0, '第二轮额度清零');
 });
 
-test('recovery-internal climb is deducted from the parent climb quota', () => {
+test('nested climb_up inherits the recovery budget via ctx.climb', async () => {
+  const budget = { height: 3, spent: 1 };
+  let got: unknown = undefined;
+  const skill = { name: 'climb_up', description: '', argsDoc: '', timeoutMs: 1000, movement: true,
+    validate: () => ({ ok: true, args: {} }), run: async (ctx: { climb?: unknown }) => { got = ctx.climb; return ok('x'); } };
   const adapter = new FakeAdapter();
-  adapter.pos = { x: 0.5, y: 66, z: 0.5 }; // 恢复后身体在 y=66
-  const key = JSON.stringify({ height: 3, untilSky: false });
-  const activity = createActivity({ what: '爬升', why: '', kind: 'other', repeat: 1,
-    steps: [{ skill: 'use_skill', args: { name: 're-climb', failure: { skill: 'climb_up', args: { height: 2 }, position: { x: 0, y: 65, z: 0 } } } },
-      { skill: 'climb_up', args: { height: 3, untilSky: false } }] }, '', 'llm', adapter.state());
-  activity.climbSpent = { [key]: 1 }; // 顶层已爬 1 格失败
-  const step = nextStep(activity)!;
-  assert.equal(step.skill, 'use_skill');
-  afterStep(activity, step, { status: 'succeeded', summary: '做完了', data: { done: ['climb_up → 成'] } }, 100, adapter.state());
-  assert.equal(activity.climbSpent[key], 2, '恢复内部爬升入账（顶层 1 + 恢复 1）');
+  const ctx = makeCtx(adapter);
+  ctx.recovery = { skill: 'climb_up', args: { height: 3 }, climb: budget };
+  await runSkill(ctx, skill as never, {} as never);
+  assert.equal(got, budget, '恢复内部嵌套动作拿到同一份额度账本');
 });
 
-test('climb_up cancellation preserves the partial height already climbed', async () => {
+test('climb_up cancellation preserves only the confirmed height', async () => {
   const adapter = new FakeAdapter();
   adapter.pos = { x: 0.5, y: 64, z: 0.5 };
   adapter.inv.set('dirt', 8);
+  const budget = { height: 3, spent: 0 };
   const controller = new AbortController();
   let climbs = 0;
   adapter.moveTo = async () => {
     climbs++;
-    adapter.pos = { ...adapter.pos, y: adapter.pos.y + 1 };
-    if (climbs === 1) controller.abort('reflex');
+    if (climbs === 1) adapter.pos = { ...adapter.pos, y: 65 }; // 第一格确认
+    else { adapter.pos = { ...adapter.pos, y: 65.2 }; controller.abort('reflex'); } // 第二格跳到半空未落稳
   };
-  const ctx = { adapter, signal: controller.signal, deadline: Date.now() + 10000, senses: { refresh() {} }, make: false };
+  const ctx = { adapter, signal: controller.signal, deadline: Date.now() + 10000, senses: { refresh() {} }, make: false, climb: budget };
   await assert.rejects(climbUp.run(ctx as never, { height: 3, untilSky: false }), (e: { partialClimbed?: number }) => {
-    assert.equal(e.partialClimbed, 1, '取消结果保留已爬升的部分高度');
+    assert.equal(budget.spent, 1, '账本只入账确认的爬升');
+    assert.equal(e.partialClimbed, 1, '取消只保留确认的 1 格，不把半空的瞬时高度当进展');
     return true;
   });
 });

@@ -98,22 +98,17 @@ interface Snapshot { at: number; sessionId: string; dim: string; pos: AgentState
  * 交给恢复技能的“刚失败的那一步”：除了动作、参数、失败码和一句话，还带上动作自己算出来的目标坐标
  * （比如 goto "NW 20" 实际要去的那一格）和失败时人在哪——以前只有一句话，恢复技能和它的核对都“没有目标坐标”
  */
-export function failureFor(step: { skill: string; args?: unknown }, result: { failureCode?: string | null; summary: string; data?: unknown }, pos: { x: number; y: number; z: number }) {
+export function failureFor(step: { skill: string; args?: unknown }, result: { failureCode?: string | null; summary: string; data?: unknown }, pos: { x: number; y: number; z: number }, climb?: { height: number; spent: number }) {
   const d = result.data && typeof result.data === 'object' ? result.data as Record<string, unknown> : {};
   const blockTarget = d.blockTarget && typeof d.blockTarget === 'object' ? d.blockTarget as Record<string, unknown> : {};
   const target = worldPoint(d.targetCell) ?? worldPoint(d.target) ?? worldPoint(blockTarget.pos) ?? (step.skill === 'dig' ? worldPoint(d.pos) : undefined);
-  // climb_up 已实际爬升：把已用掉的高度额度写回恢复参数，恢复重放也只爬剩余额度，不重置完整高度。
-  let args = step.args ?? {};
-  if (step.skill === 'climb_up' && typeof d.climbed === 'number' && d.climbed > 0 && args && typeof args === 'object' && !Array.isArray(args)) {
-    const height = (args as Record<string, unknown>).height;
-    if (typeof height === 'number') args = { ...args, height: Math.max(1, height - d.climbed) };
-  }
   return {
-    skill: step.skill, args, code: result.failureCode ?? null, summary: result.summary.slice(0, 160),
+    skill: step.skill, args: step.args ?? {}, code: result.failureCode ?? null, summary: result.summary.slice(0, 160),
     ...(target ? { target, coordinateFrame: 'world' } : {}),
     ...(Number.isSafeInteger(d.targetId ?? d.entityId) ? { entityId: Number(d.targetId ?? d.entityId) } : {}),
     position: worldPoint(d.position) ?? { ...pos },
     ...(d.waterAhead !== undefined ? { waterAhead: !!d.waterAhead } : {}),
+    ...(climb ? { climb } : {}),
   };
 }
 
@@ -621,7 +616,8 @@ export class Mind {
     }
     const state = this.d.adapter.state();
     this.activity.stepStart = { pos: { ...state.pos }, view: viewOf(this.safe(() => this.d.perception.snapshot(), undefined)) };
-    const r = this.d.arbiter.start(step, this.activity.source === 'rule' ? 'rule' : 'llm', { planId: this.activity.id });
+    const climb = step.skill === 'climb_up' ? this.activity.climb?.[JSON.stringify(step.args ?? {})] : undefined;
+    const r = this.d.arbiter.start(step, this.activity.source === 'rule' ? 'rule' : 'llm', { planId: this.activity.id, ...(climb ? { climb } : {}) });
     if ('error' in r) this.handleStepResult(step, { status: 'failed', failureCode: 'BAD_ARGS', summary: r.error }, 0);
   }
 
@@ -813,13 +809,7 @@ export class Mind {
     if (o.result.status === 'cancelled') {
       // 被反射打断：等身体安全了把这一步再做一遍
       if (o.preemptedBy === 'reflex') {
-        const own = a.steps[Math.max(0, a.index - 1)];
-        // climb_up 取消前已经爬升的部分高度要入账，回退后只爬剩余额度，不整段重爬。
-        if (o.task.skill === 'climb_up' && typeof o.result.data?.climbed === 'number' && o.result.data.climbed > 0 && own?.skill === 'climb_up') {
-          const key = JSON.stringify(own.args ?? {});
-          a.climbSpent ??= {};
-          a.climbSpent[key] = (a.climbSpent[key] ?? 0) + o.result.data.climbed;
-        }
+        // climb_up 的已确认进展已在 climbUp.run 里实时入账，回退后 nextStep 派发时按剩余额度继续，无需这里再结算。
         a.index = Math.max(0, a.index - 1);
         a.interruptions = (a.interruptions ?? 0) + 1;
         // 一直被身体躲闪打断：这段活眼下做不成，先想想怎么对付周围的危险
@@ -873,7 +863,8 @@ export class Mind {
       if (b) {
         a.adaptations.push(`skill:${b.name}`);
         a.awaitingRecovery = b.name;
-        a.steps.splice(Math.max(0, a.index - 1), 0, { skill: 'use_skill', args: { name: b.name, failure: failureFor(step, result, this.d.adapter.state().pos) }, optional: true });
+        const climb = step.skill === 'climb_up' ? a.climb?.[JSON.stringify(step.args ?? {})] : undefined;
+        a.steps.splice(Math.max(0, a.index - 1), 0, { skill: 'use_skill', args: { name: b.name, failure: failureFor(step, result, this.d.adapter.state().pos, climb) }, optional: true });
         a.index = Math.max(0, a.index - 1);
         a.consecutiveFailures = 0;
         this.d.self.think(`${step.skill} 没成，照学会的「${b.name}」试试`, 'outcome');
@@ -1342,7 +1333,7 @@ export class Mind {
         && a.steps.slice(0, currentIndex).every((step, i) => sameStep(step, draft.steps[i]));
       const runningIndex = keepsPrefix ? currentIndex : firstIsRunning ? 0 : -1;
       if (running?.planId === a.id && runningIndex < 0) this.d.arbiter.cancel('改了做法');
-      Object.assign(a, { what: draft.what, why: draft.why || a.why, kind: draft.kind, steps: draft.steps, repeat: draft.repeat, iteration: 0, index: runningIndex + 1, adaptations: [], consecutiveFailures: 0,
+      Object.assign(a, { what: draft.what, why: draft.why || a.why, kind: draft.kind, steps: draft.steps, repeat: draft.repeat, iteration: 0, index: runningIndex + 1, adaptations: [], consecutiveFailures: 0, climb: {},
         monologue: decision.monologue || a.monologue });
       if (draft.facing) a.facing = draft.facing; else delete a.facing;
       if (draft.doneWhen) a.doneWhen = draft.doneWhen; else delete a.doneWhen;

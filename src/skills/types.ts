@@ -91,6 +91,8 @@ export interface SkillCtx {
   taskId: string;
   /** Original delegation inherited by recovery and nested learned skills. */
   recovery?: RecoveryContext;
+  /** 当前逻辑动作的共享额度账本（如 climb_up 的原高度与已确认爬升），由同一执行实例的所有调用共享。 */
+  climb?: { height: number; spent: number };
   /** 上报进度 0..1，供预规划和控制台使用 */
   progress(p: number, note?: string): void;
   /** Bounded stationary work suspends only the movement stall check, including nested calls. */
@@ -141,7 +143,7 @@ export function runSkill<A>(ctx: SkillCtx, skill: Skill<A>, args: A & { make?: b
       return typeof value === 'function' ? value.bind(target) : value;
     },
   });
-  return skill.run({ ...ctx, adapter, actionAdapter, make }, args).catch((error: unknown) => {
+  return skill.run({ ...ctx, adapter, actionAdapter, make, ...(ctx.climb === undefined && ctx.recovery?.climb ? { climb: ctx.recovery.climb } : {}) }, args).catch((error: unknown) => {
     if (isAbort(error)) throw error;
     return fail(codeFromError(error), error instanceof Error ? error.message : String(error));
   });

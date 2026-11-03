@@ -181,7 +181,7 @@ export class Arbiter extends EventEmitter {
    * 启动一个任务。若已有任务在运行，会先抢占（取消）它。
    * 返回 null 表示参数校验失败。
    */
-  start(step: Step, source: TaskSource, meta: { planId?: string; gentle?: boolean } = {}): TaskInfo | { error: string } {
+  start(step: Step, source: TaskSource, meta: { planId?: string; gentle?: boolean; climb?: { height: number; spent: number } } = {}): TaskInfo | { error: string } {
     if (this.pausedFlag) return { error: 'Agent 已暂停' };
     const v = this.validate(step);
     if (!v.ok) {
@@ -234,6 +234,7 @@ export class Arbiter extends EventEmitter {
         if (note) task.note = note;
       },
       setStationaryWait: (waiting: boolean) => { task.stationaryWait = waiting; },
+      ...(meta.climb ? { climb: meta.climb } : {}),
     };
 
     runSkill(ctx, skill, v.args as { make?: boolean })
@@ -247,13 +248,13 @@ export class Arbiter extends EventEmitter {
       .then((result) => {
         clearTimeout(timeout);
         if (controller.signal.reason === 'TIMEOUT' && result.status === 'cancelled') {
-          result = { status: 'failed', failureCode: 'TIMEOUT', summary: `${skill.name} 超时` };
+          result = { status: 'failed', failureCode: 'TIMEOUT', summary: `${skill.name} 超时`, ...(result.data ? { data: result.data } : {}) };
         }
         if (controller.signal.aborted && controller.signal.reason !== 'TIMEOUT' && result.status === 'succeeded') {
-          result = { status: 'cancelled', summary: `${skill.name} 已被取消（结果作废）` };
+          result = { status: 'cancelled', summary: `${skill.name} 已被取消（结果作废）`, ...(result.data ? { data: result.data } : {}) };
         }
         if (task.cancelCode && result.status !== 'succeeded') {
-          result = { status: 'failed', failureCode: task.cancelCode, summary: `${skill.name} 失败：${task.cancelCode}${task.cancelReason ? `（${task.cancelReason}）` : ''}` };
+          result = { status: 'failed', failureCode: task.cancelCode, summary: `${skill.name} 失败：${task.cancelCode}${task.cancelReason ? `（${task.cancelReason}）` : ''}`, ...(result.data ? { data: result.data } : {}) };
         }
         if (this.current?.id === task.id) {
           this.current = null;

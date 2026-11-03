@@ -82,23 +82,14 @@ export function nextStep(a: Activity): Step | null {
     if (a.iteration + 1 >= a.repeat) return null;
     a.iteration++;
     a.index = 0;
-    a.climbSpent = {}; // 新一轮：重置累计额度，从原始参数开始。
+    a.climb = {}; // 新一轮：重置额度账本，从原始目标开始。
   }
   const step = a.steps[a.index++];
   if (!step) return null;
-  // climb_up 跨自动重试/恢复共享剩余额度：派发时按累计已爬格数扣减，只改本次派发的副本，不改模板。
-  if (step.skill === 'climb_up' && a.climbSpent) {
-    const spent = a.climbSpent[JSON.stringify(step.args ?? {})] ?? 0;
-    if (spent > 0) {
-      const args = step.args && typeof step.args === 'object' && !Array.isArray(step.args) ? { ...step.args } : step.args;
-      if (args && typeof args === 'object' && !Array.isArray(args)) {
-        const height = (args as Record<string, unknown>).height;
-        if (typeof height === 'number') {
-          (args as Record<string, unknown>).height = Math.max(1, height - spent);
-          return { skill: step.skill, args };
-        }
-      }
-    }
+  if (step.skill === 'climb_up') {
+    const key = JSON.stringify(step.args ?? {});
+    a.climb ??= {};
+    a.climb[key] ??= { height: (step.args as Record<string, unknown>)?.height as number ?? 0, spent: 0 };
   }
   return { skill: step.skill, args: step.args };
 }
@@ -147,25 +138,18 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   if (previousPosition && JSON.stringify(feetCell(previousPosition)) !== JSON.stringify(feetCell(state.pos))) delete a.airDigs;
   a.results.push({ skill: step.skill, args: step.args, status: result.status, failureCode: result.failureCode, summary: result.summary.slice(0, 160), at: Date.now(), durationMs, pos: { ...state.pos }, ...(view !== undefined ? { view } : {}) });
   if (a.results.length > 16) a.results = a.results.slice(-16);
+  // climb_up 的统一结算与续跑决策：账本已在 climbUp.run 里结算（成功/失败/取消/嵌套都计入），这里只判断完成/继续/耗尽。
+  if (step.skill === 'climb_up') {
+    const key = JSON.stringify(step.args ?? {});
+    if (result.status === 'succeeded') {
+      if (a.climb) delete a.climb[key];
+    } else {
+      const budget = a.climb?.[key];
+      if (budget && budget.spent >= budget.height && result.data?.goalReached === false) return { kind: 'stuck', why: result.summary.slice(0, 160), exhausted: true };
+    }
+  }
   if (result.status === 'succeeded') {
     a.consecutiveFailures = 0;
-    // climb_up 成功：本逻辑动作额度用完，清掉累计，下一轮从原始参数开始。
-    if (step.skill === 'climb_up' && a.climbSpent) delete a.climbSpent[JSON.stringify(a.steps[Math.max(0, a.index - 1)]?.args ?? step.args ?? {})];
-    // 恢复（use_skill）内部爬升也要入账：失败时的站位到现在的净上升，加回父动作余额，避免原动作又整段重爬。
-    if (step.skill === 'use_skill') {
-      const failure = (step.args as Record<string, unknown> | undefined)?.failure as { skill?: string; position?: { y: number } } | undefined;
-      if (failure?.skill === 'climb_up' && typeof failure.position?.y === 'number') {
-        const dy = Math.floor(state.pos.y) - Math.floor(failure.position.y);
-        if (dy > 0) {
-          const climbStep = a.steps.find((s) => s.skill === 'climb_up');
-          if (climbStep) {
-            const key = JSON.stringify(climbStep.args ?? {});
-            a.climbSpent ??= {};
-            a.climbSpent[key] = (a.climbSpent[key] ?? 0) + dy;
-          }
-        }
-      }
-    }
     // 真实挖掘、放置或跨格移动是执行进展，不能沿用之前的空挖计数。
     if (step.skill === 'place_at' && result.data?.placed
       || step.skill === 'dig_at' && result.data?.was && result.data.was !== 'air'
@@ -257,17 +241,6 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   if (data?.obscured) {
     if (dark && hasItem(/^torch$/)) return adapt('place_torch', {}, '看不清，先插火把照亮再试', 'light');
     return { kind: 'stuck', why: result.summary.slice(0, 160) };
-  }
-  // climb_up 已实际爬升但未满足停止条件：把已爬格数累计进本轮额度（不写回模板），后续清障/重试/恢复只爬剩余额度；
-  // 额度耗尽就标记 exhausted，由调度器终止自动推进（不再插恢复、不再重放原动作），避免 16 格变 33 格。
-  if (step.skill === 'climb_up' && typeof data?.climbed === 'number' && data.climbed > 0 && data?.goalReached === false) {
-    const own = a.steps[Math.max(0, a.index - 1)];
-    const key = JSON.stringify(own?.args ?? step.args ?? {});
-    const spent = (a.climbSpent?.[key] ?? 0) + data.climbed;
-    a.climbSpent ??= {};
-    a.climbSpent[key] = spent;
-    const height = own?.skill === 'climb_up' && own.args && typeof own.args === 'object' ? (own.args as Record<string, unknown>).height : undefined;
-    if (typeof height === 'number' && spent >= height) return { kind: 'stuck', why: result.summary.slice(0, 160), exhausted: true };
   }
   // 3) 头顶跳跃空间受阻：先挖开头顶再垫/迈。place_at / climb_up 是 Agent 明确要「往上」，自动清头顶属于稳定执行已选动作。
   if (step.skill === 'place_at' && data?.pillarFailure === 'NOT_PLACED:头顶跳跃空间受阻'

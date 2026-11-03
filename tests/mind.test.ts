@@ -112,7 +112,7 @@ test('climb_up 额度耗尽直接终止，不插入学得恢复也不重放原�
   const previous = SKILLS.climb_up;
   SKILLS.climb_up = { name: 'climb_up', description: '测试爬升', argsDoc: '{}', timeoutMs: 3000, movement: true,
     validate: (raw: any) => ({ ok: true, args: { height: Number(raw?.height ?? 16), untilSky: true } }),
-    run: async () => fail('STUCK', '往上爬了 16 格后停下：仍未满足停止条件', { climbed: 16, goalReached: false }) };
+    run: async (ctx: { climb?: { height: number; spent: number } }) => { if (ctx.climb) ctx.climb.spent = 16; return fail('STUCK', '往上爬了 16 格后停下：仍未满足停止条件', { goalReached: false }); } };
   t.after(() => { SKILLS.climb_up = previous; setBehaviorRegistry(null); });
   let recovered = false;
   (w.mind as any).d.behaviors = {
