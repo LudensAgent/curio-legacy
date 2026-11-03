@@ -883,8 +883,17 @@ export class BehaviorEngine {
     if (result.status === 'cancelled') { this.noteInvocation(name, resolved || result.data?.version !== undefined ? b : undefined, result); return; }
     if (!b) return;
     if (this.noteInvocation(name, b, result)) return;
-    const succeeded = result.status === 'succeeded' && (!b.candidate || result.data?.verified === true);
-    this.record(b, succeeded, result.summary, result.data ?? {});
+    // 统一目标达成未知的记账：失败才算失败、verify 通过才算成功；没写/没通过 verify 的“跑完了”只记使用、不记成败。
+    const okRun = this.runOutcome(result);
+    if (okRun === null) return;
+    this.record(b, okRun, result.summary, result.data ?? {});
+  }
+
+  /** 一次运行的成败：失败算失败，verify 通过算成功；其余是目标达成未知（只记使用）。恢复技能不看 verify。 */
+  private runOutcome(result: SkillResult, recoveryRun = false): boolean | null {
+    if (recoveryRun) return result.status === 'succeeded';
+    if (result.status === 'failed') return false;
+    return result.data?.verified === true ? true : null;
   }
 
   /** Count one invocation separately from delayed recovery/automatic success evidence. */
@@ -918,6 +927,19 @@ export class BehaviorEngine {
     const old = typeof version === 'number' ? this.book?.definitionVersion(name, version) : null;
     const restored = old ? toBehavior(old, this.adapter) : null;
     return restored && !('error' in restored) ? restored : undefined;
+  }
+
+  /** 这次任务实际执行的是哪个版本：优先用回执/反射捕获的版本；执行期间没被改写才按当前 trial 归属；
+   *  执行期间被改写又没捕获到版本时返回 undefined——不按完成时的 trial:true 猜当前候选。 */
+  private executedRun(name: string, o: TaskOutcome, pending: { behavior: Behavior } | undefined): Behavior | undefined {
+    const capturedVersion = o.result.data?.version;
+    if (capturedVersion !== undefined) return this.completed(name, capturedVersion);
+    const args = o.task.args as { trial?: boolean; failure?: unknown };
+    const captured = pending?.behavior ?? (args.failure ? this.recoveries.get(name)?.behavior : undefined);
+    if (captured) return captured;
+    const changedAt = Math.max(this.stats[name]?.versionAt ?? 0, this.book?.get(name)?.updatedAt ?? 0);
+    if (changedAt <= o.task.startedAt) return this.get(name, args.trial === true) ?? this.completed(name, undefined);
+    return undefined;
   }
 
   private touch(name: string, fn: (st: BehaviorStats) => void) {
@@ -962,35 +984,26 @@ export class BehaviorEngine {
     const name = String((o.task.args as any)?.name ?? '');
     const aftermath = this.aftermath.get(name);
     const pending = aftermath?.taskId === o.task.id ? aftermath : undefined;
+    const args = o.task.args as { trial?: boolean; failure?: unknown };
+    const recovery = this.recoveries.get(name);
+    // 回执带版本按版本归属；反射捕获按捕获版本；执行期间没被改写才按当前 trial 归属；
+    // STUCK/TIMEOUT 常缺回执版本，执行期间又被改成新候选时只能保留未知，不按完成时的 trial:true 猜当前候选。
+    const b = this.executedRun(name, o, pending);
     if (o.result.status === 'cancelled') {
-      const recovery = this.recoveries.get(name);
-      const args = o.task.args as { trial?: boolean; failure?: unknown };
-      const captured = pending?.behavior ?? (args.failure ? recovery?.behavior : undefined);
-      const selected = captured ?? (o.result.data?.version !== undefined ? this.completed(name, o.result.data.version) : this.get(name, args.trial === true));
-      const changedAt = Math.max(this.stats[name]?.versionAt ?? 0, this.book?.get(name)?.updatedAt ?? 0);
-      const versionKnown = captured || o.result.data?.version !== undefined || changedAt <= o.task.startedAt;
-      this.noteInvocation(name, versionKnown ? selected : undefined, o.result);
+      this.noteInvocation(name, b, o.result);
       if (pending) this.aftermath.delete(name);
       if (args.failure && recovery) { recovery.ignored = true; recovery.invocationRecorded = true; }
       return;
     }
-    const args = o.task.args as { trial?: boolean; failure?: unknown };
-    // 回执带版本按版本归属；缺版本时按 trial 标志取候选/稳定——STUCK 终止的回执常缺版本，不能静默算到稳定版头上。
-    const b = o.result.data?.version !== undefined
-      ? this.completed(name, o.result.data.version)
-      : this.get(name, args.trial === true) ?? this.completed(name, undefined);
-    if (!b) return;
+    if (!b) { this.noteInvocation(name, undefined, o.result); if (pending) this.aftermath.delete(name); return; }
     this.noteUndo(name, o.task.id);
-    const recovery = this.recoveries.get(name);
     const recoveryRun = !!args.failure && !!recovery;
     if (recoveryRun) recovery.invocationRecorded = true;
     if (b.candidate) { this.recordInvocation(name, o.result, b); return; }
     const skipped = this.noteInvocation(name, b, o.result);
     // 成败只看“目标是否真的达成”：恢复技能由 creditRecovery 按“重做失败的那一步”定成败；
     // 普通稳定技能只有 verify 通过（verified:true）才算成功；没写 verify 的“跑完了”是目标达成未知，只记使用、不记成败。
-    const okRun: boolean | null = recoveryRun
-      ? o.result.status === 'succeeded'
-      : o.result.status === 'failed' ? false : o.result.data?.verified === true ? true : null;
+    const okRun = this.runOutcome(o.result, recoveryRun);
     if (recoveryRun) {
       recovery.behavior = b;
       recovery.data = o.result.data;
@@ -1032,16 +1045,23 @@ export class BehaviorEngine {
     this.aftermath.delete(name);
     if (!a) return;
     const b = a.behavior;
+    const version = b.version ?? this.stats[b.name]?.rev ?? 1;
     const hp = this.adapter.state().hp;
     const lost = Math.max(0, a.hp - hp);
     const situation = b.when ? situationOf(b.when) : null;
     // 三态：true 触发处境还在；false 确认解除；null 判断不了（死了、没有处境可查、或读世界失败）——不能误说成“解除了”。
     let still: boolean | null = null;
     if (!died && situation) { try { still = evalPredicate(situation, this.sense(null)); } catch { still = null; } }
-    const facts = [died ? '做完后不久就死了' : '', lost >= 1 ? `做完后又掉了 ${Math.round(lost)} 点血` : '',
-      still === true ? '触发它的情况还在' : still === false ? '触发它的情况解除了' : ''].filter(Boolean).join('；');
-    this.bus.publish('skill_aftermath', 'P3', `技能「${name}」事后观测：${facts}${a.summary ? `（它做了：${a.summary.slice(0, 80)}）` : ''}`,
-      { name, version: b.version ?? this.stats[b.name]?.rev ?? 1, taskId: a.taskId, died, lost: Math.round(lost), still, context: a.context });
+    // 观测区间是「触发到判断」：净掉血是触发以来的，不是“做完后”；死亡按是否已完成区分执行阶段。
+    const completed = a.summary !== undefined;
+    const facts = [
+      died ? (completed ? '做完后不久就死了' : '执行期间就死了') : '',
+      lost >= 1 ? `从触发到现在净掉了 ${Math.round(lost)} 点血` : '',
+      still === true ? '触发它的情况还在' : still === false ? '触发它的情况解除了' : '',
+    ].filter(Boolean).join('；');
+    const context = a.context ? `；触发时：${a.context}` : '';
+    this.bus.publish('skill_aftermath', 'P3', `技能「${name}」v${version} 事后观测：${facts}${a.summary ? `（它做了：${a.summary.slice(0, 80)}）` : ''}${context}`,
+      { name, version, taskId: a.taskId, died, lost: Math.round(lost), still, context: a.context });
   }
 
   private record(b: Behavior, okRun: boolean, summary: string, data: Record<string, any>) {

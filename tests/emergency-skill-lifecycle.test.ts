@@ -25,7 +25,7 @@ function setup(t: TestContext) {
   setBehaviorRegistry(engine);
   t.after(() => { setBehaviorRegistry(null); engine.dispose(); fs.rmSync(directory, { recursive: true, force: true }); });
   assert.ok(engine.write(definition).ok);
-  for (let i = 0; i < 3; i++) engine.recordInvocation(definition.name, { status: 'succeeded', summary: '在当时的处境中实际离开危险位置', data: { version: 1 } });
+  for (let i = 0; i < 3; i++) engine.recordInvocation(definition.name, { status: 'succeeded', summary: '在当时的处境中实际离开危险位置', data: { version: 1, verified: true } });
   assert.ok(book.write(definition.name, definition.description, notes).ok);
   return { directory, book, adapter, bus, engine };
 }

@@ -202,7 +202,8 @@ export class SkillSmith {
     const st = this.engine.statsOf(o.skill);
     const cur = this.engine.currentStats(o.skill);
     const last = st?.recent?.at(-1);
-    const stale = now - o.at > SkillSmith.OWNER_TTL_MS || !b || this.engine.inactive(o.skill) || this.engine.isAdvisory(o.skill) || this.engine.versionOf(b) !== o.version
+    // 读取旧记录也复用和新建一致的覆盖资格（候选/收起/停用/拉锯只提醒都不算覆盖），不因版本匹配就继续生效。
+    const stale = now - o.at > SkillSmith.OWNER_TTL_MS || !!this.engine.handlesNow(o.skill) || !b || this.engine.versionOf(b) !== o.version
       || (cur.fail >= 3 && cur.fail > cur.ok) || (!!last && !last.ok && now - last.at < 10 * 60_000);
     if (!stale) return o;
     this.owners.delete(key);
