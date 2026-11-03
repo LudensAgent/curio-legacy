@@ -134,7 +134,9 @@ export class WalkMoveExecutor implements MoveExecutor {
   }
 
   private releaseIf(executionId: string): void {
-    if (executionId === this.activeExecutionId) this.body.setControlState('forward', false);
+    // 归属检查必须同时保护松键与清空归属：旧段的迟到收尾不能清掉新段的归属。
+    if (executionId !== this.activeExecutionId) return;
+    this.body.setControlState('forward', false);
     this.activeExecutionId = null;
   }
 }
@@ -161,23 +163,31 @@ export async function runWalkRoute(opts: {
   let sequence = 0; // 委托内单调递增，跨段不重置
   const scope = { worldId: opts.request.worldId, dim: opts.request.dim, sessionId: opts.request.sessionId, executionId: '' };
 
-  loop.start(opts.request);
+  // 统一有效期限：宿主期限与库执行期限一致，避免宿主到期后库仍继续执行。
+  loop.start({ ...opts.request, deadlineMs: deadline });
   scope.executionId = loop.status()!.delegationId;
-  executor.setFrameSink((entity) => loop.onSample(bodySample(scope, entity, now(), ++sequence, lifecycle())));
+
+  // 统一帧处理顺序：本轮合法观测先进入地图并复验，再让身体样本确认到达。
+  const observeThenSample = (entity: WalkBody['entity']) => {
+    const report = opts.observe?.();
+    if (report) loop.observe(report, 64);
+    loop.onSample(bodySample(scope, entity, now(), ++sequence, lifecycle()));
+  };
+  executor.setFrameSink(observeThenSample);
 
   // 初始实测位置：bodyArrival 需要多帧确认身体稳定在起点，advance 才会启动首段。
-  for (let i = 0; i < 8; i++) loop.onSample(bodySample(scope, opts.tick(), now(), ++sequence, lifecycle()));
+  for (let i = 0; i < 8; i++) observeThenSample(opts.tick());
 
   let iterations = 0;
   while (loop.status()!.result === null && now() < deadline && iterations++ < 2000) {
-    // 先处理本轮世界观测，再 advance（世界变化先于到达确认；异步 move 返回也遵守同一顺序）。
-    const report = opts.observe?.();
-    if (report) loop.observe(report, 64);
     loop.advance(64);
     loop.checkTimeout();
     await new Promise((r) => setImmediate(r));
   }
-  return loop.status()!.result ?? { outcome: 'FAILED', message: 'no route result', problem: { kind: 'execution_failed', detail: 'loop ended without a terminal result' }, confirmed: false, trace: [] };
+  // 退出时若仍无终态：取消所属库执行与身体执行、释放控制，保留已测位移后返回。
+  let result = loop.status()!.result;
+  if (result === null) result = loop.cancel('scheduler', 'host deadline exceeded');
+  return result;
 }
 
 export { GROUNDED_ARRIVAL_DEFAULTS };

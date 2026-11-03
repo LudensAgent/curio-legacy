@@ -92,3 +92,28 @@ test('未知形状返回能力缺口，不当作可通行', () => {
   assert.equal(r.kind, 'unsupported_shape');
   if (r.kind === 'unsupported_shape') assert.match(r.block, /oak_slab/);
 });
+
+test('宿主期限早于请求期限：返回后不再继续执行，保留部分位移', async () => {
+  const map = buildMap();
+  const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }];
+  const { bot, tick, now } = body({ x: 0.54, z: 0.52 });
+  const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, now, deadlineMs: 2500 });
+  assert.equal(result.outcome, 'TIMEOUT', result.message);
+  assert.equal(bot.control.forward, false, '返回后不得继续按前进键');
+});
+
+test('可见支撑变化在到达前被处理，不误报 ARRIVED', async () => {
+  const map = buildMap();
+  const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }];
+  const { bot, tick, now } = body({ x: 0.54, z: 0.52 });
+  let removed = false;
+  const observe = () => {
+    if (!removed && now() >= 2500) {
+      removed = true;
+      return map.observe({ worldId: 'world', dim: 'overworld', sessionId: 's1', observedAt: now(), sequence: 900, source: 'vision', evidence: 'seen', stateComplete: true, state: { name: 'minecraft:air', properties: {} }, pos: { x: 1, y: -1, z: 0 } });
+    }
+    return null;
+  };
+  const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, now, observe });
+  assert.notEqual(result.outcome, 'ARRIVED', '支撑变化应导致失效，不能误报 ARRIVED');
+});
