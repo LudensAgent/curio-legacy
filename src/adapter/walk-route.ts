@@ -28,16 +28,17 @@ const FULL_CUBE: CollisionShape = {
   boxes: [{ minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 }],
   supportFaces: [{ top: 1, minX: 0, minZ: 0, maxX: 1, maxZ: 1 }],
 };
-const DRY_FULL = new Set(['minecraft:stone', 'minecraft:grass_block', 'minecraft:dirt', 'minecraft:cobblestone', 'minecraft:sand']);
-const AIR = new Set(['minecraft:air', 'minecraft:cave_air', 'minecraft:void_air', 'air']);
+const DRY_FULL = new Set(['stone', 'grass_block', 'dirt', 'cobblestone', 'sand']);
+const AIR = new Set(['air', 'cave_air', 'void_air']);
 
 /** 版本明确的碰撞形状提供器：只接普通干燥整块；未知形状返回能力缺口，不猜。 */
 export const walkCollisionProvider: CollisionShapeProvider = {
   version: 'curio-1.20.1-dry-full-v1',
   resolve(state, _cell, _read) {
-    if (AIR.has(state.name)) return { kind: 'shape', shape: EMPTY };
-    if (DRY_FULL.has(state.name)) return { kind: 'shape', shape: FULL_CUBE };
-    return { kind: 'unsupported_shape', block: serializeBlockState(state), detail: `未接入的形状：${state.name}` };
+    const name = state.name.replace(/^minecraft:/, '');
+    if (AIR.has(name)) return { kind: 'shape', shape: EMPTY };
+    if (DRY_FULL.has(name)) return { kind: 'shape', shape: FULL_CUBE };
+    return { kind: 'unsupported_shape', block: serializeBlockState(state), detail: `未接入的形状：${name}` };
   },
 };
 

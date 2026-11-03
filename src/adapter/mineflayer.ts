@@ -1540,11 +1540,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const bot = this.bot;
     return () => new Promise((resolve) => {
       const onTick = () => {
-        bot.removeListener('physicTick', onTick);
+        bot.removeListener('physicsTick', onTick);
         const e = bot.entity;
         resolve({ position: { x: e.position.x, y: e.position.y, z: e.position.z }, velocity: { x: e.velocity.x, y: e.velocity.y, z: e.velocity.z }, onGround: e.onGround, isInWater: e.isInWater });
       };
-      bot.on('physicTick', onTick);
+      bot.on('physicsTick', onTick);
     });
   }
 

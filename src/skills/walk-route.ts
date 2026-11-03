@@ -86,7 +86,7 @@ export const walkRoute: Skill<WalkRouteArgs> = {
     };
     const nav = await runWalkRoute({
       map, body, request, tick,
-      lifecycle: () => ({ alive: state.alive, connected: state.connected, observationReady: state.observationReady }),
+      lifecycle: () => { const s = ctx.adapter.state(); return { alive: s.alive, connected: s.connected, observationReady: s.observationReady }; },
       deadlineMs: args.deadlineMs ?? ctx.deadline,
       now: Date.now,
     });
