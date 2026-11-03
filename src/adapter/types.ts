@@ -146,7 +146,7 @@ export interface AgentState {
 export type MoveTarget =
   | { kind: 'near'; pos: Vec3Like; range: number }
   | { kind: 'xz'; x: number; z: number; range: number }
-  /** 站到这一格；普通移动不改地形，明确挖掘/爬升动作可另行授权。 */
+  /** 站到这一格；y 是脚高，可为分数（半砖/雪层等薄层，如 64.5）。普通移动不改地形，明确挖掘/爬升动作可另行授权。 */
   | { kind: 'xyz'; x: number; y: number; z: number }
   | { kind: 'reach_block'; pos: Vec3Like }
   | { kind: 'place_block'; pos: Vec3Like; facing?: 'north' | 'south' | 'east' | 'west' | 'up' | 'down' }

@@ -38,10 +38,10 @@ test('moving sideways without reaching the requested cell is not arrival', async
   await assert.rejects(adapter.moveTo({ kind: 'xyz', x: 4, y: 64, z: 0 }, opts), /尚未到达目标.*0\.50,64\.00,1\.50/);
 });
 
-test('exact arrival uses the actual integer feet cell without an extra block of height', async () => {
+test('exact arrival uses the actual foot height without an extra block of height', async () => {
   const { adapter, bot, opts } = fixture();
   bot.pathfinder.goto = async () => { bot.entity.position = new Vec3(-1.5, 64.5, 2.75); };
-  await adapter.moveTo({ kind: 'xyz', x: -2, y: 64, z: 2 }, opts);
+  await adapter.moveTo({ kind: 'xyz', x: -2, y: 64.5, z: 2 }, opts);
   await assert.rejects(adapter.moveTo({ kind: 'xyz', x: -2, y: 65, z: 2 }, opts), /尚未到达目标/);
 });
 

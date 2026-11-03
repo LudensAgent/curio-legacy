@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { placeAt, primitiveSkills, stepTo } from '../src/skills/primitives.ts';
 import { makeBridge } from '../src/codeskills/bridge.ts';
 import { FakeAdapter } from './fake-adapter.ts';
-import { makeCtx } from './survival-helpers.ts';
+import { makeCtx, observeAllBlocks } from './survival-helpers.ts';
 
 test('a downward step reports the selected support cell without revealing an unseen block', async (t) => {
   const w = new FakeAdapter();
@@ -94,7 +94,7 @@ test('step does not auto-fill a shallow air gap; it reports the missing support 
 test('step rejects partial diagonal movement and reports actual location', async (t) => {
   const w = new FakeAdapter();
   w.pos = { x: 0.5, y: 64, z: 0.5 };
-  const ctx = makeCtx(w);
+  const ctx = makeCtx(w, { senses: { observeBlocks: observeAllBlocks(w) } });
   t.after(() => ctx.memory.close());
   const move = t.mock.method(w, 'moveTo', async () => { w.pos = { x: 1.5, y: 64, z: 0.5 }; });
   const r = await stepTo.run(ctx, { at: [1, 0, 1], facing: 'E' });
@@ -108,7 +108,7 @@ test('step rejects partial diagonal movement and reports actual location', async
 test('step confirms position even when movement resolves or rejects', async (t) => {
   const w = new FakeAdapter();
   w.pos = { x: 0.5, y: 64, z: 0.5 };
-  const ctx = makeCtx(w);
+  const ctx = makeCtx(w, { senses: { observeBlocks: observeAllBlocks(w) } });
   t.after(() => ctx.memory.close());
   const move = t.mock.method(w, 'moveTo', async () => {});
   assert.equal((await stepTo.run(ctx, { at: [1, 0, 0], facing: 'E' })).status, 'failed');

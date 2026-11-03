@@ -4,7 +4,7 @@ import { WorldMemory } from '../src/memory/store.ts';
 import { createActivity, nextStep } from '../src/mind/activity.ts';
 import { parseDecision, validateDraft } from '../src/mind/thinker.ts';
 import { SKILLS } from '../src/skills/index.ts';
-import { makeCtx, TestWorld } from './survival-helpers.ts';
+import { makeCtx, observeAllBlocks, TestWorld } from './survival-helpers.ts';
 
 test('the recorded north narrative with explicit south steps is rejected until the activity declares its frame', (t) => {
   const adapter = new TestWorld(), memory = new WorldMemory(null);
@@ -50,7 +50,7 @@ test('all horizontal primitive aliases bind to the declared frame and even optio
 });
 
 test('camera turns do not change a declared north frame across routine repetitions', async (t) => {
-  const adapter = new TestWorld(), ctx = makeCtx(adapter);
+  const adapter = new TestWorld(), ctx = makeCtx(adapter, { senses: { observeBlocks: observeAllBlocks(adapter) } });
   t.after(() => ctx.memory.close());
   adapter.pos = { x: 0.5, y: 64, z: 0.5 };
   adapter.yaw = Math.PI;

@@ -222,7 +222,11 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
         const { local: _local, around: _around, ...data } = r.data ?? {};
         return { ok: r.status === 'succeeded', code: r.failureCode ?? null, summary: r.summary.slice(0, 200), ...(Object.keys(data).length ? { data } : {}) };
       }
-      case 'stepTo': return runSkill('step', { xyz: { x: int(a[0], 'x'), y: int(a[1], 'y'), z: int(a[2], 'z') }, facing: 'N' });
+      case 'stepTo': {
+        const y = Number(a[1]);
+        if (!Number.isFinite(y)) throw new Error('y 要是数字');
+        return runSkill('step', { xyz: { x: int(a[0], 'x'), y, z: int(a[2], 'z') }, facing: 'N' });
+      }
       case 'digAt': {
         const options = a[3] && typeof a[3] === 'object' ? a[3] as Record<string, unknown> : {};
         return runSkill('dig_at', { xyz: { x: int(a[0], 'x'), y: int(a[1], 'y'), z: int(a[2], 'z') }, facing: 'N', ...(options.wet === true ? { wet: true } : {}), ...(options.lava === true ? { lava: true } : {}) });

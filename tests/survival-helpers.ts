@@ -44,6 +44,11 @@ export class InstantBuildWorld extends TestWorld {
   }
 }
 
+/** 无遮挡的模拟观察：把每个已加载格（含默认地面/石头/空气）都当作当前看得见，供需要真实支撑/净空的 step 用例。 */
+export const observeAllBlocks = (adapter: FakeAdapter) => (positions: Vec3Like[]) => positions
+  .filter((pos) => adapter.blockAt(pos) !== null)
+  .map((pos) => ({ pos, name: adapter.blockAt(pos)!, properties: adapter.blockStateAt?.(pos)?.properties ?? {}, worldId: adapter.worldId, sessionId: adapter.sessionId, dimension: adapter.dim, observationId: 1, observedAt: Date.now(), source: 'vision' as const }));
+
 export function stubSenses(adapter: FakeAdapter, extra: Partial<Senses> = {}): Senses {
   const placed = () => new Set(adapter.blocks.map((b) => `${b.pos.x},${b.pos.y},${b.pos.z}`));
   return {
@@ -54,7 +59,7 @@ export function stubSenses(adapter: FakeAdapter, extra: Partial<Senses> = {}): S
     observeBlocks: (positions) => {
       const seen = placed();
       return positions.filter((pos) => seen.has(`${pos.x},${pos.y},${pos.z}`))
-        .map((pos) => ({ pos, name: adapter.blockAt(pos) ?? 'air', properties: {}, worldId: adapter.worldId, sessionId: adapter.sessionId, dimension: adapter.dim, observationId: 1, observedAt: Date.now(), source: 'vision' as const }));
+        .map((pos) => ({ pos, name: adapter.blockAt(pos) ?? 'air', properties: adapter.blockStateAt?.(pos)?.properties ?? {}, worldId: adapter.worldId, sessionId: adapter.sessionId, dimension: adapter.dim, observationId: 1, observedAt: Date.now(), source: 'vision' as const }));
     },
     refresh() {}, markSweep() {},
     nearestLand: () => null,

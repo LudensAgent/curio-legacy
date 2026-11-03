@@ -1081,7 +1081,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         goal = new goals.GoalNearXZ(target.x, target.z, target.range);
         break;
       case 'xyz':
-        goal = new goals.GoalBlock(Math.floor(target.x), Math.floor(target.y), Math.floor(target.z));
+        // y 是脚高（可为分数）。pathfinder 的节点是“脚下那块 +1”：整块脚高 64 → 节点 64，
+        // 半砖脚高 64.5 → 节点 65（见 pathfinder getPathFromTo 的 offset）。
+        goal = new goals.GoalBlock(Math.floor(target.x), Math.ceil(target.y - 0.001), Math.floor(target.z));
         break;
       case 'reach_block': {
         // 浆果丛、作物、花草、火把这些没有碰撞箱的方块：视线射线会直接穿过去，“看得到这一格”永远不成立，
@@ -1151,7 +1153,13 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       goal = new goals.GoalFollow(ent, target.range);
     }
     const position = b.entity.position;
-    if (!goal.isEnd(position.floored())) throw new Error(`No path: 寻路结束但尚未到达目标，实际位于 (${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})`);
+    if (target.kind === 'xyz') {
+      // xyz 的 y 是脚高（可为分数）：验收实际脚高与列，不只看节点——半砖脚高 64.5 与整块脚高 65 落在同一节点。
+      const cell = position.floored();
+      if (cell.x !== Math.floor(target.x) || cell.z !== Math.floor(target.z) || Math.abs(position.y - target.y) > 0.3) {
+        throw new Error(`No path: 寻路结束但尚未到达目标，实际位于 (${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})`);
+      }
+    } else if (!goal.isEnd(position.floored())) throw new Error(`No path: 寻路结束但尚未到达目标，实际位于 (${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})`);
   }
 
   private leafOnlyBreakable: Set<number> | null = null;

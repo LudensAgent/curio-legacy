@@ -1,57 +1,54 @@
 import minecraftData from 'minecraft-data';
+import BlockFactory from 'prismarine-block';
 import { config } from '../config.ts';
 
 /**
- * 局部几何：用当前 blockstate 的碰撞形状判断「能不能穿过」「顶面能不能站」，
- * 不再把方块名属于“实心/可穿过”直接等同于可站立或无碰撞。
+ * 局部几何：按「当前已观察 blockstate」解析碰撞盒，判断支撑顶面与身体净空。
  * 只做纯几何，不查询遮挡或未观察区域——上层负责合法观测与未知反馈。
+ * 用 prismarine-block 的 fromProperties 取当前状态的碰撞盒，不把方块名属于
+ * “实心/可穿过”直接等同于可站立或无碰撞，也不再取所有状态的形状并集。
  */
 
-const registry = minecraftData(config.mc.version) as unknown as {
-  blockCollisionShapes: { blocks: Record<string, number | number[]>; shapes: Record<number, number[][]> };
-};
+const version = config.mc.version;
+const data = minecraftData(version);
+const Block = BlockFactory(version);
 
-/** 一个碰撞盒：[minX, minY, minZ, maxX, maxY, maxZ]，cell-local [0,1]^3。 */
 type Box = number[];
+type BlockProps = Record<string, string | number | boolean>;
 
-/** 雪层：按层数给碰撞高度（1 层 = 0.125，8 层 = 1.0）。 */
-function snowBoxes(props: Record<string, unknown>): Box[] {
-  const layers = Number(props.layers ?? 1);
-  if (!Number.isFinite(layers) || layers < 1) return [];
-  return [[0, 0, 0, 1, Math.min(layers, 8) / 8, 1]];
-}
+const AIR = new Set(['air', 'cave_air', 'void_air']);
 
-/** 半砖：按 type 属性分辨下半砖 / 上半砖 / 双层。 */
-function slabBoxes(name: string, props: Record<string, unknown>): Box[] {
-  const type = String(props.type ?? 'bottom');
-  if (type === 'top') return [[0, 0.5, 0, 1, 1, 1]];
-  if (type === 'bottom') return [[0, 0, 0, 1, 0.5, 1]];
-  return [[0, 0, 0, 1, 1, 1]]; // double
-}
-
-/**
- * 一个方块在当前 blockstate 下的碰撞盒集合（cell-local [0,1]^3）。空气/液体/火把等返回空。
- * 半砖与雪层按属性精确展开；其余带状态的方块（门、栅栏、梯子、箱子…）沿用静态表里各状态的并集，
- * 对「有没有碰撞」「顶面有多高」是保守但仍正确的估计。
- */
-export function collisionBoxes(name: string, props: Record<string, unknown> = {}): Box[] {
-  if (name === 'snow') return snowBoxes(props);
-  if (name.endsWith('_slab')) return slabBoxes(name, props);
-  const ids = registry.blockCollisionShapes.blocks[name];
-  if (ids === undefined) return [];
-  const idList = Array.isArray(ids) ? ids : [ids];
-  return idList.flatMap((id) => registry.blockCollisionShapes.shapes[id] ?? []);
+/** 一个方块在当前 blockstate 下的碰撞盒（cell-local，可超出 [0,1]，如栅栏 1.5 高）。空气/液体/火把返回空。 */
+export function collisionBoxes(name: string, properties: BlockProps = {}): Box[] {
+  if (name === null || name === undefined || AIR.has(name)) return [];
+  if (!data.blocksByName[name]) return [];
+  return (Block.fromProperties(name, properties as Record<string, string | number>, 0)?.shapes ?? []) as Box[];
 }
 
 /**
  * 最高可站立顶面（cell-local Y）；无顶面返回 null。
  * 只认水平跨度够大的顶面（宽、深均 ≥ 0.5），栅栏柱、梯子板、门板这类窄条不能站。
  */
-export function supportTop(name: string, props: Record<string, unknown> = {}): number | null {
+export function supportTop(name: string, properties: BlockProps = {}): number | null {
   let top: number | null = null;
-  for (const box of collisionBoxes(name, props)) {
+  for (const box of collisionBoxes(name, properties)) {
     if (box[3] - box[0] < 0.5 || box[5] - box[2] < 0.5) continue;
     top = top === null ? box[4] : Math.max(top, box[4]);
   }
   return top;
+}
+
+/** 身体 AABB（0.6×1.8）：脚底在 footY，水平居中于整数列 (cx, cz)。 */
+export interface BodyBox { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number }
+
+/** 方块 (name, properties) 位于 cell，其碰撞盒是否与身体 AABB 相交。 */
+export function blockCollidesBody(name: string, properties: BlockProps, cell: { x: number; y: number; z: number }, body: BodyBox): boolean {
+  for (const box of collisionBoxes(name, properties)) {
+    const [x0, y0, z0, x1, y1, z1] = box;
+    if (x1 - x0 <= 0 || y1 - y0 <= 0 || z1 - z0 <= 0) continue;
+    if (cell.x + x1 > body.minX && cell.x + x0 < body.maxX
+      && cell.y + y1 > body.minY && cell.y + y0 < body.maxY
+      && cell.z + z1 > body.minZ && cell.z + z0 < body.maxZ) return true;
+  }
+  return false;
 }

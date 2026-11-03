@@ -1,7 +1,7 @@
 import type { Vec3Like } from '../adapter/types.ts';
 import { FACINGS, facingOfYaw, feetCell, localMap, supportCell, toWorld, type Facing } from '../perception/local.ts';
 import { attachmentFaces, dropBelow, isSoftBlock, LIQUID_BLOCKS, surroundings } from '../perception/surroundings.ts';
-import { collisionBoxes, supportTop } from '../perception/geometry.ts';
+import { blockCollidesBody, collisionBoxes, supportTop } from '../perception/geometry.ts';
 import { sleep, throwIfAborted } from '../util.ts';
 import { breakCell, why } from './body.ts';
 import { classifyBlock, MAN_MADE_NOTE, OWN_BUILDING_HINT, ownBuildingAt, storedChestAt } from './build.ts';
@@ -55,6 +55,12 @@ function after(ctx: SkillCtx, facing: Facing, target?: Vec3Like) {
 function visibleCells(ctx: SkillCtx, positions: Vec3Like[]) {
   ctx.senses.refresh();
   return new Map((ctx.senses.observeBlocks?.(positions) ?? []).map((b) => [`${b.pos.x},${b.pos.y},${b.pos.z}`, b.name]));
+}
+
+/** 只认本次视线确认的方块及其 blockstate；用于 step 的几何（未观察 = 未知，不读 blockAt 墙后数据）。 */
+function visibleStates(ctx: SkillCtx, positions: Vec3Like[]) {
+  ctx.senses.refresh();
+  return new Map((ctx.senses.observeBlocks?.(positions) ?? []).map((b) => [`${b.pos.x},${b.pos.y},${b.pos.z}`, { name: b.name, properties: b.properties ?? {} }]));
 }
 
 const liquidNext = (ctx: SkillCtx, c: Vec3Like) => wetNeighbours(ctx, c)[0]?.name;
@@ -242,34 +248,34 @@ export const stepTo: Skill<CellArgs> = {
     const a = ctx.adapter;
     const start = a.state().pos, feet = feetCell(start);
     const target = toWorld(feet, args.facing, args.at);
-    const seen = visibleCells(ctx, [target, { ...target, y: target.y + 1 }, { ...target, y: target.y - 1 }, { ...feet, y: feet.y + 2 }]);
-    const describe = (p: Vec3Like) => seen.get(`${p.x},${p.y},${p.z}`) ?? (a.blockAt(p) === null ? '未加载的格子' : '未看清的格子');
-    const propsOf = (p: Vec3Like) => a.blockStateAt?.(p)?.properties ?? {};
-    // 可穿过（身体能占据这一格）：无碰撞盒、打开的木门、或能站上去的薄层（半砖/雪/地毯）；液体与整块/窄条阻挡为 false；null = 未加载。
-    const passable = (p: Vec3Like): boolean | null => {
-      const n = a.blockAt(p);
-      if (n === null) return null;
-      if (LIQUID_BLOCKS.has(n)) return false;
-      if (n.endsWith('_door') && n !== 'iron_door' && propsOf(p).open === true) return true;
-      if (collisionBoxes(n, propsOf(p)).length === 0) return true;
-      const top = supportTop(n, propsOf(p));
-      if (top !== null && top < 1 - 1e-6) return true;
-      if (n === 'ladder') return true;
-      return false;
-    };
-    // 站面顶高（世界 Y）；null = 无站面。
+    // 只认本次视线确认的方块及其 blockstate 计算几何；未观察 = 未知，不读 blockAt 的墙后数据（见 CLAUDE 知识库：墙后/遮挡 = 未知）。
+    const states = visibleStates(ctx, [target, { ...target, y: target.y + 1 }, { ...target, y: target.y + 2 }, { ...target, y: target.y - 1 }, { ...feet, y: feet.y + 2 }]);
+    const observe = (positions: Vec3Like[]) => { for (const [k, v] of visibleStates(ctx, positions)) states.set(k, v); };
+    const observed = (p: Vec3Like) => states.get(`${p.x},${p.y},${p.z}`) ?? null;
+    const describe = (p: Vec3Like) => observed(p)?.name ?? (a.blockAt(p) === null ? '未加载的格子' : '未看清的格子');
+    const isUnseen = (p: Vec3Like) => observed(p) === null;
     const supportTopAt = (p: Vec3Like): number | null => {
-      const n = a.blockAt(p);
-      if (n === null) return null;
-      const top = supportTop(n, propsOf(p));
+      const o = observed(p);
+      if (!o) return null;
+      const top = supportTop(o.name, o.properties);
       return top === null ? null : p.y + top;
     };
-    // 某脚格上的实际脚高：整块/上半砖在 y-1，下半砖就在脚格 y 本身。
+    // 某脚格上的实际脚高：薄层（半砖/雪/地毯）在脚格本身；否则看脚下一格。
     const footYAt = (cell: Vec3Like): number | null => {
-      const below = supportTopAt({ ...cell, y: cell.y - 1 });
       const inCell = supportTopAt(cell);
+      const below = supportTopAt({ ...cell, y: cell.y - 1 });
       if (inCell !== null && (below === null || inCell > below)) return inCell;
       return below;
+    };
+    // 身体净空：脚高 footY、列 (cx,cz) 处 0.6×1.8 身体盒是否与已观察方块相交；返回相交格或 null。
+    const clearanceBlocker = (footY: number, cx: number, cz: number): Vec3Like | null => {
+      const body = { minX: cx + 0.2, maxX: cx + 0.8, minY: footY, maxY: footY + 1.8, minZ: cz + 0.2, maxZ: cz + 0.8 };
+      for (let y = Math.floor(footY); y <= Math.floor(footY + 1.8 - 1e-6); y++) {
+        const cell = { x: cx, y, z: cz };
+        const o = observed(cell);
+        if (o && blockCollidesBody(o.name, o.properties, cell, body)) return cell;
+      }
+      return null;
     };
     // 泡在水里：脚下那格是水、岸往往比脚高一两格，平地上的“上下 ±1”对不上。像玩家一样朝那边游、贴着岸按住跳爬上去。
     // 这项“邻列内多高度选出口”的辅助只属于相对 step；绝对 xyz/stepTo 保持所选脚高，不套用多高度搜索。
@@ -278,16 +284,13 @@ export const stepTo: Skill<CellArgs> = {
       if (out) return out;
     }
     // 沿梯子往上爬一格：目标是自己头那格，脚下是梯子；头顶上方要空
-    if (args.at[0] === 0 && args.at[2] === 0 && args.at[1] === 1) {
-      const top = { ...target, y: target.y + 1 };
-      if (passable(top) !== true) {
-        if (passable(top) === null && ctx.senses.observeBlocks) {
-          await glanceAt(ctx, top);
-          for (const [key, value] of visibleCells(ctx, [top])) seen.set(key, value);
-        }
-        return fail('PATH_NOT_FOUND', passable(top) === null ? '梯子往上爬不动：头顶跳跃空间未确认'
-          : `梯子往上爬不动：头顶上方是 ${describe(top)}`, after(ctx, args.facing, target));
+    if (args.at[0] === 0 && args.at[2] === 0 && args.at[1] === 1 && args.xyz === undefined) {
+      if (isUnseen({ ...target, y: target.y + 1 }) && ctx.senses.observeBlocks) {
+        await glanceAt(ctx, { ...target, y: target.y + 1 });
+        observe([{ ...target, y: target.y + 1 }]);
       }
+      const blocker = clearanceBlocker(target.y, target.x, target.z);
+      if (blocker) return fail('PATH_NOT_FOUND', isUnseen(blocker) ? '梯子往上爬不动：头顶跳跃空间未确认' : `梯子往上爬不动：头顶上方是 ${describe(blocker)}`, after(ctx, args.facing, target));
       let movementError: unknown;
       try {
         await a.moveTo({ kind: 'xyz', x: target.x, y: target.y, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())) });
@@ -300,57 +303,89 @@ export const stepTo: Skill<CellArgs> = {
       if (end.x !== target.x || end.y !== target.y || end.z !== target.z) return fail(movementError ? codeFromError(movementError) : 'EFFECT_NOT_CONFIRMED', `没有爬到指定格，实际在 (${end.x},${end.y},${end.z})${movementError ? `；${(movementError as Error).message}` : ''}`, after(ctx, args.facing, target));
       return ok(`沿梯子爬上了一格（现在 y=${end.y}）${a.blockAt({ ...end }) === 'ladder' ? '' : '；这格没有梯子了，再往上要先挂'}`, { moved: [0, 1, 0], ...after(ctx, args.facing, target) });
     }
-    const head = { ...target, y: target.y + 1 };
     const ownHead = { ...feet, y: feet.y + 2 };
-    const currentFoot = footYAt(feet);
-    const targetFoot = footYAt(target);
-    const isUnseen = (p: Vec3Like) => !seen.has(`${p.x},${p.y},${p.z}`);
-    // 斜向一步身体会扫过两个角落列（0.6 宽的盒子在 2×2 列间移动），净空也要查那两列。
-    const cornerCells = args.at[0] !== 0 && args.at[2] !== 0
-      ? [{ x: target.x, y: target.y, z: feet.z }, { x: feet.x, y: target.y, z: target.z }].flatMap((c) => [c, { ...c, y: c.y + 1 }])
+    const currentFoot = footYAt(feet) ?? start.y;
+    const absolute = args.xyz !== undefined;
+    const corners = args.at[0] !== 0 && args.at[2] !== 0
+      ? [{ x: target.x, z: feet.z }, { x: feet.x, z: target.z }]
       : [];
+    const cornerCells = corners.flatMap((c) => [{ x: c.x, y: target.y, z: c.z }, { x: c.x, y: target.y + 1, z: c.z }]);
+    // 未看清的目标格先转头看一眼，再看不清就如实报“无法确认”，不拿 blockAt 的墙后数据报障碍名称。
+    const glanceCells = [target, { ...target, y: target.y - 1 }, { ...target, y: target.y + 1 }, { ...target, y: target.y + 2 }, ownHead, ...cornerCells];
+    const unseenFirst = glanceCells.find((p) => isUnseen(p) && ctx.senses.observeBlocks);
+    if (unseenFirst && ctx.senses.observeBlocks) {
+      await glanceAt(ctx, unseenFirst);
+      observe(glanceCells);
+    }
+    const targetBlock = observed(target);
+    // 目标格是否被整块/窄条挡住（打开的木门可穿，门板贴边不挡中心）。
+    const blocksBodyCell = (name: string, props: Record<string, string | number | boolean>) => {
+      if (name.endsWith('_door') && name !== 'iron_door' && props.open === true) return false;
+      const top = supportTop(name, props);
+      return top !== null ? top >= 1 - 1e-6 : collisionBoxes(name, props).length > 0;
+    };
     let landingSupport: { pos: Vec3Like; at: [number, number, number]; placeAtInRange: boolean; observed: string | null } | undefined;
-    // 未看清的通行格先转头看一眼，再看不清就如实报“无法确认”，不拿 blockAt 的墙后数据报障碍名称。
-    const unseenBlock = [target, head, ...(args.at[1] === 1 ? [ownHead] : []), ...cornerCells]
-      .find((p) => isUnseen(p) && ctx.senses.observeBlocks);
-    if (unseenBlock && ctx.senses.observeBlocks) {
-      await glanceAt(ctx, unseenBlock);
-      for (const [key, value] of visibleCells(ctx, [target, head, ownHead, { ...target, y: target.y - 1 }, ...cornerCells])) seen.set(key, value);
-    }
+    let targetFoot: number | null = null;
     const problems: string[] = [];
-    // 目标格通行
-    if (passable(target) === false) {
-      const dn = describe(target);
-      problems.push(isUnseen(target) ? `目标格是 ${dn}，无法确认通行空间` : `目标格是 ${dn}${dn.endsWith('_door') ? '（门的状态或碰撞形状阻碍通行）' : LIQUID_BLOCKS.has(dn) ? '' : /chest|barrel|furnace|crafting_table|_bed$/.test(dn) ? '（是用得着的东西，绕过去，别挖）' : `（要过去先 dig_at [${args.at}] 挖开）`}`);
-    } else if (passable(target) === null) problems.push(`目标格是 ${describe(target)}，无法确认通行空间`);
-    // 头顶净空
-    if (passable(head) === false) {
-      const dn = describe(head);
-      problems.push(isUnseen(head) ? `目标格上方是 ${dn}，无法确认头部空间` : `目标格上方是 ${dn}${dn.endsWith('_door') ? '（门的状态或碰撞形状阻碍通行）' : `（会碰头${LIQUID_BLOCKS.has(dn) ? '' : `；先 dig_at [${args.at[0]},${args.at[1] + 1},${args.at[2]}]`}）`}`);
-    } else if (passable(head) === null) problems.push(`目标格上方是 ${describe(head)}，无法确认头部空间`);
-    // 斜向角落净空
-    for (const c of cornerCells) {
-      if (passable(c) === false) problems.push(`斜向迈步会撞到角落 ${describe(c)}`);
-      else if (passable(c) === null) problems.push(`斜向迈步的角落 ${describe(c)}，无法确认通行空间`);
-    }
-    // 支撑：按实际支撑顶面与本次转换期望的脚高判断，不自动补坑/改落点。目标格被整块挡住时只报阻挡，不再另算支撑。
-    if (passable(target) === true) {
-      if (targetFoot === null) {
+    if (targetBlock === null) {
+      problems.push(`目标格是 ${describe(target)}，无法确认通行空间`);
+    } else if (blocksBodyCell(targetBlock.name, targetBlock.properties)) {
+      const dn = targetBlock.name;
+      problems.push(`目标格是 ${dn}${dn.endsWith('_door') ? '（门的状态或碰撞形状阻碍通行）' : LIQUID_BLOCKS.has(dn) ? '' : /chest|barrel|furnace|crafting_table|_bed$/.test(dn) ? '（是用得着的东西，绕过去，别挖）' : `（要过去先 dig_at [${args.at}] 挖开）`}`);
+    } else {
+      // 目标格能站：按实际顶面算脚高；无支撑则报缺口。
+      const actualFoot = footYAt(target);
+      if (actualFoot === null) {
         const floor = { ...target, y: target.y - 1 };
         const supportAt = toRel(feet, args.facing, floor);
         const placeAtInRange = supportAt[1] >= -1;
-        landingSupport = { pos: floor, at: supportAt, placeAtInRange, observed: seen.get(`${floor.x},${floor.y},${floor.z}`) ?? null };
-        problems.unshift(`目标格脚下 (${floor.x},${floor.y},${floor.z}) 是 ${describe(floor)}，无已确认支撑；支撑格 [${supportAt}]${placeAtInRange ? '' : ' 超出 place_at 上下 -1..3 范围'}；脚部目标格 [${args.at}] 须留空；未执行迈步`);
+        landingSupport = { pos: floor, at: supportAt, placeAtInRange, observed: observed(floor)?.name ?? null };
+        const dn = describe(floor);
+        const gap = isUnseen(floor) ? `${dn}，无法确认支撑` : `${dn}，无已确认支撑`;
+        problems.unshift(`目标格脚下 (${floor.x},${floor.y},${floor.z}) 是 ${gap}；支撑格 [${supportAt}]${placeAtInRange ? '' : ' 超出 place_at 上下 -1..3 范围'}；脚部目标格 [${args.at}] 须留空；未执行迈步`);
       } else {
-        const expectedFoot = (currentFoot ?? start.y) + args.at[1];
-        if (Math.abs(targetFoot - expectedFoot) > 0.51) {
-          problems.unshift(`目标支撑面在 y=${targetFoot.toFixed(2)}，与本次${args.at[1] > 0 ? '上一级' : args.at[1] < 0 ? '下一级' : '平走'}期望脚高 y=${expectedFoot.toFixed(2)} 不符；未执行迈步`);
+        targetFoot = absolute ? args.xyz!.y : actualFoot;
+        const expected = absolute ? targetFoot : currentFoot + args.at[1];
+        if (Math.abs(actualFoot - expected) > (absolute ? 0.3 : 0.51)) {
+          problems.unshift(absolute
+            ? `目标支撑面在 y=${actualFoot.toFixed(2)}，与绝对脚高 ${targetFoot.toFixed(2)} 不符；未执行迈步`
+            : `目标支撑面在 y=${actualFoot.toFixed(2)}，与本次${args.at[1] > 0 ? '上一级' : args.at[1] < 0 ? '下一级' : '平走'}期望脚高 y=${expected.toFixed(2)} 不符；未执行迈步`);
+        } else {
+          // 净空：转头看清身体实际占据的几格（脚高 targetFoot 起 1.8 高），再查 0.6×1.8 身体盒是否与方块相交。
+          const need: Vec3Like[] = [];
+          for (let y = Math.floor(targetFoot); y <= Math.floor(targetFoot + 1.8 - 1e-6); y++) need.push({ x: target.x, y, z: target.z });
+          const unseen = need.find((p) => isUnseen(p) && ctx.senses.observeBlocks);
+          if (unseen && ctx.senses.observeBlocks) {
+            await glanceAt(ctx, unseen);
+            observe(need);
+          }
+          const blocker = clearanceBlocker(targetFoot, target.x, target.z);
+          if (blocker) {
+            const dn = describe(blocker);
+            const atCell = blocker.y === target.y;
+            problems.push(isUnseen(blocker) ? `${atCell ? '目标格' : '目标格上方'}是 ${dn}，无法确认${atCell ? '通行' : '头部'}空间`
+              : atCell ? `目标格是 ${dn}（身体被占住，先 dig_at [${args.at}] 挖开）`
+              : `目标格上方是 ${dn}${dn.endsWith('_door') ? '（门的状态或碰撞形状阻碍通行）' : `（会碰头${LIQUID_BLOCKS.has(dn) ? '' : `；先 dig_at [${args.at[0]},${args.at[1] + 1},${args.at[2]}]`}）`}`);
+          } else {
+            const unseen2 = need.find((p) => isUnseen(p));
+            if (unseen2) problems.push(`${unseen2.y === target.y ? '目标格' : '目标格上方'}是 ${describe(unseen2)}，无法确认${unseen2.y === target.y ? '通行' : '头部'}空间`);
+          }
+          // 斜向角落净空
+          for (const c of corners) {
+            const cb = clearanceBlocker(targetFoot, c.x, c.z);
+            if (cb) problems.push(isUnseen(cb) ? `斜向迈步的角落 ${describe(cb)}，无法确认通行空间` : `斜向迈步会撞到角落 ${describe(cb)}`);
+            else {
+              const cu = [{ x: c.x, y: target.y, z: c.z }, { x: c.x, y: target.y + 1, z: c.z }].find((p) => isUnseen(p));
+              if (cu) problems.push(`斜向迈步的角落 ${describe(cu)}，无法确认通行空间`);
+            }
+          }
         }
       }
     }
-    if (args.at[1] === 1) {
-      if (passable(ownHead) === false) problems.push(`往上跳时自己头顶上方是 ${describe(ownHead)}（跳不起来；先 dig_at [0,2,0]）`);
-      else if (passable(ownHead) === null) problems.push(`往上跳时自己头顶上方是 ${describe(ownHead)}，无法确认跳跃空间`);
+    if (args.at[1] === 1 && args.xyz === undefined) {
+      const oh = clearanceBlocker(currentFoot + 1, feet.x, feet.z);
+      if (oh && oh.y > feet.y) problems.push(`往上跳时自己头顶上方是 ${describe(oh)}（跳不起来；先 dig_at [0,2,0]）`);
+      else if (isUnseen(ownHead)) problems.push(`往上跳时自己头顶上方是 ${describe(ownHead)}，无法确认跳跃空间`);
     }
     if (problems.length) return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：${problems.join('；')}`, { problems, movementNotAttempted: true, obscured: problems.every((p) => p.includes('未看清') || p.includes('未加载')),
       ...(landingSupport ? { landingSupport } : {}),
@@ -358,26 +393,27 @@ export const stepTo: Skill<CellArgs> = {
     let movementError: unknown;
     try {
       // 下行（下一级）：pathfinder 的 maxDropDown 对比的是「脚高 → 落点地板」的落差，一步下降（脚 73→72，地板 71）是 2，不是 1。
-      // 传 1 会让原版 getLandingBlock 直接判 null、一步都下不去（和 descend 的 drop+1 同一套语义）。
-      await a.moveTo({ kind: 'xyz', x: target.x, y: target.y, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())), ...(args.at[1] === -1 ? { maxDropDown: 2 } : {}) });
+      // 传 1 会让原版 getLandingBlock 直接判 null、一步都下不去（和 descend 的 drop+1 同一套语义）。目标 y 传实际脚高（可为分数）。
+      await a.moveTo({ kind: 'xyz', x: target.x, y: targetFoot!, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())), ...(args.at[1] === -1 ? { maxDropDown: 2 } : {}) });
     } catch (e) {
       if (isAbort(e)) throw e;
       movementError = e;
     }
     throwIfAborted(ctx.signal);
-    // 用实际身体状态确认到达：站稳、脚格一致、实际脚高与目标支撑面相符；不能只凭整数脚格或 moveTo 返回成功。
+    // 用实际身体状态确认到达：站稳、列一致、实际脚高与目标脚高相符；不能只凭整数脚格或 moveTo 返回成功。
     const state = a.state();
     const end = feetCell(state.pos);
+    const foot = targetFoot!;
     const landed = state.onGround && end.x === target.x && end.y === target.y && end.z === target.z
-      && targetFoot !== null && Math.abs(state.pos.y - targetFoot) <= 0.3;
+      && Math.abs(state.pos.y - foot) <= 0.3;
     if (!landed) {
       const why = !state.onGround ? '身体没有站稳'
         : end.x !== target.x || end.z !== target.z ? `实际列 (${end.x},${end.z}) 与目标不符`
         : end.y !== target.y ? `实际脚格 ${end.y} 与目标脚格 ${target.y} 不符`
-        : `实际脚高 ${state.pos.y.toFixed(2)} 与目标脚高 ${targetFoot?.toFixed(2) ?? '未知'} 不符`;
+        : `实际脚高 ${state.pos.y.toFixed(2)} 与目标脚高 ${foot.toFixed(2)} 不符`;
       return fail(movementError ? codeFromError(movementError) : 'EFFECT_NOT_CONFIRMED', `没有站到 [${args.at}]：${why}；实际在 (${end.x},${end.y},${end.z})${movementError ? `；${(movementError as Error).message}` : ''}`, after(ctx, args.facing, target));
     }
-    return ok(`站到了 [${args.at}]${Math.abs(targetFoot - Math.floor(targetFoot)) > 0.01 ? `（脚高 ${targetFoot.toFixed(2)}）` : ''}`, { moved: [...args.at], ...after(ctx, args.facing, target) });
+    return ok(`站到了 [${args.at}]${Math.abs(foot - Math.floor(foot)) > 0.01 ? `（脚高 ${foot.toFixed(2)}）` : ''}`, { moved: [...args.at], ...after(ctx, args.facing, target) });
   },
 };
 
@@ -498,7 +534,7 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
 function absValue(v: unknown): Vec3Like | null {
   const arr = typeof v === 'string' ? v.split(/[,\s]+/).filter(Boolean).map(Number)
     : Array.isArray(v) ? v.map(Number) : v && typeof v === 'object' ? [(v as any).x, (v as any).y, (v as any).z].map(Number) : null;
-  return arr && arr.length === 3 && arr.every(Number.isInteger) ? { x: arr[0], y: arr[1], z: arr[2] } : null;
+  return arr && arr.length === 3 && arr.every(Number.isFinite) ? { x: arr[0], y: arr[1], z: arr[2] } : null;
 }
 
 /**
@@ -508,16 +544,18 @@ function absValue(v: unknown): Vec3Like | null {
 function withAbsolute<A extends CellArgs>(skill: Skill<A>, bounds: { f: number; u: [number, number]; r: number }): Skill<A & { xyz?: Vec3Like }> {
   const rel = (feet: Vec3Like, facing: Facing, p: Vec3Like) => parseRel(toRel(feet, facing, p), bounds);
   const far = (p: Vec3Like, why: string) => `(${p.x},${p.y},${p.z}) 不在身边能${skill.name === 'step' ? '迈到' : '够到'}的范围：${why}；先走近（goto 那里）再做`;
+  // step 的绝对 y 是脚高（可为分数，如半砖 64.5），范围换算用它的脚格；dig_at/place_at 仍是整数方块格。
+  const cellOf = (p: Vec3Like): Vec3Like => skill.name === 'step' ? { x: p.x, y: Math.floor(p.y), z: p.z } : p;
   return {
     ...skill,
-    argsDoc: `${skill.argsDoc}；也可以用绝对坐标 "xyz":[x,y,z] 代替 [前,上,右]`,
+    argsDoc: `${skill.argsDoc}；也可以用绝对坐标 "xyz":[x,y,z] 代替 [前,上,右]${skill.name === 'step' ? '（step 的 y 是脚高，可为分数，如半砖 64.5）' : ''}`,
     validate(raw, adapter) {
       const a = obj(raw);
       const p = absValue(a.xyz ?? a.abs ?? a.world);
       if (!p) return skill.validate(raw, adapter);
       const facing = facingArg(a.facing, adapter);
       if (!FACINGS.includes(facing as Facing)) return { ok: false, error: facing };
-      const r = rel(feetCell(adapter.state().pos), facing as Facing, p);
+      const r = rel(feetCell(adapter.state().pos), facing as Facing, cellOf(p));
       if (typeof r === 'string') return { ok: false, error: far(p, r) };
       const { xyz: _x, abs: _a, world: _w, at: _at, to: _to, pos: _p, ...rest } = a;
       const v = skill.validate({ ...rest, at: r, facing }, adapter);
@@ -525,7 +563,7 @@ function withAbsolute<A extends CellArgs>(skill: Skill<A>, bounds: { f: number; 
     },
     async run(ctx, args) {
       const from = feetCell(ctx.adapter.state().pos);
-      const r = args.xyz ? rel(from, args.facing, args.xyz) : args.at;
+      const r = args.xyz ? rel(from, args.facing, cellOf(args.xyz)) : args.at;
       const result = typeof r === 'string'
         ? fail('PATH_NOT_FOUND', far(args.xyz!, r), after(ctx, args.facing, args.xyz))
         : await skill.run(ctx, args.xyz ? { ...args, at: r } : args);

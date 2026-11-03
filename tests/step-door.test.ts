@@ -2,14 +2,14 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { stepTo } from '../src/skills/primitives.ts';
 import { FakeAdapter } from './fake-adapter.ts';
-import { makeCtx } from './survival-helpers.ts';
+import { makeCtx, observeAllBlocks } from './survival-helpers.ts';
 
 test('step treats an open door as passable and a closed or unknown door as blocked', async (t) => {
   const world = new FakeAdapter();
   world.pos = { x: 0.5, y: 64, z: 0.5 };
   const door = [{ x: 0, y: 65, z: -1 }, { x: 0, y: 66, z: -1 }];
   world.blocks.push({ name: 'grass_block', pos: { x: 0, y: 64, z: -1 } }, ...door.map((pos) => ({ name: 'oak_door', pos })));
-  const ctx = makeCtx(world);
+  const ctx = makeCtx(world, { senses: { observeBlocks: observeAllBlocks(world) } });
   t.after(() => ctx.memory.close());
   const move = t.mock.method(world, 'moveTo', world.moveTo.bind(world));
   // 门打开：可穿行
