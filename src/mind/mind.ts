@@ -616,11 +616,14 @@ export class Mind {
     const gap = this.activity.stanceGap;
     if (gap) {
       const v = this.d.arbiter.validate(step);
-      if (v.ok && relativeCellAction(step.skill, v.args)) {
+      if (!v.ok) {
+        // 校验失败/被拒绝的步骤不会执行，不能消费尚未处理的站位缺口，留给后续步骤。
+      } else if (relativeCellAction(step.skill, v.args)) {
         this.finishActivity('stuck', `「${gap.skill}」没到新站位，身体现在在 (${gap.pos.x.toFixed(2)},${gap.pos.y.toFixed(2)},${gap.pos.z.toFixed(2)})；接着的「${step.skill}」是相对坐标，会打到错误位置。先确认实际站位或改用绝对坐标`);
         return;
+      } else {
+        delete this.activity.stanceGap;
       }
-      delete this.activity.stanceGap;
     }
     // 提醒曾经失败，仍执行 Agent 明确选择的动作。
     const same = this.sameFails.get(exactSig(step));
