@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { test } from 'node:test';
 import { createActivity, nextStep, afterStep } from '../src/mind/activity.ts';
 import { Mind } from '../src/mind/mind.ts';
+import { climbUp } from '../src/skills/body.ts';
 import { ok } from '../src/skills/types.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 
@@ -91,7 +92,9 @@ function climbAdjust(draftSteps: { skill: string; args?: unknown; id?: string }[
 test('非法恢复调整被拒后不取消原任务、账本保持，原爬升可继续完成', () => {
   const { activity, cancelled, decision, stepId } = climbAdjust([{ skill: 'use_skill', args: { name: 'recover', failure: { skill: 'climb_up', args: { height: 5 }, climbId: 'missing', climb: { height: 5, spent: 0, startY: 64 } } } }]);
   assert.deepEqual(cancelled, [], '拒绝不取消原任务');
-  assert.equal(activity.climb[stepId].spent, 1, '账本保持 spent=1');
+  const budget = activity.climb?.[stepId];
+  assert.ok(budget, '账本存在');
+  assert.equal(budget.spent, 1, '账本保持 spent=1');
   assert.match(decision.notes.join(''), /父账本/, '给出明确拒绝原因');
 });
 
@@ -99,4 +102,21 @@ test('合法重排仍取消旧任务并启动新计划', () => {
   const { activity, cancelled } = climbAdjust([{ skill: 'climb_up', args: { height: 3, untilSky: false } }]);
   assert.deepEqual(cancelled, ['改了做法']);
   assert.equal(activity.index, 0);
+});
+
+test('非法恢复调整被拒后，原爬升预算不变并继续完成 5 格', async () => {
+  const { activity, stepId } = climbAdjust([{ skill: 'use_skill', args: { name: 'recover', failure: { skill: 'climb_up', args: { height: 5 }, climbId: 'missing', climb: { height: 5, spent: 0, startY: 64 } } } }]);
+  const budget = activity.climb?.[stepId];
+  assert.ok(budget);
+  assert.equal(budget.spent, 1, '拒绝后账本不变');
+  // 用同一份账本继续执行原爬升，能从 1 格补到 5 格。
+  const adapter = new FakeAdapter();
+  adapter.pos = { x: 0.5, y: 65, z: 0.5 };
+  adapter.inv.set('dirt', 8);
+  adapter.moveTo = async () => { adapter.pos = { ...adapter.pos, y: adapter.pos.y + 1 }; };
+  const ctx = { adapter, signal: new AbortController().signal, deadline: Date.now() + 10000, senses: { refresh() {} }, make: false, climb: budget };
+  const r = await climbUp.run(ctx as never, { height: 5, untilSky: false });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.goalReached, true, '原目标最终完成');
+  assert.equal(budget.spent, 5, '累计爬升 5 格');
 });
