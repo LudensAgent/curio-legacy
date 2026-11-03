@@ -339,18 +339,21 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
     // 父动作续跑（经仲裁器派发、无恢复上下文）按父目标验收；恢复子动作按自身 args.height 验收。
     const isParentContinuation = !!budget && ctx.recovery === undefined;
     const netFromStart = () => Math.max(0, Math.floor(adapter.state().pos.y + 0.05) - Math.floor((budget ? budget.startY : start) + 0.05));
-    // 确认一次单级转换真正完成：身体落稳（onGround）且净高度确实升高，不把空中的瞬时高度当落点。
-    const confirmedAscent = (fromY: number) => {
+    // 身体是否在有效支撑上：站立（onGround）或贴着梯子（梯子上的有效攀爬可以 onGround=false）。
+    const landed = () => {
       const state = adapter.state();
-      return state.onGround && Math.floor(state.pos.y + 0.05) > Math.floor(fromY) && state.pos.y > fromY + 0.05;
+      const feet = Math.floor(state.pos.y + 0.05);
+      return state.onGround || adapter.blockAt({ x: Math.floor(state.pos.x), y: feet, z: Math.floor(state.pos.z) }) === 'ladder';
     };
+    // 确认一次单级转换真正完成：身体在有效支撑上且净高度确实升高，不把空中的瞬时高度当落点。
+    const confirmedAscent = (fromY: number) => landed() && Math.floor(adapter.state().pos.y + 0.05) > Math.floor(fromY) && adapter.state().pos.y > fromY + 0.05;
     let climbedThisRun = 0;
     const total = () => (budget ? budget.spent : climbedThisRun);
     const reached = (around: ReturnType<typeof surroundings>) => (!args.untilSky || around.sky) && (!args.untilExit || around.exits.length > 0);
     const finish = (stopped?: string, failureCause?: 'PILLAR_CLEARANCE') => {
       const state = adapter.state(), around = surroundings(adapter);
       const climbed = isParentContinuation ? netFromStart() : climbedThisRun;
-      const goalReached = args.untilSky || args.untilExit ? reached(around) : isParentContinuation ? netFromStart() >= budget!.height : climbedThisRun >= args.height;
+      const goalReached = args.untilSky || args.untilExit ? reached(around) : isParentContinuation ? landed() && netFromStart() >= budget!.height : climbedThisRun >= args.height;
       const facts = { climbed, spent: total(), height: budget?.height ?? args.height, sky: around.sky, exits: around.exits, goalReached, position: { ...state.pos }, ...(failureCause ? { failureCause } : {}),
         effectEvidence: { verified: true, changed: climbedThisRun > 0, reasons: [`实际高度 ${start} → ${state.pos.y}`] } };
       if (goalReached) return ok(`往上爬了 ${climbed} 格${args.untilExit ? '，四周有路了' : args.untilSky ? '，看得见天空了' : ''}`, facts);
@@ -368,6 +371,14 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
     // 只有确实要继续爬时才需要材料。
     if (!onLadder() && !hasPlaceable(adapter.state().inventory)) return fail('MISSING_MATERIALS', '脚下没有梯子，背包里也没有能垫脚的方块（泥土/圆石/石头/木板）');
     let lastBeforeY: number | undefined;
+    // 单级转换的成功、失败、取消及清障重试共用一次结算：身体已在有效支撑上站高才算入账。
+    const settlePending = () => {
+      if (budget && lastBeforeY !== undefined && confirmedAscent(lastBeforeY)) {
+        budget.spent++;
+        climbedThisRun++;
+        lastBeforeY = undefined;
+      }
+    };
     try {
       for (let i = 0; i < effectiveHeight && Date.now() < ctx.deadline - 1000; i++) {
         throwIfAborted(signal);
@@ -389,8 +400,7 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
           if (isAbort(e)) throw e;
           const name = e instanceof Error ? e.name : undefined;
           if (name !== 'PillarClearanceError') {
-            // 普通移动错误也可能已放块站稳：先结算实际效果，再停下。
-            if (budget && lastBeforeY !== undefined && confirmedAscent(lastBeforeY)) { budget.spent++; climbedThisRun++; lastBeforeY = undefined; }
+            settlePending();
             return finish(why(e));
           }
           // 搭柱被头顶/侧上方挡住：适配器报告具体那一格，把它挖开再垫一次；挖不动（基岩、近液体）由 breakCell 抛错如实停下
@@ -406,6 +416,7 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
             await moveUp();
           } catch (e2) {
             if (isAbort(e2)) throw e2;
+            settlePending();
             return finish(why(e2), e2 instanceof Error && e2.name === 'PillarClearanceError' ? 'PILLAR_CLEARANCE' : undefined);
           }
         }
@@ -420,11 +431,7 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
       throwIfAborted(signal);
       return finish();
     } catch (e) {
-      // 成功、取消、普通错误和超时统一结算未决的小步：身体已落稳升高才算入账。
-      if (budget && lastBeforeY !== undefined && confirmedAscent(lastBeforeY)) {
-        budget.spent++;
-        climbedThisRun++;
-      }
+      settlePending();
       if (isAbort(e)) (e as Error & { partialClimbed?: number }).partialClimbed = total();
       throw e;
     }

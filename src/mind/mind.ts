@@ -99,7 +99,7 @@ interface Snapshot { at: number; sessionId: string; dim: string; pos: AgentState
  * 交给恢复技能的“刚失败的那一步”：除了动作、参数、失败码和一句话，还带上动作自己算出来的目标坐标
  * （比如 goto "NW 20" 实际要去的那一格）和失败时人在哪——以前只有一句话，恢复技能和它的核对都“没有目标坐标”
  */
-export function failureFor(step: { skill: string; args?: unknown }, result: { failureCode?: string | null; summary: string; data?: unknown }, pos: { x: number; y: number; z: number }, climb?: { height: number; spent: number; startY: number }) {
+export function failureFor(step: { skill: string; args?: unknown }, result: { failureCode?: string | null; summary: string; data?: unknown }, pos: { x: number; y: number; z: number }, climb?: { height: number; spent: number; startY: number }, climbId?: string) {
   const d = result.data && typeof result.data === 'object' ? result.data as Record<string, unknown> : {};
   const blockTarget = d.blockTarget && typeof d.blockTarget === 'object' ? d.blockTarget as Record<string, unknown> : {};
   const target = worldPoint(d.targetCell) ?? worldPoint(d.target) ?? worldPoint(blockTarget.pos) ?? (step.skill === 'dig' ? worldPoint(d.pos) : undefined);
@@ -110,6 +110,7 @@ export function failureFor(step: { skill: string; args?: unknown }, result: { fa
     position: worldPoint(d.position) ?? { ...pos },
     ...(d.waterAhead !== undefined ? { waterAhead: !!d.waterAhead } : {}),
     ...(climb ? { climb } : {}),
+    ...(climbId ? { climbId } : {}),
   };
 }
 
@@ -864,8 +865,10 @@ export class Mind {
       if (b) {
         a.adaptations.push(`skill:${b.name}`);
         a.awaitingRecovery = b.name;
-        const climb = step.skill === 'climb_up' ? a.climb?.[a.steps[Math.max(0, a.index - 1)]?.id ?? JSON.stringify(step.args ?? {})] : undefined;
-        a.steps.splice(Math.max(0, a.index - 1), 0, { skill: 'use_skill', args: { name: b.name, failure: failureFor(step, result, this.d.adapter.state().pos, climb) }, optional: true });
+        const own = a.steps[Math.max(0, a.index - 1)];
+        const climb = step.skill === 'climb_up' ? a.climb?.[own?.id ?? JSON.stringify(step.args ?? {})] : undefined;
+        const climbId = step.skill === 'climb_up' ? own?.id : undefined;
+        a.steps.splice(Math.max(0, a.index - 1), 0, { skill: 'use_skill', args: { name: b.name, failure: failureFor(step, result, this.d.adapter.state().pos, climb, climbId) }, optional: true });
         a.index = Math.max(0, a.index - 1);
         a.consecutiveFailures = 0;
         this.d.self.think(`${step.skill} 没成，照学会的「${b.name}」试试`, 'outcome');
@@ -1334,13 +1337,18 @@ export class Mind {
         && a.steps.slice(0, currentIndex).every((step, i) => sameStep(step, draft.steps[i]));
       const runningIndex = keepsPrefix ? currentIndex : firstIsRunning ? 0 : -1;
       if (running?.planId === a.id && runningIndex < 0) this.d.arbiter.cancel('改了做法');
-      // 重新分配实例 ID；仍在执行的动作保留原 ID 与额度账本（含恢复包装里的引用），其余独立建账。
-      const oldRunning = runningIndex >= 0 ? a.steps.find((s) => sameStep(s, draft.steps[runningIndex])) : undefined;
-      const steps = draft.steps.map((s, i) => ({ ...s, id: i === runningIndex && oldRunning ? oldRunning.id : shortId('st_') }));
-      const preservedClimb = runningIndex >= 0 && oldRunning?.id ? (() => {
-        const entry = this.activity.climb?.[oldRunning.id!];
-        return entry ? { [oldRunning.id!]: entry } : {};
-      })() : {};
+      // 重新分配实例 ID；仍在执行的动作按准确索引保留原 ID 与额度账本，其余独立建账。
+      const oldRunning = runningIndex >= 0 ? a.steps[currentIndex] : undefined;
+      // 恢复包装（use_skill）里携带父执行实例的 ID 与账本引用，调整时一并保留给待续跑的 climb_up。
+      const recoveryClimb = oldRunning?.skill === 'use_skill' ? (oldRunning.args as Record<string, unknown> | undefined)?.failure as { climbId?: string; climb?: { height: number; spent: number; startY: number }; args?: unknown } | undefined : undefined;
+      const steps = draft.steps.map((s, i) => {
+        if (i === runningIndex && oldRunning) return { ...s, id: oldRunning.id };
+        if (recoveryClimb?.climbId && s.skill === 'climb_up' && isDeepStrictEqual(s.args ?? {}, recoveryClimb.args ?? {})) return { ...s, id: recoveryClimb.climbId };
+        return { ...s, id: shortId('st_') };
+      });
+      const preservedClimb: Record<string, { height: number; spent: number; startY: number }> = {};
+      if (recoveryClimb?.climbId && recoveryClimb.climb) preservedClimb[recoveryClimb.climbId] = recoveryClimb.climb;
+      else if (oldRunning?.id) { const entry = this.activity.climb?.[oldRunning.id]; if (entry) preservedClimb[oldRunning.id] = entry; }
       Object.assign(a, { what: draft.what, why: draft.why || a.why, kind: draft.kind, steps, repeat: draft.repeat, iteration: 0, index: runningIndex + 1, adaptations: [], consecutiveFailures: 0, climb: preservedClimb,
         monologue: decision.monologue || a.monologue });
       if (draft.facing) a.facing = draft.facing; else delete a.facing;
