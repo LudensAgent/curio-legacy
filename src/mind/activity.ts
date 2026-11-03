@@ -234,7 +234,7 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     const mark = `${tag}:${step.skill}:${code}:${JSON.stringify(step.args ?? {}).slice(0, 60)}`;
     if (a.adaptations.includes(mark)) return { kind: 'stuck', why: result.summary.slice(0, 160) };
     a.adaptations.push(mark);
-    a.steps.splice(Math.max(0, a.index - 1), 0, { skill, args });
+    a.steps.splice(Math.max(0, a.index - 1), 0, { skill, args, id: shortId('st_') });
     a.index = Math.max(0, a.index - 1);
     return { kind: 'continue', adapted: what };
   };
@@ -253,7 +253,7 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     const mark = `clearance:${step.skill}:${code}:${JSON.stringify(step.args ?? {}).slice(0, 60)}`;
     if (a.adaptations.includes(mark)) return { kind: 'stuck', why: result.summary.slice(0, 160) };
     a.adaptations.push(mark);
-    a.steps.splice(Math.max(0, a.index - 1), 0, ...cells.map((c) => ({ skill: 'dig_at', args: { at: c.at, ...(c.facing ? { facing: c.facing } : {}) } })));
+    a.steps.splice(Math.max(0, a.index - 1), 0, ...cells.map((c) => ({ skill: 'dig_at', args: { at: c.at, ...(c.facing ? { facing: c.facing } : {}) }, id: shortId('st_') })));
     a.index = Math.max(0, a.index - 1);
     return { kind: 'continue', adapted: `头顶被挡，先把 ${cells.length} 格障碍全挖开再走` };
   }

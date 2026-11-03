@@ -921,7 +921,7 @@ export class Mind {
     if (next) {
       a.adaptations.push(`skill:${next.name}`);
       a.awaitingRecovery = next.name;
-      a.steps.splice(a.index, 0, { skill: 'use_skill', args: { name: next.name, failure }, optional: true });
+      a.steps.splice(a.index, 0, { skill: 'use_skill', args: { name: next.name, failure }, optional: true, id: shortId('st_') });
       this.d.bus.publish('body_adapt', 'P3', `${why}，换学会的做法：${next.name}（${next.description}）`, { planId: a.id, skill: next.name });
       return true;
     }
@@ -1360,15 +1360,29 @@ export class Mind {
         if (old.skill !== s.skill || !isDeepStrictEqual(stableArgs(old.args), stableArgs(s.args))) { decision.notes.push(`steps[${i}] 引用了实例 #${s.id} 但参数已变：要改目标就新建动作（去掉 id），调整未生效`); this.d.bus.publish('activity_adjust', 'P2', `调整被拒绝：实例 #${s.id} 参数不符`, { planId: a.id }); return; }
       }
       // 2. 决定是否保留在途任务：所有步骤统一按已验证的实例 ID 判断（省略 ID 视为新建），不用参数匹配回退。
-      const sameRunning = (draftStep: { id?: string } | undefined, old: { id?: string }) => !!draftStep && draftStep.id === old.id;
+      const sameRunning = (draftStep: { id?: string } | undefined, old: { id?: string }) => !!draftStep && !!draftStep.id && draftStep.id === old.id;
       const runningOld = a.steps[currentIndex];
       const firstIsRunning = running?.planId === a.id && sameRunning(draft.steps[0], runningOld);
       const keepsPrefix = running?.planId === a.id && currentIndex > 0 && sameRunning(draft.steps[currentIndex], runningOld)
         && a.steps.slice(0, currentIndex).every((step, i) => sameRunning(draft.steps[i], step));
       const runningIndex = keepsPrefix ? currentIndex : firstIsRunning ? 0 : -1;
       if (running?.planId === a.id && runningIndex < 0) this.d.arbiter.cancel('改了做法');
-      // 3. 分配 ID：引用保留原 ID，新建分配新 ID。
-      const steps = draft.steps.map((s) => ({ ...s, id: typeof s.id === 'string' && s.id ? s.id : shortId('st_') }));
+      // 3. 分配 ID：引用保留原 ID，新建分配新 ID；恢复步骤按 climbId 重新绑定当前账本，不采用模型回传的进度副本。
+      const steps = draft.steps.map((s) => {
+        const step = { ...s, id: typeof s.id === 'string' && s.id ? s.id : shortId('st_') };
+        if (step.skill === 'use_skill' && step.args && typeof step.args === 'object') {
+          const args = step.args as Record<string, unknown>;
+          const failure = args.failure;
+          if (failure && typeof failure === 'object' && !Array.isArray(failure)) {
+            const f = failure as Record<string, unknown>;
+            if (typeof f.climbId === 'string' && f.climbId) {
+              const entry = a.climb?.[f.climbId];
+              if (entry) args.failure = { ...f, climb: entry };
+            }
+          }
+        }
+        return step;
+      });
       // 4. 保留被引用实例的账本。
       const preservedClimb: Record<string, { height: number; spent: number; startY: number }> = {};
       for (const s of steps) if (typeof s.id === 'string') { const entry = this.activity.climb?.[s.id]; if (entry) preservedClimb[s.id] = entry; }
