@@ -278,6 +278,21 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
     this.actions.push(`place:${name}`);
     return { ok: true };
   }
+  async useBucketAt(pos: Vec3Like, item: string, signal: AbortSignal): Promise<ActionResult & { placed?: Vec3Like }> {
+    await sleep(20, signal);
+    if (!(this.inv.get(item) ?? 0)) return { ok: false, reason: `NO_ITEM:${item}` };
+    const fluid = item === 'water_bucket' ? 'water' : 'lava';
+    if (this.nameAt(pos.x, pos.y, pos.z) !== 'air') return { ok: false, reason: `BLOCKED:(${pos.x},${pos.y},${pos.z}) 不是空气，是 ${this.nameAt(pos.x, pos.y, pos.z)}` };
+    const sides = [[0, -1, 0], [0, 1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]];
+    const solid = sides.some(([dx, dy, dz]) => !['air', 'water', 'lava'].includes(this.nameAt(pos.x + dx, pos.y + dy, pos.z + dz)));
+    if (!solid) return { ok: false, reason: `NO_REFERENCE:(${pos.x},${pos.y},${pos.z}) 四周没有实心方块可贴面` };
+    this.inv.set(item, (this.inv.get(item) ?? 0) - 1);
+    this.inv.set('bucket', (this.inv.get('bucket') ?? 0) + 1);
+    this.removed.delete(this.k(pos.x, pos.y, pos.z));
+    this.blocks.push({ name: fluid, pos: { ...pos } });
+    this.actions.push(`useBucket:${item}`);
+    return { ok: true, placed: { x: pos.x, y: pos.y, z: pos.z }, effectEvidence: { verified: true, changed: true, reasons: [`(${pos.x},${pos.y},${pos.z}) 出现了 ${fluid}`, `背包 ${item} 减少 1`] } };
+  }
   async craft(item: string, count: number, signal: AbortSignal) {
     await sleep(50, signal);
     this.inv.set(item, (this.inv.get(item) ?? 0) + count);
@@ -479,9 +494,15 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
       this.entities.push({ id, name: 'boat', kind: 'other', pos: { x: target.pos.x + 0.5, y: target.pos.y + 1, z: target.pos.z + 0.5 }, dist: 0, height: 0.6 });
       return { ok: true, spawned: 'boat' };
     }
-    if (target.kind === 'block' && item === 'bucket' && this.nameAt(target.pos.x, target.pos.y, target.pos.z) === 'water') {
-      this.inv.set('bucket', this.inv.get('bucket')! - 1);
-      this.inv.set('water_bucket', (this.inv.get('water_bucket') ?? 0) + 1);
+    if (target.kind === 'block' && item === 'bucket' && ['water', 'lava'].includes(this.nameAt(target.pos.x, target.pos.y, target.pos.z))) {
+      const src = this.nameAt(target.pos.x, target.pos.y, target.pos.z);
+      this.inv.set('bucket', (this.inv.get('bucket') ?? 0) - 1);
+      this.inv.set(`${src}_bucket`, (this.inv.get(`${src}_bucket`) ?? 0) + 1);
+      const i = this.blocks.findIndex((b) => b.pos.x === target.pos.x && b.pos.y === target.pos.y && b.pos.z === target.pos.z);
+      if (i >= 0) this.blocks.splice(i, 1);
+      else this.removed.add(this.k(target.pos.x, target.pos.y, target.pos.z));
+      this.actions.push(`fill:${src}`);
+      return { ok: true, effectEvidence: { verified: true, changed: true, reasons: [`背包 bucket 减少 1、${src}_bucket 增加 1`, `(${target.pos.x},${target.pos.y},${target.pos.z}) 的 ${src} 变成了空气`] } };
     }
     return { ok: true };
   }

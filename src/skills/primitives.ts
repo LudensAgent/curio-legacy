@@ -18,7 +18,7 @@ import { findStation, isStation, rememberStation } from './stations.ts';
  *   dig_at [0,2,0] → dig_at [1,1,0] → dig_at [1,2,0] → step [1,1,0]   重复几轮就是一道往前上方的阶梯。
  */
 type Rel = [number, number, number];
-interface CellArgs { at: Rel; facing: Facing; own?: boolean; wet?: boolean; lava?: boolean; xyz?: Vec3Like }
+interface CellArgs { at: Rel; facing: Facing; own?: boolean; wet?: boolean; lava?: boolean; fall?: boolean; xyz?: Vec3Like }
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 
 /** 模型常用的几种写法都认：at / to / pos / offset / rel / cell，数组 [1,1,0]、字符串 "1,1,0"、对象 {"f":1,"u":1,"r":0} */
@@ -81,8 +81,8 @@ const KEEPSAKE = /_bed$|^(crafting_table|furnace|smoker|blast_furnace|chest|barr
 
 export const digAt: Skill<CellArgs> = {
   name: 'dig_at',
-  description: '挖掉身边指定的一格；目标不在视野时先转头看向它，仍看不见则返回未知，不挖其他位置。自动换现有工具，默认不造工具。液体邻格默认不挖；wet:true 接受进水，lava:true 接受进岩浆，分别显式选择。只挖不走，不能挖基岩。斜下格 [1,-1,0] 在正前方那格后面，看不见也挖不到；往下挖 [0,-1,0] 挖的是脚下支撑块（半砖、耕地这类矮方块就在脚这一格，挖空后自己会落下）',
-  argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "own"?:true, "wet"?:true（允许进水）, "lava"?:true（允许进岩浆）}（前后/左右 ±2，上下 -1..3；facing 定义相对坐标的方向，执行时可能转头观察固定的目标格；例：[1,1,0] 前方高一格，[0,2,0] 头顶上方（往上挖用这个；[0,1,0] 是自己站的头那格、本来就空），[0,-1,0] 脚下的支撑块（半砖等矮方块就在脚这一格））',
+  description: '挖掉身边指定的一格；目标不在视野时先转头看向它，仍看不见则返回未知，不挖其他位置。自动换现有工具，默认不造工具。液体邻格默认不挖；wet:true 接受进水，lava:true 接受进岩浆，分别显式选择。挖脚下支撑块若下方有落差/液体会默认拦住，fall:true 才接受坠落风险照挖（风险已如实报告，挖不挖由你定）。只挖不走，不能挖基岩。斜下格 [1,-1,0] 在正前方那格后面，看不见也挖不到；往下挖 [0,-1,0] 挖的是脚下支撑块（半砖、耕地这类矮方块就在脚这一格，挖空后自己会落下）',
+  argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "own"?:true, "wet"?:true（允许进水）, "lava"?:true（允许进岩浆）, "fall"?:true（接受挖脚下后的坠落风险）}（前后/左右 ±2，上下 -1..3；facing 定义相对坐标的方向，执行时可能转头观察固定的目标格；例：[1,1,0] 前方高一格，[0,2,0] 头顶上方（往上挖用这个；[0,1,0] 是自己站的头那格、本来就空），[0,-1,0] 脚下的支撑块（半砖等矮方块就在脚这一格））',
   timeoutMs: 30000,
   movement: false,
   validate(raw, adapter) {
@@ -92,7 +92,7 @@ export const digAt: Skill<CellArgs> = {
     const facing = facingArg(a.facing, adapter);
     if (!FACINGS.includes(facing as Facing)) return { ok: false, error: facing };
     // [0,0,0]/[0,1,0] 是自己站的两格，本来就空：照样接受（执行时说明一下），不当成写错丢掉
-    return { ok: true, args: { at, facing: facing as Facing, ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}) } };
+    return { ok: true, args: { at, facing: facing as Facing, ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}), ...(a.fall === true ? { fall: true } : {}) } };
   },
   async run(ctx, args) {
     throwIfAborted(ctx.signal);
@@ -156,7 +156,8 @@ export const digAt: Skill<CellArgs> = {
         const reason = drop === 0
           ? (peek === null ? '下面的落点还没加载，未知能否安全落地' : '下面有超过 3 格的落差，跳下去会掉血')
           : `下面 ${drop} 格是 ${landing}，往下挖会掉进去`;
-        return fail('BAD_ARGS', `[${args.at}] 挖的是脚下支撑块：${reason}，没有往下挖`, { ...after(ctx, args.facing, pos), below: landing ?? peek, drop });
+        // 风险如实报告，挖不挖由 Agent 明确选择：fall:true 才接受坠落风险照挖，不默认替它拦下合法基础挖掘。
+        if (!args.fall) return fail('BAD_ARGS', `[${args.at}] 挖的是脚下支撑块：${reason}，没有往下挖；如果确认接受这个坠落风险，写 "fall":true 再挖`, { ...after(ctx, args.facing, pos), below: landing ?? peek, drop, fallRisk: reason });
       }
     }
     const mine = args.own ? null : ownBuildingAt(ctx.memory, ctx.adapter.state(), pos, before);

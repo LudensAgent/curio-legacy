@@ -285,6 +285,18 @@ test('dig_at [0,-1,0] 脚下支撑下面是深坑（落差超过 3 格）时拒�
   assert.ok(!w.actions.includes('dig:grass_block'), '没有挖掉脚下的支撑');
 });
 
+test('dig_at [0,-1,0] 脚下深坑：fall:true 明确接受坠落风险后照挖', async (t) => {
+  const w = new FakeAdapter();
+  w.groundY = 63;
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.removed.add('0,62,0'); w.removed.add('0,61,0'); w.removed.add('0,60,0'); w.removed.add('0,59,0');
+  const ctx = makeCtx(w, { senses: { observeBlocks: visibleTargets(w) } });
+  t.after(() => ctx.memory.close());
+  const r = await digAt.run(ctx, { at: [0, -1, 0], facing: 'N', fall: true });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.ok(w.actions.includes('dig:grass_block'), 'fall:true 明确授权后真的挖掉脚下支撑');
+});
+
 test('dig_at 液体邻格默认不挖；wet:true 与 lava:true 分别授权进水和进岩浆', async (t) => {
   const w = pocket();
   // 前方那格（0,60,-1）是石头，它再往前一格（0,60,-2）是水

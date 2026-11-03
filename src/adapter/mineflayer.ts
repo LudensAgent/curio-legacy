@@ -1836,6 +1836,66 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return { ok: false, reason: 'NO_REFERENCE' };
   }
 
+  /**
+   * 满桶（water_bucket / lava_bucket）往指定空气格倒流体：按物品使用语义（use_item）处理，服务器按视线确定落点，
+   * 不能走 placeBlock 的 block_place 数据包（那条路径会让服务器拒绝，桶也倒不进去）。这里选一格紧贴目标空气格的
+   * 实心方块面，把准星对准那一面再发 use_item，最后分别核对「桶是否被消耗」与「目标格是否出现水/岩浆」。
+   * 失败时保留真实原因：周围没有实心面（NO_REFERENCE）、面都看不见/够不到（NO_PLACEMENT_FACE）、
+   * 服务端没消耗桶且目标没变化（NO_EFFECT）、桶消耗了但目标格没出现流体（PLACEMENT_NOT_CONFIRMED，如下界蒸发）。
+   */
+  async useBucketAt(pos: Vec3Like, item: string, signal: AbortSignal): Promise<ActionResult & { placed?: Vec3Like }> {
+    const check = this.actionCheckpoint(signal);
+    throwIfAborted(signal);
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
+    await this.interactionReady();
+    check();
+    const b = this.bot;
+    if (!(await this.equipNamed(item, check))) return { ok: false, reason: `NO_ITEM:${item}` };
+    const target = this.vec(pos);
+    const fluidName = item === 'water_bucket' ? 'water' : 'lava';
+    const cur = b.blockAt(target);
+    if (cur && cur.boundingBox === 'block') return { ok: false, reason: `BLOCKED:(${target.x},${target.y},${target.z}) 不是空气，是 ${cur.name}` };
+    const faces = [new Vec3(0, -1, 0), new Vec3(0, 1, 0), new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)];
+    const refs = faces.map((f) => ({ f, ref: b.blockAt(target.plus(f)) }))
+      .filter((x) => x.ref && x.ref.boundingBox === 'block')
+      .sort((x, y) => Number(OPENS_ON_CLICK.test(x.ref.name)) - Number(OPENS_ON_CLICK.test(y.ref.name)));
+    if (!refs.length) return { ok: false, reason: `NO_REFERENCE:(${target.x},${target.y},${target.z}) 四周没有实心方块可贴面，倒不进去` };
+    const count = () => this.invCountOf(item);
+    const before = count();
+    let sawFace = false;
+    for (const { f, ref } of refs) {
+      if (!this.canClickPlacementFace(ref, f.scaled(-1))) continue;
+      sawFace = true;
+      const sneak = OPENS_ON_CLICK.test(ref.name);
+      if (sneak) b.setControlState('sneak', true);
+      try {
+        await this.afterAction(() => b.lookAt(ref.position.offset(0.5 - f.x * 0.5, 0.5 - f.y * 0.5, 0.5 - f.z * 0.5), true), check);
+        await this.afterAction(() => this.lookSynced(), check);
+        await this.afterAction(async () => { b.activateItem(); await sleep(200, signal); b.deactivateItem(); }, check);
+      } catch (e: any) {
+        if (e?.name === 'AbortedError') throw e;
+      } finally {
+        if (sneak) b.setControlState('sneak', false);
+      }
+      if (await this.waitForInteraction(() => count() < before || b.blockAt(target)?.name === fluidName, check, 600)) break;
+    }
+    const consumed = count() < before;
+    const now = b.blockAt(target);
+    const placed = !!now && now.name === fluidName;
+    const reasons = [
+      ...(placed ? [`(${target.x},${target.y},${target.z}) 出现了 ${now.name}`] : []),
+      ...(consumed ? [`背包 ${item} 减少 ${before - count()}`] : []),
+    ];
+    const effectEvidence = { verified: true, changed: reasons.length > 0, reasons: reasons.length ? reasons : ['没有确认桶被消耗或目标格出现流体'] };
+    if (placed && consumed) {
+      this.notePlaced({ x: target.x, y: target.y, z: target.z }, item);
+      return { ok: true, placed: { x: target.x, y: target.y, z: target.z }, effectEvidence };
+    }
+    if (consumed) return { ok: false, reason: `PLACEMENT_NOT_CONFIRMED:${item} 已消耗，但目标格没有出现 ${fluidName}（可能倒进了别的格，或在下界蒸发了）`, effectEvidence };
+    if (!sawFace) return { ok: false, reason: 'NO_PLACEMENT_FACE:目标空气格四周的面都看不见或够不到（被挡/太远），未发送使用动作', effectEvidence: { verified: true, changed: false, reasons: ['没有可点击的空置面，未发送使用动作'] } };
+    return { ok: false, reason: `NO_EFFECT:服务器没有消耗 ${item}，目标格也没变化（可能仍不是可倒流体的空格）`, effectEvidence };
+  }
+
   private canClickPlacementFace(reference: any, face: any, delta?: any) {
     const b = this.bot;
     if (!b.entity?.position?.offset) return false;
@@ -2801,6 +2861,20 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
 
   private invCountOf(name: string): number {
     return this.bot.inventory.items().filter((i: any) => i.name === name).reduce((n: number, i: any) => n + i.count, 0);
+  }
+
+  private inventoryCounts(): Map<string, number> {
+    const counts = new Map<string, number>();
+    for (const item of this.bot.inventory.items()) counts.set(item.name, (counts.get(item.name) ?? 0) + item.count);
+    return counts;
+  }
+
+  private inventoryDiff(before: Map<string, number>, after: Map<string, number>): string[] {
+    const names = new Set([...before.keys(), ...after.keys()]);
+    return [...names].sort().flatMap((n) => {
+      const d = (after.get(n) ?? 0) - (before.get(n) ?? 0);
+      return d ? [`背包 ${n} ${d > 0 ? '+' : ''}${d}`] : [];
+    });
   }
 
   async smelt(input: string, count: number, fuel: string, signal: AbortSignal, opts: SmeltOpts = {}): Promise<SmeltResult> {
@@ -4111,8 +4185,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (!(await this.equipNamed(item, check))) return { ok: false, reason: `NO_ITEM:${item}` };
     try {
       if (target.kind === 'self') {
+        // 沿当前准星使用，不自动低头、不选点。之后核对背包变化：扔东西/喝药会消耗物品，满桶倒水会转成空桶；
+        // 什么都没变就照实说「已执行但未确认效果」，不冒充成功（满桶 self 不一定倒在脚边）。
+        const before = this.inventoryCounts();
         await this.afterAction(async () => { b.activateItem(); await sleep(400, signal); b.deactivateItem(); }, check);
-        return { ok: true, effectEvidence: { verified: false, changed: false, reasons: ['已执行自用动作，尚未验证最终效果'] } };
+        const diff = this.inventoryDiff(before, this.inventoryCounts());
+        return { ok: true, effectEvidence: { verified: true, changed: diff.length > 0, reasons: diff.length ? diff : ['已沿当前准星执行使用，但没有观察到背包变化（未确认是否生效）'] } };
       }
       const block = b.blockAt(this.vec(target.pos));
       if (!block) return { ok: false, reason: 'NO_BLOCK' };

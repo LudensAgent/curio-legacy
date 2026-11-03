@@ -646,7 +646,7 @@ ${this.rules()}
           const by = typeof r.covered_by === 'string' && this.engine.get(r.covered_by) && !this.engine.inactive(r.covered_by) ? r.covered_by : null;
           if (by) this.setOwner(inc, by);
           const limitation = typeof r.limitation === 'string' && r.limitation.trim() ? r.limitation.trim().slice(0, 200) : null;
-          if (limitation) this.bus.publish('body_limit', 'P2', `身体做不到的事（报给开发者）：${limitation}`, { kind: inc.kind, limitation, headline: inc.headline.slice(0, 200) });
+          if (limitation) this.bus.publish('body_limit', 'P2', `模型推断身体可能做不到（尚未验证，报给开发者核对，别当成已确认的能力边界）：${limitation}`, { kind: inc.kind, limitation, confidence: 'inferred', unverified: true, headline: inc.headline.slice(0, 200) });
           this.bus.publish('skill_forge_none', 'P3', `看了${KIND_LABEL[inc.kind]}，没有写技能：${why}${by ? `（归「${by}」管，同一件事以后直接交给它）` : ''}`, { kind: inc.kind, ...(by ? { coveredBy: by } : {}) });
           out.push(`${tag}不写：${why}`);
           continue;

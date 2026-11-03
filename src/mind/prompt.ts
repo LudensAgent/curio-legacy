@@ -238,11 +238,6 @@ const PRECISE = `【精确操作】local 以脚部占据格为原点：[前,上,
 repeat 每轮重做整套 steps；子步骤继承 activity.facing，每步相对坐标按当前位置重算。done_when 写可观察结果。照明可选 place_torch 或空闲习惯 habits.torch_every。挖前看清目标格。
 - 机械性失败身体会就地应变再重试：太暗先插火把、脚下无支撑先垫一块、头顶被挡先挖开（会消耗方块/火把）；应变不动才交给你决定。`;
 
-const EXAMPLE = `【例子】想进下界时：
-→ {"kind":"knowledge","query":"怎么建下界传送门"}
-← 已经查到资料了……黑曜石要用铁镐或钻石镐挖，岩浆浇上水就变成黑曜石
-→ {"monologue":"先凑够黑曜石把传送门点起来。","decision":"new","activity":{"what":"采黑曜石","why":"要建下界传送门","kind":"gather","steps":[{"skill":"gather","args":{"block":"obsidian","count":10}}],"done_when":{"type":"inventory_min","item":"obsidian","count":10}}}`;
-
 export function deliberateSystem(persona: string, skills: string[] = []): string {
   return `${persona}
 
@@ -273,7 +268,6 @@ ${CONDITIONS}
 
 ${PRECISE}
 
-${EXAMPLE}
 ${liveAudience.enabled && liveAudience.inPrompt !== false ? `\n${AUDIENCE_RULES}\n` : ''}
 【动作】参数必须合法：
 ${movesCatalog(28)}${SKILL_INDEX(skills)}`;
@@ -526,7 +520,8 @@ export function situationalReminders(ctx: MindContext): string[] {
   return out.slice(0, 5);
 }
 
-const pos3 = (p: [number, number, number]) => p.map((n) => Math.round(n)).join(',');
+// 展示身体位置用「脚部占据格」（floor，与 local 图原点一致），不用四舍五入，避免与局部图推算出的绝对坐标差一格。
+const pos3 = (p: [number, number, number]) => [Math.floor(p[0]), Math.floor(p[1] + 0.05), Math.floor(p[2])].join(',');
 
 /** 【专注】：主目标、清单、手上的活是不是在推进它（放在消息靠后，模型最看得见的地方） */
 function focusBlock(ctx: MindContext): Record<string, unknown> | null {

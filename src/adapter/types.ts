@@ -419,6 +419,8 @@ export interface GameAdapter {
   // ---- 通用基础动作：玩家的“右键”和“方向键”。上层用它们组合出技能清单里没有的玩法
   /** 手持 item 右键：对着一个方块/水面（block），或对空中/自己（self） */
   useItemOn?(item: string, target: { kind: 'block'; pos: Vec3Like } | { kind: 'self' }, signal: AbortSignal): Promise<ActionResult & { spawned?: string; placed?: Vec3Like }>;
+  /** 满桶（water_bucket/lava_bucket）往指定空气格倒流体：按 use_item 物品使用语义，贴实心面发射线、核对桶消耗与目标格流体 */
+  useBucketAt?(pos: Vec3Like, item: string, signal: AbortSignal): Promise<ActionResult & { placed?: Vec3Like }>;
   /** 右键一个实体：船/矿车/马会坐上去，其他生物按手上物品交互（喂食、繁殖、剪毛、交易…） */
   interactEntity?(entityId: number, item: string | null, signal: AbortSignal): Promise<ActionResult & { mounted?: string }>;
   /** 从载具/坐骑上下来；toward = 先面朝这个点（原版下船时按乘客朝向挑落点，面朝岸边就会落到岸上） */

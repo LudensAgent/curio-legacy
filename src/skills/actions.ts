@@ -35,8 +35,8 @@ const dirOk = (dir: string | undefined, from: { x: number; z: number }, to: { x:
 // ------------------------------------------------------------------ use_item
 export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string }> = {
   name: 'use_item',
-  description: '手持物品右键：对着最近的看得见的某种方块、水面或岩浆（on 写方块名），或对自己（on:"self"，扔东西朝正看着的方向）；on 写坐标（"x,y,z" 或 {"x","y","z"}）时：水桶/岩浆桶倒进那一格空气（浇岩浆做黑曜石用它），打火石/火焰弹对这格右键点火（点下界门框内空气用它）；手持船/筏（*_boat/*_raft）对 on:"water" 是放船（生成实体，之后 interact 坐上去、ride 划走）；要对准确定的那一格用 interact_block（写坐标）；对生物用东西（喂、剪、挤奶）是 interact',
-  argsDoc: '{"item": "<物品名>", "on"?: "self | water | lava | <方块名> | {x,y,z}坐标（倒水桶/岩浆桶进这格空气 / 打火石·火焰弹对这格点火）", "dir"?: "N|NE|E|SE|S|SW|W|NW"}',
+  description: '手持物品右键：对着最近的看得见的某种方块、水面或岩浆（on 写方块名），或沿当前准星使用（on:"self"，不自动低头/选点，只朝正看着的方向用）；on 写坐标（"x,y,z" 或 {"x","y","z"}）时：满水桶/岩浆桶往那格空气倒流体，空桶（bucket）从那一格流体源装水/岩浆，打火石/火焰弹对这格右键点火（点下界门框内空气用它）；手持船/筏（*_boat/*_raft）对 on:"water" 是放船（生成实体，之后 interact 坐上去、ride 划走）；要对准确定的那一格用 interact_block（写坐标）；对生物用东西（喂、剪、挤奶）是 interact',
+  argsDoc: '{"item": "<物品名>", "on"?: "self | water | lava | <方块名> | {x,y,z}坐标（满桶倒进这格空气 / 空桶从这格流体源装 / 打火石·火焰弹对这格点火）", "dir"?: "N|NE|E|SE|S|SW|W|NW"}',
   timeoutMs: 30000,
   movement: true,
   validate(raw, adapter) {
@@ -49,9 +49,9 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
     const dir = typeof a.dir === 'string' ? a.dir.toUpperCase() : undefined;
     if (dir && !DIRS[dir]) return { ok: false, error: `dir 必须是 ${Object.keys(DIRS).join('/')}` };
     // 满的流体桶（水桶/岩浆桶）不能对着流体本体右键：服务器不会把水倒进岩浆源或水格里，只会 NO_EFFECT。
-    // 要倒流体：on 写那一格空气的坐标（水桶浇岩浆做黑曜石就写岩浆旁的那格空气，水会流过去），或 on:"self" 往自己脚边倒。
+    // 要倒流体：on 写那一格空气的坐标（水桶浇岩浆做黑曜石就写岩浆旁的那格空气，水会流过去），或 on:"self" 沿当前准星使用。
     if (FLUID_BUCKETS.has(item) && (on === 'water' || on === 'lava')) {
-      return { ok: false, error: `满的 ${item} 不能对着 ${on} 本体右键（会 NO_EFFECT，倒不进流体源格）；把 on 写成那格空气的坐标 {"x","y","z"}（浇岩浆做黑曜石写岩浆旁那格空气，水会流过去），或 on:"self" 倒自己脚边` };
+      return { ok: false, error: `满的 ${item} 不能对着 ${on} 本体右键（会 NO_EFFECT，倒不进流体源格）；把 on 写成那格空气的坐标 {"x","y","z"}（浇岩浆做黑曜石写岩浆旁那格空气，水会流过去），或 on:"self" 沿当前准星使用` };
     }
     // 打火石/火焰弹点下界门：要点门框内侧那格空气（on 写坐标），对着 obsidian 等方块本体右键会 NO_EFFECT 点不着。
     if (IGNITE_ITEMS.has(item) && typeof on === 'string' && on !== 'self') {
@@ -73,17 +73,44 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
         const now = adapter.blockAt(pos);
         return ok(`对 (${pos.x},${pos.y},${pos.z}) 使用 ${args.item}（现在这格是 ${now ?? '未知'}）`, { pos, changed: now });
       }
-      if (!FLUID_BUCKETS.has(args.item)) return fail('BAD_ARGS', 'on 写坐标只支持倒水/倒岩浆（water_bucket / lava_bucket）或点火（flint_and_steel / fire_charge）；对其他物品请写方块名或 "self"');
+      if (args.item === 'bucket') {
+        // 空桶精确收集：目标必须是流体源（water/lava，level=0），流动的装不了。装完核对「bucket→water_bucket」与「源格变空气」。
+        const cur = adapter.blockAt(pos);
+        if (cur !== 'water' && cur !== 'lava') return fail('BAD_ARGS', `(${pos.x},${pos.y},${pos.z}) 不是水或岩浆源（现在是 ${cur ?? '未知'}），空桶只能从流体源装`, { pos });
+        const src = adapter.blockStateAt?.(pos);
+        if (src && src.properties?.level !== undefined && Number(src.properties.level) !== 0) return fail('BAD_ARGS', `(${pos.x},${pos.y},${pos.z}) 是流动的 ${cur}（level=${src.properties.level}），空桶只能从源方块装`, { pos });
+        const beforeBucket = s.inventory.find((i) => i.name === 'bucket')?.count ?? 0;
+        try {
+          const r = await adapter.useItemOn('bucket', { kind: 'block', pos }, signal);
+          const afterBucket = adapter.state().inventory.find((i) => i.name === 'bucket')?.count ?? 0;
+          const now = adapter.blockAt(pos);
+          const gotFilled = afterBucket < beforeBucket;
+          const drained = now === 'air';
+          const reasons = [
+            ...(gotFilled ? [`背包 bucket 少 ${beforeBucket - afterBucket}`] : []),
+            ...(drained ? [`(${pos.x},${pos.y},${pos.z}) 的 ${cur} 变成了空气`] : []),
+          ];
+          if (!r.ok) return fail('ERROR', `从 (${pos.x},${pos.y},${pos.z}) 装 ${cur} 失败：${r.reason}`, { pos, reason: r.reason, effectEvidence: r.effectEvidence });
+          if (gotFilled && drained) return ok(`从 (${pos.x},${pos.y},${pos.z}) 装了 ${cur}：bucket→${cur}_bucket，源格已变空气`, { pos, collected: `${cur}_bucket`, effectEvidence: { verified: true, changed: true, reasons } });
+          return fail('EFFECT_NOT_CONFIRMED', `对 (${pos.x},${pos.y},${pos.z}) 用了空桶，但没有同时确认「bucket 转成 ${cur}_bucket」和「源格变空气」（${reasons.length ? reasons.join('；') : '两样都没变'}）`, { pos, effectEvidence: { verified: true, changed: false, reasons } });
+        } catch (e) {
+          if (isAbort(e)) throw e;
+          return fail(codeFromError(e), `装 ${cur} 出错：${(e as Error).message}`);
+        }
+      }
+      if (!FLUID_BUCKETS.has(args.item)) return fail('BAD_ARGS', 'on 写坐标只支持满桶倒流体（water_bucket / lava_bucket）、空桶装流体（bucket）或点火（flint_and_steel / fire_charge）；对其他物品请写方块名或 "self"');
       const cur = adapter.blockAt(pos);
       if (cur !== null && !AIRISH.has(cur)) return fail('EFFECT_NOT_CONFIRMED', `(${pos.x},${pos.y},${pos.z}) 不是空气（现在是 ${cur}），水/岩浆只能倒进空格`, { pos });
+      if (!adapter.useBucketAt) return fail('ERROR', '当前适配器不支持往坐标倒流体');
       try {
-        const r = await adapter.placeBlockAt(pos, [args.item], signal);
+        const r = await adapter.useBucketAt(pos, args.item, signal);
         if (!r.ok) {
-          if (r.reason === 'NO_REFERENCE') return fail('PATH_NOT_FOUND', `往 (${pos.x},${pos.y},${pos.z}) 倒 ${args.item} 没成：这格空气旁边没有能贴住水桶的面（实心方块或岩浆/水面），或你站太远/视线被挡看不到那个面；走到能看见岩浆面或墙面的位置，让目标空气格贴着那个面再倒`, { pos, reason: r.reason });
-          return fail(r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS' : 'PATH_NOT_FOUND', `往 (${pos.x},${pos.y},${pos.z}) 倒 ${args.item} 没成：${r.reason}`, { pos, reason: r.reason });
+          const code = r.reason?.startsWith('NO_ITEM') ? 'MISSING_MATERIALS'
+            : r.reason?.startsWith('NO_REFERENCE') || r.reason?.startsWith('NO_PLACEMENT_FACE') ? 'PATH_NOT_FOUND'
+            : r.reason?.startsWith('NO_EFFECT') || r.reason?.startsWith('PLACEMENT_NOT_CONFIRMED') ? 'EFFECT_NOT_CONFIRMED' : 'ERROR';
+          return fail(code, `往 (${pos.x},${pos.y},${pos.z}) 倒 ${args.item} 没成：${r.reason}`, { pos, reason: r.reason, effectEvidence: r.effectEvidence });
         }
-        const now = adapter.blockAt(pos);
-        return ok(`往 (${pos.x},${pos.y},${pos.z}) 倒了 ${args.item}（现在这格是 ${now ?? '未知'}）`, { pos, placed: now });
+        return ok(`往 (${pos.x},${pos.y},${pos.z}) 倒了 ${args.item}${r.placed ? `，确认这格变成了 ${adapter.blockAt(pos)}` : ''}${r.effectEvidence?.reasons?.length ? `；${r.effectEvidence.reasons.join('；')}` : ''}`, { pos, placed: r.placed, effectEvidence: r.effectEvidence });
       } catch (e) {
         if (isAbort(e)) throw e;
         return fail(codeFromError(e), `倒 ${args.item} 出错：${(e as Error).message}`);
@@ -92,7 +119,11 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
     try {
       if (args.on === 'self') {
         const r = await adapter.useItemOn(args.item, { kind: 'self' }, signal);
-        return r.ok ? ok(`使用了 ${args.item}`, { effectEvidence: r.effectEvidence }) : fail('ERROR', `使用 ${args.item} 失败：${r.reason}`, { effectEvidence: r.effectEvidence });
+        if (!r.ok) return fail('ERROR', `使用 ${args.item} 失败：${r.reason}`, { effectEvidence: r.effectEvidence });
+        // on:"self" 只是沿当前准星使用，不自动低头、不选点；没观察到背包/目标变化就如实报「已执行但未确认」，
+        // 不能把满桶 self 当成「已经倒在脚边」的成功。
+        if (r.effectEvidence?.changed) return ok(`沿准星使用了 ${args.item}；${r.effectEvidence.reasons.join('；')}`, { effectEvidence: r.effectEvidence });
+        return fail('EFFECT_NOT_CONFIRMED', `沿当前准星使用了 ${args.item}（没有自动低头或选点），但没观察到背包或目标变化，效果未确认`, { effectEvidence: r.effectEvidence });
       }
       senses.refresh();
       const names = new Set([args.on, ...adapter.resolveBlockNames(args.on)]);
