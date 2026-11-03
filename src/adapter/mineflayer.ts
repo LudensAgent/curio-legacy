@@ -966,8 +966,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       movements.allowSprinting = opts.sprint ?? target.kind === 'away_from';
       if (opts.maxDropDown !== undefined) {
         if (!Number.isInteger(opts.maxDropDown) || opts.maxDropDown < 1 || opts.maxDropDown > 32 || target.kind !== 'xyz') throw new Error('BAD_ARGS: 明确下行需要相邻 xyz 落点和 1–32 格上限');
-        const from = b.entity.position.floored(), to = { x: Math.floor(target.x), y: Math.floor(target.y), z: Math.floor(target.z) };
-        if (Math.abs(from.x - to.x) + Math.abs(from.z - to.z) !== 1 || to.y >= Math.ceil(b.entity.position.y)) throw new Error('BAD_ARGS: 明确下行只支持相邻一列的较低落点');
+        // 节点 = 「脚下那块 +1」：整块脚高 63 → 节点 63，半砖脚高 63.5 → 节点 64。过滤候选用节点，与目标映射（ceil(y-0.001)）一致。
+        const from = b.entity.position.floored(), to = { x: Math.floor(target.x), y: Math.ceil(target.y - 0.001), z: Math.floor(target.z) };
+        if (Math.abs(from.x - to.x) + Math.abs(from.z - to.z) !== 1 || target.y >= b.entity.position.y) throw new Error('BAD_ARGS: 明确下行只支持相邻一列的较低落点');
         movements.maxDropDown = opts.maxDropDown;
         movements.infiniteLiquidDropdownDistance = false;
         movements.canDig = false; movements.allow1by1towers = false; movements.scafoldingBlocks = [];

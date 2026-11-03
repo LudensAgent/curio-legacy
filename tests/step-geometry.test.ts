@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { stepTo } from '../src/skills/primitives.ts';
+import { primitiveSkills, stepTo } from '../src/skills/primitives.ts';
 import { collisionBoxes, supportTop } from '../src/perception/geometry.ts';
 import { TestWorld, makeCtx, observeAllBlocks } from './survival-helpers.ts';
 
@@ -120,4 +120,62 @@ test('斜向一步会扫过角落：角落里有整块时拒绝，不能只查�
   assert.equal(r.failureCode, 'PATH_NOT_FOUND');
   assert.match(r.summary, /斜向迈步会撞到角落 stone/);
   assert.equal(move.mock.callCount(), 0);
+});
+
+test('绝对脚高与支撑面不符时拒绝，不被 ±0.3 容差接受另一支撑面', async (t) => {
+  const w = level(new TestWorld());
+  w.setBlock({ x: 0, y: 64, z: -1 }, 'oak_slab');
+  w.blockProperties.set('0,64,-1', { type: 'bottom' }); // 支撑面 64.5
+  const c = ctx(w);
+  t.after(() => c.memory.close());
+  const skill = primitiveSkills.find((s) => s.name === 'step')!;
+  const parsed = skill.validate({ xyz: [0, 64.75, -1], facing: 'N' }, w);
+  assert.ok(parsed.ok, !parsed.ok ? parsed.error : '');
+  const move = t.mock.method(w, 'moveTo', async () => {});
+  const r = await skill.run(c, parsed.args);
+  assert.equal(r.status, 'failed', r.summary);
+  assert.match(r.summary, /支撑面在 y=64\.50，与绝对脚高 64\.75 不符/);
+  assert.equal(move.mock.callCount(), 0);
+});
+
+test('相对上行踩 8 层雪：按实际脚高 64.875 验收，不比较整数脚格', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.setBlock({ x: 0, y: 64, z: -1 }, 'snow');
+  w.blockProperties.set('0,64,-1', { layers: 8 }); // 顶面 64.875
+  const c = ctx(w);
+  t.after(() => c.memory.close());
+  t.mock.method(w, 'moveTo', async () => { w.pos = { x: 0.5, y: 64.875, z: -0.5 }; });
+  const r = await stepTo.run(c, { at: [1, 1, 0], facing: 'N' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.match(r.summary, /脚高 64\.88/);
+});
+
+test('绝对 step xyz 也能沿梯子往上爬（与相对 [0,1,0] 一致）', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.setBlock({ x: 0, y: 64, z: 0 }, 'ladder');
+  const c = ctx(w);
+  t.after(() => c.memory.close());
+  const skill = primitiveSkills.find((s) => s.name === 'step')!;
+  const parsed = skill.validate({ xyz: [0, 65, 0], facing: 'N' }, w);
+  assert.ok(parsed.ok, !parsed.ok ? parsed.error : '');
+  t.mock.method(w, 'moveTo', async () => { w.pos = { x: 0.5, y: 65, z: 0.5 }; });
+  const r = await skill.run(c, parsed.args);
+  assert.equal(r.status, 'succeeded', r.summary);
+});
+
+test('半砖净空要确认三层：逐个补看直到看清，不只补看第一个未知格', async (t) => {
+  const w = level(new TestWorld());
+  w.setBlock({ x: 0, y: 64, z: -1 }, 'oak_slab');
+  w.blockProperties.set('0,64,-1', { type: 'bottom' });
+  const revealed = new Set<string>();
+  const revealQueue = ['0,64,-1', '0,65,-1', '0,66,-1'];
+  const c = makeCtx(w, { senses: { observeBlocks: (positions) => positions.filter((p) => revealed.has(`${p.x},${p.y},${p.z}`)).map((p) => ({ name: w.blockAt(p) ?? 'air', pos: p, properties: w.blockStateAt?.(p)?.properties ?? {}, worldId: w.worldId, sessionId: w.sessionId, dimension: w.dim, observationId: 1, observedAt: Date.now(), source: 'vision' as const })) } });
+  t.after(() => c.memory.close());
+  const look = t.mock.method(w, 'look', async () => { const next = revealQueue.shift(); if (next) revealed.add(next); });
+  t.mock.method(w, 'moveTo', async () => { w.pos = { x: 0.5, y: 64.5, z: -0.5 }; });
+  const r = await stepTo.run(c, { at: [1, 0, 0], facing: 'N' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.ok(look.mock.callCount() >= 2, `补看了 ${look.mock.callCount()} 次，应不止一次`);
 });

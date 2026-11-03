@@ -277,14 +277,23 @@ export const stepTo: Skill<CellArgs> = {
       }
       return null;
     };
+    // 有界补看：逐个转头看清未观察的格子，直到看清或到期。半砖脚高要确认三层空间，不能只补看第一个未知格。
+    const glanceAll = async (positions: Vec3Like[]) => {
+      if (!ctx.senses.observeBlocks) return;
+      for (const p of positions) {
+        if (!isUnseen(p) || Date.now() >= ctx.deadline) continue;
+        await glanceAt(ctx, p);
+        observe([p]);
+      }
+    };
     // 泡在水里：脚下那格是水、岸往往比脚高一两格，平地上的“上下 ±1”对不上。像玩家一样朝那边游、贴着岸按住跳爬上去。
     // 这项“邻列内多高度选出口”的辅助只属于相对 step；绝对 xyz/stepTo 保持所选脚高，不套用多高度搜索。
     if (a.state().inWater && a.swimTo && args.xyz === undefined) {
       const out = await stepOutOfWater(ctx, args, feet);
       if (out) return out;
     }
-    // 沿梯子往上爬一格：目标是自己头那格，脚下是梯子；头顶上方要空
-    if (args.at[0] === 0 && args.at[2] === 0 && args.at[1] === 1 && args.xyz === undefined) {
+    // 沿梯子往上爬一格：目标是自己头那格，脚下是梯子；头顶上方要空。绝对 xyz 也走这条（整数脚高才触发）。
+    if (args.at[0] === 0 && args.at[2] === 0 && args.at[1] === 1) {
       if (isUnseen({ ...target, y: target.y + 1 }) && ctx.senses.observeBlocks) {
         await glanceAt(ctx, { ...target, y: target.y + 1 });
         observe([{ ...target, y: target.y + 1 }]);
@@ -346,7 +355,9 @@ export const stepTo: Skill<CellArgs> = {
       } else {
         targetFoot = absolute ? args.xyz!.y : actualFoot;
         const expected = absolute ? targetFoot : currentFoot + args.at[1];
-        if (Math.abs(actualFoot - expected) > (absolute ? 0.3 : 0.51)) {
+        // 绝对目标要求支撑面与请求脚高一致（几何值是精确的 0.5/0.875 等，容差只吸收浮点）；
+        // 相对目标按格子差换算，允许半砖/雪层的 ±0.51 落差。
+        if (Math.abs(actualFoot - expected) > (absolute ? 0.01 : 0.51)) {
           problems.unshift(absolute
             ? `目标支撑面在 y=${actualFoot.toFixed(2)}，与绝对脚高 ${targetFoot.toFixed(2)} 不符；未执行迈步`
             : `目标支撑面在 y=${actualFoot.toFixed(2)}，与本次${args.at[1] > 0 ? '上一级' : args.at[1] < 0 ? '下一级' : '平走'}期望脚高 y=${expected.toFixed(2)} 不符；未执行迈步`);
@@ -354,11 +365,7 @@ export const stepTo: Skill<CellArgs> = {
           // 净空：转头看清身体实际占据的几格（脚高 targetFoot 起 1.8 高），再查 0.6×1.8 身体盒是否与方块相交。
           const need: Vec3Like[] = [];
           for (let y = Math.floor(targetFoot); y <= Math.floor(targetFoot + 1.8 - 1e-6); y++) need.push({ x: target.x, y, z: target.z });
-          const unseen = need.find((p) => isUnseen(p) && ctx.senses.observeBlocks);
-          if (unseen && ctx.senses.observeBlocks) {
-            await glanceAt(ctx, unseen);
-            observe(need);
-          }
+          await glanceAll(need);
           const blocker = clearanceBlocker(targetFoot, target.x, target.z);
           if (blocker) {
             const dn = describe(blocker);
@@ -382,7 +389,7 @@ export const stepTo: Skill<CellArgs> = {
         }
       }
     }
-    if (args.at[1] === 1 && args.xyz === undefined) {
+    if (args.at[1] === 1) {
       const oh = clearanceBlocker(currentFoot + 1, feet.x, feet.z);
       if (oh && oh.y > feet.y) problems.push(`往上跳时自己头顶上方是 ${describe(oh)}（跳不起来；先 dig_at [0,2,0]）`);
       else if (isUnseen(ownHead)) problems.push(`往上跳时自己头顶上方是 ${describe(ownHead)}，无法确认跳跃空间`);
@@ -404,12 +411,12 @@ export const stepTo: Skill<CellArgs> = {
     const state = a.state();
     const end = feetCell(state.pos);
     const foot = targetFoot!;
-    const landed = state.onGround && end.x === target.x && end.y === target.y && end.z === target.z
+    // 验收按实际脚高 + 目标列 + 接触状态，不比较整数脚格——半砖/雪层的脚高会让脚格比目标格低一格。
+    const landed = state.onGround && end.x === target.x && end.z === target.z
       && Math.abs(state.pos.y - foot) <= 0.3;
     if (!landed) {
       const why = !state.onGround ? '身体没有站稳'
         : end.x !== target.x || end.z !== target.z ? `实际列 (${end.x},${end.z}) 与目标不符`
-        : end.y !== target.y ? `实际脚格 ${end.y} 与目标脚格 ${target.y} 不符`
         : `实际脚高 ${state.pos.y.toFixed(2)} 与目标脚高 ${foot.toFixed(2)} 不符`;
       return fail(movementError ? codeFromError(movementError) : 'EFFECT_NOT_CONFIRMED', `没有站到 [${args.at}]：${why}；实际在 (${end.x},${end.y},${end.z})${movementError ? `；${(movementError as Error).message}` : ''}`, after(ctx, args.facing, target));
     }
