@@ -78,6 +78,7 @@ LLM 请求走 OpenAI 兼容 `/chat/completions`（DeepSeek / OpenAI / Ollama 等
 - scope 为受影响的模块/目录（如 `mind`、`adapter`、`perception`、`config`、`docs`），可省略。
 - 主题用英文、小写、祈使句，简明概括本次改动。
 - 正文（可选）用中文说明为什么改、改了什么，必要时分点。
+- **严禁添加 Claude 提交署名。** 不得在提交信息中添加 Claude / Claude Code 的署名、共同作者或生成标记，包括 `Co-Authored-By: Claude ...`、`Generated with Claude Code` 等；不得将 Git author 或 committer 设置为 Claude。
 - 每次完成用户确认的修改后自动提交，提交信息遵循以上格式。
 
 ## 并行修改
