@@ -1459,18 +1459,26 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (typeof b.look === 'function') { try { b.look(Math.atan2(-(tx - p0.x), -(tz - p0.z)), 0, true); } catch { /* ignore */ } }
     b.clearControlStates();
     b.setControlState('forward', true);
+    // 地面摩擦使水平速度每 tick 衰减到约 0.546 倍（停稳系数 ≈ 1/(1-0.546) ≈ 2.2），
+    // 空中摩擦约 0.91 倍（停稳系数 ≈ 1/(1-0.91) ≈ 11.1，见 prismarine-physics）。
+    const GROUND_STOP = 1 / (1 - 0.546);
+    const AIR_STOP = 1 / (1 - 0.91);
+    const EDGE = 0.2; // 身体中心离开原支撑、脚高开始变化的点：方块半宽 0.5 − 身体半宽 0.3
     let closest = dist();
     let overshot = false;
     try {
-      // 水平推进：按当前速度估算制动距离，只有当身体会停在目标列内才松键；不以固定水平距离提前刹车——
-      // 否则寻路停在距中心很近但仍由原支撑托住时，刚前进就松键、一步迈不出去。
-      // 地面摩擦使水平速度每 tick 衰减到约 0.546 倍，停稳距离 ≈ speed / (1 - 0.546) ≈ speed * 2.2（取 2.5 略保守）。
+      // 水平推进：按当前速度与「地面→下落」的状态变化估算制动距离，只有当身体会停在目标列内才松键。
+      // 下降时身体离开支撑、水平速度在空中衰减更慢，须更早松键，让速度在到达边缘时降到能靠空中滑行落到中心。
+      // 不以固定水平距离提前刹车——否则寻路停在距中心很近但仍由原支撑托住时，刚前进就松键、一步迈不出去。
       while (!settled() && Date.now() < deadline) {
         check();
         const d = dist();
         const v = b.entity.velocity;
         const speed = v ? Math.hypot(v.x, v.z) : 0;
-        if (d <= speed * 2.5) { b.setControlState('forward', false); break; }
+        const stopDist = target.y < p0y
+          ? EDGE + Math.max(0, speed - EDGE / AIR_STOP) * GROUND_STOP // 下降：地面减速到边缘速度，再空中滑到中心
+          : speed * GROUND_STOP;                                     // 平走/上行：地面减速
+        if (d <= stopDist) { b.setControlState('forward', false); break; }
         if (d > closest + 0.05 || d > 1.5) { overshot = true; break; }
         closest = Math.min(closest, d);
         await this.afterAction(() => sleep(Math.min(50, Math.max(1, deadline - Date.now())), check.signal), check);
@@ -1480,10 +1488,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     }
     if (overshot) return 'overshot';
     // 落地确认：所有成功都经统一的连续稳定验收——站稳 + 列一致 + 脚高相符 + 水平速度已衰减到接近停住
-    // （低于物理的 negligibleVelocity，之后速度被置零、身体不再滑动），不因单帧 settled 提前返回。
+    // （低于物理的 negligibleVelocity 0.003，之后速度被置零、身体不再滑动），不因单帧 settled 提前返回。
     const stopped = () => {
       const v = b.entity.velocity;
-      return !v || Math.hypot(v.x, v.z) < 0.005;
+      return !v || Math.hypot(v.x, v.z) < 0.003;
     };
     let stable = 0;
     while (Date.now() < deadline) {

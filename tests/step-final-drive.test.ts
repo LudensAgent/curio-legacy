@@ -152,6 +152,16 @@ test('单列半砖：身体停在目标边缘仍能受控减速落到半砖上',
   assert.equal(Math.floor(bot.entity.position.z), -1);
 });
 
+test('单列半砖：从整块格中心出发也能受控减速落到半砖', async (t) => {
+  const world = stepWorld({ name: 'stone', props: {} }, { name: 'oak_slab', props: { type: 'bottom' } });
+  const { bot, timer } = physicsBot(world, 64); // 从格中心 (0.5, 64, 0.5) 出发
+  t.after(() => clearInterval(timer));
+  const a = adapter(bot);
+  await a.moveTo({ kind: 'xyz', x: 0, y: 63.5, z: -1 }, { signal: new AbortController().signal, timeoutMs: 4000, allowTerrainChanges: false });
+  assert.ok(Math.abs(bot.entity.position.y - 63.5) <= 0.01, `脚高 ${bot.entity.position.y}`);
+  assert.equal(Math.floor(bot.entity.position.z), -1);
+});
+
 test('身体离目标太远时不盲目前推', async (t) => {
   const world = stepWorld({ name: 'stone', props: {} }, { name: 'farmland', props: {} });
   const { bot, timer } = physicsBot(world, 64);
