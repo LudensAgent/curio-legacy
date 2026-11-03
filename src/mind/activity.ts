@@ -45,7 +45,7 @@ export function viewOf(p?: Percept): string | undefined {
 
 export function createActivity(draft: ActivityDraft, monologue: string, source: Activity['source'], state: Pick<AgentState, 'inventory'>): Activity {
   return {
-    id: shortId('act_'), what: draft.what, why: draft.why, kind: draft.kind, steps: draft.steps.map((s) => ({ ...s })),
+    id: shortId('act_'), what: draft.what, why: draft.why, kind: draft.kind, steps: draft.steps.map((s) => ({ ...s, id: s.id ?? shortId('st_') })),
     ...(draft.facing ? { facing: draft.facing } : {}),
     repeat: Math.max(1, Math.min(12, draft.repeat || 1)), iteration: 0, index: 0,
     ...(draft.doneWhen ? { doneWhen: draft.doneWhen } : {}), ...(draft.expect ? { expect: draft.expect } : {}),
@@ -77,7 +77,7 @@ export function softMiss(a: Activity | null | undefined, step: Step, result: Pic
 }
 
 /** 下一个动作；这一轮做完了就开始下一轮；都做完返回 null */
-export function nextStep(a: Activity): Step | null {
+export function nextStep(a: Activity): (Step & { id?: string }) | null {
   if (a.index >= a.steps.length) {
     if (a.iteration + 1 >= a.repeat) return null;
     a.iteration++;
@@ -87,9 +87,10 @@ export function nextStep(a: Activity): Step | null {
   const step = a.steps[a.index++];
   if (!step) return null;
   if (step.skill === 'climb_up') {
-    const key = JSON.stringify(step.args ?? {});
+    const key = step.id ?? JSON.stringify(step.args ?? {});
     a.climb ??= {};
     a.climb[key] ??= { height: (step.args as Record<string, unknown>)?.height as number ?? 0, spent: 0, startY: Number.NaN };
+    return { skill: step.skill, args: step.args, id: step.id };
   }
   return { skill: step.skill, args: step.args };
 }
@@ -140,7 +141,7 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   if (a.results.length > 16) a.results = a.results.slice(-16);
   // climb_up 的统一结算与续跑决策：账本已在 climbUp.run 里结算（成功/失败/取消/嵌套都计入），这里只判断完成/继续/耗尽。
   if (step.skill === 'climb_up') {
-    const key = JSON.stringify(step.args ?? {});
+    const key = a.steps[Math.max(0, a.index - 1)]?.id ?? JSON.stringify(step.args ?? {});
     if (result.status === 'succeeded') {
       if (a.climb) delete a.climb[key];
     } else {

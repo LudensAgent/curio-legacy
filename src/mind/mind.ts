@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
+import { shortId } from '../util.ts';
 import type { AgentState, GameAdapter } from '../adapter/types.ts';
 import type { Arbiter, Step, TaskOutcome } from '../arbiter/arbiter.ts';
 import type { AgentEvent, EventBus } from '../events.ts';
@@ -616,7 +617,7 @@ export class Mind {
     }
     const state = this.d.adapter.state();
     this.activity.stepStart = { pos: { ...state.pos }, view: viewOf(this.safe(() => this.d.perception.snapshot(), undefined)) };
-    const climb = step.skill === 'climb_up' ? this.activity.climb?.[JSON.stringify(step.args ?? {})] : undefined;
+    const climb = step.skill === 'climb_up' ? this.activity.climb?.[step.id ?? JSON.stringify(step.args ?? {})] : undefined;
     const r = this.d.arbiter.start(step, this.activity.source === 'rule' ? 'rule' : 'llm', { planId: this.activity.id, ...(climb ? { climb } : {}) });
     if ('error' in r) this.handleStepResult(step, { status: 'failed', failureCode: 'BAD_ARGS', summary: r.error }, 0);
   }
@@ -863,7 +864,7 @@ export class Mind {
       if (b) {
         a.adaptations.push(`skill:${b.name}`);
         a.awaitingRecovery = b.name;
-        const climb = step.skill === 'climb_up' ? a.climb?.[JSON.stringify(step.args ?? {})] : undefined;
+        const climb = step.skill === 'climb_up' ? a.climb?.[a.steps[Math.max(0, a.index - 1)]?.id ?? JSON.stringify(step.args ?? {})] : undefined;
         a.steps.splice(Math.max(0, a.index - 1), 0, { skill: 'use_skill', args: { name: b.name, failure: failureFor(step, result, this.d.adapter.state().pos, climb) }, optional: true });
         a.index = Math.max(0, a.index - 1);
         a.consecutiveFailures = 0;
@@ -1333,10 +1334,14 @@ export class Mind {
         && a.steps.slice(0, currentIndex).every((step, i) => sameStep(step, draft.steps[i]));
       const runningIndex = keepsPrefix ? currentIndex : firstIsRunning ? 0 : -1;
       if (running?.planId === a.id && runningIndex < 0) this.d.arbiter.cancel('改了做法');
-      // 保留仍在执行的动作的额度账本，其余（新动作、改动过的动作）独立建账，不继承无关旧账。
-      const preservedKey = runningIndex >= 0 ? JSON.stringify(draft.steps[runningIndex]?.args ?? {}) : undefined;
-      const preservedClimb = preservedKey && this.activity.climb?.[preservedKey] ? { [preservedKey]: this.activity.climb[preservedKey] } : {};
-      Object.assign(a, { what: draft.what, why: draft.why || a.why, kind: draft.kind, steps: draft.steps, repeat: draft.repeat, iteration: 0, index: runningIndex + 1, adaptations: [], consecutiveFailures: 0, climb: preservedClimb,
+      // 重新分配实例 ID；仍在执行的动作保留原 ID 与额度账本（含恢复包装里的引用），其余独立建账。
+      const oldRunning = runningIndex >= 0 ? a.steps.find((s) => sameStep(s, draft.steps[runningIndex])) : undefined;
+      const steps = draft.steps.map((s, i) => ({ ...s, id: i === runningIndex && oldRunning ? oldRunning.id : shortId('st_') }));
+      const preservedClimb = runningIndex >= 0 && oldRunning?.id ? (() => {
+        const entry = this.activity.climb?.[oldRunning.id!];
+        return entry ? { [oldRunning.id!]: entry } : {};
+      })() : {};
+      Object.assign(a, { what: draft.what, why: draft.why || a.why, kind: draft.kind, steps, repeat: draft.repeat, iteration: 0, index: runningIndex + 1, adaptations: [], consecutiveFailures: 0, climb: preservedClimb,
         monologue: decision.monologue || a.monologue });
       if (draft.facing) a.facing = draft.facing; else delete a.facing;
       if (draft.doneWhen) a.doneWhen = draft.doneWhen; else delete a.doneWhen;

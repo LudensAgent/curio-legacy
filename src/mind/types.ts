@@ -20,7 +20,7 @@ export type DecisionKind = 'continue' | 'adjust' | 'new' | 'detour' | 'switch' |
 export const DECISION_KINDS: readonly DecisionKind[] = ['continue', 'adjust', 'new', 'detour', 'switch', 'experiment', 'rest'];
 
 /** routine 里的一步；optional = 顺手、碰运气的事（见到动物就打、有果子就摘），失败了这段活照常往下做 */
-export type ActivityStep = Step & { optional?: boolean };
+export type ActivityStep = Step & { optional?: boolean; /** 逻辑动作实例 ID，区分同参数的不同动作，跨重试/恢复/计划调整稳定 */ id?: string };
 
 export interface StepResult { skill: string; args?: unknown; status: string; failureCode?: string; summary: string; at: number; durationMs: number; pos?: { x: number; y: number; z: number }; view?: string }
 

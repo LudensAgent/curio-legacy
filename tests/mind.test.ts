@@ -148,7 +148,7 @@ test('找不到目标时交回心智，不自动加探索或改目标', () => {
     const a = createActivity({ what: '尝试采集', why: '', kind: 'gather', repeat: 1, steps }, '', 'llm', adapter.state());
     const s = nextStep(a)!;
     assert.deepEqual(afterStep(a, s, fail('NOT_FOUND', '当前没有看到目标'), 100, adapter.state()), { kind: 'stuck', why: '当前没有看到目标' });
-    assert.deepEqual(a.steps, steps, '失败不额外加入探索动作');
+    assert.deepEqual(a.steps.map((x) => x.skill), steps.map((x) => x.skill), '失败不额外加入探索动作');
     assert.equal(a.results.at(-1)?.summary, '当前没有看到目标');
   }
 });

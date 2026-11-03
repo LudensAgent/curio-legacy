@@ -336,16 +336,21 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
     if (budget && !Number.isFinite(budget.startY)) budget.startY = Math.floor(start);
     const remainingSpend = budget ? Math.max(0, budget.height - budget.spent) : args.height;
     const effectiveHeight = Math.min(args.height, remainingSpend);
-    // 同一动作（args.height 等于父额度）按父目标验收；恢复子动作按自身 args.height 验收。
-    const isSameAction = !!budget && args.height === budget.height;
+    // 父动作续跑（经仲裁器派发、无恢复上下文）按父目标验收；恢复子动作按自身 args.height 验收。
+    const isParentContinuation = !!budget && ctx.recovery === undefined;
     const netFromStart = () => Math.max(0, Math.floor(adapter.state().pos.y + 0.05) - Math.floor((budget ? budget.startY : start) + 0.05));
+    // 确认一次单级转换真正完成：身体落稳（onGround）且净高度确实升高，不把空中的瞬时高度当落点。
+    const confirmedAscent = (fromY: number) => {
+      const state = adapter.state();
+      return state.onGround && Math.floor(state.pos.y + 0.05) > Math.floor(fromY) && state.pos.y > fromY + 0.05;
+    };
     let climbedThisRun = 0;
     const total = () => (budget ? budget.spent : climbedThisRun);
     const reached = (around: ReturnType<typeof surroundings>) => (!args.untilSky || around.sky) && (!args.untilExit || around.exits.length > 0);
     const finish = (stopped?: string, failureCause?: 'PILLAR_CLEARANCE') => {
       const state = adapter.state(), around = surroundings(adapter);
-      const climbed = isSameAction ? netFromStart() : climbedThisRun;
-      const goalReached = args.untilSky || args.untilExit ? reached(around) : isSameAction ? netFromStart() >= budget!.height : climbedThisRun >= effectiveHeight;
+      const climbed = isParentContinuation ? netFromStart() : climbedThisRun;
+      const goalReached = args.untilSky || args.untilExit ? reached(around) : isParentContinuation ? netFromStart() >= budget!.height : climbedThisRun >= args.height;
       const facts = { climbed, spent: total(), height: budget?.height ?? args.height, sky: around.sky, exits: around.exits, goalReached, position: { ...state.pos }, ...(failureCause ? { failureCause } : {}),
         effectEvidence: { verified: true, changed: climbedThisRun > 0, reasons: [`实际高度 ${start} → ${state.pos.y}`] } };
       if (goalReached) return ok(`往上爬了 ${climbed} 格${args.untilExit ? '，四周有路了' : args.untilSky ? '，看得见天空了' : ''}`, facts);
@@ -383,7 +388,11 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
         } catch (e) {
           if (isAbort(e)) throw e;
           const name = e instanceof Error ? e.name : undefined;
-          if (name !== 'PillarClearanceError') return finish(why(e));
+          if (name !== 'PillarClearanceError') {
+            // 普通移动错误也可能已放块站稳：先结算实际效果，再停下。
+            if (budget && lastBeforeY !== undefined && confirmedAscent(lastBeforeY)) { budget.spent++; climbedThisRun++; lastBeforeY = undefined; }
+            return finish(why(e));
+          }
           // 搭柱被头顶/侧上方挡住：适配器报告具体那一格，把它挖开再垫一次；挖不动（基岩、近液体）由 breakCell 抛错如实停下
           const blocked = (e as { block?: { pos: Vec3Like } }).block?.pos;
           if (!blocked) return finish(why(e), 'PILLAR_CLEARANCE');
@@ -401,8 +410,7 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
           }
         }
         throwIfAborted(signal);
-        const after = adapter.state().pos;
-        if (Math.floor(after.y + 0.05) <= me.y || after.y <= before.y + 0.05) return finish('移动已结束，但脚下没有实际升到上一格');
+        if (!confirmedAscent(before.y)) return finish('移动已结束，但脚下没有实际站高');
         climbedThisRun++;
         if (budget) budget.spent++;
         lastBeforeY = undefined;
@@ -412,17 +420,12 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
       throwIfAborted(signal);
       return finish();
     } catch (e) {
-      if (isAbort(e)) {
-        // 取消时复验未结算的一步：身体已站稳升高才算入账（保留“空中跳跃不计进展”），再保留部分进展供调度器复用剩余额度。
-        if (budget && lastBeforeY !== undefined) {
-          const now = adapter.state().pos;
-          if (Math.floor(now.y + 0.05) > Math.floor(lastBeforeY) && now.y > lastBeforeY + 0.05) {
-            budget.spent++;
-            climbedThisRun++;
-          }
-        }
-        (e as Error & { partialClimbed?: number }).partialClimbed = total();
+      // 成功、取消、普通错误和超时统一结算未决的小步：身体已落稳升高才算入账。
+      if (budget && lastBeforeY !== undefined && confirmedAscent(lastBeforeY)) {
+        budget.spent++;
+        climbedThisRun++;
       }
+      if (isAbort(e)) (e as Error & { partialClimbed?: number }).partialClimbed = total();
       throw e;
     }
   },
