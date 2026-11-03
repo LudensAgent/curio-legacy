@@ -85,7 +85,9 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
       const handle = makeBridge(ctx);
       const bridge: SandboxHandler = async (method, values) => {
         const value = await handle(method, values);
-        const receipt = value as { ok?: boolean; moved?: number; data?: { noop?: boolean; expect?: { discarded?: string[]; forMs?: number; what?: string }; effectEvidence?: { verified?: boolean; changed?: boolean } } } | null;
+        const receipt = value as { ok?: boolean; moved?: number; data?: { noop?: boolean; expect?: { discarded?: string[]; forMs?: number; what?: string }; effectEvidence?: { verified?: boolean; changed?: boolean }; climbed?: number } } | null;
+        // 代码桥与声明式步骤共用效果收集：api.act 的爬升也计入整个技能实例的累计进展。
+        if (typeof receipt?.data?.climbed === 'number') climbedTotal += receipt.data.climbed;
         // 嵌套动作声明的持续效果（toss_item 的 discarded）要带上去：做完以后被自己打破，才能把失败记到这份技能头上
         const nested = receipt?.data?.expect;
         if (nested && !effectExpect) effectExpect = { ...nested, by: b.name };
@@ -128,7 +130,7 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
         const combatChanged = combatSig() !== combatBefore;
         const noop = still && invSig() === invBefore && !acted && !combatChanged;
         const noopText = noop ? '（身体这次什么都没做：没挪动、背包没变、没挖也没放。是条件不满足跳过了，还是技能没起作用，看上面的结果；要的事并没有发生）' : '';
-        return ok(`代码技能「${b.name}」做完了${m.text}${r.result !== null && r.result !== undefined ? `：${JSON.stringify(r.result).slice(0, 160)}` : ''}${noopText}`, { ...data, result: r.result, verified: !!b.verify, displacement: { horizontal: m.h, dy: m.dy }, ...(effectExpect ? { expect: effectExpect } : {}), ...(noop ? { noop: true } : {}) });
+        return ok(`代码技能「${b.name}」做完了${m.text}${r.result !== null && r.result !== undefined ? `：${JSON.stringify(r.result).slice(0, 160)}` : ''}${noopText}`, { ...data, result: r.result, verified: !!b.verify, displacement: { horizontal: m.h, dy: m.dy }, ...(climbedTotal > 0 ? { climbed: climbedTotal, spent: recovery?.climb?.spent ?? climbedTotal } : {}), ...(effectExpect ? { expect: effectExpect } : {}), ...(noop ? { noop: true } : {}) });
       }
       const done: string[] = [];
       let completedSteps = 0;
@@ -161,12 +163,14 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
       ctx.progress(1);
       const judged = await verifyRun(b, bridge, { before, result: { done }, args: { ...args.args, ...(args.failure ? { failure: args.failure } : {}) } }, ctx);
       if (judged) return fail('ERROR', `技能「${b.name}」的步骤都做完了，但${judged}${moved().text}`, { done, verified: false });
-      return ok(`照技能「${b.name}」做完了：${done.join('，')}${moved().text}`, { done, verified: !!b.verify, ...(completedSteps === 0 ? { noop: true } : {}) });
+      return ok(`照技能「${b.name}」做完了：${done.join('，')}${moved().text}`, { done, verified: !!b.verify, ...(climbedTotal > 0 ? { climbed: climbedTotal, spent: recovery?.climb?.spent ?? climbedTotal } : {}), ...(completedSteps === 0 ? { noop: true } : {}) });
     })().catch((error: unknown) => {
-      // 取消/失败也保留已累计的爬升进展：把已完成步骤的爬升合并进回执，供调度层判断是否续跑。
+      // 取消/失败也保留已累计的爬升进展：局部增量相加，共享账本只读取一次，不重复计算。
       if (climbedTotal > 0 && error && typeof error === 'object') {
         const prev = (error as { partial?: Record<string, unknown> }).partial ?? {};
-        (error as { partial?: Record<string, unknown> }).partial = { ...prev, climbed: climbedTotal + (typeof prev.climbed === 'number' ? prev.climbed : 0), spent: climbedTotal + (typeof prev.spent === 'number' ? prev.spent : 0) };
+        const climbed = climbedTotal + (typeof prev.climbed === 'number' ? prev.climbed : 0);
+        const spent = recovery?.climb?.spent ?? climbed;
+        (error as { partial?: Record<string, unknown> }).partial = { ...prev, climbed, spent };
       }
       if (isAbort(error) && ((ctx as SkillCtx & { skillDepth?: number }).skillDepth ?? 0) > 0) {
         registry?.recordInvocation?.(b.name, { status: 'cancelled', summary: '嵌套技能调用被取消', data: { version: b.version ?? 1 } });
