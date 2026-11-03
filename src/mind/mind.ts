@@ -811,7 +811,14 @@ export class Mind {
     if (o.result.status === 'cancelled') {
       // 被反射打断：等身体安全了把这一步再做一遍
       if (o.preemptedBy === 'reflex') {
-        // climb_up 的已确认进展已在 climbUp.run 里实时入账，回退后 nextStep 派发时按剩余额度继续，无需这里再结算。
+        // 顶层 climb_up 的进展已在账本实时入账，回退后按剩余额度续跑；普通嵌套技能（use_skill 等）内的爬升没有可靠续跑状态，
+        // 若已产生部分爬升，把部分完成事实交回 Agent，不整段重播。
+        const climbed = o.result.data?.climbed;
+        if (o.task.skill !== 'climb_up' && typeof climbed === 'number' && climbed > 0) {
+          const spent = o.result.data?.spent;
+          this.finishActivity('stuck', `${o.task.skill} 被反射打断，之前已完成部分爬升（净 ${climbed} 格${typeof spent === 'number' ? `，消耗 ${spent} 块` : ''}）；没有可靠的续跑状态，是否继续由你决定`);
+          return;
+        }
         a.index = Math.max(0, a.index - 1);
         a.interruptions = (a.interruptions ?? 0) + 1;
         // 一直被身体躲闪打断：这段活眼下做不成，先想想怎么对付周围的危险
@@ -1341,14 +1348,10 @@ export class Mind {
       const oldRunning = runningIndex >= 0 ? a.steps[currentIndex] : undefined;
       // 恢复包装（use_skill）里携带父执行实例的 ID 与账本引用，调整时一并保留给待续跑的 climb_up。
       const recoveryClimb = oldRunning?.skill === 'use_skill' ? (oldRunning.args as Record<string, unknown> | undefined)?.failure as { climbId?: string; climb?: { height: number; spent: number; startY: number }; args?: unknown } | undefined : undefined;
-      // 只给唯一待续跑的父实例保留原 ID；其余即使参数相同也独立建账，避免多个同参步骤绑定到同一父 ID。
-      let assignedRecoveryId = false;
+      // 待续跑的父实例紧跟恢复包装之后（runningIndex + 1）；已完成的前缀不得参与父 ID 重绑定，避免父 ID 落到历史步骤。
       const steps = draft.steps.map((s, i) => {
         if (i === runningIndex && oldRunning) return { ...s, id: oldRunning.id };
-        if (!assignedRecoveryId && recoveryClimb?.climbId && s.skill === 'climb_up' && isDeepStrictEqual(s.args ?? {}, recoveryClimb.args ?? {})) {
-          assignedRecoveryId = true;
-          return { ...s, id: recoveryClimb.climbId };
-        }
+        if (i === runningIndex + 1 && recoveryClimb?.climbId && s.skill === 'climb_up' && isDeepStrictEqual(s.args ?? {}, recoveryClimb.args ?? {})) return { ...s, id: recoveryClimb.climbId };
         return { ...s, id: shortId('st_') };
       });
       const preservedClimb: Record<string, { height: number; spent: number; startY: number }> = {};
