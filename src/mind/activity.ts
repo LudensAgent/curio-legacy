@@ -316,7 +316,7 @@ export function describeActivity(a: Activity, state: AgentState, percept?: Perce
   return {
     what: a.what, why: a.why, kind: a.kind,
     ...(a.facing ? { facing: a.facing } : {}),
-    routine: a.steps.map((s) => `${s.skill} ${argsLabel(s)}${s.optional ? '（顺手）' : ''}`),
+    routine: a.steps.map((s) => `${s.skill} ${argsLabel(s)}${s.id ? ` #${s.id}` : ''}${s.optional ? '（顺手）' : ''}`),
     round: `${a.iteration + 1}/${a.repeat}`, next_step: a.index,
     elapsed_real_s: Math.round((Date.now() - a.startedAt) / 1000),
     ...(done ? { done_when: { status: done.status, actual: done.actual } } : {}),

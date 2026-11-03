@@ -1344,20 +1344,15 @@ export class Mind {
         && a.steps.slice(0, currentIndex).every((step, i) => sameStep(step, draft.steps[i]));
       const runningIndex = keepsPrefix ? currentIndex : firstIsRunning ? 0 : -1;
       if (running?.planId === a.id && runningIndex < 0) this.d.arbiter.cancel('改了做法');
-      // 重新分配实例 ID；仍在执行的动作按准确索引保留原 ID 与额度账本，其余独立建账。
+      // 按实例 ID 继承预算：草案显式引用旧实例（id）或正在执行的动作保留原 ID；未引用的旧实例预算丢弃（停止自动续跑）。
       const oldRunning = runningIndex >= 0 ? a.steps[currentIndex] : undefined;
-      // 恢复包装（use_skill）里携带父执行实例的 ID 与账本引用，调整时一并保留给待续跑的 climb_up。
-      const recoveryClimb = oldRunning?.skill === 'use_skill' ? (oldRunning.args as Record<string, unknown> | undefined)?.failure as { climbId?: string; climb?: { height: number; spent: number; startY: number }; args?: unknown } | undefined : undefined;
-      // 待续跑的父实例只在恢复包装之后的续跑点（runningIndex + 1）保留原 ID；删除父实例或插入其他步骤导致续跑点不是原动作时，
-      // 不把预算转交给别的同参数动作，保留原目标与剩余额度交回 Agent 决定。
       const steps = draft.steps.map((s, i) => {
+        if (typeof s.id === 'string' && s.id) return { ...s };
         if (i === runningIndex && oldRunning) return { ...s, id: oldRunning.id };
-        if (i === runningIndex + 1 && recoveryClimb?.climbId && s.skill === 'climb_up' && isDeepStrictEqual(s.args ?? {}, recoveryClimb.args ?? {})) return { ...s, id: recoveryClimb.climbId };
         return { ...s, id: shortId('st_') };
       });
       const preservedClimb: Record<string, { height: number; spent: number; startY: number }> = {};
-      if (recoveryClimb?.climbId && recoveryClimb.climb) preservedClimb[recoveryClimb.climbId] = recoveryClimb.climb;
-      else if (oldRunning?.id) { const entry = this.activity.climb?.[oldRunning.id]; if (entry) preservedClimb[oldRunning.id] = entry; }
+      for (const s of steps) if (typeof s.id === 'string') { const entry = this.activity.climb?.[s.id]; if (entry) preservedClimb[s.id] = entry; }
       Object.assign(a, { what: draft.what, why: draft.why || a.why, kind: draft.kind, steps, repeat: draft.repeat, iteration: 0, index: runningIndex + 1, adaptations: [], consecutiveFailures: 0, climb: preservedClimb,
         monologue: decision.monologue || a.monologue });
       if (draft.facing) a.facing = draft.facing; else delete a.facing;

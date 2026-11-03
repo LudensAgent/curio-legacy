@@ -140,7 +140,9 @@ export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldM
         args = { ...args, facing };
       } else if (!cell.xyz && facing && s.args?.facing == null) args = { ...args, facing };
     }
-    steps.push({ skill: name, args, ...(optional ? { optional: true } : {}) });
+    // 草案可显式引用旧实例 ID（续跑同一动作时保留其额度账本）；无 ID 则视为新建动作。
+    const keepId = s0 && typeof s0 === 'object' && typeof (s0 as Record<string, unknown>).id === 'string' && (s0 as Record<string, unknown>).id ? (s0 as Record<string, unknown>).id as string : undefined;
+    steps.push({ skill: name, args, ...(optional ? { optional: true } : {}), ...(keepId ? { id: keepId } : {}) });
   }
   if (requiredErrors.length) return { error: `${label} 必需步骤无法执行，整段未安排：${requiredErrors.join('；')}。请修正、明确删去或重新决定` };
   if (!steps.length) return { error: `${label} 没有可执行的动作：${errors.join('；')}` };
