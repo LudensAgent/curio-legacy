@@ -1157,7 +1157,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (target.kind === 'xyz') {
       // xyz 的 y 是脚高（可为分数）：验收实际脚高与列，不只看节点——半砖脚高 64.5 与整块脚高 65 落在同一节点。
       const cell = position.floored();
-      if (cell.x !== Math.floor(target.x) || cell.z !== Math.floor(target.z) || Math.abs(position.y - target.y) > 0.3) {
+      if (cell.x !== Math.floor(target.x) || cell.z !== Math.floor(target.z) || Math.abs(position.y - target.y) > 0.05) {
         throw new Error(`No path: 寻路结束但尚未到达目标，实际位于 (${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})`);
       }
     } else if (!goal.isEnd(position.floored())) throw new Error(`No path: 寻路结束但尚未到达目标，实际位于 (${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})`);

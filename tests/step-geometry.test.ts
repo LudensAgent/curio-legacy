@@ -179,3 +179,58 @@ test('半砖净空要确认三层：逐个补看直到看清，不只补看第�
   assert.equal(r.status, 'succeeded', r.summary);
   assert.ok(look.mock.callCount() >= 2, `补看了 ${look.mock.callCount()} 次，应不止一次`);
 });
+
+test('平走到耕地（0.0625 落差）停在原平台不报成功', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.setBlock({ x: 0, y: 63, z: -1 }, 'farmland'); // 目标列支撑是耕地，顶 63.9375
+  const c = ctx(w);
+  t.after(() => c.memory.close());
+  t.mock.method(w, 'moveTo', async () => { w.pos = { x: 0.5, y: 64, z: -0.5 }; }); // 停在原平台，脚高 64
+  const r = await stepTo.run(c, { at: [1, 0, 0], facing: 'N' });
+  assert.equal(r.status, 'failed', r.summary);
+  assert.equal(r.failureCode, 'EFFECT_NOT_CONFIRMED');
+});
+
+test('半格上行到整块：按实际脚高 65 查净空，头顶 66.8125 的关闭上半活板门不挡', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 64.5, z: 0.5 }; // 站在底半砖上
+  w.setBlock({ x: 0, y: 64, z: 0 }, 'oak_slab');
+  w.blockProperties.set('0,64,0', { type: 'bottom' });
+  w.setBlock({ x: 0, y: 64, z: -1 }, 'stone'); // 目标列整块，顶 65
+  w.setBlock({ x: 0, y: 66, z: 0 }, 'oak_trapdoor'); // 当前列上方，底面 66.8125
+  w.blockProperties.set('0,66,0', { half: 'top', open: false });
+  const c = ctx(w);
+  t.after(() => c.memory.close());
+  t.mock.method(w, 'moveTo', async () => { w.pos = { x: 0.5, y: 65, z: -0.5 }; });
+  const r = await stepTo.run(c, { at: [1, 1, 0], facing: 'N' });
+  assert.equal(r.status, 'succeeded', r.summary);
+});
+
+test('半砖目标头格 y+2 有障碍时，反馈挖掘坐标指向实际障碍格 [1,2,0]', async (t) => {
+  const w = level(new TestWorld());
+  w.setBlock({ x: 0, y: 64, z: -1 }, 'oak_slab');
+  w.blockProperties.set('0,64,-1', { type: 'bottom' }); // 脚高 64.5
+  w.setBlock({ x: 0, y: 66, z: -1 }, 'stone'); // 头顶 y=66 有石头
+  const c = ctx(w);
+  t.after(() => c.memory.close());
+  const move = t.mock.method(w, 'moveTo', async () => {});
+  const r = await stepTo.run(c, { at: [1, 0, 0], facing: 'N' });
+  assert.equal(r.status, 'failed', r.summary);
+  assert.match(r.summary, /dig_at \[1,2,0\]/);
+  assert.equal(move.mock.callCount(), 0);
+});
+
+test('绝对 xyz 分数脚高沿梯子：明确返回不支持，不取整报成功', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.setBlock({ x: 0, y: 64, z: 0 }, 'ladder');
+  const c = ctx(w);
+  t.after(() => c.memory.close());
+  const skill = primitiveSkills.find((s) => s.name === 'step')!;
+  const parsed = skill.validate({ xyz: [0, 65.5, 0], facing: 'N' }, w);
+  assert.ok(parsed.ok, !parsed.ok ? parsed.error : '');
+  const r = await skill.run(c, parsed.args);
+  assert.equal(r.status, 'failed', r.summary);
+  assert.match(r.summary, /整数脚高/);
+});

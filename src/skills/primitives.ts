@@ -294,6 +294,9 @@ export const stepTo: Skill<CellArgs> = {
     }
     // 沿梯子往上爬一格：目标是自己头那格，脚下是梯子；头顶上方要空。绝对 xyz 也走这条（整数脚高才触发）。
     if (args.at[0] === 0 && args.at[2] === 0 && args.at[1] === 1) {
+      if (args.xyz !== undefined && Math.abs(args.xyz.y - target.y) > 0.01) {
+        return fail('BAD_ARGS', `梯子只能爬到整数脚高：请求脚高 ${args.xyz.y.toFixed(2)}，梯子顶在 ${target.y}`, after(ctx, args.facing, target));
+      }
       if (isUnseen({ ...target, y: target.y + 1 }) && ctx.senses.observeBlocks) {
         await glanceAt(ctx, { ...target, y: target.y + 1 });
         observe([{ ...target, y: target.y + 1 }]);
@@ -370,9 +373,11 @@ export const stepTo: Skill<CellArgs> = {
           if (blocker) {
             const dn = describe(blocker);
             const atCell = blocker.y === target.y;
+            // 挖掘坐标从实际 blocker 格换算，不用固定的 args.at[1]+1——半砖脚高可能把头顶障碍抬到 target.y+2。
+            const digRel = toRel(feet, args.facing, blocker);
             problems.push(isUnseen(blocker) ? `${atCell ? '目标格' : '目标格上方'}是 ${dn}，无法确认${atCell ? '通行' : '头部'}空间`
-              : atCell ? `目标格是 ${dn}（身体被占住，先 dig_at [${args.at}] 挖开）`
-              : `目标格上方是 ${dn}${dn.endsWith('_door') ? '（门的状态或碰撞形状阻碍通行）' : `（会碰头${LIQUID_BLOCKS.has(dn) ? '' : `；先 dig_at [${args.at[0]},${args.at[1] + 1},${args.at[2]}]`}）`}`);
+              : atCell ? `目标格是 ${dn}（身体被占住，先 dig_at [${digRel}] 挖开）`
+              : `目标格上方是 ${dn}${dn.endsWith('_door') ? '（门的状态或碰撞形状阻碍通行）' : `（会碰头${LIQUID_BLOCKS.has(dn) ? '' : `；先 dig_at [${digRel}]`}）`}`);
           } else {
             const unseen2 = need.find((p) => isUnseen(p));
             if (unseen2) problems.push(`${unseen2.y === target.y ? '目标格' : '目标格上方'}是 ${describe(unseen2)}，无法确认${unseen2.y === target.y ? '通行' : '头部'}空间`);
@@ -389,8 +394,9 @@ export const stepTo: Skill<CellArgs> = {
         }
       }
     }
-    if (args.at[1] === 1) {
-      const oh = clearanceBlocker(currentFoot + 1, feet.x, feet.z);
+    if (args.at[1] === 1 && targetFoot !== null) {
+      // 按实际目标脚高判断起跳净空：半格上步是走上去（脚高只抬 0.5），不是整格跳跃，不能按 currentFoot+1 假想跳高一格。
+      const oh = clearanceBlocker(targetFoot, feet.x, feet.z);
       if (oh && oh.y > feet.y) problems.push(`往上跳时自己头顶上方是 ${describe(oh)}（跳不起来；先 dig_at [0,2,0]）`);
       else if (isUnseen(ownHead)) problems.push(`往上跳时自己头顶上方是 ${describe(ownHead)}，无法确认跳跃空间`);
     }
@@ -412,8 +418,10 @@ export const stepTo: Skill<CellArgs> = {
     const end = feetCell(state.pos);
     const foot = targetFoot!;
     // 验收按实际脚高 + 目标列 + 接触状态，不比较整数脚格——半砖/雪层的脚高会让脚格比目标格低一格。
+    // 脚高是离散的支撑顶面（整块 1.0、耕地 0.9375、半砖 0.5…），最小差 0.0625，故用 0.05 只吸收浮点，
+    // 不能像 0.3 那样把「还站在原平台（高 0.0625）」当成已踩到目标支撑。
     const landed = state.onGround && end.x === target.x && end.z === target.z
-      && Math.abs(state.pos.y - foot) <= 0.3;
+      && Math.abs(state.pos.y - foot) <= 0.05;
     if (!landed) {
       const why = !state.onGround ? '身体没有站稳'
         : end.x !== target.x || end.z !== target.z ? `实际列 (${end.x},${end.z}) 与目标不符`
