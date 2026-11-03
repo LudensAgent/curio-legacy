@@ -60,7 +60,7 @@ export function constrainRecoveryAction(ctx: SkillCtx, name: string, values: Rec
       if (!target || target.x !== scope.target.x || target.y !== scope.target.y || target.z !== scope.target.z) throw new Error('恢复不能替换原动作的目标格');
     }
     if (name === 'dig_at' && scope.skill === 'dig_at') {
-      for (const flag of ['wet', 'lava', 'own'] as const) if (args[flag] === true && original[flag] !== true) throw new Error(`原挖掘没有允许 ${flag}:true，恢复不能擅自打开`);
+      for (const flag of ['wet', 'lava', 'own', 'fall'] as const) if (args[flag] === true && original[flag] !== true) throw new Error(`原挖掘没有允许 ${flag}:true，恢复不能擅自打开`);
     }
     if (name === 'place_at' && scope.skill === 'place_at' && original.item !== undefined && args.item !== original.item) throw new Error('恢复必须保留原放置物品');
   }

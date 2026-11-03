@@ -229,7 +229,7 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
       }
       case 'digAt': {
         const options = a[3] && typeof a[3] === 'object' ? a[3] as Record<string, unknown> : {};
-        return runSkill('dig_at', { xyz: { x: int(a[0], 'x'), y: int(a[1], 'y'), z: int(a[2], 'z') }, facing: 'N', ...(options.wet === true ? { wet: true } : {}), ...(options.lava === true ? { lava: true } : {}) });
+        return runSkill('dig_at', { xyz: { x: int(a[0], 'x'), y: int(a[1], 'y'), z: int(a[2], 'z') }, facing: 'N', ...(options.wet === true ? { wet: true } : {}), ...(options.lava === true ? { lava: true } : {}), ...(options.fall === true ? { fall: true } : {}) });
       }
       case 'placeAt': return runSkill('place_at', { xyz: { x: int(a[0], 'x'), y: int(a[1], 'y'), z: int(a[2], 'z') }, item: String(a[3] ?? 'any'), facing: 'N' });
       case 'moveTo': {

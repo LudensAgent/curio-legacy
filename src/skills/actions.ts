@@ -74,25 +74,33 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
         return ok(`对 (${pos.x},${pos.y},${pos.z}) 使用 ${args.item}（现在这格是 ${now ?? '未知'}）`, { pos, changed: now });
       }
       if (args.item === 'bucket') {
-        // 空桶精确收集：目标必须是流体源（water/lava，level=0），流动的装不了。装完核对「bucket→water_bucket」与「源格变空气」。
-        const cur = adapter.blockAt(pos);
-        if (cur !== 'water' && cur !== 'lava') return fail('BAD_ARGS', `(${pos.x},${pos.y},${pos.z}) 不是水或岩浆源（现在是 ${cur ?? '未知'}），空桶只能从流体源装`, { pos });
-        const src = adapter.blockStateAt?.(pos);
-        if (src && src.properties?.level !== undefined && Number(src.properties.level) !== 0) return fail('BAD_ARGS', `(${pos.x},${pos.y},${pos.z}) 是流动的 ${cur}（level=${src.properties.level}），空桶只能从源方块装`, { pos });
+        // 空桶精确收集：目标必须是「当前看得见的」流体源（water/lava，level=0）。用感知观察而非直接读区块，
+        // 避免泄漏墙后/远处不可见方块；流动的装不了。装完核对「bucket→water_bucket/lava_bucket」完整转换，源格后续状态单独报告。
+        senses.refresh();
+        const seen = senses.observeBlocks?.([pos]).find((b) => b.source === 'vision' && b.pos.x === pos.x && b.pos.y === pos.y && b.pos.z === pos.z);
+        if (!seen) return fail('NOT_FOUND', `(${pos.x},${pos.y},${pos.z}) 当前看不见（被挡、太远或没加载），空桶不能凭坐标装看不见的流体`, { pos });
+        const cur = seen.name;
+        if (cur !== 'water' && cur !== 'lava') return fail('BAD_ARGS', `(${pos.x},${pos.y},${pos.z}) 现在看得见的是 ${cur}，不是水或岩浆源；空桶只能从流体源装`, { pos });
+        if (Number(seen.properties?.level ?? 0) !== 0) return fail('BAD_ARGS', `(${pos.x},${pos.y},${pos.z}) 是流动的 ${cur}（level=${seen.properties.level}），空桶只能从源方块装`, { pos });
+        if (dist3(adapter.eye() ?? { ...s.pos, y: s.pos.y + 1.62 }, { x: pos.x + 0.5, y: pos.y + 0.5, z: pos.z + 0.5 }) > 4.4) return fail('PATH_NOT_FOUND', `(${pos.x},${pos.y},${pos.z}) 太远够不到，先走近再装`, { pos });
         const beforeBucket = s.inventory.find((i) => i.name === 'bucket')?.count ?? 0;
+        const beforeFilled = s.inventory.find((i) => i.name === `${cur}_bucket`)?.count ?? 0;
         try {
           const r = await adapter.useItemOn('bucket', { kind: 'block', pos }, signal);
           const afterBucket = adapter.state().inventory.find((i) => i.name === 'bucket')?.count ?? 0;
+          const afterFilled = adapter.state().inventory.find((i) => i.name === `${cur}_bucket`)?.count ?? 0;
           const now = adapter.blockAt(pos);
-          const gotFilled = afterBucket < beforeBucket;
+          const spent = afterBucket < beforeBucket;
+          const gotFilled = afterFilled > beforeFilled;
           const drained = now === 'air';
           const reasons = [
-            ...(gotFilled ? [`背包 bucket 少 ${beforeBucket - afterBucket}`] : []),
-            ...(drained ? [`(${pos.x},${pos.y},${pos.z}) 的 ${cur} 变成了空气`] : []),
+            ...(spent ? [`背包 bucket 少 ${beforeBucket - afterBucket}`] : []),
+            ...(gotFilled ? [`背包 ${cur}_bucket 增加 ${afterFilled - beforeFilled}`] : []),
+            ...(drained ? [`(${pos.x},${pos.y},${pos.z}) 的 ${cur} 变成了空气`] : now !== null ? [`(${pos.x},${pos.y},${pos.z}) 现在仍是 ${now}（可能被邻近源重新填回）`] : []),
           ];
           if (!r.ok) return fail('ERROR', `从 (${pos.x},${pos.y},${pos.z}) 装 ${cur} 失败：${r.reason}`, { pos, reason: r.reason, effectEvidence: r.effectEvidence });
-          if (gotFilled && drained) return ok(`从 (${pos.x},${pos.y},${pos.z}) 装了 ${cur}：bucket→${cur}_bucket，源格已变空气`, { pos, collected: `${cur}_bucket`, effectEvidence: { verified: true, changed: true, reasons } });
-          return fail('EFFECT_NOT_CONFIRMED', `对 (${pos.x},${pos.y},${pos.z}) 用了空桶，但没有同时确认「bucket 转成 ${cur}_bucket」和「源格变空气」（${reasons.length ? reasons.join('；') : '两样都没变'}）`, { pos, effectEvidence: { verified: true, changed: false, reasons } });
+          if (spent && gotFilled) return ok(`从 (${pos.x},${pos.y},${pos.z}) 装了 ${cur}：bucket→${cur}_bucket${drained ? '，源格已变空气' : `，源格现在仍是 ${now ?? '未知'}（可能被邻近水源重新填回）`}`, { pos, collected: `${cur}_bucket`, effectEvidence: { verified: true, changed: true, reasons } });
+          return fail('EFFECT_NOT_CONFIRMED', `对 (${pos.x},${pos.y},${pos.z}) 用了空桶，但没有同时确认「bucket 减少」和「${cur}_bucket 增加」（${reasons.length ? reasons.join('；') : '两样都没变'}）`, { pos, effectEvidence: { verified: true, changed: false, reasons } });
         } catch (e) {
           if (isAbort(e)) throw e;
           return fail(codeFromError(e), `装 ${cur} 出错：${(e as Error).message}`);
@@ -120,10 +128,11 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
       if (args.on === 'self') {
         const r = await adapter.useItemOn(args.item, { kind: 'self' }, signal);
         if (!r.ok) return fail('ERROR', `使用 ${args.item} 失败：${r.reason}`, { effectEvidence: r.effectEvidence });
-        // on:"self" 只是沿当前准星使用，不自动低头、不选点；没观察到背包/目标变化就如实报「已执行但未确认」，
-        // 不能把满桶 self 当成「已经倒在脚边」的成功。
-        if (r.effectEvidence?.changed) return ok(`沿准星使用了 ${args.item}；${r.effectEvidence.reasons.join('；')}`, { effectEvidence: r.effectEvidence });
-        return fail('EFFECT_NOT_CONFIRMED', `沿当前准星使用了 ${args.item}（没有自动低头或选点），但没观察到背包或目标变化，效果未确认`, { effectEvidence: r.effectEvidence });
+        // on:"self" 只是沿当前准星使用（输入已执行），不自动低头、不选点；满桶倒水只报「桶被消耗」，具体倒在哪一格不确认。
+        // 数量未变也不当失败（鱼竿等使用不消耗物品的工具是正常输入完成）。
+        const consumed = r.effectEvidence?.changed;
+        const note = FLUID_BUCKETS.has(args.item) ? '；没有自动低头/选点，具体倒在哪一格未确认' : '';
+        return ok(`沿当前准星使用了 ${args.item}${r.effectEvidence?.reasons?.length ? `；${r.effectEvidence.reasons.join('；')}` : ''}${note}`, { effectEvidence: r.effectEvidence, ...(consumed && FLUID_BUCKETS.has(args.item) ? { poured_unconfirmed: true } : {}) });
       }
       senses.refresh();
       const names = new Set([args.on, ...adapter.resolveBlockNames(args.on)]);

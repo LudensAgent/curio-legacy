@@ -1877,9 +1877,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       } finally {
         if (sneak) b.setControlState('sneak', false);
       }
-      if (await this.waitForInteraction(() => count() < before || b.blockAt(target)?.name === fluidName, check, 600)) break;
+      // 桶一旦被消耗就说明服务器接受了这次 use_item：不再重发别的面，只继续等目标格出现流体。
+      if (await this.waitForInteraction(() => count() < before, check, 600)) break;
     }
     const consumed = count() < before;
+    // 方块更新往往晚于背包更新：桶消耗后再等一段，别在目标格还没出现水时就过早判失败。
+    if (consumed) await this.waitForInteraction(() => b.blockAt(target)?.name === fluidName, check, 800);
     const now = b.blockAt(target);
     const placed = !!now && now.name === fluidName;
     const reasons = [
@@ -1906,7 +1909,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (distance > 4.4 || distance < 0.01) return false;
     if (typeof b.world?.raycast !== 'function') return true;
     const hit = b.world.raycast(from, direction.normalize(), distance + 0.05);
-    return !!hit?.position && hit.position.equals(reference.position);
+    if (!hit?.position || !hit.position.equals(reference.position)) return false;
+    // 除了命中参照方块，还要确认命中「请求的那一面」。否则射线斜穿侧壁时，use_item 会把水倒进别的相邻格
+    // （例如请求倒进石块上方，实际命中西侧，倒进旁边一格），桶照样被消耗、目标格却没有任何流体。
+    if (delta) return true;
+    const expected = face.y !== 0 ? (face.y > 0 ? 1 : 0) : face.z !== 0 ? (face.z > 0 ? 3 : 2) : (face.x > 0 ? 5 : 4);
+    return hit.face === expected;
   }
 
   blockStateAt(pos: Vec3Like) {
@@ -2861,20 +2869,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
 
   private invCountOf(name: string): number {
     return this.bot.inventory.items().filter((i: any) => i.name === name).reduce((n: number, i: any) => n + i.count, 0);
-  }
-
-  private inventoryCounts(): Map<string, number> {
-    const counts = new Map<string, number>();
-    for (const item of this.bot.inventory.items()) counts.set(item.name, (counts.get(item.name) ?? 0) + item.count);
-    return counts;
-  }
-
-  private inventoryDiff(before: Map<string, number>, after: Map<string, number>): string[] {
-    const names = new Set([...before.keys(), ...after.keys()]);
-    return [...names].sort().flatMap((n) => {
-      const d = (after.get(n) ?? 0) - (before.get(n) ?? 0);
-      return d ? [`背包 ${n} ${d > 0 ? '+' : ''}${d}`] : [];
-    });
   }
 
   async smelt(input: string, count: number, fuel: string, signal: AbortSignal, opts: SmeltOpts = {}): Promise<SmeltResult> {
@@ -4185,12 +4179,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (!(await this.equipNamed(item, check))) return { ok: false, reason: `NO_ITEM:${item}` };
     try {
       if (target.kind === 'self') {
-        // 沿当前准星使用，不自动低头、不选点。之后核对背包变化：扔东西/喝药会消耗物品，满桶倒水会转成空桶；
-        // 什么都没变就照实说「已执行但未确认效果」，不冒充成功（满桶 self 不一定倒在脚边）。
-        const before = this.inventoryCounts();
+        // 沿当前准星使用，不自动低头、不选点。只核对「本物品」是否被消耗（满桶转空桶、扔东西/喝药都会减少），
+        // 不把顺路捡起的其他物品变化当成本动作效果；鱼竿这类使用不消耗物品的工具，数量不变也是正常输入完成。
+        const before = this.invCountOf(item);
         await this.afterAction(async () => { b.activateItem(); await sleep(400, signal); b.deactivateItem(); }, check);
-        const diff = this.inventoryDiff(before, this.inventoryCounts());
-        return { ok: true, effectEvidence: { verified: true, changed: diff.length > 0, reasons: diff.length ? diff : ['已沿当前准星执行使用，但没有观察到背包变化（未确认是否生效）'] } };
+        const after = this.invCountOf(item);
+        return { ok: true, effectEvidence: { verified: true, changed: after < before, reasons: after < before ? [`背包 ${item} 减少 ${before - after}`] : [`已沿当前准星使用 ${item}，${item} 数量未变（该物品使用不消耗，或未生效）`] } };
       }
       const block = b.blockAt(this.vec(target.pos));
       if (!block) return { ok: false, reason: 'NO_BLOCK' };

@@ -170,3 +170,30 @@ test('nested methods cannot bypass reservation guards with raw adapter craft/pla
   assert.equal((await run('place')).status, 'succeeded');
   assert.equal(adapter.inv.get('cobblestone'), 3);
 });
+
+test('useBucketAt cannot consume another project reserved bucket, owner can', async (t) => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), a = project('a'), b = project('b', 'active');
+  memory.setWorld(adapter.worldId); memory.saveProject(a); memory.saveProject(b);
+  adapter.inv.set('water_bucket', 2);
+  reservationsFor(memory).reserve(owner(a), [{ name: 'water_bucket', count: 2 }], adapter.state(), memory.projects());
+  const arbiter = new Arbiter(adapter, memory, new EventBus(), context(adapter, memory).senses);
+  SKILLS.test_reserved_bucket = {
+    name: 'test_reserved_bucket', description: 'bucket reservation fixture', argsDoc: '{}', timeoutMs: 5000, movement: false,
+    validate: () => ({ ok: true, args: {} }),
+    async run(ctx) {
+      await ctx.actionAdapter.useBucketAt({ x: 0, y: 64, z: 2 }, 'water_bucket', ctx.signal);
+      return { status: 'succeeded', summary: 'bucket poured' };
+    },
+  };
+  t.after(() => { delete SKILLS.test_reserved_bucket; });
+  const run = () => new Promise<TaskOutcome>((resolve) => {
+    arbiter.once('done', resolve);
+    const started = arbiter.start({ skill: 'test_reserved_bucket', args: {} }, 'llm');
+    assert.ok(!('error' in started));
+  });
+  assert.equal((await run()).result.status, 'failed', '别的项目预留的水桶不能被 useBucketAt 消耗');
+  assert.equal(adapter.inv.get('water_bucket'), 2, '预留的水桶没被消耗');
+  b.status = 'deferred'; memory.saveProject(b); a.status = 'active'; memory.saveProject(a);
+  assert.equal((await run()).result.status, 'succeeded', 'owner 可以用自己的水桶');
+  assert.equal(adapter.inv.get('water_bucket'), 1);
+});

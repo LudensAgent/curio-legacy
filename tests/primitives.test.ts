@@ -353,6 +353,18 @@ test('explicit lava permission reaches dig validation and the code skill bridge'
   }
 });
 
+test('explicit fall permission reaches the code skill bridge', async (t) => {
+  const w = new FakeAdapter();
+  w.groundY = 63;
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.removed.add('0,62,0'); w.removed.add('0,61,0'); w.removed.add('0,60,0'); w.removed.add('0,59,0'); // 脚下深坑
+  const ctx = makeCtx(w, { senses: { observeBlocks: visibleTargets(w) } });
+  t.after(() => ctx.memory.close());
+  const bridge = makeBridge(ctx);
+  assert.equal((await bridge('digAt', [0, 63, 0]) as { ok: boolean }).ok, false, '不授权 fall 时拒绝挖脚下支撑');
+  assert.equal((await bridge('digAt', [0, 63, 0, { fall: true }]) as { ok: boolean }).ok, true, 'fall:true 经桥接生效');
+});
+
 test('absolute dig_at keeps its world cell instead of re-interpreting it as a support dig', async (t) => {
   const w = new FakeAdapter();
   w.groundY = 63; // y63 是草方块，站在 y64 的下半砖上

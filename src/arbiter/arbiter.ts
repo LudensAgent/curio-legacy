@@ -60,7 +60,7 @@ interface Running extends TaskInfo {
 /** 会“透视”的原始查询：技能必须改用 ctx.senses（看见/听见/记得的东西）。 */
 // lightAt 不在其中：身边的明暗是看得出来的
 const XRAY_METHODS = new Set(['findBlocks', 'nearbyEntities', 'blockOptics']);
-const ACTION_METHODS = new Set(['moveTo', 'dig', 'placeBlockAt', 'placeBlockStateAt', 'equipItem', 'tossItem', 'arrangeHotbar', 'useGui', 'tradeWith', 'useBlockAt', 'useItem', 'rangedAttack', 'enterPortalAt', 'collectNearbyDrops', 'craft', 'sleepInBed', 'smelt', 'useChest', 'till', 'plant', 'eat', 'equipWeapon', 'attack', 'look', 'jump', 'swimTo', 'diveTo', 'pillarUp', 'drive', 'raiseShield', 'startDraw', 'releaseDraw', 'signText', 'editBook', 'chat', 'stopAll', 'fish', 'useItemOn', 'interactEntity', 'ride', 'dismount', 'emptyFurnace']);
+const ACTION_METHODS = new Set(['moveTo', 'dig', 'placeBlockAt', 'placeBlockStateAt', 'equipItem', 'tossItem', 'arrangeHotbar', 'useGui', 'tradeWith', 'useBlockAt', 'useItem', 'rangedAttack', 'enterPortalAt', 'collectNearbyDrops', 'craft', 'sleepInBed', 'smelt', 'useChest', 'till', 'plant', 'eat', 'equipWeapon', 'attack', 'look', 'jump', 'swimTo', 'diveTo', 'pillarUp', 'drive', 'raiseShield', 'startDraw', 'releaseDraw', 'signText', 'editBook', 'chat', 'stopAll', 'fish', 'useItemOn', 'useBucketAt', 'interactEntity', 'ride', 'dismount', 'emptyFurnace']);
 
 /**
  * 动作仲裁器：任意时刻只有一个任务拥有角色控制权。
@@ -142,6 +142,7 @@ export class Arbiter extends EventEmitter {
                 if (!allowed.length) throw new Error('RESERVED_MATERIALS:没有可用于放置的未预留方块');
                 args[1] = allowed;
               } else if (prop === 'placeBlockStateAt' || prop === 'plant') requireAvailable(String(args[1]), 1);
+              else if (prop === 'useBucketAt') requireAvailable(String(args[1]), 1);
               else if (prop === 'useChest') for (const item of args[1] as { name: string; count: number }[]) requireAvailable(item.name, item.count);
               else if (prop === 'smelt') {
                 const input = String(args[0]), amount = Number(args[1]), fuel = String(args[2]);
@@ -166,7 +167,7 @@ export class Arbiter extends EventEmitter {
             }
             // These older primitives did not expose a signal. Bind task ownership
             // here so their internal post-await checks also observe cancellation.
-            const signalIndex: Record<string, number> = { dig: 1, placeBlockAt: 2, placeBlockStateAt: 3, equipItem: 2, tossItem: 2, arrangeHotbar: 2, useGui: 2, tradeWith: 3, useBlockAt: 2, useItem: 1, rangedAttack: 1, enterPortalAt: 1, collectNearbyDrops: 0, craft: 2, sleepInBed: 0, smelt: 3, useChest: 3, till: 1, plant: 2, eat: 0, equipWeapon: 0, attack: 1, look: 2, jump: 1, swimTo: 1, diveTo: 1, pillarUp: 1, drive: 2, raiseShield: 1, startDraw: 1, releaseDraw: 0, signText: 1, editBook: 2, fish: 0, useItemOn: 2, interactEntity: 2, ride: 1, dismount: 0, emptyFurnace: 1 };
+            const signalIndex: Record<string, number> = { dig: 1, placeBlockAt: 2, placeBlockStateAt: 3, equipItem: 2, tossItem: 2, arrangeHotbar: 2, useGui: 2, tradeWith: 3, useBlockAt: 2, useItem: 1, rangedAttack: 1, enterPortalAt: 1, collectNearbyDrops: 0, craft: 2, sleepInBed: 0, smelt: 3, useChest: 3, till: 1, plant: 2, eat: 0, equipWeapon: 0, attack: 1, look: 2, jump: 1, swimTo: 1, diveTo: 1, pillarUp: 1, drive: 2, raiseShield: 1, startDraw: 1, releaseDraw: 0, signText: 1, editBook: 2, fish: 0, useItemOn: 2, useBucketAt: 2, interactEntity: 2, ride: 1, dismount: 0, emptyFurnace: 1 };
             if (prop === 'moveTo') args[1] = { ...(args[1] as object), signal };
             else if (String(prop) in signalIndex) args[signalIndex[String(prop)]] = signal;
             return v.apply(t, args);
