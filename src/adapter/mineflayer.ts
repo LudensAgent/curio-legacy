@@ -1462,13 +1462,15 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     let closest = dist();
     let overshot = false;
     try {
-      // 水平推进：直到身体真正离开原支撑（脚高变化）且已贴近目标才松键，不以水平距离提前刹车——
-      // 否则寻路停在距中心很近但仍由原支撑托住时，刚前进就松键、一步都迈不出去。
+      // 水平推进：按当前速度估算制动距离，只有当身体会停在目标列内才松键；不以固定水平距离提前刹车——
+      // 否则寻路停在距中心很近但仍由原支撑托住时，刚前进就松键、一步迈不出去。
+      // 地面摩擦使水平速度每 tick 衰减到约 0.546 倍，停稳距离 ≈ speed / (1 - 0.546) ≈ speed * 2.2（取 2.5 略保守）。
       while (!settled() && Date.now() < deadline) {
         check();
-        const p = b.entity.position;
         const d = dist();
-        if (Math.abs(p.y - p0y) > 0.02 && d <= 0.35) { b.setControlState('forward', false); break; }
+        const v = b.entity.velocity;
+        const speed = v ? Math.hypot(v.x, v.z) : 0;
+        if (d <= speed * 2.5) { b.setControlState('forward', false); break; }
         if (d > closest + 0.05 || d > 1.5) { overshot = true; break; }
         closest = Math.min(closest, d);
         await this.afterAction(() => sleep(Math.min(50, Math.max(1, deadline - Date.now())), check.signal), check);
@@ -1477,11 +1479,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (ownsControls()) { try { b.setControlState('forward', false); } catch { /* ignore */ } }
     }
     if (overshot) return 'overshot';
-    // 落地确认：所有成功都经统一的连续稳定验收——站稳 + 列一致 + 脚高相符 + 水平速度已衰减到接近停住，
-    // 不因单帧 settled 提前返回，惯性把身体带出目标列不误报成功。
+    // 落地确认：所有成功都经统一的连续稳定验收——站稳 + 列一致 + 脚高相符 + 水平速度已衰减到接近停住
+    // （低于物理的 negligibleVelocity，之后速度被置零、身体不再滑动），不因单帧 settled 提前返回。
     const stopped = () => {
       const v = b.entity.velocity;
-      return !v || Math.hypot(v.x, v.z) < 0.02;
+      return !v || Math.hypot(v.x, v.z) < 0.005;
     };
     let stable = 0;
     while (Date.now() < deadline) {

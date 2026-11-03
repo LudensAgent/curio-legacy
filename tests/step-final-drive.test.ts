@@ -139,6 +139,19 @@ test('身体已贴近目标但仍由原支撑托住时，仍会前推并落到�
   assert.equal(Math.floor(bot.entity.position.z), -1);
 });
 
+test('单列半砖：身体停在目标边缘仍能受控减速落到半砖上', async (t) => {
+  const world = stepWorld({ name: 'stone', props: {} }, { name: 'oak_slab', props: { type: 'bottom' } });
+  const { bot, timer } = physicsBot(world, 64);
+  t.after(() => clearInterval(timer));
+  // 寻路停在目标列边缘（脚仍由原整块托住），速度为零——正是 P1「等脚高下降才松键」偏晚的起始状态。
+  bot.entity.position = new Vec3(0.5, 64, -0.2);
+  bot.entity.velocity = new Vec3(0, 0, 0);
+  const a = adapter(bot);
+  await a.moveTo({ kind: 'xyz', x: 0, y: 63.5, z: -1 }, { signal: new AbortController().signal, timeoutMs: 4000, allowTerrainChanges: false });
+  assert.ok(Math.abs(bot.entity.position.y - 63.5) <= 0.01, `脚高 ${bot.entity.position.y}`);
+  assert.equal(Math.floor(bot.entity.position.z), -1);
+});
+
 test('身体离目标太远时不盲目前推', async (t) => {
   const world = stepWorld({ name: 'stone', props: {} }, { name: 'farmland', props: {} });
   const { bot, timer } = physicsBot(world, 64);
