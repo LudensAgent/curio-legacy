@@ -8,6 +8,10 @@
  * 生产接线注意：这里的 `tick` 是离线测试夹具里推进 prismarine-physics 的帧源；
  * 真实适配层应由游戏服务器的 physicsTick 驱动帧、再喂给本执行器，而不是由执行器
  * 主动推进物理。生命周期/作用域也来自实际适配器，不从请求复制。
+ *
+ * 控制归属：身体桥的全部控制写入（look/clearControlStates/setControlState/stop）都经
+ * WalkMoveExecutor 发出，并在每次写入前、每次异步帧等待恢复后复核父任务信号、当前段
+ * 信号与期限；物理帧等待本身支持取消、截止时间和连接结束，不在没有下一帧时永久挂起。
  */
 
 import { GROUNDED_ARRIVAL_DEFAULTS, WalkRouteExecutor, VoxelMap, serializeBlockState } from 'curio-minecraft-3d-memory';
@@ -55,32 +59,68 @@ export interface WalkBody {
   };
 }
 
-/** 一次物理帧推进：离线夹具同步推进 prismarine-physics；生产由 physicsTick 驱动（异步）。 */
+/**
+ * 一次物理帧推进：离线夹具同步推进 prismarine-physics；生产由 physicsTick 驱动（异步）。
+ * 传入 `signal`，在取消、断线或截止时返回 null 而非挂起，并清理自己的监听器。
+ */
 export interface WalkTick {
-  (): WalkBody['entity'] | Promise<WalkBody['entity']>;
+  (signal: AbortSignal): Promise<WalkBody['entity'] | null>;
 }
 
-/** 实际适配器的存活/连接/观测就绪状态；不从请求复制后冒充观测。 */
+/** 实际适配器的存活/连接/观测就绪状态与作用域；不从请求复制后冒充观测。 */
 export interface WalkLifecycle {
+  worldId: string;
+  dim: string;
+  sessionId: string;
   alive: boolean;
   connected: boolean;
   observationReady: boolean;
 }
 
-/** 从实体状态构造一个 BodySample；速度单位为格/tick。 */
+/** 从实际实体观测构造一个 BodySample；作用域与生命周期都来自实际适配器，不从请求复制。 */
 export function bodySample(
-  scope: { worldId: string; dim: string; sessionId: string; executionId: string },
+  executionId: string,
   entity: WalkBody['entity'],
   observedAt: number,
   sequence: number,
   lifecycle: WalkLifecycle,
 ): BodySample {
   return {
-    worldId: scope.worldId, dim: scope.dim, sessionId: scope.sessionId, executionId: scope.executionId,
+    worldId: lifecycle.worldId, dim: lifecycle.dim, sessionId: lifecycle.sessionId, executionId,
     pos: { ...entity.position }, velocity: { ...entity.velocity }, observedAt, sequence,
     alive: lifecycle.alive, connected: lifecycle.connected, observationReady: lifecycle.observationReady,
     onGround: entity.onGround, inWater: entity.isInWater,
   };
+}
+
+/**
+ * 有界等待下一物理帧：任一信号中止、期限到达或 tick 自身断线都返回 null，
+ * 不会依赖“再收到一帧”才发现已经失效。期限由调用方给定（含每段 timeout 与总 deadline 的最小者）。
+ */
+async function awaitFrame(
+  tick: WalkTick,
+  deadlineMs: number,
+  now: () => number,
+  ...signals: AbortSignal[]
+): Promise<WalkBody['entity'] | null> {
+  for (const s of signals) if (s.aborted) return null;
+  if (now() >= deadlineMs) return null;
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  for (const s of signals) s.addEventListener('abort', onAbort, { once: true });
+  const remaining = Math.max(0, deadlineMs - now());
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      tick(controller.signal),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => { controller.abort(); resolve(null); }, remaining);
+      }),
+    ]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+    for (const s of signals) s.removeEventListener('abort', onAbort);
+  }
 }
 
 /**
@@ -94,29 +134,45 @@ export class WalkMoveExecutor implements MoveExecutor {
   constructor(
     private readonly body: WalkBody,
     private readonly tick: WalkTick,
+    private readonly parentSignal: AbortSignal,
     private readonly now: () => number = Date.now,
   ) {}
 
   /** 宿主在帧回调里构造样本（掌握单调序号与生命周期），再喂给库。 */
   setFrameSink(fn: (entity: WalkBody['entity']) => void) { this.frameSink = fn; }
 
+  private aborted(request: ExecutableMove): boolean {
+    return request.signal.aborted || this.parentSignal.aborted;
+  }
+
   async move(request: ExecutableMove): Promise<ExecutableMoveResult> {
     const { from, to } = request;
-    // 控制前先检查取消与期限：已取消的请求不得写任何控制。
-    if (request.signal.aborted) return { failure: { kind: 'cancelled' } };
-    if (this.now() >= request.deadlineMs) return { failure: { kind: 'timed_out' } };
+    // 控制前先检查取消与期限：已取消/已到期的请求不得写任何控制。
+    if (this.aborted(request)) return { failure: { kind: 'cancelled' } };
+    // 每段有效期限：总期限与单段 timeout 的较小者，不能靠单段拖过总期限。
+    const moveDeadline = Math.min(request.deadlineMs, this.now() + request.timeoutMs);
+    if (this.now() >= moveDeadline) return { failure: { kind: 'timed_out' } };
+
     this.body.look(Math.atan2(-(to.x - from.x), -(to.z - from.z)), 0);
     // 转头后重新检查所有权/取消：转头等待期间可能被抢占。
-    if (request.signal.aborted) return { failure: { kind: 'cancelled' } };
+    if (this.aborted(request)) return { failure: { kind: 'cancelled' } };
     this.body.clearControlStates();
     this.body.setControlState('forward', true);
     this.activeExecutionId = request.executionId;
+
     const GROUND_STOP = 1 / (1 - 0.546); // 地面摩擦每 tick 衰减到约 0.546 倍
     let braked = false;
     for (let i = 0; i < 400; i++) {
-      if (request.signal.aborted) { this.releaseIf(request.executionId); return { failure: { kind: 'cancelled' } }; }
-      if (this.now() >= request.deadlineMs) { this.releaseIf(request.executionId); return { failure: { kind: 'timed_out' } }; }
-      const e = await this.tick();
+      if (this.aborted(request)) { this.releaseIf(request.executionId); return { failure: { kind: 'cancelled' } }; }
+      if (this.now() >= moveDeadline) { this.releaseIf(request.executionId); return { failure: { kind: 'timed_out' } }; }
+      const e = await awaitFrame(this.tick, moveDeadline, this.now, request.signal, this.parentSignal);
+      if (e === null) {
+        // 无帧：复核取消/期限后再决定终态，不把断线误判为普通成功。
+        if (this.aborted(request)) { this.releaseIf(request.executionId); return { failure: { kind: 'cancelled' } }; }
+        if (this.now() >= moveDeadline) { this.releaseIf(request.executionId); return { failure: { kind: 'timed_out' } }; }
+        this.releaseIf(request.executionId);
+        return { failure: { kind: 'execution_error', detail: 'no physics frame available' } };
+      }
       const dist = Math.hypot(to.x - e.position.x, to.z - e.position.z);
       const speed = Math.hypot(e.velocity.x, e.velocity.z);
       if (!braked && dist <= speed * GROUND_STOP) { this.body.setControlState('forward', false); braked = true; }
@@ -144,13 +200,14 @@ export class WalkMoveExecutor implements MoveExecutor {
 
 /**
  * 驱动一个已选短路线，直到终态。MoveExecutor 在 advance 里自驱单段，宿主负责采样、
- * 序号与生命周期，并在到达确认前先处理世界观测。
+ * 序号与生命周期，并在到达确认前先处理世界观测。父任务取消经 `signal` 贯通到库取消。
  */
 export async function runWalkRoute(opts: {
   map: VoxelMap;
   body: WalkBody;
   request: WalkRouteRequest;
   tick: WalkTick;
+  signal: AbortSignal;
   lifecycle?: () => WalkLifecycle;
   observe?: () => ChangeReport | null;
   deadlineMs?: number;
@@ -158,36 +215,54 @@ export async function runWalkRoute(opts: {
 }): Promise<NavResult> {
   const now = opts.now ?? Date.now;
   const deadline = opts.deadlineMs ?? opts.request.deadlineMs;
-  const lifecycle = opts.lifecycle ?? (() => ({ alive: true, connected: true, observationReady: true }));
-  const executor = new WalkMoveExecutor(opts.body, opts.tick, now);
+  const lifecycle = opts.lifecycle ?? (() => ({
+    worldId: opts.request.worldId, dim: opts.request.dim, sessionId: opts.request.sessionId,
+    alive: true, connected: true, observationReady: true,
+  }));
+  const executor = new WalkMoveExecutor(opts.body, opts.tick, opts.signal, now);
   const loop = new WalkRouteExecutor(opts.map, executor, { now });
   let sequence = 0; // 委托内单调递增，跨段不重置
-  const scope = { worldId: opts.request.worldId, dim: opts.request.dim, sessionId: opts.request.sessionId, executionId: '' };
 
-  // 统一有效期限：宿主期限与库执行期限一致，避免宿主到期后库仍继续执行。
+  // 父任务取消贯通到库执行与身体执行：取消所属段、释放控制，不启动下一段。
+  const onParentAbort = () => { loop.cancel('agent', 'parent task cancelled'); };
+  opts.signal.addEventListener('abort', onParentAbort, { once: true });
+
   loop.start({ ...opts.request, deadlineMs: deadline });
-  scope.executionId = loop.status()!.delegationId;
+  const executionId = loop.status()!.delegationId;
 
   // 统一帧处理顺序：本轮合法观测先进入地图并复验，再让身体样本确认到达。
   const observeThenSample = (entity: WalkBody['entity']) => {
     const report = opts.observe?.();
     if (report) loop.observe(report, 64);
-    loop.onSample(bodySample(scope, entity, now(), ++sequence, lifecycle()));
+    loop.onSample(bodySample(executionId, entity, now(), ++sequence, lifecycle()));
   };
   executor.setFrameSink(observeThenSample);
 
   // 初始实测位置：bodyArrival 需要多帧确认身体稳定在起点，advance 才会启动首段。
-  for (let i = 0; i < 8; i++) observeThenSample(await opts.tick());
+  // 初始采样与行走采样使用同一套期限和生命周期约束，不在期限检查循环之前无限等待。
+  if (loop.status()!.result === null) {
+    for (let i = 0; i < 8; i++) {
+      const entity = await awaitFrame(opts.tick, deadline, now, opts.signal);
+      if (entity === null) break;
+      observeThenSample(entity);
+      if (opts.signal.aborted) break;
+    }
+  }
 
   let iterations = 0;
-  while (loop.status()!.result === null && now() < deadline && iterations++ < 20000) {
+  while (loop.status()!.result === null && now() < deadline && !opts.signal.aborted && iterations++ < 20000) {
     loop.advance(64);
     loop.checkTimeout();
     await new Promise((r) => setTimeout(r, 10));
   }
-  // 退出时若仍无终态：取消所属库执行与身体执行、释放控制，保留已测位移后返回。
+  // 退出时若仍无终态：区分父任务取消与宿主期限到期，保留已测位移后返回。
   let result = loop.status()!.result;
-  if (result === null) result = loop.cancel('scheduler', 'host deadline exceeded');
+  if (result === null) {
+    result = opts.signal.aborted
+      ? loop.cancel('agent', 'parent task cancelled')
+      : loop.cancel('scheduler', 'host deadline exceeded');
+  }
+  opts.signal.removeEventListener('abort', onParentAbort);
   return result;
 }
 

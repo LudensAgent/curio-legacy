@@ -42,7 +42,7 @@ function body(start: { x: number; z: number }) {
   const tick = () => {
     physics.simulatePlayer(new PlayerState(bot, control), world).apply(bot);
     clock += 50;
-    return bot.entity;
+    return Promise.resolve(bot.entity);
   };
   return { bot, tick, now: () => clock };
 }
@@ -78,7 +78,7 @@ test('三段含转弯的偏移起点路线走通并 ARRIVED，末位用实际测
   // 名义点列；身体实际起点带偏移（0.54,0.52），后续名义点沿 X/Z 相邻。
   const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 1.5 }, { x: 2.5, y: 0, z: 1.5 }];
   const { bot, tick, now } = body({ x: 0.54, z: 0.52 });
-  const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, now });
+  const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, signal: new AbortController().signal, now });
   assert.equal(result.outcome, 'ARRIVED', result.message);
   assert.ok(result.outcome === 'ARRIVED' && result.lastPosition);
   // 末位不是名义点 (2.5, 1.5)，而是实际测量位置。
@@ -93,11 +93,24 @@ test('未知形状返回能力缺口，不当作可通行', () => {
   if (r.kind === 'unsupported_shape') assert.match(r.block, /oak_slab/);
 });
 
+test('无 physicsTick（断线/服务器停帧）时按期限有界退出，不挂起', async () => {
+  const map = buildMap();
+  const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }];
+  const { bot } = body({ x: 0.54, z: 0.52 });
+  const neverTick = () => new Promise<never>((_resolve) => {}); // 永不产生物理帧
+  const start = Date.now();
+  const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick: neverTick, signal: new AbortController().signal, now: Date.now, deadlineMs: Date.now() + 150 });
+  const elapsed = Date.now() - start;
+  assert.notEqual(result.outcome, 'ARRIVED', '无物理帧不得误报到达');
+  assert.ok(elapsed < 2000, `应在一段期限内结束，不挂起（实际 ${elapsed}ms）`);
+  assert.equal(bot.control.forward, false, '退出后不得继续按前进键');
+});
+
 test('宿主期限早于请求期限：返回后不再继续执行，保留部分位移', async () => {
   const map = buildMap();
   const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }];
   const { bot, tick, now } = body({ x: 0.54, z: 0.52 });
-  const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, now, deadlineMs: 2500 });
+  const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, signal: new AbortController().signal, now, deadlineMs: 2500 });
   assert.equal(result.outcome, 'TIMEOUT', result.message);
   assert.equal(bot.control.forward, false, '返回后不得继续按前进键');
 });
@@ -114,6 +127,6 @@ test('可见支撑变化在到达前被处理，不误报 ARRIVED', async () => 
     }
     return null;
   };
-  const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, now, observe });
+  const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, signal: new AbortController().signal, now, observe });
   assert.notEqual(result.outcome, 'ARRIVED', '支撑变化应导致失效，不能误报 ARRIVED');
 });

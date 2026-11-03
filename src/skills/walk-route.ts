@@ -3,55 +3,81 @@
  * 通过库的 WalkRouteExecutor 复用路线验证与单段编排；身体桥走适配器的实测物理帧，
  * 不调用会重新寻路的 moveTo。到达语义由库的 bodyArrival 判定。
  * 地图由合法视锥观测喂 VoxelMap：初始扫描路线格，移动中持续更新当前身体周边格。
+ * 观测遵守 Vision 的批次限制（≤32 格/次），变化报告整批合并喂给地图，不丢支撑拆除通知。
  */
 
 import { GROUNDED_ARRIVAL_DEFAULTS, VoxelMap } from 'curio-minecraft-3d-memory';
-import type { ChangeReport, NavResult, Vec3Like } from 'curio-minecraft-3d-memory';
-import { runWalkRoute, walkCollisionProvider, type WalkBody, type WalkTick } from '../adapter/walk-route.ts';
+import type { ChangeReport, NavResult, Observation, Vec3Like } from 'curio-minecraft-3d-memory';
+import { runWalkRoute, walkCollisionProvider } from '../adapter/walk-route.ts';
 import type { BlockObservation } from '../adapter/types.ts';
-import { ok, fail, type Skill, type SkillCtx } from './types.ts';
+import { fail, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 
 interface WalkRouteArgs {
   points: Vec3Like[];
   deadlineMs?: number;
 }
 
-/** 把一次合法视锥观测喂进 VoxelMap，返回 ChangeReport。 */
-function feedCell(map: VoxelMap, b: BlockObservation): ChangeReport {
-  return map.observe({
+/** 本轮能力上限：短路线，单轴相邻一格。 */
+const MAX_POINTS = 32;
+
+/** 把一次合法视锥观测映射成库的 Observation。 */
+function toObservation(b: BlockObservation): Observation {
+  return {
     worldId: b.worldId, dim: b.dimension, sessionId: b.sessionId,
     observedAt: b.observedAt, sequence: b.observationId,
     source: 'vision', evidence: 'seen', stateComplete: true,
-    state: { name: b.name, properties: b.properties as Record<string, string> }, pos: { ...b.pos },
-  });
+    state: { name: b.name, properties: (b.properties ?? {}) as Record<string, string> }, pos: { ...b.pos },
+  };
 }
 
-/** 观察一组格并喂进地图；返回最后一个 ChangeReport（多次变更的截面由地图累计）。 */
-function observeCells(ctx: SkillCtx, map: VoxelMap, cells: Vec3Like[]): ChangeReport | null {
-  const observed = ctx.senses.observeBlocks?.(cells) ?? [];
-  let report: ChangeReport | null = null;
-  for (const b of observed) report = feedCell(map, b);
-  return report;
+function dedupe(cells: Vec3Like[]): Vec3Like[] {
+  const seen = new Set<string>();
+  const out: Vec3Like[] = [];
+  for (const c of cells) {
+    const k = `${c.x},${c.y},${c.z}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push({ x: c.x, y: c.y, z: c.z });
+  }
+  return out;
 }
 
-/** 从路线点列导出需要观察的格（脚高、支撑、净空）。 */
+/**
+ * 观察一组格并整批喂进地图；遵守 Vision 的 ≤32 格/次批次限制，
+ * 用 map.observeBatch 合并所有变化报告，不丢前面已观察到的支撑拆除通知。
+ */
+export function observeCells(ctx: SkillCtx, map: VoxelMap, cells: Vec3Like[]): ChangeReport | null {
+  const observeBlocks = ctx.senses.observeBlocks;
+  if (!observeBlocks) return null;
+  const unique = dedupe(cells);
+  const observations: Observation[] = [];
+  for (let i = 0; i < unique.length; i += 32) {
+    for (const b of observeBlocks(unique.slice(i, i + 32))) observations.push(toObservation(b));
+  }
+  if (observations.length === 0) return null;
+  return map.observeBatch({ observations, unobserved: [] });
+}
+
+/**
+ * 从路线点列导出需要观察的格：每个点周围 3×3 的水平邻域 × 脚高/支撑/头/净空。
+ * 按短路线约束有界生成，不枚举整条路线的包围矩形。额外观察的格对验证无害。
+ */
 function routeCells(points: Vec3Like[]): Vec3Like[] {
-  const minX = Math.floor(Math.min(...points.map((p) => p.x))) - 1;
-  const maxX = Math.floor(Math.max(...points.map((p) => p.x))) + 1;
-  const minZ = Math.floor(Math.min(...points.map((p) => p.z))) - 1;
-  const maxZ = Math.floor(Math.max(...points.map((p) => p.z))) + 1;
-  const feetY = Math.floor(points[0]!.y);
   const cells: Vec3Like[] = [];
-  for (let x = minX; x <= maxX; x++) for (let z = minZ; z <= maxZ; z++) {
-    for (let y = feetY - 1; y <= feetY + 2; y++) cells.push({ x, y, z });
+  for (const p of points) {
+    const fx = Math.floor(p.x), fy = Math.floor(p.y), fz = Math.floor(p.z);
+    for (let x = fx - 1; x <= fx + 1; x++)
+      for (let z = fz - 1; z <= fz + 1; z++)
+        for (let y = fy - 1; y <= fy + 2; y++) cells.push({ x, y, z });
   }
   return cells;
 }
 
-function navToResult(nav: NavResult): ReturnType<typeof fail> | ReturnType<typeof ok> {
+function navToResult(nav: NavResult): SkillResult {
   const summary = nav.message;
   if (nav.outcome === 'ARRIVED') return ok(summary, { nav });
-  if (nav.outcome === 'CANCELLED') return fail('STUCK', summary, { nav });
+  // 取消是取消，不包装成普通 STUCK；部分位移随 nav.lastPosition/trace 保留在 data。
+  if (nav.outcome === 'CANCELLED') return { status: 'cancelled', summary, data: { nav } };
   const code = nav.outcome === 'TIMEOUT' ? 'TIMEOUT' : nav.outcome === 'BLOCKED' ? 'PATH_NOT_FOUND' : 'ERROR';
   return fail(code, summary, { nav });
 }
@@ -59,65 +85,103 @@ function navToResult(nav: NavResult): ReturnType<typeof fail> | ReturnType<typeo
 export const walkRoute: Skill<WalkRouteArgs> = {
   name: 'walk_route',
   description: '走一条显式给定的同高、无施工短路线（普通干燥整块、沿 X/Z）。由你提供点列，代码稳定执行到每个点',
-  argsDoc: '{"points":[[x,y,z],...]}（≥2 个点，脚高 y 相同，相邻沿 X/Z）',
+  argsDoc: '{"points":[[x,y,z],...]}（2~32 个点，脚高 y 相同，相邻沿 X/Z 一格）',
   timeoutMs: 30000,
   movement: true,
-  validate(raw, adapter) {
-    const a = (raw ?? {}) as Record<string, unknown>;
+  validate(raw, _adapter) {
+    const a = (raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}) as Record<string, unknown>;
     const points = a.points;
     if (!Array.isArray(points) || points.length < 2) return { ok: false, error: 'walk_route 需要 {"points":[[x,y,z],...]}，至少 2 个点' };
-    const parsed: Vec3Like[] = points.map((p) => {
-      const arr = Array.isArray(p) ? p : (p as Record<string, unknown>);
-      const x = Number(Array.isArray(p) ? arr[0] : (arr as Record<string, unknown>).x);
-      const y = Number(Array.isArray(p) ? arr[1] : (arr as Record<string, unknown>).y);
-      const z = Number(Array.isArray(p) ? arr[2] : (arr as Record<string, unknown>).z);
-      return { x, y, z };
-    });
-    if (parsed.some((p) => !Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z))) return { ok: false, error: 'points 坐标必须是有限数字' };
-    if (parsed.some((p) => p.y !== parsed[0]!.y)) return { ok: false, error: 'walk_route 本轮只支持同高路线（y 相同）' };
+    if (points.length > MAX_POINTS) return { ok: false, error: `walk_route 本轮最多 ${MAX_POINTS} 个点` };
+
+    const parsed: Vec3Like[] = [];
+    for (const p of points) {
+      const coord = readPoint(p);
+      if (coord === null) return { ok: false, error: 'points 每个点必须是 [x,y,z] 数组或 {x,y,z} 对象，坐标为有限数字' };
+      parsed.push(coord);
+    }
+    const y = parsed[0]!.y;
+    for (const p of parsed) if (p.y !== y) return { ok: false, error: 'walk_route 本轮只支持同高路线（y 相同）' };
+    for (let i = 0; i < parsed.length - 1; i++) {
+      const dx = parsed[i + 1]!.x - parsed[i]!.x;
+      const dz = parsed[i + 1]!.z - parsed[i]!.z;
+      const isXStep = Math.abs(Math.abs(dx) - 1) < 1e-9 && Math.abs(dz) < 1e-9;
+      const isZStep = Math.abs(Math.abs(dz) - 1) < 1e-9 && Math.abs(dx) < 1e-9;
+      if (!isXStep && !isZStep) return { ok: false, error: 'walk_route 只支持沿 X/Z 单轴相邻一格的路线（非对角、非跳跃、非跨格）' };
+    }
+
     const rawDeadline = a.deadlineMs === undefined ? undefined : Number(a.deadlineMs);
     const deadlineMs = rawDeadline !== undefined && Number.isFinite(rawDeadline) && rawDeadline > 0 ? rawDeadline : undefined;
+    if (rawDeadline !== undefined && deadlineMs === undefined) return { ok: false, error: 'deadlineMs 必须是正有限数字（毫秒）' };
     return { ok: true, args: { points: parsed, ...(deadlineMs !== undefined ? { deadlineMs } : {}) } };
   },
   async run(ctx, args) {
-    const body = (ctx.adapter as unknown as { walkBody?: () => WalkBody }).walkBody?.();
-    const tick = (ctx.adapter as unknown as { walkTick?: () => WalkTick }).walkTick?.();
+    const body = ctx.adapter.walkBody?.();
+    const tick = ctx.adapter.walkTick?.();
     if (!body || !tick) return fail('ERROR', '当前适配器没有 walk 身体桥（walkBody/walkTick）');
+
     const state = ctx.adapter.state();
     const map = new VoxelMap(state.worldId, { validityWindowMs: 60_000 });
-    observeCells(ctx, map, routeCells(args.points));
+    // 有效期限不能超过父委托期限：子请求只能缩短，不能延长。
+    const effectiveDeadline = Math.min(args.deadlineMs ?? ctx.deadline, ctx.deadline);
+
     // 预扫：依次转向各路线段方向、略低头观察（视锥是朝向的，脚高格在视线下方）。
+    observeCells(ctx, map, routeCells(args.points));
     if (typeof ctx.adapter.look === 'function') {
       for (let i = 0; i < args.points.length - 1; i++) {
+        if (ctx.signal.aborted || Date.now() >= effectiveDeadline) break;
         const a = args.points[i]!, b = args.points[i + 1]!;
         const yaw = Math.atan2(-(b.x - a.x), -(b.z - a.z));
         await ctx.adapter.look(yaw, -0.6);
         observeCells(ctx, map, routeCells(args.points));
       }
     }
+    if (ctx.signal.aborted) return { status: 'cancelled', summary: '预扫阶段被取消', data: {} };
+
     // 移动中持续更新身体周边格（视锥随身体朝向移动而更新）。
     const observe = () => {
       const p = ctx.adapter.state().pos;
       const fx = Math.floor(p.x), fy = Math.floor(p.y), fz = Math.floor(p.z);
       const cells: Vec3Like[] = [];
-      for (let x = fx - 2; x <= fx + 2; x++) for (let z = fz - 2; z <= fz + 2; z++) {
-        for (let y = fy - 1; y <= fy + 2; y++) cells.push({ x, y, z });
-      }
+      for (let x = fx - 1; x <= fx + 1; x++)
+        for (let z = fz - 1; z <= fz + 1; z++)
+          for (let y = fy - 1; y <= fy + 2; y++) cells.push({ x, y, z });
       return observeCells(ctx, map, cells);
     };
+
     const request = {
       worldId: state.worldId, dim: state.dim, sessionId: state.sessionId, mode: 'walk' as const,
       body: { feet: args.points[0]!, width: 0.6, height: 1.8, pose: 'standing' as const },
       points: args.points, arrival: { kind: 'exact' as const },
       bodyArrival: GROUNDED_ARRIVAL_DEFAULTS, shapeProvider: walkCollisionProvider,
-      deadlineMs: args.deadlineMs ?? ctx.deadline, timeoutMs: 4000,
+      deadlineMs: effectiveDeadline, timeoutMs: 4000,
     };
     const nav = await runWalkRoute({
-      map, body, request, tick, observe,
-      lifecycle: () => { const s = ctx.adapter.state(); return { alive: s.alive, connected: s.connected, observationReady: s.observationReady }; },
-      deadlineMs: args.deadlineMs ?? ctx.deadline,
+      map, body, request, tick, signal: ctx.signal, observe,
+      lifecycle: () => {
+        const s = ctx.adapter.state();
+        return { worldId: s.worldId, dim: s.dim, sessionId: s.sessionId, alive: s.alive, connected: s.connected, observationReady: s.observationReady };
+      },
+      deadlineMs: effectiveDeadline,
       now: Date.now,
     });
+    // 父任务已取消但库以其它终态返回（期限/失效先到）：以取消返回，保留部分位移。
+    if (ctx.signal.aborted && nav.outcome !== 'CANCELLED') return { status: 'cancelled', summary: nav.message, data: { nav } };
     return navToResult(nav);
   },
 };
+
+function readPoint(p: unknown): Vec3Like | null {
+  if (Array.isArray(p)) {
+    const x = Number(p[0]), y = Number(p[1]), z = Number(p[2]);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
+    return { x, y, z };
+  }
+  if (p !== null && typeof p === 'object') {
+    const o = p as Record<string, unknown>;
+    const x = Number(o.x), y = Number(o.y), z = Number(o.z);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
+    return { x, y, z };
+  }
+  return null;
+}

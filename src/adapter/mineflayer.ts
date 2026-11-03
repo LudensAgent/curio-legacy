@@ -1535,16 +1535,26 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     };
   }
 
-  /** 下一物理帧：由服务端 physicsTick 驱动，返回最新实测实体状态（异步）。 */
+  /** 下一物理帧：由服务端 physicsTick 驱动，返回最新实测实体状态（异步）。取消或断线时返回 null 并清理监听器。 */
   walkTick(): WalkTick {
     const bot = this.bot;
-    return () => new Promise((resolve) => {
+    return (signal) => new Promise((resolve) => {
+      if (signal.aborted) { resolve(null); return; }
       const onTick = () => {
-        bot.removeListener('physicsTick', onTick);
+        cleanup();
         const e = bot.entity;
         resolve({ position: { x: e.position.x, y: e.position.y, z: e.position.z }, velocity: { x: e.velocity.x, y: e.velocity.y, z: e.velocity.z }, onGround: e.onGround, isInWater: e.isInWater });
       };
+      const onAbort = () => { cleanup(); resolve(null); };
+      const onEnd = () => { cleanup(); resolve(null); };
+      const cleanup = () => {
+        signal.removeEventListener('abort', onAbort);
+        bot.removeListener('physicsTick', onTick);
+        bot.removeListener('end', onEnd);
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
       bot.on('physicsTick', onTick);
+      bot.once('end', onEnd);
     });
   }
 

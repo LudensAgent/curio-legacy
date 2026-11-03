@@ -17,7 +17,7 @@ function recordingBody() {
 
 test('已取消的请求不写任何控制（控制前先检查取消）', async () => {
   const { controls, body } = recordingBody();
-  const executor = new WalkMoveExecutor(body, () => body.entity, () => 0);
+  const executor = new WalkMoveExecutor(body, () => Promise.resolve(body.entity), new AbortController().signal, () => 0);
   const abort = new AbortController();
   abort.abort();
   const request: ExecutableMove = { executionId: 'e1', worldId: 'w', dim: 'd', sessionId: 's', from: { x: 0, y: 0, z: 0 }, to: { x: 1, y: 0, z: 0 }, deadlineMs: 1000, timeoutMs: 100, signal: abort.signal };
@@ -26,18 +26,29 @@ test('已取消的请求不写任何控制（控制前先检查取消）', async
   assert.deepEqual(controls, [], '已取消请求不得写 look/forward/clear');
 });
 
+test('父任务信号中止同样拦截控制写入', async () => {
+  const { controls, body } = recordingBody();
+  const parent = new AbortController();
+  parent.abort();
+  const executor = new WalkMoveExecutor(body, () => Promise.resolve(body.entity), parent.signal, () => 0);
+  const request: ExecutableMove = { executionId: 'e1', worldId: 'w', dim: 'd', sessionId: 's', from: { x: 0, y: 0, z: 0 }, to: { x: 1, y: 0, z: 0 }, deadlineMs: 1000, timeoutMs: 100, signal: new AbortController().signal };
+  const result = await executor.move(request);
+  assert.equal(result.failure?.kind, 'cancelled');
+  assert.deepEqual(controls, [], '父任务已取消时不得写控制');
+});
+
 test('stop 只释放所属 executionId，旧 ID 不清理当前控制', () => {
   const { controls, body } = recordingBody();
-  const executor = new WalkMoveExecutor(body, () => body.entity, () => 0);
+  const executor = new WalkMoveExecutor(body, () => Promise.resolve(body.entity), new AbortController().signal, () => 0);
   executor.stop('old-id');
   assert.deepEqual(controls, [], '无活动段时旧 ID 的 stop 不得写控制');
 });
 
 test('旧段迟到的 releaseIf 不清新段归属，新段 stop 仍能释放', async () => {
   const { controls, body } = recordingBody();
-  const executor = new WalkMoveExecutor(body, () => body.entity, () => 0);
+  const executor = new WalkMoveExecutor(body, () => Promise.resolve(body.entity), new AbortController().signal, () => 0);
   const sig = new AbortController();
-  const p = executor.move({ executionId: 'e2', worldId: 'w', dim: 'd', sessionId: 's', from: { x: 0, y: 0, z: 0 }, to: { x: 1, y: 0, z: 0 }, deadlineMs: 100000, timeoutMs: 100, signal: sig.signal });
+  const p = executor.move({ executionId: 'e2', worldId: 'w', dim: 'd', sessionId: 's', from: { x: 0, y: 0, z: 0 }, to: { x: 1, y: 0, z: 0 }, deadlineMs: 100000, timeoutMs: 100000, signal: sig.signal });
   await new Promise((r) => setImmediate(r)); // 让 move 循环启动并写 forward
   // 旧段迟到收尾（executionId 不匹配当前段）
   (Reflect.get(executor, 'releaseIf') as (id: string) => void).call(executor, 'e1');
