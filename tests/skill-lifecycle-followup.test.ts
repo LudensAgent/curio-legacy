@@ -417,3 +417,91 @@ test('已完成候选（reflex 验收）后死亡，事后观测报“做完后�
   assert.match(after[0].msg, /做完后不久就死了/, '已完成候选报做完后死亡');
   assert.doesNotMatch(after[0].msg, /执行期间就死了/);
 });
+
+test('替代技能不能按 subsumed_by 收起自己（同名旧版并入新版）', async (t) => {
+  const directory = tmp(), adapter = new FakeAdapter(), bus = new EventBus();
+  const book = new SkillBook(null, directory);
+  const engine = new BehaviorEngine(book, adapter, null, bus, senses0, path.join(directory, 'stats.json'));
+  t.after(() => { engine.dispose(); fs.rmSync(directory, { recursive: true, force: true }); });
+  for (const name of ['skill-a', 'skill-b']) assert.ok(engine.write(codeSkill(name)).ok);
+  for (let i = 0; i < 3; i++) engine.recordInvocation('skill-b', { status: 'succeeded', summary: '实际做成', data: { version: 1, verified: true } });
+  let round = 0;
+  const planner = { autonomous: true, noteInvalid() {}, complete: async () => {
+    const text = round++ === 0
+      ? JSON.stringify({ merge: [{ from: ['skill-a', 'skill-b'], skill: { name: 'skill-a', description: '合并 AB', code: 'return {worked:true};', verify: 'const s = await api.state(); return true;' } }] })
+      : JSON.stringify({ retire: [{ name: 'skill-a', target: 'skill', version: 2, why: '已并入', subsumed_by: 'skill-a' }] });
+    return { text, latencyMs: 0 };
+  } };
+  const curator = new SkillCurator(planner, engine, book, bus);
+  await curator.check(Date.now(), { force: true }); // 第一轮：生成替代候选 skill-a v2
+  for (let i = 0; i < 3; i++) engine.recordInvocation('skill-a', { status: 'succeeded', summary: '实际做成', data: { version: 2, verified: true } }); // 验收晋升 skill-a v2
+  const result = await curator.check(Date.now(), { force: true });
+  assert.equal(engine.inactive('skill-a'), false, '同名旧版并入新版后，当前版本就是替代结果，不能按替代收起它自己');
+  assert.match(result!, /未完成/);
+});
+
+test('来源并入后又独立改版，旧替代关系不能收起新版', async (t) => {
+  const directory = tmp(), adapter = new FakeAdapter(), bus = new EventBus();
+  const book = new SkillBook(null, directory);
+  const engine = new BehaviorEngine(book, adapter, null, bus, senses0, path.join(directory, 'stats.json'));
+  t.after(() => { engine.dispose(); fs.rmSync(directory, { recursive: true, force: true }); });
+  for (const name of ['skill-a', 'skill-b']) assert.ok(engine.write(codeSkill(name)).ok);
+  for (let i = 0; i < 3; i++) engine.recordInvocation('skill-b', { status: 'succeeded', summary: '实际做成', data: { version: 1, verified: true } });
+  let round = 0;
+  const planner = { autonomous: true, noteInvalid() {}, complete: async () => {
+    const text = round++ === 0
+      ? JSON.stringify({ merge: [{ from: ['skill-a', 'skill-b'], skill: { name: 'skill-a', description: '合并 AB', code: 'return {worked:true};', verify: 'const s = await api.state(); return true;' } }] })
+      : JSON.stringify({ retire: [{ name: 'skill-b', target: 'skill', version: 2, why: '已并入', subsumed_by: 'skill-a' }] });
+    return { text, latencyMs: 0 };
+  } };
+  const curator = new SkillCurator(planner, engine, book, bus);
+  await curator.check(Date.now(), { force: true }); // 第一轮：B1 并入 A（记录 B v1 → A v2）
+  for (let i = 0; i < 3; i++) engine.recordInvocation('skill-a', { status: 'succeeded', summary: '实际做成', data: { version: 2, verified: true } }); // 验收晋升 A v2
+  assert.ok(engine.write({ name: 'skill-b', description: 'skill-b 用途扩展的做法', code: 'return {worked:true};', verify: 'const s = await api.state(); return true;' }, { by: 'mind' }).ok); // B 独立改版为 B2
+  for (let i = 0; i < 3; i++) engine.recordInvocation('skill-b', { status: 'succeeded', summary: '实际做成', data: { version: 2, verified: true } }); // 验收晋升 B v2
+  const result = await curator.check(Date.now(), { force: true });
+  assert.equal(engine.inactive('skill-b'), false, 'B 并入 A 后又独立改版为 v2，旧关系只覆盖 B1，不能收起 B2');
+  assert.match(result!, /未完成/);
+});
+
+test('文字合并失败后，下一轮仍不能按 subsumed_by 收起来源记录', async (t) => {
+  const directory = tmp(), adapter = new FakeAdapter(), bus = new EventBus();
+  const book = new SkillBook(null, directory);
+  const engine = new BehaviorEngine(book, adapter, null, bus, senses0, path.join(directory, 'stats.json'));
+  t.after(() => { engine.dispose(); fs.rmSync(directory, { recursive: true, force: true }); });
+  assert.ok(engine.write({ name: 'target-skill', description: '已有执行版本', code: 'return {worked:true};', verify: 'const s = await api.state(); return true;' }).ok);
+  assert.ok(book.write('note-a', '做法 A 的说明', '做法 A 的内容，至少要二十个字才能写下来').ok);
+  assert.ok(book.write('note-b', '做法 B 的说明', '做法 B 的内容，至少要二十个字才能写下来').ok);
+  let round = 0;
+  const planner = { autonomous: true, noteInvalid() {}, complete: async () => {
+    const text = round++ === 0
+      ? JSON.stringify({ merge: [{ from: ['note-a', 'note-b'], skill: { name: 'target-skill', description: '合并成已有技能名', body: '合并后的正文，至少要二十个字才能写下来' } }] })
+      : JSON.stringify({ retire: [{ name: 'note-b', target: 'note', why: '已并入', subsumed_by: 'target-skill' }] });
+    return { text, latencyMs: 0 };
+  } };
+  const curator = new SkillCurator(planner, engine, book, bus);
+  await curator.check(Date.now(), { force: true }); // 第一轮：文字合并目标名被行为技能占用，失败
+  const result = await curator.check(Date.now(), { force: true }); // 第二轮：仍声明 subsumed_by
+  assert.equal(engine.inactive('note-b'), false, '文字合并失败后，下一轮仍不能按 subsumed_by 收起来源记录');
+  assert.match(result!, /未完成/);
+});
+
+test('文字合并成功后，按 subsumed_by 收起来源记录才允许', async (t) => {
+  const directory = tmp(), adapter = new FakeAdapter(), bus = new EventBus();
+  const book = new SkillBook(null, directory);
+  const engine = new BehaviorEngine(book, adapter, null, bus, senses0, path.join(directory, 'stats.json'));
+  t.after(() => { engine.dispose(); fs.rmSync(directory, { recursive: true, force: true }); });
+  assert.ok(book.write('note-a', '做法 A 的说明', '做法 A 的内容，至少要二十个字才能写下来').ok);
+  assert.ok(book.write('note-b', '做法 B 的说明', '做法 B 的内容，至少要二十个字才能写下来').ok);
+  let round = 0;
+  const planner = { autonomous: true, noteInvalid() {}, complete: async () => {
+    const text = round++ === 0
+      ? JSON.stringify({ merge: [{ from: ['note-a', 'note-b'], skill: { name: 'note-a', description: '合并 A 和 B 的做法', body: '合并后的做法正文，至少要二十个字才能写下来' } }] })
+      : JSON.stringify({ retire: [{ name: 'note-b', target: 'note', why: '已并入', subsumed_by: 'note-a' }] });
+    return { text, latencyMs: 0 };
+  } };
+  const curator = new SkillCurator(planner, engine, book, bus);
+  await curator.check(Date.now(), { force: true }); // 第一轮：文字合并成功
+  const result = await curator.check(Date.now(), { force: true }); // 第二轮：按替代收起
+  assert.equal(engine.inactive('note-b'), true, '文字合并成功后，按 subsumed_by 收起来源记录才允许');
+});
