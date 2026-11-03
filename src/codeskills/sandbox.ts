@@ -146,7 +146,10 @@ export async function runSandboxed(code: string, args: unknown, handle: SandboxH
   // 等工作线程回话时才计时：超过 pokeMs 没动静就是同步代码停不下来
   const arm = (extra = 0) => { if (watchdog) clearTimeout(watchdog); watchdog = setTimeout(() => end(failWith(`代码卡住了：一次同步计算超过 ${pokeMs} 毫秒（死循环，或者循环里没有 await api）`)), pokeMs + extra); };
   const disarm = () => { if (watchdog) clearTimeout(watchdog); watchdog = null; };
-  const onAbort = () => end(Object.assign(new Error('task cancelled'), { name: 'AbortedError' }));
+  // 取消时停止派发新动作，让在途动作完成有界取消结算（带着部分回执 end）；没有在途动作才立即结束。
+  let inFlight = false;
+  let cancelling = false;
+  const onAbort = () => { cancelling = true; if (!inFlight) end(Object.assign(new Error('task cancelled'), { name: 'AbortedError' })); };
   opts.signal.addEventListener('abort', onAbort, { once: true });
   const overall = setTimeout(() => end(failWith('代码超时：总时限用完了（循环太多、或者在等很久的动作）')), Math.max(100, opts.deadline - Date.now()));
   let chain = Promise.resolve();
@@ -168,20 +171,23 @@ export async function runSandboxed(code: string, args: unknown, handle: SandboxH
     disarm();
     // 一个一个处理（代码里 Promise.all 也按顺序做）
     chain = chain.then(async () => {
-      if (done) return;
+      if (done || cancelling) return;
       if (++calls > maxCalls) { end(failWith(`api 调用超过 ${maxCalls} 次：多半是循环没有出口`)); return; }
       const a = Array.isArray(msg.a) ? msg.a : [];
       let out: string, isError = false;
+      inFlight = true;
       try {
         const value = await handle(String(msg.m), a);
         out = JSON.stringify(value === undefined ? null : value);
         trace.push(`${msg.m}(${JSON.stringify(a).slice(1, -1).slice(0, 60)}) → ${out.slice(0, 80)}`); if (trace.length > 60) trace.splice(0, trace.length - 30);
       } catch (e) {
-        if ((e as Error)?.name === 'AbortedError') { end(e as Error); return; }
+        if ((e as Error)?.name === 'AbortedError') { inFlight = false; end(e as Error); return; }
         out = String((e as Error)?.message ?? e).slice(0, 300); isError = true;
         trace.push(`${msg.m}(${JSON.stringify(a).slice(1, -1).slice(0, 60)}) ✗ ${out.slice(0, 80)}`); if (trace.length > 60) trace.splice(0, trace.length - 30);
       }
+      inFlight = false;
       if (done) return;
+      if (cancelling) { end(Object.assign(new Error('task cancelled'), { name: 'AbortedError' })); return; }
       worker.postMessage({ t: 'result', id: msg.id, json: out, isError });
       arm();
     });

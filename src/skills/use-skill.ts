@@ -119,20 +119,20 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
         });
         const data = { version: b.version ?? 1, calls: r.calls, trace: r.trace, logs: r.logs, args: JSON.stringify(input).slice(0, 300), ...(r.line ? { line: r.line } : {}) };
         const m = moved();
-        if (!r.ok) return fail(/超时/.test(r.error ?? '') ? 'TIMEOUT' : 'ERROR', `代码技能「${b.name}」v${b.version ?? 1} 没成${r.line ? `（第 ${r.line} 行）` : ''}：${r.error}${m.text}`, { ...data, displacement: { horizontal: m.h, dy: m.dy }, ...climbFacts() });
+        if (!r.ok) return fail(/超时/.test(r.error ?? '') ? 'TIMEOUT' : 'ERROR', `代码技能「${b.name}」v${b.version ?? 1} 没成${r.line ? `（第 ${r.line} 行）` : ''}：${r.error}${m.text}`, { ...data, displacement: { horizontal: m.h, dy: m.dy } });
         // 代码自己说没成（返回 {ok:false,…}）：照它说的算失败，不能记成“做完了”
         const res = r.result as Record<string, unknown> | null | undefined;
         if (res && typeof res === 'object' && !Array.isArray(res) && res.ok === false) {
-          return fail('ERROR', `代码技能「${b.name}」v${b.version ?? 1} 自己报告没成：${JSON.stringify(res).slice(0, 160)}${m.text}`, { ...data, result: r.result, displacement: { horizontal: m.h, dy: m.dy }, ...climbFacts() });
+          return fail('ERROR', `代码技能「${b.name}」v${b.version ?? 1} 自己报告没成：${JSON.stringify(res).slice(0, 160)}${m.text}`, { ...data, result: r.result, displacement: { horizontal: m.h, dy: m.dy } });
         }
         const judged = await verifyRun(b, bridge, { before, result: r.result ?? null, args: input }, ctx);
-        if (judged) return fail('ERROR', `代码技能「${b.name}」v${b.version ?? 1} 说做完了，但${judged}${m.text}`, { ...data, result: r.result, verified: false, displacement: { horizontal: m.h, dy: m.dy }, ...climbFacts() });
+        if (judged) return fail('ERROR', `代码技能「${b.name}」v${b.version ?? 1} 说做完了，但${judged}${m.text}`, { ...data, result: r.result, verified: false, displacement: { horizontal: m.h, dy: m.dy } });
         // 代码没报错，但身体一点没动、背包没变、也没挖没放：说清楚这次什么都没做（可能是条件不满足就跳过了，也可能是技能没起作用），别当成“做成了”
         const still = Math.abs(ctx.adapter.state().pos.x - from.x) + Math.abs(ctx.adapter.state().pos.z - from.z) < 0.3 && Math.floor(ctx.adapter.state().pos.y) === Math.floor(from.y);
         const combatChanged = combatSig() !== combatBefore;
         const noop = still && invSig() === invBefore && !acted && !combatChanged;
         const noopText = noop ? '（身体这次什么都没做：没挪动、背包没变、没挖也没放。是条件不满足跳过了，还是技能没起作用，看上面的结果；要的事并没有发生）' : '';
-        return ok(`代码技能「${b.name}」做完了${m.text}${r.result !== null && r.result !== undefined ? `：${JSON.stringify(r.result).slice(0, 160)}` : ''}${noopText}`, { ...data, result: r.result, verified: !!b.verify, displacement: { horizontal: m.h, dy: m.dy }, ...climbFacts(), ...(effectExpect ? { expect: effectExpect } : {}), ...(noop ? { noop: true } : {}) });
+        return ok(`代码技能「${b.name}」做完了${m.text}${r.result !== null && r.result !== undefined ? `：${JSON.stringify(r.result).slice(0, 160)}` : ''}${noopText}`, { ...data, result: r.result, verified: !!b.verify, displacement: { horizontal: m.h, dy: m.dy }, ...(effectExpect ? { expect: effectExpect } : {}), ...(noop ? { noop: true } : {}) });
       }
       const done: string[] = [];
       let completedSteps = 0;
@@ -160,12 +160,12 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
         done.push(`${st.skill} → ${r.status === 'succeeded' ? '成' : `没成(${r.failureCode ?? ''})`}`);
         if (r.status === 'failed' && !st.optional) return fail(r.failureCode ?? 'ERROR', `技能「${b.name}」第 ${i + 1} 步 ${st.skill} 没成：${r.summary.slice(0, 120)}`,
           { done, ...(r.data?.effectEvidence ? { effectEvidence: r.data.effectEvidence } : {}),
-            ...(r.data?.dug ? { dug: r.data.dug } : {}), ...(r.data?.walked !== undefined ? { walked: r.data.walked } : {}), ...climbFacts() });
+            ...(r.data?.dug ? { dug: r.data.dug } : {}), ...(r.data?.walked !== undefined ? { walked: r.data.walked } : {}) });
       }
       ctx.progress(1);
       const judged = await verifyRun(b, bridge, { before, result: { done }, args: { ...args.args, ...(args.failure ? { failure: args.failure } : {}) } }, ctx);
       if (judged) return fail('ERROR', `技能「${b.name}」的步骤都做完了，但${judged}${moved().text}`, { done, verified: false });
-      return ok(`照技能「${b.name}」做完了：${done.join('，')}${moved().text}`, { done, verified: !!b.verify, ...climbFacts(), ...(completedSteps === 0 ? { noop: true } : {}) });
+      return ok(`照技能「${b.name}」做完了：${done.join('，')}${moved().text}`, { done, verified: !!b.verify, ...(completedSteps === 0 ? { noop: true } : {}) });
     })().catch((error: unknown) => {
       // 取消/失败也保留已累计的爬升进展：局部增量相加，共享账本只读取一次，不重复计算。
       if (climbedTotal > 0 && error && typeof error === 'object') {
