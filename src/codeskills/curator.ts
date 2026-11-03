@@ -43,6 +43,15 @@ function catches(a: unknown, b: unknown): boolean {
   return sa.length > 0 && sb.length > 0 && sa.some((v) => sb.includes(v)) && meet(list(fa.code), list(fb.code));
 }
 
+/** 动作签名：这份技能具体做什么。steps 按动作名，code 按调用的 api 方法。威胁相同但做法不同（举盾 vs 攻击）不算重复。 */
+function actionSignature(b: Behavior): string {
+  if (b.code) {
+    const calls = [...new Set([...b.code.matchAll(/api\.([A-Za-z]\w*)/g)].map((m) => m[1]).sort())];
+    return `code:${calls.join(',')}`;
+  }
+  return `steps:${b.steps.map((s) => s.skill).join('>')}`;
+}
+
 /** 看着像同一件事的技能：名字相近、说明相近，或者条件一模一样且说明也有点像。只是候选，合不合并由整理时判断 */
 export function similarSkills(skills: { name: string; description?: string; when?: unknown }[]): [string, string, number][] {
   const w = skills.map((b) => ({ b, ...words(b.name, b.description), when: b.when ? JSON.stringify(b.when) : '' }));
@@ -291,31 +300,38 @@ export class SkillCurator {
   }
 
   /**
-   * 应急技能去重（不需要模型）：按「威胁谓词 key」粗分，同一处境下的未验证候选大多是从没触发过的重复。
-   * 只留已验证成功过的；若一簇都没有验证过，留一个最新候选当种子（别把某处境一锅端成零覆盖）。
-   * 其余收起——契约和证据都留在历史里，真需要时可用 skill {name, from_version:N} 重新验证找回。
+   * 应急技能去重（不需要模型）：按「威胁处境 × 动作签名」分簇，同一簇里未验证过的候选大多是从没触发过的重复。
+   * 同属 combat 但做法不同（举盾、攻击、撤退）不算同一份，不互相替代。只收起未验证的候选；
+   * 停用/收起/拉锯只提醒的稳定版都不是“已验证的代表”，也不在这里被当成重复收起。
+   * 一簇全都没验证过就留一个最新候选当种子（别把某处境一锅端成零覆盖）；契约和证据留在历史里，可 skill {name, from_version:N} 找回。
    */
   retireRedundantEmergency(_now = Date.now()): string[] {
     const out: string[] = [];
     let dim = '';
     try { dim = this.dim(); } catch { /* 状态暂不可用 */ }
     this.syncLifetimes(dim);
-    const byKind = new Map<string, Behavior[]>();
+    // 按「威胁处境 × 动作签名」分组：同属 combat 但一个举盾一个攻击是不同做法，不能互相替代。
+    const bySig = new Map<string, Behavior[]>();
     for (const b of this.active().filter((b) => isEmergency(b))) {
       // 只在别的维度生效的（比如下界专用）：人不在那儿时用不上是正常的，不在这一趟去重里收
       if (b.when?.dim && dim && !b.when.dim.includes(dim)) continue;
-      const key = emergencyKind(b);
-      const group = byKind.get(key);
-      if (group) group.push(b); else byKind.set(key, [b]);
+      const key = `${emergencyKind(b)}|${actionSignature(b)}`;
+      const group = bySig.get(key);
+      if (group) group.push(b); else bySig.set(key, [b]);
     }
-    for (const group of byKind.values()) {
+    for (const group of bySig.values()) {
       if (group.length <= 1) continue; // 唯一代表不在这步收：出事时还得有招
-      const validated = (b: Behavior) => (this.engine.currentStats(b.name, !!b.candidate).ok ?? 0) > 0;
-      const keep = group.filter(validated);
-      // 一簇全都没验证过：留最新一个当种子，其余才收（半个游戏日观察期由下面的 settled 把关）
-      const seeds = keep.length ? [] : group.filter((b) => this.settled(b, dim)).sort((a, b) => (this.lifetime(a)?.age ?? 0) - (this.lifetime(b)?.age ?? 0)).slice(0, 1);
+      // 真正的代表：当前版本确实成功过、而且现在能自动接手（停用/收起/拉锯只提醒的都不算）。
+      const rep = (b: Behavior) => (this.engine.currentStats(b.name, !!b.candidate).ok ?? 0) > 0
+        && !this.engine.isAdvisory(b.name)
+        && (b.candidate ? !this.engine.inactive(b.name) && !this.engine.candidateRetirement(b.name) : this.engine.enabled(b));
+      const keep = group.filter(rep);
+      // 只收起未验证过的候选；稳定版（含拉锯只提醒的）不在这里动，交给闲置/低价值/模型整理。
+      const victims = group.filter((b) => b.candidate && (this.engine.currentStats(b.name, true).ok ?? 0) === 0);
+      // 一簇全都没验证过：留最新一个候选当种子，其余才收（半个游戏日观察期由下面的 settled 把关）
+      const seeds = keep.length ? [] : victims.filter((b) => this.settled(b, dim)).sort((a, b) => (this.lifetime(a)?.age ?? 0) - (this.lifetime(b)?.age ?? 0)).slice(0, 1);
       const keepNames = new Set([...keep, ...seeds].map((b) => b.name));
-      for (const b of group) {
+      for (const b of victims) {
         if (keepNames.has(b.name)) continue;
         if (!this.settled(b, dim)) continue; // 刚写的给半个游戏日观察
         if (this.retire(b, `应急去重：这一处境已有${keep.length ? '已验证的代表' : '更新的候选'}（${[...keepNames].join('、')}），这份未验证过，收起；完整契约留在历史可找回`)) out.push(b.name);
@@ -406,7 +422,7 @@ export class SkillCurator {
 - 只提醒不接手的（advisory：来回拉锯里输掉、被改成不自动做的技能）：定期复查——触发条件还和别的技能重叠就合并/收窄；已经不再重叠、又有真实成功证据的，改写它恢复自动接手。别让这些"只喊不干"的技能一直占着位置。
 - 常常同时满足条件抢着接手的（clashed_with）：调整优先级（priority：更管用、更要紧的高），或者收窄某个的触发条件（用 merge 重写它）。
 - 明显没用、被别的技能完全覆盖的：收起（retire）。
-- lifesaver 只描述应急用途，不代表已经有效。protectedEmergency=true 的应急技能是「当前版本已验证成功过」的，免闲置和容量收起——救命的技能平时很少触发、没法预先验收，不能因为“好久没用上”就收；但真正坏掉的（本版用了 ≥4 次却很少成功）仍照常收起。未验证的应急候选不再免闲置/容量收起，会按「威胁谓词 key」粗分去重：同一处境（举盾后撤、溺水、岩浆、窒息、覆盖同一本能）只留已验证的，一簇全未验证就留一个最新候选当种子，其余收起（契约和证据留在历史，可 from_version 找回）。未验证候选和已停用应急版不能借同名旧版成功永久保留。
+- lifesaver 只描述应急用途，不代表已经有效。protectedEmergency=true 的应急技能是「当前版本已验证成功过」的，免闲置和容量收起——救命的技能平时很少触发、没法预先验收，不能因为“好久没用上”就收；但真正坏掉的（本版用了 ≥4 次却很少成功）仍照常收起。未验证的应急候选不再免闲置/容量收起，会按「威胁处境 × 动作」分簇去重：同一处境同一做法只留已验证的；做法不同（举盾、攻击、撤退）不互相替代，一簇全未验证就留一个最新候选当种子，其余收起（契约和证据留在历史，可 from_version 找回）。未验证候选和已停用应急版不能借同名旧版成功永久保留。
 - successfulEmergencyVersions 列出保留的成功应急版本；收起不会删除完整契约、笔记和证据，心智可用 skill {name,from_version:N} 显式生成新候选重新验收，不能把历史成功当作新候选成功。
 - observedGameDays 只累计在线、未暂停的有效游戏刻（每天24000tick）；未知历史为null，不能按现实时间或离线期间的世界日期差推断闲置。普通${this.opts.unusedDays}日、候选${this.opts.candidateUnusedDays}日、停用${this.opts.disabledDays}日自动收起；纯改写不刷新候选闲置。
 - similar_to 是名字或说明看着相近的：逐对看是不是在做同一件事。是的话合并成一份，或者收起用得少、成得少的那份（uses 少的、fail 多的）；只是名字像、其实管的是两回事的就留着。
@@ -430,6 +446,9 @@ export class SkillCurator {
     const versions = this.active(), notes = this.notes();
     const names = new Set([...versions, ...notes].map((entry) => entry.name));
     const noteNames = new Set(notes.map((entry) => entry.name));
+    // 跨两次尝试累积：首轮合并失败的来源，第二轮即使删掉 merge、只留 retire，也不能以“已被替代”收起。
+    const done: string[] = [], errors: string[] = [];
+    const mergeSources = new Set<string>();
     for (let attempt = 0; attempt < 2; attempt++) {
       const c = await this.planner.complete(messages, { label: 'skill:整理', tier: 'full', signal: AbortSignal.timeout(10 * 60_000), attempt, maxTokensScale: 2 });
       let raw: ReturnType<typeof parseCuration>;
@@ -439,9 +458,6 @@ export class SkillCurator {
         continue;
       }
       if (raw.ok && !raw.merge.length && !raw.retire.length && !raw.restore.length && !raw.priority.length && !raw.improve.length && !raw.rollback.length) return '不用整理';
-      const done: string[] = [], errors: string[] = [];
-      // 合并没有存下的来源：同轮 retire 里若以“已被替代”为由收起它们，必须拦下——替代还没成立。
-      const failedMergeFrom = new Set<string>();
       for (const m of raw.merge) {
         const from = m.from.filter((name) => names.has(name));
         if (from.length && from.every((name) => noteNames.has(name)) && m.note) {
@@ -455,7 +471,9 @@ export class SkillCurator {
         // 合并必须沿用被合并技能之一的名字（保留其中一个），避免每次都起 merged/unified/consolidated 新名、让同一族越并越多
         if (from.length && (typeof m.skill.name !== 'string' || !from.includes(m.skill.name))) m.skill.name = from[0];
         const w = this.engine.write(m.skill, { by: 'curator' });
-        if (!w.ok) { for (const n of from) failedMergeFrom.add(n); errors.push(`合并 ${from.join('+')} 没存下：${w.error}`); continue; }
+        // 本轮列为合并来源的：无论存没存下，替代都还没验收成立，同轮不能以“已被替代”收起来源。
+        for (const n of from) mergeSources.add(n);
+        if (!w.ok) { errors.push(`合并 ${from.join('+')} 没存下：${w.error}`); continue; }
         done.push(`${from.join('+')} → 候选 ${w.name}（保留原技能，验收后再决定收起）`);
         this.bus.publish('skill_merged', 'P2', `整理技能：${from.join('、')} 生成合并候选「${w.name}」；原技能保持原状态`, { from, into: w.name, candidate: true });
       }
@@ -478,8 +496,8 @@ export class SkillCurator {
         // 模型显式收起时只保护“实际成功过的稳定应急版”；未验证的应急候选仍可收起（借同名旧版成功不能永久保留）
         const emergencyStats = this.engine.currentStats(name);
         if (!eb.candidate && this.protectedEmergency(eb) && (emergencyStats?.ok ?? 0) > (emergencyStats?.fail ?? 0)) { errors.push(`${name} 当前稳定应急版成功多于失败，保留；改进先生成候选并验收，不因少用丢掉已验证能力`); continue; }
-        // 合并失败时，不能以“已被替代”为由退役来源；独立放弃旧技能（不带 merge）仍照常执行。
-        if (failedMergeFrom.has(name)) { errors.push(`「${name}」的合并没有存下，不能以“已被替代”为由收起；若确需独立放弃，请单独发起不带 merge 的 retire`); continue; }
+        // 本轮被列为合并来源的：合并只生成候选，替代还没验收成立，不能同轮收起；独立放弃旧技能（不带 merge）仍照常执行。
+        if (mergeSources.has(name)) { errors.push(`「${name}」本轮被列为合并来源（合并只生成候选，替代尚未验收成立），不能同轮收起；等候选验收通过或确有独立证据后，再单独发起不带 merge 的 retire`); continue; }
         if (this.retire(eb, why)) done.push(`收起 ${name}${eb.candidate ? ` 候选 v${eb.version}` : ''}`);
       }
       for (const r of raw.restore) {

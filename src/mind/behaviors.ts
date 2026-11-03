@@ -797,10 +797,12 @@ export class BehaviorEngine {
   isAdvisory(name: string): boolean { return !!this.stats[name]?.advisory; }
 
   /** 技能能不能真正接管某件事（covered_by 用它判断“这事已有技能管”，不是只问有没有这个名字）。
-   *  已收起/停用/拉锯只提醒的返回原因；null = 可以接管。 */
+   *  区分可试验候选与可复用的稳定版：候选（需 trial:true 才可试）不算覆盖；稳定版无论显式调用还是自动接手都可算覆盖，
+   *  但已收起/停用/拉锯只提醒的返回原因。null = 可以接管。 */
   handlesNow(name: string): string | null {
     const b = this.get(name);
     if (!b) return `没有技能 ${name}`;
+    if (b.candidate) return `${name} 尚为候选，需要显式试用验收`;
     if (this.inactive(name)) return `${name} 已收起或停用`;
     const adv = this.stats[name]?.advisory;
     if (adv) return `${name} 拉锯后只提醒、不自动接手：${adv.why}`;
@@ -875,10 +877,10 @@ export class BehaviorEngine {
     return { ok: true, version: this.get(name)?.version ?? 0 };
   }
 
-  /** 嵌套调用也保留子技能自己的版本证据；顶层由 arbiter 的 done 事件记账。 */
-  recordInvocation(name: string, result: SkillResult) {
-    const b = this.completed(name, result.data?.version);
-    if (result.status === 'cancelled') { this.noteInvocation(name, result.data?.version !== undefined ? b : undefined, result); return; }
+  /** 嵌套调用也保留子技能自己的版本证据；顶层由 arbiter 的 done 事件记账。resolved 供 onDone 在回执缺版本时传入按 trial 归属的行为。 */
+  recordInvocation(name: string, result: SkillResult, resolved?: Behavior) {
+    const b = resolved ?? this.completed(name, result.data?.version);
+    if (result.status === 'cancelled') { this.noteInvocation(name, resolved || result.data?.version !== undefined ? b : undefined, result); return; }
     if (!b) return;
     if (this.noteInvocation(name, b, result)) return;
     const succeeded = result.status === 'succeeded' && (!b.candidate || result.data?.verified === true);
@@ -972,15 +974,24 @@ export class BehaviorEngine {
       if (args.failure && recovery) { recovery.ignored = true; recovery.invocationRecorded = true; }
       return;
     }
-    const b = this.completed(name, o.result.data?.version);
+    const args = o.task.args as { trial?: boolean; failure?: unknown };
+    // 回执带版本按版本归属；缺版本时按 trial 标志取候选/稳定——STUCK 终止的回执常缺版本，不能静默算到稳定版头上。
+    const b = o.result.data?.version !== undefined
+      ? this.completed(name, o.result.data.version)
+      : this.get(name, args.trial === true) ?? this.completed(name, undefined);
     if (!b) return;
     this.noteUndo(name, o.task.id);
     const recovery = this.recoveries.get(name);
-    if ((o.task.args as { failure?: unknown })?.failure && recovery) recovery.invocationRecorded = true;
-    if (b.candidate) { this.recordInvocation(name, o.result); return; }
+    const recoveryRun = !!args.failure && !!recovery;
+    if (recoveryRun) recovery.invocationRecorded = true;
+    if (b.candidate) { this.recordInvocation(name, o.result, b); return; }
     const skipped = this.noteInvocation(name, b, o.result);
-    const okRun = o.result.status === 'succeeded';
-    if ((o.task.args as { failure?: unknown })?.failure && recovery) {
+    // 成败只看“目标是否真的达成”：恢复技能由 creditRecovery 按“重做失败的那一步”定成败；
+    // 普通稳定技能只有 verify 通过（verified:true）才算成功；没写 verify 的“跑完了”是目标达成未知，只记使用、不记成败。
+    const okRun: boolean | null = recoveryRun
+      ? o.result.status === 'succeeded'
+      : o.result.status === 'failed' ? false : o.result.data?.verified === true ? true : null;
+    if (recoveryRun) {
       recovery.behavior = b;
       recovery.data = o.result.data;
       recovery.ignored = !okRun || o.result.data?.noop === true;
@@ -993,15 +1004,15 @@ export class BehaviorEngine {
       return;
     }
     // 恢复时用的：做完了先不算成功，等重做的那一步出结果（creditRecovery）；自己就出错了才直接算失败
-    if ((o.task.args as any)?.failure && okRun) return;
-    // 成败按执行结果（含声明判定 verify）统一在这里记，候选、稳定、反射都一样；事后 12 秒的观测只补充事实，不再用保命阈值替技能定成败。
-    // no-op 已在上面 skipped 分支统一处理（走 use-skill 的 noop 信号），这里不再用位移启发式补判——那会把 0.2 格的小位移也误判成空转。
+    if (recoveryRun && okRun) return;
     if (pending && o.task.source === 'reflex') {
       pending.behavior = b;
       pending.summary = o.result.summary; pending.data = o.result.data ?? {};
       // 代码本身出错（参数、异常）才不等事后观测：马上记失败；其余保留 aftermath 供 judge 补记死亡、掉血、处境等事实。
-      if (!okRun && ['ERROR', 'BAD_ARGS'].includes(String(o.result.failureCode))) this.aftermath.delete(name);
+      if (okRun === false && ['ERROR', 'BAD_ARGS'].includes(String(o.result.failureCode))) this.aftermath.delete(name);
     }
+    // 跑完了但没有 verify 判定：目标达成未知——只记使用与经过，不记成败（不把“运行完成”冒充成“成功证据”）。
+    if (okRun === null) return;
     this.record(b, okRun, o.result.summary, (o.result.data ?? {}) as Record<string, any>);
   }
 
@@ -1024,10 +1035,13 @@ export class BehaviorEngine {
     const hp = this.adapter.state().hp;
     const lost = Math.max(0, a.hp - hp);
     const situation = b.when ? situationOf(b.when) : null;
-    let still = false;
-    if (!died && situation) { try { still = evalPredicate(situation, this.sense(null)); } catch { still = false; } }
-    const facts = [died ? '做完后不久就死了' : '', lost >= 1 ? `做完后又掉了 ${Math.round(lost)} 点血` : '', still ? '触发它的情况还在' : '触发它的情况解除了'].filter(Boolean).join('；');
-    this.bus.publish('skill_aftermath', 'P3', `技能「${name}」事后观测：${facts}${a.summary ? `（它做了：${a.summary.slice(0, 80)}）` : ''}`, { name, died, lost: Math.round(lost), still, context: a.context });
+    // 三态：true 触发处境还在；false 确认解除；null 判断不了（死了、没有处境可查、或读世界失败）——不能误说成“解除了”。
+    let still: boolean | null = null;
+    if (!died && situation) { try { still = evalPredicate(situation, this.sense(null)); } catch { still = null; } }
+    const facts = [died ? '做完后不久就死了' : '', lost >= 1 ? `做完后又掉了 ${Math.round(lost)} 点血` : '',
+      still === true ? '触发它的情况还在' : still === false ? '触发它的情况解除了' : ''].filter(Boolean).join('；');
+    this.bus.publish('skill_aftermath', 'P3', `技能「${name}」事后观测：${facts}${a.summary ? `（它做了：${a.summary.slice(0, 80)}）` : ''}`,
+      { name, version: b.version ?? this.stats[b.name]?.rev ?? 1, taskId: a.taskId, died, lost: Math.round(lost), still, context: a.context });
   }
 
   private record(b: Behavior, okRun: boolean, summary: string, data: Record<string, any>) {

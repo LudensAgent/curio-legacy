@@ -62,6 +62,11 @@ export class Attention {
       case 'skill_promoted': return this.notice(`skill_promoted:${String(d.name ?? '')}`, ev.msg, 0.4, 0);
       case 'skill_rollback': return this.notice(`skill_rollback:${String(d.name ?? '')}`, ev.msg, 0.35, 0);
       case 'skill_disabled': return d.by === 'stats' ? this.notice(`skill_disabled:${String(d.name ?? '')}`, `${ev.msg}：回头改一改（同名重写 skill）`, 0.5, 600_000) : null;
+      // 自动技能做完后的事后观测（死亡、掉血、触发处境是否还在）：只报事实，归因和取舍交给心智。
+      case 'skill_aftermath': {
+        const died = !!d.died, lost = Number(d.lost ?? 0);
+        return this.notice(`skill_aftermath:${String(d.name ?? '')}`, ev.msg, died ? 0.75 : lost >= 4 ? 0.6 : 0.4, 60_000);
+      }
       case 'lesson': return d.source === 'observed' ? this.notice(`lesson:${ev.msg.slice(0, 30)}`, ev.msg, 0.3, 300_000) : null;
       default: return null;
     }
