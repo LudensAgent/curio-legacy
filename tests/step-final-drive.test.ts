@@ -97,7 +97,7 @@ test('物理：从整块前进一步踩到耕地（脚高 63.9375），不是停
 });
 
 test('物理：从整块下一步踩到底半砖（脚高 63.5）', () => {
-  const world = stepWorld({ name: 'stone', props: {} }, { name: 'oak_slab', props: { type: 'bottom' } });
+  const world = stepWorld({ name: 'stone', props: {} }, { name: 'oak_slab', props: { type: 'bottom', waterlogged: false } });
   const minY = minFootInTarget(world, 64);
   // 采样时刻身体仍在向下沉降，允许 0.1 容差；关键是踩到半砖顶面（≈63.5），而不是停在 64 或穿透到 63。
   assert.ok(minY >= 63.5 && minY < 63.6, `最低脚高 ${minY}`);
@@ -118,7 +118,7 @@ test('moveTo 在寻路按节点提前结算后，闭环前推真正落到目标�
 });
 
 test('moveTo 从底半砖上一步到整块（脚高 64）也能闭环完成', async (t) => {
-  const world = stepWorld({ name: 'oak_slab', props: { type: 'bottom' } }, { name: 'stone', props: {} });
+  const world = stepWorld({ name: 'oak_slab', props: { type: 'bottom', waterlogged: false } }, { name: 'stone', props: {} });
   const { bot, timer } = physicsBot(world, 63.5);
   t.after(() => clearInterval(timer));
   const a = adapter(bot);
@@ -140,7 +140,7 @@ test('身体已贴近目标但仍由原支撑托住时，仍会前推并落到�
 });
 
 test('单列半砖：身体停在目标边缘仍能受控减速落到半砖上', async (t) => {
-  const world = stepWorld({ name: 'stone', props: {} }, { name: 'oak_slab', props: { type: 'bottom' } });
+  const world = stepWorld({ name: 'stone', props: {} }, { name: 'oak_slab', props: { type: 'bottom', waterlogged: false } });
   const { bot, timer } = physicsBot(world, 64);
   t.after(() => clearInterval(timer));
   // 寻路停在目标列边缘（脚仍由原整块托住），速度为零——正是 P1「等脚高下降才松键」偏晚的起始状态。
@@ -153,13 +153,46 @@ test('单列半砖：身体停在目标边缘仍能受控减速落到半砖上',
 });
 
 test('单列半砖：从整块格中心出发也能受控减速落到半砖', async (t) => {
-  const world = stepWorld({ name: 'stone', props: {} }, { name: 'oak_slab', props: { type: 'bottom' } });
+  const world = stepWorld({ name: 'stone', props: {} }, { name: 'oak_slab', props: { type: 'bottom', waterlogged: false } });
   const { bot, timer } = physicsBot(world, 64); // 从格中心 (0.5, 64, 0.5) 出发
   t.after(() => clearInterval(timer));
   const a = adapter(bot);
   await a.moveTo({ kind: 'xyz', x: 0, y: 63.5, z: -1 }, { signal: new AbortController().signal, timeoutMs: 4000, allowTerrainChanges: false });
   assert.ok(Math.abs(bot.entity.position.y - 63.5) <= 0.01, `脚高 ${bot.entity.position.y}`);
   assert.equal(Math.floor(bot.entity.position.z), -1);
+});
+
+for (const x of [0.4, 0.5, 0.55]) {
+  test(`单列干半砖（waterlogged:false）：从 x=${x} 出发也落稳到脚高 63.5`, async (t) => {
+    const world = stepWorld({ name: 'stone', props: {} }, { name: 'oak_slab', props: { type: 'bottom', waterlogged: false } });
+    const { bot, timer } = physicsBot(world, 64);
+    t.after(() => clearInterval(timer));
+    bot.entity.position = new Vec3(x, 64, 0.5);
+    const a = adapter(bot);
+    await a.moveTo({ kind: 'xyz', x: 0, y: 63.5, z: -1 }, { signal: new AbortController().signal, timeoutMs: 4000, allowTerrainChanges: false });
+    assert.ok(Math.abs(bot.entity.position.y - 63.5) <= 0.01, `脚高 ${bot.entity.position.y}`);
+    assert.equal(Math.floor(bot.entity.position.z), -1);
+  });
+}
+
+test('含水半砖是独立用例：脚高同为 63.5 但身体进水（inWater），不能混入干半砖', () => {
+  const dry = stepWorld({ name: 'stone', props: {} }, { name: 'oak_slab', props: { type: 'bottom', waterlogged: false } });
+  const wet = stepWorld({ name: 'stone', props: {} }, { name: 'oak_slab', props: { type: 'bottom', waterlogged: true } });
+  const inWaterOnTarget = (world: ReturnType<typeof stepWorld>) => {
+    const control = { forward: true, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
+    const entity = { position: new Vec3(0.5, 64, 0.5), velocity: new Vec3(0, 0, 0), onGround: true,
+      isInWater: false, isInLava: false, isInWeb: false, isCollidedHorizontally: false, isCollidedVertically: false, yaw: 0, pitch: 0, effects: {}, attributes: {} };
+    const bot = { version: '1.20.1', entity, jumpTicks: 0, jumpQueued: false, fireworkRocketDuration: 0, inventory: { slots: [] } };
+    const physics = Physics(data, world);
+    let inWater = false;
+    for (let i = 0; i < 120; i++) {
+      physics.simulatePlayer(new PlayerState(bot, control), world).apply(bot);
+      if (Math.floor(bot.entity.position.z) === -1 && bot.entity.isInWater) inWater = true;
+    }
+    return inWater;
+  };
+  assert.equal(inWaterOnTarget(dry), false, '干半砖不应进水');
+  assert.equal(inWaterOnTarget(wet), true, '含水半砖应进水');
 });
 
 test('身体离目标太远时不盲目前推', async (t) => {
@@ -234,7 +267,7 @@ test('相邻目标的空 noPath（goto 正常返回）不触发前推', async (t
 });
 
 test('单列半砖后方恢复整块：越段即停，不无限前推', async (t) => {
-  const world = stepWorld({ name: 'stone', props: {} }, { name: 'oak_slab', props: { type: 'bottom' } });
+  const world = stepWorld({ name: 'stone', props: {} }, { name: 'oak_slab', props: { type: 'bottom', waterlogged: false } });
   const { bot, timer } = physicsBot(world, 64);
   t.after(() => clearInterval(timer));
   // 寻路在节点边界提前结算后，身体已在原支撑边缘、带前进速度冲向薄层（复现越过单列半砖不停）。
