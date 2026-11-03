@@ -1084,7 +1084,8 @@ export class Mind {
       gameMessages: this.recentGameMessages(),
       // 收起、停用的技能不进目录（翻技能书、回想时还看得到）：目录越长越难挑，还拖累缓存
       skills: this.safe(() => this.d.thinker.skillBook?.index((n) => !!this.d.behaviors?.hidden(n),
-        this.d.behaviors ? (name, trial) => this.d.behaviors!.executionError(name, trial) : undefined) ?? [], []),
+        this.d.behaviors ? (name, trial) => this.d.behaviors!.executionError(name, trial) : undefined,
+        this.d.behaviors ? (name) => this.d.behaviors!.autoNote(name) : undefined) ?? [], []),
       recalled, ...(hindsightMemories ? { hindsightMemories } : {}), ...(openedSkill ? { openedSkill } : {}), ...(learnFrom ? { learnFrom } : {}), plan,
       hunting: this.safe(() => this.d.ledger?.huntTally() ?? null, null),
       ...(this.trip ? { trip: { minutes: (Date.now() - this.trip.since) / 60_000, gained: diffInventory(this.trip.inventory, inventoryOf(state)).gained, nearEnd: reason === Mind.NEAR_END_REASON } } : {}),

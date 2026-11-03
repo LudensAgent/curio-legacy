@@ -440,6 +440,8 @@ export class SkillCurator {
       }
       if (raw.ok && !raw.merge.length && !raw.retire.length && !raw.restore.length && !raw.priority.length && !raw.improve.length && !raw.rollback.length) return '不用整理';
       const done: string[] = [], errors: string[] = [];
+      // 合并没有存下的来源：同轮 retire 里若以“已被替代”为由收起它们，必须拦下——替代还没成立。
+      const failedMergeFrom = new Set<string>();
       for (const m of raw.merge) {
         const from = m.from.filter((name) => names.has(name));
         if (from.length && from.every((name) => noteNames.has(name)) && m.note) {
@@ -453,7 +455,7 @@ export class SkillCurator {
         // 合并必须沿用被合并技能之一的名字（保留其中一个），避免每次都起 merged/unified/consolidated 新名、让同一族越并越多
         if (from.length && (typeof m.skill.name !== 'string' || !from.includes(m.skill.name))) m.skill.name = from[0];
         const w = this.engine.write(m.skill, { by: 'curator' });
-        if (!w.ok) { errors.push(`合并 ${from.join('+')} 没存下：${w.error}`); continue; }
+        if (!w.ok) { for (const n of from) failedMergeFrom.add(n); errors.push(`合并 ${from.join('+')} 没存下：${w.error}`); continue; }
         done.push(`${from.join('+')} → 候选 ${w.name}（保留原技能，验收后再决定收起）`);
         this.bus.publish('skill_merged', 'P2', `整理技能：${from.join('、')} 生成合并候选「${w.name}」；原技能保持原状态`, { from, into: w.name, candidate: true });
       }
@@ -476,6 +478,8 @@ export class SkillCurator {
         // 模型显式收起时只保护“实际成功过的稳定应急版”；未验证的应急候选仍可收起（借同名旧版成功不能永久保留）
         const emergencyStats = this.engine.currentStats(name);
         if (!eb.candidate && this.protectedEmergency(eb) && (emergencyStats?.ok ?? 0) > (emergencyStats?.fail ?? 0)) { errors.push(`${name} 当前稳定应急版成功多于失败，保留；改进先生成候选并验收，不因少用丢掉已验证能力`); continue; }
+        // 合并失败时，不能以“已被替代”为由退役来源；独立放弃旧技能（不带 merge）仍照常执行。
+        if (failedMergeFrom.has(name)) { errors.push(`「${name}」的合并没有存下，不能以“已被替代”为由收起；若确需独立放弃，请单独发起不带 merge 的 retire`); continue; }
         if (this.retire(eb, why)) done.push(`收起 ${name}${eb.candidate ? ` 候选 v${eb.version}` : ''}`);
       }
       for (const r of raw.restore) {
@@ -504,7 +508,7 @@ export class SkillCurator {
         done.push(`改进 ${name}`);
       }
       if (errors.length && !done.length && attempt === 0) { messages.push({ role: 'assistant', content: c.text.slice(0, 6000) }, { role: 'user', content: `${errors.join('；')}。改正后只输出 JSON。` }); continue; }
-      return done.length ? done.join('；') : errors.join('；') || '没有可用的整理';
+      return [...done, ...errors.map((e) => `未完成：${e}`)].join('；') || '没有可用的整理';
     }
     throw new Error('两次都没拿到能用的整理结果');
   }

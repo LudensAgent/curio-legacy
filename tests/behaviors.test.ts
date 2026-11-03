@@ -473,15 +473,17 @@ test('反射也是技能：躲苦力怕、受伤撤退、还手、饿了吃这�
   reflex.tick();
   assert.equal(starts.at(-1)?.skill, 'use_skill');
   assert.equal((starts.at(-1)?.args as any).name, 'retreat-when-hurt', '血少又挨打：交给受伤撤退技能');
-  // 事后评判：12 秒内死了就记一次没用（代码会被后台改进）
+  // 事后观测：死亡、掉血、处境变化都是事实，不再自动把死亡算成这项技能的失败、把活着算成成功
+  const aftermath: { type: string; data?: any }[] = [];
+  bus.on('event', (e: any) => { if (e.type === 'skill_aftermath') aftermath.push(e); });
   current = null;
   bus.publish('death', 'P0', '死了');
-  assert.equal(engine.statsOf('retreat-when-hurt')?.fail, 1);
-  assert.match(engine.statsOf('retreat-when-hurt')!.recent![0].summary, /触发时血 5.*zombie.*死了/);
-  // 再来一次，这回 12 秒后还活着、没再掉血：算管用
+  assert.equal(engine.statsOf('retreat-when-hurt')?.fail, 0, '死亡不再自动归因成技能失败');
+  assert.ok(aftermath.some((e) => e.data.name === 'retreat-when-hurt' && e.data.died === true), '事后观测报告死亡事实');
+  // 再来一次，12 秒后还活着、没再掉血：也不再自动算成功（成败由执行结果/verify 决定）
   now += 20_000; bus.publish('hurt', 'P2', '受到伤害'); reflex.tick();
   current = null; now += 13_000; reflex.tick();
-  assert.equal(engine.statsOf('retreat-when-hurt')?.ok, 1);
+  assert.equal(engine.statsOf('retreat-when-hurt')?.ok, 0);
   // 岩浆没有内置强制逃跑
   state.inLava = true; current = null; reflex.tick();
   assert.notEqual(starts.at(-1)?.skill, 'flee');

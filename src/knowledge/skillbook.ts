@@ -162,7 +162,7 @@ export class SkillBook {
     return true;
   }
   /** 提示词里的索引：每份一行 */
-  index(skip?: (name: string) => boolean, executionError?: (name: string, trial: boolean) => string | null): string[] {
+  index(skip?: (name: string) => boolean, executionError?: (name: string, trial: boolean) => string | null, autoNote?: (name: string) => string | null): string[] {
     return this.list().filter((s) => !skip?.(s.name)).map((s) => {
       const candidate = this.candidates.get(s.name);
       const status: string[] = [];
@@ -172,7 +172,8 @@ export class SkillBook {
         else if (!executionError) status.push(`未确认是否可执行${s.mode ? `，声明方式：${MODE_LABEL[s.mode]}` : ''}`);
         else {
           const error = executionError(s.name, false);
-          status.push(error ? `不可执行：${error}` : `可执行${s.mode ? `，${MODE_LABEL[s.mode]}` : ''}`);
+          const note = autoNote?.(s.name);
+          status.push(error ? `不可执行：${error}` : `可执行${s.mode ? `，${MODE_LABEL[s.mode]}` : ''}${note ? `，但${note}` : ''}`);
         }
       }
       if (candidate) {

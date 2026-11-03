@@ -202,7 +202,7 @@ export class SkillSmith {
     const st = this.engine.statsOf(o.skill);
     const cur = this.engine.currentStats(o.skill);
     const last = st?.recent?.at(-1);
-    const stale = now - o.at > SkillSmith.OWNER_TTL_MS || !b || this.engine.inactive(o.skill) || this.engine.versionOf(b) !== o.version
+    const stale = now - o.at > SkillSmith.OWNER_TTL_MS || !b || this.engine.inactive(o.skill) || this.engine.isAdvisory(o.skill) || this.engine.versionOf(b) !== o.version
       || (cur.fail >= 3 && cur.fail > cur.ok) || (!!last && !last.ok && now - last.at < 10 * 60_000);
     if (!stale) return o;
     this.owners.delete(key);
@@ -212,7 +212,7 @@ export class SkillSmith {
 
   private setOwner(incident: Incident, skill: string) {
     const b = incident.key ? this.engine.get(skill) : undefined;
-    if (!b || !incident.key || this.engine.inactive(skill)) return;
+    if (!b || !incident.key || this.engine.handlesNow(skill)) return;
     this.owners.set(incident.key, { skill, version: this.engine.versionOf(b), at: Date.now(), kind: incident.kind, headline: incident.headline.slice(0, 120) });
     if (this.owners.size > 300) this.owners.delete(this.owners.keys().next().value!);
     this.saveOwners();
@@ -643,7 +643,7 @@ ${this.rules()}
         if (r.none) {
           settled.add(idx);
           const why = String(r.why ?? '').slice(0, 160);
-          const by = typeof r.covered_by === 'string' && this.engine.get(r.covered_by) && !this.engine.inactive(r.covered_by) ? r.covered_by : null;
+          const by = typeof r.covered_by === 'string' && !this.engine.handlesNow(r.covered_by) ? r.covered_by : null;
           if (by) this.setOwner(inc, by);
           const limitation = typeof r.limitation === 'string' && r.limitation.trim() ? r.limitation.trim().slice(0, 200) : null;
           if (limitation) this.bus.publish('body_limit', 'P2', `身体做不到的事（报给开发者）：${limitation}`, { kind: inc.kind, limitation, headline: inc.headline.slice(0, 200) });

@@ -792,6 +792,30 @@ export class BehaviorEngine {
   reliableList(): string[] {
     return this.list().filter((b) => !this.reliable(b.name)).map((b) => { const c = this.currentStats(b.name); return `${b.name}：${b.description.slice(0, 60)}（成 ${c.ok} 败 ${c.fail}${b.needs ? `，args.${Object.keys(b.needs).join('/')}` : ''}）`; });
   }
+
+  /** 拉锯里输掉、只提醒不自动接手的技能：显式调用和组合仍可用，但不能宣称它自动覆盖某件事。 */
+  isAdvisory(name: string): boolean { return !!this.stats[name]?.advisory; }
+
+  /** 技能能不能真正接管某件事（covered_by 用它判断“这事已有技能管”，不是只问有没有这个名字）。
+   *  已收起/停用/拉锯只提醒的返回原因；null = 可以接管。 */
+  handlesNow(name: string): string | null {
+    const b = this.get(name);
+    if (!b) return `没有技能 ${name}`;
+    if (this.inactive(name)) return `${name} 已收起或停用`;
+    const adv = this.stats[name]?.advisory;
+    if (adv) return `${name} 拉锯后只提醒、不自动接手：${adv.why}`;
+    return null;
+  }
+
+  /** 给提示词看的自动接手状态：null=按声明自动接手；否则一句话说明为什么不会自动做（但仍可显式调用）。 */
+  autoNote(name: string): string | null {
+    const b = this.get(name);
+    if (!b || b.mode !== 'auto') return null;
+    if (this.inactive(name)) return '已收起或停用';
+    const adv = this.stats[name]?.advisory;
+    if (adv) return `拉锯后只提醒、不自动接手（${adv.why}）`;
+    return null;
+  }
   /** 能不能改写这份技能：当前版本用得太少就先别动（停用了、或者代码本身报错的除外） */
   rewriteGate(name: string): string | null {
     const b = this.get(name, true) ?? this.get(name);
@@ -970,13 +994,13 @@ export class BehaviorEngine {
     }
     // 恢复时用的：做完了先不算成功，等重做的那一步出结果（creditRecovery）；自己就出错了才直接算失败
     if ((o.task.args as any)?.failure && okRun) return;
-    // 自动技能（后天的反射）：做没做完不算数，十几秒后看结果（judge）；代码本身出错才马上算失败。
+    // 成败按执行结果（含声明判定 verify）统一在这里记，候选、稳定、反射都一样；事后 12 秒的观测只补充事实，不再用保命阈值替技能定成败。
     // no-op 已在上面 skipped 分支统一处理（走 use-skill 的 noop 信号），这里不再用位移启发式补判——那会把 0.2 格的小位移也误判成空转。
-    if (pending && o.task.source === 'reflex') pending.behavior = b;
     if (pending && o.task.source === 'reflex') {
+      pending.behavior = b;
       pending.summary = o.result.summary; pending.data = o.result.data ?? {};
-      if (okRun || !['ERROR', 'BAD_ARGS'].includes(String(o.result.failureCode))) return;
-      this.aftermath.delete(name);
+      // 代码本身出错（参数、异常）才不等事后观测：马上记失败；其余保留 aftermath 供 judge 补记死亡、掉血、处境等事实。
+      if (!okRun && ['ERROR', 'BAD_ARGS'].includes(String(o.result.failureCode))) this.aftermath.delete(name);
     }
     this.record(b, okRun, o.result.summary, (o.result.data ?? {}) as Record<string, any>);
   }
@@ -989,7 +1013,9 @@ export class BehaviorEngine {
     this.bus.publish('instinct_idle', 'P3', `技能「${name}」接手后什么都没做就返回${interrupted ? `（打断了「${interrupted}」）` : ''}，先歇 ${BehaviorEngine.HOLD_MS / 1000} 秒（怪更近或挨打时照常接手）；它的 when 可能比代码里的判断宽`, { name, ...(interrupted ? { interrupted } : {}), times: this.stats[name]?.idleInterrupts });
   }
 
-  /** 自动技能的事后评判：死了、或者又掉了 6 点以上的血，就是没管用 */
+  /** 自动技能的事后观测：12 秒后（或死亡时）补记事实——死了、又掉多少血、触发处境是否还在。
+   *  成败已在 onDone 按执行结果（含声明判定 verify）记下，这里不再用“没死、掉血少、处境解除”替技能目标定成败，
+   *  也不把后来的死亡、掉血自动归因成这项技能的失败。事实单独报给心智与整理，归因由 Agent 决定。 */
   private judge(name: string, died: boolean) {
     const a = this.aftermath.get(name);
     this.aftermath.delete(name);
@@ -997,13 +1023,11 @@ export class BehaviorEngine {
     const b = a.behavior;
     const hp = this.adapter.state().hp;
     const lost = Math.max(0, a.hp - hp);
-    // 管没管用：没死、没再掉一大截血，而且触发它的那个情况解除了（饿了的不饿了、贴脸的怪不在了）
     const situation = b.when ? situationOf(b.when) : null;
     let still = false;
     if (!died && situation) { try { still = evalPredicate(situation, this.sense(null)); } catch { still = false; } }
-    const worked = !died && lost < 6 && !still;
-    const verdict = died ? '做完不久就死了' : lost >= 6 ? `做完后又掉了 ${Math.round(lost)} 点血` : still ? `做完了，但触发它的情况还在（血 ${Math.round(hp)}）` : `触发它的情况解除了（血 ${Math.round(hp)}）`;
-    this.record(b, worked, `${a.context}；${a.summary ? `它做了：${a.summary.slice(0, 100)}；` : ''}结果：${verdict}`, a.data ?? {});
+    const facts = [died ? '做完后不久就死了' : '', lost >= 1 ? `做完后又掉了 ${Math.round(lost)} 点血` : '', still ? '触发它的情况还在' : '触发它的情况解除了'].filter(Boolean).join('；');
+    this.bus.publish('skill_aftermath', 'P3', `技能「${name}」事后观测：${facts}${a.summary ? `（它做了：${a.summary.slice(0, 80)}）` : ''}`, { name, died, lost: Math.round(lost), still, context: a.context });
   }
 
   private record(b: Behavior, okRun: boolean, summary: string, data: Record<string, any>) {
@@ -1115,7 +1139,7 @@ export class BehaviorEngine {
         : candidate ? `；候选 v${candidate.version} 尚未启用，用 use_skill {name:"${b.name}",trial:true} 试用，试用成${this.currentStats(b.name, true).ok}/败${this.currentStats(b.name, true).fail}` : '';
       const successful = this.successfulEmergencyVersions(b.name);
       const history = successful.length ? `；保留成功过的应急版本 ${successful.slice(0, 4).map((entry) => `v${entry.version}（成${entry.ok}/败${entry.fail}）`).join('、')}，可查技能历史，由心智用 from_version 选为新候选再试` : '';
-      return `${b.name}［${b.mode === 'auto' ? '自动' : b.mode === 'recover' ? '失败时先试' : '调用'}${b.code ? `，代码 v${b.version ?? 1}` : ''}${b.overrides.length ? `，代替本能 ${b.overrides.map((o) => INSTINCTS[o]?.off ? `${o}（这条本能本来就没开）` : o).join('/')}` : ''}${b.needs ? `，调用时给 args.${Object.keys(b.needs).join('/')}` : ''}］${st && st.ok + st.fail ? ` 成${st.ok}/败${st.fail}` : ''}${st?.retired ? ` 已收起（${st.retired.slice(0, 30)}）` : st?.disabled ? ' 已停用' : ''}${untested}${trial}${history}`;
+      return `${b.name}［${b.mode === 'auto' ? '自动' : b.mode === 'recover' ? '失败时先试' : '调用'}${b.code ? `，代码 v${b.version ?? 1}` : ''}${b.overrides.length ? `，代替本能 ${b.overrides.map((o) => INSTINCTS[o]?.off ? `${o}（这条本能本来就没开）` : o).join('/')}` : ''}${b.needs ? `，调用时给 args.${Object.keys(b.needs).join('/')}` : ''}］${st && st.ok + st.fail ? ` 成${st.ok}/败${st.fail}` : ''}${st?.retired ? ` 已收起（${st.retired.slice(0, 30)}）` : st?.disabled ? ' 已停用' : ''}${st?.advisory ? ` 拉锯后只提醒不自动接手（${st.advisory.why.slice(0, 24)}）` : ''}${untested}${trial}${history}`;
     }), ...[...this.invalid].map(([n, why]) => `${n}：${why}`),
       ...[...this.invalidCandidates].map(([n, why]) => `${n}：候选未通过校验：${why}`)];
   }
