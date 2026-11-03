@@ -191,8 +191,10 @@ export class SkillBook {
     if (!NAME.test(n)) return { ok: false, error: '技能名只能用小写英文、数字和连字符（2–41 个字符）' };
     const prev = this.skills.get(n);
     if (prev?.source === 'builtin' && !(hasCode(prev.behavior) && hasCode(behavior))) return { ok: false, error: `${n} 是内置技能，不能改；换个名字写自己的版本` };
-    const desc = description.replace(/[\r\n]+/g, ' ').trim().slice(0, 200);
-    let text = body.replace(/\r\n/g, '\n').replace(BEHAVIOR_BLOCK, '').trim().slice(0, 6000);
+    // 说明与正文采用与 reload 读取一致的规范形式（trim 后再去首尾引号、截断后再 trim），
+    // 保证同一份持久化内容在写入与完整重载后得到同一份表示，不因规范化差异误判内容已改写。
+    const desc = description.replace(/[\r\n]+/g, ' ').trim().slice(0, 200).trim().replace(/^["']|["']$/g, '');
+    let text = body.replace(/\r\n/g, '\n').replace(BEHAVIOR_BLOCK, '').trim().slice(0, 6000).trim();
     const pending = this.candidates.get(n);
     const dir = path.join(this.selfDir, n);
     const notesFile = path.join(dir, 'NOTES.md');

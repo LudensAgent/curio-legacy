@@ -96,6 +96,8 @@ export class SkillCurator {
    *  version 是被并入目标的版本；fromVersion 是来源合并当时的版本——来源后来独立改版后，旧关系不能覆盖新版（不能用覆盖 B1 的证据处理 B2）。文字记录合并用 version/fromVersion=0（文字无版本）。 */
   private substitutions = new Map<string, { into: string; version: number; fromVersion: number; at: number; sourceText?: string; targetText?: string }>();
   private substitutionsFile: string | null = null;
+  /** 构建整理输入时记录的文字快照（名字 → 内容标识）：应用合并前据此核验模型看到的材料是否仍是当前内容。 */
+  private noteSeen = new Map<string, string>();
   /** 最近的事后观测事实（技能名 → 最近几条死亡/掉血/处境，带观测版本），喂给整理模型判断该不该收起。 */
   private aftermath = new Map<string, { version?: number; died: boolean; lost: number; still: boolean | null; context: string }[]>();
   private timer: NodeJS.Timeout | null = null;
@@ -399,8 +401,12 @@ export class SkillCurator {
         ...(st?.undoneBy && Object.keys(st.undoneBy).length ? { work_undone_by: st.undoneBy } : {}),
         ...(st?.loops?.length ? { see_sawed_with: st.loops.map((l) => `${l.with.startsWith('doing:') ? `手上的「${l.with.slice(6)}」` : `「${l.with}」`}（${l.times} 回）`) } : {}), ...(b.code ? { code: b.code.slice(0, 2500), ...(b.verify ? { verify: b.verify } : {}) } : { steps: b.steps }) };
     });
-    const notes = this.notes().map((entry) => ({ name: entry.name, target: 'note', description: entry.description, body: entry.body, notes: entry.notes,
-      retired: this.engine.statsOf(entry.name)?.retired ?? null, disabled: this.engine.inactive(entry.name) }));
+    this.noteSeen = new Map();
+    const notes = this.notes().map((entry) => {
+      this.noteSeen.set(entry.name, noteFingerprint(entry));
+      return { name: entry.name, target: 'note', description: entry.description, body: entry.body, notes: entry.notes,
+        retired: this.engine.statsOf(entry.name)?.retired ?? null, disabled: this.engine.inactive(entry.name) };
+    });
     const system = `你在整理 Minecraft 机器人 Muses 自己写的技能及文字记录。像人整理笔记一样：
 - skills 分开列正式版本（target:skill）和候选（target:candidate）；同名两者的证据不能混用。retire 必须带 target；执行版本再带 version。收起候选不会收起同名稳定版；收起正式版时，未收起的同名候选仍可显式试用。
 - 已停用但未收起的技能也要评估；候选没有验收通过不等于已经会用。候选可保留试用、同名修订或依据证据收起，不强制心智做任何试验。
@@ -466,15 +472,30 @@ export class SkillCurator {
             errors.push(`${target} 不是纯文字记录，不能用文字合并覆盖`);
             continue;
           }
+          // 应用前核验模型看到的材料仍与当前一致：来源或目标在等待回复期间被改写，旧合并会覆盖新内容，必须拒绝。
+          const staleSource = from.find((n) => {
+            const seen = this.noteSeen.get(n);
+            const current = this.book?.get(n);
+            return seen === undefined || !current || seen !== noteFingerprint(current);
+          });
+          const seenTarget = this.noteSeen.get(target);
+          const currentTarget = this.book?.get(target);
+          const staleTarget = seenTarget !== undefined && (!currentTarget || seenTarget !== noteFingerprint(currentTarget));
+          if (staleSource !== undefined || staleTarget) {
+            const changed = staleSource ?? target;
+            for (const n of from) mergeSources.set(n, '整理期间内容已变化');
+            errors.push(`「${changed}」在整理期间被改写，本次合并基于过期内容未应用；请用新材料重新决定`);
+            continue;
+          }
           const saved = this.book?.write(target, m.note.description, m.note.body);
           if (saved?.ok) {
             // 文字确实成功保存进替代记录后，才记录“来源 → 目标”的替代关系；后续按替代收起文字来源据此校验。
-            // 关系绑定双方当时的内容标识：来源后来加料、或目标改写移除原合并内容后，旧关系都不能继续授权收起来源。
+            // 关系绑定模型输入快照里的内容标识：来源后来加料、或目标改写后，旧关系都不能继续授权收起来源。
             const targetText = noteFingerprint(saved.skill);
             for (const n of from) {
-              const source = this.book?.get(n);
+              const sourceText = this.noteSeen.get(n);
               this.substitutions.set(n, { into: saved.skill.name, version: 0, fromVersion: 0, at: Date.now(),
-                ...(source ? { sourceText: noteFingerprint(source) } : {}), targetText });
+                ...(sourceText !== undefined ? { sourceText } : {}), targetText });
             }
             this.saveSubstitutions();
             done.push(`${from.join('+')} → 文字记录 ${saved.skill.name}（保留来源${this.engine.inactive(saved.skill.name) ? '；目标仍收起，需要明确 restore' : ''}）`);
@@ -518,7 +539,7 @@ export class SkillCurator {
             if (typeof sub.sourceText !== 'string' || typeof sub.targetText !== 'string') { errors.push(`「${name}」并入「${r.subsumed_by}」的旧文字合并关系缺少内容标识，不能按替代收起；确有独立理由时去掉 subsumed_by 单独 retire`); continue; }
             const source = this.book?.get(name);
             if (!source || sub.sourceText !== noteFingerprint(source)) { errors.push(`「${name}」在并入「${r.subsumed_by}」后又改了内容，旧合并关系不覆盖新内容，不能按替代收起；确有独立理由时去掉 subsumed_by 单独 retire`); continue; }
-            if (sub.targetText !== noteFingerprint(target)) { errors.push(`「${r.subsumed_by}」在并入「${name}」后已改写（原合并内容已不在），旧合并关系不能授权收起来源；确有独立理由时去掉 subsumed_by 单独 retire`); continue; }
+            if (sub.targetText !== noteFingerprint(target)) { errors.push(`「${r.subsumed_by}」在并入「${name}」后内容标识已变化，无法确认原合并关系仍覆盖当前内容，不能授权收起来源；确有独立理由时去掉 subsumed_by 单独 retire`); continue; }
           }
           if (!this.engine.inactive(name) && this.engine.retire(name, why)) done.push(`收起文字记录 ${name}`);
           continue;
