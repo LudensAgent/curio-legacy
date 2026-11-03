@@ -216,7 +216,14 @@ async function stepOutOfWater(ctx: SkillCtx, args: CellArgs, feet: Vec3Like) {
   }
   if (!stand) return null;
   const rel: [number, number, number] = [args.at[0], dy, args.at[2]];
-  const res = await a.swimTo!({ x: stand.x + 0.5, y: stand.y, z: stand.z + 0.5 }, ctx.signal, { timeoutMs: Math.max(1000, Math.min(7000, ctx.deadline - Date.now())) });
+  let res: { ok: boolean; reason?: string };
+  try {
+    res = await a.swimTo!({ x: stand.x + 0.5, y: stand.y, z: stand.z + 0.5 }, ctx.signal, { timeoutMs: Math.max(1000, Math.min(7000, ctx.deadline - Date.now())) });
+  } catch (e) {
+    // 取消时保留辅助实际选定的上岸落点，不能只用原请求目标或最后位置代替。
+    if (isAbort(e)) (e as Error & { partial?: Record<string, unknown> }).partial = { stand: { ...stand }, rel: [...rel] };
+    throw e;
+  }
   const s = a.state(), end = feetCell(s.pos);
   if (!s.inWater && s.onGround && end.x === stand.x && end.y === stand.y && end.z === stand.z) {
     return ok(`从水里爬上了岸 [${rel}]（实际在 (${end.x},${end.y},${end.z})）`, { moved: rel, landed: true, ...after(ctx, args.facing, stand) });
@@ -298,7 +305,11 @@ export const stepTo: Skill<CellArgs> = {
         const out = await stepOutOfWater(ctx, args, feet);
         if (out) return out;
       } catch (e) {
-        if (isAbort(e)) (e as Error & { partial?: Record<string, unknown> }).partial = partialFacts();
+        if (isAbort(e)) {
+          // 保留原请求目标，同时合并水中辅助实际选定的上岸落点（stand/rel），不能用最后位置代替。
+          const prev = (e as Error & { partial?: Record<string, unknown> }).partial ?? {};
+          (e as Error & { partial?: Record<string, unknown> }).partial = { ...partialFacts(), ...prev };
+        }
         throw e;
       }
     }
