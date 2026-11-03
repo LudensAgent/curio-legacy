@@ -875,7 +875,7 @@ export class Mind {
         const own = a.steps[Math.max(0, a.index - 1)];
         const climb = step.skill === 'climb_up' ? a.climb?.[own?.id ?? JSON.stringify(step.args ?? {})] : undefined;
         const climbId = step.skill === 'climb_up' ? own?.id : undefined;
-        a.steps.splice(Math.max(0, a.index - 1), 0, { skill: 'use_skill', args: { name: b.name, failure: failureFor(step, result, this.d.adapter.state().pos, climb, climbId) }, optional: true });
+        a.steps.splice(Math.max(0, a.index - 1), 0, { skill: 'use_skill', args: { name: b.name, failure: failureFor(step, result, this.d.adapter.state().pos, climb, climbId) }, optional: true, id: shortId('st_') });
         a.index = Math.max(0, a.index - 1);
         a.consecutiveFailures = 0;
         this.d.self.think(`${step.skill} 没成，照学会的「${b.name}」试试`, 'outcome');
@@ -1334,36 +1334,34 @@ export class Mind {
       if (!sameActivity) { this.staleDropped++; return; } // 对旧活的调整，活已经换了
       const a = this.activity;
       const running = this.d.arbiter.info();
-      // 实例身份一致才算同一个执行实例：草案显式引用 ID 时必须与旧步骤 ID 相同，否则退到动作+参数比较。
-      const sameInstance = (draft: { skill: string; args?: unknown; id?: string } | undefined, old: { skill: string; args?: unknown; id?: string } | undefined) => {
-        if (!draft || !old) return false;
-        if (typeof draft.id === 'string' && draft.id) return draft.id === old.id;
-        return draft.skill === old.skill && isDeepStrictEqual(draft.args ?? {}, old.args ?? {});
-      };
-      // 新计划可以从正在做的步骤开始，也可以保留已经做完的前缀。
-      // 只有当前步骤（含实例 ID）相同，且前面没有新动作时，才让它继续执行。
       const currentIndex = a.index - 1;
+      const runningId = a.steps[currentIndex]?.id;
+      // 1. 先校验整个草案的实例引用：存在、唯一、动作与参数一致。失败保留现状并反馈原因，不把错误引用解释为新动作授权。
+      const referenced = new Set<string>();
+      for (let i = 0; i < draft.steps.length; i++) {
+        const s = draft.steps[i];
+        if (typeof s.id !== 'string' || !s.id) continue;
+        if (referenced.has(s.id)) { decision.notes.push(`steps[${i}] 重复引用实例 #${s.id}，调整未生效`); this.d.bus.publish('activity_adjust', 'P2', `调整被拒绝：重复引用 #${s.id}`, { planId: a.id }); return; }
+        referenced.add(s.id);
+        const old = a.steps.find((o) => o.id === s.id);
+        if (!old) { decision.notes.push(`steps[${i}] 引用了不存在的实例 #${s.id}，调整未生效`); this.d.bus.publish('activity_adjust', 'P2', `调整被拒绝：未知实例 #${s.id}`, { planId: a.id }); return; }
+        if (old.skill !== s.skill || !isDeepStrictEqual(old.args ?? {}, s.args ?? {})) { decision.notes.push(`steps[${i}] 引用了实例 #${s.id} 但参数已变：要改目标就新建动作（去掉 id），调整未生效`); this.d.bus.publish('activity_adjust', 'P2', `调整被拒绝：实例 #${s.id} 参数不符`, { planId: a.id }); return; }
+      }
+      // 2. 决定是否保留在途任务：额度动作（climb_up）必须 ID 一致（省略 ID 视为新建）；非额度动作退回动作+参数比较。
+      const sameRunning = (draftStep: { skill: string; args?: unknown; id?: string } | undefined, old: { skill: string; args?: unknown; id?: string }) => {
+        if (!draftStep) return false;
+        if (old.skill === 'climb_up' || draftStep.skill === 'climb_up') return draftStep.id === old.id;
+        return draftStep.skill === old.skill && isDeepStrictEqual(draftStep.args ?? {}, old.args ?? {});
+      };
       const runningOld = a.steps[currentIndex];
-      const firstIsRunning = running?.planId === a.id && sameInstance(draft.steps[0], runningOld);
-      const keepsPrefix = running?.planId === a.id && currentIndex > 0 && sameInstance(draft.steps[currentIndex], runningOld)
-        && a.steps.slice(0, currentIndex).every((step, i) => sameInstance(draft.steps[i], step));
+      const firstIsRunning = running?.planId === a.id && sameRunning(draft.steps[0], runningOld);
+      const keepsPrefix = running?.planId === a.id && currentIndex > 0 && sameRunning(draft.steps[currentIndex], runningOld)
+        && a.steps.slice(0, currentIndex).every((step, i) => step.skill === draft.steps[i]?.skill && isDeepStrictEqual(step.args ?? {}, draft.steps[i]?.args ?? {}));
       const runningIndex = keepsPrefix ? currentIndex : firstIsRunning ? 0 : -1;
       if (running?.planId === a.id && runningIndex < 0) this.d.arbiter.cancel('改了做法');
-      // 按实例 ID 继承预算：引用必须存在、唯一、且动作与参数一致，否则丢弃旧 ID（新建/修改，不沿用旧账本验收新参数）。
-      const oldRunning = runningIndex >= 0 ? runningOld : undefined;
-      const claimed = new Set<string>();
-      const steps = draft.steps.map((s, i) => {
-        if (typeof s.id === 'string' && s.id) {
-          const old = a.steps.find((o) => o.id === s.id);
-          if (old && !claimed.has(s.id) && old.skill === s.skill && isDeepStrictEqual(old.args ?? {}, s.args ?? {})) {
-            claimed.add(s.id);
-            return { ...s };
-          }
-          return { ...s, id: shortId('st_') };
-        }
-        if (i === runningIndex && oldRunning) return { ...s, id: oldRunning.id };
-        return { ...s, id: shortId('st_') };
-      });
+      // 3. 分配 ID：引用保留原 ID，新建分配新 ID。
+      const steps = draft.steps.map((s) => ({ ...s, id: typeof s.id === 'string' && s.id ? s.id : shortId('st_') }));
+      // 4. 保留被引用实例的账本。
       const preservedClimb: Record<string, { height: number; spent: number; startY: number }> = {};
       for (const s of steps) if (typeof s.id === 'string') { const entry = this.activity.climb?.[s.id]; if (entry) preservedClimb[s.id] = entry; }
       Object.assign(a, { what: draft.what, why: draft.why || a.why, kind: draft.kind, steps, repeat: draft.repeat, iteration: 0, index: runningIndex + 1, adaptations: [], consecutiveFailures: 0, climb: preservedClimb,

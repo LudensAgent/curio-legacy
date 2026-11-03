@@ -45,7 +45,7 @@ export function viewOf(p?: Percept): string | undefined {
 
 export function createActivity(draft: ActivityDraft, monologue: string, source: Activity['source'], state: Pick<AgentState, 'inventory'>): Activity {
   return {
-    id: shortId('act_'), what: draft.what, why: draft.why, kind: draft.kind, steps: draft.steps.map((s) => ({ ...s, id: s.id ?? shortId('st_') })),
+    id: shortId('act_'), what: draft.what, why: draft.why, kind: draft.kind, steps: draft.steps.map((s) => ({ ...s, id: shortId('st_') })),
     ...(draft.facing ? { facing: draft.facing } : {}),
     repeat: Math.max(1, Math.min(12, draft.repeat || 1)), iteration: 0, index: 0,
     ...(draft.doneWhen ? { doneWhen: draft.doneWhen } : {}), ...(draft.expect ? { expect: draft.expect } : {}),
