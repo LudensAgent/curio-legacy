@@ -1358,6 +1358,11 @@ export class Mind {
         const old = a.steps.find((o) => o.id === s.id);
         if (!old) { decision.notes.push(`steps[${i}] 引用了不存在的实例 #${s.id}，调整未生效`); this.d.bus.publish('activity_adjust', 'P2', `调整被拒绝：未知实例 #${s.id}`, { planId: a.id }); return; }
         if (old.skill !== s.skill || !isDeepStrictEqual(stableArgs(old.args), stableArgs(s.args))) { decision.notes.push(`steps[${i}] 引用了实例 #${s.id} 但参数已变：要改目标就新建动作（去掉 id），调整未生效`); this.d.bus.publish('activity_adjust', 'P2', `调整被拒绝：实例 #${s.id} 参数不符`, { planId: a.id }); return; }
+        // 仍需继续的恢复步骤引用父账本（climbId）：账本必须仍在，否则返回明确错误，不能回退模型回传副本或重新给额度。
+        if (old.skill === 'use_skill') {
+          const f = (old.args as Record<string, unknown> | undefined)?.failure as { climbId?: string } | undefined;
+          if (typeof f?.climbId === 'string' && f.climbId && !a.climb?.[f.climbId]) { decision.notes.push(`steps[${i}] 引用的恢复实例 #${s.id} 需要父账本 #${f.climbId}，但该账本已不存在，调整未生效`); this.d.bus.publish('activity_adjust', 'P2', `调整被拒绝：恢复父账本 #${f.climbId} 缺失`, { planId: a.id }); return; }
+        }
       }
       // 2. 决定是否保留在途任务：所有步骤统一按已验证的实例 ID 判断（省略 ID 视为新建），不用参数匹配回退。
       const sameRunning = (draftStep: { id?: string } | undefined, old: { id?: string }) => !!draftStep && !!draftStep.id && draftStep.id === old.id;
@@ -1383,9 +1388,18 @@ export class Mind {
         }
         return step;
       });
-      // 4. 保留被引用实例的账本。
+      // 4. 保留被引用实例的账本：既含步骤自身 ID，也含恢复步骤通过 failure.climbId 引用的父账本（删除父步骤仍保留恢复时账本不丢）。
       const preservedClimb: Record<string, { height: number; spent: number; startY: number }> = {};
-      for (const s of steps) if (typeof s.id === 'string') { const entry = this.activity.climb?.[s.id]; if (entry) preservedClimb[s.id] = entry; }
+      for (const s of steps) {
+        if (typeof s.id === 'string') { const entry = a.climb?.[s.id]; if (entry) preservedClimb[s.id] = entry; }
+        if (s.skill === 'use_skill' && s.args && typeof s.args === 'object') {
+          const failure = (s.args as Record<string, unknown>).failure;
+          if (failure && typeof failure === 'object' && !Array.isArray(failure)) {
+            const f = failure as Record<string, unknown>;
+            if (typeof f.climbId === 'string' && f.climbId) { const entry = a.climb?.[f.climbId]; if (entry) preservedClimb[f.climbId] = entry; }
+          }
+        }
+      }
       Object.assign(a, { what: draft.what, why: draft.why || a.why, kind: draft.kind, steps, repeat: draft.repeat, iteration: 0, index: runningIndex + 1, adaptations: [], consecutiveFailures: 0, climb: preservedClimb,
         monologue: decision.monologue || a.monologue });
       if (draft.facing) a.facing = draft.facing; else delete a.facing;
