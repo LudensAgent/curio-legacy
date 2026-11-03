@@ -251,3 +251,33 @@ test('self distinguishes completed input from unknown effect for consumable and 
     assert.equal(r.data?.poured_unconfirmed, undefined);
   }
 });
+
+test('use_item 空桶名称取源：侧面可接触、顶部被遮挡的源仍可收集', async (t) => {
+  const w = new TestWorld();
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  w.inv.set('bucket', 1);
+  // 源 (0,64,2) 上方 (0,65,2) 是石头，顶被遮挡；但侧面可接触
+  w.setBlock({ x: 0, y: 64, z: 2 }, 'water');
+  w.blockProperties.set('0,64,2', { level: 0 });
+  w.setBlock({ x: 0, y: 65, z: 2 }, 'stone');
+  const r = await useItem.run(ctx, { item: 'bucket', on: 'water' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(w.inv.get('bucket'), 0);
+  assert.equal(w.inv.get('water_bucket'), 1);
+  assert.equal(w.blockAt({ x: 0, y: 64, z: 2 }), 'air');
+});
+
+test('use_item 放船仍要求开阔水面：顶部被遮挡的水格不选为放船点', async (t) => {
+  const w = new TestWorld();
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  w.inv.set('oak_boat', 1);
+  // 顶部被遮挡的水格：放船需要上面是空气的开阔水面，不应选中
+  w.setBlock({ x: 0, y: 64, z: 2 }, 'water');
+  w.blockProperties.set('0,64,2', { level: 0 });
+  w.setBlock({ x: 0, y: 65, z: 2 }, 'stone');
+  const r = await useItem.run(ctx, { item: 'oak_boat', on: 'water' });
+  assert.equal(r.status, 'failed', r.summary);
+  assert.equal(w.inv.get('oak_boat'), 1, '没放成不该扣船');
+});

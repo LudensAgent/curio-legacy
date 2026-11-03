@@ -151,12 +151,13 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
       senses.refresh();
       const names = new Set([args.on, ...adapter.resolveBlockNames(args.on)]);
       const fluid = args.on === 'water' || args.on === 'lava';
-      // 只用看得见的方块；液体要选表面（上面是空气）的那一格。放船还要选开阔水面：船身 1.375 格宽，贴岸的一格浅水放不下
+      // 只用看得见的方块；放船要选表面（上面是空气）那一格的开阔水面：船身 1.375 格宽，贴岸的一格浅水放不下。
       const boat = /_boat$|_raft$/.test(args.item);
-      // 空桶装水/装岩浆只能从源方块（level=0）取，流动的取不了；放船不挑源
+      // 空桶装水/装岩浆只能从源方块（level=0）取，流动的取不了；放船不挑源。
+      // 收集不要求源格上方是空气：侧面可接触、顶部有遮挡的源仍可由交互射线确认命中，不应在这里被排除。
       const collectSource = fluid && args.item === 'bucket';
       let hits = senses.knownBlocks([...names], 32)
-        .filter((h) => !fluid || AIRISH.has(adapter.blockAt({ x: h.pos.x, y: h.pos.y + 1, z: h.pos.z }) ?? 'air'))
+        .filter((h) => !fluid || !boat || AIRISH.has(adapter.blockAt({ x: h.pos.x, y: h.pos.y + 1, z: h.pos.z }) ?? 'air'))
         .filter((h) => !fluid || !boat || openWater(ctx, h.pos, 2) >= 4)
         .filter((h) => dirOk(args.dir, s.pos, h.pos));
       const hadSurface = hits.length > 0;
