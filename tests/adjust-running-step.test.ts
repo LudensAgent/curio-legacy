@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { isDeepStrictEqual } from 'node:util';
 import { test } from 'node:test';
 import { createActivity, nextStep, afterStep } from '../src/mind/activity.ts';
 import { Mind } from '../src/mind/mind.ts';
@@ -13,6 +14,13 @@ function adjust(steps: ReturnType<typeof step>[], original = [step(1), step(2), 
   nextStep(activity);
   nextStep(activity);
   const running = { skill: 'mind_step', args: { n: 2 }, planId: activity.id };
+  // 草案里动作+参数相同的步骤按旧实例 ID 引用（模拟模型按 ID 续跑同一实例；重复参数按先后占用区分实例）。
+  const claimed = new Set<string>();
+  const withIds = steps.map((s) => {
+    const old = activity.steps.find((o) => o.id !== undefined && !claimed.has(o.id) && o.skill === s.skill && isDeepStrictEqual(o.args ?? {}, s.args ?? {}));
+    if (old) { claimed.add(old.id!); return { ...s, id: old.id }; }
+    return s;
+  });
   const cancelled: string[] = [];
   const context = {
     activity, staleDropped: 0,
@@ -21,7 +29,7 @@ function adjust(steps: ReturnType<typeof step>[], original = [step(1), step(2), 
       adapter, perception: { snapshot: () => undefined }, bus: { publish() {} } },
   };
   const decision = { kind: 'adjust', tier: 'glance', source: 'llm', monologue: '', notes: [],
-    activity: { what: '调整后的活', why: '', kind: 'other', steps, repeat } };
+    activity: { what: '调整后的活', why: '', kind: 'other', steps: withIds, repeat } };
   (Mind.prototype as any).apply.call(context, decision, activity.id);
   return { activity, adapter, cancelled };
 }
