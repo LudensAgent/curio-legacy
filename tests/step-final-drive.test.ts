@@ -14,7 +14,7 @@ const { Physics, PlayerState } = require('prismarine-physics');
 
 /** 一段相邻地面步的物理世界：原点列 + 目标列各一块，其余按 y≤63 实心、以上空气。
  *  continuous=true 时目标薄层沿移动方向向后方连续延伸（模拟真实田埂/半砖平台，而非单列）。 */
-function stepWorld(origin: { name: string; props: Record<string, string | number> }, target: { name: string; props: Record<string, string | number> }, continuous = false) {
+function stepWorld(origin: { name: string; props: Record<string, string | number | boolean> }, target: { name: string; props: Record<string, string | number | boolean> }, continuous = false) {
   const originState = Block.fromProperties(origin.name, origin.props, 0).stateId;
   const targetState = Block.fromProperties(target.name, target.props, 0).stateId;
   return {
