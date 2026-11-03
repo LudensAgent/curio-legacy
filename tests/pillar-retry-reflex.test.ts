@@ -131,7 +131,7 @@ test('climb_up partial progress is tracked in the shared budget without mutating
   const verdict = afterStep(activity, step, fail('STUCK', '往上爬了 1 格后停下', { goalReached: false }), 100, adapter.state());
   assert.equal(verdict.kind, 'continue', '剩余额度下继续，而不是重试完整高度');
   assert.equal((activity.steps[0].args as { height: number }).height, 3, '模板参数保持不变');
-  assert.equal(activity.climb[key].spent, 1, '已确认进展入账');
+  assert.equal(activity.climb![key].spent, 1, '已确认进展入账');
 });
 
 test('climb_up repeat:2 starts each round from the original budget', () => {
@@ -140,21 +140,21 @@ test('climb_up repeat:2 starts each round from the original budget', () => {
     steps: [{ skill: 'climb_up', args: { height: 3, untilSky: false } }] }, '', 'llm', adapter.state());
   const step1 = nextStep(activity)!;
   const key = JSON.stringify(step1.args ?? {});
-  assert.equal(activity.climb[key].height, 3, '第一轮建立原始高度账本');
-  assert.equal(activity.climb[key].spent, 0);
+  assert.equal(activity.climb![key].height, 3, '第一轮建立原始高度账本');
+  assert.equal(activity.climb![key].spent, 0);
   // 第一轮成功：删除账本
   assert.equal(afterStep(activity, step1, { status: 'succeeded', summary: '往上爬了 3 格', data: { goalReached: true } }, 100, adapter.state()).kind, 'continue');
-  assert.equal(activity.climb[key], undefined, '成功后删除账本');
+  assert.equal(activity.climb![key], undefined, '成功后删除账本');
   // 第二轮：reset 账本，从原始高度重新开始
   const step2 = nextStep(activity)!;
   assert.equal(step2.skill, 'climb_up');
   assert.equal((step2.args as { height: number }).height, 3, '第二轮从原始参数开始');
-  assert.equal(activity.climb[JSON.stringify(step2.args ?? {})].height, 3);
-  assert.equal(activity.climb[JSON.stringify(step2.args ?? {})].spent, 0, '第二轮额度清零');
+  assert.equal(activity.climb![JSON.stringify(step2.args ?? {})].height, 3);
+  assert.equal(activity.climb![JSON.stringify(step2.args ?? {})].spent, 0, '第二轮额度清零');
 });
 
 test('nested climb_up inherits the recovery budget via ctx.climb', async () => {
-  const budget = { height: 3, spent: 1 };
+  const budget = { height: 3, spent: 1, startY: 64 };
   let got: unknown = undefined;
   const skill = { name: 'climb_up', description: '', argsDoc: '', timeoutMs: 1000, movement: true,
     validate: () => ({ ok: true, args: {} }), run: async (ctx: { climb?: unknown }) => { got = ctx.climb; return ok('x'); } };
@@ -169,7 +169,7 @@ test('climb_up cancellation preserves only the confirmed height', async () => {
   const adapter = new FakeAdapter();
   adapter.pos = { x: 0.5, y: 64, z: 0.5 };
   adapter.inv.set('dirt', 8);
-  const budget = { height: 3, spent: 0 };
+  const budget = { height: 3, spent: 0, startY: 64 };
   const controller = new AbortController();
   let climbs = 0;
   adapter.moveTo = async () => {
@@ -183,6 +183,42 @@ test('climb_up cancellation preserves only the confirmed height', async () => {
     assert.equal(e.partialClimbed, 1, '取消只保留确认的 1 格，不把半空的瞬时高度当进展');
     return true;
   });
+});
+
+test('climb_up with a fall-back reports net progress, not cumulative spend', async () => {
+  const adapter = new FakeAdapter();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 }; // 已跌回 Y64
+  adapter.inv.set('dirt', 8);
+  const budget = { height: 3, spent: 1, startY: 64 }; // 爬 1 格后又跌回，逻辑起点 Y64
+  adapter.moveTo = async () => { adapter.pos = { ...adapter.pos, y: adapter.pos.y + 1 }; };
+  const ctx = { adapter, signal: new AbortController().signal, deadline: Date.now() + 10000, senses: { refresh() {} }, make: false, climb: budget };
+  const r = await climbUp.run(ctx as never, { height: 3, untilSky: false });
+  assert.equal(r.status, 'failed', r.summary);
+  assert.equal(r.data?.goalReached, false, '净升高 2 格不满足原定 3 格目标');
+  assert.equal(r.data?.climbed, 2, '净升高是 2 格，不是累计消耗 3 格');
+});
+
+test('recovery sub-action climb_up completes its own goal regardless of the parent quota', async () => {
+  const adapter = new FakeAdapter();
+  adapter.pos = { x: 0.5, y: 65, z: 0.5 }; // 父动作已爬 1 格
+  adapter.inv.set('dirt', 8);
+  const budget = { height: 3, spent: 1, startY: 64 };
+  adapter.moveTo = async () => { adapter.pos = { ...adapter.pos, y: adapter.pos.y + 1 }; };
+  const ctx = { adapter, signal: new AbortController().signal, deadline: Date.now() + 10000, senses: { refresh() {} }, make: false, climb: budget };
+  const r = await climbUp.run(ctx as never, { height: 1, untilSky: false }); // 恢复子动作：爬 1 格
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.goalReached, true);
+  assert.equal(r.data?.climbed, 1, '子动作自身目标完成，不再被父额度未完成卡成 STUCK');
+});
+
+test('climb_up with exhausted quota does not require materials when the goal is already met', async () => {
+  const adapter = new FakeAdapter();
+  adapter.pos = { x: 0.5, y: 67, z: 0.5 }; // 已爬到 Y67（净 3 格）
+  const budget = { height: 3, spent: 3, startY: 64 }; // 额度已用完，背包无材料
+  const ctx = { adapter, signal: new AbortController().signal, deadline: Date.now() + 10000, senses: { refresh() {} }, make: false, climb: budget };
+  const r = await climbUp.run(ctx as never, { height: 3, untilSky: false });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.goalReached, true, '目标已达成时无需材料');
 });
 
 test('excavate_path preflight rejection is not auto-retried for another identical gap', () => {

@@ -329,25 +329,28 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
     const { adapter, signal } = ctx;
     throwIfAborted(signal);
     const onLadder = () => adapter.blockAt(floor(adapter.state().pos)) === 'ladder';
-    if (!onLadder() && !hasPlaceable(adapter.state().inventory)) return fail('MISSING_MATERIALS', '脚下没有梯子，背包里也没有能垫脚的方块（泥土/圆石/石头/木板）');
     const start = adapter.state().pos.y;
     // 同一逻辑动作的共享额度账本：跨顶层/重试/恢复共享，确认爬升才入账，取消/失败也保留。
     const budget = ctx.climb;
-    const remaining = budget ? Math.max(0, budget.height - budget.spent) : args.height;
-    const limit = Math.min(args.height, remaining);
-    const height = budget?.height ?? args.height;
+    // 首次派发时记录逻辑起点；父委托目标 = 从逻辑起点净升高 height。
+    if (budget && !Number.isFinite(budget.startY)) budget.startY = Math.floor(start);
+    const remainingSpend = budget ? Math.max(0, budget.height - budget.spent) : args.height;
+    const effectiveHeight = Math.min(args.height, remainingSpend);
+    // 同一动作（args.height 等于父额度）按父目标验收；恢复子动作按自身 args.height 验收。
+    const isSameAction = !!budget && args.height === budget.height;
+    const netFromStart = () => Math.max(0, Math.floor(adapter.state().pos.y + 0.05) - Math.floor((budget ? budget.startY : start) + 0.05));
     let climbedThisRun = 0;
     const total = () => (budget ? budget.spent : climbedThisRun);
     const reached = (around: ReturnType<typeof surroundings>) => (!args.untilSky || around.sky) && (!args.untilExit || around.exits.length > 0);
     const finish = (stopped?: string, failureCause?: 'PILLAR_CLEARANCE') => {
       const state = adapter.state(), around = surroundings(adapter);
-      const climbed = total();
-      const goalReached = args.untilSky || args.untilExit ? reached(around) : climbed >= height;
-      const facts = { climbed, height, sky: around.sky, exits: around.exits, goalReached, position: { ...state.pos }, ...(failureCause ? { failureCause } : {}),
+      const climbed = isSameAction ? netFromStart() : climbedThisRun;
+      const goalReached = args.untilSky || args.untilExit ? reached(around) : isSameAction ? netFromStart() >= budget!.height : climbedThisRun >= effectiveHeight;
+      const facts = { climbed, spent: total(), height: budget?.height ?? args.height, sky: around.sky, exits: around.exits, goalReached, position: { ...state.pos }, ...(failureCause ? { failureCause } : {}),
         effectEvidence: { verified: true, changed: climbedThisRun > 0, reasons: [`实际高度 ${start} → ${state.pos.y}`] } };
+      if (goalReached) return ok(`往上爬了 ${climbed} 格${args.untilExit ? '，四周有路了' : args.untilSky ? '，看得见天空了' : ''}`, facts);
       if (!climbed) return fail('STUCK', `未实际爬升${stopped ? `：${stopped}` : '，没有完成垫高'}`, facts);
-      if (stopped || !goalReached) return fail('STUCK', `往上爬了 ${climbed} 格后停下：${stopped ?? '已到本次高度或时间上限，仍未满足停止条件'}`, facts);
-      return ok(`往上爬了 ${climbed} 格${args.untilExit ? '，四周有路了' : args.untilSky ? '，看得见天空了' : ''}`, facts);
+      return fail('STUCK', `往上爬了 ${climbed} 格后停下：${stopped ?? '已到本次高度或时间上限，仍未满足停止条件'}`, facts);
     };
     const initial = surroundings(adapter);
     if ((args.untilSky || args.untilExit) && reached(initial)) {
@@ -355,12 +358,18 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
       return ok(`${args.untilExit ? '四周已经有路可走' : '已经看得见天空'}，所以没有垫高；如果是想站上坑沿，用 {"height":2} 这样直接指定格数`,
         { climbed: 0, alreadySatisfied: true, sky: initial.sky, exits: initial.exits });
     }
+    // 父委托额度已用完：无需材料，直接按目标验收（达成则完成，未达成则交回）。
+    if (effectiveHeight <= 0) return finish('本次授权的高度额度已用完');
+    // 只有确实要继续爬时才需要材料。
+    if (!onLadder() && !hasPlaceable(adapter.state().inventory)) return fail('MISSING_MATERIALS', '脚下没有梯子，背包里也没有能垫脚的方块（泥土/圆石/石头/木板）');
+    let lastBeforeY: number | undefined;
     try {
-      for (let i = 0; i < limit && Date.now() < ctx.deadline - 1000; i++) {
+      for (let i = 0; i < effectiveHeight && Date.now() < ctx.deadline - 1000; i++) {
         throwIfAborted(signal);
         const here = surroundings(adapter);
         if ((args.untilSky || args.untilExit) && reached(here)) break;
         const before = adapter.state().pos, me = floor(before);
+        lastBeforeY = before.y;
         const moveUp = () => adapter.moveTo({ kind: 'xyz', x: me.x, y: me.y + 1, z: me.z }, { signal, timeoutMs: Math.max(1, Math.min(8000, ctx.deadline - Date.now())), allowTerrainChanges: true });
         // 头顶的方块先挖开（不挖液体旁边的）
         try {
@@ -396,6 +405,7 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
         if (Math.floor(after.y + 0.05) <= me.y || after.y <= before.y + 0.05) return finish('移动已结束，但脚下没有实际升到上一格');
         climbedThisRun++;
         if (budget) budget.spent++;
+        lastBeforeY = undefined;
         ctx.senses.refresh();
         if (!onLadder() && !hasPlaceable(adapter.state().inventory)) break;
       }
@@ -403,7 +413,14 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
       return finish();
     } catch (e) {
       if (isAbort(e)) {
-        // 取消也保留已爬升的部分进展，供调度器回退后复用剩余额度，不再整段重爬。
+        // 取消时复验未结算的一步：身体已站稳升高才算入账（保留“空中跳跃不计进展”），再保留部分进展供调度器复用剩余额度。
+        if (budget && lastBeforeY !== undefined) {
+          const now = adapter.state().pos;
+          if (Math.floor(now.y + 0.05) > Math.floor(lastBeforeY) && now.y > lastBeforeY + 0.05) {
+            budget.spent++;
+            climbedThisRun++;
+          }
+        }
         (e as Error & { partialClimbed?: number }).partialClimbed = total();
       }
       throw e;

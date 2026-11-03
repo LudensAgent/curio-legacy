@@ -98,7 +98,7 @@ interface Snapshot { at: number; sessionId: string; dim: string; pos: AgentState
  * 交给恢复技能的“刚失败的那一步”：除了动作、参数、失败码和一句话，还带上动作自己算出来的目标坐标
  * （比如 goto "NW 20" 实际要去的那一格）和失败时人在哪——以前只有一句话，恢复技能和它的核对都“没有目标坐标”
  */
-export function failureFor(step: { skill: string; args?: unknown }, result: { failureCode?: string | null; summary: string; data?: unknown }, pos: { x: number; y: number; z: number }, climb?: { height: number; spent: number }) {
+export function failureFor(step: { skill: string; args?: unknown }, result: { failureCode?: string | null; summary: string; data?: unknown }, pos: { x: number; y: number; z: number }, climb?: { height: number; spent: number; startY: number }) {
   const d = result.data && typeof result.data === 'object' ? result.data as Record<string, unknown> : {};
   const blockTarget = d.blockTarget && typeof d.blockTarget === 'object' ? d.blockTarget as Record<string, unknown> : {};
   const target = worldPoint(d.targetCell) ?? worldPoint(d.target) ?? worldPoint(blockTarget.pos) ?? (step.skill === 'dig' ? worldPoint(d.pos) : undefined);
@@ -1333,7 +1333,10 @@ export class Mind {
         && a.steps.slice(0, currentIndex).every((step, i) => sameStep(step, draft.steps[i]));
       const runningIndex = keepsPrefix ? currentIndex : firstIsRunning ? 0 : -1;
       if (running?.planId === a.id && runningIndex < 0) this.d.arbiter.cancel('改了做法');
-      Object.assign(a, { what: draft.what, why: draft.why || a.why, kind: draft.kind, steps: draft.steps, repeat: draft.repeat, iteration: 0, index: runningIndex + 1, adaptations: [], consecutiveFailures: 0, climb: {},
+      // 保留仍在执行的动作的额度账本，其余（新动作、改动过的动作）独立建账，不继承无关旧账。
+      const preservedKey = runningIndex >= 0 ? JSON.stringify(draft.steps[runningIndex]?.args ?? {}) : undefined;
+      const preservedClimb = preservedKey && this.activity.climb?.[preservedKey] ? { [preservedKey]: this.activity.climb[preservedKey] } : {};
+      Object.assign(a, { what: draft.what, why: draft.why || a.why, kind: draft.kind, steps: draft.steps, repeat: draft.repeat, iteration: 0, index: runningIndex + 1, adaptations: [], consecutiveFailures: 0, climb: preservedClimb,
         monologue: decision.monologue || a.monologue });
       if (draft.facing) a.facing = draft.facing; else delete a.facing;
       if (draft.doneWhen) a.doneWhen = draft.doneWhen; else delete a.doneWhen;

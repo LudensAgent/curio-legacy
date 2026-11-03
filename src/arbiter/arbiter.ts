@@ -181,7 +181,7 @@ export class Arbiter extends EventEmitter {
    * 启动一个任务。若已有任务在运行，会先抢占（取消）它。
    * 返回 null 表示参数校验失败。
    */
-  start(step: Step, source: TaskSource, meta: { planId?: string; gentle?: boolean; climb?: { height: number; spent: number } } = {}): TaskInfo | { error: string } {
+  start(step: Step, source: TaskSource, meta: { planId?: string; gentle?: boolean; climb?: { height: number; spent: number; startY: number } } = {}): TaskInfo | { error: string } {
     if (this.pausedFlag) return { error: 'Agent 已暂停' };
     const v = this.validate(step);
     if (!v.ok) {

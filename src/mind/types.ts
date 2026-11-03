@@ -69,8 +69,8 @@ export interface Activity {
   airDigs?: Record<string, { target: { x: number; y: number; z: number }; count: number }>;
   /** 同一步多轮在同一个下行目标前停下时，保留实际停因交回心智。 */
   partialStops?: Record<string, { pos: { x: number; y: number; z: number }; below: string | null; iteration: number; count: number }>;
-  /** 各逻辑动作实例的额度账本（如 climb_up 的原高度与已确认爬升），跨重试/恢复共享；每轮开始与计划调整时重置。 */
-  climb?: Record<string, { height: number; spent: number }>;
+  /** 各逻辑动作实例的额度账本（如 climb_up 的原高度、逻辑起点与已确认爬升），跨重试/恢复共享；每轮开始与计划调整时重置。 */
+  climb?: Record<string, { height: number; spent: number; startY: number }>;
   dropped?: string[];
   /** 被身体反射打断了几次 */
   interruptions?: number;

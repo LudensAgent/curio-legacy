@@ -3,7 +3,7 @@ import { facingOfYaw, feetCell, toWorld, type Facing } from '../perception/local
 import { attachmentFaces } from '../perception/surroundings.ts';
 import type { SkillCtx } from './types.ts';
 
-export type RecoveryContext = { skill: string; args: Record<string, unknown>; target?: Vec3Like; position?: Vec3Like; entityId?: number; allowPlace?: boolean; allowDig?: boolean; climb?: { height: number; spent: number } };
+export type RecoveryContext = { skill: string; args: Record<string, unknown>; target?: Vec3Like; position?: Vec3Like; entityId?: number; allowPlace?: boolean; allowDig?: boolean; climb?: { height: number; spent: number; startY: number } };
 
 /** World coordinates only; never guess at/to relative arrays or coerce null into zero. */
 export function worldPoint(value: unknown): Vec3Like | undefined {
@@ -22,7 +22,7 @@ export function recoveryContext(value: unknown): RecoveryContext | { error: stri
   if (raw.position !== undefined && !position) return { error: 'failure.position 须为明确的世界坐标' };
   const entityId = raw.entityId ?? args.entityId;
   if (entityId !== undefined && (!Number.isSafeInteger(entityId) || Number(entityId) < 0)) return { error: 'failure.entityId 须为原实体整数 ID' };
-  const climb = raw.climb && typeof raw.climb === 'object' && !Array.isArray(raw.climb) ? raw.climb as { height: number; spent: number } : undefined;
+  const climb = raw.climb && typeof raw.climb === 'object' && !Array.isArray(raw.climb) ? raw.climb as { height: number; spent: number; startY: number } : undefined;
   return { ...raw, skill: raw.skill, args, ...(target ? { target } : {}), ...(position ? { position } : {}), ...(entityId !== undefined ? { entityId: Number(entityId) } : {}), ...(climb ? { climb } : {}) };
 }
 

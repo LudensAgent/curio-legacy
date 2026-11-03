@@ -89,7 +89,7 @@ export function nextStep(a: Activity): Step | null {
   if (step.skill === 'climb_up') {
     const key = JSON.stringify(step.args ?? {});
     a.climb ??= {};
-    a.climb[key] ??= { height: (step.args as Record<string, unknown>)?.height as number ?? 0, spent: 0 };
+    a.climb[key] ??= { height: (step.args as Record<string, unknown>)?.height as number ?? 0, spent: 0, startY: Number.NaN };
   }
   return { skill: step.skill, args: step.args };
 }
