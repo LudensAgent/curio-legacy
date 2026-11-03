@@ -1366,7 +1366,6 @@ export class Mind {
       const keepsPrefix = running?.planId === a.id && currentIndex > 0 && sameRunning(draft.steps[currentIndex], runningOld)
         && a.steps.slice(0, currentIndex).every((step, i) => sameRunning(draft.steps[i], step));
       const runningIndex = keepsPrefix ? currentIndex : firstIsRunning ? 0 : -1;
-      if (running?.planId === a.id && runningIndex < 0) this.d.arbiter.cancel('改了做法');
       // 2.5 校验将继续执行（运行及之后）的恢复步骤的父账本：无论是否带步骤 ID，账本必须仍在，否则返回明确错误。
       for (let i = Math.max(0, runningIndex); i < draft.steps.length; i++) {
         const s = draft.steps[i];
@@ -1374,6 +1373,8 @@ export class Mind {
         const f = (s.args as Record<string, unknown> | undefined)?.failure as { climbId?: string } | undefined;
         if (typeof f?.climbId === 'string' && f.climbId && !a.climb?.[f.climbId]) { decision.notes.push(`steps[${i}] 的恢复需要父账本 #${f.climbId}，但该账本已不存在，调整未生效`); this.d.bus.publish('activity_adjust', 'P2', `调整被拒绝：恢复父账本 #${f.climbId} 缺失`, { planId: a.id }); return; }
       }
+      // 全部校验通过后再取消旧任务：拒绝非法调整不得取消原动作，避免原动作被取消后活动仍被记为 done。
+      if (running?.planId === a.id && runningIndex < 0) this.d.arbiter.cancel('改了做法');
       // 3. 分配 ID：引用保留原 ID，新建分配新 ID；恢复步骤按 climbId 重新绑定当前账本，不采用模型回传的进度副本。
       const steps = draft.steps.map((s) => {
         const step = { ...s, id: typeof s.id === 'string' && s.id ? s.id : shortId('st_') };
