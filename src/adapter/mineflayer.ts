@@ -1163,10 +1163,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       // 末段收尾只在寻路确有有效路径（非空 noPath）时补推；越段/超时分别报告，不统一说成无路径。
       if (!atTarget() && reached && !opts.allowSwimming) {
         const outcome = await this.finishAdjacentStep({ x: target.x, y: target.y, z: target.z }, deadline, check);
-        if (!atTarget()) {
-          if (outcome === 'timeout') throw new Error(`TIMEOUT: 终段推进用尽时间预算，实际位于 ${here()}`);
-          throw new Error(`No path: ${outcome === 'overshot' ? '越过了所选相邻落点' : '寻路结束但尚未到达目标'}，实际位于 ${here()}`);
-        }
+        // helper 的 arrived 已经过连续稳定验收，直接采纳，不再用较宽的瞬时坐标检查覆盖它。
+        if (outcome === 'arrived') return;
+        if (outcome === 'timeout') throw new Error(`TIMEOUT: 终段推进用尽时间预算，实际位于 ${here()}`);
+        throw new Error(`No path: ${outcome === 'overshot' ? '越过了所选相邻落点' : '寻路结束但尚未到达目标'}，实际位于 ${here()}`);
       }
       if (!atTarget()) throw new Error(`No path: 寻路结束但尚未到达目标，实际位于 ${here()}`);
     } else if (!goal.isEnd(position.floored())) throw new Error(`No path: 寻路结束但尚未到达目标，实际位于 (${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})`);
@@ -1430,11 +1430,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   /**
    * 末段收尾：mineflayer-pathfinder 的 goal_reached 只按整数节点判定，薄层/小落差的一步会在身体
    * 仍由原支撑托住、还没踩上目标支撑面时提前结算（节点已到、脚高未到）。此时身体已贴近目标列且
-   * 仍在地面，分「水平接近 → 制动 → 落地确认」三阶段补完这一步：
-   *   - 接近：面朝目标列中心按住前进，接近中心即松键；越过中心（距离由减转增）或超出单步位移即停，
-   *     不会无限前推；
-   *   - 制动：松键后等惯性衰减；
-   *   - 落地确认：连续两拍站稳、列一致、脚高相符才算到达，不是只看松键瞬间的位置。
+   * 仍在地面，分「水平推进 → 制动 → 落地确认」三阶段补完这一步：
+   *   - 推进：面朝目标列中心按住前进，直到身体真正踩上目标支撑（列一致 + 脚高相符 + 站稳）才松键；
+   *     不以水平距离提前刹车——否则寻路停在距中心很近但仍由原支撑托住时，刚前进就松键、一步迈不出去；
+   *   - 越段保护：越过目标中心（距离由减转增）或超出单步位移即停止前推，不会无限前推；
+   *   - 落地确认：所有成功都经统一的连续稳定验收（两拍站稳 + 列一致 + 脚高相符），不因单帧 settled 提前返回。
    * 只在干地相邻单步（水平 ≤1.2、脚高差 ≤1）且确有有效路径依据时执行；共用原 deadline，释放按键前
    * 确认仍拥有本次控制，旧回调不能松新动作的键。返回分类供调用方区分越段、超时与到达。
    */
@@ -1449,9 +1449,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       return !!b.entity.onGround && Math.floor(p.x) === fx && Math.floor(p.z) === fz && Math.abs(p.y - target.y) <= 0.01;
     };
     const p0 = b.entity.position;
+    const p0y = p0.y;
     const dist = () => Math.hypot(tx - b.entity.position.x, tz - b.entity.position.z);
     if (Date.now() >= deadline) return 'timeout';
-    if (dist() > 1.2 || Math.abs(p0.y - target.y) > 1) return 'blocked';
+    if (dist() > 1.2 || Math.abs(p0y - target.y) > 1) return 'blocked';
     const epoch = this.actionEpoch, dimension = this.currentDimension();
     const ownsControls = () => epoch === this.actionEpoch && b === this.bot && dimension === this.currentDimension();
     check();
@@ -1461,11 +1462,13 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     let closest = dist();
     let overshot = false;
     try {
-      // 水平接近：接近目标列中心即刹车；越过中心（距离开始拉大）或超出单步位移即停止，不再无限前推。
+      // 水平推进：直到身体真正离开原支撑（脚高变化）且已贴近目标才松键，不以水平距离提前刹车——
+      // 否则寻路停在距中心很近但仍由原支撑托住时，刚前进就松键、一步都迈不出去。
       while (!settled() && Date.now() < deadline) {
         check();
+        const p = b.entity.position;
         const d = dist();
-        if (d <= 0.35) { b.setControlState('forward', false); break; }
+        if (Math.abs(p.y - p0y) > 0.02 && d <= 0.35) { b.setControlState('forward', false); break; }
         if (d > closest + 0.05 || d > 1.5) { overshot = true; break; }
         closest = Math.min(closest, d);
         await this.afterAction(() => sleep(Math.min(50, Math.max(1, deadline - Date.now())), check.signal), check);
@@ -1474,19 +1477,20 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (ownsControls()) { try { b.setControlState('forward', false); } catch { /* ignore */ } }
     }
     if (overshot) return 'overshot';
-    if (settled()) return 'arrived';
-    // 落地确认：松键后等身体稳定落到目标支撑面（惯性可能继续滑，连续两拍站稳才算）。
-    let last = { x: b.entity.position.x, z: b.entity.position.z };
+    // 落地确认：所有成功都经统一的连续稳定验收——站稳 + 列一致 + 脚高相符 + 水平速度已衰减到接近停住，
+    // 不因单帧 settled 提前返回，惯性把身体带出目标列不误报成功。
+    const stopped = () => {
+      const v = b.entity.velocity;
+      return !v || Math.hypot(v.x, v.z) < 0.02;
+    };
     let stable = 0;
     while (Date.now() < deadline) {
       check();
-      const p = b.entity.position;
-      if (settled() && Math.hypot(p.x - last.x, p.z - last.z) < 0.01) {
+      if (settled() && stopped()) {
         if (++stable >= 2) return 'arrived';
       } else {
         stable = 0;
       }
-      last = { x: p.x, z: p.z };
       await this.afterAction(() => sleep(Math.min(40, Math.max(1, deadline - Date.now())), check.signal), check);
     }
     return 'timeout';

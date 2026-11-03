@@ -12,8 +12,9 @@ const data = require('minecraft-data')('1.20.1');
 const Block = require('prismarine-block')(data);
 const { Physics, PlayerState } = require('prismarine-physics');
 
-/** 一段相邻地面步的物理世界：原点列 + 目标列各一块，其余按 y≤63 实心、以上空气。 */
-function stepWorld(origin: { name: string; props: Record<string, string | number> }, target: { name: string; props: Record<string, string | number> }) {
+/** 一段相邻地面步的物理世界：原点列 + 目标列各一块，其余按 y≤63 实心、以上空气。
+ *  continuous=true 时目标薄层沿移动方向向后方连续延伸（模拟真实田埂/半砖平台，而非单列）。 */
+function stepWorld(origin: { name: string; props: Record<string, string | number> }, target: { name: string; props: Record<string, string | number> }, continuous = false) {
   const originState = Block.fromProperties(origin.name, origin.props, 0).stateId;
   const targetState = Block.fromProperties(target.name, target.props, 0).stateId;
   return {
@@ -22,6 +23,7 @@ function stepWorld(origin: { name: string; props: Record<string, string | number
       let stateId = p.y <= 63 ? data.blocksByName.stone.defaultState : data.blocksByName.air.defaultState;
       if (p.x === 0 && p.z === 0 && p.y === 63) stateId = originState;
       if (p.x === 0 && p.z === -1 && p.y === 63) stateId = targetState;
+      if (continuous && p.x === 0 && p.z < -1 && p.y === 63) stateId = targetState;
       const block = Block.fromStateId(stateId, 0);
       block.position = p;
       return block;
@@ -102,7 +104,8 @@ test('物理：从整块下一步踩到底半砖（脚高 63.5）', () => {
 });
 
 test('moveTo 在寻路按节点提前结算后，闭环前推真正落到目标薄层，且一到即停', async (t) => {
-  const world = stepWorld({ name: 'stone', props: {} }, { name: 'farmland', props: {} });
+  // 连续耕地：身体离开原支撑后会稳定停在耕地上，不因惯性滑出目标列。
+  const world = stepWorld({ name: 'stone', props: {} }, { name: 'farmland', props: {} }, true);
   const { bot, timer } = physicsBot(world, 64);
   t.after(() => clearInterval(timer));
   const a = adapter(bot);
@@ -121,6 +124,18 @@ test('moveTo 从底半砖上一步到整块（脚高 64）也能闭环完成', a
   const a = adapter(bot);
   await a.moveTo({ kind: 'xyz', x: 0, y: 64, z: -1 }, { signal: new AbortController().signal, timeoutMs: 4000, allowTerrainChanges: false });
   assert.ok(Math.abs(bot.entity.position.y - 64) <= 0.01, `脚高 ${bot.entity.position.y}`);
+  assert.equal(Math.floor(bot.entity.position.z), -1);
+});
+
+test('身体已贴近目标但仍由原支撑托住时，仍会前推并落到目标', async (t) => {
+  const world = stepWorld({ name: 'stone', props: {} }, { name: 'farmland', props: {} }, true);
+  const { bot, timer } = physicsBot(world, 64);
+  t.after(() => clearInterval(timer));
+  // 寻路停在距目标中心 0.3 格（<0.35）但仍由原支撑托住：这正是「提前制动」复现的旧支撑边缘卡住位置。
+  bot.entity.position = new Vec3(0.5, 64, -0.2);
+  const a = adapter(bot);
+  await a.moveTo({ kind: 'xyz', x: 0, y: 63.9375, z: -1 }, { signal: new AbortController().signal, timeoutMs: 4000, allowTerrainChanges: false });
+  assert.ok(Math.abs(bot.entity.position.y - 63.9375) <= 0.01, `脚高 ${bot.entity.position.y}`);
   assert.equal(Math.floor(bot.entity.position.z), -1);
 });
 
@@ -215,7 +230,7 @@ test('终段推进无法完成时报告 TIMEOUT 而非无路径', async () => {
 });
 
 test('到达后继续推进物理，身体仍稳定停在目标列', async (t) => {
-  const world = stepWorld({ name: 'stone', props: {} }, { name: 'farmland', props: {} });
+  const world = stepWorld({ name: 'stone', props: {} }, { name: 'farmland', props: {} }, true);
   const { bot, timer } = physicsBot(world, 64);
   t.after(() => clearInterval(timer));
   const a = adapter(bot);
