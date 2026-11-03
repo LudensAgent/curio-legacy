@@ -1358,11 +1358,6 @@ export class Mind {
         const old = a.steps.find((o) => o.id === s.id);
         if (!old) { decision.notes.push(`steps[${i}] 引用了不存在的实例 #${s.id}，调整未生效`); this.d.bus.publish('activity_adjust', 'P2', `调整被拒绝：未知实例 #${s.id}`, { planId: a.id }); return; }
         if (old.skill !== s.skill || !isDeepStrictEqual(stableArgs(old.args), stableArgs(s.args))) { decision.notes.push(`steps[${i}] 引用了实例 #${s.id} 但参数已变：要改目标就新建动作（去掉 id），调整未生效`); this.d.bus.publish('activity_adjust', 'P2', `调整被拒绝：实例 #${s.id} 参数不符`, { planId: a.id }); return; }
-        // 仍需继续的恢复步骤引用父账本（climbId）：账本必须仍在，否则返回明确错误，不能回退模型回传副本或重新给额度。
-        if (old.skill === 'use_skill') {
-          const f = (old.args as Record<string, unknown> | undefined)?.failure as { climbId?: string } | undefined;
-          if (typeof f?.climbId === 'string' && f.climbId && !a.climb?.[f.climbId]) { decision.notes.push(`steps[${i}] 引用的恢复实例 #${s.id} 需要父账本 #${f.climbId}，但该账本已不存在，调整未生效`); this.d.bus.publish('activity_adjust', 'P2', `调整被拒绝：恢复父账本 #${f.climbId} 缺失`, { planId: a.id }); return; }
-        }
       }
       // 2. 决定是否保留在途任务：所有步骤统一按已验证的实例 ID 判断（省略 ID 视为新建），不用参数匹配回退。
       const sameRunning = (draftStep: { id?: string } | undefined, old: { id?: string }) => !!draftStep && !!draftStep.id && draftStep.id === old.id;
@@ -1372,6 +1367,13 @@ export class Mind {
         && a.steps.slice(0, currentIndex).every((step, i) => sameRunning(draft.steps[i], step));
       const runningIndex = keepsPrefix ? currentIndex : firstIsRunning ? 0 : -1;
       if (running?.planId === a.id && runningIndex < 0) this.d.arbiter.cancel('改了做法');
+      // 2.5 校验将继续执行（运行及之后）的恢复步骤的父账本：无论是否带步骤 ID，账本必须仍在，否则返回明确错误。
+      for (let i = Math.max(0, runningIndex); i < draft.steps.length; i++) {
+        const s = draft.steps[i];
+        if (s.skill !== 'use_skill') continue;
+        const f = (s.args as Record<string, unknown> | undefined)?.failure as { climbId?: string } | undefined;
+        if (typeof f?.climbId === 'string' && f.climbId && !a.climb?.[f.climbId]) { decision.notes.push(`steps[${i}] 的恢复需要父账本 #${f.climbId}，但该账本已不存在，调整未生效`); this.d.bus.publish('activity_adjust', 'P2', `调整被拒绝：恢复父账本 #${f.climbId} 缺失`, { planId: a.id }); return; }
+      }
       // 3. 分配 ID：引用保留原 ID，新建分配新 ID；恢复步骤按 climbId 重新绑定当前账本，不采用模型回传的进度副本。
       const steps = draft.steps.map((s) => {
         const step = { ...s, id: typeof s.id === 'string' && s.id ? s.id : shortId('st_') };
