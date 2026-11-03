@@ -1,0 +1,94 @@
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import { test } from 'node:test';
+import { Vec3 } from 'vec3';
+import { GROUNDED_ARRIVAL_DEFAULTS, VoxelMap, type WalkRouteRequest } from 'curio-minecraft-3d-memory';
+import { runWalkRoute, walkCollisionProvider } from '../src/adapter/walk-route.ts';
+
+const require = createRequire(import.meta.url);
+const data = require('minecraft-data')('1.20.1');
+const Block = require('prismarine-block')(data);
+const { Physics, PlayerState } = require('prismarine-physics');
+
+/** 平坦石地面（y=-1），身体脚高 y=0。 */
+function flatWorld() {
+  const world = {
+    getBlock(position: { floored(): { x: number; y: number; z: number } }) {
+      const p = position.floored();
+      const stateId = p.y <= -1 ? data.blocksByName.stone.defaultState : data.blocksByName.air.defaultState;
+      const block = Block.fromStateId(stateId, 0);
+      block.position = p;
+      return block;
+    },
+  };
+  return world;
+}
+
+/** 带真实物理的身体：setControlState 驱动控制，tick 推一步物理并推进模拟时钟。 */
+function body(start: { x: number; z: number }) {
+  const control: Record<string, boolean> = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
+  const entity = { position: new Vec3(start.x, 0, start.z), velocity: new Vec3(0, 0, 0), onGround: true,
+    isInWater: false, isInLava: false, isInWeb: false, isCollidedHorizontally: false, isCollidedVertically: false,
+    yaw: 0, pitch: 0, effects: {}, attributes: {} };
+  const bot = {
+    version: '1.20.1', entity, control, jumpTicks: 0, jumpQueued: false, fireworkRocketDuration: 0, inventory: { slots: [] },
+    setControlState(name: string, value: boolean) { control[name] = value; },
+    clearControlStates() { for (const k of Object.keys(control)) control[k] = false; },
+    look(yaw: number, pitch: number) { entity.yaw = yaw; entity.pitch = pitch; },
+  };
+  const world = flatWorld();
+  const physics = Physics(data, world);
+  let clock = 2000;
+  const tick = () => {
+    physics.simulatePlayer(new PlayerState(bot, control), world).apply(bot);
+    clock += 50;
+    return bot.entity;
+  };
+  return { bot, tick, now: () => clock };
+}
+
+function buildMap() {
+  const map = new VoxelMap('world', { validityWindowMs: 60_000 });
+  for (let x = -1; x <= 4; x++) for (let z = -1; z <= 4; z++) for (let y = -1; y <= 2; y++) {
+    map.observe({
+      worldId: 'world', dim: 'overworld', sessionId: 's1', observedAt: 1000, sequence: 1,
+      source: 'vision', evidence: 'seen', stateComplete: true,
+      state: y === -1 ? { name: 'minecraft:stone', properties: {} } : { name: 'minecraft:air', properties: {} },
+      pos: { x, y, z },
+    });
+  }
+  return map;
+}
+
+function request(points: WalkRouteRequest['points']): WalkRouteRequest {
+  return {
+    worldId: 'world', dim: 'overworld', sessionId: 's1', mode: 'walk',
+    body: { feet: points[0]!, width: 0.6, height: 1.8, pose: 'standing' },
+    points,
+    arrival: { kind: 'exact' },
+    bodyArrival: GROUNDED_ARRIVAL_DEFAULTS,
+    shapeProvider: walkCollisionProvider,
+    deadlineMs: 30_000,
+    timeoutMs: 4000,
+  };
+}
+
+test('三段含转弯的偏移起点路线走通并 ARRIVED，末位用实际测量值', async () => {
+  const map = buildMap();
+  // 名义点列；身体实际起点带偏移（0.54,0.52），后续名义点沿 X/Z 相邻。
+  const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 1.5 }, { x: 2.5, y: 0, z: 1.5 }];
+  const { bot, tick, now } = body({ x: 0.54, z: 0.52 });
+  const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, now });
+  assert.equal(result.outcome, 'ARRIVED', result.message);
+  assert.ok(result.outcome === 'ARRIVED' && result.lastPosition);
+  // 末位不是名义点 (2.5, 1.5)，而是实际测量位置。
+  assert.ok(Math.abs((result as { lastPosition: { x: number; z: number } }).lastPosition.x - 2.5) <= 0.12);
+  assert.ok(Math.abs((result as { lastPosition: { x: number; z: number } }).lastPosition.z - 1.5) <= 0.12);
+  assert.equal(bot.control.forward, false, '到达后应松开前进键');
+});
+
+test('未知形状返回能力缺口，不当作可通行', () => {
+  const r = walkCollisionProvider.resolve({ name: 'minecraft:oak_slab', properties: {} }, { x: 0, y: 0, z: 0 }, { cell: () => ({ kind: 'unknown' } as never) });
+  assert.equal(r.kind, 'unsupported_shape');
+  if (r.kind === 'unsupported_shape') assert.match(r.block, /oak_slab/);
+});
