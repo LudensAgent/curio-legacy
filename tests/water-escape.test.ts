@@ -157,6 +157,26 @@ test('climbing out onto the bank does not keep bunny-hopping on dry land', async
   assert.equal(hops, 0, `jumped ${hops} times on dry land before settling`);
 });
 
+test('surface escape:"shore" never digs the ceiling or hunts air pockets', async (t) => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  let now = 100000;
+  t.mock.method(Date, 'now', () => now);
+  adapter.inWater = true; adapter.oxygen = 10;
+  // FakeAdapter 里 y<63 是 stone：站在 y=60 时头顶 y=61 是石头，形成封顶（reachable）
+  adapter.pos = { x: 0.5, y: 60, z: 0.5 };
+  let digs = 0;
+  adapter.dig = async () => { digs++; return { ok: true }; };
+  // 每次游泳/寻路都大步推进时间，让循环尽快耗尽 deadline，避免测试空转
+  adapter.swimTo = async () => { now += 40000; return { ok: false, landed: false, oxygen: 10 }; };
+  adapter.moveTo = async () => { now += 40000; };
+  try {
+    const result = await surface.run({ adapter, memory, bus, signal: new AbortController().signal, deadline: now + 32000, taskId: 'surface-shore', progress() {},
+      senses: { refresh() {}, markSweep() {}, perceivedEntities: () => [], knownBlocks: () => [], nearestLand: () => ({ dir: 'E', dist: 5, pos: { x: 5, y: 63, z: 0 } }) } }, { escape: 'shore' });
+    assert.equal(digs, 0, 'escape:"shore" 不得暗中挖开头顶方块');
+    assert.equal(result.status, 'failed', result.summary); // 头顶封住且不许挖，未上岸应如实报告
+  } finally { memory.close(); }
+});
+
 test('stuck in water: correction does not choose a bank or start swimming', async (t) => {
   const { adapter, bot } = pond(t);
   bot.entity.position = new Vec3(5.4, 62.4, 2.5);

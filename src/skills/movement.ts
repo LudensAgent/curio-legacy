@@ -767,8 +767,8 @@ type Vec = { x: number; y: number; z: number };
 /** escape：可选起始方式——dig=优先找气穴/往上挖，shore=让寻路带着往岸上走 */
 export const surface: Skill<{ escape?: 'dig' | 'shore' }> = {
   name: 'surface',
-  description: '尝试上浮换气并游上岸；可能寻找气穴、挖开头顶方块或寻路到附近岸边，未上岸会如实报告',
-  argsDoc: '{"escape"?: "dig"（优先寻找气穴或挖开头顶）|"shore"（优先尝试寻路上岸）}',
+  description: '尝试上浮换气并游上岸；默认可能寻找气穴、挖开头顶方块或寻路到附近岸边，escape:"shore" 只游上岸不挖顶/不找气穴，未上岸会如实报告',
+  argsDoc: '{"escape"?: "dig"（寻找气穴或挖开头顶）|"shore"（只游上岸，不挖顶、不找气穴）}',
   timeoutMs: 35000,
   movement: true,
   validate(raw) {
@@ -779,10 +779,12 @@ export const surface: Skill<{ escape?: 'dig' | 'shore' }> = {
     const end = Math.min(ctx.deadline, Date.now() + 32000);
     const excluded: Vec[] = [];
     let attempts = 0, scans = 0, pockets = 0, rises = 0, walks = 0, failedSwims = 0;
-    // 打法在一次上浮里就会升级：先正常游；游两次没上岸或氧气 <6 → 找气穴/往上挖；再不行 → 让寻路往岸上走；轮完从头再来
+    // 打法在一次上浮里就会升级：先正常游；游两次没上岸或氧气 <6 → 找气穴/往上挖；再不行 → 让寻路往岸上走；轮完从头再来。
+    // escape:"shore" 明确只要游上岸，不得暗中升级成挖顶或找气穴（会额外消耗工具/方块，超出委托手段）。
     let tactic: 'swim' | 'dig' | 'shore' = args.escape ?? 'swim';
+    const allowDig = args.escape !== 'shore';
     const escalate = (why: string) => {
-      const next = tactic === 'swim' ? 'dig' : tactic === 'dig' ? 'shore' : 'swim';
+      const next: 'swim' | 'dig' | 'shore' = tactic === 'swim' ? (allowDig ? 'dig' : 'shore') : tactic === 'dig' ? 'shore' : 'swim';
       notes.push(`${why}，改为${next === 'dig' ? '找气穴/往上挖' : next === 'shore' ? '让寻路往岸上走' : '重新游'}`);
       tactic = next; failedSwims = 0;
       if (next === 'dig') pockets = 0;
@@ -809,34 +811,37 @@ export const surface: Skill<{ escape?: 'dig' | 'shore' }> = {
       let sealed = false;
       if (lid) {
         const k = `${lid.pos.x},${lid.pos.y},${lid.pos.z}`;
-        // 水下挖方块慢 5 倍（脚不着地再慢 5 倍）：附近有气穴就先游过去，比憋着气挖顶快
-        const near = pockets < 3 ? findAirPocket(ctx) : null;
-        if (near && near.steps <= 10) {
-          pockets++;
-          ctx.progress(0, `头顶是 ${lid.name}，旁边 ${near.steps} 格有气穴，先游过去换气`);
-          const landed = await swimPath(ctx, near.path, end);
-          if (landed) return ok(`游进气穴后上了岸，氧气 ${ctx.adapter.state().oxygen}/20`, { attempts, landed: true, pocket: near.pos });
-          notes.push(`游向了 ${near.steps} 格外的气穴`);
-          if (headInAir(ctx)) { await ctx.adapter.swimTo(null, ctx.signal, { timeoutMs: Math.max(300, Math.min(3000, end - Date.now())) }); }
-          continue;
-        }
-        if (lid.reachable && !lid.unbreakable && !stubborn.has(k) && brokeCeiling < 6) {
-          ctx.progress(0, `头顶是 ${lid.name}，挖开透气`);
-          try {
-            const r = await ctx.adapter.dig(lid.pos, ctx.signal);
-            if (r.ok) { brokeCeiling++; continue; }
-            stubborn.add(k);
-          } catch (e) {
-            if (isAbort(e)) throw e;
-            stubborn.add(k);
+        if (allowDig) {
+          // 水下挖方块慢 5 倍（脚不着地再慢 5 倍）：附近有气穴就先游过去，比憋着气挖顶快
+          const near = pockets < 3 ? findAirPocket(ctx) : null;
+          if (near && near.steps <= 10) {
+            pockets++;
+            ctx.progress(0, `头顶是 ${lid.name}，旁边 ${near.steps} 格有气穴，先游过去换气`);
+            const landed = await swimPath(ctx, near.path, end);
+            if (landed) return ok(`游进气穴后上了岸，氧气 ${ctx.adapter.state().oxygen}/20`, { attempts, landed: true, pocket: near.pos });
+            notes.push(`游向了 ${near.steps} 格外的气穴`);
+            if (headInAir(ctx)) { await ctx.adapter.swimTo(null, ctx.signal, { timeoutMs: Math.max(300, Math.min(3000, end - Date.now())) }); }
+            continue;
           }
-        } else if (!lid.reachable && rises < 3) {
-          // 顶在头上好几格：先浮上去（一直按着跳），到了够得着的高度再挖
-          rises++;
-          ctx.progress(0, `往上游，头顶 ${Math.round(lid.pos.y - ctx.adapter.state().pos.y)} 格处是 ${lid.name}`);
-          await ctx.adapter.swimTo(null, ctx.signal, { timeoutMs: 1500 });
-          continue;
+          if (lid.reachable && !lid.unbreakable && !stubborn.has(k) && brokeCeiling < 6) {
+            ctx.progress(0, `头顶是 ${lid.name}，挖开透气`);
+            try {
+              const r = await ctx.adapter.dig(lid.pos, ctx.signal);
+              if (r.ok) { brokeCeiling++; continue; }
+              stubborn.add(k);
+            } catch (e) {
+              if (isAbort(e)) throw e;
+              stubborn.add(k);
+            }
+          } else if (!lid.reachable && rises < 3) {
+            // 顶在头上好几格：先浮上去（一直按着跳），到了够得着的高度再挖
+            rises++;
+            ctx.progress(0, `往上游，头顶 ${Math.round(lid.pos.y - ctx.adapter.state().pos.y)} 格处是 ${lid.name}`);
+            await ctx.adapter.swimTo(null, ctx.signal, { timeoutMs: 1500 });
+            continue;
+          }
         }
+        // 挖不开，或 escape:"shore" 明确不要挖顶/找气穴：封顶只如实标记，继续寻路上岸
         sealed = true;
       }
       if (tactic === 'swim' && ctx.adapter.state().oxygen < 6 && !sealed) escalate(`氧气只剩 ${ctx.adapter.state().oxygen}`);
@@ -852,7 +857,7 @@ export const surface: Skill<{ escape?: 'dig' | 'shore' }> = {
         continue;
       }
       // 被封住（挖不开）或换打法时：找身边水里连着的气穴（相邻的水面/洞里的空气），游过去换气
-      if ((sealed || tactic === 'dig') && pockets < 3) {
+      if (allowDig && (sealed || tactic === 'dig') && pockets < 3) {
         const pocket = findAirPocket(ctx);
         if (pocket) {
           pockets++;
