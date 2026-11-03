@@ -1,5 +1,5 @@
 import type { EventBus } from '../events.ts';
-import type { SkillBook } from '../knowledge/skillbook.ts';
+import { normalizeSkillName, type SkillBook } from '../knowledge/skillbook.ts';
 import { isEmergency, type Behavior, type BehaviorEngine } from '../mind/behaviors.ts';
 import type { LedgerView } from '../mind/ledger.ts';
 import type { ChatMessage } from '../planner/llm.ts';
@@ -465,7 +465,9 @@ export class SkillCurator {
       for (const m of raw.merge) {
         const from = m.from.filter((name) => names.has(name));
         if (from.length && from.every((name) => noteNames.has(name)) && m.note) {
-          const target = m.note.name;
+          // 模型返回的目标名可能与实际写入的规范名不同（如 NOTE-A → note-a）：统一在入口规范化，
+          // 让目标占用检查、快照校验和写入都使用同一个名字，避免覆盖规范化后命中的真实目标。
+          const target = normalizeSkillName(m.note.name);
           if (this.book?.get(target) && !noteNames.has(target)) {
             // 合并失败的所有出口统一保留来源保护：目标名已被行为技能占用，来源没被并入，同轮/跨轮都不能以“已并入”收起。
             for (const n of from) mergeSources.set(n, `文字合并目标 ${target} 已有执行版本`);
