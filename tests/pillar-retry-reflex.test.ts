@@ -150,6 +150,38 @@ test('climb_up repeat:2 starts each round from the original height', () => {
   assert.equal((activity.steps[0].args as { height: number }).height, 3, '模板从未被改写');
 });
 
+test('recovery-internal climb is deducted from the parent climb quota', () => {
+  const adapter = new FakeAdapter();
+  adapter.pos = { x: 0.5, y: 66, z: 0.5 }; // 恢复后身体在 y=66
+  const key = JSON.stringify({ height: 3, untilSky: false });
+  const activity = createActivity({ what: '爬升', why: '', kind: 'other', repeat: 1,
+    steps: [{ skill: 'use_skill', args: { name: 're-climb', failure: { skill: 'climb_up', args: { height: 2 }, position: { x: 0, y: 65, z: 0 } } } },
+      { skill: 'climb_up', args: { height: 3, untilSky: false } }] }, '', 'llm', adapter.state());
+  activity.climbSpent = { [key]: 1 }; // 顶层已爬 1 格失败
+  const step = nextStep(activity)!;
+  assert.equal(step.skill, 'use_skill');
+  afterStep(activity, step, { status: 'succeeded', summary: '做完了', data: { done: ['climb_up → 成'] } }, 100, adapter.state());
+  assert.equal(activity.climbSpent[key], 2, '恢复内部爬升入账（顶层 1 + 恢复 1）');
+});
+
+test('climb_up cancellation preserves the partial height already climbed', async () => {
+  const adapter = new FakeAdapter();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  adapter.inv.set('dirt', 8);
+  const controller = new AbortController();
+  let climbs = 0;
+  adapter.moveTo = async () => {
+    climbs++;
+    adapter.pos = { ...adapter.pos, y: adapter.pos.y + 1 };
+    if (climbs === 1) controller.abort('reflex');
+  };
+  const ctx = { adapter, signal: controller.signal, deadline: Date.now() + 10000, senses: { refresh() {} }, make: false };
+  await assert.rejects(climbUp.run(ctx as never, { height: 3, untilSky: false }), (e: { partialClimbed?: number }) => {
+    assert.equal(e.partialClimbed, 1, '取消结果保留已爬升的部分高度');
+    return true;
+  });
+});
+
 test('excavate_path preflight rejection is not auto-retried for another identical gap', () => {
   const adapter = new FakeAdapter();
   const activity = createActivity({ what: '开挖', why: '', kind: 'other', repeat: 1,

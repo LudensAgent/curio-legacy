@@ -151,6 +151,21 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     a.consecutiveFailures = 0;
     // climb_up 成功：本逻辑动作额度用完，清掉累计，下一轮从原始参数开始。
     if (step.skill === 'climb_up' && a.climbSpent) delete a.climbSpent[JSON.stringify(a.steps[Math.max(0, a.index - 1)]?.args ?? step.args ?? {})];
+    // 恢复（use_skill）内部爬升也要入账：失败时的站位到现在的净上升，加回父动作余额，避免原动作又整段重爬。
+    if (step.skill === 'use_skill') {
+      const failure = (step.args as Record<string, unknown> | undefined)?.failure as { skill?: string; position?: { y: number } } | undefined;
+      if (failure?.skill === 'climb_up' && typeof failure.position?.y === 'number') {
+        const dy = Math.floor(state.pos.y) - Math.floor(failure.position.y);
+        if (dy > 0) {
+          const climbStep = a.steps.find((s) => s.skill === 'climb_up');
+          if (climbStep) {
+            const key = JSON.stringify(climbStep.args ?? {});
+            a.climbSpent ??= {};
+            a.climbSpent[key] = (a.climbSpent[key] ?? 0) + dy;
+          }
+        }
+      }
+    }
     // 真实挖掘、放置或跨格移动是执行进展，不能沿用之前的空挖计数。
     if (step.skill === 'place_at' && result.data?.placed
       || step.skill === 'dig_at' && result.data?.was && result.data.was !== 'air'

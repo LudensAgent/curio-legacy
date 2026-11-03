@@ -813,6 +813,13 @@ export class Mind {
     if (o.result.status === 'cancelled') {
       // 被反射打断：等身体安全了把这一步再做一遍
       if (o.preemptedBy === 'reflex') {
+        const own = a.steps[Math.max(0, a.index - 1)];
+        // climb_up 取消前已经爬升的部分高度要入账，回退后只爬剩余额度，不整段重爬。
+        if (o.task.skill === 'climb_up' && typeof o.result.data?.climbed === 'number' && o.result.data.climbed > 0 && own?.skill === 'climb_up') {
+          const key = JSON.stringify(own.args ?? {});
+          a.climbSpent ??= {};
+          a.climbSpent[key] = (a.climbSpent[key] ?? 0) + o.result.data.climbed;
+        }
         a.index = Math.max(0, a.index - 1);
         a.interruptions = (a.interruptions ?? 0) + 1;
         // 一直被身体躲闪打断：这段活眼下做不成，先想想怎么对付周围的危险

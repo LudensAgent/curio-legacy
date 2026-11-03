@@ -238,7 +238,10 @@ export class Arbiter extends EventEmitter {
 
     runSkill(ctx, skill, v.args as { make?: boolean })
       .catch((e: any): SkillResult => {
-        if (e?.name === 'AbortedError') return { status: 'cancelled', summary: String(controller.signal.reason ?? '已取消') };
+        if (e?.name === 'AbortedError') {
+          const partial = typeof e?.partialClimbed === 'number' ? { climbed: e.partialClimbed } : undefined;
+          return { status: 'cancelled', summary: String(controller.signal.reason ?? '已取消'), ...(partial ? { data: partial } : {}) };
+        }
         return { status: 'failed', failureCode: 'ERROR', summary: String(e?.message ?? e) };
       })
       .then((result) => {

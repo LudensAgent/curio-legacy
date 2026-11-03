@@ -348,49 +348,57 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
       return ok(`${args.untilExit ? '四周已经有路可走' : '已经看得见天空'}，所以没有垫高；如果是想站上坑沿，用 {"height":2} 这样直接指定格数`,
         { climbed: 0, alreadySatisfied: true, sky: initial.sky, exits: initial.exits });
     }
-    for (let i = 0; i < args.height && Date.now() < ctx.deadline - 1000; i++) {
-      throwIfAborted(signal);
-      const here = surroundings(adapter);
-      if ((args.untilSky || args.untilExit) && reached(here)) break;
-      const before = adapter.state().pos, me = floor(before);
-      const moveUp = () => adapter.moveTo({ kind: 'xyz', x: me.x, y: me.y + 1, z: me.z }, { signal, timeoutMs: Math.max(1, Math.min(8000, ctx.deadline - Date.now())), allowTerrainChanges: true });
-      // 头顶的方块先挖开（不挖液体旁边的）
-      try {
-        await breakCell(ctx, { x: me.x, y: me.y + 2, z: me.z });
-      } catch (e) {
-        if (isAbort(e)) throw e;
-        return finish(why(e));
-      }
-      try {
-        await moveUp();
-      } catch (e) {
-        if (isAbort(e)) throw e;
-        const name = e instanceof Error ? e.name : undefined;
-        if (name !== 'PillarClearanceError') return finish(why(e));
-        // 搭柱被头顶/侧上方挡住：适配器报告具体那一格，把它挖开再垫一次；挖不动（基岩、近液体）由 breakCell 抛错如实停下
-        const blocked = (e as { block?: { pos: Vec3Like } }).block?.pos;
-        if (!blocked) return finish(why(e), 'PILLAR_CLEARANCE');
+    try {
+      for (let i = 0; i < args.height && Date.now() < ctx.deadline - 1000; i++) {
+        throwIfAborted(signal);
+        const here = surroundings(adapter);
+        if ((args.untilSky || args.untilExit) && reached(here)) break;
+        const before = adapter.state().pos, me = floor(before);
+        const moveUp = () => adapter.moveTo({ kind: 'xyz', x: me.x, y: me.y + 1, z: me.z }, { signal, timeoutMs: Math.max(1, Math.min(8000, ctx.deadline - Date.now())), allowTerrainChanges: true });
+        // 头顶的方块先挖开（不挖液体旁边的）
         try {
-          await breakCell(ctx, blocked);
-        } catch (e2) {
-          if (isAbort(e2)) throw e2;
-          return finish(why(e2), 'PILLAR_CLEARANCE');
+          await breakCell(ctx, { x: me.x, y: me.y + 2, z: me.z });
+        } catch (e) {
+          if (isAbort(e)) throw e;
+          return finish(why(e));
         }
         try {
           await moveUp();
-        } catch (e2) {
-          if (isAbort(e2)) throw e2;
-          return finish(why(e2), e2 instanceof Error && e2.name === 'PillarClearanceError' ? 'PILLAR_CLEARANCE' : undefined);
+        } catch (e) {
+          if (isAbort(e)) throw e;
+          const name = e instanceof Error ? e.name : undefined;
+          if (name !== 'PillarClearanceError') return finish(why(e));
+          // 搭柱被头顶/侧上方挡住：适配器报告具体那一格，把它挖开再垫一次；挖不动（基岩、近液体）由 breakCell 抛错如实停下
+          const blocked = (e as { block?: { pos: Vec3Like } }).block?.pos;
+          if (!blocked) return finish(why(e), 'PILLAR_CLEARANCE');
+          try {
+            await breakCell(ctx, blocked);
+          } catch (e2) {
+            if (isAbort(e2)) throw e2;
+            return finish(why(e2), 'PILLAR_CLEARANCE');
+          }
+          try {
+            await moveUp();
+          } catch (e2) {
+            if (isAbort(e2)) throw e2;
+            return finish(why(e2), e2 instanceof Error && e2.name === 'PillarClearanceError' ? 'PILLAR_CLEARANCE' : undefined);
+          }
         }
+        throwIfAborted(signal);
+        const after = adapter.state().pos;
+        if (Math.floor(after.y + 0.05) <= me.y || after.y <= before.y + 0.05) return finish('移动已结束，但脚下没有实际升到上一格');
+        ctx.senses.refresh();
+        if (!onLadder() && !hasPlaceable(adapter.state().inventory)) break;
       }
       throwIfAborted(signal);
-      const after = adapter.state().pos;
-      if (Math.floor(after.y + 0.05) <= me.y || after.y <= before.y + 0.05) return finish('移动已结束，但脚下没有实际升到上一格');
-      ctx.senses.refresh();
-      if (!onLadder() && !hasPlaceable(adapter.state().inventory)) break;
+      return finish();
+    } catch (e) {
+      if (isAbort(e)) {
+        // 取消也保留已爬升的部分进展，供调度器回退后复用剩余额度，不再整段重爬。
+        (e as Error & { partialClimbed?: number }).partialClimbed = Math.max(0, Math.floor(adapter.state().pos.y + 0.05) - Math.floor(start + 0.05));
+      }
+      throw e;
     }
-    throwIfAborted(signal);
-    return finish();
   },
 };
 
