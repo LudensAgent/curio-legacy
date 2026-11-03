@@ -178,9 +178,10 @@ test('climb_up cancellation preserves only the confirmed height', async () => {
     else { adapter.pos = { ...adapter.pos, y: 65.2 }; controller.abort('reflex'); } // 第二格跳到半空未落稳
   };
   const ctx = { adapter, signal: controller.signal, deadline: Date.now() + 10000, senses: { refresh() {} }, make: false, climb: budget };
-  await assert.rejects(climbUp.run(ctx as never, { height: 3, untilSky: false }), (e: { partialClimbed?: number }) => {
+  await assert.rejects(climbUp.run(ctx as never, { height: 3, untilSky: false }), (e: { partial?: { climbed: number; spent: number } }) => {
     assert.equal(budget.spent, 1, '账本只入账确认的爬升');
-    assert.equal(e.partialClimbed, 1, '取消只保留确认的 1 格，不把半空的瞬时高度当进展');
+    assert.equal(e.partial?.climbed, 1, '取消只保留确认的 1 格净进展');
+    assert.equal(e.partial?.spent, 1, '取消同时保留累计消耗');
     return true;
   });
 });
@@ -196,6 +197,22 @@ test('climb_up with a fall-back reports net progress, not cumulative spend', asy
   assert.equal(r.status, 'failed', r.summary);
   assert.equal(r.data?.goalReached, false, '净升高 2 格不满足原定 3 格目标');
   assert.equal(r.data?.climbed, 2, '净升高是 2 格，不是累计消耗 3 格');
+});
+
+test('nested climb without a budget still settles actual progress on error', async () => {
+  const adapter = new FakeAdapter();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  adapter.inv.set('dirt', 8);
+  let climbs = 0;
+  adapter.moveTo = async () => {
+    climbs++;
+    adapter.pos = { ...adapter.pos, y: adapter.pos.y + 1 };
+    if (climbs === 1) throw new Error('No path');
+  };
+  const ctx = { adapter, signal: new AbortController().signal, deadline: Date.now() + 10000, senses: { refresh() {} }, make: false };
+  const r = await climbUp.run(ctx as never, { height: 3, untilSky: false });
+  assert.equal(r.status, 'failed', r.summary);
+  assert.equal(r.data?.climbed, 1, '无预算的嵌套爬升也结算已完成的 1 格，而不是报「未实际爬升」');
 });
 
 test('recovery sub-action climb_up completes its own goal regardless of the parent quota', async () => {
@@ -225,9 +242,10 @@ test('climb_up does not count a mid-air jump as progress on cancel', async () =>
     if (climbs === 1) controller.abort('reflex');
   };
   const ctx = { adapter: world, signal: controller.signal, deadline: Date.now() + 10000, senses: { refresh() {} }, make: false, climb: budget };
-  await assert.rejects(climbUp.run(ctx as never, { height: 3, untilSky: false }), (e: { partialClimbed?: number }) => {
-    assert.equal(budget.spent, 0, '空中跳跃不计入账');
-    assert.equal(e.partialClimbed, 0);
+  await assert.rejects(climbUp.run(ctx as never, { height: 3, untilSky: false }), (e: { partial?: { climbed: number; spent: number; goalReached: boolean } }) => {
+    assert.equal(budget.spent, 0, '空中跳跃不计入账（无确认爬升）');
+    assert.equal(e.partial?.spent, 0, '累计消耗为 0');
+    assert.equal(e.partial?.goalReached, false, '未落稳不算目标达成');
     return true;
   });
 });

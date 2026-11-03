@@ -1341,9 +1341,14 @@ export class Mind {
       const oldRunning = runningIndex >= 0 ? a.steps[currentIndex] : undefined;
       // 恢复包装（use_skill）里携带父执行实例的 ID 与账本引用，调整时一并保留给待续跑的 climb_up。
       const recoveryClimb = oldRunning?.skill === 'use_skill' ? (oldRunning.args as Record<string, unknown> | undefined)?.failure as { climbId?: string; climb?: { height: number; spent: number; startY: number }; args?: unknown } | undefined : undefined;
+      // 只给唯一待续跑的父实例保留原 ID；其余即使参数相同也独立建账，避免多个同参步骤绑定到同一父 ID。
+      let assignedRecoveryId = false;
       const steps = draft.steps.map((s, i) => {
         if (i === runningIndex && oldRunning) return { ...s, id: oldRunning.id };
-        if (recoveryClimb?.climbId && s.skill === 'climb_up' && isDeepStrictEqual(s.args ?? {}, recoveryClimb.args ?? {})) return { ...s, id: recoveryClimb.climbId };
+        if (!assignedRecoveryId && recoveryClimb?.climbId && s.skill === 'climb_up' && isDeepStrictEqual(s.args ?? {}, recoveryClimb.args ?? {})) {
+          assignedRecoveryId = true;
+          return { ...s, id: recoveryClimb.climbId };
+        }
         return { ...s, id: shortId('st_') };
       });
       const preservedClimb: Record<string, { height: number; spent: number; startY: number }> = {};

@@ -350,15 +350,19 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
     let climbedThisRun = 0;
     const total = () => (budget ? budget.spent : climbedThisRun);
     const reached = (around: ReturnType<typeof surroundings>) => (!args.untilSky || around.sky) && (!args.untilExit || around.exits.length > 0);
-    const finish = (stopped?: string, failureCause?: 'PILLAR_CLEARANCE') => {
+    // 结构化效果回执：区分本次/净进展（climbed）、累计消耗（spent）与目标是否达成（goalReached），成功/失败/取消共用。
+    const currentFacts = (failureCause?: 'PILLAR_CLEARANCE') => {
       const state = adapter.state(), around = surroundings(adapter);
       const climbed = isParentContinuation ? netFromStart() : climbedThisRun;
       const goalReached = args.untilSky || args.untilExit ? reached(around) : isParentContinuation ? landed() && netFromStart() >= budget!.height : climbedThisRun >= args.height;
-      const facts = { climbed, spent: total(), height: budget?.height ?? args.height, sky: around.sky, exits: around.exits, goalReached, position: { ...state.pos }, ...(failureCause ? { failureCause } : {}),
+      return { climbed, spent: total(), height: budget?.height ?? args.height, sky: around.sky, exits: around.exits, goalReached, position: { ...state.pos }, ...(failureCause ? { failureCause } : {}),
         effectEvidence: { verified: true, changed: climbedThisRun > 0, reasons: [`实际高度 ${start} → ${state.pos.y}`] } };
-      if (goalReached) return ok(`往上爬了 ${climbed} 格${args.untilExit ? '，四周有路了' : args.untilSky ? '，看得见天空了' : ''}`, facts);
-      if (!climbed) return fail('STUCK', `未实际爬升${stopped ? `：${stopped}` : '，没有完成垫高'}`, facts);
-      return fail('STUCK', `往上爬了 ${climbed} 格后停下：${stopped ?? '已到本次高度或时间上限，仍未满足停止条件'}`, facts);
+    };
+    const finish = (stopped?: string, failureCause?: 'PILLAR_CLEARANCE') => {
+      const facts = currentFacts(failureCause);
+      if (facts.goalReached) return ok(`往上爬了 ${facts.climbed} 格${args.untilExit ? '，四周有路了' : args.untilSky ? '，看得见天空了' : ''}`, facts);
+      if (!facts.climbed) return fail('STUCK', `未实际爬升${stopped ? `：${stopped}` : '，没有完成垫高'}`, facts);
+      return fail('STUCK', `往上爬了 ${facts.climbed} 格后停下：${stopped ?? '已到本次高度或时间上限，仍未满足停止条件'}`, facts);
     };
     const initial = surroundings(adapter);
     if ((args.untilSky || args.untilExit) && reached(initial)) {
@@ -372,10 +376,11 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
     if (!onLadder() && !hasPlaceable(adapter.state().inventory)) return fail('MISSING_MATERIALS', '脚下没有梯子，背包里也没有能垫脚的方块（泥土/圆石/石头/木板）');
     let lastBeforeY: number | undefined;
     // 单级转换的成功、失败、取消及清障重试共用一次结算：身体已在有效支撑上站高才算入账。
+    // 实际效果始终结算（无论有无预算）；只有累计预算的更新依赖预算对象存在。
     const settlePending = () => {
-      if (budget && lastBeforeY !== undefined && confirmedAscent(lastBeforeY)) {
-        budget.spent++;
+      if (lastBeforeY !== undefined && confirmedAscent(lastBeforeY)) {
         climbedThisRun++;
+        if (budget) budget.spent++;
         lastBeforeY = undefined;
       }
     };
@@ -432,7 +437,7 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
       return finish();
     } catch (e) {
       settlePending();
-      if (isAbort(e)) (e as Error & { partialClimbed?: number }).partialClimbed = total();
+      if (isAbort(e)) (e as Error & { partial?: Record<string, unknown> }).partial = currentFacts();
       throw e;
     }
   },
