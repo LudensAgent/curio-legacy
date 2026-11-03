@@ -163,8 +163,14 @@ test('step 保持指定高度，显式选择下一级才下行，也能踩上薄
   w2.blocks.push({ name: 'snow', pos: { x: 0, y: 63, z: -1 } });
   const ctx2 = makeCtx(w2);
   t.after(() => ctx2.memory.close());
-  const r2 = await stepTo.run(ctx2, { at: [1, 0, 0], facing: 'N' });
+  // 薄雪是能踩的薄层，但一层雪顶面只有 0.125 高：平走 [1,0,0] 会把脚高从 64 降到 63.125，
+  // 那不是“保持高度”的平走，必须显式下一级 [1,-1,0] 才能站上去。
+  const flat = await stepTo.run(ctx2, { at: [1, 0, 0], facing: 'N' });
+  assert.equal(flat.status, 'failed', flat.summary);
+  assert.match(flat.summary, /支撑面在 y=63\.13/);
+  const r2 = await stepTo.run(ctx2, { at: [1, -1, 0], facing: 'N' });
   assert.equal(r2.status, 'succeeded', r2.summary);
+  assert.equal(Math.floor(w2.pos.y), 63);
 });
 
 test('step 不把实际落到其他高度当作到达目标', async (t) => {
