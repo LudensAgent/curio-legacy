@@ -859,7 +859,7 @@ export class Mind {
     const state = this.d.adapter.state();
     const verdict = afterStep(a, step, result, durationMs, state, percept);
     // 身体自己应变不了：先试学会的恢复办法（模型以前从类似的卡住里总结出来的），试过还不行才叫脑子
-    if (verdict.kind === 'stuck' && result.status === 'failed' && step.skill !== 'use_skill' && this.d.behaviors) {
+    if (verdict.kind === 'stuck' && !verdict.exhausted && result.status === 'failed' && step.skill !== 'use_skill' && this.d.behaviors) {
       const tried = new Set(a.adaptations.filter((x) => x.startsWith('skill:')).map((x) => x.slice(6)));
       const skipped = a.adaptations.filter((x) => x.startsWith('skip:')).length;
       const b = tried.size - skipped < 2 ? this.safe(() => this.d.behaviors!.recoveryFor({ skill: step.skill, code: result.failureCode }, tried), null) : null;

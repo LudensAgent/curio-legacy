@@ -106,7 +106,7 @@ test('a goto blocked by pillar clearance reports the fact and lets the mind deci
   assert.equal(activity.steps[0].skill, 'goto');
 });
 
-test('climb_up with partial progress is not auto-retried for another full height budget', () => {
+test('climb_up exhausts its budget and terminates instead of re-climbing the full height', () => {
   const adapter = new FakeAdapter();
   const activity = createActivity({ what: '爬升', why: '', kind: 'other', repeat: 1,
     steps: [{ skill: 'climb_up', args: { height: 16, untilSky: true } }] }, '', 'llm', adapter.state());
@@ -114,10 +114,11 @@ test('climb_up with partial progress is not auto-retried for another full height
   activity.stepStart = { pos: { x: 0.5, y: 64, z: 0.5 } };
   const verdict = afterStep(activity, step, fail('STUCK', '往上爬了 16 格后停下：仍未满足停止条件', { climbed: 16, goalReached: false }), 100, adapter.state());
   assert.equal(verdict.kind, 'stuck');
+  assert.equal(verdict.exhausted, true, '额度耗尽须标记，调度器据此终止自动推进');
   assert.ok(!activity.adaptations.some((item) => item.startsWith('retry:')), '不会原样重试再爬一次完整高度');
 });
 
-test('climb_up partial progress reduces the remaining height for the re-run', () => {
+test('climb_up partial progress reduces the dispatched height without mutating the template', () => {
   const adapter = new FakeAdapter();
   const activity = createActivity({ what: '爬升', why: '', kind: 'other', repeat: 1,
     steps: [{ skill: 'climb_up', args: { height: 3, untilSky: false } }] }, '', 'llm', adapter.state());
@@ -125,7 +126,28 @@ test('climb_up partial progress reduces the remaining height for the re-run', ()
   activity.stepStart = { pos: { x: 0.5, y: 64, z: 0.5 } };
   const verdict = afterStep(activity, step, fail('STUCK', '往上爬了 1 格后停下', { climbed: 1, goalReached: false }), 100, adapter.state());
   assert.equal(verdict.kind, 'continue', '剩余额度下继续爬，而不是重试完整高度');
-  assert.equal((activity.steps[0].args as { height: number }).height, 2, '剩余高度额度写回本步参数');
+  assert.equal((activity.steps[0].args as { height: number }).height, 3, '模板参数保持不变');
+  const next = nextStep(activity)!;
+  assert.equal(next.skill, 'climb_up');
+  assert.equal((next.args as { height: number }).height, 2, '派发时按剩余额度扣减');
+});
+
+test('climb_up repeat:2 starts each round from the original height', () => {
+  const adapter = new FakeAdapter();
+  const activity = createActivity({ what: '爬升', why: '', kind: 'other', repeat: 2,
+    steps: [{ skill: 'climb_up', args: { height: 3, untilSky: false } }] }, '', 'llm', adapter.state());
+  // 第一轮：爬 1 格失败 → 重试派发 height 2 → 成功
+  let step = nextStep(activity)!;
+  activity.stepStart = { pos: { x: 0.5, y: 64, z: 0.5 } };
+  assert.equal(afterStep(activity, step, fail('STUCK', '往上爬了 1 格后停下', { climbed: 1, goalReached: false }), 100, adapter.state()).kind, 'continue');
+  const retry = nextStep(activity)!;
+  assert.equal((retry.args as { height: number }).height, 2);
+  assert.equal(afterStep(activity, retry, { status: 'succeeded', summary: '往上爬了 2 格', data: { climbed: 2 } }, 100, adapter.state()).kind, 'continue');
+  // 第一轮做完，进入第二轮：reset 累计额度，重新派发原始 height 3
+  const round2 = nextStep(activity)!;
+  assert.equal(round2.skill, 'climb_up');
+  assert.equal((round2.args as { height: number }).height, 3, '第二轮从原始参数开始');
+  assert.equal((activity.steps[0].args as { height: number }).height, 3, '模板从未被改写');
 });
 
 test('excavate_path preflight rejection is not auto-retried for another identical gap', () => {

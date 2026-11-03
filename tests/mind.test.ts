@@ -107,6 +107,27 @@ for (const scenario of ['noop', 'skipped', 'changed', 'steps-noop', 'steps-chang
   }
 });
 
+test('climb_up 额度耗尽直接终止，不插入学得恢复也不重放原动作', async (t) => {
+  const w = fixture(t);
+  const previous = SKILLS.climb_up;
+  SKILLS.climb_up = { name: 'climb_up', description: '测试爬升', argsDoc: '{}', timeoutMs: 3000, movement: true,
+    validate: (raw: any) => ({ ok: true, args: { height: Number(raw?.height ?? 16), untilSky: true } }),
+    run: async () => fail('STUCK', '往上爬了 16 格后停下：仍未满足停止条件', { climbed: 16, goalReached: false }) };
+  t.after(() => { SKILLS.climb_up = previous; setBehaviorRegistry(null); });
+  let recovered = false;
+  (w.mind as any).d.behaviors = {
+    recoveryFor: () => { recovered = true; return { name: 're-climb', description: '重爬', steps: [] }; },
+    recoverySkipped: () => {}, creditRecovery: () => {},
+  };
+  setBehaviorRegistry({ get: () => ({ name: 're-climb', description: '重爬', steps: [] }), list: () => [{ name: 're-climb' }] });
+  await w.tick();
+  await w.reply(0, { decision: 'new', activity: { what: '爬升', steps: [{ skill: 'climb_up', args: { height: 16, untilSky: true } }] } });
+  await w.tick();
+  await flush();
+  assert.equal(recovered, false, '额度耗尽不插入学得恢复');
+  assert.equal(w.mind.activity, null, '直接交回心智，不再重放原动作');
+});
+
 test('手动调用未产生动作的技能仍正常返回成功和 noop 证据', async (t) => {
   const w = fixture(t);
   const skill = { name: 'manual-noop', description: '观察后结束', steps: [], code: 'return {ok:true,note:"没有需要做的"};' };
