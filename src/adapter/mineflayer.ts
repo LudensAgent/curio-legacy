@@ -1156,24 +1156,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const position = b.entity.position;
     if (target.kind === 'xyz') {
       // xyz 的 y 是脚高（可为分数）：验收实际脚高与列，不只看节点——半砖脚高 64.5 与整块脚高 65 落在同一节点。
-      let cell = position.floored();
-      const atTarget = () => cell.x === Math.floor(target.x) && cell.z === Math.floor(target.z) && Math.abs(b.entity.position.y - target.y) <= 0.01;
-      // 末段：pathfinder 会在平台边缘提前结算（节点已到、脚高未落到目标支撑，尤其小落差/薄层）。在原授权局部边内补一次受限前推。
-      if (!atTarget() && b.entity.onGround && !b.entity.isInWater && !b.entity.isInLava && typeof b.setControlState === 'function' && typeof b.clearControlStates === 'function') {
-        const tx = Math.floor(target.x) + 0.5, tz = Math.floor(target.z) + 0.5;
-        const dx = tx - position.x, dz = tz - position.z;
-        const dist = Math.hypot(dx, dz);
-        if (dist > 0.05 && dist < 1) {
-          check();
-          try { b.look(Math.atan2(-dx, -dz), 0, false); } catch { /* 无 look 的测试模拟 */ }
-          b.clearControlStates();
-          b.setControlState('forward', true);
-          try { await this.afterAction(() => sleep(Math.min(600, Math.max(1, opts.timeoutMs)), opts.signal), check); }
-          finally { try { b.setControlState('forward', false); } catch { /* 控制权可能已转移 */ } }
-          cell = b.entity.position.floored();
-        }
+      const cell = position.floored();
+      if (cell.x !== Math.floor(target.x) || cell.z !== Math.floor(target.z) || Math.abs(position.y - target.y) > 0.01) {
+        throw new Error(`No path: 寻路结束但尚未到达目标，实际位于 (${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})`);
       }
-      if (!atTarget()) throw new Error(`No path: 寻路结束但尚未到达目标，实际位于 (${b.entity.position.x.toFixed(2)},${b.entity.position.y.toFixed(2)},${b.entity.position.z.toFixed(2)})`);
     } else if (!goal.isEnd(position.floored())) throw new Error(`No path: 寻路结束但尚未到达目标，实际位于 (${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})`);
   }
 

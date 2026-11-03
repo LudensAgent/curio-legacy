@@ -248,6 +248,11 @@ export const stepTo: Skill<CellArgs> = {
     const a = ctx.adapter;
     const start = a.state().pos, feet = feetCell(start);
     const target = toWorld(feet, args.facing, args.at);
+    // 取消/中断时保留已发生位移与最后位置：Arbiter 经 AbortedError.partial 拿到。所有执行模式（平走/梯子/水中）共用。
+    const partialFacts = (extra?: Record<string, unknown>) => {
+      const s = a.state();
+      return { at: args.at, ...(args.xyz !== undefined ? { xyz: args.xyz } : {}), target: { ...target }, position: { ...s.pos }, moved: s.pos.x !== start.x || s.pos.y !== start.y || s.pos.z !== start.z, ...(extra ?? {}) };
+    };
     // 只认本次视线确认的方块及其 blockstate 计算几何；未观察 = 未知，不读 blockAt 的墙后数据（见 CLAUDE 知识库：墙后/遮挡 = 未知）。
     const states = visibleStates(ctx, [target, { ...target, y: target.y + 1 }, { ...target, y: target.y + 2 }, { ...target, y: target.y - 1 }, { ...feet, y: feet.y + 2 }]);
     const observe = (positions: Vec3Like[]) => { for (const [k, v] of visibleStates(ctx, positions)) states.set(k, v); };
@@ -289,8 +294,13 @@ export const stepTo: Skill<CellArgs> = {
     // 泡在水里：脚下那格是水、岸往往比脚高一两格，平地上的“上下 ±1”对不上。像玩家一样朝那边游、贴着岸按住跳爬上去。
     // 这项“邻列内多高度选出口”的辅助只属于相对 step；绝对 xyz/stepTo 保持所选脚高，不套用多高度搜索。
     if (a.state().inWater && a.swimTo && args.xyz === undefined) {
-      const out = await stepOutOfWater(ctx, args, feet);
-      if (out) return out;
+      try {
+        const out = await stepOutOfWater(ctx, args, feet);
+        if (out) return out;
+      } catch (e) {
+        if (isAbort(e)) (e as Error & { partial?: Record<string, unknown> }).partial = partialFacts();
+        throw e;
+      }
     }
     // 沿梯子往上爬一格：目标是自己头那格，脚下是梯子；头顶上方要空。绝对 xyz 也走这条（整数脚高才触发）。
     if (args.at[0] === 0 && args.at[2] === 0 && args.at[1] === 1) {
@@ -307,10 +317,17 @@ export const stepTo: Skill<CellArgs> = {
       try {
         await a.moveTo({ kind: 'xyz', x: target.x, y: target.y, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())) });
       } catch (e) {
-        if (isAbort(e)) throw e;
+        if (isAbort(e)) {
+          (e as Error & { partial?: Record<string, unknown> }).partial = partialFacts({ targetFoot: target.y });
+          throw e;
+        }
         movementError = e;
       }
-      throwIfAborted(ctx.signal);
+      if (ctx.signal.aborted) {
+        const ab = new AbortedError(String(ctx.signal.reason ?? 'aborted'));
+        (ab as Error & { partial?: Record<string, unknown> }).partial = partialFacts({ targetFoot: target.y });
+        throw ab;
+      }
       const end = feetCell(a.state().pos);
       if (end.x !== target.x || end.y !== target.y || end.z !== target.z) return fail(movementError ? codeFromError(movementError) : 'EFFECT_NOT_CONFIRMED', `没有爬到指定格，实际在 (${end.x},${end.y},${end.z})${movementError ? `；${(movementError as Error).message}` : ''}`, after(ctx, args.facing, target));
       return ok(`沿梯子爬上了一格（现在 y=${end.y}）${a.blockAt({ ...end }) === 'ladder' ? '' : '；这格没有梯子了，再往上要先挂'}`, { moved: [0, 1, 0], ...after(ctx, args.facing, target) });
@@ -403,11 +420,6 @@ export const stepTo: Skill<CellArgs> = {
     if (problems.length) return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：${problems.join('；')}`, { problems, movementNotAttempted: true, obscured: problems.every((p) => p.includes('未看清') || p.includes('未加载')),
       ...(landingSupport ? { landingSupport } : {}),
       ...after(ctx, args.facing, target) });
-    // 取消/中断时保留已发生的位移：Arbiter 经 AbortedError.partial 拿到最后位置，不把部分移动写成完全未执行。
-    const partialFacts = () => {
-      const s = a.state();
-      return { target: { ...target }, targetFoot, position: { ...s.pos }, moved: s.pos.x !== start.x || s.pos.y !== start.y || s.pos.z !== start.z };
-    };
     let movementError: unknown;
     try {
       // 下行（下一级）：pathfinder 的 maxDropDown 对比的是「脚高 → 落点地板」的落差，一步下降（脚 73→72，地板 71）是 2，不是 1。
@@ -415,14 +427,14 @@ export const stepTo: Skill<CellArgs> = {
       await a.moveTo({ kind: 'xyz', x: target.x, y: targetFoot!, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())), ...(args.at[1] === -1 ? { maxDropDown: 2 } : {}) });
     } catch (e) {
       if (isAbort(e)) {
-        (e as Error & { partial?: Record<string, unknown> }).partial = partialFacts();
+        (e as Error & { partial?: Record<string, unknown> }).partial = partialFacts({ targetFoot });
         throw e;
       }
       movementError = e;
     }
     if (ctx.signal.aborted) {
       const ab = new AbortedError(String(ctx.signal.reason ?? 'aborted'));
-      (ab as Error & { partial?: Record<string, unknown> }).partial = partialFacts();
+      (ab as Error & { partial?: Record<string, unknown> }).partial = partialFacts({ targetFoot });
       throw ab;
     }
     // 用实际身体状态确认到达：站稳、列一致、实际脚高与目标脚高相符；不能只凭整数脚格或 moveTo 返回成功。
