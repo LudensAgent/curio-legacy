@@ -247,3 +247,18 @@ test('睡莲到地毯（0.03125 差）停在睡莲边不报成功', async (t) =>
   assert.equal(r.status, 'failed', r.summary);
   assert.equal(r.failureCode, 'EFFECT_NOT_CONFIRMED');
 });
+
+test('取消时保留已发生位移（AbortedError.partial）', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  const c = ctx(w);
+  t.after(() => c.memory.close());
+  t.mock.method(w, 'moveTo', async () => {
+    w.pos = { x: 0.5, y: 64, z: -0.5 }; // 先移动一格
+    throw Object.assign(new Error('cancelled'), { name: 'AbortedError' }); // 再取消
+  });
+  await assert.rejects(
+    stepTo.run(c, { at: [1, 0, 0], facing: 'N' }),
+    (e: any) => e.name === 'AbortedError' && e.partial?.moved === true && e.partial?.position?.z === -0.5 && e.partial?.targetFoot === 64,
+  );
+});

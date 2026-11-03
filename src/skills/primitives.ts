@@ -2,7 +2,7 @@ import type { Vec3Like } from '../adapter/types.ts';
 import { FACINGS, facingOfYaw, feetCell, localMap, supportCell, toWorld, type Facing } from '../perception/local.ts';
 import { attachmentFaces, dropBelow, isSoftBlock, LIQUID_BLOCKS, surroundings } from '../perception/surroundings.ts';
 import { blockCollidesBody, collisionBoxes, supportTop } from '../perception/geometry.ts';
-import { sleep, throwIfAborted } from '../util.ts';
+import { AbortedError, sleep, throwIfAborted } from '../util.ts';
 import { breakCell, why } from './body.ts';
 import { classifyBlock, MAN_MADE_NOTE, OWN_BUILDING_HINT, ownBuildingAt, storedChestAt } from './build.ts';
 import { noteEdit } from '../mind/edits.ts';
@@ -403,16 +403,28 @@ export const stepTo: Skill<CellArgs> = {
     if (problems.length) return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：${problems.join('；')}`, { problems, movementNotAttempted: true, obscured: problems.every((p) => p.includes('未看清') || p.includes('未加载')),
       ...(landingSupport ? { landingSupport } : {}),
       ...after(ctx, args.facing, target) });
+    // 取消/中断时保留已发生的位移：Arbiter 经 AbortedError.partial 拿到最后位置，不把部分移动写成完全未执行。
+    const partialFacts = () => {
+      const s = a.state();
+      return { target: { ...target }, targetFoot, position: { ...s.pos }, moved: s.pos.x !== start.x || s.pos.y !== start.y || s.pos.z !== start.z };
+    };
     let movementError: unknown;
     try {
       // 下行（下一级）：pathfinder 的 maxDropDown 对比的是「脚高 → 落点地板」的落差，一步下降（脚 73→72，地板 71）是 2，不是 1。
       // 传 1 会让原版 getLandingBlock 直接判 null、一步都下不去（和 descend 的 drop+1 同一套语义）。目标 y 传实际脚高（可为分数）。
       await a.moveTo({ kind: 'xyz', x: target.x, y: targetFoot!, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())), ...(args.at[1] === -1 ? { maxDropDown: 2 } : {}) });
     } catch (e) {
-      if (isAbort(e)) throw e;
+      if (isAbort(e)) {
+        (e as Error & { partial?: Record<string, unknown> }).partial = partialFacts();
+        throw e;
+      }
       movementError = e;
     }
-    throwIfAborted(ctx.signal);
+    if (ctx.signal.aborted) {
+      const ab = new AbortedError(String(ctx.signal.reason ?? 'aborted'));
+      (ab as Error & { partial?: Record<string, unknown> }).partial = partialFacts();
+      throw ab;
+    }
     // 用实际身体状态确认到达：站稳、列一致、实际脚高与目标脚高相符；不能只凭整数脚格或 moveTo 返回成功。
     const state = a.state();
     const end = feetCell(state.pos);
