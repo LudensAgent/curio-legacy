@@ -295,7 +295,7 @@ export const stepTo: Skill<CellArgs> = {
     // 沿梯子往上爬一格：目标是自己头那格，脚下是梯子；头顶上方要空。绝对 xyz 也走这条（整数脚高才触发）。
     if (args.at[0] === 0 && args.at[2] === 0 && args.at[1] === 1) {
       if (args.xyz !== undefined && Math.abs(args.xyz.y - target.y) > 0.01) {
-        return fail('BAD_ARGS', `梯子只能爬到整数脚高：请求脚高 ${args.xyz.y.toFixed(2)}，梯子顶在 ${target.y}`, after(ctx, args.facing, target));
+        return fail('BAD_ARGS', `当前 step 的梯子辅助仅支持整数脚高，收到 ${args.xyz.y.toFixed(2)}`, after(ctx, args.facing, target));
       }
       if (isUnseen({ ...target, y: target.y + 1 }) && ctx.senses.observeBlocks) {
         await glanceAt(ctx, { ...target, y: target.y + 1 });
@@ -418,10 +418,10 @@ export const stepTo: Skill<CellArgs> = {
     const end = feetCell(state.pos);
     const foot = targetFoot!;
     // 验收按实际脚高 + 目标列 + 接触状态，不比较整数脚格——半砖/雪层的脚高会让脚格比目标格低一格。
-    // 脚高是离散的支撑顶面（整块 1.0、耕地 0.9375、半砖 0.5…），最小差 0.0625，故用 0.05 只吸收浮点，
-    // 不能像 0.3 那样把「还站在原平台（高 0.0625）」当成已踩到目标支撑。
+    // 脚高是离散的支撑顶面；睡莲(0.09375)与地毯(0.0625)只差 0.03125，故容差取 0.01，只吸收浮点，
+    // 不能把「仍停在原支撑（差 0.03125）」当成已踩到目标支撑。
     const landed = state.onGround && end.x === target.x && end.z === target.z
-      && Math.abs(state.pos.y - foot) <= 0.05;
+      && Math.abs(state.pos.y - foot) <= 0.01;
     if (!landed) {
       const why = !state.onGround ? '身体没有站稳'
         : end.x !== target.x || end.z !== target.z ? `实际列 (${end.x},${end.z}) 与目标不符`

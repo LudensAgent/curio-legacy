@@ -234,3 +234,16 @@ test('绝对 xyz 分数脚高沿梯子：明确返回不支持，不取整报成
   assert.equal(r.status, 'failed', r.summary);
   assert.match(r.summary, /整数脚高/);
 });
+
+test('睡莲到地毯（0.03125 差）停在睡莲边不报成功', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 64.09375, z: 0.5 }; // 站在睡莲上
+  w.setBlock({ x: 0, y: 64, z: 0 }, 'lily_pad'); // 顶 64.09375
+  w.setBlock({ x: 0, y: 64, z: -1 }, 'red_carpet'); // 顶 64.0625
+  const c = ctx(w);
+  t.after(() => c.memory.close());
+  t.mock.method(w, 'moveTo', async () => { w.pos = { x: 0.5, y: 64.09375, z: -0.5 }; }); // 停在睡莲边缘
+  const r = await stepTo.run(c, { at: [1, 0, 0], facing: 'N' });
+  assert.equal(r.status, 'failed', r.summary);
+  assert.equal(r.failureCode, 'EFFECT_NOT_CONFIRMED');
+});
