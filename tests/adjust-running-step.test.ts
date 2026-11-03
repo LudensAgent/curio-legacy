@@ -66,3 +66,37 @@ test('当前步骤参数变了，或新步骤排在当前动作之前，立即�
     assert.deepEqual(nextStep(activity), steps[0]);
   }
 });
+
+/** climb 账本 + 取消顺序的调整探针：climb_up 已爬 1 格（spent=1），提交草案看是否取消/保留。 */
+function climbAdjust(draftSteps: { skill: string; args?: unknown; id?: string }[], climbSpent = 1) {
+  const adapter = new FakeAdapter();
+  const activity = createActivity({ what: '爬5格', why: '', kind: 'other', steps: [{ skill: 'climb_up', args: { height: 5, untilSky: false } }], repeat: 1 }, '', 'llm', adapter.state());
+  const stepId = activity.steps[0].id!;
+  activity.climb = { [stepId]: { height: 5, spent: climbSpent, startY: 64 } };
+  nextStep(activity);
+  const running = { skill: 'climb_up', args: { height: 5, untilSky: false }, planId: activity.id };
+  const cancelled: string[] = [];
+  const context = {
+    activity, staleDropped: 0,
+    applySkill() {}, applyPlan() {}, guardFocus() {}, safe: () => undefined,
+    d: { arbiter: { info: () => running, cancel: (reason: string) => cancelled.push(reason) },
+      adapter, perception: { snapshot: () => undefined }, bus: { publish() {} } },
+  };
+  const decision = { kind: 'adjust', tier: 'glance', source: 'llm', monologue: '', notes: [],
+    activity: { what: '调整', why: '', kind: 'other', steps: draftSteps, repeat: 1 } };
+  (Mind.prototype as any).apply.call(context, decision, activity.id);
+  return { activity, cancelled, decision, stepId };
+}
+
+test('非法恢复调整被拒后不取消原任务、账本保持，原爬升可继续完成', () => {
+  const { activity, cancelled, decision, stepId } = climbAdjust([{ skill: 'use_skill', args: { name: 'recover', failure: { skill: 'climb_up', args: { height: 5 }, climbId: 'missing', climb: { height: 5, spent: 0, startY: 64 } } } }]);
+  assert.deepEqual(cancelled, [], '拒绝不取消原任务');
+  assert.equal(activity.climb[stepId].spent, 1, '账本保持 spent=1');
+  assert.match(decision.notes.join(''), /父账本/, '给出明确拒绝原因');
+});
+
+test('合法重排仍取消旧任务并启动新计划', () => {
+  const { activity, cancelled } = climbAdjust([{ skill: 'climb_up', args: { height: 3, untilSky: false } }]);
+  assert.deepEqual(cancelled, ['改了做法']);
+  assert.equal(activity.index, 0);
+});
