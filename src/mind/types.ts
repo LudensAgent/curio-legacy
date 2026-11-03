@@ -82,6 +82,8 @@ export interface Activity {
   suspendedAt?: number;
   /** 上一步开工时的身体/视野；只有环境确实变化才原样重试。 */
   stepStart?: { pos: { x: number; y: number; z: number }; view?: string };
+  /** 上一步移动未确认到达：下一步校验后若为相对挖掘/放置则报告依赖缺口。 */
+  stanceGap?: { skill: string; pos: { x: number; y: number; z: number } };
 }
 
 export type ActivityOutcome = 'done' | 'unmet' | 'stuck' | 'abandoned' | 'interrupted' | 'replaced';

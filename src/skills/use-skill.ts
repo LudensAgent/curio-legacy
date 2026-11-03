@@ -137,6 +137,8 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
       }
       const done: string[] = [];
       let completedSteps = 0;
+      // 上一步移动未确认到达的事实：下一步校验完成后、执行前用它判断相对坐标依赖。
+      let pendingStance: { skill: string; pos: { x: number; y: number; z: number } } | null = null;
       for (const [i, st] of b.steps.entries()) {
         throwIfAborted(ctx.signal);
         ctx.progress(i / b.steps.length, `${b.name}：第 ${i + 1} 步 ${st.skill}`);
@@ -147,6 +149,12 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
           if (st.optional) { done.push(`${st.skill} 跳过（${v && !v.ok ? v.error : '没有这个动作'}）`); continue; }
           return fail('BAD_ARGS', `技能「${b.name}」第 ${i + 1} 步 ${st.skill} 写错了：${v && !v.ok ? v.error : '没有这个动作'}`, { done });
         }
+        // 校验完成后、执行前：上一步移动未确认到达，本步是相对挖掘/放置 → 报告依赖缺口，不执行本步。
+        if (pendingStance !== null && relativeCellAction(st.skill, v.args)) {
+          const pos = pendingStance.pos;
+          return fail('ERROR', `技能「${b.name}」第 ${i} 步「${pendingStance.skill}」没到新站位，身体现在在 (${pos.x.toFixed(2)},${pos.y.toFixed(2)},${pos.z.toFixed(2)})；第 ${i + 1} 步「${st.skill}」是相对坐标，会打到错误位置。先确认实际站位或改用绝对坐标`, { done });
+        }
+        pendingStance = null;
         let r: SkillResult;
         try {
           r = await runSkill({ ...ctx, senses: visibleActionSenses(ctx.senses), deadline: Math.min(ctx.deadline, Date.now() + skill.timeoutMs),
@@ -159,13 +167,9 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
         if (r.status === 'succeeded' && r.data?.noop !== true) completedSteps++;
         if (typeof r.data?.climbed === 'number') climbedTotal += r.data.climbed;
         done.push(`${st.skill} → ${r.status === 'succeeded' ? '成' : `没成(${r.failureCode ?? ''})`}`);
-        // optional 移动没到新站位，紧跟的相对挖掘/放置会按当前站位解析、打到错的地方：中止并报告依赖缺口。
+        // optional 移动没到新站位：记下事实，留给下一步在校验后判断。
         if (r.status === 'failed' && st.optional && STANCE_MOVES.has(st.skill)) {
-          const next = b.steps[i + 1];
-          if (next && relativeCellAction(next.skill, next.args)) {
-            const pos = ctx.adapter.state().pos;
-            return fail('ERROR', `技能「${b.name}」第 ${i + 1} 步「${st.skill}」没到新站位，身体现在在 (${pos.x.toFixed(2)},${pos.y.toFixed(2)},${pos.z.toFixed(2)})；第 ${i + 2} 步「${next.skill}」是相对坐标，会打到错误位置。先确认实际站位或改用绝对坐标`, { done });
-          }
+          pendingStance = { skill: st.skill, pos: { ...ctx.adapter.state().pos } };
         }
         if (r.status === 'failed' && !st.optional) return fail(r.failureCode ?? 'ERROR', `技能「${b.name}」第 ${i + 1} 步 ${st.skill} 没成：${r.summary.slice(0, 120)}`,
           { done, ...(r.data?.effectEvidence ? { effectEvidence: r.data.effectEvidence } : {}),

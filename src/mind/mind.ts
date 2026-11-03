@@ -17,6 +17,7 @@ import { consumptionSummary } from '../brain/supply.ts';
 import { pickFuel } from '../skills/economy.ts';
 import { pickVariant } from '../skills/work.ts';
 import { afterStep, argsLabel, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, nextStep, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
+import { relativeCellAction } from '../skills/stance.ts';
 import { instinctNote, type BehaviorEngine } from './behaviors.ts';
 import { recallLocal } from './recall.ts';
 import { Attention, EXPERIENCE_MS, RECONSIDER, URGENT } from './attention.ts';
@@ -611,6 +612,16 @@ export class Mind {
     } else this.resumeCheck = null;
     const step = nextStep(this.activity);
     if (!step) return this.finishActivity('done', '这段活的步骤都做完了');
+    // 上一步移动未确认到达：本步校验后若为相对挖掘/放置，报告依赖缺口，不执行本步。
+    const gap = this.activity.stanceGap;
+    if (gap) {
+      const v = this.d.arbiter.validate(step);
+      if (v.ok && relativeCellAction(step.skill, v.args)) {
+        this.finishActivity('stuck', `「${gap.skill}」没到新站位，身体现在在 (${gap.pos.x.toFixed(2)},${gap.pos.y.toFixed(2)},${gap.pos.z.toFixed(2)})；接着的「${step.skill}」是相对坐标，会打到错误位置。先确认实际站位或改用绝对坐标`);
+        return;
+      }
+      delete this.activity.stanceGap;
+    }
     // 提醒曾经失败，仍执行 Agent 明确选择的动作。
     const same = this.sameFails.get(exactSig(step));
     if (same && same.n >= Mind.SAME_FAIL_LIMIT && Date.now() - same.last < Mind.SAME_FAIL_MS) {
