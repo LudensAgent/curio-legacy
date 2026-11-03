@@ -54,9 +54,9 @@ export interface WalkBody {
   };
 }
 
-/** 一次物理帧推进（离线夹具）；返回最新实体状态并推进模拟时钟。 */
+/** 一次物理帧推进：离线夹具同步推进 prismarine-physics；生产由 physicsTick 驱动（异步）。 */
 export interface WalkTick {
-  (): WalkBody['entity'];
+  (): WalkBody['entity'] | Promise<WalkBody['entity']>;
 }
 
 /** 实际适配器的存活/连接/观测就绪状态；不从请求复制后冒充观测。 */
@@ -115,7 +115,7 @@ export class WalkMoveExecutor implements MoveExecutor {
     for (let i = 0; i < 400; i++) {
       if (request.signal.aborted) { this.releaseIf(request.executionId); return { failure: { kind: 'cancelled' } }; }
       if (this.now() >= request.deadlineMs) { this.releaseIf(request.executionId); return { failure: { kind: 'timed_out' } }; }
-      const e = this.tick();
+      const e = await this.tick();
       const dist = Math.hypot(to.x - e.position.x, to.z - e.position.z);
       const speed = Math.hypot(e.velocity.x, e.velocity.z);
       if (!braked && dist <= speed * GROUND_STOP) { this.body.setControlState('forward', false); braked = true; }
@@ -176,13 +176,13 @@ export async function runWalkRoute(opts: {
   executor.setFrameSink(observeThenSample);
 
   // 初始实测位置：bodyArrival 需要多帧确认身体稳定在起点，advance 才会启动首段。
-  for (let i = 0; i < 8; i++) observeThenSample(opts.tick());
+  for (let i = 0; i < 8; i++) observeThenSample(await opts.tick());
 
   let iterations = 0;
-  while (loop.status()!.result === null && now() < deadline && iterations++ < 2000) {
+  while (loop.status()!.result === null && now() < deadline && iterations++ < 20000) {
     loop.advance(64);
     loop.checkTimeout();
-    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setTimeout(r, 10));
   }
   // 退出时若仍无终态：取消所属库执行与身体执行、释放控制，保留已测位移后返回。
   let result = loop.status()!.result;

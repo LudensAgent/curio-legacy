@@ -13,6 +13,7 @@ import { installClientGuard } from './click-guard.ts';
 import { cornerSafe } from './corner-safe.ts';
 import { AIR_BLOCKS, attachmentFaces } from '../perception/surroundings.ts';
 import { feetCell, facingOfYaw } from '../perception/local.ts';
+import type { WalkBody, WalkTick } from './walk-route.ts';
 
 import type {
   InvItem,
@@ -1521,6 +1522,30 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     });
     // 被打断的动作可能做了一半：界面里摆了一半的材料、光标上拿着东西。等服务器处理完已经发出的包，再收拾
     this.scheduleRepair('动作被打断', 250);
+  }
+
+  /** walk_route 身体桥：只暴露前向控制与实测实体，不暴露寻路/挖掘等。 */
+  walkBody(): WalkBody {
+    const bot = this.bot;
+    return {
+      setControlState: (name, value) => bot.setControlState(name, value),
+      clearControlStates: () => bot.clearControlStates(),
+      look: (yaw, pitch) => { bot.look(yaw, pitch, true).catch(() => {}); },
+      entity: bot.entity,
+    };
+  }
+
+  /** 下一物理帧：由服务端 physicsTick 驱动，返回最新实测实体状态（异步）。 */
+  walkTick(): WalkTick {
+    const bot = this.bot;
+    return () => new Promise((resolve) => {
+      const onTick = () => {
+        bot.removeListener('physicTick', onTick);
+        const e = bot.entity;
+        resolve({ position: { x: e.position.x, y: e.position.y, z: e.position.z }, velocity: { x: e.velocity.x, y: e.velocity.y, z: e.velocity.z }, onGround: e.onGround, isInWater: e.isInWater });
+      };
+      bot.on('physicTick', onTick);
+    });
   }
 
   /**
