@@ -3,8 +3,11 @@
  *
  * 只接普通干燥整块、同高、沿 X/Z 的短路线；不含挖掘、放置、跳跃、绕路、水面、飞行。
  * MoveExecutor 只执行库已选定的单段，不转发给会自行寻路的 moveTo。
- * 制动沿用 finishAdjacentStep 的思路（按地面摩擦估算制动距离、到点松键），
- * 到达语义由库的 WalkRouteExecutor（显式 bodyArrival）用连续坐标 + 速度 + 稳定帧判定。
+ * 制动沿用 finishAdjacentStep 的思路；到达语义由库的 WalkRouteExecutor（显式 bodyArrival）判定。
+ *
+ * 生产接线注意：这里的 `tick` 是离线测试夹具里推进 prismarine-physics 的帧源；
+ * 真实适配层应由游戏服务器的 physicsTick 驱动帧、再喂给本执行器，而不是由执行器
+ * 主动推进物理。生命周期/作用域也来自实际适配器，不从请求复制。
  */
 
 import { GROUNDED_ARRIVAL_DEFAULTS, WalkRouteExecutor, VoxelMap, serializeBlockState } from 'curio-minecraft-3d-memory';
@@ -51,9 +54,16 @@ export interface WalkBody {
   };
 }
 
-/** 一次物理帧推进：推进物理、返回最新实体状态（并推进模拟时钟）。 */
+/** 一次物理帧推进（离线夹具）；返回最新实体状态并推进模拟时钟。 */
 export interface WalkTick {
   (): WalkBody['entity'];
+}
+
+/** 实际适配器的存活/连接/观测就绪状态；不从请求复制后冒充观测。 */
+export interface WalkLifecycle {
+  alive: boolean;
+  connected: boolean;
+  observationReady: boolean;
 }
 
 /** 从实体状态构造一个 BodySample；速度单位为格/tick。 */
@@ -62,22 +72,23 @@ export function bodySample(
   entity: WalkBody['entity'],
   observedAt: number,
   sequence: number,
+  lifecycle: WalkLifecycle,
 ): BodySample {
   return {
     worldId: scope.worldId, dim: scope.dim, sessionId: scope.sessionId, executionId: scope.executionId,
     pos: { ...entity.position }, velocity: { ...entity.velocity }, observedAt, sequence,
-    alive: true, connected: true, observationReady: true,
+    alive: lifecycle.alive, connected: lifecycle.connected, observationReady: lifecycle.observationReady,
     onGround: entity.onGround, inWater: entity.isInWater,
   };
 }
 
 /**
- * 库 MoveExecutor 的窄身体桥：朝向目标向量 + 前向推进，按地面摩擦估算制动距离、到点松键，
- * 让身体靠摩擦停稳；再持续采样推给库，由库的 bodyArrival 判定到达并 stop/abort。
+ * 库 MoveExecutor 的窄身体桥：朝向目标向量 + 前向推进，按地面摩擦制动、到点松键，
+ * 再把实测物理帧交给宿主构造样本。控制前先检查取消/期限；stop 只释放所属段。
  */
 export class WalkMoveExecutor implements MoveExecutor {
-  private sampleSink: ((sample: BodySample) => void) | null = null;
-  private delegationId: string | null = null;
+  private frameSink: ((entity: WalkBody['entity']) => void) | null = null;
+  private activeExecutionId: string | null = null;
 
   constructor(
     private readonly body: WalkBody,
@@ -85,74 +96,88 @@ export class WalkMoveExecutor implements MoveExecutor {
     private readonly now: () => number = Date.now,
   ) {}
 
-  setSampleSink(fn: (sample: BodySample) => void) { this.sampleSink = fn; }
-  /** 宿主推送的样本按库约定用 delegationId 作为执行归属，而非单段的 executionId。 */
-  setDelegationId(id: string) { this.delegationId = id; }
+  /** 宿主在帧回调里构造样本（掌握单调序号与生命周期），再喂给库。 */
+  setFrameSink(fn: (entity: WalkBody['entity']) => void) { this.frameSink = fn; }
 
-  move(request: ExecutableMove): Promise<ExecutableMoveResult> {
+  async move(request: ExecutableMove): Promise<ExecutableMoveResult> {
     const { from, to } = request;
+    // 控制前先检查取消与期限：已取消的请求不得写任何控制。
+    if (request.signal.aborted) return { failure: { kind: 'cancelled' } };
+    if (this.now() >= request.deadlineMs) return { failure: { kind: 'timed_out' } };
     this.body.look(Math.atan2(-(to.x - from.x), -(to.z - from.z)), 0);
+    // 转头后重新检查所有权/取消：转头等待期间可能被抢占。
+    if (request.signal.aborted) return { failure: { kind: 'cancelled' } };
     this.body.clearControlStates();
     this.body.setControlState('forward', true);
+    this.activeExecutionId = request.executionId;
     const GROUND_STOP = 1 / (1 - 0.546); // 地面摩擦每 tick 衰减到约 0.546 倍
     let braked = false;
-    let sequence = 0;
-    const scope = { worldId: request.worldId, dim: request.dim, sessionId: request.sessionId, executionId: this.delegationId ?? request.executionId };
-    // 同步驱动该段：采样推给库，库在 onSample 里确认到达 → stop/abort 并 recordArrival。
-    // 这里的返回结果对库是 fire-and-forget（stopActive 已清 activeExecutionId），只用于超时兜底。
     for (let i = 0; i < 400; i++) {
-      if (request.signal.aborted) { this.body.setControlState('forward', false); return Promise.resolve({ failure: { kind: 'cancelled' } }); }
-      if (this.now() >= request.deadlineMs) { this.body.setControlState('forward', false); return Promise.resolve({ failure: { kind: 'timed_out' } }); }
+      if (request.signal.aborted) { this.releaseIf(request.executionId); return { failure: { kind: 'cancelled' } }; }
+      if (this.now() >= request.deadlineMs) { this.releaseIf(request.executionId); return { failure: { kind: 'timed_out' } }; }
       const e = this.tick();
       const dist = Math.hypot(to.x - e.position.x, to.z - e.position.z);
       const speed = Math.hypot(e.velocity.x, e.velocity.z);
       if (!braked && dist <= speed * GROUND_STOP) { this.body.setControlState('forward', false); braked = true; }
-      this.sampleSink?.(bodySample(scope, e, this.now(), ++sequence));
+      this.frameSink?.(e);
+      // 让出事件循环：库的 onSample 确认到达 → stop/abort，及其 move 结果微任务得以执行。
+      await new Promise((r) => setImmediate(r));
     }
-    this.body.setControlState('forward', false);
-    return Promise.resolve({ failure: { kind: 'timed_out' } });
+    this.releaseIf(request.executionId);
+    return { failure: { kind: 'timed_out' } };
   }
 
   stop(executionId: string): void {
+    if (executionId !== this.activeExecutionId) return; // 旧段不能清理新段的控制
     this.body.setControlState('forward', false);
     this.body.clearControlStates();
+  }
+
+  private releaseIf(executionId: string): void {
+    if (executionId === this.activeExecutionId) this.body.setControlState('forward', false);
+    this.activeExecutionId = null;
   }
 }
 
 /**
- * 驱动一个已选短路线，直到终态。MoveExecutor 在 advance 里自驱单段（制动 + 采样 + 推库），
- * 本函数只负责推进库的验证/复验/取消归属，并在到达确认前先处理世界观测。
+ * 驱动一个已选短路线，直到终态。MoveExecutor 在 advance 里自驱单段，宿主负责采样、
+ * 序号与生命周期，并在到达确认前先处理世界观测。
  */
 export async function runWalkRoute(opts: {
   map: VoxelMap;
   body: WalkBody;
   request: WalkRouteRequest;
   tick: WalkTick;
+  lifecycle?: () => WalkLifecycle;
   observe?: () => ChangeReport | null;
   deadlineMs?: number;
   now?: () => number;
 }): Promise<NavResult> {
   const now = opts.now ?? Date.now;
   const deadline = opts.deadlineMs ?? opts.request.deadlineMs;
+  const lifecycle = opts.lifecycle ?? (() => ({ alive: true, connected: true, observationReady: true }));
   const executor = new WalkMoveExecutor(opts.body, opts.tick, now);
   const loop = new WalkRouteExecutor(opts.map, executor, { now });
-  executor.setSampleSink((sample) => loop.onSample(sample));
+  let sequence = 0; // 委托内单调递增，跨段不重置
+  const scope = { worldId: opts.request.worldId, dim: opts.request.dim, sessionId: opts.request.sessionId, executionId: '' };
 
   loop.start(opts.request);
-  executor.setDelegationId(loop.status()!.delegationId);
-  // 初始实测位置：bodyArrival 需要多帧确认身体稳定在起点（stableMs + onGround），advance 才会启动首段。
-  {
-    const scope = { worldId: opts.request.worldId, dim: opts.request.dim, sessionId: opts.request.sessionId, executionId: loop.status()!.delegationId };
-    for (let i = 0; i < 8; i++) loop.onSample(bodySample(scope, opts.tick(), now(), i + 1));
-  }
+  scope.executionId = loop.status()!.delegationId;
+  executor.setFrameSink((entity) => loop.onSample(bodySample(scope, entity, now(), ++sequence, lifecycle())));
+
+  // 初始实测位置：bodyArrival 需要多帧确认身体稳定在起点，advance 才会启动首段。
+  for (let i = 0; i < 8; i++) loop.onSample(bodySample(scope, opts.tick(), now(), ++sequence, lifecycle()));
+
   let iterations = 0;
   while (loop.status()!.result === null && now() < deadline && iterations++ < 2000) {
-    loop.advance(64);
-    // 先处理本轮世界观测，再允许身体样本确认到达。
+    // 先处理本轮世界观测，再 advance（世界变化先于到达确认；异步 move 返回也遵守同一顺序）。
     const report = opts.observe?.();
     if (report) loop.observe(report, 64);
+    loop.advance(64);
     loop.checkTimeout();
     await new Promise((r) => setImmediate(r));
   }
   return loop.status()!.result ?? { outcome: 'FAILED', message: 'no route result', problem: { kind: 'execution_failed', detail: 'loop ended without a terminal result' }, confirmed: false, trace: [] };
 }
+
+export { GROUNDED_ARRIVAL_DEFAULTS };
