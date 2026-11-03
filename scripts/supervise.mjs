@@ -28,8 +28,8 @@ const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
 function dataDirFrom(root, envFile) {
   const env = { ...(fs.existsSync(envFile) ? parseEnv(fs.readFileSync(envFile, 'utf8')) : {}), ...process.env };
   const configuredMode = env.CURIO_MODE?.trim() || 'local';
-  if (configuredMode !== 'local' && configuredMode !== 'live') throw new Error('CURIO_MODE 必须为 local 或 live');
-  const mode = path.basename(envFile) === '.env.live' ? 'live' : configuredMode;
+  if (configuredMode !== 'local' && configuredMode !== 'live' && configuredMode !== 'test') throw new Error('CURIO_MODE 必须为 local、live 或 test');
+  const mode = path.basename(envFile) === '.env.live' ? 'live' : path.basename(envFile) === '.env.test' ? 'test' : configuredMode;
   return path.resolve(root, env.DATA_DIR?.trim() || path.join('data', mode));
 }
 
@@ -154,14 +154,14 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const curioRoot = (process.env.CURIO_ROOT || rootEnvVars.CURIO_ROOT || '').trim();
   const curioArg = process.argv.find((a) => a.startsWith('--curio='))?.slice('--curio='.length);
   if (curioArg) {
-    if (curioArg !== 'live' && curioArg !== 'local') throw new Error(`--curio 只支持 live / local，收到：${curioArg}`);
+    if (curioArg !== 'live' && curioArg !== 'local' && curioArg !== 'test') throw new Error(`--curio 只支持 live / local / test，收到：${curioArg}`);
     if (!curioRoot) throw new Error('--curio 需要 CURIO_ROOT（进程环境变量或项目根目录 .env 里设置）');
   }
   let selectedEnv = curioArg
     ? path.join(curioRoot, `.env.${curioArg}`)
     : process.execArgv.find((arg) => arg.startsWith('--env-file='))?.slice('--env-file='.length)
       || process.env.ENV_FILE?.trim();
-  if (selectedEnv === 'live' || selectedEnv === 'local') {
+  if (selectedEnv === 'live' || selectedEnv === 'local' || selectedEnv === 'test') {
     if (!curioRoot) throw new Error(`裸模式 ${selectedEnv} 需要 CURIO_ROOT（进程环境变量或项目根目录 .env 里设置）`);
     selectedEnv = path.join(curioRoot, `.env.${selectedEnv}`);
   }

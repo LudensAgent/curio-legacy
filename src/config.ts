@@ -1,7 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseEnv } from 'node:util';
+import { assertTestIsolation, peerLayouts } from './config/isolation.ts';
 import { memorySettings } from './memory/settings.ts';
+
+/** 仓库根：隔离校验与各脚本按同一锚点解析相对路径。 */
+const projectDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 // CURIO_ROOT：env + 数据放在项目外（如 /path/to/curio）时，用裸关键字 live / local 定位 $CURIO_ROOT/.env.<mode>。
 // 优先进程环境变量，其次读项目根目录 .env（与 scripts/supervise.mjs 保持一致）。
@@ -12,21 +17,24 @@ const curioRoot = (() => {
   return fs.existsSync(f) ? (parseEnv(fs.readFileSync(f, 'utf8')).CURIO_ROOT?.trim() ?? '') : '';
 })();
 const curioArg = process.argv.find((arg) => arg.startsWith('--curio='))?.slice('--curio='.length);
-if (curioArg && curioArg !== 'live' && curioArg !== 'local') throw new Error(`--curio 只支持 live / local，收到：${curioArg}`);
+if (curioArg && curioArg !== 'live' && curioArg !== 'local' && curioArg !== 'test') throw new Error(`--curio 只支持 live / local / test，收到：${curioArg}`);
 const selectedEnvRaw = curioArg
   || process.execArgv.find((arg) => arg.startsWith('--env-file='))?.slice('--env-file='.length)
   || process.env.ENV_FILE?.trim();
-const isBareMode = selectedEnvRaw === 'live' || selectedEnvRaw === 'local';
+const isBareMode = selectedEnvRaw === 'live' || selectedEnvRaw === 'local' || selectedEnvRaw === 'test';
 if (isBareMode && !curioRoot) throw new Error(`裸模式 ${selectedEnvRaw} 需要 CURIO_ROOT（进程环境变量或项目根目录 .env 里设置）`);
 const selectedEnv = isBareMode ? path.join(curioRoot, `.env.${selectedEnvRaw}`) : selectedEnvRaw;
 export const envFile = path.resolve(selectedEnv || '.env');
 const hasEnv = fs.existsSync(envFile);
 if (selectedEnvRaw && !hasEnv) throw new Error(`找不到配置文件：${envFile}`);
 
-// 公共 .env + 模式覆盖文件（.env.local / .env.live / 自定义）合并。
+// 公共 .env + 模式覆盖文件（.env.local / .env.live / .env.test / 自定义）合并。
 // 优先级：进程环境变量 > 模式文件 > 公共 .env（process.loadEnvFile 会覆盖已存在的变量，故手动合并再按序回填）。
-const readVars = (file: string) => (fs.existsSync(file) ? parseEnv(fs.readFileSync(file, 'utf8')) : {});
-const merged = { ...readVars(path.join(path.dirname(envFile), '.env')), ...readVars(envFile) };
+const readVars = (file: string): Record<string, string | undefined> => (fs.existsSync(file) ? parseEnv(fs.readFileSync(file, 'utf8')) : {});
+const modeVars = readVars(envFile);
+// test 必须显式指定世界身份：只在公共 .env 里的 MEMORY_WORLD_ID 不算显式（会与其它环境混用空间记录）。
+const worldIdExplicit = (process.env.MEMORY_WORLD_ID ?? '').trim() !== '' || (modeVars.MEMORY_WORLD_ID ?? '').trim() !== '';
+const merged = { ...readVars(path.join(path.dirname(envFile), '.env')), ...modeVars };
 for (const [k, v] of Object.entries(merged)) {
   if (v !== undefined && process.env[k] === undefined) process.env[k] = v;
 }
@@ -44,8 +52,10 @@ const bool = (k: string, d: boolean) => {
 
 const observer = str('OBSERVER_PLAYER');
 const configuredMode = str('CURIO_MODE', 'local');
-if (configuredMode !== 'local' && configuredMode !== 'live') throw new Error('CURIO_MODE 必须为 local 或 live');
-const mode = path.basename(envFile) === '.env.live' ? 'live' : configuredMode;
+const MODES: readonly string[] = ['local', 'live', 'test'];
+if (!MODES.includes(configuredMode)) throw new Error('CURIO_MODE 必须为 local、live 或 test');
+const modeByFile = path.basename(envFile) === '.env.live' ? 'live' : path.basename(envFile) === '.env.test' ? 'test' : null;
+const mode = (modeByFile ?? configuredMode) as 'local' | 'live' | 'test';
 const dataDir = path.resolve(str('DATA_DIR') || `./data/${mode}`);
 
 export const config = {
@@ -123,6 +133,13 @@ export const config = {
     '你叫 Muses，一个目标明确、喜欢记录新发现的 Minecraft 探险家，一路从空手求生走向打败末影龙：砍树做工具、下矿炼铁、进下界拿烈焰棒、合成末影之眼找到要塞，最后在末地解放末影龙。',
   ),
   memory: memorySettings({ ...process.env, DATA_DIR: dataDir }),
+  /**
+   * 空间记忆库（curio-minecraft-3d-memory）的 SQLite 数据库文件：库继续接受显式参数，不识别 local/live/test。
+   * 默认放在 DATA_DIR 下，随数据目录一起隔离；首轮只提供路径，尚未由 Curio 主流程打开（walk 闭环仍是离线接线）。
+   */
+  spatial: {
+    databasePath: path.resolve(str('SPATIAL_DB_PATH') || path.join(dataDir, 'spatial', 'spatial.sqlite')),
+  },
   /** 心智层：像真人一样一段一段地玩、边做边想 */
   mind: {
     /** 性格关键词（逗号分隔），会进入每次思考，也保存在 DATA_DIR/mind.json */
@@ -179,7 +196,7 @@ export const config = {
   },
   dashboard: {
     host: str('DASHBOARD_HOST', '127.0.0.1'),
-    port: num('DASHBOARD_PORT', mode === 'live' ? 3000 : 3001),
+    port: num('DASHBOARD_PORT', mode === 'live' ? 3000 : mode === 'test' ? 3002 : 3001),
   },
   vision: {
     // 0 或 auto = 跟随服务器 view-distance
@@ -210,8 +227,30 @@ export const config = {
   /** 记忆服务（Hindsight）所用模型的价格覆盖，格式同 LLM_PRICE；不写就按它上报的模型名查内置价格表 */
   memoryLlmPrice: str('MEMORY_LLM_PRICE'),
   /** 观察者模组 HUD 的布局和开关（控制台「直播」页修改）：直播设置，不跟着角色存档走 */
-  observerHudConfig: path.resolve(str('OBSERVER_HUD_CONFIG', mode === 'live' ? './live/observer-hud.json' : './live/observer-hud.local.json')),
+  observerHudConfig: path.resolve(str('OBSERVER_HUD_CONFIG', `./live/${mode === 'live' ? 'observer-hud.json' : `observer-hud.${mode}.json`}`)),
 };
+
+// test 是宿主运行环境：在连接游戏、打开数据库等任何副作用之前，先确认它不会踩到 local/live 的地址、数据库或数据目录。
+if (mode === 'test') {
+  const serverDir = path.resolve(projectDir, str('SERVER_DIR') || 'world');
+  const agentsDir = path.resolve(projectDir, str('AGENTS_DIR') || path.join('agents', mode));
+  assertTestIsolation({
+    mode: 'test',
+    dataDir,
+    serverDir,
+    agentsDir,
+    llmArchiveDir: config.llmArchiveDir,
+    danmakuArchiveDir: config.danmakuArchiveDir,
+    observerHudConfig: config.observerHudConfig,
+    spatialDbPath: config.spatial.databasePath,
+    worldId: config.memory.worldId,
+    mcHost: config.mc.host,
+    mcPort: config.mc.port,
+    rconHost: config.observer.rconHost,
+    rconPort: config.observer.rconPort,
+    dashboardPort: config.dashboard.port,
+  }, peerLayouts(projectDir, curioRoot, 'test'), { worldIdExplicit });
+}
 
 export type Config = typeof config;
 
