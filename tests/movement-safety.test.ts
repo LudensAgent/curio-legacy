@@ -39,10 +39,8 @@ test('walking preserves terrain by default and only explicit terrain work restor
   const walking = selected[1];
   assert.notEqual(walking, safe);
   assert.equal(walking instanceof Movements, true);
-  assert.equal(walking.blocksCantBreak.has(registry.blocksByName.stone.id), true, 'ordinary walking must not tunnel through a wall');
-  assert.equal(walking.blocksCantBreak.has(registry.blocksByName.dirt.id), true);
-  assert.equal(walking.blocksCantBreak.has(registry.blocksByName.spruce_leaves.id), false, 'leaves can be pushed through like a player would');
-  assert.equal(original.blocksCantBreak.has(registry.blocksByName.stone.id), false, 'the base configuration stays intact');
+  assert.equal(walking.canDig, false, 'ordinary walking must not tunnel through a wall or clear leaves');
+  assert.equal(original.canDig, true, 'the base configuration stays intact');
   assert.equal(walking.allow1by1towers, false, 'ordinary walking must not build pillars');
   assert.deepEqual(walking.scafoldingBlocks, [], 'ordinary walking must not bridge an unsupported edge');
   assert.equal(walking.allowParkour, false, 'parkour jumps from off-centre starts leave the bot stuck on edges');

@@ -60,7 +60,7 @@ test('moveTo retains legacy permissions but independently disables scaffolding a
     [{ allowPlace: true, allowTower: true }, false, true, true],
   ] as const) {
     await adapter.moveTo({ kind: 'xz', x: 2, z: 0, range: 1 }, { ...opts, ...permissions });
-    assert.equal(selected.blocksCantBreak.has(registry.blocksByName.stone.id), !dig);
+    assert.equal(selected.canDig, dig);
     assert.equal(selected.scafoldingBlocks.length > 0, place);
     assert.equal(selected.allow1by1towers, tower);
   }

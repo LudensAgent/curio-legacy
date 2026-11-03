@@ -1,0 +1,163 @@
+import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { createRequire } from 'node:module';
+import { test } from 'node:test';
+import { Vec3 } from 'vec3';
+import { MineflayerAdapter } from '../src/adapter/mineflayer.ts';
+import { config } from '../src/config.ts';
+import { EventBus } from '../src/events.ts';
+
+const require = createRequire(import.meta.url);
+const data = require('minecraft-data')('1.20.1');
+const Block = require('prismarine-block')(data);
+const { Physics, PlayerState } = require('prismarine-physics');
+
+/** 一段相邻地面步的物理世界：原点列 + 目标列各一块，其余按 y≤63 实心、以上空气。 */
+function stepWorld(origin: { name: string; props: Record<string, string | number> }, target: { name: string; props: Record<string, string | number> }) {
+  const originState = Block.fromProperties(origin.name, origin.props, 0).stateId;
+  const targetState = Block.fromProperties(target.name, target.props, 0).stateId;
+  return {
+    getBlock(position: { floored(): { x: number; y: number; z: number } }) {
+      const p = position.floored();
+      let stateId = p.y <= 63 ? data.blocksByName.stone.defaultState : data.blocksByName.air.defaultState;
+      if (p.x === 0 && p.z === 0 && p.y === 63) stateId = originState;
+      if (p.x === 0 && p.z === -1 && p.y === 63) stateId = targetState;
+      const block = Block.fromStateId(stateId, 0);
+      block.position = p;
+      return block;
+    },
+  };
+}
+
+/** 纯物理探针：按住前进，返回身体进入目标列（z=-1）期间的最低脚高——证明薄层会被真实踩下。 */
+function minFootInTarget(world: ReturnType<typeof stepWorld>, startFootY: number) {
+  const control = { forward: true, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
+  const entity = { position: new Vec3(0.5, startFootY, 0.5), velocity: new Vec3(0, 0, 0), onGround: true,
+    isInWater: false, isInLava: false, isInWeb: false, isCollidedHorizontally: false, isCollidedVertically: false,
+    yaw: 0, pitch: 0, effects: {}, attributes: {} };
+  const bot = { version: '1.20.1', entity, jumpTicks: 0, jumpQueued: false, fireworkRocketDuration: 0, inventory: { slots: [] } };
+  const physics = Physics(data, world);
+  let minY = Infinity;
+  for (let i = 0; i < 120; i++) {
+    physics.simulatePlayer(new PlayerState(bot, control), world).apply(bot);
+    if (Math.floor(bot.entity.position.z) === -1) minY = Math.min(minY, bot.entity.position.y);
+  }
+  return minY;
+}
+
+/** 带真实物理的 bot：setControlState 驱动控制，50ms 一 tick 推物理。 */
+function physicsBot(world: ReturnType<typeof stepWorld>, startFootY: number) {
+  const control: Record<string, boolean> = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
+  const entity = { position: new Vec3(0.5, startFootY, 0.5), velocity: new Vec3(0, 0, 0), onGround: true,
+    isInWater: false, isInLava: false, isInWeb: false, isCollidedHorizontally: false, isCollidedVertically: false,
+    yaw: 0, pitch: 0, effects: {}, attributes: {} };
+  const bot: any = Object.assign(new EventEmitter(), {
+    version: '1.20.1', entity, control, jumpTicks: 0, jumpQueued: false, fireworkRocketDuration: 0,
+    inventory: { slots: [] }, vehicle: null, game: { dimension: 'overworld' },
+    setControlState(name: string, value: boolean) { control[name] = value; },
+    clearControlStates() { for (const k of Object.keys(control)) control[k] = false; },
+    look(yaw: number, pitch: number) { entity.yaw = yaw; entity.pitch = pitch; },
+    pathfinder: { goto: async () => {}, setGoal() {}, stop() {}, setMovements() {}, isMoving: () => false, isBuilding: () => false },
+  });
+  const physics = Physics(data, world);
+  const timer = setInterval(() => { physics.simulatePlayer(new PlayerState(bot, control), world).apply(bot); }, 50);
+  timer.unref?.();
+  return { bot, timer };
+}
+
+function adapter(bot: any) {
+  const a = new MineflayerAdapter(config, new EventBus());
+  a.bot = bot; a.mcData = data; Reflect.set(a, 'connectedFlag', true);
+  return a;
+}
+
+test('物理：从整块前进一步踩到耕地（脚高 63.9375），不是停在整数节点', () => {
+  const world = stepWorld({ name: 'stone', props: {} }, { name: 'farmland', props: {} });
+  const minY = minFootInTarget(world, 64);
+  assert.ok(Math.abs(minY - 63.9375) <= 0.02, `最低脚高 ${minY}`);
+});
+
+test('物理：从整块下一步踩到底半砖（脚高 63.5）', () => {
+  const world = stepWorld({ name: 'stone', props: {} }, { name: 'oak_slab', props: { type: 'bottom' } });
+  const minY = minFootInTarget(world, 64);
+  // 采样时刻身体仍在向下沉降，允许 0.1 容差；关键是踩到半砖顶面（≈63.5），而不是停在 64 或穿透到 63。
+  assert.ok(minY >= 63.5 && minY < 63.6, `最低脚高 ${minY}`);
+});
+
+test('moveTo 在寻路按节点提前结算后，闭环前推真正落到目标薄层，且一到即停', async (t) => {
+  const world = stepWorld({ name: 'stone', props: {} }, { name: 'farmland', props: {} });
+  const { bot, timer } = physicsBot(world, 64);
+  t.after(() => clearInterval(timer));
+  const a = adapter(bot);
+  // 寻路按整数节点立刻结算（节点 64→64 未变），身体仍由原支撑托住。
+  await a.moveTo({ kind: 'xyz', x: 0, y: 63.9375, z: -1 }, { signal: new AbortController().signal, timeoutMs: 4000, allowTerrainChanges: false });
+  assert.ok(Math.abs(bot.entity.position.y - 63.9375) <= 0.01, `脚高 ${bot.entity.position.y}`);
+  assert.equal(Math.floor(bot.entity.position.z), -1);
+  assert.ok(bot.entity.position.z > -1, `越过目标格 z=${bot.entity.position.z}`);
+  assert.equal(bot.control.forward, false, '到达后应已松开前进键');
+});
+
+test('moveTo 从底半砖上一步到整块（脚高 64）也能闭环完成', async (t) => {
+  const world = stepWorld({ name: 'oak_slab', props: { type: 'bottom' } }, { name: 'stone', props: {} });
+  const { bot, timer } = physicsBot(world, 63.5);
+  t.after(() => clearInterval(timer));
+  const a = adapter(bot);
+  await a.moveTo({ kind: 'xyz', x: 0, y: 64, z: -1 }, { signal: new AbortController().signal, timeoutMs: 4000, allowTerrainChanges: false });
+  assert.ok(Math.abs(bot.entity.position.y - 64) <= 0.01, `脚高 ${bot.entity.position.y}`);
+  assert.equal(Math.floor(bot.entity.position.z), -1);
+});
+
+test('身体离目标太远时不盲目前推', async (t) => {
+  const world = stepWorld({ name: 'stone', props: {} }, { name: 'farmland', props: {} });
+  const { bot, timer } = physicsBot(world, 64);
+  t.after(() => clearInterval(timer));
+  const a = adapter(bot);
+  const forwardSets: boolean[] = [];
+  const orig = bot.setControlState.bind(bot);
+  bot.setControlState = (name: string, value: boolean) => { if (name === 'forward') forwardSets.push(value); orig(name, value); };
+  // 寻路空返回（path.length === 0 的 noPath），身体离目标 4 格，不在相邻单步范围内。
+  bot.pathfinder.goto = async () => {};
+  await assert.rejects(a.moveTo({ kind: 'xyz', x: 4, y: 64, z: 0 }, { signal: new AbortController().signal, timeoutMs: 1000 }), /尚未到达目标/);
+  assert.equal(forwardSets.some((v) => v === true), false, '不该为远离目标启动前推');
+});
+
+test('寻路直接报 NoPath 时不启动前推', async (t) => {
+  const world = stepWorld({ name: 'stone', props: {} }, { name: 'farmland', props: {} });
+  const { bot, timer } = physicsBot(world, 64);
+  t.after(() => clearInterval(timer));
+  const a = adapter(bot);
+  const forwardSets: boolean[] = [];
+  const orig = bot.setControlState.bind(bot);
+  bot.setControlState = (name: string, value: boolean) => { if (name === 'forward') forwardSets.push(value); orig(name, value); };
+  bot.pathfinder.goto = async () => { throw Object.assign(new Error('No path to the goal!'), { name: 'NoPath' }); };
+  await assert.rejects(a.moveTo({ kind: 'xyz', x: 0, y: 63.9375, z: -1 }, { signal: new AbortController().signal, timeoutMs: 1000 }), /No path/);
+  assert.equal(forwardSets.some((v) => v === true), false, 'NoPath 后不该前推');
+});
+
+test('末段前推的期限已过时不发前进键', async () => {
+  const world = stepWorld({ name: 'stone', props: {} }, { name: 'farmland', props: {} });
+  const { bot, timer } = physicsBot(world, 64);
+  clearInterval(timer);
+  const a = adapter(bot);
+  const forwardSets: boolean[] = [];
+  const orig = bot.setControlState.bind(bot);
+  bot.setControlState = (name: string, value: boolean) => { if (name === 'forward') forwardSets.push(value); orig(name, value); };
+  const check = (a as any).actionCheckpoint(new AbortController().signal);
+  const done = await (a as any).finishAdjacentStep({ x: 0, y: 63.9375, z: -1 }, Date.now() - 1, check);
+  assert.equal(done, false);
+  assert.equal(forwardSets.length, 0, '期限已过不该发任何前进键');
+});
+
+test('纯移动不改变地形：普通 moveTo 不允许寻路挖掘（含树叶）、架桥或搭柱', async () => {
+  const { Movements } = require('mineflayer-pathfinder');
+  let selected: any;
+  const bot: any = { registry: data, game: { dimension: 'overworld' }, entity: { position: new Vec3(2.5, 64, 0.5) }, inventory: { items: () => [] },
+    pathfinder: { setMovements: (m: unknown) => { selected = m; }, goto: async () => {} } };
+  const a = adapter(bot);
+  (a as any).normalMovements = new Movements(bot);
+  (a as any).normalMovements.allow1by1towers = true;
+  await a.moveTo({ kind: 'xyz', x: 2, y: 64, z: 0 }, { signal: new AbortController().signal, timeoutMs: 1000 });
+  assert.equal(selected.canDig, false, '纯移动不得允许寻路挖块（含树叶）');
+  assert.equal(selected.scafoldingBlocks.length, 0, '纯移动不得允许架桥');
+  assert.equal(selected.allow1by1towers, false, '纯移动不得允许搭柱');
+});

@@ -943,12 +943,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (opts.maxDropDown !== undefined && (!this.normalMovements || typeof b.pathfinder.setMovements !== 'function')) throw new Error('No path: 当前寻路器不能配置明确下行范围');
     if (this.normalMovements && typeof b.pathfinder.setMovements === 'function') {
       const movements = cornerSafe(Object.assign(Object.create(Object.getPrototypeOf(this.normalMovements)), this.normalMovements));
-      if (opts.constructionSafe) {
+      if (opts.constructionSafe || !opts.allowTerrainChanges) {
+        // 纯移动不改地形：不挖（含树叶）、不搭柱、不架桥。明确挖掘/爬升动作另行 allowTerrainChanges:true 授权。
         movements.canDig = false; movements.allow1by1towers = false; movements.scafoldingBlocks = [];
-      } else if (!opts.allowTerrainChanges) {
-        // 普通走路不挖墙、不搭柱、不架桥；但像真人一样可以随手拨开树叶（站在树冠上、钻过灌木丛时）。
-        movements.canDig = true; movements.allow1by1towers = false; movements.scafoldingBlocks = [];
-        movements.blocksCantBreak = this.allButLeaves(movements.blocksCantBreak);
       }
       if (!opts.constructionSafe) {
         const allowPlace = opts.allowPlace ?? !!opts.allowTerrainChanges;
@@ -1144,6 +1141,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         break;
       }
     }
+    const deadline = Date.now() + opts.timeoutMs;
     await this.gotoUnstalled(goal, opts, check);
     check();
     // Pathfinder can resolve an empty noPath result without reaching its goal.
@@ -1156,22 +1154,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const position = b.entity.position;
     if (target.kind === 'xyz') {
       // xyz 的 y 是脚高（可为分数）：验收实际脚高与列，不只看节点——半砖脚高 64.5 与整块脚高 65 落在同一节点。
-      const cell = position.floored();
-      if (cell.x !== Math.floor(target.x) || cell.z !== Math.floor(target.z) || Math.abs(position.y - target.y) > 0.01) {
-        throw new Error(`No path: 寻路结束但尚未到达目标，实际位于 (${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})`);
-      }
+      const atTarget = () => {
+        const p = b.entity.position;
+        const cell = p.floored();
+        return cell.x === Math.floor(target.x) && cell.z === Math.floor(target.z) && Math.abs(p.y - target.y) <= 0.01;
+      };
+      // 末段收尾：寻路按整数节点提前结算（薄层/小落差时身体仍由原支撑托住），补一次闭环前推完成这一步。
+      // 只覆盖干地相邻单步；明确 allowSwimming 的入水落点（descend 水面）保留自己的推进与上岸验收。
+      if (!atTarget() && !opts.allowSwimming) await this.finishAdjacentStep({ x: target.x, y: target.y, z: target.z }, deadline, check);
+      if (!atTarget()) throw new Error(`No path: 寻路结束但尚未到达目标，实际位于 (${b.entity.position.x.toFixed(2)},${b.entity.position.y.toFixed(2)},${b.entity.position.z.toFixed(2)})`);
     } else if (!goal.isEnd(position.floored())) throw new Error(`No path: 寻路结束但尚未到达目标，实际位于 (${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})`);
-  }
-
-  private leafOnlyBreakable: Set<number> | null = null;
-  /** 除树叶以外都不能拆：普通走路只允许拨开树叶 */
-  private allButLeaves(base: Set<number>): Set<number> {
-    if (!this.leafOnlyBreakable) {
-      const registry = this.mcData ?? this.bot?.registry;
-      const blocks: any[] = registry?.blocksArray ?? Object.values(registry?.blocks ?? {});
-      this.leafOnlyBreakable = new Set(blocks.filter((b: any) => !/_leaves$/.test(String(b?.name))).map((b: any) => b.id));
-    }
-    return new Set([...base, ...this.leafOnlyBreakable]);
   }
 
   /**
@@ -1424,6 +1416,43 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       return `确认脚下有支撑，向${label}挪半步后重新寻路`;
     }
     return null;
+  }
+
+  /**
+   * 末段收尾：mineflayer-pathfinder 的 goal_reached 只按整数节点判定，薄层/小落差的一步会在身体
+   * 仍由原支撑托住、还没踩上目标支撑面时提前结算（节点已到、脚高未到）。此时身体已贴近目标列且
+   * 仍在地面，面朝目标列中心按住前进，逐 tick 按真实脚高与列验收，一到即停，不追加固定时长。
+   * 只覆盖相邻单步（水平 ≤1.2、脚高差 ≤1）且确有有效依据（goto 已成功结算）；不因空 noPath 或
+   * 一般寻路失败盲目前进。共用原 deadline，释放按键前确认仍拥有本次控制，旧回调不能松新动作的键。
+   */
+  private async finishAdjacentStep(target: { x: number; y: number; z: number }, deadline: number, check: (() => void) & { signal?: AbortSignal }): Promise<boolean> {
+    const b = this.bot, e = b?.entity;
+    if (!e?.position || !e.onGround || e.isInWater || e.isInLava || b.vehicle) return false;
+    if (typeof b.setControlState !== 'function' || typeof b.clearControlStates !== 'function') return false;
+    const tx = Math.floor(target.x) + 0.5, tz = Math.floor(target.z) + 0.5;
+    const arrived = () => {
+      const p = b.entity.position;
+      return Math.floor(p.x) === Math.floor(target.x) && Math.floor(p.z) === Math.floor(target.z)
+        && Math.abs(p.y - target.y) <= 0.01;
+    };
+    const p = b.entity.position;
+    if (Date.now() >= deadline) return false;
+    if (Math.hypot(tx - p.x, tz - p.z) > 1.2 || Math.abs(p.y - target.y) > 1) return false;
+    const epoch = this.actionEpoch, dimension = this.currentDimension();
+    const ownsControls = () => epoch === this.actionEpoch && b === this.bot && dimension === this.currentDimension();
+    check();
+    if (typeof b.look === 'function') { try { b.look(Math.atan2(-(tx - p.x), -(tz - p.z)), 0, true); } catch { /* ignore */ } }
+    b.clearControlStates();
+    b.setControlState('forward', true);
+    try {
+      while (!arrived() && Date.now() < deadline) {
+        check();
+        await this.afterAction(() => sleep(Math.min(50, Math.max(1, deadline - Date.now())), check.signal), check);
+      }
+    } finally {
+      if (ownsControls()) { try { b.setControlState('forward', false); } catch { /* ignore */ } }
+    }
+    return arrived();
   }
 
   stopAll() {
