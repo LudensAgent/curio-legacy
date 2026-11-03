@@ -1334,20 +1334,33 @@ export class Mind {
       if (!sameActivity) { this.staleDropped++; return; } // 对旧活的调整，活已经换了
       const a = this.activity;
       const running = this.d.arbiter.info();
-      const sameStep = (step: Step | undefined, other: Step | undefined) => !!step && !!other
-        && step.skill === other.skill && isDeepStrictEqual(step.args ?? {}, other.args ?? {});
+      // 实例身份一致才算同一个执行实例：草案显式引用 ID 时必须与旧步骤 ID 相同，否则退到动作+参数比较。
+      const sameInstance = (draft: { skill: string; args?: unknown; id?: string } | undefined, old: { skill: string; args?: unknown; id?: string } | undefined) => {
+        if (!draft || !old) return false;
+        if (typeof draft.id === 'string' && draft.id) return draft.id === old.id;
+        return draft.skill === old.skill && isDeepStrictEqual(draft.args ?? {}, old.args ?? {});
+      };
       // 新计划可以从正在做的步骤开始，也可以保留已经做完的前缀。
-      // 只有当前步骤及其参数相同，且前面没有新动作时，才让它继续执行。
+      // 只有当前步骤（含实例 ID）相同，且前面没有新动作时，才让它继续执行。
       const currentIndex = a.index - 1;
-      const firstIsRunning = running?.planId === a.id && sameStep(draft.steps[0], running);
-      const keepsPrefix = running?.planId === a.id && currentIndex > 0 && sameStep(draft.steps[currentIndex], running)
-        && a.steps.slice(0, currentIndex).every((step, i) => sameStep(step, draft.steps[i]));
+      const runningOld = a.steps[currentIndex];
+      const firstIsRunning = running?.planId === a.id && sameInstance(draft.steps[0], runningOld);
+      const keepsPrefix = running?.planId === a.id && currentIndex > 0 && sameInstance(draft.steps[currentIndex], runningOld)
+        && a.steps.slice(0, currentIndex).every((step, i) => sameInstance(draft.steps[i], step));
       const runningIndex = keepsPrefix ? currentIndex : firstIsRunning ? 0 : -1;
       if (running?.planId === a.id && runningIndex < 0) this.d.arbiter.cancel('改了做法');
-      // 按实例 ID 继承预算：草案显式引用旧实例（id）或正在执行的动作保留原 ID；未引用的旧实例预算丢弃（停止自动续跑）。
-      const oldRunning = runningIndex >= 0 ? a.steps[currentIndex] : undefined;
+      // 按实例 ID 继承预算：引用必须存在、唯一、且动作与参数一致，否则丢弃旧 ID（新建/修改，不沿用旧账本验收新参数）。
+      const oldRunning = runningIndex >= 0 ? runningOld : undefined;
+      const claimed = new Set<string>();
       const steps = draft.steps.map((s, i) => {
-        if (typeof s.id === 'string' && s.id) return { ...s };
+        if (typeof s.id === 'string' && s.id) {
+          const old = a.steps.find((o) => o.id === s.id);
+          if (old && !claimed.has(s.id) && old.skill === s.skill && isDeepStrictEqual(old.args ?? {}, s.args ?? {})) {
+            claimed.add(s.id);
+            return { ...s };
+          }
+          return { ...s, id: shortId('st_') };
+        }
         if (i === runningIndex && oldRunning) return { ...s, id: oldRunning.id };
         return { ...s, id: shortId('st_') };
       });
