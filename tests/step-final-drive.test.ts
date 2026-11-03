@@ -71,6 +71,23 @@ function adapter(bot: any) {
   return a;
 }
 
+/** 有 setControlState 但身体不动的 bot：用来测终段在无法推进时耗尽期限。 */
+function noPhysicsBot() {
+  const control: Record<string, boolean> = {};
+  const forwardSets: boolean[] = [];
+  const bot: any = Object.assign(new EventEmitter(), {
+    version: '1.20.1',
+    entity: { position: new Vec3(0.5, 64, 0.5), velocity: new Vec3(0, 0, 0), onGround: true, isInWater: false, isInLava: false, isInWeb: false, isCollidedHorizontally: false, isCollidedVertically: false, yaw: 0, pitch: 0, effects: {}, attributes: {} },
+    jumpTicks: 0, jumpQueued: false, fireworkRocketDuration: 0,
+    inventory: { slots: [] }, vehicle: null, game: { dimension: 'overworld' },
+    setControlState(name: string, value: boolean) { control[name] = value; if (name === 'forward') forwardSets.push(value); },
+    clearControlStates() { for (const k of Object.keys(control)) control[k] = false; },
+    look() {},
+    pathfinder: { goto: async () => {}, setGoal() {}, stop() {}, setMovements() {}, isMoving: () => false, isBuilding: () => false },
+  });
+  return { bot, forwardSets };
+}
+
 test('物理：从整块前进一步踩到耕地（脚高 63.9375），不是停在整数节点', () => {
   const world = stepWorld({ name: 'stone', props: {} }, { name: 'farmland', props: {} });
   const minY = minFootInTarget(world, 64);
@@ -144,7 +161,7 @@ test('末段前推的期限已过时不发前进键', async () => {
   bot.setControlState = (name: string, value: boolean) => { if (name === 'forward') forwardSets.push(value); orig(name, value); };
   const check = (a as any).actionCheckpoint(new AbortController().signal);
   const done = await (a as any).finishAdjacentStep({ x: 0, y: 63.9375, z: -1 }, Date.now() - 1, check);
-  assert.equal(done, false);
+  assert.equal(done, 'timeout');
   assert.equal(forwardSets.length, 0, '期限已过不该发任何前进键');
 });
 
@@ -160,4 +177,51 @@ test('纯移动不改变地形：普通 moveTo 不允许寻路挖掘（含树叶
   assert.equal(selected.canDig, false, '纯移动不得允许寻路挖块（含树叶）');
   assert.equal(selected.scafoldingBlocks.length, 0, '纯移动不得允许架桥');
   assert.equal(selected.allow1by1towers, false, '纯移动不得允许搭柱');
+});
+
+test('相邻目标的空 noPath（goto 正常返回）不触发前推', async (t) => {
+  const world = stepWorld({ name: 'stone', props: {} }, { name: 'farmland', props: {} });
+  const { bot, timer } = physicsBot(world, 64);
+  t.after(() => clearInterval(timer));
+  const a = adapter(bot);
+  const forwardSets: boolean[] = [];
+  const orig = bot.setControlState.bind(bot);
+  bot.setControlState = (name: string, value: boolean) => { if (name === 'forward') forwardSets.push(value); orig(name, value); };
+  // 已安装 Pathfinder 的 goto 在 path:[]、status:noPath 时会正常返回（不抛错），这里复现。
+  const pathfinderGoto = require('mineflayer-pathfinder/lib/goto');
+  bot.pathfinder.goto = (goal: any) => pathfinderGoto(bot, goal);
+  bot.pathfinder.setGoal = () => { bot.emit('path_update', { status: 'noPath', path: [] }); };
+  await assert.rejects(a.moveTo({ kind: 'xyz', x: 0, y: 63.9375, z: -1 }, { signal: new AbortController().signal, timeoutMs: 1000 }), /尚未到达目标/);
+  assert.equal(forwardSets.some((v) => v === true), false, '空 noPath 不该前推');
+});
+
+test('单列半砖后方恢复整块：越段即停，不无限前推', async (t) => {
+  const world = stepWorld({ name: 'stone', props: {} }, { name: 'oak_slab', props: { type: 'bottom' } });
+  const { bot, timer } = physicsBot(world, 64);
+  t.after(() => clearInterval(timer));
+  // 寻路在节点边界提前结算后，身体已在原支撑边缘、带前进速度冲向薄层（复现越过单列半砖不停）。
+  bot.entity.position = new Vec3(0.5, 64, 0.0);
+  bot.entity.velocity = new Vec3(0, 0, -0.3);
+  const a = adapter(bot);
+  try { await a.moveTo({ kind: 'xyz', x: 0, y: 63.5, z: -1 }, { signal: new AbortController().signal, timeoutMs: 1500, allowTerrainChanges: false }); } catch { /* 越段或超时均属预期，关键是不得无限前推 */ }
+  assert.ok(Math.abs(bot.entity.position.z) < 3, `越段后不该继续前推，z=${bot.entity.position.z}`);
+  assert.equal(bot.control.forward, false, '越段后应松开前进键');
+});
+
+test('终段推进无法完成时报告 TIMEOUT 而非无路径', async () => {
+  const { bot } = noPhysicsBot();
+  const a = adapter(bot);
+  await assert.rejects(a.moveTo({ kind: 'xyz', x: 0, y: 63.9375, z: -1 }, { signal: new AbortController().signal, timeoutMs: 250 }), /TIMEOUT/);
+});
+
+test('到达后继续推进物理，身体仍稳定停在目标列', async (t) => {
+  const world = stepWorld({ name: 'stone', props: {} }, { name: 'farmland', props: {} });
+  const { bot, timer } = physicsBot(world, 64);
+  t.after(() => clearInterval(timer));
+  const a = adapter(bot);
+  await a.moveTo({ kind: 'xyz', x: 0, y: 63.9375, z: -1 }, { signal: new AbortController().signal, timeoutMs: 4000, allowTerrainChanges: false });
+  // moveTo 返回后再推进若干物理 tick：身体已稳定停住，不因惯性滑出目标列。
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(Math.floor(bot.entity.position.z), -1, `停稳后仍在目标列 z=${bot.entity.position.z}`);
+  assert.ok(Math.abs(bot.entity.position.y - 63.9375) <= 0.02, `停稳后脚高 ${bot.entity.position.y}`);
 });

@@ -1142,7 +1142,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       }
     }
     const deadline = Date.now() + opts.timeoutMs;
-    await this.gotoUnstalled(goal, opts, check);
+    const reached = await this.gotoUnstalled(goal, opts, check);
     check();
     // Pathfinder can resolve an empty noPath result without reaching its goal.
     // Following is measured against the entity's current cell, not its old one.
@@ -1159,10 +1159,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         const cell = p.floored();
         return cell.x === Math.floor(target.x) && cell.z === Math.floor(target.z) && Math.abs(p.y - target.y) <= 0.01;
       };
-      // 末段收尾：寻路按整数节点提前结算（薄层/小落差时身体仍由原支撑托住），补一次闭环前推完成这一步。
-      // 只覆盖干地相邻单步；明确 allowSwimming 的入水落点（descend 水面）保留自己的推进与上岸验收。
-      if (!atTarget() && !opts.allowSwimming) await this.finishAdjacentStep({ x: target.x, y: target.y, z: target.z }, deadline, check);
-      if (!atTarget()) throw new Error(`No path: 寻路结束但尚未到达目标，实际位于 (${b.entity.position.x.toFixed(2)},${b.entity.position.y.toFixed(2)},${b.entity.position.z.toFixed(2)})`);
+      const here = () => `(${b.entity.position.x.toFixed(2)},${b.entity.position.y.toFixed(2)},${b.entity.position.z.toFixed(2)})`;
+      // 末段收尾只在寻路确有有效路径（非空 noPath）时补推；越段/超时分别报告，不统一说成无路径。
+      if (!atTarget() && reached && !opts.allowSwimming) {
+        const outcome = await this.finishAdjacentStep({ x: target.x, y: target.y, z: target.z }, deadline, check);
+        if (!atTarget()) {
+          if (outcome === 'timeout') throw new Error(`TIMEOUT: 终段推进用尽时间预算，实际位于 ${here()}`);
+          throw new Error(`No path: ${outcome === 'overshot' ? '越过了所选相邻落点' : '寻路结束但尚未到达目标'}，实际位于 ${here()}`);
+        }
+      }
+      if (!atTarget()) throw new Error(`No path: 寻路结束但尚未到达目标，实际位于 ${here()}`);
     } else if (!goal.isEnd(position.floored())) throw new Error(`No path: 寻路结束但尚未到达目标，实际位于 (${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})`);
   }
 
@@ -1249,7 +1255,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   }
 
   /** Inspect the nearby obstruction before trying a short correction, then replan. */
-  private async gotoUnstalled(goal: any, opts: MoveOpts, check: () => void) {
+  private async gotoUnstalled(goal: any, opts: MoveOpts, check: () => void): Promise<boolean> {
     const b = this.bot;
     const epoch = this.actionEpoch, dimension = this.currentDimension();
     const ownsControls = () => epoch === this.actionEpoch && b === this.bot && dimension === this.currentDimension();
@@ -1265,8 +1271,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       let groundedY = b.entity?.onGround ? last?.y ?? null : null;
       let verticalY = last?.y ?? null;
       let plannedPath: { status: string; nodes: { x: number; y: number; z: number }[] } | null = null;
+      let emptyPath = false;
       const onPathUpdate = (result: { status: string; path: { x: number; y: number; z: number }[] }) => {
         plannedPath = { status: result.status, nodes: result.path.slice(0, 6).map(({ x, y, z }) => ({ x, y, z })) };
+        emptyPath = result.path.length === 0;
       };
       const onPhysicsTick = () => {
         const p = b.entity?.position;
@@ -1325,7 +1333,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         await this.afterAction(() => raceAbort(b.pathfinder.goto(goal), opts.signal, remaining, () => { if (ownsControls()) this.stopAll(); else this.actionEpoch++; }), check);
         // 搭柱被头顶/侧上方挡住：先当成一次停滞，走下面的 nudge 退半步重新规划；只有退不动了才抛 PILLAR_CLEARANCE 让心智去挖头顶
         if (blockedPillar) stalled = true;
-        if (!stalled) return;
+        // 已安装 Pathfinder 的 goto 在 path:[] 的 noPath 时也会正常返回；这不等于到达，返回 false 让上层别当有效路径补推。
+        if (!stalled) return !emptyPath;
       } catch (e: any) {
         if (blockedPillar && ownsControls() && e?.name !== 'AbortedError') stalled = true;
         if (!stalled || e?.name === 'AbortedError') throw e;
@@ -1421,38 +1430,66 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   /**
    * 末段收尾：mineflayer-pathfinder 的 goal_reached 只按整数节点判定，薄层/小落差的一步会在身体
    * 仍由原支撑托住、还没踩上目标支撑面时提前结算（节点已到、脚高未到）。此时身体已贴近目标列且
-   * 仍在地面，面朝目标列中心按住前进，逐 tick 按真实脚高与列验收，一到即停，不追加固定时长。
-   * 只覆盖相邻单步（水平 ≤1.2、脚高差 ≤1）且确有有效依据（goto 已成功结算）；不因空 noPath 或
-   * 一般寻路失败盲目前进。共用原 deadline，释放按键前确认仍拥有本次控制，旧回调不能松新动作的键。
+   * 仍在地面，分「水平接近 → 制动 → 落地确认」三阶段补完这一步：
+   *   - 接近：面朝目标列中心按住前进，接近中心即松键；越过中心（距离由减转增）或超出单步位移即停，
+   *     不会无限前推；
+   *   - 制动：松键后等惯性衰减；
+   *   - 落地确认：连续两拍站稳、列一致、脚高相符才算到达，不是只看松键瞬间的位置。
+   * 只在干地相邻单步（水平 ≤1.2、脚高差 ≤1）且确有有效路径依据时执行；共用原 deadline，释放按键前
+   * 确认仍拥有本次控制，旧回调不能松新动作的键。返回分类供调用方区分越段、超时与到达。
    */
-  private async finishAdjacentStep(target: { x: number; y: number; z: number }, deadline: number, check: (() => void) & { signal?: AbortSignal }): Promise<boolean> {
+  private async finishAdjacentStep(target: { x: number; y: number; z: number }, deadline: number, check: (() => void) & { signal?: AbortSignal }): Promise<'arrived' | 'overshot' | 'timeout' | 'blocked'> {
     const b = this.bot, e = b?.entity;
-    if (!e?.position || !e.onGround || e.isInWater || e.isInLava || b.vehicle) return false;
-    if (typeof b.setControlState !== 'function' || typeof b.clearControlStates !== 'function') return false;
+    if (!e?.position || !e.onGround || e.isInWater || e.isInLava || b.vehicle) return 'blocked';
+    if (typeof b.setControlState !== 'function' || typeof b.clearControlStates !== 'function') return 'blocked';
     const tx = Math.floor(target.x) + 0.5, tz = Math.floor(target.z) + 0.5;
-    const arrived = () => {
+    const fx = Math.floor(target.x), fz = Math.floor(target.z);
+    const settled = () => {
       const p = b.entity.position;
-      return Math.floor(p.x) === Math.floor(target.x) && Math.floor(p.z) === Math.floor(target.z)
-        && Math.abs(p.y - target.y) <= 0.01;
+      return !!b.entity.onGround && Math.floor(p.x) === fx && Math.floor(p.z) === fz && Math.abs(p.y - target.y) <= 0.01;
     };
-    const p = b.entity.position;
-    if (Date.now() >= deadline) return false;
-    if (Math.hypot(tx - p.x, tz - p.z) > 1.2 || Math.abs(p.y - target.y) > 1) return false;
+    const p0 = b.entity.position;
+    const dist = () => Math.hypot(tx - b.entity.position.x, tz - b.entity.position.z);
+    if (Date.now() >= deadline) return 'timeout';
+    if (dist() > 1.2 || Math.abs(p0.y - target.y) > 1) return 'blocked';
     const epoch = this.actionEpoch, dimension = this.currentDimension();
     const ownsControls = () => epoch === this.actionEpoch && b === this.bot && dimension === this.currentDimension();
     check();
-    if (typeof b.look === 'function') { try { b.look(Math.atan2(-(tx - p.x), -(tz - p.z)), 0, true); } catch { /* ignore */ } }
+    if (typeof b.look === 'function') { try { b.look(Math.atan2(-(tx - p0.x), -(tz - p0.z)), 0, true); } catch { /* ignore */ } }
     b.clearControlStates();
     b.setControlState('forward', true);
+    let closest = dist();
+    let overshot = false;
     try {
-      while (!arrived() && Date.now() < deadline) {
+      // 水平接近：接近目标列中心即刹车；越过中心（距离开始拉大）或超出单步位移即停止，不再无限前推。
+      while (!settled() && Date.now() < deadline) {
         check();
+        const d = dist();
+        if (d <= 0.35) { b.setControlState('forward', false); break; }
+        if (d > closest + 0.05 || d > 1.5) { overshot = true; break; }
+        closest = Math.min(closest, d);
         await this.afterAction(() => sleep(Math.min(50, Math.max(1, deadline - Date.now())), check.signal), check);
       }
     } finally {
       if (ownsControls()) { try { b.setControlState('forward', false); } catch { /* ignore */ } }
     }
-    return arrived();
+    if (overshot) return 'overshot';
+    if (settled()) return 'arrived';
+    // 落地确认：松键后等身体稳定落到目标支撑面（惯性可能继续滑，连续两拍站稳才算）。
+    let last = { x: b.entity.position.x, z: b.entity.position.z };
+    let stable = 0;
+    while (Date.now() < deadline) {
+      check();
+      const p = b.entity.position;
+      if (settled() && Math.hypot(p.x - last.x, p.z - last.z) < 0.01) {
+        if (++stable >= 2) return 'arrived';
+      } else {
+        stable = 0;
+      }
+      last = { x: p.x, z: p.z };
+      await this.afterAction(() => sleep(Math.min(40, Math.max(1, deadline - Date.now())), check.signal), check);
+    }
+    return 'timeout';
   }
 
   stopAll() {
