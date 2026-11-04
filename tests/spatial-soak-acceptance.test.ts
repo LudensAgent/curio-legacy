@@ -43,7 +43,9 @@ import {
   createEvidenceEmitter,
   createPhysicsTickMetrics,
   createSoakMetrics,
+  legFixturePoints,
   parseCliArgs,
+  prepareLegStart,
   shutdownFacts,
   soakWalkRequest,
   startSpatialSoakFoundation,
@@ -318,6 +320,53 @@ test('soak walk requests keep the fixed target and use the same near radius for 
   assert.equal(request.deadlineMs, 46_000);
   // 必须小于执行器允许的最大水平容差上限 0.5，且足够容纳真实停止抖动。
   assert.ok(SOAK_ARRIVAL_RADIUS > 0 && SOAK_ARRIVAL_RADIUS < 0.5);
+});
+
+test('every leg teleports to its fixed nominal start and measures the actual settled body separately', async () => {
+  // 固定夹具点保持未取整的 A/B 标称坐标；setup 起点和目标始终是相反的两格。
+  const outbound = legFixturePoints('A', 'B');
+  assert.deepEqual(outbound, { setup: FIXTURE_A, target: FIXTURE_B });
+  assert.deepEqual(outbound.target, { x: 209.5, y: 64, z: 216.5 });
+  const inbound = legFixturePoints('B', 'A');
+  assert.deepEqual(inbound, { setup: FIXTURE_B, target: FIXTURE_A });
+  assert.notDeepEqual(outbound.setup, outbound.target);
+
+  const calls: string[] = [];
+  // 真实跑中上一段会停在容差内的半格上；setup 结算点与随后实测点都可能偏离标称值。
+  const setupSettled = { x: 209.5, y: 64, z: 216.5 };
+  const actualAfterSettle = { x: 209.4375, y: 64, z: 216.5 };
+  const prepared = await prepareLegStart(
+    3,
+    inbound.setup,
+    async (position, label) => {
+      calls.push(`setup:${label}:${position.x},${position.y},${position.z}`);
+      assert.deepEqual(position, FIXTURE_B);
+      return setupSettled;
+    },
+    async (label) => {
+      calls.push(`measure:${label}`);
+      return actualAfterSettle;
+    },
+  );
+  // 顺序必须是 setup tp -> 结算 -> 读取真实位置；测量不得复用 setup 请求或上一段终点。
+  assert.deepEqual(calls, ['setup:leg-3-setup:209.5,64,216.5', 'measure:leg 3']);
+  assert.deepEqual(prepared.setupRequested, FIXTURE_B);
+  assert.deepEqual(prepared.setupSettled, setupSettled);
+  assert.deepEqual(prepared.measuredStart, actualAfterSettle);
+  assert.notDeepEqual(prepared.measuredStart, prepared.setupRequested);
+
+  // setup tp 失败时不得继续测量或发出 walk_to。
+  let measuredAfterFailure = false;
+  await assert.rejects(
+    prepareLegStart(
+      4,
+      FIXTURE_A,
+      async () => { throw new Error('fixture tp did not settle'); },
+      async () => { measuredAfterFailure = true; return FIXTURE_A; },
+    ),
+    /fixture tp did not settle/,
+  );
+  assert.equal(measuredAfterFailure, false);
 });
 
 test('pre-dispatch stable samples and interleaved dispatches are recorded, not rejected', () => {

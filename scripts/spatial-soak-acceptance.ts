@@ -115,6 +115,30 @@ export const soakWalkRequest = (target: FixtureEndpoint, deadlineMs: number) => 
   arrival: { kind: 'near' as const, radius: SOAK_ARRIVAL_RADIUS },
   deadlineMs,
 });
+
+export type FixtureEndpointName = keyof typeof FIXTURE_ENDPOINTS;
+
+/** 每段 leg 的固定夹具起点与固定目标；两者都不投影、不取整、不改写。 */
+export const legFixturePoints = (from: FixtureEndpointName, to: FixtureEndpointName) => ({
+  setup: FIXTURE_ENDPOINTS[from],
+  target: FIXTURE_ENDPOINTS[to],
+});
+
+/**
+ * 每段 walk_to 前的固定 setup 序列：先把夹具 tp 到本段标称起点并结算，再由调用方
+ * 从真实 `adapter.state().pos` 读取实测起点。setup 只布置夹具，不是移动证据；任何
+ * 一步失败都不会发出 walk_to。
+ */
+export const prepareLegStart = async (
+  index: number,
+  setupRequested: FixtureEndpoint,
+  setup: (position: FixtureEndpoint, label: string) => Promise<FixtureEndpoint>,
+  measure: (label: string) => Promise<FixtureEndpoint>,
+) => {
+  const setupSettled = await setup(setupRequested, `leg-${index}-setup`);
+  const measuredStart = await measure(`leg ${index}`);
+  return { index, setupRequested, setupSettled, measuredStart };
+};
 export const SMOKE_MIN_SUCCESSFUL_LEGS = 2;
 export const SMOKE_MIN_CHECKPOINT_SAVES = 2;
 /** smoke 完成等待上限；避免 full 在 smoke 未满足时空等一小时。 */
@@ -179,8 +203,9 @@ Options:
                       working-set evidence, not only the separate manual scenario.
   --help, -h          Print this text and exit without loading config, creating a DB, or opening sockets.
 
-Every leg reads its measured start from adapter.state().pos after settle; fixed A/B
-targets and measured starts are recorded separately. Any scheduled checkpoint failure,
+Every leg first performs the fixture setup tp to its fixed nominal start, then reads
+the actual adapter.state().pos as its measured start; fixed A/B targets and measured
+starts are recorded separately. Any scheduled checkpoint failure,
 unclean shutdown, or evidence record over 64KiB fails the run. Manual residency is
 never reported as passed unless the real SharedSpatialSession manual API is present.`;
 
@@ -1801,15 +1826,15 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
     target: FixtureEndpoint,
     nominalFrom: 'A' | 'B',
     nominalTo: 'A' | 'B',
+    measuredFrom: FixtureEndpoint,
   ): Promise<void> => {
     if (arbiter === null) throw new Error('walk leg requested before arbiter is ready');
     if (runScope === null) throw new Error('walk leg requested before runtime scope is ready');
     if (stopping) throw new Error('run is stopping; refusing walk_to');
-    // 每段开始都在上一段/setup 结算后读取真实身体位置；不再复用上一段标称终点。
-    const measuredFrom = await measureLegStart(`leg ${index}`);
     const tolerance = { ...library!.GROUNDED_ARRIVAL_DEFAULTS, horizontalTolerance: SOAK_ARRIVAL_RADIUS };
-    // 实测起点可能因上一段动量落在半格上，exact 目标会因不在 ±1 脚格上被库拒绝。
-    // 用 near 且验收使用同一半径：仍要求真实终点落在容差内，不投影或改写目标。
+    // 即使 setup tp 落在标称格，服务端结算也可能让实测起点偏离整数脚格；exact 目标
+    // 会因不在 ±1 脚格上被库拒绝。用 near 且验收使用同一半径：仍要求真实终点落在
+    // 容差内，不投影或改写目标。
     const request = soakWalkRequest(target, Date.now() + SMOKE_LEG_BUDGET_MS);
     const started = arbiter.start({ skill: 'walk_to', args: request }, 'user');
     if ('error' in started) throw new Error(`walk_to rejected: ${started.error}`);
@@ -2334,8 +2359,20 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
 
     const runNextLeg = async (): Promise<void> => {
       const nominalTo = nominalFrom === 'A' ? 'B' : 'A';
-      const target = nominalTo === 'A' ? FIXTURE_A : FIXTURE_B;
-      await runLeg(legIndex, target, nominalFrom, nominalTo);
+      const points = legFixturePoints(nominalFrom, nominalTo);
+      // 每段 leg 都先做一次夹具 setup tp 到本段固定标称起点。上一段可能在容差内
+      // 停在半格上，不能把该落点当作下一段固定目标的起点。tp 只布置夹具，不是
+      // 移动证据；落地后再读取真实身体位置作为本段实测起点。
+      const prepared = await prepareLegStart(legIndex, points.setup, fixtureTeleport, measureLegStart);
+      emit('leg-setup', null, {
+        index: prepared.index,
+        from: nominalFrom,
+        requested: clone(prepared.setupRequested),
+        settled: clone(prepared.setupSettled),
+        at: Date.now(),
+        note: 'Fixture setup teleport before the leg; not movement evidence.',
+      });
+      await runLeg(legIndex, points.target, nominalFrom, nominalTo, prepared.measuredStart);
       directions.add(`${nominalFrom}->${nominalTo}`);
       nominalFrom = nominalTo;
       legIndex += 1;
