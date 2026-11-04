@@ -8,7 +8,7 @@ import { dist3, sleep, throwIfAborted } from '../util.ts';
 import type { EntityInfo, Vec3Like } from '../adapter/types.ts';
 import { feetCell } from '../perception/local.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type FailureCode, type Skill, type SkillCtx, type SkillResult } from './types.ts';
-import { planTravel } from './overland.ts';
+import { HEADING_TARGET, MAX_HEADING_DISTANCE, planTravel } from './overland.ts';
 import { passageDeepestAnchor, passageNearestNode, passageRoute, passageSurfaceAnchor } from '../memory/passages.ts';
 
 // ------------------------------------------------------------------ 寻找与张望（人眼式：不透视，只是转头看）
@@ -233,26 +233,56 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
 };
 
 // ------------------------------------------------------------------ goto
-export const goTo: Skill<{ target: string; dig?: boolean; place?: boolean; tower?: boolean; sprint?: boolean; avoid?: string[]; lead?: string }> = {
+export const goTo: Skill<{ target: string; dig?: boolean; place?: boolean; tower?: boolean; sprint?: boolean; avoid?: string[]; lead?: string; headingOrigin?: Vec3Like }> = {
   name: 'goto',
   description: '步行去地标或坐标；普通步行按可见或近期亲历的落脚点引导，明确三维坐标尽量进入指定格，进不去时停在相邻格并说明差多少。遇到已观察的木门会开门。默认不挖墙、不放方块；dig:true 兼容旧行为，允许挖掘、垫路，并默认允许原地搭柱爬坡（可 tower:false 关闭）。place:false 可禁止放置，tower:false 可禁止原地搭柱；也可单独设 place:true 授权垫路、tower:true 授权搭柱。搭建消耗方块，可能在水面架桥。lead 可带指定生物走。',
-  argsDoc: '{"target":"<地标、坐标或方向>" 或 {"x":数字,"y":数字,"z":数字}, "dig"?:boolean, "place"?:boolean（允许垫路，默认继承 dig）, "tower"?:boolean（允许原地搭柱；dig:true 时默认开启，可 tower:false 关闭）, "sprint"?:boolean, "avoid"?:["方块名"], "lead"?:"生物名"}',
+  argsDoc: '{"target":"<地标、坐标或方向如 E 200>" 或 {"x":数字,"y":数字,"z":数字}, "dig"?:boolean, "place"?:boolean（允许垫路，默认继承 dig）, "tower"?:boolean（允许原地搭柱；dig:true 时默认开启，可 tower:false 关闭）, "sprint"?:boolean, "avoid"?:["方块名"], "lead"?:"生物名"}；方向写法单次最多 200 格，超出会明确拒绝而不是缩短目标',
   timeoutMs: 600000,
   movement: true,
-  validate(raw) {
+  validate(raw, adapter) {
     const target = obj(raw).target;
     const point = typeof target === 'object' && target !== null && !Array.isArray(target) ? target as Record<string, unknown> : null;
     const t = typeof target === 'string' ? target.trim()
       : point && [point.x, point.y, point.z].every((n) => typeof n === 'number' && Number.isFinite(n)) ? `${point.x},${point.y},${point.z}` : '';
     if (!t) return { ok: false, error: 'target 需要地标、坐标字符串或包含数字 x、y、z 的坐标对象' };
+    // 方向目标超过单次上限时明确拒绝，不悄悄改成较小距离（原目标不变）。
+    const heading = t.trim().toUpperCase().match(HEADING_TARGET);
+    if (heading && Number(heading[2]) > MAX_HEADING_DISTANCE) {
+      return { ok: false, error: `方向距离 ${heading[2]} 格超过单次上限 ${MAX_HEADING_DISTANCE} 格；原目标不会被缩短，请分段前往或直接写终点坐标` };
+    }
+    let headingOrigin: Vec3Like | undefined;
+    if (heading) {
+      const rawOrigin = obj(raw).headingOrigin;
+      if (rawOrigin === undefined) {
+        // 首次校验冻结方向起点；重复校验沿用已经冻结的起点，不按新站位重算。
+        headingOrigin = { ...adapter.state().pos };
+      } else {
+        const p = rawOrigin && typeof rawOrigin === 'object' && !Array.isArray(rawOrigin) ? rawOrigin as Record<string, unknown> : null;
+        if (!p || !['x', 'y', 'z'].every((k) => typeof p[k] === 'number' && Number.isFinite(p[k]))) {
+          return { ok: false, error: 'headingOrigin 需要 {x,y,z} 有限数字' };
+        }
+        headingOrigin = { x: p.x as number, y: p.y as number, z: p.z as number };
+      }
+    }
     for (const flag of ['dig', 'place', 'tower'] as const) if (obj(raw)[flag] !== undefined && typeof obj(raw)[flag] !== 'boolean') return { ok: false, error: `${flag} 需要布尔值` };
     if (obj(raw).tower === true && (obj(raw).place ?? obj(raw).dig) !== true) return { ok: false, error: 'tower:true 需要允许放置（place:true 或 dig:true）' };
     const avoid = Array.isArray(obj(raw).avoid) ? (obj(raw).avoid as unknown[]).map((n) => String(n).replace(/^minecraft:/, '')).filter((n) => /^[a-z_]+$/.test(n)).slice(0, 16) : [];
     const lead = typeof obj(raw).lead === 'string' ? String(obj(raw).lead).trim().toLowerCase().replace(/^minecraft:/, '') : '';
     if (obj(raw).lead !== undefined && !/^[a-z_]{2,40}$/.test(lead)) return { ok: false, error: 'lead 写生物名，比如 "cow"' };
-    return { ok: true, args: { target: t, ...(obj(raw).dig === true ? { dig: true } : {}), ...(typeof obj(raw).place === 'boolean' ? { place: obj(raw).place as boolean } : {}), ...(typeof obj(raw).tower === 'boolean' ? { tower: obj(raw).tower as boolean } : {}), ...(obj(raw).sprint === true && !lead ? { sprint: true } : {}), ...(avoid.length ? { avoid } : {}), ...(lead ? { lead } : {}) } };
+    return { ok: true, args: { target: t, ...(obj(raw).dig === true ? { dig: true } : {}), ...(typeof obj(raw).place === 'boolean' ? { place: obj(raw).place as boolean } : {}), ...(typeof obj(raw).tower === 'boolean' ? { tower: obj(raw).tower as boolean } : {}), ...(obj(raw).sprint === true && !lead ? { sprint: true } : {}), ...(avoid.length ? { avoid } : {}), ...(lead ? { lead } : {}), ...(headingOrigin ? { headingOrigin } : {}) } };
   },
   async run(ctx, args) {
+    const request = {
+      target: args.target, ...(args.dig ? { dig: true } : {}), ...(typeof args.place === 'boolean' ? { place: args.place } : {}),
+      ...(typeof args.tower === 'boolean' ? { tower: args.tower } : {}), ...(args.sprint ? { sprint: true } : {}),
+      ...(args.avoid ? { avoid: [...args.avoid] } : {}), ...(args.lead ? { lead: args.lead } : {}),
+      ...(args.headingOrigin ? { headingOrigin: { ...args.headingOrigin } } : {}),
+    };
+    // 每个回执都带原请求、实际后端与解析后的绝对目标；嵌套/恢复不会把它改写成相对目标。
+    const finish = (r: SkillResult): SkillResult => ({
+      ...r,
+      data: { ...(r.data ?? {}), originalRequest: request, ...(r.data?.target ? { resolvedTarget: r.data.target } : {}), backend: 'pathfinder' },
+    });
     const r = await walkTo(ctx, args);
     const d = (r.data ?? {}) as { target?: Vec3Like; position?: Vec3Like; waterAhead?: boolean };
     // 走不通时反馈地形，不将步行委托自动升级为游泳或准备载具。
@@ -262,11 +292,11 @@ export const goTo: Skill<{ target: string; dig?: boolean; place?: boolean; tower
         const plan = planTravel((p) => ctx.adapter.blockAt(p), here, d.target, { canBoat: false, maxNodes: 8000, margin: 16 });
         if (plan && !plan.reached && plan.why) {
           const climbHint = plan.climbed && args.place !== true && args.dig !== true ? '；可加 dig:true 授权挖墙和垫方块爬坡' : '';
-          return { ...r, summary: `${r.summary}（看地形：${plan.why}${climbHint}）` };
+          return finish({ ...r, summary: `${r.summary}（看地形：${plan.why}${climbHint}）` });
         }
       } catch { /* 诊断不了就照原样 */ }
     }
-    return r;
+    return finish(r);
   },
 };
 
@@ -280,7 +310,7 @@ function follower(ctx: SkillCtx, name: string, id: number | null): EntityInfo | 
   return (id !== null ? seen.find((e) => e.id === id) : undefined) ?? seen.sort((a, b) => a.dist - b.dist)[0] ?? null;
 }
 
-async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; place?: boolean; tower?: boolean; sprint?: boolean; avoid?: string[]; lead?: string }): Promise<SkillResult> {
+async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; place?: boolean; tower?: boolean; sprint?: boolean; avoid?: string[]; lead?: string; headingOrigin?: Vec3Like }): Promise<SkillResult> {
   {
     const { adapter, memory, signal } = ctx;
     const allowPlace = args.place ?? !!args.dig, allowTower = allowPlace && (args.tower ?? !!args.dig);
@@ -292,11 +322,14 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
     // 坐标写法很随意：(-3,90,-10)、x=-3 y=90 z=-10、-3 90 -10 都认；只有两个数时当作 x,z
     // 作品 ID（或前几位）先认：像 3f9a1b2c 这样的 ID 里也有数字，不能当坐标
     // “往东 20 格”：按方向和格数算出落点（东 x+、南 z+），免得自己算坐标算反
-    const heading = args.target.trim().toUpperCase().match(/^(N|NE|E|SE|S|SW|W|NW)\s*(\d{1,3})$/);
+    const heading = args.target.trim().toUpperCase().match(HEADING_TARGET);
     if (heading) {
       const [dx, dz] = DIRS[heading[1]];
-      const n = Math.min(200, Number(heading[2])), len = Math.hypot(dx, dz) || 1;
-      pos = { x: Math.round(s.pos.x + dx / len * n), y: s.pos.y, z: Math.round(s.pos.z + dz / len * n) };
+      // 距离在 validate 已按上限拒绝；这里不再 Math.min 截断，原目标不会被改小。
+      // 起点用 validate 冻结的 headingOrigin：重试/新 taskId 不会按新站位重新解释方向。
+      const from = args.headingOrigin ?? s.pos;
+      const n = Number(heading[2]), len = Math.hypot(dx, dz) || 1;
+      pos = { x: Math.round(from.x + dx / len * n), y: from.y, z: Math.round(from.z + dz / len * n) };
       flat = true;
       label = `往 ${heading[1]} ${n} 格`;
     }
@@ -348,6 +381,8 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
     const measured = (position = adapter.state().pos) => ({ target: pos, position, moved: dist3(s.pos, position),
       targetCell: cell(pos!), positionCell: cell(position), arrivedCell: Math.floor(position.x) === Math.floor(pos!.x)
         && Math.floor(position.z) === Math.floor(pos!.z) && (flat || Math.floor(position.y) === Math.floor(pos!.y)),
+      // 与 travel/follow_passage/ride 共用的到达布尔值：只按本动作的原完成条件计算。
+      arrived: arrived(position),
       ...(flat ? { horizontalOnly: true } : {}) });
     // 邻格只是实际进展，不代表已到达指定格；不推断未见目标的障碍。
     const nextTo = (p: Vec3Like) => !flat && !!nums && !heading && Math.max(Math.abs(Math.floor(p.x) - Math.floor(pos!.x)), Math.abs(Math.floor(p.y) - Math.floor(pos!.y)), Math.abs(Math.floor(p.z) - Math.floor(pos!.z))) <= 1;
@@ -556,14 +591,20 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; dig?: boolean }>
   },
   async run(ctx, args) {
     const { adapter, memory, signal } = ctx;
+    // 指定历史路线保留原请求与后端；失败时不改用 goto/travel 的另一条路线。
+    const request = { to: args.to, ...(args.dig ? { dig: true } : {}) };
+    const receipt = (r: SkillResult, resolved?: Vec3Like): SkillResult => ({
+      ...r,
+      data: { ...(r.data ?? {}), originalRequest: request, ...(resolved ? { resolvedTarget: resolved } : {}), backend: 'pathfinder_waypoints' },
+    });
     const s = adapter.state();
-    if (!s.connected) return fail('NOT_CONNECTED', '未连接');
+    if (!s.connected) return receipt(fail('NOT_CONNECTED', '未连接'));
     const here = { x: s.pos.x, y: s.pos.y, z: s.pos.z };
     const recs = memory.passages(s.dim).filter((r) => !r.worldId || r.worldId === s.worldId);
-    if (!recs.length) return fail('NOT_FOUND', '没有记下的旧矿道；要先下矿走过/挖过一段，或改用 goto / excavate_path');
+    if (!recs.length) return receipt(fail('NOT_FOUND', '没有记下的旧矿道；要先下矿走过/挖过一段，或改用 goto / excavate_path'));
     const back = args.to === 'entrance';
     const target = back ? passageSurfaceAnchor(recs, here) : passageDeepestAnchor(recs, here);
-    if (!target) return fail('NOT_FOUND', '旧矿道里没有可用的目标点');
+    if (!target) return receipt(fail('NOT_FOUND', '旧矿道里没有可用的目标点'));
     const kind = recs.some((r) => r.kind === 'dug') ? '挖过的旧矿道' : recs.some((r) => r.kind === 'bridge') ? '我搭的桥' : '走过的路';
     const allowDig = !!args.dig;
     const terrainPermission = { ...(allowDig ? { allowTerrainChanges: true } : {}), allowPlace: allowDig, allowTower: allowDig };
@@ -573,14 +614,14 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; dig?: boolean }>
     // 离矿道网太远连不上：先走到最近的脚点把 agent 接回网里，再沿路由走；dig:true 才授权挖开挡路
     if (!route || route.length < 2) {
       const nearest = passageNearestNode(recs, start);
-      if (!nearest) return fail('PATH_NOT_FOUND', `旧矿道连不到${back ? '地表入口' : '最深处'}（没有可接的脚点）；改走别的路`);
+      if (!nearest) return receipt(fail('PATH_NOT_FOUND', `旧矿道连不到${back ? '地表入口' : '最深处'}（没有可接的脚点）；改走别的路`), target);
       const np = `${Math.round(nearest.x)},${Math.round(nearest.y)},${Math.round(nearest.z)}`;
       try {
         await adapter.moveTo({ kind: 'near', pos: nearest, range: 2 }, { signal, timeoutMs: Math.max(2000, Math.min(20000, ctx.deadline - Date.now())), allowSwimming: false, ...terrainPermission });
       } catch (e) {
         if (isAbort(e)) throw e;
         const now = adapter.state().pos;
-        return fail('PATH_NOT_FOUND', `先走到最近的旧矿道脚点 (${np}) 没成（${(e as Error).message.slice(0, 50)}）。人停在 (${now.x.toFixed(1)},${now.y.toFixed(1)},${now.z.toFixed(1)})${allowDig ? '' : '；可加 dig:true 授权挖开挡路'}`);
+        return receipt(fail('PATH_NOT_FOUND', `先走到最近的旧矿道脚点 (${np}) 没成（${(e as Error).message.slice(0, 50)}）。人停在 (${now.x.toFixed(1)},${now.y.toFixed(1)},${now.z.toFixed(1)})${allowDig ? '' : '；可加 dig:true 授权挖开挡路'}`, { position: now }), target);
       }
       start = adapter.state().pos;
       route = passageRoute(recs, start, target, { near: 6 });
@@ -588,14 +629,14 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; dig?: boolean }>
         const tgtNode = passageNearestNode(recs, target);
         const tgtStr = tgtNode ? `(${Math.round(tgtNode.x)},${Math.round(tgtNode.y)},${Math.round(tgtNode.z)})` : '未知位置';
         const gap = tgtNode ? Math.round(dist3(start, tgtNode)) : null;
-        return fail('PATH_NOT_FOUND', `到了脚点 (${np}) 附近，但仍连不到${back ? '地表入口' : '最深处'}：离${goal}最近的旧矿道脚点在 ${tgtStr}，从你脚下直线约 ${gap ?? '未知'} 格（通道在这中间断开；可朝它垫/挖过去接上，或改走别的路）`);
+        return receipt(fail('PATH_NOT_FOUND', `到了脚点 (${np}) 附近，但仍连不到${back ? '地表入口' : '最深处'}：离${goal}最近的旧矿道脚点在 ${tgtStr}，从你脚下直线约 ${gap ?? '未知'} 格（通道在这中间断开；可朝它垫/挖过去接上，或改走别的路）`, { position: start }), target);
       }
     }
     ctx.progress(0, `沿${kind}${back ? '回入口' : '下最深'}，共 ${route.length} 段`);
     let last = start;
     for (let i = 0; i < route.length; i++) {
       throwIfAborted(signal);
-      if (Date.now() >= ctx.deadline) return fail('TIMEOUT', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段时间用完；人停在 (${last.x.toFixed(1)},${last.y.toFixed(1)},${last.z.toFixed(1)})，离目标约 ${Math.round(dist3(last, target))} 格`, { position: last, reachedWaypoint: i, totalWaypoints: route.length - 1 });
+      if (Date.now() >= ctx.deadline) return receipt(fail('TIMEOUT', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段时间用完；人停在 (${last.x.toFixed(1)},${last.y.toFixed(1)},${last.z.toFixed(1)})，离目标约 ${Math.round(dist3(last, target))} 格`, { position: last, reachedWaypoint: i, totalWaypoints: route.length - 1 }), target);
       const wp = route[i];
       if (dist3(last, wp) <= 1.2) continue;
       // 上 1 格台阶：两格高隧道里跳不起来。先把「起跳头顶」「新头」两格挖开（dig:true 才授权挖），再迈。
@@ -605,14 +646,14 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; dig?: boolean }>
           const b = adapter.blockAt(h);
           if (b === null || AIR_BLOCKS.has(b) || isSoftBlock(b) || LIQUID_BLOCKS.has(b)) continue;
           if (!allowDig) {
-            return fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段：下一路点 (${Math.round(wp.x)},${Math.round(wp.y)},${Math.round(wp.z)}) 是 1 格上台阶，头顶 (${h.x},${h.y},${h.z}) 是 ${b}，两格高隧道里跳不上去；可加 dig:true 让我先挖开头顶再迈，或自己 dig_at 阶梯`, { position: last, reachedWaypoint: i, totalWaypoints: route.length - 1, blockedHead: h });
+            return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段：下一路点 (${Math.round(wp.x)},${Math.round(wp.y)},${Math.round(wp.z)}) 是 1 格上台阶，头顶 (${h.x},${h.y},${h.z}) 是 ${b}，两格高隧道里跳不上去；可加 dig:true 让我先挖开头顶再迈，或自己 dig_at 阶梯`, { position: last, reachedWaypoint: i, totalWaypoints: route.length - 1, blockedHead: h }), target);
           }
           try {
             await breakCell(ctx, h);
           } catch (e) {
             if (isAbort(e)) throw e;
             const now = adapter.state().pos;
-            return fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段：要挖开头顶 (${h.x},${h.y},${h.z}) 迈上台阶，没成（${why(e)}）。人停在 (${now.x.toFixed(1)},${now.y.toFixed(1)},${now.z.toFixed(1)})`, { position: now, reachedWaypoint: i, totalWaypoints: route.length - 1, blockedHead: h });
+            return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段：要挖开头顶 (${h.x},${h.y},${h.z}) 迈上台阶，没成（${why(e)}）。人停在 (${now.x.toFixed(1)},${now.y.toFixed(1)},${now.z.toFixed(1)})`, { position: now, reachedWaypoint: i, totalWaypoints: route.length - 1, blockedHead: h }), target);
           }
         }
       }
@@ -622,7 +663,7 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; dig?: boolean }>
       } catch (e) {
         if (isAbort(e)) throw e;
         const now = adapter.state().pos;
-        return fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段卡住：下一路点 (${Math.round(wp.x)},${Math.round(wp.y)},${Math.round(wp.z)}) 过不去（${(e as Error).message.slice(0, 50)}）。人停在 (${now.x.toFixed(1)},${now.y.toFixed(1)},${now.z.toFixed(1)})，离${goal}约 ${Math.round(dist3(now, target))} 格${allowDig ? '' : '；可加 dig:true 授权挖开挡路'}`, { position: now, reachedWaypoint: i, totalWaypoints: route.length - 1, remaining: Math.round(dist3(now, target)), target });
+        return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段卡住：下一路点 (${Math.round(wp.x)},${Math.round(wp.y)},${Math.round(wp.z)}) 过不去（${(e as Error).message.slice(0, 50)}）。人停在 (${now.x.toFixed(1)},${now.y.toFixed(1)},${now.z.toFixed(1)})，离${goal}约 ${Math.round(dist3(now, target))} 格${allowDig ? '' : '；可加 dig:true 授权挖开挡路'}`, { position: now, reachedWaypoint: i, totalWaypoints: route.length - 1, remaining: Math.round(dist3(now, target)), target }), target);
       }
       last = adapter.state().pos;
     }
@@ -633,7 +674,10 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; dig?: boolean }>
       const g = passageDeepestAnchor(recs);
       return g && g.y < target.y - 2 ? `；还记着更深的旧矿道脚点 (${Math.round(g.x)},${Math.round(g.y)},${Math.round(g.z)})，和当前这段不连通，接不进去（要下去得先朝它垫/挖一段接上）` : '';
     })();
-    return ok(`沿${kind}${back ? '回入口' : '下最深'}走完了记下的 ${route.length} 个脚点，现在站在 (${end.x.toFixed(1)},${end.y.toFixed(1)},${end.z.toFixed(1)})，离${goal}参考点约 ${remaining} 格（再往前没有记过的路，剩下的自己看）${deeper}`, { position: end, remaining, target, walkedWaypoints: route.length });
+    // 走完记录的路点 ≠ 到达参考点：按实测位置和三维距离分别报告。
+    const arrived = dist3(end, target) <= 2;
+    const place = arrived ? `到达${goal}参考点附近` : `离${goal}参考点约 ${remaining} 格`;
+    return receipt(ok(`沿${kind}${back ? '回入口' : '下最深'}走完了记下的 ${route.length} 个脚点，现在站在 (${end.x.toFixed(1)},${end.y.toFixed(1)},${end.z.toFixed(1)})，${place}（再往前没有记过的路，剩下的自己看）${deeper}`, { position: end, remaining, target, arrived, walkedWaypoints: route.length }), target);
   },
 };
 

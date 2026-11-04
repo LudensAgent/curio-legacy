@@ -90,6 +90,8 @@ type WalkToArgs = {
 type WalkToBase = {
   originalRequest: { to: Vec3Like; arrival: WalkToArrival; deadlineMs?: number };
   target: Vec3Like;
+  /** 本入口唯一使用的执行后端；失败时不降级到旧 goto/travel。 */
+  backend: 'library_walk_route_search';
 };
 
 type SearchStop = {
@@ -410,6 +412,7 @@ export const walkTo: Skill<WalkToArgs> = {
         ...(args.deadlineMs !== undefined ? { deadlineMs: args.deadlineMs } : {}),
       },
       target: { ...args.to },
+      backend: 'library_walk_route_search',
     };
     const spatial = ctx.spatial;
     if (!spatial) return fail('ERROR', 'walk_to 需要宿主共享空间会话（ctx.spatial），当前未接线', base);
@@ -792,6 +795,8 @@ type WalkKnownRouteArgs = {
 type WalkKnownBase = {
   originalRequest: { fragmentId: string; deadlineMs?: number };
   target?: Vec3Like;
+  /** 本入口唯一使用的执行后端；历史几何只作路线来源，不降级到旧 follow_passage。 */
+  backend: 'library_known_walk_route';
 };
 
 export const walkKnownRoute: Skill<WalkKnownRouteArgs> = {
@@ -822,6 +827,7 @@ export const walkKnownRoute: Skill<WalkKnownRouteArgs> = {
         fragmentId: args.fragmentId,
         ...(args.deadlineMs !== undefined ? { deadlineMs: args.deadlineMs } : {}),
       },
+      backend: 'library_known_walk_route',
     };
     const spatial = ctx.spatial;
     if (!spatial) return fail('ERROR', 'walk_known_route 需要宿主共享空间会话（ctx.spatial），当前未接线', base);

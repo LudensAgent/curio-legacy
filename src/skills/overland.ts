@@ -2,8 +2,12 @@ import type { Vec3Like } from '../adapter/types.ts';
 import { DIRS } from '../perception/perception.ts';
 import { dist3 } from '../util.ts';
 import { ride } from './actions.ts';
-import { codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
+import { codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 import { PLACEABLE } from './survival.ts';
+
+/** 方向写法（"W 500"）与 goto 共用的解析式；距离上限由各入口在 validate 里显式拒绝，不静默缩短目标。 */
+export const HEADING_TARGET = /^(N|NE|E|SE|S|SW|W|NW)\s*(\d+)$/;
+export const MAX_HEADING_DISTANCE = 200;
 
 /**
  * 出行：步行与游泳的水陆寻路；已经乘船时委托水面导航，不隐式切换载具。
@@ -171,16 +175,19 @@ function explainBlocked(rej: Map<string, number>, near: Map<string, number>): st
 }
 
 // ------------------------------------------------------------------ travel
-type TravelArgs = { to: string; noBoat?: boolean; place?: boolean };
+type TravelArgs = { to: string; noBoat?: boolean; place?: boolean; headingOrigin?: Vec3Like };
 
-const parseTarget = (ctx: SkillCtx, raw: string): { x: number; y?: number; z: number; label: string } | null => {
+const parseTarget = (ctx: SkillCtx, raw: string, headingOrigin?: Vec3Like): { x: number; y?: number; z: number; label: string } | null => {
   const s = ctx.adapter.state();
-  // 方向+距离（和 goto 一致）："E 150" 按朝向和格数算出落点，免得模型自己算坐标
-  const heading = raw.trim().toUpperCase().match(/^(N|NE|E|SE|S|SW|W|NW)\s*(\d{1,3})$/);
+  // 方向+距离（和 goto 一致）："E 150" 按朝向和格数算出落点，免得模型自己算坐标。
+  // 距离在 validate 里已按上限拒绝；这里不截断，目标不会因为上限而被悄悄改小。
+  // 方向在首次校验时冻结起点 headingOrigin；重试/新 taskId 沿用它，不按新位置重新解释。
+  const heading = raw.trim().toUpperCase().match(HEADING_TARGET);
   if (heading) {
     const [dx, dz] = DIRS[heading[1]];
-    const n = Math.min(200, Number(heading[2])), len = Math.hypot(dx, dz) || 1;
-    return { x: Math.round(s.pos.x + dx / len * n), z: Math.round(s.pos.z + dz / len * n), label: `往 ${heading[1]} ${n} 格` };
+    const from = headingOrigin ?? s.pos;
+    const n = Number(heading[2]), len = Math.hypot(dx, dz) || 1;
+    return { x: Math.round(from.x + dx / len * n), z: Math.round(from.z + dz / len * n), label: `往 ${heading[1]} ${n} 格` };
   }
   const nums = raw.match(/-?\d+(?:\.\d+)?/g);
   if (nums && !/[a-z一-龥]{2,}/i.test(raw.replace(/\b[xyz]\s*[=:]/gi, ''))) {
@@ -195,10 +202,10 @@ const parseTarget = (ctx: SkillCtx, raw: string): { x: number; y?: number; z: nu
 export const travel: Skill<TravelArgs> = {
   name: 'travel',
   description: '按地形在地表和水面步行、游泳前往目标（只在地表/水面，地下或悬空会失败）；已乘船时沿水路停靠，保持乘坐并反馈落脚处，不制造或切换载具；三维目标核对实际高度；place:true 授权原地垫方块爬上 2 格以上的陡坡/高墙（消耗垫脚方块）',
-  argsDoc: '{"to": "x,z | x,y,z | 地标名 | base | death | 方向如 E 150", "noBoat"?: true（只走和游，已乘船时需先自行下船）, "place"?: true（允许垫方块爬 2 格以上的坡）}；只在地表/水面用，地下或悬空先用 dig_at/climb_up 回地面；目标 2.5 格内算到达，带 y 时按三维距离核对',
+  argsDoc: '{"to": "x,z | x,y,z | 地标名 | base | death | 方向如 E 150", "noBoat"?: true（只走和游，已乘船时需先自行下船）, "place"?: true（允许垫方块爬 2 格以上的坡）}；只在地表/水面用，地下或悬空先用 dig_at/climb_up 回地面；目标 2.5 格内算到达，带 y 时按三维距离核对；方向写法单次最多 200 格，超出会明确拒绝而不是缩短目标',
   timeoutMs: 600000,
   movement: true,
-  validate(raw) {
+  validate(raw, adapter) {
     const a = obj(raw);
     // 目标可能写成对象（{x,y,z}）或方向（"E 150"）：统一成字符串，避免把对象 String 成 "[object Object]"
     const rawTo = a.to ?? a.target;
@@ -211,28 +218,57 @@ export const travel: Skill<TravelArgs> = {
       to = String(rawTo ?? '').trim();
     }
     if (!to) return { ok: false, error: 'to 需要 x,z / x,y,z 坐标、地标名、base、death，或方向如 "E 150"' };
-    return { ok: true, args: { to, ...(a.noBoat === true ? { noBoat: true } : {}), ...(a.place === true ? { place: true } : {}) } };
+    const heading = to.trim().toUpperCase().match(HEADING_TARGET);
+    if (heading && Number(heading[2]) > MAX_HEADING_DISTANCE) {
+      return { ok: false, error: `方向距离 ${heading[2]} 格超过单次上限 ${MAX_HEADING_DISTANCE} 格；原目标不会被缩短，请分段前往或直接写终点坐标` };
+    }
+    let headingOrigin: Vec3Like | undefined;
+    if (heading) {
+      const rawOrigin = a.headingOrigin;
+      if (rawOrigin === undefined) {
+        // 首次校验冻结方向起点；重复校验沿用参数里已经冻结的起点。
+        headingOrigin = { ...adapter.state().pos };
+      } else {
+        const p = rawOrigin && typeof rawOrigin === 'object' && !Array.isArray(rawOrigin) ? rawOrigin as Record<string, unknown> : null;
+        if (!p || !['x', 'y', 'z'].every((k) => typeof p[k] === 'number' && Number.isFinite(p[k]))) {
+          return { ok: false, error: 'headingOrigin 需要 {x,y,z} 有限数字' };
+        }
+        headingOrigin = { x: p.x as number, y: p.y as number, z: p.z as number };
+      }
+    }
+    return { ok: true, args: { to, ...(a.noBoat === true ? { noBoat: true } : {}), ...(a.place === true ? { place: true } : {}), ...(headingOrigin ? { headingOrigin } : {}) } };
   },
   async run(ctx, args) {
     const { adapter, signal } = ctx;
-    const target = parseTarget(ctx, args.to);
-    if (!target) return fail('NOT_FOUND', `看不懂目标或找不到地标：${args.to}（写坐标 x,z 或记得的地标名）`);
+    // 父委托、实际使用的后端与解析目标一起留在每份回执里；失败/取消/嵌套时不被替换。
+    const request = { to: args.to, ...(args.noBoat ? { noBoat: true } : {}), ...(args.place ? { place: true } : {}), ...(args.headingOrigin ? { headingOrigin: { ...args.headingOrigin } } : {}) };
+    const target = parseTarget(ctx, args.to, args.headingOrigin);
+    if (!target) return fail('NOT_FOUND', `看不懂目标或找不到地标：${args.to}（写坐标 x,z 或记得的地标名）`, { originalRequest: request });
     const s0 = adapter.state();
+    const backend = s0.riding ? 'boat_ride' : 'land_water_plan';
+    const receipt = (r: SkillResult): SkillResult => ({ ...r, data: { ...(r.data ?? {}), originalRequest: request, resolvedTarget: { x: target.x, ...(target.y !== undefined ? { y: target.y } : {}), z: target.z }, backend } });
     const startPos = { ...s0.pos };
     const flat = (p: Vec3Like) => Math.hypot(p.x - target.x, p.z - target.z);
     const arrived = (p: Vec3Like) => target.y === undefined
       ? flat(p) <= 2.5
       : dist3(p, { x: target.x, y: target.y, z: target.z }) <= 2.5;
     if (s0.riding) {
-      if (args.noBoat || !/(^|_)(boat|raft)$/.test(s0.riding)) return fail('BAD_ARGS', `正在乘坐 ${s0.riding}，此次出行不能使用当前载具；是否下船由你决定`);
+      if (args.noBoat || !/(^|_)(boat|raft)$/.test(s0.riding)) return receipt(fail('BAD_ARGS', `正在乘坐 ${s0.riding}，此次出行不能使用当前载具；是否下船由你决定`));
       const result = await ride.run(ctx, { to: { x: target.x, z: target.z }, distance: 240 });
-      if (result.status !== 'succeeded') return result;
-      if (arrived(adapter.state().pos)) return result;
-      if (target.y !== undefined && flat(adapter.state().pos) <= 2.5) {
-        const p = adapter.state().pos;
-        return fail('PATH_NOT_FOUND', `水路已到 ${target.label} 的水平附近，但当前高度 ${p.y.toFixed(1)}，目标高度 ${target.y}，尚未到达；水面导航不能确认该高度的落点；${result.summary}`, { ...result.data, target, pos: p });
+      if (result.status !== 'succeeded') return receipt(result);
+      const after = adapter.state().pos;
+      if (arrived(after)) {
+        // 水路到达目标范围时船仍可能保持乘坐：明确区分“到点”与“已下船上岸”。
+        return receipt({
+          ...result,
+          summary: `${result.summary}；水路已在 ${target.label} 附近，仍保持乘坐（未下船，未确认上岸）`,
+          data: { ...(result.data ?? {}), target, position: { ...after }, arrived: true, stillRiding: true, disembarked: false },
+        });
       }
-      return fail('PATH_NOT_FOUND', `水路部分已停船，距 ${target.label} 还有 ${Math.round(flat(adapter.state().pos))} 格；${result.summary}`, { ...result.data, target });
+      if (target.y !== undefined && flat(after) <= 2.5) {
+        return receipt(fail('PATH_NOT_FOUND', `水路已到 ${target.label} 的水平附近，但当前高度 ${after.y.toFixed(1)}，目标高度 ${target.y}，尚未到达；水面导航不能确认该高度的落点；${result.summary}`, { ...result.data, target, position: after, pos: after, arrived: false }));
+      }
+      return receipt(fail('PATH_NOT_FOUND', `水路部分已停船，距 ${target.label} 还有 ${Math.round(flat(after))} 格；${result.summary}`, { ...result.data, target, position: { ...after }, arrived: false }));
     }
     const avoid = new Set<string>();
     const done: string[] = [];
@@ -243,7 +279,7 @@ export const travel: Skill<TravelArgs> = {
         const here = adapter.state().pos;
         if (flat(here) <= 2.5) break;
         const plan = planTravel(blockAt, here, target, { canBoat: false, avoid });
-        if (!plan) return fail('PATH_NOT_FOUND', `travel 只管地面上的路：现在脚下不是地面（在地下、悬空或站不住），先回到地面再走；${done.length ? `已经${done.join('，')}` : ''}`);
+        if (!plan) return receipt(fail('PATH_NOT_FOUND', `travel 只管地面上的路：现在脚下不是地面（在地下、悬空或站不住），先回到地面再走；${done.length ? `已经${done.join('，')}` : ''}`));
         // 陡坡/高墙（要一次往上爬 2 格以上）：授权垫路且手里有方块时，原地垫高 1 格，把 2 格墙变成 1 格台阶再重规划
         if (plan.climbed && args.place && climbed < 3 && adapter.pillarUp) {
           const inv = adapter.state().inventory ?? [];
@@ -283,14 +319,30 @@ export const travel: Skill<TravelArgs> = {
               if (j >= leg.cells.length - 1 || budget <= 0) break;
             }
           } else {
-            const land = next?.cells[0] ?? leg.cells[leg.cells.length - 1];
+            // 水段的完成条件是来到计划里的指定出口，而不是“在任意干地站稳”。
+            // swimTo 报 landed 不区分原岸/对岸；这里用实测位置核对下一段陆地的第一格。
+            // 没有下一段陆地时只要求到最后一个水格附近，不虚构上岸。
+            const exit = next?.cells[0] ?? null;
+            const lastWater = leg.cells[leg.cells.length - 1];
             const before = adapter.state().pos;
             // 规划格是整数方块坐标（land.y 已是脚高）：转成方块中心的落脚点，否则角色停在角点旁不上岸。
-            const footing = { x: land.x + 0.5, y: land.y, z: land.z + 0.5 };
+            const footing = exit
+              ? { x: exit.x + 0.5, y: exit.y, z: exit.z + 0.5 }
+              : { x: lastWater.x + 0.5, y: lastWater.y + 0.5, z: lastWater.z + 0.5 };
             const r = adapter.swimTo ? await adapter.swimTo(footing, signal, { timeoutMs: Math.min(20000, 3000 + leg.cells.length * 1500) }) : { ok: false, reason: 'NO_SWIM', landed: false, oxygen: 20 };
-            swum += dist3(before, adapter.state().pos);
-            if (!r.ok || !r.landed) { lastErr = `游过 ${leg.cells.length} 格水没上岸（${r.reason ?? '没站稳'}）`; avoid.add(`${land.x},${land.z}`); failed = true; }
-            budget -= dist3(before, adapter.state().pos);
+            const after = adapter.state().pos;
+            const moved = dist3(before, after);
+            swum += moved;
+            budget -= moved;
+            const within = exit
+              ? Math.hypot(after.x - footing.x, after.z - footing.z) <= 2.5 && Math.abs(after.y - exit.y) <= 1
+              : Math.hypot(after.x - footing.x, after.z - footing.z) <= 2.5 && Math.abs(after.y - footing.y) <= 1.5;
+            const reachedExit = r.ok && (exit ? r.landed : true) && within;
+            if (!reachedExit) {
+              const where = exit ? `没到指定岸 (${exit.x},${exit.y},${exit.z})` : '没到水段终点';
+              lastErr = `游过 ${leg.cells.length} 格水${where}（${r.reason ?? '没站稳'}）`;
+              avoid.add(`${(exit ?? lastWater).x},${(exit ?? lastWater).z}`);
+            }
             failed = true; // 过完一段水就按新位置重新规划（岸那边的路这时才看得清）
           }
         }
@@ -298,16 +350,16 @@ export const travel: Skill<TravelArgs> = {
       }
     } catch (e) {
       if (isAbort(e)) throw e;
-      return fail(codeFromError(e), `出行途中出错：${(e as Error).message}`);
+      return receipt(fail(codeFromError(e), `出行途中出错：${(e as Error).message}`));
     }
     const end = adapter.state().pos;
     const left = Math.round(flat(end));
     const how = [walked > 1 ? `走了约 ${Math.round(walked)} 格` : '', swum > 1 ? `游了约 ${Math.round(swum)} 格` : ''].filter(Boolean).join('、') || '没怎么挪动';
     const at = `(${Math.round(end.x)},${Math.round(end.y)},${Math.round(end.z)})`;
-    if (target.y === undefined ? left <= 2.5 : arrived(end)) return ok(`到了 ${target.label} 附近 ${at}：${how}`, { walked: Math.round(walked), swum: Math.round(swum), replans });
-    if (target.y !== undefined && flat(end) <= 2.5) return fail('PATH_NOT_FOUND', `到了 ${target.label} 的水平附近，但当前在 ${at}，目标高度 ${target.y}，尚未到达；travel 只规划地面和水面的水平路线，无法确认通往该高度的路径`, { walked: Math.round(walked), swum: Math.round(swum), pos: { ...end }, target, replans });
+    if (target.y === undefined ? left <= 2.5 : arrived(end)) return receipt(ok(`到了 ${target.label} 附近 ${at}：${how}`, { walked: Math.round(walked), swum: Math.round(swum), replans, position: { ...end }, target, arrived: true }));
+    if (target.y !== undefined && flat(end) <= 2.5) return receipt(fail('PATH_NOT_FOUND', `到了 ${target.label} 的水平附近，但当前在 ${at}，目标高度 ${target.y}，尚未到达；travel 只规划地面和水面的水平路线，无法确认通往该高度的路径`, { walked: Math.round(walked), swum: Math.round(swum), position: { ...end }, pos: { ...end }, target, replans, arrived: false }));
     const closer = Math.round(flat(startPos) - left);
-    return fail(closer > 4 ? 'TIMEOUT' : 'PATH_NOT_FOUND', `离 ${target.label} 的水平距离还有 ${left} 格，现在在 ${at}${target.y !== undefined ? `，目标高度 ${target.y}` : ''}（${how}，水平距离比出发时近了 ${closer} 格）${lastErr ? `；${lastErr}` : ''}`, { walked: Math.round(walked), swum: Math.round(swum), left, replans });
+    return receipt(fail(closer > 4 ? 'TIMEOUT' : 'PATH_NOT_FOUND', `离 ${target.label} 的水平距离还有 ${left} 格，现在在 ${at}${target.y !== undefined ? `，目标高度 ${target.y}` : ''}（${how}，水平距离比出发时近了 ${closer} 格）${lastErr ? `；${lastErr}` : ''}`, { walked: Math.round(walked), swum: Math.round(swum), left, position: { ...end }, replans, arrived: false }));
   },
 };
 

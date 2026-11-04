@@ -16,8 +16,12 @@ export interface BehaviorLookup {
   recordInvocation?(name: string, result: SkillResult): void;
 }
 const OBSERVATION_ACTIONS = new Set(['look', 'look_around', 'wait', 'inspect_block', 'assess_landings']);
-/** 代码技能里实际发生失败的导航动作；用于保留真实的最近一次失败回执。 */
-const NAVIGATION_ACTIONS = new Set(['walk_to', 'walk_known_route']);
+/**
+ * 导航动作：代码技能里失败时保留真实回执；可选步骤没到新站位时据此读取该步的实测末位。
+ * 旧外壳 goto/travel/follow_passage/ride 现在也在每个结果里带 originalRequest/position，
+ * 因此与库入口共用同一份回执，不靠新 taskId 或当前 state 猜测。
+ */
+const NAVIGATION_ACTIONS = new Set(['walk_to', 'walk_known_route', 'goto', 'travel', 'follow_passage', 'ride']);
 /** 步骤结果只保留有界的最近条目，避免代码/宏把整段历史都塞进失败回执。 */
 const MAX_STEP_RESULTS = 8;
 let registry: BehaviorLookup | null = null;
