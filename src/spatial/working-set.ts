@@ -15,12 +15,16 @@
  */
 import { PersistenceError, WorkingSetManager } from 'curio-minecraft-3d-memory/storage/sqlite';
 import type {
+  FreeResult,
   PrepareResult,
   SpatialSession,
   WorkingSetLimits,
   WorkingSetStats,
 } from 'curio-minecraft-3d-memory/storage/sqlite';
 import type { SectionKey } from 'curio-minecraft-3d-memory';
+
+/** Node 的单次 setTimeout 最大延迟；更大的值会被钳到 1ms 而提前触发。 */
+export const MAX_DEADLINE_DELAY_MS = 2_147_483_647;
 
 /** prepare 未取得可用结果的原因。 */
 export type WorkingSetCancelReason = 'aborted' | 'deadline' | 'closing';
@@ -82,13 +86,17 @@ export class WorkingSetCoordinator {
       return Promise.reject(new PersistenceError('closing', 'working set coordinator is closing; prepare is rejected'));
     }
     const { signal, deadline } = options;
-    if (deadline !== undefined && !Number.isFinite(deadline)) {
-      return Promise.reject(new PersistenceError('invalid_argument', 'deadline must be a finite absolute epoch-millisecond value'));
+    const now = Date.now();
+    if (deadline !== undefined && (!Number.isFinite(deadline) || deadline - now > MAX_DEADLINE_DELAY_MS)) {
+      return Promise.reject(new PersistenceError(
+        'invalid_argument',
+        `deadline must be a finite absolute epoch-millisecond value no more than ${MAX_DEADLINE_DELAY_MS} ms ahead`,
+      ));
     }
     if (signal?.aborted === true) {
       return Promise.resolve({ status: 'cancelled', reason: 'aborted', result: null, lease: null });
     }
-    if (deadline !== undefined && Date.now() >= deadline) {
+    if (deadline !== undefined && now >= deadline) {
       return Promise.resolve({ status: 'cancelled', reason: 'deadline', result: null, lease: null });
     }
 
@@ -120,7 +128,8 @@ export class WorkingSetCoordinator {
       signal?.addEventListener('abort', onAbort, { once: true });
       this.cancellers.add(cancel);
       if (deadline !== undefined) {
-        timer = setTimeout(() => cancel('deadline'), deadline - Date.now());
+        const delay = Math.min(Math.max(0, deadline - Date.now()), MAX_DEADLINE_DELAY_MS);
+        timer = setTimeout(() => cancel('deadline'), delay);
         timer.unref?.();
       }
 
@@ -185,6 +194,17 @@ export class WorkingSetCoordinator {
         this.finishSettlement(settlement, finishTracked);
       });
     });
+  }
+
+  /**
+   * 显式释放工作集空间；closing 之后拒绝新操作，其余直接走库内同一 session 门的
+   * `WorkingSetManager.free`。不加载、不保存、不关闭会话。
+   */
+  free(target?: { sections?: number; bytes?: number }): FreeResult {
+    if (this.closingFlag) {
+      throw new PersistenceError('closing', 'working set coordinator is closing; free is rejected');
+    }
+    return this.manager.free(target);
   }
 
   /**

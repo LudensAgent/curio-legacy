@@ -13,7 +13,7 @@ import { test } from 'node:test';
 import { WorkingSetManager, openSpatialSession, PersistenceError } from 'curio-minecraft-3d-memory/storage/sqlite';
 import type { CloseResult, SpatialSession } from 'curio-minecraft-3d-memory/storage/sqlite';
 import type { Observation, ResidencyLimits, SectionKey } from 'curio-minecraft-3d-memory';
-import { WorkingSetCoordinator } from '../src/spatial/working-set.ts';
+import { MAX_DEADLINE_DELAY_MS, WorkingSetCoordinator } from '../src/spatial/working-set.ts';
 import type { WorkingSetPrepareOutcome } from '../src/spatial/working-set.ts';
 
 const WORLD = 'manual-residency-world';
@@ -281,6 +281,48 @@ test('a finite byte capacity rejection keeps the library result and marks the lo
     assert.equal(outcome.lease, null);
     assert.equal(coordinator.stats().pinnedLeases, 0);
     assert.equal(session.sectionResidency(key).residency, 'load_failed');
+
+    // 第二次请求只看到 notReady，不会把同一次加载失败当成可重试的容量问题。
+    const retried = await coordinator.prepare([key]);
+    assert.equal(retried.status, 'incomplete');
+    if (retried.status !== 'incomplete') assert.fail('load_failed section was retried as a new load');
+    assert.equal(retried.result.status, 'incomplete');
+    assert.deepEqual(retried.result.notReady, [key]);
+    assert.deepEqual(retried.result.loaded, []);
+    assert.deepEqual(retried.result.noRecord, []);
+    assert.equal(retried.result.lease.token, '');
+    assert.equal(retried.lease, null);
+    assert.equal(session.sectionResidency(key).residency, 'load_failed');
+  } catch (err) {
+    failed = true;
+    throw err;
+  } finally {
+    if (session !== null) {
+      close = await session.close();
+      if (!failed) assertClose(close, false);
+    }
+    cleanup(dir, close);
+  }
+});
+
+test('a deadline beyond the supported timer range is rejected before any load', async () => {
+  const { dir, dbPath } = makeTempDb();
+  let session: SpatialSession | null = null;
+  let coordinator: WorkingSetCoordinator | null = null;
+  let close: CloseResult | null = null;
+  let failed = false;
+  try {
+    await seed(dbPath, [observation(0, 64, 0, 100, 1)]);
+    session = await openManual(dbPath);
+    coordinator = new WorkingSetCoordinator(session);
+
+    await assert.rejects(
+      coordinator.prepare([keyAt(0)], { deadline: Date.now() + MAX_DEADLINE_DELAY_MS + 60_000 }),
+      (error: unknown) => error instanceof PersistenceError && error.kind === 'invalid_argument',
+    );
+    assert.equal(session.busy, false);
+    assert.equal(session.sectionResidency(keyAt(0)).residency, 'not_resident');
+    assert.equal(coordinator.stats().pinnedLeases, 0);
   } catch (err) {
     failed = true;
     throw err;
