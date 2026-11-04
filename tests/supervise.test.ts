@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 // @ts-ignore 纯 JS 脚本
-import { supervise } from '../scripts/supervise.mjs';
+import { supervise, dataDirFrom } from '../scripts/supervise.mjs';
 
 const FAKE = path.resolve('tests/fixtures/fake-agent.mjs');
 function run(plan: string[], extra: Record<string, unknown> = {}) {
@@ -60,4 +60,23 @@ test('an agent that announced it will be busy (heap snapshot) is not killed for 
   await r.s.done;
   assert.equal(r.runs(), 1);
   assert.deepEqual(r.events(), []);
+});
+
+test('dataDirFrom 接受 test 模式并解析 DATA_DIR', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'supervise-dir-'));
+  const envFile = path.join(root, '.env.test');
+  fs.writeFileSync(envFile, 'CURIO_MODE=test\nDATA_DIR=./data/test\n');
+  assert.equal(dataDirFrom(root, envFile), path.join(root, 'data', 'test'));
+  // 缺 DATA_DIR 时回退到默认 data/test（按 CURIO_MODE=test）
+  fs.writeFileSync(envFile, 'CURIO_MODE=test\n');
+  assert.equal(dataDirFrom(root, envFile), path.join(root, 'data', 'test'));
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('dataDirFrom 拒绝未知模式', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'supervise-dir-'));
+  const envFile = path.join(root, '.env.bad');
+  fs.writeFileSync(envFile, 'CURIO_MODE=bad\n');
+  assert.throws(() => dataDirFrom(root, envFile), /CURIO_MODE/);
+  fs.rmSync(root, { recursive: true, force: true });
 });

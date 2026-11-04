@@ -81,7 +81,9 @@ export function peerLayouts(projectDir: string, curioRoot: string, currentMode: 
   for (const mode of ENV_MODES) {
     if (mode === currentMode) continue;
     const modeFile = curioRoot ? path.join(curioRoot, `.env.${mode}`) : path.join(projectDir, `.env.${mode}`);
-    if (!fs.existsSync(modeFile)) continue;
+    // local 是默认运行环境：即使没有 .env.local，也会沿用公共 .env 的默认目录与端口运行，必须纳入比较，
+    // 否则 test 继承公共 .env 的 DATA_DIR/SERVER_DIR/端口时不会被发现。live/test 没有对应模式文件则不存在，跳过。
+    if (mode !== 'local' && !fs.existsSync(modeFile)) continue;
     const vars = { ...readVars(path.join(path.dirname(modeFile), '.env')), ...readVars(modeFile) };
     out.push(resolveLayout(mode, vars, projectDir));
   }
@@ -97,8 +99,9 @@ function sameOrNested(parent: string, child: string): boolean {
 function normalizeHost(host: string): string {
   let h = host.toLowerCase();
   if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
-  if (h === '0.0.0.0') h = '127.0.0.1';
-  if (h === '::') h = '::1';
+  // 回环地址统一：localhost、0.0.0.0 都指本机 127.0.0.1，否则只换主机写法就能绕过同一实例的端口冲突检查。
+  if (h === 'localhost' || h === '0.0.0.0' || h === '127.0.0.1') h = '127.0.0.1';
+  if (h === '::' || h === '::1') h = '::1';
   return h;
 }
 

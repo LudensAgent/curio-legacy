@@ -125,3 +125,34 @@ test('resolveLayout 对显式相对路径也以 baseDir 为锚点，与调用进
   assert.equal(l.agentsDir, path.join(base, 'agents', 'test'));
   fs.rmSync(base, { recursive: true, force: true });
 });
+
+test('peerLayouts 缺 .env.local 仍把默认 local 纳入比较（沿用公共 .env 的目录与端口）', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-iso-'));
+  fs.writeFileSync(path.join(root, '.env'), 'SERVER_DIR=./world\nDATA_DIR=./data/local\nMC_PORT=25565\nRCON_PORT=25575\nMEMORY_WORLD_ID=curio-local\n');
+  // 没有 .env.local / .env.live：默认 local 仍存在。
+  const peers = peerLayouts(root, '', 'test');
+  assert.equal(peers.length, 1);
+  assert.equal(peers[0].mode, 'local');
+  assert.equal(peers[0].dataDir, path.join(root, 'data', 'local'));
+  assert.equal(peers[0].serverDir, path.join(root, 'world'));
+  assert.equal(peers[0].mcPort, 25565);
+  assert.equal(peers[0].worldId, 'curio-local');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('test 沿用公共 .env 的 local 目录时，与默认 local peer 冲突被拒绝', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-iso-'));
+  fs.writeFileSync(path.join(root, '.env'), 'SERVER_DIR=./world\nDATA_DIR=./data/local\nMC_PORT=25565\nRCON_PORT=25575\nMEMORY_WORLD_ID=curio-local\n');
+  const peers = peerLayouts(root, '', 'test');
+  // test 只显式指定世界身份，其余沿用公共 .env 的 local 配置。
+  const test = resolveLayout('test', { MEMORY_WORLD_ID: 'curio-test-01' }, root);
+  assert.throws(() => assertTestIsolation(test, peers, { worldIdExplicit: true }), /可写目录.*冲突/);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('回环主机别名（localhost / 127.0.0.1）与相同端口不视为可分离', () => {
+  const base = os.tmpdir();
+  const local = localLayout(base);
+  assert.throws(() => assertTestIsolation(testLayout(base, { mcHost: 'localhost', mcPort: 25565 }), [local], { worldIdExplicit: true }), /游戏连接地址.*冲突/);
+  assert.throws(() => assertTestIsolation(testLayout(base, { rconHost: 'localhost', rconPort: 25575 }), [local], { worldIdExplicit: true }), /RCON 地址.*冲突/);
+});

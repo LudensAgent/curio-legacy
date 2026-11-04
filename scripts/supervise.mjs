@@ -25,11 +25,11 @@ const stamp = (d = new Date()) => `${day(d)}-${pad(d.getHours())}${pad(d.getMinu
 const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
 
 /** 守护日志跟随所选配置；进程环境变量的优先级与子进程一致。 */
-function dataDirFrom(root, envFile) {
+export function dataDirFrom(root, envFile) {
   const env = { ...(fs.existsSync(envFile) ? parseEnv(fs.readFileSync(envFile, 'utf8')) : {}), ...process.env };
   const configuredMode = env.CURIO_MODE?.trim() || 'local';
-  if (configuredMode !== 'local' && configuredMode !== 'live') throw new Error('CURIO_MODE 必须为 local 或 live');
-  const mode = path.basename(envFile) === '.env.live' ? 'live' : configuredMode;
+  if (configuredMode !== 'local' && configuredMode !== 'live' && configuredMode !== 'test') throw new Error('CURIO_MODE 必须为 local、live 或 test');
+  const mode = path.basename(envFile) === '.env.live' ? 'live' : path.basename(envFile) === '.env.test' ? 'test' : configuredMode;
   return path.resolve(root, env.DATA_DIR?.trim() || path.join('data', mode));
 }
 
