@@ -192,13 +192,17 @@ async function settle(times = 2): Promise<void> {
 
 /** Bounded wait for a Promise so a wiring gap fails instead of hanging the run. */
 function withDeadline<T>(p: Promise<T>, what: string, ms = 15000): Promise<T> {
-  return Promise.race([
-    p,
-    new Promise<T>((_resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`timed out waiting for ${what}`)), ms);
-      timer.unref();
-    }),
-  ]);
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timed out waiting for ${what}`)), ms);
+    const finish = (settle: () => void) => {
+      clearTimeout(timer);
+      settle();
+    };
+    p.then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error)),
+    );
+  });
 }
 
 interface OldPartial {
@@ -260,6 +264,18 @@ test('late cancelled swim_to cannot own or contaminate a shared walk_route repla
   let cleanClosed = false;
   let shutdownFinished = false;
   let primaryError: unknown = null;
+  let cleanupError: unknown = null;
+  let activeTaskId: string | null = null;
+
+  // Outcome collection lives outside the try so teardown can await the actual
+  // active task even when an assertion fails mid-handover.
+  const outcomes = new Map<string, TaskOutcome>();
+  const outcomeWaiters = new Map<string, (outcome: TaskOutcome) => void>();
+  const doneFor = (id: string): Promise<TaskOutcome> => {
+    const existing = outcomes.get(id);
+    if (existing) return Promise.resolve(existing);
+    return new Promise<TaskOutcome>((resolve) => outcomeWaiters.set(id, resolve));
+  };
 
   try {
     svc = await SharedSpatialSession.open({ worldId, databasePath: join(dir, 'memory.db') });
@@ -295,18 +311,11 @@ test('late cancelled swim_to cannot own or contaminate a shared walk_route repla
     let stops = 0;
     adapter.stopAll = () => { stops++; stopAll(); };
 
-    const outcomes = new Map<string, TaskOutcome>();
-    const outcomeWaiters = new Map<string, (outcome: TaskOutcome) => void>();
     arbiter.on('done', (outcome) => {
       outcomes.set(outcome.task.id, outcome);
       outcomeWaiters.get(outcome.task.id)?.(outcome);
       outcomeWaiters.delete(outcome.task.id);
     });
-    const doneFor = (id: string): Promise<TaskOutcome> => {
-      const existing = outcomes.get(id);
-      if (existing) return Promise.resolve(existing);
-      return new Promise<TaskOutcome>((resolve) => outcomeWaiters.set(id, resolve));
-    };
 
     // ================= Window A =================
     // Start the old public swim_to; it must truly own the controls and settle
@@ -316,6 +325,7 @@ test('late cancelled swim_to cannot own or contaminate a shared walk_route repla
     onboardSwimWait = resolveSwimWaitEntered;
 
     const oldTask = started(arbiter.start({ skill: 'swim_to', args: { xyz: SWIM_TARGET } }, 'llm'));
+    activeTaskId = oldTask.id;
     await withDeadline(swimWaitEntered, 'old swim waitForTicks');
     const owned = {
       pos: { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z },
@@ -335,18 +345,30 @@ test('late cancelled swim_to cannot own or contaminate a shared walk_route repla
     bot.holdLook = true;
 
     const newTask = started(arbiter.start({ skill: 'walk_route', args: { points: POINTS } }, 'llm'));
+    activeTaskId = newTask.id;
     assert.notEqual(newTask.id, oldTask.id);
-    await withDeadline(lookHeld, 'replacement pre-scan look');
-
-    // The old task's cancellation catch/finally/TaskOutcome completes while the
-    // new walk is genuinely suspended inside a legal pre-scan look.
-    const oldOutcome = await withDeadline(doneFor(oldTask.id), 'old swim cancelled outcome');
+    // Capture the boundary at the real synchronous handover: Arbiter.start has
+    // already run cancel + adapter.stopAll (synchronous key release), but the
+    // old swim's async catch/finally has not run yet. Anything below must not
+    // add control writes, stops, samples or loop observations while the new
+    // walk stays suspended in its legal pre-scan look.
     const boundaryA = {
       index: bot.controlLog.length,
+      controls: { ...bot.controls },
+      stops,
+      samples,
+      observes: loopObserves,
+      reports: delivered.length,
       visionCalls: visionCalls.length,
       at: clock.now,
       wall: performance.now(),
     };
+    assert.equal(bot.controls.forward, false, 'the synchronous cancel/stopAll already released old forward');
+
+    await withDeadline(lookHeld, 'replacement pre-scan look');
+    // The old task's catch/finally/TaskOutcome completes while the new walk is
+    // genuinely suspended inside a legal pre-scan look.
+    const oldOutcome = await withDeadline(doneFor(oldTask.id), 'old swim cancelled outcome');
     await settle(4);
 
     assert.equal(oldOutcome.task.id, oldTask.id, 'old result is collected by its actual taskId');
@@ -357,14 +379,17 @@ test('late cancelled swim_to cannot own or contaminate a shared walk_route repla
     assert.deepEqual(partial.pos, owned.pos, 'old partial keeps the last owned position');
     assert.equal(partial.oxygen, owned.oxygen, 'old partial keeps the frozen oxygen');
     assert.equal(partial.observedAt, owned.observedAt, 'old partial keeps the observedAt sample time');
-    assert.equal(bot.controls.forward, false, 'cancellation released the old forward control');
     assert.equal(bot.lookPending(), true, 'the replacement is still suspended in its legal pre-scan look');
-    t.diagnostic(`window A: old task ${oldTask.id} cancelled at control-index ${boundaryA.index} (clock ${boundaryA.at}, wall ${boundaryA.wall.toFixed(1)}ms); replacement ${newTask.id} look still pending`);
+    t.diagnostic(`window A: handover boundary at control-index ${boundaryA.index} (clock ${boundaryA.at}, wall ${boundaryA.wall.toFixed(1)}ms); old ${oldTask.id} then cancelled while replacement ${newTask.id} look stayed pending`);
 
     assert.equal(bot.controlLog.length, boundaryA.index,
-      `no old set/clear after the cancelled boundary (index ${boundaryA.index} at wall ${boundaryA.wall.toFixed(1)}ms)`);
-    assert.equal(visionCalls.length, boundaryA.visionCalls, 'no observation from the old task after its boundary');
-    assert.deepEqual(delivered, [], 'the replacement is not attached until it actually starts moving');
+      `no old set/clear after the real handover boundary (index ${boundaryA.index} at wall ${boundaryA.wall.toFixed(1)}ms)`);
+    assert.deepEqual(bot.controls, boundaryA.controls, 'no control key changed during the old async cancellation');
+    assert.equal(stops, boundaryA.stops, 'no extra stopAll/ownership change during the old async cancellation');
+    assert.equal(samples, boundaryA.samples, 'no body sample entered the replacement during the old cancellation');
+    assert.equal(loopObserves, boundaryA.observes, 'no loop observation reached the replacement during the old cancellation');
+    assert.equal(delivered.length, boundaryA.reports, 'no shared report was delivered during the old cancellation');
+    assert.equal(visionCalls.length, boundaryA.visionCalls, 'no observation ran during the old async cancellation');
 
     // ================= release pre-scan, move the real physics =================
     bot.releaseHeldLook();
@@ -474,21 +499,61 @@ test('late cancelled swim_to cannot own or contaminate a shared walk_route repla
     primaryError = error;
     throw error;
   } finally {
-    prototype.onSample = originalOnSample;
-    prototype.observe = originalObserve;
-    arbiter?.dispose();
+    const cleanupProblems: string[] = [];
+    try {
+      // Cancel the test's actual active task first. The synchronous stopAll is
+      // part of cancellation; the async outcome is awaited below under a bound.
+      const active = arbiter?.current ?? null;
+      if (active !== null) {
+        activeTaskId = active.id;
+        arbiter!.cancel('test cleanup');
+      }
+      // Release this fixture's held low-level awaiters so no adapter/hook await
+      // outlives the test: the pre-scan look and the old swim's physics wait.
+      bot.releaseHeldLook();
+      bot.releaseSwimWait();
+
+      if (activeTaskId !== null && !outcomes.has(activeTaskId)) {
+        try {
+          await withDeadline(doneFor(activeTaskId), `cleanup task ${activeTaskId}`, 3000);
+        } catch (error) {
+          cleanupProblems.push(`active task did not finish: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+
+      // A cancelled walkTick removes its own physics listener; wait rather than
+      // assume the microtask ordering.
+      const listenerUntil = performance.now() + 2000;
+      while (bot.listenerCount('physicsTick') > 0 && performance.now() < listenerUntil) await delay(5);
+      if (bot.listenerCount('physicsTick') > 0) cleanupProblems.push('physicsTick listener still attached after cancellation');
+    } finally {
+      prototype.onSample = originalOnSample;
+      prototype.observe = originalObserve;
+      arbiter?.dispose();
+    }
+
     if (svc !== null && !shutdownFinished) {
       try {
         const secondary = await svc.shutdown();
+        shutdownFinished = true;
         const diagnostics = spatialShutdownDiagnostics(secondary, worldId);
-        if (diagnostics.problems.length > 0 || secondary.error !== null) {
-          console.error('secondary shared shutdown was not clean', diagnostics);
+        if (diagnostics.problems.length > 0) {
+          cleanupProblems.push(`secondary shutdown problems: ${diagnostics.problems.join(',')}`);
         }
       } catch (error) {
-        console.error('secondary shared shutdown failed', error);
+        cleanupProblems.push(`secondary shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
+
+    // Only a confirmed clean close may delete the fixture; otherwise retain it
+    // and surface the diagnostics.
     if (cleanClosed) rmSync(dir, { recursive: true, force: true });
     else if (primaryError !== null) console.error('shared spatial fixture retained at', dir);
+
+    if (cleanupProblems.length > 0) {
+      cleanupError = new Error(cleanupProblems.join('; '));
+      if (primaryError !== null) console.error('secondary cleanup problems', cleanupError.message);
+      else throw cleanupError;
+    }
   }
 });
