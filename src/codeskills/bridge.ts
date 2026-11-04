@@ -115,7 +115,7 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
     if (!v.ok) throw new Error(`${name} 参数错误：${v.error}`);
     throwIfAborted(ctx.signal);
     const r = await executeSkill({ ...ctx, senses: actionSenses, deadline: Math.min(ctx.deadline, Date.now() + skill.timeoutMs), progress: () => {} }, skill, constrainRecoveryAction(ctx, name, v.args));
-    if (r.status === 'cancelled') throw Object.assign(new Error('task cancelled'), { name: 'AbortedError' });
+    if (r.status === 'cancelled') throw Object.assign(new Error('task cancelled'), { name: 'AbortedError', ...(r.data ? { partial: r.data } : {}) });
     const { local: _local, around: _around, ...data } = r.data ?? {};
     return { ok: r.status === 'succeeded', code: r.failureCode ?? null, summary: r.summary.slice(0, 200), ...(Object.keys(data).length ? { data } : {}) };
   };
@@ -218,7 +218,7 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
         if (!v.ok) throw new Error(`useSkill 参数错误：${v.error}`);
         throwIfAborted(ctx.signal);
         const r = await executeSkill({ ...ctx, skillDepth: depth + 1, deadline: Math.min(ctx.deadline, Date.now() + skill.timeoutMs), progress: () => {} } as SkillCtx, skill, v.args);
-        if (r.status === 'cancelled') throw Object.assign(new Error('task cancelled'), { name: 'AbortedError' });
+        if (r.status === 'cancelled') throw Object.assign(new Error('task cancelled'), { name: 'AbortedError', ...(r.data ? { partial: r.data } : {}) });
         const { local: _local, around: _around, ...data } = r.data ?? {};
         return { ok: r.status === 'succeeded', code: r.failureCode ?? null, summary: r.summary.slice(0, 200), ...(Object.keys(data).length ? { data } : {}) };
       }

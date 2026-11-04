@@ -4,7 +4,8 @@ import type { GameAdapter } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { SKILLS } from './index.ts';
-import { fail, ok, type Skill } from './types.ts';
+import { constrainRecoveryAction } from './recovery.ts';
+import { fail, ok, runSkill, validateSkill, type Skill } from './types.ts';
 
 /**
  * 技能库（受限的“自我进化”）：
@@ -62,7 +63,7 @@ export class SkillLibrary {
     for (const [i, st] of o.steps.entries()) {
       const sk = SKILLS[String(st?.skill ?? '')];
       if (!sk || sk.name.startsWith(PREFIX) || sk.name === 'unstuck') return { ok: false, error: `第 ${i + 1} 步使用了不可组合的技能 ${st?.skill}` };
-      const v = sk.validate(st?.args ?? {}, this.adapter);
+      const v = validateSkill(sk, st?.args ?? {}, this.adapter);
       if (!v.ok) return { ok: false, error: `第 ${i + 1} 步参数错误：${v.error}` };
       steps.push({ skill: sk.name, args: v.args });
     }
@@ -125,10 +126,10 @@ export class SkillLibrary {
         for (const [i, st] of def.steps.entries()) {
           const sk = SKILLS[st.skill];
           if (!sk) return fail('ERROR', `组合技能引用的 ${st.skill} 不存在`);
-          const v = sk.validate(st.args ?? {}, ctx.adapter);
+          const v = validateSkill(sk, st.args ?? {}, ctx.adapter);
           if (!v.ok) return fail('BAD_ARGS', `第 ${i + 1} 步参数失效：${v.error}`);
           ctx.progress(i / def.steps.length, `${def.name}：第 ${i + 1}/${def.steps.length} 步 ${st.skill}`);
-          const r = await sk.run({ ...ctx, deadline: Math.min(ctx.deadline, Date.now() + sk.timeoutMs) }, v.args);
+          const r = await runSkill({ ...ctx, deadline: Math.min(ctx.deadline, Date.now() + sk.timeoutMs) }, sk, constrainRecoveryAction(ctx, st.skill, v.args));
           results.push(`${st.skill}:${r.status}`);
           if (r.status !== 'succeeded') return { ...r, summary: `${def.name} 在第 ${i + 1} 步失败：${r.summary}` };
         }
