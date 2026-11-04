@@ -3029,13 +3029,14 @@ async function scenarioW5(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   };
   ev.extra = { ...ev.extra, rcon: rconDiag };
   const response = await ctx.rcon.send(command);
-  // 只有严格解析成功的 response 才能作为「变化已执行」的上界。
-  parseSetBlock(response);
   const responseSeq = d.seq.next();
   const responseTs = Date.now();
   const frameAtResponse = d.recorder.frames.length;
   rconDiag.response = response;
   rconDiag.responded = { seq: responseSeq, ts: responseTs, frame: frameAtResponse };
+  // 先保存真实原 response 作为失败证据；严格解析失败会直接中止，后续 hidden
+  // 判定只在 parse 成功后执行，因此成功边界仍以真实 responseSeq 为准。
+  parseSetBlock(response);
 
   const ownMoves = () => d.exec.moves.filter((m) => m.taskId === taskId && m.delegationId === delegationId);
   const returnMoveOf = () => ownMoves().find((m) => m.executionId.endsWith('-step-2')) ?? null;
