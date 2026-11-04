@@ -17,15 +17,18 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { Vec3 } from 'vec3';
 import { WalkRouteExecutor } from 'curio-minecraft-3d-memory';
-import type { BodySample, ChangeReport } from 'curio-minecraft-3d-memory';
+import type { BodySample, ChangeReport, NavResult } from 'curio-minecraft-3d-memory';
+import { PersistenceError } from 'curio-minecraft-3d-memory/storage/sqlite';
 import { Arbiter, type TaskOutcome } from '../src/arbiter/arbiter.ts';
 import { MineflayerAdapter } from '../src/adapter/mineflayer.ts';
+import type { BlockObservation } from '../src/adapter/types.ts';
 import type { WalkBody, WalkTick } from '../src/adapter/walk-route.ts';
 import { EventBus } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { DEFAULT_VISION, Vision } from '../src/perception/vision.ts';
 import { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import type { ShutdownResult } from '../src/spatial/shared-session.ts';
+import { errorFacts, spatialShutdownDiagnostics } from '../src/spatial/host-shutdown.ts';
 import { config } from '../src/config.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 
@@ -720,5 +723,192 @@ test('暂停时取消回调抛错仍完成父任务取消与 stopAll，并保留
   } finally {
     arbiter?.dispose();
     await closeShared(svc, dir);
+  }
+});
+
+test('真实 checkpoint 容量失败不重写已完成移动，同一服务仍可走 B，最终真实关停保留脏事实', async (t) => {
+  const adapter = new WalkHostAdapter();
+  const dir = mkdtempSync(join(tmpdir(), 'shared-spatial-host-'));
+  // 公开 snapshotLimits 只是快照容量，不是驻留预算；真实 Vision 自然写入的格数超过 1。
+  const svc = await SharedSpatialSession.open({
+    worldId: WORLD,
+    databasePath: join(dir, 'memory.db'),
+    snapshotLimits: { maxObservedCells: 1 },
+  });
+  let arbiter: Arbiter | null = null;
+  let shutdown: ShutdownResult | null = null;
+  let shutdownFailure: unknown = null;
+  let assertionsPassed = false;
+
+  // 只记录真实 Vision 交给服务的原始观测，不注入合成地面。
+  const batches: BlockObservation[][] = [];
+  const observe = svc.observe.bind(svc);
+  svc.observe = (observations) => { batches.push([...observations]); return observe(observations); };
+
+  try {
+    const vision = new Vision(adapter, { ...DEFAULT_VISION, range: 24 }, svc);
+    arbiter = new Arbiter(adapter, new WorldMemory(null), new EventBus(), vision, svc);
+    const voxel = svc.session.voxel;
+
+    const doneA = doneOf(arbiter);
+    arbiter.start({ skill: 'walk_route', args: { points: POINTS_A } }, 'llm');
+    const a = await doneA;
+    assert.equal(a.result.status, 'succeeded', a.result.summary);
+    assert.ok(a.result.data);
+    const navA = a.result.data.nav as NavResult;
+    assert.equal(navA.outcome, 'ARRIVED');
+    assert.equal(navA.confirmed, true);
+    assert.ok(navA.lastPosition !== undefined, 'ARRIVED 必须带实测最后位置');
+    assert.ok(navA.lastObservation !== undefined, 'ARRIVED 必须带实测最后观测');
+    assert.ok(navA.trace.length > 0, 'ARRIVED 必须保留真实轨迹');
+    assert.notEqual(navA.memoryWrite, 'saved', '尚未成功保存时不得声称 saved');
+
+    const resultASnapshot = structuredClone(a.result);
+    const navASnapshot = structuredClone(navA);
+
+    const observedPositions = new Set(
+      batches.flatMap((list) => list.map((b) => `${b.dimension}|${b.pos.x},${b.pos.y},${b.pos.z}`)),
+    );
+    assert.ok(observedPositions.size >= 2, '真实 Vision 必须自然写入至少两个格，容量失败才是真实场景');
+
+    const firstObs = batches.flat()[0];
+    assert.ok(firstObs !== undefined);
+    const originalCell = voxel.cellAt(firstObs.dimension, firstObs.pos.x, firstObs.pos.y, firstObs.pos.z);
+    assert.ok(originalCell.observed, '选定的原始观测格必须真实存在');
+    const originalEvidence = structuredClone(originalCell.evidence);
+    // 同一格可能被本轮步行后续帧合法刷新；证据必须对应某条真实交付的原始观测。
+    const matchingObs = batches.flat().find((b) =>
+      b.dimension === firstObs.dimension && b.pos.x === firstObs.pos.x &&
+      b.pos.y === firstObs.pos.y && b.pos.z === firstObs.pos.z &&
+      b.observedAt === originalEvidence.observation.observedAt &&
+      b.observationId === originalEvidence.observation.sequence);
+    assert.ok(matchingObs !== undefined, '格证据必须对应真实交付的原始观测');
+    assert.equal(originalEvidence.observation.worldId, WORLD);
+    assert.equal(originalEvidence.observation.dim, matchingObs.dimension);
+    assert.equal(originalEvidence.observation.sessionId, matchingObs.sessionId);
+    assert.deepEqual(
+      Object.keys(originalEvidence.observation.state.properties).sort(),
+      Object.keys(matchingObs.properties ?? {}).sort(),
+    );
+
+    // 第一次保存前：真实内存事实已脏，且真实格证据已经存在。
+    const before = svc.getPersistenceState();
+    assert.equal(before.dirty, true);
+    assert.ok(before.voxelRevision > before.confirmedVoxelRevision);
+
+    let firstError: unknown = null;
+    try {
+      await svc.checkpoint();
+    } catch (err) {
+      firstError = err;
+    }
+    assert.ok(firstError instanceof PersistenceError, '真实 checkpoint 必须抛出 PersistenceError');
+    assert.equal(firstError.kind, 'capacity');
+    const firstFacts = errorFacts(firstError);
+    assert.equal(firstFacts.kind, 'capacity');
+    assert.equal(firstFacts.name, 'PersistenceError');
+    assert.ok(firstFacts.message.length > 0, '容量错误必须保留可理解的原始消息');
+
+    // 失败保存不确认任何版本，不抹除脏状态与内存证据。
+    const afterFailure = svc.getPersistenceState();
+    assert.equal(afterFailure.confirmedVoxelRevision, before.confirmedVoxelRevision);
+    assert.equal(afterFailure.confirmedFragmentRevision, before.confirmedFragmentRevision);
+    assert.equal(afterFailure.confirmedTopologyRevision, before.confirmedTopologyRevision);
+    assert.equal(afterFailure.lastConfirmedCheckpointId, before.lastConfirmedCheckpointId);
+    assert.equal(afterFailure.dirty, true);
+    const retainedCell = voxel.cellAt(firstObs.dimension, firstObs.pos.x, firstObs.pos.y, firstObs.pos.z);
+    assert.ok(retainedCell.observed);
+    assert.deepEqual(structuredClone(retainedCell.evidence), originalEvidence, '失败保存不得删除真实内存事实');
+
+    // 已完成移动对象与快照不得被保存失败改写；未保存是独立事实。
+    assert.deepEqual(a.result, resultASnapshot);
+    assert.deepEqual(navA, navASnapshot);
+    assert.notEqual(navA.memoryWrite, 'saved');
+
+    const doneB = doneOf(arbiter);
+    arbiter.start({ skill: 'walk_route', args: { points: POINTS_B } }, 'llm');
+    const b = await doneB;
+    assert.equal(b.result.status, 'succeeded', b.result.summary);
+    assert.ok(b.result.data);
+    const navB = b.result.data.nav as NavResult;
+    assert.equal(navB.outcome, 'ARRIVED');
+    assert.equal(navB.confirmed, true);
+    assert.ok(navB.lastPosition !== undefined);
+    assert.equal(svc.closing, false, '失败的保存不得关闭仍在运行的服务');
+    assert.equal(svc.session.voxel, voxel, 'B 必须复用同一个共享地图');
+    assert.deepEqual(a.result, resultASnapshot);
+    assert.deepEqual(navA, navASnapshot);
+    const cellAfterB = voxel.cellAt(firstObs.dimension, firstObs.pos.x, firstObs.pos.y, firstObs.pos.z);
+    assert.ok(cellAfterB.observed, 'B 之后原始格仍必须被见过（允许 B 的真实观测刷新时间）');
+
+    // 实际最终关停：可能产生新的容量错误，但不要求与第一次是同一对象。
+    shutdown = await svc.shutdown();
+    assert.ok(shutdown.error instanceof PersistenceError);
+    const finalFacts = errorFacts(shutdown.error);
+    assert.equal(finalFacts.kind, 'capacity');
+    assert.ok(finalFacts.message.length > 0);
+    assert.equal(shutdown.checkpoint, null);
+    assert.equal(shutdown.cancelError, null);
+    assert.equal(shutdown.closeError, null);
+    assert.ok(shutdown.close !== null, '容量失败不得跳过真实 close');
+    assert.equal(shutdown.close.completed, true);
+    assert.equal(shutdown.close.error, null);
+    assert.equal(shutdown.close.unconfirmedRequest, false);
+    assert.equal(shutdown.close.dirty, true);
+    assert.equal(shutdown.close.lastConfirmedCheckpointId, null);
+    const afterShutdown = svc.getPersistenceState();
+    assert.equal(afterShutdown.dirty, true, '未保存的真实脏事实不得被关停抹掉');
+
+    const diagnostics = spatialShutdownDiagnostics(shutdown, WORLD);
+    assert.equal(diagnostics.ok, false);
+    assert.ok(diagnostics.problems.includes('primary_save_error'));
+    assert.ok(diagnostics.problems.includes('missing_checkpoint'));
+    assert.ok(diagnostics.problems.includes('close_dirty'));
+    assert.deepEqual(diagnostics.primarySaveError, finalFacts);
+    assert.equal(diagnostics.primarySaveError?.kind, 'capacity');
+    assert.equal(diagnostics.primarySaveError?.name, 'PersistenceError');
+    assert.ok((diagnostics.primarySaveError?.message ?? '').length > 0);
+    assert.equal(diagnostics.checkpoint, null);
+    assert.equal(diagnostics.cancelError, null);
+    assert.equal(diagnostics.closeError, null);
+    assert.ok(diagnostics.close !== null);
+    assert.equal(diagnostics.close.completed, true);
+    assert.equal(diagnostics.close.error, null);
+    assert.equal(diagnostics.close.unconfirmedRequest, false);
+    assert.equal(diagnostics.close.dirty, true);
+
+    t.diagnostic(JSON.stringify({
+      a: { task: { id: a.task.id, planVersion: a.task.planVersion, args: a.task.args }, result: a.result },
+      b: { task: { id: b.task.id, planVersion: b.task.planVersion, args: b.task.args }, result: b.result },
+      firstCapacity: firstFacts,
+      persistence: { before, afterFailure, afterShutdown },
+      finalShutdown: {
+        checkpoint: shutdown.checkpoint,
+        primarySaveError: finalFacts,
+        cancelError: shutdown.cancelError,
+        close: shutdown.close,
+        closeError: shutdown.closeError,
+      },
+      diagnostics,
+    }));
+
+    assertionsPassed = true;
+  } finally {
+    // dispose 只注销 listener，不关闭共享服务。
+    arbiter?.dispose();
+    if (shutdown === null) {
+      try {
+        shutdown = await svc.shutdown();
+      } catch (err) {
+        shutdownFailure = err;
+      }
+    }
+    const closeKnown = shutdown !== null && shutdown.close !== null &&
+      shutdown.close.completed && shutdown.close.error === null &&
+      shutdown.close.unconfirmedRequest === false;
+    // 只有确认干净 close 且断言全部成功才删除本测试的 mkdtemp fixture。
+    if (assertionsPassed && shutdownFailure === null && closeKnown) {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
