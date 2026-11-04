@@ -27,6 +27,7 @@ import {
   FIXTURE_A,
   FIXTURE_B,
   H2B_REQUIRED_SCENARIOS,
+  H2_PENDING,
   HELP,
   MAX_JSONL_RECORD_BYTES,
   MAX_WORKING_SET_SNAPSHOTS,
@@ -43,6 +44,7 @@ import {
   createEvidenceEmitter,
   createPhysicsTickMetrics,
   createSoakMetrics,
+  h2ForResult,
   legFixturePoints,
   parseCliArgs,
   prepareLegStart,
@@ -169,6 +171,19 @@ test('run report stays H2 pending and never claims a full pass', () => {
   assert.equal(report.fixture.crossSectionX, 208);
   assert.equal(report.fixture.supportY, 63);
   assert.equal(report.fixture.bodyY, 64);
+});
+
+test('final H2 status is derived from the actual result, not a fixed pending constant', () => {
+  // smoke 即使判据全部满足也只能是 pending/false。
+  assert.deepEqual(h2ForResult('smoke', true), H2_PENDING);
+  assert.equal(h2ForResult('smoke', true).fullPass, false);
+  // full 未通过时同样不能宣称 passed。
+  assert.deepEqual(h2ForResult('full', false), H2_PENDING);
+  // 只有真实 full pass 才报告 passed/true。
+  const passed = h2ForResult('full', true);
+  assert.equal(passed.state, 'passed');
+  assert.equal(passed.fullPass, true);
+  assert.notDeepEqual(passed, H2_PENDING);
 });
 
 test('direct JSONL evidence is human-readable and a record over 64KiB fails explicitly without truncation', () => {
@@ -770,10 +785,11 @@ test('package metadata rejects a tampered provenance hash or lock integrity', ()
   }
 });
 
-test('manual residency scenario reports not-integrated when the real manual API is absent', async () => {
-  const supported = manualScenarioSupported(SharedSpatialSession);
-  assert.equal(typeof supported, 'boolean');
-  if (supported) return;
+test('manual residency scenario reports not-integrated when the real manual API is absent', async (t) => {
+  if (manualScenarioSupported(SharedSpatialSession)) {
+    t.skip('real manual API is present; covered by the manual success-path test');
+    return;
+  }
   const result = await runManualScenario({
     worldId: 'manual-offline-world',
     databasePath: join(tmpdir(), 'unused-manual.sqlite'),
@@ -784,6 +800,85 @@ test('manual residency scenario reports not-integrated when the real manual API 
   assert.equal(result.state, 'not-integrated');
   assert.equal(result.ok, false, 'manual must never be reported as passed without the real API');
   assert.match(result.problems.join(' '), /not integrated/);
+});
+
+test('manual residency scenario passes offline with real handoff, lease and shutdown facts', { timeout: 30_000 }, async (t) => {
+  if (!manualScenarioSupported(SharedSpatialSession)) {
+    t.skip('host has no real manual SharedSpatialSession API; run this test in the integration worktree');
+    return;
+  }
+  const worldId = 'manual-offline-fixture-world';
+  const dir = mkdtempSync(join(tmpdir(), 'spatial-soak-manual-'));
+  const databasePath = join(dir, 'manual.sqlite');
+  const scope = { worldId, dim: 'overworld', sessionId: 'offline-fixture-session' };
+  const emissions: { kind: string; payload: unknown }[] = [];
+  try {
+    // 合成 typed 观测，但会话、prepare/lease、pending handoff、checkpoint 和
+    // shutdown 全部来自真实 manual SharedSpatialSession 与真实 SQLite 文件。
+    // 重开后的重观测必须像真实 Vision 一样带更新的 observedAt；相同时间戳会被库
+    // 视为已保存证据的重复确认，保留 STALE，而不是恢复 FRESH。
+    const observedBatches: BlockObservation[][] = [];
+    const observe = () => {
+      const base = observedBatches.length === 0 ? 41 : 51;
+      const batch = [
+        offlineObservation(worldId, base, 0, 0, 0, 'minecraft:stone'),
+        offlineObservation(worldId, base + 1, 1, 0, 0, 'minecraft:air'),
+      ];
+      observedBatches.push(batch);
+      return batch;
+    };
+    const result = await runManualScenario({
+      worldId,
+      databasePath,
+      scope,
+      observe,
+      emit: (kind, payload) => { emissions.push({ kind, payload }); },
+      drainTimeoutMs: 15_000,
+    });
+
+    assert.equal(result.state, 'passed', result.problems.join(', '));
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.problems, []);
+    assert.equal(result.facts.supported, true);
+    assert.equal(typeof result.facts.firstCheckpointId, 'string');
+    assert.equal(result.facts.sectionResidencyAfterReopen, 'not_resident');
+    assert.equal(result.facts.pendingAfterObserve, observedBatches[1]!.length);
+    assert.equal(result.facts.pendingDrained, true);
+    assert.equal(result.facts.reobservedObservedAt, observedBatches[1]![0]!.observedAt);
+    assert.equal(result.facts.reobservedFreshness, 'FRESH');
+    assert.equal(result.facts.reobservedSessionId, scope.sessionId);
+    assert.equal(result.facts.pendingBeforeShutdown, 0);
+    assert.equal(result.facts.unreleasedPins, 0);
+
+    const prepare = result.facts.prepare;
+    assert.ok(isRecord(prepare));
+    assert.equal(prepare.status, 'ready');
+    assert.equal(typeof prepare.lease, 'string');
+    const statsPinned = result.facts.statsPinned;
+    assert.ok(isRecord(statsPinned));
+    assert.ok(typeof statsPinned.pinnedLeases === 'number' && statsPinned.pinnedLeases >= 1);
+    const statsAfterRelease = result.facts.statsAfterRelease;
+    assert.ok(isRecord(statsAfterRelease));
+    assert.equal(statsAfterRelease.pinnedLeases, 0);
+
+    const firstShutdown = result.facts.firstShutdown;
+    assert.ok(isRecord(firstShutdown));
+    assert.equal(firstShutdown.error, null);
+    assert.equal(typeof firstShutdown.checkpoint, 'string');
+    const secondShutdown = result.facts.secondShutdown;
+    assert.ok(isRecord(secondShutdown));
+    assert.equal(secondShutdown.error, null);
+    assert.equal(typeof secondShutdown.checkpoint, 'string');
+    const secondClose = secondShutdown.close;
+    assert.ok(isRecord(secondClose));
+    assert.equal(secondClose.completed, true);
+    assert.equal(secondClose.error, null);
+
+    assert.equal(emissions.length, 1);
+    assert.equal(emissions[0]!.kind, 'scenario-manual');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('physics tick metrics aggregate actual callback timing without retaining frames', () => {
