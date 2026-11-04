@@ -622,6 +622,9 @@ test('final checkpoint persists a unique last fact and a clean close; reopen res
       assert.equal(cell.evidence.observation.state.properties.facing, 'east');
       assert.equal(cell.evidence.observation.observedAt, 1_700_000_000_123);
       assert.equal(cell.evidence.observation.sequence, 42);
+      assert.equal(cell.evidence.observation.worldId, WORLD);
+      assert.equal(cell.evidence.observation.dim, 'overworld');
+      assert.equal(cell.evidence.observation.sessionId, 's1');
     }
 
     reopenResult = await reopened.shutdown();
@@ -775,7 +778,11 @@ test('an injected close failure after the real worker close stays secondary and 
     const injected = new Error('injected close failure');
     const realClose = svc.session.close.bind(svc.session);
     svc.session.close = async () => {
-      await realClose();
+      const actual = await realClose();
+      // 注入前先确认真实 close 成功，避免实际 close 失败伪装成预期注入。
+      assert.equal(actual.completed, true);
+      assert.equal(actual.error, null);
+      assert.equal(actual.unconfirmedRequest, false);
       throw injected;
     };
 
