@@ -77,24 +77,28 @@ function readVars(file: string): Record<string, string | undefined> {
   return fs.existsSync(file) ? parseEnv(fs.readFileSync(file, 'utf8')) : {};
 }
 
-/** 读取当前模式之外其它环境的最终布局（公共 .env + 模式文件合并，不含本进程变量覆盖）。 */
-export function peerLayouts(projectDir: string, curioRoot: string, currentMode: EnvMode): Layout[] {
-  const root = curioRoot || projectDir;
-  const common = readVars(path.join(root, '.env'));
+/**
+ * 读取当前模式之外其它环境的最终布局（公共 .env 与各模式文件），不含本进程变量覆盖。
+ * baseDir 必须是实际配置文件所在目录（与 config.ts 的 res() 锚点一致），否则外置 --env-file 会选择
+ * 外部同目录的 .env，而这里却去读仓库配置，导致 test 沿用外部 local 的目录仍被放行。
+ */
+export function peerLayouts(baseDir: string, currentMode: EnvMode): Layout[] {
+  const common = readVars(path.join(baseDir, '.env'));
   // 默认运行环境（仅由公共 .env 构成，CURIO_MODE 缺省为 local）始终存在：
   // 不能因为缺少 .env.local 就跳过它，否则 test 会静默沿用公共 .env 里 local 的目录与端口。
   const rawMode = (common.CURIO_MODE ?? '').trim();
   const defaultMode: EnvMode = rawMode === 'live' || rawMode === 'test' ? rawMode : 'local';
-  const peers = new Map<EnvMode, Layout>();
-  if (defaultMode !== currentMode) peers.set(defaultMode, resolveLayout(defaultMode, common, root));
+  const peers: Layout[] = [];
+  if (defaultMode !== currentMode) peers.push(resolveLayout(defaultMode, common, baseDir));
   for (const mode of ENV_MODES) {
     if (mode === currentMode) continue;
-    const modeFile = path.join(root, `.env.${mode}`);
+    const modeFile = path.join(baseDir, `.env.${mode}`);
     if (!fs.existsSync(modeFile)) continue;
-    // 有模式文件时以「公共 .env + 模式文件」的合并为准（覆盖默认环境同名的布局）。
-    peers.set(mode, resolveLayout(mode, { ...common, ...readVars(modeFile) }, root));
+    // 模式文件与默认入口是两套独立布局，都要参与比较：即使 .env.local 与默认 local 同名，
+    // 也不能覆盖掉默认入口（不带模式的启动仍可使用公共 .env）。
+    peers.push(resolveLayout(mode, { ...common, ...readVars(modeFile) }, baseDir));
   }
-  return [...peers.values()];
+  return peers;
 }
 
 /** parent 与 child 相同，或 child 位于 parent 内部。 */
@@ -106,7 +110,8 @@ function sameOrNested(parent: string, child: string): boolean {
 function normalizeHost(host: string): string {
   let h = host.toLowerCase();
   if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
-  if (h === '0.0.0.0') h = '127.0.0.1';
+  // 常见回环地址别名统一到 127.0.0.1：localhost 与 127.0.0.1 指向同一回环主机，不能绕过端口冲突检查。
+  if (h === '0.0.0.0' || h === 'localhost') h = '127.0.0.1';
   if (h === '::') h = '::1';
   return h;
 }

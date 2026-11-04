@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertResetOffline } from '../src/maintenance/offline.ts';
+import { readServerPropertyValues, validateLevelName } from '../src/maintenance/world-reset.ts';
 
 type ConfigModule = typeof import('../src/config.ts');
 
@@ -29,15 +30,15 @@ function argvFlag(name: string): string | undefined {
   return undefined;
 }
 
+/** 读取 server.properties 的最终值（同名键取最后一个，处理转义与分隔符），与 world-reset 的解析口径一致。 */
 export function readServerProperty(file: string, key: string): string | undefined {
-  for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
-    const t = line.trim();
-    if (!t || t.startsWith('#')) continue;
-    const eq = t.indexOf('=');
-    if (eq < 0) continue;
-    if (t.slice(0, eq).trim() === key) return t.slice(eq + 1).trim();
-  }
-  return undefined;
+  return readServerPropertyValues(file).get(key);
+}
+
+/** parent 与 child 相同，或 child 位于 parent 内部。 */
+function sameOrNested(parent: string, child: string): boolean {
+  const relative = path.relative(parent, child);
+  return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`));
 }
 
 export function setServerProperty(file: string, key: string, value: string): void {
@@ -130,9 +131,15 @@ async function initTest(): Promise<void> {
 
   const seedProps = path.join(seedDir, 'server.properties');
   if (!fs.existsSync(seedProps)) throw new Error(`种子源不是 Minecraft 服务器目录（缺 server.properties）：${seedDir}`);
-  if (path.resolve(seedDir) === path.resolve(targetServerDir)) throw new Error('种子源不能等于 test 世界目录');
+  const seedResolved = path.resolve(seedDir);
+  const targetResolved = path.resolve(targetServerDir);
+  if (sameOrNested(seedResolved, targetResolved) || sameOrNested(targetResolved, seedResolved)) {
+    throw new Error('种子源与 test 世界目录不能相同或相互包含，否则复制会把刚创建的目标再次当作源递归展开');
+  }
   const levelName = readServerProperty(seedProps, 'level-name') ?? 'world';
-  const seedWorld = path.join(seedDir, levelName);
+  // level-name 必须位于种子服务器目录内部：拒绝绝对路径、.. 段或指向种子目录之外，否则副本仍指向共享世界而非独立副本。
+  validateLevelName(seedDir, levelName);
+  const seedWorld = path.resolve(seedDir, levelName);
   if (!fs.existsSync(path.join(seedWorld, 'level.dat'))) throw new Error(`种子源缺少世界 level.dat：${path.join(seedWorld, 'level.dat')}`);
   const rawPort = readServerProperty(seedProps, 'server-port') ?? '25565';
   const seedPort = Number(rawPort);

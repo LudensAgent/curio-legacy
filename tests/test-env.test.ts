@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { existingTestState, hasWorldData, readServerProperty, syncServerForTest } from '../scripts/test-env.ts';
+import { validateLevelName } from '../src/maintenance/world-reset.ts';
 
 function tmp() { return fs.mkdtempSync(path.join(os.tmpdir(), 'test-env-')); }
 
@@ -73,5 +74,32 @@ test('syncServerForTest 在无 RCON 密码时关闭 RCON', () => {
   syncServerForTest(target, { mcPort: 25566, rconPort: 25576, rconPassword: '' });
   assert.equal(readServerProperty(path.join(target, 'server.properties'), 'enable-rcon'), 'false');
   assert.equal(readServerProperty(path.join(target, 'server.properties'), 'rcon.password'), '');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('readServerProperty 同名键取最后一个（Java Properties 语义），不漏检真实监听端口', () => {
+  const dir = tmp();
+  const props = path.join(dir, 'server.properties');
+  fs.writeFileSync(props, 'server-port=25565\nserver-port=25566\n');
+  assert.equal(readServerProperty(props, 'server-port'), '25566');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('readServerProperty 支持 : 分隔符与反斜线转义', () => {
+  const dir = tmp();
+  const props = path.join(dir, 'server.properties');
+  fs.writeFileSync(props, 'server-port:25565\nrcon.password=pa\\=ss\\ word\n');
+  assert.equal(readServerProperty(props, 'server-port'), '25565');
+  assert.equal(readServerProperty(props, 'rcon.password'), 'pa=ss word');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('validateLevelName 拒绝指向服务器目录之外的 level-name（../ 与绝对路径）', () => {
+  const dir = tmp();
+  const server = path.join(dir, 'server');
+  fs.mkdirSync(server, { recursive: true });
+  assert.throws(() => validateLevelName(server, '../shared-world'), /之外|不安全/);
+  assert.throws(() => validateLevelName(server, path.resolve(dir, 'outside')), /之外|不安全/);
+  assert.doesNotThrow(() => validateLevelName(server, 'world'));
   fs.rmSync(dir, { recursive: true, force: true });
 });

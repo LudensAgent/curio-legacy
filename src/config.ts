@@ -1,12 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { parseEnv } from 'node:util';
 import { assertTestIsolation, peerLayouts } from './config/isolation.ts';
 import { memorySettings } from './memory/settings.ts';
-
-/** 仓库根：用于定位 peer 环境配置文件（隔离校验）；数据路径统一以配置文件所在目录为锚点。 */
-const projectDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 // CURIO_ROOT：env + 数据放在项目外（如 /path/to/curio）时，用裸关键字 live / local 定位 $CURIO_ROOT/.env.<mode>。
 // 优先进程环境变量，其次读项目根目录 .env（与 scripts/supervise.mjs 保持一致）。
@@ -253,7 +249,7 @@ if (mode === 'test') {
     rconHost: config.observer.rconHost,
     rconPort: config.observer.rconPort,
     dashboardPort: config.dashboard.port,
-  }, peerLayouts(projectDir, curioRoot, 'test'), { worldIdExplicit });
+  }, peerLayouts(path.dirname(envFile), 'test'), { worldIdExplicit });
 }
 
 export type Config = typeof config;
