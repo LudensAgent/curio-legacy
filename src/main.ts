@@ -89,7 +89,23 @@ const adapter = new MineflayerAdapter(config, bus);
 let spatial: SharedSpatialSession;
 try {
   mkdirSync(path.dirname(config.spatial.databasePath), { recursive: true });
-  spatial = await SharedSpatialSession.open({ worldId: adapter.state().worldId, databasePath: config.spatial.databasePath });
+  spatial = await SharedSpatialSession.open({
+    worldId: adapter.state().worldId,
+    databasePath: config.spatial.databasePath,
+    voxelLoading: config.spatial.voxelLoading,
+    // manual 模式下容量/未就绪/丢弃/取消事件只进入有界日志；摘要本身已由服务
+    // 限制 keys 与消息字节，不在这里重新放大。
+    onWorkingSetDiagnostic: (diagnostic) => {
+      bus.publish('spatial_working_set', diagnostic.kind === 'discarded' ? 'P3' : 'P2', diagnostic.message, {
+        kind: diagnostic.kind,
+        count: diagnostic.count,
+        keys: diagnostic.keys,
+        observedAtMin: diagnostic.observedAtMin,
+        observedAtMax: diagnostic.observedAtMax,
+        ...(diagnostic.kind === 'discarded' ? { reason: diagnostic.reason } : {}),
+      });
+    },
+  });
 } catch (error) {
   const kind = (error as { kind?: unknown })?.kind;
   writeSync(2, JSON.stringify({

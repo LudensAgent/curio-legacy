@@ -51,6 +51,12 @@ const bool = (k: string, d: boolean) => {
   if (v === undefined || v === '') return d;
   return ['1', 'true', 'yes', 'on'].includes(v.toLowerCase());
 };
+// 体素驻留模式只在配置边界解析一次；拼错不静默回落到默认值。
+const voxelLoadingRaw = str('SPATIAL_VOXEL_LOADING', 'eager').toLowerCase();
+if (voxelLoadingRaw !== 'eager' && voxelLoadingRaw !== 'manual') {
+  throw new Error(`SPATIAL_VOXEL_LOADING 必须为 eager 或 manual，收到：${voxelLoadingRaw}`);
+}
+const voxelLoading: 'eager' | 'manual' = voxelLoadingRaw;
 
 const observer = str('OBSERVER_PLAYER');
 const configuredMode = str('CURIO_MODE', 'local');
@@ -141,6 +147,14 @@ export const config = {
    */
   spatial: {
     databasePath: res(str('SPATIAL_DB_PATH') || path.join(dataDir, 'spatial', 'spatial.sqlite')),
+    /**
+     * 体素驻留模式。eager（默认）= 打开时加载已提交体素，保持原有行为；
+     * manual = 只按显式 prepare 加载调用方点名的 Section，技能在执行前声明
+     * 依赖，未驻留的已保存证据有界排队。manual 只约束体素驻留：history/
+     * topology/catalog 仍会正常加载，residentBytes 是库的工作集估算，不是
+     * 进程 RSS，也不是整个系统的内存上限。
+     */
+    voxelLoading,
   },
   /** 心智层：像真人一样一段一段地玩、边做边想 */
   mind: {

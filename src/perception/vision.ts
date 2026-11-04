@@ -637,6 +637,9 @@ export class Vision {
         dimension: state.dim, observationId: state.observationId, observedAt: now, source: 'vision' });
     }
     // 合法视锥结果是共享地图的唯一写入源；空批次不产生任何写入/生命周期报告。
+    // 同步调用：eager 直接写入；manual 对 resident/首观测同步写入，未驻留的已保存
+    // 证据只进入服务的有限后台队列。这里不做磁盘 I/O、不等待加载、不改变作用域
+    // 或中断规则；变更报告仍在返回前同步派发。
     if (out.length > 0 && !this.spatial?.closing) this.spatial?.observe(out);
     return out;
   }
