@@ -83,6 +83,11 @@ function lifecycleBroken(lc: WalkLifecycle): boolean {
   return !lc.alive || !lc.connected || !lc.observationReady;
 }
 
+/** 身体作用域是否已偏离委托（world/dim/session 任一不一致）。 */
+function scopeMismatch(lc: WalkLifecycle, scope: { worldId: string; dim: string; sessionId: string }): boolean {
+  return lc.worldId !== scope.worldId || lc.dim !== scope.dim || lc.sessionId !== scope.sessionId;
+}
+
 /** 从实际实体观测构造一个 BodySample；作用域与生命周期都来自实际适配器，不从请求复制。 */
 export function bodySample(
   executionId: string,
@@ -165,10 +170,10 @@ export class WalkMoveExecutor implements MoveExecutor {
     // 转头后重新检查取消/期限：转头等待期间可能被抢占或到期。
     if (this.aborted(request)) return { failure: { kind: 'cancelled' } };
     if (this.now() >= moveDeadline) return { failure: { kind: 'timed_out' } };
-    // 启动该段前检查生命周期：已断线/死亡/观测未就绪时不得写前进键，直接取消本委托。
+    // 启动该段前检查生命周期与作用域：已断线/死亡/观测未就绪/换会话时不得写前进键，直接取消本委托。
     const lc = this.lifecycle?.();
-    if (lc !== undefined && lifecycleBroken(lc)) {
-      this.onLifecycleBroken?.(`alive=${lc.alive} connected=${lc.connected} observationReady=${lc.observationReady}`);
+    if (lc !== undefined && (lifecycleBroken(lc) || scopeMismatch(lc, request))) {
+      this.onLifecycleBroken?.(`alive=${lc.alive} connected=${lc.connected} observationReady=${lc.observationReady} scope=${lc.worldId}/${lc.dim}/${lc.sessionId}`);
       return { failure: { kind: 'cancelled' } };
     }
     this.body.clearControlStates();
@@ -201,8 +206,8 @@ export class WalkMoveExecutor implements MoveExecutor {
         // 无帧：复核取消/期限/生命周期后再决定终态，不把断线误判为普通成功，也不把停帧误判为断线。
         if (this.now() >= moveDeadline) { this.releaseIf(request.executionId); return { failure: { kind: 'timed_out' } }; }
         const lc = this.lifecycle?.();
-        if (lc !== undefined && lifecycleBroken(lc)) {
-          this.onLifecycleBroken?.(`alive=${lc.alive} connected=${lc.connected} observationReady=${lc.observationReady}`);
+        if (lc !== undefined && (lifecycleBroken(lc) || scopeMismatch(lc, request))) {
+          this.onLifecycleBroken?.(`alive=${lc.alive} connected=${lc.connected} observationReady=${lc.observationReady} scope=${lc.worldId}/${lc.dim}/${lc.sessionId}`);
           this.releaseIf(request.executionId);
           return { failure: { kind: 'cancelled' } };
         }
@@ -304,11 +309,11 @@ export async function runWalkRoute(opts: {
   const onParentAbort = () => { loop.cancel('agent', 'parent task cancelled'); };
   opts.signal.addEventListener('abort', onParentAbort, { once: true });
 
-  // 生命周期失效时立即以 lifecycle 取消本委托：保留已测位移、释放当前控制，不再启动下一段。
+  // 生命周期失效或作用域偏离时立即以 lifecycle 取消本委托：保留已测位移、释放当前控制，不再启动下一段。
   const cancelBrokenLifecycle = () => {
     const lc = lifecycle();
-    if (!lifecycleBroken(lc)) return false;
-    loop.cancel('lifecycle', `alive=${lc.alive} connected=${lc.connected} observationReady=${lc.observationReady}`);
+    if (!lifecycleBroken(lc) && !scopeMismatch(lc, opts.request)) return false;
+    loop.cancel('lifecycle', `alive=${lc.alive} connected=${lc.connected} observationReady=${lc.observationReady} scope=${lc.worldId}/${lc.dim}/${lc.sessionId}`);
     return true;
   };
 
