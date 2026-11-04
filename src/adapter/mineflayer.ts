@@ -4110,8 +4110,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     try {
       while (Date.now() < end) {
         check();
+        const p = b.entity.position;
+        const distance = destination ? Math.hypot(destination.x - p.x, destination.z - p.z) : 0;
         const dry = dryFooting();
-        if (dry && ownOxygen(b) >= 18) {
+        // 指定目标时必须抵达目标附近（dry 且水平距离在容差内）才算上岸；不指定目标（仅上浮换气）则任意干地站稳即可。
+        const arrived = !destination || distance <= 1.0;
+        if (dry && arrived && ownOxygen(b) >= 18) {
           drySince ??= Date.now();
           if (Date.now() - drySince >= 600) return { ok: true, landed: true, oxygen: ownOxygen(b) };
         } else drySince = null;
@@ -4132,8 +4136,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           await this.afterAction(() => b.look(b.entity.yaw + Math.PI / 2, -0.1, true), check);
           nextTurn = Date.now() + 1000;
         }
-        const p = b.entity.position;
-        const distance = destination ? Math.hypot(destination.x - p.x, destination.z - p.z) : 0;
         if (destination && distance > 0.35 && !dry) {
           await this.afterAction(() => b.look(Math.atan2(p.x - destination!.x, p.z - destination!.z), 0, true), check);
           b.setControlState('forward', true);

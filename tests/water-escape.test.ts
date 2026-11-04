@@ -140,6 +140,15 @@ test('surface keeps ownership after oxygen14 and only reports success after actu
   } finally { memory.close(); }
 });
 
+test('swimTo to a distant target does not report landed without arriving', async (t) => {
+  const { adapter, bot } = pond(t);
+  // 角色已在东岸干地上，目标在对岸 6 格外：不应因「已站稳」就报 landed。
+  bot.entity.position = new Vec3(6.5, 64, 2.5);
+  bot.entity.onGround = true; bot.entity.isInWater = false;
+  const result = await adapter.swimTo({ x: 0.5, y: 64, z: 2.5 }, new AbortController().signal, { timeoutMs: 1500 });
+  assert.equal(result.landed, false, '未抵达远处目标不能报 landed');
+});
+
 test('climbing out onto the bank does not keep bunny-hopping on dry land', async (t) => {
   const { adapter, bot } = pond(t);
   const tick = bot.waitForTicks.bind(bot);
