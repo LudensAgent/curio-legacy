@@ -121,7 +121,7 @@ function validLegacyFixture() {
         endpoint({ id: 'g2', dim: 'the_end', pos: { x: 200, y: 64, z: 200 }, kind: 'end_gateway', observedAt: 9400 }),
       ],
       traversals: [crossing()],
-      gateways: [crossing({ fromId: 'g1', toId: 'g2', ts: 9500 })],
+      gateways: [crossing({ fromId: 'g1', toId: 'g2', fromSession: 'gateway-session', toSession: 'gateway-session', ts: 9500 })],
     },
   };
 }
@@ -208,15 +208,23 @@ test('known shapes preserve original IDs, keys, times and scope without root inf
   assert.equal(precise.ledgerStatus, 'recorded_nonempty_at_original_time');
   assert.equal(precise.contents.observedAt, 6000);
   assert.equal(precise.contents.itemLines.total, 1);
+  assert.equal(precise.migrationStatus, 'candidate_historical');
   assert.equal(recordedEmpty.ledgerStatus, 'recorded_empty_at_original_time');
   assert.equal(recordedEmpty.contents.freeSlots, 27);
+  assert.equal(recordedEmpty.migrationStatus, 'candidate_historical');
   assert.equal(unknown.ledgerStatus, 'unknown');
   assert.equal(unknown.contents.observedAt, 0);
   assert.equal(stale.ledgerStatus, 'stale_unconfirmed');
   assert.equal(stale.contents.possiblyStale, true);
+  assert.equal(stale.contents.observedAt, 6200);
+  assert.equal(stale.migrationStatus, 'needs_review');
+  assert.ok(stale.reviewReasons.includes('stale_ledger_time_not_confirmed_full_observation'));
+  assert.equal(stale.provenance.time, 'record_contents_observedAt_may_be_incremental_update_not_confirmed_full_observation');
   assert.equal(legacy.ledgerStatus, 'legacy_imprecise');
   assert.equal(legacy.worldId, null);
   assert.equal(legacy.contents.itemLines.present, false);
+  assert.equal(chests.candidateHistorical, 2);
+  assert.equal(chests.needsReview, 3);
   assert.equal(chests.itemLines.total, null);
   assert.equal(chests.itemLines.inspected, 2);
   assert.equal(JSON.stringify(chests).includes('iron_ore'), false);
@@ -626,10 +634,10 @@ test('travel consistency uses resolved endpoint scope and session contracts', ()
         crossing({ fromId: 'a', toId: 'b', fromSession: 's1', toSession: 's2', fromObservation: -1, toObservation: 1.5, ts: 9700 }),
       ],
       gateways: [
-        crossing({ fromId: 'g1', toId: 'g2', fromSession: 's1', toSession: 's2', ts: 9800 }),
-        crossing({ fromId: 'a', toId: 'g1', fromSession: 's1', toSession: 's2', ts: 9900 }),
-        crossing({ fromId: 'g1', toId: 'g3', fromSession: 's1', toSession: 's2', ts: 10_000 }),
-        crossing({ fromId: 'g1', toId: 'g2', fromSession: 'same', toSession: 'same', ts: 10_100 }),
+        crossing({ fromId: 'g1', toId: 'g2', fromSession: 'gateway-session', toSession: 'gateway-session', ts: 9800 }),
+        crossing({ fromId: 'a', toId: 'g1', fromSession: 'gateway-session', toSession: 'gateway-session', ts: 9900 }),
+        crossing({ fromId: 'g1', toId: 'g3', fromSession: 'gateway-session', toSession: 'gateway-session', ts: 10_000 }),
+        crossing({ fromId: 'g1', toId: 'g2', fromSession: 's1', toSession: 's2', ts: 10_100 }),
       ],
     },
   });
@@ -652,10 +660,13 @@ test('travel consistency uses resolved endpoint scope and session contracts', ()
   assert.equal(travel.traversals.candidateHistorical, 1);
 
   const gateways = travel.gateways.records;
+  assert.equal(gateways[0].fromSession, gateways[0].toSession);
   assert.equal(gateways[0].migrationStatus, 'candidate_historical');
   assert.ok(gateways[1].reviewReasons.includes('gateway_endpoint_kind_mismatch'));
   assert.ok(gateways[2].reviewReasons.includes('gateway_endpoint_not_the_end'));
-  assert.ok(gateways[3].reviewReasons.includes('crossing_session_not_distinct'));
+  assert.equal(gateways[3].migrationStatus, 'needs_review');
+  assert.ok(gateways[3].reviewReasons.includes('gateway_session_mismatch'));
+  assert.equal(gateways[3].reviewReasons.includes('crossing_session_not_distinct'), false);
   assert.equal(travel.gateways.candidateHistorical, 1);
   assert.ok(report.issues.some((issue) => issue.code === 'blocked_endpoint_reference'));
 });

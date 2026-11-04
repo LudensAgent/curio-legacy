@@ -540,6 +540,7 @@ function projectChest(key: string, raw: unknown, ctx: Context, complete: boolean
   if (ledgerStatus === 'invalid') blockers.push('precise_ledger_invalid');
   else if (ledgerStatus === 'unverified_truncated') blockers.push('precise_ledger_unverified_by_truncation');
   else if (ledgerStatus === 'unknown') blockers.push('precise_ledger_without_positive_observation_time');
+  else if (ledgerStatus === 'stale_unconfirmed') blockers.push('stale_ledger_time_not_confirmed_full_observation');
   if (!complete) blockers.push('collection_truncated');
   if (!versionOk) blockers.push('unrecognized_root_version');
   if (itemLines.truncated) blockers.push('nested_inspection_truncated');
@@ -575,7 +576,9 @@ function projectChest(key: string, raw: unknown, ctx: Context, complete: boolean
       source: 'world-memory.chests',
       worldScope: worldId ? 'record_worldId' : 'missing',
       dimScope: dim ? 'record_dim' : 'missing',
-      time: contentsObservedAt !== null && contentsObservedAt > 0 ? 'record_contents_observedAt' : 'missing',
+      time: ledgerStatus === 'stale_unconfirmed'
+        ? 'record_contents_observedAt_may_be_incremental_update_not_confirmed_full_observation'
+        : contentsObservedAt !== null && contentsObservedAt > 0 ? 'record_contents_observedAt' : 'missing',
       lastUseTime: ts !== null ? 'record_ts_last_use' : 'missing',
       session: 'not_recorded',
       ledger: ledgerStatus,
@@ -819,7 +822,13 @@ function projectCrossing(
       blockers.push('endpoint_dimensions_not_distinct');
     }
   }
-  if (fromSession !== null && toSession !== null && fromSession === toSession) blockers.push('crossing_session_not_distinct');
+  if (fromSession !== null && toSession !== null) {
+    if (recordType === 'travel_gateway') {
+      if (fromSession !== toSession) blockers.push('gateway_session_mismatch');
+    } else if (fromSession === toSession) {
+      blockers.push('crossing_session_not_distinct');
+    }
+  }
   if (!complete) blockers.push('collection_truncated');
   if (!versionOk) blockers.push('unrecognized_root_version');
   markUnknownFields(projection, record, TRAVEL_CROSSING_FIELDS, ctx);
