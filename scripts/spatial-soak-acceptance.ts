@@ -1,17 +1,22 @@
 /**
- * 空间记忆 soak 验收（H1 foundation + H2a real smoke）。
+ * 空间记忆 soak 验收（H1 foundation + H2a smoke + H2b 场景结构）。
  *
  * H1 地基：CLI 纯解析、同步有界 JSONL 证据写入、内存/定时器聚合指标，以及在
  * 真实 SharedSpatialSession 上组合常规 30s checkpoint 调度和真实 shutdown。
  *
- * H2a 只增加受限的真实游戏 smoke：夹具端点 A/B、RCON 只读 preflight 与一次
- * 自有测试 Bot 的 setup tp、真实 Vision 初始准入、真实 walk_to 往返与每段成功的
- * spatial_query、真实调度保存确认。全量 60 分钟、显式取消、自动重连和手动重开
- * 仍留给 H2b；H2a 的 full 模式只报告 pending/not-run，不连接任何服务。
+ * H2a smoke：夹具端点 A/B、RCON 只读 preflight 与一次自有测试 Bot 的 setup tp、
+ * 真实 Vision 初始准入、真实 walk_to 往返与每段成功的 spatial_query、真实调度保存
+ * 确认。每段在真实身体 settle 后从 adapter.state().pos 读取实测起点，不复用上一段
+ * 的标称终点。
  *
- * 证据由两个独占新建文件承载：metrics.jsonl（H1 foundation 自有 writer）与
- * events.jsonl（运行事件；大记录按稳定 eventId 分块）。每条记录同步追加，
- * 不保留全部历史帧；单条超过硬上限时显式失败，不静默截断。
+ * H2b 场景：显式取消（真实移动后取消并核对后续物理帧/按键释放）、真实断线重连/
+ * 新会话、关闭/重开后的 stale 分类（使用原始 observedAt），以及 manual residency
+ * 整合场景（独立模块，仅在 manual 分支合入后启用）。full 模式必须实际活动满
+ * 3,600,000ms 且所有必需场景通过；manual API 未合入时在连接前显式失败，不会空等。
+ *
+ * 证据是直接、可读的 JSONL（每行一条记录），大记录不编码、不分块、不截断：
+ * 单条超过 64KiB 时显式失败并使本次运行失败。最终 run-result 写入失败同样返回
+ * 非零退出码。
  */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -47,9 +52,11 @@ import type {
   WalkRouteStatus,
 } from 'curio-minecraft-3d-memory';
 import {
+  CANCEL_MOVEMENT_THRESHOLD,
   LANE,
-  captureMoveCall,
   classifyAdapterEnd,
+  classifyCancellationResult,
+  classifyPostCancelFrames,
   classifySettledFrames,
   classifyTerminalBody,
   classifyWalkToResult,
@@ -64,6 +71,10 @@ import {
   type CapturedRouteSample,
   type PhysicsFrame,
 } from './navigation-acceptance.ts';
+import {
+  manualScenarioSupported,
+  runManualScenario,
+} from './spatial-soak-manual-scenario.ts';
 
 /** 保留的测试干道；与 navigation-acceptance 的 LANE 相同。 */
 export { LANE };
@@ -84,10 +95,6 @@ export const MIN_DURATION_MS = 90_000;
 export const MAX_DURATION_MS = 3_600_000;
 /** 单条 JSONL 记录（含 envelope）的硬上限。超出即失败，不写半条记录。 */
 export const MAX_JSONL_RECORD_BYTES = 64 * 1024;
-/** 大记录分块的 UTF-8 负载上限；base64 后的单块仍低于 64KiB。 */
-export const CHUNK_PAYLOAD_BYTES = 16 * 1024;
-/** 单个逻辑事件的硬上限；超出显式失败，不截断、不丢字段。 */
-export const MAX_EVENT_BYTES = 1024 * 1024;
 /** 内存快照周期；定时器已 unref，stop 时清除。 */
 export const SAMPLE_INTERVAL_MS = 1_000;
 /** 连接物理帧/监听器诊断的落盘周期；不逐帧保存。 */
@@ -95,51 +102,59 @@ export const CONNECTION_SNAPSHOT_INTERVAL_MS = 5_000;
 export const SMOKE_LEG_BUDGET_MS = 45_000;
 export const SMOKE_MIN_SUCCESSFUL_LEGS = 2;
 export const SMOKE_MIN_CHECKPOINT_SAVES = 2;
+/** smoke 完成等待上限；避免 full 在 smoke 未满足时空等一小时。 */
+export const SMOKE_COMPLETION_WAIT_MS = 90_000;
 /** 当前任务保留给既有分类器的有界窗口。超出显式失败/取消，不静默截断。 */
 export const MAX_SAMPLES_PER_TASK = 4_096;
 export const MAX_MOVES_PER_TASK = 16;
 export const MAX_STARTS_PER_TASK = 16;
+/** full 模式必须执行的 H2b 场景；manual 仅在 manual-residency 分支合入后可用。 */
+export const H2B_REQUIRED_SCENARIOS = [
+  'explicit-cancel',
+  'disconnect-reconnect',
+  'close-reopen',
+  'manual-residency',
+] as const;
+export type H2bScenarioId = typeof H2B_REQUIRED_SCENARIOS[number];
 
 const DECIMAL_TOKEN = /^-?(?:\d+(?:\.\d*)?|\.\d+)$/;
 const INTEGER_TOKEN = /^\d+$/;
 const HEX_40 = /^[0-9a-f]{40}$/;
+const HEX_64 = /^[0-9a-f]{64}$/;
+const EXPECTED_CURIO_PACKAGE = 'curio-minecraft-3d-memory';
 
 export const H2_PENDING = {
   state: 'pending',
   fullPass: false,
   detail:
-    'H2a implements a bounded real-game smoke path only. Full 60-minute soak, explicit cancel acceptance, auto-reconnect, and manual reopen remain pending; no full pass is claimed.',
+    'H2a smoke and H2b scenario structure are implemented. Manual residency integration and real long-run acceptance remain pending; no full pass is claimed.',
 } as const;
-
-export const H2A_PENDING_MANDATORY = [
-  'full-60-minute-run',
-  'explicit-cancel-scenarios',
-  'auto-reconnect',
-  'manual-reopen',
-] as const;
 
 const H1_IMPLEMENTED = {
   state: 'implemented',
   scope: 'offline CLI, bounded evidence writer, metrics, and real-session lifecycle foundation',
 } as const;
 
-export const HELP = `spatial-soak-acceptance — H1 foundation + H2a bounded real smoke
+export const HELP = `spatial-soak-acceptance — H1 foundation + H2a smoke + H2b scenario structure
 
 Usage:
   node --import tsx scripts/spatial-soak-acceptance.ts --curio=test --mode=smoke --start=207.5,64,216.5 [--duration-ms=N]
 
 Options:
   --curio=test        Required; only the isolated test environment is accepted.
-  --mode=smoke|full   Required. smoke may run the bounded real path; full is reserved for
-                      H2b and remains pending/not-run without connecting.
+  --mode=smoke|full   Required. smoke runs the bounded real smoke path and exits once
+                      its criteria are met; full runs at least 3,600,000ms of active
+                      soak and requires every H2b scenario, including manual residency.
   --start=x,y,z       Required; must be exactly fixture endpoint A=(207.5,64,216.5)
                       or B=(209.5,64,216.5). Values are never rounded.
   --duration-ms=N     Optional; integer 90000..3600000, default 3600000.
-                      --mode=full requires exactly 3600000 and does not run in H2a.
+                      --mode=full requires exactly 3600000.
   --help, -h          Print this text and exit without loading config, creating a DB, or opening sockets.
 
-The smoke path uses only RCON list and one setup tp of the configured test Bot. Map facts
-come from normal Vision and production navigation; H2a never claims a full pass.`;
+Every leg reads its measured start from adapter.state().pos after settle; fixed A/B
+targets and measured starts are recorded separately. Any scheduled checkpoint failure,
+unclean shutdown, or evidence record over 64KiB fails the run. Manual residency is
+never reported as passed unless the real SharedSpatialSession manual API is present.`;
 
 export type FixtureEndpoint = { x: number; y: number; z: number };
 
@@ -195,11 +210,11 @@ export function parseCliArgs(argv: readonly string[]): ParsedCli {
       return { ok: false, error: `--duration-ms must be between ${MIN_DURATION_MS} and ${MAX_DURATION_MS}` };
     }
   }
-  // H2a 的 full 只是占位：90s 不能被放大成 1h，也不允许冒充满时长运行。
+  // full 必须是完整一小时，不能把 90s 放大成一次一小时运行。
   if (rawMode === 'full' && durationMs !== DEFAULT_DURATION_MS) {
     return {
       ok: false,
-      error: `--mode=full requires --duration-ms=${DEFAULT_DURATION_MS} in H2a; full remains pending/not-run`,
+      error: `--mode=full requires --duration-ms=${DEFAULT_DURATION_MS}; shorter runs are smoke only`,
     };
   }
 
@@ -236,170 +251,218 @@ export function buildRunReport(parsed: Extract<ParsedCli, { ok: true; help: fals
     fixture: FIXTURE_FACTS,
     h1: H1_IMPLEMENTED,
     h2: H2_PENDING,
+    requiredScenarios: H2B_REQUIRED_SCENARIOS,
   };
 }
 
 const sha256Hex = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex');
 const sha256File = (file: string): string => sha256Hex(readFileSync(file));
+const sha512Base64 = (bytes: Uint8Array): string => createHash('sha512').update(bytes).digest('base64');
 
-export interface ChunkPartRecord {
-  kind: 'evidence-chunk';
-  eventId: string;
-  partIndex: number;
-  partCount: number;
-  payloadBytes: number;
-  payloadSha256: string;
-  partSha256: string;
-  encoding: 'base64';
-  data: string;
-}
-
-export interface EncodedChunkedRecord {
-  eventId: string;
-  payloadBytes: number;
-  payloadSha256: string;
-  partCount: number;
-  parts: ChunkPartRecord[];
+export interface CurioPackageMeta {
+  name: string;
+  version: string;
+  dependencySpec: string;
+  tgz: { path: string; bytes: number; sha256: string; integrity: string };
+  lock: { version: string; resolved: string; integrity: string };
+  provenance: {
+    path: string;
+    sha256: string;
+    sourceHEAD: string;
+    artifactSHA256: string;
+    npmIntegrity: string;
+    tracked: boolean;
+  };
+  installedPackageJson: string;
+  checks: Record<string, 'verified'>;
 }
 
 /**
- * 把一个大 payload 编成稳定、可重建的分块记录。
- *
- * 按 UTF-8 字节切片（每片不超过 maxChunkBytes），最后统一解码，避免把多字节字符
- * 切断后各自解码造成损坏。每块都带 eventId、partIndex/partCount、整包与分块哈希；
- * 超出 MAX_EVENT_BYTES 时抛 RangeError，绝不截断字段。
+ * 真实的 Curio 来源包校验：计算 tgz 的 SHA-256 与 npm sha512 integrity，并与
+ * manifest file: 规格、package-lock 条目、已安装包身份和 provenance 声明逐项
+ * 对照。不是复制声明值：每个哈希都从实际字节重新计算，任一不一致都抛错。
  */
-export function encodeChunkedRecord(
-  eventId: string,
-  payload: unknown,
-  maxChunkBytes = CHUNK_PAYLOAD_BYTES,
-): EncodedChunkedRecord {
-  if (eventId === '') throw new TypeError('chunked record eventId must not be empty');
-  if (!Number.isInteger(maxChunkBytes) || maxChunkBytes < 1) {
-    throw new RangeError(`maxChunkBytes must be a positive integer, got ${maxChunkBytes}`);
+export function collectPackageMeta(base: string): CurioPackageMeta {
+  const manifestPath = path.join(base, 'package.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { dependencies?: Record<string, string> };
+  const spec = manifest.dependencies?.[EXPECTED_CURIO_PACKAGE];
+  if (typeof spec !== 'string' || !spec.startsWith('file:')) {
+    throw new Error(`package.json dependency for ${EXPECTED_CURIO_PACKAGE} must be a file: spec`);
   }
-  const json = JSON.stringify(payload);
-  if (json === undefined) throw new TypeError('chunked record payload is not JSON serializable');
-  const bytes = Buffer.from(json, 'utf8');
-  if (bytes.length > MAX_EVENT_BYTES) {
-    throw new RangeError(`event ${eventId} is ${bytes.length} bytes, exceeds hard limit ${MAX_EVENT_BYTES}`);
+  const tgzRel = spec.slice('file:'.length);
+  if (tgzRel.length === 0) throw new Error(`file: dependency for ${EXPECTED_CURIO_PACKAGE} has no path`);
+  const tgzPath = path.resolve(base, tgzRel);
+  if (!existsSync(tgzPath)) throw new Error(`vendored tarball is missing: ${tgzPath}`);
+  const tgzBytes = readFileSync(tgzPath);
+  const tgzSha256 = sha256Hex(tgzBytes);
+  const tgzIntegrity = `sha512-${sha512Base64(tgzBytes)}`;
+
+  const installedLocal = path.join(base, 'node_modules', EXPECTED_CURIO_PACKAGE, 'package.json');
+  const installedPackageJson = existsSync(installedLocal)
+    ? installedLocal
+    : (() => {
+      const entryUrl = import.meta.resolve(EXPECTED_CURIO_PACKAGE);
+      if (!entryUrl.startsWith('file:')) throw new Error(`curio package entry is not a file URL: ${entryUrl}`);
+      return path.resolve(path.dirname(fileURLToPath(entryUrl)), '..', 'package.json');
+    })();
+  const installed = JSON.parse(readFileSync(installedPackageJson, 'utf8')) as { name?: string; version?: string };
+  if (installed.name !== EXPECTED_CURIO_PACKAGE) {
+    throw new Error(`installed package name ${String(installed.name)} is not ${EXPECTED_CURIO_PACKAGE}`);
   }
-  const payloadSha256 = sha256Hex(bytes);
-  const partCount = Math.max(1, Math.ceil(bytes.length / maxChunkBytes));
-  const parts = Array.from({ length: partCount }, (_, partIndex): ChunkPartRecord => {
-    const slice = bytes.subarray(partIndex * maxChunkBytes, (partIndex + 1) * maxChunkBytes);
-    return {
-      kind: 'evidence-chunk',
-      eventId,
-      partIndex,
-      partCount,
-      payloadBytes: bytes.length,
-      payloadSha256,
-      partSha256: sha256Hex(slice),
-      encoding: 'base64',
-      data: slice.toString('base64'),
-    };
-  });
-  return { eventId, payloadBytes: bytes.length, payloadSha256, partCount, parts };
-}
-
-const isRecordValue = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value);
-const isNumberValue = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
-
-export interface DecodedChunkedRecord {
-  ok: boolean;
-  problems: string[];
-  eventId: string | null;
-  payload: unknown;
-  payloadSha256: string | null;
-  partCount: number | null;
-}
-
-/** 重建分块事件；缺块、重复块、哈希不符或 JSON 损坏都显式报告。 */
-export function decodeChunkedRecord(records: readonly unknown[]): DecodedChunkedRecord {
-  const problems: string[] = [];
-  const parts = records.filter(isRecordValue);
-  if (parts.length !== records.length) problems.push('non-object chunk record encountered');
-  if (parts.length === 0) {
-    return { ok: false, problems: ['no chunk records supplied'], eventId: null, payload: null, payloadSha256: null, partCount: null };
-  }
-  if (parts.some((part) => part.kind !== 'evidence-chunk')) problems.push('record kind is not evidence-chunk');
-  if (parts.some((part) => part.encoding !== 'base64')) problems.push('chunk encoding is not base64');
-
-  const eventIds = new Set(parts.map((part) => part.eventId).filter((id): id is string => typeof id === 'string'));
-  if (eventIds.size !== 1) problems.push(`chunk eventIds are not exactly one: ${eventIds.size}`);
-  const eventId = eventIds.size === 1 ? [...eventIds][0]! : null;
-
-  const declaredCounts = new Set(parts.map((part) => part.partCount).filter(isNumberValue));
-  if (declaredCounts.size !== 1) problems.push('chunk partCount is inconsistent');
-  const declaredCount = declaredCounts.size === 1 ? [...declaredCounts][0]! : null;
-  if (declaredCount !== null && (!Number.isInteger(declaredCount) || declaredCount < 1)) problems.push('chunk partCount is invalid');
-
-  const payloadSizes = new Set(parts.map((part) => part.payloadBytes).filter(isNumberValue));
-  if (payloadSizes.size !== 1) problems.push('chunk payloadBytes is inconsistent');
-  const payloadBytes = payloadSizes.size === 1 ? [...payloadSizes][0]! : null;
-
-  const payloadHashes = new Set(parts.map((part) => part.payloadSha256).filter((hash): hash is string => typeof hash === 'string'));
-  if (payloadHashes.size !== 1) problems.push('chunk payloadSha256 is inconsistent');
-  const payloadSha256 = payloadHashes.size === 1 ? [...payloadHashes][0]! : null;
-
-  const byIndex = new Map<number, Record<string, unknown>>();
-  for (const part of parts) {
-    if (!Number.isInteger(part.partIndex) || (part.partIndex as number) < 0) {
-      problems.push(`chunk partIndex is invalid: ${String(part.partIndex)}`);
-      continue;
-    }
-    const index = part.partIndex as number;
-    if (declaredCount !== null && index >= declaredCount) problems.push(`chunk partIndex ${index} is outside partCount ${declaredCount}`);
-    if (byIndex.has(index)) problems.push(`duplicate evidence chunk part ${index}`);
-    byIndex.set(index, part);
+  if (typeof installed.version !== 'string' || !/^\d+\.\d+\.\d+/.test(installed.version)) {
+    throw new Error(`installed ${EXPECTED_CURIO_PACKAGE} has no usable version`);
   }
 
-  const slices: Buffer[] = [];
-  if (declaredCount !== null) {
-    for (let index = 0; index < declaredCount; index += 1) {
-      const part = byIndex.get(index);
-      if (part === undefined) {
-        problems.push(`missing evidence chunk part ${index} of ${declaredCount}`);
-        continue;
-      }
-      if (typeof part.data !== 'string') {
-        problems.push(`evidence chunk part ${index} data is not a string`);
-        continue;
-      }
-      if (typeof part.partSha256 !== 'string') {
-        problems.push(`evidence chunk part ${index} partSha256 is missing`);
-        continue;
-      }
-      const slice = Buffer.from(part.data, 'base64');
-      if (sha256Hex(slice) !== part.partSha256) problems.push(`evidence chunk part ${index} hash mismatch`);
-      slices.push(slice);
-    }
+  const lock = JSON.parse(readFileSync(path.join(base, 'package-lock.json'), 'utf8')) as {
+    packages?: Record<string, { name?: string; version?: string; resolved?: string; integrity?: string; dependencies?: Record<string, string> }>;
+  };
+  const rootLockDep = lock.packages?.['']?.dependencies?.[EXPECTED_CURIO_PACKAGE];
+  if (rootLockDep !== spec) throw new Error(`lock root dependency ${String(rootLockDep)} differs from manifest ${spec}`);
+  const lockEntry = lock.packages?.[`node_modules/${EXPECTED_CURIO_PACKAGE}`];
+  if (lockEntry === undefined) throw new Error(`package-lock lacks node_modules/${EXPECTED_CURIO_PACKAGE}`);
+  if (lockEntry.name !== undefined && lockEntry.name !== EXPECTED_CURIO_PACKAGE) {
+    throw new Error(`lock package name ${lockEntry.name} is not ${EXPECTED_CURIO_PACKAGE}`);
+  }
+  if (lockEntry.version !== installed.version) {
+    throw new Error(`lock version ${String(lockEntry.version)} differs from installed ${installed.version}`);
+  }
+  if (lockEntry.resolved !== spec) throw new Error(`lock resolved ${String(lockEntry.resolved)} differs from manifest ${spec}`);
+  if (typeof lockEntry.integrity !== 'string' || lockEntry.integrity.length === 0) {
+    throw new Error(`package-lock lacks integrity for ${EXPECTED_CURIO_PACKAGE}`);
+  }
+  if (lockEntry.integrity !== tgzIntegrity) {
+    throw new Error('actual tarball sha512 integrity differs from package-lock integrity');
   }
 
-  let payload: unknown = null;
-  if (problems.length === 0 && payloadBytes !== null && payloadSha256 !== null) {
-    const combined = Buffer.concat(slices);
-    if (combined.length !== payloadBytes) problems.push(`reconstructed ${combined.length} bytes, expected ${payloadBytes}`);
-    const reconstructedHash = sha256Hex(combined);
-    if (reconstructedHash !== payloadSha256) problems.push('reconstructed payload hash mismatch');
-    if (problems.length === 0) {
-      try {
-        payload = JSON.parse(combined.toString('utf8'));
-      } catch (error) {
-        problems.push(`reconstructed payload is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
+  const provenanceRel = `vendor/${EXPECTED_CURIO_PACKAGE}-${installed.version}.provenance.json`;
+  const provenancePath = path.join(base, provenanceRel);
+  if (!existsSync(provenancePath)) throw new Error(`curio source provenance is missing: ${provenanceRel}`);
+  const tracked = (() => {
+    if (!existsSync(path.join(base, '.git'))) return false;
+    execFileSync('git', ['-c', `safe.directory=${base}`, 'ls-files', '--error-unmatch', provenanceRel], {
+      cwd: base,
+      stdio: 'ignore',
+    });
+    return true;
+  })();
+  const provenance = JSON.parse(readFileSync(provenancePath, 'utf8')) as {
+    package?: { name?: string; version?: string };
+    sourceHEAD?: string;
+    artifactSHA256?: string;
+    npmIntegrity?: string;
+    sourceBinding?: { clean?: boolean; head?: string };
+  };
+  if (provenance.package?.name !== EXPECTED_CURIO_PACKAGE) {
+    throw new Error(`provenance package name ${String(provenance.package?.name)} is not ${EXPECTED_CURIO_PACKAGE}`);
   }
+  if (provenance.package?.version !== installed.version) {
+    throw new Error(`provenance version ${String(provenance.package?.version)} differs from installed ${installed.version}`);
+  }
+  if (provenance.artifactSHA256 !== tgzSha256) {
+    throw new Error('actual tarball SHA-256 differs from provenance artifactSHA256');
+  }
+  if (provenance.npmIntegrity !== lockEntry.integrity) {
+    throw new Error('provenance npmIntegrity differs from package-lock integrity');
+  }
+  if (provenance.npmIntegrity !== tgzIntegrity) {
+    throw new Error('actual tarball sha512 integrity differs from provenance npmIntegrity');
+  }
+  if (typeof provenance.sourceHEAD !== 'string' || !HEX_40.test(provenance.sourceHEAD)) {
+    throw new Error('provenance sourceHEAD is not a full 40-char hash');
+  }
+  if (provenance.sourceBinding?.clean !== true) throw new Error('provenance sourceBinding.clean must be true');
+  if (provenance.sourceBinding?.head !== provenance.sourceHEAD) {
+    throw new Error('provenance sourceBinding.head differs from sourceHEAD');
+  }
+  if (!HEX_64.test(tgzSha256)) throw new Error('computed tarball SHA-256 is malformed');
 
   return {
-    ok: problems.length === 0,
-    problems,
-    eventId,
-    payload,
-    payloadSha256,
-    partCount: declaredCount,
+    name: installed.name,
+    version: installed.version,
+    dependencySpec: spec,
+    tgz: { path: path.relative(base, tgzPath).replaceAll('\\', '/'), bytes: tgzBytes.length, sha256: tgzSha256, integrity: tgzIntegrity },
+    lock: { version: lockEntry.version, resolved: lockEntry.resolved, integrity: lockEntry.integrity },
+    provenance: {
+      path: provenanceRel,
+      sha256: sha256File(provenancePath),
+      sourceHEAD: provenance.sourceHEAD,
+      artifactSHA256: provenance.artifactSHA256,
+      npmIntegrity: provenance.npmIntegrity,
+      tracked,
+    },
+    installedPackageJson: path.relative(base, installedPackageJson).replaceAll('\\', '/'),
+    checks: {
+      manifestSpec: 'verified',
+      lockEntry: 'verified',
+      installedIdentity: 'verified',
+      tgzSha256: 'verified',
+      tgzSha512: 'verified',
+      provenance: 'verified',
+    },
+  };
+}
+
+function collectMetadata(repoRoot: string, scriptPath: string) {
+  const git = (args: string[]): string =>
+    execFileSync('git', ['-c', `safe.directory=${repoRoot}`, ...args], { cwd: repoRoot, encoding: 'utf8' }).trim();
+
+  const top = git(['rev-parse', '--show-toplevel']);
+  if (path.resolve(top).toLowerCase() !== path.resolve(repoRoot).toLowerCase()) {
+    throw new Error(`git top-level mismatch: ${top}`);
+  }
+  const head = git(['rev-parse', 'HEAD']);
+  if (!HEX_40.test(head)) throw new Error(`git HEAD is not a full 40-char hash: ${head}`);
+  const branch = git(['rev-parse', '--abbrev-ref', 'HEAD']);
+  const status = git(['status', '--porcelain=v1']);
+  const pkg = collectPackageMeta(repoRoot);
+
+  return {
+    status: 'OK',
+    head,
+    branch,
+    clean: status === '',
+    script: {
+      path: path.relative(repoRoot, scriptPath).replaceAll('\\', '/'),
+      sha256: sha256File(scriptPath),
+    },
+    package: pkg,
+  };
+}
+
+export interface EvidenceEmitter {
+  readonly failure: unknown;
+  emit(kind: string, taskId: string | null, payload: unknown): { eventId: string; bytes: number } | null;
+}
+
+/**
+ * 直接写入可读 JSONL 的事件发射器：一行一个事件，不做编码/分块/截断。
+ * 单条记录超过 writer 的 64KiB 上限时保留首个错误并返回 null；调用方据此失败。
+ */
+export function createEvidenceEmitter(writer: BoundedJsonlWriter, runId: string): EvidenceEmitter {
+  let sequence = 0;
+  let failure: unknown = null;
+
+  const emit = (kind: string, taskId: string | null, payload: unknown) => {
+    if (failure !== null) return null;
+    const eventId = `${runId}:event-${++sequence}`;
+    const body = { kind, runId, eventId, taskId, at: Date.now(), payload };
+    try {
+      const json = JSON.stringify(body);
+      if (json === undefined) throw new TypeError(`evidence event ${eventId} is not JSON serializable`);
+      const bytes = Buffer.byteLength(json, 'utf8');
+      writer.append(body);
+      return { eventId, bytes };
+    } catch (error) {
+      failure = error;
+      return null;
+    }
+  };
+
+  return {
+    get failure() {
+      return failure;
+    },
+    emit,
   };
 }
 
@@ -691,6 +754,34 @@ export const shutdownFacts = (result: ShutdownResult): Record<string, unknown> =
   closeError: result.closeError === null ? null : errorFacts(result.closeError),
 });
 
+export interface ShutdownVerdict {
+  ok: boolean;
+  problems: string[];
+  facts: Record<string, unknown> | null;
+}
+
+/**
+ * 失败判据：真实 ShutdownResult 的每个失败面都要失败，而不是只看 stop() 是否
+ * 抛错。最终 checkpoint 缺失、checkpoint 错误、close 抛错、close 未完成或
+ * close.error 非空都列为失败；dirty/unconfirmedRequest 作为事实保留。
+ */
+export function classifyShutdownResult(result: ShutdownResult | null): ShutdownVerdict {
+  if (result === null) {
+    return { ok: false, problems: ['shared spatial shutdown returned no result'], facts: null };
+  }
+  const problems: string[] = [];
+  if (result.checkpoint === null) problems.push('missing confirmed final checkpoint');
+  if (result.error !== null) problems.push(`final checkpoint failed: ${errorText(result.error)}`);
+  if (result.closeError !== null) problems.push(`close threw: ${errorText(result.closeError)}`);
+  if (result.close === null) {
+    problems.push('missing close result');
+  } else {
+    if (result.close.completed !== true) problems.push('close did not complete');
+    if (result.close.error !== null) problems.push(`close reported an error: ${errorText(result.close.error)}`);
+  }
+  return { ok: problems.length === 0, problems, facts: shutdownFacts(result) };
+}
+
 /**
  * 用调用方提供的真实服务与证据路径启动采样、常规 30s checkpoint 调度，
  * 并保证 stop 时先停未来触发，再通过服务自身的 shutdown 做最终保存和关闭。
@@ -833,8 +924,11 @@ export function startSpatialSoakFoundation(options: SoakFoundationOptions): Spat
   };
 }
 
+const isRecordValue = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
 const isVec = (value: unknown): value is { x: number; y: number; z: number } =>
   isRecordValue(value) && isNumberValue(value.x) && isNumberValue(value.y) && isNumberValue(value.z);
+const isNumberValue = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 const distance = (a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }): number =>
   Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 
@@ -898,126 +992,134 @@ interface TaskWindow {
   lastSequence: number;
 }
 
-interface EvidenceEmitter {
-  readonly failure: unknown;
-  emit(kind: string, taskId: string | null, payload: unknown): { eventId: string; bytes: number } | null;
+interface ScenarioResult {
+  id: string;
+  state: 'passed' | 'failed' | 'not-integrated' | 'not-run';
+  ok: boolean;
+  problems: string[];
+  facts: Record<string, unknown>;
 }
 
-/** 事件落盘：小记录单行；大记录按稳定 eventId 分块；任一失败都保留首错。 */
-function createEvidenceEmitter(writer: BoundedJsonlWriter, runId: string): EvidenceEmitter {
-  let sequence = 0;
-  let failure: unknown = null;
+/**
+ * 相关已接受样本与确认 Nav.trace 的关联。
+ *
+ * accepted 样本由 onSample 阶段确认：样本 executionId 等于该路由的 delegationId、
+ * 返回的 lastPosition 与样本位置深相等、sequence 为数值（见 executorWrappedOnSample
+ * 与 navigation-acceptance 的既有模式）。ExecutableMove 的 executionId 是
+ * `${delegationId}-step-N`，因此这里不再错误地要求两者逐字相等。
+ *
+ * 按真实派发顺序把 `taskMoves[i]` 对应到 `trace[i]`：该 trace 点必须有一个
+ * accepted 同任务/同作用域样本，位置与 observedAt 精确对应，且时间落在该派发的
+ * [receivedAt, deadlineMs] 内。move.request.to 是名义请求目标，不拿它替代真实
+ * 观测位置。
+ * 不要求每个 move.result 都有 sample，也不拿上一移动的 result 充当下一移动的 from。
+ */
+export function classifyLegTrace(
+  nav: Record<string, unknown> | null,
+  taskId: string,
+  samples: readonly CapturedRouteSample[],
+  moves: readonly CapturedMove[],
+): { ok: boolean; problems: string[] } {
+  const problems: string[] = [];
+  const trace = nav !== null && Array.isArray(nav.trace)
+    ? nav.trace.filter((entry): entry is { pos: FixtureEndpoint; ts: number } =>
+      isRecordValue(entry) && isVec(entry.pos) && isNumberValue(entry.ts))
+    : [];
+  if (nav === null || nav.confirmed !== true) problems.push('missing confirmed nav trace');
+  if (trace.length === 0) problems.push('confirmed nav trace has no points');
 
-  const emit = (kind: string, taskId: string | null, payload: unknown) => {
-    if (failure !== null) return null;
-    const eventId = `${runId}:event-${++sequence}`;
-    const body = { kind, runId, eventId, taskId, at: Date.now(), payload };
-    try {
-      const json = JSON.stringify(body);
-      if (json === undefined) throw new TypeError(`evidence event ${eventId} is not JSON serializable`);
-      const bytes = Buffer.byteLength(json, 'utf8');
-      if (bytes > MAX_EVENT_BYTES) {
-        throw new RangeError(`evidence event ${eventId} is ${bytes} bytes, exceeds ${MAX_EVENT_BYTES}`);
+  const taskMoves = moves.filter((move) => move.taskId === taskId);
+  const acceptedSamples = samples.filter((sample) =>
+    sample.taskId === taskId && sample.accepted && Number.isInteger(sample.sample.sequence));
+  if (taskMoves.length === 0 && trace.length > 0) problems.push('confirmed trace exists but no ExecutableMove dispatch was recorded');
+  if (trace.length > taskMoves.length) {
+    problems.push(`trace has ${trace.length} points but only ${taskMoves.length} dispatches were recorded`);
+  }
+
+  // 一个 walk 任务对应一个路由 delegation；move 的 executionId 必须由它派生。
+  const routeDelegations = new Set(acceptedSamples.map((sample) => sample.delegationId));
+  if (routeDelegations.size > 1) {
+    problems.push(`accepted samples span ${routeDelegations.size} route delegations within ${taskId}`);
+  }
+  const routeDelegation = routeDelegations.size === 1 ? [...routeDelegations][0]! : null;
+  if (routeDelegation !== null) {
+    for (const [index, move] of taskMoves.entries()) {
+      if (!move.request.executionId.startsWith(`${routeDelegation}-step-`)) {
+        problems.push(`move ${index}.executionId is not derived from accepted route delegation ${routeDelegation}`);
       }
-      if (bytes <= CHUNK_PAYLOAD_BYTES) {
-        writer.append(body);
-      } else {
-        for (const part of encodeChunkedRecord(eventId, body).parts) writer.append(part);
-      }
-      return { eventId, bytes };
-    } catch (error) {
-      failure = error;
-      return null;
     }
-  };
+  }
 
-  return {
-    get failure() {
-      return failure;
-    },
-    emit,
-  };
+  const compared = Math.min(trace.length, taskMoves.length);
+  for (let index = 0; index < compared; index += 1) {
+    const point = trace[index]!;
+    const move = taskMoves[index]!;
+    const matched = acceptedSamples.some((sample) =>
+      (routeDelegation === null || sample.delegationId === routeDelegation)
+      && sample.sample.executionId === sample.delegationId
+      && isDeepStrictEqual(sample.sample.position, point.pos)
+      && sample.sample.observedAt === point.ts
+      && sample.sample.worldId === move.request.worldId
+      && sample.sample.dim === move.request.dim
+      && sample.sample.sessionId === move.request.sessionId
+      && sample.sample.observedAt >= move.receivedAt
+      && sample.sample.observedAt <= move.request.deadlineMs);
+    if (!matched) {
+      problems.push(`trace point ${index} has no accepted same-delegation sample matching pos/ts/scope/time-range`);
+    }
+  }
+
+  // 每个 accepted 样本都必须属于该路由的一次真实派发及其时间范围，防止孤立样本混入关联。
+  for (const sample of acceptedSamples) {
+    const owned = taskMoves.some((move) =>
+      (routeDelegation === null || (
+        sample.delegationId === routeDelegation
+        && move.request.executionId.startsWith(`${routeDelegation}-step-`)))
+      && sample.sample.observedAt >= move.receivedAt
+      && sample.sample.observedAt <= move.request.deadlineMs
+      && sample.sample.worldId === move.request.worldId
+      && sample.sample.dim === move.request.dim
+      && sample.sample.sessionId === move.request.sessionId);
+    if (!owned) {
+      problems.push(`accepted sample sequence ${sample.sample.sequence} has no matching dispatch/time-range/scope`);
+    }
+  }
+
+  return { ok: problems.length === 0, problems };
 }
 
-function collectMetadata(repoRoot: string, scriptPath: string) {
-  const git = (args: string[]): string =>
-    execFileSync('git', ['-c', `safe.directory=${repoRoot}`, ...args], { cwd: repoRoot, encoding: 'utf8' }).trim();
-
-  const top = git(['rev-parse', '--show-toplevel']);
-  if (path.resolve(top).toLowerCase() !== path.resolve(repoRoot).toLowerCase()) {
-    throw new Error(`git top-level mismatch: ${top}`);
+/**
+ * 时长诚实分类：full 只有在活动时长真正达到请求时长时才有资格 full pass；
+ * smoke 无论跑多久都只是 smoke/scenario 结果，不转成 full pass。
+ */
+export function classifyDuration(
+  mode: 'smoke' | 'full',
+  durationMs: number,
+  activeElapsedMs: number | null,
+): { fullPassEligible: boolean; durationSatisfied: boolean; smokeOnly: boolean; problems: string[] } {
+  const elapsed = activeElapsedMs ?? 0;
+  const durationSatisfied = elapsed >= durationMs;
+  if (mode === 'full') {
+    return {
+      fullPassEligible: durationSatisfied,
+      durationSatisfied,
+      smokeOnly: false,
+      problems: durationSatisfied ? [] : [`full run active ${elapsed}ms < required ${durationMs}ms`],
+    };
   }
-  const head = git(['rev-parse', 'HEAD']);
-  if (!HEX_40.test(head)) throw new Error(`git HEAD is not a full 40-char hash: ${head}`);
-  const branch = git(['rev-parse', '--abbrev-ref', 'HEAD']);
-  const status = git(['status', '--porcelain=v1']);
-
-  // 由当前安装解析出的实际入口定位 package.json，不假定工作区存在局部 node_modules。
-  const entryUrl = import.meta.resolve('curio-minecraft-3d-memory');
-  if (!entryUrl.startsWith('file:')) throw new Error(`curio package entry is not a file URL: ${entryUrl}`);
-  const entryPath = fileURLToPath(entryUrl);
-  const packageJsonPath = path.resolve(path.dirname(entryPath), '..', 'package.json');
-  if (!existsSync(packageJsonPath)) throw new Error(`installed curio package.json is missing: ${packageJsonPath}`);
-  const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as Record<string, unknown>;
-  const name = typeof pkg.name === 'string' ? pkg.name : '';
-  const version = typeof pkg.version === 'string' ? pkg.version : '';
-  if (name !== 'curio-minecraft-3d-memory' || !/^\d+\.\d+\.\d+/.test(version)) {
-    throw new Error(`installed curio package identity is unavailable: ${name}@${version}`);
-  }
-
-  const provenanceRel = `vendor/curio-minecraft-3d-memory-${version}.provenance.json`;
-  const provenanceAbs = path.join(repoRoot, provenanceRel);
-  if (!existsSync(provenanceAbs)) throw new Error(`curio source provenance is missing: ${provenanceRel}`);
-  // 未跟踪文件不能作为可复现的来源证据。
-  execFileSync('git', ['-c', `safe.directory=${repoRoot}`, 'ls-files', '--error-unmatch', provenanceRel], {
-    cwd: repoRoot,
-    stdio: 'ignore',
-  });
-  const provenance = JSON.parse(readFileSync(provenanceAbs, 'utf8')) as Record<string, unknown>;
-  const provenancePackage = isRecordValue(provenance.package) ? provenance.package : null;
-  if (provenancePackage === null || provenancePackage.name !== name || provenancePackage.version !== version) {
-    throw new Error(`curio provenance version does not match installed ${name}@${version}`);
-  }
-  if (typeof provenance.sourceHEAD !== 'string' || !HEX_40.test(provenance.sourceHEAD)) {
-    throw new Error('curio provenance sourceHEAD is unavailable');
-  }
-  if (typeof provenance.artifactSHA256 !== 'string') throw new Error('curio provenance artifactSHA256 is unavailable');
-
-  return {
-    status: 'OK',
-    head,
-    branch,
-    clean: status === '',
-    script: {
-      path: path.relative(repoRoot, scriptPath).replaceAll('\\', '/'),
-      sha256: sha256File(scriptPath),
-    },
-    package: {
-      name,
-      version,
-      entry: {
-        path: path.relative(repoRoot, entryPath).replaceAll('\\', '/'),
-        sha256: sha256File(entryPath),
-      },
-      provenance: {
-        path: provenanceRel,
-        sha256: sha256File(provenanceAbs),
-        sourceHEAD: provenance.sourceHEAD,
-        artifactSHA256: provenance.artifactSHA256,
-      },
-    },
-  };
+  return { fullPassEligible: false, durationSatisfied, smokeOnly: true, problems: [] };
 }
 
 interface RunReport {
   schema: 'spatial-soak-acceptance';
   runId: string;
-  mode: 'smoke';
-  status: 'SMOKE_PASS' | 'FAIL';
+  mode: 'smoke' | 'full';
+  status: 'SMOKE_PASS' | 'FULL_PASS' | 'FAIL';
   smokePass: boolean;
-  fullPass: false;
-  longRunCompleted: false;
-  pendingMandatory: typeof H2A_PENDING_MANDATORY;
+  fullPass: boolean;
+  longRunCompleted: boolean;
+  durationSatisfied: boolean;
+  pendingMandatory: readonly H2bScenarioId[];
   startedAt: number | null;
   finishedAt: number | null;
   activeElapsedMs: number | null;
@@ -1029,23 +1131,28 @@ interface RunReport {
   queryVerifiedLegs: number;
   directions: string[];
   savedCheckpointReports: number;
+  failedCheckpointReports: number;
+  scenarios: Record<string, ScenarioResult>;
+  telemetry: Record<string, unknown>;
   metadata: ReturnType<typeof collectMetadata> | null;
   evidence: { dir: string; metrics: string; events: string } | null;
   primaryError: ReturnType<typeof errorFacts> | null;
   cleanupErrors: { step: string; error: ReturnType<typeof errorFacts> }[];
   evidenceFailure: ReturnType<typeof errorFacts> | null;
   shutdown: Record<string, unknown> | null;
+  shutdownVerdict: ShutdownVerdict | null;
+  finalEvidenceWritten: boolean;
   h2: typeof H2_PENDING;
 }
 
 /**
- * H2a 的真实 smoke 执行器。
+ * 真实 smoke / soak 执行器。
  *
  * 只在 config.mode === 'test' 时运行；setup 使用只读 list 和一次自有 Bot 的 tp，
  * 之后的一切世界事实来自正常 Vision 与生产 walk_to/spatial_query。任何错误都先
  * 停止新任务、采集终态分类，再做有界清理；证据与数据库保留。
  */
-async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Promise<number> {
+async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Promise<number> {
   const { config } = await import('../src/config.ts');
   if (config.mode !== 'test') {
     process.stderr.write(`spatial-soak-acceptance: only test mode is accepted, got ${config.mode}\n`);
@@ -1074,6 +1181,7 @@ async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Pro
   const perTask = new Map<string, TaskWindow>();
   const executorTasks = new WeakMap<object, { taskId: string; delegationId: string }>();
   const takenTraceKeys = new Set<string>();
+  const scenarioResults = new Map<string, ScenarioResult>();
 
   let eventsWriter: BoundedJsonlWriter | null = null;
   let evidenceEmitter: EvidenceEmitter | null = null;
@@ -1095,8 +1203,10 @@ async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Pro
     on(event: 'physicsTick', listener: () => void): void;
     removeListener(event: 'end' | 'physicsTick', listener: () => void): void;
     listenerCount?(event: string): number;
+    quit?(): void;
   }
   let ownedBot: OwnedBotHandle | null = null;
+  let ownedBotRef: unknown = null;
   // TypeScript 不会把闭包内对 ownedBot 的赋值反映到外层的控制流收窄，用显式读取函数
   // 保持清理代码看到真实的可空句柄类型。
   const ownedBotHandle = (): OwnedBotHandle | null => ownedBot;
@@ -1119,6 +1229,7 @@ async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Pro
   let successfulLegs = 0;
   let queryVerifiedLegs = 0;
   let savedCheckpointReports = 0;
+  let failedCheckpointReports = 0;
   const directions = new Set<string>();
   let snapshotTimer: NodeJS.Timeout | null = null;
   let snapshotCallbacks = 0;
@@ -1128,6 +1239,8 @@ async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Pro
   let primaryError: unknown = null;
   const cleanupErrors: Array<{ step: string; error: unknown }> = [];
   let shutdownFactsResult: Record<string, unknown> | null = null;
+  let shutdownVerdict: ShutdownVerdict | null = null;
+  let finalTelemetry: Record<string, unknown> | null = null;
   let stopping = false;
   let moveCallSequence = 0;
   let startCallSequence = 0;
@@ -1155,6 +1268,11 @@ async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Pro
     },
   });
 
+  const residencySummary = (): Record<string, unknown> => ({
+    state: 'unavailable',
+    detail: 'Manual residency telemetry is only available through the integrated manual scenario; this live run does not probe private state.',
+  });
+
   const connectionSnapshot = (label: string) => {
     const at = Date.now();
     const ticks = physicsTicks.snapshot();
@@ -1170,10 +1288,7 @@ async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Pro
         current: connectionListenerSnapshot(),
       },
       foundationMetrics: foundation?.snapshotMetrics() ?? null,
-      residency: {
-        state: 'unavailable',
-        detail: 'SharedSpatialSession exposes no public residency/pin API; H2a does not probe private state. Manual integration remains pending.',
-      },
+      residency: residencySummary(),
     };
   };
 
@@ -1271,48 +1386,21 @@ async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Pro
     }
   };
 
-  const classifyLegTrace = (
-    nav: Record<string, unknown> | null,
-    taskId: string,
-    samples: readonly CapturedRouteSample[],
-    moves: readonly CapturedMove[],
-  ): { ok: boolean; problems: string[] } => {
-    const problems: string[] = [];
-    const trace = nav !== null && Array.isArray(nav.trace)
-      ? nav.trace.filter((entry): entry is { pos: FixtureEndpoint; ts: number } =>
-        isRecordValue(entry) && isVec(entry.pos) && isNumberValue(entry.ts))
-      : [];
-    if (nav === null || nav.confirmed !== true) problems.push('missing confirmed nav trace');
-    if (trace.length === 0) problems.push('confirmed nav trace has no points');
-    for (let index = 0; index < trace.length; index += 1) {
-      const point = trace[index]!;
-      const matched = samples.some((sample) =>
-        sample.taskId === taskId
-        && sample.accepted
-        && sample.sample.observedAt === point.ts
-        && isDeepStrictEqual(sample.sample.position, point.pos));
-      if (!matched) problems.push(`trace point ${index} does not match an accepted same-task raw sample`);
-    }
-
-    const taskMoves = moves.filter((move) => move.taskId === taskId);
-    for (let index = 1; index < taskMoves.length; index += 1) {
-      const previous = taskMoves[index - 1]!;
-      const current = taskMoves[index]!;
-      const previousPosition = previous.result?.sample?.position;
-      if (previousPosition === undefined) {
-        problems.push(`move ${index - 1} has no actual result sample required by move ${index}.from`);
-        continue;
-      }
-      if (!isDeepStrictEqual(current.request.from, previousPosition)) {
-        problems.push(`move ${index}.from does not match previous actual trace position`);
-      }
-    }
-    return { ok: problems.length === 0, problems };
+  const measureLegStart = async (label: string): Promise<FixtureEndpoint> => {
+    const settled = await waitForEvidenceAware(() => {
+      const state = adapter!.state();
+      const controls = controlsSnapshot(adapter!);
+      return arbiter!.info() === null
+        && state.observationReady
+        && controls.ok
+        && controlReleaseProblems(controls.values).length === 0;
+    }, 10_000, `leg start settle (${label})`);
+    if (!settled) throw new Error(`leg start body did not settle with released controls before ${label}`);
+    return { ...adapter!.state().pos };
   };
 
   const runLeg = async (
     index: number,
-    from: FixtureEndpoint,
     target: FixtureEndpoint,
     nominalFrom: 'A' | 'B',
     nominalTo: 'A' | 'B',
@@ -1320,6 +1408,8 @@ async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Pro
     if (arbiter === null) throw new Error('walk leg requested before arbiter is ready');
     if (runScope === null) throw new Error('walk leg requested before runtime scope is ready');
     if (stopping) throw new Error('run is stopping; refusing walk_to');
+    // 每段开始都在上一段/setup 结算后读取真实身体位置；不再复用上一段标称终点。
+    const measuredFrom = await measureLegStart(`leg ${index}`);
     const request = {
       to: clone(target),
       arrival: { kind: 'exact' as const },
@@ -1331,8 +1421,8 @@ async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Pro
     emit('leg-start', info.id, {
       index,
       nominal: { from: nominalFrom, to: nominalTo },
-      from: clone(from),
-      target: clone(target),
+      measuredFrom: clone(measuredFrom),
+      fixedTarget: clone(target),
       request: clone(request),
       task: clone(info),
       startedAt: Date.now(),
@@ -1348,7 +1438,7 @@ async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Pro
       const terminalControls = controlsSnapshot(adapter!);
       const window = perTask.get(info.id) ?? { samples: [], moves: [], starts: [], lastSequence: -1 };
       const tolerance = library!.GROUNDED_ARRIVAL_DEFAULTS;
-      const verdict = classifyWalkToResult(outcome.result, from, target, tolerance, {
+      const verdict = classifyWalkToResult(outcome.result, measuredFrom, target, tolerance, {
         taskId: info.id,
         samples: window.samples,
       });
@@ -1363,8 +1453,8 @@ async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Pro
       emit('leg-result', info.id, {
         index,
         nominal: { from: nominalFrom, to: nominalTo },
-        from: clone(from),
-        target: clone(target),
+        measuredFrom: clone(measuredFrom),
+        fixedTarget: clone(target),
         startedAt: request.deadlineMs - SMOKE_LEG_BUDGET_MS,
         finishedAt,
         outcome: clone(outcome),
@@ -1396,7 +1486,7 @@ async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Pro
       startRaw: cli.startRaw,
       durationMs: cli.durationMs,
       fixture: FIXTURE_FACTS,
-      note: 'H2a bounded smoke. RCON is limited to list and one setup tp of the configured test Bot; world facts come from normal Vision/navigation.',
+      note: 'smoke runs bounded real smoke; full requires the real manual residency API and at least one hour of active time.',
     });
 
     const { EventBus } = await import('../src/events.ts');
@@ -1404,30 +1494,44 @@ async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Pro
     const { Vision: VisionClass } = await import('../src/perception/vision.ts');
     const { WorldMemory: WorldMemoryClass } = await import('../src/memory/store.ts');
     const { Arbiter: ArbiterClass } = await import('../src/arbiter/arbiter.ts');
-    const { SharedSpatialSession: SharedSpatialSessionClass } = await import('../src/spatial/shared-session.ts');
     const { Rcon: RconClass } = await import('../src/observer/rcon.ts');
     const { WalkMoveExecutor: WalkMoveExecutorClass } = await import('../src/adapter/walk-route.ts');
     library = await import('curio-minecraft-3d-memory');
 
+    // full 只有在真实 manual API 存在时才可能通过；缺失时在连接前显式失败，
+    // 绝不先跑一小时再报告 pending。
+    if (cli.mode === 'full' && !manualScenarioSupported(SharedSpatialSession)) {
+      emit('full-blocked', null, {
+        reason: 'manual residency API is not integrated; full pass cannot be evaluated',
+        requiredScenarios: H2B_REQUIRED_SCENARIOS,
+      });
+      throw new Error(
+        'full mode blocked: SharedSpatialSession manual residency API (voxelLoading/prepare/release/workingSetStats/pendingObservations) is not integrated in this worktree',
+      );
+    }
+
     const bus = new EventBus();
     adapter = new MineflayerAdapterClass(config, bus);
-    spatial = await SharedSpatialSessionClass.open({
+    spatial = await SharedSpatialSession.open({
       worldId: config.memory.worldId,
       databasePath: path.join(evidenceDir, 'spatial.sqlite'),
       timeoutMs: 5000,
     });
+    // 从这里开始 spatial 已打开：即使后续构造失败，finally 也必须真实 shutdown。
+    const openedSpatial = spatial;
     memory = new WorldMemoryClass(null);
-    vision = new VisionClass(adapter, config.vision, spatial);
-    arbiter = new ArbiterClass(adapter, memory, bus, vision, spatial);
+    vision = new VisionClass(adapter, config.vision, openedSpatial);
+    arbiter = new ArbiterClass(adapter, memory, bus, vision, openedSpatial);
     rcon = new RconClass(config.observer.rconHost, config.observer.rconPort, config.observer.rconPassword);
 
     foundation = startSpatialSoakFoundation({
-      service: spatial,
+      service: openedSpatial,
       evidencePath: metricsPath,
       runId,
       onCheckpointReport: (report) => {
         if (report.status === 'saved') savedCheckpointReports += 1;
-        emit('checkpoint-report', null, { report, savedCheckpointReports });
+        else failedCheckpointReports += 1;
+        emit('checkpoint-report', null, { report, savedCheckpointReports, failedCheckpointReports });
       },
     });
 
@@ -1571,25 +1675,52 @@ async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Pro
       const window = taskId === null ? null : taskWindow(taskId);
       const canKeep = window !== null && window.moves.length < MAX_MOVES_PER_TASK;
       if (window !== null && !canKeep) traceOverflow('moves', taskId!);
-      const sink: CapturedMove[] = canKeep ? window!.moves : [];
-      const call = ++moveCallSequence;
-      const pending = captureMoveCall(
-        { move: (moveRequest) => moverOriginalMove!.call(this, moveRequest) },
-        request,
+      // 本次调用自己的 record 在任何 await 之前创建并保留；绝不使用 sink.at(-1)，
+      // 否则并发/紧随其后的另一次 move 会让结果写到错误的 record 上。
+      const entry: CapturedMove = {
         taskId,
-        sink,
-      );
-      const entry = sink.at(-1);
-      if (entry !== undefined) emit('walk-move-request', taskId, { call, move: clone(entry) });
+        receivedAt: Date.now(),
+        request: {
+          executionId: request.executionId,
+          worldId: request.worldId,
+          dim: request.dim,
+          sessionId: request.sessionId,
+          from: clone(request.from),
+          to: clone(request.to),
+          deadlineMs: request.deadlineMs,
+          timeoutMs: request.timeoutMs,
+        },
+        result: null,
+        error: null,
+      };
+      if (canKeep) window!.moves.push(entry);
+      const call = ++moveCallSequence;
+      emit('walk-move-request', taskId, { call, move: clone(entry) });
+      const pending = moverOriginalMove!.call(this, request);
       return pending.then(
         (result) => {
-          const current = sink.at(-1);
-          if (current !== undefined) emit('walk-move-result', taskId, { call, move: clone(current) });
+          entry.result = {
+            ...(result.sample === undefined ? {} : {
+              sample: {
+                executionId: result.sample.executionId,
+                sequence: result.sample.sequence,
+                worldId: result.sample.worldId,
+                dim: result.sample.dim,
+                sessionId: result.sample.sessionId,
+                observedAt: result.sample.observedAt,
+                position: clone(result.sample.pos),
+                onGround: result.sample.onGround,
+                inWater: result.sample.inWater,
+              },
+            }),
+            ...(result.failure === undefined ? {} : { failure: clone(result.failure) as Record<string, unknown> }),
+          };
+          emit('walk-move-result', taskId, { call, move: clone(entry) });
           return result;
         },
         (error: unknown) => {
-          const current = sink.at(-1);
-          if (current !== undefined) emit('walk-move-error', taskId, { call, move: clone(current), error: errorFacts(error) });
+          entry.error = errorText(error);
+          emit('walk-move-error', taskId, { call, move: clone(entry), error: errorFacts(error) });
           throw error;
         },
       );
@@ -1620,9 +1751,20 @@ async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Pro
       emit('spawn', null, { at: Date.now() });
     };
     adapter.once('spawn', spawnListener);
+
     const captureOwnBot = (): void => {
-      if (ownedBot !== null || adapter?.bot === null || adapter?.bot === undefined) return;
-      ownedBot = adapter.bot as unknown as OwnedBotHandle;
+      const candidate: unknown = adapter?.bot;
+      if (candidate === null || candidate === undefined || candidate === ownedBotRef) return;
+      // 换连接后把诊断监听器从旧 bot 上移除，再挂到真实新 bot；baseline 在挂接前采集。
+      const previous = ownedBotHandle();
+      if (previous !== null) {
+        if (physicsTickListener !== null) previous.removeListener('physicsTick', physicsTickListener);
+        if (botEndListener !== null) previous.removeListener('end', botEndListener);
+        physicsTickListener = null;
+        botEndListener = null;
+      }
+      ownedBotRef = candidate;
+      ownedBot = candidate as OwnedBotHandle;
       botOwned = true;
       botListenerBaseline = {
         physicsTick: listenerCountOf(ownedBot, 'physicsTick'),
@@ -1633,8 +1775,8 @@ async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Pro
         emit('bot-end', null, { at: Date.now() });
       };
       physicsTickListener = () => physicsTicks.record(Date.now());
-      ownedBot!.once('end', botEndListener);
-      ownedBot!.on('physicsTick', physicsTickListener);
+      ownedBot.once('end', botEndListener);
+      ownedBot.on('physicsTick', physicsTickListener);
       emit('adapter-listeners', null, {
         baseline: { adapter: adapterListenerBaseline, bot: botListenerBaseline },
         current: connectionListenerSnapshot(),
@@ -1768,7 +1910,6 @@ async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Pro
 
     const endpointName = (point: FixtureEndpoint): 'A' | 'B' => samePoint(point, FIXTURE_A) ? 'A' : 'B';
     let nominalFrom = endpointName(cli.start);
-    let from: FixtureEndpoint = measuredStart;
     const activeDeadline = (activeStartedAt = Date.now()) + cli.durationMs;
     let legIndex = 0;
 
@@ -1777,38 +1918,313 @@ async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Pro
       && directions.has('A->B')
       && directions.has('B->A')
       && queryVerifiedLegs >= successfulLegs
-      && savedCheckpointReports >= SMOKE_MIN_CHECKPOINT_SAVES;
+      && savedCheckpointReports >= SMOKE_MIN_CHECKPOINT_SAVES
+      && failedCheckpointReports === 0;
 
-    while (!stopping && !smokeSatisfied()) {
-      const remaining = activeDeadline - Date.now();
-      if (remaining < SMOKE_LEG_BUDGET_MS + 5_000) break;
+    const runNextLeg = async (): Promise<void> => {
       const nominalTo = nominalFrom === 'A' ? 'B' : 'A';
       const target = nominalTo === 'A' ? FIXTURE_A : FIXTURE_B;
-      await runLeg(legIndex, from, target, nominalFrom, nominalTo);
+      await runLeg(legIndex, target, nominalFrom, nominalTo);
       directions.add(`${nominalFrom}->${nominalTo}`);
       nominalFrom = nominalTo;
-      // 每段使用固定标称端点，避免累计浮点漂移；实际起点/终态仍按实测分类。
-      from = target;
       legIndex += 1;
-    }
+    };
+    const recordScenario = (result: ScenarioResult): ScenarioResult => {
+      scenarioResults.set(result.id, result);
+      emit('scenario-result', null, result);
+      return result;
+    };
 
-    if (!smokeSatisfied() && !stopping) {
-      // 剩余时间不足以保证下一段 45s 委托时，只做有界等待，不启动必然超时的任务。
-      const idleRemaining = Math.max(0, activeDeadline - Date.now());
-      if (idleRemaining > 0) {
+    const runCancelScenario = async (): Promise<ScenarioResult> => {
+      const id = 'explicit-cancel';
+      const problems: string[] = [];
+      const facts: Record<string, unknown> = {};
+      const start = await measureLegStart('cancel scenario');
+      const nearest = distance(start, FIXTURE_A) <= distance(start, FIXTURE_B) ? 'A' : 'B';
+      const targetName = nearest === 'A' ? 'B' : 'A';
+      const target = targetName === 'A' ? FIXTURE_A : FIXTURE_B;
+      const request = { to: clone(target), arrival: { kind: 'exact' as const }, deadlineMs: Date.now() + SMOKE_LEG_BUDGET_MS };
+      const started = arbiter!.start({ skill: 'walk_to', args: request }, 'user');
+      if ('error' in started) {
+        return { id, state: 'failed', ok: false, problems: [`walk_to rejected: ${started.error}`], facts };
+      }
+      const info = started as TaskInfo;
+      emit('scenario-start', info.id, { id, start: clone(start), target: clone(target), request: clone(request), task: clone(info) });
+      try {
+        const moved = await waitForEvidenceAware(() => {
+          const window = perTask.get(info.id);
+          return window !== undefined && window.samples.some((sample) =>
+            sample.accepted && sample.taskId === info.id
+            && distance(sample.sample.position, start) > CANCEL_MOVEMENT_THRESHOLD);
+        }, 20_000, 'explicit cancel movement');
+        facts.moved = moved;
+        if (!moved) problems.push('no accepted same-task sample showed real movement before cancel');
+        const cancelCalledAt = Date.now();
+        emit('scenario-cancel-request', info.id, { id, at: cancelCalledAt });
+        arbiter!.cancel('soak acceptance: explicit cancel after measured movement');
+        const outcome = await waitForTaskOutcome(info.id, 10_000, true);
+        facts.cancelLatencyMs = Date.now() - cancelCalledAt;
+        if (outcome === null) problems.push('cancel outcome was not delivered');
+        // 取消后的有界真实物理帧：至少覆盖 300ms，并且每一帧 7 个控制键都可读且松开。
+        const frames: PhysicsFrame[] = [];
+        let frameNumber = 0;
+        const frameDeadline = Date.now() + 1_000;
+        while (Date.now() < frameDeadline) {
+          const entity = await nextPhysicsFrame(Math.max(1, frameDeadline - Date.now()));
+          if (entity === null) break;
+          frames.push({
+            frame: ++frameNumber,
+            at: Date.now(),
+            position: { ...entity.position },
+            onGround: entity.onGround,
+            inWater: entity.isInWater,
+            controls: controlsSnapshot(adapter!).values,
+          });
+        }
+        const postCancel = classifyPostCancelFrames(frames, 300);
+        facts.postCancelFrames = frames;
+        facts.postCancel = postCancel;
+        problems.push(...postCancel.problems);
+        const controls = controlsSnapshot(adapter!);
+        facts.controls = controls;
+        if (!controls.ok) problems.push(`control keys unreadable after cancel: ${controls.missing.join(',')}`);
+        if (outcome !== null) {
+          const window = perTask.get(info.id);
+          const verdict = classifyCancellationResult(
+            outcome.result,
+            info.id,
+            window?.samples ?? [],
+            controls.values,
+            postCancel.reactivated,
+            start,
+          );
+          facts.verdict = verdict;
+          problems.push(...verdict.problems);
+        }
+      } finally {
+        perTask.delete(info.id);
+        outcomes.delete(info.id);
+      }
+      return { id, state: problems.length === 0 ? 'passed' : 'failed', ok: problems.length === 0, problems, facts };
+    };
+
+    const runDisconnectReconnectScenario = async (): Promise<ScenarioResult> => {
+      const id = 'disconnect-reconnect';
+      const problems: string[] = [];
+      const facts: Record<string, unknown> = {};
+      const before = adapter!.state();
+      const baselineSession = before.sessionId;
+      facts.before = { sessionId: baselineSession, pos: { ...before.pos }, worldId: before.worldId, dim: before.dim };
+      let disconnected = false;
+      const onDisconnected = () => { disconnected = true; };
+      adapter!.once('disconnected', onDisconnected);
+      const botCandidate: unknown = adapter!.bot;
+      const quitBot = isRecordValue(botCandidate) && typeof botCandidate.quit === 'function'
+        ? botCandidate.quit
+        : null;
+      if (quitBot === null) {
+        adapter!.off('disconnected', onDisconnected);
+        return { id, state: 'failed', ok: false, problems: ['adapter exposes no real bot handle to disconnect'], facts };
+      }
+      emit('scenario-disconnect', null, { id, at: Date.now(), baselineSession });
+      quitBot.call(botCandidate);
+      const sawDisconnect = await waitForEvidenceAware(() => disconnected, 30_000, 'real disconnect');
+      facts.disconnected = sawDisconnect;
+      if (!sawDisconnect) problems.push('real disconnect event was not observed');
+      const reconnected = await waitForEvidenceAware(() => {
+        const state = adapter!.state();
+        return state.observationReady && state.sessionId !== baselineSession;
+      }, 60_000, 'real reconnect/new session');
+      facts.reconnected = reconnected;
+      const after = adapter!.state();
+      facts.after = { sessionId: after.sessionId, pos: { ...after.pos }, worldId: after.worldId, dim: after.dim };
+      if (!reconnected) problems.push('did not reach observationReady with a new session after reconnect');
+      adapter!.off('disconnected', onDisconnected);
+      // 新 bot 句柄重新挂接有界物理帧/end 诊断；旧句柄监听器在 captureOwnBot 内移除。
+      botEnded = false;
+      adapterDisconnected = false;
+      captureOwnBot();
+      const scope = adapter!.state();
+      if (reconnected) {
+        const cells = localBodyCells(scope.pos);
+        const observations = vision!.observeBlocks(cells);
+        const admitted = spatial!.observationAdmitted;
+        facts.observations = observations.length;
+        facts.admitted = admitted;
+        if (!admitted) problems.push('shared spatial session did not admit observations under the reconnected session');
+        runScope = { worldId: scope.worldId, dim: scope.dim, sessionId: scope.sessionId };
+        measuredStart = { ...scope.pos };
+      }
+      const controls = controlsSnapshot(adapter!);
+      facts.controls = controls;
+      if (!controls.ok || CONTROL_KEYS.some((key) => controls.values[key] === true)) {
+        problems.push('controls are not readable/released after reconnect');
+      }
+      if (arbiter!.info() !== null) problems.push('a task is still active after reconnect');
+      emit('scenario-reconnect', null, { id, ...facts, scope: runScope });
+      return { id, state: problems.length === 0 ? 'passed' : 'failed', ok: problems.length === 0, problems, facts };
+    };
+
+    const runCloseReopenScenario = async (): Promise<ScenarioResult> => {
+      const id = 'close-reopen';
+      const problems: string[] = [];
+      const facts: Record<string, unknown> = {};
+      const databasePath = path.join(evidenceDir, 'scenario-close-reopen.sqlite');
+      const scope = adapter!.state();
+      const cells = localBodyCells(scope.pos);
+      const initial = vision!.observeBlocks(cells);
+      const targetObservation = initial[0];
+      if (targetObservation === undefined) {
+        return { id, state: 'failed', ok: false, problems: ['Vision returned no observations for close/reopen scenario'], facts };
+      }
+      let first: SharedSpatialSession | null = null;
+      let second: SharedSpatialSession | null = null;
+      try {
+        first = await SharedSpatialSession.open({ worldId: scope.worldId, databasePath });
+        first.beginSession({ worldId: scope.worldId, dim: scope.dim, sessionId: scope.sessionId });
+        first.observe(initial);
+        const before = first.session.voxel.cellAt(scope.dim, targetObservation.pos.x, targetObservation.pos.y, targetObservation.pos.z);
+        if (!before.observed) {
+          problems.push('first session did not store the real Vision observation');
+        } else {
+          facts.before = before.evidence;
+          if (before.evidence.observation.observedAt !== targetObservation.observedAt) {
+            problems.push('first session stored a different observedAt than Vision delivered');
+          }
+        }
+        const shutdownA = await first.shutdown();
+        first = null;
+        const verdictA = classifyShutdownResult(shutdownA);
+        problems.push(...verdictA.problems.map((problem) => `first session: ${problem}`));
+        const reopenAt = Date.now();
+        facts.reopenAt = reopenAt;
+        second = await SharedSpatialSession.open({ worldId: scope.worldId, databasePath });
+        second.beginSession({ worldId: scope.worldId, dim: scope.dim, sessionId: scope.sessionId });
+        const restored = second.session.voxel.cellAt(scope.dim, targetObservation.pos.x, targetObservation.pos.y, targetObservation.pos.z);
+        facts.restored = restored.observed ? restored.evidence : restored;
+        if (!restored.observed) {
+          problems.push('reopened session lost the observed cell');
+        } else {
+          const evidence = restored.evidence;
+          facts.originalObservedAt = evidence.observation.observedAt;
+          facts.restoredFreshness = evidence.freshness;
+          facts.restoredStaleReason = evidence.staleReason ?? null;
+          if (evidence.freshness !== 'STALE') {
+            problems.push(`restored evidence freshness is ${evidence.freshness} (STALE required after reopen)`);
+          }
+          if (evidence.observation.observedAt !== targetObservation.observedAt) {
+            problems.push('restored evidence observedAt was not the original observation timestamp');
+          }
+          if (evidence.observation.observedAt >= reopenAt) {
+            problems.push('restored observedAt is not earlier than the actual reopen time');
+          }
+          if (evidence.observation.sessionId !== scope.sessionId) {
+            problems.push('restored evidence lost its original session id');
+          }
+        }
+        // 新的真实 Vision 观测才能把同一格恢复为 FRESH；重放旧时间戳不被当作新观测。
+        const fresh = vision!.observeBlocks(cells);
+        const freshMatch = fresh.find((observation) =>
+          observation.pos.x === targetObservation.pos.x
+          && observation.pos.y === targetObservation.pos.y
+          && observation.pos.z === targetObservation.pos.z);
+        if (freshMatch === undefined) {
+          problems.push('fresh Vision observation did not cover the reopened cell');
+        } else {
+          second.observe([freshMatch]);
+          const refreshed = second.session.voxel.cellAt(scope.dim, freshMatch.pos.x, freshMatch.pos.y, freshMatch.pos.z);
+          facts.refreshed = refreshed.observed ? refreshed.evidence : refreshed;
+          if (!refreshed.observed) problems.push('fresh observation did not restore the reopened cell');
+          else {
+            if (refreshed.evidence.freshness !== 'FRESH') problems.push('fresh observation did not restore freshness');
+            if (refreshed.evidence.observation.observedAt !== freshMatch.observedAt) {
+              problems.push('fresh observation did not preserve its delivered observedAt');
+            }
+            if (refreshed.evidence.observation.observedAt <= targetObservation.observedAt) {
+              problems.push('fresh observation timestamp did not advance past the restored observation');
+            }
+          }
+        }
+        const shutdownB = await second.shutdown();
+        second = null;
+        const verdictB = classifyShutdownResult(shutdownB);
+        problems.push(...verdictB.problems.map((problem) => `second session: ${problem}`));
+      } finally {
+        if (second !== null) {
+          const shutdown = await second.shutdown();
+          facts.cleanupSecondShutdown = classifyShutdownResult(shutdown).problems;
+          second = null;
+        }
+        if (first !== null) {
+          const shutdown = await first.shutdown();
+          facts.cleanupFirstShutdown = classifyShutdownResult(shutdown).problems;
+          first = null;
+        }
+      }
+      emit('scenario-close-reopen', null, { ...facts, problems });
+      return { id, state: problems.length === 0 ? 'passed' : 'failed', ok: problems.length === 0, problems, facts };
+    };
+
+    // smoke 活动：跑到判据满足或预算不足以再启动一段。未满足时只做有限等待，
+    // 绝不把剩余的 full 时长当成空等（full 由下面显式场景与 soak 循环填充）。
+    while (!stopping && !smokeSatisfied()) {
+      if (failedCheckpointReports > 0) throw new Error(`scheduled checkpoint failed (${failedCheckpointReports} reports)`);
+      const remaining = activeDeadline - Date.now();
+      if (remaining < SMOKE_LEG_BUDGET_MS + 5_000) break;
+      await runNextLeg();
+    }
+    if (!smokeSatisfied() && failedCheckpointReports === 0) {
+      const remaining = Math.max(0, activeDeadline - Date.now());
+      if (remaining > 0) {
         await waitForEvidenceAware(
-          () => smokeSatisfied() || Date.now() >= activeDeadline,
-          idleRemaining,
+          () => smokeSatisfied() || failedCheckpointReports > 0 || Date.now() >= activeDeadline,
+          Math.min(remaining, SMOKE_COMPLETION_WAIT_MS),
           'smoke completion wait',
         );
       }
     }
-    activeFinishedAt = Date.now();
+    if (failedCheckpointReports > 0) throw new Error(`scheduled checkpoint failed (${failedCheckpointReports} reports)`);
     if (!smokeSatisfied()) {
       throw new Error(
         `smoke criteria not met: legs=${successfulLegs} directions=${[...directions].join(',')} queries=${queryVerifiedLegs} savedCheckpoints=${savedCheckpointReports}`,
       );
     }
+
+    if (cli.mode === 'full') {
+      // 场景按真实依赖顺序执行；任一失败立即抛出，不空等剩余时长。
+      const cancel = recordScenario(await runCancelScenario());
+      if (!cancel.ok) throw new Error(`explicit-cancel scenario failed: ${cancel.problems.join(', ')}`);
+      const reconnect = recordScenario(await runDisconnectReconnectScenario());
+      if (!reconnect.ok) throw new Error(`disconnect-reconnect scenario failed: ${reconnect.problems.join(', ')}`);
+      const reopen = recordScenario(await runCloseReopenScenario());
+      if (!reopen.ok) throw new Error(`close-reopen scenario failed: ${reopen.problems.join(', ')}`);
+      const manualScope = adapter.state();
+      const manual = recordScenario(await runManualScenario({
+        worldId: config.memory.worldId,
+        databasePath: path.join(evidenceDir, 'scenario-manual.sqlite'),
+        scope: { worldId: manualScope.worldId, dim: manualScope.dim, sessionId: manualScope.sessionId },
+        observe: () => vision!.observeBlocks(localBodyCells(adapter!.state().pos)),
+        emit: (kind, payload) => { emit(kind, null, payload); },
+      }));
+      if (!manual.ok) throw new Error(`manual-residency scenario ${manual.state}: ${manual.problems.join(', ')}`);
+
+      // 满足全部场景后继续真实 leg/checkpoint 活动直到完整一小时。
+      while (!stopping && Date.now() < activeDeadline) {
+        if (failedCheckpointReports > 0) throw new Error(`scheduled checkpoint failed (${failedCheckpointReports} reports)`);
+        const remaining = activeDeadline - Date.now();
+        if (remaining < SMOKE_LEG_BUDGET_MS + 5_000) {
+          await sleep(remaining);
+          break;
+        }
+        await runNextLeg();
+      }
+      // 最后不足一段预算时只等待到真实期限，确保 activeElapsedMs 不是被缩短的。
+      while (Date.now() < activeDeadline) {
+        await sleep(Math.min(1_000, Math.max(1, activeDeadline - Date.now())));
+      }
+    }
+
+    activeFinishedAt = Date.now();
   } catch (error) {
     primaryError = error;
   } finally {
@@ -1821,20 +2237,11 @@ async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Pro
     for (const timer of waitTimers) clearInterval(timer);
     waitTimers.clear();
 
+    // 先移除自有 physicsTick 监听，再处理任务与连接。
     const botHandle = ownedBotHandle();
     if (botHandle !== null && physicsTickListener !== null) {
       botHandle.removeListener('physicsTick', physicsTickListener);
       physicsTickListener = null;
-    }
-    // 移除自有监听器后再取最终连接快照，明确显示 current 已回落。
-    if (foundation !== null) {
-      foundation.appendMetrics(connectionSnapshot('final'));
-      emit('connection-final', null, {
-        physicsTicks: physicsTicks.snapshot(),
-        listeners: connectionListenerSnapshot(),
-        foundationMetrics: foundation.snapshotMetrics(),
-        residency: { state: 'unavailable', detail: 'No public residency/pin API; not probed.' },
-      });
     }
 
     if (arbiter !== null) {
@@ -1855,41 +2262,15 @@ async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Pro
           noteCleanupError('cancel-await', error);
         }
       }
-    }
-
-    if (foundation !== null) {
-      try {
-        const stopped = await withTimeout(foundation.stop(), 60_000, 'bounded foundation stop');
-        shutdownFactsResult = shutdownFacts(stopped.shutdown);
-        emit('shutdown', null, {
-          shutdown: shutdownFactsResult,
-          evidenceError: stopped.evidenceError === null ? null : errorFacts(stopped.evidenceError),
-          h2: H2_PENDING,
-        });
-      } catch (error) {
-        noteCleanupError('foundation-stop', error);
+      // 移除会话重置监听，避免 quit 产生的 session_reset 在最终 checkpoint 前把证据置 stale。
+      if (doneListener !== null) {
+        arbiter.off('done', doneListener);
+        doneListener = null;
       }
-    }
-
-    if (arbiter !== null) {
       try {
         arbiter.dispose();
       } catch (error) {
         noteCleanupError('arbiter-dispose', error);
-      }
-    }
-    if (memory !== null) {
-      try {
-        memory.close();
-      } catch (error) {
-        noteCleanupError('memory-close', error);
-      }
-    }
-    if (rcon !== null) {
-      try {
-        rcon.close();
-      } catch (error) {
-        noteCleanupError('rcon-close', error);
       }
     }
 
@@ -1921,6 +2302,7 @@ async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Pro
       });
     }
 
+    // 监听器计数只在真实 quit 与 removeListener 之后采集，不把清理前快照冒充最终值。
     if (adapter !== null && disconnectListener !== null) {
       adapter.off('disconnected', disconnectListener);
       disconnectListener = null;
@@ -1929,9 +2311,74 @@ async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Pro
       adapter.off('spawn', spawnListener);
       spawnListener = null;
     }
-    if (botHandle !== null && botEndListener !== null) {
-      botHandle.removeListener('end', botEndListener);
+    const finalBotHandle = ownedBotHandle();
+    if (finalBotHandle !== null && botEndListener !== null) {
+      finalBotHandle.removeListener('end', botEndListener);
       botEndListener = null;
+    }
+    const finalListeners = connectionListenerSnapshot();
+    const telemetryFinal = {
+      listeners: { baseline: { adapter: adapterListenerBaseline, bot: botListenerBaseline }, final: finalListeners },
+      physicsTicks: physicsTicks.snapshot(),
+      snapshotCallbacks,
+      residency: residencySummary(),
+    };
+    finalTelemetry = telemetryFinal;
+    if (foundation !== null) {
+      foundation.appendMetrics({ kind: 'connection-metrics', label: 'final', ...telemetryFinal });
+    }
+    emit('connection-final', null, telemetryFinal);
+
+    // spatial 已打开时必须有真实 shutdown 结果。foundation 构造失败时也要兜底关闭。
+    if (foundation !== null) {
+      try {
+        const stopped = await withTimeout(foundation.stop(), 60_000, 'bounded foundation stop');
+        shutdownFactsResult = shutdownFacts(stopped.shutdown);
+        shutdownVerdict = classifyShutdownResult(stopped.shutdown);
+        emit('shutdown', null, {
+          shutdown: shutdownFactsResult,
+          verdict: shutdownVerdict,
+          evidenceError: stopped.evidenceError === null ? null : errorFacts(stopped.evidenceError),
+          h2: H2_PENDING,
+        });
+      } catch (error) {
+        noteCleanupError('foundation-stop', error);
+      }
+    }
+    if (spatial !== null && foundation === null) {
+      // 会话已 open 但 foundation 构造失败：直接调用真实 shutdown，避免泄漏。
+      try {
+        const shutdown = await withTimeout(spatial.shutdown(), 60_000, 'bounded fallback spatial shutdown');
+        shutdownFactsResult = shutdownFacts(shutdown);
+        shutdownVerdict = classifyShutdownResult(shutdown);
+        emit('shutdown', null, {
+          shutdown: shutdownFactsResult,
+          verdict: shutdownVerdict,
+          fallback: true,
+          note: 'foundation construction failed; spatial session was still shut down by the caller.',
+          h2: H2_PENDING,
+        });
+      } catch (error) {
+        noteCleanupError('spatial-shutdown', error);
+      }
+    }
+    if (spatial !== null && shutdownVerdict === null) {
+      shutdownVerdict = classifyShutdownResult(null);
+    }
+
+    if (memory !== null) {
+      try {
+        memory.close();
+      } catch (error) {
+        noteCleanupError('memory-close', error);
+      }
+    }
+    if (rcon !== null) {
+      try {
+        rcon.close();
+      } catch (error) {
+        noteCleanupError('rcon-close', error);
+      }
     }
 
     // 只还原自己安装的实际原型包装；若已被他人替换则不动。
@@ -1960,7 +2407,12 @@ async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Pro
   }
 
   activeFinishedAt ??= Date.now();
+  const activeElapsedMs = activeStartedAt === null ? null : Math.max(0, activeFinishedAt - activeStartedAt);
   const evidenceFailure = currentEvidenceFailure();
+  const durationVerdict = classifyDuration(cli.mode, cli.durationMs, activeElapsedMs);
+  const shutdownOk = spatial === null
+    ? primaryError !== null || !connectAttempted
+    : shutdownVerdict !== null && shutdownVerdict.ok;
   const smokePass = primaryError === null
     && evidenceFailure === null
     && cleanupErrors.length === 0
@@ -1968,20 +2420,31 @@ async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Pro
     && directions.has('A->B')
     && directions.has('B->A')
     && queryVerifiedLegs >= successfulLegs
-    && savedCheckpointReports >= SMOKE_MIN_CHECKPOINT_SAVES;
+    && savedCheckpointReports >= SMOKE_MIN_CHECKPOINT_SAVES
+    && failedCheckpointReports === 0;
+  const scenariosPass = cli.mode === 'smoke'
+    || H2B_REQUIRED_SCENARIOS.every((id) => scenarioResults.get(id)?.ok === true);
+  const pass = smokePass
+    && shutdownOk
+    && scenariosPass
+    && (cli.mode === 'smoke' || durationVerdict.fullPassEligible);
 
+  const manualResult = scenarioResults.get('manual-residency');
   const report: RunReport = {
     schema: 'spatial-soak-acceptance',
     runId,
-    mode: 'smoke',
-    status: smokePass ? 'SMOKE_PASS' : 'FAIL',
+    mode: cli.mode,
+    status: pass ? (cli.mode === 'full' ? 'FULL_PASS' : 'SMOKE_PASS') : 'FAIL',
     smokePass,
-    fullPass: false,
-    longRunCompleted: false,
-    pendingMandatory: H2A_PENDING_MANDATORY,
-    startedAt: activeStartedAt === null ? null : activeStartedAt,
+    fullPass: cli.mode === 'full' && pass,
+    longRunCompleted: cli.mode === 'full' && durationVerdict.durationSatisfied,
+    durationSatisfied: durationVerdict.durationSatisfied,
+    pendingMandatory: cli.mode === 'smoke'
+      ? H2B_REQUIRED_SCENARIOS
+      : H2B_REQUIRED_SCENARIOS.filter((id) => scenarioResults.get(id)?.ok !== true),
+    startedAt: activeStartedAt,
     finishedAt: activeFinishedAt,
-    activeElapsedMs: activeStartedAt === null ? null : Math.max(0, activeFinishedAt - activeStartedAt),
+    activeElapsedMs,
     durationMs: cli.durationMs,
     start: clone(cli.start),
     measuredStart: measuredStart === null ? null : clone(measuredStart),
@@ -1990,19 +2453,49 @@ async function runSmoke(cli: Extract<ParsedCli, { ok: true; help: false }>): Pro
     queryVerifiedLegs,
     directions: [...directions],
     savedCheckpointReports,
+    failedCheckpointReports,
+    scenarios: Object.fromEntries(scenarioResults),
+    telemetry: {
+      // 此报告本身作为下一条记录写入；这里统计的是它之前已落盘的事件。
+      eventRecordsBeforeResult: eventsWriter?.recordsWritten ?? 0,
+      eventBytesBeforeResult: eventsWriter?.bytesWritten ?? 0,
+      listenerCounts: finalTelemetry?.listeners ?? null,
+      manualPendingObservations: manualResult?.facts.pendingBeforeShutdown
+        ?? manualResult?.facts.pendingAfterObserve
+        ?? null,
+      manualUnreleasedPins: manualResult?.facts.unreleasedPins
+        ?? manualResult?.facts.unreleasedPinsAtCleanup
+        ?? null,
+      unconfirmedCloseRequest: shutdownFactsResult?.close === null || shutdownFactsResult?.close === undefined
+        ? null
+        : (isRecordValue(shutdownFactsResult.close) ? shutdownFactsResult.close.unconfirmedRequest : null),
+      dirtyAtClose: shutdownFactsResult?.close === null || shutdownFactsResult?.close === undefined
+        ? null
+        : (isRecordValue(shutdownFactsResult.close) ? shutdownFactsResult.close.dirty : null),
+    },
     metadata,
     evidence: { dir: evidenceDir, metrics: metricsPath, events: eventsPath },
     primaryError: primaryError === null ? null : errorFacts(primaryError),
     cleanupErrors: cleanupErrors.map((entry) => ({ step: entry.step, error: errorFacts(entry.error) })),
     evidenceFailure: evidenceFailure === null ? null : errorFacts(evidenceFailure),
     shutdown: shutdownFactsResult,
+    shutdownVerdict,
+    // 该记录只有在下面真正写入成功后才存在；写入失败时 stdout 报告会改回 false。
+    finalEvidenceWritten: true,
     h2: H2_PENDING,
   };
 
-  emit('run-result', null, report);
+  const finalRecord = emit('run-result', null, report);
+  if (finalRecord === null) {
+    report.status = 'FAIL';
+    report.smokePass = false;
+    report.fullPass = false;
+    report.finalEvidenceWritten = false;
+    report.primaryError ??= errorFacts(new Error('final run-result evidence record was not written'));
+  }
   eventsWriter?.close();
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-  return smokePass ? 0 : 1;
+  return report.status === 'FAIL' || !report.finalEvidenceWritten ? 1 : 0;
 }
 
 const invokedPath = process.argv[1];
@@ -2013,19 +2506,7 @@ if (invokedPath !== undefined && import.meta.url === pathToFileURL(invokedPath).
     process.exitCode = 1;
   } else if (parsed.help) {
     process.stdout.write(`${HELP}\n`);
-  } else if (parsed.mode === 'full') {
-    // H2a 的 full 只报告 pending/not-run：不加载 config/DB，不连接 socket/Bot/RCON。
-    process.stdout.write(`${JSON.stringify({
-      ...buildRunReport(parsed),
-      status: 'H2_FULL_PENDING',
-      full: {
-        state: 'not-run',
-        reason: 'H2a implements smoke only; full 60-minute/cancel/reconnect/reopen remain H2b.',
-      },
-      connections: 0,
-    }, null, 2)}\n`);
-    process.exitCode = 2;
   } else {
-    process.exitCode = await runSmoke(parsed);
+    process.exitCode = await runSoak(parsed);
   }
 }

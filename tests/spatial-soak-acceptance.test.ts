@@ -1,15 +1,17 @@
 /**
  * spatial-soak-acceptance 的离线验收。
  *
- * 只使用临时 SQLite 数据库、真实 SharedSpatialSession/public scheduler 和纯内存
- * 指标；不连接游戏、RCON、服务器、网络或 LLM。观察数据是本文件的合成 typed
- * 离线 fixture，不是线上 Vision 或真实游戏证据。
+ * 只使用临时 SQLite 数据库、真实 SharedSpatialSession/public scheduler、真实
+ * 文件哈希和纯内存指标；不连接游戏、RCON、服务器、网络或 LLM。观察数据是本文件
+ * 的合成 typed 离线 fixture，不是线上 Vision 或真实游戏证据。
  */
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_SPATIAL_CHECKPOINT_INTERVAL_MS,
   startSpatialCheckpointScheduler,
@@ -17,26 +19,41 @@ import {
 } from '../src/spatial/checkpoint-scheduler.ts';
 import { SharedSpatialSession, type ShutdownResult } from '../src/spatial/shared-session.ts';
 import type { BlockObservation } from '../src/adapter/types.ts';
+import type { CapturedMove, CapturedRouteSample } from '../scripts/navigation-acceptance.ts';
 import {
   BoundedJsonlWriter,
   DEFAULT_DURATION_MS,
   FIXTURE_A,
   FIXTURE_B,
+  H2B_REQUIRED_SCENARIOS,
   HELP,
-  MAX_EVENT_BYTES,
   MAX_JSONL_RECORD_BYTES,
   buildRunReport,
+  classifyDuration,
+  classifyLegTrace,
+  classifyShutdownResult,
+  collectPackageMeta,
+  createEvidenceEmitter,
   createPhysicsTickMetrics,
   createSoakMetrics,
-  decodeChunkedRecord,
-  encodeChunkedRecord,
   parseCliArgs,
   shutdownFacts,
   startSpatialSoakFoundation,
 } from '../scripts/spatial-soak-acceptance.ts';
+import {
+  manualScenarioSupported,
+  runManualScenario,
+} from '../scripts/spatial-soak-manual-scenario.ts';
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const isRangeError = (value: unknown): value is RangeError => {
+  if (typeof value !== 'object' || value === null) return false;
+  return value instanceof RangeError;
+};
+
+const REPO_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 
 test('CLI parsing accepts exact runs, rejects malformed flags, and keeps help pure', () => {
   assert.deepEqual(parseCliArgs(['--help']), { ok: true, help: true });
@@ -44,6 +61,7 @@ test('CLI parsing accepts exact runs, rejects malformed flags, and keeps help pu
   assert.match(HELP, /--mode=smoke\|full/);
   assert.match(HELP, /--duration-ms=N/);
   assert.match(HELP, /without loading config, creating a DB, or opening sockets/);
+  assert.match(HELP, /64KiB/);
 
   const accepted = parseCliArgs([
     '--curio=test',
@@ -66,7 +84,7 @@ test('CLI parsing accepts exact runs, rejects malformed flags, and keeps help pu
   assert.deepEqual(endpointB.start, FIXTURE_B);
   assert.deepEqual(FIXTURE_A, { x: 207.5, y: 64, z: 216.5 });
 
-  // full 是 H2b 占位：只接受真实一小时；90s 不能被当成一次一小时运行。
+  // full 必须是真实一小时；90s 不能被当成一次一小时运行。
   const fullAccepted = parseCliArgs(['--curio=test', '--mode=full', '--start=207.5,64,216.5']);
   assert.ok(fullAccepted.ok && !fullAccepted.help);
   assert.equal(fullAccepted.mode, 'full');
@@ -111,58 +129,300 @@ test('run report stays H2 pending and never claims a full pass', () => {
   assert.equal(report.h2.state, 'pending');
   assert.equal(report.h2.fullPass, false);
   assert.equal(report.h1.state, 'implemented');
+  assert.deepEqual(report.requiredScenarios, H2B_REQUIRED_SCENARIOS);
   assert.deepEqual(report.fixture.endpoints, { A: FIXTURE_A, B: FIXTURE_B });
   assert.equal(report.fixture.crossSectionX, 208);
   assert.equal(report.fixture.supportY, 63);
   assert.equal(report.fixture.bodyY, 64);
 });
 
-test('chunked evidence reconstructs large payloads exactly and detects missing parts', () => {
-  const largeText = '分段证据-'.repeat(9_000);
-  const payload = {
-    kind: 'task-done',
-    at: 1_700_000_000_123,
-    eventId: 'run:event-42',
-    outcome: {
-      task: { id: 'walk-task-1', startedAt: 1_700_000_000_000 },
-      result: { status: 'succeeded', data: { text: largeText, trace: [1, 2, 3] } },
-    },
-  };
-  const encoded = encodeChunkedRecord('run:event-42', payload, 1_024);
-  assert.ok(Buffer.byteLength(JSON.stringify(payload), 'utf8') > 16_384);
-  assert.ok(encoded.partCount > 1);
-  assert.deepEqual(
-    encoded.parts.map((part) => part.partIndex),
-    encoded.parts.map((_, index) => index),
-  );
-  assert.ok(encoded.parts.every((part) => part.eventId === 'run:event-42'));
-  assert.ok(encoded.parts.every((part) => part.partCount === encoded.partCount));
-  assert.ok(encoded.parts.every((part) => part.payloadSha256 === encoded.payloadSha256));
+test('direct JSONL evidence is human-readable and a record over 64KiB fails explicitly without truncation', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'spatial-soak-evidence-'));
+  const evidencePath = join(dir, 'events.jsonl');
+  try {
+    const writer = new BoundedJsonlWriter(evidencePath);
+    const emitter = createEvidenceEmitter(writer, 'run-x');
+    const small = emitter.emit('sample', 'task-1', { position: { x: 207.5, y: 64, z: 216.5 }, sequence: 7 });
+    assert.ok(small !== null);
+    assert.equal(emitter.failure, null);
 
-  const decoded = decodeChunkedRecord(encoded.parts);
-  assert.equal(decoded.ok, true, decoded.problems.join(', '));
-  assert.equal(decoded.eventId, 'run:event-42');
-  assert.equal(decoded.partCount, encoded.partCount);
-  assert.deepEqual(decoded.payload, payload, 'original time and nested data must survive reconstruction');
+    // 一条超过 64KiB 的记录必须让本次运行显式失败，而不是分块/截断/继续。
+    const oversized = emitter.emit('oversized', null, { blob: 'x'.repeat(MAX_JSONL_RECORD_BYTES) });
+    assert.equal(oversized, null);
+    const emitterFailure = emitter.failure;
+    assert.ok(isRangeError(emitterFailure));
+    assert.match(String(emitterFailure), /exceeds limit/);
+    // 首个错误之后不再写任何记录（包括 run-result）。
+    assert.equal(emitter.emit('run-result', null, { status: 'PASS' }), null);
+    writer.close();
 
-  // 相同输入产生相同的分块与哈希，便于离线重建。
-  assert.deepEqual(encodeChunkedRecord('run:event-42', payload, 1_024), encoded);
+    const raw = readFileSync(evidencePath, 'utf8');
+    const lines = raw.trimEnd().split('\n');
+    assert.equal(lines.length, 1, 'oversized record must not be written, even partially');
+    const entry = JSON.parse(lines[0]) as unknown;
+    assert.ok(isRecord(entry));
+    assert.equal(entry.sequence, 1);
+    assert.equal(typeof entry.captureTime, 'number');
+    assert.ok(isRecord(entry.record));
+    assert.equal(entry.record.kind, 'sample');
+    assert.equal(entry.record.taskId, 'task-1');
+    assert.ok(isRecord(entry.record.payload));
+    assert.deepEqual(entry.record.payload.position, { x: 207.5, y: 64, z: 216.5 });
+    assert.ok(!raw.includes('oversized'));
+    assert.ok(!raw.includes('run-result'));
+    assert.equal(MAX_JSONL_RECORD_BYTES, 64 * 1024);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
-  const missing = encoded.parts.filter((part) => part.partIndex !== 1);
-  const missingDecoded = decodeChunkedRecord(missing);
-  assert.equal(missingDecoded.ok, false);
-  assert.match(missingDecoded.problems.join(' '), /missing evidence chunk part 1/);
-  assert.equal(missingDecoded.payload, null);
+const legSample = (
+  taskId: string,
+  executionId: string,
+  sequence: number,
+  observedAt: number,
+  position: { x: number; y: number; z: number },
+  accepted = true,
+): CapturedRouteSample => ({
+  taskId,
+  delegationId: executionId,
+  accepted,
+  receivedAt: observedAt + 1,
+  sample: {
+    executionId,
+    sequence,
+    worldId: 'world',
+    dim: 'overworld',
+    sessionId: 'session-1',
+    observedAt,
+    position,
+    onGround: true,
+    inWater: false,
+  },
+  returned: {
+    delegationId: executionId,
+    lastPosition: position,
+    nextPointIndex: 1,
+    activeStepIndex: 0,
+    resultOutcome: 'RUNNING',
+    resultLastPosition: position,
+    resultLastObservation: null,
+  },
+});
 
-  const mismatched = encoded.parts.map((part) => part.partIndex === 2 ? { ...part, partSha256: '0'.repeat(64) } : part);
-  const mismatchDecoded = decodeChunkedRecord(mismatched);
-  assert.equal(mismatchDecoded.ok, false);
-  assert.match(mismatchDecoded.problems.join(' '), /hash mismatch/);
+const legMove = (
+  taskId: string,
+  executionId: string,
+  from: { x: number; y: number; z: number },
+  to: { x: number; y: number; z: number },
+  receivedAt: number,
+  deadlineMs: number,
+): CapturedMove => ({
+  taskId,
+  receivedAt,
+  request: { executionId, worldId: 'world', dim: 'overworld', sessionId: 'session-1', from, to, deadlineMs, timeoutMs: 45_000 },
+  result: null,
+  error: null,
+});
 
-  assert.throws(
-    () => encodeChunkedRecord('too-big', { blob: 'x'.repeat(MAX_EVENT_BYTES + 1) }),
-    RangeError,
-  );
+test('leg trace correlation uses dispatch order + accepted sample identity without requiring every move result', () => {
+  const taskId = 'walk-task';
+  // 真实关系：accepted BodySample.executionId 是路由 delegationId（walk-1），
+  // 而 ExecutableMove.executionId 是 walk-1-step-N。
+  const delegation = 'walk-1';
+  const a = { x: 207.5, y: 64, z: 216.5 };
+  const b = { x: 208.5, y: 64, z: 216.5 };
+  const c = { x: 209.5, y: 64, z: 216.5 };
+  const moves = [
+    legMove(taskId, `${delegation}-step-0`, a, b, 1_000, 46_000),
+    legMove(taskId, `${delegation}-step-1`, b, c, 2_000, 47_000),
+  ];
+  // 两个 move 都没有 result.sample；相关只来自 accepted onSample 样本。
+  const samples = [
+    legSample(taskId, delegation, 1, 1_500, b),
+    legSample(taskId, delegation, 2, 2_500, c),
+  ];
+  const nav = { confirmed: true, trace: [{ pos: b, ts: 1_500 }, { pos: c, ts: 2_500 }] };
+
+  const ok = classifyLegTrace(nav, taskId, samples, moves);
+  assert.equal(ok.ok, true, ok.problems.join(', '));
+
+  // 额外派发没有 trace 点也允许；只有已确认 trace 点必须按派发顺序对应。
+  const withExtra = [...moves, legMove(taskId, `${delegation}-step-2`, c, a, 3_000, 48_000)];
+  assert.equal(classifyLegTrace(nav, taskId, samples, withExtra).ok, true);
+
+  const wrongPosition = { confirmed: true, trace: [{ pos: a, ts: 1_500 }, { pos: c, ts: 2_500 }] };
+  assert.match(classifyLegTrace(wrongPosition, taskId, samples, moves).problems.join(' '), /trace point 0/);
+
+  const wrongTime = { confirmed: true, trace: [{ pos: b, ts: 1_501 }, { pos: c, ts: 2_500 }] };
+  assert.match(classifyLegTrace(wrongTime, taskId, samples, moves).problems.join(' '), /trace point 0/);
+
+  // 不同路由 delegation 的样本不能被借来配对。
+  const wrongDelegation = [legSample(taskId, 'walk-other', 1, 1_500, b), samples[1]!];
+  assert.match(classifyLegTrace(nav, taskId, wrongDelegation, moves).problems.join(' '), /route delegations/);
+
+  const outOfRange = [legSample(taskId, delegation, 1, 900, b), samples[1]!];
+  assert.match(classifyLegTrace(nav, taskId, outOfRange, moves).problems.join(' '), /trace point 0/);
+
+  const rejected = [legSample(taskId, delegation, 1, 1_500, b, false), samples[1]!];
+  assert.match(classifyLegTrace(nav, taskId, rejected, moves).problems.join(' '), /trace point 0/);
+
+  // move 的 executionId 必须由同一路由 delegation 派生。
+  const wrongMoveId = [moves[0]!, legMove(taskId, 'other-step-1', b, c, 2_000, 47_000)];
+  assert.match(classifyLegTrace(nav, taskId, samples, wrongMoveId).problems.join(' '), /not derived/);
+
+  const unconfirmed = { confirmed: false, trace: [{ pos: b, ts: 1_500 }, { pos: c, ts: 2_500 }] };
+  assert.match(classifyLegTrace(unconfirmed, taskId, samples, moves).problems.join(' '), /confirmed nav trace/);
+
+  // 跨任务样本不得借来配对。
+  const foreign = [legSample('other-task', delegation, 1, 1_500, b), samples[1]!];
+  assert.match(classifyLegTrace(nav, taskId, foreign, moves).problems.join(' '), /trace point 0/);
+});
+
+const cleanShutdown = (overrides: Partial<ShutdownResult> = {}): ShutdownResult => ({
+  checkpoint: { checkpointId: 'checkpoint-1' } as never,
+  error: null,
+  cancelError: null,
+  close: {
+    completed: true,
+    error: null,
+    dirty: false,
+    unconfirmedRequest: false,
+    checkpointId: 'checkpoint-1',
+  } as never,
+  closeError: null,
+  ...overrides,
+});
+
+test('shutdown classification fails every real failure surface, not just a thrown stop()', () => {
+  assert.equal(classifyShutdownResult(null).ok, false);
+  const clean = classifyShutdownResult(cleanShutdown());
+  assert.equal(clean.ok, true, clean.problems.join(', '));
+  assert.equal(clean.facts?.finalCheckpointSaved, true);
+
+  const cases: Array<[string, ShutdownResult]> = [
+    ['missing final checkpoint', cleanShutdown({ checkpoint: null })],
+    ['checkpoint error', cleanShutdown({ error: new Error('save failed') })],
+    ['close threw', cleanShutdown({ closeError: new Error('close failed') })],
+    ['missing close result', cleanShutdown({ close: null })],
+    ['close incomplete', cleanShutdown({ close: { completed: false, error: null, dirty: true, unconfirmedRequest: true, checkpointId: null } as never })],
+    ['close error', cleanShutdown({ close: { completed: true, error: new Error('disk'), dirty: false, unconfirmedRequest: false, checkpointId: 'c' } as never })],
+  ];
+  for (const [label, result] of cases) {
+    assert.equal(classifyShutdownResult(result).ok, false, `${label} must fail`);
+  }
+  // dirty/unconfirmed 作为事实保留；失败判据仍来自明确的 checkpoint/close 失败面。
+  const dirty = classifyShutdownResult(cleanShutdown({ close: { completed: true, error: null, dirty: true, unconfirmedRequest: true, checkpointId: 'c' } as never }));
+  assert.equal(dirty.ok, true);
+  assert.equal((dirty.facts?.close as Record<string, unknown>).dirty, true);
+  assert.equal((dirty.facts?.close as Record<string, unknown>).unconfirmedRequest, true);
+});
+
+test('duration classification keeps smoke separate and refuses a short full run', () => {
+  const shortFull = classifyDuration('full', 3_600_000, 90_000);
+  assert.equal(shortFull.fullPassEligible, false);
+  assert.equal(shortFull.durationSatisfied, false);
+  assert.match(shortFull.problems.join(' '), /required 3600000ms/);
+
+  const longFull = classifyDuration('full', 3_600_000, 3_600_000);
+  assert.equal(longFull.fullPassEligible, true);
+  assert.deepEqual(longFull.problems, []);
+
+  const smoke = classifyDuration('smoke', 3_600_000, 90_000);
+  assert.equal(smoke.smokeOnly, true);
+  assert.equal(smoke.fullPassEligible, false);
+  assert.equal(smoke.durationSatisfied, false);
+  assert.deepEqual(smoke.problems, []);
+
+  const nullElapsed = classifyDuration('full', 3_600_000, null);
+  assert.equal(nullElapsed.fullPassEligible, false);
+});
+
+test('package metadata is verified against actual tarball bytes, lock entry, and provenance', () => {
+  const repo = collectPackageMeta(REPO_ROOT);
+  assert.equal(repo.name, 'curio-minecraft-3d-memory');
+  assert.equal(repo.checks.tgzSha256, 'verified');
+  assert.equal(repo.checks.tgzSha512, 'verified');
+  assert.equal(repo.checks.lockEntry, 'verified');
+  assert.equal(repo.checks.provenance, 'verified');
+  assert.equal(repo.provenance.artifactSHA256, repo.tgz.sha256);
+  assert.equal(repo.provenance.npmIntegrity, repo.lock.integrity);
+  const actual = readFileSync(resolve(REPO_ROOT, repo.tgz.path));
+  assert.equal(createHash('sha256').update(actual).digest('hex'), repo.tgz.sha256);
+  assert.equal(`sha512-${createHash('sha512').update(actual).digest('base64')}`, repo.tgz.integrity);
+});
+
+test('package metadata rejects a tampered provenance hash or lock integrity', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'spatial-soak-package-'));
+  try {
+    const name = 'curio-minecraft-3d-memory';
+    const version = '9.9.9';
+    const spec = `file:vendor/${name}-${version}.tgz`;
+    const tgzBytes = Buffer.from('offline fixture tarball bytes; not a real package', 'utf8');
+    const tgzSha256 = createHash('sha256').update(tgzBytes).digest('hex');
+    const integrity = `sha512-${createHash('sha512').update(tgzBytes).digest('base64')}`;
+    const sourceHEAD = 'a'.repeat(40);
+
+    mkdirSync(join(dir, 'vendor'), { recursive: true });
+    mkdirSync(join(dir, 'node_modules', name), { recursive: true });
+    writeFileSync(join(dir, 'vendor', `${name}-${version}.tgz`), tgzBytes);
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ dependencies: { [name]: spec } }, null, 2));
+    writeFileSync(join(dir, 'package-lock.json'), JSON.stringify({
+      packages: {
+        '': { dependencies: { [name]: spec } },
+        [`node_modules/${name}`]: { version, resolved: spec, integrity },
+      },
+    }, null, 2));
+    writeFileSync(join(dir, 'node_modules', name, 'package.json'), JSON.stringify({ name, version }, null, 2));
+    const provenancePath = join(dir, 'vendor', `${name}-${version}.provenance.json`);
+    writeFileSync(provenancePath, JSON.stringify({
+      package: { name, version },
+      sourceHEAD,
+      artifactSHA256: tgzSha256,
+      npmIntegrity: integrity,
+      sourceBinding: { clean: true, head: sourceHEAD },
+    }, null, 2));
+
+    const verified = collectPackageMeta(dir);
+    assert.equal(verified.checks.tgzSha256, 'verified');
+    assert.equal(verified.provenance.tracked, false);
+    assert.equal(verified.tgz.sha256, tgzSha256);
+
+    writeFileSync(provenancePath, JSON.stringify({
+      package: { name, version },
+      sourceHEAD,
+      artifactSHA256: '0'.repeat(64),
+      npmIntegrity: integrity,
+      sourceBinding: { clean: true, head: sourceHEAD },
+    }, null, 2));
+    assert.throws(() => collectPackageMeta(dir), /artifactSHA256/);
+
+    writeFileSync(join(dir, 'package-lock.json'), JSON.stringify({
+      packages: {
+        '': { dependencies: { [name]: spec } },
+        [`node_modules/${name}`]: { version, resolved: spec, integrity: 'sha512-AAAA' },
+      },
+    }, null, 2));
+    assert.throws(() => collectPackageMeta(dir), /package-lock integrity/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('manual residency scenario reports not-integrated when the real manual API is absent', async () => {
+  const supported = manualScenarioSupported(SharedSpatialSession);
+  assert.equal(typeof supported, 'boolean');
+  if (supported) return;
+  const result = await runManualScenario({
+    worldId: 'manual-offline-world',
+    databasePath: join(tmpdir(), 'unused-manual.sqlite'),
+    scope: { worldId: 'manual-offline-world', dim: 'overworld', sessionId: 'offline' },
+    observe: () => [],
+    emit: () => {},
+  });
+  assert.equal(result.state, 'not-integrated');
+  assert.equal(result.ok, false, 'manual must never be reported as passed without the real API');
+  assert.match(result.problems.join(' '), /not integrated/);
 });
 
 test('physics tick metrics aggregate actual callback timing without retaining frames', () => {
@@ -376,6 +636,7 @@ test('real SQLite session reaches actual checkpoint/close and foundation writes 
     assert.equal(shutdown.close?.error, null);
     assert.equal(shutdown.close?.unconfirmedRequest, false);
     assert.equal(shutdown.close?.dirty, false);
+    assert.equal(classifyShutdownResult(shutdown).ok, true);
 
     const rawEvidence = readFileSync(evidencePath, 'utf8');
     const entries = rawEvidence
