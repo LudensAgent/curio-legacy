@@ -80,7 +80,11 @@ test('walk_route 通过真实身体桥离线走通三段转弯', { timeout: 4500
     const result = await svc.shutdown();
     assert.equal(result.error, null);
     assert.equal(result.cancelError, null);
-    assert.ok(result.close !== null && result.close.completed && result.close.error === null);
+    assert.equal(result.closeError, null);
+    assert.ok(result.close !== null, 'real close must return a result');
+    assert.equal(result.close.completed, true);
+    assert.equal(result.close.error, null);
+    assert.equal(result.close.unconfirmedRequest, false);
     rmSync(dir, { recursive: true, force: true });
   }
 });

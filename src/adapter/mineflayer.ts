@@ -274,7 +274,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         this.emit('session_reset');
       } catch (error) {
         const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-        this.bus.publish('adapter_event_error', 'P1', `session_reset listener failed: ${detail}`);
+        // Unknown boundary: keep a typed own `kind` that domain errors carry alongside name/message.
+        const kind = error !== null && typeof error === 'object' && 'kind' in error && typeof error.kind === 'string' ? ` kind=${error.kind}` : '';
+        this.bus.publish('adapter_event_error', 'P1', `session_reset listener failed: ${detail}${kind}`);
       }
     }
   }

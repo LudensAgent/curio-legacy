@@ -156,13 +156,14 @@ export class WalkMoveExecutor implements MoveExecutor {
     private readonly now: () => number = Date.now,
     private readonly lifecycle?: () => WalkLifecycle,
     private readonly onLifecycleBroken?: (detail: string) => void,
+    private readonly runSignal?: AbortSignal,
   ) {}
 
   /** 宿主在帧回调里构造样本（掌握单调序号与生命周期），再喂给库。 */
   setFrameSink(fn: (entity: WalkBody['entity']) => void) { this.frameSink = fn; }
 
   private aborted(request: ExecutableMove): boolean {
-    return request.signal.aborted || this.parentSignal.aborted;
+    return request.signal.aborted || this.parentSignal.aborted || this.runSignal?.aborted === true;
   }
 
   async move(request: ExecutableMove): Promise<ExecutableMoveResult> {
@@ -204,7 +205,7 @@ export class WalkMoveExecutor implements MoveExecutor {
     for (let i = 0; i < 400; i++) {
       if (this.aborted(request)) { this.releaseIf(request.executionId); return { failure: { kind: 'cancelled' } }; }
       if (this.now() >= moveDeadline) { this.releaseIf(request.executionId); return { failure: { kind: 'timed_out' } }; }
-      const e = await awaitFrame(this.tick, moveDeadline, this.now, request.signal, this.parentSignal);
+      const e = await awaitFrame(this.tick, moveDeadline, this.now, request.signal, this.parentSignal, ...(this.runSignal ? [this.runSignal] : []));
       // 每次异步等待返回后，在写控制或提交样本之前，复核取消/期限/归属：旧段迟到恢复不能
       // 松开新段的键、提交旧样本；到期帧也不能再写控制。
       if (this.aborted(request)) { this.releaseIf(request.executionId); return { failure: { kind: 'cancelled' } }; }
@@ -316,9 +317,16 @@ export async function runWalkRoute(opts: {
     worldId: opts.request.worldId, dim: opts.request.dim, sessionId: opts.request.sessionId,
     alive: true, connected: true, observationReady: true,
   }));
+  // 本次运行自己的取消通道：先让库写入 lifecycle 原因，再唤醒本运行的帧等待。
+  // 只中止这个运行态 signal，绝不 abort 父任务 signal。
+  const runAbort = new AbortController();
+  const cancelRun = (by: 'lifecycle' | 'agent' | 'scheduler', reason: string) => {
+    loop.cancel(by, reason);
+    runAbort.abort();
+  };
   const executor = new WalkMoveExecutor(opts.body, opts.tick, opts.signal, now, lifecycle, (detail) => {
-    loop.cancel('lifecycle', detail);
-  });
+    cancelRun('lifecycle', detail);
+  }, runAbort.signal);
   const loop = new WalkRouteExecutor(opts.map, executor, { now });
   let sequence = 0; // 委托内单调递增，跨段不重置
 
@@ -330,7 +338,7 @@ export async function runWalkRoute(opts: {
   const cancelBrokenLifecycle = () => {
     const lc = lifecycle();
     if (!lifecycleBroken(lc) && !scopeMismatch(lc, opts.request)) return false;
-    loop.cancel('lifecycle', `alive=${lc.alive} connected=${lc.connected} observationReady=${lc.observationReady} scope=${lc.worldId}/${lc.dim}/${lc.sessionId}`);
+    cancelRun('lifecycle', `alive=${lc.alive} connected=${lc.connected} observationReady=${lc.observationReady} scope=${lc.worldId}/${lc.dim}/${lc.sessionId}`);
     return true;
   };
 
@@ -339,7 +347,7 @@ export async function runWalkRoute(opts: {
     loop.start({ ...opts.request, deadlineMs: deadline });
     unbindActive = opts.bindActive?.({
       observe: (report, budget) => { loop.observe(report, budget); },
-      cancel: (by, reason) => { loop.cancel(by, reason); },
+      cancel: (by, reason) => { cancelRun(by, reason); },
     }) ?? null;
     const executionId = loop.status()!.delegationId;
 
@@ -357,12 +365,13 @@ export async function runWalkRoute(opts: {
     // 产生终态、取消或到期，再交给下面的行走循环。
     let initFrames = 0;
     let frameEnded = false;
-    while (loop.status()!.result === null && loop.status()!.activeStepIndex === null && now() < deadline && !opts.signal.aborted && initFrames < 400) {
-      const entity = await awaitFrame(opts.tick, deadline, now, opts.signal);
+    while (loop.status()!.result === null && loop.status()!.activeStepIndex === null && now() < deadline && !opts.signal.aborted && !runAbort.signal.aborted && initFrames < 400) {
+      const entity = await awaitFrame(opts.tick, deadline, now, opts.signal, runAbort.signal);
       if (entity === null) {
-        // 无帧：先区分父取消/期限耗尽/生命周期失效；三者之外即「帧源结束但仍连接」。
+        // 无帧：先区分本运行取消（已由 loop.cancel 写入 lifecycle/共享取消原因）、
+        // 父取消/期限耗尽/生命周期失效；三者之外即「帧源结束但仍连接」。
         // null 不是重试授权——继续重试会在微任务队列上空转，饿死定时器与取消信号。
-        if (opts.signal.aborted) break;
+        if (runAbort.signal.aborted || opts.signal.aborted) break;
         if (now() >= deadline) break;
         if (cancelBrokenLifecycle()) break;
         frameEnded = true;
@@ -379,7 +388,7 @@ export async function runWalkRoute(opts: {
 
     if (!frameEnded) {
       let iterations = 0;
-      while (loop.status()!.result === null && now() < deadline && !opts.signal.aborted && iterations++ < 20000) {
+      while (loop.status()!.result === null && now() < deadline && !opts.signal.aborted && !runAbort.signal.aborted && iterations++ < 20000) {
         if (cancelBrokenLifecycle()) break;
         loop.advance(64);
         loop.checkTimeout();
@@ -415,7 +424,7 @@ export async function runWalkRoute(opts: {
     opts.signal.removeEventListener('abort', onParentAbort);
     // 异常路径也不得把活动移动的控制留在身体上；正常返回时 result 已非 null，这里为空操作。
     const status = loop.status();
-    if (status !== null && status.result === null) loop.cancel('scheduler', 'host walk-route error');
+    if (status !== null && status.result === null) cancelRun('scheduler', 'host walk-route error');
   }
 }
 

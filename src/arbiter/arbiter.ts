@@ -80,11 +80,15 @@ export class Arbiter extends EventEmitter {
 
   setPaused(paused: boolean) {
     this.pausedFlag = paused;
-    // 暂停/恢复边界即使在零观测间隔也必须进入共享空间记忆；不依赖 Mind 事件或轮询。
-    this.spatial?.setPaused(paused);
-    if (paused) {
-      this.cancel('paused');
-      this.adapter.stopAll();
+    try {
+      // 暂停/恢复边界即使在零观测间隔也必须进入共享空间记忆；不依赖 Mind 事件或轮询。
+      this.spatial?.setPaused(paused);
+    } finally {
+      // 即使共享服务在取消回调里抛错，也必须完成原来的取消与 stopAll；错误原样上抛。
+      if (paused) {
+        this.cancel('paused');
+        this.adapter.stopAll();
+      }
     }
   }
 
