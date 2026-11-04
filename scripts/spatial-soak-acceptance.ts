@@ -1328,11 +1328,17 @@ export function classifyLegTrace(
   };
 } {
   const problems: string[] = [];
-  const trace = nav !== null && Array.isArray(nav.trace)
-    ? nav.trace.filter((entry): entry is { pos: FixtureEndpoint; ts: number } =>
-      isRecordValue(entry) && isVec(entry.pos) && isNumberValue(entry.ts))
-    : [];
+  const rawTrace = nav !== null && Array.isArray(nav.trace) ? nav.trace : null;
+  const trace = rawTrace === null
+    ? []
+    : rawTrace.filter((entry): entry is { pos: FixtureEndpoint; ts: number } =>
+      isRecordValue(entry) && isVec(entry.pos) && isNumberValue(entry.ts));
+  const malformedTracePoints = rawTrace === null ? 0 : rawTrace.length - trace.length;
   if (nav === null || nav.confirmed !== true) problems.push('missing confirmed nav trace');
+  // 损坏的 trace 点不能被静默过滤：否则额外或畸形的点可以绕过一一对应检查。
+  if (malformedTracePoints > 0) {
+    problems.push(`confirmed nav trace contains ${malformedTracePoints} malformed point(s)`);
+  }
   if (trace.length === 0) problems.push('confirmed nav trace has no points');
 
   const taskMoves = moves.filter((move) => move.taskId === taskId);

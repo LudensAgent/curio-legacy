@@ -103,11 +103,12 @@ const waitFor = async (predicate: () => boolean, timeoutMs: number, intervalMs =
   return predicate();
 };
 
-const shutdownProblems = (result: ShutdownResult | null): string[] => {
+export const shutdownProblems = (result: ShutdownResult | null): string[] => {
   if (result === null) return ['shutdown returned no result'];
   const problems: string[] = [];
   if (result.checkpoint === null) problems.push('missing confirmed final checkpoint');
   if (result.error !== null) problems.push('final checkpoint error');
+  if (result.cancelError !== null) problems.push('cancel error');
   if (result.closeError !== null) problems.push('close threw');
   if (result.close === null) problems.push('missing close result');
   else {

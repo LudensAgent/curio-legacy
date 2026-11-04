@@ -57,6 +57,7 @@ import {
 import {
   manualScenarioSupported,
   runManualScenario,
+  shutdownProblems,
 } from '../scripts/spatial-soak-manual-scenario.ts';
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -337,6 +338,23 @@ test('leg trace correlation uses dispatch order + accepted sample identity witho
   assert.match(classifyLegTrace(nav, taskId, foreign, moves).problems.join(' '), /trace point 0/);
 });
 
+test('malformed confirmed trace points fail instead of being silently filtered', () => {
+  const taskId = 'walk-malformed-trace';
+  const delegation = 'walk-1';
+  const a = { x: 207.5, y: 64, z: 216.5 };
+  const b = { x: 208.5, y: 64, z: 216.5 };
+  const moves = [legMove(taskId, `${delegation}-step-0`, a, b, 1_000, 46_000)];
+  const samples = [legSample(taskId, delegation, 1, 1_500, b)];
+  // 一条合法点 + 一条畸形点：过滤后长度仍与派发相等，必须由原始长度暴露畸形点。
+  const nav = { confirmed: true, trace: [{ pos: b, ts: 1_500 }, { garbage: true }] };
+
+  const verdict = classifyLegTrace(nav, taskId, samples, moves);
+  assert.equal(verdict.ok, false);
+  assert.match(verdict.problems.join(' '), /confirmed nav trace contains 1 malformed point/);
+  assert.equal(verdict.facts.tracePoints, 1);
+  assert.equal(verdict.facts.dispatches, 1);
+});
+
 test('soak walk requests keep the fixed target and use the same near radius for completion and verification', () => {
   const request = soakWalkRequest(FIXTURE_B, 46_000);
   assert.deepEqual(request.to, FIXTURE_B);
@@ -505,6 +523,12 @@ test('shutdown classification fails every real failure surface, not just a throw
   assert.equal(dirty.ok, true);
   assert.equal((dirty.facts?.close as Record<string, unknown>).dirty, true);
   assert.equal((dirty.facts?.close as Record<string, unknown>).unconfirmedRequest, true);
+});
+
+test('manual-scenario shutdown verdict fails on a non-null cancelError', () => {
+  assert.deepEqual(shutdownProblems(cleanShutdown()), []);
+  const verdict = shutdownProblems(cleanShutdown({ cancelError: new Error('cancel failed') }));
+  assert.deepEqual(verdict, ['cancel error']);
 });
 
 test('duration classification keeps smoke separate and refuses a short full run', () => {
