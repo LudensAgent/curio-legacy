@@ -149,6 +149,26 @@ test('swimTo to a distant target does not report landed without arriving', async
   assert.equal(result.landed, false, '未抵达远处目标不能报 landed');
 });
 
+test('swimTo enables forward to enter water from a dry shore', async (t) => {
+  const { adapter, bot } = pond(t);
+  let forwardEnables = 0;
+  const orig = bot.setControlState.bind(bot);
+  bot.setControlState = (name: string, value: boolean) => { if (name === 'forward' && value) forwardEnables++; orig(name, value); };
+  bot.entity.position = new Vec3(6.5, 64, 2.5);
+  bot.entity.onGround = true; bot.entity.isInWater = false;
+  await adapter.swimTo({ x: 0.5, y: 64, z: 2.5 }, new AbortController().signal, { timeoutMs: 1500 });
+  assert.ok(forwardEnables > 0, '干岸上也要启用前进，先走进水里再游到对岸');
+});
+
+test('swimTo does not report arrived at a target far above', async (t) => {
+  const { adapter, bot } = pond(t);
+  // 水平距离 0，但目标高 6 格：不能只凭水平距离原地报上岸。
+  bot.entity.position = new Vec3(6.5, 64, 2.5);
+  bot.entity.onGround = true; bot.entity.isInWater = false;
+  const result = await adapter.swimTo({ x: 6.5, y: 70, z: 2.5 }, new AbortController().signal, { timeoutMs: 1500 });
+  assert.equal(result.landed, false, '高处目标不能原地报 landed');
+});
+
 test('climbing out onto the bank does not keep bunny-hopping on dry land', async (t) => {
   const { adapter, bot } = pond(t);
   const tick = bot.waitForTicks.bind(bot);

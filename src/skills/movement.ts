@@ -800,9 +800,10 @@ export const surface: Skill<{ escape?: 'dig' | 'shore' }> = {
     const notes: string[] = [];
     while (Date.now() < end) {
       ctx.signal.throwIfAborted();
-      // 头还没出水面、头顶又是通到水面的开阔水路：先原地按住上浮换气。
+      // 头还没出水面、头顶没有已知的实心封顶（开阔水面，或未观察、需要上浮去看）时先上浮换气/观察。
       // 换气是 surface 的第一要务，也是任何 escape 战术（挖顶/找气穴/游上岸）的前提，不能让战术跳过这一步。
-      if (ctx.adapter.state().inWater && !headInAir(ctx) && !ceilingAbove(ctx)) {
+      const lid = ceilingAbove(ctx);
+      if (ctx.adapter.state().inWater && !headInAir(ctx) && (lid === null || lid === 'unknown')) {
         floatTries++;
         if (floatTries <= 3) {
           await ctx.adapter.swimTo(null, ctx.signal, { timeoutMs: Math.max(300, Math.min(2000, end - Date.now())) });
@@ -814,9 +815,11 @@ export const surface: Skill<{ escape?: 'dig' | 'shore' }> = {
         floatTries = 0;
       }
       // 头顶被冰/石头封住时往上游没用：够得着就挖开（玩家在冰下、水洞里会这么做），够不着先往上游到够得着
-      const lid = ceilingAbove(ctx);
       let sealed = false;
-      if (lid) {
+      if (lid === 'unknown') {
+        // 头顶未观察：不挖、不找气穴（都走观察接口），如实标记封顶未知，落到寻岸。
+        sealed = true;
+      } else if (lid) {
         const k = `${lid.pos.x},${lid.pos.y},${lid.pos.z}`;
         if (allowDig) {
           // 水下挖方块慢 5 倍（脚不着地再慢 5 倍）：附近有气穴就先游过去，比憋着气挖顶快
@@ -892,10 +895,16 @@ export const surface: Skill<{ escape?: 'dig' | 'shore' }> = {
         }
         const now = ctx.adapter.state();
         if (!now.inWater && now.onGround && now.oxygen >= 18) {
-          // 寻路只给瞬时干地样本：稍等再复核，与游泳路径的稳定干地验收一致，避免瞬时上岸误报。
-          await sleep(600, ctx.signal);
-          const afterConfirm = ctx.adapter.state();
-          if (!afterConfirm.inWater && afterConfirm.onGround && afterConfirm.oxygen >= 18) {
+          // 持续 600ms 稳定干地才算上岸：中途回水就重置计时，避免瞬时干地/回水再触岸误报。
+          let dryFor = 0;
+          while (dryFor < 600 && Date.now() < end) {
+            await sleep(100, ctx.signal);
+            const st = ctx.adapter.state();
+            if (!st.inWater && st.onGround && st.oxygen >= 18) dryFor += 100;
+            else dryFor = 0;
+          }
+          if (dryFor >= 600) {
+            const afterConfirm = ctx.adapter.state();
             return ok(`走上了岸，氧气 ${afterConfirm.oxygen}/20`, { attempts, landed: true, pos: afterConfirm.pos });
           }
         }
@@ -981,12 +990,15 @@ const UNBREAKABLE = new Set(['bedrock', 'barrier', 'end_portal_frame', 'reinforc
  * 人在水里时，头顶这一列往上看 24 格：先碰到空气 = 开阔水面（null）；先碰到实心方块 = 被封住，返回那一块
  * （reachable：站在水里伸手够得着，约 4.5 格内）。只看自己头顶这一列，是身边的物理环境，不算透视。
  */
-export function ceilingAbove(ctx: SkillCtx): { name: string; pos: Vec; reachable: boolean; unbreakable: boolean } | null {
+export function ceilingAbove(ctx: SkillCtx): { name: string; pos: Vec; reachable: boolean; unbreakable: boolean } | 'unknown' | null {
   const s = ctx.adapter.state();
   if (!s.inWater) return null;
   const x = Math.floor(s.pos.x), z = Math.floor(s.pos.z), feet = Math.floor(s.pos.y);
   for (let y = feet + 1; y <= feet + 24; y++) {
-    const name = ctx.adapter.blockAt({ x, y, z }) ?? 'air';
+    // 只用当前观察，不读原始区块：未观察到的格既不能当空气（开阔），也不能当实心方块（封顶）。
+    const ob = ctx.senses.observeBlocks?.([{ x, y, z }])[0];
+    if (!ob) return 'unknown';
+    const name = ob.name;
     if (AIRS.has(name)) return null; // 头顶是开阔水面
     if (PASSABLE.has(name)) continue;
     return { name, pos: { x, y, z }, reachable: y + 0.5 - (s.pos.y + 1.62) <= 4, unbreakable: UNBREAKABLE.has(name) };

@@ -253,9 +253,9 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
     }
     const name = this.nameAt(pos.x, pos.y, pos.z);
     if (name === 'air') return { ok: false, reason: 'NO_BLOCK' };
-    const i = this.blocks.findIndex((b) => b.pos.x === pos.x && b.pos.y === pos.y && b.pos.z === pos.z);
-    if (i >= 0) this.blocks.splice(i, 1);
-    else this.removed.add(this.k(pos.x, pos.y, pos.z));
+    // 挖掉后该格必须是空气（加入 removed），否则会回退到默认方块，感知层也看不到挖空的结果。
+    this.blocks = this.blocks.filter((b) => !(b.pos.x === pos.x && b.pos.y === pos.y && b.pos.z === pos.z));
+    this.removed.add(this.k(pos.x, pos.y, pos.z));
     const b = { name };
     const drop = b.name === 'stone' ? 'cobblestone' : b.name === 'grass_block' ? 'dirt' : b.name;
     // 挖掉脚下的方块会掉下去

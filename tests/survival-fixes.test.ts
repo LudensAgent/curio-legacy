@@ -4,7 +4,7 @@ import { Reflex } from '../src/brain/reflex.ts';
 import { EventBus } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { placeTorch } from '../src/skills/light.ts';
-import { findAirPocket, surface } from '../src/skills/movement.ts';
+import { ceilingAbove, findAirPocket, surface } from '../src/skills/movement.ts';
 import { hunt } from '../src/skills/survival.ts';
 import { eat, gather, gatherTargetRisk } from '../src/skills/work.ts';
 import { dig } from '../src/skills/body.ts';
@@ -70,7 +70,8 @@ function submerged(feetY: number) {
 
 test('surface：水下头顶是石头 → 先往上挖开，再上浮换气', async () => {
   const w = submerged(60);
-  w.setBlock({ x: 0, y: 60, z: 0 }, 'water'); w.setBlock({ x: 0, y: 61, z: 0 }, 'water'); // y=62 默认是石头
+  w.setBlock({ x: 0, y: 60, z: 0 }, 'water'); w.setBlock({ x: 0, y: 61, z: 0 }, 'water');
+  w.setBlock({ x: 0, y: 62, z: 0 }, 'stone'); // 显式放下头顶石头，视为已观察
   const swim = w.swimTo.bind(w);
   w.swimTo = async (target, signal, opts) => {
     const result = await swim(target, signal, opts);
@@ -122,6 +123,17 @@ test('findAirPocket 不读取未观察区域：无视觉观察时不返回拐角
   const ctx = makeCtx(w, { senses: { observeBlocks: () => [] } });
   try {
     assert.equal(findAirPocket(ctx), null);
+  } finally { ctx.memory.close(); }
+});
+
+test('ceilingAbove 不读原始区块：头顶未观察时返回 unknown 而非精确方块', async () => {
+  const w = submerged(60);
+  w.setBlock({ x: 0, y: 60, z: 0 }, 'water');
+  w.setBlock({ x: 0, y: 70, z: 0 }, 'stone'); // 头顶 10 格的方块，但没有任何观察
+  // 没有任何视觉观察：不能返回该方块的精确名称和坐标。
+  const ctx = makeCtx(w, { senses: { observeBlocks: () => [] } });
+  try {
+    assert.equal(ceilingAbove(ctx), 'unknown');
   } finally { ctx.memory.close(); }
 });
 

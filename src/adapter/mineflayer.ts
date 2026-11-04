@@ -4112,9 +4112,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         check();
         const p = b.entity.position;
         const distance = destination ? Math.hypot(destination.x - p.x, destination.z - p.z) : 0;
+        const vertical = destination ? Math.abs(destination.y - p.y) : 0;
         const dry = dryFooting();
-        // 指定目标时必须抵达目标附近（dry 且水平距离在容差内）才算上岸；不指定目标（仅上浮换气）则任意干地站稳即可。
-        const arrived = !destination || distance <= 1.0;
+        // 指定目标时必须抵达目标附近（dry 且水平/高度都在容差内）才算上岸；只比水平距离会把高处目标也误判成抵达。
+        const arrived = !destination || (distance <= 1.0 && vertical <= 1.5);
         if (dry && arrived && ownOxygen(b) >= 18) {
           drySince ??= Date.now();
           if (Date.now() - drySince >= 600) return { ok: true, landed: true, oxygen: ownOxygen(b) };
@@ -4136,7 +4137,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           await this.afterAction(() => b.look(b.entity.yaw + Math.PI / 2, -0.1, true), check);
           nextTurn = Date.now() + 1000;
         }
-        if (destination && distance > 0.35 && !dry) {
+        // 离目标还有水平距离就向前：干岸上要先走进水里（不游泳也要迈步），不能只在 !dry 时才前进，否则两岸间隔的水永远过不去。
+        if (destination && distance > 0.35) {
           await this.afterAction(() => b.look(Math.atan2(p.x - destination!.x, p.z - destination!.z), 0, true), check);
           b.setControlState('forward', true);
         } else b.setControlState('forward', false);
@@ -4283,9 +4285,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (item === 'bucket' && ['water', 'lava'].includes(block.name)) {
         if (Number(block.getProperties().level) !== 0) return { ok: false, reason: 'NOT_SOURCE:指定流体不是源方块' };
         const from = b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0);
-        const centerDirection = block.position.offset(0.5, 0.5, 0.5).minus(from);
-        const centerDistance = centerDirection.norm();
-        if (centerDistance > 4.4 || centerDistance < 0.01) return { ok: false, reason: 'OUT_OF_RANGE:指定流体源不在交互范围内' };
         if (typeof b.world?.raycast !== 'function') return { ok: false, reason: 'TARGET_NOT_CONFIRMED:当前无法确认流体源的射线' };
         // SOURCE_ONLY 也会命中含水方块和水生植物中的水源，不只是名为 water 的格子。
         const waterSources = new Set(['seagrass', 'tall_seagrass', 'kelp', 'kelp_plant', 'bubble_column']);
@@ -4302,14 +4301,21 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         };
         // 同一指定源格尝试有限候选瞄准点（液面→中心→略低），按真实射线选第一个能首先命中源的点。
         // 顶部封石时液面被挡、中心被前方半砖挡等不同遮挡下各有适用的瞄准高度，不能单一朝液面或强制朝中心。
+        // 距离按候选点判断，不能先用源中心做预检：中心可能超 4.4 而液面候选仍在交互范围内。
+        let anyInRange = false;
         const aim = [0.85, 0.5, 0.3]
           .map((dy) => block.position.offset(0.5, dy, 0.5))
           .find((candidate) => {
             const direction = candidate.minus(from), distance = direction.norm();
             if (distance > 4.4 || distance < 0.01) return false;
+            anyInRange = true;
             return b.world.raycast(from, direction.normalize(), distance + 0.05, sourceOrBlock)?.position.equals(block.position) === true;
           });
-        if (!aim) return { ok: false, reason: 'TARGET_NOT_CONFIRMED:视线不能首先命中指定流体源，未发送使用动作' };
+        if (!aim) {
+          return anyInRange
+            ? { ok: false, reason: 'TARGET_NOT_CONFIRMED:视线不能首先命中指定流体源，未发送使用动作' }
+            : { ok: false, reason: 'OUT_OF_RANGE:指定流体源不在交互范围内' };
+        }
         const filled = `${block.name}_bucket`, beforeEmpty = this.invCountOf('bucket'), beforeFilled = this.invCountOf(filled);
         await this.afterAction(() => b.lookAt(aim, true), check);
         await this.afterAction(() => this.lookSynced(), check);

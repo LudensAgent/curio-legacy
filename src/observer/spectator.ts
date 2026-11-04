@@ -94,6 +94,9 @@ export class Spectator {
   }
 
   private async setupWorld() {
+    // test 模式不自动改全服规则（keepInventory/doImmediateRespawn），交由持锁的测试编排显式执行和恢复，
+    // 否则暂停中的测试客户端仍会在首次出生时修改共享服务器规则，干扰另一个测试任务。
+    if (this.cfg.mode === 'test') return;
     if (!this.cfg.observer.setupGamerules) return;
     for (const cmd of [`gamerule keepInventory ${this.cfg.observer.keepInventory}`, 'gamerule doImmediateRespawn true']) {
       try {
