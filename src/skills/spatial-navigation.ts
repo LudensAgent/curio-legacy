@@ -33,6 +33,14 @@ import {
 import { awaitFrame, walkCollisionProvider } from '../adapter/walk-route.ts';
 import type { WalkTick } from '../adapter/walk-route.ts';
 import type { SharedSpatialSession } from '../spatial/shared-session.ts';
+import {
+  acquireRouteResidency,
+  releaseRouteResidency,
+  residencyFacts,
+  routeDependencySections,
+  sectionsForCells,
+} from '../spatial/skill-residency.ts';
+import type { RouteResidency } from '../spatial/skill-residency.ts';
 import { executeWalkRoute, historyFields, observeCells, readObservedState, readPoint, routeCells } from './walk-route.ts';
 import type { WalkRouteExecution } from './walk-route.ts';
 import { fail, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
@@ -439,6 +447,36 @@ export const walkTo: Skill<WalkToArgs> = {
     const tick = ctx.adapter.walkTick?.();
     if (!body || !tick) return fail('ERROR', '当前适配器没有 walk 身体桥（walkBody/walkTick）', base);
 
+    // 搜索前的显式驻留：只按真实脚位与固定半径准备区的实际格计算 Sections；
+    // 不按目标点预取。prepare 失败如实返回，不替换目的地或扩大搜索范围。
+    const searchScope = { worldId: entry.worldId, dim: entry.dim, sessionId: entry.sessionId };
+    // eager 保持原有同步准备路径；manual 才在任何读取前 await 真实 prepare。
+    let prepResidency: RouteResidency | null = { status: 'ready', lease: null, sections: [], noRecord: [] };
+    if (spatial.session.voxelLoading === 'manual') {
+      prepResidency = await acquireRouteResidency(
+        spatial,
+        [
+          ...sectionsForCells(searchScope, preparationCells(entry.pos)),
+          ...routeDependencySections(map, searchScope, entry.pos, []),
+        ],
+        { signal: ctx.signal, deadline: effectiveDeadline },
+      );
+      if (prepResidency.status !== 'ready') {
+        const failed = prepResidency;
+        prepResidency = null;
+        const summary = `walk_to 空间依赖未准备好：${failed.message}`;
+        const data = { ...base, stage: 'residency', ...residencyFacts(failed) };
+        if (failed.reason === 'cancelled') {
+          if (ctx.signal.aborted || spatial.closing || spatial.paused) {
+            return { status: 'cancelled', summary, data: { ...data, cancelBy: 'lifecycle' } };
+          }
+          return fail('TIMEOUT', summary, data);
+        }
+        return fail('ERROR', summary, data);
+      }
+    }
+
+    try {
     const search = new WalkRouteSearch(map, { now: Date.now, ...SEARCH_LIMITS });
     let snapshot: WalkSearchSnapshot | null = null;
     let searchToken: number | null = null;
@@ -507,8 +545,10 @@ export const walkTo: Skill<WalkToArgs> = {
           startFeet = { x: startState.pos.x, y: startState.pos.y, z: startState.pos.z };
           // 搜索期间的真实报告→invalidate，生命周期→cancel；token 仅覆盖本次搜索。
           searchToken = spatial.attach({
+            // 报告在同一同步观测/应用路径内失效受影响依赖；搜索本身不做磁盘 I/O。
             receiver: (report) => { search.invalidate(report); },
             cancel: () => { search.cancel('shared spatial session interrupted the active search'); },
+            protectedSections: prepResidency.lease?.keys ?? prepResidency.sections,
           });
           snapshot = search.start({
             worldId: startState.worldId, dim: startState.dim, sessionId: startState.sessionId, mode: 'walk',
@@ -647,62 +687,89 @@ export const walkTo: Skill<WalkToArgs> = {
       });
     }
 
-    // 候选交给既有执行后端：内部 exact 只指候选末点，原 to/arrival 完整保留在 data。
-    const request = {
-      worldId: snapshot.worldId, dim: snapshot.dim, sessionId: snapshot.sessionId, mode: 'walk' as const,
-      body: { feet: { ...candidate.points[0]! }, width: 0.6, height: 1.8, pose: 'standing' as const },
-      points: candidate.points, arrival: { kind: 'exact' as const },
-      bodyArrival: GROUNDED_ARRIVAL_DEFAULTS, shapeProvider: walkCollisionProvider,
-      deadlineMs: effectiveDeadline, timeoutMs: 4000,
-    };
-    const execution = await executeWalkRoute(ctx, spatial, { map, body, tick, request, deadlineMs: effectiveDeadline });
-    const nav = execution.nav;
-
-    // 父取消但执行器以其它终态返回时，仍按取消返回并保留实际 nav/partial。
-    // 位置只投影执行器已有的 lastPosition，不重读新任务的 adapter state。
-    if (ctx.signal.aborted && nav.outcome !== 'CANCELLED') {
-      return {
-        status: 'cancelled',
-        summary: nav.message,
-        data: {
-          ...base, stage: 'CANCELLED', candidate, search: snapshot, nav, ...historyFields(execution),
-          ...(nav.lastPosition !== undefined ? { position: { ...nav.lastPosition } } : {}),
-        },
+    // 搜索已结束：释放弃搜索期的保护，再按真实执行起点与候选路线实际会读的
+    // Sections 重新 prepare；不沿用目标点或搜索范围作为执行依赖。
+    releaseRouteResidency(spatial, prepResidency);
+    prepResidency = null;
+    const actualStart = { x: preMove.pos.x, y: preMove.pos.y, z: preMove.pos.z };
+    const routeResidency = await acquireRouteResidency(
+      spatial,
+      routeDependencySections(map, snapshot, actualStart, candidate.points),
+      { signal: ctx.signal, deadline: effectiveDeadline },
+    );
+    if (routeResidency.status !== 'ready') {
+      return fail('ERROR', `walk_to 执行依赖未准备好：${routeResidency.message}`, {
+        ...base, stage: 'residency', candidate, search: snapshot,
+        position: { ...actualStart }, ...residencyFacts(routeResidency),
+      });
+    }
+    try {
+      // 候选交给既有执行后端：内部 exact 只指候选末点，原 to/arrival 完整保留在 data。
+      const request = {
+        worldId: snapshot.worldId, dim: snapshot.dim, sessionId: snapshot.sessionId, mode: 'walk' as const,
+        body: { feet: { ...candidate.points[0]! }, width: 0.6, height: 1.8, pose: 'standing' as const },
+        points: candidate.points, arrival: { kind: 'exact' as const },
+        bodyArrival: GROUNDED_ARRIVAL_DEFAULTS, shapeProvider: walkCollisionProvider,
+        deadlineMs: effectiveDeadline, timeoutMs: 4000,
       };
-    }
-    // near 只认原目标与原半径：候选末点到达不等于原 near 条件满足。
-    if (nav.outcome === 'ARRIVED' && args.arrival.kind === 'near') {
-      const actualDistance = distance3d(nav.lastPosition, args.to);
-      if (actualDistance > args.arrival.radius) {
-        const detail = `候选末点已到达，但原 near 条件未满足：实测距原目标 ${actualDistance.toFixed(3)} > 半径 ${args.arrival.radius}`;
-        // data.nav 表示原委托的真实结果：原 near 条件未确认，不是候选 ARRIVED。
-        // 原执行的 lastPosition/lastObservation/trace 原样保留；候选 ARRIVED 单独放在 executionNav。
-        const delegationNav: NavResult = {
-          outcome: 'FAILED',
-          message: detail,
-          confirmed: false,
-          trace: nav.trace,
-          lastPosition: { ...nav.lastPosition },
-          lastObservation: { ...nav.lastObservation },
-          // 内存写入状态只透传真实 pending/failed 语义，不改变原委托的身体结果。
-          ...(nav.memoryWrite !== undefined ? { memoryWrite: nav.memoryWrite } : {}),
-          problem: { kind: 'unconfirmed_arrival', expected: { ...args.to } },
+      const execution = await executeWalkRoute(ctx, spatial, {
+        map, body, tick, request, deadlineMs: effectiveDeadline,
+        protectedSections: routeResidency.lease?.keys ?? routeResidency.sections,
+      });
+      const nav = execution.nav;
+
+      // 父取消但执行器以其它终态返回时，仍按取消返回并保留实际 nav/partial。
+      // 位置只投影执行器已有的 lastPosition，不重读新任务的 adapter state。
+      if (ctx.signal.aborted && nav.outcome !== 'CANCELLED') {
+        return {
+          status: 'cancelled',
+          summary: nav.message,
+          data: {
+            ...base, stage: 'CANCELLED', candidate, search: snapshot, nav, ...historyFields(execution),
+            ...(nav.lastPosition !== undefined ? { position: { ...nav.lastPosition } } : {}),
+          },
         };
-        return fail('EFFECT_NOT_CONFIRMED', detail, {
-          ...base,
-          stage: 'unconfirmed_arrival',
-          confirmed: false,
-          position: { ...nav.lastPosition },
-          candidate,
-          search: snapshot,
-          nav: delegationNav,
-          executionNav: nav,
-          ...historyFields(execution),
-          problem: { kind: 'unconfirmed_arrival', expected: { ...args.to } },
-        });
       }
+      // near 只认原目标与原半径：候选末点到达不等于原 near 条件满足。
+      if (nav.outcome === 'ARRIVED' && args.arrival.kind === 'near') {
+        const actualDistance = distance3d(nav.lastPosition, args.to);
+        if (actualDistance > args.arrival.radius) {
+          const detail = `候选末点已到达，但原 near 条件未满足：实测距原目标 ${actualDistance.toFixed(3)} > 半径 ${args.arrival.radius}`;
+          // data.nav 表示原委托的真实结果：原 near 条件未确认，不是候选 ARRIVED。
+          // 原执行的 lastPosition/lastObservation/trace 原样保留；候选 ARRIVED 单独放在 executionNav。
+          const delegationNav: NavResult = {
+            outcome: 'FAILED',
+            message: detail,
+            confirmed: false,
+            trace: nav.trace,
+            lastPosition: { ...nav.lastPosition },
+            lastObservation: { ...nav.lastObservation },
+            // 内存写入状态只透传真实 pending/failed 语义，不改变原委托的身体结果。
+            ...(nav.memoryWrite !== undefined ? { memoryWrite: nav.memoryWrite } : {}),
+            problem: { kind: 'unconfirmed_arrival', expected: { ...args.to } },
+          };
+          return fail('EFFECT_NOT_CONFIRMED', detail, {
+            ...base,
+            stage: 'unconfirmed_arrival',
+            confirmed: false,
+            position: { ...nav.lastPosition },
+            candidate,
+            search: snapshot,
+            nav: delegationNav,
+            executionNav: nav,
+            ...historyFields(execution),
+            problem: { kind: 'unconfirmed_arrival', expected: { ...args.to } },
+          });
+        }
+      }
+      return executionResult(execution, candidate, snapshot, base);
+    } finally {
+      releaseRouteResidency(spatial, routeResidency);
     }
-    return executionResult(execution, candidate, snapshot, base);
+    } finally {
+      // 搜索期/零边确认期的 lease 只在这里释放一次；执行 lease 已单独结算。
+      releaseRouteResidency(spatial, prepResidency);
+    }
   },
 };
 
@@ -799,6 +866,31 @@ export const walkKnownRoute: Skill<WalkKnownRouteArgs> = {
     const prepEligible = fragment !== null && fragment.worldId === entry.worldId && fragment.dim === entry.dim
       && points.length >= 2 && points.length <= MAX_KNOWN_POINTS;
 
+    // 依赖 Sections 只按真实身体起点与所选历史路线各段扫掠计算；prepare 在读取
+    // 地图/执行之前完成。全为 no_record 时不加载也不否决，留给后续观测如实报告。
+    const knownScope = { worldId: entry.worldId, dim: entry.dim, sessionId: entry.sessionId };
+    // eager 保持原有同步准备路径；manual 才在任何读取前 await 真实 prepare。
+    let knownResidency: RouteResidency = { status: 'ready', lease: null, sections: [], noRecord: [] };
+    if (spatial.session.voxelLoading === 'manual') {
+      knownResidency = await acquireRouteResidency(
+        spatial,
+        routeDependencySections(map, knownScope, entry.pos, points),
+        { signal: ctx.signal, deadline: effectiveDeadline },
+      );
+      if (knownResidency.status !== 'ready') {
+        const summary = `walk_known_route 空间依赖未准备好：${knownResidency.message}`;
+        const data = { ...baseWithTarget, stage: 'residency', ...residencyFacts(knownResidency) };
+        if (knownResidency.reason === 'cancelled') {
+          if (ctx.signal.aborted || spatial.closing || spatial.paused) {
+            return { status: 'cancelled', summary, data: { ...data, cancelBy: 'lifecycle' } };
+          }
+          return fail('TIMEOUT', summary, data);
+        }
+        return fail('ERROR', summary, data);
+      }
+    }
+
+    try {
     ctx.setStationaryWait?.(true);
     try {
       if (prepEligible) {
@@ -890,6 +982,7 @@ export const walkKnownRoute: Skill<WalkKnownRouteArgs> = {
     };
     const execution = await executeWalkRoute(ctx, spatial, {
       map, body, tick, request, deadlineMs: effectiveDeadline, starter,
+      protectedSections: knownResidency.lease?.keys ?? knownResidency.sections,
     });
     const nav = execution.nav;
     const knownStart = startHolder.value;
@@ -925,5 +1018,9 @@ export const walkKnownRoute: Skill<WalkKnownRouteArgs> = {
     if (nav.outcome === 'TIMEOUT') return fail('TIMEOUT', nav.message, data);
     if (nav.outcome === 'BLOCKED' || nav.outcome === 'NO_PATH') return fail('PATH_NOT_FOUND', nav.message, data);
     return fail('ERROR', nav.message, data);
+    } finally {
+      // 成功、取消、期限、异常与关停都精确释放本次 lease 一次。
+      releaseRouteResidency(spatial, knownResidency);
+    }
   },
 };
