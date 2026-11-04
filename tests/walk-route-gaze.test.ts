@@ -33,21 +33,39 @@ function scene() {
 const supportAhead = { x: 1, y: -1, z: 0 }; // 前方路径支撑
 const supportUnder = { x: 0, y: -1, z: 0 }; // 同列脚下支撑
 
-test('WalkMoveExecutor.move 每段恰好一次低头朝向，且保持目标 yaw', async () => {
+test('WalkMoveExecutor.move 每段恰好一次低头朝向，且保持目标 yaw，并使真实 Vision 看到支撑', async () => {
+  const { adapter, vision } = scene();
   const looks: { yaw: number; pitch: number }[] = [];
   const entity = { position: { x: 0, y: 0, z: 0 }, velocity: { x: 0, y: 0, z: 0 }, onGround: true, isInWater: false };
   const body = {
     setControlState() {},
     clearControlStates() {},
-    look(yaw: number, pitch: number) { looks.push({ yaw, pitch }); },
+    // 身体桥的 look 真正更新实际适配器朝向：真实 Vision 读到的是执行器实际执行的转头。
+    look(yaw: number, pitch: number) {
+      looks.push({ yaw, pitch });
+      adapter.yaw = yaw;
+      adapter.pitch = pitch;
+    },
     entity,
   };
-  const executor = new WalkMoveExecutor(body, () => Promise.resolve(entity), new AbortController().signal, () => 0);
+  // 执行前水平朝向（scene 默认 pitch=0）看不到支撑：证明是执行器执行的转头让支撑进入视锥。
+  assert.deepEqual(vision.observeBlocks([supportAhead]).map((b) => b.name), [], '执行前水平朝向看不到前方支撑');
+  // 首个物理帧交付后立即中止父任务，避免无关的 400 帧空转；以真实的 cancelled 收尾，不伪造成功。
+  const parent = new AbortController();
+  const tick = () => {
+    parent.abort();
+    return Promise.resolve(entity);
+  };
+  const executor = new WalkMoveExecutor(body, tick, parent.signal, () => 0);
   const request: ExecutableMove = { executionId: 'e1', worldId: 'w', dim: 'd', sessionId: 's', from: { x: 0, y: 0, z: 0 }, to: { x: 1, y: 0, z: 0 }, deadlineMs: 1000, timeoutMs: 100, signal: new AbortController().signal };
-  await executor.move(request);
+  const result = await executor.move(request);
+  assert.equal(result.failure?.kind, 'cancelled', '父任务中止应返回 cancelled，而非伪造到达');
   assert.equal(looks.length, 1, '每段应恰好一次转头');
   assert.equal(looks[0]!.pitch, WALK_GAZE_PITCH, '移动朝向必须向下看支撑，而不是水平 pitch=0');
   assert.ok(Math.abs(looks[0]!.yaw - Math.atan2(-1, 0)) < 1e-9, '目标 yaw 不得被俯仰改动');
+  // 执行器实际执行的向下转头，应让真实 Vision 真正看到前方支撑。
+  const seen = vision.observeBlocks([supportAhead]).map((b) => b.name);
+  assert.ok(seen.includes('grass_block'), `执行器执行的低头应让真实 Vision 看到前方支撑：${JSON.stringify(seen)}`);
 });
 
 test('水平朝向看不到路线支撑，向下移动朝向能看到；背后的目标保持未知', () => {

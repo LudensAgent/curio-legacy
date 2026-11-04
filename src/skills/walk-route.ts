@@ -86,7 +86,7 @@ function navToResult(nav: NavResult): SkillResult {
 
 export const walkRoute: Skill<WalkRouteArgs> = {
   name: 'walk_route',
-  description: '走一条显式给定的同高、无施工短路线（普通干燥整块、沿 X/Z）。由你提供点列，代码稳定执行到每个点；出发前会有限次转头（≤12 次）观察路线支撑/身体/净空格，移动中每段会低头看向该段路径的支撑格，途中只依据可见格更新，不消耗任何资源',
+  description: '走一条显式给定的同高、无施工短路线（普通干燥整块、沿 X/Z）。由你提供点列，代码稳定执行到每个点；出发前会有限次转头（≤12 次）观察路线支撑/身体/净空格，移动中每段会低头看向该段路径的支撑格，途中只依据可见格更新；转头观察不使用任何物品',
   argsDoc: '{"points":[[x,y,z],...]}（2~32 个点，脚高 y 相同，相邻沿 X/Z 一格）',
   timeoutMs: 30000,
   movement: true,
