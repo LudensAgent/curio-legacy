@@ -1185,16 +1185,28 @@ test('quitClient：真实断线事件 → ended=true 且移除监听器、调用
   tracker.dispose();
 });
 
-test('quitClient：已观测到断线（connection-lifetime）→ 立即 ended=true 不等过去事件', async () => {
+test('quitClient：已观测到断线（connection-lifetime）→ 快返仍调用 quit 撤销计划重连', async () => {
   const em = new FakeEmitter();
   const tracker = new ConnectionTracker(em as never);
   em.emit('disconnected', 'earlier'); // 已发生过的断线
-  let quitCalled = false;
-  const adapter = { bot: { quit: () => {} }, quit: () => { quitCalled = true; }, on: em.on.bind(em), removeListener: em.removeListener.bind(em) };
+  let quitCalled = 0;
+  const adapter = { bot: { quit: () => {} }, quit: () => { quitCalled++; }, on: em.on.bind(em), removeListener: em.removeListener.bind(em) };
   const r = await quitClient(adapter as never, tracker, 5000);
   assert.equal(r.ended, true);
   assert.equal(r.reason, 'already-observed end');
-  assert.equal(quitCalled, false, '已结束则不应再 quit');
+  assert.equal(quitCalled, 1, 'alreadyEnded 快返也必须调用 adapter.quit，取消自动重连计划');
+  tracker.dispose();
+});
+
+test('quitClient：无 bot 快返仍调用 quit；不把 connected=false 当作已关闭', async () => {
+  const em = new FakeEmitter();
+  const tracker = new ConnectionTracker(em as never);
+  let quitCalled = 0;
+  const adapter = { bot: null, quit: () => { quitCalled++; }, on: em.on.bind(em), removeListener: em.removeListener.bind(em) };
+  const r = await quitClient(adapter as never, tracker, 5000);
+  assert.equal(r.ended, true);
+  assert.equal(r.reason, 'no bot');
+  assert.equal(quitCalled, 1, 'no bot 快返也必须调用 adapter.quit，撤销已排定的重连');
   tracker.dispose();
 });
 
@@ -2145,6 +2157,140 @@ test('pickSpatialWitness：只选已写入同一 svc.voxel 且 name/properties/t
     observations: [{ ...observation, stateComplete: true }], unobserved: [], reportId: 1, report: incompleteReport,
   });
   assert.equal(pickSpatialWitness([{ visionCalls: [vision], mapBatches: [{ ...incompleteStored, mapIsSessionVoxel: true }] }], incompleteVoxel), null);
+});
+
+test('真实 SQLite 重连边界（离线注入 typed payload，非联机）：旧 loop OPEN 失效、旧 payload 被拒且 STALE、仅新 session 请求格 FRESH，witness 不混 epoch', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'walk-reconnect-'));
+  const dbPath = path.join(dir, 'spatial.sqlite');
+  const world = 'walk-reconnect-world';
+  const dim = 'overworld';
+  let nowValue = 1000;
+  const now = () => nowValue;
+  const exec = new ExecutionDiagnostics(new EventSeq(), () => null, now, { frame: () => 0, readKeys: () => ({ ...emptyKeys }) });
+  exec.wrap();
+  let svc: SharedSpatialSession | null = null;
+  let shutdownResult: ShutdownResult | null = null;
+  let shutdownAwaitError: unknown = null;
+  let primaryFailure: unknown = null;
+  try {
+    svc = await SharedSpatialSession.open({ worldId: world, databasePath: dbPath, timeoutMs: 5000, now });
+    svc.beginSession({ worldId: world, dim, sessionId: 's1' });
+    const map = svc.session.voxel;
+    const loop = new WalkRouteExecutor(map, {
+      move: async () => ({ failure: { kind: 'cancelled' } as const }),
+      stop: () => {},
+    }, { now });
+    loop.start({
+      worldId: world, dim, sessionId: 's1', mode: 'walk',
+      body: { feet: { x: 0.5, y: 0, z: 0.5 }, width: 0.6, height: 1.8, pose: 'standing' },
+      points: [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }],
+      arrival: { kind: 'exact' }, bodyArrival: GROUNDED_ARRIVAL_DEFAULTS, shapeProvider: walkCollisionProvider,
+      deadlineMs: 5000, timeoutMs: 1000,
+    });
+    svc.attach({
+      receiver: (report) => loop.observe(report, 64),
+      cancel: () => loop.cancel('lifecycle', 'session reset'),
+    });
+    let observationId = 0;
+    const observation = (x: number, y: number, z: number, name: string, sessionId = 's1', observedAt = 1000) => ({
+      worldId: world, dimension: dim, sessionId, pos: { x, y, z },
+      name, properties: {}, stateComplete: true,
+      observedAt, source: 'vision' as const, observationId: ++observationId,
+    });
+    const oldSupport = observation(1, -1, 0, 'minecraft:stone');
+    const oldOther = observation(0, -1, 0, 'minecraft:stone');
+    svc.observe([
+      oldOther, oldSupport,
+      observation(0, 0, 0, 'minecraft:air'), observation(1, 0, 0, 'minecraft:air'),
+      observation(0, 1, 0, 'minecraft:air'), observation(1, 1, 0, 'minecraft:air'),
+    ]);
+    const before = loop.status();
+    assert.ok(before);
+    const stepBefore = before.route.steps[0];
+    assert.equal(stepBefore?.kind === 'verified' ? stepBefore.result.status : null, 'OPEN');
+    assert.equal(cellEvidenceSnapshot(map.cellAt(dim, 1, -1, 0)).freshness, 'FRESH');
+
+    // 新 session 经生产 beginSession 准入，旧 session 证据全部 STALE；旧 loop 收到非 Vision 生命周期报告。
+    nowValue = 2000;
+    svc.beginSession({ worldId: world, dim, sessionId: 's2' });
+    const lifecycle = exec.observes[exec.observes.length - 1]!;
+    assert.equal(lifecycle.reportSource, 'unmatched', '生命周期报告不得冒充 Vision/mapBatch');
+    assert.equal(lifecycle.mapBatchMatched, false);
+    const stepAfter = loop.status()?.route.steps[0];
+    assert.equal(stepAfter?.kind === 'verified' && stepAfter.result.status === 'OPEN', false, '旧 OPEN 必须变非 OPEN');
+    const cellBeforeReplay = cellEvidenceSnapshot(map.cellAt(dim, 1, -1, 0));
+    assert.equal(cellBeforeReplay.freshness, 'STALE');
+
+    // 旧 typed payload 原样交给生产服务：旧 session 被拒绝，目标格保持原证据/STALE。
+    const replay = svc.observe([oldSupport]);
+    assert.equal(replay.sections.length, 0, '旧 session payload 必须被生产服务拒绝');
+    const cellAfterReplay = cellEvidenceSnapshot(map.cellAt(dim, 1, -1, 0));
+    assert.equal(cellAfterReplay.freshness, 'STALE');
+    assert.deepEqual(cellAfterReplay, cellBeforeReplay);
+
+    // 只请求新 session 下的单格，另一旧格不请求：前者 FRESH，后者仍 STALE。
+    const newSupport = { ...oldSupport, sessionId: 's2', observedAt: 2000, observationId: 77 };
+    svc.observe([newSupport]);
+    const freshCell = cellEvidenceSnapshot(map.cellAt(dim, 1, -1, 0));
+    assert.equal(freshCell.freshness, 'FRESH');
+    assert.equal(freshCell.sequence, 77);
+    assert.equal(freshCell.sessionId, 's2');
+    const untouched = cellEvidenceSnapshot(map.cellAt(dim, 0, -1, 0));
+    assert.equal(untouched.freshness, 'STALE');
+    assert.equal(untouched.sequence, oldOther.observationId);
+    assert.equal(untouched.sessionId, 's1');
+
+    const oldBatch = exec.mapBatches[0]!;
+    const newBatch = exec.mapBatches[exec.mapBatches.length - 1]!;
+    assert.notEqual(oldBatch.reportId, newBatch.reportId);
+    const oldSource = {
+      source: 'scenario', epoch: null,
+      visionCalls: [{
+        seq: oldBatch.seq - 1, ts: 1000, frame: 0, visionId: 1, positions: [{ ...oldSupport.pos }], eye: null,
+        payload: [oldSupport], output: [],
+      } as VisionCallRecord],
+      mapBatches: [{ ...mapBatchForEvidence(oldBatch), mapIsSessionVoxel: true }],
+    };
+    const reconnectSource = {
+      source: 'reconnect', epoch: 'reconnect-s2',
+      visionCalls: [{
+        seq: newBatch.seq - 1, ts: 2000, frame: 0, visionId: 2, positions: [{ ...newSupport.pos }], eye: null,
+        payload: [newSupport], output: [],
+      } as VisionCallRecord],
+      mapBatches: [{ ...mapBatchForEvidence(newBatch), mapIsSessionVoxel: true }],
+    };
+    assert.equal(pickSpatialWitness([oldSource], map), null, '旧 STALE 前缀不得作为最后合法事实');
+    const picked = pickSpatialWitness([oldSource, reconnectSource], map);
+    assert.ok(picked);
+    assert.equal(picked.source, 'reconnect');
+    assert.equal(picked.epoch, 'reconnect-s2');
+    assert.equal(picked.block.observationId, 77);
+  } catch (error) {
+    primaryFailure = error;
+    throw error;
+  } finally {
+    exec.unwrap();
+    if (svc !== null && shutdownResult === null) {
+      try { shutdownResult = await svc.shutdown(); } catch (error) { shutdownAwaitError = error; }
+    }
+    const shutdown = svc === null ? null : spatialShutdownRecord(shutdownResult, null, shutdownAwaitError, world);
+    const shutdownOk = shutdown !== null && shutdown.ok;
+    if (shutdownOk) {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch (error) {
+        const message = `关闭已确认但删除 fixture 失败：${dir}（${String(error)}）`;
+        if (primaryFailure === null) throw error;
+        t.diagnostic(message);
+      }
+    } else {
+      const detail = `shutdown=${JSON.stringify(shutdown)}`
+        + ` awaitError=${shutdownAwaitError instanceof Error ? shutdownAwaitError.message : String(shutdownAwaitError)}`;
+      const message = `未确认关闭，保留 fixture：${dir}（${detail}）`;
+      if (primaryFailure === null) throw new Error(message, { cause: shutdownAwaitError });
+      t.diagnostic(message);
+    }
+  }
 });
 
 test('spatialShutdownRecord：真实 SQLite 会话正常关停由最终 checkpoint/close 证据确认', async (t) => {
