@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import type { GameAdapter } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
+import type { SharedSpatialSession } from '../spatial/shared-session.ts';
 import { SKILLS } from '../skills/index.ts';
 import { isSkillDisabled } from '../skills/disabled.ts';
 import { runSkill, validateSkill, type FailureCode, type Senses, type SkillResult } from '../skills/types.ts';
@@ -73,19 +74,34 @@ export class Arbiter extends EventEmitter {
   private version = 0;
   blockedActions = 0;
   private pausedFlag = false;
+  private disposeLifecycle: (() => void) | null = null;
 
   get paused() { return this.pausedFlag; }
 
   setPaused(paused: boolean) {
     this.pausedFlag = paused;
+    // 暂停/恢复边界即使在零观测间隔也必须进入共享空间记忆；不依赖 Mind 事件或轮询。
+    this.spatial?.setPaused(paused);
     if (paused) {
       this.cancel('paused');
       this.adapter.stopAll();
     }
   }
 
-  constructor(private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private senses: Senses) {
+  constructor(private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private senses: Senses, private spatial?: SharedSpatialSession) {
     super();
+    if (this.spatial) {
+      // 真实会话身份变化只通知共享服务中断；此时绝不回调 adapter.state()（换维会再次触发 newSession）。
+      const onSessionReset = () => { this.spatial!.interrupt(); };
+      this.adapter.on('session_reset', onSessionReset);
+      this.disposeLifecycle = () => { this.adapter.off?.('session_reset', onSessionReset); };
+    }
+  }
+
+  /** Host/test teardown: remove only the lifecycle listener; never close the shared session here. */
+  dispose(): void {
+    this.disposeLifecycle?.();
+    this.disposeLifecycle = null;
   }
 
   get planVersion() {
@@ -183,6 +199,8 @@ export class Arbiter extends EventEmitter {
    */
   start(step: Step, source: TaskSource, meta: { planId?: string; gentle?: boolean; climb?: { height: number; spent: number; startY: number } } = {}): TaskInfo | { error: string } {
     if (this.pausedFlag) return { error: 'Agent 已暂停' };
+    // 关闭中的共享服务不再接受新任务；不自动重试或退回独立地图。
+    if (this.spatial?.closing) return { error: '共享空间会话正在关闭，拒绝启动新任务' };
     const v = this.validate(step);
     if (!v.ok) {
       this.bus.publish('task_rejected', 'P1', `${step.skill} 参数无效：${v.error}`, { step, source });
@@ -235,6 +253,7 @@ export class Arbiter extends EventEmitter {
       },
       setStationaryWait: (waiting: boolean) => { task.stationaryWait = waiting; },
       ...(meta.climb ? { climb: meta.climb } : {}),
+      ...(this.spatial ? { spatial: this.spatial } : {}),
     };
 
     runSkill(ctx, skill, v.args as { make?: boolean })

@@ -312,6 +312,8 @@ export interface DriveResult extends ActionResult { moved: number; ms: number; s
 
 export interface GameAdapter {
   on(event: AdapterEvent, cb: (...args: any[]) => void): this;
+  /** Standard listener removal for host-owned lifecycle bindings; optional for minimal adapters. */
+  off?(event: AdapterEvent, cb: (...args: any[]) => void): this;
 
   state(): AgentState;
   inventorySlots?(): InventorySlot[];
@@ -456,4 +458,6 @@ export interface GameAdapter {
  */
 export type AdapterEvent = 'spawn' | 'death' | 'respawn' | 'hurt' | 'disconnected' | 'kicked' | 'chat' | 'game_message'
   /** 捡起了自己刚扔掉的东西：{ item, count } */
-  | 'recollected';
+  | 'recollected'
+  /** The adapter's real sessionId changed (connect/spawn/death/respawn/end/dimension). No payload. */
+  | 'session_reset';

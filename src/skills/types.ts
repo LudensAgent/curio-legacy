@@ -1,6 +1,7 @@
 import type { BlockHit, BlockObservation, EntityInfo, GameAdapter, Vec3Like } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
+import type { SharedSpatialSession } from '../spatial/shared-session.ts';
 import type { RecoveryContext } from './recovery.ts';
 
 export type FailureCode =
@@ -93,6 +94,8 @@ export interface SkillCtx {
   recovery?: RecoveryContext;
   /** 当前逻辑动作的共享额度账本（如 climb_up 的原高度、逻辑起点与已确认爬升），由同一执行实例的所有调用共享。 */
   climb?: { height: number; spent: number; startY: number };
+  /** 宿主级共享空间会话；walk_route 等共享记忆消费者必须显式使用，缺失时不得自建地图。 */
+  spatial?: SharedSpatialSession;
   /** 上报进度 0..1，供预规划和控制台使用 */
   progress(p: number, note?: string): void;
   /** Bounded stationary work suspends only the movement stall check, including nested calls. */

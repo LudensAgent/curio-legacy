@@ -262,10 +262,21 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   private newSession() {
     this.dragonDeath = null;
     this.spawned = false;
+    const previousSessionId = this.sessionId;
     this.sessionId = shortId('session_');
     this.observationId = 0;
     // 跨维度传送会等维度真正切过去再自己验收；这里不 stopAll，否则把正在等落地的动作掐成「断线」
     if (!this.inPortalTransition) this.stopAll();
+    // 真实会话身份变化是共享空间记忆的唯一生命周期信号；载荷里没有状态，消费者不能回调 state()。
+    // 监听器异常只记诊断，不能中断 newSession/end 的后续处理。
+    if (this.sessionId !== previousSessionId) {
+      try {
+        this.emit('session_reset');
+      } catch (error) {
+        const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+        this.bus.publish('adapter_event_error', 'P1', `session_reset listener failed: ${detail}`);
+      }
+    }
   }
 
   private currentDimension() {

@@ -214,6 +214,15 @@ function shapeHitDistance(shapes: NonNullable<Optics['shapes']>, eye: Eye, dx: n
   return Number.isFinite(nearest) ? nearest : null;
 }
 
+/**
+ * 共享空间记忆的窄接收口：只接受宿主可信作用域的开始与真实合法观测。
+ * 作用域必须来自 adapter.state()（不是观测载荷）；调用方在观测为空时不派发。
+ */
+export interface SpatialObservationSink {
+  beginSession(scope: { worldId: string; dim: string; sessionId: string }): unknown;
+  observe(observations: readonly BlockObservation[]): unknown;
+}
+
 export class Vision {
   frame: VisionFrame | null = null;
   seen: SeenEntity[] = [];
@@ -236,7 +245,10 @@ export class Vision {
   private session = '';
   private scopes = new Map<string, { known: Map<string, Known>; perName: Map<string, number> }>();
 
-  constructor(private adapter: GameAdapter, public cfg: VisionConfig = DEFAULT_VISION) {}
+  /** 上一份已可信开始的作用域（world/dim/session）；未就绪时清空，避免用旧边界接纳新证据。 */
+  private spatialScope: string | null = null;
+
+  constructor(private adapter: GameAdapter, public cfg: VisionConfig = DEFAULT_VISION, private spatial?: SpatialObservationSink) {}
 
   private syncScope() {
     const state = this.adapter.state();
@@ -551,7 +563,20 @@ export class Vision {
   /** Inspect a bounded set of actual sight lines, never cached memory behind a wall. */
   observeBlocks(positions: Vec3Like[]): BlockObservation[] {
     const state = this.syncScope(), eye = this.adapter.eye();
-    if (!state.connected || !state.alive || !state.observationReady || !eye) return [];
+    if (!state.connected || !state.alive || !state.observationReady || !eye) {
+      // 未就绪即中断边界：下一次可信 ready 必须重新 beginSession 才能接纳证据。
+      if (this.spatial !== undefined) this.spatialScope = null;
+      return [];
+    }
+    if (this.spatial !== undefined) {
+      if (state.dim === 'unknown') return [];
+      const scopeKey = `${state.worldId}|${state.dim}|${state.sessionId}`;
+      // 只在真实 ready 作用域变化时开始新会话；空批次绝不 begin/dispatch。
+      if (scopeKey !== this.spatialScope) {
+        this.spatial.beginSession({ worldId: state.worldId, dim: state.dim, sessionId: state.sessionId });
+        this.spatialScope = scopeKey;
+      }
+    }
     const now = Date.now(), seen = new Set<string>(), out: BlockObservation[] = [];
     const hFov = this.cfg.hFov * Math.PI / 180, vFov = this.cfg.vFov * Math.PI / 180;
     for (const pos of positions.slice(0, 32)) {
@@ -597,6 +622,8 @@ export class Vision {
       out.push({ name, properties: { ...block?.properties }, stateComplete: block != null, pos: { ...pos }, worldId: state.worldId, sessionId: state.sessionId,
         dimension: state.dim, observationId: state.observationId, observedAt: now, source: 'vision' });
     }
+    // 合法视锥结果是共享地图的唯一写入源；空批次不产生任何写入/生命周期报告。
+    if (out.length > 0) this.spatial?.observe(out);
     return out;
   }
 

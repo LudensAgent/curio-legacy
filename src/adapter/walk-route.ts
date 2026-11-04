@@ -286,9 +286,17 @@ export class WalkMoveExecutor implements MoveExecutor {
   }
 }
 
+/** 宿主的窄活动句柄：只暴露报告注入与取消，供共享会话在 loop.start 边界附着。 */
+export interface ActiveWalkLoop {
+  observe(report: ChangeReport, budget: number): void;
+  cancel(by: 'lifecycle', reason: string): void;
+}
+
 /**
  * 驱动一个已选短路线，直到终态。MoveExecutor 在 advance 里自驱单段，宿主负责采样、
  * 序号与生命周期，并在到达确认前先处理世界观测。父任务取消经 `signal` 贯通到库取消。
+ * `bindActive` 在 loop.start 后立即调用，返回的解除函数只在 finally 里撤销本次附着；
+ * 共享会话的关闭/取消不属于这里。
  */
 export async function runWalkRoute(opts: {
   map: VoxelMap;
@@ -300,6 +308,7 @@ export async function runWalkRoute(opts: {
   observe?: () => ChangeReport | null;
   deadlineMs?: number;
   now?: () => number;
+  bindActive?: (loop: ActiveWalkLoop) => (() => void) | void;
 }): Promise<NavResult> {
   const now = opts.now ?? Date.now;
   const deadline = opts.deadlineMs ?? opts.request.deadlineMs;
@@ -325,8 +334,13 @@ export async function runWalkRoute(opts: {
     return true;
   };
 
+  let unbindActive: (() => void) | null = null;
   try {
     loop.start({ ...opts.request, deadlineMs: deadline });
+    unbindActive = opts.bindActive?.({
+      observe: (report, budget) => { loop.observe(report, budget); },
+      cancel: (by, reason) => { loop.cancel(by, reason); },
+    }) ?? null;
     const executionId = loop.status()!.delegationId;
 
     // 统一帧处理顺序：本轮合法观测先进入地图并复验，再让身体样本确认到达。
@@ -397,6 +411,7 @@ export async function runWalkRoute(opts: {
     }
     return result;
   } finally {
+    unbindActive?.();
     opts.signal.removeEventListener('abort', onParentAbort);
     // 异常路径也不得把活动移动的控制留在身体上；正常返回时 result 已非 null，这里为空操作。
     const status = loop.status();
