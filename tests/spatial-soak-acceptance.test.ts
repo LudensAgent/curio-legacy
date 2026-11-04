@@ -47,6 +47,7 @@ import {
   parseCliArgs,
   prepareLegStart,
   shutdownFacts,
+  smokePassed,
   soakWalkRequest,
   startSpatialSoakFoundation,
   workingSetStatsSignature,
@@ -281,9 +282,17 @@ test('leg trace correlation uses dispatch order + accepted sample identity witho
   const ok = classifyLegTrace(nav, taskId, samples, moves);
   assert.equal(ok.ok, true, ok.problems.join(', '));
 
-  // 额外派发没有 trace 点也允许；只有已确认 trace 点必须按派发顺序对应。
+  // 派发必须与确认 trace 点一一对应：多出的派发没有 trace/样本证据，必须失败。
   const withExtra = [...moves, legMove(taskId, `${delegation}-step-2`, c, a, 3_000, 48_000)];
-  assert.equal(classifyLegTrace(nav, taskId, samples, withExtra).ok, true);
+  const extraDispatch = classifyLegTrace(nav, taskId, samples, withExtra);
+  assert.equal(extraDispatch.ok, false);
+  assert.match(extraDispatch.problems.join(' '), /confirmed trace has 2 points but 3 ExecutableMove dispatches/);
+
+  // 反方向（trace 多于派发）同样失败。
+  const longTrace = { confirmed: true, trace: [...nav.trace, { pos: a, ts: 3_000 }] };
+  const shortDispatch = classifyLegTrace(longTrace, taskId, samples, [moves[0]!]);
+  assert.equal(shortDispatch.ok, false);
+  assert.match(shortDispatch.problems.join(' '), /confirmed trace has 3 points but 1 ExecutableMove dispatches/);
 
   const wrongPosition = { confirmed: true, trace: [{ pos: a, ts: 1_500 }, { pos: c, ts: 2_500 }] };
   assert.match(classifyLegTrace(wrongPosition, taskId, samples, moves).problems.join(' '), /trace point 0/);
@@ -417,6 +426,28 @@ test('pre-dispatch stable samples and interleaved dispatches are recorded, not r
   );
 });
 
+test('duplicate confirmed trace points require distinct accepted samples', () => {
+  const taskId = 'walk-duplicate-trace';
+  const delegation = 'walk-1';
+  const a = { x: 207.5, y: 64, z: 216.5 };
+  const b = { x: 208.5, y: 64, z: 216.5 };
+  const moves = [
+    legMove(taskId, `${delegation}-step-0`, a, b, 1_000, 46_000),
+    legMove(taskId, `${delegation}-step-1`, a, b, 1_200, 47_000),
+  ];
+  const nav = { confirmed: true, trace: [{ pos: b, ts: 1_500 }, { pos: b, ts: 1_500 }] };
+
+  const oneSample = classifyLegTrace(nav, taskId, [legSample(taskId, delegation, 1, 1_500, b)], moves);
+  assert.equal(oneSample.ok, false);
+  assert.match(oneSample.problems.join(' '), /trace point 1 has no unused accepted same-delegation sample/);
+
+  const twoSamples = classifyLegTrace(nav, taskId, [
+    legSample(taskId, delegation, 1, 1_500, b),
+    legSample(taskId, delegation, 2, 1_500, b),
+  ], moves);
+  assert.equal(twoSamples.ok, true, twoSamples.problems.join(', '));
+});
+
 const cleanShutdown = (overrides: Partial<ShutdownResult> = {}): ShutdownResult => ({
   checkpoint: { checkpointId: 'checkpoint-1' } as never,
   error: null,
@@ -441,6 +472,7 @@ test('shutdown classification fails every real failure surface, not just a throw
   const cases: Array<[string, ShutdownResult]> = [
     ['missing final checkpoint', cleanShutdown({ checkpoint: null })],
     ['checkpoint error', cleanShutdown({ error: new Error('save failed') })],
+    ['cancel error', cleanShutdown({ cancelError: new Error('cancel failed') })],
     ['close threw', cleanShutdown({ closeError: new Error('close failed') })],
     ['missing close result', cleanShutdown({ close: null })],
     ['close incomplete', cleanShutdown({ close: { completed: false, error: null, dirty: true, unconfirmedRequest: true, checkpointId: null } as never })],
@@ -449,6 +481,10 @@ test('shutdown classification fails every real failure surface, not just a throw
   for (const [label, result] of cases) {
     assert.equal(classifyShutdownResult(result).ok, false, `${label} must fail`);
   }
+  assert.match(
+    classifyShutdownResult(cleanShutdown({ cancelError: new Error('cancel failed') })).problems.join(' '),
+    /cancel error: .*cancel failed/,
+  );
   // dirty/unconfirmed 作为事实保留；失败判据仍来自明确的 checkpoint/close 失败面。
   const dirty = classifyShutdownResult(cleanShutdown({ close: { completed: true, error: null, dirty: true, unconfirmedRequest: true, checkpointId: 'c' } as never }));
   assert.equal(dirty.ok, true);
@@ -474,6 +510,25 @@ test('duration classification keeps smoke separate and refuses a short full run'
 
   const nullElapsed = classifyDuration('full', 3_600_000, null);
   assert.equal(nullElapsed.fullPassEligible, false);
+});
+
+test('evidence-capacity overflow deterministically fails the smoke/full pass criteria', () => {
+  const base = {
+    primaryError: false,
+    evidenceFailure: false,
+    cleanupErrors: 0,
+    successfulLegs: 2,
+    directions: ['A->B', 'B->A'],
+    queryVerifiedLegs: 2,
+    savedCheckpointReports: 2,
+    failedCheckpointReports: 0,
+    traceCapacityExceeded: false,
+  };
+  assert.equal(smokePassed(base), true);
+  assert.equal(smokePassed({ ...base, traceCapacityExceeded: true }), false);
+  // 其他既有失败面保持不变。
+  assert.equal(smokePassed({ ...base, cleanupErrors: 1 }), false);
+  assert.equal(smokePassed({ ...base, successfulLegs: 1 }), false);
 });
 
 test('main working-set snapshots keep bounded counts and a resident byte estimate instead of RSS or section keys', () => {
