@@ -636,7 +636,9 @@ export interface W5CellCapture extends CellEvidenceSnapshot {
 }
 
 export interface W5RouteProof {
+  /** 同一次 revealObserve 调用进入前的真实 status().route（不是拆支撑前的旧快照）。 */
   before: RouteStateSnapshot | null;
+  /** 同一次 revealObserve 调用返回后的真实 status().route。 */
   after: RouteStateSnapshot | null;
   totalSteps: number;
   step3Started: boolean;
@@ -774,7 +776,6 @@ export function checkW5HiddenReveal(x: W5ChainInput): { ok: boolean; reason?: st
   if (x.revealObserve.statusBeforeActiveStepIndex !== 2 || x.revealObserve.statusBeforeOutcome !== null) {
     return { ok: false, reason: '回看不在返程 step2 活动段' };
   }
-  if (x.revealObserve.statusAfterOutcome !== null) return { ok: false, reason: '回看在 loop 终态后才被消费' };
   if (x.revealObserve.enterSeq <= x.revealBatch.seq) return { ok: false, reason: '回看 observe 早于真实报告' };
 
   const route = x.routeProof;
@@ -797,12 +798,14 @@ export function checkW5HiddenReveal(x: W5ChainInput): { ok: boolean; reason?: st
   }
   const afterStep3 = route.after.steps[3];
   if (!afterStep3) return { ok: false, reason: '拆支撑后缺少未来 step3 状态' };
-  if (afterStep3.kind === 'verified' && afterStep3.status === 'OPEN') {
+  if (afterStep3.kind !== 'verified') {
+    return { ok: false, reason: '真实 air 报告后未来 step3 尚未重算为 verified' };
+  }
+  if (afterStep3.status === 'OPEN') {
     return { ok: false, reason: '真实 air 报告后未来 step3 仍为 OPEN' };
   }
-  if (route.after.invalidatedCount <= route.before.invalidatedCount) {
-    return { ok: false, reason: 'step3 结论未因真实报告失效重算' };
-  }
+  // invalidatedCount 只统计「当前仍 pending 且曾失效」的步数；预算内全部重算后
+  // 会归零，不是累计失效事件数，因此不参与判定，原字段仍保留在 route 快照中。
 
   const terminal = x.terminal;
   if (!terminal || !terminal.navPresent) return { ok: false, reason: '缺少真实 Nav 终态' };
@@ -3116,9 +3119,8 @@ async function scenarioW5(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   if (revealObserve.statusBefore?.result !== null || revealObserve.statusBefore?.activeStepIndex !== 2) {
     throw new Error('W5 回看不在返程 step2 活动段');
   }
-  if (revealObserve.statusAfter?.result !== null) {
-    throw new Error('W5 回看在 loop 已终态后才被消费，不是生产回看');
-  }
+  // 本次合法 report 可以让 loop 在 observe 内进入 FAILED/BLOCKED；这只要求
+  // before 仍在途，after 的终态由下方真实 Nav/全部键断言另行核对。
 
   const o = await awaitOrTimeout(done, 20_000, 'W5 完成');
   const nav = navFromResult(o.result);
@@ -3129,10 +3131,11 @@ async function scenarioW5(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
     const match = /-step-(\d+)$/.exec(m.executionId);
     return match ? Number(match[1]) : -1;
   }))].sort((a, b) => a - b);
+  const observedBeforeRoute = revealObserve.statusBefore?.route ?? null;
   const routeProof: W5RouteProof = {
-    before: beforeRoute,
+    before: observedBeforeRoute,
     after: revealObserve.statusAfter?.route ?? null,
-    totalSteps: beforeRoute?.stepCount ?? 0,
+    totalSteps: observedBeforeRoute?.stepCount ?? 0,
     step3Started: startedStepIndexes.includes(3),
     moveExecutionIds: moves.map((m) => m.executionId),
     moveCount: moves.length,
@@ -3223,6 +3226,8 @@ async function scenarioW5(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
     cellBefore, cellDuring, cellAfter,
     hidden: { ...hidden, visionSeqs: hiddenCalls.map((c) => c.seq), batchSeqs: hiddenMaps.map((b) => b.seq) },
     returnMove: { seq: returnMove.seq, executionId: returnMove.executionId, from: returnMove.from, to: returnMove.to, ts: returnMove.ts },
+    // 拆除前的旧路线快照仅作原诊断保留；判定用的是同一次 revealObserve 的前后状态。
+    beforeRemovalRoute: beforeRoute,
     routeProof,
     terminal,
     moves: moves.map((m) => ({ seq: m.seq, executionId: m.executionId, from: m.from, to: m.to })),

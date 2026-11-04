@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { GROUNDED_ARRIVAL_DEFAULTS, VoxelMap, WalkRouteExecutor } from 'curio-minecraft-3d-memory';
+import { GROUNDED_ARRIVAL_DEFAULTS, RouteVerifier, VoxelMap, WalkRouteExecutor } from 'curio-minecraft-3d-memory';
 import type { NavResult } from 'curio-minecraft-3d-memory';
 import {
   acceptedMeasurements,
@@ -1447,7 +1447,7 @@ const W5_BEFORE_ROUTE = {
 };
 const W5_AFTER_ROUTE = {
   stepCount: 4, complete: true, verdict: 'BLOCKED', openPrefix: 3,
-  verifiedStepIndexes: [0, 1, 2, 3], pendingStepIndexes: [], invalidatedCount: 1,
+  verifiedStepIndexes: [0, 1, 2, 3], pendingStepIndexes: [], invalidatedCount: 0,
   earliestProblem: { stepIndex: 3, status: 'BLOCKED', problemKind: 'missing_support' },
   steps: [
     { kind: 'verified' as const, status: 'OPEN', problemKind: null },
@@ -1591,8 +1591,13 @@ test('checkW5HiddenReveal：真实隐藏窗口+返程 step2 回看+未来 step3 
     /返程 step2/,
   );
   assert.match(
-    checkW5HiddenReveal({ ...W5_CHAIN_OK, revealObserve: { ...W5_CHAIN_OK.revealObserve, statusAfterOutcome: 'FAILED' } }).reason ?? '',
-    /终态后才被消费/,
+    checkW5HiddenReveal({ ...W5_CHAIN_OK, revealObserve: { ...W5_CHAIN_OK.revealObserve, statusBeforeOutcome: 'FAILED' } }).reason ?? '',
+    /返程 step2/,
+  );
+  // before 活跃、本次合法 report 使 after 进入 FAILED 是允许顺序；终态由 terminal 断言。
+  assert.deepEqual(
+    checkW5HiddenReveal({ ...W5_CHAIN_OK, revealObserve: { ...W5_CHAIN_OK.revealObserve, statusAfterOutcome: 'FAILED' } }),
+    { ok: true },
   );
   assert.match(
     checkW5HiddenReveal({ ...W5_CHAIN_OK, returnMove: { ...W5_CHAIN_OK.returnMove, from: { x: 216.55, y: 64, z: 205.52 } } }).reason ?? '',
@@ -1622,9 +1627,25 @@ test('checkW5HiddenReveal：真实隐藏窗口+返程 step2 回看+未来 step3 
     }).reason ?? '',
     /仍为 OPEN/,
   );
+  // 预算内可直接重算时，pending 不能被当作「已知缺支撑」的 verified 结论。
   assert.match(
-    checkW5HiddenReveal({ ...W5_CHAIN_OK, routeProof: { ...W5_CHAIN_OK.routeProof, after: { ...W5_AFTER_ROUTE, invalidatedCount: 0 } } }).reason ?? '',
-    /失效重算/,
+    checkW5HiddenReveal({
+      ...W5_CHAIN_OK,
+      routeProof: {
+        ...W5_CHAIN_OK.routeProof,
+        after: {
+          ...W5_AFTER_ROUTE, complete: false, verdict: 'INCOMPLETE', openPrefix: 3,
+          verifiedStepIndexes: [0, 1, 2], pendingStepIndexes: [3], earliestProblem: null,
+          steps: [...W5_AFTER_ROUTE.steps.slice(0, 3), { kind: 'pending' as const, reason: 'invalidated' as const }],
+        },
+      },
+    }).reason ?? '',
+    /尚未重算为 verified/,
+  );
+  // invalidatedCount 是「当前仍失效未重算」的计数，不是累计事件数，不参与判定。
+  assert.deepEqual(
+    checkW5HiddenReveal({ ...W5_CHAIN_OK, routeProof: { ...W5_CHAIN_OK.routeProof, after: { ...W5_AFTER_ROUTE, invalidatedCount: 2 } } }),
+    { ok: true },
   );
   assert.match(
     checkW5HiddenReveal({ ...W5_CHAIN_OK, terminal: { ...W5_CHAIN_OK.terminal, navPresent: false } }).reason ?? '',
@@ -1650,6 +1671,86 @@ test('checkW5HiddenReveal：真实隐藏窗口+返程 step2 回看+未来 step3 
     checkW5HiddenReveal({ ...W5_CHAIN_OK, terminal: { ...W5_CHAIN_OK.terminal, allKeysReleased: false } }).reason ?? '',
     /7 键/,
   );
+});
+
+test('W5 真实 RouteVerifier：预算内失效重算后 step3 OPEN→非OPEN 且 invalidatedCount 归零仍 PASS', () => {
+  const now = 3000;
+  const worldId = 'world';
+  const dim = 'overworld';
+  const sessionId = 's1';
+  const map = new VoxelMap(worldId, { now: () => now, validityWindowMs: 60_000 });
+  let sequence = 0;
+  const observeCell = (x: number, y: number, z: number, name: string, observedAt = now - 1000) => map.observe({
+    pos: { x, y, z }, state: { name, properties: {} }, stateComplete: true,
+    evidence: 'seen', observedAt, source: 'vision', sessionId,
+    sequence: ++sequence, dim, worldId,
+  });
+  // 完整地面 y=0，其余为 air；路线 4 步沿 +X，每步移动一格。
+  for (let x = -1; x <= 6; x++) {
+    for (let z = -1; z <= 1; z++) {
+      for (let y = -1; y <= 3; y++) observeCell(x, y, z, y === 0 ? 'stone' : 'air');
+    }
+  }
+
+  const verifier = new RouteVerifier(map, { now: () => now });
+  const points = [0, 1, 2, 3, 4].map((i) => ({ x: i + 0.5, y: 1, z: 0.5 }));
+  verifier.register({
+    worldId, dim, sessionId, mode: 'walk',
+    body: { feet: { ...points[0]! }, width: 0.6, height: 1.8, pose: 'standing' },
+    shapeProvider: walkCollisionProvider, points,
+  });
+  const before = verifier.advance(64);
+  assert.equal(before.steps.length, 4);
+  assert.equal(before.steps[3]?.kind, 'verified');
+  const beforeStep3 = before.steps[3];
+  if (beforeStep3?.kind !== 'verified') assert.fail('拆支撑前 step3 未 verified');
+  assert.equal(beforeStep3.result.status, 'OPEN');
+  assert.equal(before.invalidatedCount, 0);
+
+  // 真实 observe(path) → ChangeReport → apply 失效重算：移除 step3 使用的支撑格。
+  const report = observeCell(4, 0, 0, 'air', now);
+  assert.equal(report.sections.some((section) => section.invalidated), true);
+  const after = verifier.apply(report, 64);
+  assert.ok(after);
+  assert.deepEqual(after.pendingStepIndexes, []);
+  assert.equal(after.invalidatedCount, 0);
+  assert.equal(after.steps[3]?.kind, 'verified');
+  const afterStep3 = after.steps[3];
+  if (afterStep3?.kind !== 'verified') assert.fail('拆支撑后 step3 未重算为 verified');
+  assert.notEqual(afterStep3.result.status, 'OPEN');
+  assert.equal(afterStep3.result.problem?.kind, 'missing_support');
+  assert.equal(after.earliestProblem?.stepIndex, 3);
+
+  const snapRoute = (s: typeof before): RouteStateSnapshot => ({
+    stepCount: s.stepCount,
+    complete: s.complete,
+    verdict: s.verdict,
+    openPrefix: s.openPrefix,
+    verifiedStepIndexes: [...s.verifiedStepIndexes],
+    pendingStepIndexes: [...s.pendingStepIndexes],
+    invalidatedCount: s.invalidatedCount,
+    earliestProblem: s.earliestProblem === null ? null : {
+      stepIndex: s.earliestProblem.stepIndex,
+      status: s.earliestProblem.status,
+      problemKind: s.earliestProblem.problem?.kind ?? null,
+    },
+    steps: s.steps.map((step) => step.kind === 'verified'
+      ? { kind: 'verified' as const, status: step.result.status, problemKind: step.result.problem?.kind ?? null }
+      : { kind: 'pending' as const, reason: step.reason }),
+  });
+  // 同一次真实前后状态即可支撑 W5 判据：step3 verified OPEN → verified 非 OPEN。
+  assert.deepEqual(checkW5HiddenReveal({
+    ...W5_CHAIN_OK,
+    routeProof: {
+      before: snapRoute(before),
+      after: snapRoute(after),
+      totalSteps: 4,
+      step3Started: false,
+      moveExecutionIds: W5_CHAIN_OK.routeProof.moveExecutionIds,
+      moveCount: 3,
+      startedStepIndexes: [0, 1, 2],
+    },
+  }), { ok: true });
 });
 
 test('mapBatchForEvidence：输出JSON保留原observations/report与编号，且不含实际map对象', () => {
