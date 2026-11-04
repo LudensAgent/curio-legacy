@@ -101,6 +101,44 @@ export const SAMPLE_INTERVAL_MS = 1_000;
 /** 连接物理帧/监听器诊断的落盘周期；不逐帧保存。 */
 export const CONNECTION_SNAPSHOT_INTERVAL_MS = 5_000;
 export const SMOKE_LEG_BUDGET_MS = 45_000;
+/**
+ * soak 的 near 完成半径。实测身体停止点会在候选格周围抖动，执行器默认 0.12 的
+ * bodyArrival 容差与 near 目标检查叠加后，正常停止也可能略超 0.12。这里把请求的
+ * near radius 与验收用的水平容差设为同一个值：既容忍真实停止抖动，又不把 A/B
+ * 两格目标混在一起，且没有投影或改写目标。
+ */
+export const SOAK_ARRIVAL_RADIUS = 0.25;
+
+/** 所有 soak walk_to 请求共用：固定目标 + 同一 near 半径，目标永不投影或改写。 */
+export const soakWalkRequest = (target: FixtureEndpoint, deadlineMs: number) => ({
+  to: { ...target },
+  arrival: { kind: 'near' as const, radius: SOAK_ARRIVAL_RADIUS },
+  deadlineMs,
+});
+
+export type FixtureEndpointName = keyof typeof FIXTURE_ENDPOINTS;
+
+/** 每段 leg 的固定夹具起点与固定目标；两者都不投影、不取整、不改写。 */
+export const legFixturePoints = (from: FixtureEndpointName, to: FixtureEndpointName) => ({
+  setup: FIXTURE_ENDPOINTS[from],
+  target: FIXTURE_ENDPOINTS[to],
+});
+
+/**
+ * 每段 walk_to 前的固定 setup 序列：先把夹具 tp 到本段标称起点并结算，再由调用方
+ * 从真实 `adapter.state().pos` 读取实测起点。setup 只布置夹具，不是移动证据；任何
+ * 一步失败都不会发出 walk_to。
+ */
+export const prepareLegStart = async (
+  index: number,
+  setupRequested: FixtureEndpoint,
+  setup: (position: FixtureEndpoint, label: string) => Promise<FixtureEndpoint>,
+  measure: (label: string) => Promise<FixtureEndpoint>,
+) => {
+  const setupSettled = await setup(setupRequested, `leg-${index}-setup`);
+  const measuredStart = await measure(`leg ${index}`);
+  return { index, setupRequested, setupSettled, measuredStart };
+};
 export const SMOKE_MIN_SUCCESSFUL_LEGS = 2;
 export const SMOKE_MIN_CHECKPOINT_SAVES = 2;
 /** smoke 完成等待上限；避免 full 在 smoke 未满足时空等一小时。 */
@@ -165,8 +203,9 @@ Options:
                       working-set evidence, not only the separate manual scenario.
   --help, -h          Print this text and exit without loading config, creating a DB, or opening sockets.
 
-Every leg reads its measured start from adapter.state().pos after settle; fixed A/B
-targets and measured starts are recorded separately. Any scheduled checkpoint failure,
+Every leg first performs the fixture setup tp to its fixed nominal start, then reads
+the actual adapter.state().pos as its measured start; fixed A/B targets and measured
+starts are recorded separately. Any scheduled checkpoint failure,
 unclean shutdown, or evidence record over 64KiB fails the run. Manual residency is
 never reported as passed unless the real SharedSpatialSession manual API is present.`;
 
@@ -1787,17 +1826,16 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
     target: FixtureEndpoint,
     nominalFrom: 'A' | 'B',
     nominalTo: 'A' | 'B',
+    measuredFrom: FixtureEndpoint,
   ): Promise<void> => {
     if (arbiter === null) throw new Error('walk leg requested before arbiter is ready');
     if (runScope === null) throw new Error('walk leg requested before runtime scope is ready');
     if (stopping) throw new Error('run is stopping; refusing walk_to');
-    // 每段开始都在上一段/setup 结算后读取真实身体位置；不再复用上一段标称终点。
-    const measuredFrom = await measureLegStart(`leg ${index}`);
-    const request = {
-      to: clone(target),
-      arrival: { kind: 'exact' as const },
-      deadlineMs: Date.now() + SMOKE_LEG_BUDGET_MS,
-    };
+    const tolerance = { ...library!.GROUNDED_ARRIVAL_DEFAULTS, horizontalTolerance: SOAK_ARRIVAL_RADIUS };
+    // 即使 setup tp 落在标称格，服务端结算也可能让实测起点偏离整数脚格；exact 目标
+    // 会因不在 ±1 脚格上被库拒绝。用 near 且验收使用同一半径：仍要求真实终点落在
+    // 容差内，不投影或改写目标。
+    const request = soakWalkRequest(target, Date.now() + SMOKE_LEG_BUDGET_MS);
     const started = arbiter.start({ skill: 'walk_to', args: request }, 'user');
     if ('error' in started) throw new Error(`walk_to rejected: ${started.error}`);
     const info = started as TaskInfo;
@@ -1820,7 +1858,6 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
       const terminalState = adapter!.state();
       const terminalControls = controlsSnapshot(adapter!);
       const window = perTask.get(info.id) ?? { samples: [], moves: [], starts: [], lastSequence: -1 };
-      const tolerance = library!.GROUNDED_ARRIVAL_DEFAULTS;
       const verdict = classifyWalkToResult(outcome.result, measuredFrom, target, tolerance, {
         taskId: info.id,
         samples: window.samples,
@@ -2322,8 +2359,20 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
 
     const runNextLeg = async (): Promise<void> => {
       const nominalTo = nominalFrom === 'A' ? 'B' : 'A';
-      const target = nominalTo === 'A' ? FIXTURE_A : FIXTURE_B;
-      await runLeg(legIndex, target, nominalFrom, nominalTo);
+      const points = legFixturePoints(nominalFrom, nominalTo);
+      // 每段 leg 都先做一次夹具 setup tp 到本段固定标称起点。上一段可能在容差内
+      // 停在半格上，不能把该落点当作下一段固定目标的起点。tp 只布置夹具，不是
+      // 移动证据；落地后再读取真实身体位置作为本段实测起点。
+      const prepared = await prepareLegStart(legIndex, points.setup, fixtureTeleport, measureLegStart);
+      emit('leg-setup', null, {
+        index: prepared.index,
+        from: nominalFrom,
+        requested: clone(prepared.setupRequested),
+        settled: clone(prepared.setupSettled),
+        at: Date.now(),
+        note: 'Fixture setup teleport before the leg; not movement evidence.',
+      });
+      await runLeg(legIndex, points.target, nominalFrom, nominalTo, prepared.measuredStart);
       directions.add(`${nominalFrom}->${nominalTo}`);
       nominalFrom = nominalTo;
       legIndex += 1;
@@ -2344,7 +2393,7 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
       const nearest = distance(start, FIXTURE_A) <= distance(start, FIXTURE_B) ? 'A' : 'B';
       const targetName = nearest === 'A' ? 'B' : 'A';
       const target = targetName === 'A' ? FIXTURE_A : FIXTURE_B;
-      const request = { to: clone(target), arrival: { kind: 'exact' as const }, deadlineMs: Date.now() + SMOKE_LEG_BUDGET_MS };
+      const request = soakWalkRequest(target, Date.now() + SMOKE_LEG_BUDGET_MS);
       const started = arbiter!.start({ skill: 'walk_to', args: request }, 'user');
       if ('error' in started) {
         return { id, state: 'failed', ok: false, problems: [`walk_to rejected: ${started.error}`], facts };
