@@ -53,6 +53,7 @@ import {
   parseScenarioSelector,
   parseSetBlock,
   partialMatchesLastSample,
+  pickSpatialWitness,
   mapBatchForEvidence,
   partialMatchesRecorded,
   platformEscaped,
@@ -1071,6 +1072,53 @@ test('ExecutionDiagnostics：onSample 保存完整原始样本与状态前后，
   assert.equal(WalkRouteExecutor.prototype.onSample, orig);
 });
 
+test('WalkRouteExecutor 真实公开库：start 仅 pending/INCOMPLETE，真实 map 写入+observe 后才 OPEN', () => {
+  const exec = new ExecutionDiagnostics(new EventSeq(), () => 'task_B', () => 1000);
+  exec.wrap();
+  try {
+    const map = new VoxelMap('world', { validityWindowMs: 60_000, now: () => 1000 });
+    const loop = new WalkRouteExecutor(map, { move: async () => ({ failure: { kind: 'cancelled' } as const }), stop: () => {} }, { now: () => 1000 });
+    const start = loop.start({
+      worldId: 'world', dim: 'overworld', sessionId: 's1', mode: 'walk',
+      body: { feet: { x: 0.5, y: 0, z: 0.5 }, width: 0.6, height: 1.8, pose: 'standing' },
+      points: [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }],
+      arrival: { kind: 'exact' }, bodyArrival: GROUNDED_ARRIVAL_DEFAULTS, shapeProvider: walkCollisionProvider,
+      deadlineMs: 5000, timeoutMs: 1000,
+    });
+    assert.equal(start.route.verdict, 'INCOMPLETE', 'start 只注册待验证路线');
+    assert.equal(start.route.complete, false);
+    assert.deepEqual(start.route.verifiedStepIndexes, []);
+    assert.deepEqual(start.route.pendingStepIndexes, [0]);
+    assert.equal(start.route.steps[0]!.kind, 'pending');
+
+    let sequence = 0;
+    const observation = (x: number, y: number, z: number, name: string) => ({
+      worldId: 'world', dim: 'overworld', sessionId: 's1', pos: { x, y, z },
+      state: { name, properties: {} }, stateComplete: true, evidence: 'seen' as const,
+      observedAt: 1000, source: 'vision' as const, sequence: ++sequence,
+    });
+    const report = map.observeBatch({
+      observations: [
+        observation(0, -1, 0, 'minecraft:stone'), observation(1, -1, 0, 'minecraft:stone'),
+        observation(0, 0, 0, 'minecraft:air'), observation(1, 0, 0, 'minecraft:air'),
+        observation(0, 1, 0, 'minecraft:air'), observation(1, 1, 0, 'minecraft:air'),
+      ],
+      unobserved: [],
+    });
+    const verified = loop.observe(report, 16);
+    assert.equal(verified.route.verdict, 'OPEN', '只有真实 observe 推进验证后才 OPEN');
+    assert.equal(verified.route.complete, true);
+    assert.deepEqual(verified.route.verifiedStepIndexes, [0]);
+    assert.equal(verified.route.steps[0]!.kind, 'verified');
+    assert.equal(verified.route.steps[0]!.kind === 'verified' ? verified.route.steps[0]!.result.status : null, 'OPEN');
+    assert.equal(exec.routeCalls[0]!.ownerTaskId, 'task_B');
+    assert.equal(exec.observes[0]!.ownerTaskId, 'task_B');
+    assert.equal(exec.observes[0]!.statusAfter.route?.verdict, 'OPEN', 'B 归属的 observe 快照才证明 OPEN');
+  } finally {
+    exec.unwrap();
+  }
+});
+
 test('TaskTracker：done 只在 entries 存在且未 settled 时保存一次完整结果', async () => {
   const em = new FakeEmitter();
   const tracker = new TaskTracker(em as never);
@@ -1874,6 +1922,77 @@ test('ExecutionDiagnostics：observeBatch 返回原 ChangeReport，并以 WeakMa
   }
 });
 
+test('ExecutionDiagnostics：实际 Vision 返回保留完整 typed payload，不改字段、不复用诊断投影', () => {
+  const returned = [{
+    pos: { x: 1, y: 2, z: 3 }, name: 'minecraft:stone', properties: { variant: 7, wet: true },
+    worldId: 'world', sessionId: 's1', dimension: 'overworld', observedAt: 1000, observationId: 42,
+    source: 'vision' as const,
+  }];
+  const vision = { observeBlocks: (_positions: Array<{ x: number; y: number; z: number }>) => returned };
+  const exec = new ExecutionDiagnostics(new EventSeq(), () => 'task_A', () => 1000, { vision: vision as never });
+  exec.wrap();
+  try {
+    assert.equal(vision.observeBlocks([{ x: 1, y: 2, z: 3 }]), returned, '包装必须透传原返回数组');
+    const rec = exec.visionCalls[0]!;
+    assert.deepEqual(rec.payload, returned, 'typed 副本必须与实际返回完全一致');
+    assert.equal(rec.payload[0]!.source, 'vision');
+    assert.equal(Object.hasOwn(rec.payload[0]!, 'stateComplete'), false, '不得补 stateComplete');
+    assert.equal(rec.output[0]!.stateComplete, null, '既有诊断投影语义不变');
+    assert.notEqual(rec.payload, returned);
+    assert.notEqual(rec.payload[0], returned[0]);
+    assert.notEqual(rec.payload[0]!.pos, returned[0]!.pos);
+    assert.notEqual(rec.payload[0]!.properties, returned[0]!.properties);
+    (rec.payload[0]!.properties as Record<string, unknown>).changed = 'yes';
+    assert.equal(Object.hasOwn(returned[0]!.properties, 'changed'), false, '副本变异不得回写实际返回');
+  } finally {
+    exec.unwrap();
+  }
+  assert.equal(vision.observeBlocks([{ x: 1, y: 2, z: 3 }]), returned, 'unwrap 必须恢复原方法');
+});
+
+test('pickSpatialWitness：只选已写入同一 svc.voxel 且 name/properties/time/sequence/scope 一致的原 payload', () => {
+  const voxel = new VoxelMap('world', { validityWindowMs: 60_000, now: () => 1000 });
+  const block = {
+    pos: { x: 4, y: 5, z: 6 }, name: 'minecraft:stone', properties: { variant: 7 },
+    worldId: 'world', sessionId: 's1', dimension: 'overworld', observedAt: 1000, observationId: 9,
+    source: 'vision' as const,
+  };
+  const vision: VisionCallRecord = {
+    seq: 3, ts: 1000, frame: 1, visionId: 1, positions: [{ ...block.pos }], eye: null,
+    payload: [block],
+    output: [{
+      pos: { ...block.pos }, name: block.name, properties: { variant: 7 }, stateComplete: null,
+      worldId: 'world', sessionId: 's1', dimension: 'overworld', observedAt: 1000, observationId: 9,
+    }],
+  };
+  assert.equal(pickSpatialWitness([{ visionCalls: [vision], mapBatches: [] }], voxel), null, '未真正入图不得选 witness');
+
+  const observation = {
+    worldId: 'world', dim: 'overworld', sessionId: 's1', pos: { ...block.pos },
+    state: { name: 'minecraft:stone', properties: { variant: '7' } }, stateComplete: true,
+    evidence: 'seen' as const, observedAt: 1000, source: 'vision' as const, sequence: 9,
+  };
+  const report = voxel.observeBatch({ observations: [observation], unobserved: [] });
+  const stored = mapBatchForEvidence({
+    seq: 4, ts: 1000, frame: 1, mapId: 1, mapWorldId: 'world', map: voxel,
+    observations: [observation], unobserved: [], reportId: 1, report,
+  });
+  const picked = pickSpatialWitness([{ visionCalls: [vision], mapBatches: [{ ...stored, mapIsSessionVoxel: true }] }], voxel);
+  assert.ok(picked);
+  assert.equal(picked.block, block, '必须返回原 typed payload 记录而非投影');
+  assert.equal(picked.cell.sequence, 9);
+  assert.deepEqual(picked.cell.properties, { variant: '7' });
+
+  // 同一位置但 properties 不一致的 map 证据不得把该 payload 关联成 witness。
+  const otherVoxel = new VoxelMap('world', { validityWindowMs: 60_000, now: () => 1000 });
+  const otherReport = otherVoxel.observeBatch({ observations: [{ ...observation, state: { name: 'minecraft:stone', properties: { variant: '8' } } }], unobserved: [] });
+  const otherStored = mapBatchForEvidence({
+    seq: 4, ts: 1000, frame: 1, mapId: 1, mapWorldId: 'world', map: otherVoxel,
+    observations: [observation], unobserved: [], reportId: 1, report: otherReport,
+  });
+  assert.equal(pickSpatialWitness([{ visionCalls: [vision], mapBatches: [{ ...otherStored, mapIsSessionVoxel: true }] }], otherVoxel), null);
+});
+
 test('spatialShutdownRecord：真实 SQLite 会话正常关停由最终 checkpoint/close 证据确认', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'walk-acceptance-spatial-'));
   const databasePath = path.join(dir, 'spatial.sqlite');
@@ -1967,7 +2086,8 @@ test('checkS1Return：反向三段实测接续+同一svc.voxel的B新观测才�
     observations: [observationAt(11, 2000, 'y')], unobserved: [], reportId: 1, report,
   };
   const vision: VisionCallRecord = {
-    seq: 5, ts: 1500, frame: 1, visionId: 1, positions: [{ ...cell }], eye: null, output: [visionOutput],
+    seq: 5, ts: 1500, frame: 1, visionId: 1, positions: [{ ...cell }], eye: null,
+    payload: [{ ...visionOutput, source: 'vision' }], output: [visionOutput],
   };
 
   const aRoute = [
@@ -2074,6 +2194,24 @@ test('checkSpatialFinalSave/checkSpatialReopen：真实SQLite空anchor→typed�
     assert.notEqual(firstResult.checkpoint!.checkpointId, anchor.checkpointId);
     const firstCheckpointId = firstResult.checkpoint!.checkpointId;
 
+    // 边界：真实 CP/revisions/close 全部成功，但 shutdown 分类含 cancelError 时 S3 门槛不得算通过。
+    const shutdownOk = spatialShutdownRecord(firstResult, null, null, world);
+    const cancelError = Object.assign(new Error('cancel failed'), { kind: 'data' });
+    // 用真实 CP/close 结果注入 cancelError，只验证分类边界，不声称真实 worker 取消失败。
+    const shutdownCancelled = spatialShutdownRecord({ ...firstResult!, cancelError }, null, null, world);
+    assert.equal(shutdownOk.ok, true);
+    assert.equal(shutdownCancelled.ok, false, 'cancelError 必须使 shutdown 分类失败');
+    assert.ok(shutdownCancelled.problems.includes('cancel_error'));
+    assert.equal(shutdownCancelled.diagnostics?.cancelError?.message, 'cancel failed');
+    assert.deepEqual(checkSpatialFinalSave({
+      anchorCheckpointId: anchor.checkpointId,
+      anchorState: { dirty: anchorState.dirty, lastConfirmedCheckpointId: anchorState.lastConfirmedCheckpointId, voxelRevision: anchorState.voxelRevision },
+      checkpoint: firstResult.checkpoint,
+      state: first.getPersistenceState(),
+      close: firstResult.close,
+    }), { ok: true }, '原始 CP/close 事实仍成功，只有合并门槛应失败');
+    assert.equal(proof.ok && shutdownCancelled.ok, false, 'S3 必须同时要求最终保存与 shutdown 分类通过');
+
     // 只有真实 close 已确认后才重开同一 DB；不 beginSession、不刷新。
     assert.equal(firstResult.close!.completed, true);
     reopened = await SharedSpatialSession.open({ worldId: world, databasePath: dbPath, timeoutMs: 5000 });
@@ -2121,4 +2259,80 @@ test('checkSpatialFinalSave/checkSpatialReopen：真实SQLite空anchor→typed�
   assert.ok(failed.problems.includes('missing_close_result'));
   assert.equal(failed.serviceAwaitError, null);
   assert.equal(closeFailure.checkpoint!.checkpointId, firstResult!.checkpoint!.checkpointId, '关闭失败不得覆盖第一 final id');
+});
+
+test('S3 清理：primaryFailure 存在时两个真实会话仍尝试关闭，close/delete 次错只诊断不替换主错', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'walk-s3-cleanup-'));
+  const world = 'walk-s3-cleanup-world';
+  const firstDb = path.join(dir, 'first.sqlite');
+  const secondDb = path.join(dir, 'second.sqlite');
+  let first: SharedSpatialSession | null = null;
+  let second: SharedSpatialSession | null = null;
+  let firstResult: ShutdownResult | null = null;
+  let secondResult: ShutdownResult | null = null;
+  let firstAwaitError: unknown = null;
+  let secondAwaitError: unknown = null;
+  let deleteError: unknown = null;
+  const attempts = { first: false, second: false };
+  const primary = new Error('primary S3 failure');
+  let thrown: unknown = null;
+  try {
+    first = await SharedSpatialSession.open({ worldId: world, databasePath: firstDb, timeoutMs: 5000 });
+    second = await SharedSpatialSession.open({ worldId: world, databasePath: secondDb, timeoutMs: 5000 });
+    throw primary;
+  } catch (error) {
+    thrown = error;
+  } finally {
+    // 两个已开服务都执行真实 shutdown；随后注入的 await 次错模拟关闭结果等待失败。
+    if (first !== null) {
+      attempts.first = true;
+      try {
+        firstResult = await first.shutdown();
+        throw new Error('forced first close await secondary');
+      } catch (error) { firstAwaitError = error; }
+    }
+    if (second !== null) {
+      attempts.second = true;
+      try {
+        secondResult = await second.shutdown();
+        throw new Error('forced second close await secondary');
+      } catch (error) { secondAwaitError = error; }
+    }
+    // 删除次错也只在有主错时诊断，不替换主错。
+    const rmSync = fs.rmSync;
+    const forcedDelete = new Error('forced delete secondary');
+    try {
+      fs.rmSync = () => { throw forcedDelete; };
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch (error) { deleteError = error; }
+    } finally {
+      fs.rmSync = rmSync;
+    }
+    const firstShutdown = first === null ? null : spatialShutdownRecord(firstResult, null, firstAwaitError, world);
+    const secondShutdown = second === null ? null : spatialShutdownRecord(secondResult, null, secondAwaitError, world);
+    const closed = firstShutdown !== null && firstShutdown.ok && secondShutdown !== null && secondShutdown.ok;
+    if (!closed) {
+      const detail = `first=${JSON.stringify(firstShutdown?.problems ?? null)} second=${JSON.stringify(secondShutdown?.problems ?? null)}`
+        + ` firstAwait=${firstAwaitError instanceof Error ? firstAwaitError.message : String(firstAwaitError)}`
+        + ` secondAwait=${secondAwaitError instanceof Error ? secondAwaitError.message : String(secondAwaitError)}`
+        + ` delete=${deleteError instanceof Error ? deleteError.message : String(deleteError)}`;
+      const message = `未确认关闭，保留 fixture：${dir}（${detail}）`;
+      if (primary === null) throw new Error(message);
+      t.diagnostic(message);
+    } else {
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch (error) { t.diagnostic(`关闭已确认但删除 fixture 失败：${dir}（${String(error)}）`); }
+    }
+  }
+  assert.equal(thrown, primary, '清理次错不得替换主错');
+  assert.equal(attempts.first, true);
+  assert.equal(attempts.second, true);
+  assert.equal(spatialShutdownRecord(firstResult, null, null, world).ok, true, '第一会话真实 close 必须已实际执行');
+  assert.equal(spatialShutdownRecord(secondResult, null, null, world).ok, true, '第二会话真实 close 必须已实际执行');
+  const firstShutdown = spatialShutdownRecord(firstResult, null, firstAwaitError, world);
+  const secondShutdown = spatialShutdownRecord(secondResult, null, secondAwaitError, world);
+  assert.ok(firstShutdown.problems.includes('shutdown_await_error'));
+  assert.ok(secondShutdown.problems.includes('shutdown_await_error'));
+  assert.equal(firstAwaitError instanceof Error && firstAwaitError.message, 'forced first close await secondary');
+  assert.equal(secondAwaitError instanceof Error && secondAwaitError.message, 'forced second close await secondary');
+  assert.equal(deleteError instanceof Error && deleteError.message, 'forced delete secondary');
+  assert.ok(fs.existsSync(dir), '未确认关闭必须保留 fixture');
 });

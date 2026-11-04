@@ -36,6 +36,7 @@ import type {
   RouteStatus,
   WalkRouteStatus,
 } from 'curio-minecraft-3d-memory';
+import type { BlockObservation } from '../src/adapter/types.ts';
 import { config } from '../src/config.ts';
 import { MineflayerAdapter } from '../src/adapter/mineflayer.ts';
 import { Vision } from '../src/perception/vision.ts';
@@ -1712,6 +1713,8 @@ export interface VisionCallRecord {
   visionId: number;
   positions: Vec3[];
   eye: EyeSnapshot | null;
+  /** observeBlocks 原返回的完整 typed 副本（保留 source 与可选字段的未定义状态，不补字段）。 */
+  payload: BlockObservation[];
   output: Array<{
     pos: Vec3;
     name: string;
@@ -1947,6 +1950,7 @@ export class ExecutionDiagnostics {
         const visionId = self2.nextVisionId += 1;
         self2.visionCalls.push({
           seq, ts, frame, visionId, positions: copied, eye,
+          payload: output.map((b) => ({ ...b, pos: { ...b.pos }, properties: { ...b.properties } })),
           output: output.map((b) => ({
             pos: { ...b.pos }, name: b.name, properties: { ...b.properties },
             stateComplete: b.stateComplete ?? null,
@@ -2807,11 +2811,16 @@ function visionOutputAt(call: VisionCallRecord, pos: Vec3): VisionCallRecord['ou
   return call.output.find((b) => sameCell(b.pos, pos));
 }
 
+type VisionBlock = Pick<
+  BlockObservation,
+  'pos' | 'name' | 'properties' | 'worldId' | 'sessionId' | 'dimension' | 'observedAt' | 'observationId'
+>;
+
 /**
  * 生产 toObservation 用 `sequence = observationId` 连接本次 Vision 输出；
  * 不要求 originObservationId（真实输入未填），也不靠位置/时间近似猜。
  */
-function observationMatchesVision(o: Observation, target: Vec3, v: VisionCallRecord['output'][number]): boolean {
+function observationMatchesVision(o: Observation, target: Vec3, v: VisionBlock): boolean {
   return sameCell(o.pos, target)
     && o.sequence === v.observationId
     && o.worldId === v.worldId
@@ -2819,6 +2828,45 @@ function observationMatchesVision(o: Observation, target: Vec3, v: VisionCallRec
     && o.sessionId === v.sessionId
     && o.observedAt === v.observedAt
     && o.state.name === v.name;
+}
+
+export interface SpatialWitnessPick {
+  vision: VisionCallRecord;
+  block: BlockObservation;
+  batch: StoredMapBatchRecord;
+  cell: CellEvidenceSnapshot;
+}
+
+function normalizedProperties(properties: Record<string, string | number | boolean>): Record<string, string> {
+  return Object.fromEntries(Object.entries(properties).map(([k, v]) => [k, String(v)]));
+}
+
+/**
+ * S3 witness 只从真实 Vision 返回并原样保存的 typed payload 中选：该 payload 必须先被
+ * 同一 svc.voxel 的 map 批次写入，且该格当前 cellAt 的 name/properties/time/sequence/scope
+ * 与原 payload 一致。未真正入图的 payload 不可能入选；不从诊断投影重建。
+ */
+export function pickSpatialWitness(
+  scenarios: ReadonlyArray<{ visionCalls: readonly VisionCallRecord[]; mapBatches: readonly StoredMapBatchRecord[] }>,
+  voxel: VoxelMap,
+): SpatialWitnessPick | null {
+  const candidates = scenarios
+    .flatMap((ev) => ev.visionCalls.flatMap((vision) => vision.payload.map((block) => ({ ev, vision, block }))))
+    .sort((a, b) => b.vision.ts - a.vision.ts || b.vision.visionId - a.vision.visionId);
+  for (const c of candidates) {
+    const expectedProperties = normalizedProperties(c.block.properties);
+    const batch = c.ev.mapBatches.find((b) => b.mapIsSessionVoxel === true
+      && b.seq > c.vision.seq
+      && b.observations.some((o) => observationMatchesVision(o, c.block.pos, c.block)
+        && JSON.stringify(normalizedProperties(o.state.properties)) === JSON.stringify(expectedProperties)));
+    if (!batch) continue;
+    const cell = cellEvidenceSnapshot(voxel.cellAt(c.block.dimension, c.block.pos.x, c.block.pos.y, c.block.pos.z));
+    if (!cell.observed || cell.sequence !== c.block.observationId || cell.observedAt !== c.block.observedAt
+      || cell.sessionId !== c.block.sessionId || cell.name !== c.block.name
+      || JSON.stringify(cell.properties ?? {}) !== JSON.stringify(expectedProperties)) continue;
+    return { vision: c.vision, block: c.block, batch, cell };
+  }
+  return null;
 }
 
 /** ChangeReport 是否包含目标格的真实变化（单格 change，不是 section 共用 revision）。 */
@@ -2978,6 +3026,7 @@ async function scenarioW1(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   const bArrival = assertArrivedAt(bNav, bRoute[bRoute.length - 1]!, bY, 'S1 B');
   const bSegments = checkTaskSegments(d.exec.moves, bDelegation, bTaskId, 3);
   const bCompletions = measuredCompletions(d.exec.deliveredSamples, bTaskId, bDelegation);
+  assertArrivalProvenance(bNav!, bCompletions, 'S1 B');
   const bRelease = assertProductionRelease(d.diag.stopAlls, bTaskId, snapshotKeys(ctx.bot), 'S1 B');
   // B 自己的真实 public route 验证状态（按 task+delegation 过滤，不拿 A 旧 OPEN）。
   const bRouteRows = [
@@ -4349,42 +4398,23 @@ async function main() {
         s3.reason = `没有可用的真实场景记录（fatal=${String(evidence.fatalError ?? 'none')}）`;
         if (evidence.fatalError === undefined) cleanupErrors.push({ step: 'spatial-s3', message: 'S3 没有可用的真实 Vision witness' });
       } else {
-        const candidates = observedScenarios
-          .flatMap((ev) => ev.visionCalls.flatMap((vision) => vision.output.map((output) => ({ ev, vision, output }))))
-          .sort((a, b) => b.vision.ts - a.vision.ts || b.vision.visionId - a.vision.visionId);
-        let picked: {
-          ev: ScenarioEvidence;
-          vision: VisionCallRecord;
-          output: VisionCallRecord['output'][number];
-          batch: StoredMapBatchRecord;
-          cell: CellEvidenceSnapshot;
-        } | null = null;
-        for (const c of candidates) {
-          const batch = c.ev.mapBatches.find((b) => b.mapIsSessionVoxel === true
-            && b.seq > c.vision.seq
-            && b.observations.some((o) => observationMatchesVision(o, c.output.pos, c.output)));
-          if (!batch) continue;
-          const cell = cellEvidenceSnapshot(spatial.session.voxel.cellAt(c.output.dimension, c.output.pos.x, c.output.pos.y, c.output.pos.z));
-          if (!cell.observed || cell.sequence !== c.output.observationId || cell.observedAt !== c.output.observedAt
-            || cell.sessionId !== c.output.sessionId || cell.name !== c.output.name) continue;
-          picked = { ...c, batch, cell };
-          break;
-        }
+        const picked = pickSpatialWitness(observedScenarios, spatial.session.voxel);
         if (picked === null) {
           s3.status = evidence.fatalError === undefined ? 'FAIL' : 'NOT_RUN';
           s3.reason = '本轮没有“实际 Vision 返回且已写入同一 svc.voxel”的合法事实';
           if (evidence.fatalError === undefined) cleanupErrors.push({ step: 'spatial-s3', message: 'S3 缺少真实写入同一 svc.voxel 的 witness' });
         } else {
-          const properties = Object.fromEntries(Object.entries(picked.output.properties).map(([k, v]) => [k, String(v)]));
+          const properties = normalizedProperties(picked.block.properties);
           s3Witness = {
-            pos: { ...picked.output.pos }, dim: picked.output.dimension, worldId: picked.output.worldId,
-            sessionId: picked.output.sessionId, name: picked.output.name, properties,
-            observedAt: picked.output.observedAt, sequence: picked.output.observationId,
+            pos: { ...picked.block.pos }, dim: picked.block.dimension, worldId: picked.block.worldId,
+            sessionId: picked.block.sessionId, name: picked.block.name, properties,
+            observedAt: picked.block.observedAt, sequence: picked.block.observationId,
             cell: picked.cell,
           };
           s3.witness = {
             ...s3Witness,
-            observation: picked.output,
+            // 原 typed payload 供随后 S2 原样重放；不是诊断投影。
+            payload: picked.block,
             vision: { seq: picked.vision.seq, ts: picked.vision.ts, visionId: picked.vision.visionId, frame: picked.vision.frame },
             map: { seq: picked.batch.seq, mapId: picked.batch.mapId, mapWorldId: picked.batch.mapWorldId, reportId: picked.batch.reportId },
           };
@@ -4450,10 +4480,16 @@ async function main() {
             topologyRevision: finalState.topologyRevision, confirmedTopologyRevision: finalState.confirmedTopologyRevision,
           },
         };
-        if (!proof.ok) {
+        // 第一会话的成功/重开门槛必须同时有真实 shutdown 分类通过；仅 CP/revisions/close
+        // 成功而 cancelError 等存在时不得写 PASS。shutdown 诊断已完整保存在 firstClose。
+        if (!proof.ok || !shutdown.ok) {
+          const reason = [
+            !proof.ok ? `第一会话最终保存/close 证明失败：${proof.reason}` : null,
+            !shutdown.ok ? `第一会话 shutdown 未确认：${shutdown.problems.join(',')}` : null,
+          ].filter((r): r is string => r !== null).join('；');
           s3.status = 'FAIL';
-          s3.reason = `第一会话最终保存/close 证明失败：${proof.reason}`;
-          cleanupErrors.push({ step: 'spatial-s3', message: `第一会话最终保存/close 证明失败：${proof.reason}` });
+          s3.reason = reason;
+          cleanupErrors.push({ step: 'spatial-s3', message: reason });
         } else if (s3Witness !== null) {
           const witness = s3Witness;
           let reopened: SharedSpatialSession | null = null;
