@@ -405,12 +405,9 @@ export const walkTo: Skill<WalkToArgs> = {
     };
     const spatial = ctx.spatial;
     if (!spatial) return fail('ERROR', 'walk_to 需要宿主共享空间会话（ctx.spatial），当前未接线', base);
-    // 入口同步取得本委托的身体桥，后续异步准备不再重新取，旧任务不会拿到新身体。
-    const body = ctx.adapter.walkBody?.();
-    const tick = ctx.adapter.walkTick?.();
-    if (!body || !tick) return fail('ERROR', '当前适配器没有 walk 身体桥（walkBody/walkTick）', base);
 
     // 有效期限只能缩短父委托预算：args.deadlineMs 是绝对 epoch，不是相对预算。
+    // 父取消/期限先于任何现场读取：已取消的旧任务不得再读新 scope 或身体桥。
     const effectiveDeadline = Math.min(args.deadlineMs ?? ctx.deadline, ctx.deadline);
     if (ctx.signal.aborted) return { status: 'cancelled', summary: 'walk_to 在开始前被取消', data: base };
     if (Date.now() >= effectiveDeadline) return fail('TIMEOUT', 'walk_to 期限在开始前已耗尽', { ...base, stage: 'TIMEOUT' });
@@ -423,6 +420,24 @@ export const walkTo: Skill<WalkToArgs> = {
     if (entry.worldId !== spatial.worldId || entry.worldId !== map.worldId || entry.dim === 'unknown') {
       return fail('ERROR', '共享空间作用域与当前身体不一致', { ...base, stage: 'SCOPE_CHANGED' });
     }
+    // 入口也按实际约束检查共享服务：未准入/暂停/关闭时不再取身体桥。
+    // 与既有准备门禁保持同一返回外壳：生命周期取消、零观测、零控制。
+    if (spatial.closing || spatial.paused || !spatial.observationAdmitted) {
+      ctx.setStationaryWait?.(false);
+      return {
+        status: 'cancelled',
+        summary: '共享空间会话未就绪/已暂停/已关闭，不能开始搜索',
+        data: { ...base, stage: 'CANCELLED', cancelBy: 'lifecycle' },
+      };
+    }
+
+    // ready/作用域/服务门禁通过后，仍在任何 await 前同步取得本委托的身体桥；
+    // 后续准备不再重取，旧任务不会拿到新身体。入口 ready-gap 因此先由
+    // readObservedState 交给共享服务中断，而不是在 guard 的 walkBody/walkTick
+    // 上抛 AbortedError 并丢失技能自己的 NOT_READY 结果。
+    const body = ctx.adapter.walkBody?.();
+    const tick = ctx.adapter.walkTick?.();
+    if (!body || !tick) return fail('ERROR', '当前适配器没有 walk 身体桥（walkBody/walkTick）', base);
 
     const search = new WalkRouteSearch(map, { now: Date.now, ...SEARCH_LIMITS });
     let snapshot: WalkSearchSnapshot | null = null;
@@ -732,12 +747,9 @@ export const walkKnownRoute: Skill<WalkKnownRouteArgs> = {
     };
     const spatial = ctx.spatial;
     if (!spatial) return fail('ERROR', 'walk_known_route 需要宿主共享空间会话（ctx.spatial），当前未接线', base);
-    // 入口同步取得身体桥；之后的准备/执行都使用同一份，旧任务不会拿到新身体。
-    const body = ctx.adapter.walkBody?.();
-    const tick = ctx.adapter.walkTick?.();
-    if (!body || !tick) return fail('ERROR', '当前适配器没有 walk 身体桥（walkBody/walkTick）', base);
 
     // 有效期限只能缩短父委托预算：args.deadlineMs 是绝对 epoch，不是相对预算。
+    // 父取消/期限先于任何现场读取：已取消的旧任务不得再读新 scope 或身体桥。
     const effectiveDeadline = Math.min(args.deadlineMs ?? ctx.deadline, ctx.deadline);
     if (ctx.signal.aborted) return { status: 'cancelled', summary: 'walk_known_route 在开始前被取消', data: base };
     if (Date.now() >= effectiveDeadline) {
@@ -755,6 +767,14 @@ export const walkKnownRoute: Skill<WalkKnownRouteArgs> = {
     if (spatial.closing || spatial.paused || !spatial.observationAdmitted) {
       return fail('NOT_CONNECTED', '共享空间会话未就绪/已暂停/已关闭', { ...base, stage: 'NOT_READY' });
     }
+
+    // ready/作用域/服务门禁通过后，仍在任何 await 前同步取得本委托的身体桥；
+    // 之后的准备/执行都使用同一份，旧任务不会拿到新身体。入口 ready-gap 因此
+    // 先由 readObservedState 交给共享服务中断，而不是在 guard 的
+    // walkBody/walkTick 上抛 AbortedError 并丢失技能自己的 NOT_READY 结果。
+    const body = ctx.adapter.walkBody?.();
+    const tick = ctx.adapter.walkTick?.();
+    if (!body || !tick) return fail('ERROR', '当前适配器没有 walk 身体桥（walkBody/walkTick）', base);
 
     // 只读查询：按显式 ID 取一次选定 fragment 快照；不扫描全 history、不造/迁移 JSON、
     // 不写入该 fragment（读取不是使用成功）。
