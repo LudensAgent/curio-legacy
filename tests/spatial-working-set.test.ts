@@ -1,7 +1,7 @@
 /**
  * M1：宿主侧 WorkingSetCoordinator 的独立验收。
  *
- * 使用安装的 curio-minecraft-3d-memory 0.7.7、真实 SQLite Worker 和每个用例独有的
+ * 使用安装的 curio-minecraft-3d-memory 0.8.0、真实 SQLite Worker 和每个用例独有的
  * mkdtemp 数据库。每个已打开的 session 都在 try/finally 中先释放 lease 再真实
  * close；只有 CloseResult 确认完成、无错误且无未确认请求时才删除临时目录。
  */

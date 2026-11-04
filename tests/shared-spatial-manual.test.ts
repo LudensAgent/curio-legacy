@@ -1,7 +1,7 @@
 /**
  * M2a1：SharedSpatialSession manual 体素接缝的真实 SQLite 验收。
  *
- * 每个用例使用安装的 curio-minecraft-3d-memory 0.7.7、真实 SQLite Worker 和
+ * 每个用例使用安装的 curio-minecraft-3d-memory 0.8.0、真实 SQLite Worker 和
  * 独有 mkdtemp 数据库。所有打开的会话都在 try/finally 中真实关闭；只有
  * CloseResult 确认完成、无错误且无未确认请求时才删除临时目录。
  */
