@@ -160,7 +160,9 @@ test('known shapes preserve original IDs, keys, times and scope without root inf
   assert.equal(projectedPassage.createdAt, 1000);
   assert.equal(projectedPassage.lastUsedAt, 2000);
   assert.equal(projectedPassage.uses, 3);
-  assert.equal(projectedPassage.migrationStatus, 'candidate_historical');
+  assert.equal(projectedPassage.migrationStatus, 'needs_review');
+  assert.ok(projectedPassage.reviewReasons.includes('passage_has_no_per_point_observation_time'));
+  assert.equal(projectedPassage.shapeStatus, 'valid');
   assert.deepEqual(projectedPassage.unknownFields, ['customField']);
   assert.ok(projectedPassage.retainedFields.includes('customField'));
   assert.equal(projectedPassage.geometry.entrances.total, 1);
@@ -170,6 +172,9 @@ test('known shapes preserve original IDs, keys, times and scope without root inf
   assert.equal(projectedPassage.geometry.links.traversalEvidence, 'unverified');
   assert.equal(projectedPassage.geometry.traversalEvidence, 'links_are_not_certified_traversals');
   assert.equal(projectedPassage.provenance.session, 'not_recorded');
+  assert.equal(projectedPassage.provenance.observationTime, 'not_recorded');
+  assert.equal(projectedPassage.provenance.time, 'record_createdAt_lastUsedAt');
+  assert.equal(passages.candidateHistorical, 0);
 
   const landmarks = worldCollections.landmarks;
   assert.equal(landmarks.total, 2);
@@ -253,6 +258,11 @@ test('known shapes preserve original IDs, keys, times and scope without root inf
   assert.equal(traversal.fromObservation, 11);
   assert.equal(traversal.toObservation, 12);
   assert.equal(traversal.references.from.status, 'resolved');
+  assert.equal(traversal.references.from.matchCount, 1);
+  assert.deepEqual(traversal.references.from.locatorSamples, ['/travel/endpoints/0']);
+  assert.equal(traversal.references.from.scope?.worldId, 'world-a');
+  assert.equal(traversal.references.from.scope?.dim, 'overworld');
+  assert.equal('resolvedEndpoints' in traversal.references.from, false);
   assert.equal(traversal.provenance.ownWorldScope, 'not_recorded');
   assert.equal(traversal.provenance.returnLink, 'not_inferred');
   assert.equal(traversal.provenance.observationIds, 'sequence_not_timestamp');
@@ -349,7 +359,10 @@ test('duplicate IDs and dangling or ambiguous references are never resolved by f
   assert.equal(unresolved.references.from.status, 'unresolved');
   assert.equal(unresolved.migrationStatus, 'needs_review');
   assert.equal(ambiguous.references.from.status, 'ambiguous');
-  assert.equal(ambiguous.references.from.matchedLocators.length, 2);
+  assert.equal(ambiguous.references.from.matchCount, 2);
+  assert.equal(ambiguous.references.from.locatorSamples.length, 2);
+  assert.equal(ambiguous.references.from.locatorsTruncated, false);
+  assert.equal(ambiguous.references.from.scope, null);
   assert.equal(ambiguous.migrationStatus, 'needs_review');
   assert.equal(traversals.candidateHistorical, 0);
 
@@ -483,6 +496,235 @@ test('malformed nested geometry and item lines invalidate the record without nor
   assert.equal(chestRecord.migrationStatus, 'needs_review');
   assert.equal(chestRecord.contents.itemLines.invalid, 1);
   assert.equal(collections.chests.invalid, 1);
+});
+
+test('landmark candidates require positive original observedAt; ts is never a substitute', () => {
+  const report = inspectLegacySpatialMemory({
+    worldMemory: {
+      version: 4,
+      worldId: 'w',
+      landmarks: [
+        { id: 'lm_observed', kind: 'resource', label: 'iron', dim: 'overworld', pos: { x: 1, y: 2, z: 3 }, ts: 100, worldId: 'w', observedAt: 200 },
+        { id: 'lm_missing_observed', kind: 'resource', label: 'coal', dim: 'overworld', pos: { x: 4, y: 5, z: 6 }, ts: 300, worldId: 'w' },
+        { id: 'lm_zero_observed', kind: 'waypoint', label: 'mark', dim: 'overworld', pos: { x: 7, y: 8, z: 9 }, ts: 400, worldId: 'w', observedAt: 0 },
+      ],
+    },
+  });
+  const landmarks = must(report.sources.worldMemory.collections, 'landmark collections').landmarks;
+  const observed = must(landmarks.records.find((record) => record.id === 'lm_observed'), 'observed landmark');
+  const missingObservedAt = must(landmarks.records.find((record) => record.id === 'lm_missing_observed'), 'missing-observation landmark');
+  const zeroObservedAt = must(landmarks.records.find((record) => record.id === 'lm_zero_observed'), 'zero-observation landmark');
+  assert.equal(observed.migrationStatus, 'candidate_historical');
+  assert.equal(observed.ts, 100);
+  assert.equal(observed.observedAt, 200);
+  assert.equal(missingObservedAt.shapeStatus, 'valid');
+  assert.equal(missingObservedAt.migrationStatus, 'needs_review');
+  assert.ok(missingObservedAt.reviewReasons.includes('missing_record_observedAt'));
+  assert.equal(missingObservedAt.ts, 300);
+  assert.equal(missingObservedAt.observedAt, null);
+  assert.equal(zeroObservedAt.shapeStatus, 'valid');
+  assert.equal(zeroObservedAt.migrationStatus, 'needs_review');
+  assert.ok(zeroObservedAt.reviewReasons.includes('observedAt_not_positive'));
+  assert.equal(zeroObservedAt.observedAt, 0);
+  assert.equal(landmarks.candidateHistorical, 1);
+  assert.equal(landmarks.needsReview, 2);
+});
+
+test('container ledger classification requires a fully valid, positive-time inspected ledger', () => {
+  const at = (x: number) => ({ x, y: 64, z: 1 });
+  const key = (x: number) => `w:overworld:${x},64,1`;
+  const report = inspectLegacySpatialMemory({
+    worldMemory: {
+      version: 4,
+      worldId: 'w',
+      chests: {
+        [key(1)]: chest({ worldId: 'w', pos: at(1), contents: { items: [{ name: 'iron_ore', count: -1 }], observedAt: 6000 } }),
+        [key(2)]: chest({ worldId: 'w', pos: at(2), contents: { items: [{ name: 'iron_ore', count: 1.5 }], observedAt: 6000 } }),
+        [key(3)]: chest({ worldId: 'w', pos: at(3), contents: { items: [], observedAt: 6000, capacity: 27, freeSlots: 28 } }),
+        [key(4)]: chest({ worldId: 'w', pos: at(4), contents: { items: [], observedAt: 6000, possiblyStale: 'yes' } }),
+        [key(5)]: chest({ worldId: 'w', pos: at(5), contents: { items: [], observedAt: 6000, day: 1.5 } }),
+        [key(6)]: chest({ worldId: 'w', pos: at(6), contents: { items: [{ name: '', count: 2 }], observedAt: 6000 } }),
+      },
+    },
+  });
+  const chests = must(report.sources.worldMemory.collections, 'chest collections').chests;
+  const negative = must(chests.records.find((record) => record.originalKey === key(1)), 'negative count');
+  const fractional = must(chests.records.find((record) => record.originalKey === key(2)), 'fractional count');
+  const badSlots = must(chests.records.find((record) => record.originalKey === key(3)), 'bad slots');
+  const badStale = must(chests.records.find((record) => record.originalKey === key(4)), 'bad stale flag');
+  const badDay = must(chests.records.find((record) => record.originalKey === key(5)), 'bad day');
+  const badLine = must(chests.records.find((record) => record.originalKey === key(6)), 'bad item line');
+
+  for (const record of [negative, fractional, badSlots, badStale, badDay, badLine]) {
+    assert.equal(record.ledgerStatus, 'invalid');
+    assert.equal(record.shapeStatus, 'invalid');
+    assert.equal(record.migrationStatus, 'needs_review');
+  }
+  assert.equal(negative.contents.itemLines.invalid, 1);
+  assert.equal(fractional.contents.itemLines.invalid, 1);
+  assert.equal(badSlots.contents.capacity, 27);
+  assert.equal(badSlots.contents.freeSlots, 28);
+  assert.ok(badSlots.invalidReasons.includes('contents_freeSlots_exceeds_capacity'));
+  assert.equal(badStale.contents.possiblyStale, null);
+  assert.ok(badStale.invalidReasons.includes('contents_possiblyStale_not_boolean'));
+  assert.equal(badDay.contents.day, 1.5);
+  assert.ok(badDay.invalidReasons.includes('contents_day_not_nonnegative_integer'));
+  assert.equal(badLine.contents.itemLines.invalid, 1);
+  assert.equal(chests.candidateHistorical, 0);
+  assert.equal(chests.invalid, 6);
+
+  const truncated = inspectLegacySpatialMemory({
+    worldMemory: {
+      version: 4,
+      worldId: 'w',
+      chests: {
+        [key(1)]: chest({
+          worldId: 'w',
+          pos: at(1),
+          contents: { items: Array.from({ length: 5 }, (_, index) => ({ name: 'dirt', count: index + 1 })), observedAt: 6000 },
+        }),
+      },
+    },
+  }, { maxNestedItemsPerRecord: 2 });
+  const truncatedChests = must(truncated.sources.worldMemory.collections, 'truncated chest collections').chests;
+  const truncatedRecord = truncatedChests.records[0];
+  assert.equal(truncatedRecord.shapeStatus, 'valid');
+  assert.equal(truncatedRecord.ledgerStatus, 'unverified_truncated');
+  assert.equal(truncatedRecord.migrationStatus, 'needs_review');
+  assert.ok(truncatedRecord.reviewReasons.includes('nested_inspection_truncated'));
+  assert.equal(truncatedRecord.contents.itemLines.total, 5);
+  assert.equal(truncatedRecord.contents.itemLines.inspected, 2);
+  assert.equal(truncatedRecord.contents.itemLines.uninspected, 3);
+  assert.equal(truncatedChests.itemLines.total, 5);
+  assert.equal(truncatedChests.itemLines.inspected, 2);
+  assert.equal(truncatedChests.itemLines.uninspected, 3);
+  assert.equal(truncatedChests.itemLines.truncated, true);
+  assert.equal(truncated.summary.counts.chestItemLines?.total, 5);
+});
+
+test('travel consistency uses resolved endpoint scope and session contracts', () => {
+  const report = inspectLegacySpatialMemory({
+    travel: {
+      version: 1,
+      endpoints: [
+        endpoint({ id: 'a', worldId: 'world-a', dim: 'overworld', observedAt: 100 }),
+        endpoint({ id: 'b', worldId: 'world-a', dim: 'the_nether', observedAt: 101 }),
+        endpoint({ id: 'c', worldId: 'world-b', dim: 'the_nether', observedAt: 102 }),
+        endpoint({ id: 'd', worldId: 'world-a', dim: 'overworld', observedAt: 103 }),
+        endpoint({ id: 'e', worldId: 'world-a', dim: 'the_nether', observedAt: 104 }),
+        endpoint({ id: 'stale', worldId: 'world-a', dim: 'overworld', observedAt: 0 }),
+        endpoint({ id: 'g1', worldId: 'world-a', dim: 'the_end', kind: 'end_gateway', observedAt: 105 }),
+        endpoint({ id: 'g2', worldId: 'world-a', dim: 'the_end', kind: 'end_gateway', observedAt: 106 }),
+        endpoint({ id: 'g3', worldId: 'world-a', dim: 'the_nether', kind: 'end_gateway', observedAt: 107 }),
+      ],
+      traversals: [
+        crossing({ fromId: 'a', toId: 'b', fromSession: 's1', toSession: 's2' }),
+        crossing({ fromId: 'a', toId: 'c', fromSession: 's1', toSession: 's2', ts: 9300 }),
+        crossing({ fromId: 'a', toId: 'd', fromSession: 's1', toSession: 's2', ts: 9400 }),
+        crossing({ fromId: 'a', toId: 'e', fromSession: 'same', toSession: 'same', ts: 9500 }),
+        crossing({ fromId: 'a', toId: 'stale', fromSession: 's1', toSession: 's2', ts: 9600 }),
+        crossing({ fromId: 'a', toId: 'b', fromSession: 's1', toSession: 's2', fromObservation: -1, toObservation: 1.5, ts: 9700 }),
+      ],
+      gateways: [
+        crossing({ fromId: 'g1', toId: 'g2', fromSession: 's1', toSession: 's2', ts: 9800 }),
+        crossing({ fromId: 'a', toId: 'g1', fromSession: 's1', toSession: 's2', ts: 9900 }),
+        crossing({ fromId: 'g1', toId: 'g3', fromSession: 's1', toSession: 's2', ts: 10_000 }),
+        crossing({ fromId: 'g1', toId: 'g2', fromSession: 'same', toSession: 'same', ts: 10_100 }),
+      ],
+    },
+  });
+  const travel = must(report.sources.travel.collections, 'travel collections');
+  assert.equal(travel.endpoints.candidateHistorical, 8);
+  assert.equal(travel.endpoints.needsReview, 1);
+
+  const traversals = travel.traversals.records;
+  assert.equal(traversals[0].migrationStatus, 'candidate_historical');
+  assert.equal(traversals[1].migrationStatus, 'needs_review');
+  assert.ok(traversals[1].reviewReasons.includes('endpoint_world_mismatch'));
+  assert.ok(traversals[2].reviewReasons.includes('endpoint_dimensions_not_distinct'));
+  assert.ok(traversals[3].reviewReasons.includes('crossing_session_not_distinct'));
+  assert.equal(traversals[4].references.to.status, 'referenced_endpoint_needs_review');
+  assert.equal(traversals[4].migrationStatus, 'needs_review');
+  assert.equal(traversals[4].references.to.scope?.observedAt, 0);
+  assert.equal(traversals[5].shapeStatus, 'invalid');
+  assert.ok(traversals[5].invalidReasons.includes('fromObservation_not_nonnegative_integer'));
+  assert.ok(traversals[5].invalidReasons.includes('toObservation_not_nonnegative_integer'));
+  assert.equal(travel.traversals.candidateHistorical, 1);
+
+  const gateways = travel.gateways.records;
+  assert.equal(gateways[0].migrationStatus, 'candidate_historical');
+  assert.ok(gateways[1].reviewReasons.includes('gateway_endpoint_kind_mismatch'));
+  assert.ok(gateways[2].reviewReasons.includes('gateway_endpoint_not_the_end'));
+  assert.ok(gateways[3].reviewReasons.includes('crossing_session_not_distinct'));
+  assert.equal(travel.gateways.candidateHistorical, 1);
+  assert.ok(report.issues.some((issue) => issue.code === 'blocked_endpoint_reference'));
+});
+
+test('reference reports stay compact and bounded when endpoints repeat', () => {
+  const endpoints = Array.from({ length: 10 }, (_, index) => endpoint({
+    id: 'dup',
+    worldId: 'world-a',
+    dim: index % 2 === 0 ? 'overworld' : 'the_nether',
+    observedAt: 500 + index,
+  }));
+  endpoints.push(endpoint({ id: 'unique', worldId: 'world-a', dim: 'the_nether', observedAt: 600 }));
+  const traversals = Array.from({ length: 20 }, (_, index) => crossing({
+    fromId: 'dup',
+    toId: 'unique',
+    fromSession: `s${index}a`,
+    toSession: `s${index}b`,
+    ts: 1000 + index,
+  }));
+  const report = inspectLegacySpatialMemory(
+    { travel: { version: 1, endpoints, traversals, gateways: [] } },
+    { maxNestedItemsPerRecord: 2 },
+  );
+  const travel = must(report.sources.travel.collections, 'bounded travel collections');
+  assert.equal(travel.endpoints.total, 11);
+  assert.equal(travel.endpoints.inspected, 11);
+  assert.equal(travel.endpoints.candidateHistorical, 1);
+  assert.equal(travel.traversals.total, 20);
+  assert.equal(travel.traversals.candidateHistorical, 0);
+  for (const traversal of travel.traversals.records) {
+    assert.equal(traversal.references.from.status, 'ambiguous');
+    assert.equal(traversal.references.from.matchCount, 10);
+    assert.equal(traversal.references.from.locatorSamples.length, 2);
+    assert.equal(traversal.references.from.omittedLocators, 8);
+    assert.equal(traversal.references.from.locatorsTruncated, true);
+    assert.equal(traversal.references.from.scope, null);
+  }
+  const duplicateIssue = report.issues.find((issue) => issue.code === 'duplicate_id');
+  assert.ok(duplicateIssue);
+  assert.match(duplicateIssue.message, /\(\+8 more locations\)/);
+  const json = JSON.stringify(report);
+  assert.equal(json.includes('resolvedEndpoints'), false);
+  assert.ok(json.length < 200_000, `bounded report was ${json.length} bytes`);
+});
+
+test('duplicate landmark IDs refresh collection and subset summaries consistently', () => {
+  const landmark = {
+    id: 'base_dup', kind: 'base', label: 'home', dim: 'overworld', pos: { x: 0, y: 64, z: 0 },
+    ts: 100, worldId: 'w', observedAt: 200,
+  };
+  const report = inspectLegacySpatialMemory({
+    worldMemory: { version: 4, worldId: 'w', landmarks: [landmark, { ...landmark, ts: 101, observedAt: 201 }] },
+  });
+  const worldCollections = must(report.sources.worldMemory.collections, 'duplicate landmark collections');
+  const landmarks = worldCollections.landmarks;
+  assert.equal(landmarks.total, 2);
+  assert.equal(landmarks.inspected, 2);
+  assert.equal(landmarks.candidateHistorical, 0);
+  assert.equal(landmarks.needsReview, 2);
+  assert.ok(landmarks.records.every((record) => record.identityStatus === 'duplicate'));
+  assert.ok(landmarks.records.every((record) => record.migrationStatus === 'needs_review'));
+  assert.equal(worldCollections.bases.inspected, 2);
+  assert.equal(worldCollections.bases.total, 2);
+  assert.equal(worldCollections.bases.candidateHistorical, 0);
+  assert.equal(worldCollections.bases.needsReview, 2);
+  assert.equal(report.summary.counts.landmarks?.candidateHistorical, 0);
+  assert.equal(report.summary.counts.landmarks?.needsReview, 2);
+  assert.equal(report.summary.counts.bases?.candidateHistorical, 0);
+  assert.equal(report.summary.counts.bases?.needsReview, 2);
 });
 
 test('explicit options are validated once at the input boundary', () => {

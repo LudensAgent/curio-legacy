@@ -56,6 +56,9 @@ const isFiniteNumber = (value: unknown): value is number =>
 const isNonEmptyString = (value: unknown): value is string =>
   typeof value === 'string' && value.length > 0;
 
+const isNonNegativeInteger = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+
 const isVec3 = (value: unknown): value is { x: number; y: number; z: number } =>
   isRecord(value) && isFiniteNumber(value.x) && isFiniteNumber(value.y) && isFiniteNumber(value.z);
 
@@ -179,7 +182,7 @@ function inspectItemLines(value: unknown, locator: string, ctx: Context) {
     total: window.total,
     inspected: window.inspected,
     uninspected: window.uninspected,
-    invalid: window.items.filter((item) => !isRecord(item) || typeof item.name !== 'string' || !isFiniteNumber(item.count)).length,
+    invalid: window.items.filter((item) => !isRecord(item) || !isNonEmptyString(item.name) || !isNonNegativeInteger(item.count)).length,
     truncated,
   };
 }
@@ -266,8 +269,9 @@ function applyDuplicateIds(records: ProjectionBase[], ctx: Context) {
   }
   for (const [id, group] of groups) {
     if (group.length < 2) continue;
-    const locators = group.map((record) => record.locator);
-    addIssue(ctx, 'duplicate_id', locators[0], `duplicate original id "${id}" at ${locators.join(', ')}`);
+    const samples = group.slice(0, ctx.options.maxNestedItemsPerRecord).map((record) => record.locator);
+    const omitted = group.length - samples.length;
+    addIssue(ctx, 'duplicate_id', group[0].locator, `duplicate original id "${id}" at ${samples.join(', ')}${omitted > 0 ? ` (+${omitted} more locations)` : ''}`);
     for (const record of group) {
       record.identityStatus = 'duplicate';
       record.migrationStatus = 'needs_review';
@@ -329,6 +333,9 @@ function projectPassage(raw: unknown, index: number, ctx: Context, complete: boo
   if (!complete) blockers.push('collection_truncated');
   if (!versionOk) blockers.push('unrecognized_root_version');
   if (entrances.truncated || path.truncated || links.truncated || ores.truncated) blockers.push('nested_inspection_truncated');
+  // createdAt/lastUsedAt describe creation and use, not per-point observation.
+  blockers.push('passage_has_no_per_point_observation_time');
+  missing.push('observationTime');
   markUnknownFields(projection, record, PASSAGE_FIELDS, ctx);
 
   const result = {
@@ -392,8 +399,14 @@ function projectLandmark(raw: unknown, index: number, ctx: Context, complete: bo
   if (ts === null) { invalid.push('ts_not_finite_number'); missing.push('ts'); }
   else if (ts <= 0) blockers.push('ts_not_positive');
   const observedAt = numberOrNull(record.observedAt);
-  if (record.observedAt !== undefined && observedAt === null) invalid.push('observedAt_not_finite_number');
-  if (record.observedAt === undefined) missing.push('observedAt');
+  if (record.observedAt === undefined) {
+    missing.push('observedAt');
+    blockers.push('missing_record_observedAt');
+  } else if (observedAt === null) {
+    invalid.push('observedAt_not_finite_number');
+  } else if (observedAt <= 0) {
+    blockers.push('observedAt_not_positive');
+  }
   if (record.primary !== undefined && typeof record.primary !== 'boolean') invalid.push('primary_not_boolean');
   if (record.count !== undefined && !isFiniteNumber(record.count)) invalid.push('count_not_finite_number');
   if (record.detail !== undefined && typeof record.detail !== 'string') invalid.push('detail_not_string');
@@ -461,7 +474,7 @@ function projectChest(key: string, raw: unknown, ctx: Context, complete: boolean
   const contentsRaw = record.contents;
   const knownLegacyFields = Array.isArray(record.items) || Array.isArray(record.traces) || record.items !== undefined || record.traces !== undefined;
   let contentsPresent = false;
-  let ledgerStatus: 'missing' | 'legacy_imprecise' | 'invalid' | 'unknown' | 'stale_unconfirmed' | 'recorded_empty_at_original_time' | 'recorded_nonempty_at_original_time' = 'missing';
+  let ledgerStatus: 'missing' | 'legacy_imprecise' | 'invalid' | 'unverified_truncated' | 'unknown' | 'stale_unconfirmed' | 'recorded_empty_at_original_time' | 'recorded_nonempty_at_original_time' = 'missing';
   let contentsUnknownFields: string[] = [];
   let itemLines = { present: false, total: null as number | null, inspected: 0, uninspected: null as number | null, invalid: 0, truncated: false };
   let contentsObservedAt: number | null = null;
@@ -476,28 +489,41 @@ function projectChest(key: string, raw: unknown, ctx: Context, complete: boolean
       invalid.push('contents_not_object');
       ledgerStatus = 'invalid';
     } else {
+      let ledgerProblems = false;
       itemLines = inspectItemLines(contentsRaw.items, locator, ctx);
-      if (!itemLines.present) invalid.push('contents_items_not_array');
-      else if (itemLines.invalid > 0) invalid.push('contents_items_contain_invalid_lines');
+      if (!itemLines.present) { invalid.push('contents_items_not_array'); ledgerProblems = true; }
+      else if (itemLines.invalid > 0) { invalid.push('contents_items_contain_invalid_lines'); ledgerProblems = true; }
+
       contentsObservedAt = numberOrNull(contentsRaw.observedAt);
-      if (contentsObservedAt === null) { invalid.push('contents_observedAt_not_finite_number'); missing.push('contents.observedAt'); }
+      if (contentsObservedAt === null) { invalid.push('contents_observedAt_not_finite_number'); missing.push('contents.observedAt'); ledgerProblems = true; }
+
       if (contentsRaw.day !== undefined) {
         contentsDay = numberOrNull(contentsRaw.day);
-        if (contentsDay === null) invalid.push('contents_day_not_finite_number');
+        if (!isNonNegativeInteger(contentsDay)) { invalid.push('contents_day_not_nonnegative_integer'); ledgerProblems = true; }
       }
-      if (contentsRaw.possiblyStale !== undefined && typeof contentsRaw.possiblyStale !== 'boolean') invalid.push('contents_possiblyStale_not_boolean');
-      possiblyStale = typeof contentsRaw.possiblyStale === 'boolean' ? contentsRaw.possiblyStale : null;
+      if (contentsRaw.possiblyStale !== undefined) {
+        if (typeof contentsRaw.possiblyStale !== 'boolean') { invalid.push('contents_possiblyStale_not_boolean'); ledgerProblems = true; }
+        else possiblyStale = contentsRaw.possiblyStale;
+      }
       if (contentsRaw.capacity !== undefined) {
         capacity = numberOrNull(contentsRaw.capacity);
-        if (capacity === null) invalid.push('contents_capacity_not_finite_number');
+        if (!isNonNegativeInteger(capacity)) { invalid.push('contents_capacity_not_nonnegative_integer'); ledgerProblems = true; }
       }
       if (contentsRaw.freeSlots !== undefined) {
         freeSlots = numberOrNull(contentsRaw.freeSlots);
-        if (freeSlots === null) invalid.push('contents_freeSlots_not_finite_number');
+        if (!isNonNegativeInteger(freeSlots)) { invalid.push('contents_freeSlots_not_nonnegative_integer'); ledgerProblems = true; }
       }
+      if (capacity !== null && freeSlots !== null && freeSlots > capacity) {
+        invalid.push('contents_freeSlots_exceeds_capacity');
+        ledgerProblems = true;
+      }
+
       contentsUnknownFields = Object.keys(contentsRaw).filter((field) => !CHEST_CONTENTS_FIELDS.has(field));
       if (contentsUnknownFields.length) addIssue(ctx, 'unknown_field', locator, `unknown contents fields retained: ${contentsUnknownFields.join(', ')}`);
-      if (!itemLines.present) ledgerStatus = 'invalid';
+
+      // Ledger evidence is only precise when the whole inspected ledger is valid.
+      if (ledgerProblems) ledgerStatus = 'invalid';
+      else if (itemLines.truncated) ledgerStatus = 'unverified_truncated';
       else if (contentsObservedAt === null || contentsObservedAt <= 0) ledgerStatus = 'unknown';
       else if (possiblyStale === true) ledgerStatus = 'stale_unconfirmed';
       else if (itemLines.total === 0) ledgerStatus = 'recorded_empty_at_original_time';
@@ -511,12 +537,9 @@ function projectChest(key: string, raw: unknown, ctx: Context, complete: boolean
     blockers.push('precise_ledger_missing');
   }
 
-  if (contentsPresent && contentsObservedAt !== null && contentsObservedAt > 0) {
-    if (ledgerStatus === 'invalid' || ledgerStatus === 'missing') blockers.push('precise_ledger_unavailable');
-  } else if (contentsPresent) {
-    blockers.push('precise_ledger_without_positive_observation_time');
-  }
-  if (itemLines.invalid > 0) blockers.push('invalid_item_lines');
+  if (ledgerStatus === 'invalid') blockers.push('precise_ledger_invalid');
+  else if (ledgerStatus === 'unverified_truncated') blockers.push('precise_ledger_unverified_by_truncation');
+  else if (ledgerStatus === 'unknown') blockers.push('precise_ledger_without_positive_observation_time');
   if (!complete) blockers.push('collection_truncated');
   if (!versionOk) blockers.push('unrecognized_root_version');
   if (itemLines.truncated) blockers.push('nested_inspection_truncated');
@@ -685,22 +708,51 @@ function projectEndpoint(raw: unknown, index: number, ctx: Context, complete: bo
   return result;
 }
 
-type EndpointRecord = ReturnType<typeof projectEndpoint>;
+type EndpointScope = {
+  locator: string;
+  worldId: string | null;
+  dim: string | null;
+  kind: string | null;
+  observedAt: number | null;
+  shapeStatus: ShapeStatus;
+  migrationStatus: MigrationStatus;
+};
 
-function referenceStatus(id: string | null, index: Map<string, EndpointRecord[]>, endpointsStatus: string, endpointsComplete: boolean) {
-  if (id === null) return { id, status: 'missing_reference_id' as const, matchedLocators: [] as string[], resolvedEndpoints: [] as EndpointRecord[] };
-  const matches = index.get(id) ?? [];
-  const matchedLocators = matches.map((match) => match.locator);
-  if (matches.length > 1) return { id, status: 'ambiguous' as const, matchedLocators, resolvedEndpoints: matches };
-  if (matches.length === 1) {
-    if (matches[0].shapeStatus === 'invalid') return { id, status: 'unresolved_invalid_endpoint' as const, matchedLocators, resolvedEndpoints: matches };
-    if (endpointsComplete) return { id, status: 'resolved' as const, matchedLocators, resolvedEndpoints: matches };
-    return { id, status: 'unverified_truncated' as const, matchedLocators, resolvedEndpoints: matches };
+type EndpointIndexEntry = {
+  count: number;
+  locatorSamples: string[];
+  omittedLocators: number;
+  unique: EndpointScope | null;
+};
+
+type ReferenceStatus = 'missing_reference_id' | 'unresolved' | 'unresolved_invalid_endpoint' | 'ambiguous' | 'unverified_truncated' | 'referenced_endpoint_needs_review' | 'resolved';
+
+function referenceStatus(id: string | null, index: Map<string, EndpointIndexEntry>, endpointsStatus: string, endpointsComplete: boolean) {
+  if (id === null) {
+    return {
+      id, status: 'missing_reference_id' as ReferenceStatus, matchCount: 0, locatorSamples: [] as string[],
+      locatorsTruncated: false, omittedLocators: 0, scope: null as EndpointScope | null,
+    };
   }
-  if (endpointsStatus === 'omitted' || endpointsStatus === 'invalid' || endpointsStatus === 'empty' || endpointsStatus === 'inspected') {
-    return { id, status: 'unresolved' as const, matchedLocators, resolvedEndpoints: [] as EndpointRecord[] };
+  const entry = index.get(id);
+  if (!entry) {
+    const status: ReferenceStatus = endpointsStatus === 'truncated' ? 'unverified_truncated' : 'unresolved';
+    return { id, status, matchCount: 0, locatorSamples: [] as string[], locatorsTruncated: false, omittedLocators: 0, scope: null as EndpointScope | null };
   }
-  return { id, status: 'unverified_truncated' as const, matchedLocators, resolvedEndpoints: [] as EndpointRecord[] };
+  const sample = {
+    id,
+    matchCount: entry.count,
+    locatorSamples: entry.locatorSamples,
+    locatorsTruncated: entry.omittedLocators > 0,
+    omittedLocators: entry.omittedLocators,
+  };
+  if (entry.count > 1) return { ...sample, status: 'ambiguous' as ReferenceStatus, scope: null as EndpointScope | null };
+  const scope = entry.unique;
+  if (!scope) return { ...sample, status: 'unverified_truncated' as ReferenceStatus, scope: null as EndpointScope | null };
+  if (scope.shapeStatus !== 'valid') return { ...sample, status: 'unresolved_invalid_endpoint' as ReferenceStatus, scope };
+  if (!endpointsComplete) return { ...sample, status: 'unverified_truncated' as ReferenceStatus, scope };
+  if (scope.migrationStatus !== 'candidate_historical') return { ...sample, status: 'referenced_endpoint_needs_review' as ReferenceStatus, scope };
+  return { ...sample, status: 'resolved' as ReferenceStatus, scope };
 }
 
 function projectCrossing(
@@ -710,7 +762,7 @@ function projectCrossing(
   complete: boolean,
   versionOk: boolean,
   recordType: 'travel_traversal' | 'travel_gateway',
-  endpointIndex: Map<string, EndpointRecord[]>,
+  endpointIndex: Map<string, EndpointIndexEntry>,
   endpointsStatus: string,
   endpointsComplete: boolean,
 ) {
@@ -731,10 +783,10 @@ function projectCrossing(
   const toSession = isNonEmptyString(record.toSession) ? record.toSession : null;
   if (!fromSession) invalid.push('fromSession_not_nonempty_string');
   if (!toSession) invalid.push('toSession_not_nonempty_string');
-  const fromObservation = numberOrNull(record.fromObservation);
-  const toObservation = numberOrNull(record.toObservation);
-  if (fromObservation === null) invalid.push('fromObservation_not_finite_number');
-  if (toObservation === null) invalid.push('toObservation_not_finite_number');
+  const fromObservation = isNonNegativeInteger(record.fromObservation) ? record.fromObservation : null;
+  const toObservation = isNonNegativeInteger(record.toObservation) ? record.toObservation : null;
+  if (fromObservation === null) invalid.push('fromObservation_not_nonnegative_integer');
+  if (toObservation === null) invalid.push('toObservation_not_nonnegative_integer');
 
   const fromReference = referenceStatus(fromId, endpointIndex, endpointsStatus, endpointsComplete);
   const toReference = referenceStatus(toId, endpointIndex, endpointsStatus, endpointsComplete);
@@ -743,24 +795,31 @@ function projectCrossing(
       addIssue(ctx, 'dangling_portal_reference', locator, `endpoint "${reference.id}" is unresolved (${reference.status})`);
       blockers.push(`endpoint_reference_${reference.status}`);
     } else if (reference.status === 'ambiguous') {
-      addIssue(ctx, 'ambiguous_portal_reference', locator, `endpoint "${reference.id}" matches ${reference.matchedLocators.length} records`);
+      const suffix = reference.locatorsTruncated ? ` (+${reference.omittedLocators} more locations)` : '';
+      addIssue(ctx, 'ambiguous_portal_reference', locator, `endpoint "${reference.id}" matches ${reference.matchCount} records at ${reference.locatorSamples.join(', ')}${suffix}`);
       blockers.push('ambiguous_portal_reference');
     } else if (reference.status === 'unverified_truncated') {
       addIssue(ctx, 'unverified_portal_reference', locator, `endpoint "${reference.id}" could not be verified because endpoint inspection was truncated`);
       blockers.push('unverified_portal_reference');
+    } else if (reference.status === 'referenced_endpoint_needs_review') {
+      addIssue(ctx, 'blocked_endpoint_reference', locator, `endpoint "${reference.id}" is needs_review; the reference does not promote it`);
+      blockers.push('referenced_endpoint_needs_review');
     }
   }
   if (fromId !== null && fromId === toId) blockers.push('same_endpoint_reference');
-  if (recordType === 'travel_gateway') {
-    const resolved = [...fromReference.resolvedEndpoints, ...toReference.resolvedEndpoints];
-    if (fromReference.status === 'resolved' && toReference.status === 'resolved' && resolved.some((endpoint) => endpoint.kind !== 'end_gateway')) {
-      blockers.push('gateway_endpoint_kind_mismatch');
+
+  if (fromReference.status === 'resolved' && toReference.status === 'resolved' && fromReference.scope && toReference.scope) {
+    const fromScope = fromReference.scope;
+    const toScope = toReference.scope;
+    if (fromScope.worldId !== toScope.worldId) blockers.push('endpoint_world_mismatch');
+    if (recordType === 'travel_gateway') {
+      if (fromScope.kind !== 'end_gateway' || toScope.kind !== 'end_gateway') blockers.push('gateway_endpoint_kind_mismatch');
+      if (fromScope.dim !== 'the_end' || toScope.dim !== 'the_end') blockers.push('gateway_endpoint_not_the_end');
+    } else if (fromScope.dim === toScope.dim) {
+      blockers.push('endpoint_dimensions_not_distinct');
     }
-  } else if (fromReference.status === 'resolved' && toReference.status === 'resolved') {
-    const fromEndpoint = fromReference.resolvedEndpoints[0];
-    const toEndpoint = toReference.resolvedEndpoints[0];
-    if (fromEndpoint.worldId === toEndpoint.worldId && fromEndpoint.dim === toEndpoint.dim) blockers.push('endpoint_dimensions_not_distinct');
   }
+  if (fromSession !== null && toSession !== null && fromSession === toSession) blockers.push('crossing_session_not_distinct');
   if (!complete) blockers.push('collection_truncated');
   if (!versionOk) blockers.push('unrecognized_root_version');
   markUnknownFields(projection, record, TRAVEL_CROSSING_FIELDS, ctx);
@@ -861,17 +920,20 @@ function inspectWorldMemory(raw: unknown, ctx: Context) {
   };
 
   const chestsAvailable = chests.status !== 'omitted' && chests.status !== 'invalid';
+  // Array lengths remain known when only nested item validation was truncated.
+  const allLineLengthsKnown = chests.records.every((record) => record.contents.itemLines.present);
+  const itemLinesKnown = chestsAvailable && !chests.truncated && allLineLengthsKnown;
   const itemLines = {
     unit: 'item_lines',
     countedAsContainers: false,
     status: chests.status,
-    total: !chestsAvailable || chests.truncated || chests.records.some((record) => !record.contents.itemLines.present || record.contents.itemLines.truncated)
-      ? null
-      : chests.records.reduce((sum, record) => sum + (record.contents.itemLines.total ?? 0), 0),
+    total: itemLinesKnown
+      ? chests.records.reduce((sum, record) => sum + (record.contents.itemLines.total ?? 0), 0)
+      : null,
     inspected: chests.records.reduce((sum, record) => sum + record.contents.itemLines.inspected, 0),
-    uninspected: !chestsAvailable || chests.truncated
-      ? null
-      : chests.records.reduce((sum, record) => sum + (record.contents.itemLines.uninspected ?? 0), 0),
+    uninspected: itemLinesKnown
+      ? chests.records.reduce((sum, record) => sum + (record.contents.itemLines.uninspected ?? 0), 0)
+      : null,
     invalid: chests.records.reduce((sum, record) => sum + record.contents.itemLines.invalid, 0),
     truncated: chests.status === 'truncated' || chests.records.some((record) => record.contents.itemLines.truncated),
   };
@@ -929,12 +991,31 @@ function inspectTravel(raw: unknown, ctx: Context) {
   const endpoints = inspectArrayCollection(raw.endpoints, '/travel/endpoints', ctx, (item, index, complete) => projectEndpoint(item, index, ctx, complete, versionOk));
   applyDuplicateIds(endpoints.records, ctx);
   refreshCollectionCounts(endpoints);
-  const endpointIndex = new Map<string, EndpointRecord[]>();
+  const endpointIndex = new Map<string, EndpointIndexEntry>();
   for (const endpoint of endpoints.records) {
     if (!endpoint.id) continue;
-    const group = endpointIndex.get(endpoint.id) ?? [];
-    group.push(endpoint);
-    endpointIndex.set(endpoint.id, group);
+    const existing = endpointIndex.get(endpoint.id);
+    if (!existing) {
+      endpointIndex.set(endpoint.id, {
+        count: 1,
+        locatorSamples: ctx.options.maxNestedItemsPerRecord > 0 ? [endpoint.locator] : [],
+        omittedLocators: ctx.options.maxNestedItemsPerRecord > 0 ? 0 : 1,
+        unique: {
+          locator: endpoint.locator,
+          worldId: endpoint.worldId,
+          dim: endpoint.dim,
+          kind: endpoint.kind,
+          observedAt: endpoint.observedAt,
+          shapeStatus: endpoint.shapeStatus,
+          migrationStatus: endpoint.migrationStatus,
+        },
+      });
+      continue;
+    }
+    existing.count++;
+    if (existing.locatorSamples.length < ctx.options.maxNestedItemsPerRecord) existing.locatorSamples.push(endpoint.locator);
+    existing.omittedLocators = existing.count - existing.locatorSamples.length;
+    existing.unique = null;
   }
   const endpointsComplete = endpoints.status === 'inspected' || endpoints.status === 'empty';
   const traversals = inspectArrayCollection(raw.traversals, '/travel/traversals', ctx, (item, index, complete) =>
