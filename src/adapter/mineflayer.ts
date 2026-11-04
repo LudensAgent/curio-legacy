@@ -4246,7 +4246,13 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (item === 'bucket' && ['water', 'lava'].includes(block.name)) {
         if (Number(block.getProperties().level) !== 0) return { ok: false, reason: 'NOT_SOURCE:指定流体不是源方块' };
         const from = b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0);
-        const aim = block.position.offset(0.5, 0.85, 0.5), direction = aim.minus(from), distance = direction.norm();
+        // 顶部被实心方块遮挡时，朝 y+0.85 的“液面”会被头顶方块挡住：改为朝源格中心（侧面可接触），
+        // 射线才会首先命中源而非头顶方块。顶部开阔（空气/流体/含水/水生植物）仍朝液面。
+        const above = b.blockAt(block.position.offset(0, 1, 0));
+        const topOccluded = above !== null
+          && !['air', 'cave_air', 'void_air', 'water', 'lava', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass'].includes(above.name)
+          && above.getProperties?.().waterlogged !== true;
+        const aim = block.position.offset(0.5, topOccluded ? 0.5 : 0.85, 0.5), direction = aim.minus(from), distance = direction.norm();
         if (distance > 4.4 || distance < 0.01) return { ok: false, reason: 'OUT_OF_RANGE:指定流体源不在交互范围内' };
         if (typeof b.world?.raycast !== 'function') return { ok: false, reason: 'TARGET_NOT_CONFIRMED:当前无法确认流体源的射线' };
         // SOURCE_ONLY 也会命中含水方块和水生植物中的水源，不只是名为 water 的格子。
