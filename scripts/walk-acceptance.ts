@@ -718,7 +718,8 @@ export function acceptedMovementBeyond(
 ): DeliveredSampleRecord | undefined {
   const accepted = acceptedMeasurements(records, taskId, delegationId);
   const last = accepted[accepted.length - 1];
-  return last && dist2(last.sample.pos, startPos) > minDistance ? last : undefined;
+  return last && last.statusAfter.result === null && last.statusAfter.activeStepIndex !== null
+    && dist2(last.sample.pos, startPos) > minDistance ? last : undefined;
 }
 
 /**
@@ -2230,8 +2231,10 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
       const { delegationId } = await awaitRouteStartRecord(d.exec.routeCalls, t.task.id, t.done, 10_000, 'W7b');
       const done = t.done;
       await waitFor(
-        () => acceptedMovementBeyond(d.exec.deliveredSamples, t.task.id, delegationId, startPos, 0.5) !== undefined,
-        15_000, 'W7b 本 task 已接受测量开始移动',
+        () => ctx.arbiter.current?.id === t.task.id
+          && publicRouteTerminalSeq(d.exec.routeCalls, d.exec.deliveredSamples, t.task.id, delegationId) === null
+          && acceptedMovementBeyond(d.exec.deliveredSamples, t.task.id, delegationId, startPos, 0.5) !== undefined,
+        15_000, 'W7b 本 task 活跃已接受测量开始移动',
       );
       const acceptedBeforePause = acceptedMeasurements(d.exec.deliveredSamples, t.task.id, delegationId).length;
       snapControl(ctx, 'before-paused-frame-cancel', ev);
@@ -2342,8 +2345,10 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
       const { delegationId } = await awaitRouteStartRecord(d.exec.routeCalls, t.task.id, t.done, 10_000, 'W7c');
       const done = t.done;
       await waitFor(
-        () => acceptedMovementBeyond(d.exec.deliveredSamples, t.task.id, delegationId, startPos, 0.5) !== undefined,
-        15_000, 'W7c 本 task 已接受测量开始移动',
+        () => ctx.arbiter.current?.id === t.task.id
+          && publicRouteTerminalSeq(d.exec.routeCalls, d.exec.deliveredSamples, t.task.id, delegationId) === null
+          && acceptedMovementBeyond(d.exec.deliveredSamples, t.task.id, delegationId, startPos, 0.5) !== undefined,
+        15_000, 'W7c 本 task 活跃已接受测量开始移动',
       );
       const acceptedBefore = acceptedMeasurements(d.exec.deliveredSamples, t.task.id, delegationId);
       const lastBefore = acceptedBefore[acceptedBefore.length - 1];

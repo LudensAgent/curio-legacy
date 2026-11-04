@@ -552,6 +552,10 @@ test('acceptedMovementBeyond：假夹具中仅本 task/delegation 已接受且�
   // lastPosition 未记录该原始测量：未接受。
   const unaccepted = delivery({ x: 1.5, y: 64, z: 0 }, statusSnap(), statusSnap({ lastPosition: { x: 0.5, y: 64, z: 0 } }));
   assert.equal(acceptedMovementBeyond([unaccepted], 'task_A', 'walk-1', start, 0.5), undefined);
+  // 本次 sample 自身令公开状态到达：before 仍为 null，但不是活跃测量。
+  assert.equal(acceptedMovementBeyond([at(1.5, { result: arrivedNav() })], 'task_A', 'walk-1', start, 0.5), undefined);
+  // 公开状态已离开活动步：不得触发。
+  assert.equal(acceptedMovementBeyond([at(1.5, { activeStepIndex: null })], 'task_A', 'walk-1', start, 0.5), undefined);
   // 正确本 task 活跃测量 > 0.5 才触发，并保留原 sample 身份/时刻。
   const good = at(1.5);
   const hit = acceptedMovementBeyond([unaccepted, good], 'task_A', 'walk-1', start, 0.5);
