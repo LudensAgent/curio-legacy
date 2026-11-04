@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import { PersistenceError } from 'curio-minecraft-3d-memory/storage/sqlite';
 import { classifySpatialShutdown, errorFacts, spatialShutdownDiagnostics } from '../src/spatial/host-shutdown.ts';
+import { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import type { ShutdownResult } from '../src/spatial/shared-session.ts';
 
 const PROJECT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -119,6 +120,57 @@ test('诊断：非 Error 抛出值也保留类型与内容', () => {
   assert.deepEqual(diagnostics.primarySaveError, { kind: null, name: 'string', message: 'boom' });
   assert.deepEqual(diagnostics.cancelError, { kind: null, name: 'number', message: '42' });
   assert.deepEqual(errorFacts(null), { kind: null, name: 'object', message: 'null' });
+  assert.deepEqual(errorFacts(undefined), { kind: null, name: 'undefined', message: 'undefined' });
+
+  // 普通对象与 Error 走同一份字段读取：typed 字符串字段保留，缺失时才退回类型与 String。
+  assert.deepEqual(
+    errorFacts({ kind: 'capacity', name: 'plain-save', message: 'retained reason', code: 'X' }),
+    { kind: 'capacity', name: 'plain-save', message: 'retained reason', code: 'X' },
+  );
+  assert.deepEqual(errorFacts({ code: 7 }), { kind: null, name: 'object', message: '[object Object]', code: 7 });
+});
+
+test('诊断：真实会话最终 checkpoint 抛普通对象时保留字段、判非成功且真实 close 完成', async (t) => {
+  const { dir, abs } = fixture(t);
+  const dbPath = abs(path.join(dir, 'spatial.sqlite'));
+  const worldId = 'shared-spatial-plain-throw';
+  const svc = await SharedSpatialSession.open({ worldId, databasePath: dbPath, timeoutMs: 5000 });
+  let result: ShutdownResult | null = null;
+  try {
+    svc.beginSession({ worldId, dim: 'overworld', sessionId: 's1' });
+    svc.observe([{
+      name: 'minecraft:stone',
+      properties: {},
+      pos: { x: 0, y: 0, z: 0 },
+      worldId,
+      sessionId: 's1',
+      dimension: 'overworld',
+      observationId: 1,
+      observedAt: 1,
+      source: 'vision',
+      stateComplete: true,
+    }]);
+
+    const thrown = { kind: 'capacity', name: 'plain-save', message: 'retained reason', code: 'X' };
+    svc.session.checkpoint = async () => { throw thrown; };
+
+    result = await svc.shutdown();
+    const diagnostics = spatialShutdownDiagnostics(result, worldId);
+    assert.equal(result.error, thrown, '原始抛出对象保持同一性');
+    assert.equal(diagnostics.ok, false);
+    assert.ok(diagnostics.problems.includes('primary_save_error'));
+    assert.deepEqual(diagnostics.primarySaveError, { kind: 'capacity', name: 'plain-save', message: 'retained reason', code: 'X' });
+    assert.equal(diagnostics.checkpoint, null);
+    assert.equal(result.closeError, null);
+    assert.notEqual(result.close, null, '保存错误后仍须尝试真实 close');
+    assert.equal(result.close!.completed, true);
+    assert.equal(result.close!.error, null);
+    assert.equal(classifySpatialShutdown(result, worldId).ok, false);
+  } finally {
+    if (result === null) {
+      try { await svc.shutdown(); } catch { /* 保留原始失败证据 */ }
+    }
+  }
 });
 
 test('主启动：真实空间库打开失败时以非零码退出，且不初始化本地记忆/计时器/Bot', async (t) => {
@@ -156,15 +208,45 @@ test('主启动：真实空间库打开失败时以非零码退出，且不初�
     'OBSERVER_FEED=0',
   ].join('\n') + '\n');
 
+  // 只观测真实原型方法：主启动若构造 WorldMemory/EpisodicMemory，这两个调用必然发生。
+  const preload = path.join(dir, 'observe-memory-hooks.mjs');
+  const hookEvidence = path.join(dir, 'memory-hook-evidence.json');
+  const storeUrl = pathToFileURL(path.join(PROJECT, 'src', 'memory', 'store.ts')).href;
+  const episodicUrl = pathToFileURL(path.join(PROJECT, 'src', 'memory', 'episodic.ts')).href;
+  fs.writeFileSync(preload, `
+import fs from 'node:fs';
+import { WorldMemory } from ${JSON.stringify(storeUrl)};
+import { EpisodicMemory } from ${JSON.stringify(episodicUrl)};
+
+const evidenceFile = process.env.CHILD_MEMORY_EVIDENCE;
+const calls = { installed: true, flush: 0, start: 0 };
+const realFlush = WorldMemory.prototype.flush;
+WorldMemory.prototype.flush = function (...args) {
+  calls.flush += 1;
+  return realFlush.apply(this, args);
+};
+const realStart = EpisodicMemory.prototype.start;
+EpisodicMemory.prototype.start = function (...args) {
+  calls.start += 1;
+  return realStart.apply(this, args);
+};
+if (evidenceFile) process.on('exit', () => fs.writeFileSync(evidenceFile, JSON.stringify(calls)));
+`);
+
   const child = await runChild([
     '--import', import.meta.resolve('tsx'),
+    '--import', pathToFileURL(preload).href,
     fileURLToPath(new URL('../src/main.ts', import.meta.url)),
     '--curio=test',
-  ], sanitizedEnv({ CURIO_ROOT: dir }), 20_000);
+  ], sanitizedEnv({ CURIO_ROOT: dir, CHILD_MEMORY_EVIDENCE: hookEvidence }), 20_000);
 
   assert.equal(child.timedOut, false, `子进程超时；stdout=${child.stdout} stderr=${child.stderr}`);
   assert.notEqual(child.code, 0, `期望非零退出，实际 ${child.code}；${child.stderr}`);
   assert.equal(connections, 0, '空间库打开失败后不应尝试连接 Bot');
+
+  // 钩子回读作为构造证据；文件不存在/钩子未装载不能算通过。
+  assert.ok(fs.existsSync(hookEvidence), `缺少钩子证据；stderr=${child.stderr}`);
+  assert.deepEqual(JSON.parse(fs.readFileSync(hookEvidence, 'utf8')), { installed: true, flush: 0, start: 0 });
 
   const line = child.stderr.split(/\r?\n/).find((entry) => entry.includes('"event":"spatial_open_failed"'));
   assert.ok(line, `缺少结构化打开失败诊断；stderr=${child.stderr}`);
@@ -177,6 +259,40 @@ test('主启动：真实空间库打开失败时以非零码退出，且不初�
 
   assert.equal(fs.existsSync(path.join(dataDir, 'world-memory.json')), false, 'WorldMemory 不应被构造');
   assert.equal(fs.existsSync(path.join(dataDir, 'memory')), false, 'EpisodicMemory 不应开始归档');
+
+  // 正向探针：同一 preload 下真实构造两者时钩子必须记到调用，证明上面的 0 不是钩子失效。
+  const probeDir = path.join(dir, 'probe');
+  fs.mkdirSync(probeDir, { recursive: true });
+  const probeScript = path.join(dir, 'memory-hook-probe.mts');
+  const probeEvidence = path.join(dir, 'memory-hook-probe.json');
+  const eventsUrl = pathToFileURL(path.join(PROJECT, 'src', 'events.ts')).href;
+  fs.writeFileSync(probeScript, `
+import path from 'node:path';
+import { WorldMemory } from ${JSON.stringify(storeUrl)};
+import { EpisodicMemory } from ${JSON.stringify(episodicUrl)};
+import { EventBus } from ${JSON.stringify(eventsUrl)};
+
+const dir = process.env.CHILD_PROBE_DIR;
+const memory = new WorldMemory(path.join(dir, 'world-memory.json'));
+const episodic = new EpisodicMemory(
+  { provider: 'local', worldId: 'probe', agentId: 'probe', baseUrl: '', apiKey: '', bankId: '', timeoutMs: 1000, maxContextBytes: 1024 },
+  memory,
+  new EventBus(),
+  () => { throw new Error('probe must not read agent state'); },
+  dir,
+);
+episodic.start();
+episodic.stop();
+`);
+  const probe = await runChild([
+    '--import', import.meta.resolve('tsx'),
+    '--import', pathToFileURL(preload).href,
+    probeScript,
+  ], sanitizedEnv({ CHILD_PROBE_DIR: probeDir, CHILD_MEMORY_EVIDENCE: probeEvidence }), 20_000);
+  assert.equal(probe.timedOut, false, `探针超时；stdout=${probe.stdout} stderr=${probe.stderr}`);
+  assert.equal(probe.code, 0, `探针退出码 ${probe.code}；${probe.stderr}`);
+  assert.ok(fs.existsSync(probeEvidence), `探针缺少钩子证据；stderr=${probe.stderr}`);
+  assert.deepEqual(JSON.parse(fs.readFileSync(probeEvidence, 'utf8')), { installed: true, flush: 1, start: 1 });
 });
 
 test('真实会话关停：worker 自然退出，重开数据库仍读到最终事实及其 STALE 证据', async (t) => {

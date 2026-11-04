@@ -17,14 +17,14 @@ export interface ErrorFacts {
 }
 
 export function errorFacts(error: unknown): ErrorFacts {
-  if (error instanceof Error) {
-    const kind = (error as { kind?: unknown }).kind;
-    const code = (error as { code?: unknown }).code;
+  if (typeof error === 'object' && error !== null) {
+    const facts = error as { kind?: unknown; name?: unknown; message?: unknown; code?: unknown };
     return {
-      kind: typeof kind === 'string' ? kind : null,
-      name: error.name,
-      message: error.message,
-      ...(typeof code === 'string' || typeof code === 'number' ? { code } : {}),
+      kind: typeof facts.kind === 'string' ? facts.kind : null,
+      // 普通对象没有可信的 name/message 时退回真实类型与 String 值，不臆造错误类别。
+      name: typeof facts.name === 'string' ? facts.name : 'object',
+      message: typeof facts.message === 'string' ? facts.message : String(error),
+      ...(typeof facts.code === 'string' || typeof facts.code === 'number' ? { code: facts.code } : {}),
     };
   }
   return { kind: null, name: typeof error, message: String(error) };
