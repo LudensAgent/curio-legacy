@@ -513,10 +513,17 @@ test('walk_to 实际 Vision 链：空共享图经固定半径4准备取证，公
 
     // 现有 physics 闭环提供连续身体起点与真实帧；VisionProbe 只替换光学查询。
     const physics = physicsHarness();
+    const adapter = new VisionProbeAdapter();
     let bodyLooks = 0;
     const botLook = physics.fixture.bot.look.bind(physics.fixture.bot);
-    physics.fixture.bot.look = (yaw: number, pitch: number) => { bodyLooks++; botLook(yaw, pitch); };
-    const adapter = new VisionProbeAdapter();
+    // 执行段的 body.look 只推进 physics 朝向；真实 Vision.eye 读的是 adapter 的公开
+    // yaw/pitch，因此同步到 FakeAdapter，准备转头仍由 adapter.look 单独计数。
+    physics.fixture.bot.look = (yaw: number, pitch: number) => {
+      bodyLooks++;
+      botLook(yaw, pitch);
+      adapter.yaw = yaw;
+      adapter.pitch = pitch;
+    };
     adapter.feet = () => ({
       x: physics.fixture.entity.position.x, y: physics.fixture.entity.position.y, z: physics.fixture.entity.position.z,
     });

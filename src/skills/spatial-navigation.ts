@@ -29,7 +29,8 @@ import {
 import { awaitFrame, walkCollisionProvider } from '../adapter/walk-route.ts';
 import type { WalkTick } from '../adapter/walk-route.ts';
 import type { SharedSpatialSession } from '../spatial/shared-session.ts';
-import { executeWalkRoute, observeCells, readPoint } from './walk-route.ts';
+import { executeWalkRoute, historyFields, observeCells, readPoint } from './walk-route.ts';
+import type { WalkRouteExecution } from './walk-route.ts';
 import { fail, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 
 /** 本次执行后端最多接受 32 个候选点；超限如实报 route_budget，绝不截断路线。 */
@@ -232,7 +233,8 @@ async function confirmZeroEdge(
         return cancelled('lifecycle', 'shared spatial session is not accepting observations', 'walk_to 零边确认期间共享空间会话暂停/关闭/未准入');
       }
 
-      // 父取消与本次生命周期任一到达都直接唤醒等待，不依赖帧源响应 signal。
+      // 父取消与本次生命周期任一到达都经 awaitFrame 合并到 WalkTick 既有 signal 契约：
+      // abort/期限会中止本次等待并传递给帧源，不另设一套超时。
       const entity = await awaitFrame(tick, deadlineMs, Date.now, ctx.signal, lifecycle.signal);
 
       // 每次等待返回后先复核，再决定是否接受这一帧；失效后的迟到帧不能覆盖旧末位。
@@ -320,17 +322,19 @@ async function confirmZeroEdge(
 
 /** 把执行后端的结果映射成技能结果；候选末点到 ≠ 原目标到达。 */
 function executionResult(
-  nav: NavResult,
+  execution: WalkRouteExecution,
   candidate: WalkSearchCandidate,
   snapshot: WalkSearchSnapshot,
   base: WalkToBase,
 ): SkillResult {
+  const nav = execution.nav;
   const data = {
     ...base,
     stage: nav.outcome,
     candidate,
     search: snapshot,
     nav,
+    ...historyFields(execution),
     ...(nav.outcome === 'ARRIVED' ? { position: { ...nav.lastPosition } } : {}),
     ...(nav.outcome !== 'ARRIVED' && nav.lastPosition !== undefined ? { position: { ...nav.lastPosition } } : {}),
   };
@@ -587,6 +591,8 @@ export const walkTo: Skill<WalkToArgs> = {
         candidate,
         search: snapshot,
         nav,
+        // 零边候选没有任何已确认移动段：统一不记录历史、不造 traversal/move id。
+        history: { status: 'not_recorded' as const, traversalIds: [] as [], reason: 'no_confirmed_segment' as const },
         ...(nav.lastPosition !== undefined ? { position: { ...nav.lastPosition } } : {}),
       };
       if (nav.outcome === 'ARRIVED') {
@@ -626,7 +632,8 @@ export const walkTo: Skill<WalkToArgs> = {
       bodyArrival: GROUNDED_ARRIVAL_DEFAULTS, shapeProvider: walkCollisionProvider,
       deadlineMs: effectiveDeadline, timeoutMs: 4000,
     };
-    const nav = await executeWalkRoute(ctx, spatial, { map, body, tick, request, deadlineMs: effectiveDeadline });
+    const execution = await executeWalkRoute(ctx, spatial, { map, body, tick, request, deadlineMs: effectiveDeadline });
+    const nav = execution.nav;
 
     // 父取消但执行器以其它终态返回时，仍按取消返回并保留实际 nav/partial。
     // 位置只投影执行器已有的 lastPosition，不重读新任务的 adapter state。
@@ -635,7 +642,7 @@ export const walkTo: Skill<WalkToArgs> = {
         status: 'cancelled',
         summary: nav.message,
         data: {
-          ...base, stage: 'CANCELLED', candidate, search: snapshot, nav,
+          ...base, stage: 'CANCELLED', candidate, search: snapshot, nav, ...historyFields(execution),
           ...(nav.lastPosition !== undefined ? { position: { ...nav.lastPosition } } : {}),
         },
       };
@@ -654,6 +661,8 @@ export const walkTo: Skill<WalkToArgs> = {
           trace: nav.trace,
           lastPosition: { ...nav.lastPosition },
           lastObservation: { ...nav.lastObservation },
+          // 内存写入状态只透传真实 pending/failed 语义，不改变原委托的身体结果。
+          ...(nav.memoryWrite !== undefined ? { memoryWrite: nav.memoryWrite } : {}),
           problem: { kind: 'unconfirmed_arrival', expected: { ...args.to } },
         };
         return fail('EFFECT_NOT_CONFIRMED', detail, {
@@ -665,10 +674,11 @@ export const walkTo: Skill<WalkToArgs> = {
           search: snapshot,
           nav: delegationNav,
           executionNav: nav,
+          ...historyFields(execution),
           problem: { kind: 'unconfirmed_arrival', expected: { ...args.to } },
         });
       }
     }
-    return executionResult(nav, candidate, snapshot, base);
+    return executionResult(execution, candidate, snapshot, base);
   },
 };

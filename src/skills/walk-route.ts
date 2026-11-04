@@ -6,10 +6,11 @@
  * 观测遵守 Vision 的批次限制（≤32 格/次），变化报告整批合并喂给地图，不丢支撑拆除通知。
  */
 
+import { randomUUID } from 'node:crypto';
 import { GROUNDED_ARRIVAL_DEFAULTS } from 'curio-minecraft-3d-memory';
 import type { ChangeReport, NavResult, Observation, Vec3Like, VoxelMap, WalkRouteRequest } from 'curio-minecraft-3d-memory';
 import { runWalkRoute, walkCollisionProvider } from '../adapter/walk-route.ts';
-import type { WalkBody, WalkTick } from '../adapter/walk-route.ts';
+import type { WalkBody, WalkMoveRequestObservation, WalkTick } from '../adapter/walk-route.ts';
 import type { SharedSpatialSession } from '../spatial/shared-session.ts';
 import type { BlockObservation } from '../adapter/types.ts';
 import { fail, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
@@ -92,20 +93,51 @@ function routeCells(points: Vec3Like[]): Vec3Like[] {
   return cells;
 }
 
-function navToResult(nav: NavResult): SkillResult {
+/**
+ * 一次真实步行执行的内存历史投影。已确认段的事实先进入内存，落盘状态只由宿主
+ * 既有周期/final checkpoint 确认；`accepted_pending_checkpoint` 不是 `saved`。
+ */
+export type WalkHistoryOutcome =
+  | { status: 'accepted_pending_checkpoint'; fragmentId: string; traversalIds: string[] }
+  | { status: 'not_recorded'; traversalIds: []; reason: 'no_confirmed_segment' }
+  | { status: 'failed'; fragmentId?: string; traversalIds: string[] };
+
+/** 保存边界失败的精确阶段与已成功 ID；不改写实际身体结果。 */
+export interface WalkHistoryFailure {
+  stage: 'closed' | 'save_fragment' | 'add_traversal';
+  message: string;
+  fragmentId?: string;
+  traversalIds: string[];
+}
+
+export interface WalkRouteExecution {
+  nav: NavResult;
+  history: WalkHistoryOutcome;
+  historyFailure?: WalkHistoryFailure;
+}
+
+export function historyFields(execution: WalkRouteExecution): Record<string, unknown> {
+  return {
+    history: execution.history,
+    ...(execution.historyFailure !== undefined ? { historyFailure: execution.historyFailure } : {}),
+  };
+}
+
+function navToResult(nav: NavResult, execution: WalkRouteExecution): SkillResult {
   const summary = nav.message;
-  if (nav.outcome === 'ARRIVED') return ok(summary, { nav });
+  const data = { nav, ...historyFields(execution) };
+  if (nav.outcome === 'ARRIVED') return ok(summary, data);
   // 取消是取消，不包装成普通 STUCK；部分位移随 nav.lastPosition/trace 保留在 data。
-  if (nav.outcome === 'CANCELLED') return { status: 'cancelled', summary, data: { nav } };
+  if (nav.outcome === 'CANCELLED') return { status: 'cancelled', summary, data };
   const code = nav.outcome === 'TIMEOUT' ? 'TIMEOUT' : nav.outcome === 'BLOCKED' ? 'PATH_NOT_FOUND' : 'ERROR';
-  return fail(code, summary, { nav });
+  return fail(code, summary, data);
 }
 
 /**
  * walk_route 与 walk_to 共用的窄执行边界：同一套移动中局部观察、生命周期检查与
  * 共享会话附着/解除。调用者只提供已验证的路线请求；不在此处搜索或改写目标。
  */
-export function executeWalkRoute(
+export async function executeWalkRoute(
   ctx: SkillCtx,
   spatial: SharedSpatialSession,
   opts: {
@@ -115,11 +147,19 @@ export function executeWalkRoute(
     request: WalkRouteRequest;
     deadlineMs: number;
   },
-): Promise<NavResult> {
+): Promise<WalkRouteExecution> {
+  // 每次真实执行自己的唯一调用标识：库的 delegationId/executionId 会在新的 loop 里
+  // 重用（walk-1-step-n），不能单独作为全局身份；这里只用于区分本次实际调用。
+  const invocationId = randomUUID();
+  // 库实际发出的单段请求事实（from/作用域/executionId）；收到不代表运动或到达，
+  // 只有终态 trace 中已确认的前缀才与这些请求配对写历史。
+  const moveRequests: WalkMoveRequestObservation[] = [];
+
   // 移动中持续更新身体周边格（视锥随身体朝向移动而更新），有界 3×3×4。
   const observe = () => observeCells(ctx, opts.map, bodyLocalCells(ctx.adapter.state().pos));
-  return runWalkRoute({
+  const nav = await runWalkRoute({
     map: opts.map, body: opts.body, request: opts.request, tick: opts.tick, signal: ctx.signal, observe,
+    onMoveRequest: (move) => { moveRequests.push(move); },
     lifecycle: () => {
       const s = ctx.adapter.state();
       // 真实 ready 丢失（同一 sessionId 下区块消失）可能先被步行生命周期看到、
@@ -140,6 +180,101 @@ export function executeWalkRoute(
       return () => spatial.detach(token);
     },
   });
+
+  // 已确认段 = 终态 trace 的前缀，且每一段都有库实际发出的请求可供归属。
+  // 未确认的当前半段不会进入 trace，也不会被补写成 traversal。
+  const confirmed = Math.min(nav.trace.length, moveRequests.length);
+  if (confirmed === 0) {
+    return {
+      nav,
+      history: { status: 'not_recorded', traversalIds: [], reason: 'no_confirmed_segment' },
+    };
+  }
+
+  // 共享会话已进入关停：旧步行的异步收尾不得再绕过关停直接写内存历史，也
+  // 不能把未落盘事实标成 accepted_pending_checkpoint；真实 Nav/confirmed prefix 原样保留。
+  if (spatial.closing) {
+    nav.memoryWrite = 'failed';
+    return {
+      nav,
+      history: { status: 'failed', traversalIds: [] },
+      historyFailure: {
+        stage: 'closed',
+        message: 'shared spatial session is closing; confirmed walk corridor was not written',
+        traversalIds: [],
+      },
+    };
+  }
+
+  // 原请求点列前缀（长度 = 已确认段数 + 1）作为经实际执行确认的 nominal corridor 几何。
+  // 不取整、不反转、不插值、不拼接实测轨迹，也不把未走后续点写入折线。
+  const prefix = opts.request.points.slice(0, confirmed + 1);
+  // fragment ID 同样包含父任务、本次调用与首段实际执行归属；traversal 各自包含所属段。
+  const fragmentId = `${ctx.taskId}:${invocationId}:${moveRequests[0]!.executionId}`;
+  const fragment = {
+    id: fragmentId,
+    worldId: opts.request.worldId,
+    dim: opts.request.dim,
+    kind: 'walked' as const,
+    entrances: [] as Vec3Like[],
+    polyline: prefix.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+    geometrySource: 'traversal' as const,
+    deepestY: Math.min(...prefix.map((p) => p.y)),
+    createdAt: nav.trace[0]!.ts,
+    lastUsedAt: nav.trace[confirmed - 1]!.ts,
+    uses: 1,
+  };
+  try {
+    spatial.session.history.saveFragment(fragment);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    nav.memoryWrite = 'failed';
+    return {
+      nav,
+      history: { status: 'failed', traversalIds: [] },
+      historyFailure: { stage: 'save_fragment', message, traversalIds: [] },
+    };
+  }
+
+  // 逐确认段写实际证据：from 来自该次库实际发出的 ExecutableMove.from，to/时间来自
+  // 对应终态 trace；executionId 保留库原值，actionId 保留父任务，均不宣称全局唯一。
+  const traversalIds: string[] = [];
+  for (let i = 0; i < confirmed; i++) {
+    const move = moveRequests[i]!;
+    const trace = nav.trace[i]!;
+    const evidence = {
+      id: `${ctx.taskId}:${invocationId}:${move.executionId}`,
+      fragmentId,
+      from: { ...move.from },
+      to: { ...trace.pos },
+      worldId: move.worldId,
+      dim: move.dim,
+      sessionId: move.sessionId,
+      observedAt: trace.ts,
+      source: 'confirmed_walk_corridor',
+      executionId: move.executionId,
+      actionId: ctx.taskId,
+      mode: 'walk' as const,
+    };
+    try {
+      spatial.session.history.addTraversal(evidence);
+      traversalIds.push(evidence.id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      nav.memoryWrite = 'failed';
+      return {
+        nav,
+        history: { status: 'failed', fragmentId, traversalIds: [...traversalIds] },
+        historyFailure: { stage: 'add_traversal', message, fragmentId, traversalIds: [...traversalIds] },
+      };
+    }
+  }
+
+  nav.memoryWrite = 'pending';
+  return {
+    nav,
+    history: { status: 'accepted_pending_checkpoint', fragmentId, traversalIds },
+  };
 }
 
 export const walkRoute: Skill<WalkRouteArgs> = {
@@ -212,10 +347,13 @@ export const walkRoute: Skill<WalkRouteArgs> = {
       bodyArrival: GROUNDED_ARRIVAL_DEFAULTS, shapeProvider: walkCollisionProvider,
       deadlineMs: effectiveDeadline, timeoutMs: 4000,
     };
-    const nav = await executeWalkRoute(ctx, spatial, { map, body, tick, request, deadlineMs: effectiveDeadline });
+    const execution = await executeWalkRoute(ctx, spatial, { map, body, tick, request, deadlineMs: effectiveDeadline });
+    const nav = execution.nav;
     // 父任务已取消但库以其它终态返回（期限/失效先到）：以取消返回，保留部分位移。
-    if (ctx.signal.aborted && nav.outcome !== 'CANCELLED') return { status: 'cancelled', summary: nav.message, data: { nav } };
-    return navToResult(nav);
+    if (ctx.signal.aborted && nav.outcome !== 'CANCELLED') {
+      return { status: 'cancelled', summary: nav.message, data: { nav, ...historyFields(execution) } };
+    }
+    return navToResult(nav, execution);
   },
 };
 
