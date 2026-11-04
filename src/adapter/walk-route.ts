@@ -35,6 +35,13 @@ const FULL_CUBE: CollisionShape = {
 const DRY_FULL = new Set(['stone', 'grass_block', 'dirt', 'cobblestone', 'sand']);
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 
+/**
+ * 移动中看向所委托路径支撑的俯仰角（弧度）。与预扫的向下俯仰一致：同列/近处路径
+ * 支撑位于身体下方，水平朝向（pitch=0）的视锥看不到它们，必须向下看才能让支撑
+ * 真正进入视锥、成为合法视觉证据。目标朝向（yaw）不受影响，且不消耗资源。
+ */
+export const WALK_GAZE_PITCH = -1.2;
+
 /** 版本明确的碰撞形状提供器：只接普通干燥整块；未知形状返回能力缺口，不猜。 */
 export const walkCollisionProvider: CollisionShapeProvider = {
   version: 'curio-1.20.1-dry-full-v1',
@@ -166,7 +173,7 @@ export class WalkMoveExecutor implements MoveExecutor {
     const moveDeadline = Math.min(request.deadlineMs, this.now() + request.timeoutMs);
     if (this.now() >= moveDeadline) return { failure: { kind: 'timed_out' } };
 
-    await this.body.look(Math.atan2(-(to.x - from.x), -(to.z - from.z)), 0);
+    await this.body.look(Math.atan2(-(to.x - from.x), -(to.z - from.z)), WALK_GAZE_PITCH);
     // 转头后重新检查取消/期限：转头等待期间可能被抢占或到期。
     if (this.aborted(request)) return { failure: { kind: 'cancelled' } };
     if (this.now() >= moveDeadline) return { failure: { kind: 'timed_out' } };
