@@ -22,6 +22,7 @@ import type {
   CollisionShapeProvider,
   ExecutableMove,
   ExecutableMoveResult,
+  KnownWalkRouteStart,
   MoveExecutor,
   NavResult,
   WalkRouteRequest,
@@ -310,6 +311,13 @@ export async function runWalkRoute(opts: {
   deadlineMs?: number;
   now?: () => number;
   bindActive?: (loop: ActiveWalkLoop) => (() => void) | void;
+  /**
+   * 可选启动接缝：收到本次运行的同一个 executor 与已取有效期限的请求。
+   * 调用者可据此调用 `startKnownWalkRoute` 并原样返回其结果；STARTED 后本运行
+   * 继续驱动该实例。REJECTED 时不会附着活动 loop、不订阅物理帧、不写控制，
+   * 直接返回携带原 reason/message 的 FAILED，不冒充世界 BLOCKED/TIMEOUT/ARRIVED。
+   */
+  starter?: (loop: WalkRouteExecutor, request: WalkRouteRequest) => KnownWalkRouteStart;
 }): Promise<NavResult> {
   const now = opts.now ?? Date.now;
   const deadline = opts.deadlineMs ?? opts.request.deadlineMs;
@@ -344,7 +352,23 @@ export async function runWalkRoute(opts: {
 
   let unbindActive: (() => void) | null = null;
   try {
-    loop.start({ ...opts.request, deadlineMs: deadline });
+    const startRequest: WalkRouteRequest = { ...opts.request, deadlineMs: deadline };
+    if (opts.starter) {
+      const start = opts.starter(loop, startRequest);
+      if (start.kind === 'REJECTED') {
+        // 拒绝发生在 executor.start 之前：不附着活动 loop、不订阅帧、不写控制。
+        // 原 reason 保留在结构化 problem 中，message 原样带回；不改写成世界事实。
+        return {
+          outcome: 'FAILED',
+          message: start.message,
+          problem: { kind: 'unavailable', detail: `known walk route rejected: ${start.reason}` },
+          confirmed: false,
+          trace: [],
+        };
+      }
+    } else {
+      loop.start(startRequest);
+    }
     unbindActive = opts.bindActive?.({
       observe: (report, budget) => { loop.observe(report, budget); },
       cancel: (by, reason) => { cancelRun(by, reason); },
