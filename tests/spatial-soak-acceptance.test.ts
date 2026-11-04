@@ -20,10 +20,16 @@ import type { BlockObservation } from '../src/adapter/types.ts';
 import {
   BoundedJsonlWriter,
   DEFAULT_DURATION_MS,
+  FIXTURE_A,
+  FIXTURE_B,
   HELP,
+  MAX_EVENT_BYTES,
   MAX_JSONL_RECORD_BYTES,
   buildRunReport,
+  createPhysicsTickMetrics,
   createSoakMetrics,
+  decodeChunkedRecord,
+  encodeChunkedRecord,
   parseCliArgs,
   shutdownFacts,
   startSpatialSoakFoundation,
@@ -41,52 +47,139 @@ test('CLI parsing accepts exact runs, rejects malformed flags, and keeps help pu
 
   const accepted = parseCliArgs([
     '--curio=test',
-    '--mode=full',
-    '--start=200.5,64,217.5',
+    '--mode=smoke',
+    '--start=207.5,64,216.5',
     '--duration-ms=90000',
   ]);
   assert.deepEqual(accepted, {
     ok: true,
     help: false,
     curio: 'test',
-    mode: 'full',
-    start: { x: 200.5, y: 64, z: 217.5 },
-    startRaw: '200.5,64,217.5',
+    mode: 'smoke',
+    start: { x: 207.5, y: 64, z: 216.5 },
+    startRaw: '207.5,64,216.5',
     durationMs: 90000,
   });
 
-  const defaulted = parseCliArgs(['--curio=test', '--mode=smoke', '--start=200.5,64,216.5']);
+  const endpointB = parseCliArgs(['--curio=test', '--mode=smoke', '--start=209.5,64,216.5']);
+  assert.ok(endpointB.ok && !endpointB.help);
+  assert.deepEqual(endpointB.start, FIXTURE_B);
+  assert.deepEqual(FIXTURE_A, { x: 207.5, y: 64, z: 216.5 });
+
+  // full 是 H2b 占位：只接受真实一小时；90s 不能被当成一次一小时运行。
+  const fullAccepted = parseCliArgs(['--curio=test', '--mode=full', '--start=207.5,64,216.5']);
+  assert.ok(fullAccepted.ok && !fullAccepted.help);
+  assert.equal(fullAccepted.mode, 'full');
+  assert.equal(fullAccepted.durationMs, 3_600_000);
+
+  const defaulted = parseCliArgs(['--curio=test', '--mode=smoke', '--start=207.5,64,216.5']);
   assert.ok(defaulted.ok && !defaulted.help);
   assert.equal(defaulted.durationMs, DEFAULT_DURATION_MS);
 
   const rejected = [
     [],
-    ['--curio=live', '--mode=full', '--start=200.5,64,216.5'],
-    ['--curio=test', '--curio=test', '--mode=full', '--start=200.5,64,216.5'],
-    ['--curio=test', '--mode=full', '--mode=smoke', '--start=200.5,64,216.5'],
-    ['--curio=test', '--mode=full', '--start=200.5,64,216.5', '--nope=1'],
-    ['--curio=test', '--mode=full', '--start=200.5,64,216.5', '--duration-ms=89999'],
-    ['--curio=test', '--mode=full', '--start=200.5,64,216.5', '--duration-ms=3600001'],
-    ['--curio=test', '--mode=full', '--start=200.5,64,216.5', '--duration-ms=90000.5'],
-    ['--curio=test', '--mode=full', '--start=200.5,64,216.5', '--duration-ms=9e4'],
-    ['--curio=test', '--mode=full', '--start=199.9,64,216.5'],
-    ['--curio=test', '--mode=full', '--start=200.5,63,216.5'],
-    ['--curio=test', '--mode=full', '--start=200.5,64,218'],
-    ['--curio=test', '--mode=full', '--start=200.5,64,NaN'],
-    ['--curio=test', '--mode=full', '--start=200.5,64,0x10'],
+    ['--curio=live', '--mode=smoke', '--start=207.5,64,216.5'],
+    ['--curio=test', '--curio=test', '--mode=smoke', '--start=207.5,64,216.5'],
+    ['--curio=test', '--mode=full', '--mode=smoke', '--start=207.5,64,216.5'],
+    ['--curio=test', '--mode=smoke', '--start=207.5,64,216.5', '--nope=1'],
+    ['--curio=test', '--mode=smoke', '--start=207.5,64,216.5', '--duration-ms=89999'],
+    ['--curio=test', '--mode=smoke', '--start=207.5,64,216.5', '--duration-ms=3600001'],
+    ['--curio=test', '--mode=smoke', '--start=207.5,64,216.5', '--duration-ms=90000.5'],
+    ['--curio=test', '--mode=smoke', '--start=207.5,64,216.5', '--duration-ms=9e4'],
+    // full 只允许真实一小时，避免 90s 被放大或标记为一小时运行。
+    ['--curio=test', '--mode=full', '--start=207.5,64,216.5', '--duration-ms=90000'],
+    ['--curio=test', '--mode=full', '--start=207.5,64,216.5', '--duration-ms=3599999'],
+    // 仅接受精确夹具端点，不做附近/取整替换。
+    ['--curio=test', '--mode=smoke', '--start=200.5,64,216.5'],
+    ['--curio=test', '--mode=smoke', '--start=207.4,64,216.5'],
+    ['--curio=test', '--mode=smoke', '--start=207.5,63,216.5'],
+    ['--curio=test', '--mode=smoke', '--start=207.5,64,217.5'],
+    ['--curio=test', '--mode=smoke', '--start=199.9,64,216.5'],
+    ['--curio=test', '--mode=smoke', '--start=207.5,64,NaN'],
+    ['--curio=test', '--mode=smoke', '--start=207.5,64,0x10'],
   ];
   for (const argv of rejected) assert.equal(parseCliArgs(argv).ok, false, `expected rejection: ${argv.join(' ')}`);
 });
 
 test('run report stays H2 pending and never claims a full pass', () => {
-  const parsed = parseCliArgs(['--curio=test', '--mode=full', '--start=200.5,64,216.5']);
+  const parsed = parseCliArgs(['--curio=test', '--mode=full', '--start=207.5,64,216.5']);
   assert.ok(parsed.ok && !parsed.help);
   const report = buildRunReport(parsed);
   assert.equal(report.status, 'H2_PENDING');
   assert.equal(report.fullPass, false);
+  assert.equal(report.longRunCompleted, false);
   assert.equal(report.h2.state, 'pending');
   assert.equal(report.h2.fullPass, false);
   assert.equal(report.h1.state, 'implemented');
+  assert.deepEqual(report.fixture.endpoints, { A: FIXTURE_A, B: FIXTURE_B });
+  assert.equal(report.fixture.crossSectionX, 208);
+  assert.equal(report.fixture.supportY, 63);
+  assert.equal(report.fixture.bodyY, 64);
+});
+
+test('chunked evidence reconstructs large payloads exactly and detects missing parts', () => {
+  const largeText = '分段证据-'.repeat(9_000);
+  const payload = {
+    kind: 'task-done',
+    at: 1_700_000_000_123,
+    eventId: 'run:event-42',
+    outcome: {
+      task: { id: 'walk-task-1', startedAt: 1_700_000_000_000 },
+      result: { status: 'succeeded', data: { text: largeText, trace: [1, 2, 3] } },
+    },
+  };
+  const encoded = encodeChunkedRecord('run:event-42', payload, 1_024);
+  assert.ok(Buffer.byteLength(JSON.stringify(payload), 'utf8') > 16_384);
+  assert.ok(encoded.partCount > 1);
+  assert.deepEqual(
+    encoded.parts.map((part) => part.partIndex),
+    encoded.parts.map((_, index) => index),
+  );
+  assert.ok(encoded.parts.every((part) => part.eventId === 'run:event-42'));
+  assert.ok(encoded.parts.every((part) => part.partCount === encoded.partCount));
+  assert.ok(encoded.parts.every((part) => part.payloadSha256 === encoded.payloadSha256));
+
+  const decoded = decodeChunkedRecord(encoded.parts);
+  assert.equal(decoded.ok, true, decoded.problems.join(', '));
+  assert.equal(decoded.eventId, 'run:event-42');
+  assert.equal(decoded.partCount, encoded.partCount);
+  assert.deepEqual(decoded.payload, payload, 'original time and nested data must survive reconstruction');
+
+  // 相同输入产生相同的分块与哈希，便于离线重建。
+  assert.deepEqual(encodeChunkedRecord('run:event-42', payload, 1_024), encoded);
+
+  const missing = encoded.parts.filter((part) => part.partIndex !== 1);
+  const missingDecoded = decodeChunkedRecord(missing);
+  assert.equal(missingDecoded.ok, false);
+  assert.match(missingDecoded.problems.join(' '), /missing evidence chunk part 1/);
+  assert.equal(missingDecoded.payload, null);
+
+  const mismatched = encoded.parts.map((part) => part.partIndex === 2 ? { ...part, partSha256: '0'.repeat(64) } : part);
+  const mismatchDecoded = decodeChunkedRecord(mismatched);
+  assert.equal(mismatchDecoded.ok, false);
+  assert.match(mismatchDecoded.problems.join(' '), /hash mismatch/);
+
+  assert.throws(
+    () => encodeChunkedRecord('too-big', { blob: 'x'.repeat(MAX_EVENT_BYTES + 1) }),
+    RangeError,
+  );
+});
+
+test('physics tick metrics aggregate actual callback timing without retaining frames', () => {
+  const metrics = createPhysicsTickMetrics();
+  metrics.record(1_000);
+  metrics.record(1_050);
+  metrics.record(1_150);
+  const view = metrics.snapshot();
+  assert.deepEqual(view, {
+    count: 3,
+    lastAt: 1_150,
+    maxGapMs: 100,
+    meanGapMs: 75,
+    totalGapMs: 150,
+    gapCount: 2,
+  });
+  assert.equal('frames' in metrics, false);
 });
 
 test('bounded JSONL writer owns a new file, writes unique increasing records, and rejects reuse', () => {
