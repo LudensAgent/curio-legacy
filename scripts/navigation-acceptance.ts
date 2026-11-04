@@ -10,11 +10,13 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import type { TaskInfo, TaskOutcome } from '../src/arbiter/arbiter.ts';
 import type { Vec3Like } from '../src/adapter/types.ts';
 import type { Rcon } from '../src/observer/rcon.ts';
 import type { SharedSpatialSession as SharedSpatialSessionType, ShutdownResult } from '../src/spatial/shared-session.ts';
 import type { SpatialSession } from 'curio-minecraft-3d-memory/storage/sqlite';
+import type { BodySample, PathFragment, WalkRouteExecutor, WalkRouteRequest, WalkRouteStatus } from 'curio-minecraft-3d-memory';
 
 export const LANE = { minX: 200, maxXExclusive: 219, minZ: 216, maxZExclusive: 218, feetY: 64 } as const;
 const CONTROL_KEYS = ['forward', 'back', 'left', 'right', 'jump', 'sprint', 'sneak'] as const;
@@ -68,24 +70,55 @@ export function parseCliArgs(argv: readonly string[]): ParsedCli {
 export const inLane = (p: Vec3Like): boolean =>
   isVec(p) && p.y === LANE.feetY && p.x >= LANE.minX && p.x < LANE.maxXExclusive && p.z >= LANE.minZ && p.z < LANE.maxZExclusive;
 
-const deepEqual = (a: unknown, b: unknown): boolean => {
-  if (a === b) return true;
-  if (typeof a === 'number' && typeof b === 'number' && Number.isNaN(a) && Number.isNaN(b)) return true;
-  if (typeof a !== 'object' || a === null || typeof b !== 'object' || b === null || Array.isArray(a) !== Array.isArray(b)) return false;
-  const ak = Object.keys(a), bk = Object.keys(b);
-  return ak.length === bk.length && ak.every((k) => Object.prototype.hasOwnProperty.call(b, k) && deepEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]));
-};
 const distance = (a: Vec3Like, b: Vec3Like) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 interface Tolerance { horizontalTolerance: number; feetTolerance: number }
 const withinArrival = (pos: Vec3Like, target: Vec3Like, tol: Tolerance) =>
-  Math.abs(pos.x - target.x) <= tol.horizontalTolerance && Math.abs(pos.z - target.z) <= tol.horizontalTolerance && Math.abs(pos.y - target.y) <= tol.feetTolerance;
+  Math.hypot(pos.x - target.x, pos.z - target.z) <= tol.horizontalTolerance && Math.abs(pos.y - target.y) <= tol.feetTolerance;
+
+/** 小型诊断记录：真实 WalkRouteExecutor.onSample 交付的 BodySample 及其返回值。 */
+export interface CapturedRouteSample {
+  taskId: string;
+  delegationId: string;
+  accepted: boolean;
+  sample: {
+    executionId: string; sequence: number; worldId: string; dim: string; sessionId: string;
+    observedAt: number; position: Vec3Like; onGround: boolean; inWater: boolean;
+  };
+  returned: {
+    delegationId: string; lastPosition: Vec3Like | null; nextPointIndex: number;
+    activeStepIndex: number | null; resultOutcome: string | null;
+    resultLastPosition: Vec3Like | null; resultLastObservation: Record<string, unknown> | null;
+  };
+}
+export interface TerminalSampleEvidence { taskId: string; samples: readonly CapturedRouteSample[] }
+
+/** 终态必须精确对上该任务真实交付且被 onSample 接受的样本，不能靠时间容差或事后 state 推断。 */
+function terminalSampleProblems(nav: Record<string, unknown>, evidence: TerminalSampleEvidence | undefined, start: Vec3Like) {
+  const p: string[] = [];
+  if (evidence === undefined) return { problems: ['missing actual same-task WalkRouteExecutor samples'] };
+  const samples = evidence.samples.filter((s) => s.taskId === evidence.taskId);
+  if (!samples.some((s) => s.accepted && distance(s.sample.position, start) > 0.25)) p.push('no accepted same-task sample shows measured movement');
+  const pos = nav.lastPosition;
+  const obs = isRecord(nav.lastObservation) ? nav.lastObservation : null;
+  if (!isVec(pos) || obs === null || !isNum(obs.observedAt)) {
+    p.push('missing terminal lastPosition/lastObservation');
+    return { problems: p };
+  }
+  const matched = samples.find((s) => s.accepted
+    && isDeepStrictEqual(s.sample.position, pos)
+    && s.sample.worldId === obs.worldId && s.sample.dim === obs.dim && s.sample.sessionId === obs.sessionId
+    && s.sample.observedAt === obs.observedAt
+    && s.sample.onGround === obs.onGround && s.sample.inWater === obs.inWater);
+  if (matched === undefined) p.push('terminal lastPosition/lastObservation does not exactly match an accepted same-task sample');
+  return { problems: p };
+}
 const navOf = (result: unknown): Record<string, unknown> | null => {
   if (!isRecord(result) || !isRecord(result.data)) return null;
   return isRecord(result.data.nav) ? result.data.nav : null;
 };
 
-/** walk_to 终态：succeeded + 原始 nav ARRIVED/confirmed + 实测位移 + 现有运行时到达容差。 */
-export function classifyWalkToResult(result: unknown, start: Vec3Like, target: Vec3Like, tol: Tolerance) {
+/** walk_to 终态：succeeded + 原始 nav ARRIVED/confirmed + 实测位移 + 同任务真实样本 + 运行时到达容差。 */
+export function classifyWalkToResult(result: unknown, start: Vec3Like, target: Vec3Like, tol: Tolerance, evidence?: TerminalSampleEvidence) {
   const p: string[] = [];
   const nav = navOf(result);
   if (!isRecord(result) || result.status !== 'succeeded') p.push('skill status is not succeeded');
@@ -99,12 +132,13 @@ export function classifyWalkToResult(result: unknown, start: Vec3Like, target: V
       if (!withinArrival(nav.lastPosition, target, tol)) p.push('nav.lastPosition outside runtime arrival tolerance');
     }
     if (!isRecord(nav.lastObservation)) p.push('missing nav.lastObservation');
+    p.push(...terminalSampleProblems(nav, evidence, start).problems);
   }
   return { ok: p.length === 0, problems: p, nav };
 }
 
-/** walk_known_route 终态：STARTED + 原样历史几何 + nav ARRIVED/confirmed + 实测位移。 */
-export function classifyKnownRouteResult(result: unknown, originalPoints: readonly Vec3Like[], start: Vec3Like, tol: Tolerance) {
+/** walk_known_route 终态：STARTED + 原样历史几何 + nav ARRIVED/confirmed + 同任务真实样本。 */
+export function classifyKnownRouteResult(result: unknown, originalPoints: readonly Vec3Like[], start: Vec3Like, tol: Tolerance, evidence?: TerminalSampleEvidence) {
   const p: string[] = [];
   const nav = navOf(result);
   const data = isRecord(result) && isRecord(result.data) ? result.data : null;
@@ -118,8 +152,8 @@ export function classifyKnownRouteResult(result: unknown, originalPoints: readon
     if (route === null) p.push('missing data.knownStart.route');
     else {
       if (!Array.isArray(route.points) || !route.points.every(isVec)) p.push('knownStart.route.points malformed');
-      else if (!deepEqual(route.points, originalPoints)) p.push('knownStart route geometry/order changed');
-      if (!isVec(route.target) || !deepEqual(route.target, last)) p.push('knownStart route target is not original last point');
+      else if (!isDeepStrictEqual(route.points, originalPoints)) p.push('knownStart route geometry/order changed');
+      if (!isVec(route.target) || !isDeepStrictEqual(route.target, last)) p.push('knownStart route target is not original last point');
     }
   }
   if (nav === null) p.push('missing data.nav');
@@ -132,14 +166,14 @@ export function classifyKnownRouteResult(result: unknown, originalPoints: readon
       if (last !== undefined && !withinArrival(nav.lastPosition, last, tol)) p.push('nav.lastPosition outside runtime arrival tolerance');
     }
     if (!isRecord(nav.lastObservation)) p.push('missing nav.lastObservation');
+    p.push(...terminalSampleProblems(nav, evidence, start).problems);
   }
   return { ok: p.length === 0, problems: p, nav };
 }
 
-export interface CapturedWalkSample { at: number; position: Vec3Like; worldId: string; dim: string; sessionId: string }
-
-/** 取消终态：cancelled/unconfirmed、部分数据可对上真实 walkTick 样本、7 个控制键已释放。 */
-export function classifyCancellationResult(result: unknown, samples: readonly CapturedWalkSample[], controls: Record<string, unknown>, reactivated: boolean) {
+/** 取消终态：cancelled/unconfirmed、部分数据精确对上同任务真实样本、7 个控制键已释放。 */
+export function classifyCancellationResult(result: unknown, taskId: string, samples: readonly CapturedRouteSample[],
+  controls: Record<string, unknown>, reactivated: boolean, start: Vec3Like) {
   const p: string[] = [];
   const nav = navOf(result);
   if (!isRecord(result) || result.status !== 'cancelled') p.push('skill status is not cancelled');
@@ -147,17 +181,9 @@ export function classifyCancellationResult(result: unknown, samples: readonly Ca
   else {
     if (nav.outcome !== 'CANCELLED') p.push(`nav.outcome=${String(nav.outcome)} (CANCELLED required)`);
     if (nav.confirmed !== false) p.push('cancelled nav must be unconfirmed');
-    const obs = isRecord(nav.lastObservation) ? nav.lastObservation : null;
     if (!isVec(nav.lastPosition)) p.push('missing cancelled nav.lastPosition');
-    if (obs === null) p.push('missing cancelled nav.lastObservation');
-    else if (!isNum(obs.observedAt) || typeof obs.worldId !== 'string' || typeof obs.dim !== 'string' || typeof obs.sessionId !== 'string') {
-      p.push('lastObservation timestamp/scope missing');
-    } else if (isVec(nav.lastPosition)) {
-      const match = samples
-        .filter((s) => deepEqual(s.position, nav.lastPosition) && s.worldId === obs.worldId && s.dim === obs.dim && s.sessionId === obs.sessionId)
-        .map((s) => Math.abs(s.at - (obs.observedAt as number))).sort((a, b) => a - b)[0];
-      if (match === undefined || match > 50) p.push('partial lastPosition/lastObservation does not match a captured walkTick sample');
-    }
+    if (!isRecord(nav.lastObservation)) p.push('missing cancelled nav.lastObservation');
+    p.push(...terminalSampleProblems(nav, { taskId, samples }, start).problems);
   }
   const missing = CONTROL_KEYS.filter((k) => typeof controls[k] !== 'boolean');
   if (missing.length) p.push(`missing control keys: ${missing.join(',')}`);
@@ -165,6 +191,41 @@ export function classifyCancellationResult(result: unknown, samples: readonly Ca
   if (active.length) p.push(`controls not released: ${active.join(',')}`);
   if (reactivated) p.push('control reactivated during bounded post-cancel window');
   return { ok: p.length === 0, problems: p, nav };
+}
+
+/** 有界实际物理帧：每帧只记录交付时的位置与控制键，不事后读状态补帧。 */
+export interface PhysicsFrame {
+  frame: number; at: number; position: Vec3Like; onGround: boolean; inWater: boolean;
+  controls: Record<string, unknown>;
+}
+export interface FrameControls { values: Record<string, unknown>; missing: string[] }
+
+/** 稳定落点：必须有连续、足量的真实物理帧跨越请求的稳定时长，且期间位置不变。 */
+export function classifySettledFrames(frames: readonly PhysicsFrame[], stableMs: number) {
+  const p: string[] = [];
+  if (frames.length === 0) { p.push('no physics frames observed during settle'); return { ok: false, problems: p, position: null }; }
+  if (frames.length < 2) p.push('fewer than 2 distinct physics frames during settle');
+  const first = frames[0]!, last = frames[frames.length - 1]!;
+  if (last.at - first.at < stableMs) p.push(`physics frames span ${last.at - first.at}ms < required ${stableMs}ms`);
+  if (frames.some((f) => !f.onGround || f.inWater)) p.push('settle frames are not grounded and dry');
+  if (frames.some((f) => distance(f.position, first.position) > 1e-6)) p.push('body did not remain stationary across physics frames');
+  return { ok: p.length === 0, problems: p, position: p.length === 0 ? { ...last.position } : null };
+}
+
+/** 取消后的有界实际物理帧：没有帧、覆盖不足或任一控制键按下/缺失都不能通过。 */
+export function classifyPostCancelFrames(frames: readonly PhysicsFrame[], durationMs: number) {
+  const p: string[] = [];
+  if (frames.length === 0) { p.push('no physics frames observed after cancel'); return { ok: false, problems: p, reactivated: true }; }
+  if (frames.length < 2) p.push('fewer than 2 distinct post-cancel physics frames');
+  const first = frames[0]!, last = frames[frames.length - 1]!;
+  if (last.at - first.at < durationMs) p.push(`post-cancel frames span ${last.at - first.at}ms < required ${durationMs}ms`);
+  let reactivated = false;
+  for (const f of frames) {
+    const missing = CONTROL_KEYS.filter((k) => typeof f.controls[k] !== 'boolean');
+    if (missing.length || CONTROL_KEYS.some((k) => f.controls[k] === true)) { reactivated = true; break; }
+  }
+  if (reactivated) p.push('control reactivated or unreadable during bounded post-cancel frames');
+  return { ok: p.length === 0, problems: p, reactivated };
 }
 
 /** fragments 稳定契约；返回原始条目，不把几何改写成观测。 */
@@ -186,10 +247,53 @@ export function validateFragmentsQuery(value: unknown) {
     if (typeof f.id !== 'string' || typeof f.worldId !== 'string' || typeof f.dim !== 'string') p.push('fragment identity fields malformed');
     if (typeof f.kind !== 'string' || typeof f.geometrySource !== 'string') p.push('fragment provenance fields malformed');
     if (!isNum(f.createdAt) || !isNum(f.lastUsedAt) || !isNum(f.uses)) p.push('fragment time/uses fields malformed');
-    const poly = isRecord(f.polyline) ? f.polyline : null;
-    if (poly === null || !Array.isArray(poly.points) || !poly.points.every(isVec) || !isVec(poly.first) || !isVec(poly.last)) p.push('fragment polyline projection malformed');
+    const projectionProblems = (name: string, projection: unknown) => {
+      if (!isRecord(projection)) { p.push(`fragment ${name} projection malformed`); return; }
+      if (!isNum(projection.points) || projection.points < 0) p.push(`fragment ${name}.points is not a non-negative count`);
+      else if (projection.points === 0) {
+        if (projection.first !== null || projection.last !== null) p.push(`fragment ${name} with zero points must have null first/last`);
+      } else if (!isVec(projection.first) || !isVec(projection.last)) p.push(`fragment ${name} first/last malformed`);
+    };
+    projectionProblems('polyline', f.polyline);
+    projectionProblems('entrances', f.entrances);
+    const links = isRecord(f.links) ? f.links : null;
+    if (links === null) p.push('fragment links projection malformed');
+    else if (links.recorded === false) {
+      if (typeof links.note !== 'string') p.push('fragment unrecorded links must explain that absence is not no-connection');
+    } else if (links.recorded !== true) p.push('fragment links.recorded must be boolean');
+    else {
+      if (!isNum(links.points) || links.points < 0) p.push('fragment links.points malformed');
+      else if (links.points === 0 && (links.first !== null || links.last !== null)) p.push('fragment links with zero points must have null first/last');
+    }
   }
   return { ok: p.length === 0, problems: p, fragments, page };
+}
+
+/** 列表投影（点数/首末点）必须与真实 PathFragment 全量几何和元数据一致。 */
+export function fragmentProjectionMatches(fragment: unknown, actual: PathFragment | null) {
+  const p: string[] = [];
+  if (!isRecord(fragment) || actual === null) return { ok: false, problems: ['fragment projection or typed original missing'] };
+  for (const field of ['id', 'worldId', 'dim', 'kind', 'geometrySource'] as const) {
+    if (fragment[field] !== actual[field]) p.push(`fragment ${field} differs from typed original`);
+  }
+  for (const field of ['createdAt', 'lastUsedAt', 'uses', 'deepestY'] as const) {
+    if (fragment[field] !== actual[field]) p.push(`fragment ${field} differs from typed original`);
+  }
+  const compared = (name: 'polyline' | 'entrances' | 'links', source: readonly unknown[] | undefined) => {
+    const projection = isRecord(fragment[name]) ? fragment[name] as Record<string, unknown> : null;
+    if (projection === null) { p.push(`fragment ${name} projection missing`); return; }
+    if (source === undefined) {
+      if (projection.recorded !== false) p.push(`fragment ${name} should be reported as unrecorded`);
+      return;
+    }
+    if (projection.points !== source.length) p.push(`fragment ${name}.points differs from typed original length`);
+    if (!isDeepStrictEqual(projection.first, source[0] ?? null)) p.push(`fragment ${name}.first differs from typed original`);
+    if (!isDeepStrictEqual(projection.last, source.at(-1) ?? null)) p.push(`fragment ${name}.last differs from typed original`);
+  };
+  compared('polyline', actual.polyline);
+  compared('entrances', actual.entrances);
+  compared('links', actual.links);
+  return { ok: p.length === 0, problems: p };
 }
 
 /** fragment.polyline 稳定契约；返回原始有序点。 */
@@ -247,6 +351,10 @@ export function classifyAdapterEnd(botEnd: boolean, adapterDisconnected: boolean
   return { ok: p.length === 0, problems: p };
 }
 
+/** 清理失败也必须反映为非零退出，不能被主场景的错误掩盖。 */
+export const acceptanceExitCode = (fatal: unknown, failures: readonly unknown[], cleanupErrors: readonly unknown[]) =>
+  fatal !== null || failures.length > 0 || cleanupErrors.length > 0 ? 1 : 0;
+
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 async function waitFor(predicate: () => boolean, timeoutMs: number, intervalMs = 50): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
@@ -292,13 +400,21 @@ function collectMetadata(repoRoot: string, scriptPath: string) {
   };
 }
 
-function parseRconList(text: string) {
+/** 声明人数必须与解析出的名字一一对应；缺冒号、count=0 却有名字都算格式错误。 */
+export function parseRconList(text: string) {
   const m = /There are (\d+) of a max of (\d+) players online/i.exec(text);
   if (!m) throw new Error(`cannot parse RCON list response: ${text}`);
-  const count = Number(m[1]);
   const colon = text.indexOf(':');
-  const names = count === 0 || colon < 0 ? [] : text.slice(colon + 1).split(',').map((s) => s.trim()).filter(Boolean);
-  return { count, max: Number(m[2]), names, raw: text };
+  if (colon < 0) throw new Error(`RCON list response has no player list separator: ${text}`);
+  const count = Number(m[1]);
+  const rawNames = text.slice(colon + 1).split(',').map((s) => s.trim());
+  if (count === 0) {
+    if (rawNames.some(Boolean)) throw new Error(`RCON list declared 0 players but listed names: ${text}`);
+    return { count, max: Number(m[2]), names: [] as string[], raw: text };
+  }
+  if (rawNames.some((s) => s === '')) throw new Error(`RCON list has an empty player entry: ${text}`);
+  if (rawNames.length !== count) throw new Error(`RCON list declared ${count} players but parsed ${rawNames.length} names: ${text}`);
+  return { count, max: Number(m[2]), names: rawNames, raw: text };
 }
 
 function controlsSnapshot(adapter: { bot: unknown }) {
@@ -330,7 +446,10 @@ async function main() {
     host: { mcHost: config.mc.host, mcPort: config.mc.port, username: config.mc.username, version: config.mc.version, rconHost: config.observer.rconHost, rconPort: config.observer.rconPort },
     scheduler: 'not-started', note: 'No periodic scheduler. RCON fixture teleports are setup only, never navigation success.',
     scenarios: {} as Record<string, unknown>, tasks: [] as unknown[],
+    // RCON 记录从创建时就写入 evidence；中途失败也能立即保留已发出的命令与响应。
+    rcon: { records: [] as unknown[] },
   };
+  const rconRecords = (evidence.rcon as { records: unknown[] }).records;
   const writeEvidence = () => fs.writeFileSync(path.join(evidenceDir, 'evidence.json'), JSON.stringify(evidence, null, 2));
   const scenarios = evidence.scenarios as Record<string, unknown>;
   const scenario = (name: string, extra: Record<string, unknown> = {}) => {
@@ -370,17 +489,23 @@ async function main() {
   let doneListener: ((outcome: TaskOutcome) => void) | null = null;
   let disconnectListener: (() => void) | null = null;
   let botEndListener: (() => void) | null = null;
-  let originalWalkTick: typeof adapter.walkTick | undefined;
+  let botOwned = false;
   let dim = 'unknown';
   let measuredStart: Vec3Like | null = null;
-  let selectedFragment: Record<string, unknown> | null = null;
+  let walk1TaskId: string | null = null;
+  let originalFragment: PathFragment | null = null;
   let selectedTraversal: Record<string, unknown> | null = null;
   let knownPoints: Vec3Like[] | null = null;
   let voxelFact: Record<string, unknown> | null = null;
   const outcomes = new Map<string, TaskOutcome>();
   const waiters = new Map<string, { resolve: (outcome: TaskOutcome) => void; timer: NodeJS.Timeout }>();
-  const walkSamples: CapturedWalkSample[] = [];
-  const rconRecords: Array<Record<string, unknown>> = [];
+  const routeSamples: CapturedRouteSample[] = [];
+  let executorOriginalStart: ((this: WalkRouteExecutor, request: WalkRouteRequest) => WalkRouteStatus) | null = null;
+  let executorOriginalOnSample: ((this: WalkRouteExecutor, sample: BodySample) => WalkRouteStatus) | null = null;
+  let executorWrappedStart: ((this: WalkRouteExecutor, request: WalkRouteRequest) => WalkRouteStatus) | null = null;
+  let executorWrappedOnSample: ((this: WalkRouteExecutor, sample: BodySample) => WalkRouteStatus) | null = null;
+  const executorTasks = new WeakMap<object, { taskId: string; delegationId: string }>();
+  let waitForOutcome: ((taskId: string, timeoutMs: number) => Promise<TaskOutcome | null>) | null = null;
 
   try {
     if (fatal !== null) throw fatal;
@@ -399,6 +524,65 @@ async function main() {
     };
     arbiter.on('done', doneListener);
 
+    // 小型诊断包装：只观察真实 WalkRouteExecutor.start/onSample，不改变请求、样本或返回值；
+    // 把实际委托绑定到启动它的 Arbiter 任务，清理时只还原自己装的包装。
+    const executorProto = library.WalkRouteExecutor.prototype as unknown as {
+      start(this: WalkRouteExecutor, request: WalkRouteRequest): WalkRouteStatus;
+      onSample(this: WalkRouteExecutor, sample: BodySample): WalkRouteStatus;
+    };
+    executorOriginalStart = executorProto.start;
+    executorOriginalOnSample = executorProto.onSample;
+    executorWrappedStart = function (this: WalkRouteExecutor, request: WalkRouteRequest) {
+      const status = executorOriginalStart!.call(this, request);
+      const task = arbiter?.info();
+      if (task !== null && task !== undefined) executorTasks.set(this, { taskId: task.id, delegationId: status.delegationId });
+      return status;
+    };
+    executorWrappedOnSample = function (this: WalkRouteExecutor, sample: BodySample) {
+      const returned = executorOriginalOnSample!.call(this, sample);
+      const binding = executorTasks.get(this as unknown as object);
+      if (binding !== undefined) {
+        routeSamples.push({
+          taskId: binding.taskId,
+          delegationId: binding.delegationId,
+          accepted: sample.executionId === returned.delegationId && isDeepStrictEqual(returned.lastPosition, sample.pos) && isNum(sample.sequence),
+          sample: {
+            executionId: sample.executionId, sequence: sample.sequence,
+            worldId: sample.worldId, dim: sample.dim, sessionId: sample.sessionId,
+            observedAt: sample.observedAt, position: { ...sample.pos },
+            onGround: sample.onGround, inWater: sample.inWater,
+          },
+          returned: {
+            delegationId: returned.delegationId,
+            lastPosition: returned.lastPosition === null ? null : { ...returned.lastPosition },
+            nextPointIndex: returned.nextPointIndex, activeStepIndex: returned.activeStepIndex,
+            resultOutcome: returned.result === null ? null : returned.result.outcome,
+            resultLastPosition: returned.result?.lastPosition === undefined ? null : { ...returned.result.lastPosition },
+            resultLastObservation: returned.result?.lastObservation === undefined ? null : { ...returned.result.lastObservation } as Record<string, unknown>,
+          },
+        });
+      }
+      return returned;
+    };
+    executorProto.start = executorWrappedStart;
+    executorProto.onSample = executorWrappedOnSample;
+
+    /** 有界等待某任务的真实终态；即使已在 done 竞态中先到，也从 outcomes 取回。 */
+    waitForOutcome = (taskId: string, timeoutMs: number): Promise<TaskOutcome | null> => {
+      const existing = outcomes.get(taskId);
+      if (existing !== undefined) return Promise.resolve(existing);
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => { arbiter?.off('done', onDone); resolve(null); }, timeoutMs);
+        const onDone = (outcome: TaskOutcome) => {
+          if (outcome.task.id !== taskId) return;
+          clearTimeout(timer);
+          arbiter?.off('done', onDone);
+          resolve(outcome);
+        };
+        arbiter!.on('done', onDone);
+      });
+    };
+
     const startTask = (skill: string, args: unknown, budgetMs: number) => {
       const started = arbiter!.start({ skill, args }, 'user');
       if ('error' in started) throw new Error(`${skill} rejected: ${started.error}`);
@@ -407,6 +591,14 @@ async function main() {
         const timer = setTimeout(() => { waiters.delete(info.id); resolve(null); }, budgetMs);
         waiters.set(info.id, { resolve: (outcome) => { clearTimeout(timer); resolve(outcome); }, timer });
       });
+      // 同步终态可能在 waiter 注册前已经写入 outcomes：先查结果，避免永久等到预算耗尽。
+      const settled = outcomes.get(info.id);
+      if (settled !== undefined) {
+        const waiter = waiters.get(info.id);
+        if (waiter !== undefined) clearTimeout(waiter.timer);
+        waiters.delete(info.id);
+        return { info, done: Promise.resolve(settled) };
+      }
       return { info, done };
     };
 
@@ -417,26 +609,52 @@ async function main() {
       catch (e) { rec.error = shutdownMod.errorFacts(e); rconRecords.push(rec); writeEvidence(); throw e; }
     };
 
-    const settleBody = async (timeoutMs: number) => {
-      const deadline = Date.now() + timeoutMs;
-      let last: Vec3Like | null = null, stableSince = 0;
-      while (Date.now() < deadline) {
-        const state = adapter.state();
-        if (state.observationReady && state.onGround && !state.inWater) {
-          if (last !== null && distance(last, state.pos) < 1e-6) { if (Date.now() - stableSince >= 300) return { ...state.pos }; }
-          else { last = { ...state.pos }; stableSince = Date.now(); }
-        } else { last = null; stableSince = 0; }
-        await sleep(50);
+    // 当前物理帧源：只订阅真实的 physicsTick；没有帧时显式失败，不事后读 state 补帧。
+    // 每次现取 walkTick，避免在 Bot 连接前捕获空实现。
+    let frameCounter = 0;
+    const nextPhysicsFrame = async (timeoutMs: number) => {
+      const tick = adapter.walkTick?.();
+      if (!tick) return null;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), Math.max(1, timeoutMs));
+      try { return await tick(controller.signal); } finally { clearTimeout(timer); }
+    };
+    const collectPhysicsFrames = async (spanMs: number, hardCapMs: number): Promise<PhysicsFrame[]> => {
+      const frames: PhysicsFrame[] = [];
+      if (!adapter.walkTick) return frames;
+      const startedAt = Date.now();
+      let firstAt: number | null = null;
+      while (Date.now() - startedAt < hardCapMs) {
+        const entity = await nextPhysicsFrame(Math.min(1000, hardCapMs - (Date.now() - startedAt)));
+        if (entity === null) break;
+        const at = Date.now();
+        firstAt ??= at;
+        frames.push({ frame: ++frameCounter, at, position: { ...entity.position }, onGround: entity.onGround, inWater: entity.isInWater, controls: controlsSnapshot(adapter).values });
+        if (at - firstAt >= spanMs) break;
       }
-      throw new Error('bounded body settle timed out');
+      return frames;
+    };
+
+    const settleBody = async (timeoutMs: number) => {
+      const frames = await collectPhysicsFrames(300, timeoutMs);
+      const settled = classifySettledFrames(frames, 300);
+      if (!settled.ok || settled.position === null) throw new Error(`bounded body settle failed: ${settled.problems.join(', ')}`);
+      if (!adapter.state().observationReady) throw new Error('body settled only after observationReady was lost');
+      return settled.position;
     };
 
     const fixtureTeleport = async (position: Vec3Like, label: string) => {
       if (arbiter!.info() !== null) throw new Error(`refusing fixture tp while a task is active (${label})`);
       const name = config.mc.username;
       if (!/^[A-Za-z0-9_]{1,16}$/.test(name)) throw new Error(`unsafe bot username: ${name}`);
+      if (adapter.state().username !== name) throw new Error(`connected bot identity ${adapter.state().username} is not configured test user ${name}`);
       if (!isVec(position) || !inLane(position)) throw new Error(`refusing to tp outside lane: ${JSON.stringify(position)}`);
+      // 每次夹具 tp 前都确认：真实连接身份就是配置的测试 Bot，且 RCON 只列出这一个同名 Bot。
+      const list = parseRconList(await sendRcon('list'));
+      const occurrences = list.names.filter((n) => n === name).length;
+      if (occurrences !== 1) throw new Error(`fixture tp requires RCON to list ${name} exactly once; got ${occurrences}`);
       const command = `tp ${name} ${String(position.x)} ${String(position.y)} ${String(position.z)}`;
+      if (!command.startsWith(`tp ${name} `)) throw new Error(`refusing non-literal fixture tp command: ${command}`);
       (scenarios.fixture ??= { requests: [] as unknown[], responses: [] as unknown[] });
       const fixture = scenarios.fixture as Record<string, unknown>;
       (fixture.requests as unknown[]).push({ label, at: Date.now(), command, position: clone(position), sequence: eventSequence + 1 });
@@ -445,7 +663,17 @@ async function main() {
       writeEvidence();
       const reached = await waitFor(() => { const s = adapter!.state(); return s.observationReady && s.onGround && distance(s.pos, position) <= 0.75; }, 10_000);
       if (!reached) throw new Error(`fixture tp did not settle at ${label}`);
-      return settleBody(15_000);
+      const settled = await settleBody(15_000);
+      // 保留测量通道：别的玩家若在保留通道内，只报告干扰并失败，绝不移动他们。
+      const interference = adapter.nearbyEntities(24)
+        .filter((e) => e.kind === 'player' && e.name !== name && inLane(e.pos))
+        .map((e) => ({ name: e.name, pos: { ...e.pos }, dist: e.dist }));
+      if (interference.length) {
+        fixture.interference = [...((fixture.interference as unknown[] | undefined) ?? []), { label, at: Date.now(), players: interference }];
+        writeEvidence();
+        throw new Error(`fixture interference in reserved measurement lane at ${label}: ${interference.map((p) => p.name).join(',')}`);
+      }
+      return settled;
     };
 
     const captureVoxelFact = (voxel: { cellAt(dim: string, x: number, y: number, z: number): unknown }, dimension: string, points: readonly Vec3Like[]) => {
@@ -467,43 +695,42 @@ async function main() {
     disconnectListener = () => { adapterDisconnected = true; };
     adapter.on('disconnected', disconnectListener);
 
+    const botName = config.mc.username;
+    if (!/^[A-Za-z0-9_]{1,16}$/.test(botName)) throw new Error(`unsafe bot username: ${botName}`);
     const preflight = parseRconList(await sendRcon('list'));
-    evidence.preflight = { at: Date.now(), ...preflight, sequence: rconRecords[rconRecords.length - 1]?.sequence };
+    evidence.preflight = { at: Date.now(), ...preflight, sequence: (rconRecords.at(-1) as Record<string, unknown> | undefined)?.sequence };
     writeEvidence();
-    if (preflight.count !== 0) throw new Error(`pre-connect RCON list declared ${preflight.count} players (zero required)`);
+    // 根检查只读 list；其他玩家可以远远旁观。唯一拒绝的是配置的测试 Bot 已在名单里重复出现。
+    if (preflight.names.filter((n) => n === botName).length > 1) {
+      throw new Error(`duplicate test bot ${botName} already listed before connection: ${JSON.stringify(preflight.names)}`);
+    }
 
     const spawn = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('bounded spawn wait timed out')), 30_000);
       adapter.once('spawn', () => { clearTimeout(timer); resolve(); });
     });
     adapter.connect();
+    // 只要适配器创建了 Bot，无论 spawn 是否及时完成，清理都必须拥有并等待它的真实退出。
+    const ownBot = () => {
+      if (!adapter.bot || botOwned) return;
+      botOwned = true;
+      botEndListener = () => { botEnded = true; };
+      adapter.bot.once('end', botEndListener);
+    };
+    ownBot();
     await spawn;
-    if (adapter.bot) { botEndListener = () => { botEnded = true; }; adapter.bot.once('end', botEndListener); }
+    ownBot();
     const ready = await waitFor(() => adapter.state().observationReady, 30_000);
     if (!ready) throw new Error('bounded observationReady wait timed out');
 
     const postConnect = parseRconList(await sendRcon('list'));
-    evidence.postConnect = { at: Date.now(), ...postConnect, sequence: rconRecords[rconRecords.length - 1]?.sequence };
+    evidence.postConnect = { at: Date.now(), ...postConnect, sequence: (rconRecords.at(-1) as Record<string, unknown> | undefined)?.sequence };
     writeEvidence();
-    const botName = config.mc.username;
-    if (postConnect.count !== 1 || postConnect.names.length !== 1 || postConnect.names[0] !== botName) {
-      throw new Error(`post-connect RCON list must contain only owned bot ${botName}; got ${JSON.stringify(postConnect.names)}`);
+    if (postConnect.names.filter((n) => n === botName).length !== 1) {
+      throw new Error(`post-connect RCON list must contain owned bot ${botName} exactly once; got ${JSON.stringify(postConnect.names)}`);
     }
     dim = adapter.state().dim;
     evidence.dim = dim;
-
-    // walkTick 只做只读旁路：原样返回真实帧。
-    originalWalkTick = adapter.walkTick;
-    if (originalWalkTick) {
-      adapter.walkTick = () => {
-        const tick = originalWalkTick!.call(adapter);
-        return async (signal) => {
-          const entity = await tick(signal);
-          if (entity) { const s = adapter.state(); walkSamples.push({ at: Date.now(), position: { ...entity.position }, worldId: s.worldId, dim: s.dim, sessionId: s.sessionId }); }
-          return entity;
-        };
-      };
-    }
 
     measuredStart = await fixtureTeleport(cli.start, 'initial-safe-start');
     evidence.measuredStart = clone(measuredStart);
@@ -516,6 +743,7 @@ async function main() {
       preHistory.task = clone(task.info);
       preHistory.outcome = outcome === null ? null : clone(outcome);
       if (outcome === null) throw new Error('pre-walk history query timed out');
+      if (outcome.result.status !== 'succeeded') throw new Error(`pre-walk history query status ${outcome.result.status}`);
       const q = isRecord(outcome.result.data) ? outcome.result.data.spatialQuery : undefined;
       const checked = validateFragmentsQuery(q);
       preHistory.query = q === undefined ? null : clone(q);
@@ -534,12 +762,13 @@ async function main() {
       const request = { to: clone(target), arrival: { kind: 'exact' as const }, deadlineMs: Date.now() + WALK_BUDGET_MS };
       s1.request = clone(request);
       const task = startTask('walk_to', request, WALK_BUDGET_MS + 5000);
+      walk1TaskId = task.info.id;
       s1.task = clone(task.info); writeEvidence();
       const outcome = await task.done;
       s1.outcome = outcome === null ? null : clone(outcome);
       s1.body = adapter.state(); s1.controls = controlsSnapshot(adapter);
       if (outcome === null) throw new Error('walk_to timed out before terminal outcome');
-      const verdict = classifyWalkToResult(outcome.result, start, target, tolerance);
+      const verdict = classifyWalkToResult(outcome.result, start, target, tolerance, { taskId: task.info.id, samples: routeSamples });
       s1.verdict = verdict;
       if (!verdict.ok) throw new Error(verdict.problems.join(', '));
     } catch (e) { addProblem(s1, errorText(e)); } finally { finish(s1); }
@@ -554,6 +783,7 @@ async function main() {
         const entry: Record<string, unknown> = { name, at: Date.now(), request: clone(args), task: clone(task.info), outcome: outcome === null ? null : clone(outcome) };
         queries.push(entry); writeEvidence();
         if (outcome === null) throw new Error(`${name} query timed out`);
+        if (outcome.result.status !== 'succeeded') throw new Error(`${name} query status ${outcome.result.status}`);
         const q = isRecord(outcome.result.data) ? outcome.result.data.spatialQuery : undefined;
         entry.query = q === undefined ? null : clone(q); writeEvidence();
         if (q === undefined) throw new Error(`${name} query missing data.spatialQuery`);
@@ -564,16 +794,31 @@ async function main() {
       if (!fragments.ok) throw new Error(fragments.problems.join(', '));
       const selected = fragments.fragments.find((f) => f.geometrySource === 'traversal') ?? null;
       if (selected === null) throw new Error('no traversal-sourced fragment in fresh history');
-      selectedFragment = selected; s2.selectedFragment = clone(selected);
+      s2.selectedProjection = clone(selected);
       const fragmentId = selected.id as string;
 
-      const polyline = validateFragmentQuery(await runQuery('fragment.polyline', { kind: 'fragment', dim, fragmentId, field: 'polyline', offset: 0, limit: 32 }), fragmentId);
-      s2.polylineVerdict = polyline;
-      if (!polyline.ok) throw new Error(polyline.problems.join(', '));
-      const points = polyline.points;
+      // 用真实历史读取完整几何：列表里的 polyline.points 是点数，不是数组，不能拿来与完整点列比较。
+      const typed = spatial.session.history.getFragment(fragmentId);
+      if (typed === null) throw new Error(`typed PathFragment ${fragmentId} missing after walk`);
+      originalFragment = typed;
+      const projection = fragmentProjectionMatches(selected, typed);
+      s2.fragmentProjection = projection;
+      if (!projection.ok) throw new Error(`fragment listing projection differs from typed original: ${projection.problems.join(', ')}`);
+
+      let points: Vec3Like[] = [];
+      let total = 0;
+      for (let offset = 0; offset < 8 * 32; offset += 32) {
+        const page = validateFragmentQuery(await runQuery(`fragment.polyline@${offset}`, { kind: 'fragment', dim, fragmentId, field: 'polyline', offset, limit: 32 }), fragmentId);
+        s2.polylineVerdict = page;
+        if (!page.ok) throw new Error(page.problems.join(', '));
+        total = page.total;
+        points = [...points, ...page.points];
+        if (points.length >= total) break;
+      }
+      if (points.length !== total) throw new Error(`fragment query returned ${points.length}/${total} polyline points`);
+      if (!isDeepStrictEqual(points, typed.polyline)) throw new Error('fragment query polyline differs from typed original geometry/order');
       if (!points.every(inLane)) throw new Error('stored route leaves the reserved dry lane');
       if (!points.slice(1).every((p, i) => p.y === points[i].y && Math.abs(p.x - points[i].x) + Math.abs(p.z - points[i].z) === 1)) throw new Error('stored polyline is not same-height unit-adjacent');
-      if (!deepEqual(points, (selected.polyline as Record<string, unknown>).points)) throw new Error('fragment query polyline differs from fragments listing');
       knownPoints = points;
 
       const scope = { worldId: adapter.state().worldId, dim, sessionId: adapter.state().sessionId };
@@ -581,22 +826,24 @@ async function main() {
       s2.traversalsVerdict = traversals;
       if (!traversals.ok) throw new Error(traversals.problems.join(', '));
       selectedTraversal = traversals.record;
-      const walk1 = (scenarios.walk_to as Record<string, unknown>).task as TaskInfo | undefined;
-      if (walk1 !== undefined && typeof selectedTraversal?.actionId === 'string' && selectedTraversal.actionId !== walk1.id) {
-        addProblem(s2, `traversal.actionId ${selectedTraversal.actionId} does not match walk task ${walk1.id}`);
-      }
+      // 归属必须来自真实启动的 walk_to 任务：actionId 直接相等，或 executionId 命中该任务实际交付的样本。
+      const executionIds = new Set(routeSamples.filter((s) => s.taskId === walk1TaskId && s.accepted).map((s) => s.sample.executionId));
+      const actionId = typeof selectedTraversal?.actionId === 'string' ? selectedTraversal.actionId : null;
+      const executionId = typeof selectedTraversal?.executionId === 'string' ? selectedTraversal.executionId : null;
+      const ownerOk = walk1TaskId !== null && (actionId === walk1TaskId || (executionId !== null && executionIds.has(executionId)));
+      if (!ownerOk) addProblem(s2, `traversal ownership does not match actual walk task ${String(walk1TaskId)} (actionId=${String(actionId)}, executionId=${String(executionId)})`);
     } catch (e) { addProblem(s2, errorText(e)); } finally { finish(s2); }
 
     const s3 = scenario('walk_known_route');
     try {
-      if (selectedFragment === null || knownPoints === null) throw new Error('no verified fragment geometry from this run');
+      if (originalFragment === null || knownPoints === null) throw new Error('no typed original fragment geometry from this run');
       const first = knownPoints[0], last = knownPoints[knownPoints.length - 1];
       s3.storedGeometry = { first: clone(first), last: clone(last), points: clone(knownPoints) };
       if (!inLane(first)) throw new Error('stored first point outside lane');
       const settled = await fixtureTeleport(first, 'known-route-first-point');
       s3.settledStart = clone(settled);
-      if (!withinArrival(settled, first, tolerance)) throw new Error('actual settled body does not satisfy the runtime start point');
-      const request = { fragmentId: selectedFragment.id as string, deadlineMs: Date.now() + WALK_BUDGET_MS };
+      if (!(Math.hypot(settled.x - first.x, settled.z - first.z) <= tolerance.horizontalTolerance && Math.abs(settled.y - first.y) <= tolerance.feetTolerance)) throw new Error('actual settled body does not satisfy the runtime start point');
+      const request = { fragmentId: originalFragment.id, deadlineMs: Date.now() + WALK_BUDGET_MS };
       s3.request = clone(request);
       const task = startTask('walk_known_route', request, WALK_BUDGET_MS + 5000);
       s3.task = clone(task.info); writeEvidence();
@@ -604,7 +851,7 @@ async function main() {
       s3.outcome = outcome === null ? null : clone(outcome);
       s3.body = adapter.state(); s3.controls = controlsSnapshot(adapter);
       if (outcome === null) throw new Error('walk_known_route timed out before terminal outcome');
-      const verdict = classifyKnownRouteResult(outcome.result, knownPoints, settled, tolerance);
+      const verdict = classifyKnownRouteResult(outcome.result, knownPoints, settled, tolerance, { taskId: task.info.id, samples: routeSamples });
       s3.verdict = verdict;
       if (!verdict.ok) throw new Error(verdict.problems.join(', '));
     } catch (e) { addProblem(s3, errorText(e)); } finally { finish(s3); }
@@ -619,28 +866,27 @@ async function main() {
       s4.request = clone(request); s4.measuredStart = clone(start); s4.target = clone(target);
       cancelTask = startTask('walk_to', request, 20_000);
       s4.task = clone(cancelTask.info); writeEvidence();
-      const moved = await waitFor(() => arbiter!.info()?.id === cancelTask!.info.id && distance(adapter.state().pos, start) > 0.15, 15_000, 25);
-      if (!moved) throw new Error('walk_to did not produce positive measured displacement while still active');
+      // 只在实际同任务样本证明已经移动后才取消；不以无关的后续 state 轮询代替。
+      const taskId = cancelTask.info.id;
+      const moved = await waitFor(() => routeSamples.some((s) => s.taskId === taskId && s.accepted && distance(s.sample.position, start) > 0.15), 15_000, 25);
+      if (!moved) throw new Error('no accepted same-task movement sample before cancel');
       const cancelAt = Date.now();
       arbiter!.cancel('navigation acceptance cancel');
+      // 生产 cancel 后立即读取全部 7 个控制键，再等真实终态；两处都在任何 harness fallback 之前读取。
       const controlsAtCancel = controlsSnapshot(adapter);
       s4.cancellation = { sequence: ++eventSequence, at: cancelAt, reason: 'navigation acceptance cancel', controlsAtCancel };
       writeEvidence();
       const outcome = await cancelTask.done;
       s4.outcome = outcome === null ? null : clone(outcome);
-      s4.controlsAtTerminal = controlsSnapshot(adapter); writeEvidence();
-      let reactivated = false;
-      const windowSamples: Array<Record<string, unknown>> = [];
-      const windowEnd = Date.now() + 600;
-      while (Date.now() < windowEnd) {
-        const snapshot = controlsSnapshot(adapter);
-        windowSamples.push({ at: Date.now(), values: clone(snapshot.values), missing: snapshot.missing });
-        if (snapshot.missing.length !== 0 || CONTROL_KEYS.some((k) => snapshot.values[k] === true)) reactivated = true;
-        await sleep(25);
-      }
-      s4.postCancelWindow = { durationMs: 600, samples: windowSamples, walkSamples: walkSamples.filter((sample) => sample.at >= cancelAt).length };
+      const controlsAtTerminal = controlsSnapshot(adapter);
+      s4.controlsAtTerminal = controlsAtTerminal; writeEvidence();
+      // 有界实际物理帧覆盖取消后窗口；没有帧不能 PASS。
+      const postCancelFrames = await collectPhysicsFrames(600, 2500);
+      const postCancel = classifyPostCancelFrames(postCancelFrames, 600);
+      s4.postCancelWindow = { durationMs: 600, frames: postCancelFrames, verdict: postCancel };
+      if (!postCancel.ok) throw new Error(postCancel.problems.join(', '));
       if (outcome === null) throw new Error('cancelled task timed out before terminal outcome');
-      const verdict = classifyCancellationResult(outcome.result, walkSamples, controlsAtCancel.values, reactivated);
+      const verdict = classifyCancellationResult(outcome.result, taskId, routeSamples, controlsAtCancel.values, postCancel.reactivated, start);
       s4.verdict = verdict;
       if (!verdict.ok) throw new Error(verdict.problems.join(', '));
     } catch (e) { addProblem(s4, errorText(e)); }
@@ -663,6 +909,20 @@ async function main() {
   const s5 = scenario('shutdown_reopen');
   let reopened: SpatialSession | null = null;
   try {
+    // 关停前先用现有 setPaused/cancel gating Arbiter，并等活动任务的真实终态；done 监听此时仍保留。
+    const active = arbiter?.info() ?? null;
+    evidence.shutdownGate = { activeTaskId: active?.id ?? null, at: Date.now() };
+    writeEvidence();
+    if (arbiter !== null) {
+      // 用现有 pause/cancel 关闸，阻止新任务；然后有界等待活动任务的真实终态，done 监听仍保留。
+      try { arbiter.setPaused(true); }
+      catch (e) { addProblem(s5, `shutdown gate pause/cancel failed: ${errorText(e)}`); cleanupErrors.push({ step: 'shutdown-gate', error: e }); }
+      if (active !== null) {
+        const settled = waitForOutcome === null ? null : await waitForOutcome(active.id, 15_000);
+        s5.activeTaskOutcome = settled === null ? null : clone(settled);
+        if (settled === null) addProblem(s5, `active task ${active.id} did not settle after pause/cancel`);
+      }
+    }
     if (spatial === null) addProblem(s5, 'shared session was never opened');
     else {
       try {
@@ -704,7 +964,15 @@ async function main() {
       }
     }
 
-    if ((s5.problems as string[]).length === 0 && shutdownResult !== null && shutdownResult.close?.completed === true) {
+    // 重开与持久化 PASS 必须同时具备：确认的干净 close + 原始 typed 片段/记录 + 可核对的 voxel 证据。
+    // 只有 close 成功不算保存证据；缺任何一项都保持 FAIL。
+    if (originalFragment === null) addProblem(s5, 'no typed original PathFragment for persistence comparison');
+    if (selectedTraversal === null) addProblem(s5, 'no original traversal record for persistence comparison');
+    if (voxelFact === null) addProblem(s5, 'no captured voxel evidence; voxel persistence is unverified');
+    const closeConfirmed = shutdownResult !== null && shutdownResult.close !== null
+      && shutdownResult.close.completed && shutdownResult.close.error === null
+      && !shutdownResult.close.unconfirmedRequest && !shutdownResult.close.dirty;
+    if ((s5.problems as string[]).length === 0 && closeConfirmed) {
       reopened = await withTimeout(storage.openSpatialSession({ databasePath: spatial!.databasePath, worldId: spatial!.worldId, timeoutMs: 10_000 }), 30_000, 'bounded reopen wait');
       s5.reopened = true;
       const compareFields = (label: string, original: unknown, copy: unknown, fields: readonly string[]) => {
@@ -712,19 +980,20 @@ async function main() {
         for (const field of fields) {
           const a = Object.prototype.hasOwnProperty.call(original, field), b = Object.prototype.hasOwnProperty.call(copy, field);
           if (a !== b) addProblem(s5, `${label}.${field} presence differs`);
-          else if (a && !deepEqual(original[field], copy[field])) addProblem(s5, `${label}.${field} changed after reopen`);
+          else if (a && !isDeepStrictEqual(original[field], copy[field])) addProblem(s5, `${label}.${field} changed after reopen`);
         }
       };
-      if (selectedFragment !== null) {
-        const copy = reopened.history.getFragment(selectedFragment.id as string);
+      if (originalFragment !== null) {
+        const copy = reopened.history.getFragment(originalFragment.id);
         s5.reopenedFragment = copy;
-        compareFields('fragment', selectedFragment, copy, ['id', 'worldId', 'dim', 'kind', 'entrances', 'polyline', 'geometrySource', 'links', 'deepestY', 'createdAt', 'lastUsedAt', 'uses']);
-      } else s5.fragmentComparison = 'not-available: no verified fragment';
+        // 同形状的 typed PathFragment 逐字段比较：几何、元数据、时间、会话与来源都必须保持原样。
+        if (copy === null || !isDeepStrictEqual(originalFragment, copy)) addProblem(s5, 'typed original fragment changed after reopen');
+      }
       if (selectedTraversal !== null) {
-        const copy = reopened.history.getTraversal(selectedTraversal.id as string);
+        const copy = reopened.history.getTraversal(String(selectedTraversal.id));
         s5.reopenedTraversal = copy;
         compareFields('traversal', selectedTraversal, copy, ['id', 'fragmentId', 'from', 'to', 'worldId', 'dim', 'sessionId', 'observedAt', 'source', 'executionId', 'actionId', 'mode']);
-      } else s5.traversalComparison = 'not-available: no verified traversal';
+      }
       if (voxelFact !== null) {
         const pos = voxelFact.pos as Vec3Like, factDim = voxelFact.dim as string;
         const cell = reopened.voxel.cellAt(factDim, pos.x, pos.y, pos.z);
@@ -735,8 +1004,8 @@ async function main() {
           if (ev.freshness !== 'STALE') addProblem(s5, 'reopened voxel freshness is not STALE');
           compareFields('voxel.observation', voxelFact.observation, ev.observation, Object.keys(isRecord(voxelFact.observation) ? voxelFact.observation : {}));
         }
-      } else s5.voxelComparison = 'not-captured: no legitimate observation available';
-    } else s5.reopenSkipped = 'first close not confirmed; reopen is not allowed';
+      }
+    } else s5.reopenSkipped = closeConfirmed ? 'missing mandatory original evidence; reopen is not allowed for a PASS' : 'first close not confirmed; reopen is not allowed';
   } catch (e) {
     addProblem(s5, errorText(e));
   } finally {
@@ -750,8 +1019,8 @@ async function main() {
     finish(s5);
   }
 
-  // 早先失败不能跳过服务关停/其他清理；原始主失败保留。
-  if (spatial !== null && shutdownResult === null && shutdownCallError === null) {
+  // 早先失败不能跳过服务关停/其他清理；原始主失败保留。shutdown 幂等，失败后仍再次有界尝试真实 close。
+  if (spatial !== null && shutdownResult === null) {
     try {
       const cleanupResult = await withTimeout(spatial.shutdown(), 30_000, 'bounded cleanup shutdown wait');
       shutdownResult = cleanupResult;
@@ -760,18 +1029,28 @@ async function main() {
       if (!diagnostics.ok) cleanupErrors.push({ step: 'shutdown', error: new Error(diagnostics.problems.join(',')) });
     } catch (e) { cleanupErrors.push({ step: 'shutdown', error: e }); }
   }
+  // 收集完关停结果后清除所有遗留 waiter 计时器；已到达的终态仍留在 evidence.tasks。
+  for (const [id, waiter] of waiters) { clearTimeout(waiter.timer); waiters.delete(id); }
   if (arbiter !== null && doneListener !== null) arbiter.off('done', doneListener);
   if (arbiter !== null) arbiter.dispose();
-  if (originalWalkTick !== undefined) adapter.walkTick = originalWalkTick;
+  // 只还原自己装上的执行器包装。
+  const executorProto = library.WalkRouteExecutor.prototype as unknown as {
+    start(this: WalkRouteExecutor, request: WalkRouteRequest): WalkRouteStatus;
+    onSample(this: WalkRouteExecutor, sample: BodySample): WalkRouteStatus;
+  };
+  if (executorOriginalStart !== null && executorWrappedStart !== null && executorProto.start === executorWrappedStart) executorProto.start = executorOriginalStart;
+  if (executorOriginalOnSample !== null && executorWrappedOnSample !== null && executorProto.onSample === executorWrappedOnSample) executorProto.onSample = executorOriginalOnSample;
   if (rcon !== null) { try { rcon.close(); } catch (e) { cleanupErrors.push({ step: 'close-rcon', error: e }); } }
   if (memory !== null) { try { memory.close(); } catch (e) { cleanupErrors.push({ step: 'close-memory', error: e }); } }
-  try {
-    adapter.quit();
-    const ended = await waitFor(() => botEnded && adapterDisconnected, 5000);
-    const classification = classifyAdapterEnd(botEnded, adapterDisconnected, !ended);
-    evidence.adapterEnd = classification;
-    if (!classification.ok) cleanupErrors.push({ step: 'adapter-end', error: new Error(classification.problems.join(', ')) });
-  } catch (e) { cleanupErrors.push({ step: 'adapter-quit', error: e }); }
+  if (botOwned) {
+    try {
+      adapter.quit();
+      const ended = await waitFor(() => botEnded && adapterDisconnected, 5000);
+      const classification = classifyAdapterEnd(botEnded, adapterDisconnected, !ended);
+      evidence.adapterEnd = classification;
+      if (!classification.ok) cleanupErrors.push({ step: 'adapter-end', error: new Error(classification.problems.join(', ')) });
+    } catch (e) { cleanupErrors.push({ step: 'adapter-quit', error: e }); }
+  } else evidence.adapterEnd = { status: 'not-owned: no Bot client was connected by this harness' };
   if (disconnectListener !== null) adapter.off('disconnected', disconnectListener);
   if (botEndListener !== null && adapter.bot) adapter.bot.removeListener('end', botEndListener);
 
@@ -780,9 +1059,9 @@ async function main() {
   const failures = Object.values(scenarios).flatMap((s) => isRecord(s) && Array.isArray(s.problems) ? s.problems.map((p) => ({ scenario: s.name, problem: p })) : []);
   evidence.failures = failures;
   evidence.cleanupErrors = cleanupErrors.map((item) => ({ step: item.step, error: shutdownMod.errorFacts(item.error) }));
-  evidence.ok = fatal === null && failures.length === 0 && cleanupErrors.length === 0;
+  evidence.ok = acceptanceExitCode(fatal, failures, cleanupErrors) === 0;
   writeEvidence();
-  process.exitCode = evidence.ok ? 0 : 1;
+  process.exitCode = acceptanceExitCode(fatal, failures, cleanupErrors);
 }
 
 if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
