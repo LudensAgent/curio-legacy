@@ -7,6 +7,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import { PersistenceError } from 'curio-minecraft-3d-memory/storage/sqlite';
+import type { CloseResult } from 'curio-minecraft-3d-memory/storage/sqlite';
 import { classifySpatialShutdown, errorFacts, spatialShutdownDiagnostics } from '../src/spatial/host-shutdown.ts';
 import { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import type { ShutdownResult } from '../src/spatial/shared-session.ts';
@@ -130,45 +131,59 @@ test('诊断：非 Error 抛出值也保留类型与内容', () => {
   assert.deepEqual(errorFacts({ code: 7 }), { kind: null, name: 'object', message: '[object Object]', code: 7 });
 });
 
-test('诊断：真实会话最终 checkpoint 抛普通对象时保留字段、判非成功且真实 close 完成', async (t) => {
-  const { dir, abs } = fixture(t);
-  const dbPath = abs(path.join(dir, 'spatial.sqlite'));
+test('诊断：真实会话最终 checkpoint 抛普通对象时保留字段、判非成功且真实 close 完成', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-shared-spatial-'));
+  const dbPath = path.join(dir, 'spatial.sqlite').replaceAll('\\', '/');
   const worldId = 'shared-spatial-plain-throw';
-  const svc = await SharedSpatialSession.open({ worldId, databasePath: dbPath, timeoutMs: 5000 });
   let result: ShutdownResult | null = null;
+  let shutdownError: unknown = null;
   try {
-    svc.beginSession({ worldId, dim: 'overworld', sessionId: 's1' });
-    svc.observe([{
-      name: 'minecraft:stone',
-      properties: {},
-      pos: { x: 0, y: 0, z: 0 },
-      worldId,
-      sessionId: 's1',
-      dimension: 'overworld',
-      observationId: 1,
-      observedAt: 1,
-      source: 'vision',
-      stateComplete: true,
-    }]);
+    const svc = await SharedSpatialSession.open({ worldId, databasePath: dbPath, timeoutMs: 5000 });
+    try {
+      svc.beginSession({ worldId, dim: 'overworld', sessionId: 's1' });
+      svc.observe([{
+        name: 'minecraft:stone',
+        properties: {},
+        pos: { x: 0, y: 0, z: 0 },
+        worldId,
+        sessionId: 's1',
+        dimension: 'overworld',
+        observationId: 1,
+        observedAt: 1,
+        source: 'vision',
+        stateComplete: true,
+      }]);
 
-    const thrown = { kind: 'capacity', name: 'plain-save', message: 'retained reason', code: 'X' };
-    svc.session.checkpoint = async () => { throw thrown; };
+      const thrown = { kind: 'capacity', name: 'plain-save', message: 'retained reason', code: 'X' };
+      svc.session.checkpoint = async () => { throw thrown; };
 
-    result = await svc.shutdown();
-    const diagnostics = spatialShutdownDiagnostics(result, worldId);
-    assert.equal(result.error, thrown, '原始抛出对象保持同一性');
-    assert.equal(diagnostics.ok, false);
-    assert.ok(diagnostics.problems.includes('primary_save_error'));
-    assert.deepEqual(diagnostics.primarySaveError, { kind: 'capacity', name: 'plain-save', message: 'retained reason', code: 'X' });
-    assert.equal(diagnostics.checkpoint, null);
-    assert.equal(result.closeError, null);
-    assert.notEqual(result.close, null, '保存错误后仍须尝试真实 close');
-    assert.equal(result.close!.completed, true);
-    assert.equal(result.close!.error, null);
-    assert.equal(classifySpatialShutdown(result, worldId).ok, false);
+      result = await svc.shutdown();
+      const diagnostics = spatialShutdownDiagnostics(result, worldId);
+      assert.equal(result.error, thrown, '原始抛出对象保持同一性');
+      assert.equal(diagnostics.ok, false);
+      assert.ok(diagnostics.problems.includes('primary_save_error'));
+      assert.deepEqual(diagnostics.primarySaveError, { kind: 'capacity', name: 'plain-save', message: 'retained reason', code: 'X' });
+      assert.equal(diagnostics.checkpoint, null);
+      assert.equal(result.closeError, null);
+      assert.notEqual(result.close, null, '保存错误后仍须尝试真实 close');
+      assert.equal(result.close!.completed, true);
+      assert.equal(result.close!.error, null);
+      assert.equal(result.close!.unconfirmedRequest, false);
+      assert.equal(classifySpatialShutdown(result, worldId).ok, false);
+    } finally {
+      if (result === null) {
+        try { result = await svc.shutdown(); } catch (err) { shutdownError = err; }
+      }
+    }
   } finally {
-    if (result === null) {
-      try { await svc.shutdown(); } catch { /* 保留原始失败证据 */ }
+    const close = result?.close ?? null;
+    const clean = result !== null && close !== null && close.completed
+      && close.error === null && !close.unconfirmedRequest && result.closeError === null;
+    if (clean) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } else {
+      // 未确认真实 close 时保留 fixture，并附原始关闭诊断；不覆盖主失败。
+      console.error('保留未确认关闭的 fixture:', dir, 'closeError=', result?.closeError, 'close=', close, 'shutdownError=', shutdownError);
     }
   }
 });
@@ -295,10 +310,13 @@ episodic.stop();
   assert.deepEqual(JSON.parse(fs.readFileSync(probeEvidence, 'utf8')), { installed: true, flush: 1, start: 1 });
 });
 
-test('真实会话关停：worker 自然退出，重开数据库仍读到最终事实及其 STALE 证据', async (t) => {
-  const { dir, abs } = fixture(t);
-  const dbPath = abs(path.join(dir, 'spatial.sqlite'));
+test('真实会话关停：worker 自然退出，重开数据库仍读到最终事实及其 STALE 证据', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-shared-spatial-'));
+  const dbPath = path.join(dir, 'spatial.sqlite').replaceAll('\\', '/');
   const observedAt = 1_700_000_123_456;
+  let childSucceeded = false;
+  let reopenedClose: CloseResult | null = null;
+  try {
   const childScript = path.join(dir, 'shutdown-child.mts');
   const sharedUrl = pathToFileURL(path.join(PROJECT, 'src', 'spatial', 'shared-session.ts')).href;
   const helperUrl = pathToFileURL(path.join(PROJECT, 'src', 'spatial', 'host-shutdown.ts')).href;
@@ -345,6 +363,7 @@ process.stdout.write(JSON.stringify({
   );
   assert.equal(child.timedOut, false, `worker 未自然退出；stdout=${child.stdout} stderr=${child.stderr}`);
   assert.equal(child.code, 0, `child 退出码 ${child.code}；stderr=${child.stderr}`);
+  childSucceeded = true;
   const parsed = JSON.parse(child.stdout.trim().split(/\r?\n/).at(-1) ?? '{}');
   assert.equal(parsed.diagnostics.ok, true, JSON.stringify(parsed.diagnostics));
   assert.equal(parsed.diagnostics.close.completed, true);
@@ -356,6 +375,7 @@ process.stdout.write(JSON.stringify({
 
   const { openSpatialSession } = await import('curio-minecraft-3d-memory/storage/sqlite');
   const reopened = await openSpatialSession({ worldId: 'shared-spatial-worker-exit', databasePath: dbPath, timeoutMs: 5000 });
+  let readbackError: unknown = null;
   try {
     const cell = reopened.voxel.cellAt('overworld', 12, 34, 56);
     assert.equal(cell.observed, true, '重开后应读到已提交的最终事实');
@@ -365,7 +385,28 @@ process.stdout.write(JSON.stringify({
       assert.equal(cell.evidence.freshness, 'STALE');
       assert.equal(cell.evidence.staleReason, 'observation_gap');
     }
+  } catch (err) {
+    readbackError = err;
+  }
+  try {
+    reopenedClose = await reopened.close();
+  } catch (err) {
+    if (readbackError === null) throw err;
+    console.error('重开后真实 close 也失败（保留主读取失败）:', err);
+  }
+  if (readbackError !== null) throw readbackError;
+  assert.ok(reopenedClose !== null, '重开后必须取得真实 CloseResult');
+  assert.equal(reopenedClose.completed, true, '重开后的真实 close 必须完成');
+  assert.equal(reopenedClose.error, null);
+  assert.equal(reopenedClose.unconfirmedRequest, false);
   } finally {
-    await reopened.close();
+    const clean = childSucceeded && reopenedClose !== null && reopenedClose.completed
+      && reopenedClose.error === null && !reopenedClose.unconfirmedRequest;
+    if (clean) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } else {
+      // 子进程失败/超时或重开 close 未确认时保留 fixture，不删除可能仍打开的库。
+      console.error('保留失败 fixture:', dir, 'childSucceeded=', childSucceeded, 'reopenedClose=', reopenedClose);
+    }
   }
 });
