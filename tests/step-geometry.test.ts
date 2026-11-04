@@ -277,3 +277,16 @@ test('水中取消保留原请求与辅助选定的上岸落点', async (t) => {
     (e: any) => e.name === 'AbortedError' && e.partial?.stand?.y === 64 && e.partial?.target?.y === 62 && e.partial?.rel?.join() === '1,2,0',
   );
 });
+
+test('站在箱子等非整块支撑上，按格子差上一步不应被高度检查误拒', async (t) => {
+  const w = new TestWorld();
+  // 箱子顶面 63.875：脚格仍是 63，朝北上一格的真实支撑面是 64。
+  w.pos = { x: 0.5, y: 63.875, z: 0.5 };
+  w.setBlock({ x: 0, y: 63, z: 0 }, 'chest');
+  w.setBlock({ x: 0, y: 63, z: -1 }, 'stone');
+  const c = ctx(w);
+  t.after(() => c.memory.close());
+  t.mock.method(w, 'moveTo', async () => { w.pos = { x: 0.5, y: 64, z: -0.5 }; });
+  const r = await stepTo.run(c, { at: [1, 1, 0], facing: 'N' });
+  assert.equal(r.status, 'succeeded', r.summary);
+});

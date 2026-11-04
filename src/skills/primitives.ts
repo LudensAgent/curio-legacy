@@ -351,7 +351,6 @@ export const stepTo: Skill<CellArgs> = {
       return ok(`沿梯子爬上了一格（现在 y=${end.y}）${a.blockAt({ ...end }) === 'ladder' ? '' : '；这格没有梯子了，再往上要先挂'}`, { moved: [0, 1, 0], ...after(ctx, args.facing, target) });
     }
     const ownHead = { ...feet, y: feet.y + 2 };
-    const currentFoot = footYAt(feet) ?? start.y;
     const absolute = args.xyz !== undefined;
     const corners = args.at[0] !== 0 && args.at[2] !== 0
       ? [{ x: target.x, z: feet.z }, { x: feet.x, z: target.z }]
@@ -392,9 +391,12 @@ export const stepTo: Skill<CellArgs> = {
         problems.unshift(`目标格脚下 (${floor.x},${floor.y},${floor.z}) 是 ${gap}；支撑格 [${supportAt}]${placeAtInRange ? '' : ' 超出 place_at 上下 -1..3 范围'}；脚部目标格 [${args.at}] 须留空；未执行迈步`);
       } else {
         targetFoot = absolute ? args.xyz!.y : actualFoot;
-        const expected = absolute ? targetFoot : currentFoot + args.at[1];
+        // 相对目标是“脚格”偏移，基准必须是整数脚格 feet.y，而不是当前实际支撑顶面：
+        // 站在箱子（顶面 0.875）、床等非整块支撑上时，拿 support top + 1 会把
+        // 0.125 的真实抬升误算成 0.875 的落差并拒绝合法迈步。绝对目标仍按请求脚高精确核对。
+        const expected = absolute ? targetFoot : feet.y + args.at[1];
         // 绝对目标要求支撑面与请求脚高一致（几何值是精确的 0.5/0.875 等，容差只吸收浮点）；
-        // 相对目标按格子差换算，允许半砖/雪层的 ±0.51 落差。
+        // 相对目标按格子差换算，允许目标半砖/雪层的 ±0.51 落差。
         if (Math.abs(actualFoot - expected) > (absolute ? 0.01 : 0.51)) {
           problems.unshift(absolute
             ? `目标支撑面在 y=${actualFoot.toFixed(2)}，与绝对脚高 ${targetFoot.toFixed(2)} 不符；未执行迈步`
@@ -430,7 +432,7 @@ export const stepTo: Skill<CellArgs> = {
       }
     }
     if (args.at[1] === 1 && targetFoot !== null) {
-      // 按实际目标脚高判断起跳净空：半格上步是走上去（脚高只抬 0.5），不是整格跳跃，不能按 currentFoot+1 假想跳高一格。
+      // 按实际目标脚高判断起跳净空：半格上步是走上去（脚高只抬 0.5），不是整格跳跃，不能按当前脚高+1 假想跳高一格。
       await glanceAll([ownHead]);
       const oh = clearanceBlocker(targetFoot, feet.x, feet.z);
       if (oh && oh.y > feet.y) problems.push(`往上跳时自己头顶上方是 ${describe(oh)}（跳不起来；先 dig_at [0,2,0]）`);
