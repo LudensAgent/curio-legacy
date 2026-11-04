@@ -13,12 +13,18 @@ import { test } from 'node:test';
 import { GROUNDED_ARRIVAL_DEFAULTS, VoxelMap, WalkRouteExecutor } from 'curio-minecraft-3d-memory';
 import type { NavResult } from 'curio-minecraft-3d-memory';
 import {
+  acceptedMeasurements,
   adjacentRouteX,
   allGroundedAt,
+  allKeysReleased,
   blockFaceBounds,
+  checkTaskSegments,
+  classifyOldOwnerControls,
   ConnectionTracker,
   dist2,
+  EventSeq,
   ExecutionDiagnostics,
+  foreignSampleDeliveries,
   framesSince,
   gitMeta,
   gitPorcelainPaths,
@@ -26,7 +32,7 @@ import {
   integrityMatches,
   isEmptyBlockState,
   isArrived,
-  lateForwardWritesByOwner,
+  measuredCompletions,
   packageMeta,
   parseExecuteIfBlock,
   parseRconList,
@@ -36,14 +42,18 @@ import {
   platformEscaped,
   probeBlock,
   quitClient,
-  segmentsContiguous,
+  segmentsFollowMeasured,
   snapshotKeys,
   summarizeTrajectory,
+  TaskTracker,
+  vecEqual,
   WalkDiagnostics,
   withinFootprint,
-  type ControlEntry,
+  type ActualControlEntry,
+  type DeliveredSampleRecord,
   type FrameRecord,
   type MoveRecord,
+  type RouteStatusSnapshot,
   type WalkBridge,
 } from '../scripts/walk-acceptance.ts';
 import { WalkMoveExecutor, walkCollisionProvider } from '../src/adapter/walk-route.ts';
@@ -394,128 +404,300 @@ test('framesSince：teleport/搭设帧排除在支撑断言之外（防 setup �
   assert.equal(framesSince(frames, 1000)[0]!.ownerTaskId, 't');
 });
 
-test('lateForwardWritesByOwner：只有取消边界之后的同主 forward=true 才判复活', () => {
-  const log: ControlEntry[] = [
-    { ts: 10, op: 'set', name: 'forward', value: true, ownerTaskId: 'A' }, // 取消前合法
-    { ts: 20, op: 'set', name: 'forward', value: true, ownerTaskId: 'B' }, // 取消后但属 B
-    { ts: 25, op: 'set', name: 'forward', value: true, ownerTaskId: 'A' }, // 取消后属 A → 复活
-  ];
-  const late = lateForwardWritesByOwner(log, 'A', 15);
-  assert.equal(late.length, 1);
-  assert.equal(late[0]!.ts, 25);
-});
+function statusSnap(o: Partial<RouteStatusSnapshot> = {}): RouteStatusSnapshot {
+  return { delegationId: 'walk-1', nextPointIndex: 1, activeStepIndex: 0, lastPosition: null, result: null, ...o };
+}
 
-test('segmentsContiguous：后续段从上一段实测终点接续；断档即假', () => {
-  const m: MoveRecord[] = [
-    { ts: 1, executionId: 'e0', from: { x: 0.5, y: 0, z: 0.5 }, to: { x: 1.5, y: 0, z: 0.5 }, deadlineMs: 1000 },
-    { ts: 2, executionId: 'e1', from: { x: 1.48, y: 0, z: 0.5 }, to: { x: 2.5, y: 0, z: 0.5 }, deadlineMs: 1000 },
-  ];
-  assert.equal(segmentsContiguous(m), true);
-  const gap: MoveRecord[] = [
-    { ts: 1, executionId: 'e0', from: { x: 0.5, y: 0, z: 0.5 }, to: { x: 1.5, y: 0, z: 0.5 }, deadlineMs: 1000 },
-    { ts: 2, executionId: 'e1', from: { x: 3.0, y: 0, z: 0.5 }, to: { x: 4.0, y: 0, z: 0.5 }, deadlineMs: 1000 },
-  ];
-  assert.equal(segmentsContiguous(gap), false);
-});
-
-// --- WalkDiagnostics：创建时绑定归属 + stopAll 前快照（假夹具） ---
-
-function fakeBody() {
+let deliverySeq = 0;
+function delivery(
+  pos: { x: number; y: number; z: number },
+  before: RouteStatusSnapshot,
+  after: RouteStatusSnapshot,
+  opts: { delegationId?: string; owner?: string | null; sequence?: number } = {},
+): DeliveredSampleRecord {
+  const delegationId = opts.delegationId ?? 'walk-1';
+  const sequence = opts.sequence ?? ++deliverySeq;
   return {
-    setControlState() {},
-    clearControlStates() {},
+    seq: sequence, ts: sequence, ownerTaskId: opts.owner ?? 'task_A', delegationId,
+    sample: {
+      worldId: 'w', dim: 'd', sessionId: 's', executionId: delegationId,
+      pos: { ...pos }, velocity: { x: 0, y: 0, z: 0 },
+      observedAt: sequence * 50, sequence, alive: true, connected: true, observationReady: true,
+      onGround: true, inWater: false,
+    },
+    statusBefore: before, statusAfter: after,
+  };
+}
+
+function moveRecord(delegationId: string, taskId: string, step: number, from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }): MoveRecord {
+  return {
+    seq: step + 1, ts: step * 50, taskId, delegationId,
+    executionId: `${delegationId}-step-${step}`,
+    from: { ...from }, to: { ...to }, deadlineMs: 10_000, timeoutMs: 4000, signalAborted: false,
+  };
+}
+
+test('allKeysReleased/vecEqual：7 键全 false 与严格坐标相等', () => {
+  assert.equal(allKeysReleased(emptyKeys), true);
+  assert.equal(allKeysReleased({ ...emptyKeys, sneak: true }), false);
+  assert.equal(vecEqual({ x: 1.5, y: 64, z: 0.5 }, { x: 1.5, y: 64, z: 0.5 }), true);
+  assert.equal(vecEqual({ x: 1.5, y: 64, z: 0.5 }, { x: 1.53, y: 64, z: 0.5 }), false);
+  assert.equal(vecEqual(null, { x: 0, y: 0, z: 0 }), false);
+});
+
+test('checkTaskSegments：恰好 0..n-1 段且归属正确；0/1/2/额外段均失败', () => {
+  const own = [
+    moveRecord('walk-7', 'task_A', 0, { x: 0, y: 64, z: 0 }, { x: 1, y: 64, z: 0 }),
+    moveRecord('walk-7', 'task_A', 1, { x: 1, y: 64, z: 0 }, { x: 1, y: 64, z: 1 }),
+    moveRecord('walk-7', 'task_A', 2, { x: 1, y: 64, z: 1 }, { x: 2, y: 64, z: 1 }),
+  ];
+  assert.equal(checkTaskSegments(own, 'walk-7', 'task_A', 3).ok, true);
+  assert.equal(checkTaskSegments([], 'walk-7', 'task_A', 3).ok, false, '0 段');
+  assert.equal(checkTaskSegments(own.slice(0, 1), 'walk-7', 'task_A', 3).ok, false, '1 段');
+  assert.equal(checkTaskSegments(own.slice(0, 2), 'walk-7', 'task_A', 3).ok, false, '2 段');
+  const extra = [...own, moveRecord('walk-7', 'task_A', 3, { x: 2, y: 64, z: 1 }, { x: 3, y: 64, z: 1 })];
+  assert.equal(checkTaskSegments(extra, 'walk-7', 'task_A', 3).ok, false, '额外段');
+  const wrongOwner = own.map((m) => (m.executionId.endsWith('step-1') ? { ...m, taskId: 'task_X' } : m));
+  assert.equal(checkTaskSegments(wrongOwner, 'walk-7', 'task_A', 3).ok, false, '错误归属');
+});
+
+test('acceptedMeasurements：只有 lastPosition 记录该原始测量且序号单调才算接受', () => {
+  const pos = { x: 1.5, y: 64, z: 0.5 };
+  const accepted = delivery(pos, statusSnap(), statusSnap({ nextPointIndex: 2, lastPosition: pos }));
+  assert.equal(acceptedMeasurements([accepted], 'walk-1').length, 1);
+  const replay = delivery({ x: 1.5, y: 64, z: 0.5 }, statusSnap({ nextPointIndex: 2 }), statusSnap({ nextPointIndex: 2, lastPosition: pos }), { sequence: accepted.sample.sequence });
+  assert.equal(acceptedMeasurements([accepted, replay], 'walk-1').length, 1, '重放序号不得再次计入');
+  const foreign = delivery({ x: 2.5, y: 64, z: 0.5 }, statusSnap(), statusSnap({ lastPosition: { x: 2.5, y: 64, z: 0.5 } }), { delegationId: 'walk-2' });
+  foreign.sample.executionId = 'walk-1';
+  assert.equal(acceptedMeasurements([foreign], 'walk-2').length, 0, '错误 sample id 不得计入');
+});
+
+test('measuredCompletions/segmentsFollowMeasured：严格用实测完成点，名义点即使容差内也拒绝', () => {
+  const measured1 = { x: 1.53, y: 64, z: 0.5 };
+  const measured2 = { x: 2.54, y: 64, z: 0.5 };
+  const d1 = delivery(measured1, statusSnap({ nextPointIndex: 1 }), statusSnap({ nextPointIndex: 2, lastPosition: measured1 }));
+  const d2 = delivery(measured2, statusSnap({ nextPointIndex: 2 }), statusSnap({ nextPointIndex: 3, lastPosition: measured2 }));
+  const completions = measuredCompletions([d1, d2], 'walk-1');
+  assert.equal(completions.length, 2);
+  assert.deepEqual(completions.map((c) => c.stepIndex), [0, 1]);
+
+  const moves = [
+    moveRecord('walk-1', 'task_A', 0, { x: 0.5, y: 64, z: 0.5 }, { x: 1.5, y: 64, z: 0.5 }),
+    moveRecord('walk-1', 'task_A', 1, measured1, { x: 2.5, y: 64, z: 0.5 }),
+    moveRecord('walk-1', 'task_A', 2, measured2, { x: 3.5, y: 64, z: 0.5 }),
+  ];
+  assert.equal(segmentsFollowMeasured(moves, completions), true);
+
+  // 负例：from 用上一段名义 to（1.5），实测是 1.53；两者差 0.03 在 arrival 0.12 内，仍必须拒绝。
+  const nominal = moves.map((m, i) => (i === 1 ? { ...m, from: { x: 1.5, y: 64, z: 0.5 } } : m));
+  assert.ok(Math.abs(1.5 - measured1.x) <= 0.12, '负例差异必须在 arrival tolerance 内才具有区分力');
+  assert.equal(segmentsFollowMeasured(nominal, completions), false);
+  assert.equal(segmentsFollowMeasured(moves, completions.slice(0, 1)), false, '缺上一段完成点必须拒绝');
+});
+
+test('classifyOldOwnerControls：取消后实际复活拒绝、接管后任何旧键拒绝、阻断的 attempt 允许', () => {
+  const keys = (fwd = false) => ({ ...emptyKeys, forward: fwd });
+  const entries: ActualControlEntry[] = [
+    { seq: 11, ts: 11, op: 'clear', ownerTaskId: 'A', keysBefore: keys(true), keysAfter: keys(false) },
+    { seq: 12, ts: 12, op: 'set', name: 'back', value: false, ownerTaskId: 'A', keysBefore: keys(false), keysAfter: keys(false) },
+    { seq: 13, ts: 13, op: 'set', name: 'forward', value: true, ownerTaskId: 'A', keysBefore: keys(false), keysAfter: keys(true) },
+    { seq: 14, ts: 14, op: 'set', name: 'forward', value: true, ownerTaskId: 'A', keysBefore: keys(false), keysAfter: keys(false) },
+    { seq: 21, ts: 21, op: 'clear', ownerTaskId: 'A', keysBefore: keys(false), keysAfter: keys(false) },
+    { seq: 22, ts: 22, op: 'set', name: 'left', value: false, ownerTaskId: 'A', keysBefore: keys(false), keysAfter: keys(false) },
+    { seq: 23, ts: 23, op: 'set', name: 'forward', value: true, ownerTaskId: 'A', keysBefore: keys(false), keysAfter: keys(true) },
+  ];
+  const v = classifyOldOwnerControls(entries, 'A', { cancelSeq: 10, takeoverSeq: 20 });
+  assert.deepEqual(v.revived.map((c) => c.seq), [13, 23], '只有 keysAfter 真的 true 才算复活');
+  assert.deepEqual(v.afterTakeover.map((c) => c.seq), [21, 22, 23], '接管后任何实际 set/clear 都非法');
+  assert.deepEqual(v.releasedBeforeTakeover.map((c) => c.seq), [11, 12, 13, 14], '取消后接管前的松键保留为证据');
+  assert.equal(v.releasedBeforeTakeover.some((c) => c.name === 'forward' && c.value === true && c.keysAfter.forward === false), true, '被 guard 阻断的 attempt 不得算复活');
+});
+
+test('foreignSampleDeliveries：B delegation 的样本必须来自 B 的静态 owner 与原 sample id', () => {
+  const pos = { x: 0.5, y: 64, z: 0.5 };
+  const good = delivery(pos, statusSnap(), statusSnap({ lastPosition: pos }), { delegationId: 'walk-2', owner: 'task_B', sequence: 40 });
+  const oldOwner = delivery(pos, statusSnap(), statusSnap({ lastPosition: pos }), { delegationId: 'walk-2', owner: 'task_A', sequence: 41 });
+  const oldId = delivery(pos, statusSnap(), statusSnap({ lastPosition: pos }), { delegationId: 'walk-2', owner: 'task_B', sequence: 42 });
+  oldId.sample.executionId = 'walk-1';
+  const foreign = foreignSampleDeliveries([good, oldOwner, oldId], 'walk-2', 'task_B');
+  assert.deepEqual(foreign.map((r) => r.seq), [41, 42]);
+});
+
+// --- WalkDiagnostics：请求/实际调用分离、创建时绑定、stopAll 前后（假夹具） ---
+
+type MutableKeys = { [K in keyof typeof emptyKeys]: boolean };
+
+function fakeRaw(controlState: MutableKeys) {
+  return {
+    setControlState(name: string, value: boolean) { controlState[name as keyof MutableKeys] = value; },
+    clearControlStates() { for (const k of Object.keys(controlState) as (keyof MutableKeys)[]) controlState[k] = false; },
+  };
+}
+
+function fakeBody(raw: { setControlState(name: string, value: boolean): void; clearControlStates(): void }) {
+  return {
+    setControlState: (name: string, value: boolean) => raw.setControlState(name, value),
+    clearControlStates: () => raw.clearControlStates(),
     look() {},
     entity: { position: { x: 0, y: 64, z: 0 }, velocity: { x: 0, y: 0, z: 0 }, onGround: true, isInWater: false },
   };
 }
 
-test('WalkDiagnostics：控制写入归属绑定在 walkBody 创建时，不是写入时', () => {
+test('WalkDiagnostics：body 请求与实际 Bot 调用分开，归属绑定在 walkBody 创建时', () => {
   let current: string | null = 'task_A';
-  const target: WalkBridge = { walkBody: fakeBody, stopAll: () => {} };
-  const diag = new WalkDiagnostics(target, () => current, () => snapshotKeys({ controlState: emptyKeys }), () => 0);
+  const controlState: MutableKeys = { ...emptyKeys };
+  const raw = fakeRaw(controlState);
+  const target: WalkBridge = { walkBody: () => fakeBody(raw), stopAll: () => {} };
+  const seq = new EventSeq();
+  const diag = new WalkDiagnostics(target, () => current, () => snapshotKeys({ controlState }), seq, raw, () => 0);
   diag.wrap();
 
   const body = target.walkBody!();
-  current = 'task_B'; // 创建之后换主：旧 body 的写入仍应记为 task_A
+  current = 'task_B'; // 创建之后换主：旧 body 的请求与实际调用仍属 task_A
 
   body.setControlState('forward', true);
+  body.setControlState('back', false); // 原本就是 false，仍必须记录这次真实调用
   body.clearControlStates();
   body.look(0, 0);
 
-  assert.deepEqual(diag.controlLog.map((c) => c.ownerTaskId), ['task_A', 'task_A', 'task_A']);
-  assert.deepEqual(diag.controlLog.map((c) => c.op), ['set', 'clear', 'look']);
+  assert.deepEqual(diag.attempts.map((c) => c.ownerTaskId), ['task_A', 'task_A', 'task_A', 'task_A']);
+  assert.deepEqual(diag.attempts.map((c) => c.op), ['set', 'set', 'clear', 'look']);
+  assert.deepEqual(diag.actualControls.map((c) => c.op), ['set', 'set', 'clear']);
+  assert.deepEqual(diag.actualControls.map((c) => c.ownerTaskId), ['task_A', 'task_A', 'task_A']);
+  assert.equal(diag.actualControls[0]!.keysBefore.forward, false);
+  assert.equal(diag.actualControls[0]!.keysAfter.forward, true);
+  assert.equal(diag.actualControls[1]!.keysBefore.back, false, '原状态 false 也要记录');
+  assert.equal(diag.actualControls[1]!.keysAfter.back, false);
+  assert.equal(diag.actualControls[2]!.keysAfter.forward, false, 'clear 实际释放 forward');
+  const allSeq = [...diag.attempts, ...diag.actualControls].map((c) => c.seq);
+  assert.equal(new Set(allSeq).size, allSeq.length, 'eventSeq 在整个场景内唯一递增');
+  assert.ok(diag.attempts.every((c, i) => i === 0 || c.seq > diag.attempts[i - 1]!.seq));
+  assert.ok(diag.actualControls.every((c, i) => i === 0 || c.seq > diag.actualControls[i - 1]!.seq));
+  assert.ok(diag.attempts[0]!.seq < diag.actualControls[0]!.seq, '请求先于对应的实际调用');
   diag.unwrap();
 });
 
-test('WalkDiagnostics：真实 stopAll 之前采集全键快照（释放前状态），归属为创建时任务', () => {
-  const controlState = { ...emptyKeys, forward: true };
-  let current: string | null = 'task_A';
+test('WalkDiagnostics：生产 stopAll 记录前后全键与 eventSeq，归属为创建时任务', () => {
+  const controlState: MutableKeys = { ...emptyKeys };
+  const raw = fakeRaw(controlState);
   let stopped = false;
   const target: WalkBridge = {
-    walkBody: fakeBody,
-    stopAll: () => { stopped = true; controlState.forward = false; },
+    walkBody: () => fakeBody(raw),
+    stopAll: () => { stopped = true; raw.clearControlStates(); },
   };
-  const diag = new WalkDiagnostics(target, () => current, () => snapshotKeys({ controlState }), () => 123);
+  const diag = new WalkDiagnostics(target, () => 'task_A', () => snapshotKeys({ controlState }), new EventSeq(), raw, () => 123);
   diag.wrap();
 
-  target.walkBody!();
+  target.walkBody!().setControlState('forward', true);
   target.stopAll();
 
   assert.equal(stopped, true);
-  assert.equal(diag.stopSnapshots.length, 1);
-  const snap = diag.stopSnapshots[0]!;
-  assert.equal(snap.label, 'pre-stopAll');
-  assert.equal(snap.ownerTaskId, 'task_A');
-  assert.equal(snap.ts, 123);
-  assert.equal(snap.keys.forward, true, '快照必须在真实 stopAll 清键之前采集');
-  assert.equal(diag.controlLog.some((c) => c.op === 'stopAll'), true);
+  assert.equal(diag.stopAlls.length, 1);
+  const rec = diag.stopAlls[0]!;
+  assert.equal(rec.label, 'production-stopAll');
+  assert.equal(rec.kind, 'production');
+  assert.equal(rec.ownerTaskId, 'task_A');
+  assert.equal(rec.ts, 123);
+  assert.equal(rec.keysBefore.forward, true, 'before 必须在真实 stopAll 清键之前采集');
+  assert.equal(rec.keysAfter.forward, false);
+  assert.ok(rec.seqAfter > rec.seqBefore);
+  // stopAll 内部的真实 clear 也以 stopAll 归属记录。
+  assert.equal(diag.actualControls.some((c) => c.op === 'clear' && c.ownerTaskId === 'task_A'), true);
   diag.unwrap();
 });
 
-test('WalkDiagnostics：unwrap 恢复原实现', () => {
-  const target: WalkBridge = { walkBody: fakeBody, stopAll: () => {} };
+test('WalkDiagnostics：unwrap 恢复原实现且不清键、不调用 stopAll', () => {
+  const controlState: MutableKeys = { ...emptyKeys };
+  const raw = fakeRaw(controlState);
+  let stopCalls = 0;
+  const target: WalkBridge = { walkBody: () => fakeBody(raw), stopAll: () => { stopCalls++; } };
   const originalBody = target.walkBody;
   const originalStop = target.stopAll;
-  const diag = new WalkDiagnostics(target, () => null, () => snapshotKeys({ controlState: emptyKeys }));
+  const diag = new WalkDiagnostics(target, () => 'task_A', () => snapshotKeys({ controlState }), new EventSeq(), raw);
   diag.wrap();
-  assert.notEqual(target.walkBody, originalBody);
+  target.walkBody!().setControlState('forward', true);
+  const actualBefore = diag.actualControls.length;
   diag.unwrap();
   assert.equal(target.walkBody, originalBody);
   assert.equal(target.stopAll, originalStop);
+  assert.equal(controlState.forward, true, '解绑不得清新键');
+  assert.equal(stopCalls, 0, '解绑不得调用 stopAll');
+  assert.equal(diag.actualControls.length, actualBefore);
 });
 
-// --- ExecutionDiagnostics：move / onSample 公开桥的包装与恢复 ---
+test('WalkDiagnostics：walkTick 记录等待/交付的 eventSeq 并绑定创建时归属', async () => {
+  let current: string | null = 'task_A';
+  const entity = { position: { x: 1, y: 64, z: 2 }, velocity: { x: 0, y: 0, z: 0 }, onGround: true, isInWater: false };
+  const target: WalkBridge = { walkTick: () => async () => entity, stopAll: () => {} };
+  const diag = new WalkDiagnostics(target, () => current, () => snapshotKeys({ controlState: { ...emptyKeys } }), new EventSeq());
+  diag.wrap();
+  const tick = target.walkTick!();
+  current = 'task_B';
+  const got = await tick(new AbortController().signal);
+  assert.equal(got, entity);
+  assert.equal(diag.ticks.length, 1);
+  assert.equal(diag.ticks[0]!.ownerTaskId, 'task_A');
+  assert.equal(diag.ticks[0]!.delivered, true);
+  assert.deepEqual(diag.ticks[0]!.pos, { x: 1, y: 64, z: 2 });
+  assert.ok(diag.ticks[0]!.seqEnd > diag.ticks[0]!.seqStart);
+  diag.unwrap();
+});
 
-test('ExecutionDiagnostics：包装 move 记录 from/to/executionId，unwrap 恢复', async () => {
-  const exec = new ExecutionDiagnostics(() => 0);
-  const orig = WalkMoveExecutor.prototype.move;
+// --- ExecutionDiagnostics：公开 start/advance/onSample/setFrameSink/move 的包装与恢复 ---
+
+test('ExecutionDiagnostics：move 段绑定创建时任务与真实 delegation/executionId', async () => {
+  const exec = new ExecutionDiagnostics(new EventSeq(), () => 'task_A', () => 0);
+  const origMove = WalkMoveExecutor.prototype.move;
+  const origStart = WalkRouteExecutor.prototype.start;
+  const origSetFrameSink = WalkMoveExecutor.prototype.setFrameSink;
   exec.wrap();
-  assert.notEqual(WalkMoveExecutor.prototype.move, orig);
+  assert.notEqual(WalkMoveExecutor.prototype.move, origMove);
+
+  const map = new VoxelMap('world', { validityWindowMs: 60_000 });
+  const loop = new WalkRouteExecutor(map, { move: async () => ({ failure: { kind: 'cancelled' } as const }), stop: () => {} });
+  const started = loop.start({
+    worldId: 'world', dim: 'overworld', sessionId: 's1', mode: 'walk',
+    body: { feet: { x: 0.5, y: 0, z: 0.5 }, width: 0.6, height: 1.8, pose: 'standing' },
+    points: [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }],
+    arrival: { kind: 'exact' }, bodyArrival: GROUNDED_ARRIVAL_DEFAULTS, shapeProvider: walkCollisionProvider,
+    deadlineMs: Date.now() + 5000, timeoutMs: 1000,
+  });
 
   const entity = { position: { x: 0, y: 0, z: 0 }, velocity: { x: 0, y: 0, z: 0 }, onGround: true, isInWater: false };
   const body = { setControlState() {}, clearControlStates() {}, look() {}, entity };
   const parent = new AbortController();
   const tick = () => { parent.abort(); return Promise.resolve(entity); };
   const executor = new WalkMoveExecutor(body, tick, parent.signal, () => 0);
-  await executor.move({ executionId: 'walk-1-step-0', worldId: 'w', dim: 'd', sessionId: 's', from: { x: 0, y: 0, z: 0 }, to: { x: 1, y: 0, z: 0 }, deadlineMs: 1000, timeoutMs: 100, signal: new AbortController().signal });
+  executor.setFrameSink(() => {});
+  await executor.move({
+    executionId: `${started.delegationId}-step-0`, worldId: 'w', dim: 'd', sessionId: 's',
+    from: { x: 0, y: 0, z: 0 }, to: { x: 1, y: 0, z: 0 }, deadlineMs: 1000, timeoutMs: 100, signal: new AbortController().signal,
+  });
 
   assert.equal(exec.moves.length, 1);
-  assert.equal(exec.moves[0]!.executionId, 'walk-1-step-0');
-  assert.deepEqual(exec.moves[0]!.from, { x: 0, y: 0, z: 0 });
-  assert.deepEqual(exec.moves[0]!.to, { x: 1, y: 0, z: 0 });
+  const m = exec.moves[0]!;
+  assert.equal(m.executionId, `${started.delegationId}-step-0`);
+  assert.equal(m.delegationId, started.delegationId);
+  assert.equal(m.taskId, 'task_A');
+  assert.deepEqual(m.from, { x: 0, y: 0, z: 0 });
+  assert.deepEqual(m.to, { x: 1, y: 0, z: 0 });
+  assert.equal(exec.bindings.some((b) => b.kind === 'frameSink' && b.ownerTaskId === 'task_A'), true);
+  assert.equal(exec.routeCalls.filter((c) => c.op === 'start' && c.ownerTaskId === 'task_A').length, 1);
 
   exec.unwrap();
-  assert.equal(WalkMoveExecutor.prototype.move, orig);
+  assert.equal(WalkMoveExecutor.prototype.move, origMove);
+  assert.equal(WalkRouteExecutor.prototype.start, origStart);
+  assert.equal(WalkMoveExecutor.prototype.setFrameSink, origSetFrameSink);
 });
 
-test('ExecutionDiagnostics：包装 onSample 记录委托样本（delegationId/sequence/pos），unwrap 恢复', () => {
-  const exec = new ExecutionDiagnostics(() => 1000);
+test('ExecutionDiagnostics：onSample 保存完整原始样本与状态前后，接受需由 lastPosition 证明', () => {
+  const exec = new ExecutionDiagnostics(new EventSeq(), () => 'task_A', () => 1000);
   const orig = WalkRouteExecutor.prototype.onSample;
   exec.wrap();
   assert.notEqual(WalkRouteExecutor.prototype.onSample, orig);
 
   const map = new VoxelMap('world', { validityWindowMs: 60_000 });
-  const loop = new WalkRouteExecutor(map, { move: async () => ({ failure: { kind: 'cancelled' } as const }), stop: () => {} });
+  const loop = new WalkRouteExecutor(map, { move: async () => ({ failure: { kind: 'cancelled' } as const }), stop: () => {} }, { now: () => 1000 });
   const status = loop.start({
     worldId: 'world', dim: 'overworld', sessionId: 's1', mode: 'walk',
     body: { feet: { x: 0.5, y: 0, z: 0.5 }, width: 0.6, height: 1.8, pose: 'standing' },
@@ -530,13 +712,54 @@ test('ExecutionDiagnostics：包装 onSample 记录委托样本（delegationId/s
     alive: true, connected: true, observationReady: true, onGround: true, inWater: false,
   });
 
-  assert.equal(exec.acceptedSamples.length, 1);
-  assert.equal(exec.acceptedSamples[0]!.delegationId, delegationId);
-  assert.equal(exec.acceptedSamples[0]!.sequence, 1);
-  assert.deepEqual(exec.acceptedSamples[0]!.pos, { x: 0.5, y: 0, z: 0.5 });
+  assert.equal(exec.deliveredSamples.length, 1);
+  const rec = exec.deliveredSamples[0]!;
+  assert.equal(rec.ownerTaskId, 'task_A');
+  assert.equal(rec.delegationId, delegationId);
+  assert.equal(rec.sample.executionId, delegationId);
+  assert.equal(rec.sample.worldId, 'world');
+  assert.equal(rec.sample.dim, 'overworld');
+  assert.equal(rec.sample.sessionId, 's1');
+  assert.equal(rec.sample.sequence, 1);
+  assert.equal(rec.sample.observedAt, 1000);
+  assert.equal(rec.statusBefore.result, null);
+  assert.deepEqual(rec.statusAfter.lastPosition, { x: 0.5, y: 0, z: 0.5 });
+  assert.equal(acceptedMeasurements(exec.deliveredSamples, delegationId).length, 1);
+
+  // 错误 sample id 只记录为交付，不能计入接受。
+  loop.onSample({
+    worldId: 'world', dim: 'overworld', sessionId: 's1', executionId: 'other',
+    pos: { x: 1, y: 0, z: 0.5 }, velocity: { x: 0, y: 0, z: 0 }, observedAt: 1100, sequence: 2,
+    alive: true, connected: true, observationReady: true, onGround: true, inWater: false,
+  });
+  assert.equal(exec.deliveredSamples.length, 2);
+  assert.equal(acceptedMeasurements(exec.deliveredSamples, delegationId).length, 1);
 
   exec.unwrap();
   assert.equal(WalkRouteExecutor.prototype.onSample, orig);
+});
+
+test('TaskTracker：done 只在 entries 存在且未 settled 时保存一次完整结果', async () => {
+  const em = new FakeEmitter();
+  const tracker = new TaskTracker(em as never);
+  const task = {
+    id: 't_1', planVersion: 1, skill: 'walk_route', args: { points: [] }, source: 'user' as const,
+    startedAt: 1, deadline: 10, progress: 0, note: '', movement: true,
+  };
+  const done = tracker.register(task, { points: [], deadlineMs: 10 }, { worldId: 'w', dim: 'd', sessionId: 's', alive: true, connected: true, observationReady: true });
+  const outcome = {
+    task, durationMs: 5,
+    result: { status: 'succeeded' as const, summary: 'ok', data: { nav: arrivedNav() } },
+  };
+  em.emit('done', outcome);
+  em.emit('done', outcome);
+  const got = await done;
+  assert.equal(got, outcome);
+  assert.equal(tracker.outcomes.length, 1, '同一任务只保存一次');
+  assert.deepEqual(tracker.outcomes[0]!.result, outcome.result);
+  em.emit('done', { ...outcome, task: { ...task, id: 'unknown' } });
+  assert.equal(tracker.outcomes.length, 1, '未登记任务不得写入');
+  tracker.dispose();
 });
 
 // --- ConnectionTracker / quitClient：真实 end / 已观测 / 缺 end 超时 / 监听器移除 ---

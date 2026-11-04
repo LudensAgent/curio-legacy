@@ -58,6 +58,18 @@ const KEYS: ControlState[] = ['forward', 'back', 'left', 'right', 'jump', 'sprin
 type KeyState = Record<ControlState, boolean>;
 type Keys = KeyState;
 
+export interface Vec3 {
+  x: number;
+  y: number;
+  z: number;
+}
+
+/** 场景内唯一的单调事件序号：同毫秒事件仍可严格排序，不依赖 Date.now 分窗。 */
+export class EventSeq {
+  private n = 0;
+  next(): number { return ++this.n; }
+}
+
 export interface FrameRecord {
   seq: number;
   ts: number;
@@ -71,49 +83,127 @@ export interface FrameRecord {
   worldAgeTicks: number | null;
 }
 
-/** 一次控制写入：身体桥 set/clear/look 与全局 stopAll 都在同一条时间线上，靠 op 区分。 */
-export interface ControlEntry {
+/**
+ * 身体桥发出的控制「请求」（walkBody 包装层，调用前记录）。它只证明请求，
+ * 不证明原始 Bot 方法真的采纳（内部 guard 可能仍是 no-op）。
+ */
+export interface ControlAttempt {
+  seq: number;
   ts: number;
-  op: 'set' | 'clear' | 'look' | 'stopAll';
+  op: 'set' | 'clear' | 'look';
   name?: string;
   value?: boolean;
   ownerTaskId: string | null;
 }
 
-/** 真实 adapter.stopAll 之前采集的全键快照（stopAll 会清键，之前才是「释放前」状态）。 */
-export interface StopAllSnapshot {
+/**
+ * 原始 Bot 的 setControlState / clearControlStates 实际入口记录。
+ * before/after 都是真实 7 键状态；即使按键原本就是目标值也保留这次真实调用。
+ */
+export interface ActualControlEntry {
+  seq: number;
+  ts: number;
+  op: 'set' | 'clear';
+  name?: string;
+  value?: boolean;
+  ownerTaskId: string | null;
+  keysBefore: Keys;
+  keysAfter: Keys;
+}
+
+/** adapter.stopAll 的真实前后全键与事件序号；kind 区分生产/测试夹具回退。 */
+export interface StopAllRecord {
+  seqBefore: number;
+  seqAfter: number;
   ts: number;
   label: string;
-  keys: Keys;
+  kind: 'production' | 'harness';
+  keysBefore: Keys;
+  keysAfter: Keys;
   ownerTaskId: string | null;
 }
 
-/** walkTick 交付的实测帧采样日志：owner 绑定在 walkTick 创建时，用于检测旧任务迟到样本。 */
-export interface SampleEntry {
-  ts: number;
+/** walkTick 每次等待与交付的事件序号，owner 绑定在 walkTick 创建时。 */
+export interface TickEntry {
+  seqStart: number;
+  seqEnd: number;
+  tsStart: number;
+  tsEnd: number;
   ownerTaskId: string | null;
-  x: number; y: number; z: number;
+  delivered: boolean;
+  pos?: Vec3;
 }
 
-/** WalkMoveExecutor.move 的实际执行记录（公开身体桥诊断包装，不伪造）。 */
+/** WalkMoveExecutor.move 的实际段请求（公开桥包装，记录创建时绑定的任务与段身份）。 */
 export interface MoveRecord {
+  seq: number;
   ts: number;
+  taskId: string | null;
+  delegationId: string | null;
   executionId: string; // 段 executionId（walk-<gen>-step-<i>），与 taskId / delegationId 区分
-  from: { x: number; y: number; z: number };
-  to: { x: number; y: number; z: number };
+  from: Vec3;
+  to: Vec3;
   deadlineMs: number;
+  timeoutMs: number;
+  signalAborted: boolean;
 }
 
-/** WalkRouteExecutor.onSample 收到的委托样本（sample.executionId 即 delegationId）。 */
-export interface AcceptedSampleRecord {
-  ts: number;
+export interface RouteStatusSnapshot {
   delegationId: string;
-  sequence: number;
-  pos: { x: number; y: number; z: number };
-  observedAt: number;
-  onGround: boolean;
   nextPointIndex: number;
-  lastPosition: { x: number; y: number; z: number } | null;
+  activeStepIndex: number | null;
+  lastPosition: Vec3 | null;
+  result: NavResult | null;
+}
+
+/** 公开 WalkRouteExecutor 调用（start/advance 状态变化/onSample）及其前后状态。 */
+export interface RouteCallRecord {
+  seq: number;
+  ts: number;
+  op: 'start' | 'advance' | 'onSample';
+  ownerTaskId: string | null;
+  delegationId: string | null;
+  statusBefore: RouteStatusSnapshot | null;
+  statusAfter: RouteStatusSnapshot;
+}
+
+/**
+ * onSample 被调用只代表样本「已交付」。这里保存完整原始 BodySample（真实 scope/
+ * lifecycle/id/time/sequence）与公开状态前后；是否被接受必须由 lastPosition、
+ * nextPointIndex 推进和最终 NavResult.trace/lastObservation 另行证明。
+ */
+export interface DeliveredSampleRecord {
+  seq: number;
+  ts: number;
+  ownerTaskId: string | null;
+  delegationId: string;
+  sample: BodySample;
+  statusBefore: RouteStatusSnapshot;
+  statusAfter: RouteStatusSnapshot;
+}
+
+/** 被公开状态证明确认到达的一段实测完成点。 */
+export interface MeasuredCompletion {
+  stepIndex: number;
+  sampleSequence: number;
+  observedAt: number;
+  pos: Vec3;
+  sample: DeliveredSampleRecord;
+}
+
+/** 身体桥/执行器创建时的静态归属，供旧回调正确归属。 */
+export interface BindingRecord {
+  seq: number;
+  ts: number;
+  ownerTaskId: string | null;
+  kind: 'body' | 'tick' | 'frameSink' | 'route';
+}
+
+export interface TimelineMark {
+  seq: number;
+  ts: number;
+  label: string;
+  taskId: string | null;
 }
 
 interface ControlSnapshot {
@@ -157,12 +247,16 @@ interface ScenarioEvidence {
   results: TaskDoneRecord[];
   frames: FrameRecord[];
   framesTruncated: boolean;
-  controlLog: ControlEntry[];
+  controlAttempts: ControlAttempt[];
+  actualControls: ActualControlEntry[];
   controlSnapshots: ControlSnapshot[];
-  stopSnapshots: StopAllSnapshot[];
-  sampleLog: SampleEntry[];
-  acceptedSamples: AcceptedSampleRecord[];
+  stopAlls: StopAllRecord[];
+  ticks: TickEntry[];
+  routeCalls: RouteCallRecord[];
+  deliveredSamples: DeliveredSampleRecord[];
   moves: MoveRecord[];
+  bindings: BindingRecord[];
+  marks: TimelineMark[];
   serverCorrections: ServerCorrection[];
   trajectory?: Record<string, unknown>;
   error?: string;
@@ -347,18 +441,153 @@ export function framesSince(frames: FrameRecord[], ts: number): FrameRecord[] {
   return frames.filter((f) => f.ts >= ts);
 }
 
-/** 归属为某任务的迟到 forward=true 写入（取消/换主之后仍写前进键即复活/清键）。 */
-export function lateForwardWritesByOwner(controlLog: ControlEntry[], ownerTaskId: string, sinceTs: number): ControlEntry[] {
-  return controlLog.filter((c) => c.ownerTaskId === ownerTaskId && c.ts >= sinceTs && c.op === 'set' && c.name === 'forward' && c.value === true);
+export function vecEqual(a: { x: number; y: number; z: number } | null | undefined, b: { x: number; y: number; z: number } | null | undefined, eps = 1e-9): boolean {
+  return !!a && !!b && Math.abs(a.x - b.x) <= eps && Math.abs(a.y - b.y) <= eps && Math.abs(a.z - b.z) <= eps;
 }
 
-/** 连续段是否从上一段的实测终点接续（每个后续段的 from 紧贴上一段的 to）。 */
-export function segmentsContiguous(moves: MoveRecord[], tol = 0.2): boolean {
+export function allKeysReleased(keys: Keys): boolean {
+  return KEYS.every((k) => keys[k] === false);
+}
+
+function finiteVec(v: { x: number; y: number; z: number }): boolean {
+  return Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z);
+}
+
+/**
+ * 本任务实际 move 段集合：必须恰好包含 delegation 的 0..expectedCount-1 段，
+ * 每段归属正确、from/to 完整；0/1/2 段或额外段都不通过。
+ */
+export interface SegmentSetCheck {
+  ok: boolean;
+  reason?: string;
+  segments: MoveRecord[];
+  missing: string[];
+  extra: string[];
+  wrongOwner: MoveRecord[];
+  incomplete: MoveRecord[];
+}
+
+export function checkTaskSegments(
+  moves: MoveRecord[],
+  delegationId: string,
+  taskId: string,
+  expectedCount: number,
+): SegmentSetCheck {
+  const own = moves.filter((m) => m.delegationId === delegationId);
+  const expected = Array.from({ length: expectedCount }, (_, i) => `${delegationId}-step-${i}`);
+  const ids = own.map((m) => m.executionId);
+  const missing = expected.filter((id) => !ids.includes(id));
+  const extra = ids.filter((id) => !expected.includes(id));
+  const segments = expected.flatMap((id) => own.filter((m) => m.executionId === id));
+  const wrongOwner = own.filter((m) => m.taskId !== taskId);
+  const incomplete = segments.filter((m) => !finiteVec(m.from) || !finiteVec(m.to));
+  const ok = own.length === expectedCount && missing.length === 0 && extra.length === 0
+    && wrongOwner.length === 0 && incomplete.length === 0 && segments.length === expectedCount;
+  const reason = !ok
+    ? `own=${own.length} expected=${expectedCount} missing=${JSON.stringify(missing)} extra=${JSON.stringify(extra)} wrongOwner=${wrongOwner.length} incomplete=${incomplete.length}`
+    : undefined;
+  return { ok, reason, segments, missing, extra, wrongOwner, incomplete };
+}
+
+/**
+ * 由公开 onSample 状态证明「真实测量被接受」：样本 id 属于该 delegation、
+ * sequence/observedAt 单调、调用前未终结、调用后 lastPosition 正是该原始测量。
+ */
+export function acceptedMeasurements(
+  records: DeliveredSampleRecord[],
+  delegationId?: string,
+): DeliveredSampleRecord[] {
+  const lastSeq = new Map<string, number>();
+  const lastObserved = new Map<string, number>();
+  const out: DeliveredSampleRecord[] = [];
+  for (const r of records) {
+    if (delegationId !== undefined && r.delegationId !== delegationId) continue;
+    const prevSeq = lastSeq.get(r.delegationId) ?? Number.NEGATIVE_INFINITY;
+    const prevObserved = lastObserved.get(r.delegationId) ?? Number.NEGATIVE_INFINITY;
+    const recorded = r.sample.executionId === r.delegationId
+      && r.statusBefore.result === null
+      && r.sample.sequence > prevSeq
+      && r.sample.observedAt >= prevObserved
+      && r.statusAfter.lastPosition !== null
+      && vecEqual(r.statusAfter.lastPosition, r.sample.pos);
+    if (recorded) {
+      out.push(r);
+      lastSeq.set(r.delegationId, r.sample.sequence);
+      lastObserved.set(r.delegationId, r.sample.observedAt);
+    }
+  }
+  return out;
+}
+
+/** 被公开状态证明的逐段到达：nextPointIndex 真实推进且该次原始测量已记录。 */
+export function measuredCompletions(
+  records: DeliveredSampleRecord[],
+  delegationId: string,
+): MeasuredCompletion[] {
+  return acceptedMeasurements(records, delegationId)
+    .filter((r) => r.statusAfter.nextPointIndex > r.statusBefore.nextPointIndex)
+    .map((r) => ({
+      stepIndex: r.statusBefore.nextPointIndex - 1,
+      sampleSequence: r.sample.sequence,
+      observedAt: r.sample.observedAt,
+      pos: { ...r.statusAfter.lastPosition! },
+      sample: r,
+    }));
+}
+
+/**
+ * 下一段的 from 必须严格等于上一段由公开状态证明的实测完成点（x/y/z 全部），
+ * 不接受名义 prev.to，也不接受 arrival tolerance 内的近似。
+ */
+export function segmentsFollowMeasured(
+  moves: MoveRecord[],
+  completions: MeasuredCompletion[],
+  eps = 1e-9,
+): boolean {
+  if (moves.length === 0) return false;
   for (let i = 1; i < moves.length; i++) {
-    const prev = moves[i - 1]!, cur = moves[i]!;
-    if (Math.hypot(cur.from.x - prev.to.x, cur.from.z - prev.to.z) > tol) return false;
+    const completion = completions.find((c) => c.stepIndex === i - 1);
+    if (!completion || !vecEqual(moves[i]!.from, completion.pos, eps)) return false;
   }
   return true;
+}
+
+/** 取消/交接边界后的旧任务实际控制调用是否违规（只用 eventSeq 判定先后）。 */
+export interface OldOwnerBoundary {
+  cancelSeq: number;
+  takeoverSeq: number;
+}
+
+export interface OldOwnerViolations {
+  /** 取消后仍实际写入并保持 forward=true。 */
+  revived: ActualControlEntry[];
+  /** B 已接管后，旧任务仍发出任何实际 set/clear。 */
+  afterTakeover: ActualControlEntry[];
+  /** 取消后、接管前的旧任务真实松键（允许，仅作证据）。 */
+  releasedBeforeTakeover: ActualControlEntry[];
+}
+
+export function classifyOldOwnerControls(
+  actualControls: ActualControlEntry[],
+  ownerTaskId: string,
+  boundary: OldOwnerBoundary,
+): OldOwnerViolations {
+  const own = actualControls.filter((c) => c.ownerTaskId === ownerTaskId && c.seq > boundary.cancelSeq);
+  return {
+    revived: own.filter((c) => c.op === 'set' && c.name === 'forward' && c.value === true && c.keysAfter.forward === true),
+    afterTakeover: own.filter((c) => c.seq > boundary.takeoverSeq),
+    releasedBeforeTakeover: own.filter((c) => c.seq <= boundary.takeoverSeq),
+  };
+}
+
+/** B delegation 的交付样本必须全部来自 B 的静态 owner 与原始 sample id。 */
+export function foreignSampleDeliveries(
+  records: DeliveredSampleRecord[],
+  delegationId: string,
+  taskId: string,
+): DeliveredSampleRecord[] {
+  return records.filter((r) => r.delegationId === delegationId
+    && (r.sample.executionId !== delegationId || r.ownerTaskId !== taskId));
 }
 
 function isDirectRun(): boolean {
@@ -376,23 +605,36 @@ export interface WalkBridge {
   stopAll: () => void;
 }
 
+/** 原始 Bot 的最小控制入口；包装后完全透传原参数/this/返回。 */
+export interface RawControlTarget {
+  setControlState(name: string, value: boolean): void;
+  clearControlStates(): void;
+}
+
 /**
- * 采集身体桥控制写入、真实 stopAll 前的全键快照、walkTick 交付的样本，全部把
- * 归属（taskId）绑定在「walkBody / walkTick 创建那一刻」，而不是写入那一刻。
+ * 采集身体桥控制请求、原始 Bot 实际控制调用、生产 stopAll 前后、walkTick 等待/交付。
+ * 归属（taskId）绑定在「walkBody / walkTick 创建那一刻」，不是旧回调触发时的 arbiter.current。
  */
 export class WalkDiagnostics {
-  readonly controlLog: ControlEntry[] = [];
-  readonly stopSnapshots: StopAllSnapshot[] = [];
-  readonly sampleLog: SampleEntry[] = [];
+  readonly attempts: ControlAttempt[] = [];
+  readonly actualControls: ActualControlEntry[] = [];
+  readonly stopAlls: StopAllRecord[] = [];
+  readonly ticks: TickEntry[] = [];
+  readonly bindings: BindingRecord[] = [];
   private lastBodyOwner: string | null = null;
+  private rawCallOwner: string | null = null;
   private origBody?: () => WalkBody;
   private origTick?: () => WalkTick;
   private origStop?: () => void;
+  private origRawSet?: RawControlTarget['setControlState'];
+  private origRawClear?: RawControlTarget['clearControlStates'];
 
   constructor(
     private readonly target: WalkBridge,
     private readonly owner: () => string | null,
     private readonly readKeys: () => Keys,
+    private readonly seq: EventSeq,
+    private readonly rawBot?: RawControlTarget,
     private readonly now: () => number = Date.now,
   ) {}
 
@@ -400,23 +642,58 @@ export class WalkDiagnostics {
     const origBody = this.target.walkBody;
     const origTick = this.target.walkTick;
     const origStop = this.target.stopAll;
+    const raw = this.rawBot;
+
+    // 原始 Bot 实际入口：先读 before，调用原方法，再读 after；所有调用都记录，
+    // 包括「按键原本已是目标值」的 false/no-op，以及被内部 guard 拦住的请求。
+    if (raw) {
+      const self = this;
+      const origSet = raw.setControlState;
+      const origClear = raw.clearControlStates;
+      raw.setControlState = function (name: string, value: boolean) {
+        const seq = self.seq.next();
+        const ts = self.now();
+        const ownerTaskId = self.rawCallOwner;
+        const keysBefore = self.readKeys();
+        origSet.call(raw, name, value);
+        const keysAfter = self.readKeys();
+        self.actualControls.push({ seq, ts, op: 'set', name, value, ownerTaskId, keysBefore, keysAfter });
+      };
+      raw.clearControlStates = function () {
+        const seq = self.seq.next();
+        const ts = self.now();
+        const ownerTaskId = self.rawCallOwner;
+        const keysBefore = self.readKeys();
+        origClear.call(raw);
+        const keysAfter = self.readKeys();
+        self.actualControls.push({ seq, ts, op: 'clear', ownerTaskId, keysBefore, keysAfter });
+      };
+      this.origRawSet = origSet;
+      this.origRawClear = origClear;
+    }
 
     if (origBody) {
       this.target.walkBody = () => {
         const owner = this.owner();
         this.lastBodyOwner = owner;
+        this.bindings.push({ seq: this.seq.next(), ts: this.now(), ownerTaskId: owner, kind: 'body' });
         const body = origBody.call(this.target);
+        // 这些只是身体桥请求（attempt）；是否真的写入由原始 Bot 入口记录证明。
         return {
           setControlState: (name: string, value: boolean) => {
-            this.controlLog.push({ ts: this.now(), op: 'set', name, value, ownerTaskId: owner });
-            body.setControlState(name, value);
+            this.attempts.push({ seq: this.seq.next(), ts: this.now(), op: 'set', name, value, ownerTaskId: owner });
+            const prevOwner = this.rawCallOwner;
+            this.rawCallOwner = owner;
+            try { body.setControlState(name, value); } finally { this.rawCallOwner = prevOwner; }
           },
           clearControlStates: () => {
-            this.controlLog.push({ ts: this.now(), op: 'clear', ownerTaskId: owner });
-            body.clearControlStates();
+            this.attempts.push({ seq: this.seq.next(), ts: this.now(), op: 'clear', ownerTaskId: owner });
+            const prevOwner = this.rawCallOwner;
+            this.rawCallOwner = owner;
+            try { body.clearControlStates(); } finally { this.rawCallOwner = prevOwner; }
           },
           look: (yaw: number, pitch: number) => {
-            this.controlLog.push({ ts: this.now(), op: 'look', ownerTaskId: owner });
+            this.attempts.push({ seq: this.seq.next(), ts: this.now(), op: 'look', ownerTaskId: owner });
             return body.look(yaw, pitch);
           },
           entity: body.entity,
@@ -427,21 +704,32 @@ export class WalkDiagnostics {
     if (origTick) {
       this.target.walkTick = () => {
         const owner = this.owner();
+        this.bindings.push({ seq: this.seq.next(), ts: this.now(), ownerTaskId: owner, kind: 'tick' });
         const tick = origTick.call(this.target);
         return async (signal: AbortSignal) => {
+          const seqStart = this.seq.next();
+          const tsStart = this.now();
           const entity = await tick(signal);
-          if (entity) this.sampleLog.push({ ts: this.now(), ownerTaskId: owner, x: entity.position.x, y: entity.position.y, z: entity.position.z });
+          this.ticks.push({
+            seqStart, seqEnd: this.seq.next(), tsStart, tsEnd: this.now(),
+            ownerTaskId: owner, delivered: entity !== null,
+            ...(entity ? { pos: { ...entity.position } } : {}),
+          });
           return entity;
         };
       };
     }
 
     this.target.stopAll = () => {
-      const keys = this.readKeys();
       const owner = this.lastBodyOwner;
-      this.stopSnapshots.push({ ts: this.now(), label: 'pre-stopAll', keys, ownerTaskId: owner });
-      this.controlLog.push({ ts: this.now(), op: 'stopAll', ownerTaskId: owner });
-      origStop.call(this.target);
+      const seqBefore = this.seq.next();
+      const ts = this.now();
+      const keysBefore = this.readKeys();
+      const prevOwner = this.rawCallOwner;
+      this.rawCallOwner = owner;
+      try { origStop.call(this.target); } finally { this.rawCallOwner = prevOwner; }
+      const keysAfter = this.readKeys();
+      this.stopAlls.push({ seqBefore, seqAfter: this.seq.next(), ts, label: 'production-stopAll', kind: 'production', keysBefore, keysAfter, ownerTaskId: owner });
     };
 
     this.origBody = origBody;
@@ -449,32 +737,54 @@ export class WalkDiagnostics {
     this.origStop = origStop;
   }
 
+  /** 只恢复原实现；绝不调用 clear/stop，避免清理时误清接管任务的新键。 */
   unwrap() {
     if (this.origBody) this.target.walkBody = this.origBody;
     if (this.origTick) this.target.walkTick = this.origTick;
     if (this.origStop) this.target.stopAll = this.origStop;
+    if (this.rawBot) {
+      if (this.origRawSet) this.rawBot.setControlState = this.origRawSet;
+      if (this.origRawClear) this.rawBot.clearControlStates = this.origRawClear;
+    }
     this.origBody = undefined;
     this.origTick = undefined;
     this.origStop = undefined;
+    this.origRawSet = undefined;
+    this.origRawClear = undefined;
   }
 }
 
 /**
- * 采集库执行层的真实记录：WalkMoveExecutor.move 的每段 from/to/executionId，
- * WalkRouteExecutor.onSample 收到的委托样本。两个都是公开方法，只做原型级诊断
- * 包装并委托原实现，不访问私有字段、不改请求；所有任务结果落定后恢复。
+ * 采集库执行层的真实记录：WalkRouteExecutor 的公开 start/advance/onSample，
+ * WalkMoveExecutor 的公开 setFrameSink/move。归属在创建时绑定到具体实例，
+ * 旧 A 的迟到回调仍按 A 的静态绑定记录，不读取调用时的 arbiter.current。
  */
 type MoveFn = (this: WalkMoveExecutor, request: ExecutableMove) => ReturnType<WalkMoveExecutor['move']>;
 type OnSampleFn = (this: WalkRouteExecutor, sample: BodySample) => WalkRouteStatus;
+type StartFn = (this: WalkRouteExecutor, request: Parameters<WalkRouteExecutor['start']>[0]) => WalkRouteStatus;
+type AdvanceFn = (this: WalkRouteExecutor, budget: number) => WalkRouteStatus;
+type SetFrameSinkFn = (this: WalkMoveExecutor, fn: Parameters<WalkMoveExecutor['setFrameSink']>[0]) => void;
 
 export class ExecutionDiagnostics {
   readonly moves: MoveRecord[] = [];
-  readonly acceptedSamples: AcceptedSampleRecord[] = [];
+  readonly deliveredSamples: DeliveredSampleRecord[] = [];
+  readonly routeCalls: RouteCallRecord[] = [];
+  readonly bindings: BindingRecord[] = [];
   private wrapped = false;
+  private readonly routeOwners = new WeakMap<WalkRouteExecutor, { taskId: string | null; delegationId: string }>();
+  private readonly moveOwners = new WeakMap<WalkMoveExecutor, { taskId: string | null }>();
+  private readonly delegationOwners = new Map<string, string | null>();
   private origMove?: MoveFn;
   private origOnSample?: OnSampleFn;
+  private origStart?: StartFn;
+  private origAdvance?: AdvanceFn;
+  private origSetFrameSink?: SetFrameSinkFn;
 
-  constructor(private readonly now: () => number = Date.now) {}
+  constructor(
+    private readonly seq: EventSeq,
+    private readonly owner: () => string | null,
+    private readonly now: () => number = Date.now,
+  ) {}
 
   wrap() {
     if (this.wrapped) return;
@@ -482,33 +792,80 @@ export class ExecutionDiagnostics {
     const self = this;
     const origMove = WalkMoveExecutor.prototype.move as MoveFn;
     const origOnSample = WalkRouteExecutor.prototype.onSample as OnSampleFn;
+    const origStart = WalkRouteExecutor.prototype.start as StartFn;
+    const origAdvance = WalkRouteExecutor.prototype.advance as AdvanceFn;
+    const origSetFrameSink = WalkMoveExecutor.prototype.setFrameSink as SetFrameSinkFn;
     this.origMove = origMove;
     this.origOnSample = origOnSample;
+    this.origStart = origStart;
+    this.origAdvance = origAdvance;
+    this.origSetFrameSink = origSetFrameSink;
+
+    (WalkRouteExecutor.prototype as { start: StartFn }).start = function (this: WalkRouteExecutor, request: Parameters<WalkRouteExecutor['start']>[0]) {
+      const owner = self.owner();
+      const before = snapshotStatus(this.status());
+      const status = origStart.call(this, request);
+      self.routeOwners.set(this, { taskId: owner, delegationId: status.delegationId });
+      self.delegationOwners.set(status.delegationId, owner);
+      self.routeCalls.push({
+        seq: self.seq.next(), ts: self.now(), op: 'start', ownerTaskId: owner,
+        delegationId: status.delegationId, statusBefore: before, statusAfter: snapshotStatus(status)!,
+      });
+      return status;
+    };
+
+    (WalkRouteExecutor.prototype as { advance: AdvanceFn }).advance = function (this: WalkRouteExecutor, budget: number) {
+      // 归属在进入调用前静态取出；即使原实现内发生重入 start，也不改标本次事件。
+      const binding = self.routeOwners.get(this);
+      const before = snapshotStatus(this.status());
+      const status = origAdvance.call(this, budget);
+      const after = snapshotStatus(status)!;
+      if (!sameStatus(before, after)) {
+        self.routeCalls.push({
+          seq: self.seq.next(), ts: self.now(), op: 'advance',
+          ownerTaskId: binding?.taskId ?? null, delegationId: binding?.delegationId ?? status.delegationId,
+          statusBefore: before, statusAfter: after,
+        });
+      }
+      return status;
+    };
+
+    (WalkRouteExecutor.prototype as { onSample: OnSampleFn }).onSample = function (this: WalkRouteExecutor, sample: BodySample) {
+      const binding = self.routeOwners.get(this);
+      const before = snapshotStatus(this.status());
+      const status = origOnSample.call(this, sample);
+      const after = snapshotStatus(status)!;
+      self.deliveredSamples.push({
+        seq: self.seq.next(), ts: self.now(), ownerTaskId: binding?.taskId ?? null,
+        delegationId: binding?.delegationId ?? after.delegationId, sample: cloneSample(sample),
+        statusBefore: before ?? after, statusAfter: after,
+      });
+      return status;
+    };
+
+    (WalkMoveExecutor.prototype as { setFrameSink: SetFrameSinkFn }).setFrameSink = function (this: WalkMoveExecutor, fn: Parameters<WalkMoveExecutor['setFrameSink']>[0]) {
+      const owner = self.owner();
+      self.moveOwners.set(this, { taskId: owner });
+      self.bindings.push({ seq: self.seq.next(), ts: self.now(), ownerTaskId: owner, kind: 'frameSink' });
+      return origSetFrameSink.call(this, fn);
+    };
 
     (WalkMoveExecutor.prototype as { move: MoveFn }).move = function (this: WalkMoveExecutor, request: ExecutableMove) {
+      const delegationId = segmentDelegationId(request.executionId);
+      const instanceOwner = self.moveOwners.get(this)?.taskId ?? null;
+      const delegationOwner = delegationId === null ? undefined : self.delegationOwners.get(delegationId);
       self.moves.push({
-        ts: self.now(),
+        seq: self.seq.next(), ts: self.now(),
+        taskId: instanceOwner ?? delegationOwner ?? null,
+        delegationId,
         executionId: request.executionId,
         from: { ...request.from },
         to: { ...request.to },
         deadlineMs: request.deadlineMs,
+        timeoutMs: request.timeoutMs,
+        signalAborted: request.signal.aborted,
       });
       return origMove.call(this, request);
-    };
-
-    (WalkRouteExecutor.prototype as { onSample: OnSampleFn }).onSample = function (this: WalkRouteExecutor, sample: BodySample) {
-      const status = origOnSample.call(this, sample);
-      self.acceptedSamples.push({
-        ts: self.now(),
-        delegationId: sample.executionId,
-        sequence: sample.sequence,
-        pos: { ...sample.pos },
-        observedAt: sample.observedAt,
-        onGround: sample.onGround,
-        nextPointIndex: status.nextPointIndex,
-        lastPosition: status.lastPosition ? { ...status.lastPosition } : null,
-      });
-      return status;
     };
   }
 
@@ -516,10 +873,48 @@ export class ExecutionDiagnostics {
     if (!this.wrapped) return;
     if (this.origMove) (WalkMoveExecutor.prototype as { move: MoveFn }).move = this.origMove;
     if (this.origOnSample) (WalkRouteExecutor.prototype as { onSample: OnSampleFn }).onSample = this.origOnSample;
+    if (this.origStart) (WalkRouteExecutor.prototype as { start: StartFn }).start = this.origStart;
+    if (this.origAdvance) (WalkRouteExecutor.prototype as { advance: AdvanceFn }).advance = this.origAdvance;
+    if (this.origSetFrameSink) (WalkMoveExecutor.prototype as { setFrameSink: SetFrameSinkFn }).setFrameSink = this.origSetFrameSink;
     this.origMove = undefined;
     this.origOnSample = undefined;
+    this.origStart = undefined;
+    this.origAdvance = undefined;
+    this.origSetFrameSink = undefined;
     this.wrapped = false;
   }
+}
+
+function snapshotStatus(status: WalkRouteStatus | null): RouteStatusSnapshot | null {
+  if (status === null) return null;
+  return {
+    delegationId: status.delegationId,
+    nextPointIndex: status.nextPointIndex,
+    activeStepIndex: status.activeStepIndex,
+    lastPosition: status.lastPosition ? { ...status.lastPosition } : null,
+    result: status.result,
+  };
+}
+
+function sameStatus(a: RouteStatusSnapshot | null, b: RouteStatusSnapshot | null): boolean {
+  return !!a && !!b && a.delegationId === b.delegationId
+    && a.nextPointIndex === b.nextPointIndex
+    && a.activeStepIndex === b.activeStepIndex
+    && (a.result?.outcome ?? null) === (b.result?.outcome ?? null)
+    && vecEqual(a.lastPosition, b.lastPosition);
+}
+
+function cloneSample(sample: BodySample): BodySample {
+  return {
+    ...sample,
+    pos: { ...sample.pos },
+    ...(sample.velocity === undefined ? {} : { velocity: { ...sample.velocity } }),
+  };
+}
+
+function segmentDelegationId(executionId: string): string | null {
+  const idx = executionId.lastIndexOf('-step-');
+  return idx > 0 ? executionId.slice(0, idx) : null;
 }
 
 class FrameRecorder {
@@ -583,6 +978,57 @@ function toDoneRecord(o: TaskOutcome): TaskDoneRecord {
     gentle: o.gentle,
     doneAt: Date.now(),
   };
+}
+
+/** ARRIVED+confirmed、横向 <=0.12、脚高 <=0.05、最终观测着地且干燥。 */
+function assertArrivedAt(nav: NavResult | undefined, target: Vec3, feetY: number, label: string) {
+  if (!isArrived(nav)) throw new Error(`${label} 未确认到达：outcome=${nav?.outcome} confirmed=${nav?.confirmed}`);
+  const pos = nav.lastPosition;
+  if (!pos) throw new Error(`${label} ARRIVED 缺少 lastPosition`);
+  const horizontalError = dist2(pos, target);
+  const feetError = Math.abs(pos.y - feetY);
+  if (horizontalError > 0.12 || feetError > 0.05) {
+    throw new Error(`${label} 到达但超容差：横向 ${horizontalError.toFixed(3)} (>0.12) 脚高 ${feetError.toFixed(3)} (>0.05)`);
+  }
+  const obs = nav.lastObservation;
+  if (!obs) throw new Error(`${label} ARRIVED 缺少 lastObservation`);
+  if (!obs.onGround) throw new Error(`${label} 最终观测未着地`);
+  if (obs.inWater !== false) throw new Error(`${label} 最终观测不干燥：inWater=${String(obs.inWater)}`);
+  return { horizontalError, feetError, obs, pos };
+}
+
+/**
+ * 用最终 NavResult 的 trace/lastObservation 证明最后一次到达来自原始测量：
+ * 观测时间/scope/位置与实测完成点一致，trace 条数等于真实到达次数。
+ */
+function assertArrivalProvenance(nav: NavResult, completions: MeasuredCompletion[], label: string) {
+  const last = completions[completions.length - 1];
+  if (!last) throw new Error(`${label} 无实测完成点`);
+  if (nav.trace.length !== completions.length) throw new Error(`${label} trace 条数 ${nav.trace.length} != 实测到达 ${completions.length}`);
+  const traceTail = nav.trace[nav.trace.length - 1];
+  if (!traceTail || !vecEqual(traceTail.pos, last.pos) || traceTail.ts !== last.observedAt) {
+    throw new Error(`${label} trace 末项与最后实测完成点不一致`);
+  }
+  const obs = nav.lastObservation;
+  if (!obs) throw new Error(`${label} 缺少 lastObservation`);
+  const raw = last.sample.sample;
+  if (obs.observedAt !== raw.observedAt) throw new Error(`${label} lastObservation.observedAt 非原始测量时间`);
+  if (obs.worldId !== raw.worldId || obs.dim !== raw.dim || obs.sessionId !== raw.sessionId) {
+    throw new Error(`${label} lastObservation scope 与原始测量不一致`);
+  }
+}
+
+/**
+ * 终态生产 stopAll 必须是本任务真实触发，且其 before/after 与最终键全部 false：
+ * 证明 body 在 stopAll 之前已经释放全部 7 键，而不是靠 stopAll 掩盖残留。
+ */
+function assertProductionRelease(stopAlls: StopAllRecord[], taskId: string, finalKeys: Keys, label: string): StopAllRecord {
+  const record = [...stopAlls].reverse().find((s) => s.kind === 'production' && s.ownerTaskId === taskId);
+  if (!record) throw new Error(`${label} 未捕获归属 ${taskId} 的生产 stopAll`);
+  if (!allKeysReleased(record.keysBefore)) throw new Error(`${label} stopAll 之前存在未释放键：${JSON.stringify(record.keysBefore)}`);
+  if (!allKeysReleased(record.keysAfter)) throw new Error(`${label} stopAll 之后仍存在未释放键：${JSON.stringify(record.keysAfter)}`);
+  if (!allKeysReleased(finalKeys)) throw new Error(`${label} 最终仍存在未释放键：${JSON.stringify(finalKeys)}`);
+  return record;
 }
 
 // ---------------------------------------------------------------------------
@@ -694,14 +1140,15 @@ export function packageMeta(opts: PackageMetaOptions = {}) {
 // 任务追踪：done 一触发即记录终态（每次 taskId 一次），不因后续断言/等待丢失
 // ---------------------------------------------------------------------------
 
-class TaskTracker {
+export class TaskTracker {
   readonly starts: TaskStartRecord[] = [];
   readonly outcomes: TaskDoneRecord[] = [];
   private entries = new Map<string, { promise: Promise<TaskOutcome>; resolve: (o: TaskOutcome) => void; settled: boolean }>();
-  private readonly arbiter: Arbiter;
+  private readonly arbiter: Pick<Arbiter, 'on' | 'removeListener'>;
   private readonly onDone = (o: TaskOutcome) => {
     const e = this.entries.get(o.task.id);
-    if (!e) return;
+    if (!e || e.settled) return;
+    // done 可能在后续位移断言之前异步到达：立即保存完整 TaskOutcome，只保存一次。
     this.outcomes.push(toDoneRecord(o));
     e.settled = true;
     e.resolve(o);
@@ -813,7 +1260,14 @@ interface ScenarioDiag {
   diag: WalkDiagnostics;
   exec: ExecutionDiagnostics;
   tasks: TaskTracker;
+  seq: EventSeq;
   ev: ScenarioEvidence;
+}
+
+function markTimeline(d: ScenarioDiag, label: string, taskId: string | null): number {
+  const seq = d.seq.next();
+  d.ev.marks.push({ seq, ts: Date.now(), label, taskId });
+  return seq;
 }
 
 // ---------------------------------------------------------------------------
@@ -994,20 +1448,22 @@ async function runScenario(
 ): Promise<ScenarioEvidence> {
   const ev: ScenarioEvidence = {
     verdict: 'NOT_RUN', startedAt: Date.now(), taskStarts: [], results: [],
-    frames: [], framesTruncated: false, controlLog: [], controlSnapshots: [], stopSnapshots: [],
-    sampleLog: [], acceptedSamples: [], moves: [], serverCorrections: [],
+    frames: [], framesTruncated: false, controlAttempts: [], actualControls: [], controlSnapshots: [],
+    stopAlls: [], ticks: [], routeCalls: [], deliveredSamples: [], moves: [], bindings: [], marks: [],
+    serverCorrections: [],
   };
+  const seq = new EventSeq();
   const recorder = new FrameRecorder(ctx.bot, () => ctx.arbiter.current?.id ?? null);
   const corrections = new ServerCorrectionRecorder(ctx.bot);
-  const diag = new WalkDiagnostics(ctx.adapter, () => ctx.arbiter.current?.id ?? null, () => snapshotKeys(ctx.bot));
-  const exec = new ExecutionDiagnostics();
+  const diag = new WalkDiagnostics(ctx.adapter, () => ctx.arbiter.current?.id ?? null, () => snapshotKeys(ctx.bot), seq, ctx.bot);
+  const exec = new ExecutionDiagnostics(seq, () => ctx.arbiter.current?.id ?? null);
   const tasks = new TaskTracker(ctx.arbiter);
   recorder.start();
   corrections.start();
   diag.wrap();
   exec.wrap();
   try {
-    await body({ recorder, corrections, diag, exec, tasks, ev });
+    await body({ recorder, corrections, diag, exec, tasks, seq, ev });
     if (ev.verdict === 'NOT_RUN') ev.verdict = 'PASS';
   } catch (e) {
     ev.verdict = 'FAIL';
@@ -1031,11 +1487,14 @@ async function runScenario(
     ev.durationMs = ev.finishedAt - ev.startedAt;
     ev.frames = recorder.frames;
     ev.framesTruncated = recorder.truncated;
-    ev.controlLog = diag.controlLog;
-    ev.stopSnapshots = diag.stopSnapshots;
-    ev.sampleLog = diag.sampleLog;
-    ev.acceptedSamples = exec.acceptedSamples;
+    ev.controlAttempts = diag.attempts;
+    ev.actualControls = diag.actualControls;
+    ev.stopAlls = diag.stopAlls;
+    ev.ticks = diag.ticks;
+    ev.routeCalls = exec.routeCalls;
+    ev.deliveredSamples = exec.deliveredSamples;
     ev.moves = exec.moves;
+    ev.bindings = [...diag.bindings, ...exec.bindings];
     ev.serverCorrections = corrections.corrections;
     ev.taskStarts = tasks.starts;
     ev.results = tasks.outcomes;
@@ -1052,7 +1511,7 @@ async function runScenario(
 // 场景实现
 // ---------------------------------------------------------------------------
 
-/** W1：同高三段相邻 X/Z 转弯，ARRIVED 且容差内，每段从实测终点接续。 */
+/** W1：同高三段相邻 X/Z 转弯，ARRIVED 且容差内，每段从实测终点严格接续。 */
 async function scenarioW1(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   const ev = d.ev;
   const lane = WALK_LANE;
@@ -1074,31 +1533,41 @@ async function scenarioW1(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   const o = await awaitOrTimeout(started.done, 60_000, 'W1 完成');
   if (o.result.status !== 'succeeded') throw new Error(`W1 未成功：status=${o.result.status} 摘要=${o.result.summary}`);
   const nav = navFromResult(o.result);
-  if (!isArrived(nav)) throw new Error(`W1 未确认到达：outcome=${nav?.outcome} 摘要=${o.result.summary}`);
-  const finalTarget = route[route.length - 1]!;
-  const finalPos = nav!.lastPosition;
-  const err = dist2(finalPos, finalTarget);
-  const feetErr = Math.abs(finalPos.y - y);
-  if (err > 0.12 || feetErr > 0.05) {
-    throw new Error(`W1 到达但超容差：横向 ${err.toFixed(3)} (>0.12) 脚高 ${feetErr.toFixed(3)} (>0.05)`);
+  const arrival = assertArrivedAt(nav, route[route.length - 1]!, y, 'W1');
+
+  const taskId = started.task.id;
+  const startCall = d.exec.routeCalls.find((c) => c.op === 'start' && c.ownerTaskId === taskId);
+  if (!startCall?.delegationId) throw new Error('W1 未捕获本任务的真实 delegation 启动');
+  const delegationId = startCall.delegationId;
+
+  // 恰好 3 段本任务 move；0/1/2/额外段都 FAIL，每段身份/归属/from/to 完整。
+  const segments = checkTaskSegments(d.exec.moves, delegationId, taskId, 3);
+  if (!segments.ok) throw new Error(`W1 段集合不合法：${segments.reason}`);
+
+  // 每段完成点必须来自公开 nextPointIndex 推进 + 该次原始测量；下一段 from 严格等于它。
+  const completions = measuredCompletions(d.exec.deliveredSamples, delegationId);
+  if (completions.length !== 3) throw new Error(`W1 实测到达完成点 ${completions.length} != 3`);
+  if (!segmentsFollowMeasured(segments.segments, completions)) {
+    throw new Error(`W1 段间未从实测完成点严格接续：${JSON.stringify(segments.segments.map((m) => ({ id: m.executionId, from: m.from, to: m.to })))}`);
   }
-  // 每段从实测终点接续：库的 move.from 是上一段实测位置，不是名义路点。
-  if (d.exec.moves.length > 1 && !segmentsContiguous(d.exec.moves)) {
-    throw new Error(`W1 段间不接续：${JSON.stringify(d.exec.moves.map((m) => ({ from: m.from, to: m.to })))}`);
-  }
-  // 全键释放必须在生产 stopAll 之前被捕获（stopSnapshots 非空即真实记录到释放前状态）。
-  if (d.diag.stopSnapshots.length === 0) throw new Error('W1 未捕获任何 stopAll 前全键快照');
+  assertArrivalProvenance(nav!, completions, 'W1');
+  const release = assertProductionRelease(d.diag.stopAlls, taskId, snapshotKeys(ctx.bot), 'W1');
+
   ev.extra = {
     ...ev.extra,
-    route, deadlineMs, taskStartTs,
-    horizontalError: Number(err.toFixed(3)), feetError: Number(feetErr.toFixed(3)),
-    onGroundAtArrival: nav!.lastObservation?.onGround,
-    segmentCount: d.exec.moves.length,
+    route, deadlineMs, taskStartTs, delegationId,
+    horizontalError: Number(arrival.horizontalError.toFixed(3)), feetError: Number(arrival.feetError.toFixed(3)),
+    onGroundAtArrival: arrival.obs.onGround, inWaterAtArrival: arrival.obs.inWater,
+    segmentCount: segments.segments.length,
+    segmentIds: segments.segments.map((m) => m.executionId),
+    measuredCompletionPositions: completions.map((c) => c.pos),
+    stopAllSeq: { before: release.seqBefore, after: release.seqAfter },
+    acceptedSampleCount: acceptedMeasurements(d.exec.deliveredSamples, delegationId).length,
   };
   ev.verdict = 'PASS';
 }
 
-/** W2：受控平台边缘、分数起终点、整条真实轨迹无坠落/失支撑。 */
+/** W2：受控平台边缘、分数起终点、整条真实轨迹无坠落/失支撑，并做终态全键断言。 */
 async function scenarioW2(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   const ev = d.ev;
   const p = W2_PLATFORM;
@@ -1115,7 +1584,18 @@ async function scenarioW2(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   const o = await awaitOrTimeout(started.done, 60_000, 'W2 完成');
   if (o.result.status !== 'succeeded') throw new Error(`W2 未成功：status=${o.result.status} 摘要=${o.result.summary}`);
   const nav = navFromResult(o.result);
-  if (!isArrived(nav)) throw new Error(`W2 未到达：outcome=${nav?.outcome} 摘要=${o.result.summary}`);
+  const arrival = assertArrivedAt(nav, p.target, p.feetY, 'W2');
+
+  const taskId = started.task.id;
+  const startCall = d.exec.routeCalls.find((c) => c.op === 'start' && c.ownerTaskId === taskId);
+  if (!startCall?.delegationId) throw new Error('W2 未捕获本任务的真实 delegation 启动');
+  const delegationId = startCall.delegationId;
+  const segments = checkTaskSegments(d.exec.moves, delegationId, taskId, 1);
+  if (!segments.ok) throw new Error(`W2 段集合不合法：${segments.reason}`);
+  const completions = measuredCompletions(d.exec.deliveredSamples, delegationId);
+  if (completions.length !== 1) throw new Error(`W2 实测到达完成点 ${completions.length} != 1`);
+  assertArrivalProvenance(nav!, completions, 'W2');
+  const release = assertProductionRelease(d.diag.stopAlls, taskId, snapshotKeys(ctx.bot), 'W2');
 
   const motionFrames = framesSince(d.recorder.frames, taskStartTs);
   ev.trajectory = summarizeTrajectory(motionFrames);
@@ -1129,11 +1609,18 @@ async function scenarioW2(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   if (platformEscaped(motionFrames, footprint)) {
     throw new Error(`W2 逃出平台足迹：bounds=${JSON.stringify(ev.trajectory)}`);
   }
-  ev.extra = { ...ev.extra, arrival: nav, taskStartTs };
+  ev.extra = {
+    ...ev.extra, arrival: nav, taskStartTs, delegationId,
+    horizontalError: Number(arrival.horizontalError.toFixed(3)), feetError: Number(arrival.feetError.toFixed(3)),
+    onGroundAtArrival: arrival.obs.onGround, inWaterAtArrival: arrival.obs.inWater,
+    segmentCount: segments.segments.length,
+    stopAllSeq: { before: release.seqBefore, after: release.seqAfter },
+    acceptedSampleCount: acceptedMeasurements(d.exec.deliveredSamples, delegationId).length,
+  };
   ev.verdict = 'PASS';
 }
 
-/** W6：移动中取消并立即交接给新 walk 任务，收集两任务 id 与结果，检查旧回调是否复活/清键。 */
+/** W6：移动中取消并立即交接给新 walk 任务；按 eventSeq 检查旧回调复活/清键与样本归属。 */
 async function scenarioW6(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   const ev = d.ev;
   const lane = WALK_LANE;
@@ -1141,8 +1628,7 @@ async function scenarioW6(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   await buildSupportFixture(ctx.rcon, ev, { xMin: lane.xMin, xMax: lane.xMax, zMin: lane.zMin, zMax: lane.zMax }, lane.feetY, lane.material);
   await teleportAndSettle(ctx, ev, lane.start, 'W6 步行道起点');
 
-  const y = lane.feetY;
-  const routeA = Array.from({ length: 10 }, (_, i) => ({ x: lane.start.x + i, y, z: lane.start.z }));
+  const routeA = Array.from({ length: 10 }, (_, i) => ({ x: lane.start.x + i, y: lane.feetY, z: lane.start.z }));
   const a = startWalkTask(ctx, d, routeA, Date.now() + 30_000);
   if ('error' in a) throw new Error(`W6 任务A启动失败：${a.error}`);
   const aDone = a.done;
@@ -1150,36 +1636,91 @@ async function scenarioW6(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   await waitFor(() => dist2(ctx.adapter.state().pos, moveStart) > 0.5, 15_000, 'W6 任务A开始移动');
 
   snapControl(ctx, 'before-arbiter-cancel', ev);
-  const cancelTs = Date.now();
+  const cancelSeq = markTimeline(d, 'arbiter-cancel', a.task.id);
   ctx.arbiter.cancel('W6 取消并交接');
   snapControl(ctx, 'after-arbiter-cancel', ev);
 
-  // 立即用交接点实测位置作为 B 起点，不是 A 的原始 p。
-  const handoff = ctx.adapter.state().pos;
-  const routeB = [{ x: handoff.x, y, z: handoff.z }, { x: handoff.x + 1, y, z: handoff.z }, { x: handoff.x + 2, y, z: handoff.z }];
+  // B 立刻从取消后的真实实测 handoff x/y/z 开始（不沿用 A 起点、不硬编码 y）。
+  const handoff = { ...ctx.adapter.state().pos };
+  const routeB = [
+    { x: handoff.x, y: handoff.y, z: handoff.z },
+    { x: handoff.x + 1, y: handoff.y, z: handoff.z },
+    { x: handoff.x + 2, y: handoff.y, z: handoff.z },
+  ];
   const b = startWalkTask(ctx, d, routeB, Date.now() + 30_000);
   if ('error' in b) throw new Error(`W6 任务B启动失败：${b.error}`);
   const bDone = b.done;
 
-  // 两个 done promise 都在 await 之前持有，避免丢失快的 B 事件。
-  const [oA, oB] = await Promise.all([aDone, bDone]);
+  // B 接管边界取 B 的真实 walkBody 创建事件（eventSeq），不是调用时的 arbiter.current。
+  const bBody = [...d.diag.bindings].reverse().find((x) => x.kind === 'body' && x.ownerTaskId === b.task.id);
+  if (!bBody) throw new Error('W6 未捕获任务B的 body 创建绑定');
+  const takeoverSeq = bBody.seq;
+  markTimeline(d, 'task-B-body-bound', b.task.id);
 
+  // 两个 done promise 都在 await 之前持有，避免丢失快的 B 事件；有界等待两者落定。
+  const [oA, oB] = await awaitOrTimeout(Promise.all([aDone, bDone]), 60_000, 'W6 A/B 完成');
   snapControl(ctx, 'after-both-complete', ev);
 
-  if (oA.result.status !== 'cancelled') throw new Error(`W6 任务A未以 cancelled 结束：status=${oA.result.status} 摘要=${oA.result.summary}`);
-  if (oB.result.status !== 'succeeded') throw new Error(`W6 任务B未成功：status=${oB.result.status} 摘要=${oB.result.summary}`);
-  const navA = navFromResult(oA.result);
-  if (!hasPartialPosition(navA)) throw new Error('W6 任务A取消未保留实测部分位移（lastPosition 缺失）');
+  const taskIds = d.tasks.outcomes.map((r) => r.task.id);
+  if (!taskIds.includes(a.task.id) || !taskIds.includes(b.task.id)) throw new Error('W6 两个任务的 done 结果未完整保存');
 
-  // 旧回调复活检查：取消后（cancelTs 之后）归属 A 的 forward=true 写入即为复活/清键。
-  const resurrected = lateForwardWritesByOwner(d.diag.controlLog, a.task.id, cancelTs);
-  ev.extra = { ...ev.extra,
+  // A：CANCELLED / confirmed=false / 保留与最后有效原始样本一致的 partial。
+  if (oA.result.status !== 'cancelled') throw new Error(`W6 任务A未以 cancelled 结束：status=${oA.result.status} 摘要=${oA.result.summary}`);
+  const navA = navFromResult(oA.result);
+  if (!navA || navA.outcome !== 'CANCELLED' || navA.confirmed !== false) throw new Error(`W6 任务A终态非 CANCELLED/unconfirmed：${navA?.outcome}`);
+  if (!hasPartialPosition(navA)) throw new Error('W6 任务A取消未保留实测部分位移（lastPosition 缺失）');
+  const aStart = d.exec.routeCalls.find((c) => c.op === 'start' && c.ownerTaskId === a.task.id);
+  if (!aStart?.delegationId) throw new Error('W6 未捕获任务A的真实 delegation');
+  const aAccepted = acceptedMeasurements(d.exec.deliveredSamples, aStart.delegationId);
+  const aLast = aAccepted[aAccepted.length - 1];
+  if (!aLast) throw new Error('W6 任务A无被公开状态证明的实测样本');
+  if (!vecEqual(navA.lastPosition, aLast.sample.pos)) throw new Error('W6 任务A partial 与最后有效原始样本位置不一致');
+  const aObs = navA.lastObservation;
+  if (!aObs) throw new Error('W6 任务A partial 缺少 lastObservation');
+  if (aObs.observedAt !== aLast.sample.observedAt
+    || aObs.worldId !== aLast.sample.worldId || aObs.dim !== aLast.sample.dim || aObs.sessionId !== aLast.sample.sessionId) {
+    throw new Error('W6 任务A lastObservation 的原始时间/scope 与最后有效样本不一致');
+  }
+
+  // B：ARRIVED/confirmed/容差/着地干燥；B 的段与交付样本不得混入旧 A 来源。
+  if (oB.result.status !== 'succeeded') throw new Error(`W6 任务B未成功：status=${oB.result.status} 摘要=${oB.result.summary}`);
+  const navB = navFromResult(oB.result);
+  const bArrival = assertArrivedAt(navB, routeB[routeB.length - 1]!, handoff.y, 'W6 B');
+  const bStart = d.exec.routeCalls.find((c) => c.op === 'start' && c.ownerTaskId === b.task.id);
+  if (!bStart?.delegationId) throw new Error('W6 未捕获任务B的真实 delegation');
+  const bSegments = checkTaskSegments(d.exec.moves, bStart.delegationId, b.task.id, 2);
+  if (!bSegments.ok) throw new Error(`W6 任务B段集合不合法：${bSegments.reason}`);
+  const bCompletions = measuredCompletions(d.exec.deliveredSamples, bStart.delegationId);
+  if (bCompletions.length !== 2) throw new Error(`W6 任务B实测到达完成点 ${bCompletions.length} != 2`);
+  if (!segmentsFollowMeasured(bSegments.segments, bCompletions)) throw new Error('W6 任务B段间未从实测完成点严格接续');
+  const foreign = foreignSampleDeliveries(d.exec.deliveredSamples, bStart.delegationId, b.task.id);
+  if (foreign.length > 0) throw new Error(`W6 任务B delegation 混入 ${foreign.length} 条错误归属样本`);
+  const bRelease = assertProductionRelease(d.diag.stopAlls, b.task.id, snapshotKeys(ctx.bot), 'W6 B');
+
+  // 旧 A 实际控制边界：取消后实际复活拒绝；B 接管后任何 A 真实 set/clear 拒绝。
+  const violations = classifyOldOwnerControls(d.diag.actualControls, a.task.id, { cancelSeq, takeoverSeq });
+  if (violations.revived.length > 0) throw new Error(`W6 旧任务A在取消后实际复活 forward=true ${violations.revived.length} 次`);
+  if (violations.afterTakeover.length > 0) {
+    throw new Error(`W6 旧任务A在B接管后仍有 ${violations.afterTakeover.length} 次实际控制：${JSON.stringify(violations.afterTakeover.map((c) => ({ seq: c.seq, op: c.op, name: c.name, value: c.value })))}`);
+  }
+  // 旧 A tick 的迟到交付本身允许（会被丢弃），只要求它没有提交进 B 的 delegation/segment。
+  const oldTicksAfterCancel = d.diag.ticks.filter((t) => t.ownerTaskId === a.task.id && t.seqEnd > cancelSeq && t.delivered);
+
+  ev.extra = {
+    ...ev.extra,
     taskA: a.task.id, taskB: b.task.id,
-    cancelTs, handoff,
+    cancelSeq, takeoverSeq, handoff,
     finalKeys: snapshotKeys(ctx.bot),
-    lateOldForwardWrites: resurrected.length,
+    delegationA: aStart.delegationId, delegationB: bStart.delegationId,
+    aPartial: { lastPosition: navA.lastPosition, lastObservation: navA.lastObservation, acceptedSamples: aAccepted.length },
+    bArrival: {
+      horizontalError: Number(bArrival.horizontalError.toFixed(3)), feetError: Number(bArrival.feetError.toFixed(3)),
+      onGround: bArrival.obs.onGround, inWater: bArrival.obs.inWater, acceptedSamples: acceptedMeasurements(d.exec.deliveredSamples, bStart.delegationId).length,
+    },
+    oldAReleasedBeforeTakeover: violations.releasedBeforeTakeover.map((c) => ({ seq: c.seq, op: c.op, name: c.name, value: c.value })),
+    oldATickDeliveriesAfterCancel: oldTicksAfterCancel.length,
+    stopAllSeqB: { before: bRelease.seqBefore, after: bRelease.seqAfter },
   };
-  if (resurrected.length > 0) throw new Error(`W6 检测到 ${resurrected.length} 次旧任务A迟到 forward=true（复活/清键）`);
   ev.verdict = 'PASS';
 }
 
@@ -1215,7 +1756,7 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
     }
     if (!hasPartialPosition(nav)) throw new Error('W7a TIMEOUT 未保留实测部分位移');
     // 部分位移必须与最后一条已接受样本一致（非初始位置）。
-    const accepted = d.exec.acceptedSamples.filter((s) => s.lastPosition !== null).map((s) => s.lastPosition!);
+    const accepted = acceptedMeasurements(d.exec.deliveredSamples).map((s) => s.sample.pos);
     if (!partialMatchesLastSample(nav, accepted)) throw new Error('W7a 部分位移与最后已接受样本不一致');
     if (timeoutTs > deadlineMs + 1000) throw new Error('W7a 实际结束远超期限');
     subcases.a = { ...(subcases.a as object), verdict: 'PASS' };
@@ -1278,7 +1819,7 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
     };
     if (oDisc.result.status !== 'cancelled') throw new Error(`W7c 断线未以 cancelled 结束：status=${oDisc.result.status} 摘要=${oDisc.result.summary}`);
     if (!hasPartialPosition(nav)) throw new Error('W7c 断线未保留实测部分位移');
-    const accepted = d.exec.acceptedSamples.filter((s) => s.lastPosition !== null).map((s) => s.lastPosition!);
+    const accepted = acceptedMeasurements(d.exec.deliveredSamples).map((s) => s.sample.pos);
     if (!partialMatchesLastSample(nav, accepted)) throw new Error('W7c 部分位移与最后已接受样本不一致');
     subcases.c = { ...(subcases.c as object), verdict: 'PASS' };
   } catch (e) {
