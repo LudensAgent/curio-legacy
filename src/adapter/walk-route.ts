@@ -336,6 +336,7 @@ export async function runWalkRoute(opts: {
         if (opts.signal.aborted) break;
         if (now() >= deadline) break;
         if (cancelBrokenLifecycle()) break;
+        initFrames++; // 空交付也计入有界预算，避免停帧时无限空转。
         continue;
       }
       observeThenSample(entity);
