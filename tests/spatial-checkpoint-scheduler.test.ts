@@ -393,24 +393,21 @@ test('真实 SQLite：常规周期保存独立于宿主最终关停，重开恢�
       assert.ok(observed.sections.length > 0, '真实观测应写入内存地图');
       assert.equal(spatial.getPersistenceState().dirty, true);
 
-      let stop: (() => void) | null = null;
-      let timer: ReturnType<typeof setTimeout> | null = null;
-      const firstSave = new Promise<Extract<SpatialCheckpointReport, { status: 'saved' }>>((resolve, reject) => {
-        timer = setTimeout(() => reject(new Error('周期保存未在 5000ms 内完成')), 5000);
-        stop = startSpatialCheckpointScheduler(spatial, (report) => {
-          if (report.status === 'failed') {
-            reject(new Error(`周期保存失败：${JSON.stringify(report.error)}`));
-            return;
-          }
-          resolve(report);
-        }, 10);
-      });
+      const firstSave = deferred<Extract<SpatialCheckpointReport, { status: 'saved' }>>();
+      const timer = setTimeout(() => firstSave.reject(new Error('周期保存未在 5000ms 内完成')), 5000);
+      const stop = startSpatialCheckpointScheduler(spatial, (report) => {
+        if (report.status === 'failed') {
+          firstSave.reject(new Error(`周期保存失败：${JSON.stringify(report.error)}`));
+          return;
+        }
+        firstSave.resolve(report);
+      }, 10);
       let saved: Extract<SpatialCheckpointReport, { status: 'saved' }> | undefined;
       try {
-        saved = await firstSave;
+        saved = await firstSave.promise;
       } finally {
-        if (timer !== null) clearTimeout(timer);
-        stop?.();
+        clearTimeout(timer);
+        stop();
       }
       assert.ok(saved !== undefined, '必须收到真实 saved 汇报');
       assert.equal(saved.checkpoint.worldId, worldId);
