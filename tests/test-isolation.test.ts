@@ -185,6 +185,14 @@ test('IPv6 回环 ::1 与 localhost / 127.0.0.1 视为同一主机，游戏与 R
   assert.throws(() => assertTestIsolation(testLayout(base, { rconHost: '127.0.0.1', rconPort: 25575 }), [localRcon], { worldIdExplicit: true }), /RCON 地址.*冲突/);
 });
 
+test('通配地址 :: 与 ::1 / 127.0.0.1 一次性归一为同一回环，端口冲突不被漏检', () => {
+  const base = os.tmpdir();
+  const local = localLayout(base, { mcHost: '::' });
+  assert.throws(() => assertTestIsolation(testLayout(base, { mcHost: '::1', mcPort: 25565 }), [local], { worldIdExplicit: true }), /游戏连接地址.*冲突/);
+  const localV4 = localLayout(base, { rconHost: '::' });
+  assert.throws(() => assertTestIsolation(testLayout(base, { rconHost: '127.0.0.1', rconPort: 25575 }), [localV4], { worldIdExplicit: true }), /RCON 地址.*冲突/);
+});
+
 test('OBSERVER_HUD_CONFIG 在 Windows 上大小写不同也视为同一文件', { skip: process.platform !== 'win32' }, () => {
   const base = os.tmpdir();
   const local = localLayout(base);

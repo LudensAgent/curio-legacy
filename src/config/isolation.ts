@@ -115,9 +115,9 @@ function sameFile(left: string, right: string): boolean {
 function normalizeHost(host: string): string {
   let h = host.toLowerCase();
   if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
-  // 常见回环地址别名统一到 127.0.0.1：localhost / 127.0.0.1 / ::1（IPv6 回环）指向同一回环主机，不能绕过端口冲突检查。
-  if (h === '0.0.0.0' || h === 'localhost' || h === '::1') h = '127.0.0.1';
-  if (h === '::') h = '::1';
+  // 回环与通配地址一次性归一：0.0.0.0 / localhost / :: / ::1 都指向本机回环或包含回环，端口相同即冲突。
+  // 不能分两步（先 ::→::1 再 ::1→127.0.0.1），否则 :: 与 ::1 会落到不同 token 而漏检。
+  if (h === '0.0.0.0' || h === 'localhost' || h === '::' || h === '::1') h = '127.0.0.1';
   return h;
 }
 

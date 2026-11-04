@@ -107,6 +107,19 @@ test('existingTestState 识别目标里任何已有世界（即使 level-name �
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('existingTestState 识别嵌套目录里的已有世界（level-name 带路径）', () => {
+  const dir = tmp();
+  const targetServer = path.join(dir, 'target');
+  const dataDir = path.join(dir, 'data');
+  const nested = path.join('worlds', 'survival');
+  fs.mkdirSync(path.join(targetServer, nested), { recursive: true });
+  fs.writeFileSync(path.join(targetServer, nested, 'level.dat'), 'old');
+  fs.writeFileSync(path.join(targetServer, 'server.properties'), 'level-name=worlds/survival\nserver-port=25565\n');
+  const markers = existingTestState({ dataDir, spatialDbPath: path.join(dataDir, 'spatial', 'spatial.sqlite') }, targetServer);
+  assert.deepEqual(markers, [`世界 ${nested}/level.dat`]);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('setServerProperty 按逻辑键处理 : 分隔与重复键，写回后最后一条生效', () => {
   const dir = tmp();
   const props = path.join(dir, 'server.properties');

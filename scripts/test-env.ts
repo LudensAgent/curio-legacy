@@ -69,15 +69,26 @@ export function setServerProperty(file: string, key: string, value: string): voi
   fs.writeFileSync(file, Buffer.concat([without, needBreak ? Buffer.from(eol) : Buffer.alloc(0), entry]));
 }
 
-/** 目录里含 level.dat 的一级子目录名（即世界目录）。空目录、只有 server.properties 返回空。 */
+/** copySeed 会跳过的运行期目录；检测已有世界时同样跳过，口径一致。 */
+const COPY_EXCLUDE = new Set(['logs', 'recordings', '.cache', 'session.lock']);
+
+/** 目录里所有含 level.dat 的世界目录（相对路径，可嵌套）。空目录、只有 server.properties 返回空。 */
 export function worldDirsIn(dir: string): string[] {
   if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir, { withFileTypes: true })
-    .filter((e) => e.isDirectory() && fs.existsSync(path.join(dir, e.name, 'level.dat')))
-    .map((e) => e.name);
+  const found: string[] = [];
+  const walk = (current: string, rel: string): void => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      if (entry.isSymbolicLink() || !entry.isDirectory() || COPY_EXCLUDE.has(entry.name)) continue;
+      const childRel = rel ? path.join(rel, entry.name) : entry.name;
+      if (fs.existsSync(path.join(current, entry.name, 'level.dat'))) found.push(childRel);
+      walk(path.join(current, entry.name), childRel);
+    }
+  };
+  walk(dir, '');
+  return found;
 }
 
-/** 目录里是否存在任何世界（任意子目录含 level.dat）。空目录、只有 server.properties 不算已初始化。 */
+/** 目录里是否存在任何世界（任意深度子目录含 level.dat）。空目录、只有 server.properties 不算已初始化。 */
 export function hasWorldData(dir: string): boolean {
   return worldDirsIn(dir).length > 0;
 }
@@ -104,7 +115,6 @@ export function syncServerForTest(targetServerDir: string, config: { mcPort: num
 }
 
 /** 复制服务器目录作为世界种子；跳过运行期目录、锁定文件与链接，保证可写世界是真实副本。 */
-const COPY_EXCLUDE = new Set(['logs', 'recordings', '.cache', 'session.lock']);
 function copySeed(src: string, dst: string): void {
   fs.mkdirSync(dst, { recursive: true });
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
