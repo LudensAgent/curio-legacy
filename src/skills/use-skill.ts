@@ -101,12 +101,15 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
         if (receipt?.data?.inputCompleted === true) inputCompleted = true;
         const okEffect = receipt?.ok === true && receipt.data?.noop !== true && !inputOnly;
         // 有的动作自己报 ok 但没真做（move moved=0、shield 没举、look/lookAt 只转头）；有的报没成却真改了世界（挖到一半）
-        // ——只有真正改变了身体/世界才算"动了"：effectEvidence 是通用真效果信号；move 看 moved>0；look/lookAt/shield 不算
+        // ——只有真正改变了身体/世界才算"动了"：effectEvidence 是通用真效果信号；move 看 moved>0；look/lookAt/shield 不算。
+        // 只读动作（含由只读子步骤组成的宏）即使成功也不改变身体/世界，不能算物理执行。
+        const observationAction = method === 'act'
+          && (OBSERVATION_ACTIONS.has(String(values[0])) || SKILLS[String(values[0])]?.readOnly === true);
         const effectful = evidence
           || (method === 'move' ? (receipt?.moved ?? 0) > 0
             : !['look', 'lookAt', 'shield', 'log', 'sleep', 'progress'].includes(method)
               && !VERIFY_METHODS.includes(method as typeof VERIFY_METHODS[number])
-              && !(method === 'act' && OBSERVATION_ACTIONS.has(String(values[0])))
+              && !observationAction
               && okEffect);
         if (effectful) acted = true;
         return value;
@@ -144,6 +147,9 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
         return ok(`代码技能「${b.name}」做完了${m.text}${r.result !== null && r.result !== undefined ? `：${JSON.stringify(r.result).slice(0, 160)}` : ''}${noopText}${inputText}`, { ...data, ...(inputCompleted ? { inputCompleted: true, effectUnconfirmed } : {}), result: r.result, verified: !!b.verify, displacement: { horizontal: m.h, dy: m.dy }, ...(effectExpect ? { expect: effectExpect } : {}), ...(noop ? { noop: true } : {}) });
       }
       const done: string[] = [];
+      // 只读步骤（spatial_query、只读宏等）成功时的实际返回：保留查询数据，但不计为物理执行。
+      // steps 数量受技能上限约束（行为步骤最多 8），不会额外收集代码的 api 调用历史。
+      const stepResults: Record<string, unknown>[] = [];
       let completedSteps = 0;
       // 上一步移动未确认到达的事实：下一步校验完成后、执行前用它判断相对坐标依赖。
       let pendingStance: { skill: string; pos: { x: number; y: number; z: number } } | null = null;
@@ -176,7 +182,11 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
         const inputOnly = r.data?.inputCompleted === true && (r.data.effectUnconfirmed ?? !(effect?.verified === true && effect.changed === true));
         if (r.data?.inputCompleted === true) inputCompleted = true;
         if (effect?.verified === true && effect.changed === true) acted = true;
-        if (r.status === 'succeeded' && r.data?.noop !== true && !inputOnly) {
+        const readOnlyStep = SKILLS[st.skill]?.readOnly === true;
+        if (readOnlyStep && r.status === 'succeeded') {
+          stepResults.push({ skill: st.skill, status: r.status, ...(r.data ? { data: r.data } : {}) });
+        }
+        if (r.status === 'succeeded' && r.data?.noop !== true && !inputOnly && !readOnlyStep) {
           completedSteps++;
           if (!OBSERVATION_ACTIONS.has(st.skill)) acted = true;
         }
@@ -187,7 +197,7 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
           pendingStance = { skill: st.skill, pos: { ...ctx.adapter.state().pos } };
         }
         if (r.status === 'failed' && !st.optional) return fail(r.failureCode ?? 'ERROR', `技能「${b.name}」第 ${i + 1} 步 ${st.skill} 没成：${r.summary.slice(0, 120)}`,
-          { done, ...(r.data?.effectEvidence ? { effectEvidence: r.data.effectEvidence } : {}),
+          { done, ...(stepResults.length ? { stepResults } : {}), ...(r.data?.effectEvidence ? { effectEvidence: r.data.effectEvidence } : {}),
             ...(r.data?.dug ? { dug: r.data.dug } : {}), ...(r.data?.walked !== undefined ? { walked: r.data.walked } : {}) });
       }
       ctx.progress(1);
@@ -195,6 +205,7 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
       if (judged) return fail('ERROR', `技能「${b.name}」的步骤都做完了，但${judged}${moved().text}`, { done, verified: false });
       const effectUnconfirmed = inputCompleted && !acted && !b.verify;
       return ok(`照技能「${b.name}」做完了：${done.join('，')}${moved().text}`, { done, verified: !!b.verify,
+        ...(stepResults.length ? { stepResults } : {}),
         ...(inputCompleted ? { inputCompleted: true, effectUnconfirmed } : {}), ...(completedSteps === 0 && !inputCompleted ? { noop: true } : {}) });
     })().catch((error: unknown) => {
       // 取消/失败也保留已累计的爬升进展：局部增量相加，共享账本只读取一次，不重复计算。

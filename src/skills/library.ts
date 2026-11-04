@@ -120,9 +120,16 @@ export class SkillLibrary {
       argsDoc: '{}',
       timeoutMs: Math.min(timeout, 600_000),
       movement: def.steps.some((s) => SKILLS[s.skill]?.movement),
+      // 子步骤全是只读时，宏本身也只读：调度、效果判定和统计都不能把它当物理动作。
+      readOnly: def.steps.every((s) => SKILLS[s.skill]?.readOnly === true),
       validate: () => ({ ok: true, args: {} }),
       run: async (ctx) => {
         const results: string[] = [];
+        // 宏最多 6 步；只保留只读步骤的实际返回（如 spatial_query 的查询证据），
+        // 不重复收集物理动作或代码技能的调用历史。
+        const stepResults: Record<string, unknown>[] = [];
+        let physical = false;
+        let inputCompleted = false;
         for (const [i, st] of def.steps.entries()) {
           const sk = SKILLS[st.skill];
           if (!sk) return fail('ERROR', `组合技能引用的 ${st.skill} 不存在`);
@@ -131,9 +138,21 @@ export class SkillLibrary {
           ctx.progress(i / def.steps.length, `${def.name}：第 ${i + 1}/${def.steps.length} 步 ${st.skill}`);
           const r = await runSkill({ ...ctx, deadline: Math.min(ctx.deadline, Date.now() + sk.timeoutMs) }, sk, constrainRecoveryAction(ctx, st.skill, v.args));
           results.push(`${st.skill}:${r.status}`);
-          if (r.status !== 'succeeded') return { ...r, summary: `${def.name} 在第 ${i + 1} 步失败：${r.summary}` };
+          if (sk.readOnly === true && r.status === 'succeeded' && r.data) stepResults.push({ skill: st.skill, status: r.status, data: r.data });
+          if (sk.readOnly !== true && r.data?.noop !== true) physical = true;
+          if (r.data?.inputCompleted === true) inputCompleted = true;
+          if (r.status !== 'succeeded') {
+            return { ...r, summary: `${def.name} 在第 ${i + 1} 步失败：${r.summary}`,
+              data: { ...(r.data ?? {}), ...(stepResults.length ? { stepResults } : {}) } };
+          }
         }
-        return ok(`${def.name} 完成（${results.join('，')}）`);
+        // 只读/空转结果不是物理执行：保留查询数据与状态，但不冒充身体效果。
+        const noop = !physical && !inputCompleted;
+        return ok(`${def.name} 完成（${results.join('，')}）`, {
+          ...(stepResults.length ? { stepResults } : {}),
+          ...(inputCompleted ? { inputCompleted: true, effectUnconfirmed: !physical } : {}),
+          ...(noop ? { noop: true } : {}),
+        });
       },
     };
   }
