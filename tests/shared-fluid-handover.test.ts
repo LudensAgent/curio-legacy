@@ -264,7 +264,6 @@ test('late cancelled swim_to cannot own or contaminate a shared walk_route repla
   let cleanClosed = false;
   let shutdownFinished = false;
   let primaryError: unknown = null;
-  let cleanupError: unknown = null;
   let activeTaskId: string | null = null;
 
   // Outcome collection lives outside the try so teardown can await the actual
@@ -551,7 +550,7 @@ test('late cancelled swim_to cannot own or contaminate a shared walk_route repla
     else if (primaryError !== null) console.error('shared spatial fixture retained at', dir);
 
     if (cleanupProblems.length > 0) {
-      cleanupError = new Error(cleanupProblems.join('; '));
+      const cleanupError = new Error(cleanupProblems.join('; '));
       if (primaryError !== null) console.error('secondary cleanup problems', cleanupError.message);
       else throw cleanupError;
     }
