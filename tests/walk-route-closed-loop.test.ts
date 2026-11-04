@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { getEventListeners } from 'node:events';
 import { createRequire } from 'node:module';
 import { test } from 'node:test';
 import { Vec3 } from 'vec3';
@@ -373,8 +374,76 @@ test('活动移动中断线：保留部分末位位移并释放全部按键', as
   assert.equal((result as { problem?: { by?: string } }).problem?.by, 'lifecycle');
   const last = (result as { lastPosition?: { x: number; z: number } }).lastPosition;
   assert.ok(last, '断线时应保留已测末位位移');
-  assert.ok(last && last.x < 1.5 - 0.12, `末位 x=${last?.x.toFixed(2)} 应仍是部分位移而非到达目标`);
+  // 实际发生了向前位移（末位不是回到初始位置），且末位与断线前最后一次采样的位置一致。
+  assert.ok(last.x > 0.54 + 0.01, `末位 x=${last.x.toFixed(3)} 应表明实际向前移动（>初始 0.54）`);
+  assert.ok(Math.abs(last.x - bot.entity.position.x) < 1e-6 && Math.abs(last.z - bot.entity.position.z) < 1e-6,
+    `末位 (${last.x.toFixed(3)},${last.z.toFixed(3)}) 应等于断线前最后采样位置 (${bot.entity.position.x.toFixed(3)},${bot.entity.position.z.toFixed(3)})`);
+  assert.ok(last.x < 1.5 - 0.12, `末位 x=${last.x.toFixed(2)} 应仍是部分位移而非到达目标`);
   for (const key of Object.keys(bot.control)) {
     assert.equal(bot.control[key], false, `断线后 ${key} 键应释放`);
   }
+});
+
+test('初始化阶段连接有效但帧源立即结束：显式 execution_failed 而非超时/取消，且只请求一次帧', async () => {
+  const map = buildMap();
+  const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }];
+  const { bot } = body({ x: 0.54, z: 0.52 });
+  let calls = 0;
+  const tick = () => { calls += 1; return Promise.resolve(null); }; // 连接有效但无未来帧
+  const start = Date.now();
+  const result = await runWalkRoute({
+    map, body: bot as never, request: request(points), tick,
+    signal: new AbortController().signal, now: Date.now, deadlineMs: Date.now() + 5000,
+    lifecycle: () => ({ worldId: 'world', dim: 'overworld', sessionId: 's1', alive: true, connected: true, observationReady: true }),
+  });
+  const elapsed = Date.now() - start;
+  assert.equal(result.outcome, 'FAILED', result.message);
+  assert.equal((result as { problem?: { kind: string } }).problem?.kind, 'execution_failed');
+  assert.equal(calls, 1, `帧源结束只应请求一次帧，不应空转重试（实际 ${calls} 次）`);
+  assert.ok(elapsed < 1000, `应立即以执行失败返回而非挂起（实际 ${elapsed}ms）`);
+  for (const key of Object.keys(bot.control)) assert.equal(bot.control[key], false, `${key} 键不应被按下`);
+});
+
+test('活动移动中连接有效但帧源结束：显式 execution_failed 而非超时，且请求次数有限', async () => {
+  const map = buildMap();
+  const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }];
+  const { bot, tick: physicsTick, now } = body({ x: 0.54, z: 0.52 });
+  let forwardFrames = 0;
+  let calls = 0;
+  const tick = (signal: AbortSignal) => {
+    calls += 1;
+    if (signal.aborted) return Promise.resolve(null);
+    if (bot.control.forward) {
+      forwardFrames += 1;
+      if (forwardFrames > 3) return Promise.resolve(null); // 帧源结束但仍连接
+    }
+    return physicsTick();
+  };
+  const result = await runWalkRoute({
+    map, body: bot as never, request: request(points), tick,
+    signal: new AbortController().signal, now,
+    lifecycle: () => ({ worldId: 'world', dim: 'overworld', sessionId: 's1', alive: true, connected: true, observationReady: true }),
+  });
+  assert.equal(result.outcome, 'FAILED', result.message);
+  assert.equal((result as { problem?: { kind: string } }).problem?.kind, 'execution_failed');
+  assert.ok(calls < 100, `帧源结束请求次数应有限（实际 ${calls} 次），不应空转 400 次`);
+  for (const key of Object.keys(bot.control)) {
+    assert.equal(bot.control[key], false, `帧源结束后 ${key} 键应释放`);
+  }
+});
+
+test('初始化清理：返回后移除父任务 abort 监听，且不残留按键', async () => {
+  const map = buildMap();
+  const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }];
+  const { bot } = body({ x: 0.54, z: 0.52 });
+  const tick = () => Promise.resolve(null);
+  const signal = new AbortController().signal;
+  const result = await runWalkRoute({
+    map, body: bot as never, request: request(points), tick,
+    signal, now: Date.now, deadlineMs: Date.now() + 5000,
+    lifecycle: () => ({ worldId: 'world', dim: 'overworld', sessionId: 's1', alive: true, connected: false, observationReady: true }),
+  });
+  assert.equal(result.outcome, 'CANCELLED', result.message);
+  assert.equal(getEventListeners(signal, 'abort').length, 0, '返回后应移除父任务 abort 监听');
+  for (const key of Object.keys(bot.control)) assert.equal(bot.control[key], false, `${key} 键不应被按下`);
 });

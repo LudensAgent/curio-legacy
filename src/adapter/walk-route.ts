@@ -203,16 +203,17 @@ export class WalkMoveExecutor implements MoveExecutor {
       if (this.aborted(request)) { this.releaseIf(request.executionId); return { failure: { kind: 'cancelled' } }; }
       if (this.now() >= moveDeadline) { this.releaseIf(request.executionId); return { failure: { kind: 'timed_out' } }; }
       if (e === null) {
-        // 无帧：复核取消/期限/生命周期后再决定终态，不把断线误判为普通成功，也不把停帧误判为断线。
-        if (this.now() >= moveDeadline) { this.releaseIf(request.executionId); return { failure: { kind: 'timed_out' } }; }
+        // 无帧：取消与期限已在上方排除。null 是帧源结束/取消的结果，不是重试授权——
+        // 继续重试会在微任务队列上空转、过早耗尽 400 次迭代，把正常等待误判为超时。
         const lc = this.lifecycle?.();
         if (lc !== undefined && (lifecycleBroken(lc) || scopeMismatch(lc, request))) {
           this.onLifecycleBroken?.(`alive=${lc.alive} connected=${lc.connected} observationReady=${lc.observationReady} scope=${lc.worldId}/${lc.dim}/${lc.sessionId}`);
           this.releaseIf(request.executionId);
           return { failure: { kind: 'cancelled' } };
         }
-        // 生命周期仍有效：只是帧交付停滞，继续按该段期限等待下一帧，不提前判执行错误。
-        continue;
+        // 生命周期仍有效却无帧可交付：显式执行失败，不伪造超时也不伪造生命周期取消。
+        this.releaseIf(request.executionId);
+        return { failure: { kind: 'execution_error', detail: 'no physics frame delivered while connected' } };
       }
       const dist = Math.hypot(to.x - e.position.x, to.z - e.position.z);
       // 用实际帧间位移估计速度，并按采样间隔折算为每 tick 速度：每 2 tick 采样一次时位移是
@@ -334,15 +335,17 @@ export async function runWalkRoute(opts: {
     // 身体执行未启动、库又等稳定样本，只能原地等到超时）。因此持续采样直到 advance 启动首段、
     // 产生终态、取消或到期，再交给下面的行走循环。
     let initFrames = 0;
+    let frameEnded = false;
     while (loop.status()!.result === null && loop.status()!.activeStepIndex === null && now() < deadline && !opts.signal.aborted && initFrames < 400) {
       const entity = await awaitFrame(opts.tick, deadline, now, opts.signal);
       if (entity === null) {
-        // 无帧：先区分父取消/期限耗尽/生命周期失效；仅帧交付停滞时继续按期限等待下一帧。
+        // 无帧：先区分父取消/期限耗尽/生命周期失效；三者之外即「帧源结束但仍连接」。
+        // null 不是重试授权——继续重试会在微任务队列上空转，饿死定时器与取消信号。
         if (opts.signal.aborted) break;
         if (now() >= deadline) break;
         if (cancelBrokenLifecycle()) break;
-        initFrames++; // 空交付也计入有界预算，避免停帧时无限空转。
-        continue;
+        frameEnded = true;
+        break;
       }
       observeThenSample(entity);
       // 每处理一个样本后立即检查终态/取消；首帧就失效时不继续订阅下一帧。
@@ -353,17 +356,31 @@ export async function runWalkRoute(opts: {
       initFrames++;
     }
 
-    let iterations = 0;
-    while (loop.status()!.result === null && now() < deadline && !opts.signal.aborted && iterations++ < 20000) {
-      if (cancelBrokenLifecycle()) break;
-      loop.advance(64);
-      loop.checkTimeout();
-      await new Promise((r) => setTimeout(r, 10));
+    if (!frameEnded) {
+      let iterations = 0;
+      while (loop.status()!.result === null && now() < deadline && !opts.signal.aborted && iterations++ < 20000) {
+        if (cancelBrokenLifecycle()) break;
+        loop.advance(64);
+        loop.checkTimeout();
+        await new Promise((r) => setTimeout(r, 10));
+      }
     }
     // 退出时若仍无终态：主动取消返回 CANCELLED，期限耗尽返回 TIMEOUT，两者分别反馈，保留已测位移。
     let result = loop.status()!.result;
     if (result === null) {
-      if (opts.signal.aborted) {
+      if (frameEnded) {
+        // 生命周期仍有效却无帧可交付：这是执行失败，不是超时，也不是生命周期取消。
+        // 保留已测末位（若有），不伪造 TIMEOUT/CANCELLED。
+        const lastPosition = loop.status()!.lastPosition;
+        result = {
+          outcome: 'FAILED',
+          message: 'the body stopped producing physics frames while still connected',
+          problem: { kind: 'execution_failed', detail: 'no physics frame delivered while connected' },
+          confirmed: false,
+          trace: [],
+          ...(lastPosition !== null ? { lastPosition: { ...lastPosition } } : {}),
+        };
+      } else if (opts.signal.aborted) {
         result = loop.cancel('agent', 'parent task cancelled');
       } else {
         loop.checkTimeout(); // 期限耗尽 → guard 判定 TIMEOUT
@@ -375,12 +392,8 @@ export async function runWalkRoute(opts: {
   } finally {
     opts.signal.removeEventListener('abort', onParentAbort);
     // 异常路径也不得把活动移动的控制留在身体上；正常返回时 result 已非 null，这里为空操作。
-    try {
-      const status = loop.status();
-      if (status !== null && status.result === null) loop.cancel('scheduler', 'host walk-route error');
-    } catch {
-      // 没有委托或时钟异常时无法再做归属清理，只保证不掩盖原始错误。
-    }
+    const status = loop.status();
+    if (status !== null && status.result === null) loop.cancel('scheduler', 'host walk-route error');
   }
 }
 
