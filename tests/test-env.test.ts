@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { existingTestState, hasWorldData, readServerProperty, setServerProperty, syncServerForTest } from '../scripts/test-env.ts';
+import { assertNoLinksIn, existingTestState, hasWorldData, readServerProperty, setServerProperty, syncServerForTest } from '../scripts/test-env.ts';
 import { validateLevelName } from '../src/maintenance/world-reset.ts';
 
 function tmp() { return fs.mkdtempSync(path.join(os.tmpdir(), 'test-env-')); }
@@ -117,6 +117,29 @@ test('existingTestState 识别嵌套目录里的已有世界（level-name 带路
   fs.writeFileSync(path.join(targetServer, 'server.properties'), 'level-name=worlds/survival\nserver-port=25565\n');
   const markers = existingTestState({ dataDir, spatialDbPath: path.join(dataDir, 'spatial', 'spatial.sqlite') }, targetServer);
   assert.deepEqual(markers, [`世界 ${nested}/level.dat`]);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('assertNoLinksIn 拒绝目标里的 junction，避免 copySeed 沿它写入另一环境的世界', { skip: process.platform !== 'win32' }, () => {
+  const dir = tmp();
+  const localWorld = path.join(dir, 'local-world');
+  const target = path.join(dir, 'target');
+  fs.mkdirSync(localWorld, { recursive: true });
+  fs.writeFileSync(path.join(localWorld, 'level.dat'), 'local');
+  fs.mkdirSync(target, { recursive: true });
+  fs.symlinkSync(localWorld, path.join(target, 'world'), 'junction');
+  assert.throws(() => assertNoLinksIn(target), /符号链接或 junction/);
+  fs.rmSync(path.join(target, 'world'), { force: true });
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('assertNoLinksIn 对不存在的目标与普通目录不抛错', () => {
+  const dir = tmp();
+  const empty = path.join(dir, 'fresh');
+  assert.doesNotThrow(() => assertNoLinksIn(empty)); // 尚不存在：首次初始化
+  fs.mkdirSync(empty, { recursive: true });
+  fs.writeFileSync(path.join(empty, 'server.properties'), 'server-port=25565\n');
+  assert.doesNotThrow(() => assertNoLinksIn(empty)); // 只有普通文件
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

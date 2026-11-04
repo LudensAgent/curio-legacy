@@ -93,6 +93,20 @@ export function hasWorldData(dir: string): boolean {
   return worldDirsIn(dir).length > 0;
 }
 
+/** 目标服务器目录不能包含符号链接或 junction：copySeed 会沿它写入链接指向的外部目录，覆盖其他环境的世界。 */
+export function assertNoLinksIn(dir: string): void {
+  if (!fs.existsSync(dir)) return;
+  if (fs.lstatSync(dir).isSymbolicLink()) throw new Error(`test 世界目录不能是符号链接或 junction：${dir}`);
+  const walk = (current: string): void => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const child = path.join(current, entry.name);
+      if (entry.isSymbolicLink()) throw new Error(`test 世界目录不能包含符号链接或 junction：${child}`);
+      if (entry.isDirectory()) walk(child);
+    }
+  };
+  walk(dir);
+}
+
 /** 目标自身已有测试状态时的标记列表；空数组 = 尚未初始化。只读，不写盘。 */
 export function existingTestState(config: { dataDir: string; spatialDbPath: string }, targetServerDir: string): string[] {
   const markers: string[] = [];
@@ -180,6 +194,9 @@ async function initTest(): Promise<void> {
   // 已有测试状态不静默覆盖：按目标自身的配置与实际状态判断，不能拿种子的 level-name 去查目标。
   const existing = existingTestState({ dataDir: config.dataDir, spatialDbPath: config.spatial.databasePath }, targetServerDir);
   if (existing.length) throw new Error(`test 环境已初始化（${existing.join('、')}）。若要重来请另建实例目录或手动重置。`);
+
+  // 目标里不能有符号链接或 junction：copySeed 会沿它写入链接指向的外部目录（如 local 世界），不能把跳过链接当成目标为空。
+  assertNoLinksIn(targetServerDir);
 
   copySeed(seedDir, targetServerDir);
   syncServerForTest(targetServerDir, { mcPort: config.mc.port, rconPort: config.observer.rconPort, rconPassword: config.observer.rconPassword });
