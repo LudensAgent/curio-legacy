@@ -193,21 +193,24 @@ export function assertSeedSourceAllowed(seedDir: string, opts: {
   testRoot: string;
   envDir: string;
 }): void {
+  // 全部用实际解析路径判断：junction 会让词法路径通过检查，但实际落点别名到测试根目录外或 local/live。
+  const seedReal = resolveRealPath(seedDir);
+  const targetReal = resolveRealPath(opts.targetServerDir);
+  const testRootReal = resolveRealPath(opts.testRoot);
   // 不得用 local/live 的世界或数据目录作种子：本任务的测试世界必须独立，不能用它们的快照初始化。
   for (const peer of peerLayouts(opts.envDir, 'test')) {
-    for (const peerDir of [peer.serverDir, peer.dataDir]) {
-      if (sameOrNested(seedDir, peerDir) || sameOrNested(peerDir, seedDir)) {
+    for (const rawPeerDir of [peer.serverDir, peer.dataDir]) {
+      const peerDir = resolveRealPath(rawPeerDir);
+      if (sameOrNested(seedReal, peerDir) || sameOrNested(peerDir, seedReal)) {
         throw new Error(`种子源不能是 ${peer.mode} 的世界或数据目录：${seedDir}（请用独立测试世界源）`);
       }
     }
   }
   // 种子源必须位于测试根目录（TEST_ROOT_DIR）内，不能来自测试目录之外。
-  if (!sameOrNested(opts.testRoot, seedDir)) {
+  if (!sameOrNested(testRootReal, seedReal)) {
     throw new Error(`种子源必须位于测试根目录 ${opts.testRoot} 内：${seedDir}`);
   }
   // 用实际解析路径判断源目标是否相互包含：junction 会让词法路径不同但实际落点嵌套，导致复制递归展开自身。
-  const seedReal = fs.realpathSync(seedDir);
-  const targetReal = resolveRealPath(opts.targetServerDir);
   if (sameOrNested(seedReal, targetReal) || sameOrNested(targetReal, seedReal)) {
     throw new Error('种子源与 test 世界目录（解析后）不能相同或相互包含，否则复制会把刚创建的目标再次当作源递归展开');
   }

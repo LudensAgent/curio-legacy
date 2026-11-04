@@ -220,3 +220,28 @@ test('assertSeedSourceAllowed 拒绝 local/live 的世界或数据目录作种�
   assert.throws(() => assertSeedSourceAllowed(seed, { targetServerDir: path.join(root, 'target'), testRoot: root, envDir: root }), /local 的世界或数据目录/);
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+test('assertSeedSourceAllowed 拒绝经 junction 别名到测试根目录外的种子', { skip: process.platform !== 'win32' }, () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'seed-src-'));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'seed-out-'));
+  fs.writeFileSync(path.join(outside, 'server.properties'), 'server-port=25565\n');
+  // root/alias 是指向根目录外 outside 的 junction：词法上在测试根目录内，实际落到根目录之外。
+  const alias = path.join(root, 'alias');
+  fs.symlinkSync(outside, alias, 'junction');
+  assert.throws(() => assertSeedSourceAllowed(alias, { targetServerDir: path.join(root, 'target'), testRoot: root, envDir: root }), /测试根目录|local|live/);
+  fs.rmSync(alias, { force: true });
+  fs.rmSync(root, { recursive: true, force: true });
+  fs.rmSync(outside, { recursive: true, force: true });
+});
+
+test('assertSeedSourceAllowed 拒绝经 junction 别名到 local 世界目录的种子', { skip: process.platform !== 'win32' }, () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'seed-src-'));
+  fs.writeFileSync(path.join(root, '.env'), 'SERVER_DIR=./local-world\n');
+  const localWorld = path.join(root, 'local-world');
+  fs.mkdirSync(localWorld, { recursive: true });
+  const alias = path.join(root, 'seed');
+  fs.symlinkSync(localWorld, alias, 'junction');
+  assert.throws(() => assertSeedSourceAllowed(alias, { targetServerDir: path.join(root, 'target'), testRoot: root, envDir: root }), /local 的世界或数据目录/);
+  fs.rmSync(alias, { force: true });
+  fs.rmSync(root, { recursive: true, force: true });
+});
