@@ -114,6 +114,17 @@ test('surface：头顶挖不动时，沿连通的水道游向最近的气穴', a
   } finally { ctx.memory.close(); }
 });
 
+test('findAirPocket 不读取未观察区域：无视觉观察时不返回拐角后的气穴', async () => {
+  const w = submerged(58);
+  for (const p of [[0, 58, 0], [0, 59, 0], [1, 59, 0], [2, 59, 0], [3, 59, 0], [3, 60, 0]]) w.setBlock({ x: p[0], y: p[1], z: p[2] }, 'water');
+  w.setBlock({ x: 3, y: 61, z: 0 }, 'air');
+  // 没有任何视觉观察：即使原始区块里连通着气穴，也不能当已知路线。
+  const ctx = makeCtx(w, { senses: { observeBlocks: () => [] } });
+  try {
+    assert.equal(findAirPocket(ctx), null);
+  } finally { ctx.memory.close(); }
+});
+
 // ------------------------------------------------------------ 火把 / 吃 / 打鱼
 test('place_torch：半空中或泡在水里时立刻说明原因，不去找位置', async () => {
   const w = new TestWorld();

@@ -778,7 +778,7 @@ export const surface: Skill<{ escape?: 'dig' | 'shore' }> = {
   async run(ctx, args) {
     const end = Math.min(ctx.deadline, Date.now() + 32000);
     const excluded: Vec[] = [];
-    let attempts = 0, scans = 0, pockets = 0, rises = 0, walks = 0, failedSwims = 0;
+    let attempts = 0, scans = 0, pockets = 0, rises = 0, walks = 0, failedSwims = 0, floatTries = 0;
     // 打法在一次上浮里就会升级：先正常游；游两次没上岸或氧气 <6 → 找气穴/往上挖；再不行 → 让寻路往岸上走；轮完从头再来。
     // escape:"shore" 明确只要游上岸，不得暗中升级成挖顶或找气穴（会额外消耗工具/方块，超出委托手段）。
     let tactic: 'swim' | 'dig' | 'shore' = args.escape ?? 'swim';
@@ -803,8 +803,15 @@ export const surface: Skill<{ escape?: 'dig' | 'shore' }> = {
       // 头还没出水面、头顶又是通到水面的开阔水路：先原地按住上浮换气。
       // 换气是 surface 的第一要务，也是任何 escape 战术（挖顶/找气穴/游上岸）的前提，不能让战术跳过这一步。
       if (ctx.adapter.state().inWater && !headInAir(ctx) && !ceilingAbove(ctx)) {
-        await ctx.adapter.swimTo(null, ctx.signal, { timeoutMs: Math.max(300, Math.min(2000, end - Date.now())) });
-        continue;
+        floatTries++;
+        if (floatTries <= 3) {
+          await ctx.adapter.swimTo(null, ctx.signal, { timeoutMs: Math.max(300, Math.min(2000, end - Date.now())) });
+          continue;
+        }
+        // 连续几次上浮都没把头探出水面：不再原地空转，落到下面按战术寻岸（不额外选岸，仍在授权范围内）。
+        floatTries = 0;
+      } else {
+        floatTries = 0;
       }
       // 头顶被冰/石头封住时往上游没用：够得着就挖开（玩家在冰下、水洞里会这么做），够不着先往上游到够得着
       const lid = ceilingAbove(ctx);
@@ -884,7 +891,14 @@ export const surface: Skill<{ escape?: 'dig' | 'shore' }> = {
           if (isAbort(e)) throw e;
         }
         const now = ctx.adapter.state();
-        if (!now.inWater && now.onGround) return ok(`走上了岸，氧气 ${now.oxygen}/20`, { attempts, landed: true, pos: now.pos });
+        if (!now.inWater && now.onGround && now.oxygen >= 18) {
+          // 寻路只给瞬时干地样本：稍等再复核，与游泳路径的稳定干地验收一致，避免瞬时上岸误报。
+          await sleep(600, ctx.signal);
+          const afterConfirm = ctx.adapter.state();
+          if (!afterConfirm.inWater && afterConfirm.onGround && afterConfirm.oxygen >= 18) {
+            return ok(`走上了岸，氧气 ${afterConfirm.oxygen}/20`, { attempts, landed: true, pos: afterConfirm.pos });
+          }
+        }
       }
       const target = land ? { x: land.pos.x + 0.5, y: land.pos.y + 1, z: land.pos.z + 0.5 } : null;
       ctx.progress(0, land ? `保持上浮，向 ${land.dir} 岸边游动（${land.dist} 格）` : '保持上浮并寻找实际可站立的岸边');
@@ -988,7 +1002,8 @@ export function findAirPocket(ctx: SkillCtx, radius = 8, maxNodes = 2500): { pos
   const s = ctx.adapter.state();
   const ox = Math.floor(s.pos.x), oz = Math.floor(s.pos.z), feet = Math.floor(s.pos.y);
   const k = (p: Vec) => `${p.x},${p.y},${p.z}`;
-  const name = (p: Vec) => ctx.adapter.blockAt(p);
+  // 只用当前看得见/刚观察到的方块，不读原始区块：水道连通不等于可见，拐角后的气穴不能当已知路线。
+  const name = (p: Vec) => ctx.senses.observeBlocks?.([p])[0]?.name ?? null;
   const prev = new Map<string, Vec | null>();
   const queue: Vec[] = [];
   for (const y of [feet, feet + 1]) {
