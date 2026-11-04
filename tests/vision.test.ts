@@ -5,6 +5,7 @@ import { EventBus } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { CATS, Vision, dirOfYaw, relOf, yawTo } from '../src/perception/vision.ts';
 import { SKILLS } from '../src/skills/index.ts';
+import type { GameAdapter } from '../src/adapter/types.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 
 // FakeAdapter：角色站在 (0,64,0)，地面 y=63 草方块、y<63 石头；默认面朝东(+X)，略低头
@@ -199,7 +200,8 @@ test('observeBlocks：blockStateAt 缺失时名称可见但状态不完整', () 
   adapter.yaw = -Math.PI / 2;
   adapter.pitch = 0;
   adapter.blocks.push({ name: 'stone', pos: { x: 2, y: 64, z: 0 } });
-  adapter.blockStateAt = (() => null) as typeof adapter.blockStateAt;
+  const gameAdapter: GameAdapter = adapter;
+  gameAdapter.blockStateAt = () => null;
   const out = vision.observeBlocks([{ x: 2, y: 64, z: 0 }]);
   assert.equal(out[0]?.name, 'stone');
   assert.equal(out[0]?.stateComplete, false);

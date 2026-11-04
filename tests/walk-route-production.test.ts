@@ -181,3 +181,28 @@ test('observeCells 不把缺失 blockStateAt 的光学名称回退当成完整�
   assert.equal(view.observed, true, '名称可见的格子应进入地图');
   assert.equal(view.observed ? view.evidence.observation.stateComplete : null, false, '仅有光学名称时不得标记为完整状态');
 });
+
+test('observeCells 把混合 boolean/number/string 属性规范成语义字符串，且不改元数据', () => {
+  const map = new VoxelMap('world', { validityWindowMs: 60_000 });
+  const observedAt = 1_700_000_000_000;
+  const senses = {
+    ...flatSenses(),
+    observeBlocks: () => ([
+      { name: 'minecraft:oak_door', properties: { open: true, water_level: 3, facing: 'north' }, stateComplete: true, pos: { x: 5, y: 2, z: 0 }, worldId: 'world', sessionId: 's1', dimension: 'overworld', observationId: 42, observedAt, source: 'vision' },
+    ] as BlockObservation[]),
+  } as unknown as Senses;
+  const ctx = { senses } as never;
+  observeCells(ctx, map, [{ x: 5, y: 2, z: 0 }]);
+  const view = map.cellAt('overworld', 5, 2, 0);
+  assert.equal(view.observed, true);
+  const obs = view.observed ? view.evidence.observation : null;
+  assert.deepEqual(obs?.state.properties, { open: 'true', water_level: '3', facing: 'north' }, 'boolean/number 必须规范成字符串，字符串键值原样保留');
+  assert.equal(obs?.state.name, 'minecraft:oak_door');
+  assert.equal(obs?.worldId, 'world');
+  assert.equal(obs?.dim, 'overworld');
+  assert.equal(obs?.sessionId, 's1');
+  assert.equal(obs?.observedAt, observedAt, 'observedAt 必须原样保留');
+  assert.equal(obs?.sequence, 42, 'observationId 必须映射为 sequence');
+  assert.equal(obs?.source, 'vision');
+  assert.equal(obs?.stateComplete, true);
+});

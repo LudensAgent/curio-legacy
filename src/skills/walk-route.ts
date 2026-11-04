@@ -22,11 +22,14 @@ const MAX_POINTS = 32;
 
 /** 把一次合法视锥观测映射成库的 Observation。 */
 function toObservation(b: BlockObservation): Observation {
+  // 库要求 state.properties 为 Record<string,string>；本边界把 boolean/number
+  // 统一成语义字符串（如 open→'true'、level→'3'），不猜测、不补默认值。
+  const properties = Object.fromEntries(Object.entries(b.properties ?? {}).map(([k, v]) => [k, String(v)]));
   return {
     worldId: b.worldId, dim: b.dimension, sessionId: b.sessionId,
     observedAt: b.observedAt, sequence: b.observationId,
     source: 'vision', evidence: 'seen', stateComplete: b.stateComplete === true,
-    state: { name: b.name, properties: (b.properties ?? {}) as Record<string, string> }, pos: { ...b.pos },
+    state: { name: b.name, properties }, pos: { ...b.pos },
   };
 }
 

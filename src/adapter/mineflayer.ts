@@ -1888,7 +1888,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (!this.ready) return null;
     const block = this.bot.blockAt(this.vec(pos));
     if (!block) return null;
-    return { name: String(block.name), properties: block.getProperties?.() ?? {} };
+    // 拿不到属性读取器就返回 null，而不是空回退：空 map 只对 stone/air 这类
+    // 本就没有状态属性的方块是真实的完整状态，缺失读取器不能冒充完整状态。
+    const properties = block.getProperties?.();
+    if (!properties) return null;
+    return { name: String(block.name), properties };
   }
 
   async placeBlockStateAt(pos: Vec3Like, name: string, properties: Record<string, string | number | boolean>, signal: AbortSignal): Promise<ActionResult> {
