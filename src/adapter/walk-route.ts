@@ -167,6 +167,10 @@ export class WalkMoveExecutor implements MoveExecutor {
     // 摩擦口径与之不符，不能直接套用。
     const GROUND_STOP = 1.2;
     const TICK_MS = 50;
+    // 接近终点的减速阈值：进入该距离后潜行，限制余速与越过平台的幅度。
+    // 满速 + 采样间隔不均匀（如补跑 4 tick）时一次可前冲约 0.86 格，故提前减速，
+    // 让实际运动轨迹留在已验证范围内；越过后的纠偏只作补充。
+    const SLOW_DISTANCE = 0.7;
     // 到达容差：制动后落在容差外时按此做有限位置修正（前后蠕行），不放大容差掩盖误差。
     const tol = request.bodyArrival?.horizontalTolerance ?? 0.12;
     const axis = { x: to.x - from.x, z: to.z - from.z }; // 单轴 ±1
@@ -221,8 +225,10 @@ export class WalkMoveExecutor implements MoveExecutor {
         this.body.setControlState('forward', false);
         this.body.setControlState('back', false);
         this.body.setControlState('sneak', false);
+      } else {
+        // 仍在靠近：接近终点时潜行减速（限制余速，防越过平台），否则满速。
+        this.body.setControlState('sneak', dist <= SLOW_DISTANCE);
       }
-      // else: 保持当前移动方向（含潜行纠偏），继续接近。
       this.frameSink?.(e);
       // 让出事件循环：库的 onSample 确认到达 → stop/abort，及其 move 结果微任务得以执行。
       await new Promise((r) => setImmediate(r));
@@ -289,15 +295,19 @@ export async function runWalkRoute(opts: {
   executor.setFrameSink(observeThenSample);
 
   // 初始实测位置：bodyArrival 需要多帧确认身体稳定在起点，advance 才会启动首段。
-  // 初始采样与行走采样使用同一套期限和生命周期约束，不在期限检查循环之前无限等待。
-  if (loop.status()!.result === null) {
-    for (let i = 0; i < 8; i++) {
-      const entity = await awaitFrame(opts.tick, deadline, now, opts.signal);
-      if (entity === null) break;
-      observeThenSample(entity);
-      // 每处理一个初始样本后立即检查终态：首帧就失效（如 scope_changed）时不再订阅下一帧、不等期限。
-      if (opts.signal.aborted || loop.status()!.result !== null) break;
-    }
+  // 固定 8 帧不能代表起点已稳定（采样间隔不均会重置稳定窗口，停止取样后没人再喂样本，
+  // 身体执行未启动、库又等稳定样本，只能原地等到超时）。因此持续采样直到 advance 启动首段、
+  // 产生终态、取消或到期，再交给下面的行走循环。
+  let initFrames = 0;
+  while (loop.status()!.result === null && loop.status()!.activeStepIndex === null && now() < deadline && !opts.signal.aborted && initFrames < 400) {
+    const entity = await awaitFrame(opts.tick, deadline, now, opts.signal);
+    if (entity === null) break;
+    observeThenSample(entity);
+    // 每处理一个样本后立即检查终态/取消；首帧就失效时不继续订阅下一帧。
+    if (opts.signal.aborted || loop.status()!.result !== null) break;
+    loop.advance(64);
+    loop.checkTimeout();
+    initFrames++;
   }
 
   let iterations = 0;
