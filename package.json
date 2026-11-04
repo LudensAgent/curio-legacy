@@ -58,8 +58,8 @@
   },
   "dependencies": {
     "@vectorize-io/hindsight-client": "1.1.0",
+    "curio-minecraft-3d-memory": "file:vendor/curio-minecraft-3d-memory-0.7.5.tgz",
     "curio-observer": "file:../CurioObserver",
-    "curio-minecraft-3d-memory": "file:vendor/curio-minecraft-3d-memory-0.1.0.tgz",
     "gridstack": "12.3.3",
     "minecraft-data": "^3.60.0",
     "mineflayer": "^4.20.0",

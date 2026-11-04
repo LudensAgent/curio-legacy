@@ -1,0 +1,22 @@
+{
+  "package": {
+    "name": "curio-minecraft-3d-memory",
+    "version": "0.7.5"
+  },
+  "sourceHEAD": "5682ea82765256daeb9e0845ab082cba978b1e7e",
+  "artifactSHA256": "5542ba0f6cef942dd81667a6b72d6f4de10fc3ae16cf91aadadeb6073bce33ad",
+  "npmIntegrity": "sha512-tWVuLlsXY1NvXhSr7CmTqa+ABEVKb/XVOlj3WEvA892JDA8NYtQsz+9NlpOhFWBz6MAB9EIrglOH4IVkaVfEew==",
+  "runId": "1793770157520-7548",
+  "runnerHash": "3836278b1f1e89505ffe0f353751c1179f5f210763da5dbc55e777ba045e2608",
+  "consumerHash": "47f1846fa00f026aca692c1145b8cc116e9f0c41bd30f5b35b025c22c950797d",
+  "sourceBinding": {
+    "clean": true,
+    "head": "5682ea82765256daeb9e0845ab082cba978b1e7e"
+  },
+  "scenarios": {
+    "positive": { "status": "PASS", "expectedExit": 0, "actualExit": 0 },
+    "early-release-pin": { "status": "PASS", "expectedExit": 1, "actualExit": 1 },
+    "skip-final-checkpoint": { "status": "PASS", "expectedExit": 1, "actualExit": 1 }
+  },
+  "typecheck": "PASS"
+}
