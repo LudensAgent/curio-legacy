@@ -97,25 +97,53 @@ test('swim_to from a dry shore still swims toward the chosen target (no blanket 
   } finally { ctx.memory.close(); }
 });
 
-test('swim_to refuses an exhausted budget without delegating', async (t) => {
+test('surface treats a positive 500ms remaining budget as usable and delegates the full budget', async (t) => {
   const w = new TestWorld();
   w.inWater = true; w.oxygen = 10;
-  let swims = 0;
-  w.swimTo = async () => { swims++; return { ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, surfaced: false, oxygen: 10 }; };
+  let delegatedMs: number | undefined;
+  w.swimTo = async (_t: Vec3Like | null, _signal: AbortSignal, opts?: { timeoutMs?: number }) => { delegatedMs = opts?.timeoutMs; return { ok: true, landed: false, surfaced: true, oxygen: 20 }; };
   const now = 100000;
   t.mock.method(Date, 'now', () => now);
   const ctx = makeCtx(w);
-  ctx.deadline = now + 500; // 剩余不足 1 秒上浮/游泳
+  ctx.deadline = now + 500;
   try {
-    const r = await swimTo.run(ctx, { xyz: { x: 4, y: 64, z: 1 } });
-    assert.equal(r.status, 'failed');
-    assert.equal(r.failureCode, 'TIMEOUT');
-    assert.equal(swims, 0, '预算不足不强行开游');
-    assert.equal(r.data?.oxygen, 10, '保留实际氧气');
+    const r = await surface.run(ctx, {});
+    assert.equal(r.status, 'succeeded', r.summary);
+    assert.equal(delegatedMs, 500, 'surface 同样不再扣 1000');
   } finally { ctx.memory.close(); }
 });
 
-test('swim_to delegates a short parent budget without extending it', async (t) => {
+test('surface refuses only when no positive time remains', async (t) => {
+  const w = new TestWorld();
+  w.inWater = true; w.oxygen = 10;
+  let swims = 0;
+  w.swimTo = async () => { swims++; return { ok: true, landed: false, surfaced: true, oxygen: 20 }; };
+  const now = 100000;
+  t.mock.method(Date, 'now', () => now);
+  const ctx = makeCtx(w);
+  ctx.deadline = now;
+  try {
+    const r = await surface.run(ctx, {});
+    assert.equal(r.status, 'failed');
+    assert.equal(r.failureCode, 'TIMEOUT');
+    assert.equal(swims, 0);
+  } finally { ctx.memory.close(); }
+});
+
+test('swim_to success reports surfaced and landed as separate facts', async () => {
+  const w = new TestWorld();
+  w.inWater = false;
+  w.swimTo = async () => { w.inWater = false; return { ok: true, landed: true, surfaced: false, oxygen: 20 }; };
+  const ctx = makeCtx(w);
+  try {
+    const r = await swimTo.run(ctx, { xyz: { x: 4, y: 64, z: 1 } });
+    assert.equal(r.status, 'succeeded', r.summary);
+    assert.equal(r.data?.landed, true);
+    assert.equal(r.data?.surfaced, false, 'surfaced 单独如实报告，不因 landed 硬写成 true');
+  } finally { ctx.memory.close(); }
+});
+
+test('swim_to treats a positive 500ms remaining budget as usable, not exhausted', async (t) => {
   const w = new TestWorld();
   w.inWater = true; w.oxygen = 10;
   let delegatedMs: number | undefined;
@@ -123,10 +151,46 @@ test('swim_to delegates a short parent budget without extending it', async (t) =
   const now = 100000;
   t.mock.method(Date, 'now', () => now);
   const ctx = makeCtx(w);
-  ctx.deadline = now + 2500; // 剩余 2500 → 委托 1500
+  ctx.deadline = now + 500; // 500ms 是正剩余，不因固定 -1000 缓冲被误判为耗尽
   try {
     const r = await swimTo.run(ctx, { xyz: { x: 4, y: 64, z: 1 } });
     assert.equal(r.status, 'failed');
-    assert.equal(delegatedMs, 1500, '委托时长 = 剩余 - 1000，不被 Math.max 拉长');
+    assert.equal(r.failureCode, 'PATH_NOT_FOUND');
+    assert.equal(delegatedMs, 500, '500ms 剩余应原样委托，不再扣 1000');
+    assert.equal(r.data?.oxygen, 10);
+  } finally { ctx.memory.close(); }
+});
+
+test('swim_to delegates the full positive parent budget without a fixed -1000 cut', async (t) => {
+  const w = new TestWorld();
+  w.inWater = true; w.oxygen = 10;
+  let delegatedMs: number | undefined;
+  w.swimTo = async (_t: Vec3Like | null, _signal: AbortSignal, opts?: { timeoutMs?: number }) => { delegatedMs = opts?.timeoutMs; return { ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, surfaced: false, oxygen: 10 }; };
+  const now = 100000;
+  t.mock.method(Date, 'now', () => now);
+  const ctx = makeCtx(w);
+  ctx.deadline = now + 2500; // 剩余 2500 → 委托 2500（不再 -1000）
+  try {
+    const r = await swimTo.run(ctx, { xyz: { x: 4, y: 64, z: 1 } });
+    assert.equal(r.status, 'failed');
+    assert.equal(delegatedMs, 2500, '委托时长 = 剩余，不被 -1000 缩减');
+  } finally { ctx.memory.close(); }
+});
+
+test('swim_to refuses only when no positive time remains', async (t) => {
+  const w = new TestWorld();
+  w.inWater = true; w.oxygen = 10;
+  let swims = 0;
+  w.swimTo = async () => { swims++; return { ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, surfaced: false, oxygen: 10 }; };
+  const now = 100000;
+  t.mock.method(Date, 'now', () => now);
+  const ctx = makeCtx(w);
+  ctx.deadline = now; // 剩余 0
+  try {
+    const r = await swimTo.run(ctx, { xyz: { x: 4, y: 64, z: 1 } });
+    assert.equal(r.status, 'failed');
+    assert.equal(r.failureCode, 'TIMEOUT');
+    assert.equal(swims, 0, '剩余 <= 0 才拒绝，不发出控制');
+    assert.equal(r.data?.oxygen, 10);
   } finally { ctx.memory.close(); }
 });

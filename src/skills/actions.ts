@@ -543,13 +543,24 @@ export const swimTo: Skill<{ xyz: { x: number; y: number; z: number }; timeoutMs
     const a = ctx.adapter;
     if (!a.swimTo) return fail('ERROR', '当前适配器缺少持续游泳控制，不能游向指定坐标');
     const s0 = a.state();
-    // 预算耗尽或不足一次游泳就拒绝，不强行开游；剩余不足时用真实剩余时间，不把父级预算拉长。
-    const timeoutMs = Math.min(args.timeoutMs ?? 20000, ctx.deadline - Date.now() - 1000);
-    if (timeoutMs <= 0) return fail('TIMEOUT', `游向目标的预算已用完（或剩余不足 1 秒），未执行；现在在 (${s0.pos.x.toFixed(1)},${s0.pos.y.toFixed(1)},${s0.pos.z.toFixed(1)})，氧气 ${s0.oxygen}/20`, { landed: false, pos: s0.pos, oxygen: s0.oxygen });
-    const r = await a.swimTo(args.xyz, ctx.signal, { timeoutMs });
+    // 预算耗尽（remaining <= 0）才拒绝，不强行开游；剩余不足时用真实剩余时间，不把父级预算拉长。
+    const timeoutMs = Math.min(args.timeoutMs ?? 20000, ctx.deadline - Date.now());
+    if (timeoutMs <= 0) return fail('TIMEOUT', `游向目标的预算已用完，未执行；现在在 (${s0.pos.x.toFixed(1)},${s0.pos.y.toFixed(1)},${s0.pos.z.toFixed(1)})，氧气 ${s0.oxygen}/20`, { landed: false, pos: { ...s0.pos }, oxygen: s0.oxygen });
+    let r;
+    try {
+      r = await a.swimTo(args.xyz, ctx.signal, { timeoutMs });
+    } catch (e) {
+      // 取消/超时：保留底层带回的冻结 partial（真实动作效果）；无则用委托前的 s0 兜底。绝不重读 a.state()，
+      // 否则替换任务或新连接已经更新的位置/氧气会被算到这次旧动作头上。
+      if (isAbort(e) || (e as Error)?.name === 'TimeoutError') {
+        const prev = (e as Error & { partial?: Record<string, unknown> }).partial ?? {};
+        (e as Error & { partial?: Record<string, unknown> }).partial = { landed: false, target: { ...args.xyz }, pos: { ...s0.pos }, oxygen: s0.oxygen, ...prev };
+      }
+      throw e;
+    }
     const s = a.state();
     const at = `现在在 (${s.pos.x.toFixed(1)},${s.pos.y.toFixed(1)},${s.pos.z.toFixed(1)})，氧气 ${r.oxygen}/20`;
-    if (r.ok && r.landed) return ok(`游到了 (${args.xyz.x},${args.xyz.y},${args.xyz.z}) 并站稳，${at}`, { landed: true, pos: s.pos, oxygen: r.oxygen });
+    if (r.ok && r.landed) return ok(`游到了 (${args.xyz.x},${args.xyz.y},${args.xyz.z}) 并站稳，${at}`, { landed: true, surfaced: r.surfaced, pos: s.pos, oxygen: r.oxygen });
     const why = r.reason === 'WATER_ESCAPE_TIMEOUT' ? '游了一阵还没到' : r.reason === 'SWIM_NO_PROGRESS' ? '游不动' : r.reason;
     return fail('PATH_NOT_FOUND', `${why}；${at}`, { landed: false, surfaced: r.surfaced, pos: s.pos, oxygen: r.oxygen, reason: r.reason });
   },

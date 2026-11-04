@@ -4098,7 +4098,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const end = Date.now() + Math.min(20000, opts.timeoutMs ?? 10000);
     let drySince: number | null = null;
     let surfacedSince: number | null = null;
-    let surfaced = false;
     let lastProgress = Date.now(), anchor = b.entity.position.clone();
     const destination = target;
     // 流体包含水和岩浆：岩浆不能被当成「非流体」或「干地」。
@@ -4112,6 +4111,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const head = b.blockAt(p.offset(0, b.entity.eyeHeight ?? 1.62, 0));
       return !!b.entity.onGround && !b.entity.isInWater && !b.entity.isInLava && !!head && ['air', 'cave_air', 'void_air'].includes(head.name) && support?.boundingBox === 'block' && !fluid(support);
     };
+    // 头此刻稳定露头（结束后重采样，不读陈旧样本；头一旦沉下，surfacedSince 立即归零）。
+    const surfacedNow = () => {
+      if (!headOut()) surfacedSince = null;
+      return surfacedSince !== null && Date.now() - surfacedSince >= 600;
+    };
+    // 真正的剩余预算：每次等待都用它封顶，不设最低值去延长它。
+    const remaining = () => Math.max(0, end - Date.now());
+    // 最后一次仍属于本动作的冻结样本（克隆坐标，不保留可变 Vec 引用）。取消/超时后不能再读 b.entity——
+    // 替换任务或新连接可能已经更新它，把它当作旧动作的 partial 会把新主人的位置/氧气张冠李戴。
+    let lastOwned = { pos: { x: b.entity.position.x, y: b.entity.position.y, z: b.entity.position.z }, oxygen: ownOxygen(b), surfaced: false };
     check();
     b.pathfinder?.setGoal(null);
     b.clearControlStates();
@@ -4129,29 +4138,35 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           if (Date.now() - drySince >= 600) return { ok: true, landed: true, surfaced: true, oxygen: ownOxygen(b) };
         } else drySince = null;
         // 头稳定露出空气（不管有没有指定目标）：这是本次已观察到的部分事实，未到岸/超时也要保留。
-        if (headOut()) {
-          surfacedSince ??= Date.now();
-          if (Date.now() - surfacedSince >= 600) surfaced = true;
-        } else surfacedSince = null;
+        if (headOut()) surfacedSince ??= Date.now();
+        else surfacedSince = null;
+        // 冻结本次仍拥有控制权时观察到的位置/氧气/露头状态（在后续 await 之前，避免迟到重采样读到新主人状态）。
+        lastOwned = { pos: { x: p.x, y: p.y, z: p.z }, oxygen: ownOxygen(b), surfaced: surfacedNow() };
         // 垂直上浮模式（无目标）：头稳定离开流体就算已浮出水面，不要求上岸；短暂露头不算。
-        if (!destination && surfaced) return { ok: true, landed: false, surfaced: true, oxygen: ownOxygen(b) };
+        if (!destination && surfacedNow()) return { ok: true, landed: false, surfaced: true, oxygen: ownOxygen(b) };
         // 只在水里按跳（上浮、借撞岸的那一下爬上去）。人已经出水、只是还没落稳时还按着，落地那一刻又起跳，
         // 就会在岸上一下一下地跳个不停，一直跳到超时
         b.setControlState('jump', !dry && (!!b.entity.isInWater || headUnder()));
         b.setControlState('sprint', false);
         // 离目标还有水平距离就向前：干岸上要先走进水里（不游泳也要迈步），不能只在 !dry 时才前进，否则两岸间隔的水永远过不去。
         if (destination && distance > 0.35) {
-          await this.afterAction(() => b.look(Math.atan2(p.x - destination!.x, p.z - destination!.z), 0, true), check);
+          await this.afterAction(() => raceAbort(b.look(Math.atan2(p.x - destination!.x, p.z - destination!.z), 0, true), signal, remaining(), () => {}), check);
           b.setControlState('forward', true);
         } else b.setControlState('forward', false);
         if (p.distanceTo(anchor) >= 0.3) { lastProgress = Date.now(); anchor = p.clone(); }
         // 贴着岸往上爬时水平位置本来就不动（靠水里撞墙的上抬一点点爬上去）：多给点时间，别刚贴上岸就算没进展
         const climbingBank = !!b.entity.isCollidedHorizontally && distance <= 1.6;
-        if (!dry && destination && Date.now() - lastProgress >= (climbingBank ? 5000 : 2500)) return { ok: false, reason: 'SWIM_NO_PROGRESS', landed: false, surfaced, oxygen: ownOxygen(b) };
-        if (typeof b.waitForTicks === 'function') await this.afterAction(() => raceAbort(b.waitForTicks(2), signal, Math.max(1, Math.min(2000, end - Date.now())), () => {}), check);
-        else await this.afterAction(() => sleep(100, signal), check);
+        if (!dry && destination && Date.now() - lastProgress >= (climbingBank ? 5000 : 2500)) return { ok: false, reason: 'SWIM_NO_PROGRESS', landed: false, surfaced: surfacedNow(), oxygen: ownOxygen(b) };
+        if (typeof b.waitForTicks === 'function') await this.afterAction(() => raceAbort(b.waitForTicks(2), signal, Math.min(2000, remaining()), () => {}), check);
+        else await this.afterAction(() => raceAbort(sleep(Math.min(100, remaining()), signal), signal, remaining(), () => {}), check);
       }
-      return { ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, surfaced, oxygen: ownOxygen(b) };
+      return { ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, surfaced: surfacedNow(), oxygen: ownOxygen(b) };
+    } catch (e) {
+      // 取消/超时（AbortedError/TimeoutError）也要带回最后一次拥有的冻结样本，不重读可能已被替换的 b.entity。
+      if (e instanceof Error && (e.name === 'AbortedError' || e.name === 'TimeoutError')) {
+        (e as Error & { partial?: Record<string, unknown> }).partial = { landed: false, surfaced: lastOwned.surfaced, pos: lastOwned.pos, oxygen: lastOwned.oxygen };
+      }
+      throw e;
     } finally {
       // A replaced task owns the controls now; stopAll already released ours.
       if (epoch === this.actionEpoch && b === this.bot) {

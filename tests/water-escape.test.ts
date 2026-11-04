@@ -241,3 +241,121 @@ test('targeted swim timeout preserves an observed surfaced head as a partial fac
   assert.equal(result.landed, false);
   assert.equal(result.surfaced, true, '途中头稳定露出空气应保留为部分事实，不因未到目标而硬写成 false');
 });
+
+/** 头方块随时间变化的真实适配器夹具：headAt(now) 返回 null 表示未观察（未知）。 */
+function timedFluidBot(t: TestContext, headAt: (now: number) => string | null, bodyName: string, opts: { onGround?: boolean; inWater?: boolean } = {}) {
+  let now = 100000;
+  t.mock.method(Date, 'now', () => now);
+  const controls: Record<string, boolean> = {};
+  const bot = {
+    game: { dimension: 'overworld' },
+    entity: {
+      position: new Vec3(2.5, 61, 2.5), velocity: new Vec3(0, 0, 0), eyeHeight: 1.62,
+      onGround: opts.onGround ?? false, isInWater: opts.inWater ?? true, isInLava: false, isCollidedHorizontally: false,
+    },
+    oxygenLevel: 10,
+    pathfinder: { setGoal() {} },
+    setControlState(name: string, value: boolean) { controls[name] = value; },
+    clearControlStates() { for (const k of Object.keys(controls)) controls[k] = false; },
+    blockAt: (p: { y: number }) => {
+      const head = headAt(now);
+      const name = p.y >= bot.entity.position.y + 1.0 ? head : bodyName;
+      if (name === null) return null;
+      return { name, getProperties: () => ({}) as Record<string, string | number | boolean>, boundingBox: 'block' };
+    },
+    async look() {},
+    async waitForTicks(count: number) { for (let i = 0; i < count; i++) now += 100; },
+  };
+  const adapter = new MineflayerAdapter(config, new EventBus());
+  adapter.bot = bot; adapter.mcData = data; Reflect.set(adapter, 'connectedFlag', true);
+  return { adapter, bot, controls };
+}
+
+test('targeted swim reports surfaced=false when the head was air then submerged before timeout', async (t) => {
+  const { adapter } = timedFluidBot(t, (now) => (now < 100700 ? 'air' : 'water'), 'water');
+  const result = await adapter.swimTo({ x: 6.5, y: 64, z: 2.5 }, new AbortController().signal, { timeoutMs: 1500 });
+  assert.equal(result.ok, false);
+  assert.equal(result.landed, false);
+  assert.equal(result.surfaced, false, '露头又沉下后，结束时头已不在空气中，不能保留陈旧的 surfaced=true');
+});
+
+test('targeted swim reports surfaced=false when the head becomes unknown before timeout', async (t) => {
+  const { adapter } = timedFluidBot(t, (now) => (now < 100700 ? 'air' : null), 'water');
+  const result = await adapter.swimTo({ x: 6.5, y: 64, z: 2.5 }, new AbortController().signal, { timeoutMs: 1500 });
+  assert.equal(result.surfaced, false, '未观察（null）的头不算能呼吸，surfaced 不得陈旧为 true');
+});
+
+test('surfaced is re-sampled after the final tick, not left stale', async (t) => {
+  // 头在最后一个物理帧才沉下水，循环之后不再有下一次 headOut 检查
+  const { adapter } = timedFluidBot(t, (now) => (now < 101450 ? 'air' : 'water'), 'water');
+  const result = await adapter.swimTo({ x: 6.5, y: 64, z: 2.5 }, new AbortController().signal, { timeoutMs: 1500 });
+  assert.equal(result.surfaced, false, '最后一个 tick 把头沉下水后，返回前要重采样，不能读陈旧样本');
+});
+
+test('solid head never counts as surfaced', async (t) => {
+  const { adapter } = timedFluidBot(t, () => 'stone', 'water');
+  const result = await adapter.swimTo(null, new AbortController().signal, { timeoutMs: 500 });
+  assert.equal(result.surfaced, false);
+  assert.equal(result.landed, false);
+});
+
+test('onGround true with no water still requires a breathable head before surfaced/landed', async (t) => {
+  // 站在干地、头却是实心方块：onGround+不碰水不能跳过接触检查（headOut/dryFooting）。
+  const { adapter } = timedFluidBot(t, () => 'stone', 'stone', { onGround: true, inWater: false });
+  const result = await adapter.swimTo({ x: 2.5, y: 61, z: 2.5 }, new AbortController().signal, { timeoutMs: 500 });
+  assert.equal(result.surfaced, false, '头是实心方块，站在干地也不能算露头');
+  assert.equal(result.landed, false, 'onGround 且不碰水不等于干地站稳');
+});
+
+test('swimTo bounds a stalled look to the remaining budget', { timeout: 5000 }, async (t) => {
+  const { adapter, bot } = timedFluidBot(t, () => 'air', 'water');
+  bot.look = () => new Promise<void>(() => {}); // 永不 resolve 的转头
+  await assert.rejects(adapter.swimTo({ x: 6.5, y: 64, z: 2.5 }, new AbortController().signal, { timeoutMs: 300 }), { name: 'TimeoutError' });
+});
+
+test('swimTo bounds a stalled physics tick to the remaining budget', { timeout: 5000 }, async (t) => {
+  const { adapter, bot } = timedFluidBot(t, () => 'air', 'water');
+  bot.waitForTicks = () => new Promise<void>(() => {}); // 永不 resolve 的物理帧
+  await assert.rejects(adapter.swimTo({ x: 6.5, y: 64, z: 2.5 }, new AbortController().signal, { timeoutMs: 300 }), { name: 'TimeoutError' });
+});
+
+test('swimTo without waitForTicks falls back to a bounded sleep', { timeout: 5000 }, async () => {
+  // 无 waitForTicks 时走 sleep 回退：用真实时钟（不 mock Date.now），否则 now 永不前进、循环永不结束。
+  const controls: Record<string, boolean> = {};
+  const bot = {
+    game: { dimension: 'overworld' },
+    entity: {
+      position: new Vec3(2.5, 61, 2.5), velocity: new Vec3(0, 0, 0), eyeHeight: 1.62,
+      onGround: false, isInWater: true, isInLava: false, isCollidedHorizontally: false,
+    },
+    oxygenLevel: 10,
+    pathfinder: { setGoal() {} },
+    setControlState(name: string, value: boolean) { controls[name] = value; },
+    clearControlStates() { for (const k of Object.keys(controls)) controls[k] = false; },
+    blockAt: (p: { y: number }) => ({ name: p.y >= bot.entity.position.y + 1.0 ? 'air' : 'water', getProperties: () => ({}) as Record<string, string | number | boolean>, boundingBox: 'block' }),
+    async look() {},
+  };
+  const adapter = new MineflayerAdapter(config, new EventBus());
+  adapter.bot = bot; adapter.mcData = data; Reflect.set(adapter, 'connectedFlag', true);
+  const result = await adapter.swimTo({ x: 6.5, y: 64, z: 2.5 }, new AbortController().signal, { timeoutMs: 300 });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'WATER_ESCAPE_TIMEOUT');
+});
+
+test('a replacement task position is not attributed to the old cancelled swim partial', async (t) => {
+  const { adapter, bot } = pond(t);
+  let release!: () => void;
+  bot.waitForTicks = () => new Promise<void>((resolve) => { release = resolve; });
+  const controller = new AbortController();
+  const pending = adapter.swimTo({ x: 6.5, y: 64, z: 2.5 }, controller.signal);
+  await setImmediate(); // 进入首次 waitForTicks，已冻结旧位置
+  const owned = { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z };
+  adapter.stopAll(); // 替换任务接管（epoch 变化，不 abort signal）
+  bot.entity.position.set(100, 100, 100); // 替换任务把身体挪走
+  release(); // 迟到完成 → 旧动作 check() 抛 AbortedError
+  await assert.rejects(pending, (e: Error & { partial?: { pos?: { x: number; y: number; z: number } } }) => {
+    assert.equal(e.name, 'AbortedError');
+    assert.deepEqual(e.partial?.pos, owned, '旧动作 partial 保留最后一次拥有时的冻结位置，不张冠李戴成替换任务的新位置');
+    return true;
+  });
+});

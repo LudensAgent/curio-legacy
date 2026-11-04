@@ -5,7 +5,7 @@ import { API_DOC, makeBridge, setReliableSkills } from '../src/codeskills/bridge
 import { SKILLS } from '../src/skills/index.ts';
 import { digAt } from '../src/skills/primitives.ts';
 import { setBehaviorRegistry, useSkill } from '../src/skills/use-skill.ts';
-import { sleep } from '../src/util.ts';
+import { AbortedError, sleep, TimeoutError } from '../src/util.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx, observeAllBlocks } from './survival-helpers.ts';
 
@@ -145,4 +145,57 @@ test('permission to dig during movement recovery does not also authorize falling
     await assert.rejects(makeBridge(ctx)('act', ['dig_at', { at: [0, -1, 0], facing: 'N', fall: true }]), /fall:true/);
     assert.deepEqual(adapter.actions, []);
   });
+});
+
+test('cancelled swim_to keeps observed partial displacement and exact coords through the arbiter', async () => {
+  const adapter = new FakeAdapter();
+  adapter.inWater = true; adapter.oxygen = 10;
+  const ctx = makeCtx(adapter);
+  const arbiter = new Arbiter(adapter, ctx.memory, ctx.bus, ctx.senses);
+  let entered!: () => void;
+  const gate = new Promise<void>((resolve) => { entered = resolve; });
+  adapter.swimTo = async (_target, signal) => {
+    adapter.pos = { x: -3.5, y: 62.25, z: 10.5 }; // 部分位移：小数 + 负值
+    adapter.oxygen = 6;
+    entered();
+    await new Promise<never>((_, reject) => {
+      signal.addEventListener('abort', () => {
+        const e = new AbortedError(String(signal.reason));
+        (e as Error & { partial?: Record<string, unknown> }).partial = { landed: false, surfaced: false, pos: { ...adapter.pos }, oxygen: adapter.oxygen };
+        reject(e);
+      });
+    });
+    return { ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, surfaced: false, oxygen: 6 };
+  };
+  const done = new Promise<TaskOutcome>((resolve) => arbiter.once('done', resolve));
+  assert.ok(!('error' in arbiter.start({ skill: 'swim_to', args: { xyz: [4, 64, 1] } }, 'llm')));
+  await gate;
+  arbiter.cancel('替换任务');
+  const outcome = await done;
+  assert.equal(outcome.result.status, 'cancelled');
+  assert.deepEqual(outcome.result.data?.pos, { x: -3.5, y: 62.25, z: 10.5 }, '保留取消前已发生的小数/负值位移');
+  assert.equal(outcome.result.data?.oxygen, 6);
+  ctx.memory.close();
+});
+
+test('timed-out swim_to keeps partial facts instead of discarding them', async () => {
+  const adapter = new FakeAdapter();
+  adapter.inWater = true; adapter.oxygen = 10;
+  const ctx = makeCtx(adapter);
+  const arbiter = new Arbiter(adapter, ctx.memory, ctx.bus, ctx.senses);
+  adapter.swimTo = async () => {
+    adapter.pos = { x: 1.25, y: 62.5, z: -0.5 };
+    adapter.oxygen = 7;
+    const e = new TimeoutError('timeout after 500ms');
+    (e as Error & { partial?: Record<string, unknown> }).partial = { landed: false, surfaced: false, pos: { ...adapter.pos }, oxygen: adapter.oxygen };
+    throw e;
+  };
+  const done = new Promise<TaskOutcome>((resolve) => arbiter.once('done', resolve));
+  arbiter.start({ skill: 'swim_to', args: { xyz: [4, 64, 1] } }, 'llm');
+  const outcome = await done;
+  assert.equal(outcome.result.status, 'failed');
+  assert.equal(outcome.result.failureCode, 'TIMEOUT');
+  assert.deepEqual(outcome.result.data?.pos, { x: 1.25, y: 62.5, z: -0.5 });
+  assert.equal(outcome.result.data?.oxygen, 7);
+  ctx.memory.close();
 });

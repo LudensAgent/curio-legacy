@@ -101,7 +101,7 @@ test('surface refuses an exhausted budget without delegating an ascent', async (
   adapter.swimTo = async () => { swims++; return { ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, surfaced: false, oxygen: 6 }; };
   try {
     const result = await surface.run({ adapter, memory, bus: new EventBus(), signal: new AbortController().signal,
-      deadline: now + 500, taskId: 'surface-expired', progress() {},
+      deadline: now, taskId: 'surface-expired', progress() {},
       senses: { refresh() {}, markSweep() {}, perceivedEntities: () => [], knownBlocks: () => [] } }, {});
     assert.equal(result.status, 'failed');
     assert.equal(result.failureCode, 'TIMEOUT');

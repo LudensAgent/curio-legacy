@@ -497,8 +497,8 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
         if (arrived(after)) continue;
         if (dist3(cur, after) < 0.3 && !arrived(after)) {
           if (nextTo(after)) return failedNear(after, '没有取得进展');
-          // 泡在水里时步行寻路不肯动（不游泳），一下就返回：说清楚是因为在水里
-          const wet = adapter.state().inWater ? '；人泡在水里，步行寻路不游泳——先用 surface 浮出水面换气、再用 swim_to 游到指定岸上，或在脚下垫一块站出水面再走' : '';
+          // 泡在水里时步行寻路不肯动（不游泳），一下就返回：如实说是因为在水里、本次没有游泳
+          const wet = adapter.state().inWater ? '；人泡在水里，步行寻路不游泳，本次没有执行游泳' : '';
           return fail('PATH_NOT_FOUND', `前往 ${label} 没有取得进展，仍在 (${after.x.toFixed(2)},${after.y.toFixed(2)},${after.z.toFixed(2)})；尚未到达目标位置，需要换入口或路线${wet}`, measured(after));
         }
         if (distance(after) < bestDistance - 0.5) { bestDistance = distance(after); detours = 0; }
@@ -782,13 +782,23 @@ export const surface: Skill<{ timeoutMs?: number }> = {
     if (!a.swimTo) return fail('STUCK', '当前适配器缺少持续游泳控制，不能确认已浮出水面');
     const s0 = a.state();
     // 一次有界上浮委托：不选岸、不找气穴、不挖不垫、不换目标；surfaced（头露出流体）与 landed（站稳干地）分别报告。
-    // 预算耗尽或不足一次上浮就拒绝，不强行开游（岩浆同样由底层 dryFooting/headOut 的真实身体确认排除）。
-    const timeoutMs = Math.min(args.timeoutMs ?? 20000, ctx.deadline - Date.now() - 1000);
-    if (timeoutMs <= 0) return fail('TIMEOUT', `上浮时间已用完（或剩余不足 1 秒），未执行；现在在 (${s0.pos.x.toFixed(1)},${s0.pos.y.toFixed(1)},${s0.pos.z.toFixed(1)})，氧气 ${s0.oxygen}/20`, { landed: false, surfaced: false, pos: s0.pos, oxygen: s0.oxygen });
-    const r = await a.swimTo(null, ctx.signal, { timeoutMs });
+    // 预算耗尽（remaining <= 0）才拒绝，不强行开游（岩浆同样由底层 dryFooting/headOut 的真实身体确认排除）。
+    const timeoutMs = Math.min(args.timeoutMs ?? 20000, ctx.deadline - Date.now());
+    if (timeoutMs <= 0) return fail('TIMEOUT', `上浮时间已用完，未执行；现在在 (${s0.pos.x.toFixed(1)},${s0.pos.y.toFixed(1)},${s0.pos.z.toFixed(1)})，氧气 ${s0.oxygen}/20`, { landed: false, surfaced: false, pos: { ...s0.pos }, oxygen: s0.oxygen });
+    let r;
+    try {
+      r = await a.swimTo(null, ctx.signal, { timeoutMs });
+    } catch (e) {
+      // 取消/超时：保留底层带回的冻结 partial；无则用委托前的 s0 兜底，不重读 a.state() 以免张冠李戴到新主人状态。
+      if (isAbort(e) || (e as Error)?.name === 'TimeoutError') {
+        const prev = (e as Error & { partial?: Record<string, unknown> }).partial ?? {};
+        (e as Error & { partial?: Record<string, unknown> }).partial = { landed: false, surfaced: false, pos: { ...s0.pos }, oxygen: s0.oxygen, ...prev };
+      }
+      throw e;
+    }
     const s = a.state();
     const at = `现在在 (${s.pos.x.toFixed(1)},${s.pos.y.toFixed(1)},${s.pos.z.toFixed(1)})，氧气 ${s.oxygen}/20`;
-    if (r.ok && r.landed) return ok(`上浮后已站稳干地，氧气 ${s.oxygen}/20`, { landed: true, surfaced: true, pos: s.pos, oxygen: s.oxygen });
+    if (r.ok && r.landed) return ok(`上浮后已站稳干地，氧气 ${s.oxygen}/20`, { landed: true, surfaced: r.surfaced, pos: s.pos, oxygen: s.oxygen });
     if (r.ok && r.surfaced) return ok(`结束时头已露出流体（氧气 ${s.oxygen}/20），还没上岸；松开控制后是否继续浮着、是否持续换气不保证`, { landed: false, surfaced: true, pos: s.pos, oxygen: s.oxygen });
     const why = r.reason === 'WATER_ESCAPE_TIMEOUT' ? '上浮没把头露出流体' : r.reason === 'SWIM_NO_PROGRESS' ? '上浮没动' : r.reason;
     return fail('STUCK', `${why}；${at}`, { landed: false, surfaced: r.surfaced, pos: s.pos, oxygen: s.oxygen, reason: r.reason });
