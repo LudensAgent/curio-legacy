@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { test } from 'node:test';
+import { setImmediate } from 'node:timers/promises';
 import { Vec3 } from 'vec3';
 import type { Block } from 'prismarine-block';
 import { MineflayerAdapter } from '../src/adapter/mineflayer.ts';
@@ -38,7 +39,7 @@ function fixture(item = 'water_bucket') {
       bot.entity.pitch = Math.atan2(delta.y, Math.hypot(delta.x, delta.z));
     },
     async waitForTicks() {},
-    setControlState() {}, deactivateItem() {},
+    setControlState(_name: string, _value: boolean) {}, clearControlStates() {}, deactivateItem() {},
     activateItem() { bot._client.write('use_item'); },
     _client: { write(packet: string) { assert.equal(packet, 'use_item'); uses++; onUse(); } },
   };
@@ -273,4 +274,50 @@ test('precise collection picks a reachable aim when top is occluded and a lower 
   const result = await f.adapter.useItemOn('bucket', { kind: 'block', pos: source }, signal());
   assert.equal(result.ok, true, result.reason);
   assert.equal(f.uses(), 1);
+});
+
+test('cancelled bucket placement cannot clear a replacement walk’s sneak', async () => {
+  const f = fixture();
+  f.put('crafting_table', f.target.offset(0, -1, 0)); // 可交互参照：向它贴面倒水要先潜行，避免点开工作台
+  f.bot.heldItem = { name: 'water_bucket' };
+  const controls = { sneak: false };
+  f.bot.setControlState = (name: string, value: boolean) => { if (name === 'sneak') controls.sneak = value; };
+  f.bot.clearControlStates = () => { controls.sneak = false; };
+  let releaseLook!: () => void;
+  f.bot.lookAt = () => new Promise<void>((resolve) => { releaseLook = resolve; });
+  const pending = f.adapter.useBucketAt(f.target, 'water_bucket', new AbortController().signal);
+  for (let i = 0; i < 100 && !controls.sneak; i++) await setImmediate();
+  assert.equal(controls.sneak, true, '向工作台贴面倒水必须先潜行');
+  f.adapter.stopAll(); // 旧桶动作被换主打断
+  assert.equal(controls.sneak, false, 'stopAll 应清掉旧动作自己的控制');
+  f.adapter.walkBody().setControlState('sneak', true); // 新移动任务接管并按下潜行
+  assert.equal(controls.sneak, true);
+  releaseLook(); // 旧桶动作迟到的完成
+  await assert.rejects(pending, { name: 'AbortedError' });
+  assert.equal(controls.sneak, true, '旧桶动作的收尾不能清掉新移动任务的潜行');
+});
+
+test('bucket placement releases its own sneak when the try body fails', async () => {
+  const f = fixture();
+  f.put('crafting_table', f.target.offset(0, -1, 0));
+  f.bot.heldItem = { name: 'water_bucket' };
+  const controls = { sneak: false };
+  f.bot.setControlState = (name: string, value: boolean) => { if (name === 'sneak') controls.sneak = value; };
+  f.bot.clearControlStates = () => { controls.sneak = false; };
+  f.bot.lookAt = async () => { throw new Error('LOOK_DISCONNECTED'); };
+  await assert.rejects(f.adapter.useBucketAt(f.target, 'water_bucket', new AbortController().signal), /LOOK_DISCONNECTED/);
+  assert.equal(controls.sneak, false, '同属主失败后仍要释放自己的潜行');
+});
+
+test('bucket placement releases its own sneak on success', async () => {
+  const f = fixture();
+  f.put('crafting_table', f.target.offset(0, -1, 0));
+  f.bot.heldItem = { name: 'water_bucket' };
+  const controls = { sneak: false };
+  f.bot.setControlState = (name: string, value: boolean) => { if (name === 'sneak') controls.sneak = value; };
+  f.bot.clearControlStates = () => { controls.sneak = false; };
+  f.onUse(() => { f.inventory.set('water_bucket', 0); f.inventory.set('bucket', 1); f.put('water', f.target); });
+  const result = await f.adapter.useBucketAt(f.target, 'water_bucket', new AbortController().signal);
+  assert.equal(result.ok, true, result.reason);
+  assert.equal(controls.sneak, false, '成功后应释放自己的潜行');
 });

@@ -1903,6 +1903,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (!face) return { ok: false, reason: 'NO_PLACEMENT_FACE:没有确认可点击的目标面，未发送使用动作', effectEvidence: { verified: true, changed: false, reasons: ['目标面被挡、太远、参照块会吸收水或射线不可用'] } };
     const { f, ref } = face;
     const sneak = OPENS_ON_CLICK.test(ref.name);
+    const epoch = this.actionEpoch;
+    const ownsControls = () => epoch === this.actionEpoch && b === this.bot;
     if (sneak) b.setControlState('sneak', true);
     try {
       await this.afterAction(() => b.lookAt(ref.position.offset(0.5 - f.x * 0.5, 0.5 - f.y * 0.5, 0.5 - f.z * 0.5), true), check);
@@ -1910,7 +1912,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (!this.canClickPlacementFace(ref, f.scaled(-1), undefined, true)) return { ok: false, reason: 'NO_PLACEMENT_FACE:使用前实际视线已不能命中目标面，未发送使用动作' };
       await this.afterAction(async () => { b.activateItem(); await sleep(200, signal); b.deactivateItem(); }, check);
     } finally {
-      if (sneak) b.setControlState('sneak', false);
+      // 只有仍属于本次动作时才松开潜行：被换主/打断后的迟到收尾不能清掉新任务的潜行。
+      if (sneak && ownsControls()) b.setControlState('sneak', false);
     }
     const sourcePlaced = () => {
       const now = b.blockAt(target);
