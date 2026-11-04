@@ -116,7 +116,7 @@ export function bodySample(
  * 有界等待下一物理帧：任一信号中止、期限到达或 tick 自身断线都返回 null，
  * 不会依赖“再收到一帧”才发现已经失效。期限由调用方给定（含每段 timeout 与总 deadline 的最小者）。
  */
-async function awaitFrame(
+export async function awaitFrame(
   tick: WalkTick,
   deadlineMs: number,
   now: () => number,

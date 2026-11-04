@@ -7,8 +7,10 @@
  */
 
 import { GROUNDED_ARRIVAL_DEFAULTS } from 'curio-minecraft-3d-memory';
-import type { ChangeReport, NavResult, Observation, Vec3Like, VoxelMap } from 'curio-minecraft-3d-memory';
+import type { ChangeReport, NavResult, Observation, Vec3Like, VoxelMap, WalkRouteRequest } from 'curio-minecraft-3d-memory';
 import { runWalkRoute, walkCollisionProvider } from '../adapter/walk-route.ts';
+import type { WalkBody, WalkTick } from '../adapter/walk-route.ts';
+import type { SharedSpatialSession } from '../spatial/shared-session.ts';
 import type { BlockObservation } from '../adapter/types.ts';
 import { fail, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 
@@ -65,6 +67,16 @@ export function observeCells(ctx: SkillCtx, map: VoxelMap, cells: Vec3Like[]): C
   return map.observeBatch({ observations, unobserved: [] });
 }
 
+/** 身体附近的有界局部观察格：3×3 水平邻域 × 脚高/支撑/头/净空（3×3×4），不枚举包围矩形。 */
+export function bodyLocalCells(pos: Vec3Like): Vec3Like[] {
+  const fx = Math.floor(pos.x), fy = Math.floor(pos.y), fz = Math.floor(pos.z);
+  const cells: Vec3Like[] = [];
+  for (let x = fx - 1; x <= fx + 1; x++)
+    for (let z = fz - 1; z <= fz + 1; z++)
+      for (let y = fy - 1; y <= fy + 2; y++) cells.push({ x, y, z });
+  return cells;
+}
+
 /**
  * 从路线点列导出需要观察的格：每个点周围 3×3 的水平邻域 × 脚高/支撑/头/净空。
  * 按短路线约束有界生成，不枚举整条路线的包围矩形。额外观察的格对验证无害。
@@ -87,6 +99,47 @@ function navToResult(nav: NavResult): SkillResult {
   if (nav.outcome === 'CANCELLED') return { status: 'cancelled', summary, data: { nav } };
   const code = nav.outcome === 'TIMEOUT' ? 'TIMEOUT' : nav.outcome === 'BLOCKED' ? 'PATH_NOT_FOUND' : 'ERROR';
   return fail(code, summary, { nav });
+}
+
+/**
+ * walk_route 与 walk_to 共用的窄执行边界：同一套移动中局部观察、生命周期检查与
+ * 共享会话附着/解除。调用者只提供已验证的路线请求；不在此处搜索或改写目标。
+ */
+export function executeWalkRoute(
+  ctx: SkillCtx,
+  spatial: SharedSpatialSession,
+  opts: {
+    map: VoxelMap;
+    body: WalkBody;
+    tick: WalkTick;
+    request: WalkRouteRequest;
+    deadlineMs: number;
+  },
+): Promise<NavResult> {
+  // 移动中持续更新身体周边格（视锥随身体朝向移动而更新），有界 3×3×4。
+  const observe = () => observeCells(ctx, opts.map, bodyLocalCells(ctx.adapter.state().pos));
+  return runWalkRoute({
+    map: opts.map, body: opts.body, request: opts.request, tick: opts.tick, signal: ctx.signal, observe,
+    lifecycle: () => {
+      const s = ctx.adapter.state();
+      // 真实 ready 丢失（同一 sessionId 下区块消失）可能先被步行生命周期看到、
+      // 且之后没有下一帧/下一次 Vision 调用；此时把已经知道的实际边界交给共享
+      // 服务一次。服务仅在实际准入时 interrupt，重复读取不会重复中断。
+      if (!s.observationReady && spatial.observationAdmitted) spatial.interrupt();
+      return { worldId: s.worldId, dim: s.dim, sessionId: s.sessionId, alive: s.alive, connected: s.connected, observationReady: s.observationReady };
+    },
+    deadlineMs: opts.deadlineMs,
+    now: Date.now,
+    // 附着生命周期属于本次真实步行：报告在身体样本前同步进入 loop，取消走 lifecycle。
+    // finally 只撤销本 token，不关闭共享会话，也不影响后续任务。
+    bindActive: (loop) => {
+      const token = spatial.attach({
+        receiver: (report) => loop.observe(report, 64),
+        cancel: () => loop.cancel('lifecycle', 'shared spatial session interrupted the active walk'),
+      });
+      return () => spatial.detach(token);
+    },
+  });
 }
 
 export const walkRoute: Skill<WalkRouteArgs> = {
@@ -152,17 +205,6 @@ export const walkRoute: Skill<WalkRouteArgs> = {
     }
     if (ctx.signal.aborted) return { status: 'cancelled', summary: '预扫阶段被取消', data: {} };
 
-    // 移动中持续更新身体周边格（视锥随身体朝向移动而更新）。
-    const observe = () => {
-      const p = ctx.adapter.state().pos;
-      const fx = Math.floor(p.x), fy = Math.floor(p.y), fz = Math.floor(p.z);
-      const cells: Vec3Like[] = [];
-      for (let x = fx - 1; x <= fx + 1; x++)
-        for (let z = fz - 1; z <= fz + 1; z++)
-          for (let y = fy - 1; y <= fy + 2; y++) cells.push({ x, y, z });
-      return observeCells(ctx, map, cells);
-    };
-
     const request = {
       worldId: state.worldId, dim: state.dim, sessionId: state.sessionId, mode: 'walk' as const,
       body: { feet: args.points[0]!, width: 0.6, height: 1.8, pose: 'standing' as const },
@@ -170,28 +212,7 @@ export const walkRoute: Skill<WalkRouteArgs> = {
       bodyArrival: GROUNDED_ARRIVAL_DEFAULTS, shapeProvider: walkCollisionProvider,
       deadlineMs: effectiveDeadline, timeoutMs: 4000,
     };
-    const nav = await runWalkRoute({
-      map, body, request, tick, signal: ctx.signal, observe,
-      lifecycle: () => {
-        const s = ctx.adapter.state();
-        // 真实 ready 丢失（同一 sessionId 下区块消失）可能先被步行生命周期看到、
-        // 且之后没有下一帧/下一次 Vision 调用；此时把已经知道的实际边界交给共享
-        // 服务一次。服务仅在实际准入时 interrupt，重复读取不会重复中断。
-        if (!s.observationReady && spatial.observationAdmitted) spatial.interrupt();
-        return { worldId: s.worldId, dim: s.dim, sessionId: s.sessionId, alive: s.alive, connected: s.connected, observationReady: s.observationReady };
-      },
-      deadlineMs: effectiveDeadline,
-      now: Date.now,
-      // 附着生命周期属于本次真实步行：报告在身体样本前同步进入 loop，取消走 lifecycle。
-      // finally 只撤销本 token，不关闭共享会话，也不影响后续任务。
-      bindActive: (loop) => {
-        const token = spatial.attach({
-          receiver: (report) => loop.observe(report, 64),
-          cancel: () => loop.cancel('lifecycle', 'shared spatial session interrupted the active walk'),
-        });
-        return () => spatial.detach(token);
-      },
-    });
+    const nav = await executeWalkRoute(ctx, spatial, { map, body, tick, request, deadlineMs: effectiveDeadline });
     // 父任务已取消但库以其它终态返回（期限/失效先到）：以取消返回，保留部分位移。
     if (ctx.signal.aborted && nav.outcome !== 'CANCELLED') return { status: 'cancelled', summary: nav.message, data: { nav } };
     return navToResult(nav);
@@ -205,7 +226,7 @@ function validCoord(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v) && Math.abs(v) <= COORD_BOUND;
 }
 
-function readPoint(p: unknown): Vec3Like | null {
+export function readPoint(p: unknown): Vec3Like | null {
   if (Array.isArray(p)) {
     if (!validCoord(p[0]) || !validCoord(p[1]) || !validCoord(p[2])) return null;
     return { x: p[0], y: p[1], z: p[2] };
