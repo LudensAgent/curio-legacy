@@ -52,7 +52,7 @@ test('walk_route 通过真实身体桥离线走通三段转弯', async () => {
   } as unknown as GameAdapter;
   const senses = {
     observeBlocks: (positions: { x: number; y: number; z: number }[]) => positions.map((p): BlockObservation => ({
-      name: p.y === -1 ? 'minecraft:stone' : 'minecraft:air', properties: {}, pos: { ...p },
+      name: p.y === -1 ? 'minecraft:stone' : 'minecraft:air', properties: {}, stateComplete: true, pos: { ...p },
       worldId: 'world', sessionId: 's1', dimension: 'overworld', observationId: 1, observedAt: Date.now(), source: 'vision',
     })),
   };

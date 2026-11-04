@@ -290,6 +290,8 @@ export interface BlockObservation extends BlockState {
   observationId: number;
   observedAt: number;
   source: 'vision';
+  /** false when only the name is known (blockStateAt unavailable); empty properties from a fallback are not complete state. */
+  stateComplete?: boolean;
 }
 
 export interface UseItemOptions {

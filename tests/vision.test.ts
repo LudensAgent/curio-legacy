@@ -167,3 +167,40 @@ test('扫描性能（40×24 射线，64 格）', () => {
   console.log(`  平均每次扫描 ${ms.toFixed(1)} ms`);
   assert.ok(ms < 200);
 });
+
+// ---- observeBlocks 边界：脚下/头顶不再免视线，必须真实进入视锥且无遮挡
+test('observeBlocks：视锥外的脚下与头顶竖列不返回精确视觉', () => {
+  const { adapter, vision } = setup();
+  assert.deepEqual(vision.observeBlocks([{ x: 0, y: 63, z: 0 }, { x: 0, y: 66, z: 0 }]), []);
+});
+
+test('observeBlocks：真正低头看支撑、抬头看净空都返回事实', () => {
+  const { adapter, vision } = setup();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  adapter.yaw = Math.PI;
+  adapter.pitch = -1.2;
+  assert.equal(vision.observeBlocks([{ x: 0, y: 63, z: 0 }])[0]?.name, 'grass_block');
+  adapter.pitch = 1.1;
+  assert.equal(vision.observeBlocks([{ x: 0, y: 66, z: 0 }])[0]?.name, 'air');
+});
+
+test('observeBlocks：转头能看见的支撑被贴身的脚格挡住时仍不返回', () => {
+  const { adapter, vision } = setup();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  adapter.yaw = Math.PI;
+  adapter.pitch = -1.2;
+  adapter.blocks.push({ name: 'stone', pos: { x: 0, y: 64, z: 0 } }); // 脚格塞入石头，挡住脚下支撑
+  assert.deepEqual(vision.observeBlocks([{ x: 0, y: 63, z: 0 }]), []);
+});
+
+test('observeBlocks：blockStateAt 缺失时名称可见但状态不完整', () => {
+  const { adapter, vision } = setup();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  adapter.yaw = -Math.PI / 2;
+  adapter.pitch = 0;
+  adapter.blocks.push({ name: 'stone', pos: { x: 2, y: 64, z: 0 } });
+  adapter.blockStateAt = (() => null) as typeof adapter.blockStateAt;
+  const out = vision.observeBlocks([{ x: 2, y: 64, z: 0 }]);
+  assert.equal(out[0]?.name, 'stone');
+  assert.equal(out[0]?.stateComplete, false);
+});

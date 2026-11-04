@@ -25,7 +25,7 @@ function toObservation(b: BlockObservation): Observation {
   return {
     worldId: b.worldId, dim: b.dimension, sessionId: b.sessionId,
     observedAt: b.observedAt, sequence: b.observationId,
-    source: 'vision', evidence: 'seen', stateComplete: true,
+    source: 'vision', evidence: 'seen', stateComplete: b.stateComplete === true,
     state: { name: b.name, properties: (b.properties ?? {}) as Record<string, string> }, pos: { ...b.pos },
   };
 }
@@ -83,7 +83,7 @@ function navToResult(nav: NavResult): SkillResult {
 
 export const walkRoute: Skill<WalkRouteArgs> = {
   name: 'walk_route',
-  description: '走一条显式给定的同高、无施工短路线（普通干燥整块、沿 X/Z）。由你提供点列，代码稳定执行到每个点',
+  description: '走一条显式给定的同高、无施工短路线（普通干燥整块、沿 X/Z）。由你提供点列，代码稳定执行到每个点；出发前会有限次转头（≤12 次）观察路线支撑/身体/净空格，途中只依据可见格更新',
   argsDoc: '{"points":[[x,y,z],...]}（2~32 个点，脚高 y 相同，相邻沿 X/Z 一格）',
   timeoutMs: 30000,
   movement: true,
@@ -124,15 +124,19 @@ export const walkRoute: Skill<WalkRouteArgs> = {
     // 有效期限不能超过父委托期限：子请求只能缩短，不能延长。
     const effectiveDeadline = Math.min(args.deadlineMs ?? ctx.deadline, ctx.deadline);
 
-    // 预扫：依次转向四个朝向、略低头观察（视锥是朝向的，脚高/支撑格在视线下方）。
-    // 验证需要身体扫掠的前后格（身体 0.6 宽 + 分数脚位会把身后一列也算进扫掠），只朝路线前进方向
-    // 会漏掉身后格，故四个朝向都看一遍——这是合法转头，不是放宽视锥或接触感知。
-    observeCells(ctx, map, routeCells(args.points));
+    // 预扫：有限次合法转头（4 个朝向 × 3 个俯仰）覆盖验证所需的支撑、身体与净空竖列。
+    // 视锥配置不变；脚下/头顶不因“贴着身体”就免视线，因此必须真正低头/抬头去看。
+    // 这是执行这条显式路线所需的观察，不扩宽视锥、不做额外探索，也不消耗资源。
+    const route = routeCells(args.points);
+    observeCells(ctx, map, route);
     if (typeof ctx.adapter.look === 'function') {
-      for (const yaw of [-Math.PI / 2, 0, Math.PI / 2, Math.PI]) {
+      for (const pitch of [-1.2, 0, 1.1]) {
+        for (const yaw of [-Math.PI / 2, 0, Math.PI / 2, Math.PI]) {
+          if (ctx.signal.aborted || Date.now() >= effectiveDeadline) break;
+          await ctx.adapter.look(yaw, pitch);
+          observeCells(ctx, map, route);
+        }
         if (ctx.signal.aborted || Date.now() >= effectiveDeadline) break;
-        await ctx.adapter.look(yaw, -0.6);
-        observeCells(ctx, map, routeCells(args.points));
       }
     }
     if (ctx.signal.aborted) return { status: 'cancelled', summary: '预扫阶段被取消', data: {} };

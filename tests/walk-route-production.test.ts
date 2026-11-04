@@ -66,7 +66,7 @@ function makeWalkAdapter() {
 function flatSenses(): Senses {
   return {
     observeBlocks: (positions: { x: number; y: number; z: number }[]): BlockObservation[] => positions.map((p): BlockObservation => ({
-      name: p.y === -1 ? 'minecraft:stone' : 'minecraft:air', properties: {}, pos: { ...p },
+      name: p.y === -1 ? 'minecraft:stone' : 'minecraft:air', properties: {}, stateComplete: true, pos: { ...p },
       worldId: 'world', sessionId: 's1', dimension: 'overworld', observationId: 1, observedAt: Date.now(), source: 'vision',
     })),
     perceivedEntities: () => [],
@@ -138,7 +138,7 @@ test('observeCells 遵守 ≤32 批次：超过 32 个候选时关键格不因�
     ...flatSenses(),
     observeBlocks: (positions: { x: number; y: number; z: number }[]) => {
       positions.forEach((p) => requested.push(p.x));
-      return positions.map((p): BlockObservation => ({ name: 'minecraft:air', properties: {}, pos: { ...p }, worldId: 'world', sessionId: 's1', dimension: 'overworld', observationId: 1, observedAt: Date.now(), source: 'vision' }));
+      return positions.map((p): BlockObservation => ({ name: 'minecraft:air', properties: {}, stateComplete: true, pos: { ...p }, worldId: 'world', sessionId: 's1', dimension: 'overworld', observationId: 1, observedAt: Date.now(), source: 'vision' }));
     },
   } as unknown as Senses;
   const ctx = { senses } as never;
@@ -154,8 +154,8 @@ test('observeCells 整批合并 ChangeReport：支撑拆除与无关刷新同批
   const senses = {
     ...flatSenses(),
     observeBlocks: () => ([
-      { name: 'minecraft:air', properties: {}, pos: { x: 15, y: -1, z: 0 }, worldId: 'world', sessionId: 's1', dimension: 'overworld', observationId: 2, observedAt: Date.now(), source: 'vision' },
-      { name: 'minecraft:air', properties: {}, pos: { x: 16, y: 2, z: 0 }, worldId: 'world', sessionId: 's1', dimension: 'overworld', observationId: 3, observedAt: Date.now(), source: 'vision' },
+      { name: 'minecraft:air', properties: {}, stateComplete: true, pos: { x: 15, y: -1, z: 0 }, worldId: 'world', sessionId: 's1', dimension: 'overworld', observationId: 2, observedAt: Date.now(), source: 'vision' },
+      { name: 'minecraft:air', properties: {}, stateComplete: true, pos: { x: 16, y: 2, z: 0 }, worldId: 'world', sessionId: 's1', dimension: 'overworld', observationId: 3, observedAt: Date.now(), source: 'vision' },
     ] as BlockObservation[]),
   } as unknown as Senses;
   const ctx = { senses } as never;
@@ -165,4 +165,19 @@ test('observeCells 整批合并 ChangeReport：支撑拆除与无关刷新同批
   assert.ok(cells.includes('15,-1,0'), '支撑拆除的变化必须出现在报告中');
   const view = map.cellAt('overworld', 15, -1, 0);
   assert.equal(view.observed ? view.evidence.observation.state.name : null, 'minecraft:air', '地图必须反映支撑已拆除为空气');
+});
+
+test('observeCells 不把缺失 blockStateAt 的光学名称回退当成完整状态', () => {
+  const map = new VoxelMap('world', { validityWindowMs: 60_000 });
+  const senses = {
+    ...flatSenses(),
+    observeBlocks: () => ([
+      { name: 'minecraft:oak_door', properties: {}, stateComplete: false, pos: { x: 3, y: 0, z: 0 }, worldId: 'world', sessionId: 's1', dimension: 'overworld', observationId: 1, observedAt: Date.now(), source: 'vision' },
+    ] as BlockObservation[]),
+  } as unknown as Senses;
+  const ctx = { senses } as never;
+  observeCells(ctx, map, [{ x: 3, y: 0, z: 0 }]);
+  const view = map.cellAt('overworld', 3, 0, 0);
+  assert.equal(view.observed, true, '名称可见的格子应进入地图');
+  assert.equal(view.observed ? view.evidence.observation.stateComplete : null, false, '仅有光学名称时不得标记为完整状态');
 });
