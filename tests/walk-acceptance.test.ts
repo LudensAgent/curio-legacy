@@ -24,6 +24,7 @@ import {
   gitPorcelainPaths,
   hasPartialPosition,
   integrityMatches,
+  isEmptyBlockState,
   isArrived,
   lateForwardWritesByOwner,
   packageMeta,
@@ -113,10 +114,22 @@ test('parseExecuteIfBlock：只接受 Java 的 Test passed / Test failed，命�
   assert.throws(() => parseExecuteIfBlock(''), /无法解析/);
 });
 
-test('parseSetBlock：只接受真实成功反馈，错误响应抛错', () => {
-  assert.doesNotThrow(() => parseSetBlock('Changed the block at 200, 63, 216 to minecraft:stone'));
+test('parseSetBlock：只接受 1.20 真实成功反馈（无 to），截断/错误/尾缀负例必须抛错', () => {
+  assert.doesNotThrow(() => parseSetBlock('Changed the block at 200, 63, 216'));
+  assert.doesNotThrow(() => parseSetBlock('Changed the block at -12, -64, -3'));
+  assert.throws(() => parseSetBlock('Changed the block at 200, 63, 216 to minecraft:stone'), /无法确认/, '真实成功文本没有 to');
+  assert.throws(() => parseSetBlock('Changed the block at 200, 63'), /无法确认/, '截断坐标');
   assert.throws(() => parseSetBlock('That position is not loaded'), /无法确认/);
-  assert.throws(() => parseSetBlock('Test failed'), /无法确认/);
+  assert.throws(() => parseSetBlock('Unknown or incomplete command'), /无法确认/);
+  assert.throws(() => parseSetBlock('Changed the block at 200, 63, 216 extra'), /无法确认/, '任意尾缀');
+});
+
+test('isEmptyBlockState：air/cave_air/void_air 都是合法空格，material/unknown 是占用', () => {
+  assert.equal(isEmptyBlockState('air'), true);
+  assert.equal(isEmptyBlockState('cave_air'), true);
+  assert.equal(isEmptyBlockState('void_air'), true);
+  assert.equal(isEmptyBlockState('material'), false);
+  assert.equal(isEmptyBlockState('unknown'), false);
 });
 
 test('probeBlock：实际 execute if block 命令精确判定 air / 材料 / unknown', async () => {
@@ -127,6 +140,11 @@ test('probeBlock：实际 execute if block 命令精确判定 air / 材料 / unk
   }, { x: 200, y: 63, z: 216 }, 'minecraft:stone');
   assert.equal(air, 'air');
   assert.deepEqual(airCalls, ['execute if block 200 63 216 minecraft:air'], 'air 命中后不应继续探测');
+
+  const caveAir = await probeBlock(async (command) => command.endsWith(' minecraft:cave_air') ? 'Test passed' : 'Test failed', { x: 201, y: 63, z: 216 }, 'minecraft:stone');
+  assert.equal(caveAir, 'cave_air');
+  const voidAir = await probeBlock(async (command) => command.endsWith(' minecraft:void_air') ? 'Test passed' : 'Test failed', { x: 202, y: 63, z: 216 }, 'minecraft:stone');
+  assert.equal(voidAir, 'void_air');
 
   const materialCalls: string[] = [];
   const material = await probeBlock(async (command) => {

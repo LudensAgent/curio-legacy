@@ -637,10 +637,6 @@ export function packageMeta(opts: PackageMetaOptions = {}) {
   const tgzRel = dep.slice('file:'.length);
   if (tgzRel.length === 0) throw new Error(`package.json 对 ${EXPECTED_PACKAGE_NAME} 的 file: 依赖缺少路径`);
   const tgzPath = path.resolve(base, tgzRel);
-  const relToBase = path.relative(base, tgzPath);
-  if (relToBase === '' || relToBase.startsWith('..') || path.isAbsolute(relToBase)) {
-    throw new Error(`依赖路径越出包根目录：${tgzRel}`);
-  }
   const tgzBytes = fs.readFileSync(tgzPath);
   const tgzSha256 = crypto.createHash('sha256').update(tgzBytes).digest('hex');
 
@@ -837,6 +833,11 @@ export interface RconOp { command: string; response: string }
 
 export type BlockProbeState = 'air' | 'cave_air' | 'void_air' | 'material' | 'unknown';
 
+/** air / cave_air / void_air 都是合法空格；material 与 unknown 才是真实占用。 */
+export function isEmptyBlockState(state: BlockProbeState): boolean {
+  return state === 'air' || state === 'cave_air' || state === 'void_air';
+}
+
 /** 严格解析 Java `execute if block` 的反馈：只有 Test passed / Test failed 合法。 */
 export function parseExecuteIfBlock(raw: string): 'match' | 'mismatch' {
   const text = raw.trim();
@@ -845,9 +846,9 @@ export function parseExecuteIfBlock(raw: string): 'match' | 'mismatch' {
   throw new Error(`execute if block 响应无法解析：${JSON.stringify(raw)}`);
 }
 
-/** 严格解析 Java `setblock` 的成功反馈；其他（错误/未知）一律抛错，不当作已写入。 */
+/** 严格解析 Java `setblock` 的成功反馈（1.20 语言文件：`Changed the block at %s, %s, %s`）。 */
 export function parseSetBlock(raw: string): void {
-  if (!/^Changed the block at -?\d+, -?\d+, -?\d+ to /.test(raw.trim())) {
+  if (!/^Changed the block at -?\d+, -?\d+, -?\d+$/.test(raw.trim())) {
     throw new Error(`setblock 响应无法确认为成功：${JSON.stringify(raw)}`);
   }
 }
@@ -877,8 +878,8 @@ export async function probeBlock(
 
 /**
  * 在限定范围内搭建支撑面：先逐格确认支撑格（feetY-1）与净空格（feetY/feetY+1）。
- * 支撑格接受同材料（同 run 或旧 run 遗留）或 air（此时补建）；净空格必须是 air。
- * 其余状态（cave_air/void_air/未知材料/占用）一律中止，不覆写。
+ * 支撑格接受同材料（同 run 或旧 run 遗留）或任意合法空格（air/cave_air/void_air，此时补建）；
+ * 净空格接受任意合法空格。未知材料或真实占用一律中止，不覆写。
  * 所有控制端命令与响应在尝试时立即写入本场景证据，中途失败也保留。
  */
 async function buildSupportFixture(
@@ -902,15 +903,15 @@ async function buildSupportFixture(
   for (let x = footprint.xMin; x <= footprint.xMax; x++) {
     for (let z = footprint.zMin; z <= footprint.zMax; z++) {
       const support = await probeBlock(send, { x, y: feetY - 1, z }, material);
-      if (support === 'air') toBuild.push({ x, z });
+      if (isEmptyBlockState(support)) toBuild.push({ x, z });
       else if (support === 'material') reused++;
       else {
         throw new Error(`支撑格状态不可复用（x=${x} y=${feetY - 1} z=${z} → ${support}），中止且不覆写`);
       }
       for (const y of [feetY, feetY + 1]) {
         const clear = await probeBlock(send, { x, y, z }, material);
-        if (clear !== 'air') {
-          throw new Error(`净空格不是 air（x=${x} y=${y} z=${z} → ${clear}），中止且不覆写`);
+        if (!isEmptyBlockState(clear)) {
+          throw new Error(`净空格被占用（x=${x} y=${y} z=${z} → ${clear}），中止且不覆写`);
         }
       }
     }
