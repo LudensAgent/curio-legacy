@@ -78,6 +78,11 @@ export interface WalkLifecycle {
   observationReady: boolean;
 }
 
+/** 生命周期是否已不可用：死亡/断线/观测未就绪都算失效，需立即终止委托。 */
+function lifecycleBroken(lc: WalkLifecycle): boolean {
+  return !lc.alive || !lc.connected || !lc.observationReady;
+}
+
 /** 从实际实体观测构造一个 BodySample；作用域与生命周期都来自实际适配器，不从请求复制。 */
 export function bodySample(
   executionId: string,
@@ -137,6 +142,8 @@ export class WalkMoveExecutor implements MoveExecutor {
     private readonly tick: WalkTick,
     private readonly parentSignal: AbortSignal,
     private readonly now: () => number = Date.now,
+    private readonly lifecycle?: () => WalkLifecycle,
+    private readonly onLifecycleBroken?: (detail: string) => void,
   ) {}
 
   /** 宿主在帧回调里构造样本（掌握单调序号与生命周期），再喂给库。 */
@@ -158,6 +165,12 @@ export class WalkMoveExecutor implements MoveExecutor {
     // 转头后重新检查取消/期限：转头等待期间可能被抢占或到期。
     if (this.aborted(request)) return { failure: { kind: 'cancelled' } };
     if (this.now() >= moveDeadline) return { failure: { kind: 'timed_out' } };
+    // 启动该段前检查生命周期：已断线/死亡/观测未就绪时不得写前进键，直接取消本委托。
+    const lc = this.lifecycle?.();
+    if (lc !== undefined && lifecycleBroken(lc)) {
+      this.onLifecycleBroken?.(`alive=${lc.alive} connected=${lc.connected} observationReady=${lc.observationReady}`);
+      return { failure: { kind: 'cancelled' } };
+    }
     this.body.clearControlStates();
     this.body.setControlState('forward', true);
     this.activeExecutionId = request.executionId;
@@ -185,10 +198,16 @@ export class WalkMoveExecutor implements MoveExecutor {
       if (this.aborted(request)) { this.releaseIf(request.executionId); return { failure: { kind: 'cancelled' } }; }
       if (this.now() >= moveDeadline) { this.releaseIf(request.executionId); return { failure: { kind: 'timed_out' } }; }
       if (e === null) {
-        // 无帧：复核取消/期限后再决定终态，不把断线误判为普通成功。
+        // 无帧：复核取消/期限/生命周期后再决定终态，不把断线误判为普通成功，也不把停帧误判为断线。
         if (this.now() >= moveDeadline) { this.releaseIf(request.executionId); return { failure: { kind: 'timed_out' } }; }
-        this.releaseIf(request.executionId);
-        return { failure: { kind: 'execution_error', detail: 'no physics frame available' } };
+        const lc = this.lifecycle?.();
+        if (lc !== undefined && lifecycleBroken(lc)) {
+          this.onLifecycleBroken?.(`alive=${lc.alive} connected=${lc.connected} observationReady=${lc.observationReady}`);
+          this.releaseIf(request.executionId);
+          return { failure: { kind: 'cancelled' } };
+        }
+        // 生命周期仍有效：只是帧交付停滞，继续按该段期限等待下一帧，不提前判执行错误。
+        continue;
       }
       const dist = Math.hypot(to.x - e.position.x, to.z - e.position.z);
       // 用实际帧间位移估计速度，并按采样间隔折算为每 tick 速度：每 2 tick 采样一次时位移是
@@ -275,7 +294,9 @@ export async function runWalkRoute(opts: {
     worldId: opts.request.worldId, dim: opts.request.dim, sessionId: opts.request.sessionId,
     alive: true, connected: true, observationReady: true,
   }));
-  const executor = new WalkMoveExecutor(opts.body, opts.tick, opts.signal, now);
+  const executor = new WalkMoveExecutor(opts.body, opts.tick, opts.signal, now, lifecycle, (detail) => {
+    loop.cancel('lifecycle', detail);
+  });
   const loop = new WalkRouteExecutor(opts.map, executor, { now });
   let sequence = 0; // 委托内单调递增，跨段不重置
 
@@ -283,52 +304,78 @@ export async function runWalkRoute(opts: {
   const onParentAbort = () => { loop.cancel('agent', 'parent task cancelled'); };
   opts.signal.addEventListener('abort', onParentAbort, { once: true });
 
-  loop.start({ ...opts.request, deadlineMs: deadline });
-  const executionId = loop.status()!.delegationId;
-
-  // 统一帧处理顺序：本轮合法观测先进入地图并复验，再让身体样本确认到达。
-  const observeThenSample = (entity: WalkBody['entity']) => {
-    const report = opts.observe?.();
-    if (report) loop.observe(report, 64);
-    loop.onSample(bodySample(executionId, entity, now(), ++sequence, lifecycle()));
+  // 生命周期失效时立即以 lifecycle 取消本委托：保留已测位移、释放当前控制，不再启动下一段。
+  const cancelBrokenLifecycle = () => {
+    const lc = lifecycle();
+    if (!lifecycleBroken(lc)) return false;
+    loop.cancel('lifecycle', `alive=${lc.alive} connected=${lc.connected} observationReady=${lc.observationReady}`);
+    return true;
   };
-  executor.setFrameSink(observeThenSample);
 
-  // 初始实测位置：bodyArrival 需要多帧确认身体稳定在起点，advance 才会启动首段。
-  // 固定 8 帧不能代表起点已稳定（采样间隔不均会重置稳定窗口，停止取样后没人再喂样本，
-  // 身体执行未启动、库又等稳定样本，只能原地等到超时）。因此持续采样直到 advance 启动首段、
-  // 产生终态、取消或到期，再交给下面的行走循环。
-  let initFrames = 0;
-  while (loop.status()!.result === null && loop.status()!.activeStepIndex === null && now() < deadline && !opts.signal.aborted && initFrames < 400) {
-    const entity = await awaitFrame(opts.tick, deadline, now, opts.signal);
-    if (entity === null) break;
-    observeThenSample(entity);
-    // 每处理一个样本后立即检查终态/取消；首帧就失效时不继续订阅下一帧。
-    if (opts.signal.aborted || loop.status()!.result !== null) break;
-    loop.advance(64);
-    loop.checkTimeout();
-    initFrames++;
-  }
+  try {
+    loop.start({ ...opts.request, deadlineMs: deadline });
+    const executionId = loop.status()!.delegationId;
 
-  let iterations = 0;
-  while (loop.status()!.result === null && now() < deadline && !opts.signal.aborted && iterations++ < 20000) {
-    loop.advance(64);
-    loop.checkTimeout();
-    await new Promise((r) => setTimeout(r, 10));
-  }
-  // 退出时若仍无终态：主动取消返回 CANCELLED，期限耗尽返回 TIMEOUT，两者分别反馈，保留已测位移。
-  let result = loop.status()!.result;
-  if (result === null) {
-    if (opts.signal.aborted) {
-      result = loop.cancel('agent', 'parent task cancelled');
-    } else {
-      loop.checkTimeout(); // 期限耗尽 → guard 判定 TIMEOUT
-      result = loop.status()!.result;
-      if (result === null) result = loop.cancel('scheduler', 'host deadline exceeded');
+    // 统一帧处理顺序：本轮合法观测先进入地图并复验，再让身体样本确认到达。
+    const observeThenSample = (entity: WalkBody['entity']) => {
+      const report = opts.observe?.();
+      if (report) loop.observe(report, 64);
+      loop.onSample(bodySample(executionId, entity, now(), ++sequence, lifecycle()));
+    };
+    executor.setFrameSink(observeThenSample);
+
+    // 初始实测位置：bodyArrival 需要多帧确认身体稳定在起点，advance 才会启动首段。
+    // 固定 8 帧不能代表起点已稳定（采样间隔不均会重置稳定窗口，停止取样后没人再喂样本，
+    // 身体执行未启动、库又等稳定样本，只能原地等到超时）。因此持续采样直到 advance 启动首段、
+    // 产生终态、取消或到期，再交给下面的行走循环。
+    let initFrames = 0;
+    while (loop.status()!.result === null && loop.status()!.activeStepIndex === null && now() < deadline && !opts.signal.aborted && initFrames < 400) {
+      const entity = await awaitFrame(opts.tick, deadline, now, opts.signal);
+      if (entity === null) {
+        // 无帧：先区分父取消/期限耗尽/生命周期失效；仅帧交付停滞时继续按期限等待下一帧。
+        if (opts.signal.aborted) break;
+        if (now() >= deadline) break;
+        if (cancelBrokenLifecycle()) break;
+        continue;
+      }
+      observeThenSample(entity);
+      // 每处理一个样本后立即检查终态/取消；首帧就失效时不继续订阅下一帧。
+      if (opts.signal.aborted || loop.status()!.result !== null) break;
+      if (cancelBrokenLifecycle()) break;
+      loop.advance(64);
+      loop.checkTimeout();
+      initFrames++;
+    }
+
+    let iterations = 0;
+    while (loop.status()!.result === null && now() < deadline && !opts.signal.aborted && iterations++ < 20000) {
+      if (cancelBrokenLifecycle()) break;
+      loop.advance(64);
+      loop.checkTimeout();
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    // 退出时若仍无终态：主动取消返回 CANCELLED，期限耗尽返回 TIMEOUT，两者分别反馈，保留已测位移。
+    let result = loop.status()!.result;
+    if (result === null) {
+      if (opts.signal.aborted) {
+        result = loop.cancel('agent', 'parent task cancelled');
+      } else {
+        loop.checkTimeout(); // 期限耗尽 → guard 判定 TIMEOUT
+        result = loop.status()!.result;
+        if (result === null) result = loop.cancel('scheduler', 'host deadline exceeded');
+      }
+    }
+    return result;
+  } finally {
+    opts.signal.removeEventListener('abort', onParentAbort);
+    // 异常路径也不得把活动移动的控制留在身体上；正常返回时 result 已非 null，这里为空操作。
+    try {
+      const status = loop.status();
+      if (status !== null && status.result === null) loop.cancel('scheduler', 'host walk-route error');
+    } catch {
+      // 没有委托或时钟异常时无法再做归属清理，只保证不掩盖原始错误。
     }
   }
-  opts.signal.removeEventListener('abort', onParentAbort);
-  return result;
 }
 
 export { GROUNDED_ARRIVAL_DEFAULTS };

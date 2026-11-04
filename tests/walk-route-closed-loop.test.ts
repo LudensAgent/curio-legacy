@@ -329,3 +329,52 @@ test('初始稳定窗口前八帧反复重置时不提前写控制，稳定后�
     clearTimeout(watchdogTimer);
   }
 });
+
+test('断线（tick 立即返回 null 且 connected=false）在初始化阶段立即按 lifecycle 取消并清理', async () => {
+  const map = buildMap();
+  const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }];
+  const { bot } = body({ x: 0.54, z: 0.52 });
+  const tick = () => Promise.resolve(null); // 连接已结束：没有未来物理帧
+  const start = Date.now();
+  const result = await runWalkRoute({
+    map, body: bot as never, request: request(points), tick,
+    signal: new AbortController().signal, now: Date.now, deadlineMs: Date.now() + 5000,
+    lifecycle: () => ({ worldId: 'world', dim: 'overworld', sessionId: 's1', alive: true, connected: false, observationReady: true }),
+  });
+  const elapsed = Date.now() - start;
+  assert.equal(result.outcome, 'CANCELLED', result.message);
+  assert.equal((result as { problem?: { by?: string } }).problem?.by, 'lifecycle');
+  assert.ok(elapsed < 1000, `断线应立即返回而非等到期限（实际 ${elapsed}ms）`);
+  for (const key of Object.keys(bot.control)) {
+    assert.equal(bot.control[key], false, `初始化阶段断线后 ${key} 键不应被按下`);
+  }
+});
+
+test('活动移动中断线：保留部分末位位移并释放全部按键', async () => {
+  const map = buildMap();
+  const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }];
+  const { bot, tick: physicsTick, now } = body({ x: 0.54, z: 0.52 });
+  let connected = true;
+  let forwardFrames = 0;
+  const tick = (signal: AbortSignal) => {
+    if (!connected || signal.aborted) return Promise.resolve(null);
+    if (bot.control.forward) {
+      forwardFrames += 1;
+      if (forwardFrames > 3) { connected = false; return Promise.resolve(null); }
+    }
+    return physicsTick();
+  };
+  const result = await runWalkRoute({
+    map, body: bot as never, request: request(points), tick,
+    signal: new AbortController().signal, now,
+    lifecycle: () => ({ worldId: 'world', dim: 'overworld', sessionId: 's1', alive: true, connected, observationReady: true }),
+  });
+  assert.equal(result.outcome, 'CANCELLED', result.message);
+  assert.equal((result as { problem?: { by?: string } }).problem?.by, 'lifecycle');
+  const last = (result as { lastPosition?: { x: number; z: number } }).lastPosition;
+  assert.ok(last, '断线时应保留已测末位位移');
+  assert.ok(last && last.x < 1.5 - 0.12, `末位 x=${last?.x.toFixed(2)} 应仍是部分位移而非到达目标`);
+  for (const key of Object.keys(bot.control)) {
+    assert.equal(bot.control[key], false, `断线后 ${key} 键应释放`);
+  }
+});
