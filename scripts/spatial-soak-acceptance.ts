@@ -1040,8 +1040,8 @@ export interface ShutdownVerdict {
 
 /**
  * 失败判据：真实 ShutdownResult 的每个失败面都要失败，而不是只看 stop() 是否
- * 抛错。最终 checkpoint 缺失、checkpoint 错误、close 抛错、close 未完成或
- * close.error 非空都列为失败；dirty/unconfirmedRequest 作为事实保留。
+ * 抛错。最终 checkpoint 缺失、checkpoint 错误、cancelError、close 抛错、close
+ * 未完成或 close.error 非空都列为失败；dirty/unconfirmedRequest 作为事实保留。
  */
 export function classifyShutdownResult(result: ShutdownResult | null): ShutdownVerdict {
   if (result === null) {
@@ -1050,6 +1050,7 @@ export function classifyShutdownResult(result: ShutdownResult | null): ShutdownV
   const problems: string[] = [];
   if (result.checkpoint === null) problems.push('missing confirmed final checkpoint');
   if (result.error !== null) problems.push(`final checkpoint failed: ${errorText(result.error)}`);
+  if (result.cancelError !== null) problems.push(`cancel error: ${errorText(result.cancelError)}`);
   if (result.closeError !== null) problems.push(`close threw: ${errorText(result.closeError)}`);
   if (result.close === null) {
     problems.push('missing close result');
@@ -1286,10 +1287,10 @@ interface ScenarioResult {
  * 与 navigation-acceptance 的既有模式）。ExecutableMove 的 executionId 是
  * `${delegationId}-step-N`，因此这里不再错误地要求两者逐字相等。
  *
- * 按真实派发顺序把 `taskMoves[i]` 对应到 `trace[i]`：该 trace 点必须有一个
- * accepted 同任务/同作用域样本，位置与 observedAt 精确对应，且时间落在该派发的
- * [receivedAt, deadlineMs] 内。move.request.to 是名义请求目标，不拿它替代真实
- * 观测位置。
+ * 按真实派发顺序把 `taskMoves[i]` 对应到 `trace[i]`：确认 trace 点与派发必须
+ * 一一对应，且每个 trace 点必须使用一条未被占用的 accepted 同任务/同作用域样本，
+ * 位置与 observedAt 精确对应，时间落在该派发的 [receivedAt, deadlineMs] 内。
+ * move.request.to 是名义请求目标，不拿它替代真实观测位置。
  * 不要求每个 move.result 都有 sample，也不拿上一移动的 result 充当下一移动的 from。
  *
  * 方向必须从 trace/派发出发：派发前的稳定起点样本、派发后的终点样本或派发间隙
@@ -1326,8 +1327,12 @@ export function classifyLegTrace(
   const acceptedSamples = samples.filter((sample) =>
     sample.taskId === taskId && sample.accepted && Number.isInteger(sample.sample.sequence));
   if (taskMoves.length === 0 && trace.length > 0) problems.push('confirmed trace exists but no ExecutableMove dispatch was recorded');
-  if (trace.length > taskMoves.length) {
-    problems.push(`trace has ${trace.length} points but only ${taskMoves.length} dispatches were recorded`);
+  // 每个确认 trace 点必须恰好对应一次真实派发；多出的派发没有 trace/样本证据，
+  // 不能因为 trace 较短就被静默放过。
+  if (trace.length !== taskMoves.length) {
+    problems.push(
+      `confirmed trace has ${trace.length} points but ${taskMoves.length} ExecutableMove dispatches were recorded; exactly one dispatch per trace point is required`,
+    );
   }
 
   // 一个 walk 任务对应一个路由 delegation；move 的 executionId 必须由它派生。
@@ -1345,11 +1350,15 @@ export function classifyLegTrace(
   }
 
   const compared = Math.min(trace.length, taskMoves.length);
+  // 样本按 sequence 一对一消费：重复的 pos/ts trace 点必须由不同样本分别证明，
+  // 不能拿同一条 accepted 样本重复配对。
+  const usedSequences = new Set<number>();
   for (let index = 0; index < compared; index += 1) {
     const point = trace[index]!;
     const move = taskMoves[index]!;
-    const matched = acceptedSamples.some((sample) =>
-      (routeDelegation === null || sample.delegationId === routeDelegation)
+    const matched = acceptedSamples.find((sample) =>
+      !usedSequences.has(sample.sample.sequence)
+      && (routeDelegation === null || sample.delegationId === routeDelegation)
       && sample.sample.executionId === sample.delegationId
       && isDeepStrictEqual(sample.sample.position, point.pos)
       && sample.sample.observedAt === point.ts
@@ -1358,8 +1367,10 @@ export function classifyLegTrace(
       && sample.sample.sessionId === move.request.sessionId
       && sample.sample.observedAt >= move.receivedAt
       && sample.sample.observedAt <= move.request.deadlineMs);
-    if (!matched) {
-      problems.push(`trace point ${index} has no accepted same-delegation sample matching pos/ts/scope/time-range`);
+    if (matched === undefined) {
+      problems.push(`trace point ${index} has no unused accepted same-delegation sample matching pos/ts/scope/time-range`);
+    } else {
+      usedSequences.add(matched.sample.sequence);
     }
   }
 
@@ -1436,6 +1447,32 @@ export function classifyDuration(
   return { fullPassEligible: false, durationSatisfied, smokeOnly: true, problems: [] };
 }
 
+/**
+ * smoke 与 full 共用的通过判据。证据容量溢出是确定性失败面：即使任务随后正常结束，
+ * 也不能在截断的样本窗口上宣称通过。
+ */
+export const smokePassed = (input: {
+  primaryError: boolean;
+  evidenceFailure: boolean;
+  cleanupErrors: number;
+  successfulLegs: number;
+  directions: readonly string[];
+  queryVerifiedLegs: number;
+  savedCheckpointReports: number;
+  failedCheckpointReports: number;
+  traceCapacityExceeded: boolean;
+}): boolean =>
+  !input.primaryError
+  && !input.evidenceFailure
+  && input.cleanupErrors === 0
+  && input.successfulLegs >= SMOKE_MIN_SUCCESSFUL_LEGS
+  && input.directions.includes('A->B')
+  && input.directions.includes('B->A')
+  && input.queryVerifiedLegs >= input.successfulLegs
+  && input.savedCheckpointReports >= SMOKE_MIN_CHECKPOINT_SAVES
+  && input.failedCheckpointReports === 0
+  && !input.traceCapacityExceeded;
+
 interface RunReport {
   schema: 'spatial-soak-acceptance';
   runId: string;
@@ -1456,6 +1493,10 @@ interface RunReport {
     actual: string | null;
   };
   workingSet: Record<string, unknown>;
+  traceCapacity: {
+    events: number;
+    failure: { kind: 'samples' | 'moves' | 'starts'; taskId: string; limit: number } | null;
+  };
   mainManualEvidence: MainManualEvidence;
   start: FixtureEndpoint;
   measuredStart: FixtureEndpoint | null;
@@ -1515,6 +1556,9 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
   const executorTasks = new WeakMap<object, { taskId: string; delegationId: string }>();
   const takenTraceKeys = new Set<string>();
   const scenarioResults = new Map<string, ScenarioResult>();
+  /** 证据容量溢出的首个有界事实；一旦出现，整次运行必须失败。 */
+  let traceCapacityFailure: { kind: 'samples' | 'moves' | 'starts'; taskId: string; limit: number } | null = null;
+  let traceCapacityEvents = 0;
 
   let eventsWriter: BoundedJsonlWriter | null = null;
   let evidenceEmitter: EvidenceEmitter | null = null;
@@ -1719,10 +1763,12 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
     if (takenTraceKeys.has(key)) return;
     takenTraceKeys.add(key);
     const limit = kind === 'samples' ? MAX_SAMPLES_PER_TASK : kind === 'moves' ? MAX_MOVES_PER_TASK : MAX_STARTS_PER_TASK;
+    traceCapacityEvents += 1;
+    traceCapacityFailure ??= { kind, taskId, limit };
     emit('trace-window-exceeded', taskId, {
       kind,
       limit,
-      note: 'Explicit evidence-capacity failure; the run is cancelled rather than silently truncating the classifier window.',
+      note: 'Explicit evidence-capacity failure; the run fails even if the task itself finishes successfully.',
     });
     const active = arbiter?.info() ?? null;
     if (active !== null && active.id === taskId) {
@@ -1836,6 +1882,8 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
     // 会因不在 ±1 脚格上被库拒绝。用 near 且验收使用同一半径：仍要求真实终点落在
     // 容差内，不投影或改写目标。
     const request = soakWalkRequest(target, Date.now() + SMOKE_LEG_BUDGET_MS);
+    // leg-start/leg-result 共用同一个真实派发时刻，不用 deadline 反推。
+    const startedAt = Date.now();
     const started = arbiter.start({ skill: 'walk_to', args: request }, 'user');
     if ('error' in started) throw new Error(`walk_to rejected: ${started.error}`);
     const info = started as TaskInfo;
@@ -1846,7 +1894,7 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
       fixedTarget: clone(target),
       request: clone(request),
       task: clone(info),
-      startedAt: Date.now(),
+      startedAt,
     });
 
     try {
@@ -1875,7 +1923,7 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
         nominal: { from: nominalFrom, to: nominalTo },
         measuredFrom: clone(measuredFrom),
         fixedTarget: clone(target),
-        startedAt: request.deadlineMs - SMOKE_LEG_BUDGET_MS,
+        startedAt,
         finishedAt,
         outcome: clone(outcome),
         body: clone(terminalState),
@@ -2785,7 +2833,12 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
 
     // 关停前先处理可接受的 handoff：manual 主会话显式 drain 一次，再记录关停前
     // 快照。残留 pending 不会被改写成功；shutdown 会把它们计入 error。
-    captureWorkingSetSnapshot('before-shutdown-drain');
+    // 快照失败只记为清理错误，绝不能阻止后续真实 shutdown。
+    try {
+      captureWorkingSetSnapshot('before-shutdown-drain');
+    } catch (error) {
+      noteCleanupError('working-set-snapshot-before-drain', error);
+    }
     if (
       mainSession !== null
       && mainVoxelLoading === 'manual'
@@ -2821,8 +2874,13 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
         noteCleanupError('working-set-drain', error);
       }
     }
-    const preShutdownSnapshot = captureWorkingSetSnapshot('before-shutdown');
-    pendingBeforeShutdown = preShutdownSnapshot.pending?.observations ?? null;
+    let preShutdownSnapshot: WorkingSetSnapshotFacts | null = null;
+    try {
+      preShutdownSnapshot = captureWorkingSetSnapshot('before-shutdown');
+    } catch (error) {
+      noteCleanupError('working-set-snapshot-before-shutdown', error);
+    }
+    pendingBeforeShutdown = preShutdownSnapshot?.pending?.observations ?? null;
 
     // spatial 已打开时必须有真实 shutdown 结果。foundation 构造失败时也要兜底关闭。
     if (foundation !== null) {
@@ -2923,15 +2981,17 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
   const shutdownOk = spatial === null
     ? primaryError !== null || !connectAttempted
     : shutdownVerdict !== null && shutdownVerdict.ok;
-  const smokePass = primaryError === null
-    && evidenceFailure === null
-    && cleanupErrors.length === 0
-    && successfulLegs >= SMOKE_MIN_SUCCESSFUL_LEGS
-    && directions.has('A->B')
-    && directions.has('B->A')
-    && queryVerifiedLegs >= successfulLegs
-    && savedCheckpointReports >= SMOKE_MIN_CHECKPOINT_SAVES
-    && failedCheckpointReports === 0;
+  const smokePass = smokePassed({
+    primaryError: primaryError !== null,
+    evidenceFailure: evidenceFailure !== null,
+    cleanupErrors: cleanupErrors.length,
+    successfulLegs,
+    directions: [...directions],
+    queryVerifiedLegs,
+    savedCheckpointReports,
+    failedCheckpointReports,
+    traceCapacityExceeded: traceCapacityFailure !== null,
+  });
   const scenariosPass = cli.mode === 'smoke'
     || H2B_REQUIRED_SCENARIOS.every((id) => scenarioResults.get(id)?.ok === true);
   const workingSetStatsChanged = workingSetSignatures.size > 1;
@@ -2988,6 +3048,10 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
       drain: workingSetDrainFacts,
       afterShutdown: workingSetPostShutdown,
       residentBytesMeaning: 'library working-set estimate, not process RSS',
+    },
+    traceCapacity: {
+      events: traceCapacityEvents,
+      failure: traceCapacityFailure,
     },
     mainManualEvidence,
     start: clone(cli.start),
