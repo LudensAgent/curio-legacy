@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { placeAt, primitiveSkills, stepTo } from '../src/skills/primitives.ts';
+import { DEFAULT_VISION, Vision } from '../src/perception/vision.ts';
 import { makeBridge } from '../src/codeskills/bridge.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx, observeAllBlocks } from './survival-helpers.ts';
@@ -182,4 +183,134 @@ test('water step does not claim to land on the selected bank when it lands adjac
   assert.equal(r.failureCode, 'EFFECT_NOT_CONFIRMED');
   assert.deepEqual(r.data?.targetCell, { x: 1, y: 64, z: 0 });
   assert.deepEqual(r.data?.position, { x: 1.5, y: 64, z: 1.5 });
+});
+
+test('an upward step turns to confirm its own head space before moving', async (t) => {
+  const w = new FakeAdapter();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.speed = 100000;
+  w.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 0 } }); // 目标脚格下方可站立的支撑
+  const vision = new Vision(w);
+  const ownHead = { x: 0, y: 66, z: 0 };
+  const observations: { positions: { x: number; y: number; z: number }[]; out: ReturnType<Vision['observeBlocks']> }[] = [];
+  const looks: { yaw: number; pitch: number }[] = [];
+  let sawOwnHead = false, ownHeadBeforeMove = false;
+  const ctx = makeCtx(w, { senses: {
+    refresh: () => vision.refresh(),
+    markSweep: () => vision.markSweep(),
+    observeBlocks: (positions) => {
+      const out = vision.observeBlocks(positions);
+      observations.push({ positions: positions.map((p) => ({ ...p })), out });
+      if (out.some((b) => b.pos.x === ownHead.x && b.pos.y === ownHead.y && b.pos.z === ownHead.z)) sawOwnHead = true;
+      return out;
+    },
+  } });
+  t.after(() => ctx.memory.close());
+  assert.deepEqual(vision.observeBlocks([ownHead]), [], 'own head starts outside the actual view cone');
+  const originalLook = w.look.bind(w);
+  t.mock.method(w, 'look', async (yaw: number, pitch: number) => {
+    looks.push({ yaw, pitch });
+    return originalLook(yaw, pitch);
+  });
+  const moves: unknown[] = [];
+  const originalMove = w.moveTo.bind(w);
+  t.mock.method(w, 'moveTo', async (target, opts) => {
+    ownHeadBeforeMove = sawOwnHead;
+    moves.push(target);
+    return originalMove(target, opts);
+  });
+  const r = await stepTo.run(ctx, { at: [1, 1, 0], facing: 'E' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.deepEqual(r.data?.targetCell, { x: 1, y: 65, z: 0 });
+  assert.deepEqual(w.pos, { x: 1.5, y: 65, z: 0.5 });
+  assert.equal(moves.length, 1, 'the step moved once to the selected cell');
+  assert.ok(sawOwnHead, 'the step actually observed its own overhead cell');
+  assert.ok(ownHeadBeforeMove, 'that observation happened before movement');
+  assert.ok(looks.some((l) => l.pitch > 1.2), 'the step turned upward to look at its own head space');
+  const read = observations.find((o) => o.positions.length === 1 && o.positions[0].x === ownHead.x && o.positions[0].y === ownHead.y && o.positions[0].z === ownHead.z);
+  assert.ok(read, 'the upward turn was followed by a bounded reread of that cell');
+  assert.deepEqual(read.out.map((b) => b.name), ['air']);
+  assert.deepEqual(w.actions.filter((a) => a.startsWith('dig')), []);
+});
+
+test('an upward step stays unknown when the overhead turn reveals nothing', async (t) => {
+  const w = new FakeAdapter();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 0 } });
+  const vision = new Vision(w);
+  const ownHead = { x: 0, y: 66, z: 0 };
+  const observations: { positions: { x: number; y: number; z: number }[]; out: ReturnType<Vision['observeBlocks']> }[] = [];
+  const ctx = makeCtx(w, { senses: {
+    refresh: () => vision.refresh(),
+    markSweep: () => vision.markSweep(),
+    observeBlocks: (positions) => {
+      const out = vision.observeBlocks(positions);
+      observations.push({ positions: positions.map((p) => ({ ...p })), out });
+      return out;
+    },
+  } });
+  t.after(() => ctx.memory.close());
+  assert.deepEqual(vision.observeBlocks([ownHead]), [], 'own head starts outside the actual view cone');
+  let overheadLookAttempted = false;
+  const originalLook = w.look.bind(w);
+  t.mock.method(w, 'look', async (yaw: number, pitch: number) => {
+    if (pitch > 1.2) { overheadLookAttempted = true; return; } // 只压制竖直头顶这一转，其余目标转头照常生效
+    return originalLook(yaw, pitch);
+  });
+  const move = t.mock.method(w, 'moveTo', async () => {});
+  const dig = t.mock.method(w, 'dig', async () => ({ ok: true }));
+  const r = await stepTo.run(ctx, { at: [1, 1, 0], facing: 'E' });
+  assert.equal(r.status, 'failed');
+  assert.equal(r.failureCode, 'PATH_NOT_FOUND');
+  assert.match(r.summary, /未看清的格子/);
+  assert.match(r.summary, /无法确认跳跃空间/);
+  assert.ok(overheadLookAttempted, 'the step actually tried to turn upward');
+  const read = observations.find((o) => o.positions.length === 1 && o.positions[0].x === ownHead.x && o.positions[0].y === ownHead.y && o.positions[0].z === ownHead.z);
+  assert.ok(read, 'the step reread its own head cell after the turn');
+  assert.deepEqual(read.out, [], 'actual Vision still returns nothing for it');
+  assert.equal(move.mock.callCount(), 0);
+  assert.equal(dig.mock.callCount(), 0);
+  assert.deepEqual(w.actions, []);
+  assert.doesNotMatch(r.summary, /头顶上方是 (air|stone)/);
+});
+
+test('an observed solid overhead blocker stops the upward step with its actual name', async (t) => {
+  const w = new FakeAdapter();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 0 } });
+  w.blocks.push({ name: 'stone', pos: { x: 0, y: 66, z: 0 } }); // 只有转头后才会进入实际视野的头顶实心块
+  // 收窄水平视锥：目标列抬头时不会顺带看到头顶块的近角，必须单独竖直转头才能看见。
+  const vision = new Vision(w, { ...DEFAULT_VISION, hFov: 60 });
+  const ownHead = { x: 0, y: 66, z: 0 };
+  const observations: { positions: { x: number; y: number; z: number }[]; out: ReturnType<Vision['observeBlocks']> }[] = [];
+  const ctx = makeCtx(w, { senses: {
+    refresh: () => vision.refresh(),
+    markSweep: () => vision.markSweep(),
+    observeBlocks: (positions) => {
+      const out = vision.observeBlocks(positions);
+      observations.push({ positions: positions.map((p) => ({ ...p })), out });
+      return out;
+    },
+  } });
+  t.after(() => ctx.memory.close());
+  assert.deepEqual(vision.observeBlocks([ownHead]), [], 'own head starts outside the actual view cone');
+  let turnedUp = false;
+  const originalLook = w.look.bind(w);
+  t.mock.method(w, 'look', async (yaw: number, pitch: number) => {
+    if (pitch > 1.2) turnedUp = true;
+    return originalLook(yaw, pitch);
+  });
+  const move = t.mock.method(w, 'moveTo', async () => {});
+  const dig = t.mock.method(w, 'dig', async () => ({ ok: true }));
+  const r = await stepTo.run(ctx, { at: [1, 1, 0], facing: 'E' });
+  assert.equal(r.status, 'failed');
+  assert.equal(r.failureCode, 'PATH_NOT_FOUND');
+  assert.match(r.summary, /头顶上方是 stone/);
+  assert.ok(turnedUp, 'the step turned toward its own head before reporting the blocker');
+  const read = observations.find((o) => o.positions.length === 1 && o.positions[0].x === ownHead.x && o.positions[0].y === ownHead.y && o.positions[0].z === ownHead.z);
+  assert.ok(read, 'the step reread its own head cell after the turn');
+  assert.deepEqual(read.out.map((b) => b.name), ['stone']);
+  assert.equal(move.mock.callCount(), 0);
+  assert.equal(dig.mock.callCount(), 0);
+  assert.deepEqual(w.actions, []);
 });
