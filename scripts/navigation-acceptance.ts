@@ -289,7 +289,8 @@ export async function captureMoveCall(
 
 /**
  * N3 traversal 归属：actionId 必须是真实首个 walk 任务，executionId 必须来自该任务真实
- * ExecutableMove 请求；from 用请求原值，to/observedAt 必须对应已确认 nav.trace 点。
+ * ExecutableMove 请求；from 用请求原值，scope 用请求原值，to/observedAt 必须对应该请求在
+ * 真实派发顺序中的确认 trace 点。不按字符串猜索引，也不接受跨段的 from/id + 端点/时间混搭。
  * 不要求 move 返回过样本（合法 onSample 已确认即可），也不拿 fragment 名义几何冒充轨迹。
  */
 export function classifyTraversalOwnership(
@@ -304,16 +305,32 @@ export function classifyTraversalOwnership(
   if (record.actionId !== walkTaskId) p.push(`traversal.actionId ${String(record.actionId)} is not the actual walk task ${walkTaskId}`);
   const executionId = typeof record.executionId === 'string' ? record.executionId : null;
   if (executionId === null) p.push('traversal.executionId is missing');
-  const move = executionId === null ? undefined : moves.find((m) => m.taskId === walkTaskId && m.request.executionId === executionId);
-  if (executionId !== null && move === undefined) p.push(`traversal.executionId ${executionId} has no actual WalkMoveExecutor request owned by ${walkTaskId}`);
-  if (move !== undefined && !isDeepStrictEqual(record.from, move.request.from)) p.push('traversal.from differs from the actual move request.from');
+  // 真实派发顺序 = 该任务实际发出的 move 请求顺序；executionId 只用来定位这次派发。
+  const taskMoves = moves.filter((m) => m.taskId === walkTaskId);
+  const indices = executionId === null ? [] : taskMoves.flatMap((m, i) => m.request.executionId === executionId ? [i] : []);
+  if (executionId !== null && indices.length === 0) p.push(`traversal.executionId ${executionId} has no actual WalkMoveExecutor request owned by ${walkTaskId}`);
+  if (indices.length > 1) p.push(`traversal.executionId ${executionId} is ambiguous within ${walkTaskId} (${indices.length} actual dispatches)`);
+  const move = indices.length === 1 ? taskMoves[indices[0]!] : undefined;
+  if (move !== undefined) {
+    if (!isDeepStrictEqual(record.from, move.request.from)) p.push('traversal.from differs from the actual move request.from');
+    if (record.worldId !== move.request.worldId || record.dim !== move.request.dim || record.sessionId !== move.request.sessionId) {
+      p.push('traversal world/dim/session differs from the actual move request scope');
+    }
+  }
   if (record.source !== 'confirmed_walk_corridor') p.push(`traversal.source=${String(record.source)} (confirmed_walk_corridor required)`);
   if (record.mode !== 'walk') p.push(`traversal.mode=${String(record.mode)} (walk required)`);
   const trace = nav !== null && Array.isArray(nav.trace) ? nav.trace.filter((t): t is { pos: Vec3Like; ts: number } => isRecord(t) && isVec(t.pos) && isNum(t.ts)) : [];
   if (nav === null || nav.confirmed !== true) p.push('missing confirmed walk nav result');
   else if (!isVec(record.to) || !isNum(record.observedAt)) p.push('traversal.to/observedAt malformed');
-  else if (!trace.some((t) => isDeepStrictEqual(t.pos, record.to) && t.ts === record.observedAt)) {
-    p.push('traversal.to/observedAt does not correspond to a confirmed nav.trace point');
+  else if (move === undefined) {
+    // 前面的归属问题已经报告；没有确定的派发序号就不能接受任何 trace 点。
+  } else if (indices[0]! >= trace.length) {
+    p.push(`traversal dispatch index ${indices[0]} has no corresponding confirmed nav.trace point`);
+  } else {
+    const expected = trace[indices[0]!]!;
+    if (!isDeepStrictEqual(record.to, expected.pos) || record.observedAt !== expected.ts) {
+      p.push('traversal.to/observedAt does not correspond to the confirmed nav.trace point at the actual dispatch index');
+    }
   }
   return { ok: p.length === 0, problems: p };
 }
@@ -333,6 +350,26 @@ export function localBodyCells(start: Vec3Like, radius = 1): Vec3Like[] {
   return cells;
 }
 
+/**
+ * 初始观测证据：`admitted` 必须取共享会话的实际准入状态，不能由 Vision 返回条数猜测；
+ * Vision 的真实输出单独保留。正常 Vision.observeBlocks 仍是唯一准入/写入路径，
+ * 这里不 beginSession、不填格、不强制 FRESH。
+ */
+export function initialObservationFacts(
+  admitted: boolean,
+  cells: readonly Vec3Like[],
+  observations: readonly unknown[],
+  at: number,
+) {
+  return {
+    at,
+    cells: clone(cells),
+    admitted,
+    vision: { returned: observations.length, observations: clone(observations) },
+    note: 'admitted is the actual SharedSpatialSession observationAdmitted state after normal Vision.observeBlocks; Vision output is retained separately. No manual beginSession, fill or forced freshness.',
+  };
+}
+
 /** 有界实际物理帧：每帧只记录交付时的位置与控制键，不事后读状态补帧。 */
 export interface PhysicsFrame {
   frame: number; at: number; position: Vec3Like; onGround: boolean; inWater: boolean;
@@ -342,30 +379,41 @@ export interface FrameControls { values: Record<string, unknown>; missing: strin
 
 /**
  * 稳定落点：在真实物理帧中找一段连续、落地、干燥且位置不变的窗口，帧间时间必须自行跨越
- * 请求的稳定时长。早期残余速度只会重置窗口；不用墙钟补足，也不接受零帧。
+ * 请求的稳定时长。
+ *
+ * 连续性上限与库执行器一致：相邻帧间隔不得超过 `Math.max(50, stableMs)`。更大的空档、
+ * 非递增/重复的帧号或时间都重置窗口；不插值、不用墙钟补足，也不接受零帧。
  */
 export function classifySettledFrames(frames: readonly PhysicsFrame[], stableMs: number) {
   const p: string[] = [];
   if (frames.length === 0) { p.push('no physics frames observed during settle'); return { ok: false, problems: p, position: null }; }
+  const maxGapMs = Math.max(50, stableMs);
   let window: PhysicsFrame[] = [];
   let stable: PhysicsFrame[] | null = null;
   for (const frame of frames) {
     if (!frame.onGround || frame.inWater) { window = []; continue; }
     if (window.length === 0) { window = [frame]; continue; }
-    if (distance(frame.position, window[0]!.position) > 1e-6) { window = [frame]; continue; }
+    const previous = window[window.length - 1]!;
+    const ordered = frame.at > previous.at && frame.frame > previous.frame;
+    const gapOk = frame.at - previous.at <= maxGapMs;
+    const samePosition = distance(frame.position, window[0]!.position) <= 1e-6;
+    if (!ordered || !gapOk || !samePosition) { window = [frame]; continue; }
     window.push(frame);
     if (frame.at - window[0]!.at >= stableMs) { stable = window; break; }
   }
   if (stable === null) {
     if (frames.length < 2) p.push('fewer than 2 distinct physics frames during settle');
     else if (!frames.some((f) => f.onGround && !f.inWater)) p.push('settle frames are not grounded and dry');
-    else p.push(`no stationary grounded/dry physics-frame window spans ${stableMs}ms`);
+    else p.push(`no stationary grounded/dry physics-frame window spans ${stableMs}ms with gaps <= ${maxGapMs}ms`);
   }
   const last = stable === null ? null : stable[stable.length - 1]!;
   return { ok: stable !== null, problems: p, position: last === null ? null : { ...last.position } };
 }
 
-/** 取消后的有界实际物理帧：没有帧、覆盖不足或任一控制键按下/缺失都不能通过。 */
+/**
+ * 取消后的有界实际物理帧：没有帧、覆盖不足或任一控制键按下/缺失都不能通过。
+ * 只描述这些实际采样帧上的按键状态，不声称采样间隔内每一瞬间的按键都必然为松开。
+ */
 export function classifyPostCancelFrames(frames: readonly PhysicsFrame[], durationMs: number) {
   const p: string[] = [];
   if (frames.length === 0) { p.push('no physics frames observed after cancel'); return { ok: false, problems: p, reactivated: true }; }
@@ -973,13 +1021,10 @@ async function main() {
     // 不填充路线、不强制 FRESH，也不读隐藏地形。
     const initialCells = localBodyCells(measuredStart);
     const initialObservations = vision.observeBlocks(initialCells);
-    evidence.initialObservation = {
-      at: Date.now(),
-      cells: clone(initialCells),
-      observations: clone(initialObservations),
-      admitted: initialObservations.length > 0,
-      note: 'Normal Vision.observeBlocks over a bounded local body cell batch; no manual beginSession or forced freshness.',
-    };
+    // 准入状态取共享会话实际值；Vision 返回条数单独保留，不用它猜 admitted。
+    evidence.initialObservation = initialObservationFacts(
+      spatial.observationAdmitted, initialCells, initialObservations, Date.now(),
+    );
     writeEvidence();
 
     const preHistory = scenario('pre_walk_empty_history');

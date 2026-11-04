@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { Vec3 } from 'vec3';
 import {
   CANCEL_MOVEMENT_THRESHOLD,
   acceptanceExitCode,
-  captureMoveCall,
   classifyAdapterEnd,
   classifyCancellationResult,
   classifyKnownRouteResult,
@@ -19,6 +20,7 @@ import {
   classifyWalkToResult,
   controlReleaseProblems,
   fragmentProjectionMatches,
+  initialObservationFacts,
   localBodyCells,
   parseCliArgs,
   parseRconList,
@@ -33,8 +35,15 @@ import {
 import { WalkMoveExecutor } from '../src/adapter/walk-route.ts';
 import { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import { spatialQuery } from '../src/skills/spatial-query.ts';
-import type { SkillCtx } from '../src/skills/types.ts';
+import { runSkill, type SkillCtx } from '../src/skills/types.ts';
+import { walkRoute } from '../src/skills/walk-route.ts';
+import type { BlockObservation, GameAdapter } from '../src/adapter/types.ts';
 import type { ExecutableMove } from 'curio-minecraft-3d-memory';
+
+const require = createRequire(import.meta.url);
+const data = require('minecraft-data')('1.20.1');
+const Block = require('prismarine-block')(data);
+const { Physics, PlayerState } = require('prismarine-physics');
 
 const script = fileURLToPath(new URL('../scripts/navigation-acceptance.ts', import.meta.url));
 const tsx = import.meta.resolve('tsx');
@@ -58,6 +67,78 @@ function routeSample(taskId: string, nav: Record<string, unknown>, over: Partial
       resultOutcome: 'ARRIVED', resultLastPosition: { ...sample.position }, resultLastObservation: { ...obs },
     },
   };
+}
+
+/** 本文件专用的真实 prismarine 平坦身体（y<=63 为石，脚高 64），只用于 WalkRouteExecutor 证据。 */
+function acceptancePhysics() {
+  const feet = { x: 200.5, y: 64, z: 216.5 };
+  const world = {
+    getBlock(position: { floored(): { x: number; y: number; z: number } }) {
+      const p = position.floored();
+      const stateId = p.y <= 63 ? data.blocksByName.stone.defaultState : data.blocksByName.air.defaultState;
+      const block = Block.fromStateId(stateId, 0);
+      block.position = p;
+      return block;
+    },
+  };
+  const control: Record<string, boolean> = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
+  const entity = {
+    position: new Vec3(feet.x, feet.y, feet.z), velocity: new Vec3(0, 0, 0), onGround: true, isInWater: false,
+    isInLava: false, isInWeb: false, isCollidedHorizontally: false, isCollidedVertically: false,
+    yaw: 0, pitch: 0, effects: {}, attributes: {},
+  };
+  const bot = {
+    version: '1.20.1', entity, control, jumpTicks: 0, jumpQueued: false, fireworkRocketDuration: 0, inventory: { slots: [] },
+    setControlState(name: string, value: boolean) { control[name] = value; },
+    clearControlStates() { for (const key of Object.keys(control)) control[key] = false; },
+    look(yaw: number, pitch: number) { entity.yaw = yaw; entity.pitch = pitch; },
+  };
+  const physics = Physics(data, world);
+  const tick = (signal: AbortSignal) => new Promise<{ position: { x: number; y: number; z: number }; velocity: { x: number; y: number; z: number }; onGround: boolean; isInWater: boolean } | null>((resolve) => {
+    if (signal.aborted) { resolve(null); return; }
+    const onAbort = () => { cleanup(); resolve(null); };
+    const timer = setTimeout(() => {
+      physics.simulatePlayer(new PlayerState(bot, control), world).apply(bot);
+      cleanup();
+      resolve({
+        position: { x: entity.position.x, y: entity.position.y, z: entity.position.z },
+        velocity: { x: entity.velocity.x, y: entity.velocity.y, z: entity.velocity.z },
+        onGround: entity.onGround, isInWater: entity.isInWater,
+      });
+    }, 50);
+    const cleanup = () => { clearTimeout(timer); signal.removeEventListener('abort', onAbort); };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  const adapter = {
+    state: () => ({
+      worldId: 'world', dim: 'overworld', sessionId: 's1', alive: true, connected: true, observationReady: true,
+      pos: { x: entity.position.x, y: entity.position.y, z: entity.position.z },
+    }),
+    walkBody: () => ({
+      setControlState: (name: string, value: boolean) => bot.setControlState(name, value),
+      clearControlStates: () => bot.clearControlStates(),
+      look: (yaw: number, pitch: number) => bot.look(yaw, pitch),
+      entity: { position: entity.position, velocity: entity.velocity, onGround: entity.onGround, isInWater: entity.isInWater },
+    }),
+    walkTick: () => tick,
+  } as unknown as GameAdapter;
+  return { adapter, feet, cell: (p: { x: number; y: number; z: number }) => p.y === 63 ? 'minecraft:stone' : 'minecraft:air' };
+}
+
+function acceptanceSenses(svc: SharedSpatialSession, nameAt: (p: { x: number; y: number; z: number }) => string) {
+  let sequence = 1;
+  const observeBlocks = (positions: { x: number; y: number; z: number }[]): BlockObservation[] => {
+    const observations = positions.map((p): BlockObservation => ({
+      name: nameAt(p), properties: {}, worldId: 'world', sessionId: 's1', dimension: 'overworld',
+      source: 'vision', stateComplete: true, observedAt: Date.now(), observationId: sequence++, pos: { ...p },
+    }));
+    if (observations.length > 0) svc.observe(observations);
+    return observations;
+  };
+  const cells: { x: number; y: number; z: number }[] = [];
+  for (let x = 199; x <= 205; x++) for (let z = 215; z <= 218; z++) for (let y = 62; y <= 66; y++) cells.push({ x, y, z });
+  observeBlocks(cells);
+  return { observeBlocks, perceivedEntities: () => [], knownBlocks: () => [], refresh() {}, markSweep() {} };
 }
 
 test('--help exits 0 without loading config', () => {
@@ -167,14 +248,23 @@ test('cancellation needs exact same-task partial sample, released controls and r
   assert.equal(classifyCancellationResult({ status: 'cancelled', summary: 'cancelled', data: { nav: tiny } }, 't3', [routeSample('t3', tiny)], controls, false, start).ok, false);
 });
 
-test('settle and post-cancel windows reject zero frames and short frame coverage', () => {
-  const frames: PhysicsFrame[] = [
-    { frame: 1, at: 0, position: { x: 0, y: 64, z: 0 }, onGround: true, inWater: false, controls: { forward: false } },
-    { frame: 2, at: 350, position: { x: 0, y: 64, z: 0 }, onGround: true, inWater: false, controls: { forward: false } },
-  ];
+test('settle and post-cancel windows require real consecutive frames, no invented gaps', () => {
+  const still = (at: number, frame: number): PhysicsFrame => ({ frame, at, position: { x: 0, y: 64, z: 0 }, onGround: true, inWater: false, controls: { forward: false } });
+  const frames: PhysicsFrame[] = [still(0, 1), still(300, 2)];
   assert.equal(classifySettledFrames([], 300).ok, false);
   assert.equal(classifySettledFrames([frames[0]!], 300).ok, false);
-  assert.equal(classifySettledFrames(frames, 300).ok, true);
+  // 150ms 稳定窗口配 300ms 上限：真实三帧连续窗口成立。
+  assert.equal(classifySettledFrames([still(0, 1), still(150, 2), still(300, 3)], 300).ok, true);
+  // 缺失帧空档超过 max(50, stableMs) 时不能把两端当成连续稳定。
+  assert.equal(classifySettledFrames([still(0, 1), still(100, 2), still(500, 3)], 300).ok, false);
+  assert.equal(classifySettledFrames([still(0, 1), still(350, 2)], 300).ok, false, '单段空档超过上限');
+  // 真实间隔的稳定帧：相邻间隔都在上限内，窗口自行跨越 stableMs。
+  const spaced = classifySettledFrames([still(0, 1), still(300, 2), still(600, 3)], 300);
+  assert.equal(spaced.ok, true);
+  assert.deepEqual(spaced.position, { x: 0, y: 64, z: 0 });
+  // 重复/非递增时间或帧号重置窗口，不能靠重复样本凑时长。
+  assert.equal(classifySettledFrames([still(0, 1), still(250, 2), still(250, 3), still(260, 4)], 300).ok, false);
+  assert.equal(classifySettledFrames([still(0, 1), still(250, 2), still(100, 3), still(260, 4)], 300).ok, false);
   const moved = [frames[0]!, { ...frames[1]!, position: { x: 0.2, y: 64, z: 0 } }];
   assert.equal(classifySettledFrames(moved, 300).ok, false);
   // 早期残余移动后真正稳定：窗口从稳定段重新开始，必须 PASS 并返回稳定段位置。
@@ -182,8 +272,8 @@ test('settle and post-cancel windows reject zero frames and short frame coverage
     { frame: 3, at: 0, position: { x: 0, y: 64, z: 0 }, onGround: true, inWater: false, controls: { forward: true } },
     { frame: 4, at: 50, position: { x: 0.2, y: 64, z: 0 }, onGround: true, inWater: false, controls: { forward: true } },
     { frame: 5, at: 100, position: { x: 0.4, y: 64, z: 0 }, onGround: true, inWater: false, controls: { forward: false } },
-    { frame: 6, at: 450, position: { x: 0.4, y: 64, z: 0 }, onGround: true, inWater: false, controls: { forward: false } },
-    { frame: 7, at: 620, position: { x: 0.4, y: 64, z: 0 }, onGround: true, inWater: false, controls: { forward: false } },
+    { frame: 6, at: 400, position: { x: 0.4, y: 64, z: 0 }, onGround: true, inWater: false, controls: { forward: false } },
+    { frame: 7, at: 700, position: { x: 0.4, y: 64, z: 0 }, onGround: true, inWater: false, controls: { forward: false } },
   ];
   const stable = classifySettledFrames(earlyMotionThenStable, 300);
   assert.equal(stable.ok, true);
@@ -199,6 +289,19 @@ test('settle and post-cancel windows reject zero frames and short frame coverage
   const long = [{ ...frames[0]!, controls }, { ...frames[1]!, at: 700, controls }];
   assert.equal(classifyPostCancelFrames(long, 600).ok, true);
   assert.equal(classifyPostCancelFrames([long[0]!, { ...long[1]!, controls: { ...controls, forward: true } }], 600).ok, false);
+});
+
+test('initial observation records actual admitted state separately from Vision output', () => {
+  const cells = [{ x: 200, y: 64, z: 216 }];
+  const observation = { pos: { x: 200, y: 63, z: 216 }, name: 'minecraft:grass_block' };
+  // 有观测返回不等于准入；没有观测返回也不等于未准入。
+  const notAdmitted = initialObservationFacts(false, cells, [observation], 1000);
+  assert.equal(notAdmitted.admitted, false);
+  assert.equal(notAdmitted.vision.returned, 1);
+  assert.deepEqual(notAdmitted.vision.observations, [observation]);
+  const admitted = initialObservationFacts(true, cells, [], 2000);
+  assert.equal(admitted.admitted, true);
+  assert.equal(admitted.vision.returned, 0);
 });
 
 test('RCON list validates declared count, separator and duplicate bot before connection', () => {
@@ -321,62 +424,89 @@ test('adapter end classification requires both real observations and cleanup fai
   assert.equal(acceptanceExitCode(new Error('fatal'), [], []), 1);
 });
 
-test('traversal ownership uses the actual walk task and real ExecutableMove requests, not sample ids', async () => {
+test('traversal ownership pairs actual task dispatch order with the corresponding confirmed trace', { timeout: 30_000 }, async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'navigation-acceptance-ownership-'));
+  const svc = await SharedSpatialSession.open({ worldId: 'world', databasePath: path.join(dir, 'memory.db'), timeoutMs: 5000 });
+  svc.beginSession({ worldId: 'world', dim: 'overworld', sessionId: 's1' });
+  const fixture = acceptancePhysics();
+  const senses = acceptanceSenses(svc, fixture.cell);
+  const taskId = 'walk-real';
   const sink: CapturedMove[] = [];
-  const invocation = async (taskId: string, executionId: string, from: { x: number; y: number; z: number }) => {
-    const controller = new AbortController();
-    const controls = new Set<string>();
-    const body = {
-      setControlState(name: string, value: boolean) { if (value) controls.add(name); else controls.delete(name); },
-      clearControlStates() { controls.clear(); },
-      look() {},
-      entity: { position: { x: 0, y: 64, z: 0 }, velocity: { x: 0, y: 0, z: 0 }, onGround: true, isInWater: false },
-    };
-    // 真实的公开 MoveExecutor 调用：帧源结束会返回 execution_error，足以绑定请求与结果。
-    const executor = new WalkMoveExecutor(body, async () => null, controller.signal);
-    const request: ExecutableMove = {
-      executionId, worldId: 'world', dim: 'overworld', sessionId: 'session',
-      from: { ...from }, to: { x: from.x + 1, y: from.y, z: from.z },
-      deadlineMs: Date.now() + 5000, timeoutMs: 1000, signal: controller.signal,
-    };
-    const result = await captureMoveCall(executor, request, taskId, sink);
-    return { request, result };
+  const proto = WalkMoveExecutor.prototype as unknown as {
+    move(this: unknown, request: ExecutableMove): Promise<{ sample?: unknown; failure?: unknown }>;
   };
-
-  const from = { x: 200.5, y: 64, z: 216.5 };
-  const mine = await invocation('walk-1', 'walk-1-step-0', from);
-  // 另一个任务复用/持有不同 executionId；它们的请求不能被借给 walk-1。
-  await invocation('walk-2', 'reused-step', { x: 0, y: 64, z: 0 });
-  await invocation('walk-2', 'walk-1-step-0', { x: 5, y: 64, z: 5 });
-  assert.equal(sink.length, 3);
-  assert.equal(sink[0]!.taskId, 'walk-1');
-  assert.equal(sink[0]!.request.executionId, 'walk-1-step-0');
-  assert.deepEqual(sink[0]!.request.from, from);
-  assert.equal((sink[0]!.result?.failure as Record<string, unknown> | undefined)?.kind, 'execution_error');
-  // move 结果没有样本；归属仍可由确定性的 onSample/trace 证据成立。
-  assert.equal(sink[0]!.result?.sample, undefined);
-
-  const tracePos = { x: 201.4, y: 64, z: 216.5 };
-  const nav = {
-    outcome: 'ARRIVED', confirmed: true, lastPosition: { ...tracePos },
-    lastObservation: { worldId: 'world', dim: 'overworld', sessionId: 'session', observedAt: 9000, onGround: true, inWater: false },
-    trace: [{ pos: { ...tracePos }, ts: 9000 }],
+  const original = proto.move;
+  // 只记录实际派发请求（不依赖 move 返回样本），按真实调用顺序登记该任务归属。
+  proto.move = function (this: unknown, request: ExecutableMove) {
+    sink.push({
+      taskId, receivedAt: Date.now(),
+      request: {
+        executionId: request.executionId, worldId: request.worldId, dim: request.dim, sessionId: request.sessionId,
+        from: { ...request.from }, to: { ...request.to }, deadlineMs: request.deadlineMs, timeoutMs: request.timeoutMs,
+      },
+      result: null, error: null,
+    });
+    return original.call(this, request);
   };
-  const base = () => ({
-    actionId: 'walk-1', executionId: 'walk-1-step-0', from: { ...from }, to: { ...tracePos },
-    observedAt: 9000, source: 'confirmed_walk_corridor', mode: 'walk',
-  });
-  assert.equal(classifyTraversalOwnership(base(), 'walk-1', sink, nav).ok, true);
-  // 名义 move 目标不是确认轨迹点：不能用它替代实际观测端点。
-  assert.equal(classifyTraversalOwnership({ ...base(), to: { x: mine.request.to.x, y: 64, z: 216.5 } }, 'walk-1', sink, nav).ok, false);
-  assert.equal(classifyTraversalOwnership({ ...base(), observedAt: 9001 }, 'walk-1', sink, nav).ok, false);
-  assert.equal(classifyTraversalOwnership({ ...base(), from: { x: 200.4, y: 64, z: 216.5 } }, 'walk-1', sink, nav).ok, false);
-  // actionId 是另一个任务，或 executionId 只属于另一个任务：都不能冒充 walk-1。
-  assert.equal(classifyTraversalOwnership(base(), 'walk-2', sink, nav).ok, false);
-  assert.equal(classifyTraversalOwnership({ ...base(), executionId: 'reused-step' }, 'walk-1', sink, nav).ok, false);
-  assert.equal(classifyTraversalOwnership({ ...base(), source: 'walk_memory' }, 'walk-1', sink, nav).ok, false);
-  assert.equal(classifyTraversalOwnership({ ...base(), mode: 'ride' }, 'walk-1', sink, nav).ok, false);
-  assert.equal(classifyTraversalOwnership(null, 'walk-1', sink, nav).ok, false);
+  try {
+    const points = [
+      { x: 200.5, y: 64, z: 216.5 },
+      { x: 201.5, y: 64, z: 216.5 },
+      { x: 202.5, y: 64, z: 216.5 },
+    ];
+    const ctx = {
+      adapter: fixture.adapter, senses, spatial: svc, signal: new AbortController().signal,
+      deadline: Date.now() + 20_000, taskId, progress() {}, setStationaryWait() {},
+    } as unknown as SkillCtx;
+    const result = await runSkill(ctx, walkRoute, { points });
+    assert.equal(result.status, 'succeeded', result.summary);
+    const nav = result.data?.nav as Record<string, unknown>;
+    assert.equal(nav.confirmed, true);
+    const trace = nav.trace as { pos: { x: number; y: number; z: number }; ts: number }[];
+    assert.equal(trace.length, 2, '两段都应由真实 onSample 确认');
+    assert.equal(sink.length, 2, '真实派发两段 move 请求');
+    const history = result.data?.history as { status: string; traversalIds: string[] };
+    assert.equal(history.status, 'accepted_pending_checkpoint');
+    assert.equal(history.traversalIds.length, 2);
+    const store = svc.session.history;
+
+    for (let i = 0; i < 2; i++) {
+      const record = store.getTraversal(history.traversalIds[i]!) as unknown as Record<string, unknown>;
+      assert.deepEqual(sink[i]!.request.from, record.from, '真实派发顺序与 from 一致');
+      assert.equal(classifyTraversalOwnership(record, taskId, sink, nav).ok, true, `第 ${i} 段应归属成功`);
+    }
+    const first = store.getTraversal(history.traversalIds[0]!) as unknown as Record<string, unknown>;
+    const second = store.getTraversal(history.traversalIds[1]!) as unknown as Record<string, unknown>;
+
+    // 跨段混搭：第一段的 executionId/from，配上第二段端点/时间 → 必须拒绝。
+    const swapped = { ...first, to: second.to, observedAt: second.observedAt };
+    assert.equal(classifyTraversalOwnership(swapped, taskId, sink, nav).ok, false);
+    // 只换端点或时间也不能借用任意其它 trace 点。
+    assert.equal(classifyTraversalOwnership({ ...first, to: trace[1]!.pos }, taskId, sink, nav).ok, false);
+    assert.equal(classifyTraversalOwnership({ ...first, observedAt: trace[1]!.ts }, taskId, sink, nav).ok, false);
+    // 名义 move 目标不是确认轨迹点。
+    assert.equal(classifyTraversalOwnership({ ...first, to: { ...sink[0]!.request.to } }, taskId, sink, nav).ok, false);
+    assert.equal(classifyTraversalOwnership({ ...first, from: { x: 200.4, y: 64, z: 216.5 } }, taskId, sink, nav).ok, false);
+    assert.equal(classifyTraversalOwnership({ ...first, worldId: 'other-world' }, taskId, sink, nav).ok, false);
+    // 另一个任务 id / 把真实请求改归其它任务：都不能冒充本任务。
+    assert.equal(classifyTraversalOwnership(first, 'other-task', sink, nav).ok, false);
+    assert.equal(classifyTraversalOwnership(first, taskId, sink.map((m) => ({ ...m, taskId: 'other-task' })), nav).ok, false);
+    assert.equal(classifyTraversalOwnership({ ...first, executionId: 'unknown-step' }, taskId, sink, nav).ok, false);
+    assert.equal(classifyTraversalOwnership(null, taskId, sink, nav).ok, false);
+
+    // 派发序号超出确认 trace 长度（末尾未确认半段）时不能借用已有 trace。
+    const viaNav = { ...second, executionId: sink[1]!.request.executionId, to: trace[0]!.pos, observedAt: trace[0]!.ts };
+    assert.equal(classifyTraversalOwnership(viaNav, taskId, sink, { ...nav, trace: [trace[0]!] }).ok, false);
+    // move 返回没有样本仍能通过：本用例的 sink.result 全为 null。
+    assert.equal(sink.every((move) => move.result === null), true);
+  } finally {
+    proto.move = original;
+    const shutdown = await svc.shutdown();
+    assert.equal(shutdown.close?.completed, true);
+    assert.equal(shutdown.close?.error, null);
+    assert.equal(shutdown.close?.dirty, false);
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('local body cell batch is bounded and centered on the measured feet', () => {
