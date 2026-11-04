@@ -248,6 +248,40 @@ test('spatial_query：真实注册、只读分发、查询数据保留且不产�
       assert.equal(stepped.data?.noop, true);
       assert.equal((stepped.data?.stepResults as unknown[]).length, 2);
       assert.ok(((rec((stepped.data?.stepResults as Record<string, unknown>[])[0]!.data).stepResults) as unknown[]).length >= 2);
+
+      // 输入动作确实执行过，但效果未确认：不是 noop，也绝不能聚合成已确认的世界效果。
+      adapter.inv.set('ender_pearl', 2);
+      const inputMacro = library.learn({
+        name: 'input_macro', description: '两次使用输入',
+        steps: [
+          { skill: 'use_item', args: { item: 'ender_pearl', on: 'self' } },
+          { skill: 'use_item', args: { item: 'ender_pearl', on: 'self' } },
+        ],
+      });
+      assert.ok(inputMacro.ok, inputMacro.ok ? '' : inputMacro.error);
+      const inputOnly = await runSkill(ctx, SKILLS['macro:input_macro'], {});
+      assert.equal(inputOnly.status, 'succeeded');
+      assert.equal(inputOnly.data?.inputCompleted, true);
+      assert.equal(inputOnly.data?.effectUnconfirmed, true);
+      assert.notEqual(inputOnly.data?.noop, true, '输入已执行，不能记成空转');
+      assert.deepEqual(adapter.actions.filter((a) => a === 'use:ender_pearl:self'), ['use:ender_pearl:self', 'use:ender_pearl:self']);
+
+      // 显式 verified + changed 的物理子步骤仍然聚合成真实物理结果，不会因输入语义被降级。
+      adapter.inv.set('water_bucket', 2);
+      const physicalMacro = library.learn({
+        name: 'physical_macro', description: '两次倒水',
+        steps: [
+          { skill: 'use_item', args: { item: 'water_bucket', on: { x: 3, y: 64, z: 0 } } },
+          { skill: 'use_item', args: { item: 'water_bucket', on: { x: 3, y: 64, z: 1 } } },
+        ],
+      });
+      assert.ok(physicalMacro.ok, physicalMacro.ok ? '' : physicalMacro.error);
+      const physical = await runSkill(ctx, SKILLS['macro:physical_macro'], {});
+      assert.equal(physical.status, 'succeeded');
+      assert.notEqual(physical.data?.inputCompleted, true);
+      assert.notEqual(physical.data?.effectUnconfirmed, true);
+      assert.notEqual(physical.data?.noop, true, '确认改变世界的子步骤仍算物理结果');
+      assert.deepEqual(adapter.actions.filter((a) => a === 'useBucket:water_bucket'), ['useBucket:water_bucket', 'useBucket:water_bucket']);
     });
 
     // ---- 所有分发都没有刷新共享证据或改写历史时间/会话 ----
@@ -262,34 +296,78 @@ test('spatial_query：真实注册、只读分发、查询数据保留且不产�
     assert.equal(history.getTraversal('t-integration')?.sessionId, SESSION);
     assert.equal(history.getTraversal('t-integration')?.observedAt, 12_345);
 
-    await t.test('真实 BehaviorEngine：noop 只计使用/跳过，不记成败或晋升；物理成功仍计成功', () => {
+    await t.test('真实 BehaviorEngine：实际 use_skill 结果按 noop/输入/物理语义记账', async () => {
       const statsDir = mkdtempSync(join(tmpdir(), 'spatial-query-stats-'));
       const book = new SkillBook(null, statsDir);
       const engine = new BehaviorEngine(book, adapter, null, bus, { perceivedEntities: () => [], observeBlocks: () => [] }, join(statsDir, 'stats.json'));
       t.after(() => { engine.dispose(); rmSync(statsDir, { recursive: true, force: true }); });
-      const behavior = { name: 'query-shaped-candidate', description: '只读查询验证', body: '只读取历史事实。',
+
+      const register = (behavior: { name: string; description: string; body: string; code?: string; steps?: { skill: string; args?: unknown }[]; verify?: string }) => {
+        assert.ok(engine.write(behavior, { by: 'mind' }).ok);
+        setBehaviorRegistry({ get: (name) => name === behavior.name ? { ...behavior, steps: behavior.steps ?? [] } : undefined, list: () => [{ name: behavior.name }] });
+      };
+      // 实际执行 use_skill，再把真实结果交给 BehaviorEngine 的正式记账入口。
+      const execute = async (behavior: { name: string }) => {
+        const result = await useSkill.run(ctx, { name: behavior.name });
+        engine.recordInvocation(behavior.name, result);
+        return result;
+      };
+
+      // 1) 只读查询代码技能：noop 只计使用/跳过，不记成败、不晋升。
+      const queryBehavior = { name: 'query-shaped-candidate', description: '只读查询验证', body: '只读取历史事实。',
         code: 'const r = await api.act("spatial_query", { kind: "fragments", dim: "overworld", limit: 1 }); return r;',
-        verify: 'const s = await api.state(); return s.connected ? true : "disconnected";' };
-      const written = engine.write(behavior, { by: 'mind' });
-      assert.ok(written.ok);
+        verify: 'const s = await api.state(); return s.hp > 0 ? true : "dead";' };
+      register(queryBehavior);
+      const queryResult = await execute(queryBehavior);
+      assert.equal(queryResult.status, 'succeeded', queryResult.summary);
+      assert.equal(queryResult.data?.noop, true);
+      const queryStats = engine.statsOf(queryBehavior.name)!;
+      assert.equal(queryStats.uses, 1);
+      assert.equal(queryStats.skipped, 1);
+      assert.deepEqual(engine.currentStats(queryBehavior.name, true), { ok: 0, fail: 0 }, 'noop 不能成为物理成功证据');
+      assert.ok(engine.list(true).some((b) => b.name === queryBehavior.name), '没有物理成功证据时仍是候选');
+      assert.equal(engine.get(queryBehavior.name)?.candidate, true, '未被晋升为稳定版');
 
-      for (let i = 0; i < 3; i++) engine.recordInvocation(behavior.name, { status: 'succeeded', summary: '只读了已记录事实', data: { version: 1, verified: true, noop: true } });
-      const stats = engine.statsOf(behavior.name)!;
-      assert.equal(stats.uses, 3);
-      assert.equal(stats.skipped, 3);
-      assert.equal(stats.usageByVersion?.['1']?.uses, 3);
-      assert.equal(stats.usageByVersion?.['1']?.skipped, 3);
-      assert.deepEqual(engine.currentStats(behavior.name, true), { ok: 0, fail: 0 }, 'noop/verify 通过也不能成为物理成功证据');
-      assert.ok(engine.list(true).some((b) => b.name === behavior.name), '没有物理成功证据时仍是候选');
-      assert.equal(engine.get(behavior.name)?.candidate, true, '未被晋升为稳定版');
+      // 2) 宏里的 use_item 输入已执行、效果未确认：不是 noop，也不能算成功。
+      if (!SKILLS['macro:input_macro']) {
+        adapter.inv.set('ender_pearl', 1);
+        const learned = library.learn({ name: 'input_macro', description: '两次使用输入',
+          steps: [
+            { skill: 'use_item', args: { item: 'ender_pearl', on: 'self' } },
+            { skill: 'use_item', args: { item: 'ender_pearl', on: 'self' } },
+          ] });
+        assert.ok(learned.ok, learned.ok ? '' : learned.error);
+      }
+      const inputBehavior = { name: 'input-only-macro', description: '宏只执行使用输入', body: '执行物品使用输入，不声称效果。',
+        steps: [{ skill: 'macro:input_macro' }] };
+      register(inputBehavior);
+      const inputResult = await execute(inputBehavior);
+      assert.equal(inputResult.status, 'succeeded', inputResult.summary);
+      assert.equal(inputResult.data?.inputCompleted, true);
+      assert.equal(inputResult.data?.effectUnconfirmed, true);
+      assert.notEqual(inputResult.data?.noop, true, '输入确实执行过，不能当空转');
+      const inputStats = engine.statsOf(inputBehavior.name)!;
+      assert.equal(inputStats.uses, 1);
+      assert.equal(inputStats.skipped ?? 0, 0);
+      assert.deepEqual(engine.currentStats(inputBehavior.name, true), { ok: 0, fail: 0 }, '输入未确认不能晋升为成功');
+      assert.equal(engine.get(inputBehavior.name)?.candidate, true);
 
-      engine.recordInvocation(behavior.name, { status: 'succeeded', summary: '真实改变了世界', data: { version: 1, verified: true } });
-      assert.deepEqual(engine.currentStats(behavior.name, true), { ok: 1, fail: 0 }, '真实物理成功仍正常计入');
-      assert.equal(engine.statsOf(behavior.name)!.skipped, 3);
+      // 3) 真实物理对比：同一具身动作路径里 effectEvidence verified+changed，成功仍按成功记账。
+      adapter.inv.set('water_bucket', 1);
+      const physicalBehavior = { name: 'physical-shaped-candidate', description: '执行倒水并验证', body: '真实改变世界的物理动作。',
+        code: 'const r = await api.act("use_item", { item: "water_bucket", on: { x: 6, y: 64, z: 0 } }); return r;',
+        verify: 'const s = await api.state(); return s.hp > 0 ? true : "dead";' };
+      register(physicalBehavior);
+      const physicalResult = await execute(physicalBehavior);
+      assert.equal(physicalResult.status, 'succeeded', physicalResult.summary);
+      assert.notEqual(physicalResult.data?.noop, true);
+      assert.notEqual(physicalResult.data?.effectUnconfirmed, true);
+      assert.deepEqual(engine.currentStats(physicalBehavior.name, true), { ok: 1, fail: 0 }, '真实物理成功仍正常计入');
+      assert.equal(engine.statsOf(physicalBehavior.name)!.skipped ?? 0, 0);
     });
   } finally {
     setBehaviorRegistry(null);
-    for (const name of ['macro:query_macro']) delete SKILLS[name];
+    for (const name of ['macro:query_macro', 'macro:input_macro', 'macro:physical_macro']) delete SKILLS[name];
     arbiter?.dispose();
     shutdown = await spatial.shutdown();
     assert.ok(shutdown !== null);

@@ -142,7 +142,7 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
         // 原始使用输入确实执行过，不能称为空转；但期间捡到物品不能替它证明效果。
         const effectUnconfirmed = inputCompleted && !acted && !b.verify;
         const noop = !inputCompleted && still && invSig() === invBefore && !acted && !combatChanged;
-        const noopText = noop ? '（身体这次什么都没做：没挪动、背包没变、没挖也没放。是条件不满足跳过了，还是技能没起作用，看上面的结果；要的事并没有发生）' : '';
+        const noopText = noop ? '（没有观察到身体或世界效果：没挪动、背包没变、没挖也没放。是条件不满足跳过了，还是技能没起作用，看上面的结果）' : '';
         const inputText = effectUnconfirmed ? '（使用输入已执行，效果尚未确认）' : '';
         return ok(`代码技能「${b.name}」做完了${m.text}${r.result !== null && r.result !== undefined ? `：${JSON.stringify(r.result).slice(0, 160)}` : ''}${noopText}${inputText}`, { ...data, ...(inputCompleted ? { inputCompleted: true, effectUnconfirmed } : {}), result: r.result, verified: !!b.verify, displacement: { horizontal: m.h, dy: m.dy }, ...(effectExpect ? { expect: effectExpect } : {}), ...(noop ? { noop: true } : {}) });
       }

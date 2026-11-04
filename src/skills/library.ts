@@ -139,7 +139,12 @@ export class SkillLibrary {
           const r = await runSkill({ ...ctx, deadline: Math.min(ctx.deadline, Date.now() + sk.timeoutMs) }, sk, constrainRecoveryAction(ctx, st.skill, v.args));
           results.push(`${st.skill}:${r.status}`);
           if (sk.readOnly === true && r.status === 'succeeded' && r.data) stepResults.push({ skill: st.skill, status: r.status, data: r.data });
-          if (sk.readOnly !== true && r.data?.noop !== true) physical = true;
+          // 与 use_skill 一致：输入已执行但效果未确认时不是物理改变；显式 verified + changed 才是真效果。
+          const effect = r.data?.effectEvidence as { verified?: boolean; changed?: boolean } | undefined;
+          const confirmedEffect = effect?.verified === true && effect.changed === true;
+          const inputOnly = r.data?.inputCompleted === true && (r.data.effectUnconfirmed ?? !confirmedEffect);
+          if (confirmedEffect) physical = true;
+          if (r.status === 'succeeded' && sk.readOnly !== true && r.data?.noop !== true && !inputOnly) physical = true;
           if (r.data?.inputCompleted === true) inputCompleted = true;
           if (r.status !== 'succeeded') {
             return { ...r, summary: `${def.name} 在第 ${i + 1} 步失败：${r.summary}`,
