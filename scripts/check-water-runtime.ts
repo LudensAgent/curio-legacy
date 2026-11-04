@@ -419,6 +419,8 @@ async function main(): Promise<void> {
     results.scenario3 = scenario3;
     const w3 = startTask({ skill: 'swim_to', args: { xyz: [west.x, west.y, west.z] } }, 40_000);
     scenario3.taskId = w3.taskId;
+    // W3 结果承诺可能因下方进入水体等待提前抛错而被弃用；立即挂上拒绝处理器，避免其 40s 超时拒绝成为未处理拒绝。
+    w3.outcome.catch(() => {});
 
     // 进入水体等待：等待期间持续采样实际接触/最后观测位置，而非只有起始信封。
     const w3EntrySamples: ContactSample[] = [];
@@ -455,8 +457,10 @@ async function main(): Promise<void> {
       origClear.call(bot);
     };
     restoreControls = () => {
-      try { bot.setControlState = origSet; } catch { /* ignore */ }
-      try { bot.clearControlStates = origClear; } catch { /* ignore */ }
+      const errors: string[] = [];
+      try { bot.setControlState = origSet; } catch (e) { errors.push((e as Error).message ?? String(e)); }
+      try { bot.clearControlStates = origClear; } catch (e) { errors.push((e as Error).message ?? String(e)); }
+      if (errors.length) throw new Error(errors.join('；'));
     };
     ar.cancel('联机验收取消'); // 同步 stopAll 释放控制（合法取消，不在仪表窗口内）
     scenario3.cancelBoundary = { seq, ts: Date.now(), note: '同步 ar.cancel 后立即记录；迟到事件 seq 均大于此边界' };
@@ -511,23 +515,31 @@ async function main(): Promise<void> {
     try { restoreControls?.(); } catch (e) { cleanupErrors.push(`还原按键仪表失败：${(e as Error).message ?? String(e)}`); }
 
     // 取消活动任务并收集其匹配 TaskOutcome（有界），先于移除 done 监听/清 waiter。
+    // 用窄作用域、按 taskId 过滤的额外 done 监听收集结果，不覆盖 startTask 已挂的 waiter/40s 定时器。
     try {
       if (arbiter) {
-        const active = arbiter.info();
+        const ar = arbiter;
+        const active = ar.info();
         if (active) {
           const activeId = active.id;
+          let cleanupDone: ((o: TaskOutcome) => void) | null = null;
+          let cleanupTimer: NodeJS.Timeout | null = null;
           const activeOutcome = new Promise<TaskOutcome>((resolve, reject) => {
             const existing = outcomes.get(activeId);
             if (existing) { resolve(existing); return; }
-            const timer = setTimeout(() => { outcomeWaiters.delete(activeId); reject(new Error(`收尾等待任务 ${activeId} 结果超时`)); }, 5000);
-            outcomeWaiters.set(activeId, { resolve, reject, timer });
+            cleanupDone = (o: TaskOutcome) => { if (o.task.id === activeId) resolve(o); };
+            ar.on('done', cleanupDone);
+            cleanupTimer = setTimeout(() => { reject(new Error(`收尾等待任务 ${activeId} 结果超时`)); }, 5000);
           });
-          arbiter.cancel('验收收尾');
+          ar.cancel('验收收尾');
           try {
             const o = await activeOutcome;
             results.cleanupTaskOutcome = { receivedAt: Date.now(), outcome: o };
           } catch (e) {
             cleanupErrors.push(`收尾取消任务 ${activeId} 未收集到结果：${(e as Error).message ?? String(e)}`);
+          } finally {
+            if (cleanupDone) ar.off('done', cleanupDone);
+            if (cleanupTimer) clearTimeout(cleanupTimer);
           }
         }
       }
@@ -543,17 +555,38 @@ async function main(): Promise<void> {
     try { adapter?.stopAll(); } catch (e) { cleanupErrors.push(`stopAll 失败：${(e as Error).message ?? String(e)}`); }
     try { memory?.close(); } catch (e) { cleanupErrors.push(`memory.close 失败：${(e as Error).message ?? String(e)}`); }
 
-    // quit 并等待真实 end/disconnected（有界）。
+    // quit 并等待真实 end/disconnected（有界）：超时绝不当作断线确认，须拒绝并计入 cleanupErrors。
     try {
       if (adapter) {
         const a = adapter;
-        await new Promise<void>((resolve) => {
+        await new Promise<void>((resolve, reject) => {
           let settled = false;
           let timer: NodeJS.Timeout | null = null;
-          const settle = () => { if (settled) return; settled = true; if (timer) clearTimeout(timer); resolve(); };
-          a.once('disconnected', settle);
-          timer = setTimeout(settle, 5000);
-          a.quit();
+          const onDisc = (reason: string) => {
+            if (settled) return;
+            settled = true;
+            if (timer) clearTimeout(timer);
+            a.off('disconnected', onDisc);
+            results.quitConfirmation = { confirmedAt: Date.now(), reason };
+            resolve();
+          };
+          a.on('disconnected', onDisc);
+          timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            if (timer) clearTimeout(timer);
+            a.off('disconnected', onDisc);
+            reject(new Error('quit 后 5s 内未确认断线'));
+          }, 5000);
+          try {
+            a.quit();
+          } catch (e) {
+            if (settled) return;
+            settled = true;
+            if (timer) clearTimeout(timer);
+            a.off('disconnected', onDisc);
+            reject(e as Error);
+          }
         });
       }
     } catch (e) { cleanupErrors.push(`quit/等待断线失败：${(e as Error).message ?? String(e)}`); }
