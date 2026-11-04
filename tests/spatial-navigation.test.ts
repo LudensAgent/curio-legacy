@@ -168,6 +168,48 @@ function scriptedHarness(opts: {
   };
 }
 
+/** 可阻塞转头的准备夹具：控制 look 何时返回，观测请求单独计数。 */
+function blockedLookHarness() {
+  let scope = { worldId: WORLD, dim: DIM, sessionId: SESSION };
+  let looks = 0;
+  let observes = 0;
+  let writes = 0;
+  let pendingLook: (() => void) | null = null;
+  let lookStartedResolve: (() => void) | null = null;
+  const lookStarted = new Promise<void>((resolve) => { lookStartedResolve = resolve; });
+  const control: Record<string, boolean> = {
+    forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false,
+  };
+  const body = {
+    setControlState(name: string, value: boolean) { writes++; control[name] = value; },
+    clearControlStates() { writes++; for (const k of Object.keys(control)) control[k] = false; },
+    look() {},
+    entity: { position: { ...START }, velocity: { x: 0, y: 0, z: 0 }, onGround: true, isInWater: false },
+  };
+  const adapter = {
+    state: () => ({
+      ...scope, alive: true, connected: true, observationReady: true, pos: { ...START },
+    }),
+    walkBody: () => body,
+    walkTick: () => () => Promise.resolve(null),
+    look: () => {
+      looks++;
+      lookStartedResolve?.();
+      return new Promise<void>((resolve) => { pendingLook = resolve; });
+    },
+  } as unknown as GameAdapter;
+  return {
+    adapter,
+    senses: { observeBlocks: () => { observes++; return []; } },
+    looks: () => looks,
+    observes: () => observes,
+    writes: () => writes,
+    lookStarted,
+    resolveLook: () => { pendingLook?.(); pendingLook = null; },
+    setDim: (dim: string) => { scope = { ...scope, dim }; },
+  };
+}
+
 function makePerception(svc: SharedSpatialSession) {
   let seq = 1;
   type Cell = { x: number; y: number; z: number; solid: boolean };
@@ -262,7 +304,7 @@ function distance3d(a: Vec3Like, b: Vec3Like): number {
   return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 }
 
-test('walk_to 参数边界：显式 arrival、有限坐标、near 正半径与上限，缺共享会话如实失败', async () => {
+test('walk_to 参数边界：显式 arrival、有限坐标、near 正半径，缺共享会话如实失败', async () => {
   const okNear = walkTo.validate({ to: [-1.5, 0.25, -2.25], arrival: { kind: 'near', radius: 1.5 } }, {} as never);
   assert.ok(okNear.ok);
   if (okNear.ok) {
@@ -273,7 +315,15 @@ test('walk_to 参数边界：显式 arrival、有限坐标、near 正半径与�
   assert.ok(okExact.ok);
   assert.ok(!walkTo.validate({ to: [0, 0, 0] }, {} as never).ok, 'arrival 必须显式');
   assert.ok(!walkTo.validate({ to: [0, 0, 0], arrival: { kind: 'near', radius: 0 } }, {} as never).ok);
-  assert.ok(!walkTo.validate({ to: [0, 0, 0], arrival: { kind: 'near', radius: 33 } }, {} as never).ok, 'near 半径上限');
+  assert.ok(!walkTo.validate({ to: [0, 0, 0], arrival: { kind: 'near', radius: -1 } }, {} as never).ok);
+  const okWide = walkTo.validate({ to: [0, 0, 0], arrival: { kind: 'near', radius: 33 } }, {} as never);
+  assert.ok(okWide.ok, 'near 半径 33 合法，无任意上限');
+  if (okWide.ok) assert.deepEqual(okWide.args.arrival, { kind: 'near', radius: 33 }, '半径原样保留，不取整');
+  const okFractional = walkTo.validate({ to: [0, 0, 0], arrival: { kind: 'near', radius: 33.25 } }, {} as never);
+  assert.ok(okFractional.ok);
+  if (okFractional.ok) assert.deepEqual(okFractional.args.arrival, { kind: 'near', radius: 33.25 }, '不做 coerce/round');
+  assert.ok(!walkTo.validate({ to: [0, 0, 0], arrival: { kind: 'near', radius: '33' } }, {} as never).ok, '不做字符串 coerce');
+  assert.ok(!walkTo.validate({ to: [0, 0, 0], arrival: { kind: 'near', radius: Number.POSITIVE_INFINITY } }, {} as never).ok);
   assert.ok(!walkTo.validate({ to: [Number.NaN, 0, 0], arrival: { kind: 'exact' } }, {} as never).ok);
   assert.ok(!walkTo.validate({ to: [0, 0, 0], arrival: { kind: 'near', radius: 1 }, deadlineMs: -1 }, {} as never).ok);
   assert.ok(!walkTo.validate({ to: [0, 0, 0], arrival: { kind: 'exact' }, deadlineMs: Number.POSITIVE_INFINITY }, {} as never).ok);
@@ -365,15 +415,28 @@ test('walk_to near 候选到达但实测越原半径时不得 success，保留�
     assert.equal(result.status, 'failed', '候选到达不得冒充原 near 目标成功');
     assert.equal(result.data?.stage, 'unconfirmed_arrival');
     assert.equal(result.data?.confirmed, false);
+    // data.nav 描述原委托：原 near 条件未确认，必须是 FAILED，而不是候选执行器的 ARRIVED。
     const nav = navOf(result);
-    assert.equal(nav.outcome, 'ARRIVED', '候选末点确由执行器真实到达');
+    assert.ok(nav.outcome === 'FAILED', `data.nav 应表示原委托失败，实际 ${nav.outcome}`);
+    assert.equal(nav.confirmed, false);
+    assert.ok(nav.problem.kind === 'unconfirmed_arrival');
+    assert.deepEqual(nav.problem.expected, target);
     assert.ok(nav.lastPosition, '执行 partial/实测位置必须保留');
     const position = result.data?.position as Vec3Like;
     const actual = distance3d(position, target);
     assert.ok(actual > 0.0451, `实测末位应越原半径，实际 ${actual}`);
     assert.deepEqual(position, nav.lastPosition);
+    // 原候选执行的 ARRIVED 原样保存在 executionNav，时间/位置/trace 不在委托投影中被改写。
+    const executionNav = result.data?.executionNav as NavResult;
+    assert.ok(executionNav.outcome === 'ARRIVED', '候选末点确由执行器真实到达');
+    assert.equal(executionNav.confirmed, true);
+    assert.deepEqual(nav.lastPosition, executionNav.lastPosition, '原执行位置原样保留');
+    assert.deepEqual(nav.lastObservation, executionNav.lastObservation, '原观测时间/作用域原样保留');
+    assert.deepEqual(nav.trace, executionNav.trace, '原执行 trace 原样保留');
+    assert.ok(nav.trace.length > 0, '真实执行应留下 trace');
     assert.deepEqual((result.data?.problem as { kind?: string }).kind, 'unconfirmed_arrival');
     assert.deepEqual(result.data?.originalRequest, { to: target, arrival: { kind: 'near', radius: 0.0451 } });
+    assert.deepEqual(result.data?.target, target, '原目标不可变');
     for (const key of Object.keys(fixture.fixture.control)) {
       assert.equal(fixture.fixture.control[key], false, `结束后 ${key} 键应释放`);
     }
@@ -568,11 +631,26 @@ test('walk_to 候选项点上限：超过 32 点明确 route_budget，不截断�
   }
 });
 
-test('walk_to 零边候选：真实连续稳定帧确认原完成条件，零控制、无伪段', { timeout: 30000 }, async () => {
+test('walk_to 零边候选：真实连续稳定帧确认原完成条件，统一 nav、零控制、无伪段', { timeout: 30000 }, async () => {
   const h = await openHarness();
   try {
     const fixture = physicsHarness();
     const c = context(fixture.adapter, h.svc, h.perception.senses);
+
+    const assertZeroNav = (result: { data?: Record<string, unknown> }) => {
+      const nav = navOf(result);
+      assert.ok(nav.outcome === 'ARRIVED');
+      assert.equal(nav.confirmed, true);
+      assert.deepEqual(nav.trace, [], '零边不造 trace/history');
+      assert.deepEqual(nav.lastPosition, result.data?.position);
+      assert.equal(nav.lastObservation.worldId, WORLD);
+      assert.equal(nav.lastObservation.dim, DIM);
+      assert.equal(nav.lastObservation.sessionId, SESSION);
+      assert.equal(nav.lastObservation.observedAt, result.data?.observedAt, 'lastObservation 对应真实接受帧');
+      assert.equal(nav.lastObservation.onGround, true);
+      assert.equal(nav.lastObservation.inWater, false);
+    };
+
     const exact = await runSkill(c.ctx, walkTo, { to: { ...START }, arrival: { kind: 'exact' } });
     assert.equal(exact.status, 'succeeded', exact.summary);
     assert.equal(exact.data?.stage, 'ARRIVED');
@@ -583,12 +661,19 @@ test('walk_to 零边候选：真实连续稳定帧确认原完成条件，零控
     assert.ok(Math.abs(exactPos.x - START.x) < 1e-9 && Math.abs(exactPos.z - START.z) < 1e-9);
     assert.ok((exact.data?.stableSamples as number) >= 2);
     assert.equal(fixture.fixture.writes(), 0, '零边确认不得写任何控制');
-    assert.equal(exact.data?.nav, undefined, '零边候选不应伪造执行段');
+    assertZeroNav(exact);
 
     const near = await runSkill(c.ctx, walkTo, { to: { x: START.x, y: 0.08, z: START.z }, arrival: { kind: 'near', radius: 0.1 } });
     assert.equal(near.status, 'succeeded', near.summary);
     assert.equal(near.data?.zeroEdge, true);
-    assert.equal(near.data?.nav, undefined);
+    assertZeroNav(near);
+    assert.equal(fixture.fixture.writes(), 0);
+
+    // near 半径没有 32 的任意上限：33 仍合法，且零边确认按同一稳定窗口成立。
+    const wide = await runSkill(c.ctx, walkTo, { to: { ...START }, arrival: { kind: 'near', radius: 33 } });
+    assert.equal(wide.status, 'succeeded', wide.summary);
+    assert.equal(wide.data?.zeroEdge, true);
+    assertZeroNav(wide);
     assert.equal(fixture.fixture.writes(), 0);
   } finally {
     await closeHarness(h);
@@ -608,6 +693,14 @@ test('walk_to 零边负例：不稳定/无帧/取消均有界结束且零按键'
     assert.equal(unstableResult.status, 'failed');
     assert.equal(unstableResult.data?.stage, 'unconfirmed_arrival');
     assert.equal(unstable.writes(), 0, '零边不稳定也不得写控制');
+    const unstableNav = navOf(unstableResult);
+    assert.ok(unstableNav.outcome === 'FAILED');
+    assert.equal(unstableNav.confirmed, false);
+    assert.deepEqual(unstableNav.trace, []);
+    assert.ok(unstableNav.problem.kind === 'unconfirmed_arrival');
+    assert.deepEqual(unstableNav.lastPosition, START, '不稳定帧仍是真实接受的末位');
+    assert.ok(unstableNav.lastObservation, '真实接受帧应有 lastObservation');
+    assert.equal(unstableNav.lastObservation.onGround, false);
 
     let tickCalls = 0;
     const noFrame = scriptedHarness({
@@ -619,6 +712,12 @@ test('walk_to 零边负例：不稳定/无帧/取消均有界结束且零按键'
     assert.equal(noFrameResult.data?.stage, 'execution_failed');
     assert.equal(tickCalls, 1, '帧源结束应只请求一次，不空转重试');
     assert.equal(noFrame.writes(), 0);
+    const noFrameNav = navOf(noFrameResult);
+    assert.ok(noFrameNav.outcome === 'FAILED');
+    assert.equal(noFrameNav.confirmed, false);
+    assert.deepEqual(noFrameNav.trace, []);
+    assert.ok(noFrameNav.problem.kind === 'execution_failed');
+    assert.equal(noFrameNav.lastPosition, undefined, '无帧不得伪造末位');
 
     const parent = new AbortController();
     const hanging = scriptedHarness({
@@ -633,6 +732,13 @@ test('walk_to 零边负例：不稳定/无帧/取消均有界结束且零按键'
       assert.equal(cancelled.status, 'cancelled');
       assert.equal(cancelled.data?.stage, 'CANCELLED');
       assert.equal(hanging.writes(), 0);
+      const cancelNav = navOf(cancelled);
+      assert.ok(cancelNav.outcome === 'CANCELLED');
+      assert.equal(cancelNav.confirmed, false);
+      assert.deepEqual(cancelNav.trace, []);
+      assert.ok(cancelNav.problem.kind === 'cancelled');
+      assert.equal(cancelNav.problem.by, 'agent');
+      assert.equal(cancelNav.lastPosition, undefined, '父取消无帧时不得伪造末位');
       assert.equal(getEventListeners(parent.signal, 'abort').length, 0, '取消后不应残留监听');
       assert.equal(c3.stationary(), false);
     } finally {
@@ -701,6 +807,203 @@ test('walk_to 执行阶段父取消：保留真实 nav/partial 与候选信息',
     assert.equal(fixture.control.forward, false, '取消后应释放前进键');
     assert.equal(fixture.control.back, false);
     assert.equal(fixture.control.sneak, false);
+  } finally {
+    await closeHarness(h);
+  }
+});
+
+test('walk_to 准备转头返回后复核：等待期间父取消不再观测或转头', { timeout: 10000 }, async () => {
+  const h = await openHarness();
+  try {
+    const fixture = blockedLookHarness();
+    const parent = new AbortController();
+    const c = context(fixture.adapter, h.svc, fixture.senses, { signal: parent.signal, deadline: Date.now() + 10_000 });
+    const running = runSkill(c.ctx, walkTo, { to: { x: 3.54, y: 0, z: 0.52 }, arrival: { kind: 'near', radius: 0.4 } });
+    await fixture.lookStarted;
+    const observesBefore = fixture.observes();
+    assert.ok(observesBefore > 0, '准备阶段应已发出初始合法观测');
+    parent.abort();
+    fixture.resolveLook();
+    const result = await running;
+
+    assert.equal(result.status, 'cancelled');
+    assert.equal(result.data?.stage, 'CANCELLED');
+    assert.equal(fixture.looks(), 1, '父取消后不得再转头');
+    assert.equal(fixture.observes(), observesBefore, '父取消后不得再发观测请求');
+    assert.equal(fixture.writes(), 0, '未开始移动不得写控制');
+    assert.equal(getEventListeners(parent.signal, 'abort').length, 0, '返回后不应残留监听');
+    assert.equal(c.stationary(), false);
+  } finally {
+    await closeHarness(h);
+  }
+});
+
+test('walk_to 准备转头返回后复核：等待期间换 scope 不再观测或转头', { timeout: 10000 }, async () => {
+  const h = await openHarness();
+  try {
+    const fixture = blockedLookHarness();
+    const c = context(fixture.adapter, h.svc, fixture.senses, { deadline: Date.now() + 10_000 });
+    const running = runSkill(c.ctx, walkTo, { to: { x: 3.54, y: 0, z: 0.52 }, arrival: { kind: 'near', radius: 0.4 } });
+    await fixture.lookStarted;
+    const observesBefore = fixture.observes();
+    fixture.setDim('nether');
+    fixture.resolveLook();
+    const result = await running;
+
+    assert.equal(result.status, 'cancelled');
+    assert.equal(result.data?.stage, 'CANCELLED');
+    assert.equal(result.data?.cancelBy, 'scope_changed');
+    assert.equal(fixture.looks(), 1, '换 scope 后不得再转头');
+    assert.equal(fixture.observes(), observesBefore, '换 scope 后不得再发观测请求');
+    assert.equal(fixture.writes(), 0);
+    assert.equal(c.stationary(), false);
+  } finally {
+    await closeHarness(h);
+  }
+});
+
+test('walk_to 零边候选：共享会话 interrupt 在无帧等待中有界取消，零控制零残留监听', { timeout: 10000 }, async () => {
+  const h = await openHarness();
+  try {
+    const fixture = scriptedHarness({ tick: () => new Promise<EntityFrame | null>(() => {}) });
+    const c = context(fixture.adapter, h.svc, h.perception.senses, { deadline: Date.now() + 10_000 });
+    const startedAt = Date.now();
+    const timer = setTimeout(() => { h.svc.interrupt(); }, 30);
+    try {
+      const result = await runSkill(c.ctx, walkTo, { to: { ...START }, arrival: { kind: 'exact' } });
+      const elapsed = Date.now() - startedAt;
+
+      assert.equal(result.status, 'cancelled');
+      assert.equal(result.data?.stage, 'CANCELLED');
+      const nav = navOf(result);
+      assert.ok(nav.outcome === 'CANCELLED');
+      assert.equal(nav.confirmed, false);
+      assert.deepEqual(nav.trace, []);
+      assert.ok(nav.problem.kind === 'cancelled');
+      assert.equal(nav.problem.by, 'lifecycle');
+      assert.equal(nav.lastPosition, undefined, '无帧中断不得伪造末位');
+      assert.ok(elapsed < 2000, `interrupt 应在期限前有界唤醒，实际 ${elapsed}ms`);
+      assert.equal(fixture.tickCalls(), 1, '无帧等待不应空转重试');
+      assert.equal(fixture.writes(), 0, '零边确认不得写任何控制');
+      assert.equal(h.svc.observationAdmitted, false, 'interrupt 后观测准入应撤销');
+    } finally {
+      clearTimeout(timer);
+    }
+  } finally {
+    await closeHarness(h);
+  }
+});
+
+test('walk_to 零边候选：期限耗尽统一 nav TIMEOUT，不伪造末位', { timeout: 10000 }, async () => {
+  const h = await openHarness();
+  try {
+    const fixture = scriptedHarness({ tick: () => new Promise<EntityFrame | null>(() => {}) });
+    const c = context(fixture.adapter, h.svc, h.perception.senses, { deadline: Date.now() + 200 });
+    const result = await runSkill(c.ctx, walkTo, { to: { ...START }, arrival: { kind: 'exact' } });
+
+    assert.equal(result.status, 'failed');
+    assert.equal(result.data?.stage, 'TIMEOUT');
+    const nav = navOf(result);
+    assert.ok(nav.outcome === 'TIMEOUT');
+    assert.equal(nav.confirmed, false);
+    assert.deepEqual(nav.trace, []);
+    assert.ok(nav.problem.kind === 'timeout');
+    assert.equal(nav.lastPosition, undefined, '无帧超时不得伪造末位');
+    assert.equal(fixture.writes(), 0);
+  } finally {
+    await closeHarness(h);
+  }
+});
+
+test('walk_to 零边确认：最后本可确认帧遇作用域变化不确认且不覆盖旧 lastObservation', { timeout: 10000 }, async () => {
+  const h = await openHarness();
+  try {
+    let dim = DIM;
+    let frame = 0;
+    const tick = (signal: AbortSignal) => new Promise<EntityFrame | null>((resolve) => {
+      if (signal.aborted) { resolve(null); return; }
+      const onAbort = () => { clearTimeout(timer); resolve(null); };
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        frame++;
+        const value: EntityFrame = {
+          position: { x: START.x + frame * 0.001, y: START.y, z: START.z },
+          velocity: { x: 0, y: 0, z: 0 }, onGround: true, isInWater: false,
+        };
+        // 第 4 帧本已满足 stableMs；但帧返回时作用域已变，不能确认，也不能覆盖旧末位。
+        if (frame === 4) dim = 'nether';
+        resolve(value);
+      }, 60);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    const fixture = scriptedHarness({ tick, state: () => ({ dim }) });
+    const c = context(fixture.adapter, h.svc, h.perception.senses, { deadline: Date.now() + 10_000 });
+    const result = await runSkill(c.ctx, walkTo, { to: { ...START }, arrival: { kind: 'exact' } });
+
+    assert.equal(result.status, 'cancelled');
+    assert.equal(result.data?.stage, 'CANCELLED');
+    const nav = navOf(result);
+    assert.ok(nav.outcome === 'CANCELLED');
+    assert.equal(nav.confirmed, false);
+    assert.deepEqual(nav.trace, []);
+    assert.ok(nav.problem.kind === 'cancelled');
+    assert.equal(nav.problem.by, 'lifecycle');
+    assert.ok(nav.lastPosition, '此前已接受的真实帧应保留');
+    assert.ok(Math.abs(nav.lastPosition.x - (START.x + 3 * 0.001)) < 1e-9, `旧末位不得被换 scope 的帧覆盖，实际 ${nav.lastPosition.x}`);
+    assert.ok(nav.lastObservation);
+    assert.equal(nav.lastObservation.dim, DIM, 'lastObservation 应来自旧作用域的真实接受帧');
+    assert.equal(nav.lastObservation.worldId, WORLD);
+    assert.equal(nav.lastObservation.sessionId, SESSION);
+    assert.equal(fixture.writes(), 0);
+  } finally {
+    await closeHarness(h);
+  }
+});
+
+test('walk_to 零边确认：最后本可确认帧遇暂停不确认且不覆盖旧 lastObservation', { timeout: 10000 }, async () => {
+  const h = await openHarness();
+  try {
+    let frame = 0;
+    const tick = (signal: AbortSignal) => new Promise<EntityFrame | null>((resolve) => {
+      if (signal.aborted) { resolve(null); return; }
+      const onAbort = () => { clearTimeout(timer); resolve(null); };
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        frame++;
+        const value: EntityFrame = {
+          position: { x: START.x + frame * 0.001, y: START.y, z: START.z },
+          velocity: { x: 0, y: 0, z: 0 }, onGround: true, isInWater: false,
+        };
+        if (frame === 4) {
+          // 先交付本帧再同步暂停：等待返回后必须复核到生命周期取消，不能接受这一帧。
+          resolve(value);
+          h.svc.setPaused(true);
+          return;
+        }
+        resolve(value);
+      }, 60);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    const fixture = scriptedHarness({ tick });
+    const c = context(fixture.adapter, h.svc, h.perception.senses, { deadline: Date.now() + 10_000 });
+    const result = await runSkill(c.ctx, walkTo, { to: { ...START }, arrival: { kind: 'exact' } });
+
+    assert.equal(h.svc.paused, true);
+    assert.equal(result.status, 'cancelled');
+    assert.equal(result.data?.stage, 'CANCELLED');
+    const nav = navOf(result);
+    assert.ok(nav.outcome === 'CANCELLED');
+    assert.equal(nav.confirmed, false);
+    assert.deepEqual(nav.trace, []);
+    assert.ok(nav.problem.kind === 'cancelled');
+    assert.equal(nav.problem.by, 'lifecycle');
+    assert.ok(nav.lastPosition, '暂停前已接受的真实帧应保留');
+    assert.ok(Math.abs(nav.lastPosition.x - (START.x + 3 * 0.001)) < 1e-9, `旧末位不得被暂停时的帧覆盖，实际 ${nav.lastPosition.x}`);
+    assert.ok(nav.lastObservation);
+    assert.equal(nav.lastObservation.dim, DIM);
+    assert.equal(nav.lastObservation.worldId, WORLD);
+    assert.equal(nav.lastObservation.sessionId, SESSION);
+    assert.equal(fixture.writes(), 0);
   } finally {
     await closeHarness(h);
   }

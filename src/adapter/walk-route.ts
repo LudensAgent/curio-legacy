@@ -125,7 +125,8 @@ export async function awaitFrame(
   for (const s of signals) if (s.aborted) return null;
   if (now() >= deadlineMs) return null;
   const controller = new AbortController();
-  const onAbort = () => controller.abort();
+  let wake: (() => void) | null = null;
+  const onAbort = () => { controller.abort(); wake?.(); };
   for (const s of signals) s.addEventListener('abort', onAbort, { once: true });
   const remaining = Math.max(0, deadlineMs - now());
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -135,8 +136,11 @@ export async function awaitFrame(
       new Promise<null>((resolve) => {
         timer = setTimeout(() => { controller.abort(); resolve(null); }, remaining);
       }),
+      // 外部取消直接唤醒等待，不能依赖帧源是否响应 signal；否则无帧挂起只能等到期限。
+      new Promise<null>((resolve) => { wake = () => resolve(null); }),
     ]);
   } finally {
+    wake = null;
     if (timer !== null) clearTimeout(timer);
     for (const s of signals) s.removeEventListener('abort', onAbort);
   }

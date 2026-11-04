@@ -6,7 +6,7 @@
  * 的 walk_route 执行后端（真实库 + 物理帧闭环）验证与执行。
  *
  * - 搜索只是候选：FOUND 不是到达；没有核实原完成条件前不产生成功。
- * - 输入能力限制（exact 不在格上/不同高、near 半径越界、候选超过本次点数上限）
+ * - 输入能力限制（exact 不在格上/不同高、near 半径非正/非有限、候选超过本次点数上限）
  *   明确报告为输入/预算限制，绝不改写成“世界无路”或悄悄投影目标。
  * - 搜索经共享会话的既有 attach 接收真实 ChangeReport（→ invalidate）与生命周期
  *   取消（→ cancel）；INVALIDATED 是终态，不自动重搜。
@@ -19,6 +19,7 @@
 import {
   GROUNDED_ARRIVAL_DEFAULTS,
   WalkRouteSearch,
+  type LastObservation,
   type NavResult,
   type Vec3Like,
   type WalkSearchCandidate,
@@ -29,9 +30,6 @@ import type { WalkTick } from '../adapter/walk-route.ts';
 import type { SharedSpatialSession } from '../spatial/shared-session.ts';
 import { bodyLocalCells, executeWalkRoute, observeCells, readPoint } from './walk-route.ts';
 import { fail, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
-
-/** 本次实现明确的 near 半径上限（格）。超出是输入限制，不是世界结论。 */
-const MAX_NEAR_RADIUS = 32;
 
 /** 本次执行后端最多接受 32 个候选点；超限如实报 route_budget，绝不截断路线。 */
 const MAX_CANDIDATE_POINTS = 32;
@@ -67,17 +65,11 @@ type SearchStop = {
   summary: string;
 };
 
-type ZeroEdgeOutcome =
-  | { status: 'confirmed'; position: Vec3Like; observedAt: number; stableSamples: number }
-  | { status: 'cancelled'; position: Vec3Like | null; summary: string }
-  | { status: 'timeout'; position: Vec3Like | null }
-  | {
-      status: 'failed';
-      stage: 'unconfirmed_arrival' | 'execution_failed';
-      position: Vec3Like | null;
-      summary: string;
-      problem: Record<string, unknown>;
-    };
+type NavFailure = Extract<NavResult, { outcome: 'NO_PATH' | 'BLOCKED' | 'CANCELLED' | 'TIMEOUT' | 'FAILED' }>;
+type ZeroEdgeNav =
+  | Extract<NavResult, { outcome: 'ARRIVED' }>
+  | (NavFailure & { outcome: 'CANCELLED' | 'TIMEOUT' | 'FAILED' });
+type ZeroEdgeOutcome = { nav: ZeroEdgeNav; stableSamples: number };
 
 /**
  * 搜索批次边界检查：取消与期限优先，且在父任务已取消时**不**再读取 adapter.state，
@@ -150,9 +142,12 @@ function searchTerminalResult(
 /**
  * 零边候选的真实确认：不造路线、不写控制，只用有界物理帧检查原完成条件、
  * 原作用域、干燥/落地/速度与 GROUNDED_ARRIVAL_DEFAULTS.stableMs 的连续有序样本。
+ * 统一返回 NavResult：trace 永远为空，lastObservation 只来自真实接受的帧，绝不
+ * 伪造 move executionId、路线或 history。
  */
 async function confirmZeroEdge(
   ctx: SkillCtx,
+  spatial: SharedSpatialSession,
   tick: WalkTick,
   target: Vec3Like,
   arrival: WalkToArrival,
@@ -164,93 +159,146 @@ async function confirmZeroEdge(
   let settledSamples = 0;
   let lastPos: Vec3Like | null = null;
   let lastAt: number | null = null;
+  let lastObservation: LastObservation | null = null;
 
-  const cancelled = (summary: string): ZeroEdgeOutcome => ({
-    status: 'cancelled', position: lastPos !== null ? { ...lastPos } : null, summary,
+  const lastFields = () => ({
+    ...(lastPos !== null ? { lastPosition: { ...lastPos } } : {}),
+    ...(lastObservation !== null ? { lastObservation: { ...lastObservation } } : {}),
   });
+  const cancelled = (
+    by: 'agent' | 'lifecycle',
+    reason: string,
+    message: string,
+  ): ZeroEdgeOutcome => {
+    const nav: ZeroEdgeNav = {
+      outcome: 'CANCELLED', message, confirmed: false, trace: [],
+      problem: { kind: 'cancelled', by, reason }, ...lastFields(),
+    };
+    return { nav, stableSamples: settledSamples };
+  };
+  const timedOut = (message: string): ZeroEdgeOutcome => {
+    const nav: ZeroEdgeNav = {
+      outcome: 'TIMEOUT', message, confirmed: false, trace: [], problem: { kind: 'timeout' }, ...lastFields(),
+    };
+    return { nav, stableSamples: settledSamples };
+  };
+  const failed = (
+    message: string,
+    problem: { kind: 'unconfirmed_arrival'; expected: Vec3Like } | { kind: 'execution_failed'; detail: string },
+  ): ZeroEdgeOutcome => {
+    const nav: ZeroEdgeNav = { outcome: 'FAILED', message, confirmed: false, trace: [], problem, ...lastFields() };
+    return { nav, stableSamples: settledSamples };
+  };
 
-  for (let frame = 0; frame < MAX_ZERO_EDGE_FRAMES; frame++) {
-    if (ctx.signal.aborted) return cancelled('walk_to 零边确认被父任务取消');
-    if (Date.now() >= deadlineMs) {
-      return { status: 'timeout', position: lastPos !== null ? { ...lastPos } : null };
-    }
-    const before = ctx.adapter.state();
-    if (!before.alive || !before.connected || !before.observationReady) {
-      return cancelled('walk_to 零边确认期间身体/观测失效');
-    }
-    if (before.worldId !== scope.worldId || before.dim !== scope.dim || before.sessionId !== scope.sessionId) {
-      return cancelled('walk_to 零边确认期间作用域变化');
-    }
-
-    const entity = await awaitFrame(tick, deadlineMs, Date.now, ctx.signal);
-    if (entity === null) {
-      if (ctx.signal.aborted) return cancelled('walk_to 零边确认被父任务取消');
-      if (Date.now() >= deadlineMs) {
-        return { status: 'timeout', position: lastPos !== null ? { ...lastPos } : null };
+  // 本次确认自己的生命周期通道：共享会话中断/暂停只唤醒本次等待，绝不中止父任务。
+  const lifecycle = new AbortController();
+  const token = spatial.attach({ receiver: () => {}, cancel: () => lifecycle.abort() });
+  try {
+    for (let frame = 0; frame < MAX_ZERO_EDGE_FRAMES; frame++) {
+      if (ctx.signal.aborted) return cancelled('agent', 'parent task cancelled', 'walk_to 零边确认被父任务取消');
+      if (lifecycle.signal.aborted) {
+        return cancelled('lifecycle', 'shared spatial session interrupted the active confirmation', 'walk_to 零边确认被共享空间生命周期取消');
       }
+      if (Date.now() >= deadlineMs) return timedOut('walk_to 零边确认到达期限');
+      const before = ctx.adapter.state();
+      if (!before.alive || !before.connected || !before.observationReady) {
+        return cancelled(
+          'lifecycle',
+          `alive=${before.alive} connected=${before.connected} observationReady=${before.observationReady}`,
+          'walk_to 零边确认期间身体/观测失效',
+        );
+      }
+      if (before.worldId !== scope.worldId || before.dim !== scope.dim || before.sessionId !== scope.sessionId) {
+        return cancelled('lifecycle', `scope=${before.worldId}/${before.dim}/${before.sessionId}`, 'walk_to 零边确认期间作用域变化');
+      }
+      if (spatial.closing || spatial.paused || !spatial.observationAdmitted) {
+        return cancelled('lifecycle', 'shared spatial session is not accepting observations', 'walk_to 零边确认期间共享空间会话暂停/关闭/未准入');
+      }
+
+      // 父取消与本次生命周期任一到达都直接唤醒等待，不依赖帧源响应 signal。
+      const entity = await awaitFrame(tick, deadlineMs, Date.now, ctx.signal, lifecycle.signal);
+
+      // 每次等待返回后先复核，再决定是否接受这一帧；失效后的迟到帧不能覆盖旧末位。
+      if (ctx.signal.aborted) return cancelled('agent', 'parent task cancelled', 'walk_to 零边确认被父任务取消');
+      if (lifecycle.signal.aborted) {
+        return cancelled('lifecycle', 'shared spatial session interrupted the active confirmation', 'walk_to 零边确认被共享空间生命周期取消');
+      }
+      if (Date.now() >= deadlineMs) return timedOut('walk_to 零边确认到达期限');
       const after = ctx.adapter.state();
       if (!after.alive || !after.connected || !after.observationReady) {
-        return cancelled('walk_to 零边确认期间身体/观测失效');
+        return cancelled(
+          'lifecycle',
+          `alive=${after.alive} connected=${after.connected} observationReady=${after.observationReady}`,
+          'walk_to 零边确认期间身体/观测失效',
+        );
       }
       if (after.worldId !== scope.worldId || after.dim !== scope.dim || after.sessionId !== scope.sessionId) {
-        return cancelled('walk_to 零边确认期间作用域变化');
+        return cancelled('lifecycle', `scope=${after.worldId}/${after.dim}/${after.sessionId}`, 'walk_to 零边确认期间作用域变化');
       }
-      return {
-        status: 'failed',
-        stage: 'execution_failed',
-        position: lastPos !== null ? { ...lastPos } : null,
-        summary: '连接仍有效但没有物理帧，无法确认原到达条件',
-        problem: { kind: 'execution_failed', detail: 'no physics frame delivered while connected' },
-      };
-    }
+      if (spatial.closing || spatial.paused || !spatial.observationAdmitted) {
+        return cancelled('lifecycle', 'shared spatial session is not accepting observations', 'walk_to 零边确认期间共享空间会话暂停/关闭/未准入');
+      }
+      if (entity === null) {
+        return failed('连接仍有效但没有物理帧，无法确认原到达条件', {
+          kind: 'execution_failed', detail: 'no physics frame delivered while connected',
+        });
+      }
 
-    const pos = entity.position;
-    // 样本来自本次请求的物理帧；取消后只保留这条已测事实，不重读新任务 state。
-    const measured = { x: pos.x, y: pos.y, z: pos.z };
-    const at = Date.now();
-    if (ctx.signal.aborted) {
+      const pos = entity.position;
+      const measured = { x: pos.x, y: pos.y, z: pos.z };
+      const at = Date.now();
+
+      const ticks = lastAt === null ? 0 : Math.max(0, at - lastAt) / 50;
+      const continuous = lastPos !== null && lastAt !== null && settledSince !== null
+        && at - lastAt <= Math.max(50, limits.stableMs)
+        && Math.hypot(measured.x - lastPos.x, measured.z - lastPos.z) <= limits.maxHorizontalSpeed * ticks + SAMPLE_EPS
+        && Math.abs(measured.y - lastPos.y) <= limits.maxVerticalSpeed * ticks + SAMPLE_EPS;
+
+      const inRange = arrival.kind === 'exact'
+        ? Math.hypot(measured.x - target.x, measured.z - target.z) <= limits.horizontalTolerance
+          && Math.abs(measured.y - target.y) <= limits.feetTolerance
+        : distance3d(measured, target) <= arrival.radius;
+      const grounded = inRange && entity.onGround && !entity.isInWater
+        && Math.hypot(entity.velocity.x, entity.velocity.z) <= limits.maxHorizontalSpeed
+        && Math.abs(entity.velocity.y) <= limits.maxVerticalSpeed;
+
+      if (!grounded) {
+        settledSince = null;
+        settledSamples = 0;
+      } else if (!continuous || settledSince === null) {
+        settledSince = at;
+        settledSamples = 1;
+      } else {
+        settledSamples += 1;
+      }
       lastPos = measured;
-      return cancelled('walk_to 零边确认被父任务取消');
+      lastAt = at;
+      const observation: LastObservation = {
+        worldId: after.worldId, dim: after.dim, sessionId: after.sessionId,
+        observedAt: at, onGround: entity.onGround, inWater: entity.isInWater,
+      };
+      lastObservation = observation;
+
+      if (grounded && settledSamples >= 2 && settledSince !== null && at - settledSince >= limits.stableMs) {
+        const nav: ZeroEdgeNav = {
+          outcome: 'ARRIVED',
+          message: `零边候选：已在实测稳定位置确认原到达条件（无移动）：${measured.x},${measured.y},${measured.z}`,
+          confirmed: true,
+          trace: [],
+          lastPosition: { ...measured },
+          lastObservation: { ...observation },
+        };
+        return { nav, stableSamples: settledSamples };
+      }
     }
 
-    const ticks = lastAt === null ? 0 : Math.max(0, at - lastAt) / 50;
-    const continuous = lastPos !== null && lastAt !== null && settledSince !== null
-      && at - lastAt <= Math.max(50, limits.stableMs)
-      && Math.hypot(measured.x - lastPos.x, measured.z - lastPos.z) <= limits.maxHorizontalSpeed * ticks + SAMPLE_EPS
-      && Math.abs(measured.y - lastPos.y) <= limits.maxVerticalSpeed * ticks + SAMPLE_EPS;
-
-    const inRange = arrival.kind === 'exact'
-      ? Math.hypot(measured.x - target.x, measured.z - target.z) <= limits.horizontalTolerance
-        && Math.abs(measured.y - target.y) <= limits.feetTolerance
-      : distance3d(measured, target) <= arrival.radius;
-    const grounded = inRange && entity.onGround && !entity.isInWater
-      && Math.hypot(entity.velocity.x, entity.velocity.z) <= limits.maxHorizontalSpeed
-      && Math.abs(entity.velocity.y) <= limits.maxVerticalSpeed;
-
-    if (!grounded) {
-      settledSince = null;
-      settledSamples = 0;
-    } else if (!continuous || settledSince === null) {
-      settledSince = at;
-      settledSamples = 1;
-    } else {
-      settledSamples += 1;
-    }
-    lastPos = measured;
-    lastAt = at;
-
-    if (grounded && settledSamples >= 2 && settledSince !== null && at - settledSince >= limits.stableMs) {
-      return { status: 'confirmed', position: { ...measured }, observedAt: at, stableSamples: settledSamples };
-    }
+    return failed('零边候选在有限帧内未形成稳定落地样本，未确认原到达条件', {
+      kind: 'unconfirmed_arrival', expected: { ...target },
+    });
+  } finally {
+    // 只解除本次确认自己的 token；不中止父任务 signal。
+    spatial.detach(token);
   }
-
-  return {
-    status: 'failed',
-    stage: 'unconfirmed_arrival',
-    position: lastPos !== null ? { ...lastPos } : null,
-    summary: '零边候选在有限帧内未形成稳定落地样本，未确认原到达条件',
-    problem: { kind: 'unconfirmed_arrival', expected: { ...target } },
-  };
 }
 
 /** 把执行后端的结果映射成技能结果；候选末点到 ≠ 原目标到达。 */
@@ -283,7 +331,7 @@ function executionResult(
 export const walkTo: Skill<WalkToArgs> = {
   name: 'walk_to',
   description: '按给定目的地做一次显式有界步行搜索并执行：只支持同高、从当前连续脚位沿整数 X/Z 格、普通干燥整块的路线；不含挖掘、放置、跳跃、游泳或绕行改造。搜索预算固定（512 节点/2048 边），找到的只是候选，最终到达由真实身体闭环与实测位置确认。exact 目标必须落在当前脚位的整数 XZ 格上（沿用既有 grounded 物理容差），near 使用原半径的完整 XYZ 距离；输入不支持会明确报告能力限制，不代表世界无路。',
-  argsDoc: '{"to":[x,y,z],"arrival":{"kind":"exact"} 或 {"kind":"near","radius":>0且≤32},"deadlineMs":可选绝对epoch毫秒}',
+  argsDoc: '{"to":[x,y,z],"arrival":{"kind":"exact"} 或 {"kind":"near","radius":>0的有限数字},"deadlineMs":可选绝对epoch毫秒}',
   timeoutMs: 30000,
   movement: true,
   validate(raw, _adapter) {
@@ -300,8 +348,8 @@ export const walkTo: Skill<WalkToArgs> = {
       arrival = { kind: 'exact' };
     } else if (ra.kind === 'near') {
       const radius = ra.radius;
-      if (typeof radius !== 'number' || !Number.isFinite(radius) || radius <= 0 || radius > MAX_NEAR_RADIUS) {
-        return { ok: false, error: `walk_to near.radius 必须是 (0, ${MAX_NEAR_RADIUS}] 内的有限数字（格）` };
+      if (typeof radius !== 'number' || !Number.isFinite(radius) || radius <= 0) {
+        return { ok: false, error: 'walk_to near.radius 必须是正的有限数字（格）' };
       }
       arrival = { kind: 'near', radius };
     } else {
@@ -353,6 +401,15 @@ export const walkTo: Skill<WalkToArgs> = {
     let startFeet: Vec3Like | null = null;
     let stop: SearchStop | null = null;
 
+    // 局部准备期间的复核：取消、期限、原作用域/ready 与共享可接纳都通过后才继续转头或观测。
+    const prepReady = (): boolean => {
+      if (ctx.signal.aborted || Date.now() >= effectiveDeadline) return false;
+      const s = ctx.adapter.state();
+      return s.alive && s.connected && s.observationReady
+        && s.worldId === entry.worldId && s.dim === entry.dim && s.sessionId === entry.sessionId
+        && !spatial.closing && !spatial.paused && spatial.observationAdmitted;
+    };
+
     // 搜索/准备期间只暂停 stationary watchdog，不延长任何任务期限；finally 恢复。
     ctx.setStationaryWait?.(true);
     try {
@@ -365,6 +422,8 @@ export const walkTo: Skill<WalkToArgs> = {
           for (const yaw of [-Math.PI / 2, 0, Math.PI / 2, Math.PI]) {
             if (ctx.signal.aborted || Date.now() >= effectiveDeadline) { prepStopped = true; break; }
             await ctx.adapter.look(yaw, pitch);
+            // 转头返回后先复核；取消/换 scope 后不得再发观测请求或继续转头。
+            if (!prepReady()) { prepStopped = true; break; }
             observeCells(ctx, map, prepCells);
           }
           if (prepStopped) break;
@@ -499,27 +558,39 @@ export const walkTo: Skill<WalkToArgs> = {
 
     // 零边 FOUND：原完成条件已在起点成立，只做有界真实帧确认，不造路线。
     if (candidate.edgeCount === 0) {
-      const zero = await confirmZeroEdge(ctx, tick, args.to, args.arrival, effectiveDeadline, snapshot);
+      const zero = await confirmZeroEdge(ctx, spatial, tick, args.to, args.arrival, effectiveDeadline, snapshot);
+      const nav = zero.nav;
       const zeroData = {
         ...base,
         zeroEdge: true,
         candidate,
         search: snapshot,
-        ...(zero.position !== null ? { position: { ...zero.position } } : {}),
+        nav,
+        ...(nav.lastPosition !== undefined ? { position: { ...nav.lastPosition } } : {}),
       };
-      if (zero.status === 'confirmed') {
-        return ok(`零边候选：已在实测稳定位置确认原到达条件（无移动）：${zero.position.x},${zero.position.y},${zero.position.z}`, {
+      if (nav.outcome === 'ARRIVED') {
+        return ok(nav.message, {
           ...zeroData,
           stage: 'ARRIVED',
           confirmed: true,
-          observedAt: zero.observedAt,
+          observedAt: nav.lastObservation.observedAt,
           stableSamples: zero.stableSamples,
         });
       }
-      if (zero.status === 'cancelled') return { status: 'cancelled', summary: zero.summary, data: { ...zeroData, stage: 'CANCELLED' } };
-      if (zero.status === 'timeout') return fail('TIMEOUT', 'walk_to 零边确认到达期限', { ...zeroData, stage: 'TIMEOUT' });
-      return fail(zero.stage === 'unconfirmed_arrival' ? 'EFFECT_NOT_CONFIRMED' : 'ERROR', zero.summary, {
-        ...zeroData, stage: zero.stage, confirmed: false, problem: zero.problem,
+      if (nav.outcome === 'CANCELLED') {
+        return {
+          status: 'cancelled',
+          summary: nav.message,
+          data: {
+            ...zeroData,
+            stage: 'CANCELLED',
+            cancelBy: nav.problem.kind === 'cancelled' && nav.problem.by === 'agent' ? 'parent' : 'lifecycle',
+          },
+        };
+      }
+      if (nav.outcome === 'TIMEOUT') return fail('TIMEOUT', nav.message, { ...zeroData, stage: 'TIMEOUT' });
+      return fail(nav.problem.kind === 'unconfirmed_arrival' ? 'EFFECT_NOT_CONFIRMED' : 'ERROR', nav.message, {
+        ...zeroData, stage: nav.problem.kind, confirmed: false, problem: nav.problem,
       });
     }
 
@@ -534,21 +605,42 @@ export const walkTo: Skill<WalkToArgs> = {
     const nav = await executeWalkRoute(ctx, spatial, { map, body, tick, request, deadlineMs: effectiveDeadline });
 
     // 父取消但执行器以其它终态返回时，仍按取消返回并保留实际 nav/partial。
+    // 位置只投影执行器已有的 lastPosition，不重读新任务的 adapter state。
     if (ctx.signal.aborted && nav.outcome !== 'CANCELLED') {
-      return { status: 'cancelled', summary: nav.message, data: { ...base, stage: 'CANCELLED', candidate, search: snapshot, nav } };
+      return {
+        status: 'cancelled',
+        summary: nav.message,
+        data: {
+          ...base, stage: 'CANCELLED', candidate, search: snapshot, nav,
+          ...(nav.lastPosition !== undefined ? { position: { ...nav.lastPosition } } : {}),
+        },
+      };
     }
     // near 只认原目标与原半径：候选末点到达不等于原 near 条件满足。
     if (nav.outcome === 'ARRIVED' && args.arrival.kind === 'near') {
       const actualDistance = distance3d(nav.lastPosition, args.to);
       if (actualDistance > args.arrival.radius) {
-        return fail('EFFECT_NOT_CONFIRMED', `候选末点已到达，但原 near 条件未满足：实测距原目标 ${actualDistance.toFixed(3)} > 半径 ${args.arrival.radius}`, {
+        const detail = `候选末点已到达，但原 near 条件未满足：实测距原目标 ${actualDistance.toFixed(3)} > 半径 ${args.arrival.radius}`;
+        // data.nav 表示原委托的真实结果：原 near 条件未确认，不是候选 ARRIVED。
+        // 原执行的 lastPosition/lastObservation/trace 原样保留；候选 ARRIVED 单独放在 executionNav。
+        const delegationNav: NavResult = {
+          outcome: 'FAILED',
+          message: detail,
+          confirmed: false,
+          trace: nav.trace,
+          lastPosition: { ...nav.lastPosition },
+          lastObservation: { ...nav.lastObservation },
+          problem: { kind: 'unconfirmed_arrival', expected: { ...args.to } },
+        };
+        return fail('EFFECT_NOT_CONFIRMED', detail, {
           ...base,
           stage: 'unconfirmed_arrival',
           confirmed: false,
           position: { ...nav.lastPosition },
           candidate,
           search: snapshot,
-          nav,
+          nav: delegationNav,
+          executionNav: nav,
           problem: { kind: 'unconfirmed_arrival', expected: { ...args.to } },
         });
       }
