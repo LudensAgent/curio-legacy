@@ -5,15 +5,16 @@
  *
  *   默认运行：node --import tsx scripts/walk-acceptance.ts --curio=test
  *   选择场景：node --import tsx scripts/walk-acceptance.ts --curio=test --scenarios=W1,W6
- *   帮助：    node --import tsx scripts/walk-acceptance.ts --help
+ *   帮助：    node --import tsx scripts/walk-acceptance.ts --curio=test --help
  *
- * 只走/只读，不挖、不放、不绕路（W2 的平台夹具通过 RCON 在限定竞技场内搭建，
- * 全程记录操作）。任一场景失败不中断其余场景；失败只写入该场景的 FAIL 与部分证据，
- * 不伪造未运行场景为通过。清理只关闭自己的 Bot/RCON，不 force process.exit 掩盖未收尾工作。
+ * 只走/只读；W2 平台夹具通过 RCON 在限定竞技场内搭建并全程记录命令与响应。
+ * 任一场景失败不中断其余场景；失败只写入该场景的 FAIL 与部分证据，不伪造未运行场景为通过。
+ * 任一场景的自有清理失败即令该场景 FAIL 并中止后续场景（不把污染状态喂给下一场景）。
+ * 证据标记为 provisional：不自动宣告 M2 完成，待协调者最终 C 证据确认后裁定。
  *
- * 证据标记为 provisional：不自动宣告 M2 完成，待协调者最终 C 证据确认后重跑/裁定。
- * 本入口只负责「采集真实的 per-segment 证据 + 源元数据校验」这一层骨架；W1/W2/W6/W7
- * 的场景级断言与容差属于下一阶段。
+ * 控制归属证据全部来自真实运行时：WalkMoveExecutor.move / WalkRouteExecutor.onSample /
+ * adapter.stopAll 都是公开身体桥，只做「委托原实现 + 创建时绑定归属」的诊断包装，
+ * 不改请求、不访问私有字段，并在所有任务结果落定后恢复原实现。不伪造 id / 状态。
  */
 
 import fs from 'node:fs';
@@ -22,16 +23,23 @@ import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { Bot, ControlState } from 'mineflayer';
-import type { NavResult } from 'curio-minecraft-3d-memory';
+import { WalkRouteExecutor } from 'curio-minecraft-3d-memory';
+import type {
+  BodySample,
+  ExecutableMove,
+  NavResult,
+  WalkRouteStatus,
+} from 'curio-minecraft-3d-memory';
 import { config } from '../src/config.ts';
 import { MineflayerAdapter } from '../src/adapter/mineflayer.ts';
 import { Vision } from '../src/perception/vision.ts';
 import { WorldMemory } from '../src/memory/store.ts';
-import { Arbiter, type TaskOutcome } from '../src/arbiter/arbiter.ts';
+import { Arbiter, type TaskInfo, type TaskOutcome, type TaskSource } from '../src/arbiter/arbiter.ts';
 import { EventBus } from '../src/events.ts';
 import { Rcon } from '../src/observer/rcon.ts';
 import type { SkillResult } from '../src/skills/types.ts';
-import type { WalkBody, WalkTick } from '../src/adapter/walk-route.ts';
+import type { Vec3Like } from '../src/adapter/types.ts';
+import { WalkMoveExecutor, type WalkBody, type WalkTick } from '../src/adapter/walk-route.ts';
 
 // ---------------------------------------------------------------------------
 // 类型与常量
@@ -42,6 +50,8 @@ type Verdict = 'PASS' | 'FAIL' | 'NOT_RUN';
 
 const SUPPORTED_SCENARIOS: ScenarioId[] = ['W1', 'W2', 'W6', 'W7'];
 const ALL_SCENARIOS: ScenarioId[] = ['W1', 'W2', 'W3', 'W4', 'W5', 'W6', 'W7'];
+/** 本轮未实现、不得被选中执行；仍会在证据里以 NOT_RUN 诚实列出。 */
+const UNSUPPORTED: ScenarioId[] = ['W3', 'W4', 'W5'];
 
 const KEYS: ControlState[] = ['forward', 'back', 'left', 'right', 'jump', 'sprint', 'sneak'];
 
@@ -85,6 +95,27 @@ export interface SampleEntry {
   x: number; y: number; z: number;
 }
 
+/** WalkMoveExecutor.move 的实际执行记录（公开身体桥诊断包装，不伪造）。 */
+export interface MoveRecord {
+  ts: number;
+  executionId: string; // 段 executionId（walk-<gen>-step-<i>），与 taskId / delegationId 区分
+  from: { x: number; y: number; z: number };
+  to: { x: number; y: number; z: number };
+  deadlineMs: number;
+}
+
+/** WalkRouteExecutor.onSample 收到的委托样本（sample.executionId 即 delegationId）。 */
+export interface AcceptedSampleRecord {
+  ts: number;
+  delegationId: string;
+  sequence: number;
+  pos: { x: number; y: number; z: number };
+  observedAt: number;
+  onGround: boolean;
+  nextPointIndex: number;
+  lastPosition: { x: number; y: number; z: number } | null;
+}
+
 interface ControlSnapshot {
   ts: number;
   label: string;
@@ -98,16 +129,22 @@ interface ServerCorrection {
   x?: number; y?: number; z?: number;
 }
 
-/** 完整记录 TaskOutcome.result（SkillResult，含完整 data.nav），不伪造 NavResult 子集。 */
-export interface TaskResultRecord {
-  taskId: string;
-  planVersion: number;
-  skill: string;
-  source: string;
-  durationMs: number;
-  preemptedBy?: string;
-  gentle?: boolean;
+/** 任务启动时捕获的完整请求与真实作用域（不做「成功后补路线」的伪造）。 */
+export interface TaskStartRecord {
+  task: TaskInfo;
+  request: { points: Vec3Like[]; deadlineMs: number };
+  scope: { worldId: string; dim: string; sessionId: string; alive: boolean; connected: boolean; observationReady: boolean };
+  registeredAt: number;
+}
+
+/** 任务终态完整记录：完整 TaskInfo + 完整 SkillResult + duration。 */
+export interface TaskDoneRecord {
+  task: TaskInfo;
   result: SkillResult;
+  durationMs: number;
+  preemptedBy?: TaskSource;
+  gentle?: boolean;
+  doneAt: number;
 }
 
 interface ScenarioEvidence {
@@ -116,14 +153,16 @@ interface ScenarioEvidence {
   startedAt: number;
   finishedAt?: number;
   durationMs?: number;
-  taskIds: string[];
-  results: TaskResultRecord[];
+  taskStarts: TaskStartRecord[];
+  results: TaskDoneRecord[];
   frames: FrameRecord[];
   framesTruncated: boolean;
   controlLog: ControlEntry[];
   controlSnapshots: ControlSnapshot[];
   stopSnapshots: StopAllSnapshot[];
   sampleLog: SampleEntry[];
+  acceptedSamples: AcceptedSampleRecord[];
+  moves: MoveRecord[];
   serverCorrections: ServerCorrection[];
   trajectory?: Record<string, unknown>;
   error?: string;
@@ -131,17 +170,35 @@ interface ScenarioEvidence {
   extra?: Record<string, unknown>;
 }
 
-/** 竞技场与步行道候选：控制面预检后确认；不可与流体道 x76..90,z76..86 重叠。 */
+/**
+ * 竞技场与步行道候选：控制面预检后确认；不可与流体道 x76..90,z76..86 重叠。
+ * y 为脚高（feetY），非方块坐标；实际坐标在授权运行的控制面预检中最终确定。
+ */
 const ARENA = {
   candidate: 'x200..220, z200..220',
   fluidLaneAvoid: 'x76..90, z76..86',
-  // W2 平台（stone，walkCollisionProvider 的 DRY_FULL 之一）：候选区内小块高台。
-  // 坐标在后续授权运行的控制面预检中最终确定；此处为占位，未连接即不落地。
-  platform: { xMin: 205, xMax: 212, zMin: 205, zMax: 210, topY: 64 },
 };
 
-/** W6/W7 平坦步行道（与 W2 平台 z205..210 错开，走 +X）。坐标待控制面预检确认。 */
-const WALK_LANE = { start: { x: 200.5, y: 64, z: 216.5 }, note: 'W6/W7 平坦步行道候选，y 为平坦地面脚高（待确认）' };
+/** W2 平台：小块高台，两格长支撑面、分数边缘起点、目标一格外（真实分数边缘用例）。 */
+const W2_PLATFORM = {
+  // 支撑面积（整数格，含起止）：两格长 × 一格宽的窄高台，迫使身体半宽 0.3 全程留在台面上。
+  xMin: 205, xMax: 207, zMin: 205, zMax: 206,
+  // 台面顶的脚高（feetY，方块在 feetY-1）。
+  feetY: 64,
+  material: 'minecraft:stone',
+  // 分数起点：x=205.55 靠近 +X 边缘，z=205.5 居中；目标沿 +X 一格外（206.55）。
+  start: { x: 205.55, y: 64, z: 205.5 },
+  target: { x: 206.55, y: 64, z: 205.5 },
+};
+
+/** W1/W6/W7 的平坦步行道：显式建造的支撑面，不假设天然地形。 */
+const WALK_LANE = {
+  // 沿 +X 的一格宽步行道（支撑方块在 feetY-1）。
+  xMin: 200, xMax: 210, zMin: 216, zMax: 216,
+  feetY: 64,
+  material: 'minecraft:stone',
+  start: { x: 200.5, y: 64, z: 216.5 },
+};
 
 // ---------------------------------------------------------------------------
 // 纯函数（供脚本与窄测试复用，无副作用）
@@ -153,15 +210,14 @@ export function parseScenarioSelector(raw: string | undefined): ScenarioId[] {
   if (tokens.length === 0) return [...SUPPORTED_SCENARIOS];
   for (const t of tokens) {
     if (!(ALL_SCENARIOS as string[]).includes(t)) throw new Error(`未知场景 ${t}；可选：${ALL_SCENARIOS.join(',')}`);
+    if (UNSUPPORTED.includes(t as ScenarioId)) {
+      throw new Error(`场景 ${t} 本轮未实现（可选：${SUPPORTED_SCENARIOS.join(',')}）；不会以全 NOT_RUN 判为通过`);
+    }
   }
   return tokens as ScenarioId[];
 }
 
-/**
- * 解析 RCON `list` 的在线玩家名。只接受原版已知格式
- * `There are N of a max of M players online: name1, name2`；格式不符或声明数量
- * 与实际名字数不一致时抛错（预检据此 fail closed），不把畸形响应静默当成空列表。
- */
+/** 解析 RCON `list` 的在线玩家名；格式/数量不符时抛错（fail closed），不当空列表。 */
 export function parseRconList(raw: string): string[] {
   const m = /^There are (\d+) of a max of (\d+) players online:(.*)$/.exec(raw.trim());
   if (!m) throw new Error(`RCON list 响应格式无法解析：${JSON.stringify(raw)}`);
@@ -184,7 +240,23 @@ export function snapshotKeys(bot: { controlState: KeyState }): Keys {
   return out;
 }
 
-/** 轨迹统计：W2 断言无坠落/失支撑所需。 */
+/** 解析 `git status --porcelain=v1 -z`：每条 `XY <path>\0`，保留前导空格、仅按 NUL 分条。 */
+export function gitPorcelainPaths(raw: string): string[] {
+  const tokens = raw.split('\0').filter((t) => t !== '');
+  const paths: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    // 每条记录都是 2 字符状态码 + 1 空格分隔 + 路径；前导空格（未暂存/未跟踪）原样保留。
+    paths.push(t.slice(3));
+    // 重命名/复制还有一条紧跟的源路径（无状态前缀），一并记录为脏路径。
+    if (t[0] === 'R' || t[0] === 'C') {
+      const src = tokens[i + 1];
+      if (src !== undefined) { paths.push(src); i++; }
+    }
+  }
+  return paths;
+}
+
 export function summarizeTrajectory(frames: FrameRecord[]): Record<string, unknown> {
   const xs = frames.map((f) => f.x), zs = frames.map((f) => f.z), ys = frames.map((f) => f.y);
   const dts = frames.map((f) => f.dtMs).filter((d) => d > 0);
@@ -211,6 +283,63 @@ export function adjacentRouteX(start: { x: number; y: number; z: number }, targe
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// 断言谓词（供场景与窄测试复用；负例夹具验证其拒绝能力，不是镜像实现）
+// ---------------------------------------------------------------------------
+
+/** 结果确认为到达：outcome ARRIVED 且 confirmed（类型守卫，供场景安全取 lastPosition）。 */
+export function isArrived(nav: NavResult | undefined): nav is NavResult & { outcome: 'ARRIVED' } {
+  return !!nav && nav.outcome === 'ARRIVED' && nav.confirmed === true;
+}
+
+/** 非到达终态是否保留了实测部分位移（lastPosition 存在）。 */
+export function hasPartialPosition(nav: NavResult | undefined): boolean {
+  return !!nav && nav.outcome !== 'ARRIVED' && nav.lastPosition !== undefined;
+}
+
+/** 部分位移的 lastPosition 是否与最后一条已接受样本一致（有界容差）。 */
+export function partialMatchesLastSample(nav: NavResult | undefined, accepted: { x: number; y: number; z: number }[], tol = 0.01): boolean {
+  if (!nav?.lastPosition) return false;
+  const last = accepted[accepted.length - 1];
+  return !!last && Math.hypot(nav.lastPosition.x - last.x, nav.lastPosition.z - last.z) <= tol
+    && Math.abs(nav.lastPosition.y - last.y) <= tol;
+}
+
+/** 位置是否落在平台足迹内（含身体半宽 0.3 的物理支撑几何，非任意高度上的 x/z 重叠）。 */
+export function withinFootprint(pos: { x: number; z: number }, f: { xMin: number; xMax: number; zMin: number; zMax: number }, halfWidth = 0.3): boolean {
+  return pos.x >= f.xMin - halfWidth && pos.x <= f.xMax + halfWidth
+    && pos.z >= f.zMin - halfWidth && pos.z <= f.zMax + halfWidth;
+}
+
+/** 是否任一帧逃出平台足迹（含半宽）。 */
+export function platformEscaped(frames: { x: number; z: number }[], f: { xMin: number; xMax: number; zMin: number; zMax: number }, halfWidth = 0.3): boolean {
+  return frames.some((p) => !withinFootprint(p, f, halfWidth));
+}
+
+/** 所有帧都在实测脚高上且着地（无坠落/腾空）。 */
+export function allGroundedAt(frames: { y: number; onGround: boolean }[], feetY: number, feetTol = 0.05): boolean {
+  return frames.length > 0 && frames.every((fr) => fr.onGround && Math.abs(fr.y - feetY) <= feetTol);
+}
+
+/** 时间戳之后的帧（用于把 teleport/搭设帧排除在支撑断言之外，防 setup 污染）。 */
+export function framesSince(frames: FrameRecord[], ts: number): FrameRecord[] {
+  return frames.filter((f) => f.ts >= ts);
+}
+
+/** 归属为某任务的迟到 forward=true 写入（取消/换主之后仍写前进键即复活/清键）。 */
+export function lateForwardWritesByOwner(controlLog: ControlEntry[], ownerTaskId: string, sinceTs: number): ControlEntry[] {
+  return controlLog.filter((c) => c.ownerTaskId === ownerTaskId && c.ts >= sinceTs && c.op === 'set' && c.name === 'forward' && c.value === true);
+}
+
+/** 连续段是否从上一段的实测终点接续（每个后续段的 from 紧贴上一段的 to）。 */
+export function segmentsContiguous(moves: MoveRecord[], tol = 0.2): boolean {
+  for (let i = 1; i < moves.length; i++) {
+    const prev = moves[i - 1]!, cur = moves[i]!;
+    if (Math.hypot(cur.from.x - prev.to.x, cur.from.z - prev.to.z) > tol) return false;
+  }
+  return true;
+}
+
 function isDirectRun(): boolean {
   if (!process.argv[1]) return false;
   try { return import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href; } catch { return false; }
@@ -220,7 +349,6 @@ function isDirectRun(): boolean {
 // 诊断采集（不改任何运行时行为：只包装并委托原实现，所有权在创建时绑定一次）
 // ---------------------------------------------------------------------------
 
-/** walkBody / walkTick / stopAll 的最小结构面，便于用假夹具做窄测试。 */
 export interface WalkBridge {
   walkBody?: () => WalkBody;
   walkTick?: () => WalkTick;
@@ -229,8 +357,7 @@ export interface WalkBridge {
 
 /**
  * 采集身体桥控制写入、真实 stopAll 前的全键快照、walkTick 交付的样本，全部把
- * 归属（taskId）绑定在「walkBody / walkTick 创建那一刻」，而不是写入那一刻——
- * 旧任务 A 的迟到回调在 B 运行期间写入时，仍被记为 A，不会误算成 B。
+ * 归属（taskId）绑定在「walkBody / walkTick 创建那一刻」，而不是写入那一刻。
  */
 export class WalkDiagnostics {
   readonly controlLog: ControlEntry[] = [];
@@ -255,7 +382,6 @@ export class WalkDiagnostics {
 
     if (origBody) {
       this.target.walkBody = () => {
-        // 创建时绑定归属一次：这是技能运行期间（任务仍为 current）调用，得到正确 taskId。
         const owner = this.owner();
         this.lastBodyOwner = owner;
         const body = origBody.call(this.target);
@@ -290,8 +416,6 @@ export class WalkDiagnostics {
     }
 
     this.target.stopAll = () => {
-      // 真实 stopAll 之前采集全键状态：Arbiter 在调用 stopAll 前已把 current 置 null，
-      // 所以归属用创建时绑定的 lastBodyOwner，而不是此刻的 current。
       const keys = this.readKeys();
       const owner = this.lastBodyOwner;
       this.stopSnapshots.push({ ts: this.now(), label: 'pre-stopAll', keys, ownerTaskId: owner });
@@ -304,7 +428,6 @@ export class WalkDiagnostics {
     this.origStop = origStop;
   }
 
-  /** 只在所有任务结果都已结束（runScenario 收尾后）才恢复原实现。 */
   unwrap() {
     if (this.origBody) this.target.walkBody = this.origBody;
     if (this.origTick) this.target.walkTick = this.origTick;
@@ -312,6 +435,69 @@ export class WalkDiagnostics {
     this.origBody = undefined;
     this.origTick = undefined;
     this.origStop = undefined;
+  }
+}
+
+/**
+ * 采集库执行层的真实记录：WalkMoveExecutor.move 的每段 from/to/executionId，
+ * WalkRouteExecutor.onSample 收到的委托样本。两个都是公开方法，只做原型级诊断
+ * 包装并委托原实现，不访问私有字段、不改请求；所有任务结果落定后恢复。
+ */
+type MoveFn = (this: WalkMoveExecutor, request: ExecutableMove) => ReturnType<WalkMoveExecutor['move']>;
+type OnSampleFn = (this: WalkRouteExecutor, sample: BodySample) => WalkRouteStatus;
+
+export class ExecutionDiagnostics {
+  readonly moves: MoveRecord[] = [];
+  readonly acceptedSamples: AcceptedSampleRecord[] = [];
+  private wrapped = false;
+  private origMove?: MoveFn;
+  private origOnSample?: OnSampleFn;
+
+  constructor(private readonly now: () => number = Date.now) {}
+
+  wrap() {
+    if (this.wrapped) return;
+    this.wrapped = true;
+    const self = this;
+    const origMove = WalkMoveExecutor.prototype.move as MoveFn;
+    const origOnSample = WalkRouteExecutor.prototype.onSample as OnSampleFn;
+    this.origMove = origMove;
+    this.origOnSample = origOnSample;
+
+    (WalkMoveExecutor.prototype as { move: MoveFn }).move = function (this: WalkMoveExecutor, request: ExecutableMove) {
+      self.moves.push({
+        ts: self.now(),
+        executionId: request.executionId,
+        from: { ...request.from },
+        to: { ...request.to },
+        deadlineMs: request.deadlineMs,
+      });
+      return origMove.call(this, request);
+    };
+
+    (WalkRouteExecutor.prototype as { onSample: OnSampleFn }).onSample = function (this: WalkRouteExecutor, sample: BodySample) {
+      const status = origOnSample.call(this, sample);
+      self.acceptedSamples.push({
+        ts: self.now(),
+        delegationId: sample.executionId,
+        sequence: sample.sequence,
+        pos: { ...sample.pos },
+        observedAt: sample.observedAt,
+        onGround: sample.onGround,
+        nextPointIndex: status.nextPointIndex,
+        lastPosition: status.lastPosition ? { ...status.lastPosition } : null,
+      });
+      return status;
+    };
+  }
+
+  unwrap() {
+    if (!this.wrapped) return;
+    if (this.origMove) (WalkMoveExecutor.prototype as { move: MoveFn }).move = this.origMove;
+    if (this.origOnSample) (WalkRouteExecutor.prototype as { onSample: OnSampleFn }).onSample = this.origOnSample;
+    this.origMove = undefined;
+    this.origOnSample = undefined;
+    this.wrapped = false;
   }
 }
 
@@ -347,8 +533,6 @@ class FrameRecorder {
 
 class ServerCorrectionRecorder {
   corrections: ServerCorrection[] = [];
-  // Mineflayer 在服务端下发位置纠正/传送包时触发 forcedMove；它是服务端纠正的规范信号，
-  // 原始 position / position_look 包由它统一起到，这里只记这一条诊断信号，不碰原始缓存。
   private readonly onForced = () => {
     const e = this.bot.entity;
     this.corrections.push({ ts: Date.now(), kind: 'forcedMove', x: e?.position.x, y: e?.position.y, z: e?.position.z });
@@ -360,20 +544,6 @@ class ServerCorrectionRecorder {
   stop() { this.bot.removeListener('forcedMove', this.onForced); }
 }
 
-/** 按 taskId 过滤的 done 监听：只收本任务的终态，所有路径都移除监听器与定时器。 */
-function waitForTask(arbiter: Arbiter, taskId: string, timeoutMs: number): Promise<TaskOutcome> {
-  return new Promise((resolve, reject) => {
-    const onDone = (o: TaskOutcome) => {
-      if (o.task.id !== taskId) return;
-      cleanup();
-      resolve(o);
-    };
-    const timer = setTimeout(() => { cleanup(); reject(new Error(`task ${taskId} 未在 ${timeoutMs}ms 内结束`)); }, timeoutMs);
-    const cleanup = () => { clearTimeout(timer); arbiter.removeListener('done', onDone); };
-    arbiter.on('done', onDone);
-  });
-}
-
 /** 从 SkillResult.data 取出完整 NavResult（公开类型），不手工挑选字段拼子集。 */
 function navFromResult(result: SkillResult): NavResult | undefined {
   const nav = result.data?.nav;
@@ -382,17 +552,15 @@ function navFromResult(result: SkillResult): NavResult | undefined {
   return nav as NavResult;
 }
 
-/** 完整记录 TaskOutcome.result（SkillResult，含完整 data.nav）。 */
-function toTaskRecord(o: TaskOutcome): TaskResultRecord {
+/** 完整记录 TaskOutcome（完整 TaskInfo + 完整 SkillResult + duration）。 */
+function toDoneRecord(o: TaskOutcome): TaskDoneRecord {
   return {
-    taskId: o.task.id,
-    planVersion: o.task.planVersion,
-    skill: o.task.skill,
-    source: o.task.source,
+    task: o.task,
+    result: o.result,
     durationMs: o.durationMs,
     preemptedBy: o.preemptedBy,
     gentle: o.gentle,
-    result: o.result,
+    doneAt: Date.now(),
   };
 }
 
@@ -404,37 +572,73 @@ function sha256File(file: string): string {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 }
 
-/** Git 元数据：正常走 execFileSync，失败向上抛（不进证据 = 失败退出），不伪造 clean HEAD。 */
+function sha512Base64(buf: Buffer): string {
+  return crypto.createHash('sha512').update(buf).digest('base64');
+}
+
+/** tgz 字节与 package-lock integrity（sha512-…）是否一致。 */
+export function integrityMatches(buf: Buffer, integrity: string): boolean {
+  const m = /^sha512-(.+)$/.exec(integrity.trim());
+  if (!m) return false;
+  return sha512Base64(buf) === m[1];
+}
+
+/** Git 元数据：用 `--porcelain=v1 -z` 解析脏路径，保留前导空格、仅按 NUL 分条。 */
 export function gitMeta() {
-  const run = (args: string[]) => execFileSync('git', args, { cwd: path.resolve('.'), encoding: 'utf8' }).trim();
-  const sha = run(['rev-parse', 'HEAD']);
-  const branch = run(['rev-parse', '--abbrev-ref', 'HEAD']);
-  const dirtyPaths = run(['status', '--short']).split('\n').filter(Boolean).map((l) => l.slice(3));
+  const run = (args: string[]) => execFileSync('git', args, { cwd: path.resolve('.'), encoding: 'utf8' });
+  const sha = run(['rev-parse', 'HEAD']).trim();
+  const branch = run(['rev-parse', '--abbrev-ref', 'HEAD']).trim();
+  const dirtyPaths = gitPorcelainPaths(run(['status', '--porcelain=v1', '-z']));
   return { sha, branch, dirtyPaths, scriptFingerprint: sha256File(fileURLToPath(import.meta.url)) };
 }
 
+interface PackageMetaOptions {
+  /** 根目录（含 package.json / package-lock.json / node_modules / vendor）。默认当前目录。 */
+  base?: string;
+}
+
 /**
- * 源元数据：读实际 package.json 依赖声明、package-lock 条目、已安装包与引用 tgz 的
- * SHA256，并校验彼此对应；任一步缺失或不一致都抛错（fail source check），不用
- * unknown/missing 占位符掩盖。不做静态安装版本声明——版本一律从已安装包读取。
+ * 源元数据校验：读实际 package.json 依赖声明、package-lock 条目（含 integrity）、
+ * 已安装包与引用 tgz 的 SHA256/SHA512，并校验彼此对应；再读 provenance.json，
+ * 交叉校验 artifactSHA256 / npmIntegrity / package name/version 后报告 sourceHEAD。
+ * 任一步缺失或不一致都抛错（fail source check），不用 unknown/missing 占位符掩盖。
  */
-export function packageMeta() {
-  const root = JSON.parse(fs.readFileSync(path.resolve('package.json'), 'utf8')) as { dependencies?: Record<string, string> };
+export function packageMeta(opts: PackageMetaOptions = {}) {
+  const base = path.resolve(opts.base ?? '.');
+  const root = JSON.parse(fs.readFileSync(path.join(base, 'package.json'), 'utf8')) as { dependencies?: Record<string, string> };
   const dep = root.dependencies?.['curio-minecraft-3d-memory'];
   if (typeof dep !== 'string' || dep.length === 0) throw new Error('package.json 缺少 curio-minecraft-3d-memory 依赖声明');
 
   const tgzRel = dep.startsWith('file:') ? dep.slice('file:'.length) : dep;
-  const tgzPath = path.resolve(tgzRel);
-  const tgzSha256 = sha256File(tgzPath);
+  const tgzPath = path.resolve(base, tgzRel);
+  const tgzBytes = fs.readFileSync(tgzPath);
+  const tgzSha256 = crypto.createHash('sha256').update(tgzBytes).digest('hex');
 
-  const installed = JSON.parse(fs.readFileSync(path.resolve('node_modules/curio-minecraft-3d-memory/package.json'), 'utf8')) as { name?: string; version?: string };
-  const lock = JSON.parse(fs.readFileSync(path.resolve('package-lock.json'), 'utf8')) as { packages?: Record<string, { name?: string; version?: string; resolved?: string }> };
+  const installed = JSON.parse(fs.readFileSync(path.join(base, 'node_modules/curio-minecraft-3d-memory/package.json'), 'utf8')) as { name?: string; version?: string };
+  const lock = JSON.parse(fs.readFileSync(path.join(base, 'package-lock.json'), 'utf8')) as { packages?: Record<string, { name?: string; version?: string; resolved?: string; integrity?: string }> };
   const lockEntry = lock.packages?.['node_modules/curio-minecraft-3d-memory'];
   if (!lockEntry) throw new Error('package-lock.json 缺少 node_modules/curio-minecraft-3d-memory 条目');
-  // file: 依赖的 lock 条目可能不写 name；写了才交叉校验，不硬塞静态包名。
   if (lockEntry.name !== undefined && lockEntry.name !== installed.name) throw new Error(`包名不一致：lock ${lockEntry.name} vs installed ${installed.name}`);
   if (lockEntry.version !== installed.version) throw new Error(`版本不一致：lock ${lockEntry.version} vs installed ${installed.version}`);
   if (lockEntry.resolved !== dep) throw new Error(`依赖声明 ${dep} 与 lock resolved ${lockEntry.resolved} 不一致`);
+  if (!lockEntry.integrity) throw new Error('package-lock 缺少 curio-minecraft-3d-memory 的 integrity');
+  if (!integrityMatches(tgzBytes, lockEntry.integrity)) throw new Error('tgz 字节与 package-lock integrity（sha512）不一致');
+
+  // provenance.json：与已安装版本对应的本地来源声明。
+  const provenanceRel = path.join('vendor', `curio-minecraft-3d-memory-${installed.version}.provenance.json`);
+  const provenancePath = path.resolve(base, provenanceRel);
+  if (!fs.existsSync(provenancePath)) throw new Error(`缺少来源声明：${provenanceRel}`);
+  const prov = JSON.parse(fs.readFileSync(provenancePath, 'utf8')) as {
+    package?: { name?: string; version?: string };
+    sourceHEAD?: string;
+    artifactSHA256?: string;
+    npmIntegrity?: string;
+  };
+  if (prov.package?.name !== installed.name) throw new Error(`provenance 包名 ${prov.package?.name} 与 installed ${installed.name} 不一致`);
+  if (prov.package?.version !== installed.version) throw new Error(`provenance 版本 ${prov.package?.version} 与 installed ${installed.version} 不一致`);
+  if (prov.artifactSHA256 !== tgzSha256) throw new Error(`provenance artifactSHA256 与 tgz SHA256 不一致`);
+  if (prov.npmIntegrity !== lockEntry.integrity) throw new Error(`provenance npmIntegrity 与 lock integrity 不一致`);
+  if (typeof prov.sourceHEAD !== 'string' || !/^[0-9a-f]{40}$/.test(prov.sourceHEAD)) throw new Error('provenance 缺少合法 sourceHEAD');
 
   return {
     name: installed.name,
@@ -442,9 +646,119 @@ export function packageMeta() {
     dependencySpec: dep,
     lockVersion: lockEntry.version,
     lockResolved: lockEntry.resolved,
+    lockIntegrity: lockEntry.integrity,
     tgzPath,
     tgzSha256,
+    sourceHEAD: prov.sourceHEAD,
   };
+}
+
+// ---------------------------------------------------------------------------
+// 任务追踪：done 一触发即记录终态（每次 taskId 一次），不因后续断言/等待丢失
+// ---------------------------------------------------------------------------
+
+class TaskTracker {
+  readonly starts: TaskStartRecord[] = [];
+  readonly outcomes: TaskDoneRecord[] = [];
+  private entries = new Map<string, { promise: Promise<TaskOutcome>; resolve: (o: TaskOutcome) => void; settled: boolean }>();
+  private readonly arbiter: Arbiter;
+  private readonly onDone = (o: TaskOutcome) => {
+    const e = this.entries.get(o.task.id);
+    if (!e) return;
+    this.outcomes.push(toDoneRecord(o));
+    e.settled = true;
+    e.resolve(o);
+  };
+
+  constructor(arbiter: Arbiter) {
+    this.arbiter = arbiter;
+    arbiter.on('done', this.onDone);
+  }
+
+  register(task: TaskInfo, request: TaskStartRecord['request'], scope: TaskStartRecord['scope']): Promise<TaskOutcome> {
+    this.starts.push({ task, request, scope, registeredAt: Date.now() });
+    let resolve!: (o: TaskOutcome) => void;
+    const promise = new Promise<TaskOutcome>((r) => { resolve = r; });
+    this.entries.set(task.id, { promise, resolve, settled: false });
+    return promise;
+  }
+
+  /** 所有已登记任务是否都已触发 done。 */
+  settled(): boolean {
+    return [...this.entries.values()].every((e) => e.settled);
+  }
+
+  /** 有界等待所有已登记任务 done；超时返回 false（视为清理失败）。 */
+  async settle(timeoutMs: number): Promise<boolean> {
+    const promises = [...this.entries.values()].map((e) => e.promise);
+    if (promises.length === 0) return true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); });
+    const all = Promise.all(promises).then(() => true);
+    try {
+      return await Promise.race([all, timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  dispose() {
+    this.arbiter.removeListener('done', this.onDone);
+    this.entries.clear();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 连接生命周期追踪：quitClient 判断「已观测到的断线」，避免等一个过去的事件
+// ---------------------------------------------------------------------------
+
+/** 只依赖公开事件追踪「连接是否已结束」；connected=false 不能证明已关闭（连接中也为 false）。 */
+export class ConnectionTracker {
+  private endedAt: number | null = null;
+  private spawnedAt: number | null = null;
+  private readonly onDisconnected = () => { this.endedAt = Date.now(); this.spawnedAt = null; };
+  private readonly onSpawn = () => { this.spawnedAt = Date.now(); this.endedAt = null; };
+
+  constructor(private readonly adapter: { on: (e: string, fn: () => void) => void; removeListener: (e: string, fn: () => void) => void }) {
+    adapter.on('disconnected', this.onDisconnected);
+    adapter.on('spawn', this.onSpawn);
+  }
+
+  /** 已观测到断线且其后未再 spawn。 */
+  alreadyEnded(): boolean {
+    return this.endedAt !== null && this.spawnedAt === null;
+  }
+
+  dispose() {
+    this.adapter.removeListener('disconnected', this.onDisconnected);
+    this.adapter.removeListener('spawn', this.onSpawn);
+  }
+}
+
+export interface QuitResult { ended: boolean; reason: string }
+
+/** 有界等待自己的 Bot 客户端真正结束；缺真实 end（超时）返回 ended=false 而非静默成功。 */
+export function quitClient(
+  adapter: { bot: { quit: () => void } | null; quit: () => void; on: (e: string, fn: (reason: string) => void) => void; removeListener: (e: string, fn: (reason: string) => void) => void },
+  tracker: ConnectionTracker,
+  timeoutMs: number,
+): Promise<QuitResult> {
+  return new Promise((resolve) => {
+    if (!adapter.bot) { resolve({ ended: true, reason: 'no bot' }); return; }
+    if (tracker.alreadyEnded()) { resolve({ ended: true, reason: 'already-observed end' }); return; }
+    let settled = false;
+    const finish = (ended: boolean, reason: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      adapter.removeListener('disconnected', onDisconnected);
+      resolve({ ended, reason });
+    };
+    const onDisconnected = (reason: string) => finish(true, `disconnected: ${reason}`);
+    const timer = setTimeout(() => finish(false, 'no end observed within deadline'), timeoutMs);
+    adapter.on('disconnected', onDisconnected);
+    adapter.quit();
+  });
 }
 
 export interface HarnessContext {
@@ -460,6 +774,8 @@ interface ScenarioDiag {
   recorder: FrameRecorder;
   corrections: ServerCorrectionRecorder;
   diag: WalkDiagnostics;
+  exec: ExecutionDiagnostics;
+  tasks: TaskTracker;
   ev: ScenarioEvidence;
 }
 
@@ -469,20 +785,50 @@ interface ScenarioDiag {
 
 async function rconPreflight(rcon: Rcon, expected: Set<string>): Promise<{ ok: boolean; raw: string; occupants: string[]; duplicateBot: boolean; unexpected: string[] }> {
   const raw = await rcon.send('list');
-  const occupants = parseRconList(raw); // 畸形响应在此抛错 → 预检 fail closed
+  const occupants = parseRconList(raw);
   const duplicateBot = occupants.filter((o) => o === config.mc.username).length > 0;
   const unexpected = occupants.filter((o) => !expected.has(o));
   return { ok: !duplicateBot && unexpected.length === 0, raw, occupants, duplicateBot, unexpected };
 }
 
-/** 在竞技场内用 RCON setblock 搭建 W2 平台并记录每一条操作（只写候选区内）。 */
-async function buildPlatformFixture(rcon: Rcon, platform: typeof ARENA.platform): Promise<string[]> {
-  const ops: string[] = [];
-  const { xMin, xMax, zMin, zMax, topY } = platform;
-  for (let x = xMin; x <= xMax; x++) for (let z = zMin; z <= zMax; z++) {
-    ops.push(await rcon.send(`setblock ${x} ${topY - 1} ${z} minecraft:stone`));
+/** 记录一条 RCON 命令与响应（命令与响应都落盘，不只响应）。 */
+interface RconOp { command: string; response: string }
+
+/**
+ * 在限定范围内搭建支撑面。逐格确认「将改写的格子 + 需要净空的格子」都为空，
+ * 任一占用即中止（不破坏既有方块/结构）；只写材料清单内的方块。
+ */
+async function buildSupportFixture(
+  rcon: Rcon,
+  footprint: { xMin: number; xMax: number; zMin: number; zMax: number },
+  feetY: number,
+  material: string,
+): Promise<RconOp[]> {
+  const ops: RconOp[] = [];
+  // 先读占位：支撑格（feetY-1）与净空格（feetY 与 feetY+1）都必须为空气才写入。
+  for (let x = footprint.xMin; x <= footprint.xMax; x++) {
+    for (let z = footprint.zMin; z <= footprint.zMax; z++) {
+      for (const y of [feetY - 1, feetY, feetY + 1]) {
+        const probe = await rcon.send(`getblock ${x} ${y} ${z}`);
+        ops.push({ command: `getblock ${x} ${y} ${z}`, response: probe });
+        if (!/minecraft:(air|cave_air|void_air)/.test(probe)) {
+          throw new Error(`夹具格被占用（x=${x} y=${y} z=${z} → ${probe}），中止而非破坏既有结构`);
+        }
+      }
+    }
+  }
+  // 全部确认后写支撑方块。
+  for (let x = footprint.xMin; x <= footprint.xMax; x++) {
+    for (let z = footprint.zMin; z <= footprint.zMax; z++) {
+      const command = `setblock ${x} ${feetY - 1} ${z} ${material}`;
+      ops.push({ command, response: await rcon.send(command) });
+    }
   }
   return ops;
+}
+
+async function teleportTo(rcon: Rcon, bot: Bot, pos: { x: number; y: number; z: number }): Promise<string> {
+  return rcon.send(`tp ${bot.username} ${pos.x} ${pos.y} ${pos.z}`);
 }
 
 /** 把 Bot 传送到指定脚位并等其落地（分数坐标，记录操作）。 */
@@ -496,67 +842,9 @@ async function teleportAndSettle(ctx: HarnessContext, ev: ScenarioEvidence, pos:
   }, 20_000, `${label} 落到指定点`);
 }
 
-async function teleportTo(rcon: Rcon, bot: Bot, pos: { x: number; y: number; z: number }): Promise<string> {
-  return rcon.send(`tp ${bot.username} ${pos.x} ${pos.y} ${pos.z}`);
-}
-
 // ---------------------------------------------------------------------------
 // 场景运行器外壳
 // ---------------------------------------------------------------------------
-
-async function runScenario(
-  ctx: HarnessContext,
-  body: (d: ScenarioDiag) => Promise<void>,
-): Promise<ScenarioEvidence> {
-  const ev: ScenarioEvidence = {
-    verdict: 'NOT_RUN', startedAt: Date.now(), taskIds: [], results: [],
-    frames: [], framesTruncated: false, controlLog: [], controlSnapshots: [], stopSnapshots: [], sampleLog: [], serverCorrections: [],
-  };
-  const recorder = new FrameRecorder(ctx.bot, () => ctx.arbiter.current?.id ?? null);
-  const corrections = new ServerCorrectionRecorder(ctx.bot);
-  const diag = new WalkDiagnostics(ctx.adapter, () => ctx.arbiter.current?.id ?? null, () => snapshotKeys(ctx.bot));
-  recorder.start();
-  corrections.start();
-  diag.wrap();
-  try {
-    await body({ recorder, corrections, diag, ev });
-    if (ev.verdict === 'NOT_RUN') ev.verdict = 'PASS';
-  } catch (e) {
-    ev.verdict = 'FAIL';
-    ev.error = (e as Error)?.message ?? String(e);
-  } finally {
-    // 场景失败也要取消并等待仍未结束的任务，防泄漏到下一场景影响后续判定。
-    try {
-      const active = ctx.arbiter.info();
-      if (active) {
-        const done = waitForTask(ctx.arbiter, active.id, 10_000);
-        ctx.arbiter.cancel('场景收尾：取消未完成任务');
-        await done;
-      }
-    } catch (ce) {
-      ev.cleanupError = (ce as Error)?.message ?? String(ce);
-    }
-    // 场景失败也要恢复宿主物理与诊断包装（W7 会关 physicsEnabled）。
-    ctx.bot.physicsEnabled = true;
-    ev.finishedAt = Date.now();
-    ev.durationMs = ev.finishedAt - ev.startedAt;
-    ev.frames = recorder.frames;
-    ev.framesTruncated = recorder.truncated;
-    ev.controlLog = diag.controlLog;
-    ev.stopSnapshots = diag.stopSnapshots;
-    ev.sampleLog = diag.sampleLog;
-    ev.serverCorrections = corrections.corrections;
-    recorder.stop();
-    corrections.stop();
-    diag.unwrap();
-  }
-  return ev;
-}
-
-/** 采集一段控制快照（含归属），用于在 stopAll 前后对照。 */
-function snapControl(ctx: HarnessContext, label: string, ev: ScenarioEvidence) {
-  ev.controlSnapshots.push({ ts: Date.now(), label, keys: snapshotKeys(ctx.bot), ownerTaskId: ctx.arbiter.current?.id ?? null });
-}
 
 function waitFor(cond: () => boolean, ms: number, label: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -568,167 +856,338 @@ function waitFor(cond: () => boolean, ms: number, label: string): Promise<void> 
   });
 }
 
+async function awaitOrTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`超时：${label}`)), ms); });
+  try {
+    return await Promise.race([p, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function snapControl(ctx: HarnessContext, label: string, ev: ScenarioEvidence) {
+  ev.controlSnapshots.push({ ts: Date.now(), label, keys: snapshotKeys(ctx.bot), ownerTaskId: ctx.arbiter.current?.id ?? null });
+}
+
+/** 从当前适配器状态取真实作用域（世界/维度/会话/存活/连接/观测就绪），不复制请求冒充观测。 */
+function actualScope(ctx: HarnessContext): TaskStartRecord['scope'] {
+  const s = ctx.adapter.state();
+  return { worldId: s.worldId, dim: s.dim, sessionId: s.sessionId, alive: s.alive, connected: s.connected, observationReady: s.observationReady };
+}
+
+/** 启动 walk_route 任务：捕获完整请求与真实作用域，登记任务 promise。 */
+function startWalkTask(
+  ctx: HarnessContext,
+  d: ScenarioDiag,
+  points: Vec3Like[],
+  deadlineMs: number,
+): { task: TaskInfo; done: Promise<TaskOutcome> } | { error: string } {
+  const scope = actualScope(ctx);
+  const started = ctx.arbiter.start({ skill: 'walk_route', args: { points, deadlineMs } }, 'user');
+  if (!started || 'error' in started) return { error: started && 'error' in started ? started.error : '未知' };
+  const done = d.tasks.register(started, { points, deadlineMs }, scope);
+  return { task: started, done };
+}
+
+async function runScenario(
+  ctx: HarnessContext,
+  body: (d: ScenarioDiag) => Promise<void>,
+): Promise<ScenarioEvidence> {
+  const ev: ScenarioEvidence = {
+    verdict: 'NOT_RUN', startedAt: Date.now(), taskStarts: [], results: [],
+    frames: [], framesTruncated: false, controlLog: [], controlSnapshots: [], stopSnapshots: [],
+    sampleLog: [], acceptedSamples: [], moves: [], serverCorrections: [],
+  };
+  const recorder = new FrameRecorder(ctx.bot, () => ctx.arbiter.current?.id ?? null);
+  const corrections = new ServerCorrectionRecorder(ctx.bot);
+  const diag = new WalkDiagnostics(ctx.adapter, () => ctx.arbiter.current?.id ?? null, () => snapshotKeys(ctx.bot));
+  const exec = new ExecutionDiagnostics();
+  const tasks = new TaskTracker(ctx.arbiter);
+  recorder.start();
+  corrections.start();
+  diag.wrap();
+  exec.wrap();
+  try {
+    await body({ recorder, corrections, diag, exec, tasks, ev });
+    if (ev.verdict === 'NOT_RUN') ev.verdict = 'PASS';
+  } catch (e) {
+    ev.verdict = 'FAIL';
+    ev.error = (e as Error)?.message ?? String(e);
+  } finally {
+    // 取消仍未结束的任务并等待所有登记任务 done；缺真实收尾即清理失败 → FAIL。
+    try {
+      const active = ctx.arbiter.info();
+      if (active) {
+        ctx.arbiter.cancel('场景收尾：取消未完成任务');
+      }
+      const settled = await tasks.settle(10_000);
+      if (!settled) throw new Error('已登记任务未在期限内全部结束');
+    } catch (ce) {
+      ev.cleanupError = (ce as Error)?.message ?? String(ce);
+      if (ev.verdict !== 'FAIL') ev.verdict = 'FAIL';
+    }
+    // 场景失败也要恢复宿主物理（W7 会关 physicsEnabled）。
+    ctx.bot.physicsEnabled = true;
+    ev.finishedAt = Date.now();
+    ev.durationMs = ev.finishedAt - ev.startedAt;
+    ev.frames = recorder.frames;
+    ev.framesTruncated = recorder.truncated;
+    ev.controlLog = diag.controlLog;
+    ev.stopSnapshots = diag.stopSnapshots;
+    ev.sampleLog = diag.sampleLog;
+    ev.acceptedSamples = exec.acceptedSamples;
+    ev.moves = exec.moves;
+    ev.serverCorrections = corrections.corrections;
+    ev.taskStarts = tasks.starts;
+    ev.results = tasks.outcomes;
+    recorder.stop();
+    corrections.stop();
+    diag.unwrap();
+    exec.unwrap();
+    tasks.dispose();
+  }
+  return ev;
+}
+
 // ---------------------------------------------------------------------------
-// 场景实现（下一阶段补齐场景级断言与容差；此处只采集真实证据骨架）
+// 场景实现
 // ---------------------------------------------------------------------------
 
-/** W1：同高三段相邻 X/Z 转弯，ARRIVED 且容差内，trace 为实测位置。 */
+/** W1：同高三段相邻 X/Z 转弯，ARRIVED 且容差内，每段从实测终点接续。 */
 async function scenarioW1(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   const ev = d.ev;
-  const s = ctx.adapter.state();
-  const p = s.pos, y = p.y;
+  const lane = WALK_LANE;
+  ev.extra = { lane, fixtureOps: await buildSupportFixture(ctx.rcon, { xMin: lane.xMin, xMax: lane.xMax, zMin: lane.zMin, zMax: lane.zMax }, lane.feetY, lane.material) };
+  await teleportAndSettle(ctx, ev, lane.start, 'W1 步行道起点');
+
+  const y = lane.feetY;
   const route = [
-    { x: p.x, y, z: p.z },
-    { x: p.x + 1, y, z: p.z },
-    { x: p.x + 1, y, z: p.z + 1 },
-    { x: p.x + 2, y, z: p.z + 1 },
+    { x: lane.start.x, y, z: lane.start.z },
+    { x: lane.start.x + 1, y, z: lane.start.z },
+    { x: lane.start.x + 1, y, z: lane.start.z + 1 },
+    { x: lane.start.x + 2, y, z: lane.start.z + 1 },
   ];
-  const started = ctx.arbiter.start({ skill: 'walk_route', args: { points: route } }, 'user');
-  if (!started || 'error' in started) throw new Error(`W1 启动失败：${started && 'error' in started ? started.error : '未知'}`);
-  ev.taskIds.push(started.id);
-  const o = await waitForTask(ctx.arbiter, started.id, 60_000);
-  ev.results.push(toTaskRecord(o));
+  const taskStartTs = Date.now();
+  const deadlineMs = Date.now() + 30_000;
+  const started = startWalkTask(ctx, d, route, deadlineMs);
+  if ('error' in started) throw new Error(`W1 启动失败：${started.error}`);
+  const o = await awaitOrTimeout(started.done, 60_000, 'W1 完成');
   if (o.result.status !== 'succeeded') throw new Error(`W1 未成功：status=${o.result.status} 摘要=${o.result.summary}`);
   const nav = navFromResult(o.result);
-  if (!nav || nav.outcome !== 'ARRIVED') throw new Error(`W1 未确认到达：outcome=${nav?.outcome} 摘要=${o.result.summary}`);
+  if (!isArrived(nav)) throw new Error(`W1 未确认到达：outcome=${nav?.outcome} 摘要=${o.result.summary}`);
   const finalTarget = route[route.length - 1]!;
-  const finalPos = nav.lastPosition;
+  const finalPos = nav!.lastPosition;
   const err = dist2(finalPos, finalTarget);
   const feetErr = Math.abs(finalPos.y - y);
   if (err > 0.12 || feetErr > 0.05) {
     throw new Error(`W1 到达但超容差：横向 ${err.toFixed(3)} (>0.12) 脚高 ${feetErr.toFixed(3)} (>0.05)`);
   }
-  ev.extra = { route, horizontalError: Number(err.toFixed(3)), feetError: Number(feetErr.toFixed(3)), onGroundAtArrival: nav.lastObservation?.onGround };
+  // 每段从实测终点接续：库的 move.from 是上一段实测位置，不是名义路点。
+  if (d.exec.moves.length > 1 && !segmentsContiguous(d.exec.moves)) {
+    throw new Error(`W1 段间不接续：${JSON.stringify(d.exec.moves.map((m) => ({ from: m.from, to: m.to })))}`);
+  }
+  // 全键释放必须在生产 stopAll 之前被捕获（stopSnapshots 非空即真实记录到释放前状态）。
+  if (d.diag.stopSnapshots.length === 0) throw new Error('W1 未捕获任何 stopAll 前全键快照');
+  ev.extra = {
+    ...ev.extra,
+    route, deadlineMs, taskStartTs,
+    horizontalError: Number(err.toFixed(3)), feetError: Number(feetErr.toFixed(3)),
+    onGroundAtArrival: nav!.lastObservation?.onGround,
+    segmentCount: d.exec.moves.length,
+  };
   ev.verdict = 'PASS';
 }
 
 /** W2：受控平台边缘、分数起终点、整条真实轨迹无坠落/失支撑。 */
 async function scenarioW2(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   const ev = d.ev;
-  const platform = ARENA.platform;
-  const start = { x: platform.xMin + 0.5, y: platform.topY, z: platform.zMin + 0.5 };
-  const target = { x: platform.xMax - 0.5, y: platform.topY, z: platform.zMin + 0.5 };
-  const route = adjacentRouteX(start, target);
-  ev.extra = { platform, start, target, route, fixtureOps: await buildPlatformFixture(ctx.rcon, platform) };
-  await teleportAndSettle(ctx, ev, start, 'W2 平台起点');
+  const p = W2_PLATFORM;
+  const route = [p.start, { ...p.target }];
+  ev.extra = { platform: p, route, fixtureOps: await buildSupportFixture(ctx.rcon, { xMin: p.xMin, xMax: p.xMax, zMin: p.zMin, zMax: p.zMax }, p.feetY, p.material) };
+  await teleportAndSettle(ctx, ev, p.start, 'W2 平台起点');
 
-  const started = ctx.arbiter.start({ skill: 'walk_route', args: { points: route } }, 'user');
-  if (!started || 'error' in started) throw new Error(`W2 启动失败：${started && 'error' in started ? started.error : '未知'}`);
-  ev.taskIds.push(started.id);
-  const o = await waitForTask(ctx.arbiter, started.id, 60_000);
-  ev.results.push(toTaskRecord(o));
+  // 只在 teleport 落定、任务启动前开始计量；搭设/传送帧单独保留，不进支撑断言。
+  const taskStartTs = Date.now();
+  const deadlineMs = Date.now() + 30_000;
+  const started = startWalkTask(ctx, d, route, deadlineMs);
+  if ('error' in started) throw new Error(`W2 启动失败：${started.error}`);
+  const o = await awaitOrTimeout(started.done, 60_000, 'W2 完成');
   if (o.result.status !== 'succeeded') throw new Error(`W2 未成功：status=${o.result.status} 摘要=${o.result.summary}`);
   const nav = navFromResult(o.result);
-  if (!nav || nav.outcome !== 'ARRIVED') throw new Error(`W2 未到达：outcome=${nav?.outcome} 摘要=${o.result.summary}`);
-  // 整条轨迹无坠落/失支撑：所有帧脚高不得低于平台顶、且全部 onGround。
-  const frames = d.recorder.frames;
-  ev.trajectory = summarizeTrajectory(frames);
-  const minFeet = (ev.trajectory.minFeetY as number) ?? NaN;
-  const airborne = (ev.trajectory.airborneFrames as number) ?? 0;
-  if (!Number.isFinite(minFeet) || minFeet < platform.topY - 0.05 || airborne > 0) {
+  if (!isArrived(nav)) throw new Error(`W2 未到达：outcome=${nav?.outcome} 摘要=${o.result.summary}`);
+
+  const motionFrames = framesSince(d.recorder.frames, taskStartTs);
+  ev.trajectory = summarizeTrajectory(motionFrames);
+  const footprint = { xMin: p.xMin, xMax: p.xMax, zMin: p.zMin, zMax: p.zMax };
+  if (motionFrames.length === 0) throw new Error('W2 无运动帧');
+  if (!allGroundedAt(motionFrames, p.feetY)) {
+    const minFeet = (ev.trajectory.minFeetY as number) ?? NaN;
+    const airborne = (ev.trajectory.airborneFrames as number) ?? 0;
     throw new Error(`W2 轨迹失支撑：minFeetY=${minFeet} airborneFrames=${airborne}`);
   }
-  ev.extra = { ...ev.extra, arrival: nav };
+  if (platformEscaped(motionFrames, footprint)) {
+    throw new Error(`W2 逃出平台足迹：bounds=${JSON.stringify(ev.trajectory)}`);
+  }
+  ev.extra = { ...ev.extra, arrival: nav, taskStartTs };
   ev.verdict = 'PASS';
 }
 
 /** W6：移动中取消并立即交接给新 walk 任务，收集两任务 id 与结果，检查旧回调是否复活/清键。 */
 async function scenarioW6(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   const ev = d.ev;
-  await teleportAndSettle(ctx, ev, WALK_LANE.start, 'W6 步行道起点');
-  const s = ctx.adapter.state();
-  const p = s.pos, y = p.y;
-  const routeA = Array.from({ length: 10 }, (_, i) => ({ x: p.x + i, y, z: p.z }));
-  const a = ctx.arbiter.start({ skill: 'walk_route', args: { points: routeA } }, 'user');
-  if (!a || 'error' in a) throw new Error(`W6 任务A启动失败：${a && 'error' in a ? a.error : '未知'}`);
-  ev.taskIds.push(a.id);
-  const aDone = waitForTask(ctx.arbiter, a.id, 60_000);
+  const lane = WALK_LANE;
+  ev.extra = { lane, fixtureOps: await buildSupportFixture(ctx.rcon, { xMin: lane.xMin, xMax: lane.xMax, zMin: lane.zMin, zMax: lane.zMax }, lane.feetY, lane.material) };
+  await teleportAndSettle(ctx, ev, lane.start, 'W6 步行道起点');
+
+  const y = lane.feetY;
+  const routeA = Array.from({ length: 10 }, (_, i) => ({ x: lane.start.x + i, y, z: lane.start.z }));
+  const a = startWalkTask(ctx, d, routeA, Date.now() + 30_000);
+  if ('error' in a) throw new Error(`W6 任务A启动失败：${a.error}`);
+  const aDone = a.done;
   const moveStart = ctx.adapter.state().pos;
   await waitFor(() => dist2(ctx.adapter.state().pos, moveStart) > 0.5, 15_000, 'W6 任务A开始移动');
 
   snapControl(ctx, 'before-arbiter-cancel', ev);
+  const cancelTs = Date.now();
   ctx.arbiter.cancel('W6 取消并交接');
   snapControl(ctx, 'after-arbiter-cancel', ev);
 
-  const routeB = [{ x: p.x, y, z: p.z }, { x: p.x + 1, y, z: p.z }, { x: p.x + 2, y, z: p.z }];
-  const b = ctx.arbiter.start({ skill: 'walk_route', args: { points: routeB } }, 'user');
-  if (!b || 'error' in b) throw new Error(`W6 任务B启动失败：${b && 'error' in b ? b.error : '未知'}`);
-  ev.taskIds.push(b.id);
+  // 立即用交接点实测位置作为 B 起点，不是 A 的原始 p。
+  const handoff = ctx.adapter.state().pos;
+  const routeB = [{ x: handoff.x, y, z: handoff.z }, { x: handoff.x + 1, y, z: handoff.z }, { x: handoff.x + 2, y, z: handoff.z }];
+  const b = startWalkTask(ctx, d, routeB, Date.now() + 30_000);
+  if ('error' in b) throw new Error(`W6 任务B启动失败：${b.error}`);
+  const bDone = b.done;
 
-  const oA = await aDone;
-  ev.results.push(toTaskRecord(oA));
-  const oB = await waitForTask(ctx.arbiter, b.id, 60_000);
-  ev.results.push(toTaskRecord(oB));
+  // 两个 done promise 都在 await 之前持有，避免丢失快的 B 事件。
+  const [oA, oB] = await Promise.all([aDone, bDone]);
 
   snapControl(ctx, 'after-both-complete', ev);
 
   if (oA.result.status !== 'cancelled') throw new Error(`W6 任务A未以 cancelled 结束：status=${oA.result.status} 摘要=${oA.result.summary}`);
   if (oB.result.status !== 'succeeded') throw new Error(`W6 任务B未成功：status=${oB.result.status} 摘要=${oB.result.summary}`);
-  // 旧回调复活检查：任务 B 完成后，任何归属为任务 A 的 forward=true 写入即为复活/清键。
-  const resurrected = d.diag.controlLog.filter((c) => c.op === 'set' && c.name === 'forward' && c.value === true && c.ownerTaskId === a.id);
+  const navA = navFromResult(oA.result);
+  if (!hasPartialPosition(navA)) throw new Error('W6 任务A取消未保留实测部分位移（lastPosition 缺失）');
+
+  // 旧回调复活检查：取消后（cancelTs 之后）归属 A 的 forward=true 写入即为复活/清键。
+  const resurrected = lateForwardWritesByOwner(d.diag.controlLog, a.task.id, cancelTs);
   ev.extra = { ...ev.extra,
-    taskA: a.id, taskB: b.id,
+    taskA: a.task.id, taskB: b.task.id,
+    cancelTs, handoff,
     finalKeys: snapshotKeys(ctx.bot),
     lateOldForwardWrites: resurrected.length,
-    injectedOldCallback: false,
-    injectionNote: '本轮未注入伪造旧回调；仅观测真实旧任务迟到回调（归属见 controlLog.ownerTaskId）',
   };
   if (resurrected.length > 0) throw new Error(`W6 检测到 ${resurrected.length} 次旧任务A迟到 forward=true（复活/清键）`);
   ev.verdict = 'PASS';
 }
 
-/** W7：独立超时、宿主帧交付暂停（标注为宿主注入而非服务端停摆）、移动中真实断线；有界释放。 */
+/** W7：独立超时（7a）、宿主帧交付暂停（7b）、移动中真实断线（7c）；各自独立判定。 */
 async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   const ev = d.ev;
-  await teleportAndSettle(ctx, ev, WALK_LANE.start, 'W7 步行道起点');
-  const s = ctx.adapter.state();
-  const y = s.pos.y;
+  const lane = WALK_LANE;
+  ev.extra = { lane, fixtureOps: await buildSupportFixture(ctx.rcon, { xMin: lane.xMin, xMax: lane.xMax, zMin: lane.zMin, zMax: lane.zMax }, lane.feetY, lane.material) };
+  await teleportAndSettle(ctx, ev, lane.start, 'W7 步行道起点');
+  const y = lane.feetY;
 
-  // 7a：独立超时（短 deadline，有界终止，保留部分位移）。
-  const pA = ctx.adapter.state().pos;
-  const routeTimeout = Array.from({ length: 8 }, (_, i) => ({ x: pA.x + i, y, z: pA.z }));
-  const t = ctx.arbiter.start({ skill: 'walk_route', args: { points: routeTimeout, deadlineMs: 2500 } }, 'user');
-  if (!t || 'error' in t) throw new Error(`W7a 启动失败：${t && 'error' in t ? t.error : '未知'}`);
-  ev.taskIds.push(t.id);
-  const oTimeout = await waitForTask(ctx.arbiter, t.id, 20_000);
-  ev.results.push(toTaskRecord(oTimeout));
-  ev.extra = { ...ev.extra, timeout: { status: oTimeout.result.status, failureCode: oTimeout.result.failureCode, summary: oTimeout.result.summary, lastPosition: navFromResult(oTimeout.result)?.lastPosition } };
+  const subcases: Record<string, { verdict: Verdict; error?: string; [k: string]: unknown }> = {};
 
-  // 7b：宿主帧交付暂停（宿主注入，非服务端停摆）：关客户端物理后无帧送达，
-  // 取消必须不依赖“再来一帧”即可终止并释放控制。
-  const pB = ctx.adapter.state().pos;
-  const routePause = Array.from({ length: 8 }, (_, i) => ({ x: pB.x + i, y, z: pB.z }));
-  const t2 = ctx.arbiter.start({ skill: 'walk_route', args: { points: routePause } }, 'user');
-  if (!t2 || 'error' in t2) throw new Error(`W7b 启动失败：${t2 && 'error' in t2 ? t2.error : '未知'}`);
-  ev.taskIds.push(t2.id);
-  const t2Done = waitForTask(ctx.arbiter, t2.id, 60_000);
-  const pauseStart = ctx.adapter.state().pos;
-  await waitFor(() => dist2(ctx.adapter.state().pos, pauseStart) > 0.5, 15_000, 'W7b 开始移动');
-  snapControl(ctx, 'before-paused-frame-cancel', ev);
-  ctx.bot.physicsEnabled = false; // 宿主帧注入：暂停帧交付，服务端仍在运行。
-  const pausedAt = ctx.adapter.state().pos;
-  ctx.arbiter.cancel('W7 暂停帧后取消');
-  const oPause = await t2Done;
-  ctx.bot.physicsEnabled = true;
-  ev.results.push(toTaskRecord(oPause));
-  ev.extra = { ...ev.extra, pausedFrame: { hostInjection: 'bot.physicsEnabled=false（宿主帧注入，非服务端停摆）', status: oPause.result.status, lastPosition: navFromResult(oPause.result)?.lastPosition, pausedAt } };
-  if (oPause.result.status !== 'cancelled') throw new Error(`W7b 暂停帧后未以 cancelled 结束：status=${oPause.result.status}`);
+  // --- 7a：独立超时（epoch 期限，非字面 2500；真实移动后再 TIMEOUT，保留部分位移） ---
+  try {
+    const budget = 2500;
+    const pA = ctx.adapter.state().pos;
+    const routeTimeout = Array.from({ length: 8 }, (_, i) => ({ x: pA.x + i, y, z: pA.z }));
+    const deadlineMs = Date.now() + budget;
+    const t = startWalkTask(ctx, d, routeTimeout, deadlineMs);
+    if ('error' in t) throw new Error(`W7a 启动失败：${t.error}`);
+    const oTimeout = await awaitOrTimeout(t.done, 20_000, 'W7a 完成');
+    const nav = navFromResult(oTimeout.result);
+    const timeoutTs = Date.now();
+    subcases.a = {
+      verdict: 'NOT_RUN', deadlineMs, budget, timeoutObservedAt: timeoutTs,
+      status: oTimeout.result.status, failureCode: oTimeout.result.failureCode,
+      summary: oTimeout.result.summary, outcome: nav?.outcome, lastPosition: nav?.lastPosition,
+    };
+    if (oTimeout.result.status !== 'failed' || nav?.outcome !== 'TIMEOUT') {
+      throw new Error(`W7a 未以真实 TIMEOUT 结束：status=${oTimeout.result.status} outcome=${nav?.outcome}`);
+    }
+    if (!hasPartialPosition(nav)) throw new Error('W7a TIMEOUT 未保留实测部分位移');
+    // 部分位移必须与最后一条已接受样本一致（非初始位置）。
+    const accepted = d.exec.acceptedSamples.filter((s) => s.lastPosition !== null).map((s) => s.lastPosition!);
+    if (!partialMatchesLastSample(nav, accepted)) throw new Error('W7a 部分位移与最后已接受样本不一致');
+    if (timeoutTs > deadlineMs + 1000) throw new Error('W7a 实际结束远超期限');
+    subcases.a = { ...(subcases.a as object), verdict: 'PASS' };
+  } catch (e) {
+    subcases.a = { ...(subcases.a as object), verdict: 'FAIL', error: (e as Error)?.message ?? String(e) };
+  }
 
-  // 7c：移动中真实断线（只断客户端，不动共享服务器）。
-  const pC = ctx.adapter.state().pos;
-  const routeDisc = Array.from({ length: 8 }, (_, i) => ({ x: pC.x + i, y, z: pC.z }));
-  const t3 = ctx.arbiter.start({ skill: 'walk_route', args: { points: routeDisc } }, 'user');
-  if (!t3 || 'error' in t3) throw new Error(`W7c 启动失败：${t3 && 'error' in t3 ? t3.error : '未知'}`);
-  ev.taskIds.push(t3.id);
-  const t3Done = waitForTask(ctx.arbiter, t3.id, 30_000);
-  const discStart = ctx.adapter.state().pos;
-  await waitFor(() => dist2(ctx.adapter.state().pos, discStart) > 0.5, 15_000, 'W7c 开始移动');
-  const lastValid = ctx.adapter.state().pos;
-  snapControl(ctx, 'before-client-disconnect', ev);
-  ctx.adapter.quit(); // 断客户端并置 stopped，防止场景内自动重连；共享服务器不受影响。
-  const oDisc = await t3Done;
-  ev.results.push(toTaskRecord(oDisc));
-  ev.extra = { ...ev.extra, disconnect: { status: oDisc.result.status, lastValidMeasuredPosition: lastValid, summary: oDisc.result.summary } };
+  // --- 7b：宿主帧交付暂停（宿主注入，非服务端停摆）：关物理后无帧、取消不依赖新帧 ---
+  try {
+    const pB = ctx.adapter.state().pos;
+    const routePause = Array.from({ length: 8 }, (_, i) => ({ x: pB.x + i, y, z: pB.z }));
+    const t2 = startWalkTask(ctx, d, routePause, Date.now() + 30_000);
+    if ('error' in t2) throw new Error(`W7b 启动失败：${t2.error}`);
+    const t2Done = t2.done;
+    const pauseStart = ctx.adapter.state().pos;
+    await waitFor(() => dist2(ctx.adapter.state().pos, pauseStart) > 0.5, 15_000, 'W7b 开始移动');
+    snapControl(ctx, 'before-paused-frame-cancel', ev);
+    const baseline = d.recorder.frames.length;
+    ctx.bot.physicsEnabled = false; // 宿主帧注入：暂停帧交付，服务端仍在运行。
+    const pausedAt = ctx.adapter.state().pos;
+    const holdMs = 250;
+    await new Promise((r) => setTimeout(r, holdMs));
+    const framesDuringHold = d.recorder.frames.length - baseline;
+    ctx.arbiter.cancel('W7 暂停帧后取消');
+    const cancelTs = Date.now();
+    const oPause = await awaitOrTimeout(t2Done, 10_000, 'W7b 取消完成');
+    ctx.bot.physicsEnabled = true;
+    const nav = navFromResult(oPause.result);
+    subcases.b = {
+      verdict: 'NOT_RUN', hostInjection: 'bot.physicsEnabled=false（宿主帧注入，非服务端停摆）',
+      baselineFrames: baseline, holdMs, framesDuringHold, cancelTs,
+      status: oPause.result.status, lastPosition: nav?.lastPosition, pausedAt,
+    };
+    if (framesDuringHold !== 0) throw new Error(`W7b 暂停期间仍有 ${framesDuringHold} 帧送达`);
+    if (oPause.result.status !== 'cancelled') throw new Error(`W7b 暂停帧后未以 cancelled 结束：status=${oPause.result.status}`);
+    if (!hasPartialPosition(nav)) throw new Error('W7b 取消未保留部分位移');
+    subcases.b = { ...(subcases.b as object), verdict: 'PASS' };
+  } catch (e) {
+    ctx.bot.physicsEnabled = true;
+    subcases.b = { ...(subcases.b as object), verdict: 'FAIL', error: (e as Error)?.message ?? String(e) };
+  }
+
+  // --- 7c：移动中真实断线（只断客户端，服务器存活）：生命周期取消、保留部分位移 ---
+  try {
+    const pC = ctx.adapter.state().pos;
+    const routeDisc = Array.from({ length: 8 }, (_, i) => ({ x: pC.x + i, y, z: pC.z }));
+    const t3 = startWalkTask(ctx, d, routeDisc, Date.now() + 30_000);
+    if ('error' in t3) throw new Error(`W7c 启动失败：${t3.error}`);
+    const t3Done = t3.done;
+    const discStart = ctx.adapter.state().pos;
+    await waitFor(() => dist2(ctx.adapter.state().pos, discStart) > 0.5, 15_000, 'W7c 开始移动');
+    const lastValid = ctx.adapter.state().pos;
+    snapControl(ctx, 'before-client-disconnect', ev);
+    ctx.adapter.quit(); // 断客户端并置 stopped；共享服务器不受影响。
+    const oDisc = await awaitOrTimeout(t3Done, 30_000, 'W7c 断线完成');
+    const nav = navFromResult(oDisc.result);
+    subcases.c = {
+      verdict: 'NOT_RUN', status: oDisc.result.status, outcome: nav?.outcome,
+      lastValidMeasuredPosition: lastValid, lastPosition: nav?.lastPosition, summary: oDisc.result.summary,
+    };
+    if (oDisc.result.status !== 'cancelled') throw new Error(`W7c 断线未以 cancelled 结束：status=${oDisc.result.status} 摘要=${oDisc.result.summary}`);
+    if (!hasPartialPosition(nav)) throw new Error('W7c 断线未保留实测部分位移');
+    const accepted = d.exec.acceptedSamples.filter((s) => s.lastPosition !== null).map((s) => s.lastPosition!);
+    if (!partialMatchesLastSample(nav, accepted)) throw new Error('W7c 部分位移与最后已接受样本不一致');
+    subcases.c = { ...(subcases.c as object), verdict: 'PASS' };
+  } catch (e) {
+    subcases.c = { ...(subcases.c as object), verdict: 'FAIL', error: (e as Error)?.message ?? String(e) };
+  }
+
+  ev.extra = { ...ev.extra, subcases };
+  const allPass = Object.values(subcases).every((s) => s.verdict === 'PASS');
+  if (!allPass) {
+    throw new Error(`W7 子场景未全过：${JSON.stringify(Object.fromEntries(Object.entries(subcases).map(([k, s]) => [k, s.verdict])))}`);
+  }
   ev.verdict = 'PASS';
 }
 
@@ -736,7 +1195,7 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
 // 主流程
 // ---------------------------------------------------------------------------
 
-/** 等待 spawn，超时/断线都清理监听器与定时器（不留悬挂句柄）。 */
+/** 等待 spawn，超时/断线都清理监听器与定时器。 */
 function waitForSpawn(adapter: MineflayerAdapter, timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
     const onSpawn = () => { cleanup(); resolve(); };
@@ -749,25 +1208,6 @@ function waitForSpawn(adapter: MineflayerAdapter, timeoutMs: number): Promise<vo
     };
     adapter.on('spawn', onSpawn);
     adapter.on('disconnected', onDisconnect);
-  });
-}
-
-/** 有界等待自己的 Bot 客户端真正结束（quit 后 bot 'end' → disconnected），超时按诊断超时处理。 */
-function quitClient(adapter: MineflayerAdapter, timeoutMs: number): Promise<void> {
-  return new Promise((resolve) => {
-    if (!adapter.bot) { resolve(); return; }
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      adapter.removeListener('disconnected', onDisconnected);
-      resolve();
-    };
-    const onDisconnected = () => finish();
-    const timer = setTimeout(finish, timeoutMs);
-    adapter.on('disconnected', onDisconnected);
-    adapter.quit();
   });
 }
 
@@ -806,23 +1246,22 @@ async function main() {
   let adapter: MineflayerAdapter | null = null;
   let rcon: Rcon | null = null;
   let memory: WorldMemory | null = null;
+  let tracker: ConnectionTracker | null = null;
 
   try {
-    // 源元数据先校验：git 失败或包来源不一致都 fail（写进 fatalError → 失败退出）。
     evidence.commit = gitMeta();
     evidence.package = packageMeta();
 
     const bus = new EventBus();
     adapter = new MineflayerAdapter(config, bus);
     const vision = new Vision(adapter, config.vision);
-    // runId 隔离记忆路径：不覆盖现有 world-memory。
     memory = new WorldMemory(path.join(evidenceDir, 'world-memory.json'));
     const arbiter = new Arbiter(adapter, memory, bus, vision);
     rcon = new Rcon(config.observer.rconHost, config.observer.rconPort, config.observer.rconPassword);
+    tracker = new ConnectionTracker(adapter);
 
     const expected = new Set([config.observer.player, ...config.observer.admins, config.mc.username].filter(Boolean));
 
-    // RCON 预检：确认无意外在线者 / 重复 Bot 后再启动 Bot；畸形 list 响应在此 fail closed。
     const preflight = await rconPreflight(rcon, expected);
     evidence.preflight = preflight;
     if (!preflight.ok) throw new Error(`RCON 预检未通过：重复Bot=${preflight.duplicateBot} 意外在线=${JSON.stringify(preflight.unexpected)} 在线=${JSON.stringify(preflight.occupants)}`);
@@ -837,20 +1276,30 @@ async function main() {
       W1: scenarioW1, W2: scenarioW2, W6: scenarioW6, W7: scenarioW7,
     };
 
+    let stopped = false;
     for (const id of ALL_SCENARIOS) {
-      if (id === 'W3') { (evidence.scenarios as Record<string, unknown>).W3 = { verdict: 'NOT_RUN', note: '引用 C1 离线 irregular 子步矩阵证据，本轮不联机运行' }; continue; }
-      if (id === 'W4' || id === 'W5') { (evidence.scenarios as Record<string, unknown>)[id] = { verdict: 'NOT_RUN', note: '留待下一阶段' }; continue; }
-      if (!selector.includes(id)) { (evidence.scenarios as Record<string, unknown>)[id] = { verdict: 'NOT_RUN', note: '未选择' }; continue; }
-      (evidence.scenarios as Record<string, unknown>)[id] = await runScenario(ctx, (d) => scenarioMap[id]!(ctx, d));
+      const scenarios = evidence.scenarios as Record<string, unknown>;
+      if (UNSUPPORTED.includes(id)) {
+        scenarios[id] = { verdict: 'NOT_RUN', note: id === 'W3' ? '引用 C1 离线 irregular 子步矩阵证据，本轮不联机运行' : '留待下一阶段' };
+        continue;
+      }
+      if (stopped) { scenarios[id] = { verdict: 'NOT_RUN', note: '前一场景清理失败，已停止后续场景' }; continue; }
+      if (!selector.includes(id)) { scenarios[id] = { verdict: 'NOT_RUN', note: '未选择' }; continue; }
+      const ev = await runScenario(ctx, (d) => scenarioMap[id]!(ctx, d));
+      scenarios[id] = ev;
+      if (ev.cleanupError) stopped = true;
     }
   } catch (e) {
     evidence.fatalError = errorMessage(e);
   } finally {
-    // 清理只关自己的 Bot/RCON/记忆：逐项尝试，失败记为结构化清理错误而非静默吞掉。
     if (adapter?.bot) { try { (adapter.bot as Bot).physicsEnabled = true; } catch (e) { cleanupErrors.push({ step: 'restore-physics', message: errorMessage(e) }); } }
-    if (adapter) { try { await quitClient(adapter, 5000); } catch (e) { cleanupErrors.push({ step: 'quit-client', message: errorMessage(e) }); } }
+    if (adapter && tracker) {
+      const q = await quitClient(adapter, tracker, 5000);
+      if (!q.ended) cleanupErrors.push({ step: 'quit-client', message: q.reason });
+    }
     if (rcon) { try { rcon.close(); } catch (e) { cleanupErrors.push({ step: 'close-rcon', message: errorMessage(e) }); } }
     if (memory) { try { memory.close(); } catch (e) { cleanupErrors.push({ step: 'close-memory', message: errorMessage(e) }); } }
+    tracker?.dispose();
   }
 
   const scenariosOk = Object.values(evidence.scenarios as Record<ScenarioId, ScenarioEvidence | { verdict: Verdict }>)
@@ -863,7 +1312,6 @@ async function main() {
   fs.writeFileSync(file, JSON.stringify(evidence, null, 2) + '\n');
   console.log(`[accept] 证据已保存：${file}`);
 
-  // 用 process.exitCode（而非 process.exit）反映整体结果，让事件循环自然排空、不掩盖未收尾工作。
   process.exitCode = evidence.ok ? 0 : 1;
 }
 
