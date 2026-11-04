@@ -1940,7 +1940,7 @@ test('ExecutionDiagnostics：observeBatch 返回原 ChangeReport；loop.observe 
   }
 });
 
-test('真实 SharedSpatialSession 暂停：生命周期报告有稳定ID且非Vision，旧loop取消/OPEN失效，证据格STALE且resume不伪复鲜', async () => {
+test('真实 SharedSpatialSession 暂停：生命周期报告有稳定ID且非Vision，旧loop取消/OPEN失效，证据格STALE且resume不伪复鲜', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'walk-pause-'));
   const dbPath = path.join(dir, 'spatial.sqlite');
   const world = 'walk-pause-world';
@@ -1952,6 +1952,9 @@ test('真实 SharedSpatialSession 暂停：生命周期报告有稳定ID且非Vi
   });
   exec.wrap();
   let svc: SharedSpatialSession | null = null;
+  let shutdownResult: ShutdownResult | null = null;
+  let shutdownAwaitError: unknown = null;
+  let primaryFailure: unknown = null;
   try {
     svc = await SharedSpatialSession.open({ worldId: world, databasePath: dbPath, timeoutMs: 5000, now });
     svc.beginSession({ worldId: world, dim, sessionId: 's1' });
@@ -2035,10 +2038,31 @@ test('真实 SharedSpatialSession 暂停：生命周期报告有稳定ID且非Vi
     assert.equal(cellAfterResume.observedAt, cellBefore.observedAt);
     assert.equal(cellAfterResume.sequence, cellBefore.sequence);
     assert.equal(cellAfterResume.sessionId, cellBefore.sessionId);
+  } catch (error) {
+    primaryFailure = error;
+    throw error;
   } finally {
     exec.unwrap();
-    if (svc !== null) await svc.shutdown();
-    fs.rmSync(dir, { recursive: true, force: true });
+    if (svc !== null && shutdownResult === null) {
+      try { shutdownResult = await svc.shutdown(); } catch (error) { shutdownAwaitError = error; }
+    }
+    const shutdown = svc === null ? null : spatialShutdownRecord(shutdownResult, null, shutdownAwaitError, world);
+    const shutdownOk = shutdown !== null && shutdown.ok;
+    if (shutdownOk) {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch (error) {
+        const message = `关闭已确认但删除 fixture 失败：${dir}（${String(error)}）`;
+        if (primaryFailure === null) throw error;
+        t.diagnostic(message);
+      }
+    } else {
+      const detail = `shutdown=${JSON.stringify(shutdown)}`
+        + ` awaitError=${shutdownAwaitError instanceof Error ? shutdownAwaitError.message : String(shutdownAwaitError)}`;
+      const message = `未确认关闭，保留 fixture：${dir}（${detail}）`;
+      if (primaryFailure === null) throw new Error(message, { cause: shutdownAwaitError });
+      t.diagnostic(message);
+    }
   }
 });
 
