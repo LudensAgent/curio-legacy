@@ -59,6 +59,7 @@ import {
   quitClient,
   segmentsFollowMeasured,
   snapshotKeys,
+  spatialShutdownRecord,
   summarizeTrajectory,
   TaskTracker,
   vecEqual,
@@ -76,6 +77,7 @@ import {
 } from '../scripts/walk-acceptance.ts';
 import { WalkMoveExecutor, walkCollisionProvider } from '../src/adapter/walk-route.ts';
 import type { TaskOutcome } from '../src/arbiter/arbiter.ts';
+import { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 
 const emptyKeys = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
 
@@ -1864,4 +1866,47 @@ test('ExecutionDiagnostics：observeBatch 返回原 ChangeReport，并以 WeakMa
   } finally {
     exec.unwrap();
   }
+});
+
+test('spatialShutdownRecord：真实 SQLite 会话正常关停由最终 checkpoint/close 证据确认', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'walk-acceptance-spatial-'));
+  const databasePath = path.join(dir, 'spatial.sqlite');
+  const spatial = await SharedSpatialSession.open({ worldId: 'walk-acceptance-world', databasePath, timeoutMs: 5000 });
+  try {
+    const result = await spatial.shutdown();
+    const record = spatialShutdownRecord(result, null, null, 'walk-acceptance-world');
+    assert.equal(record.ok, true, JSON.stringify(record));
+    assert.deepEqual(record.problems, []);
+    assert.equal(record.diagnostics?.checkpoint?.checkpointId, record.diagnostics?.close?.lastConfirmedCheckpointId);
+    assert.equal(record.diagnostics?.close?.completed, true);
+    assert.equal(record.diagnostics?.close?.dirty, false);
+    assert.equal(record.diagnostics?.checkpoint?.worldId, 'walk-acceptance-world');
+    assert.equal(record.diagnostics?.primarySaveError, null);
+    assert.equal(record.diagnostics?.cancelError, null);
+    assert.equal(record.diagnostics?.closeError, null);
+    assert.ok(fs.existsSync(databasePath), '正常关停不删除本次证据 DB');
+
+    const wrongWorld = spatialShutdownRecord(result, null, null, 'another-world');
+    assert.equal(wrongWorld.ok, false, 'checkpoint 世界不符不得算成功');
+    assert.ok(wrongWorld.problems.includes('checkpoint_world_mismatch'));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('spatialShutdownRecord：shutdown 调用/等待抛错或结果缺失都保留原始错误并判失败', () => {
+  const callError = Object.assign(new Error('shutdown call failed'), { kind: 'data' });
+  const missing = spatialShutdownRecord(null, callError, null, 'world');
+  assert.equal(missing.ok, false);
+  assert.equal(missing.diagnostics, null);
+  assert.deepEqual(missing.serviceCallError, { kind: 'data', name: 'Error', message: 'shutdown call failed' });
+  assert.equal(missing.serviceAwaitError, null);
+  assert.ok(missing.problems.includes('shutdown_result_missing'));
+  assert.ok(missing.problems.includes('shutdown_call_error'));
+
+  const awaitError = new Error('shutdown await failed');
+  const rejected = spatialShutdownRecord(null, null, awaitError, 'world');
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.serviceAwaitError?.message, 'shutdown await failed');
+  assert.ok(rejected.problems.includes('shutdown_await_error'));
 });

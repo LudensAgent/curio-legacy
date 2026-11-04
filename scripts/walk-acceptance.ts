@@ -46,6 +46,14 @@ import { Rcon } from '../src/observer/rcon.ts';
 import type { SkillResult } from '../src/skills/types.ts';
 import type { Vec3Like } from '../src/adapter/types.ts';
 import { WalkMoveExecutor, type WalkBody, type WalkTick } from '../src/adapter/walk-route.ts';
+import { SharedSpatialSession, type ShutdownResult } from '../src/spatial/shared-session.ts';
+import {
+  classifySpatialShutdown,
+  errorFacts,
+  spatialShutdownDiagnostics,
+  type ErrorFacts,
+  type SpatialShutdownDiagnostics,
+} from '../src/spatial/host-shutdown.ts';
 
 // ---------------------------------------------------------------------------
 // 类型与常量
@@ -2230,12 +2238,49 @@ export function quitClient(
   });
 }
 
+/** 关停证据：分类、结构化诊断与调用/等待错误各自保留，任一失败都不得算作已关停。 */
+export interface SpatialShutdownRecord {
+  ok: boolean;
+  problems: string[];
+  diagnostics: SpatialShutdownDiagnostics | null;
+  serviceCallError: ErrorFacts | null;
+  serviceAwaitError: ErrorFacts | null;
+}
+
+/**
+ * 汇总真实 SharedSpatialSession.shutdown 结果。shutdown 调用抛错或 promise 拒绝时
+ * 没有可信的 checkpoint/close 结果，只能如实记为未确认；只有分类通过、最终
+ * checkpoint 被 close 确认，且调用/等待都没有错误时才 ok。
+ */
+export function spatialShutdownRecord(
+  result: ShutdownResult | null,
+  serviceCallError: unknown,
+  serviceAwaitError: unknown,
+  expectedWorldId: string,
+): SpatialShutdownRecord {
+  const callError = serviceCallError === null ? null : errorFacts(serviceCallError);
+  const awaitError = serviceAwaitError === null ? null : errorFacts(serviceAwaitError);
+  const classification = result === null ? null : classifySpatialShutdown(result, expectedWorldId);
+  const problems = classification === null ? ['shutdown_result_missing'] : [...classification.problems];
+  if (callError !== null) problems.push('shutdown_call_error');
+  if (awaitError !== null) problems.push('shutdown_await_error');
+  return {
+    ok: classification !== null && classification.ok && callError === null && awaitError === null,
+    problems,
+    diagnostics: result === null ? null : spatialShutdownDiagnostics(result, expectedWorldId),
+    serviceCallError: callError,
+    serviceAwaitError: awaitError,
+  };
+}
+
 export interface HarnessContext {
   bot: Bot;
   adapter: MineflayerAdapter;
   arbiter: Arbiter;
   /** main 创建并交给生产的同一个真实 Vision 实例；不另造替身。 */
   vision: Vision;
+  /** 与 Vision/Arbiter 注入的同一个共享空间会话，供后续阶段复用。 */
+  spatial: SharedSpatialSession;
   rcon: Rcon;
   evidenceDir: string;
   runId: string;
@@ -3804,6 +3849,16 @@ async function main() {
   let rcon: Rcon | null = null;
   let memory: WorldMemory | null = null;
   let tracker: ConnectionTracker | null = null;
+  let arbiter: Arbiter | null = null;
+  let spatial: SharedSpatialSession | null = null;
+  const spatialDatabasePath = path.join(evidenceDir, 'spatial.sqlite');
+  const spatialEvidence: Record<string, unknown> = {
+    mode: 'shared',
+    databasePath: spatialDatabasePath,
+    opened: false,
+    shutdown: null,
+  };
+  evidence.spatial = spatialEvidence;
 
   try {
     evidence.commit = gitMeta();
@@ -3811,9 +3866,17 @@ async function main() {
 
     const bus = new EventBus();
     adapter = new MineflayerAdapter(config, bus);
-    const vision = new Vision(adapter, config.vision);
+    // 与 main 一致：共享空间记忆先于 Bot 连接真实打开；本轮证据只写入本 run 的 DB。
+    spatial = await SharedSpatialSession.open({
+      worldId: config.memory.worldId,
+      databasePath: spatialDatabasePath,
+      timeoutMs: 5000,
+    });
+    spatialEvidence.opened = true;
+    // 合法的 Vision 观测写入只经由这个共享服务；harness 不另造观察者或第二次 observeBatch。
+    const vision = new Vision(adapter, config.vision, spatial);
     memory = new WorldMemory(path.join(evidenceDir, 'world-memory.json'));
-    const arbiter = new Arbiter(adapter, memory, bus, vision);
+    arbiter = new Arbiter(adapter, memory, bus, vision, spatial);
     rcon = new Rcon(config.observer.rconHost, config.observer.rconPort, config.observer.rconPassword);
     tracker = new ConnectionTracker(adapter);
 
@@ -3849,7 +3912,7 @@ async function main() {
     adapter.connect();
     await spawnPromise;
 
-    const ctx: HarnessContext = { bot: adapter.bot as Bot, adapter, arbiter, vision, rcon, evidenceDir, runId };
+    const ctx: HarnessContext = { bot: adapter.bot as Bot, adapter, arbiter, vision, spatial, rcon, evidenceDir, runId };
     if (setupFixture) {
       // spawn 后立即用测试控制端 TP 到已确认支撑的固定起点，再稳定定位。
       // 先挂引用，TP/稳定失败时已发出的原始命令与响应也不会丢。
@@ -3880,6 +3943,15 @@ async function main() {
     evidence.fatalError = errorMessage(e);
   } finally {
     if (adapter?.bot) { try { (adapter.bot as Bot).physicsEnabled = true; } catch (e) { cleanupErrors.push({ step: 'restore-physics', message: errorMessage(e) }); } }
+    // 先同步进入 closing（拒绝新委托/写入并取消活动委托），随后保留原有有界清理；
+    // 其他清理失败也不能跳过关停，最终结果统一在下面等待并入证据。
+    let servicePromise: Promise<ShutdownResult> | null = null;
+    let serviceCallError: unknown = null;
+    if (spatial !== null) {
+      try { servicePromise = spatial.shutdown(); } catch (e) { serviceCallError = e; }
+    }
+    // 只移除真实持有对象的会话监听；共享服务本身由 shutdown 负责 flush/checkpoint/close。
+    arbiter?.dispose();
     if (adapter && tracker) {
       const q = await quitClient(adapter, tracker, 5000);
       if (!q.ended) cleanupErrors.push({ step: 'quit-client', message: q.reason });
@@ -3887,6 +3959,17 @@ async function main() {
     if (rcon) { try { rcon.close(); } catch (e) { cleanupErrors.push({ step: 'close-rcon', message: errorMessage(e) }); } }
     if (memory) { try { memory.close(); } catch (e) { cleanupErrors.push({ step: 'close-memory', message: errorMessage(e) }); } }
     tracker?.dispose();
+    let serviceResult: ShutdownResult | null = null;
+    let serviceAwaitError: unknown = null;
+    if (servicePromise !== null) {
+      try { serviceResult = await servicePromise; } catch (e) { serviceAwaitError = e; }
+    }
+    // open 未成功时没有可信会话可关，保留 opened=false 且不伪造 shutdown 结果。
+    if (spatial !== null) {
+      const shutdown = spatialShutdownRecord(serviceResult, serviceCallError, serviceAwaitError, spatial.worldId);
+      spatialEvidence.shutdown = shutdown;
+      if (!shutdown.ok) cleanupErrors.push({ step: 'spatial-shutdown', message: `关停未确认：${shutdown.problems.join(',')}` });
+    }
   }
 
   const scenariosOk = Object.values(evidence.scenarios as Record<ScenarioId, ScenarioEvidence | { verdict: Verdict }>)
