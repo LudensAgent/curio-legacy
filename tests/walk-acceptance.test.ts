@@ -6,6 +6,7 @@
  */
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,6 +18,11 @@ import {
   adjacentRouteX,
   allGroundedAt,
   allKeysReleased,
+  assertEndObserved,
+  assertListenerBaseline,
+  assertOwnedTicksReleased,
+  assertRealPartial,
+  assertTimeoutAfterDeadline,
   blockFaceBounds,
   checkTaskSegments,
   classifyOldOwnerControls,
@@ -57,6 +63,7 @@ import {
   type FrameRecord,
   type MoveRecord,
   type RouteStatusSnapshot,
+  type TickEntry,
   type WalkBridge,
 } from '../scripts/walk-acceptance.ts';
 import { WalkMoveExecutor, walkCollisionProvider } from '../src/adapter/walk-route.ts';
@@ -866,8 +873,10 @@ test('WalkDiagnostics：生产 stopAll 记录前后全键与 eventSeq，归属�
   assert.equal(rec.keysBefore.forward, true, 'before 必须在真实 stopAll 清键之前采集');
   assert.equal(rec.keysAfter.forward, false);
   assert.ok(rec.seqAfter > rec.seqBefore);
-  // stopAll 内部的真实 clear 也以 stopAll 归属记录。
-  assert.equal(diag.actualControls.some((c) => c.op === 'clear' && c.ownerTaskId === 'task_A'), true);
+  // stopAll 内嵌的 raw.clearControlStates 真实调用者未知：不得冒充最近 body 任务，
+  // 但 StopAllRecord 仍保留 recentBodyOwnerTaskId 上下文。
+  assert.equal(diag.actualControls.some((c) => c.op === 'clear' && c.ownerTaskId === null), true, '嵌套 raw clear 的归属应为未知 null');
+  assert.equal(diag.actualControls.some((c) => c.op === 'clear' && c.ownerTaskId === 'task_A'), false, '不得把最近 body 任务冒充 stopAll 调用者');
   diag.unwrap();
 });
 
@@ -1091,4 +1100,124 @@ test('quitClient：缺真实 end → 超时 ended=false（清理失败），并�
   assert.equal(r.ended, false);
   assert.equal(em.count('disconnected'), 1, '超时后必须移除 quitClient 自己的监听器（仅剩 tracker 的）');
   tracker.dispose();
+});
+
+// --- W7 断言：真实 deadline / 部分位移 / pending / listener / end 的负例拒绝 ---
+
+function tickEntry(o: Partial<TickEntry> = {}): TickEntry {
+  return {
+    seqStart: 1, seqEnd: 2, tsStart: 100, tsEnd: 150, ownerTaskId: 'task_A', delivered: true,
+    pending: false, signalAbortedAtEnd: false,
+    signalAbortListenersAtStart: 0, signalAbortListenersWhilePending: 1, signalAbortListenersAtEnd: 0,
+    botPhysicsTickListenersAtStart: 1, botPhysicsTickListenersWhilePending: 2, botPhysicsTickListenersAtEnd: 1,
+    botEndListenersAtStart: 0, botEndListenersWhilePending: 1, botEndListenersAtEnd: 0,
+    ...o,
+  };
+}
+
+test('assertTimeoutAfterDeadline：早于全局 deadline 的 TIMEOUT 拒绝，超有限延迟也拒绝', () => {
+  assert.doesNotThrow(() => assertTimeoutAfterDeadline(10_000, 10_000, 1500, 'W7a'), '恰好 deadline 合法');
+  assert.doesNotThrow(() => assertTimeoutAfterDeadline(10_900, 10_000, 1500, 'W7a'));
+  assert.throws(() => assertTimeoutAfterDeadline(9_999, 10_000, 1500, 'W7a'), /早于全局 deadline/);
+  assert.throws(() => assertTimeoutAfterDeadline(11_501, 10_000, 1500, 'W7a'), /有限延迟边界/);
+  assert.throws(() => assertTimeoutAfterDeadline(Number.NaN, 10_000, 1500, 'W7a'), /非有限数/);
+});
+
+test('assertRealPartial：无位移但有 lastPosition、wrong task/sample 均拒绝', () => {
+  const pos = { x: 1.0, y: 64, z: 0.5 };
+  const rec = delivery(pos, statusSnap(), statusSnap({ lastPosition: pos }), { owner: 'task_A', delegationId: 'walk-1', sequence: 7 });
+  const nav: NavResult = {
+    outcome: 'CANCELLED', message: 'x', trace: [], confirmed: false,
+    problem: { kind: 'cancelled', by: 'user', reason: 'x' },
+    lastPosition: { ...pos },
+    lastObservation: { worldId: 'w', dim: 'd', sessionId: 's', observedAt: rec.sample.observedAt, onGround: true, inWater: false },
+  };
+  assert.doesNotThrow(() => assertRealPartial(nav, [rec], 'task_A', 'walk-1', { x: 0, y: 64, z: 0.5 }, 0.5, 'W7x'));
+  assert.throws(
+    () => assertRealPartial(nav, [rec], 'task_A', 'walk-1', { x: 1.0, y: 64, z: 0.5 }, 0.5, 'W7x'),
+    /实际位移/,
+    '初始位置存在但相对起点没有位移，必须拒绝',
+  );
+  assert.throws(
+    () => assertRealPartial(nav, [rec], 'task_B', 'walk-1', { x: 0, y: 64, z: 0.5 }, 0.5, 'W7x'),
+    /wrong task\/sample/,
+    '别的 task 的样本不得冒充本任务测量',
+  );
+  const wrongId = { ...rec, sample: { ...rec.sample, executionId: 'walk-9' } };
+  assert.throws(() => assertRealPartial(nav, [wrongId], 'task_A', 'walk-1', { x: 0, y: 64, z: 0.5 }, 0.5, 'W7x'), /wrong task\/sample/);
+});
+
+test('assertOwnedTicksReleased：pending 未解除、signal/physicsTick/end 监听器残留均拒绝', () => {
+  const base = tickEntry();
+  assert.doesNotThrow(() => assertOwnedTicksReleased([base], 'task_A', 'W7x'));
+  assert.throws(() => assertOwnedTicksReleased([{ ...base, pending: true }], 'task_A', 'W7x'), /未解除/);
+  assert.throws(
+    () => assertOwnedTicksReleased([{ ...base, signalAbortListenersAtEnd: base.signalAbortListenersAtStart + 1 }], 'task_A', 'W7x'),
+    /残留 walkTick 监听器/,
+  );
+  assert.throws(
+    () => assertOwnedTicksReleased([{ ...base, botPhysicsTickListenersAtEnd: base.botPhysicsTickListenersAtStart + 1 }], 'task_A', 'W7x'),
+    /残留 walkTick 监听器/,
+  );
+  assert.throws(
+    () => assertOwnedTicksReleased([{ ...base, botEndListenersAtEnd: base.botEndListenersAtStart + 1 }], 'task_A', 'W7x'),
+    /残留 walkTick 监听器/,
+  );
+  assert.doesNotThrow(
+    () => assertOwnedTicksReleased([{ ...base, ownerTaskId: 'task_B', pending: true }], 'task_A', 'W7x'),
+    '别的 task 的 pending 不得误判为本任务',
+  );
+});
+
+test('assertEndObserved：缺 adapter.disconnected / bot.end 或早于 quit 均拒绝', () => {
+  assert.doesNotThrow(() => assertEndObserved(12, 11, 10, 'W7c'), '事件顺序可因监听器注册先后而不同');
+  assert.throws(() => assertEndObserved(null, 12, 10, 'W7c'), /adapter.disconnected/);
+  assert.throws(() => assertEndObserved(12, null, 10, 'W7c'), /bot.end/);
+  assert.throws(() => assertEndObserved(9, 12, 10, 'W7c'), /早于 quit/);
+});
+
+test('assertListenerBaseline：physicsTick/end 任一未恢复基线都拒绝', () => {
+  assert.doesNotThrow(() => assertListenerBaseline({ physicsTick: 1, end: 0 }, { physicsTick: 1, end: 0 }, 'W7x'));
+  assert.throws(() => assertListenerBaseline({ physicsTick: 1, end: 0 }, { physicsTick: 2, end: 0 }, 'W7x'), /监听器未恢复到基线/);
+  assert.throws(() => assertListenerBaseline({ physicsTick: 1, end: 0 }, { physicsTick: 1, end: 1 }, 'W7x'), /监听器未恢复到基线/);
+});
+
+test('WalkDiagnostics：walkTick 等待期间记录真实 pending/监听器，帧交付后全部移除', async () => {
+  const emitter = new EventEmitter();
+  const controlState: MutableKeys = { ...emptyKeys };
+  const raw = Object.assign(emitter, fakeRaw(controlState));
+  const entity = { position: { x: 1, y: 64, z: 2 }, velocity: { x: 0, y: 0, z: 0 }, onGround: true, isInWater: false };
+  const target: WalkBridge = {
+    walkTick: () => (signal) => new Promise((resolve) => {
+      const cleanup = () => {
+        signal.removeEventListener('abort', onAbort);
+        emitter.removeListener('physicsTick', onTick);
+        emitter.removeListener('end', onEnd);
+      };
+      const onTick = () => { cleanup(); resolve(entity); };
+      const onAbort = () => { cleanup(); resolve(null); };
+      const onEnd = () => { cleanup(); resolve(null); };
+      signal.addEventListener('abort', onAbort, { once: true });
+      emitter.on('physicsTick', onTick);
+      emitter.once('end', onEnd);
+    }),
+    stopAll: () => {},
+  };
+  const diag = new WalkDiagnostics(target, () => 'task_A', () => snapshotKeys({ controlState }), new EventSeq(), raw);
+  diag.wrap();
+  const tick = target.walkTick!();
+  const p = tick(new AbortController().signal);
+  const entry = diag.ticks[0]!;
+  assert.equal(entry.pending, true, '等待开始即记为 pending，而不是完成后才补记');
+  assert.equal(entry.botPhysicsTickListenersWhilePending, entry.botPhysicsTickListenersAtStart + 1);
+  assert.equal(entry.botEndListenersWhilePending, entry.botEndListenersAtStart + 1);
+  assert.equal(entry.signalAbortListenersWhilePending, entry.signalAbortListenersAtStart + 1);
+  emitter.emit('physicsTick');
+  assert.equal(await p, entity);
+  assert.equal(entry.pending, false);
+  assert.equal(entry.botPhysicsTickListenersAtEnd, entry.botPhysicsTickListenersAtStart);
+  assert.equal(entry.botEndListenersAtEnd, entry.botEndListenersAtStart);
+  assert.equal(entry.signalAbortListenersAtEnd, entry.signalAbortListenersAtStart);
+  assert.doesNotThrow(() => assertOwnedTicksReleased(diag.ticks, 'task_A', 'fake'));
+  diag.unwrap();
 });

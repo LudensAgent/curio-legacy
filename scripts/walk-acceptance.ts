@@ -20,6 +20,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { getEventListeners } from 'node:events';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { Bot, ControlState } from 'mineflayer';
@@ -136,6 +137,19 @@ export interface TickEntry {
   ownerTaskId: string | null;
   delivered: boolean;
   pos?: Vec3;
+  /** true 表示该等待尚未被 physicsTick/abort/end/期限解除；完成时原地改回 false。 */
+  pending: boolean;
+  signalAbortedAtEnd: boolean;
+  /** 本 task 等待期间在 signal/bot 上新增的监听器数量（start → whilePending → end）。 */
+  signalAbortListenersAtStart: number;
+  signalAbortListenersWhilePending: number;
+  signalAbortListenersAtEnd: number;
+  botPhysicsTickListenersAtStart: number;
+  botPhysicsTickListenersWhilePending: number;
+  botPhysicsTickListenersAtEnd: number;
+  botEndListenersAtStart: number;
+  botEndListenersWhilePending: number;
+  botEndListenersAtEnd: number;
 }
 
 /** WalkMoveExecutor.move 的实际段请求（公开桥包装，记录创建时绑定的任务与段身份）。 */
@@ -310,7 +324,8 @@ const W2_PLATFORM = {
  */
 const WALK_LANE = {
   // 整数方块 inclusive bounds（支撑方块在 feetY-1，净空在 feetY/feetY+1）。
-  xMin: 200, xMax: 216, zMin: 216, zMax: 217,
+  // x 上限 218（世界支撑面到 x219）为 W7a 留出单轴长路线，仍在授权 x200..220 内。
+  xMin: 200, xMax: 218, zMin: 216, zMax: 217,
   feetY: 64,
   material: 'minecraft:stone',
   start: { x: 200.5, y: 64, z: 216.5 },
@@ -466,6 +481,108 @@ export function allKeysReleased(keys: Keys): boolean {
 
 function finiteVec(v: { x: number; y: number; z: number }): boolean {
   return Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z);
+}
+
+/** 公开 EventEmitter/EventTarget 监听器计数；非 emitter 返回 0（假夹具不伪造）。 */
+function eventListenerCount(target: unknown, event: string): number {
+  if (target === null || typeof target !== 'object') return 0;
+  const t = target as { on?: unknown; addEventListener?: unknown };
+  if (typeof t.on === 'function') return getEventListeners(target as NodeJS.EventEmitter, event).length;
+  if (typeof t.addEventListener === 'function') return getEventListeners(target as EventTarget, event).length;
+  return 0;
+}
+
+export interface ListenerCounts { physicsTick: number; end: number }
+
+/** 真实 Bot 上 physicsTick/end 的监听器基线；用于确认本任务等待结束后没有残留。 */
+export function botListenerCounts(target: unknown): ListenerCounts {
+  return { physicsTick: eventListenerCount(target, 'physicsTick'), end: eventListenerCount(target, 'end') };
+}
+
+export function assertListenerBaseline(before: ListenerCounts, after: ListenerCounts, label: string): void {
+  if (after.physicsTick !== before.physicsTick || after.end !== before.end) {
+    throw new Error(`${label} 监听器未恢复到基线：before=${JSON.stringify(before)} after=${JSON.stringify(after)}`);
+  }
+}
+
+/** 本任务仍 pending 的 walkTick 等待。 */
+export function pendingTicksFor(ticks: TickEntry[], taskId: string): TickEntry[] {
+  return ticks.filter((t) => t.pending && t.ownerTaskId === taskId);
+}
+
+function tickListenerLeaks(t: TickEntry): boolean {
+  return t.signalAbortListenersAtEnd !== t.signalAbortListenersAtStart
+    || t.botPhysicsTickListenersAtEnd !== t.botPhysicsTickListenersAtStart
+    || t.botEndListenersAtEnd !== t.botEndListenersAtStart;
+}
+
+/** 本任务所有 walkTick 等待必须解除，且新增的 physicsTick/end/abort 监听器全部移除。 */
+export function assertOwnedTicksReleased(ticks: TickEntry[], taskId: string, label: string): void {
+  const pending = pendingTicksFor(ticks, taskId);
+  if (pending.length > 0) {
+    throw new Error(`${label} 仍有 ${pending.length} 个未解除的 walkTick 等待：${JSON.stringify(pending.map((t) => ({ seqStart: t.seqStart, tsStart: t.tsStart })))}`);
+  }
+  const leaks = ticks.filter((t) => t.ownerTaskId === taskId && tickListenerLeaks(t));
+  if (leaks.length > 0) {
+    throw new Error(`${label} 残留 walkTick 监听器：${JSON.stringify(leaks.map((t) => ({
+      seqStart: t.seqStart,
+      signal: [t.signalAbortListenersAtStart, t.signalAbortListenersAtEnd],
+      physicsTick: [t.botPhysicsTickListenersAtStart, t.botPhysicsTickListenersAtEnd],
+      end: [t.botEndListenersAtStart, t.botEndListenersAtEnd],
+    })))}`);
+  }
+}
+
+/** 真实结束时刻必须不早于全局 deadline（排除每段 timeout），且不超过有限延迟边界。 */
+export function assertTimeoutAfterDeadline(observedAt: number, deadlineMs: number, maxLatenessMs: number, label: string): void {
+  if (!Number.isFinite(observedAt)) throw new Error(`${label} TIMEOUT 时刻非有限数：${observedAt}`);
+  if (observedAt < deadlineMs) {
+    throw new Error(`${label} TIMEOUT 早于全局 deadline ${deadlineMs - observedAt}ms（疑似每段 timeout/错误，不能冒充全局超时）`);
+  }
+  if (observedAt > deadlineMs + maxLatenessMs) {
+    throw new Error(`${label} TIMEOUT 超出有限延迟边界：晚 ${observedAt - deadlineMs}ms > ${maxLatenessMs}ms`);
+  }
+}
+
+/**
+ * 非到达终态必须保留真实部分位移：位置来自该 task+delegation 最后一条被公开状态证明的
+ * 原始 sample，nav.lastPosition/lastObservation 与它一致，且相对任务起点实测距离 > minDistance。
+ */
+export function assertRealPartial(
+  nav: NavResult | undefined,
+  records: DeliveredSampleRecord[],
+  taskId: string,
+  delegationId: string,
+  startPos: Vec3,
+  minDistance: number,
+  label: string,
+): DeliveredSampleRecord {
+  if (nav?.outcome === 'ARRIVED' || nav?.confirmed !== false) {
+    throw new Error(`${label} 非到达终态必须 confirmed=false：outcome=${nav?.outcome} confirmed=${nav?.confirmed}`);
+  }
+  if (!nav?.lastPosition) throw new Error(`${label} 终态未保留 lastPosition`);
+  const accepted = acceptedMeasurements(records, taskId, delegationId);
+  const last = accepted[accepted.length - 1];
+  if (!last) throw new Error(`${label} 无被公开状态证明的实测样本（wrong task/sample 不得冒充）`);
+  if (!partialMatchesRecorded(nav, accepted)) throw new Error(`${label} 部分位移与最后有效原始 sample 的时间/scope/位置不一致`);
+  const moved = dist2(nav.lastPosition, startPos);
+  if (!(moved > minDistance)) {
+    throw new Error(`${label} 实际位移 ${moved.toFixed(3)} <= ${minDistance}（初始位置存在不等于部分位移）`);
+  }
+  return last;
+}
+
+/** 真实断线必须同时观察到 adapter.disconnected 与 bot.end，且都发生在 quit 之后。 */
+export function assertEndObserved(
+  adapterDisconnectedSeq: number | null,
+  botEndSeq: number | null,
+  quitSeq: number,
+  label: string,
+): void {
+  if (adapterDisconnectedSeq === null) throw new Error(`${label} 未观察到真实 adapter.disconnected`);
+  if (botEndSeq === null) throw new Error(`${label} 未观察到真实 bot.end`);
+  if (adapterDisconnectedSeq <= quitSeq) throw new Error(`${label} adapter.disconnected 早于 quit（不是本次真实断线）`);
+  if (botEndSeq <= quitSeq) throw new Error(`${label} bot.end 早于 quit（不是本次真实断线）`);
 }
 
 /**
@@ -821,25 +938,55 @@ export class WalkDiagnostics {
         return async (signal: AbortSignal) => {
           const seqStart = this.seq.next();
           const tsStart = this.now();
-          const entity = await tick(signal);
-          this.ticks.push({
-            seqStart, seqEnd: this.seq.next(), tsStart, tsEnd: this.now(),
-            ownerTaskId: owner, delivered: entity !== null,
-            ...(entity ? { pos: { ...entity.position } } : {}),
-          });
+          const botStart = botListenerCounts(this.rawBot);
+          const entry: TickEntry = {
+            seqStart, seqEnd: 0, tsStart, tsEnd: 0, ownerTaskId: owner, delivered: false,
+            pending: true, signalAbortedAtEnd: false,
+            signalAbortListenersAtStart: eventListenerCount(signal, 'abort'),
+            signalAbortListenersWhilePending: 0,
+            signalAbortListenersAtEnd: 0,
+            botPhysicsTickListenersAtStart: botStart.physicsTick,
+            botPhysicsTickListenersWhilePending: 0,
+            botPhysicsTickListenersAtEnd: 0,
+            botEndListenersAtStart: botStart.end,
+            botEndListenersWhilePending: 0,
+            botEndListenersAtEnd: 0,
+          };
+          // 等待一开始就记录：W7b 需要在 physics 暂停期间证明本任务确有未完成的帧等待，
+          // 而不是等 250ms 后凭现有 snapshot 假定存在。
+          this.ticks.push(entry);
+          const pending = tick(signal);
+          // tick() 同步注册 physicsTick/end/abort 监听器；此处采集「本任务新增」的真实计数。
+          const botPending = botListenerCounts(this.rawBot);
+          entry.signalAbortListenersWhilePending = eventListenerCount(signal, 'abort');
+          entry.botPhysicsTickListenersWhilePending = botPending.physicsTick;
+          entry.botEndListenersWhilePending = botPending.end;
+          const entity = await pending;
+          entry.seqEnd = this.seq.next();
+          entry.tsEnd = this.now();
+          entry.delivered = entity !== null;
+          if (entity) entry.pos = { ...entity.position };
+          entry.pending = false;
+          entry.signalAbortedAtEnd = signal.aborted;
+          entry.signalAbortListenersAtEnd = eventListenerCount(signal, 'abort');
+          const botEnd = botListenerCounts(this.rawBot);
+          entry.botPhysicsTickListenersAtEnd = botEnd.physicsTick;
+          entry.botEndListenersAtEnd = botEnd.end;
           return entity;
         };
       };
     }
 
     this.target.stopAll = () => {
-      // 只记录最近的 body/context 拥有者，绝不冒充本次 stopAll 的调用者。
+      // recentBodyOwnerTaskId 只作为上下文记录，不是本次 stopAll 的调用者归属。
+      // 嵌套的 raw.clearControlStates 调用者未知，rawCallOwner 置 null，避免把未知真实
+      // 调用者冒充成最近 body 任务。
       const recentBodyOwnerTaskId = this.recentBodyOwner;
       const seqBefore = this.seq.next();
       const ts = this.now();
       const keysBefore = this.readKeys();
       const prevOwner = this.rawCallOwner;
-      this.rawCallOwner = recentBodyOwnerTaskId;
+      this.rawCallOwner = null;
       try { origStop.call(this.target); } finally { this.rawCallOwner = prevOwner; }
       const keysAfter = this.readKeys();
       this.stopAlls.push({ seqBefore, seqAfter: this.seq.next(), ts, label: 'production-stopAll', kind: 'production', keysBefore, keysAfter, recentBodyOwnerTaskId });
@@ -1468,6 +1615,9 @@ export async function probeBlock(
   return 'unknown';
 }
 
+/** 夹具/启动前准备只需要可写入 extra 的证据容器，不要求完整 ScenarioEvidence。 */
+interface FixtureEvidence { extra?: Record<string, unknown> }
+
 /**
  * 在限定范围内搭建支撑面：先逐格确认支撑格（feetY-1）与净空格（feetY/feetY+1）。
  * 支撑格接受同材料（同 run 或旧 run 遗留）或任意合法空格（air/cave_air/void_air，此时补建）；
@@ -1476,7 +1626,7 @@ export async function probeBlock(
  */
 async function buildSupportFixture(
   rcon: Rcon,
-  ev: ScenarioEvidence,
+  ev: FixtureEvidence,
   footprint: { xMin: number; xMax: number; zMin: number; zMax: number },
   feetY: number,
   material: string,
@@ -1522,7 +1672,7 @@ async function teleportTo(rcon: Rcon, bot: Bot, pos: { x: number; y: number; z: 
 }
 
 /** 把 Bot 传送到指定脚位并等其落地（分数坐标，记录操作）。 */
-async function teleportAndSettle(ctx: HarnessContext, ev: ScenarioEvidence, pos: { x: number; y: number; z: number }, label: string): Promise<void> {
+async function teleportAndSettle(ctx: HarnessContext, ev: FixtureEvidence, pos: { x: number; y: number; z: number }, label: string): Promise<void> {
   const op = await teleportTo(ctx.rcon, ctx.bot, pos);
   const extra = (ev.extra ??= {}) as Record<string, unknown>;
   extra.teleports = [...((extra.teleports as unknown[]) ?? []), { label, pos, rconOp: op }];
@@ -1902,108 +2052,252 @@ async function scenarioW6(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
 async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   const ev = d.ev;
   const lane = WALK_LANE;
+  const y = lane.feetY;
   ev.extra = { lane };
   await buildSupportFixture(ctx.rcon, ev, { xMin: lane.xMin, xMax: lane.xMax, zMin: lane.zMin, zMax: lane.zMax }, lane.feetY, lane.material);
   await teleportAndSettle(ctx, ev, lane.start, 'W7 步行道起点');
-  const y = lane.feetY;
 
   const subcases: Record<string, { verdict: Verdict; error?: string; [k: string]: unknown }> = {};
+  const settleAtStart = (label: string) => teleportAndSettle(ctx, ev, lane.start, label);
+  const lineRoute = (count: number) => Array.from({ length: count }, (_, i) => ({ x: lane.start.x + i, y, z: lane.start.z }));
+  const ownSegments = (taskId: string, delegationId: string) =>
+    d.exec.moves.filter((m) => m.taskId === taskId && m.delegationId === delegationId).map((m) => m.executionId);
+  const taskStartRecord = (taskId: string) => d.tasks.starts.find((r) => r.task.id === taskId);
+  const taskDoneRecord = (taskId: string) => d.tasks.outcomes.find((r) => r.task.id === taskId);
+  let aPass = false;
+  let bPass = false;
 
-  // --- 7a：独立超时（epoch 期限，非字面 2500；真实移动后再 TIMEOUT，保留部分位移） ---
+  // --- 7a：真实全局 deadline（含 12 次预扫与稳定初始化），长路线在 lane 内，超时后保留实测位移 ---
   try {
-    const budget = 2500;
-    const pA = ctx.adapter.state().pos;
-    const routeTimeout = Array.from({ length: 8 }, (_, i) => ({ x: pA.x + i, y, z: pA.z }));
-    const deadlineMs = Date.now() + budget;
-    const t = startWalkTask(ctx, d, routeTimeout, deadlineMs);
+    await settleAtStart('W7a 起点');
+    const startPos = { ...ctx.adapter.state().pos };
+    const route = lineRoute(19); // x200.5..x218.5，支撑面 x[200,219)，始终在已建 lane 内
+    const budgetMs = 6_000;
+    const deadlineMs = Date.now() + budgetMs;
+    const listenersBefore = botListenerCounts(ctx.bot);
+    const t = startWalkTask(ctx, d, route, deadlineMs);
     if ('error' in t) throw new Error(`W7a 启动失败：${t.error}`);
-    const oTimeout = await awaitOrTimeout(t.done, 20_000, 'W7a 完成');
-    const nav = navFromResult(oTimeout.result);
-    const timeoutTs = Date.now();
-    subcases.a = {
-      verdict: 'NOT_RUN', deadlineMs, budget, timeoutObservedAt: timeoutTs,
-      status: oTimeout.result.status, failureCode: oTimeout.result.failureCode,
-      summary: oTimeout.result.summary, outcome: nav?.outcome, lastPosition: nav?.lastPosition,
+    const startCall = d.exec.routeCalls.find((c) => c.op === 'start' && c.ownerTaskId === t.task.id);
+    if (!startCall?.delegationId) throw new Error('W7a 未捕获本子任务的真实 delegation 启动');
+    const delegationId = startCall.delegationId;
+    const o = await awaitOrTimeout(t.done, budgetMs + 10_000, 'W7a 完成');
+    const doneSeq = markTimeline(d, 'task-done-w7a', t.task.id);
+    const doneRecord = taskDoneRecord(t.task.id);
+    if (!doneRecord) throw new Error('W7a done 结果未即时保存');
+    const nav = navFromResult(o.result);
+    const base = {
+      taskId: t.task.id, delegationId, request: taskStartRecord(t.task.id)?.request, scope: taskStartRecord(t.task.id)?.scope,
+      route, budgetMs, deadlineMs, timeoutObservedAt: doneRecord.doneAt, doneSeq,
+      elapsedMs: doneRecord.doneAt - t.task.startedAt,
+      status: o.result.status, failureCode: o.result.failureCode, summary: o.result.summary,
+      outcome: nav?.outcome, confirmed: nav?.confirmed, lastPosition: nav?.lastPosition,
+      segments: ownSegments(t.task.id, delegationId),
     };
-    if (oTimeout.result.status !== 'failed' || nav?.outcome !== 'TIMEOUT') {
-      throw new Error(`W7a 未以真实 TIMEOUT 结束：status=${oTimeout.result.status} outcome=${nav?.outcome}`);
+    subcases.a = { verdict: 'NOT_RUN', ...base };
+    if (o.result.status !== 'failed' || o.result.failureCode !== 'TIMEOUT') {
+      throw new Error(`W7a 未以真实 TIMEOUT 失败结束：status=${o.result.status} failureCode=${o.result.failureCode}`);
     }
-    if (!hasPartialPosition(nav)) throw new Error('W7a TIMEOUT 未保留实测部分位移');
-    // 部分位移必须由最终 lastObservation 的原 time/scope 与最后候选测量共同证明（非初始位置）。
-    // 身份取本子任务真实保存的 start 绑定，不用无参分析或假 ID。
-    const w7aStart = d.exec.routeCalls.find((c) => c.op === 'start' && c.ownerTaskId === t.task.id);
-    if (!w7aStart?.delegationId) throw new Error('W7a 未捕获本子任务的真实 delegation 启动');
-    const accepted = acceptedMeasurements(d.exec.deliveredSamples, t.task.id, w7aStart.delegationId);
-    if (!partialMatchesRecorded(nav, accepted)) throw new Error('W7a 部分位移与最后已记录测量不一致');
-    if (timeoutTs > deadlineMs + 1000) throw new Error('W7a 实际结束远超期限');
-    subcases.a = { ...(subcases.a as object), verdict: 'PASS' };
+    if (nav?.outcome !== 'TIMEOUT' || nav.confirmed !== false) {
+      throw new Error(`W7a NavResult 非 TIMEOUT/unconfirmed：outcome=${nav?.outcome} confirmed=${nav?.confirmed}`);
+    }
+    assertTimeoutAfterDeadline(doneRecord.doneAt, deadlineMs, 1500, 'W7a');
+    const last = assertRealPartial(nav, d.exec.deliveredSamples, t.task.id, delegationId, startPos, 0.5, 'W7a');
+    await waitFor(() => pendingTicksFor(d.diag.ticks, t.task.id).length === 0, 1_000, 'W7a pending tick 解除');
+    assertOwnedTicksReleased(d.diag.ticks, t.task.id, 'W7a');
+    assertListenerBaseline(listenersBefore, botListenerCounts(ctx.bot), 'W7a');
+    const finalKeys = snapshotKeys(ctx.bot);
+    if (!allKeysReleased(finalKeys)) throw new Error(`W7a 最终仍有按键未释放：${JSON.stringify(finalKeys)}`);
+    subcases.a = {
+      ...base, verdict: 'PASS', finalKeys,
+      lastValidSample: {
+        sequence: last.sample.sequence, observedAt: last.sample.observedAt,
+        worldId: last.sample.worldId, dim: last.sample.dim, sessionId: last.sample.sessionId,
+        pos: last.sample.pos,
+      },
+      lastObservation: nav.lastObservation,
+    };
+    aPass = true;
   } catch (e) {
-    subcases.a = { ...(subcases.a as object), verdict: 'FAIL', error: (e as Error)?.message ?? String(e) };
+    subcases.a = { ...(subcases.a ?? {}), verdict: 'FAIL', error: (e as Error)?.message ?? String(e) };
   }
 
-  // --- 7b：宿主帧交付暂停（宿主注入，非服务端停摆）：关物理后无帧、取消不依赖新帧 ---
-  try {
-    const pB = ctx.adapter.state().pos;
-    const routePause = Array.from({ length: 8 }, (_, i) => ({ x: pB.x + i, y, z: pB.z }));
-    const t2 = startWalkTask(ctx, d, routePause, Date.now() + 30_000);
-    if ('error' in t2) throw new Error(`W7b 启动失败：${t2.error}`);
-    const t2Done = t2.done;
-    const pauseStart = ctx.adapter.state().pos;
-    await waitFor(() => dist2(ctx.adapter.state().pos, pauseStart) > 0.5, 15_000, 'W7b 开始移动');
-    snapControl(ctx, 'before-paused-frame-cancel', ev);
-    const baseline = d.recorder.frames.length;
-    ctx.bot.physicsEnabled = false; // 宿主帧注入：暂停帧交付，服务端仍在运行。
-    const pausedAt = ctx.adapter.state().pos;
-    const holdMs = 250;
-    await new Promise((r) => setTimeout(r, holdMs));
-    const framesDuringHold = d.recorder.frames.length - baseline;
-    ctx.arbiter.cancel('W7 暂停帧后取消');
-    const cancelTs = Date.now();
-    const oPause = await awaitOrTimeout(t2Done, 10_000, 'W7b 取消完成');
-    ctx.bot.physicsEnabled = true;
-    const nav = navFromResult(oPause.result);
-    subcases.b = {
-      verdict: 'NOT_RUN', hostInjection: 'bot.physicsEnabled=false（宿主帧注入，非服务端停摆）',
-      baselineFrames: baseline, holdMs, framesDuringHold, cancelTs,
-      status: oPause.result.status, lastPosition: nav?.lastPosition, pausedAt,
-    };
-    if (framesDuringHold !== 0) throw new Error(`W7b 暂停期间仍有 ${framesDuringHold} 帧送达`);
-    if (oPause.result.status !== 'cancelled') throw new Error(`W7b 暂停帧后未以 cancelled 结束：status=${oPause.result.status}`);
-    if (!hasPartialPosition(nav)) throw new Error('W7b 取消未保留部分位移');
-    subcases.b = { ...(subcases.b as object), verdict: 'PASS' };
-  } catch (e) {
-    ctx.bot.physicsEnabled = true;
-    subcases.b = { ...(subcases.b as object), verdict: 'FAIL', error: (e as Error)?.message ?? String(e) };
+  // --- 7b：宿主帧交付暂停（宿主注入，非服务端停摆）：先证明本 task 有真实 pending 帧等待，再取消 ---
+  if (!aPass) {
+    subcases.b = { verdict: 'NOT_RUN', note: 'W7a 未通过；不继续不安全的后续子case' };
+  } else {
+    try {
+      await settleAtStart('W7b 起点');
+      const startPos = { ...ctx.adapter.state().pos };
+      const route = lineRoute(12);
+      const listenersBefore = botListenerCounts(ctx.bot);
+      const t = startWalkTask(ctx, d, route, Date.now() + 30_000);
+      if ('error' in t) throw new Error(`W7b 启动失败：${t.error}`);
+      const startCall = d.exec.routeCalls.find((c) => c.op === 'start' && c.ownerTaskId === t.task.id);
+      if (!startCall?.delegationId) throw new Error('W7b 未捕获本子任务的真实 delegation 启动');
+      const delegationId = startCall.delegationId;
+      const done = t.done;
+      await waitFor(() => dist2(ctx.adapter.state().pos, startPos) > 0.5, 15_000, 'W7b 开始移动');
+      const acceptedBeforePause = acceptedMeasurements(d.exec.deliveredSamples, t.task.id, delegationId).length;
+      snapControl(ctx, 'before-paused-frame-cancel', ev);
+      const framesBefore = d.recorder.frames.length;
+      ctx.bot.physicsEnabled = false; // 宿主帧注入：暂停 physicsTick，服务端仍在运行。
+      const pausedAt = Date.now();
+      // 等待开始时就已建好的 tick；必须确认它属于本 task 且仍未完成，而不是等一段时间后假定。
+      await waitFor(() => pendingTicksFor(d.diag.ticks, t.task.id).length > 0, 2_000, 'W7b 真实 pending walkTick');
+      const pendingAtPause = pendingTicksFor(d.diag.ticks, t.task.id)[0]!;
+      const holdMs = 300;
+      await new Promise((r) => setTimeout(r, holdMs));
+      const stillPending = pendingTicksFor(d.diag.ticks, t.task.id).find((p) => p.seqStart === pendingAtPause.seqStart);
+      const framesDuringHold = d.recorder.frames.length - framesBefore;
+      if (!stillPending) throw new Error('W7b 保持期间 pending 等待已解除，无法证明无新帧等待');
+      if (framesDuringHold !== 0) throw new Error(`W7b 暂停期间仍有 ${framesDuringHold} 帧送达`);
+      // 这些监听器由真实 walkTick 在等待开始时同步注册：现在应各新增 1 个。
+      if (pendingAtPause.botPhysicsTickListenersWhilePending !== pendingAtPause.botPhysicsTickListenersAtStart + 1) {
+        throw new Error(`W7b pending 等待未新增 physicsTick 监听器：${pendingAtPause.botPhysicsTickListenersAtStart}→${pendingAtPause.botPhysicsTickListenersWhilePending}`);
+      }
+      if (pendingAtPause.botEndListenersWhilePending !== pendingAtPause.botEndListenersAtStart + 1) {
+        throw new Error(`W7b pending 等待未新增 end 监听器：${pendingAtPause.botEndListenersAtStart}→${pendingAtPause.botEndListenersWhilePending}`);
+      }
+      if (pendingAtPause.signalAbortListenersWhilePending !== pendingAtPause.signalAbortListenersAtStart + 1) {
+        throw new Error(`W7b pending 等待未新增 abort 监听器：${pendingAtPause.signalAbortListenersAtStart}→${pendingAtPause.signalAbortListenersWhilePending}`);
+      }
+      snapControl(ctx, 'before-arbiter-cancel-w7b', ev);
+      const cancelSeq = markTimeline(d, 'arbiter-cancel-w7b', t.task.id);
+      const cancelTs = Date.now();
+      ctx.arbiter.cancel('W7 暂停帧后取消');
+      const o = await awaitOrTimeout(done, 10_000, 'W7b 取消完成');
+      const doneSeq = markTimeline(d, 'task-done-w7b', t.task.id);
+      const finishedAt = Date.now();
+      const framesAtDone = d.recorder.frames.length;
+      const nav = navFromResult(o.result);
+      const base = {
+        taskId: t.task.id, delegationId, request: taskStartRecord(t.task.id)?.request, scope: taskStartRecord(t.task.id)?.scope,
+        route, hostInjection: 'bot.physicsEnabled=false（宿主帧注入，非服务端停摆）',
+        holdMs, framesBefore, framesDuringHold, framesAtDone, pausedAt, cancelSeq, cancelTs, finishedAt, doneSeq,
+        elapsedMs: finishedAt - t.task.startedAt,
+        pendingTick: {
+          seqStart: pendingAtPause.seqStart, tsStart: pendingAtPause.tsStart,
+          signalAbort: [pendingAtPause.signalAbortListenersAtStart, pendingAtPause.signalAbortListenersWhilePending, pendingAtPause.signalAbortListenersAtEnd],
+          physicsTick: [pendingAtPause.botPhysicsTickListenersAtStart, pendingAtPause.botPhysicsTickListenersWhilePending, pendingAtPause.botPhysicsTickListenersAtEnd],
+          end: [pendingAtPause.botEndListenersAtStart, pendingAtPause.botEndListenersWhilePending, pendingAtPause.botEndListenersAtEnd],
+        },
+        status: o.result.status, outcome: nav?.outcome, confirmed: nav?.confirmed,
+        lastPosition: nav?.lastPosition, segments: ownSegments(t.task.id, delegationId),
+      };
+      subcases.b = { verdict: 'NOT_RUN', ...base };
+      if (framesAtDone !== framesBefore) throw new Error(`W7b 取消完成前仍有 ${framesAtDone - framesBefore} 帧送达`);
+      if (o.result.status !== 'cancelled') throw new Error(`W7b 暂停帧后未以 cancelled 结束：status=${o.result.status}`);
+      if (nav?.outcome !== 'CANCELLED' || nav.confirmed !== false) {
+        throw new Error(`W7b NavResult 非 CANCELLED/unconfirmed：outcome=${nav?.outcome} confirmed=${nav?.confirmed}`);
+      }
+      const last = assertRealPartial(nav, d.exec.deliveredSamples, t.task.id, delegationId, startPos, 0.5, 'W7b');
+      // 真实 Arbiter.cancel → production stopAll 是合法权限撤销：只要求 keysAfter/最终键释放，不要求 keysBefore。
+      const stopAfterCancel = d.diag.stopAlls.find((s) => s.kind === 'production' && s.seqBefore > cancelSeq && s.recentBodyOwnerTaskId === t.task.id);
+      if (!stopAfterCancel) throw new Error('W7b 未捕获取消后的生产 stopAll');
+      if (!allKeysReleased(stopAfterCancel.keysAfter)) throw new Error(`W7b production stopAll keysAfter 仍有残留：${JSON.stringify(stopAfterCancel.keysAfter)}`);
+      const finalKeys = snapshotKeys(ctx.bot);
+      if (!allKeysReleased(finalKeys)) throw new Error(`W7b 最终仍有按键未释放：${JSON.stringify(finalKeys)}`);
+      const lateMoves = d.exec.moves.filter((m) => m.taskId === t.task.id && m.delegationId === delegationId && m.seq > cancelSeq);
+      if (lateMoves.length > 0) throw new Error(`W7b 取消后仍有 ${lateMoves.length} 个旧段启动：${JSON.stringify(lateMoves.map((m) => m.executionId))}`);
+      await waitFor(() => pendingTicksFor(d.diag.ticks, t.task.id).length === 0, 1_000, 'W7b pending tick 解除');
+      assertOwnedTicksReleased(d.diag.ticks, t.task.id, 'W7b');
+      assertListenerBaseline(listenersBefore, botListenerCounts(ctx.bot), 'W7b');
+      subcases.b = {
+        ...base, verdict: 'PASS', finalKeys,
+        acceptedBeforePause,
+        stopAll: { seqBefore: stopAfterCancel.seqBefore, seqAfter: stopAfterCancel.seqAfter, keysBefore: stopAfterCancel.keysBefore, keysAfter: stopAfterCancel.keysAfter },
+        lastValidSample: {
+          sequence: last.sample.sequence, observedAt: last.sample.observedAt,
+          worldId: last.sample.worldId, dim: last.sample.dim, sessionId: last.sample.sessionId,
+          pos: last.sample.pos,
+        },
+        lastObservation: nav.lastObservation,
+      };
+      bPass = true;
+    } catch (e) {
+      subcases.b = { ...(subcases.b ?? {}), verdict: 'FAIL', error: (e as Error)?.message ?? String(e) };
+    } finally {
+      ctx.bot.physicsEnabled = true;
+    }
   }
 
-  // --- 7c：移动中真实断线（只断客户端，服务器存活）：生命周期取消、保留部分位移 ---
-  try {
-    const pC = ctx.adapter.state().pos;
-    const routeDisc = Array.from({ length: 8 }, (_, i) => ({ x: pC.x + i, y, z: pC.z }));
-    const t3 = startWalkTask(ctx, d, routeDisc, Date.now() + 30_000);
-    if ('error' in t3) throw new Error(`W7c 启动失败：${t3.error}`);
-    const t3Done = t3.done;
-    const discStart = ctx.adapter.state().pos;
-    await waitFor(() => dist2(ctx.adapter.state().pos, discStart) > 0.5, 15_000, 'W7c 开始移动');
-    const lastValid = ctx.adapter.state().pos;
-    snapControl(ctx, 'before-client-disconnect', ev);
-    ctx.adapter.quit(); // 断客户端并置 stopped；共享服务器不受影响。
-    const oDisc = await awaitOrTimeout(t3Done, 30_000, 'W7c 断线完成');
-    const nav = navFromResult(oDisc.result);
-    subcases.c = {
-      verdict: 'NOT_RUN', status: oDisc.result.status, outcome: nav?.outcome,
-      lastValidMeasuredPosition: lastValid, lastPosition: nav?.lastPosition, summary: oDisc.result.summary,
-    };
-    if (oDisc.result.status !== 'cancelled') throw new Error(`W7c 断线未以 cancelled 结束：status=${oDisc.result.status} 摘要=${oDisc.result.summary}`);
-    if (!hasPartialPosition(nav)) throw new Error('W7c 断线未保留实测部分位移');
-    // 身份取本子任务真实保存的 start 绑定，不用无参分析或假 ID。
-    const w7cStart = d.exec.routeCalls.find((c) => c.op === 'start' && c.ownerTaskId === t3.task.id);
-    if (!w7cStart?.delegationId) throw new Error('W7c 未捕获本子任务的真实 delegation 启动');
-    const accepted = acceptedMeasurements(d.exec.deliveredSamples, t3.task.id, w7cStart.delegationId);
-    if (!partialMatchesRecorded(nav, accepted)) throw new Error('W7c 部分位移与最后已记录测量不一致');
-    subcases.c = { ...(subcases.c as object), verdict: 'PASS' };
-  } catch (e) {
-    subcases.c = { ...(subcases.c as object), verdict: 'FAIL', error: (e as Error)?.message ?? String(e) };
+  // --- 7c：移动中真实断线（只断客户端，服务器存活）：观察 adapter.disconnected + bot.end，保留旧样本 ---
+  if (!bPass) {
+    subcases.c = { verdict: 'NOT_RUN', note: 'W7b 未通过或取消未收完；不启动断线子case' };
+  } else {
+    try {
+      await settleAtStart('W7c 起点');
+      const startPos = { ...ctx.adapter.state().pos };
+      const route = lineRoute(12);
+      const listenersBefore = botListenerCounts(ctx.bot);
+      const t = startWalkTask(ctx, d, route, Date.now() + 30_000);
+      if ('error' in t) throw new Error(`W7c 启动失败：${t.error}`);
+      const startCall = d.exec.routeCalls.find((c) => c.op === 'start' && c.ownerTaskId === t.task.id);
+      if (!startCall?.delegationId) throw new Error('W7c 未捕获本子任务的真实 delegation 启动');
+      const delegationId = startCall.delegationId;
+      const done = t.done;
+      await waitFor(() => dist2(ctx.adapter.state().pos, startPos) > 0.5, 15_000, 'W7c 开始移动');
+      const acceptedBefore = acceptedMeasurements(d.exec.deliveredSamples, t.task.id, delegationId);
+      const lastBefore = acceptedBefore[acceptedBefore.length - 1];
+      if (!lastBefore) throw new Error('W7c 断线前无被公开状态证明的实测样本');
+      snapControl(ctx, 'before-client-disconnect', ev);
+      const observed: { adapterDisconnectedSeq: number | null; botEndSeq: number | null } = {
+        adapterDisconnectedSeq: null, botEndSeq: null,
+      };
+      const onAdapterDisconnected = () => { observed.adapterDisconnectedSeq = markTimeline(d, 'adapter-disconnected', t.task.id); };
+      const onBotEnd = () => { observed.botEndSeq = markTimeline(d, 'bot-end', t.task.id); };
+      ctx.adapter.on('disconnected', onAdapterDisconnected);
+      ctx.bot.on('end', onBotEnd);
+      const quitSeq = markTimeline(d, 'adapter-quit', t.task.id);
+      const quitTs = Date.now();
+      ctx.adapter.quit(); // 只断客户端；共享服务器继续运行。
+      const o = await awaitOrTimeout(done, 20_000, 'W7c 断线完成');
+      const doneSeq = markTimeline(d, 'task-done-w7c', t.task.id);
+      const finishedAt = Date.now();
+      ctx.adapter.removeListener('disconnected', onAdapterDisconnected);
+      ctx.bot.removeListener('end', onBotEnd);
+      const nav = navFromResult(o.result);
+      const base = {
+        taskId: t.task.id, delegationId, request: taskStartRecord(t.task.id)?.request, scope: taskStartRecord(t.task.id)?.scope,
+        route, quitSeq, quitTs, finishedAt, doneSeq, elapsedMs: finishedAt - t.task.startedAt, observed, status: o.result.status, outcome: nav?.outcome,
+        confirmed: nav?.confirmed, summary: o.result.summary, lastPosition: nav?.lastPosition,
+        lastBefore: lastBefore.sample, segments: ownSegments(t.task.id, delegationId),
+      };
+      subcases.c = { verdict: 'NOT_RUN', ...base };
+      assertEndObserved(observed.adapterDisconnectedSeq, observed.botEndSeq, quitSeq, 'W7c');
+      if (o.result.status !== 'cancelled') throw new Error(`W7c 断线未以 cancelled 结束：status=${o.result.status} 摘要=${o.result.summary}`);
+      if (nav?.outcome !== 'CANCELLED' || nav.confirmed !== false) {
+        throw new Error(`W7c NavResult 非 CANCELLED/unconfirmed：outcome=${nav?.outcome} confirmed=${nav?.confirmed}`);
+      }
+      const last = assertRealPartial(nav, d.exec.deliveredSamples, t.task.id, delegationId, startPos, 0.5, 'W7c');
+      if (last.sample.sequence < lastBefore.sample.sequence) throw new Error('W7c 最终有效样本早于断线前已记录样本');
+      // production newSession.stopAll 是合法生命周期撤销；只记录并确认其 keysAfter 释放。
+      const stopOnDisconnect = d.diag.stopAlls.find((s) => s.kind === 'production' && s.seqBefore > quitSeq && s.recentBodyOwnerTaskId === t.task.id);
+      if (!stopOnDisconnect) throw new Error('W7c 未记录断线 newSession 的生产 stopAll');
+      if (!allKeysReleased(stopOnDisconnect.keysAfter)) throw new Error(`W7c 断线 stopAll keysAfter 仍有残留：${JSON.stringify(stopOnDisconnect.keysAfter)}`);
+      const finalKeys = snapshotKeys(ctx.bot);
+      if (!allKeysReleased(finalKeys)) throw new Error(`W7c 最终仍有按键未释放：${JSON.stringify(finalKeys)}`);
+      const lateMoves = d.exec.moves.filter((m) => m.taskId === t.task.id && m.delegationId === delegationId && m.seq > quitSeq);
+      if (lateMoves.length > 0) throw new Error(`W7c 断线后仍有 ${lateMoves.length} 个旧段启动：${JSON.stringify(lateMoves.map((m) => m.executionId))}`);
+      await waitFor(() => pendingTicksFor(d.diag.ticks, t.task.id).length === 0, 1_000, 'W7c pending tick 解除');
+      assertOwnedTicksReleased(d.diag.ticks, t.task.id, 'W7c');
+      assertListenerBaseline(listenersBefore, botListenerCounts(ctx.bot), 'W7c');
+      subcases.c = {
+        ...base, verdict: 'PASS', finalKeys,
+        stopAll: { seqBefore: stopOnDisconnect.seqBefore, seqAfter: stopOnDisconnect.seqAfter, keysBefore: stopOnDisconnect.keysBefore, keysAfter: stopOnDisconnect.keysAfter },
+        lastValidSample: {
+          sequence: last.sample.sequence, observedAt: last.sample.observedAt,
+          worldId: last.sample.worldId, dim: last.sample.dim, sessionId: last.sample.sessionId,
+          pos: last.sample.pos,
+        },
+        lastObservation: nav.lastObservation,
+        eventOrder: d.ev.marks
+          .filter((m) => m.taskId === t.task.id && ['adapter-quit', 'adapter-disconnected', 'bot-end'].includes(m.label))
+          .map((m) => ({ seq: m.seq, ts: m.ts, label: m.label })),
+      };
+    } catch (e) {
+      subcases.c = { ...(subcases.c ?? {}), verdict: 'FAIL', error: (e as Error)?.message ?? String(e) };
+    }
   }
 
   ev.extra = { ...ev.extra, subcases };
@@ -2017,6 +2311,38 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
 // ---------------------------------------------------------------------------
 // 主流程
 // ---------------------------------------------------------------------------
+
+/**
+ * 首个选中场景的固定夹具与已确认支撑起点。仅用于「Bot 连接前建场地、spawn 后立即 TP」，
+ * 不改变各场景自己的夹具核验与任务起终点。
+ */
+interface SetupFixture {
+  scenario: ScenarioId;
+  footprint: { xMin: number; xMax: number; zMin: number; zMax: number };
+  feetY: number;
+  material: string;
+  start: Vec3;
+}
+
+function setupFixtureFor(id: ScenarioId): SetupFixture | null {
+  if (id === 'W2') {
+    const p = W2_PLATFORM;
+    return {
+      scenario: id,
+      footprint: { xMin: p.xMin, xMax: p.xMax, zMin: p.zMin, zMax: p.zMax },
+      feetY: p.feetY, material: p.material, start: { ...p.start },
+    };
+  }
+  if (id === 'W1' || id === 'W6' || id === 'W7') {
+    const lane = WALK_LANE;
+    return {
+      scenario: id,
+      footprint: { xMin: lane.xMin, xMax: lane.xMax, zMin: lane.zMin, zMax: lane.zMax },
+      feetY: lane.feetY, material: lane.material, start: { ...lane.start },
+    };
+  }
+  return null;
+}
 
 /** 等待 spawn，超时/断线都清理监听器与定时器。 */
 function waitForSpawn(adapter: MineflayerAdapter, timeoutMs: number): Promise<void> {
@@ -2089,12 +2415,35 @@ async function main() {
     evidence.preflight = preflight;
     if (!preflight.ok) throw new Error(`RCON 预检未通过：重复Bot=${preflight.duplicateBot} 意外在线=${JSON.stringify(preflight.unexpected)} 在线=${JSON.stringify(preflight.occupants)}`);
 
+    // RCON 已证实无重复/意外在线后、Bot 连接前，先准备首个选中场景的固定夹具。
+    // 这样 spawn 时落点已有支撑，避免上一轮流体测试留下的危险位置让 setup 期间溺水/漂移。
+    const firstSelected = ALL_SCENARIOS.find((id) => !UNSUPPORTED.includes(id) && selector.includes(id));
+    const setupFixture = firstSelected ? setupFixtureFor(firstSelected) : null;
+    const setupEv: FixtureEvidence = { extra: {} };
+    if (firstSelected && setupFixture) {
+      await buildSupportFixture(rcon, setupEv, setupFixture.footprint, setupFixture.feetY, setupFixture.material);
+      evidence.preSetup = {
+        scenario: firstSelected,
+        start: setupFixture.start,
+        fixture: setupEv.extra?.fixture,
+        fixtureOps: setupEv.extra?.fixtureOps,
+      };
+    }
+
     const spawnPromise = waitForSpawn(adapter, 30_000);
     adapter.connect();
     await spawnPromise;
-    await waitFor(() => adapter!.state().observationReady, 30_000, 'observationReady');
 
     const ctx: HarnessContext = { bot: adapter.bot as Bot, adapter, arbiter, rcon, evidenceDir, runId };
+    if (setupFixture) {
+      // spawn 后立即用测试控制端 TP 到已确认支撑的固定起点，再稳定定位。
+      // 先挂引用，TP/稳定失败时已发出的原始命令与响应也不会丢。
+      const preSetupRecord = evidence.preSetup as Record<string, unknown>;
+      preSetupRecord.teleportEvidence = setupEv.extra;
+      await teleportAndSettle(ctx, setupEv, setupFixture.start, 'pre-setup 起点');
+      preSetupRecord.teleports = setupEv.extra?.teleports;
+    }
+    await waitFor(() => adapter!.state().observationReady, 30_000, 'observationReady');
     const scenarioMap: Partial<Record<ScenarioId, (c: HarnessContext, d: ScenarioDiag) => Promise<void>>> = {
       W1: scenarioW1, W2: scenarioW2, W6: scenarioW6, W7: scenarioW7,
     };
