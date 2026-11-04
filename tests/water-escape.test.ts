@@ -64,32 +64,15 @@ test('installed Minecraft physics swims out of a deep pond and remains on dry fo
   assert.ok(bot.entity.position.x >= 6);
 });
 
-test('recovered oxygen and a brief airborne breach cannot claim a safe landing without a shore', async (t) => {
+test('vertical ascent reports surfaced without claiming a landing when no shore exists', async (t) => {
   const { adapter, bot, controls } = pond(t);
   const result = await adapter.swimTo(null, new AbortController().signal, { timeoutMs: 6000 });
-  assert.equal(result.ok, false);
-  assert.equal(result.landed, false);
-  assert.equal(result.reason, 'WATER_ESCAPE_TIMEOUT');
-  assert.ok(bot.oxygenLevel >= 18, 'breathing recovery alone is deliberately insufficient');
+  assert.equal(result.ok, true);
+  assert.equal(result.surfaced, true, '头稳定露出水面应报告 surfaced');
+  assert.equal(result.landed, false, '浮出水面不等于上岸');
   assert.equal(controls.jump, false); assert.equal(controls.forward, false);
   await bot.waitForTicks(40);
-  assert.equal(bot.entity.isInWater, true, 'this reproduces the old surface-then-sink loop');
-});
-
-test('swimming retains buoyancy while ordinary observation discovers a shore after ascent', async (t) => {
-  const { adapter, bot, controls } = pond(t);
-  let observations = 0, highObservation = false;
-  const result = await adapter.swimTo(null, new AbortController().signal, { timeoutMs: 15000, observeShore: () => {
-    observations++;
-    assert.equal(controls.jump, true, 'looking for a bank must never release ascent controls');
-    if (bot.entity.position.y < 63) return null;
-    highObservation = true;
-    return { x: 6.5, y: 64, z: 2.5 };
-  } });
-  assert.ok(observations > 2); assert.equal(highObservation, true);
-  assert.equal(result.ok, true); assert.equal(result.landed, true);
-  await bot.waitForTicks(60);
-  assert.equal(bot.entity.isInWater, false); assert.equal(bot.entity.onGround, true);
+  assert.equal(bot.entity.isInWater, true, 'surfaced 不等于离水站稳');
 });
 
 test('cancelled swimming releases controls and a late physics wait cannot restart them', async (t) => {
@@ -121,22 +104,22 @@ test('known water surfaces and plants are never classified as dry shoreline', ()
   assert.equal(vision.nearestLand(adapter.pos), null, 'an expired historical bank is not fresh escape evidence');
 });
 
-test('surface keeps ownership after oxygen14 and only reports success after actual dry landing', async (t) => {
+test('surface delegates exactly one bounded ascent and reports surfaced without landing', async (t) => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   let now = 100000, calls = 0;
   t.mock.method(Date, 'now', () => now);
   adapter.inWater = true; adapter.oxygen = 10;
   adapter.swimTo = async () => {
-    calls++; now += 1000;
-    adapter.inWater = calls === 2;
-    adapter.oxygen = calls === 1 ? 14 : 20;
-    return { ok: calls !== 2, landed: calls !== 2, oxygen: adapter.oxygen };
+    calls++;
+    return { ok: true, landed: false, surfaced: true, oxygen: 20 };
   };
   try {
     const result = await surface.run({ adapter, memory, bus, signal: new AbortController().signal, deadline: now + 32000, taskId: 'surface-reproduction', progress() {},
       senses: { refresh() {}, markSweep() {}, perceivedEntities: () => [], knownBlocks: () => [], nearestLand: () => ({ dir: 'E', dist: 5, pos: { x: 5, y: 63, z: 0 } }) } }, {});
-    assert.equal(calls, 3); assert.equal(result.status, 'succeeded');
-    assert.equal(result.data?.landed, true); assert.match(result.summary, /上岸并站稳/);
+    assert.equal(calls, 1, '只做一次上浮委托');
+    assert.equal(result.status, 'succeeded');
+    assert.equal(result.data?.surfaced, true);
+    assert.equal(result.data?.landed, false, '浮出水面不等于上岸');
   } finally { memory.close(); }
 });
 
@@ -186,23 +169,24 @@ test('climbing out onto the bank does not keep bunny-hopping on dry land', async
   assert.equal(hops, 0, `jumped ${hops} times on dry land before settling`);
 });
 
-test('surface escape:"shore" never digs the ceiling or hunts air pockets', async (t) => {
+test('surface never digs or moves toward a shore, even when the ceiling blocks ascent', async (t) => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   let now = 100000;
   t.mock.method(Date, 'now', () => now);
   adapter.inWater = true; adapter.oxygen = 10;
   // FakeAdapter 里 y<63 是 stone：站在 y=60 时头顶 y=61 是石头，形成封顶（reachable）
   adapter.pos = { x: 0.5, y: 60, z: 0.5 };
-  let digs = 0;
+  let digs = 0, moves = 0;
   adapter.dig = async () => { digs++; return { ok: true }; };
-  // 每次游泳/寻路都大步推进时间，让循环尽快耗尽 deadline，避免测试空转
-  adapter.swimTo = async () => { now += 40000; return { ok: false, landed: false, oxygen: 10 }; };
-  adapter.moveTo = async () => { now += 40000; };
+  adapter.swimTo = async () => { return { ok: false, landed: false, surfaced: false, oxygen: 10 }; };
+  adapter.moveTo = async () => { moves++; };
   try {
     const result = await surface.run({ adapter, memory, bus, signal: new AbortController().signal, deadline: now + 32000, taskId: 'surface-shore', progress() {},
-      senses: { refresh() {}, markSweep() {}, perceivedEntities: () => [], knownBlocks: () => [], nearestLand: () => ({ dir: 'E', dist: 5, pos: { x: 5, y: 63, z: 0 } }) } }, { escape: 'shore' });
-    assert.equal(digs, 0, 'escape:"shore" 不得暗中挖开头顶方块');
-    assert.equal(result.status, 'failed', result.summary); // 头顶封住且不许挖，未上岸应如实报告
+      senses: { refresh() {}, markSweep() {}, perceivedEntities: () => [], knownBlocks: () => [], nearestLand: () => ({ dir: 'E', dist: 5, pos: { x: 5, y: 63, z: 0 } }) } }, {});
+    assert.equal(digs, 0, '封顶也不得挖开头顶方块');
+    assert.equal(moves, 0, '不得寻路到岸');
+    assert.equal(result.status, 'failed', result.summary); // 未浮出应如实报告
+    assert.equal(result.data?.landed, false);
   } finally { memory.close(); }
 });
 
@@ -212,7 +196,7 @@ test('stuck in water: correction does not choose a bank or start swimming', asyn
   await bot.waitForTicks(4);
   const before = bot.entity.position.clone();
   let swims = 0;
-  adapter.swimTo = async () => { swims++; return { ok: false, landed: false, oxygen: 20 }; };
+  adapter.swimTo = async () => { swims++; return { ok: false, landed: false, surfaced: false, oxygen: 20 }; };
   for (const allowSwimming of [false, true]) {
     const action = await (adapter as any).nudge(new Set(), { signal: new AbortController().signal, timeoutMs: 10000, allowSwimming });
     assert.equal(action, null);

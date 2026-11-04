@@ -102,7 +102,7 @@ export interface MindContext {
  */
 
 /** 常用动作：给完整参数；其余只列名字和一句用途，需要时用 {"kind":"moves"} 查完整参数 */
-export const COMMON_MOVES = ['dig_at', 'step', 'place_at', 'defend', 'gather', 'goto', 'explore', 'look', 'look_around', 'dive', 'surface', 'craft', 'smelt', 'collect_furnace', 'eat', 'hunt', 'forage', 'fish', 'farm', 'collect_seeds',
+export const COMMON_MOVES = ['dig_at', 'step', 'place_at', 'defend', 'gather', 'goto', 'explore', 'look', 'look_around', 'dive', 'surface', 'swim_to', 'craft', 'smelt', 'collect_furnace', 'eat', 'hunt', 'forage', 'fish', 'farm', 'collect_seeds',
   'pickup_items', 'store_items', 'take_items', 'find_item', 'place_torch', 'shelter', 'sleep', 'wait', 'dig', 'excavate_path', 'follow_passage', 'climb_up', 'press_keys', 'build', 'travel', 'inspect_block', 'interact_block', 'use_item', 'use_skill'];
 
 /** 远行、传送门、末地这些只在用得上时列出来，平时是噪音 */
@@ -119,7 +119,7 @@ function briefOf(d: string, n: number): string {
 
 /** 移动/潜水上浮这类动作在两种思考档位里都要给足副作用说明 */
 function descOf(s: { name: string; description: string }, chars: number): string {
-  return ['look', 'dive', 'surface', 'travel'].includes(s.name) ? s.description.replace(/\s+/g, ' ')
+  return ['look', 'dive', 'surface', 'swim_to', 'travel'].includes(s.name) ? s.description.replace(/\s+/g, ' ')
     : chars ? briefOf(s.description, chars) : '';
 }
 
@@ -137,7 +137,7 @@ export function movesCatalog(chars = 40, core: Set<string> = new Set(COMMON_MOVE
 }
 
 /** 瞥一眼时给完整参数的常用动作；其余只列名字 + 用途，参数按需用 moves 查 */
-const GLANCE_CORE = ['dig_at', 'step', 'place_at', 'gather', 'goto', 'craft', 'eat', 'sleep', 'wait', 'look', 'look_around', 'defend', 'hunt', 'place_torch', 'dive', 'surface', 'travel', 'press_keys'];
+const GLANCE_CORE = ['dig_at', 'step', 'place_at', 'gather', 'goto', 'craft', 'eat', 'sleep', 'wait', 'look', 'look_around', 'defend', 'hunt', 'place_torch', 'dive', 'surface', 'swim_to', 'travel', 'press_keys'];
 /** 瞥一眼时只列名字 + 用途的动作（完整参数按需查） */
 const GLANCE_SECONDARY = ['explore', 'forage', 'pickup_items', 'shelter', 'build', 'smelt', 'store_items', 'climb_up', 'use_skill', 'excavate_path', 'descend', 'assess_landings'];
 

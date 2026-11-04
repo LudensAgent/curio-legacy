@@ -272,8 +272,6 @@ export interface TradeView {
 
 export interface SwimOptions {
   timeoutMs?: number;
-  /** Refresh only ordinary senses; returning null keeps the swimmer afloat while looking. */
-  observeShore?: () => Vec3Like | null;
 }
 
 export interface BlockState {
@@ -419,7 +417,7 @@ export interface GameAdapter {
   look(yaw: number, pitch: number, signal?: AbortSignal): Promise<void>;
   jump(ms: number, signal: AbortSignal): Promise<void>;
   /** Swim toward an observed shore, retaining buoyancy until dry footing is verified. */
-  swimTo?(target: Vec3Like | null, signal: AbortSignal, opts?: SwimOptions): Promise<ActionResult & { landed: boolean; oxygen: number }>;
+  swimTo?(target: Vec3Like | null, signal: AbortSignal, opts?: SwimOptions): Promise<ActionResult & { landed: boolean; surfaced: boolean; oxygen: number }>;
   /** 在水里朝一格游过去（往下潜或往上游）：到了、气不够了（oxygen ≤ minOxygen）、出了水或超时就停 */
   diveTo?(target: Vec3Like, signal: AbortSignal, opts?: { minOxygen?: number; timeoutMs?: number }): Promise<ActionResult & { reached: boolean; oxygen: number }>;
 

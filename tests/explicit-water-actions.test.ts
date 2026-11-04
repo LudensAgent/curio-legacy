@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { wait } from '../src/skills/wait.ts';
 import { gather } from '../src/skills/work.ts';
 import { surface, unstuck } from '../src/skills/movement.ts';
+import { swimTo } from '../src/skills/actions.ts';
 import { makeCtx, TestWorld } from './survival-helpers.ts';
 
 test('waiting in water does not implicitly swim or change the chosen action', async () => {
@@ -59,5 +60,33 @@ test('surface remains available when explicitly requested', async () => {
     const result = await surface.run(ctx, {});
     assert.equal(result.status, 'succeeded');
     assert.equal(result.data?.landed, true);
+  } finally { ctx.memory.close(); }
+});
+
+test('swim_to keeps the chosen coordinate and only succeeds on dry landing', async () => {
+  const w = new TestWorld();
+  w.inWater = true;
+  let target: { x: number; y: number; z: number } | null = null;
+  w.swimTo = async (t: any) => { target = t; return { ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, surfaced: false, oxygen: 14 }; };
+  const ctx = makeCtx(w);
+  try {
+    const valid = swimTo.validate({ xyz: [4, 64, 1] }, w);
+    assert.ok(valid.ok);
+    const r = await swimTo.run(ctx, (valid as { args: { xyz: { x: number; y: number; z: number }; timeout?: number } }).args);
+    assert.equal(r.status, 'failed', r.summary);
+    assert.equal(r.data?.landed, false);
+    assert.deepEqual(target, { x: 4.5, y: 64, z: 1.5 }, '保持调用方选择的坐标，不换目标');
+    assert.equal(r.data?.oxygen, 14);
+  } finally { ctx.memory.close(); }
+});
+
+test('swim_to refuses outside water', async () => {
+  const w = new TestWorld();
+  w.inWater = false;
+  const ctx = makeCtx(w);
+  try {
+    const r = await swimTo.run(ctx, { xyz: { x: 4, y: 64, z: 1 } });
+    assert.equal(r.status, 'failed');
+    assert.equal(r.failureCode, 'BAD_ARGS');
   } finally { ctx.memory.close(); }
 });

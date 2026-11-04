@@ -4091,16 +4091,19 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     }
   }
 
-  async swimTo(target: Vec3Like | null, signal: AbortSignal, opts: SwimOptions = {}): Promise<ActionResult & { landed: boolean; oxygen: number }> {
+  async swimTo(target: Vec3Like | null, signal: AbortSignal, opts: SwimOptions = {}): Promise<ActionResult & { landed: boolean; surfaced: boolean; oxygen: number }> {
     const check = this.actionCheckpoint(signal);
-    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', landed: false, oxygen: 0 };
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', landed: false, surfaced: false, oxygen: 0 };
     const b = this.bot, epoch = this.actionEpoch;
     const end = Date.now() + Math.max(100, Math.min(20000, opts.timeoutMs ?? 10000));
     let drySince: number | null = null;
+    let surfacedSince: number | null = null;
     let lastProgress = Date.now(), anchor = b.entity.position.clone();
-    let destination = target, nextObservation = 0, nextTurn = Date.now() + 750;
+    const destination = target;
     const water = (block: any) => !!block && (['water', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass'].includes(block.name) || String(block.getProperties?.().waterlogged) === 'true');
     const headUnder = () => water(b.blockAt(b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0)));
+    // 头格已知且不是流体才算真正露头；未观察（null）不算已浮出水面。
+    const headOut = () => { const h = b.blockAt(b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0)); return !!h && !water(h); };
     const dryFooting = () => {
       const p = b.entity.position;
       const support = b.blockAt(p.offset(0, -0.05, 0));
@@ -4121,25 +4124,17 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         const arrived = !destination || (distance <= 1.0 && vertical <= 1.5);
         if (dry && arrived && ownOxygen(b) >= 18) {
           drySince ??= Date.now();
-          if (Date.now() - drySince >= 600) return { ok: true, landed: true, oxygen: ownOxygen(b) };
+          if (Date.now() - drySince >= 600) return { ok: true, landed: true, surfaced: true, oxygen: ownOxygen(b) };
         } else drySince = null;
-        // A brief breach of the water surface is not a landing. Keep ascending
-        // until there is actual support, then release jump and let the body settle.
+        // 垂直上浮模式（无目标）：头稳定离开流体就算已浮出水面，不要求上岸；短暂露头不算。
+        if (!destination && headOut()) {
+          surfacedSince ??= Date.now();
+          if (Date.now() - surfacedSince >= 600) return { ok: true, landed: false, surfaced: true, oxygen: ownOxygen(b) };
+        } else surfacedSince = null;
         // 只在水里按跳（上浮、借撞岸的那一下爬上去）。人已经出水、只是还没落稳时还按着，落地那一刻又起跳，
         // 就会在岸上一下一下地跳个不停，一直跳到超时
         b.setControlState('jump', !dry && (!!b.entity.isInWater || headUnder()));
         b.setControlState('sprint', false);
-        if (!destination && opts.observeShore && Date.now() >= nextObservation) {
-          destination = opts.observeShore();
-          nextObservation = Date.now() + 250;
-          if (destination) { lastProgress = Date.now(); anchor = b.entity.position.clone(); }
-        }
-        if (!destination && opts.observeShore && !dry && Date.now() >= nextTurn) {
-          // Keep jump held while turning and refreshing the view; separate
-          // jump/scan actions let the player sink during every camera turn.
-          await this.afterAction(() => b.look(b.entity.yaw + Math.PI / 2, -0.1, true), check);
-          nextTurn = Date.now() + 1000;
-        }
         // 离目标还有水平距离就向前：干岸上要先走进水里（不游泳也要迈步），不能只在 !dry 时才前进，否则两岸间隔的水永远过不去。
         if (destination && distance > 0.35) {
           await this.afterAction(() => b.look(Math.atan2(p.x - destination!.x, p.z - destination!.z), 0, true), check);
@@ -4148,11 +4143,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         if (p.distanceTo(anchor) >= 0.3) { lastProgress = Date.now(); anchor = p.clone(); }
         // 贴着岸往上爬时水平位置本来就不动（靠水里撞墙的上抬一点点爬上去）：多给点时间，别刚贴上岸就算没进展
         const climbingBank = !!b.entity.isCollidedHorizontally && distance <= 1.6;
-        if (!dry && destination && Date.now() - lastProgress >= (climbingBank ? 5000 : 2500)) return { ok: false, reason: 'SWIM_NO_PROGRESS', landed: false, oxygen: ownOxygen(b) };
+        if (!dry && destination && Date.now() - lastProgress >= (climbingBank ? 5000 : 2500)) return { ok: false, reason: 'SWIM_NO_PROGRESS', landed: false, surfaced: false, oxygen: ownOxygen(b) };
         if (typeof b.waitForTicks === 'function') await this.afterAction(() => raceAbort(b.waitForTicks(2), signal, 2000, () => {}), check);
         else await this.afterAction(() => sleep(100, signal), check);
       }
-      return { ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, oxygen: ownOxygen(b) };
+      return { ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, surfaced: false, oxygen: ownOxygen(b) };
     } finally {
       // A replaced task owns the controls now; stopAll already released ours.
       if (epoch === this.actionEpoch && b === this.bot) {

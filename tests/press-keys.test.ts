@@ -131,3 +131,26 @@ test('a learned combination can validate and execute the chosen key controls', a
   library.forget(learned.name, '测试结束');
   ctx.memory.close();
 });
+
+test('a learned macro runs surface (one ascent) then swim_to with the validated xyz surviving the round-trip', async () => {
+  const adapter = new FakeAdapter(), ctx = makeCtx(adapter);
+  adapter.inWater = true; adapter.oxygen = 10;
+  const swimCalls: ({ x: number; y: number; z: number } | null)[] = [];
+  adapter.swimTo = async (target) => {
+    swimCalls.push(target);
+    if (target) { adapter.inWater = false; adapter.pos = { x: target.x, y: target.y, z: target.z }; }
+    else adapter.oxygen = 20;
+    return { ok: true, landed: !!target, surfaced: !target, oxygen: 20 };
+  };
+  const library = new SkillLibrary(null, adapter, ctx.memory, ctx.bus);
+  const learned = library.learn({ name: 'surface_then_swim', steps: [
+    { skill: 'surface', args: {} },
+    { skill: 'swim_to', args: { xyz: [6, 64, 2] } },
+  ] });
+  assert.ok(learned.ok, 'surface 与 swim_to 现在都应可组合');
+  const result = await SKILLS[learned.name].run(ctx, {});
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.deepEqual(swimCalls, [null, { x: 6.5, y: 64, z: 2.5 }], 'swim_to 的 xyz 经 learn 校验后仍原样到达 swimTo');
+  library.forget(learned.name, '测试结束');
+  ctx.memory.close();
+});
