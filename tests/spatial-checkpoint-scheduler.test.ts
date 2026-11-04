@@ -1,12 +1,17 @@
 /**
  * 常规 checkpoint 调度的行为验收：用可控的 setInterval 与显式 promise 驱动
  * startSpatialCheckpointScheduler，证明周期触发、跳过、单次在途、dirty 保留、
- * 失败可见/下周期重试、stop 幂等且不重启、最终关停仍由宿主负责。
+ * 失败可见/下周期重试、stop 幂等且不重启、最终关停仍由宿主负责；并用真实
+ * SQLite 证明常规周期保存本身即可落盘，不依赖宿主最终 checkpoint。
  */
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
-import { PersistenceError } from 'curio-minecraft-3d-memory/storage/sqlite';
+import { openSpatialSession, PersistenceError } from 'curio-minecraft-3d-memory/storage/sqlite';
 import type { SpatialCheckpointResult, SpatialPersistenceState } from 'curio-minecraft-3d-memory/storage/sqlite';
+import { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import {
   DEFAULT_SPATIAL_CHECKPOINT_INTERVAL_MS,
   startSpatialCheckpointScheduler,
@@ -346,10 +351,104 @@ test('stop 不关闭会话，最终 shutdown/close 仍由宿主负责', async (t
   assert.equal(fx.shutdowns, 1, '最终关停由宿主显式调用');
 });
 
-test('公开的 interval 参数拒绝非正或非有限值', () => {
+test('公开的 interval 参数只接受 1..2147483647 的整数毫秒', () => {
   const fx = makeSpatial();
   assert.throws(() => startSpatialCheckpointScheduler(fx.spatial, () => {}, 0), RangeError);
   assert.throws(() => startSpatialCheckpointScheduler(fx.spatial, () => {}, -1), RangeError);
+  assert.throws(() => startSpatialCheckpointScheduler(fx.spatial, () => {}, 0.5), RangeError);
   assert.throws(() => startSpatialCheckpointScheduler(fx.spatial, () => {}, Number.NaN), RangeError);
   assert.throws(() => startSpatialCheckpointScheduler(fx.spatial, () => {}, Number.POSITIVE_INFINITY), RangeError);
+  assert.throws(() => startSpatialCheckpointScheduler(fx.spatial, () => {}, 2_147_483_648), RangeError);
+  // 普通值与 Node 允许的最大整数毫秒仍可正常启动/停止。
+  const stopMax = startSpatialCheckpointScheduler(fx.spatial, () => {}, 2_147_483_647);
+  stopMax();
+});
+
+test('真实 SQLite：常规周期保存独立于宿主最终关停，重开恢复原始观测', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'spatial-scheduler-'));
+  const dbPath = join(dir, 'memory.db');
+  const worldId = `periodic-checkpoint-${process.pid}-${Date.now()}`;
+  const dim = 'overworld';
+  const sessionId = 'periodic-session';
+  const observedAt = 1_700_000_123_456;
+  const pos = { x: 31, y: 62, z: -17 };
+  let sessionClosed = false;
+  let reopenedClosed = false;
+  try {
+    const spatial = await SharedSpatialSession.open({ worldId, databasePath: dbPath, now: () => observedAt, timeoutMs: 5000 });
+    try {
+      spatial.beginSession({ worldId, dim, sessionId });
+      const observed = spatial.observe([{
+        name: 'minecraft:emerald_block',
+        properties: {},
+        pos,
+        worldId,
+        sessionId,
+        dimension: dim,
+        observationId: 1,
+        observedAt,
+        source: 'vision',
+        stateComplete: true,
+      }]);
+      assert.ok(observed.sections.length > 0, '真实观测应写入内存地图');
+      assert.equal(spatial.getPersistenceState().dirty, true);
+
+      let stop: (() => void) | null = null;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let saved: Extract<SpatialCheckpointReport, { status: 'saved' }> | null = null;
+      const firstSave = new Promise<void>((resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('周期保存未在 5000ms 内完成')), 5000);
+        stop = startSpatialCheckpointScheduler(spatial, (report) => {
+          if (report.status === 'failed') {
+            reject(new Error(`周期保存失败：${JSON.stringify(report.error)}`));
+            return;
+          }
+          saved = report;
+          resolve();
+        }, 10);
+      });
+      try {
+        await firstSave;
+      } finally {
+        if (timer !== null) clearTimeout(timer);
+        stop?.();
+      }
+      assert.ok(saved !== null, '必须收到真实 saved 汇报');
+      assert.equal(saved.checkpoint.worldId, worldId);
+      assert.equal(saved.remainingDirty, false);
+      assert.equal(saved.state.dirty, false);
+
+      // 直接关底层会话：不调用宿主 shutdown 的最终 checkpoint，只留下周期保存。
+      const closed = await spatial.session.close();
+      sessionClosed = closed.completed && closed.error === null && !closed.unconfirmedRequest;
+      assert.equal(closed.completed, true, '底层会话真实 close 必须完成');
+      assert.equal(closed.error, null);
+      assert.equal(closed.unconfirmedRequest, false);
+      assert.equal(closed.dirty, false, '周期保存后不应残留未保存版本');
+    } finally {
+      if (!sessionClosed) {
+        try { await spatial.session.close(); } catch (error) { console.error('底层会话关闭失败:', error); }
+      }
+    }
+
+    const reopened = await openSpatialSession({ worldId, databasePath: dbPath, timeoutMs: 5000 });
+    try {
+      const cell = reopened.voxel.cellAt(dim, pos.x, pos.y, pos.z);
+      assert.equal(cell.observed, true, '周期保存应已落盘唯一观测');
+      if (cell.observed) {
+        assert.equal(cell.evidence.observation.state.name, 'minecraft:emerald_block');
+        assert.equal(cell.evidence.observation.observedAt, observedAt);
+        assert.equal(cell.evidence.observation.sessionId, sessionId);
+        assert.equal(cell.evidence.freshness, 'STALE');
+      }
+    } finally {
+      const closed = await reopened.close();
+      reopenedClosed = closed.completed && closed.error === null && !closed.unconfirmedRequest;
+      assert.equal(closed.completed, true, '重开后的真实 close 必须完成');
+      assert.equal(closed.error, null);
+    }
+  } finally {
+    if (sessionClosed && reopenedClosed) rmSync(dir, { recursive: true, force: true });
+    else console.error('保留未确认关闭的 fixture:', dir, 'sessionClosed=', sessionClosed, 'reopenedClosed=', reopenedClosed);
+  }
 });

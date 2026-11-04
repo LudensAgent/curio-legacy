@@ -7,7 +7,6 @@
  * 或清除 dirty。最终 flush/checkpoint/close 仍由宿主的 SharedSpatialSession.shutdown
  * 负责；stop() 只停未来触发，不取消已接受的 I/O。
  */
-import { PersistenceError } from 'curio-minecraft-3d-memory/storage/sqlite';
 import type { SpatialCheckpointResult, SpatialPersistenceState } from 'curio-minecraft-3d-memory/storage/sqlite';
 import { errorFacts, type ErrorFacts } from './host-shutdown.ts';
 
@@ -51,8 +50,9 @@ export function startSpatialCheckpointScheduler(
   report: (fact: SpatialCheckpointReport) => void,
   intervalMs = DEFAULT_SPATIAL_CHECKPOINT_INTERVAL_MS,
 ): () => void {
-  if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
-    throw new RangeError(`spatial checkpoint interval must be a positive finite number, got ${intervalMs}`);
+  // Node 会把超范围/小数延迟压到 1ms，等于取消有界重试间隔；只接受整数毫秒。
+  if (!Number.isInteger(intervalMs) || intervalMs < 1 || intervalMs > 2_147_483_647) {
+    throw new RangeError(`spatial checkpoint interval must be an integer between 1 and 2147483647 ms, got ${intervalMs}`);
   }
   let stopped = false;
   let pending = false;
@@ -63,17 +63,8 @@ export function startSpatialCheckpointScheduler(
     pending = true;
     void spatial.checkpoint()
       .then((checkpoint) => {
+        // 公开 checkpoint 只在提交确认后 resolve；当前状态只用于汇报剩余 dirty。
         const state = spatial.getPersistenceState();
-        // 只有库自己确认了本次 id 才算 saved；调度器不自行补写确认。
-        if (state.lastConfirmedCheckpointId !== checkpoint.checkpointId) {
-          report({
-            status: 'failed',
-            error: errorFacts(new PersistenceError('data', `checkpoint "${checkpoint.checkpointId}" was not confirmed by persistence state`)),
-            remainingDirty: state.dirty,
-            state: { ...state },
-          });
-          return;
-        }
         report({ status: 'saved', checkpoint, remainingDirty: state.dirty, state: { ...state } });
       }, (error: unknown) => {
         const state = spatial.getPersistenceState();
