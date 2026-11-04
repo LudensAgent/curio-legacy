@@ -10,10 +10,11 @@
  *   明确报告为输入/预算限制，绝不改写成“世界无路”或悄悄投影目标。
  * - 搜索经共享会话的既有 attach 接收真实 ChangeReport（→ invalidate）与生命周期
  *   取消（→ cancel）；INVALIDATED 是终态，不自动重搜。
- * - 局部准备只观察身体附近 3×3×4 格并做至多 12 次真实转头；搜索推进本身不触发
- *   额外探索。
+ * - 搜索前的局部准备以当前身体脚格为中心固定水平半径 4（9×9×4 格：支撑/脚/头/净空）
+ *   做至多 12 次真实转头观察；范围不随目标或搜索前沿扩张，搜索推进本身不触发额外探索。
+ *   执行阶段仍只观察移动中的 3×3×4 邻域。
  * - 零边候选不造路线：只用有界真实物理帧按既定 grounded 稳定窗口确认原完成条件，
- *   零控制、零移动。
+ *   零控制、零移动；成功时 data.noop=true 表示没有身体效果。
  */
 
 import {
@@ -28,7 +29,7 @@ import {
 import { awaitFrame, walkCollisionProvider } from '../adapter/walk-route.ts';
 import type { WalkTick } from '../adapter/walk-route.ts';
 import type { SharedSpatialSession } from '../spatial/shared-session.ts';
-import { bodyLocalCells, executeWalkRoute, observeCells, readPoint } from './walk-route.ts';
+import { executeWalkRoute, observeCells, readPoint } from './walk-route.ts';
 import { fail, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 
 /** 本次执行后端最多接受 32 个候选点；超限如实报 route_budget，绝不截断路线。 */
@@ -45,6 +46,22 @@ const MAX_ZERO_EDGE_FRAMES = 400;
 
 /** 连续样本容差，与库执行器的 POS_EPS 同量级，只用于判断采样是否连续。 */
 const SAMPLE_EPS = 1e-6;
+
+/** 准备阶段的固定水平观察半径（格）：以当前脚格为中心，不随目标或搜索前沿扩张。 */
+const PREP_RADIUS = 4;
+
+/**
+ * 搜索前局部准备的观察格：当前脚格为中心的水平半径 4（9×9）× 支撑/脚/头/净空 4 层。
+ * 固定 324 格，仅由当前身体位置决定；`observeCells` 再按 Vision 的 ≤32 格/批发送。
+ */
+function preparationCells(pos: Vec3Like): Vec3Like[] {
+  const fx = Math.floor(pos.x), fy = Math.floor(pos.y), fz = Math.floor(pos.z);
+  const cells: Vec3Like[] = [];
+  for (let x = fx - PREP_RADIUS; x <= fx + PREP_RADIUS; x++)
+    for (let z = fz - PREP_RADIUS; z <= fz + PREP_RADIUS; z++)
+      for (let y = fy - 1; y <= fy + 2; y++) cells.push({ x, y, z });
+  return cells;
+}
 
 type WalkToArrival = { kind: 'exact' } | { kind: 'near'; radius: number };
 
@@ -330,7 +347,7 @@ function executionResult(
 
 export const walkTo: Skill<WalkToArgs> = {
   name: 'walk_to',
-  description: '按给定目的地做一次显式有界步行搜索并执行：只支持同高、从当前连续脚位沿整数 X/Z 格、普通干燥整块的路线；不含挖掘、放置、跳跃、游泳或绕行改造。搜索预算固定（512 节点/2048 边），找到的只是候选，最终到达由真实身体闭环与实测位置确认。exact 目标必须落在当前脚位的整数 XZ 格上（沿用既有 grounded 物理容差），near 使用原半径的完整 XYZ 距离；输入不支持会明确报告能力限制，不代表世界无路。',
+  description: '按给定目的地做一次显式有界步行搜索并执行：只支持同高、从当前连续脚位沿整数 X/Z 格、普通干燥整块的路线；不含挖掘、放置、跳跃、游泳或绕行改造。搜索前会以当前身体脚格为中心做固定水平半径 4（9×9×4 格：支撑/脚/头/净空）的有限转头观察，至多 12 次真实 look；范围不随目标或搜索前沿扩张，转头观察不使用任何物品。执行中每段会朝行进方向俯视该段支撑格，移动中只观察身体周边 3×3×4 格。搜索预算固定（512 节点/2048 边），找到的只是候选，最终到达由真实身体闭环与实测位置确认。exact 目标必须落在当前脚位的整数 XZ 格上（沿用既有 grounded 物理容差），near 使用原半径的完整 XYZ 距离；输入不支持会明确报告能力限制，不代表世界无路。',
   argsDoc: '{"to":[x,y,z],"arrival":{"kind":"exact"} 或 {"kind":"near","radius":>0的有限数字},"deadlineMs":可选绝对epoch毫秒}',
   timeoutMs: 30000,
   movement: true,
@@ -413,20 +430,24 @@ export const walkTo: Skill<WalkToArgs> = {
     // 搜索/准备期间只暂停 stationary watchdog，不延长任何任务期限；finally 恢复。
     ctx.setStationaryWait?.(true);
     try {
-      // 有限局部准备：身体附近 3×3×4 格，至多 12 次真实转头；不枚举世界或目标矩形。
-      const prepCells = bodyLocalCells(ctx.adapter.state().pos);
-      observeCells(ctx, map, prepCells);
-      let prepStopped = false;
-      if (typeof ctx.adapter.look === 'function') {
-        for (const pitch of [-1.2, 0, 1.1]) {
-          for (const yaw of [-Math.PI / 2, 0, Math.PI / 2, Math.PI]) {
-            if (ctx.signal.aborted || Date.now() >= effectiveDeadline) { prepStopped = true; break; }
-            await ctx.adapter.look(yaw, pitch);
-            // 转头返回后先复核；取消/换 scope 后不得再发观测请求或继续转头。
-            if (!prepReady()) { prepStopped = true; break; }
-            observeCells(ctx, map, prepCells);
+      // 有限局部准备：当前脚格为中心固定水平半径 4（9×9×4 格），至多 12 次真实转头；
+      // 不枚举世界或目标矩形。入口先过同一门禁：已暂停/未准入/已关闭/换 scope/取消/到期
+      // 时连初始观测都不发，也不转头。
+      const prepCells = preparationCells(ctx.adapter.state().pos);
+      let prepStopped = !prepReady();
+      if (!prepStopped) {
+        observeCells(ctx, map, prepCells);
+        if (typeof ctx.adapter.look === 'function') {
+          for (const pitch of [-1.2, 0, 1.1]) {
+            for (const yaw of [-Math.PI / 2, 0, Math.PI / 2, Math.PI]) {
+              if (!prepReady()) { prepStopped = true; break; }
+              await ctx.adapter.look(yaw, pitch);
+              // 转头返回后先复核；取消/换 scope/暂停后不得再发观测请求或继续转头。
+              if (!prepReady()) { prepStopped = true; break; }
+              observeCells(ctx, map, prepCells);
+            }
+            if (prepStopped) break;
           }
-          if (prepStopped) break;
         }
       }
 
@@ -569,10 +590,13 @@ export const walkTo: Skill<WalkToArgs> = {
         ...(nav.lastPosition !== undefined ? { position: { ...nav.lastPosition } } : {}),
       };
       if (nav.outcome === 'ARRIVED') {
+        // 零控制、零位移的成功确认：仍是 ARRIVED（原条件成立），但 noop=true 让调用方
+        // 不把它计入身体效果；trace=[] 且没有 move executionId 保持原样。
         return ok(nav.message, {
           ...zeroData,
           stage: 'ARRIVED',
           confirmed: true,
+          noop: true,
           observedAt: nav.lastObservation.observedAt,
           stableSamples: zero.stableSamples,
         });
