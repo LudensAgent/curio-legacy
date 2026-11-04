@@ -5,6 +5,7 @@ import { EventBus } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { Vision } from '../src/perception/vision.ts';
 import { SKILLS } from '../src/skills/index.ts';
+import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import { sleep } from '../src/util.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 
@@ -28,6 +29,32 @@ test('取消任务：立即释放控制，任务以 cancelled 结束', async () 
   assert.equal(o.result.status, 'cancelled');
   assert.ok(adapter.stopAllCount >= 1);
   assert.equal(arbiter.current, null);
+});
+
+test('beginShutdown 停止新任务与控制，但不把共享会话标记为暂停', async () => {
+  const adapter = new FakeAdapter();
+  adapter.speed = 1;
+  const bus = new EventBus();
+  const memory = new WorldMemory(null);
+  const spatialCalls: boolean[] = [];
+  const spatial = {
+    setPaused: (paused: boolean) => { spatialCalls.push(paused); },
+    interrupt: () => {},
+  } as unknown as SharedSpatialSession;
+  const arbiter = new Arbiter(adapter, memory, bus, new Vision(adapter), spatial);
+  try {
+    arbiter.start({ skill: 'explore', args: { distance: 64 } }, 'llm');
+    await sleep(100);
+    const done = new Promise<TaskOutcome>((resolve) => arbiter.once('done', resolve));
+    arbiter.beginShutdown();
+    const outcome = await done;
+    assert.equal(outcome.result.status, 'cancelled');
+    assert.equal(arbiter.paused, true, '关停后不得再接受新任务');
+    assert.deepEqual(spatialCalls, [], '关停不得调用空间会话 setPaused（会丢弃 pending）');
+    assert.ok(adapter.stopAllCount >= 1);
+  } finally {
+    arbiter.dispose();
+  }
 });
 
 test('旧任务被取消后再发动作会被拦截（planVersion 守卫）', async () => {

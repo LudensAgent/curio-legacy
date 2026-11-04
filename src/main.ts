@@ -885,8 +885,10 @@ async function finishShutdown(code: number) {
   };
   // 先停未来周期触发；已接受的保存不取消，由下面的 shutdown().flush 等待落定。
   attempt('spatialCheckpointScheduler.stop', () => stopSpatialCheckpoints());
-  attempt('arbiter.setPaused', () => arbiter.setPaused(true));
-  attempt('arbiter.cancel', () => arbiter.cancel('退出'));
+  // 关停不能先走 setPaused：setPaused 会作废已接收的 handoff，随后 shutdown 看不到
+  // pending，仍以 exit 0 报告“保存并关闭”。beginShutdown 只停新任务/取消当前任务，
+  // 由 SharedSpatialSession.shutdown() 负责应用/报告 pending 并真实 close。
+  attempt('arbiter.beginShutdown', () => arbiter.beginShutdown());
   let servicePromise: Promise<ShutdownResult> | null = null;
   let serviceCallError: unknown = null;
   try { servicePromise = spatial.shutdown(); } catch (error) { serviceCallError = error; }
@@ -916,11 +918,20 @@ async function finishShutdown(code: number) {
     : { ok: false, problems: ['shutdown_result_missing'] };
   const ok = serviceResult !== null && serviceCallError === null && serviceAwaitError === null
     && classification.ok && cleanupErrors.length === 0;
+  const discarded = spatial.discardedObservations();
   const diagnostics = {
     code,
     ok,
     spatial: serviceResult === null ? null : spatialShutdownDiagnostics(serviceResult, spatial.worldId),
     classification,
+    // 之前 pause/interrupt/换 scope 作废的 pending 不是“已保存”；保留计数/时间范围供诊断。
+    discarded: discarded === null ? null : {
+      reason: discarded.reason,
+      count: discarded.count,
+      observedAtMin: discarded.observedAtMin,
+      observedAtMax: discarded.observedAtMax,
+      message: discarded.message,
+    },
     serviceCallError: serviceCallError === null ? null : errorFacts(serviceCallError),
     serviceAwaitError: serviceAwaitError === null ? null : errorFacts(serviceAwaitError),
     cleanupErrors: cleanupErrors.map(({ step, error }) => ({ step, error: errorFacts(error) })),

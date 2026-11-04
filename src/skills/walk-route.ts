@@ -386,6 +386,26 @@ export const walkRoute: Skill<WalkRouteArgs> = {
       }
     }
     try {
+      // prepare 是真实异步等待：期间可能换 scope、暂停、关闭或身体/观测失效。
+      // 预扫前必须重新读取当前状态，不能沿用 prepare 前的 state；失败仍走 finally 释放 lease。
+      if (ctx.signal.aborted) {
+        return { status: 'cancelled', summary: 'walk_route 预扫前被父任务取消', data: { stage: 'CANCELLED', cancelBy: 'parent', ...residencyFacts(residency) } };
+      }
+      if (Date.now() >= effectiveDeadline) {
+        return fail('TIMEOUT', 'walk_route 预扫前到达期限', { stage: 'TIMEOUT', ...residencyFacts(residency) });
+      }
+      const preparedState = ctx.adapter.state();
+      if (!preparedState.alive || !preparedState.connected || !preparedState.observationReady) {
+        return { status: 'cancelled', summary: 'walk_route 准备期间身体/观测失效，未开始预扫', data: { stage: 'CANCELLED', cancelBy: 'lifecycle', ...residencyFacts(residency) } };
+      }
+      if (preparedState.worldId !== state.worldId || preparedState.dim !== state.dim
+        || preparedState.sessionId !== state.sessionId || preparedState.worldId !== spatial.worldId) {
+        return { status: 'cancelled', summary: 'walk_route 准备期间作用域变化，未开始预扫', data: { stage: 'CANCELLED', cancelBy: 'scope_changed', ...residencyFacts(residency) } };
+      }
+      if (spatial.closing || spatial.paused) {
+        return { status: 'cancelled', summary: 'walk_route 准备期间共享会话失效，未开始预扫', data: { stage: 'CANCELLED', cancelBy: 'lifecycle', ...residencyFacts(residency) } };
+      }
+
       // 预扫：有限次合法转头（4 个朝向 × 3 个俯仰）覆盖验证所需的支撑、身体与净空竖列。
       // 视锥配置不变；脚下/头顶不因“贴着身体”就免视线，因此必须真正低头/抬头去看。
       // 这是执行这条显式路线所需的观察，不扩宽视锥、不做额外探索，也不消耗资源。
@@ -401,10 +421,26 @@ export const walkRoute: Skill<WalkRouteArgs> = {
           if (ctx.signal.aborted || Date.now() >= effectiveDeadline) break;
         }
       }
-      if (ctx.signal.aborted) return { status: 'cancelled', summary: '预扫阶段被取消', data: { ...residencyFacts(residency) } };
+      if (ctx.signal.aborted) {
+        return { status: 'cancelled', summary: '预扫阶段被取消', data: { stage: 'CANCELLED', cancelBy: 'parent', ...residencyFacts(residency) } };
+      }
+      if (Date.now() >= effectiveDeadline) {
+        return fail('TIMEOUT', '预扫阶段到达期限', { stage: 'TIMEOUT', ...residencyFacts(residency) });
+      }
+      const executionState = ctx.adapter.state();
+      if (!executionState.alive || !executionState.connected || !executionState.observationReady) {
+        return { status: 'cancelled', summary: '预扫期间身体/观测失效，未开始移动', data: { stage: 'CANCELLED', cancelBy: 'lifecycle', ...residencyFacts(residency) } };
+      }
+      if (executionState.worldId !== preparedState.worldId || executionState.dim !== preparedState.dim
+        || executionState.sessionId !== preparedState.sessionId || executionState.worldId !== spatial.worldId) {
+        return { status: 'cancelled', summary: '预扫期间作用域变化，未开始移动', data: { stage: 'CANCELLED', cancelBy: 'scope_changed', ...residencyFacts(residency) } };
+      }
+      if (spatial.closing || spatial.paused) {
+        return { status: 'cancelled', summary: '预扫期间共享会话失效，未开始移动', data: { stage: 'CANCELLED', cancelBy: 'lifecycle', ...residencyFacts(residency) } };
+      }
 
       const request = {
-        worldId: state.worldId, dim: state.dim, sessionId: state.sessionId, mode: 'walk' as const,
+        worldId: executionState.worldId, dim: executionState.dim, sessionId: executionState.sessionId, mode: 'walk' as const,
         body: { feet: args.points[0]!, width: 0.6, height: 1.8, pose: 'standing' as const },
         points: args.points, arrival: { kind: 'exact' as const },
         bodyArrival: GROUNDED_ARRIVAL_DEFAULTS, shapeProvider: walkCollisionProvider,

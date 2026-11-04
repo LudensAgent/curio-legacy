@@ -92,6 +92,17 @@ export class Arbiter extends EventEmitter {
     }
   }
 
+  /**
+   * 正常关停专用：停止接受新任务并取消当前任务/释放控制，但不把共享会话标记为
+   * 暂停。`setPaused` 会作废已接收的 handoff；关停必须让
+   * `SharedSpatialSession.shutdown()` 自己应用/报告 pending 并真实 close。
+   */
+  beginShutdown(): void {
+    this.pausedFlag = true;
+    this.cancel('退出');
+    this.adapter.stopAll();
+  }
+
   constructor(private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private senses: Senses, private spatial?: SharedSpatialSession) {
     super();
     if (this.spatial) {

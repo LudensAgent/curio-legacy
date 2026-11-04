@@ -18,6 +18,7 @@ import { openSpatialSession, PersistenceError } from 'curio-minecraft-3d-memory/
 import type { CloseResult, SpatialSession } from 'curio-minecraft-3d-memory/storage/sqlite';
 import type { Observation, SectionKey } from 'curio-minecraft-3d-memory';
 import type { BlockObservation, GameAdapter } from '../src/adapter/types.ts';
+import { Arbiter } from '../src/arbiter/arbiter.ts';
 import { EventBus } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { SharedSpatialSession } from '../src/spatial/shared-session.ts';
@@ -344,6 +345,36 @@ test('walk_route prepares, leases, and releases on success in manual mode', { ti
   }
 });
 
+test('walk_route rechecks scope after prepare and returns cancelled with a balanced lease', { timeout: 40_000 }, async () => {
+  const h = await openManual();
+  try {
+    const fixture = physicsHarness();
+    const baseState = fixture.adapter.state.bind(fixture.adapter);
+    let sessionId = SESSION;
+    const adapter = {
+      ...fixture.adapter,
+      state: () => ({ ...baseState(), sessionId }),
+    } as GameAdapter;
+    const spy = spyResidency(h.svc);
+    const spiedPrepare = h.svc.prepare.bind(h.svc);
+    h.svc.prepare = async (keys, opts) => {
+      const result = await spiedPrepare(keys, opts);
+      // 真实 prepare 完成后换 scope：技能必须重读状态，不能沿用 prepare 前的 state。
+      sessionId = 's2';
+      return result;
+    };
+    const ctx = context(adapter, h.svc, makeSenses(h.svc), {
+      taskId: 'manual-walk-route-scope', deadline: Date.now() + 25_000,
+    });
+    const result = await runSkill(ctx, walkRoute, { points: POINTS });
+    assert.equal(result.status, 'cancelled', result.summary);
+    assert.equal(rec(result.data).cancelBy, 'scope_changed');
+    assertBalanced(spy, h.svc);
+  } finally {
+    await closeManual(h);
+  }
+});
+
 test('walk_to execution-phase residency cancellation returns cancelled', { timeout: 40_000 }, async () => {
   const h = await openManual();
   try {
@@ -520,6 +551,42 @@ test('manual shutdown reports unprocessed observations and still closes the real
   assert.equal(shutdown.close?.completed, true);
   assert.equal(shutdown.close?.error, null);
   rmSync(h.dir, { recursive: true, force: true });
+});
+
+test('arbiter.beginShutdown preserves pending handoff for real shutdown reporting', { timeout: 30_000 }, async () => {
+  const h = await openManual();
+  const arbiter = new Arbiter(
+    staticAdapter(),
+    new WorldMemory(null),
+    new EventBus(),
+    makeSenses(h.svc) as unknown as Senses,
+    h.svc,
+  );
+  try {
+    h.svc.session.acquireWorkingSetOperation();
+    h.svc.observe([{
+      name: 'minecraft:dirt', properties: {}, stateComplete: true,
+      pos: { x: 0, y: 0, z: 0 }, worldId: WORLD, sessionId: SESSION, dimension: DIM,
+      observationId: 200, observedAt: Date.now(), source: 'vision',
+    }]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    h.svc.session.releaseWorkingSetOperation();
+    assert.equal(h.svc.pendingObservations().observations, 1);
+
+    // 生产关停路径：先停仲裁器，再让真实 shutdown 应用/报告 pending。
+    arbiter.beginShutdown();
+    assert.equal(h.svc.paused, false, 'beginShutdown 不得走 setPaused');
+    assert.equal(h.svc.pendingObservations().observations, 1, 'pending 不能被关停前路径丢弃');
+
+    const shutdown = await h.svc.shutdown();
+    assert.notEqual(shutdown.error, null, '未应用证据必须如实报告');
+    assert.match(String(shutdown.error), /pending observation/);
+    assert.equal(shutdown.close?.completed, true);
+    assert.equal(shutdown.close?.error, null);
+  } finally {
+    arbiter.dispose();
+    rmSync(h.dir, { recursive: true, force: true });
+  }
 });
 
 test('busy prepare retries a bounded number of times, then leases exactly once', { timeout: 30_000 }, async () => {
