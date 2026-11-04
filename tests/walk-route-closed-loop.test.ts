@@ -40,6 +40,7 @@ function platformWorld(edgeX: number) {
 
 /** 脚部水平 AABB（半宽 0.3）与 y=-1 实心块是否有正面积交叠，即脚下存在几何支撑。 */
 function supportedBy(world: { getBlock(p: { floored(): { x: number; y: number; z: number } }): { name: string } }, pos: { x: number; y: number; z: number }): boolean {
+  if (pos.y !== 0) return false; // 本夹具固定脚高 y=0：只认可恰在平台面上的支撑，不在空中仅凭 XZ 交叠推断支撑。
   const half = 0.3;
   const minX = pos.x - half, maxX = pos.x + half;
   const minZ = pos.z - half, maxZ = pos.z + half;
@@ -254,17 +255,21 @@ test('平台边缘 + 不均匀采样不滑出平台，每个子步都有支撑�
     const { bot, tick, now, trace, frameCount } = body({ x: sx, z: 0.52 }, cadence, platformWorld(edgeX));
     const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, signal: new AbortController().signal, now });
     assert.equal(result.outcome, 'ARRIVED', `起点 x=${sx} cadence=${cadence} 不应滑落超时：${result.message}`);
+    assert.ok(result.outcome === 'ARRIVED');
+    assert.equal(result.confirmed, true, '到达结果应带已确认标记');
     const last = result.lastPosition;
     assert.ok(last, '应有末位');
     assert.equal(last!.y, 0, '末位脚高不应跌落');
-    assert.ok(last!.x < edgeX, `末位 x=${last!.x.toFixed(2)} 越过平台边缘`);
-    // 所有子步：脚高不低于 0（不跌落），且脚下始终有正面积几何支撑（最大偏移子步也保持支撑）。
+    // 所有子步：脚高恒为 0（不跌落也不离地），且脚下始终有正面积几何支撑（最大偏移子步也保持支撑）。
     assert.equal(Math.min(...trace.map((t) => t.y)), 0, '任意子步脚高不得低于 0');
     assert.ok(trace.every((t) => t.supported), '每个子步脚下都应有几何支撑');
+    // 最大水平偏移须保持脚部与平台的正面积交叠：中心 x 不超过 edgeX+0.3（脚半宽），而非仅中心在平台内。
+    const maxX = Math.max(...trace.map((t) => t.x));
+    assert.ok(maxX < edgeX + 0.3, `最大水平偏移 x=${maxX.toFixed(2)} 应保持脚下支撑（<${edgeX + 0.3}）`);
     // 隐藏子步确实被记录：trace 长度多于采样帧数。
     assert.ok(trace.length > frameCount(), `trace(${trace.length}) 应多于采样帧(${frameCount()})`);
-    // 到达后所有控制释放。
-    for (const key of ['forward', 'back', 'sneak', 'left', 'right', 'jump'] as const) {
+    // 到达后所有控制释放（含冲刺键）。
+    for (const key of Object.keys(bot.control)) {
       assert.equal(bot.control[key], false, `到达后 ${key} 键应释放`);
     }
   }
@@ -303,12 +308,24 @@ test('初始稳定窗口前八帧反复重置时不提前写控制，稳定后�
     maxPending = Math.max(maxPending, pending);
     return Promise.resolve().then(() => { pending--; return bot.entity; });
   };
-  const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, signal: new AbortController().signal, now: () => clock });
-  assert.equal(result.outcome, 'ARRIVED', `稳定后应启动首段并到达：${result.message}`);
-  assert.ok(firstForwardFrame !== null && firstForwardFrame > 8, `首段执行（首次按前进）应在第 8 帧之后，实际第 ${firstForwardFrame} 帧`);
-  assert.equal(unreadyWrites.length, 0, `前八帧未就绪期间不得写任何移动键：帧 ${unreadyWrites.join(',')}`);
-  assert.equal(maxPending, 1, `并发待处理 tick 请求应不超过 1，实际 ${maxPending}`);
-  assert.equal(bot.control.forward, false, '到达后应松开前进键');
-  assert.equal(bot.control.back, false, '到达后不应残留倒退键');
-  assert.equal(bot.control.sneak, false, '到达后不应残留潜行键');
+  // 模拟时钟只在 tick 时推进：若稳定窗口回归为「最多采样 8 帧」后停止喂帧，模拟时钟不再前进，
+  // 宿主循环会按真实时间空转 20000 次才判 CANCELLED。加一个真实时间看门狗（1s）在到期时主动取消，
+  // 让「停止采样」的回归在有限时间内以非 ARRIVED 失败，而不是挂起。这只约束测试失败时间，不改产品超时。
+  const watchdog = new AbortController();
+  const watchdogTimer = setTimeout(() => watchdog.abort(), 1000);
+  try {
+    const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, signal: watchdog.signal, now: () => clock });
+    assert.equal(result.outcome, 'ARRIVED', `稳定后应启动首段并到达：${result.message}`);
+    assert.ok(result.outcome === 'ARRIVED');
+    assert.equal(result.confirmed, true, '到达结果应带已确认标记');
+    assert.ok(firstForwardFrame !== null && firstForwardFrame > 8, `首段执行（首次按前进）应在第 8 帧之后，实际第 ${firstForwardFrame} 帧`);
+    assert.equal(unreadyWrites.length, 0, `前八帧未就绪期间不得写任何移动键：帧 ${unreadyWrites.join(',')}`);
+    assert.equal(maxPending, 1, `并发待处理 tick 请求应不超过 1，实际 ${maxPending}`);
+    // 到达后所有控制释放（含冲刺键）。
+    for (const key of Object.keys(control)) {
+      assert.equal(control[key], false, `到达后 ${key} 键应释放`);
+    }
+  } finally {
+    clearTimeout(watchdogTimer);
+  }
 });
