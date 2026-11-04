@@ -90,7 +90,8 @@ test('a later real movement is preserved through nested skill completion', async
   setReliableSkills(() => null);
   const { result } = await w.run('moving-parent');
   assert.equal(result.data?.effectUnconfirmed, false);
-  for (const name of ['moving-child', 'moving-parent']) assert.deepEqual(w.engine.currentStats(name), { ok: 1, fail: 0 });
+  // main 的 verify 语义：事后移动只记录事实，不自动证明因果；没有独立 verify 通过就不计 ok。
+  for (const name of ['moving-child', 'moving-parent']) assert.deepEqual(w.engine.currentStats(name), { ok: 0, fail: 0 });
 });
 
 test('an independent verify can confirm the goal after raw item input', async (t) => {
@@ -121,7 +122,8 @@ test('unknown raw input is not idle and existing delayed reflex judgment still a
   assert.equal(w.engine.statsOf(name)?.skipped ?? 0, 0);
   w.adapter.hp = 20;
   w.engine.tick(null, now + BehaviorEngine.AFTERMATH_MS + 1);
-  assert.deepEqual(w.engine.currentStats(name), { ok: 1, fail: 0 });
+  // 延迟反射判定也不再把未 verify 的原始使用自动计为成功。
+  assert.deepEqual(w.engine.currentStats(name), { ok: 0, fail: 0 });
 });
 
 
@@ -159,5 +161,6 @@ test('steps retain subsequent movement as a confirmed action instead of unknown 
   const { result } = await w.run(name);
   assert.equal(result.status, 'succeeded');
   assert.equal(result.data?.effectUnconfirmed, false);
-  assert.deepEqual(w.engine.currentStats(name), { ok: 1, fail: 0 });
+  // 后续移动只记录事实，不自动证明因果：没有独立 verify 通过，不计 ok。
+  assert.deepEqual(w.engine.currentStats(name), { ok: 0, fail: 0 });
 });
