@@ -344,6 +344,14 @@ test('同一 ctx.spatial/signal/taskId/deadline 穿过真实嵌套查询与导�
     const macro = await runSkill(ctx, SKILLS['macro:zero_edge_macro']!, {});
     assert.equal(macro.status, 'succeeded', macro.summary);
     assert.equal(macro.data?.noop, true, '宏聚合不能把零边成功变成物理移动');
+    const macroSteps = macro.data?.stepResults as Record<string, unknown>[];
+    assert.equal(macroSteps.length, 2, '零边 noop 成功的真实子结果不被步骤层抹掉');
+    for (const entry of macroSteps) {
+      const child = rec(entry.data);
+      assert.equal(child.zeroEdge, true, '子 walk_to 保留零边语义');
+      assert.equal(child.noop, true);
+      assert.deepEqual(rec(child.nav).trace, [], '零边子结果保留空 trace');
+    }
     assert.equal(h.svc.session.history.fragments().total, fragmentsBefore, '零边成功不写 history');
     assert.equal(nav.writes(), 0, '零边确认不写任何控制键');
   });
@@ -469,6 +477,23 @@ test('恢复约束：原目标/arrival/fragment/绝对期限不可替换，正�
     await assert.rejects(bridge('act', ['press_keys', { keys: { forward: true }, ms: 100 }]), /不能用 press_keys/);
     await assert.rejects(bridge('act', ['walk_route', { points: [[0.5, 0, 0.5], [1.5, 0, 0.5]] }]), /不能用 walk_route/);
     await assert.rejects(bridge('move', [{ forward: true }, 100]), /不能用 move/);
+    // 其它真实注册的直接移动/导航动作同样在身体动作前被拒绝。
+    const otherBypasses: [string, unknown][] = [
+      ['swim_to', { xyz: [0, 0, 0] }],
+      ['travel', { to: '0,0,0' }],
+      ['follow_passage', { to: 'entrance' }],
+      ['descend', { target: { x: 0, y: 0, z: 0 } }],
+      ['climb_up', { height: 1 }],
+      ['ride', { to: '0,0' }],
+      ['surface', {}],
+      ['dive', { xyz: [0, 0, 0] }],
+    ];
+    for (const [name, args] of otherBypasses) {
+      await assert.rejects(bridge('act', [name, args]), new RegExp(`不能用 ${name}`), `${name} 必须在身体动作前拒绝`);
+    }
+    assert.equal(nav.frames(), before.frames, '新增拒绝也发生在任何物理帧之前');
+    assert.equal(nav.looks(), before.looks, '新增拒绝也发生在任何观测之前');
+    assert.equal(nav.adapter.actions.length, before.actions, '新增拒绝也发生在任何身体动作之前');
     const moved = await bridge('moveTo', [2, 0, 0, 0]) as { ok: boolean; error?: string };
     assert.equal(moved.ok, false);
     assert.match(moved.error ?? '', /不能用 goto/);
@@ -504,6 +529,7 @@ test('恢复约束：原目标/arrival/fragment/绝对期限不可替换，正�
     assert.equal((await openBridge('moveTo', [2, 0, 0, 0]) as { ok: boolean }).ok, true);
     assert.equal((await openBridge('move', [{ forward: true }, 50]) as { ok: boolean }).ok, true);
     assert.equal((await openBridge('act', ['goto', { target: '2,0,0' }]) as { ok: boolean }).ok, true);
+    assert.equal((await openBridge('act', ['swim_to', { xyz: [2, 0, 0] }]) as { ok: boolean }).ok, true, '非恢复调用仍可执行新的移动动作');
 
     // 宏名字本身不被一刀切：子步骤仍走同一约束。
     const library = new SkillLibrary(null, nav.adapter, ctx.memory, ctx.bus);
@@ -557,6 +583,61 @@ test('可选导航失败后相对挖掘/放置被阻止，绝对目标仍可执�
     const absoluteDig = await run('optional-nav-absolute-dig', [failingNavigation, { skill: 'dig_at', args: { xyz: { x: 0, y: -1, z: 0 }, facing: 'E' } }]);
     assert.equal(absoluteDig.status, 'succeeded', absoluteDig.summary);
     assert.ok(nav.adapter.actions.some((a) => a.startsWith('dig:')), '显式绝对坐标动作仍可执行');
+
+    // 真实注册的只读宏 + 之后 adapter 站位改变：相对动作被拒时仍只引用原失败步骤的实际回执。
+    const changed = { x: START.x + 7, y: START.y, z: START.z + 3 };
+    const driftName = 'readonly_drift_probe';
+    const drift: Skill = {
+      name: driftName, description: '测试用：模拟外部使站位发生变化', argsDoc: '{}', timeoutMs: 1000,
+      movement: false, readOnly: true,
+      validate: () => ({ ok: true, args: {} }),
+      async run() { nav.adapter.pos = { ...changed }; return ok('position changed externally'); },
+    };
+    SKILLS[driftName] = drift;
+    t.after(() => { delete SKILLS[driftName]; });
+    const library = new SkillLibrary(null, nav.adapter, ctx.memory, ctx.bus);
+    const readOnlyMacro = library.learn({ name: 'stance_query_macro', description: '只读查询', steps: [
+      query,
+      { skill: 'spatial_query', args: { kind: 'cells', dim: DIM, positions: [{ x: 1, y: 0, z: 0 }] } },
+    ] });
+    assert.ok(readOnlyMacro.ok, readOnlyMacro.ok ? '' : readOnlyMacro.error);
+    assert.equal(SKILLS['macro:stance_query_macro']?.readOnly, true, '宏元数据真实注册为只读');
+    t.after(() => { delete SKILLS['macro:stance_query_macro']; });
+
+    nav.adapter.pos = { ...START };
+    nav.adapter.actions.length = 0;
+    const stanceResult = await run('optional-nav-readonly-drift-relative', [
+      failingNavigation,
+      { skill: 'macro:stance_query_macro' },
+      { skill: driftName },
+      relativeDig,
+    ]);
+    assert.equal(stanceResult.status, 'failed', stanceResult.summary);
+    assert.match(stanceResult.summary, /没到新站位/);
+    assert.ok(stanceResult.summary.includes(`(${START.x.toFixed(2)},${START.y.toFixed(2)},${START.z.toFixed(2)})`), '拒绝报告原回执站位而不是后来改变的站位');
+    assert.deepEqual(nav.adapter.state().pos, changed, '拦截时 adapter 站位确实已经改变');
+    const prior = rec(stanceResult.data?.priorNavigation);
+    assert.equal(prior.skill, 'walk_to');
+    assert.equal(prior.step, 1);
+    assert.deepEqual(prior.position, { ...START });
+    const priorData = rec(prior.data);
+    assert.equal(priorData.stage, 'UNSUPPORTED', '保留原失败步骤的实际 stage');
+    assert.deepEqual(rec(priorData.originalRequest).to, { x: 1.5, y: 0, z: 0.52 });
+    assert.ok(priorData.search, '保留原 search 证据');
+    assert.equal(stanceResult.data?.nav, undefined, '旧回执不冒充顶层当前 Nav');
+    assert.equal(stanceResult.data?.position, undefined, '旧回执不冒充顶层当前位置');
+    const keptSteps = stanceResult.data?.stepResults as Record<string, unknown>[];
+    assert.ok(keptSteps.some((entry) => entry.skill === 'macro:stance_query_macro'), '保留只读宏的实际子结果');
+    assert.equal(nav.adapter.actions.filter((a) => a.startsWith('dig')).length, 0, '相对挖掘未执行');
+
+    // 绝对目标仍允许，不受站位回执影响。
+    const absoluteAfterDrift = await run('optional-nav-absolute-after-drift', [
+      failingNavigation,
+      { skill: driftName },
+      { skill: 'dig_at', args: { xyz: { x: Math.floor(changed.x), y: -1, z: Math.floor(changed.z) }, facing: 'E' } },
+    ]);
+    assert.equal(absoluteAfterDrift.status, 'succeeded', absoluteAfterDrift.summary);
+    assert.ok(nav.adapter.actions.some((a) => a.startsWith('dig:')), '绝对坐标动作仍可执行');
   });
 });
 
@@ -709,6 +790,71 @@ test('真实导航取消/失败保留结构化 nav/partial，查询与判定失�
       assert.equal(steps.length, 1);
       assert.ok(rec(rec(steps[0]!.data)).spatialQuery, '判定失败仍保留先前查询结果');
     }
+  });
+});
+
+test('组合失败保留真实子导航回执：代码子技能与注册宏，普通错误仍是主错误', { timeout: 30_000 }, async (t) => {
+  await withHarness(t, async (h) => {
+    const nav = scriptedNavAdapter();
+    const ctx = context(nav.adapter, h.svc, stubSenses(nav.adapter), { taskId: 'composed-nav-receipts' });
+    setReliableSkills(() => null);
+    t.after(() => setReliableSkills(null));
+
+    // 真实代码子技能：内部导航失败后普通抛错，只暴露 data.lastNavigationFailure。
+    const childName = 'receipt-child-code';
+    const child = {
+      name: childName, description: '子技能导航失败后抛错', version: 1, steps: [],
+      code: `await api.act("walk_to", ${JSON.stringify({ to: [1.5, 0, 0.52], arrival: { kind: 'exact' } })});\nthrow new Error("child ordinary error");`,
+    };
+    const parentName = 'receipt-parent-code';
+    const parent = {
+      name: parentName, description: '父技能调用子技能后抛错', version: 1, steps: [],
+      code: `await api.useSkill("${childName}");\nthrow new Error("parent ordinary error");`,
+    };
+    setBehaviorRegistry({ get: (name) => name === childName ? child : name === parentName ? parent : undefined, list: () => [{ name: parentName }] });
+    t.after(() => setBehaviorRegistry(null));
+
+    const result = await useSkill.run(ctx, { name: parentName });
+    assert.equal(result.status, 'failed');
+    assert.match(result.summary, /parent ordinary error/, '父层普通错误保持为主错误');
+    const receipt = rec(result.data?.lastNavigationFailure);
+    assert.equal(receipt.childSkill, 'walk_to', '保留实际子导航调用身份，而不是代码技能名');
+    assert.equal(receipt.via, 'act');
+    assert.deepEqual(rec(receipt.request).to, [1.5, 0, 0.52]);
+    assert.equal(rec(receipt.result).ok, false);
+    const receiptData = rec(rec(receipt.result).data);
+    assert.equal(receiptData.stage, 'UNSUPPORTED');
+    assert.ok(receiptData.search, '实际 search 证据原样保留');
+    assert.match(String(receipt.note), /not the cause of a later code error/);
+
+    // 真实注册宏：子步骤导航失败后父层普通抛错，宏的全部实际返回保留。
+    const library = new SkillLibrary(null, nav.adapter, ctx.memory, ctx.bus);
+    const learned = library.learn({ name: 'receipt_macro_nav', description: '导航失败的组合', steps: [
+      { skill: 'walk_to', args: { to: [1.5, 0, 0.52], arrival: { kind: 'exact' } } },
+      { skill: 'spatial_query', args: { kind: 'cells', dim: DIM, positions: [{ x: 0, y: 0, z: 0 }] } },
+    ] });
+    assert.ok(learned.ok, learned.ok ? '' : learned.error);
+    assert.ok(SKILLS['macro:receipt_macro_nav'], '宏真实注册在 SKILLS');
+    t.after(() => { delete SKILLS['macro:receipt_macro_nav']; });
+
+    const macroParentName = 'receipt-macro-parent';
+    const macroParent = {
+      name: macroParentName, description: '调用失败宏后抛错', version: 1, steps: [],
+      code: `await api.act("macro:receipt_macro_nav", {});\nthrow new Error("after macro");`,
+    };
+    setBehaviorRegistry({ get: (name) => name === macroParentName ? macroParent : undefined, list: () => [{ name: macroParentName }] });
+    const macroResult = await useSkill.run(ctx, { name: macroParentName });
+    assert.equal(macroResult.status, 'failed');
+    assert.match(macroResult.summary, /after macro/, '宏之后的普通错误仍是主错误');
+    const macroReceipt = rec(macroResult.data?.lastNavigationFailure);
+    assert.equal(macroReceipt.childSkill, 'macro:receipt_macro_nav', '保留实际宏调用身份');
+    assert.equal(macroReceipt.via, 'act');
+    assert.deepEqual(macroReceipt.request, {});
+    const macroData = rec(rec(macroReceipt.result).data);
+    assert.equal(macroData.stage, 'UNSUPPORTED');
+    assert.deepEqual(rec(macroData.originalRequest).to, { x: 1.5, y: 0, z: 0.52 });
+    assert.ok(macroData.search, '宏子步骤的实际导航证据保留');
+    assert.match(String(macroReceipt.note), /not the cause of a later code error/);
   });
 });
 

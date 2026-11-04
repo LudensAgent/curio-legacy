@@ -5,7 +5,7 @@ import { throwIfAborted } from '../util.ts';
 import { dirName } from '../perception/perception.ts';
 import { SKILLS } from './index.ts';
 import { relativeCellAction, STANCE_MOVES } from './stance.ts';
-import { constrainRecoveryAction, recoveryContext, type RecoveryContext } from './recovery.ts';
+import { constrainRecoveryAction, recoveryContext, worldPoint, type RecoveryContext } from './recovery.ts';
 import { fail, isAbort, obj, ok, runSkill, validateSkill, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 
 /** use_skill 只需要按名字取出步骤；注册表由 main 设置（行为引擎） */
@@ -100,9 +100,15 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
         const receipt = value as { ok?: boolean; code?: string | null; summary?: string; moved?: number; data?: { noop?: boolean; inputCompleted?: boolean; effectUnconfirmed?: boolean; expect?: { discarded?: string[]; forMs?: number; what?: string }; effectEvidence?: { verified?: boolean; changed?: boolean }; climbed?: number; nav?: unknown; originalRequest?: unknown; knownStart?: unknown; search?: unknown } } | null;
         const child = method === 'act' ? String(values[0] ?? '') : method === 'useSkill' ? String(values[0] ?? '') : '';
         const nestedData = receipt?.data as Record<string, unknown> | undefined;
-        const nestedNav = method === 'useSkill' && nestedData !== undefined
-          && ['nav', 'originalRequest', 'knownStart', 'search'].some((key) => nestedData[key] !== undefined);
-        if (receipt != null && receipt.ok !== true && (method === 'act' ? NAVIGATION_ACTIONS.has(child) : nestedNav)) {
+        // 实际返回的导航证据：直接导航动作、失败的组合宏，或嵌套 useSkill 的子结果。
+        const navEvidence = (data: Record<string, unknown> | undefined) => data !== undefined
+          && ['nav', 'originalRequest', 'knownStart', 'search'].some((key) => data[key] !== undefined);
+        const nestedReceipt = nestedData?.lastNavigationFailure;
+        const failed = receipt != null && receipt.ok !== true;
+        const directNavigationFailure = failed && (method === 'act'
+          ? NAVIGATION_ACTIONS.has(child) || (child.startsWith('macro:') && navEvidence(nestedData))
+          : method === 'useSkill' && navEvidence(nestedData));
+        if (directNavigationFailure) {
           lastNavigationFailure = {
             childSkill: child,
             via: method,
@@ -110,6 +116,10 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
             result: { ok: false, code: receipt.code ?? null, summary: receipt.summary ?? '', ...(receipt.data !== undefined ? { data: receipt.data } : {}) },
             note: 'contextual prior navigation failure receipt; not the cause of a later code error and not a current or new position',
           };
+        } else if (failed && nestedReceipt !== null && nestedReceipt !== undefined && typeof nestedReceipt === 'object' && !Array.isArray(nestedReceipt)) {
+          // 子代码技能只暴露 data.lastNavigationFailure：保留该回执的实际 child/call 身份与原结果，
+          // 不改写成本层调用或当前导航状态。
+          lastNavigationFailure = nestedReceipt as Record<string, unknown>;
         }
         // 代码桥与声明式步骤共用效果收集：api.act 的爬升也计入整个技能实例的累计进展。
         if (typeof receipt?.data?.climbed === 'number') climbedTotal += receipt.data.climbed;
@@ -173,7 +183,7 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
       const stepResults: Record<string, unknown>[] = [];
       let completedSteps = 0;
       // 上一步移动未确认到达的事实：下一步校验完成后、执行前用它判断相对坐标依赖。
-      let pendingStance: { skill: string; pos: { x: number; y: number; z: number } } | null = null;
+      let pendingStance: { skill: string; step: number; pos?: { x: number; y: number; z: number }; data?: Record<string, unknown> } | null = null;
       for (const [i, st] of b.steps.entries()) {
         throwIfAborted(ctx.signal);
         ctx.progress(i / b.steps.length, `${b.name}：第 ${i + 1} 步 ${st.skill}`);
@@ -187,7 +197,18 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
         // 校验完成后、执行前：上一步移动未确认到达，本步是相对挖掘/放置 → 报告依赖缺口，不执行本步。
         if (pendingStance !== null && relativeCellAction(st.skill, v.args)) {
           const pos = pendingStance.pos;
-          return fail('ERROR', `技能「${b.name}」第 ${i} 步「${pendingStance.skill}」没到新站位，身体现在在 (${pos.x.toFixed(2)},${pos.y.toFixed(2)},${pos.z.toFixed(2)})；第 ${i + 1} 步「${st.skill}」是相对坐标，会打到错误位置。先确认实际站位或改用绝对坐标`, { done });
+          const where = pos
+            ? `身体现在在 (${pos.x.toFixed(2)},${pos.y.toFixed(2)},${pos.z.toFixed(2)})`
+            : '没有保留原始站位回执';
+          // 原失败步骤的实际回执只作为先验上下文，不冒充本次错误成因或当前 Nav/位置。
+          const priorNavigation = pendingStance.data !== undefined ? {
+            skill: pendingStance.skill,
+            step: pendingStance.step,
+            ...(pos ? { position: { ...pos } } : {}),
+            data: pendingStance.data,
+          } : undefined;
+          return fail('ERROR', `技能「${b.name}」第 ${pendingStance.step} 步「${pendingStance.skill}」没到新站位，${where}；第 ${i + 1} 步「${st.skill}」是相对坐标，会打到错误位置。先确认实际站位或改用绝对坐标`,
+            { done, ...(stepResults.length ? { stepResults } : {}), ...(priorNavigation ? { priorNavigation } : {}) });
         }
         // 只读中间步骤（如 spatial_query）既不移动也不确认新站位，不能清掉未解决的移动缺口；
         // 只有实际执行的非只读步骤才消耗该事实。绝对坐标动作本就直接放行。
@@ -219,7 +240,16 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
         done.push(`${st.skill} → ${r.status === 'succeeded' ? (inputOnly ? '输入已执行，效果未确认' : '成') : `没成(${r.failureCode ?? ''})`}`);
         // optional 移动没到新站位：记下事实，留给下一步在校验后判断。
         if (r.status === 'failed' && st.optional && STANCE_MOVES.has(st.skill)) {
-          pendingStance = { skill: st.skill, pos: { ...ctx.adapter.state().pos } };
+          if (NAVIGATION_ACTIONS.has(st.skill)) {
+            // 新导航失败时只沿用该步实际返回的末位/位置与完整回执；不在这里重读 adapter.state
+            // 采样“现在”，否则之后的身体变化会把旧回执顶替成当前状态。
+            const nav = r.data?.nav as { lastPosition?: unknown } | undefined;
+            const original = worldPoint(r.data?.position) ?? worldPoint(nav?.lastPosition);
+            pendingStance = { skill: st.skill, step: i + 1, ...(original ? { pos: original } : {}), ...(r.data ? { data: r.data } : {}) };
+          } else {
+            // 旧动作没有统一的导航回执：保持原有回退（当前站位）。
+            pendingStance = { skill: st.skill, step: i + 1, pos: { ...ctx.adapter.state().pos } };
+          }
         }
         // 非可选步骤失败：原样保留该步的结构化返回（nav/search/knownStart/history/position/
         // spatialQuery result_too_large 等），不重建时间/作用域、不压平语义、不截断事实。

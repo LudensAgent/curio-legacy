@@ -10,8 +10,15 @@ export type RecoveryContext = { skill: string; args: Record<string, unknown>; ta
 
 /** 恢复时只有这两个动作能继承/重做同一导航委托；其他动作不能静默替换目标或完成条件。 */
 const NAVIGATION_SKILLS = new Set(['walk_to', 'walk_known_route']);
-/** 新导航恢复不能用旧寻路/单步/按键绕过原后端与手段。 */
-const NAVIGATION_BYPASS = new Set(['goto', 'step', 'move', 'press_keys', 'walk_route']);
+/**
+ * 新导航恢复不能用其他直接移动/导航动作绕过原后端、目标与手段。
+ * 一个显式有限集合：旧寻路/单步/按键/旧路线，以及会直接改变身体位置或移动方式的
+ * 游泳、旅行、沿矿道、下行、攀爬、载具、上浮和下潜。普通非恢复调用不受影响。
+ */
+const NAVIGATION_BYPASS = new Set([
+  'goto', 'step', 'move', 'press_keys', 'walk_route',
+  'swim_to', 'travel', 'follow_passage', 'descend', 'climb_up', 'ride', 'surface', 'dive',
+]);
 
 /** 原 failure 里的绝对期限只在失败交接边界校验一次；正值绝对 epoch，不当作时长。 */
 function recoveryDeadline(value: unknown): { ok: true; value?: number } | { ok: false; error: string } {

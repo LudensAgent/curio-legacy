@@ -125,8 +125,8 @@ export class SkillLibrary {
       validate: () => ({ ok: true, args: {} }),
       run: async (ctx) => {
         const results: string[] = [];
-        // 宏最多 6 步；只保留只读步骤的实际返回（如 spatial_query 的查询证据），
-        // 不重复收集物理动作或代码技能的调用历史。
+        // 宏最多 6 步；保留只读步骤与零边 noop 成功的实际返回（如 spatial_query 查询证据、
+        // walk_to 的 zeroEdge/nav.trace=[]），不重复收集物理动作或代码技能的调用历史。
         const stepResults: Record<string, unknown>[] = [];
         let physical = false;
         let inputCompleted = false;
@@ -138,7 +138,7 @@ export class SkillLibrary {
           ctx.progress(i / def.steps.length, `${def.name}：第 ${i + 1}/${def.steps.length} 步 ${st.skill}`);
           const r = await runSkill({ ...ctx, deadline: Math.min(ctx.deadline, Date.now() + sk.timeoutMs) }, sk, constrainRecoveryAction(ctx, st.skill, v.args));
           results.push(`${st.skill}:${r.status}`);
-          if (sk.readOnly === true && r.status === 'succeeded' && r.data) stepResults.push({ skill: st.skill, status: r.status, data: r.data });
+          if (r.status === 'succeeded' && r.data && (sk.readOnly === true || r.data.noop === true)) stepResults.push({ skill: st.skill, status: r.status, data: r.data });
           // 与 use_skill 一致：输入已执行但效果未确认时不是物理改变；显式 verified + changed 才是真效果。
           const effect = r.data?.effectEvidence as { verified?: boolean; changed?: boolean } | undefined;
           const confirmedEffect = effect?.verified === true && effect.changed === true;
