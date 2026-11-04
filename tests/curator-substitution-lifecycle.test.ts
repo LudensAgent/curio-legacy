@@ -298,3 +298,27 @@ test('说明引号内带空白：完整重载后保持一致并可按替代退�
   assert.match((await reloaded.check(Date.now(), { force: true }))!, /收起文字记录 pad-src/);
   assert.equal(second.engine.inactive(src), true, '引号内空白说明重载后仍可按替代退役');
 });
+
+test('描述含内外两层引号（引用动作名）：完整重载后保持一致并可按替代退役', async (t) => {
+  const directory = tmp();
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const first = buildEnv(directory);
+  t.after(() => first.engine.dispose());
+  const src = 'nested-src', dst = 'nested-dst';
+  // 外层双引号、内层单引号引用动作名：写入后应得到重载的固定点，中间引号保留、边缘引号去掉
+  assert.ok(first.book.write(src, `"'use_item' 的实际观察结果"`, '记录来源：观察了目标方块和真实背包变化，目前还没有验收这套做法。').ok);
+  assert.ok(first.book.write(dst, '普通目标说明', '记录目标：观察了目标方块和真实背包变化，目前还没有验收这套做法。').ok);
+  assert.equal(first.book.get(src)!.description, `use_item' 的实际观察结果`, '写入即得到固定点，不再保留会在重载时被剥掉的边缘引号');
+  const merge = { merge: [{ from: [src], skill: { name: dst, description: '合并后的目标说明', body: '记录来源与目标合并后的正文，目前尚未验收这套做法。' } }] };
+  const curator = new SkillCurator(plannerOf([merge]), first.engine, first.book, first.bus, {}, undefined, first.lifetimeFile);
+  assert.match((await curator.check(Date.now(), { force: true }))!, /文字记录 nested-dst/);
+  const before = JSON.stringify([src, dst].map((n) => ({ d: first.book.get(n)!.description, b: first.book.get(n)!.body })));
+  first.engine.dispose();
+  const second = buildEnv(directory);
+  t.after(() => second.engine.dispose());
+  const after = JSON.stringify([src, dst].map((n) => ({ d: second.book.get(n)!.description, b: second.book.get(n)!.body })));
+  assert.equal(after, before, '内外两层引号说明重载后应保持一致');
+  const reloaded = new SkillCurator(plannerOf([{ retire: [{ name: src, target: 'note', why: '已并入 nested-dst', subsumed_by: dst }] }]), second.engine, second.book, second.bus, {}, undefined, second.lifetimeFile);
+  assert.match((await reloaded.check(Date.now(), { force: true }))!, /收起文字记录 nested-src/);
+  assert.equal(second.engine.inactive(src), true, '内外两层引号说明重载后仍可按替代退役');
+});
