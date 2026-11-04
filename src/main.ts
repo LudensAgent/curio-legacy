@@ -114,14 +114,10 @@ const stopSpatialCheckpoints = startSpatialCheckpointScheduler(spatial, (fact) =
       { checkpoint, remainingDirty: fact.remainingDirty, state: fact.state });
     return;
   }
-  const retryHint = fact.state.lifecycle === 'open' && fact.state.unconfirmedCheckpointId === null
-    ? '；下个周期将重试'
-    : fact.state.lifecycle === 'open'
-      ? `；存在未确认提交 ${fact.state.unconfirmedCheckpointId}，不承诺自动重试`
-      : `；lifecycle=${fact.state.lifecycle}，需要重启后才能继续保存`;
   bus.publish('spatial_checkpoint_failed', 'P1',
-    `共享空间记忆保存失败（${fact.error.kind ?? fact.error.name}）：${fact.error.message}｜lifecycle=${fact.state.lifecycle}, 剩余 dirty=${fact.remainingDirty}${retryHint}`,
-    { error: fact.error, remainingDirty: fact.remainingDirty, state: fact.state });
+    `共享空间记忆保存失败（${fact.error.kind ?? fact.error.name}）：${fact.error.message}｜lifecycle=${fact.state.lifecycle}, closing=${spatial.closing}, 剩余 dirty=${fact.remainingDirty}, unconfirmed=${fact.state.unconfirmedCheckpointId ?? 'none'}`,
+    { error: fact.error, remainingDirty: fact.remainingDirty, lifecycle: fact.state.lifecycle,
+      closing: spatial.closing, unconfirmedCheckpointId: fact.state.unconfirmedCheckpointId, state: fact.state });
 });
 const memory = new WorldMemory(path.join(config.dataDir, 'world-memory.json'));
 const vision = new Vision(adapter, config.vision, spatial);

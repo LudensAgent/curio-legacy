@@ -2,10 +2,11 @@
  * 常规运行时的空间记忆 checkpoint 调度。
  *
  * 只使用 SharedSpatialSession 的公开单 I/O 门与 checkpoint 入口：单个定时器、
- * 同一时刻最多一次调度保存、不排队也不自行重试。周期到达时先读实际持久化状态，
- * clean/忙/非 open 一律跳过；保存结果与剩余 dirty 原样汇报，绝不代替库确认版本
- * 或清除 dirty。最终 flush/checkpoint/close 仍由宿主的 SharedSpatialSession.shutdown
- * 负责；stop() 只停未来触发，不取消已接受的 I/O。
+ * 同一时刻最多一次调度保存、不排队，不在失败后立即重试；后续周期按真实状态
+ * 决定是否保存。周期到达时先读实际持久化状态，clean/忙/非 open 一律跳过；
+ * 保存结果与剩余 dirty 原样汇报，绝不代替库确认版本或清除 dirty。最终
+ * flush/checkpoint/close 仍由宿主的 SharedSpatialSession.shutdown 负责；
+ * stop() 只停未来触发，不取消已接受的 I/O。
  */
 import type { SpatialCheckpointResult, SpatialPersistenceState } from 'curio-minecraft-3d-memory/storage/sqlite';
 import { errorFacts, type ErrorFacts } from './host-shutdown.ts';
@@ -50,7 +51,7 @@ export function startSpatialCheckpointScheduler(
   report: (fact: SpatialCheckpointReport) => void,
   intervalMs = DEFAULT_SPATIAL_CHECKPOINT_INTERVAL_MS,
 ): () => void {
-  // Node 会把超范围/小数延迟压到 1ms，等于取消有界重试间隔；只接受整数毫秒。
+  // 只接受 Node 定时器支持范围内的整数毫秒（1..2147483647）。
   if (!Number.isInteger(intervalMs) || intervalMs < 1 || intervalMs > 2_147_483_647) {
     throw new RangeError(`spatial checkpoint interval must be an integer between 1 and 2147483647 ms, got ${intervalMs}`);
   }
