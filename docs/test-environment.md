@@ -34,8 +34,9 @@
 # 只读检查：展示最终解析出的环境名、连接地址、世界目录、数据目录、空间库路径、日志目录、世界身份
 npm run test:config
 
-# 首次初始化：创建独立目录并复制世界种子（源服务器必须已停止；不覆盖已有测试状态）
-npm run test:init -- --seed /path/to/curio/data/world
+# 首次初始化：创建独立目录并复制世界种子（源必须已停止；不覆盖已有测试状态）
+# 注意：不得用 local/live 的世界或数据目录作种子（如 /path/to/curio/data/world），见下方约束
+npm run test:init -- --seed <独立的测试世界源目录>
 
 # 启动 Curio（走 scripts/supervise.mjs 的实际启动入口）
 npm run test:start
@@ -49,8 +50,8 @@ test 启动后**默认等待显式验收指令**：连接、观察、控制台�
 
 ## 世界种子的复制要求
 
-- 种子来源必须显式指定（`--seed`），通常用已有的 local 世界目录（如 `/path/to/curio/data/world`，即公共 `.env` 的 `SERVER_DIR`）。
-- 种子源服务器仍在写入时**不做普通目录复制**：`test:init` 会先探测源服务器端口，源服务器运行中会拒绝执行。请先停止 local/live 服务再复制。
+- 种子来源必须显式指定（`--seed`），且**不得是 local/live 的世界或数据目录**（如 `/path/to/curio/data/world`、`/path/to/curio/data/live` 或它们的子目录）。测试世界必须是独立副本，不能用 local/live 的快照初始化；`test:init` 会在读取、探测或复制前拒绝这类来源。
+- 种子源服务器仍在写入时**不做普通目录复制**：`test:init` 会先探测源服务器端口，源服务器运行中会拒绝执行。
 - 复制到 test 专属目录（`.env.test` 的 `SERVER_DIR`），跳过 `logs/`、`recordings/`、`.cache/`、`session.lock` 和链接；世界本体（`world/`）作为真实副本复制，不通过符号链接或目录联接共享可写世界。
 - 服务器版本、模组、插件与种子世界核对后原样复制，不自动升级世界；`test:init` 只改写**目标** `server.properties` 的服务配置，使副本与 test 配置一致：`server-port` = `MC_PORT`，`enable-rcon` = true（`RCON_PASSWORD` 为空则为 false），`rcon.port` = `RCON_PORT`，`rcon.password` = `RCON_PASSWORD`。种子源文件不被修改，密码不会写入日志或输出。
 - 新副本有独立的世界身份（`MEMORY_WORLD_ID`），不因为来自 local/live 副本就混用原环境的空间记录。

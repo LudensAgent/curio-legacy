@@ -11,6 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { peerLayouts } from '../src/config/isolation.ts';
 import { assertResetOffline } from '../src/maintenance/offline.ts';
 import { readProperties, readServerPropertyValues, validateLevelName } from '../src/maintenance/world-reset.ts';
 
@@ -167,13 +168,21 @@ async function initTest(): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  const { config } = await loadConfig();
+  const { config, envFile } = await loadConfig();
   const seedDir = path.resolve(seed);
   const targetServerDir = config.serverDir;
 
   const seedProps = path.join(seedDir, 'server.properties');
   if (!fs.existsSync(seedProps)) throw new Error(`种子源不是 Minecraft 服务器目录（缺 server.properties）：${seedDir}`);
   const seedResolved = path.resolve(seedDir);
+  // 不得用 local/live 的世界或数据目录作种子：本任务的测试世界必须独立，不能用它们的快照初始化。
+  for (const peer of peerLayouts(path.dirname(envFile), 'test')) {
+    for (const peerDir of [peer.serverDir, peer.dataDir]) {
+      if (sameOrNested(seedResolved, peerDir) || sameOrNested(peerDir, seedResolved)) {
+        throw new Error(`种子源不能是 ${peer.mode} 的世界或数据目录：${seedDir}（请用独立测试世界源）`);
+      }
+    }
+  }
   const targetResolved = path.resolve(targetServerDir);
   if (sameOrNested(seedResolved, targetResolved) || sameOrNested(targetResolved, seedResolved)) {
     throw new Error('种子源与 test 世界目录不能相同或相互包含，否则复制会把刚创建的目标再次当作源递归展开');
