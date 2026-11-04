@@ -198,7 +198,7 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
         if (pendingStance !== null && relativeCellAction(st.skill, v.args)) {
           const pos = pendingStance.pos;
           const where = pos
-            ? `身体现在在 (${pos.x.toFixed(2)},${pos.y.toFixed(2)},${pos.z.toFixed(2)})`
+            ? `${pendingStance.data !== undefined ? '原失败回执位置在' : '当时读取位置在'} (${pos.x.toFixed(2)},${pos.y.toFixed(2)},${pos.z.toFixed(2)})`
             : '没有保留原始站位回执';
           // 原失败步骤的实际回执只作为先验上下文，不冒充本次错误成因或当前 Nav/位置。
           const priorNavigation = pendingStance.data !== undefined ? {
