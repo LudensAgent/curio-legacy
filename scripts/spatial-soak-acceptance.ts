@@ -9,7 +9,7 @@
  * 证据文件由调用方给出路径；每条记录同步追加一行，不保留全部历史帧。
  * 单条记录超过 MAX_JSONL_RECORD_BYTES 时在写入前抛出，不静默丢弃。
  */
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, writeFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 import {
@@ -157,6 +157,10 @@ export function buildRunReport(parsed: Extract<ParsedCli, { ok: true; help: fals
  * 每条记录立即落盘，内存中只保留序号与字节计数，不保留记录数组。
  * envelope 提供独立的 sequence/captureTime；payload 内的原始时间戳原样保留。
  * 单条超过 maxRecordBytes 时抛 RangeError，并且不会先写出一部分。
+ *
+ * 一个证据文件只允许一个 writer：构造时以独占方式新建空文件，已存在的路径
+ * （无论是否为空）一律拒绝，避免从 sequence 0 追加到旧文件造成序号重复。
+ * 不提供续写/恢复/覆盖路径；需要新证据时使用新文件。
  */
 export class BoundedJsonlWriter {
   readonly path: string;
@@ -171,6 +175,8 @@ export class BoundedJsonlWriter {
     }
     this.path = path;
     this.maxRecordBytes = maxRecordBytes;
+    // 'wx' 原子地要求路径不存在；失败时不会截断或修改已有文件。
+    writeFileSync(path, '', { flag: 'wx' });
   }
 
   get recordsWritten(): number {
@@ -226,7 +232,10 @@ export interface SoakMetricsView {
     peak: MemorySnapshot;
     samples: number;
   };
-  timerDriftMs: TimingAggregate;
+  /** 相邻两次真实采样回调之间的实际单调时钟间隔。 */
+  timerGapMs: TimingAggregate;
+  /** 单次实际间隔超出计划周期的部分（按 0 下限截断），不是累计相位偏移。 */
+  timerLatenessMs: TimingAggregate;
   checkpointLatencyMs: TimingAggregate;
   checkpointReports: { saved: number; failed: number };
   gameFrames: { state: 'pending'; detail: string };
@@ -235,8 +244,12 @@ export interface SoakMetricsView {
 }
 
 export interface SoakMetrics {
-  /** actualMono 与计划触发时刻的差值；负值按 0 计，表示非负事件循环延迟。 */
-  recordTimerTick(expectedMono: number, actualMono: number): void;
+  /**
+   * 记录一次真实采样回调。间隔按上一个真实回调的 actualMono 计算，而不是
+   * 固定计划相位；因此一次延迟只会计入一次，不会在后续周期重复计为同样的延迟。
+   * 计划周期与负值都按 0 下限截断。
+   */
+  recordTimerTick(previousActualMono: number, actualMono: number, plannedIntervalMs: number): void;
   recordCheckpointLatency(durationMs: number): void;
   recordCheckpointReport(status: 'saved' | 'failed'): void;
   recordMemory(): MemorySnapshot;
@@ -274,14 +287,17 @@ export function createSoakMetrics(
   let final = initial;
   let peak = initial;
   let samples = 1;
-  const timerDrift = emptyTiming();
+  const timerGap = emptyTiming();
+  const timerLateness = emptyTiming();
   const checkpointLatency = emptyTiming();
   let saved = 0;
   let failed = 0;
 
   return {
-    recordTimerTick(expectedMono, actualMono) {
-      addTiming(timerDrift, actualMono - expectedMono);
+    recordTimerTick(previousActualMono, actualMono, plannedIntervalMs) {
+      const gap = actualMono - previousActualMono;
+      addTiming(timerGap, gap);
+      addTiming(timerLateness, gap - plannedIntervalMs);
     },
     recordCheckpointLatency(durationMs) {
       addTiming(checkpointLatency, durationMs);
@@ -314,7 +330,8 @@ export function createSoakMetrics(
           peak: { ...peak },
           samples,
         },
-        timerDriftMs: timingView(timerDrift),
+        timerGapMs: timingView(timerGap),
+        timerLatenessMs: timingView(timerLateness),
         checkpointLatencyMs: timingView(checkpointLatency),
         checkpointReports: { saved, failed },
         gameFrames: {
@@ -347,15 +364,30 @@ export interface SoakFoundationStop {
 
 export interface SpatialSoakFoundation {
   readonly evidencePath: string;
+  /**
+   * 首个证据写入错误；尚未失败时为 null。getter 立即反映当前状态，调用方可在
+   * 运行中据此停止 live run，而不必等 stop()。首个错误之后不再尝试写入。
+   */
+  readonly evidenceFailure: unknown;
   stop(): Promise<SoakFoundationStop>;
 }
 
-const shutdownFacts = (result: ShutdownResult): Record<string, unknown> => ({
+/**
+ * 把真实 shutdown 结果转成可稳定写入 JSONL 的事实。
+ *
+ * close.error 是 Error 实例，直接 JSON 序列化只会得到 {}，因此只把该字段换成
+ * errorFacts；completed/dirty/unconfirmedRequest/checkpointId 等真实字段保持原样。
+ * 原始 close.error 仍保留在 SoakFoundationStop.shutdown.close.error 中。
+ */
+export const shutdownFacts = (result: ShutdownResult): Record<string, unknown> => ({
   checkpoint: result.checkpoint,
   finalCheckpointSaved: result.checkpoint !== null && result.error === null,
   error: result.error === null ? null : errorFacts(result.error),
   cancelError: result.cancelError === null ? null : errorFacts(result.cancelError),
-  close: result.close,
+  close: result.close === null ? null : {
+    ...result.close,
+    error: result.close.error === null ? null : errorFacts(result.close.error),
+  },
   closeError: result.closeError === null ? null : errorFacts(result.closeError),
 });
 
@@ -387,16 +419,19 @@ export function startSpatialSoakFoundation(options: SoakFoundationOptions): Spat
   });
   write({ kind: 'memory', elapsedMs: metrics.elapsedMs(), ...metrics.recordMemory() });
 
-  let expectedTickMono = performance.now() + SAMPLE_INTERVAL_MS;
+  let lastTickMono = performance.now();
   const sampleTimer = setInterval(() => {
     const actualMono = performance.now();
-    metrics.recordTimerTick(expectedTickMono, actualMono);
-    expectedTickMono += SAMPLE_INTERVAL_MS;
+    metrics.recordTimerTick(lastTickMono, actualMono, SAMPLE_INTERVAL_MS);
+    lastTickMono = actualMono;
     write({ kind: 'memory', elapsedMs: metrics.elapsedMs(), ...metrics.recordMemory() });
   }, SAMPLE_INTERVAL_MS);
   sampleTimer.unref();
 
   let lastCheckpointLatencyMs = 0;
+  /** 当前已接受、但 report 尚未送达的完成信号；调度器同一时刻最多一个。 */
+  let pendingReport: { promise: Promise<void>; resolve: () => void } | null = null;
+
   const source: SpatialCheckpointSource = {
     get closing() {
       return options.service.closing;
@@ -408,6 +443,13 @@ export function startSpatialSoakFoundation(options: SoakFoundationOptions): Spat
     },
     getPersistenceState: () => options.service.getPersistenceState(),
     checkpoint: async () => {
+      let resolvePending: (() => void) | undefined;
+      pendingReport = {
+        promise: new Promise<void>((resolve) => {
+          resolvePending = resolve;
+        }),
+        resolve: () => resolvePending?.(),
+      };
       const startedMono = performance.now();
       try {
         return await options.service.checkpoint();
@@ -425,6 +467,9 @@ export function startSpatialSoakFoundation(options: SoakFoundationOptions): Spat
       latencyMs: lastCheckpointLatencyMs,
       report,
     });
+    const pending = pendingReport;
+    pendingReport = null;
+    pending?.resolve();
   });
 
   let stopPromise: Promise<SoakFoundationStop> | null = null;
@@ -433,31 +478,44 @@ export function startSpatialSoakFoundation(options: SoakFoundationOptions): Spat
     if (stopPromise !== null) return stopPromise;
     clearInterval(sampleTimer);
     stopScheduler();
+    // 停止未来触发后，仍可能有一次已接受的保存正在完成；等它和真实 shutdown
+    // 都结束，再采集最终内存/指标，避免最终计数漏掉迟到的 report。
+    const reportCompletion = pendingReport?.promise ?? null;
 
     stopPromise = (async () => {
+      let shutdown: ShutdownResult | null = null;
+      let shutdownError: unknown = null;
       try {
-        metrics.recordMemory();
+        shutdown = await options.service.shutdown();
       } catch (error) {
-        evidenceError = evidenceError ?? error;
+        shutdownError = error;
       }
+      if (reportCompletion !== null) await reportCompletion;
+
+      metrics.recordMemory();
       const finalMetrics = metrics.snapshot();
       write({ kind: 'metrics-final', metrics: finalMetrics });
-
-      // 即使采样/写证据失败，也必须走真实 shutdown；其结果不被清理错误覆盖。
-      const shutdown = await options.service.shutdown();
-      write({ kind: 'shutdown', shutdown: shutdownFacts(shutdown), h2: H2_PENDING });
-      try {
-        writer.close();
-      } catch (error) {
-        evidenceError = evidenceError ?? error;
+      if (shutdown !== null) {
+        write({ kind: 'shutdown', shutdown: shutdownFacts(shutdown), h2: H2_PENDING });
+      } else {
+        write({ kind: 'shutdown-error', error: errorFacts(shutdownError), h2: H2_PENDING });
       }
+      writer.close();
+      // 真实 shutdown 抛错时保留原始错误，但先关闭证据 writer 再向上抛。
+      if (shutdown === null) throw shutdownError ?? new Error('shared spatial shutdown returned no result');
       return { shutdown, evidenceError, finalMetrics, h2: H2_PENDING };
     })();
 
     return stopPromise;
   };
 
-  return { evidencePath: options.evidencePath, stop };
+  return {
+    evidencePath: options.evidencePath,
+    get evidenceFailure() {
+      return evidenceError;
+    },
+    stop,
+  };
 }
 
 const invokedPath = process.argv[1];

@@ -6,11 +6,15 @@
  * 离线 fixture，不是线上 Vision 或真实游戏证据。
  */
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { startSpatialCheckpointScheduler, type SpatialCheckpointReport } from '../src/spatial/checkpoint-scheduler.ts';
+import {
+  DEFAULT_SPATIAL_CHECKPOINT_INTERVAL_MS,
+  startSpatialCheckpointScheduler,
+  type SpatialCheckpointReport,
+} from '../src/spatial/checkpoint-scheduler.ts';
 import { SharedSpatialSession, type ShutdownResult } from '../src/spatial/shared-session.ts';
 import type { BlockObservation } from '../src/adapter/types.ts';
 import {
@@ -21,6 +25,7 @@ import {
   buildRunReport,
   createSoakMetrics,
   parseCliArgs,
+  shutdownFacts,
   startSpatialSoakFoundation,
 } from '../scripts/spatial-soak-acceptance.ts';
 
@@ -84,13 +89,14 @@ test('run report stays H2 pending and never claims a full pass', () => {
   assert.equal(report.h1.state, 'implemented');
 });
 
-test('bounded JSONL writer appends individual records and rejects oversized records before writing', () => {
+test('bounded JSONL writer owns a new file, writes unique increasing records, and rejects reuse', () => {
   const dir = mkdtempSync(join(tmpdir(), 'spatial-soak-writer-'));
   const path = join(dir, 'evidence.jsonl');
   try {
     const writer = new BoundedJsonlWriter(path, 512);
     assert.equal(MAX_JSONL_RECORD_BYTES, 64 * 1024);
     assert.equal('records' in writer, false);
+    assert.equal(statSync(path).size, 0, 'writer creates its own empty evidence file');
 
     const first = writer.append({ kind: 'a', timestamp: 111 });
     writer.append({ kind: 'b', timestamp: 222 });
@@ -103,36 +109,45 @@ test('bounded JSONL writer appends individual records and rejects oversized reco
     assert.equal(writer.recordsWritten, 4);
     assert.ok(writer.bytesWritten > 0);
 
+    const bytesAtClose = writer.bytesWritten;
     writer.close();
     assert.throws(() => writer.append({ kind: 'closed' }), /closed/);
 
-    const lines = readFileSync(path, 'utf8').trimEnd().split('\n');
+    const content = readFileSync(path, 'utf8');
+    const lines = content.trimEnd().split('\n');
     assert.equal(lines.length, 4, 'oversized record must not be partially written');
     const entries = lines.map((line): unknown => JSON.parse(line)).filter(isRecord);
     assert.deepEqual(entries.map((entry) => entry.sequence), [1, 2, 3, 4]);
+    assert.equal(new Set(entries.map((entry) => entry.sequence)).size, 4, 'sequences must be unique');
     assert.ok(entries.every((entry) => typeof entry.captureTime === 'number'));
     assert.ok(entries.every((entry) => isRecord(entry.record)));
     const firstRecord = entries[0].record;
     assert.ok(isRecord(firstRecord));
     assert.equal(firstRecord.timestamp, 111, 'original payload timestamp is preserved');
     assert.ok(!lines.some((line) => line.includes('too-big')));
+    assert.equal(statSync(path).size, bytesAtClose, 'byte count matches the actual file');
+    assert.equal(Buffer.byteLength(content, 'utf8'), bytesAtClose);
+
+    assert.throws(() => new BoundedJsonlWriter(path, 512), /already exists|EEXIST/);
+    assert.equal(readFileSync(path, 'utf8'), content, 'a rejected second writer must not modify the file');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('metrics aggregate memory, timer drift, and checkpoint timing without claiming frames or a leak', () => {
+test('metrics aggregate memory, per-interval timer gap/lateness, and checkpoint timing without claiming frames or a leak', () => {
   let mono = 1_000;
   const metrics = createSoakMetrics(() => mono);
   const initial = metrics.snapshot().memory.initial;
 
   mono = 1_200;
   const firstSample = metrics.recordMemory();
-  mono = 1_500;
-  metrics.recordTimerTick(1_400, 1_500);
-  mono = 1_800;
-  metrics.recordTimerTick(1_700, 1_750);
-  mono = 2_000;
+  // 第一次回调迟到 300ms；下一次按真实上次回调计时，间隔恢复正常，不重复计入延迟。
+  mono = 2_500;
+  metrics.recordTimerTick(1_200, 2_500, 1_000);
+  mono = 3_500;
+  metrics.recordTimerTick(2_500, 3_500, 1_000);
+  mono = 3_700;
   const secondSample = metrics.recordMemory();
   metrics.recordCheckpointLatency(40);
   metrics.recordCheckpointLatency(60);
@@ -144,8 +159,9 @@ test('metrics aggregate memory, timer drift, and checkpoint timing without claim
   assert.equal(view.memory.samples, 3);
   assert.ok(view.memory.peak.rss >= Math.max(initial.rss, firstSample.rss, secondSample.rss));
   assert.ok(view.memory.peak.heapUsed >= Math.max(initial.heapUsed, firstSample.heapUsed, secondSample.heapUsed));
-  assert.equal(view.elapsedMs, 1_000);
-  assert.deepEqual(view.timerDriftMs, { count: 2, maxMs: 100, meanMs: 75, totalMs: 150 });
+  assert.equal(view.elapsedMs, 2_700);
+  assert.deepEqual(view.timerGapMs, { count: 2, maxMs: 1_300, meanMs: 1_150, totalMs: 2_300 });
+  assert.deepEqual(view.timerLatenessMs, { count: 2, maxMs: 300, meanMs: 150, totalMs: 300 });
   assert.deepEqual(view.checkpointLatencyMs, { count: 2, maxMs: 60, meanMs: 50, totalMs: 100 });
   assert.deepEqual(view.checkpointReports, { saved: 1, failed: 1 });
   assert.equal(view.gameFrames.state, 'pending');
@@ -153,7 +169,39 @@ test('metrics aggregate memory, timer drift, and checkpoint timing without claim
   assert.equal(view.h2.state, 'pending');
 });
 
-test('real SQLite session reaches actual checkpoint/close and foundation preserves bounded evidence', async () => {
+test('shutdown facts serialize close.error through errorFacts and keep real close fields', () => {
+  const injected = new Error('boundary-injected close error (test fixture, not a worker fault)');
+  injected.name = 'BoundaryInjectedError';
+  const close = {
+    completed: false,
+    error: injected,
+    dirty: true,
+    unconfirmedRequest: true,
+    checkpointId: 'boundary-injected-checkpoint-id',
+  };
+  const result = {
+    checkpoint: null,
+    error: null,
+    cancelError: null,
+    close,
+    closeError: null,
+  } as unknown as ShutdownResult;
+
+  const facts = shutdownFacts(result);
+  const serializedClose = facts.close;
+  assert.ok(isRecord(serializedClose));
+  assert.equal(serializedClose.completed, false);
+  assert.equal(serializedClose.dirty, true);
+  assert.equal(serializedClose.unconfirmedRequest, true);
+  assert.equal(serializedClose.checkpointId, 'boundary-injected-checkpoint-id');
+  assert.notEqual(serializedClose.error, injected, 'close.error must be serialized, not written raw');
+  const serializedError = JSON.stringify(serializedClose.error);
+  assert.ok(serializedError.includes('BoundaryInjectedError'), 'serialized error must keep its name');
+  assert.ok(serializedError.includes('boundary-injected close error'), 'serialized error must keep its message');
+  assert.equal(close.error, injected, 'the original error stays available outside the serialized facts');
+});
+
+test('real SQLite session reaches actual checkpoint/close and foundation writes one strictly sequenced evidence file', async () => {
   const worldId = 'spatial-soak-offline-fixture-world';
   const dir = mkdtempSync(join(tmpdir(), 'spatial-soak-live-'));
   const databasePath = join(dir, 'memory.db');
@@ -219,13 +267,6 @@ test('real SQLite session reaches actual checkpoint/close and foundation preserv
       assert.equal(typeof fact.state.voxelRevision, 'number');
     }
 
-    const fixtureWriter = new BoundedJsonlWriter(evidencePath);
-    fixtureWriter.append({
-      kind: 'offline-fixture',
-      detail: 'synthetic typed observations for SQLite lifecycle; not live Vision or game evidence',
-    });
-    fixtureWriter.close();
-
     const foundation = startSpatialSoakFoundation({ service, evidencePath });
     const stopped = await foundation.stop();
     shutdown = stopped.shutdown;
@@ -243,16 +284,22 @@ test('real SQLite session reaches actual checkpoint/close and foundation preserv
     assert.equal(shutdown.close?.unconfirmedRequest, false);
     assert.equal(shutdown.close?.dirty, false);
 
-    const entries = readFileSync(evidencePath, 'utf8')
+    const rawEvidence = readFileSync(evidencePath, 'utf8');
+    const entries = rawEvidence
       .trimEnd()
       .split('\n')
       .map((line): unknown => JSON.parse(line))
       .filter(isRecord);
-    assert.ok(entries.every((entry) => Number.isInteger(entry.sequence)));
+    assert.deepEqual(
+      entries.map((entry) => entry.sequence),
+      entries.map((_, index) => index + 1),
+      'one writer must produce strictly increasing unique sequences starting at 1',
+    );
+    assert.equal(new Set(entries.map((entry) => entry.sequence)).size, entries.length);
     assert.ok(entries.every((entry) => typeof entry.captureTime === 'number'));
+    assert.equal(statSync(evidencePath).size, Buffer.byteLength(rawEvidence, 'utf8'));
 
     const kinds = entries.map((entry) => (isRecord(entry.record) ? entry.record.kind : undefined));
-    assert.equal(kinds.filter((kind) => kind === 'offline-fixture').length, 1);
     assert.ok(kinds.includes('foundation-start'));
     assert.ok(kinds.includes('memory'));
     assert.ok(kinds.includes('metrics-final'));
@@ -278,12 +325,243 @@ test('real SQLite session reaches actual checkpoint/close and foundation preserv
 
   const cleanup = discardFixtureAfterCleanClose(dir, shutdown);
   if (primaryError !== null) {
-    if (!cleanup.cleaned) console.error(`spatial soak fixture kept at ${dir}`);
+    if (!cleanup.cleaned) console.error(`spatial soak fixture kept at ${dir}: ${cleanup.detail}`);
+    if (cleanup.error !== null) console.error('fixture cleanup error:', cleanup.error);
+    if (shutdown !== null && shutdown.error !== null) console.error('shutdown checkpoint error:', shutdown.error);
+    if (shutdown !== null && shutdown.close !== null && shutdown.close.error !== null) {
+      console.error('shutdown close error:', shutdown.close.error);
+    }
+    if (shutdown !== null && shutdown.closeError !== null) console.error('shutdown closeError:', shutdown.closeError);
     if (secondaryShutdownError !== null) console.error('secondary shutdown error:', secondaryShutdownError);
     throw primaryError;
   }
   assert.equal(secondaryShutdownError, null);
-  assert.equal(cleanup.error, null, `fixture cleanup failed at ${dir}`);
+  assert.equal(cleanup.cleaned, true, `${cleanup.detail} (${dir})`);
+  assert.equal(cleanup.error, null, `fixture cleanup failed at ${dir}: ${cleanup.detail}`);
+});
+
+test('evidence write failure is exposed immediately and real shutdown still closes cleanly', async () => {
+  const worldId = 'spatial-soak-evidence-failure-world';
+  const dir = mkdtempSync(join(tmpdir(), 'spatial-soak-evidence-failure-'));
+  const databasePath = join(dir, 'memory.db');
+  const evidenceDir = join(dir, 'evidence');
+  const evidencePath = join(evidenceDir, 'evidence.jsonl');
+  mkdirSync(evidenceDir);
+
+  let service: SharedSpatialSession | null = null;
+  let foundation: ReturnType<typeof startSpatialSoakFoundation> | null = null;
+  let shutdown: ShutdownResult | null = null;
+  let primaryError: unknown = null;
+  let secondaryShutdownError: unknown = null;
+
+  try {
+    service = await SharedSpatialSession.open({ worldId, databasePath });
+    service.beginSession({ worldId, dim: 'overworld', sessionId: 'offline-fixture-session' });
+    service.observe([offlineObservation(worldId, 11, 0, -1, 0, 'minecraft:stone')]);
+
+    foundation = startSpatialSoakFoundation({ service, evidencePath });
+    assert.equal(foundation.evidenceFailure, null);
+    // 删除证据目录后，下一个周期写入真实失败（ENOENT）；调用方无需等 stop 即可看到。
+    rmSync(evidenceDir, { recursive: true, force: true });
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    assert.ok(foundation.evidenceFailure !== null, 'evidence failure must be visible while the run is live');
+    const firstFailure = foundation.evidenceFailure;
+
+    const stopped = await foundation.stop();
+    shutdown = stopped.shutdown;
+    assert.equal(stopped.evidenceError, firstFailure, 'first evidence failure must be preserved');
+    assert.equal(
+      typeof stopped.evidenceError === 'object' && stopped.evidenceError !== null,
+      true,
+      'missing evidence directory surfaces a real write error object',
+    );
+    assert.equal(stopped.finalMetrics.h2.fullPass, false);
+
+    assert.equal(shutdown.error, null);
+    assert.ok(shutdown.checkpoint !== null, 'final checkpoint must be real even when evidence writes failed');
+    assert.ok(shutdown.close !== null);
+    assert.equal(shutdown.close?.completed, true);
+    assert.equal(shutdown.close?.error, null);
+    assert.equal(shutdown.close?.unconfirmedRequest, false);
+    assert.equal(shutdown.close?.dirty, false);
+  } catch (error) {
+    primaryError = error;
+  }
+
+  if (shutdown === null) {
+    try {
+      if (foundation !== null) shutdown = (await foundation.stop()).shutdown;
+      else if (service !== null) shutdown = await service.shutdown();
+    } catch (error) {
+      secondaryShutdownError = error;
+    }
+  }
+
+  const cleanup = discardFixtureAfterCleanClose(dir, shutdown);
+  if (primaryError !== null) {
+    if (!cleanup.cleaned) console.error(`spatial soak fixture kept at ${dir}: ${cleanup.detail}`);
+    if (cleanup.error !== null) console.error('fixture cleanup error:', cleanup.error);
+    if (shutdown !== null && shutdown.error !== null) console.error('shutdown checkpoint error:', shutdown.error);
+    if (shutdown !== null && shutdown.close !== null && shutdown.close.error !== null) {
+      console.error('shutdown close error:', shutdown.close.error);
+    }
+    if (shutdown !== null && shutdown.closeError !== null) console.error('shutdown closeError:', shutdown.closeError);
+    if (secondaryShutdownError !== null) console.error('secondary shutdown error:', secondaryShutdownError);
+    throw primaryError;
+  }
+  assert.equal(secondaryShutdownError, null);
+  assert.equal(cleanup.cleaned, true, `${cleanup.detail} (${dir})`);
+  assert.equal(cleanup.error, null, `fixture cleanup failed at ${dir}: ${cleanup.detail}`);
+});
+
+test('default 30s foundation scheduler counts a delayed accepted report before final metrics', { timeout: 35_000 }, async () => {
+  const worldId = 'spatial-soak-default-interval-world';
+  const dir = mkdtempSync(join(tmpdir(), 'spatial-soak-default-interval-'));
+  const databasePath = join(dir, 'memory.db');
+  const evidencePath = join(dir, 'evidence.jsonl');
+
+  let service: SharedSpatialSession | null = null;
+  let foundation: ReturnType<typeof startSpatialSoakFoundation> | null = null;
+  let shutdown: ShutdownResult | null = null;
+  let primaryError: unknown = null;
+  let secondaryShutdownError: unknown = null;
+  let releaseDelivery: () => void = () => {};
+  const deliveryReleased = new Promise<void>((resolve) => {
+    releaseDelivery = resolve;
+  });
+
+  try {
+    assert.equal(DEFAULT_SPATIAL_CHECKPOINT_INTERVAL_MS, 30_000);
+    service = await SharedSpatialSession.open({ worldId, databasePath });
+    service.beginSession({ worldId, dim: 'overworld', sessionId: 'offline-fixture-session' });
+    service.observe([
+      offlineObservation(worldId, 21, 0, -1, 0, 'minecraft:stone'),
+      offlineObservation(worldId, 22, 0, 0, 0, 'minecraft:air'),
+    ]);
+    assert.equal(service.getPersistenceState().dirty, true, 'foundation test must begin with real dirty SQLite state');
+
+    let resolveAccepted: () => void = () => {};
+    const accepted = new Promise<void>((resolve) => {
+      resolveAccepted = resolve;
+    });
+    let checkpointCalls = 0;
+
+    // 测试本地包装真实 public checkpoint：真实保存完成后才 resolveAccepted，并扣住
+    // 结果投递，使 foundation.stop 发生时 report 仍未送达。
+    const gatedService = {
+      get closing() {
+        return service!.closing;
+      },
+      session: {
+        get busy() {
+          return service!.session.busy;
+        },
+      },
+      getPersistenceState: () => service!.getPersistenceState(),
+      shutdown: () => service!.shutdown(),
+      checkpoint: async () => {
+        const result = await service!.checkpoint();
+        checkpointCalls += 1;
+        resolveAccepted();
+        await deliveryReleased;
+        return result;
+      },
+    } as unknown as SharedSpatialSession;
+
+    foundation = startSpatialSoakFoundation({ service: gatedService, evidencePath });
+    let acceptTimer: ReturnType<typeof setTimeout> | undefined;
+    const acceptedInTime = await Promise.race([
+      accepted.then(() => true),
+      new Promise<boolean>((resolve) => {
+        acceptTimer = setTimeout(() => resolve(false), 32_000);
+      }),
+    ]);
+    if (acceptTimer !== undefined) clearTimeout(acceptTimer);
+    assert.equal(acceptedInTime, true, 'default 30s scheduler did not accept a checkpoint within 32s');
+    assert.equal(checkpointCalls, 1);
+
+    // report 仍被扣住：stop 必须等真实 shutdown 和这次已接受的投递完成后才取最终快照。
+    const stopPromise = foundation.stop();
+    releaseDelivery();
+    const stopped = await stopPromise;
+    shutdown = stopped.shutdown;
+
+    assert.equal(stopped.evidenceError, null);
+    assert.deepEqual(stopped.finalMetrics.checkpointReports, { saved: 1, failed: 0 });
+    assert.equal(stopped.finalMetrics.checkpointLatencyMs.count, 1);
+    assert.equal(stopped.finalMetrics.h2.fullPass, false);
+
+    assert.equal(shutdown.error, null);
+    assert.ok(shutdown.checkpoint !== null);
+    assert.ok(shutdown.close !== null);
+    assert.equal(shutdown.close?.completed, true);
+    assert.equal(shutdown.close?.error, null);
+    assert.equal(shutdown.close?.unconfirmedRequest, false);
+    assert.equal(shutdown.close?.dirty, false);
+
+    const rawEvidence = readFileSync(evidencePath, 'utf8');
+    const entries = rawEvidence
+      .trimEnd()
+      .split('\n')
+      .map((line): unknown => JSON.parse(line))
+      .filter(isRecord);
+    assert.deepEqual(
+      entries.map((entry) => entry.sequence),
+      entries.map((_, index) => index + 1),
+      'evidence sequences must stay strictly increasing and unique',
+    );
+    assert.equal(statSync(evidencePath).size, Buffer.byteLength(rawEvidence, 'utf8'));
+
+    const records = entries.map((entry) => entry.record).filter(isRecord);
+    const schedulerRecords = records.filter((record) => record.kind === 'checkpoint-scheduler');
+    assert.equal(
+      schedulerRecords.length,
+      stopped.finalMetrics.checkpointReports.saved + stopped.finalMetrics.checkpointReports.failed,
+      'JSONL callback count must agree with final metrics',
+    );
+    assert.equal(schedulerRecords.length, 1);
+    const schedulerReport = schedulerRecords[0].report;
+    assert.ok(isRecord(schedulerReport));
+    assert.equal(schedulerReport.status, 'saved');
+    const reportedLatency = schedulerRecords[0].latencyMs;
+    assert.ok(typeof reportedLatency === 'number');
+    assert.ok(Math.abs(reportedLatency - stopped.finalMetrics.checkpointLatencyMs.totalMs) < 1e-6);
+
+    const finalIndex = records.findIndex((record) => record.kind === 'metrics-final');
+    const schedulerIndex = records.findIndex((record) => record.kind === 'checkpoint-scheduler');
+    const shutdownIndex = records.findIndex((record) => record.kind === 'shutdown');
+    assert.ok(schedulerIndex >= 0, 'delayed report must be written');
+    assert.ok(finalIndex > schedulerIndex, 'final metrics must be captured after the delayed report');
+    assert.ok(shutdownIndex > finalIndex, 'shutdown record follows final metrics');
+  } catch (error) {
+    primaryError = error;
+  }
+
+  releaseDelivery();
+  if (shutdown === null) {
+    try {
+      if (foundation !== null) shutdown = (await foundation.stop()).shutdown;
+      else if (service !== null) shutdown = await service.shutdown();
+    } catch (error) {
+      secondaryShutdownError = error;
+    }
+  }
+
+  const cleanup = discardFixtureAfterCleanClose(dir, shutdown);
+  if (primaryError !== null) {
+    if (!cleanup.cleaned) console.error(`spatial soak fixture kept at ${dir}: ${cleanup.detail}`);
+    if (cleanup.error !== null) console.error('fixture cleanup error:', cleanup.error);
+    if (shutdown !== null && shutdown.error !== null) console.error('shutdown checkpoint error:', shutdown.error);
+    if (shutdown !== null && shutdown.close !== null && shutdown.close.error !== null) {
+      console.error('shutdown close error:', shutdown.close.error);
+    }
+    if (shutdown !== null && shutdown.closeError !== null) console.error('shutdown closeError:', shutdown.closeError);
+    if (secondaryShutdownError !== null) console.error('secondary shutdown error:', secondaryShutdownError);
+    throw primaryError;
+  }
+  assert.equal(secondaryShutdownError, null);
+  assert.equal(cleanup.cleaned, true, `${cleanup.detail} (${dir})`);
+  assert.equal(cleanup.error, null, `fixture cleanup failed at ${dir}: ${cleanup.detail}`);
 });
 
 /** 构造一条显式离线的 typed BlockObservation；source 字段仅为类型形状，不代表线上能力。 */
@@ -309,18 +587,36 @@ function offlineObservation(
   };
 }
 
-/** 只有 close 实际确认干净时才删除临时目录；否则保留并返回真实错误。 */
+/**
+ * 只有 close 实际确认 completed=true、error=null、unconfirmedRequest=false、
+ * dirty=false 时才删除临时目录；否则保留 dirty/未确认的证据与数据库，并返回
+ * 可供失败断言输出的具体 shutdown/cleanup 诊断。
+ */
 function discardFixtureAfterCleanClose(
   dir: string,
   result: ShutdownResult | null,
-): { cleaned: boolean; error: unknown } {
-  if (result === null || result.close === null || result.close.completed === false || result.close.error !== null) {
-    return { cleaned: false, error: null };
+): { cleaned: boolean; error: unknown; detail: string } {
+  const close = result?.close ?? null;
+  if (
+    result === null ||
+    close === null ||
+    close.completed !== true ||
+    close.error !== null ||
+    close.unconfirmedRequest !== false ||
+    close.dirty !== false
+  ) {
+    const closeDetail = close === null
+      ? 'close=null'
+      : `close.completed=${String(close.completed)} close.error=${close.error === null ? 'null' : 'present'} close.unconfirmedRequest=${String(close.unconfirmedRequest)} close.dirty=${String(close.dirty)}`;
+    const resultDetail = result === null
+      ? 'shutdown=null'
+      : `checkpoint=${result.checkpoint === null ? 'null' : 'saved'} checkpointError=${result.error === null ? 'null' : 'present'} closeError=${result.closeError === null ? 'null' : 'present'}`;
+    return { cleaned: false, error: null, detail: `fixture retained: ${resultDetail} ${closeDetail}` };
   }
   try {
     rmSync(dir, { recursive: true, force: true });
-    return { cleaned: true, error: null };
+    return { cleaned: true, error: null, detail: 'clean close confirmed; fixture removed' };
   } catch (error) {
-    return { cleaned: false, error };
+    return { cleaned: false, error, detail: 'clean close confirmed but fixture removal failed' };
   }
 }
