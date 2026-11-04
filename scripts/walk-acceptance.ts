@@ -2875,7 +2875,18 @@ export interface ReconnectSegmentEvidence {
     spawn: Array<{ seq: number; ts: number; botIsOld: boolean }>;
   };
   admission: { emptyObserved: number; observationAdmitted: boolean; scope: TaskStartRecord['scope'] } | null;
-  replay: { reportSections: number; cellAfter: CellEvidenceSnapshot; admittedAfter: boolean } | null;
+  /** 旧 typed payload 重放：调用前的原输入/证据/scope 与调用已发生的返回都在断言前落账。 */
+  replay: {
+    payload: BlockObservation;
+    call: { seq: number; ts: number };
+    cellBefore: CellEvidenceSnapshot;
+    admission: { observationAdmitted: boolean; scope: TaskStartRecord['scope'] };
+    report: ChangeReport | null;
+    response: { seq: number; ts: number } | null;
+    cellAfter: CellEvidenceSnapshot | null;
+    admittedAfter: boolean | null;
+    error?: string;
+  } | null;
   fresh: {
     requested: Vec3;
     returned: BlockObservation;
@@ -2916,8 +2927,9 @@ function normalizedProperties(properties: Record<string, string | number | boole
 /**
  * S3 witness 只从真实 Vision 返回并原样保存的 typed payload 中选：该 payload 必须先被
  * 同一 svc.voxel 的 map 批次写入，且该格当前 cellAt 的 name/properties/time/sequence/scope
- * 与原 payload 一致、且仍是 FRESH。断线/暂停后的 STALE 前缀不是当前合法事实；
- * 未真正入图的 payload 不可能入选；不从诊断投影重建。按新→旧排序，同一格只取最近一次。
+ * 与原 payload 精确一致。离线/断线后该格可能变 STALE，但原 payload 仍是最后合法历史事实，
+ * 仍可入选；若同格已被新 payload 覆写则不再对应，不能入选。未真正入图的 payload 不可能
+ * 入选；不从诊断投影重建。按新→旧排序，同一格只取最近一次。
  */
 export function pickSpatialWitnesses(
   sources: ReadonlyArray<SpatialWitnessSource>,
@@ -2940,7 +2952,7 @@ export function pickSpatialWitnesses(
         && JSON.stringify(normalizedProperties(o.state.properties)) === JSON.stringify(expectedProperties)));
     if (!batch) continue;
     const cell = cellEvidenceSnapshot(voxel.cellAt(c.block.dimension, c.block.pos.x, c.block.pos.y, c.block.pos.z));
-    if (!cell.observed || cell.freshness !== 'FRESH' || cell.sequence !== c.block.observationId || cell.observedAt !== c.block.observedAt
+    if (!cell.observed || cell.sequence !== c.block.observationId || cell.observedAt !== c.block.observedAt
       || cell.sessionId !== c.block.sessionId || cell.name !== c.block.name
       || JSON.stringify(cell.properties ?? {}) !== JSON.stringify(expectedProperties)) continue;
     pickedCells.add(key);
@@ -4403,7 +4415,9 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
       const ownBatches = d.exec.mapBatches
         .filter((b) => b.ts >= t.task.startedAt)
         .map((b) => ({ ...mapBatchForEvidence(b), mapIsSessionVoxel: b.map === ctx.spatial.session.voxel }));
-      const savedWitnesses = pickSpatialWitnesses([{ visionCalls: ownVisionCalls, mapBatches: ownBatches }], ctx.spatial.session.voxel, 8);
+      // S3 可从 STALE 历史事实中选，但断线前要重看的旧事实必须是当前 FRESH：这一要求只在此处局部执行。
+      const savedWitnesses = pickSpatialWitnesses([{ visionCalls: ownVisionCalls, mapBatches: ownBatches }], ctx.spatial.session.voxel, 8)
+        .filter((w) => w.cell.freshness === 'FRESH');
       if (savedWitnesses.length < 2) {
         throw new Error(`W7c 断线前合法 FRESH 旧事实不足 2 个不同格（${savedWitnesses.length}）`);
       }
@@ -4446,8 +4460,10 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
       if (lifecycleObserves.length < 1) throw new Error('W7c 断线后未观察到旧 loop 的真实非 Vision 生命周期报告');
       const lifecycle = lifecycleObserves[0]!;
       const statusAfterLifecycle = lifecycle.statusAfter.route;
+      if (!statusAfterLifecycle) throw new Error('W7c 旧 loop 生命周期报告后缺少公开 route 状态');
+      if (statusAfterLifecycle.verdict === 'OPEN') throw new Error('W7c 旧 loop 生命周期报告后整体 route verdict 仍为 OPEN');
       const invalidatedOldOpenSteps = oldOpenSteps.filter((index) => {
-        const step = statusAfterLifecycle?.steps[index];
+        const step = statusAfterLifecycle.steps[index];
         return !(step?.kind === 'verified' && step.status === 'OPEN');
       });
       if (invalidatedOldOpenSteps.length === 0) throw new Error('W7c 生命周期报告后旧 OPEN 步骤仍全部 OPEN，未证明路线失效');
@@ -4506,6 +4522,16 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
       d.corrections.stop();
       d.diag.unwrap();
       d.exec.unwrap();
+      // 旧连接的双事件与终态已全部确认；进入新连接等待前立即摘掉旧 disconnected/end 探针，
+      // 后续新连接的真实断线不得覆写旧 observed。finally 的清理保持幂等。
+      if (onAdapterDisconnected) {
+        ctx.adapter.removeListener('disconnected', onAdapterDisconnected);
+        onAdapterDisconnected = undefined;
+      }
+      if (onBotEnd) {
+        oldBot.removeListener('end', onBotEnd);
+        onBotEnd = undefined;
+      }
 
       // 自动重连 spawn 可能在等待期间已发生：探针已预先捕获，这里只按真实新 Bot 身份 +
       // ready 有界等待；不用会在预期断线立刻 reject 的 waitForSpawn 包住整个 end 过程。
@@ -4548,10 +4574,10 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
       }
       reconnect.admission = { emptyObserved: empty.length, observationAdmitted: ctx.spatial.observationAdmitted, scope: admissionScope };
 
-      // 从旧 typed payload 中选一个重连后近处、可在视锥内合法转头重看的格；优先支撑格。
+      // 从旧 typed payload 中选一个重连后实际距离内的格；pitch 是绝对俯仰角，不做视锥预筛，
+      // 合法支撑可向下 60–90 度，可见性由一次有限真实 look 后的单格 Vision 返回判定。
       const eye = ctx.adapter.eye();
       if (!eye) throw new Error('W7c 重连后无真实眼睛位置');
-      const vFov = ctx.vision.cfg.vFov * Math.PI / 180;
       const effectiveRange = ctx.vision.effectiveRange();
       const aimable = savedWitnesses.map((w) => {
         const dx = w.block.pos.x + 0.5 - eye.x, dy = w.block.pos.y + 0.5 - eye.y, dz = w.block.pos.z + 0.5 - eye.z;
@@ -4563,20 +4589,46 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
           pitch: Math.atan2(dy, horizontal),
           support: w.block.pos.y < Math.floor(eye.y),
         };
-      }).filter((c) => c.dist > 0.01 && c.dist <= effectiveRange && Math.abs(c.pitch) <= vFov / 2)
+      }).filter((c) => c.dist > 0.01 && c.dist <= effectiveRange)
         .sort((a, b) => Number(b.support) - Number(a.support) || a.dist - b.dist);
       const target = aimable[0];
-      if (!target) throw new Error('W7c 重连后没有可在有限视锥内合法转头重看的旧事实');
+      if (!target) throw new Error('W7c 重连后没有在实际距离内合法转头重看的旧事实');
       const untouchedFact = savedWitnesses.find((w) => !sameCell(w.block.pos, target.w.block.pos));
       if (!untouchedFact) throw new Error('W7c 缺少本次不请求的第二个旧事实');
 
       // 旧 typed payload 原样交给生产服务：旧 session/旧 scope 必须被拒绝，不能计新 Vision。
-      const replayReport = ctx.spatial.observe([target.w.block]);
+      // 调用前先把原 payload 引用、准入后 cellBefore 与当前新 scope/准入挂到证据上，
+      // 这样即使后续断言或调用抛错，输入与已发生部分也不会丢。
+      const targetDim = target.w.block.dimension, targetPos = target.w.block.pos;
+      const replayPayload = target.w.block;
+      const replayCall = { seq: d.seq.next(), ts: Date.now() };
+      const replayCellBefore = cellEvidenceSnapshot(ctx.spatial.session.voxel.cellAt(targetDim, targetPos.x, targetPos.y, targetPos.z));
+      reconnect.replay = {
+        payload: replayPayload,
+        call: replayCall,
+        cellBefore: replayCellBefore,
+        admission: { observationAdmitted: ctx.spatial.observationAdmitted, scope: actualScope(ctx) },
+        report: null, response: null, cellAfter: null, admittedAfter: null,
+      };
+      let replayReport: ChangeReport;
+      try {
+        replayReport = ctx.spatial.observe([replayPayload]);
+      } catch (error) {
+        reconnect.replay.error = (error as Error)?.message ?? String(error);
+        throw error;
+      }
+      reconnect.replay.report = replayReport;
+      reconnect.replay.response = { seq: d.seq.next(), ts: Date.now() };
+      const replayCell = cellEvidenceSnapshot(ctx.spatial.session.voxel.cellAt(targetDim, targetPos.x, targetPos.y, targetPos.z));
+      reconnect.replay.cellAfter = replayCell;
+      reconnect.replay.admittedAfter = ctx.spatial.observationAdmitted;
+
       if (replayReport.sections.length !== 0) {
         throw new Error(`W7c 旧 typed payload 重放未被拒绝：${replayReport.sections.length} sections`);
       }
-      const targetDim = target.w.block.dimension, targetPos = target.w.block.pos;
-      const replayCell = cellEvidenceSnapshot(ctx.spatial.session.voxel.cellAt(targetDim, targetPos.x, targetPos.y, targetPos.z));
+      if (!sameCellEvidence(replayCellBefore, replayCell)) {
+        throw new Error('W7c 旧 payload 重放改变了目标格全 cell 证据（含 revision/validUntil）');
+      }
       if (replayCell.freshness !== 'STALE') throw new Error(`W7c 旧 payload 重放后目标格非 STALE：${replayCell.freshness ?? 'missing'}`);
       if (replayCell.name !== target.w.cell.name
         || JSON.stringify(replayCell.properties ?? {}) !== JSON.stringify(target.w.cell.properties ?? {})
@@ -4586,7 +4638,6 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
         throw new Error('W7c 旧 payload 重放改变了目标格原证据');
       }
       if (!ctx.spatial.observationAdmitted) throw new Error('W7c 旧 payload 重放撤销了生产准入');
-      reconnect.replay = { reportSections: replayReport.sections.length, cellAfter: replayCell, admittedAfter: ctx.spatial.observationAdmitted };
 
       // 只做一次有限合法转头，只请求这一格；不扩 FOV/范围、不中途 rawblock 偷读。
       const lookSeq = markTimeline(d, 'w7c-reconnect-look', null);

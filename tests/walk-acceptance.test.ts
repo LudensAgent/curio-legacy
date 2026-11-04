@@ -2206,6 +2206,7 @@ test('真实 SQLite 重连边界（离线注入 typed payload，非联机）：�
     ]);
     const before = loop.status();
     assert.ok(before);
+    assert.equal(before.route.verdict, 'OPEN');
     const stepBefore = before.route.steps[0];
     assert.equal(stepBefore?.kind === 'verified' ? stepBefore.result.status : null, 'OPEN');
     assert.equal(cellEvidenceSnapshot(map.cellAt(dim, 1, -1, 0)).freshness, 'FRESH');
@@ -2216,7 +2217,10 @@ test('真实 SQLite 重连边界（离线注入 typed payload，非联机）：�
     const lifecycle = exec.observes[exec.observes.length - 1]!;
     assert.equal(lifecycle.reportSource, 'unmatched', '生命周期报告不得冒充 Vision/mapBatch');
     assert.equal(lifecycle.mapBatchMatched, false);
-    const stepAfter = loop.status()?.route.steps[0];
+    const statusAfter = loop.status();
+    assert.ok(statusAfter);
+    assert.notEqual(statusAfter.route.verdict, 'OPEN', '旧 loop 整体 verdict 不得仍为 OPEN');
+    const stepAfter = statusAfter.route.steps[0];
     assert.equal(stepAfter?.kind === 'verified' && stepAfter.result.status === 'OPEN', false, '旧 OPEN 必须变非 OPEN');
     const cellBeforeReplay = cellEvidenceSnapshot(map.cellAt(dim, 1, -1, 0));
     assert.equal(cellBeforeReplay.freshness, 'STALE');
@@ -2259,7 +2263,16 @@ test('真实 SQLite 重连边界（离线注入 typed payload，非联机）：�
       } as VisionCallRecord],
       mapBatches: [{ ...mapBatchForEvidence(newBatch), mapIsSessionVoxel: true }],
     };
-    assert.equal(pickSpatialWitness([oldSource], map), null, '旧 STALE 前缀不得作为最后合法事实');
+    // 同格已被 newSupport 覆写，当前 cell 不再对应旧 payload（并非因它 STALE），故旧 payload 不可选。
+    assert.equal(pickSpatialWitness([oldSource], map), null, '同格已被新 payload 覆写，旧 payload 不再对应当前 cell');
+    // 未被覆写的 oldOther 仍是原 payload 的真实 STALE 历史事实：S3 仍可保留。
+    const staleOther = pickSpatialWitness([{
+      ...oldSource,
+      visionCalls: [{ ...oldSource.visionCalls[0]!, positions: [{ ...oldOther.pos }], payload: [oldOther] }],
+    }], map);
+    assert.ok(staleOther, '未覆写的 STALE 原 payload 仍应可选');
+    assert.equal(staleOther.block.observationId, oldOther.observationId);
+    assert.equal(staleOther.cell.freshness, 'STALE');
     const picked = pickSpatialWitness([oldSource, reconnectSource], map);
     assert.ok(picked);
     assert.equal(picked.source, 'reconnect');
