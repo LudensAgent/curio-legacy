@@ -24,8 +24,8 @@ function flatWorld() {
   return world;
 }
 
-/** 带真实物理的身体：setControlState 驱动控制，tick 推一步物理并推进模拟时钟。 */
-function body(start: { x: number; z: number }) {
+/** 带真实物理的身体：setControlState 驱动控制，tick 推 tickEvery 步物理并推进模拟时钟。 */
+function body(start: { x: number; z: number }, tickEvery = 1) {
   const control: Record<string, boolean> = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
   const entity = { position: new Vec3(start.x, 0, start.z), velocity: new Vec3(0, 0, 0), onGround: true,
     isInWater: false, isInLava: false, isInWeb: false, isCollidedHorizontally: false, isCollidedVertically: false,
@@ -40,8 +40,8 @@ function body(start: { x: number; z: number }) {
   const physics = Physics(data, world);
   let clock = 2000;
   const tick = () => {
-    physics.simulatePlayer(new PlayerState(bot, control), world).apply(bot);
-    clock += 50;
+    for (let k = 0; k < tickEvery; k++) physics.simulatePlayer(new PlayerState(bot, control), world).apply(bot);
+    clock += 50 * tickEvery;
     return Promise.resolve(bot.entity);
   };
   return { bot, tick, now: () => clock };
@@ -114,6 +114,19 @@ test('合法起点偏移（0.40/0.55）不冲过目标而超时，而是有限�
     const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, signal: new AbortController().signal, now });
     assert.equal(result.outcome, 'ARRIVED', `起点 x=${sx} 应到达而非超时：${result.message}`);
     assert.equal(bot.control.forward, false, '到达后应松开前进键');
+  }
+});
+
+test('每两 tick 采样仍到达，不前后振荡超时', async () => {
+  for (const sx of [0.40, 0.50, 0.55]) {
+    const map = buildMap();
+    const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }];
+    const { bot, tick, now } = body({ x: sx, z: 0.52 }, 2);
+    const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, signal: new AbortController().signal, now });
+    assert.equal(result.outcome, 'ARRIVED', `起点 x=${sx} 每 2 tick 采样应到达而非振荡超时：${result.message}`);
+    assert.equal(bot.control.forward, false, '到达后应松开前进键');
+    assert.equal(bot.control.back, false, '到达后不应残留倒退键');
+    assert.equal(bot.control.sneak, false, '到达后不应残留潜行键');
   }
 });
 

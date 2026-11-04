@@ -57,3 +57,22 @@ test('旧段迟到的 releaseIf 不清新段归属，新段 stop 仍能释放', 
   sig.abort();
   await p;
 });
+
+test('releaseIf 释放全部移动键（forward/back/sneak），不残留倒退或潜行', () => {
+  const control: Record<string, boolean> = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
+  const entity = { position: { x: 0, y: 0, z: 0 }, velocity: { x: 0, y: 0, z: 0 }, onGround: true, isInWater: false };
+  const body = {
+    setControlState(name: string, value: boolean) { control[name] = value; },
+    clearControlStates() { for (const k of Object.keys(control)) control[k] = false; },
+    look() {},
+    entity,
+  };
+  const executor = new WalkMoveExecutor(body, () => Promise.resolve(body.entity), new AbortController().signal, () => 0);
+  // 模拟倒退纠偏已按下 back+sneak，然后释放：releaseIf 必须清掉全部移动键。
+  control.forward = false; control.back = true; control.sneak = true;
+  Reflect.set(executor, 'activeExecutionId', 'e9');
+  (Reflect.get(executor, 'releaseIf') as (id: string) => void).call(executor, 'e9');
+  assert.equal(control.forward, false);
+  assert.equal(control.back, false, 'releaseIf 必须释放倒退键');
+  assert.equal(control.sneak, false, 'releaseIf 必须释放潜行键');
+});

@@ -177,8 +177,9 @@ export class WalkMoveExecutor implements MoveExecutor {
       if (this.now() >= moveDeadline) { this.releaseIf(request.executionId); return { failure: { kind: 'timed_out' } }; }
       const e = await awaitFrame(this.tick, moveDeadline, this.now, request.signal, this.parentSignal);
       // 每次异步等待返回后，在写控制或提交样本之前，复核取消/期限/归属：旧段迟到恢复不能
-      // 松开新段的键，也不能提交旧样本。
+      // 松开新段的键、提交旧样本；到期帧也不能再写控制。
       if (this.aborted(request)) { this.releaseIf(request.executionId); return { failure: { kind: 'cancelled' } }; }
+      if (this.now() >= moveDeadline) { this.releaseIf(request.executionId); return { failure: { kind: 'timed_out' } }; }
       if (e === null) {
         // 无帧：复核取消/期限后再决定终态，不把断线误判为普通成功。
         if (this.now() >= moveDeadline) { this.releaseIf(request.executionId); return { failure: { kind: 'timed_out' } }; }
@@ -199,15 +200,19 @@ export class WalkMoveExecutor implements MoveExecutor {
       if (dist <= tol) {
         this.body.setControlState('forward', false);
         this.body.setControlState('back', false);
+        this.body.setControlState('sneak', false);
       } else if (speed < 0.01) {
-        // 静止且差一点：朝目标蠕行（冲过头就倒退），有限位置修正。
+        // 静止且差一点：潜行缓慢纠偏（冲过头就倒退）。满速纠偏会来回冲过头而振荡，
+        // 潜行余速小、停得准，结合速度方向让剩余速度和停止位置共同收敛。
         this.body.setControlState('forward', signed < 0);
         this.body.setControlState('back', signed > 0);
+        this.body.setControlState('sneak', true);
       } else if (dist <= speed * GROUND_STOP) {
         this.body.setControlState('forward', false);
         this.body.setControlState('back', false);
+        this.body.setControlState('sneak', false);
       }
-      // else: 保持当前移动方向，继续接近。
+      // else: 保持当前移动方向（含潜行纠偏），继续接近。
       this.frameSink?.(e);
       // 让出事件循环：库的 onSample 确认到达 → stop/abort，及其 move 结果微任务得以执行。
       await new Promise((r) => setImmediate(r));
@@ -227,7 +232,8 @@ export class WalkMoveExecutor implements MoveExecutor {
   private releaseIf(executionId: string): void {
     // 归属检查必须同时保护松键与清空归属：旧段的迟到收尾不能清掉新段的归属。
     if (executionId !== this.activeExecutionId) return;
-    this.body.setControlState('forward', false);
+    // 释放当前执行用到的全部移动键（前进/倒退/潜行），再撤销归属，函数返回前不留任何按键。
+    this.body.clearControlStates();
     this.activeExecutionId = null;
   }
 }

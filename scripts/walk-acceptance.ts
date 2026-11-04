@@ -90,10 +90,12 @@ async function main() {
   }
   const finalTarget = route1[route1.length - 1]!;
   const finalPos = nav1!.lastPosition!;
+  if (nav1!.confirmed !== true) fail(`场景1 到达但未 confirmed：${o1.result.summary}`);
   const err1 = dist2(finalPos, finalTarget);
   if (err1 > 0.12) fail(`场景1 末位误差 ${err1.toFixed(3)} 超出容差 0.12`);
-  results.scenario1 = { outcome: nav1!.outcome, confirmed: nav1!.confirmed, lastPosition: finalPos, error: Number(err1.toFixed(3)) };
-  console.log(`[accept] 场景1 到达：outcome=ARRIVED confirmed=${nav1!.confirmed} 末位=(${finalPos.x.toFixed(2)},${finalPos.y.toFixed(2)},${finalPos.z.toFixed(2)}) 误差=${err1.toFixed(3)}`);
+  if (Math.abs(finalPos.y - y) > 0.05) fail(`场景1 脚高 ${finalPos.y.toFixed(2)} 偏离预期 ${y.toFixed(2)} 超过 0.05`);
+  results.scenario1 = { outcome: nav1!.outcome, confirmed: nav1!.confirmed, lastPosition: finalPos, error: Number(err1.toFixed(3)), feetError: Number(Math.abs(finalPos.y - y).toFixed(3)) };
+  console.log(`[accept] 场景1 到达：outcome=ARRIVED confirmed=${nav1!.confirmed} 末位=(${finalPos.x.toFixed(2)},${finalPos.y.toFixed(2)},${finalPos.z.toFixed(2)}) 误差=${err1.toFixed(3)} 脚高误差=${Math.abs(finalPos.y - y).toFixed(3)}`);
 
   // ---- 场景 2：中途取消，不复活，迟到回调不影响后续控制 ----
   const p2 = adapter.state().pos;
