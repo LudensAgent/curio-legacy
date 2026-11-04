@@ -133,6 +133,19 @@ test('assertNoLinksIn 拒绝目标里的 junction，避免 copySeed 沿它写入
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('assertNoLinksIn 拒绝父目录为 junction、目标尚不存在的场景', { skip: process.platform !== 'win32' }, () => {
+  const dir = tmp();
+  const localServer = path.join(dir, 'local-server');
+  const alias = path.join(dir, 'alias');
+  fs.mkdirSync(localServer, { recursive: true });
+  fs.writeFileSync(path.join(localServer, 'level.dat'), 'x');
+  fs.symlinkSync(localServer, alias, 'junction');
+  // 目标 alias/testserver 尚不存在，但其父目录 alias 是 junction，copySeed 会沿它写到 local-server 里。
+  assert.throws(() => assertNoLinksIn(path.join(alias, 'testserver')), /符号链接或 junction/);
+  fs.rmSync(alias, { force: true });
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('assertNoLinksIn 对不存在的目标与普通目录不抛错', () => {
   const dir = tmp();
   const empty = path.join(dir, 'fresh');

@@ -93,8 +93,34 @@ export function hasWorldData(dir: string): boolean {
   return worldDirsIn(dir).length > 0;
 }
 
+/** 解析 dir 的实际落点（dir 可尚不存在）：向上找到现存祖先后 realpath，再拼回不存在的后缀，避免 junction 让词法路径失真。 */
+function resolveRealPath(dir: string): string {
+  let existing = path.resolve(dir);
+  const suffix: string[] = [];
+  while (!fs.existsSync(existing)) {
+    const parent = path.dirname(existing);
+    suffix.unshift(path.basename(existing));
+    if (parent === existing) break;
+    existing = parent;
+  }
+  const real = fs.realpathSync(existing);
+  return suffix.length ? path.join(real, ...suffix) : real;
+}
+
 /** 目标服务器目录不能包含符号链接或 junction：copySeed 会沿它写入链接指向的外部目录，覆盖其他环境的世界。 */
 export function assertNoLinksIn(dir: string): void {
+  // 现存祖先也可能包含 junction：目标尚不存在时，copySeed 的 mkdirSync 仍会沿它把副本写到链接指向的外部目录。
+  let ancestor = path.resolve(dir);
+  while (!fs.existsSync(ancestor)) {
+    const parent = path.dirname(ancestor);
+    if (parent === ancestor) break;
+    ancestor = parent;
+  }
+  for (let p = ancestor; ; p = path.dirname(p)) {
+    if (fs.lstatSync(p).isSymbolicLink()) throw new Error(`test 世界目录不能经过符号链接或 junction：${p}`);
+    const parent = path.dirname(p);
+    if (parent === p) break;
+  }
   if (!fs.existsSync(dir)) return;
   if (fs.lstatSync(dir).isSymbolicLink()) throw new Error(`test 世界目录不能是符号链接或 junction：${dir}`);
   const walk = (current: string): void => {
@@ -173,10 +199,11 @@ async function initTest(): Promise<void> {
 
   const seedProps = path.join(seedDir, 'server.properties');
   if (!fs.existsSync(seedProps)) throw new Error(`种子源不是 Minecraft 服务器目录（缺 server.properties）：${seedDir}`);
-  const seedResolved = path.resolve(seedDir);
-  const targetResolved = path.resolve(targetServerDir);
-  if (sameOrNested(seedResolved, targetResolved) || sameOrNested(targetResolved, seedResolved)) {
-    throw new Error('种子源与 test 世界目录不能相同或相互包含，否则复制会把刚创建的目标再次当作源递归展开');
+  // 用实际解析路径判断源目标是否相互包含：junction 会让词法路径不同但实际落点嵌套，导致复制递归展开自身。
+  const seedReal = fs.realpathSync(seedDir);
+  const targetReal = resolveRealPath(targetServerDir);
+  if (sameOrNested(seedReal, targetReal) || sameOrNested(targetReal, seedReal)) {
+    throw new Error('种子源与 test 世界目录（解析后）不能相同或相互包含，否则复制会把刚创建的目标再次当作源递归展开');
   }
   const levelName = readServerProperty(seedProps, 'level-name') ?? 'world';
   // level-name 必须位于种子服务器目录内部：拒绝绝对路径、.. 段或指向种子目录之外，否则副本仍指向共享世界而非独立副本。
