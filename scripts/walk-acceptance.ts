@@ -223,6 +223,8 @@ export interface RouteCallRecord {
 export interface DeliveredSampleRecord {
   seq: number;
   ts: number;
+  /** 交付时的实际 physics frame（现 capture.frame，不用时间推断）。 */
+  frame: number;
   ownerTaskId: string | null;
   delegationId: string;
   /** 实际交付通道：经公开 setFrameSink 回调（活动段）或直接调用（初始化）。 */
@@ -305,6 +307,9 @@ interface ScenarioEvidence {
   ticks: TickEntry[];
   routeCalls: RouteCallRecord[];
   deliveredSamples: DeliveredSampleRecord[];
+  visionCalls: VisionCallRecord[];
+  mapBatches: StoredMapBatchRecord[];
+  observes: ObserveCallRecord[];
   moves: MoveRecord[];
   bindings: BindingRecord[];
   marks: TimelineMark[];
@@ -523,14 +528,17 @@ export function sameCellEvidence(a: CellEvidenceSnapshot | null, b: CellEvidence
 }
 
 export interface W4ChainInput {
+  taskId: string;
   issueSeq: number;
   /** 拆支撑前经实际 Vision→map 的 stone 证据（同一实际 map）。 */
   initialStone: { visionSeq: number; mapSeq: number; mapId: number; name: string } | null;
-  airVision: { seq: number; name: string } | null;
-  airBatch: { seq: number; reportId: number; mapId: number; targetChanged: boolean } | null;
+  airVision: { seq: number; name: string; frame: number } | null;
+  airBatch: { seq: number; reportId: number; mapId: number; targetChanged: boolean; frame: number } | null;
   observe: {
     enterSeq: number;
     exitSeq: number;
+    frameEnter: number;
+    frameExit: number;
     reportId: number | null;
     statusBeforeActiveStepIndex: number | null;
     statusBeforeOutcome: string | null;
@@ -538,8 +546,8 @@ export interface W4ChainInput {
     statusAfterActiveStepIndex: number | null;
     statusAfterProblem: string | null;
   } | null;
-  releaseSeq: number | null;
-  nextSampleSeq: number | null;
+  release: { seq: number; ownerTaskId: string | null } | null;
+  nextSample: { seq: number; frame: number } | null;
   laterMoveCount: number;
   terminalOutcome: string | null;
 }
@@ -570,11 +578,18 @@ export function checkW4ObservationChain(x: W4ChainInput): { ok: boolean; reason?
     return { ok: false, reason: `库终态非 FAILED/route_invalidated：${x.observe.statusAfterOutcome}/${x.observe.statusAfterProblem}` };
   }
   if (x.observe.statusAfterActiveStepIndex !== null) return { ok: false, reason: '撤销后 activeStepIndex 未清空' };
-  if (x.releaseSeq === null) return { ok: false, reason: 'observe 内未捕获所属段实际控制释放' };
-  if (!(x.observe.enterSeq < x.releaseSeq && x.releaseSeq < x.observe.exitSeq)) return { ok: false, reason: '控制释放不在 observe enter/exit 之内' };
-  if (x.nextSampleSeq === null || x.nextSampleSeq <= x.observe.exitSeq || x.nextSampleSeq <= x.releaseSeq) {
+  if (x.airBatch.frame !== x.airVision.frame) return { ok: false, reason: 'map报告与Vision不在同一physics frame' };
+  if (x.observe.frameEnter !== x.airVision.frame || x.observe.frameExit !== x.airVision.frame) {
+    return { ok: false, reason: 'loop.observe 不在该Vision的同一physics frame' };
+  }
+  if (x.release === null) return { ok: false, reason: 'observe 内未捕获所属段实际控制释放' };
+  if (x.release.ownerTaskId !== x.taskId) return { ok: false, reason: '控制释放不属于本task身体' };
+  if (!(x.observe.enterSeq < x.release.seq && x.release.seq < x.observe.exitSeq)) return { ok: false, reason: '控制释放不在 observe enter/exit 之内' };
+  if (x.nextSample === null) return { ok: false, reason: '缺少后续真实 onSample' };
+  if (x.nextSample.seq <= x.observe.exitSeq || x.nextSample.seq <= x.release.seq) {
     return { ok: false, reason: '该帧 onSample 不晚于 observe exit/控制释放' };
   }
+  if (x.nextSample.frame !== x.airVision.frame) return { ok: false, reason: 'onSample 来自 later frame，不是同一physics frame' };
   if (x.laterMoveCount > 0) return { ok: false, reason: `撤销后仍启动 ${x.laterMoveCount} 个后续段` };
   if (x.terminalOutcome === 'ARRIVED') return { ok: false, reason: '已拆支撑仍误报 ARRIVED' };
   return { ok: true };
@@ -1329,6 +1344,9 @@ export interface MapBatchRecord {
   report: ChangeReport;
 }
 
+/** 可写入证据 JSON 的 map 批次：保留公开输入/报告与编号，剔除临时 VoxelMap 引用。 */
+export type StoredMapBatchRecord = Omit<MapBatchRecord, 'map'>;
+
 /** loop.observe 进入/退出时的完整公开状态、7 键、事件序号与 physics frame。 */
 export interface ObserveCallRecord {
   enterSeq: number;
@@ -1460,6 +1478,7 @@ export class ExecutionDiagnostics {
 
     (WalkRouteExecutor.prototype as { onSample: OnSampleFn }).onSample = function (this: WalkRouteExecutor, sample: BodySample) {
       const binding = self.routeOwners.get(this);
+      const frame = self.frame();
       const before = snapshotStatus(this.status());
       // 目标 loop owner 来自实例静态绑定；sourceOwner 只在同步 frameSink 回调内才可知，
       // 初始化直调如实标为 direct/null，不伪造成目标任务。
@@ -1468,7 +1487,7 @@ export class ExecutionDiagnostics {
       const status = origOnSample.call(this, sample);
       const after = snapshotStatus(status)!;
       self.deliveredSamples.push({
-        seq: self.seq.next(), ts: self.now(), ownerTaskId: binding?.taskId ?? null,
+        seq: self.seq.next(), ts: self.now(), frame, ownerTaskId: binding?.taskId ?? null,
         delegationId: binding?.delegationId ?? after.delegationId, source, sourceOwnerTaskId,
         sample: cloneSample(sample), statusBefore: before ?? after, statusAfter: after,
       });
@@ -1601,6 +1620,21 @@ export class ExecutionDiagnostics {
     this.origObserveBlocks = undefined;
     this.wrapped = false;
   }
+}
+
+/** 剔除外部的临时 VoxelMap 引用，只保留批次公开输入、真实报告对象与编号。 */
+export function mapBatchForEvidence(batch: MapBatchRecord): StoredMapBatchRecord {
+  return {
+    seq: batch.seq,
+    ts: batch.ts,
+    frame: batch.frame,
+    mapId: batch.mapId,
+    mapWorldId: batch.mapWorldId,
+    observations: batch.observations,
+    unobserved: batch.unobserved,
+    reportId: batch.reportId,
+    report: batch.report,
+  };
 }
 
 function snapshotStatus(status: WalkRouteStatus | null): RouteStatusSnapshot | null {
@@ -2213,8 +2247,8 @@ async function runScenario(
   const ev: ScenarioEvidence = {
     verdict: 'NOT_RUN', startedAt: Date.now(), taskStarts: [], results: [],
     frames: [], framesTruncated: false, controlAttempts: [], actualControls: [], controlSnapshots: [],
-    stopAlls: [], ticks: [], routeCalls: [], deliveredSamples: [], moves: [], bindings: [], marks: [],
-    serverCorrections: [],
+    stopAlls: [], ticks: [], routeCalls: [], deliveredSamples: [], visionCalls: [], mapBatches: [],
+    observes: [], moves: [], bindings: [], marks: [], serverCorrections: [],
   };
   const seq = new EventSeq();
   const recorder = new FrameRecorder(ctx.bot, () => ctx.arbiter.current?.id ?? null);
@@ -2265,6 +2299,11 @@ async function runScenario(
     ev.ticks = diag.ticks;
     ev.routeCalls = exec.routeCalls;
     ev.deliveredSamples = exec.deliveredSamples;
+    // 原始 Vision 输出、map 输入/报告与 observe 输入/输出在成功和失败路径都落盘；
+    // mapBatches 只剔除临时 VoxelMap 引用，不复制/快照库内部状态。
+    ev.visionCalls = exec.visionCalls;
+    ev.mapBatches = exec.mapBatches.map(mapBatchForEvidence);
+    ev.observes = exec.observes;
     ev.moves = exec.moves;
     ev.bindings = [...diag.bindings, ...exec.bindings];
     ev.serverCorrections = corrections.corrections;
@@ -2307,9 +2346,18 @@ function visionOutputAt(call: VisionCallRecord, pos: Vec3): VisionCallRecord['ou
   return call.output.find((b) => sameCell(b.pos, pos));
 }
 
-/** 某次实际 observeBatch 是否把目标格作为 Observation 写入。 */
-function mapBatchObserved(batch: MapBatchRecord, pos: Vec3): Observation | undefined {
-  return batch.observations.find((o) => sameCell(o.pos, pos));
+/**
+ * 生产 toObservation 用 `sequence = observationId` 连接本次 Vision 输出；
+ * 不要求 originObservationId（真实输入未填），也不靠位置/时间近似猜。
+ */
+function observationMatchesVision(o: Observation, target: Vec3, v: VisionCallRecord['output'][number]): boolean {
+  return sameCell(o.pos, target)
+    && o.sequence === v.observationId
+    && o.worldId === v.worldId
+    && o.dim === v.dimension
+    && o.sessionId === v.sessionId
+    && o.observedAt === v.observedAt
+    && o.state.name === v.name;
 }
 
 /** ChangeReport 是否包含目标格的真实变化（单格 change，不是 section 共用 revision）。 */
@@ -2456,16 +2504,28 @@ async function scenarioW4(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
       && bareBlockName(visionOutputAt(c, target)?.name ?? '') === 'stone');
     if (!vision) return null;
     const observed = visionOutputAt(vision, target)!;
-    const batch = d.exec.mapBatches.find((b) => b.seq > startCall.seq
-      && b.observations.some((o) => sameCell(o.pos, target) && o.sequence === observed.observationId));
+    const batch = d.exec.mapBatches.find((b) => b.seq > vision.seq
+      && b.observations.some((o) => observationMatchesVision(o, target, observed)));
     if (!batch) return null;
-    return { status, eye, moved, vision, observed, batch };
+    // 初选时刻的真实身体与时刻，区别于该 Vision 记录的原始 observedAt。
+    return { status, eye, moved, vision, observed, batch, body: { ...ctx.adapter.state().pos }, selectedAt: Date.now() };
   };
   await waitFor(() => stoneChain() !== null, 20_000, 'W4 活动段内合法 stone 初观测与行进/俯视');
   const initial = stoneChain()!;
   const map = initial.batch.map;
   const mapId = initial.batch.mapId;
   const cellBefore = cellEvidenceSnapshot(map.cellAt(ctx.adapter.state().dim, target.x, target.y, target.z));
+  // 已获得的初观测证据立即挂入，后续断言失败也不会丢。
+  ev.extra = {
+    ...ev.extra,
+    initialStone: {
+      visionSeq: initial.vision.seq, mapSeq: initial.batch.seq, frame: initial.vision.frame,
+      name: initial.observed.name, observedAt: initial.observed.observedAt, observationId: initial.observed.observationId,
+      body: initial.body, bodyLabel: 'selection-time', selectedAt: initial.selectedAt,
+      eye: initial.vision.eye,
+    },
+    cellBefore,
+  };
   if (!cellBefore.observed || bareBlockName(cellBefore.name ?? '') !== 'stone') {
     throw new Error(`W4 初观测 cellAt 不是 stone：${JSON.stringify(cellBefore)}`);
   }
@@ -2484,20 +2544,32 @@ async function scenarioW4(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   const issueSeq = d.seq.next();
   const issueTs = Date.now();
   const frameAtIssue = d.recorder.frames.length;
+  // 先挂同一个诊断记录引用，再发 RCON；issued 立即可见，response 只有真实收到后才填。
+  const rconDiag: Record<string, unknown> = {
+    command,
+    issued: { seq: issueSeq, ts: issueTs, frame: frameAtIssue, body: bodyBefore, eye: eyeBefore },
+    responded: null,
+  };
+  ev.extra = { ...ev.extra, rcon: rconDiag };
   const response = await ctx.rcon.send(command);
   const responseSeq = d.seq.next();
   const responseTs = Date.now();
   const frameAtResponse = d.recorder.frames.length;
+  rconDiag.response = response;
+  rconDiag.responded = { seq: responseSeq, ts: responseTs, frame: frameAtResponse };
+  // 真实 setblock 响应必须能被已有严格解析确认；失败不吞。
+  parseSetBlock(response);
 
   const airChain = () => {
     const vision = d.exec.visionCalls.find((c) => c.seq > issueSeq
       && isAirBlockName(visionOutputAt(c, target)?.name ?? ''));
     if (!vision) return null;
     const observed = visionOutputAt(vision, target)!;
-    const batch = d.exec.mapBatches.find((b) => b.seq > issueSeq
-      && b.observations.some((o) => sameCell(o.pos, target) && o.sequence === observed.observationId));
+    const batch = d.exec.mapBatches.find((b) => b.seq > vision.seq
+      && b.observations.some((o) => observationMatchesVision(o, target, observed)));
     if (!batch) return null;
-    const observe = d.exec.observes.find((o) => o.reportId !== null && o.reportId === batch.reportId && o.enterSeq > batch.seq);
+    const observe = d.exec.observes.find((o) => o.ownerTaskId === taskId && o.delegationId === delegationId
+      && o.reportId !== null && o.reportId === batch.reportId && o.enterSeq > batch.seq);
     if (!observe) return null;
     return { vision, observed, batch, observe };
   };
@@ -2505,34 +2577,45 @@ async function scenarioW4(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   const air = airChain()!;
   const o = await awaitOrTimeout(done, 20_000, 'W4 完成');
 
+  // 只接受本任务身体真实下发的 clear，且确实从按下状态松开全部 7 键；
+  // 其他任务/unknown stopAll 的 clear 不能算所属段释放。
   const release = d.diag.actualControls
     .filter((c) => c.seq > air.observe.enterSeq && c.seq < air.observe.exitSeq
-      && c.op === 'clear' && allKeysReleased(c.keysAfter))
+      && c.op === 'clear' && c.ownerTaskId === taskId
+      && Object.values(c.keysBefore).some(Boolean) && allKeysReleased(c.keysAfter))
     .sort((a, b) => a.seq - b.seq)[0];
   const nextSample = d.exec.deliveredSamples
     .filter((s) => s.ownerTaskId === taskId && s.delegationId === delegationId && s.seq > air.observe.exitSeq)
     .sort((a, b) => a.seq - b.seq)[0];
-  const laterMoves = d.exec.moves.filter((m) => m.taskId === taskId && m.delegationId === delegationId && m.seq > air.observe.exitSeq);
+  const taskMoves = d.exec.moves.filter((m) => m.taskId === taskId && m.delegationId === delegationId);
+  const firstStepMoveId = `${delegationId}-step-0`;
+  const laterMoves = taskMoves.filter((m) => m.executionId !== firstStepMoveId);
   const nav = navFromResult(o.result);
   // 拆支撑与看到 air 必须属于同一个在途段，不能等到后续段或终态才补观察。
   if (air.observe.statusBefore?.activeStepIndex !== beforeStatus.activeStepIndex) {
     throw new Error(`W4 air 观察不在拆支撑所属段：拆时=${beforeStatus.activeStepIndex} 观察时=${air.observe.statusBefore?.activeStepIndex}`);
   }
   const chain = checkW4ObservationChain({
+    taskId,
     issueSeq,
     initialStone: { visionSeq: initial.vision.seq, mapSeq: initial.batch.seq, mapId, name: initial.observed.name },
-    airVision: { seq: air.vision.seq, name: air.observed.name },
-    airBatch: { seq: air.batch.seq, reportId: air.batch.reportId, mapId: air.batch.mapId, targetChanged: reportTouchesCell(air.batch.report, target) },
+    airVision: { seq: air.vision.seq, name: air.observed.name, frame: air.vision.frame },
+    airBatch: {
+      seq: air.batch.seq, reportId: air.batch.reportId, mapId: air.batch.mapId,
+      targetChanged: reportTouchesCell(air.batch.report, target), frame: air.batch.frame,
+    },
     observe: {
-      enterSeq: air.observe.enterSeq, exitSeq: air.observe.exitSeq, reportId: air.observe.reportId,
+      enterSeq: air.observe.enterSeq, exitSeq: air.observe.exitSeq,
+      frameEnter: air.observe.frameEnter, frameExit: air.observe.frameExit,
+      reportId: air.observe.reportId,
       statusBeforeActiveStepIndex: air.observe.statusBefore?.activeStepIndex ?? null,
       statusBeforeOutcome: air.observe.statusBefore?.result?.outcome ?? null,
       statusAfterOutcome: air.observe.statusAfter.result?.outcome ?? null,
       statusAfterActiveStepIndex: air.observe.statusAfter.activeStepIndex,
       statusAfterProblem: air.observe.statusAfter.result?.problem?.kind ?? null,
     },
-    releaseSeq: release?.seq ?? null,
-    nextSampleSeq: nextSample?.seq ?? null,
+    release: release ? { seq: release.seq, ownerTaskId: release.ownerTaskId } : null,
+    nextSample: nextSample ? { seq: nextSample.seq, frame: nextSample.frame } : null,
     laterMoveCount: laterMoves.length,
     terminalOutcome: nav?.outcome ?? null,
   });
@@ -2540,22 +2623,27 @@ async function scenarioW4(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   if (nav?.outcome !== 'FAILED' || nav.problem?.kind !== 'route_invalidated') {
     throw new Error(`W4 库终态非 FAILED/route_invalidated：outcome=${nav?.outcome} problem=${nav?.problem?.kind}`);
   }
+  // 首段 active 时只应启动 step-0；第二段在任意时刻都不得启动。
+  if (taskMoves.length !== 1 || taskMoves[0]!.executionId !== firstStepMoveId) {
+    throw new Error(`W4 本任务总 move 非唯一首段 step0：${JSON.stringify(taskMoves.map((m) => m.executionId))}`);
+  }
+  const finalKeys = snapshotKeys(ctx.bot);
+  if (!allKeysReleased(finalKeys)) throw new Error(`W4 终态 7 键未全部松开：${JSON.stringify(finalKeys)}`);
+  rconDiag.firstObservation = {
+    seq: air.vision.seq, ts: air.vision.ts, frame: air.vision.frame,
+    observedAt: air.observed.observedAt, observationId: air.observed.observationId,
+  };
+  // 客户端可能先合法看到 air，再收到 setblock 应答；如实保留两者，不强制排序。
+  rconDiag.observedBeforeResponse = air.vision.seq < responseSeq;
 
   ev.extra = {
     ...ev.extra,
     taskId, delegationId, mapId,
-    rcon: {
-      command, response,
-      issued: { seq: issueSeq, ts: issueTs, frame: frameAtIssue, body: bodyBefore, eye: eyeBefore },
-      responded: { seq: responseSeq, ts: responseTs, frame: frameAtResponse },
-      firstObservation: { seq: air.vision.seq, ts: air.vision.ts, frame: air.vision.frame, observedAt: air.observed.observedAt, observationId: air.observed.observationId },
-      // 客户端可能先合法看到 air，再收到 setblock 应答；如实保留两者，不强制排序。
-      observedBeforeResponse: air.vision.seq < responseSeq,
-    },
     initialStone: {
       visionSeq: initial.vision.seq, mapSeq: initial.batch.seq, frame: initial.vision.frame,
       name: initial.observed.name, observedAt: initial.observed.observedAt, observationId: initial.observed.observationId,
-      body: { ...ctx.adapter.state().pos }, eye: initial.eye,
+      // 初选时刻真实身体与关联 Vision 记录的 eye；不与最终状态或原 observedAt 混用。
+      body: initial.body, bodyLabel: 'selection-time', selectedAt: initial.selectedAt, eye: initial.vision.eye,
     },
     cellBefore,
     air: {
@@ -2569,14 +2657,15 @@ async function scenarioW4(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
         keysBefore: air.observe.keysBefore, keysAfter: air.observe.keysAfter,
       },
     },
-    release: release ? { seq: release.seq, ts: release.ts, op: release.op, keysBefore: release.keysBefore, keysAfter: release.keysAfter } : null,
-    nextSampleSeq: nextSample?.seq ?? null,
+    release: release ? { seq: release.seq, ts: release.ts, op: release.op, ownerTaskId: release.ownerTaskId, keysBefore: release.keysBefore, keysAfter: release.keysAfter } : null,
+    nextSample: nextSample ? { seq: nextSample.seq, frame: nextSample.frame, ts: nextSample.ts } : null,
+    taskMoveIds: taskMoves.map((m) => m.executionId),
     laterMoveCount: laterMoves.length,
     final: {
       status: o.result.status, failureCode: o.result.failureCode, summary: o.result.summary,
       outcome: nav?.outcome, problem: nav?.problem, lastPosition: nav?.lastPosition,
       activeStepIndex: latestRouteStatus(d.exec, taskId, delegationId)?.activeStepIndex ?? null,
-      finalKeys: snapshotKeys(ctx.bot),
+      finalKeys,
     },
     timeline: [
       { kind: 'rcon-issued', seq: issueSeq, ts: issueTs, frame: frameAtIssue },
@@ -2585,7 +2674,7 @@ async function scenarioW4(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
       { kind: 'observe-enter', seq: air.observe.enterSeq, ts: air.observe.tsEnter, frame: air.observe.frameEnter },
       { kind: 'control-release', seq: release!.seq, ts: release!.ts, frame: null },
       { kind: 'observe-exit', seq: air.observe.exitSeq, ts: air.observe.tsExit, frame: air.observe.frameExit },
-      { kind: 'onSample', seq: nextSample!.seq, ts: nextSample!.ts, frame: null },
+      { kind: 'onSample', seq: nextSample!.seq, ts: nextSample!.ts, frame: nextSample!.frame },
       { kind: 'rcon-response', seq: responseSeq, ts: responseTs, frame: frameAtResponse },
     ],
     deltas: {
@@ -2628,10 +2717,10 @@ async function scenarioW5(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
       && bareBlockName(visionOutputAt(c, target)?.name ?? '') === 'stone');
     if (!vision) return null;
     const observed = visionOutputAt(vision, target)!;
-    const batch = d.exec.mapBatches.find((b) => b.seq > taskStartSeq
-      && b.observations.some((o) => sameCell(o.pos, target) && o.sequence === observed.observationId));
+    const batch = d.exec.mapBatches.find((b) => b.seq > vision.seq
+      && b.observations.some((o) => observationMatchesVision(o, target, observed)));
     if (!batch) return null;
-    return { vision, observed, batch };
+    return { vision, observed, batch, body: { ...ctx.adapter.state().pos }, selectedAt: Date.now() };
   };
   await waitFor(() => stoneChain() !== null, 20_000, 'W5 目标支撑合法 stone 初观测');
   const initial = stoneChain()!;
@@ -2639,6 +2728,16 @@ async function scenarioW5(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   const mapId = initial.batch.mapId;
   const dim = ctx.adapter.state().dim;
   const cellBefore = cellEvidenceSnapshot(map.cellAt(dim, target.x, target.y, target.z));
+  // 初观测证据立即挂入，后续断言失败也保留。
+  ev.extra = {
+    ...ev.extra,
+    initialStone: {
+      visionSeq: initial.vision.seq, mapSeq: initial.batch.seq, frame: initial.vision.frame,
+      name: initial.observed.name, observedAt: initial.observed.observedAt, observationId: initial.observed.observationId,
+      body: initial.body, bodyLabel: 'selection-time', selectedAt: initial.selectedAt, eye: initial.vision.eye,
+    },
+    cellBefore,
+  };
   if (!cellBefore.observed || bareBlockName(cellBefore.name ?? '') !== 'stone') {
     throw new Error(`W5 初观测 cellAt 不是 stone：${JSON.stringify(cellBefore)}`);
   }
@@ -2675,9 +2774,19 @@ async function scenarioW5(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   const frameAtIssue = d.recorder.frames.length;
   const eyeAtIssue = ctx.adapter.eye();
   const bodyAtIssue = { ...ctx.adapter.state().pos };
+  // 先挂诊断记录引用再发 RCON；issued 先落盘，response 收到后才填。
+  const rconDiag: Record<string, unknown> = {
+    command,
+    issued: { seq: issueSeq, ts: issueTs, frame: frameAtIssue, body: bodyAtIssue, eye: eyeAtIssue },
+    responded: null,
+  };
+  ev.extra = { ...ev.extra, rcon: rconDiag };
   const response = await ctx.rcon.send(command);
   const responseSeq = d.seq.next();
   const responseTs = Date.now();
+  rconDiag.response = response;
+  rconDiag.responded = { seq: responseSeq, ts: responseTs };
+  parseSetBlock(response);
 
   const airVisionAfter = () => d.exec.visionCalls.find((c) => c.seq > issueSeq
     && isAirBlockName(visionOutputAt(c, target)?.name ?? ''));
@@ -2718,8 +2827,10 @@ async function scenarioW5(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
     throw new Error(`W5 只有隐藏半段，终态先到且无生产回看：${st?.result?.outcome}/${st?.result?.problem?.kind}`);
   }
   const revealOutput = visionOutputAt(revealVision, target)!;
+  // 真实 toObservation 输入只有 sequence=observationId；originObservationId 未填，
+  // 不能拿它匹配。只在 harness join 用实际 sequence 与原 payload 字段核对。
   const revealBatch = d.exec.mapBatches.find((b) => b.seq > revealVision.seq
-    && b.observations.some((o) => sameCell(o.pos, target) && o.originObservationId === revealOutput.observationId));
+    && b.observations.some((o) => observationMatchesVision(o, target, revealOutput)));
   if (!revealBatch) throw new Error('W5 回看未形成实际 map ChangeReport');
   const revealObserve = d.exec.observes.find((o) => o.reportId !== null && o.reportId === revealBatch.reportId && o.enterSeq > revealBatch.seq);
   if (!revealObserve) throw new Error('W5 回看 report 未被同一活跃 loop.observe 消费');
@@ -2767,19 +2878,16 @@ async function scenarioW5(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
     throw new Error(`W5 cellAt sequence 未连接到真实回看：${cellAfter.sequence} < ${revealOutput.observationId}`);
   }
 
+  rconDiag.firstObservation = { seq: revealVision.seq, ts: revealVision.ts, frame: revealVision.frame };
+  rconDiag.observedBeforeResponse = revealVision.seq < responseSeq;
+
   ev.extra = {
     ...ev.extra,
     taskId, delegationId, mapId,
-    rcon: {
-      command, response,
-      issued: { seq: issueSeq, ts: issueTs, frame: frameAtIssue, body: bodyAtIssue, eye: eyeAtIssue },
-      responded: { seq: responseSeq, ts: responseTs },
-      firstObservation: { seq: revealVision.seq, ts: revealVision.ts, frame: revealVision.frame },
-      observedBeforeResponse: revealVision.seq < responseSeq,
-    },
     initialStone: {
-      visionSeq: initial.vision.seq, mapSeq: initial.batch.seq,
+      visionSeq: initial.vision.seq, mapSeq: initial.batch.seq, frame: initial.vision.frame,
       name: initial.observed.name, observedAt: initial.observed.observedAt, observationId: initial.observed.observationId,
+      body: initial.body, bodyLabel: 'selection-time', selectedAt: initial.selectedAt, eye: initial.vision.eye,
     },
     forward: {
       body: bodyAtIssue, eye: eyeAtIssue, targetYaw: forward.targetYaw, targetPitch: forward.targetPitch,

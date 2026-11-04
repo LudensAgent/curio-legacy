@@ -50,6 +50,7 @@ import {
   parseScenarioSelector,
   parseSetBlock,
   partialMatchesLastSample,
+  mapBatchForEvidence,
   partialMatchesRecorded,
   platformEscaped,
   probeBlock,
@@ -432,13 +433,13 @@ function delivery(
   pos: { x: number; y: number; z: number },
   before: RouteStatusSnapshot,
   after: RouteStatusSnapshot,
-  opts: { delegationId?: string; owner?: string | null; sequence?: number; source?: 'frameSink' | 'direct'; sourceOwner?: string | null } = {},
+  opts: { delegationId?: string; owner?: string | null; sequence?: number; frame?: number; source?: 'frameSink' | 'direct'; sourceOwner?: string | null } = {},
 ): DeliveredSampleRecord {
   const delegationId = opts.delegationId ?? 'walk-1';
   const sequence = opts.sequence ?? ++deliverySeq;
   const source = opts.source ?? 'direct';
   return {
-    seq: sequence, ts: sequence, ownerTaskId: opts.owner ?? 'task_A', delegationId,
+    seq: sequence, ts: sequence, frame: opts.frame ?? 0, ownerTaskId: opts.owner ?? 'task_A', delegationId,
     source, sourceOwnerTaskId: source === 'frameSink' ? (opts.sourceOwner ?? null) : null,
     sample: {
       worldId: 'w', dim: 'd', sessionId: 's', executionId: delegationId,
@@ -1392,22 +1393,23 @@ test('WalkDiagnostics：pending 期他人监听器增减不误报，own 任一�
 });
 
 const W4_CHAIN_OK = {
+  taskId: 'task_A',
   issueSeq: 10,
   initialStone: { visionSeq: 5, mapSeq: 6, mapId: 1, name: 'stone' },
-  airVision: { seq: 11, name: 'air' },
-  airBatch: { seq: 12, reportId: 7, mapId: 1, targetChanged: true },
+  airVision: { seq: 11, name: 'air', frame: 42 },
+  airBatch: { seq: 12, reportId: 7, mapId: 1, targetChanged: true, frame: 42 },
   observe: {
-    enterSeq: 13, exitSeq: 15, reportId: 7,
+    enterSeq: 13, exitSeq: 15, frameEnter: 42, frameExit: 42, reportId: 7,
     statusBeforeActiveStepIndex: 0, statusBeforeOutcome: null,
     statusAfterOutcome: 'FAILED', statusAfterActiveStepIndex: null, statusAfterProblem: 'route_invalidated',
   },
-  releaseSeq: 14,
-  nextSampleSeq: 16,
+  release: { seq: 14, ownerTaskId: 'task_A' },
+  nextSample: { seq: 16, frame: 42 },
   laterMoveCount: 0,
   terminalOutcome: 'FAILED',
 };
 
-test('checkW4ObservationChain：合法初观测→同对象report→observe内释放→早于onSample 才 PASS', () => {
+test('checkW4ObservationChain：合法初观测→同对象report→同帧observe内释放→同帧onSample 才 PASS', () => {
   assert.deepEqual(checkW4ObservationChain(W4_CHAIN_OK), { ok: true });
   assert.match(checkW4ObservationChain({ ...W4_CHAIN_OK, initialStone: null }).reason ?? '', /缺少拆支撑前/);
   assert.match(checkW4ObservationChain({ ...W4_CHAIN_OK, airVision: null }).reason ?? '', /未输出目标格air/);
@@ -1415,8 +1417,14 @@ test('checkW4ObservationChain：合法初观测→同对象report→observe内�
   assert.match(checkW4ObservationChain({ ...W4_CHAIN_OK, airBatch: { ...W4_CHAIN_OK.airBatch, seq: 11 } }).reason ?? '', /报告早于Vision/);
   assert.match(checkW4ObservationChain({ ...W4_CHAIN_OK, observe: { ...W4_CHAIN_OK.observe, statusBeforeActiveStepIndex: null } }).reason ?? '', /不在途/);
   assert.match(checkW4ObservationChain({ ...W4_CHAIN_OK, observe: { ...W4_CHAIN_OK.observe, statusBeforeOutcome: 'FAILED' } }).reason ?? '', /不在途/);
-  assert.match(checkW4ObservationChain({ ...W4_CHAIN_OK, releaseSeq: 15 }).reason ?? '', /控制释放不在/);
-  assert.match(checkW4ObservationChain({ ...W4_CHAIN_OK, nextSampleSeq: 14 }).reason ?? '', /onSample 不晚于/);
+  assert.match(checkW4ObservationChain({ ...W4_CHAIN_OK, release: { seq: 15, ownerTaskId: 'task_A' } }).reason ?? '', /控制释放不在/);
+  assert.match(checkW4ObservationChain({ ...W4_CHAIN_OK, release: { seq: 14, ownerTaskId: 'task_B' } }).reason ?? '', /不属于本task/);
+  assert.match(checkW4ObservationChain({ ...W4_CHAIN_OK, release: null }).reason ?? '', /未捕获/);
+  assert.match(checkW4ObservationChain({ ...W4_CHAIN_OK, nextSample: { seq: 14, frame: 42 } }).reason ?? '', /onSample 不晚于/);
+  assert.match(checkW4ObservationChain({ ...W4_CHAIN_OK, nextSample: null }).reason ?? '', /缺少后续真实 onSample/);
+  assert.match(checkW4ObservationChain({ ...W4_CHAIN_OK, nextSample: { seq: 16, frame: 43 } }).reason ?? '', /later frame/);
+  assert.match(checkW4ObservationChain({ ...W4_CHAIN_OK, airBatch: { ...W4_CHAIN_OK.airBatch, frame: 43 } }).reason ?? '', /map报告与Vision/);
+  assert.match(checkW4ObservationChain({ ...W4_CHAIN_OK, observe: { ...W4_CHAIN_OK.observe, frameEnter: 43 } }).reason ?? '', /loop.observe 不在/);
   assert.match(checkW4ObservationChain({ ...W4_CHAIN_OK, laterMoveCount: 1 }).reason ?? '', /后续段/);
   assert.match(checkW4ObservationChain({ ...W4_CHAIN_OK, terminalOutcome: 'ARRIVED' }).reason ?? '', /ARRIVED/);
 });
@@ -1452,6 +1460,36 @@ test('checkW5HiddenReveal：隐藏期未被刷新且同一委托生产回看才 
   assert.match(checkW5HiddenReveal({ ...W5_CHAIN_OK, reveal: { ...W5_CHAIN_OK.reveal, mapId: 2 } }).reason ?? '', /同一个实际map/);
   assert.match(checkW5HiddenReveal({ ...W5_CHAIN_OK, revealObserve: { reportId: 10 } }).reason ?? '', /同一对象/);
   assert.match(checkW5HiddenReveal({ ...W5_CHAIN_OK, terminalOutcome: 'ARRIVED' }).reason ?? '', /ARRIVED/);
+});
+
+test('mapBatchForEvidence：输出JSON保留原observations/report与编号，且不含实际map对象', () => {
+  const seq = new EventSeq();
+  const exec = new ExecutionDiagnostics(seq, () => 'task_A', () => 1000, { frame: () => 9 });
+  exec.wrap();
+  try {
+    const map = new VoxelMap('world', { validityWindowMs: 60_000 });
+    const observation = {
+      worldId: 'world', dim: 'overworld', sessionId: 's1', pos: { x: 1, y: 2, z: 3 },
+      state: { name: 'stone', properties: { foo: 'bar' } }, stateComplete: true, evidence: 'seen' as const,
+      observedAt: 1234, source: 'vision' as const, sequence: 77,
+    };
+    const report = map.observeBatch({ observations: [observation], unobserved: [{ pos: { x: 4, y: 5, z: 6 }, reason: 'occluded' as const }] });
+    const saved = mapBatchForEvidence(exec.mapBatches[0]!);
+    assert.equal('map' in saved, false, '不得保留临时 VoxelMap 引用');
+    assert.equal(saved.mapId, exec.mapBatches[0]!.mapId);
+    assert.equal(saved.mapWorldId, 'world');
+    assert.equal(saved.reportId, exec.mapBatches[0]!.reportId);
+    assert.equal(saved.report, report, '保留同一真实报告对象');
+    assert.equal(saved.observations[0]!.sequence, 77);
+    assert.equal(saved.observations[0]!.observedAt, 1234);
+    assert.deepEqual(saved.observations[0]!.state.properties, { foo: 'bar' });
+    const json = JSON.stringify(saved);
+    assert.ok(json.includes('"sequence":77'), '原始观测字段必须落盘');
+    assert.ok(json.includes('"reportId"'), '报告编号必须落盘');
+    assert.ok(!json.includes('VoxelMap'), '不得序列化 VoxelMap 对象');
+  } finally {
+    exec.unwrap();
+  }
 });
 
 test('ExecutionDiagnostics：observeBatch 返回原 ChangeReport，并以 WeakMap 编号连接同一对象的 loop.observe 输入', () => {
