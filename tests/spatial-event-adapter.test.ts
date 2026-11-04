@@ -1,6 +1,6 @@
 /**
- * 事件适配层契约测试：原始委托/开始证据、类型化 NavResult 保留、宿主扩展的真实
- * SQLite 往返、容量/冲突拒绝、观测事件序号/作用域，以及模块无运行时副作用。
+ * 事件适配层契约测试：完整有界 NavResult 快照、原始预算来源、confirmed/lastPosition
+ * 语义、消费冲突、未知边界读取、观测事件序号/作用域，以及真实临时 SQLite 往返。
  */
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -17,6 +17,9 @@ import {
   prepareObservedCellEvent,
   prepareObservationGapEvent,
   readCurioActionExtension,
+  CURIO_ACTION_EXTENSION_VERSION,
+  EVENT_ADAPTER_LIMITS,
+  type ConsumptionEvidence,
   type HostActionRecord,
   type NavigationActionEvidence,
   type NavigationActionPreparation,
@@ -29,6 +32,7 @@ import {
   type ObservationGapEvent,
   type ObservationGapEventInput,
   type ObservationGapEventPreparation,
+  type OriginalExecutionBudget,
   type OriginalNavigationRequest,
   type OriginalStartEvidence,
   type ParsedNavigationDelegation,
@@ -39,9 +43,18 @@ const WORLD = 'event-adapter-world';
 const DIM = 'overworld';
 const SESSION = 'session-a';
 const T0 = 1_700_000_000_000;
+const TASK_DEADLINE = T0 + 30_000;
+
+type FailureNav = Extract<NavResult, { outcome: 'NO_PATH' | 'BLOCKED' | 'CANCELLED' | 'TIMEOUT' | 'FAILED' }>;
+type PartialNav = Extract<NavResult, { outcome: 'PARTIAL' }>;
+type ArrivedNav = Extract<NavResult, { outcome: 'ARRIVED' }>;
 
 function vec(x: number, y: number, z: number): Vec3Like {
   return { x, y, z };
+}
+
+function budget(overrides: Partial<OriginalExecutionBudget> = {}): OriginalExecutionBudget {
+  return { taskStartedAt: T0, taskDeadline: TASK_DEADLINE, effectiveDeadline: TASK_DEADLINE, ...overrides };
 }
 
 function start(overrides: Partial<OriginalStartEvidence> = {}): OriginalStartEvidence {
@@ -74,11 +87,19 @@ function walkToInput(overrides: Partial<NavigationCaptureInput> = {}): Navigatio
     request: { skill: 'walk_to', to: vec(10.5, 64, -3.25), arrival: { kind: 'near', radius: 1.75 } },
     delegation: delegation(),
     originalStart: start(),
+    budget: budget(),
     ...overrides,
   };
 }
 
-type FailureNav = Extract<NavResult, { outcome: 'NO_PATH' | 'BLOCKED' | 'CANCELLED' | 'TIMEOUT' | 'FAILED' }>;
+function walkToExactInput(overrides: Partial<NavigationCaptureInput> = {}): NavigationCaptureInput {
+  const to = vec(10.5, 64, -3.25);
+  return walkToInput({
+    request: { skill: 'walk_to', to, arrival: { kind: 'exact' } },
+    delegation: delegation({ requestedTarget: to, target: to, arrival: { kind: 'exact' } }),
+    ...overrides,
+  });
+}
 
 function cancelledNav(): FailureNav {
   return {
@@ -96,6 +117,35 @@ function cancelledNav(): FailureNav {
     memoryWrite: 'failed',
     consumption: { placed: [{ pos: vec(3, 64, -2.5), name: 'minecraft:stone' }], digMs: 12 },
     problem: { kind: 'cancelled', by: 'agent', reason: 'parent task cancelled' },
+  };
+}
+
+function partialNav(): PartialNav {
+  return {
+    outcome: 'PARTIAL',
+    message: 'partial movement confirmed',
+    confirmed: true,
+    trace: [{ pos: vec(2, 64, -2.5), ts: T0 + 100 }],
+    lastPosition: vec(2, 64, -2.5),
+    lastObservation: {
+      worldId: WORLD, dim: DIM, sessionId: SESSION, observedAt: T0 + 110, onGround: true, inWater: false,
+    },
+    memoryWrite: 'pending',
+    problem: { kind: 'route_invalidated', detail: 'partial but confirmed movement' },
+  };
+}
+
+function arrivedNav(sessionId = SESSION): ArrivedNav {
+  return {
+    outcome: 'ARRIVED',
+    message: 'arrived',
+    confirmed: true,
+    trace: [{ pos: vec(2, 64, -2.5), ts: T0 + 100 }],
+    lastPosition: vec(2, 64, -2.5),
+    lastObservation: {
+      worldId: WORLD, dim: DIM, sessionId, observedAt: T0 + 110, onGround: true, inWater: false,
+    },
+    memoryWrite: 'pending',
   };
 }
 
@@ -131,12 +181,20 @@ function sampleBlockObservation(overrides: Partial<BlockObservation> = {}): Bloc
   };
 }
 
-function actionEvidence(overrides: Partial<NavigationActionEvidence> = {}): NavigationActionEvidence {
+function evidenceFor(nav: NavResult, worldId = WORLD): NavigationActionEvidence {
+  const navConsumption = nav.consumption;
+  const consumption: ConsumptionEvidence = navConsumption === undefined
+    ? { kind: 'known_empty' }
+    : {
+      kind: 'measured',
+      placed: navConsumption.placed.map((item) => ({ pos: { ...item.pos }, name: item.name })),
+      ...(navConsumption.durabilityLost !== undefined ? { durabilityLost: navConsumption.durabilityLost } : {}),
+      ...(navConsumption.digMs !== undefined ? { digMs: navConsumption.digMs } : {}),
+    };
   return {
-    consumption: { kind: 'measured', placed: [{ pos: vec(3, 64, -2.5), name: 'minecraft:stone' }], digMs: 12 },
+    consumption,
     subActions: [{ kind: 'move', at: vec(2, 64, -2.5), origin: 'execution_helper', outcome: 'cancelled' }],
-    observedChanges: [sampleObservation()],
-    ...overrides,
+    observedChanges: [sampleObservation({ worldId })],
   };
 }
 
@@ -145,7 +203,7 @@ function captured(result: NavigationCaptureResult): NavigationReceipt {
   return result.receipt;
 }
 
-function refusedCapture(result: NavigationCaptureResult): NavigationCaptureResult & { status: 'refused' } {
+function refusedCapture(result: NavigationCaptureResult): Extract<NavigationCaptureResult, { status: 'refused' }> {
   if (result.status !== 'refused') throw new Error('expected capture refusal');
   return result;
 }
@@ -186,91 +244,117 @@ function asGap(value: unknown): ObservationGapEventInput {
   return value as ObservationGapEventInput;
 }
 
+function asFailureNav(value: unknown): FailureNav {
+  return value as FailureNav;
+}
+
 function hasGap(result: { gaps: readonly { code: string; blocking: boolean }[] }, code: string): boolean {
   return result.gaps.some((gap) => gap.code === code);
 }
 
-test('walk_to keeps the original target/near tolerance and uses the receipt start, not trace[0]', () => {
-  const receipt = captured(captureNavigationReceipt(walkToInput()));
-  assert.deepEqual(receipt.request, {
-    skill: 'walk_to', to: vec(10.5, 64, -3.25), arrival: { kind: 'near', radius: 1.75 },
+function hasNonblockingGap(result: { gaps: readonly { code: string; blocking: boolean }[] }, code: string): boolean {
+  return result.gaps.some((gap) => gap.code === code && gap.blocking === false);
+}
+
+function throwingArray(length: number, throwIndex: number): unknown[] {
+  const array: unknown[] = new Array(length);
+  Object.defineProperty(array, throwIndex, {
+    get() { throw new Error('over-limit array was traversed'); },
+    enumerable: true,
+    configurable: true,
   });
-  assert.deepEqual(receipt.delegation.target, vec(10.5, 64, -3.25));
-  assert.deepEqual(receipt.delegation.arrival, { kind: 'near', radius: 1.75 });
+  return array;
+}
 
+test('prepared NavResult is a complete bounded snapshot; producer mutation cannot make the record contradictory', () => {
+  const receipt = captured(captureNavigationReceipt(walkToInput()));
   const nav = cancelledNav();
-  const result = prepared(prepareNavigationAction(receipt, nav, actionEvidence()));
-  const { record, gaps, diagnostics } = result;
-  assert.equal(gaps.length, 0);
-  assert.equal(diagnostics.length, 0);
-  assert.deepEqual(record.delegation.requestedTarget, vec(10.5, 64, -3.25));
-  assert.deepEqual(record.delegation.target, vec(10.5, 64, -3.25));
-  assert.deepEqual(record.delegation.arrival, { kind: 'near', radius: 1.75 });
-  assert.deepEqual(record.from, receipt.originalStart.pos);
-  assert.notDeepEqual(record.from, nav.trace[0]!.pos);
-  assert.deepEqual(record.trace, nav.trace);
-  const retained = record.result;
-  assert.ok(retained !== undefined);
-  assert.equal(retained.outcome, 'CANCELLED');
-  assert.equal(retained.memoryWrite, 'failed');
-  assert.deepEqual(retained.trace, nav.trace);
-  assert.deepEqual(retained.lastObservation, nav.lastObservation);
-  assert.deepEqual(retained.consumption, nav.consumption);
-  assert.deepEqual(retained.problem, nav.problem);
-  assert.equal(record.confirmed, false);
-  assert.equal('to' in record, false);
-  assert.deepEqual(record.failureAt, nav.lastPosition);
-  assert.equal(record.failureReason, nav.message);
-  assert.equal(record.curio.version, 1);
-  assert.equal(record.curio.invocationId, 'inv-1');
-  assert.equal(record.curio.source, 'llm');
-  assert.equal(record.curio.request.skill, 'walk_to');
+  const original = structuredClone(nav);
+  const result = prepared(prepareNavigationAction(receipt, nav, evidenceFor(nav)));
 
-  // Preparation never rewrites the producer's result marker.
-  assert.equal(nav.memoryWrite, 'failed');
-  assert.equal(nav.outcome, 'CANCELLED');
+  assert.equal(result.snapshot, 'independent_bounded_copy');
+  assert.equal(result.nav, nav);
+  assert.notEqual(result.record.result, nav);
+  assert.deepEqual(result.record.result, original);
+  assert.deepEqual(result.record.trace, original.trace);
+  assert.equal(result.record.confirmed, original.confirmed);
+  assert.equal(result.record.result!.confirmed, original.confirmed);
+  assert.equal('to' in result.record, false);
+  assert.equal('failureAt' in result.record, false);
+  assert.deepEqual(nav, original, 'preparation must not rewrite the producer result');
+
+  // 在 prepare 与入队之间改动 producer 的典型嵌套字段。
+  nav.trace[0]!.pos.x = 999;
+  nav.trace.push({ pos: vec(9, 64, 9), ts: T0 + 999 });
+  nav.lastPosition!.x = 777;
+  nav.lastObservation!.sessionId = 'mutated-session';
+  nav.consumption!.placed[0]!.name = 'mutated:block';
+  nav.memoryWrite = 'saved';
+  if (nav.problem.kind === 'cancelled') nav.problem.reason = 'mutated reason';
+
+  assert.deepEqual(result.record.result, original, 'record.result must stay independent of the producer nav');
+  assert.equal(result.record.result!.memoryWrite, 'failed');
+  assert.deepEqual(result.record.trace, original.trace);
+  assert.equal(result.record.confirmed, original.confirmed);
+  assert.deepEqual(result.record.result!.lastPosition, original.lastPosition);
+  assert.equal(result.record.result!.lastObservation!.sessionId, SESSION);
+  assert.deepEqual(result.record.result!.consumption, original.consumption);
+  assert.equal((result.record.result!.problem as { reason?: string }).reason, 'parent task cancelled');
 });
 
-test('scope-change/timeout-style failures stay typed and are never rewritten', () => {
-  const receipt = captured(captureNavigationReceipt(walkToInput({ invocationId: 'inv-scope' })));
-  const nav: FailureNav = {
-    outcome: 'FAILED',
-    message: 'scope changed during execution',
-    confirmed: false,
-    trace: [{ pos: vec(2, 64, -2.5), ts: T0 + 50 }],
-    lastPosition: vec(2, 64, -2.5),
-    lastObservation: {
-      worldId: WORLD, dim: DIM, sessionId: 'other-session', observedAt: T0 + 60, onGround: true, inWater: false,
-    },
-    memoryWrite: 'pending',
-    problem: { kind: 'scope_changed', detail: 'session changed' },
-  };
-  const result = prepared(prepareNavigationAction(receipt, nav, actionEvidence()));
-  assert.deepEqual(result.record.result, nav);
-  assert.equal(result.record.result!.memoryWrite, 'pending');
-  assert.deepEqual(result.record.result!.problem, { kind: 'scope_changed', detail: 'session changed' });
-  assert.deepEqual(result.record.failureAt, nav.lastPosition);
-  assert.equal(result.record.failureReason, nav.message);
-  assert.equal(result.record.confirmed, false);
-  assert.equal(nav.memoryWrite, 'pending');
+test('confirmed preserves nav.confirmed for PARTIAL and CANCELLED true results', () => {
+  const receipt = captured(captureNavigationReceipt(walkToInput()));
+
+  const partial = partialNav();
+  const partialResult = prepared(prepareNavigationAction(receipt, partial, evidenceFor(partial)));
+  assert.equal(partialResult.record.confirmed, true);
+  assert.equal(partialResult.record.result!.confirmed, true);
+
+  const cancelled = cancelledNav();
+  cancelled.confirmed = true;
+  const cancelledResult = prepared(prepareNavigationAction(receipt, cancelled, evidenceFor(cancelled)));
+  assert.equal(cancelledResult.record.confirmed, true);
+  assert.equal(cancelledResult.record.result!.confirmed, true);
 });
 
-test('walk_route preserves the full ordered route; walk_known_route preserves the real fragmentId', () => {
+test('top-level to is projected only for ARRIVED with a matching LastObservation scope', () => {
+  const receipt = captured(captureNavigationReceipt(walkToInput()));
+
+  const arrived = arrivedNav(SESSION);
+  const arrivedResult = prepared(prepareNavigationAction(receipt, arrived, evidenceFor(arrived)));
+  assert.deepEqual(arrivedResult.record.to, arrived.lastPosition);
+  assert.equal(hasGap(arrivedResult, 'terminal_scope_mismatch'), false);
+
+  const foreign = arrivedNav('other-session');
+  const foreignResult = prepared(prepareNavigationAction(receipt, foreign, evidenceFor(foreign)));
+  assert.equal('to' in foreignResult.record, false);
+  assert.ok(hasNonblockingGap(foreignResult, 'terminal_scope_mismatch'));
+  assert.deepEqual(foreignResult.record.result!.lastPosition, foreign.lastPosition);
+
+  const cancelled = cancelledNav();
+  const cancelledResult = prepared(prepareNavigationAction(receipt, cancelled, evidenceFor(cancelled)));
+  assert.equal('to' in cancelledResult.record, false);
+  assert.equal('failureAt' in cancelledResult.record, false);
+  assert.deepEqual(cancelledResult.record.result!.lastPosition, cancelled.lastPosition);
+});
+
+test('walk_route preserves ordered points; walk_known_route keeps fragmentId; budget is retained', () => {
   const points = [vec(0, 64, 0), vec(1, 64, 0), vec(2, 64, 0)];
   const route = captured(captureNavigationReceipt(walkToInput({
     invocationId: 'inv-route',
-    request: { skill: 'walk_route', points, deadlineMs: T0 + 1000 },
+    request: { skill: 'walk_route', points },
     delegation: delegation({ requestedTarget: points[2]!, target: points[2]!, arrival: { kind: 'exact' } }),
   })));
-  assert.deepEqual(route.request, { skill: 'walk_route', points, deadlineMs: T0 + 1000 });
-  assert.deepEqual(route.delegation.target, points[2]);
-  assert.deepEqual(route.delegation.arrival, { kind: 'exact' });
-
-  const routeRecord = prepared(prepareNavigationAction(route, cancelledNav(), actionEvidence())).record;
+  assert.deepEqual(route.request, { skill: 'walk_route', points });
+  assert.equal('deadlineMs' in route.request, false);
+  assert.deepEqual(route.budget, budget());
+  const routeNav = cancelledNav();
+  const routeRecord = prepared(prepareNavigationAction(route, routeNav, evidenceFor(routeNav))).record;
   const routeRequest = routeRecord.curio.request;
   assert.ok(routeRequest.skill === 'walk_route');
   assert.deepEqual(routeRequest.points, points);
   assert.deepEqual(routeRecord.delegation.target, points[2]);
+  assert.deepEqual(routeRecord.curio.budget, budget());
 
   const known = captured(captureNavigationReceipt(walkToInput({
     invocationId: 'inv-known',
@@ -282,7 +366,10 @@ test('walk_route preserves the full ordered route; walk_known_route preserves th
   assert.equal(knownRequest.fragmentId, 'frag-real-42');
   assert.equal('pathId' in knownRequest, false);
   assert.equal(known.delegation.requestedTarget, 'frag-real-42');
-  assert.deepEqual(known.delegation.target, vec(8, 64, 8));
+  const knownNav = cancelledNav();
+  const knownRecord = prepared(prepareNavigationAction(known, knownNav, evidenceFor(knownNav))).record;
+  assert.deepEqual(knownRecord.curio.request, known.request);
+  assert.deepEqual(knownRecord.curio.budget, budget());
 
   const refused = refusedCapture(captureNavigationReceipt(asCapture({
     ...walkToInput(),
@@ -291,104 +378,137 @@ test('walk_route preserves the full ordered route; walk_known_route preserves th
   assert.match(refused.gaps[0]!.detail, /fragmentId/);
 });
 
-test('missing original scope/start/time/delegation and unknown evidence are refused, never defaulted', () => {
-  const base = walkToInput();
-
-  assert.ok(hasGap(
-    refusedCapture(captureNavigationReceipt(asCapture({ ...base, originalStart: undefined }))),
-    'missing_original_start',
-  ));
-  assert.ok(hasGap(
-    refusedCapture(captureNavigationReceipt(asCapture({
-      ...base, originalStart: { ...base.originalStart, observedAt: undefined },
-    }))),
-    'missing_original_start_time',
-  ));
-  assert.ok(hasGap(
-    refusedCapture(captureNavigationReceipt(asCapture({
-      ...base, originalStart: { ...base.originalStart, sessionId: undefined },
-    }))),
-    'invalid_original_start',
-  ));
-  assert.ok(hasGap(
-    refusedCapture(captureNavigationReceipt(asCapture({ ...base, delegation: undefined }))),
-    'missing_delegation',
-  ));
-  assert.ok(hasGap(
-    refusedCapture(captureNavigationReceipt(asCapture({ ...base, invocationId: base.taskId }))),
-    'invalid_invocation_identity',
-  ));
-  assert.ok(hasGap(
-    refusedCapture(captureNavigationReceipt(asCapture({ ...base, source: 'planner' }))),
-    'invalid_source',
-  ));
-  assert.ok(hasGap(
-    refusedCapture(captureNavigationReceipt(asCapture({ ...base, planVersion: 1.5 }))),
-    'invalid_plan_version',
-  ));
-  assert.ok(hasGap(
-    refusedCapture(captureNavigationReceipt(asCapture({ ...base, ts: undefined }))),
-    'invalid_ts',
-  ));
-  assert.ok(hasGap(
-    refusedCapture(captureNavigationReceipt(asCapture({ ...base, request: undefined }))),
-    'missing_request',
-  ));
-
-  const receipt = captured(captureNavigationReceipt(base));
-  const nav = cancelledNav();
-
-  const noConsumption = unrecordable(prepareNavigationAction(receipt, nav, asEvidence({
-    subActions: [], observedChanges: [],
+test('budget keeps original TaskInfo time/deadline and resolved effective deadline without defaults', () => {
+  const base = walkToExactInput();
+  const receipt = captured(captureNavigationReceipt(asCapture({
+    ...base,
+    originalStart: start({ observedAt: T0 - 500 }),
+    budget: budget(),
   })));
-  assert.ok(hasGap(noConsumption, 'missing_consumption_evidence'));
-  assert.equal(noConsumption.receipt, receipt);
-  assert.equal(noConsumption.nav, nav);
-  assert.equal(nav.memoryWrite, 'failed');
+  assert.equal(receipt.request.skill, 'walk_to');
+  assert.equal('deadlineMs' in receipt.request, false, 'omitted request deadline stays omitted');
+  assert.equal(receipt.originalStart.observedAt, T0 - 500, 'body sample time is not replaced by TaskInfo.startedAt');
+  assert.deepEqual(receipt.budget, budget());
+
+  const earlierRequest = captured(captureNavigationReceipt(asCapture({
+    ...base,
+    request: { skill: 'walk_to', to: vec(10.5, 64, -3.25), arrival: { kind: 'exact' }, deadlineMs: T0 + 5000 },
+    budget: budget({ effectiveDeadline: T0 + 5000 }),
+  })));
+  assert.equal(earlierRequest.request.skill, 'walk_to');
+  if (earlierRequest.request.skill === 'walk_to') assert.equal(earlierRequest.request.deadlineMs, T0 + 5000);
+  assert.equal(earlierRequest.budget.effectiveDeadline, T0 + 5000);
+
+  const cappedRequest = captured(captureNavigationReceipt(asCapture({
+    ...base,
+    request: { skill: 'walk_to', to: vec(10.5, 64, -3.25), arrival: { kind: 'exact' }, deadlineMs: TASK_DEADLINE + 10_000 },
+    budget: budget({ effectiveDeadline: TASK_DEADLINE }),
+  })));
+  assert.equal(cappedRequest.budget.effectiveDeadline, TASK_DEADLINE);
 
   assert.ok(hasGap(
-    unrecordable(prepareNavigationAction(receipt, nav, asEvidence({
-      consumption: { kind: 'known_empty' }, observedChanges: [],
-    }))),
-    'missing_sub_actions',
+    refusedCapture(captureNavigationReceipt(asCapture({ ...base, budget: undefined }))),
+    'missing_budget',
   ));
   assert.ok(hasGap(
-    unrecordable(prepareNavigationAction(receipt, nav, asEvidence({
-      consumption: { kind: 'known_empty' }, subActions: [],
-    }))),
-    'missing_observed_changes',
+    refusedCapture(captureNavigationReceipt(asCapture({ ...base, budget: budget({ effectiveDeadline: T0 + 1000 }) }))),
+    'deadline_relationship_mismatch',
   ));
   assert.ok(hasGap(
-    unrecordable(prepareNavigationAction(receipt, nav, asEvidence({
-      consumption: { kind: 'guessed' }, subActions: [], observedChanges: [],
+    refusedCapture(captureNavigationReceipt(asCapture({
+      ...base, budget: { taskStartedAt: T0, taskDeadline: Number.NaN, effectiveDeadline: T0 },
     }))),
-    'invalid_consumption_evidence',
+    'invalid_budget',
   ));
-  assert.ok(hasGap(
-    unrecordable(prepareNavigationAction(receipt, nav, asEvidence({
-      consumption: { kind: 'known_empty' },
-      subActions: [{
-        kind: 'move',
-        origin: 'execution_helper',
-        outcome: 'ok',
-        effects: [{ verified: true, changed: true, reasons: ['host summary'] }],
-      }],
-      observedChanges: [],
-    }))),
-    'missing_effect_provenance',
-  ));
+
+  const nav = cancelledNav();
+  const record = prepared(prepareNavigationAction(receipt, nav, evidenceFor(nav))).record;
+  assert.deepEqual(record.curio.budget, budget());
 });
 
-test('host EffectEvidence is diagnosed, never promoted; TaskSource and subAction origins stay factual', () => {
+test('over-limit arrays/strings are refused before traversal and retain caller-owned originals', () => {
   const receipt = captured(captureNavigationReceipt(walkToInput()));
-  const host = { verified: true, changed: true, reasons: ['block_changed'] };
-  const result = prepared(prepareNavigationAction(receipt, cancelledNav(), actionEvidence({
-    hostEffectEvidence: host,
-    consumption: { kind: 'known_empty' },
-    subActions: [{ kind: 'place', origin: 'scheduler', outcome: 'ok' }],
-  })));
-  assert.ok(result.gaps.some((gap) => gap.code === 'unmappable_host_effect_evidence' && gap.blocking === false));
+
+  const traceNav = asFailureNav({ ...cancelledNav(), trace: throwingArray(EVENT_ADAPTER_LIMITS.maxTracePoints + 1, 0) });
+  const traceEvidence = evidenceFor(traceNav);
+  const traceResult = unrecordable(prepareNavigationAction(receipt, traceNav, traceEvidence));
+  assert.ok(hasGap(traceResult, 'limit_exceeded'));
+  assert.equal(traceResult.snapshot, 'not_created');
+  assert.equal(traceResult.nav, traceNav);
+  assert.equal(traceResult.evidence, traceEvidence);
+
+  const placedNav = asFailureNav({
+    ...cancelledNav(),
+    consumption: { placed: throwingArray(EVENT_ADAPTER_LIMITS.maxPlacedBlocks + 1, 0) },
+  });
+  // Build evidence from a normal nav: building it from placedNav would traverse the
+  // deliberately over-limit array before preparation gets its own pre-check.
+  const placedEvidence = evidenceFor(cancelledNav());
+  const placedResult = unrecordable(prepareNavigationAction(receipt, placedNav, placedEvidence));
+  assert.ok(hasGap(placedResult, 'limit_exceeded'));
+  assert.equal(placedResult.snapshot, 'not_created');
+  assert.equal(placedResult.nav, placedNav);
+
+  const stringNav = asFailureNav({ ...cancelledNav(), message: 'x'.repeat(EVENT_ADAPTER_LIMITS.maxStringChars + 1) });
+  const stringEvidence = evidenceFor(stringNav);
+  const stringResult = unrecordable(prepareNavigationAction(receipt, stringNav, stringEvidence));
+  assert.ok(hasGap(stringResult, 'limit_exceeded'));
+  assert.equal(stringResult.nav, stringNav);
+
+  const factsNav = asFailureNav({
+    ...cancelledNav(),
+    problem: {
+      kind: 'hazard',
+      facts: throwingArray(EVENT_ADAPTER_LIMITS.maxArrayLength + 1, 0),
+      constraint: 'test constraint',
+    },
+  });
+  const factsEvidence = evidenceFor(factsNav);
+  const factsResult = unrecordable(prepareNavigationAction(receipt, factsNav, factsEvidence));
+  assert.ok(hasGap(factsResult, 'limit_exceeded'));
+  assert.equal(factsResult.nav, factsNav);
+
+  const oversizedSubActions = throwingArray(EVENT_ADAPTER_LIMITS.maxSubActions + 1, 0);
+  const subActionEvidence = asEvidence({ ...evidenceFor(cancelledNav()), subActions: oversizedSubActions });
+  const subActionResult = unrecordable(prepareNavigationAction(receipt, cancelledNav(), subActionEvidence));
+  assert.ok(hasGap(subActionResult, 'limit_exceeded'));
+
+  const oversizedObserved = throwingArray(EVENT_ADAPTER_LIMITS.maxObservedChanges + 1, 0);
+  const observedEvidence = asEvidence({ ...evidenceFor(cancelledNav()), observedChanges: oversizedObserved });
+  const observedResult = unrecordable(prepareNavigationAction(receipt, cancelledNav(), observedEvidence));
+  assert.ok(hasGap(observedResult, 'limit_exceeded'));
+});
+
+test('host EffectEvidence reasons are bounded without scanning beyond the limit', () => {
+  const receipt = captured(captureNavigationReceipt(walkToInput()));
+  const total = EVENT_ADAPTER_LIMITS.maxHostEffectReasons + 2;
+  const reasons = Array.from({ length: total }, (_, index) => `reason-${index}`);
+  Object.defineProperty(reasons, EVENT_ADAPTER_LIMITS.maxHostEffectReasons, {
+    get() { throw new Error('host reasons were scanned beyond the bound'); },
+    enumerable: true,
+    configurable: true,
+  });
+  const nav = cancelledNav();
+  const result = prepared(prepareNavigationAction(receipt, nav, {
+    ...evidenceFor(nav),
+    hostEffectEvidence: { verified: true, changed: true, reasons },
+  }));
+  assert.ok(hasNonblockingGap(result, 'unmappable_host_effect_evidence'));
   assert.equal(result.diagnostics.length, 1);
+  assert.equal(result.diagnostics[0]!.reasons.length, EVENT_ADAPTER_LIMITS.maxHostEffectReasons);
+  assert.equal(result.diagnostics[0]!.omittedReasons, 2);
+  assert.equal(JSON.stringify(result.record.subActions).includes('reason-'), false);
+});
+
+test('host EffectEvidence is diagnosed, never promoted; source and subAction origins stay factual', () => {
+  const receipt = captured(captureNavigationReceipt(walkToInput()));
+  const nav = cancelledNav();
+  const result = prepared(prepareNavigationAction(receipt, nav, {
+    ...evidenceFor(nav),
+    hostEffectEvidence: { verified: true, changed: true, reasons: ['block_changed'] },
+    subActions: [{ kind: 'place', origin: 'scheduler', outcome: 'ok' }],
+  }));
+  assert.ok(hasNonblockingGap(result, 'unmappable_host_effect_evidence'));
   assert.deepEqual(result.diagnostics[0], {
     kind: 'host_effect_evidence', verified: true, changed: true, reasons: ['block_changed'], omittedReasons: 0,
   });
@@ -408,19 +528,94 @@ test('host EffectEvidence is diagnosed, never promoted; TaskSource and subAction
     actionId: 'inv-1',
     verified: true,
   };
-  const withEffect = prepared(prepareNavigationAction(receipt, cancelledNav(), actionEvidence({
-    consumption: { kind: 'known_empty' },
+  const withEffect = prepared(prepareNavigationAction(receipt, nav, {
+    ...evidenceFor(nav),
     subActions: [{ kind: 'place', origin: 'agent', outcome: 'ok', effects: [effect] }],
-  })));
+  }));
   assert.deepEqual(withEffect.record.subActions[0]!.effects, [effect]);
 });
 
+test('unknown or missing consumption is refused; a provided actual result is never overridden', () => {
+  const receipt = captured(captureNavigationReceipt(walkToInput()));
+  const nav = cancelledNav();
+  const original = structuredClone(nav);
+
+  const unknown = unrecordable(prepareNavigationAction(receipt, nav, asEvidence({
+    ...evidenceFor(nav), consumption: { kind: 'unknown' },
+  })));
+  assert.ok(hasGap(unknown, 'unknown_consumption_evidence'));
+  assert.equal(unknown.nav, nav);
+  assert.deepEqual(nav, original);
+
+  const missing = unrecordable(prepareNavigationAction(receipt, nav, asEvidence({
+    ...evidenceFor(nav), consumption: undefined,
+  })));
+  assert.ok(hasGap(missing, 'missing_consumption_evidence'));
+  assert.equal(missing.nav, nav);
+  assert.deepEqual(nav, original);
+
+  const missingWholeEvidence = unrecordable(prepareNavigationAction(receipt, nav, undefined as unknown as NavigationActionEvidence));
+  assert.ok(hasGap(missingWholeEvidence, 'missing_consumption_evidence'));
+  assert.equal('evidence' in missingWholeEvidence, false);
+});
+
+test('contradictory consumption summaries are refused; matching evidence is retained', () => {
+  const receipt = captured(captureNavigationReceipt(walkToInput()));
+  const nav = cancelledNav();
+  const original = structuredClone(nav);
+
+  const conflict = (consumption: ConsumptionEvidence) => unrecordable(prepareNavigationAction(receipt, nav, asEvidence({
+    ...evidenceFor(nav), consumption,
+  })));
+
+  assert.ok(hasGap(conflict({ kind: 'known_empty' }), 'consumption_conflict'));
+  assert.ok(hasGap(conflict({
+    kind: 'measured',
+    placed: [{ pos: vec(4, 64, -2.5), name: 'minecraft:stone' }],
+    digMs: 12,
+  }), 'consumption_conflict'));
+  assert.ok(hasGap(conflict({
+    kind: 'measured',
+    placed: [{ pos: vec(3, 64, -2.5), name: 'minecraft:dirt' }],
+    digMs: 12,
+  }), 'consumption_conflict'));
+  assert.ok(hasGap(conflict({
+    kind: 'measured',
+    placed: [{ pos: vec(3, 64, -2.5), name: 'minecraft:stone' }],
+    digMs: 5,
+  }), 'consumption_conflict'));
+  assert.ok(hasGap(conflict({
+    kind: 'measured',
+    placed: [{ pos: vec(3, 64, -2.5), name: 'minecraft:stone' }],
+  }), 'consumption_conflict'), 'known digMs cannot be silently omitted or zero-filled');
+  assert.deepEqual(nav, original, 'failed preparation must not change the original body result');
+
+  const matching = prepared(prepareNavigationAction(receipt, nav, evidenceFor(nav)));
+  assert.deepEqual(matching.record.consumption, { placed: [{ pos: vec(3, 64, -2.5), name: 'minecraft:stone' }], digMs: 12 });
+  assert.deepEqual(matching.record.result!.consumption, nav.consumption);
+
+  const noConsumptionNav = partialNav();
+  const knownEmpty = prepared(prepareNavigationAction(receipt, noConsumptionNav, {
+    ...evidenceFor(noConsumptionNav), consumption: { kind: 'known_empty' },
+  }));
+  assert.deepEqual(knownEmpty.record.consumption, { placed: [] });
+  assert.equal(knownEmpty.record.result!.consumption, undefined);
+
+  const unknownWithoutActual = unrecordable(prepareNavigationAction(receipt, noConsumptionNav, asEvidence({
+    ...evidenceFor(noConsumptionNav), consumption: { kind: 'unknown' },
+  })));
+  assert.ok(hasGap(unknownWithoutActual, 'unknown_consumption_evidence'));
+});
+
 test('replayed invocation keeps the same record id/content; reused task ids with distinct invocation ids do not alias', () => {
-  const make = (invocationId: string) => prepared(prepareNavigationAction(
-    captured(captureNavigationReceipt(walkToInput({ invocationId }))),
-    cancelledNav(),
-    actionEvidence(),
-  )).record;
+  const make = (invocationId: string) => {
+    const nav = cancelledNav();
+    return prepared(prepareNavigationAction(
+      captured(captureNavigationReceipt(walkToInput({ invocationId }))),
+      nav,
+      evidenceFor(nav),
+    )).record;
+  };
   const a = make('inv-a');
   const b = make('inv-b');
   const replay = make('inv-a');
@@ -439,7 +634,7 @@ test('a late old result keeps its original scope and is not re-scoped to a curre
   })));
   const nav = cancelledNav();
   nav.lastObservation = { ...nav.lastObservation!, sessionId: 'older-observation-session' };
-  const oldRecord = prepared(prepareNavigationAction(oldReceipt, nav, actionEvidence())).record;
+  const oldRecord = prepared(prepareNavigationAction(oldReceipt, nav, evidenceFor(nav))).record;
   assert.equal(oldRecord.sessionId, 'old-session');
   assert.equal(oldRecord.result!.lastObservation!.sessionId, 'older-observation-session');
 
@@ -447,12 +642,13 @@ test('a late old result keeps its original scope and is not re-scoped to a curre
     invocationId: 'inv-new',
     originalStart: start({ sessionId: 'new-session' }),
   })));
-  const newRecord = prepared(prepareNavigationAction(newReceipt, cancelledNav(), actionEvidence())).record;
+  const newNav = cancelledNav();
+  const newRecord = prepared(prepareNavigationAction(newReceipt, newNav, evidenceFor(newNav))).record;
   assert.equal(newRecord.sessionId, 'new-session');
   assert.notEqual(oldRecord.id, newRecord.id);
 });
 
-test('observed-cell events map dimension/properties, keep sequence separate, and never invent a previous state', () => {
+test('observed-cell events map properties/sequence and carry no vision actionId', () => {
   const current = sampleBlockObservation();
   const previous = sampleObservation({
     sessionId: 'older-session',
@@ -461,9 +657,9 @@ test('observed-cell events map dimension/properties, keep sequence separate, and
     pos: { ...current.pos },
     dim: current.dimension,
   });
-  const event = observedEvent(prepareObservedCellEvent({
-    id: 'event-1', sequence: 900, current, previous, actionId: 'inv-1',
-  }));
+  const event = observedEvent(prepareObservedCellEvent(asObserved({
+    id: 'event-1', sequence: 900, current, previous, actionId: 'must-not-be-copied',
+  })));
   assert.equal(event.kind, 'observed_cell_change');
   assert.equal(event.dim, 'overworld');
   assert.equal(event.current.dim, 'overworld');
@@ -475,7 +671,7 @@ test('observed-cell events map dimension/properties, keep sequence separate, and
   assert.deepEqual(event.previous, previous);
   assert.equal(event.previous!.sessionId, 'older-session');
   assert.equal(event.previous!.observedAt, T0 - 500);
-  assert.equal(event.actionId, 'inv-1');
+  assert.equal('actionId' in event, false, 'ordinary vision never carries action attribution');
 
   const incomplete = observedEvent(prepareObservedCellEvent({
     id: 'event-2', sequence: 901, current: { ...current, stateComplete: undefined },
@@ -492,11 +688,36 @@ test('observed-cell events map dimension/properties, keep sequence separate, and
   assert.equal(mismatch.status, 'refused');
   if (mismatch.status === 'refused') assert.ok(hasGap(mismatch, 'previous_scope_mismatch'));
 
-  const missingScope = prepareObservedCellEvent(asObserved({
-    id: 'event-5', sequence: 904, current: { ...current, dimension: '' },
+  const { properties: _omitted, ...withoutProperties } = current;
+  const missingProperties = prepareObservedCellEvent(asObserved({
+    id: 'event-5', sequence: 904, current: withoutProperties,
   }));
-  assert.equal(missingScope.status, 'refused');
-  if (missingScope.status === 'refused') assert.ok(hasGap(missingScope, 'invalid_current_observation'));
+  assert.equal(missingProperties.status, 'refused');
+  if (missingProperties.status === 'refused') assert.ok(hasGap(missingProperties, 'invalid_current_observation'));
+});
+
+test('oversized block properties are refused before value access', () => {
+  const properties: Record<string, string | number | boolean> = {};
+  for (let index = 0; index < EVENT_ADAPTER_LIMITS.maxBlockProperties; index += 1) {
+    properties[`p${index}`] = 'v';
+  }
+  Object.defineProperty(properties, `p${EVENT_ADAPTER_LIMITS.maxBlockProperties}`, {
+    get() { throw new Error('over-limit block properties were traversed'); },
+    enumerable: true,
+    configurable: true,
+  });
+  const refused = prepareObservedCellEvent({
+    id: 'event-props', sequence: 1, current: sampleBlockObservation({ properties }),
+  });
+  assert.equal(refused.status, 'refused');
+  if (refused.status === 'refused') assert.ok(hasGap(refused, 'limit_exceeded'));
+
+  const longValue = prepareObservedCellEvent({
+    id: 'event-value', sequence: 2,
+    current: sampleBlockObservation({ properties: { p: 'x'.repeat(EVENT_ADAPTER_LIMITS.maxStringChars + 1) } }),
+  });
+  assert.equal(longValue.status, 'refused');
+  if (longValue.status === 'refused') assert.ok(hasGap(longValue, 'limit_exceeded'));
 });
 
 test('observation gap events require explicit original scope/time/reason and never use current values', () => {
@@ -527,13 +748,18 @@ test('observation gap events require explicit original scope/time/reason and nev
   if (badReason.status === 'refused') assert.ok(hasGap(badReason, 'invalid_gap_reason'));
 });
 
-test('host extension read reports missing/unsupported/malformed metadata instead of casting', () => {
+test('host extension read reports missing/unsupported/malformed metadata and validates budget', () => {
   const receipt = captured(captureNavigationReceipt(walkToInput()));
-  const record = prepared(prepareNavigationAction(receipt, cancelledNav(), actionEvidence())).record;
+  const nav = cancelledNav();
+  const record = prepared(prepareNavigationAction(receipt, nav, evidenceFor(nav))).record;
 
   const okRead = readCurioActionExtension(record);
   assert.equal(okRead.status, 'ok');
-  if (okRead.status === 'ok') assert.deepEqual(okRead.extension, record.curio);
+  if (okRead.status === 'ok') {
+    assert.deepEqual(okRead.extension, record.curio);
+    assert.equal(okRead.extension.version, CURIO_ACTION_EXTENSION_VERSION);
+    assert.deepEqual(okRead.extension.budget, budget());
+  }
 
   assert.equal(readCurioActionExtension({ ...record, curio: undefined }).status, 'missing');
 
@@ -541,23 +767,25 @@ test('host extension read reports missing/unsupported/malformed metadata instead
   assert.equal(unsupported.status, 'unsupported_version');
   if (unsupported.status === 'unsupported_version') assert.equal(unsupported.version, 2);
 
-  const malformed = readCurioActionExtension({
+  const malformedRequest = readCurioActionExtension({
     ...record,
     curio: {
-      version: 1,
-      invocationId: 'inv-x',
-      taskId: 't',
-      planVersion: 1,
-      source: 'llm',
+      ...record.curio,
       request: { skill: 'walk_known_route', pathId: 'legacy-path' },
-      originalStart: record.curio.originalStart,
     },
   });
-  assert.equal(malformed.status, 'malformed');
-  if (malformed.status === 'malformed') assert.ok(malformed.errors.some((error) => error.includes('fragmentId')));
+  assert.equal(malformedRequest.status, 'malformed');
+  if (malformedRequest.status === 'malformed') assert.ok(malformedRequest.errors.some((error) => error.includes('fragmentId')));
+
+  const malformedBudget = readCurioActionExtension({
+    ...record,
+    curio: { ...record.curio, budget: { ...record.curio.budget, effectiveDeadline: T0 + 1 } },
+  });
+  assert.equal(malformedBudget.status, 'malformed');
+  if (malformedBudget.status === 'malformed') assert.ok(malformedBudget.errors.some((error) => error.includes('curio.budget')));
 });
 
-test('capture and prepare snapshots isolate later mutations of caller inputs and receipts', () => {
+test('capture and prepare snapshots isolate caller inputs, receipts and evidence', () => {
   const points = [vec(0, 64, 0), vec(1, 64, 0), vec(2, 64, 0)];
   const input = walkToInput({
     request: { skill: 'walk_route', points },
@@ -568,17 +796,21 @@ test('capture and prepare snapshots isolate later mutations of caller inputs and
   points[0]!.x = 99;
   input.delegation.target.x = 99;
   input.originalStart.pos.x = 99;
+  input.budget.effectiveDeadline = T0 + 1;
   const capturedRequest = receipt.request;
   assert.ok(capturedRequest.skill === 'walk_route');
   assert.deepEqual(capturedRequest.points[0], vec(0, 64, 0));
   assert.deepEqual(receipt.delegation.target, vec(2, 64, 0));
   assert.deepEqual(receipt.originalStart.pos, vec(1.25, 64, -2.5));
+  assert.deepEqual(receipt.budget, budget());
 
-  const evidence = actionEvidence();
-  const result = prepared(prepareNavigationAction(receipt, cancelledNav(), evidence));
+  const nav = cancelledNav();
+  const evidence = evidenceFor(nav);
+  const result = prepared(prepareNavigationAction(receipt, nav, evidence));
 
   receipt.delegation.target.x = 555;
   receipt.originalStart.pos.x = 555;
+  receipt.budget.effectiveDeadline = T0 + 555;
   const mutableReceiptRequest = receipt.request;
   if (mutableReceiptRequest.skill === 'walk_route') mutableReceiptRequest.points[0]!.x = 555;
   evidence.subActions[0]!.kind = 'mutated';
@@ -589,15 +821,19 @@ test('capture and prepare snapshots isolate later mutations of caller inputs and
   assert.deepEqual(preparedRequest.points[0], vec(0, 64, 0));
   assert.deepEqual(result.record.delegation.target, vec(2, 64, 0));
   assert.deepEqual(result.record.from, vec(1.25, 64, -2.5));
+  assert.deepEqual(result.record.curio.budget, budget());
   assert.equal(result.record.subActions[0]!.kind, 'move');
   assert.deepEqual(result.record.observedChanges[0]!.state.properties, {});
 });
 
-test('the adapter module has no runtime config/store/game/timer/file side effects', () => {
+test('the adapter module has only type-only imports and no runtime game/store/timer/file side effects', () => {
   const source = readFileSync(new URL('../src/spatial/event-adapter.ts', import.meta.url), 'utf8');
-  assert.doesNotMatch(source, /(^|\n)import\s+(?!type\b)/, 'the product module must use type-only imports');
-  assert.doesNotMatch(source, /from ['"][^'"]*\/config(?:\.ts)?['"]/);
-  assert.doesNotMatch(source, /from ['"][^'"]*\/arbiter(?:\.ts)?['"]/);
+  const importLines = source.split(/\r?\n/).filter((line) => line.startsWith('import '));
+  assert.ok(importLines.length >= 3);
+  assert.ok(importLines.every((line) => line.startsWith('import type ')), 'all imports must be type-only');
+  assert.ok(importLines.some((line) => line.includes("'../arbiter/arbiter.ts'")), 'TaskSource is reused via a type-only Arbiter import');
+  assert.doesNotMatch(source, /(^|\n)import\s+(?!type\b)/);
+  assert.doesNotMatch(source, /from ['"][^'"]*\/config/);
   assert.doesNotMatch(source, /from ['"][^'"]*\/memory\//);
   assert.doesNotMatch(source, /import\s+[^;]*ChangeReport/);
   assert.doesNotMatch(source, /Date\.now\s*\(/);
@@ -611,15 +847,20 @@ function sqliteWorldId(label: string): string {
   return `event-adapter-${label}-${process.pid}-${T0}`;
 }
 
-test('real sqlite: acceptance stays pending until checkpoint; query/close/reopen retain extension and partial NavResult', async () => {
+test('real sqlite: pending→checkpoint→query/close/reopen retains extension, budget and partial snapshot', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'spatial-event-adapter-'));
   const dbPath = join(dir, 'memory.db');
   const worldId = sqliteWorldId('roundtrip');
 
-  const startEvidence = start({ worldId });
-  const receipt = captured(captureNavigationReceipt(walkToInput({ originalStart: startEvidence })));
+  const startEvidence = start({ worldId, observedAt: T0 - 250 });
+  const receipt = captured(captureNavigationReceipt(asCapture({
+    ...walkToExactInput(),
+    originalStart: startEvidence,
+    budget: budget(),
+  })));
   const nav = cancelledNav();
-  const action = prepared(prepareNavigationAction(receipt, nav, actionEvidence())).record;
+  const originalNav = structuredClone(nav);
+  const action = prepared(prepareNavigationAction(receipt, nav, evidenceFor(nav, worldId))).record;
   const cellEvent = observedEvent(prepareObservedCellEvent({
     id: 'event-real-1',
     sequence: 12,
@@ -693,17 +934,15 @@ test('real sqlite: acceptance stays pending until checkpoint; query/close/reopen
         assert.equal(extension.extension.invocationId, 'inv-1');
         assert.equal(extension.extension.source, 'llm');
         assert.deepEqual(extension.extension.request, receipt.request);
+        assert.equal('deadlineMs' in extension.extension.request, false);
         assert.deepEqual(extension.extension.originalStart, startEvidence);
+        assert.deepEqual(extension.extension.budget, budget());
       }
       assert.deepEqual(storedAction.from, vec(1.25, 64, -2.5));
-      const storedNav = storedAction.result;
-      assert.ok(storedNav !== undefined);
-      assert.equal(storedNav.outcome, 'CANCELLED');
-      assert.equal(storedNav.memoryWrite, 'failed');
-      assert.deepEqual(storedNav.trace, cancelledNav().trace);
-      assert.deepEqual(storedNav.lastObservation, cancelledNav().lastObservation);
-      assert.deepEqual(storedNav.consumption, cancelledNav().consumption);
-      assert.deepEqual(storedNav.problem, cancelledNav().problem);
+      assert.deepEqual(storedAction.result, originalNav);
+      assert.equal(storedAction.result!.confirmed, false);
+      assert.equal('failureAt' in storedAction, false);
+      assert.equal('to' in storedAction, false);
 
       const eventPage = await session.queryEvents({ eventId: cellEvent.id });
       assert.equal(eventPage.records.length, 1);
@@ -736,14 +975,13 @@ test('real sqlite: acceptance stays pending until checkpoint; query/close/reopen
       if (extension.status === 'ok') {
         assert.deepEqual(extension.extension.request, receipt.request);
         assert.deepEqual(extension.extension.originalStart, startEvidence);
+        assert.deepEqual(extension.extension.budget, budget());
       }
-      const storedNav = storedAction.result;
-      assert.ok(storedNav !== undefined);
-      assert.equal(storedNav.outcome, 'CANCELLED');
-      assert.equal(storedNav.memoryWrite, 'failed');
-      assert.deepEqual(storedNav.trace, cancelledNav().trace);
-      assert.deepEqual(storedNav.lastObservation, cancelledNav().lastObservation);
-      assert.deepEqual(storedNav.consumption, cancelledNav().consumption);
+      assert.deepEqual(storedAction.result, originalNav);
+      assert.equal(storedAction.result!.memoryWrite, 'failed');
+      assert.deepEqual(storedAction.result!.trace, originalNav.trace);
+      assert.deepEqual(storedAction.result!.lastObservation, originalNav.lastObservation);
+      assert.deepEqual(storedAction.result!.consumption, originalNav.consumption);
 
       const eventPage = await reopened.queryEvents({ eventId: cellEvent.id });
       assert.equal(eventPage.records.length, 1);
@@ -766,7 +1004,7 @@ test('real sqlite: acceptance stays pending until checkpoint; query/close/reopen
   }
 });
 
-test('real sqlite: capacity/conflict rejection is atomic, keeps body results, and the worker still closes', async () => {
+test('real sqlite: capacity/conflict/malformed rejection is atomic and the worker still closes', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'spatial-event-adapter-errors-'));
   const dbPath = join(dir, 'memory.db');
   const worldId = sqliteWorldId('errors');
@@ -777,14 +1015,15 @@ test('real sqlite: capacity/conflict rejection is atomic, keeps body results, an
     });
     try {
       const make = (invocationId: string, to: Vec3Like) => {
-        const receipt = captured(captureNavigationReceipt(walkToInput({
+        const receipt = captured(captureNavigationReceipt(asCapture({
+          ...walkToExactInput(),
           invocationId,
           originalStart: start({ worldId }),
           request: { skill: 'walk_to', to, arrival: { kind: 'exact' } },
           delegation: delegation({ requestedTarget: to, target: to, arrival: { kind: 'exact' } }),
         })));
         const nav = cancelledNav();
-        return { record: prepared(prepareNavigationAction(receipt, nav, actionEvidence())).record, nav };
+        return { record: prepared(prepareNavigationAction(receipt, nav, evidenceFor(nav, worldId))).record, nav };
       };
 
       const a = make('inv-a', vec(10.5, 64, -3.25));
@@ -804,7 +1043,8 @@ test('real sqlite: capacity/conflict rejection is atomic, keeps body results, an
       assert.equal(accepted.status, 'accepted_pending_checkpoint');
       assert.equal(session.getPersistenceState().pendingJournalRecords, 1);
 
-      const conflictingReceipt = captured(captureNavigationReceipt(walkToInput({
+      const conflictingReceipt = captured(captureNavigationReceipt(asCapture({
+        ...walkToExactInput(),
         invocationId: 'inv-a',
         originalStart: start({ worldId }),
         request: { skill: 'walk_to', to: vec(12, 64, -3.25), arrival: { kind: 'exact' } },
@@ -813,7 +1053,7 @@ test('real sqlite: capacity/conflict rejection is atomic, keeps body results, an
         }),
       })));
       const conflictingNav = cancelledNav();
-      const conflicting = prepared(prepareNavigationAction(conflictingReceipt, conflictingNav, actionEvidence())).record;
+      const conflicting = prepared(prepareNavigationAction(conflictingReceipt, conflictingNav, evidenceFor(conflictingNav, worldId))).record;
       const conflict = enqueuePreparedFacts({ journal: session.journal }, { actions: [conflicting] });
       assert.equal(conflict.status, 'rejected');
       if (conflict.status === 'rejected') {
@@ -825,7 +1065,6 @@ test('real sqlite: capacity/conflict rejection is atomic, keeps body results, an
       assert.equal(conflictingNav.memoryWrite, 'failed');
       assert.equal(conflictingNav.outcome, 'CANCELLED');
 
-      // The library's own boundary validation rejects a mismatched observation event.
       const malformedEvent = observedEvent(prepareObservedCellEvent({
         id: 'event-bad', sequence: 5, current: sampleBlockObservation({ worldId }),
       }));
@@ -846,9 +1085,10 @@ test('real sqlite: capacity/conflict rejection is atomic, keeps body results, an
   }
 });
 
-// Compile-time coverage that the exported request union mirrors the real producers.
+// Compile-time coverage that the exported request/budget unions mirror the real producers.
 const _arrival: ArrivalSpec = { kind: 'near', radius: 1 };
 const _request: OriginalNavigationRequest = { skill: 'walk_known_route', fragmentId: 'frag' };
+const _budget: OriginalExecutionBudget = budget();
 const _recordType: HostActionRecord | null = null;
 const _eventType: SpatialEvent | null = null;
-void _arrival; void _request; void _recordType; void _eventType;
+void _arrival; void _request; void _budget; void _recordType; void _eventType;

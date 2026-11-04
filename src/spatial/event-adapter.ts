@@ -3,25 +3,29 @@
  * 准备成可交给 `SpatialSession.journal.recordBatch` 的固定记录。
  *
  * 本模块只做“准备”，不订阅任何运行时事件，不创建 store/worker/定时器，也不
- * 写入游戏、配置或真实记忆文件。缺少原始委托、原始作用域、原始采样时间或真实
- * 证据时，返回结构化缺口；绝不用当前状态、墙钟时间、trace[0] 或请求目标补齐。
+ * 写入游戏、配置或真实记忆文件。缺少原始委托、原始作用域、原始采样时间、执行
+ * 预算或真实证据时，返回结构化缺口；绝不用当前状态、墙钟时间、trace[0] 或
+ * 请求目标补齐。所有 import 都是 type-only；source 侧因此不会加载 Arbiter 或配置。
  *
  * 关键边界：
  * - 原始开始位置/作用域/观测时间由调用者显式提供，绝不从 NavResult.trace[0]
- *   或当前身体状态反推。
- * - NavResult 来自真实类型化生产者（WalkRouteExecution.nav 等），按引用原样
- *   保留 outcome/problem/trace/lastPosition/lastObservation/memoryWrite/consumption；
- *   不发明第二套未知 NavResult 校验器。
- * - ActionRecord 必需字段（consumption/subActions/observedChanges）必须由调用者
- *   给出“已知为空”或真实类型化证据；未知副作用不会被写成 []/0。
+ *   或当前身体状态反推。TaskInfo.startedAt 也不会被当作身体采样时间。
+ * - 原始执行预算分开保存：request.deadlineMs 保持原值（可缺省），taskStartedAt
+ *   与 taskDeadline 是原 TaskInfo 事实，effectiveDeadline 是解析后的实际约束。
+ * - NavResult 来自真实类型化生产者，按完整结构做有界独立快照；不重造 NavResult
+ *   校验器，也不把原对象和旧副本混在一条记录里。超限时拒绝并保留调用者原来的
+ *   NavResult 引用，明确说明未创建快照。
+ * - record.confirmed 直接保留 nav.confirmed；lastPosition 不推断为 failureAt；
+ *   top-level to 只在 ARRIVED 且 LastObservation 与动作作用域一致时投影。
  * - 宿主 EffectEvidence（只有 verified/changed/reasons，没有作用域与时间）不会被
- *   提升为库 EffectEvidence；只作为诊断保留，并报告不可映射缺口。
+ *   提升为库 EffectEvidence；只作为有界诊断保留，并报告不可映射缺口。
  * - 观测事件使用显式边界接收序号，与原始 observationId 分开；previous 缺失表示
- *   未知，绝不表示空气；观测缺口不改变体素状态。
+ *   未知，绝不表示空气；普通视觉不提供 actionId 归因；观测缺口不改变体素状态。
  * - 入队只调用传入的公共 `session.journal.recordBatch`，不接受 checkpoint/flush/
  *   close，也不改写任何身体结果或 `memoryWrite`。
  */
 
+import type { TaskSource } from '../arbiter/arbiter.ts';
 import type { BlockObservation, EffectEvidence as HostEffectEvidence } from '../adapter/types.ts';
 import type {
   ActionRecord,
@@ -39,15 +43,12 @@ import type {
   SpatialEvent,
 } from 'curio-minecraft-3d-memory/storage/sqlite';
 
-/** 宿主委托来源。与 Arbiter.TaskSource 一致；这里保留本地边界类型，避免加载配置/Arbiter 图。 */
-export type NavigationTaskSource = 'llm' | 'rule' | 'filler' | 'reflex' | 'user';
-
 /** 固定、版本化的宿主扩展名。未知版本由读取函数显式报告。 */
 export const CURIO_ACTION_EXTENSION_VERSION = 1;
 
 /**
- * 在深拷贝原始路线/轨迹/证据之前使用的固定形状上限。
- * 超限时拒绝并报告 limit/actual；不静默截断原始路线、轨迹或效果。
+ * 有界快照与证据的固定形状上限。数组长度在索引任何元素之前检查；对象键数量在
+ * 读取任何值之前检查；字符串长度在复制前检查。超限拒绝并报告 limit/actual。
  */
 export const EVENT_ADAPTER_LIMITS = {
   maxRoutePoints: 32,
@@ -62,6 +63,10 @@ export const EVENT_ADAPTER_LIMITS = {
   maxHostEffectReasons: 16,
   maxIdChars: 512,
   maxReasonChars: 2048,
+  maxStringChars: 4096,
+  maxObjectKeys: 64,
+  maxArrayLength: 128,
+  maxSnapshotDepth: 8,
 } as const;
 
 export type WalkToArrival = { kind: 'exact' } | { kind: 'near'; radius: number };
@@ -94,13 +99,25 @@ export interface OriginalStartEvidence {
   observedAt: number;
 }
 
+/**
+ * 原始执行预算事实：
+ * - taskStartedAt = 原 TaskInfo.startedAt（用于解释截止时间，不是身体采样时间）；
+ * - taskDeadline = 原 TaskInfo.deadline / ctx.deadline（父委托绝对期限）；
+ * - effectiveDeadline = 生产者实际使用的 min(request.deadlineMs ?? taskDeadline, taskDeadline)。
+ */
+export interface OriginalExecutionBudget {
+  taskStartedAt: number;
+  taskDeadline: number;
+  effectiveDeadline: number;
+}
+
 /** 调用者显式提供的导航捕获输入。 */
 export interface NavigationCaptureInput {
   /** 稳定、可重放的调用身份；不能只用 taskId，也不能每次重放重新生成。 */
   invocationId: string;
   taskId: string;
   planVersion: number;
-  source: NavigationTaskSource;
+  source: TaskSource;
   parentActionId?: string;
   /** 库委托/执行身份；省略时使用调用身份，不另外生成随机值。 */
   delegationId?: string;
@@ -109,20 +126,22 @@ export interface NavigationCaptureInput {
   request: OriginalNavigationRequest;
   delegation: ParsedNavigationDelegation;
   originalStart: OriginalStartEvidence;
+  budget: OriginalExecutionBudget;
 }
 
-/** 捕获后的不可变事实快照（本层返回的是新对象；调用者原输入之后可变不影响它）。 */
+/** 捕获后的新事实快照；调用者原输入之后可变不影响它。 */
 export interface NavigationReceipt {
   invocationId: string;
   taskId: string;
   planVersion: number;
-  source: NavigationTaskSource;
+  source: TaskSource;
   parentActionId?: string;
   delegationId: string;
   ts: number;
   request: OriginalNavigationRequest;
   delegation: ParsedNavigationDelegation;
   originalStart: OriginalStartEvidence;
+  budget: OriginalExecutionBudget;
 }
 
 /** 固定版本的宿主扩展，挂在实际 ActionRecord 的 `curio` 字段上。 */
@@ -131,9 +150,10 @@ export interface CurioActionExtensionV1 {
   invocationId: string;
   taskId: string;
   planVersion: number;
-  source: NavigationTaskSource;
+  source: TaskSource;
   request: OriginalNavigationRequest;
   originalStart: OriginalStartEvidence;
+  budget: OriginalExecutionBudget;
 }
 
 /** 实际写入 journal 的宿主动作记录（库只声明基础 ActionRecord）。 */
@@ -157,22 +177,23 @@ export type PreparationGapCode =
   | 'missing_original_start'
   | 'invalid_original_start'
   | 'missing_original_start_time'
+  | 'missing_budget'
+  | 'invalid_budget'
+  | 'deadline_relationship_mismatch'
   | 'limit_exceeded'
+  | 'invalid_snapshot_value'
   | 'missing_consumption_evidence'
+  | 'unknown_consumption_evidence'
   | 'invalid_consumption_evidence'
+  | 'consumption_conflict'
   | 'missing_sub_actions'
-  | 'invalid_sub_actions'
   | 'missing_observed_changes'
-  | 'invalid_observed_changes'
-  | 'missing_effect_provenance'
   | 'invalid_nav_projection'
-  | 'invalid_host_effect_evidence'
   | 'unmappable_host_effect_evidence'
+  | 'terminal_scope_mismatch'
   | 'missing_event_identity'
-  | 'invalid_event_identity'
   | 'invalid_sequence'
   | 'invalid_current_observation'
-  | 'invalid_previous_observation'
   | 'previous_scope_mismatch'
   | 'invalid_gap_scope'
   | 'invalid_gap_time'
@@ -196,8 +217,9 @@ export interface PlacedBlockConsumption {
   name: string;
 }
 
-/** 调用者必须显式说明“实际已知为空”或给出实测消耗。 */
+/** 调用者必须显式说明“实际已知为空”“实测消耗”或“未知”。 */
 export type ConsumptionEvidence =
+  | { kind: 'unknown' }
   | { kind: 'known_empty' }
   | {
     kind: 'measured';
@@ -213,11 +235,11 @@ export interface PreparedSubAction {
   origin: 'agent' | 'execution_helper' | 'scheduler';
   targetRole?: 'body' | 'head' | 'support' | 'placement_target' | 'reference_face';
   outcome: 'ok' | 'noop' | 'unknown' | 'refused' | 'failed' | 'cancelled';
-  /** 只能是库 EffectEvidence（带自己的作用域/时间）；宿主摘要不得放在这里。 */
+  /** 只能是库 EffectEvidence（带自己的作用域/时间）。 */
   effects?: readonly EffectEvidence[];
 }
 
-/** 宿主 EffectEvidence 的诊断保留；它不是库 EffectEvidence，也不参与动作记录。 */
+/** 宿主 EffectEvidence 的有界诊断保留；它不是库 EffectEvidence，也不参与动作记录。 */
 export interface HostEffectDiagnostic {
   kind: 'host_effect_evidence';
   verified: boolean;
@@ -226,6 +248,7 @@ export interface HostEffectDiagnostic {
   omittedReasons: number;
 }
 
+/** 类型化的动作证据；未知/缺失用可选字段或 consumption.kind='unknown' 表达。 */
 export interface NavigationActionEvidence {
   consumption: ConsumptionEvidence;
   subActions: readonly PreparedSubAction[];
@@ -237,16 +260,22 @@ export interface NavigationActionEvidence {
 export type NavigationActionPreparation =
   | {
     status: 'prepared';
+    /** record.result 是独立的有界完整 NavResult 快照，不是调用者的 nav 引用。 */
+    snapshot: 'independent_bounded_copy';
     record: HostActionRecord;
     receipt: NavigationReceipt;
+    /** 调用者原来的 NavResult 引用，仅供诊断；不会被改写。 */
     nav: NavResult;
     gaps: PreparationGap[];
     diagnostics: HostEffectDiagnostic[];
   }
   | {
     status: 'unrecordable';
+    /** 没有创建快照；nav 与（若提供）evidence 都是调用者拥有的原引用。 */
+    snapshot: 'not_created';
     receipt: NavigationReceipt;
     nav: NavResult;
+    evidence?: NavigationActionEvidence;
     gaps: PreparationGap[];
     diagnostics: HostEffectDiagnostic[];
   };
@@ -259,8 +288,6 @@ export interface ObservedCellEventInput {
   current: BlockObservation;
   /** 原始旧观测；缺失表示过去状态未知，绝不表示空气。 */
   previous?: Observation;
-  /** 只有在独立的已确认动作归因回执存在时才填写。 */
-  actionId?: string;
 }
 
 export type ObservedCellChangeEvent = Extract<SpatialEvent, { kind: 'observed_cell_change' }>;
@@ -333,12 +360,11 @@ type ValidationResult<T> =
   | { ok: true; value: T }
   | { ok: false; gaps: PreparationGap[] };
 
+type SnapshotResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; gap: PreparationGap };
+
 const MOVE_MODES = new Set<MoveMode>(['walk', 'jump', 'sneak', 'swim', 'climb', 'ladder', 'drop']);
-const OBSERVATION_SOURCES = new Set<Observation['source']>(['vision', 'agent_action', 'local_rescan']);
-const EVIDENCE_KINDS = new Set<Observation['evidence']>(['seen', 'contact', 'confirmed_effect']);
-const SUB_ACTION_ORIGINS = new Set<PreparedSubAction['origin']>(['agent', 'execution_helper', 'scheduler']);
-const SUB_ACTION_OUTCOMES = new Set<PreparedSubAction['outcome']>(['ok', 'noop', 'unknown', 'refused', 'failed', 'cancelled']);
-const SUB_ACTION_ROLES = new Set<NonNullable<PreparedSubAction['targetRole']>>(['body', 'head', 'support', 'placement_target', 'reference_face']);
 const GAP_REASONS = new Set<ObservationGapEventReason>([
   'out_of_view', 'occluded', 'too_dark', 'unloaded', 'budget_not_scanned', 'unknown',
   'disconnected', 'paused', 'scope_changed', 'not_ready',
@@ -382,32 +408,12 @@ function isSafeCount(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
-function isNavigationTaskSource(value: unknown): value is NavigationTaskSource {
+function isTaskSource(value: unknown): value is TaskSource {
   return value === 'llm' || value === 'rule' || value === 'filler' || value === 'reflex' || value === 'user';
 }
 
 function isMoveMode(value: unknown): value is MoveMode {
   return typeof value === 'string' && MOVE_MODES.has(value as MoveMode);
-}
-
-function isObservationSource(value: unknown): value is Observation['source'] {
-  return typeof value === 'string' && OBSERVATION_SOURCES.has(value as Observation['source']);
-}
-
-function isEvidenceKind(value: unknown): value is Observation['evidence'] {
-  return typeof value === 'string' && EVIDENCE_KINDS.has(value as Observation['evidence']);
-}
-
-function isSubActionOrigin(value: unknown): value is PreparedSubAction['origin'] {
-  return typeof value === 'string' && SUB_ACTION_ORIGINS.has(value as PreparedSubAction['origin']);
-}
-
-function isSubActionOutcome(value: unknown): value is PreparedSubAction['outcome'] {
-  return typeof value === 'string' && SUB_ACTION_OUTCOMES.has(value as PreparedSubAction['outcome']);
-}
-
-function isSubActionRole(value: unknown): value is NonNullable<PreparedSubAction['targetRole']> {
-  return typeof value === 'string' && SUB_ACTION_ROLES.has(value as NonNullable<PreparedSubAction['targetRole']>);
 }
 
 function isGapReason(value: unknown): value is ObservationGapEventReason {
@@ -621,8 +627,36 @@ function readOriginalStart(value: unknown): ValidationResult<OriginalStartEviden
 }
 
 /**
- * 捕获一次真实导航调用。输入必须是实际委托、解析约束和开始证据；缺失即拒绝，
- * 不读取当前适配器状态，也不生成任何随机/默认身份。
+ * 预算关系检查：effectiveDeadline 必须等于生产者实际使用的
+ * min(request.deadlineMs ?? taskDeadline, taskDeadline)。request.deadlineMs 仍单独
+ * 保留在 request 中，缺失时不会被填成 0 或当前时间。
+ */
+function readBudget(value: unknown, request: OriginalNavigationRequest): ValidationResult<OriginalExecutionBudget> {
+  if (!isRecord(value)) {
+    return invalid(makeGap('missing_budget', 'budget must supply the original taskStartedAt, taskDeadline and effectiveDeadline'));
+  }
+  const taskStartedAt = value.taskStartedAt;
+  const taskDeadline = value.taskDeadline;
+  const effectiveDeadline = value.effectiveDeadline;
+  if (!isFiniteNumber(taskStartedAt) || !isFiniteNumber(taskDeadline) || !isFiniteNumber(effectiveDeadline)) {
+    return invalid(makeGap('invalid_budget', 'budget values must be finite epoch milliseconds'));
+  }
+  if (taskDeadline < taskStartedAt) {
+    return invalid(makeGap('invalid_budget', 'taskDeadline must not precede taskStartedAt'));
+  }
+  const expected = Math.min(request.deadlineMs ?? taskDeadline, taskDeadline);
+  if (effectiveDeadline !== expected) {
+    return invalid(makeGap(
+      'deadline_relationship_mismatch',
+      'effectiveDeadline must equal min(request.deadlineMs ?? taskDeadline, taskDeadline)',
+    ));
+  }
+  return valid({ taskStartedAt, taskDeadline, effectiveDeadline });
+}
+
+/**
+ * 捕获一次真实导航调用。输入必须是实际委托、解析约束、开始证据和原始预算；
+ * 缺失即拒绝，不读取当前适配器状态，也不生成任何随机/默认身份。
  */
 export function captureNavigationReceipt(input: NavigationCaptureInput): NavigationCaptureResult {
   const raw: unknown = input;
@@ -656,7 +690,7 @@ export function captureNavigationReceipt(input: NavigationCaptureInput): Navigat
     return { status: 'refused', gaps: [makeGap('invalid_plan_version', 'planVersion must be a non-negative safe integer')] };
   }
   const source = raw.source;
-  if (!isNavigationTaskSource(source)) {
+  if (!isTaskSource(source)) {
     return { status: 'refused', gaps: [makeGap('invalid_source', 'source must be the original llm/rule/filler/reflex/user TaskSource')] };
   }
   const ts = raw.ts;
@@ -678,6 +712,8 @@ export function captureNavigationReceipt(input: NavigationCaptureInput): Navigat
   if (!delegation.ok) return { status: 'refused', gaps: delegation.gaps };
   const originalStart = readOriginalStart(raw.originalStart);
   if (!originalStart.ok) return { status: 'refused', gaps: originalStart.gaps };
+  const budget = readBudget(raw.budget, request.value);
+  if (!budget.ok) return { status: 'refused', gaps: budget.gaps };
 
   if (request.value.skill === 'walk_to') {
     if (!sameVec(delegation.value.target, request.value.to)) {
@@ -717,6 +753,7 @@ export function captureNavigationReceipt(input: NavigationCaptureInput): Navigat
     request: request.value,
     delegation: delegation.value,
     originalStart: originalStart.value,
+    budget: budget.value,
   };
   return { status: 'captured', receipt };
 }
@@ -774,335 +811,218 @@ function copyStart(start: OriginalStartEvidence): OriginalStartEvidence {
   };
 }
 
-function readPlacedBlock(value: unknown): PlacedBlockConsumption | null {
-  if (!isRecord(value)) return null;
-  const pos = readVec(value.pos);
-  const name = value.name;
-  if (pos === null || !isNonEmptyString(name) || name.length > EVENT_ADAPTER_LIMITS.maxIdChars) return null;
-  return { pos, name };
+function copyBudget(budget: OriginalExecutionBudget): OriginalExecutionBudget {
+  return {
+    taskStartedAt: budget.taskStartedAt,
+    taskDeadline: budget.taskDeadline,
+    effectiveDeadline: budget.effectiveDeadline,
+  };
 }
 
-function readConsumption(value: unknown): ValidationResult<ActionRecord['consumption']> {
-  if (value === undefined) {
-    return invalid(makeGap('missing_consumption_evidence', 'consumption must be explicitly known_empty or measured; unknown consumption is not written as []/0'));
+function limitSnapshotGap(what: string, limit: number, actual: number): PreparationGap {
+  return makeGap('limit_exceeded', `${what} exceeds the fixed snapshot limit`, { limit, actual });
+}
+
+/**
+ * 有界完整快照：保留类型化值的完整结构，只在读取前检查数组长度、对象键数量、
+ * 字符串/键长度和嵌套深度。它不是 schema 校验器；不认识的字段照常复制。
+ * 数组在索引任何元素之前先检查 length，因此超限数组的元素 getter 不会被调用。
+ */
+function copySnapshotValue(value: unknown, depth: number): SnapshotResult<unknown> {
+  if (depth > EVENT_ADAPTER_LIMITS.maxSnapshotDepth) {
+    return { ok: false, gap: limitSnapshotGap('snapshot depth', EVENT_ADAPTER_LIMITS.maxSnapshotDepth, depth) };
   }
-  if (!isRecord(value)) {
-    return invalid(makeGap('invalid_consumption_evidence', 'consumption must be an explicit object'));
+  if (value === null) return { ok: true, value: null };
+  switch (typeof value) {
+    case 'string':
+      return value.length > EVENT_ADAPTER_LIMITS.maxStringChars
+        ? { ok: false, gap: limitSnapshotGap('snapshot string', EVENT_ADAPTER_LIMITS.maxStringChars, value.length) }
+        : { ok: true, value };
+    case 'number':
+      return Number.isFinite(value)
+        ? { ok: true, value }
+        : { ok: false, gap: makeGap('invalid_snapshot_value', 'snapshot numbers must be finite') };
+    case 'boolean':
+      return { ok: true, value };
+    case 'undefined':
+      return { ok: false, gap: makeGap('invalid_snapshot_value', 'undefined is not a journal-safe value') };
+    case 'bigint':
+    case 'symbol':
+    case 'function':
+      return { ok: false, gap: makeGap('invalid_snapshot_value', `${typeof value} is not a journal-safe value`) };
+    default:
+      break;
   }
-  if (value.kind === 'known_empty') {
+  if (Array.isArray(value)) {
+    if (value.length > EVENT_ADAPTER_LIMITS.maxArrayLength) {
+      return { ok: false, gap: limitSnapshotGap('snapshot array', EVENT_ADAPTER_LIMITS.maxArrayLength, value.length) };
+    }
+    const out: unknown[] = [];
+    for (let i = 0; i < value.length; i += 1) {
+      const item = copySnapshotValue(value[i], depth + 1);
+      if (!item.ok) return item;
+      out.push(item.value);
+    }
+    return { ok: true, value: out };
+  }
+  const object = value as Record<string, unknown>;
+  const prototype = Object.getPrototypeOf(object);
+  if (prototype !== Object.prototype && prototype !== null) {
+    return { ok: false, gap: makeGap('invalid_snapshot_value', 'snapshot objects must be plain objects') };
+  }
+  const keys = Object.keys(object);
+  if (keys.length > EVENT_ADAPTER_LIMITS.maxObjectKeys) {
+    return { ok: false, gap: limitSnapshotGap('snapshot object keys', EVENT_ADAPTER_LIMITS.maxObjectKeys, keys.length) };
+  }
+  const out: Record<string, unknown> = {};
+  for (const key of keys) {
+    if (key.length > EVENT_ADAPTER_LIMITS.maxIdChars) {
+      return { ok: false, gap: limitSnapshotGap('snapshot object key', EVENT_ADAPTER_LIMITS.maxIdChars, key.length) };
+    }
+    const item = object[key];
+    // 对象中的 undefined 与 JSON 语义一致（省略），不是伪造值。
+    if (item === undefined) continue;
+    const copied = copySnapshotValue(item, depth + 1);
+    if (!copied.ok) return copied;
+    out[key] = copied.value;
+  }
+  return { ok: true, value: out };
+}
+
+function snapshotTyped<T>(value: T): SnapshotResult<T> {
+  const copied = copySnapshotValue(value, 0);
+  if (!copied.ok) return copied;
+  // 快照保留原结构，仅做了资源边界检查；类型由调用点拥有的 typed 值保证。
+  return { ok: true, value: copied.value as T };
+}
+
+function resolveConsumption(
+  evidence: ConsumptionEvidence | undefined,
+  nav: NavResult,
+): ValidationResult<ActionRecord['consumption']> {
+  if (evidence === undefined) {
+    return invalid(makeGap('missing_consumption_evidence', 'consumption must be explicitly unknown/known_empty/measured; missing evidence is not written as []/0'));
+  }
+  const navConsumption = nav.consumption;
+  if (evidence.kind === 'unknown') {
+    return invalid(makeGap(
+      'unknown_consumption_evidence',
+      navConsumption === undefined
+        ? 'consumption is explicitly unknown and cannot be written as []/0'
+        : 'unknown consumption cannot override the actual consumption reported by the producer',
+    ));
+  }
+  if (evidence.kind === 'known_empty') {
+    if (navConsumption !== undefined
+      && (navConsumption.placed.length > 0 || navConsumption.durabilityLost !== undefined || navConsumption.digMs !== undefined)) {
+      return invalid(makeGap('consumption_conflict', 'known_empty evidence conflicts with the producer-reported consumption; no zero/default inserted'));
+    }
     return valid({ placed: [] });
   }
-  if (value.kind !== 'measured') {
-    return invalid(makeGap('invalid_consumption_evidence', 'consumption.kind must be known_empty or measured'));
+  if (evidence.kind !== 'measured') {
+    return invalid(makeGap('invalid_consumption_evidence', 'consumption.kind must be unknown, known_empty or measured'));
   }
-  if (!Array.isArray(value.placed)) {
-    return invalid(makeGap('invalid_consumption_evidence', 'measured consumption.placed must be an array'));
+  if (evidence.placed.length > EVENT_ADAPTER_LIMITS.maxPlacedBlocks) {
+    return invalid(limitSnapshotGap('consumption.placed', EVENT_ADAPTER_LIMITS.maxPlacedBlocks, evidence.placed.length));
   }
-  if (value.placed.length > EVENT_ADAPTER_LIMITS.maxPlacedBlocks) {
-    return invalid(makeGap('limit_exceeded', 'consumption.placed exceeds the fixed limit', {
-      limit: EVENT_ADAPTER_LIMITS.maxPlacedBlocks, actual: value.placed.length,
-    }));
+  if (navConsumption !== undefined && navConsumption.placed.length > EVENT_ADAPTER_LIMITS.maxPlacedBlocks) {
+    return invalid(limitSnapshotGap('NavResult.consumption.placed', EVENT_ADAPTER_LIMITS.maxPlacedBlocks, navConsumption.placed.length));
   }
-  const placedItems = value.placed.map(readPlacedBlock);
-  const badPlaced = placedItems.findIndex((item) => item === null);
-  if (badPlaced >= 0) {
-    return invalid(makeGap('invalid_consumption_evidence', `consumption.placed[${badPlaced}] must be {pos, name}`));
+  const placed: PlacedBlockConsumption[] = [];
+  for (const item of evidence.placed) {
+    if (item.name.length > EVENT_ADAPTER_LIMITS.maxStringChars) {
+      return invalid(limitSnapshotGap('consumption placed name', EVENT_ADAPTER_LIMITS.maxStringChars, item.name.length));
+    }
+    placed.push({ pos: { ...item.pos }, name: item.name });
   }
-  const durabilityLost = value.durabilityLost;
+  const durabilityLost = evidence.durabilityLost;
   if (durabilityLost !== undefined && (!isFiniteNumber(durabilityLost) || durabilityLost < 0)) {
     return invalid(makeGap('invalid_consumption_evidence', 'consumption.durabilityLost must be a non-negative finite number when present'));
   }
-  const digMs = value.digMs;
+  const digMs = evidence.digMs;
   if (digMs !== undefined && (!isFiniteNumber(digMs) || digMs < 0)) {
     return invalid(makeGap('invalid_consumption_evidence', 'consumption.digMs must be a non-negative finite number when present'));
   }
+  if (navConsumption !== undefined) {
+    if (navConsumption.placed.length !== placed.length) {
+      return invalid(makeGap('consumption_conflict', 'measured placed count differs from the producer-reported consumption'));
+    }
+    const mismatch = navConsumption.placed.findIndex((item, index) => {
+      const other = placed[index]!;
+      return !sameVec(item.pos, other.pos) || item.name !== other.name;
+    });
+    if (mismatch >= 0) {
+      return invalid(makeGap('consumption_conflict', `measured placed[${mismatch}] position/name differs from the producer-reported consumption`));
+    }
+    if (navConsumption.durabilityLost !== undefined) {
+      if (durabilityLost === undefined) {
+        return invalid(makeGap('consumption_conflict', 'measured evidence omits the producer-reported durabilityLost; no zero/default inserted'));
+      }
+      if (durabilityLost !== navConsumption.durabilityLost) {
+        return invalid(makeGap('consumption_conflict', 'measured durabilityLost differs from the producer-reported consumption'));
+      }
+    }
+    if (navConsumption.digMs !== undefined) {
+      if (digMs === undefined) {
+        return invalid(makeGap('consumption_conflict', 'measured evidence omits the producer-reported digMs; no zero/default inserted'));
+      }
+      if (digMs !== navConsumption.digMs) {
+        return invalid(makeGap('consumption_conflict', 'measured digMs differs from the producer-reported consumption'));
+      }
+    }
+  }
   return valid({
-    placed: placedItems.filter((item): item is PlacedBlockConsumption => item !== null),
+    placed,
     ...(durabilityLost !== undefined ? { durabilityLost } : {}),
     ...(digMs !== undefined ? { digMs } : {}),
   });
 }
 
-function readLibraryEffect(value: unknown): ValidationResult<EffectEvidence> {
-  if (!isRecord(value)) {
-    return invalid(makeGap('missing_effect_provenance', 'subAction effect must be library EffectEvidence, not a host summary'));
-  }
-  const kind = value.kind;
-  const worldId = value.worldId;
-  const dim = value.dim;
-  const sessionId = value.sessionId;
-  const observedAt = value.observedAt;
-  const verified = value.verified;
-  if (!isNonEmptyString(kind) || kind.length > EVENT_ADAPTER_LIMITS.maxIdChars
-    || !isNonEmptyString(worldId) || worldId.length > EVENT_ADAPTER_LIMITS.maxIdChars
-    || !isNonEmptyString(dim) || dim.length > EVENT_ADAPTER_LIMITS.maxIdChars
-    || !isNonEmptyString(sessionId) || sessionId.length > EVENT_ADAPTER_LIMITS.maxIdChars
-    || !isFiniteNumber(observedAt)
-    || typeof verified !== 'boolean') {
-    return invalid(makeGap('missing_effect_provenance', 'library EffectEvidence requires kind, worldId, dim, sessionId, observedAt and verified'));
-  }
-  const at = value.at === undefined ? undefined : readVec(value.at);
-  if (value.at !== undefined && at === null) {
-    return invalid(makeGap('missing_effect_provenance', 'library EffectEvidence.at must be a finite {x,y,z} when present'));
-  }
-  const block = value.block;
-  if (block !== undefined && (!isNonEmptyString(block) || block.length > EVENT_ADAPTER_LIMITS.maxIdChars)) {
-    return invalid(makeGap('missing_effect_provenance', 'library EffectEvidence.block must be a non-empty string when present'));
-  }
-  const actionId = value.actionId;
-  if (actionId !== undefined && (!isNonEmptyString(actionId) || actionId.length > EVENT_ADAPTER_LIMITS.maxIdChars)) {
-    return invalid(makeGap('missing_effect_provenance', 'library EffectEvidence.actionId must be a non-empty string when present'));
-  }
-  return valid({
-    kind,
-    ...(at !== null && at !== undefined ? { at } : {}),
-    ...(block !== undefined ? { block } : {}),
-    observedAt,
-    worldId,
-    dim,
-    sessionId,
-    ...(actionId !== undefined ? { actionId } : {}),
-    verified,
-  });
-}
-
-function readSubActions(value: unknown): ValidationResult<ActionRecord['subActions']> {
-  if (value === undefined) {
-    return invalid(makeGap('missing_sub_actions', 'subActions must be explicitly supplied; unknown side effects are not written as []'));
-  }
-  if (!Array.isArray(value)) {
-    return invalid(makeGap('invalid_sub_actions', 'subActions must be an array'));
-  }
-  if (value.length > EVENT_ADAPTER_LIMITS.maxSubActions) {
-    return invalid(makeGap('limit_exceeded', 'subActions exceeds the fixed limit', {
-      limit: EVENT_ADAPTER_LIMITS.maxSubActions, actual: value.length,
-    }));
-  }
-  const results = value.map((item, index): ValidationResult<ActionRecord['subActions'][number]> => {
-    if (!isRecord(item)) {
-      return invalid(makeGap('invalid_sub_actions', `subActions[${index}] must be an object`));
+function hostEffectDiagnostic(host: HostEffectEvidence | undefined): { diagnostic: HostEffectDiagnostic | null; gaps: PreparationGap[] } {
+  if (host === undefined) return { diagnostic: null, gaps: [] };
+  const reasons = host.reasons;
+  const total = Array.isArray(reasons) ? reasons.length : 0;
+  const take = Math.min(total, EVENT_ADAPTER_LIMITS.maxHostEffectReasons);
+  const kept: string[] = [];
+  let omitted = total - take;
+  // 只检查有界前缀；不 filter/slice 整个数组，因此不会触碰超限后的元素。
+  for (let i = 0; i < take; i += 1) {
+    const reason = reasons[i];
+    if (typeof reason !== 'string' || reason.length > EVENT_ADAPTER_LIMITS.maxReasonChars) {
+      omitted += 1;
+      continue;
     }
-    const kind = item.kind;
-    if (!isNonEmptyString(kind) || kind.length > EVENT_ADAPTER_LIMITS.maxIdChars) {
-      return invalid(makeGap('invalid_sub_actions', `subActions[${index}].kind must be a non-empty string`));
-    }
-    if (!isSubActionOrigin(item.origin)) {
-      return invalid(makeGap('invalid_sub_actions', `subActions[${index}].origin must be agent/execution_helper/scheduler`));
-    }
-    if (!isSubActionOutcome(item.outcome)) {
-      return invalid(makeGap('invalid_sub_actions', `subActions[${index}].outcome is not supported`));
-    }
-    const at = item.at === undefined ? undefined : readVec(item.at);
-    if (item.at !== undefined && at === null) {
-      return invalid(makeGap('invalid_sub_actions', `subActions[${index}].at must be a finite {x,y,z} when present`));
-    }
-    const block = item.block;
-    if (block !== undefined && (!isNonEmptyString(block) || block.length > EVENT_ADAPTER_LIMITS.maxIdChars)) {
-      return invalid(makeGap('invalid_sub_actions', `subActions[${index}].block must be a non-empty string when present`));
-    }
-    const targetRole = item.targetRole;
-    if (targetRole !== undefined && !isSubActionRole(targetRole)) {
-      return invalid(makeGap('invalid_sub_actions', `subActions[${index}].targetRole is not supported`));
-    }
-    if (item.effects !== undefined && !Array.isArray(item.effects)) {
-      return invalid(makeGap('invalid_sub_actions', `subActions[${index}].effects must be an array when present`));
-    }
-    if (Array.isArray(item.effects) && item.effects.length > EVENT_ADAPTER_LIMITS.maxSubActionEffects) {
-      return invalid(makeGap('limit_exceeded', `subActions[${index}].effects exceeds the fixed limit`, {
-        limit: EVENT_ADAPTER_LIMITS.maxSubActionEffects, actual: item.effects.length,
-      }));
-    }
-    const effects = Array.isArray(item.effects) ? item.effects.map(readLibraryEffect) : [];
-    const badEffect = effects.findIndex((effect) => !effect.ok);
-    if (badEffect >= 0) {
-      const failed = effects[badEffect];
-      return invalid(...(failed !== undefined && !failed.ok ? failed.gaps : []));
-    }
-    return valid({
-      kind,
-      ...(at !== null && at !== undefined ? { at } : {}),
-      ...(block !== undefined ? { block } : {}),
-      origin: item.origin,
-      ...(targetRole !== undefined ? { targetRole } : {}),
-      outcome: item.outcome,
-      ...(Array.isArray(item.effects)
-        ? { effects: effects.filter((effect): effect is { ok: true; value: EffectEvidence } => effect.ok).map((effect) => effect.value) }
-        : {}),
-    });
-  });
-  const bad = results.find((result) => !result.ok);
-  if (bad !== undefined && !bad.ok) return invalid(...bad.gaps);
-  return valid(results.filter((result): result is { ok: true; value: ActionRecord['subActions'][number] } => result.ok).map((result) => result.value));
-}
-
-function readBlockProperties(value: unknown, what: string): ValidationResult<Record<string, string>> {
-  if (!isRecord(value)) {
-    return invalid(makeGap('invalid_current_observation', `${what}.properties must be an object`));
+    kept.push(reason);
   }
-  const entries = Object.entries(value);
-  if (entries.length > EVENT_ADAPTER_LIMITS.maxBlockProperties) {
-    return invalid(makeGap('limit_exceeded', `${what}.properties exceeds the fixed limit`, {
-      limit: EVENT_ADAPTER_LIMITS.maxBlockProperties, actual: entries.length,
-    }));
-  }
-  const invalidEntry = entries.find(([, property]) => {
-    if (typeof property === 'string') return false;
-    if (typeof property === 'number') return !Number.isFinite(property);
-    return typeof property !== 'boolean';
-  });
-  if (invalidEntry !== undefined) {
-    return invalid(makeGap('invalid_current_observation', `${what}.properties.${invalidEntry[0]} must be a string, finite number or boolean`));
-  }
-  return valid(Object.fromEntries(entries.map(([key, property]) => [key, String(property)] as const)));
-}
-
-function readObservation(value: unknown, what: string): ValidationResult<Observation> {
-  if (!isRecord(value)) {
-    return invalid(makeGap('invalid_previous_observation', `${what} must be a library Observation object`));
-  }
-  const worldId = value.worldId;
-  const dim = value.dim;
-  const sessionId = value.sessionId;
-  if (!isNonEmptyString(worldId) || worldId.length > EVENT_ADAPTER_LIMITS.maxIdChars
-    || !isNonEmptyString(dim) || dim.length > EVENT_ADAPTER_LIMITS.maxIdChars
-    || !isNonEmptyString(sessionId) || sessionId.length > EVENT_ADAPTER_LIMITS.maxIdChars) {
-    return invalid(makeGap('invalid_previous_observation', `${what} requires non-empty worldId, dim and sessionId`));
-  }
-  const pos = readVec(value.pos);
-  if (pos === null) {
-    return invalid(makeGap('invalid_previous_observation', `${what}.pos must be a finite {x,y,z}`));
-  }
-  const observedAt = value.observedAt;
-  if (!isFiniteNumber(observedAt)) {
-    return invalid(makeGap('invalid_previous_observation', `${what}.observedAt must be finite`));
-  }
-  const state = value.state;
-  if (!isRecord(state) || !isNonEmptyString(state.name) || state.name.length > EVENT_ADAPTER_LIMITS.maxIdChars) {
-    return invalid(makeGap('invalid_previous_observation', `${what}.state must contain a non-empty block name`));
-  }
-  const properties = readBlockProperties(state.properties, `${what}.state`);
-  if (!properties.ok) {
-    const propertyGap = properties.gaps[0];
-    return propertyGap?.code === 'limit_exceeded'
-      ? invalid(propertyGap)
-      : invalid(makeGap('invalid_previous_observation', propertyGap?.detail ?? `${what}.state.properties is invalid`));
-  }
-  const stateComplete = value.stateComplete;
-  if (typeof stateComplete !== 'boolean') {
-    return invalid(makeGap('invalid_previous_observation', `${what}.stateComplete must be an explicit boolean`));
-  }
-  const evidence = value.evidence;
-  if (!isEvidenceKind(evidence)) {
-    return invalid(makeGap('invalid_previous_observation', `${what}.evidence is not supported`));
-  }
-  const source = value.source;
-  if (!isObservationSource(source)) {
-    return invalid(makeGap('invalid_previous_observation', `${what}.source is not supported`));
-  }
-  const sequence = value.sequence;
-  if (!isSafeCount(sequence)) {
-    return invalid(makeGap('invalid_previous_observation', `${what}.sequence must be a non-negative safe integer`));
-  }
-  const originObservationId = value.originObservationId;
-  if (originObservationId !== undefined && !isSafeCount(originObservationId)) {
-    return invalid(makeGap('invalid_previous_observation', `${what}.originObservationId must be a non-negative safe integer when present`));
-  }
-  const actionId = value.actionId;
-  if (actionId !== undefined && (!isNonEmptyString(actionId) || actionId.length > EVENT_ADAPTER_LIMITS.maxIdChars)) {
-    return invalid(makeGap('invalid_previous_observation', `${what}.actionId must be a non-empty string when present`));
-  }
-  const observedWorldTick = value.observedWorldTick;
-  if (observedWorldTick !== undefined && (!isFiniteNumber(observedWorldTick) || observedWorldTick < 0)) {
-    return invalid(makeGap('invalid_previous_observation', `${what}.observedWorldTick must be a non-negative finite number when present`));
-  }
-  return valid({
-    pos,
-    state: { name: state.name, properties: properties.value },
-    stateComplete,
-    evidence,
-    observedAt,
-    ...(observedWorldTick !== undefined ? { observedWorldTick } : {}),
-    source,
-    sessionId,
-    ...(originObservationId !== undefined ? { originObservationId } : {}),
-    sequence,
-    ...(actionId !== undefined ? { actionId } : {}),
-    dim,
-    worldId,
-  });
-}
-
-function readObservedChanges(value: unknown): ValidationResult<Observation[]> {
-  if (value === undefined) {
-    return invalid(makeGap('missing_observed_changes', 'observedChanges must be explicitly supplied; unknown observation evidence is not written as []'));
-  }
-  if (!Array.isArray(value)) {
-    return invalid(makeGap('invalid_observed_changes', 'observedChanges must be an array of library Observations'));
-  }
-  if (value.length > EVENT_ADAPTER_LIMITS.maxObservedChanges) {
-    return invalid(makeGap('limit_exceeded', 'observedChanges exceeds the fixed limit', {
-      limit: EVENT_ADAPTER_LIMITS.maxObservedChanges, actual: value.length,
-    }));
-  }
-  const results = value.map((item, index) => readObservation(item, `observedChanges[${index}]`));
-  const bad = results.find((result) => !result.ok);
-  if (bad !== undefined && !bad.ok) {
-    const limitGap = bad.gaps.find((gap) => gap.code === 'limit_exceeded');
-    if (limitGap !== undefined) return invalid(limitGap);
-    const detail = bad.gaps.map((gap) => gap.detail).join('; ');
-    return invalid(makeGap('invalid_observed_changes', detail.length > 0 ? detail : 'observedChanges contains an invalid Observation'));
-  }
-  return valid(results.filter((result): result is { ok: true; value: Observation } => result.ok).map((result) => result.value));
-}
-
-function readHostEffectDiagnostic(value: unknown): { diagnostic: HostEffectDiagnostic | null; gaps: PreparationGap[] } {
-  if (!isRecord(value)) {
-    return {
-      diagnostic: null,
-      gaps: [makeGap('invalid_host_effect_evidence', 'hostEffectEvidence must be {verified, changed, reasons}', { blocking: false })],
-    };
-  }
-  const verified = value.verified;
-  const changed = value.changed;
-  const rawReasons = value.reasons;
-  if (typeof verified !== 'boolean' || typeof changed !== 'boolean' || !Array.isArray(rawReasons)) {
-    return {
-      diagnostic: null,
-      gaps: [makeGap('invalid_host_effect_evidence', 'hostEffectEvidence must be {verified:boolean, changed:boolean, reasons:string[]}', { blocking: false })],
-    };
-  }
-  const reasons = rawReasons.filter((reason): reason is string => typeof reason === 'string');
-  if (reasons.length !== rawReasons.length) {
-    return {
-      diagnostic: null,
-      gaps: [makeGap('invalid_host_effect_evidence', 'hostEffectEvidence.reasons must contain only strings', { blocking: false })],
-    };
-  }
-  const bounded = reasons.filter((reason) => reason.length <= EVENT_ADAPTER_LIMITS.maxReasonChars)
-    .slice(0, EVENT_ADAPTER_LIMITS.maxHostEffectReasons);
-  const omittedReasons = reasons.length - bounded.length;
   const gaps: PreparationGap[] = [
     makeGap(
       'unmappable_host_effect_evidence',
-      'host EffectEvidence has no observation scope/time and is never promoted to library EffectEvidence; it is retained only as a typed diagnostic',
+      'host EffectEvidence has no observation scope/time and is never promoted to library EffectEvidence; it is retained only as a bounded diagnostic',
       { blocking: false },
     ),
   ];
-  if (omittedReasons > 0) {
+  if (omitted > 0) {
     gaps.push(makeGap('limit_exceeded', 'hostEffectEvidence.reasons was bounded; omitted count is explicit', {
       blocking: false,
       limit: EVENT_ADAPTER_LIMITS.maxHostEffectReasons,
-      actual: reasons.length,
+      actual: total,
     }));
   }
   return {
-    diagnostic: { kind: 'host_effect_evidence', verified, changed, reasons: bounded, omittedReasons },
+    diagnostic: {
+      kind: 'host_effect_evidence',
+      verified: host.verified,
+      changed: host.changed,
+      reasons: kept,
+      omittedReasons: omitted,
+    },
     gaps,
   };
 }
 
 /**
- * 把真实类型化 NavResult 和调用者显式提供的实际证据准备成宿主 ActionRecord。
+ * 把真实类型化 NavResult 和调用者显式提供的类型化证据准备成宿主 ActionRecord。
+ * NavResult 通过固定形状上限后做完整独立快照；超限时不做快照，保留调用者原引用。
  * 纯函数：不读取当前状态、不写库、不生成 ID、不改写 nav 或 `memoryWrite`。
  */
 export function prepareNavigationAction(
@@ -1110,63 +1030,145 @@ export function prepareNavigationAction(
   nav: NavResult,
   input: NavigationActionEvidence,
 ): NavigationActionPreparation {
-  const raw: unknown = input;
   const gaps: PreparationGap[] = [];
   const diagnostics: HostEffectDiagnostic[] = [];
+  const evidence: NavigationActionEvidence | undefined = isRecord(input) ? input : undefined;
 
-  // 只对会被投影进记录的 NavResult 字段做有界检查；不重造完整 NavResult 校验器。
+  // 资源/关系预检：在索引或遍历之前完成；NavResult 超限时不再处理证据。
   const trace = nav.trace;
   if (!Array.isArray(trace)) {
     gaps.push(makeGap('invalid_nav_projection', 'NavResult.trace must be an array'));
-  } else {
-    if (trace.length > EVENT_ADAPTER_LIMITS.maxTracePoints) {
-      gaps.push(makeGap('limit_exceeded', 'NavResult.trace exceeds the fixed record limit', {
-        limit: EVENT_ADAPTER_LIMITS.maxTracePoints, actual: trace.length,
-      }));
-    }
-    if (trace.some((step) => readVec(step.pos) === null || !isFiniteNumber(step.ts))) {
-      gaps.push(makeGap('invalid_nav_projection', 'every NavResult.trace step must have a finite {x,y,z} and ts'));
-    }
+  } else if (trace.length > EVENT_ADAPTER_LIMITS.maxTracePoints) {
+    gaps.push(limitSnapshotGap('NavResult.trace', EVENT_ADAPTER_LIMITS.maxTracePoints, trace.length));
   }
-  if (nav.lastPosition !== undefined && readVec(nav.lastPosition) === null) {
-    gaps.push(makeGap('invalid_nav_projection', 'NavResult.lastPosition must be a finite {x,y,z} when present'));
+  const navPlaced = nav.consumption?.placed;
+  if (navPlaced !== undefined && !Array.isArray(navPlaced)) {
+    gaps.push(makeGap('invalid_nav_projection', 'NavResult.consumption.placed must be an array when present'));
+  } else if (navPlaced !== undefined && navPlaced.length > EVENT_ADAPTER_LIMITS.maxPlacedBlocks) {
+    gaps.push(limitSnapshotGap('NavResult.consumption.placed', EVENT_ADAPTER_LIMITS.maxPlacedBlocks, navPlaced.length));
   }
-  if (typeof nav.message !== 'string') {
-    gaps.push(makeGap('invalid_nav_projection', 'NavResult.message must be a string'));
-  }
-  if (typeof nav.confirmed !== 'boolean') {
-    gaps.push(makeGap('invalid_nav_projection', 'NavResult.confirmed must be a boolean'));
-  }
-  if (nav.outcome !== 'ARRIVED' && nav.outcome !== 'PARTIAL' && nav.outcome !== 'NO_PATH' && nav.outcome !== 'BLOCKED'
-    && nav.outcome !== 'CANCELLED' && nav.outcome !== 'TIMEOUT' && nav.outcome !== 'FAILED') {
-    gaps.push(makeGap('invalid_nav_projection', 'NavResult.outcome is not a supported navigation outcome'));
+  if (gaps.some((gap) => gap.blocking)) {
+    return {
+      status: 'unrecordable',
+      snapshot: 'not_created',
+      receipt,
+      nav,
+      ...(evidence !== undefined ? { evidence } : {}),
+      gaps,
+      diagnostics,
+    };
   }
 
-  if (!isRecord(raw)) {
-    gaps.push(makeGap('missing_consumption_evidence', 'action evidence must be an object with explicit consumption/subActions/observedChanges'));
-    return { status: 'unrecordable', receipt, nav, gaps, diagnostics };
-  }
-
-  const consumption = readConsumption(raw.consumption);
+  const consumption = resolveConsumption(evidence?.consumption, nav);
   if (!consumption.ok) gaps.push(...consumption.gaps);
-  const subActions = readSubActions(raw.subActions);
-  if (!subActions.ok) gaps.push(...subActions.gaps);
-  const observedChanges = readObservedChanges(raw.observedChanges);
-  if (!observedChanges.ok) gaps.push(...observedChanges.gaps);
 
-  if (raw.hostEffectEvidence !== undefined) {
-    const host = readHostEffectDiagnostic(raw.hostEffectEvidence);
+  const subActions = evidence?.subActions;
+  if (subActions === undefined) {
+    gaps.push(makeGap('missing_sub_actions', 'subActions must be explicitly supplied; missing evidence is not written as []'));
+  } else if (subActions.length > EVENT_ADAPTER_LIMITS.maxSubActions) {
+    gaps.push(limitSnapshotGap('subActions', EVENT_ADAPTER_LIMITS.maxSubActions, subActions.length));
+  } else {
+    // 只检查有界数量的子动作的 effects 长度；不做字段 schema 重校验。
+    const badEffects = subActions.findIndex((action) => (action.effects?.length ?? 0) > EVENT_ADAPTER_LIMITS.maxSubActionEffects);
+    if (badEffects >= 0) {
+      gaps.push(limitSnapshotGap(`subActions[${badEffects}].effects`, EVENT_ADAPTER_LIMITS.maxSubActionEffects, subActions[badEffects]!.effects!.length));
+    }
+  }
+
+  const observedChanges = evidence?.observedChanges;
+  if (observedChanges === undefined) {
+    gaps.push(makeGap('missing_observed_changes', 'observedChanges must be explicitly supplied; missing evidence is not written as []'));
+  } else if (observedChanges.length > EVENT_ADAPTER_LIMITS.maxObservedChanges) {
+    gaps.push(limitSnapshotGap('observedChanges', EVENT_ADAPTER_LIMITS.maxObservedChanges, observedChanges.length));
+  }
+
+  if (evidence?.hostEffectEvidence !== undefined) {
+    const host = hostEffectDiagnostic(evidence.hostEffectEvidence);
     if (host.diagnostic !== null) diagnostics.push(host.diagnostic);
     gaps.push(...host.gaps);
   }
 
   if (gaps.some((gap) => gap.blocking)) {
-    return { status: 'unrecordable', receipt, nav, gaps, diagnostics };
+    return {
+      status: 'unrecordable',
+      snapshot: 'not_created',
+      receipt,
+      nav,
+      ...(evidence !== undefined ? { evidence } : {}),
+      gaps,
+      diagnostics,
+    };
   }
-  if (!consumption.ok || !subActions.ok || !observedChanges.ok) {
-    // 理论上已被 blocking 分支覆盖；保留显式不可录制，避免静默构造不完整记录。
-    return { status: 'unrecordable', receipt, nav, gaps, diagnostics };
+  if (!consumption.ok || subActions === undefined || observedChanges === undefined) {
+    return {
+      status: 'unrecordable',
+      snapshot: 'not_created',
+      receipt,
+      nav,
+      ...(evidence !== undefined ? { evidence } : {}),
+      gaps,
+      diagnostics,
+    };
   }
+
+  const subActionSnapshot = snapshotTyped(subActions);
+  if (!subActionSnapshot.ok) gaps.push(subActionSnapshot.gap);
+  const observedChangeSnapshot = snapshotTyped(observedChanges);
+  if (!observedChangeSnapshot.ok) gaps.push(observedChangeSnapshot.gap);
+  if (gaps.some((gap) => gap.blocking)) {
+    return {
+      status: 'unrecordable',
+      snapshot: 'not_created',
+      receipt,
+      nav,
+      ...(evidence !== undefined ? { evidence } : {}),
+      gaps,
+      diagnostics,
+    };
+  }
+  if (!consumption.ok || !subActionSnapshot.ok || !observedChangeSnapshot.ok) {
+    return {
+      status: 'unrecordable',
+      snapshot: 'not_created',
+      receipt,
+      nav,
+      ...(evidence !== undefined ? { evidence } : {}),
+      gaps,
+      diagnostics,
+    };
+  }
+
+  // 全部上限通过后才创建完整 NavResult 快照；不挑字段、不保留原对象引用。
+  const navSnapshot = snapshotTyped(nav);
+  if (!navSnapshot.ok) {
+    gaps.push(navSnapshot.gap);
+    return {
+      status: 'unrecordable',
+      snapshot: 'not_created',
+      receipt,
+      nav,
+      ...(evidence !== undefined ? { evidence } : {}),
+      gaps,
+      diagnostics,
+    };
+  }
+  const terminal = navSnapshot.value;
+
+  // confirmed 直接保留原值（PARTIAL/CANCELLED 也可能为 true）。
+  // to 只在 ARRIVED 且真实 LastObservation 与动作作用域一致时投影；lastPosition 不推断 failureAt。
+  const lastObservation = terminal.lastObservation;
+  const observationScopeMatches = lastObservation !== undefined
+    && lastObservation.worldId === receipt.originalStart.worldId
+    && lastObservation.dim === receipt.originalStart.dim
+    && lastObservation.sessionId === receipt.originalStart.sessionId;
+  if (terminal.outcome === 'ARRIVED' && !observationScopeMatches) {
+    gaps.push(makeGap(
+      'terminal_scope_mismatch',
+      'ARRIVED lastPosition is not projected to top-level to because the real LastObservation does not match the original action scope',
+      { blocking: false },
+    ));
+  }
+  const projectTo = terminal.outcome === 'ARRIVED' && observationScopeMatches;
 
   const extension: CurioActionExtensionV1 = {
     version: CURIO_ACTION_EXTENSION_VERSION,
@@ -1176,6 +1178,7 @@ export function prepareNavigationAction(
     source: receipt.source,
     request: copyOriginalRequest(receipt.request),
     originalStart: copyStart(receipt.originalStart),
+    budget: copyBudget(receipt.budget),
   };
 
   const record: HostActionRecord = {
@@ -1187,181 +1190,151 @@ export function prepareNavigationAction(
     delegationId: receipt.delegationId,
     ...(receipt.parentActionId !== undefined ? { parentActionId: receipt.parentActionId } : {}),
     delegation: copyDelegation(receipt.delegation),
-    subActions: subActions.value,
+    subActions: [...subActionSnapshot.value],
     from: { ...receipt.originalStart.pos },
-    ...(nav.outcome === 'ARRIVED'
-      ? { to: { ...nav.lastPosition } }
-      : nav.lastPosition !== undefined
-        ? { failureAt: { ...nav.lastPosition } }
-        : {}),
-    trace: trace.map((step) => ({ pos: { ...step.pos }, ts: step.ts })),
+    ...(projectTo ? { to: { ...terminal.lastPosition } } : {}),
+    trace: terminal.trace.map((step) => ({ pos: { ...step.pos }, ts: step.ts })),
     consumption: consumption.value,
-    observedChanges: observedChanges.value,
-    ...(nav.outcome !== 'ARRIVED' ? { failureReason: nav.message } : {}),
-    confirmed: nav.outcome === 'ARRIVED' && nav.confirmed,
-    result: nav,
+    observedChanges: [...observedChangeSnapshot.value],
+    ...(terminal.outcome !== 'ARRIVED' ? { failureReason: terminal.message } : {}),
+    confirmed: terminal.confirmed,
+    result: terminal,
     curio: extension,
   };
 
-  return { status: 'prepared', record, receipt, nav, gaps, diagnostics };
-}
-
-/** 把实际视锥 BlockObservation 映射为库 Observation；序列与原始 observationId 分开。 */
-function convertCurrentObservation(value: unknown): ValidationResult<{
-  observation: Observation;
-  worldId: string;
-  dim: string;
-  sessionId: string;
-  pos: Vec3Like;
-  observedAt: number;
-}> {
-  if (!isRecord(value)) {
-    return invalid(makeGap('invalid_current_observation', 'current must be an actual BlockObservation object'));
-  }
-  const worldId = value.worldId;
-  const dim = value.dimension;
-  const sessionId = value.sessionId;
-  if (!isNonEmptyString(worldId) || worldId.length > EVENT_ADAPTER_LIMITS.maxIdChars
-    || !isNonEmptyString(dim) || dim.length > EVENT_ADAPTER_LIMITS.maxIdChars
-    || !isNonEmptyString(sessionId) || sessionId.length > EVENT_ADAPTER_LIMITS.maxIdChars) {
-    return invalid(makeGap('invalid_current_observation', 'current requires non-empty worldId, dimension and sessionId'));
-  }
-  const pos = readVec(value.pos);
-  if (pos === null) {
-    return invalid(makeGap('invalid_current_observation', 'current.pos must be a finite {x,y,z}'));
-  }
-  const observedAt = value.observedAt;
-  if (!isFiniteNumber(observedAt)) {
-    return invalid(makeGap('invalid_current_observation', 'current.observedAt must be the real acquisition time'));
-  }
-  const observationId = value.observationId;
-  if (!isSafeCount(observationId)) {
-    return invalid(makeGap('invalid_current_observation', 'current.observationId must be a non-negative safe integer'));
-  }
-  const name = value.name;
-  if (!isNonEmptyString(name) || name.length > EVENT_ADAPTER_LIMITS.maxIdChars) {
-    return invalid(makeGap('invalid_current_observation', 'current.name must be a non-empty block name'));
-  }
-  if (value.source !== 'vision') {
-    return invalid(makeGap('invalid_current_observation', 'current.source must be vision'));
-  }
-  if (value.stateComplete !== undefined && typeof value.stateComplete !== 'boolean') {
-    return invalid(makeGap('invalid_current_observation', 'current.stateComplete must be boolean when present'));
-  }
-  // 缺失的属性对象按空属性处理，但 stateComplete 仍严格由显式 true 决定；不推断完整。
-  const rawProperties = value.properties === undefined ? {} : value.properties;
-  const properties = readBlockProperties(rawProperties, 'current');
-  if (!properties.ok) {
-    const propertyGap = properties.gaps[0];
-    return propertyGap?.code === 'limit_exceeded'
-      ? invalid(propertyGap)
-      : invalid(makeGap('invalid_current_observation', propertyGap?.detail ?? 'current.properties is invalid'));
-  }
-  const observation: Observation = {
-    pos,
-    state: { name, properties: properties.value },
-    stateComplete: value.stateComplete === true,
-    evidence: 'seen',
-    observedAt,
-    source: 'vision',
-    sessionId,
-    originObservationId: observationId,
-    sequence: 0,
-    dim,
-    worldId,
+  return {
+    status: 'prepared',
+    snapshot: 'independent_bounded_copy',
+    record,
+    receipt,
+    nav,
+    gaps,
+    diagnostics,
   };
-  return valid({ observation, worldId, dim, sessionId, pos, observedAt });
 }
 
 /**
- * 准备一条 observed_cell_change 事件。current 必须是实际 BlockObservation，
- * sequence 是显式边界接收序号；previous 缺失表示未知，不表示空气。
+ * 把实际视锥 BlockObservation 映射为库 Observation。properties 是真实 typed
+ * 字段：缺失时拒绝，不用 {} 顶替并保留 stateComplete=true。普通视觉不携带
+ * actionId；序号与原始 observationId 分开。
  */
 export function prepareObservedCellEvent(input: ObservedCellEventInput): ObservedCellEventPreparation {
-  const raw: unknown = input;
-  if (!isRecord(raw)) {
-    return { status: 'refused', gaps: [makeGap('missing_event_identity', 'observed cell event input must be an object')] };
-  }
-  const id = raw.id;
+  const id = input?.id;
   if (!isNonEmptyString(id)) {
     return { status: 'refused', gaps: [makeGap('missing_event_identity', 'event id must be a stable caller-supplied identity')] };
   }
   if (id.length > EVENT_ADAPTER_LIMITS.maxIdChars) {
-    return { status: 'refused', gaps: [makeGap('limit_exceeded', 'event id is too long', {
-      limit: EVENT_ADAPTER_LIMITS.maxIdChars, actual: id.length,
-    })] };
+    return { status: 'refused', gaps: [limitSnapshotGap('event id', EVENT_ADAPTER_LIMITS.maxIdChars, id.length)] };
   }
-  if (!isSafeCount(raw.sequence)) {
+  if (!isSafeCount(input.sequence)) {
     return { status: 'refused', gaps: [makeGap('invalid_sequence', 'sequence must be the explicit non-negative boundary receive order, not observationId')] };
   }
-  const current = convertCurrentObservation(raw.current);
-  if (!current.ok) return { status: 'refused', gaps: current.gaps };
+  const current = input.current;
+  if (current === null || typeof current !== 'object') {
+    return { status: 'refused', gaps: [makeGap('invalid_current_observation', 'current must be an actual BlockObservation object')] };
+  }
+  const pos = readVec(current.pos);
+  if (!isNonEmptyString(current.worldId) || current.worldId.length > EVENT_ADAPTER_LIMITS.maxIdChars
+    || !isNonEmptyString(current.dimension) || current.dimension.length > EVENT_ADAPTER_LIMITS.maxIdChars
+    || !isNonEmptyString(current.sessionId) || current.sessionId.length > EVENT_ADAPTER_LIMITS.maxIdChars
+    || !isNonEmptyString(current.name) || current.name.length > EVENT_ADAPTER_LIMITS.maxIdChars
+    || !isFiniteNumber(current.observedAt)
+    || !isSafeCount(current.observationId)
+    || current.source !== 'vision'
+    || pos === null) {
+    return { status: 'refused', gaps: [makeGap('invalid_current_observation', 'current requires the actual typed BlockObservation scope, position, name, observationId, observedAt and source')] };
+  }
+  if (!isRecord(current.properties)) {
+    return { status: 'refused', gaps: [makeGap(
+      'invalid_current_observation',
+      'BlockObservation.properties is required; missing properties are not defaulted to {} and stateComplete is not inferred',
+    )] };
+  }
+  const propertyKeys = Object.keys(current.properties);
+  if (propertyKeys.length > EVENT_ADAPTER_LIMITS.maxBlockProperties) {
+    return { status: 'refused', gaps: [limitSnapshotGap('current.properties', EVENT_ADAPTER_LIMITS.maxBlockProperties, propertyKeys.length)] };
+  }
+  const properties: Record<string, string> = {};
+  for (const key of propertyKeys) {
+    if (key.length > EVENT_ADAPTER_LIMITS.maxIdChars) {
+      return { status: 'refused', gaps: [limitSnapshotGap('current.properties key', EVENT_ADAPTER_LIMITS.maxIdChars, key.length)] };
+    }
+    const value = current.properties[key];
+    if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') {
+      return { status: 'refused', gaps: [makeGap('invalid_current_observation', `current.properties.${key} must be a string, number or boolean`) ] };
+    }
+    const text = String(value);
+    if (text.length > EVENT_ADAPTER_LIMITS.maxStringChars) {
+      return { status: 'refused', gaps: [limitSnapshotGap(`current.properties.${key}`, EVENT_ADAPTER_LIMITS.maxStringChars, text.length)] };
+    }
+    properties[key] = text;
+  }
+
+  const observation: Observation = {
+    pos,
+    state: { name: current.name, properties },
+    stateComplete: current.stateComplete === true,
+    evidence: 'seen',
+    observedAt: current.observedAt,
+    source: 'vision',
+    sessionId: current.sessionId,
+    originObservationId: current.observationId,
+    sequence: input.sequence,
+    dim: current.dimension,
+    worldId: current.worldId,
+  };
 
   let previous: Observation | undefined;
-  if (raw.previous !== undefined) {
-    const readPrevious = readObservation(raw.previous, 'previous');
-    if (!readPrevious.ok) return { status: 'refused', gaps: readPrevious.gaps };
-    if (readPrevious.value.worldId !== current.value.worldId
-      || readPrevious.value.dim !== current.value.dim
-      || !sameVec(readPrevious.value.pos, current.value.pos)) {
+  if (input.previous !== undefined) {
+    if (input.previous.worldId !== current.worldId
+      || input.previous.dim !== current.dimension
+      || !sameVec(input.previous.pos, pos)) {
       return { status: 'refused', gaps: [makeGap('previous_scope_mismatch', 'previous observation scope/cell does not match the current event; older session/time is allowed but scope is not')] };
     }
-    previous = readPrevious.value;
+    const copied = snapshotTyped(input.previous);
+    if (!copied.ok) return { status: 'refused', gaps: [copied.gap] };
+    previous = copied.value;
   }
 
-  const actionId = raw.actionId;
-  if (actionId !== undefined && (!isNonEmptyString(actionId) || actionId.length > EVENT_ADAPTER_LIMITS.maxIdChars)) {
-    return { status: 'refused', gaps: [makeGap('invalid_event_identity', 'actionId must be a non-empty string within the id limit when present; it is never inferred from vision')] };
-  }
-
-  const observation: Observation = { ...current.value.observation, sequence: raw.sequence };
   const event: ObservedCellChangeEvent = {
     kind: 'observed_cell_change',
     id,
-    observedAt: current.value.observedAt,
-    worldId: current.value.worldId,
-    dim: current.value.dim,
-    sessionId: current.value.sessionId,
-    pos: { ...current.value.pos },
+    observedAt: current.observedAt,
+    worldId: current.worldId,
+    dim: current.dimension,
+    sessionId: current.sessionId,
+    pos: { ...pos },
     current: observation,
     ...(previous !== undefined ? { previous } : {}),
-    ...(actionId !== undefined ? { actionId } : {}),
   };
   return { status: 'prepared', event };
 }
 
 /** 准备一条 observation_gap 事件；不改变体素状态，不使用当前作用域/发布时刻补齐。 */
 export function prepareObservationGapEvent(input: ObservationGapEventInput): ObservationGapEventPreparation {
-  const raw: unknown = input;
-  if (!isRecord(raw)) {
-    return { status: 'refused', gaps: [makeGap('invalid_gap_scope', 'observation gap input must be an object')] };
-  }
-  const id = raw.id;
+  const id = input?.id;
   if (!isNonEmptyString(id)) {
     return { status: 'refused', gaps: [makeGap('missing_event_identity', 'gap id must be a stable caller-supplied identity')] };
   }
   if (id.length > EVENT_ADAPTER_LIMITS.maxIdChars) {
-    return { status: 'refused', gaps: [makeGap('limit_exceeded', 'gap id is too long', {
-      limit: EVENT_ADAPTER_LIMITS.maxIdChars, actual: id.length,
-    })] };
+    return { status: 'refused', gaps: [limitSnapshotGap('gap id', EVENT_ADAPTER_LIMITS.maxIdChars, id.length)] };
   }
-  const worldId = raw.worldId;
-  const dim = raw.dim;
-  const sessionId = raw.sessionId;
+  const worldId = input.worldId;
+  const dim = input.dim;
+  const sessionId = input.sessionId;
   if (!isNonEmptyString(worldId) || worldId.length > EVENT_ADAPTER_LIMITS.maxIdChars
     || !isNonEmptyString(dim) || dim.length > EVENT_ADAPTER_LIMITS.maxIdChars
     || !isNonEmptyString(sessionId) || sessionId.length > EVENT_ADAPTER_LIMITS.maxIdChars) {
     return { status: 'refused', gaps: [makeGap('invalid_gap_scope', 'gap requires the original non-empty worldId, dim and sessionId')] };
   }
-  const observedAt = raw.observedAt;
-  if (!isFiniteNumber(observedAt)) {
+  if (!isFiniteNumber(input.observedAt)) {
     return { status: 'refused', gaps: [makeGap('invalid_gap_time', 'gap observedAt must be the original lifecycle/observation time; publish time is not a substitute')] };
   }
-  if (!isGapReason(raw.reason)) {
+  if (!isGapReason(input.reason)) {
     return { status: 'refused', gaps: [makeGap('invalid_gap_reason', 'gap reason must be one of the actual observation/lifecycle gap reasons')] };
   }
-  const pos = raw.pos === undefined ? undefined : readVec(raw.pos);
-  if (raw.pos !== undefined && pos === null) {
+  const pos = input.pos === undefined ? undefined : readVec(input.pos);
+  if (input.pos !== undefined && pos === null) {
     return { status: 'refused', gaps: [makeGap('invalid_gap_scope', 'gap pos must be a finite {x,y,z} when present')] };
   }
   return {
@@ -1369,11 +1342,11 @@ export function prepareObservationGapEvent(input: ObservationGapEventInput): Obs
     event: {
       kind: 'observation_gap',
       id,
-      observedAt,
+      observedAt: input.observedAt,
       worldId,
       dim,
       sessionId,
-      reason: raw.reason,
+      reason: input.reason,
       ...(pos !== null && pos !== undefined ? { pos } : {}),
     },
   };
@@ -1408,7 +1381,7 @@ export function readCurioActionExtension(record: unknown): CurioActionExtensionR
     return { status: 'malformed', errors: ['curio.planVersion must be a non-negative safe integer'] };
   }
   const source = rawExtension.source;
-  if (!isNavigationTaskSource(source)) {
+  if (!isTaskSource(source)) {
     return { status: 'malformed', errors: ['curio.source must be the original llm/rule/filler/reflex/user TaskSource'] };
   }
   const request = readOriginalRequest(rawExtension.request);
@@ -1418,6 +1391,10 @@ export function readCurioActionExtension(record: unknown): CurioActionExtensionR
   const originalStart = readOriginalStart(rawExtension.originalStart);
   if (!originalStart.ok) {
     return { status: 'malformed', errors: originalStart.gaps.map((gap) => `curio.originalStart: ${gap.detail}`) };
+  }
+  const budget = readBudget(rawExtension.budget, request.value);
+  if (!budget.ok) {
+    return { status: 'malformed', errors: budget.gaps.map((gap) => `curio.budget: ${gap.detail}`) };
   }
   return {
     status: 'ok',
@@ -1429,6 +1406,7 @@ export function readCurioActionExtension(record: unknown): CurioActionExtensionR
       source,
       request: request.value,
       originalStart: originalStart.value,
+      budget: budget.value,
     },
   };
 }
@@ -1447,8 +1425,9 @@ function describePersistenceError(error: unknown): PersistenceErrorFacts {
 
 /**
  * 只通过传入的公共 `session.journal.recordBatch` 入队已准备事实。
- * 接受不是保存：返回 accepted_pending_checkpoint。拒绝时保留原记录引用以便显式重试；
- * 不 checkpoint/flush/close，不创建 store/worker/定时器，不重试、不去重、不重新编号。
+ * acceptance 不是持久 ACK：返回 accepted_pending_checkpoint。拒绝时保留原记录引用
+ * 以便显式重试；不 checkpoint/flush/close，不创建 store/worker/定时器，不重试、
+ * 不去重、不重新编号。
  */
 export function enqueuePreparedFacts(
   session: PreparedJournalSink,
