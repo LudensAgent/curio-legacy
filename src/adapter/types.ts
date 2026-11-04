@@ -313,7 +313,7 @@ export interface DriveResult extends ActionResult { moved: number; ms: number; s
 export interface GameAdapter {
   on(event: AdapterEvent, cb: (...args: any[]) => void): this;
   /** Standard listener removal for host-owned lifecycle bindings; optional for minimal adapters. */
-  off?(event: AdapterEvent, cb: (...args: any[]) => void): this;
+  off?(event: AdapterEvent, cb: (...args: unknown[]) => void): this;
 
   state(): AgentState;
   inventorySlots?(): InventorySlot[];

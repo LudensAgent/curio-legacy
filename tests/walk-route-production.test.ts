@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -41,7 +42,9 @@ function makeWalkAdapter() {
   let moveToCalls = 0;
   let stopAllCount = 0;
 
-  const adapter = {
+  // Genuine EventEmitter so Arbiter's real lifecycle binding works like production;
+  // a plain object without on/off made the constructor throw after the DB opened.
+  const adapter = Object.assign(new EventEmitter(), {
     state: () => ({
       worldId: 'world', dim: 'overworld', sessionId: 's1', alive: true, connected: true, observationReady: true,
       pos: { x: entity.position.x, y: entity.position.y, z: entity.position.z }, onGround: entity.onGround, inventory: [],
@@ -61,7 +64,7 @@ function makeWalkAdapter() {
     look: async (yaw: number, pitch: number) => { bot.look(yaw, pitch); },
     moveTo: async () => { moveToCalls++; },
     stopAll: () => { stopAllCount++; bot.clearControlStates(); },
-  } as unknown as GameAdapter;
+  }) as unknown as GameAdapter;
 
   return { adapter, controlLog, getMoveToCalls: () => moveToCalls, getStopAllCount: () => stopAllCount, control, entity };
 }
@@ -114,7 +117,11 @@ async function closeShared(svc: SharedSpatialSession, dir: string): Promise<void
   const result = await svc.shutdown();
   assert.equal(result.error, null);
   assert.equal(result.cancelError, null);
-  assert.ok(result.close !== null && result.close.completed && result.close.error === null);
+  assert.equal(result.closeError, null);
+  assert.ok(result.close !== null, 'real close must return a result');
+  assert.equal(result.close.completed, true);
+  assert.equal(result.close.error, null);
+  assert.equal(result.close.unconfirmedRequest, false);
   rmSync(dir, { recursive: true, force: true });
 }
 
@@ -132,15 +139,17 @@ test('validate：null/非相邻/对角/超大跨度在零副作用前拒绝，�
   assert.ok(reject({ points: [[0.5, 0, 0.5], [1.5, 0, 0.5]] }).ok, '合法相邻路线应通过');
 });
 
-test('walk_route 经真实 Arbiter 入口走通三段转弯，身体桥不调用 moveTo', { timeout: 45000 }, async () => {
+test('walk_route 经真实 Arbiter 入口走通三段转弯，身体桥不调用 moveTo', async () => {
   const { adapter, getMoveToCalls, control } = makeWalkAdapter();
   const bus = new EventBus();
   const memory = new WorldMemory(null);
   const { svc, dir } = await openShared();
-  const arbiter = new Arbiter(adapter, memory, bus, sharedFlatSenses(svc), svc);
+  let arbiter: Arbiter | null = null;
   try {
-    const done = new Promise<TaskOutcome>((r) => arbiter.once('done', r));
-    arbiter.start({ skill: 'walk_route', args: { points: points3 } }, 'llm');
+    // 构造可能因适配器缺少事件方法而抛错；必须在真实 Worker 已打开后仍走 finally 关闭。
+    arbiter = new Arbiter(adapter, memory, bus, sharedFlatSenses(svc), svc);
+    const done = new Promise<TaskOutcome>((r) => arbiter!.once('done', r));
+    arbiter!.start({ skill: 'walk_route', args: { points: points3 } }, 'llm');
     const o = await done;
     assert.equal(o.result.status, 'succeeded', o.result.summary);
     assert.equal((o.result.data?.nav as { outcome: string }).outcome, 'ARRIVED');
@@ -148,19 +157,20 @@ test('walk_route 经真实 Arbiter 入口走通三段转弯，身体桥不调用
     assert.equal(control.forward, false, '到达后应松开前进键');
     assert.equal(svc.session.voxel.cellAt('overworld', 1, -1, 0).observed, true, '真实步行观测必须写入共享地图');
   } finally {
-    arbiter.dispose();
+    arbiter?.dispose();
     await closeShared(svc, dir);
   }
 });
 
-test('真实 Arbiter 取消在途 walk_route：取消后不再写前进键，不复活', { timeout: 45000 }, async () => {
+test('真实 Arbiter 取消在途 walk_route：取消后不再写前进键，不复活', async () => {
   const { adapter, controlLog } = makeWalkAdapter();
   const bus = new EventBus();
   const memory = new WorldMemory(null);
   const { svc, dir } = await openShared();
-  const arbiter = new Arbiter(adapter, memory, bus, sharedFlatSenses(svc), svc);
+  let arbiter: Arbiter | null = null;
   try {
-    const done = new Promise<TaskOutcome>((r) => arbiter.once('done', r));
+    arbiter = new Arbiter(adapter, memory, bus, sharedFlatSenses(svc), svc);
+    const done = new Promise<TaskOutcome>((r) => arbiter!.once('done', r));
     arbiter.start({ skill: 'walk_route', args: { points: points3 } }, 'llm');
     // 等身体桥真正开始前进（出现 forward=true）再取消，覆盖移动期而非仅初始化期。
     const startedAt = Date.now();
@@ -177,7 +187,7 @@ test('真实 Arbiter 取消在途 walk_route：取消后不再写前进键，不
     const forwardAfter = controlLog.slice(boundary).filter((e) => e.kind === 'set' && e.name === 'forward' && e.value === true);
     assert.deepEqual(forwardAfter, [], '取消后身体桥不得重新按下前进键');
   } finally {
-    arbiter.dispose();
+    arbiter?.dispose();
     await closeShared(svc, dir);
   }
 });

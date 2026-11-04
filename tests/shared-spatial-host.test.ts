@@ -9,6 +9,7 @@
  *   - MineflayerAdapter 的真实 newSession 路径发出一次 session_reset，旧会话/迟到调用不能重新取得控制。
  */
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -19,7 +20,7 @@ import { WalkRouteExecutor } from 'curio-minecraft-3d-memory';
 import type { BodySample, ChangeReport } from 'curio-minecraft-3d-memory';
 import { Arbiter, type TaskOutcome } from '../src/arbiter/arbiter.ts';
 import { MineflayerAdapter } from '../src/adapter/mineflayer.ts';
-import type { WalkBody } from '../src/adapter/walk-route.ts';
+import type { WalkBody, WalkTick } from '../src/adapter/walk-route.ts';
 import { EventBus } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { DEFAULT_VISION, Vision } from '../src/perception/vision.ts';
@@ -36,6 +37,7 @@ const { Physics, PlayerState } = require('prismarine-physics');
 const WORLD = 'fake-world';
 const POINTS_A = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }];
 const POINTS_B = [{ x: 1.5, y: 0, z: 0.5 }, { x: 2.5, y: 0, z: 0.5 }];
+const POINTS_LONG = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 1.5 }, { x: 2.5, y: 0, z: 1.5 }];
 
 async function openShared(worldId = WORLD): Promise<{ svc: SharedSpatialSession; dir: string }> {
   const dir = mkdtempSync(join(tmpdir(), 'shared-spatial-host-'));
@@ -68,6 +70,9 @@ class WalkHostAdapter extends FakeAdapter {
     isCollidedHorizontally: false, isCollidedVertically: false, yaw: 0, pitch: 0, effects: {}, attributes: {},
   };
   readonly control: Record<string, boolean> = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
+  readonly controlLog: { name: string; value: boolean }[] = [];
+  /** Test hook: false stops delivering frames (and never lets a frame reach Vision). */
+  framesEnabled = true;
   readonly bot: Record<string, unknown>;
   private readonly physics: unknown;
   private readonly world: unknown;
@@ -83,7 +88,10 @@ class WalkHostAdapter extends FakeAdapter {
     this.bot = {
       version: '1.20.1', entity: this.entity, jumpTicks: 0, jumpQueued: false, fireworkRocketDuration: 0,
       inventory: { slots: [] },
-      setControlState: (name: string, value: boolean) => { this.control[name] = value; },
+      setControlState: (name: string, value: boolean) => {
+        this.control[name] = value;
+        this.controlLog.push({ name, value });
+      },
       clearControlStates: () => { for (const key of Object.keys(this.control)) this.control[key] = false; },
       look: (yaw: number, pitch: number) => { this.entity.yaw = yaw; this.entity.pitch = pitch; },
     };
@@ -107,7 +115,10 @@ class WalkHostAdapter extends FakeAdapter {
 
   walkBody() {
     return {
-      setControlState: (name: string, value: boolean) => { this.control[name] = value; },
+      setControlState: (name: string, value: boolean) => {
+        this.control[name] = value;
+        this.controlLog.push({ name, value });
+      },
       clearControlStates: () => { for (const key of Object.keys(this.control)) this.control[key] = false; },
       // 身体朝向必须同时写入物理实体与 Vision 读取的 adapter 朝向，二者是同一套控制。
       look: (yaw: number, pitch: number) => {
@@ -127,8 +138,18 @@ class WalkHostAdapter extends FakeAdapter {
   beforeFrame: (() => void) | null = null;
 
   walkTick() {
-    return () => new Promise<WalkBody['entity'] | null>((resolve) => {
+    return (signal: AbortSignal) => new Promise<WalkBody['entity'] | null>((resolve) => {
+      // A deliberately starved body delivers neither another frame nor EOF: the
+      // pending tick settles only when this run's own signal aborts, and removes
+      // its listener then. No background timer survives cancellation.
+      const stall = () => {
+        if (signal.aborted) { resolve(null); return; }
+        const onAbort = () => { signal.removeEventListener('abort', onAbort); resolve(null); };
+        signal.addEventListener('abort', onAbort, { once: true });
+      };
+      if (!this.framesEnabled) { stall(); return; }
       setTimeout(() => {
+        if (!this.framesEnabled) { stall(); return; }
         (this.physics as { simulatePlayer(ps: unknown, w: unknown): { apply(bot: unknown): void } })
           .simulatePlayer(new PlayerState(this.bot, this.control), this.world)
           .apply(this.bot);
@@ -139,6 +160,42 @@ class WalkHostAdapter extends FakeAdapter {
           onGround: this.entity.onGround, isInWater: this.entity.isInWater,
         });
       }, 50);
+    });
+  }
+}
+
+/**
+ * Actual pending physics tick: subscribes to a real emitter like production
+ * walkTick and resolves null on the signal it is actually given. Counts the
+ * real subscription/unsubscription so the test observes listener cleanup.
+ */
+class PendingTickHostAdapter extends WalkHostAdapter {
+  readonly physicsTick = new EventEmitter();
+  tickSubscriptions = 0;
+  tickUnsubscriptions = 0;
+
+  walkTick(): WalkTick {
+    return (signal) => new Promise<WalkBody['entity'] | null>((resolve) => {
+      if (signal.aborted) { resolve(null); return; }
+      this.tickSubscriptions++;
+      let settled = false;
+      const cleanup = () => {
+        if (settled) return;
+        settled = true;
+        this.tickUnsubscriptions++;
+        signal.removeEventListener('abort', onAbort);
+        this.physicsTick.removeListener('physicsTick', onTick);
+      };
+      const onTick = () => {
+        cleanup();
+        resolve({
+          position: this.entity.position, velocity: this.entity.velocity,
+          onGround: this.entity.onGround, isInWater: this.entity.isInWater,
+        });
+      };
+      const onAbort = () => { cleanup(); resolve(null); };
+      signal.addEventListener('abort', onAbort, { once: true });
+      this.physicsTick.on('physicsTick', onTick);
     });
   }
 }
@@ -157,17 +214,18 @@ function doneOf(arbiter: Arbiter): Promise<TaskOutcome> {
 }
 
 test('真实 Arbiter 连续 walk_route A→B 共用同一 session.voxel，A 只撤销自己的附着且不关闭服务', async () => {
-  const { svc, dir } = await openShared();
   const adapter = new WalkHostAdapter();
-  const vision = new Vision(adapter, { ...DEFAULT_VISION, range: 24 }, svc);
-  const arbiter = new Arbiter(adapter, new WorldMemory(null), new EventBus(), vision, svc);
+  const { svc, dir } = await openShared();
+  let arbiter: Arbiter | null = null;
 
   const tokens: number[] = [];
   const detached: number[] = [];
+  const reports: ChangeReport[] = [];
   const attach = svc.attach.bind(svc);
   const detach = svc.detach.bind(svc);
   svc.attach = (attachment) => {
-    const token = attach(attachment);
+    // Record the exact report the service delivers, then retain the original receiver call.
+    const token = attach({ receiver: (report) => { reports.push(report); attachment.receiver(report); }, cancel: attachment.cancel });
     tokens.push(token);
     return token;
   };
@@ -177,6 +235,9 @@ test('真实 Arbiter 连续 walk_route A→B 共用同一 session.voxel，A 只�
   };
 
   try {
+    // 构造放在真实 Worker 已打开后的 try 内：任何 setup 抛错也必须 finally 关库。
+    const vision = new Vision(adapter, { ...DEFAULT_VISION, range: 24 }, svc);
+    arbiter = new Arbiter(adapter, new WorldMemory(null), new EventBus(), vision, svc);
     const voxel = svc.session.voxel;
     const doneA = doneOf(arbiter);
     arbiter.start({ skill: 'walk_route', args: { points: POINTS_A } }, 'llm');
@@ -194,6 +255,25 @@ test('真实 Arbiter 连续 walk_route A→B 共用同一 session.voxel，A 只�
     await waitFor('B 注册活动句柄', () => tokens.length === 2);
     // A 的 finally/detach 迟到：旧 token 不能解除 B 的附着，B 仍须独立走完。
     svc.detach(tokens[0]!);
+    // B is still attached: a real legal Vision batch must reach B's original receiver
+    // through the service, not merely change the static map. Aim ahead along the
+    // walked +x axis with a real downward pitch (no underfoot FOV exemption).
+    reports.length = 0;
+    const observeBatch = voxel.observeBatch.bind(voxel);
+    let batchReport: ReturnType<typeof observeBatch> | null = null;
+    voxel.observeBatch = (request) => {
+      const report = observeBatch(request);
+      batchReport = report;
+      return report;
+    };
+    const support = { x: Math.floor(adapter.entity.position.x) + 1, y: -1, z: Math.floor(adapter.entity.position.z) };
+    adapter.pitch = -1.2;
+    const observed = vision.observeBlocks([support]);
+    assert.ok(observed.length > 0, 'B 活动期间真实可见支撑必须被观测');
+    assert.equal(reports.length, 1, 'B 原始 receiver 必须经服务收到真实地图报告');
+    assert.ok(batchReport !== null, '真实 Vision 批次必须实际调用 observeBatch 并返回报告');
+    assert.strictEqual(reports[0], batchReport, 'B 原始 receiver 必须收到 observeBatch 返回的同一报告对象');
+    assert.equal(svc.session.voxel.cellAt('overworld', support.x, support.y, support.z).observed, true, '真实观测必须写入共享地图');
     const b = await doneB;
     assert.equal(b.result.status, 'succeeded', b.result.summary);
     assert.equal((b.result.data?.nav as { outcome: string }).outcome, 'ARRIVED');
@@ -202,7 +282,7 @@ test('真实 Arbiter 连续 walk_route A→B 共用同一 session.voxel，A 只�
     assert.equal(svc.session.voxel, voxel);
     assert.equal(svc.session.voxel.cellAt('overworld', 2, -1, 0).observed, true, 'B 的实际观测事实必须写入同一张地图');
   } finally {
-    arbiter.dispose();
+    arbiter?.dispose();
     await closeShared(svc, dir);
   }
 });
@@ -225,7 +305,7 @@ test('真实 Vision→服务→loop：每接受批次恰好一次地图写，且
   const { svc, dir } = await openShared();
   const adapter = new WalkHostAdapter();
   const vision = new Vision(adapter, { ...DEFAULT_VISION, range: 24 }, svc);
-  const arbiter = new Arbiter(adapter, new WorldMemory(null), new EventBus(), vision, svc);
+  let arbiter: Arbiter | null = null;
 
   const writes: ChangeReport[] = [];
   const delivered: ChangeReport[] = [];
@@ -270,6 +350,7 @@ test('真实 Vision→服务→loop：每接受批次恰好一次地图写，且
   };
 
   try {
+    arbiter = new Arbiter(adapter, new WorldMemory(null), new EventBus(), vision, svc);
     const done = doneOf(arbiter);
     arbiter.start({ skill: 'walk_route', args: { points: POINTS_A } }, 'llm');
     const outcome = await done;
@@ -297,7 +378,7 @@ test('真实 Vision→服务→loop：每接受批次恰好一次地图写，且
   } finally {
     prototype.observe = originalObserve;
     prototype.onSample = originalOnSample;
-    arbiter.dispose();
+    arbiter?.dispose();
     await closeShared(svc, dir);
   }
 });
@@ -306,7 +387,7 @@ test('真实 Arbiter.setPaused 零观测间隔即 stale 证据并取消旧委托
   const { svc, dir } = await openShared();
   const adapter = new WalkHostAdapter();
   const vision = new Vision(adapter, { ...DEFAULT_VISION, range: 24 }, svc);
-  const arbiter = new Arbiter(adapter, new WorldMemory(null), new EventBus(), vision, svc);
+  let arbiter: Arbiter | null = null;
 
   let cancels = 0;
   const attach = svc.attach.bind(svc);
@@ -316,6 +397,7 @@ test('真实 Arbiter.setPaused 零观测间隔即 stale 证据并取消旧委托
   });
 
   try {
+    arbiter = new Arbiter(adapter, new WorldMemory(null), new EventBus(), vision, svc);
     const done = doneOf(arbiter);
     arbiter.start({ skill: 'walk_route', args: { points: POINTS_A } }, 'llm');
     const support = { x: 0, y: -1, z: 0 };
@@ -361,7 +443,7 @@ test('真实 Arbiter.setPaused 零观测间隔即 stale 证据并取消旧委托
       worldId: WORLD, sessionId: 'session-a', dimension: 'overworld', observationId: 999, observedAt: Date.now(), source: 'vision',
     }]).sections, [], '旧 session 载荷不得重新取得写入资格');
   } finally {
-    arbiter.dispose();
+    arbiter?.dispose();
     await closeShared(svc, dir);
   }
 });
@@ -373,12 +455,14 @@ test('真实 MineflayerAdapter.newSession 发出 session_reset；空报告也取
   const harness = adapter as unknown as { bot: unknown; dimension: string };
   const state0 = adapter.state();
   const svc = await SharedSpatialSession.open({ worldId: state0.worldId, databasePath: join(dir, 'memory.db') });
-  const arbiter = new Arbiter(adapter, new WorldMemory(null), new EventBus(), new Vision(adapter), svc);
+  let arbiter: Arbiter | null = null;
 
   let resets = 0;
   adapter.on('session_reset', () => { resets++; });
 
   try {
+    // 真实 Worker 已打开：构造与后续 setup 都在 finally 保护内。
+    arbiter = new Arbiter(adapter, new WorldMemory(null), new EventBus(), new Vision(adapter), svc);
     svc.beginSession({ worldId: state0.worldId, dim: 'overworld', sessionId: 'session-old' });
     let cancels = 0;
     const reports: ChangeReport[] = [];
@@ -402,8 +486,10 @@ test('真实 MineflayerAdapter.newSession 发出 session_reset；空报告也取
     }]).sections, []);
     assert.throws(() => svc.attach({ receiver: () => {}, cancel: () => {} }), /not accepting a delegation/);
 
-    // 监听器异常只产生诊断，不得中断 newSession/end 的后续处理。
-    adapter.on('session_reset', () => { throw new Error('listener boom'); });
+    // 监听器异常只产生诊断，不得中断 newSession/end 的后续处理；unknown 边界
+    // 仍须保留真实的 name/message 与领域错误自带的类型化 kind。
+    const typedBoom = Object.assign(new Error('listener boom'), { kind: 'persistence' as const });
+    adapter.on('session_reset', () => { throw typedBoom; });
     harness.dimension = 'the_nether';
     harness.bot = { game: { dimension: 'minecraft:the_end' } };
     const next = adapter.state();
@@ -411,8 +497,228 @@ test('真实 MineflayerAdapter.newSession 发出 session_reset；空报告也取
     const diagnostic = bus.recent().find((event) => event.type === 'adapter_event_error');
     assert.ok(diagnostic, '监听器错误必须作为诊断发布');
     assert.match(diagnostic.msg, /Error: listener boom/);
+    assert.match(diagnostic.msg, /kind=persistence/, '真实错误自带的 kind 必须保留');
   } finally {
-    arbiter.dispose();
+    arbiter?.dispose();
+    await closeShared(svc, dir);
+  }
+});
+
+test('真实步行生命周期检测同 session ready 丢失：一次中断、stale，重新 ready 后只由真实观测重新准入', async () => {
+  const adapter = new WalkHostAdapter();
+  const { svc, dir } = await openShared();
+  let arbiter: Arbiter | null = null;
+
+  let interrupts = 0;
+  const interrupt = svc.interrupt.bind(svc);
+  svc.interrupt = () => { interrupts++; return interrupt(); };
+  let begins = 0;
+  const beginSession = svc.beginSession.bind(svc);
+  svc.beginSession = (scope) => { begins++; return beginSession(scope); };
+  const voxel = svc.session.voxel;
+  let batchWrites = 0;
+  const observeBatch = voxel.observeBatch.bind(voxel);
+  voxel.observeBatch = (request) => { batchWrites++; return observeBatch(request); };
+
+  let unready = false;
+  let visionCallsAfterUnready = 0;
+
+  const support = { x: 0, y: -1, z: 0 };
+  const neighbor = { x: 1, y: -1, z: 0 };
+
+  try {
+    const vision = new Vision(adapter, { ...DEFAULT_VISION, range: 24 }, svc);
+    const observeBlocks = vision.observeBlocks.bind(vision);
+    vision.observeBlocks = (positions) => {
+      if (unready) visionCallsAfterUnready++;
+      return observeBlocks(positions);
+    };
+    arbiter = new Arbiter(adapter, new WorldMemory(null), new EventBus(), vision, svc);
+    const done = doneOf(arbiter);
+    arbiter.start({ skill: 'walk_route', args: { points: POINTS_LONG } }, 'llm');
+    await waitFor('walk 实际开始前进', () => adapter.control.forward === true);
+    await waitFor('路线支撑已真实观测', () => svc.session.voxel.cellAt('overworld', support.x, support.y, support.z).observed);
+    const before = svc.session.voxel.cellAt('overworld', support.x, support.y, support.z);
+    assert.equal(before.observed ? before.evidence.freshness : null, 'FRESH');
+    const neighborBefore = svc.session.voxel.cellAt('overworld', neighbor.x, neighbor.y, neighbor.z);
+    assert.equal(neighborBefore.observed, true, '邻格应已在预扫中真实观测');
+
+    // Same world/dim/sessionId; only observationReady disappears, and no more frames are delivered.
+    unready = true;
+    adapter.observationReady = false;
+    adapter.framesEnabled = false;
+    const controlBoundary = adapter.controlLog.length;
+
+    const outcome = await done;
+    assert.equal(outcome.result.status, 'cancelled', outcome.result.summary);
+    assert.equal((outcome.result.data?.nav as { outcome: string }).outcome, 'CANCELLED');
+    assert.equal(interrupts, 1, '未就绪边界只能中断一次');
+    assert.equal(visionCallsAfterUnready, 0, '无下一帧时检测必须来自 walk 生命周期，而不是 Vision');
+    await waitFor('取消后释放控制', () => adapter.control.forward === false);
+    assert.equal(svc.observationAdmitted, false, '中断后准入必须为 false');
+
+    const stale = svc.session.voxel.cellAt('overworld', support.x, support.y, support.z);
+    assert.equal(stale.observed ? stale.evidence.freshness : null, 'STALE', '已观测支撑必须被中断置 stale');
+    const neighborStale = svc.session.voxel.cellAt('overworld', neighbor.x, neighbor.y, neighbor.z);
+    assert.equal(neighborStale.observed ? neighborStale.evidence.freshness : null, 'STALE');
+    // Capture the real interruption boundary after cancellation has settled; recovery
+    // evidence must be genuinely later than the gap it replaces, not just same-ms.
+    const gapBoundary = Date.now();
+
+    // Restore trusted ready in the same scope. Vision never saw the unready state, so
+    // re-admission must come from the missing admission, not from a cached scope change.
+    adapter.entity.position.x = 0.54;
+    adapter.entity.position.y = 0;
+    adapter.entity.position.z = 0.52;
+    adapter.yaw = 0;
+    adapter.pitch = -1.2;
+    unready = false;
+    adapter.observationReady = true;
+    const beginsBeforeReobserve = begins;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const observed = vision.observeBlocks([support]);
+    assert.ok(observed.length > 0, '恢复后实际可见支撑必须被观测');
+    assert.ok(observed[0]!.observedAt > gapBoundary, '恢复观测必须晚于真实中断边界');
+    assert.equal(begins, beginsBeforeReobserve + 1, '未准入的同一作用域必须重新 begin 一次');
+    assert.equal(svc.observationAdmitted, true);
+    const fresh = svc.session.voxel.cellAt('overworld', support.x, support.y, support.z);
+    assert.equal(fresh.observed ? fresh.evidence.freshness : null, 'FRESH');
+    const neighborStillStale = svc.session.voxel.cellAt('overworld', neighbor.x, neighbor.y, neighbor.z);
+    assert.equal(neighborStillStale.observed ? neighborStillStale.evidence.freshness : null, 'STALE', '未重新看见的邻格不得被刷新');
+
+    // Paused is not admission=false: repeated reads must not begin again or dispatch writes.
+    svc.setPaused(true);
+    const beginsAtPause = begins;
+    const writesAtPause = batchWrites;
+    vision.observeBlocks([support]);
+    vision.observeBlocks([support]);
+    assert.equal(begins, beginsAtPause, '暂停读取不得重复 beginSession');
+    assert.equal(batchWrites, writesAtPause, '暂停时不得派发地图写入');
+    svc.setPaused(false);
+
+    // Repeated actual-unready reads: interrupt once, then gate without begin/dispatch.
+    const interruptsBeforeRepeat = interrupts;
+    const beginsBeforeUnready = begins;
+    const writesBeforeUnready = batchWrites;
+    adapter.observationReady = false;
+    vision.observeBlocks([support]);
+    assert.equal(interrupts, interruptsBeforeRepeat + 1);
+    vision.observeBlocks([support]);
+    vision.observeBlocks([support]);
+    assert.equal(interrupts, interruptsBeforeRepeat + 1, '重复未就绪读取不得重复中断');
+    assert.equal(begins, beginsBeforeUnready);
+    assert.equal(batchWrites, writesBeforeUnready);
+
+    const revival = adapter.controlLog.slice(controlBoundary).filter((e) => e.name === 'forward' && e.value);
+    assert.deepEqual(revival, [], '取消后不得恢复前进控制');
+  } finally {
+    arbiter?.dispose();
+    await closeShared(svc, dir);
+  }
+});
+
+test('共享 interrupt 在初始等待物理帧时立即给出 lifecycle CANCELLED，并清理真实 tick 订阅', async () => {
+  const adapter = new PendingTickHostAdapter();
+  const { svc, dir } = await openShared();
+  let arbiter: Arbiter | null = null;
+
+  try {
+    const vision = new Vision(adapter, { ...DEFAULT_VISION, range: 24 }, svc);
+    arbiter = new Arbiter(adapter, new WorldMemory(null), new EventBus(), vision, svc);
+    const done = doneOf(arbiter);
+    arbiter.start({ skill: 'walk_route', args: { points: POINTS_A } }, 'llm');
+    const parentSignal = arbiter.current!.controller.signal;
+    // Init is genuinely waiting on the adapter's real pending frame subscription.
+    await waitFor('初始物理帧订阅', () => adapter.tickSubscriptions === 1);
+    assert.equal(adapter.control.forward, false, '初始等待时不得已按前进键');
+
+    const startedAt = Date.now();
+    svc.interrupt();
+    const outcome = await done;
+    assert.equal(outcome.result.status, 'cancelled', outcome.result.summary);
+    assert.equal((outcome.result.data?.nav as { outcome: string }).outcome, 'CANCELLED');
+    assert.ok(Date.now() - startedAt < 2000, '取消必须在有限时间内结束，不能等下一帧或期限');
+    assert.equal(adapter.tickUnsubscriptions, 1, '真实 tick 订阅必须被清理');
+    assert.equal(adapter.physicsTick.listenerCount('physicsTick'), 0);
+    assert.equal(parentSignal.aborted, false, '只中止本次运行等待，不得 abort 父任务 signal');
+    assert.equal(adapter.control.forward, false, '取消后不得按下前进键');
+    assert.equal(svc.observationAdmitted, false);
+  } finally {
+    arbiter?.dispose();
+    await closeShared(svc, dir);
+  }
+});
+
+test('共享服务关闭后真实 Vision 读取不抛错、不开始会话、不派发写入', async () => {
+  const adapter = new WalkHostAdapter();
+  const { svc, dir } = await openShared();
+  let closeAttempted = false;
+  let cleanClosed = false;
+  try {
+    const vision = new Vision(adapter, { ...DEFAULT_VISION, range: 24 }, svc);
+    let begins = 0;
+    let writes = 0;
+    const beginSession = svc.beginSession.bind(svc);
+    svc.beginSession = (scope) => { begins++; return beginSession(scope); };
+    const voxel = svc.session.voxel;
+    const observeBatch = voxel.observeBatch.bind(voxel);
+    voxel.observeBatch = (request) => { writes++; return observeBatch(request); };
+
+    // Actual shutdown, not a fabricated completed flag; the real close result is asserted.
+    closeAttempted = true;
+    const shutdown = await svc.shutdown();
+    assert.equal(shutdown.error, null);
+    assert.equal(shutdown.cancelError, null);
+    assert.equal(shutdown.closeError, null);
+    assert.ok(shutdown.close !== null, 'real close must return a result');
+    assert.equal(shutdown.close.completed, true);
+    assert.equal(shutdown.close.error, null);
+    assert.equal(shutdown.close.unconfirmedRequest, false);
+    assert.equal(svc.closing, true);
+    cleanClosed = true;
+
+    const beginsBefore = begins;
+    const writesBefore = writes;
+    let observed: unknown = null;
+    assert.doesNotThrow(() => { observed = vision.observeBlocks([{ x: 0, y: -1, z: 0 }]); });
+    assert.deepEqual(observed, [], '关闭后读取必须返回空批次');
+    assert.equal(begins, beginsBefore, '关闭后不得开始新会话');
+    assert.equal(writes, writesBefore, '关闭后不得派发地图写入');
+  } finally {
+    if (cleanClosed) rmSync(dir, { recursive: true, force: true });
+    else if (!closeAttempted) await closeShared(svc, dir);
+  }
+});
+
+test('暂停时取消回调抛错仍完成父任务取消与 stopAll，并保留原始错误', async () => {
+  const adapter = new WalkHostAdapter();
+  const { svc, dir } = await openShared();
+  let arbiter: Arbiter | null = null;
+  const boom = new Error('cancel boom');
+  let attached = 0;
+  const attach = svc.attach.bind(svc);
+  svc.attach = (attachment) => {
+    attached++;
+    return attach({ receiver: attachment.receiver, cancel: () => { throw boom; } });
+  };
+
+  try {
+    const vision = new Vision(adapter, { ...DEFAULT_VISION, range: 24 }, svc);
+    arbiter = new Arbiter(adapter, new WorldMemory(null), new EventBus(), vision, svc);
+    const done = doneOf(arbiter);
+    arbiter.start({ skill: 'walk_route', args: { points: POINTS_LONG } }, 'llm');
+    await waitFor('walk 注册活动句柄', () => attached === 1);
+    const stopsBefore = adapter.stopAllCount;
+
+    assert.throws(() => arbiter!.setPaused(true), (error) => error === boom);
+    assert.equal(arbiter.current, null, '取消回调抛错后父任务仍必须被取消');
+    assert.ok(adapter.stopAllCount > stopsBefore, '取消回调抛错后仍必须 stopAll');
+    assert.equal(svc.paused, true);
+
+    const outcome = await done;
+    assert.equal(outcome.result.status, 'cancelled', outcome.result.summary);
+  } finally {
+    arbiter?.dispose();
     await closeShared(svc, dir);
   }
 });

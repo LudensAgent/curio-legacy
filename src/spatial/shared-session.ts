@@ -127,6 +127,15 @@ export class SharedSpatialSession {
     return this.pausedFlag;
   }
 
+  /**
+   * 可信 ready 准入：只有 adapter 真实 ready 的 beginSession 之后为 true，任何
+   * interrupt 之后为 false。与 paused 无关（暂停不会撤销准入，也不代表已准入）。
+   * 生命周期观察者据此决定是否还需要把“已知道的未就绪边界”交给服务。
+   */
+  get observationAdmitted(): boolean {
+    return this.admitted;
+  }
+
   get closing(): boolean {
     return this.closingFlag;
   }

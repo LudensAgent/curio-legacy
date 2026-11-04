@@ -174,6 +174,10 @@ export const walkRoute: Skill<WalkRouteArgs> = {
       map, body, request, tick, signal: ctx.signal, observe,
       lifecycle: () => {
         const s = ctx.adapter.state();
+        // 真实 ready 丢失（同一 sessionId 下区块消失）可能先被步行生命周期看到、
+        // 且之后没有下一帧/下一次 Vision 调用；此时把已经知道的实际边界交给共享
+        // 服务一次。服务仅在实际准入时 interrupt，重复读取不会重复中断。
+        if (!s.observationReady && spatial.observationAdmitted) spatial.interrupt();
         return { worldId: s.worldId, dim: s.dim, sessionId: s.sessionId, alive: s.alive, connected: s.connected, observationReady: s.observationReady };
       },
       deadlineMs: effectiveDeadline,
