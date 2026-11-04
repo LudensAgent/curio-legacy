@@ -176,6 +176,18 @@ export const H2_PENDING = {
     'H2a smoke and H2b scenario structure, including main-session manual voxel loading when the host API is present, are implemented. Offline tests do not perform a real server run or long-run acceptance; only an actual passing run may claim FULL_PASS.',
 } as const;
 
+export const H2_PASSED = {
+  state: 'passed',
+  fullPass: true,
+  detail: 'The full acceptance run completed and passed every required criterion in this run.',
+} as const;
+
+export type H2Status = typeof H2_PENDING | typeof H2_PASSED;
+
+/** 最终报告里的 H2 状态必须来自实际结果；smoke 永远不宣称 full pass。 */
+export const h2ForResult = (mode: 'smoke' | 'full', fullPass: boolean): H2Status =>
+  mode === 'full' && fullPass ? H2_PASSED : H2_PENDING;
+
 const H1_IMPLEMENTED = {
   state: 'implemented',
   scope: 'offline CLI, bounded evidence writer, metrics, and real-session lifecycle foundation',
@@ -1516,7 +1528,7 @@ interface RunReport {
   shutdown: Record<string, unknown> | null;
   shutdownVerdict: ShutdownVerdict | null;
   finalEvidenceWritten: boolean;
-  h2: typeof H2_PENDING;
+  h2: H2Status;
 }
 
 /**
@@ -3098,7 +3110,7 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
     shutdownVerdict,
     // 该记录只有在下面真正写入成功后才存在；写入失败时 stdout 报告会改回 false。
     finalEvidenceWritten: true,
-    h2: H2_PENDING,
+    h2: h2ForResult(cli.mode, pass),
   };
 
   const finalRecord = emit('run-result', null, report);
@@ -3107,6 +3119,7 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
     report.smokePass = false;
     report.fullPass = false;
     report.finalEvidenceWritten = false;
+    report.h2 = h2ForResult(cli.mode, false);
     report.primaryError ??= errorFacts(new Error('final run-result evidence record was not written'));
   }
   eventsWriter?.close();
