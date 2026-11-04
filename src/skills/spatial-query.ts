@@ -18,6 +18,8 @@ const FRAGMENT_FIELD_MAX = 32;
 const FRAGMENT_FIELD_DEFAULT = 16;
 const FRAGMENTS_PAGE_MAX = 8;
 const FRAGMENTS_PAGE_DEFAULT = 4;
+const TRAVERSALS_PAGE_MAX = 8;
+const TRAVERSALS_PAGE_DEFAULT = 4;
 const OUTPUT_LIMIT_BYTES = 64 * 1024;
 
 const MOVE_MODES: readonly MoveMode[] = ['walk', 'jump', 'sneak', 'swim', 'climb', 'ladder', 'drop'];
@@ -47,6 +49,7 @@ export type SpatialQueryArgs =
   | { kind: 'cells'; dim: string; positions: Position[] }
   | { kind: 'fragment'; dim: string; fragmentId: string; field?: FragmentField; offset?: number; limit?: number }
   | { kind: 'traversals'; dim: string; ids: string[] }
+  | { kind: 'traversals'; dim: string; fragmentId: string; after?: string; limit?: number }
   | { kind: 'nodes'; dim: string; ids: string[] }
   | {
       kind: 'route';
@@ -76,15 +79,17 @@ function validCoord(value: unknown): value is number {
 export const spatialQuery: Skill<SpatialQueryArgs> = {
   name: 'spatial_query',
   description:
-    '只读查询共享空间记忆里已记录的事实：指定方块的最近观测证据与 Section 驻留状态、单个历史片段（polyline/entrances/links）的元数据分页、指定 traversal 或 node 记录、历史拓扑路线，以及按维度分页的片段索引。'
+    '只读查询共享空间记忆里已记录的事实：指定方块的最近观测证据与 Section 驻留状态、单个历史片段（polyline/entrances/links）的元数据分页、指定 traversal 记录（明确 ID 集合，或按 fragmentId 分页）、指定 node 记录、历史拓扑路线，以及按维度分页的片段索引。'
     + '返回的是历史几何或最近一次观测，不代表当前世界状态、当前可通行性、可执行点列或在线观察；不观察、不移动、不写入、不刷新证据时间。'
-    + 'fragment 的 polyline 是来源已执行确认的原 nominal corridor 前缀，不是实测轨迹；traversal 证据独立保存原起终点、时间、会话、执行与任务关联，不表示当前可通行。'
+    + 'fragment 的 polyline 是原历史几何，按 geometrySource 区分来源；本次 Curio 行走 producer 输出的已确认 nominal 走廊前缀不是实测轨迹，不能仅由 geometrySource 推定具体生产者。对所有片段均不声称当前 passable。'
+    + 'traversal 证据独立保存原起终点、时间、会话、执行、任务关联与 source，原样返回，不表示当前可通行。'
     + 'fragment 的 links 缺失只表示该数组未记录，不证明没有连接；route 的 FOUND 仅是历史连接证据，不代表现在可走。'
-    + 'fragments 会在当前库的完整索引上按 dim 过滤、排序后分页；limit 只限制本页返回条数，不是每页扫描量或 O(page)。',
+    + 'fragments 与 fragmentId 模式的 traversal 会在当前库的完整索引上按 dim（traversal 还按 fragmentId）过滤、排序后分页；limit 只限制本页返回条数，不是每页扫描量或 O(page)。',
   argsDoc:
     '{"kind":"cells","dim":"overworld","positions":[{"x":0,"y":64,"z":0}]}  // 1..32 格，safe integer 坐标；返回原坐标、section、residency 与原 CellEvidence\n'
     + '{"kind":"fragment","dim":"overworld","fragmentId":"id","field":"polyline|entrances|links","offset":0,"limit":16}  // field 默认 polyline；offset≥0；limit 1..32，超出拒绝不 clamp\n'
-    + '{"kind":"traversals","dim":"overworld","ids":["t1"]}  // 1..8 个明确 ID，按原顺序逐个查询\n'
+    + '{"kind":"traversals","dim":"overworld","ids":["t1"]}  // 与 fragmentId 互斥；1..8 个明确 ID，按原顺序逐个查询；不接受 after/limit\n'
+    + '{"kind":"traversals","dim":"overworld","fragmentId":"id","after":"cursor","limit":4}  // 与 ids 互斥；after 为上一页 nextAfter；limit 默认 4、范围 1..8，超出拒绝不 clamp；返回 total/nextAfter/returned 与逐条原证据\n'
     + '{"kind":"nodes","dim":"overworld","ids":["n1"]}  // 1..8 个明确 ID，保留 agent/program 来源；node 无观测时间/会话\n'
     + '{"kind":"route","dim":"overworld","fromNodeId":"n1","toNodeId":"n2","mode":"walk","maxNodes":32,"maxEdges":128,"maxHistoryReads":64,"maxDiagnostics":8}  // 缺省用原库 32/128/64/8；显式值 0..64/512/256/16，零值按原值；mode 仅历史过滤；历史证据，非当前通行\n'
     + '{"kind":"fragments","dim":"overworld","after":"cursor","limit":4}  // limit 1..8；after 为上一页 nextAfter；只返回元数据与点数/首末点，不返回完整几何',
@@ -132,7 +137,41 @@ export const spatialQuery: Skill<SpatialQueryArgs> = {
         }
         return { ok: true, args: { kind: 'fragment', dim, fragmentId: o.fragmentId, field, offset, limit } };
       }
-      case 'traversals':
+      case 'traversals': {
+        const hasIds = o.ids !== undefined;
+        const hasFragmentId = o.fragmentId !== undefined;
+        if (hasIds === hasFragmentId) {
+          return { ok: false, error: 'traversals 必须且只能提供 ids 或 fragmentId 之一' };
+        }
+        if (hasIds) {
+          if (o.after !== undefined || o.limit !== undefined) {
+            return { ok: false, error: 'ids 模式不接受 after/limit；分页控制仅用于 fragmentId 模式' };
+          }
+          const ids = o.ids;
+          if (!Array.isArray(ids) || ids.length < 1 || ids.length > MAX_IDS) {
+            return { ok: false, error: `ids 需要 1..${MAX_IDS} 个明确 ID` };
+          }
+          const parsed: string[] = [];
+          for (const id of ids) {
+            if (!validId(id)) return { ok: false, error: `ids 每项必须是非空、长度 ≤${MAX_ID_LENGTH} 的字符串` };
+            parsed.push(id);
+          }
+          return { ok: true, args: { kind: 'traversals', dim, ids: parsed } };
+        }
+        if (!validId(o.fragmentId)) return { ok: false, error: `fragmentId 必须是非空、长度 ≤${MAX_ID_LENGTH} 的字符串` };
+        const after = o.after;
+        if (after !== undefined && !validId(after)) {
+          return { ok: false, error: `after 必须是非空、长度 ≤${MAX_ID_LENGTH} 的游标字符串` };
+        }
+        const limit = o.limit === undefined ? TRAVERSALS_PAGE_DEFAULT : o.limit;
+        if (typeof limit !== 'number' || !Number.isSafeInteger(limit) || limit < 1 || limit > TRAVERSALS_PAGE_MAX) {
+          return { ok: false, error: `limit 必须是 1..${TRAVERSALS_PAGE_MAX} 的安全整数，超出时拒绝而不 clamp` };
+        }
+        return {
+          ok: true,
+          args: { kind: 'traversals', dim, fragmentId: o.fragmentId, ...(after !== undefined ? { after } : {}), limit },
+        };
+      }
       case 'nodes': {
         const ids = o.ids;
         if (!Array.isArray(ids) || ids.length < 1 || ids.length > MAX_IDS) {
@@ -143,7 +182,7 @@ export const spatialQuery: Skill<SpatialQueryArgs> = {
           if (!validId(id)) return { ok: false, error: `ids 每项必须是非空、长度 ≤${MAX_ID_LENGTH} 的字符串` };
           parsed.push(id);
         }
-        return { ok: true, args: { kind: o.kind, dim, ids: parsed } };
+        return { ok: true, args: { kind: 'nodes', dim, ids: parsed } };
       }
       case 'route': {
         if (!validId(o.fromNodeId)) return { ok: false, error: `fromNodeId 必须是非空、长度 ≤${MAX_ID_LENGTH} 的字符串` };
@@ -331,21 +370,92 @@ export const spatialQuery: Skill<SpatialQueryArgs> = {
         break;
       }
       case 'traversals': {
-        const items = args.ids.map((id) => {
-          const record = history.getTraversal(id);
-          if (!record) return { id, status: 'not_found' as const };
-          if (record.worldId !== worldId || record.dim !== args.dim) {
-            return {
-              id,
-              status: 'scope_mismatch' as const,
-              actualScope: { worldId: record.worldId, dim: record.dim },
-              record,
-            };
-          }
-          return { id, status: 'found' as const, record };
+        if ('ids' in args) {
+          const items = args.ids.map((id) => {
+            const record = history.getTraversal(id);
+            if (!record) return { id, status: 'not_found' as const };
+            if (record.worldId !== worldId || record.dim !== args.dim) {
+              return {
+                id,
+                status: 'scope_mismatch' as const,
+                actualScope: { worldId: record.worldId, dim: record.dim },
+                record,
+              };
+            }
+            return { id, status: 'found' as const, record };
+          });
+          query = { kind: 'traversals', mode: 'ids', scope, requested: args.ids.length, returned: items.length, items };
+          summary = `逐个查询 ${items.length} 个 traversal ID（保留原顺序与缺失/作用域不符）`;
+          break;
+        }
+
+        const limit = args.limit ?? TRAVERSALS_PAGE_DEFAULT;
+        const requested = {
+          selector: 'fragmentId',
+          fragmentId: args.fragmentId,
+          after: args.after ?? null,
+          limit,
+        };
+        const fragmentScope = history.getFragmentScope(args.fragmentId);
+        if (!fragmentScope) {
+          query = {
+            kind: 'traversals',
+            mode: 'fragment',
+            scope,
+            requested,
+            found: false,
+            reason: 'not_found',
+            note: '未找到该 fragmentId 的 scope；未跨维度枚举 traversal',
+          };
+          summary = `未找到历史片段 ${args.fragmentId}，未执行 traversal 分页`;
+          break;
+        }
+        if (fragmentScope.worldId !== worldId || fragmentScope.dim !== args.dim) {
+          query = {
+            kind: 'traversals',
+            mode: 'fragment',
+            scope,
+            requested,
+            found: false,
+            reason: 'scope_mismatch',
+            actualScope: { worldId: fragmentScope.worldId, dim: fragmentScope.dim },
+            note: '片段作用域与请求不符；未跨维度枚举 traversal',
+          };
+          summary = `历史片段 ${args.fragmentId} 的作用域与请求不符，未执行 traversal 分页`;
+          break;
+        }
+
+        const page = history.traversals({
+          dim: args.dim,
+          fragmentId: args.fragmentId,
+          ...(args.after !== undefined ? { after: args.after } : {}),
+          limit,
         });
-        query = { kind: 'traversals', scope, requested: args.ids.length, returned: items.length, items };
-        summary = `逐个查询 ${items.length} 个 traversal ID（保留原顺序与缺失/作用域不符）`;
+        const items = page.items.map((record) => ({ id: record.id, status: 'found' as const, record }));
+        query = {
+          kind: 'traversals',
+          mode: 'fragment',
+          scope,
+          requested,
+          found: true,
+          fragmentId: args.fragmentId,
+          page: {
+            after: args.after ?? null,
+            limit,
+            total: page.total,
+            returned: items.length,
+            ...(page.nextAfter !== undefined ? { nextAfter: page.nextAfter } : {}),
+            scan: 'full_traversal_index_filter_sort',
+            scanNote: '0.7.6 在当前 traversal 索引上按 dim/fragmentId 过滤、按 id 排序后取一页；limit 只限制返回条数，不是每页扫描量或恒定 CPU。当前 SharedSession 默认 maxTraversals=10000，查询工作量受该索引容量约束。',
+          },
+          items,
+          interpretation: {
+            historicalEvidence: true,
+            currentPassability: 'not_assessed',
+            note: '返回的是历史 traversal 证据；页面为空或来源/时间未知不代表从未经过或当前不通，不能当作当前 passability',
+          },
+        };
+        summary = `按片段 ${args.fragmentId} 分页查询历史 traversal：返回 ${items.length}/${page.total}（after=${args.after ?? 'null'}，limit=${limit}）`;
         break;
       }
       case 'nodes': {

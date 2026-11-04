@@ -678,6 +678,212 @@ test('spatial_query：只读已记录事实、分页、路线证据与输出预�
   }
 });
 
+test('spatial_query：重启后按 fragmentId 分页读取真实 traversal 证据', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'spatial-query-reopen-'));
+  const dbPath = join(dir, 'memory.db');
+  let writer: SharedSpatialSession | null = null;
+  let reader: SharedSpatialSession | null = null;
+  let writerShutdown: ShutdownResult | null = null;
+  let readerShutdown: ShutdownResult | null = null;
+  try {
+    writer = await SharedSpatialSession.open({ worldId: WORLD, databasePath: dbPath });
+    try {
+      const history = writer.session.history;
+      history.saveFragment({
+        id: 'f-target', worldId: WORLD, dim: DIM, kind: 'walked', geometrySource: 'traversal',
+        polyline: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }, { x: 2, y: 0, z: 0 }],
+        entrances: [], deepestY: 0, createdAt: 7000, lastUsedAt: 8000, uses: 3,
+      });
+      history.saveFragment({
+        id: 'f-other', worldId: WORLD, dim: DIM, kind: 'walked', geometrySource: 'legacy',
+        polyline: [{ x: 20, y: 0, z: 0 }, { x: 21, y: 0, z: 0 }],
+        entrances: [], deepestY: 0, createdAt: 7100, lastUsedAt: 8100, uses: 1,
+      });
+      // 同片段 3 条：确认走廊、未知来源/会话/时间、另一条有执行归属的实测。
+      history.addTraversal({
+        id: 't-1', fragmentId: 'f-target', from: { x: 0, y: 0, z: 0 }, to: { x: 1, y: 0, z: 0 },
+        worldId: WORLD, dim: DIM, sessionId: S1, observedAt: 1_111_111,
+        source: 'confirmed_walk_corridor', executionId: 'exec-old', actionId: 'act-old', mode: 'walk',
+      });
+      history.addTraversal({
+        id: 't-2', fragmentId: 'f-target', from: { x: 1, y: 0, z: 0 }, to: { x: 2, y: 0, z: 0 },
+        worldId: WORLD, dim: DIM, sessionId: null, observedAt: null, source: 'legacy_import',
+      });
+      history.addTraversal({
+        id: 't-3', fragmentId: 'f-target', from: { x: 2, y: 0, z: 0 }, to: { x: 3, y: 0, z: 0 },
+        worldId: WORLD, dim: DIM, sessionId: 'session-old', observedAt: 2_222_222,
+        source: 'confirmed_walk', executionId: 'exec-2', actionId: 'act-2', mode: 'jump',
+      });
+      // 另一片段的证据必须隔离。
+      history.addTraversal({
+        id: 't-other', fragmentId: 'f-other', from: { x: 20, y: 0, z: 0 }, to: { x: 21, y: 0, z: 0 },
+        worldId: WORLD, dim: DIM, sessionId: S1, observedAt: 3_333_333,
+        source: 'confirmed_walk', executionId: 'exec-other', actionId: 'act-other', mode: 'walk',
+      });
+
+      const checkpoint = await writer.checkpoint();
+      assert.equal(checkpoint.worldId, WORLD);
+    } finally {
+      writerShutdown = await writer.shutdown();
+      assertCleanClose(writerShutdown);
+      writer = null;
+    }
+
+    reader = await SharedSpatialSession.open({ worldId: WORLD, databasePath: dbPath });
+    try {
+      const history = reader.session.history;
+      assert.equal(history.traversals({ fragmentId: 'f-target' }).total, 3, '重启后真实保存的 3 条证据应恢复');
+      assert.equal(history.traversals({ fragmentId: 'f-other' }).total, 1, '另一片段证据应独立恢复');
+
+      const revisionBefore = history.revision;
+      const t1Before = history.getTraversal('t-1');
+      const snapshotBefore = history.checkpointSnapshot();
+
+      // 不依赖旧 action/traversalIds：用真实 fragments 查询发现目标片段 ID。
+      const fragmentsValidated = validate({ kind: 'fragments', dim: DIM, limit: 8 });
+      assert.equal(fragmentsValidated.ok, true);
+      if (!fragmentsValidated.ok) return;
+      const fragmentsQuery = dataOf(await spatialQuery.run(ctxFor(reader), fragmentsValidated.args));
+      const discovered = list(fragmentsQuery.fragments).map(rec).find((fragment) => fragment.id === 'f-target');
+      assert.ok(discovered !== undefined, 'fragments 查询应能发现目标片段');
+      const targetId = String(discovered.id);
+
+      const defaultValidated = validate({ kind: 'traversals', dim: DIM, fragmentId: targetId });
+      assert.equal(defaultValidated.ok, true);
+      if (!defaultValidated.ok) return;
+      const defaultResult = await spatialQuery.run(ctxFor(reader), defaultValidated.args);
+      assert.equal(defaultResult.status, 'succeeded');
+      const defaultQuery = dataOf(defaultResult);
+      assert.equal(defaultQuery.found, true);
+      assert.equal(defaultQuery.mode, 'fragment');
+      assert.equal(defaultQuery.fragmentId, targetId);
+      assert.deepEqual(rec(defaultQuery.requested), { selector: 'fragmentId', fragmentId: targetId, after: null, limit: 4 });
+      const defaultPage = rec(defaultQuery.page);
+      assert.equal(defaultPage.total, 3);
+      assert.equal(defaultPage.returned, 3);
+      assert.equal(defaultPage.after, null);
+      assert.equal(defaultPage.limit, 4);
+      assert.equal('nextAfter' in defaultPage, false);
+      assert.equal(defaultPage.scan, 'full_traversal_index_filter_sort');
+      assert.match(String(defaultPage.scanNote), /maxTraversals=10000/);
+      assert.match(String(defaultPage.scanNote), /limit 只限制返回条数/);
+
+      const defaultItems = list(defaultQuery.items).map(rec);
+      assert.deepEqual(defaultItems.map((item) => item.id), ['t-1', 't-2', 't-3']);
+      assert.deepEqual(defaultItems.map((item) => item.status), ['found', 'found', 'found']);
+      assert.deepEqual(rec(defaultItems[0]!.record), {
+        id: 't-1', fragmentId: targetId,
+        from: { x: 0, y: 0, z: 0 }, to: { x: 1, y: 0, z: 0 },
+        worldId: WORLD, dim: DIM,
+        sessionId: S1, observedAt: 1_111_111, source: 'confirmed_walk_corridor',
+        executionId: 'exec-old', actionId: 'act-old', mode: 'walk',
+      });
+      assert.deepEqual(rec(defaultItems[1]!.record), {
+        id: 't-2', fragmentId: targetId,
+        from: { x: 1, y: 0, z: 0 }, to: { x: 2, y: 0, z: 0 },
+        worldId: WORLD, dim: DIM,
+        sessionId: null, observedAt: null, source: 'legacy_import',
+        executionId: undefined, actionId: undefined, mode: undefined,
+      }, '未知 session/时间不得补造，可选归属字段保持未知（不赋值）');
+      assert.deepEqual(rec(defaultItems[2]!.record), {
+        id: 't-3', fragmentId: targetId,
+        from: { x: 2, y: 0, z: 0 }, to: { x: 3, y: 0, z: 0 },
+        worldId: WORLD, dim: DIM,
+        sessionId: 'session-old', observedAt: 2_222_222, source: 'confirmed_walk',
+        executionId: 'exec-2', actionId: 'act-2', mode: 'jump',
+      });
+      assert.equal(defaultItems.some((item) => item.id === 't-other'), false, '另一片段不得混入');
+
+      const pageOneValidated = validate({ kind: 'traversals', dim: DIM, fragmentId: targetId, limit: 2 });
+      assert.equal(pageOneValidated.ok, true);
+      if (!pageOneValidated.ok) return;
+      const pageOne = dataOf(await spatialQuery.run(ctxFor(reader), pageOneValidated.args));
+      assert.deepEqual(list(pageOne.items).map((item) => rec(item).id), ['t-1', 't-2']);
+      assert.equal(rec(pageOne.page).total, 3);
+      assert.equal(rec(pageOne.page).returned, 2);
+      assert.equal(rec(pageOne.page).nextAfter, 't-2');
+
+      const pageTwoValidated = validate({ kind: 'traversals', dim: DIM, fragmentId: targetId, after: 't-2', limit: 2 });
+      assert.equal(pageTwoValidated.ok, true);
+      if (!pageTwoValidated.ok) return;
+      const pageTwo = dataOf(await spatialQuery.run(ctxFor(reader), pageTwoValidated.args));
+      assert.deepEqual(list(pageTwo.items).map((item) => rec(item).id), ['t-3']);
+      assert.equal(rec(pageTwo.page).total, 3);
+      assert.equal(rec(pageTwo.page).returned, 1);
+      assert.equal('nextAfter' in rec(pageTwo.page), false, '末页无 nextAfter');
+      assert.deepEqual(rec(pageTwo.requested), { selector: 'fragmentId', fragmentId: targetId, after: 't-2', limit: 2 });
+
+      const exhaustedValidated = validate({ kind: 'traversals', dim: DIM, fragmentId: targetId, after: 't-3', limit: 2 });
+      assert.equal(exhaustedValidated.ok, true);
+      if (!exhaustedValidated.ok) return;
+      const exhausted = dataOf(await spatialQuery.run(ctxFor(reader), exhaustedValidated.args));
+      assert.deepEqual(list(exhausted.items), []);
+      assert.equal(rec(exhausted.page).total, 3);
+      assert.equal(rec(exhausted.page).returned, 0);
+      assert.equal('nextAfter' in rec(exhausted.page), false);
+
+      // 缺片段 / 错维度返回结构化事实，不枚举其它维度。
+      const missingValidated = validate({ kind: 'traversals', dim: DIM, fragmentId: 'f-absent' });
+      assert.equal(missingValidated.ok, true);
+      if (!missingValidated.ok) return;
+      const missing = dataOf(await spatialQuery.run(ctxFor(reader), missingValidated.args));
+      assert.equal(missing.found, false);
+      assert.equal(missing.reason, 'not_found');
+      assert.equal(missing.items, undefined);
+      assert.equal(missing.page, undefined);
+
+      const wrongDimValidated = validate({ kind: 'traversals', dim: 'nether', fragmentId: targetId });
+      assert.equal(wrongDimValidated.ok, true);
+      if (!wrongDimValidated.ok) return;
+      const wrongDim = dataOf(await spatialQuery.run(ctxFor(reader), wrongDimValidated.args));
+      assert.equal(wrongDim.found, false);
+      assert.equal(wrongDim.reason, 'scope_mismatch');
+      assert.deepEqual(rec(wrongDim.actualScope), { worldId: WORLD, dim: DIM });
+      assert.equal(wrongDim.items, undefined);
+      assert.equal(wrongDim.page, undefined);
+
+      const bad: unknown[] = [
+        { kind: 'traversals', dim: DIM },
+        { kind: 'traversals', dim: DIM, ids: ['t-1'], fragmentId: targetId },
+        { kind: 'traversals', dim: DIM, fragmentId: null },
+        { kind: 'traversals', dim: DIM, fragmentId: '' },
+        { kind: 'traversals', dim: DIM, fragmentId: 'x'.repeat(257) },
+        { kind: 'traversals', dim: DIM, fragmentId: targetId, after: null },
+        { kind: 'traversals', dim: DIM, fragmentId: targetId, after: '' },
+        { kind: 'traversals', dim: DIM, fragmentId: targetId, limit: null },
+        { kind: 'traversals', dim: DIM, fragmentId: targetId, limit: 0 },
+        { kind: 'traversals', dim: DIM, fragmentId: targetId, limit: 9 },
+        { kind: 'traversals', dim: DIM, fragmentId: targetId, limit: 1.5 },
+        { kind: 'traversals', dim: DIM, ids: ['t-1'], after: 't-0' },
+        { kind: 'traversals', dim: DIM, ids: ['t-1'], limit: 2 },
+      ];
+      for (const raw of bad) assert.equal(validate(raw).ok, false, `应拒绝：${JSON.stringify(raw)}`);
+
+      // 只读：revision、原记录与完整快照在查询前后一致。
+      assert.equal(history.revision, revisionBefore);
+      assert.deepEqual(history.getTraversal('t-1'), t1Before);
+      assert.deepEqual(history.checkpointSnapshot(), snapshotBefore);
+    } finally {
+      readerShutdown = await reader.shutdown();
+      assertCleanClose(readerShutdown);
+      reader = null;
+    }
+  } finally {
+    if (writer !== null) {
+      writerShutdown = await writer.shutdown();
+      assertCleanClose(writerShutdown);
+      writer = null;
+    }
+    if (reader !== null) {
+      readerShutdown = await reader.shutdown();
+      assertCleanClose(readerShutdown);
+      reader = null;
+    }
+    const lastClose = readerShutdown ?? writerShutdown;
+    if (lastClose !== null) cleanup(dir, lastClose);
+  }
+});
+
 test('spatial_query：manual SpatialSession 的未驻留投影只报历史不可用', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'spatial-query-manual-'));
   const dbPath = join(dir, 'memory.db');
