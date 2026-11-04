@@ -2152,12 +2152,13 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
     await settleAtStart('W7a 起点');
     const startPos = { ...ctx.adapter.state().pos };
     const route = lineRoute(19); // x200.5..x218.5，支撑面 x[200,219)，始终在已建 lane 内
-    const budgetMs = 6_000;
+    // 本轮合法 12 次 adapter.look 非 force 预扫实测 6.1~7.3 秒，预算需覆盖该既存正常耗时。
+    const budgetMs = 12_000;
     const deadlineMs = Date.now() + budgetMs;
     const listenersBefore = botListenerCounts(ctx.bot);
     const t = startWalkTask(ctx, d, route, deadlineMs);
     if ('error' in t) throw new Error(`W7a 启动失败：${t.error}`);
-    const { delegationId } = await awaitRouteStartRecord(d.exec.routeCalls, t.task.id, t.done, 5_000, 'W7a');
+    const { delegationId } = await awaitRouteStartRecord(d.exec.routeCalls, t.task.id, t.done, 10_000, 'W7a');
     const o = await awaitOrTimeout(t.done, budgetMs + 10_000, 'W7a 完成');
     const doneSeq = markTimeline(d, 'task-done-w7a', t.task.id);
     const doneRecord = taskDoneRecord(t.task.id);
@@ -2210,7 +2211,7 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
       const listenersBefore = botListenerCounts(ctx.bot);
       const t = startWalkTask(ctx, d, route, Date.now() + 30_000);
       if ('error' in t) throw new Error(`W7b 启动失败：${t.error}`);
-      const { delegationId } = await awaitRouteStartRecord(d.exec.routeCalls, t.task.id, t.done, 5_000, 'W7b');
+      const { delegationId } = await awaitRouteStartRecord(d.exec.routeCalls, t.task.id, t.done, 10_000, 'W7b');
       const done = t.done;
       await waitFor(() => dist2(ctx.adapter.state().pos, startPos) > 0.5, 15_000, 'W7b 开始移动');
       const acceptedBeforePause = acceptedMeasurements(d.exec.deliveredSamples, t.task.id, delegationId).length;
@@ -2319,7 +2320,7 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
       const route = lineRoute(12);
       const t = startWalkTask(ctx, d, route, Date.now() + 30_000);
       if ('error' in t) throw new Error(`W7c 启动失败：${t.error}`);
-      const { delegationId } = await awaitRouteStartRecord(d.exec.routeCalls, t.task.id, t.done, 5_000, 'W7c');
+      const { delegationId } = await awaitRouteStartRecord(d.exec.routeCalls, t.task.id, t.done, 10_000, 'W7c');
       const done = t.done;
       await waitFor(() => dist2(ctx.adapter.state().pos, startPos) > 0.5, 15_000, 'W7c 开始移动');
       const acceptedBefore = acceptedMeasurements(d.exec.deliveredSamples, t.task.id, delegationId);
