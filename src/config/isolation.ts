@@ -125,9 +125,18 @@ function normalizeHost(host: string): string {
  * test 与已配置环境冲突时拒绝启动。调用方须在游戏连接、数据库打开等有副作用的初始化之前执行。
  * 只比较最终解析出的路径与端口，不做网络探测。
  */
-export function assertTestIsolation(test: Layout, peers: Layout[], opts: { worldIdExplicit: boolean }): void {
+export function assertTestIsolation(test: Layout, peers: Layout[], opts: { worldIdExplicit: boolean; rootDir?: string }): void {
   if (!opts.worldIdExplicit) {
     throw new Error('test 环境必须显式配置 MEMORY_WORLD_ID（不能沿用公共 .env 的默认值），否则无法保证独立的世界身份。');
+  }
+  // 指定根目录（如 /path/to/curio\test-setver）：测试实例的所有可写路径都必须落在该根目录内，
+  // 不能散落到根目录之外；仅比较与 local/live 是否冲突不能保证这一点。
+  if (opts.rootDir) {
+    for (const dir of writableDirsOf(test)) {
+      if (!sameOrNested(opts.rootDir, dir)) {
+        throw new Error(`test 可写目录必须位于指定根目录 ${opts.rootDir} 内：${dir}`);
+      }
+    }
   }
   const testDirs = writableDirsOf(test);
   for (const peer of peers) {
