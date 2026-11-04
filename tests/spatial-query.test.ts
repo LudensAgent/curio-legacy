@@ -201,6 +201,9 @@ test('spatial_query：只读已记录事实、分页、路线证据与输出预�
         { kind: 'fragment', dim: DIM, fragmentId: '' },
         { kind: 'fragment', dim: DIM, fragmentId: 'x'.repeat(257) },
         { kind: 'fragment', dim: DIM, fragmentId: 'f', field: 'bad' },
+        { kind: 'fragment', dim: DIM, fragmentId: 'f', field: null },
+        { kind: 'fragment', dim: DIM, fragmentId: 'f', offset: null },
+        { kind: 'fragment', dim: DIM, fragmentId: 'f', limit: null },
         { kind: 'fragment', dim: DIM, fragmentId: 'f', offset: -1 },
         { kind: 'fragment', dim: DIM, fragmentId: 'f', limit: 0 },
         { kind: 'fragment', dim: DIM, fragmentId: 'f', limit: 33 },
@@ -217,6 +220,7 @@ test('spatial_query：只读已记录事实、分页、路线证据与输出预�
         { kind: 'route', dim: DIM, fromNodeId: 'a', toNodeId: 'b', maxEdges: 1.5 },
         { kind: 'fragments', dim: DIM, limit: 0 },
         { kind: 'fragments', dim: DIM, limit: 9 },
+        { kind: 'fragments', dim: DIM, limit: null },
         { kind: 'fragments', dim: DIM, after: '' },
         { kind: 'fragments', dim: DIM, after: 'x'.repeat(257) },
       ];
@@ -232,6 +236,12 @@ test('spatial_query：只读已记录事实、分页、路线证据与输出预�
       }
       const negativeCoords = validate({ kind: 'cells', dim: DIM, positions: [{ x: -17, y: -64, z: -1 }] });
       assert.equal(negativeCoords.ok, true, '负坐标是合法安全整数');
+
+      const untrimmed = validate({ kind: 'fragment', dim: DIM, fragmentId: ' spaced-id ' });
+      assert.equal(untrimmed.ok, true);
+      if (untrimmed.ok && untrimmed.args.kind === 'fragment') {
+        assert.equal(untrimmed.args.fragmentId, ' spaced-id ', 'ID 身份保持原样，不 trim');
+      }
 
       // 外层前提缺失时显式失败，且不触碰 adapter/senses。
       await Promise.all([
@@ -306,6 +316,33 @@ test('spatial_query：只读已记录事实、分页、路线证据与输出预�
       const before = svc.session.voxel.cellAt(DIM, 5, 0, 0);
       await spatialQuery.run(ctxFor(svc), { kind: 'cells', dim: DIM, positions: [{ x: 5, y: 0, z: 0 }] });
       assert.deepEqual(svc.session.voxel.cellAt(DIM, 5, 0, 0), before);
+    });
+
+    await t.test('cells：validUntil 相等仍 FRESH，超过 1ms 才 EXPIRED', async () => {
+      const cellBefore = svc.session.voxel.cellAt(DIM, 1, 0, 0);
+      if (!cellBefore.observed) assert.fail('测试前提：x=1 应有已观察证据');
+      const validUntil = cellBefore.evidence.validUntil;
+      const revisionBefore = svc.session.voxel.saveRevision;
+      const realNow = Date.now;
+      try {
+        Date.now = () => validUntil;
+        const atBoundary = dataOf(await spatialQuery.run(
+          ctxFor(svc, new AbortController().signal, validUntil + 3000),
+          { kind: 'cells', dim: DIM, positions: [{ x: 1, y: 0, z: 0 }] },
+        ));
+        assert.equal(rec(list(atBoundary.results)[0]).effectiveFreshness, 'FRESH');
+
+        Date.now = () => validUntil + 1;
+        const afterBoundary = dataOf(await spatialQuery.run(
+          ctxFor(svc, new AbortController().signal, validUntil + 3001),
+          { kind: 'cells', dim: DIM, positions: [{ x: 1, y: 0, z: 0 }] },
+        ));
+        assert.equal(rec(list(afterBoundary.results)[0]).effectiveFreshness, 'EXPIRED');
+      } finally {
+        Date.now = realNow;
+      }
+      assert.deepEqual(svc.session.voxel.cellAt(DIM, 1, 0, 0), cellBefore);
+      assert.equal(svc.session.voxel.saveRevision, revisionBefore);
     });
 
     await t.test('fragment：scope 先查、单记录分页、links 缺失如实标记', async () => {
@@ -471,7 +508,9 @@ test('spatial_query：只读已记录事实、分页、路线证据与输出预�
       const foundResult = await spatialQuery.run(ctxFor(svc), { kind: 'route', dim: DIM, fromNodeId: 'n-a', toNodeId: 'n-b' });
       const found = dataOf(foundResult);
       assert.equal(found.metadataReads, 2);
-      assert.equal(found.proofScope, 'ok');
+      assert.deepEqual(rec(found.requested).budgets, {
+        maxNodes: 32, maxEdges: 128, maxHistoryReads: 64, maxDiagnostics: 8,
+      });
       const route = rec(found.route);
       assert.equal(route.status, 'FOUND');
       assert.deepEqual(list(route.nodeIds), ['n-a', 'n-b']);
@@ -498,6 +537,9 @@ test('spatial_query：只读已记录事实、分页、路线证据与输出预�
       const zero = dataOf(await spatialQuery.run(ctxFor(svc), {
         kind: 'route', dim: DIM, fromNodeId: 'n-a', toNodeId: 'n-b', maxEdges: 0,
       }));
+      assert.deepEqual(rec(zero.requested).budgets, {
+        maxNodes: 32, maxEdges: 0, maxHistoryReads: 64, maxDiagnostics: 8,
+      });
       const zeroRoute = rec(zero.route);
       assert.equal(zeroRoute.status, 'BUDGET_EXHAUSTED');
       assert.equal(zeroRoute.exhausted, 'maxEdges');
@@ -511,12 +553,70 @@ test('spatial_query：只读已记录事实、分页、路线证据与输出预�
       const absent = dataOf(await spatialQuery.run(ctxFor(svc), { kind: 'route', dim: DIM, fromNodeId: 'n-absent', toNodeId: 'n-b' }));
       assert.equal(absent.result, 'not_found');
       assert.equal(absent.metadataReads, 1);
+
+      // 真实 validate→run 默认预算回归：33 个节点的有证据链默认耗尽，显式较高预算可找到。
+      const chainLen = 33;
+      const chainPos = (i: number) => ({ x: 100 + i * 2, y: 0, z: 0 });
+      history.saveFragment({
+        id: 'f-chain', worldId: WORLD, dim: DIM, kind: 'walked', geometrySource: 'traversal',
+        polyline: Array.from({ length: chainLen }, (_, i) => chainPos(i)), entrances: [],
+        deepestY: 0, createdAt: 5000, lastUsedAt: 6000, uses: chainLen,
+      });
+      for (let i = 0; i < chainLen; i += 1) {
+        topology.saveNode({ id: `nc-${i}`, kind: 'place', source: 'agent', worldId: WORLD, dim: DIM, location: { kind: 'exact', pos: chainPos(i) } });
+      }
+      for (let i = 0; i < chainLen - 1; i += 1) {
+        history.addTraversal({
+          id: `tc-${i}`, fragmentId: 'f-chain', from: chainPos(i), to: chainPos(i + 1),
+          worldId: WORLD, dim: DIM, sessionId: S1, observedAt: 50_000 + i,
+          source: 'confirmed_walk_corridor', executionId: 'exec-chain', actionId: 'act-chain', mode: 'walk',
+        });
+        topology.saveEdge({
+          id: `ec-${i}`, from: `nc-${i}`, to: `nc-${i + 1}`, type: 'HORIZONTAL', basis: 'traversed',
+          fragmentId: 'f-chain', evidenceIds: [`tc-${i}`],
+        });
+      }
+
+      const defaultValidated = validate({ kind: 'route', dim: DIM, fromNodeId: 'nc-0', toNodeId: `nc-${chainLen - 1}` });
+      assert.equal(defaultValidated.ok, true);
+      if (!defaultValidated.ok) return;
+      const chainExhausted = dataOf(await spatialQuery.run(ctxFor(svc), defaultValidated.args));
+      assert.deepEqual(rec(chainExhausted.requested).budgets, {
+        maxNodes: 32, maxEdges: 128, maxHistoryReads: 64, maxDiagnostics: 8,
+      });
+      const exhaustedRoute = rec(chainExhausted.route);
+      assert.equal(exhaustedRoute.status, 'BUDGET_EXHAUSTED');
+      assert.equal(exhaustedRoute.exhausted, 'maxNodes');
+      assert.ok((rec(exhaustedRoute.stats).nodesRead as number) <= 32, '默认节点预算必须是 32');
+
+      const authorizedValidated = validate({
+        kind: 'route', dim: DIM, fromNodeId: 'nc-0', toNodeId: `nc-${chainLen - 1}`, maxNodes: 64,
+      });
+      assert.equal(authorizedValidated.ok, true);
+      if (!authorizedValidated.ok) return;
+      const chainFound = dataOf(await spatialQuery.run(ctxFor(svc), authorizedValidated.args));
+      assert.deepEqual(rec(chainFound.requested).budgets, {
+        maxNodes: 64, maxEdges: 128, maxHistoryReads: 64, maxDiagnostics: 8,
+      });
+      const foundChainRoute = rec(chainFound.route);
+      assert.equal(foundChainRoute.status, 'FOUND');
+      assert.equal(list(foundChainRoute.nodeIds).length, chainLen);
+      assert.equal(list(foundChainRoute.segments).length, chainLen - 1);
+      const chainEvidence = rec(rec(list(foundChainRoute.segments)[0]).evidence);
+      assert.equal(chainEvidence.source, 'confirmed_walk_corridor', '原 source 原样输出');
+      assert.deepEqual(chainEvidence.from, chainPos(0));
+      assert.deepEqual(chainEvidence.to, chainPos(1));
+      assert.equal(chainEvidence.sessionId, S1);
+      assert.equal(chainEvidence.observedAt, 50_000);
+      assert.equal(chainEvidence.executionId, 'exec-chain');
+      assert.equal(chainEvidence.actionId, 'act-chain');
     });
 
     await t.test('输出预算：超过 64 KiB 时返回结构化 result_too_large，不截断证据', async () => {
       svc.observe([block({ x: 6, y: 0, z: 0 }, 'minecraft:stone', now, 99, { properties: { blob: 'x'.repeat(70_000) } })]);
       const result = await spatialQuery.run(ctxFor(svc), { kind: 'cells', dim: DIM, positions: [{ x: 6, y: 0, z: 0 }] });
-      assert.equal(result.status, 'succeeded');
+      assert.equal(result.status, 'failed');
+      assert.equal(result.failureCode, 'ERROR');
       const q = dataOf(result);
       assert.equal(q.result, 'result_too_large');
       assert.ok((q.serializedBytes as number) > (q.limitBytes as number));

@@ -22,12 +22,20 @@ const OUTPUT_LIMIT_BYTES = 64 * 1024;
 
 const MOVE_MODES: readonly MoveMode[] = ['walk', 'jump', 'sneak', 'swim', 'climb', 'ladder', 'drop'];
 
-/** 原库 route 预算的公开上限；未提供时沿用原库默认值。零值按原值传递。 */
+/** 原库 route 预算的公开上限。零值按原值传递。 */
 const ROUTE_BUDGET_MAX = {
   maxNodes: 64,
   maxEdges: 512,
   maxHistoryReads: 256,
   maxDiagnostics: 16,
+} as const;
+
+/** 显式传入的默认预算；原库自身缺省上限过大，不能依赖。 */
+const ROUTE_BUDGET_DEFAULT = {
+  maxNodes: 32,
+  maxEdges: 128,
+  maxHistoryReads: 64,
+  maxDiagnostics: 8,
 } as const;
 
 type RouteBudgetKey = keyof typeof ROUTE_BUDGET_MAX;
@@ -70,6 +78,7 @@ export const spatialQuery: Skill<SpatialQueryArgs> = {
   description:
     '只读查询共享空间记忆里已记录的事实：指定方块的最近观测证据与 Section 驻留状态、单个历史片段（polyline/entrances/links）的元数据分页、指定 traversal 或 node 记录、历史拓扑路线，以及按维度分页的片段索引。'
     + '返回的是历史几何或最近一次观测，不代表当前世界状态、当前可通行性、可执行点列或在线观察；不观察、不移动、不写入、不刷新证据时间。'
+    + 'fragment 的 polyline 是来源已执行确认的原 nominal corridor 前缀，不是实测轨迹；traversal 证据独立保存原起终点、时间、会话、执行与任务关联，不表示当前可通行。'
     + 'fragment 的 links 缺失只表示该数组未记录，不证明没有连接；route 的 FOUND 仅是历史连接证据，不代表现在可走。'
     + 'fragments 会在当前库的完整索引上按 dim 过滤、排序后分页；limit 只限制本页返回条数，不是每页扫描量或 O(page)。',
   argsDoc:
@@ -109,15 +118,15 @@ export const spatialQuery: Skill<SpatialQueryArgs> = {
       }
       case 'fragment': {
         if (!validId(o.fragmentId)) return { ok: false, error: `fragmentId 必须是非空、长度 ≤${MAX_ID_LENGTH} 的字符串` };
-        const field = o.field ?? 'polyline';
+        const field = o.field === undefined ? 'polyline' : o.field;
         if (field !== 'polyline' && field !== 'entrances' && field !== 'links') {
           return { ok: false, error: 'field 必须是 polyline、entrances 或 links' };
         }
-        const offset = o.offset ?? 0;
+        const offset = o.offset === undefined ? 0 : o.offset;
         if (typeof offset !== 'number' || !Number.isSafeInteger(offset) || offset < 0) {
           return { ok: false, error: 'offset 必须是非负安全整数' };
         }
-        const limit = o.limit ?? FRAGMENT_FIELD_DEFAULT;
+        const limit = o.limit === undefined ? FRAGMENT_FIELD_DEFAULT : o.limit;
         if (typeof limit !== 'number' || !Number.isSafeInteger(limit) || limit < 1 || limit > FRAGMENT_FIELD_MAX) {
           return { ok: false, error: `limit 必须是 1..${FRAGMENT_FIELD_MAX} 的安全整数，超出时拒绝而不 clamp` };
         }
@@ -172,7 +181,7 @@ export const spatialQuery: Skill<SpatialQueryArgs> = {
         if (after !== undefined && !validId(after)) {
           return { ok: false, error: `after 必须是非空、长度 ≤${MAX_ID_LENGTH} 的游标字符串` };
         }
-        const limit = o.limit ?? FRAGMENTS_PAGE_DEFAULT;
+        const limit = o.limit === undefined ? FRAGMENTS_PAGE_DEFAULT : o.limit;
         if (typeof limit !== 'number' || !Number.isSafeInteger(limit) || limit < 1 || limit > FRAGMENTS_PAGE_MAX) {
           return { ok: false, error: `limit 必须是 1..${FRAGMENTS_PAGE_MAX} 的安全整数` };
         }
@@ -229,7 +238,7 @@ export const spatialQuery: Skill<SpatialQueryArgs> = {
           }
           const effectiveFreshness = cell.evidence.freshness === 'STALE'
             ? 'STALE'
-            : assessedAt >= cell.evidence.validUntil
+            : assessedAt > cell.evidence.validUntil
               ? 'EXPIRED'
               : 'FRESH';
           return {
@@ -360,16 +369,17 @@ export const spatialQuery: Skill<SpatialQueryArgs> = {
         break;
       }
       case 'route': {
+        const budgets = {
+          maxNodes: args.maxNodes ?? ROUTE_BUDGET_DEFAULT.maxNodes,
+          maxEdges: args.maxEdges ?? ROUTE_BUDGET_DEFAULT.maxEdges,
+          maxHistoryReads: args.maxHistoryReads ?? ROUTE_BUDGET_DEFAULT.maxHistoryReads,
+          maxDiagnostics: args.maxDiagnostics ?? ROUTE_BUDGET_DEFAULT.maxDiagnostics,
+        };
         const requested = {
           fromNodeId: args.fromNodeId,
           toNodeId: args.toNodeId,
           ...(args.mode !== undefined ? { mode: args.mode } : {}),
-          budgets: {
-            maxNodes: args.maxNodes ?? null,
-            maxEdges: args.maxEdges ?? null,
-            maxHistoryReads: args.maxHistoryReads ?? null,
-            maxDiagnostics: args.maxDiagnostics ?? null,
-          },
+          budgets,
         };
         const interpretation = {
           historicalRecordedConnections: true,
@@ -430,32 +440,14 @@ export const spatialQuery: Skill<SpatialQueryArgs> = {
         }
         const route = topology.route(args.fromNodeId, args.toNodeId, {
           ...(args.mode !== undefined ? { mode: args.mode } : {}),
-          ...(args.maxNodes !== undefined ? { maxNodes: args.maxNodes } : {}),
-          ...(args.maxEdges !== undefined ? { maxEdges: args.maxEdges } : {}),
-          ...(args.maxHistoryReads !== undefined ? { maxHistoryReads: args.maxHistoryReads } : {}),
-          ...(args.maxDiagnostics !== undefined ? { maxDiagnostics: args.maxDiagnostics } : {}),
+          ...budgets,
         });
-        const scopeMismatches = route.status === 'FOUND'
-          ? route.segments
-              .filter((segment) => segment.evidence.worldId !== worldId || segment.evidence.dim !== args.dim)
-              .map((segment) => ({
-                edgeId: segment.edgeId,
-                evidenceId: segment.evidenceId,
-                worldId: segment.evidence.worldId,
-                dim: segment.evidence.dim,
-              }))
-          : [];
         query = {
           kind: 'route',
           scope,
           requested,
           metadataReads,
           route,
-          ...(route.status === 'FOUND'
-            ? scopeMismatches.length === 0
-              ? { proofScope: 'ok' }
-              : { proofScope: 'scope_mismatch', scopeMismatches }
-            : {}),
           interpretation,
         };
         summary = `历史路线查询完成：${route.status}；仅表示已记录连接证据，不代表当前通行`;
@@ -521,7 +513,7 @@ export const spatialQuery: Skill<SpatialQueryArgs> = {
     const data = { spatialQuery: query };
     const serializedBytes = new TextEncoder().encode(JSON.stringify(data)).length;
     if (serializedBytes > OUTPUT_LIMIT_BYTES) {
-      return ok(`空间查询结果序列化 ${serializedBytes} 字节，超过 ${OUTPUT_LIMIT_BYTES} 字节预算；未返回任何截断证据`, {
+      return fail('ERROR', `空间查询结果序列化 ${serializedBytes} 字节，超过 ${OUTPUT_LIMIT_BYTES} 字节预算；未返回任何截断证据`, {
         spatialQuery: {
           kind: args.kind,
           scope,
