@@ -181,10 +181,58 @@ export async function acquireRouteResidency(
     return { status: 'ready', lease: null, sections, noRecord };
   }
 
-  const outcome = await spatial.prepare(loadable, options).then(
+  const prepareOnce = () => spatial.prepare(loadable, options).then(
     (result) => ({ kind: 'result' as const, result }),
     (error: unknown) => ({ kind: 'error' as const, error }),
   );
+  // 检查点调度器/后台加载短暂占用时，库以 kind 'busy' 拒绝 prepare：这是忙，
+  // 不是路线不可用。只在调用方 signal/deadline 范围内对 'busy' 做有限次退避
+  // 重试（至多 4 次尝试）；closing/closed/error 等其他失败不重试。耗尽后保留
+  // 最后一次真实错误，取消/期限则返回 cancelled 交给调用方区分生命周期与超时。
+  const BUSY_ATTEMPTS = 4;
+  const BUSY_BACKOFF_MS = [10, 20, 40];
+  const retryStopped = (why: 'signal aborted' | 'deadline reached'): RouteResidencyFailure => ({
+    status: 'not_ready',
+    reason: 'cancelled',
+    message: `route residency retry stopped: ${why}`,
+    sections,
+    noRecord,
+  });
+
+  let outcome = await prepareOnce();
+  let attempts = 1;
+  while (
+    attempts < BUSY_ATTEMPTS
+    && outcome.kind === 'error'
+    && outcome.error instanceof PersistenceError
+    && outcome.error.kind === 'busy'
+  ) {
+    const remaining = options.deadline === undefined
+      ? Number.POSITIVE_INFINITY
+      : options.deadline - Date.now();
+    if (options.signal?.aborted === true) return retryStopped('signal aborted');
+    if (remaining <= 0) return retryStopped('deadline reached');
+
+    let aborted = false;
+    const waitMs = Math.min(BUSY_BACKOFF_MS[attempts - 1]!, remaining);
+    await new Promise<void>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const onAbort = () => { aborted = true; cleanup(); resolve(); };
+      const cleanup = () => {
+        if (timer !== undefined) clearTimeout(timer);
+        options.signal?.removeEventListener('abort', onAbort);
+      };
+      timer = setTimeout(() => { cleanup(); resolve(); }, waitMs);
+      options.signal?.addEventListener('abort', onAbort, { once: true });
+    });
+    if (aborted) return retryStopped('signal aborted');
+    if (options.deadline !== undefined && Date.now() >= options.deadline) {
+      return retryStopped('deadline reached');
+    }
+
+    outcome = await prepareOnce();
+    attempts += 1;
+  }
   if (outcome.kind === 'error') {
     const kind = outcome.error instanceof PersistenceError ? outcome.error.kind : 'error';
     const reason: RouteResidencyFailureReason = kind === 'busy' || kind === 'closing' || kind === 'closed' ? kind : 'error';

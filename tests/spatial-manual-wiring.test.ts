@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { Vec3 } from 'vec3';
-import { openSpatialSession } from 'curio-minecraft-3d-memory/storage/sqlite';
+import { openSpatialSession, PersistenceError } from 'curio-minecraft-3d-memory/storage/sqlite';
 import type { CloseResult, SpatialSession } from 'curio-minecraft-3d-memory/storage/sqlite';
 import type { Observation, SectionKey } from 'curio-minecraft-3d-memory';
 import type { BlockObservation, GameAdapter } from '../src/adapter/types.ts';
@@ -520,4 +520,110 @@ test('manual shutdown reports unprocessed observations and still closes the real
   assert.equal(shutdown.close?.completed, true);
   assert.equal(shutdown.close?.error, null);
   rmSync(h.dir, { recursive: true, force: true });
+});
+
+test('busy prepare retries a bounded number of times, then leases exactly once', { timeout: 30_000 }, async () => {
+  const h = await openManual();
+  try {
+    const realPrepare = h.svc.prepare.bind(h.svc);
+    let attempts = 0;
+    h.svc.prepare = async (keys, opts) => {
+      attempts += 1;
+      if (attempts <= 2) throw new PersistenceError('busy', `checkpoint scheduler busy (attempt ${attempts})`);
+      return realPrepare(keys, opts);
+    };
+
+    const residency = await acquireRouteResidency(h.svc, [keyAt(0)], { deadline: Date.now() + 5000 });
+    assert.equal(residency.status, 'ready');
+    assert.equal(attempts, 3, '两次 busy 后第三次真实准备成功');
+    if (residency.status === 'ready') {
+      assert.notEqual(residency.lease, null);
+      assert.equal(h.svc.workingSetStats().pinnedLeases, 1, '重试不得重复授予 lease');
+      releaseRouteResidency(h.svc, residency);
+    }
+    assert.equal(h.svc.workingSetStats().pinnedLeases, 0);
+  } finally {
+    await closeManual(h);
+  }
+});
+
+test('busy prepare exhaustion keeps the real error and no lease', { timeout: 30_000 }, async () => {
+  const h = await openManual();
+  try {
+    const busyError = new PersistenceError('busy', 'checkpoint scheduler stayed busy');
+    let attempts = 0;
+    h.svc.prepare = async () => {
+      attempts += 1;
+      throw busyError;
+    };
+
+    const residency = await acquireRouteResidency(h.svc, [keyAt(0)], { deadline: Date.now() + 5000 });
+    assert.equal(residency.status, 'not_ready');
+    assert.equal(attempts, 4, '至多 4 次尝试，不得无限重试');
+    if (residency.status === 'not_ready') {
+      assert.equal(residency.reason, 'busy');
+      assert.equal(residency.error, busyError, '耗尽后保留最后一次真实错误');
+      assert.equal(residency.message, busyError.message);
+    }
+    assert.equal(h.svc.workingSetStats().pinnedLeases, 0, '重试不得泄漏 lease');
+  } finally {
+    await closeManual(h);
+  }
+});
+
+test('abort during a busy retry stops immediately with reason cancelled', { timeout: 30_000 }, async () => {
+  const h = await openManual();
+  try {
+    const controller = new AbortController();
+    let attempts = 0;
+    h.svc.prepare = async () => {
+      attempts += 1;
+      controller.abort();
+      throw new PersistenceError('busy', 'checkpoint scheduler busy');
+    };
+
+    const residency = await acquireRouteResidency(h.svc, [keyAt(0)], {
+      signal: controller.signal, deadline: Date.now() + 5000,
+    });
+    assert.equal(attempts, 1, '取消后不再重试');
+    assert.equal(residency.status, 'not_ready');
+    if (residency.status === 'not_ready') {
+      assert.equal(residency.reason, 'cancelled');
+      assert.match(residency.message, /signal aborted/);
+    }
+    assert.equal(h.svc.workingSetStats().pinnedLeases, 0);
+  } finally {
+    await closeManual(h);
+  }
+});
+
+test('walk_to execution-phase prepare deadline is TIMEOUT, not lifecycle cancellation', { timeout: 60_000 }, async () => {
+  const h = await openManual();
+  try {
+    const fixture = physicsHarness();
+    const deadline = Date.now() + 5000;
+    const ctx = context(fixture.adapter, h.svc, makeSenses(h.svc), { taskId: 'manual-exec-deadline', deadline });
+    const realPrepare = h.svc.prepare.bind(h.svc);
+    let calls = 0;
+    h.svc.prepare = async (keys, opts) => {
+      const call = ++calls;
+      // 第一次是搜索前准备，必须尽快成功；第二次是执行前的真实路线依赖准备，
+      // 拖到期限之后，让真实 prepare 自己以 deadline 取消结算。
+      if (call === 2) {
+        await new Promise((resolve) => setTimeout(resolve, Math.max(1, deadline - Date.now() + 20)));
+      }
+      return realPrepare(keys, opts);
+    };
+
+    const result = await runSkill(ctx, walkTo, { to: { x: 2.54, y: 0, z: 0.52 }, arrival: { kind: 'near', radius: 0.5 } });
+    assert.equal(result.status, 'failed', result.summary);
+    assert.equal(result.failureCode, 'TIMEOUT');
+    assert.equal(calls, 2, '搜索与执行阶段各一次真实 prepare');
+    const facts = rec(rec(result.data).residency);
+    assert.equal(facts.status, 'not_ready');
+    assert.equal(facts.reason, 'cancelled');
+    assert.equal(h.svc.workingSetStats().pinnedLeases, 0);
+  } finally {
+    await closeManual(h);
+  }
 });

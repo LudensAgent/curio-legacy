@@ -703,9 +703,15 @@ export const walkTo: Skill<WalkToArgs> = {
         ...base, stage: 'residency', candidate, search: snapshot,
         position: { ...actualStart }, ...residencyFacts(routeResidency),
       };
-      // prepare 的 cancelled 可能是父取消、期限或关停；和搜索阶段一样按取消返回，
-      // 不把它包装成普通 ERROR。其余失败保留真实缺口。
-      if (routeResidency.reason === 'cancelled') return { status: 'cancelled', summary, data };
+      // prepare 的 cancelled 可能是父取消、关停或期限；只有生命周期原因才返回
+      // cancelled（与搜索阶段同一约定），期限耗尽按 TIMEOUT 如实报告。
+      // 其余失败保留真实缺口。
+      if (routeResidency.reason === 'cancelled') {
+        if (ctx.signal.aborted || spatial.closing || spatial.paused) {
+          return { status: 'cancelled', summary, data: { ...data, cancelBy: 'lifecycle' } };
+        }
+        return fail('TIMEOUT', summary, data);
+      }
       return fail('ERROR', summary, data);
     }
     try {
