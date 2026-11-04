@@ -69,6 +69,7 @@ import {
   type FrameRecord,
   type MoveRecord,
   type RouteCallRecord,
+  type RouteStateSnapshot,
   type RouteStatusSnapshot,
   type TickEntry,
   type WalkBridge,
@@ -421,10 +422,19 @@ test('framesSince：teleport/搭设帧排除在支撑断言之外（防 setup �
   assert.equal(framesSince(frames, 1000)[0]!.ownerTaskId, 't');
 });
 
+function routeSnap(o: Partial<RouteStateSnapshot> = {}): RouteStateSnapshot {
+  return {
+    stepCount: 1, complete: true, verdict: 'OPEN', openPrefix: 1,
+    verifiedStepIndexes: [0], pendingStepIndexes: [], invalidatedCount: 0, earliestProblem: null,
+    steps: [{ kind: 'verified', status: 'OPEN', problemKind: null }], ...o,
+  };
+}
+
 function statusSnap(o: Partial<RouteStatusSnapshot> = {}): RouteStatusSnapshot {
   return {
     worldId: 'w', dim: 'd', sessionId: 's',
-    delegationId: 'walk-1', nextPointIndex: 1, activeStepIndex: 0, lastPosition: null, result: null, ...o,
+    delegationId: 'walk-1', nextPointIndex: 1, activeStepIndex: 0, lastPosition: null, result: null,
+    route: routeSnap(), ...o,
   };
 }
 
@@ -1429,37 +1439,217 @@ test('checkW4ObservationChain：合法初观测→同对象report→同帧observ
   assert.match(checkW4ObservationChain({ ...W4_CHAIN_OK, terminalOutcome: 'ARRIVED' }).reason ?? '', /ARRIVED/);
 });
 
+const W5_EYE = { x: 217.5, y: 65.62, z: 205.52, yaw: -Math.PI / 2, pitch: -1.2 };
+const W5_BEFORE_ROUTE = {
+  stepCount: 4, complete: true, verdict: 'OPEN', openPrefix: 4,
+  verifiedStepIndexes: [0, 1, 2, 3], pendingStepIndexes: [], invalidatedCount: 0, earliestProblem: null,
+  steps: [0, 1, 2, 3].map(() => ({ kind: 'verified' as const, status: 'OPEN', problemKind: null })),
+};
+const W5_AFTER_ROUTE = {
+  stepCount: 4, complete: true, verdict: 'BLOCKED', openPrefix: 3,
+  verifiedStepIndexes: [0, 1, 2, 3], pendingStepIndexes: [], invalidatedCount: 1,
+  earliestProblem: { stepIndex: 3, status: 'BLOCKED', problemKind: 'missing_support' },
+  steps: [
+    { kind: 'verified' as const, status: 'OPEN', problemKind: null },
+    { kind: 'verified' as const, status: 'OPEN', problemKind: null },
+    { kind: 'verified' as const, status: 'OPEN', problemKind: null },
+    { kind: 'verified' as const, status: 'BLOCKED', problemKind: 'missing_support' },
+  ],
+};
 const W5_CHAIN_OK = {
+  taskId: 'task_A',
+  delegationId: 'walk-1',
   stoneMapId: 1,
-  removalSeq: 10,
-  hidden: { visionCount: 3, batchCount: 2, sawAir: false, targetChanged: false },
+  removalSeq: 12,
+  hidden: {
+    startSeq: 10, startAt: 1000, endSeq: 30, endAt: 1300,
+    views: [
+      { seq: 13, frame: 40, eye: W5_EYE, targetInPositions: false, targetInFov: false, targetOutput: null },
+      { seq: 14, frame: 41, eye: W5_EYE, targetInPositions: false, targetInFov: false, targetOutput: null },
+    ],
+    batches: [{ seq: 15, frame: 40, targetObservation: false, targetChanged: false }],
+  },
   cellBefore: {
     observed: true, name: 'stone', properties: {}, observedAt: 100, sequence: 3, originObservationId: 3,
     sessionId: 's', revision: 1, freshness: 'FRESH', validUntil: 600,
+    captureAt: 1000, captureSeq: 10, captureFrame: 40, body: { x: 217.5, y: 64, z: 205.52 }, eye: W5_EYE,
   },
   cellDuring: {
     observed: true, name: 'stone', properties: {}, observedAt: 100, sequence: 3, originObservationId: 3,
     sessionId: 's', revision: 1, freshness: 'FRESH', validUntil: 600,
+    captureAt: 1200, captureSeq: 16, captureFrame: 41, body: { x: 217.5, y: 64, z: 205.52 }, eye: W5_EYE,
   },
-  reveal: { seq: 20, name: 'air', mapId: 1, observedAt: 200 },
-  revealBatch: { mapId: 1, reportId: 9, targetChanged: true },
-  revealObserve: { reportId: 9 },
-  terminalOutcome: 'FAILED',
+  returnMove: {
+    seq: 30, executionId: 'walk-1-step-2',
+    from: { x: 217.55, y: 64, z: 205.52 }, to: { x: 216.55, y: 64, z: 205.52 },
+  },
+  reveal: {
+    seq: 31, frame: 50, name: 'air', mapId: 1, observedAt: 200,
+    eye: { ...W5_EYE, yaw: Math.PI / 2 }, targetInFov: true, precedingTargetOutputs: [],
+  },
+  revealBatch: { seq: 32, mapId: 1, reportId: 9, targetChanged: true },
+  revealObserve: {
+    reportId: 9, ownerTaskId: 'task_A', delegationId: 'walk-1', enterSeq: 33,
+    statusBeforeOutcome: null, statusBeforeActiveStepIndex: 2,
+    statusAfterOutcome: null, statusAfterActiveStepIndex: 2,
+  },
+  routeProof: {
+    before: W5_BEFORE_ROUTE, after: W5_AFTER_ROUTE, totalSteps: 4, step3Started: false,
+    moveExecutionIds: ['walk-1-step-0', 'walk-1-step-1', 'walk-1-step-2'],
+    moveCount: 3, startedStepIndexes: [0, 1, 2],
+  },
+  terminal: {
+    navPresent: true, outcome: 'FAILED', confirmed: false, problemKind: 'route_invalidated',
+    lastPosition: { x: 216.55, y: 64, z: 205.52 }, allKeysReleased: true,
+  },
 };
 
-test('checkW5HiddenReveal：隐藏期未被刷新且同一委托生产回看才 PASS，半段/刷新均拒绝', () => {
+test('checkW5HiddenReveal：真实隐藏窗口+返程 step2 回看+未来 step3 失效才 PASS', () => {
   assert.deepEqual(checkW5HiddenReveal(W5_CHAIN_OK), { ok: true });
   assert.match(checkW5HiddenReveal({ ...W5_CHAIN_OK, reveal: null }).reason ?? '', /只有隐藏半段/);
-  assert.match(checkW5HiddenReveal({ ...W5_CHAIN_OK, hidden: { ...W5_CHAIN_OK.hidden, visionCount: 1 } }).reason ?? '', /边界不足/);
-  assert.match(checkW5HiddenReveal({ ...W5_CHAIN_OK, hidden: { ...W5_CHAIN_OK.hidden, sawAir: true } }).reason ?? '', /已看到/);
-  assert.match(checkW5HiddenReveal({ ...W5_CHAIN_OK, hidden: { ...W5_CHAIN_OK.hidden, targetChanged: true } }).reason ?? '', /已含目标格/);
+  assert.match(
+    checkW5HiddenReveal({
+      ...W5_CHAIN_OK,
+      hidden: { ...W5_CHAIN_OK.hidden, views: W5_CHAIN_OK.hidden.views.map((v) => ({ ...v, frame: 40 })) },
+    }).reason ?? '',
+    /两个不同 physics frame/,
+  );
+  assert.match(
+    checkW5HiddenReveal({
+      ...W5_CHAIN_OK,
+      hidden: { ...W5_CHAIN_OK.hidden, views: [{ ...W5_CHAIN_OK.hidden.views[0]!, targetOutput: 'air' }, W5_CHAIN_OK.hidden.views[1]!] },
+    }).reason ?? '',
+    /已输出目标格/,
+  );
+  assert.match(
+    checkW5HiddenReveal({
+      ...W5_CHAIN_OK,
+      hidden: { ...W5_CHAIN_OK.hidden, views: [{ ...W5_CHAIN_OK.hidden.views[0]!, targetInPositions: true }, W5_CHAIN_OK.hidden.views[1]!] },
+    }).reason ?? '',
+    /候选仍包含目标格/,
+  );
+  assert.match(
+    checkW5HiddenReveal({
+      ...W5_CHAIN_OK,
+      hidden: { ...W5_CHAIN_OK.hidden, views: [{ ...W5_CHAIN_OK.hidden.views[0]!, targetInFov: true }, W5_CHAIN_OK.hidden.views[1]!] },
+    }).reason ?? '',
+    /未排除目标 FOV/,
+  );
+  assert.match(
+    checkW5HiddenReveal({
+      ...W5_CHAIN_OK,
+      hidden: { ...W5_CHAIN_OK.hidden, batches: [{ ...W5_CHAIN_OK.hidden.batches[0]!, targetObservation: true }] },
+    }).reason ?? '',
+    /map 输入刷新/,
+  );
+  assert.match(
+    checkW5HiddenReveal({
+      ...W5_CHAIN_OK,
+      hidden: { ...W5_CHAIN_OK.hidden, batches: [{ ...W5_CHAIN_OK.hidden.batches[0]!, targetChanged: true }] },
+    }).reason ?? '',
+    /已含目标格/,
+  );
+  assert.match(
+    checkW5HiddenReveal({ ...W5_CHAIN_OK, cellBefore: { ...W5_CHAIN_OK.cellBefore, captureSeq: 9 } }).reason ?? '',
+    /baseline 早于隐藏起点/,
+  );
+  assert.match(
+    checkW5HiddenReveal({ ...W5_CHAIN_OK, cellDuring: { ...W5_CHAIN_OK.cellDuring, captureAt: 1000 } }).reason ?? '',
+    /capture 时刻未推进/,
+  );
   assert.match(
     checkW5HiddenReveal({ ...W5_CHAIN_OK, cellDuring: { ...W5_CHAIN_OK.cellDuring, observedAt: 150, revision: 2 } }).reason ?? '',
     /人工刷新/,
   );
+  assert.match(
+    checkW5HiddenReveal({ ...W5_CHAIN_OK, reveal: { ...W5_CHAIN_OK.reveal, seq: 30 } }).reason ?? '',
+    /返程 move 之后/,
+  );
+  assert.match(
+    checkW5HiddenReveal({ ...W5_CHAIN_OK, reveal: { ...W5_CHAIN_OK.reveal, name: 'stone' } }).reason ?? '',
+    /不是air/,
+  );
+  assert.match(
+    checkW5HiddenReveal({ ...W5_CHAIN_OK, reveal: { ...W5_CHAIN_OK.reveal, targetInFov: false } }).reason ?? '',
+    /回看真实朝向/,
+  );
+  assert.match(
+    checkW5HiddenReveal({ ...W5_CHAIN_OK, reveal: { ...W5_CHAIN_OK.reveal, precedingTargetOutputs: ['air'] } }).reason ?? '',
+    /未被采用/,
+  );
   assert.match(checkW5HiddenReveal({ ...W5_CHAIN_OK, reveal: { ...W5_CHAIN_OK.reveal, mapId: 2 } }).reason ?? '', /同一个实际map/);
-  assert.match(checkW5HiddenReveal({ ...W5_CHAIN_OK, revealObserve: { reportId: 10 } }).reason ?? '', /同一对象/);
-  assert.match(checkW5HiddenReveal({ ...W5_CHAIN_OK, terminalOutcome: 'ARRIVED' }).reason ?? '', /ARRIVED/);
+  assert.match(
+    checkW5HiddenReveal({ ...W5_CHAIN_OK, revealObserve: { ...W5_CHAIN_OK.revealObserve, reportId: 10 } }).reason ?? '',
+    /同一对象/,
+  );
+  assert.match(
+    checkW5HiddenReveal({ ...W5_CHAIN_OK, revealObserve: { ...W5_CHAIN_OK.revealObserve, ownerTaskId: 'task_B' } }).reason ?? '',
+    /同一 task\/delegation/,
+  );
+  assert.match(
+    checkW5HiddenReveal({ ...W5_CHAIN_OK, revealObserve: { ...W5_CHAIN_OK.revealObserve, statusBeforeActiveStepIndex: 1 } }).reason ?? '',
+    /返程 step2/,
+  );
+  assert.match(
+    checkW5HiddenReveal({ ...W5_CHAIN_OK, revealObserve: { ...W5_CHAIN_OK.revealObserve, statusAfterOutcome: 'FAILED' } }).reason ?? '',
+    /终态后才被消费/,
+  );
+  assert.match(
+    checkW5HiddenReveal({ ...W5_CHAIN_OK, returnMove: { ...W5_CHAIN_OK.returnMove, from: { x: 216.55, y: 64, z: 205.52 } } }).reason ?? '',
+    /不是 -X 折返/,
+  );
+  assert.match(
+    checkW5HiddenReveal({ ...W5_CHAIN_OK, routeProof: { ...W5_CHAIN_OK.routeProof, step3Started: true } }).reason ?? '',
+    /step3 已启动/,
+  );
+  assert.match(
+    checkW5HiddenReveal({
+      ...W5_CHAIN_OK,
+      routeProof: { ...W5_CHAIN_OK.routeProof, moveExecutionIds: W5_CHAIN_OK.routeProof.moveExecutionIds.slice(0, 2), moveCount: 2, startedStepIndexes: [0, 1] },
+    }).reason ?? '',
+    /实际 move 数/,
+  );
+  assert.match(
+    checkW5HiddenReveal({
+      ...W5_CHAIN_OK,
+      routeProof: {
+        ...W5_CHAIN_OK.routeProof,
+        after: {
+          ...W5_AFTER_ROUTE, verdict: 'OPEN', earliestProblem: null,
+          steps: W5_AFTER_ROUTE.steps.map((s, i) => i === 3 ? { kind: 'verified' as const, status: 'OPEN', problemKind: null } : s),
+        },
+      },
+    }).reason ?? '',
+    /仍为 OPEN/,
+  );
+  assert.match(
+    checkW5HiddenReveal({ ...W5_CHAIN_OK, routeProof: { ...W5_CHAIN_OK.routeProof, after: { ...W5_AFTER_ROUTE, invalidatedCount: 0 } } }).reason ?? '',
+    /失效重算/,
+  );
+  assert.match(
+    checkW5HiddenReveal({ ...W5_CHAIN_OK, terminal: { ...W5_CHAIN_OK.terminal, navPresent: false } }).reason ?? '',
+    /真实 Nav/,
+  );
+  assert.match(
+    checkW5HiddenReveal({ ...W5_CHAIN_OK, terminal: { ...W5_CHAIN_OK.terminal, outcome: 'ARRIVED' } }).reason ?? '',
+    /FAILED\/BLOCKED/,
+  );
+  assert.match(
+    checkW5HiddenReveal({ ...W5_CHAIN_OK, terminal: { ...W5_CHAIN_OK.terminal, confirmed: true } }).reason ?? '',
+    /confirmed/,
+  );
+  assert.match(
+    checkW5HiddenReveal({ ...W5_CHAIN_OK, terminal: { ...W5_CHAIN_OK.terminal, problemKind: null } }).reason ?? '',
+    /真实 problem/,
+  );
+  assert.match(
+    checkW5HiddenReveal({ ...W5_CHAIN_OK, terminal: { ...W5_CHAIN_OK.terminal, lastPosition: null } }).reason ?? '',
+    /lastPosition/,
+  );
+  assert.match(
+    checkW5HiddenReveal({ ...W5_CHAIN_OK, terminal: { ...W5_CHAIN_OK.terminal, allKeysReleased: false } }).reason ?? '',
+    /7 键/,
+  );
 });
 
 test('mapBatchForEvidence：输出JSON保留原observations/report与编号，且不含实际map对象', () => {
