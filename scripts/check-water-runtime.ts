@@ -382,29 +382,43 @@ async function main(): Promise<void> {
     const tr2 = startPhysicsTrace(ad);
     w2Trace = tr2;
     scenario2.stabilityTrace = tr2.samples; // 立即挂上（活引用）
-    await sleepMs(W2_STABILITY_MS);
+    // 等待真实物理样本自身证明连续站稳：至少 2 个 physicsTick 样本，且首末物理样本真实 ts 跨度 ≥ W2_STABILITY_MS；有界等待（约 2s），不用端点墙钟或固定 sleep。
+    const w2StableDeadline = Date.now() + 2000;
+    while (true) {
+      if (tr2.error) break;
+      const n = tr2.samples.length;
+      if (n >= 2 && tr2.samples[n - 1].ts - tr2.samples[0].ts >= W2_STABILITY_MS) break;
+      if (Date.now() > w2StableDeadline) break;
+      await sleepMs(50);
+    }
     tr2.stop();
     w2Trace = null;
     const w2Stable = contact(ad, 'w2_stable');
 
-    // 连续观测窗口 = 完成快照 + 中间物理样本 + 稳定端快照；全部须干地且在容差内，且真实跨度 ≥ W2_STABILITY_MS。
-    const windowSamples: ContactSample[] = [w2Finish, ...tr2.samples, w2Stable];
-    const windowSpanMs = windowSamples[windowSamples.length - 1].ts - windowSamples[0].ts;
+    // 连续站稳以真实物理样本为准：至少 2 个 physicsTick 样本、首末物理样本真实跨度 ≥ W2_STABILITY_MS、且每个物理样本都干地且在容差内。
+    // finish/stable 端点作为额外检查与证据保留，不参与物理跨度判定。
+    const physSamples = tr2.samples;
+    const physCount = physSamples.length;
+    const physSpanMs = physCount >= 2 ? physSamples[physCount - 1].ts - physSamples[0].ts : 0;
+    const physDry = physSamples.every((s) => dryOf(s) && withinOf(s.pos));
+    const windowSamples: ContactSample[] = [w2Finish, ...physSamples, w2Stable];
     const windowDry = windowSamples.every((s) => dryOf(s) && withinOf(s.pos));
     const errFinish = errOf(w2Finish.pos);
     const errStable = errOf(w2Stable.pos);
     scenario2.requestedStabilityMs = W2_STABILITY_MS;
-    scenario2.windowSpanMs = windowSpanMs;
+    scenario2.physicsSampleCount = physCount;
+    scenario2.physicsSpanMs = physSpanMs;
+    scenario2.windowSpanMs = windowSamples[windowSamples.length - 1].ts - windowSamples[0].ts; // 端点墙钟跨度（仅证据，不作判据）
     scenario2.windowDry = windowDry;
     scenario2.windowSamples = windowSamples;
     scenario2.finishErr = { horizontal: Number(errFinish.horizontal.toFixed(3)), vertical: Number(errFinish.vertical.toFixed(3)) };
     scenario2.stable = { ...w2Stable, horizontal: Number(errStable.horizontal.toFixed(3)), vertical: Number(errStable.vertical.toFixed(3)) };
     scenario2.traceError = tr2.error;
-    log({ event: 'water_w2', status: o2.result.status, landedBySkill: scenario2.landedBySkill, skillSurfaced: scenario2.skillSurfaced, windowSpanMs, windowDry, traceError: tr2.error });
+    log({ event: 'water_w2', status: o2.result.status, landedBySkill: scenario2.landedBySkill, skillSurfaced: scenario2.skillSurfaced, physicsSampleCount: physCount, physSpanMs, windowDry, traceError: tr2.error });
 
     if (tr2.error) throw new Error(`W2 物理采样回调失败：${tr2.error}`);
-    if (!scenario2.landedBySkill || !scenario2.skillSurfaced || !windowDry || windowSpanMs < W2_STABILITY_MS) {
-      throw new Error(`W2 swim_to 未在连续站稳窗口（真实跨度 ${windowSpanMs}ms，需 ≥${W2_STABILITY_MS}ms）满足干地且容差：status=${o2.result.status} landed=${scenario2.landedBySkill} surfaced=${scenario2.skillSurfaced} 连续站稳=${windowDry} 摘要=${o2.result.summary}`);
+    if (!scenario2.landedBySkill || !scenario2.skillSurfaced || physCount < 2 || physSpanMs < W2_STABILITY_MS || !physDry || !windowDry) {
+      throw new Error(`W2 swim_to 未在真实物理采样连续站稳窗口满足干地且容差：status=${o2.result.status} landed=${scenario2.landedBySkill} surfaced=${scenario2.skillSurfaced} 物理样本=${physCount} 物理跨度=${physSpanMs}ms（需 ≥${W2_STABILITY_MS}ms 且 ≥2 样本）物理全干=${physDry} 端点全干=${windowDry} 摘要=${o2.result.summary}`);
     }
 
     // ---- W3：从干岸游向对岸，进入水体并水平移动后取消 ----
