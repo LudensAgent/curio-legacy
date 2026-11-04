@@ -240,7 +240,7 @@ async function stepOutOfWater(ctx: SkillCtx, args: CellArgs, feet: Vec3Like) {
 
 export const stepTo: Skill<CellArgs> = {
   name: 'step',
-  description: '迈到身边相邻的一格（[前,上,右]）：可以平走、上一级台阶（上+1，会跳）、下一级（上-1）；脚下是梯子时 [0,1,0] 沿梯子爬一格。目标格和头顶需要有身体通行空间、脚下要有支撑（按碰撞形状：整块、半砖、雪层、地毯都能站，脚高按实际顶面，不取整）；上台阶时自己头顶上方也要空。陆上只走指定高度的一格，不会自动下坎；更深的落点可用 assess_landings 查看并用 descend 明确选择。泡在水里时朝岸那边迈（[1,0,0] 就行），身体会游过去、贴着岸爬上去（岸比脚高一两格也行）',
+  description: '迈到身边相邻的一格（[前,上,右]）：可以平走、上一级台阶（上+1，会跳）、下一级（上-1）；脚下是梯子时 [0,1,0] 沿梯子爬一格。目标格和头顶需要有身体通行空间、脚下要有支撑（按碰撞形状：整块、半砖、雪层、地毯都能站，脚高按实际顶面，不取整）；上台阶时自己头顶上方也要空；不确定时可能先转头确认这次迈步所需的空间。陆上只走指定高度的一格，不会自动下坎；更深的落点可用 assess_landings 查看并用 descend 明确选择。泡在水里时朝岸那边迈（[1,0,0] 就行），身体会游过去、贴着岸爬上去（岸比脚高一两格也行）',
   argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W"}（前后/左右 ±1，上下 -1..1；to 是脚部目标格，须留空，支撑在它下面一格；例：[1,-1,0] 下一级，支撑在 [1,-2,0]）',
   timeoutMs: 8000,
   movement: true,
@@ -431,6 +431,7 @@ export const stepTo: Skill<CellArgs> = {
     }
     if (args.at[1] === 1 && targetFoot !== null) {
       // 按实际目标脚高判断起跳净空：半格上步是走上去（脚高只抬 0.5），不是整格跳跃，不能按 currentFoot+1 假想跳高一格。
+      await glanceAll([ownHead]);
       const oh = clearanceBlocker(targetFoot, feet.x, feet.z);
       if (oh && oh.y > feet.y) problems.push(`往上跳时自己头顶上方是 ${describe(oh)}（跳不起来；先 dig_at [0,2,0]）`);
       else if (isUnseen(ownHead)) problems.push(`往上跳时自己头顶上方是 ${describe(ownHead)}，无法确认跳跃空间`);
