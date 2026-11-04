@@ -42,6 +42,8 @@ import {
   partialMatchesRecorded,
   platformEscaped,
   probeBlock,
+  productionStopAllsInWindow,
+  publicRouteTerminalSeq,
   quitClient,
   segmentsFollowMeasured,
   snapshotKeys,
@@ -470,12 +472,12 @@ test('checkTaskSegments：恰好 0..n-1 段且归属正确；0/1/2/额外段均�
 test('acceptedMeasurements：只有 lastPosition 记录该原始测量且序号单调才算接受', () => {
   const pos = { x: 1.5, y: 64, z: 0.5 };
   const accepted = delivery(pos, statusSnap(), statusSnap({ nextPointIndex: 2, lastPosition: pos }));
-  assert.equal(acceptedMeasurements([accepted], 'walk-1').length, 1);
+  assert.equal(acceptedMeasurements([accepted], 'task_A', 'walk-1').length, 1);
   const replay = delivery({ x: 1.5, y: 64, z: 0.5 }, statusSnap({ nextPointIndex: 2 }), statusSnap({ nextPointIndex: 2, lastPosition: pos }), { sequence: accepted.sample.sequence });
-  assert.equal(acceptedMeasurements([accepted, replay], 'walk-1').length, 1, '重放序号不得再次计入');
+  assert.equal(acceptedMeasurements([accepted, replay], 'task_A', 'walk-1').length, 1, '重放序号不得再次计入');
   const foreign = delivery({ x: 2.5, y: 64, z: 0.5 }, statusSnap(), statusSnap({ lastPosition: { x: 2.5, y: 64, z: 0.5 } }), { delegationId: 'walk-2' });
   foreign.sample.executionId = 'walk-1';
-  assert.equal(acceptedMeasurements([foreign], 'walk-2').length, 0, '错误 sample id 不得计入');
+  assert.equal(acceptedMeasurements([foreign], 'task_A', 'walk-2').length, 0, '错误 sample id 不得计入');
 });
 
 test('acceptedMeasurements：真实库拒绝同位置但错误 scope 的样本时不得计为被接受', () => {
@@ -501,7 +503,7 @@ test('acceptedMeasurements：真实库拒绝同位置但错误 scope 的样本�
       };
       loop.onSample(sample);
       assert.deepEqual(exec.deliveredSamples[0]!.statusAfter.lastPosition, pos, `${field}: 首个合法样本记录 P`);
-      assert.equal(acceptedMeasurements(exec.deliveredSamples, status.delegationId).length, 1);
+      assert.equal(acceptedMeasurements(exec.deliveredSamples, 'task_A', status.delegationId).length, 1);
 
       // 错误 world/dim/session 但完全相同的位置 P：库因 scope_changed 拒绝并终结。
       loop.onSample({ ...sample, [field]: field === 'dim' ? 'nether' : 'other', sequence: 2 });
@@ -512,7 +514,7 @@ test('acceptedMeasurements：真实库拒绝同位置但错误 scope 的样本�
       if (result === null || result.outcome === 'ARRIVED') throw new Error(`${field}: 错误 scope 样本必须产生失败终态`);
       assert.equal(result.outcome, 'FAILED');
       assert.equal(result.problem.kind, 'scope_changed');
-      assert.equal(acceptedMeasurements(exec.deliveredSamples, status.delegationId).length, 1, `${field}: 错误 scope 的同位置样本不得计为接受`);
+      assert.equal(acceptedMeasurements(exec.deliveredSamples, 'task_A', status.delegationId).length, 1, `${field}: 错误 scope 的同位置样本不得计为接受`);
     } finally {
       exec.unwrap();
     }
@@ -538,7 +540,7 @@ test('measuredCompletions/segmentsFollowMeasured：严格用实测完成点，�
   const measured2 = { x: 2.54, y: 64, z: 0.5 };
   const d1 = delivery(measured1, statusSnap({ nextPointIndex: 1 }), statusSnap({ nextPointIndex: 2, lastPosition: measured1 }));
   const d2 = delivery(measured2, statusSnap({ nextPointIndex: 2 }), statusSnap({ nextPointIndex: 3, lastPosition: measured2 }));
-  const completions = measuredCompletions([d1, d2], 'walk-1');
+  const completions = measuredCompletions([d1, d2], 'task_A', 'walk-1');
   assert.equal(completions.length, 2);
   assert.deepEqual(completions.map((c) => c.stepIndex), [0, 1]);
 
@@ -600,7 +602,8 @@ test('foreignSampleDeliveries：B delegation 的样本必须来自 B 的目标 o
   const oldSource = delivery(pos, statusSnap(), statusSnap({ lastPosition: pos }), { delegationId: 'walk-2', owner: 'task_B', sequence: 43, source: 'frameSink', sourceOwner: 'task_A' });
   const directActive = delivery(pos, statusSnap({ activeStepIndex: 0 }), statusSnap({ lastPosition: pos }), { delegationId: 'walk-2', owner: 'task_B', sequence: 44, source: 'direct' });
   const foreign = foreignSampleDeliveries([good, oldOwner, oldId, oldSource, directActive], 'walk-2', 'task_B');
-  assert.deepEqual(foreign.map((r) => r.seq), [41, 42, 43, 44], '目标 owner/id 被改写但来源是旧 A，或活动段来源不可确认，都必须拒绝');
+  assert.deepEqual(foreign.map((r) => r.seq), [42, 43, 44], '目标 loop 内 id 被改写、来源是旧 A，或活动段来源不可确认，都必须拒绝');
+  assert.equal(foreign.some((r) => r.seq === 41), false, 'A 自己 loop 的合法记录不是 B 的外来样本（同名 delegation 下按 task 隔离）');
 });
 
 test('foreignSampleDeliveries：真实 setFrameSink 回调 → onSample 驱动旧 A 样本入 B 时按来源识别', async () => {
@@ -626,6 +629,7 @@ test('foreignSampleDeliveries：真实 setFrameSink 回调 → onSample 驱动�
       arrival: { kind: 'exact' }, shapeProvider: walkCollisionProvider, deadlineMs: 5000, timeoutMs: 1000,
     });
 
+    assert.equal(startA.delegationId, startB.delegationId, '两个真实实例的 delegation 同名（都是实例内 walk-1）');
     const entity = { position: { x: 0.5, y: 0, z: 0.5 }, velocity: { x: 0, y: 0, z: 0 }, onGround: true, isInWater: false };
     let frames = 0;
     const body = { setControlState() {}, clearControlStates() {}, look() {}, entity };
@@ -666,6 +670,120 @@ test('foreignSampleDeliveries：真实 setFrameSink 回调 → onSample 驱动�
     assert.equal(direct.sourceOwnerTaskId, null);
     assert.equal(foreignSampleDeliveries([direct], startB.delegationId, 'task_B').length, 0, '合法初始化直调不得误失败');
   } finally {
+    exec.unwrap();
+  }
+});
+
+test('ExecutionDiagnostics：两个真实 loop 都 start 出同名 walk-1，候选按 task+delegation 隔离', () => {
+  let current: string | null = 'task_A';
+  const exec = new ExecutionDiagnostics(new EventSeq(), () => current, () => 1000);
+  exec.wrap();
+  try {
+    const noMove = { move: async () => ({ failure: { kind: 'cancelled' } as const }), stop: () => {} };
+    const loopA = new WalkRouteExecutor(new VoxelMap('world', { validityWindowMs: 60_000 }), noMove, { now: () => 1000 });
+    const loopB = new WalkRouteExecutor(new VoxelMap('world', { validityWindowMs: 60_000 }), noMove, { now: () => 1000 });
+    const startA = loopA.start({
+      worldId: 'world', dim: 'overworld', sessionId: 's1', mode: 'walk',
+      body: { feet: { x: 0.5, y: 0, z: 0.5 }, width: 0.6, height: 1.8, pose: 'standing' },
+      points: [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }],
+      arrival: { kind: 'exact' }, shapeProvider: walkCollisionProvider, deadlineMs: 5000, timeoutMs: 1000,
+    });
+    current = 'task_B';
+    const startB = loopB.start({
+      worldId: 'world', dim: 'overworld', sessionId: 's1', mode: 'walk',
+      body: { feet: { x: 10.5, y: 0, z: 0.5 }, width: 0.6, height: 1.8, pose: 'standing' },
+      points: [{ x: 10.5, y: 0, z: 0.5 }, { x: 11.5, y: 0, z: 0.5 }],
+      arrival: { kind: 'exact' }, shapeProvider: walkCollisionProvider, deadlineMs: 5000, timeoutMs: 1000,
+    });
+    assert.equal(startA.delegationId, 'walk-1', '真实实例的 delegation 是实例内 generation');
+    assert.equal(startB.delegationId, 'walk-1', '第二个实例同样得到 walk-1，不能假设 walk-2');
+
+    // A 用高 sequence，B 用低 sequence：独立查询不得跨任务比较单调性。
+    loopA.onSample({
+      worldId: 'world', dim: 'overworld', sessionId: 's1', executionId: startA.delegationId,
+      pos: { x: 0.5, y: 0, z: 0.5 }, velocity: { x: 0, y: 0, z: 0 }, observedAt: 5000, sequence: 50,
+      alive: true, connected: true, observationReady: true, onGround: true, inWater: false,
+    });
+    loopB.onSample({
+      worldId: 'world', dim: 'overworld', sessionId: 's1', executionId: startB.delegationId,
+      pos: { x: 10.5, y: 0, z: 0.5 }, velocity: { x: 0, y: 0, z: 0 }, observedAt: 1000, sequence: 1,
+      alive: true, connected: true, observationReady: true, onGround: true, inWater: false,
+    });
+    const aAccepted = acceptedMeasurements(exec.deliveredSamples, 'task_A', startA.delegationId);
+    const bAccepted = acceptedMeasurements(exec.deliveredSamples, 'task_B', startB.delegationId);
+    assert.deepEqual(aAccepted.map((r) => r.sample.sequence), [50], 'A 自己的候选不因同名 B 受影响');
+    assert.deepEqual(bAccepted.map((r) => r.sample.sequence), [1], 'B 的低 sequence 不因 A 的高 sequence 被拒');
+    assert.deepEqual(foreignSampleDeliveries(exec.deliveredSamples, startA.delegationId, 'task_A'), [], 'A 自己 loop 的记录不是外来样本');
+    assert.deepEqual(foreignSampleDeliveries(exec.deliveredSamples, startB.delegationId, 'task_B'), [], 'B 自己 loop 的记录不是外来样本');
+
+    // 段集合同样按 task+delegation 隔离；两个任务的 step-0 executionId 完全相同。
+    const aMoves = [
+      moveRecord(startA.delegationId, 'task_A', 0, { x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }),
+      moveRecord(startA.delegationId, 'task_A', 1, { x: 1.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 1.5 }),
+    ];
+    const bMoves = [
+      moveRecord(startB.delegationId, 'task_B', 0, { x: 10.5, y: 0, z: 0.5 }, { x: 11.5, y: 0, z: 0.5 }),
+    ];
+    assert.equal(checkTaskSegments([...aMoves, ...bMoves], startA.delegationId, 'task_A', 2).ok, true, 'A 的合法段不被同名 B 段污染');
+    assert.equal(checkTaskSegments([...aMoves, ...bMoves], startB.delegationId, 'task_B', 1).ok, true, 'B 的合法段不被同名 A 段污染');
+    assert.equal(checkTaskSegments([...aMoves, ...bMoves], startA.delegationId, 'task_A', 3).ok, false, '当前任务漏段仍必须 FAIL');
+  } finally {
+    exec.unwrap();
+  }
+});
+
+test('measuredCompletions：同名 walk-1 下按 task+delegation 独立推进，A 高序号不拒 B 低序号', () => {
+  const posA = { x: 1.5, y: 64, z: 0.5 };
+  const posB = { x: 11.5, y: 64, z: 0.5 };
+  const recA = delivery(posA, statusSnap({ nextPointIndex: 1 }), statusSnap({ nextPointIndex: 2, lastPosition: posA }), { owner: 'task_A', sequence: 100 });
+  const recB = delivery(posB, statusSnap({ nextPointIndex: 1 }), statusSnap({ nextPointIndex: 2, lastPosition: posB }), { owner: 'task_B', sequence: 1 });
+  const a = measuredCompletions([recA, recB], 'task_A', 'walk-1');
+  const b = measuredCompletions([recA, recB], 'task_B', 'walk-1');
+  assert.deepEqual(a.map((c) => c.sampleSequence), [100]);
+  assert.deepEqual(b.map((c) => c.sampleSequence), [1], 'A 的高 sequence 不得让 B 的低 sequence 完成点被拒');
+  assert.deepEqual(a.map((c) => c.pos), [posA]);
+  assert.deepEqual(b.map((c) => c.pos), [posB]);
+});
+
+test('W6 stopAll 窗口：最近 body 同为 B 时，活动窗口内生产 stopAll 拒绝，真实公开终态后收尾允许', () => {
+  const seq = new EventSeq();
+  const controlState: MutableKeys = { ...emptyKeys };
+  const raw = fakeRaw(controlState);
+  const target: WalkBridge = { walkBody: () => fakeBody(raw), stopAll: () => raw.clearControlStates() };
+  const diag = new WalkDiagnostics(target, () => 'task_B', () => snapshotKeys({ controlState }), seq, raw, () => 1000);
+  const exec = new ExecutionDiagnostics(seq, () => 'task_B', () => 1000);
+  diag.wrap();
+  exec.wrap();
+  try {
+    target.walkBody!(); // 最近 body 归属 B
+    const takeoverSeq = diag.bindings.find((b) => b.kind === 'body')!.seq;
+    target.stopAll(); // B 活动窗口内：本场景没有授权 cancel/pause/disconnect
+    const inWindow = diag.stopAlls[0]!;
+
+    // 终态来自真实公开 status.result（错误 scope 的样本会终结 loop），不是预计时间。
+    const loop = new WalkRouteExecutor(new VoxelMap('world', { validityWindowMs: 60_000 }), { move: async () => ({ failure: { kind: 'cancelled' } as const }), stop: () => {} }, { now: () => 1000 });
+    const started = loop.start({
+      worldId: 'world', dim: 'overworld', sessionId: 's1', mode: 'walk',
+      body: { feet: { x: 0.5, y: 0, z: 0.5 }, width: 0.6, height: 1.8, pose: 'standing' },
+      points: [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }],
+      arrival: { kind: 'exact' }, shapeProvider: walkCollisionProvider, deadlineMs: 5000, timeoutMs: 1000,
+    });
+    loop.onSample({
+      worldId: 'other', dim: 'overworld', sessionId: 's1', executionId: started.delegationId,
+      pos: { x: 0.5, y: 0, z: 0.5 }, velocity: { x: 0, y: 0, z: 0 }, observedAt: 1000, sequence: 1,
+      alive: true, connected: true, observationReady: true, onGround: true, inWater: false,
+    });
+    const terminalSeq = publicRouteTerminalSeq(exec.routeCalls, exec.deliveredSamples, 'task_B', started.delegationId);
+    assert.notEqual(terminalSeq, null, '必须有真实公开终态');
+
+    target.stopAll(); // 终态后的正常 Arbiter 收尾
+    const afterTerminal = diag.stopAlls[1]!;
+    assert.equal(inWindow.recentBodyOwnerTaskId, 'task_B');
+    assert.equal(afterTerminal.recentBodyOwnerTaskId, 'task_B', '两者最近 body owner 相同');
+    assert.deepEqual(productionStopAllsInWindow(diag.stopAlls, takeoverSeq, terminalSeq!).map((s) => s.seqBefore), [inWindow.seqBefore], '活动窗口内的生产 stopAll 必须被拒');
+    assert.deepEqual(productionStopAllsInWindow(diag.stopAlls, terminalSeq!, Number.POSITIVE_INFINITY).map((s) => s.seqBefore), [afterTerminal.seqBefore], '真实终态后的收尾允许');
+  } finally {
+    diag.unwrap();
     exec.unwrap();
   }
 });
@@ -724,7 +842,7 @@ test('WalkDiagnostics：body 请求与实际 Bot 调用分开，归属绑定在 
   diag.unwrap();
 });
 
-test('WalkDiagnostics：生产 stopAll 记录前后全键与 eventSeq，归属为创建时任务', () => {
+test('WalkDiagnostics：生产 stopAll 记录前后全键与 eventSeq，归属字段只表示最近 body', () => {
   const controlState: MutableKeys = { ...emptyKeys };
   const raw = fakeRaw(controlState);
   let stopped = false;
@@ -743,7 +861,7 @@ test('WalkDiagnostics：生产 stopAll 记录前后全键与 eventSeq，归属�
   const rec = diag.stopAlls[0]!;
   assert.equal(rec.label, 'production-stopAll');
   assert.equal(rec.kind, 'production');
-  assert.equal(rec.ownerTaskId, 'task_A');
+  assert.equal(rec.recentBodyOwnerTaskId, 'task_A', '只记录最近 body 归属，不冒充 stopAll 调用者');
   assert.equal(rec.ts, 123);
   assert.equal(rec.keysBefore.forward, true, 'before 必须在真实 stopAll 清键之前采集');
   assert.equal(rec.keysAfter.forward, false);
@@ -871,7 +989,7 @@ test('ExecutionDiagnostics：onSample 保存完整原始样本与状态前后，
   assert.equal(rec.sample.observedAt, 1000);
   assert.equal(rec.statusBefore.result, null);
   assert.deepEqual(rec.statusAfter.lastPosition, { x: 0.5, y: 0, z: 0.5 });
-  assert.equal(acceptedMeasurements(exec.deliveredSamples, delegationId).length, 1);
+  assert.equal(acceptedMeasurements(exec.deliveredSamples, 'task_A', delegationId).length, 1);
 
   // 错误 sample id 只记录为交付，不能计入接受。
   loop.onSample({
@@ -880,7 +998,7 @@ test('ExecutionDiagnostics：onSample 保存完整原始样本与状态前后，
     alive: true, connected: true, observationReady: true, onGround: true, inWater: false,
   });
   assert.equal(exec.deliveredSamples.length, 2);
-  assert.equal(acceptedMeasurements(exec.deliveredSamples, delegationId).length, 1);
+  assert.equal(acceptedMeasurements(exec.deliveredSamples, 'task_A', delegationId).length, 1);
 
   exec.unwrap();
   assert.equal(WalkRouteExecutor.prototype.onSample, orig);
