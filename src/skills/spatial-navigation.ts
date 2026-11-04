@@ -20,21 +20,28 @@
 import {
   GROUNDED_ARRIVAL_DEFAULTS,
   WalkRouteSearch,
+  startKnownWalkRoute,
+  type KnownWalkRouteStart,
   type LastObservation,
   type NavResult,
   type Vec3Like,
+  type WalkRouteExecutor,
+  type WalkRouteRequest,
   type WalkSearchCandidate,
   type WalkSearchSnapshot,
 } from 'curio-minecraft-3d-memory';
 import { awaitFrame, walkCollisionProvider } from '../adapter/walk-route.ts';
 import type { WalkTick } from '../adapter/walk-route.ts';
 import type { SharedSpatialSession } from '../spatial/shared-session.ts';
-import { executeWalkRoute, historyFields, observeCells, readPoint } from './walk-route.ts';
+import { executeWalkRoute, historyFields, observeCells, readObservedState, readPoint, routeCells } from './walk-route.ts';
 import type { WalkRouteExecution } from './walk-route.ts';
 import { fail, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 
 /** 本次执行后端最多接受 32 个候选点；超限如实报 route_budget，绝不截断路线。 */
 const MAX_CANDIDATE_POINTS = 32;
+
+/** 已知历史路线在 start 前请求的点数预算；超限由公开 helper 报 route_budget，不截断。 */
+const MAX_KNOWN_POINTS = 32;
 
 /** 固定搜索预算，与库的公开上限语义一致。 */
 const SEARCH_LIMITS = { maxNodes: 512, maxEdges: 2048, maxFrontiers: 32, maxDiagnostics: 32 } as const;
@@ -95,6 +102,7 @@ type ZeroEdgeOutcome = { nav: ZeroEdgeNav; stableSamples: number };
  */
 function searchStop(
   ctx: SkillCtx,
+  spatial: SharedSpatialSession,
   deadlineMs: number,
   scope: { worldId: string; dim: string; sessionId: string },
 ): SearchStop | null {
@@ -104,7 +112,7 @@ function searchStop(
   if (Date.now() >= deadlineMs) {
     return { stage: 'TIMEOUT', reason: 'deadline exceeded', summary: 'walk_to 搜索到达期限' };
   }
-  const s = ctx.adapter.state();
+  const s = readObservedState(ctx, spatial);
   if (!s.alive || !s.connected || !s.observationReady) {
     return {
       stage: 'NOT_READY',
@@ -218,7 +226,7 @@ async function confirmZeroEdge(
         return cancelled('lifecycle', 'shared spatial session interrupted the active confirmation', 'walk_to 零边确认被共享空间生命周期取消');
       }
       if (Date.now() >= deadlineMs) return timedOut('walk_to 零边确认到达期限');
-      const before = ctx.adapter.state();
+      const before = readObservedState(ctx, spatial);
       if (!before.alive || !before.connected || !before.observationReady) {
         return cancelled(
           'lifecycle',
@@ -243,7 +251,7 @@ async function confirmZeroEdge(
         return cancelled('lifecycle', 'shared spatial session interrupted the active confirmation', 'walk_to 零边确认被共享空间生命周期取消');
       }
       if (Date.now() >= deadlineMs) return timedOut('walk_to 零边确认到达期限');
-      const after = ctx.adapter.state();
+      const after = readObservedState(ctx, spatial);
       if (!after.alive || !after.connected || !after.observationReady) {
         return cancelled(
           'lifecycle',
@@ -408,7 +416,7 @@ export const walkTo: Skill<WalkToArgs> = {
     if (Date.now() >= effectiveDeadline) return fail('TIMEOUT', 'walk_to 期限在开始前已耗尽', { ...base, stage: 'TIMEOUT' });
 
     const map = spatial.session.voxel;
-    const entry = ctx.adapter.state();
+    const entry = readObservedState(ctx, spatial);
     if (!entry.alive || !entry.connected || !entry.observationReady) {
       return fail('NOT_CONNECTED', '身体或观测尚未就绪', { ...base, stage: 'NOT_READY' });
     }
@@ -425,7 +433,7 @@ export const walkTo: Skill<WalkToArgs> = {
     // 局部准备期间的复核：取消、期限、原作用域/ready 与共享可接纳都通过后才继续转头或观测。
     const prepReady = (): boolean => {
       if (ctx.signal.aborted || Date.now() >= effectiveDeadline) return false;
-      const s = ctx.adapter.state();
+      const s = readObservedState(ctx, spatial);
       return s.alive && s.connected && s.observationReady
         && s.worldId === entry.worldId && s.dim === entry.dim && s.sessionId === entry.sessionId
         && !spatial.closing && !spatial.paused && spatial.observationAdmitted;
@@ -437,7 +445,7 @@ export const walkTo: Skill<WalkToArgs> = {
       // 有限局部准备：当前脚格为中心固定水平半径 4（9×9×4 格），至多 12 次真实转头；
       // 不枚举世界或目标矩形。入口先过同一门禁：已暂停/未准入/已关闭/换 scope/取消/到期
       // 时连初始观测都不发，也不转头。
-      const prepCells = preparationCells(ctx.adapter.state().pos);
+      const prepCells = preparationCells(readObservedState(ctx, spatial).pos);
       let prepStopped = !prepReady();
       if (!prepStopped) {
         observeCells(ctx, map, prepCells);
@@ -460,7 +468,7 @@ export const walkTo: Skill<WalkToArgs> = {
       } else if (Date.now() >= effectiveDeadline) {
         stop = { stage: 'TIMEOUT', reason: 'deadline exceeded', summary: 'walk_to 在局部准备时到达期限' };
       } else {
-        const startState = ctx.adapter.state();
+        const startState = readObservedState(ctx, spatial);
         if (!startState.alive || !startState.connected || !startState.observationReady) {
           stop = {
             stage: 'NOT_READY',
@@ -493,7 +501,7 @@ export const walkTo: Skill<WalkToArgs> = {
             target: { ...args.to }, arrival: args.arrival, shapeProvider: walkCollisionProvider,
           });
           while (snapshot.state === 'PENDING') {
-            const before = searchStop(ctx, effectiveDeadline, startState);
+            const before = searchStop(ctx, spatial, effectiveDeadline, startState);
             if (before !== null) {
               search.cancel(before.reason);
               snapshot = search.status()!;
@@ -503,7 +511,7 @@ export const walkTo: Skill<WalkToArgs> = {
             search.advance(EDGES_PER_ADVANCE);
             // 宏任务让出：取消、期限与共享会话报告都能在批次之间落地。
             await new Promise<void>((resolve) => setTimeout(resolve, 0));
-            const after = searchStop(ctx, effectiveDeadline, startState);
+            const after = searchStop(ctx, spatial, effectiveDeadline, startState);
             if (after !== null) {
               search.cancel(after.reason);
               snapshot = search.status()!;
@@ -562,7 +570,7 @@ export const walkTo: Skill<WalkToArgs> = {
         ...base, stage: 'TIMEOUT', candidate, search: snapshot, ...(startFeet !== null ? { position: { ...startFeet } } : {}),
       });
     }
-    const preMove = ctx.adapter.state();
+    const preMove = readObservedState(ctx, spatial);
     if (!preMove.alive || !preMove.connected || !preMove.observationReady) {
       return {
         status: 'cancelled', summary: 'walk_to 执行前身体/观测失效，未开始移动',
@@ -680,5 +688,222 @@ export const walkTo: Skill<WalkToArgs> = {
       }
     }
     return executionResult(execution, candidate, snapshot, base);
+  },
+};
+
+type WalkKnownRouteArgs = {
+  fragmentId: string;
+  deadlineMs?: number;
+};
+
+type WalkKnownBase = {
+  originalRequest: { fragmentId: string; deadlineMs?: number };
+  target?: Vec3Like;
+};
+
+export const walkKnownRoute: Skill<WalkKnownRouteArgs> = {
+  name: 'walk_known_route',
+  description: '按 fragmentId 读取共享空间历史中的一条已存路线，并在当前世界中重新验证后执行：历史几何只作为选定路线，不证明现在可通行或由本 Agent 走过；每段都按当前合法观测重新判定 OPEN，实际身体位置由物理样本与既有 grounded 稳定窗口确认，不从历史点传送或改写起点。支持同高、沿 X/Z 单轴相邻一格、2~32 点的普通干燥整块路线；出发前对选定点做有限转头观察（至多 12 次真实 look），移动中只观察身体周边 3×3×4 格；不含搜索、挖掘、放置、跳跃、游泳或旧 moveTo 兜底。',
+  argsDoc: '{"fragmentId":"历史片段ID（非空字符串）","deadlineMs":可选绝对epoch毫秒}',
+  timeoutMs: 30000,
+  movement: true,
+  validate(raw, _adapter) {
+    const a = (raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}) as Record<string, unknown>;
+    const fragmentId = a.fragmentId;
+    if (typeof fragmentId !== 'string' || fragmentId.length === 0) {
+      return { ok: false, error: 'walk_known_route 需要非空字符串 fragmentId' };
+    }
+    const rawDeadline = a.deadlineMs;
+    let deadlineMs: number | undefined;
+    if (rawDeadline !== undefined) {
+      if (typeof rawDeadline !== 'number' || !Number.isFinite(rawDeadline) || rawDeadline <= 0) {
+        return { ok: false, error: 'deadlineMs 必须是正的绝对 epoch 毫秒' };
+      }
+      deadlineMs = rawDeadline;
+    }
+    return { ok: true, args: { fragmentId, ...(deadlineMs !== undefined ? { deadlineMs } : {}) } };
+  },
+  async run(ctx, args) {
+    const base: WalkKnownBase = {
+      originalRequest: {
+        fragmentId: args.fragmentId,
+        ...(args.deadlineMs !== undefined ? { deadlineMs: args.deadlineMs } : {}),
+      },
+    };
+    const spatial = ctx.spatial;
+    if (!spatial) return fail('ERROR', 'walk_known_route 需要宿主共享空间会话（ctx.spatial），当前未接线', base);
+    // 入口同步取得身体桥；之后的准备/执行都使用同一份，旧任务不会拿到新身体。
+    const body = ctx.adapter.walkBody?.();
+    const tick = ctx.adapter.walkTick?.();
+    if (!body || !tick) return fail('ERROR', '当前适配器没有 walk 身体桥（walkBody/walkTick）', base);
+
+    // 有效期限只能缩短父委托预算：args.deadlineMs 是绝对 epoch，不是相对预算。
+    const effectiveDeadline = Math.min(args.deadlineMs ?? ctx.deadline, ctx.deadline);
+    if (ctx.signal.aborted) return { status: 'cancelled', summary: 'walk_known_route 在开始前被取消', data: base };
+    if (Date.now() >= effectiveDeadline) {
+      return fail('TIMEOUT', 'walk_known_route 期限在开始前已耗尽', { ...base, stage: 'TIMEOUT' });
+    }
+
+    const map = spatial.session.voxel;
+    const entry = readObservedState(ctx, spatial);
+    if (!entry.alive || !entry.connected || !entry.observationReady) {
+      return fail('NOT_CONNECTED', '身体或观测尚未就绪', { ...base, stage: 'NOT_READY' });
+    }
+    if (entry.worldId !== spatial.worldId || entry.worldId !== map.worldId || entry.dim === 'unknown') {
+      return fail('ERROR', '共享空间作用域与当前身体不一致', { ...base, stage: 'SCOPE_CHANGED' });
+    }
+    if (spatial.closing || spatial.paused || !spatial.observationAdmitted) {
+      return fail('NOT_CONNECTED', '共享空间会话未就绪/已暂停/已关闭', { ...base, stage: 'NOT_READY' });
+    }
+
+    // 只读查询：按显式 ID 取一次选定 fragment 快照；不扫描全 history、不造/迁移 JSON、
+    // 不写入该 fragment（读取不是使用成功）。
+    const history = spatial.session.history;
+    const fragment = history.getFragment(args.fragmentId);
+    const points = fragment === null ? [] : fragment.polyline.map((p) => ({ x: p.x, y: p.y, z: p.z }));
+    const target = points.length > 0 ? { ...points[points.length - 1]! } : undefined;
+    const baseWithTarget: WalkKnownBase = target !== undefined ? { ...base, target } : base;
+
+    // 准备边界与 walk_to 相同：父取消/期限优先；实际读取 state 后若同 session 的
+    // observationReady 丢失，readObservedState 把已知边界交给共享服务一次。
+    const prepReady = (): boolean => {
+      if (ctx.signal.aborted || Date.now() >= effectiveDeadline) return false;
+      const s = readObservedState(ctx, spatial);
+      return s.alive && s.connected && s.observationReady
+        && s.worldId === entry.worldId && s.dim === entry.dim && s.sessionId === entry.sessionId
+        && !spatial.closing && !spatial.paused && spatial.observationAdmitted;
+    };
+
+    // 只有选中几何与当前作用域一致、点数在本次预算内时才做有限观察；缺失/错 scope/
+    // 超预算等情况跳过准备，由公开 helper 在 start 前给出准确拒绝，零控制、零假成功。
+    const prepEligible = fragment !== null && fragment.worldId === entry.worldId && fragment.dim === entry.dim
+      && points.length >= 2 && points.length <= MAX_KNOWN_POINTS;
+
+    ctx.setStationaryWait?.(true);
+    try {
+      if (prepEligible) {
+        const cells = routeCells(points);
+        if (prepReady()) {
+          observeCells(ctx, map, cells);
+          if (typeof ctx.adapter.look === 'function') {
+            for (const pitch of [-1.2, 0, 1.1]) {
+              for (const yaw of [-Math.PI / 2, 0, Math.PI / 2, Math.PI]) {
+                if (!prepReady()) break;
+                await ctx.adapter.look(yaw, pitch);
+                // 转头返回后先复核；取消/失去 ready/换 scope 后不得再发观测或继续转头。
+                if (!prepReady()) break;
+                observeCells(ctx, map, cells);
+              }
+              if (!prepReady()) break;
+            }
+          }
+        }
+      }
+    } finally {
+      ctx.setStationaryWait?.(false);
+    }
+
+    let stop: SearchStop | null = null;
+    if (ctx.signal.aborted) {
+      stop = { stage: 'CANCELLED', reason: 'parent task cancelled', summary: 'walk_known_route 在准备时被取消' };
+    } else if (Date.now() >= effectiveDeadline) {
+      stop = { stage: 'TIMEOUT', reason: 'deadline exceeded', summary: 'walk_known_route 在准备时到达期限' };
+    } else {
+      const startState = readObservedState(ctx, spatial);
+      if (!startState.alive || !startState.connected || !startState.observationReady) {
+        stop = {
+          stage: 'NOT_READY',
+          reason: `alive=${startState.alive} connected=${startState.connected} observationReady=${startState.observationReady}`,
+          summary: '准备后身体/观测失效，未开始执行',
+        };
+      } else if (startState.worldId !== entry.worldId || startState.dim !== entry.dim || startState.sessionId !== entry.sessionId) {
+        stop = {
+          stage: 'SCOPE_CHANGED',
+          reason: `scope=${startState.worldId}/${startState.dim}/${startState.sessionId}`,
+          summary: '准备后作用域变化，未开始执行',
+        };
+      } else if (spatial.closing || spatial.paused || !spatial.observationAdmitted) {
+        stop = {
+          stage: 'NOT_READY',
+          reason: 'shared spatial session is not accepting a delegation',
+          summary: '共享空间会话未就绪/已暂停/已关闭，未开始执行',
+        };
+      }
+    }
+    if (stop !== null) {
+      const data = {
+        ...baseWithTarget,
+        stage: stop.stage === 'TIMEOUT' ? 'TIMEOUT' : 'CANCELLED',
+        cancelBy: stop.stage === 'SCOPE_CHANGED' ? 'scope_changed' : stop.stage === 'NOT_READY' ? 'lifecycle' : stop.stage === 'CANCELLED' ? 'parent' : 'deadline',
+      };
+      if (stop.stage === 'TIMEOUT') return fail('TIMEOUT', stop.summary, data);
+      return { status: 'cancelled', summary: stop.summary, data };
+    }
+
+    // 已批准 nominal/actual 分离：body.feet 只镜像选定路线的原首点，作为几何参考，
+    // 不是 BodySample；真实身体位置仍由库的 mandatory 样本与既有 0.12/0.05 grounded
+    // 稳定窗口验证。太远时由库按真实 deviation 失败，绝不 TP、自动连接首点或放大容差。
+    const nominalStart = points.length > 0 ? points[0]! : entry.pos;
+    const request: WalkRouteRequest = {
+      worldId: entry.worldId, dim: entry.dim, sessionId: entry.sessionId, mode: 'walk' as const,
+      body: { feet: { x: nominalStart.x, y: nominalStart.y, z: nominalStart.z }, width: 0.6, height: 1.8, pose: 'standing' as const },
+      points: points.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+      arrival: { kind: 'exact' as const },
+      bodyArrival: GROUNDED_ARRIVAL_DEFAULTS, shapeProvider: walkCollisionProvider,
+      deadlineMs: effectiveDeadline, timeoutMs: 4000,
+    };
+
+    // 公开 helper 只在一个边界启动同一个 loop：STARTED 不是 OPEN/到达；REJECTED 原样
+    // 保留 reason/message，不泛称世界 BLOCKED。之后的观察/物理样本/父取消/期限/partial
+    // 全部沿用 executeWalkRoute 的现有真实执行链，没有第二套执行器。
+    const startHolder: { value: KnownWalkRouteStart | null } = { value: null };
+    const starter = (loop: WalkRouteExecutor, startRequest: WalkRouteRequest): KnownWalkRouteStart => {
+      const { points: _ignored, ...walk } = startRequest;
+      const start = startKnownWalkRoute(history, loop, {
+        ...walk,
+        fragmentId: args.fragmentId,
+        parentActionId: ctx.taskId,
+        maxRoutePoints: MAX_KNOWN_POINTS,
+      });
+      startHolder.value = start;
+      return start;
+    };
+    const execution = await executeWalkRoute(ctx, spatial, {
+      map, body, tick, request, deadlineMs: effectiveDeadline, starter,
+    });
+    const nav = execution.nav;
+    const knownStart = startHolder.value;
+
+    const data = {
+      ...baseWithTarget,
+      stage: nav.outcome,
+      ...(nav.lastPosition !== undefined ? { position: { ...nav.lastPosition } } : {}),
+      nav,
+      // body.feet 是路线几何参考，不是实测样本；实际位置只来自 nav.lastPosition/物理样本。
+      ...(points.length > 0 ? {
+        bodyReference: {
+          kind: 'nominal_route_start' as const,
+          feet: { x: points[0]!.x, y: points[0]!.y, z: points[0]!.z },
+          measured: false,
+          note: 'body.feet mirrors the selected route start as geometry; actual position is verified by measured body samples',
+        },
+      } : {}),
+      ...(knownStart !== null ? { knownStart } : {}),
+      ...historyFields(execution),
+    };
+
+    if (knownStart !== null && knownStart.kind === 'REJECTED') {
+      // 拒绝发生在 start 之前：原 reason/message 原样保留，不写成世界堵塞或超时。
+      return fail('ERROR', knownStart.message, { ...data, stage: 'REJECTED', reason: knownStart.reason });
+    }
+    // 父取消但执行器以其它终态返回：按取消返回并保留实际 nav/partial。
+    if (ctx.signal.aborted && nav.outcome !== 'CANCELLED') {
+      return { status: 'cancelled', summary: nav.message, data: { ...data, stage: 'CANCELLED', cancelBy: 'parent' } };
+    }
+    if (nav.outcome === 'ARRIVED') return ok(nav.message, data);
+    if (nav.outcome === 'CANCELLED') return { status: 'cancelled', summary: nav.message, data };
+    if (nav.outcome === 'TIMEOUT') return fail('TIMEOUT', nav.message, data);
+    if (nav.outcome === 'BLOCKED' || nav.outcome === 'NO_PATH') return fail('PATH_NOT_FOUND', nav.message, data);
+    return fail('ERROR', nav.message, data);
   },
 };

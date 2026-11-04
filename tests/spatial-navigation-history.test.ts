@@ -142,7 +142,10 @@ function physicsHarness(opts: {
   return { adapter, entity, control, tick, frozen: () => frozen };
 }
 
-/** 通过共享会话公开 observe 写真实观测；请求什么格就写什么格。 */
+/**
+ * 通过共享会话公开 observe 写入合成 typed BlockObservation 夹具；请求什么格就写什么格。
+ * 这是测试构造的合成感知输入，不声称经过真实 Vision 的视锥/遮挡链。
+ */
 function makeSenses(svc: SharedSpatialSession) {
   let sequence = 1;
   const observeBlocks = (positions: Vec3Like[]): BlockObservation[] => {
@@ -195,8 +198,9 @@ function describe(error: unknown): string {
 }
 
 /**
- * 主错优先的夹具清理：测试体异常原样抛出；关闭确认成功后才删临时目录，
- * 关闭失败时保留路径并仅作诊断，不覆盖主错。
+ * 主错优先的夹具清理：测试体异常原样抛出；真实的 await shutdown 与删除各自捕获次错，
+ * 只有确认 close 完成且没有清理问题时才删临时目录。有主错时次错只作诊断并保留路径，
+ * 不覆盖原主错；没有主错时才抛出实际清理次错。
  */
 async function withHarness(t: TestContext, fn: (h: Harness) => Promise<void>): Promise<void> {
   const h = await openHarness();
@@ -208,23 +212,44 @@ async function withHarness(t: TestContext, fn: (h: Harness) => Promise<void>): P
     failed = true;
     primary = error;
   }
-  const shutdown = await h.svc.shutdown();
+  let shutdown: ShutdownResult | null = null;
+  let shutdownFailed = false;
+  let shutdownError: unknown = null;
+  try {
+    shutdown = await h.svc.shutdown();
+  } catch (error) {
+    shutdownFailed = true;
+    shutdownError = error;
+  }
   const problems: string[] = [];
-  if (shutdown.error !== null) problems.push(`save: ${describe(shutdown.error)}`);
-  if (shutdown.cancelError !== null) problems.push(`cancel: ${describe(shutdown.cancelError)}`);
-  if (shutdown.closeError !== null) problems.push(`close threw: ${describe(shutdown.closeError)}`);
-  if (shutdown.close === null) {
-    problems.push('close returned no result');
+  if (shutdownFailed) {
+    problems.push(`shutdown threw: ${describe(shutdownError)}`);
+  } else if (shutdown === null) {
+    problems.push('shutdown returned no result');
   } else {
-    if (!shutdown.close.completed) problems.push('close did not complete');
-    if (shutdown.close.error !== null) problems.push(`close: ${describe(shutdown.close.error)}`);
+    if (shutdown.error !== null) problems.push(`save: ${describe(shutdown.error)}`);
+    if (shutdown.cancelError !== null) problems.push(`cancel: ${describe(shutdown.cancelError)}`);
+    if (shutdown.closeError !== null) problems.push(`close threw: ${describe(shutdown.closeError)}`);
+    if (shutdown.close === null) {
+      problems.push('close returned no result');
+    } else {
+      if (!shutdown.close.completed) problems.push('close did not complete');
+      if (shutdown.close.error !== null) problems.push(`close: ${describe(shutdown.close.error)}`);
+    }
   }
   if (problems.length === 0) {
-    rmSync(h.dir, { recursive: true, force: true });
-  } else if (failed) {
-    t.diagnostic(`fixture retained at ${h.dir}; close problems after primary error: ${problems.join(' | ')}`);
-  } else {
-    throw new Error(`history harness close failed (fixture kept at ${h.dir}): ${problems.join(' | ')}`);
+    try {
+      rmSync(h.dir, { recursive: true, force: true });
+    } catch (error) {
+      problems.push(`remove threw: ${describe(error)}`);
+    }
+  }
+  if (problems.length > 0) {
+    if (failed) {
+      t.diagnostic(`fixture retained at ${h.dir}; cleanup problems after primary error: ${problems.join(' | ')}`);
+    } else {
+      throw new Error(`history harness close failed (fixture kept at ${h.dir}): ${problems.join(' | ')}`);
+    }
   }
   if (failed) throw primary;
 }

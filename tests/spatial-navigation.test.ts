@@ -11,8 +11,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { Vec3 } from 'vec3';
-import type { NavResult, Vec3Like, WalkSearchSnapshot } from 'curio-minecraft-3d-memory';
+import { RouteVerifier, type NavResult, type Vec3Like, type WalkSearchSnapshot } from 'curio-minecraft-3d-memory';
 import { Vision, DEFAULT_VISION } from '../src/perception/vision.ts';
+import { walkCollisionProvider } from '../src/adapter/walk-route.ts';
 import { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import { walkTo } from '../src/skills/spatial-navigation.ts';
 import { runSkill } from '../src/skills/types.ts';
@@ -226,8 +227,8 @@ function eventEmitterTick() {
   };
 }
 
-/** 可阻塞转头的准备夹具：控制 look 何时返回，观测请求单独计数。 */
-function blockedLookHarness() {
+/** 可阻塞转头的准备夹具：控制 look 何时返回，观测请求单独计数；可切换 observationReady。 */
+function blockedLookHarness(opts?: { observationReady?: () => boolean }) {
   let scope = { worldId: WORLD, dim: DIM, sessionId: SESSION };
   let looks = 0;
   let observes = 0;
@@ -246,7 +247,7 @@ function blockedLookHarness() {
   };
   const adapter = {
     state: () => ({
-      ...scope, alive: true, connected: true, observationReady: true, pos: { ...START },
+      ...scope, alive: true, connected: true, observationReady: opts?.observationReady?.() ?? true, pos: { ...START },
     }),
     walkBody: () => body,
     walkTick: () => () => Promise.resolve(null),
@@ -266,6 +267,46 @@ function blockedLookHarness() {
     resolveLook: () => { pendingLook?.(); pendingLook = null; },
     setDim: (dim: string) => { scope = { ...scope, dim }; },
   };
+}
+
+/** 一条同高合法走廊：x=0..2、z=0，支撑/脚/头都来自真实公开 observe。 */
+function seedCorridor(h: { perception: ReturnType<typeof makePerception> }) {
+  h.perception.seed({ xFrom: 0, xTo: 2, zFrom: 0, zTo: 0, yFrom: -1, yTo: 1 });
+}
+
+/** 用真实公开 RouteVerifier 在同一张共享地图上登记并验证一条 OPEN 走廊。 */
+function openCorridorVerifier(h: { svc: SharedSpatialSession }): RouteVerifier {
+  const verifier = new RouteVerifier(h.svc.session.voxel, { now: Date.now });
+  verifier.register({
+    worldId: WORLD, dim: DIM, sessionId: SESSION, mode: 'walk',
+    body: { feet: { x: 0.5, y: 0, z: 0.5 }, width: 0.6, height: 1.8, pose: 'standing' },
+    points: [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }],
+    shapeProvider: walkCollisionProvider,
+  });
+  assert.equal(verifier.advance(10).verdict, 'OPEN');
+  return verifier;
+}
+
+function cellEvidence(h: { svc: SharedSpatialSession }, x: number, y: number, z: number) {
+  const view = h.svc.session.voxel.cellAt(DIM, x, y, z);
+  if (!view.observed) throw new Error(`cell ${x},${y},${z} should be observed`);
+  return view.evidence;
+}
+
+/**
+ * 记录服务实际 interrupt 次数，并把原始 interrupt 返回的真实 ChangeReport 交给原 verifier；
+ * 不构造替代报告或替代新鲜度。返回读取计数的函数。
+ */
+function countInterrupts(svc: SharedSpatialSession, verifier: RouteVerifier): () => number {
+  const original = svc.interrupt.bind(svc);
+  let count = 0;
+  svc.interrupt = () => {
+    count++;
+    const report = original();
+    verifier.apply(report, 10);
+    return report;
+  };
+  return () => count;
 }
 
 function makePerception(svc: SharedSpatialSession) {
@@ -1195,6 +1236,122 @@ test('walk_to 零边确认：最后本可确认帧遇暂停不确认且不覆盖
     assert.equal(nav.lastObservation.worldId, WORLD);
     assert.equal(nav.lastObservation.sessionId, SESSION);
     assert.equal(fixture.writes(), 0);
+  } finally {
+    await closeHarness(h);
+  }
+});
+
+test('walk_to 准备等待返回时同 session ready 丢失：一次 interrupt、旧证据 STALE、verifier 非 OPEN', { timeout: 10000 }, async () => {
+  const h = await openHarness();
+  try {
+    seedCorridor(h);
+    const verifier = openCorridorVerifier(h);
+    const beforeA = cellEvidence(h, 0, -1, 0).observation.observedAt;
+    const beforeB = cellEvidence(h, 1, -1, 0).observation.observedAt;
+    const interrupts = countInterrupts(h.svc, verifier);
+
+    let ready = true;
+    const fixture = blockedLookHarness({ observationReady: () => ready });
+    const parent = new AbortController();
+    const c = context(fixture.adapter, h.svc, fixture.senses, { signal: parent.signal, deadline: Date.now() + 10_000 });
+    const running = runSkill(c.ctx, walkTo, { to: { x: 3.54, y: 0, z: 0.52 }, arrival: { kind: 'near', radius: 0.4 } });
+    await fixture.lookStarted;
+    assert.equal(interrupts(), 0, '准备期间尚未中断');
+    ready = false;
+    fixture.resolveLook();
+    const result = await running;
+
+    assert.equal(result.status, 'cancelled');
+    assert.equal(result.data?.stage, 'CANCELLED');
+    assert.equal(result.data?.cancelBy, 'lifecycle');
+    assert.equal(interrupts(), 1, '同一 ready gap 只 interrupt 一次');
+    assert.equal(h.svc.observationAdmitted, false, 'interrupt 后不得再准入观测');
+    assert.equal(cellEvidence(h, 0, -1, 0).freshness, 'STALE');
+    assert.equal(cellEvidence(h, 1, -1, 0).freshness, 'STALE');
+    assert.equal(cellEvidence(h, 0, -1, 0).observation.observedAt, beforeA, '旧证据时间不改');
+    assert.notEqual(verifier.status()!.verdict, 'OPEN', '真实 lifecycle 报告必须让原 verifier 失效');
+    assert.equal(fixture.writes(), 0, '未开始移动不得写控制');
+
+    // ready 恢复走真实 beginSession 入口；只重新观察一格，另一格保持 STALE、原时间不改。
+    h.svc.beginSession({ worldId: WORLD, dim: DIM, sessionId: SESSION });
+    const recoveryReport = h.svc.observe([{
+      name: 'minecraft:stone', properties: {}, stateComplete: true, pos: { x: 1, y: -1, z: 0 },
+      worldId: WORLD, sessionId: SESSION, dimension: DIM,
+      observationId: 9001, observedAt: Date.now() + 1000, source: 'vision',
+    }]);
+    verifier.apply(recoveryReport, 10);
+    assert.equal(cellEvidence(h, 1, -1, 0).freshness, 'FRESH', '只有真实重新观察的一格恢复');
+    assert.equal(cellEvidence(h, 0, -1, 0).freshness, 'STALE', '未重新观察的格不得自行刷新');
+    assert.equal(cellEvidence(h, 0, -1, 0).observation.observedAt, beforeA, '未刷新格保留原证据时间');
+    assert.ok(cellEvidence(h, 1, -1, 0).observation.observedAt > beforeB);
+    assert.notEqual(verifier.status()!.verdict, 'OPEN', '单格恢复不足以让整条路线重新 OPEN');
+  } finally {
+    await closeHarness(h);
+  }
+});
+
+test('walk_to 零边帧等待返回时同 session ready 丢失：一次 interrupt、保留旧 lastObservation、verifier 非 OPEN', { timeout: 10000 }, async () => {
+  const h = await openHarness();
+  try {
+    seedCorridor(h);
+    const verifier = openCorridorVerifier(h);
+    const beforeA = cellEvidence(h, 0, -1, 0).observation.observedAt;
+    const beforeB = cellEvidence(h, 1, -1, 0).observation.observedAt;
+    const interrupts = countInterrupts(h.svc, verifier);
+
+    let ready = true;
+    let frame = 0;
+    const tick = (signal: AbortSignal) => new Promise<EntityFrame | null>((resolve) => {
+      if (signal.aborted) { resolve(null); return; }
+      const onAbort = () => { clearTimeout(timer); resolve(null); };
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        frame++;
+        if (frame === 4) ready = false; // 帧返回前同一 session 的 ready 已丢失
+        resolve({
+          position: { x: START.x + frame * 0.001, y: START.y, z: START.z },
+          velocity: { x: 0, y: 0, z: 0 }, onGround: true, isInWater: false,
+        });
+      }, 60);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    const fixture = scriptedHarness({ tick, state: () => ({ observationReady: ready }) });
+    const c = context(fixture.adapter, h.svc, h.perception.senses, { deadline: Date.now() + 10_000 });
+    const result = await runSkill(c.ctx, walkTo, { to: { ...START }, arrival: { kind: 'exact' } });
+
+    assert.equal(result.status, 'cancelled');
+    assert.equal(result.data?.stage, 'CANCELLED');
+    assert.equal(interrupts(), 1, '同一 ready gap 只 interrupt 一次');
+    assert.equal(h.svc.observationAdmitted, false);
+    const nav = navOf(result);
+    assert.ok(nav.outcome === 'CANCELLED');
+    assert.ok(nav.problem.kind === 'cancelled');
+    assert.equal(nav.problem.by, 'lifecycle');
+    assert.ok(nav.lastPosition, '此前接受的真实帧应保留');
+    assert.ok(Math.abs(nav.lastPosition.x - (START.x + 3 * 0.001)) < 1e-9, `ready 丢失帧不得覆盖旧末位，实际 ${nav.lastPosition.x}`);
+    assert.ok(nav.lastObservation);
+    assert.equal(nav.lastObservation.dim, DIM, '旧 lastObservation 作用域保持');
+    assert.equal(nav.lastObservation.worldId, WORLD);
+    assert.equal(nav.lastObservation.sessionId, SESSION);
+    assert.deepEqual(nav.trace, []);
+    assert.equal(cellEvidence(h, 0, -1, 0).freshness, 'STALE');
+    assert.equal(cellEvidence(h, 1, -1, 0).freshness, 'STALE');
+    assert.equal(cellEvidence(h, 0, -1, 0).observation.observedAt, beforeA, '旧证据时间不改');
+    assert.notEqual(verifier.status()!.verdict, 'OPEN');
+    assert.equal(fixture.writes(), 0);
+
+    h.svc.beginSession({ worldId: WORLD, dim: DIM, sessionId: SESSION });
+    const recoveryReport = h.svc.observe([{
+      name: 'minecraft:stone', properties: {}, stateComplete: true, pos: { x: 1, y: -1, z: 0 },
+      worldId: WORLD, sessionId: SESSION, dimension: DIM,
+      observationId: 9002, observedAt: Date.now() + 1000, source: 'vision',
+    }]);
+    verifier.apply(recoveryReport, 10);
+    assert.equal(cellEvidence(h, 1, -1, 0).freshness, 'FRESH');
+    assert.equal(cellEvidence(h, 0, -1, 0).freshness, 'STALE');
+    assert.equal(cellEvidence(h, 0, -1, 0).observation.observedAt, beforeA);
+    assert.ok(cellEvidence(h, 1, -1, 0).observation.observedAt > beforeB);
+    assert.notEqual(verifier.status()!.verdict, 'OPEN');
   } finally {
     await closeHarness(h);
   }

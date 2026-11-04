@@ -8,7 +8,16 @@
 
 import { randomUUID } from 'node:crypto';
 import { GROUNDED_ARRIVAL_DEFAULTS } from 'curio-minecraft-3d-memory';
-import type { ChangeReport, NavResult, Observation, Vec3Like, VoxelMap, WalkRouteRequest } from 'curio-minecraft-3d-memory';
+import type {
+  ChangeReport,
+  KnownWalkRouteStart,
+  NavResult,
+  Observation,
+  Vec3Like,
+  VoxelMap,
+  WalkRouteExecutor,
+  WalkRouteRequest,
+} from 'curio-minecraft-3d-memory';
 import { runWalkRoute, walkCollisionProvider } from '../adapter/walk-route.ts';
 import type { WalkBody, WalkMoveRequestObservation, WalkTick } from '../adapter/walk-route.ts';
 import type { SharedSpatialSession } from '../spatial/shared-session.ts';
@@ -82,7 +91,7 @@ export function bodyLocalCells(pos: Vec3Like): Vec3Like[] {
  * 从路线点列导出需要观察的格：每个点周围 3×3 的水平邻域 × 脚高/支撑/头/净空。
  * 按短路线约束有界生成，不枚举整条路线的包围矩形。额外观察的格对验证无害。
  */
-function routeCells(points: Vec3Like[]): Vec3Like[] {
+export function routeCells(points: Vec3Like[]): Vec3Like[] {
   const cells: Vec3Like[] = [];
   for (const p of points) {
     const fx = Math.floor(p.x), fy = Math.floor(p.y), fz = Math.floor(p.z);
@@ -134,8 +143,23 @@ function navToResult(nav: NavResult, execution: WalkRouteExecution): SkillResult
 }
 
 /**
- * walk_route 与 walk_to 共用的窄执行边界：同一套移动中局部观察、生命周期检查与
- * 共享会话附着/解除。调用者只提供已验证的路线请求；不在此处搜索或改写目标。
+ * 实际读取当前身体状态，并在同一 session 的真实 ready 丢失时只把已经知道的边界交给
+ * 共享服务一次：interrupt 后 observationAdmitted 已为 false，重复读取不会再次中断；
+ * 正在关停时不再触碰服务。这里不重新 beginSession、不刷新任何格；恢复 ready 后由
+ * 真实 Vision/reconnect 入口重新准入。调用方必须先检查父取消/期限，避免旧任务取消后
+ * 再读取新任务的现场。
+ */
+export function readObservedState(ctx: SkillCtx, spatial: SharedSpatialSession) {
+  const state = ctx.adapter.state();
+  if (!state.observationReady && spatial.observationAdmitted && !spatial.closing) spatial.interrupt();
+  return state;
+}
+
+/**
+ * walk_route、walk_to 与 walk_known_route 共用的窄执行边界：同一套移动中局部观察、
+ * 生命周期检查与共享会话附着/解除。调用者只提供已验证的路线请求；不在此处搜索或
+ * 改写目标。可选的 starter 只把本次运行的同一个 loop 交给库的已知路线起点，不建立
+ * 第二套执行循环。
  */
 export async function executeWalkRoute(
   ctx: SkillCtx,
@@ -146,6 +170,7 @@ export async function executeWalkRoute(
     tick: WalkTick;
     request: WalkRouteRequest;
     deadlineMs: number;
+    starter?: (loop: WalkRouteExecutor, request: WalkRouteRequest) => KnownWalkRouteStart;
   },
 ): Promise<WalkRouteExecution> {
   // 每次真实执行自己的唯一调用标识：库的 delegationId/executionId 会在新的 loop 里
@@ -160,15 +185,15 @@ export async function executeWalkRoute(
   const nav = await runWalkRoute({
     map: opts.map, body: opts.body, request: opts.request, tick: opts.tick, signal: ctx.signal, observe,
     onMoveRequest: (move) => { moveRequests.push(move); },
+    // 真实 ready 丢失（同一 sessionId 下区块消失）可能先被步行生命周期看到、且之后
+    // 没有下一帧/下一次 Vision 调用；readObservedState 把已经知道的实际边界交给共享
+    // 服务一次，服务仅在实际准入时 interrupt，重复读取不会重复中断。
     lifecycle: () => {
-      const s = ctx.adapter.state();
-      // 真实 ready 丢失（同一 sessionId 下区块消失）可能先被步行生命周期看到、
-      // 且之后没有下一帧/下一次 Vision 调用；此时把已经知道的实际边界交给共享
-      // 服务一次。服务仅在实际准入时 interrupt，重复读取不会重复中断。
-      if (!s.observationReady && spatial.observationAdmitted) spatial.interrupt();
+      const s = readObservedState(ctx, spatial);
       return { worldId: s.worldId, dim: s.dim, sessionId: s.sessionId, alive: s.alive, connected: s.connected, observationReady: s.observationReady };
     },
     deadlineMs: opts.deadlineMs,
+    starter: opts.starter,
     now: Date.now,
     // 附着生命周期属于本次真实步行：报告在身体样本前同步进入 loop，取消走 lifecycle。
     // finally 只撤销本 token，不关闭共享会话，也不影响后续任务。
