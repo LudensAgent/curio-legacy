@@ -261,3 +261,16 @@ test('precise collection reaches a side-accessible source whose top is occluded 
   assert.equal(result.ok, true, result.reason);
   assert.equal(f.uses(), 1);
 });
+
+test('precise collection picks a reachable aim when top is occluded and a lower slab blocks the center', async () => {
+  const f = fixture('bucket');
+  f.bot.entity.position = new Vec3(0.5, 63, 0.5);
+  const source = new Vec3(3, 64, 0);
+  f.put('water', source);
+  f.put('stone', source.offset(0, 1, 0)); // 顶部封石
+  f.put('oak_slab', new Vec3(1, 64, 0), 0, { type: 'bottom', waterlogged: 'false' }); // 前方下半砖挡中心
+  f.onUse(() => { f.inventory.set('bucket', 0); f.inventory.set('water_bucket', 1); });
+  const result = await f.adapter.useItemOn('bucket', { kind: 'block', pos: source }, signal());
+  assert.equal(result.ok, true, result.reason);
+  assert.equal(f.uses(), 1);
+});

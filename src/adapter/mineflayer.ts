@@ -4283,14 +4283,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (item === 'bucket' && ['water', 'lava'].includes(block.name)) {
         if (Number(block.getProperties().level) !== 0) return { ok: false, reason: 'NOT_SOURCE:指定流体不是源方块' };
         const from = b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0);
-        // 顶部被实心方块遮挡时，朝 y+0.85 的“液面”会被头顶方块挡住：改为朝源格中心（侧面可接触），
-        // 射线才会首先命中源而非头顶方块。顶部开阔（空气/流体/含水/水生植物）仍朝液面。
-        const above = b.blockAt(block.position.offset(0, 1, 0));
-        const topOccluded = above !== null
-          && !['air', 'cave_air', 'void_air', 'water', 'lava', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass'].includes(above.name)
-          && above.getProperties?.().waterlogged !== true;
-        const aim = block.position.offset(0.5, topOccluded ? 0.5 : 0.85, 0.5), direction = aim.minus(from), distance = direction.norm();
-        if (distance > 4.4 || distance < 0.01) return { ok: false, reason: 'OUT_OF_RANGE:指定流体源不在交互范围内' };
+        const centerDirection = block.position.offset(0.5, 0.5, 0.5).minus(from);
+        const centerDistance = centerDirection.norm();
+        if (centerDistance > 4.4 || centerDistance < 0.01) return { ok: false, reason: 'OUT_OF_RANGE:指定流体源不在交互范围内' };
         if (typeof b.world?.raycast !== 'function') return { ok: false, reason: 'TARGET_NOT_CONFIRMED:当前无法确认流体源的射线' };
         // SOURCE_ONLY 也会命中含水方块和水生植物中的水源，不只是名为 water 的格子。
         const waterSources = new Set(['seagrass', 'tall_seagrass', 'kelp', 'kelp_plant', 'bubble_column']);
@@ -4305,8 +4300,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           // 保留实心部分：含水顶半砖等实体形状可能高于液面；流水自身不挡源射线。
           return !!ray.intersect(fluid?.source ? [...candidate.shapes, [0, 0, 0, 1, height, 1]] : candidate.shapes, candidate.position);
         };
-        const hit = b.world.raycast(from, direction.normalize(), distance + 0.05, sourceOrBlock);
-        if (!hit?.position.equals(block.position)) return { ok: false, reason: 'TARGET_NOT_CONFIRMED:视线不能首先命中指定流体源，未发送使用动作' };
+        // 同一指定源格尝试有限候选瞄准点（液面→中心→略低），按真实射线选第一个能首先命中源的点。
+        // 顶部封石时液面被挡、中心被前方半砖挡等不同遮挡下各有适用的瞄准高度，不能单一朝液面或强制朝中心。
+        const aim = [0.85, 0.5, 0.3]
+          .map((dy) => block.position.offset(0.5, dy, 0.5))
+          .find((candidate) => {
+            const direction = candidate.minus(from), distance = direction.norm();
+            if (distance > 4.4 || distance < 0.01) return false;
+            return b.world.raycast(from, direction.normalize(), distance + 0.05, sourceOrBlock)?.position.equals(block.position) === true;
+          });
+        if (!aim) return { ok: false, reason: 'TARGET_NOT_CONFIRMED:视线不能首先命中指定流体源，未发送使用动作' };
         const filled = `${block.name}_bucket`, beforeEmpty = this.invCountOf('bucket'), beforeFilled = this.invCountOf(filled);
         await this.afterAction(() => b.lookAt(aim, true), check);
         await this.afterAction(() => this.lookSynced(), check);
