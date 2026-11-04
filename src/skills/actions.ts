@@ -92,7 +92,7 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
         if (cur !== 'water' && cur !== 'lava') return fail('BAD_ARGS', `(${pos.x},${pos.y},${pos.z}) 现在看得见的是 ${cur}，不是水或岩浆源；空桶只能从流体源装`, { pos });
         if (seen.properties.level === undefined) return fail('NOT_FOUND', `(${pos.x},${pos.y},${pos.z}) 的 ${cur} 源状态未知，未执行取源`, { pos });
         if (Number(seen.properties.level) !== 0) return fail('BAD_ARGS', `(${pos.x},${pos.y},${pos.z}) 是流动的 ${cur}（level=${seen.properties.level}），空桶只能从源方块装`, { pos });
-        if (dist3(adapter.eye() ?? { ...s.pos, y: s.pos.y + 1.62 }, { x: pos.x + 0.5, y: pos.y + 0.5, z: pos.z + 0.5 }) > 4.4) return fail('PATH_NOT_FOUND', `(${pos.x},${pos.y},${pos.z}) 超出交互距离，未执行取源`, { pos });
+        // 距离交给适配器按候选瞄准点与实际射线判断，不在技能入口用源格中心做预检（中心超距而液面在范围内会被误拒）。
         const beforeBucket = s.inventory.find((i) => i.name === 'bucket')?.count ?? 0;
         const beforeFilled = s.inventory.find((i) => i.name === `${cur}_bucket`)?.count ?? 0;
         try {

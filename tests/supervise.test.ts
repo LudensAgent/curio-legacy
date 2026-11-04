@@ -81,7 +81,7 @@ test('preflightConfig 对沿用 local 目录的 test 配置返回非零（隔离
   fs.writeFileSync(path.join(root, '.env.test'), 'MEMORY_WORLD_ID=curio-test-01\n');
   const r = preflightConfig(path.join(root, '.env.test'), REPO, { CURIO_ROOT: root });
   assert.notEqual(r.status, 0);
-  assert.match(r.stderr || r.stdout || '', /冲突|隔离|MEMORY_WORLD_ID|可写目录/);
+  assert.match(r.stderr || r.stdout || '', /冲突|隔离|MEMORY_WORLD_ID|可写目录|TEST_ROOT_DIR/);
   fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -92,6 +92,7 @@ test('preflightConfig 对独立合法的 test 配置返回 0', () => {
     'MEMORY_WORLD_ID=curio-test-01', 'DATA_DIR=./data/test', 'SERVER_DIR=./world-test', 'MC_PORT=25566',
     'RCON_PORT=25576', 'DASHBOARD_PORT=3002', 'AGENTS_DIR=./agents/test', 'LLM_ARCHIVE_DIR=./archives/test/llm-calls',
     'DANMAKU_ARCHIVE_DIR=./archives/test/danmaku', 'OBSERVER_HUD_CONFIG=./live/observer-hud.test.json',
+    'TEST_ROOT_DIR=.',
   ].join('\n') + '\n');
   const r = preflightConfig(path.join(root, '.env.test'), REPO, { CURIO_ROOT: root });
   assert.equal(r.status, 0, r.stderr || r.stdout);

@@ -183,6 +183,10 @@ async function initTest(): Promise<void> {
       }
     }
   }
+  // 种子源必须位于测试根目录（SERVER_DIR）内，不能来自测试目录之外。
+  if (!sameOrNested(targetServerDir, seedResolved)) {
+    throw new Error(`种子源必须位于测试根目录 ${targetServerDir} 内：${seedDir}`);
+  }
   const targetResolved = path.resolve(targetServerDir);
   if (sameOrNested(seedResolved, targetResolved) || sameOrNested(targetResolved, seedResolved)) {
     throw new Error('种子源与 test 世界目录不能相同或相互包含，否则复制会把刚创建的目标再次当作源递归展开');

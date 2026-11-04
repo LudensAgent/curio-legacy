@@ -129,10 +129,10 @@ export function assertTestIsolation(test: Layout, peers: Layout[], opts: { world
   if (!opts.worldIdExplicit) {
     throw new Error('test 环境必须显式配置 MEMORY_WORLD_ID（不能沿用公共 .env 的默认值），否则无法保证独立的世界身份。');
   }
-  // 指定根目录（如 /path/to/curio\test-setver）：测试实例的所有可写路径都必须落在该根目录内，
-  // 不能散落到根目录之外；仅比较与 local/live 是否冲突不能保证这一点。
+  // 指定根目录（如 /path/to/curio\test-setver）：测试实例的所有可写路径（含 HUD 配置文件）都必须落在该根目录内，
+  // 不能散落到根目录之外；仅比较与 local/live 是否冲突不能保证这一点。rootDir 由 config 层强制传入。
   if (opts.rootDir) {
-    for (const dir of writableDirsOf(test)) {
+    for (const dir of [...writableDirsOf(test), test.observerHudConfig]) {
       if (!sameOrNested(opts.rootDir, dir)) {
         throw new Error(`test 可写目录必须位于指定根目录 ${opts.rootDir} 内：${dir}`);
       }

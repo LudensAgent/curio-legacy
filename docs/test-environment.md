@@ -70,7 +70,7 @@ test 启动后**默认等待显式验收指令**：连接、观察、控制台�
 ## 后续真实 walk 验收如何使用这个环境
 
 - 用 `test:config` 确认连接地址、世界目录、数据目录和世界身份都指向 test 专属位置。
-- 用 `test:init` 从 local 世界复制一个可重复的测试世界。
+- 用 `test:init -- --seed <测试目录内的独立世界源>` 复制一个可重复的测试世界（种子源须位于 `SERVER_DIR` 内，不得用 local/live 世界）。
 - 启动 test 服务器后 `npm run test:start`；walk 闭环接线完成后，在同一 test 实例里做真实感知、空间记忆和 walk 的集成验收。
 - 空间库由 `config.spatial.databasePath` 提供显式路径，会话按现有契约建立（`sessionId` 由适配器在每次连接/重连时生成，不用环境名充当）。
 - 验收后若要重复实验，另建一个 test 实例目录（新 `DATA_DIR`/`SERVER_DIR`/`MEMORY_WORLD_ID`），保持可复现且不污染已有结果。

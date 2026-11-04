@@ -35,6 +35,12 @@ export class Spectator {
   }
 
   start() {
+    // test 模式不自动改全服规则，也不自动附着/旁观（gamemode spectator、spectate），避免两个任务争抢共享观察者；
+    // 这些由持锁的测试编排显式执行和恢复。
+    if (this.cfg.mode === 'test') {
+      this.bus.publish('spectator', 'P1', '测试模式不自动附着旁观，由持锁的测试编排显式控制');
+      return;
+    }
     let first = true;
     if (this.rcon) {
       this.adapter.on('spawn', () => {

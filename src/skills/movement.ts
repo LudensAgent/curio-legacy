@@ -895,13 +895,13 @@ export const surface: Skill<{ escape?: 'dig' | 'shore' }> = {
         }
         const now = ctx.adapter.state();
         if (!now.inWater && now.onGround && now.oxygen >= 18) {
-          // 持续 600ms 稳定干地才算上岸：中途回水就重置计时，避免瞬时干地/回水再触岸误报。
+          // 持续 600ms 稳定干地才算上岸：中途回水就退出确认，恢复下面的游泳控制，而不是原地等到超时。
           let dryFor = 0;
           while (dryFor < 600 && Date.now() < end) {
             await sleep(100, ctx.signal);
             const st = ctx.adapter.state();
             if (!st.inWater && st.onGround && st.oxygen >= 18) dryFor += 100;
-            else dryFor = 0;
+            else break;
           }
           if (dryFor >= 600) {
             const afterConfirm = ctx.adapter.state();

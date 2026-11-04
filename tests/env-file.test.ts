@@ -86,7 +86,7 @@ test('双 --env-file 启动时写回目标选最后一个（.env.test），不�
   fs.writeFileSync(path.join(root, '.env'), 'CURIO_MODE=local\nDATA_DIR=./data/local\n');
   fs.writeFileSync(path.join(root, '.env.test'), [
     'CURIO_MODE=test', 'DATA_DIR=./data/test', 'SERVER_DIR=./world-test', 'MC_PORT=25566',
-    'RCON_PORT=25576', 'MEMORY_WORLD_ID=curio-test-01',
+    'RCON_PORT=25576', 'MEMORY_WORLD_ID=curio-test-01', 'TEST_ROOT_DIR=.',
   ].join('\n') + '\n');
   process.execArgv.push('--env-file=.env', '--env-file=.env.test');
   const { config, envFile } = await loadConfig();

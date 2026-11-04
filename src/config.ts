@@ -238,6 +238,8 @@ export const config = {
 
 // test 是宿主运行环境：在连接游戏、打开数据库等任何副作用之前，先确认它不会踩到 local/live 的地址、数据库或数据目录。
 if (mode === 'test') {
+  const testRoot = str('TEST_ROOT_DIR');
+  if (!testRoot) throw new Error('test 环境必须配置 TEST_ROOT_DIR（唯一测试根目录），否则无法保证所有路径落在指定目录内。');
   assertTestIsolation({
     mode: 'test',
     dataDir,
@@ -253,7 +255,7 @@ if (mode === 'test') {
     rconHost: config.observer.rconHost,
     rconPort: config.observer.rconPort,
     dashboardPort: config.dashboard.port,
-  }, peerLayouts(path.dirname(envFile), 'test'), { worldIdExplicit, rootDir: str('TEST_ROOT_DIR') || undefined });
+  }, peerLayouts(path.dirname(envFile), 'test'), { worldIdExplicit, rootDir: res(testRoot) });
 }
 
 export type Config = typeof config;

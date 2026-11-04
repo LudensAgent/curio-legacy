@@ -153,10 +153,10 @@ test('use_item on:"self" 对不消耗物品的工具（鱼竿）不算失败', a
 });
 
 
-test('coordinate collection rejects stale, cross-session and out-of-range observations before using the bucket', async (t) => {
-  for (const mode of ['old', 'world', 'session', 'dimension', 'not-ready', 'far', 'unknown-level']) {
+test('coordinate collection rejects stale, cross-session observations before using the bucket', async (t) => {
+  for (const mode of ['old', 'world', 'session', 'dimension', 'not-ready', 'unknown-level']) {
     const w = new TestWorld();
-    const pos = { x: mode === 'far' ? 10 : 0, y: 64, z: 2 };
+    const pos = { x: 0, y: 64, z: 2 };
     w.inv.set('bucket', 1);
     let uses = 0;
     w.useItemOn = async () => { uses++; return { ok: true }; };
