@@ -259,12 +259,20 @@ test('真实 Arbiter 连续 walk_route A→B 共用同一 session.voxel，A 只�
     // through the service, not merely change the static map. Aim ahead along the
     // walked +x axis with a real downward pitch (no underfoot FOV exemption).
     reports.length = 0;
+    const observeBatch = voxel.observeBatch.bind(voxel);
+    let batchReport: ReturnType<typeof observeBatch> | null = null;
+    voxel.observeBatch = (request) => {
+      const report = observeBatch(request);
+      batchReport = report;
+      return report;
+    };
     const support = { x: Math.floor(adapter.entity.position.x) + 1, y: -1, z: Math.floor(adapter.entity.position.z) };
     adapter.pitch = -1.2;
     const observed = vision.observeBlocks([support]);
     assert.ok(observed.length > 0, 'B 活动期间真实可见支撑必须被观测');
     assert.equal(reports.length, 1, 'B 原始 receiver 必须经服务收到真实地图报告');
-    assert.ok(Array.isArray(reports[0]!.sections), '报告必须携带真实地图变化段');
+    assert.ok(batchReport !== null, '真实 Vision 批次必须实际调用 observeBatch 并返回报告');
+    assert.strictEqual(reports[0], batchReport, 'B 原始 receiver 必须收到 observeBatch 返回的同一报告对象');
     assert.equal(svc.session.voxel.cellAt('overworld', support.x, support.y, support.z).observed, true, '真实观测必须写入共享地图');
     const b = await doneB;
     assert.equal(b.result.status, 'succeeded', b.result.summary);
@@ -553,6 +561,9 @@ test('真实步行生命周期检测同 session ready 丢失：一次中断、st
     assert.equal(stale.observed ? stale.evidence.freshness : null, 'STALE', '已观测支撑必须被中断置 stale');
     const neighborStale = svc.session.voxel.cellAt('overworld', neighbor.x, neighbor.y, neighbor.z);
     assert.equal(neighborStale.observed ? neighborStale.evidence.freshness : null, 'STALE');
+    // Capture the real interruption boundary after cancellation has settled; recovery
+    // evidence must be genuinely later than the gap it replaces, not just same-ms.
+    const gapBoundary = Date.now();
 
     // Restore trusted ready in the same scope. Vision never saw the unready state, so
     // re-admission must come from the missing admission, not from a cached scope change.
@@ -564,8 +575,10 @@ test('真实步行生命周期检测同 session ready 丢失：一次中断、st
     unready = false;
     adapter.observationReady = true;
     const beginsBeforeReobserve = begins;
+    await new Promise((resolve) => setTimeout(resolve, 5));
     const observed = vision.observeBlocks([support]);
     assert.ok(observed.length > 0, '恢复后实际可见支撑必须被观测');
+    assert.ok(observed[0]!.observedAt > gapBoundary, '恢复观测必须晚于真实中断边界');
     assert.equal(begins, beginsBeforeReobserve + 1, '未准入的同一作用域必须重新 begin 一次');
     assert.equal(svc.observationAdmitted, true);
     const fresh = svc.session.voxel.cellAt('overworld', support.x, support.y, support.z);
@@ -639,7 +652,8 @@ test('共享 interrupt 在初始等待物理帧时立即给出 lifecycle CANCELL
 test('共享服务关闭后真实 Vision 读取不抛错、不开始会话、不派发写入', async () => {
   const adapter = new WalkHostAdapter();
   const { svc, dir } = await openShared();
-  let closed = false;
+  let closeAttempted = false;
+  let cleanClosed = false;
   try {
     const vision = new Vision(adapter, { ...DEFAULT_VISION, range: 24 }, svc);
     let begins = 0;
@@ -651,8 +665,8 @@ test('共享服务关闭后真实 Vision 读取不抛错、不开始会话、不
     voxel.observeBatch = (request) => { writes++; return observeBatch(request); };
 
     // Actual shutdown, not a fabricated completed flag; the real close result is asserted.
+    closeAttempted = true;
     const shutdown = await svc.shutdown();
-    closed = true;
     assert.equal(shutdown.error, null);
     assert.equal(shutdown.cancelError, null);
     assert.equal(shutdown.closeError, null);
@@ -661,6 +675,7 @@ test('共享服务关闭后真实 Vision 读取不抛错、不开始会话、不
     assert.equal(shutdown.close.error, null);
     assert.equal(shutdown.close.unconfirmedRequest, false);
     assert.equal(svc.closing, true);
+    cleanClosed = true;
 
     const beginsBefore = begins;
     const writesBefore = writes;
@@ -670,8 +685,8 @@ test('共享服务关闭后真实 Vision 读取不抛错、不开始会话、不
     assert.equal(begins, beginsBefore, '关闭后不得开始新会话');
     assert.equal(writes, writesBefore, '关闭后不得派发地图写入');
   } finally {
-    if (closed) rmSync(dir, { recursive: true, force: true });
-    else await closeShared(svc, dir);
+    if (cleanClosed) rmSync(dir, { recursive: true, force: true });
+    else if (!closeAttempted) await closeShared(svc, dir);
   }
 });
 
