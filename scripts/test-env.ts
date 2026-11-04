@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertResetOffline } from '../src/maintenance/offline.ts';
-import { readServerPropertyValues, validateLevelName } from '../src/maintenance/world-reset.ts';
+import { readProperties, readServerPropertyValues, validateLevelName } from '../src/maintenance/world-reset.ts';
 
 type ConfigModule = typeof import('../src/config.ts');
 
@@ -41,26 +41,45 @@ function sameOrNested(parent: string, child: string): boolean {
   return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`));
 }
 
+/** 与 world-reset 的 unescapeProperty 互逆：转义值里的反斜线与控制字符，保证写回后读回值不变。 */
+function escapePropertyValue(value: string): string {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/\t/g, '\\t')
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')
+    .replace(/\f/g, '\\f');
+}
+
+/**
+ * 按 Java Properties 语义写入单个键：移除所有同名逻辑项（= / : 分隔、重复键、续行、转义键）后，
+ * 在末尾追加一条规范的 key=value（同名键最后一个生效）。值经转义，写回后读回一致。
+ */
 export function setServerProperty(file: string, key: string, value: string): void {
-  const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
-  let found = false;
-  const out = lines.map((line) => {
-    const t = line.trim();
-    if (t && !t.startsWith('#') && t.indexOf('=') >= 0 && t.slice(0, t.indexOf('=')).trim() === key) {
-      found = true;
-      return `${key}=${value}`;
-    }
-    return line;
-  });
-  if (!found) out.push(`${key}=${value}`);
-  fs.writeFileSync(file, out.join('\n'));
+  const buffer = fs.readFileSync(file);
+  const matches = readProperties(buffer).filter((item) => item.key === key);
+  const chunks: Buffer[] = [];
+  let offset = 0;
+  for (const item of matches) { chunks.push(buffer.subarray(offset, item.start)); offset = item.end; }
+  chunks.push(buffer.subarray(offset));
+  const without = Buffer.concat(chunks);
+  const eol = buffer.includes('\r\n') ? '\r\n' : '\n';
+  const entry = Buffer.from(`${key}=${escapePropertyValue(value)}${eol}`);
+  const needBreak = without.length > 0 && without[without.length - 1] !== 0x0a;
+  fs.writeFileSync(file, Buffer.concat([without, needBreak ? Buffer.from(eol) : Buffer.alloc(0), entry]));
+}
+
+/** 目录里含 level.dat 的一级子目录名（即世界目录）。空目录、只有 server.properties 返回空。 */
+export function worldDirsIn(dir: string): string[] {
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && fs.existsSync(path.join(dir, e.name, 'level.dat')))
+    .map((e) => e.name);
 }
 
 /** 目录里是否存在任何世界（任意子目录含 level.dat）。空目录、只有 server.properties 不算已初始化。 */
 export function hasWorldData(dir: string): boolean {
-  if (!fs.existsSync(dir)) return false;
-  return fs.readdirSync(dir, { withFileTypes: true })
-    .some((e) => e.isDirectory() && fs.existsSync(path.join(dir, e.name, 'level.dat')));
+  return worldDirsIn(dir).length > 0;
 }
 
 /** 目标自身已有测试状态时的标记列表；空数组 = 尚未初始化。只读，不写盘。 */
@@ -69,10 +88,9 @@ export function existingTestState(config: { dataDir: string; spatialDbPath: stri
   if (fs.existsSync(path.join(config.dataDir, 'init.json'))) markers.push('初始化标记 init.json');
   if (fs.existsSync(path.join(config.dataDir, 'world-memory.json'))) markers.push('情境记忆 world-memory.json');
   if (fs.existsSync(config.spatialDbPath)) markers.push(`空间数据库 ${config.spatialDbPath}`);
-  const targetProps = path.join(targetServerDir, 'server.properties');
-  const targetLevelName = fs.existsSync(targetProps) ? (readServerProperty(targetProps, 'level-name') ?? 'world') : null;
-  if (targetLevelName && fs.existsSync(path.join(targetServerDir, targetLevelName, 'level.dat'))) markers.push(`世界 ${targetLevelName}/level.dat`);
-  else if (!targetLevelName && hasWorldData(targetServerDir)) markers.push('世界 level.dat');
+  // 目标服务器目录里任何世界数据都算已初始化：不能只按 server.properties 当前 level-name 判断，
+  // 否则 level-name 指向别处时，旧的 world 会被种子复制覆盖并混入旧 region 区块。
+  for (const name of worldDirsIn(targetServerDir)) markers.push(`世界 ${name}/level.dat`);
   return markers;
 }
 

@@ -184,9 +184,11 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     if (curioArg !== 'live' && curioArg !== 'local' && curioArg !== 'test') throw new Error(`--curio 只支持 live / local / test，收到：${curioArg}`);
     if (!curioRoot) throw new Error('--curio 需要 CURIO_ROOT（进程环境变量或项目根目录 .env 里设置）');
   }
+  // 多个 --env-file 时最后一个才是模式覆盖文件（与 src/config.ts 一致），否则会把子进程指向公共 .env。
+  const execArgvEnvFile = process.execArgv.filter((arg) => arg.startsWith('--env-file=')).map((arg) => arg.slice('--env-file='.length));
   let selectedEnv = curioArg
     ? path.join(curioRoot, `.env.${curioArg}`)
-    : process.execArgv.find((arg) => arg.startsWith('--env-file='))?.slice('--env-file='.length)
+    : execArgvEnvFile[execArgvEnvFile.length - 1]
       || process.env.ENV_FILE?.trim();
   if (selectedEnv === 'live' || selectedEnv === 'local' || selectedEnv === 'test') {
     if (!curioRoot) throw new Error(`裸模式 ${selectedEnv} 需要 CURIO_ROOT（进程环境变量或项目根目录 .env 里设置）`);

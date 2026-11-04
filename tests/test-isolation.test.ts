@@ -176,3 +176,18 @@ test('localhost 与 127.0.0.1 视为同一回环地址，游戏与 RCON 端口�
   const localRcon = localLayout(base, { rconHost: 'localhost' });
   assert.throws(() => assertTestIsolation(testLayout(base, { rconPort: 25575 }), [localRcon], { worldIdExplicit: true }), /RCON 地址.*冲突/);
 });
+
+test('IPv6 回环 ::1 与 localhost / 127.0.0.1 视为同一主机，游戏与 RCON 端口冲突都被拒绝', () => {
+  const base = os.tmpdir();
+  const local = localLayout(base, { mcHost: 'localhost' });
+  assert.throws(() => assertTestIsolation(testLayout(base, { mcHost: '::1', mcPort: 25565 }), [local], { worldIdExplicit: true }), /游戏连接地址.*冲突/);
+  const localRcon = localLayout(base, { rconHost: '[::1]' });
+  assert.throws(() => assertTestIsolation(testLayout(base, { rconHost: '127.0.0.1', rconPort: 25575 }), [localRcon], { worldIdExplicit: true }), /RCON 地址.*冲突/);
+});
+
+test('OBSERVER_HUD_CONFIG 在 Windows 上大小写不同也视为同一文件', { skip: process.platform !== 'win32' }, () => {
+  const base = os.tmpdir();
+  const local = localLayout(base);
+  const test = testLayout(base, { observerHudConfig: local.observerHudConfig.toUpperCase() });
+  assert.throws(() => assertTestIsolation(test, [local], { worldIdExplicit: true }), /OBSERVER_HUD_CONFIG/);
+});

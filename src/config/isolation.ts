@@ -107,11 +107,16 @@ function sameOrNested(parent: string, child: string): boolean {
   return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`));
 }
 
+/** 两个路径指向同一文件（Windows 下大小写不敏感，与目录比较的 path.relative 口径一致）。 */
+function sameFile(left: string, right: string): boolean {
+  return path.relative(left, right) === '';
+}
+
 function normalizeHost(host: string): string {
   let h = host.toLowerCase();
   if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
-  // 常见回环地址别名统一到 127.0.0.1：localhost 与 127.0.0.1 指向同一回环主机，不能绕过端口冲突检查。
-  if (h === '0.0.0.0' || h === 'localhost') h = '127.0.0.1';
+  // 常见回环地址别名统一到 127.0.0.1：localhost / 127.0.0.1 / ::1（IPv6 回环）指向同一回环主机，不能绕过端口冲突检查。
+  if (h === '0.0.0.0' || h === 'localhost' || h === '::1') h = '127.0.0.1';
   if (h === '::') h = '::1';
   return h;
 }
@@ -133,7 +138,7 @@ export function assertTestIsolation(test: Layout, peers: Layout[], opts: { world
         }
       }
     }
-    if (test.observerHudConfig === peer.observerHudConfig) {
+    if (sameFile(test.observerHudConfig, peer.observerHudConfig)) {
       throw new Error(`test 的 OBSERVER_HUD_CONFIG 与 ${peer.mode} 相同：${test.observerHudConfig}`);
     }
     if (test.worldId === peer.worldId) {

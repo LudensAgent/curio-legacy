@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { existingTestState, hasWorldData, readServerProperty, syncServerForTest } from '../scripts/test-env.ts';
+import { existingTestState, hasWorldData, readServerProperty, setServerProperty, syncServerForTest } from '../scripts/test-env.ts';
 import { validateLevelName } from '../src/maintenance/world-reset.ts';
 
 function tmp() { return fs.mkdtempSync(path.join(os.tmpdir(), 'test-env-')); }
@@ -91,6 +91,37 @@ test('readServerProperty 支持 : 分隔符与反斜线转义', () => {
   fs.writeFileSync(props, 'server-port:25565\nrcon.password=pa\\=ss\\ word\n');
   assert.equal(readServerProperty(props, 'server-port'), '25565');
   assert.equal(readServerProperty(props, 'rcon.password'), 'pa=ss word');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('existingTestState 识别目标里任何已有世界（即使 level-name 指向别处），避免种子覆盖混入旧区块', () => {
+  const dir = tmp();
+  const targetServer = path.join(dir, 'target');
+  const dataDir = path.join(dir, 'data');
+  fs.mkdirSync(path.join(targetServer, 'world'), { recursive: true });
+  fs.writeFileSync(path.join(targetServer, 'world', 'level.dat'), 'old');
+  // level-name 指向尚不存在的 next-world，但旧的 world 仍在；复制种子会覆盖 world/level.dat 并留下旧 region。
+  fs.writeFileSync(path.join(targetServer, 'server.properties'), 'level-name=next-world\nserver-port=25565\n');
+  const markers = existingTestState({ dataDir, spatialDbPath: path.join(dataDir, 'spatial', 'spatial.sqlite') }, targetServer);
+  assert.deepEqual(markers, ['世界 world/level.dat']);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('setServerProperty 按逻辑键处理 : 分隔与重复键，写回后最后一条生效', () => {
+  const dir = tmp();
+  const props = path.join(dir, 'server.properties');
+  fs.writeFileSync(props, 'server-port=25565\nserver-port:25567\n');
+  setServerProperty(props, 'server-port', '25566');
+  assert.equal(readServerProperty(props, 'server-port'), '25566');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('setServerProperty 转义反斜线，密码写回后回读一致', () => {
+  const dir = tmp();
+  const props = path.join(dir, 'server.properties');
+  fs.writeFileSync(props, 'enable-rcon=true\nrcon.port=25575\nrcon.password=old\n');
+  setServerProperty(props, 'rcon.password', 'abc\\def');
+  assert.equal(readServerProperty(props, 'rcon.password'), 'abc\\def');
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

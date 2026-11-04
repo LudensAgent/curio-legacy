@@ -81,6 +81,20 @@ test('界面默认只在窗口边界短暂停留，显式等待值仍然生效',
   assert.deepEqual(overridden.config.ui, { pacingMs: 250, openHoldMs: 600, closeHoldMs: 800 });
 });
 
+test('双 --env-file 启动时写回目标选最后一个（.env.test），不回写公共 .env', async (t) => {
+  const root = project(t);
+  fs.writeFileSync(path.join(root, '.env'), 'CURIO_MODE=local\nDATA_DIR=./data/local\n');
+  fs.writeFileSync(path.join(root, '.env.test'), [
+    'CURIO_MODE=test', 'DATA_DIR=./data/test', 'SERVER_DIR=./world-test', 'MC_PORT=25566',
+    'RCON_PORT=25576', 'MEMORY_WORLD_ID=curio-test-01',
+  ].join('\n') + '\n');
+  process.execArgv.push('--env-file=.env', '--env-file=.env.test');
+  const { config, envFile } = await loadConfig();
+  assert.equal(envFile, path.join(root, '.env.test'));
+  assert.equal(config.mode, 'test');
+  assert.equal(config.dataDir, path.join(root, 'data', 'test'));
+});
+
 test('未填写目录时按模式读取独立角色与记忆身份，直播文件名保持直播默认值', async (t) => {
   const root = project(t);
   for (const mode of ['local', 'live']) {

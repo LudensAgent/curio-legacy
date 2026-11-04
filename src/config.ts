@@ -14,9 +14,13 @@ const curioRoot = (() => {
 })();
 const curioArg = process.argv.find((arg) => arg.startsWith('--curio='))?.slice('--curio='.length);
 if (curioArg && curioArg !== 'live' && curioArg !== 'local' && curioArg !== 'test') throw new Error(`--curio 只支持 live / local / test，收到：${curioArg}`);
-const selectedEnvRaw = curioArg
-  || process.execArgv.find((arg) => arg.startsWith('--env-file='))?.slice('--env-file='.length)
-  || process.env.ENV_FILE?.trim();
+// 多个 --env-file（如 --env-file=.env --env-file=.env.test）时，最后一个才是模式覆盖文件（后写覆盖先写），
+// 写回也应落在它身上，不能把测试配置写回公共 .env。
+const execArgvEnvFile = (() => {
+  const matches = process.execArgv.filter((arg) => arg.startsWith('--env-file='));
+  return matches[matches.length - 1]?.slice('--env-file='.length);
+})();
+const selectedEnvRaw = curioArg || execArgvEnvFile || process.env.ENV_FILE?.trim();
 const isBareMode = selectedEnvRaw === 'live' || selectedEnvRaw === 'local' || selectedEnvRaw === 'test';
 if (isBareMode && !curioRoot) throw new Error(`裸模式 ${selectedEnvRaw} 需要 CURIO_ROOT（进程环境变量或项目根目录 .env 里设置）`);
 const selectedEnv = isBareMode ? path.join(curioRoot, `.env.${selectedEnvRaw}`) : selectedEnvRaw;

@@ -109,7 +109,7 @@ function safeServerDirectory(serverDir: string, projectDir: string): string {
   return realDirectory;
 }
 
-interface LogicalProperty {
+export interface LogicalProperty {
   start: number;
   end: number;
   key: string;
@@ -137,7 +137,7 @@ function unescapeProperty(value: string): string {
 }
 
 /** 用 Latin-1 建立原字节区间，删除种子项时不重编码其他配置、注释与换行。 */
-function readProperties(buffer: Buffer): LogicalProperty[] {
+export function readProperties(buffer: Buffer): LogicalProperty[] {
   const source = buffer.toString('latin1');
   const properties: LogicalProperty[] = [];
   let offset = 0;
