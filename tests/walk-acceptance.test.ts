@@ -23,6 +23,7 @@ import {
   assertOwnedTicksReleased,
   assertRealPartial,
   assertTimeoutAfterDeadline,
+  awaitRouteStartRecord,
   blockFaceBounds,
   checkTaskSegments,
   classifyOldOwnerControls,
@@ -62,11 +63,13 @@ import {
   type DeliveredSampleRecord,
   type FrameRecord,
   type MoveRecord,
+  type RouteCallRecord,
   type RouteStatusSnapshot,
   type TickEntry,
   type WalkBridge,
 } from '../scripts/walk-acceptance.ts';
 import { WalkMoveExecutor, walkCollisionProvider } from '../src/adapter/walk-route.ts';
+import type { TaskOutcome } from '../src/arbiter/arbiter.ts';
 
 const emptyKeys = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
 
@@ -1106,11 +1109,13 @@ test('quitClient：缺真实 end → 超时 ended=false（清理失败），并�
 
 function tickEntry(o: Partial<TickEntry> = {}): TickEntry {
   return {
-    seqStart: 1, seqEnd: 2, tsStart: 100, tsEnd: 150, ownerTaskId: 'task_A', delivered: true,
+    seqStart: 1, seqEnd: 2, tsStart: 100, tsEnd: 150, diagId: 'tick-1', ownerTaskId: 'task_A', delivered: true,
     pending: false, signalAbortedAtEnd: false,
     signalAbortListenersAtStart: 0, signalAbortListenersWhilePending: 1, signalAbortListenersAtEnd: 0,
     botPhysicsTickListenersAtStart: 1, botPhysicsTickListenersWhilePending: 2, botPhysicsTickListenersAtEnd: 1,
     botEndListenersAtStart: 0, botEndListenersWhilePending: 1, botEndListenersAtEnd: 0,
+    ownedAbortAdded: 1, ownedPhysicsTickAdded: 1, ownedEndAdded: 1,
+    ownedAbortResidual: 0, ownedPhysicsTickResidual: 0, ownedEndResidual: 0,
     ...o,
   };
 }
@@ -1152,16 +1157,25 @@ test('assertOwnedTicksReleased：pending 未解除、signal/physicsTick/end 监�
   assert.doesNotThrow(() => assertOwnedTicksReleased([base], 'task_A', 'W7x'));
   assert.throws(() => assertOwnedTicksReleased([{ ...base, pending: true }], 'task_A', 'W7x'), /未解除/);
   assert.throws(
-    () => assertOwnedTicksReleased([{ ...base, signalAbortListenersAtEnd: base.signalAbortListenersAtStart + 1 }], 'task_A', 'W7x'),
+    () => assertOwnedTicksReleased([{ ...base, ownedAbortResidual: 1 }], 'task_A', 'W7x'),
     /残留 walkTick 监听器/,
   );
   assert.throws(
-    () => assertOwnedTicksReleased([{ ...base, botPhysicsTickListenersAtEnd: base.botPhysicsTickListenersAtStart + 1 }], 'task_A', 'W7x'),
+    () => assertOwnedTicksReleased([{ ...base, ownedPhysicsTickResidual: 1 }], 'task_A', 'W7x'),
     /残留 walkTick 监听器/,
   );
   assert.throws(
-    () => assertOwnedTicksReleased([{ ...base, botEndListenersAtEnd: base.botEndListenersAtStart + 1 }], 'task_A', 'W7x'),
+    () => assertOwnedTicksReleased([{ ...base, ownedEndResidual: 1 }], 'task_A', 'W7x'),
     /残留 walkTick 监听器/,
+  );
+  assert.doesNotThrow(
+    () => assertOwnedTicksReleased([{
+      ...base,
+      signalAbortListenersAtEnd: base.signalAbortListenersAtStart + 5,
+      botPhysicsTickListenersAtEnd: base.botPhysicsTickListenersAtStart + 5,
+      botEndListenersAtEnd: base.botEndListenersAtStart + 5,
+    }], 'task_A', 'W7x'),
+    '全局总数变化只作诊断，不能代替 owned 归属清理而误报',
   );
   assert.doesNotThrow(
     () => assertOwnedTicksReleased([{ ...base, ownerTaskId: 'task_B', pending: true }], 'task_A', 'W7x'),
@@ -1220,4 +1234,123 @@ test('WalkDiagnostics：walkTick 等待期间记录真实 pending/监听器，�
   assert.equal(entry.signalAbortListenersAtEnd, entry.signalAbortListenersAtStart);
   assert.doesNotThrow(() => assertOwnedTicksReleased(diag.ticks, 'task_A', 'fake'));
   diag.unwrap();
+});
+
+function routeStart(taskId: string, delegationId: string): RouteCallRecord {
+  return {
+    seq: 1, ts: 1, op: 'start', ownerTaskId: taskId, delegationId,
+    statusBefore: null, statusAfter: statusSnap({ delegationId }),
+  };
+}
+
+function outcomeFor(taskId: string): TaskOutcome {
+  return {
+    task: {
+      id: taskId, planVersion: 1, skill: 'walk_route', args: {}, source: 'user',
+      startedAt: 1, deadline: 2, progress: 0, note: '', movement: true,
+    },
+    result: { status: 'failed', failureCode: 'TIMEOUT', summary: 'failed:TIMEOUT' },
+    durationMs: 5,
+  };
+}
+
+test('awaitRouteStartRecord：有界等待异步稍后出现的本任务真实 start（fake 数组，非 live）', async () => {
+  const calls: RouteCallRecord[] = [routeStart('task_B', 'walk-9')];
+  const pending = awaitRouteStartRecord(calls, 'task_A', new Promise<TaskOutcome>(() => {}), 1_000, 'W7x');
+  setTimeout(() => calls.push(routeStart('task_A', 'walk-1')), 25);
+  const { startCall, delegationId } = await pending;
+  assert.equal(delegationId, 'walk-1');
+  assert.equal(startCall.ownerTaskId, 'task_A', '别的任务的 start 不得冒充本任务');
+});
+
+test('awaitRouteStartRecord：start 前已 done 时如实失败并保留完整 TaskOutcome', async () => {
+  const outcome = outcomeFor('task_A');
+  await assert.rejects(
+    awaitRouteStartRecord([], 'task_A', Promise.resolve(outcome), 1_000, 'W7x'),
+    (e: Error) => {
+      assert.match(e.message, /真实 walk_route.start 前已结束/);
+      assert.match(e.message, /"task":/);
+      assert.match(e.message, /"failureCode":"TIMEOUT"/);
+      return true;
+    },
+  );
+});
+
+test('awaitRouteStartRecord：无 start 也无 done 时有界超时', async () => {
+  await assert.rejects(
+    awaitRouteStartRecord([], 'task_A', new Promise<TaskOutcome>(() => {}), 60, 'W7x'),
+    /60ms 内未观察到本任务真实 walk_route.start/,
+  );
+});
+
+test('WalkDiagnostics：pending 期他人监听器增减不误报，own 任一类漏移除仍 FAIL（fake EventEmitter/AbortSignal，非真实断线）', async () => {
+  const entity = { position: { x: 1, y: 64, z: 2 }, velocity: { x: 0, y: 0, z: 0 }, onGround: true, isInWater: false };
+  for (const leak of ['none', 'physicsTick', 'end', 'abort'] as const) {
+    const emitter = new EventEmitter();
+    const controlState: MutableKeys = { ...emptyKeys };
+    const raw = Object.assign(emitter, fakeRaw(controlState));
+    const controller = new AbortController();
+    const externalTick = () => {};
+    const externalEnd = () => {};
+    const externalAbort = () => {};
+    emitter.on('physicsTick', externalTick);
+    emitter.once('end', externalEnd);
+    controller.signal.addEventListener('abort', externalAbort);
+    let finish: (() => void) | undefined;
+    const target: WalkBridge = {
+      walkTick: () => (signal) => new Promise((resolve) => {
+        const ownTick = () => {};
+        const ownEnd = () => {};
+        const ownAbort = () => {};
+        signal.addEventListener('abort', ownAbort, { once: true });
+        emitter.on('physicsTick', ownTick);
+        emitter.once('end', ownEnd);
+        finish = () => {
+          if (leak !== 'physicsTick') emitter.removeListener('physicsTick', ownTick);
+          if (leak !== 'end') emitter.removeListener('end', ownEnd);
+          if (leak !== 'abort') signal.removeEventListener('abort', ownAbort);
+          resolve(entity);
+        };
+      }),
+      stopAll: () => {},
+    };
+    const diag = new WalkDiagnostics(target, () => 'task_A', () => snapshotKeys({ controlState }), new EventSeq(), raw);
+    diag.wrap();
+    const p = target.walkTick!()(controller.signal);
+    const entry = diag.ticks[0]!;
+    assert.equal(entry.pending, true, `${leak}: 等待开始即 pending`);
+    assert.equal(entry.diagId, `tick-${entry.seqStart}`);
+    assert.equal(entry.ownedAbortAdded, 1);
+    assert.equal(entry.ownedPhysicsTickAdded, 1);
+    assert.equal(entry.ownedEndAdded, 1);
+    // pending 期间：其他监听器正常增加/移除，包含原生 once 移除。
+    emitter.removeListener('physicsTick', externalTick);
+    emitter.removeListener('end', externalEnd);
+    controller.signal.removeEventListener('abort', externalAbort);
+    if (leak === 'none') emitter.on('physicsTick', () => {});
+    assert.ok(finish);
+    finish();
+    await p;
+    assert.equal(entry.pending, false);
+    if (leak === 'none') {
+      assert.equal(entry.botPhysicsTickListenersAtEnd, entry.botPhysicsTickListenersAtStart, '总数巧合相同');
+      assert.equal(entry.ownedPhysicsTickResidual, 0);
+      assert.doesNotThrow(
+        () => assertOwnedTicksReleased(diag.ticks, 'task_A', 'fake'),
+        '他人监听器变化且总数巧合相同时不得误报',
+      );
+    } else {
+      const residual = { physicsTick: entry.ownedPhysicsTickResidual, end: entry.ownedEndResidual, abort: entry.ownedAbortResidual }[leak];
+      const total = { physicsTick: entry.botPhysicsTickListenersAtEnd, end: entry.botEndListenersAtEnd, abort: entry.signalAbortListenersAtEnd }[leak];
+      const start = { physicsTick: entry.botPhysicsTickListenersAtStart, end: entry.botEndListenersAtStart, abort: entry.signalAbortListenersAtStart }[leak];
+      assert.equal(residual, 1, `${leak}: 本 tick 自己的监听器应残留`);
+      assert.equal(total, start, `${leak}: 即使全局总数巧合相同`);
+      assert.throws(
+        () => assertOwnedTicksReleased(diag.ticks, 'task_A', 'fake'),
+        /残留 walkTick 监听器/,
+        `${leak}: 自己的监听器漏移除必须 FAIL`,
+      );
+    }
+    diag.unwrap();
+  }
 });

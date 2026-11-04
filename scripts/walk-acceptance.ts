@@ -134,13 +134,15 @@ export interface TickEntry {
   seqEnd: number;
   tsStart: number;
   tsEnd: number;
+  /** 稳定诊断 ID；不含 Function 本体，可安全写入证据 JSON。 */
+  diagId: string;
   ownerTaskId: string | null;
   delivered: boolean;
   pos?: Vec3;
   /** true 表示该等待尚未被 physicsTick/abort/end/期限解除；完成时原地改回 false。 */
   pending: boolean;
   signalAbortedAtEnd: boolean;
-  /** 本 task 等待期间在 signal/bot 上新增的监听器数量（start → whilePending → end）。 */
+  /** 全局监听器总数，仅作诊断；归属判定使用下面的 owned 计数。 */
   signalAbortListenersAtStart: number;
   signalAbortListenersWhilePending: number;
   signalAbortListenersAtEnd: number;
@@ -150,6 +152,22 @@ export interface TickEntry {
   botEndListenersAtStart: number;
   botEndListenersWhilePending: number;
   botEndListenersAtEnd: number;
+  /** 本 tick 在同步返回 Promise 后新增的真实函数数量（来自 getEventListeners 差集）。 */
+  ownedAbortAdded: number;
+  ownedPhysicsTickAdded: number;
+  ownedEndAdded: number;
+  /** 等待结束时，上述本 tick 自己的函数仍留在监听器集合中的数量。 */
+  ownedAbortResidual: number;
+  ownedPhysicsTickResidual: number;
+  ownedEndResidual: number;
+}
+
+type ListenerSet = Set<Function>;
+
+interface OwnedTickListeners {
+  abort: ListenerSet;
+  physicsTick: ListenerSet;
+  end: ListenerSet;
 }
 
 /** WalkMoveExecutor.move 的实际段请求（公开桥包装，记录创建时绑定的任务与段身份）。 */
@@ -483,13 +501,27 @@ function finiteVec(v: { x: number; y: number; z: number }): boolean {
   return Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z);
 }
 
+/** 公开 EventEmitter/EventTarget 的真实监听器函数集合；非 emitter 返回空集（假夹具不伪造）。 */
+function listenerSet(target: unknown, event: string): ListenerSet {
+  if (target === null || typeof target !== 'object') return new Set();
+  const t = target as { on?: unknown; addEventListener?: unknown };
+  if (typeof t.on === 'function') return new Set(getEventListeners(target as NodeJS.EventEmitter, event));
+  if (typeof t.addEventListener === 'function') return new Set(getEventListeners(target as EventTarget, event));
+  return new Set();
+}
+
 /** 公开 EventEmitter/EventTarget 监听器计数；非 emitter 返回 0（假夹具不伪造）。 */
 function eventListenerCount(target: unknown, event: string): number {
-  if (target === null || typeof target !== 'object') return 0;
-  const t = target as { on?: unknown; addEventListener?: unknown };
-  if (typeof t.on === 'function') return getEventListeners(target as NodeJS.EventEmitter, event).length;
-  if (typeof t.addEventListener === 'function') return getEventListeners(target as EventTarget, event).length;
-  return 0;
+  return listenerSet(target, event).size;
+}
+
+function addedListenerSet(before: ListenerSet, after: ListenerSet): ListenerSet {
+  return new Set([...after].filter((fn) => !before.has(fn)));
+}
+
+/** 只按函数身份确认本 tick 自己新增的监听器是否仍存在，不受总数巧合影响。 */
+function residualListenerCount(owned: ListenerSet, after: ListenerSet): number {
+  return [...owned].filter((fn) => after.has(fn)).length;
 }
 
 export interface ListenerCounts { physicsTick: number; end: number }
@@ -511,24 +543,25 @@ export function pendingTicksFor(ticks: TickEntry[], taskId: string): TickEntry[]
 }
 
 function tickListenerLeaks(t: TickEntry): boolean {
-  return t.signalAbortListenersAtEnd !== t.signalAbortListenersAtStart
-    || t.botPhysicsTickListenersAtEnd !== t.botPhysicsTickListenersAtStart
-    || t.botEndListenersAtEnd !== t.botEndListenersAtStart;
+  return t.ownedAbortResidual > 0 || t.ownedPhysicsTickResidual > 0 || t.ownedEndResidual > 0;
 }
 
-/** 本任务所有 walkTick 等待必须解除，且新增的 physicsTick/end/abort 监听器全部移除。 */
+/**
+ * 本任务所有 walkTick 等待必须解除，且本 tick 自己新增的 physicsTick/end/abort 函数
+ * 全部消失。只看函数身份差集，不用全局总数相等推断归属（其它监听器可合法增减）。
+ */
 export function assertOwnedTicksReleased(ticks: TickEntry[], taskId: string, label: string): void {
   const pending = pendingTicksFor(ticks, taskId);
   if (pending.length > 0) {
-    throw new Error(`${label} 仍有 ${pending.length} 个未解除的 walkTick 等待：${JSON.stringify(pending.map((t) => ({ seqStart: t.seqStart, tsStart: t.tsStart })))}`);
+    throw new Error(`${label} 仍有 ${pending.length} 个未解除的 walkTick 等待：${JSON.stringify(pending.map((t) => ({ diagId: t.diagId, seqStart: t.seqStart, tsStart: t.tsStart })))}`);
   }
   const leaks = ticks.filter((t) => t.ownerTaskId === taskId && tickListenerLeaks(t));
   if (leaks.length > 0) {
     throw new Error(`${label} 残留 walkTick 监听器：${JSON.stringify(leaks.map((t) => ({
-      seqStart: t.seqStart,
-      signal: [t.signalAbortListenersAtStart, t.signalAbortListenersAtEnd],
-      physicsTick: [t.botPhysicsTickListenersAtStart, t.botPhysicsTickListenersAtEnd],
-      end: [t.botEndListenersAtStart, t.botEndListenersAtEnd],
+      diagId: t.diagId,
+      abort: { added: t.ownedAbortAdded, residual: t.ownedAbortResidual },
+      physicsTick: { added: t.ownedPhysicsTickAdded, residual: t.ownedPhysicsTickResidual },
+      end: { added: t.ownedEndAdded, residual: t.ownedEndResidual },
     })))}`);
   }
 }
@@ -938,29 +971,44 @@ export class WalkDiagnostics {
         return async (signal: AbortSignal) => {
           const seqStart = this.seq.next();
           const tsStart = this.now();
-          const botStart = botListenerCounts(this.rawBot);
+          // 调用原 tick 前的真实函数集合；差值即本 tick 自己的监听器。
+          const signalBefore = listenerSet(signal, 'abort');
+          const botTickBefore = listenerSet(this.rawBot, 'physicsTick');
+          const botEndBefore = listenerSet(this.rawBot, 'end');
           const entry: TickEntry = {
-            seqStart, seqEnd: 0, tsStart, tsEnd: 0, ownerTaskId: owner, delivered: false,
+            seqStart, seqEnd: 0, tsStart, tsEnd: 0, diagId: `tick-${seqStart}`, ownerTaskId: owner, delivered: false,
             pending: true, signalAbortedAtEnd: false,
-            signalAbortListenersAtStart: eventListenerCount(signal, 'abort'),
+            signalAbortListenersAtStart: signalBefore.size,
             signalAbortListenersWhilePending: 0,
             signalAbortListenersAtEnd: 0,
-            botPhysicsTickListenersAtStart: botStart.physicsTick,
+            botPhysicsTickListenersAtStart: botTickBefore.size,
             botPhysicsTickListenersWhilePending: 0,
             botPhysicsTickListenersAtEnd: 0,
-            botEndListenersAtStart: botStart.end,
+            botEndListenersAtStart: botEndBefore.size,
             botEndListenersWhilePending: 0,
             botEndListenersAtEnd: 0,
+            ownedAbortAdded: 0, ownedPhysicsTickAdded: 0, ownedEndAdded: 0,
+            ownedAbortResidual: 0, ownedPhysicsTickResidual: 0, ownedEndResidual: 0,
           };
           // 等待一开始就记录：W7b 需要在 physics 暂停期间证明本任务确有未完成的帧等待，
           // 而不是等 250ms 后凭现有 snapshot 假定存在。
           this.ticks.push(entry);
           const pending = tick(signal);
-          // tick() 同步注册 physicsTick/end/abort 监听器；此处采集「本任务新增」的真实计数。
-          const botPending = botListenerCounts(this.rawBot);
-          entry.signalAbortListenersWhilePending = eventListenerCount(signal, 'abort');
-          entry.botPhysicsTickListenersWhilePending = botPending.physicsTick;
-          entry.botEndListenersWhilePending = botPending.end;
+          // tick() 同步注册 physicsTick/end/abort；按函数身份保存本 tick 新增的集合。
+          const signalPending = listenerSet(signal, 'abort');
+          const botTickPending = listenerSet(this.rawBot, 'physicsTick');
+          const botEndPending = listenerSet(this.rawBot, 'end');
+          const owned: OwnedTickListeners = {
+            abort: addedListenerSet(signalBefore, signalPending),
+            physicsTick: addedListenerSet(botTickBefore, botTickPending),
+            end: addedListenerSet(botEndBefore, botEndPending),
+          };
+          entry.ownedAbortAdded = owned.abort.size;
+          entry.ownedPhysicsTickAdded = owned.physicsTick.size;
+          entry.ownedEndAdded = owned.end.size;
+          entry.signalAbortListenersWhilePending = signalPending.size;
+          entry.botPhysicsTickListenersWhilePending = botTickPending.size;
+          entry.botEndListenersWhilePending = botEndPending.size;
           const entity = await pending;
           entry.seqEnd = this.seq.next();
           entry.tsEnd = this.now();
@@ -968,10 +1016,15 @@ export class WalkDiagnostics {
           if (entity) entry.pos = { ...entity.position };
           entry.pending = false;
           entry.signalAbortedAtEnd = signal.aborted;
-          entry.signalAbortListenersAtEnd = eventListenerCount(signal, 'abort');
-          const botEnd = botListenerCounts(this.rawBot);
-          entry.botPhysicsTickListenersAtEnd = botEnd.physicsTick;
-          entry.botEndListenersAtEnd = botEnd.end;
+          const signalEnd = listenerSet(signal, 'abort');
+          const botTickEnd = listenerSet(this.rawBot, 'physicsTick');
+          const botEndEnd = listenerSet(this.rawBot, 'end');
+          entry.signalAbortListenersAtEnd = signalEnd.size;
+          entry.botPhysicsTickListenersAtEnd = botTickEnd.size;
+          entry.botEndListenersAtEnd = botEndEnd.size;
+          entry.ownedAbortResidual = residualListenerCount(owned.abort, signalEnd);
+          entry.ownedPhysicsTickResidual = residualListenerCount(owned.physicsTick, botTickEnd);
+          entry.ownedEndResidual = residualListenerCount(owned.end, botEndEnd);
           return entity;
         };
       };
@@ -1730,6 +1783,30 @@ function startWalkTask(
   return { task: started, done };
 }
 
+/**
+ * 有界等待本任务真实 walk_route.start 记录（真实启动在 adapter.look 预扫之后）。
+ * 不能凭任意 sleep 猜测 ID：只接受 ownerTaskId 匹配且有 delegationId 的真实记录。
+ * 任务若在 start 前结束，原样抛出完整 TaskOutcome，交由场景如实 FAIL。
+ */
+export async function awaitRouteStartRecord(
+  routeCalls: RouteCallRecord[],
+  taskId: string,
+  done: Promise<TaskOutcome>,
+  timeoutMs: number,
+  label: string,
+): Promise<{ startCall: RouteCallRecord; delegationId: string }> {
+  let outcome: TaskOutcome | null = null;
+  void done.then((o) => { outcome = o; });
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const start = routeCalls.find((c) => c.op === 'start' && c.ownerTaskId === taskId && !!c.delegationId);
+    if (start?.delegationId) return { startCall: start, delegationId: start.delegationId };
+    if (outcome) throw new Error(`${label} 任务在真实 walk_route.start 前已结束：${JSON.stringify(outcome)}`);
+    if (Date.now() >= deadline) throw new Error(`${label} 在 ${timeoutMs}ms 内未观察到本任务真实 walk_route.start`);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
 async function runScenario(
   ctx: HarnessContext,
   body: (d: ScenarioDiag) => Promise<void>,
@@ -1761,6 +1838,9 @@ async function runScenario(
     try {
       const active = ctx.arbiter.info();
       if (active) {
+        // 明确标记这是 harness 收尾取消；其嵌套 stopAll 可由该 eventSeq/时间/task 分辨，
+        // 但此标记不参与 PASS 判定，也不替失败场景清键。
+        ev.marks.push({ seq: seq.next(), ts: Date.now(), label: 'harness-cleanup-cancel', taskId: active.id });
         ctx.arbiter.cancel('场景收尾：取消未完成任务');
       }
       const settled = await tasks.settle(10_000);
@@ -2077,9 +2157,7 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
     const listenersBefore = botListenerCounts(ctx.bot);
     const t = startWalkTask(ctx, d, route, deadlineMs);
     if ('error' in t) throw new Error(`W7a 启动失败：${t.error}`);
-    const startCall = d.exec.routeCalls.find((c) => c.op === 'start' && c.ownerTaskId === t.task.id);
-    if (!startCall?.delegationId) throw new Error('W7a 未捕获本子任务的真实 delegation 启动');
-    const delegationId = startCall.delegationId;
+    const { delegationId } = await awaitRouteStartRecord(d.exec.routeCalls, t.task.id, t.done, 5_000, 'W7a');
     const o = await awaitOrTimeout(t.done, budgetMs + 10_000, 'W7a 完成');
     const doneSeq = markTimeline(d, 'task-done-w7a', t.task.id);
     const doneRecord = taskDoneRecord(t.task.id);
@@ -2132,9 +2210,7 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
       const listenersBefore = botListenerCounts(ctx.bot);
       const t = startWalkTask(ctx, d, route, Date.now() + 30_000);
       if ('error' in t) throw new Error(`W7b 启动失败：${t.error}`);
-      const startCall = d.exec.routeCalls.find((c) => c.op === 'start' && c.ownerTaskId === t.task.id);
-      if (!startCall?.delegationId) throw new Error('W7b 未捕获本子任务的真实 delegation 启动');
-      const delegationId = startCall.delegationId;
+      const { delegationId } = await awaitRouteStartRecord(d.exec.routeCalls, t.task.id, t.done, 5_000, 'W7b');
       const done = t.done;
       await waitFor(() => dist2(ctx.adapter.state().pos, startPos) > 0.5, 15_000, 'W7b 开始移动');
       const acceptedBeforePause = acceptedMeasurements(d.exec.deliveredSamples, t.task.id, delegationId).length;
@@ -2151,15 +2227,15 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
       const framesDuringHold = d.recorder.frames.length - framesBefore;
       if (!stillPending) throw new Error('W7b 保持期间 pending 等待已解除，无法证明无新帧等待');
       if (framesDuringHold !== 0) throw new Error(`W7b 暂停期间仍有 ${framesDuringHold} 帧送达`);
-      // 这些监听器由真实 walkTick 在等待开始时同步注册：现在应各新增 1 个。
-      if (pendingAtPause.botPhysicsTickListenersWhilePending !== pendingAtPause.botPhysicsTickListenersAtStart + 1) {
-        throw new Error(`W7b pending 等待未新增 physicsTick 监听器：${pendingAtPause.botPhysicsTickListenersAtStart}→${pendingAtPause.botPhysicsTickListenersWhilePending}`);
+      // 这些监听器由真实 walkTick 在等待开始时同步注册：按函数身份确认本 tick 各自新增。
+      if (pendingAtPause.ownedPhysicsTickAdded < 1) {
+        throw new Error(`W7b pending 等待未新增本 tick 的 physicsTick 监听器：${pendingAtPause.diagId}`);
       }
-      if (pendingAtPause.botEndListenersWhilePending !== pendingAtPause.botEndListenersAtStart + 1) {
-        throw new Error(`W7b pending 等待未新增 end 监听器：${pendingAtPause.botEndListenersAtStart}→${pendingAtPause.botEndListenersWhilePending}`);
+      if (pendingAtPause.ownedEndAdded < 1) {
+        throw new Error(`W7b pending 等待未新增本 tick 的 end 监听器：${pendingAtPause.diagId}`);
       }
-      if (pendingAtPause.signalAbortListenersWhilePending !== pendingAtPause.signalAbortListenersAtStart + 1) {
-        throw new Error(`W7b pending 等待未新增 abort 监听器：${pendingAtPause.signalAbortListenersAtStart}→${pendingAtPause.signalAbortListenersWhilePending}`);
+      if (pendingAtPause.ownedAbortAdded < 1) {
+        throw new Error(`W7b pending 等待未新增本 tick 的 abort 监听器：${pendingAtPause.diagId}`);
       }
       snapControl(ctx, 'before-arbiter-cancel-w7b', ev);
       const cancelSeq = markTimeline(d, 'arbiter-cancel-w7b', t.task.id);
@@ -2176,10 +2252,15 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
         holdMs, framesBefore, framesDuringHold, framesAtDone, pausedAt, cancelSeq, cancelTs, finishedAt, doneSeq,
         elapsedMs: finishedAt - t.task.startedAt,
         pendingTick: {
-          seqStart: pendingAtPause.seqStart, tsStart: pendingAtPause.tsStart,
+          diagId: pendingAtPause.diagId, seqStart: pendingAtPause.seqStart, tsStart: pendingAtPause.tsStart,
           signalAbort: [pendingAtPause.signalAbortListenersAtStart, pendingAtPause.signalAbortListenersWhilePending, pendingAtPause.signalAbortListenersAtEnd],
           physicsTick: [pendingAtPause.botPhysicsTickListenersAtStart, pendingAtPause.botPhysicsTickListenersWhilePending, pendingAtPause.botPhysicsTickListenersAtEnd],
           end: [pendingAtPause.botEndListenersAtStart, pendingAtPause.botEndListenersWhilePending, pendingAtPause.botEndListenersAtEnd],
+          ownedAdded: {
+            abort: pendingAtPause.ownedAbortAdded,
+            physicsTick: pendingAtPause.ownedPhysicsTickAdded,
+            end: pendingAtPause.ownedEndAdded,
+          },
         },
         status: o.result.status, outcome: nav?.outcome, confirmed: nav?.confirmed,
         lastPosition: nav?.lastPosition, segments: ownSegments(t.task.id, delegationId),
@@ -2205,6 +2286,11 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
       subcases.b = {
         ...base, verdict: 'PASS', finalKeys,
         acceptedBeforePause,
+        pendingOwnedResidual: {
+          abort: pendingAtPause.ownedAbortResidual,
+          physicsTick: pendingAtPause.ownedPhysicsTickResidual,
+          end: pendingAtPause.ownedEndResidual,
+        },
         stopAll: { seqBefore: stopAfterCancel.seqBefore, seqAfter: stopAfterCancel.seqAfter, keysBefore: stopAfterCancel.keysBefore, keysAfter: stopAfterCancel.keysAfter },
         lastValidSample: {
           sequence: last.sample.sequence, observedAt: last.sample.observedAt,
@@ -2225,16 +2311,15 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   if (!bPass) {
     subcases.c = { verdict: 'NOT_RUN', note: 'W7b 未通过或取消未收完；不启动断线子case' };
   } else {
+    let onAdapterDisconnected: (() => void) | undefined;
+    let onBotEnd: (() => void) | undefined;
     try {
       await settleAtStart('W7c 起点');
       const startPos = { ...ctx.adapter.state().pos };
       const route = lineRoute(12);
-      const listenersBefore = botListenerCounts(ctx.bot);
       const t = startWalkTask(ctx, d, route, Date.now() + 30_000);
       if ('error' in t) throw new Error(`W7c 启动失败：${t.error}`);
-      const startCall = d.exec.routeCalls.find((c) => c.op === 'start' && c.ownerTaskId === t.task.id);
-      if (!startCall?.delegationId) throw new Error('W7c 未捕获本子任务的真实 delegation 启动');
-      const delegationId = startCall.delegationId;
+      const { delegationId } = await awaitRouteStartRecord(d.exec.routeCalls, t.task.id, t.done, 5_000, 'W7c');
       const done = t.done;
       await waitFor(() => dist2(ctx.adapter.state().pos, startPos) > 0.5, 15_000, 'W7c 开始移动');
       const acceptedBefore = acceptedMeasurements(d.exec.deliveredSamples, t.task.id, delegationId);
@@ -2244,8 +2329,8 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
       const observed: { adapterDisconnectedSeq: number | null; botEndSeq: number | null } = {
         adapterDisconnectedSeq: null, botEndSeq: null,
       };
-      const onAdapterDisconnected = () => { observed.adapterDisconnectedSeq = markTimeline(d, 'adapter-disconnected', t.task.id); };
-      const onBotEnd = () => { observed.botEndSeq = markTimeline(d, 'bot-end', t.task.id); };
+      onAdapterDisconnected = () => { observed.adapterDisconnectedSeq = markTimeline(d, 'adapter-disconnected', t.task.id); };
+      onBotEnd = () => { observed.botEndSeq = markTimeline(d, 'bot-end', t.task.id); };
       ctx.adapter.on('disconnected', onAdapterDisconnected);
       ctx.bot.on('end', onBotEnd);
       const quitSeq = markTimeline(d, 'adapter-quit', t.task.id);
@@ -2254,8 +2339,6 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
       const o = await awaitOrTimeout(done, 20_000, 'W7c 断线完成');
       const doneSeq = markTimeline(d, 'task-done-w7c', t.task.id);
       const finishedAt = Date.now();
-      ctx.adapter.removeListener('disconnected', onAdapterDisconnected);
-      ctx.bot.removeListener('end', onBotEnd);
       const nav = navFromResult(o.result);
       const base = {
         taskId: t.task.id, delegationId, request: taskStartRecord(t.task.id)?.request, scope: taskStartRecord(t.task.id)?.scope,
@@ -2264,6 +2347,12 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
         lastBefore: lastBefore.sample, segments: ownSegments(t.task.id, delegationId),
       };
       subcases.c = { verdict: 'NOT_RUN', ...base };
+      // 任务先 done 不代表断线事件已观察完；在有界窗口内确认本次真实双事件后才撤探针。
+      await waitFor(
+        () => observed.adapterDisconnectedSeq !== null && observed.botEndSeq !== null,
+        5_000,
+        'W7c 真实 adapter.disconnected 与 bot.end 双事件',
+      );
       assertEndObserved(observed.adapterDisconnectedSeq, observed.botEndSeq, quitSeq, 'W7c');
       if (o.result.status !== 'cancelled') throw new Error(`W7c 断线未以 cancelled 结束：status=${o.result.status} 摘要=${o.result.summary}`);
       if (nav?.outcome !== 'CANCELLED' || nav.confirmed !== false) {
@@ -2281,7 +2370,7 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
       if (lateMoves.length > 0) throw new Error(`W7c 断线后仍有 ${lateMoves.length} 个旧段启动：${JSON.stringify(lateMoves.map((m) => m.executionId))}`);
       await waitFor(() => pendingTicksFor(d.diag.ticks, t.task.id).length === 0, 1_000, 'W7c pending tick 解除');
       assertOwnedTicksReleased(d.diag.ticks, t.task.id, 'W7c');
-      assertListenerBaseline(listenersBefore, botListenerCounts(ctx.bot), 'W7c');
+      // 真实断线会合法移除原生 once/end 监听器；全局总数相等不能证明归属清理，故只用 owned 残留守门。
       subcases.c = {
         ...base, verdict: 'PASS', finalKeys,
         stopAll: { seqBefore: stopOnDisconnect.seqBefore, seqAfter: stopOnDisconnect.seqAfter, keysBefore: stopOnDisconnect.keysBefore, keysAfter: stopOnDisconnect.keysAfter },
@@ -2297,6 +2386,10 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
       };
     } catch (e) {
       subcases.c = { ...(subcases.c ?? {}), verdict: 'FAIL', error: (e as Error)?.message ?? String(e) };
+    } finally {
+      // 无论等待 done 还是等待双事件失败，都只移除本次探针，不改真实事件顺序/处理。
+      if (onAdapterDisconnected) ctx.adapter.removeListener('disconnected', onAdapterDisconnected);
+      if (onBotEnd) ctx.bot.removeListener('end', onBotEnd);
     }
   }
 
@@ -2421,13 +2514,20 @@ async function main() {
     const setupFixture = firstSelected ? setupFixtureFor(firstSelected) : null;
     const setupEv: FixtureEvidence = { extra: {} };
     if (firstSelected && setupFixture) {
-      await buildSupportFixture(rcon, setupEv, setupFixture.footprint, setupFixture.feetY, setupFixture.material);
-      evidence.preSetup = {
+      // 「0 玩家后、连接前建场地」：预期管理员在线也不满足该门槛。
+      if (preflight.occupants.length !== 0) {
+        throw new Error(`建场前服务器仍有玩家在线（要求 0）：${JSON.stringify(preflight.occupants)}`);
+      }
+      // 先挂同一个 extra 记录引用；中途失败时已发出的 RCON 命令/响应也会保留在证据里。
+      const preSetup: Record<string, unknown> = {
         scenario: firstSelected,
         start: setupFixture.start,
-        fixture: setupEv.extra?.fixture,
-        fixtureOps: setupEv.extra?.fixtureOps,
+        setup: setupEv.extra,
       };
+      evidence.preSetup = preSetup;
+      await buildSupportFixture(rcon, setupEv, setupFixture.footprint, setupFixture.feetY, setupFixture.material);
+      preSetup.fixture = setupEv.extra?.fixture;
+      preSetup.fixtureOps = setupEv.extra?.fixtureOps;
     }
 
     const spawnPromise = waitForSpawn(adapter, 30_000);
