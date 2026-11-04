@@ -14,6 +14,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { config } from '../src/config.ts';
 import { MineflayerAdapter } from '../src/adapter/mineflayer.ts';
 import { Vision } from '../src/perception/vision.ts';
@@ -23,10 +24,10 @@ import { EventBus } from '../src/events.ts';
 
 // ------------------------------------------------------------------ 参数与夹具契约
 const RESERVED = { xMin: 76, xMaxExclusive: 91, zMin: 76, zMaxExclusive: 87 };
-const FIXTURE_NEAR = 2.0; // 当前位置离指定水下起点的最大偏差（格）
+const FIXTURE_NEAR = 2.0;
 const FIXTURE_TIMEOUT_MS = 180_000;
 const W1_SURFACED_STABLE_MS = 600; // 独立判定「头部稳定露出流体」的最短连续时长（真实 ts 差，非采样次数乘间隔）
-const W2_STABILITY_MS = 400; // W2 到达后复查站稳的观测窗口（真实 ts 差）
+const W2_STABILITY_MS = 400; // W2 到达后连续站稳观测窗口的最短真实跨度（真实 ts 差）
 const KEYS = ['forward', 'back', 'left', 'right', 'jump', 'sprint', 'sneak'] as const;
 
 // 归一化接触判定用的流体/空气方块名（仅本脚本的测试判据，非 Agent 感知、非远程地图事实）。
@@ -75,7 +76,9 @@ function checkCoord(p: { x: number; y: number; z: number }, label: string): void
 }
 
 // ------------------------------------------------------------------ 结果与退出
-const results: Record<string, unknown> = { mode: config.mode, worldId: config.memory.worldId, startedAt: Date.now() };
+const results: Record<string, unknown> = { mode: config.mode, worldId: config.memory.worldId, host: config.mc.host, port: config.mc.port, startedAt: Date.now() };
+const taskOutcomes: Record<string, unknown> = {};
+results.taskOutcomes = taskOutcomes;
 
 function writeResults(): void {
   const dir = path.join(config.dataDir, 'logs');
@@ -111,6 +114,69 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   });
 }
 
+/** 只读 git 版本信息（不含任何凭据）；读取失败抛出清晰错误，绝不返回空/伪造哈希。 */
+function readGitSha(rev: string): string {
+  try {
+    const out = execFileSync('git', ['-c', `safe.directory=${process.cwd()}`, 'rev-parse', rev], { encoding: 'utf8', cwd: process.cwd() });
+    const v = out.trim();
+    if (!v) throw new Error('空输出');
+    return v;
+  } catch (e) {
+    throw new Error(`无法读取 git 版本信息（${rev}）：${(e as Error).message ?? String(e)}`);
+  }
+}
+
+/** 独立读取自身 7 个控制键：读不到任一键就失败，绝不退回“空即全 false”的假通过。 */
+function sampleControls(ad: MineflayerAdapter): Record<string, boolean> {
+  const b = ad.bot;
+  if (!b || typeof b.getControlState !== 'function') throw new Error('无法读取 bot 按键状态（getControlState 缺失）');
+  const out: Record<string, boolean> = {};
+  for (const k of KEYS) {
+    const v = b.getControlState(k);
+    if (typeof v !== 'boolean') throw new Error(`无法读取按键 ${k} 的布尔状态`);
+    out[k] = v;
+  }
+  return out;
+}
+
+/** 归一化接触事实（测试判据）：只暴露自身身体的本体/接触判定布尔，不暴露精确方块名/属性。 */
+function contact(ad: MineflayerAdapter, label: string): ContactSample {
+  const s = ad.state();
+  const head = ad.blockAt({ x: Math.floor(s.pos.x), y: Math.floor(s.pos.y + 1.62), z: Math.floor(s.pos.z) });
+  return {
+    oracle: true,
+    ts: Date.now(), label,
+    pos: { x: s.pos.x, y: s.pos.y, z: s.pos.z },
+    oxygen: s.oxygen,
+    bodyInWater: s.inWater,
+    bodyInLava: s.inLava,
+    onGround: s.onGround,
+    headInFluid: FLUID_NAMES.has(head ?? ''),
+    headInAir: AIR_NAMES.has(head ?? ''),
+    observationReady: s.observationReady,
+    alive: s.alive,
+    controls: sampleControls(ad),
+  };
+}
+
+/** 动作期物理采样：跟随 bot 真实 physicsTick，观测紧跟真实物理，不用“采样次数×名义间隔”折算时长。 */
+function startPhysicsTrace(ad: MineflayerAdapter): TraceHandle {
+  const b = ad.bot;
+  if (!b || typeof b.on !== 'function' || typeof b.off !== 'function') throw new Error('无法安装物理采样监听（bot 缺失 on/off）');
+  const samples: ContactSample[] = [];
+  let error: string | null = null;
+  let stopped = false;
+  const onTick = () => {
+    try {
+      samples.push(contact(ad, 'trace'));
+    } catch (e) {
+      error = (e as Error).message ?? String(e);
+    }
+  };
+  b.on('physicsTick', onTick);
+  return { samples, get error() { return error; }, stop: () => { if (!stopped) { stopped = true; b.off('physicsTick', onTick); } } };
+}
+
 async function main(): Promise<void> {
   if (config.mode !== 'test') {
     console.error('[water-check] 失败：联机验收只允许在 test 环境运行，不写任何证据文件、不创建适配器');
@@ -128,8 +194,14 @@ async function main(): Promise<void> {
   let restoreControls: (() => void) | null = null;
   let w1Trace: TraceHandle | null = null;
   let w2Trace: TraceHandle | null = null;
+  const scenario1: Record<string, unknown> = {};
+  const scenario2: Record<string, unknown> = {};
+  const scenario3: Record<string, unknown> = {};
 
   try {
+    results.head = readGitSha('HEAD');
+    results.scriptBlob = readGitSha('HEAD:scripts/check-water-runtime.ts');
+
     const source = parseXYZ(option('--source'), 'source');
     const east = parseXYZ(option('--east'), 'east');
     const west = parseXYZ(option('--west'), 'west');
@@ -147,57 +219,6 @@ async function main(): Promise<void> {
     const ar = new Arbiter(ad, mem, bus, vision);
     arbiter = ar;
 
-    // 独立读取自身 7 个控制键：读不到任一键就失败，绝不退回“空即全 false”的假通过。
-    const sampleControls = (): Record<string, boolean> => {
-      const b = ad.bot;
-      if (!b || typeof b.getControlState !== 'function') throw new Error('无法读取 bot 按键状态（getControlState 缺失）');
-      const out: Record<string, boolean> = {};
-      for (const k of KEYS) {
-        const v = b.getControlState(k);
-        if (typeof v !== 'boolean') throw new Error(`无法读取按键 ${k} 的布尔状态`);
-        out[k] = v;
-      }
-      return out;
-    };
-
-    // 归一化接触事实（测试判据）：只暴露自身身体的本体/接触判定布尔，不暴露精确方块名/属性。
-    const contact = (label: string): ContactSample => {
-      const s = ad.state();
-      const head = ad.blockAt({ x: Math.floor(s.pos.x), y: Math.floor(s.pos.y + 1.62), z: Math.floor(s.pos.z) });
-      return {
-        oracle: true,
-        ts: Date.now(), label,
-        pos: { x: s.pos.x, y: s.pos.y, z: s.pos.z },
-        oxygen: s.oxygen,
-        bodyInWater: s.inWater,
-        bodyInLava: s.inLava,
-        onGround: s.onGround,
-        headInFluid: FLUID_NAMES.has(head ?? ''),
-        headInAir: AIR_NAMES.has(head ?? ''),
-        observationReady: s.observationReady,
-        alive: s.alive,
-        controls: sampleControls(),
-      };
-    };
-
-    // 动作期物理采样：跟随 bot 真实 physicsTick，观测紧跟真实物理，不用“采样次数×名义间隔”折算时长。
-    const startPhysicsTrace = (): TraceHandle => {
-      const b = ad.bot;
-      if (!b || typeof b.on !== 'function' || typeof b.off !== 'function') throw new Error('无法安装物理采样监听（bot 缺失 on/off）');
-      const samples: ContactSample[] = [];
-      let error: string | null = null;
-      let stopped = false;
-      const onTick = () => {
-        try {
-          samples.push(contact('trace'));
-        } catch (e) {
-          error = (e as Error).message ?? String(e);
-        }
-      };
-      b.on('physicsTick', onTick);
-      return { samples, get error() { return error; }, stop: () => { if (!stopped) { stopped = true; b.off('physicsTick', onTick); } } };
-    };
-
     // 玩家列表诊断：bot.players 缺失或自身用户名未知时视为「不可用」，绝不当作「没有其他玩家」。
     const playerList = (): { available: boolean; others: string[] } => {
       const b = ad.bot;
@@ -212,8 +233,9 @@ async function main(): Promise<void> {
       if (status.others.length) throw new Error(`${stage}：服务器上仍有其他玩家 ${status.others.join('、')}，未执行动作`);
     };
 
-    // 提前挂上 done 监听（先于任何 start），按 taskId 匹配结果；start 返回 {error} 时清楚失败。
+    // 提前挂上 done 监听（先于任何 start），把完整 TaskOutcome 立即落到输出（含 result.data 局部位置/氧气/surfaced/landed 与 task.args/startedAt/deadline），再按 taskId 匹配 resolve waiter。
     const done = (o: TaskOutcome) => {
+      taskOutcomes[o.task.id] = { receivedAt: Date.now(), outcome: o };
       outcomes.set(o.task.id, o);
       const w = outcomeWaiters.get(o.task.id);
       if (w) { clearTimeout(w.timer); outcomeWaiters.delete(o.task.id); w.resolve(o); }
@@ -251,7 +273,6 @@ async function main(): Promise<void> {
     const startState = ad.state();
     log({ event: 'water_spawned', pos: startState.pos, dim: startState.dim });
 
-    // 夹具就绪：只等操作员把 bot 放到水下起点，不发任何管理命令/传送；要求真实浸没（身体在水中 + 头部在水下）。
     log({ event: 'water_fixture_waiting', required: `在预留池 x[76,91),z[76,87) 内布置池塘：池底 y65、水体 x77..89,z77..85,y66..69、边界墙至 y69、其上空气；将 bot 放到水下起点 (${source.x},${source.y},${source.z})（身体与头部均浸没）。脚本不执行管理命令。`, source, east, west });
     const fixtureDeadline = Date.now() + FIXTURE_TIMEOUT_MS;
     while (true) {
@@ -275,25 +296,28 @@ async function main(): Promise<void> {
       if (Date.now() > fixtureDeadline) throw new Error(`等待水域夹具超时：${reasons.join('；')}（当前 ${s.pos.x.toFixed(2)},${s.pos.y.toFixed(2)},${s.pos.z.toFixed(2)}，inWater=${s.inWater}，headInFluid=${headInFluid}）`);
       await sleepMs(200);
     }
-    results.fixtureReady = contact('fixture');
+    results.fixtureReady = contact(ad, 'fixture');
     assertNoOtherPlayers('夹具就绪后');
 
     // ---- W1：surface 一次有界上浮 ----
     assertNoOtherPlayers('W1 前');
-    const w1Start = contact('w1_start');
-    const scenario1: Record<string, unknown> = { taskId: null, requested: { skill: 'surface', args: {} }, start: w1Start, startedAt: Date.now(), status: 'pending' };
+    const w1Start = contact(ad, 'w1_start');
+    scenario1.taskId = null;
+    scenario1.requested = { skill: 'surface', args: {} };
+    scenario1.start = w1Start;
+    scenario1.startedAt = Date.now();
+    scenario1.status = 'pending';
     results.scenario1 = scenario1;
     const w1 = startTask({ skill: 'surface', args: {} }, 40_000);
     scenario1.taskId = w1.taskId;
 
-    const tr1 = startPhysicsTrace();
+    const tr1 = startPhysicsTrace(ad);
     w1Trace = tr1;
-    const o1 = await w1.outcome; // 可能超时：信封（taskId/start/startedAt）已先持久化，trace 由 finally 移除
-    const w1Completion = contact('w1_completion'); // 结果返回后立即采样，早于任何清理等待
+    scenario1.trace = tr1.samples; // 立即挂上（活引用）：失败路径也保留已采样样本
+    const o1 = await w1.outcome;
+    const w1Completion = contact(ad, 'w1_completion'); // 结果返回后立即采样，早于任何清理等待
     tr1.stop();
     w1Trace = null;
-    scenario1.trace = tr1.samples;
-    scenario1.traceError = tr1.error;
     scenario1.completion = w1Completion;
     scenario1.status = o1.result.status;
     scenario1.summary = o1.result.summary;
@@ -302,8 +326,8 @@ async function main(): Promise<void> {
     scenario1.surfaced = w1surfaced;
     scenario1.landed = w1landed;
     scenario1.durationMs = o1.durationMs;
+    scenario1.traceError = tr1.error;
 
-    // 独立判定：末尾连续「头部露出流体」的起点（真实 ts），要求一直持续到完成快照且 headInAir 为真。
     let finalAirStart: number | null = null;
     if (tr1.samples.length && tr1.samples[tr1.samples.length - 1].headInAir) {
       let i = tr1.samples.length - 1;
@@ -318,7 +342,7 @@ async function main(): Promise<void> {
     scenario1.everLanded = everLanded;
     scenario1.traceSampleCount = tr1.samples.length;
 
-    const w1AfterRelease = contact('w1_after_release');
+    const w1AfterRelease = contact(ad, 'w1_after_release');
     scenario1.afterRelease = w1AfterRelease;
     log({ event: 'water_w1', status: o1.result.status, surfaced: w1surfaced, landed: w1landed, surfacedIndependent, surfacedDurationMs, everLanded, traceError: tr1.error });
 
@@ -331,84 +355,103 @@ async function main(): Promise<void> {
 
     // ---- W2：swim_to 到东岸干地目标（精确坐标，不取整） ----
     assertNoOtherPlayers('W2 前');
-    const w2Start = contact('w2_start');
-    const scenario2: Record<string, unknown> = { taskId: null, requested: { skill: 'swim_to', args: { xyz: [east.x, east.y, east.z] } }, target: east, start: w2Start, startedAt: Date.now(), status: 'pending' };
+    const w2Start = contact(ad, 'w2_start');
+    scenario2.taskId = null;
+    scenario2.requested = { skill: 'swim_to', args: { xyz: [east.x, east.y, east.z] } };
+    scenario2.target = east;
+    scenario2.start = w2Start;
+    scenario2.startedAt = Date.now();
+    scenario2.status = 'pending';
     results.scenario2 = scenario2;
     const w2 = startTask({ skill: 'swim_to', args: { xyz: [east.x, east.y, east.z] } }, 40_000);
     scenario2.taskId = w2.taskId;
 
-    const o2 = await w2.outcome; // 可能超时
-    const w2Finish = contact('w2_finish');
+    const o2 = await w2.outcome;
+    const w2Finish = contact(ad, 'w2_finish');
+    scenario2.finish = w2Finish; // 400ms 观测窗口之前先落盘结果/完成快照
+    scenario2.status = o2.result.status;
+    scenario2.summary = o2.result.summary;
+    scenario2.durationMs = o2.durationMs;
+    scenario2.landedBySkill = o2.result.status === 'succeeded' && Boolean(o2.result.data?.landed);
+    scenario2.skillSurfaced = Boolean(o2.result.data?.surfaced);
+
     const errOf = (p: { x: number; y: number; z: number }) => ({ horizontal: Math.hypot(p.x - east.x, p.z - east.z), vertical: Math.abs(p.y - east.y) });
     const dryOf = (c: { onGround: boolean; bodyInWater: boolean; bodyInLava: boolean; headInAir: boolean }) => c.onGround && !c.bodyInWater && !c.bodyInLava && c.headInAir;
     const withinOf = (p: { x: number; y: number; z: number }) => { const e = errOf(p); return e.horizontal <= 1 && e.vertical <= 1.5; };
 
-    // 站稳观测窗口：用物理采样连续记录，而非只取两个端点（避免漏掉中途重新入水/下坠）。
-    const tr2 = startPhysicsTrace();
+    const tr2 = startPhysicsTrace(ad);
     w2Trace = tr2;
+    scenario2.stabilityTrace = tr2.samples; // 立即挂上（活引用）
     await sleepMs(W2_STABILITY_MS);
     tr2.stop();
     w2Trace = null;
-    const w2Stable = contact('w2_stable');
-    const stabilitySamples = tr2.samples;
-    const stabilityObservedMs = stabilitySamples.length ? stabilitySamples[stabilitySamples.length - 1].ts - stabilitySamples[0].ts : 0;
-    const stabilityDry = stabilitySamples.length > 0 && stabilitySamples.every((s) => dryOf(s) && withinOf(s.pos));
+    const w2Stable = contact(ad, 'w2_stable');
 
+    // 连续观测窗口 = 完成快照 + 中间物理样本 + 稳定端快照；全部须干地且在容差内，且真实跨度 ≥ W2_STABILITY_MS。
+    const windowSamples: ContactSample[] = [w2Finish, ...tr2.samples, w2Stable];
+    const windowSpanMs = windowSamples[windowSamples.length - 1].ts - windowSamples[0].ts;
+    const windowDry = windowSamples.every((s) => dryOf(s) && withinOf(s.pos));
     const errFinish = errOf(w2Finish.pos);
     const errStable = errOf(w2Stable.pos);
-    const withinFinish = withinOf(w2Finish.pos);
-    const withinStable = withinOf(w2Stable.pos);
-    const dryFinish = dryOf(w2Finish);
-    const dryStable = dryOf(w2Stable);
-    const landedBySkill = o2.result.status === 'succeeded' && Boolean(o2.result.data?.landed);
-    const skillSurfaced = Boolean(o2.result.data?.surfaced);
-    scenario2.status = o2.result.status;
-    scenario2.summary = o2.result.summary;
-    scenario2.landedBySkill = landedBySkill;
-    scenario2.skillSurfaced = skillSurfaced;
     scenario2.requestedStabilityMs = W2_STABILITY_MS;
-    scenario2.stabilityObservedMs = stabilityObservedMs;
-    scenario2.finish = { ...w2Finish, horizontal: Number(errFinish.horizontal.toFixed(3)), vertical: Number(errFinish.vertical.toFixed(3)), withinTolerance: withinFinish, dry: dryFinish };
-    scenario2.stabilityTrace = stabilitySamples;
-    scenario2.stabilityDry = stabilityDry;
+    scenario2.windowSpanMs = windowSpanMs;
+    scenario2.windowDry = windowDry;
+    scenario2.windowSamples = windowSamples;
+    scenario2.finishErr = { horizontal: Number(errFinish.horizontal.toFixed(3)), vertical: Number(errFinish.vertical.toFixed(3)) };
+    scenario2.stable = { ...w2Stable, horizontal: Number(errStable.horizontal.toFixed(3)), vertical: Number(errStable.vertical.toFixed(3)) };
     scenario2.traceError = tr2.error;
-    scenario2.stable = { ...w2Stable, horizontal: Number(errStable.horizontal.toFixed(3)), vertical: Number(errStable.vertical.toFixed(3)), withinTolerance: withinStable, dry: dryStable };
-    scenario2.durationMs = o2.durationMs;
-    log({ event: 'water_w2', status: o2.result.status, landedBySkill, skillSurfaced, stabilityObservedMs, stabilityDry, finish: { withinTolerance: withinFinish, dry: dryFinish }, stable: { withinTolerance: withinStable, dry: dryStable }, traceError: tr2.error });
+    log({ event: 'water_w2', status: o2.result.status, landedBySkill: scenario2.landedBySkill, skillSurfaced: scenario2.skillSurfaced, windowSpanMs, windowDry, traceError: tr2.error });
 
     if (tr2.error) throw new Error(`W2 物理采样回调失败：${tr2.error}`);
-    if (!landedBySkill || !skillSurfaced || !withinFinish || !withinStable || !dryFinish || !dryStable || !stabilityDry) {
-      throw new Error(`W2 swim_to 未在到达/复查/连续站稳窗口均满足干地且容差：status=${o2.result.status} landed=${landedBySkill} surfaced=${skillSurfaced} 到达[水平=${errFinish.horizontal.toFixed(3)},垂直=${errFinish.vertical.toFixed(3)},dry=${dryFinish}] 复查[水平=${errStable.horizontal.toFixed(3)},垂直=${errStable.vertical.toFixed(3)},dry=${dryStable}] 连续站稳=${stabilityDry} 摘要=${o2.result.summary}`);
+    if (!scenario2.landedBySkill || !scenario2.skillSurfaced || !windowDry || windowSpanMs < W2_STABILITY_MS) {
+      throw new Error(`W2 swim_to 未在连续站稳窗口（真实跨度 ${windowSpanMs}ms，需 ≥${W2_STABILITY_MS}ms）满足干地且容差：status=${o2.result.status} landed=${scenario2.landedBySkill} surfaced=${scenario2.skillSurfaced} 连续站稳=${windowDry} 摘要=${o2.result.summary}`);
     }
 
     // ---- W3：从干岸游向对岸，进入水体并水平移动后取消 ----
     assertNoOtherPlayers('W3 前');
-    const w3Start = contact('w3_start');
-    const scenario3: Record<string, unknown> = { taskId: null, requested: { skill: 'swim_to', args: { xyz: [west.x, west.y, west.z] } }, target: west, start: w3Start, startedAt: Date.now(), status: 'pending' };
+    const w3Start = contact(ad, 'w3_start');
+    scenario3.taskId = null;
+    scenario3.requested = { skill: 'swim_to', args: { xyz: [west.x, west.y, west.z] } };
+    scenario3.target = west;
+    scenario3.start = w3Start;
+    scenario3.startedAt = Date.now();
+    scenario3.status = 'pending';
     results.scenario3 = scenario3;
     const w3 = startTask({ skill: 'swim_to', args: { xyz: [west.x, west.y, west.z] } }, 40_000);
     scenario3.taskId = w3.taskId;
-    await waitFor(() => {
+
+    // 进入水体等待：等待期间持续采样实际接触/最后观测位置，而非只有起始信封。
+    const w3EntrySamples: ContactSample[] = [];
+    scenario3.entryWaitSamples = w3EntrySamples;
+    const w3EntryDeadline = Date.now() + 20_000;
+    while (true) {
       const s = ad.state();
-      return s.inWater && Math.hypot(s.pos.x - w3Start.pos.x, s.pos.z - w3Start.pos.z) > 0.5;
-    }, 20_000, 'swim_to 进入水体并水平移动'); // 可能超时：信封已持久化
+      if (s.inWater && Math.hypot(s.pos.x - w3Start.pos.x, s.pos.z - w3Start.pos.z) > 0.5) break;
+      try { w3EntrySamples.push(contact(ad, 'w3_entry_wait')); } catch (e) { scenario3.entryWaitSampleError = (e as Error).message ?? String(e); }
+      if (Date.now() > w3EntryDeadline) throw new Error('超时：swim_to 进入水体并水平移动');
+      await sleepMs(100);
+    }
     scenario3.enteredWater = true;
-    const w3PreCancel = contact('w3_pre_cancel');
+    const w3PreCancel = contact(ad, 'w3_pre_cancel');
     scenario3.preCancel = w3PreCancel;
+
     // 脚本级按键写入仪表：只包裹现有 bot.setControlState/clearControlStates，记录迟到窗口内的真实写入/清除；不改生产、不引入新 API/类型。
     const bot = ad.bot;
     if (!bot || typeof bot.setControlState !== 'function' || typeof bot.clearControlStates !== 'function') throw new Error('无法安装脚本级按键写入仪表（bot 缺少 setControlState/clearControlStates）');
     const origSet: (name: string, value: boolean) => void = bot.setControlState;
     const origClear: () => void = bot.clearControlStates;
+    let seq = 0;
     let recording = false;
-    const lateWrites: { ts: number; key: string; value: boolean }[] = [];
-    const lateClears: { ts: number }[] = [];
+    const lateWrites: { seq: number; ts: number; key: string; value: boolean }[] = [];
+    const lateClears: { seq: number; ts: number }[] = [];
+    scenario3.lateWrites = lateWrites; // 任何 fallible await 之前先挂上（活引用）
+    scenario3.lateClears = lateClears;
     bot.setControlState = function (name: string, value: boolean): void {
-      if (recording) lateWrites.push({ ts: Date.now(), key: name, value });
+      if (recording) lateWrites.push({ seq: ++seq, ts: Date.now(), key: name, value });
       origSet.call(bot, name, value);
     };
     bot.clearControlStates = function (): void {
-      if (recording) lateClears.push({ ts: Date.now() });
+      if (recording) lateClears.push({ seq: ++seq, ts: Date.now() });
       origClear.call(bot);
     };
     restoreControls = () => {
@@ -416,29 +459,27 @@ async function main(): Promise<void> {
       try { bot.clearControlStates = origClear; } catch { /* ignore */ }
     };
     ar.cancel('联机验收取消'); // 同步 stopAll 释放控制（合法取消，不在仪表窗口内）
-    const w3KeysAtCancel = sampleControls(); // 取消后、任何后续清理前立即读取全部 7 键
+    scenario3.cancelBoundary = { seq, ts: Date.now(), note: '同步 ar.cancel 后立即记录；迟到事件 seq 均大于此边界' };
+    const w3KeysAtCancel = sampleControls(ad); // 取消后、任何后续清理前立即读取全部 7 键
     const anyKeyAtCancel = KEYS.some((k) => w3KeysAtCancel[k]);
     scenario3.keysAtCancel = w3KeysAtCancel;
     recording = true; // 迟到窗口起点：合法 stopAll 之后
-    const o3 = await w3.outcome;
     const lateKeySamples: { ts: number; controls: Record<string, boolean> }[] = [];
+    scenario3.lateKeySamples = lateKeySamples; // 任何 fallible await 之前先挂上
+    const o3 = await w3.outcome;
     for (let i = 0; i < 12; i++) {
       await sleepMs(100);
-      lateKeySamples.push({ ts: Date.now(), controls: sampleControls() });
+      lateKeySamples.push({ ts: Date.now(), controls: sampleControls(ad) });
     }
     recording = false;
     const reactivated = lateKeySamples.some((s) => KEYS.some((k) => s.controls[k]));
-    const w3Finish = contact('w3_finish');
+    const w3Finish = contact(ad, 'w3_finish');
     scenario3.status = o3.result.status;
     scenario3.summary = o3.result.summary;
     scenario3.anyKeyAtCancel = anyKeyAtCancel;
-    scenario3.lateWrites = lateWrites;
-    scenario3.lateClears = lateClears;
-    scenario3.lateKeySamples = lateKeySamples;
     scenario3.reactivated = reactivated;
     scenario3.finish = w3Finish;
     scenario3.durationMs = o3.durationMs;
-    // 取消后的物理漂移/重力单独记录，不与「控制复活」混淆。
     scenario3.drift = { horizontal: Number(Math.hypot(w3Finish.pos.x - w3PreCancel.pos.x, w3Finish.pos.z - w3PreCancel.pos.z).toFixed(3)), vertical: Number((w3Finish.pos.y - w3PreCancel.pos.y).toFixed(3)), note: '取消后的物理漂移/重力，非按键复活' };
     log({ event: 'water_w3', status: o3.result.status, anyKeyAtCancel, lateWrites: lateWrites.length, lateClears: lateClears.length, reactivated, summary: o3.result.summary });
     if (o3.result.status !== 'cancelled') throw new Error(`W3 取消后任务未以 cancelled 结束：status=${o3.result.status} 摘要=${o3.result.summary}`);
@@ -453,19 +494,79 @@ async function main(): Promise<void> {
     results.failed = (e as Error).message ?? String(e);
     results.failedAt = Date.now();
   } finally {
-    // 证据已全部采集后才清理；先还原仪表、停掉动作期采样监听、移除 spawn 监听、清掉未决 waiter 定时器，避免失败后遗留 unhandled rejection / keepalive。
-    try { w1Trace?.stop(); } catch { /* ignore */ }
-    try { w2Trace?.stop(); } catch { /* ignore */ }
-    try { restoreControls?.(); } catch { /* ignore */ }
-    for (const w of outcomeWaiters.values()) clearTimeout(w.timer);
+    const cleanupErrors: string[] = [];
+
+    // 清理前记录带标签的最终诊断接触（不覆盖任何既有事实样本）。
+    try {
+      if (adapter && adapter.state().observationReady) results.finalDiagnostic = contact(adapter, 'final_diagnostic');
+    } catch (e) { cleanupErrors.push(`最终诊断接触失败：${(e as Error).message ?? String(e)}`); }
+
+    // 失败路径仍未记录 trace 回调错误时补记到输出。
+    try { if (w1Trace?.error) scenario1.traceError = w1Trace.error; } catch (e) { cleanupErrors.push(`记录 W1 采样错误失败：${(e as Error).message ?? String(e)}`); }
+    try { if (w2Trace?.error) scenario2.traceError = w2Trace.error; } catch (e) { cleanupErrors.push(`记录 W2 采样错误失败：${(e as Error).message ?? String(e)}`); }
+
+    // 停止动作期采样监听、还原仪表。
+    try { w1Trace?.stop(); } catch (e) { cleanupErrors.push(`停止 W1 采样失败：${(e as Error).message ?? String(e)}`); }
+    try { w2Trace?.stop(); } catch (e) { cleanupErrors.push(`停止 W2 采样失败：${(e as Error).message ?? String(e)}`); }
+    try { restoreControls?.(); } catch (e) { cleanupErrors.push(`还原按键仪表失败：${(e as Error).message ?? String(e)}`); }
+
+    // 取消活动任务并收集其匹配 TaskOutcome（有界），先于移除 done 监听/清 waiter。
+    try {
+      if (arbiter) {
+        const active = arbiter.info();
+        if (active) {
+          const activeId = active.id;
+          const activeOutcome = new Promise<TaskOutcome>((resolve, reject) => {
+            const existing = outcomes.get(activeId);
+            if (existing) { resolve(existing); return; }
+            const timer = setTimeout(() => { outcomeWaiters.delete(activeId); reject(new Error(`收尾等待任务 ${activeId} 结果超时`)); }, 5000);
+            outcomeWaiters.set(activeId, { resolve, reject, timer });
+          });
+          arbiter.cancel('验收收尾');
+          try {
+            const o = await activeOutcome;
+            results.cleanupTaskOutcome = { receivedAt: Date.now(), outcome: o };
+          } catch (e) {
+            cleanupErrors.push(`收尾取消任务 ${activeId} 未收集到结果：${(e as Error).message ?? String(e)}`);
+          }
+        }
+      }
+    } catch (e) { cleanupErrors.push(`收尾取消任务失败：${(e as Error).message ?? String(e)}`); }
+
+    // 移除 done 监听、清掉未决 waiter 定时器。
+    try { if (onDone && arbiter) arbiter.off('done', onDone); } catch (e) { cleanupErrors.push(`移除 done 监听失败：${(e as Error).message ?? String(e)}`); }
+    for (const w of outcomeWaiters.values()) { try { clearTimeout(w.timer); } catch { /* ignore */ } }
     outcomeWaiters.clear();
-    try { spawnCleanup(); } catch { /* ignore */ }
-    try { if (onDone && arbiter) arbiter.off('done', onDone); } catch { /* ignore */ }
-    try { arbiter?.cancel('验收收尾'); } catch { /* ignore */ }
-    try { adapter?.stopAll(); } catch { /* ignore */ }
-    try { memory?.close(); } catch { /* ignore */ }
-    try { adapter?.quit(); } catch { /* ignore */ }
+
+    // 移除 spawn 监听、释放控制、关闭内存。
+    try { spawnCleanup(); } catch (e) { cleanupErrors.push(`移除 spawn 监听失败：${(e as Error).message ?? String(e)}`); }
+    try { adapter?.stopAll(); } catch (e) { cleanupErrors.push(`stopAll 失败：${(e as Error).message ?? String(e)}`); }
+    try { memory?.close(); } catch (e) { cleanupErrors.push(`memory.close 失败：${(e as Error).message ?? String(e)}`); }
+
+    // quit 并等待真实 end/disconnected（有界）。
+    try {
+      if (adapter) {
+        const a = adapter;
+        await new Promise<void>((resolve) => {
+          let settled = false;
+          let timer: NodeJS.Timeout | null = null;
+          const settle = () => { if (settled) return; settled = true; if (timer) clearTimeout(timer); resolve(); };
+          a.once('disconnected', settle);
+          timer = setTimeout(settle, 5000);
+          a.quit();
+        });
+      }
+    } catch (e) { cleanupErrors.push(`quit/等待断线失败：${(e as Error).message ?? String(e)}`); }
+
     results.finishedAt = Date.now();
+    if (cleanupErrors.length) {
+      results.cleanupErrors = cleanupErrors;
+      if (!results.failed) {
+        results.ok = false;
+        results.failed = `清理阶段失败：${cleanupErrors.join('；')}`;
+        results.failedAt = Date.now();
+      }
+    }
     writeResults();
   }
 
@@ -476,7 +577,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((e) => {
-  // 兜底：仅当 finally 内写盘/清理本身抛错才会走到这里，不再重复写结果。
   console.error(`[water-check] 未预期错误：${(e as Error).message ?? e}`);
   process.exitCode = 1;
 });
