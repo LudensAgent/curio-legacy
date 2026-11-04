@@ -706,6 +706,22 @@ export function acceptedMeasurements(
 }
 
 /**
+ * 本 task+delegation 最新被公开状态证明的实测 sample 相对起点确实超过 minDistance 时返回它。
+ * 触发注入前置只能用执行器已确认的测量，不能用比已交付样本超前的 body/adapter 原始状态。
+ */
+export function acceptedMovementBeyond(
+  records: DeliveredSampleRecord[],
+  taskId: string,
+  delegationId: string,
+  startPos: Vec3,
+  minDistance: number,
+): DeliveredSampleRecord | undefined {
+  const accepted = acceptedMeasurements(records, taskId, delegationId);
+  const last = accepted[accepted.length - 1];
+  return last && dist2(last.sample.pos, startPos) > minDistance ? last : undefined;
+}
+
+/**
  * 终态 NavResult 的 lastObservation 必须就是最后一条候选测量的原始 time/scope 与位置，
  * 从而把 partial/完成所用测量绑定到真实观测，而不是仅凭「位置看起来一致」。
  */
@@ -2213,7 +2229,10 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
       if ('error' in t) throw new Error(`W7b 启动失败：${t.error}`);
       const { delegationId } = await awaitRouteStartRecord(d.exec.routeCalls, t.task.id, t.done, 10_000, 'W7b');
       const done = t.done;
-      await waitFor(() => dist2(ctx.adapter.state().pos, startPos) > 0.5, 15_000, 'W7b 开始移动');
+      await waitFor(
+        () => acceptedMovementBeyond(d.exec.deliveredSamples, t.task.id, delegationId, startPos, 0.5) !== undefined,
+        15_000, 'W7b 本 task 已接受测量开始移动',
+      );
       const acceptedBeforePause = acceptedMeasurements(d.exec.deliveredSamples, t.task.id, delegationId).length;
       snapControl(ctx, 'before-paused-frame-cancel', ev);
       const framesBefore = d.recorder.frames.length;
@@ -2322,7 +2341,10 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
       if ('error' in t) throw new Error(`W7c 启动失败：${t.error}`);
       const { delegationId } = await awaitRouteStartRecord(d.exec.routeCalls, t.task.id, t.done, 10_000, 'W7c');
       const done = t.done;
-      await waitFor(() => dist2(ctx.adapter.state().pos, startPos) > 0.5, 15_000, 'W7c 开始移动');
+      await waitFor(
+        () => acceptedMovementBeyond(d.exec.deliveredSamples, t.task.id, delegationId, startPos, 0.5) !== undefined,
+        15_000, 'W7c 本 task 已接受测量开始移动',
+      );
       const acceptedBefore = acceptedMeasurements(d.exec.deliveredSamples, t.task.id, delegationId);
       const lastBefore = acceptedBefore[acceptedBefore.length - 1];
       if (!lastBefore) throw new Error('W7c 断线前无被公开状态证明的实测样本');

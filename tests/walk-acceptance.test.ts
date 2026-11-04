@@ -15,6 +15,7 @@ import { GROUNDED_ARRIVAL_DEFAULTS, VoxelMap, WalkRouteExecutor } from 'curio-mi
 import type { NavResult } from 'curio-minecraft-3d-memory';
 import {
   acceptedMeasurements,
+  acceptedMovementBeyond,
   adjacentRouteX,
   allGroundedAt,
   allKeysReleased,
@@ -529,6 +530,35 @@ test('acceptedMeasurements：真实库拒绝同位置但错误 scope 的样本�
       exec.unwrap();
     }
   }
+});
+
+test('acceptedMovementBeyond：假夹具中仅本 task/delegation 已接受且实测位移 > 0.5 才触发', () => {
+  const start = { x: 0, y: 64, z: 0 };
+  const at = (x: number, after: Partial<RouteStatusSnapshot> = {}) => {
+    const pos = { x, y: 64, z: 0 };
+    return delivery(pos, statusSnap(), statusSnap({ lastPosition: pos, ...after }));
+  };
+  // 假 raw body 已越 0.5，但本 task 已接受测量仍只有 0.43：不得触发。
+  const rawBodyAhead = { x: 0.6, y: 64, z: 0 };
+  assert.ok(dist2(rawBodyAhead, start) > 0.5, '假 raw body 夹具确实超前');
+  assert.equal(acceptedMovementBeyond([at(0.43)], 'task_A', 'walk-1', start, 0.5), undefined);
+  // 别的 task 即使同名 walk-1 也不触发。
+  const otherTask = delivery({ x: 1.5, y: 64, z: 0 }, statusSnap(), statusSnap({ lastPosition: { x: 1.5, y: 64, z: 0 } }), { owner: 'task_B' });
+  assert.equal(acceptedMovementBeyond([otherTask], 'task_A', 'walk-1', start, 0.5), undefined);
+  // 错误 scope 的样本不被 acceptedMeasurements 接受。
+  const wrongScope = at(1.5);
+  wrongScope.sample.worldId = 'other';
+  assert.equal(acceptedMovementBeyond([wrongScope], 'task_A', 'walk-1', start, 0.5), undefined);
+  // lastPosition 未记录该原始测量：未接受。
+  const unaccepted = delivery({ x: 1.5, y: 64, z: 0 }, statusSnap(), statusSnap({ lastPosition: { x: 0.5, y: 64, z: 0 } }));
+  assert.equal(acceptedMovementBeyond([unaccepted], 'task_A', 'walk-1', start, 0.5), undefined);
+  // 正确本 task 活跃测量 > 0.5 才触发，并保留原 sample 身份/时刻。
+  const good = at(1.5);
+  const hit = acceptedMovementBeyond([unaccepted, good], 'task_A', 'walk-1', start, 0.5);
+  assert.equal(hit, good);
+  assert.equal(hit?.sample.sequence, good.sample.sequence);
+  assert.equal(hit?.sample.observedAt, good.sample.observedAt);
+  assert.deepEqual(hit?.sample.pos, good.sample.pos);
 });
 
 test('partialMatchesRecorded：partial 必须匹配最后候选测量的原 time/scope/position', () => {
