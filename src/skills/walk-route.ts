@@ -13,6 +13,7 @@ import type {
   KnownWalkRouteStart,
   NavResult,
   Observation,
+  SectionKey,
   Vec3Like,
   VoxelMap,
   WalkRouteExecutor,
@@ -21,6 +22,13 @@ import type {
 import { runWalkRoute, walkCollisionProvider } from '../adapter/walk-route.ts';
 import type { WalkBody, WalkMoveRequestObservation, WalkTick } from '../adapter/walk-route.ts';
 import type { SharedSpatialSession } from '../spatial/shared-session.ts';
+import {
+  acquireRouteResidency,
+  releaseRouteResidency,
+  residencyFacts,
+  routeDependencySections,
+} from '../spatial/skill-residency.ts';
+import type { RouteResidency } from '../spatial/skill-residency.ts';
 import type { BlockObservation } from '../adapter/types.ts';
 import { fail, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 
@@ -170,6 +178,8 @@ export async function executeWalkRoute(
     tick: WalkTick;
     request: WalkRouteRequest;
     deadlineMs: number;
+    /** 本次执行实际依赖、由调用方 prepare 后持有的 Sections；附着生命周期用。 */
+    protectedSections?: readonly SectionKey[];
     starter?: (loop: WalkRouteExecutor, request: WalkRouteRequest) => KnownWalkRouteStart;
   },
 ): Promise<WalkRouteExecution> {
@@ -199,8 +209,11 @@ export async function executeWalkRoute(
     // finally 只撤销本 token，不关闭共享会话，也不影响后续任务。
     bindActive: (loop) => {
       const token = spatial.attach({
+        // ChangeReport 在同步观测路径里先于同一帧的 onSample 到达，库据此失效
+        // 受影响依赖；这里不做磁盘 I/O、不重复消费报告。
         receiver: (report) => loop.observe(report, 64),
         cancel: () => loop.cancel('lifecycle', 'shared spatial session interrupted the active walk'),
+        ...(opts.protectedSections !== undefined ? { protectedSections: opts.protectedSections } : {}),
       });
       return () => spatial.detach(token);
     },
@@ -348,37 +361,69 @@ export const walkRoute: Skill<WalkRouteArgs> = {
     // 有效期限不能超过父委托期限：子请求只能缩短，不能延长。
     const effectiveDeadline = Math.min(args.deadlineMs ?? ctx.deadline, ctx.deadline);
 
-    // 预扫：有限次合法转头（4 个朝向 × 3 个俯仰）覆盖验证所需的支撑、身体与净空竖列。
-    // 视锥配置不变；脚下/头顶不因“贴着身体”就免视线，因此必须真正低头/抬头去看。
-    // 这是执行这条显式路线所需的观察，不扩宽视锥、不做额外探索，也不消耗资源。
-    const route = routeCells(args.points);
-    observeCells(ctx, map, route);
-    if (typeof ctx.adapter.look === 'function') {
-      for (const pitch of [-1.2, 0, 1.1]) {
-        for (const yaw of [-Math.PI / 2, 0, Math.PI / 2, Math.PI]) {
-          if (ctx.signal.aborted || Date.now() >= effectiveDeadline) break;
-          await ctx.adapter.look(yaw, pitch);
-          observeCells(ctx, map, route);
+    // 依赖 Section 只由真实身体起点、本次路线各段扫掠与支撑层决定；不用目标点
+    // 代替起点，也不按包围盒扩展。prepare 在任何地图读取/执行之前完成。
+    // eager 模式保持原有同步预扫：这里不 await，避免把首次观测推到换手边界之后。
+    let residency: RouteResidency = { status: 'ready', lease: null, sections: [], noRecord: [] };
+    if (spatial.session.voxelLoading === 'manual') {
+      const actualStart = { x: state.pos.x, y: state.pos.y, z: state.pos.z };
+      const scope = { worldId: state.worldId, dim: state.dim, sessionId: state.sessionId };
+      residency = await acquireRouteResidency(
+        spatial,
+        routeDependencySections(map, scope, actualStart, args.points),
+        { signal: ctx.signal, deadline: effectiveDeadline },
+      );
+      if (residency.status !== 'ready') {
+        const summary = `walk_route 空间依赖未准备好：${residency.message}`;
+        const data = { stage: 'residency', ...residencyFacts(residency) };
+        if (residency.reason === 'cancelled') {
+          if (ctx.signal.aborted || spatial.closing || spatial.paused) {
+            return { status: 'cancelled', summary, data: { ...data, cancelBy: 'lifecycle' } };
+          }
+          return fail('TIMEOUT', summary, data);
         }
-        if (ctx.signal.aborted || Date.now() >= effectiveDeadline) break;
+        return fail('ERROR', summary, data);
       }
     }
-    if (ctx.signal.aborted) return { status: 'cancelled', summary: '预扫阶段被取消', data: {} };
+    try {
+      // 预扫：有限次合法转头（4 个朝向 × 3 个俯仰）覆盖验证所需的支撑、身体与净空竖列。
+      // 视锥配置不变；脚下/头顶不因“贴着身体”就免视线，因此必须真正低头/抬头去看。
+      // 这是执行这条显式路线所需的观察，不扩宽视锥、不做额外探索，也不消耗资源。
+      const route = routeCells(args.points);
+      observeCells(ctx, map, route);
+      if (typeof ctx.adapter.look === 'function') {
+        for (const pitch of [-1.2, 0, 1.1]) {
+          for (const yaw of [-Math.PI / 2, 0, Math.PI / 2, Math.PI]) {
+            if (ctx.signal.aborted || Date.now() >= effectiveDeadline) break;
+            await ctx.adapter.look(yaw, pitch);
+            observeCells(ctx, map, route);
+          }
+          if (ctx.signal.aborted || Date.now() >= effectiveDeadline) break;
+        }
+      }
+      if (ctx.signal.aborted) return { status: 'cancelled', summary: '预扫阶段被取消', data: { ...residencyFacts(residency) } };
 
-    const request = {
-      worldId: state.worldId, dim: state.dim, sessionId: state.sessionId, mode: 'walk' as const,
-      body: { feet: args.points[0]!, width: 0.6, height: 1.8, pose: 'standing' as const },
-      points: args.points, arrival: { kind: 'exact' as const },
-      bodyArrival: GROUNDED_ARRIVAL_DEFAULTS, shapeProvider: walkCollisionProvider,
-      deadlineMs: effectiveDeadline, timeoutMs: 4000,
-    };
-    const execution = await executeWalkRoute(ctx, spatial, { map, body, tick, request, deadlineMs: effectiveDeadline });
-    const nav = execution.nav;
-    // 父任务已取消但库以其它终态返回（期限/失效先到）：以取消返回，保留部分位移。
-    if (ctx.signal.aborted && nav.outcome !== 'CANCELLED') {
-      return { status: 'cancelled', summary: nav.message, data: { nav, ...historyFields(execution) } };
+      const request = {
+        worldId: state.worldId, dim: state.dim, sessionId: state.sessionId, mode: 'walk' as const,
+        body: { feet: args.points[0]!, width: 0.6, height: 1.8, pose: 'standing' as const },
+        points: args.points, arrival: { kind: 'exact' as const },
+        bodyArrival: GROUNDED_ARRIVAL_DEFAULTS, shapeProvider: walkCollisionProvider,
+        deadlineMs: effectiveDeadline, timeoutMs: 4000,
+      };
+      const execution = await executeWalkRoute(ctx, spatial, {
+        map, body, tick, request, deadlineMs: effectiveDeadline,
+        protectedSections: residency.lease?.keys ?? residency.sections,
+      });
+      const nav = execution.nav;
+      // 父任务已取消但库以其它终态返回（期限/失效先到）：以取消返回，保留部分位移。
+      if (ctx.signal.aborted && nav.outcome !== 'CANCELLED') {
+        return { status: 'cancelled', summary: nav.message, data: { nav, ...historyFields(execution), ...residencyFacts(residency) } };
+      }
+      return navToResult(nav, execution);
+    } finally {
+      // 无论成功、取消、期限、异常还是关停，都只释放本次 lease 一次。
+      releaseRouteResidency(spatial, residency);
     }
-    return navToResult(nav, execution);
   },
 };
 
