@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { Vec3Like } from '../src/adapter/types.ts';
 import { wait } from '../src/skills/wait.ts';
 import { gather } from '../src/skills/work.ts';
 import { surface, unstuck } from '../src/skills/movement.ts';
@@ -63,30 +64,69 @@ test('surface remains available when explicitly requested', async () => {
   } finally { ctx.memory.close(); }
 });
 
-test('swim_to keeps the chosen coordinate and only succeeds on dry landing', async () => {
+test('swim_to preserves fractional and negative coordinates exactly and only succeeds on dry landing', async () => {
   const w = new TestWorld();
   w.inWater = true;
-  let target: { x: number; y: number; z: number } | null = null;
-  w.swimTo = async (t: any) => { target = t; return { ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, surfaced: false, oxygen: 14 }; };
+  let target: Vec3Like | null = null;
+  w.swimTo = async (t: Vec3Like | null) => { target = t; return { ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, surfaced: false, oxygen: 14 }; };
   const ctx = makeCtx(w);
   try {
-    const valid = swimTo.validate({ xyz: [4, 64, 1] }, w);
+    const valid = swimTo.validate({ xyz: [-3.5, 64, 10.25] }, w);
     assert.ok(valid.ok);
-    const r = await swimTo.run(ctx, (valid as { args: { xyz: { x: number; y: number; z: number }; timeout?: number } }).args);
+    const r = await swimTo.run(ctx, valid.args);
     assert.equal(r.status, 'failed', r.summary);
     assert.equal(r.data?.landed, false);
-    assert.deepEqual(target, { x: 4.5, y: 64, z: 1.5 }, '保持调用方选择的坐标，不换目标');
+    assert.deepEqual(target, { x: -3.5, y: 64, z: 10.25 }, '保持调用方选择的世界坐标（小数/负值），不取整、不加 0.5、不换目标');
     assert.equal(r.data?.oxygen, 14);
   } finally { ctx.memory.close(); }
 });
 
-test('swim_to refuses outside water', async () => {
+test('swim_to from a dry shore still swims toward the chosen target (no blanket in-water refusal)', async () => {
   const w = new TestWorld();
-  w.inWater = false;
+  w.inWater = false; // 站在干岸上也要能先走进水里再游向目标
+  let target: Vec3Like | null = null;
+  w.swimTo = async (t: Vec3Like | null) => { target = t; w.inWater = false; return { ok: true, landed: true, surfaced: true, oxygen: 20 }; };
   const ctx = makeCtx(w);
+  try {
+    const valid = swimTo.validate({ xyz: [4, 64, 1] }, w);
+    assert.ok(valid.ok);
+    const r = await swimTo.run(ctx, valid.args);
+    assert.equal(r.status, 'succeeded', r.summary);
+    assert.deepEqual(target, { x: 4, y: 64, z: 1 }, '目标坐标原样传给底层，不因不在水里而拒绝');
+    assert.equal(r.data?.landed, true);
+  } finally { ctx.memory.close(); }
+});
+
+test('swim_to refuses an exhausted budget without delegating', async (t) => {
+  const w = new TestWorld();
+  w.inWater = true; w.oxygen = 10;
+  let swims = 0;
+  w.swimTo = async () => { swims++; return { ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, surfaced: false, oxygen: 10 }; };
+  const now = 100000;
+  t.mock.method(Date, 'now', () => now);
+  const ctx = makeCtx(w);
+  ctx.deadline = now + 500; // 剩余不足 1 秒上浮/游泳
   try {
     const r = await swimTo.run(ctx, { xyz: { x: 4, y: 64, z: 1 } });
     assert.equal(r.status, 'failed');
-    assert.equal(r.failureCode, 'BAD_ARGS');
+    assert.equal(r.failureCode, 'TIMEOUT');
+    assert.equal(swims, 0, '预算不足不强行开游');
+    assert.equal(r.data?.oxygen, 10, '保留实际氧气');
+  } finally { ctx.memory.close(); }
+});
+
+test('swim_to delegates a short parent budget without extending it', async (t) => {
+  const w = new TestWorld();
+  w.inWater = true; w.oxygen = 10;
+  let delegatedMs: number | undefined;
+  w.swimTo = async (_t: Vec3Like | null, _signal: AbortSignal, opts?: { timeoutMs?: number }) => { delegatedMs = opts?.timeoutMs; return { ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, surfaced: false, oxygen: 10 }; };
+  const now = 100000;
+  t.mock.method(Date, 'now', () => now);
+  const ctx = makeCtx(w);
+  ctx.deadline = now + 2500; // 剩余 2500 → 委托 1500
+  try {
+    const r = await swimTo.run(ctx, { xyz: { x: 4, y: 64, z: 1 } });
+    assert.equal(r.status, 'failed');
+    assert.equal(delegatedMs, 1500, '委托时长 = 剩余 - 1000，不被 Math.max 拉长');
   } finally { ctx.memory.close(); }
 });

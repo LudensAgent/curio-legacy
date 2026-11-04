@@ -205,3 +205,39 @@ test('stuck in water: correction does not choose a bank or start swimming', asyn
   assert.deepEqual(bot.entity.position, before);
   assert.equal(bot.entity.isInWater, true);
 });
+
+function fluidBot(t: TestContext, headName: string, bodyName: string, inLava: boolean, inWater: boolean) {
+  let now = 100000;
+  t.mock.method(Date, 'now', () => now);
+  const controls: Record<string, boolean> = {};
+  const bot: any = {
+    game: { dimension: 'overworld' },
+    entity: { position: new Vec3(2.5, 61, 2.5), velocity: new Vec3(0, 0, 0), eyeHeight: 1.62, onGround: false, isInWater: inWater, isInLava: inLava, isCollidedHorizontally: false },
+    oxygenLevel: 10,
+    pathfinder: { setGoal() {} },
+    setControlState(name: string, value: boolean) { controls[name] = value; },
+    clearControlStates() { for (const k of Object.keys(controls)) controls[k] = false; },
+    blockAt: (p: any) => ({ name: p.y >= bot.entity.position.y + 1.0 ? headName : bodyName, getProperties: () => ({}) }),
+    async look() {},
+    async waitForTicks() { now += 100; },
+  };
+  const adapter = new MineflayerAdapter(config, new EventBus());
+  adapter.bot = bot; adapter.mcData = data; (adapter as any).connectedFlag = true;
+  return adapter;
+}
+
+test('head in lava is never reported surfaced or dry landing', async (t) => {
+  const adapter = fluidBot(t, 'lava', 'lava', true, false);
+  const result = await adapter.swimTo(null, new AbortController().signal, { timeoutMs: 1500 });
+  assert.equal(result.ok, false, '头在岩浆里不算浮出');
+  assert.equal(result.surfaced, false, '头在岩浆里不能算 surfaced（不能呼吸）');
+  assert.equal(result.landed, false, '岩浆不能算干地');
+});
+
+test('targeted swim timeout preserves an observed surfaced head as a partial fact', async (t) => {
+  const adapter = fluidBot(t, 'air', 'water', false, true);
+  const result = await adapter.swimTo({ x: 6.5, y: 64, z: 2.5 }, new AbortController().signal, { timeoutMs: 1500 });
+  assert.equal(result.ok, false, '目标未到不报成功');
+  assert.equal(result.landed, false);
+  assert.equal(result.surfaced, true, '途中头稳定露出空气应保留为部分事实，不因未到目标而硬写成 false');
+});

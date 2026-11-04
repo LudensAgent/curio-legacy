@@ -498,7 +498,7 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
         if (dist3(cur, after) < 0.3 && !arrived(after)) {
           if (nextTo(after)) return failedNear(after, '没有取得进展');
           // 泡在水里时步行寻路不肯动（不游泳），一下就返回：说清楚是因为在水里
-          const wet = adapter.state().inWater ? '；人泡在水里，步行寻路不游泳——先 surface 游上岸，或在脚下垫一块站出水面，再走' : '';
+          const wet = adapter.state().inWater ? '；人泡在水里，步行寻路不游泳——先用 surface 浮出水面换气、再用 swim_to 游到指定岸上，或在脚下垫一块站出水面再走' : '';
           return fail('PATH_NOT_FOUND', `前往 ${label} 没有取得进展，仍在 (${after.x.toFixed(2)},${after.y.toFixed(2)},${after.z.toFixed(2)})；尚未到达目标位置，需要换入口或路线${wet}`, measured(after));
         }
         if (distance(after) < bestDistance - 0.5) { bestDistance = distance(after); detours = 0; }
@@ -764,32 +764,33 @@ export const unstuck: Skill<{}> = {
 
 // ------------------------------------------------------------------ surface（由 Agent 主动调用）
 /** 一次有界上浮委托：只往上浮出水面换气，不找岸、不找气穴、不挖不垫、不换目标。 */
-export const surface: Skill<{ timeout?: number }> = {
+export const surface: Skill<{ timeoutMs?: number }> = {
   name: 'surface',
-  description: '只做一次有界上浮：按住上浮让头露出水面换气；不找岸、不找气穴、不挖不垫。浮出水面（surfaced）与站稳上岸（landed）分开报告，未浮出会如实说清位置与氧气',
-  argsDoc: '{"timeout"?: 1000-30000（毫秒，本次上浮最多持续多久，可选）}',
-  timeoutMs: 35000,
+  description: '只做一次有界上浮：按住上浮让头露出流体换气；不找岸、不找气穴、不挖不垫。surfaced 只表示结束时头已露出流体（空气），不保证松开控制后继续浮着或持续换气；landed 表示站稳干地，两者分开报告，未浮出会如实说清位置与氧气',
+  argsDoc: '{"timeoutMs"?: 1000-20000（毫秒，本次上浮最多持续多久，可选）}',
+  timeoutMs: 25000,
   movement: true,
   validate(raw) {
     const a = obj(raw);
     if (a.escape !== undefined) return { ok: false, error: 'surface 不再接受 escape："dig"|"shore"（自动挖顶/找气穴/寻岸超出委托）。要挖开头顶用 dig_at，要向指定岸边游用 swim_to {"xyz":[x,y,z]}，要持续按住上浮用 press_keys {"keys":{"jump":true},"ms":…}' };
-    const timeout = a.timeout ?? a.timeoutMs;
-    if (timeout !== undefined && (!Number.isFinite(Number(timeout)) || Number(timeout) < 1000 || Number(timeout) > 30000)) return { ok: false, error: 'timeout 必须是 1000–30000 的毫秒数' };
-    return { ok: true, args: timeout !== undefined ? { timeout: Math.round(Number(timeout)) } : {} };
+    const timeoutMs = a.timeoutMs;
+    if (timeoutMs !== undefined && (!Number.isFinite(Number(timeoutMs)) || Number(timeoutMs) < 1000 || Number(timeoutMs) > 20000)) return { ok: false, error: 'timeoutMs 必须是 1000–20000 的毫秒数' };
+    return { ok: true, args: timeoutMs !== undefined ? { timeoutMs: Math.round(Number(timeoutMs)) } : {} };
   },
   async run(ctx, args) {
     const a = ctx.adapter;
     if (!a.swimTo) return fail('STUCK', '当前适配器缺少持续游泳控制，不能确认已浮出水面');
     const s0 = a.state();
-    if (!s0.inWater && s0.onGround) return ok('没在水里，已经站在干地上了', { landed: true, surfaced: true, pos: s0.pos });
-    // 一次有界上浮委托：不选岸、不找气穴、不挖不垫、不换目标；surfaced（浮出水面）与 landed（站稳干地）分别报告。
-    const timeoutMs = Math.max(300, Math.min(args.timeout ?? 20000, ctx.deadline - Date.now() - 1000));
+    // 一次有界上浮委托：不选岸、不找气穴、不挖不垫、不换目标；surfaced（头露出流体）与 landed（站稳干地）分别报告。
+    // 预算耗尽或不足一次上浮就拒绝，不强行开游（岩浆同样由底层 dryFooting/headOut 的真实身体确认排除）。
+    const timeoutMs = Math.min(args.timeoutMs ?? 20000, ctx.deadline - Date.now() - 1000);
+    if (timeoutMs <= 0) return fail('TIMEOUT', `上浮时间已用完（或剩余不足 1 秒），未执行；现在在 (${s0.pos.x.toFixed(1)},${s0.pos.y.toFixed(1)},${s0.pos.z.toFixed(1)})，氧气 ${s0.oxygen}/20`, { landed: false, surfaced: false, pos: s0.pos, oxygen: s0.oxygen });
     const r = await a.swimTo(null, ctx.signal, { timeoutMs });
     const s = a.state();
     const at = `现在在 (${s.pos.x.toFixed(1)},${s.pos.y.toFixed(1)},${s.pos.z.toFixed(1)})，氧气 ${s.oxygen}/20`;
     if (r.ok && r.landed) return ok(`上浮后已站稳干地，氧气 ${s.oxygen}/20`, { landed: true, surfaced: true, pos: s.pos, oxygen: s.oxygen });
-    if (r.ok && r.surfaced) return ok(`头已稳定露出水面能呼吸了（氧气 ${s.oxygen}/20），还没上岸`, { landed: false, surfaced: true, pos: s.pos, oxygen: s.oxygen });
-    const why = r.reason === 'WATER_ESCAPE_TIMEOUT' ? '上浮没把头露出水面' : r.reason === 'SWIM_NO_PROGRESS' ? '上浮没动' : r.reason;
-    return fail('STUCK', `${why}；${at}`, { landed: false, surfaced: false, pos: s.pos, oxygen: s.oxygen, reason: r.reason });
+    if (r.ok && r.surfaced) return ok(`结束时头已露出流体（氧气 ${s.oxygen}/20），还没上岸；松开控制后是否继续浮着、是否持续换气不保证`, { landed: false, surfaced: true, pos: s.pos, oxygen: s.oxygen });
+    const why = r.reason === 'WATER_ESCAPE_TIMEOUT' ? '上浮没把头露出流体' : r.reason === 'SWIM_NO_PROGRESS' ? '上浮没动' : r.reason;
+    return fail('STUCK', `${why}；${at}`, { landed: false, surfaced: r.surfaced, pos: s.pos, oxygen: s.oxygen, reason: r.reason });
   },
 };

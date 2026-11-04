@@ -83,10 +83,29 @@ test('surface reports surfaced (not landed) when the adapter surfaces without dr
   adapter.swimTo = async () => { adapter.oxygen = 20; return { ok: true, landed: false, surfaced: true, oxygen: 20 }; };
   try {
     const result = await surface.run({ adapter, memory, bus: new EventBus(), signal: new AbortController().signal,
-      deadline: now + 1000, taskId: 'breathing-evidence', progress() {},
+      deadline: now + 32000, taskId: 'breathing-evidence', progress() {},
       senses: { refresh() {}, markSweep() {}, perceivedEntities: () => [], knownBlocks: () => [] } }, {});
     assert.equal(result.status, 'succeeded', result.summary);
     assert.equal(result.data?.surfaced, true);
     assert.equal(result.data?.landed, false, '浮出水面不等于上岸');
+  } finally { memory.close(); }
+});
+
+test('surface refuses an exhausted budget without delegating an ascent', async (t) => {
+  let now = 100000;
+  t.mock.method(Date, 'now', () => now);
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null);
+  adapter.inWater = true; adapter.oxygen = 6;
+  adapter.pos = { x: 0.5, y: 60, z: 0.5 };
+  let swims = 0;
+  adapter.swimTo = async () => { swims++; return { ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, surfaced: false, oxygen: 6 }; };
+  try {
+    const result = await surface.run({ adapter, memory, bus: new EventBus(), signal: new AbortController().signal,
+      deadline: now + 500, taskId: 'surface-expired', progress() {},
+      senses: { refresh() {}, markSweep() {}, perceivedEntities: () => [], knownBlocks: () => [] } }, {});
+    assert.equal(result.status, 'failed');
+    assert.equal(result.failureCode, 'TIMEOUT');
+    assert.equal(swims, 0, '预算耗尽不强行上浮');
+    assert.equal(result.data?.oxygen, 6, '保留实际氧气');
   } finally { memory.close(); }
 });

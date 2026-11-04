@@ -520,12 +520,12 @@ export const dive: Skill<{ xyz: { x: number; y: number; z: number }; min_oxygen:
 };
 
 // ------------------------------------------------------------------ swim_to
-/** 在水里朝调用方指定的世界坐标游过去：保持这个目标不变，到目标附近站稳才算到，否则如实报告位置与氧气。 */
-export const swimTo: Skill<{ xyz: { x: number; y: number; z: number }; timeout?: number }> = {
+/** 朝调用方指定的世界坐标游过去：保持这个目标不变，到目标附近站稳才算到，否则如实报告位置与氧气。 */
+export const swimTo: Skill<{ xyz: { x: number; y: number; z: number }; timeoutMs?: number }> = {
   name: 'swim_to',
-  description: '从水里朝指定的世界坐标游过去并保持这个目标不换；到目标附近站稳（干地）才算到，未到岸如实报告位置、氧气与未到原因。只在水里用',
-  argsDoc: '{"xyz":[x,y,z], "timeout"?: 1000-30000（毫秒，可选）}；xyz 是游过去后脚所在的世界坐标格（脚高）',
-  timeoutMs: 35000,
+  description: '从当前位置朝调用方指定的世界坐标游过去并保持这个目标不换（站在干岸上也会先走进水里再游）；到目标附近站稳（干地）才算到，未到岸如实报告位置、氧气与未到原因',
+  argsDoc: '{"xyz":[x,y,z], "timeoutMs"?: 1000-20000（毫秒，可选）}；xyz 是游过去后脚所在的世界坐标（可含小数/负值），原样传给底层，不改写、不取整',
+  timeoutMs: 25000,
   movement: true,
   validate(raw) {
     const a = obj(raw);
@@ -534,23 +534,24 @@ export const swimTo: Skill<{ xyz: { x: number; y: number; z: number }; timeout?:
       : Array.isArray(v) ? v.map(Number)
       : v && typeof v === 'object' ? [Number((v as { x?: unknown }).x), Number((v as { y?: unknown }).y), Number((v as { z?: unknown }).z)]
       : null;
-    if (!arr || arr.length !== 3 || !arr.every(Number.isFinite)) return { ok: false, error: '写 "xyz":[x,y,z]（游过去后脚所在的目标格）' };
-    const timeout = a.timeout;
-    if (timeout !== undefined && (!Number.isFinite(Number(timeout)) || Number(timeout) < 1000 || Number(timeout) > 30000)) return { ok: false, error: 'timeout 必须是 1000–30000 的毫秒数' };
-    return { ok: true, args: { xyz: { x: Math.floor(arr[0]), y: Math.floor(arr[1]), z: Math.floor(arr[2]) }, ...(timeout !== undefined ? { timeout: Math.round(Number(timeout)) } : {}) } };
+    if (!arr || arr.length !== 3 || !arr.every(Number.isFinite)) return { ok: false, error: '写 "xyz":[x,y,z]（游过去后脚所在的目标坐标）' };
+    const timeoutMs = a.timeoutMs;
+    if (timeoutMs !== undefined && (!Number.isFinite(Number(timeoutMs)) || Number(timeoutMs) < 1000 || Number(timeoutMs) > 20000)) return { ok: false, error: 'timeoutMs 必须是 1000–20000 的毫秒数' };
+    return { ok: true, args: { xyz: { x: arr[0], y: arr[1], z: arr[2] }, ...(timeoutMs !== undefined ? { timeoutMs: Math.round(Number(timeoutMs)) } : {}) } };
   },
   async run(ctx, args) {
     const a = ctx.adapter;
     if (!a.swimTo) return fail('ERROR', '当前适配器缺少持续游泳控制，不能游向指定坐标');
-    if (!a.state().inWater) return fail('BAD_ARGS', '不在水里：swim_to 只管水里朝指定坐标游；陆上走路用 goto / step');
-    const target = { x: args.xyz.x + 0.5, y: args.xyz.y, z: args.xyz.z + 0.5 };
-    const timeoutMs = Math.max(1000, Math.min(args.timeout ?? 20000, ctx.deadline - Date.now() - 1000));
-    const r = await a.swimTo(target, ctx.signal, { timeoutMs });
+    const s0 = a.state();
+    // 预算耗尽或不足一次游泳就拒绝，不强行开游；剩余不足时用真实剩余时间，不把父级预算拉长。
+    const timeoutMs = Math.min(args.timeoutMs ?? 20000, ctx.deadline - Date.now() - 1000);
+    if (timeoutMs <= 0) return fail('TIMEOUT', `游向目标的预算已用完（或剩余不足 1 秒），未执行；现在在 (${s0.pos.x.toFixed(1)},${s0.pos.y.toFixed(1)},${s0.pos.z.toFixed(1)})，氧气 ${s0.oxygen}/20`, { landed: false, pos: s0.pos, oxygen: s0.oxygen });
+    const r = await a.swimTo(args.xyz, ctx.signal, { timeoutMs });
     const s = a.state();
     const at = `现在在 (${s.pos.x.toFixed(1)},${s.pos.y.toFixed(1)},${s.pos.z.toFixed(1)})，氧气 ${r.oxygen}/20`;
     if (r.ok && r.landed) return ok(`游到了 (${args.xyz.x},${args.xyz.y},${args.xyz.z}) 并站稳，${at}`, { landed: true, pos: s.pos, oxygen: r.oxygen });
     const why = r.reason === 'WATER_ESCAPE_TIMEOUT' ? '游了一阵还没到' : r.reason === 'SWIM_NO_PROGRESS' ? '游不动' : r.reason;
-    return fail('PATH_NOT_FOUND', `${why}；${at}`, { landed: false, pos: s.pos, oxygen: r.oxygen, reason: r.reason });
+    return fail('PATH_NOT_FOUND', `${why}；${at}`, { landed: false, surfaced: r.surfaced, pos: s.pos, oxygen: r.oxygen, reason: r.reason });
   },
 };
 

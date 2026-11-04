@@ -4095,20 +4095,22 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const check = this.actionCheckpoint(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', landed: false, surfaced: false, oxygen: 0 };
     const b = this.bot, epoch = this.actionEpoch;
-    const end = Date.now() + Math.max(100, Math.min(20000, opts.timeoutMs ?? 10000));
+    const end = Date.now() + Math.min(20000, opts.timeoutMs ?? 10000);
     let drySince: number | null = null;
     let surfacedSince: number | null = null;
+    let surfaced = false;
     let lastProgress = Date.now(), anchor = b.entity.position.clone();
     const destination = target;
-    const water = (block: any) => !!block && (['water', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass'].includes(block.name) || String(block.getProperties?.().waterlogged) === 'true');
-    const headUnder = () => water(b.blockAt(b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0)));
-    // 头格已知且不是流体才算真正露头；未观察（null）不算已浮出水面。
-    const headOut = () => { const h = b.blockAt(b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0)); return !!h && !water(h); };
+    // 流体包含水和岩浆：岩浆不能被当成「非流体」或「干地」。
+    const fluid = (block: any) => !!block && (['water', 'lava', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass'].includes(block.name) || String(block.getProperties?.().waterlogged) === 'true');
+    const headUnder = () => fluid(b.blockAt(b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0)));
+    // 头格已知且是可呼吸的空气才算真正露头；岩浆/实心方块/未观察（null）都不算能呼吸。
+    const headOut = () => { const h = b.blockAt(b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0)); return !!h && ['air', 'cave_air', 'void_air'].includes(h.name); };
     const dryFooting = () => {
       const p = b.entity.position;
       const support = b.blockAt(p.offset(0, -0.05, 0));
       const head = b.blockAt(p.offset(0, b.entity.eyeHeight ?? 1.62, 0));
-      return !!b.entity.onGround && !b.entity.isInWater && !!head && !water(head) && support?.boundingBox === 'block' && !water(support);
+      return !!b.entity.onGround && !b.entity.isInWater && !b.entity.isInLava && !!head && ['air', 'cave_air', 'void_air'].includes(head.name) && support?.boundingBox === 'block' && !fluid(support);
     };
     check();
     b.pathfinder?.setGoal(null);
@@ -4126,11 +4128,13 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           drySince ??= Date.now();
           if (Date.now() - drySince >= 600) return { ok: true, landed: true, surfaced: true, oxygen: ownOxygen(b) };
         } else drySince = null;
-        // 垂直上浮模式（无目标）：头稳定离开流体就算已浮出水面，不要求上岸；短暂露头不算。
-        if (!destination && headOut()) {
+        // 头稳定露出空气（不管有没有指定目标）：这是本次已观察到的部分事实，未到岸/超时也要保留。
+        if (headOut()) {
           surfacedSince ??= Date.now();
-          if (Date.now() - surfacedSince >= 600) return { ok: true, landed: false, surfaced: true, oxygen: ownOxygen(b) };
+          if (Date.now() - surfacedSince >= 600) surfaced = true;
         } else surfacedSince = null;
+        // 垂直上浮模式（无目标）：头稳定离开流体就算已浮出水面，不要求上岸；短暂露头不算。
+        if (!destination && surfaced) return { ok: true, landed: false, surfaced: true, oxygen: ownOxygen(b) };
         // 只在水里按跳（上浮、借撞岸的那一下爬上去）。人已经出水、只是还没落稳时还按着，落地那一刻又起跳，
         // 就会在岸上一下一下地跳个不停，一直跳到超时
         b.setControlState('jump', !dry && (!!b.entity.isInWater || headUnder()));
@@ -4143,11 +4147,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         if (p.distanceTo(anchor) >= 0.3) { lastProgress = Date.now(); anchor = p.clone(); }
         // 贴着岸往上爬时水平位置本来就不动（靠水里撞墙的上抬一点点爬上去）：多给点时间，别刚贴上岸就算没进展
         const climbingBank = !!b.entity.isCollidedHorizontally && distance <= 1.6;
-        if (!dry && destination && Date.now() - lastProgress >= (climbingBank ? 5000 : 2500)) return { ok: false, reason: 'SWIM_NO_PROGRESS', landed: false, surfaced: false, oxygen: ownOxygen(b) };
-        if (typeof b.waitForTicks === 'function') await this.afterAction(() => raceAbort(b.waitForTicks(2), signal, 2000, () => {}), check);
+        if (!dry && destination && Date.now() - lastProgress >= (climbingBank ? 5000 : 2500)) return { ok: false, reason: 'SWIM_NO_PROGRESS', landed: false, surfaced, oxygen: ownOxygen(b) };
+        if (typeof b.waitForTicks === 'function') await this.afterAction(() => raceAbort(b.waitForTicks(2), signal, Math.max(1, Math.min(2000, end - Date.now())), () => {}), check);
         else await this.afterAction(() => sleep(100, signal), check);
       }
-      return { ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, surfaced: false, oxygen: ownOxygen(b) };
+      return { ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, surfaced, oxygen: ownOxygen(b) };
     } finally {
       // A replaced task owns the controls now; stopAll already released ours.
       if (epoch === this.actionEpoch && b === this.bot) {
