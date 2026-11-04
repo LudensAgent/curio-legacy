@@ -91,7 +91,7 @@ export const spatialQuery: Skill<SpatialQueryArgs> = {
     + '{"kind":"traversals","dim":"overworld","ids":["t1"]}  // 与 fragmentId 互斥；1..8 个明确 ID，按原顺序逐个查询；不接受 after/limit\n'
     + '{"kind":"traversals","dim":"overworld","fragmentId":"id","after":"cursor","limit":4}  // 与 ids 互斥；after 为上一页 nextAfter；limit 默认 4、范围 1..8，超出拒绝不 clamp；返回 total/nextAfter/returned 与逐条原证据\n'
     + '{"kind":"nodes","dim":"overworld","ids":["n1"]}  // 1..8 个明确 ID，保留 agent/program 来源；node 无观测时间/会话\n'
-    + '{"kind":"route","dim":"overworld","fromNodeId":"n1","toNodeId":"n2","mode":"walk","maxNodes":32,"maxEdges":128,"maxHistoryReads":64,"maxDiagnostics":8}  // 缺省用原库 32/128/64/8；显式值 0..64/512/256/16，零值按原值；mode 仅历史过滤；历史证据，非当前通行\n'
+    + '{"kind":"route","dim":"overworld","fromNodeId":"n1","toNodeId":"n2","mode":"walk","maxNodes":32,"maxEdges":128,"maxHistoryReads":64,"maxDiagnostics":8}  // 缺省用宿主限定预算 32/128/64/8；显式值 0..64/512/256/16，零值按原值；mode 仅历史过滤；历史证据，非当前通行\n'
     + '{"kind":"fragments","dim":"overworld","after":"cursor","limit":4}  // limit 1..8；after 为上一页 nextAfter；只返回元数据与点数/首末点，不返回完整几何',
   timeoutMs: 3000,
   movement: false,
