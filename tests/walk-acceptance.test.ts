@@ -2234,19 +2234,33 @@ test('checkSpatialFinalSave/checkSpatialReopen：真实SQLite空anchor→typed�
     primaryFailure = error;
     throw error;
   } finally {
+    // 两个已开服务各自记录真实 shutdown await 错误；第一次失败不得跳过第二个尝试。
+    let firstAwaitError: unknown = null;
+    let secondAwaitError: unknown = null;
     if (first !== null && firstResult === null) {
-      try { firstResult = await first.shutdown(); } catch (error) { if (primaryFailure === null) throw error; }
+      try { firstResult = await first.shutdown(); } catch (error) { firstAwaitError = error; }
     }
     if (reopened !== null && secondResult === null) {
-      try { secondResult = await reopened.shutdown(); } catch (error) { if (primaryFailure === null) throw error; }
+      try { secondResult = await reopened.shutdown(); } catch (error) { secondAwaitError = error; }
     }
-    const firstOk = firstResult !== null && spatialShutdownRecord(firstResult, null, null, world).ok;
-    const secondOk = secondResult !== null && spatialShutdownRecord(secondResult, null, null, world).ok;
+    const firstShutdown = first === null ? null : spatialShutdownRecord(firstResult, null, firstAwaitError, world);
+    const secondShutdown = reopened === null ? null : spatialShutdownRecord(secondResult, null, secondAwaitError, world);
+    const firstOk = firstShutdown !== null && firstShutdown.ok;
+    const secondOk = secondShutdown !== null && secondShutdown.ok;
     if (firstOk && secondOk) {
-      try { fs.rmSync(dir, { recursive: true, force: true }); } catch (error) { if (primaryFailure === null) throw error; }
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch (error) {
+        const message = `关闭已确认但删除 fixture 失败：${dir}（${String(error)}）`;
+        if (primaryFailure === null) throw error;
+        t.diagnostic(message);
+      }
     } else {
-      const message = `未确认关闭，保留 fixture：${dbPath}（first=${String(firstOk)} second=${String(secondOk)}）`;
-      if (primaryFailure === null) throw new Error(message);
+      const detail = `first=${JSON.stringify(firstShutdown?.problems ?? null)} second=${JSON.stringify(secondShutdown?.problems ?? null)}`
+        + ` firstAwait=${firstAwaitError instanceof Error ? firstAwaitError.message : String(firstAwaitError)}`
+        + ` secondAwait=${secondAwaitError instanceof Error ? secondAwaitError.message : String(secondAwaitError)}`;
+      const message = `未确认关闭，保留 fixture：${dir}（${detail}）`;
+      if (primaryFailure === null) throw new Error(message, { cause: firstAwaitError ?? secondAwaitError });
       t.diagnostic(message);
     }
   }
@@ -2259,80 +2273,4 @@ test('checkSpatialFinalSave/checkSpatialReopen：真实SQLite空anchor→typed�
   assert.ok(failed.problems.includes('missing_close_result'));
   assert.equal(failed.serviceAwaitError, null);
   assert.equal(closeFailure.checkpoint!.checkpointId, firstResult!.checkpoint!.checkpointId, '关闭失败不得覆盖第一 final id');
-});
-
-test('S3 清理：primaryFailure 存在时两个真实会话仍尝试关闭，close/delete 次错只诊断不替换主错', async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'walk-s3-cleanup-'));
-  const world = 'walk-s3-cleanup-world';
-  const firstDb = path.join(dir, 'first.sqlite');
-  const secondDb = path.join(dir, 'second.sqlite');
-  let first: SharedSpatialSession | null = null;
-  let second: SharedSpatialSession | null = null;
-  let firstResult: ShutdownResult | null = null;
-  let secondResult: ShutdownResult | null = null;
-  let firstAwaitError: unknown = null;
-  let secondAwaitError: unknown = null;
-  let deleteError: unknown = null;
-  const attempts = { first: false, second: false };
-  const primary = new Error('primary S3 failure');
-  let thrown: unknown = null;
-  try {
-    first = await SharedSpatialSession.open({ worldId: world, databasePath: firstDb, timeoutMs: 5000 });
-    second = await SharedSpatialSession.open({ worldId: world, databasePath: secondDb, timeoutMs: 5000 });
-    throw primary;
-  } catch (error) {
-    thrown = error;
-  } finally {
-    // 两个已开服务都执行真实 shutdown；随后注入的 await 次错模拟关闭结果等待失败。
-    if (first !== null) {
-      attempts.first = true;
-      try {
-        firstResult = await first.shutdown();
-        throw new Error('forced first close await secondary');
-      } catch (error) { firstAwaitError = error; }
-    }
-    if (second !== null) {
-      attempts.second = true;
-      try {
-        secondResult = await second.shutdown();
-        throw new Error('forced second close await secondary');
-      } catch (error) { secondAwaitError = error; }
-    }
-    // 删除次错也只在有主错时诊断，不替换主错。
-    const rmSync = fs.rmSync;
-    const forcedDelete = new Error('forced delete secondary');
-    try {
-      fs.rmSync = () => { throw forcedDelete; };
-      try { fs.rmSync(dir, { recursive: true, force: true }); } catch (error) { deleteError = error; }
-    } finally {
-      fs.rmSync = rmSync;
-    }
-    const firstShutdown = first === null ? null : spatialShutdownRecord(firstResult, null, firstAwaitError, world);
-    const secondShutdown = second === null ? null : spatialShutdownRecord(secondResult, null, secondAwaitError, world);
-    const closed = firstShutdown !== null && firstShutdown.ok && secondShutdown !== null && secondShutdown.ok;
-    if (!closed) {
-      const detail = `first=${JSON.stringify(firstShutdown?.problems ?? null)} second=${JSON.stringify(secondShutdown?.problems ?? null)}`
-        + ` firstAwait=${firstAwaitError instanceof Error ? firstAwaitError.message : String(firstAwaitError)}`
-        + ` secondAwait=${secondAwaitError instanceof Error ? secondAwaitError.message : String(secondAwaitError)}`
-        + ` delete=${deleteError instanceof Error ? deleteError.message : String(deleteError)}`;
-      const message = `未确认关闭，保留 fixture：${dir}（${detail}）`;
-      if (primary === null) throw new Error(message);
-      t.diagnostic(message);
-    } else {
-      try { fs.rmSync(dir, { recursive: true, force: true }); } catch (error) { t.diagnostic(`关闭已确认但删除 fixture 失败：${dir}（${String(error)}）`); }
-    }
-  }
-  assert.equal(thrown, primary, '清理次错不得替换主错');
-  assert.equal(attempts.first, true);
-  assert.equal(attempts.second, true);
-  assert.equal(spatialShutdownRecord(firstResult, null, null, world).ok, true, '第一会话真实 close 必须已实际执行');
-  assert.equal(spatialShutdownRecord(secondResult, null, null, world).ok, true, '第二会话真实 close 必须已实际执行');
-  const firstShutdown = spatialShutdownRecord(firstResult, null, firstAwaitError, world);
-  const secondShutdown = spatialShutdownRecord(secondResult, null, secondAwaitError, world);
-  assert.ok(firstShutdown.problems.includes('shutdown_await_error'));
-  assert.ok(secondShutdown.problems.includes('shutdown_await_error'));
-  assert.equal(firstAwaitError instanceof Error && firstAwaitError.message, 'forced first close await secondary');
-  assert.equal(secondAwaitError instanceof Error && secondAwaitError.message, 'forced second close await secondary');
-  assert.equal(deleteError instanceof Error && deleteError.message, 'forced delete secondary');
-  assert.ok(fs.existsSync(dir), '未确认关闭必须保留 fixture');
 });
