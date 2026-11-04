@@ -309,6 +309,54 @@ test('leg trace correlation uses dispatch order + accepted sample identity witho
   assert.match(classifyLegTrace(nav, taskId, foreign, moves).problems.join(' '), /trace point 0/);
 });
 
+test('pre-dispatch stable samples and interleaved dispatches are recorded, not rejected', () => {
+  const taskId = 'walk-stable-start';
+  const delegation = 'walk-1';
+  const a = { x: 207.5, y: 64, z: 216.5 };
+  const b = { x: 208.5, y: 64, z: 216.5 };
+  const c = { x: 209.5, y: 64, z: 216.5 };
+  // 真实运行：4 个 accepted 稳定起点样本在第一次 move 派发之前到达。
+  const stable = [1, 2, 3, 4].map((sequence) =>
+    legSample(taskId, delegation, sequence, 1_000 + sequence * 100, a));
+  const dispatches = [
+    legMove(taskId, `${delegation}-step-0`, a, b, 1_500, 46_000),
+    legMove(taskId, `${delegation}-step-1`, b, c, 1_700, 47_000),
+  ];
+  const moved = [
+    legSample(taskId, delegation, 5, 1_600, b),
+    legSample(taskId, delegation, 6, 2_000, c),
+  ];
+  const nav = { confirmed: true, trace: [{ pos: b, ts: 1_600 }, { pos: c, ts: 2_000 }] };
+
+  const accepted = classifyLegTrace(nav, taskId, [...stable, ...moved], dispatches);
+  assert.equal(accepted.ok, true, accepted.problems.join(', '));
+  assert.equal(accepted.facts.acceptedSamples, 6);
+  assert.equal(accepted.facts.acceptedSamplesOutsideDispatchWindows, 4);
+  assert.deepEqual(accepted.facts.acceptedSampleSequencesOutsideDispatch, [1, 2, 3, 4]);
+  assert.equal(accepted.facts.outsideDispatchSequencesTruncated, false);
+  assert.equal(accepted.facts.compared, 2);
+
+  // 所有派发窗口结束后的终点 accepted 样本同样允许。
+  const terminal = legSample(taskId, delegation, 7, 48_000, c);
+  const withTerminal = classifyLegTrace(nav, taskId, [...stable, ...moved, terminal], dispatches);
+  assert.equal(withTerminal.ok, true, withTerminal.problems.join(', '));
+  assert.equal(withTerminal.facts.acceptedSamplesOutsideDispatchWindows, 5);
+
+  // 额外样本的作用域或 executionId 与派发矛盾时仍然失败。
+  const scopeTemplate = legSample(taskId, delegation, 8, 3_100, c);
+  const foreignScope = { ...scopeTemplate, sample: { ...scopeTemplate.sample, dim: 'nether' } };
+  assert.match(
+    classifyLegTrace(nav, taskId, [...stable, ...moved, foreignScope], dispatches).problems.join(' '),
+    /scope contradicts/,
+  );
+  const execTemplate = legSample(taskId, delegation, 9, 3_200, c);
+  const foreignExec = { ...execTemplate, sample: { ...execTemplate.sample, executionId: 'walk-9' } };
+  assert.match(
+    classifyLegTrace(nav, taskId, [...stable, ...moved, foreignExec], dispatches).problems.join(' '),
+    /executionId walk-9 contradicts route delegation walk-1/,
+  );
+});
+
 const cleanShutdown = (overrides: Partial<ShutdownResult> = {}): ShutdownResult => ({
   checkpoint: { checkpointId: 'checkpoint-1' } as never,
   error: null,

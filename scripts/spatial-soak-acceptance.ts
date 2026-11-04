@@ -1252,13 +1252,29 @@ interface ScenarioResult {
  * [receivedAt, deadlineMs] 内。move.request.to 是名义请求目标，不拿它替代真实
  * 观测位置。
  * 不要求每个 move.result 都有 sample，也不拿上一移动的 result 充当下一移动的 from。
+ *
+ * 方向必须从 trace/派发出发：派发前的稳定起点样本、派发后的终点样本或派发间隙
+ * 样本都是正常观测，只记录为 `acceptedSamplesOutsideDispatchWindows`，不能因为
+ * 它们不落在任何派发窗口就把整段判失败。矛盾的作用域或 executionId 仍然失败。
  */
 export function classifyLegTrace(
   nav: Record<string, unknown> | null,
   taskId: string,
   samples: readonly CapturedRouteSample[],
   moves: readonly CapturedMove[],
-): { ok: boolean; problems: string[] } {
+): {
+  ok: boolean;
+  problems: string[];
+  facts: {
+    tracePoints: number;
+    dispatches: number;
+    compared: number;
+    acceptedSamples: number;
+    acceptedSamplesOutsideDispatchWindows: number;
+    acceptedSampleSequencesOutsideDispatch: number[];
+    outsideDispatchSequencesTruncated: boolean;
+  };
+} {
   const problems: string[] = [];
   const trace = nav !== null && Array.isArray(nav.trace)
     ? nav.trace.filter((entry): entry is { pos: FixtureEndpoint; ts: number } =>
@@ -1308,23 +1324,55 @@ export function classifyLegTrace(
     }
   }
 
-  // 每个 accepted 样本都必须属于该路由的一次真实派发及其时间范围，防止孤立样本混入关联。
-  for (const sample of acceptedSamples) {
-    const owned = taskMoves.some((move) =>
-      (routeDelegation === null || (
-        sample.delegationId === routeDelegation
-        && move.request.executionId.startsWith(`${routeDelegation}-step-`)))
-      && sample.sample.observedAt >= move.receivedAt
-      && sample.sample.observedAt <= move.request.deadlineMs
-      && sample.sample.worldId === move.request.worldId
-      && sample.sample.dim === move.request.dim
-      && sample.sample.sessionId === move.request.sessionId);
-    if (!owned) {
-      problems.push(`accepted sample sequence ${sample.sample.sequence} has no matching dispatch/time-range/scope`);
-    }
+  // 样本自身必须与 accepted 的条件一致；executionId 与 route delegation 矛盾仍失败。
+  const contradictoryExecution = acceptedSamples.find(
+    (sample) => sample.sample.executionId !== sample.delegationId,
+  );
+  if (contradictoryExecution !== undefined) {
+    problems.push(
+      `accepted sample sequence ${contradictoryExecution.sample.sequence} executionId ${contradictoryExecution.sample.executionId} contradicts route delegation ${contradictoryExecution.delegationId}`,
+    );
   }
 
-  return { ok: problems.length === 0, problems };
+  // 样本作用域必须与至少一次真实派发一致；矛盾仍失败，但时间窗口外的
+  // 稳定起点/终点样本不再因此被判失败。
+  const dispatchScopeOf = (sample: CapturedRouteSample): boolean => taskMoves.some((move) =>
+    sample.sample.worldId === move.request.worldId
+    && sample.sample.dim === move.request.dim
+    && sample.sample.sessionId === move.request.sessionId);
+  const contradictoryScope = taskMoves.length === 0
+    ? undefined
+    : acceptedSamples.find((sample) => !dispatchScopeOf(sample));
+  if (contradictoryScope !== undefined) {
+    problems.push(
+      `accepted sample sequence ${contradictoryScope.sample.sequence} scope contradicts the recorded dispatch scope`,
+    );
+  }
+
+  // 确认的 trace 点必须匹配派发；额外的 accepted 样本（首帧稳定、末帧或派发间隙）
+  // 是正常事实，只记录数量/有界序号，不作为失败。
+  const outsideDispatch = acceptedSamples.filter((sample) => !taskMoves.some((move) =>
+    sample.delegationId === sample.sample.executionId
+    && sample.sample.observedAt >= move.receivedAt
+    && sample.sample.observedAt <= move.request.deadlineMs
+    && sample.sample.worldId === move.request.worldId
+    && sample.sample.dim === move.request.dim
+    && sample.sample.sessionId === move.request.sessionId));
+  const outsideSequences = outsideDispatch.map((sample) => sample.sample.sequence);
+
+  return {
+    ok: problems.length === 0,
+    problems,
+    facts: {
+      tracePoints: trace.length,
+      dispatches: taskMoves.length,
+      compared,
+      acceptedSamples: acceptedSamples.length,
+      acceptedSamplesOutsideDispatchWindows: outsideDispatch.length,
+      acceptedSampleSequencesOutsideDispatch: outsideSequences.slice(0, 32),
+      outsideDispatchSequencesTruncated: outsideSequences.length > 32,
+    },
+  };
 }
 
 /**
