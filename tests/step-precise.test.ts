@@ -17,25 +17,36 @@ test('a downward step reports the selected support cell without revealing an uns
     dimension: w.dim, observationId: 1, observedAt: Date.now(), source: 'vision' as const,
   })) } });
   t.after(() => ctx.memory.close());
+  const originalMove = w.moveTo.bind(w);
   const move = t.mock.method(w, 'moveTo', async () => {});
   const bridge = makeBridge(ctx);
   const hidden = await bridge('stepTo', [1, 63, 0]) as { ok: boolean; summary: string; data: { landingSupport: { pos: unknown; observed: string | null } } };
   assert.equal(hidden.ok, false);
   assert.match(hidden.summary, /脚下 \(1,62,0\) 是 未看清的格子/);
-  assert.deepEqual(hidden.data.landingSupport, { pos: { x: 1, y: 62, z: 0 }, at: [0, -2, 1], placeAtInRange: false, observed: null });
-  assert.match(hidden.summary, /支撑格 \[0,-2,1\] 超出 place_at 上下 -1\.\.3 范围/);
+  assert.deepEqual(hidden.data.landingSupport, { pos: { x: 1, y: 62, z: 0 }, at: [0, -2, 1], placeAtInRange: true, observed: null, reference: 'observed' });
+  assert.doesNotMatch(hidden.summary, /超出 place_at/);
   assert.match(hidden.summary, /脚部目标格 \[0,-1,1\] 须留空/);
   assert.equal(move.mock.callCount(), 0);
 
   seeFloor = true;
   const visible = await stepTo.run(ctx, { at: [1, -1, 0], facing: 'E' });
   assert.match(visible.summary, /脚下 \(1,62,0\) 是 air/);
-  assert.deepEqual(visible.data?.landingSupport, { pos: { x: 1, y: 62, z: 0 }, at: [1, -2, 0], placeAtInRange: false, observed: 'air' });
-  assert.match(visible.summary, /支撑格 \[1,-2,0\] 超出 place_at 上下 -1\.\.3 范围/);
-  assert.equal(placeAt.validate({ at: [1, -2, 0], facing: 'E', item: 'cobblestone' }, w).ok, false);
-  assert.equal(primitiveSkills.find((skill) => skill.name === 'place_at')!.validate({ xyz: [1, 62, 0], item: 'cobblestone' }, w).ok, false,
+  assert.deepEqual(visible.data?.landingSupport, { pos: { x: 1, y: 62, z: 0 }, at: [1, -2, 0], placeAtInRange: true, observed: 'air', reference: 'observed' });
+  assert.doesNotMatch(visible.summary, /超出 place_at/);
+  // y=-2 的下一级支撑在 place_at 范围内：先显式补支撑，才可能迈下这一级。
+  assert.equal(placeAt.validate({ at: [1, -2, 0], facing: 'E', item: 'cobblestone' }, w).ok, true);
+  assert.equal(primitiveSkills.find((skill) => skill.name === 'place_at')!.validate({ xyz: [1, 62, 0], item: 'cobblestone' }, w).ok, true,
     'the reported placement range also applies to absolute targets');
   assert.equal(move.mock.callCount(), 0);
+  w.inv.set('cobblestone', 1);
+  const placed = await placeAt.run(ctx, { at: [1, -2, 0], facing: 'E', item: 'cobblestone' });
+  assert.equal(placed.status, 'succeeded', placed.summary);
+  assert.equal(w.blockAt({ x: 1, y: 62, z: 0 }), 'cobblestone');
+  assert.equal(w.inv.get('cobblestone'), 0);
+  move.mock.mockImplementation(originalMove);
+  const descended = await stepTo.run(ctx, { at: [1, -1, 0], facing: 'E' });
+  assert.equal(descended.status, 'succeeded', descended.summary);
+  assert.deepEqual(w.pos, { x: 1.5, y: 63, z: 0.5 });
 });
 
 test('support feedback identifies the floor to fill while keeping the selected foot cell empty', async (t) => {
@@ -52,7 +63,7 @@ test('support feedback identifies the floor to fill while keeping the selected f
   t.after(() => ctx.memory.close());
   const blocked = await stepTo.run(ctx, { at: [1, 0, 0], facing: 'N' });
   assert.equal(blocked.status, 'failed');
-  assert.deepEqual(blocked.data?.landingSupport, { pos: { x: 0, y: 63, z: -1 }, at: [1, -1, 0], placeAtInRange: true, observed: 'air' });
+  assert.deepEqual(blocked.data?.landingSupport, { pos: { x: 0, y: 63, z: -1 }, at: [1, -1, 0], placeAtInRange: true, observed: 'air', reference: 'observed' });
   assert.match(blocked.summary, /支撑格 \[1,-1,0\]；脚部目标格 \[1,0,0\] 须留空/);
   assert.deepEqual(w.actions, [], 'reporting a missing floor does not move or spend blocks');
   assert.equal(w.inv.get('cobblestone'), 1);

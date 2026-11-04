@@ -1,5 +1,7 @@
 import { DIRS } from '../perception/perception.ts';
+import { supportCell } from '../perception/local.ts';
 import { DIR_OFFSETS, dropBelow, isSoftBlock, LIQUID_BLOCKS, surroundings } from '../perception/surroundings.ts';
+import { supportTop } from '../perception/geometry.ts';
 import { dirOfYaw, interactiveName } from '../perception/vision.ts';
 import { isContainerLandmark } from '../memory/chest-memory.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
@@ -126,8 +128,10 @@ async function recoverBlock(ctx: SkillCtx, args: TargetDigArgs) {
       const p = adapter.state().pos;
       return affected.some((c) => c.y >= p.y - 1.05 && c.y <= p.y + 0.01 && c.x < p.x + 0.3 && c.x + 1 > p.x - 0.3 && c.z < p.z + 0.3 && c.z + 1 > p.z - 0.3);
     };
-    // 低方块（床、下半砖、地毯、雪层……）站在上面拆掉只是往下落不到一格，不会摔伤；别再走“先离开再拆”那一套（那一步在窄平台上常常走不动，导致一直拆不掉）
-    if (supportsMe() && !/_(bed|slab|carpet)$|^snow$|^daylight_detector$/.test(name)) {
+    // 低方块（床、下半砖、地毯、雪层、耕地……）按碰撞顶面判断：站在上面拆掉只是往下落不到一格，不会摔伤；
+    // 别再走“先离开再拆”那一套（那一步在窄平台上常常走不动，导致一直拆不掉）。
+    const supportFace = supportTop(name, adapter.blockStateAt?.(pos)?.properties ?? {});
+    if (supportsMe() && (supportFace === null || supportFace >= 1 - 1e-6)) {
       const me = floor(adapter.state().pos);
       const landing = Object.values(DIR_OFFSETS).map(([dx, dz]) => ({ x: me.x + dx, y: me.y, z: me.z + dz })).find((c) => {
         const below = adapter.blockAt({ ...c, y: c.y - 1 });
@@ -237,8 +241,9 @@ export const dig: Skill<DigArgs> = {
       }
       if (args.dir === 'down') {
         for (let i = 0; i < args.blocks; i++) {
-          const me = floor(adapter.state().pos);
-          const c = { x: me.x, y: me.y - 1, z: me.z };
+          // 和 dig_at [0,-1,0] 一样挖“当前支撑格”：站在半砖/床这类矮方块上时，
+          // 支撑就在脚所在那格（floor(y)-1 会挖到它下面的空气）。
+          const c = supportCell(adapter.state().pos);
           targetCell = c;
           // 脚下这格挖空后，人往下掉多少格：向下扫最多 3 格找第一个实心落点（3 格以内不掉血）。
           // 以前只看脚下 2 格是不是实心，等于只允许掉 1 格；现在放宽到「不掉血的 3 格安全余量」。
@@ -255,16 +260,19 @@ export const dig: Skill<DigArgs> = {
           }
           const n = await breakCell(ctx, c, false, undefined, { allowWater: args.wet, allowLava: args.lava });
           if (n) dug.push(n);
-          // 掉 drop 格后落脚的那一格（实心落点方块上面）：人从 me.y 落到 me.y - drop
-          const landingCell = { x: c.x, y: c.y - drop + 1, z: c.z };
+          // 落到 drop 格下方第一个实心落点的实际顶面：半砖/台阶按碰撞顶面（可为分数），不再只认整数脚格。
+          const landPos = { x: c.x, y: c.y - drop, z: c.z };
+          const landState = adapter.blockStateAt?.(landPos);
+          const landTop = landState ? supportTop(landState.name, landState.properties ?? {}) : null;
+          const expectedFoot = landTop !== null ? landPos.y + landTop : landPos.y + 1;
           let moveError: unknown;
-          try { await adapter.moveTo({ kind: 'xyz', x: landingCell.x, y: landingCell.y, z: landingCell.z }, { signal, timeoutMs: 4000 }); }
+          try { await adapter.moveTo({ kind: 'xyz', x: c.x, y: expectedFoot, z: c.z }, { signal, timeoutMs: 4000 }); }
           catch (e) { if (isAbort(e)) throw e; moveError = e; }
           throwIfAborted(signal);
           const position = adapter.state().pos;
-          if (Math.floor(position.x) !== landingCell.x || Math.floor(position.y + 0.05) !== landingCell.y || Math.floor(position.z) !== landingCell.z) {
-            return fail(moveError ? codeFromError(moveError) : 'PATH_NOT_FOUND', `已挖掉 ${dug.length} 格，确认到达下一级 ${walked} 次；没有落到 (${landingCell.x},${landingCell.y},${landingCell.z})，实际位置 (${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})${moveError ? `；${why(moveError)}` : ''}`,
-              { dug, walked, targetCell: c, drop, position: { ...position }, effectEvidence: effectEvidence(position) });
+          if (Math.floor(position.x) !== c.x || Math.abs(position.y - expectedFoot) > 0.05 || Math.floor(position.z) !== c.z) {
+            return fail(moveError ? codeFromError(moveError) : 'PATH_NOT_FOUND', `已挖掉 ${dug.length} 格，确认到达下一级 ${walked} 次；没有落到 (${c.x},${expectedFoot.toFixed(2)},${c.z})，实际位置 (${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})${moveError ? `；${why(moveError)}` : ''}`,
+              { dug, walked, targetCell: c, drop, expectedFoot, position: { ...position }, effectEvidence: effectEvidence(position) });
           }
           walked++;
         }

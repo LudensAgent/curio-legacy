@@ -1,4 +1,5 @@
 import type { Vec3Like } from '../adapter/types.ts';
+import { supportTop } from '../perception/geometry.ts';
 import { AbortedError, dist3, sleep, throwIfAborted } from '../util.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill } from './types.ts';
 
@@ -44,6 +45,18 @@ export const descend: Skill<{ target: Vec3Like }> = {
       return refused(`未下行：落点净空${state(option.clearance)}，落体通道${state(option.corridor)}，落点${option.approach === 'adjacent' ? '在相邻位置' : '不在相邻位置'}`, 'BAD_ARGS', { geometry });
     }
     const target = option.target;
+    // 与 step/excavation 同一套碰撞顶面：地面落点必须是已观察支撑方块的真实站立面，
+    // 不能把半格/窄条顶面按整数脚高硬套（水落点另由水深检查）。
+    if (option.surface === 'ground') {
+      const supportState = adapter.blockStateAt?.(option.support.pos);
+      const name = supportState?.name ?? option.support.name;
+      const top = supportTop(name, supportState?.properties ?? {});
+      if (top === null) return refused(`落点支撑 ${name} 没有可站立顶面，不能按地面落点下行`, 'BAD_ARGS', { support: option.support });
+      const surface = option.support.pos.y + top;
+      if (Math.abs(surface - option.surfaceY) > 0.01 || Math.abs(target.y - surface) > 0.01) {
+        return refused(`落点支撑面按碰撞形状在 y=${surface.toFixed(2)}，与所选脚高 y=${target.y.toFixed(2)} 不符`, 'BAD_ARGS', { support: option.support, surface });
+      }
+    }
     if (Math.abs(Math.floor(initial.pos.x) - Math.floor(target.x)) + Math.abs(Math.floor(initial.pos.z) - Math.floor(target.z)) !== 1
       || Math.abs(target.y - Math.round(target.y)) > 0.01) return refused('当前寻路器只支持相邻四向、整数脚位的单步下落；此落点需要其他方式接近');
     const surfaceY = option.surface === 'water' ? option.support.pos.y + 1 : target.y, drop = initial.pos.y - surfaceY;

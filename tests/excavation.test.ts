@@ -109,6 +109,36 @@ test('excavation refuses unsafe, partial or unknown floors and adjacent liquids 
   assert.equal(world.digs.length, 0);
 });
 
+test('a shallow missing support returns the gap before digging and never spends blocks', async () => {
+  const world = new ExcavationWorld();
+  world.setBlock({ x: 1, y: 62, z: 0 }, 'air'); // 目标脚格下是空气，再下面 y61 是石头
+  world.inv.set('cobblestone', 3);
+  const result = await excavationSkill.run(context(world), args({ steps: 1 }));
+  assert.equal(result.status, 'failed', result.summary);
+  assert.equal(world.digs.length, 0, '报缺口之前没有开挖');
+  assert.equal(world.moves.length, 0, '报缺口之前没有移动');
+  assert.equal(world.inv.get('cobblestone'), 3, '纯开挖不擅自消耗材料垫块');
+  assert.ok(!world.actions.some((action) => action.startsWith('place:')), '没有隐式放置');
+  // 显式补上支撑（Agent 自己选择 place_at 的组合动作）后，同一段开挖可以完成。
+  world.setBlock({ x: 1, y: 62, z: 0 }, 'cobblestone');
+  const done = await excavationSkill.run(context(world), args({ steps: 1 }));
+  assert.equal(done.status, 'succeeded', done.summary);
+  assert.deepEqual(world.pos, { x: 1.5, y: 63, z: 0.5 });
+});
+
+test('a partial support surface is a geometric mismatch, not a claim that the game block is unstable', async () => {
+  const world = new ExcavationWorld();
+  world.setBlock({ x: 1, y: 62, z: 0 }, 'oak_slab');
+  world.blockProperties.set('1,62,0', { type: 'bottom' }); // 顶面 62.5，不是请求的脚高 63
+  const result = await excavationSkill.run(context(world), args({ steps: 1 }));
+  assert.equal(result.status, 'failed', result.summary);
+  assert.equal(result.data?.unsupportedGeometry, true);
+  assert.match(result.summary, /支撑面在 y=62\.50/);
+  assert.doesNotMatch(result.summary, /站不稳/);
+  assert.equal(world.digs.length, 0);
+  assert.equal(world.moves.length, 0);
+});
+
 test('excavation refuses an unknown body cell instead of treating it as clear', async () => {
   const world = new ExcavationWorld(), adapter: GameAdapter = world;
   const read = adapter.blockAt.bind(adapter);

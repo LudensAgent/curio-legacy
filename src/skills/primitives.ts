@@ -1,7 +1,7 @@
 import type { Vec3Like } from '../adapter/types.ts';
 import { FACINGS, facingOfYaw, feetCell, localMap, supportCell, toWorld, type Facing } from '../perception/local.ts';
 import { attachmentFaces, dropBelow, isSoftBlock, LIQUID_BLOCKS, surroundings } from '../perception/surroundings.ts';
-import { blockCollidesBody, collisionBoxes, supportTop } from '../perception/geometry.ts';
+import { blockCollidesBody, bodyBoxAt, bodyCells, footSurfaceY, hasAnyCollision, isPassableDoor, isReplaceable, placementReference, shapeKnown, supportTop, type BlockProps } from '../perception/geometry.ts';
 import { AbortedError, sleep, throwIfAborted } from '../util.ts';
 import { breakCell, why } from './body.ts';
 import { classifyBlock, MAN_MADE_NOTE, OWN_BUILDING_HINT, ownBuildingAt, storedChestAt } from './build.ts';
@@ -273,24 +273,10 @@ export const stepTo: Skill<CellArgs> = {
     const observed = (p: Vec3Like) => states.get(`${p.x},${p.y},${p.z}`) ?? null;
     const describe = (p: Vec3Like) => observed(p)?.name ?? (a.blockAt(p) === null ? '未加载的格子' : '未看清的格子');
     const isUnseen = (p: Vec3Like) => observed(p) === null;
-    const supportTopAt = (p: Vec3Like): number | null => {
-      const o = observed(p);
-      if (!o) return null;
-      const top = supportTop(o.name, o.properties);
-      return top === null ? null : p.y + top;
-    };
-    // 某脚格上的实际脚高：薄层（半砖/雪/地毯）在脚格本身；否则看脚下一格。
-    const footYAt = (cell: Vec3Like): number | null => {
-      const inCell = supportTopAt(cell);
-      const below = supportTopAt({ ...cell, y: cell.y - 1 });
-      if (inCell !== null && (below === null || inCell > below)) return inCell;
-      return below;
-    };
     // 身体净空：脚高 footY、列 (cx,cz) 处 0.6×1.8 身体盒是否与已观察方块相交；返回相交格或 null。
     const clearanceBlocker = (footY: number, cx: number, cz: number): Vec3Like | null => {
-      const body = { minX: cx + 0.2, maxX: cx + 0.8, minY: footY, maxY: footY + 1.8, minZ: cz + 0.2, maxZ: cz + 0.8 };
-      for (let y = Math.floor(footY); y <= Math.floor(footY + 1.8 - 1e-6); y++) {
-        const cell = { x: cx, y, z: cz };
+      const body = bodyBoxAt(footY, cx, cz);
+      for (const cell of bodyCells(footY, cx, cz)) {
         const o = observed(cell);
         if (o && blockCollidesBody(o.name, o.properties, cell, body)) return cell;
       }
@@ -366,11 +352,11 @@ export const stepTo: Skill<CellArgs> = {
     const targetBlock = observed(target);
     // 目标格是否被整块/窄条挡住（打开的木门可穿，门板贴边不挡中心）。
     const blocksBodyCell = (name: string, props: Record<string, string | number | boolean>) => {
-      if (name.endsWith('_door') && name !== 'iron_door' && props.open === true) return false;
+      if (isPassableDoor(name, props)) return false;
       const top = supportTop(name, props);
-      return top !== null ? top >= 1 - 1e-6 : collisionBoxes(name, props).length > 0;
+      return top !== null ? top >= 1 - 1e-6 : hasAnyCollision(name, props);
     };
-    let landingSupport: { pos: Vec3Like; at: [number, number, number]; placeAtInRange: boolean; observed: string | null } | undefined;
+    let landingSupport: { pos: Vec3Like; at: [number, number, number]; placeAtInRange: boolean; observed: string | null; reference: ReturnType<typeof placementReference> } | undefined;
     let targetFoot: number | null = null;
     const problems: string[] = [];
     if (targetBlock === null) {
@@ -380,15 +366,23 @@ export const stepTo: Skill<CellArgs> = {
       problems.push(`目标格是 ${dn}${dn.endsWith('_door') ? '（门的状态或碰撞形状阻碍通行）' : LIQUID_BLOCKS.has(dn) ? '' : /chest|barrel|furnace|crafting_table|_bed$/.test(dn) ? '（是用得着的东西，绕过去，别挖）' : `（要过去先 dig_at [${args.at}] 挖开）`}`);
     } else {
       // 目标格能站：按实际顶面算脚高；无支撑则报缺口。
-      const actualFoot = footYAt(target);
+      const actualFoot = footSurfaceY(target, observed);
       if (actualFoot === null) {
         const floor = { ...target, y: target.y - 1 };
         const supportAt = toRel(feet, args.facing, floor);
-        const placeAtInRange = supportAt[1] >= -1;
-        landingSupport = { pos: floor, at: supportAt, placeAtInRange, observed: observed(floor)?.name ?? null };
+        // 下一级 [1,-1,0] 的支撑在 [1,-2,0]：feet 下两格仍在真实交互距离内；能放与否还要看有没有已观察的贴面。
+        const placeAtInRange = supportAt[1] >= -2 && supportAt[1] <= 3;
+        const neighbors = [{ x: 1, y: 0, z: 0 }, { x: -1, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }, { x: 0, y: -1, z: 0 }, { x: 0, y: 0, z: 1 }, { x: 0, y: 0, z: -1 }]
+          .map((d) => ({ x: floor.x + d.x, y: floor.y + d.y, z: floor.z + d.z }));
+        observe(neighbors);
+        const reference = placementReference(floor, observed);
+        landingSupport = { pos: floor, at: supportAt, placeAtInRange, observed: observed(floor)?.name ?? null, reference };
         const dn = describe(floor);
         const gap = isUnseen(floor) ? `${dn}，无法确认支撑` : `${dn}，无已确认支撑`;
-        problems.unshift(`目标格脚下 (${floor.x},${floor.y},${floor.z}) 是 ${gap}；支撑格 [${supportAt}]${placeAtInRange ? '' : ' 超出 place_at 上下 -1..3 范围'}；脚部目标格 [${args.at}] 须留空；未执行迈步`);
+        const placeNote = !placeAtInRange ? '（超出 place_at 上下 -2..3 范围）'
+          : reference === 'unknown' ? '（在 place_at 范围内；贴面未看清）'
+          : reference === 'none' ? '（在 place_at 范围内；未观察到可贴面的方块，直接放可能失败）' : '';
+        problems.unshift(`目标格脚下 (${floor.x},${floor.y},${floor.z}) 是 ${gap}；支撑格 [${supportAt}]${placeNote}；脚部目标格 [${args.at}] 须留空；未执行迈步`);
       } else {
         targetFoot = absolute ? args.xyz!.y : actualFoot;
         // 相对目标是“脚格”偏移，基准必须是整数脚格 feet.y，而不是当前实际支撑顶面：
@@ -477,15 +471,31 @@ export const stepTo: Skill<CellArgs> = {
   },
 };
 
+/** 已占用格子的碰撞形状：半砖、雪层、地毯、门、火把不是同一种“实心”，反馈里分开说。 */
+function shapeOf(name: string, properties: BlockProps = {}): string {
+  const top = supportTop(name, properties), known = shapeKnown(name, properties);
+  const topText = top !== null ? `顶面 ${top}` : known ? '无碰撞' : '状态未确认';
+  if (name === 'snow') return `雪层（${String(properties.layers ?? 1)} 层，${topText}）`;
+  if (/_carpet$/.test(name)) return `地毯（薄层，${topText}）`;
+  if (/_slab$/.test(name)) return `${properties.type === 'top' ? '上半砖' : '下半砖'}（${top !== null ? `顶面 ${top}` : topText}）`;
+  if (/_door$/.test(name)) return `门（${properties.half === 'upper' ? '上半' : '下半'}，${properties.open === true ? '打开' : '关闭'}）`;
+  if (/torch$/.test(name)) return '火把（无碰撞、不承重）';
+  if (/_trapdoor$/.test(name)) return `活板门（${properties.open === true ? '打开' : '关闭'}）`;
+  if (/_stairs$/.test(name)) return '台阶';
+  if (/_bed$/.test(name)) return '床';
+  if (name === 'ladder') return '梯子（不承重）';
+  return top === null ? '非完整方块' : `可站立顶面 ${top}`;
+}
+
 export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
   name: 'place_at',
-  description: '在身边指定的空格放一块方块（[前,上,右]）。实心方块放 [0,0,0] 表示原地垫一块站上去（跳起来往脚下放）；梯子、火把这类贴墙的东西可以放进自己站的格子 [0,0,0]/[0,1,0]，但旁边要有实心墙。item 写方块名，或 "any" 用背包里随便一种能垫的（泥土、圆石、木板…）。树苗、花这类小植物也是方块，可以用 item 指定名字放在草方块/泥土上（之后长成什么见知识库）',
-  argsDoc: '{"at":[前,上,右], "item"?:"<方块名>|any", "facing"?:"N|E|S|W"}（前后/左右 ±2，上下 -1..3；at 是方块占据格；例：[0,0,0] 原地垫高，[1,-1,0] 支撑 step [1,0,0]，会挡住 step [1,-1,0]；{"at":[0,0,0],"item":"ladder"} 在脚边墙上挂梯子）',
+  description: '在身边指定的空格放一块方块（[前,上,右]）。实心方块放 [0,0,0] 表示原地垫一块站上去（跳起来往脚下放）；梯子、火把这类贴墙的东西可以放进自己站的格子 [0,0,0]/[0,1,0]，但旁边要有实心墙。item 写方块名，或 "any" 用背包里随便一种能垫的（泥土、圆石、木板…）。树苗、花这类小植物也是方块，可以用 item 指定名字放在草方块/泥土上（之后长成什么见知识库）。目标格已有别的方块（包括半砖、雪层、地毯、门、火把）时如实报占用，不把错误材料当已完成；只放这一格，不替你做搭柱以外的施工',
+  argsDoc: '{"at":[前,上,右], "item"?:"<方块名>|any", "facing"?:"N|E|S|W"}（前后/左右 ±2，上下 -2..3；at 是方块占据格；例：[0,0,0] 原地垫高，[1,-1,0] 支撑 step [1,0,0]，会挡住 step [1,-1,0]；[1,-2,0] 补下一级 [1,-1,0] 脚下的支撑；{"at":[0,0,0],"item":"ladder"} 在脚边墙上挂梯子）',
   timeoutMs: 15000,
   movement: true,
   validate(raw, adapter) {
     const a = obj(raw);
-    const at = parseRel(relValue(a), { f: 2, u: [-1, 3], r: 2 });
+    const at = parseRel(relValue(a), { f: 2, u: [-2, 3], r: 2 });
     if (typeof at === 'string') return { ok: false, error: at };
     const item = String(a.item ?? a.block ?? 'any').replace(/^minecraft:/, '');
     if (item !== 'any' && !adapter.isKnownItem(item)) return { ok: false, error: `未知物品：${item}` };
@@ -501,24 +511,30 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
     const feet = feetCell(a.state().pos);
     // 相对 [0,0,0] 的实心块是“原地垫高”搭柱；绝对 xyz 落到脚这一格仍按普通放置，不套搭柱。
     const pos = args.xyz !== undefined ? { x: args.xyz.x, y: args.xyz.y, z: args.xyz.z } : toWorld(feet, args.facing, args.at);
-    const seen = visibleCells(ctx, [pos, { ...feet, y: feet.y + 2 }]);
     const attachable = args.item !== 'any' && attachmentFaces(args.item);
+    const neighbors = [{ x: 1, y: 0, z: 0 }, { x: -1, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }, { x: 0, y: -1, z: 0 }, { x: 0, y: 0, z: 1 }, { x: 0, y: 0, z: -1 }]
+      .map((d) => ({ x: pos.x + d.x, y: pos.y + d.y, z: pos.z + d.z }));
+    const seen = visibleStates(ctx, [pos, { ...feet, y: feet.y + 2 }, ...neighbors]);
+    const stateAt = (p: Vec3Like) => seen.get(`${p.x},${p.y},${p.z}`) ?? null;
     // 搭柱是“站高一格”的动作模式，目标不是“把方块放进这一格”，不做普通放置的“已满足”幂等判断。
     const pillar = args.xyz === undefined && args.at[0] === 0 && args.at[1] === 0 && args.at[2] === 0 && !attachable;
     if (!pillar) {
-      // 普通放置：目标已经是要放的东西（必须亲眼看见才算，不能拿服务器 blockAt 的墙后数据泄露方块名或当成已满足）。
-      const observed = seen.get(`${pos.x},${pos.y},${pos.z}`);
-      if (observed !== undefined) {
-        const sameItem = args.item !== 'any' && (observed === args.item || (args.item === 'torch' && observed === 'wall_torch'));
-        const anySolid = args.item === 'any' && !AIR.has(observed) && !isSoftBlock(observed) && !LIQUID_BLOCKS.has(observed);
-        if (sameItem || anySolid) return ok(`[${args.at}] 已经有 ${observed} 了`, { already: observed, noop: true, ...after(ctx, args.facing, pos) });
-        if (!AIR.has(observed) && !isSoftBlock(observed) && !LIQUID_BLOCKS.has(observed)) {
-          return fail('PATH_NOT_FOUND', `[${args.at}] 已被 ${observed} 占据，不是要放的 ${args.item}；先 dig_at 清掉，或改放 ${observed}`, { occupied: observed, ...after(ctx, args.facing, pos) });
+      // 普通放置：只有亲眼看见同一物品才算已满足。半砖/雪层/地毯/门/火把都占着这一格，
+      // 不能因为“看起来是实心”就把错误材料当成功。
+      const here = stateAt(pos);
+      if (here) {
+        const sameItem = args.item !== 'any' && (here.name === args.item || (args.item === 'torch' && here.name === 'wall_torch'));
+        const anySolid = args.item === 'any' && !isReplaceable(here.name) && hasAnyCollision(here.name, here.properties ?? {});
+        const shape = shapeOf(here.name, here.properties);
+        if (sameItem || anySolid) return ok(`[${args.at}] 已经有 ${here.name} 了（${shape}）`, { already: here.name, alreadyShape: shape, noop: true, ...after(ctx, args.facing, pos) });
+        if (!isReplaceable(here.name)) {
+          return fail('PATH_NOT_FOUND', `[${args.at}] 已被 ${here.name} 占据（${shape}），不是要放的 ${args.item}；先 dig_at 清掉，或换一格`, { occupied: here.name, occupiedShape: shape, ...after(ctx, args.facing, pos) });
         }
       } else {
         const cur = a.blockAt(pos);
-        // 没看清、但服务器同步数据说明这一格已实心占用：如实说“已被占用、未看清名称”，不泄露方块名，也不当作可放置。
-        if (cur !== null && !AIR.has(cur) && !LIQUID_BLOCKS.has(cur) && !isSoftBlock(cur)) return fail('PATH_NOT_FOUND', `[${args.at}] 已被占用，未放置；当前未看清方块名称`, after(ctx, args.facing, pos));
+        // 没看清：未加载不能当空气；服务器同步数据说明已占用时如实报占用，但不泄露方块名。
+        if (cur === null) return fail('NOT_FOUND', `[${args.at}] 目标格未加载，无法确认是否为空，没有放置`, after(ctx, args.facing, pos));
+        if (!isReplaceable(cur)) return fail('PATH_NOT_FOUND', `[${args.at}] 已被占用，未放置；当前未看清方块名称`, after(ctx, args.facing, pos));
       }
     }
     const inv = a.state().inventory;
@@ -547,7 +563,7 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
         }
       } else {
         const above = { ...feet, y: feet.y + 2 }, n = a.blockAt(above);
-        if (n === null || !AIR.has(n) && !isSoftBlock(n)) return fail('PATH_NOT_FOUND', `无法确认头顶跳跃空间足够（${seen.get(`${above.x},${above.y},${above.z}`) ?? '未看清的格子'}）`, { ...after(ctx, args.facing, pos), obscured: true });
+        if (n === null || !AIR.has(n) && !isSoftBlock(n)) return fail('PATH_NOT_FOUND', `无法确认头顶跳跃空间足够（${stateAt(above)?.name ?? '未看清的格子'}）`, { ...after(ctx, args.facing, pos), obscured: true });
         try {
           await a.moveTo({ kind: 'xyz', x: feet.x, y: feet.y + 1, z: feet.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(8000, ctx.deadline - Date.now())), allowTerrainChanges: true });
         } catch (e) {
@@ -568,6 +584,13 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
         return fail('BAD_ARGS', `[${args.at}] 正下方是 ${below}，放上实心方块会盖住箱盖、之后打不开；请换个位置，或先用 dig_at {"own":true} 把箱子挪走`);
       }
     }
+    // 附着面：已看清六个方向却没有可贴面的方块，就不必再调一个必然失败的放置；
+    // 还有方向没看清时只报未知，交给适配器按真实视线/距离尝试。
+    const reference = placementReference(pos, stateAt, attachable || null);
+    if (reference === 'none') {
+      return fail('PATH_NOT_FOUND', `[${args.at}] 四周已看清，没有可贴面的方块；${
+        attachable === 'side' ? `${args.item} 只能挂在实心方块侧面` : attachable === 'floor_or_side' ? `${args.item} 要立在实心方块顶面或挂在侧面` : '悬空处放不了方块'}；先走近别的面或换个位置`, { reference, ...after(ctx, args.facing, pos) });
+    }
     try {
       const r = await a.placeBlockAt(pos, names, ctx.signal);
       if (!r.ok) {
@@ -581,8 +604,13 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
       if (isAbort(e)) throw e;
       return fail(codeFromError(e), `放 [${args.at}] 没成：${(e as Error).message}`, after(ctx, args.facing, pos));
     }
-    const now = a.blockAt(pos);
+    const now = a.blockStateAt?.(pos)?.name ?? a.blockAt(pos);
     if (!now || AIR.has(now)) return fail('EFFECT_NOT_CONFIRMED', `[${args.at}] 还是空的`, after(ctx, args.facing, pos));
+    // 验收按实际出现的东西：请求 dirt 却出现 stone 时不能把“有方块了”当作成功。
+    const accepted = args.item === 'any'
+      ? names.includes(now)
+      : now === args.item || (args.item === 'torch' && now === 'wall_torch');
+    if (!accepted) return fail('EFFECT_NOT_CONFIRMED', `[${args.at}] 实际出现的是 ${now}，不是请求的 ${args.item}`, { placed: now, requested: args.item, ...after(ctx, args.facing, pos) });
     noteEdit(ctx.taskId, 'place', pos);
     // 亲手放下的功能方块（附魔台、铁砧、酿造台、工作台……）记成“我的X”：以前只有 craft/use_item_on 放的才记，place_at 放的就忘了
     if (isStation(now)) rememberStation(ctx, now, pos);
@@ -640,4 +668,4 @@ function withAbsolute<A extends CellArgs>(skill: Skill<A>, bounds: { f: number; 
   };
 }
 
-export const primitiveSkills = [withAbsolute(digAt, { f: 2, u: [-1, 3], r: 2 }), withAbsolute(stepTo, { f: 1, u: [-1, 1], r: 1 }), withAbsolute(placeAt, { f: 2, u: [-1, 3], r: 2 })];
+export const primitiveSkills = [withAbsolute(digAt, { f: 2, u: [-1, 3], r: 2 }), withAbsolute(stepTo, { f: 1, u: [-1, 1], r: 1 }), withAbsolute(placeAt, { f: 2, u: [-2, 3], r: 2 })];

@@ -52,6 +52,22 @@ test('局部地图在各朝向列出已看见且有支撑的下一级脚部落�
   }
 });
 
+test('局部地图的 stand 按碰撞顶面给出分数脚高，与 step 的半砖落脚一致', () => {
+  const pos = { x: 0, y: 64, z: 0 };
+  const adapter = { blockAt: () => { throw new Error('不能用隐藏世界补全视觉'); } };
+  const observed = new Map<string, { name: string; properties?: Record<string, string | number | boolean> }>([
+    ['0,64,-1', { name: 'oak_slab', properties: { type: 'bottom' } }],
+    ['0,63,-1', { name: 'grass_block', properties: {} }],
+    ['0,65,-1', { name: 'air', properties: {} }],
+    ['0,66,-1', { name: 'air', properties: {} }],
+  ]);
+  const map = localMap(adapter, pos, 'N', (positions) => positions.flatMap((cell) => {
+    const state = observed.get(`${cell.x},${cell.y},${cell.z}`);
+    return state ? [{ pos: cell, ...state }] : [];
+  }));
+  assert.ok(map.spots.stand.includes('[1,0,0] 前（脚高 64.50）'), `半砖顶面按 64.5 列出：${map.spots.stand}`);
+});
+
 test('下一级支撑未知、是液体或身体空间被挡时，局部地图不声称能站', () => {
   const pos = { x: 0, y: 64, z: 0 };
   const adapter = { blockAt: () => { throw new Error('不能用隐藏世界补全视觉'); } };
