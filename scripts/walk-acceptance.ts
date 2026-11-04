@@ -179,22 +179,29 @@ const ARENA = {
   fluidLaneAvoid: 'x76..90, z76..86',
 };
 
-/** W2 平台：小块高台，两格长支撑面、分数边缘起点、目标一格外（真实分数边缘用例）。 */
+/**
+ * W2 平台：真正 2×1 的整数方块支撑面（x205..206, z205），
+ * 世界连续支撑面为 x[205,207)、z[205,206)（inclusive bounds → max+1）。
+ */
 const W2_PLATFORM = {
-  // 支撑面积（整数格，含起止）：两格长 × 一格宽的窄高台，迫使身体半宽 0.3 全程留在台面上。
-  xMin: 205, xMax: 207, zMin: 205, zMax: 206,
+  // 整数方块 inclusive bounds：2 格长 × 1 格宽。
+  xMin: 205, xMax: 206, zMin: 205, zMax: 205,
   // 台面顶的脚高（feetY，方块在 feetY-1）。
   feetY: 64,
   material: 'minecraft:stone',
-  // 分数起点：x=205.55 靠近 +X 边缘，z=205.5 居中；目标沿 +X 一格外（206.55）。
-  start: { x: 205.55, y: 64, z: 205.5 },
-  target: { x: 206.55, y: 64, z: 205.5 },
+  // 分数起点与目标：目标 x=206.55 紧邻真实外边缘 x=207（身体半宽 0.3 仍在支撑面上）。
+  start: { x: 205.55, y: 64, z: 205.52 },
+  target: { x: 206.55, y: 64, z: 205.52 },
 };
 
-/** W1/W6/W7 的平坦步行道：显式建造的支撑面，不假设天然地形。 */
+/**
+ * W1/W6/W7 的平坦步行道：显式建造的支撑面，不假设天然地形。
+ * W1 路线在 z216.5 先 +X 再 +Z 到 z217.5，因此 z 至少覆盖 216..217；
+ * x 覆盖 W6 的十格直行与 W7 的直行余量，仍落在授权 x200..220, z200..220 内。
+ */
 const WALK_LANE = {
-  // 沿 +X 的一格宽步行道（支撑方块在 feetY-1）。
-  xMin: 200, xMax: 210, zMin: 216, zMax: 216,
+  // 整数方块 inclusive bounds（支撑方块在 feetY-1，净空在 feetY/feetY+1）。
+  xMin: 200, xMax: 216, zMin: 216, zMax: 217,
   feetY: 64,
   material: 'minecraft:stone',
   start: { x: 200.5, y: 64, z: 216.5 },
@@ -305,13 +312,27 @@ export function partialMatchesLastSample(nav: NavResult | undefined, accepted: {
     && Math.abs(nav.lastPosition.y - last.y) <= tol;
 }
 
-/** 位置是否落在平台足迹内（含身体半宽 0.3 的物理支撑几何，非任意高度上的 x/z 重叠）。 */
-export function withinFootprint(pos: { x: number; z: number }, f: { xMin: number; xMax: number; zMin: number; zMax: number }, halfWidth = 0.3): boolean {
-  return pos.x >= f.xMin - halfWidth && pos.x <= f.xMax + halfWidth
-    && pos.z >= f.zMin - halfWidth && pos.z <= f.zMax + halfWidth;
+/** 整数方块 inclusive bounds → 世界连续支撑面 [min, max+1]（例如格 x205..206 → 面 [205,207)）。 */
+export function blockFaceBounds(f: { xMin: number; xMax: number; zMin: number; zMax: number }) {
+  return { xMin: f.xMin, xMax: f.xMax + 1, zMin: f.zMin, zMax: f.zMax + 1 };
 }
 
-/** 是否任一帧逃出平台足迹（含半宽）。 */
+/** 两段连续区间是否有严格正重叠；恰好边界接触（长度为 0）不算。 */
+export function positiveOverlap(aMin: number, aMax: number, bMin: number, bMax: number): number {
+  return Math.min(aMax, bMax) - Math.max(aMin, bMin);
+}
+
+/**
+ * 位置是否有水平支撑：身体半宽 0.3 的 AABB 与连续支撑面在两个轴上都有严格正重叠。
+ * 不要求整个脚掌留在台面；刚好零接触不算支撑。
+ */
+export function withinFootprint(pos: { x: number; z: number }, f: { xMin: number; xMax: number; zMin: number; zMax: number }, halfWidth = 0.3): boolean {
+  const face = blockFaceBounds(f);
+  return positiveOverlap(pos.x - halfWidth, pos.x + halfWidth, face.xMin, face.xMax) > 0
+    && positiveOverlap(pos.z - halfWidth, pos.z + halfWidth, face.zMin, face.zMax) > 0;
+}
+
+/** 是否任一帧没有水平支撑（已把整数方块 bounds 转为连续面并应用半宽）。 */
 export function platformEscaped(frames: { x: number; z: number }[], f: { xMin: number; xMax: number; zMin: number; zMax: number }, halfWidth = 0.3): boolean {
   return frames.some((p) => !withinFootprint(p, f, halfWidth));
 }
@@ -597,35 +618,51 @@ interface PackageMetaOptions {
   base?: string;
 }
 
+/** 固定期望包名：package.json 键、已安装包与 provenance 都必须是这个名字。 */
+const EXPECTED_PACKAGE_NAME = 'curio-minecraft-3d-memory';
+
 /**
  * 源元数据校验：读实际 package.json 依赖声明、package-lock 条目（含 integrity）、
  * 已安装包与引用 tgz 的 SHA256/SHA512，并校验彼此对应；再读 provenance.json，
- * 交叉校验 artifactSHA256 / npmIntegrity / package name/version 后报告 sourceHEAD。
+ * 交叉校验 artifactSHA256 / npmIntegrity / package name/version 与 sourceBinding 后报告 sourceHEAD。
  * 任一步缺失或不一致都抛错（fail source check），不用 unknown/missing 占位符掩盖。
  */
 export function packageMeta(opts: PackageMetaOptions = {}) {
   const base = path.resolve(opts.base ?? '.');
   const root = JSON.parse(fs.readFileSync(path.join(base, 'package.json'), 'utf8')) as { dependencies?: Record<string, string> };
-  const dep = root.dependencies?.['curio-minecraft-3d-memory'];
-  if (typeof dep !== 'string' || dep.length === 0) throw new Error('package.json 缺少 curio-minecraft-3d-memory 依赖声明');
-
-  const tgzRel = dep.startsWith('file:') ? dep.slice('file:'.length) : dep;
+  const dep = root.dependencies?.[EXPECTED_PACKAGE_NAME];
+  if (typeof dep !== 'string' || !dep.startsWith('file:')) {
+    throw new Error(`package.json 对 ${EXPECTED_PACKAGE_NAME} 的依赖必须是 file: 规格：${JSON.stringify(dep)}`);
+  }
+  const tgzRel = dep.slice('file:'.length);
+  if (tgzRel.length === 0) throw new Error(`package.json 对 ${EXPECTED_PACKAGE_NAME} 的 file: 依赖缺少路径`);
   const tgzPath = path.resolve(base, tgzRel);
+  const relToBase = path.relative(base, tgzPath);
+  if (relToBase === '' || relToBase.startsWith('..') || path.isAbsolute(relToBase)) {
+    throw new Error(`依赖路径越出包根目录：${tgzRel}`);
+  }
   const tgzBytes = fs.readFileSync(tgzPath);
   const tgzSha256 = crypto.createHash('sha256').update(tgzBytes).digest('hex');
 
-  const installed = JSON.parse(fs.readFileSync(path.join(base, 'node_modules/curio-minecraft-3d-memory/package.json'), 'utf8')) as { name?: string; version?: string };
-  const lock = JSON.parse(fs.readFileSync(path.join(base, 'package-lock.json'), 'utf8')) as { packages?: Record<string, { name?: string; version?: string; resolved?: string; integrity?: string }> };
-  const lockEntry = lock.packages?.['node_modules/curio-minecraft-3d-memory'];
-  if (!lockEntry) throw new Error('package-lock.json 缺少 node_modules/curio-minecraft-3d-memory 条目');
-  if (lockEntry.name !== undefined && lockEntry.name !== installed.name) throw new Error(`包名不一致：lock ${lockEntry.name} vs installed ${installed.name}`);
+  const installed = JSON.parse(fs.readFileSync(path.join(base, 'node_modules', EXPECTED_PACKAGE_NAME, 'package.json'), 'utf8')) as { name?: string; version?: string };
+  if (installed.name !== EXPECTED_PACKAGE_NAME) throw new Error(`已安装包名 ${installed.name ?? '(missing)'} 与固定期望包名 ${EXPECTED_PACKAGE_NAME} 不一致`);
+  if (typeof installed.version !== 'string' || installed.version.length === 0) throw new Error('已安装包缺少版本');
+
+  const lock = JSON.parse(fs.readFileSync(path.join(base, 'package-lock.json'), 'utf8')) as {
+    packages?: Record<string, { name?: string; version?: string; resolved?: string; integrity?: string; dependencies?: Record<string, string> }>;
+  };
+  const rootLockDep = lock.packages?.['']?.dependencies?.[EXPECTED_PACKAGE_NAME];
+  if (rootLockDep !== dep) throw new Error(`package-lock root packages[''].dependencies 与 manifest 不一致：lock ${rootLockDep} vs manifest ${dep}`);
+  const lockEntry = lock.packages?.[`node_modules/${EXPECTED_PACKAGE_NAME}`];
+  if (!lockEntry) throw new Error(`package-lock.json 缺少 node_modules/${EXPECTED_PACKAGE_NAME} 条目`);
+  if (lockEntry.name !== undefined && lockEntry.name !== EXPECTED_PACKAGE_NAME) throw new Error(`lock 包名 ${lockEntry.name} 与固定期望包名 ${EXPECTED_PACKAGE_NAME} 不一致`);
   if (lockEntry.version !== installed.version) throw new Error(`版本不一致：lock ${lockEntry.version} vs installed ${installed.version}`);
   if (lockEntry.resolved !== dep) throw new Error(`依赖声明 ${dep} 与 lock resolved ${lockEntry.resolved} 不一致`);
-  if (!lockEntry.integrity) throw new Error('package-lock 缺少 curio-minecraft-3d-memory 的 integrity');
+  if (!lockEntry.integrity) throw new Error(`package-lock 缺少 ${EXPECTED_PACKAGE_NAME} 的 integrity`);
   if (!integrityMatches(tgzBytes, lockEntry.integrity)) throw new Error('tgz 字节与 package-lock integrity（sha512）不一致');
 
   // provenance.json：与已安装版本对应的本地来源声明。
-  const provenanceRel = path.join('vendor', `curio-minecraft-3d-memory-${installed.version}.provenance.json`);
+  const provenanceRel = path.join('vendor', `${EXPECTED_PACKAGE_NAME}-${installed.version}.provenance.json`);
   const provenancePath = path.resolve(base, provenanceRel);
   if (!fs.existsSync(provenancePath)) throw new Error(`缺少来源声明：${provenanceRel}`);
   const prov = JSON.parse(fs.readFileSync(provenancePath, 'utf8')) as {
@@ -633,12 +670,15 @@ export function packageMeta(opts: PackageMetaOptions = {}) {
     sourceHEAD?: string;
     artifactSHA256?: string;
     npmIntegrity?: string;
+    sourceBinding?: { clean?: boolean; head?: string };
   };
-  if (prov.package?.name !== installed.name) throw new Error(`provenance 包名 ${prov.package?.name} 与 installed ${installed.name} 不一致`);
+  if (prov.package?.name !== EXPECTED_PACKAGE_NAME) throw new Error(`provenance 包名 ${prov.package?.name} 与固定期望包名 ${EXPECTED_PACKAGE_NAME} 不一致`);
   if (prov.package?.version !== installed.version) throw new Error(`provenance 版本 ${prov.package?.version} 与 installed ${installed.version} 不一致`);
-  if (prov.artifactSHA256 !== tgzSha256) throw new Error(`provenance artifactSHA256 与 tgz SHA256 不一致`);
-  if (prov.npmIntegrity !== lockEntry.integrity) throw new Error(`provenance npmIntegrity 与 lock integrity 不一致`);
+  if (prov.artifactSHA256 !== tgzSha256) throw new Error('provenance artifactSHA256 与 tgz SHA256 不一致');
+  if (prov.npmIntegrity !== lockEntry.integrity) throw new Error('provenance npmIntegrity 与 lock integrity 不一致');
   if (typeof prov.sourceHEAD !== 'string' || !/^[0-9a-f]{40}$/.test(prov.sourceHEAD)) throw new Error('provenance 缺少合法 sourceHEAD');
+  if (prov.sourceBinding?.clean !== true) throw new Error('provenance sourceBinding.clean 必须为 true');
+  if (prov.sourceBinding?.head !== prov.sourceHEAD) throw new Error('provenance sourceBinding.head 与 sourceHEAD 不一致');
 
   return {
     name: installed.name,
@@ -650,6 +690,7 @@ export function packageMeta(opts: PackageMetaOptions = {}) {
     tgzPath,
     tgzSha256,
     sourceHEAD: prov.sourceHEAD,
+    sourceBindingClean: prov.sourceBinding.clean,
   };
 }
 
@@ -792,39 +833,95 @@ async function rconPreflight(rcon: Rcon, expected: Set<string>): Promise<{ ok: b
 }
 
 /** 记录一条 RCON 命令与响应（命令与响应都落盘，不只响应）。 */
-interface RconOp { command: string; response: string }
+export interface RconOp { command: string; response: string }
+
+export type BlockProbeState = 'air' | 'cave_air' | 'void_air' | 'material' | 'unknown';
+
+/** 严格解析 Java `execute if block` 的反馈：只有 Test passed / Test failed 合法。 */
+export function parseExecuteIfBlock(raw: string): 'match' | 'mismatch' {
+  const text = raw.trim();
+  if (text === 'Test passed') return 'match';
+  if (text === 'Test failed') return 'mismatch';
+  throw new Error(`execute if block 响应无法解析：${JSON.stringify(raw)}`);
+}
+
+/** 严格解析 Java `setblock` 的成功反馈；其他（错误/未知）一律抛错，不当作已写入。 */
+export function parseSetBlock(raw: string): void {
+  if (!/^Changed the block at -?\d+, -?\d+, -?\d+ to /.test(raw.trim())) {
+    throw new Error(`setblock 响应无法确认为成功：${JSON.stringify(raw)}`);
+  }
+}
 
 /**
- * 在限定范围内搭建支撑面。逐格确认「将改写的格子 + 需要净空的格子」都为空，
- * 任一占用即中止（不破坏既有方块/结构）；只写材料清单内的方块。
+ * 用真实 Java 1.20.1 支持的 `execute if block` 精确判定格子状态：
+ * 依次检查 minecraft:air / cave_air / void_air / 指定材料，全部不匹配则为 unknown。
+ * 每条命令与响应都通过 send 记录（调用方在尝试时落盘）。
+ */
+export async function probeBlock(
+  send: (command: string) => Promise<string>,
+  pos: { x: number; y: number; z: number },
+  material: string,
+): Promise<BlockProbeState> {
+  const candidates: Array<{ block: string; state: BlockProbeState }> = [
+    { block: 'minecraft:air', state: 'air' },
+    { block: 'minecraft:cave_air', state: 'cave_air' },
+    { block: 'minecraft:void_air', state: 'void_air' },
+    { block: material, state: 'material' },
+  ];
+  for (const candidate of candidates) {
+    const command = `execute if block ${pos.x} ${pos.y} ${pos.z} ${candidate.block}`;
+    if (parseExecuteIfBlock(await send(command)) === 'match') return candidate.state;
+  }
+  return 'unknown';
+}
+
+/**
+ * 在限定范围内搭建支撑面：先逐格确认支撑格（feetY-1）与净空格（feetY/feetY+1）。
+ * 支撑格接受同材料（同 run 或旧 run 遗留）或 air（此时补建）；净空格必须是 air。
+ * 其余状态（cave_air/void_air/未知材料/占用）一律中止，不覆写。
+ * 所有控制端命令与响应在尝试时立即写入本场景证据，中途失败也保留。
  */
 async function buildSupportFixture(
   rcon: Rcon,
+  ev: ScenarioEvidence,
   footprint: { xMin: number; xMax: number; zMin: number; zMax: number },
   feetY: number,
   material: string,
-): Promise<RconOp[]> {
-  const ops: RconOp[] = [];
-  // 先读占位：支撑格（feetY-1）与净空格（feetY 与 feetY+1）都必须为空气才写入。
+): Promise<void> {
+  const extra = (ev.extra ??= {});
+  const ops = (extra.fixtureOps ??= []) as RconOp[];
+  const send = async (command: string) => {
+    const response = await rcon.send(command);
+    ops.push({ command, response });
+    return response;
+  };
+
+  // 第一阶段：只检查，不写入；未知/占用时保持现场原样。
+  const toBuild: Array<{ x: number; z: number }> = [];
+  let reused = 0;
   for (let x = footprint.xMin; x <= footprint.xMax; x++) {
     for (let z = footprint.zMin; z <= footprint.zMax; z++) {
-      for (const y of [feetY - 1, feetY, feetY + 1]) {
-        const probe = await rcon.send(`getblock ${x} ${y} ${z}`);
-        ops.push({ command: `getblock ${x} ${y} ${z}`, response: probe });
-        if (!/minecraft:(air|cave_air|void_air)/.test(probe)) {
-          throw new Error(`夹具格被占用（x=${x} y=${y} z=${z} → ${probe}），中止而非破坏既有结构`);
+      const support = await probeBlock(send, { x, y: feetY - 1, z }, material);
+      if (support === 'air') toBuild.push({ x, z });
+      else if (support === 'material') reused++;
+      else {
+        throw new Error(`支撑格状态不可复用（x=${x} y=${feetY - 1} z=${z} → ${support}），中止且不覆写`);
+      }
+      for (const y of [feetY, feetY + 1]) {
+        const clear = await probeBlock(send, { x, y, z }, material);
+        if (clear !== 'air') {
+          throw new Error(`净空格不是 air（x=${x} y=${y} z=${z} → ${clear}），中止且不覆写`);
         }
       }
     }
   }
-  // 全部确认后写支撑方块。
-  for (let x = footprint.xMin; x <= footprint.xMax; x++) {
-    for (let z = footprint.zMin; z <= footprint.zMax; z++) {
-      const command = `setblock ${x} ${feetY - 1} ${z} ${material}`;
-      ops.push({ command, response: await rcon.send(command) });
-    }
+
+  // 第二阶段：只补建确认为 air 的支撑格。
+  for (const { x, z } of toBuild) {
+    const command = `setblock ${x} ${feetY - 1} ${z} ${material}`;
+    parseSetBlock(await send(command));
   }
-  return ops;
+  extra.fixture = { footprint, feetY, material, reused, built: toBuild.length };
 }
 
 async function teleportTo(rcon: Rcon, bot: Bot, pos: { x: number; y: number; z: number }): Promise<string> {
@@ -958,7 +1055,8 @@ async function runScenario(
 async function scenarioW1(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   const ev = d.ev;
   const lane = WALK_LANE;
-  ev.extra = { lane, fixtureOps: await buildSupportFixture(ctx.rcon, { xMin: lane.xMin, xMax: lane.xMax, zMin: lane.zMin, zMax: lane.zMax }, lane.feetY, lane.material) };
+  ev.extra = { lane };
+  await buildSupportFixture(ctx.rcon, ev, { xMin: lane.xMin, xMax: lane.xMax, zMin: lane.zMin, zMax: lane.zMax }, lane.feetY, lane.material);
   await teleportAndSettle(ctx, ev, lane.start, 'W1 步行道起点');
 
   const y = lane.feetY;
@@ -1004,7 +1102,8 @@ async function scenarioW2(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   const ev = d.ev;
   const p = W2_PLATFORM;
   const route = [p.start, { ...p.target }];
-  ev.extra = { platform: p, route, fixtureOps: await buildSupportFixture(ctx.rcon, { xMin: p.xMin, xMax: p.xMax, zMin: p.zMin, zMax: p.zMax }, p.feetY, p.material) };
+  ev.extra = { platform: p, route };
+  await buildSupportFixture(ctx.rcon, ev, { xMin: p.xMin, xMax: p.xMax, zMin: p.zMin, zMax: p.zMax }, p.feetY, p.material);
   await teleportAndSettle(ctx, ev, p.start, 'W2 平台起点');
 
   // 只在 teleport 落定、任务启动前开始计量；搭设/传送帧单独保留，不进支撑断言。
@@ -1037,7 +1136,8 @@ async function scenarioW2(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
 async function scenarioW6(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   const ev = d.ev;
   const lane = WALK_LANE;
-  ev.extra = { lane, fixtureOps: await buildSupportFixture(ctx.rcon, { xMin: lane.xMin, xMax: lane.xMax, zMin: lane.zMin, zMax: lane.zMax }, lane.feetY, lane.material) };
+  ev.extra = { lane };
+  await buildSupportFixture(ctx.rcon, ev, { xMin: lane.xMin, xMax: lane.xMax, zMin: lane.zMin, zMax: lane.zMax }, lane.feetY, lane.material);
   await teleportAndSettle(ctx, ev, lane.start, 'W6 步行道起点');
 
   const y = lane.feetY;
@@ -1086,7 +1186,8 @@ async function scenarioW6(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
 async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   const ev = d.ev;
   const lane = WALK_LANE;
-  ev.extra = { lane, fixtureOps: await buildSupportFixture(ctx.rcon, { xMin: lane.xMin, xMax: lane.xMax, zMin: lane.zMin, zMax: lane.zMax }, lane.feetY, lane.material) };
+  ev.extra = { lane };
+  await buildSupportFixture(ctx.rcon, ev, { xMin: lane.xMin, xMax: lane.xMax, zMin: lane.zMin, zMax: lane.zMax }, lane.feetY, lane.material);
   await teleportAndSettle(ctx, ev, lane.start, 'W7 步行道起点');
   const y = lane.feetY;
 

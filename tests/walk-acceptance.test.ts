@@ -15,6 +15,7 @@ import type { NavResult } from 'curio-minecraft-3d-memory';
 import {
   adjacentRouteX,
   allGroundedAt,
+  blockFaceBounds,
   ConnectionTracker,
   dist2,
   ExecutionDiagnostics,
@@ -26,10 +27,13 @@ import {
   isArrived,
   lateForwardWritesByOwner,
   packageMeta,
+  parseExecuteIfBlock,
   parseRconList,
   parseScenarioSelector,
+  parseSetBlock,
   partialMatchesLastSample,
   platformEscaped,
+  probeBlock,
   quitClient,
   segmentsContiguous,
   snapshotKeys,
@@ -101,6 +105,57 @@ test('adjacentRouteX：起点到终点逐格相邻、含终点、同 y/z', () =>
   ]);
 });
 
+test('parseExecuteIfBlock：只接受 Java 的 Test passed / Test failed，命令错误必须抛错', () => {
+  assert.equal(parseExecuteIfBlock('Test passed'), 'match');
+  assert.equal(parseExecuteIfBlock('Test failed'), 'mismatch');
+  assert.throws(() => parseExecuteIfBlock('That position is not loaded'), /无法解析/);
+  assert.throws(() => parseExecuteIfBlock('Unknown or incomplete command'), /无法解析/);
+  assert.throws(() => parseExecuteIfBlock(''), /无法解析/);
+});
+
+test('parseSetBlock：只接受真实成功反馈，错误响应抛错', () => {
+  assert.doesNotThrow(() => parseSetBlock('Changed the block at 200, 63, 216 to minecraft:stone'));
+  assert.throws(() => parseSetBlock('That position is not loaded'), /无法确认/);
+  assert.throws(() => parseSetBlock('Test failed'), /无法确认/);
+});
+
+test('probeBlock：实际 execute if block 命令精确判定 air / 材料 / unknown', async () => {
+  const airCalls: string[] = [];
+  const air = await probeBlock(async (command) => {
+    airCalls.push(command);
+    return command.endsWith(' minecraft:air') ? 'Test passed' : 'Test failed';
+  }, { x: 200, y: 63, z: 216 }, 'minecraft:stone');
+  assert.equal(air, 'air');
+  assert.deepEqual(airCalls, ['execute if block 200 63 216 minecraft:air'], 'air 命中后不应继续探测');
+
+  const materialCalls: string[] = [];
+  const material = await probeBlock(async (command) => {
+    materialCalls.push(command);
+    return command.endsWith(' minecraft:stone') ? 'Test passed' : 'Test failed';
+  }, { x: 205, y: 63, z: 205 }, 'minecraft:stone');
+  assert.equal(material, 'material');
+  assert.deepEqual(materialCalls, [
+    'execute if block 205 63 205 minecraft:air',
+    'execute if block 205 63 205 minecraft:cave_air',
+    'execute if block 205 63 205 minecraft:void_air',
+    'execute if block 205 63 205 minecraft:stone',
+  ]);
+
+  const unknownCalls: string[] = [];
+  const unknown = await probeBlock(async (command) => {
+    unknownCalls.push(command);
+    return 'Test failed';
+  }, { x: 220, y: 64, z: 220 }, 'minecraft:stone');
+  assert.equal(unknown, 'unknown');
+  assert.equal(unknownCalls.length, 4, '四项精确检查都不匹配才是 unknown');
+
+  await assert.rejects(
+    probeBlock(async () => 'That position is not loaded', { x: 200, y: 63, z: 216 }, 'minecraft:stone'),
+    /无法解析/,
+    '命令错误不得被当成不匹配继续写入',
+  );
+});
+
 test('summarizeTrajectory：统计帧数/脚高/腾空/帧间隔', () => {
   const frames: FrameRecord[] = [
     { seq: 0, ts: 1000, dtMs: 0, x: 0.5, y: 64, z: 0.5, vx: 0, vy: 0, vz: 0, onGround: true, inWater: false, keys: emptyKeys, ownerTaskId: 't_1', worldAgeTicks: 100 },
@@ -154,31 +209,117 @@ test('integrityMatches：正确字节匹配 sha512 integrity，篡改字节不�
   assert.equal(integrityMatches(buf, 'sha1-deadbeef'), false, '非 sha512 integrity 不得误匹配');
 });
 
-test('packageMeta：源元数据彼此对应，含 provenance 校验与 sourceHEAD', () => {
+test('packageMeta：当前可信 artifact 的来源/字节/锁/install 彼此对应', () => {
   const meta = packageMeta();
   assert.equal(meta.name, 'curio-minecraft-3d-memory');
+  assert.equal(meta.version, '0.7.5');
   assert.equal(meta.lockVersion, meta.version);
   assert.equal(meta.lockResolved, meta.dependencySpec);
-  assert.ok(meta.dependencySpec.startsWith('file:'));
-  assert.match(meta.tgzSha256, /^[0-9a-f]{64}$/);
-  assert.match(meta.lockIntegrity, /^sha512-/);
-  assert.match(meta.sourceHEAD, /^[0-9a-f]{40}$/);
+  assert.equal(meta.dependencySpec, 'file:vendor/curio-minecraft-3d-memory-0.7.5.tgz');
+  assert.equal(meta.tgzSha256, '5542ba0f6cef942dd81667a6b72d6f4de10fc3ae16cf91aadadeb6073bce33ad');
+  assert.equal(meta.lockIntegrity, 'sha512-tWVuLlsXY1NvXhSr7CmTqa+ABEVKb/XVOlj3WEvA892JDA8NYtQsz+9NlpOhFWBz6MAB9EIrglOH4IVkaVfEew==');
+  assert.equal(meta.sourceHEAD, '5682ea82765256daeb9e0845ab082cba978b1e7e');
+  assert.equal(meta.sourceBindingClean, true);
 });
 
-test('packageMeta：同版本但字节被篡改必须失败（不触及真实 tarball）', () => {
+const FAKE_NAME = 'curio-minecraft-3d-memory';
+const FAKE_VERSION = '0.7.5';
+
+/** 临时目录里的完整假包：真实 crypto 计算字节哈希，便于逐项制造负例。 */
+function makeFakePackage() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'walk-pkg-'));
+  const tgzRel = `vendor/${FAKE_NAME}-${FAKE_VERSION}.tgz`;
+  const tgzPath = path.join(dir, tgzRel);
+  const bytes = Buffer.from('fake-curio-artifact-bytes');
+  const integrity = `sha512-${createHash('sha512').update(bytes).digest('base64')}`;
+  const sourceHEAD = 'a'.repeat(40);
+  const provenancePath = path.join(dir, 'vendor', `${FAKE_NAME}-${FAKE_VERSION}.provenance.json`);
+  fs.mkdirSync(path.dirname(tgzPath), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'node_modules', FAKE_NAME), { recursive: true });
+  fs.writeFileSync(tgzPath, bytes);
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { [FAKE_NAME]: `file:${tgzRel}` } }));
+  fs.writeFileSync(path.join(dir, 'node_modules', FAKE_NAME, 'package.json'), JSON.stringify({ name: FAKE_NAME, version: FAKE_VERSION }));
+  fs.writeFileSync(path.join(dir, 'package-lock.json'), JSON.stringify({
+    packages: {
+      '': { dependencies: { [FAKE_NAME]: `file:${tgzRel}` } },
+      [`node_modules/${FAKE_NAME}`]: { version: FAKE_VERSION, resolved: `file:${tgzRel}`, integrity },
+    },
+  }));
+  fs.writeFileSync(provenancePath, JSON.stringify({
+    package: { name: FAKE_NAME, version: FAKE_VERSION },
+    sourceHEAD,
+    artifactSHA256: createHash('sha256').update(bytes).digest('hex'),
+    npmIntegrity: integrity,
+    sourceBinding: { clean: true, head: sourceHEAD },
+  }));
+  return { dir, tgzPath, provenancePath, sourceHEAD };
+}
+
+test('packageMeta：临时假包完整时通过（证明负例不是被无关检查挡住）', () => {
+  const pkg = makeFakePackage();
   try {
-    fs.mkdirSync(path.join(dir, 'vendor'), { recursive: true });
-    fs.mkdirSync(path.join(dir, 'node_modules', 'curio-minecraft-3d-memory'), { recursive: true });
-    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { 'curio-minecraft-3d-memory': 'file:vendor/curio-minecraft-3d-memory-0.7.5.tgz' } }));
-    fs.writeFileSync(path.join(dir, 'vendor', 'curio-minecraft-3d-memory-0.7.5.tgz'), Buffer.from('tampered-bytes-not-the-real-artifact'));
-    fs.writeFileSync(path.join(dir, 'node_modules', 'curio-minecraft-3d-memory', 'package.json'), JSON.stringify({ name: 'curio-minecraft-3d-memory', version: '0.7.5' }));
-    fs.writeFileSync(path.join(dir, 'package-lock.json'), JSON.stringify({
-      packages: { 'node_modules/curio-minecraft-3d-memory': { version: '0.7.5', resolved: 'file:vendor/curio-minecraft-3d-memory-0.7.5.tgz', integrity: 'sha512-tWVuLlsXY1NvXhSr7CmTqa+ABEVKb/XVOlj3WEvA892JDA8NYtQsz+9NlpOhFWBz6MAB9EIrglOH4IVkaVfEew==' } },
-    }));
-    assert.throws(() => packageMeta({ base: dir }), /integrity（sha512）不一致/);
+    assert.equal(packageMeta({ base: pkg.dir }).sourceHEAD, pkg.sourceHEAD);
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(pkg.dir, { recursive: true, force: true });
+  }
+});
+
+test('packageMeta：篡改/包名/root lock/source binding 负例都失败（不触及真实 artifact）', () => {
+  const cases: Array<{ name: string; pattern: RegExp; mutate: (pkg: ReturnType<typeof makeFakePackage>) => void }> = [
+    {
+      name: '同版本 artifact 字节被篡改',
+      pattern: /integrity（sha512）不一致/,
+      mutate: (pkg) => fs.writeFileSync(pkg.tgzPath, Buffer.from('tampered-bytes-not-the-real-artifact')),
+    },
+    {
+      name: 'installed 包名错误',
+      pattern: /固定期望包名/,
+      mutate: (pkg) => fs.writeFileSync(path.join(pkg.dir, 'node_modules', FAKE_NAME, 'package.json'), JSON.stringify({ name: 'other-package', version: FAKE_VERSION })),
+    },
+    {
+      name: 'manifest 非 file:',
+      pattern: /必须是 file:/,
+      mutate: (pkg) => fs.writeFileSync(path.join(pkg.dir, 'package.json'), JSON.stringify({ dependencies: { [FAKE_NAME]: FAKE_VERSION } })),
+    },
+    {
+      name: 'root lock 依赖不一致',
+      pattern: /root packages/,
+      mutate: (pkg) => {
+        const file = path.join(pkg.dir, 'package-lock.json');
+        const lock = JSON.parse(fs.readFileSync(file, 'utf8')) as { packages: Record<string, { dependencies?: Record<string, string> }> };
+        lock.packages['']!.dependencies![FAKE_NAME] = 'file:vendor/other.tgz';
+        fs.writeFileSync(file, JSON.stringify(lock));
+      },
+    },
+    {
+      name: 'sourceBinding.clean=false',
+      pattern: /sourceBinding\.clean/,
+      mutate: (pkg) => {
+        const file = pkg.provenancePath;
+        const prov = JSON.parse(fs.readFileSync(file, 'utf8')) as { sourceBinding: { clean: boolean } };
+        prov.sourceBinding.clean = false;
+        fs.writeFileSync(file, JSON.stringify(prov));
+      },
+    },
+    {
+      name: 'sourceBinding.head 不一致',
+      pattern: /sourceBinding\.head/,
+      mutate: (pkg) => {
+        const file = pkg.provenancePath;
+        const prov = JSON.parse(fs.readFileSync(file, 'utf8')) as { sourceBinding: { head: string } };
+        prov.sourceBinding.head = 'b'.repeat(40);
+        fs.writeFileSync(file, JSON.stringify(prov));
+      },
+    },
+  ];
+  for (const c of cases) {
+    const pkg = makeFakePackage();
+    try {
+      c.mutate(pkg);
+      assert.throws(() => packageMeta({ base: pkg.dir }), c.pattern, c.name);
+    } finally {
+      fs.rmSync(pkg.dir, { recursive: true, force: true });
+    }
   }
 });
 
@@ -203,13 +344,20 @@ test('partialMatchesLastSample：部分位移须与最后已接受样本一致',
   assert.equal(partialMatchesLastSample(nav, []), false);
 });
 
-test('withinFootprint/platformEscaped：含身体半宽 0.3 的物理支撑几何', () => {
-  const f = { xMin: 205, xMax: 207, zMin: 205, zMax: 206 };
-  assert.equal(withinFootprint({ x: 205.55, z: 205.5 }, f), true);
-  assert.equal(withinFootprint({ x: 206.85, z: 205.5 }, f), true, '半宽 0.3 内仍算在足迹内');
-  assert.equal(withinFootprint({ x: 207.35, z: 205.5 }, f), false);
-  assert.equal(platformEscaped([{ x: 205.55, z: 205.5 }, { x: 206.2, z: 205.5 }], f), false);
-  assert.equal(platformEscaped([{ x: 205.55, z: 205.5 }, { x: 207.5, z: 205.5 }], f), true);
+test('withinFootprint/platformEscaped：整数 bounds 转连续面，半宽 0.3 严格正重叠才算支撑', () => {
+  const f = { xMin: 205, xMax: 206, zMin: 205, zMax: 205 }; // 真正 2×1
+  assert.deepEqual(blockFaceBounds(f), { xMin: 205, xMax: 207, zMin: 205, zMax: 206 });
+  assert.equal(withinFootprint({ x: 205.55, z: 205.52 }, f), true, '起点在支撑面内');
+  assert.equal(withinFootprint({ x: 206.55, z: 205.52 }, f), true, '目标紧邻外边缘 x207 仍有正重叠');
+  assert.equal(withinFootprint({ x: 207.29, z: 205.52 }, f), true, '身体越过边缘但仍有非零重叠');
+  assert.equal(withinFootprint({ x: 207.3, z: 205.52 }, f), false, '恰好零接触不算支撑（max+1 + 半宽）');
+  assert.equal(withinFootprint({ x: 207.31, z: 205.52 }, f), false, '半宽越过后零重叠被拒');
+  assert.equal(withinFootprint({ x: 204.7, z: 205.52 }, f), false, 'x 下侧恰好零接触不算支撑');
+  assert.equal(withinFootprint({ x: 204.71, z: 205.52 }, f), true);
+  assert.equal(withinFootprint({ x: 205.55, z: 206.29 }, f), true, 'z 外边缘仍可正重叠');
+  assert.equal(withinFootprint({ x: 205.55, z: 206.3 }, f), false, 'z 方向恰好零接触不算支撑');
+  assert.equal(platformEscaped([{ x: 205.55, z: 205.52 }, { x: 206.55, z: 205.52 }], f), false);
+  assert.equal(platformEscaped([{ x: 205.55, z: 205.52 }, { x: 207.3, z: 205.52 }], f), true);
 });
 
 test('allGroundedAt：所有帧在实测脚高且着地；腾空/脚高偏移即假', () => {
