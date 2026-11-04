@@ -115,7 +115,7 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
     if (!v.ok) throw new Error(`${name} 参数错误：${v.error}`);
     throwIfAborted(ctx.signal);
     const r = await executeSkill({ ...ctx, senses: actionSenses, deadline: Math.min(ctx.deadline, Date.now() + skill.timeoutMs), progress: () => {} }, skill, constrainRecoveryAction(ctx, name, v.args));
-    if (r.status === 'cancelled') throw Object.assign(new Error('task cancelled'), { name: 'AbortedError' });
+    if (r.status === 'cancelled') throw Object.assign(new Error('task cancelled'), { name: 'AbortedError', ...(r.data ? { partial: r.data } : {}) });
     const { local: _local, around: _around, ...data } = r.data ?? {};
     return { ok: r.status === 'succeeded', code: r.failureCode ?? null, summary: r.summary.slice(0, 200), ...(Object.keys(data).length ? { data } : {}) };
   };
@@ -218,7 +218,7 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
         if (!v.ok) throw new Error(`useSkill 参数错误：${v.error}`);
         throwIfAborted(ctx.signal);
         const r = await executeSkill({ ...ctx, skillDepth: depth + 1, deadline: Math.min(ctx.deadline, Date.now() + skill.timeoutMs), progress: () => {} } as SkillCtx, skill, v.args);
-        if (r.status === 'cancelled') throw Object.assign(new Error('task cancelled'), { name: 'AbortedError' });
+        if (r.status === 'cancelled') throw Object.assign(new Error('task cancelled'), { name: 'AbortedError', ...(r.data ? { partial: r.data } : {}) });
         const { local: _local, around: _around, ...data } = r.data ?? {};
         return { ok: r.status === 'succeeded', code: r.failureCode ?? null, summary: r.summary.slice(0, 200), ...(Object.keys(data).length ? { data } : {}) };
       }
@@ -256,6 +256,8 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
       }
       case 'move': {
         const raw = (a[0] && typeof a[0] === 'object' ? a[0] : {}) as Record<string, unknown>;
+        // 恢复委托是导航时，原始按键移动会绕过原后端/目标/手段；必须在任何身体写入前拒绝。
+        constrainRecoveryAction(ctx, 'move', raw);
         const keys: DriveKeys = {};
         for (const k of ['forward', 'back', 'left', 'right', 'jump', 'sprint', 'sneak'] as const) if (raw[k]) keys[k] = true;
         const o = (a[2] && typeof a[2] === 'object' ? a[2] : {}) as Record<string, unknown>;

@@ -139,7 +139,7 @@ export function movesCatalog(chars = 40, core: Set<string> = new Set(COMMON_MOVE
 /** 瞥一眼时给完整参数的常用动作；其余只列名字 + 用途，参数按需用 moves 查 */
 const GLANCE_CORE = ['dig_at', 'step', 'place_at', 'gather', 'goto', 'craft', 'eat', 'sleep', 'wait', 'look', 'look_around', 'defend', 'hunt', 'place_torch', 'dive', 'surface', 'swim_to', 'travel', 'press_keys'];
 /** 瞥一眼时只列名字 + 用途的动作（完整参数按需查） */
-const GLANCE_SECONDARY = ['explore', 'forage', 'pickup_items', 'shelter', 'build', 'smelt', 'store_items', 'climb_up', 'use_skill', 'excavate_path', 'descend', 'assess_landings'];
+const GLANCE_SECONDARY = ['explore', 'forage', 'pickup_items', 'shelter', 'build', 'smelt', 'store_items', 'climb_up', 'use_skill', 'excavate_path', 'descend', 'assess_landings', 'spatial_query', 'walk_to', 'walk_known_route'];
 
 /** 抬头看（glance）的动作目录：只列少数完整参数 + 常用名字，隐藏长尾，保持轻量 */
 export function glanceCatalog(): string {

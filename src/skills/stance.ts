@@ -9,7 +9,7 @@
  */
 
 /** 会改变身体站位的移动步骤；失败后身体可能已有部分位移，不再位于原起点。 */
-export const STANCE_MOVES = new Set(['step', 'goto', 'descend', 'climb_up', 'follow_passage', 'travel', 'ride']);
+export const STANCE_MOVES = new Set(['step', 'goto', 'descend', 'climb_up', 'follow_passage', 'travel', 'ride', 'walk_to', 'walk_known_route']);
 
 /**
  * 规范化参数下，该动作是否为依赖站位的相对挖掘/放置。

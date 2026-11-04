@@ -22,6 +22,7 @@ import type {
   CollisionShapeProvider,
   ExecutableMove,
   ExecutableMoveResult,
+  KnownWalkRouteStart,
   MoveExecutor,
   NavResult,
   WalkRouteRequest,
@@ -85,6 +86,19 @@ export interface WalkLifecycle {
   observationReady: boolean;
 }
 
+/**
+ * 库实际发出的一次单段移动请求快照。只复制位置/作用域/执行归属等事实，
+ * 不携带 signal、期限或控制入口；收到它不代表已经开始运动或已经到达。
+ */
+export interface WalkMoveRequestObservation {
+  executionId: string;
+  worldId: string;
+  dim: string;
+  sessionId: string;
+  from: { x: number; y: number; z: number };
+  to: { x: number; y: number; z: number };
+}
+
 /** 生命周期是否已不可用：死亡/断线/观测未就绪都算失效，需立即终止委托。 */
 function lifecycleBroken(lc: WalkLifecycle): boolean {
   return !lc.alive || !lc.connected || !lc.observationReady;
@@ -115,7 +129,7 @@ export function bodySample(
  * 有界等待下一物理帧：任一信号中止、期限到达或 tick 自身断线都返回 null，
  * 不会依赖“再收到一帧”才发现已经失效。期限由调用方给定（含每段 timeout 与总 deadline 的最小者）。
  */
-async function awaitFrame(
+export async function awaitFrame(
   tick: WalkTick,
   deadlineMs: number,
   now: () => number,
@@ -124,7 +138,7 @@ async function awaitFrame(
   for (const s of signals) if (s.aborted) return null;
   if (now() >= deadlineMs) return null;
   const controller = new AbortController();
-  const onAbort = () => controller.abort();
+  const onAbort = () => { controller.abort(); };
   for (const s of signals) s.addEventListener('abort', onAbort, { once: true });
   const remaining = Math.max(0, deadlineMs - now());
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -157,6 +171,7 @@ export class WalkMoveExecutor implements MoveExecutor {
     private readonly lifecycle?: () => WalkLifecycle,
     private readonly onLifecycleBroken?: (detail: string) => void,
     private readonly runSignal?: AbortSignal,
+    private readonly onMoveRequest?: (move: WalkMoveRequestObservation) => void,
   ) {}
 
   /** 宿主在帧回调里构造样本（掌握单调序号与生命周期），再喂给库。 */
@@ -168,6 +183,12 @@ export class WalkMoveExecutor implements MoveExecutor {
 
   async move(request: ExecutableMove): Promise<ExecutableMoveResult> {
     const { from, to } = request;
+    // 记录库实际发出的请求事实；回调只观察，不参与控制、等待或验证。
+    this.onMoveRequest?.({
+      executionId: request.executionId,
+      worldId: request.worldId, dim: request.dim, sessionId: request.sessionId,
+      from: { ...from }, to: { ...to },
+    });
     // 控制前先检查取消与期限：已取消/已到期的请求不得写任何控制。
     if (this.aborted(request)) return { failure: { kind: 'cancelled' } };
     // 每段有效期限：总期限与单段 timeout 的较小者，不能靠单段拖过总期限。
@@ -310,6 +331,15 @@ export async function runWalkRoute(opts: {
   deadlineMs?: number;
   now?: () => number;
   bindActive?: (loop: ActiveWalkLoop) => (() => void) | void;
+  /** 观察库实际发出的单段移动请求；不改变本次执行的控制、等待或验证。 */
+  onMoveRequest?: (move: WalkMoveRequestObservation) => void;
+  /**
+   * 可选启动接缝：收到本次运行的同一个 executor 与已取有效期限的请求。
+   * 调用者可据此调用 `startKnownWalkRoute` 并原样返回其结果；STARTED 后本运行
+   * 继续驱动该实例。REJECTED 时不会附着活动 loop、不订阅物理帧、不写控制，
+   * 直接返回携带原 reason/message 的 FAILED，不冒充世界 BLOCKED/TIMEOUT/ARRIVED。
+   */
+  starter?: (loop: WalkRouteExecutor, request: WalkRouteRequest) => KnownWalkRouteStart;
 }): Promise<NavResult> {
   const now = opts.now ?? Date.now;
   const deadline = opts.deadlineMs ?? opts.request.deadlineMs;
@@ -326,7 +356,7 @@ export async function runWalkRoute(opts: {
   };
   const executor = new WalkMoveExecutor(opts.body, opts.tick, opts.signal, now, lifecycle, (detail) => {
     cancelRun('lifecycle', detail);
-  }, runAbort.signal);
+  }, runAbort.signal, opts.onMoveRequest);
   const loop = new WalkRouteExecutor(opts.map, executor, { now });
   let sequence = 0; // 委托内单调递增，跨段不重置
 
@@ -344,7 +374,23 @@ export async function runWalkRoute(opts: {
 
   let unbindActive: (() => void) | null = null;
   try {
-    loop.start({ ...opts.request, deadlineMs: deadline });
+    const startRequest: WalkRouteRequest = { ...opts.request, deadlineMs: deadline };
+    if (opts.starter) {
+      const start = opts.starter(loop, startRequest);
+      if (start.kind === 'REJECTED') {
+        // 拒绝发生在 executor.start 之前：不附着活动 loop、不订阅帧、不写控制。
+        // 原 reason 保留在结构化 problem 中，message 原样带回；不改写成世界事实。
+        return {
+          outcome: 'FAILED',
+          message: start.message,
+          problem: { kind: 'unavailable', detail: `known walk route rejected: ${start.reason}` },
+          confirmed: false,
+          trace: [],
+        };
+      }
+    } else {
+      loop.start(startRequest);
+    }
     unbindActive = opts.bindActive?.({
       observe: (report, budget) => { loop.observe(report, budget); },
       cancel: (by, reason) => { cancelRun(by, reason); },
