@@ -26,6 +26,9 @@ import {
   assertTimeoutAfterDeadline,
   awaitRouteStartRecord,
   blockFaceBounds,
+  checkS1Return,
+  checkSpatialFinalSave,
+  checkSpatialReopen,
   checkTaskSegments,
   checkW4ObservationChain,
   checkW5HiddenReveal,
@@ -66,13 +69,16 @@ import {
   WalkDiagnostics,
   withinFootprint,
   type ActualControlEntry,
+  type CellEvidenceSnapshot,
   type DeliveredSampleRecord,
   type FrameRecord,
+  type MapBatchRecord,
   type MoveRecord,
   type RouteCallRecord,
   type RouteStateSnapshot,
   type RouteStatusSnapshot,
   type TickEntry,
+  type VisionCallRecord,
   type WalkBridge,
 } from '../scripts/walk-acceptance.ts';
 import { WalkMoveExecutor, walkCollisionProvider } from '../src/adapter/walk-route.ts';
@@ -260,13 +266,13 @@ test('integrityMatches：正确字节匹配 sha512 integrity，篡改字节不�
 test('packageMeta：当前可信 artifact 的来源/字节/锁/install 彼此对应', () => {
   const meta = packageMeta();
   assert.equal(meta.name, 'curio-minecraft-3d-memory');
-  assert.equal(meta.version, '0.7.5');
+  assert.equal(meta.version, '0.7.6');
   assert.equal(meta.lockVersion, meta.version);
   assert.equal(meta.lockResolved, meta.dependencySpec);
-  assert.equal(meta.dependencySpec, 'file:vendor/curio-minecraft-3d-memory-0.7.5.tgz');
-  assert.equal(meta.tgzSha256, '5542ba0f6cef942dd81667a6b72d6f4de10fc3ae16cf91aadadeb6073bce33ad');
-  assert.equal(meta.lockIntegrity, 'sha512-tWVuLlsXY1NvXhSr7CmTqa+ABEVKb/XVOlj3WEvA892JDA8NYtQsz+9NlpOhFWBz6MAB9EIrglOH4IVkaVfEew==');
-  assert.equal(meta.sourceHEAD, '5682ea82765256daeb9e0845ab082cba978b1e7e');
+  assert.equal(meta.dependencySpec, 'file:vendor/curio-minecraft-3d-memory-0.7.6.tgz');
+  assert.equal(meta.tgzSha256, 'f17cac0228ca381d9ac9880a9a2ddf892e0184946a6df7e22a8219c519cf5e27');
+  assert.equal(meta.lockIntegrity, 'sha512-4xFyERG9B6btTDwg+Itmf/4zPoiRuOOBfSpN952NybgVzlJFEknzZ4V13C1jNJe4AklrU8mPFbHUHxIv/eXV9w==');
+  assert.equal(meta.sourceHEAD, 'd0091948bc100e59d2fa98f28a9891669f670e40');
   assert.equal(meta.sourceBindingClean, true);
 });
 
@@ -1901,7 +1907,8 @@ test('spatialShutdownRecord：真实 SQLite 会话正常关停由最终 checkpoi
     if (spatial !== null && result === null) {
       try { result = await spatial.shutdown(); } catch (error) { cleanupError = error; }
     }
-    const shutdown = spatial === null ? null : spatialShutdownRecord(result, cleanupError, null, spatial.worldId);
+    // finally 里的 await spatial.shutdown() 异常是「等待结果」失败，不是同步调用失败。
+    const shutdown = spatial === null ? null : spatialShutdownRecord(result, null, cleanupError, spatial.worldId);
     const closed = shutdown !== null && shutdown.ok;
     if (!closed) {
       const detail = shutdown === null ? 'session was not opened' : JSON.stringify(shutdown.problems);
@@ -1936,4 +1943,182 @@ test('spatialShutdownRecord：shutdown 调用/等待抛错或结果缺失都保�
   assert.equal(rejected.ok, false);
   assert.equal(rejected.serviceAwaitError?.message, 'shutdown await failed');
   assert.ok(rejected.problems.includes('shutdown_await_error'));
+});
+
+test('checkS1Return：反向三段实测接续+同一svc.voxel的B新观测才通过；跨任务同名delegation/换map/无新观测均拒绝', () => {
+  const map = new VoxelMap('w', { validityWindowMs: 600_000 });
+  const cell = { x: 1, y: 63, z: 0 };
+  const observationAt = (sequence: number, observedAt: number, variant: string) => ({
+    worldId: 'w', dim: 'd', sessionId: 's', pos: { ...cell },
+    state: { name: 'minecraft:stone', properties: { variant } }, stateComplete: true,
+    evidence: 'seen' as const, observedAt, source: 'vision' as const, sequence,
+  });
+  map.observeBatch({ observations: [observationAt(10, 1000, 'x')], unobserved: [] });
+  const baselineCell = cellEvidenceSnapshot(map.cellAt('d', cell.x, cell.y, cell.z));
+  const beforeStartCell = cellEvidenceSnapshot(map.cellAt('d', cell.x, cell.y, cell.z));
+  const visionOutput = {
+    pos: { ...cell }, name: 'minecraft:stone', properties: { variant: 'y' }, stateComplete: true,
+    worldId: 'w', sessionId: 's', dimension: 'd', observedAt: 2000, observationId: 11,
+  };
+  const report = map.observeBatch({ observations: [observationAt(11, 2000, 'y')], unobserved: [] });
+  const afterCell = cellEvidenceSnapshot(map.cellAt('d', cell.x, cell.y, cell.z));
+  const batch: MapBatchRecord = {
+    seq: 6, ts: 1600, frame: 1, mapId: 1, mapWorldId: 'w', map,
+    observations: [observationAt(11, 2000, 'y')], unobserved: [], reportId: 1, report,
+  };
+  const vision: VisionCallRecord = {
+    seq: 5, ts: 1500, frame: 1, visionId: 1, positions: [{ ...cell }], eye: null, output: [visionOutput],
+  };
+
+  const aRoute = [
+    { x: 2.5, y: 64, z: 0.5 }, { x: 3.5, y: 64, z: 0.5 },
+    { x: 3.5, y: 64, z: 1.5 }, { x: 4.5, y: 64, z: 1.5 },
+  ];
+  const aLast = { x: 4.55, y: 64, z: 1.52 };
+  const bRoute = [aLast, { x: 3.55, y: 64, z: 1.52 }, { x: 3.55, y: 64, z: 0.52 }, { x: 2.55, y: 64, z: 0.52 }];
+  const completion0 = { x: 3.56, y: 64, z: 1.52 };
+  const completion1 = { x: 3.54, y: 64, z: 0.53 };
+  const completion2 = { x: 2.55, y: 64, z: 0.52 };
+  const samples = [
+    delivery(completion0, statusSnap({ nextPointIndex: 1 }), statusSnap({ nextPointIndex: 2, lastPosition: completion0 }), { owner: 'task_B' }),
+    delivery(completion1, statusSnap({ nextPointIndex: 2 }), statusSnap({ nextPointIndex: 3, lastPosition: completion1 }), { owner: 'task_B' }),
+    delivery(completion2, statusSnap({ nextPointIndex: 3 }), statusSnap({ nextPointIndex: 4, lastPosition: completion2, result: null }), { owner: 'task_B' }),
+  ];
+  const bCompletions = measuredCompletions(samples, 'task_B', 'walk-1');
+  const movesA = [
+    moveRecord('walk-1', 'task_A', 0, aRoute[0]!, aRoute[1]!),
+    moveRecord('walk-1', 'task_A', 1, aRoute[1]!, aRoute[2]!),
+    moveRecord('walk-1', 'task_A', 2, aRoute[2]!, aRoute[3]!),
+  ];
+  const movesB = [
+    moveRecord('walk-1', 'task_B', 0, bRoute[0]!, bRoute[1]!),
+    moveRecord('walk-1', 'task_B', 1, completion0, bRoute[2]!),
+    moveRecord('walk-1', 'task_B', 2, completion1, bRoute[3]!),
+  ];
+  const bStartStatus = statusSnap({
+    delegationId: 'walk-1',
+    route: routeSnap({
+      stepCount: 3, openPrefix: 3, verifiedStepIndexes: [0, 1, 2], pendingStepIndexes: [],
+      steps: [
+        { kind: 'verified', status: 'OPEN', problemKind: null },
+        { kind: 'verified', status: 'OPEN', problemKind: null },
+        { kind: 'verified', status: 'OPEN', problemKind: null },
+      ],
+    }),
+  });
+  const valid = {
+    taskIdA: 'task_A', taskIdB: 'task_B', aRoute, aLastCompletion: aLast,
+    delegationB: 'walk-1', bRoute, bStartSeq: 0,
+    bRouteStatus: { ownerTaskId: 'task_B', seq: 4, status: bStartStatus },
+    bMoves: [...movesA, ...movesB], bCompletions, bMaps: [batch],
+    expectedMap: map, expectedScope: { worldId: 'w', dim: 'd', sessionId: 's' },
+    witnessCell: cell, baselineCell, beforeStartCell, bVision: vision, afterCell,
+  };
+  assert.deepEqual(checkS1Return(valid), { ok: true });
+
+  // 同名 delegation 下只拿 A 的段/或把 B 段标成 A 都不得通过。
+  assert.equal(checkS1Return({ ...valid, bMoves: movesA }).ok, false, '跨 task 同名 delegation 不得复用 A 段');
+  assert.equal(checkS1Return({ ...valid, bMoves: movesB.map((m) => ({ ...m, taskId: 'task_A' })) }).ok, false, 'B 段归属必须是 B task');
+  // 不能把 A 的旧 route OPEN 当作 B 的复验。
+  assert.equal(checkS1Return({ ...valid, bRouteStatus: { ...valid.bRouteStatus, ownerTaskId: 'task_A' } }).ok, false, 'A 的 route 快照不得冒充 B');
+  assert.equal(checkS1Return({ ...valid, bRouteStatus: { ...valid.bRouteStatus, seq: 0 } }).ok, false, 'B 起点之前的 route 快照不得复用');
+  // 不是同一个 svc.voxel 实例。
+  assert.equal(checkS1Return({ ...valid, bMaps: [{ ...batch, map: new VoxelMap('w') }] }).ok, false, '换 map 不得通过');
+  // 没有新的合法 Vision→map 观测。
+  assert.equal(checkS1Return({ ...valid, bVision: null }).ok, false, '缺 B 实际 Vision 不得通过');
+  assert.equal(checkS1Return({ ...valid, afterCell: baselineCell }).ok, false, 'cellAt 未更新不得通过');
+  assert.equal(checkS1Return({ ...valid, bVision: { ...vision, output: [{ ...visionOutput, observationId: 99 }] } }).ok, false, '未写入 map 的 payload 不得通过');
+  // B 开始前原证据被刷新也不得通过。
+  assert.equal(checkS1Return({ ...valid, beforeStartCell: afterCell }).ok, false, '原证据被刷新不得通过');
+});
+
+test('checkSpatialFinalSave/checkSpatialReopen：真实SQLite空anchor→typed事实→finalCP/close→reopen STALE，关闭失败单独诊断', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'walk-s3-'));
+  const dbPath = path.join(dir, 'spatial.sqlite');
+  const world = 'walk-s3-world';
+  let first: SharedSpatialSession | null = null;
+  let firstResult: ShutdownResult | null = null;
+  let reopened: SharedSpatialSession | null = null;
+  let secondResult: ShutdownResult | null = null;
+  let primaryFailure: unknown = null;
+  try {
+    first = await SharedSpatialSession.open({ worldId: world, databasePath: dbPath, timeoutMs: 5000 });
+    const anchor = await first.checkpoint();
+    const anchorState = first.getPersistenceState();
+    assert.equal(anchorState.dirty, false);
+    assert.equal(anchorState.lastConfirmedCheckpointId, anchor.checkpointId);
+
+    first.beginSession({ worldId: world, dim: 'overworld', sessionId: 's1' });
+    first.observe([{
+      worldId: world, dimension: 'overworld', sessionId: 's1', observedAt: 1_700_000_000_123, observationId: 42,
+      source: 'vision', stateComplete: true, pos: { x: 7, y: 8, z: 9 },
+      name: 'minecraft:oak_door', properties: { open: 'true', half: 'upper', facing: 'east' },
+    }]);
+    const cell = cellEvidenceSnapshot(first.session.voxel.cellAt('overworld', 7, 8, 9));
+    assert.equal(cell.observed, true);
+    if (!cell.observed) assert.fail('witness cell was not written');
+
+    firstResult = await first.shutdown();
+    const proof = checkSpatialFinalSave({
+      anchorCheckpointId: anchor.checkpointId,
+      anchorState: {
+        dirty: anchorState.dirty,
+        lastConfirmedCheckpointId: anchorState.lastConfirmedCheckpointId,
+        voxelRevision: anchorState.voxelRevision,
+      },
+      checkpoint: firstResult.checkpoint,
+      state: first.getPersistenceState(),
+      close: firstResult.close,
+    });
+    assert.deepEqual(proof, { ok: true });
+    assert.notEqual(firstResult.checkpoint!.checkpointId, anchor.checkpointId);
+    const firstCheckpointId = firstResult.checkpoint!.checkpointId;
+
+    // 只有真实 close 已确认后才重开同一 DB；不 beginSession、不刷新。
+    assert.equal(firstResult.close!.completed, true);
+    reopened = await SharedSpatialSession.open({ worldId: world, databasePath: dbPath, timeoutMs: 5000 });
+    const readback = cellEvidenceSnapshot(reopened.session.voxel.cellAt('overworld', 7, 8, 9));
+    const witness = {
+      pos: { x: 7, y: 8, z: 9 }, dim: 'overworld', worldId: world, sessionId: 's1',
+      name: 'minecraft:oak_door', properties: { open: 'true', half: 'upper', facing: 'east' },
+      observedAt: 1_700_000_000_123, sequence: 42,
+      cell,
+    };
+    assert.deepEqual(checkSpatialReopen(witness, readback), { ok: true });
+    assert.equal(readback.freshness, 'STALE');
+
+    secondResult = await reopened.shutdown();
+    const second = spatialShutdownRecord(secondResult, null, null, world);
+    assert.equal(second.ok, true, JSON.stringify(second.problems));
+    // 第二 close 是独立证据；第一 final id 仍保留在 firstResult 中。
+    assert.equal(firstResult.checkpoint!.checkpointId, firstCheckpointId);
+  } catch (error) {
+    primaryFailure = error;
+    throw error;
+  } finally {
+    if (first !== null && firstResult === null) {
+      try { firstResult = await first.shutdown(); } catch (error) { if (primaryFailure === null) throw error; }
+    }
+    if (reopened !== null && secondResult === null) {
+      try { secondResult = await reopened.shutdown(); } catch (error) { if (primaryFailure === null) throw error; }
+    }
+    const firstOk = firstResult !== null && spatialShutdownRecord(firstResult, null, null, world).ok;
+    const secondOk = secondResult !== null && spatialShutdownRecord(secondResult, null, null, world).ok;
+    if (firstOk && secondOk) {
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch (error) { if (primaryFailure === null) throw error; }
+    } else {
+      const message = `未确认关闭，保留 fixture：${dbPath}（first=${String(firstOk)} second=${String(secondOk)}）`;
+      if (primaryFailure === null) throw new Error(message);
+      t.diagnostic(message);
+    }
+  }
+
+  // 关闭失败诊断：用真实结果的副本注入 close 失败，只验证分类不伪造实机运行。
+  const closeFailure: ShutdownResult = { ...firstResult!, close: null, closeError: new Error('close failed') };
+  const failed = spatialShutdownRecord(closeFailure, null, null, world);
+  assert.equal(failed.ok, false);
+  assert.ok(failed.problems.includes('close_error'));
+  assert.ok(failed.problems.includes('missing_close_result'));
+  assert.equal(failed.serviceAwaitError, null);
+  assert.equal(closeFailure.checkpoint!.checkpointId, firstResult!.checkpoint!.checkpointId, '关闭失败不得覆盖第一 final id');
 });

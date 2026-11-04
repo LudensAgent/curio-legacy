@@ -847,6 +847,189 @@ export function checkW5HiddenReveal(x: W5ChainInput): { ok: boolean; reason?: st
   return { ok: true };
 }
 
+export interface S1ReturnInput {
+  taskIdA: string;
+  taskIdB: string;
+  aRoute: Vec3[];
+  /** A 最后一段实测完成点；B 必须原样从这里出发。 */
+  aLastCompletion: Vec3;
+  delegationB: string;
+  bRoute: Vec3[];
+  bStartSeq: number;
+  /** B 自己记录里的 public route 快照（owner/seq 用于拒绝复用 A 的旧 OPEN）。 */
+  bRouteStatus: { ownerTaskId: string | null; seq: number; status: RouteStatusSnapshot };
+  bMoves: MoveRecord[];
+  bCompletions: MeasuredCompletion[];
+  /** 只含 B 开始后的真实 map 批次。 */
+  bMaps: MapBatchRecord[];
+  expectedMap: VoxelMap;
+  expectedScope: { worldId: string; dim: string; sessionId: string };
+  witnessCell: Vec3;
+  baselineCell: CellEvidenceSnapshot;
+  beforeStartCell: CellEvidenceSnapshot;
+  bVision: VisionCallRecord | null;
+  afterCell: CellEvidenceSnapshot;
+}
+
+const unitStep = (d: Vec3) => Math.abs(d.x) + Math.abs(d.z) === 1 && d.y === 0;
+
+/**
+ * S1 返程证明：同一真实 map、B 独立 task（delegation 允许同名）、反向严格相邻
+ * 三段、实测接续，以及 witness 格必须由 B 期真实 Vision 重新观测并写入同一
+ * svc.voxel 的 sequence 链路。跨 task 同名 delegation、换 map、没有新合法观测
+ * 或旧证据被刷新，都不得通过。
+ */
+export function checkS1Return(x: S1ReturnInput): { ok: boolean; reason?: string } {
+  if (x.taskIdA === x.taskIdB) return { ok: false, reason: 'A/B 不是两个不同任务' };
+  if (x.aRoute.length !== 4 || x.bRoute.length !== 4) return { ok: false, reason: 'A/B 路线不是三段四节点' };
+  for (let i = 0; i < 3; i++) {
+    const a = x.aRoute[i]!;
+    const aNext = x.aRoute[i + 1]!;
+    const b = x.bRoute[i]!;
+    const bNext = x.bRoute[i + 1]!;
+    const aDelta = { x: aNext.x - a.x, y: aNext.y - a.y, z: aNext.z - a.z };
+    const bDelta = { x: bNext.x - b.x, y: bNext.y - b.y, z: bNext.z - b.z };
+    if (!unitStep(aDelta) || !unitStep(bDelta)) return { ok: false, reason: `第 ${i} 段不是严格单格相邻` };
+    const forward = x.aRoute[2 - i]!;
+    const forwardNext = x.aRoute[3 - i]!;
+    const expected = { x: forward.x - forwardNext.x, y: forward.y - forwardNext.y, z: forward.z - forwardNext.z };
+    if (!vecEqual(bDelta, expected)) return { ok: false, reason: `B 第 ${i} 段不是 A 单位方向的逆序` };
+  }
+  if (!vecEqual(x.bRoute[0]!, x.aLastCompletion)) return { ok: false, reason: 'B 起点不是 A 实测末位原坐标' };
+
+  const segments = checkTaskSegments(x.bMoves, x.delegationB, x.taskIdB, 3);
+  if (!segments.ok) return { ok: false, reason: `B 段集合不合法：${segments.reason}` };
+  for (let i = 0; i < 3; i++) {
+    if (!vecEqual(segments.segments[i]!.to, x.bRoute[i + 1]!)) return { ok: false, reason: `B 第 ${i} 段目标偏离路线` };
+  }
+  if (!vecEqual(segments.segments[0]!.from, x.bRoute[0]!)) return { ok: false, reason: 'B 首段不是从实测末位出发' };
+  if (x.bCompletions.length !== 3) return { ok: false, reason: `B 实测完成点 ${x.bCompletions.length} != 3` };
+  if (x.bCompletions.some((c) => c.sample.ownerTaskId !== x.taskIdB || c.sample.delegationId !== x.delegationB)) {
+    return { ok: false, reason: 'B 完成点不属于本 task+delegation（同名 delegation 不得跨任务复用）' };
+  }
+  if (!segmentsFollowMeasured(segments.segments, x.bCompletions)) {
+    return { ok: false, reason: 'B 段间未从实测完成点严格接续' };
+  }
+
+  const route = x.bRouteStatus.status.route;
+  if (x.bRouteStatus.ownerTaskId !== x.taskIdB) return { ok: false, reason: 'B route 快照不属于 B task（不得复用 A 的旧 OPEN）' };
+  if (x.bRouteStatus.seq <= x.bStartSeq) return { ok: false, reason: 'B route 快照早于 B 起点（不得复用 A 的旧 OPEN）' };
+  if (x.bRouteStatus.status.delegationId !== x.delegationB) return { ok: false, reason: 'B public status 不是本 delegation' };
+  if (!route || route.stepCount !== 3 || route.steps.length !== 3) return { ok: false, reason: 'B 真实 public route 不是三步' };
+  if (route.verifiedStepIndexes.join(',') !== '0,1,2') return { ok: false, reason: `B route 未验证 0..2：${route.verifiedStepIndexes.join(',')}` };
+  if (route.steps.some((s) => s.kind !== 'verified' || s.status !== 'OPEN')) {
+    return { ok: false, reason: 'B route 存在非 verified OPEN 的步骤' };
+  }
+
+  if (x.bMaps.length === 0) return { ok: false, reason: 'B 缺少真实 map 批次' };
+  if (x.bMaps.some((b) => b.map !== x.expectedMap)) return { ok: false, reason: 'B 实际 map 不是同一个 svc.voxel 实例' };
+  if (x.bMaps.some((b) => b.mapWorldId !== x.expectedMap.worldId)) return { ok: false, reason: 'B map 世界不一致' };
+
+  if (!x.baselineCell.observed || !x.beforeStartCell.observed) return { ok: false, reason: 'witness 基准缺少原始 cellAt 证据' };
+  if (!sameCellEvidence(x.baselineCell, x.beforeStartCell)) {
+    return { ok: false, reason: 'B 开始前 witness 原证据被清空/刷新' };
+  }
+
+  const vision = x.bVision;
+  if (!vision) return { ok: false, reason: 'B 缺少实际 Vision 调用' };
+  if (vision.seq <= x.bStartSeq) return { ok: false, reason: 'B Vision 早于 B 起点（不能复用 A 旧观测）' };
+  const output = visionOutputAt(vision, x.witnessCell);
+  if (!output) return { ok: false, reason: 'B Vision 输出不含 witness 格' };
+  if (output.worldId !== x.expectedScope.worldId || output.dimension !== x.expectedScope.dim || output.sessionId !== x.expectedScope.sessionId) {
+    return { ok: false, reason: 'B Vision 输出 scope 与真实当前 scope 不一致' };
+  }
+  if (!(output.observedAt > (x.baselineCell.observedAt ?? Number.NEGATIVE_INFINITY))) {
+    return { ok: false, reason: 'B Vision 时间未晚于 witness 原证据（不是新观测）' };
+  }
+  if (output.observationId === x.baselineCell.sequence) return { ok: false, reason: 'B Vision 不是新 observationId' };
+  const producer = x.bMaps.find((b) => b.seq > vision.seq
+    && b.observations.some((o) => observationMatchesVision(o, x.witnessCell, output)));
+  if (!producer) return { ok: false, reason: 'B 新观测未写入同一 svc.voxel（sequence 未对上生产 map）' };
+
+  if (!x.afterCell.observed) return { ok: false, reason: 'B 后 witness 格已无证据' };
+  if (x.afterCell.sequence !== output.observationId) return { ok: false, reason: 'B 后 cellAt sequence 不是本次 Vision observationId' };
+  if (x.afterCell.observedAt !== output.observedAt) return { ok: false, reason: 'B 后 cellAt 时间不是本次 Vision 原时间' };
+  if (x.afterCell.sessionId !== output.sessionId) return { ok: false, reason: 'B 后 cellAt session 不是本次 Vision scope' };
+  if (x.afterCell.name !== output.name) return { ok: false, reason: 'B 后 cellAt 名称不是本次 Vision 结果' };
+  const expectedProps = Object.fromEntries(Object.entries(output.properties).map(([k, v]) => [k, String(v)]));
+  if (JSON.stringify(x.afterCell.properties ?? {}) !== JSON.stringify(expectedProps)) {
+    return { ok: false, reason: 'B 后 cellAt properties 不是本次 Vision 结果' };
+  }
+  return { ok: true };
+}
+
+export interface SpatialFinalSaveInput {
+  anchorCheckpointId: string;
+  anchorState: { dirty: boolean; lastConfirmedCheckpointId: string | null; voxelRevision: number };
+  checkpoint: { checkpointId: string; voxelRevision: number; fragmentRevision: number; topologyRevision: number } | null;
+  state: {
+    dirty: boolean;
+    voxelRevision: number; confirmedVoxelRevision: number;
+    fragmentRevision: number; confirmedFragmentRevision: number;
+    topologyRevision: number; confirmedTopologyRevision: number;
+  };
+  close: { completed: boolean; lastConfirmedCheckpointId: string | null; unconfirmedRequest: boolean; dirty: boolean; error: unknown } | null;
+}
+
+/**
+ * S3 第一会话：空 anchor 干净，最终 checkpoint 是新 id，当前/已确认各域 revision
+ * 与 checkpoint 完全一致，dirty=false，close 成功且确认同一 checkpoint；最终
+ * voxel revision 必须领先空 anchor，证明 witness 相对 anchor 是新增事实。
+ */
+export function checkSpatialFinalSave(x: SpatialFinalSaveInput): { ok: boolean; reason?: string } {
+  if (!x.anchorCheckpointId) return { ok: false, reason: 'anchor 缺少真实 checkpointId' };
+  if (x.anchorState.dirty) return { ok: false, reason: '空 anchor 保存后仍 dirty' };
+  if (x.anchorState.lastConfirmedCheckpointId !== x.anchorCheckpointId) {
+    return { ok: false, reason: 'anchor 不是最后确认的 checkpoint' };
+  }
+  const cp = x.checkpoint;
+  if (!cp) return { ok: false, reason: '缺少最终 checkpoint' };
+  if (cp.checkpointId === x.anchorCheckpointId) return { ok: false, reason: '最终 checkpoint 仍是 anchor' };
+  if (x.state.dirty) return { ok: false, reason: '最终保存后 dirty 仍为 true' };
+  if (cp.voxelRevision !== x.state.voxelRevision || cp.voxelRevision !== x.state.confirmedVoxelRevision) {
+    return { ok: false, reason: 'voxel revision 与当前/已确认版本不一致' };
+  }
+  if (cp.fragmentRevision !== x.state.fragmentRevision || cp.fragmentRevision !== x.state.confirmedFragmentRevision) {
+    return { ok: false, reason: 'fragment revision 与当前/已确认版本不一致' };
+  }
+  if (cp.topologyRevision !== x.state.topologyRevision || cp.topologyRevision !== x.state.confirmedTopologyRevision) {
+    return { ok: false, reason: 'topology revision 与当前/已确认版本不一致' };
+  }
+  if (cp.voxelRevision <= x.anchorState.voxelRevision) return { ok: false, reason: 'witness 未使 voxel revision 领先空 anchor' };
+  const close = x.close;
+  if (!close) return { ok: false, reason: '缺少真实 close 结果' };
+  if (!close.completed) return { ok: false, reason: 'close 未完成' };
+  if (close.unconfirmedRequest) return { ok: false, reason: 'close 存在未确认请求' };
+  if (close.dirty) return { ok: false, reason: 'close 报告 dirty' };
+  if (close.error !== null) return { ok: false, reason: 'close 自身报告错误' };
+  if (close.lastConfirmedCheckpointId !== cp.checkpointId) return { ok: false, reason: 'close 未确认最终 checkpoint' };
+  return { ok: true };
+}
+
+export interface SpatialWitness {
+  pos: Vec3;
+  dim: string;
+  worldId: string;
+  sessionId: string;
+  name: string;
+  properties: Record<string, string>;
+  observedAt: number;
+  sequence: number;
+  cell: CellEvidenceSnapshot;
+}
+
+/** S3 重开：witness 原 state/properties/时间/sequence/session 保持，freshness 为 STALE。 */
+export function checkSpatialReopen(witness: SpatialWitness, readback: CellEvidenceSnapshot): { ok: boolean; reason?: string } {
+  if (!readback.observed) return { ok: false, reason: '重开后 witness 格无证据' };
+  if (readback.freshness !== 'STALE') return { ok: false, reason: `重开后 freshness=${readback.freshness ?? 'missing'} 不是 STALE` };
+  if (readback.name !== witness.name) return { ok: false, reason: '重开后 state 名称变化' };
+  if (JSON.stringify(readback.properties ?? {}) !== JSON.stringify(witness.properties)) return { ok: false, reason: '重开后 properties 变化' };
+  if (readback.observedAt !== witness.observedAt) return { ok: false, reason: '重开后 observedAt 变化' };
+  if (readback.sequence !== witness.sequence) return { ok: false, reason: '重开后 sequence 变化' };
+  if (readback.sessionId !== witness.sessionId) return { ok: false, reason: '重开后 session 变化' };
+  return { ok: true };
+}
+
 export function adjacentRouteX(start: { x: number; y: number; z: number }, target: { x: number; y: number; z: number }): { x: number; y: number; z: number }[] {
   const n = Math.round(target.x - start.x);
   const out: { x: number; y: number; z: number }[] = [];
@@ -1557,7 +1740,10 @@ export interface MapBatchRecord {
 }
 
 /** 可写入证据 JSON 的 map 批次：保留公开输入/报告与编号，剔除临时 VoxelMap 引用。 */
-export type StoredMapBatchRecord = Omit<MapBatchRecord, 'map'>;
+export type StoredMapBatchRecord = Omit<MapBatchRecord, 'map'> & {
+  /** 采集时该批次 map 是否为 ctx.spatial.session.voxel 同一实例（不写入 map 引用）。 */
+  mapIsSessionVoxel?: boolean;
+};
 
 /** loop.observe 进入/退出时的完整公开状态、7 键、事件序号与 physics frame。 */
 export interface ObserveCallRecord {
@@ -2574,7 +2760,10 @@ async function runScenario(
     // 原始 Vision 输出、map 输入/报告与 observe 输入/输出在成功和失败路径都落盘；
     // mapBatches 只剔除临时 VoxelMap 引用，不复制/快照库内部状态。
     ev.visionCalls = exec.visionCalls;
-    ev.mapBatches = exec.mapBatches.map(mapBatchForEvidence);
+    ev.mapBatches = exec.mapBatches.map((b) => ({
+      ...mapBatchForEvidence(b),
+      mapIsSessionVoxel: b.map === ctx.spatial.session.voxel,
+    }));
     ev.observes = exec.observes;
     ev.moves = exec.moves;
     ev.bindings = [...diag.bindings, ...exec.bindings];
@@ -2690,6 +2879,180 @@ async function scenarioW1(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
     stopAllSeq: { before: release.seqBefore, after: release.seqAfter },
     acceptedSampleCount: acceptedMeasurements(d.exec.deliveredSamples, taskId, delegationId).length,
   };
+
+  // ---- S1：A 结束后不 TP/不新 map/不关服务，沿 A 方向逆序追加真实 B 任务 ----
+  const aLast = completions[completions.length - 1]!;
+  const aBodyAtEnd = { ...ctx.adapter.state().pos };
+  const s1: Record<string, unknown> = {
+    status: 'RUNNING',
+    a: {
+      taskId, delegationId,
+      route, lastCompletion: { ...aLast.pos },
+      lastCompletionSample: { sequence: aLast.sampleSequence, observedAt: aLast.observedAt },
+      bodyAtEnd: aBodyAtEnd,
+      segmentIds: segments.segments.map((m) => m.executionId),
+      stopAllSeq: { before: release.seqBefore, after: release.seqAfter },
+    },
+  };
+  ev.extra = { ...ev.extra, s1 };
+  ev.verdict = 'NOT_RUN';
+
+  const persistence = ctx.spatial.getPersistenceState();
+  s1.boundary = { lifecycle: persistence.lifecycle, closing: ctx.spatial.closing };
+  if (persistence.lifecycle !== 'open' || ctx.spatial.closing) {
+    throw new Error(`S1 A 结束/B 开始前共享服务不是 open：${persistence.lifecycle} closing=${ctx.spatial.closing}`);
+  }
+
+  // B 起点就是 A 实测末位原坐标；方向严格取 A 单位 delta 的逆序 -X/-Z/-X。
+  const bY = aLast.pos.y;
+  const bRoute = [
+    { ...aLast.pos },
+    { x: aLast.pos.x - 1, y: bY, z: aLast.pos.z },
+    { x: aLast.pos.x - 1, y: bY, z: aLast.pos.z - 1 },
+    { x: aLast.pos.x - 2, y: bY, z: aLast.pos.z - 1 },
+  ];
+  // B 首目标的 floor 支撑：A 必须已通过真实 Vision→同一 svc.voxel 的 map 观测过它。
+  const witnessCell = {
+    x: Math.floor(bRoute[1]!.x),
+    y: Math.floor(bRoute[1]!.y) - 1,
+    z: Math.floor(bRoute[1]!.z),
+  };
+  const aChain = (() => {
+    for (let i = d.exec.visionCalls.length - 1; i >= 0; i--) {
+      const vision = d.exec.visionCalls[i]!;
+      const output = visionOutputAt(vision, witnessCell);
+      if (!output) continue;
+      const batch = d.exec.mapBatches.find((b) => b.map === ctx.spatial.session.voxel
+        && b.seq > vision.seq
+        && b.observations.some((o) => observationMatchesVision(o, witnessCell, output)));
+      if (batch) return { vision, output, batch };
+    }
+    return null;
+  })();
+  if (!aChain) throw new Error('S1 A 阶段没有 witness 格的合法 Vision→同 svc.voxel 观测');
+  const witnessDim = aChain.output.dimension;
+  const baselineCell = cellEvidenceSnapshot(ctx.spatial.session.voxel.cellAt(witnessDim, witnessCell.x, witnessCell.y, witnessCell.z));
+  s1.witness = {
+    cell: witnessCell,
+    dim: witnessDim,
+    aVision: {
+      seq: aChain.vision.seq, ts: aChain.vision.ts, visionId: aChain.vision.visionId,
+      frame: aChain.vision.frame, observationId: aChain.output.observationId,
+      observedAt: aChain.output.observedAt, name: aChain.output.name,
+      worldId: aChain.output.worldId, sessionId: aChain.output.sessionId,
+    },
+    aMap: { seq: aChain.batch.seq, mapId: aChain.batch.mapId, mapWorldId: aChain.batch.mapWorldId, reportId: aChain.batch.reportId, mapIsSessionVoxel: aChain.batch.map === ctx.spatial.session.voxel },
+    baselineCell,
+  };
+  if (!baselineCell.observed) throw new Error(`S1 witness 基准格不可读：${JSON.stringify(baselineCell)}`);
+  if (bareBlockName(baselineCell.name ?? '') !== bareBlockName(lane.material)) {
+    throw new Error(`S1 witness 不是步行道支撑格：${JSON.stringify(baselineCell)}`);
+  }
+  if (baselineCell.sequence !== aChain.output.observationId || baselineCell.observedAt !== aChain.output.observedAt
+    || baselineCell.sessionId !== aChain.output.sessionId || baselineCell.name !== aChain.output.name) {
+    throw new Error(`S1 witness 基准与 A 实际 Vision 不一致：${JSON.stringify(baselineCell)}`);
+  }
+
+  // B 开始前再次只读确认：A 动作结束没有清空/刷新这份原证据。
+  const beforeStartCell = cellEvidenceSnapshot(ctx.spatial.session.voxel.cellAt(witnessDim, witnessCell.x, witnessCell.y, witnessCell.z));
+  s1.witness = { ...(s1.witness as Record<string, unknown>), beforeStartCell };
+  if (!sameCellEvidence(baselineCell, beforeStartCell)) {
+    throw new Error(`S1 B 开始前 witness 原证据被清空/刷新：before=${JSON.stringify(baselineCell)} after=${JSON.stringify(beforeStartCell)}`);
+  }
+
+  const bStartSeq = d.seq.next();
+  const bDeadlineMs = Date.now() + 30_000;
+  const startedB = startWalkTask(ctx, d, bRoute, bDeadlineMs);
+  if ('error' in startedB) throw new Error(`S1 B 启动失败：${startedB.error}`);
+  const bTaskId = startedB.task.id;
+  s1.b = { taskId: bTaskId, route: bRoute, startSeq: bStartSeq, deadlineMs: bDeadlineMs, startRegisteredAt: Date.now() };
+  const bStarted = await awaitRouteStartRecord(d.exec.routeCalls, bTaskId, startedB.done, 10_000, 'S1 B');
+  const bDelegation = bStarted.delegationId;
+  s1.b = { ...(s1.b as Record<string, unknown>), delegationId: bDelegation, startStatus: bStarted.startCall.statusAfter };
+  const bOutcome = await awaitOrTimeout(startedB.done, 60_000, 'S1 B 完成');
+  if (bOutcome.result.status !== 'succeeded') {
+    s1.b = { ...(s1.b as Record<string, unknown>), outcome: bOutcome.result };
+    throw new Error(`S1 B 未成功：status=${bOutcome.result.status} 摘要=${bOutcome.result.summary}`);
+  }
+  const bNav = navFromResult(bOutcome.result);
+  const bArrival = assertArrivedAt(bNav, bRoute[bRoute.length - 1]!, bY, 'S1 B');
+  const bSegments = checkTaskSegments(d.exec.moves, bDelegation, bTaskId, 3);
+  const bCompletions = measuredCompletions(d.exec.deliveredSamples, bTaskId, bDelegation);
+  const bRelease = assertProductionRelease(d.diag.stopAlls, bTaskId, snapshotKeys(ctx.bot), 'S1 B');
+  // B 自己的真实 public route 验证状态（按 task+delegation 过滤，不拿 A 旧 OPEN）。
+  const bRouteRows = [
+    ...d.exec.routeCalls.filter((c) => c.ownerTaskId === bTaskId && c.delegationId === bDelegation)
+      .map((c) => ({ ownerTaskId: c.ownerTaskId, seq: c.seq, status: c.statusAfter })),
+    ...d.exec.deliveredSamples.filter((s) => s.ownerTaskId === bTaskId && s.delegationId === bDelegation)
+      .map((s) => ({ ownerTaskId: s.ownerTaskId, seq: s.seq, status: s.statusAfter })),
+    ...d.exec.observes.filter((o) => o.ownerTaskId === bTaskId && o.delegationId === bDelegation)
+      .map((o) => ({ ownerTaskId: o.ownerTaskId, seq: o.exitSeq, status: o.statusAfter })),
+  ];
+  const bRouteOpen = (status: RouteStatusSnapshot) => status.route !== null
+    && status.route.stepCount === 3
+    && status.route.verifiedStepIndexes.join(',') === '0,1,2'
+    && status.route.steps.length === 3
+    && status.route.steps.every((step) => step.kind === 'verified' && step.status === 'OPEN');
+  const bRouteProof = [...bRouteRows].reverse().find((row) => bRouteOpen(row.status))
+    ?? { ownerTaskId: bStarted.startCall.ownerTaskId, seq: bStarted.startCall.seq, status: bStarted.startCall.statusAfter };
+  s1.b = {
+    ...(s1.b as Record<string, unknown>),
+    routeProof: { ownerTaskId: bRouteProof.ownerTaskId, seq: bRouteProof.seq, status: bRouteProof.status },
+    segmentIds: bSegments.segments.map((m) => m.executionId),
+    measuredCompletionPositions: bCompletions.map((c) => c.pos),
+    horizontalError: Number(bArrival.horizontalError.toFixed(3)),
+    feetError: Number(bArrival.feetError.toFixed(3)),
+    stopAllSeq: { before: bRelease.seqBefore, after: bRelease.seqAfter },
+    acceptedSampleCount: acceptedMeasurements(d.exec.deliveredSamples, bTaskId, bDelegation).length,
+    maps: d.exec.mapBatches.filter((b) => b.seq > bStartSeq).map((b) => ({
+      seq: b.seq, mapId: b.mapId, mapWorldId: b.mapWorldId,
+      mapIsSessionVoxel: b.map === ctx.spatial.session.voxel,
+    })),
+  };
+
+  // B 期真实 Vision→同一 svc.voxel 的重观测链路；取最后一个实际写入的候选。
+  const bChains = (() => {
+    const out: Array<{ vision: VisionCallRecord; output: VisionCallRecord['output'][number]; batch: MapBatchRecord }> = [];
+    for (let i = d.exec.visionCalls.length - 1; i >= 0; i--) {
+      const vision = d.exec.visionCalls[i]!;
+      if (vision.seq <= bStartSeq || !visionOutputAt(vision, witnessCell)) continue;
+      const output = visionOutputAt(vision, witnessCell)!;
+      const batch = d.exec.mapBatches.find((b) => b.map === ctx.spatial.session.voxel
+        && b.seq > vision.seq
+        && b.observations.some((o) => observationMatchesVision(o, witnessCell, output)));
+      if (batch) out.push({ vision, output, batch });
+    }
+    return out;
+  })();
+  const bVision = bChains[0]?.vision
+    ?? [...d.exec.visionCalls].reverse().find((c) => c.seq > bStartSeq && visionOutputAt(c, witnessCell) !== undefined)
+    ?? null;
+  const afterCell = cellEvidenceSnapshot(ctx.spatial.session.voxel.cellAt(witnessDim, witnessCell.x, witnessCell.y, witnessCell.z));
+  const bScope = actualScope(ctx);
+  const bMaps = d.exec.mapBatches.filter((b) => b.seq > bStartSeq);
+  s1.witness = {
+    ...(s1.witness as Record<string, unknown>),
+    bVision: bChains[0] ? {
+      seq: bChains[0].vision.seq, ts: bChains[0].vision.ts, visionId: bChains[0].vision.visionId,
+      frame: bChains[0].vision.frame, observationId: bChains[0].output.observationId,
+      observedAt: bChains[0].output.observedAt, name: bChains[0].output.name,
+      worldId: bChains[0].output.worldId, sessionId: bChains[0].output.sessionId,
+    } : null,
+    bMap: bChains[0] ? { seq: bChains[0].batch.seq, mapId: bChains[0].batch.mapId, mapWorldId: bChains[0].batch.mapWorldId, reportId: bChains[0].batch.reportId } : null,
+    afterCell,
+  };
+
+  const s1Check = checkS1Return({
+    taskIdA: taskId, taskIdB: bTaskId, aRoute: route, aLastCompletion: aLast.pos,
+    delegationB: bDelegation, bRoute, bStartSeq, bRouteStatus: bRouteProof,
+    bMoves: d.exec.moves, bCompletions, bMaps,
+    expectedMap: ctx.spatial.session.voxel,
+    expectedScope: { worldId: bScope.worldId, dim: bScope.dim, sessionId: bScope.sessionId },
+    witnessCell, baselineCell, beforeStartCell, bVision, afterCell,
+  });
+  s1.check = s1Check;
+  s1.status = s1Check.ok ? 'PASS' : 'FAIL';
+  if (!s1Check.ok) throw new Error(`S1 返程证明失败：${s1Check.reason}`);
   ev.verdict = 'PASS';
 }
 
@@ -3856,9 +4219,24 @@ async function main() {
     mode: 'shared',
     databasePath: spatialDatabasePath,
     opened: false,
+    anchor: null,
     shutdown: null,
+    s3: null,
+    // 本 harness 不启动 periodic scheduler；只验证共享服务的最终保存/close/重开读回。
+    scheduler: 'not-started',
   };
   evidence.spatial = spatialEvidence;
+  const observedScenarios: ScenarioEvidence[] = [];
+  let s3Witness: SpatialWitness | null = null;
+  let s3Anchor: {
+    checkpointId: string;
+    voxelRevision: number;
+    fragmentRevision: number;
+    topologyRevision: number;
+    dirty: boolean;
+    confirmedId: string | null;
+    ts: number;
+  } | null = null;
 
   try {
     evidence.commit = gitMeta();
@@ -3873,6 +4251,23 @@ async function main() {
       timeoutMs: 5000,
     });
     spatialEvidence.opened = true;
+    // S3 anchor：Bot 连接/任何真实 Vision 之前，对空库做一次显式保存，记录真实 id/revisions/dirty。
+    // 这不是伪造事实；后续 witness 相对该空 anchor 必须是实际新增。
+    const anchorCheckpoint = await spatial.checkpoint();
+    const anchorState = spatial.getPersistenceState();
+    s3Anchor = {
+      checkpointId: anchorCheckpoint.checkpointId,
+      voxelRevision: anchorCheckpoint.voxelRevision,
+      fragmentRevision: anchorCheckpoint.fragmentRevision,
+      topologyRevision: anchorCheckpoint.topologyRevision,
+      dirty: anchorState.dirty,
+      confirmedId: anchorState.lastConfirmedCheckpointId,
+      ts: Date.now(),
+    };
+    spatialEvidence.anchor = { ...s3Anchor, worldId: anchorCheckpoint.worldId };
+    if (anchorState.dirty || anchorState.lastConfirmedCheckpointId !== anchorCheckpoint.checkpointId) {
+      throw new Error(`S3 空 anchor 未确认为干净 checkpoint：dirty=${anchorState.dirty} confirmed=${anchorState.lastConfirmedCheckpointId}`);
+    }
     // 合法的 Vision 观测写入只经由这个共享服务；harness 不另造观察者或第二次 observeBatch。
     const vision = new Vision(adapter, config.vision, spatial);
     memory = new WorldMemory(path.join(evidenceDir, 'world-memory.json'));
@@ -3937,12 +4332,75 @@ async function main() {
       if (!selector.includes(id)) { scenarios[id] = { verdict: 'NOT_RUN', note: '未选择' }; continue; }
       const ev = await runScenario(ctx, (d) => scenarioMap[id]!(ctx, d));
       scenarios[id] = ev;
+      observedScenarios.push(ev);
       if (ev.cleanupError) stopped = true;
     }
   } catch (e) {
     evidence.fatalError = errorMessage(e);
   } finally {
     if (adapter?.bot) { try { (adapter.bot as Bot).physicsEnabled = true; } catch (e) { cleanupErrors.push({ step: 'restore-physics', message: errorMessage(e) }); } }
+    // S3 witness：从本轮全部真实场景记录里取最后一个「实际 Vision 返回且已写入同一
+    // svc.voxel」的合法事实；不写图、不另造 observer，也不用 RCON sentinel。
+    if (spatial !== null && s3Anchor !== null) {
+      const s3: Record<string, unknown> = { status: 'RUNNING', anchorCheckpointId: s3Anchor.checkpointId };
+      spatialEvidence.s3 = s3;
+      if (observedScenarios.length === 0) {
+        s3.status = evidence.fatalError === undefined ? 'FAIL' : 'NOT_RUN';
+        s3.reason = `没有可用的真实场景记录（fatal=${String(evidence.fatalError ?? 'none')}）`;
+        if (evidence.fatalError === undefined) cleanupErrors.push({ step: 'spatial-s3', message: 'S3 没有可用的真实 Vision witness' });
+      } else {
+        const candidates = observedScenarios
+          .flatMap((ev) => ev.visionCalls.flatMap((vision) => vision.output.map((output) => ({ ev, vision, output }))))
+          .sort((a, b) => b.vision.ts - a.vision.ts || b.vision.visionId - a.vision.visionId);
+        let picked: {
+          ev: ScenarioEvidence;
+          vision: VisionCallRecord;
+          output: VisionCallRecord['output'][number];
+          batch: StoredMapBatchRecord;
+          cell: CellEvidenceSnapshot;
+        } | null = null;
+        for (const c of candidates) {
+          const batch = c.ev.mapBatches.find((b) => b.mapIsSessionVoxel === true
+            && b.seq > c.vision.seq
+            && b.observations.some((o) => observationMatchesVision(o, c.output.pos, c.output)));
+          if (!batch) continue;
+          const cell = cellEvidenceSnapshot(spatial.session.voxel.cellAt(c.output.dimension, c.output.pos.x, c.output.pos.y, c.output.pos.z));
+          if (!cell.observed || cell.sequence !== c.output.observationId || cell.observedAt !== c.output.observedAt
+            || cell.sessionId !== c.output.sessionId || cell.name !== c.output.name) continue;
+          picked = { ...c, batch, cell };
+          break;
+        }
+        if (picked === null) {
+          s3.status = evidence.fatalError === undefined ? 'FAIL' : 'NOT_RUN';
+          s3.reason = '本轮没有“实际 Vision 返回且已写入同一 svc.voxel”的合法事实';
+          if (evidence.fatalError === undefined) cleanupErrors.push({ step: 'spatial-s3', message: 'S3 缺少真实写入同一 svc.voxel 的 witness' });
+        } else {
+          const properties = Object.fromEntries(Object.entries(picked.output.properties).map(([k, v]) => [k, String(v)]));
+          s3Witness = {
+            pos: { ...picked.output.pos }, dim: picked.output.dimension, worldId: picked.output.worldId,
+            sessionId: picked.output.sessionId, name: picked.output.name, properties,
+            observedAt: picked.output.observedAt, sequence: picked.output.observationId,
+            cell: picked.cell,
+          };
+          s3.witness = {
+            ...s3Witness,
+            observation: picked.output,
+            vision: { seq: picked.vision.seq, ts: picked.vision.ts, visionId: picked.vision.visionId, frame: picked.vision.frame },
+            map: { seq: picked.batch.seq, mapId: picked.batch.mapId, mapWorldId: picked.batch.mapWorldId, reportId: picked.batch.reportId },
+          };
+          s3.status = 'PENDING';
+        }
+      }
+    }
+    if (spatialEvidence.s3 === null) {
+      spatialEvidence.s3 = {
+        status: evidence.fatalError === undefined ? 'FAIL' : 'NOT_RUN',
+        reason: `共享服务/anchor 未建立：${String(evidence.fatalError ?? 'unknown')}`,
+      };
+      if (spatial !== null && evidence.fatalError === undefined) {
+        cleanupErrors.push({ step: 'spatial-s3', message: 'S3 共享服务/anchor 未建立' });
+      }
+    }
     // 先同步进入 closing（拒绝新委托/写入并取消活动委托），随后保留原有有界清理；
     // 其他清理失败也不能跳过关停，最终结果统一在下面等待并入证据。
     let servicePromise: Promise<ShutdownResult> | null = null;
@@ -3969,6 +4427,68 @@ async function main() {
       const shutdown = spatialShutdownRecord(serviceResult, serviceCallError, serviceAwaitError, spatial.worldId);
       spatialEvidence.shutdown = shutdown;
       if (!shutdown.ok) cleanupErrors.push({ step: 'spatial-shutdown', message: `关停未确认：${shutdown.problems.join(',')}` });
+
+      // S3：只在第一会话真实 close 已确认后，才用同一 world/DB 重新打开只读验证 witness。
+      if (s3Anchor !== null) {
+        const s3 = spatialEvidence.s3 as Record<string, unknown>;
+        const finalState = spatial.getPersistenceState();
+        const proof = checkSpatialFinalSave({
+          anchorCheckpointId: s3Anchor.checkpointId,
+          anchorState: { dirty: s3Anchor.dirty, lastConfirmedCheckpointId: s3Anchor.confirmedId, voxelRevision: s3Anchor.voxelRevision },
+          checkpoint: serviceResult?.checkpoint ?? null,
+          state: finalState,
+          close: serviceResult?.close ?? null,
+        });
+        s3.firstClose = {
+          proof,
+          shutdown,
+          checkpoint: serviceResult?.checkpoint ?? null,
+          state: {
+            lifecycle: finalState.lifecycle, dirty: finalState.dirty,
+            voxelRevision: finalState.voxelRevision, confirmedVoxelRevision: finalState.confirmedVoxelRevision,
+            fragmentRevision: finalState.fragmentRevision, confirmedFragmentRevision: finalState.confirmedFragmentRevision,
+            topologyRevision: finalState.topologyRevision, confirmedTopologyRevision: finalState.confirmedTopologyRevision,
+          },
+        };
+        if (!proof.ok) {
+          s3.status = 'FAIL';
+          s3.reason = `第一会话最终保存/close 证明失败：${proof.reason}`;
+          cleanupErrors.push({ step: 'spatial-s3', message: `第一会话最终保存/close 证明失败：${proof.reason}` });
+        } else if (s3Witness !== null) {
+          const witness = s3Witness;
+          let reopened: SharedSpatialSession | null = null;
+          let reopenResult: ShutdownResult | null = null;
+          let reopenAwaitError: unknown = null;
+          try {
+            reopened = await SharedSpatialSession.open({ worldId: spatial.worldId, databasePath: spatial.databasePath, timeoutMs: 5000 });
+            const readback = cellEvidenceSnapshot(reopened.session.voxel.cellAt(witness.dim, witness.pos.x, witness.pos.y, witness.pos.z));
+            const reopenCheck = checkSpatialReopen(witness, readback);
+            s3.reopen = { cell: readback, check: reopenCheck };
+            if (!reopenCheck.ok) {
+              s3.status = 'FAIL';
+              s3.reason = `重开读回失败：${reopenCheck.reason}`;
+              cleanupErrors.push({ step: 'spatial-s3-reopen', message: `S3 重开读回失败：${reopenCheck.reason}` });
+            }
+          } catch (e) {
+            s3.reopen = { error: errorFacts(e) };
+            s3.status = 'FAIL';
+            cleanupErrors.push({ step: 'spatial-s3-reopen', message: `S3 重开失败：${errorMessage(e)}` });
+          } finally {
+            // 第二会话真实 shutdown/close；结果与第一会话最终 id 分开保存，失败也不覆盖第一保存主错。
+            if (reopened !== null) {
+              const reopenCallError: unknown = null;
+              try { reopenResult = await reopened.shutdown(); } catch (e) { reopenAwaitError = e; }
+              const second = spatialShutdownRecord(reopenResult, reopenCallError, reopenAwaitError, reopened.worldId);
+              s3.secondClose = second;
+              if (!second.ok) {
+                s3.status = 'FAIL';
+                cleanupErrors.push({ step: 'spatial-s3-second-shutdown', message: `S3 第二会话关停未确认：${second.problems.join(',')}` });
+              }
+            }
+          }
+          if (s3.status !== 'FAIL') s3.status = 'PASS';
+        }
+      }
     }
   }
 
