@@ -77,7 +77,7 @@ import {
 } from '../scripts/walk-acceptance.ts';
 import { WalkMoveExecutor, walkCollisionProvider } from '../src/adapter/walk-route.ts';
 import type { TaskOutcome } from '../src/arbiter/arbiter.ts';
-import { SharedSpatialSession } from '../src/spatial/shared-session.ts';
+import { SharedSpatialSession, type ShutdownResult } from '../src/spatial/shared-session.ts';
 
 const emptyKeys = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
 
@@ -1868,12 +1868,15 @@ test('ExecutionDiagnostics：observeBatch 返回原 ChangeReport，并以 WeakMa
   }
 });
 
-test('spatialShutdownRecord：真实 SQLite 会话正常关停由最终 checkpoint/close 证据确认', async () => {
+test('spatialShutdownRecord：真实 SQLite 会话正常关停由最终 checkpoint/close 证据确认', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'walk-acceptance-spatial-'));
   const databasePath = path.join(dir, 'spatial.sqlite');
-  const spatial = await SharedSpatialSession.open({ worldId: 'walk-acceptance-world', databasePath, timeoutMs: 5000 });
+  let spatial: SharedSpatialSession | null = null;
+  let result: ShutdownResult | null = null;
+  let primaryFailure: unknown = null;
   try {
-    const result = await spatial.shutdown();
+    spatial = await SharedSpatialSession.open({ worldId: 'walk-acceptance-world', databasePath, timeoutMs: 5000 });
+    result = await spatial.shutdown();
     const record = spatialShutdownRecord(result, null, null, 'walk-acceptance-world');
     assert.equal(record.ok, true, JSON.stringify(record));
     assert.deepEqual(record.problems, []);
@@ -1889,8 +1892,32 @@ test('spatialShutdownRecord：真实 SQLite 会话正常关停由最终 checkpoi
     const wrongWorld = spatialShutdownRecord(result, null, null, 'another-world');
     assert.equal(wrongWorld.ok, false, 'checkpoint 世界不符不得算成功');
     assert.ok(wrongWorld.problems.includes('checkpoint_world_mismatch'));
+  } catch (error) {
+    primaryFailure = error;
+    throw error;
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+    // 主流程未完成真实 shutdown 时仍尽力关闭；关闭是否可信只看实际结果。
+    let cleanupError: unknown = null;
+    if (spatial !== null && result === null) {
+      try { result = await spatial.shutdown(); } catch (error) { cleanupError = error; }
+    }
+    const shutdown = spatial === null ? null : spatialShutdownRecord(result, cleanupError, null, spatial.worldId);
+    const closed = shutdown !== null && shutdown.ok;
+    if (!closed) {
+      const detail = shutdown === null ? 'session was not opened' : JSON.stringify(shutdown.problems);
+      const message = `未确认关闭，保留 fixture：${databasePath}（${detail}）`;
+      // 主错误优先；仅当没有主错误时才把未确认关闭/次关闭错误作为测试失败。
+      if (primaryFailure === null) throw new Error(message, { cause: cleanupError });
+      t.diagnostic(message);
+    } else {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch (error) {
+        // 只有关闭已被实际 CloseResult/分类确认后才删除；删除失败也不覆盖主错误。
+        if (primaryFailure === null) throw error;
+        t.diagnostic(`关闭已确认但删除 fixture 失败：${databasePath}（${String(error)}）`);
+      }
+    }
   }
 });
 
