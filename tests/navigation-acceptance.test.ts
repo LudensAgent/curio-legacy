@@ -6,25 +6,35 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
+  CANCEL_MOVEMENT_THRESHOLD,
   acceptanceExitCode,
+  captureMoveCall,
   classifyAdapterEnd,
   classifyCancellationResult,
   classifyKnownRouteResult,
   classifyPostCancelFrames,
   classifySettledFrames,
+  classifyTerminalBody,
+  classifyTraversalOwnership,
   classifyWalkToResult,
+  controlReleaseProblems,
   fragmentProjectionMatches,
+  localBodyCells,
   parseCliArgs,
   parseRconList,
+  preflightBotConflict,
   validateFragmentsQuery,
   validateFragmentQuery,
   validateTraversalsQuery,
+  type CapturedMove,
   type CapturedRouteSample,
   type PhysicsFrame,
 } from '../scripts/navigation-acceptance.ts';
+import { WalkMoveExecutor } from '../src/adapter/walk-route.ts';
 import { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import { spatialQuery } from '../src/skills/spatial-query.ts';
 import type { SkillCtx } from '../src/skills/types.ts';
+import type { ExecutableMove } from 'curio-minecraft-3d-memory';
 
 const script = fileURLToPath(new URL('../scripts/navigation-acceptance.ts', import.meta.url));
 const tsx = import.meta.resolve('tsx');
@@ -42,7 +52,7 @@ function routeSample(taskId: string, nav: Record<string, unknown>, over: Partial
     onGround: obs.onGround === true, inWater: obs.inWater === true, ...over,
   };
   return {
-    taskId, delegationId: sample.executionId, accepted: true, sample,
+    taskId, delegationId: sample.executionId, accepted: true, receivedAt: 1, sample,
     returned: {
       delegationId: sample.executionId, lastPosition: { ...sample.position }, nextPointIndex: 2, activeStepIndex: null,
       resultOutcome: 'ARRIVED', resultLastPosition: { ...sample.position }, resultLastObservation: { ...obs },
@@ -146,6 +156,15 @@ test('cancellation needs exact same-task partial sample, released controls and r
   const missingKey = { ...controls } as Record<string, unknown>;
   delete missingKey.sneak;
   assert.equal(classifyCancellationResult(result, 't3', [sample], missingKey, false, start).ok, false);
+
+  // 触发取消与终态分类共用同一阈值：0.16 格的部分位移是有效的取消证据，
+  // 0.10 格则不能证明真的动过。
+  assert.equal(CANCEL_MOVEMENT_THRESHOLD, 0.15);
+  const partial = { ...nav, lastPosition: { x: start.x + 0.16, y: start.y, z: start.z } };
+  const partialResult = { status: 'cancelled', summary: 'cancelled', data: { nav: partial } };
+  assert.equal(classifyCancellationResult(partialResult, 't3', [routeSample('t3', partial)], controls, false, start).ok, true);
+  const tiny = { ...nav, lastPosition: { x: start.x + 0.1, y: start.y, z: start.z } };
+  assert.equal(classifyCancellationResult({ status: 'cancelled', summary: 'cancelled', data: { nav: tiny } }, 't3', [routeSample('t3', tiny)], controls, false, start).ok, false);
 });
 
 test('settle and post-cancel windows reject zero frames and short frame coverage', () => {
@@ -158,6 +177,22 @@ test('settle and post-cancel windows reject zero frames and short frame coverage
   assert.equal(classifySettledFrames(frames, 300).ok, true);
   const moved = [frames[0]!, { ...frames[1]!, position: { x: 0.2, y: 64, z: 0 } }];
   assert.equal(classifySettledFrames(moved, 300).ok, false);
+  // 早期残余移动后真正稳定：窗口从稳定段重新开始，必须 PASS 并返回稳定段位置。
+  const earlyMotionThenStable: PhysicsFrame[] = [
+    { frame: 3, at: 0, position: { x: 0, y: 64, z: 0 }, onGround: true, inWater: false, controls: { forward: true } },
+    { frame: 4, at: 50, position: { x: 0.2, y: 64, z: 0 }, onGround: true, inWater: false, controls: { forward: true } },
+    { frame: 5, at: 100, position: { x: 0.4, y: 64, z: 0 }, onGround: true, inWater: false, controls: { forward: false } },
+    { frame: 6, at: 450, position: { x: 0.4, y: 64, z: 0 }, onGround: true, inWater: false, controls: { forward: false } },
+    { frame: 7, at: 620, position: { x: 0.4, y: 64, z: 0 }, onGround: true, inWater: false, controls: { forward: false } },
+  ];
+  const stable = classifySettledFrames(earlyMotionThenStable, 300);
+  assert.equal(stable.ok, true);
+  assert.deepEqual(stable.position, { x: 0.4, y: 64, z: 0 });
+  // 持续移动即使持续到硬上限也不能用墙钟凑出稳定窗口。
+  const persistentMotion: PhysicsFrame[] = Array.from({ length: 8 }, (_, i) => ({
+    frame: 10 + i, at: i * 100, position: { x: i * 0.2, y: 64, z: 0 }, onGround: true, inWater: false, controls: { forward: true },
+  }));
+  assert.equal(classifySettledFrames(persistentMotion, 300).ok, false);
   assert.equal(classifyPostCancelFrames([], 600).ok, false);
   assert.equal(classifyPostCancelFrames(frames, 600).ok, false, 'coverage must span the requested window');
   const controls = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
@@ -177,6 +212,45 @@ test('RCON list validates declared count, separator and duplicate bot before con
   const other = parseRconList('There are 3 of a max of 20 players online: TestBot, Alex, Steve');
   assert.equal(other.names.filter((n) => n === 'TestBot').length, 1);
   assert.deepEqual(other.names.filter((n) => n !== 'TestBot'), ['Alex', 'Steve']);
+});
+
+test('preflight rejects any existing configured test bot but allows other names', () => {
+  assert.equal(preflightBotConflict([], 'TestBot'), null);
+  assert.equal(preflightBotConflict(['Alex', 'Steve'], 'TestBot'), null, 'other players may watch');
+  assert.match(preflightBotConflict(['TestBot'], 'TestBot') ?? '', /already listed before connection/);
+  assert.match(preflightBotConflict(['Alex', 'TestBot', 'Steve'], 'TestBot') ?? '', /already listed before connection/);
+  // 解析器保留 count/name 校验，且不据此分析或移动其他玩家。
+  const parsed = parseRconList('There are 2 of a max of 20 players online: TestBot, Alex');
+  assert.equal(parsed.count, 2);
+  assert.deepEqual(parsed.names, ['TestBot', 'Alex']);
+  assert.equal(preflightBotConflict(parsed.names, 'TestBot') !== null, true);
+  assert.equal(preflightBotConflict(parsed.names, 'Nobody'), null);
+});
+
+test('terminal body must satisfy the same hypot tolerance, grounded/dry/ready scope and released controls', () => {
+  const start = { x: 200.5, y: 64, z: 216.5 };
+  const target = { x: 202.5, y: 64, z: 216.5 };
+  const scope = { worldId: 'world', dim: 'overworld', sessionId: 'session' };
+  const controls = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
+  const state = { pos: { ...target }, onGround: true, inWater: false, observationReady: true, ...scope };
+  assert.equal(classifyTerminalBody({ state, controls }, target, tolerance, scope).ok, true);
+
+  // NavResult 说 ARRIVED 但同一时刻的真实身体在容差外：不能 PASS。
+  const outside = { ...state, pos: { x: target.x + 0.2, y: target.y, z: target.z } };
+  assert.equal(classifyTerminalBody({ state: outside, controls }, target, tolerance, scope).ok, false);
+  // 单独 x/z 都小、Math.hypot 超限也不能接受。
+  const diagonal = { ...state, pos: { x: target.x + 0.1, y: target.y, z: target.z + 0.1 } };
+  assert.equal(classifyTerminalBody({ state: diagonal, controls }, target, tolerance, scope).ok, false);
+  assert.equal(classifyTerminalBody({ state: { ...state, onGround: false }, controls }, target, tolerance, scope).ok, false);
+  assert.equal(classifyTerminalBody({ state: { ...state, inWater: true }, controls }, target, tolerance, scope).ok, false);
+  assert.equal(classifyTerminalBody({ state: { ...state, observationReady: false }, controls }, target, tolerance, scope).ok, false);
+  assert.equal(classifyTerminalBody({ state: { ...state, sessionId: 'other' }, controls }, target, tolerance, scope).ok, false);
+  // 未释放/不可读的控制键同样失败。
+  assert.equal(classifyTerminalBody({ state, controls: { ...controls, forward: true } }, target, tolerance, scope).ok, false);
+  const missing = { ...controls } as Record<string, unknown>;
+  delete missing.sneak;
+  assert.equal(classifyTerminalBody({ state, controls: missing }, target, tolerance, scope).ok, false);
+  assert.equal(controlReleaseProblems(controls).length, 0);
 });
 
 test('real spatialQuery outputs use counts for listings and full geometry for comparison', async () => {
@@ -245,6 +319,71 @@ test('adapter end classification requires both real observations and cleanup fai
   assert.equal(acceptanceExitCode(null, [], [{ step: 'adapter-end', error: new Error('x') }]), 1);
   assert.equal(acceptanceExitCode(null, [{ scenario: 's', problem: 'x' }], []), 1);
   assert.equal(acceptanceExitCode(new Error('fatal'), [], []), 1);
+});
+
+test('traversal ownership uses the actual walk task and real ExecutableMove requests, not sample ids', async () => {
+  const sink: CapturedMove[] = [];
+  const invocation = async (taskId: string, executionId: string, from: { x: number; y: number; z: number }) => {
+    const controller = new AbortController();
+    const controls = new Set<string>();
+    const body = {
+      setControlState(name: string, value: boolean) { if (value) controls.add(name); else controls.delete(name); },
+      clearControlStates() { controls.clear(); },
+      look() {},
+      entity: { position: { x: 0, y: 64, z: 0 }, velocity: { x: 0, y: 0, z: 0 }, onGround: true, isInWater: false },
+    };
+    // 真实的公开 MoveExecutor 调用：帧源结束会返回 execution_error，足以绑定请求与结果。
+    const executor = new WalkMoveExecutor(body, async () => null, controller.signal);
+    const request: ExecutableMove = {
+      executionId, worldId: 'world', dim: 'overworld', sessionId: 'session',
+      from: { ...from }, to: { x: from.x + 1, y: from.y, z: from.z },
+      deadlineMs: Date.now() + 5000, timeoutMs: 1000, signal: controller.signal,
+    };
+    const result = await captureMoveCall(executor, request, taskId, sink);
+    return { request, result };
+  };
+
+  const from = { x: 200.5, y: 64, z: 216.5 };
+  const mine = await invocation('walk-1', 'walk-1-step-0', from);
+  // 另一个任务复用/持有不同 executionId；它们的请求不能被借给 walk-1。
+  await invocation('walk-2', 'reused-step', { x: 0, y: 64, z: 0 });
+  await invocation('walk-2', 'walk-1-step-0', { x: 5, y: 64, z: 5 });
+  assert.equal(sink.length, 3);
+  assert.equal(sink[0]!.taskId, 'walk-1');
+  assert.equal(sink[0]!.request.executionId, 'walk-1-step-0');
+  assert.deepEqual(sink[0]!.request.from, from);
+  assert.equal((sink[0]!.result?.failure as Record<string, unknown> | undefined)?.kind, 'execution_error');
+  // move 结果没有样本；归属仍可由确定性的 onSample/trace 证据成立。
+  assert.equal(sink[0]!.result?.sample, undefined);
+
+  const tracePos = { x: 201.4, y: 64, z: 216.5 };
+  const nav = {
+    outcome: 'ARRIVED', confirmed: true, lastPosition: { ...tracePos },
+    lastObservation: { worldId: 'world', dim: 'overworld', sessionId: 'session', observedAt: 9000, onGround: true, inWater: false },
+    trace: [{ pos: { ...tracePos }, ts: 9000 }],
+  };
+  const base = () => ({
+    actionId: 'walk-1', executionId: 'walk-1-step-0', from: { ...from }, to: { ...tracePos },
+    observedAt: 9000, source: 'confirmed_walk_corridor', mode: 'walk',
+  });
+  assert.equal(classifyTraversalOwnership(base(), 'walk-1', sink, nav).ok, true);
+  // 名义 move 目标不是确认轨迹点：不能用它替代实际观测端点。
+  assert.equal(classifyTraversalOwnership({ ...base(), to: { x: mine.request.to.x, y: 64, z: 216.5 } }, 'walk-1', sink, nav).ok, false);
+  assert.equal(classifyTraversalOwnership({ ...base(), observedAt: 9001 }, 'walk-1', sink, nav).ok, false);
+  assert.equal(classifyTraversalOwnership({ ...base(), from: { x: 200.4, y: 64, z: 216.5 } }, 'walk-1', sink, nav).ok, false);
+  // actionId 是另一个任务，或 executionId 只属于另一个任务：都不能冒充 walk-1。
+  assert.equal(classifyTraversalOwnership(base(), 'walk-2', sink, nav).ok, false);
+  assert.equal(classifyTraversalOwnership({ ...base(), executionId: 'reused-step' }, 'walk-1', sink, nav).ok, false);
+  assert.equal(classifyTraversalOwnership({ ...base(), source: 'walk_memory' }, 'walk-1', sink, nav).ok, false);
+  assert.equal(classifyTraversalOwnership({ ...base(), mode: 'ride' }, 'walk-1', sink, nav).ok, false);
+  assert.equal(classifyTraversalOwnership(null, 'walk-1', sink, nav).ok, false);
+});
+
+test('local body cell batch is bounded and centered on the measured feet', () => {
+  const cells = localBodyCells({ x: 200.5, y: 64, z: 216.5 }, 1);
+  assert.equal(cells.length, 27);
+  assert.ok(cells.some((p) => p.x === 200 && p.y === 64 && p.z === 216));
+  assert.ok(cells.every((p) => Math.abs(p.x - 200) <= 1 && Math.abs(p.z - 216) <= 1 && p.y >= 63 && p.y <= 65));
 });
 
 test('script help does not create run evidence or require a config file', () => {

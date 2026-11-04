@@ -16,7 +16,7 @@ import type { Vec3Like } from '../src/adapter/types.ts';
 import type { Rcon } from '../src/observer/rcon.ts';
 import type { SharedSpatialSession as SharedSpatialSessionType, ShutdownResult } from '../src/spatial/shared-session.ts';
 import type { SpatialSession } from 'curio-minecraft-3d-memory/storage/sqlite';
-import type { BodySample, PathFragment, WalkRouteExecutor, WalkRouteRequest, WalkRouteStatus } from 'curio-minecraft-3d-memory';
+import type { BodySample, ExecutableMove, ExecutableMoveResult, PathFragment, WalkRouteExecutor, WalkRouteRequest, WalkRouteStatus } from 'curio-minecraft-3d-memory';
 
 export const LANE = { minX: 200, maxXExclusive: 219, minZ: 216, maxZExclusive: 218, feetY: 64 } as const;
 const CONTROL_KEYS = ['forward', 'back', 'left', 'right', 'jump', 'sprint', 'sneak'] as const;
@@ -80,6 +80,8 @@ export interface CapturedRouteSample {
   taskId: string;
   delegationId: string;
   accepted: boolean;
+  /** 诊断接收时间；sample.observedAt 仍是原始交付值，不用接收时间替换。 */
+  receivedAt: number;
   sample: {
     executionId: string; sequence: number; worldId: string; dim: string; sessionId: string;
     observedAt: number; position: Vec3Like; onGround: boolean; inWater: boolean;
@@ -92,12 +94,16 @@ export interface CapturedRouteSample {
 }
 export interface TerminalSampleEvidence { taskId: string; samples: readonly CapturedRouteSample[] }
 
+/** 成功与取消共用同一把尺：取消只需证明真实部分位移，不能比触发取消的阈值更严。 */
+export const CANCEL_MOVEMENT_THRESHOLD = 0.15;
+
 /** 终态必须精确对上该任务真实交付且被 onSample 接受的样本，不能靠时间容差或事后 state 推断。 */
-function terminalSampleProblems(nav: Record<string, unknown>, evidence: TerminalSampleEvidence | undefined, start: Vec3Like) {
+function terminalSampleProblems(nav: Record<string, unknown>, evidence: TerminalSampleEvidence | undefined, start: Vec3Like,
+  minMovement = 0.25) {
   const p: string[] = [];
   if (evidence === undefined) return { problems: ['missing actual same-task WalkRouteExecutor samples'] };
   const samples = evidence.samples.filter((s) => s.taskId === evidence.taskId);
-  if (!samples.some((s) => s.accepted && distance(s.sample.position, start) > 0.25)) p.push('no accepted same-task sample shows measured movement');
+  if (!samples.some((s) => s.accepted && distance(s.sample.position, start) > minMovement)) p.push('no accepted same-task sample shows measured movement');
   const pos = nav.lastPosition;
   const obs = isRecord(nav.lastObservation) ? nav.lastObservation : null;
   if (!isVec(pos) || obs === null || !isNum(obs.observedAt)) {
@@ -171,6 +177,16 @@ export function classifyKnownRouteResult(result: unknown, originalPoints: readon
   return { ok: p.length === 0, problems: p, nav };
 }
 
+/** 7 个移动控制键必须全部可读且已松开；结算与取消终态共用。 */
+export function controlReleaseProblems(controls: Record<string, unknown>): string[] {
+  const p: string[] = [];
+  const missing = CONTROL_KEYS.filter((k) => typeof controls[k] !== 'boolean');
+  if (missing.length) p.push(`missing control keys: ${missing.join(',')}`);
+  const active = CONTROL_KEYS.filter((k) => controls[k] === true);
+  if (active.length) p.push(`controls not released: ${active.join(',')}`);
+  return p;
+}
+
 /** 取消终态：cancelled/unconfirmed、部分数据精确对上同任务真实样本、7 个控制键已释放。 */
 export function classifyCancellationResult(result: unknown, taskId: string, samples: readonly CapturedRouteSample[],
   controls: Record<string, unknown>, reactivated: boolean, start: Vec3Like) {
@@ -183,14 +199,138 @@ export function classifyCancellationResult(result: unknown, taskId: string, samp
     if (nav.confirmed !== false) p.push('cancelled nav must be unconfirmed');
     if (!isVec(nav.lastPosition)) p.push('missing cancelled nav.lastPosition');
     if (!isRecord(nav.lastObservation)) p.push('missing cancelled nav.lastObservation');
-    p.push(...terminalSampleProblems(nav, { taskId, samples }, start).problems);
+    // 触发取消与终态分类使用同一阈值；取消只要求真实测得的部分位移。
+    p.push(...terminalSampleProblems(nav, { taskId, samples }, start, CANCEL_MOVEMENT_THRESHOLD).problems);
   }
-  const missing = CONTROL_KEYS.filter((k) => typeof controls[k] !== 'boolean');
-  if (missing.length) p.push(`missing control keys: ${missing.join(',')}`);
-  const active = CONTROL_KEYS.filter((k) => controls[k] === true);
-  if (active.length) p.push(`controls not released: ${active.join(',')}`);
+  p.push(...controlReleaseProblems(controls));
   if (reactivated) p.push('control reactivated during bounded post-cancel window');
   return { ok: p.length === 0, problems: p, nav };
+}
+
+/** 终态实际身体：与 NavResult 分开核对位置、落地/干燥/就绪、会话作用域与全部 7 个控制键。 */
+export interface TerminalBodyEvidence {
+  state: {
+    pos: Vec3Like; onGround: boolean; inWater: boolean; observationReady: boolean;
+    worldId: string; dim: string; sessionId: string;
+  };
+  controls: Record<string, unknown>;
+}
+export function classifyTerminalBody(body: TerminalBodyEvidence | undefined, target: Vec3Like, tol: Tolerance,
+  scope: { worldId: string; dim: string; sessionId: string }) {
+  const p: string[] = [];
+  if (body === undefined) return { ok: false, problems: ['missing terminal body snapshot'] };
+  const s = body.state;
+  if (!withinArrival(s.pos, target, tol)) p.push('terminal body outside runtime arrival tolerance');
+  if (!s.onGround) p.push('terminal body is not grounded');
+  if (s.inWater) p.push('terminal body is in water');
+  if (!s.observationReady) p.push('terminal body observation is not ready');
+  if (s.worldId !== scope.worldId || s.dim !== scope.dim || s.sessionId !== scope.sessionId) {
+    p.push('terminal body world/dim/session differs from this run');
+  }
+  p.push(...controlReleaseProblems(body.controls));
+  return { ok: p.length === 0, problems: p };
+}
+
+/** 真实 WalkMoveExecutor.move 的诊断记录：只保留有限请求/结果字段，AbortSignal 等句柄明确不序列化。 */
+export interface CapturedMoveRequest {
+  executionId: string; worldId: string; dim: string; sessionId: string;
+  from: Vec3Like; to: Vec3Like; deadlineMs: number; timeoutMs: number;
+}
+export interface CapturedMoveSample {
+  executionId: string; sequence: number; worldId: string; dim: string; sessionId: string;
+  observedAt: number; position: Vec3Like; onGround: boolean; inWater: boolean;
+}
+export interface CapturedMove {
+  /** 发起该 move 的真实 Arbiter 任务；没有活动任务时必须是 null，不能借用样本 id。 */
+  taskId: string | null;
+  /** 诊断接收时间；请求里的 from/to 和结果样本时间仍是原值。 */
+  receivedAt: number;
+  request: CapturedMoveRequest;
+  result: { sample?: CapturedMoveSample; failure?: Record<string, unknown> } | null;
+  error: string | null;
+}
+
+/** 调用真实 MoveExecutor.move 并记录请求/结果；原 Promise 与返回值/异常原样透传。 */
+export async function captureMoveCall(
+  executor: { move(request: ExecutableMove): Promise<ExecutableMoveResult> },
+  request: ExecutableMove,
+  taskId: string | null,
+  sink: CapturedMove[],
+): Promise<ExecutableMoveResult> {
+  const entry: CapturedMove = {
+    taskId,
+    receivedAt: Date.now(),
+    request: {
+      executionId: request.executionId, worldId: request.worldId, dim: request.dim, sessionId: request.sessionId,
+      from: clone(request.from), to: clone(request.to), deadlineMs: request.deadlineMs, timeoutMs: request.timeoutMs,
+    },
+    result: null, error: null,
+  };
+  sink.push(entry);
+  try {
+    const result = await executor.move(request);
+    entry.result = {
+      ...(result.sample === undefined ? {} : {
+        sample: {
+          executionId: result.sample.executionId, sequence: result.sample.sequence,
+          worldId: result.sample.worldId, dim: result.sample.dim, sessionId: result.sample.sessionId,
+          observedAt: result.sample.observedAt, position: clone(result.sample.pos),
+          onGround: result.sample.onGround, inWater: result.sample.inWater,
+        },
+      }),
+      ...(result.failure === undefined ? {} : { failure: clone(result.failure) as Record<string, unknown> }),
+    };
+    return result;
+  } catch (e) {
+    entry.error = errorText(e);
+    throw e;
+  }
+}
+
+/**
+ * N3 traversal 归属：actionId 必须是真实首个 walk 任务，executionId 必须来自该任务真实
+ * ExecutableMove 请求；from 用请求原值，to/observedAt 必须对应已确认 nav.trace 点。
+ * 不要求 move 返回过样本（合法 onSample 已确认即可），也不拿 fragment 名义几何冒充轨迹。
+ */
+export function classifyTraversalOwnership(
+  record: Record<string, unknown> | null,
+  walkTaskId: string | null,
+  moves: readonly CapturedMove[],
+  nav: Record<string, unknown> | null,
+) {
+  const p: string[] = [];
+  if (record === null) { p.push('missing traversal record'); return { ok: false, problems: p }; }
+  if (walkTaskId === null) { p.push('missing actual first walk task id'); return { ok: false, problems: p }; }
+  if (record.actionId !== walkTaskId) p.push(`traversal.actionId ${String(record.actionId)} is not the actual walk task ${walkTaskId}`);
+  const executionId = typeof record.executionId === 'string' ? record.executionId : null;
+  if (executionId === null) p.push('traversal.executionId is missing');
+  const move = executionId === null ? undefined : moves.find((m) => m.taskId === walkTaskId && m.request.executionId === executionId);
+  if (executionId !== null && move === undefined) p.push(`traversal.executionId ${executionId} has no actual WalkMoveExecutor request owned by ${walkTaskId}`);
+  if (move !== undefined && !isDeepStrictEqual(record.from, move.request.from)) p.push('traversal.from differs from the actual move request.from');
+  if (record.source !== 'confirmed_walk_corridor') p.push(`traversal.source=${String(record.source)} (confirmed_walk_corridor required)`);
+  if (record.mode !== 'walk') p.push(`traversal.mode=${String(record.mode)} (walk required)`);
+  const trace = nav !== null && Array.isArray(nav.trace) ? nav.trace.filter((t): t is { pos: Vec3Like; ts: number } => isRecord(t) && isVec(t.pos) && isNum(t.ts)) : [];
+  if (nav === null || nav.confirmed !== true) p.push('missing confirmed walk nav result');
+  else if (!isVec(record.to) || !isNum(record.observedAt)) p.push('traversal.to/observedAt malformed');
+  else if (!trace.some((t) => isDeepStrictEqual(t.pos, record.to) && t.ts === record.observedAt)) {
+    p.push('traversal.to/observedAt does not correspond to a confirmed nav.trace point');
+  }
+  return { ok: p.length === 0, problems: p };
+}
+
+/** 初始观测批次：只取身体附近的有界局部格，交给正常 Vision.observeBlocks 视线判定。 */
+export function localBodyCells(start: Vec3Like, radius = 1): Vec3Like[] {
+  const feet = { x: Math.floor(start.x), y: Math.floor(start.y), z: Math.floor(start.z) };
+  const seen = new Set<string>();
+  const cells: Vec3Like[] = [];
+  for (let dx = -radius; dx <= radius; dx++) for (let dz = -radius; dz <= radius; dz++) for (let dy = -1; dy <= 1; dy++) {
+    const pos = { x: feet.x + dx, y: feet.y + dy, z: feet.z + dz };
+    const key = `${pos.x},${pos.y},${pos.z}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    cells.push(pos);
+  }
+  return cells;
 }
 
 /** 有界实际物理帧：每帧只记录交付时的位置与控制键，不事后读状态补帧。 */
@@ -200,16 +340,29 @@ export interface PhysicsFrame {
 }
 export interface FrameControls { values: Record<string, unknown>; missing: string[] }
 
-/** 稳定落点：必须有连续、足量的真实物理帧跨越请求的稳定时长，且期间位置不变。 */
+/**
+ * 稳定落点：在真实物理帧中找一段连续、落地、干燥且位置不变的窗口，帧间时间必须自行跨越
+ * 请求的稳定时长。早期残余速度只会重置窗口；不用墙钟补足，也不接受零帧。
+ */
 export function classifySettledFrames(frames: readonly PhysicsFrame[], stableMs: number) {
   const p: string[] = [];
   if (frames.length === 0) { p.push('no physics frames observed during settle'); return { ok: false, problems: p, position: null }; }
-  if (frames.length < 2) p.push('fewer than 2 distinct physics frames during settle');
-  const first = frames[0]!, last = frames[frames.length - 1]!;
-  if (last.at - first.at < stableMs) p.push(`physics frames span ${last.at - first.at}ms < required ${stableMs}ms`);
-  if (frames.some((f) => !f.onGround || f.inWater)) p.push('settle frames are not grounded and dry');
-  if (frames.some((f) => distance(f.position, first.position) > 1e-6)) p.push('body did not remain stationary across physics frames');
-  return { ok: p.length === 0, problems: p, position: p.length === 0 ? { ...last.position } : null };
+  let window: PhysicsFrame[] = [];
+  let stable: PhysicsFrame[] | null = null;
+  for (const frame of frames) {
+    if (!frame.onGround || frame.inWater) { window = []; continue; }
+    if (window.length === 0) { window = [frame]; continue; }
+    if (distance(frame.position, window[0]!.position) > 1e-6) { window = [frame]; continue; }
+    window.push(frame);
+    if (frame.at - window[0]!.at >= stableMs) { stable = window; break; }
+  }
+  if (stable === null) {
+    if (frames.length < 2) p.push('fewer than 2 distinct physics frames during settle');
+    else if (!frames.some((f) => f.onGround && !f.inWater)) p.push('settle frames are not grounded and dry');
+    else p.push(`no stationary grounded/dry physics-frame window spans ${stableMs}ms`);
+  }
+  const last = stable === null ? null : stable[stable.length - 1]!;
+  return { ok: stable !== null, problems: p, position: last === null ? null : { ...last.position } };
 }
 
 /** 取消后的有界实际物理帧：没有帧、覆盖不足或任一控制键按下/缺失都不能通过。 */
@@ -417,6 +570,14 @@ export function parseRconList(text: string) {
   return { count, max: Number(m[2]), names: rawNames, raw: text };
 }
 
+/** 连接前只要名单里已有任意一个同名测试 Bot 就拒绝：再连一个同名客户端会把已在线的踢下线。 */
+export function preflightBotConflict(names: readonly string[], botName: string): string | null {
+  const occurrences = names.filter((n) => n === botName).length;
+  return occurrences > 0
+    ? `configured test bot ${botName} already listed before connection (${occurrences}); connecting would kick it`
+    : null;
+}
+
 function controlsSnapshot(adapter: { bot: unknown }) {
   const bot = isRecord(adapter.bot) ? adapter.bot : null;
   const state = bot !== null && isRecord(bot.controlState) ? bot.controlState : null;
@@ -441,11 +602,18 @@ async function main() {
   const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const evidenceDir = path.join(config.dataDir, 'navigation-acceptance', runId);
   fs.mkdirSync(evidenceDir, { recursive: true });
+  // 原始路线诊断只在这里放一份：真实 executor 请求、真实 move 请求/结果、原始样本。
+  // 不按场景重复整个数组；样本的 observedAt/sequence/world/dim/session 是交付原值。
+  const routeDiagnostics: { note: string; starts: unknown[]; moves: CapturedMove[]; samples: CapturedRouteSample[] } = {
+    note: 'Original WalkRouteExecutor/WalkMoveExecutor diagnostics. sample observedAt/sequence/world/dim/session are delivered values; receivedAt is separate. AbortSignal/shapeProvider/request signals are execution handles and are omitted.',
+    starts: [], moves: [], samples: [],
+  };
   const evidence: Record<string, unknown> = {
     schema: 'navigation-acceptance', runId, startedAt: Date.now(), mode: config.mode, evidenceDir,
     host: { mcHost: config.mc.host, mcPort: config.mc.port, username: config.mc.username, version: config.mc.version, rconHost: config.observer.rconHost, rconPort: config.observer.rconPort },
     scheduler: 'not-started', note: 'No periodic scheduler. RCON fixture teleports are setup only, never navigation success.',
     scenarios: {} as Record<string, unknown>, tasks: [] as unknown[],
+    routeDiagnostics,
     // RCON 记录从创建时就写入 evidence；中途失败也能立即保留已发出的命令与响应。
     rcon: { records: [] as unknown[] },
   };
@@ -469,6 +637,7 @@ async function main() {
   const { Arbiter } = await import('../src/arbiter/arbiter.ts');
   const { SharedSpatialSession } = await import('../src/spatial/shared-session.ts');
   const { Rcon } = await import('../src/observer/rcon.ts');
+  const { WalkMoveExecutor } = await import('../src/adapter/walk-route.ts');
   const shutdownMod = await import('../src/spatial/host-shutdown.ts');
   const library = await import('curio-minecraft-3d-memory');
   const storage = await import('curio-minecraft-3d-memory/storage/sqlite');
@@ -490,6 +659,11 @@ async function main() {
   let disconnectListener: (() => void) | null = null;
   let botEndListener: (() => void) | null = null;
   let botOwned = false;
+  /** connect() 已发起（即使 spawn 失败或没有拿到 bot 引用），清理时也必须 quit 以禁用重连。 */
+  let connectAttempted = false;
+  let spawnObserved = false;
+  type OwnedBot = { once(event: 'end', listener: () => void): void; removeListener(event: 'end', listener: () => void): void };
+  let ownedBot: OwnedBot | null = null;
   let dim = 'unknown';
   let measuredStart: Vec3Like | null = null;
   let walk1TaskId: string | null = null;
@@ -499,11 +673,13 @@ async function main() {
   let voxelFact: Record<string, unknown> | null = null;
   const outcomes = new Map<string, TaskOutcome>();
   const waiters = new Map<string, { resolve: (outcome: TaskOutcome) => void; timer: NodeJS.Timeout }>();
-  const routeSamples: CapturedRouteSample[] = [];
+  const routeSamples = routeDiagnostics.samples;
   let executorOriginalStart: ((this: WalkRouteExecutor, request: WalkRouteRequest) => WalkRouteStatus) | null = null;
   let executorOriginalOnSample: ((this: WalkRouteExecutor, sample: BodySample) => WalkRouteStatus) | null = null;
   let executorWrappedStart: ((this: WalkRouteExecutor, request: WalkRouteRequest) => WalkRouteStatus) | null = null;
   let executorWrappedOnSample: ((this: WalkRouteExecutor, sample: BodySample) => WalkRouteStatus) | null = null;
+  let moverOriginalMove: ((this: unknown, request: ExecutableMove) => Promise<ExecutableMoveResult>) | null = null;
+  let moverWrappedMove: ((this: unknown, request: ExecutableMove) => Promise<ExecutableMoveResult>) | null = null;
   const executorTasks = new WeakMap<object, { taskId: string; delegationId: string }>();
   let waitForOutcome: ((taskId: string, timeoutMs: number) => Promise<TaskOutcome | null>) | null = null;
 
@@ -536,6 +712,23 @@ async function main() {
       const status = executorOriginalStart!.call(this, request);
       const task = arbiter?.info();
       if (task !== null && task !== undefined) executorTasks.set(this, { taskId: task.id, delegationId: status.delegationId });
+      routeDiagnostics.starts.push({
+        taskId: task?.id ?? null, delegationId: status.delegationId, receivedAt: Date.now(),
+        // 信号、shapeProvider 等执行句柄不序列化；这里只保留证明路线/期限的有限字段。
+        request: {
+          worldId: request.worldId, dim: request.dim, sessionId: request.sessionId, mode: request.mode,
+          body: { feet: clone(request.body.feet), width: request.body.width, height: request.body.height, pose: request.body.pose },
+          points: clone(request.points), arrival: clone(request.arrival),
+          ...(request.bodyArrival === undefined ? {} : { bodyArrival: clone(request.bodyArrival) }),
+          deadlineMs: request.deadlineMs, timeoutMs: request.timeoutMs,
+        },
+        status: {
+          delegationId: status.delegationId, nextPointIndex: status.nextPointIndex, activeStepIndex: status.activeStepIndex,
+          lastPosition: status.lastPosition === null ? null : clone(status.lastPosition),
+          resultOutcome: status.result === null ? null : status.result.outcome,
+        },
+      });
+      writeEvidence();
       return status;
     };
     executorWrappedOnSample = function (this: WalkRouteExecutor, sample: BodySample) {
@@ -546,6 +739,7 @@ async function main() {
           taskId: binding.taskId,
           delegationId: binding.delegationId,
           accepted: sample.executionId === returned.delegationId && isDeepStrictEqual(returned.lastPosition, sample.pos) && isNum(sample.sequence),
+          receivedAt: Date.now(),
           sample: {
             executionId: sample.executionId, sequence: sample.sequence,
             worldId: sample.worldId, dim: sample.dim, sessionId: sample.sessionId,
@@ -561,11 +755,29 @@ async function main() {
             resultLastObservation: returned.result?.lastObservation === undefined ? null : { ...returned.result.lastObservation } as Record<string, unknown>,
           },
         });
+        writeEvidence();
       }
       return returned;
     };
     executorProto.start = executorWrappedStart;
     executorProto.onSample = executorWrappedOnSample;
+
+    // 真实单段移动诊断：只观察实际 WalkMoveExecutor.move 的请求/结果，原样透传 Promise、
+    // 返回值与异常；任务归属在该 move 被发起时从真实 Arbiter 读取，不借用样本 id。
+    const moverProto = WalkMoveExecutor.prototype as unknown as {
+      move(this: unknown, request: ExecutableMove): Promise<ExecutableMoveResult>;
+    };
+    moverOriginalMove = moverProto.move;
+    moverWrappedMove = function (this: unknown, request: ExecutableMove) {
+      const taskId = arbiter?.info()?.id ?? null;
+      // captureMoveCall 在第一个 await 前同步登记请求，所以这里立即落盘请求；结果到达后再写一次。
+      const pending = captureMoveCall(
+        { move: (r) => moverOriginalMove!.call(this, r) }, request, taskId, routeDiagnostics.moves,
+      );
+      writeEvidence();
+      return pending.finally(writeEvidence);
+    };
+    moverProto.move = moverWrappedMove;
 
     /** 有界等待某任务的真实终态；即使已在 done 竞态中先到，也从 outcomes 取回。 */
     waitForOutcome = (taskId: string, timeoutMs: number): Promise<TaskOutcome | null> => {
@@ -636,8 +848,17 @@ async function main() {
     };
 
     const settleBody = async (timeoutMs: number) => {
-      const frames = await collectPhysicsFrames(300, timeoutMs);
-      const settled = classifySettledFrames(frames, 300);
+      // 在硬上限内持续收集真实物理帧，直到出现连续 300ms 的落地/干燥/静止窗口；
+      // 早期残余速度只重置窗口，不用墙钟或补造帧凑时长。
+      const frames: PhysicsFrame[] = [];
+      const startedAt = Date.now();
+      let settled = classifySettledFrames(frames, 300);
+      while (!settled.ok && Date.now() - startedAt < timeoutMs) {
+        const entity = await nextPhysicsFrame(Math.min(1000, timeoutMs - (Date.now() - startedAt)));
+        if (entity === null) break;
+        frames.push({ frame: ++frameCounter, at: Date.now(), position: { ...entity.position }, onGround: entity.onGround, inWater: entity.isInWater, controls: controlsSnapshot(adapter).values });
+        settled = classifySettledFrames(frames, 300);
+      }
       if (!settled.ok || settled.position === null) throw new Error(`bounded body settle failed: ${settled.problems.join(', ')}`);
       if (!adapter.state().observationReady) throw new Error('body settled only after observationReady was lost');
       return settled.position;
@@ -700,26 +921,37 @@ async function main() {
     const preflight = parseRconList(await sendRcon('list'));
     evidence.preflight = { at: Date.now(), ...preflight, sequence: (rconRecords.at(-1) as Record<string, unknown> | undefined)?.sequence };
     writeEvidence();
-    // 根检查只读 list；其他玩家可以远远旁观。唯一拒绝的是配置的测试 Bot 已在名单里重复出现。
-    if (preflight.names.filter((n) => n === botName).length > 1) {
-      throw new Error(`duplicate test bot ${botName} already listed before connection: ${JSON.stringify(preflight.names)}`);
-    }
+    // 根检查只读 list；其他玩家可以远远旁观。连接前名单里只要已有任意一个同名测试 Bot 就拒绝：
+    // 再连一个同名客户端会把已在线的踢下线。绝不据此发命令或移动其他玩家。
+    const preflightConflict = preflightBotConflict(preflight.names, botName);
+    if (preflightConflict !== null) throw new Error(preflightConflict);
 
+    let spawnTimer: NodeJS.Timeout | null = null;
+    let spawnListener: (() => void) | null = null;
     const spawn = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('bounded spawn wait timed out')), 30_000);
-      adapter.once('spawn', () => { clearTimeout(timer); resolve(); });
+      spawnTimer = setTimeout(() => reject(new Error('bounded spawn wait timed out')), 30_000);
+      spawnListener = () => { spawnObserved = true; resolve(); };
+      adapter.once('spawn', spawnListener);
     });
-    adapter.connect();
-    // 只要适配器创建了 Bot，无论 spawn 是否及时完成，清理都必须拥有并等待它的真实退出。
+    // MineflayerAdapter.connect 同步 createBot 并立即赋值 this.bot；连接后马上捕获实际拥有的引用。
     const ownBot = () => {
-      if (!adapter.bot || botOwned) return;
+      if (ownedBot !== null || !adapter.bot) return;
+      ownedBot = adapter.bot as unknown as OwnedBot;
       botOwned = true;
       botEndListener = () => { botEnded = true; };
-      adapter.bot.once('end', botEndListener);
+      ownedBot!.once('end', botEndListener);
     };
-    ownBot();
-    await spawn;
-    ownBot();
+    try {
+      connectAttempted = true;
+      adapter.connect();
+      ownBot();
+      await spawn;
+      ownBot();
+    } finally {
+      // spawn 成功/失败/超时都要撤掉自己的有界监听器与计时器。
+      if (spawnTimer !== null) { clearTimeout(spawnTimer); spawnTimer = null; }
+      if (spawnListener !== null) { adapter.off('spawn', spawnListener); spawnListener = null; }
+    }
     const ready = await waitFor(() => adapter.state().observationReady, 30_000);
     if (!ready) throw new Error('bounded observationReady wait timed out');
 
@@ -734,6 +966,20 @@ async function main() {
 
     measuredStart = await fixtureTeleport(cli.start, 'initial-safe-start');
     evidence.measuredStart = clone(measuredStart);
+    writeEvidence();
+
+    // 初始化审计：构造 Vision/Arbiter 本身不构成观测准入。夹具站位稳定后，用生产同一条
+    // 正常合法视线路径做一次有界局部观测，并原样记录返回的观察；不手动 beginSession、
+    // 不填充路线、不强制 FRESH，也不读隐藏地形。
+    const initialCells = localBodyCells(measuredStart);
+    const initialObservations = vision.observeBlocks(initialCells);
+    evidence.initialObservation = {
+      at: Date.now(),
+      cells: clone(initialCells),
+      observations: clone(initialObservations),
+      admitted: initialObservations.length > 0,
+      note: 'Normal Vision.observeBlocks over a bounded local body cell batch; no manual beginSession or forced freshness.',
+    };
     writeEvidence();
 
     const preHistory = scenario('pre_walk_empty_history');
@@ -759,6 +1005,8 @@ async function main() {
       const target = { x: start.x + 2, y: start.y, z: start.z };
       s1.measuredStart = clone(start); s1.target = clone(target);
       if (!inLane(start) || !inLane(target)) throw new Error('walk_to start/target outside reserved lane');
+      const scope = { worldId: adapter.state().worldId, dim: adapter.state().dim, sessionId: adapter.state().sessionId };
+      s1.scope = clone(scope);
       const request = { to: clone(target), arrival: { kind: 'exact' as const }, deadlineMs: Date.now() + WALK_BUDGET_MS };
       s1.request = clone(request);
       const task = startTask('walk_to', request, WALK_BUDGET_MS + 5000);
@@ -766,11 +1014,18 @@ async function main() {
       s1.task = clone(task.info); writeEvidence();
       const outcome = await task.done;
       s1.outcome = outcome === null ? null : clone(outcome);
-      s1.body = adapter.state(); s1.controls = controlsSnapshot(adapter);
+      // 终态同一时刻的真实身体与控制键：位置用运行时同一个 Math.hypot 水平/脚位容差。
+      const terminalState = adapter.state();
+      const terminalControls = controlsSnapshot(adapter);
+      s1.body = clone(terminalState); s1.controls = terminalControls;
       if (outcome === null) throw new Error('walk_to timed out before terminal outcome');
+      const nav = navOf(outcome.result);
+      // 历史写入标记原样保留：pending/缺失不能被当成已保存。
+      s1.memoryWrite = nav?.memoryWrite ?? null;
       const verdict = classifyWalkToResult(outcome.result, start, target, tolerance, { taskId: task.info.id, samples: routeSamples });
-      s1.verdict = verdict;
-      if (!verdict.ok) throw new Error(verdict.problems.join(', '));
+      const bodyVerdict = classifyTerminalBody({ state: terminalState, controls: terminalControls.values }, target, tolerance, scope);
+      s1.verdict = verdict; s1.bodyVerdict = bodyVerdict;
+      if (!verdict.ok || !bodyVerdict.ok) throw new Error([...verdict.problems, ...bodyVerdict.problems].join(', '));
     } catch (e) { addProblem(s1, errorText(e)); } finally { finish(s1); }
 
     const s2 = scenario('spatial_query_history');
@@ -805,16 +1060,13 @@ async function main() {
       s2.fragmentProjection = projection;
       if (!projection.ok) throw new Error(`fragment listing projection differs from typed original: ${projection.problems.join(', ')}`);
 
-      let points: Vec3Like[] = [];
-      let total = 0;
-      for (let offset = 0; offset < 8 * 32; offset += 32) {
-        const page = validateFragmentQuery(await runQuery(`fragment.polyline@${offset}`, { kind: 'fragment', dim, fragmentId, field: 'polyline', offset, limit: 32 }), fragmentId);
-        s2.polylineVerdict = page;
-        if (!page.ok) throw new Error(page.problems.join(', '));
-        total = page.total;
-        points = [...points, ...page.points];
-        if (points.length >= total) break;
-      }
+      // 路线点上限 32：单页 limit=32 已是有界完整读取；helper 要求 offset=0 且该页完整，
+      // 不写一个实际无法翻页的循环来假装分页。
+      const polylinePage = validateFragmentQuery(await runQuery('fragment.polyline', { kind: 'fragment', dim, fragmentId, field: 'polyline', offset: 0, limit: 32 }), fragmentId);
+      s2.polylineVerdict = polylinePage;
+      if (!polylinePage.ok) throw new Error(polylinePage.problems.join(', '));
+      const points: Vec3Like[] = polylinePage.points;
+      const total = polylinePage.total;
       if (points.length !== total) throw new Error(`fragment query returned ${points.length}/${total} polyline points`);
       if (!isDeepStrictEqual(points, typed.polyline)) throw new Error('fragment query polyline differs from typed original geometry/order');
       if (!points.every(inLane)) throw new Error('stored route leaves the reserved dry lane');
@@ -826,12 +1078,17 @@ async function main() {
       s2.traversalsVerdict = traversals;
       if (!traversals.ok) throw new Error(traversals.problems.join(', '));
       selectedTraversal = traversals.record;
-      // 归属必须来自真实启动的 walk_to 任务：actionId 直接相等，或 executionId 命中该任务实际交付的样本。
-      const executionIds = new Set(routeSamples.filter((s) => s.taskId === walk1TaskId && s.accepted).map((s) => s.sample.executionId));
-      const actionId = typeof selectedTraversal?.actionId === 'string' ? selectedTraversal.actionId : null;
-      const executionId = typeof selectedTraversal?.executionId === 'string' ? selectedTraversal.executionId : null;
-      const ownerOk = walk1TaskId !== null && (actionId === walk1TaskId || (executionId !== null && executionIds.has(executionId)));
-      if (!ownerOk) addProblem(s2, `traversal ownership does not match actual walk task ${String(walk1TaskId)} (actionId=${String(actionId)}, executionId=${String(executionId)})`);
+      // N3 归属：actionId 必须等于真实首个 walk 任务，executionId 必须来自该任务真实
+      // ExecutableMove 请求；from 用请求原值，to/observedAt 必须对应已确认 nav.trace 点。
+      // delegation 样本 id 与逐段 executionId 不同，不能再用样本 id 反推归属。
+      const walk1Outcome = walk1TaskId === null ? null : outcomes.get(walk1TaskId) ?? null;
+      const walk1Nav = walk1Outcome === null ? null : navOf(walk1Outcome.result);
+      const ownership = classifyTraversalOwnership(selectedTraversal, walk1TaskId, routeDiagnostics.moves, walk1Nav);
+      s2.traversalOwnership = ownership;
+      // 历史写入原样记录：pending/缺失只是 accepted-pending，不等于已保存。
+      s2.memoryWrite = walk1Nav?.memoryWrite ?? null;
+      s2.geometryRole = 'typed fragment polyline is nominal route geometry; actual traversal endpoints/times come from captured move requests plus confirmed nav.trace';
+      if (!ownership.ok) addProblem(s2, ownership.problems.join(', '));
     } catch (e) { addProblem(s2, errorText(e)); } finally { finish(s2); }
 
     const s3 = scenario('walk_known_route');
@@ -843,17 +1100,25 @@ async function main() {
       const settled = await fixtureTeleport(first, 'known-route-first-point');
       s3.settledStart = clone(settled);
       if (!(Math.hypot(settled.x - first.x, settled.z - first.z) <= tolerance.horizontalTolerance && Math.abs(settled.y - first.y) <= tolerance.feetTolerance)) throw new Error('actual settled body does not satisfy the runtime start point');
+      const scope = { worldId: adapter.state().worldId, dim: adapter.state().dim, sessionId: adapter.state().sessionId };
+      s3.scope = clone(scope);
       const request = { fragmentId: originalFragment.id, deadlineMs: Date.now() + WALK_BUDGET_MS };
       s3.request = clone(request);
       const task = startTask('walk_known_route', request, WALK_BUDGET_MS + 5000);
       s3.task = clone(task.info); writeEvidence();
       const outcome = await task.done;
       s3.outcome = outcome === null ? null : clone(outcome);
-      s3.body = adapter.state(); s3.controls = controlsSnapshot(adapter);
+      const terminalState = adapter.state();
+      const terminalControls = controlsSnapshot(adapter);
+      s3.body = clone(terminalState); s3.controls = terminalControls;
       if (outcome === null) throw new Error('walk_known_route timed out before terminal outcome');
+      const nav = navOf(outcome.result);
+      s3.memoryWrite = nav?.memoryWrite ?? null;
       const verdict = classifyKnownRouteResult(outcome.result, knownPoints, settled, tolerance, { taskId: task.info.id, samples: routeSamples });
-      s3.verdict = verdict;
-      if (!verdict.ok) throw new Error(verdict.problems.join(', '));
+      // 原始终点：已知路线最后一个原始点，不是名义几何之外的猜测。
+      const bodyVerdict = classifyTerminalBody({ state: terminalState, controls: terminalControls.values }, last, tolerance, scope);
+      s3.verdict = verdict; s3.bodyVerdict = bodyVerdict;
+      if (!verdict.ok || !bodyVerdict.ok) throw new Error([...verdict.problems, ...bodyVerdict.problems].join(', '));
     } catch (e) { addProblem(s3, errorText(e)); } finally { finish(s3); }
 
     const s4 = scenario('cancel_after_movement');
@@ -866,10 +1131,13 @@ async function main() {
       s4.request = clone(request); s4.measuredStart = clone(start); s4.target = clone(target);
       cancelTask = startTask('walk_to', request, 20_000);
       s4.task = clone(cancelTask.info); writeEvidence();
-      // 只在实际同任务样本证明已经移动后才取消；不以无关的后续 state 轮询代替。
+      // 只在实际同任务样本证明已经移动后才取消；触发与终态分类共用同一个取消阈值。
       const taskId = cancelTask.info.id;
-      const moved = await waitFor(() => routeSamples.some((s) => s.taskId === taskId && s.accepted && distance(s.sample.position, start) > 0.15), 15_000, 25);
+      const moved = await waitFor(() => routeSamples.some((s) => s.taskId === taskId && s.accepted
+        && distance(s.sample.position, start) > CANCEL_MOVEMENT_THRESHOLD), 15_000, 25);
       if (!moved) throw new Error('no accepted same-task movement sample before cancel');
+      // 取消必须发生在任务尚未完成时，不能等它自然到达后再补一个 cancelled 结论。
+      if (outcomes.has(taskId)) throw new Error('walk task reached a terminal outcome before cancellation was triggered');
       const cancelAt = Date.now();
       arbiter!.cancel('navigation acceptance cancel');
       // 生产 cancel 后立即读取全部 7 个控制键，再等真实终态；两处都在任何 harness fallback 之前读取。
@@ -880,6 +1148,9 @@ async function main() {
       s4.outcome = outcome === null ? null : clone(outcome);
       const controlsAtTerminal = controlsSnapshot(adapter);
       s4.controlsAtTerminal = controlsAtTerminal; writeEvidence();
+      // 终态同样要求全部 7 个控制键可读且已释放（在 fallback 清理之前读取）。
+      const terminalControlProblems = controlReleaseProblems(controlsAtTerminal.values);
+      if (terminalControlProblems.length) throw new Error(`terminal controls: ${terminalControlProblems.join(', ')}`);
       // 有界实际物理帧覆盖取消后窗口；没有帧不能 PASS。
       const postCancelFrames = await collectPhysicsFrames(600, 2500);
       const postCancel = classifyPostCancelFrames(postCancelFrames, 600);
@@ -1040,19 +1311,29 @@ async function main() {
   };
   if (executorOriginalStart !== null && executorWrappedStart !== null && executorProto.start === executorWrappedStart) executorProto.start = executorOriginalStart;
   if (executorOriginalOnSample !== null && executorWrappedOnSample !== null && executorProto.onSample === executorWrappedOnSample) executorProto.onSample = executorOriginalOnSample;
+  const moverProto = WalkMoveExecutor.prototype as unknown as {
+    move(this: unknown, request: ExecutableMove): Promise<ExecutableMoveResult>;
+  };
+  if (moverOriginalMove !== null && moverWrappedMove !== null && moverProto.move === moverWrappedMove) moverProto.move = moverOriginalMove;
   if (rcon !== null) { try { rcon.close(); } catch (e) { cleanupErrors.push({ step: 'close-rcon', error: e }); } }
   if (memory !== null) { try { memory.close(); } catch (e) { cleanupErrors.push({ step: 'close-memory', error: e }); } }
-  if (botOwned) {
+  // connect() 一旦发起就必须 quit（sets stopped=true 并禁用重连），即使 spawn 失败或没拿到 bot 引用。
+  if (connectAttempted) {
     try {
       adapter.quit();
       const ended = await waitFor(() => botEnded && adapterDisconnected, 5000);
       const classification = classifyAdapterEnd(botEnded, adapterDisconnected, !ended);
-      evidence.adapterEnd = classification;
+      // 只报告实际观察：spawnObserved 单独记录，不因连接尝试或结束事件声称曾经 spawn。
+      evidence.adapterEnd = {
+        ...classification, connectAttempted, spawnObserved, botOwned: ownedBot !== null,
+        botEnded, adapterDisconnected,
+      };
       if (!classification.ok) cleanupErrors.push({ step: 'adapter-end', error: new Error(classification.problems.join(', ')) });
     } catch (e) { cleanupErrors.push({ step: 'adapter-quit', error: e }); }
-  } else evidence.adapterEnd = { status: 'not-owned: no Bot client was connected by this harness' };
+  } else evidence.adapterEnd = { status: 'not-owned: no Bot client was connected by this harness', connectAttempted, spawnObserved };
   if (disconnectListener !== null) adapter.off('disconnected', disconnectListener);
-  if (botEndListener !== null && adapter.bot) adapter.bot.removeListener('end', botEndListener);
+  // 只从实际捕获的自有 Bot 引用上移除自己的 end 监听器（适配器重连后 this.bot 可能已换）。
+  if (botEndListener !== null) (ownedBot as OwnedBot | null)?.removeListener('end', botEndListener);
 
   evidence.rcon = { records: rconRecords };
   evidence.finishedAt = Date.now();
