@@ -15,6 +15,7 @@ function testLayout(base: string, overrides: Partial<Layout> = {}): Layout {
     llmArchiveDir: d('curio/archives/test/llm-calls'),
     danmakuArchiveDir: d('curio/archives/test/danmaku'),
     observerHudConfig: d('curio/observer-hud.test.json'),
+    spatialDbPath: d('curio/data/test/spatial/spatial.sqlite'),
     worldId: 'curio-test-01',
     mcHost: '127.0.0.1',
     mcPort: 25566,
@@ -35,6 +36,7 @@ function localLayout(base: string, overrides: Partial<Layout> = {}): Layout {
     llmArchiveDir: d('curio/archives/local/llm-calls'),
     danmakuArchiveDir: d('curio/archives/local/danmaku'),
     observerHudConfig: d('curio/observer-hud.local.json'),
+    spatialDbPath: d('curio/data/local/spatial/spatial.sqlite'),
     worldId: 'curio-local',
     mcPort: 25565,
     rconPort: 25575,
@@ -43,14 +45,15 @@ function localLayout(base: string, overrides: Partial<Layout> = {}): Layout {
   });
 }
 
-test('resolveLayout 解析默认值：test 控制台端口默认 3002', () => {
+test('resolveLayout 解析默认值：空间库默认落在数据目录下，test 控制台端口默认 3002', () => {
   const base = os.tmpdir();
   const l = resolveLayout('test', {}, base);
   assert.equal(l.dataDir, path.join(base, 'data', 'test'));
   assert.equal(l.serverDir, path.join(base, 'world'));
+  assert.equal(l.spatialDbPath, path.join(base, 'data', 'test', 'spatial', 'spatial.sqlite'));
   assert.equal(l.dashboardPort, 3002);
   assert.equal(l.worldId, '127.0.0.1:25565');
-  assert.ok(writableDirsOf(l).includes(l.dataDir));
+  assert.ok(writableDirsOf(l).includes(path.dirname(l.spatialDbPath)));
 });
 
 test('assertTestIsolation 接受完全分离的布局', () => {
@@ -74,6 +77,7 @@ test('test 世界身份与 local/live 相同时拒绝', () => {
 test('test 数据目录与 local 数据目录相互包含时拒绝', () => {
   const base = os.tmpdir();
   const local = localLayout(base);
+  // test 数据目录塞进 local 数据目录内部
   const nested = testLayout(base, { dataDir: path.join(local.dataDir, 'nested') });
   assert.throws(() => assertTestIsolation(nested, [local], { worldIdExplicit: true }), /可写目录.*冲突/);
 });
@@ -98,20 +102,45 @@ test('OBSERVER_HUD_CONFIG 与 local 相同（同一个文件）时拒绝', () =>
   assert.throws(() => assertTestIsolation(testLayout(base, { observerHudConfig: local.observerHudConfig }), [local], { worldIdExplicit: true }), /OBSERVER_HUD_CONFIG/);
 });
 
-test('peerLayouts 合并公共 .env 与模式文件，缺少的 peer 跳过', () => {
+test('peerLayouts 合并公共 .env 与模式文件，同时保留默认入口与模式文件', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-iso-'));
   fs.writeFileSync(path.join(root, '.env'), 'SERVER_DIR=./world\nMC_PORT=25565\nMEMORY_WORLD_ID=127.0.0.1:25565\n');
   fs.writeFileSync(path.join(root, '.env.local'), 'DATA_DIR=./data/local\nMEMORY_WORLD_ID=curio-local\nDASHBOARD_PORT=3001\n');
   fs.writeFileSync(path.join(root, '.env.live'), 'DATA_DIR=./data/live\nMC_HOST=192.168.1.50\nDASHBOARD_PORT=3000\n');
-  const peers = peerLayouts(root, '', 'test');
-  assert.equal(peers.length, 2);
-  const local = peers.find((p) => p.mode === 'local')!;
-  assert.equal(local.dataDir, path.join(root, 'data', 'local'));
-  assert.equal(local.serverDir, path.join(root, 'world'));
-  assert.equal(local.worldId, 'curio-local');
+  const peers = peerLayouts(root, 'test');
+  // 默认入口（仅公共 .env）与 .env.local 是两套独立布局，都要保留，不能按模式名去重覆盖。
+  assert.equal(peers.length, 3);
+  const defaultLocal = peers.find((p) => p.mode === 'local' && p.worldId === '127.0.0.1:25565')!;
+  assert.equal(defaultLocal.dataDir, path.join(root, 'data', 'local'));
+  assert.equal(defaultLocal.serverDir, path.join(root, 'world'));
+  const localFile = peers.find((p) => p.mode === 'local' && p.worldId === 'curio-local')!;
+  assert.equal(localFile.serverDir, path.join(root, 'world'));
   const live = peers.find((p) => p.mode === 'live')!;
   assert.equal(live.mcHost, '192.168.1.50');
   assert.equal(live.worldId, '127.0.0.1:25565'); // 继承公共 .env
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('peerLayouts 把仅由公共 .env 构成的默认 local 纳入比较（缺 .env.local 不跳过）', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-iso-'));
+  fs.writeFileSync(path.join(root, '.env'), 'SERVER_DIR=./world\nDATA_DIR=./data/local\nMC_PORT=25565\nRCON_PORT=25575\n');
+  // 没有 .env.local / .env.live：默认运行环境仍存在。
+  const peers = peerLayouts(root, 'test');
+  assert.equal(peers.length, 1);
+  assert.equal(peers[0].mode, 'local');
+  assert.equal(peers[0].dataDir, path.join(root, 'data', 'local'));
+  assert.equal(peers[0].serverDir, path.join(root, 'world'));
+  assert.equal(peers[0].mcPort, 25565);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('test 沿用公共 .env 的 local 目录时，与默认 local peer 冲突被拒绝', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-iso-'));
+  fs.writeFileSync(path.join(root, '.env'), 'SERVER_DIR=./world\nDATA_DIR=./data/local\nMC_PORT=25565\nRCON_PORT=25575\nMEMORY_WORLD_ID=curio-local\n');
+  const peers = peerLayouts(root, 'test');
+  // test 只显式指定世界身份，其它沿用公共 .env 的 local 配置。
+  const test = resolveLayout('test', { MEMORY_WORLD_ID: 'curio-test-01' }, root);
+  assert.throws(() => assertTestIsolation(test, peers, { worldIdExplicit: true }), /可写目录.*冲突/);
   fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -119,40 +148,54 @@ test('resolveLayout 对显式相对路径也以 baseDir 为锚点，与调用进
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-iso-'));
   const l = resolveLayout('test', {
     DATA_DIR: './data/test', SERVER_DIR: './world-test', AGENTS_DIR: './agents/test',
+    SPATIAL_DB_PATH: './data/test/spatial/spatial.sqlite',
   }, base);
   assert.equal(l.dataDir, path.join(base, 'data', 'test'));
   assert.equal(l.serverDir, path.join(base, 'world-test'));
   assert.equal(l.agentsDir, path.join(base, 'agents', 'test'));
+  assert.equal(l.spatialDbPath, path.join(base, 'data', 'test', 'spatial', 'spatial.sqlite'));
   fs.rmSync(base, { recursive: true, force: true });
 });
 
-test('peerLayouts 缺 .env.local 仍把默认 local 纳入比较（沿用公共 .env 的目录与端口）', () => {
+test('默认 local 与 .env.local 同名时都参与比较，test 沿用默认 local 目录被拒绝', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-iso-'));
-  fs.writeFileSync(path.join(root, '.env'), 'SERVER_DIR=./world\nDATA_DIR=./data/local\nMC_PORT=25565\nRCON_PORT=25575\nMEMORY_WORLD_ID=curio-local\n');
-  // 没有 .env.local / .env.live：默认 local 仍存在。
-  const peers = peerLayouts(root, '', 'test');
-  assert.equal(peers.length, 1);
-  assert.equal(peers[0].mode, 'local');
-  assert.equal(peers[0].dataDir, path.join(root, 'data', 'local'));
-  assert.equal(peers[0].serverDir, path.join(root, 'world'));
-  assert.equal(peers[0].mcPort, 25565);
-  assert.equal(peers[0].worldId, 'curio-local');
-  fs.rmSync(root, { recursive: true, force: true });
-});
-
-test('test 沿用公共 .env 的 local 目录时，与默认 local peer 冲突被拒绝', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-iso-'));
-  fs.writeFileSync(path.join(root, '.env'), 'SERVER_DIR=./world\nDATA_DIR=./data/local\nMC_PORT=25565\nRCON_PORT=25575\nMEMORY_WORLD_ID=curio-local\n');
-  const peers = peerLayouts(root, '', 'test');
-  // test 只显式指定世界身份，其余沿用公共 .env 的 local 配置。
-  const test = resolveLayout('test', { MEMORY_WORLD_ID: 'curio-test-01' }, root);
+  fs.writeFileSync(path.join(root, '.env'), 'SERVER_DIR=./world\nDATA_DIR=./data/local\nMC_PORT=25565\nRCON_PORT=25575\n');
+  fs.writeFileSync(path.join(root, '.env.local'), 'SERVER_DIR=./world-local\n');
+  const peers = peerLayouts(root, 'test');
+  assert.equal(peers.length, 2); // 默认 local + .env.local 两套布局都保留
+  // test 显式指定世界身份，SERVER_DIR 沿用公共 .env 的 world（与默认 local 相同），必须被拒绝。
+  const test = resolveLayout('test', { MEMORY_WORLD_ID: 'curio-test-01', SERVER_DIR: './world', DATA_DIR: './data/test', MC_PORT: '25566', RCON_PORT: '25576' }, root);
   assert.throws(() => assertTestIsolation(test, peers, { worldIdExplicit: true }), /可写目录.*冲突/);
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-test('回环主机别名（localhost / 127.0.0.1）与相同端口不视为可分离', () => {
+test('localhost 与 127.0.0.1 视为同一回环地址，游戏与 RCON 端口冲突都被拒绝', () => {
+  const base = os.tmpdir();
+  const local = localLayout(base, { mcHost: 'localhost' });
+  assert.throws(() => assertTestIsolation(testLayout(base, { mcPort: 25565 }), [local], { worldIdExplicit: true }), /游戏连接地址.*冲突/);
+  const localRcon = localLayout(base, { rconHost: 'localhost' });
+  assert.throws(() => assertTestIsolation(testLayout(base, { rconPort: 25575 }), [localRcon], { worldIdExplicit: true }), /RCON 地址.*冲突/);
+});
+
+test('IPv6 回环 ::1 与 localhost / 127.0.0.1 视为同一主机，游戏与 RCON 端口冲突都被拒绝', () => {
+  const base = os.tmpdir();
+  const local = localLayout(base, { mcHost: 'localhost' });
+  assert.throws(() => assertTestIsolation(testLayout(base, { mcHost: '::1', mcPort: 25565 }), [local], { worldIdExplicit: true }), /游戏连接地址.*冲突/);
+  const localRcon = localLayout(base, { rconHost: '[::1]' });
+  assert.throws(() => assertTestIsolation(testLayout(base, { rconHost: '127.0.0.1', rconPort: 25575 }), [localRcon], { worldIdExplicit: true }), /RCON 地址.*冲突/);
+});
+
+test('通配地址 :: 与 ::1 / 127.0.0.1 一次性归一为同一回环，端口冲突不被漏检', () => {
+  const base = os.tmpdir();
+  const local = localLayout(base, { mcHost: '::' });
+  assert.throws(() => assertTestIsolation(testLayout(base, { mcHost: '::1', mcPort: 25565 }), [local], { worldIdExplicit: true }), /游戏连接地址.*冲突/);
+  const localV4 = localLayout(base, { rconHost: '::' });
+  assert.throws(() => assertTestIsolation(testLayout(base, { rconHost: '127.0.0.1', rconPort: 25575 }), [localV4], { worldIdExplicit: true }), /RCON 地址.*冲突/);
+});
+
+test('OBSERVER_HUD_CONFIG 在 Windows 上大小写不同也视为同一文件', { skip: process.platform !== 'win32' }, () => {
   const base = os.tmpdir();
   const local = localLayout(base);
-  assert.throws(() => assertTestIsolation(testLayout(base, { mcHost: 'localhost', mcPort: 25565 }), [local], { worldIdExplicit: true }), /游戏连接地址.*冲突/);
-  assert.throws(() => assertTestIsolation(testLayout(base, { rconHost: 'localhost', rconPort: 25575 }), [local], { worldIdExplicit: true }), /RCON 地址.*冲突/);
+  const test = testLayout(base, { observerHudConfig: local.observerHudConfig.toUpperCase() });
+  assert.throws(() => assertTestIsolation(test, [local], { worldIdExplicit: true }), /OBSERVER_HUD_CONFIG/);
 });

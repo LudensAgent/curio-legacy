@@ -4,6 +4,8 @@
  * 所有数据都是结构化的游戏状态，不依赖截图或多模态识图。
  */
 
+import type { WalkBody, WalkTick } from './walk-route.ts';
+
 export interface Vec3Like {
   x: number;
   y: number;
@@ -337,6 +339,11 @@ export interface GameAdapter {
   moveTo(target: MoveTarget, opts: MoveOpts): Promise<void>;
   /** 释放一切：停止寻路、清除按键、停止挖掘/使用物品。 */
   stopAll(): void;
+
+  /** walk_route 身体桥：只暴露前向控制与实测实体，不暴露寻路/挖掘等。 */
+  walkBody?(): WalkBody;
+  /** 下一物理帧：由服务端 physicsTick 驱动；取消/断线返回 null。 */
+  walkTick?(): WalkTick;
 
   canHarvest(pos: Vec3Like): boolean;
   /** 估算用某个工具（null = 空手）挖一个方块需要的毫秒数；未知返回 null */

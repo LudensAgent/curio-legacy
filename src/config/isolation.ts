@@ -4,8 +4,7 @@
  * 目标：test 是宿主运行环境（不等于单元测试进程），必须使用独立的连接配置、世界副本和运行状态，
  * 不能复用 local/live 的地址、数据库或数据目录。校验在 config 加载阶段完成，早于任何有副作用的初始化。
  *
- * 空间记忆库在本分支仍是 JSON 文件（world-memory.json，落在 dataDir 内），故这里只比较最终解析出的可写路径与端口，
- * 不引入尚未接线的 SQLite 空间库分支。
+ * 空间记忆库继续接受显式参数；这里只比较最终解析出的可写路径与端口，不向库注入 local/live/test 分支。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -30,6 +29,8 @@ export interface Layout {
   danmakuArchiveDir: string;
   /** 观察者 HUD 配置文件（单个文件）。 */
   observerHudConfig: string;
+  /** 空间记忆 SQLite 数据库文件（显式传给空间记忆库）。 */
+  spatialDbPath: string;
   /** 世界身份：空间记录按它分区，重启必须保持稳定。 */
   worldId: string;
   mcHost: string;
@@ -39,9 +40,9 @@ export interface Layout {
   dashboardPort: number;
 }
 
-/** 该布局的可写目录（数据、世界、角色、归档）。 */
+/** 该布局的可写目录（数据、世界、角色、归档、空间库）。 */
 export function writableDirsOf(layout: Layout): string[] {
-  return [layout.dataDir, layout.serverDir, layout.agentsDir, layout.llmArchiveDir, layout.danmakuArchiveDir];
+  return [layout.dataDir, layout.serverDir, layout.agentsDir, layout.llmArchiveDir, layout.danmakuArchiveDir, path.dirname(layout.spatialDbPath)];
 }
 
 /** 相对路径按 baseDir 解析；数字与默认值口径和 config.ts 保持一致。 */
@@ -62,6 +63,7 @@ export function resolveLayout(mode: EnvMode, vars: Record<string, string | undef
     llmArchiveDir: res(v('LLM_ARCHIVE_DIR') || path.join('archives', mode, 'llm-calls')),
     danmakuArchiveDir: res(v('DANMAKU_ARCHIVE_DIR') || path.join('archives', mode, 'danmaku')),
     observerHudConfig: res(v('OBSERVER_HUD_CONFIG') || path.join('live', hudName)),
+    spatialDbPath: res(v('SPATIAL_DB_PATH') || path.join(dataDir, 'spatial', 'spatial.sqlite')),
     worldId: v('MEMORY_WORLD_ID') || `${v('MC_HOST') || '127.0.0.1'}:${num('MC_PORT', 25565)}`,
     mcHost: v('MC_HOST') || '127.0.0.1',
     mcPort: num('MC_PORT', 25565),
@@ -75,19 +77,28 @@ function readVars(file: string): Record<string, string | undefined> {
   return fs.existsSync(file) ? parseEnv(fs.readFileSync(file, 'utf8')) : {};
 }
 
-/** 读取当前模式之外其它环境的最终布局（公共 .env + 模式文件合并，不含本进程变量覆盖）。 */
-export function peerLayouts(projectDir: string, curioRoot: string, currentMode: EnvMode): Layout[] {
-  const out: Layout[] = [];
+/**
+ * 读取当前模式之外其它环境的最终布局（公共 .env 与各模式文件），不含本进程变量覆盖。
+ * baseDir 必须是实际配置文件所在目录（与 config.ts 的 res() 锚点一致），否则外置 --env-file 会选择
+ * 外部同目录的 .env，而这里却去读仓库配置，导致 test 沿用外部 local 的目录仍被放行。
+ */
+export function peerLayouts(baseDir: string, currentMode: EnvMode): Layout[] {
+  const common = readVars(path.join(baseDir, '.env'));
+  // 默认运行环境（仅由公共 .env 构成，CURIO_MODE 缺省为 local）始终存在：
+  // 不能因为缺少 .env.local 就跳过它，否则 test 会静默沿用公共 .env 里 local 的目录与端口。
+  const rawMode = (common.CURIO_MODE ?? '').trim();
+  const defaultMode: EnvMode = rawMode === 'live' || rawMode === 'test' ? rawMode : 'local';
+  const peers: Layout[] = [];
+  if (defaultMode !== currentMode) peers.push(resolveLayout(defaultMode, common, baseDir));
   for (const mode of ENV_MODES) {
     if (mode === currentMode) continue;
-    const modeFile = curioRoot ? path.join(curioRoot, `.env.${mode}`) : path.join(projectDir, `.env.${mode}`);
-    // local 是默认运行环境：即使没有 .env.local，也会沿用公共 .env 的默认目录与端口运行，必须纳入比较，
-    // 否则 test 继承公共 .env 的 DATA_DIR/SERVER_DIR/端口时不会被发现。live/test 没有对应模式文件则不存在，跳过。
-    if (mode !== 'local' && !fs.existsSync(modeFile)) continue;
-    const vars = { ...readVars(path.join(path.dirname(modeFile), '.env')), ...readVars(modeFile) };
-    out.push(resolveLayout(mode, vars, projectDir));
+    const modeFile = path.join(baseDir, `.env.${mode}`);
+    if (!fs.existsSync(modeFile)) continue;
+    // 模式文件与默认入口是两套独立布局，都要参与比较：即使 .env.local 与默认 local 同名，
+    // 也不能覆盖掉默认入口（不带模式的启动仍可使用公共 .env）。
+    peers.push(resolveLayout(mode, { ...common, ...readVars(modeFile) }, baseDir));
   }
-  return out;
+  return peers;
 }
 
 /** parent 与 child 相同，或 child 位于 parent 内部。 */
@@ -96,12 +107,17 @@ function sameOrNested(parent: string, child: string): boolean {
   return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`));
 }
 
+/** 两个路径指向同一文件（Windows 下大小写不敏感，与目录比较的 path.relative 口径一致）。 */
+function sameFile(left: string, right: string): boolean {
+  return path.relative(left, right) === '';
+}
+
 function normalizeHost(host: string): string {
   let h = host.toLowerCase();
   if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
-  // 回环地址统一：localhost、0.0.0.0 都指本机 127.0.0.1，否则只换主机写法就能绕过同一实例的端口冲突检查。
-  if (h === 'localhost' || h === '0.0.0.0' || h === '127.0.0.1') h = '127.0.0.1';
-  if (h === '::' || h === '::1') h = '::1';
+  // 回环与通配地址一次性归一：0.0.0.0 / localhost / :: / ::1 都指向本机回环或包含回环，端口相同即冲突。
+  // 不能分两步（先 ::→::1 再 ::1→127.0.0.1），否则 :: 与 ::1 会落到不同 token 而漏检。
+  if (h === '0.0.0.0' || h === 'localhost' || h === '::' || h === '::1') h = '127.0.0.1';
   return h;
 }
 
@@ -122,7 +138,7 @@ export function assertTestIsolation(test: Layout, peers: Layout[], opts: { world
         }
       }
     }
-    if (test.observerHudConfig === peer.observerHudConfig) {
+    if (sameFile(test.observerHudConfig, peer.observerHudConfig)) {
       throw new Error(`test 的 OBSERVER_HUD_CONFIG 与 ${peer.mode} 相同：${test.observerHudConfig}`);
     }
     if (test.worldId === peer.worldId) {

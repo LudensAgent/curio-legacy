@@ -109,7 +109,7 @@ function safeServerDirectory(serverDir: string, projectDir: string): string {
   return realDirectory;
 }
 
-interface LogicalProperty {
+export interface LogicalProperty {
   start: number;
   end: number;
   key: string;
@@ -137,7 +137,7 @@ function unescapeProperty(value: string): string {
 }
 
 /** 用 Latin-1 建立原字节区间，删除种子项时不重编码其他配置、注释与换行。 */
-function readProperties(buffer: Buffer): LogicalProperty[] {
+export function readProperties(buffer: Buffer): LogicalProperty[] {
   const source = buffer.toString('latin1');
   const properties: LogicalProperty[] = [];
   let offset = 0;
@@ -190,6 +190,14 @@ function readProperties(buffer: Buffer): LogicalProperty[] {
   return properties;
 }
 
+/**
+ * 读取 server.properties 的最终键值（Java Properties 语义）：同名键取最后一个，处理反斜线转义、
+ * 续行与 =/: /空白分隔符。供 init/重置等需要判断「服务器实际监听端口」的场景复用，避免读错第一个键而漏检。
+ */
+export function readServerPropertyValues(file: string): Map<string, string> {
+  return new Map(readProperties(fs.readFileSync(file)).map((item) => [item.key, item.value]));
+}
+
 function keepEntry(name: string, stat: fs.Stats): boolean {
   const lower = name.toLowerCase();
   if (KEEP_DIRECTORIES.has(lower)) return true;
@@ -197,7 +205,7 @@ function keepEntry(name: string, stat: fs.Stats): boolean {
   return KEEP_FILES.has(lower) || /\.(?:properties|toml|ya?ml|conf|ini|cfg|jar|bat|cmd|ps1|sh)$/i.test(name);
 }
 
-function validateLevelName(directory: string, levelName: string): void {
+export function validateLevelName(directory: string, levelName: string): void {
   if (!levelName || path.posix.isAbsolute(levelName) || path.win32.isAbsolute(levelName)
     || /[\x00-\x1f<>:"|?*]/.test(levelName)) {
     throw new Error(`level-name 不安全，拒绝清理：${JSON.stringify(levelName)}`);

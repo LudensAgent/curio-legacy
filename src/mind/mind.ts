@@ -616,11 +616,14 @@ export class Mind {
     const gap = this.activity.stanceGap;
     if (gap) {
       const v = this.d.arbiter.validate(step);
-      if (v.ok && relativeCellAction(step.skill, v.args)) {
+      if (!v.ok) {
+        // 校验失败/被拒绝的步骤不会执行，不能消费尚未处理的站位缺口，留给后续步骤。
+      } else if (relativeCellAction(step.skill, v.args)) {
         this.finishActivity('stuck', `「${gap.skill}」没到新站位，身体现在在 (${gap.pos.x.toFixed(2)},${gap.pos.y.toFixed(2)},${gap.pos.z.toFixed(2)})；接着的「${step.skill}」是相对坐标，会打到错误位置。先确认实际站位或改用绝对坐标`);
         return;
+      } else {
+        delete this.activity.stanceGap;
       }
-      delete this.activity.stanceGap;
     }
     // 提醒曾经失败，仍执行 Agent 明确选择的动作。
     const same = this.sameFails.get(exactSig(step));
@@ -1095,7 +1098,8 @@ export class Mind {
       gameMessages: this.recentGameMessages(),
       // 收起、停用的技能不进目录（翻技能书、回想时还看得到）：目录越长越难挑，还拖累缓存
       skills: this.safe(() => this.d.thinker.skillBook?.index((n) => !!this.d.behaviors?.hidden(n),
-        this.d.behaviors ? (name, trial) => this.d.behaviors!.executionError(name, trial) : undefined) ?? [], []),
+        this.d.behaviors ? (name, trial) => this.d.behaviors!.executionError(name, trial) : undefined,
+        this.d.behaviors ? (name) => this.d.behaviors!.autoNote(name) : undefined) ?? [], []),
       recalled, ...(hindsightMemories ? { hindsightMemories } : {}), ...(openedSkill ? { openedSkill } : {}), ...(learnFrom ? { learnFrom } : {}), plan,
       hunting: this.safe(() => this.d.ledger?.huntTally() ?? null, null),
       ...(this.trip ? { trip: { minutes: (Date.now() - this.trip.since) / 60_000, gained: diffInventory(this.trip.inventory, inventoryOf(state)).gained, nearEnd: reason === Mind.NEAR_END_REASON } } : {}),

@@ -1,10 +1,11 @@
 import type { EventBus } from '../events.ts';
-import type { SkillBook } from '../knowledge/skillbook.ts';
-import { emergencyKind, isEmergency, type Behavior, type BehaviorEngine } from '../mind/behaviors.ts';
+import { normalizeSkillName, type SkillBook } from '../knowledge/skillbook.ts';
+import { isEmergency, type Behavior, type BehaviorEngine } from '../mind/behaviors.ts';
 import type { LedgerView } from '../mind/ledger.ts';
 import type { ChatMessage } from '../planner/llm.ts';
 import { extractJson } from '../planner/plan.ts';
 import type { Planner } from '../planner/planner.ts';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AgentState } from '../adapter/types.ts';
@@ -33,6 +34,10 @@ function words(name: string, description = ''): { name: Set<string>; text: Set<s
   return { name: new Set(name.toLowerCase().split(/[-_]/).filter((w) => w.length > 1)), text };
 }
 const jaccard = (a: Set<string>, b: Set<string>) => { if (!a.size || !b.size) return 0; let n = 0; for (const x of a) if (b.has(x)) n++; return n / (a.size + b.size - n); };
+
+/** 文字记录内容标识：跨重载稳定，覆盖实际参与合并的名字、说明、正文和学习笔记。 */
+const noteFingerprint = (entry: { name: string; description: string; body: string; notes?: string }) =>
+  createHash('sha256').update(JSON.stringify([entry.name, entry.description, entry.body, entry.notes ?? ''])).digest('hex');
 
 function catches(a: unknown, b: unknown): boolean {
   const fa = (a as any)?.after_failure, fb = (b as any)?.after_failure;
@@ -74,7 +79,8 @@ function parseCuration(text: string) {
     }),
     priority: rows('priority').slice(0, 8).map((entry) => ({ name: String(entry.name ?? ''), priority: Number(entry.priority) })).filter((entry) => Number.isFinite(entry.priority)),
     retire: rows('retire').slice(0, 8).map((entry) => ({ name: String(entry.name ?? ''), target: entry.target === undefined ? undefined : String(entry.target),
-      version: typeof entry.version === 'number' ? entry.version : undefined, why: String(entry.why ?? '整理时收起') })),
+      version: typeof entry.version === 'number' ? entry.version : undefined, why: String(entry.why ?? '整理时收起'),
+      subsumed_by: entry.subsumed_by === undefined ? undefined : String(entry.subsumed_by) })),
     restore: rows('restore').slice(0, 8).map((entry) => ({ name: String(entry.name ?? '') })),
     rollback: rows('rollback').slice(0, 4).map((entry) => ({ name: String(entry.name ?? ''), to: Math.floor(Number(entry.to)), why: String(entry.why ?? '').slice(0, 100) })),
     improve: rows('improve').slice(0, 3).map((entry) => ({ name: String(entry.name ?? ''), why: String(entry.why ?? '').slice(0, 200) })),
@@ -86,6 +92,14 @@ export class SkillCurator {
   lastRun = 0;
   private lastSignature = '';
   private conflictSeen = new Map<string, number>();
+  /** 合并生成的替代关系：来源技能 → 并入哪个候选及版本。替代候选还没验收晋升前，来源不能按“被替代”收起（持久化到磁盘，重建整理器后仍生效）。
+   *  version 是被并入目标的版本；fromVersion 是来源合并当时的版本——来源后来独立改版后，旧关系不能覆盖新版（不能用覆盖 B1 的证据处理 B2）。文字记录合并用 version/fromVersion=0（文字无版本）。 */
+  private substitutions = new Map<string, { into: string; version: number; fromVersion: number; at: number; sourceText?: string; targetText?: string }>();
+  private substitutionsFile: string | null = null;
+  /** 构建整理输入时记录的文字快照（名字 → 内容标识）：应用合并前据此核验模型看到的材料是否仍是当前内容。 */
+  private noteSeen = new Map<string, string>();
+  /** 最近的事后观测事实（技能名 → 最近几条死亡/掉血/处境，带观测版本），喂给整理模型判断该不该收起。 */
+  private aftermath = new Map<string, { version?: number; died: boolean; lost: number; still: boolean | null; context: string }[]>();
   private timer: NodeJS.Timeout | null = null;
   private observationTimer: NodeJS.Timeout | null = null;
   private lifetimes = new Map<string, Lifetime>();
@@ -100,6 +114,13 @@ export class SkillCurator {
     }
     if (event.type === 'skill_disabled' || event.type === 'skill_retired') for (const entry of this.lifetimes.values()) {
       if (entry.candidate && entry.name === event.data?.name && this.engine.executionError(entry.name, true)) entry.retired = true;
+    }
+    if (event.type === 'skill_aftermath') {
+      const name = String(event.data?.name ?? '');
+      if (!name) return;
+      const version = typeof event.data?.version === 'number' ? event.data.version : undefined;
+      const fact = { version, died: !!event.data?.died, lost: Number(event.data?.lost ?? 0), still: event.data?.still === null ? null : !!event.data?.still, context: String(event.data?.context ?? '') };
+      this.aftermath.set(name, [...(this.aftermath.get(name) ?? []), fact].slice(-4));
     }
   };
   readonly opts: CuratorOptions;
@@ -128,6 +149,18 @@ export class SkillCurator {
           this.lifetimes.set(JSON.stringify([entry.world, entry.name, entry.candidate]), entry);
         }
       } catch (error) { this.bus.publish('skill_clock_unknown', 'P2', `无法重建旧技能的有效游戏时间，从新观察开始：${String(error)}`); }
+    }
+    this.substitutionsFile = lifetimeFile ? lifetimeFile.replace(/(\.json)?$/, '') + '-substitutions.json' : null;
+    if (this.substitutionsFile && fs.existsSync(this.substitutionsFile)) {
+      try {
+        const raw: unknown = JSON.parse(fs.readFileSync(this.substitutionsFile, 'utf8'));
+        if (raw && typeof raw === 'object' && !Array.isArray(raw)) for (const [source, sub] of Object.entries(raw as Record<string, unknown>)) {
+          const s = sub as { into?: unknown; version?: unknown; fromVersion?: unknown; at?: unknown; sourceText?: unknown; targetText?: unknown };
+          if (typeof s?.into === 'string' && typeof s?.version === 'number' && typeof s?.fromVersion === 'number' && typeof s?.at === 'number')
+            this.substitutions.set(source, { into: s.into, version: s.version, fromVersion: s.fromVersion, at: s.at,
+              ...(typeof s.sourceText === 'string' ? { sourceText: s.sourceText } : {}), ...(typeof s.targetText === 'string' ? { targetText: s.targetText } : {}) });
+        }
+      } catch { /* 坏了就从头记 */ }
     }
     this.bus.on('event', this.breakObservation);
   }
@@ -198,6 +231,14 @@ export class SkillCurator {
       fs.writeFileSync(this.lifetimeFile, JSON.stringify([...this.lifetimes.values()]));
     }
     this.savedAt = Date.now();
+  }
+
+  private saveSubstitutions() {
+    if (!this.substitutionsFile) return;
+    try {
+      fs.mkdirSync(path.dirname(this.substitutionsFile), { recursive: true });
+      fs.writeFileSync(this.substitutionsFile, JSON.stringify(Object.fromEntries(this.substitutions), null, 1));
+    } catch { /* 写不进去不影响 */ }
   }
 
   /** 救命技能平时很少触发是正常的（岩浆、窒息、埋身这类不天天发生），不能因为“好久没用上”或“技能太多”就收起。
@@ -290,44 +331,10 @@ export class SkillCurator {
     return out;
   }
 
-  /**
-   * 应急技能去重（不需要模型）：按「威胁谓词 key」粗分，同一处境下的未验证候选大多是从没触发过的重复。
-   * 只留已验证成功过的；若一簇都没有验证过，留一个最新候选当种子（别把某处境一锅端成零覆盖）。
-   * 其余收起——契约和证据都留在历史里，真需要时可用 skill {name, from_version:N} 重新验证找回。
-   */
-  retireRedundantEmergency(_now = Date.now()): string[] {
-    const out: string[] = [];
-    let dim = '';
-    try { dim = this.dim(); } catch { /* 状态暂不可用 */ }
-    this.syncLifetimes(dim);
-    const byKind = new Map<string, Behavior[]>();
-    for (const b of this.active().filter((b) => isEmergency(b))) {
-      // 只在别的维度生效的（比如下界专用）：人不在那儿时用不上是正常的，不在这一趟去重里收
-      if (b.when?.dim && dim && !b.when.dim.includes(dim)) continue;
-      const key = emergencyKind(b);
-      const group = byKind.get(key);
-      if (group) group.push(b); else byKind.set(key, [b]);
-    }
-    for (const group of byKind.values()) {
-      if (group.length <= 1) continue; // 唯一代表不在这步收：出事时还得有招
-      const validated = (b: Behavior) => (this.engine.currentStats(b.name, !!b.candidate).ok ?? 0) > 0;
-      const keep = group.filter(validated);
-      // 一簇全都没验证过：留最新一个当种子，其余才收（半个游戏日观察期由下面的 settled 把关）
-      const seeds = keep.length ? [] : group.filter((b) => this.settled(b, dim)).sort((a, b) => (this.lifetime(a)?.age ?? 0) - (this.lifetime(b)?.age ?? 0)).slice(0, 1);
-      const keepNames = new Set([...keep, ...seeds].map((b) => b.name));
-      for (const b of group) {
-        if (keepNames.has(b.name)) continue;
-        if (!this.settled(b, dim)) continue; // 刚写的给半个游戏日观察
-        if (this.retire(b, `应急去重：这一处境已有${keep.length ? '已验证的代表' : '更新的候选'}（${[...keepNames].join('、')}），这份未验证过，收起；完整契约留在历史可找回`)) out.push(b.name);
-      }
-    }
-    return out;
-  }
-
   /** 定时检查：先收起用不上的、没用的；技能够多、而且有新技能、冲突或看着重复的，才请模型合并 */
   async check(now = Date.now(), opts: { force?: boolean; postDeath?: boolean } = {}): Promise<string | null> {
     if (this.busy) return opts.force ? '正在整理技能，请等待本次完成' : null;
-    const retired = [...this.retireUnused(now), ...this.retireLowValue(now), ...this.retireRedundantEmergency(now)];
+    const retired = [...this.retireUnused(now), ...this.retireLowValue(now)];
     this.saveTime();
     const skills = this.active();
     const notes = this.notes();
@@ -371,6 +378,10 @@ export class SkillCurator {
     for (const [a, b] of similarSkills(this.active())) { if (a === b) continue; similar.set(a, [...(similar.get(a) ?? []), b]); similar.set(b, [...(similar.get(b) ?? []), a]); }
     const skills = this.active().map((b) => {
       const st = this.engine.statsOf(b.name);
+      const aftermathFacts = this.aftermath.get(b.name) ?? [];
+      const ownVersion = Number(this.engine.versionOf(b));
+      const ownAftermath = aftermathFacts.filter((f) => f.version === undefined || f.version === ownVersion);
+      const otherAftermath = aftermathFacts.filter((f) => f.version !== undefined && f.version !== ownVersion);
       return { name: b.name, target: b.candidate ? 'candidate' : 'skill', version: b.version ?? 1, disabled: !!st?.disabled,
         description: b.description, body: b.body, notes: b.notes, mode: b.mode, priority: b.priority, ...(b.when ? { when: b.when } : {}), ...(isEmergency(b) ? { lifesaver: true } : {}),
         kind: b.code ? `代码 v${b.version ?? 1}（${b.code.length} 字符）` : `${b.steps.length} 步`,
@@ -378,6 +389,8 @@ export class SkillCurator {
         observedGameDays: this.lifetime(b) ? { age: this.lifetime(b)!.age / DAY_TICKS, idle: this.lifetime(b)!.idle / DAY_TICKS, disabled: this.lifetime(b)!.disabled / DAY_TICKS } : null,
         uses: { ...this.engine.currentStats(b.name, !!b.candidate), ...(b.candidate ? {} : { fired: st?.fired ?? 0 }) },
         lifetime: st ? { ok: st.ok, fail: st.fail } : { ok: 0, fail: 0 },
+        ...(ownAftermath.length ? { aftermath: ownAftermath } : {}),
+        ...(otherAftermath.length ? { aftermath_other_versions: otherAftermath } : {}),
         ...(st?.byVersion && Object.keys(st.byVersion).length > 1 ? { versions: st.byVersion } : {}),
         ...(this.effect(b.name) ? { harvest_effect: this.effect(b.name) } : {}),
         ...(st?.conflicts && Object.keys(st.conflicts).length ? { clashed_with: st.conflicts } : {}),
@@ -388,15 +401,19 @@ export class SkillCurator {
         ...(st?.undoneBy && Object.keys(st.undoneBy).length ? { work_undone_by: st.undoneBy } : {}),
         ...(st?.loops?.length ? { see_sawed_with: st.loops.map((l) => `${l.with.startsWith('doing:') ? `手上的「${l.with.slice(6)}」` : `「${l.with}」`}（${l.times} 回）`) } : {}), ...(b.code ? { code: b.code.slice(0, 2500), ...(b.verify ? { verify: b.verify } : {}) } : { steps: b.steps }) };
     });
-    const notes = this.notes().map((entry) => ({ name: entry.name, target: 'note', description: entry.description, body: entry.body, notes: entry.notes,
-      retired: this.engine.statsOf(entry.name)?.retired ?? null, disabled: this.engine.inactive(entry.name) }));
+    this.noteSeen = new Map();
+    const notes = this.notes().map((entry) => {
+      this.noteSeen.set(entry.name, noteFingerprint(entry));
+      return { name: entry.name, target: 'note', description: entry.description, body: entry.body, notes: entry.notes,
+        retired: this.engine.statsOf(entry.name)?.retired ?? null, disabled: this.engine.inactive(entry.name) };
+    });
     const system = `你在整理 Minecraft 机器人 Muses 自己写的技能及文字记录。像人整理笔记一样：
 - skills 分开列正式版本（target:skill）和候选（target:candidate）；同名两者的证据不能混用。retire 必须带 target；执行版本再带 version。收起候选不会收起同名稳定版；收起正式版时，未收起的同名候选仍可显式试用。
 - 已停用但未收起的技能也要评估；候选没有验收通过不等于已经会用。候选可保留试用、同名修订或依据证据收起，不强制心智做任何试验。
 - notes 是纯文字记录，不参与执行成败和闲置淘汰。可按内容重复或已被事实推翻来 retire（target:note），不能因为没有执行次数就收起。确有用途时可用 restore 恢复文字记录；读取不代表做法验证成功。
-- 合并纯文字记录也用 merge：from 只能写 notes 中的名字，skill 只写 name、description、body；先保留原记录，是否收起来源再明确决定。写入已收起的文字目标不会自动恢复，需要时另写 restore。已有行为技能的补充笔记保留在 notes 中，修订必须保留其仍适用的约束。
+- 合并纯文字记录也用 merge：from 只能写 notes 中的名字，skill 只写 name、description、body；先保留原记录，是否收起来源再明确决定。写入已收起的文字目标不会自动恢复，需要时另写 restore。已有行为技能的补充笔记保留在 notes 中，修订必须保留其仍适用的约束。文字来源按替代收起（subsumed_by）时，只有 merge 确实成功写进目标后才算替代成立；合并失败过的来源，下一轮也不能凭 subsumed_by 收起。来源或目标在合并后又改了内容，旧合并关系也不再授权收起，需重新合并或改用不带 subsumed_by 的独立 retire。
 - 说的是同一件事、触发条件大面积重叠的：合并成一份更好的（merge：from 写被合并的名字，skill 写合并后的完整技能，必须沿用其中一个 from 名字，不要起 merged/unified/consolidated 这类新名）。合并时保留各自真正管用的部分（看 uses 的成败）。
-- 行为 merge 先保存候选，原技能保留；候选实际验收通过后再根据新证据决定是否 retire 来源技能。uses 是表中指定版本的证据，lifetime 是历史总计，不混用。${postDeath ? `
+- 行为 merge 先保存候选，原技能保留；候选实际验收通过后再根据新证据决定是否 retire 来源技能。uses 是表中指定版本的证据，lifetime 是历史总计，不混用。aftermath 是这份技能当前版本最近几次事后观测（died 是否死亡、lost 从触发到判断净掉的血、still 触发处境还在/解除/未知），只是事实，成败已按 uses 记下，不要拿它再定一次成败；aftermath_other_versions 是别的版本观测到的，不能当成当前版本的经历。${postDeath ? `
 - 【死亡刚发生】刚死了一次：优先处理导致这次死亡的来回拉锯（see_sawed_with）、互相拆台（undid_work_of）、抢着接手（clashed_with）的技能，由你判断怎么处理——若是同一件事、条件大面积重叠，合并成一份并 retire 冗余来源；若其实是不同场景、只是条件重叠才互相触发，就收窄各自的 when 划分互不重叠的场景，保留它们、不合并、不删除。` : ''}
 - 来回拉锯的（see_sawed_with：一个做完另一个又把它推回去，或者技能一再打断手上同一件事）：这最要紧——找出两边条件为什么会轮流成立，
   收窄条件让它们不再互相触发（比如躲怪的技能加上“怪还在附近”、回地表的技能加上“附近没有怪”），或者合并成一份统一处理；
@@ -405,8 +422,8 @@ export class SkillCurator {
 - 白白触发的（idle_interrupts：条件成立接手了，代码却什么都没做就返回、人也没动的次数——包括没打断任何事）：when 比代码里真正动手的判断宽，把 when 收窄到和代码一致，或者收起这份用不上的。
 - 只提醒不接手的（advisory：来回拉锯里输掉、被改成不自动做的技能）：定期复查——触发条件还和别的技能重叠就合并/收窄；已经不再重叠、又有真实成功证据的，改写它恢复自动接手。别让这些"只喊不干"的技能一直占着位置。
 - 常常同时满足条件抢着接手的（clashed_with）：调整优先级（priority：更管用、更要紧的高），或者收窄某个的触发条件（用 merge 重写它）。
-- 明显没用、被别的技能完全覆盖的：收起（retire）。
-- lifesaver 只描述应急用途，不代表已经有效。protectedEmergency=true 的应急技能是「当前版本已验证成功过」的，免闲置和容量收起——救命的技能平时很少触发、没法预先验收，不能因为“好久没用上”就收；但真正坏掉的（本版用了 ≥4 次却很少成功）仍照常收起。未验证的应急候选不再免闲置/容量收起，会按「威胁谓词 key」粗分去重：同一处境（举盾后撤、溺水、岩浆、窒息、覆盖同一本能）只留已验证的，一簇全未验证就留一个最新候选当种子，其余收起（契约和证据留在历史，可 from_version 找回）。未验证候选和已停用应急版不能借同名旧版成功永久保留。
+- 明显没用、被别的技能完全覆盖的：收起（retire）。因为被另一份技能替代而收起时，retire 写 "subsumed_by":"被并入的技能名"（只有那个替代版本已验收晋升、当前可执行、且来源自合并后没再改版才允许）；不是替代、只是自己没用了（闲置、低价值、证据少），就只写 why、不写 subsumed_by，照常收起。
+- lifesaver 只描述应急用途，不代表已经有效。protectedEmergency=true 的应急技能是「当前版本已验证成功过」的，免闲置和容量收起——救命的技能平时很少触发、没法预先验收，不能因为“好久没用上”就收；但真正坏掉的（本版用了 ≥4 次却很少成功）仍照常收起。未验证的应急候选不自动按处境/动作分簇去重：两个技能是否互相替代由你按它们的代码和证据判断，不能只看同属 combat 或都调用了某个 api 就认定能互相替代；确有重复、且替代已有验证证据，才 merge/retire。未验证候选和已停用应急版不能借同名旧版成功永久保留。
 - successfulEmergencyVersions 列出保留的成功应急版本；收起不会删除完整契约、笔记和证据，心智可用 skill {name,from_version:N} 显式生成新候选重新验收，不能把历史成功当作新候选成功。
 - observedGameDays 只累计在线、未暂停的有效游戏刻（每天24000tick）；未知历史为null，不能按现实时间或离线期间的世界日期差推断闲置。普通${this.opts.unusedDays}日、候选${this.opts.candidateUnusedDays}日、停用${this.opts.disabledDays}日自动收起；纯改写不刷新候选闲置。
 - similar_to 是名字或说明看着相近的：逐对看是不是在做同一件事。是的话合并成一份，或者收起用得少、成得少的那份（uses 少的、fail 多的）；只是名字像、其实管的是两回事的就留着。
@@ -418,7 +435,7 @@ export class SkillCurator {
   · 数据太少（一两次）不下结论。
 - 没有要整理的就输出 {"ok":true}。不要为了整理而整理。
 技能格式和写法与原来相同（when / steps 或 code / priority / cooldown_s / args）；合并出来的代码技能要带 verify（判定：做完以后看一眼世界确认真的做成了，只能用 api.state/blockAt/region/entities/drops/nearestLand，return true 算成、return "原因" 算没成）；合并/重写导致代码变了，就必须重新复核 verify，不能直接沿用旧判定，判定不能写成恒真（至少要调用一次 api.* 观察世界）。
-只输出一个 JSON 对象：{"merge":[{"from":["a","b"],"skill":{…}}],"priority":[{"name":"…","priority":1-90}],"retire":[{"name":"…","target":"candidate|skill|note","version":1,"why":"…"}],"restore":[{"name":"文字记录名","why":"恢复理由"}],"improve":[{"name":"…","why":"…"}],"rollback":[{"name":"…","to":1,"why":"…"}]}（用不到的键省略；文字记录不写 version）或 {"ok":true}`;
+只输出一个 JSON 对象：{"merge":[{"from":["a","b"],"skill":{…}}],"priority":[{"name":"…","priority":1-90}],"retire":[{"name":"…","target":"candidate|skill|note","version":1,"why":"…","subsumed_by":"被并入的技能名（按替代收起时才写）"}],"restore":[{"name":"文字记录名","why":"恢复理由"}],"improve":[{"name":"…","why":"…"}],"rollback":[{"name":"…","to":1,"why":"…"}]}（用不到的键省略；文字记录不写 version）或 {"ok":true}`;
     return [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify({ skills, notes }) }];
   }
 
@@ -430,6 +447,9 @@ export class SkillCurator {
     const versions = this.active(), notes = this.notes();
     const names = new Set([...versions, ...notes].map((entry) => entry.name));
     const noteNames = new Set(notes.map((entry) => entry.name));
+    // 跨两次尝试累积：首轮合并失败的来源，第二轮即使删掉 merge、只留 retire，也不能以“已被替代”收起。
+    const done: string[] = [], errors: string[] = [];
+    const mergeSources = new Map<string, string>();
     for (let attempt = 0; attempt < 2; attempt++) {
       const c = await this.planner.complete(messages, { label: 'skill:整理', tier: 'full', signal: AbortSignal.timeout(10 * 60_000), attempt, maxTokensScale: 2 });
       let raw: ReturnType<typeof parseCuration>;
@@ -438,22 +458,67 @@ export class SkillCurator {
         messages.push({ role: 'user', content: '刚才的回复不是合法 JSON，请只输出一个 JSON 对象。' });
         continue;
       }
-      if (raw.ok && !raw.merge.length && !raw.retire.length && !raw.restore.length && !raw.priority.length && !raw.improve.length && !raw.rollback.length) return '不用整理';
-      const done: string[] = [], errors: string[] = [];
+      if (raw.ok && !raw.merge.length && !raw.retire.length && !raw.restore.length && !raw.priority.length && !raw.improve.length && !raw.rollback.length) {
+        // 第二轮回“不用整理”不能吞掉首轮已记下的失败：有未完成的就照实报出去。
+        return errors.length ? [...done, ...errors.map((e) => `未完成：${e}`)].join('；') || '没有可用的整理' : '不用整理';
+      }
       for (const m of raw.merge) {
         const from = m.from.filter((name) => names.has(name));
         if (from.length && from.every((name) => noteNames.has(name)) && m.note) {
-          const target = m.note.name;
-          if (this.book?.get(target) && !noteNames.has(target)) { errors.push(`${target} 不是纯文字记录，不能用文字合并覆盖`); continue; }
+          // 模型返回的目标名可能与实际写入的规范名不同（如 NOTE-A → note-a）：统一在入口规范化，
+          // 让目标占用检查、快照校验和写入都使用同一个名字，避免覆盖规范化后命中的真实目标。
+          const target = normalizeSkillName(m.note.name);
+          if (this.book?.get(target) && !noteNames.has(target)) {
+            // 合并失败的所有出口统一保留来源保护：目标名已被行为技能占用，来源没被并入，同轮/跨轮都不能以“已并入”收起。
+            for (const n of from) mergeSources.set(n, `文字合并目标 ${target} 已有执行版本`);
+            errors.push(`${target} 不是纯文字记录，不能用文字合并覆盖`);
+            continue;
+          }
+          // 应用前核验模型看到的材料仍与当前一致：来源或目标在等待回复期间被改写，旧合并会覆盖新内容，必须拒绝。
+          const staleSource = from.find((n) => {
+            const seen = this.noteSeen.get(n);
+            const current = this.book?.get(n);
+            return seen === undefined || !current || seen !== noteFingerprint(current);
+          });
+          const seenTarget = this.noteSeen.get(target);
+          const currentTarget = this.book?.get(target);
+          const staleTarget = seenTarget !== undefined && (!currentTarget || seenTarget !== noteFingerprint(currentTarget));
+          if (staleSource !== undefined || staleTarget) {
+            const changed = staleSource ?? target;
+            for (const n of from) mergeSources.set(n, '整理期间内容已变化');
+            errors.push(`「${changed}」在整理期间被改写，本次合并基于过期内容未应用；请用新材料重新决定`);
+            continue;
+          }
           const saved = this.book?.write(target, m.note.description, m.note.body);
-          if (saved?.ok) { done.push(`${from.join('+')} → 文字记录 ${saved.skill.name}（保留来源${this.engine.inactive(saved.skill.name) ? '；目标仍收起，需要明确 restore' : ''}）`); }
-          else errors.push(`文字合并没存下：${saved && !saved.ok ? saved.error : '没有技能书'}`);
+          if (saved?.ok) {
+            // 文字确实成功保存进替代记录后，才记录“来源 → 目标”的替代关系；后续按替代收起文字来源据此校验。
+            // 关系绑定模型输入快照里的内容标识：来源后来加料、或目标改写后，旧关系都不能继续授权收起来源。
+            const targetText = noteFingerprint(saved.skill);
+            for (const n of from) {
+              const sourceText = this.noteSeen.get(n);
+              this.substitutions.set(n, { into: saved.skill.name, version: 0, fromVersion: 0, at: Date.now(),
+                ...(sourceText !== undefined ? { sourceText } : {}), targetText });
+            }
+            this.saveSubstitutions();
+            done.push(`${from.join('+')} → 文字记录 ${saved.skill.name}（保留来源${this.engine.inactive(saved.skill.name) ? '；目标仍收起，需要明确 restore' : ''}）`);
+          } else { errors.push(`文字合并没存下：${saved && !saved.ok ? saved.error : '没有技能书'}`); for (const n of from) mergeSources.set(n, '文字合并没存下'); }
           continue;
         }
         // 合并必须沿用被合并技能之一的名字（保留其中一个），避免每次都起 merged/unified/consolidated 新名、让同一族越并越多
         if (from.length && (typeof m.skill.name !== 'string' || !from.includes(m.skill.name))) m.skill.name = from[0];
         const w = this.engine.write(m.skill, { by: 'curator' });
+        // 本轮列为合并来源的：无论存没存下，替代都还没验收成立，同轮不能以“已被替代”收起来源。
+        for (const n of from) mergeSources.set(n, '合并只生成候选，替代尚未验收成立');
         if (!w.ok) { errors.push(`合并 ${from.join('+')} 没存下：${w.error}`); continue; }
+        const candidate = this.engine.get(w.name, true);
+        const intoVersion = candidate?.version ?? 1;
+        // 跨整理轮次、跨进程也保留“来源 → 替代候选”的关系：候选验收晋升前，来源不能按“被替代”收起；
+        // 同时绑定来源合并当时的版本——来源后来独立改版后，旧关系不能覆盖新版（不能用覆盖 B1 的证据处理 B2）。
+        for (const n of from) {
+          const source = this.engine.get(n) ?? this.engine.get(n, true);
+          this.substitutions.set(n, { into: w.name, version: intoVersion, fromVersion: source ? Number(this.engine.versionOf(source)) : 1, at: Date.now() });
+        }
+        this.saveSubstitutions();
         done.push(`${from.join('+')} → 候选 ${w.name}（保留原技能，验收后再决定收起）`);
         this.bus.publish('skill_merged', 'P2', `整理技能：${from.join('、')} 生成合并候选「${w.name}」；原技能保持原状态`, { from, into: w.name, candidate: true });
       }
@@ -464,6 +529,20 @@ export class SkillCurator {
         const { name, why } = r;
         if (r.target === 'note' && noteNames.has(name)) {
           if (this.book?.get(name)?.behavior !== undefined || this.book?.candidate(name)) { errors.push(`${name} 已有执行版本，不能按纯文字收起`); continue; }
+          const blocked = mergeSources.get(name);
+          if (blocked) { errors.push(`「${name}」本轮被列为文字合并来源（${blocked}），不能同轮收起`); continue; }
+          // 按替代收起文字来源：只有文字确实成功保存进替代记录（存在来源 → 目标的合并关系，且目标仍是文字记录）才允许；合并失败过的来源，下一轮也不能凭 subsumed_by 收起。
+          if (r.subsumed_by !== undefined) {
+            const sub = this.substitutions.get(name);
+            const target = this.book?.get(r.subsumed_by);
+            const bound = !!sub && sub.into === r.subsumed_by && sub.into !== name && !!target && target.behavior === undefined && !this.book?.candidate(r.subsumed_by);
+            if (!bound) { errors.push(`「${name}」没有记录成功并入「${r.subsumed_by}」的文字合并关系，不能按替代收起；确有独立理由时去掉 subsumed_by 单独 retire`); continue; }
+            // 关系还要覆盖当时实际并入的内容：缺内容标识的旧关系不能猜它覆盖当前内容；任一侧改写后旧关系都不能继续授权。
+            if (typeof sub.sourceText !== 'string' || typeof sub.targetText !== 'string') { errors.push(`「${name}」并入「${r.subsumed_by}」的旧文字合并关系缺少内容标识，不能按替代收起；确有独立理由时去掉 subsumed_by 单独 retire`); continue; }
+            const source = this.book?.get(name);
+            if (!source || sub.sourceText !== noteFingerprint(source)) { errors.push(`「${name}」在并入「${r.subsumed_by}」后又改了内容，旧合并关系不覆盖新内容，不能按替代收起；确有独立理由时去掉 subsumed_by 单独 retire`); continue; }
+            if (sub.targetText !== noteFingerprint(target)) { errors.push(`「${r.subsumed_by}」在并入「${name}」后内容标识已变化，无法确认原合并关系仍覆盖当前内容，不能授权收起来源；确有独立理由时去掉 subsumed_by 单独 retire`); continue; }
+          }
           if (!this.engine.inactive(name) && this.engine.retire(name, why)) done.push(`收起文字记录 ${name}`);
           continue;
         }
@@ -473,9 +552,32 @@ export class SkillCurator {
         if (r.version !== undefined && r.version !== eb.version || this.engine.get(name, !!eb.candidate)?.version !== eb.version) { errors.push(`${name} 版本已变化，未收起`); continue; }
         const st = this.engine.currentStats(name, !!eb.candidate), tries = st.ok + st.fail;
         if (tries > 0 && tries < 3 || tries === 0 && (this.lifetime(eb)?.age ?? 0) < DAY_TICKS / 2) { errors.push(`${name} 当前版本证据还少，先保留`); continue; }
-        // 模型显式收起时只保护“实际成功过的稳定应急版”；未验证的应急候选仍可收起（借同名旧版成功不能永久保留）
-        const emergencyStats = this.engine.currentStats(name);
-        if (!eb.candidate && this.protectedEmergency(eb) && (emergencyStats?.ok ?? 0) > (emergencyStats?.fail ?? 0)) { errors.push(`${name} 当前稳定应急版成功多于失败，保留；改进先生成候选并验收，不因少用丢掉已验证能力`); continue; }
+        // 本轮被列为合并来源的：合并只生成候选，替代还没验收成立，不能同轮收起；独立放弃旧技能（不带 merge）仍照常执行。
+        const sameRound = mergeSources.get(name);
+        if (sameRound) { errors.push(`「${name}」本轮被列为合并来源（${sameRound}），不能同轮收起；等候选验收通过或确有独立证据后，再单独发起不带 merge 的 retire`); continue; }
+        // 按替代收起（模型明确写 subsumed_by）才检查替代关系：该版本已验收晋升且当前可执行，才允许；
+        // 不带 subsumed_by 的 retire 是独立放弃（闲置、低价值、证据少），照常执行，不再从 why 里解析“并入/替代/合并”之类的词。
+        let subsumed = false;
+        if (r.subsumed_by !== undefined) {
+          const claimed = r.subsumed_by;
+          const sub = this.substitutions.get(name);
+          if (!sub || sub.into !== claimed) { errors.push(`「${name}」没有记录并入「${claimed}」的替代关系，不能按替代收起；确有独立证据时去掉 subsumed_by 单独 retire`); continue; }
+          // 同名旧版并入新版（A+B→A v2）只换版本不换名字：当前版本就是替代结果，不能按替代收起它自己。
+          if (sub.into === name) { errors.push(`「${name}」并入的替代目标就是它自己（同名旧版并入新版），当前版本就是替代结果，不能按替代收起；确有独立证据时去掉 subsumed_by 单独 retire`); continue; }
+          // 来源合并后又独立改版（B1 并入 A 后 B 更新成 B2）：旧关系只覆盖合并当时的版本，不能覆盖新版。
+          if (sub.fromVersion !== Number(this.engine.versionOf(eb))) { errors.push(`「${name}」并入「${sub.into}」时是 v${sub.fromVersion}，现已更新到 v${Number(this.engine.versionOf(eb))}；旧替代关系不覆盖新版，不能按替代收起，确有独立证据时去掉 subsumed_by 单独 retire`); continue; }
+          const stable = this.engine.get(sub.into);
+          const promoted = !!stable && !stable.candidate && this.engine.versionOf(stable) === String(sub.version);
+          const executable = this.engine.handlesNow(sub.into) === null;
+          if (!promoted || !executable) { errors.push(`「${name}」并入的「${sub.into}」v${sub.version} 还没验收晋升为当前可执行版本，不能按替代收起；等它验收通过，或确有独立证据时去掉 subsumed_by 单独 retire`); continue; }
+          subsumed = true;
+        }
+        // 模型显式收起时只保护“实际成功过的稳定应急版”；未验证的应急候选仍可收起（借同名旧版成功不能永久保留）。
+        // 明确提出的替代收起，只有关系完整有效（已验收晋升、当前可执行）才放行；否则继续保护来源。
+        if (!subsumed) {
+          const emergencyStats = this.engine.currentStats(name);
+          if (!eb.candidate && this.protectedEmergency(eb) && (emergencyStats?.ok ?? 0) > (emergencyStats?.fail ?? 0)) { errors.push(`${name} 当前稳定应急版成功多于失败，保留；改进先生成候选并验收，不因少用丢掉已验证能力`); continue; }
+        }
         if (this.retire(eb, why)) done.push(`收起 ${name}${eb.candidate ? ` 候选 v${eb.version}` : ''}`);
       }
       for (const r of raw.restore) {
@@ -504,7 +606,7 @@ export class SkillCurator {
         done.push(`改进 ${name}`);
       }
       if (errors.length && !done.length && attempt === 0) { messages.push({ role: 'assistant', content: c.text.slice(0, 6000) }, { role: 'user', content: `${errors.join('；')}。改正后只输出 JSON。` }); continue; }
-      return done.length ? done.join('；') : errors.join('；') || '没有可用的整理';
+      return [...done, ...errors.map((e) => `未完成：${e}`)].join('；') || '没有可用的整理';
     }
     throw new Error('两次都没拿到能用的整理结果');
   }

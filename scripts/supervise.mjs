@@ -12,7 +12,7 @@
  *
  * 纯 JS，不依赖 tsx，守护本身尽量不出错。
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,13 +24,40 @@ const day = (d = new Date()) => `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad
 const stamp = (d = new Date()) => `${day(d)}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
 
-/** 守护日志跟随所选配置；进程环境变量的优先级与子进程一致。 */
-export function dataDirFrom(root, envFile) {
-  const env = { ...(fs.existsSync(envFile) ? parseEnv(fs.readFileSync(envFile, 'utf8')) : {}), ...process.env };
-  const configuredMode = env.CURIO_MODE?.trim() || 'local';
+/** 与子进程（src/config.ts）一致的合并顺序：进程环境变量 > 模式文件 > 公共 .env。 */
+export function envVars(envFile) {
+  const common = path.join(path.dirname(envFile), '.env');
+  return {
+    ...(fs.existsSync(common) ? parseEnv(fs.readFileSync(common, 'utf8')) : {}),
+    ...(fs.existsSync(envFile) ? parseEnv(fs.readFileSync(envFile, 'utf8')) : {}),
+    ...process.env,
+  };
+}
+
+export function modeFrom(envFile, env) {
+  const configuredMode = (env.CURIO_MODE ?? '').trim() || 'local';
   if (configuredMode !== 'local' && configuredMode !== 'live' && configuredMode !== 'test') throw new Error('CURIO_MODE 必须为 local、live 或 test');
-  const mode = path.basename(envFile) === '.env.live' ? 'live' : path.basename(envFile) === '.env.test' ? 'test' : configuredMode;
-  return path.resolve(root, env.DATA_DIR?.trim() || path.join('data', mode));
+  return path.basename(envFile) === '.env.live' ? 'live' : path.basename(envFile) === '.env.test' ? 'test' : configuredMode;
+}
+
+/** 守护日志跟随所选配置；与子进程相同的数据目录（相对路径按配置文件所在目录解析）。 */
+export function dataDirFrom(envFile) {
+  const env = envVars(envFile);
+  const mode = modeFrom(envFile, env);
+  return path.resolve(path.dirname(envFile), (env.DATA_DIR ?? '').trim() || path.join('data', mode));
+}
+
+/**
+ * test 配置预检：在父进程写日志、启动子进程之前，用子进程同一份 src/config.ts 做完整配置解析与隔离校验。
+ * 校验失败（非零退出）即配置错误；父进程据此直接失败，不写盘、不进入崩溃重启循环。
+ */
+export function preflightConfig(envFile, root, extraEnv = {}) {
+  const code = "import('./src/config.ts').catch((e) => { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); });";
+  const args = [
+    ...(fs.existsSync(envFile) ? [`--env-file=${envFile}`] : []),
+    '--import', 'tsx', '--eval', code,
+  ];
+  return spawnSync(process.execPath, args, { cwd: root, encoding: 'utf8', env: { ...process.env, ...extraEnv } });
 }
 
 /** 第 n 次连续崩溃后等多久再起（毫秒） */
@@ -157,9 +184,11 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     if (curioArg !== 'live' && curioArg !== 'local' && curioArg !== 'test') throw new Error(`--curio 只支持 live / local / test，收到：${curioArg}`);
     if (!curioRoot) throw new Error('--curio 需要 CURIO_ROOT（进程环境变量或项目根目录 .env 里设置）');
   }
+  // 多个 --env-file 时最后一个才是模式覆盖文件（与 src/config.ts 一致），否则会把子进程指向公共 .env。
+  const execArgvEnvFile = process.execArgv.filter((arg) => arg.startsWith('--env-file=')).map((arg) => arg.slice('--env-file='.length));
   let selectedEnv = curioArg
     ? path.join(curioRoot, `.env.${curioArg}`)
-    : process.execArgv.find((arg) => arg.startsWith('--env-file='))?.slice('--env-file='.length)
+    : execArgvEnvFile[execArgvEnvFile.length - 1]
       || process.env.ENV_FILE?.trim();
   if (selectedEnv === 'live' || selectedEnv === 'local' || selectedEnv === 'test') {
     if (!curioRoot) throw new Error(`裸模式 ${selectedEnv} 需要 CURIO_ROOT（进程环境变量或项目根目录 .env 里设置）`);
@@ -168,7 +197,15 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const envFile = path.resolve(root, selectedEnv || '.env');
   const hasEnv = fs.existsSync(envFile);
   if (selectedEnv && !hasEnv) throw new Error(`找不到配置文件：${envFile}`);
-  const logDir = path.join(dataDirFrom(root, envFile), 'logs');
+  // test 是宿主运行环境：写日志、启动子进程前先做完整配置与隔离校验，配置错误直接失败，不写盘、不进入崩溃重启循环。
+  if (modeFrom(envFile, envVars(envFile)) === 'test') {
+    const preflight = preflightConfig(envFile, root);
+    if (preflight.status !== 0) {
+      process.stderr.write(stripAnsi(preflight.stderr || preflight.stdout || ''));
+      process.exit(preflight.status || 1);
+    }
+  }
+  const logDir = path.join(dataDirFrom(envFile), 'logs');
   const proxy = process.argv.includes('--proxy');
   const command = [process.execPath,
     ...(hasEnv ? [`--env-file=${envFile}`] : []),

@@ -25,6 +25,7 @@
     "supervise:curio:local": "node scripts/supervise.mjs --curio=local",
     "supervise:curio:test": "node scripts/supervise.mjs --curio=test",
     "test:config": "node --import tsx scripts/test-env.ts --curio=test config",
+    "test:init": "node --import tsx scripts/test-env.ts --curio=test init",
     "test:start": "node scripts/supervise.mjs --curio=test",
     "dev": "tsx watch src/main.ts",
     "check:llm": "tsx scripts/check-llm.ts",

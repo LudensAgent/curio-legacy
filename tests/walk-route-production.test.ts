@@ -1,0 +1,162 @@
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import { test } from 'node:test';
+import { Vec3 } from 'vec3';
+import { VoxelMap } from 'curio-minecraft-3d-memory';
+import { Arbiter, type TaskOutcome } from '../src/arbiter/arbiter.ts';
+import { EventBus } from '../src/events.ts';
+import { WorldMemory } from '../src/memory/store.ts';
+import { observeCells, walkRoute } from '../src/skills/walk-route.ts';
+import type { Senses } from '../src/skills/types.ts';
+import type { BlockObservation, GameAdapter } from '../src/adapter/types.ts';
+
+const require = createRequire(import.meta.url);
+const data = require('minecraft-data')('1.20.1');
+const Block = require('prismarine-block')(data);
+const { Physics, PlayerState } = require('prismarine-physics');
+
+/** 控制日志：记录每次 setControlState/clearControlStates，用于断言取消后不再写前进键。 */
+interface ControlEvent { kind: 'set' | 'clear'; name?: string; value?: boolean; at: number }
+let clockBase = 0;
+
+/** prismarine-physics 平坦石地面（y=-1），身体脚高 y=0；带控制日志与 moveTo/stopAll 计数。 */
+function makeWalkAdapter() {
+  const world = { getBlock(p: { floored(): { x: number; y: number; z: number } }) {
+    const c = p.floored();
+    const id = c.y <= -1 ? data.blocksByName.stone.defaultState : data.blocksByName.air.defaultState;
+    const b = Block.fromStateId(id, 0); b.position = c; return b;
+  } };
+  const control: Record<string, boolean> = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
+  const controlLog: ControlEvent[] = [];
+  const entity = { position: new Vec3(0.54, 0, 0.52), velocity: new Vec3(0, 0, 0), onGround: true, isInWater: false, isInLava: false, isInWeb: false, isCollidedHorizontally: false, isCollidedVertically: false, yaw: 0, pitch: 0, effects: {}, attributes: {} };
+  const bot = { version: '1.20.1', entity, jumpTicks: 0, jumpQueued: false, fireworkRocketDuration: 0, inventory: { slots: [] },
+    setControlState(name: string, value: boolean) { control[name] = value; controlLog.push({ kind: 'set', name, value, at: clockBase++ }); },
+    clearControlStates() { for (const k of Object.keys(control)) control[k] = false; controlLog.push({ kind: 'clear', at: clockBase++ }); },
+    look(yaw: number, pitch: number) { entity.yaw = yaw; entity.pitch = pitch; } };
+  const physics = Physics(data, world);
+  let moveToCalls = 0;
+  let stopAllCount = 0;
+
+  const adapter = {
+    state: () => ({
+      worldId: 'world', dim: 'overworld', sessionId: 's1', alive: true, connected: true, observationReady: true,
+      pos: { x: entity.position.x, y: entity.position.y, z: entity.position.z }, onGround: entity.onGround, inventory: [],
+    }),
+    walkBody: () => ({
+      setControlState: (n: string, v: boolean) => bot.setControlState(n, v),
+      clearControlStates: () => bot.clearControlStates(),
+      look: (y: number, p: number) => bot.look(y, p),
+      entity: { position: entity.position, velocity: entity.velocity, onGround: entity.onGround, isInWater: entity.isInWater },
+    }),
+    walkTick: () => () => new Promise((resolve) => {
+      setTimeout(() => {
+        physics.simulatePlayer(new PlayerState(bot, control), world).apply(bot);
+        resolve({ position: entity.position, velocity: entity.velocity, onGround: entity.onGround, isInWater: entity.isInWater });
+      }, 50);
+    }),
+    look: async (yaw: number, pitch: number) => { bot.look(yaw, pitch); },
+    moveTo: async () => { moveToCalls++; },
+    stopAll: () => { stopAllCount++; bot.clearControlStates(); },
+  } as unknown as GameAdapter;
+
+  return { adapter, controlLog, getMoveToCalls: () => moveToCalls, getStopAllCount: () => stopAllCount, control, entity };
+}
+
+/** 平坦世界的 senses：无条件返回请求格 stone(y=-1)/air(其它) 的合法观测。 */
+function flatSenses(): Senses {
+  return {
+    observeBlocks: (positions: { x: number; y: number; z: number }[]): BlockObservation[] => positions.map((p): BlockObservation => ({
+      name: p.y === -1 ? 'minecraft:stone' : 'minecraft:air', properties: {}, pos: { ...p },
+      worldId: 'world', sessionId: 's1', dimension: 'overworld', observationId: 1, observedAt: Date.now(), source: 'vision',
+    })),
+    perceivedEntities: () => [],
+    knownBlocks: () => [],
+    refresh: () => {},
+    markSweep: () => {},
+    nearestLand: () => null,
+    navigationWaypoint: () => null,
+    rememberedWaypoint: () => null,
+  } as unknown as Senses;
+}
+
+const points3 = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 1.5 }, { x: 2.5, y: 0, z: 1.5 }];
+
+test('validate：null/非相邻/对角/超大跨度在零副作用前拒绝，不抛异常', () => {
+  const reject = (raw: unknown) => walkRoute.validate(raw, {} as never);
+  assert.ok(!reject({ points: [null, [1.5, 0, 0.5]] }).ok, 'null 点必须拒绝且不抛异常');
+  assert.ok(!reject({ points: [[0.5, 0, 0.5], 'x'] }).ok, '非结构点必须拒绝');
+  assert.ok(!reject({ points: [[0.5, 0, 0.5], [2.5, 0, 0.5]] }).ok, '跨格（非相邻）必须拒绝');
+  assert.ok(!reject({ points: [[0.5, 0, 0.5], [1.5, 0, 1.5]] }).ok, '对角必须拒绝');
+  assert.ok(!reject({ points: [[0.5, 0, 0.5], [1.5, 1, 0.5]] }).ok, '不同高必须拒绝');
+  assert.ok(!reject({ points: [[0.5, 0, 0.5], [1.5, 0, 0.5], [NaN, 0, 0.5]] }).ok, '非有限坐标必须拒绝');
+  assert.ok(!reject({ points: [[0.5, 0, 0.5], [1.5, 0, 0.5]], deadlineMs: -5 }).ok, '负期限必须拒绝');
+  assert.ok(reject({ points: [[0.5, 0, 0.5], [1.5, 0, 0.5]] }).ok, '合法相邻路线应通过');
+});
+
+test('walk_route 经真实 Arbiter 入口走通三段转弯，身体桥不调用 moveTo', async () => {
+  const { adapter, getMoveToCalls, control } = makeWalkAdapter();
+  const bus = new EventBus();
+  const memory = new WorldMemory(null);
+  const arbiter = new Arbiter(adapter, memory, bus, flatSenses());
+  const done = new Promise<TaskOutcome>((r) => arbiter.once('done', r));
+  arbiter.start({ skill: 'walk_route', args: { points: points3 } }, 'llm');
+  const o = await done;
+  assert.equal(o.result.status, 'succeeded', o.result.summary);
+  assert.equal((o.result.data?.nav as { outcome: string }).outcome, 'ARRIVED');
+  assert.equal(getMoveToCalls(), 0, 'walk 身体桥不得调用会重新寻路的 moveTo');
+  assert.equal(control.forward, false, '到达后应松开前进键');
+});
+
+test('真实 Arbiter 取消在途 walk_route：取消后不再写前进键，不复活', async () => {
+  const { adapter, controlLog } = makeWalkAdapter();
+  const bus = new EventBus();
+  const memory = new WorldMemory(null);
+  const arbiter = new Arbiter(adapter, memory, bus, flatSenses());
+  const done = new Promise<TaskOutcome>((r) => arbiter.once('done', r));
+  arbiter.start({ skill: 'walk_route', args: { points: points3 } }, 'llm');
+  await new Promise((r) => setTimeout(r, 300));
+  arbiter.cancel('集成测试取消');
+  const o = await done;
+  assert.equal(o.result.status, 'cancelled', o.result.summary);
+  // 取消之后不得再出现 forward=true：父任务信号已贯通到身体桥。
+  const cancelAt = clockBase;
+  const forwardAfter = controlLog.filter((e) => e.kind === 'set' && e.name === 'forward' && e.value === true && e.at >= cancelAt);
+  assert.deepEqual(forwardAfter, [], '取消后身体桥不得重新按下前进键');
+});
+
+test('observeCells 遵守 ≤32 批次：超过 32 个候选时关键格不因截断漏掉', () => {
+  const map = new VoxelMap('world', { validityWindowMs: 60_000 });
+  const cells = Array.from({ length: 80 }, (_, i) => ({ x: i, y: 0, z: 0 }));
+  const requested: number[] = [];
+  const senses = {
+    ...flatSenses(),
+    observeBlocks: (positions: { x: number; y: number; z: number }[]) => {
+      positions.forEach((p) => requested.push(p.x));
+      return positions.map((p): BlockObservation => ({ name: 'minecraft:air', properties: {}, pos: { ...p }, worldId: 'world', sessionId: 's1', dimension: 'overworld', observationId: 1, observedAt: Date.now(), source: 'vision' }));
+    },
+  } as unknown as Senses;
+  const ctx = { senses } as never;
+  observeCells(ctx, map, cells);
+  assert.deepEqual(requested, Array.from({ length: 80 }, (_, i) => i), '全部 80 个候选必须分批请求，关键格排在第 32 个之后也不漏掉');
+});
+
+test('observeCells 整批合并 ChangeReport：支撑拆除与无关刷新同批不丢失', () => {
+  const map = new VoxelMap('world', { validityWindowMs: 60_000 });
+  // 先建立支撑格 stone 的已有证据
+  map.observe({ worldId: 'world', dim: 'overworld', sessionId: 's1', observedAt: 1, sequence: 1, source: 'vision', evidence: 'seen', stateComplete: true, state: { name: 'minecraft:stone', properties: {} }, pos: { x: 15, y: -1, z: 0 } });
+  // 一次返回两个变化：先支撑拆除（stone→air），再无关刷新
+  const senses = {
+    ...flatSenses(),
+    observeBlocks: () => ([
+      { name: 'minecraft:air', properties: {}, pos: { x: 15, y: -1, z: 0 }, worldId: 'world', sessionId: 's1', dimension: 'overworld', observationId: 2, observedAt: Date.now(), source: 'vision' },
+      { name: 'minecraft:air', properties: {}, pos: { x: 16, y: 2, z: 0 }, worldId: 'world', sessionId: 's1', dimension: 'overworld', observationId: 3, observedAt: Date.now(), source: 'vision' },
+    ] as BlockObservation[]),
+  } as unknown as Senses;
+  const ctx = { senses } as never;
+  const report = observeCells(ctx, map, [{ x: 15, y: -1, z: 0 }, { x: 16, y: 2, z: 0 }]);
+  assert.ok(report, '应返回合并报告');
+  const cells = report!.sections.flatMap((s) => s.cells.map((c) => `${c.pos.x},${c.pos.y},${c.pos.z}`));
+  assert.ok(cells.includes('15,-1,0'), '支撑拆除的变化必须出现在报告中');
+  const view = map.cellAt('overworld', 15, -1, 0);
+  assert.equal(view.observed ? view.evidence.observation.state.name : null, 'minecraft:air', '地图必须反映支撑已拆除为空气');
+});

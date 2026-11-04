@@ -162,7 +162,7 @@ export class SkillBook {
     return true;
   }
   /** 提示词里的索引：每份一行 */
-  index(skip?: (name: string) => boolean, executionError?: (name: string, trial: boolean) => string | null): string[] {
+  index(skip?: (name: string) => boolean, executionError?: (name: string, trial: boolean) => string | null, autoNote?: (name: string) => string | null): string[] {
     return this.list().filter((s) => !skip?.(s.name)).map((s) => {
       const candidate = this.candidates.get(s.name);
       const status: string[] = [];
@@ -172,7 +172,8 @@ export class SkillBook {
         else if (!executionError) status.push(`未确认是否可执行${s.mode ? `，声明方式：${MODE_LABEL[s.mode]}` : ''}`);
         else {
           const error = executionError(s.name, false);
-          status.push(error ? `不可执行：${error}` : `可执行${s.mode ? `，${MODE_LABEL[s.mode]}` : ''}`);
+          const note = autoNote?.(s.name);
+          status.push(error ? `不可执行：${error}` : `可执行${s.mode ? `，${MODE_LABEL[s.mode]}` : ''}${note ? `，但${note}` : ''}`);
         }
       }
       if (candidate) {
@@ -190,8 +191,10 @@ export class SkillBook {
     if (!NAME.test(n)) return { ok: false, error: '技能名只能用小写英文、数字和连字符（2–41 个字符）' };
     const prev = this.skills.get(n);
     if (prev?.source === 'builtin' && !(hasCode(prev.behavior) && hasCode(behavior))) return { ok: false, error: `${n} 是内置技能，不能改；换个名字写自己的版本` };
-    const desc = description.replace(/[\r\n]+/g, ' ').trim().slice(0, 200);
-    let text = body.replace(/\r\n/g, '\n').replace(BEHAVIOR_BLOCK, '').trim().slice(0, 6000);
+    // 说明采用与 reload 读取一致的规范形式：先规范化换行并截断，再把首尾的空白与引号（含内外多层引号）一并去掉，
+    // 得到 trim().replace(首尾引号) 的固定点，保证同一份持久化内容在写入与完整重载后得到同一份表示。
+    const desc = description.replace(/[\r\n]+/g, ' ').trim().slice(0, 200).replace(/^[\s"']+|[\s"']+$/g, '');
+    let text = body.replace(/\r\n/g, '\n').replace(BEHAVIOR_BLOCK, '').trim().slice(0, 6000).trim();
     const pending = this.candidates.get(n);
     const dir = path.join(this.selfDir, n);
     const notesFile = path.join(dir, 'NOTES.md');

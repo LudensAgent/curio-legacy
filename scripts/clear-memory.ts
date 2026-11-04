@@ -2,7 +2,7 @@
 import { fileURLToPath } from 'node:url';
 import { config, requireLocalMode } from '../src/config.ts';
 import { resetTestSession } from '../src/maintenance/reset.ts';
-import { defaultServerDir, prepareNewWorld } from '../src/seeds/new-world.ts';
+import { prepareNewWorld } from '../src/seeds/new-world.ts';
 
 try {
   const args = new Set(process.argv.slice(2));
@@ -17,7 +17,7 @@ try {
     const outcome = await resetTestSession({
       dataDir: config.dataDir,
       projectDir,
-      serverDir: defaultServerDir(projectDir),
+      serverDir: config.serverDir,
       memory: args.has('--hindsight') ? { ...config.memory, provider: 'hindsight' } : config.memory,
       full: args.has('--full'), dryRun: args.has('--dry-run'),
       endpoints: [{ host: config.dashboard.host, port: config.dashboard.port, label: 'Agent 控制台' }],
@@ -36,7 +36,7 @@ try {
         if (!args.has('--random-seed')) {
           const projectDir = fileURLToPath(new URL('../', import.meta.url));
           try {
-            await prepareNewWorld({ serverDir: defaultServerDir(projectDir), projectDir, rcon: { host: config.observer.rconHost, port: config.observer.rconPort, password: config.observer.rconPassword } }, (s) => console.log(`· ${s}`));
+            await prepareNewWorld({ serverDir: config.serverDir, projectDir, rcon: { host: config.observer.rconHost, port: config.observer.rconPort, password: config.observer.rconPassword } }, (s) => console.log(`· ${s}`));
           } catch (e: any) { console.log(`挑种子没成，下次启动服务器是随机种子的新世界：${e?.message ?? e}`); }
         } else console.log('下次启动创建随机种子的新世界。');
       }
