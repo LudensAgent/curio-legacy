@@ -633,7 +633,13 @@ export class Mind {
     const state = this.d.adapter.state();
     this.activity.stepStart = { pos: { ...state.pos }, view: viewOf(this.safe(() => this.d.perception.snapshot(), undefined)) };
     const climb = step.skill === 'climb_up' ? this.activity.climb?.[step.id ?? JSON.stringify(step.args ?? {})] : undefined;
-    const r = this.d.arbiter.start(step, this.activity.source === 'rule' ? 'rule' : 'llm', { planId: this.activity.id, ...(climb ? { climb } : {}) });
+    const r = this.d.arbiter.start(step, this.activity.source === 'rule' ? 'rule' : 'llm', {
+      planId: this.activity.id,
+      ...(step.id ? { stepId: step.id } : {}),
+      ...(step.origin ? { origin: step.origin } : {}),
+      ...(step.authorizedBy ? { authorizedBy: step.authorizedBy } : {}),
+      ...(climb ? { climb } : {}),
+    });
     if ('error' in r) this.handleStepResult(step, { status: 'failed', failureCode: 'BAD_ARGS', summary: r.error }, 0);
   }
 
@@ -889,7 +895,10 @@ export class Mind {
         const own = a.steps[Math.max(0, a.index - 1)];
         const climb = step.skill === 'climb_up' ? a.climb?.[own?.id ?? JSON.stringify(step.args ?? {})] : undefined;
         const climbId = step.skill === 'climb_up' ? own?.id : undefined;
-        a.steps.splice(Math.max(0, a.index - 1), 0, { skill: 'use_skill', args: { name: b.name, failure: failureFor(step, result, this.d.adapter.state().pos, climb, climbId) }, optional: true, id: shortId('st_') });
+        a.steps.splice(Math.max(0, a.index - 1), 0, {
+          skill: 'use_skill', args: { name: b.name, failure: failureFor(step, result, this.d.adapter.state().pos, climb, climbId) }, optional: true, id: shortId('st_'),
+          origin: 'execution_helper', authorizedBy: { skill: step.skill, ...(own?.id ? { stepId: own.id } : {}), args: step.args },
+        });
         a.index = Math.max(0, a.index - 1);
         a.consecutiveFailures = 0;
         this.d.self.think(`${step.skill} 没成，照学会的「${b.name}」试试`, 'outcome');
@@ -935,7 +944,10 @@ export class Mind {
     if (next) {
       a.adaptations.push(`skill:${next.name}`);
       a.awaitingRecovery = next.name;
-      a.steps.splice(a.index, 0, { skill: 'use_skill', args: { name: next.name, failure }, optional: true, id: shortId('st_') });
+      a.steps.splice(a.index, 0, {
+        skill: 'use_skill', args: { name: next.name, failure }, optional: true, id: shortId('st_'),
+        origin: 'execution_helper', authorizedBy: { skill: failure.skill, args: failure.args },
+      });
       this.d.bus.publish('body_adapt', 'P3', `${why}，换学会的做法：${next.name}（${next.description}）`, { planId: a.id, skill: next.name });
       return true;
     }

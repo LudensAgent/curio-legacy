@@ -117,7 +117,8 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
     const r = await executeSkill({ ...ctx, senses: actionSenses, deadline: Math.min(ctx.deadline, Date.now() + skill.timeoutMs), progress: () => {} }, skill, constrainRecoveryAction(ctx, name, v.args));
     if (r.status === 'cancelled') throw Object.assign(new Error('task cancelled'), { name: 'AbortedError', ...(r.data ? { partial: r.data } : {}) });
     const { local: _local, around: _around, ...data } = r.data ?? {};
-    return { ok: r.status === 'succeeded', code: r.failureCode ?? null, summary: r.summary.slice(0, 200), ...(Object.keys(data).length ? { data } : {}) };
+    // 保留 data 外壳（即使去掉 local/around 后为空），代码里能稳定区分“没有 data”和“有结构化 data”。
+    return { ok: r.status === 'succeeded', code: r.failureCode ?? null, summary: r.summary.slice(0, 200), ...(r.data !== undefined ? { data } : {}) };
   };
   return async (method, a) => {
     throwIfAborted(ctx.signal);
@@ -220,7 +221,8 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
         const r = await executeSkill({ ...ctx, skillDepth: depth + 1, deadline: Math.min(ctx.deadline, Date.now() + skill.timeoutMs), progress: () => {} } as SkillCtx, skill, v.args);
         if (r.status === 'cancelled') throw Object.assign(new Error('task cancelled'), { name: 'AbortedError', ...(r.data ? { partial: r.data } : {}) });
         const { local: _local, around: _around, ...data } = r.data ?? {};
-        return { ok: r.status === 'succeeded', code: r.failureCode ?? null, summary: r.summary.slice(0, 200), ...(Object.keys(data).length ? { data } : {}) };
+        // api.useSkill 与 api.act 一样保留 data 外壳：嵌套代码技能的结构化事实不能被压成 ok/code/summary。
+        return { ok: r.status === 'succeeded', code: r.failureCode ?? null, summary: r.summary.slice(0, 200), ...(r.data !== undefined ? { data } : {}) };
       }
       case 'stepTo': {
         const y = Number(a[1]);

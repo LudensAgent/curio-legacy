@@ -91,9 +91,13 @@ export function nextStep(a: Activity): (Step & { id?: string }) | null {
     const key = step.id ?? JSON.stringify(step.args ?? {});
     a.climb ??= {};
     a.climb[key] ??= { height: (step.args as Record<string, unknown>)?.height as number ?? 0, spent: 0, startY: Number.NaN };
-    return { skill: step.skill, args: step.args, id: step.id };
+    return { skill: step.skill, args: step.args, ...(step.id ? { id: step.id } : {}), ...(step.origin ? { origin: step.origin } : {}), ...(step.authorizedBy ? { authorizedBy: step.authorizedBy } : {}) };
   }
-  return { skill: step.skill, args: step.args };
+  // 归因随逻辑步骤一起下传：自动插步保留 execution_helper 与授权链，普通步骤仍是 agent。
+  // 普通 agent 步骤维持原来的 {skill,args} 形状（调用方按它比较同一步）；只有插步额外带 id，
+  // 便于把自动动作追溯到被执行的逻辑步骤。
+  const attribution = { ...(step.origin ? { origin: step.origin } : {}), ...(step.authorizedBy ? { authorizedBy: step.authorizedBy } : {}) };
+  return { skill: step.skill, args: step.args, ...(step.origin && step.id ? { id: step.id } : {}), ...attribution };
 }
 
 /** 还剩多少个动作（估计，用来决定什么时候开始想“接下来做什么”） */
@@ -240,7 +244,11 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     const mark = `${tag}:${step.skill}:${code}:${JSON.stringify(step.args ?? {}).slice(0, 60)}`;
     if (a.adaptations.includes(mark)) return { kind: 'stuck', why: result.summary.slice(0, 160) };
     a.adaptations.push(mark);
-    a.steps.splice(Math.max(0, a.index - 1), 0, { skill, args, id: shortId('st_') });
+    const own = ownStep(a, step);
+    a.steps.splice(Math.max(0, a.index - 1), 0, {
+      skill, args, id: shortId('st_'), origin: 'execution_helper',
+      authorizedBy: { skill: step.skill, ...(own?.id ? { stepId: own.id } : {}), args: step.args },
+    });
     a.index = Math.max(0, a.index - 1);
     return { kind: 'continue', adapted: what };
   };
@@ -255,7 +263,9 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     const mark = `clearance:${step.skill}:${code}:${JSON.stringify(step.args ?? {}).slice(0, 60)}`;
     if (a.adaptations.includes(mark)) return { kind: 'stuck', why: result.summary.slice(0, 160) };
     a.adaptations.push(mark);
-    a.steps.splice(Math.max(0, a.index - 1), 0, ...cells.map((c) => ({ skill: 'dig_at', args: { at: c.at, ...(c.facing ? { facing: c.facing } : {}) }, id: shortId('st_') })));
+    const own = ownStep(a, step);
+    const authorizedBy = { skill: step.skill, ...(own?.id ? { stepId: own.id } : {}), args: step.args };
+    a.steps.splice(Math.max(0, a.index - 1), 0, ...cells.map((c) => ({ skill: 'dig_at', args: { at: c.at, ...(c.facing ? { facing: c.facing } : {}) }, id: shortId('st_'), origin: 'execution_helper' as const, authorizedBy })));
     a.index = Math.max(0, a.index - 1);
     return { kind: 'continue', adapted: `头顶被挡，先把 ${cells.length} 格障碍全挖开再走` };
   }

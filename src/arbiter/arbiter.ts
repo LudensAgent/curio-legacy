@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import type { GameAdapter } from '../adapter/types.ts';
+import type { AgentState, GameAdapter, Vec3Like } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import type { SharedSpatialSession } from '../spatial/shared-session.ts';
@@ -12,10 +12,22 @@ import { config } from '../config.ts';
 import { fuelBurn } from '../methods/fuel.ts';
 
 export type TaskSource = 'llm' | 'rule' | 'filler' | 'reflex' | 'user';
+/** 谁产生了这一步：Agent 的选择、执行辅助的自动插步，还是独立调度（反射/填充）。 */
+export type TaskOrigin = 'agent' | 'execution_helper' | 'scheduler';
+/** 自动插步的授权链：它是在执行哪个原步骤授予的能力/目标。 */
+export interface StepAuthorization {
+  skill: string;
+  stepId?: string;
+  args?: unknown;
+}
 
 export interface Step {
   skill: string;
   args?: unknown;
+  /** 逻辑动作实例；同参数的不同动作也能区分，跨重试稳定。 */
+  id?: string;
+  origin?: TaskOrigin;
+  authorizedBy?: StepAuthorization;
 }
 
 export interface TaskInfo {
@@ -23,7 +35,12 @@ export interface TaskInfo {
   planVersion: number;
   skill: string;
   args: unknown;
+  /** 进入校验前的原始参数；`args` 是校验后的规范化参数。 */
+  requestedArgs?: unknown;
   source: TaskSource;
+  origin?: TaskOrigin;
+  stepId?: string;
+  authorizedBy?: StepAuthorization;
   startedAt: number;
   deadline: number;
   progress: number;
@@ -213,7 +230,14 @@ export class Arbiter extends EventEmitter {
    * 启动一个任务。若已有任务在运行，会先抢占（取消）它。
    * 返回 null 表示参数校验失败。
    */
-  start(step: Step, source: TaskSource, meta: { planId?: string; gentle?: boolean; climb?: { height: number; spent: number; startY: number } } = {}): TaskInfo | { error: string } {
+  start(step: Step, source: TaskSource, meta: {
+    planId?: string;
+    stepId?: string;
+    origin?: TaskOrigin;
+    authorizedBy?: StepAuthorization;
+    gentle?: boolean;
+    climb?: { height: number; spent: number; startY: number };
+  } = {}): TaskInfo | { error: string } {
     if (this.pausedFlag) return { error: 'Agent 已暂停' };
     // 关闭中的共享服务不再接受新任务；不自动重试或退回独立地图。
     if (this.spatial?.closing) return { error: '共享空间会话正在关闭，拒绝启动新任务' };
@@ -228,12 +252,21 @@ export class Arbiter extends EventEmitter {
     const skill = SKILLS[step.skill];
     const controller = new AbortController();
     const now = Date.now();
+    // 开始作用域/位置与背包在派发这一刻实测；结束事实只在没有更新任务时才能归给本任务。
+    const startState = readState(this.adapter);
+    const startedScope = scopeOf(startState, now);
+    const invBefore = countsOf(startState?.inventory ?? []);
+    const origin = meta.origin ?? (source === 'llm' || source === 'rule' || source === 'user' ? 'agent' : 'scheduler');
     const task: Running = {
       id: shortId('t_'),
       planVersion: ++this.version,
       skill: skill.name,
       args: v.args,
+      requestedArgs: step.args ?? {},
       source,
+      origin,
+      ...(meta.stepId ? { stepId: meta.stepId } : {}),
+      ...(meta.authorizedBy ? { authorizedBy: meta.authorizedBy } : {}),
       startedAt: now,
       deadline: now + skill.timeoutMs,
       progress: 0,
@@ -249,11 +282,15 @@ export class Arbiter extends EventEmitter {
       planVersion: task.planVersion,
       skill: task.skill,
       args: task.args,
+      requestedArgs: task.requestedArgs,
       source,
+      origin,
+      planId: task.planId ?? null,
+      stepId: task.stepId ?? null,
+      authorizedBy: task.authorizedBy ?? null,
     });
 
     const timeout = setTimeout(() => controller.abort('TIMEOUT'), skill.timeoutMs + 2000);
-    const invBefore = inventoryCounts(this.adapter);
     const ctx = {
       adapter: this.guard(controller.signal),
       senses: this.senses,
@@ -295,12 +332,26 @@ export class Arbiter extends EventEmitter {
           this.current = null;
           this.adapter.stopAll();
         }
-        const durationMs = Date.now() - task.startedAt;
-        // 动作顺手用掉、结果里又没提到的东西（自动做的工作台、熔炉、船、镐子、火把、烧掉的燃料……）：如实补一句
-        if (source !== 'filler') { const spent = spentNote(invBefore, inventoryCounts(this.adapter), result.summary); if (spent) result = { ...result, summary: `${result.summary}${spent}` }; }
+        const endedAt = Date.now();
+        const durationMs = endedAt - task.startedAt;
+        // 取消/超时的迟到回调可能在新任务已经开始后才落定。只有期间没有新 planVersion 时，
+        // 当前 adapter 状态和背包才还能归给这个任务；否则保留结果数据里的实测事实，末状态记 null。
+        const stillOwned = this.version === task.planVersion;
+        const endState = stillOwned ? readState(this.adapter) : null;
+        const invAfter = endState ? countsOf(endState.inventory) : null;
+        const resultData = result.data && typeof result.data === 'object' ? result.data as Record<string, unknown> : undefined;
+        const measured = resultData ? lastPositionOf(resultData) : null;
+        const resolved = resultData ? resolvedTargetOf(resultData) : null;
+        // 动作顺手用掉、结果里又没提到的东西（自动做的工作台、熔炉、船、镐子、火把、烧掉的燃料……）：如实补一句。
+        // 迟到回调不拿新任务的背包补摘要，避免把别人的消耗记到旧动作头上。
+        if (stillOwned && invAfter && source !== 'filler') {
+          const spent = spentNote(invBefore, invAfter, result.summary);
+          if (spent) result = { ...result, summary: `${result.summary}${spent}` };
+        }
         this.memory.recordSkill(skill.name, result.status, result.failureCode);
         const sev = result.status === 'failed' ? 'P1' : source === 'filler' ? 'P3' : 'P2';
         this.bus.publish('task_end', sev, `[${source}] ${skill.name} → ${result.status}${result.failureCode ? `(${result.failureCode})` : ''}：${result.summary}`, {
+          // 保留原有字段，供既有观察/记账/学习消费者继续使用。
           taskId: task.id,
           durationMs,
           status: result.status,
@@ -308,6 +359,38 @@ export class Arbiter extends EventEmitter {
           skill: task.skill,
           summary: result.summary,
           source,
+          // 结构化委托事实：任何入口的取消/超时/失败/嵌套都落到同一份父委托身份上。
+          planId: task.planId ?? null,
+          planVersion: task.planVersion,
+          stepId: task.stepId ?? null,
+          origin: task.origin ?? originOfSource(task.source),
+          authorizedBy: task.authorizedBy ?? null,
+          // 当前调用链没有“任务派发任务”的父子 Arbiter；嵌套 use_skill/代码技能共享本任务 id。
+          parentTaskId: null,
+          startedAt: task.startedAt,
+          deadline: task.deadline,
+          args: task.requestedArgs ?? task.args,
+          normalizedArgs: task.args,
+          budget: {
+            deadline: task.deadline,
+            climb: meta.climb ? { ...meta.climb } : null,
+            make: typeof (task.args as { make?: unknown } | null)?.make === 'boolean' ? (task.args as { make: boolean }).make : null,
+          },
+          scope: {
+            start: startedScope,
+            end: stillOwned ? scopeOf(endState, endedAt) : null,
+          },
+          lateCompletion: !stillOwned,
+          // 只报实测位置，绝不拿目标或请求坐标补齐。
+          lastPosition: endState ? { ...endState.pos } : measured?.position ?? null,
+          lastPositionFrom: endState ? 'adapter.state' : measured?.from ?? null,
+          // 解析目标只在技能明确返回目标字段时填写；position/lastPosition 不能冒充目标。
+          resolvedTarget: resolved?.target ?? null,
+          resolvedTargetFrom: resolved?.from ?? null,
+          // 结构化消费：背包实际增减；开始或结束背包没有实测、或迟到回调时未知，明确 null。
+          inventoryDiff: startedScope && invAfter ? diffCounts(invBefore, invAfter) : null,
+          // 结果/部分效果原样保留（取消、超时、STUCK 都不改写已确认 data）。
+          data: result.data ?? null,
           // 动作声明的持续效果（比如扔掉的东西几分钟内不该回到手上）：交给 EffectWatch 盯着
           ...(result.status === 'succeeded' && result.data?.expect ? { expect: result.data.expect } : {}),
         });
@@ -333,10 +416,61 @@ export class Arbiter extends EventEmitter {
   }
 }
 
-function inventoryCounts(adapter: GameAdapter): Map<string, number> {
+function originOfSource(source: TaskSource): TaskOrigin {
+  return source === 'llm' || source === 'rule' || source === 'user' ? 'agent' : 'scheduler';
+}
+
+/** Adapter state is a measurement boundary: unavailable state stays absent, never synthesized. */
+function readState(adapter: GameAdapter): AgentState | null {
+  try { return adapter.state(); } catch { return null; }
+}
+
+function scopeOf(state: AgentState | null, at: number) {
+  return state ? { worldId: state.worldId, dim: state.dim, sessionId: state.sessionId, at, pos: { ...state.pos } } : null;
+}
+
+function countsOf(inventory: readonly { name: string; count: number }[]): Map<string, number> {
   const m = new Map<string, number>();
-  try { for (const i of adapter.state().inventory) m.set(i.name, (m.get(i.name) ?? 0) + i.count); } catch { /* 状态暂不可用 */ }
+  for (const i of inventory) m.set(i.name, (m.get(i.name) ?? 0) + i.count);
   return m;
+}
+
+function diffCounts(before: Map<string, number>, after: Map<string, number>) {
+  const gained: Record<string, number> = {}, lost: Record<string, number> = {};
+  for (const name of new Set([...before.keys(), ...after.keys()])) {
+    const d = (after.get(name) ?? 0) - (before.get(name) ?? 0);
+    if (d > 0) gained[name] = d; else if (d < 0) lost[name] = -d;
+  }
+  return { gained, lost };
+}
+
+/** Only finite world coordinates; arrays and partial objects are not coordinates. */
+function pointOf(value: unknown): Vec3Like | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const point = value as Record<string, unknown>;
+  return ['x', 'y', 'z'].every((key) => typeof point[key] === 'number' && Number.isFinite(point[key]))
+    ? { x: point.x as number, y: point.y as number, z: point.z as number } : null;
+}
+
+/** 技能显式返回的目标字段；不把 position/lastPosition 当目标。 */
+function resolvedTargetOf(data: Record<string, unknown>): { target: Vec3Like; from: string } | null {
+  const target = pointOf(data.target);
+  if (target) return { target, from: 'data.target' };
+  const cell = pointOf(data.targetCell);
+  return cell ? { target: cell, from: 'data.targetCell' } : null;
+}
+
+/** 结果里明确记录的最后实测位置；来源写清楚，避免和请求坐标或当前身体混淆。 */
+function lastPositionOf(data: Record<string, unknown>): { position: Vec3Like; from: string } | null {
+  const direct = pointOf(data.position);
+  if (direct) return { position: direct, from: 'data.position' };
+  const pos = pointOf(data.pos);
+  if (pos) return { position: pos, from: 'data.pos' };
+  const nav = data.nav && typeof data.nav === 'object' ? data.nav as Record<string, unknown> : null;
+  const navLast = pointOf(nav?.lastPosition);
+  if (navLast) return { position: navLast, from: 'data.nav.lastPosition' };
+  const last = pointOf(data.lastPosition);
+  return last ? { position: last, from: 'data.lastPosition' } : null;
 }
 
 /** 背包里少了、结果里又没提到的东西：“；顺带用掉了 oak_planks×5、coal×1” */
