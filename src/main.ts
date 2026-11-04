@@ -29,6 +29,7 @@ import { attachLogger, JsonlWriter } from './log.ts';
 import { WorldMemory } from './memory/store.ts';
 import { EpisodicMemory } from './memory/episodic.ts';
 import { SharedSpatialSession, type ShutdownResult } from './spatial/shared-session.ts';
+import { startSpatialCheckpointScheduler } from './spatial/checkpoint-scheduler.ts';
 import { classifySpatialShutdown, errorFacts, spatialShutdownDiagnostics } from './spatial/host-shutdown.ts';
 import { HindsightBackend } from './memory/hindsight.ts';
 import { HindsightUsage } from './memory/hindsight-usage.ts';
@@ -103,6 +104,20 @@ try {
   }) + '\n');
   process.exit(1);
 }
+// 常规运行时每 30 秒在物理 tick 之外走同一条公开 checkpoint 路径；只汇报实际
+// 保存结果与剩余 dirty，最终 flush/close 仍由 finishShutdown 的 spatial.shutdown 负责。
+const stopSpatialCheckpoints = startSpatialCheckpointScheduler(spatial, (fact) => {
+  if (fact.status === 'saved') {
+    const { checkpoint } = fact;
+    bus.publish('spatial_checkpoint', 'P3',
+      `共享空间记忆已保存 ${checkpoint.checkpointId}（voxel=${checkpoint.voxelRevision}, fragment=${checkpoint.fragmentRevision}, topology=${checkpoint.topologyRevision}）｜剩余 dirty=${fact.remainingDirty}`,
+      { checkpoint, remainingDirty: fact.remainingDirty, state: fact.state });
+    return;
+  }
+  bus.publish('spatial_checkpoint_failed', 'P1',
+    `共享空间记忆保存失败（${fact.error.kind ?? fact.error.name}）：${fact.error.message}｜剩余 dirty=${fact.remainingDirty}，等待下个周期`,
+    { error: fact.error, remainingDirty: fact.remainingDirty, state: fact.state });
+});
 const memory = new WorldMemory(path.join(config.dataDir, 'world-memory.json'));
 const vision = new Vision(adapter, config.vision, spatial);
 const arbiter = new Arbiter(adapter, memory, bus, vision, spatial);
@@ -851,6 +866,8 @@ async function finishShutdown(code: number) {
   const attempt = (step: string, run: () => unknown) => {
     try { run(); } catch (error) { cleanupErrors.push({ step, error }); }
   };
+  // 先停未来周期触发；已接受的保存不取消，由下面的 shutdown().flush 等待落定。
+  attempt('spatialCheckpointScheduler.stop', () => stopSpatialCheckpoints());
   attempt('arbiter.setPaused', () => arbiter.setPaused(true));
   attempt('arbiter.cancel', () => arbiter.cancel('退出'));
   let servicePromise: Promise<ShutdownResult> | null = null;
