@@ -41,8 +41,8 @@ npm run test:start
 
 `test:start` 启动的是 Curio 进程，**不代表 Minecraft 服务端已经启动**。启动顺序：先单独启动 test 的 Minecraft 服务端（`/path/to/curio\test-setver` 下的 Fabric jar，端口须与 `.env.test` 的 `MC_PORT` 一致），再 `npm run test:start`。Curio 只连接、不代为启动服务器；本轮也不自动启动 LLM 自主活动或发起游戏动作。
 
-## 当前缺口（尚未完成）
+## 当前状态
 
-`/path/to/curio\test-setver\server.properties` 目前仍是默认 `server-port=25565`，与 local 配置的 `127.0.0.1:25565` 相同；而 `test:config` 按隔离要求解析为 `25566`。实际服务端仍在 25565 上运行，改端口需要停止并重启该测试服务端（`enable-rcon=false`，无法用 RCON 优雅停机）。本分支未擅自停止该进程，因此尚未在实服复现桶操作、被水流推动的移动与瞬时落地水时序。
+`/path/to/curio\test-setver\server.properties` 已配置为 `server-port=25566`、`enable-rcon=true`、`rcon.port=25576`、`rcon.password=test-setver-rcon`，服务端已按此重启。`test:config` 解析出的连接地址、RCON、世界目录、数据目录与世界身份均指向该独立实例，隔离校验通过。桶操作（水/岩浆倒放与收集、封顶源收集）与水中上岸已在实服复现，见 [调查报告](fluid-interaction-investigation-2026-11-03.md) 的「实服验收」一节。
 
 本分支未提供 `test:init`（世界副本初始化）：测试服务端与测试世界须由操作者显式放置到 `/path/to/curio\test-setver`，不复制 local/live 的世界、记忆、数据库或日志，也不用它们的快照初始化。
