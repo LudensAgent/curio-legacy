@@ -149,6 +149,10 @@ export interface MoveRecord {
 }
 
 export interface RouteStatusSnapshot {
+  /** 真实 public status 的委托作用域；用于拒绝「同位置但 scope 已错」的样本。 */
+  worldId: string;
+  dim: string;
+  sessionId: string;
   delegationId: string;
   nextPointIndex: number;
   activeStepIndex: number | null;
@@ -169,14 +173,21 @@ export interface RouteCallRecord {
 
 /**
  * onSample 被调用只代表样本「已交付」。这里保存完整原始 BodySample（真实 scope/
- * lifecycle/id/time/sequence）与公开状态前后；是否被接受必须由 lastPosition、
+ * lifecycle/id/time/sequence）与公开状态前后；是否被接受必须由 scope、lastPosition、
  * nextPointIndex 推进和最终 NavResult.trace/lastObservation 另行证明。
+ *
+ * `ownerTaskId` 是目标 loop 实例的静态绑定；`sourceOwnerTaskId` 是样本实际通过
+ * 公开 setFrameSink 回调送达时的来源 loop 绑定（直接调用时为 null）。两者必须分开，
+ * 否则旧 A 来源把 payload 改写成 B 后无法辨识。
  */
 export interface DeliveredSampleRecord {
   seq: number;
   ts: number;
   ownerTaskId: string | null;
   delegationId: string;
+  /** 实际交付通道：经公开 setFrameSink 回调（活动段）或直接调用（初始化）。 */
+  source: 'frameSink' | 'direct';
+  sourceOwnerTaskId: string | null;
   sample: BodySample;
   statusBefore: RouteStatusSnapshot;
   statusAfter: RouteStatusSnapshot;
@@ -489,9 +500,20 @@ export function checkTaskSegments(
   return { ok, reason, segments, missing, extra, wrongOwner, incomplete };
 }
 
+function finiteSample(sample: BodySample): boolean {
+  return Number.isFinite(sample.pos.x) && Number.isFinite(sample.pos.y) && Number.isFinite(sample.pos.z)
+    && Number.isFinite(sample.observedAt) && Number.isFinite(sample.sequence);
+}
+
 /**
- * 由公开 onSample 状态证明「真实测量被接受」：样本 id 属于该 delegation、
- * sequence/observedAt 单调、调用前未终结、调用后 lastPosition 正是该原始测量。
+ * 公开 onSample 状态证明「该原始测量确实被库记录为候选测量」：样本有限、id 属于该
+ * delegation、sequence/observedAt 单调、调用前未终结、样本 scope 与真实 public status
+ * 的作用域一致、调用后 lastPosition 正是该原始测量。
+ *
+ * 这不是「每次交付都被接纳」的声明：lastPosition 在拒绝同位置的错误 scope 样本时
+ * 保持不变，必须靠 scope 比对排除；真正的完成/部分位移还要用 nextPointIndex 推进
+ * 和最终 NavResult.lastObservation 的原 time/scope/position 证明（见 measuredCompletions /
+ * partialMatchesRecorded）。
  */
 export function acceptedMeasurements(
   records: DeliveredSampleRecord[],
@@ -504,7 +526,11 @@ export function acceptedMeasurements(
     if (delegationId !== undefined && r.delegationId !== delegationId) continue;
     const prevSeq = lastSeq.get(r.delegationId) ?? Number.NEGATIVE_INFINITY;
     const prevObserved = lastObserved.get(r.delegationId) ?? Number.NEGATIVE_INFINITY;
-    const recorded = r.sample.executionId === r.delegationId
+    const recorded = finiteSample(r.sample)
+      && r.sample.executionId === r.delegationId
+      && r.sample.worldId === r.statusAfter.worldId
+      && r.sample.dim === r.statusAfter.dim
+      && r.sample.sessionId === r.statusAfter.sessionId
       && r.statusBefore.result === null
       && r.sample.sequence > prevSeq
       && r.sample.observedAt >= prevObserved
@@ -517,6 +543,29 @@ export function acceptedMeasurements(
     }
   }
   return out;
+}
+
+/**
+ * 终态 NavResult 的 lastObservation 必须就是最后一条候选测量的原始 time/scope 与位置，
+ * 从而把 partial/完成所用测量绑定到真实观测，而不是仅凭「位置看起来一致」。
+ */
+export function partialMatchesRecorded(
+  nav: NavResult | undefined,
+  records: DeliveredSampleRecord[],
+  tol = 0.01,
+): boolean {
+  if (!nav?.lastPosition) return false;
+  const last = records[records.length - 1];
+  if (!last) return false;
+  const obs = nav.lastObservation;
+  if (!obs) return false;
+  const s = last.sample;
+  return Math.hypot(nav.lastPosition.x - s.pos.x, nav.lastPosition.z - s.pos.z) <= tol
+    && Math.abs(nav.lastPosition.y - s.pos.y) <= tol
+    && obs.observedAt === s.observedAt
+    && obs.worldId === s.worldId
+    && obs.dim === s.dim
+    && obs.sessionId === s.sessionId;
 }
 
 /** 被公开状态证明的逐段到达：nextPointIndex 真实推进且该次原始测量已记录。 */
@@ -559,7 +608,7 @@ export interface OldOwnerBoundary {
 }
 
 export interface OldOwnerViolations {
-  /** 取消后仍实际写入并保持 forward=true。 */
+  /** 取消后仍实际写入并保持 7 键中任一 keysAfter=true。 */
   revived: ActualControlEntry[];
   /** B 已接管后，旧任务仍发出任何实际 set/clear。 */
   afterTakeover: ActualControlEntry[];
@@ -573,21 +622,35 @@ export function classifyOldOwnerControls(
   boundary: OldOwnerBoundary,
 ): OldOwnerViolations {
   const own = actualControls.filter((c) => c.ownerTaskId === ownerTaskId && c.seq > boundary.cancelSeq);
+  // 任何 7 键之一的真实 keysAfter=true 都是复活；只写 forward 会漏掉 back/left/right/jump/sprint/sneak。
+  const revived = own.filter((c) => c.op === 'set' && c.value === true
+    && c.name !== undefined && (KEYS as string[]).includes(c.name)
+    && c.keysAfter[c.name as ControlState] === true);
+  const revivedSeq = new Set(revived.map((c) => c.seq));
   return {
-    revived: own.filter((c) => c.op === 'set' && c.name === 'forward' && c.value === true && c.keysAfter.forward === true),
+    revived,
     afterTakeover: own.filter((c) => c.seq > boundary.takeoverSeq),
-    releasedBeforeTakeover: own.filter((c) => c.seq <= boundary.takeoverSeq),
+    // 接管前允许合法松键；但已真实复活的 true 条目不能同时被说成「松键」。
+    releasedBeforeTakeover: own.filter((c) => c.seq <= boundary.takeoverSeq && !revivedSeq.has(c.seq)),
   };
 }
 
-/** B delegation 的交付样本必须全部来自 B 的静态 owner 与原始 sample id。 */
+/**
+ * B delegation 的交付样本必须来自 B 的目标 loop、原始 sample id，并且（活动段）实际
+ * 经 B 自己的 frameSink 送达：旧 A 来源把 executionId 改写成 B 仍会因 sourceOwner 被拒。
+ * 直接调用只允许出现在初始化阶段；活动段无法确认来源时同样拒绝。
+ */
 export function foreignSampleDeliveries(
   records: DeliveredSampleRecord[],
   delegationId: string,
   taskId: string,
 ): DeliveredSampleRecord[] {
-  return records.filter((r) => r.delegationId === delegationId
-    && (r.sample.executionId !== delegationId || r.ownerTaskId !== taskId));
+  return records.filter((r) => r.delegationId === delegationId && (
+    r.sample.executionId !== delegationId
+    || r.ownerTaskId !== taskId
+    || (r.source === 'frameSink' && r.sourceOwnerTaskId !== taskId)
+    || (r.source === 'direct' && r.statusBefore.activeStepIndex !== null)
+  ));
 }
 
 function isDirectRun(): boolean {
@@ -773,6 +836,9 @@ export class ExecutionDiagnostics {
   private wrapped = false;
   private readonly routeOwners = new WeakMap<WalkRouteExecutor, { taskId: string | null; delegationId: string }>();
   private readonly moveOwners = new WeakMap<WalkMoveExecutor, { taskId: string | null }>();
+  /** 当前同步 frameSink 回调的来源 loop 绑定；直接 onSample（初始化）时为 null。 */
+  private frameSinkSourceOwner: string | null = null;
+  private inFrameSink = false;
   private readonly delegationOwners = new Map<string, string | null>();
   private origMove?: MoveFn;
   private origOnSample?: OnSampleFn;
@@ -833,12 +899,16 @@ export class ExecutionDiagnostics {
     (WalkRouteExecutor.prototype as { onSample: OnSampleFn }).onSample = function (this: WalkRouteExecutor, sample: BodySample) {
       const binding = self.routeOwners.get(this);
       const before = snapshotStatus(this.status());
+      // 目标 loop owner 来自实例静态绑定；sourceOwner 只在同步 frameSink 回调内才可知，
+      // 初始化直调如实标为 direct/null，不伪造成目标任务。
+      const source: DeliveredSampleRecord['source'] = self.inFrameSink ? 'frameSink' : 'direct';
+      const sourceOwnerTaskId = self.inFrameSink ? self.frameSinkSourceOwner : null;
       const status = origOnSample.call(this, sample);
       const after = snapshotStatus(status)!;
       self.deliveredSamples.push({
         seq: self.seq.next(), ts: self.now(), ownerTaskId: binding?.taskId ?? null,
-        delegationId: binding?.delegationId ?? after.delegationId, sample: cloneSample(sample),
-        statusBefore: before ?? after, statusAfter: after,
+        delegationId: binding?.delegationId ?? after.delegationId, source, sourceOwnerTaskId,
+        sample: cloneSample(sample), statusBefore: before ?? after, statusAfter: after,
       });
       return status;
     };
@@ -847,7 +917,20 @@ export class ExecutionDiagnostics {
       const owner = self.owner();
       self.moveOwners.set(this, { taskId: owner });
       self.bindings.push({ seq: self.seq.next(), ts: self.now(), ownerTaskId: owner, kind: 'frameSink' });
-      return origSetFrameSink.call(this, fn);
+      // 窄同步上下文包装：原 fn 的参数/返回/this 原样保留，finally 还原来源上下文。
+      const wrapped = function (this: unknown, ...args: Parameters<typeof fn>) {
+        const prevSourceOwner = self.frameSinkSourceOwner;
+        const prevInFrameSink = self.inFrameSink;
+        self.frameSinkSourceOwner = owner;
+        self.inFrameSink = true;
+        try {
+          return fn.apply(this as never, args);
+        } finally {
+          self.frameSinkSourceOwner = prevSourceOwner;
+          self.inFrameSink = prevInFrameSink;
+        }
+      };
+      return origSetFrameSink.call(this, wrapped);
     };
 
     (WalkMoveExecutor.prototype as { move: MoveFn }).move = function (this: WalkMoveExecutor, request: ExecutableMove) {
@@ -888,6 +971,9 @@ export class ExecutionDiagnostics {
 function snapshotStatus(status: WalkRouteStatus | null): RouteStatusSnapshot | null {
   if (status === null) return null;
   return {
+    worldId: status.worldId,
+    dim: status.dim,
+    sessionId: status.sessionId,
     delegationId: status.delegationId,
     nextPointIndex: status.nextPointIndex,
     activeStepIndex: status.activeStepIndex,
@@ -897,7 +983,8 @@ function snapshotStatus(status: WalkRouteStatus | null): RouteStatusSnapshot | n
 }
 
 function sameStatus(a: RouteStatusSnapshot | null, b: RouteStatusSnapshot | null): boolean {
-  return !!a && !!b && a.delegationId === b.delegationId
+  return !!a && !!b && a.worldId === b.worldId && a.dim === b.dim && a.sessionId === b.sessionId
+    && a.delegationId === b.delegationId
     && a.nextPointIndex === b.nextPointIndex
     && a.activeStepIndex === b.activeStepIndex
     && (a.result?.outcome ?? null) === (b.result?.outcome ?? null)
@@ -1640,6 +1727,28 @@ async function scenarioW6(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   ctx.arbiter.cancel('W6 取消并交接');
   snapControl(ctx, 'after-arbiter-cancel', ev);
 
+  // B 启动/接管前：真实取消后全部 7 键必须为 false。合法的 Arbiter.cancel →
+  // production stopAll 释放即可，不要求此处由 body 独自释放，也不用 harness fallback。
+  const keysAfterCancel = snapshotKeys(ctx.bot);
+  const stopAfterCancel = [...d.diag.stopAlls].reverse().find((s) =>
+    s.kind === 'production' && s.ownerTaskId === a.task.id && s.seqBefore > cancelSeq);
+  ev.extra = {
+    ...ev.extra,
+    cancelSeq,
+    keysAfterCancel,
+    stopAllAfterCancel: stopAfterCancel
+      ? { seqBefore: stopAfterCancel.seqBefore, seqAfter: stopAfterCancel.seqAfter, keysBefore: stopAfterCancel.keysBefore, keysAfter: stopAfterCancel.keysAfter }
+      : null,
+    taskBRun: false,
+  };
+  if (!stopAfterCancel) throw new Error('W6 取消后未捕获任务A的生产 stopAll 释放');
+  if (!allKeysReleased(stopAfterCancel.keysAfter)) {
+    throw new Error(`W6 取消后生产 stopAll keysAfter 仍有残留：${JSON.stringify(stopAfterCancel.keysAfter)}`);
+  }
+  if (!allKeysReleased(keysAfterCancel)) {
+    throw new Error(`W6 取消后真实全键仍有残留：${JSON.stringify(keysAfterCancel)}`);
+  }
+
   // B 立刻从取消后的真实实测 handoff x/y/z 开始（不沿用 A 起点、不硬编码 y）。
   const handoff = { ...ctx.adapter.state().pos };
   const routeB = [
@@ -1699,7 +1808,9 @@ async function scenarioW6(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
 
   // 旧 A 实际控制边界：取消后实际复活拒绝；B 接管后任何 A 真实 set/clear 拒绝。
   const violations = classifyOldOwnerControls(d.diag.actualControls, a.task.id, { cancelSeq, takeoverSeq });
-  if (violations.revived.length > 0) throw new Error(`W6 旧任务A在取消后实际复活 forward=true ${violations.revived.length} 次`);
+  if (violations.revived.length > 0) {
+    throw new Error(`W6 旧任务A在取消后实际复活按键 ${violations.revived.length} 次：${JSON.stringify(violations.revived.map((c) => ({ seq: c.seq, name: c.name, keysAfter: c.keysAfter })))}`);
+  }
   if (violations.afterTakeover.length > 0) {
     throw new Error(`W6 旧任务A在B接管后仍有 ${violations.afterTakeover.length} 次实际控制：${JSON.stringify(violations.afterTakeover.map((c) => ({ seq: c.seq, op: c.op, name: c.name, value: c.value })))}`);
   }
@@ -1708,7 +1819,7 @@ async function scenarioW6(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
 
   ev.extra = {
     ...ev.extra,
-    taskA: a.task.id, taskB: b.task.id,
+    taskA: a.task.id, taskB: b.task.id, taskBRun: true,
     cancelSeq, takeoverSeq, handoff,
     finalKeys: snapshotKeys(ctx.bot),
     delegationA: aStart.delegationId, delegationB: bStart.delegationId,
@@ -1717,7 +1828,8 @@ async function scenarioW6(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
       horizontalError: Number(bArrival.horizontalError.toFixed(3)), feetError: Number(bArrival.feetError.toFixed(3)),
       onGround: bArrival.obs.onGround, inWater: bArrival.obs.inWater, acceptedSamples: acceptedMeasurements(d.exec.deliveredSamples, bStart.delegationId).length,
     },
-    oldAReleasedBeforeTakeover: violations.releasedBeforeTakeover.map((c) => ({ seq: c.seq, op: c.op, name: c.name, value: c.value })),
+    oldARevived: violations.revived.map((c) => ({ seq: c.seq, name: c.name, keysAfter: c.keysAfter })),
+    oldAPreTakeoverNonRevival: violations.releasedBeforeTakeover.map((c) => ({ seq: c.seq, op: c.op, name: c.name, value: c.value })),
     oldATickDeliveriesAfterCancel: oldTicksAfterCancel.length,
     stopAllSeqB: { before: bRelease.seqBefore, after: bRelease.seqAfter },
   };
@@ -1755,9 +1867,9 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
       throw new Error(`W7a 未以真实 TIMEOUT 结束：status=${oTimeout.result.status} outcome=${nav?.outcome}`);
     }
     if (!hasPartialPosition(nav)) throw new Error('W7a TIMEOUT 未保留实测部分位移');
-    // 部分位移必须与最后一条已接受样本一致（非初始位置）。
-    const accepted = acceptedMeasurements(d.exec.deliveredSamples).map((s) => s.sample.pos);
-    if (!partialMatchesLastSample(nav, accepted)) throw new Error('W7a 部分位移与最后已接受样本不一致');
+    // 部分位移必须由最终 lastObservation 的原 time/scope 与最后候选测量共同证明（非初始位置）。
+    const accepted = acceptedMeasurements(d.exec.deliveredSamples);
+    if (!partialMatchesRecorded(nav, accepted)) throw new Error('W7a 部分位移与最后已记录测量不一致');
     if (timeoutTs > deadlineMs + 1000) throw new Error('W7a 实际结束远超期限');
     subcases.a = { ...(subcases.a as object), verdict: 'PASS' };
   } catch (e) {
@@ -1819,8 +1931,8 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
     };
     if (oDisc.result.status !== 'cancelled') throw new Error(`W7c 断线未以 cancelled 结束：status=${oDisc.result.status} 摘要=${oDisc.result.summary}`);
     if (!hasPartialPosition(nav)) throw new Error('W7c 断线未保留实测部分位移');
-    const accepted = acceptedMeasurements(d.exec.deliveredSamples).map((s) => s.sample.pos);
-    if (!partialMatchesLastSample(nav, accepted)) throw new Error('W7c 部分位移与最后已接受样本不一致');
+    const accepted = acceptedMeasurements(d.exec.deliveredSamples);
+    if (!partialMatchesRecorded(nav, accepted)) throw new Error('W7c 部分位移与最后已记录测量不一致');
     subcases.c = { ...(subcases.c as object), verdict: 'PASS' };
   } catch (e) {
     subcases.c = { ...(subcases.c as object), verdict: 'FAIL', error: (e as Error)?.message ?? String(e) };
