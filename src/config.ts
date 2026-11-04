@@ -137,7 +137,7 @@ export const config = {
   memory: memorySettings({ ...process.env, DATA_DIR: dataDir }),
   /**
    * 空间记忆库（curio-minecraft-3d-memory）的 SQLite 数据库文件：库继续接受显式参数，不识别 local/live/test。
-   * 默认放在 DATA_DIR 下，随数据目录一起隔离；首轮只提供路径，尚未由 Curio 主流程打开（walk 闭环仍是离线接线）。
+   * 默认放在 DATA_DIR 下，随数据目录一起隔离；宿主启动时由主流程实际打开并持有（共享空间服务）。
    */
   spatial: {
     databasePath: res(str('SPATIAL_DB_PATH') || path.join(dataDir, 'spatial', 'spatial.sqlite')),

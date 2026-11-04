@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, rmSync, writeSync } from 'node:fs';
 import path from 'node:path';
 import { startStallProfiler } from './observer/stall-profiler.ts';
 import { runtime } from './runtime.ts';
@@ -28,6 +28,8 @@ import { EventBus } from './events.ts';
 import { attachLogger, JsonlWriter } from './log.ts';
 import { WorldMemory } from './memory/store.ts';
 import { EpisodicMemory } from './memory/episodic.ts';
+import { SharedSpatialSession, type ShutdownResult } from './spatial/shared-session.ts';
+import { classifySpatialShutdown, errorFacts, spatialShutdownDiagnostics } from './spatial/host-shutdown.ts';
 import { HindsightBackend } from './memory/hindsight.ts';
 import { HindsightUsage } from './memory/hindsight-usage.ts';
 import { installProcessHealth, RESTART_EXIT_CODE } from './observer/process-health.ts';
@@ -81,10 +83,29 @@ bus.on('event', (ev: { type: string; ts?: number; msg: string; data?: Record<str
 process.on('unhandledRejection', (e: any) => bus.publish('unhandled', 'P1', String(e?.stack ?? e)));
 process.on('uncaughtException', (e: any) => bus.publish('uncaught', 'P0', String(e?.stack ?? e)));
 
-const memory = new WorldMemory(path.join(config.dataDir, 'world-memory.json'));
 const adapter = new MineflayerAdapter(config, bus);
-const vision = new Vision(adapter, config.vision);
-const arbiter = new Arbiter(adapter, memory, bus, vision);
+// 空间记忆先于本地世界记忆、计时器和 Bot 连接打开；打开失败没有本地/临时地图兜底，直接以非零码退出。
+let spatial: SharedSpatialSession;
+try {
+  mkdirSync(path.dirname(config.spatial.databasePath), { recursive: true });
+  spatial = await SharedSpatialSession.open({ worldId: adapter.state().worldId, databasePath: config.spatial.databasePath });
+} catch (error) {
+  const kind = (error as { kind?: unknown })?.kind;
+  writeSync(2, JSON.stringify({
+    event: 'spatial_open_failed',
+    worldId: adapter.state().worldId,
+    databasePath: config.spatial.databasePath,
+    error: {
+      kind: typeof kind === 'string' ? kind : null,
+      name: error instanceof Error ? error.name : typeof error,
+      message: error instanceof Error ? error.message : String(error),
+    },
+  }) + '\n');
+  process.exit(1);
+}
+const memory = new WorldMemory(path.join(config.dataDir, 'world-memory.json'));
+const vision = new Vision(adapter, config.vision, spatial);
+const arbiter = new Arbiter(adapter, memory, bus, vision, spatial);
 const perception = new Perception(adapter, memory, bus, vision);
 // 区分“在自家屋里”和“在坑里”：围着自己的墙是不是自己盖的房子
 perception.ownBuilt = (pos, block) => { const st = adapter.state(); return ownBuildingAt(memory, { worldId: st.worldId, dim: st.dim }, pos, block); };
@@ -816,25 +837,65 @@ async function killEntities(type: string, radius: number): Promise<{ ok: boolean
 function shutdown(code = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
+  void finishShutdown(code);
+}
+
+/**
+ * 关停顺序：同步暂停（拒绝新委托、停止合法观测写入）→ 取消旧动作 → 启动共享空间
+ * service.shutdown（同步置 closing）→ 保留原有清理 → 等最终 checkpoint/close 落定
+ * 后再按原 500ms 计划退出。任何清理步骤抛错都单独记录，绝不跳过 service.shutdown。
+ */
+async function finishShutdown(code: number) {
   bus.publish('shutdown', 'P1', '正在退出，保存记忆…');
-  arbiter.cancel('退出');
-  executive.stop();
-  actionChat.stop();
-  void live?.stop();
-  episodic.stop();
-  ledger.stop();
-  curator.stop();
-  methods.dispose();
-  selfModel.close();
-  observerInstall?.dispose();
-  observerTasks?.dispose();
-  feed?.dispose();
-  memory.close();
-  adapter.quit();
-  processHealth.dispose();
-  runStats.stop();
-  memoryLlm?.stop();
-  setTimeout(() => process.exit(code), 500);
+  const cleanupErrors: { step: string; error: unknown }[] = [];
+  const attempt = (step: string, run: () => unknown) => {
+    try { run(); } catch (error) { cleanupErrors.push({ step, error }); }
+  };
+  attempt('arbiter.setPaused', () => arbiter.setPaused(true));
+  attempt('arbiter.cancel', () => arbiter.cancel('退出'));
+  let servicePromise: Promise<ShutdownResult> | null = null;
+  let serviceCallError: unknown = null;
+  try { servicePromise = spatial.shutdown(); } catch (error) { serviceCallError = error; }
+  attempt('executive.stop', () => executive.stop());
+  attempt('actionChat.stop', () => actionChat.stop());
+  attempt('live.stop', () => live?.stop());
+  attempt('episodic.stop', () => episodic.stop());
+  attempt('ledger.stop', () => ledger.stop());
+  attempt('curator.stop', () => curator.stop());
+  attempt('methods.dispose', () => methods.dispose());
+  attempt('selfModel.close', () => selfModel.close());
+  attempt('observerInstall.dispose', () => observerInstall?.dispose());
+  attempt('observerTasks.dispose', () => observerTasks?.dispose());
+  attempt('feed.dispose', () => feed?.dispose());
+  attempt('memory.close', () => memory.close());
+  attempt('adapter.quit', () => adapter.quit());
+  attempt('processHealth.dispose', () => processHealth.dispose());
+  attempt('runStats.stop', () => runStats.stop());
+  attempt('memoryLlm.stop', () => memoryLlm?.stop());
+  let serviceResult: ShutdownResult | null = null;
+  let serviceAwaitError: unknown = null;
+  if (servicePromise) {
+    try { serviceResult = await servicePromise; } catch (error) { serviceAwaitError = error; }
+  }
+  const classification = serviceResult !== null
+    ? classifySpatialShutdown(serviceResult, spatial.worldId)
+    : { ok: false, problems: ['shutdown_result_missing'] };
+  const ok = serviceResult !== null && serviceCallError === null && serviceAwaitError === null
+    && classification.ok && cleanupErrors.length === 0;
+  const diagnostics = {
+    code,
+    ok,
+    spatial: serviceResult === null ? null : spatialShutdownDiagnostics(serviceResult, spatial.worldId),
+    classification,
+    serviceCallError: serviceCallError === null ? null : errorFacts(serviceCallError),
+    serviceAwaitError: serviceAwaitError === null ? null : errorFacts(serviceAwaitError),
+    cleanupErrors: cleanupErrors.map(({ step, error }) => ({ step, error: errorFacts(error) })),
+  };
+  bus.publish('shutdown', 'P1',
+    `${ok ? '共享空间记忆已保存并关闭' : '共享空间记忆关停未确认'}｜${JSON.stringify(diagnostics)}`);
+  // 已经是非零（例如重启码）就保留；关停确认失败只把原本的 0 变成非零。
+  const exitCode = ok ? code : code === 0 ? 1 : code;
+  setTimeout(() => process.exit(exitCode), 500);
 }
 process.on('SIGINT', () => shutdown());
 process.on('SIGTERM', () => shutdown());
