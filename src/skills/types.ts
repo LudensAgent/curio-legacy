@@ -146,7 +146,8 @@ export function runSkill<A>(ctx: SkillCtx, skill: Skill<A>, args: A & { make?: b
   return skill.run({ ...ctx, adapter, actionAdapter, make, ...(ctx.climb === undefined && ctx.recovery?.climb ? { climb: ctx.recovery.climb } : {}) }, args).catch((error: unknown) => {
     if (isAbort(error)) throw error;
     // 非取消异常（如 TimeoutError）也要保留底层带回的部分事实，别把已经发生的位移/位置/氧气丢光。
-    const partial = (error as Error & { partial?: Record<string, unknown> }).partial;
+    // rejection 本身可能是 null/undefined，先做边界判断再取 partial，避免在 `(error as ...)` 上直接崩掉。
+    const partial = error instanceof Error ? (error as Error & { partial?: Record<string, unknown> }).partial : undefined;
     return fail(codeFromError(error), error instanceof Error ? error.message : String(error), partial && typeof partial === 'object' ? partial : undefined);
   });
 }

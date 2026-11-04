@@ -543,9 +543,11 @@ export const swimTo: Skill<{ xyz: { x: number; y: number; z: number }; timeoutMs
     const a = ctx.adapter;
     if (!a.swimTo) return fail('ERROR', '当前适配器缺少持续游泳控制，不能游向指定坐标');
     const s0 = a.state();
+    // 委托前就冻结自己的位置/氧气/观测时刻：state().pos 可能是可变引用，不克隆会被底层动作改成新主人的状态。
+    const s0Snapshot = { pos: { ...s0.pos }, oxygen: s0.oxygen, observedAt: Date.now() };
     // 预算耗尽（remaining <= 0）才拒绝，不强行开游；剩余不足时用真实剩余时间，不把父级预算拉长。
     const timeoutMs = Math.min(args.timeoutMs ?? 20000, ctx.deadline - Date.now());
-    if (timeoutMs <= 0) return fail('TIMEOUT', `游向目标的预算已用完，未执行；现在在 (${s0.pos.x.toFixed(1)},${s0.pos.y.toFixed(1)},${s0.pos.z.toFixed(1)})，氧气 ${s0.oxygen}/20`, { landed: false, pos: { ...s0.pos }, oxygen: s0.oxygen });
+    if (timeoutMs <= 0) return fail('TIMEOUT', `游向目标的预算已用完，未执行；现在在 (${s0.pos.x.toFixed(1)},${s0.pos.y.toFixed(1)},${s0.pos.z.toFixed(1)})，氧气 ${s0.oxygen}/20`, { landed: false, pos: s0Snapshot.pos, oxygen: s0Snapshot.oxygen, observedAt: s0Snapshot.observedAt });
     let r;
     try {
       r = await a.swimTo(args.xyz, ctx.signal, { timeoutMs });
@@ -554,7 +556,7 @@ export const swimTo: Skill<{ xyz: { x: number; y: number; z: number }; timeoutMs
       // 否则替换任务或新连接已经更新的位置/氧气会被算到这次旧动作头上。
       if (isAbort(e) || (e as Error)?.name === 'TimeoutError') {
         const prev = (e as Error & { partial?: Record<string, unknown> }).partial ?? {};
-        (e as Error & { partial?: Record<string, unknown> }).partial = { landed: false, target: { ...args.xyz }, pos: { ...s0.pos }, oxygen: s0.oxygen, ...prev };
+        (e as Error & { partial?: Record<string, unknown> }).partial = { landed: false, target: { ...args.xyz }, pos: s0Snapshot.pos, oxygen: s0Snapshot.oxygen, observedAt: s0Snapshot.observedAt, ...prev };
       }
       throw e;
     }

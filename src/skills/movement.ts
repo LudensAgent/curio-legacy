@@ -781,10 +781,12 @@ export const surface: Skill<{ timeoutMs?: number }> = {
     const a = ctx.adapter;
     if (!a.swimTo) return fail('STUCK', '当前适配器缺少持续游泳控制，不能确认已浮出水面');
     const s0 = a.state();
+    // 委托前就冻结自己的位置/氧气/观测时刻：state().pos 可能是可变引用，不克隆会被底层动作改成新主人的状态。
+    const s0Snapshot = { pos: { ...s0.pos }, oxygen: s0.oxygen, observedAt: Date.now() };
     // 一次有界上浮委托：不选岸、不找气穴、不挖不垫、不换目标；surfaced（头露出流体）与 landed（站稳干地）分别报告。
     // 预算耗尽（remaining <= 0）才拒绝，不强行开游（岩浆同样由底层 dryFooting/headOut 的真实身体确认排除）。
     const timeoutMs = Math.min(args.timeoutMs ?? 20000, ctx.deadline - Date.now());
-    if (timeoutMs <= 0) return fail('TIMEOUT', `上浮时间已用完，未执行；现在在 (${s0.pos.x.toFixed(1)},${s0.pos.y.toFixed(1)},${s0.pos.z.toFixed(1)})，氧气 ${s0.oxygen}/20`, { landed: false, surfaced: false, pos: { ...s0.pos }, oxygen: s0.oxygen });
+    if (timeoutMs <= 0) return fail('TIMEOUT', `上浮时间已用完，未执行；现在在 (${s0.pos.x.toFixed(1)},${s0.pos.y.toFixed(1)},${s0.pos.z.toFixed(1)})，氧气 ${s0.oxygen}/20`, { landed: false, surfaced: false, pos: s0Snapshot.pos, oxygen: s0Snapshot.oxygen, observedAt: s0Snapshot.observedAt });
     let r;
     try {
       r = await a.swimTo(null, ctx.signal, { timeoutMs });
@@ -792,7 +794,7 @@ export const surface: Skill<{ timeoutMs?: number }> = {
       // 取消/超时：保留底层带回的冻结 partial；无则用委托前的 s0 兜底，不重读 a.state() 以免张冠李戴到新主人状态。
       if (isAbort(e) || (e as Error)?.name === 'TimeoutError') {
         const prev = (e as Error & { partial?: Record<string, unknown> }).partial ?? {};
-        (e as Error & { partial?: Record<string, unknown> }).partial = { landed: false, surfaced: false, pos: { ...s0.pos }, oxygen: s0.oxygen, ...prev };
+        (e as Error & { partial?: Record<string, unknown> }).partial = { landed: false, surfaced: false, pos: s0Snapshot.pos, oxygen: s0Snapshot.oxygen, observedAt: s0Snapshot.observedAt, ...prev };
       }
       throw e;
     }

@@ -4,6 +4,7 @@ import { Arbiter, type TaskOutcome } from '../src/arbiter/arbiter.ts';
 import { API_DOC, makeBridge, setReliableSkills } from '../src/codeskills/bridge.ts';
 import { SKILLS } from '../src/skills/index.ts';
 import { digAt } from '../src/skills/primitives.ts';
+import { runSkill, type Skill } from '../src/skills/types.ts';
 import { setBehaviorRegistry, useSkill } from '../src/skills/use-skill.ts';
 import { AbortedError, sleep, TimeoutError } from '../src/util.ts';
 import { FakeAdapter } from './fake-adapter.ts';
@@ -175,6 +176,32 @@ test('cancelled swim_to keeps observed partial displacement and exact coords thr
   assert.equal(outcome.result.status, 'cancelled');
   assert.deepEqual(outcome.result.data?.pos, { x: -3.5, y: 62.25, z: 10.5 }, '保留取消前已发生的小数/负值位移');
   assert.equal(outcome.result.data?.oxygen, 6);
+  ctx.memory.close();
+});
+
+test('runSkill survives a null/undefined rejection and still keeps a real partial', async () => {
+  const adapter = new FakeAdapter(), ctx = makeCtx(adapter);
+  // null/undefined rejection：不得崩溃，退回通用 ERROR 失败（旧失败行为）。
+  for (const bad of [null, undefined]) {
+    const skill: Skill<{}> = { name: `test_reject_${String(bad)}`, description: '', argsDoc: '{}', timeoutMs: 5000, movement: false,
+      validate: () => ({ ok: true, args: {} }), run: async () => { throw bad; } };
+    const result = await runSkill(ctx, skill, {});
+    assert.equal(result.status, 'failed');
+    assert.equal(result.failureCode, 'ERROR');
+    assert.equal(result.data, undefined);
+  }
+  // 真正的 partial（TimeoutError）仍要原样保留。
+  const timed: Skill<{}> = { name: 'test_reject_partial', description: '', argsDoc: '{}', timeoutMs: 5000, movement: false,
+    validate: () => ({ ok: true, args: {} }), run: async () => {
+      const e = new TimeoutError('timeout');
+      (e as Error & { partial?: Record<string, unknown> }).partial = { pos: { x: 1, y: 2, z: 3 }, oxygen: 5 };
+      throw e;
+    } };
+  const result = await runSkill(ctx, timed, {});
+  assert.equal(result.status, 'failed');
+  assert.equal(result.failureCode, 'TIMEOUT');
+  assert.deepEqual(result.data?.pos, { x: 1, y: 2, z: 3 });
+  assert.equal(result.data?.oxygen, 5);
   ctx.memory.close();
 });
 

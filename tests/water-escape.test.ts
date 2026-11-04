@@ -48,7 +48,7 @@ function pond(t: TestContext) {
   };
   const adapter = new MineflayerAdapter(config, new EventBus());
   adapter.bot = bot; adapter.mcData = data; (adapter as any).connectedFlag = true;
-  return { adapter, bot, controls, ticks: () => ticks };
+  return { adapter, bot, controls, ticks: () => ticks, advanceNow: (ms: number) => { now += ms; } };
 }
 
 test('installed Minecraft physics swims out of a deep pond and remains on dry footing after controls release', async (t) => {
@@ -210,19 +210,19 @@ function fluidBot(t: TestContext, headName: string, bodyName: string, inLava: bo
   let now = 100000;
   t.mock.method(Date, 'now', () => now);
   const controls: Record<string, boolean> = {};
-  const bot: any = {
+  const bot = {
     game: { dimension: 'overworld' },
     entity: { position: new Vec3(2.5, 61, 2.5), velocity: new Vec3(0, 0, 0), eyeHeight: 1.62, onGround: false, isInWater: inWater, isInLava: inLava, isCollidedHorizontally: false },
     oxygenLevel: 10,
     pathfinder: { setGoal() {} },
     setControlState(name: string, value: boolean) { controls[name] = value; },
     clearControlStates() { for (const k of Object.keys(controls)) controls[k] = false; },
-    blockAt: (p: any) => ({ name: p.y >= bot.entity.position.y + 1.0 ? headName : bodyName, getProperties: () => ({}) }),
+    blockAt: (p: { y: number }) => ({ name: p.y >= bot.entity.position.y + 1.0 ? headName : bodyName, getProperties: () => ({}) as Record<string, string | number | boolean> }),
     async look() {},
     async waitForTicks() { now += 100; },
   };
   const adapter = new MineflayerAdapter(config, new EventBus());
-  adapter.bot = bot; adapter.mcData = data; (adapter as any).connectedFlag = true;
+  adapter.bot = bot; adapter.mcData = data; Reflect.set(adapter, 'connectedFlag', true);
   return adapter;
 }
 
@@ -319,6 +319,31 @@ test('swimTo bounds a stalled physics tick to the remaining budget', { timeout: 
   await assert.rejects(adapter.swimTo({ x: 6.5, y: 64, z: 2.5 }, new AbortController().signal, { timeoutMs: 300 }), { name: 'TimeoutError' });
 });
 
+test('swimTo does not hang or write forward when budget exhausts during look before an unresolved tick', { timeout: 5000 }, async (t) => {
+  // 转头刚好把预算耗尽（now 越过 end），随后未完成的 tick 不应再被触发、也不得写 forward。
+  let now = 100000;
+  t.mock.method(Date, 'now', () => now);
+  const controls: Record<string, boolean> = {};
+  let forwardWrites = 0;
+  const bot = {
+    game: { dimension: 'overworld' },
+    entity: { position: new Vec3(2.5, 61, 2.5), velocity: new Vec3(0, 0, 0), eyeHeight: 1.62, onGround: false, isInWater: true, isInLava: false, isCollidedHorizontally: false },
+    oxygenLevel: 10,
+    pathfinder: { setGoal() {} },
+    setControlState(name: string, value: boolean) { if (name === 'forward' && value) forwardWrites++; controls[name] = value; },
+    clearControlStates() { for (const k of Object.keys(controls)) controls[k] = false; },
+    blockAt: (p: { y: number }) => ({ name: p.y >= bot.entity.position.y + 1.0 ? 'air' : 'water', getProperties: () => ({}) as Record<string, string | number | boolean>, boundingBox: 'block' }),
+    async look() { now += 400; }, // 转头消耗预算，越过 300ms 的 end
+    async waitForTicks() { /* 永不 resolve，旧实现会因 remaining()=0 禁用超时定时器而永久挂起 */ },
+  };
+  const adapter = new MineflayerAdapter(config, new EventBus());
+  adapter.bot = bot; adapter.mcData = data; Reflect.set(adapter, 'connectedFlag', true);
+  const result = await adapter.swimTo({ x: 6.5, y: 64, z: 2.5 }, new AbortController().signal, { timeoutMs: 300 });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'WATER_ESCAPE_TIMEOUT');
+  assert.equal(forwardWrites, 0, '预算耗尽后不得再写 forward');
+});
+
 test('swimTo without waitForTicks falls back to a bounded sleep', { timeout: 5000 }, async () => {
   // 无 waitForTicks 时走 sleep 回退：用真实时钟（不 mock Date.now），否则 now 永不前进、循环永不结束。
   const controls: Record<string, boolean> = {};
@@ -342,20 +367,26 @@ test('swimTo without waitForTicks falls back to a bounded sleep', { timeout: 500
   assert.equal(result.reason, 'WATER_ESCAPE_TIMEOUT');
 });
 
-test('a replacement task position is not attributed to the old cancelled swim partial', async (t) => {
-  const { adapter, bot } = pond(t);
+test('a replacement task position/oxygen/observedAt are not attributed to the old cancelled swim partial', async (t) => {
+  const { adapter, bot, advanceNow } = pond(t);
   let release!: () => void;
   bot.waitForTicks = () => new Promise<void>((resolve) => { release = resolve; });
   const controller = new AbortController();
   const pending = adapter.swimTo({ x: 6.5, y: 64, z: 2.5 }, controller.signal);
-  await setImmediate(); // 进入首次 waitForTicks，已冻结旧位置
+  await setImmediate(); // 进入首次 waitForTicks，已冻结旧位置/氧气/观测时刻
   const owned = { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z };
+  const ownedOxygen = bot.oxygenLevel;
+  const ownedAt = Date.now();
   adapter.stopAll(); // 替换任务接管（epoch 变化，不 abort signal）
   bot.entity.position.set(100, 100, 100); // 替换任务把身体挪走
+  bot.oxygenLevel = 3; // 替换任务也改了氧气
+  advanceNow(5000); // 替换任务推进了时钟
   release(); // 迟到完成 → 旧动作 check() 抛 AbortedError
-  await assert.rejects(pending, (e: Error & { partial?: { pos?: { x: number; y: number; z: number } } }) => {
+  await assert.rejects(pending, (e: Error & { partial?: { pos?: { x: number; y: number; z: number }; oxygen?: number; observedAt?: number } }) => {
     assert.equal(e.name, 'AbortedError');
     assert.deepEqual(e.partial?.pos, owned, '旧动作 partial 保留最后一次拥有时的冻结位置，不张冠李戴成替换任务的新位置');
+    assert.equal(e.partial?.oxygen, ownedOxygen, '旧动作 partial 保留冻结氧气，不换成替换任务的氧气');
+    assert.equal(e.partial?.observedAt, ownedAt, '旧动作 partial 保留冻结观测时刻，不换成取消/清理时刻');
     return true;
   });
 });
