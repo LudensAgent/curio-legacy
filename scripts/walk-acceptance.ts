@@ -1,7 +1,7 @@
 /**
  * walk_route 真实 Minecraft M2 验收入口：连接 test 服务器，用真实
  * MineflayerAdapter + Arbiter + Vision 从 Arbiter 入口发起 walk_route，
- * 对 W1/W2/W6/W7 逐场景判定 PASS / FAIL / NOT_RUN，保存结构化 JSON 证据。
+ * 对 W1/W2/W4/W5/W6/W7 逐场景判定 PASS / FAIL / NOT_RUN，保存结构化 JSON 证据。
  *
  *   默认运行：node --import tsx scripts/walk-acceptance.ts --curio=test
  *   选择场景：node --import tsx scripts/walk-acceptance.ts --curio=test --scenarios=W1,W6
@@ -24,11 +24,15 @@ import { getEventListeners } from 'node:events';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { Bot, ControlState } from 'mineflayer';
-import { WalkRouteExecutor } from 'curio-minecraft-3d-memory';
+import { VoxelMap, WalkRouteExecutor } from 'curio-minecraft-3d-memory';
 import type {
   BodySample,
+  CellView,
+  ChangeReport,
   ExecutableMove,
   NavResult,
+  Observation,
+  ObservationBatch,
   WalkRouteStatus,
 } from 'curio-minecraft-3d-memory';
 import { config } from '../src/config.ts';
@@ -49,10 +53,10 @@ import { WalkMoveExecutor, type WalkBody, type WalkTick } from '../src/adapter/w
 type ScenarioId = 'W1' | 'W2' | 'W3' | 'W4' | 'W5' | 'W6' | 'W7';
 type Verdict = 'PASS' | 'FAIL' | 'NOT_RUN';
 
-const SUPPORTED_SCENARIOS: ScenarioId[] = ['W1', 'W2', 'W6', 'W7'];
+const SUPPORTED_SCENARIOS: ScenarioId[] = ['W1', 'W2', 'W4', 'W5', 'W6', 'W7'];
 const ALL_SCENARIOS: ScenarioId[] = ['W1', 'W2', 'W3', 'W4', 'W5', 'W6', 'W7'];
 /** 本轮未实现、不得被选中执行；仍会在证据里以 NOT_RUN 诚实列出。 */
-const UNSUPPORTED: ScenarioId[] = ['W3', 'W4', 'W5'];
+const UNSUPPORTED: ScenarioId[] = ['W3'];
 
 const KEYS: ControlState[] = ['forward', 'back', 'left', 'right', 'jump', 'sprint', 'sneak'];
 
@@ -336,6 +340,45 @@ const W2_PLATFORM = {
 };
 
 /**
+ * W4：3×1 支撑（x210..212, z205），显式 3 点 / 2 段 +X 路线。
+ * 首段 active 时只拆 x211 目标支撑；x212 保留为尚未启动的第二段，
+ * 使「不启动后续段」具备区分力，也不加替代侧路。
+ */
+const W4_FIXTURE = {
+  xMin: 210, xMax: 212, zMin: 205, zMax: 205,
+  feetY: 64,
+  material: 'minecraft:stone',
+  start: { x: 210.55, y: 64, z: 205.52 },
+  targetSupport: { x: 211, y: 63, z: 205 },
+  route: [
+    { x: 210.55, y: 64, z: 205.52 },
+    { x: 211.55, y: 64, z: 205.52 },
+    { x: 212.55, y: 64, z: 205.52 },
+  ],
+};
+
+/**
+ * W5：3×1 支撑（x215..217, z205）上的显式往返。
+ * 去程到 floor(x)=217 且前向段仍 active 时拆身后的 x215（fx±1 候选外、
+ * 实际 yaw 也在 FOV 外）；只有同一活跃委托自然折返、经自身 observeCells
+ * 再次合法看见时才算完整回看。
+ */
+const W5_FIXTURE = {
+  xMin: 215, xMax: 217, zMin: 205, zMax: 205,
+  feetY: 64,
+  material: 'minecraft:stone',
+  start: { x: 215.55, y: 64, z: 205.52 },
+  targetSupport: { x: 215, y: 63, z: 205 },
+  route: [
+    { x: 215.55, y: 64, z: 205.52 },
+    { x: 216.55, y: 64, z: 205.52 },
+    { x: 217.55, y: 64, z: 205.52 },
+    { x: 216.55, y: 64, z: 205.52 },
+    { x: 215.55, y: 64, z: 205.52 },
+  ],
+};
+
+/**
  * W1/W6/W7 的平坦步行道：显式建造的支撑面，不假设天然地形。
  * W1 路线在 z216.5 先 +X 再 +Z 到 z217.5，因此 z 至少覆盖 216..217；
  * x 覆盖 W6 的十格直行与 W7 的直行余量，仍落在授权 x200..220, z200..220 内。
@@ -425,6 +468,158 @@ export function summarizeTrajectory(frames: FrameRecord[]): Record<string, unkno
 }
 
 /** 沿 X 单轴的相邻分数步点列（start → target 逐格）。 */
+/** 方块名按无命名空间比较；只做比较，不据此补全状态。 */
+export function bareBlockName(name: string): string {
+  return name.replace(/^minecraft:/, '');
+}
+
+export function isAirBlockName(name: string): boolean {
+  return ['air', 'cave_air', 'void_air'].includes(bareBlockName(name));
+}
+
+/** 只读快照：cellAt 返回单格证据；不刷新时间/版本。 */
+export interface CellEvidenceSnapshot {
+  observed: boolean;
+  name?: string;
+  properties?: Record<string, string>;
+  observedAt?: number;
+  sequence?: number;
+  originObservationId?: number;
+  sessionId?: string;
+  revision?: number;
+  freshness?: string;
+  validUntil?: number;
+}
+
+export function cellEvidenceSnapshot(view: CellView): CellEvidenceSnapshot {
+  if (!view.observed) return { observed: false };
+  const e = view.evidence;
+  return {
+    observed: true,
+    name: e.observation.state.name,
+    properties: { ...e.observation.state.properties },
+    observedAt: e.observation.observedAt,
+    sequence: e.observation.sequence,
+    originObservationId: e.observation.originObservationId,
+    sessionId: e.observation.sessionId,
+    revision: e.revision,
+    freshness: e.freshness,
+    validUntil: e.validUntil,
+  };
+}
+
+/** 隐藏期只允许 TTL/年龄自然增长；原始 state/properties/time/sequence/revision/validUntil 全不得变化。 */
+export function sameCellEvidence(a: CellEvidenceSnapshot | null, b: CellEvidenceSnapshot | null): boolean {
+  if (!a || !b || !a.observed || !b.observed) return false;
+  return a.name === b.name
+    && JSON.stringify(a.properties ?? {}) === JSON.stringify(b.properties ?? {})
+    && a.observedAt === b.observedAt
+    && a.sequence === b.sequence
+    && a.originObservationId === b.originObservationId
+    && a.sessionId === b.sessionId
+    && a.revision === b.revision
+    && a.freshness === b.freshness
+    && a.validUntil === b.validUntil;
+}
+
+export interface W4ChainInput {
+  issueSeq: number;
+  /** 拆支撑前经实际 Vision→map 的 stone 证据（同一实际 map）。 */
+  initialStone: { visionSeq: number; mapSeq: number; mapId: number; name: string } | null;
+  airVision: { seq: number; name: string } | null;
+  airBatch: { seq: number; reportId: number; mapId: number; targetChanged: boolean } | null;
+  observe: {
+    enterSeq: number;
+    exitSeq: number;
+    reportId: number | null;
+    statusBeforeActiveStepIndex: number | null;
+    statusBeforeOutcome: string | null;
+    statusAfterOutcome: string | null;
+    statusAfterActiveStepIndex: number | null;
+    statusAfterProblem: string | null;
+  } | null;
+  releaseSeq: number | null;
+  nextSampleSeq: number | null;
+  laterMoveCount: number;
+  terminalOutcome: string | null;
+}
+
+/**
+ * W4 正向链路：合法初观测 → 实际 Vision air → 同一 ChangeReport 对象 → loop.observe
+ * 在活动段内同步释放控制（早于该帧 onSample），且之后不启动新段、不 ARRIVED。
+ */
+export function checkW4ObservationChain(x: W4ChainInput): { ok: boolean; reason?: string } {
+  if (!x.initialStone) return { ok: false, reason: '缺少拆支撑前的合法 stone 初观测' };
+  if (bareBlockName(x.initialStone.name) !== 'stone') {
+    return { ok: false, reason: `初观测不是 stone：${x.initialStone.name}` };
+  }
+  if (x.initialStone.mapId !== x.airBatch?.mapId) return { ok: false, reason: '初观测与air报告不是同一个实际map' };
+  if (x.initialStone.visionSeq >= x.issueSeq || x.initialStone.mapSeq >= x.issueSeq) return { ok: false, reason: '初观测晚于拆支撑' };
+  if (!x.airVision) return { ok: false, reason: '实际Vision未输出目标格air' };
+  if (!isAirBlockName(x.airVision.name)) return { ok: false, reason: `Vision输出不是air：${x.airVision.name}` };
+  if (x.airVision.seq <= x.issueSeq) return { ok: false, reason: 'air观测不晚于拆支撑' };
+  if (!x.airBatch) return { ok: false, reason: 'air观测未形成ChangeReport' };
+  if (!x.airBatch.targetChanged) return { ok: false, reason: 'ChangeReport未包含目标格变化' };
+  if (x.airBatch.seq <= x.airVision.seq) return { ok: false, reason: 'map报告早于Vision输出' };
+  if (!x.observe) return { ok: false, reason: '缺少loop.observe调用' };
+  if (x.observe.reportId === null || x.observe.reportId !== x.airBatch.reportId) return { ok: false, reason: 'loop.observe收到不是同一个ChangeReport对象' };
+  if (x.observe.statusBeforeActiveStepIndex === null || x.observe.statusBeforeOutcome !== null) {
+    return { ok: false, reason: '观察时所属段已不在途（非活动段或已终态）' };
+  }
+  if (x.observe.statusAfterOutcome !== 'FAILED' || x.observe.statusAfterProblem !== 'route_invalidated') {
+    return { ok: false, reason: `库终态非 FAILED/route_invalidated：${x.observe.statusAfterOutcome}/${x.observe.statusAfterProblem}` };
+  }
+  if (x.observe.statusAfterActiveStepIndex !== null) return { ok: false, reason: '撤销后 activeStepIndex 未清空' };
+  if (x.releaseSeq === null) return { ok: false, reason: 'observe 内未捕获所属段实际控制释放' };
+  if (!(x.observe.enterSeq < x.releaseSeq && x.releaseSeq < x.observe.exitSeq)) return { ok: false, reason: '控制释放不在 observe enter/exit 之内' };
+  if (x.nextSampleSeq === null || x.nextSampleSeq <= x.observe.exitSeq || x.nextSampleSeq <= x.releaseSeq) {
+    return { ok: false, reason: '该帧 onSample 不晚于 observe exit/控制释放' };
+  }
+  if (x.laterMoveCount > 0) return { ok: false, reason: `撤销后仍启动 ${x.laterMoveCount} 个后续段` };
+  if (x.terminalOutcome === 'ARRIVED') return { ok: false, reason: '已拆支撑仍误报 ARRIVED' };
+  return { ok: true };
+}
+
+export interface W5ChainInput {
+  stoneMapId: number | null;
+  removalSeq: number;
+  hidden: { visionCount: number; batchCount: number; sawAir: boolean; targetChanged: boolean } | null;
+  cellBefore: CellEvidenceSnapshot | null;
+  cellDuring: CellEvidenceSnapshot | null;
+  reveal: { seq: number; name: string; mapId: number; observedAt: number } | null;
+  revealBatch: { mapId: number; reportId: number; targetChanged: boolean } | null;
+  revealObserve: { reportId: number | null } | null;
+  terminalOutcome: string | null;
+}
+
+/**
+ * W5 需要「隐藏半段 + 同一实际委托生产回看」两段都成立：
+ * 隐藏期不得有 air 输出/报告，cellAt 原证据不得被刷新；回看必须同一 map、
+ * 同一真实报告对象喂给 loop.observe，且最终不得误报到达。
+ */
+export function checkW5HiddenReveal(x: W5ChainInput): { ok: boolean; reason?: string } {
+  if (x.stoneMapId === null) return { ok: false, reason: '缺少拆支撑前合法 stone 初观测的实际map' };
+  if (!x.hidden) return { ok: false, reason: '缺少隐藏期观察边界' };
+  if (x.hidden.visionCount < 2 || x.hidden.batchCount < 1) return { ok: false, reason: '隐藏期真实观察边界不足' };
+  if (x.hidden.sawAir) return { ok: false, reason: '隐藏期 Vision 已看到 x0 air' };
+  if (x.hidden.targetChanged) return { ok: false, reason: '隐藏期 ChangeReport 已含目标格变化' };
+  if (!x.cellBefore?.observed || !x.cellDuring?.observed) return { ok: false, reason: '隐藏期缺少可读的 cellAt 证据' };
+  if (!sameCellEvidence(x.cellBefore, x.cellDuring)) return { ok: false, reason: '隐藏期 cellAt 原证据被人工刷新' };
+  if (!x.reveal) return { ok: false, reason: '只有隐藏半段，缺少同一活跃委托的生产回看' };
+  if (!isAirBlockName(x.reveal.name)) return { ok: false, reason: `回看输出不是air：${x.reveal.name}` };
+  if (x.reveal.seq <= x.removalSeq) return { ok: false, reason: '回看早于拆支撑' };
+  if (x.reveal.observedAt <= (x.cellBefore.observedAt ?? 0)) return { ok: false, reason: '回看 observedAt 未刷新' };
+  if (x.reveal.mapId !== x.stoneMapId) return { ok: false, reason: '回看不是同一个实际map' };
+  if (!x.revealBatch) return { ok: false, reason: '回看未形成 ChangeReport' };
+  if (x.revealBatch.mapId !== x.stoneMapId) return { ok: false, reason: '回看报告来自别的map' };
+  if (!x.revealBatch.targetChanged) return { ok: false, reason: '回看ChangeReport未包含目标格变化' };
+  if (!x.revealObserve || x.revealObserve.reportId === null || x.revealObserve.reportId !== x.revealBatch.reportId) {
+    return { ok: false, reason: '回看报告未作为同一对象进入活跃loop.observe' };
+  }
+  if (x.terminalOutcome === 'ARRIVED') return { ok: false, reason: '已拆支撑仍误报走到 ARRIVED' };
+  return { ok: true };
+}
+
 export function adjacentRouteX(start: { x: number; y: number; z: number }, target: { x: number; y: number; z: number }): { x: number; y: number; z: number }[] {
   const n = Math.round(target.x - start.x);
   const out: { x: number; y: number; z: number }[] = [];
@@ -1094,13 +1289,88 @@ type OnSampleFn = (this: WalkRouteExecutor, sample: BodySample) => WalkRouteStat
 type StartFn = (this: WalkRouteExecutor, request: Parameters<WalkRouteExecutor['start']>[0]) => WalkRouteStatus;
 type AdvanceFn = (this: WalkRouteExecutor, budget: number) => WalkRouteStatus;
 type SetFrameSinkFn = (this: WalkMoveExecutor, fn: Parameters<WalkMoveExecutor['setFrameSink']>[0]) => void;
+type ObserveBatchFn = (this: VoxelMap, batch: ObservationBatch) => ChangeReport;
+type LoopObserveFn = (this: WalkRouteExecutor, report: ChangeReport, budget: number) => WalkRouteStatus;
+
+export interface EyeSnapshot { x: number; y: number; z: number; yaw: number; pitch: number }
+
+/** 实际 Vision.observeBlocks 的输入与实际输出（含真实 scope/时间/observationId）。 */
+export interface VisionCallRecord {
+  seq: number;
+  ts: number;
+  frame: number;
+  visionId: number;
+  positions: Vec3[];
+  eye: EyeSnapshot | null;
+  output: Array<{
+    pos: Vec3;
+    name: string;
+    properties: Record<string, string | number | boolean>;
+    stateComplete: boolean | null;
+    worldId: string;
+    sessionId: string;
+    dimension: string;
+    observedAt: number;
+    observationId: number;
+  }>;
+}
+
+/** 实际 map.observeBatch 的输入、返回对象，以及 WeakMap 编号证明的同一对象身份。 */
+export interface MapBatchRecord {
+  seq: number;
+  ts: number;
+  frame: number;
+  mapId: number;
+  mapWorldId: string;
+  map: VoxelMap;
+  observations: Observation[];
+  unobserved: ObservationBatch['unobserved'];
+  reportId: number;
+  report: ChangeReport;
+}
+
+/** loop.observe 进入/退出时的完整公开状态、7 键、事件序号与 physics frame。 */
+export interface ObserveCallRecord {
+  enterSeq: number;
+  exitSeq: number;
+  tsEnter: number;
+  tsExit: number;
+  frameEnter: number;
+  frameExit: number;
+  ownerTaskId: string | null;
+  delegationId: string;
+  reportId: number | null;
+  statusBefore: RouteStatusSnapshot | null;
+  statusAfter: RouteStatusSnapshot;
+  keysBefore: Keys;
+  keysAfter: Keys;
+}
+
+export interface ExecutionCaptureOptions {
+  vision?: Vision;
+  frame?: () => number;
+  eye?: () => EyeSnapshot | null;
+  readKeys?: () => Keys;
+}
 
 export class ExecutionDiagnostics {
   readonly moves: MoveRecord[] = [];
   readonly deliveredSamples: DeliveredSampleRecord[] = [];
   readonly routeCalls: RouteCallRecord[] = [];
+  readonly observes: ObserveCallRecord[] = [];
+  readonly mapBatches: MapBatchRecord[] = [];
+  readonly visionCalls: VisionCallRecord[] = [];
   readonly bindings: BindingRecord[] = [];
   private wrapped = false;
+  private readonly reportIds = new WeakMap<object, number>();
+  private readonly mapIds = new WeakMap<object, number>();
+  private nextReportId = 0;
+  private nextMapId = 0;
+  private nextVisionId = 0;
+  private origObserveBatch?: ObserveBatchFn;
+  private origLoopObserve?: LoopObserveFn;
+  private origObserveBlocks?: Vision['observeBlocks'];
+  private readonly capture: ExecutionCaptureOptions;
   private readonly routeOwners = new WeakMap<WalkRouteExecutor, { taskId: string | null; delegationId: string }>();
   private readonly moveOwners = new WeakMap<WalkMoveExecutor, { taskId: string | null }>();
   /** 当前同步 frameSink 回调的来源 loop 绑定；直接 onSample（初始化）时为 null。 */
@@ -1116,7 +1386,30 @@ export class ExecutionDiagnostics {
     private readonly seq: EventSeq,
     private readonly owner: () => string | null,
     private readonly now: () => number = Date.now,
-  ) {}
+    capture: ExecutionCaptureOptions = {},
+  ) {
+    this.capture = capture;
+  }
+
+  private keys(): Keys {
+    return this.capture.readKeys?.() ?? { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
+  }
+
+  private frame(): number {
+    return this.capture.frame?.() ?? 0;
+  }
+
+  private idForMap(map: VoxelMap): number {
+    let id = this.mapIds.get(map);
+    if (id === undefined) { id = ++this.nextMapId; this.mapIds.set(map, id); }
+    return id;
+  }
+
+  private idForReport(report: ChangeReport): number {
+    let id = this.reportIds.get(report);
+    if (id === undefined) { id = ++this.nextReportId; this.reportIds.set(report, id); }
+    return id;
+  }
 
   wrap() {
     if (this.wrapped) return;
@@ -1127,11 +1420,15 @@ export class ExecutionDiagnostics {
     const origStart = WalkRouteExecutor.prototype.start as StartFn;
     const origAdvance = WalkRouteExecutor.prototype.advance as AdvanceFn;
     const origSetFrameSink = WalkMoveExecutor.prototype.setFrameSink as SetFrameSinkFn;
+    const origObserveBatch = VoxelMap.prototype.observeBatch as ObserveBatchFn;
+    const origLoopObserve = WalkRouteExecutor.prototype.observe as LoopObserveFn;
     this.origMove = origMove;
     this.origOnSample = origOnSample;
     this.origStart = origStart;
     this.origAdvance = origAdvance;
     this.origSetFrameSink = origSetFrameSink;
+    this.origObserveBatch = origObserveBatch;
+    this.origLoopObserve = origLoopObserve;
 
     (WalkRouteExecutor.prototype as { start: StartFn }).start = function (this: WalkRouteExecutor, request: Parameters<WalkRouteExecutor['start']>[0]) {
       const owner = self.owner();
@@ -1216,6 +1513,72 @@ export class ExecutionDiagnostics {
       });
       return origMove.call(this, request);
     };
+
+    // 实际 Vision 实例：只按原 this/args 透传，记录真实输入与输出；finally 在 unwrap 还原。
+    const vision = this.capture.vision;
+    if (vision) {
+      const origObserveBlocks = vision.observeBlocks;
+      this.origObserveBlocks = origObserveBlocks;
+      vision.observeBlocks = function (this: Vision, positions: Parameters<Vision['observeBlocks']>[0]) {
+        const self2 = self;
+        const seq = self2.seq.next();
+        const ts = self2.now();
+        const frame = self2.frame();
+        const eye = self2.capture.eye?.() ?? null;
+        const copied = positions.map((p) => ({ x: p.x, y: p.y, z: p.z }));
+        const output = origObserveBlocks.call(this, positions);
+        const visionId = self2.nextVisionId += 1;
+        self2.visionCalls.push({
+          seq, ts, frame, visionId, positions: copied, eye,
+          output: output.map((b) => ({
+            pos: { ...b.pos }, name: b.name, properties: { ...b.properties },
+            stateComplete: b.stateComplete ?? null,
+            worldId: b.worldId, sessionId: b.sessionId, dimension: b.dimension,
+            observedAt: b.observedAt, observationId: b.observationId,
+          })),
+        });
+        return output;
+      };
+    }
+
+    // 实际 VoxelMap.observeBatch：完全透传返回对象；同一返回对象用 WeakMap 编号，
+    // 供 loop.observe 侧确认是同一个 ChangeReport，而不是内容相同的另一份对象。
+    (VoxelMap.prototype as { observeBatch: ObserveBatchFn }).observeBatch = function (this: VoxelMap, batch: ObservationBatch) {
+      const seq = self.seq.next();
+      const ts = self.now();
+      const frame = self.frame();
+      const mapId = self.idForMap(this);
+      const report = origObserveBatch.call(this, batch);
+      const reportId = self.idForReport(report);
+      self.mapBatches.push({
+        seq, ts, frame, mapId, mapWorldId: this.worldId, map: this,
+        observations: batch.observations.map((o) => ({ ...o, pos: { ...o.pos }, state: { name: o.state.name, properties: { ...o.state.properties } } })),
+        unobserved: batch.unobserved.map((u) => ({ ...u, pos: { ...u.pos } })),
+        reportId, report,
+      });
+      return report;
+    };
+
+    (WalkRouteExecutor.prototype as { observe: LoopObserveFn }).observe = function (this: WalkRouteExecutor, report: ChangeReport, budget: number) {
+      const binding = self.routeOwners.get(this);
+      const enterSeq = self.seq.next();
+      const tsEnter = self.now();
+      const frameEnter = self.frame();
+      const statusBefore = snapshotStatus(this.status());
+      const keysBefore = self.keys();
+      const reportId = self.reportIds.get(report) ?? null;
+      const status = origLoopObserve.call(this, report, budget);
+      const tsExit = self.now();
+      const exitSeq = self.seq.next();
+      const after = snapshotStatus(status)!;
+      self.observes.push({
+        enterSeq, exitSeq, tsEnter, tsExit, frameEnter, frameExit: self.frame(),
+        ownerTaskId: binding?.taskId ?? null,
+        delegationId: binding?.delegationId ?? after.delegationId,
+        reportId, statusBefore, statusAfter: after, keysBefore, keysAfter: self.keys(),
+      });
+      return status;
+    };
   }
 
   unwrap() {
@@ -1225,11 +1588,17 @@ export class ExecutionDiagnostics {
     if (this.origStart) (WalkRouteExecutor.prototype as { start: StartFn }).start = this.origStart;
     if (this.origAdvance) (WalkRouteExecutor.prototype as { advance: AdvanceFn }).advance = this.origAdvance;
     if (this.origSetFrameSink) (WalkMoveExecutor.prototype as { setFrameSink: SetFrameSinkFn }).setFrameSink = this.origSetFrameSink;
+    if (this.origObserveBatch) (VoxelMap.prototype as { observeBatch: ObserveBatchFn }).observeBatch = this.origObserveBatch;
+    if (this.origLoopObserve) (WalkRouteExecutor.prototype as { observe: LoopObserveFn }).observe = this.origLoopObserve;
+    if (this.origObserveBlocks && this.capture.vision) this.capture.vision.observeBlocks = this.origObserveBlocks;
     this.origMove = undefined;
     this.origOnSample = undefined;
     this.origStart = undefined;
     this.origAdvance = undefined;
     this.origSetFrameSink = undefined;
+    this.origObserveBatch = undefined;
+    this.origLoopObserve = undefined;
+    this.origObserveBlocks = undefined;
     this.wrapped = false;
   }
 }
@@ -1604,6 +1973,8 @@ export interface HarnessContext {
   bot: Bot;
   adapter: MineflayerAdapter;
   arbiter: Arbiter;
+  /** main 创建并交给生产的同一个真实 Vision 实例；不另造替身。 */
+  vision: Vision;
   rcon: Rcon;
   evidenceDir: string;
   runId: string;
@@ -1766,6 +2137,17 @@ function waitFor(cond: () => boolean, ms: number, label: string): Promise<void> 
   });
 }
 
+/** 短窗口前置（如去程仅数百毫秒）用 5ms 轮询，避免 50ms 轮询错过活动段。 */
+function waitForPrecise(cond: () => boolean, ms: number, label: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const t0 = Date.now();
+    const iv = setInterval(() => {
+      if (cond()) { clearInterval(iv); resolve(); }
+      else if (Date.now() - t0 > ms) { clearInterval(iv); reject(new Error(`超时：${label}`)); }
+    }, 5);
+  });
+}
+
 async function awaitOrTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`超时：${label}`)), ms); });
@@ -1838,7 +2220,12 @@ async function runScenario(
   const recorder = new FrameRecorder(ctx.bot, () => ctx.arbiter.current?.id ?? null);
   const corrections = new ServerCorrectionRecorder(ctx.bot);
   const diag = new WalkDiagnostics(ctx.adapter, () => ctx.arbiter.current?.id ?? null, () => snapshotKeys(ctx.bot), seq, ctx.bot);
-  const exec = new ExecutionDiagnostics(seq, () => ctx.arbiter.current?.id ?? null);
+  const exec = new ExecutionDiagnostics(seq, () => ctx.arbiter.current?.id ?? null, Date.now, {
+    vision: ctx.vision,
+    frame: () => recorder.frames.length,
+    eye: () => ctx.adapter.eye(),
+    readKeys: () => snapshotKeys(ctx.bot),
+  });
   const tasks = new TaskTracker(ctx.arbiter);
   recorder.start();
   corrections.start();
@@ -1895,6 +2282,40 @@ async function runScenario(
 // ---------------------------------------------------------------------------
 // 场景实现
 // ---------------------------------------------------------------------------
+
+function angularDistance(a: number, b: number): number {
+  const d = Math.abs(a - b) % (Math.PI * 2);
+  return d > Math.PI ? Math.PI * 2 - d : d;
+}
+
+function sameCell(a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }): boolean {
+  return a.x === b.x && a.y === b.y && a.z === b.z;
+}
+
+/** 取本 task/delegation 的最新公开状态（含 start/advance/onSample/observe 的真实快照）。 */
+function latestRouteStatus(exec: ExecutionDiagnostics, taskId: string, delegationId: string): RouteStatusSnapshot | null {
+  const rows: Array<{ seq: number; status: RouteStatusSnapshot }> = [
+    ...exec.routeCalls.filter((c) => c.ownerTaskId === taskId && c.delegationId === delegationId).map((c) => ({ seq: c.seq, status: c.statusAfter })),
+    ...exec.deliveredSamples.filter((s) => s.ownerTaskId === taskId && s.delegationId === delegationId).map((s) => ({ seq: s.seq, status: s.statusAfter })),
+    ...exec.observes.filter((o) => o.ownerTaskId === taskId && o.delegationId === delegationId).map((o) => ({ seq: o.exitSeq, status: o.statusAfter })),
+  ];
+  return rows.sort((a, b) => b.seq - a.seq)[0]?.status ?? null;
+}
+
+/** 在某次实际 Vision 调用的输出中查找目标格。 */
+function visionOutputAt(call: VisionCallRecord, pos: Vec3): VisionCallRecord['output'][number] | undefined {
+  return call.output.find((b) => sameCell(b.pos, pos));
+}
+
+/** 某次实际 observeBatch 是否把目标格作为 Observation 写入。 */
+function mapBatchObserved(batch: MapBatchRecord, pos: Vec3): Observation | undefined {
+  return batch.observations.find((o) => sameCell(o.pos, pos));
+}
+
+/** ChangeReport 是否包含目标格的真实变化（单格 change，不是 section 共用 revision）。 */
+function reportTouchesCell(report: ChangeReport, pos: Vec3): boolean {
+  return report.sections.some((s) => s.cells.some((c) => sameCell(c.pos, pos)));
+}
 
 /** W1：同高三段相邻 X/Z 转弯，ARRIVED 且容差内，每段从实测终点严格接续。 */
 async function scenarioW1(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
@@ -2001,6 +2422,387 @@ async function scenarioW2(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
     segmentCount: segments.segments.length,
     stopAllSeq: { before: release.seqBefore, after: release.seqAfter },
     acceptedSampleCount: acceptedMeasurements(d.exec.deliveredSamples, taskId, delegationId).length,
+  };
+  ev.verdict = 'PASS';
+}
+
+/**
+ * W4：真实可见支撑失效。只有「合法 stone 初观测 → 控制端拆 exact target →
+ * 实际 Vision 看到 air → 同一 ChangeReport 进入 loop.observe → 所属段在 observe
+ * 内释放控制（早于该帧 onSample）」全链成立才 PASS；不靠终态后补观测或 harness 写图。
+ */
+async function scenarioW4(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
+  const ev = d.ev;
+  const f = W4_FIXTURE;
+  const target = f.targetSupport;
+  ev.extra = { fixture: f, route: f.route, targetSupport: target };
+  await buildSupportFixture(ctx.rcon, ev, { xMin: f.xMin, xMax: f.xMax, zMin: f.zMin, zMax: f.zMax }, f.feetY, f.material);
+  await teleportAndSettle(ctx, ev, f.start, 'W4 起点');
+  const startPos = { ...ctx.adapter.state().pos };
+  const started = startWalkTask(ctx, d, f.route, Date.now() + 30_000);
+  if ('error' in started) throw new Error(`W4 启动失败：${started.error}`);
+  const taskId = started.task.id;
+  const done = started.done;
+  const { startCall, delegationId } = await awaitRouteStartRecord(d.exec.routeCalls, taskId, done, 10_000, 'W4');
+
+  const stoneChain = () => {
+    const status = latestRouteStatus(d.exec, taskId, delegationId);
+    const eye = ctx.adapter.eye();
+    if (!status || status.result !== null || status.activeStepIndex === null) return null;
+    const moved = acceptedMovementBeyond(d.exec.deliveredSamples, taskId, delegationId, startPos, 0.3);
+    if (moved === undefined || !eye) return null;
+    if (Math.abs(eye.pitch + 1.2) > 0.08 || angularDistance(eye.yaw, -Math.PI / 2) > 0.2) return null;
+    const vision = [...d.exec.visionCalls].reverse().find((c) => c.seq > startCall.seq
+      && bareBlockName(visionOutputAt(c, target)?.name ?? '') === 'stone');
+    if (!vision) return null;
+    const observed = visionOutputAt(vision, target)!;
+    const batch = d.exec.mapBatches.find((b) => b.seq > startCall.seq
+      && b.observations.some((o) => sameCell(o.pos, target) && o.sequence === observed.observationId));
+    if (!batch) return null;
+    return { status, eye, moved, vision, observed, batch };
+  };
+  await waitFor(() => stoneChain() !== null, 20_000, 'W4 活动段内合法 stone 初观测与行进/俯视');
+  const initial = stoneChain()!;
+  const map = initial.batch.map;
+  const mapId = initial.batch.mapId;
+  const cellBefore = cellEvidenceSnapshot(map.cellAt(ctx.adapter.state().dim, target.x, target.y, target.z));
+  if (!cellBefore.observed || bareBlockName(cellBefore.name ?? '') !== 'stone') {
+    throw new Error(`W4 初观测 cellAt 不是 stone：${JSON.stringify(cellBefore)}`);
+  }
+
+  // 拆之前复核仍在同一委托活动段；只拆 exact target，不加替代侧路。
+  const beforeStatus = latestRouteStatus(d.exec, taskId, delegationId);
+  if (ctx.arbiter.current?.id !== taskId || !beforeStatus || beforeStatus.result !== null || beforeStatus.activeStepIndex !== 0) {
+    throw new Error(`W4 拆支撑前不在首段在途：${beforeStatus?.activeStepIndex}/${beforeStatus?.result?.outcome ?? null}`);
+  }
+  const eyeBefore = ctx.adapter.eye();
+  const bodyBefore = { ...ctx.adapter.state().pos };
+  if (Math.floor(bodyBefore.x) !== 210) {
+    throw new Error(`W4 拆支撑时目标 x211 已非前方支撑（body.x=${bodyBefore.x}）`);
+  }
+  const command = `setblock ${target.x} ${target.y} ${target.z} minecraft:air`;
+  const issueSeq = d.seq.next();
+  const issueTs = Date.now();
+  const frameAtIssue = d.recorder.frames.length;
+  const response = await ctx.rcon.send(command);
+  const responseSeq = d.seq.next();
+  const responseTs = Date.now();
+  const frameAtResponse = d.recorder.frames.length;
+
+  const airChain = () => {
+    const vision = d.exec.visionCalls.find((c) => c.seq > issueSeq
+      && isAirBlockName(visionOutputAt(c, target)?.name ?? ''));
+    if (!vision) return null;
+    const observed = visionOutputAt(vision, target)!;
+    const batch = d.exec.mapBatches.find((b) => b.seq > issueSeq
+      && b.observations.some((o) => sameCell(o.pos, target) && o.sequence === observed.observationId));
+    if (!batch) return null;
+    const observe = d.exec.observes.find((o) => o.reportId !== null && o.reportId === batch.reportId && o.enterSeq > batch.seq);
+    if (!observe) return null;
+    return { vision, observed, batch, observe };
+  };
+  await waitFor(() => airChain() !== null, 15_000, 'W4 实际 Vision air → 同一 report → loop.observe');
+  const air = airChain()!;
+  const o = await awaitOrTimeout(done, 20_000, 'W4 完成');
+
+  const release = d.diag.actualControls
+    .filter((c) => c.seq > air.observe.enterSeq && c.seq < air.observe.exitSeq
+      && c.op === 'clear' && allKeysReleased(c.keysAfter))
+    .sort((a, b) => a.seq - b.seq)[0];
+  const nextSample = d.exec.deliveredSamples
+    .filter((s) => s.ownerTaskId === taskId && s.delegationId === delegationId && s.seq > air.observe.exitSeq)
+    .sort((a, b) => a.seq - b.seq)[0];
+  const laterMoves = d.exec.moves.filter((m) => m.taskId === taskId && m.delegationId === delegationId && m.seq > air.observe.exitSeq);
+  const nav = navFromResult(o.result);
+  // 拆支撑与看到 air 必须属于同一个在途段，不能等到后续段或终态才补观察。
+  if (air.observe.statusBefore?.activeStepIndex !== beforeStatus.activeStepIndex) {
+    throw new Error(`W4 air 观察不在拆支撑所属段：拆时=${beforeStatus.activeStepIndex} 观察时=${air.observe.statusBefore?.activeStepIndex}`);
+  }
+  const chain = checkW4ObservationChain({
+    issueSeq,
+    initialStone: { visionSeq: initial.vision.seq, mapSeq: initial.batch.seq, mapId, name: initial.observed.name },
+    airVision: { seq: air.vision.seq, name: air.observed.name },
+    airBatch: { seq: air.batch.seq, reportId: air.batch.reportId, mapId: air.batch.mapId, targetChanged: reportTouchesCell(air.batch.report, target) },
+    observe: {
+      enterSeq: air.observe.enterSeq, exitSeq: air.observe.exitSeq, reportId: air.observe.reportId,
+      statusBeforeActiveStepIndex: air.observe.statusBefore?.activeStepIndex ?? null,
+      statusBeforeOutcome: air.observe.statusBefore?.result?.outcome ?? null,
+      statusAfterOutcome: air.observe.statusAfter.result?.outcome ?? null,
+      statusAfterActiveStepIndex: air.observe.statusAfter.activeStepIndex,
+      statusAfterProblem: air.observe.statusAfter.result?.problem?.kind ?? null,
+    },
+    releaseSeq: release?.seq ?? null,
+    nextSampleSeq: nextSample?.seq ?? null,
+    laterMoveCount: laterMoves.length,
+    terminalOutcome: nav?.outcome ?? null,
+  });
+  if (!chain.ok) throw new Error(`W4 观察链不成立：${chain.reason}`);
+  if (nav?.outcome !== 'FAILED' || nav.problem?.kind !== 'route_invalidated') {
+    throw new Error(`W4 库终态非 FAILED/route_invalidated：outcome=${nav?.outcome} problem=${nav?.problem?.kind}`);
+  }
+
+  ev.extra = {
+    ...ev.extra,
+    taskId, delegationId, mapId,
+    rcon: {
+      command, response,
+      issued: { seq: issueSeq, ts: issueTs, frame: frameAtIssue, body: bodyBefore, eye: eyeBefore },
+      responded: { seq: responseSeq, ts: responseTs, frame: frameAtResponse },
+      firstObservation: { seq: air.vision.seq, ts: air.vision.ts, frame: air.vision.frame, observedAt: air.observed.observedAt, observationId: air.observed.observationId },
+      // 客户端可能先合法看到 air，再收到 setblock 应答；如实保留两者，不强制排序。
+      observedBeforeResponse: air.vision.seq < responseSeq,
+    },
+    initialStone: {
+      visionSeq: initial.vision.seq, mapSeq: initial.batch.seq, frame: initial.vision.frame,
+      name: initial.observed.name, observedAt: initial.observed.observedAt, observationId: initial.observed.observationId,
+      body: { ...ctx.adapter.state().pos }, eye: initial.eye,
+    },
+    cellBefore,
+    air: {
+      visionSeq: air.vision.seq, visionFrame: air.vision.frame, visionTs: air.vision.ts,
+      mapSeq: air.batch.seq, reportId: air.batch.reportId, mapId: air.batch.mapId,
+      reportTouchesTarget: reportTouchesCell(air.batch.report, target),
+      observe: {
+        enterSeq: air.observe.enterSeq, exitSeq: air.observe.exitSeq, tsEnter: air.observe.tsEnter, tsExit: air.observe.tsExit,
+        frameEnter: air.observe.frameEnter, frameExit: air.observe.frameExit,
+        statusBefore: air.observe.statusBefore, statusAfter: air.observe.statusAfter,
+        keysBefore: air.observe.keysBefore, keysAfter: air.observe.keysAfter,
+      },
+    },
+    release: release ? { seq: release.seq, ts: release.ts, op: release.op, keysBefore: release.keysBefore, keysAfter: release.keysAfter } : null,
+    nextSampleSeq: nextSample?.seq ?? null,
+    laterMoveCount: laterMoves.length,
+    final: {
+      status: o.result.status, failureCode: o.result.failureCode, summary: o.result.summary,
+      outcome: nav?.outcome, problem: nav?.problem, lastPosition: nav?.lastPosition,
+      activeStepIndex: latestRouteStatus(d.exec, taskId, delegationId)?.activeStepIndex ?? null,
+      finalKeys: snapshotKeys(ctx.bot),
+    },
+    timeline: [
+      { kind: 'rcon-issued', seq: issueSeq, ts: issueTs, frame: frameAtIssue },
+      { kind: 'vision-air', seq: air.vision.seq, ts: air.vision.ts, frame: air.vision.frame },
+      { kind: 'map-report', seq: air.batch.seq, ts: air.batch.ts, frame: air.batch.frame },
+      { kind: 'observe-enter', seq: air.observe.enterSeq, ts: air.observe.tsEnter, frame: air.observe.frameEnter },
+      { kind: 'control-release', seq: release!.seq, ts: release!.ts, frame: null },
+      { kind: 'observe-exit', seq: air.observe.exitSeq, ts: air.observe.tsExit, frame: air.observe.frameExit },
+      { kind: 'onSample', seq: nextSample!.seq, ts: nextSample!.ts, frame: null },
+      { kind: 'rcon-response', seq: responseSeq, ts: responseTs, frame: frameAtResponse },
+    ],
+    deltas: {
+      visionToMapMs: air.batch.ts - air.vision.ts,
+      mapToObserveEnterMs: air.observe.tsEnter - air.batch.ts,
+      observeDurationMs: air.observe.tsExit - air.observe.tsEnter,
+      releaseAfterEnterMs: release!.ts - air.observe.tsEnter,
+      onSampleAfterExitMs: nextSample!.ts - air.observe.tsExit,
+      issueToFirstObservationMs: air.vision.ts - issueTs,
+      firstObservationToResponseMs: responseTs - air.vision.ts,
+    },
+  };
+  ev.verdict = 'PASS';
+}
+
+/**
+ * W5：隐藏变化后由同一活跃显式往返委托自然回看。隐藏期只证明「未看到/未刷新」，
+ * 回看必须是真实 Vision→map→report→同一 loop，不能由 harness 直接写图或动作后补查。
+ */
+async function scenarioW5(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
+  const ev = d.ev;
+  const f = W5_FIXTURE;
+  const target = f.targetSupport;
+  // 只读当前配置的既有 FOV，不放大视锥；用于证明目标确实在身后 FOV 外。
+  const visionHfovRad = config.vision.hFov * Math.PI / 180;
+  ev.extra = { fixture: f, route: f.route, targetSupport: target };
+  await buildSupportFixture(ctx.rcon, ev, { xMin: f.xMin, xMax: f.xMax, zMin: f.zMin, zMax: f.zMax }, f.feetY, f.material);
+  await teleportAndSettle(ctx, ev, f.start, 'W5 起点');
+  // 合法预扫发生在 loop.start 之前；用任务启动边界区分本场景真实视觉来源，而不是伪造 loop 归属。
+  const taskStartSeq = d.seq.next();
+  const started = startWalkTask(ctx, d, f.route, Date.now() + 30_000);
+  if ('error' in started) throw new Error(`W5 启动失败：${started.error}`);
+  const taskId = started.task.id;
+  const done = started.done;
+  const { delegationId } = await awaitRouteStartRecord(d.exec.routeCalls, taskId, done, 10_000, 'W5');
+
+  // 初观测可以在合法预扫或移动观察中；只接受实际 Vision 输出 + 实际 map 写入的同一 observationId。
+  const stoneChain = () => {
+    const vision = d.exec.visionCalls.find((c) => c.seq > taskStartSeq
+      && bareBlockName(visionOutputAt(c, target)?.name ?? '') === 'stone');
+    if (!vision) return null;
+    const observed = visionOutputAt(vision, target)!;
+    const batch = d.exec.mapBatches.find((b) => b.seq > taskStartSeq
+      && b.observations.some((o) => sameCell(o.pos, target) && o.sequence === observed.observationId));
+    if (!batch) return null;
+    return { vision, observed, batch };
+  };
+  await waitFor(() => stoneChain() !== null, 20_000, 'W5 目标支撑合法 stone 初观测');
+  const initial = stoneChain()!;
+  const map = initial.batch.map;
+  const mapId = initial.batch.mapId;
+  const dim = ctx.adapter.state().dim;
+  const cellBefore = cellEvidenceSnapshot(map.cellAt(dim, target.x, target.y, target.z));
+  if (!cellBefore.observed || bareBlockName(cellBefore.name ?? '') !== 'stone') {
+    throw new Error(`W5 初观测 cellAt 不是 stone：${JSON.stringify(cellBefore)}`);
+  }
+
+  const forwardGaze = () => {
+    const status = latestRouteStatus(d.exec, taskId, delegationId);
+    const eye = ctx.adapter.eye();
+    const pos = ctx.adapter.state().pos;
+    if (!status || status.result !== null || status.activeStepIndex !== 1) return null;
+    if (Math.floor(pos.x) !== 217) return null;
+    if (!eye || Math.abs(eye.pitch + 1.2) > 0.08 || angularDistance(eye.yaw, -Math.PI / 2) > 0.25) return null;
+    const dx = target.x + 0.5 - eye.x;
+    const dz = target.z + 0.5 - eye.z;
+    const dy = target.y + 0.5 - eye.y;
+    const targetYaw = Math.atan2(-dx, -dz);
+    const targetPitch = Math.atan2(dy, Math.hypot(dx, dz));
+    if (angularDistance(eye.yaw, targetYaw) <= visionHfovRad / 2) return null;
+    return { status, eye, pos, targetYaw, targetPitch };
+  };
+  await waitForPrecise(() => forwardGaze() !== null, 20_000, 'W5 去程 floor(x)=217 且前向段 active、x0 在 FOV 外');
+  const forward = forwardGaze()!;
+  const candidates: Vec3[] = [];
+  const fx = Math.floor(forward.pos.x), fy = Math.floor(forward.pos.y), fz = Math.floor(forward.pos.z);
+  for (let x = fx - 1; x <= fx + 1; x++) for (let z = fz - 1; z <= fz + 1; z++) for (let y = fy - 1; y <= fy + 2; y++) candidates.push({ x, y, z });
+  if (candidates.some((c) => sameCell(c, target))) throw new Error('W5 目标支撑仍在本帧生产 fx±1 候选内，隐藏前提不成立');
+
+  const beforeStatus = latestRouteStatus(d.exec, taskId, delegationId);
+  if (ctx.arbiter.current?.id !== taskId || !beforeStatus || beforeStatus.result !== null || beforeStatus.activeStepIndex !== 1) {
+    throw new Error('W5 拆支撑前委托已不在前向活动段');
+  }
+  const command = `setblock ${target.x} ${target.y} ${target.z} minecraft:air`;
+  const issueSeq = d.seq.next();
+  const issueTs = Date.now();
+  const frameAtIssue = d.recorder.frames.length;
+  const eyeAtIssue = ctx.adapter.eye();
+  const bodyAtIssue = { ...ctx.adapter.state().pos };
+  const response = await ctx.rcon.send(command);
+  const responseSeq = d.seq.next();
+  const responseTs = Date.now();
+
+  const airVisionAfter = () => d.exec.visionCalls.find((c) => c.seq > issueSeq
+    && isAirBlockName(visionOutputAt(c, target)?.name ?? ''));
+  const hiddenVision = () => d.exec.visionCalls.filter((c) => c.seq > issueSeq && c.seq < (airVisionAfter()?.seq ?? Number.POSITIVE_INFINITY));
+  const hiddenBatches = () => d.exec.mapBatches.filter((b) => b.seq > issueSeq && b.seq < (airVisionAfter()?.seq ?? Number.POSITIVE_INFINITY));
+
+  // 隐藏期至少积累数次真实观察边界，且不得出现目标 air / 目标格变化。
+  const hiddenDeadline = Date.now() + 15_000;
+  while (Date.now() < hiddenDeadline) {
+    const air = airVisionAfter();
+    if (air) break;
+    const status = latestRouteStatus(d.exec, taskId, delegationId);
+    if (status?.result !== null) break;
+    if (hiddenVision().length >= 2 && hiddenBatches().length >= 1) break;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  const hiddenCalls = hiddenVision();
+  const hiddenMaps = hiddenBatches();
+  const hiddenSawAir = hiddenCalls.some((c) => isAirBlockName(visionOutputAt(c, target)?.name ?? ''));
+  const hiddenTargetChanged = hiddenMaps.some((b) => reportTouchesCell(b.report, target));
+  const cellDuring = cellEvidenceSnapshot(map.cellAt(dim, target.x, target.y, target.z));
+  const hiddenAgeBefore = cellBefore.observedAt !== undefined ? Date.now() - cellBefore.observedAt : 0;
+  const hiddenAgeDuring = cellDuring.observedAt !== undefined ? Date.now() - cellDuring.observedAt : 0;
+  const hidden = {
+    visionCount: hiddenCalls.length,
+    batchCount: hiddenMaps.length,
+    sawAir: hiddenSawAir,
+    targetChanged: hiddenTargetChanged,
+    ageBeforeMs: hiddenAgeBefore,
+    ageDuringMs: hiddenAgeDuring,
+  };
+
+  await waitFor(() => airVisionAfter() !== undefined || latestRouteStatus(d.exec, taskId, delegationId)?.result !== null,
+    20_000, 'W5 折返回看或终态');
+  const revealVision = airVisionAfter();
+  if (!revealVision) {
+    const st = latestRouteStatus(d.exec, taskId, delegationId);
+    throw new Error(`W5 只有隐藏半段，终态先到且无生产回看：${st?.result?.outcome}/${st?.result?.problem?.kind}`);
+  }
+  const revealOutput = visionOutputAt(revealVision, target)!;
+  const revealBatch = d.exec.mapBatches.find((b) => b.seq > revealVision.seq
+    && b.observations.some((o) => sameCell(o.pos, target) && o.originObservationId === revealOutput.observationId));
+  if (!revealBatch) throw new Error('W5 回看未形成实际 map ChangeReport');
+  const revealObserve = d.exec.observes.find((o) => o.reportId !== null && o.reportId === revealBatch.reportId && o.enterSeq > revealBatch.seq);
+  if (!revealObserve) throw new Error('W5 回看 report 未被同一活跃 loop.observe 消费');
+  if (revealObserve.ownerTaskId !== taskId || revealObserve.delegationId !== delegationId) {
+    throw new Error(`W5 回看不是同一 task/delegation：${revealObserve.ownerTaskId}/${revealObserve.delegationId}`);
+  }
+  if (revealObserve.statusBefore?.result !== null) {
+    throw new Error('W5 回看在 loop 已终态后才被消费，不是生产回看');
+  }
+
+  const o = await awaitOrTimeout(done, 20_000, 'W5 完成');
+  const nav = navFromResult(o.result);
+  const cellAfter = cellEvidenceSnapshot(map.cellAt(dim, target.x, target.y, target.z));
+  const revealBody = revealVision.eye;
+  const chain = checkW5HiddenReveal({
+    stoneMapId: mapId,
+    removalSeq: issueSeq,
+    hidden,
+    cellBefore,
+    cellDuring,
+    reveal: {
+      seq: revealVision.seq,
+      name: revealOutput.name,
+      mapId: revealBatch.mapId,
+      observedAt: revealOutput.observedAt,
+    },
+    revealBatch: {
+      mapId: revealBatch.mapId,
+      reportId: revealBatch.reportId,
+      targetChanged: reportTouchesCell(revealBatch.report, target),
+    },
+    revealObserve: { reportId: revealObserve.reportId },
+    terminalOutcome: nav?.outcome ?? null,
+  });
+  if (!chain.ok) throw new Error(`W5 隐藏→回看链不成立：${chain.reason}`);
+  if (hiddenAgeDuring < hiddenAgeBefore) throw new Error('W5 隐藏期 cellAt 年龄未自然增长');
+  if (!cellAfter.observed || !isAirBlockName(cellAfter.name ?? '')) throw new Error(`W5 回看后 cellAt 不是 air：${JSON.stringify(cellAfter)}`);
+  if (cellAfter.observedAt === undefined || cellAfter.observedAt < revealOutput.observedAt) {
+    throw new Error('W5 cellAt 新证据早于真实回看 observedAt');
+  }
+  if (cellAfter.revision === undefined || cellBefore.revision === undefined || cellAfter.revision <= cellBefore.revision) {
+    throw new Error(`W5 cellAt revision 未推进：before=${cellBefore.revision} after=${cellAfter.revision}`);
+  }
+  if (cellAfter.sequence === undefined || cellAfter.sequence < revealOutput.observationId) {
+    throw new Error(`W5 cellAt sequence 未连接到真实回看：${cellAfter.sequence} < ${revealOutput.observationId}`);
+  }
+
+  ev.extra = {
+    ...ev.extra,
+    taskId, delegationId, mapId,
+    rcon: {
+      command, response,
+      issued: { seq: issueSeq, ts: issueTs, frame: frameAtIssue, body: bodyAtIssue, eye: eyeAtIssue },
+      responded: { seq: responseSeq, ts: responseTs },
+      firstObservation: { seq: revealVision.seq, ts: revealVision.ts, frame: revealVision.frame },
+      observedBeforeResponse: revealVision.seq < responseSeq,
+    },
+    initialStone: {
+      visionSeq: initial.vision.seq, mapSeq: initial.batch.seq,
+      name: initial.observed.name, observedAt: initial.observed.observedAt, observationId: initial.observed.observationId,
+    },
+    forward: {
+      body: bodyAtIssue, eye: eyeAtIssue, targetYaw: forward.targetYaw, targetPitch: forward.targetPitch,
+      angularDifference: angularDistance(forward.eye.yaw, forward.targetYaw),
+      hFovHalfRad: visionHfovRad / 2,
+      candidates, targetInCandidates: false,
+    },
+    cellBefore, cellDuring, cellAfter,
+    hidden: { ...hidden, visionSeqs: hiddenCalls.map((c) => c.seq), batchSeqs: hiddenMaps.map((b) => b.seq) },
+    reveal: {
+      visionSeq: revealVision.seq, visionFrame: revealVision.frame, visionTs: revealVision.ts,
+      positions: revealVision.positions, eye: revealBody, output: revealOutput,
+      batchSeq: revealBatch.seq, mapId: revealBatch.mapId, reportId: revealBatch.reportId,
+      reportTouchesTarget: reportTouchesCell(revealBatch.report, target),
+      observeEnterSeq: revealObserve.enterSeq, observeExitSeq: revealObserve.exitSeq,
+      observeStatusBefore: revealObserve.statusBefore, observeStatusAfter: revealObserve.statusAfter,
+    },
+    final: {
+      status: o.result.status, failureCode: o.result.failureCode, summary: o.result.summary,
+      outcome: nav?.outcome, problem: nav?.problem, lastPosition: nav?.lastPosition,
+      activeStepIndex: latestRouteStatus(d.exec, taskId, delegationId)?.activeStepIndex ?? null,
+      finalKeys: snapshotKeys(ctx.bot),
+    },
   };
   ev.verdict = 'PASS';
 }
@@ -2454,6 +3256,14 @@ function setupFixtureFor(id: ScenarioId): SetupFixture | null {
       feetY: p.feetY, material: p.material, start: { ...p.start },
     };
   }
+  if (id === 'W4' || id === 'W5') {
+    const f = id === 'W4' ? W4_FIXTURE : W5_FIXTURE;
+    return {
+      scenario: id,
+      footprint: { xMin: f.xMin, xMax: f.xMax, zMin: f.zMin, zMax: f.zMax },
+      feetY: f.feetY, material: f.material, start: { ...f.start },
+    };
+  }
   if (id === 'W1' || id === 'W6' || id === 'W7') {
     const lane = WALK_LANE;
     return {
@@ -2562,7 +3372,7 @@ async function main() {
     adapter.connect();
     await spawnPromise;
 
-    const ctx: HarnessContext = { bot: adapter.bot as Bot, adapter, arbiter, rcon, evidenceDir, runId };
+    const ctx: HarnessContext = { bot: adapter.bot as Bot, adapter, arbiter, vision, rcon, evidenceDir, runId };
     if (setupFixture) {
       // spawn 后立即用测试控制端 TP 到已确认支撑的固定起点，再稳定定位。
       // 先挂引用，TP/稳定失败时已发出的原始命令与响应也不会丢。
@@ -2573,14 +3383,14 @@ async function main() {
     }
     await waitFor(() => adapter!.state().observationReady, 30_000, 'observationReady');
     const scenarioMap: Partial<Record<ScenarioId, (c: HarnessContext, d: ScenarioDiag) => Promise<void>>> = {
-      W1: scenarioW1, W2: scenarioW2, W6: scenarioW6, W7: scenarioW7,
+      W1: scenarioW1, W2: scenarioW2, W4: scenarioW4, W5: scenarioW5, W6: scenarioW6, W7: scenarioW7,
     };
 
     let stopped = false;
     for (const id of ALL_SCENARIOS) {
       const scenarios = evidence.scenarios as Record<string, unknown>;
       if (UNSUPPORTED.includes(id)) {
-        scenarios[id] = { verdict: 'NOT_RUN', note: id === 'W3' ? '引用 C1 离线 irregular 子步矩阵证据，本轮不联机运行' : '留待下一阶段' };
+        scenarios[id] = { verdict: 'NOT_RUN', note: id === 'W3' ? '引用 C1 离线 irregular 子步矩阵证据（真实持续前 8 帧 onGround=false，随后恢复），本轮不联机运行' : '留待下一阶段' };
         continue;
       }
       if (stopped) { scenarios[id] = { verdict: 'NOT_RUN', note: '前一场景清理失败，已停止后续场景' }; continue; }
@@ -2617,8 +3427,8 @@ async function main() {
 
 async function run() {
   if (process.argv.includes('--help') || process.argv.includes('-h')) {
-    console.log('用法：node --import tsx scripts/walk-acceptance.ts --curio=test [--scenarios=W1,W2,W6,W7] [--help]');
-    console.log('场景：W1 到达转弯 / W2 平台边缘 / W6 取消交接 / W7 超时·暂停帧·断线（W4/W5 下一阶段，W3 引用离线证据）');
+    console.log('用法：node --import tsx scripts/walk-acceptance.ts --curio=test [--scenarios=W1,W2,W4,W5,W6,W7] [--help]');
+    console.log('场景：W1 到达转弯 / W2 平台边缘 / W4 可见支撑失效 / W5 隐藏变化后生产回看 / W6 取消交接 / W7 超时·暂停帧·断线（W3 引用离线证据）');
     return;
   }
   await main();
