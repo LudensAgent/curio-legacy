@@ -270,6 +270,14 @@ test('真实两段步行保存原 nominal 前缀，并以实际 move/trace 逐�
   await withHarness(t, async (h) => {
     const senses = makeSenses(h.svc);
     senses.seed(-2, 6);
+    // setup 完成后先真实 checkpoint，建立已确认的干净 baseline：后续两段步行只投影
+    // accepted_pending_checkpoint，不得被误认为已经偷偷保存。
+    const baselineCheckpoint = await h.svc.session.checkpoint();
+    const baseline = h.svc.getPersistenceState();
+    assert.equal(baseline.dirty, false, 'checkpoint 后 baseline 应为 clean');
+    assert.equal(baseline.fragmentRevision, baseline.confirmedFragmentRevision, 'baseline 的 fragment 已确认');
+    assert.equal(baseline.lastConfirmedCheckpointId, baselineCheckpoint.checkpointId, 'baseline 记录真实 checkpoint id');
+
     const fixture = physicsHarness();
     const ctx = context(fixture.adapter, h.svc, senses, { taskId: 'task-two-segments' });
     const points = [
@@ -278,6 +286,14 @@ test('真实两段步行保存原 nominal 前缀，并以实际 move/trace 逐�
       { x: 2.5, y: 0, z: 0.5 },
     ];
     const result = await runSkill(ctx, walkRoute, { points });
+
+    // 执行后：内存历史已推进，但确认版本与 checkpoint id 仍是 baseline；dirty=true
+    // 说明 accepted_pending_checkpoint 并未偷偷保存。
+    const after = h.svc.getPersistenceState();
+    assert.ok(after.fragmentRevision > baseline.fragmentRevision, `fragmentRevision 应增长，实际 ${baseline.fragmentRevision} -> ${after.fragmentRevision}`);
+    assert.equal(after.confirmedFragmentRevision, baseline.confirmedFragmentRevision, 'confirmedFragmentRevision 不得被本次内存写入推进');
+    assert.equal(after.lastConfirmedCheckpointId, baseline.lastConfirmedCheckpointId, '本轮不得产生新的已确认 checkpoint');
+    assert.equal(after.dirty, true, '未落盘的已接受事实应保持 dirty');
 
     assert.equal(result.status, 'succeeded', result.summary);
     const nav = navOf(result);

@@ -488,7 +488,8 @@ test('known 合法观察变化撤销在飞段：不冒充 OPEN，保留已确认
       onFrame: (entity, control) => {
         if (changed || !control.forward || entity.position.x < 1.7) return;
         changed = true;
-        // 测试注入一次真实方块变化（公开 observe），真实报告会同步送给活动 loop。
+        // 测试注入一次 synthetic typed observation boundary injection（公开 observe）；
+        // 这不声称真实 Vision 观察或世界方块已改变，只验证报告会同步送给活动 loop。
         h.svc.observe([{
           name: 'minecraft:air', properties: {}, stateComplete: true, pos: { x: 2, y: -1, z: 0 },
           worldId: WORLD, sessionId: SESSION, dimension: DIM,
@@ -502,10 +503,10 @@ test('known 合法观察变化撤销在飞段：不冒充 OPEN，保留已确认
       { fragmentId: 'changed-route' },
     );
 
-    assert.ok(changed, '测试应在第二段触发一次真实观察变化');
+    assert.ok(changed, '测试应在第二段触发一次 synthetic typed observation boundary injection');
     assert.equal(result.status, 'failed', result.summary);
     const nav = navOf(result);
-    assert.notEqual(nav.outcome, 'ARRIVED', '真实观察变化不得冒充到达');
+    assert.notEqual(nav.outcome, 'ARRIVED', '注入的 typed observation 不得冒充到达');
     assert.equal(nav.trace.length, 1, '只保留变化前已确认的首段');
     assert.ok(nav.lastPosition, '保留实际部分位移');
     assert.ok(nav.lastPosition.x < 2.5 - 0.12, '未确认的第二段不得伪报到达末点');

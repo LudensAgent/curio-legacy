@@ -12,10 +12,14 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { Vec3 } from 'vec3';
 import { RouteVerifier, type NavResult, type Vec3Like, type WalkSearchSnapshot } from 'curio-minecraft-3d-memory';
+import { Arbiter, type TaskOutcome } from '../src/arbiter/arbiter.ts';
+import { EventBus } from '../src/events.ts';
+import { WorldMemory } from '../src/memory/store.ts';
 import { Vision, DEFAULT_VISION } from '../src/perception/vision.ts';
 import { walkCollisionProvider } from '../src/adapter/walk-route.ts';
 import { SharedSpatialSession } from '../src/spatial/shared-session.ts';
-import { walkTo } from '../src/skills/spatial-navigation.ts';
+import { SKILLS } from '../src/skills/index.ts';
+import { walkKnownRoute, walkTo } from '../src/skills/spatial-navigation.ts';
 import { runSkill } from '../src/skills/types.ts';
 import type { BlockObservation, GameAdapter } from '../src/adapter/types.ts';
 import { FakeAdapter } from './fake-adapter.ts';
@@ -267,6 +271,94 @@ function blockedLookHarness(opts?: { observationReady?: () => boolean }) {
     resolveLook: () => { pendingLook?.(); pendingLook = null; },
     setDim: (dim: string) => { scope = { ...scope, dim }; },
   };
+}
+
+/**
+ * 入口 ready-gap 的真实 Arbiter 夹具：状态与共享会话同 scope，但 observationReady=false。
+ * 身体桥只在真正被调用时计数；真实 guard 会拦截 ACTION_METHODS，所以调用计数保持 0
+ * 才能证明技能在取得身体桥前先处理了 ready-gap。
+ */
+class EntryGapAdapter extends FakeAdapter {
+  bodyCalls = 0;
+  tickCalls = 0;
+  controlWrites = 0;
+
+  constructor() {
+    super();
+    this.worldId = WORLD;
+    this.sessionId = SESSION;
+    this.dim = DIM;
+    this.groundY = -1;
+    this.pos = { ...START };
+    this.observationReady = false;
+  }
+
+  walkBody() {
+    this.bodyCalls++;
+    return {
+      setControlState: () => { this.controlWrites++; },
+      clearControlStates: () => { this.controlWrites++; },
+      look: () => {},
+      entity: {
+        position: { ...START }, velocity: { x: 0, y: 0, z: 0 }, onGround: true, isInWater: false,
+      },
+    };
+  }
+
+  walkTick() {
+    this.tickCalls++;
+    return () => Promise.resolve(null);
+  }
+}
+
+/**
+ * 真实 Arbiter + 真实 guard + 真实 SharedSpatialSession：入口时同 session ready=false。
+ * 技能必须先读实际状态并交给服务 interrupt，返回自己的 NOT_READY 结果；不得先调用
+ * guard 守卫的 walkBody/walkTick 而只得到 AbortedError→cancelled。
+ */
+async function assertEntryReadyGap(skillName: 'walk_to' | 'walk_known_route', args: unknown, originalRequest: unknown) {
+  const h = await openHarness();
+  try {
+    seedCorridor(h);
+    const verifier = openCorridorVerifier(h);
+    assert.equal(verifier.status()!.verdict, 'OPEN', 'baseline 的公开 verifier 应为 OPEN');
+    assert.equal(cellEvidence(h, 1, -1, 0).freshness, 'FRESH', 'baseline 旧证据应为 FRESH');
+    const gapEvidenceAt = cellEvidence(h, 0, -1, 0).observation.observedAt;
+    const interrupts = countInterrupts(h.svc, verifier);
+
+    const adapter = new EntryGapAdapter();
+    const arbiter = new Arbiter(adapter, new WorldMemory(null), new EventBus(), new Vision(adapter), h.svc);
+    const hadSkill = Object.prototype.hasOwnProperty.call(SKILLS, skillName);
+    const previous = SKILLS[skillName];
+    SKILLS[skillName] = skillName === 'walk_to' ? walkTo : walkKnownRoute;
+    try {
+      const done = new Promise<TaskOutcome>((resolve) => arbiter.once('done', resolve));
+      const started = arbiter.start({ skill: skillName, args }, 'llm');
+      assert.ok(!('error' in started), `真实 Arbiter 应接受 ${skillName} 参数`);
+      const outcome = await done;
+
+      assert.equal(outcome.result.status, 'failed', '必须是技能自己的 NOT_READY，而不是 guard 的 AbortedError');
+      assert.equal(outcome.result.failureCode, 'NOT_CONNECTED');
+      assert.equal(outcome.result.data?.stage, 'NOT_READY');
+      assert.deepEqual(outcome.result.data?.originalRequest, originalRequest, '技能自己的原请求数据必须保留');
+      assert.equal(arbiter.blockedActions, 0, '不得调用任何被 guard 拦截的动作');
+      assert.equal(adapter.bodyCalls, 0, 'ready-gap 下不得取得身体桥');
+      assert.equal(adapter.tickCalls, 0, 'ready-gap 下不得取得帧源');
+      assert.equal(adapter.controlWrites, 0, '未开始移动不得写控制');
+      assert.equal(interrupts(), 1, '同一入口 ready-gap 只 interrupt 一次');
+      assert.equal(h.svc.observationAdmitted, false, 'interrupt 后不得再准入观测');
+      assert.equal(cellEvidence(h, 0, -1, 0).freshness, 'STALE');
+      assert.equal(cellEvidence(h, 1, -1, 0).freshness, 'STALE');
+      assert.equal(cellEvidence(h, 0, -1, 0).observation.observedAt, gapEvidenceAt, '旧证据时间不改');
+      assert.notEqual(verifier.status()!.verdict, 'OPEN', '真实 lifecycle 报告必须让原 verifier 失效');
+    } finally {
+      arbiter.dispose();
+      if (hadSkill) SKILLS[skillName] = previous;
+      else delete SKILLS[skillName];
+    }
+  } finally {
+    await closeHarness(h);
+  }
 }
 
 /** 一条同高合法走廊：x=0..2、z=0，支撑/脚/头都来自真实公开 observe。 */
@@ -1246,8 +1338,9 @@ test('walk_to 准备等待返回时同 session ready 丢失：一次 interrupt�
   try {
     seedCorridor(h);
     const verifier = openCorridorVerifier(h);
-    const beforeA = cellEvidence(h, 0, -1, 0).observation.observedAt;
     const beforeB = cellEvidence(h, 1, -1, 0).observation.observedAt;
+    // 准备阶段可以合法刷新证据时间；ready gap 前的实际证据时间才是 interrupt 不得改写的基线。
+    let gapEvidenceAt = cellEvidence(h, 0, -1, 0).observation.observedAt;
     const interrupts = countInterrupts(h.svc, verifier);
 
     let ready = true;
@@ -1257,6 +1350,7 @@ test('walk_to 准备等待返回时同 session ready 丢失：一次 interrupt�
     const running = runSkill(c.ctx, walkTo, { to: { x: 3.54, y: 0, z: 0.52 }, arrival: { kind: 'near', radius: 0.4 } });
     await fixture.lookStarted;
     assert.equal(interrupts(), 0, '准备期间尚未中断');
+    gapEvidenceAt = cellEvidence(h, 0, -1, 0).observation.observedAt;
     ready = false;
     fixture.resolveLook();
     const result = await running;
@@ -1268,22 +1362,30 @@ test('walk_to 准备等待返回时同 session ready 丢失：一次 interrupt�
     assert.equal(h.svc.observationAdmitted, false, 'interrupt 后不得再准入观测');
     assert.equal(cellEvidence(h, 0, -1, 0).freshness, 'STALE');
     assert.equal(cellEvidence(h, 1, -1, 0).freshness, 'STALE');
-    assert.equal(cellEvidence(h, 0, -1, 0).observation.observedAt, beforeA, '旧证据时间不改');
+    assert.equal(cellEvidence(h, 0, -1, 0).observation.observedAt, gapEvidenceAt, '旧证据时间不改');
     assert.notEqual(verifier.status()!.verdict, 'OPEN', '真实 lifecycle 报告必须让原 verifier 失效');
     assert.equal(fixture.writes(), 0, '未开始移动不得写控制');
 
-    // ready 恢复走真实 beginSession 入口；只重新观察一格，另一格保持 STALE、原时间不改。
-    h.svc.beginSession({ worldId: WORLD, dim: DIM, sessionId: SESSION });
-    const recoveryReport = h.svc.observe([{
-      name: 'minecraft:stone', properties: {}, stateComplete: true, pos: { x: 1, y: -1, z: 0 },
-      worldId: WORLD, sessionId: SESSION, dimension: DIM,
-      observationId: 9001, observedAt: Date.now() + 1000, source: 'vision',
-    }]);
-    verifier.apply(recoveryReport, 10);
-    assert.equal(cellEvidence(h, 1, -1, 0).freshness, 'FRESH', '只有真实重新观察的一格恢复');
-    assert.equal(cellEvidence(h, 0, -1, 0).freshness, 'STALE', '未重新观察的格不得自行刷新');
-    assert.equal(cellEvidence(h, 0, -1, 0).observation.observedAt, beforeA, '未刷新格保留原证据时间');
-    assert.ok(cellEvidence(h, 1, -1, 0).observation.observedAt > beforeB);
+    // ready 恢复走真实 Vision 入口：同 scope 的真实 ready 由 adapter.state() 提供，
+    // Vision 自己 beginSession/observe；只请求并写入实际可见的单格。
+    const visionAdapter = new VisionProbeAdapter();
+    visionAdapter.groundY = -1;
+    // 自然等待到下一毫秒：interrupt 边界按毫秒记录，真实 Vision 的观测必须晚于它才会被接受；
+    // 不改 payload 时间，也不放宽任何门禁。
+    const recoveryFloor = Date.now();
+    while (Date.now() <= recoveryFloor) await new Promise((resolve) => setTimeout(resolve, 1));
+    await visionAdapter.look(-Math.PI / 2, -1.2);
+    const vision = new Vision(visionAdapter, DEFAULT_VISION, h.svc);
+    const recovered = vision.observeBlocks([{ x: 1, y: -1, z: 0 }]);
+    assert.equal(recovered.length, 1, '真实 Vision 应只看到请求的单格');
+    const recoveredCell = cellEvidence(h, 1, -1, 0);
+    assert.equal(recoveredCell.freshness, 'FRESH', '只有真实 Vision 重新看见的一格恢复');
+    assert.equal(recoveredCell.observation.source, 'vision', '输出源必须来自实际 Vision');
+    assert.equal(recoveredCell.observation.stateComplete, true, '完整性必须来自实际 Vision');
+    assert.equal(recoveredCell.observation.state.name, 'grass_block', '方块状态必须来自实际 Vision 读取');
+    assert.equal(cellEvidence(h, 0, -1, 0).freshness, 'STALE', '未请求/未见的邻格不得自行刷新');
+    assert.equal(cellEvidence(h, 0, -1, 0).observation.observedAt, gapEvidenceAt, '未刷新格保留原证据时间');
+    assert.ok(recoveredCell.observation.observedAt > beforeB, '新证据时间应晚于旧证据');
     assert.notEqual(verifier.status()!.verdict, 'OPEN', '单格恢复不足以让整条路线重新 OPEN');
   } finally {
     await closeHarness(h);
@@ -1295,8 +1397,9 @@ test('walk_to 零边帧等待返回时同 session ready 丢失：一次 interrup
   try {
     seedCorridor(h);
     const verifier = openCorridorVerifier(h);
-    const beforeA = cellEvidence(h, 0, -1, 0).observation.observedAt;
     const beforeB = cellEvidence(h, 1, -1, 0).observation.observedAt;
+    // 准备阶段可以合法刷新证据时间；ready gap 前的实际证据时间才是 interrupt 不得改写的基线。
+    let gapEvidenceAt = cellEvidence(h, 0, -1, 0).observation.observedAt;
     const interrupts = countInterrupts(h.svc, verifier);
 
     let ready = true;
@@ -1307,7 +1410,10 @@ test('walk_to 零边帧等待返回时同 session ready 丢失：一次 interrup
       const timer = setTimeout(() => {
         signal.removeEventListener('abort', onAbort);
         frame++;
-        if (frame === 4) ready = false; // 帧返回前同一 session 的 ready 已丢失
+        if (frame === 4) { // 帧返回前同一 session 的 ready 已丢失
+          gapEvidenceAt = cellEvidence(h, 0, -1, 0).observation.observedAt;
+          ready = false;
+        }
         resolve({
           position: { x: START.x + frame * 0.001, y: START.y, z: START.z },
           velocity: { x: 0, y: 0, z: 0 }, onGround: true, isInWater: false,
@@ -1336,23 +1442,48 @@ test('walk_to 零边帧等待返回时同 session ready 丢失：一次 interrup
     assert.deepEqual(nav.trace, []);
     assert.equal(cellEvidence(h, 0, -1, 0).freshness, 'STALE');
     assert.equal(cellEvidence(h, 1, -1, 0).freshness, 'STALE');
-    assert.equal(cellEvidence(h, 0, -1, 0).observation.observedAt, beforeA, '旧证据时间不改');
+    assert.equal(cellEvidence(h, 0, -1, 0).observation.observedAt, gapEvidenceAt, '旧证据时间不改');
     assert.notEqual(verifier.status()!.verdict, 'OPEN');
     assert.equal(fixture.writes(), 0);
 
-    h.svc.beginSession({ worldId: WORLD, dim: DIM, sessionId: SESSION });
-    const recoveryReport = h.svc.observe([{
-      name: 'minecraft:stone', properties: {}, stateComplete: true, pos: { x: 1, y: -1, z: 0 },
-      worldId: WORLD, sessionId: SESSION, dimension: DIM,
-      observationId: 9002, observedAt: Date.now() + 1000, source: 'vision',
-    }]);
-    verifier.apply(recoveryReport, 10);
-    assert.equal(cellEvidence(h, 1, -1, 0).freshness, 'FRESH');
-    assert.equal(cellEvidence(h, 0, -1, 0).freshness, 'STALE');
-    assert.equal(cellEvidence(h, 0, -1, 0).observation.observedAt, beforeA);
-    assert.ok(cellEvidence(h, 1, -1, 0).observation.observedAt > beforeB);
+    // ready 恢复走真实 Vision 入口：同 scope 的真实 ready 由 adapter.state() 提供，
+    // Vision 自己 beginSession/observe；只请求并写入实际可见的单格。
+    const visionAdapter = new VisionProbeAdapter();
+    visionAdapter.groundY = -1;
+    // 自然等待到下一毫秒：interrupt 边界按毫秒记录，真实 Vision 的观测必须晚于它才会被接受；
+    // 不改 payload 时间，也不放宽任何门禁。
+    const recoveryFloor = Date.now();
+    while (Date.now() <= recoveryFloor) await new Promise((resolve) => setTimeout(resolve, 1));
+    await visionAdapter.look(-Math.PI / 2, -1.2);
+    const vision = new Vision(visionAdapter, DEFAULT_VISION, h.svc);
+    const recovered = vision.observeBlocks([{ x: 1, y: -1, z: 0 }]);
+    assert.equal(recovered.length, 1, '真实 Vision 应只看到请求的单格');
+    const recoveredCell = cellEvidence(h, 1, -1, 0);
+    assert.equal(recoveredCell.freshness, 'FRESH', '只有真实 Vision 重新看见的一格恢复');
+    assert.equal(recoveredCell.observation.source, 'vision', '输出源必须来自实际 Vision');
+    assert.equal(recoveredCell.observation.stateComplete, true, '完整性必须来自实际 Vision');
+    assert.equal(recoveredCell.observation.state.name, 'grass_block', '方块状态必须来自实际 Vision 读取');
+    assert.equal(cellEvidence(h, 0, -1, 0).freshness, 'STALE', '未请求/未见的邻格不得自行刷新');
+    assert.equal(cellEvidence(h, 0, -1, 0).observation.observedAt, gapEvidenceAt, '未刷新格保留原证据时间');
+    assert.ok(recoveredCell.observation.observedAt > beforeB, '新证据时间应晚于旧证据');
     assert.notEqual(verifier.status()!.verdict, 'OPEN');
   } finally {
     await closeHarness(h);
   }
+});
+
+test('walk_to 入口 ready-gap 走真实 Arbiter：先读 state 并 interrupt，不触发 guard AbortedError', { timeout: 10000 }, async () => {
+  await assertEntryReadyGap(
+    'walk_to',
+    { to: { x: 3.54, y: 0, z: 0.52 }, arrival: { kind: 'near', radius: 0.4 } },
+    { to: { x: 3.54, y: 0, z: 0.52 }, arrival: { kind: 'near', radius: 0.4 } },
+  );
+});
+
+test('walk_known_route 入口 ready-gap 走真实 Arbiter：先读 state 并 interrupt，不触发 guard AbortedError', { timeout: 10000 }, async () => {
+  await assertEntryReadyGap(
+    'walk_known_route',
+    { fragmentId: 'entry-gap' },
+    { fragmentId: 'entry-gap' },
+  );
 });
