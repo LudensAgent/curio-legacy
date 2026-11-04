@@ -763,6 +763,7 @@ test('真实 checkpoint 容量失败不重写已完成移动，同一服务仍�
     assert.ok(navA.trace.length > 0, 'ARRIVED 必须保留真实轨迹');
     assert.notEqual(navA.memoryWrite, 'saved', '尚未成功保存时不得声称 saved');
 
+    const originalResultA = a.result;
     const resultASnapshot = structuredClone(a.result);
     const navASnapshot = structuredClone(navA);
 
@@ -821,6 +822,8 @@ test('真实 checkpoint 容量失败不重写已完成移动，同一服务仍�
     assert.deepEqual(structuredClone(retainedCell.evidence), originalEvidence, '失败保存不得删除真实内存事实');
 
     // 已完成移动对象与快照不得被保存失败改写；未保存是独立事实。
+    assert.strictEqual(a.result, originalResultA);
+    assert.strictEqual(a.result.data?.nav, navA);
     assert.deepEqual(a.result, resultASnapshot);
     assert.deepEqual(navA, navASnapshot);
     assert.notEqual(navA.memoryWrite, 'saved');
@@ -836,6 +839,8 @@ test('真实 checkpoint 容量失败不重写已完成移动，同一服务仍�
     assert.ok(navB.lastPosition !== undefined);
     assert.equal(svc.closing, false, '失败的保存不得关闭仍在运行的服务');
     assert.equal(svc.session.voxel, voxel, 'B 必须复用同一个共享地图');
+    assert.strictEqual(a.result, originalResultA);
+    assert.strictEqual(a.result.data?.nav, navA);
     assert.deepEqual(a.result, resultASnapshot);
     assert.deepEqual(navA, navASnapshot);
     const cellAfterB = voxel.cellAt(firstObs.dimension, firstObs.pos.x, firstObs.pos.y, firstObs.pos.z);
@@ -858,6 +863,17 @@ test('真实 checkpoint 容量失败不重写已完成移动，同一服务仍�
     assert.equal(shutdown.close.lastConfirmedCheckpointId, null);
     const afterShutdown = svc.getPersistenceState();
     assert.equal(afterShutdown.dirty, true, '未保存的真实脏事实不得被关停抹掉');
+    // 两次容量保存都未确认任何版本：状态必须与第一次失败前一致。
+    assert.equal(afterShutdown.confirmedVoxelRevision, before.confirmedVoxelRevision);
+    assert.equal(afterShutdown.confirmedFragmentRevision, before.confirmedFragmentRevision);
+    assert.equal(afterShutdown.confirmedTopologyRevision, before.confirmedTopologyRevision);
+    assert.equal(afterShutdown.lastConfirmedCheckpointId, before.lastConfirmedCheckpointId);
+    // 最终关停也不得改写已完成的 A 移动对象或快照。
+    assert.strictEqual(a.result, originalResultA);
+    assert.strictEqual(a.result.data?.nav, navA);
+    assert.deepEqual(a.result, resultASnapshot);
+    assert.deepEqual(navA, navASnapshot);
+    assert.notEqual(navA.memoryWrite, 'saved');
 
     const diagnostics = spatialShutdownDiagnostics(shutdown, WORLD);
     assert.equal(diagnostics.ok, false);
