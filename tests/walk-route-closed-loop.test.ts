@@ -38,7 +38,24 @@ function platformWorld(edgeX: number) {
   };
 }
 
-/** 带真实物理的身体：setControlState 驱动控制，tick 推 tickEvery 步物理并推进模拟时钟。 */
+/** 脚部水平 AABB（半宽 0.3）与 y=-1 实心块是否有正面积交叠，即脚下存在几何支撑。 */
+function supportedBy(world: { getBlock(p: { floored(): { x: number; y: number; z: number } }): { name: string } }, pos: { x: number; y: number; z: number }): boolean {
+  const half = 0.3;
+  const minX = pos.x - half, maxX = pos.x + half;
+  const minZ = pos.z - half, maxZ = pos.z + half;
+  for (let bx = Math.floor(minX); bx <= Math.floor(maxX); bx++) {
+    for (let bz = Math.floor(minZ); bz <= Math.floor(maxZ); bz++) {
+      const overlapX = Math.min(maxX, bx + 1) - Math.max(minX, bx);
+      const overlapZ = Math.min(maxZ, bz + 1) - Math.max(minZ, bz);
+      if (overlapX <= 0 || overlapZ <= 0) continue;
+      if (world.getBlock({ floored: () => ({ x: bx, y: -1, z: bz }) }).name !== 'air') return true;
+    }
+  }
+  return false;
+}
+
+/** 带真实物理的身体：setControlState 驱动控制，tick 推 tickEvery 步物理并推进模拟时钟。
+ *  trace 记录每个模拟子步（含采样帧号），用于证明隐藏子步被逐帧观察而非只看到采样端点。 */
 function body(start: { x: number; z: number }, tickEvery: number | number[] = 1, world = flatWorld()) {
   const control: Record<string, boolean> = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
   const entity = { position: new Vec3(start.x, 0, start.z), velocity: new Vec3(0, 0, 0), onGround: true,
@@ -53,13 +70,21 @@ function body(start: { x: number; z: number }, tickEvery: number | number[] = 1,
   const physics = Physics(data, world);
   let clock = 2000;
   let ti = 0;
+  let frame = 0;
+  const trace: Array<{ frame: number; step: number; x: number; y: number; z: number; onGround: boolean; supported: boolean; forward: boolean; back: boolean; sneak: boolean }> = [];
   const tick = () => {
     const n = Array.isArray(tickEvery) ? tickEvery[ti++ % tickEvery.length]! : tickEvery;
-    for (let k = 0; k < n; k++) physics.simulatePlayer(new PlayerState(bot, control), world).apply(bot);
+    for (let k = 0; k < n; k++) {
+      physics.simulatePlayer(new PlayerState(bot, control), world).apply(bot);
+      trace.push({ frame, step: k, x: entity.position.x, y: entity.position.y, z: entity.position.z,
+        onGround: entity.onGround, supported: supportedBy(world, entity.position),
+        forward: control.forward, back: control.back, sneak: control.sneak });
+    }
+    frame++;
     clock += 50 * n;
     return Promise.resolve(bot.entity);
   };
-  return { bot, tick, now: () => clock };
+  return { bot, tick, now: () => clock, trace, frameCount: () => frame };
 }
 
 function buildMap() {
@@ -215,43 +240,75 @@ test('可见支撑变化在到达前被处理，不误报 ARRIVED', async () => 
   assert.notEqual(result.outcome, 'ARRIVED', '支撑变化应导致失效，不能误报 ARRIVED');
 });
 
-test('平台边缘 + 不均匀采样 [1,2,1,1,4] 不滑出平台', async () => {
-  const map = buildPlatformMap(2); // 支撑只在 x<2，目标 x=1.5 是最后一块实心
+test('平台边缘 + 不均匀采样不滑出平台，每个子步都有支撑且末位仍在平台上', async () => {
+  const edgeX = 2; // 支撑只在 x<2，目标 x=1.5 是最后一块实心
   const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }];
-  const { bot, tick, now } = body({ x: 0.40, z: 0.52 }, [1, 2, 1, 1, 4], platformWorld(2));
-  const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, signal: new AbortController().signal, now });
-  assert.equal(result.outcome, 'ARRIVED', `平台边缘不应滑落超时：${result.message}`);
-  // 末位必须仍在平台上（脚高不变、x 未越过 2）。
-  const last = result.lastPosition;
-  assert.ok(last, '应有末位');
-  assert.equal(last!.y, 0, '脚高不应跌落');
-  assert.ok(last!.x < 2.0, `末位 x=${last!.x.toFixed(2)} 越过平台边缘`);
+  const cases = [
+    { sx: 0.55, cadence: [1, 2, 1, 1, 4] },
+    { sx: 0.40, cadence: [1, 2, 1, 1, 4] },
+    { sx: 0.55, cadence: [1, 1, 3, 1, 2] },
+    { sx: 0.40, cadence: [1, 1, 3, 1, 2] },
+  ];
+  for (const { sx, cadence } of cases) {
+    const map = buildPlatformMap(edgeX);
+    const { bot, tick, now, trace, frameCount } = body({ x: sx, z: 0.52 }, cadence, platformWorld(edgeX));
+    const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, signal: new AbortController().signal, now });
+    assert.equal(result.outcome, 'ARRIVED', `起点 x=${sx} cadence=${cadence} 不应滑落超时：${result.message}`);
+    const last = result.lastPosition;
+    assert.ok(last, '应有末位');
+    assert.equal(last!.y, 0, '末位脚高不应跌落');
+    assert.ok(last!.x < edgeX, `末位 x=${last!.x.toFixed(2)} 越过平台边缘`);
+    // 所有子步：脚高不低于 0（不跌落），且脚下始终有正面积几何支撑（最大偏移子步也保持支撑）。
+    assert.equal(Math.min(...trace.map((t) => t.y)), 0, '任意子步脚高不得低于 0');
+    assert.ok(trace.every((t) => t.supported), '每个子步脚下都应有几何支撑');
+    // 隐藏子步确实被记录：trace 长度多于采样帧数。
+    assert.ok(trace.length > frameCount(), `trace(${trace.length}) 应多于采样帧(${frameCount()})`);
+    // 到达后所有控制释放。
+    for (const key of ['forward', 'back', 'sneak', 'left', 'right', 'jump'] as const) {
+      assert.equal(bot.control[key], false, `到达后 ${key} 键应释放`);
+    }
+  }
 });
 
-test('初始稳定窗口被长间隔重置后仍继续采样并启动首段', async () => {
+test('初始稳定窗口前八帧反复重置时不提前写控制，稳定后启动首段并到达', async () => {
   const map = new VoxelMap('world', { validityWindowMs: 60_000 });
-  const now0 = Date.now();
   for (let x = -1; x <= 4; x++) for (let z = -1; z <= 4; z++) for (let y = -1; y <= 2; y++) {
-    map.observe({ worldId: 'world', dim: 'overworld', sessionId: 's1', observedAt: now0, sequence: 1, source: 'vision', evidence: 'seen', stateComplete: true, state: y === -1 ? { name: 'minecraft:stone', properties: {} } : { name: 'minecraft:air', properties: {} }, pos: { x, y, z } });
+    map.observe({ worldId: 'world', dim: 'overworld', sessionId: 's1', observedAt: 1000, sequence: 1, source: 'vision', evidence: 'seen', stateComplete: true, state: y === -1 ? { name: 'minecraft:stone', properties: {} } : { name: 'minecraft:air', properties: {} }, pos: { x, y, z } });
   }
   const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }];
-  // 直接构造物理身体：tick 用真实时钟推进 prismarine-physics，第 6 帧前插 200ms 间隔重置稳定窗口。
+  // 前八帧用交替 onGround 标志显式扰动，反复重置稳定窗口；第八帧后恢复正常物理采样。
   const control: Record<string, boolean> = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
   const entity = { position: new Vec3(0.54, 0, 0.52), velocity: new Vec3(0, 0, 0), onGround: true, isInWater: false, isInLava: false, isInWeb: false, isCollidedHorizontally: false, isCollidedVertically: false, yaw: 0, pitch: 0, effects: {}, attributes: {} };
+  let frame = 0;
+  let firstForwardFrame: number | null = null;
+  const unreadyWrites: number[] = [];
   const bot = { version: '1.20.1', entity, control, jumpTicks: 0, jumpQueued: false, fireworkRocketDuration: 0, inventory: { slots: [] },
-    setControlState(name: string, value: boolean) { control[name] = value; },
+    setControlState(name: string, value: boolean) {
+      control[name] = value;
+      if (name === 'forward' && value && firstForwardFrame === null) firstForwardFrame = frame;
+      if (['forward', 'back', 'sneak'].includes(name) && frame <= 8) unreadyWrites.push(frame);
+    },
     clearControlStates() { for (const k of Object.keys(control)) control[k] = false; },
     look(yaw: number, pitch: number) { entity.yaw = yaw; entity.pitch = pitch; } };
-  const physics = Physics(data, flatWorld());
-  let frame = 0;
-  const tick = () => new Promise<typeof bot.entity>((resolve) => {
-    const delay = frame === 6 ? 200 : 50;
+  const world = flatWorld();
+  const physics = Physics(data, world);
+  let clock = 1000;
+  let pending = 0, maxPending = 0;
+  const tick = (signal: AbortSignal) => {
     frame++;
-    setTimeout(() => { physics.simulatePlayer(new PlayerState(bot, control), flatWorld()).apply(bot); resolve(bot.entity); }, delay);
-  });
-  const start = Date.now();
-  const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, signal: new AbortController().signal, now: Date.now, deadlineMs: start + 5000 });
-  const elapsed = Date.now() - start;
-  assert.equal(result.outcome, 'ARRIVED', `起点未稳定时应继续采样到启动首段，而非原地等超时：${result.message}`);
-  assert.ok(elapsed < 4000, `应在期限内到达（实际 ${elapsed}ms）`);
+    physics.simulatePlayer(new PlayerState(bot, control), world).apply(bot);
+    if (frame <= 8) entity.onGround = false; // 显式扰动：前八帧强制不稳
+    clock += 50;
+    pending++;
+    maxPending = Math.max(maxPending, pending);
+    return Promise.resolve().then(() => { pending--; return bot.entity; });
+  };
+  const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, signal: new AbortController().signal, now: () => clock });
+  assert.equal(result.outcome, 'ARRIVED', `稳定后应启动首段并到达：${result.message}`);
+  assert.ok(firstForwardFrame !== null && firstForwardFrame > 8, `首段执行（首次按前进）应在第 8 帧之后，实际第 ${firstForwardFrame} 帧`);
+  assert.equal(unreadyWrites.length, 0, `前八帧未就绪期间不得写任何移动键：帧 ${unreadyWrites.join(',')}`);
+  assert.equal(maxPending, 1, `并发待处理 tick 请求应不超过 1，实际 ${maxPending}`);
+  assert.equal(bot.control.forward, false, '到达后应松开前进键');
+  assert.equal(bot.control.back, false, '到达后不应残留倒退键');
+  assert.equal(bot.control.sneak, false, '到达后不应残留潜行键');
 });
