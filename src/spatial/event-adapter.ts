@@ -457,7 +457,9 @@ function readVecList(value: unknown, what: string, limit: number): ValidationRes
   if (value.length > limit) {
     return invalid(makeGap('limit_exceeded', `${what} exceeds the fixed point limit`, { limit, actual: value.length }));
   }
-  const items = value.map(readVec);
+  // Array.from 会把稀疏数组的空洞当作 undefined 交给 readVec，而不是跳过；
+  // 否则 map+filter 会静默丢洞并让长度检查与返回数组不一致。
+  const items = Array.from(value, readVec);
   const badIndex = items.findIndex((item) => item === null);
   if (badIndex >= 0) {
     return invalid(makeGap('invalid_request', `${what}[${badIndex}] must be a finite {x,y,z}`));
@@ -581,7 +583,7 @@ function readDelegation(value: unknown): ValidationResult<ParsedNavigationDelega
       limit: EVENT_ADAPTER_LIMITS.maxMaterials, actual: value.materials.length,
     }));
   }
-  const materials = value.materials.map(readMaterialAllowance);
+  const materials = Array.from(value.materials, readMaterialAllowance);
   const badMaterial = materials.findIndex((item) => item === null);
   if (badMaterial >= 0) {
     return invalid(makeGap('invalid_delegation', `delegation.materials[${badMaterial}] must be {name, maxCount>=0}`));

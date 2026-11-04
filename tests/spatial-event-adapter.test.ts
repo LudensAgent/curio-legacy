@@ -426,6 +426,23 @@ test('budget keeps original TaskInfo time/deadline and resolved effective deadli
   assert.deepEqual(record.curio.budget, budget());
 });
 
+test('sparse route points and materials are refused instead of silently compacted', () => {
+  const sparsePoints = new Array(3) as unknown[];
+  sparsePoints[0] = vec(0, 64, 0);
+  sparsePoints[2] = vec(1, 64, 0);
+  const pointsRefused = refusedCapture(captureNavigationReceipt(walkToInput({
+    request: { skill: 'walk_route', points: sparsePoints } as unknown as NavigationCaptureInput['request'],
+  })));
+  assert.equal(pointsRefused.gaps.some((gap) => gap.code === 'invalid_request' && gap.blocking), true);
+
+  const sparseMaterials = new Array(2) as unknown[];
+  sparseMaterials[0] = { name: 'minecraft:dirt', maxCount: 1 };
+  const materialsRefused = refusedCapture(captureNavigationReceipt(walkToInput({
+    delegation: { ...delegation(), materials: sparseMaterials } as unknown as NavigationCaptureInput['delegation'],
+  })));
+  assert.equal(materialsRefused.gaps.some((gap) => gap.code === 'invalid_delegation' && gap.blocking), true);
+});
+
 test('over-limit arrays/strings are refused before traversal and retain caller-owned originals', () => {
   const receipt = captured(captureNavigationReceipt(walkToInput()));
 
