@@ -114,13 +114,19 @@ test('真实 Arbiter 取消在途 walk_route：取消后不再写前进键，不
   const arbiter = new Arbiter(adapter, memory, bus, flatSenses());
   const done = new Promise<TaskOutcome>((r) => arbiter.once('done', r));
   arbiter.start({ skill: 'walk_route', args: { points: points3 } }, 'llm');
-  await new Promise((r) => setTimeout(r, 300));
+  // 等身体桥真正开始前进（出现 forward=true）再取消，覆盖移动期而非仅初始化期。
+  const startedAt = Date.now();
+  while (!controlLog.some((e) => e.kind === 'set' && e.name === 'forward' && e.value === true)) {
+    if (Date.now() - startedAt > 5000) throw new Error('walk 未在期限内开始前进');
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  // 取消前记录日志边界：取消后任何 forward=true 都应被捕获。
+  const boundary = controlLog.length;
   arbiter.cancel('集成测试取消');
   const o = await done;
   assert.equal(o.result.status, 'cancelled', o.result.summary);
   // 取消之后不得再出现 forward=true：父任务信号已贯通到身体桥。
-  const cancelAt = clockBase;
-  const forwardAfter = controlLog.filter((e) => e.kind === 'set' && e.name === 'forward' && e.value === true && e.at >= cancelAt);
+  const forwardAfter = controlLog.slice(boundary).filter((e) => e.kind === 'set' && e.name === 'forward' && e.value === true);
   assert.deepEqual(forwardAfter, [], '取消后身体桥不得重新按下前进键');
 });
 

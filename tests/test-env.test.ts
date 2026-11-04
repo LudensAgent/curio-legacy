@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { assertNoLinksIn, existingTestState, hasWorldData, readServerProperty, setServerProperty, syncServerForTest } from '../scripts/test-env.ts';
+import { assertNoLinksIn, assertSeedSourceAllowed, existingTestState, hasWorldData, readServerProperty, setServerProperty, syncServerForTest } from '../scripts/test-env.ts';
 import { validateLevelName } from '../src/maintenance/world-reset.ts';
 
 function tmp() { return fs.mkdtempSync(path.join(os.tmpdir(), 'test-env-')); }
@@ -133,6 +133,19 @@ test('assertNoLinksIn 拒绝目标里的 junction，避免 copySeed 沿它写入
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('assertNoLinksIn 拒绝父目录为 junction、目标尚不存在的场景', { skip: process.platform !== 'win32' }, () => {
+  const dir = tmp();
+  const localServer = path.join(dir, 'local-server');
+  const alias = path.join(dir, 'alias');
+  fs.mkdirSync(localServer, { recursive: true });
+  fs.writeFileSync(path.join(localServer, 'level.dat'), 'x');
+  fs.symlinkSync(localServer, alias, 'junction');
+  // 目标 alias/testserver 尚不存在，但其父目录 alias 是 junction，copySeed 会沿它写到 local-server 里。
+  assert.throws(() => assertNoLinksIn(path.join(alias, 'testserver')), /符号链接或 junction/);
+  fs.rmSync(alias, { force: true });
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('assertNoLinksIn 对不存在的目标与普通目录不抛错', () => {
   const dir = tmp();
   const empty = path.join(dir, 'fresh');
@@ -169,4 +182,41 @@ test('validateLevelName 拒绝指向服务器目录之外的 level-name（../ �
   assert.throws(() => validateLevelName(server, path.resolve(dir, 'outside')), /之外|不安全/);
   assert.doesNotThrow(() => validateLevelName(server, 'world'));
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('assertSeedSourceAllowed 接受测试根目录下的同级种子与目标', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'seed-src-'));
+  const seed = path.join(root, 'seed');
+  const target = path.join(root, 'target');
+  fs.mkdirSync(path.join(seed, 'world'), { recursive: true });
+  fs.writeFileSync(path.join(seed, 'world', 'level.dat'), 'x');
+  assert.doesNotThrow(() => assertSeedSourceAllowed(seed, { targetServerDir: target, testRoot: root, envDir: root }));
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('assertSeedSourceAllowed 拒绝测试根目录外的种子', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'seed-src-'));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'seed-out-'));
+  fs.writeFileSync(path.join(outside, 'server.properties'), 'server-port=25565\n');
+  assert.throws(() => assertSeedSourceAllowed(outside, { targetServerDir: path.join(root, 'target'), testRoot: root, envDir: root }), /测试根目录/);
+  fs.rmSync(root, { recursive: true, force: true });
+  fs.rmSync(outside, { recursive: true, force: true });
+});
+
+test('assertSeedSourceAllowed 拒绝种子与目标相同或相互包含（解析后）', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'seed-src-'));
+  const seed = path.join(root, 'seed');
+  fs.mkdirSync(path.join(seed, 'world'), { recursive: true });
+  fs.writeFileSync(path.join(seed, 'world', 'level.dat'), 'x');
+  assert.throws(() => assertSeedSourceAllowed(seed, { targetServerDir: path.join(seed, 'target'), testRoot: root, envDir: root }), /相同或相互包含/);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('assertSeedSourceAllowed 拒绝 local/live 的世界或数据目录作种子', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'seed-src-'));
+  fs.writeFileSync(path.join(root, '.env'), 'SERVER_DIR=./local-world\n');
+  const seed = path.join(root, 'local-world');
+  fs.mkdirSync(seed, { recursive: true });
+  assert.throws(() => assertSeedSourceAllowed(seed, { targetServerDir: path.join(root, 'target'), testRoot: root, envDir: root }), /local 的世界或数据目录/);
+  fs.rmSync(root, { recursive: true, force: true });
 });

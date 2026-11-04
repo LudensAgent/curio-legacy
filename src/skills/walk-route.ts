@@ -47,12 +47,11 @@ function dedupe(cells: Vec3Like[]): Vec3Like[] {
  * 用 map.observeBatch 合并所有变化报告，不丢前面已观察到的支撑拆除通知。
  */
 export function observeCells(ctx: SkillCtx, map: VoxelMap, cells: Vec3Like[]): ChangeReport | null {
-  const observeBlocks = ctx.senses.observeBlocks;
-  if (!observeBlocks) return null;
+  if (!ctx.senses.observeBlocks) return null;
   const unique = dedupe(cells);
   const observations: Observation[] = [];
   for (let i = 0; i < unique.length; i += 32) {
-    for (const b of observeBlocks(unique.slice(i, i + 32))) observations.push(toObservation(b));
+    for (const b of ctx.senses.observeBlocks(unique.slice(i, i + 32))) observations.push(toObservation(b));
   }
   if (observations.length === 0) return null;
   return map.observeBatch({ observations, unobserved: [] });
@@ -97,7 +96,7 @@ export const walkRoute: Skill<WalkRouteArgs> = {
     const parsed: Vec3Like[] = [];
     for (const p of points) {
       const coord = readPoint(p);
-      if (coord === null) return { ok: false, error: 'points 每个点必须是 [x,y,z] 数组或 {x,y,z} 对象，坐标为有限数字' };
+      if (coord === null) return { ok: false, error: 'points 每个点必须是 [x,y,z] 数组或 {x,y,z} 对象，坐标为 ±30000000 内的有限数字' };
       parsed.push(coord);
     }
     const y = parsed[0]!.y;
@@ -125,13 +124,13 @@ export const walkRoute: Skill<WalkRouteArgs> = {
     // 有效期限不能超过父委托期限：子请求只能缩短，不能延长。
     const effectiveDeadline = Math.min(args.deadlineMs ?? ctx.deadline, ctx.deadline);
 
-    // 预扫：依次转向各路线段方向、略低头观察（视锥是朝向的，脚高格在视线下方）。
+    // 预扫：依次转向四个朝向、略低头观察（视锥是朝向的，脚高/支撑格在视线下方）。
+    // 验证需要身体扫掠的前后格（身体 0.6 宽 + 分数脚位会把身后一列也算进扫掠），只朝路线前进方向
+    // 会漏掉身后格，故四个朝向都看一遍——这是合法转头，不是放宽视锥或接触感知。
     observeCells(ctx, map, routeCells(args.points));
     if (typeof ctx.adapter.look === 'function') {
-      for (let i = 0; i < args.points.length - 1; i++) {
+      for (const yaw of [-Math.PI / 2, 0, Math.PI / 2, Math.PI]) {
         if (ctx.signal.aborted || Date.now() >= effectiveDeadline) break;
-        const a = args.points[i]!, b = args.points[i + 1]!;
-        const yaw = Math.atan2(-(b.x - a.x), -(b.z - a.z));
         await ctx.adapter.look(yaw, -0.6);
         observeCells(ctx, map, routeCells(args.points));
       }
@@ -171,17 +170,22 @@ export const walkRoute: Skill<WalkRouteArgs> = {
   },
 };
 
+/** 坐标必须本身是有限数字，且落在可安全枚举的范围（Minecraft 世界边界内）。 */
+const COORD_BOUND = 30_000_000;
+
+function validCoord(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v) && Math.abs(v) <= COORD_BOUND;
+}
+
 function readPoint(p: unknown): Vec3Like | null {
   if (Array.isArray(p)) {
-    const x = Number(p[0]), y = Number(p[1]), z = Number(p[2]);
-    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
-    return { x, y, z };
+    if (!validCoord(p[0]) || !validCoord(p[1]) || !validCoord(p[2])) return null;
+    return { x: p[0], y: p[1], z: p[2] };
   }
-  if (p !== null && typeof p === 'object') {
+  if (p !== null && typeof p === 'object' && !Array.isArray(p)) {
     const o = p as Record<string, unknown>;
-    const x = Number(o.x), y = Number(o.y), z = Number(o.z);
-    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
-    return { x, y, z };
+    if (!validCoord(o.x) || !validCoord(o.y) || !validCoord(o.z)) return null;
+    return { x: o.x, y: o.y, z: o.z };
   }
   return null;
 }

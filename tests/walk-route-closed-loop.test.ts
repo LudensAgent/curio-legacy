@@ -24,8 +24,22 @@ function flatWorld() {
   return world;
 }
 
-/** 带真实物理的身体：setControlState 驱动控制，tick 推一步物理并推进模拟时钟。 */
-function body(start: { x: number; z: number }) {
+/** 平台边缘世界：y=-1 支撑仅在 x<edgeX 为石，x>=edgeX 为空气（脚高 y=0 的身体越过即跌落）。 */
+function platformWorld(edgeX: number) {
+  return {
+    getBlock(position: { floored(): { x: number; y: number; z: number } }) {
+      const p = position.floored();
+      const solid = p.y <= -1 && p.x < edgeX;
+      const stateId = solid ? data.blocksByName.stone.defaultState : data.blocksByName.air.defaultState;
+      const block = Block.fromStateId(stateId, 0);
+      block.position = p;
+      return block;
+    },
+  };
+}
+
+/** 带真实物理的身体：setControlState 驱动控制，tick 推 tickEvery 步物理并推进模拟时钟。 */
+function body(start: { x: number; z: number }, tickEvery: number | number[] = 1, world = flatWorld()) {
   const control: Record<string, boolean> = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
   const entity = { position: new Vec3(start.x, 0, start.z), velocity: new Vec3(0, 0, 0), onGround: true,
     isInWater: false, isInLava: false, isInWeb: false, isCollidedHorizontally: false, isCollidedVertically: false,
@@ -36,12 +50,13 @@ function body(start: { x: number; z: number }) {
     clearControlStates() { for (const k of Object.keys(control)) control[k] = false; },
     look(yaw: number, pitch: number) { entity.yaw = yaw; entity.pitch = pitch; },
   };
-  const world = flatWorld();
   const physics = Physics(data, world);
   let clock = 2000;
+  let ti = 0;
   const tick = () => {
-    physics.simulatePlayer(new PlayerState(bot, control), world).apply(bot);
-    clock += 50;
+    const n = Array.isArray(tickEvery) ? tickEvery[ti++ % tickEvery.length]! : tickEvery;
+    for (let k = 0; k < n; k++) physics.simulatePlayer(new PlayerState(bot, control), world).apply(bot);
+    clock += 50 * n;
     return Promise.resolve(bot.entity);
   };
   return { bot, tick, now: () => clock };
@@ -54,6 +69,19 @@ function buildMap() {
       worldId: 'world', dim: 'overworld', sessionId: 's1', observedAt: 1000, sequence: 1,
       source: 'vision', evidence: 'seen', stateComplete: true,
       state: y === -1 ? { name: 'minecraft:stone', properties: {} } : { name: 'minecraft:air', properties: {} },
+      pos: { x, y, z },
+    });
+  }
+  return map;
+}
+
+function buildPlatformMap(edgeX: number) {
+  const map = new VoxelMap('world', { validityWindowMs: 60_000 });
+  for (let x = -1; x <= 4; x++) for (let z = -1; z <= 4; z++) for (let y = -1; y <= 2; y++) {
+    map.observe({
+      worldId: 'world', dim: 'overworld', sessionId: 's1', observedAt: 1000, sequence: 1,
+      source: 'vision', evidence: 'seen', stateComplete: true,
+      state: y === -1 && x < edgeX ? { name: 'minecraft:stone', properties: {} } : { name: 'minecraft:air', properties: {} },
       pos: { x, y, z },
     });
   }
@@ -101,9 +129,65 @@ test('无 physicsTick（断线/服务器停帧）时按期限有界退出，不�
   const start = Date.now();
   const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick: neverTick, signal: new AbortController().signal, now: Date.now, deadlineMs: Date.now() + 150 });
   const elapsed = Date.now() - start;
-  assert.notEqual(result.outcome, 'ARRIVED', '无物理帧不得误报到达');
+  assert.equal(result.outcome, 'TIMEOUT', `无物理帧且期限耗尽应归 TIMEOUT 而非 CANCELLED：${result.message}`);
   assert.ok(elapsed < 2000, `应在一段期限内结束，不挂起（实际 ${elapsed}ms）`);
   assert.equal(bot.control.forward, false, '退出后不得继续按前进键');
+});
+
+test('合法起点偏移（0.40/0.55）不冲过目标而超时，而是有限位置修正后到达', async () => {
+  for (const sx of [0.40, 0.55]) {
+    const map = buildMap();
+    const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }];
+    const { bot, tick, now } = body({ x: sx, z: 0.52 });
+    const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, signal: new AbortController().signal, now });
+    assert.equal(result.outcome, 'ARRIVED', `起点 x=${sx} 应到达而非超时：${result.message}`);
+    assert.equal(bot.control.forward, false, '到达后应松开前进键');
+  }
+});
+
+test('每两 tick 采样仍到达，不前后振荡超时', async () => {
+  for (const sx of [0.40, 0.50, 0.55]) {
+    const map = buildMap();
+    const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }];
+    const { bot, tick, now } = body({ x: sx, z: 0.52 }, 2);
+    const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, signal: new AbortController().signal, now });
+    assert.equal(result.outcome, 'ARRIVED', `起点 x=${sx} 每 2 tick 采样应到达而非振荡超时：${result.message}`);
+    assert.equal(bot.control.forward, false, '到达后应松开前进键');
+    assert.equal(bot.control.back, false, '到达后不应残留倒退键');
+    assert.equal(bot.control.sneak, false, '到达后不应残留潜行键');
+  }
+});
+
+test('不均匀采样 [1,1,3,1,2] 越过目标后及时制动并到达，不持续前进', async () => {
+  const map = buildMap();
+  const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }];
+  const { bot, tick, now } = body({ x: 0.40, z: 0.52 }, [1, 1, 3, 1, 2]);
+  const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, signal: new AbortController().signal, now });
+  assert.equal(result.outcome, 'ARRIVED', `不均匀采样应到达而非持续前进超时：${result.message}`);
+  const last = result.lastPosition;
+  assert.ok(last && Math.abs(last.x - 1.5) <= 0.12, `末位 ${last?.x.toFixed(2)} 偏离目标过大`);
+});
+
+test('首帧 scope 失效后不再等期限，立即返回', async () => {
+  const map = buildMap();
+  const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }];
+  const { bot } = body({ x: 0.54, z: 0.52 });
+  let frames = 0;
+  const tick = () => {
+    frames++;
+    if (frames > 1) return new Promise<never>(() => {}); // 首帧后不再产生物理帧
+    return Promise.resolve(bot.entity);
+  };
+  const start = Date.now();
+  const result = await runWalkRoute({
+    map, body: bot as never, request: request(points), tick,
+    signal: new AbortController().signal, now: Date.now, deadlineMs: Date.now() + 5000,
+    lifecycle: () => ({ worldId: 'world', dim: 'overworld', sessionId: 'other', alive: true, connected: true, observationReady: true }),
+  });
+  const elapsed = Date.now() - start;
+  assert.equal(result.outcome, 'FAILED');
+  assert.equal((result as { problem?: { kind: string } }).problem?.kind, 'scope_changed');
+  assert.ok(elapsed < 1000, `首帧失效应立即返回而非等到期限（实际 ${elapsed}ms）`);
 });
 
 test('宿主期限早于请求期限：返回后不再继续执行，保留部分位移', async () => {
@@ -129,4 +213,45 @@ test('可见支撑变化在到达前被处理，不误报 ARRIVED', async () => 
   };
   const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, signal: new AbortController().signal, now, observe });
   assert.notEqual(result.outcome, 'ARRIVED', '支撑变化应导致失效，不能误报 ARRIVED');
+});
+
+test('平台边缘 + 不均匀采样 [1,2,1,1,4] 不滑出平台', async () => {
+  const map = buildPlatformMap(2); // 支撑只在 x<2，目标 x=1.5 是最后一块实心
+  const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }];
+  const { bot, tick, now } = body({ x: 0.40, z: 0.52 }, [1, 2, 1, 1, 4], platformWorld(2));
+  const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, signal: new AbortController().signal, now });
+  assert.equal(result.outcome, 'ARRIVED', `平台边缘不应滑落超时：${result.message}`);
+  // 末位必须仍在平台上（脚高不变、x 未越过 2）。
+  const last = result.lastPosition;
+  assert.ok(last, '应有末位');
+  assert.equal(last!.y, 0, '脚高不应跌落');
+  assert.ok(last!.x < 2.0, `末位 x=${last!.x.toFixed(2)} 越过平台边缘`);
+});
+
+test('初始稳定窗口被长间隔重置后仍继续采样并启动首段', async () => {
+  const map = new VoxelMap('world', { validityWindowMs: 60_000 });
+  const now0 = Date.now();
+  for (let x = -1; x <= 4; x++) for (let z = -1; z <= 4; z++) for (let y = -1; y <= 2; y++) {
+    map.observe({ worldId: 'world', dim: 'overworld', sessionId: 's1', observedAt: now0, sequence: 1, source: 'vision', evidence: 'seen', stateComplete: true, state: y === -1 ? { name: 'minecraft:stone', properties: {} } : { name: 'minecraft:air', properties: {} }, pos: { x, y, z } });
+  }
+  const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }];
+  // 直接构造物理身体：tick 用真实时钟推进 prismarine-physics，第 6 帧前插 200ms 间隔重置稳定窗口。
+  const control: Record<string, boolean> = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
+  const entity = { position: new Vec3(0.54, 0, 0.52), velocity: new Vec3(0, 0, 0), onGround: true, isInWater: false, isInLava: false, isInWeb: false, isCollidedHorizontally: false, isCollidedVertically: false, yaw: 0, pitch: 0, effects: {}, attributes: {} };
+  const bot = { version: '1.20.1', entity, control, jumpTicks: 0, jumpQueued: false, fireworkRocketDuration: 0, inventory: { slots: [] },
+    setControlState(name: string, value: boolean) { control[name] = value; },
+    clearControlStates() { for (const k of Object.keys(control)) control[k] = false; },
+    look(yaw: number, pitch: number) { entity.yaw = yaw; entity.pitch = pitch; } };
+  const physics = Physics(data, flatWorld());
+  let frame = 0;
+  const tick = () => new Promise<typeof bot.entity>((resolve) => {
+    const delay = frame === 6 ? 200 : 50;
+    frame++;
+    setTimeout(() => { physics.simulatePlayer(new PlayerState(bot, control), flatWorld()).apply(bot); resolve(bot.entity); }, delay);
+  });
+  const start = Date.now();
+  const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, signal: new AbortController().signal, now: Date.now, deadlineMs: start + 5000 });
+  const elapsed = Date.now() - start;
+  assert.equal(result.outcome, 'ARRIVED', `起点未稳定时应继续采样到启动首段，而非原地等超时：${result.message}`);
+  assert.ok(elapsed < 4000, `应在期限内到达（实际 ${elapsed}ms）`);
 });

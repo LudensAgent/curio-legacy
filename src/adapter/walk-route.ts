@@ -50,7 +50,8 @@ export const walkCollisionProvider: CollisionShapeProvider = {
 export interface WalkBody {
   setControlState(name: string, value: boolean): void;
   clearControlStates(): void;
-  look(yaw: number, pitch: number): void;
+  /** 转向目标朝向；返回 Promise 时调用方应等待转向完成再按前进键，避免转弯时残留旧朝向。 */
+  look(yaw: number, pitch: number): void | Promise<void>;
   entity: {
     position: { x: number; y: number; z: number };
     velocity: { x: number; y: number; z: number };
@@ -153,29 +154,81 @@ export class WalkMoveExecutor implements MoveExecutor {
     const moveDeadline = Math.min(request.deadlineMs, this.now() + request.timeoutMs);
     if (this.now() >= moveDeadline) return { failure: { kind: 'timed_out' } };
 
-    this.body.look(Math.atan2(-(to.x - from.x), -(to.z - from.z)), 0);
-    // 转头后重新检查所有权/取消：转头等待期间可能被抢占。
+    await this.body.look(Math.atan2(-(to.x - from.x), -(to.z - from.z)), 0);
+    // 转头后重新检查取消/期限：转头等待期间可能被抢占或到期。
     if (this.aborted(request)) return { failure: { kind: 'cancelled' } };
+    if (this.now() >= moveDeadline) return { failure: { kind: 'timed_out' } };
     this.body.clearControlStates();
     this.body.setControlState('forward', true);
     this.activeExecutionId = request.executionId;
 
-    const GROUND_STOP = 1 / (1 - 0.546); // 地面摩擦每 tick 衰减到约 0.546 倍
-    let braked = false;
+    // 制动距离系数：真实 1.20.1 服务器上松开前进键后约再走 1.19 个 tick 的位移即停
+    // （实测 coast≈0.256 格、帧间位移≈0.216 格/tick）。离线 prismarine-physics 的 0.546
+    // 摩擦口径与之不符，不能直接套用。
+    const GROUND_STOP = 1.2;
+    const TICK_MS = 50;
+    // 接近终点的减速阈值：进入该距离后潜行，限制余速与越过平台的幅度。
+    // 满速 + 采样间隔不均匀（如补跑 4 tick）时一次可前冲约 0.86 格，故提前减速，
+    // 让实际运动轨迹留在已验证范围内；越过后的纠偏只作补充。
+    const SLOW_DISTANCE = 0.7;
+    // 到达容差：制动后落在容差外时按此做有限位置修正（前后蠕行），不放大容差掩盖误差。
+    const tol = request.bodyArrival?.horizontalTolerance ?? 0.12;
+    const axis = { x: to.x - from.x, z: to.z - from.z }; // 单轴 ±1
+    let prevPos: { x: number; z: number } | null = null;
+    let prevTime: number | null = null;
     for (let i = 0; i < 400; i++) {
       if (this.aborted(request)) { this.releaseIf(request.executionId); return { failure: { kind: 'cancelled' } }; }
       if (this.now() >= moveDeadline) { this.releaseIf(request.executionId); return { failure: { kind: 'timed_out' } }; }
       const e = await awaitFrame(this.tick, moveDeadline, this.now, request.signal, this.parentSignal);
+      // 每次异步等待返回后，在写控制或提交样本之前，复核取消/期限/归属：旧段迟到恢复不能
+      // 松开新段的键、提交旧样本；到期帧也不能再写控制。
+      if (this.aborted(request)) { this.releaseIf(request.executionId); return { failure: { kind: 'cancelled' } }; }
+      if (this.now() >= moveDeadline) { this.releaseIf(request.executionId); return { failure: { kind: 'timed_out' } }; }
       if (e === null) {
         // 无帧：复核取消/期限后再决定终态，不把断线误判为普通成功。
-        if (this.aborted(request)) { this.releaseIf(request.executionId); return { failure: { kind: 'cancelled' } }; }
         if (this.now() >= moveDeadline) { this.releaseIf(request.executionId); return { failure: { kind: 'timed_out' } }; }
         this.releaseIf(request.executionId);
         return { failure: { kind: 'execution_error', detail: 'no physics frame available' } };
       }
       const dist = Math.hypot(to.x - e.position.x, to.z - e.position.z);
-      const speed = Math.hypot(e.velocity.x, e.velocity.z);
-      if (!braked && dist <= speed * GROUND_STOP) { this.body.setControlState('forward', false); braked = true; }
+      // 用实际帧间位移估计速度，并按采样间隔折算为每 tick 速度：每 2 tick 采样一次时位移是
+      // 2 倍，直接当速度会让制动距离翻倍而提前停下。首帧没有前值，退回 velocity 作启动近似。
+      const t = this.now();
+      const speed = prevPos !== null && prevTime !== null
+        ? Math.hypot(e.position.x - prevPos.x, e.position.z - prevPos.z) / Math.max(1, (t - prevTime) / TICK_MS)
+        : Math.hypot(e.velocity.x, e.velocity.z);
+      // 沿运动轴的实际运动方向：>0 朝目标轴正向移动，<0 反向。首帧无前值，置 0。
+      const movingAlong = prevPos !== null
+        ? (e.position.x - prevPos.x) * axis.x + (e.position.z - prevPos.z) * axis.z
+        : 0;
+      prevPos = { x: e.position.x, z: e.position.z };
+      prevTime = t;
+      // 沿运动轴的有符号误差：>0 冲过头，<0 还没到。
+      const signed = (e.position.x - to.x) * axis.x + (e.position.z - to.z) * axis.z;
+      if (dist <= tol) {
+        this.body.setControlState('forward', false);
+        this.body.setControlState('back', false);
+        this.body.setControlState('sneak', false);
+      } else if (signed * movingAlong > 0) {
+        // 越过目标且继续同向远离：不能只等「进入制动距离窗口」（采样间隔不均匀时可能直接跳过去），
+        // 立即松键制动，再交由下面的有限纠偏。
+        this.body.setControlState('forward', false);
+        this.body.setControlState('back', false);
+        this.body.setControlState('sneak', false);
+      } else if (speed < 0.01) {
+        // 静止且差一点：潜行缓慢纠偏（冲过头就倒退）。满速纠偏会来回冲过头而振荡，
+        // 潜行余速小、停得准，结合速度方向让剩余速度和停止位置共同收敛。
+        this.body.setControlState('forward', signed < 0);
+        this.body.setControlState('back', signed > 0);
+        this.body.setControlState('sneak', true);
+      } else if (dist <= speed * GROUND_STOP) {
+        this.body.setControlState('forward', false);
+        this.body.setControlState('back', false);
+        this.body.setControlState('sneak', false);
+      } else {
+        // 仍在靠近：接近终点时潜行减速（限制余速，防越过平台），否则满速。
+        this.body.setControlState('sneak', dist <= SLOW_DISTANCE);
+      }
       this.frameSink?.(e);
       // 让出事件循环：库的 onSample 确认到达 → stop/abort，及其 move 结果微任务得以执行。
       await new Promise((r) => setImmediate(r));
@@ -188,12 +241,15 @@ export class WalkMoveExecutor implements MoveExecutor {
     if (executionId !== this.activeExecutionId) return; // 旧段不能清理新段的控制
     this.body.setControlState('forward', false);
     this.body.clearControlStates();
+    // 结束旧执行的控制权：迟到收尾（releaseIf）再也不能操作身体。
+    this.activeExecutionId = null;
   }
 
   private releaseIf(executionId: string): void {
     // 归属检查必须同时保护松键与清空归属：旧段的迟到收尾不能清掉新段的归属。
     if (executionId !== this.activeExecutionId) return;
-    this.body.setControlState('forward', false);
+    // 释放当前执行用到的全部移动键（前进/倒退/潜行），再撤销归属，函数返回前不留任何按键。
+    this.body.clearControlStates();
     this.activeExecutionId = null;
   }
 }
@@ -239,14 +295,19 @@ export async function runWalkRoute(opts: {
   executor.setFrameSink(observeThenSample);
 
   // 初始实测位置：bodyArrival 需要多帧确认身体稳定在起点，advance 才会启动首段。
-  // 初始采样与行走采样使用同一套期限和生命周期约束，不在期限检查循环之前无限等待。
-  if (loop.status()!.result === null) {
-    for (let i = 0; i < 8; i++) {
-      const entity = await awaitFrame(opts.tick, deadline, now, opts.signal);
-      if (entity === null) break;
-      observeThenSample(entity);
-      if (opts.signal.aborted) break;
-    }
+  // 固定 8 帧不能代表起点已稳定（采样间隔不均会重置稳定窗口，停止取样后没人再喂样本，
+  // 身体执行未启动、库又等稳定样本，只能原地等到超时）。因此持续采样直到 advance 启动首段、
+  // 产生终态、取消或到期，再交给下面的行走循环。
+  let initFrames = 0;
+  while (loop.status()!.result === null && loop.status()!.activeStepIndex === null && now() < deadline && !opts.signal.aborted && initFrames < 400) {
+    const entity = await awaitFrame(opts.tick, deadline, now, opts.signal);
+    if (entity === null) break;
+    observeThenSample(entity);
+    // 每处理一个样本后立即检查终态/取消；首帧就失效时不继续订阅下一帧。
+    if (opts.signal.aborted || loop.status()!.result !== null) break;
+    loop.advance(64);
+    loop.checkTimeout();
+    initFrames++;
   }
 
   let iterations = 0;
@@ -255,12 +316,16 @@ export async function runWalkRoute(opts: {
     loop.checkTimeout();
     await new Promise((r) => setTimeout(r, 10));
   }
-  // 退出时若仍无终态：区分父任务取消与宿主期限到期，保留已测位移后返回。
+  // 退出时若仍无终态：主动取消返回 CANCELLED，期限耗尽返回 TIMEOUT，两者分别反馈，保留已测位移。
   let result = loop.status()!.result;
   if (result === null) {
-    result = opts.signal.aborted
-      ? loop.cancel('agent', 'parent task cancelled')
-      : loop.cancel('scheduler', 'host deadline exceeded');
+    if (opts.signal.aborted) {
+      result = loop.cancel('agent', 'parent task cancelled');
+    } else {
+      loop.checkTimeout(); // 期限耗尽 → guard 判定 TIMEOUT
+      result = loop.status()!.result;
+      if (result === null) result = loop.cancel('scheduler', 'host deadline exceeded');
+    }
   }
   opts.signal.removeEventListener('abort', onParentAbort);
   return result;

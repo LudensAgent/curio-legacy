@@ -94,8 +94,34 @@ export function hasWorldData(dir: string): boolean {
   return worldDirsIn(dir).length > 0;
 }
 
+/** 解析 dir 的实际落点（dir 可尚不存在）：向上找到现存祖先后 realpath，再拼回不存在的后缀，避免 junction 让词法路径失真。 */
+function resolveRealPath(dir: string): string {
+  let existing = path.resolve(dir);
+  const suffix: string[] = [];
+  while (!fs.existsSync(existing)) {
+    const parent = path.dirname(existing);
+    suffix.unshift(path.basename(existing));
+    if (parent === existing) break;
+    existing = parent;
+  }
+  const real = fs.realpathSync(existing);
+  return suffix.length ? path.join(real, ...suffix) : real;
+}
+
 /** 目标服务器目录不能包含符号链接或 junction：copySeed 会沿它写入链接指向的外部目录，覆盖其他环境的世界。 */
 export function assertNoLinksIn(dir: string): void {
+  // 现存祖先也可能包含 junction：目标尚不存在时，copySeed 的 mkdirSync 仍会沿它把副本写到链接指向的外部目录。
+  let ancestor = path.resolve(dir);
+  while (!fs.existsSync(ancestor)) {
+    const parent = path.dirname(ancestor);
+    if (parent === ancestor) break;
+    ancestor = parent;
+  }
+  for (let p = ancestor; ; p = path.dirname(p)) {
+    if (fs.lstatSync(p).isSymbolicLink()) throw new Error(`test 世界目录不能经过符号链接或 junction：${p}`);
+    const parent = path.dirname(p);
+    if (parent === p) break;
+  }
   if (!fs.existsSync(dir)) return;
   if (fs.lstatSync(dir).isSymbolicLink()) throw new Error(`test 世界目录不能是符号链接或 junction：${dir}`);
   const walk = (current: string): void => {
@@ -161,6 +187,32 @@ async function showConfig(): Promise<void> {
   for (const [key, value] of rows) console.log(`${key}: ${value}`);
 }
 
+/** 校验种子源：不得取自 local/live，必须落在测试根目录内，且与目标互不包含。纯路径校验，不写盘、不启动服务器。 */
+export function assertSeedSourceAllowed(seedDir: string, opts: {
+  targetServerDir: string;
+  testRoot: string;
+  envDir: string;
+}): void {
+  // 不得用 local/live 的世界或数据目录作种子：本任务的测试世界必须独立，不能用它们的快照初始化。
+  for (const peer of peerLayouts(opts.envDir, 'test')) {
+    for (const peerDir of [peer.serverDir, peer.dataDir]) {
+      if (sameOrNested(seedDir, peerDir) || sameOrNested(peerDir, seedDir)) {
+        throw new Error(`种子源不能是 ${peer.mode} 的世界或数据目录：${seedDir}（请用独立测试世界源）`);
+      }
+    }
+  }
+  // 种子源必须位于测试根目录（TEST_ROOT_DIR）内，不能来自测试目录之外。
+  if (!sameOrNested(opts.testRoot, seedDir)) {
+    throw new Error(`种子源必须位于测试根目录 ${opts.testRoot} 内：${seedDir}`);
+  }
+  // 用实际解析路径判断源目标是否相互包含：junction 会让词法路径不同但实际落点嵌套，导致复制递归展开自身。
+  const seedReal = fs.realpathSync(seedDir);
+  const targetReal = resolveRealPath(opts.targetServerDir);
+  if (sameOrNested(seedReal, targetReal) || sameOrNested(targetReal, seedReal)) {
+    throw new Error('种子源与 test 世界目录（解析后）不能相同或相互包含，否则复制会把刚创建的目标再次当作源递归展开');
+  }
+}
+
 async function initTest(): Promise<void> {
   const seed = argvFlag('--seed');
   if (!seed) {
@@ -174,23 +226,11 @@ async function initTest(): Promise<void> {
 
   const seedProps = path.join(seedDir, 'server.properties');
   if (!fs.existsSync(seedProps)) throw new Error(`种子源不是 Minecraft 服务器目录（缺 server.properties）：${seedDir}`);
-  const seedResolved = path.resolve(seedDir);
-  // 不得用 local/live 的世界或数据目录作种子：本任务的测试世界必须独立，不能用它们的快照初始化。
-  for (const peer of peerLayouts(path.dirname(envFile), 'test')) {
-    for (const peerDir of [peer.serverDir, peer.dataDir]) {
-      if (sameOrNested(seedResolved, peerDir) || sameOrNested(peerDir, seedResolved)) {
-        throw new Error(`种子源不能是 ${peer.mode} 的世界或数据目录：${seedDir}（请用独立测试世界源）`);
-      }
-    }
-  }
-  // 种子源必须位于测试根目录（SERVER_DIR）内，不能来自测试目录之外。
-  if (!sameOrNested(targetServerDir, seedResolved)) {
-    throw new Error(`种子源必须位于测试根目录 ${targetServerDir} 内：${seedDir}`);
-  }
-  const targetResolved = path.resolve(targetServerDir);
-  if (sameOrNested(seedResolved, targetResolved) || sameOrNested(targetResolved, seedResolved)) {
-    throw new Error('种子源与 test 世界目录不能相同或相互包含，否则复制会把刚创建的目标再次当作源递归展开');
-  }
+  assertSeedSourceAllowed(seedDir, {
+    targetServerDir,
+    testRoot: path.resolve(path.dirname(envFile), process.env.TEST_ROOT_DIR ?? ''),
+    envDir: path.dirname(envFile),
+  });
   const levelName = readServerProperty(seedProps, 'level-name') ?? 'world';
   // level-name 必须位于种子服务器目录内部：拒绝绝对路径、.. 段或指向种子目录之外，否则副本仍指向共享世界而非独立副本。
   validateLevelName(seedDir, levelName);
