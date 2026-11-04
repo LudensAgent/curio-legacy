@@ -324,7 +324,7 @@ test('swimTo does not hang or write forward when budget exhausts during look bef
   let now = 100000;
   t.mock.method(Date, 'now', () => now);
   const controls: Record<string, boolean> = {};
-  let forwardWrites = 0;
+  let forwardWrites = 0, lookCalls = 0, tickCalls = 0;
   const bot = {
     game: { dimension: 'overworld' },
     entity: { position: new Vec3(2.5, 61, 2.5), velocity: new Vec3(0, 0, 0), eyeHeight: 1.62, onGround: false, isInWater: true, isInLava: false, isCollidedHorizontally: false },
@@ -333,14 +333,16 @@ test('swimTo does not hang or write forward when budget exhausts during look bef
     setControlState(name: string, value: boolean) { if (name === 'forward' && value) forwardWrites++; controls[name] = value; },
     clearControlStates() { for (const k of Object.keys(controls)) controls[k] = false; },
     blockAt: (p: { y: number }) => ({ name: p.y >= bot.entity.position.y + 1.0 ? 'air' : 'water', getProperties: () => ({}) as Record<string, string | number | boolean>, boundingBox: 'block' }),
-    async look() { now += 400; }, // 转头消耗预算，越过 300ms 的 end
-    async waitForTicks() { /* 永不 resolve，旧实现会因 remaining()=0 禁用超时定时器而永久挂起 */ },
+    async look() { lookCalls++; now += 300; }, // 转头刚好把 now 推到 300ms 的 end 上
+    waitForTicks() { tickCalls++; return new Promise<void>(() => {}); }, // 真实永不 resolve：旧实现会因 remaining()=0 禁用超时定时器而永久挂起
   };
   const adapter = new MineflayerAdapter(config, new EventBus());
   adapter.bot = bot; adapter.mcData = data; Reflect.set(adapter, 'connectedFlag', true);
   const result = await adapter.swimTo({ x: 6.5, y: 64, z: 2.5 }, new AbortController().signal, { timeoutMs: 300 });
   assert.equal(result.ok, false);
   assert.equal(result.reason, 'WATER_ESCAPE_TIMEOUT');
+  assert.equal(lookCalls, 1, '只在仍有正预算时调用一次 look');
+  assert.equal(tickCalls, 0, 'look 恰好落在截止时刻（remaining=0）后不得触发任何 tick');
   assert.equal(forwardWrites, 0, '预算耗尽后不得再写 forward');
 });
 

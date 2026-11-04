@@ -5,6 +5,8 @@ import { wait } from '../src/skills/wait.ts';
 import { gather } from '../src/skills/work.ts';
 import { surface, unstuck } from '../src/skills/movement.ts';
 import { swimTo } from '../src/skills/actions.ts';
+import { runSkill, type SkillCtx } from '../src/skills/types.ts';
+import { AbortedError, TimeoutError } from '../src/util.ts';
 import { makeCtx, TestWorld } from './survival-helpers.ts';
 
 test('waiting in water does not implicitly swim or change the chosen action', async () => {
@@ -175,6 +177,60 @@ test('swim_to delegates the full positive parent budget without a fixed -1000 cu
     assert.equal(r.status, 'failed');
     assert.equal(delegatedMs, 2500, '委托时长 = 剩余，不被 -1000 缩减');
   } finally { ctx.memory.close(); }
+});
+
+type WaterPartial = { pos?: { x: number; y: number; z: number }; oxygen?: number; observedAt?: number };
+
+for (const scenario of [
+  {
+    name: 'surface cancellation keeps the pre-delegation clone when the adapter throws AbortedError without partial',
+    cancelled: true,
+    error: () => new AbortedError('test cancel'),
+    run: (ctx: SkillCtx) => runSkill(ctx, surface, {}),
+  },
+  {
+    name: 'swim_to timeout keeps the pre-delegation clone when the adapter throws TimeoutError without partial',
+    cancelled: false,
+    error: () => new TimeoutError('test timeout'),
+    run: (ctx: SkillCtx) => runSkill(ctx, swimTo, { xyz: { x: -3.5, y: 64, z: 10.25 } }),
+  },
+]) test(scenario.name, async (t) => {
+  const w = new TestWorld();
+  // state().pos 是可变引用：底层动作会原地改写它，再推进时钟，且不带 partial 抛错。
+  const sharedPos = { x: 1.25, y: 60, z: -4.5 };
+  const shared = { pos: sharedPos, oxygen: 12 };
+  w.state = () => shared as unknown as ReturnType<TestWorld['state']>;
+  let now = 100000;
+  t.mock.method(Date, 'now', () => now);
+  w.swimTo = async () => {
+    sharedPos.x = 99; sharedPos.y = 4; sharedPos.z = -99;
+    shared.oxygen = 2;
+    now += 500;
+    throw scenario.error();
+  };
+  const ctx = makeCtx(w);
+  try {
+    let partial: WaterPartial | undefined;
+    if (scenario.cancelled) {
+      let caught: unknown;
+      try { await scenario.run(ctx); } catch (e) { caught = e; }
+      assert.ok(caught instanceof Error, '取消应向上抛出，不发明成功或失败结果');
+      assert.equal(caught.name, 'AbortedError', 'AbortedError 保持取消语义');
+      partial = (caught as Error & { partial?: WaterPartial }).partial;
+    } else {
+      const result = await scenario.run(ctx);
+      assert.equal(result.status, 'failed');
+      assert.equal(result.failureCode, 'TIMEOUT', 'TimeoutError 归类为 TIMEOUT 失败，不包装成成功');
+      partial = result.data as WaterPartial;
+    }
+    assert.deepEqual(partial?.pos, { x: 1.25, y: 60, z: -4.5 }, '没有时，partial 用委托前的坐标克隆，不读被原地改写/推进后的当前值');
+    assert.notStrictEqual(partial?.pos, sharedPos, 'partial.pos 是独立克隆，不是底层仍在改写的同一对象');
+    assert.equal(partial?.oxygen, 12, 'partial.oxygen 是委托前氧气，不是底层改写后的 2');
+    assert.equal(partial?.observedAt, 100000, 'partial.observedAt 是委托前观测时刻，不是推进后的时刻');
+    assert.deepEqual(sharedPos, { x: 99, y: 4, z: -99 }, '确认适配器确实原地改写了 state().pos');
+    assert.equal(shared.oxygen, 2);
+    assert.equal(now, 100500, '确认适配器确实推进了时钟');
+  } finally { ctx.memory.close(); t.mock.restoreAll(); }
 });
 
 test('swim_to refuses only when no positive time remains', async (t) => {

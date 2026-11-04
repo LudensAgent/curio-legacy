@@ -132,21 +132,25 @@ test('a learned combination can validate and execute the chosen key controls', a
   ctx.memory.close();
 });
 
-test('a learned macro runs surface (one ascent) then swim_to with the validated fractional/negative xyz surviving the round-trip', async () => {
+test('a learned macro runs surface (one ascent) then swim_to with the validated fractional/negative xyz surviving the round-trip', async (t) => {
   const adapter = new FakeAdapter(), ctx = makeCtx(adapter);
   adapter.inWater = true; adapter.oxygen = 10;
-  const swimCalls: ({ x: number; y: number; z: number } | null)[] = [];
-  adapter.swimTo = async (target) => {
-    swimCalls.push(target);
-    if (target) { adapter.inWater = false; adapter.pos = { x: target.x, y: target.y, z: target.z }; }
-    else adapter.oxygen = 20;
-    return { ok: true, landed: !!target, surfaced: !target, oxygen: 20 };
+  let now = 100000;
+  t.mock.method(Date, 'now', () => now);
+  ctx.deadline = now + 500; // 父预算 500ms；子步骤不得把它重置成自己的 20s
+  const delegated: { target: { x: number; y: number; z: number } | null; signal: AbortSignal; timeoutMs?: number }[] = [];
+  adapter.swimTo = async (target, signal, opts) => {
+    delegated.push({ target, signal, timeoutMs: opts?.timeoutMs });
+    if (delegated.length === 1) now += 100; // surface 的真实委托推进时钟：第二步只剩 400ms
+    return target
+      ? { ok: true, landed: true, surfaced: true, oxygen: 20 }
+      : { ok: true, landed: false, surfaced: true, oxygen: 20 };
   };
-  // 走真实 SkillLibrary 注册/校验路径执行 surface 与 swim_to，同时捕获它们收到的 ctx，验证继承的 signal/taskId 与正剩余预算。
-  const captured: { skill: string; signal: AbortSignal; taskId: string; remaining: number }[] = [];
+  // 走真实 SkillLibrary 注册/校验路径执行 surface 与 swim_to，同时捕获它们收到的 ctx，验证继承的 signal/taskId 与父级剩余预算。
+  const captured: { skill: string; signal: AbortSignal; taskId: string; deadline: number; remaining: number }[] = [];
   const origSurface = SKILLS.surface, origSwimTo = SKILLS.swim_to;
-  SKILLS.surface = { ...origSurface, run: async (c, a) => { captured.push({ skill: 'surface', signal: c.signal, taskId: c.taskId, remaining: c.deadline - Date.now() }); return origSurface.run(c, a); } };
-  SKILLS.swim_to = { ...origSwimTo, run: async (c, a) => { captured.push({ skill: 'swim_to', signal: c.signal, taskId: c.taskId, remaining: c.deadline - Date.now() }); return origSwimTo.run(c, a); } };
+  SKILLS.surface = { ...origSurface, run: async (c, a) => { captured.push({ skill: 'surface', signal: c.signal, taskId: c.taskId, deadline: c.deadline, remaining: c.deadline - Date.now() }); return origSurface.run(c, a); } };
+  SKILLS.swim_to = { ...origSwimTo, run: async (c, a) => { captured.push({ skill: 'swim_to', signal: c.signal, taskId: c.taskId, deadline: c.deadline, remaining: c.deadline - Date.now() }); return origSwimTo.run(c, a); } };
   const library = new SkillLibrary(null, adapter, ctx.memory, ctx.bus);
   const learned = library.learn({ name: 'surface_then_swim', steps: [
     { skill: 'surface', args: {} },
@@ -156,17 +160,21 @@ test('a learned macro runs surface (one ascent) then swim_to with the validated 
   try {
     const result = await SKILLS[learned.name].run(ctx, {});
     assert.equal(result.status, 'succeeded', result.summary);
-    assert.deepEqual(swimCalls, [null, { x: -7.5, y: 64, z: 3.25 }], 'swim_to 的 xyz 经 learn 校验并再校验后仍原样到达 swimTo（不取整、不加 0.5）');
+    assert.deepEqual(delegated.map((d) => d.target), [null, { x: -7.5, y: 64, z: 3.25 }], '第一次上浮传 null，随后 swim_to 的 fractional/negative xyz 经 learn 校验并再校验后原样到达 swimTo（不取整、不加 0.5）');
+    assert.deepEqual(delegated.map((d) => d.timeoutMs), [500, 400], 'surface 取得父级全部剩余 500ms；时钟推进后 swim_to 只取得剩余 400ms');
+    assert.deepEqual(delegated.map((d) => d.signal), [ctx.signal, ctx.signal], '两次委托都继承调用方的同一个 signal');
     assert.deepEqual(captured.map((c) => c.skill), ['surface', 'swim_to'], '两个真实公共技能都按顺序执行');
+    assert.deepEqual(captured.map((c) => c.remaining), [500, 400], '子步骤按真实父级剩余预算执行（不是各自的 20s 默认超时）');
     for (const c of captured) {
       assert.equal(c.signal, ctx.signal, `${c.skill} 继承了调用方的 signal`);
       assert.equal(c.taskId, ctx.taskId, `${c.skill} 继承了调用方的 taskId`);
-      assert.ok(c.remaining > 0, `${c.skill} 的剩余预算应为正（实际 ${c.remaining}）`);
+      assert.equal(c.deadline, ctx.deadline, `${c.skill} 的 deadline 保持父级截止时刻，不被重置成 now + 自身超时`);
     }
   } finally {
     SKILLS.surface = origSurface;
     SKILLS.swim_to = origSwimTo;
     library.forget(learned.name, '测试结束');
     ctx.memory.close();
+    t.mock.restoreAll();
   }
 });
