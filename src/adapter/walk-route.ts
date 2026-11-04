@@ -155,8 +155,9 @@ export class WalkMoveExecutor implements MoveExecutor {
     if (this.now() >= moveDeadline) return { failure: { kind: 'timed_out' } };
 
     await this.body.look(Math.atan2(-(to.x - from.x), -(to.z - from.z)), 0);
-    // 转头后重新检查所有权/取消：转头等待期间可能被抢占。
+    // 转头后重新检查取消/期限：转头等待期间可能被抢占或到期。
     if (this.aborted(request)) return { failure: { kind: 'cancelled' } };
+    if (this.now() >= moveDeadline) return { failure: { kind: 'timed_out' } };
     this.body.clearControlStates();
     this.body.setControlState('forward', true);
     this.activeExecutionId = request.executionId;
@@ -165,28 +166,48 @@ export class WalkMoveExecutor implements MoveExecutor {
     // （实测 coast≈0.256 格、帧间位移≈0.216 格/tick）。离线 prismarine-physics 的 0.546
     // 摩擦口径与之不符，不能直接套用。
     const GROUND_STOP = 1.2;
-    let braked = false;
+    const TICK_MS = 50;
+    // 到达容差：制动后落在容差外时按此做有限位置修正（前后蠕行），不放大容差掩盖误差。
+    const tol = request.bodyArrival?.horizontalTolerance ?? 0.12;
+    const axis = { x: to.x - from.x, z: to.z - from.z }; // 单轴 ±1
     let prevPos: { x: number; z: number } | null = null;
+    let prevTime: number | null = null;
     for (let i = 0; i < 400; i++) {
       if (this.aborted(request)) { this.releaseIf(request.executionId); return { failure: { kind: 'cancelled' } }; }
       if (this.now() >= moveDeadline) { this.releaseIf(request.executionId); return { failure: { kind: 'timed_out' } }; }
       const e = await awaitFrame(this.tick, moveDeadline, this.now, request.signal, this.parentSignal);
+      // 每次异步等待返回后，在写控制或提交样本之前，复核取消/期限/归属：旧段迟到恢复不能
+      // 松开新段的键，也不能提交旧样本。
+      if (this.aborted(request)) { this.releaseIf(request.executionId); return { failure: { kind: 'cancelled' } }; }
       if (e === null) {
         // 无帧：复核取消/期限后再决定终态，不把断线误判为普通成功。
-        if (this.aborted(request)) { this.releaseIf(request.executionId); return { failure: { kind: 'cancelled' } }; }
         if (this.now() >= moveDeadline) { this.releaseIf(request.executionId); return { failure: { kind: 'timed_out' } }; }
         this.releaseIf(request.executionId);
         return { failure: { kind: 'execution_error', detail: 'no physics frame available' } };
       }
       const dist = Math.hypot(to.x - e.position.x, to.z - e.position.z);
-      // 用实际帧间位移估计速度：真实适配器 entity.velocity 约为每 tick 实际位移的 0.546 倍
-      // （服务器上报的是摩擦后的速度），直接用它会让制动距离少算一半而冲过目标。首帧没有前值，
-      // 退回到 velocity 作为启动近似。
-      const speed = prevPos === null
-        ? Math.hypot(e.velocity.x, e.velocity.z)
-        : Math.hypot(e.position.x - prevPos.x, e.position.z - prevPos.z);
+      // 用实际帧间位移估计速度，并按采样间隔折算为每 tick 速度：每 2 tick 采样一次时位移是
+      // 2 倍，直接当速度会让制动距离翻倍而提前停下。首帧没有前值，退回 velocity 作启动近似。
+      const t = this.now();
+      const speed = prevPos !== null && prevTime !== null
+        ? Math.hypot(e.position.x - prevPos.x, e.position.z - prevPos.z) / Math.max(1, (t - prevTime) / TICK_MS)
+        : Math.hypot(e.velocity.x, e.velocity.z);
       prevPos = { x: e.position.x, z: e.position.z };
-      if (!braked && dist <= speed * GROUND_STOP) { this.body.setControlState('forward', false); braked = true; }
+      prevTime = t;
+      // 沿运动轴的有符号误差：>0 冲过头，<0 还没到。
+      const signed = (e.position.x - to.x) * axis.x + (e.position.z - to.z) * axis.z;
+      if (dist <= tol) {
+        this.body.setControlState('forward', false);
+        this.body.setControlState('back', false);
+      } else if (speed < 0.01) {
+        // 静止且差一点：朝目标蠕行（冲过头就倒退），有限位置修正。
+        this.body.setControlState('forward', signed < 0);
+        this.body.setControlState('back', signed > 0);
+      } else if (dist <= speed * GROUND_STOP) {
+        this.body.setControlState('forward', false);
+        this.body.setControlState('back', false);
+      }
+      // else: 保持当前移动方向，继续接近。
       this.frameSink?.(e);
       // 让出事件循环：库的 onSample 确认到达 → stop/abort，及其 move 结果微任务得以执行。
       await new Promise((r) => setImmediate(r));
@@ -199,6 +220,8 @@ export class WalkMoveExecutor implements MoveExecutor {
     if (executionId !== this.activeExecutionId) return; // 旧段不能清理新段的控制
     this.body.setControlState('forward', false);
     this.body.clearControlStates();
+    // 结束旧执行的控制权：迟到收尾（releaseIf）再也不能操作身体。
+    this.activeExecutionId = null;
   }
 
   private releaseIf(executionId: string): void {
@@ -266,12 +289,16 @@ export async function runWalkRoute(opts: {
     loop.checkTimeout();
     await new Promise((r) => setTimeout(r, 10));
   }
-  // 退出时若仍无终态：区分父任务取消与宿主期限到期，保留已测位移后返回。
+  // 退出时若仍无终态：主动取消返回 CANCELLED，期限耗尽返回 TIMEOUT，两者分别反馈，保留已测位移。
   let result = loop.status()!.result;
   if (result === null) {
-    result = opts.signal.aborted
-      ? loop.cancel('agent', 'parent task cancelled')
-      : loop.cancel('scheduler', 'host deadline exceeded');
+    if (opts.signal.aborted) {
+      result = loop.cancel('agent', 'parent task cancelled');
+    } else {
+      loop.checkTimeout(); // 期限耗尽 → guard 判定 TIMEOUT
+      result = loop.status()!.result;
+      if (result === null) result = loop.cancel('scheduler', 'host deadline exceeded');
+    }
   }
   opts.signal.removeEventListener('abort', onParentAbort);
   return result;

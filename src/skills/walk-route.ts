@@ -96,7 +96,7 @@ export const walkRoute: Skill<WalkRouteArgs> = {
     const parsed: Vec3Like[] = [];
     for (const p of points) {
       const coord = readPoint(p);
-      if (coord === null) return { ok: false, error: 'points 每个点必须是 [x,y,z] 数组或 {x,y,z} 对象，坐标为有限数字' };
+      if (coord === null) return { ok: false, error: 'points 每个点必须是 [x,y,z] 数组或 {x,y,z} 对象，坐标为 ±30000000 内的有限数字' };
       parsed.push(coord);
     }
     const y = parsed[0]!.y;
@@ -170,17 +170,22 @@ export const walkRoute: Skill<WalkRouteArgs> = {
   },
 };
 
+/** 坐标必须本身是有限数字，且落在可安全枚举的范围（Minecraft 世界边界内）。 */
+const COORD_BOUND = 30_000_000;
+
+function validCoord(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v) && Math.abs(v) <= COORD_BOUND;
+}
+
 function readPoint(p: unknown): Vec3Like | null {
   if (Array.isArray(p)) {
-    const x = Number(p[0]), y = Number(p[1]), z = Number(p[2]);
-    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
-    return { x, y, z };
+    if (!validCoord(p[0]) || !validCoord(p[1]) || !validCoord(p[2])) return null;
+    return { x: p[0], y: p[1], z: p[2] };
   }
-  if (p !== null && typeof p === 'object') {
+  if (p !== null && typeof p === 'object' && !Array.isArray(p)) {
     const o = p as Record<string, unknown>;
-    const x = Number(o.x), y = Number(o.y), z = Number(o.z);
-    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
-    return { x, y, z };
+    if (!validCoord(o.x) || !validCoord(o.y) || !validCoord(o.z)) return null;
+    return { x: o.x, y: o.y, z: o.z };
   }
   return null;
 }

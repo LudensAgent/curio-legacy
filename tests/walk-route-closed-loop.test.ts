@@ -101,9 +101,20 @@ test('无 physicsTick（断线/服务器停帧）时按期限有界退出，不�
   const start = Date.now();
   const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick: neverTick, signal: new AbortController().signal, now: Date.now, deadlineMs: Date.now() + 150 });
   const elapsed = Date.now() - start;
-  assert.notEqual(result.outcome, 'ARRIVED', '无物理帧不得误报到达');
+  assert.equal(result.outcome, 'TIMEOUT', `无物理帧且期限耗尽应归 TIMEOUT 而非 CANCELLED：${result.message}`);
   assert.ok(elapsed < 2000, `应在一段期限内结束，不挂起（实际 ${elapsed}ms）`);
   assert.equal(bot.control.forward, false, '退出后不得继续按前进键');
+});
+
+test('合法起点偏移（0.40/0.55）不冲过目标而超时，而是有限位置修正后到达', async () => {
+  for (const sx of [0.40, 0.55]) {
+    const map = buildMap();
+    const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }];
+    const { bot, tick, now } = body({ x: sx, z: 0.52 });
+    const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, signal: new AbortController().signal, now });
+    assert.equal(result.outcome, 'ARRIVED', `起点 x=${sx} 应到达而非超时：${result.message}`);
+    assert.equal(bot.control.forward, false, '到达后应松开前进键');
+  }
 });
 
 test('宿主期限早于请求期限：返回后不再继续执行，保留部分位移', async () => {
