@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { Vec3 } from 'vec3';
 import { SKILLS } from '../src/skills/index.ts';
+import { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import { walkRoute } from '../src/skills/walk-route.ts';
 import { runSkill } from '../src/skills/types.ts';
 import type { BlockObservation, GameAdapter } from '../src/adapter/types.ts';
@@ -20,7 +24,7 @@ test('walk_route 已注册并可校验点列', () => {
   assert.ok(!bad.ok, '同高要求');
 });
 
-test('walk_route 通过真实身体桥离线走通三段转弯', async () => {
+test('walk_route 通过真实身体桥离线走通三段转弯', { timeout: 45000 }, async () => {
   // prismarine-physics 世界：石地面 y=-1，空气以上
   const world = { getBlock(p: { floored(): { x: number; y: number; z: number } }) {
     const c = p.floored();
@@ -50,14 +54,37 @@ test('walk_route 通过真实身体桥离线走通三段转弯', async () => {
       }, 50);
     }),
   } as unknown as GameAdapter;
+  const dir = mkdtempSync(join(tmpdir(), 'walk-route-skill-'));
+  const svc = await SharedSpatialSession.open({ worldId: 'world', databasePath: join(dir, 'memory.db') });
+  let begun = false;
   const senses = {
-    observeBlocks: (positions: { x: number; y: number; z: number }[]) => positions.map((p): BlockObservation => ({
-      name: p.y === -1 ? 'minecraft:stone' : 'minecraft:air', properties: {}, stateComplete: true, pos: { ...p },
-      worldId: 'world', sessionId: 's1', dimension: 'overworld', observationId: 1, observedAt: Date.now(), source: 'vision',
-    })),
+    observeBlocks: (positions: { x: number; y: number; z: number }[]) => {
+      if (!begun) {
+        svc.beginSession({ worldId: 'world', dim: 'overworld', sessionId: 's1' });
+        begun = true;
+      }
+      const observations = positions.map((p): BlockObservation => ({
+        name: p.y === -1 ? 'minecraft:stone' : 'minecraft:air', properties: {}, stateComplete: true, pos: { ...p },
+        worldId: 'world', sessionId: 's1', dimension: 'overworld', observationId: 1, observedAt: Date.now(), source: 'vision',
+      }));
+      if (observations.length > 0) svc.observe(observations);
+      return observations;
+    },
   };
-  const ctx = { adapter, senses, deadline: Date.now() + 30000, signal: new AbortController().signal, taskId: 't', progress() {} };
-  const result = await runSkill(ctx as never, walkRoute, { points: [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 1.5 }, { x: 2.5, y: 0, z: 1.5 }] });
-  assert.equal(result.status, 'succeeded', result.summary);
-  assert.equal((result.data?.nav as { outcome: string }).outcome, 'ARRIVED');
+  try {
+    const ctx = { adapter, senses, spatial: svc, deadline: Date.now() + 30000, signal: new AbortController().signal, taskId: 't', progress() {} };
+    const result = await runSkill(ctx as never, walkRoute, { points: [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 1.5 }, { x: 2.5, y: 0, z: 1.5 }] });
+    assert.equal(result.status, 'succeeded', result.summary);
+    assert.equal((result.data?.nav as { outcome: string }).outcome, 'ARRIVED');
+  } finally {
+    const result = await svc.shutdown();
+    assert.equal(result.error, null);
+    assert.equal(result.cancelError, null);
+    assert.equal(result.closeError, null);
+    assert.ok(result.close !== null, 'real close must return a result');
+    assert.equal(result.close.completed, true);
+    assert.equal(result.close.error, null);
+    assert.equal(result.close.unconfirmedRequest, false);
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -8,11 +8,13 @@ test('both thinking tiers expose direction and water movement tools with their e
     const look = lines.find((line) => line.startsWith('- look '));
     const dive = lines.find((line) => line.startsWith('- dive '));
     const surface = lines.find((line) => line.startsWith('- surface '));
+    const swimTo = lines.find((line) => line.startsWith('- swim_to '));
     const travel = lines.find((line) => line.startsWith('- travel '));
-    assert.ok(look && dive && surface && travel, 'these actions must be discoverable before the agent uses them');
+    assert.ok(look && dive && surface && swimTo && travel, 'these actions must be discoverable before the agent uses them');
     assert.match(look, /"dir".*NW.*只转头不走/);
     assert.match(dive, /"xyz".*min_oxygen.*停下回报/);
-    assert.match(surface, /上浮换气并游上岸.*挖开头顶方块/);
+    assert.match(surface, /只做一次有界上浮.*不找岸.*不挖不垫/);
+    assert.match(swimTo, /"xyz".*保持这个目标不换|"xyz".*游过去/);
     assert.match(travel, /步行、游泳.*不制造或切换载具/);
   }
 });

@@ -272,8 +272,6 @@ export interface TradeView {
 
 export interface SwimOptions {
   timeoutMs?: number;
-  /** Refresh only ordinary senses; returning null keeps the swimmer afloat while looking. */
-  observeShore?: () => Vec3Like | null;
 }
 
 export interface BlockState {
@@ -312,6 +310,8 @@ export interface DriveResult extends ActionResult { moved: number; ms: number; s
 
 export interface GameAdapter {
   on(event: AdapterEvent, cb: (...args: any[]) => void): this;
+  /** Standard listener removal for host-owned lifecycle bindings; optional for minimal adapters. */
+  off?(event: AdapterEvent, cb: (...args: unknown[]) => void): this;
 
   state(): AgentState;
   inventorySlots?(): InventorySlot[];
@@ -421,13 +421,15 @@ export interface GameAdapter {
   look(yaw: number, pitch: number, signal?: AbortSignal): Promise<void>;
   jump(ms: number, signal: AbortSignal): Promise<void>;
   /** Swim toward an observed shore, retaining buoyancy until dry footing is verified. */
-  swimTo?(target: Vec3Like | null, signal: AbortSignal, opts?: SwimOptions): Promise<ActionResult & { landed: boolean; oxygen: number }>;
+  swimTo?(target: Vec3Like | null, signal: AbortSignal, opts?: SwimOptions): Promise<ActionResult & { landed: boolean; surfaced: boolean; oxygen: number }>;
   /** 在水里朝一格游过去（往下潜或往上游）：到了、气不够了（oxygen ≤ minOxygen）、出了水或超时就停 */
   diveTo?(target: Vec3Like, signal: AbortSignal, opts?: { minOxygen?: number; timeoutMs?: number }): Promise<ActionResult & { reached: boolean; oxygen: number }>;
 
   // ---- 通用基础动作：玩家的“右键”和“方向键”。上层用它们组合出技能清单里没有的玩法
   /** 手持 item 右键：对着一个方块/水面（block），或对空中/自己（self） */
   useItemOn?(item: string, target: { kind: 'block'; pos: Vec3Like } | { kind: 'self' }, signal: AbortSignal): Promise<ActionResult & { spawned?: string; placed?: Vec3Like }>;
+  /** 满桶（water_bucket/lava_bucket）往指定空气格倒流体：按 use_item 物品使用语义，贴实心面发射线、核对桶消耗与目标格流体 */
+  useBucketAt?(pos: Vec3Like, item: string, signal: AbortSignal): Promise<ActionResult & { placed?: Vec3Like }>;
   /** 右键一个实体：船/矿车/马会坐上去，其他生物按手上物品交互（喂食、繁殖、剪毛、交易…） */
   interactEntity?(entityId: number, item: string | null, signal: AbortSignal): Promise<ActionResult & { mounted?: string }>;
   /** 从载具/坐骑上下来；toward = 先面朝这个点（原版下船时按乘客朝向挑落点，面朝岸边就会落到岸上） */
@@ -456,4 +458,6 @@ export interface GameAdapter {
  */
 export type AdapterEvent = 'spawn' | 'death' | 'respawn' | 'hurt' | 'disconnected' | 'kicked' | 'chat' | 'game_message'
   /** 捡起了自己刚扔掉的东西：{ item, count } */
-  | 'recollected';
+  | 'recollected'
+  /** The adapter's real sessionId changed (connect/spawn/death/respawn/end/dimension). No payload. */
+  | 'session_reset';

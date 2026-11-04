@@ -6,8 +6,8 @@
  * 观测遵守 Vision 的批次限制（≤32 格/次），变化报告整批合并喂给地图，不丢支撑拆除通知。
  */
 
-import { GROUNDED_ARRIVAL_DEFAULTS, VoxelMap } from 'curio-minecraft-3d-memory';
-import type { ChangeReport, NavResult, Observation, Vec3Like } from 'curio-minecraft-3d-memory';
+import { GROUNDED_ARRIVAL_DEFAULTS } from 'curio-minecraft-3d-memory';
+import type { ChangeReport, NavResult, Observation, Vec3Like, VoxelMap } from 'curio-minecraft-3d-memory';
 import { runWalkRoute, walkCollisionProvider } from '../adapter/walk-route.ts';
 import type { BlockObservation } from '../adapter/types.ts';
 import { fail, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
@@ -46,17 +46,22 @@ function dedupe(cells: Vec3Like[]): Vec3Like[] {
 }
 
 /**
- * 观察一组格并整批喂进地图；遵守 Vision 的 ≤32 格/次批次限制，
- * 用 map.observeBatch 合并所有变化报告，不丢前面已观察到的支撑拆除通知。
+ * 观察一组格；遵守 Vision 的 ≤32 格/次批次限制。
+ * 共享模式下只触发实际合法 Vision 观测（服务/真实视觉是唯一写者），不再写地图；
+ * 独立模式下保持单次 observeBatch 的既有路径，供其自身的有界批测试使用。
  */
 export function observeCells(ctx: SkillCtx, map: VoxelMap, cells: Vec3Like[]): ChangeReport | null {
   if (!ctx.senses.observeBlocks) return null;
   const unique = dedupe(cells);
+  const shared = ctx.spatial !== undefined;
   const observations: Observation[] = [];
   for (let i = 0; i < unique.length; i += 32) {
-    for (const b of ctx.senses.observeBlocks(unique.slice(i, i + 32))) observations.push(toObservation(b));
+    const batch = ctx.senses.observeBlocks(unique.slice(i, i + 32));
+    // 共享模式：Vision 在返回前已通过服务同步写入并派发报告。
+    if (shared) continue;
+    for (const b of batch) observations.push(toObservation(b));
   }
-  if (observations.length === 0) return null;
+  if (shared || observations.length === 0) return null;
   return map.observeBatch({ observations, unobserved: [] });
 }
 
@@ -118,12 +123,15 @@ export const walkRoute: Skill<WalkRouteArgs> = {
     return { ok: true, args: { points: parsed, ...(deadlineMs !== undefined ? { deadlineMs } : {}) } };
   },
   async run(ctx, args) {
+    const spatial = ctx.spatial;
+    if (!spatial) return fail('ERROR', 'walk_route 需要宿主共享空间会话（ctx.spatial），当前未接线');
     const body = ctx.adapter.walkBody?.();
     const tick = ctx.adapter.walkTick?.();
     if (!body || !tick) return fail('ERROR', '当前适配器没有 walk 身体桥（walkBody/walkTick）');
 
     const state = ctx.adapter.state();
-    const map = new VoxelMap(state.worldId, { validityWindowMs: 60_000 });
+    // 共享步行只读宿主服务持有的地图；缺失/关闭时显式失败，绝不自建 VoxelMap 兜底。
+    const map = spatial.session.voxel;
     // 有效期限不能超过父委托期限：子请求只能缩短，不能延长。
     const effectiveDeadline = Math.min(args.deadlineMs ?? ctx.deadline, ctx.deadline);
 
@@ -166,10 +174,23 @@ export const walkRoute: Skill<WalkRouteArgs> = {
       map, body, request, tick, signal: ctx.signal, observe,
       lifecycle: () => {
         const s = ctx.adapter.state();
+        // 真实 ready 丢失（同一 sessionId 下区块消失）可能先被步行生命周期看到、
+        // 且之后没有下一帧/下一次 Vision 调用；此时把已经知道的实际边界交给共享
+        // 服务一次。服务仅在实际准入时 interrupt，重复读取不会重复中断。
+        if (!s.observationReady && spatial.observationAdmitted) spatial.interrupt();
         return { worldId: s.worldId, dim: s.dim, sessionId: s.sessionId, alive: s.alive, connected: s.connected, observationReady: s.observationReady };
       },
       deadlineMs: effectiveDeadline,
       now: Date.now,
+      // 附着生命周期属于本次真实步行：报告在身体样本前同步进入 loop，取消走 lifecycle。
+      // finally 只撤销本 token，不关闭共享会话，也不影响后续任务。
+      bindActive: (loop) => {
+        const token = spatial.attach({
+          receiver: (report) => loop.observe(report, 64),
+          cancel: () => loop.cancel('lifecycle', 'shared spatial session interrupted the active walk'),
+        });
+        return () => spatial.detach(token);
+      },
     });
     // 父任务已取消但库以其它终态返回（期限/失效先到）：以取消返回，保留部分位移。
     if (ctx.signal.aborted && nav.outcome !== 'CANCELLED') return { status: 'cancelled', summary: nav.message, data: { nav } };

@@ -59,6 +59,7 @@ export function constrainRecoveryAction(ctx: SkillCtx, name: string, values: Rec
       const target = worldPoint(args.xyz) ?? (Array.isArray(args.at) && args.at.length === 3 ? toWorld(feetCell(ctx.adapter.state().pos), facing, args.at as [number, number, number]) : undefined);
       if (!target || target.x !== scope.target.x || target.y !== scope.target.y || target.z !== scope.target.z) throw new Error('恢复不能替换原动作的目标格');
     }
+    if (name === 'dig_at' && args.fall === true && original.fall !== true) throw new Error('原委托没有允许 fall:true，恢复不能擅自接受坠落风险');
     if (name === 'dig_at' && scope.skill === 'dig_at') {
       for (const flag of ['wet', 'lava', 'own'] as const) if (args[flag] === true && original[flag] !== true) throw new Error(`原挖掘没有允许 ${flag}:true，恢复不能擅自打开`);
     }

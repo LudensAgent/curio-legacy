@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import type { GameAdapter } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
+import type { SharedSpatialSession } from '../spatial/shared-session.ts';
 import { SKILLS } from '../skills/index.ts';
 import { isSkillDisabled } from '../skills/disabled.ts';
 import { runSkill, validateSkill, type FailureCode, type Senses, type SkillResult } from '../skills/types.ts';
@@ -60,7 +61,7 @@ interface Running extends TaskInfo {
 /** 会“透视”的原始查询：技能必须改用 ctx.senses（看见/听见/记得的东西）。 */
 // lightAt 不在其中：身边的明暗是看得出来的
 const XRAY_METHODS = new Set(['findBlocks', 'nearbyEntities', 'blockOptics']);
-const ACTION_METHODS = new Set(['moveTo', 'dig', 'placeBlockAt', 'placeBlockStateAt', 'equipItem', 'tossItem', 'arrangeHotbar', 'useGui', 'tradeWith', 'useBlockAt', 'useItem', 'rangedAttack', 'enterPortalAt', 'collectNearbyDrops', 'craft', 'sleepInBed', 'smelt', 'useChest', 'till', 'plant', 'eat', 'equipWeapon', 'attack', 'look', 'jump', 'swimTo', 'diveTo', 'pillarUp', 'drive', 'raiseShield', 'startDraw', 'releaseDraw', 'signText', 'editBook', 'chat', 'stopAll', 'fish', 'useItemOn', 'interactEntity', 'ride', 'dismount', 'emptyFurnace', 'walkBody', 'walkTick']);
+const ACTION_METHODS = new Set(['moveTo', 'dig', 'placeBlockAt', 'placeBlockStateAt', 'equipItem', 'tossItem', 'arrangeHotbar', 'useGui', 'tradeWith', 'useBlockAt', 'useItem', 'rangedAttack', 'enterPortalAt', 'collectNearbyDrops', 'craft', 'sleepInBed', 'smelt', 'useChest', 'till', 'plant', 'eat', 'equipWeapon', 'attack', 'look', 'jump', 'swimTo', 'diveTo', 'pillarUp', 'drive', 'raiseShield', 'startDraw', 'releaseDraw', 'signText', 'editBook', 'chat', 'stopAll', 'fish', 'useItemOn', 'useBucketAt', 'interactEntity', 'ride', 'dismount', 'emptyFurnace', 'walkBody', 'walkTick']);
 
 /**
  * 动作仲裁器：任意时刻只有一个任务拥有角色控制权。
@@ -73,19 +74,38 @@ export class Arbiter extends EventEmitter {
   private version = 0;
   blockedActions = 0;
   private pausedFlag = false;
+  private disposeLifecycle: (() => void) | null = null;
 
   get paused() { return this.pausedFlag; }
 
   setPaused(paused: boolean) {
     this.pausedFlag = paused;
-    if (paused) {
-      this.cancel('paused');
-      this.adapter.stopAll();
+    try {
+      // 暂停/恢复边界即使在零观测间隔也必须进入共享空间记忆；不依赖 Mind 事件或轮询。
+      this.spatial?.setPaused(paused);
+    } finally {
+      // 即使共享服务在取消回调里抛错，也必须完成原来的取消与 stopAll；错误原样上抛。
+      if (paused) {
+        this.cancel('paused');
+        this.adapter.stopAll();
+      }
     }
   }
 
-  constructor(private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private senses: Senses) {
+  constructor(private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private senses: Senses, private spatial?: SharedSpatialSession) {
     super();
+    if (this.spatial) {
+      // 真实会话身份变化只通知共享服务中断；此时绝不回调 adapter.state()（换维会再次触发 newSession）。
+      const onSessionReset = () => { this.spatial!.interrupt(); };
+      this.adapter.on('session_reset', onSessionReset);
+      this.disposeLifecycle = () => { this.adapter.off?.('session_reset', onSessionReset); };
+    }
+  }
+
+  /** Host/test teardown: remove only the lifecycle listener; never close the shared session here. */
+  dispose(): void {
+    this.disposeLifecycle?.();
+    this.disposeLifecycle = null;
   }
 
   get planVersion() {
@@ -142,6 +162,7 @@ export class Arbiter extends EventEmitter {
                 if (!allowed.length) throw new Error('RESERVED_MATERIALS:没有可用于放置的未预留方块');
                 args[1] = allowed;
               } else if (prop === 'placeBlockStateAt' || prop === 'plant') requireAvailable(String(args[1]), 1);
+              else if (prop === 'useBucketAt') requireAvailable(String(args[1]), 1);
               else if (prop === 'useChest') for (const item of args[1] as { name: string; count: number }[]) requireAvailable(item.name, item.count);
               else if (prop === 'smelt') {
                 const input = String(args[0]), amount = Number(args[1]), fuel = String(args[2]);
@@ -166,7 +187,7 @@ export class Arbiter extends EventEmitter {
             }
             // These older primitives did not expose a signal. Bind task ownership
             // here so their internal post-await checks also observe cancellation.
-            const signalIndex: Record<string, number> = { dig: 1, placeBlockAt: 2, placeBlockStateAt: 3, equipItem: 2, tossItem: 2, arrangeHotbar: 2, useGui: 2, tradeWith: 3, useBlockAt: 2, useItem: 1, rangedAttack: 1, enterPortalAt: 1, collectNearbyDrops: 0, craft: 2, sleepInBed: 0, smelt: 3, useChest: 3, till: 1, plant: 2, eat: 0, equipWeapon: 0, attack: 1, look: 2, jump: 1, swimTo: 1, diveTo: 1, pillarUp: 1, drive: 2, raiseShield: 1, startDraw: 1, releaseDraw: 0, signText: 1, editBook: 2, fish: 0, useItemOn: 2, interactEntity: 2, ride: 1, dismount: 0, emptyFurnace: 1 };
+            const signalIndex: Record<string, number> = { dig: 1, placeBlockAt: 2, placeBlockStateAt: 3, equipItem: 2, tossItem: 2, arrangeHotbar: 2, useGui: 2, tradeWith: 3, useBlockAt: 2, useItem: 1, rangedAttack: 1, enterPortalAt: 1, collectNearbyDrops: 0, craft: 2, sleepInBed: 0, smelt: 3, useChest: 3, till: 1, plant: 2, eat: 0, equipWeapon: 0, attack: 1, look: 2, jump: 1, swimTo: 1, diveTo: 1, pillarUp: 1, drive: 2, raiseShield: 1, startDraw: 1, releaseDraw: 0, signText: 1, editBook: 2, fish: 0, useItemOn: 2, useBucketAt: 2, interactEntity: 2, ride: 1, dismount: 0, emptyFurnace: 1 };
             if (prop === 'moveTo') args[1] = { ...(args[1] as object), signal };
             else if (String(prop) in signalIndex) args[signalIndex[String(prop)]] = signal;
             return v.apply(t, args);
@@ -183,6 +204,8 @@ export class Arbiter extends EventEmitter {
    */
   start(step: Step, source: TaskSource, meta: { planId?: string; gentle?: boolean; climb?: { height: number; spent: number; startY: number } } = {}): TaskInfo | { error: string } {
     if (this.pausedFlag) return { error: 'Agent 已暂停' };
+    // 关闭中的共享服务不再接受新任务；不自动重试或退回独立地图。
+    if (this.spatial?.closing) return { error: '共享空间会话正在关闭，拒绝启动新任务' };
     const v = this.validate(step);
     if (!v.ok) {
       this.bus.publish('task_rejected', 'P1', `${step.skill} 参数无效：${v.error}`, { step, source });
@@ -235,6 +258,7 @@ export class Arbiter extends EventEmitter {
       },
       setStationaryWait: (waiting: boolean) => { task.stationaryWait = waiting; },
       ...(meta.climb ? { climb: meta.climb } : {}),
+      ...(this.spatial ? { spatial: this.spatial } : {}),
     };
 
     runSkill(ctx, skill, v.args as { make?: boolean })

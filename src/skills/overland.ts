@@ -285,7 +285,9 @@ export const travel: Skill<TravelArgs> = {
           } else {
             const land = next?.cells[0] ?? leg.cells[leg.cells.length - 1];
             const before = adapter.state().pos;
-            const r = adapter.swimTo ? await adapter.swimTo(land, signal, { timeoutMs: Math.min(20000, 3000 + leg.cells.length * 1500) }) : { ok: false, reason: 'NO_SWIM', landed: false, oxygen: 20 };
+            // 规划格是整数方块坐标（land.y 已是脚高）：转成方块中心的落脚点，否则角色停在角点旁不上岸。
+            const footing = { x: land.x + 0.5, y: land.y, z: land.z + 0.5 };
+            const r = adapter.swimTo ? await adapter.swimTo(footing, signal, { timeoutMs: Math.min(20000, 3000 + leg.cells.length * 1500) }) : { ok: false, reason: 'NO_SWIM', landed: false, oxygen: 20 };
             swum += dist3(before, adapter.state().pos);
             if (!r.ok || !r.landed) { lastErr = `游过 ${leg.cells.length} 格水没上岸（${r.reason ?? '没站稳'}）`; avoid.add(`${land.x},${land.z}`); failed = true; }
             budget -= dist3(before, adapter.state().pos);

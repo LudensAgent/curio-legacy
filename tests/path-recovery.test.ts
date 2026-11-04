@@ -98,7 +98,7 @@ test('a stalled water route reports the blockage without selecting a new destina
     let rejectPath: (e: Error) => void = () => {}, actualGoal: unknown, swims = 0;
     w.bot.pathfinder = { goto: (target: unknown) => { actualGoal = target; return new Promise((_, reject) => { rejectPath = reject; }); },
       isMoving: () => true, stop() { rejectPath(new Error('Path was stopped')); }, setGoal() {} };
-    w.adapter.swimTo = async () => { swims++; return { ok: false, landed: false, oxygen: 20 }; };
+    w.adapter.swimTo = async () => { swims++; return { ok: false, landed: false, surfaced: false, oxygen: 20 }; };
     const pending = (w.adapter as any).gotoUnstalled(goal, { ...w.opts, allowSwimming }, (w.adapter as any).actionCheckpoint(w.opts.signal));
     const rejected = assert.rejects(pending, /当前在水中.*未另选上岸位置/);
     await advance(2700);

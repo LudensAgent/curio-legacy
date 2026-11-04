@@ -4,7 +4,7 @@ import { Reflex } from '../src/brain/reflex.ts';
 import { EventBus } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { placeTorch } from '../src/skills/light.ts';
-import { findAirPocket, surface } from '../src/skills/movement.ts';
+import { surface } from '../src/skills/movement.ts';
 import { hunt } from '../src/skills/survival.ts';
 import { eat, gather, gatherTargetRisk } from '../src/skills/work.ts';
 import { dig } from '../src/skills/body.ts';
@@ -60,7 +60,7 @@ test('gather：深坑挨水的石头算 deep；树和沙子不因水/危险区�
   } finally { memory.close(); }
 });
 
-// ------------------------------------------------------------ surface：头顶封住 / 开阔水面 / 水洞气穴
+// ------------------------------------------------------------ surface：只做一次有界上浮，不挖顶/不找气穴/不寻岸
 function submerged(feetY: number) {
   const w = new TestWorld();
   w.inWater = true; w.oxygen = 6;
@@ -68,50 +68,57 @@ function submerged(feetY: number) {
   return w;
 }
 
-test('surface：水下头顶是石头 → 先往上挖开，再上浮换气', async () => {
+test('surface 只做一次有界上浮：不挖顶、不找气穴、不寻岸、不换目标', async () => {
   const w = submerged(60);
-  w.setBlock({ x: 0, y: 60, z: 0 }, 'water'); w.setBlock({ x: 0, y: 61, z: 0 }, 'water'); // y=62 默认是石头
-  const swim = w.swimTo.bind(w);
-  w.swimTo = async (target, signal, opts) => {
-    const result = await swim(target, signal, opts);
-    if (!target) w.pos.y = 61; // 眼部到达刚挖开的空气，身体仍在水里
-    return result;
-  };
-  const ctx = makeCtx(w);
+  w.setBlock({ x: 0, y: 62, z: 0 }, 'stone'); // 头顶封住，但 surface 不看也不挖
+  let digs = 0, moves = 0, swims = 0;
+  const realSwim = w.swimTo.bind(w);
+  w.swimTo = async (target: any, signal: AbortSignal, opts?: any) => { swims++; return realSwim(target, signal, opts); };
+  w.dig = async () => { digs++; return { ok: true }; };
+  w.moveTo = async () => { moves++; };
+  const ctx = makeCtx(w, { deadlineMs: 3000 });
   try {
     const r = await surface.run(ctx, {});
-    assert.equal(r.status, 'succeeded', r.summary);
-    const dig = w.actions.indexOf('dig:stone'), swim = w.actions.findIndex((a) => a.startsWith('swim:'));
-    assert.ok(dig >= 0 && swim > dig, w.actions.join(' '));
-    assert.equal(w.blockAt({ x: 0, y: 62, z: 0 }), 'air');
+    assert.equal(r.status, 'failed', r.summary);
+    assert.equal(digs, 0, '不得挖开头顶');
+    assert.equal(moves, 0, '不得寻路到岸/换目标');
+    assert.equal(swims, 1, '只做一次上浮委托');
+    assert.equal(r.data?.landed, false);
+    assert.equal(r.data?.surfaced, false);
   } finally { ctx.memory.close(); }
 });
 
-test('surface：开阔水面不挖东西，直接上浮', async () => {
+test('surface 浮出水面但未站稳时报告 surfaced=true、landed=false', async () => {
   const w = submerged(64);
-  w.setBlock({ x: 0, y: 64, z: 0 }, 'water');
+  w.swimTo = async () => { w.inWater = true; w.oxygen = 20; return { ok: true, landed: false, surfaced: true, oxygen: 20 }; };
   const ctx = makeCtx(w);
   try {
     const r = await surface.run(ctx, {});
     assert.equal(r.status, 'succeeded', r.summary);
-    assert.ok(!w.actions.some((a) => a.startsWith('dig:')), w.actions.join(' '));
-    assert.equal(w.actions[0], 'swim:up');
+    assert.equal(r.data?.surfaced, true);
+    assert.equal(r.data?.landed, false);
   } finally { ctx.memory.close(); }
 });
 
-test('surface：头顶挖不动时，沿连通的水道游向最近的气穴', async () => {
-  const w = submerged(58);
-  for (const p of [[0, 58, 0], [0, 59, 0], [1, 59, 0], [2, 59, 0], [3, 59, 0], [3, 60, 0]]) w.setBlock({ x: p[0], y: p[1], z: p[2] }, 'water');
-  for (let y = 61; y <= 63; y++) w.setBlock({ x: 3, y, z: 0 }, 'air'); // 竖井通到地面
-  w.dig = async () => ({ ok: false, reason: 'TOOL_MISSING' });
+test('surface 上浮失败时保留实际位置与氧气，不谎称上岸', async () => {
+  const w = submerged(60);
+  w.swimTo = async () => { w.pos = { ...w.pos, y: w.pos.y + 1 }; return { ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, surfaced: false, oxygen: w.oxygen }; };
   const ctx = makeCtx(w);
   try {
-    const pocket = findAirPocket(ctx);
-    assert.deepEqual(pocket?.pos, { x: 3, y: 61, z: 0 });
     const r = await surface.run(ctx, {});
-    assert.equal(r.status, 'succeeded', r.summary);
-    assert.deepEqual(r.data?.pocket, { x: 3, y: 61, z: 0 });
+    assert.equal(r.status, 'failed');
+    assert.equal(r.data?.landed, false);
+    assert.equal(r.data?.surfaced, false);
+    assert.deepEqual(r.data?.pos, w.pos);
+    assert.equal(r.data?.oxygen, w.oxygen);
   } finally { ctx.memory.close(); }
+});
+
+test('surface 拒绝旧的 escape 参数，不再接受自动挖顶/寻岸', () => {
+  const w = new TestWorld();
+  const v = surface.validate({ escape: 'shore' }, w);
+  assert.equal(v.ok, false);
+  assert.match(v.error, /escape/);
 });
 
 // ------------------------------------------------------------ 火把 / 吃 / 打鱼
@@ -161,46 +168,23 @@ test('hunt：可以指定打鱼，但只打浅水里的鱼', async () => {
   } finally { ctx.memory.close(); }
 });
 
-test('surface：一次上浮里就升级打法——游不到岸就先原地换气，再让寻路往岸上走', async () => {
+test('surface 不因低氧或封顶升级成挖顶/寻岸：始终只做一次上浮委托', async () => {
   const w = submerged(60);
   w.oxygen = 10;
   for (let y = 60; y <= 70; y++) w.setBlock({ x: 0, y, z: 0 }, 'water');
   const swims: string[] = [];
-  // 原地游到水面能换气（头出空气）；向岸游却始终站不上岸（氧气继续掉）
-  w.swimTo = async (target) => {
+  w.swimTo = async (target: any) => {
     swims.push(target ? 'shore' : 'up');
-    if (!target) { w.pos.y = 71; w.oxygen = 20; }
-    else w.oxygen = Math.max(0, w.oxygen - 1);
-    return { ok: false, landed: false, oxygen: w.oxygen };
+    return { ok: false, landed: false, surfaced: false, oxygen: w.oxygen };
   };
   const moves: string[] = [];
-  w.moveTo = async (t: any) => { moves.push(t.kind); w.inWater = false; w.oxygen = 20; };
+  w.moveTo = async (t: any) => { moves.push(t.kind); };
   const ctx = makeCtx(w, { senses: { nearestLand: () => ({ dir: 'E', dist: 6, pos: { x: 6, y: 63, z: 0 } }) } });
   try {
     const r = await surface.run(ctx, {});
-    assert.equal(r.status, 'succeeded', r.summary);
-    assert.deepEqual(moves, ['near'], '游不到岸后升级为让寻路往岸上走');
-  } finally { ctx.memory.close(); }
-});
-
-test('surface：游进气穴后头在空气里就原地换气，不再找别的气穴游走', async () => {
-  const w = submerged(58);
-  for (const p of [[0, 58, 0], [0, 59, 0], [1, 59, 0], [2, 59, 0], [3, 59, 0], [3, 60, 0]]) w.setBlock({ x: p[0], y: p[1], z: p[2] }, 'water');
-  w.setBlock({ x: 3, y: 61, z: 0 }, 'air');
-  w.dig = async () => ({ ok: false, reason: 'TOOL_MISSING' });
-  const swims: string[] = [];
-  w.swimTo = async (target) => {
-    swims.push(target ? `${target.x},${target.y},${target.z}` : 'up');
-    if (target) w.pos = { x: target.x, y: target.y - 1.62, z: target.z };
-    else w.oxygen = 20;
-    return { ok: false, landed: false, oxygen: w.oxygen };
-  };
-  const ctx = makeCtx(w, { deadlineMs: 3000 });
-  try {
-    await surface.run(ctx, { escape: 'dig' });
-    const last = swims.lastIndexOf('3.5,61,0.5');
-    assert.ok(last >= 0, swims.join(' '));
-    assert.equal(swims[last + 1], 'up', swims.join(' '));
+    assert.equal(r.status, 'failed', r.summary);
+    assert.deepEqual(moves, [], '不得升级为让寻路往岸上走');
+    assert.deepEqual(swims, ['up'], '只向上浮，从不向岸游');
   } finally { ctx.memory.close(); }
 });
 

@@ -214,6 +214,20 @@ function shapeHitDistance(shapes: NonNullable<Optics['shapes']>, eye: Eye, dx: n
   return Number.isFinite(nearest) ? nearest : null;
 }
 
+/**
+ * 共享空间记忆的窄接收口：只接受宿主可信作用域的开始与真实合法观测。
+ * 作用域必须来自 adapter.state()（不是观测载荷）；调用方在观测为空时不派发。
+ */
+export interface SpatialObservationSink {
+  beginSession(scope: { worldId: string; dim: string; sessionId: string }): unknown;
+  /** Trusted-ready admission; independent of paused/closing. */
+  readonly observationAdmitted: boolean;
+  /** Host shutdown boundary; a closing sink accepts no begin/interrupt/observe. */
+  readonly closing: boolean;
+  interrupt(): unknown;
+  observe(observations: readonly BlockObservation[]): unknown;
+}
+
 export class Vision {
   frame: VisionFrame | null = null;
   seen: SeenEntity[] = [];
@@ -236,7 +250,10 @@ export class Vision {
   private session = '';
   private scopes = new Map<string, { known: Map<string, Known>; perName: Map<string, number> }>();
 
-  constructor(private adapter: GameAdapter, public cfg: VisionConfig = DEFAULT_VISION) {}
+  /** 上一份已可信开始的作用域（world/dim/session）；未就绪时清空，避免用旧边界接纳新证据。 */
+  private spatialScope: string | null = null;
+
+  constructor(private adapter: GameAdapter, public cfg: VisionConfig = DEFAULT_VISION, private spatial?: SpatialObservationSink) {}
 
   private syncScope() {
     const state = this.adapter.state();
@@ -551,7 +568,29 @@ export class Vision {
   /** Inspect a bounded set of actual sight lines, never cached memory behind a wall. */
   observeBlocks(positions: Vec3Like[]): BlockObservation[] {
     const state = this.syncScope(), eye = this.adapter.eye();
-    if (!state.connected || !state.alive || !state.observationReady || !eye) return [];
+    // A closing shared service must not be re-admitted, interrupted, or written by
+    // late reads; stop this shared writer without scanning further.
+    if (this.spatial?.closing === true) return [];
+    const trustedReady = state.connected && state.alive && state.observationReady && state.dim !== 'unknown' && eye !== null;
+    if (this.spatial !== undefined) {
+      if (!trustedReady) {
+        // 实际可信状态已不 ready（例如同一 sessionId 下区块丢失）：已准入的旧证据
+        // 必须此刻中断一次并置 stale，不能等下一帧或下一次作用域变化。中断后准入为
+        // false，重复的未就绪读取不会再次 interrupt。
+        this.spatialScope = null;
+        if (this.spatial.observationAdmitted) this.spatial.interrupt();
+        return [];
+      }
+      const scopeKey = `${state.worldId}|${state.dim}|${state.sessionId}`;
+      // 真实 ready 的作用域变化，或此前已被中断（walk 生命周期可能先看到未就绪），
+      // 都需要 beginSession 重新准入。首次作用域变化即使本批最终没有合法观测也应
+      // 开始会话；但同一作用域/同一批之后绝不只为每批重复 begin。
+      if (scopeKey !== this.spatialScope || !this.spatial.observationAdmitted) {
+        this.spatial.beginSession({ worldId: state.worldId, dim: state.dim, sessionId: state.sessionId });
+        this.spatialScope = scopeKey;
+      }
+    }
+    if (!trustedReady) return [];
     const now = Date.now(), seen = new Set<string>(), out: BlockObservation[] = [];
     const hFov = this.cfg.hFov * Math.PI / 180, vFov = this.cfg.vFov * Math.PI / 180;
     for (const pos of positions.slice(0, 32)) {
@@ -597,6 +636,8 @@ export class Vision {
       out.push({ name, properties: { ...block?.properties }, stateComplete: block != null, pos: { ...pos }, worldId: state.worldId, sessionId: state.sessionId,
         dimension: state.dim, observationId: state.observationId, observedAt: now, source: 'vision' });
     }
+    // 合法视锥结果是共享地图的唯一写入源；空批次不产生任何写入/生命周期报告。
+    if (out.length > 0 && !this.spatial?.closing) this.spatial?.observe(out);
     return out;
   }
 
@@ -942,7 +983,14 @@ export class Vision {
       heard: this.heard.slice(0, 5).map((e) => ({ name: e.name, approx: `${e.rel}约 ${Math.max(2, Math.round(e.dist / 2) * 2)} 格`, dir: e.dir })),
       nearest_land: (() => {
         const l = this.nearestLand(here);
-        return l ? { dir: l.dir, dist: l.dist } : null;
+        if (!l) return null;
+        return {
+          dir: l.dir, dist: l.dist,
+          foot: { x: l.pos.x, y: l.pos.y + 1, z: l.pos.z },
+          relative_height: l.pos.y + 1 - Math.floor(here.y),
+          path_confirmed: false,
+          note: '候选落脚点（脚部目标格，由可见地表估计）；尚未确认能沿直线游过去，地下顶板、高岸或墙体可能挡住',
+        };
       })(),
       last_look_around_s: this.lastSweepAt ? Math.round((now - this.lastSweepAt) / 1000) : null,
       ...(() => {

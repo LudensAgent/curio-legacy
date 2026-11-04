@@ -199,3 +199,20 @@ test('OBSERVER_HUD_CONFIG 在 Windows 上大小写不同也视为同一文件', 
   const test = testLayout(base, { observerHudConfig: local.observerHudConfig.toUpperCase() });
   assert.throws(() => assertTestIsolation(test, [local], { worldIdExplicit: true }), /OBSERVER_HUD_CONFIG/);
 });
+
+test('assertTestIsolation 强制所有可写目录落在指定根目录内', () => {
+  const base = os.tmpdir();
+  const root = path.join(base, 'test-setver');
+  const inside = testLayout(base, {
+    serverDir: root,
+    dataDir: path.join(root, 'curio-data'),
+    agentsDir: path.join(root, 'curio-data', 'agents'),
+    llmArchiveDir: path.join(root, 'curio-data', 'archives', 'llm-calls'),
+    danmakuArchiveDir: path.join(root, 'curio-data', 'archives', 'danmaku'),
+    observerHudConfig: path.join(root, 'observer-hud.test.json'),
+    spatialDbPath: path.join(root, 'curio-data', 'spatial', 'spatial.sqlite'),
+  });
+  assert.doesNotThrow(() => assertTestIsolation(inside, [localLayout(base)], { worldIdExplicit: true, rootDir: root }));
+  const outside = testLayout(base, { dataDir: path.join(base, 'elsewhere') });
+  assert.throws(() => assertTestIsolation(outside, [localLayout(base)], { worldIdExplicit: true, rootDir: root }), /指定根目录/);
+});

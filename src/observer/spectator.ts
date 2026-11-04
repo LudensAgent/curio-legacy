@@ -35,6 +35,12 @@ export class Spectator {
   }
 
   start() {
+    // test 模式不自动改全服规则，也不自动附着/旁观（gamemode spectator、spectate），避免两个任务争抢共享观察者；
+    // 这些由持锁的测试编排显式执行和恢复。
+    if (this.cfg.mode === 'test') {
+      this.bus.publish('spectator', 'P1', '测试模式不自动附着旁观，由持锁的测试编排显式控制');
+      return;
+    }
     let first = true;
     if (this.rcon) {
       this.adapter.on('spawn', () => {
@@ -94,6 +100,9 @@ export class Spectator {
   }
 
   private async setupWorld() {
+    // test 模式不自动改全服规则（keepInventory/doImmediateRespawn），交由持锁的测试编排显式执行和恢复，
+    // 否则暂停中的测试客户端仍会在首次出生时修改共享服务器规则，干扰另一个测试任务。
+    if (this.cfg.mode === 'test') return;
     if (!this.cfg.observer.setupGamerules) return;
     for (const cmd of [`gamerule keepInventory ${this.cfg.observer.keepInventory}`, 'gamerule doImmediateRespawn true']) {
       try {

@@ -50,6 +50,7 @@ test('恢复挖掘不能打开原未允许的液体风险、换目标格或隐�
   t.after(() => memory.close());
   const bridge = makeBridge(ctx);
   await assert.rejects(bridge('digAt', [0, 63, 0, { wet: true }]), /wet:true/);
+  await assert.rejects(bridge('digAt', [0, 63, 0, { fall: true }]), /fall:true/);
   await assert.rejects(bridge('digAt', [1, 63, 0]), /原动作的目标格/);
   await assert.rejects(bridge('placeAt', [1, 63, 0, 'cobblestone']), /没有授权支出方块/);
   assert.equal(adapter.actions.length, 0);

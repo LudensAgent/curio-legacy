@@ -75,20 +75,16 @@ test('an opaque wall keeps an unseen icy shore out of landing evidence', () => {
   assert.equal(vision.nearestLand(adapter.pos), null, 'unseen shore behind a wall cannot be used as an escape destination');
 });
 
-test('surface uses real icy-shore perception to request a landing instead of repeating ascent in place', async () => {
+test('surface only performs vertical ascent and does not pick a shore', async () => {
   const { adapter, vision } = bank('blue_ice');
   const memory = new WorldMemory(null), bus = new EventBus();
   adapter.oxygen = 10;
   vision.scan();
-  const shore = vision.nearestLand(adapter.pos);
-  assert.ok(shore);
+  assert.ok(vision.nearestLand(adapter.pos), '感知仍提供岸线候选，但 surface 不应使用它');
   try {
     const result = await surface.run({ adapter, senses: vision, memory, bus, signal: new AbortController().signal,
       deadline: Date.now() + 32000, taskId: 'icy-shore-surface', progress() {} }, {});
-    assert.equal(result.status, 'succeeded');
-    assert.equal(result.data?.landed, true);
-    assert.deepEqual(adapter.actions, [`swim:${shore.pos.x + 0.5},${shore.pos.y + 1},${shore.pos.z + 0.5}`]);
-    assert.equal(adapter.state().inWater, false);
-    assert.ok(adapter.oxygen >= 18);
+    assert.equal(result.status, 'failed', result.summary);
+    assert.deepEqual(adapter.actions, ['swim:up'], '只向上浮，不向岸游');
   } finally { memory.close(); }
 });

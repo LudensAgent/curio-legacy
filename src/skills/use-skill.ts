@@ -15,6 +15,7 @@ export interface BehaviorLookup {
   executionError?(name: string, trial?: boolean): string | null;
   recordInvocation?(name: string, result: SkillResult): void;
 }
+const OBSERVATION_ACTIONS = new Set(['look', 'look_around', 'wait', 'inspect_block', 'assess_landings']);
 let registry: BehaviorLookup | null = null;
 export function setBehaviorRegistry(r: BehaviorLookup | null) { registry = r; }
 
@@ -84,24 +85,28 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
       const combatSig = () => { const c = ctx.adapter.combatState?.() ?? { usingItem: false, offHand: null }; return `${c.usingItem ? 1 : 0}:${c.offHand ?? ''}`; };
       const combatBefore = combatSig();
       let acted = false;
+      let inputCompleted = false;
       let effectExpect: { discarded?: string[]; forMs?: number; what?: string; by: string } | null = null;
       const handle = makeBridge(ctx);
       const bridge: SandboxHandler = async (method, values) => {
         const value = await handle(method, values);
-        const receipt = value as { ok?: boolean; moved?: number; data?: { noop?: boolean; expect?: { discarded?: string[]; forMs?: number; what?: string }; effectEvidence?: { verified?: boolean; changed?: boolean }; climbed?: number } } | null;
+        const receipt = value as { ok?: boolean; moved?: number; data?: { noop?: boolean; inputCompleted?: boolean; effectUnconfirmed?: boolean; expect?: { discarded?: string[]; forMs?: number; what?: string }; effectEvidence?: { verified?: boolean; changed?: boolean }; climbed?: number } } | null;
         // 代码桥与声明式步骤共用效果收集：api.act 的爬升也计入整个技能实例的累计进展。
         if (typeof receipt?.data?.climbed === 'number') climbedTotal += receipt.data.climbed;
         // 嵌套动作声明的持续效果（toss_item 的 discarded）要带上去：做完以后被自己打破，才能把失败记到这份技能头上
         const nested = receipt?.data?.expect;
         if (nested && !effectExpect) effectExpect = { ...nested, by: b.name };
-        const okEffect = receipt?.ok === true && receipt.data?.noop !== true;
+        const evidence = receipt?.data?.effectEvidence?.verified === true && receipt.data.effectEvidence.changed === true;
+        const inputOnly = receipt?.data?.inputCompleted === true && (receipt.data.effectUnconfirmed ?? !evidence);
+        if (receipt?.data?.inputCompleted === true) inputCompleted = true;
+        const okEffect = receipt?.ok === true && receipt.data?.noop !== true && !inputOnly;
         // 有的动作自己报 ok 但没真做（move moved=0、shield 没举、look/lookAt 只转头）；有的报没成却真改了世界（挖到一半）
         // ——只有真正改变了身体/世界才算"动了"：effectEvidence 是通用真效果信号；move 看 moved>0；look/lookAt/shield 不算
-        const evidence = receipt?.data?.effectEvidence?.verified === true && receipt.data.effectEvidence.changed === true;
         const effectful = evidence
           || (method === 'move' ? (receipt?.moved ?? 0) > 0
             : !['look', 'lookAt', 'shield', 'log', 'sleep', 'progress'].includes(method)
               && !VERIFY_METHODS.includes(method as typeof VERIFY_METHODS[number])
+              && !(method === 'act' && OBSERVATION_ACTIONS.has(String(values[0])))
               && okEffect);
         if (effectful) acted = true;
         return value;
@@ -131,9 +136,12 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
         // 代码没报错，但身体一点没动、背包没变、也没挖没放：说清楚这次什么都没做（可能是条件不满足就跳过了，也可能是技能没起作用），别当成“做成了”
         const still = Math.abs(ctx.adapter.state().pos.x - from.x) + Math.abs(ctx.adapter.state().pos.z - from.z) < 0.3 && Math.floor(ctx.adapter.state().pos.y) === Math.floor(from.y);
         const combatChanged = combatSig() !== combatBefore;
-        const noop = still && invSig() === invBefore && !acted && !combatChanged;
+        // 原始使用输入确实执行过，不能称为空转；但期间捡到物品不能替它证明效果。
+        const effectUnconfirmed = inputCompleted && !acted && !b.verify;
+        const noop = !inputCompleted && still && invSig() === invBefore && !acted && !combatChanged;
         const noopText = noop ? '（身体这次什么都没做：没挪动、背包没变、没挖也没放。是条件不满足跳过了，还是技能没起作用，看上面的结果；要的事并没有发生）' : '';
-        return ok(`代码技能「${b.name}」做完了${m.text}${r.result !== null && r.result !== undefined ? `：${JSON.stringify(r.result).slice(0, 160)}` : ''}${noopText}`, { ...data, result: r.result, verified: !!b.verify, displacement: { horizontal: m.h, dy: m.dy }, ...(effectExpect ? { expect: effectExpect } : {}), ...(noop ? { noop: true } : {}) });
+        const inputText = effectUnconfirmed ? '（使用输入已执行，效果尚未确认）' : '';
+        return ok(`代码技能「${b.name}」做完了${m.text}${r.result !== null && r.result !== undefined ? `：${JSON.stringify(r.result).slice(0, 160)}` : ''}${noopText}${inputText}`, { ...data, ...(inputCompleted ? { inputCompleted: true, effectUnconfirmed } : {}), result: r.result, verified: !!b.verify, displacement: { horizontal: m.h, dy: m.dy }, ...(effectExpect ? { expect: effectExpect } : {}), ...(noop ? { noop: true } : {}) });
       }
       const done: string[] = [];
       let completedSteps = 0;
@@ -164,9 +172,16 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
           r = fail('ERROR', String((e as Error)?.message ?? e));
         }
         if (r.status === 'cancelled') return r;
-        if (r.status === 'succeeded' && r.data?.noop !== true) completedSteps++;
+        const effect = r.data?.effectEvidence as { verified?: boolean; changed?: boolean } | undefined;
+        const inputOnly = r.data?.inputCompleted === true && (r.data.effectUnconfirmed ?? !(effect?.verified === true && effect.changed === true));
+        if (r.data?.inputCompleted === true) inputCompleted = true;
+        if (effect?.verified === true && effect.changed === true) acted = true;
+        if (r.status === 'succeeded' && r.data?.noop !== true && !inputOnly) {
+          completedSteps++;
+          if (!OBSERVATION_ACTIONS.has(st.skill)) acted = true;
+        }
         if (typeof r.data?.climbed === 'number') climbedTotal += r.data.climbed;
-        done.push(`${st.skill} → ${r.status === 'succeeded' ? '成' : `没成(${r.failureCode ?? ''})`}`);
+        done.push(`${st.skill} → ${r.status === 'succeeded' ? (inputOnly ? '输入已执行，效果未确认' : '成') : `没成(${r.failureCode ?? ''})`}`);
         // optional 移动没到新站位：记下事实，留给下一步在校验后判断。
         if (r.status === 'failed' && st.optional && STANCE_MOVES.has(st.skill)) {
           pendingStance = { skill: st.skill, pos: { ...ctx.adapter.state().pos } };
@@ -178,7 +193,9 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
       ctx.progress(1);
       const judged = await verifyRun(b, bridge, { before, result: { done }, args: { ...args.args, ...(args.failure ? { failure: args.failure } : {}) } }, ctx);
       if (judged) return fail('ERROR', `技能「${b.name}」的步骤都做完了，但${judged}${moved().text}`, { done, verified: false });
-      return ok(`照技能「${b.name}」做完了：${done.join('，')}${moved().text}`, { done, verified: !!b.verify, ...(completedSteps === 0 ? { noop: true } : {}) });
+      const effectUnconfirmed = inputCompleted && !acted && !b.verify;
+      return ok(`照技能「${b.name}」做完了：${done.join('，')}${moved().text}`, { done, verified: !!b.verify,
+        ...(inputCompleted ? { inputCompleted: true, effectUnconfirmed } : {}), ...(completedSteps === 0 && !inputCompleted ? { noop: true } : {}) });
     })().catch((error: unknown) => {
       // 取消/失败也保留已累计的爬升进展：局部增量相加，共享账本只读取一次，不重复计算。
       if (climbedTotal > 0 && error && typeof error === 'object') {

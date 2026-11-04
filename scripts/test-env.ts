@@ -11,6 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { peerLayouts } from '../src/config/isolation.ts';
 import { assertResetOffline } from '../src/maintenance/offline.ts';
 import { readProperties, readServerPropertyValues, validateLevelName } from '../src/maintenance/world-reset.ts';
 
@@ -186,6 +187,35 @@ async function showConfig(): Promise<void> {
   for (const [key, value] of rows) console.log(`${key}: ${value}`);
 }
 
+/** 校验种子源：不得取自 local/live，必须落在测试根目录内，且与目标互不包含。纯路径校验，不写盘、不启动服务器。 */
+export function assertSeedSourceAllowed(seedDir: string, opts: {
+  targetServerDir: string;
+  testRoot: string;
+  envDir: string;
+}): void {
+  // 全部用实际解析路径判断：junction 会让词法路径通过检查，但实际落点别名到测试根目录外或 local/live。
+  const seedReal = resolveRealPath(seedDir);
+  const targetReal = resolveRealPath(opts.targetServerDir);
+  const testRootReal = resolveRealPath(opts.testRoot);
+  // 不得用 local/live 的世界或数据目录作种子：本任务的测试世界必须独立，不能用它们的快照初始化。
+  for (const peer of peerLayouts(opts.envDir, 'test')) {
+    for (const rawPeerDir of [peer.serverDir, peer.dataDir]) {
+      const peerDir = resolveRealPath(rawPeerDir);
+      if (sameOrNested(seedReal, peerDir) || sameOrNested(peerDir, seedReal)) {
+        throw new Error(`种子源不能是 ${peer.mode} 的世界或数据目录：${seedDir}（请用独立测试世界源）`);
+      }
+    }
+  }
+  // 种子源必须位于测试根目录（TEST_ROOT_DIR）内，不能来自测试目录之外。
+  if (!sameOrNested(testRootReal, seedReal)) {
+    throw new Error(`种子源必须位于测试根目录 ${opts.testRoot} 内：${seedDir}`);
+  }
+  // 用实际解析路径判断源目标是否相互包含：junction 会让词法路径不同但实际落点嵌套，导致复制递归展开自身。
+  if (sameOrNested(seedReal, targetReal) || sameOrNested(targetReal, seedReal)) {
+    throw new Error('种子源与 test 世界目录（解析后）不能相同或相互包含，否则复制会把刚创建的目标再次当作源递归展开');
+  }
+}
+
 async function initTest(): Promise<void> {
   const seed = argvFlag('--seed');
   if (!seed) {
@@ -193,18 +223,17 @@ async function initTest(): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  const { config } = await loadConfig();
+  const { config, envFile } = await loadConfig();
   const seedDir = path.resolve(seed);
   const targetServerDir = config.serverDir;
 
   const seedProps = path.join(seedDir, 'server.properties');
   if (!fs.existsSync(seedProps)) throw new Error(`种子源不是 Minecraft 服务器目录（缺 server.properties）：${seedDir}`);
-  // 用实际解析路径判断源目标是否相互包含：junction 会让词法路径不同但实际落点嵌套，导致复制递归展开自身。
-  const seedReal = fs.realpathSync(seedDir);
-  const targetReal = resolveRealPath(targetServerDir);
-  if (sameOrNested(seedReal, targetReal) || sameOrNested(targetReal, seedReal)) {
-    throw new Error('种子源与 test 世界目录（解析后）不能相同或相互包含，否则复制会把刚创建的目标再次当作源递归展开');
-  }
+  assertSeedSourceAllowed(seedDir, {
+    targetServerDir,
+    testRoot: path.resolve(path.dirname(envFile), process.env.TEST_ROOT_DIR ?? ''),
+    envDir: path.dirname(envFile),
+  });
   const levelName = readServerProperty(seedProps, 'level-name') ?? 'world';
   // level-name 必须位于种子服务器目录内部：拒绝绝对路径、.. 段或指向种子目录之外，否则副本仍指向共享世界而非独立副本。
   validateLevelName(seedDir, levelName);

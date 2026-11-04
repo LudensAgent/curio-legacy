@@ -6,7 +6,7 @@ import { MineflayerAdapter } from '../src/adapter/mineflayer.ts';
 import { config } from '../src/config.ts';
 import { EventBus } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
-import { shoreHint, surface } from '../src/skills/movement.ts';
+import { surface } from '../src/skills/movement.ts';
 import { stepTo } from '../src/skills/primitives.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 
@@ -50,7 +50,7 @@ function shore() {
 test('step from water climbs onto a bank two blocks above the feet', async () => {
   const adapter = shore(), memory = new WorldMemory(null);
   let target: any = null;
-  adapter.swimTo = async (to: any) => { target = to; adapter.pos = { x: 1.5, y: 64, z: 0.5 }; adapter.inWater = false; return { ok: true, landed: true, oxygen: 20 }; };
+  adapter.swimTo = async (to: any) => { target = to; adapter.pos = { x: 1.5, y: 64, z: 0.5 }; adapter.inWater = false; return { ok: true, landed: true, surfaced: true, oxygen: 20 }; };
   try {
     const v = stepTo.validate({ to: [1, 0, 0], facing: 'E' }, adapter);
     assert.equal(v.ok, true);
@@ -64,7 +64,7 @@ test('step from water climbs onto a bank two blocks above the feet', async () =>
 
 test('step from water reports honestly when the climb did not land', async () => {
   const adapter = shore(), memory = new WorldMemory(null);
-  adapter.swimTo = async () => ({ ok: false, reason: 'SWIM_NO_PROGRESS', landed: false, oxygen: 20 });
+  adapter.swimTo = async () => ({ ok: false, reason: 'SWIM_NO_PROGRESS', landed: false, surfaced: false, oxygen: 20 });
   try {
     const r = await stepTo.run({ adapter, memory, bus: new EventBus(), signal: new AbortController().signal, deadline: Date.now() + 8000, taskId: 'water-step', progress() {},
       senses: { refresh() {}, markSweep() {}, perceivedEntities: () => [], knownBlocks: () => [] } } as any, { at: [1, 0, 0], facing: 'E' });
@@ -74,37 +74,38 @@ test('step from water reports honestly when the climb did not land', async () =>
   } finally { memory.close(); }
 });
 
-test('shore hint says how high the footing is and gives a copyable step when adjacent', () => {
-  const near = shoreHint({ x: 0.5, y: 62.4, z: 0.5 }, { dir: 'E', dist: 1, pos: { x: 1, y: 63, z: 0 } });
-  assert.match(near.text, /比脚高 2 格/);
-  assert.match(near.text, /可以尝试.*实际结果为准/);
-  assert.match(near.text, /step \{"to":\[1,0,0\],"facing":"E"\}/);
-  const high = shoreHint({ x: 0.5, y: 62.4, z: 0.5 }, { dir: 'E', dist: 1, pos: { x: 1, y: 64, z: 0 } });
-  assert.match(high.text, /比脚高 3 格/);
-  assert.doesNotMatch(high.text, /step/);
-  assert.equal('step' in high.data, false);
-  const far = shoreHint({ x: 0.5, y: 62.4, z: 0.5 }, { dir: 'NW', dist: 6, pos: { x: -4, y: 62, z: -4 } });
-  assert.doesNotMatch(far.text, /step/);
-  assert.match(far.text, /NW 6 格，落脚处比脚高 1 格/);
-});
-
-test('surface only reports breathing when the head is observed in air', async (t) => {
+test('surface reports surfaced (not landed) when the adapter surfaces without dry footing', async (t) => {
   let now = 100000;
   t.mock.method(Date, 'now', () => now);
-  for (const [head, inWater] of [['water', true], [null, true], ['air', true], ['air', false]] as const) {
-    const adapter = new FakeAdapter(), memory = new WorldMemory(null);
-    adapter.inWater = true;
-    adapter.oxygen = 18;
-    adapter.pos = { x: 0.5, y: 62.4, z: 0.5 };
-    Object.assign(adapter, { blockAt: (p: { y: number }) => Math.floor(p.y) === 64 ? head : 'air' });
-    adapter.swimTo = async () => { now += 100; adapter.inWater = inWater; return { ok: false, landed: false, oxygen: adapter.oxygen }; };
-    try {
-      const result = await surface.run({ adapter, memory, bus: new EventBus(), signal: new AbortController().signal,
-        deadline: now + 10, taskId: 'breathing-evidence', progress() {},
-        senses: { refresh() {}, markSweep() {}, perceivedEntities: () => [], knownBlocks: () => [] } }, {});
-      assert.equal(result.status, head === 'air' && inWater ? 'succeeded' : 'failed', `head=${head}, inWater=${inWater}: ${result.summary}`);
-      if (head === 'air' && inWater) assert.equal(result.data?.afloat, true);
-      else assert.doesNotMatch(result.summary, /正常呼吸/);
-    } finally { memory.close(); }
-  }
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null);
+  adapter.inWater = true; adapter.oxygen = 18;
+  adapter.pos = { x: 0.5, y: 62.4, z: 0.5 };
+  adapter.swimTo = async () => { adapter.oxygen = 20; return { ok: true, landed: false, surfaced: true, oxygen: 20 }; };
+  try {
+    const result = await surface.run({ adapter, memory, bus: new EventBus(), signal: new AbortController().signal,
+      deadline: now + 32000, taskId: 'breathing-evidence', progress() {},
+      senses: { refresh() {}, markSweep() {}, perceivedEntities: () => [], knownBlocks: () => [] } }, {});
+    assert.equal(result.status, 'succeeded', result.summary);
+    assert.equal(result.data?.surfaced, true);
+    assert.equal(result.data?.landed, false, '浮出水面不等于上岸');
+  } finally { memory.close(); }
+});
+
+test('surface refuses an exhausted budget without delegating an ascent', async (t) => {
+  let now = 100000;
+  t.mock.method(Date, 'now', () => now);
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null);
+  adapter.inWater = true; adapter.oxygen = 6;
+  adapter.pos = { x: 0.5, y: 60, z: 0.5 };
+  let swims = 0;
+  adapter.swimTo = async () => { swims++; return { ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, surfaced: false, oxygen: 6 }; };
+  try {
+    const result = await surface.run({ adapter, memory, bus: new EventBus(), signal: new AbortController().signal,
+      deadline: now, taskId: 'surface-expired', progress() {},
+      senses: { refresh() {}, markSweep() {}, perceivedEntities: () => [], knownBlocks: () => [] } }, {});
+    assert.equal(result.status, 'failed');
+    assert.equal(result.failureCode, 'TIMEOUT');
+    assert.equal(swims, 0, '预算耗尽不强行上浮');
+    assert.equal(result.data?.oxygen, 6, '保留实际氧气');
+  } finally { memory.close(); }
 });

@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { Vec3 } from 'vec3';
 import { VoxelMap } from 'curio-minecraft-3d-memory';
 import { Arbiter, type TaskOutcome } from '../src/arbiter/arbiter.ts';
 import { EventBus } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
+import { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import { observeCells, walkRoute } from '../src/skills/walk-route.ts';
 import type { Senses } from '../src/skills/types.ts';
 import type { BlockObservation, GameAdapter } from '../src/adapter/types.ts';
@@ -37,7 +42,9 @@ function makeWalkAdapter() {
   let moveToCalls = 0;
   let stopAllCount = 0;
 
-  const adapter = {
+  // Genuine EventEmitter so Arbiter's real lifecycle binding works like production;
+  // a plain object without on/off made the constructor throw after the DB opened.
+  const adapter = Object.assign(new EventEmitter(), {
     state: () => ({
       worldId: 'world', dim: 'overworld', sessionId: 's1', alive: true, connected: true, observationReady: true,
       pos: { x: entity.position.x, y: entity.position.y, z: entity.position.z }, onGround: entity.onGround, inventory: [],
@@ -57,7 +64,7 @@ function makeWalkAdapter() {
     look: async (yaw: number, pitch: number) => { bot.look(yaw, pitch); },
     moveTo: async () => { moveToCalls++; },
     stopAll: () => { stopAllCount++; bot.clearControlStates(); },
-  } as unknown as GameAdapter;
+  }) as unknown as GameAdapter;
 
   return { adapter, controlLog, getMoveToCalls: () => moveToCalls, getStopAllCount: () => stopAllCount, control, entity };
 }
@@ -79,6 +86,45 @@ function flatSenses(): Senses {
   } as unknown as Senses;
 }
 
+/**
+ * 显式测试观测源：把平坦夹具的观测直接写入真实共享服务。
+ * 它只用于本文件的旧单元夹具，不冒充生产 Vision 证据（生产链路由 host 集成测试覆盖）。
+ */
+function sharedFlatSenses(svc: SharedSpatialSession): Senses {
+  const base = flatSenses();
+  let begun = false;
+  return {
+    ...base,
+    observeBlocks: (positions: { x: number; y: number; z: number }[]) => {
+      if (!begun) {
+        svc.beginSession({ worldId: 'world', dim: 'overworld', sessionId: 's1' });
+        begun = true;
+      }
+      const observations = base.observeBlocks!(positions);
+      if (observations.length > 0) svc.observe(observations);
+      return observations;
+    },
+  } as unknown as Senses;
+}
+
+async function openShared(): Promise<{ svc: SharedSpatialSession; dir: string }> {
+  const dir = mkdtempSync(join(tmpdir(), 'walk-route-production-'));
+  const svc = await SharedSpatialSession.open({ worldId: 'world', databasePath: join(dir, 'memory.db') });
+  return { svc, dir };
+}
+
+async function closeShared(svc: SharedSpatialSession, dir: string): Promise<void> {
+  const result = await svc.shutdown();
+  assert.equal(result.error, null);
+  assert.equal(result.cancelError, null);
+  assert.equal(result.closeError, null);
+  assert.ok(result.close !== null, 'real close must return a result');
+  assert.equal(result.close.completed, true);
+  assert.equal(result.close.error, null);
+  assert.equal(result.close.unconfirmedRequest, false);
+  rmSync(dir, { recursive: true, force: true });
+}
+
 const points3 = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 1.5 }, { x: 2.5, y: 0, z: 1.5 }];
 
 test('validate：null/非相邻/对角/超大跨度在零副作用前拒绝，不抛异常', () => {
@@ -97,37 +143,53 @@ test('walk_route 经真实 Arbiter 入口走通三段转弯，身体桥不调用
   const { adapter, getMoveToCalls, control } = makeWalkAdapter();
   const bus = new EventBus();
   const memory = new WorldMemory(null);
-  const arbiter = new Arbiter(adapter, memory, bus, flatSenses());
-  const done = new Promise<TaskOutcome>((r) => arbiter.once('done', r));
-  arbiter.start({ skill: 'walk_route', args: { points: points3 } }, 'llm');
-  const o = await done;
-  assert.equal(o.result.status, 'succeeded', o.result.summary);
-  assert.equal((o.result.data?.nav as { outcome: string }).outcome, 'ARRIVED');
-  assert.equal(getMoveToCalls(), 0, 'walk 身体桥不得调用会重新寻路的 moveTo');
-  assert.equal(control.forward, false, '到达后应松开前进键');
+  const { svc, dir } = await openShared();
+  let arbiter: Arbiter | null = null;
+  try {
+    // 构造可能因适配器缺少事件方法而抛错；必须在真实 Worker 已打开后仍走 finally 关闭。
+    arbiter = new Arbiter(adapter, memory, bus, sharedFlatSenses(svc), svc);
+    const done = new Promise<TaskOutcome>((r) => arbiter!.once('done', r));
+    arbiter!.start({ skill: 'walk_route', args: { points: points3 } }, 'llm');
+    const o = await done;
+    assert.equal(o.result.status, 'succeeded', o.result.summary);
+    assert.equal((o.result.data?.nav as { outcome: string }).outcome, 'ARRIVED');
+    assert.equal(getMoveToCalls(), 0, 'walk 身体桥不得调用会重新寻路的 moveTo');
+    assert.equal(control.forward, false, '到达后应松开前进键');
+    assert.equal(svc.session.voxel.cellAt('overworld', 1, -1, 0).observed, true, '真实步行观测必须写入共享地图');
+  } finally {
+    arbiter?.dispose();
+    await closeShared(svc, dir);
+  }
 });
 
 test('真实 Arbiter 取消在途 walk_route：取消后不再写前进键，不复活', async () => {
   const { adapter, controlLog } = makeWalkAdapter();
   const bus = new EventBus();
   const memory = new WorldMemory(null);
-  const arbiter = new Arbiter(adapter, memory, bus, flatSenses());
-  const done = new Promise<TaskOutcome>((r) => arbiter.once('done', r));
-  arbiter.start({ skill: 'walk_route', args: { points: points3 } }, 'llm');
-  // 等身体桥真正开始前进（出现 forward=true）再取消，覆盖移动期而非仅初始化期。
-  const startedAt = Date.now();
-  while (!controlLog.some((e) => e.kind === 'set' && e.name === 'forward' && e.value === true)) {
-    if (Date.now() - startedAt > 5000) throw new Error('walk 未在期限内开始前进');
-    await new Promise((r) => setTimeout(r, 20));
+  const { svc, dir } = await openShared();
+  let arbiter: Arbiter | null = null;
+  try {
+    arbiter = new Arbiter(adapter, memory, bus, sharedFlatSenses(svc), svc);
+    const done = new Promise<TaskOutcome>((r) => arbiter!.once('done', r));
+    arbiter.start({ skill: 'walk_route', args: { points: points3 } }, 'llm');
+    // 等身体桥真正开始前进（出现 forward=true）再取消，覆盖移动期而非仅初始化期。
+    const startedAt = Date.now();
+    while (!controlLog.some((e) => e.kind === 'set' && e.name === 'forward' && e.value === true)) {
+      if (Date.now() - startedAt > 5000) throw new Error('walk 未在期限内开始前进');
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    // 取消前记录日志边界：取消后任何 forward=true 都应被捕获。
+    const boundary = controlLog.length;
+    arbiter.cancel('集成测试取消');
+    const o = await done;
+    assert.equal(o.result.status, 'cancelled', o.result.summary);
+    // 取消之后不得再出现 forward=true：父任务信号已贯通到身体桥。
+    const forwardAfter = controlLog.slice(boundary).filter((e) => e.kind === 'set' && e.name === 'forward' && e.value === true);
+    assert.deepEqual(forwardAfter, [], '取消后身体桥不得重新按下前进键');
+  } finally {
+    arbiter?.dispose();
+    await closeShared(svc, dir);
   }
-  // 取消前记录日志边界：取消后任何 forward=true 都应被捕获。
-  const boundary = controlLog.length;
-  arbiter.cancel('集成测试取消');
-  const o = await done;
-  assert.equal(o.result.status, 'cancelled', o.result.summary);
-  // 取消之后不得再出现 forward=true：父任务信号已贯通到身体桥。
-  const forwardAfter = controlLog.slice(boundary).filter((e) => e.kind === 'set' && e.name === 'forward' && e.value === true);
-  assert.deepEqual(forwardAfter, [], '取消后身体桥不得重新按下前进键');
 });
 
 test('observeCells 遵守 ≤32 批次：超过 32 个候选时关键格不因截断漏掉', () => {

@@ -55,9 +55,9 @@ export function stubSenses(adapter: FakeAdapter, extra: Partial<Senses> = {}): S
     perceivedEntities: (r) => adapter.nearbyEntities(r),
     // “看得见的”方块 = 测试里显式放下的方块（地面默认的草/石头不算）
     knownBlocks: (names, maxDist): BlockHit[] => adapter.findBlocks(names, maxDist, 256),
-    // 测试里显式放下的方块视为“看得见”，让 dig_at/place_at 能走到确认这一步；要模拟遮挡，测试自己传 observeBlocks
+    // 测试里显式放置（含显式设为空气）的方块视为“看得见”，让 dig_at/place_at 能走到确认这一步；要模拟遮挡，测试自己传 observeBlocks
     observeBlocks: (positions) => {
-      const seen = placed();
+      const seen = new Set([...adapter.blocks.map((b) => `${b.pos.x},${b.pos.y},${b.pos.z}`), ...adapter.removed]);
       return positions.filter((pos) => seen.has(`${pos.x},${pos.y},${pos.z}`))
         .map((pos) => ({ pos, name: adapter.blockAt(pos) ?? 'air', properties: adapter.blockStateAt?.(pos)?.properties ?? {}, worldId: adapter.worldId, sessionId: adapter.sessionId, dimension: adapter.dim, observationId: 1, observedAt: Date.now(), source: 'vision' as const }));
     },
