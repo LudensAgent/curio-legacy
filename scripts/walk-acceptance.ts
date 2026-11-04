@@ -2858,6 +2858,7 @@ export function pickSpatialWitness(
     const batch = c.ev.mapBatches.find((b) => b.mapIsSessionVoxel === true
       && b.seq > c.vision.seq
       && b.observations.some((o) => observationMatchesVision(o, c.block.pos, c.block)
+        && o.stateComplete === (c.block.stateComplete === true)
         && JSON.stringify(normalizedProperties(o.state.properties)) === JSON.stringify(expectedProperties)));
     if (!batch) continue;
     const cell = cellEvidenceSnapshot(voxel.cellAt(c.block.dimension, c.block.pos.x, c.block.pos.y, c.block.pos.z));

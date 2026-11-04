@@ -1967,9 +1967,10 @@ test('pickSpatialWitness：只选已写入同一 svc.voxel 且 name/properties/t
   };
   assert.equal(pickSpatialWitness([{ visionCalls: [vision], mapBatches: [] }], voxel), null, '未真正入图不得选 witness');
 
+  // 原 payload 缺省 stateComplete 按生产归一为 false，map 侧也必须是 false 才算完整契约匹配。
   const observation = {
     worldId: 'world', dim: 'overworld', sessionId: 's1', pos: { ...block.pos },
-    state: { name: 'minecraft:stone', properties: { variant: '7' } }, stateComplete: true,
+    state: { name: 'minecraft:stone', properties: { variant: '7' } }, stateComplete: false,
     evidence: 'seen' as const, observedAt: 1000, source: 'vision' as const, sequence: 9,
   };
   const report = voxel.observeBatch({ observations: [observation], unobserved: [] });
@@ -1991,6 +1992,15 @@ test('pickSpatialWitness：只选已写入同一 svc.voxel 且 name/properties/t
     observations: [observation], unobserved: [], reportId: 1, report: otherReport,
   });
   assert.equal(pickSpatialWitness([{ visionCalls: [vision], mapBatches: [{ ...otherStored, mapIsSessionVoxel: true }] }], otherVoxel), null);
+
+  // name/time/sequence/scope/properties 全同，仅 stateComplete 不匹配：不得改原 payload 补 true 过关。
+  const incompleteVoxel = new VoxelMap('world', { validityWindowMs: 60_000, now: () => 1000 });
+  const incompleteReport = incompleteVoxel.observeBatch({ observations: [{ ...observation, stateComplete: true }], unobserved: [] });
+  const incompleteStored = mapBatchForEvidence({
+    seq: 4, ts: 1000, frame: 1, mapId: 1, mapWorldId: 'world', map: incompleteVoxel,
+    observations: [{ ...observation, stateComplete: true }], unobserved: [], reportId: 1, report: incompleteReport,
+  });
+  assert.equal(pickSpatialWitness([{ visionCalls: [vision], mapBatches: [{ ...incompleteStored, mapIsSessionVoxel: true }] }], incompleteVoxel), null);
 });
 
 test('spatialShutdownRecord：真实 SQLite 会话正常关停由最终 checkpoint/close 证据确认', async (t) => {
@@ -2256,7 +2266,7 @@ test('checkSpatialFinalSave/checkSpatialReopen：真实SQLite空anchor→typed�
         t.diagnostic(message);
       }
     } else {
-      const detail = `first=${JSON.stringify(firstShutdown?.problems ?? null)} second=${JSON.stringify(secondShutdown?.problems ?? null)}`
+      const detail = `first=${JSON.stringify(firstShutdown)} second=${JSON.stringify(secondShutdown)}`
         + ` firstAwait=${firstAwaitError instanceof Error ? firstAwaitError.message : String(firstAwaitError)}`
         + ` secondAwait=${secondAwaitError instanceof Error ? secondAwaitError.message : String(secondAwaitError)}`;
       const message = `未确认关闭，保留 fixture：${dir}（${detail}）`;
