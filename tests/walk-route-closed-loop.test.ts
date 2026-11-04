@@ -25,7 +25,7 @@ function flatWorld() {
 }
 
 /** 带真实物理的身体：setControlState 驱动控制，tick 推 tickEvery 步物理并推进模拟时钟。 */
-function body(start: { x: number; z: number }, tickEvery = 1) {
+function body(start: { x: number; z: number }, tickEvery: number | number[] = 1) {
   const control: Record<string, boolean> = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
   const entity = { position: new Vec3(start.x, 0, start.z), velocity: new Vec3(0, 0, 0), onGround: true,
     isInWater: false, isInLava: false, isInWeb: false, isCollidedHorizontally: false, isCollidedVertically: false,
@@ -39,9 +39,11 @@ function body(start: { x: number; z: number }, tickEvery = 1) {
   const world = flatWorld();
   const physics = Physics(data, world);
   let clock = 2000;
+  let ti = 0;
   const tick = () => {
-    for (let k = 0; k < tickEvery; k++) physics.simulatePlayer(new PlayerState(bot, control), world).apply(bot);
-    clock += 50 * tickEvery;
+    const n = Array.isArray(tickEvery) ? tickEvery[ti++ % tickEvery.length]! : tickEvery;
+    for (let k = 0; k < n; k++) physics.simulatePlayer(new PlayerState(bot, control), world).apply(bot);
+    clock += 50 * n;
     return Promise.resolve(bot.entity);
   };
   return { bot, tick, now: () => clock };
@@ -128,6 +130,38 @@ test('每两 tick 采样仍到达，不前后振荡超时', async () => {
     assert.equal(bot.control.back, false, '到达后不应残留倒退键');
     assert.equal(bot.control.sneak, false, '到达后不应残留潜行键');
   }
+});
+
+test('不均匀采样 [1,1,3,1,2] 越过目标后及时制动并到达，不持续前进', async () => {
+  const map = buildMap();
+  const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }];
+  const { bot, tick, now } = body({ x: 0.40, z: 0.52 }, [1, 1, 3, 1, 2]);
+  const result = await runWalkRoute({ map, body: bot as never, request: request(points), tick, signal: new AbortController().signal, now });
+  assert.equal(result.outcome, 'ARRIVED', `不均匀采样应到达而非持续前进超时：${result.message}`);
+  const last = result.lastPosition;
+  assert.ok(last && Math.abs(last.x - 1.5) <= 0.12, `末位 ${last?.x.toFixed(2)} 偏离目标过大`);
+});
+
+test('首帧 scope 失效后不再等期限，立即返回', async () => {
+  const map = buildMap();
+  const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }];
+  const { bot } = body({ x: 0.54, z: 0.52 });
+  let frames = 0;
+  const tick = () => {
+    frames++;
+    if (frames > 1) return new Promise<never>(() => {}); // 首帧后不再产生物理帧
+    return Promise.resolve(bot.entity);
+  };
+  const start = Date.now();
+  const result = await runWalkRoute({
+    map, body: bot as never, request: request(points), tick,
+    signal: new AbortController().signal, now: Date.now, deadlineMs: Date.now() + 5000,
+    lifecycle: () => ({ worldId: 'world', dim: 'overworld', sessionId: 'other', alive: true, connected: true, observationReady: true }),
+  });
+  const elapsed = Date.now() - start;
+  assert.equal(result.outcome, 'FAILED');
+  assert.equal((result as { problem?: { kind: string } }).problem?.kind, 'scope_changed');
+  assert.ok(elapsed < 1000, `首帧失效应立即返回而非等到期限（实际 ${elapsed}ms）`);
 });
 
 test('宿主期限早于请求期限：返回后不再继续执行，保留部分位移', async () => {

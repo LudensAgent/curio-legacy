@@ -193,11 +193,21 @@ export class WalkMoveExecutor implements MoveExecutor {
       const speed = prevPos !== null && prevTime !== null
         ? Math.hypot(e.position.x - prevPos.x, e.position.z - prevPos.z) / Math.max(1, (t - prevTime) / TICK_MS)
         : Math.hypot(e.velocity.x, e.velocity.z);
+      // 沿运动轴的实际运动方向：>0 朝目标轴正向移动，<0 反向。首帧无前值，置 0。
+      const movingAlong = prevPos !== null
+        ? (e.position.x - prevPos.x) * axis.x + (e.position.z - prevPos.z) * axis.z
+        : 0;
       prevPos = { x: e.position.x, z: e.position.z };
       prevTime = t;
       // 沿运动轴的有符号误差：>0 冲过头，<0 还没到。
       const signed = (e.position.x - to.x) * axis.x + (e.position.z - to.z) * axis.z;
       if (dist <= tol) {
+        this.body.setControlState('forward', false);
+        this.body.setControlState('back', false);
+        this.body.setControlState('sneak', false);
+      } else if (signed * movingAlong > 0) {
+        // 越过目标且继续同向远离：不能只等「进入制动距离窗口」（采样间隔不均匀时可能直接跳过去），
+        // 立即松键制动，再交由下面的有限纠偏。
         this.body.setControlState('forward', false);
         this.body.setControlState('back', false);
         this.body.setControlState('sneak', false);
@@ -285,7 +295,8 @@ export async function runWalkRoute(opts: {
       const entity = await awaitFrame(opts.tick, deadline, now, opts.signal);
       if (entity === null) break;
       observeThenSample(entity);
-      if (opts.signal.aborted) break;
+      // 每处理一个初始样本后立即检查终态：首帧就失效（如 scope_changed）时不再订阅下一帧、不等期限。
+      if (opts.signal.aborted || loop.status()!.result !== null) break;
     }
   }
 
