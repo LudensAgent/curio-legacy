@@ -564,7 +564,9 @@ export const swimTo: Skill<{ xyz: { x: number; y: number; z: number }; timeoutMs
     const at = `现在在 (${s.pos.x.toFixed(1)},${s.pos.y.toFixed(1)},${s.pos.z.toFixed(1)})，氧气 ${r.oxygen}/20`;
     if (r.ok && r.landed) return ok(`游到了 (${args.xyz.x},${args.xyz.y},${args.xyz.z}) 并站稳，${at}`, { landed: true, surfaced: r.surfaced, pos: s.pos, oxygen: r.oxygen });
     const why = r.reason === 'WATER_ESCAPE_TIMEOUT' ? '游了一阵还没到' : r.reason === 'SWIM_NO_PROGRESS' ? '游不动' : r.reason;
-    return fail('PATH_NOT_FOUND', `${why}；${at}`, { landed: false, surfaced: r.surfaced, pos: s.pos, oxygen: r.oxygen, reason: r.reason });
+    // 预算耗尽不等于没有路：只有真正的物理无进展才归为 PATH_NOT_FOUND。
+    const code = r.reason === 'WATER_ESCAPE_TIMEOUT' ? 'TIMEOUT' : 'PATH_NOT_FOUND';
+    return fail(code, `${why}；${at}`, { landed: false, surfaced: r.surfaced, pos: s.pos, oxygen: r.oxygen, reason: r.reason });
   },
 };
 

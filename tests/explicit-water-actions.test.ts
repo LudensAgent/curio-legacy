@@ -157,7 +157,7 @@ test('swim_to treats a positive 500ms remaining budget as usable, not exhausted'
   try {
     const r = await swimTo.run(ctx, { xyz: { x: 4, y: 64, z: 1 } });
     assert.equal(r.status, 'failed');
-    assert.equal(r.failureCode, 'PATH_NOT_FOUND');
+    assert.equal(r.failureCode, 'TIMEOUT', 'WATER_ESCAPE_TIMEOUT 是预算耗尽，不是找不到路');
     assert.equal(delegatedMs, 500, '500ms 剩余应原样委托，不再扣 1000');
     assert.equal(r.data?.oxygen, 10);
   } finally { ctx.memory.close(); }
@@ -231,6 +231,26 @@ for (const scenario of [
     assert.equal(shared.oxygen, 2);
     assert.equal(now, 100500, '确认适配器确实推进了时钟');
   } finally { ctx.memory.close(); t.mock.restoreAll(); }
+});
+
+test('water timeout maps to TIMEOUT while SWIM_NO_PROGRESS keeps its physical failure code', async () => {
+  const w = new TestWorld();
+  w.inWater = true; w.oxygen = 10;
+  const ctx = makeCtx(w);
+  const runBoth = async (reason: string) => {
+    w.swimTo = async () => ({ ok: false, reason, landed: false, surfaced: false, oxygen: 10 });
+    return { surface: await surface.run(ctx, {}), swimTo: await swimTo.run(ctx, { xyz: { x: 4, y: 64, z: 1 } }) };
+  };
+  try {
+    const progress = await runBoth('SWIM_NO_PROGRESS');
+    assert.equal(progress.surface.failureCode, 'STUCK', 'SWIM_NO_PROGRESS 仍是物理没进展');
+    assert.equal(progress.swimTo.failureCode, 'PATH_NOT_FOUND', 'SWIM_NO_PROGRESS 对 swim_to 仍是找不到路');
+    const timeout = await runBoth('WATER_ESCAPE_TIMEOUT');
+    assert.equal(timeout.surface.failureCode, 'TIMEOUT', 'surface 的预算耗尽是 TIMEOUT');
+    assert.equal(timeout.swimTo.failureCode, 'TIMEOUT', 'swim_to 的预算耗尽是 TIMEOUT');
+    assert.equal(timeout.surface.data?.reason, 'WATER_ESCAPE_TIMEOUT');
+    assert.equal(timeout.swimTo.data?.reason, 'WATER_ESCAPE_TIMEOUT');
+  } finally { ctx.memory.close(); }
 });
 
 test('swim_to refuses only when no positive time remains', async (t) => {

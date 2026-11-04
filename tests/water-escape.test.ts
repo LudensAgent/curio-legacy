@@ -8,6 +8,7 @@ import { EventBus } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { RESOURCE_MEMORY_TTL_MS, Vision } from '../src/perception/vision.ts';
 import { surface } from '../src/skills/movement.ts';
+import { swimTo } from '../src/skills/actions.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 
 const require = createRequire(import.meta.url);
@@ -28,11 +29,11 @@ function pond(t: TestContext) {
   } };
   const physics = Physics(data, world);
   const bot: any = {
-    version: '1.20.1', game: { dimension: 'overworld' },
+    version: '1.20.1', game: { dimension: 'overworld' }, username: 'SwimProbe', health: 20, food: 20,
     entity: { position: new Vec3(2.5, 60, 2.5), velocity: new Vec3(0, 0, 0), eyeHeight: 1.62, onGround: false, isInWater: true,
       isInLava: false, isInWeb: false, isCollidedHorizontally: false, isCollidedVertically: false, yaw: 0, pitch: 0, effects: {}, attributes: {} },
     jumpTicks: 0, jumpQueued: false, fireworkRocketDuration: 0, oxygenLevel: 10,
-    inventory: { slots: [] }, pathfinder: { setGoal() {} },
+    inventory: { slots: [], items: () => [], emptySlotCount: () => 0 }, pathfinder: { setGoal() {} },
     setControlState(name: string, value: boolean) { controls[name] = value; },
     clearControlStates() { for (const key of Object.keys(controls)) controls[key] = false; },
     blockAt: (p: any) => world.getBlock(p),
@@ -391,4 +392,44 @@ test('a replacement task position/oxygen/observedAt are not attributed to the ol
     assert.equal(e.partial?.observedAt, ownedAt, '旧动作 partial 保留冻结观测时刻，不换成取消/清理时刻');
     return true;
   });
+});
+
+for (const scenario of [
+  { name: 'surface', run: (ctx: Parameters<typeof surface.run>[0]) => surface.run(ctx, {}) },
+  { name: 'swim_to', run: (ctx: Parameters<typeof swimTo.run>[0]) => swimTo.run(ctx, { xyz: { x: 6.5, y: 64, z: 2.5 } }) },
+]) test(`public ${scenario.name} maps an actual adapter WATER_ESCAPE_TIMEOUT return to TIMEOUT and keeps the observed facts`, { timeout: 5000 }, async (t) => {
+  const { adapter } = pond(t);
+  const memory = new WorldMemory(null);
+  const ctx = {
+    adapter, memory, bus: new EventBus(), signal: new AbortController().signal, deadline: Date.now() + 300, taskId: 'real-timeout', progress() {},
+    senses: { refresh() {}, markSweep() {}, perceivedEntities: () => [], knownBlocks: () => [] },
+  };
+  const originalSwim = adapter.swimTo;
+  let actual: Awaited<ReturnType<typeof originalSwim>> | undefined;
+  // 只包一层捕获真实返回值，仍由原实现跑物理循环并返回 WATER_ESCAPE_TIMEOUT。
+  adapter.swimTo = async (target, signal, opts) => {
+    actual = await originalSwim.call(adapter, target, signal, opts);
+    return actual;
+  };
+  try {
+    const result = await scenario.run(ctx);
+    const body = adapter.state();
+    assert.equal(actual?.ok, false);
+    assert.equal(actual?.reason, 'WATER_ESCAPE_TIMEOUT', '真实适配器在预算内未完成时返回 WATER_ESCAPE_TIMEOUT');
+    assert.equal(result.status, 'failed');
+    assert.equal(result.failureCode, 'TIMEOUT', '预算耗尽应归为 TIMEOUT，而不是 PATH_NOT_FOUND/STUCK');
+    assert.equal(result.data?.reason, actual?.reason);
+    assert.equal(result.data?.landed, actual?.landed);
+    assert.equal(result.data?.surfaced, actual?.surfaced);
+    if (scenario.name === 'surface') {
+      assert.match(result.summary, /上浮时间到，尚未确认完成/, '时间到只说未确认完成');
+      assert.doesNotMatch(result.summary, /没把头露出流体/, '不能断言头一定没露出，surfaced 以实际返回为准');
+    }
+    assert.deepEqual(result.data?.pos, body.pos, '保留返回时身体的真实位置');
+    assert.equal(result.data?.oxygen, actual?.oxygen, '保留适配器返回的真实氧气');
+    assert.equal(body.oxygen, actual?.oxygen);
+  } finally {
+    adapter.swimTo = originalSwim;
+    memory.close();
+  }
 });
