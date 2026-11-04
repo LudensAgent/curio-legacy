@@ -101,6 +101,20 @@ export const SAMPLE_INTERVAL_MS = 1_000;
 /** 连接物理帧/监听器诊断的落盘周期；不逐帧保存。 */
 export const CONNECTION_SNAPSHOT_INTERVAL_MS = 5_000;
 export const SMOKE_LEG_BUDGET_MS = 45_000;
+/**
+ * soak 的 near 完成半径。实测身体停止点会在候选格周围抖动，执行器默认 0.12 的
+ * bodyArrival 容差与 near 目标检查叠加后，正常停止也可能略超 0.12。这里把请求的
+ * near radius 与验收用的水平容差设为同一个值：既容忍真实停止抖动，又不把 A/B
+ * 两格目标混在一起，且没有投影或改写目标。
+ */
+export const SOAK_ARRIVAL_RADIUS = 0.25;
+
+/** 所有 soak walk_to 请求共用：固定目标 + 同一 near 半径，目标永不投影或改写。 */
+export const soakWalkRequest = (target: FixtureEndpoint, deadlineMs: number) => ({
+  to: { ...target },
+  arrival: { kind: 'near' as const, radius: SOAK_ARRIVAL_RADIUS },
+  deadlineMs,
+});
 export const SMOKE_MIN_SUCCESSFUL_LEGS = 2;
 export const SMOKE_MIN_CHECKPOINT_SAVES = 2;
 /** smoke 完成等待上限；避免 full 在 smoke 未满足时空等一小时。 */
@@ -1793,11 +1807,10 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
     if (stopping) throw new Error('run is stopping; refusing walk_to');
     // 每段开始都在上一段/setup 结算后读取真实身体位置；不再复用上一段标称终点。
     const measuredFrom = await measureLegStart(`leg ${index}`);
-    const request = {
-      to: clone(target),
-      arrival: { kind: 'exact' as const },
-      deadlineMs: Date.now() + SMOKE_LEG_BUDGET_MS,
-    };
+    const tolerance = { ...library!.GROUNDED_ARRIVAL_DEFAULTS, horizontalTolerance: SOAK_ARRIVAL_RADIUS };
+    // 实测起点可能因上一段动量落在半格上，exact 目标会因不在 ±1 脚格上被库拒绝。
+    // 用 near 且验收使用同一半径：仍要求真实终点落在容差内，不投影或改写目标。
+    const request = soakWalkRequest(target, Date.now() + SMOKE_LEG_BUDGET_MS);
     const started = arbiter.start({ skill: 'walk_to', args: request }, 'user');
     if ('error' in started) throw new Error(`walk_to rejected: ${started.error}`);
     const info = started as TaskInfo;
@@ -1820,7 +1833,6 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
       const terminalState = adapter!.state();
       const terminalControls = controlsSnapshot(adapter!);
       const window = perTask.get(info.id) ?? { samples: [], moves: [], starts: [], lastSequence: -1 };
-      const tolerance = library!.GROUNDED_ARRIVAL_DEFAULTS;
       const verdict = classifyWalkToResult(outcome.result, measuredFrom, target, tolerance, {
         taskId: info.id,
         samples: window.samples,
@@ -2344,7 +2356,7 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
       const nearest = distance(start, FIXTURE_A) <= distance(start, FIXTURE_B) ? 'A' : 'B';
       const targetName = nearest === 'A' ? 'B' : 'A';
       const target = targetName === 'A' ? FIXTURE_A : FIXTURE_B;
-      const request = { to: clone(target), arrival: { kind: 'exact' as const }, deadlineMs: Date.now() + SMOKE_LEG_BUDGET_MS };
+      const request = soakWalkRequest(target, Date.now() + SMOKE_LEG_BUDGET_MS);
       const started = arbiter!.start({ skill: 'walk_to', args: request }, 'user');
       if ('error' in started) {
         return { id, state: 'failed', ok: false, problems: [`walk_to rejected: ${started.error}`], facts };

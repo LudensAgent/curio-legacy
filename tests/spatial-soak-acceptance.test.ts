@@ -30,6 +30,7 @@ import {
   HELP,
   MAX_JSONL_RECORD_BYTES,
   MAX_WORKING_SET_SNAPSHOTS,
+  SOAK_ARRIVAL_RADIUS,
   VOXEL_LOADING_CHOICES,
   buildRunReport,
   buildSpatialOpenOptions,
@@ -44,6 +45,7 @@ import {
   createSoakMetrics,
   parseCliArgs,
   shutdownFacts,
+  soakWalkRequest,
   startSpatialSoakFoundation,
   workingSetStatsSignature,
 } from '../scripts/spatial-soak-acceptance.ts';
@@ -307,6 +309,15 @@ test('leg trace correlation uses dispatch order + accepted sample identity witho
   // 跨任务样本不得借来配对。
   const foreign = [legSample('other-task', delegation, 1, 1_500, b), samples[1]!];
   assert.match(classifyLegTrace(nav, taskId, foreign, moves).problems.join(' '), /trace point 0/);
+});
+
+test('soak walk requests keep the fixed target and use the same near radius for completion and verification', () => {
+  const request = soakWalkRequest(FIXTURE_B, 46_000);
+  assert.deepEqual(request.to, FIXTURE_B);
+  assert.deepEqual(request.arrival, { kind: 'near', radius: SOAK_ARRIVAL_RADIUS });
+  assert.equal(request.deadlineMs, 46_000);
+  // 必须小于执行器允许的最大水平容差上限 0.5，且足够容纳真实停止抖动。
+  assert.ok(SOAK_ARRIVAL_RADIUS > 0 && SOAK_ARRIVAL_RADIUS < 0.5);
 });
 
 test('pre-dispatch stable samples and interleaved dispatches are recorded, not rejected', () => {
