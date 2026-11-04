@@ -253,7 +253,7 @@ if (mode === 'test') {
     rconHost: config.observer.rconHost,
     rconPort: config.observer.rconPort,
     dashboardPort: config.dashboard.port,
-  }, peerLayouts(path.dirname(envFile), 'test'), { worldIdExplicit, rootDir: config.serverDir });
+  }, peerLayouts(path.dirname(envFile), 'test'), { worldIdExplicit, rootDir: str('TEST_ROOT_DIR') || undefined });
 }
 
 export type Config = typeof config;
