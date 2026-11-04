@@ -16,6 +16,10 @@ export interface BehaviorLookup {
   recordInvocation?(name: string, result: SkillResult): void;
 }
 const OBSERVATION_ACTIONS = new Set(['look', 'look_around', 'wait', 'inspect_block', 'assess_landings']);
+/** 代码技能里实际发生失败的导航动作；用于保留真实的最近一次失败回执。 */
+const NAVIGATION_ACTIONS = new Set(['walk_to', 'walk_known_route']);
+/** 步骤结果只保留有界的最近条目，避免代码/宏把整段历史都塞进失败回执。 */
+const MAX_STEP_RESULTS = 8;
 let registry: BehaviorLookup | null = null;
 export function setBehaviorRegistry(r: BehaviorLookup | null) { registry = r; }
 
@@ -87,10 +91,26 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
       let acted = false;
       let inputCompleted = false;
       let effectExpect: { discarded?: string[]; forMs?: number; what?: string; by: string } | null = null;
+      // 代码技能抛错时保留最近一次真实导航失败的结构化回执；它是上下文，不是后续错误的成因，
+      // 也不代表当前/新位置。只记录动作实际返回的失败回执，不从截断 trace 重建或重读现场。
+      let lastNavigationFailure: Record<string, unknown> | null = null;
       const handle = makeBridge(ctx);
       const bridge: SandboxHandler = async (method, values) => {
         const value = await handle(method, values);
-        const receipt = value as { ok?: boolean; moved?: number; data?: { noop?: boolean; inputCompleted?: boolean; effectUnconfirmed?: boolean; expect?: { discarded?: string[]; forMs?: number; what?: string }; effectEvidence?: { verified?: boolean; changed?: boolean }; climbed?: number } } | null;
+        const receipt = value as { ok?: boolean; code?: string | null; summary?: string; moved?: number; data?: { noop?: boolean; inputCompleted?: boolean; effectUnconfirmed?: boolean; expect?: { discarded?: string[]; forMs?: number; what?: string }; effectEvidence?: { verified?: boolean; changed?: boolean }; climbed?: number; nav?: unknown; originalRequest?: unknown; knownStart?: unknown; search?: unknown } } | null;
+        const child = method === 'act' ? String(values[0] ?? '') : method === 'useSkill' ? String(values[0] ?? '') : '';
+        const nestedData = receipt?.data as Record<string, unknown> | undefined;
+        const nestedNav = method === 'useSkill' && nestedData !== undefined
+          && ['nav', 'originalRequest', 'knownStart', 'search'].some((key) => nestedData[key] !== undefined);
+        if (receipt != null && receipt.ok !== true && (method === 'act' ? NAVIGATION_ACTIONS.has(child) : nestedNav)) {
+          lastNavigationFailure = {
+            childSkill: child,
+            via: method,
+            request: method === 'act' ? values[1] ?? null : { name: child, args: values[1] ?? null },
+            result: { ok: false, code: receipt.code ?? null, summary: receipt.summary ?? '', ...(receipt.data !== undefined ? { data: receipt.data } : {}) },
+            note: 'contextual prior navigation failure receipt; not the cause of a later code error and not a current or new position',
+          };
+        }
         // 代码桥与声明式步骤共用效果收集：api.act 的爬升也计入整个技能实例的累计进展。
         if (typeof receipt?.data?.climbed === 'number') climbedTotal += receipt.data.climbed;
         // 嵌套动作声明的持续效果（toss_item 的 discarded）要带上去：做完以后被自己打破，才能把失败记到这份技能头上
@@ -127,15 +147,16 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
           onLog: (t) => ctx.bus.publish('skill_log', 'P3', `[${b.name}] ${t}`),
         });
         const data = { version: b.version ?? 1, calls: r.calls, trace: r.trace, logs: r.logs, args: JSON.stringify(input).slice(0, 300), ...(r.line ? { line: r.line } : {}) };
+        const receipt = lastNavigationFailure === null ? {} : { lastNavigationFailure };
         const m = moved();
-        if (!r.ok) return fail(/超时/.test(r.error ?? '') ? 'TIMEOUT' : 'ERROR', `代码技能「${b.name}」v${b.version ?? 1} 没成${r.line ? `（第 ${r.line} 行）` : ''}：${r.error}${m.text}`, { ...data, displacement: { horizontal: m.h, dy: m.dy } });
+        if (!r.ok) return fail(/超时/.test(r.error ?? '') ? 'TIMEOUT' : 'ERROR', `代码技能「${b.name}」v${b.version ?? 1} 没成${r.line ? `（第 ${r.line} 行）` : ''}：${r.error}${m.text}`, { ...data, ...receipt, displacement: { horizontal: m.h, dy: m.dy } });
         // 代码自己说没成（返回 {ok:false,…}）：照它说的算失败，不能记成“做完了”
         const res = r.result as Record<string, unknown> | null | undefined;
         if (res && typeof res === 'object' && !Array.isArray(res) && res.ok === false) {
-          return fail('ERROR', `代码技能「${b.name}」v${b.version ?? 1} 自己报告没成：${JSON.stringify(res).slice(0, 160)}${m.text}`, { ...data, result: r.result, displacement: { horizontal: m.h, dy: m.dy } });
+          return fail('ERROR', `代码技能「${b.name}」v${b.version ?? 1} 自己报告没成：${JSON.stringify(res).slice(0, 160)}${m.text}`, { ...data, ...receipt, result: r.result, displacement: { horizontal: m.h, dy: m.dy } });
         }
         const judged = await verifyRun(b, bridge, { before, result: r.result ?? null, args: input }, ctx);
-        if (judged) return fail('ERROR', `代码技能「${b.name}」v${b.version ?? 1} 说做完了，但${judged}${m.text}`, { ...data, result: r.result, verified: false, displacement: { horizontal: m.h, dy: m.dy } });
+        if (judged) return fail('ERROR', `代码技能「${b.name}」v${b.version ?? 1} 说做完了，但${judged}${m.text}`, { ...data, ...receipt, result: r.result, verified: false, displacement: { horizontal: m.h, dy: m.dy } });
         // 代码没报错，但身体一点没动、背包没变、也没挖没放：说清楚这次什么都没做（可能是条件不满足就跳过了，也可能是技能没起作用），别当成“做成了”
         const still = Math.abs(ctx.adapter.state().pos.x - from.x) + Math.abs(ctx.adapter.state().pos.z - from.z) < 0.3 && Math.floor(ctx.adapter.state().pos.y) === Math.floor(from.y);
         const combatChanged = combatSig() !== combatBefore;
@@ -168,7 +189,9 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
           const pos = pendingStance.pos;
           return fail('ERROR', `技能「${b.name}」第 ${i} 步「${pendingStance.skill}」没到新站位，身体现在在 (${pos.x.toFixed(2)},${pos.y.toFixed(2)},${pos.z.toFixed(2)})；第 ${i + 1} 步「${st.skill}」是相对坐标，会打到错误位置。先确认实际站位或改用绝对坐标`, { done });
         }
-        pendingStance = null;
+        // 只读中间步骤（如 spatial_query）既不移动也不确认新站位，不能清掉未解决的移动缺口；
+        // 只有实际执行的非只读步骤才消耗该事实。绝对坐标动作本就直接放行。
+        if (SKILLS[st.skill]?.readOnly !== true) pendingStance = null;
         let r: SkillResult;
         try {
           r = await runSkill({ ...ctx, senses: visibleActionSenses(ctx.senses), deadline: Math.min(ctx.deadline, Date.now() + skill.timeoutMs),
@@ -183,8 +206,10 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
         if (r.data?.inputCompleted === true) inputCompleted = true;
         if (effect?.verified === true && effect.changed === true) acted = true;
         const readOnlyStep = SKILLS[st.skill]?.readOnly === true;
-        if (readOnlyStep && r.status === 'succeeded') {
+        // 只读成功与零边 noop 成功都保留实际返回；noop 的 zeroEdge/trace[] 语义不能被步骤层抹掉。
+        if (r.status === 'succeeded' && (readOnlyStep || r.data?.noop === true)) {
           stepResults.push({ skill: st.skill, status: r.status, ...(r.data ? { data: r.data } : {}) });
+          if (stepResults.length > MAX_STEP_RESULTS) stepResults.splice(0, stepResults.length - MAX_STEP_RESULTS);
         }
         if (r.status === 'succeeded' && r.data?.noop !== true && !inputOnly && !readOnlyStep) {
           completedSteps++;
@@ -196,13 +221,15 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
         if (r.status === 'failed' && st.optional && STANCE_MOVES.has(st.skill)) {
           pendingStance = { skill: st.skill, pos: { ...ctx.adapter.state().pos } };
         }
+        // 非可选步骤失败：原样保留该步的结构化返回（nav/search/knownStart/history/position/
+        // spatialQuery result_too_large 等），不重建时间/作用域、不压平语义、不截断事实。
+        // 聚合 done/stepResults 放在展开之后，语义优先级明确。
         if (r.status === 'failed' && !st.optional) return fail(r.failureCode ?? 'ERROR', `技能「${b.name}」第 ${i + 1} 步 ${st.skill} 没成：${r.summary.slice(0, 120)}`,
-          { done, ...(stepResults.length ? { stepResults } : {}), ...(r.data?.effectEvidence ? { effectEvidence: r.data.effectEvidence } : {}),
-            ...(r.data?.dug ? { dug: r.data.dug } : {}), ...(r.data?.walked !== undefined ? { walked: r.data.walked } : {}) });
+          { ...(r.data ?? {}), done, ...(stepResults.length ? { stepResults } : {}) });
       }
       ctx.progress(1);
       const judged = await verifyRun(b, bridge, { before, result: { done }, args: { ...args.args, ...(args.failure ? { failure: args.failure } : {}) } }, ctx);
-      if (judged) return fail('ERROR', `技能「${b.name}」的步骤都做完了，但${judged}${moved().text}`, { done, verified: false });
+      if (judged) return fail('ERROR', `技能「${b.name}」的步骤都做完了，但${judged}${moved().text}`, { done, ...(stepResults.length ? { stepResults } : {}), verified: false });
       const effectUnconfirmed = inputCompleted && !acted && !b.verify;
       return ok(`照技能「${b.name}」做完了：${done.join('，')}${moved().text}`, { done, verified: !!b.verify,
         ...(stepResults.length ? { stepResults } : {}),

@@ -2,8 +2,24 @@ import type { Vec3Like } from '../adapter/types.ts';
 import { facingOfYaw, feetCell, toWorld, type Facing } from '../perception/local.ts';
 import { attachmentFaces } from '../perception/surroundings.ts';
 import type { SkillCtx } from './types.ts';
+import { readPoint } from './walk-route.ts';
 
-export type RecoveryContext = { skill: string; args: Record<string, unknown>; target?: Vec3Like; position?: Vec3Like; entityId?: number; allowPlace?: boolean; allowDig?: boolean; climb?: { height: number; spent: number; startY: number } };
+type NavArrival = { kind: 'exact' } | { kind: 'near'; radius: number };
+
+export type RecoveryContext = { skill: string; args: Record<string, unknown>; target?: Vec3Like; position?: Vec3Like; entityId?: number; allowPlace?: boolean; allowDig?: boolean; climb?: { height: number; spent: number; startY: number }; arrival?: NavArrival; fragmentId?: string; deadlineMs?: number };
+
+/** 恢复时只有这两个动作能继承/重做同一导航委托；其他动作不能静默替换目标或完成条件。 */
+const NAVIGATION_SKILLS = new Set(['walk_to', 'walk_known_route']);
+/** 新导航恢复不能用旧寻路/单步/按键绕过原后端与手段。 */
+const NAVIGATION_BYPASS = new Set(['goto', 'step', 'move', 'press_keys', 'walk_route']);
+
+/** 原 failure 里的绝对期限只在失败交接边界校验一次；正值绝对 epoch，不当作时长。 */
+function recoveryDeadline(value: unknown): { ok: true; value?: number } | { ok: false; error: string } {
+  if (value === undefined) return { ok: true };
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? { ok: true, value }
+    : { ok: false, error: 'failure.args.deadlineMs 必须是正的绝对 epoch 毫秒' };
+}
 
 /** World coordinates only; never guess at/to relative arrays or coerce null into zero. */
 export function worldPoint(value: unknown): Vec3Like | undefined {
@@ -17,13 +33,52 @@ export function recoveryContext(value: unknown): RecoveryContext | { error: stri
   if (!value || typeof value !== 'object' || Array.isArray(value)) return { error: 'failure 须为原动作的失败记录对象' };
   const raw = value as Record<string, unknown>;
   if (typeof raw.skill !== 'string' || !raw.skill.trim() || !raw.args || typeof raw.args !== 'object' || Array.isArray(raw.args)) return { error: 'failure 需要原动作 skill 和原参数 args' };
-  const target = worldPoint(raw.target), position = worldPoint(raw.position), args = raw.args as Record<string, unknown>;
-  if (raw.target !== undefined && !target) return { error: 'failure.target 须为明确的世界坐标 {x,y,z}，不能将相对 at/to 当作目标' };
+  const skill = raw.skill.trim();
+  let args = raw.args as Record<string, unknown>;
+  let navTarget: Vec3Like | undefined;
+  let arrival: NavArrival | undefined;
+  let fragmentId: string | undefined;
+  let deadlineMs: number | undefined;
+  const providedTarget = worldPoint(raw.target);
+  if (raw.target !== undefined && !providedTarget) return { error: 'failure.target 须为明确的世界坐标 {x,y,z}，不能将相对 at/to 当作目标' };
+  if (skill === 'walk_to') {
+    const to = readPoint(args.to);
+    if (to === null) return { error: 'failure.args.to 必须是 walk_to 的有限世界坐标（保留小数与负数）' };
+    const ra = args.arrival;
+    if (ra === null || typeof ra !== 'object' || Array.isArray(ra)) return { error: 'failure.args.arrival 必须是 walk_to 的原始到达条件' };
+    const kind = (ra as Record<string, unknown>).kind;
+    if (kind === 'exact') arrival = { kind: 'exact' };
+    else if (kind === 'near') {
+      const radius = (ra as Record<string, unknown>).radius;
+      if (typeof radius !== 'number' || !Number.isFinite(radius) || radius <= 0) return { error: 'failure.args.arrival.radius 必须是正的有限数字' };
+      arrival = { kind: 'near', radius };
+    } else return { error: 'failure.args.arrival.kind 必须是 exact 或 near' };
+    const deadline = recoveryDeadline(args.deadlineMs);
+    if (!deadline.ok) return { error: deadline.error };
+    // 实际失败记录若带 target，只能是与原 to 完全相同的绝对目标；不静默改目标。
+    if (providedTarget && (providedTarget.x !== to.x || providedTarget.y !== to.y || providedTarget.z !== to.z)) {
+      return { error: 'failure.target 必须与 walk_to 原绝对目标一致，不能替换目标' };
+    }
+    navTarget = to;
+    deadlineMs = deadline.value;
+    args = { ...args, to, arrival, ...(deadlineMs !== undefined ? { deadlineMs } : {}) };
+  } else if (skill === 'walk_known_route') {
+    if (typeof args.fragmentId !== 'string' || args.fragmentId.length === 0) return { error: 'failure.args.fragmentId 必须是原路线 ID' };
+    const deadline = recoveryDeadline(args.deadlineMs);
+    if (!deadline.ok) return { error: deadline.error };
+    fragmentId = args.fragmentId;
+    deadlineMs = deadline.value;
+    // known route 的终点来自实际失败记录；没有就保持缺失，不由 fragment 几何臆造。
+    navTarget = providedTarget;
+    args = { ...args, fragmentId, ...(deadlineMs !== undefined ? { deadlineMs } : {}) };
+  }
+  const target = navTarget ?? providedTarget, position = worldPoint(raw.position);
   if (raw.position !== undefined && !position) return { error: 'failure.position 须为明确的世界坐标' };
   const entityId = raw.entityId ?? args.entityId;
   if (entityId !== undefined && (!Number.isSafeInteger(entityId) || Number(entityId) < 0)) return { error: 'failure.entityId 须为原实体整数 ID' };
   const climb = raw.climb && typeof raw.climb === 'object' && !Array.isArray(raw.climb) ? raw.climb as { height: number; spent: number; startY: number } : undefined;
-  return { ...raw, skill: raw.skill, args, ...(target ? { target } : {}), ...(position ? { position } : {}), ...(entityId !== undefined ? { entityId: Number(entityId) } : {}), ...(climb ? { climb } : {}) };
+  return { ...raw, skill, args, ...(target ? { target } : {}), ...(position ? { position } : {}), ...(entityId !== undefined ? { entityId: Number(entityId) } : {}), ...(climb ? { climb } : {}),
+    ...(arrival ? { arrival } : {}), ...(fragmentId !== undefined ? { fragmentId } : {}), ...(deadlineMs !== undefined ? { deadlineMs } : {}) };
 }
 
 /** Shared after primitive validation, including code, steps and nested learned calls. */
@@ -31,6 +86,35 @@ export function constrainRecoveryAction(ctx: SkillCtx, name: string, values: Rec
   const scope = ctx.recovery;
   if (!scope) return values;
   const original = scope.args, args = { ...values };
+  // 新导航恢复必须沿用同一原语：既不能换成旧寻路/单步/按键，也不能从旧动作
+  // 静默切进新导航（后者的目标/完成条件不等价）。普通非恢复调用不受影响。
+  if (NAVIGATION_SKILLS.has(scope.skill) && NAVIGATION_BYPASS.has(name)) {
+    throw new Error(`恢复「${scope.skill}」必须沿用原导航动作，不能用 ${name} 绕过原后端、目标或手段`);
+  }
+  if ((name === 'walk_to' || name === 'walk_known_route') && name !== scope.skill) {
+    throw new Error(`恢复「${scope.skill}」不能改用 ${name}：缺少等价的原始目标与完成条件`);
+  }
+  if (name === 'walk_to') {
+    const to = readPoint(args.to);
+    if (!scope.target) throw new Error('恢复 walk_to 缺少原绝对目标，不能自行发明目标');
+    if (to === null || to.x !== scope.target.x || to.y !== scope.target.y || to.z !== scope.target.z) throw new Error('恢复 walk_to 必须使用失败动作的原绝对目标');
+    const requested = args.arrival as NavArrival | undefined;
+    const same = requested !== undefined && scope.arrival !== undefined && requested.kind === scope.arrival.kind
+      && (requested.kind === 'exact' || (requested.kind === 'near' && scope.arrival.kind === 'near' && requested.radius === scope.arrival.radius));
+    if (!same) throw new Error('恢复 walk_to 必须保留原 arrival 种类与 near 半径，不能替换完成条件');
+    if (scope.deadlineMs !== undefined) {
+      if (args.deadlineMs === undefined) args.deadlineMs = scope.deadlineMs;
+      else if (typeof args.deadlineMs !== 'number' || args.deadlineMs > scope.deadlineMs) throw new Error('恢复 walk_to 不能延长原绝对期限');
+    }
+  }
+  if (name === 'walk_known_route') {
+    if (!scope.fragmentId) throw new Error('恢复 walk_known_route 缺少原 fragmentId，不能自行发明路线');
+    if (args.fragmentId !== scope.fragmentId) throw new Error('恢复 walk_known_route 必须使用失败动作的原 fragmentId');
+    if (scope.deadlineMs !== undefined) {
+      if (args.deadlineMs === undefined) args.deadlineMs = scope.deadlineMs;
+      else if (typeof args.deadlineMs !== 'number' || args.deadlineMs > scope.deadlineMs) throw new Error('恢复 walk_known_route 不能延长原绝对期限');
+    }
+  }
   const terrain = ['goto', 'step', 'explore'].includes(scope.skill) && original.dig === true;
   const placement = scope.skill === 'goto' ? (original.place ?? terrain) === true : terrain || scope.allowPlace === true;
   const tower = scope.skill === 'goto' ? placement && (original.tower ?? terrain) === true : placement;

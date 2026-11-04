@@ -31,12 +31,13 @@ import { flightSkills } from './elytra.ts';
 import { useSkill } from './use-skill.ts';
 import { walkRoute } from './walk-route.ts';
 import { spatialQuery } from './spatial-query.ts';
+import { walkKnownRoute, walkTo } from './spatial-navigation.ts';
 import { editBook, signText } from './text.ts';
 import { isSkillDisabled } from './disabled.ts';
 
 /** 技能白名单：LLM 只能从这里选择技能，参数必须通过各自的 validate。 */
 export const SKILLS: Record<string, Skill> = Object.fromEntries(
-  [explore, gather, goTo, followPassage, craft, mergeTools, mergeStacks, eat, hunt, pickupItems, shelter, build, buildingArchive, buildingReview, sleepSkill, placeTorch, smelt, collectFurnace, storeItems, takeItems, findItem, collectSeeds, farm, expedition, flee, defend, wander, lookAround, unstuck, surface, ...Object.values(travelSkills), ...Object.values(equipmentSkills), ...Object.values(dragonSkills), ...Object.values(structureSkills), ...reservationSkills, ...baseSkills, ...actionSkills, ...handSkills, ...guiSkills, ...bodySkills, ...primitiveSkills, ...overlandSkills, fish, wait, glance, forage, inspectBlock, rememberPlace, interactBlock, assessLandings, descend, ...Object.values(flightSkills), useSkill, signText, editBook, walkRoute, spatialQuery].map((s) => [s.name, s]),
+  [explore, gather, goTo, followPassage, craft, mergeTools, mergeStacks, eat, hunt, pickupItems, shelter, build, buildingArchive, buildingReview, sleepSkill, placeTorch, smelt, collectFurnace, storeItems, takeItems, findItem, collectSeeds, farm, expedition, flee, defend, wander, lookAround, unstuck, surface, ...Object.values(travelSkills), ...Object.values(equipmentSkills), ...Object.values(dragonSkills), ...Object.values(structureSkills), ...reservationSkills, ...baseSkills, ...actionSkills, ...handSkills, ...guiSkills, ...bodySkills, ...primitiveSkills, ...overlandSkills, fish, wait, glance, forage, inspectBlock, rememberPlace, interactBlock, assessLandings, descend, ...Object.values(flightSkills), useSkill, signText, editBook, walkRoute, walkTo, walkKnownRoute, spatialQuery].map((s) => [s.name, s]),
 );
 
 /** 只给反射层/填充行为使用、不让 LLM 主动规划的技能 */

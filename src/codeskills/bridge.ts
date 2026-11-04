@@ -256,6 +256,8 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
       }
       case 'move': {
         const raw = (a[0] && typeof a[0] === 'object' ? a[0] : {}) as Record<string, unknown>;
+        // 恢复委托是导航时，原始按键移动会绕过原后端/目标/手段；必须在任何身体写入前拒绝。
+        constrainRecoveryAction(ctx, 'move', raw);
         const keys: DriveKeys = {};
         for (const k of ['forward', 'back', 'left', 'right', 'jump', 'sprint', 'sneak'] as const) if (raw[k]) keys[k] = true;
         const o = (a[2] && typeof a[2] === 'object' ? a[2] : {}) as Record<string, unknown>;
