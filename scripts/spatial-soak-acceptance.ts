@@ -51,6 +51,7 @@ import type {
   WalkRouteRequest,
   WalkRouteStatus,
 } from 'curio-minecraft-3d-memory';
+import type { WorkingSetStats } from 'curio-minecraft-3d-memory/storage/sqlite';
 import {
   CANCEL_MOVEMENT_THRESHOLD,
   LANE,
@@ -116,6 +117,13 @@ export const H2B_REQUIRED_SCENARIOS = [
   'manual-residency',
 ] as const;
 export type H2bScenarioId = typeof H2B_REQUIRED_SCENARIOS[number];
+/** 主会话的体素加载模式。full 必须真实使用 manual；smoke 默认 eager。 */
+export const VOXEL_LOADING_CHOICES = ['eager', 'manual'] as const;
+export type VoxelLoadingChoice = typeof VOXEL_LOADING_CHOICES[number];
+/** 主会话工作集快照与诊断事件的硬上限；长跑中只保留有界序列。 */
+export const MAX_WORKING_SET_SNAPSHOTS = 32;
+export const MAX_WORKING_SET_DIAGNOSTIC_EVENTS = 256;
+export const MAX_WORKING_SET_DIAGNOSTIC_MESSAGE_CHARS = 512;
 
 const DECIMAL_TOKEN = /^-?(?:\d+(?:\.\d*)?|\.\d+)$/;
 const INTEGER_TOKEN = /^\d+$/;
@@ -127,7 +135,7 @@ export const H2_PENDING = {
   state: 'pending',
   fullPass: false,
   detail:
-    'H2a smoke and H2b scenario structure are implemented. Manual residency integration and real long-run acceptance remain pending; no full pass is claimed.',
+    'H2a smoke and H2b scenario structure, including main-session manual voxel loading when the host API is present, are implemented. Offline tests do not perform a real server run or long-run acceptance; only an actual passing run may claim FULL_PASS.',
 } as const;
 
 const H1_IMPLEMENTED = {
@@ -149,6 +157,12 @@ Options:
                       or B=(209.5,64,216.5). Values are never rounded.
   --duration-ms=N     Optional; integer 90000..3600000, default 3600000.
                       --mode=full requires exactly 3600000.
+  --voxel-loading=eager|manual
+                      Optional. smoke defaults to eager; full defaults to manual and
+                      rejects eager. The main session (Vision/Arbiter/walk_to) is opened
+                      with this value, and the run fails if the opened session reports a
+                      different actual voxelLoading. full also requires real main-session
+                      working-set evidence, not only the separate manual scenario.
   --help, -h          Print this text and exit without loading config, creating a DB, or opening sockets.
 
 Every leg reads its measured start from adapter.state().pos after settle; fixed A/B
@@ -168,6 +182,9 @@ export type ParsedCli =
     start: FixtureEndpoint;
     startRaw: string;
     durationMs: number;
+    voxelLoading: VoxelLoadingChoice;
+    /** 值来自显式 flag 还是按模式选择的默认值，报告必须如实区分。 */
+    voxelLoadingSource: 'flag' | 'default';
   }
   | { ok: false; error: string };
 
@@ -175,7 +192,8 @@ const isKnownFlag = (arg: string): boolean =>
   arg.startsWith('--curio=') ||
   arg.startsWith('--start=') ||
   arg.startsWith('--mode=') ||
-  arg.startsWith('--duration-ms=');
+  arg.startsWith('--duration-ms=') ||
+  arg.startsWith('--voxel-loading=');
 
 const samePoint = (a: FixtureEndpoint, b: FixtureEndpoint): boolean =>
   a.x === b.x && a.y === b.y && a.z === b.z;
@@ -190,15 +208,37 @@ export function parseCliArgs(argv: readonly string[]): ParsedCli {
   const start = argv.filter((arg) => arg.startsWith('--start='));
   const mode = argv.filter((arg) => arg.startsWith('--mode='));
   const duration = argv.filter((arg) => arg.startsWith('--duration-ms='));
+  const voxelLoadingFlags = argv.filter((arg) => arg.startsWith('--voxel-loading='));
 
   if (curio.length !== 1) return { ok: false, error: 'exactly one --curio=test is required' };
   if (curio[0] !== '--curio=test') return { ok: false, error: `only --curio=test is accepted, got ${curio[0]}` };
   if (start.length !== 1) return { ok: false, error: 'exactly one --start=x,y,z is required' };
   if (mode.length !== 1) return { ok: false, error: 'exactly one --mode=smoke|full is required' };
   if (duration.length > 1) return { ok: false, error: 'at most one --duration-ms=N is accepted' };
+  if (voxelLoadingFlags.length > 1) return { ok: false, error: 'at most one --voxel-loading=eager|manual is accepted' };
 
   const rawMode = mode[0].slice('--mode='.length);
   if (rawMode !== 'smoke' && rawMode !== 'full') return { ok: false, error: `--mode must be smoke or full, got ${rawMode}` };
+
+  // smoke 默认 eager；full 默认 manual。显式 eager 的 full 直接拒绝，不能把
+  // eager 主会话报告成 manual 长跑。
+  let voxelLoading: VoxelLoadingChoice;
+  let voxelLoadingSource: 'flag' | 'default';
+  if (voxelLoadingFlags.length === 1) {
+    const rawLoading = voxelLoadingFlags[0].slice('--voxel-loading='.length);
+    const matched = VOXEL_LOADING_CHOICES.find((choice) => choice === rawLoading);
+    if (matched === undefined) {
+      return { ok: false, error: `--voxel-loading must be eager or manual, got ${rawLoading}` };
+    }
+    voxelLoading = matched;
+    voxelLoadingSource = 'flag';
+  } else {
+    voxelLoading = rawMode === 'full' ? 'manual' : 'eager';
+    voxelLoadingSource = 'default';
+  }
+  if (rawMode === 'full' && voxelLoading !== 'manual') {
+    return { ok: false, error: '--mode=full requires --voxel-loading=manual; eager full runs are rejected' };
+  }
 
   let durationMs = DEFAULT_DURATION_MS;
   if (duration.length === 1) {
@@ -236,7 +276,17 @@ export function parseCliArgs(argv: readonly string[]): ParsedCli {
     };
   }
 
-  return { ok: true, help: false, curio: 'test', mode: rawMode, start: parsedStart, startRaw, durationMs };
+  return {
+    ok: true,
+    help: false,
+    curio: 'test',
+    mode: rawMode,
+    start: parsedStart,
+    startRaw,
+    durationMs,
+    voxelLoading,
+    voxelLoadingSource,
+  };
 }
 
 export function buildRunReport(parsed: Extract<ParsedCli, { ok: true; help: false }>) {
@@ -248,6 +298,11 @@ export function buildRunReport(parsed: Extract<ParsedCli, { ok: true; help: fals
     start: parsed.start,
     startRaw: parsed.startRaw,
     durationMs: parsed.durationMs,
+    voxelLoading: {
+      requested: parsed.voxelLoading,
+      source: parsed.voxelLoadingSource,
+      actual: null as string | null,
+    },
     fixture: FIXTURE_FACTS,
     h1: H1_IMPLEMENTED,
     h2: H2_PENDING,
@@ -427,6 +482,190 @@ function collectMetadata(repoRoot: string, scriptPath: string) {
     },
     package: pkg,
   };
+}
+
+/**
+ * 主会话可选的 manual 工作集能力。旧宿主没有这些成员时保持 undefined；
+ * 不构造假会话、不读取私有字段。manual-residency 分支合入后实例会真实提供。
+ */
+export type SpatialSoakPendingInfo = {
+  observations: number;
+  bytes?: number;
+  countLimit?: number;
+  byteLimit?: number;
+  sections?: readonly unknown[];
+  observedAtMin?: number | null;
+  observedAtMax?: number | null;
+  loading?: boolean;
+};
+
+type SpatialSoakGapFacts = {
+  kind?: string;
+  message?: string;
+  keys?: readonly unknown[];
+  count?: number;
+  observedAtMin?: number | null;
+  observedAtMax?: number | null;
+};
+
+type SpatialSoakDrainResult = {
+  cancelled: boolean;
+  reason: 'aborted' | 'deadline' | 'closing' | null;
+  pending: SpatialSoakPendingInfo;
+  gap?: SpatialSoakGapFacts | null;
+  checkpointError: unknown;
+};
+
+/** 宿主诊断回调的结构边界；只读取有界字段，不保留历史键。 */
+export type WorkingSetDiagnosticFacts = {
+  kind: string;
+  reason?: string;
+  message?: string;
+  keys?: readonly unknown[];
+  count?: number;
+  observedAtMin?: number | null;
+  observedAtMax?: number | null;
+};
+
+type SpatialSoakMainCapabilities = {
+  workingSetStats?: () => WorkingSetStats;
+  pendingObservations?: () => SpatialSoakPendingInfo;
+  drainObservations?: (options?: { deadline?: number }) => Promise<SpatialSoakDrainResult>;
+};
+
+/** 真实 SharedSpatialSession 加上可选能力；没有类型断言或包装对象。 */
+export type SpatialSoakMainSession = SharedSpatialSession & SpatialSoakMainCapabilities;
+
+/**
+ * 主会话打开选项。`voxelLoading` 与诊断回调通过非字面量对象传入，使同一份代码
+ * 在当前宿主声明（尚未包含 manual 选项）和合入后的宿主声明上都能通过类型检查；
+ * 选项是否真正生效仍由打开后的 `session.voxelLoading` 核对。
+ */
+export const buildSpatialOpenOptions = (
+  worldId: string,
+  databasePath: string,
+  voxelLoading: VoxelLoadingChoice,
+  onWorkingSetDiagnostic?: (diagnostic: WorkingSetDiagnosticFacts) => void,
+) => ({
+  worldId,
+  databasePath,
+  timeoutMs: 5000,
+  voxelLoading,
+  ...(onWorkingSetDiagnostic === undefined ? {} : { onWorkingSetDiagnostic }),
+});
+
+/** 有界工作集快照：只保留计数/字节估算，不保留 Section 键或历史消息。 */
+export type WorkingSetSnapshotFacts = {
+  label: string;
+  at: number;
+  activeElapsedMs: number | null;
+  voxelLoading: string | null;
+  stats: {
+    residentSections: number;
+    /** 库内驻留字节估算，不是进程 RSS。 */
+    residentBytesEstimate: number;
+    maxResidentSections: number;
+    maxResidentBytes: number;
+    lruTracked: number;
+    pinnedLeases: number;
+    pinnedSections: number;
+  } | null;
+  pending: {
+    observations: number;
+    bytes: number;
+    countLimit: number;
+    byteLimit: number;
+    sectionCount: number;
+    observedAtMin: number | null;
+    observedAtMax: number | null;
+    loading: boolean;
+  } | null;
+  unavailable: string | null;
+};
+
+export function buildWorkingSetSnapshot(input: {
+  label: string;
+  at: number;
+  activeElapsedMs: number | null;
+  voxelLoading: string | null;
+  stats: WorkingSetStats | null;
+  pending: SpatialSoakPendingInfo | null;
+  unavailable: string | null;
+}): WorkingSetSnapshotFacts {
+  return {
+    label: input.label,
+    at: input.at,
+    activeElapsedMs: input.activeElapsedMs,
+    voxelLoading: input.voxelLoading,
+    stats: input.stats === null ? null : {
+      residentSections: input.stats.residentSections,
+      residentBytesEstimate: input.stats.residentBytes,
+      maxResidentSections: input.stats.maxResidentSections,
+      maxResidentBytes: input.stats.maxResidentBytes,
+      lruTracked: input.stats.lruTracked,
+      pinnedLeases: input.stats.pinnedLeases,
+      pinnedSections: input.stats.pinnedSections,
+    },
+    pending: input.pending === null ? null : {
+      observations: input.pending.observations,
+      bytes: input.pending.bytes ?? 0,
+      countLimit: input.pending.countLimit ?? 0,
+      byteLimit: input.pending.byteLimit ?? 0,
+      sectionCount: input.pending.sections?.length ?? 0,
+      observedAtMin: input.pending.observedAtMin ?? null,
+      observedAtMax: input.pending.observedAtMax ?? null,
+      loading: input.pending.loading ?? false,
+    },
+    unavailable: input.unavailable,
+  };
+}
+
+/** manual 主会话的实际工作集变化判据；只在 stats 快照之间比较，不使用 RSS。 */
+export const workingSetStatsSignature = (stats: WorkingSetStats): string =>
+  [
+    stats.residentSections,
+    stats.residentBytes,
+    stats.lruTracked,
+    stats.pinnedLeases,
+    stats.pinnedSections,
+  ].join(':');
+
+export type MainManualEvidence = { ok: boolean; problems: string[] };
+
+/**
+ * full 的 manual 主会话判据：请求与打开后的实际模式必须一致；full 必须是 manual，
+ * 且主会话自己的工作集 stats 至少出现两次并发生变化。pending 在关停前必须为 0；
+ * 任何残留都如实失败，而不是只让独立 manual 场景通过。
+ */
+export function classifyMainManualEvidence(input: {
+  mode: 'smoke' | 'full';
+  requested: VoxelLoadingChoice;
+  actual: string | null;
+  statsSnapshotCount: number;
+  statsChanged: boolean;
+  pendingBeforeShutdown: number | null;
+}): MainManualEvidence {
+  const problems: string[] = [];
+  if (input.actual !== input.requested) {
+    problems.push(`requested voxelLoading=${input.requested} but opened session reports ${String(input.actual)}`);
+  }
+  if (input.mode === 'full') {
+    if (input.requested !== 'manual') problems.push('full mode must run the main session with voxelLoading=manual');
+    if (input.actual !== 'manual') problems.push('main session did not actually open with manual voxel loading');
+    if (input.statsSnapshotCount < 2) {
+      problems.push('main session produced fewer than two real workingSetStats snapshots');
+    }
+    if (!input.statsChanged) {
+      problems.push('main-session workingSetStats never changed; no manual residency evidence in the main path');
+    }
+    if (input.pendingBeforeShutdown === null) {
+      problems.push('main session exposed no pendingObservations snapshot before shutdown');
+    }
+  }
+  if (input.pendingBeforeShutdown !== null && input.pendingBeforeShutdown > 0) {
+    problems.push(`${input.pendingBeforeShutdown} observation(s) were still pending before shutdown`);
+  }
+  return { ok: problems.length === 0, problems };
 }
 
 export interface EvidenceEmitter {
@@ -1124,6 +1363,13 @@ interface RunReport {
   finishedAt: number | null;
   activeElapsedMs: number | null;
   durationMs: number;
+  voxelLoading: {
+    requested: VoxelLoadingChoice;
+    source: 'flag' | 'default';
+    actual: string | null;
+  };
+  workingSet: Record<string, unknown>;
+  mainManualEvidence: MainManualEvidence;
   start: FixtureEndpoint;
   measuredStart: FixtureEndpoint | null;
   fixture: typeof FIXTURE_FACTS;
@@ -1187,6 +1433,8 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
   let evidenceEmitter: EvidenceEmitter | null = null;
   let foundation: SpatialSoakFoundation | null = null;
   let spatial: SharedSpatialSession | null = null;
+  let mainSession: SpatialSoakMainSession | null = null;
+  let mainVoxelLoading: string | null = null;
   let memory: WorldMemory | null = null;
   let vision: Vision | null = null;
   let arbiter: Arbiter | null = null;
@@ -1245,6 +1493,20 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
   let moveCallSequence = 0;
   let startCallSequence = 0;
 
+  // 主会话 manual 证据全部有界：快照序列、诊断计数、drain 结果与关停前 pending。
+  const workingSetSnapshots: WorkingSetSnapshotFacts[] = [];
+  let latestWorkingSetSnapshot: WorkingSetSnapshotFacts | null = null;
+  let workingSetSnapshotCount = 0;
+  let workingSetSnapshotOverflow = 0;
+  let workingSetStatsSnapshotCount = 0;
+  const workingSetSignatures = new Set<string>();
+  let workingSetDiagnosticTotal = 0;
+  let workingSetDiagnosticWritten = 0;
+  const workingSetDiagnosticKinds = new Map<string, number>();
+  let workingSetDrainFacts: Record<string, unknown> | null = null;
+  let pendingBeforeShutdown: number | null = null;
+  let workingSetPostShutdown: Record<string, unknown> | null = null;
+
   const currentEvidenceFailure = (): unknown =>
     evidenceEmitter?.failure ?? foundation?.evidenceFailure ?? null;
 
@@ -1269,9 +1531,82 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
   });
 
   const residencySummary = (): Record<string, unknown> => ({
-    state: 'unavailable',
-    detail: 'Manual residency telemetry is only available through the integrated manual scenario; this live run does not probe private state.',
+    state: latestWorkingSetSnapshot === null ? 'unknown' : 'observed',
+    latestSnapshotLabel: latestWorkingSetSnapshot?.label ?? null,
+    voxelLoading: latestWorkingSetSnapshot?.voxelLoading ?? mainVoxelLoading,
+    stats: latestWorkingSetSnapshot?.stats ?? null,
+    pending: latestWorkingSetSnapshot?.pending ?? null,
+    residentBytesMeaning: 'library working-set estimate, not process RSS',
+    snapshotCount: workingSetSnapshotCount,
+    statsSnapshotCount: workingSetStatsSnapshotCount,
+    diagnosticCount: workingSetDiagnosticTotal,
   });
+
+  /**
+   * 有界诊断回调：只在内存保留每个 kind 的计数，落盘事件有上限，不保留历史键。
+   * 回调自身不做 I/O 之外的工作，也绝不改写库的真实行为。
+   */
+  const onWorkingSetDiagnostic = (diagnostic: WorkingSetDiagnosticFacts): void => {
+    workingSetDiagnosticTotal += 1;
+    const kind = diagnostic.kind;
+    workingSetDiagnosticKinds.set(kind, (workingSetDiagnosticKinds.get(kind) ?? 0) + 1);
+    if (workingSetDiagnosticWritten >= MAX_WORKING_SET_DIAGNOSTIC_EVENTS) return;
+    workingSetDiagnosticWritten += 1;
+    emit('working-set-diagnostic', null, {
+      at: Date.now(),
+      total: workingSetDiagnosticTotal,
+      kind,
+      reason: diagnostic.reason ?? null,
+      count: diagnostic.count ?? null,
+      keyCount: diagnostic.keys?.length ?? 0,
+      observedAtMin: diagnostic.observedAtMin ?? null,
+      observedAtMax: diagnostic.observedAtMax ?? null,
+      message: typeof diagnostic.message === 'string'
+        ? diagnostic.message.slice(0, MAX_WORKING_SET_DIAGNOSTIC_MESSAGE_CHARS)
+        : null,
+    });
+  };
+
+  /**
+   * 主会话真实工作集快照。stats 只在打开后的实际模式是 manual 时调用；eager
+   * 会话没有工作集，显式记录为 unavailable，绝不把它包装成 manual 证据。
+   */
+  const captureWorkingSetSnapshot = (label: string): WorkingSetSnapshotFacts => {
+    const session = mainSession;
+    const actual = session === null ? null : session.session.voxelLoading;
+    const stats = session !== null && actual === 'manual' && typeof session.workingSetStats === 'function'
+      ? session.workingSetStats()
+      : null;
+    const pending = session !== null && typeof session.pendingObservations === 'function'
+      ? session.pendingObservations()
+      : null;
+    const unavailable = session === null
+      ? 'main session not opened'
+      : stats === null
+        ? 'workingSetStats is unavailable (eager voxel loading or old host)'
+        : pending === null
+          ? 'pendingObservations is not integrated in this host'
+          : null;
+    const snapshot = buildWorkingSetSnapshot({
+      label,
+      at: Date.now(),
+      activeElapsedMs: activeStartedAt === null ? null : Date.now() - activeStartedAt,
+      voxelLoading: actual,
+      stats,
+      pending,
+      unavailable,
+    });
+    workingSetSnapshotCount += 1;
+    latestWorkingSetSnapshot = snapshot;
+    if (stats !== null) {
+      workingSetStatsSnapshotCount += 1;
+      workingSetSignatures.add(workingSetStatsSignature(stats));
+    }
+    if (workingSetSnapshots.length < MAX_WORKING_SET_SNAPSHOTS) workingSetSnapshots.push(snapshot);
+    else workingSetSnapshotOverflow += 1;
+    emit('working-set-snapshot', null, snapshot);
+    return snapshot;
+  };
 
   const connectionSnapshot = (label: string) => {
     const at = Date.now();
@@ -1485,8 +1820,9 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
       start: clone(cli.start),
       startRaw: cli.startRaw,
       durationMs: cli.durationMs,
+      voxelLoading: { requested: cli.voxelLoading, source: cli.voxelLoadingSource },
       fixture: FIXTURE_FACTS,
-      note: 'smoke runs bounded real smoke; full requires the real manual residency API and at least one hour of active time.',
+      note: 'smoke runs bounded real smoke; full opens the main session with manual voxel loading, requires real main-session working-set evidence, and at least one hour of active time.',
     });
 
     const { EventBus } = await import('../src/events.ts');
@@ -1512,11 +1848,24 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
 
     const bus = new EventBus();
     adapter = new MineflayerAdapterClass(config, bus);
-    spatial = await SharedSpatialSession.open({
-      worldId: config.memory.worldId,
-      databasePath: path.join(evidenceDir, 'spatial.sqlite'),
-      timeoutMs: 5000,
+    spatial = await SharedSpatialSession.open(buildSpatialOpenOptions(
+      config.memory.worldId,
+      path.join(evidenceDir, 'spatial.sqlite'),
+      cli.voxelLoading,
+      onWorkingSetDiagnostic,
+    ));
+    // mainSession 是同一个真实对象的能力视图；没有断言，也没有包装。
+    mainSession = spatial;
+    mainVoxelLoading = spatial.session.voxelLoading;
+    emit('voxel-loading-opened', null, {
+      requested: cli.voxelLoading,
+      source: cli.voxelLoadingSource,
+      actual: mainVoxelLoading,
     });
+    // 请求值必须在真实打开结果上生效；eager 不能被静默当成 manual，反之亦然。
+    if (mainVoxelLoading !== cli.voxelLoading) {
+      throw new Error(`requested voxelLoading=${cli.voxelLoading} but opened session reports ${mainVoxelLoading}`);
+    }
     // 从这里开始 spatial 已打开：即使后续构造失败，finally 也必须真实 shutdown。
     const openedSpatial = spatial;
     memory = new WorldMemoryClass(null);
@@ -1907,6 +2256,8 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
     const state = adapter.state();
     runScope = { worldId: state.worldId, dim: state.dim, sessionId: state.sessionId };
     emit('runtime-scope', null, { scope: clone(runScope) });
+    // 第一条基线快照：真实主会话打开且初始观测已提交。
+    captureWorkingSetSnapshot('initial-observation');
 
     const endpointName = (point: FixtureEndpoint): 'A' | 'B' => samePoint(point, FIXTURE_A) ? 'A' : 'B';
     let nominalFrom = endpointName(cli.start);
@@ -1928,6 +2279,8 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
       directions.add(`${nominalFrom}->${nominalTo}`);
       nominalFrom = nominalTo;
       legIndex += 1;
+      // 每段真实 leg 完成后记录主会话工作集快照（计数/字节估算，不保留键）。
+      captureWorkingSetSnapshot(`leg-${legIndex}`);
     };
     const recordScenario = (result: ScenarioResult): ScenarioResult => {
       scenarioResults.set(result.id, result);
@@ -2193,10 +2546,13 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
     if (cli.mode === 'full') {
       // 场景按真实依赖顺序执行；任一失败立即抛出，不空等剩余时长。
       const cancel = recordScenario(await runCancelScenario());
+      captureWorkingSetSnapshot('scenario-explicit-cancel');
       if (!cancel.ok) throw new Error(`explicit-cancel scenario failed: ${cancel.problems.join(', ')}`);
       const reconnect = recordScenario(await runDisconnectReconnectScenario());
+      captureWorkingSetSnapshot('scenario-disconnect-reconnect');
       if (!reconnect.ok) throw new Error(`disconnect-reconnect scenario failed: ${reconnect.problems.join(', ')}`);
       const reopen = recordScenario(await runCloseReopenScenario());
+      captureWorkingSetSnapshot('scenario-close-reopen');
       if (!reopen.ok) throw new Error(`close-reopen scenario failed: ${reopen.problems.join(', ')}`);
       const manualScope = adapter.state();
       const manual = recordScenario(await runManualScenario({
@@ -2206,6 +2562,7 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
         observe: () => vision!.observeBlocks(localBodyCells(adapter!.state().pos)),
         emit: (kind, payload) => { emit(kind, null, payload); },
       }));
+      captureWorkingSetSnapshot('scenario-manual-residency');
       if (!manual.ok) throw new Error(`manual-residency scenario ${manual.state}: ${manual.problems.join(', ')}`);
 
       // 满足全部场景后继续真实 leg/checkpoint 活动直到完整一小时。
@@ -2329,6 +2686,47 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
     }
     emit('connection-final', null, telemetryFinal);
 
+    // 关停前先处理可接受的 handoff：manual 主会话显式 drain 一次，再记录关停前
+    // 快照。残留 pending 不会被改写成功；shutdown 会把它们计入 error。
+    captureWorkingSetSnapshot('before-shutdown-drain');
+    if (
+      mainSession !== null
+      && mainVoxelLoading === 'manual'
+      && typeof mainSession.drainObservations === 'function'
+    ) {
+      try {
+        const drained = await withTimeout(
+          mainSession.drainObservations({ deadline: Date.now() + 15_000 }),
+          30_000,
+          'bounded working-set drain',
+        );
+        const pending = drained.pending;
+        workingSetDrainFacts = {
+          cancelled: drained.cancelled,
+          reason: drained.reason,
+          pendingObservations: pending.observations,
+          pendingBytes: pending.bytes ?? 0,
+          pendingSectionCount: pending.sections?.length ?? 0,
+          pendingObservedAtMin: pending.observedAtMin ?? null,
+          pendingObservedAtMax: pending.observedAtMax ?? null,
+          gap: drained.gap === undefined || drained.gap === null ? null : {
+            kind: drained.gap.kind ?? null,
+            count: drained.gap.count ?? null,
+            keyCount: drained.gap.keys?.length ?? 0,
+            message: typeof drained.gap.message === 'string'
+              ? drained.gap.message.slice(0, MAX_WORKING_SET_DIAGNOSTIC_MESSAGE_CHARS)
+              : null,
+          },
+          checkpointError: drained.checkpointError === null ? null : errorFacts(drained.checkpointError),
+        };
+        emit('working-set-drain', null, workingSetDrainFacts);
+      } catch (error) {
+        noteCleanupError('working-set-drain', error);
+      }
+    }
+    const preShutdownSnapshot = captureWorkingSetSnapshot('before-shutdown');
+    pendingBeforeShutdown = preShutdownSnapshot.pending?.observations ?? null;
+
     // spatial 已打开时必须有真实 shutdown 结果。foundation 构造失败时也要兜底关闭。
     if (foundation !== null) {
       try {
@@ -2362,6 +2760,21 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
         noteCleanupError('spatial-shutdown', error);
       }
     }
+    // close 之后不再调用 workingSetStats/pendingObservations：它们属于已关闭会话。
+    // 这里只记录 close 后的事实与关停前 pending，不伪造“关停后统计”。
+    workingSetPostShutdown = {
+      label: 'after-shutdown',
+      at: Date.now(),
+      available: false,
+      reason: 'session was closed by real shutdown; working-set APIs are not called after close',
+      voxelLoading: mainVoxelLoading,
+      pendingBeforeShutdown,
+      drainCancelled: workingSetDrainFacts?.cancelled ?? null,
+      shutdownCheckpoint: shutdownFactsResult?.checkpoint ?? null,
+      shutdownError: shutdownFactsResult?.error ?? null,
+    };
+    emit('working-set-post-shutdown', null, workingSetPostShutdown);
+
     if (spatial !== null && shutdownVerdict === null) {
       shutdownVerdict = classifyShutdownResult(null);
     }
@@ -2424,9 +2837,19 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
     && failedCheckpointReports === 0;
   const scenariosPass = cli.mode === 'smoke'
     || H2B_REQUIRED_SCENARIOS.every((id) => scenarioResults.get(id)?.ok === true);
+  const workingSetStatsChanged = workingSetSignatures.size > 1;
+  const mainManualEvidence = classifyMainManualEvidence({
+    mode: cli.mode,
+    requested: cli.voxelLoading,
+    actual: mainVoxelLoading,
+    statsSnapshotCount: workingSetStatsSnapshotCount,
+    statsChanged: workingSetStatsChanged,
+    pendingBeforeShutdown,
+  });
   const pass = smokePass
     && shutdownOk
     && scenariosPass
+    && mainManualEvidence.ok
     && (cli.mode === 'smoke' || durationVerdict.fullPassEligible);
 
   const manualResult = scenarioResults.get('manual-residency');
@@ -2446,6 +2869,30 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
     finishedAt: activeFinishedAt,
     activeElapsedMs,
     durationMs: cli.durationMs,
+    voxelLoading: {
+      requested: cli.voxelLoading,
+      source: cli.voxelLoadingSource,
+      actual: mainVoxelLoading,
+    },
+    workingSet: {
+      snapshots: workingSetSnapshots,
+      snapshotCount: workingSetSnapshotCount,
+      snapshotOverflow: workingSetSnapshotOverflow,
+      statsSnapshotCount: workingSetStatsSnapshotCount,
+      statsChanged: workingSetStatsChanged,
+      distinctStatsSignatures: workingSetSignatures.size,
+      pendingBeforeShutdown,
+      diagnostics: {
+        total: workingSetDiagnosticTotal,
+        written: workingSetDiagnosticWritten,
+        overflow: Math.max(0, workingSetDiagnosticTotal - workingSetDiagnosticWritten),
+        byKind: Object.fromEntries(workingSetDiagnosticKinds),
+      },
+      drain: workingSetDrainFacts,
+      afterShutdown: workingSetPostShutdown,
+      residentBytesMeaning: 'library working-set estimate, not process RSS',
+    },
+    mainManualEvidence,
     start: clone(cli.start),
     measuredStart: measuredStart === null ? null : clone(measuredStart),
     fixture: FIXTURE_FACTS,
@@ -2460,6 +2907,14 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
       eventRecordsBeforeResult: eventsWriter?.recordsWritten ?? 0,
       eventBytesBeforeResult: eventsWriter?.bytesWritten ?? 0,
       listenerCounts: finalTelemetry?.listeners ?? null,
+      mainWorkingSet: {
+        snapshotCount: workingSetSnapshotCount,
+        statsSnapshotCount: workingSetStatsSnapshotCount,
+        statsChanged: workingSetStatsChanged,
+        pendingBeforeShutdown,
+        diagnosticTotal: workingSetDiagnosticTotal,
+        drainCancelled: workingSetDrainFacts?.cancelled ?? null,
+      },
       manualPendingObservations: manualResult?.facts.pendingBeforeShutdown
         ?? manualResult?.facts.pendingAfterObserve
         ?? null,
