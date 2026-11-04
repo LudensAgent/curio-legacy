@@ -38,6 +38,13 @@ function persistenceState(overrides: Partial<SpatialPersistenceState> = {}): Spa
     dirty: false,
     baselineCheckpointId: null,
     voxelBaselineCheckpointId: null,
+    journalRevision: 0,
+    confirmedJournalRevision: 0,
+    journalBaselineCheckpointId: null,
+    pendingJournalRecords: 0,
+    pendingJournalBytes: 0,
+    committedJournalRecords: 0,
+    committedJournalBytes: 0,
     lastConfirmedCheckpointId: null,
     inFlightCheckpointId: null,
     unconfirmedCheckpointId: null,
@@ -53,6 +60,7 @@ function checkpoint(id: string, revisions = { voxel: 5, fragment: 4, topology: 3
     voxelRevision: revisions.voxel,
     fragmentRevision: revisions.fragment,
     topologyRevision: revisions.topology,
+    journalRevision: 0,
   };
 }
 

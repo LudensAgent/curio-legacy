@@ -64,7 +64,7 @@ function runChild(args: string[], env: NodeJS.ProcessEnv, timeoutMs: number): Pr
 }
 
 function checkpoint(id: string) {
-  return { checkpointId: id, worldId: 'world-a', voxelRevision: 1, fragmentRevision: 2, topologyRevision: 3 };
+  return { checkpointId: id, worldId: 'world-a', voxelRevision: 1, fragmentRevision: 2, topologyRevision: 3, journalRevision: 0 };
 }
 
 function closeResult(overrides: Partial<NonNullable<ShutdownResult['close']>> = {}) {
