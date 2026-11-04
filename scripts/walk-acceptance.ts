@@ -1758,7 +1758,17 @@ export interface ObserveCallRecord {
   frameExit: number;
   ownerTaskId: string | null;
   delegationId: string;
-  reportId: number | null;
+  /** 每个真实入参 ChangeReport 对象独立分配；生命周期报告也有稳定编号。 */
+  reportId: number;
+  /** 入参原报告对象（不改内容），生命周期/其他来源报告原样保留。 */
+  report: ChangeReport;
+  /**
+   * 该报告是否就是已记录 mapBatch 的同一对象。false 表示它不来自已捕获取的
+   * observeBatch/Vision 链路，绝不能当作合法视觉报告。
+   */
+  mapBatchMatched: boolean;
+  /** mapBatch 匹配来源，或明确标为非 Vision/mapBatch 来源。 */
+  reportSource: 'mapBatch' | 'unmatched';
   statusBefore: RouteStatusSnapshot | null;
   statusAfter: RouteStatusSnapshot;
   keysBefore: Keys;
@@ -1782,6 +1792,8 @@ export class ExecutionDiagnostics {
   readonly bindings: BindingRecord[] = [];
   private wrapped = false;
   private readonly reportIds = new WeakMap<object, number>();
+  /** 真实 observeBatch 返回过的报告对象；用于确认 loop.observe 入参的同一对象来源。 */
+  private readonly mapReports = new WeakSet<ChangeReport>();
   private readonly mapIds = new WeakMap<object, number>();
   private nextReportId = 0;
   private nextMapId = 0;
@@ -1971,6 +1983,7 @@ export class ExecutionDiagnostics {
       const mapId = self.idForMap(this);
       const report = origObserveBatch.call(this, batch);
       const reportId = self.idForReport(report);
+      self.mapReports.add(report);
       self.mapBatches.push({
         seq, ts, frame, mapId, mapWorldId: this.worldId, map: this,
         observations: batch.observations.map((o) => ({ ...o, pos: { ...o.pos }, state: { name: o.state.name, properties: { ...o.state.properties } } })),
@@ -1987,7 +2000,10 @@ export class ExecutionDiagnostics {
       const frameEnter = self.frame();
       const statusBefore = snapshotStatus(this.status());
       const keysBefore = self.keys();
-      const reportId = self.reportIds.get(report) ?? null;
+      // 每个真实入参对象都分配稳定编号；同一对象重复进入保持同一编号，内容相同的新对象不同。
+      const reportId = self.idForReport(report);
+      // 只有实际 observeBatch 返回过的同一对象才算 mapBatch/Vision 链路；生命周期报告在这里明确为 unmatched。
+      const mapBatchMatched = self.mapReports.has(report);
       const status = origLoopObserve.call(this, report, budget);
       const tsExit = self.now();
       const exitSeq = self.seq.next();
@@ -1996,7 +2012,8 @@ export class ExecutionDiagnostics {
         enterSeq, exitSeq, tsEnter, tsExit, frameEnter, frameExit: self.frame(),
         ownerTaskId: binding?.taskId ?? null,
         delegationId: binding?.delegationId ?? after.delegationId,
-        reportId, statusBefore, statusAfter: after, keysBefore, keysAfter: self.keys(),
+        reportId, report, mapBatchMatched, reportSource: mapBatchMatched ? 'mapBatch' : 'unmatched',
+        statusBefore, statusAfter: after, keysBefore, keysAfter: self.keys(),
       });
       return status;
     };
@@ -3954,7 +3971,9 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
     subcases.a = { ...(subcases.a ?? {}), verdict: 'FAIL', error: (e as Error)?.message ?? String(e) };
   }
 
-  // --- 7b：宿主帧交付暂停（宿主注入，非服务端停摆）：先证明本 task 有真实 pending 帧等待，再取消 ---
+  // --- 7b：宿主帧交付暂停（宿主注入，非服务端停摆）：先证明本 task 有真实 pending 帧等待，
+  // 再走真实 Arbiter.setPaused(true) 暂停；暂停取消旧 loop、生命周期报告使旧 OPEN 失效，
+  // 无新帧/新 Vision 时证据格 STALE；physics 仍关闭时真实 resume 且不伪复鲜。 ---
   if (!aPass) {
     subcases.b = { verdict: 'NOT_RUN', note: 'W7a 未通过；不继续不安全的后续子case' };
   } else {
@@ -3997,11 +4016,134 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
       if (pendingAtPause.ownedAbortAdded < 1) {
         throw new Error(`W7b pending 等待未新增本 tick 的 abort 监听器：${pendingAtPause.diagId}`);
       }
-      snapControl(ctx, 'before-arbiter-cancel-w7b', ev);
-      const cancelSeq = markTimeline(d, 'arbiter-cancel-w7b', t.task.id);
+      // 暂停前只从本 task 真实开始后、由真实 Vision typed payload 写入同一 svc.voxel 的
+      // 批次中取一个当前 FRESH 格；不复用 W7a 旧证据，也不从诊断投影重建。
+      const w7bVisionCalls = d.exec.visionCalls.filter((c) => c.ts >= t.task.startedAt);
+      const w7bBatches = d.exec.mapBatches
+        .filter((b) => b.ts >= t.task.startedAt)
+        .map((b) => ({ ...mapBatchForEvidence(b), mapIsSessionVoxel: b.map === ctx.spatial.session.voxel }));
+      const witness = pickSpatialWitness([{ visionCalls: w7bVisionCalls, mapBatches: w7bBatches }], ctx.spatial.session.voxel);
+      if (!witness) throw new Error('W7b 暂停前未找到本任务真实 Vision 写入同一 svc.voxel 的证据格');
+      if (witness.cell.freshness !== 'FRESH') throw new Error(`W7b 证据格暂停前非 FRESH：${witness.cell.freshness ?? 'missing'}`);
+      const readWitnessCell = () => cellEvidenceSnapshot(
+        ctx.spatial.session.voxel.cellAt(witness.block.dimension, witness.block.pos.x, witness.block.pos.y, witness.block.pos.z),
+      );
+      const witnessCellBefore = readWitnessCell();
+      const assertStaleWitness = (label: string, cell: CellEvidenceSnapshot) => {
+        if (cell.freshness !== 'STALE') throw new Error(`${label} 证据格 freshness=${cell.freshness ?? 'missing'} 不是 STALE`);
+        const before = witness.cell;
+        if (cell.name !== before.name
+          || JSON.stringify(cell.properties ?? {}) !== JSON.stringify(before.properties ?? {})
+          || cell.observedAt !== before.observedAt
+          || cell.sequence !== before.sequence
+          || cell.originObservationId !== before.originObservationId
+          || cell.sessionId !== before.sessionId) {
+          throw new Error(`${label} 证据格原 state/properties/时间/sequence/session 未保持`);
+        }
+      };
+      const statusBeforePause = latestRouteStatus(d.exec, t.task.id, delegationId);
+      const oldOpenSteps = statusBeforePause?.route?.steps
+        .flatMap((step, index) => step.kind === 'verified' && step.status === 'OPEN' ? [index] : []) ?? [];
+      if (oldOpenSteps.length === 0) throw new Error('W7b 暂停前没有公开 route OPEN 步骤可供失效证明');
+      const sharedPause: Record<string, unknown> = {
+        witnessSource: {
+          worldId: witness.block.worldId, dim: witness.block.dimension, sessionId: witness.block.sessionId,
+          pos: { ...witness.block.pos }, name: witness.block.name, properties: { ...witness.block.properties },
+          stateComplete: witness.block.stateComplete, observedAt: witness.block.observedAt,
+          observationId: witness.block.observationId,
+          vision: { seq: witness.vision.seq, ts: witness.vision.ts, frame: witness.vision.frame, visionId: witness.vision.visionId },
+          batch: {
+            seq: witness.batch.seq, mapId: witness.batch.mapId, mapWorldId: witness.batch.mapWorldId,
+            reportId: witness.batch.reportId, mapIsSessionVoxel: true,
+          },
+        },
+        witnessCellBefore,
+        routeBeforePause: statusBeforePause?.route ?? null,
+        oldOpenSteps,
+      };
+      subcases.b = { verdict: 'NOT_RUN', sharedPause };
+
+      snapControl(ctx, 'before-arbiter-pause-w7b', ev);
+      const framesBeforePause = d.recorder.frames.length;
+      const visionCallsBeforePause = d.exec.visionCalls.length;
+      const observesBeforePause = d.exec.observes.length;
+      if (ctx.bot.physicsEnabled) throw new Error('W7b 暂停前 physics 未关闭，无法证明无帧等待');
+      const pausedFlagsBefore = { arbiter: ctx.arbiter.paused, spatial: ctx.spatial.paused };
+      const cancelSeq = markTimeline(d, 'arbiter-setpaused-true-w7b', t.task.id);
       const cancelTs = Date.now();
-      ctx.arbiter.cancel('W7 暂停帧后取消');
-      const o = await awaitOrTimeout(done, 10_000, 'W7b 取消完成');
+      ctx.arbiter.setPaused(true); // 真实 Arbiter 暂停：spatial 生命周期先取消旧 loop，再 cancel/stopAll。
+      const pauseReturnSeq = d.seq.next();
+      const pauseReturnTs = Date.now();
+      const pausedFlagsAfter = { arbiter: ctx.arbiter.paused, spatial: ctx.spatial.paused };
+      sharedPause.pause = {
+        label: 'arbiter-setPaused(true)', cause: '真实 Arbiter 暂停触发取消（不是 disconnect）',
+        markSeq: cancelSeq, callTs: cancelTs, returnSeq: pauseReturnSeq, returnTs: pauseReturnTs,
+        flagsBefore: pausedFlagsBefore, flagsAfter: pausedFlagsAfter,
+        physicsEnabled: ctx.bot.physicsEnabled,
+        framesBeforePause, visionCallsBeforePause, observesBeforePause,
+      };
+      if (!pausedFlagsAfter.arbiter || !pausedFlagsAfter.spatial) {
+        throw new Error(`W7b 暂停后 paused 标志非 true：${JSON.stringify(pausedFlagsAfter)}`);
+      }
+      if (d.recorder.frames.length !== framesBeforePause) {
+        throw new Error(`W7b 暂停调用期间出现 ${d.recorder.frames.length - framesBeforePause} 个新帧`);
+      }
+      if (d.exec.visionCalls.length !== visionCallsBeforePause) {
+        throw new Error(`W7b 暂停调用期间出现 ${d.exec.visionCalls.length - visionCallsBeforePause} 次新 Vision`);
+      }
+      // 生命周期报告在 loop.cancel 之后同步进入 observe：必须保留为真实 report，
+      // 明确非 Vision/mapBatch 来源，并检查同一 this/task 的旧 OPEN 是否被报告失效。
+      const lifecycleObserves = d.exec.observes
+        .filter((o) => o.enterSeq > cancelSeq && o.ownerTaskId === t.task.id && o.delegationId === delegationId);
+      if (lifecycleObserves.length !== 1) {
+        throw new Error(`W7b 暂停后应恰好有 1 次生命周期 observe，实际 ${lifecycleObserves.length}`);
+      }
+      const lifecycle = lifecycleObserves[0]!;
+      if (lifecycle.reportSource !== 'unmatched' || lifecycle.mapBatchMatched) {
+        throw new Error(`W7b 生命周期报告被错标为 Vision/mapBatch 来源：${lifecycle.reportSource}`);
+      }
+      if (d.exec.mapBatches.some((b) => b.reportId === lifecycle.reportId)) {
+        throw new Error('W7b 生命周期报告编号与 mapBatch 冲突');
+      }
+      const witnessChange = lifecycle.report.sections
+        .flatMap((section) => section.cells)
+        .find((change) => sameCell(change.pos, witness.block.pos));
+      if (!witnessChange || witnessChange.kind !== 'staled') {
+        throw new Error(`W7b 生命周期报告未把证据格标为 staled：${JSON.stringify(witnessChange ?? null)}`);
+      }
+      const statusAfterLifecycle = lifecycle.statusAfter.route;
+      const invalidatedOldOpenSteps = oldOpenSteps.filter((index) => {
+        const step = statusAfterLifecycle?.steps[index];
+        return !(step?.kind === 'verified' && step.status === 'OPEN');
+      });
+      if (invalidatedOldOpenSteps.length === 0) {
+        throw new Error('W7b 生命周期报告后旧 OPEN 步骤仍全部 OPEN，未证明路线失效');
+      }
+      sharedPause.lifecycleObserve = {
+        enterSeq: lifecycle.enterSeq, exitSeq: lifecycle.exitSeq,
+        tsEnter: lifecycle.tsEnter, tsExit: lifecycle.tsExit,
+        frameEnter: lifecycle.frameEnter, frameExit: lifecycle.frameExit,
+        ownerTaskId: lifecycle.ownerTaskId, delegationId: lifecycle.delegationId,
+        reportId: lifecycle.reportId, mapBatchMatched: lifecycle.mapBatchMatched, reportSource: lifecycle.reportSource,
+        report: lifecycle.report,
+        statusBefore: lifecycle.statusBefore, statusAfter: lifecycle.statusAfter,
+        keysBefore: lifecycle.keysBefore, keysAfter: lifecycle.keysAfter,
+      };
+      sharedPause.routeInvalidation = {
+        oldOpenSteps, invalidatedOldOpenSteps,
+        invalidatedCountBefore: statusBeforePause?.route?.invalidatedCount ?? null,
+        invalidatedCountAfter: statusAfterLifecycle?.invalidatedCount ?? null,
+        lifecycleOutcome: lifecycle.statusAfter.result?.outcome ?? null,
+      };
+      // 无新帧/新 Vision 时只读同一格：应 STALE，原事实/时间/sequence/session 不变。
+      const witnessCellAfterPause = readWitnessCell();
+      sharedPause.witnessCellAfterPause = witnessCellAfterPause;
+      assertStaleWitness('W7b 暂停后', witnessCellAfterPause);
+      if (d.exec.observes.length !== observesBeforePause + 1) {
+        throw new Error(`W7b 暂停读取不应产生额外 observe：before=${observesBeforePause} after=${d.exec.observes.length}`);
+      }
+
+      const o = await awaitOrTimeout(done, 10_000, 'W7b 暂停取消完成');
       const doneSeq = markTimeline(d, 'task-done-w7b', t.task.id);
       const finishedAt = Date.now();
       const framesAtDone = d.recorder.frames.length;
@@ -4025,14 +4167,15 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
         status: o.result.status, outcome: nav?.outcome, confirmed: nav?.confirmed,
         lastPosition: nav?.lastPosition, segments: ownSegments(t.task.id, delegationId),
       };
-      subcases.b = { verdict: 'NOT_RUN', ...base };
+      subcases.b = { verdict: 'NOT_RUN', ...base, sharedPause };
       if (framesAtDone !== framesBefore) throw new Error(`W7b 取消完成前仍有 ${framesAtDone - framesBefore} 帧送达`);
       if (o.result.status !== 'cancelled') throw new Error(`W7b 暂停帧后未以 cancelled 结束：status=${o.result.status}`);
       if (nav?.outcome !== 'CANCELLED' || nav.confirmed !== false) {
         throw new Error(`W7b NavResult 非 CANCELLED/unconfirmed：outcome=${nav?.outcome} confirmed=${nav?.confirmed}`);
       }
       const last = assertRealPartial(nav, d.exec.deliveredSamples, t.task.id, delegationId, startPos, 0.5, 'W7b');
-      // 真实 Arbiter.cancel → production stopAll 是合法权限撤销：只要求 keysAfter/最终键释放，不要求 keysBefore。
+      // 真实 Arbiter.setPaused(true) → spatial 生命周期取消 → production stopAll 是合法权限撤销：
+      // 只要求 keysAfter/最终键释放，不要求 keysBefore。
       const stopAfterCancel = d.diag.stopAlls.find((s) => s.kind === 'production' && s.seqBefore > cancelSeq && s.recentBodyOwnerTaskId === t.task.id);
       if (!stopAfterCancel) throw new Error('W7b 未捕获取消后的生产 stopAll');
       if (!allKeysReleased(stopAfterCancel.keysAfter)) throw new Error(`W7b production stopAll keysAfter 仍有残留：${JSON.stringify(stopAfterCancel.keysAfter)}`);
@@ -4043,8 +4186,48 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
       await waitFor(() => pendingTicksFor(d.diag.ticks, t.task.id).length === 0, 1_000, 'W7b pending tick 解除');
       assertOwnedTicksReleased(d.diag.ticks, t.task.id, 'W7b');
       assertListenerBaseline(listenersBefore, botListenerCounts(ctx.bot), 'W7b');
+
+      // 取消/监听/键证据完成后，physics 仍关闭时真实 resume：不调用 observe、不更新时间，
+      // 再读同一格仍 STALE 且原事实保持，证明无观测 pause/resume gap 真实成立。
+      const framesBeforeResume = d.recorder.frames.length;
+      const visionCallsBeforeResume = d.exec.visionCalls.length;
+      const observesBeforeResume = d.exec.observes.length;
+      const pausedFlagsBeforeResume = { arbiter: ctx.arbiter.paused, spatial: ctx.spatial.paused };
+      if (!pausedFlagsBeforeResume.arbiter || !pausedFlagsBeforeResume.spatial) {
+        throw new Error(`W7b resume 前 paused 标志非 true：${JSON.stringify(pausedFlagsBeforeResume)}`);
+      }
+      if (ctx.bot.physicsEnabled) throw new Error('W7b resume 前 physics 已恢复，无法证明纯暂停 gap');
+      const resumeSeq = markTimeline(d, 'arbiter-setpaused-false-w7b', t.task.id);
+      const resumeTs = Date.now();
+      ctx.arbiter.setPaused(false);
+      const resumeReturnSeq = d.seq.next();
+      const resumeReturnTs = Date.now();
+      const resumedFlags = { arbiter: ctx.arbiter.paused, spatial: ctx.spatial.paused };
+      const witnessCellAfterResume = readWitnessCell();
+      sharedPause.resume = {
+        label: 'arbiter-setPaused(false)', markSeq: resumeSeq, callTs: resumeTs,
+        returnSeq: resumeReturnSeq, returnTs: resumeReturnTs,
+        flagsBefore: pausedFlagsBeforeResume, flagsAfter: resumedFlags,
+        physicsEnabled: ctx.bot.physicsEnabled,
+        framesBeforeResume, visionCallsBeforeResume, observesBeforeResume,
+      };
+      sharedPause.witnessCellAfterResume = witnessCellAfterResume;
+      if (resumedFlags.arbiter || resumedFlags.spatial) {
+        throw new Error(`W7b resume 后 paused 标志非 false：${JSON.stringify(resumedFlags)}`);
+      }
+      if (d.exec.observes.length !== observesBeforeResume) {
+        throw new Error(`W7b resume 不应调用 observe：before=${observesBeforeResume} after=${d.exec.observes.length}`);
+      }
+      if (d.recorder.frames.length !== framesBeforeResume) {
+        throw new Error(`W7b resume 期间出现 ${d.recorder.frames.length - framesBeforeResume} 个新帧`);
+      }
+      if (d.exec.visionCalls.length !== visionCallsBeforeResume) {
+        throw new Error(`W7b resume 期间出现 ${d.exec.visionCalls.length - visionCallsBeforeResume} 次新 Vision`);
+      }
+      assertStaleWitness('W7b resume 后', witnessCellAfterResume);
+
       subcases.b = {
-        ...base, verdict: 'PASS', finalKeys,
+        ...base, verdict: 'PASS', finalKeys, sharedPause,
         acceptedBeforePause,
         pendingOwnedResidual: {
           abort: pendingAtPause.ownedAbortResidual,
@@ -4061,7 +4244,30 @@ async function scenarioW7(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
       };
       bPass = true;
     } catch (e) {
-      subcases.b = { ...(subcases.b ?? {}), verdict: 'FAIL', error: (e as Error)?.message ?? String(e) };
+      const primary = e;
+      // 失败清理：仅在确实仍暂停时真实 resume；该次 resume 标为 harness fallback，
+      // 不参与 PASS，失败也单独保留，绝不覆盖原始失败。
+      let cleanupResume: Record<string, unknown> | null = null;
+      if (ctx.arbiter.paused || ctx.spatial.paused) {
+        const fallbackSeq = markTimeline(d, 'harness-fallback-arbiter-setpaused-false-w7b', null);
+        const fallbackTs = Date.now();
+        let cleanupError: string | null = null;
+        try {
+          ctx.arbiter.setPaused(false);
+        } catch (error) {
+          cleanupError = (error as Error)?.message ?? String(error);
+        }
+        cleanupResume = {
+          label: 'harness fallback: arbiter-setPaused(false)', markSeq: fallbackSeq, ts: fallbackTs,
+          arbiterPaused: ctx.arbiter.paused, spatialPaused: ctx.spatial.paused, error: cleanupError,
+        };
+      }
+      subcases.b = {
+        ...(subcases.b ?? {}),
+        verdict: 'FAIL',
+        error: (primary as Error)?.message ?? String(primary),
+        ...(cleanupResume === null ? {} : { cleanupResume }),
+      };
     } finally {
       ctx.bot.physicsEnabled = true;
     }

@@ -1879,7 +1879,7 @@ test('mapBatchForEvidence：输出JSON保留原observations/report与编号，�
   }
 });
 
-test('ExecutionDiagnostics：observeBatch 返回原 ChangeReport，并以 WeakMap 编号连接同一对象的 loop.observe 输入', () => {
+test('ExecutionDiagnostics：observeBatch 返回原 ChangeReport；loop.observe 每个对象独立编号并标明来源', () => {
   const seq = new EventSeq();
   const keys = { forward: true, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
   const exec = new ExecutionDiagnostics(seq, () => 'task_A', () => 1000, {
@@ -1911,14 +1911,134 @@ test('ExecutionDiagnostics：observeBatch 返回原 ChangeReport，并以 WeakMa
     loop.observe(report, 64);
     const rec = exec.observes[0]!;
     assert.equal(rec.reportId, exec.mapBatches[0]!.reportId, '同对象编号必须一致');
+    assert.equal(rec.report, report, '原报告对象必须原样保留');
+    assert.equal(rec.mapBatchMatched, true);
+    assert.equal(rec.reportSource, 'mapBatch');
     assert.equal(rec.frameEnter, 7);
     assert.deepEqual(rec.keysBefore, keys);
 
-    // 内容相同的另一份对象不得被当成同一 report。
+    // 内容相同的另一份对象不得被当成同一 report，也不得冒充 Vision/mapBatch 来源。
+    const unmatched = { sections: [] };
+    loop.observe(unmatched, 64);
+    const firstUnmatched = exec.observes[1]!;
+    assert.notEqual(firstUnmatched.reportId, null, '未匹配报告仍须有稳定编号');
+    assert.notEqual(firstUnmatched.reportId, rec.reportId, '不同对象必须分配不同编号');
+    assert.equal(firstUnmatched.mapBatchMatched, false);
+    assert.equal(firstUnmatched.reportSource, 'unmatched');
+    assert.equal(firstUnmatched.report, unmatched);
+
+    // 同一对象再次进入保持同一编号；内容相同的新对象获得新编号。
+    loop.observe(unmatched, 64);
+    assert.equal(exec.observes[2]!.reportId, firstUnmatched.reportId, '同一对象编号必须稳定');
+    assert.equal(exec.observes[2]!.mapBatchMatched, false);
     loop.observe({ sections: [] }, 64);
-    assert.equal(exec.observes[1]!.reportId, null, '非同对象不得命中 WeakMap 编号');
+    assert.notEqual(exec.observes[3]!.reportId, firstUnmatched.reportId, '内容相同的新对象不得复用编号');
+    assert.equal(exec.observes[3]!.mapBatchMatched, false);
+    assert.equal(exec.observes[3]!.reportSource, 'unmatched');
   } finally {
     exec.unwrap();
+  }
+});
+
+test('真实 SharedSpatialSession 暂停：生命周期报告有稳定ID且非Vision，旧loop取消/OPEN失效，证据格STALE且resume不伪复鲜', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'walk-pause-'));
+  const dbPath = path.join(dir, 'spatial.sqlite');
+  const world = 'walk-pause-world';
+  const dim = 'overworld';
+  const now = () => 1000;
+  const exec = new ExecutionDiagnostics(new EventSeq(), () => 'task_B', now, {
+    frame: () => 7,
+    readKeys: () => ({ ...emptyKeys }),
+  });
+  exec.wrap();
+  let svc: SharedSpatialSession | null = null;
+  try {
+    svc = await SharedSpatialSession.open({ worldId: world, databasePath: dbPath, timeoutMs: 5000, now });
+    svc.beginSession({ worldId: world, dim, sessionId: 's1' });
+    const map = svc.session.voxel;
+    const loop = new WalkRouteExecutor(map, {
+      move: async () => ({ failure: { kind: 'cancelled' } as const }),
+      stop: () => {},
+    }, { now });
+    loop.start({
+      worldId: world, dim, sessionId: 's1', mode: 'walk',
+      body: { feet: { x: 0.5, y: 0, z: 0.5 }, width: 0.6, height: 1.8, pose: 'standing' },
+      points: [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }],
+      arrival: { kind: 'exact' }, bodyArrival: GROUNDED_ARRIVAL_DEFAULTS, shapeProvider: walkCollisionProvider,
+      deadlineMs: 5000, timeoutMs: 1000,
+    });
+    svc.attach({
+      receiver: (report) => loop.observe(report, 64),
+      cancel: () => loop.cancel('lifecycle', 'test pause'),
+    });
+    let observationId = 0;
+    const observation = (x: number, y: number, z: number, name: string) => ({
+      worldId: world, dimension: dim, sessionId: 's1', pos: { x, y, z },
+      name, properties: {}, stateComplete: true,
+      observedAt: 1000, source: 'vision' as const, observationId: ++observationId,
+    });
+    svc.observe([
+      observation(0, -1, 0, 'minecraft:stone'), observation(1, -1, 0, 'minecraft:stone'),
+      observation(0, 0, 0, 'minecraft:air'), observation(1, 0, 0, 'minecraft:air'),
+      observation(0, 1, 0, 'minecraft:air'), observation(1, 1, 0, 'minecraft:air'),
+    ]);
+    // 普通 map 批次报告仍按同一对象匹配 Vision/mapBatch 来源。
+    assert.equal(exec.observes.length, 1);
+    assert.equal(exec.observes[0]!.reportSource, 'mapBatch');
+    assert.equal(exec.observes[0]!.mapBatchMatched, true);
+    const before = loop.status();
+    assert.ok(before);
+    assert.equal(before.route.steps[0]?.kind, 'verified');
+    assert.equal(before.route.steps[0]?.kind === 'verified' ? before.route.steps[0]!.result.status : null, 'OPEN');
+
+    const cellBefore = cellEvidenceSnapshot(map.cellAt(dim, 0, -1, 0));
+    assert.equal(cellBefore.freshness, 'FRESH');
+    const observesBeforePause = exec.observes.length;
+    svc.setPaused(true);
+    assert.equal(svc.paused, true);
+
+    // 生命周期报告在 loop.cancel 之后同步进入 observe：独立稳定编号，且不得冒充 Vision/mapBatch。
+    assert.equal(exec.observes.length, observesBeforePause + 1);
+    const lifecycle = exec.observes[observesBeforePause]!;
+    assert.equal(lifecycle.ownerTaskId, 'task_B');
+    assert.equal(lifecycle.mapBatchMatched, false);
+    assert.equal(lifecycle.reportSource, 'unmatched');
+    assert.equal(typeof lifecycle.reportId, 'number');
+    assert.equal(exec.mapBatches.some((b) => b.reportId === lifecycle.reportId), false, '生命周期报告不得复用 mapBatch 编号');
+    const staled = lifecycle.report.sections.flatMap((s) => s.cells).find((c) => c.pos.x === 0 && c.pos.y === -1 && c.pos.z === 0);
+    assert.equal(staled?.kind, 'staled');
+    assert.equal(lifecycle.statusBefore?.result?.outcome, 'CANCELLED', '暂停取消后同步进入 observe 的 statusBefore 已是 CANCELLED');
+
+    const after = loop.status();
+    assert.ok(after);
+    assert.equal(after.result?.outcome, 'CANCELLED');
+    const stepAfter = after.route.steps[0];
+    assert.equal(stepAfter?.kind === 'verified' && stepAfter.result.status === 'OPEN', false, '生命周期报告必须使旧 OPEN 步骤失效');
+    assert.equal(lifecycle.statusAfter.result?.outcome, 'CANCELLED');
+
+    const cellAfterPause = cellEvidenceSnapshot(map.cellAt(dim, 0, -1, 0));
+    assert.equal(cellAfterPause.freshness, 'STALE');
+    assert.equal(cellAfterPause.name, cellBefore.name);
+    assert.deepEqual(cellAfterPause.properties, cellBefore.properties);
+    assert.equal(cellAfterPause.observedAt, cellBefore.observedAt);
+    assert.equal(cellAfterPause.sequence, cellBefore.sequence);
+    assert.equal(cellAfterPause.sessionId, cellBefore.sessionId);
+
+    // resume 不调用 observe、不刷新证据；同一格仍 STALE，原事实保持。
+    const observesBeforeResume = exec.observes.length;
+    svc.setPaused(false);
+    assert.equal(svc.paused, false);
+    assert.equal(exec.observes.length, observesBeforeResume, 'resume 不得产生新的 loop.observe');
+    const cellAfterResume = cellEvidenceSnapshot(map.cellAt(dim, 0, -1, 0));
+    assert.equal(cellAfterResume.freshness, 'STALE');
+    assert.equal(cellAfterResume.name, cellBefore.name);
+    assert.equal(cellAfterResume.observedAt, cellBefore.observedAt);
+    assert.equal(cellAfterResume.sequence, cellBefore.sequence);
+    assert.equal(cellAfterResume.sessionId, cellBefore.sessionId);
+  } finally {
+    exec.unwrap();
+    if (svc !== null) await svc.shutdown();
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
