@@ -206,6 +206,7 @@ test('主启动：真实空间库打开失败时以非零码退出，且不初�
 
   fs.writeFileSync(path.join(dir, '.env.test'), [
     'CURIO_MODE=test',
+    `TEST_ROOT_DIR=${abs(path.join(dir, 'test'))}`,
     `DATA_DIR=${dataDir}`,
     `SERVER_DIR=${abs(path.join(dir, 'test', 'world'))}`,
     `AGENTS_DIR=${abs(path.join(dir, 'test', 'agents'))}`,
