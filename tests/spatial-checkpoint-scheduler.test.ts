@@ -395,25 +395,24 @@ test('真实 SQLite：常规周期保存独立于宿主最终关停，重开恢�
 
       let stop: (() => void) | null = null;
       let timer: ReturnType<typeof setTimeout> | null = null;
-      let saved: Extract<SpatialCheckpointReport, { status: 'saved' }> | null = null;
-      const firstSave = new Promise<void>((resolve, reject) => {
+      const firstSave = new Promise<Extract<SpatialCheckpointReport, { status: 'saved' }>>((resolve, reject) => {
         timer = setTimeout(() => reject(new Error('周期保存未在 5000ms 内完成')), 5000);
         stop = startSpatialCheckpointScheduler(spatial, (report) => {
           if (report.status === 'failed') {
             reject(new Error(`周期保存失败：${JSON.stringify(report.error)}`));
             return;
           }
-          saved = report;
-          resolve();
+          resolve(report);
         }, 10);
       });
+      let saved: Extract<SpatialCheckpointReport, { status: 'saved' }> | undefined;
       try {
-        await firstSave;
+        saved = await firstSave;
       } finally {
         if (timer !== null) clearTimeout(timer);
         stop?.();
       }
-      assert.ok(saved !== null, '必须收到真实 saved 汇报');
+      assert.ok(saved !== undefined, '必须收到真实 saved 汇报');
       assert.equal(saved.checkpoint.worldId, worldId);
       assert.equal(saved.remainingDirty, false);
       assert.equal(saved.state.dirty, false);
