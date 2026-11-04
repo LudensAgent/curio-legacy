@@ -13,15 +13,20 @@ const Vec3 = require('vec3').Vec3;
 /** 用一个不连服务器的 bot 模型，直接验证 blockStateAt 在“拿不到属性”和“拿到属性”两种边界下的返回。 */
 function setup(name: string, getProperties?: () => Record<string, string | number | boolean>) {
   const adapter = new MineflayerAdapter(config, new EventBus());
-  const bot: any = new EventEmitter();
-  bot.registry = data;
-  bot.entity = { position: new Vec3(0, 64, 0), yaw: 0 };
-  bot.game = { dimension: 'overworld' };
   const pos = new Vec3(1, 65, 0);
-  const block: any = { name, position: pos, boundingBox: 'block' };
-  if (getProperties) block.getProperties = getProperties;
-  bot.blockAt = () => block;
-  adapter.bot = bot; adapter.mcData = data; (adapter as any).connectedFlag = true;
+  const block = Object.assign(
+    { name, position: pos, boundingBox: 'block' },
+    getProperties ? { getProperties } : {},
+  );
+  const bot = Object.assign(new EventEmitter(), {
+    registry: data,
+    entity: { position: new Vec3(0, 64, 0), yaw: 0 },
+    game: { dimension: 'overworld' },
+    blockAt: () => block,
+  });
+  adapter.bot = bot;
+  adapter.mcData = data;
+  Object.assign(adapter, { connectedFlag: true });
   return { adapter, pos };
 }
 
