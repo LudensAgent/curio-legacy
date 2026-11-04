@@ -61,7 +61,7 @@ export class SkillLibrary {
     const steps: MacroDef['steps'] = [];
     for (const [i, st] of o.steps.entries()) {
       const sk = SKILLS[String(st?.skill ?? '')];
-      if (!sk || sk.name.startsWith(PREFIX) || ['unstuck', 'surface'].includes(sk.name)) return { ok: false, error: `第 ${i + 1} 步使用了不可组合的技能 ${st?.skill}` };
+      if (!sk || sk.name.startsWith(PREFIX) || sk.name === 'unstuck') return { ok: false, error: `第 ${i + 1} 步使用了不可组合的技能 ${st?.skill}` };
       const v = sk.validate(st?.args ?? {}, this.adapter);
       if (!v.ok) return { ok: false, error: `第 ${i + 1} 步参数错误：${v.error}` };
       steps.push({ skill: sk.name, args: v.args });

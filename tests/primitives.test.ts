@@ -285,6 +285,18 @@ test('dig_at [0,-1,0] 脚下支撑下面是深坑（落差超过 3 格）时拒�
   assert.ok(!w.actions.includes('dig:grass_block'), '没有挖掉脚下的支撑');
 });
 
+test('dig_at [0,-1,0] 脚下深坑：fall:true 明确接受坠落风险后照挖', async (t) => {
+  const w = new FakeAdapter();
+  w.groundY = 63;
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.removed.add('0,62,0'); w.removed.add('0,61,0'); w.removed.add('0,60,0'); w.removed.add('0,59,0');
+  const ctx = makeCtx(w, { senses: { observeBlocks: visibleTargets(w) } });
+  t.after(() => ctx.memory.close());
+  const r = await digAt.run(ctx, { at: [0, -1, 0], facing: 'N', fall: true });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.ok(w.actions.includes('dig:grass_block'), 'fall:true 明确授权后真的挖掉脚下支撑');
+});
+
 test('dig_at 液体邻格默认不挖；wet:true 与 lava:true 分别授权进水和进岩浆', async (t) => {
   const w = pocket();
   // 前方那格（0,60,-1）是石头，它再往前一格（0,60,-2）是水
@@ -339,6 +351,18 @@ test('explicit lava permission reaches dig validation and the code skill bridge'
     }
     assert.deepEqual(adapter.actions, ['dig:stone']);
   }
+});
+
+test('explicit fall permission reaches the code skill bridge', async (t) => {
+  const w = new FakeAdapter();
+  w.groundY = 63;
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.removed.add('0,62,0'); w.removed.add('0,61,0'); w.removed.add('0,60,0'); w.removed.add('0,59,0'); // 脚下深坑
+  const ctx = makeCtx(w, { senses: { observeBlocks: visibleTargets(w) } });
+  t.after(() => ctx.memory.close());
+  const bridge = makeBridge(ctx);
+  assert.equal((await bridge('digAt', [0, 63, 0]) as { ok: boolean }).ok, false, '不授权 fall 时拒绝挖脚下支撑');
+  assert.equal((await bridge('digAt', [0, 63, 0, { fall: true }]) as { ok: boolean }).ok, true, 'fall:true 经桥接生效');
 });
 
 test('absolute dig_at keeps its world cell instead of re-interpreting it as a support dig', async (t) => {

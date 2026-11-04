@@ -497,8 +497,8 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
         if (arrived(after)) continue;
         if (dist3(cur, after) < 0.3 && !arrived(after)) {
           if (nextTo(after)) return failedNear(after, '没有取得进展');
-          // 泡在水里时步行寻路不肯动（不游泳），一下就返回：说清楚是因为在水里
-          const wet = adapter.state().inWater ? '；人泡在水里，步行寻路不游泳——先 surface 游上岸，或在脚下垫一块站出水面，再走' : '';
+          // 泡在水里时步行寻路不肯动（不游泳），一下就返回：如实说是因为在水里、本次没有游泳
+          const wet = adapter.state().inWater ? '；人泡在水里，步行寻路不游泳，本次没有执行游泳' : '';
           return fail('PATH_NOT_FOUND', `前往 ${label} 没有取得进展，仍在 (${after.x.toFixed(2)},${after.y.toFixed(2)},${after.z.toFixed(2)})；尚未到达目标位置，需要换入口或路线${wet}`, measured(after));
         }
         if (distance(after) < bestDistance - 0.5) { bestDistance = distance(after); detours = 0; }
@@ -763,258 +763,48 @@ export const unstuck: Skill<{}> = {
 };
 
 // ------------------------------------------------------------------ surface（由 Agent 主动调用）
-type Vec = { x: number; y: number; z: number };
-/** escape：可选起始方式——dig=优先找气穴/往上挖，shore=让寻路带着往岸上走 */
-export const surface: Skill<{ escape?: 'dig' | 'shore' }> = {
+/** 一次有界上浮委托：只往上浮出水面换气，不找岸、不找气穴、不挖不垫、不换目标。 */
+export const surface: Skill<{ timeoutMs?: number }> = {
   name: 'surface',
-  description: '尝试上浮换气并游上岸；可能寻找气穴、挖开头顶方块或寻路到附近岸边，未上岸会如实报告',
-  argsDoc: '{"escape"?: "dig"（优先寻找气穴或挖开头顶）|"shore"（优先尝试寻路上岸）}',
-  timeoutMs: 35000,
+  description: '只做一次有界上浮：按住上浮让头露出流体换气；不找岸、不找气穴、不挖不垫。surfaced 只表示结束时头已露出流体（空气），不保证松开控制后继续浮着或持续换气；landed 表示站稳干地，两者分开报告，未浮出会如实说清位置与氧气',
+  argsDoc: '{"timeoutMs"?: 1000-20000（毫秒，本次上浮最多持续多久，可选）}',
+  timeoutMs: 25000,
   movement: true,
   validate(raw) {
-    const e = obj(raw).escape;
-    return { ok: true, args: e === 'dig' || e === 'shore' ? { escape: e } : {} };
+    const a = obj(raw);
+    if (a.escape !== undefined) return { ok: false, error: 'surface 不再接受 escape："dig"|"shore"（自动挖顶/找气穴/寻岸超出委托）。要挖开头顶用 dig_at，要向指定岸边游用 swim_to {"xyz":[x,y,z]}，要持续按住上浮用 press_keys {"keys":{"jump":true},"ms":…}' };
+    const timeoutMs = a.timeoutMs;
+    if (timeoutMs !== undefined && (!Number.isFinite(Number(timeoutMs)) || Number(timeoutMs) < 1000 || Number(timeoutMs) > 20000)) return { ok: false, error: 'timeoutMs 必须是 1000–20000 的毫秒数' };
+    return { ok: true, args: timeoutMs !== undefined ? { timeoutMs: Math.round(Number(timeoutMs)) } : {} };
   },
   async run(ctx, args) {
-    const end = Math.min(ctx.deadline, Date.now() + 32000);
-    const excluded: Vec[] = [];
-    let attempts = 0, scans = 0, pockets = 0, rises = 0, walks = 0, failedSwims = 0;
-    // 打法在一次上浮里就会升级：先正常游；游两次没上岸或氧气 <6 → 找气穴/往上挖；再不行 → 让寻路往岸上走；轮完从头再来
-    let tactic: 'swim' | 'dig' | 'shore' = args.escape ?? 'swim';
-    const escalate = (why: string) => {
-      const next = tactic === 'swim' ? 'dig' : tactic === 'dig' ? 'shore' : 'swim';
-      notes.push(`${why}，改为${next === 'dig' ? '找气穴/往上挖' : next === 'shore' ? '让寻路往岸上走' : '重新游'}`);
-      tactic = next; failedSwims = 0;
-      if (next === 'dig') pockets = 0;
-      if (next === 'shore') walks = 0;
-    };
-    if (!ctx.adapter.swimTo) return fail('STUCK', '当前适配器缺少持续游泳控制，不能确认已安全上岸');
-    {
-      const s0 = ctx.adapter.state();
-      if (!s0.inWater && s0.onGround) return ok('没在水里，已经站在干地上了', { landed: true, pos: s0.pos });
+    const a = ctx.adapter;
+    if (!a.swimTo) return fail('STUCK', '当前适配器缺少持续游泳控制，不能确认已浮出水面');
+    const s0 = a.state();
+    // 委托前就冻结自己的位置/氧气/观测时刻：state().pos 可能是可变引用，不克隆会被底层动作改成新主人的状态。
+    const s0Snapshot = { pos: { ...s0.pos }, oxygen: s0.oxygen, observedAt: Date.now() };
+    // 一次有界上浮委托：不选岸、不找气穴、不挖不垫、不换目标；surfaced（头露出流体）与 landed（站稳干地）分别报告。
+    // 预算耗尽（remaining <= 0）才拒绝，不强行开游（岩浆同样由底层 dryFooting/headOut 的真实身体确认排除）。
+    const timeoutMs = Math.min(args.timeoutMs ?? 20000, ctx.deadline - Date.now());
+    if (timeoutMs <= 0) return fail('TIMEOUT', `上浮时间已用完，未执行；现在在 (${s0.pos.x.toFixed(1)},${s0.pos.y.toFixed(1)},${s0.pos.z.toFixed(1)})，氧气 ${s0.oxygen}/20`, { landed: false, surfaced: false, pos: s0Snapshot.pos, oxygen: s0Snapshot.oxygen, observedAt: s0Snapshot.observedAt });
+    let r;
+    try {
+      r = await a.swimTo(null, ctx.signal, { timeoutMs });
+    } catch (e) {
+      // 取消/超时：保留底层带回的冻结 partial；无则用委托前的 s0 兜底，不重读 a.state() 以免张冠李戴到新主人状态。
+      if (isAbort(e) || (e as Error)?.name === 'TimeoutError') {
+        const prev = (e as Error & { partial?: Record<string, unknown> }).partial ?? {};
+        (e as Error & { partial?: Record<string, unknown> }).partial = { landed: false, surfaced: false, pos: s0Snapshot.pos, oxygen: s0Snapshot.oxygen, observedAt: s0Snapshot.observedAt, ...prev };
+      }
+      throw e;
     }
-    let brokeCeiling = 0;
-    const stubborn = new Set<string>(); // 挖不动的顶（没合适的工具/基岩）
-    const notes: string[] = [];
-    while (Date.now() < end) {
-      ctx.signal.throwIfAborted();
-      // 头还没出水面、头顶又是通到水面的开阔水路：先原地按住上浮换气。
-      // 换气是 surface 的第一要务，也是任何 escape 战术（挖顶/找气穴/游上岸）的前提，不能让战术跳过这一步。
-      if (ctx.adapter.state().inWater && !headInAir(ctx) && !ceilingAbove(ctx)) {
-        await ctx.adapter.swimTo(null, ctx.signal, { timeoutMs: Math.max(300, Math.min(2000, end - Date.now())) });
-        continue;
-      }
-      // 头顶被冰/石头封住时往上游没用：够得着就挖开（玩家在冰下、水洞里会这么做），够不着先往上游到够得着
-      const lid = ceilingAbove(ctx);
-      let sealed = false;
-      if (lid) {
-        const k = `${lid.pos.x},${lid.pos.y},${lid.pos.z}`;
-        // 水下挖方块慢 5 倍（脚不着地再慢 5 倍）：附近有气穴就先游过去，比憋着气挖顶快
-        const near = pockets < 3 ? findAirPocket(ctx) : null;
-        if (near && near.steps <= 10) {
-          pockets++;
-          ctx.progress(0, `头顶是 ${lid.name}，旁边 ${near.steps} 格有气穴，先游过去换气`);
-          const landed = await swimPath(ctx, near.path, end);
-          if (landed) return ok(`游进气穴后上了岸，氧气 ${ctx.adapter.state().oxygen}/20`, { attempts, landed: true, pocket: near.pos });
-          notes.push(`游向了 ${near.steps} 格外的气穴`);
-          if (headInAir(ctx)) { await ctx.adapter.swimTo(null, ctx.signal, { timeoutMs: Math.max(300, Math.min(3000, end - Date.now())) }); }
-          continue;
-        }
-        if (lid.reachable && !lid.unbreakable && !stubborn.has(k) && brokeCeiling < 6) {
-          ctx.progress(0, `头顶是 ${lid.name}，挖开透气`);
-          try {
-            const r = await ctx.adapter.dig(lid.pos, ctx.signal);
-            if (r.ok) { brokeCeiling++; continue; }
-            stubborn.add(k);
-          } catch (e) {
-            if (isAbort(e)) throw e;
-            stubborn.add(k);
-          }
-        } else if (!lid.reachable && rises < 3) {
-          // 顶在头上好几格：先浮上去（一直按着跳），到了够得着的高度再挖
-          rises++;
-          ctx.progress(0, `往上游，头顶 ${Math.round(lid.pos.y - ctx.adapter.state().pos.y)} 格处是 ${lid.name}`);
-          await ctx.adapter.swimTo(null, ctx.signal, { timeoutMs: 1500 });
-          continue;
-        }
-        sealed = true;
-      }
-      if (tactic === 'swim' && ctx.adapter.state().oxygen < 6 && !sealed) escalate(`氧气只剩 ${ctx.adapter.state().oxygen}`);
-      // 头已经在空气里（游进了气穴/水面）：原地按住上浮换气，别又游走
-      // 头顶这一列本来就通到水面（没有封顶）时，“找气穴”就是直接往上浮：同样原地按住上浮
-      if (tactic === 'dig' && (headInAir(ctx) || !lid)) {
-        ctx.progress(0, headInAir(ctx) ? '头在空气里，原地换气' : '头顶通着水面，按住上浮换气');
-        await ctx.adapter.swimTo(null, ctx.signal, { timeoutMs: Math.max(300, Math.min(3000, end - Date.now())) });
-        const now = ctx.adapter.state();
-        if (!now.inWater && now.onGround && now.oxygen >= 18) return ok(`换过气后已游上岸并站稳，氧气 ${now.oxygen}/20`, { attempts, landed: true, pos: now.pos });
-        if (now.oxygen >= 18) escalate('气换足了');
-        else if (!headInAir(ctx)) escalate('上浮没换到气');
-        continue;
-      }
-      // 被封住（挖不开）或换打法时：找身边水里连着的气穴（相邻的水面/洞里的空气），游过去换气
-      if ((sealed || tactic === 'dig') && pockets < 3) {
-        const pocket = findAirPocket(ctx);
-        if (pocket) {
-          pockets++;
-          ctx.progress(0, `头顶封住了，游向 ${pocket.steps} 格外的气穴换气`);
-          const landed = await swimPath(ctx, pocket.path, end);
-          if (landed) return ok(`游进气穴后上了岸，氧气 ${ctx.adapter.state().oxygen}/20`, { attempts, landed: true, pocket: pocket.pos });
-          notes.push(`游向了 ${pocket.steps} 格外的气穴`);
-          continue;
-        }
-        if (sealed) notes.push('头顶封住、身边没找到气穴');
-        if (tactic === 'dig') escalate('身边没有气穴');
-      } else if (tactic === 'dig') escalate('气穴都试过了');
-      ctx.senses.refresh();
-      const before = ctx.adapter.state();
-      let land = ctx.senses.nearestLand?.(before.pos, excluded);
-      // 换打法：直接让寻路往岸上走（会绕路、必要时挖开挡路的方块），而不是对着看得见却游不过去的岸直线游
-      if (tactic === 'shore' && (!land || walks >= 2)) escalate(land ? '寻路上岸没成' : '看不到能走上去的岸');
-      if (tactic === 'shore' && land && walks < 2) {
-        walks++;
-        ctx.progress(0, `让寻路带着往 ${land.dir} 的岸上走（${land.dist} 格）`);
-        try {
-          await ctx.adapter.moveTo({ kind: 'near', pos: { x: land.pos.x, y: land.pos.y + 1, z: land.pos.z }, range: 1 }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(9000, end - Date.now())) });
-        } catch (e) {
-          if (isAbort(e)) throw e;
-        }
-        const now = ctx.adapter.state();
-        if (!now.inWater && now.onGround) return ok(`走上了岸，氧气 ${now.oxygen}/20`, { attempts, landed: true, pos: now.pos });
-      }
-      const target = land ? { x: land.pos.x + 0.5, y: land.pos.y + 1, z: land.pos.z + 0.5 } : null;
-      ctx.progress(0, land ? `保持上浮，向 ${land.dir} 岸边游动（${land.dist} 格）` : '保持上浮并寻找实际可站立的岸边');
-      const result = await ctx.adapter.swimTo(target, ctx.signal, { timeoutMs: Math.min(land ? 8000 : 10000, end - Date.now()), observeShore: () => {
-        ctx.senses.refresh();
-        land = ctx.senses.nearestLand?.(ctx.adapter.state().pos, excluded);
-        return land ? { x: land.pos.x + 0.5, y: land.pos.y + 1, z: land.pos.z + 0.5 } : null;
-      } });
-      const after = ctx.adapter.state();
-      if (result.ok && result.landed && !after.inWater && after.onGround && after.oxygen >= 18) {
-        return ok(`已游上岸并站稳，氧气 ${after.oxygen}/20`, { attempts, landed: true, pos: after.pos });
-      }
-      failedSwims++;
-      if (tactic === 'swim' && (failedSwims >= 2 || ctx.adapter.state().oxygen < 6)) escalate(`游了 ${failedSwims} 次没上岸`);
-      if (land) {
-        attempts++;
-        excluded.push(land.pos);
-      } else {
-        // The continuous primitive already turns while afloat. A new bounded
-        // observation period can continue without inventing a destination.
-        scans++;
-      }
-      // 氧气还在掉时不提前放弃：换个岸、找气穴，一直动到时间用完
-      if ((attempts >= 4 || scans >= 8) && ctx.adapter.state().oxygen >= 14) break;
-      if (attempts >= 4) { attempts = 0; excluded.length = 0; pockets = Math.min(pockets, 2); }
-    }
-    const s = ctx.adapter.state();
-    // 没找到岸，但已经浮在水面、能正常呼吸：溺水危险已解除，交还给原来的事情（由它决定怎么离开水面）
-    if (s.inWater && s.oxygen >= 18 && headInAir(ctx)) {
-      const land = ctx.senses.nearestLand?.(s.pos, []);
-      const shore = land ? shoreHint(s.pos, land) : null;
-      return ok(`浮在水面能正常呼吸了（氧气 ${s.oxygen}/20），还没上岸${shore ? shore.text : '；附近没看到能上岸的地方'}`,
-        { attempts, landed: false, afloat: true, pos: s.pos, ...(shore ? { shore: shore.data } : {}), ...(brokeCeiling ? { brokeCeiling } : {}) });
-    }
-    return fail('STUCK', `尚未确认安全上岸，氧气 ${s.oxygen}/20${s.inWater ? '，仍在水中' : '，尚未站稳干地'}${notes.length ? `（${[...new Set(notes)].join('；')}）` : ''}`, { attempts, landed: false, pos: s.pos, ...(brokeCeiling ? { brokeCeiling } : {}) });
+    const s = a.state();
+    const at = `现在在 (${s.pos.x.toFixed(1)},${s.pos.y.toFixed(1)},${s.pos.z.toFixed(1)})，氧气 ${s.oxygen}/20`;
+    if (r.ok && r.landed) return ok(`上浮后已站稳干地，氧气 ${s.oxygen}/20`, { landed: true, surfaced: r.surfaced, pos: s.pos, oxygen: s.oxygen });
+    if (r.ok && r.surfaced) return ok(`结束时头已露出流体（氧气 ${s.oxygen}/20），还没上岸；松开控制后是否继续浮着、是否持续换气不保证`, { landed: false, surfaced: true, pos: s.pos, oxygen: s.oxygen });
+    // 时间到只说明预算耗尽，不证明身体卡住，也不断言头一定没露出来；surfaced 以实际返回为准。
+    const why = r.reason === 'WATER_ESCAPE_TIMEOUT' ? '上浮时间到，尚未确认完成' : r.reason === 'SWIM_NO_PROGRESS' ? '上浮没动' : r.reason;
+    const code = r.reason === 'WATER_ESCAPE_TIMEOUT' ? 'TIMEOUT' : 'STUCK';
+    return fail(code, `${why}；${at}`, { landed: false, surfaced: r.surfaced, pos: s.pos, oxygen: s.oxygen, reason: r.reason });
   },
 };
-
-/**
- * 把“最近的陆地”说成能直接用的话：落脚处比脚高几格；就贴在身边时给出能照抄的 step。
- * 只说方向和距离时，模型会按平地的高度去迈（[0,0,1]），而岸其实比泡在水里的脚高一两格。
- */
-export function shoreHint(pos: Vec3Like, land: { dir: string; dist: number; pos: Vec3Like }) {
-  const feet = feetCell(pos), stand = { x: land.pos.x, y: land.pos.y + 1, z: land.pos.z };
-  const dx = stand.x - feet.x, dz = stand.z - feet.z, dy = stand.y - feet.y;
-  const height = dy > 0 ? `，落脚处比脚高 ${dy} 格` : dy < 0 ? `，落脚处比脚低 ${-dy} 格` : '，落脚处和脚一样高';
-  const data = { dir: land.dir, dist: land.dist, dy, stand };
-  if (Math.abs(dx) + Math.abs(dz) === 1 && dy >= -1 && dy <= 2) {
-    const facing = dx === 1 ? 'E' : dx === -1 ? 'W' : dz === 1 ? 'S' : 'N';
-    return { text: `；岸就贴在身边（${facing}）${height}：可以尝试 step {"to":[1,0,0],"facing":"${facing}"}，是否上岸以实际结果为准`, data: { ...data, step: { to: [1, 0, 0], facing } } };
-  }
-  return { text: `；最近看到的陆地在 ${land.dir} ${land.dist} 格${height}`, data };
-}
-
-/** 沿气穴路线分段游过去（游泳原语只会走直线，拐弯的水道要一段一段游）；上了岸返回 true */
-async function swimPath(ctx: SkillCtx, path: Vec[], end: number): Promise<boolean> {
-  const waypoints = path.filter((_, i) => i > 0 && (i % 3 === 0 || i === path.length - 1));
-  for (const [i, w] of waypoints.entries()) {
-    const last = i === waypoints.length - 1;
-    const here = ctx.adapter.state().pos;
-    const d = Math.hypot(w.x + 0.5 - here.x, w.y - here.y, w.z + 0.5 - here.z);
-    const r = await ctx.adapter.swimTo!({ x: w.x + 0.5, y: w.y, z: w.z + 0.5 }, ctx.signal, { timeoutMs: Math.max(300, Math.min(end - Date.now(), last ? 4000 : 600 * d + 800)) });
-    if (r.landed) return true;
-    if (Date.now() >= end) break;
-  }
-  return false;
-}
-
-/** 眼睛所在的那一格是不是空气（已经能呼吸） */
-function headInAir(ctx: SkillCtx): boolean {
-  const s = ctx.adapter.state();
-  return AIRS.has(ctx.adapter.blockAt({ x: Math.floor(s.pos.x), y: Math.floor(s.pos.y + 1.62), z: Math.floor(s.pos.z) }) ?? '');
-}
-
-const PASSABLE = new Set(['air', 'cave_air', 'void_air', 'water', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass']);
-const SWIMMABLE = new Set(['water', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass']);
-const AIRS = new Set(['air', 'cave_air', 'void_air']);
-const UNBREAKABLE = new Set(['bedrock', 'barrier', 'end_portal_frame', 'reinforced_deepslate']);
-/**
- * 人在水里时，头顶这一列往上看 24 格：先碰到空气 = 开阔水面（null）；先碰到实心方块 = 被封住，返回那一块
- * （reachable：站在水里伸手够得着，约 4.5 格内）。只看自己头顶这一列，是身边的物理环境，不算透视。
- */
-export function ceilingAbove(ctx: SkillCtx): { name: string; pos: Vec; reachable: boolean; unbreakable: boolean } | null {
-  const s = ctx.adapter.state();
-  if (!s.inWater) return null;
-  const x = Math.floor(s.pos.x), z = Math.floor(s.pos.z), feet = Math.floor(s.pos.y);
-  for (let y = feet + 1; y <= feet + 24; y++) {
-    const name = ctx.adapter.blockAt({ x, y, z }) ?? 'air';
-    if (AIRS.has(name)) return null; // 头顶是开阔水面
-    if (PASSABLE.has(name)) continue;
-    return { name, pos: { x, y, z }, reachable: y + 0.5 - (s.pos.y + 1.62) <= 4, unbreakable: UNBREAKABLE.has(name) };
-  }
-  return null;
-}
-
-/**
- * 在身边连通的水里找最近的气穴：水面上方是空气的一格（或水道边能把头探进去的空气）。
- * 只沿着身体所在的水往外摸（有限范围的局部环境），不穿墙找。返回路线（水格序列，最后一格是能换气的空气）。
- */
-export function findAirPocket(ctx: SkillCtx, radius = 8, maxNodes = 2500): { pos: Vec; steps: number; path: Vec[] } | null {
-  const s = ctx.adapter.state();
-  const ox = Math.floor(s.pos.x), oz = Math.floor(s.pos.z), feet = Math.floor(s.pos.y);
-  const k = (p: Vec) => `${p.x},${p.y},${p.z}`;
-  const name = (p: Vec) => ctx.adapter.blockAt(p);
-  const prev = new Map<string, Vec | null>();
-  const queue: Vec[] = [];
-  for (const y of [feet, feet + 1]) {
-    const p = { x: ox, y, z: oz };
-    if (SWIMMABLE.has(name(p) ?? '')) { prev.set(k(p), null); queue.push(p); }
-  }
-  const pathTo = (end: Vec, from: Vec) => {
-    const out: Vec[] = [end];
-    let cur: Vec | null = from;
-    while (cur) { out.push(cur); cur = prev.get(k(cur)) ?? null; }
-    return out.reverse();
-  };
-  for (let i = 0; i < queue.length && prev.size < maxNodes; i++) {
-    const cur = queue[i];
-    for (const [dx, dy, dz] of [[0, 1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0]]) {
-      const n = { x: cur.x + dx, y: cur.y + dy, z: cur.z + dz };
-      if (prev.has(k(n)) || Math.hypot(n.x - ox, n.z - oz) > radius || n.y < feet - 4 || n.y > feet + 24) continue;
-      const b = name(n);
-      if (b === null) continue;
-      if (AIRS.has(b)) {
-        // 水面上方的空气，或水道旁边的空气（下面有东西托着头/身体）
-        const under = name({ ...n, y: n.y - 1 });
-        if (dy === 1 || (under !== null && !AIRS.has(under))) {
-          return { pos: n, steps: pathTo(n, cur).length - 1, path: pathTo(n, cur) };
-        }
-        continue;
-      }
-      if (!SWIMMABLE.has(b)) continue;
-      prev.set(k(n), cur);
-      queue.push(n);
-    }
-  }
-  return null;
-}

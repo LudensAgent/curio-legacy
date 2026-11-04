@@ -1,5 +1,5 @@
 import { DIRS } from '../perception/perception.ts';
-import { dist3, sleep, throwIfAborted } from '../util.ts';
+import { AbortedError, dist3, sleep, throwIfAborted } from '../util.ts';
 import type { DriveKeys, EntityInfo, Vec3Like } from '../adapter/types.ts';
 import { sighted, yawOfDir } from './movement.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill } from './types.ts';
@@ -35,8 +35,8 @@ const dirOk = (dir: string | undefined, from: { x: number; z: number }, to: { x:
 // ------------------------------------------------------------------ use_item
 export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string }> = {
   name: 'use_item',
-  description: '手持物品右键：对着最近的看得见的某种方块、水面或岩浆（on 写方块名），或对自己（on:"self"，扔东西朝正看着的方向）；on 写坐标（"x,y,z" 或 {"x","y","z"}）时：水桶/岩浆桶倒进那一格空气（浇岩浆做黑曜石用它），打火石/火焰弹对这格右键点火（点下界门框内空气用它）；手持船/筏（*_boat/*_raft）对 on:"water" 是放船（生成实体，之后 interact 坐上去、ride 划走）；要对准确定的那一格用 interact_block（写坐标）；对生物用东西（喂、剪、挤奶）是 interact',
-  argsDoc: '{"item": "<物品名>", "on"?: "self | water | lava | <方块名> | {x,y,z}坐标（倒水桶/岩浆桶进这格空气 / 打火石·火焰弹对这格点火）", "dir"?: "N|NE|E|SE|S|SW|W|NW"}',
+  description: '手持物品右键：对着最近的看得见的某种方块、水面或岩浆（on 写方块名），或沿当前准星使用（on:"self"，不自动低头/选点，只朝正看着的方向用）；on 写坐标（"x,y,z" 或 {"x","y","z"}）时：满水桶/岩浆桶往那格空气倒流体，空桶（bucket）从那一格流体源装水/岩浆，打火石/火焰弹对这格右键点火（点下界门框内空气用它）；手持船/筏（*_boat/*_raft）对 on:"water" 是放船（生成实体，之后 interact 坐上去、ride 划走）；要对准确定的那一格用 interact_block（写坐标）；对生物用东西（喂、剪、挤奶）是 interact',
+  argsDoc: '{"item": "<物品名>", "on"?: "self | water | lava | <方块名> | {x,y,z}坐标（满桶倒进这格空气 / 空桶从这格流体源装 / 打火石·火焰弹对这格点火）", "dir"?: "N|NE|E|SE|S|SW|W|NW"}',
   timeoutMs: 30000,
   movement: true,
   validate(raw, adapter) {
@@ -49,9 +49,9 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
     const dir = typeof a.dir === 'string' ? a.dir.toUpperCase() : undefined;
     if (dir && !DIRS[dir]) return { ok: false, error: `dir 必须是 ${Object.keys(DIRS).join('/')}` };
     // 满的流体桶（水桶/岩浆桶）不能对着流体本体右键：服务器不会把水倒进岩浆源或水格里，只会 NO_EFFECT。
-    // 要倒流体：on 写那一格空气的坐标（水桶浇岩浆做黑曜石就写岩浆旁的那格空气，水会流过去），或 on:"self" 往自己脚边倒。
+    // 要倒流体：on 写那一格空气的坐标（水桶浇岩浆做黑曜石就写岩浆旁的那格空气，水会流过去），或 on:"self" 沿当前准星使用。
     if (FLUID_BUCKETS.has(item) && (on === 'water' || on === 'lava')) {
-      return { ok: false, error: `满的 ${item} 不能对着 ${on} 本体右键（会 NO_EFFECT，倒不进流体源格）；把 on 写成那格空气的坐标 {"x","y","z"}（浇岩浆做黑曜石写岩浆旁那格空气，水会流过去），或 on:"self" 倒自己脚边` };
+      return { ok: false, error: `满的 ${item} 不能对着 ${on} 本体右键（会 NO_EFFECT，倒不进流体源格）；把 on 写成那格空气的坐标 {"x","y","z"}（浇岩浆做黑曜石写岩浆旁那格空气，水会流过去），或 on:"self" 沿当前准星使用` };
     }
     // 打火石/火焰弹点下界门：要点门框内侧那格空气（on 写坐标），对着 obsidian 等方块本体右键会 NO_EFFECT 点不着。
     if (IGNITE_ITEMS.has(item) && typeof on === 'string' && on !== 'self') {
@@ -73,17 +73,66 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
         const now = adapter.blockAt(pos);
         return ok(`对 (${pos.x},${pos.y},${pos.z}) 使用 ${args.item}（现在这格是 ${now ?? '未知'}）`, { pos, changed: now });
       }
-      if (!FLUID_BUCKETS.has(args.item)) return fail('BAD_ARGS', 'on 写坐标只支持倒水/倒岩浆（water_bucket / lava_bucket）或点火（flint_and_steel / fire_charge）；对其他物品请写方块名或 "self"');
+      if (args.item === 'bucket') {
+        // 坐标不是观察证据；动作前后都只报告当前会话中仍可见的目标状态。
+        const observe = () => {
+          throwIfAborted(signal);
+          senses.refresh();
+          const state = adapter.state();
+          if (state.worldId !== s.worldId || state.sessionId !== s.sessionId || state.dim !== s.dim) throw new AbortedError('interaction session changed');
+          if (!state.observationReady) return undefined;
+          return senses.observeBlocks?.([pos]).find((b) => b.source === 'vision'
+            && b.worldId === s.worldId && b.sessionId === s.sessionId && b.dimension === s.dim
+            && Math.abs(Date.now() - b.observedAt) <= 2000
+            && b.pos.x === pos.x && b.pos.y === pos.y && b.pos.z === pos.z);
+        };
+        const seen = observe();
+        if (!seen) return fail('NOT_FOUND', `(${pos.x},${pos.y},${pos.z}) 没有当前可见的观察，未执行取源`, { pos });
+        const cur = seen.name;
+        if (cur !== 'water' && cur !== 'lava') return fail('BAD_ARGS', `(${pos.x},${pos.y},${pos.z}) 现在看得见的是 ${cur}，不是水或岩浆源；空桶只能从流体源装`, { pos });
+        if (seen.properties.level === undefined) return fail('NOT_FOUND', `(${pos.x},${pos.y},${pos.z}) 的 ${cur} 源状态未知，未执行取源`, { pos });
+        if (Number(seen.properties.level) !== 0) return fail('BAD_ARGS', `(${pos.x},${pos.y},${pos.z}) 是流动的 ${cur}（level=${seen.properties.level}），空桶只能从源方块装`, { pos });
+        // 距离交给适配器按候选瞄准点与实际射线判断，不在技能入口用源格中心做预检（中心超距而液面在范围内会被误拒）。
+        const beforeBucket = s.inventory.find((i) => i.name === 'bucket')?.count ?? 0;
+        const beforeFilled = s.inventory.find((i) => i.name === `${cur}_bucket`)?.count ?? 0;
+        try {
+          const r = await adapter.useItemOn('bucket', { kind: 'block', pos }, signal);
+          const actual = observe();
+          const inventory = adapter.state().inventory;
+          const afterBucket = inventory.find((i) => i.name === 'bucket')?.count ?? 0;
+          const afterFilled = inventory.find((i) => i.name === `${cur}_bucket`)?.count ?? 0;
+          const spent = afterBucket < beforeBucket;
+          const gotFilled = afterFilled > beforeFilled;
+          const sourceState = actual ? `目标格现在可见 ${actual.name}` : '目标格后续状态未知（当前不可见）';
+          const reasons = [
+            ...(spent ? [`背包 bucket 少 ${beforeBucket - afterBucket}`] : []),
+            ...(gotFilled ? [`背包 ${cur}_bucket 增加 ${afterFilled - beforeFilled}`] : []),
+            sourceState,
+          ];
+          const effectEvidence = { verified: true, changed: spent || gotFilled, reasons };
+          const data = { pos, actual: actual ?? null, effectEvidence };
+          if (!r.ok) return fail(codeFromError({ message: r.reason }), `从 (${pos.x},${pos.y},${pos.z}) 装 ${cur} 未确认：${r.reason}`, data);
+          // 源格可能重新生成或被流水填回；容器转换与目标格后续状态是两项事实。
+          if (spent && gotFilled) return ok(`从 (${pos.x},${pos.y},${pos.z}) 装了 ${cur}：bucket→${cur}_bucket；${sourceState}`, { ...data, collected: `${cur}_bucket` });
+          return fail('EFFECT_NOT_CONFIRMED', `对 (${pos.x},${pos.y},${pos.z}) 用了空桶，但没有同时确认「bucket 减少」和「${cur}_bucket 增加」（${reasons.join('；')}）`, data);
+        } catch (e) {
+          if (isAbort(e)) throw e;
+          return fail(codeFromError(e), `装 ${cur} 出错：${(e as Error).message}`);
+        }
+      }
+      if (!FLUID_BUCKETS.has(args.item)) return fail('BAD_ARGS', 'on 写坐标只支持满桶倒流体（water_bucket / lava_bucket）、空桶装流体（bucket）或点火（flint_and_steel / fire_charge）；对其他物品请写方块名或 "self"');
       const cur = adapter.blockAt(pos);
       if (cur !== null && !AIRISH.has(cur)) return fail('EFFECT_NOT_CONFIRMED', `(${pos.x},${pos.y},${pos.z}) 不是空气（现在是 ${cur}），水/岩浆只能倒进空格`, { pos });
+      if (!adapter.useBucketAt) return fail('ERROR', '当前适配器不支持往坐标倒流体');
       try {
-        const r = await adapter.placeBlockAt(pos, [args.item], signal);
+        const r = await adapter.useBucketAt(pos, args.item, signal);
         if (!r.ok) {
-          if (r.reason === 'NO_REFERENCE') return fail('PATH_NOT_FOUND', `往 (${pos.x},${pos.y},${pos.z}) 倒 ${args.item} 没成：这格空气旁边没有能贴住水桶的面（实心方块或岩浆/水面），或你站太远/视线被挡看不到那个面；走到能看见岩浆面或墙面的位置，让目标空气格贴着那个面再倒`, { pos, reason: r.reason });
-          return fail(r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS' : 'PATH_NOT_FOUND', `往 (${pos.x},${pos.y},${pos.z}) 倒 ${args.item} 没成：${r.reason}`, { pos, reason: r.reason });
+          const code = r.reason?.startsWith('NO_ITEM') ? 'MISSING_MATERIALS'
+            : r.reason?.startsWith('NO_REFERENCE') || r.reason?.startsWith('NO_PLACEMENT_FACE') ? 'PATH_NOT_FOUND'
+            : r.reason?.startsWith('NO_EFFECT') || r.reason?.startsWith('PLACEMENT_NOT_CONFIRMED') ? 'EFFECT_NOT_CONFIRMED' : 'ERROR';
+          return fail(code, `往 (${pos.x},${pos.y},${pos.z}) 倒 ${args.item} 没成：${r.reason}`, { pos, reason: r.reason, effectEvidence: r.effectEvidence });
         }
-        const now = adapter.blockAt(pos);
-        return ok(`往 (${pos.x},${pos.y},${pos.z}) 倒了 ${args.item}（现在这格是 ${now ?? '未知'}）`, { pos, placed: now });
+        return ok(`往 (${pos.x},${pos.y},${pos.z}) 倒了 ${args.item}${r.placed ? `，确认这格变成了 ${adapter.blockAt(pos)}` : ''}${r.effectEvidence?.reasons?.length ? `；${r.effectEvidence.reasons.join('；')}` : ''}`, { pos, placed: r.placed, effectEvidence: r.effectEvidence });
       } catch (e) {
         if (isAbort(e)) throw e;
         return fail(codeFromError(e), `倒 ${args.item} 出错：${(e as Error).message}`);
@@ -92,17 +141,23 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
     try {
       if (args.on === 'self') {
         const r = await adapter.useItemOn(args.item, { kind: 'self' }, signal);
-        return r.ok ? ok(`使用了 ${args.item}`, { effectEvidence: r.effectEvidence }) : fail('ERROR', `使用 ${args.item} 失败：${r.reason}`, { effectEvidence: r.effectEvidence });
+        if (!r.ok) return fail('ERROR', `使用 ${args.item} 失败：${r.reason}`, { effectEvidence: r.effectEvidence });
+        // on:"self" 只是沿当前准星使用（输入已执行），不自动低头、不选点；满桶倒水只报「桶被消耗」，具体倒在哪一格不确认。
+        // 数量未变也不当失败（鱼竿等使用不消耗物品的工具是正常输入完成）。
+        const consumed = r.effectEvidence?.changed;
+        const note = FLUID_BUCKETS.has(args.item) ? '；没有自动低头/选点，具体倒在哪一格未确认' : '';
+        return ok(`沿当前准星使用了 ${args.item}${r.effectEvidence?.reasons?.length ? `；${r.effectEvidence.reasons.join('；')}` : ''}${note}`, { inputCompleted: true, effectEvidence: r.effectEvidence ?? { verified: false, changed: false, reasons: ['仅确认使用输入已完成，效果未知'] }, ...(consumed && FLUID_BUCKETS.has(args.item) ? { poured_unconfirmed: true } : {}) });
       }
       senses.refresh();
       const names = new Set([args.on, ...adapter.resolveBlockNames(args.on)]);
       const fluid = args.on === 'water' || args.on === 'lava';
-      // 只用看得见的方块；液体要选表面（上面是空气）的那一格。放船还要选开阔水面：船身 1.375 格宽，贴岸的一格浅水放不下
+      // 只用看得见的方块；放船要选表面（上面是空气）那一格的开阔水面：船身 1.375 格宽，贴岸的一格浅水放不下。
       const boat = /_boat$|_raft$/.test(args.item);
-      // 空桶装水/装岩浆只能从源方块（level=0）取，流动的取不了；放船不挑源
+      // 空桶装水/装岩浆只能从源方块（level=0）取，流动的取不了；放船不挑源。
+      // 收集不要求源格上方是空气：侧面可接触、顶部有遮挡的源仍可由交互射线确认命中，不应在这里被排除。
       const collectSource = fluid && args.item === 'bucket';
       let hits = senses.knownBlocks([...names], 32)
-        .filter((h) => !fluid || AIRISH.has(adapter.blockAt({ x: h.pos.x, y: h.pos.y + 1, z: h.pos.z }) ?? 'air'))
+        .filter((h) => !fluid || !boat || AIRISH.has(adapter.blockAt({ x: h.pos.x, y: h.pos.y + 1, z: h.pos.z }) ?? 'air'))
         .filter((h) => !fluid || !boat || openWater(ctx, h.pos, 2) >= 4)
         .filter((h) => dirOk(args.dir, s.pos, h.pos));
       const hadSurface = hits.length > 0;
@@ -464,6 +519,57 @@ export const dive: Skill<{ xyz: { x: number; y: number; z: number }; min_oxygen:
   },
 };
 
+// ------------------------------------------------------------------ swim_to
+/** 朝调用方指定的世界坐标游过去：保持这个目标不变，到目标附近站稳才算到，否则如实报告位置与氧气。 */
+export const swimTo: Skill<{ xyz: { x: number; y: number; z: number }; timeoutMs?: number }> = {
+  name: 'swim_to',
+  description: '从当前位置朝调用方指定的世界坐标游过去并保持这个目标不换（站在干岸上也会先走进水里再游）；到目标附近站稳（干地）才算到，未到岸如实报告位置、氧气与未到原因',
+  argsDoc: '{"xyz":[x,y,z], "timeoutMs"?: 1000-20000（毫秒，可选）}；xyz 是游过去后脚所在的世界坐标（可含小数/负值），原样传给底层，不改写、不取整',
+  timeoutMs: 25000,
+  movement: true,
+  validate(raw) {
+    const a = obj(raw);
+    const v = a.xyz ?? a.to ?? a.at;
+    const arr = typeof v === 'string' ? v.split(/[,\s]+/).filter(Boolean).map(Number)
+      : Array.isArray(v) ? v.map(Number)
+      : v && typeof v === 'object' ? [Number((v as { x?: unknown }).x), Number((v as { y?: unknown }).y), Number((v as { z?: unknown }).z)]
+      : null;
+    if (!arr || arr.length !== 3 || !arr.every(Number.isFinite)) return { ok: false, error: '写 "xyz":[x,y,z]（游过去后脚所在的目标坐标）' };
+    const timeoutMs = a.timeoutMs;
+    if (timeoutMs !== undefined && (!Number.isFinite(Number(timeoutMs)) || Number(timeoutMs) < 1000 || Number(timeoutMs) > 20000)) return { ok: false, error: 'timeoutMs 必须是 1000–20000 的毫秒数' };
+    return { ok: true, args: { xyz: { x: arr[0], y: arr[1], z: arr[2] }, ...(timeoutMs !== undefined ? { timeoutMs: Math.round(Number(timeoutMs)) } : {}) } };
+  },
+  async run(ctx, args) {
+    const a = ctx.adapter;
+    if (!a.swimTo) return fail('ERROR', '当前适配器缺少持续游泳控制，不能游向指定坐标');
+    const s0 = a.state();
+    // 委托前就冻结自己的位置/氧气/观测时刻：state().pos 可能是可变引用，不克隆会被底层动作改成新主人的状态。
+    const s0Snapshot = { pos: { ...s0.pos }, oxygen: s0.oxygen, observedAt: Date.now() };
+    // 预算耗尽（remaining <= 0）才拒绝，不强行开游；剩余不足时用真实剩余时间，不把父级预算拉长。
+    const timeoutMs = Math.min(args.timeoutMs ?? 20000, ctx.deadline - Date.now());
+    if (timeoutMs <= 0) return fail('TIMEOUT', `游向目标的预算已用完，未执行；现在在 (${s0.pos.x.toFixed(1)},${s0.pos.y.toFixed(1)},${s0.pos.z.toFixed(1)})，氧气 ${s0.oxygen}/20`, { landed: false, pos: s0Snapshot.pos, oxygen: s0Snapshot.oxygen, observedAt: s0Snapshot.observedAt });
+    let r;
+    try {
+      r = await a.swimTo(args.xyz, ctx.signal, { timeoutMs });
+    } catch (e) {
+      // 取消/超时：保留底层带回的冻结 partial（真实动作效果）；无则用委托前的 s0 兜底。绝不重读 a.state()，
+      // 否则替换任务或新连接已经更新的位置/氧气会被算到这次旧动作头上。
+      if (isAbort(e) || (e as Error)?.name === 'TimeoutError') {
+        const prev = (e as Error & { partial?: Record<string, unknown> }).partial ?? {};
+        (e as Error & { partial?: Record<string, unknown> }).partial = { landed: false, target: { ...args.xyz }, pos: s0Snapshot.pos, oxygen: s0Snapshot.oxygen, observedAt: s0Snapshot.observedAt, ...prev };
+      }
+      throw e;
+    }
+    const s = a.state();
+    const at = `现在在 (${s.pos.x.toFixed(1)},${s.pos.y.toFixed(1)},${s.pos.z.toFixed(1)})，氧气 ${r.oxygen}/20`;
+    if (r.ok && r.landed) return ok(`游到了 (${args.xyz.x},${args.xyz.y},${args.xyz.z}) 并站稳，${at}`, { landed: true, surfaced: r.surfaced, pos: s.pos, oxygen: r.oxygen });
+    const why = r.reason === 'WATER_ESCAPE_TIMEOUT' ? '游了一阵还没到' : r.reason === 'SWIM_NO_PROGRESS' ? '游不动' : r.reason;
+    // 预算耗尽不等于没有路：只有真正的物理无进展才归为 PATH_NOT_FOUND。
+    const code = r.reason === 'WATER_ESCAPE_TIMEOUT' ? 'TIMEOUT' : 'PATH_NOT_FOUND';
+    return fail(code, `${why}；${at}`, { landed: false, surfaced: r.surfaced, pos: s.pos, oxygen: r.oxygen, reason: r.reason });
+  },
+};
+
 export const pressKeys: Skill<{ keys: DriveKeys; ms: number; guard: boolean }> = {
   name: 'press_keys',
   description: '按住所选方向、跳跃、潜行等按键 50–10000 毫秒后松开；水中按 jump 可上浮。默认移动时检测前方岩浆、火及地面高处边缘并停止，guard:false 关闭此保护；不自动选目标或确认换气。',
@@ -498,4 +604,4 @@ export const pressKeys: Skill<{ keys: DriveKeys; ms: number; guard: boolean }> =
   },
 };
 
-export const actionSkills = [useItem, interact, hitEntity, dismount, ride, look, dive, pressKeys];
+export const actionSkills = [useItem, interact, hitEntity, dismount, ride, look, dive, swimTo, pressKeys];

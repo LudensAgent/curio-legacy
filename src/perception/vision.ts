@@ -983,7 +983,14 @@ export class Vision {
       heard: this.heard.slice(0, 5).map((e) => ({ name: e.name, approx: `${e.rel}约 ${Math.max(2, Math.round(e.dist / 2) * 2)} 格`, dir: e.dir })),
       nearest_land: (() => {
         const l = this.nearestLand(here);
-        return l ? { dir: l.dir, dist: l.dist } : null;
+        if (!l) return null;
+        return {
+          dir: l.dir, dist: l.dist,
+          foot: { x: l.pos.x, y: l.pos.y + 1, z: l.pos.z },
+          relative_height: l.pos.y + 1 - Math.floor(here.y),
+          path_confirmed: false,
+          note: '候选落脚点（脚部目标格，由可见地表估计）；尚未确认能沿直线游过去，地下顶板、高岸或墙体可能挡住',
+        };
       })(),
       last_look_around_s: this.lastSweepAt ? Math.round((now - this.lastSweepAt) / 1000) : null,
       ...(() => {

@@ -18,14 +18,14 @@ export const READ_RADIUS = 48;
 
 /** 给模型看的 api 说明（写代码技能、后台改进时都用这一份） */
 export const API_DOC = `代码是一个 async 函数体，参数 api 和 args 已经给好（args 是 use_skill 的 args；恢复时 args.failure = {skill,args,code,summary,target?,position} 是刚失败的那一步：target 是那一步实际要去/要动的坐标（动作算出来的，比如 goto "NW 20" 的落点），position 是失败时人在哪）。所有 api 调用都要 await，返回普通 JSON。
-恢复的 target 是世界坐标，不是相对 at/to；原目标、实体ID、dig/avoid/make 和液体风险限制会传给步骤与嵌套技能。不能自行换目标或增加挖掘、合成和探索；超出原委托还需放方块或挖方块时，先交回心智显式调用 use_skill args.allowPlace:true 或 args.allowDig:true。缺少绝对目标就报告缺口，不能拿当前位置猜。
+恢复的 target 是世界坐标，不是相对 at/to；原目标、实体ID、dig/avoid/make 和液体/坠落风险限制会传给步骤与嵌套技能。不能自行换目标或增加挖掘、合成和探索；超出原委托还需放方块或挖方块时，先交回心智显式调用 use_skill args.allowPlace:true 或 args.allowDig:true。缺少绝对目标就报告缺口，不能拿当前位置猜。
 - api.state() → {pos, feet:{x,y,z}, hp, food, oxygen, onGround, inWater, inLava, isDay, dim, yaw, facing, held, riding（载具名或 null）, inventory:[{name,count}]}
 - api.blockAt(x,y,z) → {name, kind}；kind = open（空气、草、雪层，能穿过）| solid | liquid | unknown；只读取身边 48 格内当前视野可见的格子。遮挡、视野外、黑暗或未加载时返回 {name:null,kind:"unknown"}，不透露隐藏的矿、液体或洞穴；先用 api.lookAt 转头，再读取。unknown 不能当空气或实心。要挖/迈身边的格子，直接用 digAt/stepTo（它们自己会转头、处理遮挡、如实回报），别先 blockAt 预检再因为 unknown 就 throw——紧邻格没转头时 blockAt 常返回 unknown，只代表还没看清，不代表没法处理
 - api.region(x1,y1,z1,x2,y2,z2) → {min, size:[sx,sy,sz], palette:[名字或"?"], kinds:[同上], data:[下标]}；第 i 格：i = (y-min.y)*sx*sz + (z-min.z)*sx + (x-min.x)；最多 40000 格；与 blockAt 共用当前可见观测，未知格为 "?"/unknown，记忆不能冒充当前观测
 - api.entities(半径≤32) → 看见的实体 [{id,name,kind,dist,pos,how:"seen",fusing?}]（kind=item 的是掉落物，name 形如 item:cobblestone）；只听见的返回 {name,kind,how:"heard",dir,dist,fusing?}，没有精确位置或实体id，距离约两格精度，只能据此决定转头或搜索。挥击、射击、跟踪和 api.act 的实体动作只能选择当前看见的目标。when.hostile 同样匹配听见的怪——按位置/ID 行动时 when 写 seen:true，或在代码里处理 heard
 - api.drops(半径≤32) → 地上的掉落物 [{id,item,count?,pos,dist,seen,ageSec?}]：seen=true 是眼前看得见的；seen=false 是刚才亲眼见过、现在不在视野里（记得的位置，ageSec 秒前）。扔完东西核对“走开了没有、有没有被捡回来”就看这个
 - api.nearestLand() → 最近候选干地经当前视野确认后返回 {stand:{x,y,z} 站上去时脚的位置, dir, dist, dy 比脚高几格} 或 null（支撑为实心、上面两格为空气、不是水底）；历史位置或被遮挡的位置不能当作已确认落点，null 不代表四周一定没有陆地
-- api.stepTo(x,y,z) 迈到相邻一格（平走、上一级、下一级；陆上不自动改成更低的落点，水中可朝岸爬出）｜api.digAt(x,y,z, {wet:true,lava:true}?)（旁边有液体默认不挖；wet:true 接受进水，lava:true 接受进岩浆，分别显式选择）｜api.placeAt(x,y,z,"方块名|any") → {ok,code,summary,data?}；检查 ok 和失败原因，stepTo 的 data 可包含实际位置、目标格及未确认支撑的位置和已观察方块（null 表示未看清）。迈步的「支撑」按当前碰撞形状判断：整块、上下半砖、雪层、地毯都能站（实际脚高按它们的顶面，半砖半格、雪层更矮，不取整）；火把、花草这类没有碰撞盒的方块不挡路也不提供支撑，会看它下面那格的顶面；门开着可穿、关着挡路。缺支撑或脚高与请求不符就如实报出支撑格，不会自动补块或改落点。placeAt 只填空气格，目标格被任何方块（含 open 类）占住时，先 digAt 清掉再放，否则放不下
+- api.stepTo(x,y,z) 迈到相邻一格（平走、上一级、下一级；陆上不自动改成更低的落点，水中可朝岸爬出）｜api.digAt(x,y,z, {wet:true,lava:true,fall:true}?)（旁边有液体默认不挖；wet:true 接受进水，lava:true 接受进岩浆；fall:true 接受移除脚下支撑后的坠落风险，三项分别显式选择，恢复不能追加原委托未授权的风险）｜api.placeAt(x,y,z,"方块名|any") → {ok,code,summary,data?}；检查 ok 和失败原因，stepTo 的 data 可包含实际位置、目标格及未确认支撑的位置和已观察方块（null 表示未看清）。迈步的「支撑」按当前碰撞形状判断：整块、上下半砖、雪层、地毯都能站（实际脚高按它们的顶面，半砖半格、雪层更矮，不取整）；火把、花草这类没有碰撞盒的方块不挡路也不提供支撑，会看它下面那格的顶面；门开着可穿、关着挡路。缺支撑或脚高与请求不符就如实报出支撑格，不会自动补块或改落点。placeAt 只填空气格，目标格被任何方块（含 open 类）占住时，先 digAt 清掉再放，否则放不下
 - api.moveTo(x,y,z,range,{sprint,avoid}?) 用寻路走过去（默认走路；sprint:true 跑，快但很耗饥饿；avoid:["方块名"] 这一趟绕开这些方块）→ {ok,error?,pos}｜api.act("动作名",{参数}) 用已有动作（goto、dig_at、defend…）→ {ok,code,summary,data?}；data 保留动作返回的实际观测与失败进展，去掉独立的原始 local/around 地图；查看地形仍用 blockAt/region 的可见边界
 - api.useSkill("技能名",{args}?) 调用一份已经验证可靠的技能（reliable_skills 里列的，当积木用：先组合已经管用的，再补新的部分）→ {ok,code,summary}；最多套两层
 - api.look(yaw,pitch)｜api.lookAt(x,y,z)｜api.sleep(毫秒≤5000)｜api.log(…) 记一句给自己看｜api.progress(0..1)
@@ -229,7 +229,7 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
       }
       case 'digAt': {
         const options = a[3] && typeof a[3] === 'object' ? a[3] as Record<string, unknown> : {};
-        return runSkill('dig_at', { xyz: { x: int(a[0], 'x'), y: int(a[1], 'y'), z: int(a[2], 'z') }, facing: 'N', ...(options.wet === true ? { wet: true } : {}), ...(options.lava === true ? { lava: true } : {}) });
+        return runSkill('dig_at', { xyz: { x: int(a[0], 'x'), y: int(a[1], 'y'), z: int(a[2], 'z') }, facing: 'N', ...(options.wet === true ? { wet: true } : {}), ...(options.lava === true ? { lava: true } : {}), ...(options.fall === true ? { fall: true } : {}) });
       }
       case 'placeAt': return runSkill('place_at', { xyz: { x: int(a[0], 'x'), y: int(a[1], 'y'), z: int(a[2], 'z') }, item: String(a[3] ?? 'any'), facing: 'N' });
       case 'moveTo': {

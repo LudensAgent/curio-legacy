@@ -102,7 +102,7 @@ export interface MindContext {
  */
 
 /** 常用动作：给完整参数；其余只列名字和一句用途，需要时用 {"kind":"moves"} 查完整参数 */
-export const COMMON_MOVES = ['dig_at', 'step', 'place_at', 'defend', 'gather', 'goto', 'explore', 'look', 'look_around', 'dive', 'surface', 'craft', 'smelt', 'collect_furnace', 'eat', 'hunt', 'forage', 'fish', 'farm', 'collect_seeds',
+export const COMMON_MOVES = ['dig_at', 'step', 'place_at', 'defend', 'gather', 'goto', 'explore', 'look', 'look_around', 'dive', 'surface', 'swim_to', 'craft', 'smelt', 'collect_furnace', 'eat', 'hunt', 'forage', 'fish', 'farm', 'collect_seeds',
   'pickup_items', 'store_items', 'take_items', 'find_item', 'place_torch', 'shelter', 'sleep', 'wait', 'dig', 'excavate_path', 'follow_passage', 'climb_up', 'press_keys', 'build', 'travel', 'inspect_block', 'interact_block', 'use_item', 'use_skill'];
 
 /** 远行、传送门、末地这些只在用得上时列出来，平时是噪音 */
@@ -119,7 +119,7 @@ function briefOf(d: string, n: number): string {
 
 /** 移动/潜水上浮这类动作在两种思考档位里都要给足副作用说明 */
 function descOf(s: { name: string; description: string }, chars: number): string {
-  return ['look', 'dive', 'surface', 'travel'].includes(s.name) ? s.description.replace(/\s+/g, ' ')
+  return ['look', 'dive', 'surface', 'swim_to', 'travel'].includes(s.name) ? s.description.replace(/\s+/g, ' ')
     : chars ? briefOf(s.description, chars) : '';
 }
 
@@ -137,7 +137,7 @@ export function movesCatalog(chars = 40, core: Set<string> = new Set(COMMON_MOVE
 }
 
 /** 瞥一眼时给完整参数的常用动作；其余只列名字 + 用途，参数按需用 moves 查 */
-const GLANCE_CORE = ['dig_at', 'step', 'place_at', 'gather', 'goto', 'craft', 'eat', 'sleep', 'wait', 'look', 'look_around', 'defend', 'hunt', 'place_torch', 'dive', 'surface', 'travel', 'press_keys'];
+const GLANCE_CORE = ['dig_at', 'step', 'place_at', 'gather', 'goto', 'craft', 'eat', 'sleep', 'wait', 'look', 'look_around', 'defend', 'hunt', 'place_torch', 'dive', 'surface', 'swim_to', 'travel', 'press_keys'];
 /** 瞥一眼时只列名字 + 用途的动作（完整参数按需查） */
 const GLANCE_SECONDARY = ['explore', 'forage', 'pickup_items', 'shelter', 'build', 'smelt', 'store_items', 'climb_up', 'use_skill', 'excavate_path', 'descend', 'assess_landings'];
 
@@ -238,11 +238,6 @@ const PRECISE = `【精确操作】local 以脚部占据格为原点：[前,上,
 repeat 每轮重做整套 steps；子步骤继承 activity.facing，每步相对坐标按当前位置重算。done_when 写可观察结果。照明可选 place_torch 或空闲习惯 habits.torch_every。挖前看清目标格。
 - 机械性失败身体会就地应变再重试：太暗先插火把、脚下无支撑先垫一块、头顶被挡先挖开（会消耗方块/火把）；应变不动才交给你决定。`;
 
-const EXAMPLE = `【例子】想进下界时：
-→ {"kind":"knowledge","query":"怎么建下界传送门"}
-← 已经查到资料了……黑曜石要用铁镐或钻石镐挖，岩浆浇上水就变成黑曜石
-→ {"monologue":"先凑够黑曜石把传送门点起来。","decision":"new","activity":{"what":"采黑曜石","why":"要建下界传送门","kind":"gather","steps":[{"skill":"gather","args":{"block":"obsidian","count":10}}],"done_when":{"type":"inventory_min","item":"obsidian","count":10}}}`;
-
 export function deliberateSystem(persona: string, skills: string[] = []): string {
   return `${persona}
 
@@ -273,7 +268,6 @@ ${CONDITIONS}
 
 ${PRECISE}
 
-${EXAMPLE}
 ${liveAudience.enabled && liveAudience.inPrompt !== false ? `\n${AUDIENCE_RULES}\n` : ''}
 【动作】参数必须合法：
 ${movesCatalog(28)}${SKILL_INDEX(skills)}`;
@@ -526,7 +520,8 @@ export function situationalReminders(ctx: MindContext): string[] {
   return out.slice(0, 5);
 }
 
-const pos3 = (p: [number, number, number]) => p.map((n) => Math.round(n)).join(',');
+// 展示身体位置用「脚部占据格」（floor，与 local 图原点一致），不用四舍五入，避免与局部图推算出的绝对坐标差一格。
+const pos3 = (p: [number, number, number]) => [Math.floor(p[0]), Math.floor(p[1] + 0.05), Math.floor(p[2])].join(',');
 
 /** 【专注】：主目标、清单、手上的活是不是在推进它（放在消息靠后，模型最看得见的地方） */
 function focusBlock(ctx: MindContext): Record<string, unknown> | null {

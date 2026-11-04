@@ -32,7 +32,7 @@ const percept: Percept = {
     remembered_resources: [{ block: 'coal_ore', count: 3, nearest: 17, dir: 'W', rel: '左侧' }],
     seen_entities: [{ id: 1, name: 'cow', pos: { x: 12, y: 70, z: -39 }, dist: 9, dir: 'N', rel: '正前' }],
     heard: [],
-    nearest_land: { dir: 'N', dist: 0 },
+    nearest_land: { dir: 'N', dist: 0, foot: { x: 12, y: 70, z: -30 }, relative_height: 0, path_confirmed: false, note: '测试候选落脚点，尚未确认路径' },
     last_look_around_s: 30,
   },
   death_recovery: null,
