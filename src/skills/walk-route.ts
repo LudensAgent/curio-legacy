@@ -47,12 +47,11 @@ function dedupe(cells: Vec3Like[]): Vec3Like[] {
  * 用 map.observeBatch 合并所有变化报告，不丢前面已观察到的支撑拆除通知。
  */
 export function observeCells(ctx: SkillCtx, map: VoxelMap, cells: Vec3Like[]): ChangeReport | null {
-  const observeBlocks = ctx.senses.observeBlocks;
-  if (!observeBlocks) return null;
+  if (!ctx.senses.observeBlocks) return null;
   const unique = dedupe(cells);
   const observations: Observation[] = [];
   for (let i = 0; i < unique.length; i += 32) {
-    for (const b of observeBlocks(unique.slice(i, i + 32))) observations.push(toObservation(b));
+    for (const b of ctx.senses.observeBlocks(unique.slice(i, i + 32))) observations.push(toObservation(b));
   }
   if (observations.length === 0) return null;
   return map.observeBatch({ observations, unobserved: [] });
@@ -125,13 +124,13 @@ export const walkRoute: Skill<WalkRouteArgs> = {
     // 有效期限不能超过父委托期限：子请求只能缩短，不能延长。
     const effectiveDeadline = Math.min(args.deadlineMs ?? ctx.deadline, ctx.deadline);
 
-    // 预扫：依次转向各路线段方向、略低头观察（视锥是朝向的，脚高格在视线下方）。
+    // 预扫：依次转向四个朝向、略低头观察（视锥是朝向的，脚高/支撑格在视线下方）。
+    // 验证需要身体扫掠的前后格（身体 0.6 宽 + 分数脚位会把身后一列也算进扫掠），只朝路线前进方向
+    // 会漏掉身后格，故四个朝向都看一遍——这是合法转头，不是放宽视锥或接触感知。
     observeCells(ctx, map, routeCells(args.points));
     if (typeof ctx.adapter.look === 'function') {
-      for (let i = 0; i < args.points.length - 1; i++) {
+      for (const yaw of [-Math.PI / 2, 0, Math.PI / 2, Math.PI]) {
         if (ctx.signal.aborted || Date.now() >= effectiveDeadline) break;
-        const a = args.points[i]!, b = args.points[i + 1]!;
-        const yaw = Math.atan2(-(b.x - a.x), -(b.z - a.z));
         await ctx.adapter.look(yaw, -0.6);
         observeCells(ctx, map, routeCells(args.points));
       }

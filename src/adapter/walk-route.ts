@@ -50,7 +50,8 @@ export const walkCollisionProvider: CollisionShapeProvider = {
 export interface WalkBody {
   setControlState(name: string, value: boolean): void;
   clearControlStates(): void;
-  look(yaw: number, pitch: number): void;
+  /** 转向目标朝向；返回 Promise 时调用方应等待转向完成再按前进键，避免转弯时残留旧朝向。 */
+  look(yaw: number, pitch: number): void | Promise<void>;
   entity: {
     position: { x: number; y: number; z: number };
     velocity: { x: number; y: number; z: number };
@@ -153,15 +154,19 @@ export class WalkMoveExecutor implements MoveExecutor {
     const moveDeadline = Math.min(request.deadlineMs, this.now() + request.timeoutMs);
     if (this.now() >= moveDeadline) return { failure: { kind: 'timed_out' } };
 
-    this.body.look(Math.atan2(-(to.x - from.x), -(to.z - from.z)), 0);
+    await this.body.look(Math.atan2(-(to.x - from.x), -(to.z - from.z)), 0);
     // 转头后重新检查所有权/取消：转头等待期间可能被抢占。
     if (this.aborted(request)) return { failure: { kind: 'cancelled' } };
     this.body.clearControlStates();
     this.body.setControlState('forward', true);
     this.activeExecutionId = request.executionId;
 
-    const GROUND_STOP = 1 / (1 - 0.546); // 地面摩擦每 tick 衰减到约 0.546 倍
+    // 制动距离系数：真实 1.20.1 服务器上松开前进键后约再走 1.19 个 tick 的位移即停
+    // （实测 coast≈0.256 格、帧间位移≈0.216 格/tick）。离线 prismarine-physics 的 0.546
+    // 摩擦口径与之不符，不能直接套用。
+    const GROUND_STOP = 1.2;
     let braked = false;
+    let prevPos: { x: number; z: number } | null = null;
     for (let i = 0; i < 400; i++) {
       if (this.aborted(request)) { this.releaseIf(request.executionId); return { failure: { kind: 'cancelled' } }; }
       if (this.now() >= moveDeadline) { this.releaseIf(request.executionId); return { failure: { kind: 'timed_out' } }; }
@@ -174,7 +179,13 @@ export class WalkMoveExecutor implements MoveExecutor {
         return { failure: { kind: 'execution_error', detail: 'no physics frame available' } };
       }
       const dist = Math.hypot(to.x - e.position.x, to.z - e.position.z);
-      const speed = Math.hypot(e.velocity.x, e.velocity.z);
+      // 用实际帧间位移估计速度：真实适配器 entity.velocity 约为每 tick 实际位移的 0.546 倍
+      // （服务器上报的是摩擦后的速度），直接用它会让制动距离少算一半而冲过目标。首帧没有前值，
+      // 退回到 velocity 作为启动近似。
+      const speed = prevPos === null
+        ? Math.hypot(e.velocity.x, e.velocity.z)
+        : Math.hypot(e.position.x - prevPos.x, e.position.z - prevPos.z);
+      prevPos = { x: e.position.x, z: e.position.z };
       if (!braked && dist <= speed * GROUND_STOP) { this.body.setControlState('forward', false); braked = true; }
       this.frameSink?.(e);
       // 让出事件循环：库的 onSample 确认到达 → stop/abort，及其 move 结果微任务得以执行。

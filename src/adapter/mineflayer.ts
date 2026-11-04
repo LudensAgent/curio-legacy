@@ -1530,7 +1530,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return {
       setControlState: (name, value) => bot.setControlState(name, value),
       clearControlStates: () => bot.clearControlStates(),
-      look: (yaw, pitch) => { bot.look(yaw, pitch, true).catch(() => {}); },
+      look: (yaw, pitch) => bot.look(yaw, pitch, true),
       entity: bot.entity,
     };
   }
