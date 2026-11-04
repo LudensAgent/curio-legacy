@@ -20,6 +20,7 @@ import {
 import { SharedSpatialSession, type ShutdownResult } from '../src/spatial/shared-session.ts';
 import type { BlockObservation } from '../src/adapter/types.ts';
 import type { CapturedMove, CapturedRouteSample } from '../scripts/navigation-acceptance.ts';
+import type { WorkingSetStats } from 'curio-minecraft-3d-memory/storage/sqlite';
 import {
   BoundedJsonlWriter,
   DEFAULT_DURATION_MS,
@@ -28,9 +29,14 @@ import {
   H2B_REQUIRED_SCENARIOS,
   HELP,
   MAX_JSONL_RECORD_BYTES,
+  MAX_WORKING_SET_SNAPSHOTS,
+  VOXEL_LOADING_CHOICES,
   buildRunReport,
+  buildSpatialOpenOptions,
+  buildWorkingSetSnapshot,
   classifyDuration,
   classifyLegTrace,
+  classifyMainManualEvidence,
   classifyShutdownResult,
   collectPackageMeta,
   createEvidenceEmitter,
@@ -39,6 +45,7 @@ import {
   parseCliArgs,
   shutdownFacts,
   startSpatialSoakFoundation,
+  workingSetStatsSignature,
 } from '../scripts/spatial-soak-acceptance.ts';
 import {
   manualScenarioSupported,
@@ -60,6 +67,7 @@ test('CLI parsing accepts exact runs, rejects malformed flags, and keeps help pu
   assert.deepEqual(parseCliArgs(['--mode=full', '-h', '--curio=test']), { ok: true, help: true });
   assert.match(HELP, /--mode=smoke\|full/);
   assert.match(HELP, /--duration-ms=N/);
+  assert.match(HELP, /--voxel-loading=eager\|manual/);
   assert.match(HELP, /without loading config, creating a DB, or opening sockets/);
   assert.match(HELP, /64KiB/);
 
@@ -77,6 +85,8 @@ test('CLI parsing accepts exact runs, rejects malformed flags, and keeps help pu
     start: { x: 207.5, y: 64, z: 216.5 },
     startRaw: '207.5,64,216.5',
     durationMs: 90000,
+    voxelLoading: 'eager',
+    voxelLoadingSource: 'default',
   });
 
   const endpointB = parseCliArgs(['--curio=test', '--mode=smoke', '--start=209.5,64,216.5']);
@@ -89,6 +99,20 @@ test('CLI parsing accepts exact runs, rejects malformed flags, and keeps help pu
   assert.ok(fullAccepted.ok && !fullAccepted.help);
   assert.equal(fullAccepted.mode, 'full');
   assert.equal(fullAccepted.durationMs, 3_600_000);
+  // full 默认 manual；smoke 默认 eager，来源必须如实区分。
+  assert.equal(fullAccepted.voxelLoading, 'manual');
+  assert.equal(fullAccepted.voxelLoadingSource, 'default');
+
+  const explicitManual = parseCliArgs([
+    '--curio=test',
+    '--mode=smoke',
+    '--start=207.5,64,216.5',
+    '--voxel-loading=manual',
+  ]);
+  assert.ok(explicitManual.ok && !explicitManual.help);
+  assert.equal(explicitManual.voxelLoading, 'manual');
+  assert.equal(explicitManual.voxelLoadingSource, 'flag');
+  assert.deepEqual([...VOXEL_LOADING_CHOICES], ['eager', 'manual']);
 
   const defaulted = parseCliArgs(['--curio=test', '--mode=smoke', '--start=207.5,64,216.5']);
   assert.ok(defaulted.ok && !defaulted.help);
@@ -107,6 +131,11 @@ test('CLI parsing accepts exact runs, rejects malformed flags, and keeps help pu
     // full 只允许真实一小时，避免 90s 被放大或标记为一小时运行。
     ['--curio=test', '--mode=full', '--start=207.5,64,216.5', '--duration-ms=90000'],
     ['--curio=test', '--mode=full', '--start=207.5,64,216.5', '--duration-ms=3599999'],
+    // voxel loading 只接受两个值；full 不能显式选择 eager；重复 flag 拒绝。
+    ['--curio=test', '--mode=smoke', '--start=207.5,64,216.5', '--voxel-loading=sideways'],
+    ['--curio=test', '--mode=full', '--start=207.5,64,216.5', '--voxel-loading=eager'],
+    ['--curio=test', '--mode=smoke', '--start=207.5,64,216.5', '--voxel-loading=eager', '--voxel-loading=manual'],
+    ['--curio=test', '--mode=smoke', '--start=207.5,64,216.5', '--voxel-loading='],
     // 仅接受精确夹具端点，不做附近/取整替换。
     ['--curio=test', '--mode=smoke', '--start=200.5,64,216.5'],
     ['--curio=test', '--mode=smoke', '--start=207.4,64,216.5'],
@@ -130,6 +159,7 @@ test('run report stays H2 pending and never claims a full pass', () => {
   assert.equal(report.h2.fullPass, false);
   assert.equal(report.h1.state, 'implemented');
   assert.deepEqual(report.requiredScenarios, H2B_REQUIRED_SCENARIOS);
+  assert.deepEqual(report.voxelLoading, { requested: 'manual', source: 'default', actual: null });
   assert.deepEqual(report.fixture.endpoints, { A: FIXTURE_A, B: FIXTURE_B });
   assert.equal(report.fixture.crossSectionX, 208);
   assert.equal(report.fixture.supportY, 63);
@@ -279,6 +309,54 @@ test('leg trace correlation uses dispatch order + accepted sample identity witho
   assert.match(classifyLegTrace(nav, taskId, foreign, moves).problems.join(' '), /trace point 0/);
 });
 
+test('pre-dispatch stable samples and interleaved dispatches are recorded, not rejected', () => {
+  const taskId = 'walk-stable-start';
+  const delegation = 'walk-1';
+  const a = { x: 207.5, y: 64, z: 216.5 };
+  const b = { x: 208.5, y: 64, z: 216.5 };
+  const c = { x: 209.5, y: 64, z: 216.5 };
+  // 真实运行：4 个 accepted 稳定起点样本在第一次 move 派发之前到达。
+  const stable = [1, 2, 3, 4].map((sequence) =>
+    legSample(taskId, delegation, sequence, 1_000 + sequence * 100, a));
+  const dispatches = [
+    legMove(taskId, `${delegation}-step-0`, a, b, 1_500, 46_000),
+    legMove(taskId, `${delegation}-step-1`, b, c, 1_700, 47_000),
+  ];
+  const moved = [
+    legSample(taskId, delegation, 5, 1_600, b),
+    legSample(taskId, delegation, 6, 2_000, c),
+  ];
+  const nav = { confirmed: true, trace: [{ pos: b, ts: 1_600 }, { pos: c, ts: 2_000 }] };
+
+  const accepted = classifyLegTrace(nav, taskId, [...stable, ...moved], dispatches);
+  assert.equal(accepted.ok, true, accepted.problems.join(', '));
+  assert.equal(accepted.facts.acceptedSamples, 6);
+  assert.equal(accepted.facts.acceptedSamplesOutsideDispatchWindows, 4);
+  assert.deepEqual(accepted.facts.acceptedSampleSequencesOutsideDispatch, [1, 2, 3, 4]);
+  assert.equal(accepted.facts.outsideDispatchSequencesTruncated, false);
+  assert.equal(accepted.facts.compared, 2);
+
+  // 所有派发窗口结束后的终点 accepted 样本同样允许。
+  const terminal = legSample(taskId, delegation, 7, 48_000, c);
+  const withTerminal = classifyLegTrace(nav, taskId, [...stable, ...moved, terminal], dispatches);
+  assert.equal(withTerminal.ok, true, withTerminal.problems.join(', '));
+  assert.equal(withTerminal.facts.acceptedSamplesOutsideDispatchWindows, 5);
+
+  // 额外样本的作用域或 executionId 与派发矛盾时仍然失败。
+  const scopeTemplate = legSample(taskId, delegation, 8, 3_100, c);
+  const foreignScope = { ...scopeTemplate, sample: { ...scopeTemplate.sample, dim: 'nether' } };
+  assert.match(
+    classifyLegTrace(nav, taskId, [...stable, ...moved, foreignScope], dispatches).problems.join(' '),
+    /scope contradicts/,
+  );
+  const execTemplate = legSample(taskId, delegation, 9, 3_200, c);
+  const foreignExec = { ...execTemplate, sample: { ...execTemplate.sample, executionId: 'walk-9' } };
+  assert.match(
+    classifyLegTrace(nav, taskId, [...stable, ...moved, foreignExec], dispatches).problems.join(' '),
+    /executionId walk-9 contradicts route delegation walk-1/,
+  );
+});
+
 const cleanShutdown = (overrides: Partial<ShutdownResult> = {}): ShutdownResult => ({
   checkpoint: { checkpointId: 'checkpoint-1' } as never,
   error: null,
@@ -336,6 +414,174 @@ test('duration classification keeps smoke separate and refuses a short full run'
 
   const nullElapsed = classifyDuration('full', 3_600_000, null);
   assert.equal(nullElapsed.fullPassEligible, false);
+});
+
+test('main working-set snapshots keep bounded counts and a resident byte estimate instead of RSS or section keys', () => {
+  const stats: WorkingSetStats = {
+    residentSections: 3,
+    residentBytes: 4096,
+    maxResidentSections: 8,
+    maxResidentBytes: 1_048_576,
+    lruTracked: 3,
+    pinnedLeases: 1,
+    pinnedSections: 1,
+  };
+  const key = { worldId: 'world', dim: 'overworld', cx: 12, sy: 4, cz: 13 };
+  const snapshot = buildWorkingSetSnapshot({
+    label: 'leg-1',
+    at: 1_000,
+    activeElapsedMs: 500,
+    voxelLoading: 'manual',
+    stats,
+    pending: {
+      observations: 2,
+      bytes: 512,
+      countLimit: 256,
+      byteLimit: 1_048_576,
+      sections: [key, { ...key, cx: 13 }],
+      observedAtMin: 100,
+      observedAtMax: 200,
+      loading: true,
+    },
+    unavailable: null,
+  });
+  assert.equal(snapshot.stats?.residentSections, 3);
+  assert.equal(snapshot.stats?.residentBytesEstimate, 4096);
+  assert.equal(snapshot.pending?.observations, 2);
+  assert.equal(snapshot.pending?.bytes, 512);
+  assert.equal(snapshot.pending?.sectionCount, 2);
+  assert.equal(snapshot.pending !== null && 'sections' in snapshot.pending, false, 'section keys are not retained');
+  assert.equal('rss' in snapshot, false, 'resident bytes are an estimate, not process RSS');
+  assert.equal(snapshot.unavailable, null);
+
+  const eager = buildWorkingSetSnapshot({
+    label: 'eager',
+    at: 2_000,
+    activeElapsedMs: 1_500,
+    voxelLoading: 'eager',
+    stats: null,
+    pending: { observations: 0, bytes: 0, sections: [], loading: false },
+    unavailable: 'workingSetStats is unavailable (eager voxel loading or old host)',
+  });
+  assert.equal(eager.stats, null);
+  assert.equal(eager.pending?.sectionCount, 0);
+  assert.match(String(eager.unavailable), /eager/);
+  assert.notEqual(workingSetStatsSignature(stats), workingSetStatsSignature({ ...stats, residentBytes: 4097 }));
+  assert.equal(MAX_WORKING_SET_SNAPSHOTS, 32);
+});
+
+test('main manual evidence requires an actually-manual session, changed stats, and no pending before shutdown', () => {
+  const base = {
+    mode: 'full' as const,
+    requested: 'manual' as const,
+    actual: 'manual',
+    statsSnapshotCount: 2,
+    statsChanged: true,
+    pendingBeforeShutdown: 0,
+  };
+  assert.deepEqual(classifyMainManualEvidence(base), { ok: true, problems: [] });
+
+  assert.match(
+    classifyMainManualEvidence({ ...base, actual: 'eager' }).problems.join(' '),
+    /reports eager/,
+  );
+  assert.match(
+    classifyMainManualEvidence({ ...base, actual: 'eager' }).problems.join(' '),
+    /did not actually open with manual/,
+  );
+  assert.match(
+    classifyMainManualEvidence({ ...base, statsSnapshotCount: 1 }).problems.join(' '),
+    /fewer than two real workingSetStats/,
+  );
+  assert.match(
+    classifyMainManualEvidence({ ...base, statsChanged: false }).problems.join(' '),
+    /workingSetStats never changed/,
+  );
+  assert.match(
+    classifyMainManualEvidence({ ...base, pendingBeforeShutdown: 3 }).problems.join(' '),
+    /3 observation\(s\) were still pending/,
+  );
+  assert.match(
+    classifyMainManualEvidence({ ...base, pendingBeforeShutdown: null }).problems.join(' '),
+    /no pendingObservations snapshot/,
+  );
+  assert.match(
+    classifyMainManualEvidence({ ...base, mode: 'smoke', requested: 'eager' }).problems.join(' '),
+    /reports manual/,
+  );
+
+  const smokeEager = classifyMainManualEvidence({
+    mode: 'smoke',
+    requested: 'eager',
+    actual: 'eager',
+    statsSnapshotCount: 0,
+    statsChanged: false,
+    pendingBeforeShutdown: null,
+  });
+  assert.deepEqual(smokeEager, { ok: true, problems: [] }, 'eager smoke does not require manual evidence');
+});
+
+test('main session open options select the requested voxel loading and the opened session reports the actual mode', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'spatial-soak-voxel-'));
+  const diagnostics: unknown[] = [];
+  try {
+    const eagerOptions = buildSpatialOpenOptions(
+      'soak-voxel-world',
+      join(dir, 'eager.sqlite'),
+      'eager',
+      (diagnostic) => diagnostics.push(diagnostic),
+    );
+    assert.equal(eagerOptions.voxelLoading, 'eager');
+    assert.equal(eagerOptions.timeoutMs, 5000);
+    assert.equal(typeof eagerOptions.onWorkingSetDiagnostic, 'function');
+    const eager = await SharedSpatialSession.open(eagerOptions);
+    try {
+      assert.equal(eager.session.voxelLoading, 'eager');
+      const verdict = classifyMainManualEvidence({
+        mode: 'smoke',
+        requested: 'eager',
+        actual: eager.session.voxelLoading,
+        statsSnapshotCount: 0,
+        statsChanged: false,
+        pendingBeforeShutdown: null,
+      });
+      assert.equal(verdict.ok, true, verdict.problems.join(', '));
+    } finally {
+      await eager.shutdown();
+    }
+
+    // 真实打开同一个选项构造器产出的 manual 请求。宿主未合入 manual API 时，
+    // 选项不会被静默当成 manual；测试据实际报告验证，而不是假定成功。
+    const manualOptions = buildSpatialOpenOptions(
+      'soak-voxel-world',
+      join(dir, 'manual.sqlite'),
+      'manual',
+      (diagnostic) => diagnostics.push(diagnostic),
+    );
+    const manual = await SharedSpatialSession.open(manualOptions);
+    try {
+      if (manualScenarioSupported(SharedSpatialSession)) {
+        assert.equal(manual.session.voxelLoading, 'manual');
+      } else {
+        assert.equal(manual.session.voxelLoading, 'eager');
+        const verdict = classifyMainManualEvidence({
+          mode: 'smoke',
+          requested: 'manual',
+          actual: manual.session.voxelLoading,
+          statsSnapshotCount: 0,
+          statsChanged: false,
+          pendingBeforeShutdown: null,
+        });
+        assert.equal(verdict.ok, false);
+        assert.match(verdict.problems.join(' '), /reports eager/);
+      }
+    } finally {
+      await manual.shutdown();
+    }
+    assert.deepEqual(diagnostics, [], 'no capacity diagnostics for these empty sessions');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('package metadata is verified against actual tarball bytes, lock entry, and provenance', () => {
