@@ -249,3 +249,15 @@ test('precise collection can see a source through the upper gap of a dry bottom 
   assert.equal(result.ok, true, result.reason);
   assert.equal(f.uses(), 1);
 });
+
+test('precise collection reaches a side-accessible source whose top is occluded by a solid block', async () => {
+  const f = fixture('bucket');
+  f.bot.entity.position = new Vec3(0.5, 63, 0.5);
+  const source = new Vec3(3, 64, 0);
+  f.put('water', source);
+  f.put('stone', source.offset(0, 1, 0)); // 顶部被实心方块遮挡，侧面仍可接触
+  f.onUse(() => { f.inventory.set('bucket', 0); f.inventory.set('water_bucket', 1); });
+  const result = await f.adapter.useItemOn('bucket', { kind: 'block', pos: source }, signal());
+  assert.equal(result.ok, true, result.reason);
+  assert.equal(f.uses(), 1);
+});
