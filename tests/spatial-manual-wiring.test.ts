@@ -344,6 +344,33 @@ test('walk_route prepares, leases, and releases on success in manual mode', { ti
   }
 });
 
+test('walk_to execution-phase residency cancellation returns cancelled', { timeout: 40_000 }, async () => {
+  const h = await openManual();
+  try {
+    const fixture = physicsHarness();
+    const spy = spyResidency(h.svc);
+    const realPrepare = h.svc.prepare.bind(h.svc);
+    const controller = new AbortController();
+    let calls = 0;
+    h.svc.prepare = async (keys, opts) => {
+      const call = ++calls;
+      // 第一次是搜索前准备；第二次是执行前的真实路线依赖准备。
+      if (call === 2) controller.abort();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return realPrepare(keys, opts);
+    };
+    const ctx = context(fixture.adapter, h.svc, makeSenses(h.svc), {
+      taskId: 'manual-exec-cancel', deadline: Date.now() + 25_000, signal: controller.signal,
+    });
+    const result = await runSkill(ctx, walkTo, { to: { x: 2.54, y: 0, z: 0.52 }, arrival: { kind: 'near', radius: 0.5 } });
+    assert.equal(result.status, 'cancelled', result.summary);
+    assert.equal(calls, 2, '搜索与执行阶段各一次真实 prepare');
+    assertBalanced(spy, h.svc);
+  } finally {
+    await closeManual(h);
+  }
+});
+
 test('manual lease is released exactly once after cancellation and after a scope change', { timeout: 40_000 }, async () => {
   // 取消：真实 prepare 返回 ready 后立刻中止父任务。
   const cancelled = await openManual();

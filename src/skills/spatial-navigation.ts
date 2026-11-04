@@ -698,10 +698,15 @@ export const walkTo: Skill<WalkToArgs> = {
       { signal: ctx.signal, deadline: effectiveDeadline },
     );
     if (routeResidency.status !== 'ready') {
-      return fail('ERROR', `walk_to 执行依赖未准备好：${routeResidency.message}`, {
+      const summary = `walk_to 执行依赖未准备好：${routeResidency.message}`;
+      const data = {
         ...base, stage: 'residency', candidate, search: snapshot,
         position: { ...actualStart }, ...residencyFacts(routeResidency),
-      });
+      };
+      // prepare 的 cancelled 可能是父取消、期限或关停；和搜索阶段一样按取消返回，
+      // 不把它包装成普通 ERROR。其余失败保留真实缺口。
+      if (routeResidency.reason === 'cancelled') return { status: 'cancelled', summary, data };
+      return fail('ERROR', summary, data);
     }
     try {
       // 候选交给既有执行后端：内部 exact 只指候选末点，原 to/arrival 完整保留在 data。
