@@ -664,6 +664,10 @@ export interface W5ChainInput {
   hidden: {
     startSeq: number;
     startAt: number;
+    /** 真实 parseSetBlock 成功后的 response 事件序号（已执行上界）。 */
+    responseSeq: number | null;
+    /** 收到成功 response 时的 physics frame 计数。 */
+    responseFrame: number | null;
     endSeq: number;
     endAt: number | null;
     views: W5HiddenView[];
@@ -717,6 +721,22 @@ export function checkW5HiddenReveal(x: W5ChainInput): { ok: boolean; reason?: st
   }
   if (x.cellDuring.captureSeq <= x.cellBefore.captureSeq || x.cellDuring.captureAt <= x.cellBefore.captureAt) {
     return { ok: false, reason: '隐藏期 cellAt capture 时刻未推进' };
+  }
+  if (hidden.responseSeq === null || hidden.responseFrame === null || !Number.isInteger(hidden.responseFrame) || hidden.responseFrame < 0) {
+    return { ok: false, reason: '缺少拆支撑成功 response 边界' };
+  }
+  if (hidden.responseSeq <= x.removalSeq) return { ok: false, reason: '成功 response 早于拆支撑发出' };
+  if (hidden.responseSeq <= hidden.startSeq || hidden.responseSeq >= hidden.endSeq) {
+    return { ok: false, reason: '成功 response 不在真实隐藏窗口内' };
+  }
+  if (x.cellDuring.captureSeq <= hidden.responseSeq) {
+    return { ok: false, reason: 'cellDuring 未在成功 response 后采集' };
+  }
+  // 只有「已确认变化之后、cellDuring 之前」的帧能证明变化已执行后仍隐藏；
+  // 后续帧不能补采为采集前证据。
+  const postResponseBeforeDuring = hidden.views.filter((v) => v.seq > hidden.responseSeq! && v.seq < x.cellDuring!.captureSeq);
+  if (new Set(postResponseBeforeDuring.map((v) => v.frame)).size < 2) {
+    return { ok: false, reason: '成功 response 后至 cellDuring 前不足两个不同 physics frame' };
   }
   if (x.cellDuring.captureSeq >= hidden.endSeq) {
     return { ok: false, reason: '隐藏期 cellDuring 不在真实隐藏窗口内' };
@@ -3009,11 +3029,13 @@ async function scenarioW5(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   };
   ev.extra = { ...ev.extra, rcon: rconDiag };
   const response = await ctx.rcon.send(command);
+  // 只有严格解析成功的 response 才能作为「变化已执行」的上界。
+  parseSetBlock(response);
   const responseSeq = d.seq.next();
   const responseTs = Date.now();
+  const frameAtResponse = d.recorder.frames.length;
   rconDiag.response = response;
-  rconDiag.responded = { seq: responseSeq, ts: responseTs };
-  parseSetBlock(response);
+  rconDiag.responded = { seq: responseSeq, ts: responseTs, frame: frameAtResponse };
 
   const ownMoves = () => d.exec.moves.filter((m) => m.taskId === taskId && m.delegationId === delegationId);
   const returnMoveOf = () => ownMoves().find((m) => m.executionId.endsWith('-step-2')) ?? null;
@@ -3045,7 +3067,10 @@ async function scenarioW5(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   while (Date.now() < hiddenDeadline) {
     returnMove = returnMoveOf();
     if (returnMove) break;
-    const frames = new Set(hiddenVisionAt(Number.POSITIVE_INFINITY).map((c) => c.frame));
+    // 只统计成功 response 之后的真实 Vision 帧；窗口后段帧不能补成采集前证据。
+    const frames = new Set(hiddenVisionAt(Number.POSITIVE_INFINITY)
+      .filter((c) => c.seq > responseSeq)
+      .map((c) => c.frame));
     if (!cellDuring && frames.size >= 2) {
       cellDuring = captureCell();
       ev.extra = { ...ev.extra, cellDuring };
@@ -3065,14 +3090,18 @@ async function scenarioW5(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
     targetObservation: b.observations.some((o) => sameCell(o.pos, target)),
     targetChanged: reportTouchesCell(b.report, target),
   }));
+  const postResponseBeforeDuring = hiddenViews.filter((v) => cellDuring !== null && v.seq > responseSeq && v.seq < cellDuring.captureSeq);
   const hidden = {
     startSeq: hiddenStartSeq,
     startAt: hiddenStartAt,
+    responseSeq,
+    responseFrame: frameAtResponse,
     endSeq: hiddenEndSeq,
     endAt: returnMove?.ts ?? null,
     views: hiddenViews,
     batches: hiddenBatchViews,
     distinctFrames: new Set(hiddenViews.map((v) => v.frame)).size,
+    postResponseFramesBeforeDuring: new Set(postResponseBeforeDuring.map((v) => v.frame)).size,
   };
   ev.extra = { ...ev.extra, hidden };
 
@@ -3082,6 +3111,9 @@ async function scenarioW5(ctx: HarnessContext, d: ScenarioDiag): Promise<void> {
   }
   if (!cellDuring) throw new Error('W5 隐藏窗口不足：未能在返程前采集第二个真实 cellAt 样本');
   if (hidden.distinctFrames < 2) throw new Error(`W5 隐藏窗口不足两个不同 physics frame：${hidden.distinctFrames}`);
+  if (hidden.postResponseFramesBeforeDuring < 2) {
+    throw new Error(`W5 成功 response 后至 cellDuring 前不足两个不同 physics frame：${hidden.postResponseFramesBeforeDuring}`);
+  }
   if (hiddenMaps.length < 1) throw new Error('W5 隐藏窗口缺少真实 map 观察边界');
   const badView = hiddenViews.find((v) => v.targetOutput !== null || v.targetInPositions || !v.eye || v.targetInFov);
   if (badView) throw new Error(`W5 隐藏期观察不合法：${JSON.stringify(badView)}`);

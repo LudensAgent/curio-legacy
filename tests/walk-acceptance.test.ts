@@ -1460,9 +1460,9 @@ const W5_CHAIN_OK = {
   taskId: 'task_A',
   delegationId: 'walk-1',
   stoneMapId: 1,
-  removalSeq: 12,
+  removalSeq: 11,
   hidden: {
-    startSeq: 10, startAt: 1000, endSeq: 30, endAt: 1300,
+    startSeq: 10, startAt: 1000, responseSeq: 12, responseFrame: 39, endSeq: 30, endAt: 1300,
     views: [
       { seq: 13, frame: 40, eye: W5_EYE, targetInPositions: false, targetInFov: false, targetOutput: null },
       { seq: 14, frame: 41, eye: W5_EYE, targetInPositions: false, targetInFov: false, targetOutput: null },
@@ -1514,10 +1514,50 @@ test('checkW5HiddenReveal：真实隐藏窗口+返程 step2 回看+未来 step3 
     }).reason ?? '',
     /两个不同 physics frame/,
   );
+  // response 前即使已有两帧也不能证明变化已执行后仍隐藏。
+  assert.match(
+    checkW5HiddenReveal({
+      ...W5_CHAIN_OK,
+      hidden: { ...W5_CHAIN_OK.hidden, responseSeq: 15 },
+    }).reason ?? '',
+    /成功 response 后至 cellDuring 前不足两个不同 physics frame/,
+  );
+  // response 后只有一帧。
+  assert.match(
+    checkW5HiddenReveal({
+      ...W5_CHAIN_OK,
+      hidden: { ...W5_CHAIN_OK.hidden, responseSeq: 13 },
+    }).reason ?? '',
+    /成功 response 后至 cellDuring 前不足两个不同 physics frame/,
+  );
+  // 两帧都在 response 后，但第二帧不在 cellDuring 之前。
+  assert.match(
+    checkW5HiddenReveal({
+      ...W5_CHAIN_OK,
+      cellDuring: { ...W5_CHAIN_OK.cellDuring, captureSeq: 14 },
+    }).reason ?? '',
+    /成功 response 后至 cellDuring 前不足两个不同 physics frame/,
+  );
   assert.match(
     checkW5HiddenReveal({
       ...W5_CHAIN_OK,
       hidden: { ...W5_CHAIN_OK.hidden, views: [{ ...W5_CHAIN_OK.hidden.views[0]!, targetOutput: 'air' }, W5_CHAIN_OK.hidden.views[1]!] },
+    }).reason ?? '',
+    /已输出目标格/,
+  );
+  // 成功 response 之前的坏观察仍属于完整隐藏窗口，不能因后段证据齐全而被忽略。
+  assert.match(
+    checkW5HiddenReveal({
+      ...W5_CHAIN_OK,
+      hidden: {
+        ...W5_CHAIN_OK.hidden, responseSeq: 14,
+        views: [
+          { ...W5_CHAIN_OK.hidden.views[0]!, seq: 13, frame: 38, targetOutput: 'stone' },
+          { ...W5_CHAIN_OK.hidden.views[0]!, seq: 15, frame: 40, targetOutput: null },
+          { ...W5_CHAIN_OK.hidden.views[1]!, seq: 16, frame: 41 },
+        ],
+      },
+      cellDuring: { ...W5_CHAIN_OK.cellDuring, captureSeq: 17 },
     }).reason ?? '',
     /已输出目标格/,
   );
