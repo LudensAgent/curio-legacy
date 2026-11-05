@@ -624,6 +624,7 @@ export const swimTo: Skill<{ xyz: { x: number; y: number; z: number }; timeoutMs
     const routeCells = route?.cells ?? [];
     const routeFacts = route ? { route: { waypoints: routeCells.map((c) => ({ x: c.x + 0.5, y: c.y, z: c.z + 0.5 })), ...(route.why ? { why: route.why } : {}) } } : {};
     let lastLeg: number | null = null;
+    let legBlocked = false;
     let r;
     try {
       for (let i = 0; i < routeCells.length; i++) {
@@ -631,16 +632,17 @@ export const swimTo: Skill<{ xyz: { x: number; y: number; z: number }; timeoutMs
         const wp = { x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5 };
         const rem = end - Date.now();
         if (rem <= 0) return fail('TIMEOUT', `游向目标的水路预算已用完，走到第 ${i}/${routeCells.length} 个水点；现在在 (${a.state().pos.x.toFixed(1)},${a.state().pos.y.toFixed(1)},${a.state().pos.z.toFixed(1)})`, { landed: false, pos: a.state().pos, oxygen: a.state().oxygen, route: routeFacts.route });
-        // 给最后一段干岸保留预算；水路段均分剩余时间，避免第一段吃掉全部。
+        // 给最后一段干岸保留预算；水路段均分剩余时间，避免第一段吃掉全部。委托时长绝不超过剩余。
         const reserve = Math.min(4000, Math.max(1200, Math.floor(rem * 0.25)));
-        const legMs = Math.max(800, Math.min(rem, Math.floor((rem - reserve) / (routeCells.length - i))));
+        const share = Math.floor(Math.max(0, rem - reserve) / (routeCells.length - i));
+        const legMs = Math.min(rem, Math.max(800, share));
         r = await a.swimTo(wp, ctx.signal, { timeoutMs: legMs });
         if (r.ok) continue;
         // 底层没确认稳定，但身体已到水点附近：继续下一段；离得远就按失败回执交回。
         const p = a.state().pos;
-        if (Math.hypot(p.x - wp.x, p.y - wp.y, p.z - wp.z) > 1.8) { lastLeg = i + 1; break; }
+        if (Math.hypot(p.x - wp.x, p.y - wp.y, p.z - wp.z) > 1.8) { lastLeg = i + 1; legBlocked = true; break; }
       }
-      if (!r || r.ok) {
+      if (!legBlocked) {
         const rem = end - Date.now();
         if (rem <= 0) return fail('TIMEOUT', '水路段走到了，但留给最后一段的预算已用完', { ...routeFacts, pos: a.state().pos, oxygen: a.state().oxygen });
         r = await a.swimTo(args.xyz, ctx.signal, { timeoutMs: Math.min(rem, ctx.deadline - Date.now()) });
