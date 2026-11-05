@@ -65,8 +65,8 @@ export const why = (e: unknown) => {
   return m;
 };
 
-type TargetDigArgs = { target: string | Vec3Like; block?: string; own?: boolean; dir?: undefined; blocks?: undefined; wet?: boolean; lava?: boolean };
-type DigArgs = ({ dir: string; blocks: number; target?: undefined; block?: undefined } | TargetDigArgs) & { wet?: boolean; lava?: boolean };
+type TargetDigArgs = { target: string | Vec3Like; block?: string; own?: boolean; dir?: undefined; blocks?: undefined; wet?: boolean; lava?: boolean; deadlineMs?: number };
+type DigArgs = ({ dir: string; blocks: number; target?: undefined; block?: undefined } | TargetDigArgs) & { wet?: boolean; lava?: boolean; deadlineMs?: number };
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 const coordinates = (value: unknown): Vec3Like | null => {
   const parts = typeof value === 'string' ? value.trim().split(/[,， ]+/).map(Number) : null;
@@ -201,26 +201,30 @@ async function recoverBlock(ctx: SkillCtx, args: TargetDigArgs) {
 export const dig: Skill<DigArgs> = {
   name: 'dig',
   description: '定点拆除并拾取，或按 dir 挖通道（dir:down 挖脚下的方块并落到下一级，下面最多 3 格落差内会继续往下、不掉血；N/E/S/W 挖水平通道；up 挖头顶）；默认不制造工具，不挖开液体邻格。wet:true 接受进水，lava:true 接受进岩浆，分别显式选择。',
-  argsDoc: '{"target"?: "<方块ID|x,y,z|地标ID>" | {"x":0,"y":64,"z":0}, "block"?: "<目标方块类型约束>", "own"?: true, "dir"?: "up|down|N|E|S|W|forward", "blocks"?: 1-6, "wet"?:true, "lava"?:true}（target 与 dir 二选一）',
+  argsDoc: '{"target"?: "<方块ID|x,y,z|地标ID>" | {"x":0,"y":64,"z":0}, "block"?: "<目标方块类型约束>", "own"?: true, "dir"?: "up|down|N|E|S|W|forward", "blocks"?: 1-6, "wet"?:true, "lava"?:true, "deadlineMs"?: 可选绝对 epoch 毫秒（只能缩短本次执行期限）}（target 与 dir 二选一）',
   timeoutMs: 60000,
   movement: true,
   validate(raw) {
     const a = obj(raw);
+    const deadlineMs = a.deadlineMs;
+    if (deadlineMs !== undefined && (typeof deadlineMs !== 'number' || !Number.isFinite(deadlineMs) || deadlineMs <= 0)) return { ok: false, error: 'deadlineMs 必须是正的绝对 epoch 毫秒' };
     const target = a.target ?? a.at ?? a.pos;
     if (target !== undefined) {
       if (a.dir !== undefined || a.direction !== undefined || a.blocks !== undefined || a.count !== undefined) return { ok: false, error: '定点 target 只拆一个目标，不能同时指定 dir/blocks' };
       const point = coordinates(target);
       if (!point && (typeof target !== 'string' || !target.trim() || target.length > 160 || /[,，]/.test(target))) return { ok: false, error: 'target 必须是方块ID、地标ID或有效的 x,y,z 坐标' };
       const block = typeof a.block === 'string' && a.block.trim() ? a.block.trim().replace(/^minecraft:/, '') : undefined;
-      return { ok: true, args: { target: point ?? String(target).trim().replace(/^minecraft:/, ''), ...(block ? { block } : {}), ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}) } };
+      return { ok: true, args: { target: point ?? String(target).trim().replace(/^minecraft:/, ''), ...(block ? { block } : {}), ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}), ...(deadlineMs !== undefined ? { deadlineMs } : {}) } };
     }
     let dir = String(a.dir ?? a.direction ?? '').trim();
     dir = /^(up|down|forward)$/i.test(dir) ? dir.toLowerCase() : dir.toUpperCase();
     if (!['up', 'down', 'forward', ...Object.keys(DIR_OFFSETS)].includes(dir)) return { ok: false, error: 'dir 必须是 up/down/forward/N/E/S/W' };
-    return { ok: true, args: { dir, blocks: clampInt(a.blocks ?? a.count, 1, 6, dir === 'up' ? 2 : 1), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}) } };
+    return { ok: true, args: { dir, blocks: clampInt(a.blocks ?? a.count, 1, 6, dir === 'up' ? 2 : 1), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}), ...(deadlineMs !== undefined ? { deadlineMs } : {}) } };
   },
   async run(ctx, args) {
-    if (args.target !== undefined) return recoverBlock(ctx, args);
+    // 自动续跑沿用原动作期限：args.deadlineMs 只能缩短父任务的 deadline，不能延长。
+    const deadline = Math.min(ctx.deadline, args.deadlineMs ?? Number.POSITIVE_INFINITY);
+    if (args.target !== undefined) return recoverBlock({ ...ctx, deadline }, args);
     const { adapter, signal } = ctx;
     const dug: string[] = [];
     const start = adapter.state().pos;
@@ -333,10 +337,10 @@ export const dig: Skill<DigArgs> = {
 };
 
 // ------------------------------------------------------------------ climb_up
-export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boolean }> = {
+export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boolean; deadlineMs?: number }> = {
   name: 'climb_up',
   description: '原地往上爬（头顶挡着会先挖开）：脚下是梯子就沿梯子爬，否则跳起来往脚下垫方块（需要背包里有泥土/圆石等方块）；until_sky 爬到看得见天空，until_exit 爬到四周有路可走（出坑）',
-  argsDoc: '{"height"?: 1-24, "until_sky"?: boolean, "until_exit"?: boolean}；兼容 untilSky/untilExit；两个停止条件同时开启时须同时满足',
+  argsDoc: '{"height"?: 1-24, "until_sky"?: boolean, "until_exit"?: boolean, "deadlineMs"?: 可选绝对 epoch 毫秒（只能缩短本次执行期限）}；兼容 untilSky/untilExit；两个停止条件同时开启时须同时满足',
   timeoutMs: 90000,
   movement: true,
   validate(raw) {
@@ -344,10 +348,14 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
     const untilExit = a.until_exit ?? a.untilExit ?? false;
     const untilSky = a.until_sky ?? a.untilSky ?? (a.height === undefined && !untilExit);
     if (typeof untilExit !== 'boolean' || typeof untilSky !== 'boolean') return { ok: false, error: 'until_sky/until_exit 须为布尔值' };
-    return { ok: true, args: { height: clampInt(a.height, 1, 24, untilSky || untilExit ? 16 : 3), untilSky, ...(untilExit ? { untilExit } : {}) } };
+    const deadlineMs = a.deadlineMs;
+    if (deadlineMs !== undefined && (typeof deadlineMs !== 'number' || !Number.isFinite(deadlineMs) || deadlineMs <= 0)) return { ok: false, error: 'deadlineMs 必须是正的绝对 epoch 毫秒' };
+    return { ok: true, args: { height: clampInt(a.height, 1, 24, untilSky || untilExit ? 16 : 3), untilSky, ...(untilExit ? { untilExit } : {}), ...(deadlineMs !== undefined ? { deadlineMs } : {}) } };
   },
   async run(ctx, args) {
     const { adapter, signal } = ctx;
+    // 自动续跑沿用原动作期限；args.deadlineMs 只能缩短，不能延长父任务预算。
+    const deadline = Math.min(ctx.deadline, args.deadlineMs ?? Number.POSITIVE_INFINITY);
     throwIfAborted(signal);
     const onLadder = () => adapter.blockAt(floor(adapter.state().pos)) === 'ladder';
     const start = adapter.state().pos.y;
@@ -409,13 +417,13 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
       }
     };
     try {
-      for (let i = 0; i < effectiveHeight && Date.now() < ctx.deadline - 1000; i++) {
+      for (let i = 0; i < effectiveHeight && Date.now() < deadline - 1000; i++) {
         throwIfAborted(signal);
         const here = surroundings(adapter);
         if ((args.untilSky || args.untilExit) && reached(here)) break;
         const before = adapter.state().pos, me = floor(before);
         lastBeforeY = before.y;
-        const moveUp = () => adapter.moveTo({ kind: 'xyz', x: me.x, y: me.y + 1, z: me.z }, { signal, timeoutMs: Math.max(1, Math.min(8000, ctx.deadline - Date.now())), allowTerrainChanges: true });
+        const moveUp = () => adapter.moveTo({ kind: 'xyz', x: me.x, y: me.y + 1, z: me.z }, { signal, timeoutMs: Math.max(1, Math.min(8000, deadline - Date.now())), allowTerrainChanges: true });
         // 头顶的方块先挖开（不挖液体旁边的）
         try {
           await breakCell(ctx, { x: me.x, y: me.y + 2, z: me.z });

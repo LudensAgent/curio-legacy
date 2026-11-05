@@ -16,7 +16,7 @@ import { causeName } from '../brain/habits.ts';
 import { consumptionSummary } from '../brain/supply.ts';
 import { pickFuel } from '../skills/economy.ts';
 import { pickVariant } from '../skills/work.ts';
-import { afterStep, argsLabel, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, nextStep, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
+import { afterStep, argsLabel, beginStep, markContinuation, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, nextStep, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
 import { relativeCellAction } from '../skills/stance.ts';
 import { instinctNote, type BehaviorEngine } from './behaviors.ts';
 import { recallLocal } from './recall.ts';
@@ -154,6 +154,8 @@ export class Mind {
   private learnedActivities = new Set<string>();
   private speechEventAt = 0;
   private fillerAt = 0;
+  /** 自动续跑沿用的原动作期限：到点取消本次执行，不许换一个新 taskId 重新获得完整超时。 */
+  private stepExpiry: { taskId: string; timer: NodeJS.Timeout } | null = null;
   private gameMessages: { at: number; text: string }[] = [];
   private deathAt = 0;
   private deathTold = false;
@@ -298,6 +300,7 @@ export class Mind {
 
   stop() {
     this.setObservedOnline(false);
+    this.clearStepExpiry();
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.cancelThinking('shutdown');
@@ -632,8 +635,20 @@ export class Mind {
     }
     const state = this.d.adapter.state();
     this.activity.stepStart = { pos: { ...state.pos }, view: viewOf(this.safe(() => this.d.perception.snapshot(), undefined)) };
+    const skill = SKILLS[step.skill];
+    // 逻辑动作的模板（带稳定 id）：期限与材料账本按它记录；动作回执里的规范化参数不能当模板。
+    const template = this.activity.steps[Math.max(0, this.activity.index - 1)] ?? step;
+    const budget = skill ? beginStep(this.activity, template, state) : undefined;
+    if (budget && budget.remainingMs <= 0) {
+      this.finishActivity('stuck', `「${step.skill}」的自动重试沿用原动作期限，现在已经到期；没有用新的超时重来，下一步由你决定`);
+      return;
+    }
+    // 自动续跑把剩余绝对期限带进参数，只有实际支持 deadlineMs 的技能会采纳；其余技能至少由下面的计时器约束。
+    const dispatch = budget?.continuation
+      ? { ...step, args: { ...(step.args && typeof step.args === 'object' && !Array.isArray(step.args) ? step.args as Record<string, unknown> : {}), deadlineMs: budget.deadlineMs } }
+      : step;
     const climb = step.skill === 'climb_up' ? this.activity.climb?.[step.id ?? JSON.stringify(step.args ?? {})] : undefined;
-    const r = this.d.arbiter.start(step, this.activity.source === 'rule' ? 'rule' : 'llm', {
+    const r = this.d.arbiter.start(dispatch, this.activity.source === 'rule' ? 'rule' : 'llm', {
       planId: this.activity.id,
       ...(step.id ? { stepId: step.id } : {}),
       ...(step.origin ? { origin: step.origin } : {}),
@@ -641,6 +656,27 @@ export class Mind {
       ...(climb ? { climb } : {}),
     });
     if ('error' in r) this.handleStepResult(step, { status: 'failed', failureCode: 'BAD_ARGS', summary: r.error }, 0);
+    else if (budget?.continuation) this.watchStepDeadline(r.id, step.skill, budget.deadlineMs);
+  }
+
+  /** 自动续跑到原动作期限就取消本次执行；不延长，也不让新 taskId 重新计时。 */
+  private watchStepDeadline(taskId: string, skill: string, deadlineMs: number) {
+    this.clearStepExpiry();
+    this.stepExpiry = {
+      taskId,
+      timer: setTimeout(() => {
+        this.stepExpiry = null;
+        if (this.d.arbiter.info()?.id !== taskId) return;
+        this.d.bus.publish('body_adapt', 'P1', `「${skill}」自动续跑沿用的原动作期限已到，取消本次执行`, { planId: this.activity?.id ?? null, skill });
+        this.d.arbiter.cancel(`「${skill}」自动续跑沿用原动作期限，已到期限`, 'TIMEOUT');
+      }, Math.max(0, deadlineMs - Date.now())),
+    };
+  }
+
+  private clearStepExpiry() {
+    if (!this.stepExpiry) return;
+    clearTimeout(this.stepExpiry.timer);
+    this.stepExpiry = null;
   }
 
   /** 只检查眼下确实会用的物品；采集等前置动作的产出仍交给实际执行确认。 */
@@ -808,6 +844,7 @@ export class Mind {
 
   // ---------------------------------------------------------------- 动作结果
   private onDone(o: TaskOutcome) {
+    if (this.stepExpiry?.taskId === o.task.id) this.clearStepExpiry();
     if (o.task.source === 'filler') return;
     const observationMiss = softMiss(this.activity?.id === o.task.planId ? this.activity : null, { skill: o.task.skill, args: o.task.args }, o.result);
     if (o.result.status !== 'cancelled' && !observationMiss) {
@@ -840,6 +877,7 @@ export class Mind {
           return;
         }
         a.index = Math.max(0, a.index - 1);
+        markContinuation(a, a.steps[a.index]); // 反射打断后的回放仍属同一次委托
         a.interruptions = (a.interruptions ?? 0) + 1;
         // 一直被身体躲闪打断：这段活眼下做不成，先想想怎么对付周围的危险
         if (a.interruptions >= 3) this.finishActivity('stuck', `这段活被身体的躲闪反应打断了 ${a.interruptions} 次，周围有危险：先处理掉威胁（打、跑远、躲起来）再做`);
@@ -900,6 +938,8 @@ export class Mind {
           origin: 'execution_helper', authorizedBy: { skill: step.skill, ...(own?.id ? { stepId: own.id } : {}), args: step.args },
         });
         a.index = Math.max(0, a.index - 1);
+        // 恢复技能之后会回放原来的动作：仍是同一次委托，沿用原期限与材料额度。
+        markContinuation(a, own);
         a.consecutiveFailures = 0;
         this.d.self.think(`${step.skill} 没成，照学会的「${b.name}」试试`, 'outcome');
         this.d.bus.publish('body_adapt', 'P3', `身体先试学会的做法：${b.name}（${b.description}）`, { planId: a.id, skill: b.name });
@@ -944,6 +984,7 @@ export class Mind {
     if (next) {
       a.adaptations.push(`skill:${next.name}`);
       a.awaitingRecovery = next.name;
+      if (retry && retry.skill === failure.skill) markContinuation(a, retry);
       a.steps.splice(a.index, 0, {
         skill: 'use_skill', args: { name: next.name, failure }, optional: true, id: shortId('st_'),
         origin: 'execution_helper', authorizedBy: { skill: failure.skill, args: failure.args },

@@ -22,13 +22,16 @@ function fixture(t: TestContext, options: { routineCare?: boolean; habits?: () =
     startedAt: now - age, deadline: now + 60_000, movement: false,
   };
   let entities: EntityInfo[] = [];
+  let onLadder = false;
   const cave = { dark: true };
   const starts: { step: Step; gentle?: boolean }[] = [];
   const cancellations: { reason: string; code?: string }[] = [];
   const adapter = {
     state: () => state,
     hasFood: () => state.inventory.some((i) => ['bread', 'beef'].includes(i.name) && i.count > 0),
-    blockAt: ({ y }: { y: number }) => y < 64 || y === 67 ? 'stone' : 'air',
+    blockAt: ({ x, y, z }: { x: number; y: number; z: number }) => onLadder && y >= 64 && Math.floor(x) === 0 && Math.floor(z) === 0
+      ? 'ladder'
+      : y < 64 || y === 67 ? 'stone' : 'air',
     lightAt: () => ({ block: cave.dark ? 0 : 12, sky: 0 }),
   } as unknown as GameAdapter;
   const arbiter = {
@@ -41,6 +44,7 @@ function fixture(t: TestContext, options: { routineCare?: boolean; habits?: () =
   const senses: Senses = { perceivedEntities: () => entities, knownBlocks: () => [], refresh() {}, markSweep() {} };
   const reflex = new Reflex(adapter, arbiter, new EventBus(), senses, options);
   return { state, cave, starts, cancellations, setTask, setIdle: () => { current = null; }, tick: () => reflex.tick(), advance: (ms: number) => { now += ms; },
+    ladder: (on: boolean) => { onLadder = on; },
     hostile: (name: string, extra: Record<string, unknown> = {}) => { entities = [{ id: 42, name, kind: 'hostile', dist: 3, pos: { x: 3, y: 64, z: 0 }, ...extra }]; },
   };
 }
@@ -124,6 +128,57 @@ test('autonomous reflexes preserve routine choices and return stuck movement whi
   assert.equal(w.starts.at(-1)?.step.skill, 'flee');
   w.setTask('craft'); w.hostile('spider'); w.tick();
   assert.equal(w.starts.at(-1)?.step.skill, 'defend');
+});
+
+test('water-surface bobbing is not forward progress: zero horizontal movement still stalls', (t) => {
+  const w = fixture(t);
+  w.setTask('swim_to', 'llm', 0, 21_000).movement = true;
+  w.state.inWater = true;
+  w.state.onGround = false;
+  for (let i = 0; i <= 20; i++) {
+    w.state.pos = { x: 0, y: i % 2 ? 64.4 : 63.9, z: 0 };
+    w.tick();
+    w.advance(1000);
+  }
+  assert.equal(w.cancellations.at(-1)?.code, 'STUCK', '上下浮动不算推进，20 秒没有水平位移仍判卡死');
+});
+
+test('ladder climbing and authorized stationary waits are not mistaken for stalls', (t) => {
+  // 贴梯子真实升高：onGround=false，但有效支撑使高度变化计入推进。
+  const climb = fixture(t);
+  climb.ladder(true);
+  climb.setTask('climb_up', 'llm', 0, 21_000).movement = true;
+  climb.state.onGround = false;
+  for (let i = 0; i <= 20; i++) {
+    climb.state.pos = { x: 0.5, y: 64 + i * 0.2, z: 0.5 };
+    climb.tick();
+    climb.advance(1000);
+  }
+  assert.equal(climb.cancellations.length, 0, '真实爬梯不能被判卡死');
+
+  // 授权的原地等待（等待落稳/传送/钓鱼）本来就没有位移，也不算卡死。
+  const wait = fixture(t);
+  const task = wait.setTask('travel_portal', 'llm', 0, 21_000);
+  task.movement = true;
+  task.stationaryWait = true;
+  for (let i = 0; i <= 25; i++) {
+    wait.state.pos = { x: 0, y: i % 2 ? 64.3 : 64, z: 0 };
+    wait.tick();
+    wait.advance(1000);
+  }
+  assert.equal(wait.cancellations.length, 0, '授权等待不判卡死');
+});
+
+test('grounded height change still counts as movement', (t) => {
+  const w = fixture(t);
+  w.setTask('dig', 'llm', 0, 21_000).movement = true;
+  w.state.onGround = true;
+  for (let i = 0; i <= 20; i++) {
+    w.state.pos = { x: 0, y: 64 + i * 0.2, z: 0 }; // 边挖边落到下一级：有有效支撑的真实升降
+    w.tick();
+    w.advance(1000);
+  }
+  assert.equal(w.cancellations.length, 0, '有效支撑上的真实升降算推进');
 });
 
 test('苦力怕：打还是跑由脑子定；没响的苦力怕不打断，嘶嘶响才躲，正在跟它打时只后撤几步', (t) => {

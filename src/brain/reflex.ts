@@ -25,7 +25,7 @@ export interface LearnedBehaviors {
 export class Reflex {
   private timer: NodeJS.Timeout | null = null;
   private cooldown = new Map<string, number>();
-  private trail: { t: number; x: number; z: number; y: number; taskId: string; progress: number }[] = [];
+  private trail: { t: number; x: number; z: number; y: number; taskId: string; progress: number; supported: boolean }[] = [];
   stuckCount = 0;
   triggers = 0;
   enabled = true;
@@ -127,7 +127,7 @@ export class Reflex {
     const instinct = (name: string) => !learned?.suppresses(name, cur);
     const legacy = this.options.instincts !== 'skills';
     if (cur?.skill === 'surface' || cur?.skill === 'flee') return;
-    if (cur?.skill === 'use_skill' && cur.source === 'reflex') { this.checkStuck(s.pos, cur); return; } // 身体正照着反射技能在做
+    if (cur?.skill === 'use_skill' && cur.source === 'reflex') { this.checkStuck(s, cur); return; } // 身体正照着反射技能在做
     // 掩体：完全封好就不出去；在坑里或正在挖坑/垫高/封顶时，只有真的被打到、怪就在身边才动
     const cover = this.cover(s.pos);
     const fortifying = !!cur && cur.source !== 'reflex' && cur.source !== 'filler' && ['dig_at', 'place_at', 'climb_up', 'shelter', 'wait', 'use_skill', 'dig', 'descend', 'step'].includes(cur.skill);
@@ -178,7 +178,7 @@ export class Reflex {
     }
 
     if (this.options.habits?.().torch_every && instinct('torch')) this.autoTorch(s, cur, nearest?.dist ?? Infinity);
-    this.checkStuck(s.pos, cur);
+    this.checkStuck(s, cur);
   }
 
   private lastTorch: { x: number; y: number; z: number } | null = null;
@@ -211,26 +211,39 @@ export class Reflex {
     this.arbiter.start({ skill: 'place_torch', args: { count: 1, auto: true } }, 'reflex', { gentle: true });
   }
 
-  /** 移动型任务 20 秒内位移 < 1.5 格且进度没有变化 → STUCK；自主模式交回决策，兼容模式自动脱困。 */
-  private checkStuck(pos: { x: number; y: number; z: number }, cur: ReturnType<Arbiter['info']>) {
+  /**
+   * 移动型任务 20 秒内位移 < 1.5 格且进度没有变化 → STUCK；自主模式交回决策，兼容模式自动脱困。
+   * 只算净水平位移 + 有效支撑上的高度变化：水面上下浮动、空中瞬时高度不是前进；
+   * 站在地面/贴着梯子升高（爬梯、落地、下行）仍然算数。stationaryWait 覆盖授权等待。
+   */
+  private checkStuck(s: ReturnType<GameAdapter['state']>, cur: ReturnType<Arbiter['info']>) {
     const now = Date.now();
+    const pos = s.pos;
     if (!cur || !cur.movement || cur.stationaryWait) {
       this.trail = [];
       return;
     }
     const last = this.trail[this.trail.length - 1];
-    if (!last || now - last.t >= 1000) this.trail.push({ t: now, x: pos.x, y: pos.y, z: pos.z, taskId: cur.id, progress: cur.progress });
+    if (!last || now - last.t >= 1000) {
+      const feet = { x: Math.floor(pos.x), y: Math.floor(pos.y + 0.05), z: Math.floor(pos.z) };
+      const onLadder = this.adapter.blockAt(feet) === 'ladder';
+      this.trail.push({ t: now, x: pos.x, y: pos.y, z: pos.z, taskId: cur.id, progress: cur.progress, supported: s.onGround === true || onLadder });
+    }
     this.trail = this.trail.filter((p) => p.taskId === cur.id && now - p.t <= 20000);
     const first = this.trail[0];
     if (!first || now - first.t < 19000 || now - cur.startedAt < 20000) return;
-    const moved = Math.max(...this.trail.map((p) => Math.hypot(p.x - first.x, p.z - first.z) + Math.abs(p.y - first.y)));
+    const horizontal = Math.max(...this.trail.map((p) => Math.hypot(p.x - first.x, p.z - first.z)));
+    // 高度只在身体有有效支撑（触地或贴梯子）时计入；以第一个有效支撑样本为基准。
+    const supported = this.trail.filter((p) => p.supported);
+    const raised = supported.length ? Math.max(...supported.map((p) => Math.abs(p.y - supported[0].y))) : 0;
+    const moved = horizontal + raised;
     // 原地连续挖同一棵树/往下挖时位置不怎么变，但进度在涨，不算卡死
     const progressed = Math.max(...this.trail.map((p) => p.progress)) - Math.min(...this.trail.map((p) => p.progress)) > 0.001;
     if (moved < 1.5 && !progressed) {
       this.stuckCount++;
       this.trail = [];
       const around = surroundings(this.adapter, pos);
-      this.bus.publish('stuck', 'P1', `${cur.skill} 20 秒内几乎没有移动（${moved.toFixed(1)} 格），判定卡死｜${around.text}`);
+      this.bus.publish('stuck', 'P1', `${cur.skill} 20 秒内几乎没有移动（水平 ${horizontal.toFixed(1)}、有效升降 ${raised.toFixed(1)} 格），判定卡死｜${around.text}`);
       this.arbiter.cancel(`卡死：20 秒没挪动，在 ${Math.round(pos.x)},${Math.round(pos.y)},${Math.round(pos.z)}｜${around.text}`, 'STUCK');
       if (this.options.routineCare !== false) this.arbiter.start({ skill: 'unstuck' }, 'reflex');
     }
