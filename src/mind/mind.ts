@@ -895,10 +895,10 @@ export class Mind {
       }
       return;
     }
-    this.handleStepResult({ skill: o.task.skill, args: o.task.args }, o.result, o.durationMs);
+    this.handleStepResult({ skill: o.task.skill, args: o.task.args }, o.result, o.durationMs, o.task.id);
   }
 
-  private handleStepResult(step: Step, result: { status: 'succeeded' | 'failed' | 'cancelled'; failureCode?: any; summary: string; data?: Record<string, unknown>; caveat?: string }, durationMs: number) {
+  private handleStepResult(step: Step, result: { status: 'succeeded' | 'failed' | 'cancelled'; failureCode?: any; summary: string; data?: Record<string, unknown>; caveat?: string }, durationMs: number, taskId?: string) {
     const a = this.activity;
     if (!a) return;
     if (this.recoverySkipped(a, step, result)) return;
@@ -967,10 +967,23 @@ export class Mind {
     // 步骤做完但收工条件未达到时，保留既有的重新思考流程；满足条件则遵守 Agent 的后续选择。
     const nextToReview = verdict.kind === 'done' && !verdict.met ? this.queuedNext : null;
     if (nextToReview) this.queuedNext = null;
-    const unmet = verdict.kind === 'done' && !verdict.met && a.doneWhen ? {
+    // 收工条件只看一次同一个快照：既给出交回心智的 known 标记，也用来判断调用方是否否决了刚完成的这次技能成功。
+    const unmetCondition = a.doneWhen;
+    const callerEvidence = verdict.kind === 'done' && !verdict.met && unmetCondition
+      ? evaluateCondition(unmetCondition, state, state.worldId, [], percept) : null;
+    const unmet = callerEvidence ? {
       reason: nextToReview ? `「${a.what}」${verdict.why}；提前想好的「${nextToReview.draft.what}」先不接着做，请根据实际结果决定是否继续。` : `「${a.what}」收工条件未满足：${verdict.why}`,
-      known: evaluateCondition(a.doneWhen, state, state.worldId, [], percept).status === 'unsatisfied',
+      known: callerEvidence.status === 'unsatisfied',
     } : undefined;
+    // 技能自述做完、自己的 verify 也通过了，但调用方明确的收工条件未满足（比如只浮在水面、没有站上干地）：
+    // 撤销这次“成功”记账——执行完毕不等于调用方要的结果。只在明确 unsatisfied 时降级；
+    // stuck、可选步骤、多步活动的后续失败都不改这份技能的账。
+    if (callerEvidence?.status === 'unsatisfied' && unmetCondition && taskId && step.skill === 'use_skill'
+      && result.status === 'succeeded' && result.data?.verified === true && this.d.behaviors) {
+      const name = String((step.args as { name?: unknown } | undefined)?.name ?? '');
+      const behaviors = this.d.behaviors;
+      if (name) this.safe(() => behaviors.callerUnmet(name, taskId, `调用方收工条件未满足：实际 ${JSON.stringify(callerEvidence.actual)}；条件 ${JSON.stringify(unmetCondition)}${callerEvidence.reason ? `；原因：${callerEvidence.reason}` : ''}`), undefined);
+    }
     this.finishActivity(verdict.kind === 'done' ? verdict.met ? 'done' : 'unmet' : 'stuck', verdict.why, unmet);
   }
 
