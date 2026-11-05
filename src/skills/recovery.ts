@@ -277,6 +277,11 @@ export function constrainRecoveryAction(ctx: SkillCtx, name: string, values: Rec
   if (scope.skill === 'press_keys' && name !== 'press_keys' && name !== 'move') {
     throw new Error(`恢复「press_keys」不能改用 ${name}：原始按键委托不能升级成其他移动或施工`);
   }
+  // 恢复不能关闭原委托的安全 guard；只有原动作本身就是 unsafe 时才允许沿用。
+  if (name === 'move' && (args.unsafe === true)) {
+    const originalUnsafe = scope.skill === 'move' && (original as Record<string, unknown>).unsafe === true;
+    if (!originalUnsafe) throw new Error('恢复不能关闭原委托的 guard 保护（unsafe:true）');
+  }
   if (scope.skill === 'press_keys' && RAW_INPUT_SKILLS.has(name)) {
     const extra = activeKeys(name === 'move' ? args : args.keys).filter((key) => !activeKeys(original.keys).includes(key));
     if (extra.length) throw new Error(`恢复按键不能新增原委托没有的 ${extra.join('、')}`);

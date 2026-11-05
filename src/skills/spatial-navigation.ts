@@ -673,6 +673,7 @@ export const walkTo: Skill<WalkToArgs> = {
       if (nav.outcome === 'ARRIVED') {
         // 零控制、零位移的成功确认：仍是 ARRIVED（原条件成立），但 noop=true 让调用方
         // 不把它计入身体效果；trace=[] 且没有 move executionId 保持原样。
+        ctx.progress(1, '零边确认：原到达条件已在实测位置成立');
         return ok(nav.message, {
           ...zeroData,
           stage: 'ARRIVED',

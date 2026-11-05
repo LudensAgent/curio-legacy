@@ -555,6 +555,10 @@ function pointOf(value: unknown): Vec3Like | null {
 
 /** 技能显式返回的目标字段；不把 position/lastPosition 当目标。 */
 function resolvedTargetOf(data: Record<string, unknown>): { target: Vec3Like; from: string } | null {
+  // Newer navigation envelopes carry the explicit resolved target; it is the
+  // authoritative fact when present.
+  const resolved = pointOf(data.resolvedTarget);
+  if (resolved) return { target: resolved, from: 'data.resolvedTarget' };
   const target = pointOf(data.target);
   if (target) return { target, from: 'data.target' };
   const cell = pointOf(data.targetCell);

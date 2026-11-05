@@ -13,7 +13,7 @@ export function assessLanding(option: LandingOption, hp: number, supportTopValue
   const collisionSurfaceY = typeof supportTopValue === 'number' ? option.support.pos.y + supportTopValue : null;
   const surfaceConsistent = collisionSurfaceY === null ? null : Math.abs(collisionSurfaceY - option.surfaceY) <= 0.01;
   const geometryKnown = option.clearance === 'clear' && option.corridor === 'clear' && option.approach === 'adjacent'
-    && supportGeometry !== 'unknown' && surfaceConsistent !== false;
+    && (supportGeometry === 'known' || supportGeometry === 'not_applicable') && surfaceConsistent !== false;
   const blocked = option.clearance === 'blocked' || option.corridor === 'blocked';
   const risk = blocked ? 'blocked' : estimatedFallDamage !== null && estimatedFallDamage >= hp ? 'lethal_estimate'
     : !geometryKnown || estimatedFallDamage === null ? 'unknown' : estimatedFallDamage > 0 ? 'injury_estimate' : 'low_fall_damage_estimate';
@@ -21,7 +21,11 @@ export function assessLanding(option: LandingOption, hp: number, supportTopValue
     supportTop: typeof supportTopValue === 'number' ? supportTopValue : null, collisionSurfaceY, surfaceConsistent, supportGeometry,
     ...(surfaceConsistent === false ? { supportNote: '支撑方块按碰撞形状的顶面与视觉落点脚高不一致；落点身份保留，未自动改写' } : {}),
     ...(supportGeometry === 'unknown' ? { supportNote: '支撑方块形状未确认，不能按整数脚高假定可站立' } : {}),
-    unknowns: [...option.unknowns, ...(supportGeometry === 'unknown' ? ['支撑方块形状未确认'] : [])],
+    unknowns: [
+      ...option.unknowns,
+      ...(supportGeometry === 'unknown' ? ['支撑方块形状未确认'] : []),
+      ...(supportGeometry === 'unavailable' ? ['支撑方块状态不可读，顶面无法复核'] : []),
+    ],
     geometrySource: '支撑顶面用共享碰撞形状复核；净空/通道仍取当前可见落点评估，未逐格复验身体碰撞',
     estimateAssumptions: '静止起跳前的落差粗估，未计护甲附魔/状态减伤；不是实际执行或安全保证',
     ...(option.surface === 'water' ? { waterCaution: '只确认可见水柱深度；水流、入水后呼吸和离水路线仍需判断' } : {}) };
@@ -41,7 +45,13 @@ export const assessLandings: Skill<{ radius: number }> = {
     const options = ctx.senses.landingOptions(args.radius).map((option) => {
       if (option.surface === 'water') return assessLanding(option, state.hp);
       const support = ctx.adapter.blockStateAt?.(option.support.pos);
-      return assessLanding(option, state.hp, supportTop(support?.name ?? option.support.name, support?.properties ?? {}));
+      // No readable state means the top surface is unavailable, not a guess from
+      // the visible name with empty properties.
+      return assessLanding(
+        option,
+        state.hp,
+        support === undefined || support === null ? undefined : supportTop(support.name, support.properties ?? {}),
+      );
     });
     return ok(options.length ? `看清 ${options.length} 处较低表面；落差、摔伤粗估与未确认项见数据，尚未移动` : '当前视野没有可确认的较低表面；可能受视角、遮挡或光照限制，不能推断四周都没有落点',
       { source: 'current_visible_landings', hp: state.hp, options, effectEvidence: { verified: true, changed: false, reasons: ['只读可见几何与风险估算，未执行下落'] } });

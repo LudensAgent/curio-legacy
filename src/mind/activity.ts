@@ -429,6 +429,15 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   if (step.skill === 'place_at' && data?.pillarFailure === 'NO_REFERENCE') {
     return { kind: 'stuck', why: result.summary.slice(0, 160) };
   }
+  // 裸 NOT_PLACED（适配器自身已重试两次仍未放下）和“贴面方块变了”都是确定性拒绝，
+  // 不能当成服务器暂时延迟再回放。
+  if (
+    step.skill === 'place_at' &&
+    typeof data?.pillarFailure === 'string' &&
+    (data.pillarFailure === 'NOT_PLACED' || data.pillarFailure.includes('脚下贴面方块变了'))
+  ) {
+    return { kind: 'stuck', why: result.summary.slice(0, 160) };
+  }
   // 服务器暂时拒绝/尚未站稳不是“没有附着面”：在同一个父委托的期限和材料额度内有限重试（最多两次）。
   // 这些是暂时条件（服务器确认延迟/身体还没落稳），不是同一确定性缺口的原样重试；确定性拒绝已在上面的分支停止。
   if (step.skill === 'place_at' && typeof data?.pillarFailure === 'string' && /^NOT_PLACED(?::|$)/.test(data.pillarFailure)) {

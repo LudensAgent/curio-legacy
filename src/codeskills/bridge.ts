@@ -288,12 +288,13 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
         // 50–10000 的另一个入口，两者上限不同，不能声称相同。
         const ms = a[1] === undefined ? 200 : Number(a[1]);
         if (!Number.isInteger(ms) || ms < 50 || ms > 1000) throw new Error('move 时长必须是 50 到 1000 的整数毫秒（press_keys 的 50–10000 是另一个入口的上限，两者不共用）');
-        // 恢复委托是导航时，原始按键移动会绕过原后端/目标/手段；必须在任何身体写入前拒绝。
-        // 同时把校验后的 ms 交给恢复约束，恢复不能超过原 press_keys 的按压时长。
-        constrainRecoveryAction(ctx, 'move', { ...raw, ms });
         const keys: DriveKeys = {};
         for (const k of ['forward', 'back', 'left', 'right', 'jump', 'sprint', 'sneak'] as const) if (raw[k]) keys[k] = true;
         const o = (a[2] && typeof a[2] === 'object' ? a[2] : {}) as Record<string, unknown>;
+        // 恢复委托是导航时，原始按键移动会绕过原后端/目标/手段；必须在任何身体写入前拒绝。
+        // 同时把校验后的 ms 与 unsafe 选项交给恢复约束：恢复不能超过原 press_keys 时长，
+        // 也不能关掉原委托的 guard 保护。
+        constrainRecoveryAction(ctx, 'move', { ...raw, ms, unsafe: o.unsafe === true });
         const face = o.face;
         if (typeof face === 'number') {
           constrainRecoveryAction(ctx, 'hit_entity', { entity: face });

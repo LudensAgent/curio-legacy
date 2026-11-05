@@ -155,13 +155,6 @@ export const config = {
      * 进程 RSS，也不是整个系统的内存上限。
      */
     voxelLoading,
-    /**
-     * 任务级空间 journal（默认关闭）。开启后把已结算的 walk_to/walk_route/
-     * walk_known_route 任务事实交给 createTaskJournalProducer：只有带完整实测证据
-     * 的任务才会排队到 journal.recordBatch，其余只上报有界结构化缺口。默认关闭，
-     * 不改变现有运行时行为；不会创建定时器或后台重试。
-     */
-    taskJournal: bool('SPATIAL_TASK_JOURNAL', false),
   },
   /** 心智层：像真人一样一段一段地玩、边做边想 */
   mind: {

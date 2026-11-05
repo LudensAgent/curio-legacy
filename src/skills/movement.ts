@@ -304,7 +304,9 @@ export const goTo: Skill<{ target: string; dig?: boolean; place?: boolean; tower
         }
       } catch { /* 诊断不了就照原样 */ }
     }
-    const outcome: NavOutcome = d.arrived === true ? 'ARRIVED'
+    // ARRIVED is a success claim: a failed call that happens to floor into the
+    // target cell (e.g. a scope change during the last move) is not an arrival.
+    const outcome: NavOutcome = r.status === 'succeeded' && d.arrived === true ? 'ARRIVED'
       : r.status === 'succeeded' ? 'PARTIAL'
       : r.failureCode === 'PATH_NOT_FOUND' ? 'NO_PATH'
       : r.failureCode === 'TIMEOUT' ? 'TIMEOUT' : 'FAILED';
