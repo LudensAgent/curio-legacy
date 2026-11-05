@@ -94,19 +94,45 @@ function allNodes(topology: TopologyStore): SpatialNode[] {
   return out;
 }
 
+/** link 方向标记的紧凑位图：第 i 位对应 links[i]。4096 条约 512 字节，base64 后约 684 字符，
+ *  远低于库默认的 16 KiB metadata 上限。 */
+const encodeFlags = (flags: boolean[]): string | undefined => {
+  if (!flags.some(Boolean)) return undefined;
+  const bytes = new Uint8Array(Math.ceil(flags.length / 8));
+  flags.forEach((flag, i) => { if (flag) bytes[i >> 3]! |= 1 << (i & 7); });
+  return Buffer.from(bytes).toString('base64');
+};
+
+const decodeFlags = (value: unknown): Uint8Array | undefined =>
+  typeof value === 'string' ? new Uint8Array(Buffer.from(value, 'base64')) : undefined;
+
+const flagAt = (bytes: Uint8Array | undefined, i: number) =>
+  !!bytes && (i >> 3) < bytes.length && (bytes[i >> 3]! & (1 << (i & 7))) !== 0;
+
 function fragmentRecord(fragment: PathFragment): PassageRecord {
   const meta = metaOf(fragment.metadata);
   const curio = meta?.type === 'passage' ? meta : undefined;
-  // 库的 fragment.links 只保留 a/b；方向证据在 metadata.curio.linkMeta 里（按 link 下标）。
-  const linkMeta = new Map<number, { cut?: boolean; reverse?: boolean }>();
-  if (Array.isArray(curio?.linkMeta)) {
-    for (const item of curio.linkMeta) {
+  // 库的 fragment.links 只保留 a/b；方向证据在 metadata.curio.linkMeta 里。
+  // 新格式是 { cut?: base64bits, reverse?: base64bits }；旧版本存的是 [{i,cut,reverse}]，继续兼容读取。
+  const legacy = new Map<number, { cut?: boolean; reverse?: boolean }>();
+  let cutBits: Uint8Array | undefined, reverseBits: Uint8Array | undefined;
+  const rawMeta = curio?.linkMeta;
+  if (Array.isArray(rawMeta)) {
+    for (const item of rawMeta) {
       if (!item || typeof item !== 'object') continue;
       const { i, cut, reverse } = item as { i?: unknown; cut?: unknown; reverse?: unknown };
       if (typeof i !== 'number') continue;
-      linkMeta.set(i, { ...(cut === true ? { cut: true } : {}), ...(reverse === true ? { reverse: true } : {}) });
+      legacy.set(i, { ...(cut === true ? { cut: true } : {}), ...(reverse === true ? { reverse: true } : {}) });
     }
+  } else if (rawMeta && typeof rawMeta === 'object') {
+    cutBits = decodeFlags((rawMeta as { cut?: unknown }).cut);
+    reverseBits = decodeFlags((rawMeta as { reverse?: unknown }).reverse);
   }
+  const flagsOf = (i: number) => ({
+    ...(legacy.get(i) ?? {}),
+    ...(flagAt(cutBits, i) ? { cut: true } : {}),
+    ...(flagAt(reverseBits, i) ? { reverse: true } : {}),
+  });
   return {
     id: fragment.id,
     worldId: fragment.worldId,
@@ -114,7 +140,7 @@ function fragmentRecord(fragment: PathFragment): PassageRecord {
     kind: fragment.kind === 'built' ? 'dug' : fragment.kind,
     entrances: fragment.entrances.map(nodePoint),
     path: fragment.polyline.map(nodePoint),
-    ...(fragment.links ? { links: fragment.links.map((link, i) => ({ a: nodePoint(link.a), b: nodePoint(link.b), ...(linkMeta.get(i) ?? {}) })) } : {}),
+    ...(fragment.links ? { links: fragment.links.map((link, i) => ({ a: nodePoint(link.a), b: nodePoint(link.b), ...flagsOf(i) })) } : {}),
     deepestY: fragment.deepestY,
     dug: typeof curio?.dug === 'number' ? curio.dug : 0,
     ores: curio?.ores && typeof curio.ores === 'object' ? (curio.ores as Record<string, number>) : {},
@@ -126,13 +152,15 @@ function fragmentRecord(fragment: PathFragment): PassageRecord {
 }
 
 /** 库的 PathFragment.links（cloneFragment）只保留 a/b，额外字段保存时会被剥掉。
- *  方向判定依赖的 cut/reverse 因此按 link 下标放进不透明 metadata.curio.linkMeta，重启后由 fragmentRecord 还原。
- *  run 只影响漏采样补桥，且每条 link 都有一个、会超过 metadata 16 KiB 上限，所以不持久化；
+ *  方向判定依赖的 cut/reverse 因此按 link 下标编码成 metadata.curio.linkMeta 位图，重启后由 fragmentRecord 还原。
+ *  run 只影响漏采样补桥，且每条 link 都有一个，逐条记录会撑爆 16 KiB metadata 上限，所以不持久化；
  *  缺失时建图退回更保守的 legacyStep（不新增错误连接，只会少补一点缺口）。 */
 function passageMetadata(rec: PassageRecord) {
-  const linkMeta = rec.links?.flatMap((link, i) => link.cut || link.reverse
-    ? [{ i, ...(link.cut ? { cut: true } : {}), ...(link.reverse ? { reverse: true } : {}) }]
-    : []);
+  const cutBits = encodeFlags(rec.links?.map((link) => !!link.cut) ?? []);
+  const reverseBits = encodeFlags(rec.links?.map((link) => !!link.reverse) ?? []);
+  const linkMeta = cutBits || reverseBits
+    ? { ...(cutBits ? { cut: cutBits } : {}), ...(reverseBits ? { reverse: reverseBits } : {}) }
+    : undefined;
   return {
     curio: {
       v: 1,
@@ -140,7 +168,7 @@ function passageMetadata(rec: PassageRecord) {
       dug: rec.dug,
       ores: rec.ores,
       ...(rec.archivedAt !== undefined ? { archivedAt: rec.archivedAt } : {}),
-      ...(linkMeta?.length ? { linkMeta } : {}),
+      ...(linkMeta ? { linkMeta } : {}),
     },
   };
 }

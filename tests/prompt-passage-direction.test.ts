@@ -71,13 +71,12 @@ test('活动只说沿矿道往下时，仍给出往最深处走的下一步', (t
   const { user, close } = undergroundShaft('沿旧矿道往下挖', '找铁矿');
   t.after(close);
   assert.match(user.content, /往最深处走的下一步/, '没有回地面/回入口的方向时，下矿提示照常给出');
-  // dig:true 是 follow_passage 的一条可选路线，不是唯一手段：自己 dig_at / place_at 也仍然可用。
-  assert.match(user.content, /follow_passage 只有带 dig:true 才会沿线挖开\/垫（会消耗方块和工具耐久），也可以自己 dig_at \/ place_at/);
-  assert.doesNotMatch(user.content, /只有 dig:true 会挖开/);
+  // 每次下矿都无条件注入的 dig:true 说明已删：通道行和 follow_passage 提示已经给出这条可选路线与代价。
+  assert.doesNotMatch(user.content, /只有 dig:true 会挖开|follow_passage 只有带 dig:true/);
 });
 
-test('通道说明分开报当前连通分量可达深度与记录全局最低点', () => {
-  // 一条 record 里两团互不相连的脚点：here 所在的浅段只到 y-28，更低的 y-61 在另一段。
+test('通道说明只报沿记录方向走得到的深度，并区分记录里更低的脚点', () => {
+  // 一条 record 里两团互不相连的脚点：here 所在的浅段只到 y-28，更低的 y-61 走不到。
   const rec: PassageRecord = {
     id: 'psg_frag', dim: 'overworld', kind: 'dug',
     entrances: [{ x: 0, y: -20, z: 0 }], deepestY: -61, dug: 40, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1,
@@ -85,10 +84,45 @@ test('通道说明分开报当前连通分量可达深度与记录全局最低�
       { x: 0, y: -61, z: 0 }, { x: 0, y: -55, z: 0 }, { x: 0, y: -49, z: 0 }],
   };
   const { text } = describePassage(rec, { x: 0, y: -28, z: 0 });
-  assert.match(text, /从你现在连通的一段能到 y-28/);
-  assert.match(text, /记录里更低的 y-61 在另一段，两段之间还没接上/);
-  assert.doesNotMatch(text, /能到 y-61/, '另一段的 y-61 不能说成当前可达');
+  assert.match(text, /从你现在的位置沿记录方向能到 y-28/);
+  assert.match(text, /记录里更低的脚点 y-61 这次走不到（可能是反向落差或另一段，尚未验证）/);
+  assert.doesNotMatch(text, /能到 y-61/, '走不到的 y-61 不能说成当前可达');
   assert.doesNotMatch(text, /你应该|建议先去|必须/);
+});
+
+test('离通道很远时不会把记录最低点说成现在能到', () => {
+  const rec: PassageRecord = {
+    id: 'psg_far', dim: 'overworld', kind: 'dug',
+    entrances: [{ x: 0, y: -20, z: 0 }], deepestY: -61, dug: 40, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1,
+    path: [{ x: 0, y: -20, z: 0 }, { x: 0, y: -26, z: 0 }, { x: 0, y: -32, z: 0 },
+      { x: 0, y: -38, z: 0 }, { x: 0, y: -44, z: 0 }, { x: 0, y: -50, z: 0 }, { x: 0, y: -56, z: 0 }, { x: 0, y: -61, z: 0 }],
+  };
+  const { text } = describePassage(rec, { x: 170, y: 64, z: 0 });
+  assert.doesNotMatch(text, /沿记录方向/, '离网 170 格时 passageDeepestAnchor 回退到全网最深，不能当作现在能到');
+  assert.doesNotMatch(text, /脚点表未保留/);
+});
+
+test('抽稀后 deepestY 更低时，不把它断言成另一段', () => {
+  // path 抽稀只剩到 y-53，deepestY 仍保留抽稀前的观测 y-61。
+  const rec: PassageRecord = {
+    id: 'psg_thin', dim: 'overworld', kind: 'dug',
+    entrances: [{ x: 0, y: -20, z: 0 }], deepestY: -61, dug: 40, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1,
+    path: [{ x: 0, y: -20, z: 0 }, { x: 0, y: -26, z: 0 }, { x: 0, y: -32, z: 0 },
+      { x: 0, y: -38, z: 0 }, { x: 0, y: -44, z: 0 }, { x: 0, y: -50, z: 0 }, { x: 0, y: -53, z: 0 }],
+  };
+  const { text } = describePassage(rec, { x: 0, y: -53, z: 0 });
+  assert.match(text, /记录里还有更低的观测点 y-61，脚点表未保留\/没在这一段/);
+  assert.doesNotMatch(text, /沿记录方向|另一段|别的段/);
+});
+
+test('连通且能走到记录最低脚点时不给深度差异说明', () => {
+  const rec: PassageRecord = {
+    id: 'psg_ok', dim: 'overworld', kind: 'dug',
+    entrances: [{ x: 0, y: 66, z: 0 }], deepestY: 48, dug: 30, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1,
+    path: STAIR,
+  };
+  const { text } = describePassage(rec, { x: 6, y: 60, z: 0 });
+  assert.doesNotMatch(text, /沿记录方向|脚点表未保留/);
 });
 
 test('下矿提示里同样区分当前可达深度与记录最低点', (t) => {
@@ -102,7 +136,8 @@ test('下矿提示里同样区分当前可达深度与记录最低点', (t) => {
     },
   });
   t.after(close);
-  assert.match(user.content, /从你现在连通的一段能到 y-28/);
+  assert.match(user.content, /从你现在的位置沿记录方向能到 y-28/);
+  assert.match(user.content, /记录里更低的脚点 y-61 这次走不到/);
   assert.doesNotMatch(user.content, /能到 y-61/);
 });
 
@@ -129,4 +164,33 @@ test('下一步脚/头可走且下方是实心时，保持可以直接走过去'
   t.after(close);
   assert.match(user.content, /往最深处走的下一步 \(\d+,\d+,\d+\) 现在仍是 2 格高的空走廊，可以直接走过去/);
   assert.doesNotMatch(user.content, /下一步落脚点下方是/);
+});
+
+test('下方支撑格未观测时不猜成空气', (t) => {
+  const air = new Set(['7,59,0', '7,60,0']);
+  const { user, close } = undergroundShaft('沿旧矿道往下挖', '找铁矿', {
+    pos: { x: 6.5, y: 60, z: 4.5 },
+    blockAt: (p) => {
+      const k = `${p.x},${p.y},${p.z}`;
+      return air.has(k) ? 'air' : k === '7,58,0' ? null : 'stone';
+    },
+  });
+  t.after(close);
+  assert.match(user.content, /下方支撑格未观测/);
+  assert.doesNotMatch(user.content, /下一步落脚点下方是/);
+});
+
+test('下方支撑格是液体时照样只说垫或下落', (t) => {
+  const air = new Set(['7,59,0', '7,60,0']);
+  const { user, close } = undergroundShaft('沿旧矿道往下挖', '找铁矿', {
+    pos: { x: 6.5, y: 60, z: 4.5 },
+    blockAt: (p) => {
+      const k = `${p.x},${p.y},${p.z}`;
+      return air.has(k) ? 'air' : k === '7,58,0' ? 'water' : 'stone';
+    },
+  });
+  t.after(close);
+  const line = user.content.split('\n').find((l) => l.includes('下一步落脚点下方是'));
+  assert.ok(line, '要给出下方液体的当前事实');
+  assert.match(line, /下一步落脚点下方是 water，走过去需要垫或下落（由你定）/);
 });

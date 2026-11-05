@@ -497,7 +497,7 @@ export function situationalReminders(ctx: MindContext): string[] {
     if (layers) out.push(layers);
     // 往下挖有稳定辅助：手工 dig_at[1,-1,0]+step 的斜下格支撑超出 place_at 范围，容易卡住
     const stairFails = (ctx.recentActionFailures ?? []).filter((f) => (f.skill === 'step' || f.skill === 'dig_at') && f.failure_code === 'PATH_NOT_FOUND');
-    out.push(`下矿有稳定下行辅助：excavate_path {"entry":"current","mode":"stairs","direction":"…","steps":4}（逐格确认工具、地板、头部空间、干燥和真实落地，遇水/岩浆/沙砾不冒险）或 assess_landings + descend${stairFails.length >= 2 ? '；刚才 step/dig_at 连续走不通——这是手工阶梯的固有限制：斜下格支撑超出 place_at 范围，容易卡住' : ''}；旧矿道可用时 follow_passage 也是现成路线；follow_passage 只有带 dig:true 才会沿线挖开/垫（会消耗方块和工具耐久），也可以自己 dig_at / place_at`);
+    out.push(`下矿有稳定下行辅助：excavate_path {"entry":"current","mode":"stairs","direction":"…","steps":4}（逐格确认工具、地板、头部空间、干燥和真实落地，遇水/岩浆/沙砾不冒险）或 assess_landings + descend${stairFails.length >= 2 ? '；刚才 step/dig_at 连续走不通——这是手工阶梯的固有限制：斜下格支撑超出 place_at 范围，容易卡住' : ''}`);
     const tunnels = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).filter((f) => f.dist <= 160).slice(0, 2);
     for (const t of tunnels) {
       out.push(`记得自己${t.text}`);
