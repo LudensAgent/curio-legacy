@@ -76,6 +76,18 @@ test('explicit pillar refuses an obstructed jump before toggling jump or placing
   assert.notEqual(w.controls.jump, true);
 });
 
+test('straddling detection follows the 0.6-wide body and requires solid support below', () => {
+  const w = fixture(0.7);
+  assert.equal((w.adapter as any).spanningCell(), null, '0.2 offset still fits inside one column');
+  w.bot.entity.position.x = 0.7001;
+  assert.deepEqual((w.adapter as any).spanningCell(), { x: 0, z: 0 });
+  w.bot.entity.position.x = 0.5;
+  assert.equal((w.adapter as any).spanningCell(), null, 'a centred stance needs no correction');
+  w.bot.entity.position.x = 0.8;
+  w.put(0, 63, 0, 'air');
+  assert.equal((w.adapter as any).spanningCell(), null, 'no solid support below the centre cell');
+});
+
 test('a body straddling two columns sneaks to the centre cell before checking pillar clearance', async () => {
   const w = fixture(); w.put(1, 66, 0, 'stone');
   const steadied: { x: number; z: number }[] = [];

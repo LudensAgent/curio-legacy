@@ -261,3 +261,50 @@ test('standing over an edge, the bot sneaks back onto the block it actually stan
   w.bot.entity.position = new Vec3(0.5, 64, 0.5);
   assert.equal((w.adapter as any).edgeSupport(), null, 'a centred stance needs no correction');
 });
+
+test('a straddling stance is recentred only for tower-capable pathfinding', async () => {
+  for (const towers of [true, false]) {
+    const w = fixture();
+    w.bot.entity.position = new Vec3(0.8, 64, 0.5);
+    const sneaked: boolean[] = [];
+    const set = w.bot.setControlState.bind(w.bot);
+    w.bot.setControlState = (key: string, value: boolean) => {
+      set(key, value);
+      if (key === 'forward' && value) { sneaked.push(!!w.controls.sneak); w.bot.entity.position = new Vec3(0.5, 64, 0.5); }
+    };
+    w.bot.look = async () => {};
+    let startedAt: any = null;
+    w.bot.pathfinder = { goto: async () => { startedAt = w.bot.entity.position.clone(); }, isMoving: () => false, stop() {}, setGoal() {} };
+    await (w.adapter as any).gotoUnstalled({}, { ...w.opts, ...(towers ? { allowTerrainChanges: true } : {}) }, (w.adapter as any).actionCheckpoint(w.opts.signal));
+    assert.deepEqual(sneaked, towers ? [true] : [], towers ? 'a towering path starts from the centre' : 'plain walking does not recentre');
+    assert.ok(Math.abs(startedAt.x - (towers ? 0.5 : 0.8)) < 0.15);
+  }
+});
+
+test('a nudge that re-straddles the body is followed by another alignment', async (t) => {
+  const advance = clock(t), w = fixture();
+  w.bot.entity.position = new Vec3(0.8, 64, 0.5);
+  const aligns: { x: number; z: number }[] = [];
+  (w.adapter as any).steady = async (cell: { x: number; z: number }) => {
+    aligns.push(cell);
+    w.bot.entity.position = new Vec3(cell.x + 0.5, 64, cell.z + 0.5);
+  };
+  let gos = 0, rejectPath: (e: Error) => void = () => {};
+  w.bot.pathfinder = {
+    goto: () => {
+      gos++;
+      if (gos === 1) return new Promise((_, reject) => { rejectPath = reject; });
+      return Promise.resolve();
+    },
+    isMoving: () => true,
+    stop() { rejectPath(new Error('Path was stopped')); },
+    setGoal() {},
+  };
+  // nudge 横挪后可能又压线：这里模拟一次回到 x=0.8 的调整。
+  (w.adapter as any).nudge = async () => { w.bot.entity.position = new Vec3(0.8, 64, 0.5); return '侧挪'; };
+  const pending = (w.adapter as any).gotoUnstalled({}, { ...w.opts, allowTerrainChanges: true }, (w.adapter as any).actionCheckpoint(w.opts.signal));
+  for (let i = 0; i < 3; i++) await advance(2700);
+  await pending;
+  assert.deepEqual(aligns, [{ x: 0, z: 0 }, { x: 0, z: 0 }], 'realigns after the nudge put the body back on the boundary');
+  assert.equal(gos, 2);
+});

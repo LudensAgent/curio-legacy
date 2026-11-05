@@ -1435,6 +1435,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         ? 'No path: 当前在水中，寻路没有取得进展，未另选上岸位置'
         : 'No path: 附近没有可确认安全的调整空间，换条路线');
       corrections++;
+      // nudge 会横挪半格左右、可能重新压线；下一次规划前允许再归位一次。
+      attempted.delete('align');
       this.bus.publish('path_nudge', 'P3', `走路被挡住，第 ${corrections} 次调整：${action}`);
     }
   }
