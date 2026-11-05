@@ -328,8 +328,8 @@ const MINING_INTENT = /下矿|矿道|矿洞|找铁|挖铁|找矿|挖矿|粗铁|�
 /** 打算里说要从地下回地面 */
 const SURFACE_INTENT = /回地面|回到地面|回前哨|回基地|回入口|退回入口|回地表|见天|爬出|挖出去|出矿|上地面|上到地面|往上爬|往上走|往上挖|挖(阶梯|台阶).{0,8}上/;
 
-/** 打算里说木头/砍树/原木（材料账只在相关时出现，避免每念都提） */
-const WOOD_INTENT = /木|树|砍|log|_wood/;
+/** 打算里说木头/砍树/原木（材料账只在相关时出现；和账本的趟数过滤共用一套口径） */
+const WOOD_INTENT = MATERIAL_FAMILIES.wood.trip;
 
 /** 沿来路回入口的下一步：把全部记下的通道连成网（碎片也接得上），取朝地表锚点走的下一个路点，核对下一步那两格（脚下+头顶）现在是否还通，给出「可走/被堵」的当前事实。 */
 function passageWayBack(ctx: MindContext): string | null {
@@ -439,6 +439,7 @@ export function decisionReminders(ctx: MindContext): string[] {
   }
   // 下矿的账：在地下、手上的活快收工或想回地面时，提供实际经历和当前所见。
   const trip = ctx.trip;
+  let tripShown = false;
   if (trip && trip.minutes >= 1.5 && (trip.nearEnd || !ctx.activity || SURFACE_INTENT.test(intent)) && (p.self.where?.kind === 'underground' || p.self.sky_visible === false)) {
     const got = Object.entries(trip.gained).filter(([k]) => /raw_|_ore$|coal|diamond|emerald|lapis|redstone|amethyst|obsidian|debris|flint|gold_nugget|quartz/.test(k)).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, n]) => `${k}×${n}`);
     const seen = p.nearby.resources.filter((r) => r.seen === 'now' && isResourceBlock(r.block)).sort((a, b) => a.nearest - b.nearest).slice(0, 4).map((r) => `${r.block}×${r.count}（最近 ${Math.round(r.nearest)} 格）`);
@@ -446,21 +447,30 @@ export function decisionReminders(ctx: MindContext): string[] {
     const picks = durabilityFacts(s.inventory, ['pickaxe'], p.storage?.stock);
     const back = passageWayBack(ctx);
     out.push(`下矿的账：${got.length ? `挖到 ${got.join(' ')}` : '还没挖到矿'}；背包空 ${p.emptySlots} 格${picks.length ? `；${picks.join('、')}` : ''}；身边${seen.length ? `看得见 ${seen.join('、')}` : '没看见矿'}${remembered ? `，48 格内记得 ${remembered} 处矿点` : ''}${back ? `；${back}` : ''}。清单后面几项还要不要这些料，一起掂量再决定收不收工`);
+    tripShown = true;
   }
-  // 木料/矿石的账：同一类材料反复跑了好几趟时，把趟数、总量、走过的距离和手头现有量摆成事实。
-  // 只报事实；多备、换做法、种不种树都由 Agent 决定，这里不推荐任何一种做法。
+  // 木料/矿石的历史账：只陈述账本里的段活数、数量、路程和现有量。
+  // 只在认真想时出现，瞥一眼不重复；现有量的背包是实时读的，箱子是上次打开时的记录，分开写。
   const materials = ctx.materials;
-  if (materials) {
-    const stockNow = (re: RegExp) => s.inventory.filter((i) => re.test(i.name)).reduce((n, i) => n + i.count, 0)
-      + (p.storage?.stock ?? []).filter((r) => re.test(r.item)).reduce((n, r) => n + r.inChests, 0);
+  if (materials && ctx.tier === 'deliberate') {
+    const backpack = (re: RegExp) => s.inventory.filter((i) => re.test(i.name)).reduce((n, i) => n + i.count, 0);
+    const chestStock = (re: RegExp) => (p.storage?.stock ?? []).filter((r) => r.inChests > 0 && re.test(r.item)).reduce((n, r) => n + r.inChests, 0);
+    const lastAgo = (at: number | null) => {
+      if (at === null) return '';
+      const minutes = Math.floor((Date.now() - at) / 60_000);
+      return `；最近一次 ${minutes < 1 ? '不到 1 分钟前' : minutes < 90 ? `${minutes} 分钟前` : `${Math.round(minutes / 60)} 小时前`}`;
+    };
     const gatheringWood = ctx.activity?.kind === 'gather' && WOOD_INTENT.test(JSON.stringify(ctx.activity.steps));
     if (materials.wood.trips >= 2 && (WOOD_INTENT.test(intent) || gatheringWood)) {
-      const t = materials.wood;
-      out.push(`木料的账：最近 ${t.trips} 段活拿到 ${t.units} 个原木/木块，共走了 ${t.walked} 格（最近平均每趟 ${t.recentWalked ?? '?'} 格）；现在背包/箱子里有 ${stockNow(MATERIAL_FAMILIES.wood)} 个。要不要多备、要不要换做法由你定。`);
+      const t = materials.wood, wood = MATERIAL_FAMILIES.wood.stock;
+      const inv = backpack(wood), chest = chestStock(wood);
+      out.push(`木料的历史账（最近 ${t.trips} 段活）：拿到 ${t.units} 个原木类方块（不含木板/木棍），一共走了 ${t.walked} 格（最近平均每段活 ${t.recentWalked} 格${lastAgo(t.lastAt)}）；现在背包里有 ${inv} 个原木类方块（实时，不含木板/木棍）${chest ? `；记得的箱子（上次打开时）还有 ${chest} 个原木类方块` : ''}`);
     }
-    if (materials.ore.trips >= 2 && MINING_INTENT.test(intent)) {
-      const t = materials.ore;
-      out.push(`矿石的账：最近 ${t.trips} 段活拿到 ${t.units} 个矿石/粗矿，共走了 ${t.walked} 格（最近平均每趟 ${t.recentWalked ?? '?'} 格）；现在背包/箱子里有 ${stockNow(MATERIAL_FAMILIES.ore)} 个。要不要多备、要不要换做法由你定。`);
+    // 下矿的账（这一趟）已经在上面说过了，就不再用历史聚合重复一遍。
+    if (!tripShown && materials.ore.trips >= 2 && MINING_INTENT.test(intent)) {
+      const t = materials.ore, ore = MATERIAL_FAMILIES.ore.stock;
+      const inv = backpack(ore), chest = chestStock(ore);
+      out.push(`矿石的历史账（最近 ${t.trips} 段活）：拿到 ${t.units} 个矿石/粗矿/矿物，一共走了 ${t.walked} 格（最近平均每段活 ${t.recentWalked} 格${lastAgo(t.lastAt)}）；现在背包里有 ${inv} 个矿石/粗矿/锭（实时）${chest ? `；记得的箱子（上次打开时）还有 ${chest} 个矿石/粗矿/锭` : ''}`);
     }
   }
   // 顺手采集与不可替代工具：把「看见什么矿 + 现在这类料有多少 + 能做什么」摆成事实，让它在路过矿石时能自己掂量要不要顺手采；
