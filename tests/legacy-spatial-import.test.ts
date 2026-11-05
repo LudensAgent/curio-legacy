@@ -125,6 +125,98 @@ test('applies to a real SQLite history session, is idempotent, and creates no tr
   assert.equal(second.unchangedNodes, 5);
 });
 
+function mapExportFixture() {
+  return {
+    metadata: { worldId: 'w', generatedAt: 300 },
+    passages: [
+      { ...fixture().worldMemory.passages[0]!, archiveStatus: 'current', snapshotAt: 300, source: { file: 'world-memory.json', pointer: '/passages/0' }, snapshotSources: [] },
+      {
+        id: 'p2', worldId: 'w', dim: 'the_nether', kind: 'unknown',
+        entrances: [vec(9, 64, 9)], path: [vec(9, 64, 9), vec(9, 65, 9)],
+        deepestY: 64, createdAt: 10, lastUsedAt: 20, uses: 1, dug: 0, ores: {}, links: [],
+        archiveStatus: 'historical', snapshotAt: 200, source: { file: 'old-backup.json', pointer: '/passages/0' }, snapshotSources: [],
+      },
+    ],
+    markers: [
+      {
+        id: 'landmark:overworld:res_old', type: 'resource', label: 'coal_ore', dim: 'overworld',
+        pos: vec(4, 60, 4), ts: 50, detail: 'last remembered resource', archiveStatus: 'historical',
+        snapshotAt: 200, source: { file: 'old-backup.json', pointer: '/landmarks/3' }, snapshotSources: [],
+      },
+      {
+        id: 'hazard:overworld:hz_old', type: 'hazard', label: '历史风险 · mob', dim: 'overworld',
+        pos: vec(5, 61, 5), ts: 51, detail: '记录半径 6 格', archiveStatus: 'historical',
+        snapshotAt: 200, source: { file: 'old-backup.json', pointer: '/hazards/2' }, snapshotSources: [],
+      },
+      {
+        id: 'landmark:overworld:base_now', type: 'base', label: 'home', dim: 'overworld',
+        pos: vec(0, 64, 0), ts: 60, detail: 'current place', archiveStatus: 'current',
+        snapshotAt: 300, source: { file: 'world-memory.json', pointer: '/landmarks/0' }, snapshotSources: [],
+      },
+      {
+        id: 'p2:reference:0', type: 'reference', label: 'surface reference', dim: 'the_nether',
+        pos: vec(9, 64, 9), ts: null, detail: 'from entrances', passageId: 'p2', archiveStatus: 'historical',
+        snapshotAt: 200, source: { file: 'old-backup.json', pointer: '/passages/0/entrances/0' }, snapshotSources: [],
+      },
+      {
+        id: 'landmark:overworld:bad', type: 'resource', label: 'bad', dim: 'overworld',
+        pos: { x: 'nope' }, ts: 1, detail: '', archiveStatus: 'historical',
+        snapshotAt: 200, source: { file: 'old-backup.json', pointer: '/landmarks/9' }, snapshotSources: [],
+      },
+    ],
+    fragments: [{ id: 'fragment:1' }],
+    historicalSnapshots: [{ passages: [] }],
+    logOnlyReferences: [{ id: 'psg_lost', count: 2 }],
+    logEvidence: [{ ts: 1, type: 'spawn' }],
+    agentPosition: { dim: 'overworld', pos: vec(0, 64, 0) },
+  };
+}
+
+test('imports archived passages and historical map markers from the map export', () => {
+  const plan = planLegacyImport({ ...fixture(), mapExport: mapExportFixture(), sourceFiles: [] });
+  assert.equal(plan.fragments.length, 2);
+  const archived = plan.fragments.find((fragment) => fragment.id === 'legacy:passage:p2');
+  assert.equal(archived?.kind, 'dug');
+  assert.equal(archived?.dim, 'the_nether');
+  assert.equal(plan.collections.passages!.unsupported, 1);
+
+  assert.equal(plan.nodes.length, 7);
+  const resource = plan.nodes.find((node) => node.id === 'legacy:map-marker:landmark:overworld:res_old');
+  assert.equal(resource?.tag, 'resource');
+  assert.equal(resource?.source, 'agent');
+  assert.deepEqual(resource?.location, { kind: 'exact', pos: vec(4, 60, 4) });
+  const hazard = plan.nodes.find((node) => node.id === 'legacy:map-marker:hazard:overworld:hz_old');
+  assert.equal(hazard?.tag, 'danger');
+  assert.equal(hazard?.source, 'program');
+
+  assert.equal(plan.collections.mapMarkers!.total, 5);
+  assert.equal(plan.collections.mapMarkers!.planned, 2);
+  assert.equal(plan.collections.mapMarkers!.unsupported, 2);
+  assert.equal(plan.collections.mapMarkers!.rejected, 1);
+  assert.equal(plan.records.find((record) => record.originalId === 'landmark:overworld:base_now')?.reason, 'covered_by_current_memory');
+  assert.equal(plan.records.find((record) => record.originalId === 'p2:reference:0')?.reason, 'covered_by_passage_entrances');
+
+  assert.equal(plan.collections.mapFragments!.unsupported, 1);
+  assert.equal(plan.collections.mapHistoricalSnapshots!.unsupported, 1);
+  assert.equal(plan.collections.mapLogOnlyReferences!.unsupported, 1);
+  assert.equal(plan.collections.mapLogEvidence!.unsupported, 1);
+  assert.equal(plan.collections.mapAgentPosition!.unsupported, 1);
+  assert.equal(plan.sourceRoots.mapExport?.worldId, 'w');
+});
+
+test('refuses a map export whose metadata does not prove the target world', () => {
+  assert.throws(() => planLegacyImport({
+    ...fixture(),
+    mapExport: { ...mapExportFixture(), metadata: { worldId: 'other' } },
+    sourceFiles: [],
+  }), /map export metadata worldId "other" does not match target worldId "w"/);
+  assert.throws(() => planLegacyImport({
+    ...fixture(),
+    mapExport: { ...mapExportFixture(), metadata: {} },
+    sourceFiles: [],
+  }), /map export metadata worldId "missing" does not match target worldId "w"/);
+});
+
 test('refuses to overwrite an existing legacy id with different content', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'legacy-conflict-'));
   const databasePath = join(dir, 'spatial.sqlite');

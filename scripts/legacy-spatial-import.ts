@@ -24,7 +24,7 @@ import type { CheckpointResult, CloseResult, PersistenceState } from 'curio-mine
 import type { PathFragment, SpatialNode } from 'curio-minecraft-3d-memory';
 
 type Vec = { x: number; y: number; z: number };
-type SourceRole = 'world-memory' | 'travel-memory' | 'placed';
+type SourceRole = 'world-memory' | 'travel-memory' | 'placed' | 'map-export';
 type PlanStatus = 'planned' | 'rejected' | 'unsupported';
 
 interface SourceFile {
@@ -75,7 +75,7 @@ export interface ImportPlan {
   collections: Record<string, CollectionStat>;
   unsupported: UnsupportedCollection[];
   sourceFiles: SourceFile[];
-  sourceRoots: { worldMemory: RootFacts; travelMemory: RootFacts | null; placed: RootFacts | null };
+  sourceRoots: { worldMemory: RootFacts; travelMemory: RootFacts | null; placed: RootFacts | null; mapExport: RootFacts | null };
   limitations: string[];
 }
 
@@ -151,6 +151,7 @@ export function planLegacyImport(input: {
   worldMemory: unknown;
   travelMemory?: unknown;
   placed?: unknown;
+  mapExport?: unknown;
   sourceFiles: SourceFile[];
   worldId?: string;
 }): ImportPlan {
@@ -161,11 +162,20 @@ export function planLegacyImport(input: {
   if (rootWorldId !== null && rootWorldId !== worldId) {
     throw new Error(`source worldId "${rootWorldId}" does not match target worldId "${worldId}"`);
   }
+  if (input.mapExport !== undefined && !isRecord(input.mapExport)) throw new Error('map export root must be an object');
+  const mapExport = isRecord(input.mapExport) ? input.mapExport : null;
+  const mapMetadata = mapExport !== null && isRecord(mapExport.metadata) ? mapExport.metadata : null;
+  const mapWorldId = mapMetadata === null ? null : text(mapMetadata.worldId);
+  if (mapExport !== null && mapWorldId !== worldId) {
+    throw new Error(`map export metadata worldId "${mapWorldId ?? 'missing'}" does not match target worldId "${worldId}"`);
+  }
 
   const collections: Record<string, CollectionStat> = {
     passages: emptyStat(), landmarks: emptyStat(), hazards: emptyStat(), chests: emptyStat(),
     farms: emptyStat(), travelEndpoints: emptyStat(), travelTraversals: emptyStat(),
     travelGateways: emptyStat(), digs: emptyStat(), visitedChunks: emptyStat(), seen: emptyStat(), placed: emptyStat(),
+    mapMarkers: emptyStat(), mapFragments: emptyStat(), mapHistoricalSnapshots: emptyStat(),
+    mapLogOnlyReferences: emptyStat(), mapLogEvidence: emptyStat(), mapAgentPosition: emptyStat(),
   };
   const records: PlanRecord[] = [];
   const fragments: PathFragment[] = [];
@@ -200,11 +210,29 @@ export function planLegacyImport(input: {
 
   // ---------------------------------------------------------------- passages
   const passageKnown = ['id', 'worldId', 'dim', 'kind', 'entrances', 'path', 'deepestY', 'dug', 'ores', 'createdAt', 'lastUsedAt', 'uses', 'links'];
-  listOf(input.worldMemory.passages).forEach((raw, index) => {
-    const locator = `/worldMemory/passages/${index}`;
+  const exportPassageKnown = [...passageKnown, 'archiveStatus', 'snapshotAt', 'source', 'snapshotSources'];
+  const worldPassageSources = listOf(input.worldMemory.passages).map((raw, index) => ({
+    raw, locator: `/worldMemory/passages/${index}`, exportRecord: false,
+  }));
+  const worldPassageIds = new Set(worldPassageSources.flatMap(({ raw }) =>
+    isRecord(raw) && typeof raw.id === 'string' ? [raw.id] : []));
+  const exportPassageSources = mapExport === null ? [] : listOf(mapExport.passages).map((raw, index) => ({
+    raw, locator: `/mapExport/passages/${index}`, exportRecord: true,
+  }));
+  const passageSources = [
+    ...worldPassageSources,
+    ...exportPassageSources.filter(({ raw }) => !isRecord(raw) || typeof raw.id !== 'string' || !worldPassageIds.has(raw.id)),
+  ];
+  exportPassageSources
+    .filter(({ raw }) => isRecord(raw) && typeof raw.id === 'string' && worldPassageIds.has(raw.id))
+    .forEach(({ raw, locator }) => record('passages', locator, (raw as Record<string, unknown>).id as string, null,
+      'unsupported', 'duplicate_of_current_memory', [], []));
+  passageSources.forEach(({ raw, locator, exportRecord }) => {
     if (!isRecord(raw)) { record('passages', locator, null, null, 'rejected', 'not_an_object', [], []); return; }
     const id = text(raw.id), dim = text(raw.dim), recordWorld = text(raw.worldId);
-    const kind = fragmentKind(raw.kind);
+    // 旧地图导出把未分类的老矿道写成 kind="unknown"；旧查询的缺省语义是 dug。
+    const unknownKindTreatedAsDug = exportRecord && raw.kind === 'unknown';
+    const kind = unknownKindTreatedAsDug ? 'dug' : fragmentKind(raw.kind);
     const path = vecList(raw.path);
     const entrances = raw.entrances === undefined ? [] : vecList(raw.entrances);
     const links = raw.links === undefined ? undefined : linkList(raw.links);
@@ -241,9 +269,11 @@ export function planLegacyImport(input: {
       lastUsedAt: lastUsedAt!,
       uses: uses!,
     });
-    const unmapped = ['dug', 'ores', ...unknownFields(raw, passageKnown)];
+    const known = exportRecord ? exportPassageKnown : passageKnown;
+    const unmapped = ['dug', 'ores', ...unknownFields(raw, known)];
     if (raw.entrances === undefined) unmapped.push('entrances_missing_treated_as_empty');
-    record('passages', locator, id, newId, 'planned', undefined, passageKnown.filter((k) => k !== 'dug' && k !== 'ores'), unmapped);
+    if (unknownKindTreatedAsDug) unmapped.push('kind_unknown_treated_as_dug');
+    record('passages', locator, id, newId, 'planned', undefined, known.filter((k) => k !== 'dug' && k !== 'ores'), unmapped);
   });
 
   // --------------------------------------------------------------- landmarks
@@ -420,6 +450,50 @@ export function planLegacyImport(input: {
     }
   }
 
+  // ------------------------------------------------ map export place markers
+  const markerTags: Record<string, LandmarkTag> = {
+    base: 'base', waypoint: 'waypoint', resource: 'resource', hazard: 'danger',
+    container: 'resource', death: 'death', entrance: 'discovery', portal: 'portal',
+  };
+  const markerKnown = ['id', 'type', 'label', 'dim', 'pos', 'ts', 'detail', 'passageId', 'archiveStatus', 'snapshotAt', 'source', 'snapshotSources'];
+  if (mapExport !== null) {
+    listOf(mapExport.markers).forEach((raw, index) => {
+      const locator = `/mapExport/markers/${index}`;
+      if (!isRecord(raw)) { record('mapMarkers', locator, null, null, 'rejected', 'not_an_object', [], []); return; }
+      const id = text(raw.id), dim = text(raw.dim), pos = vec(raw.pos), type = text(raw.type), status = text(raw.archiveStatus);
+      const pointer = isRecord(raw.source) && typeof raw.source.pointer === 'string' ? raw.source.pointer : '';
+      if (status === 'current') { record('mapMarkers', locator, id, null, 'unsupported', 'covered_by_current_memory', [], []); return; }
+      if (status !== 'historical') { record('mapMarkers', locator, id, null, 'rejected', 'missing_archive_status', [], []); return; }
+      if (type === 'reference') { record('mapMarkers', locator, id, null, 'unsupported', 'covered_by_passage_entrances', [], []); return; }
+      const tag: LandmarkTag | null = type === 'waypoint'
+        ? (id !== null && id.includes(':dis_') ? 'discovery' : 'waypoint')
+        : type === null ? null : markerTags[type] ?? null;
+      const reason =
+        id === null ? 'missing_id'
+        : dim === null ? 'missing_dim'
+        : pos === null ? 'invalid_pos'
+        : type === null ? 'missing_type'
+        : tag === null ? 'unknown_marker_type'
+        : null;
+      const newId = id === null ? null : `legacy:map-marker:${id}`;
+      if (reason !== null || newId === null || !reserve('mapMarkers', locator, id, newId)) {
+        if (reason !== null) record('mapMarkers', locator, id, newId, 'rejected', reason, [], []);
+        return;
+      }
+      const label = typeof raw.label === 'string' ? raw.label : null;
+      nodes.push({
+        id: newId, kind: type === 'entrance' ? 'entrance' : 'place',
+        source: pointer.startsWith('/landmarks') ? 'agent' : 'program',
+        ...(tag === null ? {} : { tag }),
+        ...(label === null ? {} : { label }),
+        worldId, dim: dim!, location: { kind: 'exact', pos: pos! },
+      });
+      record('mapMarkers', locator, id, newId, 'planned', undefined,
+        ['id', 'type', 'label', 'dim', 'pos', 'archiveStatus', 'source'],
+        ['ts', 'detail', 'snapshotAt', 'snapshotSources', ...unknownFields(raw, markerKnown)]);
+    });
+  }
+
   // -------------------------------------------- unsupported non-spatial data
   const unsupportedEntries = (
     category: string, value: unknown, reason: string, note: string, sample: (key: string, index: number) => string,
@@ -458,6 +532,31 @@ export function planLegacyImport(input: {
   ]);
   const placedRoot = input.placed === undefined ? null : isRecord(input.placed)
     ? rootFacts(input.placed, ['byPos']) : { unknownFields: [] };
+  if (mapExport !== null) {
+    unsupportedEntries('mapFragments', mapExport.fragments, 'derived_from_passages',
+      '碎片由 passages 的采样点与显式 links 推导；导入的 PathFragment 已保留完整 polyline，不重复写入碎片。',
+      (_, index) => `/mapExport/fragments/${index}`);
+    unsupportedEntries('mapHistoricalSnapshots', mapExport.historicalSnapshots, 'superseded_snapshots',
+      '历史快照中的矿道版本只用于选取当前或归档记录；不把多个版本合并成新几何。',
+      (_, index) => `/mapExport/historicalSnapshots/${index}`);
+    unsupportedEntries('mapLogOnlyReferences', mapExport.logOnlyReferences, 'log_only_no_geometry',
+      '日志中只出现矿道 ID，没有可验证的世界归属或保存几何，不能绘制成矿道。',
+      (_, index) => `/mapExport/logOnlyReferences/${index}`);
+    unsupportedEntries('mapLogEvidence', mapExport.logEvidence, 'log_events_not_spatial',
+      '日志事件不是空间记录；保留在来源与报告中。',
+      (_, index) => `/mapExport/logEvidence/${index}`);
+    if (mapExport.agentPosition !== undefined) {
+      unsupportedEntries('mapAgentPosition', { position: mapExport.agentPosition }, 'snapshot_position_not_evidence',
+        '导出时的 Agent 位置只是历史快照，不是当前位置，也不作为地点导入。', () => '/mapExport/agentPosition');
+    }
+  }
+  const mapExportRoot = mapExport === null ? null : {
+    ...(mapWorldId === null ? {} : { worldId: mapWorldId }),
+    unknownFields: unknownFields(mapExport, [
+      'metadata', 'dimensions', 'passages', 'historicalSnapshots', 'fragments', 'markers',
+      'agentPosition', 'logOnlyReferences', 'logEvidence',
+    ]),
+  };
 
   return {
     worldId,
@@ -467,13 +566,15 @@ export function planLegacyImport(input: {
     collections,
     unsupported,
     sourceFiles: input.sourceFiles,
-    sourceRoots: { worldMemory: worldRoot, travelMemory: travelRoot, placed: placedRoot },
+    sourceRoots: { worldMemory: worldRoot, travelMemory: travelRoot, placed: placedRoot, mapExport: mapExportRoot },
     limitations: [
       'imported PathFragments use geometrySource="legacy" and are historical geometry, not current passability or traversal evidence',
       'passage links are the old file\'s personally-walked adjacent pairs; they are preserved as legacy links, not TraversalEvidence',
       'imported SpatialNodes are place indexes; original landmark ts/primary/count, hazard times, chest contents, farm cells and endpoint observedAt remain only in the source file and report',
       'travel traversals are not imported: the library rejects PORTAL edges in this phase; they remain in travel-memory.json and the report',
       'dug records, visitedChunks, seen and placed blocks have no per-record scope/observation time and are not imported',
+      'map export markers marked current are covered by the current world-memory import; only historical markers absent from current memory are imported here',
+      'historical map markers are exact place indexes; hazard marker radii and reference markers remain in the source and report',
       'no current voxel observation, traversal evidence or topology edge is created by this import',
     ],
   };
@@ -574,6 +675,7 @@ interface Cli {
   worldMemory: string;
   travelMemory: string | null;
   placed: string | null;
+  mapExport: string | null;
   database: string;
   worldId: string | null;
   report: string | null;
@@ -594,7 +696,7 @@ export function parseCli(argv: readonly string[]): { ok: true; cli: Cli } | { ok
     if (values.has(match[1]!)) return { ok: false, error: `duplicate argument: ${match[1]}` };
     values.set(match[1]!, match[2]!);
   }
-  const allowed = new Set(['world-memory', 'travel-memory', 'placed', 'database', 'world-id', 'report', 'backup']);
+  const allowed = new Set(['world-memory', 'travel-memory', 'placed', 'map-export', 'database', 'world-id', 'report', 'backup']);
   const unknown = [...values.keys()].filter((key) => !allowed.has(key));
   if (unknown.length > 0) return { ok: false, error: `unknown option(s): ${unknown.join(', ')}` };
   const worldMemory = values.get('world-memory');
@@ -607,6 +709,7 @@ export function parseCli(argv: readonly string[]): { ok: true; cli: Cli } | { ok
       worldMemory, database,
       travelMemory: values.get('travel-memory') ?? null,
       placed: values.get('placed') ?? null,
+      mapExport: values.get('map-export') ?? null,
       worldId: values.get('world-id') ?? null,
       report: values.get('report') ?? null,
       backup: values.get('backup') ?? null,
@@ -626,6 +729,7 @@ function usage(): string {
     '  --database=<path>       必需，目标 spatial.sqlite',
     '  --travel-memory=<path>  可选，travel-memory.json（只导入 endpoints；traversals 不导入）',
     '  --placed=<path>         可选，world-memory.json.placed（只审计，不导入）',
+    '  --map-export=<path>     可选，curio-map-data/data.json（补入历史 passages 与历史地点标记；当前标记已由 world-memory 覆盖）',
     '  --world-id=<id>         可选，默认取来源根 worldId；必须与目标库一致',
     '  --include-archive       同时把 world-memory.json 的 passageArchive 作为 passages 导入',
     '  --report=<path>         可选，报告 JSON；execute 时默认放在 DB 同目录',
@@ -684,6 +788,7 @@ async function main(): Promise<number> {
   const sourceFiles: SourceFile[] = [fileFact('world-memory', cli.worldMemory)];
   if (cli.travelMemory !== null) sourceFiles.push(fileFact('travel-memory', cli.travelMemory));
   if (cli.placed !== null) sourceFiles.push(fileFact('placed', cli.placed));
+  if (cli.mapExport !== null) sourceFiles.push(fileFact('map-export', cli.mapExport));
   const sourceRoot = readJson(cli.worldMemory);
   const archive = cli.includeArchive && isRecord(sourceRoot) && Array.isArray(sourceRoot.passageArchive) ? sourceRoot.passageArchive : [];
   const livePassages = isRecord(sourceRoot) && Array.isArray(sourceRoot.passages) ? sourceRoot.passages : [];
@@ -695,6 +800,7 @@ async function main(): Promise<number> {
     worldMemory,
     ...(cli.travelMemory === null ? {} : { travelMemory: readJson(cli.travelMemory) }),
     ...(cli.placed === null ? {} : { placed: readJson(cli.placed) }),
+    ...(cli.mapExport === null ? {} : { mapExport: readJson(cli.mapExport) }),
     sourceFiles,
     ...(cli.worldId === null ? {} : { worldId: cli.worldId }),
   });
