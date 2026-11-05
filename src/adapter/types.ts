@@ -422,7 +422,9 @@ export interface GameAdapter {
   releaseDraw?(signal: AbortSignal, aim?: Vec3Like): Promise<ActionResult & { chargedMs: number }>;
   /** 身体此刻的战斗相关状态：手上是否在用东西（举盾/拉弓）、副手拿着什么 */
   combatState?(): { usingItem: boolean; offHand: string | null; drawingSinceMs: number | null };
-  enterPortalAt?(pos: Vec3Like, signal: AbortSignal, expectedDim?: string): Promise<ActionResult & { from?: AgentState; to?: AgentState }>;
+  enterPortalAt?(pos: Vec3Like, signal: AbortSignal, expectedDim?: string): Promise<ActionResult & { from?: AgentState; to?: AgentState; stand?: AgentState; leftPortal?: boolean }>;
+  /** 门外安全站位（格中心）；不知道门结构时返回 null。普通走路用它避免把“门厅”当成门方块本身。 */
+  portalStance?(pos: Vec3Like): Vec3Like | null;
   bossStatus?(): { dragonDeath: BossDeathObservation | null };
   dig(pos: Vec3Like, signal: AbortSignal): Promise<ActionResult>;
   /** 这个掉落物是不是自己几分钟前扔掉的（只是事实，捡不捡由心智和技能自己定） */

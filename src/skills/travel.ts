@@ -131,15 +131,26 @@ export const observePortal: Skill<{}> = {
     const kinds = ['nether_portal', 'end_portal', 'end_gateway'];
     // 先扫当前视野里看得见的门（记忆可能因死亡/换维度而失效，眼前看得见的才是此刻能核对的），再看记忆里的门位置重验
     const here = state.pos;
+    const feet = { x: Math.floor(here.x), y: Math.floor(here.y), z: Math.floor(here.z) };
     const around = [-2, -1, 0, 1, 2].flatMap((dx) => [-1, 0, 1].flatMap((dy) => [-2, -1, 0, 1, 2].map((dz) =>
       ({ x: Math.floor(here.x) + dx, y: Math.floor(here.y) + dy, z: Math.floor(here.z) + dz }))));
+    // 刚传送到门里时，门方块就在脚下/身上，视锥可能正好看不到它；身体实际接触的这几格可以核对。
+    const touching = [feet, { ...feet, y: feet.y + 1 },
+      { x: feet.x + 1, y: feet.y, z: feet.z }, { x: feet.x - 1, y: feet.y, z: feet.z },
+      { x: feet.x, y: feet.y, z: feet.z + 1 }, { x: feet.x, y: feet.y, z: feet.z - 1 }]
+      .map((pos) => ({ pos, name: ctx.adapter.blockAt(pos) }))
+      .filter((b): b is { pos: Vec3Like; name: string } => !!b.name && kinds.includes(b.name));
     const portal = visiblePortal(ctx, around, kinds)
-      ?? visiblePortal(ctx, ctx.senses.knownBlocks(kinds, 8).map((block) => block.pos), kinds);
+      ?? visiblePortal(ctx, ctx.senses.knownBlocks(kinds, 8).map((block) => block.pos), kinds)
+      ?? touching[0];
     if (!portal) return fail('NOT_FOUND', '附近没有已观察并能核对的传送门');
     const endpoint = travelStore(ctx.memory).observe(state, portal.pos, portal.name as PortalEndpoint['kind']);
     // 也记进常规记忆（地标），让 recall / places 能找回来，不只是 travelStore 里的一份；下界门在下界这一端尤其要靠它记住
     ctx.memory.addLandmark('discovery', `${PORTAL_LABEL[endpoint.kind]} ${endpoint.id}`, state.dim, endpoint.pos, 4);
-    return ok(`记录传送门 ${endpoint.id}`, { portalId: endpoint.id, endpoint });
+    // 另记一个“门外站位”：门方块本身是传送触发区，把它当门厅/集合点走过去会直接换维度。
+    const stance = ctx.adapter.portalStance?.(portal.pos);
+    if (stance) ctx.memory.addLandmark('waypoint', `${PORTAL_LABEL[endpoint.kind]} ${endpoint.id} 门外站位`, state.dim, stance, 3);
+    return ok(`记录传送门 ${endpoint.id}`, { portalId: endpoint.id, endpoint, ...(stance ? { stance } : {}) });
   },
 };
 
@@ -172,8 +183,17 @@ async function traverse(ctx: SkillCtx, endpoint: PortalEndpoint) {
     store.record(endpoint.id, destination.id, result.from, to);
     const roundTripVerified = store.snapshot(to.worldId).routes.some((r) => r.fromId === endpoint.id && r.toId === destination.id && r.returnVerified);
     ctx.memory.setWorld(to.worldId);
-    ctx.memory.addLandmark('waypoint', `传送到达 ${destination.id}`, to.dim, to.pos, 3);
-    return ok(`已通过实际传送到达 ${to.dim}，记录两端位置；返程入口 ${destination.id}${observed ? '' : ' 尚需寻找'}${roundTripVerified ? '；往返已验证' : ''}`, { fromId: endpoint.id, toId: destination.id, from: result.from, to, transition: true, roundTripVerified });
+    const stand = result.stand ?? to;
+    const leftPortal = result.leftPortal;
+    // 到达后如果身体已经离开门方块，就把“门外站位”记成可回来的门厅点；仍在门里时只记事实，
+    // 不把门方块本身标成安全落脚点（那会让下一次“回门厅”直接换维度）。
+    const waypoint = leftPortal === false ? to.pos : stand.pos;
+    const waypointLabel = leftPortal === undefined
+      ? `传送到达 ${destination.id}`
+      : leftPortal ? `传送到达 ${destination.id} 门外站位` : `传送到达 ${destination.id}（仍在门方块里）`;
+    ctx.memory.addLandmark('waypoint', waypointLabel, to.dim, waypoint, 3);
+    const settleNote = leftPortal === undefined ? '' : leftPortal ? '；已离开门口' : '；到达后仍在门方块里';
+    return ok(`已通过实际传送到达 ${to.dim}，记录两端位置；返程入口 ${destination.id}${observed ? '' : ' 尚需寻找'}${roundTripVerified ? '；往返已验证' : ''}${settleNote}`, { fromId: endpoint.id, toId: destination.id, from: result.from, to, stand: result.stand, leftPortal, transition: true, roundTripVerified });
   } catch (error) { if (isAbort(error)) throw error; return fail(codeFromError(error), `传送失败：${(error as Error).message}（门离你约 ${Math.round(dist3(state.pos, endpoint.pos))} 格，在 ${endpoint.pos.x},${endpoint.pos.y},${endpoint.pos.z}）`); } finally { ctx.setStationaryWait?.(false); }
 }
 

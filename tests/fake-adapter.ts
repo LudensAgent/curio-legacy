@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import type { ActionResult, AgentState, BlockHit, BossDeathObservation, DriveKeys, DriveOptions, DriveResult, EntityInfo, Eye, GameAdapter, InvItem, MoveOpts, MoveTarget, Optics, Vec3Like } from '../src/adapter/types.ts';
+import { portalStance as computePortalStance } from '../src/perception/portal.ts';
 import { dist3, raceAbort, sleep, throwIfAborted } from '../src/util.ts';
 
 /** 离线测试用的模拟游戏：没有 Minecraft 也能验证仲裁、反射、规划与连贯性。 */
@@ -106,6 +107,9 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
   }
   blockStateAt(pos: Vec3Like) {
     return { name: this.blockAt(pos), properties: this.blockProperties.get(this.k(pos.x, pos.y, pos.z)) ?? {} };
+  }
+  portalStance(pos: Vec3Like) {
+    return computePortalStance((p) => this.blockAt(p), pos);
   }
   async placeBlockStateAt(pos: Vec3Like, name: string, properties: Record<string, string | number | boolean>, signal: AbortSignal) {
     throwIfAborted(signal);
