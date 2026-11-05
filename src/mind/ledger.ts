@@ -22,7 +22,9 @@ const MAX_SEEN_KEYS = 12_000;
 
 export interface Dist { n: number; y: Record<string, number>; biome: Record<string, number>; dim: Record<string, number>; via?: Record<string, number>; last: number }
 export interface Episode {
-  at: number; what: string; kind: string; signature: string; outcome: string;
+  at: number; what: string; kind: string; outcome: string;
+  /** 做法的折中记录：通常是 `skill {"参数":…}` 的前几步（attempt_end 的 how：最多 6 步、300 字）；材料账按它区分采集步和取物/顺手捡到 */
+  signature: string;
   sec: number; actions: number; failures: number; walked: number; hpLost: number; gained: Record<string, number>;
   /** 这段活里从背包减少的可消耗资源（火把、食物、垫料…）：投入的另一半，和 gained 对称 */
   consumed?: Record<string, number>;
@@ -37,10 +39,82 @@ export interface LedgerSignal { item: string; direction: 'slow' | 'fast'; ratio:
 export interface ConsumeSignal { item: string; perBlock: number; usualPerBlock: number; episode: Episode }
 
 /** 心智和造技能的看到的账（只读） */
-export interface LedgerView { names(): string[]; describe(name: string): string; digest(n?: number): string[]; skillEffect(name: string): string; aliases(name: string): string[]; huntTally(): HuntTally }
+export interface LedgerView { names(): string[]; describe(name: string): string; digest(n?: number): string[]; skillEffect(name: string): string; aliases(name: string): string[]; huntTally(): HuntTally; materialTally(family: MaterialFamily): MaterialTally }
 
 /** 打猎的账：为了肉走了多远、打了多少 */
 export interface HuntTally { trips: number; animals: number; walked: number; recentWalked: number | null; lastAt: number | null }
+/** 一类材料的账：有几段活拿到了它、一共多少、为了它走了多远（最近 3 段平均每段活） */
+export interface MaterialTally { trips: number; units: number; walked: number; recentWalked: number | null; lastAt: number | null }
+/** 矿石的取得：挖到的矿石方块、三种粗矿、以及挖矿直接掉落的成品矿物（含紫水晶簇目标） */
+const ORE_GAIN = /_ore$|^raw_(iron|gold|copper)$|^(coal|diamond|redstone|lapis_lazuli|emerald|quartz|amethyst_shard|amethyst_cluster|ancient_debris|gold_nugget)$/;
+/** 矿石的现有量：取得口径再加上锭/碎屑/粗矿块（粗矿块展示时另注按块计） */
+const ORE_STOCK = /_ore$|^raw_(iron|gold|copper)(_block)?$|^(coal|diamond|redstone|lapis_lazuli|emerald|quartz|amethyst_shard|amethyst_cluster|ancient_debris|gold_nugget|iron_ingot|gold_ingot|copper_ingot|netherite_scrap)$/;
+/** 原木类：包含下界菌柄与竹子方块；木板/木棍不算原木 */
+const WOOD_GAIN = /_log$|_wood$|_stem$|_hyphae$|^(stripped_)?bamboo_block$/;
+
+const stepsOf = (signature: string) => signature.split('>').map((s) => s.trim()).filter(Boolean);
+const stepTokens = (step: string) => step.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+/** 生产格式是 `gather {"block":"oak_log"}`（attempt_end 的 how）；兼容旧的 `gather:oak_log` 简写 */
+function parseStep(step: string): { skill: string; target: string } {
+  const brace = step.indexOf('{');
+  const head = (brace >= 0 ? step.slice(0, brace) : step).trim();
+  const colon = head.indexOf(':');
+  const skill = (colon >= 0 ? head.slice(0, colon) : head.split(/\s+/)[0] ?? '').trim();
+  let target = '';
+  if (brace >= 0) {
+    const json = step.slice(brace);
+    try {
+      const args = JSON.parse(json) as Record<string, unknown>;
+      const v = args.block ?? args.item ?? args.animal ?? args.target ?? args.crop;
+      if (typeof v === 'string') target = v;
+    } catch { /* how 最多 300 字，JSON 可能被截断 */ }
+    if (!target) target = json.match(/"(?:block|item|animal|target|crop)"\s*:\s*"([^"]+)"/)?.[1] ?? '';
+  }
+  return { skill, target: target || (colon >= 0 ? head.slice(colon + 1) : head.slice(skill.length)).trim() };
+}
+const GATHER_STEP = /^(gather|collect)$/;
+const USE_SKILL_STEP = /^use_skill$/;
+const MINING_STEP = /^(excavate_path|dig_at|dig)$/;
+const WOOD_STEP_TOKENS = new Set(['log', 'wood', 'stem', 'hyphae', 'bamboo']);
+const hasWoodTarget = (target: string) => stepTokens(target).some((t) => WOOD_STEP_TOKENS.has(t));
+const hasOreTarget = (target: string) => ORE_GAIN.test(target) || stepTokens(target).includes('ore');
+/** what 只作代码技能/旧数据的兜底；必须明确是木料/挖掘，且不是取物或顺手捡到 */
+const WOOD_WHAT = /砍|伐|原木|木头|树干|找树|木料|木材|橡木|\bwood\b|\blogs?\b|\bchop\b|\btree\b/;
+const MINING_WHAT = /矿|挖|钻石|煤|红石|青金石|石英|铁矿|挖铁|找铁|\b(mine|mining|dig|ore|redstone|diamond|coal|lapis|quartz)\b/;
+const TAKE_WHAT = /取出|取走|取回|从箱子取|从箱子拿|拿去存|存入|存放|查找|捡|\b(take|store|find|pickup)\b/;
+const skillTokens = (name: string) => name.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+/** 代码技能名（Episode.skills）明确是砍树/木材；参数在 signature 里看不到时用名字兜底 */
+const WOOD_SKILL_TOKENS = new Set(['chop', 'tree', 'wood', 'log', 'logs']);
+const MINING_SKILL_TOKENS = new Set(['mine', 'mining', 'dig', 'digging', 'ore', 'excavate', 'excavation']);
+const woodTrip = (e: Episode) => {
+  const steps = stepsOf(e.signature).map(parseStep);
+  // 步骤级判断：有真实的木料采集步就算一趟，后面接 store_items、前面先 find_item 都不影响
+  if (steps.some((s) => GATHER_STEP.test(s.skill) && hasWoodTarget(s.target))) return true;
+  if (e.skills?.some((n) => skillTokens(n).some((t) => WOOD_SKILL_TOKENS.has(t)))) return true;
+  // use_skill 的 routine 不带参数；没有 signature 的旧数据也只能看活名。两种情况都排除挖矿/取物。
+  if (steps.some((s) => USE_SKILL_STEP.test(s.skill)) || !e.signature)
+    return WOOD_WHAT.test(e.what) && !MINING_WHAT.test(e.what) && !TAKE_WHAT.test(e.what);
+  return false;
+};
+const oreTrip = (e: Episode) => {
+  const steps = stepsOf(e.signature).map(parseStep);
+  // 步骤级判断：有真实的矿石采集/挖掘步就算一趟；纯 take/store/find routine 没有这些步，自然不算
+  if (steps.some((s) => GATHER_STEP.test(s.skill) && hasOreTarget(s.target))) return true;
+  if (steps.some((s) => MINING_STEP.test(s.skill))) return true;
+  if (e.skills?.some((n) => skillTokens(n).some((t) => MINING_SKILL_TOKENS.has(t)))) return true;
+  // use_skill/旧数据兜底：活名要说清是挖掘，且不是取物
+  if (steps.some((s) => USE_SKILL_STEP.test(s.skill)) || !e.signature) return MINING_WHAT.test(e.what) && !TAKE_WHAT.test(e.what);
+  return false;
+};
+/**
+ * 材料分类：趟数按真实 routine（signature）判断，取物/存物/顺手捡到不算一整趟；
+ * 取得与现有量用各自口径（现有量的矿石族包含锭/粗矿块，展示时另标）。
+ */
+export const MATERIAL_FAMILIES = {
+  wood: { trip: woodTrip, gain: WOOD_GAIN, stock: WOOD_GAIN },
+  ore: { trip: oreTrip, gain: ORE_GAIN, stock: ORE_STOCK },
+} as const;
+export type MaterialFamily = keyof typeof MATERIAL_FAMILIES;
 /** 动物身上掉的生肉：一块肉算一只（鸡掉 1，牛猪羊 1–3 都按 1 只估，宁可少算） */
 const RAW_MEAT = new Set(['beef', 'porkchop', 'mutton', 'chicken', 'rabbit']);
 /** 照明类可消耗资源：放了就没了，插得密不密直接反映在「每走一格用多少」上（垫料/食物不算浪费，不盯） */
@@ -356,6 +430,16 @@ export class Ledger implements LedgerView {
     const recent = hunts.slice(-3);
     return { trips: hunts.length, animals, walked: hunts.reduce((n, e) => n + e.walked, 0),
       recentWalked: recent.length ? Math.round(recent.reduce((n, e) => n + e.walked, 0) / recent.length) : null, lastAt: hunts.at(-1)?.at ?? null };
+  }
+
+  /** 一类材料的账：只统计真实 routine 是这类采集、且产出对得上的段活（复用 Episode 已有字段，不另记） */
+  materialTally(family: MaterialFamily): MaterialTally {
+    const { trip, gain } = MATERIAL_FAMILIES[family];
+    const trips = this.data.episodes.filter((e) => trip(e) && Object.keys(e.gained).some((k) => gain.test(k)));
+    const units = trips.reduce((n, e) => n + Object.entries(e.gained).filter(([k]) => gain.test(k)).reduce((m, [, v]) => m + v, 0), 0);
+    const recent = trips.slice(-3);
+    return { trips: trips.length, units, walked: trips.reduce((n, e) => n + e.walked, 0),
+      recentWalked: recent.length ? Math.round(recent.reduce((n, e) => n + e.walked, 0) / recent.length) : null, lastAt: trips.at(-1)?.at ?? null };
   }
 
   /** 给控制台看 */

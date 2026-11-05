@@ -25,7 +25,7 @@ import { foodNote } from '../skills/food.ts';
 import { isResourceBlock, oreSpotsByKind, oreSpotsNear } from '../memory/ore-spots.ts';
 import { oreLayerFacts } from '../knowledge/ore-layers.ts';
 import { husbandryFacts, villagerFacts } from '../knowledge/husbandry.ts';
-import type { HuntTally } from './ledger.ts';
+import { MATERIAL_FAMILIES, type HuntTally, type MaterialTally } from './ledger.ts';
 import { FOOD_ANIMAL_NAMES } from '../skills/movement.ts';
 import { config } from '../config.ts';
 import { creatureSpotsByKind, creatureSpotsNear } from '../memory/creature-spots.ts';
@@ -85,6 +85,8 @@ export interface MindContext {
   trip?: { minutes: number; gained: Record<string, number>; nearEnd: boolean };
   /** 打猎的账（给“肉快打光了”这种事实） */
   hunting?: HuntTally | null;
+  /** 材料账：木料/矿石各跑过几段活、一共多少、走了多远（给重复跑腿的事实，不替 Agent 决定备多少） */
+  materials?: { wood: MaterialTally; ore: MaterialTally } | null;
   /** 主目标和清单 */
   plan?: FocusPlan | null;
   /** 阶段回顾：情绪或回想提醒它停下来看这一阶段在做什么（有这一项时才允许换主目标） */
@@ -335,6 +337,9 @@ function stepSupportFact(support: string | null): string {
   return `；下一步落脚点下方是 ${support}，走过去需要垫或下落（由你定）`;
 }
 
+/** 打算里说木头/砍树/原木（材料账只在相关意图出现；前导非字母避免 dialog 之类误匹配） */
+const WOOD_INTENT = /砍|伐|原木|木头|树干|找树|木料|木材|橡木|(^|[^a-z])(log|wood|stem|hyphae|bamboo)s?\b|\bchop\b|\btree\b/;
+
 /** 沿来路回入口的下一步：把全部记下的通道连成网（碎片也接得上），取朝地表锚点走的下一个路点，核对下一步那两格（脚下+头顶）现在是否还通，给出「可走/被堵」的当前事实。 */
 function passageWayBack(ctx: MindContext): string | null {
   const p = ctx.percept, s = ctx.state;
@@ -433,10 +438,10 @@ function intentText(ctx: MindContext): string {
 }
 
 /**
- * 不占 5 条提醒配额的决策事实：下矿的账、顺手采集、挖掘规模。
+ * 不占 5 条提醒配额的决策事实：下矿的账、木料/矿石的账、顺手采集、挖掘规模。
  * 地下挖掘时静态说明常已占满 situationalReminders 的 5 个位置，这些事实按 push 顺序排在后面会被 slice 截掉
  * （2026-11-06 线上：388 个地下 prompt 里“下矿的账/顺手采集”0 次送达，ore_opportunity 却打了 231 次日志）。
- * 这里只把已有事实换个送达位置；采不采、收不收工仍由 Agent 决定。
+ * 这里只把已有事实换个送达位置；采不采、收不收工、备多少仍由 Agent 决定。
  */
 export function decisionReminders(ctx: MindContext): string[] {
   const out: string[] = [];
@@ -449,6 +454,7 @@ export function decisionReminders(ctx: MindContext): string[] {
   }
   // 下矿的账：在地下、手上的活快收工或想回地面时，提供实际经历和当前所见。
   const trip = ctx.trip;
+  let tripShown = false;
   if (trip && trip.minutes >= 1.5 && (trip.nearEnd || !ctx.activity || SURFACE_INTENT.test(intent)) && (p.self.where?.kind === 'underground' || p.self.sky_visible === false)) {
     const got = Object.entries(trip.gained).filter(([k]) => /raw_|_ore$|coal|diamond|emerald|lapis|redstone|amethyst|obsidian|debris|flint|gold_nugget|quartz/.test(k)).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, n]) => `${k}×${n}`);
     const seen = p.nearby.resources.filter((r) => r.seen === 'now' && isResourceBlock(r.block)).sort((a, b) => a.nearest - b.nearest).slice(0, 4).map((r) => `${r.block}×${r.count}（最近 ${Math.round(r.nearest)} 格）`);
@@ -456,6 +462,32 @@ export function decisionReminders(ctx: MindContext): string[] {
     const picks = durabilityFacts(s.inventory, ['pickaxe'], p.storage?.stock);
     const back = passageWayBack(ctx);
     out.push(`下矿的账：${got.length ? `挖到 ${got.join(' ')}` : '还没挖到矿'}；背包空 ${p.emptySlots} 格${picks.length ? `；${picks.join('、')}` : ''}；身边${seen.length ? `看得见 ${seen.join('、')}` : '没看见矿'}${remembered ? `，48 格内记得 ${remembered} 处矿点` : ''}${back ? `；${back}` : ''}。清单后面几项还要不要这些料，一起掂量再决定收不收工`);
+    tripShown = true;
+  }
+  // 木料/矿石的历史账：只陈述账本里的段活数、数量、路程和现有量。
+  // 只在认真想时出现，瞥一眼不重复；现有量的背包是实时读的，箱子是上次打开时的记录，分开写。
+  const materials = ctx.materials;
+  if (materials && ctx.tier === 'deliberate') {
+    const backpack = (re: RegExp) => s.inventory.filter((i) => re.test(i.name)).reduce((n, i) => n + i.count, 0);
+    const chestStock = (re: RegExp) => (p.storage?.stock ?? []).filter((r) => r.inChests > 0 && re.test(r.item)).reduce((n, r) => n + r.inChests, 0);
+    const lastAgo = (at: number | null) => {
+      if (at === null) return '';
+      const minutes = Math.floor((Date.now() - at) / 60_000);
+      return `；最近一次 ${minutes < 1 ? '不到 1 分钟前' : minutes < 90 ? `${minutes} 分钟前` : minutes < 48 * 60 ? `${Math.round(minutes / 60)} 小时前` : `${Math.round(minutes / 1440)} 天前`}`;
+    };
+    const gatheringWood = ctx.activity?.kind === 'gather' && WOOD_INTENT.test(JSON.stringify(ctx.activity.steps));
+    if (materials.wood.trips >= 2 && (WOOD_INTENT.test(intent) || gatheringWood)) {
+      const t = materials.wood, wood = MATERIAL_FAMILIES.wood.stock;
+      const inv = backpack(wood), chest = chestStock(wood);
+      out.push(`木料的历史账（最近 ${t.trips} 段活）：拿到 ${t.units} 个原木类方块（不含木板/木棍），一共走了 ${t.walked} 格（最近平均每段活 ${t.recentWalked} 格${lastAgo(t.lastAt)}）；现在背包里有 ${inv} 个原木类方块（实时，不含木板/木棍）${chest ? `；记得的箱子（上次打开时）还有 ${chest} 个原木类方块` : ''}`);
+    }
+    // 下矿的账（这一趟）已经在上面说过了，就不再用历史聚合重复一遍。
+    if (!tripShown && materials.ore.trips >= 2 && MINING_INTENT.test(intent)) {
+      const t = materials.ore, ore = MATERIAL_FAMILIES.ore.stock;
+      const inv = backpack(ore), chest = chestStock(ore);
+      const rawBlocks = backpack(/^raw_(iron|gold|copper)_block$/) + chestStock(/^raw_(iron|gold|copper)_block$/);
+      out.push(`矿石的历史账（最近 ${t.trips} 段活）：拿到 ${t.units} 个矿石/粗矿/矿物，一共走了 ${t.walked} 格（最近平均每段活 ${t.recentWalked} 格${lastAgo(t.lastAt)}）；现在背包里有 ${inv} 个矿石/粗矿/锭（实时）${chest ? `；记得的箱子（上次打开时）还有 ${chest} 个矿石/粗矿/锭` : ''}${rawBlocks ? `；粗矿块 ${rawBlocks} 个（背包+记得的箱子合计）按块计，未折算成粗铁` : ''}`);
+    }
   }
   // 顺手采集与不可替代工具：把「看见什么矿 + 现在这类料有多少 + 能做什么」摆成事实，让它在路过矿石时能自己掂量要不要顺手采；
   // 只报事实，采不采、做不做备用工具都由它定（不替它写 gather 或 craft）

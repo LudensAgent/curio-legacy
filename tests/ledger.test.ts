@@ -8,7 +8,7 @@ import { SkillSmith } from '../src/codeskills/smith.ts';
 import { EventBus } from '../src/events.ts';
 import { BUILTIN_SKILLS_DIR, SkillBook } from '../src/knowledge/skillbook.ts';
 import { BehaviorEngine } from '../src/mind/behaviors.ts';
-import { describeDist, Ledger } from '../src/mind/ledger.ts';
+import { describeDist, Ledger, type Episode } from '../src/mind/ledger.ts';
 import { recallLocal } from '../src/mind/recall.ts';
 import { SelfModel } from '../src/mind/self.ts';
 import { FakeAdapter } from './fake-adapter.ts';
@@ -31,6 +31,62 @@ test('收获账本：不针对哪种东西，按“得到的东西”记每个�
   assert.match(st.best[0].signature, /goto forest/, '最省的做法排前面');
   assert.match(ledger.describe('oak_log'), /在变省.*最省的做法：「去森林边砍」/);
   assert.match(ledger.digest().join('\n'), /什么也没得到/, '白忙的比例也算进去');
+});
+
+test('材料的账：按生产格式 routine 的采集步判断趟数，取物/顺手捡到不算', () => {
+  const ledger = new Ledger(null, new EventBus(), () => { throw new Error('不用状态'); });
+  const ep = (at: number, walked: number, gained: Record<string, number>, what: string, signature: string, kind = 'gather'): Episode =>
+    ({ at, what, kind, signature, outcome: 'done', sec: 60, actions: 1, failures: 0, walked, hpLost: 0, gained });
+  ledger.data.episodes = [
+    // 生产格式：gather {"block":...}；真实采集后有取物/存物也照算
+    ep(1_000, 100, { oak_log: 6, stick: 2 }, '收集木材', 'gather {"block":"oak_log"}'),
+    ep(2_000, 200, { oak_wood: 8 }, '采集橡木', 'gather {"block":"oak_wood"}'),
+    ep(3_000, 300, { oak_log: 3 }, 'gather wood', 'gather block log'),
+    ep(4_000, 50, { oak_log: 4 }, 'collect wood logs', 'gather:oak_log'),
+    ep(5_000, 20, { stripped_bamboo_block: 2, crimson_stem: 2, warped_hyphae: 2, nether_wart_block: 1 }, '砍竹子与菌柄', 'gather {"block":"stripped_bamboo_block"} > gather {"block":"crimson_stem"} > gather {"block":"warped_hyphae"}'),
+    ep(6_000, 40, { oak_log: 5 }, '砍树后存入箱子', 'gather {"block":"oak_log"} > store_items {"items":["oak_log"]}'),
+    ep(7_000, 10, { oak_log: 2 }, '先找斧头再砍树', 'find_item {"item":"axe"} > gather {"block":"oak_log"}'),
+    // 取物/顺手捡到：routine 里没有木料采集步
+    ep(8_000, 0, { oak_log: 8 }, 'take_items 从箱子取木头', 'take_items {"item":"oak_log"}'),
+    ep(9_000, 0, { oak_log: 64 }, '从箱子取原木', 'take_items {"item":"oak_log"}'),
+    ep(10_000, 0, { oak_log: 1 }, '挖铁矿时顺手捡了一根原木', 'excavate_path {"direction":"east"} > pickup_items {"item":"oak_log"}'),
+    // use_skill/旧数据兜底：活名明确性收紧后仍能分对
+    ep(11_000, 30, { oak_log: 3 }, '获取木材', 'use_skill'),
+    ep(12_000, 20, { oak_log: 2 }, '用铁斧砍树', 'use_skill'),
+    ep(13_000, 0, { oak_log: 5 }, '从箱子取出原木', 'use_skill'),
+    ep(14_000, 0, { oak_log: 1 }, '挖铁矿时顺手捡了一根原木', 'use_skill'),
+    // 生产格式的矿石采集：gather 目标含矿石/紫水晶簇/远古残骸，或 excavate/dig
+    ep(15_000, 90, { raw_iron: 2, iron_ore: 3 }, '挖铁矿', 'gather {"block":"iron_ore"}'),
+    ep(15_500, 10, { raw_iron: 2, oak_log: 1 }, '挖铁矿时顺手捡了一根原木', 'gather {"block":"iron_ore"} > pickup_items {"item":"oak_log"}'),
+    ep(16_000, 40, { lapis_lazuli: 5 }, '采集青金石', 'gather {"block":"lapis_lazuli"}'),
+    ep(17_000, 30, { quartz: 4 }, '收集石英', 'gather {"block":"nether_quartz_ore"}'),
+    ep(18_000, 60, { diamond: 1 }, '挖钻石', 'excavate_path {"direction":"east"}'),
+    ep(19_000, 70, { ancient_debris: 1 }, '挖远古残骸', 'gather {"block":"ancient_debris"}'),
+    ep(20_000, 50, { amethyst_shard: 2 }, '挖紫水晶', 'gather {"block":"amethyst_cluster"}'),
+    // 纯取物/查找/粗矿块不算矿石趟
+    ep(21_000, 30, { iron_ore: 64 }, 'take_items 取铁矿', 'take_items {"item":"iron_ore"}'),
+    ep(22_000, 30, { raw_iron_block: 64 }, '整理粗铁块', 'gather {"block":"raw_iron_block"}'),
+    ep(23_000, 0, { iron_ore: 64 }, 'find_item 查铁矿', 'find_item {"item":"iron_ore"}'),
+  ];
+  const wood = ledger.materialTally('wood');
+  assert.equal(wood.trips, 9, '7 段真实采集 + 采集后存物 + 查找后再采集 + 2 段 use_skill 兜底；取物/顺手捡到不算');
+  assert.equal(wood.units, 39, '只数原木类方块，木棍和泥土不算');
+  assert.equal(wood.walked, 770);
+  assert.equal(wood.recentWalked, 20, '最近 3 段：10 + 30 + 20');
+  assert.equal(wood.lastAt, 12_000);
+  const ore = ledger.materialTally('ore');
+  assert.equal(ore.trips, 7);
+  assert.equal(ore.units, 20);
+  assert.equal(ore.walked, 350);
+  assert.equal(ore.lastAt, 20_000);
+  // 10 段 diamond/coal 挖矿后，矿石族不能因为漏掉成品矿物而为 0
+  for (let i = 0; i < 10; i++) ledger.data.episodes.push(ep(24_000 + i * 1_000, 50, i % 2 ? { diamond: 1 } : { coal: 2 }, i % 2 ? '挖钻石' : '挖煤', i % 2 ? 'gather {"block":"diamond_ore"}' : 'gather {"block":"coal_ore"}'));
+  const mined = ledger.materialTally('ore');
+  assert.equal(mined.trips, 17);
+  assert.equal(mined.units, 35, '15 个基础矿石 + 5 钻石 + 10 煤 + 远古残骸/紫水晶');
+  assert.equal(mined.walked, 850);
+  assert.equal(mined.recentWalked, 50);
+  assert.equal(mined.lastAt, 33_000);
 });
 
 test('东西出现在哪：看见的和拿到的按高度、群系记成分布，同一格方块只记一次', () => {
