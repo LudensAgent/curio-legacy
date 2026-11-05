@@ -826,7 +826,8 @@ export const lookAround: Skill<{ seconds: number; for?: string; direction?: stri
     const yaws = sector ? [-1.3, -0.65, 0, 0.65, 1.3].map((o) => center + o) : Array.from({ length: 8 }, (_, k) => center + ((k + 1) * 2 * Math.PI) / 8);
     const per = Math.max(250, (args.seconds * 1000) / yaws.length);
     for (const [k, yaw] of yaws.entries()) {
-      const pitch = k % 2 === 0 ? -0.05 : -0.45; // 平视 / 略低头
+      // 平视 / 略低头 / 每四个角度抬一次头：头顶（洞顶、树冠下的矿）也要扫到
+      const pitch = k % 4 === 2 ? 0.45 : k % 2 === 0 ? -0.05 : -0.45;
       await ctx.adapter.look(yaw, pitch);
       await sleep(per, ctx.signal);
       ctx.senses.refresh();
@@ -837,6 +838,9 @@ export const lookAround: Skill<{ seconds: number; for?: string; direction?: stri
       }
     }
     if (!sector) ctx.senses.markSweep();
+    // 扫完回到平视：否则接下来的行走、地平线扫描和远景都会被最后一下低头挡住
+    const end = ctx.adapter.eye();
+    if (end) { await ctx.adapter.look(end.yaw, -0.05); ctx.senses.refresh(); }
     if (args.for) return fail('NOT_FOUND', `${args.direction ? `${args.direction} 方向` : '四周'}本次视野未见 ${args.for}；旧记忆不算本次看见，视野外或遮挡后的情况仍未知`, facts(yaws.length));
     return ok(args.direction ? `看了看 ${args.direction} 方向` : '环顾了一圈', facts(yaws.length));
   },

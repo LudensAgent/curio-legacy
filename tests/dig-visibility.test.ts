@@ -66,14 +66,14 @@ test('absolute and code-skill coordinates remain fixed when observation changes 
 test('a visible-after-looking solid target is dug at its original world position', async (t) => {
   const adapter = new FakeAdapter();
   adapter.pos = { x: 0.5, y: 64, z: 0.5 };
-  adapter.yaw = -Math.PI / 2;
-  const target = { x: 0, y: 64, z: -1 }, other = { x: 1, y: 64, z: 0 };
+  adapter.yaw = -Math.PI / 2; // 面朝东：目标在西边身后，初始视野外
+  const target = { x: -1, y: 64, z: 0 }, other = { x: 1, y: 64, z: 0 };
   adapter.blocks.push({ name: 'stone', pos: target }, { name: 'stone', pos: other });
   const ctx = makeCtx(adapter);
   ctx.senses = new Vision(adapter);
   t.after(() => ctx.memory.close());
   assert.deepEqual(ctx.senses.observeBlocks!([target]), []);
-  const result = await digAt.run(ctx, { at: [1, 0, 0], facing: 'N' });
+  const result = await digAt.run(ctx, { at: [1, 0, 0], facing: 'W' });
   assert.equal(result.status, 'succeeded', result.summary);
   assert.deepEqual(result.data?.targetCell, target);
   assert.equal(adapter.blockAt(target), 'air');

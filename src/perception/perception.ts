@@ -8,7 +8,7 @@ import type { EventBus } from '../events.ts';
 import type { PassageRecord, WorldMemory } from '../memory/store.ts';
 import { dist3, effectiveLight, round1, lightAround, shortId } from '../util.ts';
 import { torchCount, nearbyTorchLight } from '../skills/light.ts';
-import { interactiveName, INTERACTIVE_BLOCKS, NOTABLE, type Vision, type VisionSummary } from './vision.ts';
+import { DIM_AMBIENT_LIGHT, interactiveName, INTERACTIVE_BLOCKS, NOTABLE, type Vision, type VisionSummary } from './vision.ts';
 import { type Drive, type Stock } from '../brain/drives.ts';
 import { causeName } from '../brain/habits.ts';
 import { PassageTracker, bridgeRuns, MIN_BRIDGE, passageEntranceDescent } from '../memory/passages.ts';
@@ -340,8 +340,8 @@ export class Perception {
     // 客户端方块光（getBlockLight）插火把后可能没及时更新：合并近处火把的估算光，避免插了火把仍报“很暗”
     const block = Math.max(l.block, nearbyTorchLight(this.adapter, s.pos));
     // 下界有维度环境光（约 7）：原始区块光照是 0，但下界昏暗可见、不是漆黑，别把「看不见」当插火把的理由。
-    // 末地有天空光（固定正午，sky≈15），本身已经亮，不用补环境光。
-    const here = Math.max(effectiveLight({ block, sky: l.sky }, s.timeOfDay), s.dim === 'the_nether' ? 7 : 0);
+    // 末地有天空光（固定正午，sky≈15），本身已经亮，不用补环境光。与视觉模块共用同一张环境光表。
+    const here = Math.max(effectiveLight({ block, sky: l.sky }, s.timeOfDay), DIM_AMBIENT_LIGHT[s.dim] ?? 0);
     const comp = this.vision.composition;
     const total = Object.values(comp).reduce((a, b) => a + b, 0) || 1;
     return {

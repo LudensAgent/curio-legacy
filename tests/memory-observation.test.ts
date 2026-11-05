@@ -121,7 +121,8 @@ test('brief sightings are recorded and not seeing a nearby animal later does not
 test('known ores and containers survive unseen changes until their old cell is actually visible again', () => {
   ['iron_ore', 'chest'].forEach((name) => {
     ['behind', 'occluded', 'dark'].forEach((hidden) => {
-      const adapter = new FakeAdapter(), vision = new Vision(adapter), pos = { x: 8, y: 64, z: 1 };
+      // dark 用例放到全黑可视距离（10 格）之外，才代表“确实看不清”
+      const adapter = new FakeAdapter(), vision = new Vision(adapter), pos = hidden === 'dark' ? { x: 12, y: 64, z: 1 } : { x: 8, y: 64, z: 1 };
       adapter.blocks.push({ name, pos });
       vision.scan();
       assert.equal(vision.knownBlocks([name], 16).length, 1, `${name}: initially seen`);

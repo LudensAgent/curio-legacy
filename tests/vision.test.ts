@@ -100,13 +100,27 @@ test('实体：视野内且无遮挡的牛能看见，并给出画面坐标与�
 test('黑暗：没有光时只能看清身边几格，远处是 dark', () => {
   const { adapter, vision } = setup();
   adapter.light = 0;
+  adapter.blocks.push({ name: 'coal_ore', pos: { x: 8, y: 64, z: 0 } });
   adapter.blocks.push({ name: 'gold_ore', pos: { x: 20, y: 64, z: 0 } });
   adapter.entities.push({ id: 4, name: 'creeper', kind: 'hostile', pos: { x: 15, y: 64, z: 0 }, dist: 0, height: 1.7 });
   vision.scan();
-  assert.ok(!sees(vision, 'gold_ore'));
+  assert.ok(sees(vision, 'coal_ore'), '全黑时仍能看清身边约 10 格内的煤');
+  assert.ok(!sees(vision, 'gold_ore'), '20 格外仍然看不清');
   assert.equal(vision.seen.length, 0, '黑暗中 15 格外的苦力怕看不见');
   const dark = vision.frame!.cats.filter((c) => CATS[c] === 'dark').length;
   assert.ok(dark > 0, '画面中应有 dark 像素');
+});
+
+test('平视时正头顶的矿石也在视野内（垂直视野覆盖头顶）', () => {
+  const { adapter, vision } = setup();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  adapter.pitch = 0;
+  // 两格高的巷道：天花板在脚上方 2 格，正头顶那格换成铁矿
+  for (let x = -1; x <= 1; x++) for (let z = -1; z <= 1; z++) adapter.blocks.push({ name: 'stone', pos: { x, y: 66, z } });
+  adapter.blocks = adapter.blocks.filter((b) => !(b.pos.x === 0 && b.pos.y === 66 && b.pos.z === 0));
+  adapter.blocks.push({ name: 'iron_ore', pos: { x: 0, y: 66, z: 0 } });
+  vision.scan();
+  assert.ok(sees(vision, 'iron_ore'), '正头顶的铁矿石应进入视野记忆');
 });
 
 test('技能调用透视接口会被拒绝（必须用 ctx.senses）', async () => {
@@ -159,7 +173,7 @@ test('gather：埋在地下的原木不会去挖（NOT_FOUND）；背后的树�
   assert.ok(adapter.state().pos.y >= y0 - 0.01, '不自己往下挖');
 });
 
-test('扫描性能（40×24 射线，64 格）', () => {
+test('扫描性能（40×32 射线，64 格）', () => {
   const { adapter, vision } = setup();
   for (let i = 0; i < 40; i++) adapter.blocks.push({ name: 'oak_log', pos: { x: 10 + i, y: 64, z: (i % 7) - 3 } });
   const t0 = performance.now();
@@ -171,7 +185,9 @@ test('扫描性能（40×24 射线，64 格）', () => {
 
 // ---- observeBlocks 边界：脚下/头顶不再免视线，必须真实进入视锥且无遮挡
 test('observeBlocks：视锥外的脚下与头顶竖列不返回精确视觉', () => {
-  const { adapter, vision } = setup();
+  const adapter = new FakeAdapter();
+  // 用窄视锥单独验证“没有接触豁免”：默认 96° 平视时正头顶本来就在视野里
+  const vision = new Vision(adapter, { range: 64, hFov: 120, vFov: 60, cols: 40, rows: 24, bandCols: 0, bandRows: 0, hearRadius: 10 });
   assert.deepEqual(vision.observeBlocks([{ x: 0, y: 63, z: 0 }, { x: 0, y: 66, z: 0 }]), []);
 });
 

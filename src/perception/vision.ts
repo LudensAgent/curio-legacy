@@ -9,7 +9,7 @@ import { isResourceBlock } from '../memory/ore-spots.ts';
  * - 视锥：以角色当前的 yaw/pitch 为中心，水平 FOV × 垂直 FOV 发射 cols × rows 条射线（像一台低分辨率相机）
  * - 遮挡：每条射线用体素遍历（Amanatides & Woo DDA）前进，遇到第一个不透明方块就停下 → 只能看到表面，不能透视
  * - 透明介质：空气/玻璃/草/花可穿过；水最多穿过 6 格；树叶最多穿过 2 层
- * - 光照：命中面的亮度决定能看多远（黑暗的洞穴里只能看清身边几格）
+ * - 光照：命中面的亮度决定能看多远（全黑仍能看清身边约 10 格；下界有维度环境光，不按漆黑处理）
  * - 实体：在视锥内 + 视线不被遮挡 + 足够亮 才算“看见”；看不见但离得近的算“听见”（只有大致方向和距离）
  * - 记忆：看见过的资源方块会被记住（位置 + 时间），转身之后仍然知道它在哪
  *
@@ -17,7 +17,7 @@ import { isResourceBlock } from '../memory/ore-spots.ts';
  */
 
 export interface VisionConfig {
-  /** 能看多远（格）。0 = 自动：服务器实际下发的渲染距离（view-distance × 16） */
+  /** 能看多远（格）。0 = 自动：服务器实际下发的渲染距离（view-distance × 16），最高 64 格 */
   range: number;
   hFov: number; // 度
   vFov: number; // 度
@@ -29,9 +29,17 @@ export interface VisionConfig {
   bandRows: number;
 }
 
-export const DEFAULT_VISION: VisionConfig = { range: 0, hFov: 120, vFov: 72, cols: 40, rows: 24, hearRadius: 10, bandCols: 160, bandRows: 8 };
+// 垂直视野 96°：平视时上缘达 +48°，能看见两格高空间里正头顶那一格；
+// 72°/84° 时正头顶恰好落在视锥上缘外，只有前一格能看见。
+export const DEFAULT_VISION: VisionConfig = { range: 0, hFov: 120, vFov: 96, cols: 40, rows: 32, hearRadius: 10, bandCols: 160, bandRows: 8 };
 const FALLBACK_RANGE = 64;
 const MAX_RANGE = 64;
+
+/** 维度环境光：末地光照贴图整体提亮；下界没有天光，但维度环境光约 7，玩家仍能看清远处地形。 */
+export const DIM_AMBIENT_LIGHT: Record<string, number> = { the_end: 4, the_nether: 7 };
+
+/** 看得清多远：亮处全视距，昏暗 20 格，微光 14 格，全黑 10 格（不是透视）。 */
+const seeRangeOf = (light: number, range: number) => (light >= 4 ? range : light >= 2 ? 20 : light >= 1 ? 14 : 10);
 
 export const CATS = ['unknown', 'sky', 'dark', 'water', 'lava', 'leaves', 'wood', 'grass', 'dirt', 'sand', 'stone', 'ore', 'snow', 'plant', 'built', 'other'] as const;
 export type Cat = (typeof CATS)[number];
@@ -284,10 +292,21 @@ export class Vision {
     return state;
   }
 
-  /** 实际视距：配置值，或服务器下发的渲染距离（区块数 × 16） */
+  /** 实际视距：配置值，或服务器下发的渲染距离（区块数 × 16），射线扫描上限 64 格 */
   effectiveRange(): number {
     const rd = this.adapter.renderDistance?.();
     return Math.min(MAX_RANGE, this.cfg.range > 0 ? this.cfg.range : FALLBACK_RANGE, rd && rd > 0 ? rd : FALLBACK_RANGE);
+  }
+
+  /**
+   * 这一格实际有多少光（只用于视觉可见距离）：方块光、扣掉夜色后的天光、维度环境光取最大。
+   * 下界没有天光（sky=0）但有维度环境光，不能把整片下界当成漆黑；末地同理。
+   */
+  private visionLight(state: ReturnType<GameAdapter['state']>, x: number, y: number, z: number): number {
+    const r = this.adapter.lightAt(x, y, z);
+    const t = state.timeOfDay;
+    const darkness = t < 12000 ? 0 : t < 13800 || t >= 22200 ? 5 : 11;
+    return Math.max(r?.block ?? 0, (r?.sky ?? 0) - darkness, DIM_AMBIENT_LIGHT[state.dim] ?? 0);
   }
 
   // ------------------------------------------------------------ 扫描
@@ -310,8 +329,6 @@ export class Vision {
     const range = this.effectiveRange();
     const hFov = (this.cfg.hFov * Math.PI) / 180;
     const vFov = (this.cfg.vFov * Math.PI) / 180;
-    const t = s.timeOfDay;
-    const darkness = t < 12000 ? 0 : t < 13800 || t >= 22200 ? 5 : 11;
 
     const optCache = new Map<number, Optics | null>();
     const lightCache = new Map<number, number>();
@@ -330,11 +347,7 @@ export class Vision {
       const k = lk(x, y, z);
       let l = lightCache.get(k);
       if (l === undefined) {
-        const r = this.adapter.lightAt(x, y, z);
-        // The End uses a brightened client lightmap even with zero sky/block
-        // light (1.20.1 DimensionEffects.End). This floor belongs only to
-        // visibility; raw light and mob-spawn rules remain unchanged.
-        l = Math.max(r?.block ?? 0, (r?.sky ?? 0) - darkness, s.dim === 'the_end' ? 4 : 0);
+        l = this.visionLight(s, x, y, z);
         lightCache.set(k, l);
       }
       return l;
@@ -351,7 +364,7 @@ export class Vision {
       }
       return e;
     };
-    const seeRange = (l: number) => (l >= 4 ? range : l >= 2 ? 14 : l >= 1 ? 8 : 5);
+    const seeRange = (l: number) => seeRangeOf(l, range);
 
     const cats: number[] = new Array(cols * rows);
     const dists: number[] = new Array(cols * rows);
@@ -622,10 +635,9 @@ export class Vision {
         const hit = boxes ? shapeHitDistance(boxes, eye, dx / distance, dy / distance, dz / distance, pos.x, pos.y, pos.z, distance) : distance;
         if (hit === null || !this.clearLine(eye, dx / distance, dy / distance, dz / distance, hit,
           (bx, by, bz) => bx === pos.x && by === pos.y && bz === pos.z ? { name: 'air', kind: 'clear' } : this.adapter.blockOptics(bx, by, bz))) return false;
-        const near = Math.max(0, hit - .1), l = this.adapter.lightAt(Math.floor(eye.x + dx / distance * near), Math.floor(eye.y + dy / distance * near), Math.floor(eye.z + dz / distance * near));
-        const t = state.timeOfDay, darkness = t < 12000 ? 0 : t < 13800 || t >= 22200 ? 5 : 11;
-        const light = Math.max(l?.block ?? 0, (l?.sky ?? 0) - darkness, state.dim === 'the_end' ? 4 : 0);
-        return hit <= (light >= 4 ? this.effectiveRange() : light >= 2 ? 14 : light >= 1 ? 8 : 5);
+        const near = Math.max(0, hit - .1);
+        const light = this.visionLight(state, Math.floor(eye.x + dx / distance * near), Math.floor(eye.y + dy / distance * near), Math.floor(eye.z + dz / distance * near));
+        return hit <= seeRangeOf(light, this.effectiveRange());
       });
       if (!visible) continue;
       const block = this.adapter.blockStateAt?.(pos);

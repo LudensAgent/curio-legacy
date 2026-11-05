@@ -19,6 +19,16 @@ test('End ambient visibility sees distant exposed terrain and dragon despite raw
   assert.ok(vision.seen.some((e) => e.name === 'ender_dragon' && e.phase === 0));
 });
 
+test('Nether ambient visibility is not limited to torchlight', () => {
+  const { adapter, vision } = scene('the_nether');
+  adapter.blocks.push({ name: 'nether_quartz_ore', pos: { x: 40, y: 64, z: 4 } });
+  adapter.entities.push({ id: 2, name: 'zombified_piglin', kind: 'hostile', pos: { x: 40, y: 65, z: -4 }, height: 1.9, dist: 40 });
+  vision.scan();
+  assert.ok([...vision.visibleNow.values()].some((b) => b.name === 'nether_quartz_ore'), '下界环境光应让远处的石英矿可见');
+  assert.ok(vision.seen.some((e) => e.name === 'zombified_piglin'), '下界环境光应让远处的僵尸猪灵可见');
+  assert.equal(vision.observeBlocks([{ x: 40, y: 64, z: 4 }])[0]?.name, 'nether_quartz_ore');
+});
+
 test('End ambient visibility preserves occlusion and the Overworld darkness limit', () => {
   const { adapter, vision } = scene('the_end');
   for (let y = 64; y <= 80; y++) for (let z = -8; z <= 8; z++) adapter.blocks.push({ name: 'obsidian', pos: { x: 8, y, z } });
