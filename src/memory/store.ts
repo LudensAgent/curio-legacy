@@ -641,6 +641,7 @@ export class WorldMemory {
     if (!prev) this.placedInsert(key, cell);
     this.placedDirty = true;
     this.evictPlaced();
+    if (this.spatial) this.touch();
   }
 
   /** 挖掉时移除：不是自己放的格是无害 no-op。 */
@@ -650,6 +651,7 @@ export class WorldMemory {
     if (!this.placedByPos.delete(key)) return;
     this.placedDelete(key, this.placedCell(x, y, z));
     this.placedDirty = true;
+    if (this.spatial) this.touch();
   }
 
   /** 这一格是不是自己放的；是则返回方块名，否则 null。O(1)。 */
