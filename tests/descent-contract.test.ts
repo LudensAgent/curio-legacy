@@ -20,6 +20,9 @@ test('descend requires fresh local geometry, sufficient health or observed water
   }
   const ground = fixture(), parsed = descend.validate({ target: ground.option.target }, ground.ctx.adapter);
   assert.ok(parsed.ok);
+  const delegated = descend.validate({ target: ground.option.target, allowUnknownCorridor: true }, ground.ctx.adapter);
+  assert.ok(delegated.ok); assert.equal(delegated.args.allowUnknownCorridor, true);
+  assert.equal(descend.validate({ target: ground.option.target, allowUnknownCorridor: 'yes' }, ground.ctx.adapter).ok, false);
   const actual = await descend.run(ground.ctx, parsed.args);
   assert.equal(actual.status, 'succeeded'); assert.deepEqual(actual.data?.position, ground.option.target);
   assert.equal(ground.calls.length, 1);
@@ -35,8 +38,14 @@ test('descend requires fresh local geometry, sufficient health or observed water
   const occluded = fixture(); occluded.option.corridor = 'unknown';
   const unknown = await descend.run(occluded.ctx, { target: occluded.option.target });
   assert.equal(unknown.status, 'failed'); assert.match(unknown.summary, /落体通道未看清/);
+  assert.match(unknown.summary, /allowUnknownCorridor:true/);
   assert.deepEqual(unknown.data?.geometry, { clearance: 'clear', corridor: 'unknown', approach: 'adjacent', unknowns: [] });
   assert.equal(occluded.calls.length, 0);
+  const accepted = await descend.run(occluded.ctx, { target: occluded.option.target, allowUnknownCorridor: true });
+  assert.equal(accepted.status, 'succeeded', accepted.summary);
+  assert.equal(accepted.data?.corridor, 'unknown');
+  assert.equal(accepted.data?.unknownCorridorAccepted, true);
+  assert.equal(occluded.calls.length, 1, 'an explicit delegation executes the selected landing');
   const blocked = fixture(); blocked.option.clearance = 'blocked';
   const obstruction = await descend.run(blocked.ctx, { target: blocked.option.target });
   assert.match(obstruction.summary, /落点净空观察到阻挡/); assert.equal(blocked.calls.length, 0);

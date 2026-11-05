@@ -7,7 +7,7 @@ import { WorldMemory } from '../src/memory/store.ts';
 import { Vision } from '../src/perception/vision.ts';
 import { EYE_DESCENT_LABEL, EXCAVATION_CHECKPOINT_LABEL, excavationSkill, type ExcavationArgs } from '../src/skills/excavation.ts';
 import { findStronghold, searchStructure, structureSkills } from '../src/skills/structures.ts';
-import type { Senses, SkillCtx } from '../src/skills/types.ts';
+import type { LandingOption, Senses, SkillCtx } from '../src/skills/types.ts';
 import { throwIfAborted } from '../src/util.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 
@@ -119,11 +119,37 @@ test('a shallow missing support returns the gap before digging and never spends 
   assert.equal(world.moves.length, 0, '报缺口之前没有移动');
   assert.equal(world.inv.get('cobblestone'), 3, '纯开挖不擅自消耗材料垫块');
   assert.ok(!world.actions.some((action) => action.startsWith('place:')), '没有隐式放置');
+  const cavity = result.data?.cavity as { reason: string; nextLanding: Vec3Like; supportCell: Vec3Like; visibleLandings: unknown[]; handoff: string };
+  assert.equal(cavity.reason, 'next_landing_support_air');
+  assert.deepEqual(cavity.nextLanding, { x: 1, y: 63, z: 0 });
+  assert.deepEqual(cavity.supportCell, { x: 1, y: 62, z: 0 });
+  assert.deepEqual(cavity.visibleLandings, [], '没有可见落点时不编造');
+  assert.match(cavity.handoff, /descend/);
+  assert.match(cavity.handoff, /没有自动垫块/);
   // 显式补上支撑（Agent 自己选择 place_at 的组合动作）后，同一段开挖可以完成。
   world.setBlock({ x: 1, y: 62, z: 0 }, 'cobblestone');
   const done = await excavationSkill.run(context(world), args({ steps: 1 }));
   assert.equal(done.status, 'succeeded', done.summary);
   assert.deepEqual(world.pos, { x: 1.5, y: 63, z: 0.5 });
+});
+
+test('the air-gap failure includes currently visible lower landings without choosing one', async () => {
+  const world = new ExcavationWorld();
+  world.setBlock({ x: 1, y: 62, z: 0 }, 'air');
+  const option: LandingOption = {
+    target: { x: 1.5, y: 61, z: 0.5 }, support: { pos: { x: 1, y: 60, z: 0 }, name: 'stone' },
+    surface: 'ground', surfaceY: 61, drop: 3, horizontalDistance: 1,
+    clearance: 'clear', corridor: 'unknown', approach: 'adjacent', waterDepth: 'unknown', unknowns: ['接近入口或下落通道没有全部看清'],
+    receipt: { worldId: world.worldId, sessionId: 's', dimension: 'overworld', observationId: 1, at: Date.now(), from: { x: 0.5, y: 64, z: 0.5 }, onGround: true },
+  };
+  const senses = { ...sensoryFixture(), landingOptions: () => [option] } as Senses;
+  const result = await excavationSkill.run(context(world, { senses }), args({ steps: 1 }));
+  const cavity = result.data?.cavity as { visibleLandings: Array<{ target: Vec3Like; corridor: string }> };
+  assert.equal(result.status, 'failed');
+  assert.equal(cavity.visibleLandings.length, 1);
+  assert.deepEqual(cavity.visibleLandings[0].target, option.target);
+  assert.equal(cavity.visibleLandings[0].corridor, 'unknown');
+  assert.equal(world.moves.length, 0, 'handoff lists facts but does not choose or execute a descent');
 });
 
 test('a partial support surface is a geometric mismatch, not a claim that the game block is unstable', async () => {

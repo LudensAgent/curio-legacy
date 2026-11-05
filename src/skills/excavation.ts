@@ -32,6 +32,8 @@ const hazardLabel = (name: string) => name === 'water' || name === 'lava' || nam
 const voxel = (pos: Vec3Like): Vec3Like => ({ x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z) });
 
 class ExcavationStop extends Error {
+  /** 下一落点没有支撑时带上该落点，供失败回执附可见落点事实，而不是只给一句硬错误 */
+  nextLanding?: Vec3Like;
   constructor(public code: FailureCode, message: string, public unsupportedGeometry = false) { super(message); }
 }
 
@@ -56,7 +58,11 @@ function supportProblem(ctx: SkillCtx, cell: Vec3Like, expectedFoot: number, lab
   if (!shapeKnown(state.name, state.properties ?? {})) return new ExcavationStop('NOT_FOUND', `${label}的 ${state.name} 状态未确认（缺少 blockstate），不能确认支撑顶面`);
   const top = supportTop(state.name, state.properties ?? {});
   if (top === null) {
-    if (AIR.has(state.name)) return new ExcavationStop('ERROR', `${label}下面是空的（${state.name}）：前面脚下是个坑/洞穴`);
+    if (AIR.has(state.name)) {
+      const gap = new ExcavationStop('ERROR', `${label}下面是空的（${state.name}）：前面脚下是个坑/洞穴`);
+      gap.nextLanding = { ...cell, y: expectedFoot };
+      return gap;
+    }
     return new ExcavationStop('ERROR', `${label}的 ${state.name} 没有水平承重顶面，不能作为落点支撑`);
   }
   const surface = cell.y + top;
@@ -122,6 +128,22 @@ function preflightColumn(ctx: SkillCtx, feet: Vec3Like, height: number) {
     }
   }
   return cells;
+}
+
+/** 下一落点没支撑时的只读缺口：把当前可见的较低落点原样列出，不选择、不自动垫/挖/下落。 */
+function cavityGap(ctx: SkillCtx, nextLanding: Vec3Like) {
+  const options = ctx.senses.landingOptions?.(12) ?? [];
+  const distance = (target: Vec3Like) => Math.hypot(target.x - nextLanding.x, target.y - nextLanding.y, target.z - nextLanding.z);
+  return {
+    reason: 'next_landing_support_air',
+    nextLanding: { ...nextLanding },
+    supportCell: { x: nextLanding.x, y: nextLanding.y - 1, z: nextLanding.z },
+    visibleLandings: options
+      .map((o) => ({ target: { ...o.target }, surface: o.surface, drop: o.drop, clearance: o.clearance, corridor: o.corridor, approach: o.approach, unknowns: o.unknowns }))
+      .sort((a, b) => distance(a.target) - distance(b.target))
+      .slice(0, 5),
+    handoff: '可见落点需由 assess_landings 明确选择；确认支撑与净空后可用 descend 选落点（落体通道未看清时可显式 allowUnknownCorridor），也可 place_at 补支撑或换方向；本次没有自动垫块、挖掘或下落',
+  };
 }
 
 export function trustedExcavationEntry(ctx: SkillCtx, id: string, strongholdOnly = false) {
@@ -272,16 +294,18 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       throw error;
     }
     const msg = (error as Error).message;
+    const cavity = error instanceof ExcavationStop && error.nextLanding ? cavityGap(ctx, error.nextLanding) : null;
     // 拒绝时把「为什么 + 能怎么办」一起报，别只留一句 ERROR 让它盲试
     const hint = /液体|水|lava|water/.test(msg) ? '（先换方向避开液体，或先 place_at 堵上再挖）'
       : /下落方块/.test(msg) ? '（下面是沙子/沙砾这类下落方块，换方向或先堵住再挖）'
       : /未知|未加载/.test(msg) ? '（先照亮/转头看清那一格再挖，或换方向）'
+      : cavity ? '（已附当前可见落点事实 cavity；要补支撑得自己显式 place_at，或换方向，或选落点用 descend；本次开挖没有自动垫/挖/下落）'
       : /下面是空的|洞穴|虚空/.test(msg) ? '（前面脚下是空的：要补支撑得自己显式 place_at，或换方向、下去探这个洞；这不是本次开挖自动做的）'
       : /支撑面在|半格|整格脚高/.test(msg) ? '（落点实际支撑顶面与所选脚高不符；可确认落点高度、换一格/换方向，或改用 step 明确落脚）'
       : /身体空间|干燥|站稳/.test(msg) ? '（先挖开落点那两格的脚/头空间，或换方向）'
       : '';
     const unsupported = error instanceof ExcavationStop && error.unsupportedGeometry ? { unsupportedGeometry: true } : {};
-    return fail(error instanceof ExcavationStop ? error.code : codeFromError(error), `有界开挖停止：${msg}${hint}`, { ...details(), ...unsupported });
+    return fail(error instanceof ExcavationStop ? error.code : codeFromError(error), `有界开挖停止：${msg}${hint}`, { ...details(), ...unsupported, ...(cavity ? { cavity } : {}) });
   }
 }
 
