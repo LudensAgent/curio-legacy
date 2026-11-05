@@ -220,7 +220,7 @@ test('地标：同一格的“工作台”和“我的工作台”只留自己�
 });
 
 test('按需提醒：想下矿或回地面时说明历史路线与当前通路未知', async () => {
-  const { situationalReminders } = await import('../src/mind/prompt.ts');
+  const { situationalReminders, decisionReminders } = await import('../src/mind/prompt.ts');
   const { SelfModel } = await import('../src/mind/self.ts');
   const { Perception } = await import('../src/perception/perception.ts');
   const { Vision } = await import('../src/perception/vision.ts');
@@ -252,7 +252,7 @@ test('按需提醒：想下矿或回地面时说明历史路线与当前通路�
   const tripCtx = ctx(at(22, 42, 0), '回地面');
   tripCtx.percept.self.sky_visible = false;
   tripCtx.trip = { minutes: 2, gained: {}, nearEnd: true };
-  const trip = situationalReminders(tripCtx).find((r) => r.startsWith('下矿的账'))!;
+  const trip = decisionReminders(tripCtx).find((r) => r.startsWith('下矿的账'))!;
   assert.match(trip, /你正沿着自己挖过的旧矿道；沿它回入口的下一步 \(\d+,\d+,\d+\)/);
   assert.doesNotMatch(trip, /沿通道走回|挖台阶回地面|再下来一趟/);
   const busy = situationalReminders(ctx(at(20, 64, 30), '砍 16 根原木'));

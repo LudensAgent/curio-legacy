@@ -412,6 +412,45 @@ function planRevisionHint(ctx: MindContext): string | null {
   return `主目标「${plan.goal.slice(0, 30)}」的清单已观察到 ${Math.round(stall.minutes)} 在线分钟没勾掉一项${stall.historyUnknown ? '（更早的在线时长未知）' : ''}，最近：${recent.join('；')}。主目标不用换（换目标要等阶段回顾）；但清单可以按实际情况改：把反复卡住缺掉的那一步补成一项、把卡住的项拆成能验证的小步，或删掉做不成的项（已观察到 ${Math.round(stall.minutes)} 分钟无进展，删项不再强制写 switch_reason；写一句理由记下来更好；删项不会自动完成主目标，要收工请走阶段回顾或明确勾完清单），写 plan {"focus":"${plan.agendaId}","steps":[…] }${doneSteps.length ? `；已经勾掉的（${doneSteps.slice(0, 3).map((t) => `「${t.slice(0, 14)}」`).join('、')}）保留，别写成新步骤` : ''}`;
 }
 
+/** 这一念的意图文本：当前活动、议程、最近三个念头。提醒里的“想下矿/想回地面”判断共用同一口径。 */
+function intentText(ctx: MindContext): string {
+  return [ctx.activity?.what, ctx.activity?.why, ...ctx.self.agenda().map((a) => a.text), ...ctx.self.recentThoughts(3).map((t) => t.text)].filter(Boolean).join(' ');
+}
+
+/**
+ * 不占 5 条提醒配额的决策事实：下矿的账、顺手采集、挖掘规模。
+ * 地下挖掘时静态说明常已占满 situationalReminders 的 5 个位置，这些事实按 push 顺序排在后面会被 slice 截掉
+ * （2026-11-06 线上：388 个地下 prompt 里“下矿的账/顺手采集”0 次送达，ore_opportunity 却打了 231 次日志）。
+ * 这里只把已有事实换个送达位置；采不采、收不收工仍由 Agent 决定。
+ */
+export function decisionReminders(ctx: MindContext): string[] {
+  const out: string[] = [];
+  const p = ctx.percept, s = ctx.state;
+  const here = { x: p.self.pos[0], y: p.self.pos[1], z: p.self.pos[2] };
+  const intent = intentText(ctx);
+  // 预算要有个规模可除：提醒它把挖多深/横多远说出来（不替它定）
+  if (MINING_INTENT.test(intent) && !/(y ?[=-]? ?\d+|挖到|下到|横着|横探|\d+ ?格)/.test(intent)) {
+    out.push('要下矿先想好这次大概挖多深/横多远（挖到 y=某层、横着多少格）');
+  }
+  // 下矿的账：在地下、手上的活快收工或想回地面时，提供实际经历和当前所见。
+  const trip = ctx.trip;
+  if (trip && trip.minutes >= 1.5 && (trip.nearEnd || !ctx.activity || SURFACE_INTENT.test(intent)) && (p.self.where?.kind === 'underground' || p.self.sky_visible === false)) {
+    const got = Object.entries(trip.gained).filter(([k]) => /raw_|_ore$|coal|diamond|emerald|lapis|redstone|amethyst|obsidian|debris|flint|gold_nugget|quartz/.test(k)).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, n]) => `${k}×${n}`);
+    const seen = p.nearby.resources.filter((r) => r.seen === 'now' && isResourceBlock(r.block)).sort((a, b) => a.nearest - b.nearest).slice(0, 4).map((r) => `${r.block}×${r.count}（最近 ${Math.round(r.nearest)} 格）`);
+    const remembered = oreSpotsNear(ctx.memory.landmarks(), { worldId: s.worldId, dim: p.self.dim, pos: here }, { radius: 48 }).length;
+    const picks = durabilityFacts(s.inventory, ['pickaxe'], p.storage?.stock);
+    const back = passageWayBack(ctx);
+    out.push(`下矿的账：${got.length ? `挖到 ${got.join(' ')}` : '还没挖到矿'}；背包空 ${p.emptySlots} 格${picks.length ? `；${picks.join('、')}` : ''}；身边${seen.length ? `看得见 ${seen.join('、')}` : '没看见矿'}${remembered ? `，48 格内记得 ${remembered} 处矿点` : ''}${back ? `；${back}` : ''}。清单后面几项还要不要这些料，一起掂量再决定收不收工`);
+  }
+  // 顺手采集与不可替代工具：把「看见什么矿 + 现在这类料有多少 + 能做什么」摆成事实，让它在路过矿石时能自己掂量要不要顺手采；
+  // 只报事实，采不采、做不做备用工具都由它定（不替它写 gather 或 craft）
+  if (ctx.tier === 'deliberate') {
+    const ore = oreOpportunityFact(p.nearby.resources, p.storage?.stock, s.inventory);
+    if (ore) { out.push(ore); ctx.log?.(ore, { kind: 'ore_opportunity' }); }
+  }
+  return out;
+}
+
 /** 按情境追加在用户消息末尾的提醒：只说和眼下有关的 2–4 件事 */
 export function situationalReminders(ctx: MindContext): string[] {
   const out: string[] = [];
@@ -420,7 +459,7 @@ export function situationalReminders(ctx: MindContext): string[] {
   if (p.self.dim !== 'overworld') out.push(`你在${DIM_ZH[p.self.dim] ?? p.self.dim}，不是主世界；记得的地标、矿道、箱子都按维度分开，主世界的东西在这里看不到。这里没有昼夜、始终昏暗，火把只能照明，不能像主世界那样靠光拦住刷怪`);
   const drafts = activeDrafts()?.list(4).filter((d) => !d.usedBy) ?? [];
   const unfinished = myBuilds(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }).filter((b) => b.status !== 'complete' && b.dist <= 96);
-  const intent = [ctx.activity?.what, ctx.activity?.why, ...ctx.self.agenda().map((a) => a.text), ...ctx.self.recentThoughts(3).map((t) => t.text)].filter(Boolean).join(' ');
+  const intent = intentText(ctx);
   if (ctx.learnFrom) {
     const f = ctx.learnFrom;
     out.push(`刚才「${f.stuck.what}」卡住了（${f.stuck.why.slice(0, 50)}${f.stuck.skill ? `，失败的是 ${f.stuck.skill}${f.stuck.code ? ` ${f.stuck.code}` : ''}` : ''}），随后「${f.solved.what}」做成了（${f.solved.routine.slice(0, 4).join('；')}）：以后还会碰到的话，写 worth_learning 说清怎么回事，后台会把它练成技能`);
@@ -471,10 +510,6 @@ export function situationalReminders(ctx: MindContext): string[] {
     // 世界规则事实：keepInventory 开着时死亡不掉落（只是事实，怎么备仍由它定）
     const keepInv = s.gamerules?.keepInventory;
     if (keepInv === true || keepInv === 'true') out.push('keepInventory 开着（死亡不掉落）');
-    // 预算要有个规模可除：提醒它把挖多深/横多远说出来（不替它定）
-    if (!/(y ?[=-]? ?\d+|挖到|下到|横着|横探|\d+ ?格)/.test(intent)) {
-      out.push('要下矿先想好这次大概挖多深/横多远（挖到 y=某层、横着多少格）');
-    }
   }
   // 冶炼燃料预算：手上这段活要 smelt 时，先把燃料够不够摆出来（只报事实，燃料比走 methods/fuel 的原版默认）
   const smeltStep = ctx.activity?.steps?.find((st) => st.skill === 'smelt');
@@ -486,22 +521,7 @@ export function situationalReminders(ctx: MindContext): string[] {
       if (f) out.push(f);
     }
   }
-  // 下矿的账：在地下、手上的活快收工或想回地面时，提供实际经历和当前所见。
-  const trip = ctx.trip;
-  if (trip && trip.minutes >= 1.5 && (trip.nearEnd || !ctx.activity || SURFACE_INTENT.test(intent)) && (p.self.where?.kind === 'underground' || p.self.sky_visible === false)) {
-    const got = Object.entries(trip.gained).filter(([k]) => /raw_|_ore$|coal|diamond|emerald|lapis|redstone|amethyst|obsidian|debris|flint|gold_nugget|quartz/.test(k)).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, n]) => `${k}×${n}`);
-    const seen = p.nearby.resources.filter((r) => r.seen === 'now' && isResourceBlock(r.block)).sort((a, b) => a.nearest - b.nearest).slice(0, 4).map((r) => `${r.block}×${r.count}（最近 ${Math.round(r.nearest)} 格）`);
-    const remembered = oreSpotsNear(ctx.memory.landmarks(), { worldId: s.worldId, dim: p.self.dim, pos: here }, { radius: 48 }).length;
-    const picks = durabilityFacts(s.inventory, ['pickaxe'], p.storage?.stock);
-    const back = passageWayBack(ctx);
-    out.push(`下矿的账：${got.length ? `挖到 ${got.join(' ')}` : '还没挖到矿'}；背包空 ${p.emptySlots} 格${picks.length ? `；${picks.join('、')}` : ''}；身边${seen.length ? `看得见 ${seen.join('、')}` : '没看见矿'}${remembered ? `，48 格内记得 ${remembered} 处矿点` : ''}${back ? `；${back}` : ''}。清单后面几项还要不要这些料，一起掂量再决定收不收工`);
-  }
-  // 顺手采集与不可替代工具：把「看见什么矿 + 现在这类料有多少 + 能做什么」摆成事实，让它在路过矿石时能自己掂量要不要顺手采；
-  // 只报事实，采不采、做不做备用工具都由它定（不替它写 gather 或 craft）
-  if (ctx.tier === 'deliberate') {
-    const ore = oreOpportunityFact(p.nearby.resources, p.storage?.stock, s.inventory);
-    if (ore) { out.push(ore); ctx.log?.(ore, { kind: 'ore_opportunity' }); }
-  }
+  // 下矿的账、顺手采集、挖掘规模不在这里追加：它们不占 5 条提醒配额，由 decisionReminders 在切片后单独送达。
   // 工具分级事实不在这里追加：这里末尾只保留 5 条，挖掘场景前面常已有 3–8 条，
   // 放在这里会被 slice 截掉；由 buildMindMessages 在切片后单独追加，确保真的送达。
   // 养动物、村民交易：打算里提到了才把机制摆出来（模型对这些的记忆常是含糊或老版本的）
@@ -852,6 +872,8 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
     sections.unshift(['操作者的指令', { order: order.text, received: `${order.ageSec} 现实秒前`, status: order.status === 'new' ? '刚收到，还没照做' : '照做中', must: '优先于你自己的打算；照做，并在 operator 里回应 doing / done / cannot' }]);
     reminders.unshift(`操作者的指令「${order.text.slice(0, 80)}」${order.status === 'new' ? '刚收到：这一念就照做（把它变成手上的活）' : '还没做完：手上的活要为它服务；做完了就写 done'}，并写 operator`);
   }
+  // 决策事实不占 5 条提醒配额：地下挖掘时静态说明常已占满，必须像工具事实一样在切片后单独追加。
+  for (const d of decisionReminders(ctx)) reminders.push(d);
   const body = noteGoneSpots(sections.map(([name, data]) => `【${name}】${JSON.stringify(data)}`).join('\n'), ctx.memory, p.self.dim);
   return [{ role: 'system', content: system }, { role: 'user', content: `${body}${reminders.length ? `\n\n【此刻要留意】\n${reminders.map((r) => `- ${r}`).join('\n')}` : ''}\n\n现在你在想什么、打算怎么做？只输出一个 JSON 对象。` }];
 }

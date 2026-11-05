@@ -6,7 +6,7 @@ import { EventBus } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { createActivity } from '../src/mind/activity.ts';
 import { Mind } from '../src/mind/mind.ts';
-import { buildMindMessages, situationalReminders, type MindContext } from '../src/mind/prompt.ts';
+import { buildMindMessages, decisionReminders, situationalReminders, type MindContext } from '../src/mind/prompt.ts';
 import { SelfModel } from '../src/mind/self.ts';
 import type { Thinker } from '../src/mind/thinker.ts';
 import { Perception } from '../src/perception/perception.ts';
@@ -148,6 +148,36 @@ test('提示词：工具事实不占 5 条提醒配额，真实挖掘上下文�
   assert.ok(user.includes(fact), '切片后单独追加，工具事实必须真正进入 user 消息');
   const hidden = buildMindMessages({ ...ctx, toolFact: null }).find((m) => m.role === 'user')!.content;
   assert.ok(!hidden.includes(fact));
+  memory.close();
+});
+
+test('提示词：下矿的账/顺手采集/挖掘规模不占 5 条提醒配额，地下挖掘时真正送达', () => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  const perception = new Perception(adapter, memory, bus, new Vision(adapter));
+  const base: MindContext = { tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(), self: new SelfModel(null),
+    memory, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' };
+  const activity = createActivity({
+    what: '沿矿道往下挖，找钻石', why: '测试', kind: 'gather', repeat: 1,
+    steps: [
+      { skill: 'excavate_path', args: { entry: 'current', mode: 'stairs', direction: 'east', steps: 4 } },
+      { skill: 'smelt', args: { item: 'raw_iron', count: 8 } },
+    ],
+  }, '', 'llm', adapter.state());
+  const ctx = { ...base, activity, trip: { minutes: 10, gained: { diamond: 1 }, nearEnd: true } };
+  (ctx.percept.self as any).where = { kind: 'underground', text: '在地下：头顶 3 格是 stone' };
+  (ctx.percept.self as any).sky_visible = false;
+  (ctx.state as any).gamerules = { keepInventory: true };
+  (ctx.percept as any).nearby.resources = [{ block: 'iron_ore', count: 3, nearest: 5, dir: 'N', seen: 'now' }];
+  const reminders = situationalReminders(ctx);
+  assert.equal(reminders.length, 5, '静态提醒已占满 5 条');
+  const decisions = decisionReminders(ctx);
+  assert.ok(decisions.some((r) => r.startsWith('下矿的账')), decisions.join('\n'));
+  assert.ok(decisions.some((r) => r.startsWith('顺手采集')), decisions.join('\n'));
+  assert.ok(decisions.some((r) => r.startsWith('要下矿先想好')), decisions.join('\n'));
+  const user = buildMindMessages(ctx).find((m) => m.role === 'user')!.content;
+  assert.ok(user.includes('下矿的账'), '下矿的账必须真正进入 user 消息');
+  assert.ok(user.includes('顺手采集'), '顺手采集必须真正进入 user 消息');
+  assert.ok(user.includes('要下矿先想好'), '挖掘规模提醒必须真正进入 user 消息');
   memory.close();
 });
 
