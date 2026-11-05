@@ -44,6 +44,33 @@ export function viewOf(p?: Percept): string | undefined {
   return p ? JSON.stringify({ around: p.self.around }) : undefined;
 }
 
+/**
+ * 自动重试只看失败回执里实际观测到的相关事实：支撑/净空、目标格、进度、额度和身体位置。
+ * 转头、背包/附近资源增减、无关火把不在其中，不能用来给同一缺口再要一次重试。
+ */
+const GAP_EVIDENCE_FIELDS = [
+  'movementNotAttempted', 'obscured', 'failureCause', 'pillarFailure', 'pillarClearance', 'reference', 'occupied',
+  'problems', 'landingSupport', 'completedSteps', 'excavatedBlocks', 'ascendedLevels', 'descendedLevels',
+  'goalReached', 'climbed', 'spent', 'targetCell', 'target', 'was', 'drop', 'expectedFoot', 'below', 'partialStop',
+  'unsupportedGeometry', 'position', 'placed', 'consumed',
+] as const;
+
+function gapEvidence(result: SkillResult): string {
+  const data = result.data;
+  if (!data) return '';
+  const picked: Record<string, unknown> = {};
+  for (const key of GAP_EVIDENCE_FIELDS) if (data[key] !== undefined) picked[key] = data[key];
+  const text = JSON.stringify(picked);
+  return text.length > 240 ? text.slice(0, 240) : text;
+}
+
+/** 短指纹：把“同一技能/参数/失败码/证据版本”记进 adaptations，避免长参数撑大提示词。 */
+function digest(text: string): string {
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 16777619);
+  return (h >>> 0).toString(36);
+}
+
 export function createActivity(draft: ActivityDraft, monologue: string, source: Activity['source'], state: Pick<AgentState, 'inventory'>): Activity {
   return {
     id: shortId('act_'), what: draft.what, why: draft.why, kind: draft.kind, steps: draft.steps.map((s) => ({ ...s, id: shortId('st_') })),
@@ -138,8 +165,6 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   const previous = [...a.results].reverse().find((r) => r.status === 'failed' && targetKeyOf(r) === targetKeyOf(step));
   const view = viewOf(percept);
   const baseline = previous?.pos ? previous : a.stepStart;
-  const changed = !!baseline && (!!baseline.pos && Math.hypot(state.pos.x - baseline.pos.x, state.pos.y - baseline.pos.y, state.pos.z - baseline.pos.z) >= 0.5 ||
-    baseline.view !== undefined && view !== undefined && baseline.view !== view);
   const previousPosition = a.results.at(-1)?.pos;
   if (previousPosition && JSON.stringify(feetCell(previousPosition)) !== JSON.stringify(feetCell(state.pos))) delete a.airDigs;
   a.results.push({ skill: step.skill, args: step.args, status: result.status, failureCode: result.failureCode, summary: result.summary.slice(0, 160), at: Date.now(), durationMs, pos: { ...state.pos }, ...(view !== undefined ? { view } : {}) });
@@ -229,64 +254,61 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   a.failures++;
   a.consecutiveFailures++;
   const code = result.failureCode ?? 'ERROR';
-  const key = `${a.index - 1}:${step.skill}:${code}`;
   if (a.failures >= 5) return { kind: 'stuck', why: `这段活已经失败 ${a.failures} 次了（最近：${result.summary.slice(0, 80)}）` };
   if (NEEDS_THOUGHT.has(code)) return { kind: 'stuck', why: result.summary.slice(0, 160) };
-  // 机械执行失败先由身体就地应变（清脚下、垫支撑、清头顶），补不动才交给脑子——脑子想不出“没支撑/头顶被挡”的新答案。
+  // 自动插步只能是已选动作契约里明确包含的执行辅助；挖、放、耗材和改目标默认交回事实。
   const data = result.data as Record<string, any> | undefined;
   // 确定性预检拒绝先于任何自动照明/清障处理：暗处未知支撑、预检一步未推进，交回事实，不自动耗火把或原样重试。
   if (step.skill === 'step' && data?.movementNotAttempted === true) return { kind: 'stuck', why: result.summary.slice(0, 160) };
   if (step.skill === 'excavate_path' && data?.completedSteps === 0 && (data?.excavatedBlocks ?? 0) === 0) return { kind: 'stuck', why: result.summary.slice(0, 160) };
   const stepArgs = (step.args ?? {}) as Record<string, any>;
   const facing = stepArgs.facing ?? a.facing;
-  const adapt = (skill: string, args: unknown, what: string, tag: string): StepVerdict => {
-    // 用稳定的步签名（不随 index 因插步而偏移）标记「同一逻辑步只应变一次」
-    const mark = `${tag}:${step.skill}:${code}:${JSON.stringify(step.args ?? {}).slice(0, 60)}`;
-    if (a.adaptations.includes(mark)) return { kind: 'stuck', why: result.summary.slice(0, 160) };
-    a.adaptations.push(mark);
-    const own = ownStep(a, step);
-    a.steps.splice(Math.max(0, a.index - 1), 0, {
-      skill, args, id: shortId('st_'), origin: 'execution_helper',
-      authorizedBy: { skill: step.skill, ...(own?.id ? { stepId: own.id } : {}), args: step.args },
-    });
-    a.index = Math.max(0, a.index - 1);
-    return { kind: 'continue', adapted: what };
-  };
   // 1) 看不清：交回事实，不自动插火把（照明是耗材，未授权不支出）
   if (data?.obscured) return { kind: 'stuck', why: result.summary.slice(0, 160) };
-  // 3) climb_up 明确授权「往上」与清障：头顶被挡先挖开（属于稳定执行已选动作）。
+  // 2) climb_up 的动作说明明确包含「头顶挡着会先挖开」：这是该动作契约内的执行辅助。
+  //    保留授权链（原步骤/参数），并说明只会消耗工具耐久；同一障碍证据只清一次，最多两次。
   if (step.skill === 'climb_up' && data?.failureCause === 'PILLAR_CLEARANCE') {
     // 障碍格可能有多格（身后/侧上方）：一次全挖空，别再一格一格挤牙膏、也别硬编码 [0,2,0]
     const cells: { at: [number, number, number]; facing?: string }[] = data?.pillarClearance?.cells?.length
       ? data.pillarClearance.cells
       : [{ at: data?.pillarClearance?.at ?? [0, 2, 0], facing: data?.pillarClearance?.facing ?? facing }];
-    const mark = `clearance:${step.skill}:${code}:${JSON.stringify(step.args ?? {}).slice(0, 60)}`;
-    if (a.adaptations.includes(mark)) return { kind: 'stuck', why: result.summary.slice(0, 160) };
+    const scope = `${step.skill}:${digest(JSON.stringify(step.args ?? {}))}:${code}`;
+    const mark = `clearance:${scope}:${digest(JSON.stringify(cells.map((cell) => [cell.at, cell.facing ?? null])))}`;
+    const cleared = a.adaptations.filter((item) => item.startsWith(`clearance:${scope}:`)).length;
+    if (cleared >= 2 || a.adaptations.includes(mark)) return { kind: 'stuck', why: result.summary.slice(0, 160) };
     a.adaptations.push(mark);
     const own = ownStep(a, step);
     const authorizedBy = { skill: step.skill, ...(own?.id ? { stepId: own.id } : {}), args: step.args };
     a.steps.splice(Math.max(0, a.index - 1), 0, ...cells.map((c) => ({ skill: 'dig_at', args: { at: c.at, ...(c.facing ? { facing: c.facing } : {}) }, id: shortId('st_'), origin: 'execution_helper' as const, authorizedBy })));
     a.index = Math.max(0, a.index - 1);
-    return { kind: 'continue', adapted: `头顶被挡，先把 ${cells.length} 格障碍全挖开再走` };
+    return { kind: 'continue', adapted: `头顶被挡，先把 ${cells.length} 格障碍挖开再走（climb_up 已授权清障；只消耗工具耐久，不消耗背包方块）` };
   }
   // goto 是「委托寻路」：头顶被挡是路线事实，不替 Agent 决定挖哪一格——挖开、绕行还是退回去由它定。
   if (step.skill === 'goto' && data?.pillarClearance) return { kind: 'stuck', why: result.summary.slice(0, 160) };
-  // place_at 是普通放置/搭柱：不隐式清顶；头顶被挡/未加载交回事实，挖哪一格由 Agent 决定。
+  // place_at 是普通放置/搭柱：不隐式清顶或挖脚下；交回事实，挖哪一格由 Agent 决定。
   if (step.skill === 'place_at' && data?.pillarFailure === 'NOT_PLACED:头顶跳跃空间受阻') return { kind: 'stuck', why: result.summary.slice(0, 160) };
   if (step.skill === 'place_at' && data?.pillarFailure === 'NOT_PLACED:头顶跳跃空间未加载') return { kind: 'stuck', why: result.summary.slice(0, 160) };
   if (step.skill === 'place_at' && data?.pillarFailure === 'NOT_PLACED:跳不起来') return { kind: 'stuck', why: result.summary.slice(0, 160) };
-  // 4) 脚下有非空气的可替换物（火把/草/雪层…）：先拿掉再垫（同头顶清障，属于稳定执行已选动作）
+  // 3) 脚下有非空气的可替换物（火把/草/雪层…）：place_at 没有授予挖掘，不自动 dig_at 清掉。
   if (step.skill === 'place_at' && typeof data?.pillarFailure === 'string' && data.pillarFailure.startsWith('BLOCKED:')) {
-    return adapt('dig_at', { at: [0, 0, 0], ...(facing ? { facing } : {}) }, '脚下有东西挡住垫高，先拿掉再垫', 'clearance');
+    return { kind: 'stuck', why: result.summary.slice(0, 160) };
   }
-  // 5) 脚下没有实心地面（悬空/水里/梯子上）或服务器拒放：原地垫高垫不了，别白重试，把事实交回脑子
+  // 4) 脚下没有实心地面（悬空/水里/梯子上）或服务器拒放：原地垫高垫不了，别白重试，把事实交回脑子
   if (step.skill === 'place_at' && (data?.pillarFailure === 'NO_REFERENCE' || typeof data?.pillarFailure === 'string' && data.pillarFailure.startsWith('NOT_PLACED:Server'))) {
     return { kind: 'stuck', why: result.summary.slice(0, 160) };
   }
-  if (RETRYABLE.has(code) && !(step.skill === 'goto' && code === 'PATH_NOT_FOUND') && changed && a.consecutiveFailures === 1 && !a.adaptations.includes(`retry:${key}`)) {
-    a.adaptations.push(`retry:${key}`);
+  // 5) 同一技能+错误+原参数+同一证据版本不原样重试。首次重试要求身体实际移动（相关进展）；
+  //    之后只有失败回执里的支撑/净空/目标/进度等事实变了才允许复验，且最多两次。
+  //    转头、附近资源增减、无关火把不计入证据。
+  const retryScope = `${step.skill}:${digest(JSON.stringify(step.args ?? {}))}:${code}`;
+  const retryMark = `retry:${retryScope}:${digest(gapEvidence(result))}`;
+  const retries = a.adaptations.filter((item) => item.startsWith(`retry:${retryScope}:`)).length;
+  const physicallyMoved = !!baseline?.pos && Math.hypot(state.pos.x - baseline.pos.x, state.pos.y - baseline.pos.y, state.pos.z - baseline.pos.z) >= 0.5;
+  if (RETRYABLE.has(code) && !(step.skill === 'goto' && code === 'PATH_NOT_FOUND')
+    && !a.adaptations.includes(retryMark) && retries < 2 && (retries > 0 || physicallyMoved)) {
+    a.adaptations.push(retryMark);
     a.index = Math.max(0, a.index - 1);
-    return { kind: 'continue', adapted: `${step.skill} 没成，再试一次` };
+    return { kind: 'continue', adapted: `${step.skill} 没成；相关事实有变化，再试一次` };
   }
   return { kind: 'stuck', why: result.summary.slice(0, 160) };
 }

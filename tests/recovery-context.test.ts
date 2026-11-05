@@ -5,7 +5,7 @@ import { EventBus } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { failureFor } from '../src/mind/mind.ts';
 import { Vision } from '../src/perception/vision.ts';
-import { recoveryContext } from '../src/skills/recovery.ts';
+import { constrainRecoveryAction, recoveryContext } from '../src/skills/recovery.ts';
 import type { SkillCtx, SkillResult } from '../src/skills/types.ts';
 import { setBehaviorRegistry, useSkill } from '../src/skills/use-skill.ts';
 import { FakeAdapter } from './fake-adapter.ts';
@@ -72,6 +72,100 @@ test('原实体 ID 与种类对细动作同样有效，不能绕过 act 改打�
   ctx.recovery = { skill: 'defend', args: { target: 'skeleton' } };
   await assert.rejects(makeBridge(ctx)('attack', [8]), /原种类/);
   assert.equal(adapter.actions.length, 0);
+});
+
+function scopeCtx(recovery: SkillCtx['recovery']) {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null);
+  const ctx: SkillCtx = { adapter, memory, senses: new Vision(adapter), bus: new EventBus(), signal: new AbortController().signal,
+    deadline: Date.now() + 10000, taskId: 'scope-test', progress() {}, recovery };
+  return { adapter, memory, ctx };
+}
+
+test('恢复不能由普通动作引入组合施工，组合施工只沿用原剩余额度', (t) => {
+  const { memory, ctx } = scopeCtx({ skill: 'step', args: { to: [1, 0, 0] } });
+  t.after(() => memory.close());
+  assert.throws(() => constrainRecoveryAction(ctx, 'excavate_path', { entry: 'current', mode: 'stairs', direction: 'east', steps: 2 }), /显式授权/);
+  assert.throws(() => constrainRecoveryAction(ctx, 'climb_up', { height: 1, untilSky: false }), /显式授权/);
+  assert.throws(() => constrainRecoveryAction(ctx, 'dig', { dir: 'down', blocks: 1 }), /没有授权挖掘/);
+
+  ctx.recovery = { skill: 'climb_up', args: { height: 5, untilSky: false }, climb: { height: 5, spent: 3, startY: 64 } };
+  assert.equal((constrainRecoveryAction(ctx, 'climb_up', { height: 5, untilSky: false }) as { height: number }).height, 2, '只补剩余高度');
+  assert.equal((constrainRecoveryAction(ctx, 'climb_up', { height: 1, untilSky: false }) as { height: number }).height, 1);
+  assert.throws(() => constrainRecoveryAction(ctx, 'climb_up', { height: 2, untilSky: true }), /停止条件/);
+
+  ctx.recovery = { skill: 'excavate_path', args: { entry: 'current', mode: 'stairs', direction: 'east', steps: 3 } };
+  assert.equal((constrainRecoveryAction(ctx, 'excavate_path', { entry: 'current', mode: 'stairs', direction: 'east', steps: 2 }) as { steps: number }).steps, 2);
+  assert.throws(() => constrainRecoveryAction(ctx, 'excavate_path', { entry: 'current', mode: 'stairs', direction: 'east', steps: 4 }), /额度/);
+  assert.throws(() => constrainRecoveryAction(ctx, 'excavate_path', { entry: 'other', mode: 'stairs', direction: 'east', steps: 1 }), /原入口/);
+  assert.throws(() => constrainRecoveryAction(ctx, 'excavate_path', { entry: 'current', mode: 'stairs', direction: 'west', steps: 1 }), /方向与模式/);
+});
+
+test('恢复沿用水面/载具入口与预算，不能改用原始按键或其他移动方式', (t) => {
+  const { memory, ctx } = scopeCtx({ skill: 'surface', args: { timeoutMs: 5000 } });
+  t.after(() => memory.close());
+  assert.equal(constrainRecoveryAction(ctx, 'surface', { timeoutMs: 5000 }).timeoutMs, 5000);
+  assert.throws(() => constrainRecoveryAction(ctx, 'surface', { timeoutMs: 6000 }), /时间预算/);
+  assert.throws(() => constrainRecoveryAction(ctx, 'swim_to', { xyz: { x: 1, y: 64, z: 1 } }), /不能改用/);
+
+  ctx.recovery = { skill: 'travel', args: { to: 'E 100', noBoat: true } };
+  assert.equal(constrainRecoveryAction(ctx, 'travel', { to: 'E 100', noBoat: true }).noBoat, true);
+  assert.throws(() => constrainRecoveryAction(ctx, 'travel', { to: 'E 100' }), /没有授权使用船/);
+  assert.throws(() => constrainRecoveryAction(ctx, 'travel', { to: 'E 100', noBoat: true, place: true }), /垫方块/);
+
+  ctx.recovery = { skill: 'swim_to', args: { xyz: { x: 1, y: 64, z: 2 } } };
+  assert.deepEqual(constrainRecoveryAction(ctx, 'swim_to', { xyz: { x: 1, y: 64, z: 2 } }).xyz, { x: 1, y: 64, z: 2 });
+  assert.throws(() => constrainRecoveryAction(ctx, 'swim_to', { xyz: { x: 1, y: 64, z: 3 } }), /原目标坐标/);
+
+  ctx.recovery = { skill: 'step', args: { to: [1, 0, 0] } };
+  assert.throws(() => constrainRecoveryAction(ctx, 'press_keys', { keys: { forward: true }, ms: 100 }), /原始按键/);
+  ctx.recovery = { skill: 'press_keys', args: { keys: { forward: true }, ms: 100 } };
+  assert.equal(constrainRecoveryAction(ctx, 'press_keys', { keys: { forward: true }, ms: 50 }).ms, 50);
+  assert.throws(() => constrainRecoveryAction(ctx, 'press_keys', { keys: { forward: true, jump: true }, ms: 100 }), /新增/);
+  assert.throws(() => constrainRecoveryAction(ctx, 'press_keys', { keys: { forward: true }, ms: 200 }), /按压时长/);
+  assert.throws(() => constrainRecoveryAction(ctx, 'goto', { target: '1,64,1' }), /升级/);
+
+  ctx.recovery = { skill: 'step', args: {}, deadlineMs: Date.now() - 1 };
+  assert.throws(() => constrainRecoveryAction(ctx, 'step', { to: [0, 0, 1] }), /期限已过/);
+});
+
+test('恢复不能开启未授权的 make、不能换 dig 目标，也不能自选实体', (t) => {
+  const { memory, ctx } = scopeCtx({ skill: 'step', args: { to: [1, 0, 0] } });
+  t.after(() => memory.close());
+  assert.throws(() => constrainRecoveryAction(ctx, 'gather', { make: true }), /自动准备/);
+  ctx.recovery = { skill: 'step', args: { to: [1, 0, 0], make: false } };
+  assert.equal(constrainRecoveryAction(ctx, 'gather', {}).make, false, '原动作禁止准备时嵌套动作保持 make:false');
+
+  ctx.recovery = { skill: 'dig', args: { target: { x: 1, y: 63, z: 0 }, block: 'stone' } };
+  assert.deepEqual(constrainRecoveryAction(ctx, 'dig', { target: { x: 1, y: 63, z: 0 }, block: 'stone' }).target, { x: 1, y: 63, z: 0 });
+  assert.throws(() => constrainRecoveryAction(ctx, 'dig', { target: { x: 2, y: 63, z: 0 }, block: 'stone' }), /原目标/);
+  assert.throws(() => constrainRecoveryAction(ctx, 'dig', { target: { x: 1, y: 63, z: 0 }, block: 'dirt' }), /方块约束/);
+  assert.throws(() => constrainRecoveryAction(ctx, 'dig', { target: { x: 1, y: 63, z: 0 }, block: 'stone', wet: true }), /wet:true/);
+
+  ctx.recovery = { skill: 'dig', args: { dir: 'down', blocks: 2 } };
+  assert.equal(constrainRecoveryAction(ctx, 'dig', { dir: 'down', blocks: 2 }).blocks, 2);
+  assert.throws(() => constrainRecoveryAction(ctx, 'dig', { dir: 'down', blocks: 3 }), /格数额度/);
+
+  ctx.recovery = { skill: 'step', args: { to: [1, 0, 0] } };
+  assert.throws(() => constrainRecoveryAction(ctx, 'hit_entity', { entity: 7 }), /没有指定实体/);
+  ctx.recovery = { skill: 'hit_entity', args: { entity: 7 } };
+  assert.throws(() => constrainRecoveryAction(ctx, 'hit_entity', { entity: 8 }), /原实体/);
+});
+
+test('Agent 新的显式委托不受恢复上下文约束', () => {
+  const adapter = new FakeAdapter();
+  const values = { to: { x: 9, y: 64, z: 9 }, arrival: { kind: 'exact' } };
+  const out = constrainRecoveryAction({ adapter } as unknown as SkillCtx, 'walk_to', values);
+  assert.deepEqual(out, values, '没有 recovery 时原样放行');
+});
+
+test('失败交接会校验高度账本并忽略伪造的 allowPlace/allowDig', () => {
+  assert.ok('error' in recoveryContext({ skill: 'climb_up', args: { height: 3 }, climb: { height: 0, spent: 0, startY: 64 } }));
+  assert.ok('error' in recoveryContext({ skill: 'climb_up', args: { height: 3 }, climb: { height: 3, spent: -1, startY: 64 } }));
+  const forged = recoveryContext({ skill: 'step', args: {}, allowPlace: 'yes', allowDig: 1 });
+  assert.ok(!('error' in forged));
+  if ('error' in forged) return;
+  assert.equal(forged.allowPlace, undefined);
+  assert.equal(forged.allowDig, undefined);
 });
 
 test('嵌套技能的取消向自己的版本记一次调用，并继续向父层传递取消', async (t) => {
