@@ -365,7 +365,7 @@ export function passageRoute(recs: Pick<PassageRecord, 'path' | 'links'>[], from
   return route;
 }
 
-/** 从 here 连得上的通道分量（here 离网 >6 格时退回全部记录）。 */
+/** 从 here 连得上的通道分量（here 水平离网 >6 格时退回全部记录）。 */
 function surfacePool(recs: (Pick<PassageRecord, 'path' | 'entrances' | 'links'> & { id?: string })[], here: Vec3Like, near = 6) {
   const { nodes, owner, edges } = passageGraph(recs);
   let start = -1, bd = near;
@@ -380,8 +380,8 @@ function surfacePool(recs: (Pick<PassageRecord, 'path' | 'entrances' | 'links'> 
       owners.add(owner[u]!);
       for (const v of edges.get(u) ?? []) if (!seen.has(v)) { seen.add(v); stack.push(v); }
     }
-    const reachable = recs.filter((_, i) => owners.has(i));
-    if (reachable.length) pool = reachable;
+    // start 自己所属的 record 一定在 owners 里，所以过滤结果不会是空。
+    pool = recs.filter((_, i) => owners.has(i));
   }
   return { nodes, edges, start, pool };
 }
@@ -410,7 +410,7 @@ export function passageSurfaceCandidates(recs: (Pick<PassageRecord, 'path' | 'en
     }
   }
   if (!hits.length) return [];
-  // 先从 here 最近的可达节点出发做一次最短路；here 离网太远时用最近脚点（follow_passage 会先走过去）。
+  // 先从 here 最近的节点出发做一次最短路；here 离网太远时也用它当起点（follow_passage 会先走过去）。
   let origin = start;
   if (origin < 0) {
     let bd = Infinity;
@@ -448,7 +448,7 @@ export function passageSurfaceAnchor(recs: Pick<PassageRecord, 'path' | 'entranc
 }
 
 /**
- * 同一段路被重复记成多条 record（点只差 0–2 格）时，导航只留一条代表：
+ * 同一段路被重复记成多条 record（点基本重合，≈1.5 格内）时，导航只留一条代表：
  * 重复记录会在图上形成并行的伪岔路，让“最短路径”在两团几乎相同的点之间来回穿。
  * 只影响本次读取，不改存储。live 优先于归档，links/点数多的优先，最近用过的优先。
  * 两个方向的重合度都要达标：一条长巷里包含另一条短巷时，短巷反向覆盖不了长巷，不会被误删。
@@ -460,12 +460,13 @@ export function dedupePassages<T extends { path: Vec3Like[]; links?: { a: Vec3Li
   recs: T[], opts: { cover?: number; near?: number } = {},
 ): T[] {
   const cover = opts.cover ?? 0.8, near = opts.near ?? 1.5;
-  // path 是稀疏采样（多则 160 点）；只有 links 的旧记录才退回边的端点，均匀抽样，避免 O(点数²) 爆炸。
-  const sample = (r: T): Vec3Like[] => r.path.length ? r.path : (() => {
-    const pts = [...new Map((r.links ?? []).flatMap((l) => [l.a, l.b]).map((p) => [`${p.x},${p.y},${p.z}`, p])).values()];
+  // path 是稀疏采样（多则 160 点）；只有 links 的旧记录才退回边的端点。
+  // 两种来源都均匀抽到 ≤64 点，避免两两比较在密集记录上变成 O(160²)。
+  const sample = (r: T): Vec3Like[] => {
+    const pts = r.path.length ? r.path : [...new Map((r.links ?? []).flatMap((l) => [l.a, l.b]).map((p) => [`${p.x},${p.y},${p.z}`, p])).values()];
     const step = Math.max(1, Math.ceil(pts.length / 64));
-    return pts.filter((_, i) => i % step === 0);
-  })();
+    return step === 1 ? pts : pts.filter((_, i) => i % step === 0);
+  };
   const eligible = recs.map((r, i) => ({ r, i })).filter(({ r }) => (r.links?.length ?? 0) > 0);
   if (eligible.length < 2) return [...recs];
   const ptsOf = new Map(eligible.map(({ r, i }) => [i, sample(r)]));
@@ -478,8 +479,17 @@ export function dedupePassages<T extends { path: Vec3Like[]; links?: { a: Vec3Li
     && a.min.x - near <= b.max.x && b.min.x - near <= a.max.x
     && a.min.y - near <= b.max.y && b.min.y - near <= a.max.y
     && a.min.z - near <= b.max.z && b.min.z - near <= a.max.z; };
-  const covered = (a: Vec3Like[], b: Vec3Like[]) => a.length > 0 && b.length > 0
-    && a.filter((p) => b.some((q) => d3(p, q) <= near)).length / a.length >= cover;
+  // 提前退出：剩余点全命中也达不到阈值时立刻判否，密集场景下不必把 64×64 比完。
+  const covered = (a: Vec3Like[], b: Vec3Like[]) => {
+    if (!a.length || !b.length) return false;
+    const need = Math.ceil(cover * a.length);
+    let hit = 0;
+    for (let i = 0; i < a.length; i++) {
+      if (b.some((q) => d3(a[i]!, q) <= near)) hit++;
+      if (hit + (a.length - i - 1) < need) return false;
+    }
+    return hit >= need;
+  };
   const rank = eligible.map(({ r, i }) => ({ i, key: [r.archivedAt === undefined ? 0 : 1, -(r.links?.length ?? 0), -(r.lastUsedAt ?? 0), -r.path.length] }));
   rank.sort((a, b) => { for (let k = 0; k < a.key.length; k++) if (a.key[k] !== b.key[k]) return a.key[k]! - b.key[k]!; return a.i - b.i; });
   const clusters: { rep: number; members: number[] }[] = [];
