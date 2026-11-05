@@ -23,6 +23,8 @@ import { ObservedGameClock } from './game-clock.ts';
 export interface CuratorOptions { checkMs: number; unusedDays: number; candidateUnusedDays: number; disabledDays: number; gapMs: number; minSkills: number; /** 同时留着的自己写的技能最多几份：多了就收起最没用的 */ maxActive: number }
 export const DEFAULT_CURATOR: CuratorOptions = { checkMs: 60_000, unusedDays: 60, candidateUnusedDays: 15, disabledDays: 5, gapMs: 0, minSkills: 4, maxActive: 24 };
 const DAY_TICKS = 24_000;
+/** fired 在触发瞬间就加，执行结果要等结束（或取消）才记；刚触发的技能不能当成“触发过却什么都没做”。 */
+const FIRED_GRACE_MS = 10 * 60_000;
 type Lifetime = { world: string; name: string; candidate: boolean; version: number; clock: number; age: number; idle: number; disabled: number;
   activity: string; restoredAt: number; disabledAt: number; retired: boolean };
 
@@ -263,11 +265,14 @@ export class SkillCurator {
     // 触发过却 0 成 0 败：跳过（noop/skip）或有没被取消的实际执行（没写 verify 的“跑完了”）都说明条件与代码对不上，
     // 不算“还没机会证明”。只触发后被取消（心智改主意、断线、更高优先级抢占）不记成负面证据。
     // usageByVersion 按版本记，重写后的新版本从零判断；只有完全没有按版本拆分的老统计才退回终身 skipped/uses/fired，
-    // 此时接受“历史证据取消保护”的保守取舍（老统计没有取消归属，fired 无法区分取消）。
+    // 此时接受“历史证据取消保护”的保守取舍（老统计没有取消归属）。
+    // fired 只在完全没有 uses 计数器的更老数据里使用，且要过了宽限期：触发瞬间 fired 就加了，结果要等执行结束才回来，
+    // 刚触发的技能正在跑，不能因为 fired=1 被中途收起。有 uses 时取消豁免优先于 fired。
     const usage = st?.usageByVersion?.[this.engine.versionOf(b)];
     const triggered = st?.usageByVersion !== undefined
       ? (usage?.skipped ?? 0) > 0 || (usage?.uses ?? 0) - (usage?.cancelled ?? 0) > 0
-      : (st?.skipped ?? 0) > 0 || (st?.uses ?? 0) - (st?.cancelled ?? 0) > 0 || (st?.fired ?? 0) > 0;
+      : (st?.skipped ?? 0) > 0 || (st?.uses ?? 0) - (st?.cancelled ?? 0) > 0
+        || (st?.uses === undefined && (st?.fired ?? 0) > 0 && Date.now() - (st?.lastAt ?? 0) > FIRED_GRACE_MS);
     // idleInterrupts 只有终身计数，重写后不清：历史上白触发过的技能继续保守地不按闲置保护。
     const triggeredNothing = cur.ok === 0 && (triggered || (st?.idleInterrupts ?? 0) > 0);
     // conflicts/loops/undid/undoneBy 也是终身计数，重写后不清；有这些历史证据时保守地不保护，留给模型整理或容量淘汰。

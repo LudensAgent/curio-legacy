@@ -268,11 +268,37 @@ test('没有按版本统计的老存档：fired/uses/skipped 也取消主动保�
   const legacyUsage = { ...definition, name: 'legacy-used-torch-top-up', description: '火把少了就补满箱子', when: { food_below: 7 } };
   for (const skill of [firedOnly, legacyUsage]) assert.ok(w.engine.write(skill).ok, skill.name);
   const stats = (w.engine as any).stats;
-  stats[firedOnly.name] = { fired: 5, ok: 0, fail: 0, lastAt: Date.now() };
+  stats[firedOnly.name] = { fired: 5, ok: 0, fail: 0, lastAt: Date.now() - 11 * 60_000 };
   stats[legacyUsage.name] = { fired: 5, uses: 5, skipped: 5, ok: 0, fail: 0, lastAt: Date.now() };
   w.observe();
   w.observe(8 * day);
   assert.deepEqual(new Set(w.curator.retireUnused()), new Set([firedOnly.name, legacyUsage.name]));
+});
+
+test('老存档刚触发还没结果时，不把 fired 当成负面证据', (t) => {
+  const w = setup(t);
+  const skill = { ...definition, name: 'legacy-fresh-torch-top-up', description: '火把少了就补到箱子里', when: { food_below: 8 } };
+  assert.ok(w.engine.write(skill).ok);
+  const stats = (w.engine as any).stats;
+  stats[skill.name] = { fired: 1, ok: 0, fail: 0, lastAt: Date.now() };
+  w.observe();
+  w.observe(8 * day);
+  assert.deepEqual(w.curator.retireUnused(), [], '触发宽限期内不能把执行中的技能收起');
+  stats[skill.name].lastAt = Date.now() - 11 * 60_000;
+  assert.deepEqual(w.curator.retireUnused(), [skill.name], '过了宽限期仍是 0 成 0 败才按负面证据收起');
+});
+
+test('老存档有 uses 时取消豁免优先，不再被 fired 覆盖', (t) => {
+  const w = setup(t);
+  const cancelled = { ...definition, name: 'legacy-cancelled-torch-top-up', description: '火把少了就补到箱子里', when: { food_below: 8 } };
+  const executed = { ...definition, name: 'legacy-executed-torch-top-up', description: '火把少了就补满箱子', when: { food_below: 7 } };
+  for (const skill of [cancelled, executed]) assert.ok(w.engine.write(skill).ok, skill.name);
+  const stats = (w.engine as any).stats;
+  stats[cancelled.name] = { fired: 5, uses: 5, cancelled: 5, skipped: 0, ok: 0, fail: 0, lastAt: Date.now() - 11 * 60_000 };
+  stats[executed.name] = { fired: 5, uses: 5, cancelled: 0, skipped: 0, ok: 0, fail: 0, lastAt: Date.now() - 11 * 60_000 };
+  w.observe();
+  w.observe(8 * day);
+  assert.deepEqual(w.curator.retireUnused(), [executed.name], '有 uses 时只看未取消的实际执行，fired 不再覆盖取消豁免');
 });
 
 test('容量压力先收有失败证据的，从没用过的主动维护技能排在后面', (t) => {
