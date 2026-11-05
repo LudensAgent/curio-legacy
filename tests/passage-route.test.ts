@@ -73,6 +73,21 @@ test('碎片化通道：站在接不回地表的支巷里，把全部通道连�
   assert.deepEqual(passageDeepestAnchor([shaft, branch]), { x: 0, y: 32, z: 0 });
 });
 
+test('地表锚点取够得着的分量里最高入口，不取脚边但更深的归档入口', () => {
+  // 当前位置在 y65 的竖井里。旁边一条归档通道在 y57 有个“入口”参考点，
+  // 但它是脚下深处；同一条可走分量里最高到 y77。回地表不能选 y57。
+  const shaft = {
+    path: [{ x: 0, y: 65, z: 0 }, { x: 0, y: 70, z: 0 }, { x: 0, y: 77, z: 0 }],
+    entrances: [{ x: 0, y: 61, z: 0 }],
+  };
+  const archived = {
+    path: [{ x: 1, y: 57, z: 0 }, { x: 1, y: 50, z: 0 }],
+    entrances: [{ x: 1, y: 57, z: 0 }],
+  };
+  const anchor = passageSurfaceAnchor([shaft, archived], { x: 0, y: 65, z: 0 });
+  assert.equal(anchor?.y, 77, '选择可达分量的最高点，而不是水平最近的深处入口');
+});
+
 test('passageDeepestAnchor 只取从 here 连得上的最深处，另一团互不相连的碎片不算', () => {
   // 深井在原点附近，浅巷在 100 格外，两团相隔很远、连不上
   const deep = { path: [{ x: 0, y: 20, z: 0 }, { x: 0, y: 15, z: 0 }, { x: 0, y: 10, z: 0 }] };

@@ -335,16 +335,37 @@ export function passageRoute(recs: Pick<PassageRecord, 'path' | 'links'>[], from
   return route;
 }
 
-/** 想回地面时，从全部记下的通道里挑一个要朝它走的地表锚点：全网离自己最近的有效地表入口；没有入口就退回全网最高的脚点（最接近地表）。 */
-export function passageSurfaceAnchor(recs: Pick<PassageRecord, 'path' | 'entrances'>[], here: Vec3Like): Vec3Like | null {
+/**
+ * 想回地面时，从**从 here 连得上的通道分量**里挑地表锚点：
+ * 先要够得着，再取最高（最接近地表）的入口；没有有效入口就取该分量最高的脚点。
+ * 不能只按水平距离取最近的入口——归档里的旧入口可能在脚下方几十格，
+ * 选中它会让 follow_passage 在“深处入口”报到达，然后另一个动作再挖上去。
+ */
+export function passageSurfaceAnchor(recs: Pick<PassageRecord, 'path' | 'entrances' | 'links'>[], here: Vec3Like): Vec3Like | null {
+  const { nodes, owner, edges } = passageGraph(recs);
+  let start = -1, bd = 6;
+  nodes.forEach((q, i) => { const d = flat(q, here); if (d < bd) { bd = d; start = i; } });
+  let pool = recs;
+  if (start >= 0) {
+    const owners = new Set<number>();
+    const seen = new Set<number>([start]);
+    const stack = [start];
+    while (stack.length) {
+      const u = stack.pop()!;
+      owners.add(owner[u]!);
+      for (const v of edges.get(u) ?? []) if (!seen.has(v)) { seen.add(v); stack.push(v); }
+    }
+    const reachable = recs.filter((_, i) => owners.has(i));
+    if (reachable.length) pool = reachable;
+  }
   const anchors: Vec3Like[] = [];
-  for (const r of recs) {
+  for (const r of pool) {
     const surfaceY = r.path.length ? Math.max(...r.path.map((p) => p.y)) : Math.max(...r.entrances.map((e) => e.y));
     for (const e of r.entrances) if (surfaceY - e.y <= 6) anchors.push(e);
   }
-  if (anchors.length) return [...anchors].sort((a, b) => flat(a, here) - flat(b, here))[0];
-  const all = recs.flatMap((r) => r.path);
-  return all.length ? [...all].sort((a, b) => b.y - a.y)[0] : null;
+  if (anchors.length) return [...anchors].sort((a, b) => b.y - a.y || flat(a, here) - flat(b, here))[0] ?? null;
+  // 没有入口记录时退回该分量最高的脚点；同高保持记录顺序，不按水平距离改变旧目标。
+  return [...pool.flatMap((r) => r.path)].sort((a, b) => b.y - a.y)[0] ?? null;
 }
 
 /** 洞口正下方、离它最近的一个下降脚点：洞口还空着时，用它往里一步验证通道地板是否还在（被炸成坑时地板会一起没了）。
