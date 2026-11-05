@@ -41,6 +41,10 @@ import type { WorkingSetPrepareOptions, WorkingSetPrepareOutcome } from './worki
 /** 正常操作的持久化时限；supervisor 20s 窗口内约可容纳一次保存 + 最终 checkpoint + close。 */
 const DEFAULT_TIMEOUT_MS = 5000;
 
+/** 单条通道 fragment 的 links 上限。库默认 4096，但长期沿一条主矿道行走会持续追加走过的边
+ *  （线上已出现 4107 条，落盘时被拒并产生 P0）；提高到 16384 给长矿道留出余量。 */
+const MAX_FRAGMENT_LINKS = 16_384;
+
 /** 宿主侧待加载原始证据的硬上限；超出时保留时间/数量并显式报告，不静默覆盖。 */
 export const MAX_PENDING_OBSERVATIONS = 256;
 
@@ -437,6 +441,7 @@ export class SharedSpatialSession {
       ...(options.residencyLimits === undefined ? {} : { residencyLimits: options.residencyLimits }),
       timeoutMs,
       snapshotLimits: options.snapshotLimits,
+      fragmentOptions: { maxLinks: MAX_FRAGMENT_LINKS },
     });
     return new SharedSpatialSession(
       session,
