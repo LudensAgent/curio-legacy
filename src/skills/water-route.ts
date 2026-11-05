@@ -35,6 +35,14 @@ export type WaterRoute = {
   cells: Vec3Like[];
   /** 找不到水路时给调用方看的事实。 */
   why?: string;
+  /** 目标干岸比观察到的最高的水面还高 1 格以上：从水里直接爬不上去。 */
+  reason?: 'SHORE_TOO_HIGH';
+  /** 目标脚格 y（取整后）。 */
+  targetY?: number;
+  /** 目标附近观察到的最高的水面顶 y。 */
+  waterTop?: number;
+  /** 目标脚位比水面顶高几格（从水里直接上岸最多 1 格）。 */
+  climbNeeded?: number;
 };
 
 /**
@@ -51,7 +59,23 @@ export function planWaterRoute(blockAt: BlockAt, from: Vec3Like, to: Vec3Like, o
     : [0, 1, 2, -1, -2].map((dy) => ({ ...startCell, y: startCell.y + dy })).find((c) => isWater(blockAt(c)));
   if (!start) return null;
   // 目标不临水（干岸离水太远）：交回直游，不把“走到内陆”伪装成水路。
-  if (!targetInWater && !dryLaunch(blockAt, to, toCell)) return null;
+  if (!targetInWater && !dryLaunch(blockAt, to, toCell)) {
+    // 目标附近确实观察到露出空气的水面，但最高的水面也比目标脚位低 1 格以上：
+    // 从水里直接上岸够不着。只用已观察到的方块；未加载（null）不猜能不能爬。
+    let waterTop: number | null = null;
+    for (let dy = -6; dy <= 0; dy++) for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
+      if (Math.hypot(dx, dz) > 2) continue;
+      const c = { x: toCell.x + dx, y: toCell.y + dy, z: toCell.z + dz };
+      if (!isWater(blockAt(c)) || !isBreathable(blockAt({ x: c.x, y: c.y + 1, z: c.z }))) continue;
+      waterTop = waterTop === null ? c.y + 1 : Math.max(waterTop, c.y + 1);
+    }
+    if (waterTop !== null && isDryFooting(blockAt, toCell) && toCell.y - waterTop > 1) {
+      const climbNeeded = toCell.y - waterTop;
+      return { cells: [], reason: 'SHORE_TOO_HIGH', targetY: toCell.y, waterTop, climbNeeded,
+        why: `目标脚位 (y=${toCell.y}) 比观察到的水面 (y=${waterTop}) 高 ${climbNeeded} 格；从水里直接爬上岸最多高 1 格` };
+    }
+    return null;
+  }
 
   const reach = opts.reach ?? 48;
   const minX = Math.min(start.x, toCell.x) - reach, maxX = Math.max(start.x, toCell.x) + reach;
