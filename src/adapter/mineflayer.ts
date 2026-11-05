@@ -2253,7 +2253,23 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       await this.afterAction(() => this.bot.equip(item, destination), check);
       await this.syncInventory(check);
       const slot = this.bot.getEquipmentDestSlot?.(destination);
-      const actual = destination === 'hand' ? this.bot.heldItem : this.bot.inventory.slots?.[slot];
+      const read = () => destination === 'hand' ? this.bot.heldItem : this.bot.inventory.slots?.[slot];
+      let actual = read();
+      // 服务器把物品移进装备槽的回包可能比本地窗口同步晚一拍。只在有「离开源槽」的
+      // 证据时继续等，避免把明确回滚的装备（物品还在源槽）误判成成功；物品仍在源槽
+      // 就立即按失败返回。
+      const stillAtSource = () => {
+        const held = this.bot.inventory.slots?.[item.slot];
+        return !!held && held.name === name && JSON.stringify([held.type, held.metadata, held.nbt ?? null]) === identity;
+      };
+      if (actual?.name !== name && !stillAtSource()) {
+        for (let i = 0; i < 6 && actual?.name !== name && !stillAtSource(); i++) {
+          check();
+          await this.afterAction(() => sleep(50, signal), check);
+          await this.syncInventory(check);
+          actual = read();
+        }
+      }
       if (destination === 'hand' && actual?.name === name && opts.explicit) this.noteHandChoice(name);
       return actual?.name === name && (opts.sourceSlot === undefined || JSON.stringify([actual.type, actual.metadata, actual.nbt ?? null]) === identity) ? { ok: true } : { ok: false, reason: 'EQUIP_NOT_CONFIRMED' };
     });
@@ -4027,19 +4043,32 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const clearance = this.pillarClearance();
     if (clearance) return { ok: false, reason: `NOT_PLACED:头顶跳跃空间${clearance.kind === 'blocked' ? '受阻' : '未加载'}`, clearanceDetail: describePillarClearance(clearance), clearance: clearance.kind === 'blocked' && clearance.blocks.length ? { at: clearance.blocks[0].rel, facing: clearance.blocks[0].facing, cells: clearance.blocks.flatMap((blk) => (blk.rel && blk.facing ? [{ at: blk.rel, facing: blk.facing }] : [])) } : undefined };
     let placed = false, lastError = '';
-    // 贴面放置常被服务器拒绝（方块和身体重叠、或客户端拿的参考块已陈旧）：重试一次，每次重新抓脚下的参考方块
+    // 贴面放置常被服务器拒绝（方块和身体重叠、或客户端拿的参考块已陈旧）。still air 是
+    // 快速失败：被拒不会消耗方块，可以在「身体离格 → 落回」的窗口里重抓参考块再放。
     for (let attempt = 0; attempt < 2 && !placed; attempt++) {
-      const ref = b.blockAt(feet.offset(0, -1, 0));
-      if (!ref || ref.boundingBox !== 'block') { lastError = lastError || '脚下贴面方块变了，没地方放'; break; }
+      // 起跳前仍先确认脚下贴面还在；内层每放一次会重新抓，覆盖窗口里方块变化。
+      const beforeJump = b.blockAt(feet.offset(0, -1, 0));
+      if (!beforeJump || beforeJump.boundingBox !== 'block') { lastError = lastError || '脚下贴面方块变了，没地方放'; break; }
       b.setControlState('jump', true);
       try {
         const t0 = Date.now();
-        // 等脚底离开那一格（身体的底面高过方块顶面）才放，否则方块会和自己重叠，服务器不认
-        while (b.entity.position.y < feet.y + 1.02 && Date.now() - t0 < 700) await this.afterAction(() => sleep(15, signal), check);
-        if (b.entity.position.y >= feet.y + 1.02) {
-          try { await this.afterAction(() => raceAbort(b.placeBlock(ref, new Vec3(0, 1, 0)), signal, 2500, () => {}), check); }
-          catch (e: any) { if (e?.name === 'AbortedError') throw e; lastError = String(e?.message ?? e).slice(0, 80); }
-        } else { lastError = '跳不起来'; break; }
+        let reached = false, jumpPlaced = false;
+        while (Date.now() - t0 < 900 && !jumpPlaced) {
+          check();
+          // 等脚底离开那一格（身体的底面高过方块顶面）才放，否则方块会和自己重叠，服务器不认
+          if (b.entity.position.y < feet.y + 1.02) { await this.afterAction(() => sleep(15, signal), check); continue; }
+          reached = true;
+          const ref = b.blockAt(feet.offset(0, -1, 0));
+          if (!ref || ref.boundingBox !== 'block') { lastError = lastError || '脚下贴面方块变了，没地方放'; break; }
+          try {
+            await this.afterAction(() => raceAbort(b.placeBlock(ref, new Vec3(0, 1, 0)), signal, 400, () => {}), check);
+            jumpPlaced = true;
+          } catch (e: any) {
+            if (e?.name === 'AbortedError') throw e;
+            lastError = String(e?.message ?? e).slice(0, 80);
+          }
+        }
+        if (!reached && !lastError) lastError = '跳不起来';
       } finally {
         if (epoch === this.actionEpoch && b === this.bot) b.setControlState('jump', false);
       }

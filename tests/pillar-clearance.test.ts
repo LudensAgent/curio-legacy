@@ -178,3 +178,20 @@ test('pillar in deep water reports the floor depth instead of a bare NO_REFERENC
   assert.equal(result.reason, 'NO_REFERENCE');
   assert.equal(result.waterDepth, 2);
 });
+
+test('pillar retries a fast still-air refusal while the body is off the cell', async () => {
+  const w = fixture(0.5);
+  let attempts = 0;
+  w.bot.setControlState = (key: string, value: boolean) => {
+    w.controls[key] = value;
+    if (key === 'jump' && value) w.bot.entity.position.y = 65.02;
+  };
+  w.bot.placeBlock = async () => {
+    attempts++;
+    if (attempts === 1) throw new Error('Server refused to place cobblestone at (0, 64, 0): the block is still air');
+    w.put(0, 64, 0, 'cobblestone');
+  };
+  const result = await w.adapter.pillarUp(['cobblestone'], new AbortController().signal);
+  assert.equal(result.ok, true, result.reason);
+  assert.equal(attempts, 2, '一次 still air 后应趁落回前再放一次');
+});

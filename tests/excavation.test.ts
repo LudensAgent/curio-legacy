@@ -387,3 +387,14 @@ test('installed Minecraft physics can jump onto an excavated upper step under th
   assert.equal(world.blockAt({ x: 0, y: 67, z: 0 }), 'obsidian', 'the test retains a real solid ceiling, rather than granting open sky');
   assert.equal(world.blockAt({ x: 1, y: 64, z: 0 }), 'obsidian', 'the real jump lands on the original retained step');
 });
+
+test('standing on a partial support is a route/geometry gap, not BAD_ARGS', async () => {
+  const world = new ExcavationWorld();
+  world.setBlock({ x: 0, y: 63, z: 0 }, 'soul_sand');
+  world.pos = { x: 0.5, y: 63.875, z: 0.5 };
+  const result = await excavationSkill.run(context(world), args({ mode: 'stairs_up', steps: 1 }));
+  assert.equal(result.status, 'failed');
+  assert.equal(result.failureCode, 'PATH_NOT_FOUND', '参数本身没问题；是当前站位/支撑面不适合整格开挖');
+  assert.match(result.summary, /半格/);
+  assert.equal(world.digs.length, 0);
+});

@@ -226,3 +226,20 @@ test('仓储未指定 target 只返回线索，make:true 也不制造或放置�
     assert.equal(memory.chests().length, 0);
   }
 });
+
+test('smelt make:true reaches the adapter prepare option; default stays false', async () => {
+  const a = new FakeAdapter();
+  a.inv.set('raw_iron', 2);
+  a.inv.set('coal', 1);
+  const seen: any[] = [];
+  a.smelt = (async (_input: unknown, _count: unknown, _fuel: unknown, _signal: unknown, opts: unknown) => {
+    seen.push(opts);
+    return { ok: true, made: 1, output: 'iron_ingot' };
+  }) as any;
+  const first = await runSkill(a, 'smelt', { item: 'raw_iron' });
+  assert.equal(first.o.result.status, 'succeeded', first.o.result.summary);
+  assert.equal(seen[0]?.prepare, false);
+  const second = await runSkill(a, 'smelt', { item: 'raw_iron', make: true });
+  assert.equal(second.o.result.status, 'succeeded', second.o.result.summary);
+  assert.equal(seen[1]?.prepare, true);
+});

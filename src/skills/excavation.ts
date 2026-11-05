@@ -232,7 +232,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
     if (!origin.onGround) throw new ExcavationStop('ERROR', '需要先在已知干燥地板上站稳');
     standingCell(ctx, origin.pos);
     if (Math.abs(origin.pos.y - Math.round(origin.pos.y)) > 0.01) {
-      throw new ExcavationStop('BAD_ARGS', `当前脚高 y=${origin.pos.y.toFixed(2)}，站在半格/非整块支撑上；整格阶梯/通道会挖掉这层支撑，未实现半格脚高转换，未开始`, true);
+      throw new ExcavationStop('PATH_NOT_FOUND', `当前脚高 y=${origin.pos.y.toFixed(2)}，站在半格/非整块支撑上；整格阶梯/通道会挖掉这层支撑，未实现半格脚高转换，未开始`, true);
     }
     ctx.memory.setWorld(origin.worldId);
     if (args.entry !== 'current') {
@@ -280,7 +280,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       if (!current.onGround) throw new ExcavationStop('ERROR', '尚未站稳，不能继续开挖下一格');
       standingCell(ctx, current.pos);
       if (Math.abs(current.pos.y - Math.round(current.pos.y)) > 0.01) {
-        throw new ExcavationStop('BAD_ARGS', `脚高 y=${current.pos.y.toFixed(2)} 站在半格/非整块支撑上；整格开挖未实现半格脚高转换`, true);
+        throw new ExcavationStop('PATH_NOT_FOUND', `脚高 y=${current.pos.y.toFixed(2)} 站在半格/非整块支撑上；整格开挖未实现半格脚高转换`, true);
       }
       const next = { x: here.x + direction.x, y: here.y + (args.mode === 'stairs' ? -1 : args.mode === 'stairs_up' ? 1 : 0), z: here.z + direction.z };
       // 下一落脚要落在 next.y。先按碰撞顶面确认脚下支撑：空气/未知/半格顶面都在挖掘前报缺口，

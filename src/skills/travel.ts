@@ -132,7 +132,9 @@ export const observePortal: Skill<{}> = {
     // 先扫当前视野里看得见的门（记忆可能因死亡/换维度而失效，眼前看得见的才是此刻能核对的），再看记忆里的门位置重验
     const here = state.pos;
     const feet = { x: Math.floor(here.x), y: Math.floor(here.y), z: Math.floor(here.z) };
-    const around = [-2, -1, 0, 1, 2].flatMap((dx) => [-1, 0, 1].flatMap((dy) => [-2, -1, 0, 1, 2].map((dz) =>
+    // 身体高两格，直接站在门下时门方块可能在脚上方第 2–3 格；只扫 ±1 会漏掉“头顶上的门”。
+    // 这里扩大扫描窗口，但仍由 observeBlocks 要求本次视野证据，不透视。
+    const around = [-2, -1, 0, 1, 2].flatMap((dx) => [-1, 0, 1, 2, 3].flatMap((dy) => [-2, -1, 0, 1, 2].map((dz) =>
       ({ x: Math.floor(here.x) + dx, y: Math.floor(here.y) + dy, z: Math.floor(here.z) + dz }))));
     // 刚传送到门里时，门方块就在脚下/身上，视锥可能正好看不到它；只核对身体真正占据的脚/头两格，
     // 不把旁边一格的方块当“亲眼见过”（那会绕过视觉边界）。

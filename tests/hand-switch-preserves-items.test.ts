@@ -125,6 +125,24 @@ test('automatic dirt digging stops when inventory synchronization rolls back the
   assert.ok(w.clicks.every((click) => click.slot !== -999));
 });
 
+test('armor equip waits for a delayed equipment-slot update instead of reporting failure', async () => {
+  const w = fixture();
+  const chestplate = w.put(9, 'iron_chestplate');
+  let syncs = 0;
+  // 第一次同步只看到源槽空了（物品在途）；第二次（等一拍后）服务器回包才放进躯干槽。
+  w.bot._syncWindow = async (window: Window) => {
+    syncs++;
+    if (syncs === 1) window.slots[9] = null;
+    if (syncs >= 2) {
+      window.slots[9] = null;
+      window.updateSlot(6, chestplate);
+    }
+  };
+  const result = await w.adapter.equipItem('iron_chestplate', 'torso', new AbortController().signal);
+  assert.equal(result.ok, true, result.reason);
+  assert.equal(w.inventory.slots[6], chestplate);
+});
+
 for (const emptySlot of [9, 37]) {
   test(`automatic dirt digging can empty its hand through vacant slot ${emptySlot} without losing the sword`, async () => {
     const w = fixture();

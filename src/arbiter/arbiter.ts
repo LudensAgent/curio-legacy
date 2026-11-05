@@ -102,8 +102,12 @@ interface Running extends TaskInfo {
 
 /** 会修改游戏世界或角色状态的方法：任务被取消后，旧任务再调用这些方法会被拦截。 */
 /** 会“透视”的原始查询：技能必须改用 ctx.senses（看见/听见/记得的东西）。 */
-// lightAt 不在其中：身边的明暗是看得出来的
-const XRAY_METHODS = new Set(['findBlocks', 'nearbyEntities', 'blockOptics']);
+// lightAt 不在其中：身边的明暗是看得出来的。
+// blockOptics 也不在其中：它只补充碰撞形状（半砖/雪层/箱子/堆肥桶等），是执行
+// 已记录路线所需的几何；agent 自己写的代码技能在 sandbox 里只能拿到 api，拿不到
+// 原始 adapter，不能借它透视。把它一起禁掉会让 follow_passage 在路线预检时直接
+// 抛出 NO_XRAY，整条已记录路线都用不了。
+const XRAY_METHODS = new Set(['findBlocks', 'nearbyEntities']);
 const ACTION_METHODS = new Set(['moveTo', 'dig', 'placeBlockAt', 'placeBlockStateAt', 'equipItem', 'tossItem', 'arrangeHotbar', 'useGui', 'tradeWith', 'useBlockAt', 'useItem', 'rangedAttack', 'enterPortalAt', 'collectNearbyDrops', 'craft', 'sleepInBed', 'smelt', 'useChest', 'till', 'plant', 'eat', 'equipWeapon', 'attack', 'look', 'jump', 'swimTo', 'diveTo', 'pillarUp', 'drive', 'raiseShield', 'startDraw', 'releaseDraw', 'signText', 'editBook', 'chat', 'stopAll', 'fish', 'useItemOn', 'useBucketAt', 'interactEntity', 'ride', 'dismount', 'emptyFurnace', 'walkBody', 'walkTick']);
 
 /**

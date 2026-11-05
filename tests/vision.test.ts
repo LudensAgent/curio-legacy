@@ -145,6 +145,30 @@ test('技能调用透视接口会被拒绝（必须用 ctx.senses）', async () 
   }
 });
 
+test('内置技能可以读取碰撞形状；原始方块搜索仍被拒绝', async () => {
+  const { adapter, vision } = setup();
+  const arbiter = new Arbiter(adapter, new WorldMemory(null), new EventBus(), vision);
+  SKILLS.test_shape = {
+    name: 'test_shape', description: '', argsDoc: '{}', timeoutMs: 3000, movement: false,
+    validate: () => ({ ok: true, args: {} }),
+    async run(ctx) {
+      const optics = ctx.adapter.blockOptics(0, adapter.groundY, 0);
+      return optics
+        ? { status: 'succeeded', summary: `shape:${optics.name}` }
+        : { status: 'failed', summary: '没有碰撞形状' };
+    },
+  };
+  try {
+    const done = new Promise<TaskOutcome>((r) => arbiter.once('done', r));
+    arbiter.start({ skill: 'test_shape' }, 'llm');
+    const o = await done;
+    assert.equal(o.result.status, 'succeeded', o.result.summary);
+    assert.match(o.result.summary, /shape:grass_block/);
+  } finally {
+    delete SKILLS.test_shape;
+  }
+});
+
 test('gather：埋在地下的原木不会去挖（NOT_FOUND）；背后的树要转头看见后才去砍；看不见石头时不自己往下挖', async () => {
   const { adapter, vision } = setup();
   adapter.blocks.push({ name: 'oak_log', pos: { x: 3, y: adapter.groundY - 3, z: 0 } }); // 埋在地下：转头也看不见

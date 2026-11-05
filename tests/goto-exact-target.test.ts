@@ -57,6 +57,19 @@ test('goto preserves timeout and does not report an adjacent unknown cell as blo
   assert.equal(result.data?.moved, 0);
 });
 
+test('goto timeout at a distance reports the actual stopping point and remaining distance', async (t) => {
+  const adapter = new TestWorld();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  const ctx = makeCtx(adapter);
+  t.after(() => ctx.memory.close());
+  t.mock.method(adapter, 'moveTo', async () => { throw new Error('timeout after 20000ms'); });
+  const result = await goTo.run(ctx, { target: '50,64,0', dig: true });
+  assert.equal(result.status, 'failed');
+  assert.match(result.summary, /timeout after 20000ms/);
+  assert.match(result.summary, /现在在 \(0\.50,64\.00,0\.50\)/);
+  assert.match(result.summary, /距目标 49\.50 格/);
+});
+
 test('an adjacent goto reports a freshly observed target door without claiming why it blocked movement', async (t) => {
   const adapter = new TestWorld();
   adapter.pos = { x: 0.5, y: 64, z: 0.5 };
@@ -105,4 +118,17 @@ test('goto cannot report arrival when pathfinding resolves without reaching the 
   assert.equal(result.failureCode, 'PATH_NOT_FOUND');
   assert.match(result.summary, /尚未到达.*没有取得进展/);
   assert.equal(result.data?.arrivedCell, false);
+});
+
+test('goto timeout at an occupied exact cell names the occupant instead of only timing out', async (t) => {
+  const adapter = new TestWorld();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  adapter.setBlock({ x: 50, y: 64, z: 0 }, 'chest');
+  const ctx = makeCtx(adapter);
+  t.after(() => ctx.memory.close());
+  t.mock.method(adapter, 'moveTo', async () => { throw new Error('timeout after 20000ms'); });
+  const result = await goTo.run(ctx, { target: '50,64,0', dig: true });
+  assert.equal(result.status, 'failed');
+  assert.match(result.summary, /目标格 \(50,64,0\) 当前是 chest/);
+  assert.match(result.summary, /不能站进|可能站不进去/);
 });

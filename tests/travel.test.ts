@@ -314,3 +314,19 @@ test('a pearl use without observed teleport cannot become an outer-island succes
   assert.equal(result.failureCode, 'TIMEOUT');
   assert.deepEqual(travelStore(memory).snapshot(adapter.worldId).gateways, []);
 });
+
+test('observe_portal can record a portal directly above the body, not only within ±1', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  const portal = { x: 0, y: 66, z: 0 };
+  w.setBlock(portal, 'nether_portal');
+  const ctx = makeCtx(w, { senses: { observeBlocks: (positions) => positions
+    .filter((p) => p.x === portal.x && p.y === portal.y && p.z === portal.z)
+    .map((pos) => ({ name: 'nether_portal', pos, properties: {}, worldId: w.worldId, sessionId: w.sessionId,
+      dimension: w.dim, observationId: 1, observedAt: Date.now(), source: 'vision' as const })) } });
+  ctx.memory.setWorld(w.worldId);
+  t.after(() => ctx.memory.close());
+  const r = await travelSkills.observe_portal.run(ctx, {});
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.deepEqual(travelStore(ctx.memory).get(r.data?.portalId as string, w.worldId)?.pos, portal);
+});

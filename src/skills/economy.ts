@@ -31,17 +31,18 @@ function noteFurnace(ctx: SkillCtx, l: import('../adapter/types.ts').FurnaceLeav
   ctx.memory.setFurnace({ dim: ctx.adapter.state().dim, pos: l.pos, block: l.block, input: l.input, output: l.output, fuel: l.fuel, burning: l.burning, ...(l.why ? { why: l.why } : {}) });
 }
 
-export const smelt: Skill<{ item: string; count: number }> = {
+export const smelt: Skill<{ item: string; count: number; make?: boolean }> = {
   name: 'smelt',
   description: `用已有熔炉烧指定物品，燃料按煤/木炭/木板/原木选择；缺熔炉默认返回缺口。make:true 才允许制造和放置熔炉（消耗8圆石或背包熔炉）。可烧生铁、生肉、原木、沙子、圆石等`,
-  argsDoc: '{"item": "raw_iron|beef|oak_log|sand|…", "count"?: 1-64}',
+  argsDoc: '{"item": "raw_iron|beef|oak_log|sand|…", "count"?: 1-64, "make"?:true（允许缺熔炉时就地做一个，消耗 8 圆石）}',
   timeoutMs: 600000,
   movement: false,
   validate(raw) {
     const a = obj(raw);
     const item = String(a.item ?? '').replace(/^minecraft:/, '');
     if (!SMELTABLE[item]) return { ok: false, error: `不能烧 ${item}；可烧：${Object.keys(SMELTABLE).slice(0, 12).join('/')}…` };
-    return { ok: true, args: { item, count: clampInt(a.count, 1, 64, 8) } };
+    if (a.make !== undefined && typeof a.make !== 'boolean') return { ok: false, error: 'make 需要布尔值' };
+    return { ok: true, args: { item, count: clampInt(a.count, 1, 64, 8), ...(a.make === true ? { make: true } : {}) } };
   },
   async run(ctx, args) {
     const { adapter, senses, signal } = ctx;
@@ -55,14 +56,14 @@ export const smelt: Skill<{ item: string; count: number }> = {
     ctx.progress(0, `烧 ${args.item} ×${n}（燃料 ${fuel}）`);
     try {
       const moreFuels = FUELS.filter((f) => f !== fuel && f !== args.item && s.inventory.some((i) => i.name === f && i.count > 0));
-      const r = await adapter.smelt(args.item, n, fuel, signal, { furnacePos: furnace?.pos, moreFuels, onLeave: (l) => noteFurnace(ctx, l), onProgress: (d) => ctx.progress(d / n, `已烧好 ${d}/${n}`) });
+      const r = await adapter.smelt(args.item, n, fuel, signal, { furnacePos: furnace?.pos, prepare: args.make === true, moreFuels, onLeave: (l) => noteFurnace(ctx, l), onProgress: (d) => ctx.progress(d / n, `已烧好 ${d}/${n}`) });
       if (r.furnacePos) rememberStation(ctx, 'furnace', r.furnacePos);
       const at = r.furnacePos ? ` (${r.furnacePos.x},${r.furnacePos.y},${r.furnacePos.z})` : '';
       const why = r.stopped ? `；没烧完：${STOP_ZH[r.stopped]}` : '';
       const back = r.returned ? `，没烧的 ${r.returned} 个 ${args.item} 取回了背包` : '';
       const still = r.left && (r.left.input || r.left.output) ? `；熔炉${at}里还留着 ${[slotText(r.left.input), slotText(r.left.output)].filter(Boolean).join('、')}（背包满了拿不回来，记得回来取）` : '';
       if (!r.ok) {
-        if (r.reason === 'NO_FURNACE') return fail('MISSING_MATERIALS', '烧不了：NO_FURNACE（需要 8 个圆石做熔炉）');
+        if (r.reason === 'NO_FURNACE') return fail('MISSING_MATERIALS', '烧不了：NO_FURNACE（附近没有可用熔炉；允许就地做一个熔炉就写 make:true，需要 8 个圆石）');
         if (r.reason === 'OUT_OF_FUEL') return fail('MISSING_MATERIALS', `一个也没烧成：燃料不够（${fuel} 烧完了，背包里没有别的燃料）${back}${still}${chestHint(ctx.memory, s, [], { fuel: true })}`, { stopped: r.stopped });
         return fail('ERROR', `烧不了：${r.reason}${why}${back}${still}`, { stopped: r.stopped });
       }

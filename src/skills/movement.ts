@@ -432,15 +432,24 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
         ? `；目标格看到 ${observedDoor.name}，门目前${String(open) === 'true' ? '打开' : '关闭'}，尚未确认它是否挡住路线` : '';
       return { note, observedDoor };
     };
+    // 明确坐标落在箱子上时，原动作要求身体站进那一格；目标格有方块就不可能站进去。
+    // 这不是视觉发现，只是把调用方自己给的目标格事实说清楚，避免一直 20 秒超时。
+    const targetCellNote = () => {
+      if (!nums || heading) return '';
+      const at = cell(pos!);
+      const name = adapter.blockAt(at);
+      if (!name || isSoftBlock(name) || LIQUID_BLOCKS.has(name)) return '';
+      return `；目标格 (${at.x},${at.y},${at.z}) 当前是 ${name}（不是空气），指定脚高可能站不进去；要到它旁边或顶上请写相邻坐标，或确认半格脚高`;
+    };
     // 明确坐标那格走不进去（被挡/够不着）时，人已经停在相邻格：如实报告"到旁边了、差多少"，不算失败也不谎称进格。
     const arrivedNearby = (p: Vec3Like, why: string) => {
       const { note, observedDoor } = doorNoteAt();
-      return ok(`到达 ${label} 附近：站在相邻格 (${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)})，差 ${distance(p).toFixed(2)} 格，没能进入目标格（${why}）${note}${terrainNote()}`, { ...measured(p), nextTo: true, arrivedNearby: true, ...(observedDoor ? { observedDoor } : {}) });
+      return ok(`到达 ${label} 附近：站在相邻格 (${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)})，差 ${distance(p).toFixed(2)} 格，没能进入目标格（${why}）${note}${targetCellNote()}${terrainNote()}`, { ...measured(p), nextTo: true, arrivedNearby: true, ...(observedDoor ? { observedDoor } : {}) });
     };
     // 一步都没挪动、还贴着目标格：这是卡住，不是"到附近"，照旧报失败。
     const failedNear = (p: Vec3Like, why: string, code: FailureCode = 'PATH_NOT_FOUND') => {
       const { note, observedDoor } = doorNoteAt();
-      return fail(code, `尚未到达 ${label} 的目标格：实际站在 (${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)})，紧挨着目标格，差 ${distance(p).toFixed(2)} 格（${why}）${note}${terrainNote()}`, { ...measured(p), nextTo: true, ...(observedDoor ? { observedDoor } : {}) });
+      return fail(code, `尚未到达 ${label} 的目标格：实际站在 (${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)})，紧挨着目标格，差 ${distance(p).toFixed(2)} 格（${why}）${note}${targetCellNote()}${terrainNote()}`, { ...measured(p), nextTo: true, ...(observedDoor ? { observedDoor } : {}) });
     };
     const inScope = () => {
       throwIfAborted(signal);
@@ -580,7 +589,10 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
       }
       const water = waterNear();
       const placeHint = allowPlace ? '' : '；没有挖墙/垫路权限，要架桥或垫脚可显式加 place:true（会消耗方块）';
-      return fail(codeFromError(e), `前往 ${label} 失败：${(e as Error).message}${water ? '；附近有水，尚未确认干燥步行通路' : ''}${placeHint}`, {
+      // 超时/换路失败时把身体实际停在哪、离目标还有多远一起交回；否则只看到
+      // “timeout after 20000ms”，无法判断是原地没动还是已经走了大半。
+      const at = `(${now.x.toFixed(2)},${now.y.toFixed(2)},${now.z.toFixed(2)})`;
+      return fail(codeFromError(e), `前往 ${label} 失败：${(e as Error).message}；现在在 ${at}，距目标 ${distance(now).toFixed(2)} 格${targetCellNote()}${water ? '；附近有水，尚未确认干燥步行通路' : ''}${placeHint}`, {
         ...measured(), waterAhead: water,
         ...((e as Error).name === 'PillarClearanceError' ? { pillarClearance: true } : {}),
       });
