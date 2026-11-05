@@ -30,7 +30,7 @@ import type { ParsedGameMessage } from '../memory/game-messages.ts';
 import { NEAR_END_REASON, type MindContext } from './prompt.ts';
 import { cleanPlanStep, moodWords, PLAN_REVISION_MIN, SelfModel } from './self.ts';
 import type { LedgerView } from './ledger.ts';
-import type { Thinker } from './thinker.ts';
+import { LOW_AIR_OXYGEN, type Thinker } from './thinker.ts';
 import type { Activity, ActivityDraft, ActivityEnd, ActivityOutcome, ActivityRecord, MindDecision, Noticing } from './types.ts';
 
 export interface MindDeps {
@@ -209,8 +209,6 @@ export class Mind {
   static NEAR_END_REASON = NEAR_END_REASON;
   /** 要命的处境（窒息、被贴身围攻、水下没气）：用“瞥一眼”那档快速拿主意，几秒都等不起 */
   static DANGER_REASON = '有危险，马上拿主意';
-  /** 人在水里、氧气低于这个数：只够“瞥一眼”，不够认真想完 */
-  static LOW_AIR_OXYGEN = 10;
   private lastHurtEventAt = 0;
   /** 危险还在的这段时间里，等想法时不让身体去张望、捡东西 */
   private dangerUntil = 0;
@@ -438,7 +436,7 @@ export class Mind {
     // 水位低氧时认真想也会被 think() 降成瞥一眼；这里照样算出来，免得“瞥一眼升级成认真想”的分支
     // 每一拍都把刚发出的瞥一眼撤掉再重发，没等回答就自己转个不停。
     const s = this.d.adapter.state();
-    const lowAir = s.inWater && s.oxygen < Mind.LOW_AIR_OXYGEN;
+    const lowAir = s.inWater && s.oxygen < LOW_AIR_OXYGEN;
     if (this.thinking) {
       // 要命的时候不等慢慢想完：撤掉正在想的，马上快想一次
       if (danger && this.thinking.reason !== Mind.DANGER_REASON) { this.cancelThinking('danger'); this.staleDropped++; }
@@ -1129,7 +1127,7 @@ export class Mind {
     // 长尾几十秒），而水下氧气从 10 掉到 0 往往也在这几秒内，等回答回来可能已经溺死。瞥一眼只是更快地
     // 看见现状和可选做法，想什么、做什么仍由心智决定；这里不选动作、不触发救援，只把调度延迟压下来。
     // 放在 think() 统一处理，pendingReason、urgentNow、没活在身、上一段刚结束、最后一步提前想这些路径都覆盖到。
-    if (tier === 'deliberate' && state.inWater && state.oxygen < Mind.LOW_AIR_OXYGEN) tier = 'glance';
+    if (tier === 'deliberate' && state.inWater && state.oxygen < LOW_AIR_OXYGEN) tier = 'glance';
     let percept: Percept;
     try { percept = this.d.perception.update(); } catch { return; }
     this.trackTrip(percept, state);
