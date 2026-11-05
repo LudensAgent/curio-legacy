@@ -2,7 +2,7 @@ import minecraftData from 'minecraft-data';
 import type { AgentState, Vec3Like } from '../adapter/types.ts';
 import { config } from '../config.ts';
 import { AbortedError, dist3, sleep, throwIfAborted } from '../util.ts';
-import { bodyCells, bodyProbe, footSurfaceY, shapeKnown, supportTop, type ObservedState, type StateAt } from '../perception/geometry.ts';
+import { bodyCells, bodyProbe, estimatedFallDamage, footSurfaceY, shapeKnown, supportTop, type ObservedState, type StateAt } from '../perception/geometry.ts';
 import { codeFromError, fail, isAbort, obj, ok, type FailureCode, type Skill, type SkillCtx } from './types.ts';
 import { EXCAVATION_WAYPOINT_CAP } from '../memory/store.ts';
 
@@ -31,9 +31,14 @@ const hazard = (name: string) => HAZARDS.has(name) || falling(name) || name.star
 const hazardLabel = (name: string) => name === 'water' || name === 'lava' || name === 'bubble_column' ? '液体' : falling(name) ? '下落方块' : '危险方块';
 const voxel = (pos: Vec3Like): Vec3Like => ({ x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z) });
 
+interface BelowSupport { at: Vec3Like; foot: number; drop: number; block: string }
+interface BelowScan { found: BelowSupport | null; unknownAt: Vec3Like | null; hazardAt: { at: Vec3Like; name: string } | null; scanned: number }
+
 class ExcavationStop extends Error {
   /** 下一落点没有支撑时带上该落点，供失败回执附可见落点事实，而不是只给一句硬错误 */
   nextLanding?: Vec3Like;
+  /** 缺口下方实际能站的第一处支撑；没有就保留检查深度/未知位置，不把 air 当成“无限深”。 */
+  below?: BelowScan;
   constructor(public code: FailureCode, message: string, public unsupportedGeometry = false) { super(message); }
 }
 
@@ -44,6 +49,23 @@ const stateAt = (adapter: SkillCtx['adapter']): StateAt => (pos) => {
   const name = adapter.blockAt(pos);
   return name === null ? null : { name, properties: {} };
 };
+
+/** 从某个脚高向下找第一处可站立支撑；给出精确落差，而不是只说“下面是空气”。 */
+function scanSupportBelow(ctx: SkillCtx, fromFoot: Vec3Like, maxDepth = 64): BelowScan {
+  const at = stateAt(ctx.adapter);
+  for (let depth = 1; depth <= maxDepth; depth++) {
+    const pos = { x: fromFoot.x, y: fromFoot.y - depth, z: fromFoot.z };
+    const state = at(pos);
+    if (!state) return { found: null, unknownAt: pos, hazardAt: null, scanned: depth };
+    if (hazard(state.name)) return { found: null, unknownAt: null, hazardAt: { at: pos, name: state.name }, scanned: depth };
+    const top = supportTop(state.name, state.properties ?? {});
+    if (top !== null) {
+      const foot = pos.y + top;
+      return { found: { at: pos, foot, drop: fromFoot.y - foot, block: state.name }, unknownAt: null, hazardAt: null, scanned: depth };
+    }
+  }
+  return { found: null, unknownAt: null, hazardAt: null, scanned: maxDepth };
+}
 
 /**
  * 落点支撑判定：用与 step 相同的碰撞顶面，而不是方块名猜“整块/不完整”。
@@ -61,8 +83,18 @@ function supportProblem(ctx: SkillCtx, cell: Vec3Like, expectedFoot: number, lab
   const top = supportTop(state.name, state.properties ?? {});
   if (top === null) {
     if (AIR.has(state.name)) {
-      const gap = new ExcavationStop('ERROR', `${label}${landing}的支撑格 ${at} 是 ${state.name}：下一落点下面是空的，没有可站立支撑`);
+      const below = scanSupportBelow(ctx, { ...cell, y: expectedFoot });
+      const where = below.found
+        ? `向下 ${below.found.drop.toFixed(Number.isInteger(below.found.drop) ? 0 : 2)} 格到 (${below.found.at.x},${below.found.foot.toFixed(2)},${below.found.at.z})（${below.found.block}）`
+        : below.unknownAt
+          ? `向下 ${below.scanned} 格到 (${below.unknownAt.x},${below.unknownAt.y},${below.unknownAt.z}) 起未加载/未知`
+          : below.hazardAt
+            ? `向下 ${below.scanned} 格是 ${below.hazardAt.name}（${hazardLabel(below.hazardAt.name)}）`
+            : '向下 64 格没有已加载的可站立面';
+      const damage = below.found ? estimatedFallDamage(below.found.drop) : 0;
+      const gap = new ExcavationStop('ERROR', `${label}${landing}的支撑格 ${at} 是 ${state.name}：下一落点下面是空的，${where}${damage ? `；落差约 ${below.found!.drop.toFixed(Number.isInteger(below.found!.drop) ? 0 : 2)} 格，按当前生命预计约 ${damage} 点摔伤（未计护甲/摔落保护）` : ''}`);
       gap.nextLanding = { ...cell, y: expectedFoot };
+      gap.below = below;
       return gap;
     }
     return new ExcavationStop('ERROR', `${label}${landing}的支撑格 ${at} 是 ${state.name}，没有水平承重顶面，不能作为落点支撑`);
@@ -133,13 +165,16 @@ function preflightColumn(ctx: SkillCtx, feet: Vec3Like, height: number) {
 }
 
 /** 下一落点没支撑时的只读缺口：把当前可见的较低落点原样列出，不选择、不自动垫/挖/下落。 */
-function cavityGap(ctx: SkillCtx, nextLanding: Vec3Like) {
+function cavityGap(ctx: SkillCtx, nextLanding: Vec3Like, below = scanSupportBelow(ctx, nextLanding)) {
   const options = ctx.senses.landingOptions?.(12) ?? [];
   const distance = (target: Vec3Like) => Math.hypot(target.x - nextLanding.x, target.y - nextLanding.y, target.z - nextLanding.z);
   return {
     reason: 'next_landing_support_air',
     nextLanding: { ...nextLanding },
     supportCell: { x: nextLanding.x, y: nextLanding.y - 1, z: nextLanding.z },
+    ...(below.found ? {
+      fall: { drop: below.found.drop, landing: { x: below.found.at.x, y: below.found.foot, z: below.found.at.z }, block: below.found.block, damage: estimatedFallDamage(below.found.drop) },
+    } : { fallScan: { checked: below.scanned, unknownAt: below.unknownAt, hazardAt: below.hazardAt } }),
     visibleLandings: options
       .map((o) => ({ target: { ...o.target }, surface: o.surface, drop: o.drop, clearance: o.clearance, corridor: o.corridor, approach: o.approach, unknowns: o.unknowns }))
       .sort((a, b) => distance(a.target) - distance(b.target))
@@ -296,14 +331,15 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       throw error;
     }
     const msg = (error as Error).message;
-    const cavity = error instanceof ExcavationStop && error.nextLanding ? cavityGap(ctx, error.nextLanding) : null;
+    const cavity = error instanceof ExcavationStop && error.nextLanding ? cavityGap(ctx, error.nextLanding, error.below) : null;
+    const fall = cavity && 'fall' in cavity ? cavity.fall : null;
     // 拒绝时把「为什么 + 能怎么办」一起报，别只留一句 ERROR 让它盲试
     // 用「液体」标记和方块名判断，不能用单个「水」字：它会把「没有水平承重顶面」误判成液体提示。
     const hint = /液体|lava|water|岩浆/.test(msg) ? '（先换方向避开液体，或先 place_at 堵上再挖）'
       : /没有水平承重顶面|传送门/.test(msg) ? '（这一格不是能站的水平承重面：换方向，或先用 dig_at / place_at 改变这一格）'
       : /下落方块/.test(msg) ? '（下面是沙子/沙砾这类下落方块，换方向或先堵住再挖）'
       : /未知|未加载/.test(msg) ? '（先照亮/转头看清那一格再挖，或换方向）'
-      : cavity ? `（下一落点 (${cavity.nextLanding.x},${cavity.nextLanding.y},${cavity.nextLanding.z}) 的支撑格 (${cavity.supportCell.x},${cavity.supportCell.y},${cavity.supportCell.z}) 是空的；要补支撑得自己显式 place_at 这一格，或换方向，或选落点用 descend；本次开挖没有自动垫/挖/下落）`
+      : cavity ? `（下一落点 (${cavity.nextLanding.x},${cavity.nextLanding.y},${cavity.nextLanding.z}) 的支撑格 (${cavity.supportCell.x},${cavity.supportCell.y},${cavity.supportCell.z}) 是空的${fall ? `；向下 ${fall.drop.toFixed(Number.isInteger(fall.drop) ? 0 : 2)} 格到 (${fall.landing.x},${fall.landing.y.toFixed(2)},${fall.landing.z})（落差 ${fall.drop.toFixed(Number.isInteger(fall.drop) ? 0 : 2)} 格${fall.damage ? `，按当前生命预计约 ${fall.damage} 点摔伤` : ''}）` : ''}；要补支撑得自己显式 place_at 这一格，或换方向，或选落点用 descend；本次开挖没有自动垫/挖/下落）`
       : /下面是空的|洞穴|虚空/.test(msg) ? '（前面脚下是空的：要补支撑得自己显式 place_at，或换方向、下去探这个洞；这不是本次开挖自动做的）'
       : /支撑面在|半格|整格脚高/.test(msg) ? '（落点实际支撑顶面与所选脚高不符；可确认落点高度、换一格/换方向，或改用 step 明确落脚）'
       : /身体空间|干燥|站稳/.test(msg) ? '（先挖开落点那两格的脚/头空间，或换方向）'

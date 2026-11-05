@@ -138,7 +138,7 @@ test('原子动作认模型常用的几种坐标写法：at / to / pos、字符�
   assert.ok(!bad.ok && /"at":\[前,上,右\]/.test(bad.error));
 });
 
-test('step 允许 1–4 格安全落差，5 格以上才拒绝，也能踩上厚雪', async (t) => {
+test('step 报实际落差：4 格内自动走，5 格返回精确高度和摔伤，也能踩上厚雪', async (t) => {
   const w = new FakeAdapter();
   w.pos = { x: 0.5, y: 64, z: 0.5 };
   (w as any).removed.add('0,63,-1');
@@ -156,6 +156,17 @@ test('step 允许 1–4 格安全落差，5 格以上才拒绝，也能踩上厚
   assert.deepEqual(w.pos, { x: 0.5, y: 62, z: -0.5 });
   assert.match(deeper.summary, /下落 2 格/);
 
+  const w4 = new FakeAdapter();
+  w4.pos = { x: 0.5, y: 64, z: 0.5 };
+  for (const y of [63, 62, 61, 60]) (w4 as any).removed.add(`0,${y},-1`);
+  const ctx4 = makeCtx(w4, { senses: { observeBlocks: observeAllBlocks(w4) } });
+  t.after(() => ctx4.memory.close());
+  const four = await stepTo.run(ctx4, { at: [1, 0, 0], facing: 'N' });
+  assert.equal(four.status, 'succeeded', four.summary);
+  assert.deepEqual(w4.pos, { x: 0.5, y: 60, z: -0.5 });
+  assert.match(four.summary, /下落 4 格.*预计约 1 点摔伤/);
+  assert.deepEqual(four.data?.fall, { drop: 4, damage: 1 });
+
   const w3 = new FakeAdapter();
   w3.pos = { x: 0.5, y: 64, z: 0.5 };
   for (const y of [63, 62, 61, 60, 59]) (w3 as any).removed.add(`0,${y},-1`);
@@ -164,6 +175,8 @@ test('step 允许 1–4 格安全落差，5 格以上才拒绝，也能踩上厚
   const tooDeep = await stepTo.run(ctx3, { at: [1, 0, 0], facing: 'N' });
   assert.equal(tooDeep.status, 'failed', tooDeep.summary);
   assert.equal(tooDeep.data?.movementNotAttempted, true);
+  assert.match(tooDeep.summary, /落差约 5 格/);
+  assert.deepEqual(tooDeep.data?.fall, { drop: 5, damage: 2, landing: { x: 0, y: 59, z: -1 } });
 
   const w2 = new FakeAdapter();
   w2.pos = { x: 0.5, y: 64, z: 0.5 };
