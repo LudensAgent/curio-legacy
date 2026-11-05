@@ -41,6 +41,9 @@ function persistenceState(overrides: Partial<SpatialPersistenceState> = {}): Spa
     journalRevision: 0,
     confirmedJournalRevision: 0,
     journalBaselineCheckpointId: null,
+    ledgerRevision: 0,
+    confirmedLedgerRevision: 0,
+    ledgerBaselineCheckpointId: null,
     pendingJournalRecords: 0,
     pendingJournalBytes: 0,
     committedJournalRecords: 0,
@@ -61,6 +64,7 @@ function checkpoint(id: string, revisions = { voxel: 5, fragment: 4, topology: 3
     fragmentRevision: revisions.fragment,
     topologyRevision: revisions.topology,
     journalRevision: 0,
+    ledgerRevision: 0,
   };
 }
 
