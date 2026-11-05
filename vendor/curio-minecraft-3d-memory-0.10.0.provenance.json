@@ -1,0 +1,26 @@
+{
+  "package": {
+    "name": "curio-minecraft-3d-memory",
+    "version": "0.10.0"
+  },
+  "sourceHEAD": "0737f300c6cea3831d0e2dc1ff349257fa536be8",
+  "artifactSHA256": "a2ddad1e811284bacd13cc0a9072eba097bafe214fcce84be7acdab491c0a19c",
+  "npmIntegrity": "sha512-HIeOAusSBpKGrbnIEDC0IsoWVAmvnHa3qRSqvhaoxpC+2yqcVcLxmwbUN0bnQrAn3+Shv1bMusHpbaCKp1Kj+w==",
+  "sourceBinding": {
+    "clean": true,
+    "head": "0737f300c6cea3831d0e2dc1ff349257fa536be8",
+    "note": "Package inputs were clean. A pre-existing unstaged docs/spatial-memory-library-design.md change is not a build/package input."
+  },
+  "verification": {
+    "unitTests": {
+      "status": "PASS",
+      "command": "npx vitest run tests",
+      "passed": 968,
+      "failed": 0
+    },
+    "typecheck": "PASS",
+    "consumerRuntime": "NOT_RUN",
+    "consumerNodeNextTypes": "NOT_RUN"
+  },
+  "notes": "Adds opaque metadata/externalRef on PathFragment, durable/metadata on SpatialNode, SQLite schema v7, and unattributed placed-ledger imports. Real Minecraft/mineflayer integration was not run for this artifact."
+}
