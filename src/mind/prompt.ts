@@ -7,6 +7,7 @@ import { dirName, durationText, realSecondsToTicks, sunText, type Percept } from
 import { isSoftBlock } from '../perception/surroundings.ts';
 import { audienceBlock, AUDIENCE_RULES, exploredAround, liveAudience, type MySkillInfo } from '../planner/prompt.ts';
 import type { ChatMessage } from '../planner/llm.ts';
+import { isSkillDisabled } from '../skills/disabled.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 import { myBed } from '../skills/stations.ts';
 import { gearAlreadyHeldInText } from '../skills/work.ts';
@@ -108,8 +109,11 @@ export interface MindContext {
 export const COMMON_MOVES = ['dig_at', 'step', 'place_at', 'defend', 'gather', 'goto', 'explore', 'look', 'look_around', 'dive', 'surface', 'swim_to', 'craft', 'smelt', 'collect_furnace', 'eat', 'hunt', 'forage', 'fish', 'farm', 'collect_seeds',
   'pickup_items', 'store_items', 'take_items', 'find_item', 'place_torch', 'shelter', 'sleep', 'wait', 'dig', 'excavate_path', 'follow_passage', 'climb_up', 'press_keys', 'build', 'travel', 'inspect_block', 'interact_block', 'use_item', 'use_skill', 'merge_tools'];
 
-/** 远行、传送门、末地这些只在用得上时列出来，平时是噪音；穿装备是日常动作，留在常驻目录里 */
-const ADVANCED = /portal|end_|dragon|stronghold|search_structure|reservations|base_memory|building_archive|building_review|ranged_defend/;
+/**
+ * 真·远行/末地动作：平时不占静态目录。建造档案、基地、预留、远程防守这些是日常通用能力，
+ * 归到“其余动作”按需可查，不能因为还没进下界就整类消失。
+ */
+const ADVANCED = /portal|end_|dragon|stronghold|search_structure/;
 
 /** 描述取第一句话，太长就在逗号处截断（不截在半个词上） */
 function briefOf(d: string, n: number): string {
@@ -132,25 +136,44 @@ function descOf(s: { name: string; description: string }, chars: number): string
  * 当前活动用到的动作单独作为 user 提醒，这样 system 前缀保持字节稳定，最大程度命中服务端前缀缓存。
  */
 export function movesCatalog(chars = 40, core: Set<string> = new Set(COMMON_MOVES)): string {
-  const visible = Object.values(SKILLS).filter((s) => !LLM_HIDDEN.has(s.name) && !ADVANCED.test(s.name));
+  const visible = Object.values(SKILLS).filter((s) => !LLM_HIDDEN.has(s.name) && !isSkillDisabled(s.name) && !ADVANCED.test(s.name));
   const detailed = visible.filter((s) => core.has(s.name)).map((s) => `- ${s.name} ${s.argsDoc}${descOf(s, chars) ? `：${descOf(s, chars)}` : ''}`);
   const onDemand = visible.filter((s) => !core.has(s.name)).map((s) => `${s.name}（${briefOf(s.description, 14)}）`);
-  const demandLine = onDemand.length ? `\n其他动作（用 {"kind":"moves","names":["…"]} 查完整参数）：${onDemand.join('、')}` : '';
+  const demandLine = onDemand.length ? `\n其他动作（用 {"kind":"moves","names":["…"]} 查完整参数；不写 names 列出全部动作，含进阶动作）：${onDemand.join('、')}` : '';
   return `${detailed.join('\n')}${demandLine}\n缺工具、熔炉、船、火把等默认报告缺口；加 "make":true 才允许顺手制造/准备并消耗材料，加 "make":false 则禁止本动作及嵌套准备`;
 }
 
 /** 进阶动作（portal/end_/dragon/…）：不进静态目录，按需作为 user 提醒给出，避免平时噪音、也不破坏 system 前缀缓存 */
 export function advancedMovesLine(): string {
-  const names = Object.values(SKILLS).filter((s) => !LLM_HIDDEN.has(s.name) && ADVANCED.test(s.name)).map((s) => s.name);
+  const names = Object.values(SKILLS).filter((s) => !LLM_HIDDEN.has(s.name) && !isSkillDisabled(s.name) && ADVANCED.test(s.name)).map((s) => s.name);
   return names.length ? `进阶动作可用（参数用 moves 查）：${names.map((n) => `${n}（${briefOf(SKILLS[n].description, 14)}）`).join('、')}` : '';
 }
 
-/** 完整参数（moves 查询用） */
+/**
+ * 空 moves 查询的完整动作目录：常用动作已在 system 里给参数，这里只列名字；
+ * 其余动作（含平时不占目录的进阶动作）给完整参数和一句用途，保证 Agent 能自己发现全部能力。
+ */
+export function moveDirectory(): string {
+  const visible = Object.values(SKILLS).filter((s) => !LLM_HIDDEN.has(s.name) && !isSkillDisabled(s.name));
+  const core = visible.filter((s) => COMMON_MOVES.includes(s.name)).map((s) => s.name);
+  const rest = visible.filter((s) => !COMMON_MOVES.includes(s.name)).map((s) => {
+    const args = s.argsDoc && s.argsDoc !== '{}' ? s.argsDoc : '';
+    return `- ${s.name}${args ? ` ${args}` : ''}：${briefOf(s.description, 60)}`;
+  });
+  return `常用动作（system 目录已给完整参数）：${core.join('、')}\n其余动作（完整参数）：\n${rest.join('\n')}`;
+}
+
+/** 完整参数（moves 查询用）；最多 12 个，多出来的明确提示分开查，不静默丢掉。 */
 export function moveDetails(names: string[]): string {
-  return names.slice(0, 6).map((n) => {
+  const unique = [...new Set(names.map((n) => String(n).trim()).filter(Boolean))];
+  const shown = unique.slice(0, 12);
+  const more = unique.length > shown.length ? `\n（还有 ${unique.length - shown.length} 个没查，请分开写 names）` : '';
+  return shown.map((n) => {
     const s = SKILLS[n];
-    return s && !LLM_HIDDEN.has(n) ? `- ${s.name} ${s.argsDoc}：${s.description.replace(/\s+/g, ' ')}` : `- ${n}：没有这个动作`;
-  }).join('\n');
+    if (LLM_HIDDEN.has(n)) return `- ${n}：不是可主动规划的动作`;
+    if (isSkillDisabled(n)) return `- ${n}：已禁用，先在面板启用`;
+    return s ? `- ${s.name} ${s.argsDoc}：${s.description.replace(/\s+/g, ' ')}` : `- ${n}：没有这个动作`;
+  }).join('\n') + more;
 }
 
 const CONDITIONS = `done_when 的写法（可选，写错会被忽略）：
@@ -184,7 +207,7 @@ const PASSAGES_QUERY = `{"kind":"passages"} 查当前世界和维度的矿道记
 
 const QUERIES = `【先查再做】需要时先输出一个查询 JSON（查询本身不执行身体动作，但等待期间世界仍在运行、身体可能继续动作，每次思考最多 3 次；拿到结果后以最新状态为准），再决定：
 - {"kind":"skill","query":"关键词"} 查技能（空查询浏览目录，offset 分页，含收起和停用）；{"kind":"skill","name":"技能名"} 读技能及版本记录，加 "version":30 读历史版本；读取不代表启用或验证｜{"kind":"design","brief":"用途、多大、风格","where":"here|base|x,y,z"} 请建筑师画图纸：房子、前哨、仓库、畜栏、塔等要长期用的建筑（where：脚下、家旁或坐标）；传送门/末地门不是建筑，用 build_portal 立框点燃，别让建筑师画
-- {"kind":"recipes","item":"物品名","count":1} 看配方和缺口（"uses":"物品" 反查用途）｜{"kind":"moves","names":["动作名"]} 看动作参数
+- {"kind":"recipes","item":"物品名","count":1} 看配方和缺口（"uses":"物品" 反查用途）｜{"kind":"moves","names":["动作名"]} 看动作参数；不写 names 列出全部动作（含平时不显示的进阶动作）
 - {"kind":"recall","query":"关键词"} 回想以前的经历、日记、教训和技能｜{"kind":"mechanics","query":"…"} 查底层操作接口
 - ${PASSAGES_QUERY}
 - {"kind":"knowledge","query":"问题"} 搜索 Wiki 候选；再用 {"kind":"knowledge","id":"文档id"} 看章节目录，加 "section":"章节id" 读正文，续页按 nextCursor 传 cursor。空查询浏览目录，目录续页传 offset。摘录不等于读完或学会；资料不代表现场事实，做法自行判断。`;
@@ -196,7 +219,7 @@ const SKILL_INDEX = (skills: string[], brief = false) => skills.length
 /** 用户消息分块：越往后越要紧（模型对末尾注意力最强） */
 const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。往某方向走直接写 goto {"target":"E 20"}，别自己算坐标；[前,上,右] 按指定 facing 换算。
 【相对坐标】activity/next 含 dig_at、step、place_at 的水平相对操作时，必须声明活动的 facing:"N|E|S|W"，表示坐标的前方，不等于推进方向。子步骤省略 facing 就继承，显式冲突会退回；绝对 xyz 和纯竖直操作不要求这个字段。活动参考系独立于镜头朝向；转头、观察、插火把不会改变它，local 方块图仍按 local.facing 解读。输出前核对文字目标方向与坐标换算后的实际方向；例如 facing:"N" 的 [-1,0,0] 是向南。需要改变参考系时可明确声明新的 facing（包括 "S"），后退或换向仍由你决定。
-【上下移动】上下移动不用 step：往上只有脚下有梯子才能爬，否则用 place_at [0,0,0] 垫一块站上去；往下用 dig_at [0,-1,0]（挖空脚下人会自己掉下去，不需要再 step）。垫高会跳起来、需要头顶上方两格（头和头上一格）都空：两格高的隧道/矿道里跳不起来，别反复垫高，改用向上阶梯 dig_at [0,2,0] → dig_at [1,2,0] → dig_at [1,1,0] → step [1,1,0]。
+【原地上下】原地升降不用 step：往上只有脚下有梯子才能 step [0,1,0]，否则用 place_at [0,0,0] 垫一块站上去；往下用 dig_at [0,-1,0]（挖空脚下人会自己掉下去，不需要再 step）。相邻一格的上/下台阶用 step [1,1,0]/[1,-1,0]；[1,0,0] 会按实际落点自动迈上一格或落到 4 格内安全落点。垫高会跳起来、需要头顶上方两格（头和头上一格）都空：两格高的隧道/矿道里跳不起来，别反复垫高，改用向上阶梯 dig_at [0,2,0] → dig_at [1,2,0] → dig_at [1,1,0] → step [1,1,0]。
 【消息怎么读】越往后越要紧：【我】性格心情、议程、窍门 →【记得的地方】→【进度】主线到哪了、下一个目标 →【想起来的】自动想起的旧事和技能 →【最近】→【手上的活】→【身边】方块图 local、生物、资源 →【身体】where、生命饥饿、天色、背包 →【专注】主目标和清单 →【此刻】为什么现在想、注意到什么 →【此刻要留意】。未看见的方块状态未知，未挖到不代表那里是空气。`;
 
 const ROUTINE_OF_THINKING = `【每次这样想】
@@ -209,7 +232,7 @@ const CHOOSE = `【选动作】
 - 去记得的地方或坐标 → goto；找没见过的东西 → explore {"until":…}；拿看得见的方块 → gather；身边某一格 → dig_at / step / place_at
 - 坐船过水：船是实体，用 use_item {"item":"…_boat","on":"water"} 放到水面（别用 place_at），再 interact {"entity":"boat"} 上船；ride {"direction":"SW"} 划（ride 必须给 direction 或 to）。travel 提供步行和游泳寻路，已乘船时沿水路导航；吃 → eat（背包有吃的）/ hunt / forage / fish；做东西 → craft、smelt（会自己放下背包里的工作台/熔炉；拿不准查 recipes）
 - 从箱子取/存东西 → 先 find_item {"item":"…"} 查它在哪个箱子，再 take_items / store_items 指定那只箱子（target 写坐标或容器地标 ID）
-- 在坑里或地下想上去 → 看【身边】local 和背包，用 dig_at / step / place_at 自己想办法（怎么上去由你定，背包里有什么用什么）；目标脚下是空腔时，step 可写 fill:"方块名" 先补这一格搭桥，或先 place_at 补支撑；想往下深挖 → 有稳定辅助 excavate_path {"entry":"current","mode":"stairs"} 或 assess_landings + descend（手工 dig_at+step 阶梯的斜下格支撑超出 place_at 范围，容易卡住）
+- 在坑里或地下想上去 → 看【身边】local 和背包，用 dig_at / step / place_at 自己想办法（怎么上去由你定，背包里有什么用什么）；目标脚下是空腔时，step 可写 fill:"方块名" 先补这一格搭桥，或先 place_at 补支撑；想往下深挖 → 有稳定辅助 excavate_path {"entry":"current","mode":"stairs"} 或 assess_landings + descend（手工 dig_at+step 阶梯要自己处理下一级的支撑格）
 - 穿下界门/末地门 → 先 observe_portal 拿 portalId，再 travel_portal {"portalId":"…"} 穿过去；travel_portal 不行时，自己走到门面正前那一格、面向门面走进去（走进紫色门面等传送是可行的；portal 方块站不住也挖不掉，所以别用 step/dig 去动它）
 - design 请建筑师画图纸，再 build（新盖 {"draft":"图纸ID"}，续建 {"projectId":"作品ID"}）；不要自己画图纸
 - goto 默认不挖墙、不垫路、不搭柱；dig:true 才额外允许挖掘、垫路和搭柱；place:false 禁止放置，tower:false 禁止原地搭柱。`;
@@ -222,11 +245,11 @@ const PRINCIPLES = `【原则】
 - 只知道亲眼看到或记得的东西，坐标来自观察或地标，不编。
 - 遇到危险如何行动由你或你写下的技能决定；插火把、顺手吃可用 habits 定成习惯；捡东西需明确安排 pickup_items，pickup 偏好只提醒思考。`;
 
-const PRECISE = `【精确操作】local 以脚部占据格为原点：[前,上,右]，前=local.facing。spots.stand/place 是当前可见的候选站位/放置格，仍需动作确认。step 指脚部目标格，place_at 指方块占据格，支撑在脚部目标下面一格。
+const PRECISE = `【精确操作】local 以脚部占据格为原点：[前,上,右]，前=local.facing。spots.stand/place 是当前可见的候选站位/放置格，仍需动作确认。step 的 to 是目标列/脚部格：[1,0,0] 会按实际方块自动迈上一格或落到 4 格内安全落点；[1,1,0]/[1,-1,0] 明确指定上/下一格；place_at 指方块占据格，支撑在脚部目标下面一格。
 - [0,0,0] 是脚部格，[0,1,0] 是头部格，[0,-1,0] 是支撑格。place_at [0,0,0] 放实心方块会跳起垫高（需头顶上方两格全空，两格高的隧道改用阶梯 dig_at+step）；梯子、火把可放进身体格（需有附着面）。挖空 [0,-1,0] 会下落，无需 step。
-- step [1,-1,0] 下一级需 [1,-2,0] 支撑；place_at [1,-1,0] 会堵住该脚部目标格。place_at 上下范围 -1..3，不能原位补 [1,-2,0]。
+- place_at [1,-1,0] 会在 [1,0,0] 脚部目标格正下方补支撑，会堵住该脚部目标格；place_at 上下范围 -2..3，可以补下一级 [1,-1,0] 的支撑格 [1,-2,0]。
 repeat 每轮重做整套 steps；子步骤继承 activity.facing，每步相对坐标按当前位置重算。done_when 写可观察结果。照明可选 place_torch 或空闲习惯 habits.torch_every。挖前看清目标格。
-- 机械性失败身体会就地应变再重试：太暗先插火把、脚下无支撑先垫一块、头顶被挡先挖开（会消耗方块/火把）；应变不动才交给你决定。`;
+- 机械性失败只会做已授权的执行辅助：明确选的 climb_up 可以清障，同一证据在有限范围内会重试；照明、垫方块、挖墙都要你显式安排（make / place / dig / fill），不会自动消耗材料。`;
 
 /**
  * 两级思考共用的系统前缀：身份、操作者、读法、原则、选动作、决定、输出格式和动作目录逐字相同、顺序固定。

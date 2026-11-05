@@ -11,7 +11,7 @@ import type { Planner } from '../planner/planner.ts';
 import { validateCondition } from '../projects/conditions.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 import { validateSkill } from '../skills/types.ts';
-import { buildMindMessages, buildReflectionMessages, moveDetails, type MindContext } from './prompt.ts';
+import { buildMindMessages, buildReflectionMessages, moveDetails, moveDirectory, type MindContext } from './prompt.ts';
 import type { SelfModel } from './self.ts';
 import { cleanLesson, cleanPlanStep } from './self.ts';
 import { designBuilding } from '../building/architect.ts';
@@ -456,7 +456,7 @@ export class Thinker {
       }
       if (kind === 'moves') {
         const names = (Array.isArray(raw.names) ? raw.names : [raw.name ?? raw.names]).map((n: unknown) => String(n ?? '').trim()).filter(Boolean);
-        return names.length ? moveDetails(names) : '要查哪些动作？写 {"kind":"moves","names":["动作名"]}';
+        return names.length ? moveDetails(names) : moveDirectory();
       }
       if (kind === 'skill') {
         const name = String(raw.name ?? '').trim();

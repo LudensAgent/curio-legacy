@@ -238,7 +238,7 @@ async function stepOutOfWater(ctx: SkillCtx, args: CellArgs, feet: Vec3Like) {
 
 export const stepTo: Skill<StepArgs> = {
   name: 'step',
-  description: '迈到身边相邻的一格（[前,上,右]）：可以平走、上一级台阶（上+1，会跳）、下一级（上-1）；脚下是梯子时 [0,1,0] 沿梯子爬一格。落点按实际碰撞顶面计算（整块、半砖、雪层、地毯都能站，脚高可为分数）；目标列没有同层支撑时，由寻路在下方最多 4 格内找安全落点（游戏里 1–4 格坠落不摔伤），不再逐格做视线预检，也不再因为支撑格是 air 就原地报错。身体空间被方块占住时才拒绝并给出挖掘坐标。更深的落点用 assess_landings 查看并用 descend 明确选择。泡在水里时朝岸那边迈（[1,0,0] 就行），身体会游过去、贴着岸爬上去（岸比脚高一两格也行）。可选 fill 写一种背包方块名：目标脚格下方的支撑格是空的时，先只往那一格补一块再迈（消耗 1 块）；不写就不垫',
+  description: '迈到身边相邻的一格（[前,上,右]）：可以平走、上一级台阶（上+1，会跳）、下一级（上-1）；脚下是梯子时 [0,1,0] 沿梯子爬一格。落点按实际碰撞顶面计算（整块、半砖、雪层、地毯都能站，脚高可为分数）；目标列没有同层支撑时，由寻路在下方最多 4 格内找落点（1–3 格不摔伤，4 格只受少量伤害；不致命），不再逐格做视线预检，也不再因为支撑格是 air 就原地报错。身体空间被方块占住时才拒绝并给出挖掘坐标。更深的落点用 assess_landings 查看并用 descend 明确选择。泡在水里时朝岸那边迈（[1,0,0] 就行），身体会游过去、贴着岸爬上去（岸比脚高一两格也行）。可选 fill 写一种背包方块名：目标脚格下方的支撑格是空的时，先只往那一格补一块再迈（消耗 1 块）；不写就不垫',
   argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W", "fill"?:方块名（目标脚下空时先补这一格，可搭桥）}（前后/左右 ±1，上下 -1..1；[1,0,0] 平走，也会自动迈上相邻一格台阶或下落到 4 格内的安全落点；[1,1,0] 明确上一级；[1,-1,0] 明确下一级；更深落差用 descend）',
   timeoutMs: 8000,
   movement: true,
@@ -303,7 +303,7 @@ export const stepTo: Skill<StepArgs> = {
     const blockerLabel = (p: Vec3Like) => visibleName(p) ?? '实心方块';
     const absolute = args.xyz !== undefined;
     const requestedFoot = absolute ? args.xyz!.y : feet.y + args.at[1];
-    // 直接落点优先（含半砖顶面、一格台阶）；站不住时向下找最多 4 格，对应游戏里安全的 1–4 格坠落。
+    // 直接落点优先（含半砖顶面、一格台阶）；站不住时向下找最多 4 格：1–3 格不摔伤，4 格只受少量伤害。
     const chooseLanding = (): number | null => {
       if (absolute) return requestedFoot;
       const direct = rawFoot(target);
@@ -420,7 +420,7 @@ export const stepTo: Skill<StepArgs> = {
     }
     let movementError: unknown;
     try {
-      // 直接按实际落点走路。默认寻路允许最多 4 格安全坠落；不再为每格支撑/净空做视线预检，
+      // 直接按实际落点走路。默认寻路允许最多 4 格、不致命的落差；不再为每格支撑/净空做视线预检，
       // 也不在 air 支撑上原地报错——能否走过去由寻路器按真实方块和物理判断。
       await a.moveTo({ kind: 'xyz', x: target.x, y: foot, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())), allowTerrainChanges: false });
     } catch (e) {

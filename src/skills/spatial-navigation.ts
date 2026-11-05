@@ -817,7 +817,7 @@ type WalkKnownBase = {
 export const walkKnownRoute: Skill<WalkKnownRouteArgs> = {
   name: 'walk_known_route',
   description: '按 fragmentId 读取共享空间历史中的一条已存路线，并在当前世界中重新验证后执行：历史几何只作为选定路线，不证明现在可通行或由本 Agent 走过；每段都按当前合法观测重新判定 OPEN，实际身体位置由物理样本与既有 grounded 稳定窗口确认，不从历史点传送或改写起点。支持同高、沿 X/Z 单轴相邻一格、2~32 点的普通干燥整块路线；出发前对选定点做有限转头观察（至多 12 次真实 look），移动中只观察身体周边 3×3×4 格；不含搜索、挖掘、放置、跳跃、游泳或旧 moveTo 兜底。',
-  argsDoc: '{"fragmentId":"历史片段ID（非空字符串）","deadlineMs":可选绝对epoch毫秒}；只接受这些参数，avoid/dig/place/tower/materials 等未贯通的选项会被明确拒绝，不会静默忽略',
+  argsDoc: '{"fragmentId":"历史片段ID（非空字符串；先用 spatial_query {"kind":"fragments"} 列出）","deadlineMs":可选绝对epoch毫秒}；只接受这些参数，avoid/dig/place/tower/materials 等未贯通的选项会被明确拒绝，不会静默忽略',
   timeoutMs: 30000,
   movement: true,
   validate(raw, _adapter) {
