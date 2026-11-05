@@ -28,12 +28,12 @@ test('离两段旧矿道都远时，选接得上的那团地表入口，而不�
   assert.deepEqual(result.data?.resolvedTarget, { x: 2, y: 64, z: 0 }, '选接得上的 psg_a 入口，而不是 y 更高的 psg_b');
 });
 
-test('没有入口记录、两团又不相连时，报实际跨分量断口', async () => {
+test('没有入口记录时，不把另一团更高的不可达点当目标', async () => {
   const adapter = new TestWorld();
   adapter.pos = { x: 0.5, y: 64, z: 10.5 };
   const memory = new WorldMemory(null);
   memory.setWorld(adapter.worldId);
-  // 两条都没有入口记录，退回“该分量最高的脚点”；psg_b 更高，但和最近的 psg_a 断开 8 格。
+  // 两条都没有入口记录，退回“能走到的该分量最高脚点”；psg_b 更高，但和最近的 psg_a 断开 8 格。
   memory.savePassage({ ...rec(adapter, 'psg_a', [{ x: 0, y: 64, z: 0 }, { x: 2, y: 64, z: 0 }], { x: 2, y: 64, z: 0 }), entrances: [] });
   memory.savePassage({ ...rec(adapter, 'psg_b', [{ x: 10, y: 66, z: 0 }, { x: 12, y: 66, z: 0 }], { x: 12, y: 66, z: 0 }), entrances: [] });
 
@@ -42,16 +42,13 @@ test('没有入口记录、两团又不相连时，报实际跨分量断口', as
 
   assert.equal(result.status, 'failed');
   assert.equal(result.failureCode, 'PATH_NOT_FOUND');
-  // 报的是实际断口和它的宽度，不是“从你脚下直线约 N 格”。
-  assert.match(result.summary, /通道在 \(2,64,0\) 和 \(10,66,0\) 之间断开，相距 8 格（水平 8、垂直 2）/);
-  assert.doesNotMatch(result.summary, /从你脚下/);
-  const gap = result.data?.connectionGap as { from: Vec3Like; to: Vec3Like; distance: number; horizontal: number; vertical: number };
-  assert.deepEqual(gap.from, { x: 2, y: 64, z: 0 });
-  assert.deepEqual(gap.to, { x: 10, y: 66, z: 0 });
-  assert.equal(gap.vertical, 2);
+  // 目标只能是这里连得上的那团（0,64,0），不能是 y 更高的不可达团。
+  assert.deepEqual(result.data?.resolvedTarget, { x: 0, y: 64, z: 0 });
+  assert.match(result.summary, /锚点本身接不上一条可走的路/);
+  assert.equal(result.data?.connectionGap, undefined, '没有把另一团当成已选目标，就不伪造 connectionGap');
 });
 
-test('断口在 near 范围内时，走到最近的可达脚点并如实报告还差几格', async () => {
+test('没有可用入口时停在可达脚点，如实报锚点接不上而不是跨分量断口', async () => {
   const adapter = new TestWorld();
   adapter.pos = { x: 0.5, y: 64, z: 10.5 };
   const memory = new WorldMemory(null);
@@ -62,11 +59,9 @@ test('断口在 near 范围内时，走到最近的可达脚点并如实报告�
   const ctx = makeCtx(adapter, { memory });
   const result = await followPassage.run(ctx as never, { to: 'entrance' });
 
-  assert.equal(result.status, 'succeeded', result.summary);
-  assert.match(result.summary, /离入口参考点约 4 格/);
-  const arrival = result.data?.arrival as { satisfied: boolean };
-  assert.equal(arrival.satisfied, false, '没到 ≤2 格不能报 arrived');
-  assert.equal(result.data?.connectionGap, undefined, '断口在 near 内时走最近的脚点，不算确定断口');
+  assert.equal(result.status, 'failed');
+  assert.match(result.summary, /锚点本身接不上一条可走的路/);
+  assert.equal(result.data?.connectionGap, undefined, '没有把另一团当成已选目标，就不伪造 connectionGap');
 });
 
 test('dig:true 时先尝试接上小断口，再接回记录路线', async (t) => {
@@ -116,9 +111,10 @@ test('断口没有被 dig:true 授权时，提示可以加 dig:true', async (t) 
   const result = await followPassage.run(ctx as never, { to: 'entrance' });
 
   assert.equal(result.status, 'failed');
-  assert.match(result.summary, /相距 4 格（水平 0、垂直 4）/);
+  // 没有 dig 授权时只给有向可达的锚点；不会为了更高但不可达的入口伪造跨分量断口。
+  assert.match(result.summary, /锚点本身接不上一条可走的路/);
   assert.match(result.summary, /加 dig:true/);
-  assert.ok(result.data?.connectionGap);
+  assert.equal(result.data?.connectionGap, undefined);
 });
 
 test('同一条通道的锚点离脚点太远时，不伪造跨分量 connectionGap', async () => {

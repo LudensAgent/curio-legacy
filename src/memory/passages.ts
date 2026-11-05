@@ -46,7 +46,7 @@ const MAX_POINTS = 160;
  *  图只由 path/links 的数量决定（uses、lastUsedAt 等字段不影响拓扑），用计数做失效信号；
  *  动作内的数组引用作为缓存键，动作结束后数组被回收，图随之释放。 */
 const graphCache = new WeakMap<object, {
-  hop: number; link: number; points: number; links: number;
+  hop: number; link: number; points: number; links: number; cuts: number; reverses: number;
   graph: { nodes: Vec3Like[]; owner: number[]; edges: Map<number, Set<number>>; blocked: Map<number, Set<number>> };
 }>();
 
@@ -262,7 +262,9 @@ export class PassageTracker {
     const same = (u: Vec3Like, v: Vec3Like) => u.x === v.x && u.y === v.y && u.z === v.z;
     const existing = links.find((l) => (same(l.a, a) && same(l.b, b)) || (same(l.a, b) && same(l.b, a)));
     if (existing) {
+      // 反向走过同一对格子、或并入的 link 本身带 reverse，都说明方向证据是双向的；合并时不能把它吞掉。
       if (!existing.reverse && same(existing.a, b) && same(existing.b, a)) existing.reverse = true;
+      if (mark.reverse) existing.reverse = true;
       return;
     }
     links.push({ a, b, ...(mark.run !== undefined ? { run: mark.run } : {}), ...(mark.cut ? { cut: true } : {}), ...(mark.reverse ? { reverse: true } : {}) });
@@ -305,13 +307,20 @@ export function passageLevels(rec: Pick<PassageRecord, 'path'>): number[] {
 /** 通道脚点 + 真实边走成的图：节点是脚点（path 或 links 端点），边是 links（或旧数据的时间相邻脚点）
  *  + 跨 record 的碎片自愈 + 同一段连续观测（run 相同）里漏采样的小缺口；merge/dedupe 的 cut 边界不跨。
  *  边仍按无向存储（碎片化/分量判断需要）；`blocked` 只标出「反向没有证据」的有向禁行：
- *  显式 link 的 a→b 记录顺序是向下掉（a 高、b 低、差 ≥2）时，只证明 a→b，反向 climb 不可走。 */
+ *  显式 link 是纯垂直下坠（同 x/z，a 高、b 低、差 ≥2）时，只证明 a→b，反向 climb 不可走；
+ *  带水平位移的 dy≤-2 可能是跨了两级台阶，保持双向。 */
 export function passageGraph(recs: Pick<PassageRecord, 'path' | 'links'>[], opts: { hop?: number; link?: number } = {}): { nodes: Vec3Like[]; owner: number[]; edges: Map<number, Set<number>>; blocked: Map<number, Set<number>> } {
   const hop = opts.hop ?? 7, link = opts.link ?? PASSAGE_LINK;
-  let points = 0, linkCount = 0;
-  for (const r of recs) { points += r.path.length; linkCount += r.links?.length ?? 0; }
+  let points = 0, linkCount = 0, cuts = 0, reverses = 0;
+  for (const r of recs) {
+    points += r.path.length;
+    linkCount += r.links?.length ?? 0;
+    // 方向签名：同一条 record 的 links 数组可能在反复 observe 中原地补上 cut/reverse，计数变化必须让图失效。
+    for (const l of r.links ?? []) { if (l.cut) cuts++; if (l.reverse) reverses++; }
+  }
   const hit = graphCache.get(recs);
-  if (hit && hit.hop === hop && hit.link === link && hit.points === points && hit.links === linkCount) return hit.graph;
+  if (hit && hit.hop === hop && hit.link === link && hit.points === points && hit.links === linkCount
+    && hit.cuts === cuts && hit.reverses === reverses) return hit.graph;
 
   const nodes: Vec3Like[] = [];
   const owner: number[] = [];
@@ -340,10 +349,11 @@ export function passageGraph(recs: Pick<PassageRecord, 'path' | 'links'>[], opts
         const u = indexOf(l.a, recIdx), v = indexOf(l.b, recIdx);
         add(u, v);
         if (u === v) continue;
-        // 只有显式 link 有方向证据：记录顺序 a→b 是向下掉（差 ≥2）时反向爬没有证据；
-        // 水平、向上爬、cut（方向不确定）保持双向。path 推断边和跨 record 几何连边不参与判向。
-        const key = pairKey(u, v), dy = l.b.y - l.a.y;
-        if (l.cut || l.reverse || Math.abs(dy) <= 1 || dy >= 2) twoWay.add(key);
+        // 只有显式 link 有方向证据，而且只有「纯垂直」的下坠才判单向：两次观测之间带着水平位移的
+        // dy≤-2 很可能是跨了两级 1 格台阶，不能当成不能爬的落差。向上爬、水平、cut、reverse 都保持双向。
+        const key = pairKey(u, v);
+        const vertical = l.a.x === l.b.x && l.a.z === l.b.z;
+        if (l.cut || l.reverse || !vertical || l.a.y - l.b.y < 2) twoWay.add(key);
         else oneWay.set(key, [u, v]);
       }
       // 同一段连续观测（同一个 run）里相邻两条 link 之间漏采了中间步时补上，不然走过的一条道会断成多团。
@@ -394,7 +404,7 @@ export function passageGraph(recs: Pick<PassageRecord, 'path' | 'links'>[], opts
   }
   for (const [key, [u, v]] of oneWay) if (!twoWay.has(key)) (blocked.get(v) ?? blocked.set(v, new Set()).get(v)!).add(u);
   const graph = { nodes, owner, edges, blocked };
-  graphCache.set(recs, { hop, link, points, links: linkCount, graph });
+  graphCache.set(recs, { hop, link, points, links: linkCount, cuts, reverses, graph });
   return graph;
 }
 
@@ -577,15 +587,37 @@ export function passageSurfaceCandidates(recs: (Pick<PassageRecord, 'path' | 'en
     .slice(0, limit);
 }
 
-/** 想回地面时取代价最小的地表出口；没有有效入口就取该分量最高的脚点（保持旧行为）。
+/** 想回地面时取代价最小的地表出口；没有有效入口就取**从 here 按记录方向可达**的最高脚点。
  * 不能只按水平距离取最近的入口——归档里的旧入口可能在脚下方几十格，
- * 选中它会让 follow_passage 在“深处入口”报到达，然后另一个动作再挖上去。 */
-export function passageSurfaceAnchor(recs: Pick<PassageRecord, 'path' | 'entrances' | 'links'>[], here: Vec3Like): Vec3Like | null {
+ * 选中它会让 follow_passage 在“深处入口”报到达，然后另一个动作再挖上去。
+ * 兜底也不能只按 y 取最高点：反向没有证据的落差（有向禁行）之外的更高点到不了，返回它只会让路由 null。 */
+export function passageSurfaceAnchor(recs: Pick<PassageRecord, 'path' | 'entrances' | 'links'>[], here: Vec3Like,
+  opts: { allowUnreachable?: boolean } = {}): Vec3Like | null {
   const best = passageSurfaceCandidates(recs, here, { limit: 1 })[0];
   if (best) return best.anchor;
-  const { pool } = surfacePool(recs, here);
-  // 没有入口记录时退回该分量最高的脚点；同高保持记录顺序，不按水平距离改变旧目标。
-  return [...pool.flatMap((r) => r.path)].sort((a, b) => b.y - a.y)[0] ?? null;
+  // 带施工权限时，目标可以是记录里更高的不可达出口：follow_passage 的 dig:true 会先尝试接上小断口。
+  // 不带施工权限时只给有向可达的点，避免拿一个当前根本到不了的锚点当目标。
+  if (opts.allowUnreachable) {
+    const { pool } = surfacePool(recs, here);
+    return [...pool.flatMap((r) => r.path)].sort((a, b) => b.y - a.y)[0] ?? null;
+  }
+  const { nodes, edges, blocked } = passageGraph(recs);
+  // 起点按三维距离取最近脚点（竖直井里同一 x/z 的上下点不能混为一谈）；离网远时 follow_passage 会先走过去。
+  let origin = -1, bd = Infinity;
+  nodes.forEach((q, i) => { const d = d3(q, here); if (d < bd) { bd = d; origin = i; } });
+  if (origin < 0) return null;
+  const seen = new Set<number>([origin]);
+  const stack = [origin];
+  while (stack.length) {
+    const u = stack.pop()!;
+    for (const v of edges.get(u) ?? []) {
+      if (seen.has(v) || blocked.get(u)?.has(v)) continue;
+      seen.add(v); stack.push(v);
+    }
+  }
+  let highest: Vec3Like | null = null;
+  for (let i = 0; i < nodes.length; i++) if (seen.has(i) && (!highest || nodes[i]!.y > highest.y)) highest = nodes[i]!;
+  return highest;
 }
 
 /**
