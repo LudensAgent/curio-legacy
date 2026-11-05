@@ -11,6 +11,7 @@ export type FailureCode =
   | 'TOOL_MISSING'
   | 'INVENTORY_FULL'
   | 'MISSING_MATERIALS'
+  | 'WOULD_WASTE'
   | 'NO_CRAFTING_TABLE'
   | 'UNKNOWN_ITEM'
   | 'BAD_ARGS'

@@ -38,7 +38,7 @@ function normalizeDoneWhen(raw: unknown, depth = 0): unknown {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || depth > 4) return raw;
   const o = { ...raw } as Record<string, any>;
   const aliases: Record<string, string> = { in_water: 'inWater', in_lava: 'inLava', on_ground: 'onGround', skyVisible: 'sky_visible' };
-  const selfFields = ['held', 'riding', 'inWater', 'inLava', 'onGround', 'sky_visible', 'underground'];
+  const selfFields = ['held', 'riding', 'inWater', 'inLava', 'onGround', 'dim', 'sky_visible', 'underground'];
   const fieldName = (field: unknown) => typeof field === 'string' ? aliases[field] ?? field : undefined;
   if (o.type === undefined) {
     if (Array.isArray(o.conditions)) o.type = o.any === true || o.mode === 'any' ? 'any_of' : 'all_of';

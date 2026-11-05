@@ -1496,6 +1496,8 @@ test('提示词：背包里的护甲和空槽并列写出，避免把背包里�
   assert.match(body.wearables_in_backpack, /iron_boots（耐久 20\/195，快坏了），脚槽空着/);
   assert.match(body.wearables_in_backpack, /iron_chestplate（耐久 4\/240，快坏了），胸槽现穿着 iron_chestplate（耐久 15\/240）/);
   assert.match(body.mergeable_gear, /iron_chestplate 2 件（背包 4\/240、身上 15\/240）/);
+  assert.match(body.mergeable_gear, /min\(满耐久, 两件耐久之和 \+ 满耐久5%\)/);
+  assert.match(body.mergeable_gear, /多出的耐久会被丢掉、合计耐久反而下降/);
   memory.close();
 });
 

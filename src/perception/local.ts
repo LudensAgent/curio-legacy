@@ -41,7 +41,8 @@ const AIR = new Set(['air', 'cave_air', 'void_air']);
  * spots.stand/place 与 step/place_at 用同一套碰撞形状判断，未知格一律不当作空气或空位。
  */
 export function localMap(_adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like, facing: Facing,
-  observe?: (positions: Vec3Like[]) => readonly { name: string; pos: Vec3Like; properties?: Record<string, string | number | boolean> }[], radius = config.vision.localRadius) {
+  observe?: (positions: Vec3Like[]) => readonly { name: string; pos: Vec3Like; properties?: Record<string, string | number | boolean> }[], radius = config.vision.localRadius,
+  body?: { feet: string | null; head: string | null }) {
   const feet = feetCell(pos);
   const R = Math.max(1, Math.min(8, Math.floor(radius))), U0 = -2, U1 = 3;
   const key = (p: Vec3Like) => `${p.x},${p.y},${p.z}`;
@@ -66,13 +67,23 @@ export function localMap(_adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like, 
     }
     return c;
   };
+  // 身体占据的两格是触觉事实（由感知层从 surrounding 的 feet/head 传来，不走视野锥）；
+  // 站在门方块、水里时必须让模型看见格子里是什么，不能用一个“Y”把触发方块遮掉。
+  const bodyCells = body ?? { feet: null, head: null };
+  const bodySymbol = (name: string | null, cell: '脚' | '头') => {
+    if (!name || AIR.has(name)) return null;
+    const c = cell === '脚' ? '@' : '%';
+    legend[c] = `${cell}所在格：${name}`;
+    return c;
+  };
+  const bodyChars = [bodySymbol(bodyCells.feet, '脚'), bodySymbol(bodyCells.head, '头')];
   const layers: Record<string, string[]> = {};
   for (let u = U1; u >= U0; u--) {
     const rows: string[] = [];
     for (let f = R; f >= -R; f--) {
       let row = '';
       for (let r = -R; r <= R; r++) {
-        if (f === 0 && r === 0 && (u === 0 || u === 1)) { row += 'Y'; continue; }
+        if (f === 0 && r === 0 && (u === 0 || u === 1)) { row += bodyChars[u] ?? 'Y'; continue; }
         const n = at(f, u, r);
         row += n === null ? '?' : symbol(n.name);
       }
@@ -113,7 +124,7 @@ export function localMap(_adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like, 
     if (placementReference(cell, stateAtWorld, null) !== 'observed') continue;
     place.push(`[${f},${u},${r}] ${word(f, u, r)}`);
   }
-  return { facing, source: 'current_vision', frame: `[前,上,右]；每层的行从前(f=+${R})到后(f=-${R})，列从左(r=-${R})到右(r=+${R})，中间是自己；只显示本次看见的格子，? 是未知`, legend, layers,
+  return { facing, source: 'current_vision', frame: `[前,上,右]；每层的行从前(f=+${R})到后(f=-${R})，列从左(r=-${R})到右(r=+${R})，中间是自己；只显示本次看见的格子，? 是未知`, legend, layers, body: bodyCells,
     spots: { stand: stand.slice(0, 8), place: place.slice(0, 8), note: 'stand 是脚部目标格（括号里的脚高按实际碰撞顶面，半砖/雪层等可为分数）；place 是已看清的空位且旁边有已观察的可贴面方块。两者都按当前可见格和碰撞形状估计，未知格不计入；实际移动和放置仍需动作确认。[0,0,0] 是当前脚部占据格，[0,-1,0] 是其下方支撑格' } };
 }
 
