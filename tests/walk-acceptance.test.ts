@@ -271,9 +271,9 @@ test('packageMeta：当前可信 artifact 的来源/字节/锁/install 彼此对
   assert.equal(meta.lockVersion, meta.version);
   assert.equal(meta.lockResolved, meta.dependencySpec);
   assert.equal(meta.dependencySpec, 'file:vendor/curio-minecraft-3d-memory-0.9.0.tgz');
-  assert.equal(meta.tgzSha256, '54e688590690a5cfc9ae36da1bbd977ecd7d47d2ca9a73334fd2cfe7053fd424');
-  assert.equal(meta.lockIntegrity, 'sha512-e9XEI2kyb1/OyLq0N+dVsPeCNIm8aOMt44oW0l2jCGT0NZVxWVJQ1mi1pLa25NS8KZEUvodKjciXe8uYXQMK1w==');
-  assert.equal(meta.sourceHEAD, '9668ad49c2f37f96c0e3173a67a525dc5006fa67');
+  assert.equal(meta.tgzSha256, 'bf598df5600d41cc6889784d28b1c106b378c8a3a45f61111be741c5f75de774');
+  assert.equal(meta.lockIntegrity, 'sha512-bNWCqqMfa/g63imFE/Ekv3tA+6TVnm7t7B5Y+hJcCuOkFbe80uiQpBSlEp4Co7Bocemmt0GnfpRcQ9oJgj/Oyw==');
+  assert.equal(meta.sourceHEAD, 'c7707b6567ec054062a2693d6391db494e45bd0a');
   assert.equal(meta.sourceBindingClean, true);
 });
 
