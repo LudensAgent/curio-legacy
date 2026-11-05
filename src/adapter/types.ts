@@ -421,7 +421,7 @@ export interface GameAdapter {
   arrangeHotbar?(name: string, index: number, signal: AbortSignal, opts?: { sourceSlot?: number }): Promise<ActionResult>;
   /** 把背包和快捷栏里同名可堆叠物品的散叠两两合并到堆叠上限，腾出空槽；item 可指定只整理一种。不制造、不丢弃。 */
   mergeStacks?(signal: AbortSignal, item?: string): Promise<ActionResult & { merged: number; freed: number }>;
-  equipItem?(name: string | null, destination: 'hand' | 'off-hand' | 'head' | 'torso' | 'legs' | 'feet', signal: AbortSignal, opts?: { sourceSlot?: number }): Promise<ActionResult>;
+  equipItem?(name: string | null, destination: 'hand' | 'off-hand' | 'head' | 'torso' | 'legs' | 'feet', signal: AbortSignal, opts?: { sourceSlot?: number; explicit?: boolean }): Promise<ActionResult>;
   /** item='' performs a legal empty-hand interaction (for example opening an owned door). */
   useBlockAt?(pos: Vec3Like, item: string, signal: AbortSignal): Promise<ActionResult>;
   useItem?(item: string, signal: AbortSignal, opts?: UseItemOptions): Promise<ActionResult>;
