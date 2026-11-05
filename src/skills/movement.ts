@@ -192,8 +192,9 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
       }
     }, 500);
     let stopWalk: AbortController | null = null;
+    const attempts: string[] = [];
     try {
-      for (const cand of order.slice(0, 2)) {
+      for (const cand of order.slice(0, 3)) {
         const tx = start.x + cand.dx * distance;
         const tz = start.z + cand.dz * distance;
         ctx.progress(0, `向 ${cand.d} 探索 ${distance} 格${args.until ? `，留意 ${args.until}` : ''}`);
@@ -222,10 +223,11 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
           if (moved < distance * 0.3) failedDirs.set(cand.d, Date.now());
           if (moved >= distance * 0.5) return done(cand.d, true);
           if (codeFromError(e) === 'TIMEOUT') return fail('TIMEOUT', `向 ${cand.d} 探索超时，仅前进 ${moved} 格`);
-          // 换一个方向再试一次
+          attempts.push(`${cand.d} 只前进 ${moved} 格（${(e as Error).message.slice(0, 60)}）`);
+          // 换一个方向再试；最多试三个方向，避免只试两个就判死
         }
       }
-      return fail('PATH_NOT_FOUND', '两个方向都无法前进');
+      return fail('PATH_NOT_FOUND', `${attempts.length} 个方向都无法前进（${attempts.join('；')}）；explore 本身不挖墙、不垫路，要穿过去可显式用 goto {"target":"<坐标>","dig":true}（挖墙/垫路/搭柱）或 place:true（只垫路），也可用 excavate_path 开一条通道`, { attempts });
     } finally {
       clearInterval(prog);
     }
