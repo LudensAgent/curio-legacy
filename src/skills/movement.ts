@@ -9,7 +9,7 @@ import type { EntityInfo, Vec3Like } from '../adapter/types.ts';
 import { feetCell } from '../perception/local.ts';
 import { cancelledNav, clampInt, codeFromError, fail, isAbort, navReceipt, obj, ok, type FailureCode, type NavOutcome, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 import { HEADING_TARGET, MAX_HEADING_DISTANCE, planTravel } from './overland.ts';
-import { passageDeepestAnchor, passageGraph, passageNearestNode, passageRoute, passageSurfaceAnchor } from '../memory/passages.ts';
+import { dedupePassages, passageDeepestAnchor, passageGraph, passageNearestNode, passageRoute, passageSurfaceAnchor, passageSurfaceCandidates } from '../memory/passages.ts';
 
 // ------------------------------------------------------------------ 寻找与张望（人眼式：不透视，只是转头看）
 /** 朝 (dx,dz) 方向的 yaw（0 = 北/-Z，正值向左/西） */
@@ -594,7 +594,7 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
 /** 沿自己记下的旧矿道（把全部通道连成网的脚点）逐段走：entrance 回记录入口（不一定是传送门/基地），deepest 下到最深处。 */
 export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig?: boolean }> = {
   name: 'follow_passage',
-  description: '沿旧矿道回记录入口（不一定是传送门/基地）；to:"entrance" 是当前连通分量里最高的记录入口锚点，要找特定传送门/基地用 goto 或 travel_portal；to:"deepest" 下到最深处；可选 id 只选一条已知通道（含历史归档），不选则走全部记录连成的网。每段用步行寻路，dig:true 才允许挖开挡路、垫方块；走不通就停在原地并说明走到第几段、离目标还差多少，接不上时给出 connectionGap 两端。完成条件：走完记录脚点后离入口/最深处锚点三维 ≤2 格才算 arrived；后端 pathfinder_waypoints；只认 to、id 与 dig，不提供 place/tower 施工权限',
+  description: '沿旧矿道回记录入口（不一定是传送门/基地）；to:"entrance" 取当前连通分量里靠近地表、且沿记录网实际路长最短的记录入口锚点（不是 y 最高或直线最近），要找特定传送门/基地用 goto 或 travel_portal；to:"deepest" 下到最深处；可选 id 只选一条已知通道（含历史归档），不选则走去重后的全部记录连成的网。每段用步行寻路，dig:true 才允许挖开挡路、垫方块；走不通就停在原地并说明走到第几段、离目标还差多少，接不上时给出 connectionGap 两端。回入口的路线如果明显绕远（路长 ≥24 格且先降到两端以下 8 格以上），会在开走前停下，给出同分量的备选出口和代价；要强制走指定记录就带 id。完成条件：走完记录脚点后离入口/最深处锚点三维 ≤2 格才算 arrived；后端 pathfinder_waypoints；只认 to、id 与 dig，不提供 place/tower 施工权限',
   argsDoc: '{"to":"entrance"|"deepest", "id"?:string, "dig"?:boolean}',
   timeoutMs: 600000,
   movement: true,
@@ -634,11 +634,15 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
       if (!s.connected) return receipt(fail('NOT_CONNECTED', '未连接'));
       const here = { x: s.pos.x, y: s.pos.y, z: s.pos.z };
       const allRecs = memory.allPassages(s.dim).filter((r) => !r.worldId || r.worldId === s.worldId);
-      const recs = args.id ? allRecs.filter((r) => r.id === args.id) : allRecs;
+      // 同一条路被重复记成多条 record 时，图上会出现并行的伪岔路；导航只留代表。
+      // 显式指定 id 时不合并：agent 选的就是那一条，合并可能把它删掉。
+      const recs = args.id ? allRecs.filter((r) => r.id === args.id) : dedupePassages(allRecs);
       const archivedCount = recs.filter((r) => r.archivedAt !== undefined).length;
       if (!recs.length) return receipt(fail('NOT_FOUND', args.id ? `没有找到通道 ${args.id}；用 query passages 核对 ID，或省略 id 走全部旧矿道` : '没有记下的旧矿道；要先下矿走过/挖过一段，或改用 goto / excavate_path'));
       const back = args.to === 'entrance';
-      target = back ? passageSurfaceAnchor(recs, here) : passageDeepestAnchor(recs, here);
+      // 入口解析同时记下这条出口所属的记录 ID：绕行预检要给 agent 一个“强制走这条”的 id。
+      const chosenExit = back ? passageSurfaceCandidates(recs, here, { limit: 1 })[0] : undefined;
+      target = back ? (chosenExit?.anchor ?? passageSurfaceAnchor(recs, here)) : passageDeepestAnchor(recs, here);
       if (!target) return receipt(fail('NOT_FOUND', '旧矿道里没有可用的目标点'));
       resolved = target;
       const anchor = `(${Math.round(target.x)},${Math.round(target.y)},${Math.round(target.z)})`;
@@ -728,13 +732,49 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
           return receipt(fail('PATH_NOT_FOUND', why, { position: start, ...(connectionGap ? { connectionGap } : {}) }));
         }
       }
-      ctx.progress(0, `沿${kind}${back ? `回记录入口 ${anchor}` : `下最深 ${anchor}`}，共 ${route.length} 段`);
+      // 出发前把这条路的实际形状算出来：段数、路长、最低点、和两端的高差。
+      // 记录网的「最高入口」只保证接近地表；看着 y 高 2 格，实际可能要下潜 20 多格再爬回来。
+      const routeFacts = (() => {
+        const pathLength = route.slice(1).reduce((n, p, i) => n + dist3(route[i]!, p), 0);
+        const minY = Math.min(...route.map((p) => p.y));
+        const maxY = Math.max(...route.map((p) => p.y));
+        const straight = dist3(start, target!);
+        const dip = Math.max(0, Math.min(start.y, target!.y) - minY);
+        return {
+          segments: route.length - 1, pathLength: Math.round(pathLength), minY, maxY,
+          straight: Math.round(straight * 10) / 10, dip,
+          ratio: straight > 0.01 ? Math.round((pathLength / straight) * 10) / 10 : null,
+        };
+      })();
+      // 回入口却要先降到两端都低 8 格以上、而且路够长：这不是“回到地表”，而是一段穿过旧矿道的绕行。
+      // 太短的下探（一两次台阶）不值得打断。显式给了 id（agent 自己选的记录）时不拦；
+      // 否则在开走前把事实和备选出口交回去，由 agent 决定。
+      if (!args.id && back && routeFacts.pathLength >= 24 && routeFacts.dip >= 8) {
+        const candidates = passageSurfaceCandidates(recs, start, { limit: 4 });
+        const resolvedIds = chosenExit?.recordIds.length
+          ? chosenExit.recordIds
+          : candidates.find((c) => dist3(c.anchor, target!) <= 3)?.recordIds ?? [];
+        const alternatives = candidates
+          .filter((c) => dist3(c.anchor, target!) > 0.5)
+          .map((c) => ({
+            pos: { x: Math.round(c.anchor.x), y: Math.round(c.anchor.y), z: Math.round(c.anchor.z) },
+            cost: Math.round(c.cost), ids: c.recordIds,
+          }));
+        const alt = alternatives.length
+          ? `；同分量的备选出口：${alternatives.map((a) => `(${a.pos.x},${a.pos.y},${a.pos.z}) 约 ${a.cost} 格${a.ids.length ? `〔${a.ids.slice(0, 2).join('、')}〕` : ''}`).join('；')}`
+          : '；同分量没有别的记录出口';
+        const force = resolvedIds.length ? `；要强制走当前这条就带 id〔${resolvedIds.slice(0, 2).join('、')}〕` : '';
+        return receipt(fail('PATH_NOT_FOUND', `沿${kind}回记录入口的路线不是直接回地表：共 ${routeFacts.segments} 段约 ${routeFacts.pathLength} 格，最低到 y=${routeFacts.minY}（比两端低 ${routeFacts.dip} 格），要先下潜再爬回来${alt}。没有沿这条记录继续走${force}；要自己挖/走由你定`, { position: start, routeFacts, alternatives, resolvedTarget: target, resolvedIds, decisionRequired: true }));
+      }
+      ctx.progress(0, `沿${kind}${back ? `回记录入口 ${anchor}` : `下最深 ${anchor}`}，共 ${route.length} 段${routeFacts.dip >= 4 ? `（先降到 y=${routeFacts.minY}，比两端低 ${routeFacts.dip} 格）` : ''}`);
       let last = start;
+      // 连续多少段只能靠同列兜底：记录点和现状对不上时不要闷头磨完整条。
+      let rescued = 0, rescueCount = 0;
       for (let i = 0; i < route.length; i++) {
         throwIfAborted(signal);
         if (Date.now() >= ctx.deadline) return receipt(fail('TIMEOUT', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段时间用完；人停在 (${last.x.toFixed(1)},${last.y.toFixed(1)},${last.z.toFixed(1)})，离目标约 ${Math.round(dist3(last, target))} 格`, { position: last, reachedWaypoint: i, totalWaypoints: route.length - 1 }));
         const wp = route[i];
-        if (dist3(last, wp) <= 1.2) continue;
+        if (dist3(last, wp) <= 1.2) { rescued = 0; continue; }
         // 上 1 格台阶：两格高隧道里跳不起来。先把「起跳头顶」「新头」两格挖开（dig:true 才授权挖），再迈。
         const lc = feetCell(last);
         if (wp.y === lc.y + 1 && Math.abs(wp.x - lc.x) <= 1 && Math.abs(wp.z - lc.z) <= 1) {
@@ -754,21 +794,38 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
           }
         }
         ctx.progress(i / route.length, `沿${kind}${back ? '回入口' : '下最深'}：第 ${i}/${route.length - 1} 段`);
-        const moveOpts = { signal, timeoutMs: Math.max(2000, Math.min(20000, ctx.deadline - Date.now())), allowSwimming: false, ...terrainPermission };
+        // 短途路点（1–4 格）不该给 A* 10 秒：想这么久还没结果，通常说明这个记录点现在不可达。
+        // 用 moveTo 的整体预算封顶（寻路 + 移动），比等满 thinkTimeout 再走 partial path 快得多。
+        const hop = dist3(last, wp);
+        const moveOpts = { signal, timeoutMs: Math.max(2000, Math.min(ctx.deadline - Date.now(), hop <= 4 ? 5000 : 15000)), allowSwimming: false, ...terrainPermission };
         try {
           await adapter.moveTo({ kind: 'near', pos: wp, range: 1.2 }, moveOpts);
+          rescued = 0;
         } catch (e) {
           trace.push({ ...adapter.state().pos });
           if (isAbort(e)) throw e;
           // 记录脚点的 y 可能已因地形/旧数据偏差 1–4 格；先按同一列的 x/z 再走一次，
           // 让寻路用真实支撑和安全落差，而不是因为精确 y 对不上就停在原地。
+          // 兜底这一段给回 15s：短 hop 的 5s 封顶是用来快点放弃“精确 y 不可达”，
+          // 同列可能还要绕一小段，不能也按 5s 判死。
+          const rescueOpts = { ...moveOpts, timeoutMs: Math.max(moveOpts.timeoutMs, Math.min(ctx.deadline - Date.now(), 15000)) };
           try {
-            await adapter.moveTo({ kind: 'xz', x: wp.x, z: wp.z, range: 1.2 }, moveOpts);
+            await adapter.moveTo({ kind: 'xz', x: wp.x, z: wp.z, range: 1.2 }, rescueOpts);
           } catch (e2) {
             trace.push({ ...adapter.state().pos });
             if (isAbort(e2)) throw e2;
             const now = adapter.state().pos;
-            return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段卡住：下一路点 (${Math.round(wp.x)},${Math.round(wp.y)},${Math.round(wp.z)}) 过不去（${(e2 as Error).message.slice(0, 50)}）。人停在 (${now.x.toFixed(1)},${now.y.toFixed(1)},${now.z.toFixed(1)})，离${goal}约 ${Math.round(dist3(now, target))} 格${allowDig ? '' : '；可加 dig:true 授权挖开挡路'}`, { position: now, reachedWaypoint: i, totalWaypoints: route.length - 1, remaining: Math.round(dist3(now, target)), target }));
+            return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段卡住：下一路点 (${Math.round(wp.x)},${Math.round(wp.y)},${Math.round(wp.z)}) 过不去（${(e2 as Error).message.slice(0, 50)}）。人停在 (${now.x.toFixed(1)},${now.y.toFixed(1)},${now.z.toFixed(1)})，离${goal}约 ${Math.round(dist3(now, target))} 格${allowDig ? '' : '；可加 dig:true 授权挖开挡路'}`, { position: now, reachedWaypoint: i, totalWaypoints: route.length - 1, remaining: Math.round(dist3(now, target)), target, routeFacts }));
+          }
+          // 同列兜底必须核对高度：只差 4 格以内算记录偏差；差得多说明记录和现在的地形对不上，
+          // 继续走会把整条路线悄悄挪到另一层隧道上。
+          const got = adapter.state().pos;
+          if (Math.abs(got.y - wp.y) > 4) {
+            return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段：记录路点在 (${Math.round(wp.x)},${Math.round(wp.y)},${Math.round(wp.z)})，同列只到得了 (${got.x.toFixed(1)},${got.y.toFixed(1)},${got.z.toFixed(1)})，高度差 ${Math.round(Math.abs(got.y - wp.y))} 格。这条记录和当前地形对不上，没有继续往下走；换条路或自己过去（由你定）`, { position: got, reachedWaypoint: i, totalWaypoints: route.length - 1, staleWaypoint: { wp, at: got }, routeFacts }));
+          }
+          rescued++; rescueCount++;
+          if (rescued >= 3) {
+            return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}连续 ${rescued} 段只能靠同列兜底（记录点的 y 与现状有偏差），停在 (${got.x.toFixed(1)},${got.y.toFixed(1)},${got.z.toFixed(1)})；这条记录可能已经过时，没有继续磨完整条。换条路或自己过去（由你定）`, { position: got, reachedWaypoint: i, totalWaypoints: route.length - 1, rescueCount, routeFacts }));
           }
         }
         last = adapter.state().pos;
@@ -785,7 +842,7 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
       const arrived = dist3(end, target) <= 2;
       const place = arrived ? `到达${goal}参考点附近` : `离${goal}参考点约 ${remaining} 格`;
       const archiveNote = archivedCount ? `；其中 ${archivedCount} 条来自历史归档，只算旧几何，沿途已按当前方块逐段尝试` : '';
-      return receipt(ok(`沿${kind}${back ? '回入口' : '下最深'}走完了记下的 ${route.length} 个脚点，现在站在 (${end.x.toFixed(1)},${end.y.toFixed(1)},${end.z.toFixed(1)})，${place}（再往前没有记过的路，剩下的自己看）${archiveNote}${deeper}`, { position: end, remaining, target, arrived, walkedWaypoints: route.length, archivedCount }));
+      return receipt(ok(`沿${kind}${back ? '回入口' : '下最深'}走完了记下的 ${route.length} 个脚点，现在站在 (${end.x.toFixed(1)},${end.y.toFixed(1)},${end.z.toFixed(1)})，${place}（再往前没有记过的路，剩下的自己看）${archiveNote}${deeper}`, { position: end, remaining, target, arrived, walkedWaypoints: route.length, archivedCount, routeFacts, rescueCount }));
     } catch (e) {
       // 取消仍抛 AbortedError，但已测到的最后位置、原请求、锚点与后端随 partial 保留。
       if (isAbort(e)) throw cancelledNav(e, {
