@@ -1,6 +1,6 @@
 import type { Vec3Like } from '../adapter/types.ts';
 import { FACINGS, facingOfYaw, feetCell, localMap, supportCell, toWorld, type Facing } from '../perception/local.ts';
-import { attachmentFaces, dropBelow, isSoftBlock, LIQUID_BLOCKS, surroundings } from '../perception/surroundings.ts';
+import { attachmentFaces, dropBelow, isSoftBlock, isTreeSaplingItem, LIQUID_BLOCKS, saplingSoilFor, saplingSoilText, surroundings } from '../perception/surroundings.ts';
 import { blockCollidesBody, bodyBoxAt, bodyCells, estimatedFallDamage, footSurfaceY, hasAnyCollision, isReplaceable, placementReference, shapeKnown, supportTop, type BlockProps } from '../perception/geometry.ts';
 import { AbortedError, sleep, throwIfAborted } from '../util.ts';
 import { breakCell, why } from './body.ts';
@@ -517,7 +517,7 @@ function shapeOf(name: string, properties: BlockProps = {}): string {
 
 export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
   name: 'place_at',
-  description: '在身边指定的空格放一块方块（[前,上,右]）。实心方块放 [0,0,0] 表示原地垫一块站上去（跳起来往脚下放）；梯子、火把这类贴墙的东西可以放进自己站的格子 [0,0,0]/[0,1,0]，但旁边要有实心墙。item 写方块名，或 "any" 用背包里随便一种能垫的（泥土、圆石、木板…）。树苗、花这类小植物也是方块，可以用 item 指定名字放在草方块/泥土上（之后长成什么见知识库）。目标格已有别的方块（包括半砖、雪层、地毯、门、火把）时如实报占用，不把错误材料当已完成；只放这一格，不替你做搭柱以外的施工',
+  description: '在身边指定的空格放一块方块（[前,上,右]）。实心方块放 [0,0,0] 表示原地垫一块站上去（跳起来往脚下放）；梯子、火把这类贴墙的东西可以放进自己站的格子 [0,0,0]/[0,1,0]，但旁边要有实心墙。item 写方块名，或 "any" 用背包里随便一种能垫的（泥土、圆石、木板…）。树苗、花这类小植物也是方块，可以用 item 指定名字放在草方块/泥土上（红树苗 mangrove_propagule 同样按树苗规则，可种在泥/沾泥的红树根上；之后长成什么见知识库）。目标格已有别的方块（包括半砖、雪层、地毯、门、火把）时如实报占用，不把错误材料当已完成；只放这一格，不替你做搭柱以外的施工',
   argsDoc: '{"at":[前,上,右], "item"?:"<方块名>|any", "facing"?:"N|E|S|W"}（前后/左右 ±2，上下 -2..3；at 是方块占据格；例：[0,0,0] 原地垫高，[1,-1,0] 支撑 step [1,0,0]，会挡住 step [1,-1,0]；[1,-2,0] 补下一级 [1,-1,0] 脚下的支撑；{"at":[0,0,0],"item":"ladder"} 在脚边墙上挂梯子）',
   timeoutMs: 15000,
   movement: true,
@@ -540,12 +540,14 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
     // 相对 [0,0,0] 的实心块是“原地垫高”搭柱；绝对 xyz 落到脚这一格仍按普通放置，不套搭柱。
     const pos = args.xyz !== undefined ? { x: args.xyz.x, y: args.xyz.y, z: args.xyz.z } : toWorld(feet, args.facing, args.at);
     const attachable = args.item !== 'any' && attachmentFaces(args.item);
+    const sapling = args.item !== 'any' && isTreeSaplingItem(args.item);
     const neighbors = [{ x: 1, y: 0, z: 0 }, { x: -1, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }, { x: 0, y: -1, z: 0 }, { x: 0, y: 0, z: 1 }, { x: 0, y: 0, z: -1 }]
       .map((d) => ({ x: pos.x + d.x, y: pos.y + d.y, z: pos.z + d.z }));
     const seen = visibleStates(ctx, [pos, { ...feet, y: feet.y + 2 }, ...neighbors]);
     const stateAt = (p: Vec3Like) => seen.get(`${p.x},${p.y},${p.z}`) ?? null;
     // 搭柱是“站高一格”的动作模式，目标不是“把方块放进这一格”，不做普通放置的“已满足”幂等判断。
-    const pillar = args.xyz === undefined && args.at[0] === 0 && args.at[1] === 0 && args.at[2] === 0 && !attachable;
+    // 树苗不是实心方块，[0,0,0] 是按普通放置种在自己脚这一格，不能当成原地垫高。
+    const pillar = args.xyz === undefined && args.at[0] === 0 && args.at[1] === 0 && args.at[2] === 0 && !attachable && !sapling;
     if (!pillar) {
       // 普通放置：只有亲眼看见同一物品才算已满足。半砖/雪层/地毯/门/火把都占着这一格，
       // 不能因为“看起来是实心”就把错误材料当成功。
@@ -568,6 +570,16 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
     const inv = a.state().inventory;
     const names = args.item === 'any' ? PLACEABLE.filter((n) => inv.some((i) => i.name === n && i.count > 0)) : [args.item];
     if (!names.length || !inv.some((i) => names.includes(i.name) && i.count > 0)) return fail('MISSING_MATERIALS', `背包里没有 ${args.item === 'any' ? '能垫的方块（泥土/圆石/木板…）' : args.item}`, after(ctx, args.facing, pos));
+    // 树苗的落点由正下方的土壤决定：先报清楚下面是什么，别让放置失败落进“悬空/看不见那个面”的泛化反馈。
+    if (!pillar && sapling) {
+      const supportPos = { x: pos.x, y: pos.y - 1, z: pos.z };
+      const support = stateAt(supportPos)?.name ?? a.blockAt(supportPos);
+      const soil = saplingSoilFor(args.item);
+      if (support === null) return fail('NOT_FOUND', `[${args.at}] 正下方 (${supportPos.x},${supportPos.y},${supportPos.z}) 未加载，无法确认树苗的土壤，没有放置`, { supportPos, ...after(ctx, args.facing, pos) });
+      if (!soil.has(support)) {
+        return fail('BAD_ARGS', `[${args.at}] 种不了 ${args.item}：正下方 (${supportPos.x},${supportPos.y},${supportPos.z}) 是 ${support}，${args.item} 只能种在${saplingSoilText(args.item)}上；换一格下方是土的，或先把下面换成泥土/草方块`, { support, supportPos, expectedSupport: [...soil], ...after(ctx, args.facing, pos) });
+      }
+    }
     // 旁边已经有一个工作台/熔炉还要再放：多半是没注意到它（合成/烧东西会自己走过去用）。真要再放一个写 extra:true
     if ((args.item === 'crafting_table' || args.item === 'furnace') && !args.extra) {
       const near = findStation(ctx, [args.item], 8);
