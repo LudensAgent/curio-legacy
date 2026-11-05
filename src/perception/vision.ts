@@ -919,7 +919,7 @@ export class Vision {
     const here = state.pos;
     const remaining = Math.hypot(target.x - here.x, target.z - here.z);
     // Optical transparency includes glass and barriers; it is not a collision test.
-    const passable = (o: Optics | null) => !!o && /^(air|cave_air|void_air|light|short_grass|grass|tall_grass|fern|large_fern|dead_bush|torch|wall_torch|.*_torch|.*_carpet|.*_flower|.*_tulip|dandelion|poppy|vine|.*_sapling)$/.test(o.name);
+    const passable = (o: Optics | null) => !!o && /^(air|cave_air|void_air|light|short_grass|grass|tall_grass|fern|large_fern|dead_bush|torch|wall_torch|.*_torch|.*_carpet|.*_flower|.*_tulip|dandelion|poppy|vine|.*_sapling|mangrove_propagule)$/.test(o.name);
     const hazardousFloor = (name: string) => /water|lava|ice$|magma|campfire|cactus|powder_snow|berry_bush/.test(name);
     let best: { pos: Vec3Like; score: number } | null = null;
     for (const surface of this.visibleSurfaces.values()) {

@@ -1495,7 +1495,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       finally { if (ownsControls()) for (const k of keys) b.setControlState(k, false); }
     };
     if (!opts.constructionSafe) {
-      const soft = /(_leaves|grass|fern|vine|bush|_sapling|snow|flower|tulip|dandelion|poppy|azalea|cobweb)$/;
+      const soft = /(_leaves|grass|fern|vine|bush|_sapling|mangrove_propagule|snow|flower|tulip|dandelion|poppy|azalea|cobweb)$/;
       for (const block of opts.allowTerrainChanges ? bodyBlocks(p.offset(fx * 0.75, 0, fz * 0.75)) : []) {
         if (!block || !soft.test(block.name) || !b.canDigBlock?.(block)) continue;
         const key = `dig:${block.position}`;

@@ -4,7 +4,7 @@ import { durabilityFacts, fuelFacts, oreOpportunityFact, supplyFacts } from '../
 import type { AudienceContext } from '../live/audience.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { dirName, durationText, realSecondsToTicks, sunText, type Percept } from '../perception/perception.ts';
-import { isSoftBlock, LIQUID_BLOCKS } from '../perception/surroundings.ts';
+import { isSoftBlock, isTreeSaplingItem, LIQUID_BLOCKS } from '../perception/surroundings.ts';
 import { audienceBlock, AUDIENCE_RULES, exploredAround, liveAudience, type MySkillInfo } from '../planner/prompt.ts';
 import type { ChatMessage } from '../planner/llm.ts';
 import { isSkillDisabled } from '../skills/disabled.ts';
@@ -722,7 +722,7 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
       const multi = stackSize && count > stackSize && it?.stacks?.length ? `，共 ${it.stacks.length} 叠` : '';
       const stacks = s.emptySlots <= 5 && stackSize && stackSize > 1 && it?.stacks?.length
         ? `；${it.stacks.map((stack) => `槽${stack.slot} ${stack.count}/${stackSize}，该叠可再放 ${stackSize - stack.count} 个数据相同的物品`).join('；')}` : '';
-      return `${name}×${count}${/_sapling$/.test(name) ? '（可种）' : ''}${it?.stackSize ? `（每叠上限 ${it.stackSize}${multi}${stacks}）` : ''}${durabilityText(it)}${it?.enchanted ? '（附魔）' : ''}`;
+      return `${name}×${count}${isTreeSaplingItem(name) ? '（可种）' : ''}${it?.stackSize ? `（每叠上限 ${it.stackSize}${multi}${stacks}）` : ''}${durabilityText(it)}${it?.enchanted ? '（附魔）' : ''}`;
     }), empty_slots: `${s.emptySlots} 个空槽（每槽放一叠，不是一件）`,
     ...(wearables.length ? { wearables_in_backpack: `背包里的护甲/盾（穿到对应槽才生效）：${wearables.join('；')}` } : {}),
     ...(mergeable.length ? { mergeable_gear: `${mergeable.join('；')}。同名同材质装备可在工作台/砂轮合成修理：结果耐久 = min(满耐久, 两件耐久之和 + 满耐久5%)；铁砧是 +满耐久12%（耗经验、保留普通附魔）。两件耐久之和超过满耐久时，多出的耐久会被丢掉、合计耐久反而下降，只换来一个空槽；合不合由你定。穿在身上的那件不在背包里，不能直接放进合成格。` } : {}),
