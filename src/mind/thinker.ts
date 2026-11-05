@@ -29,6 +29,12 @@ import { recallLocal, RECALL_LABEL } from './recall.ts';
 const QUERY_KINDS = ['recipes', 'recall', 'mechanics', 'skill', 'design', 'moves', 'knowledge', 'passages'];
 /** 需要完整上下文（技能、图纸、Wiki 资料、矿道记录）才值得从瞥一眼升级成认真想的查询；其余轻量查询就地回答 */
 const HEAVY_QUERY_KINDS = ['skill', 'design', 'knowledge', 'passages'];
+/**
+ * 水里低氧阈值：身体在水里、氧气低于这个数时，只够“瞥一眼”，不够完整想一轮。
+ * 完整认真想的中位约 9 秒、长尾几十秒；水下氧气从 10 掉到 0 往往也在这几秒内，等回答回来可能已经溺死。
+ * Mind 用它决定前景思考的档位，Thinker 用它拒绝在思考中途升级为更慢的一轮。
+ */
+export const LOW_AIR_OXYGEN = 10;
 import { ACTIVITY_KINDS, DECISION_KINDS, type ActivityDraft, type ActivityKind, type ActivityStep, type Consolidation, type DecisionKind, type Habits, type MindDecision } from './types.ts';
 
 const str = (v: unknown, max: number) => typeof v === 'string' ? v.trim().slice(0, max) : '';
@@ -301,6 +307,10 @@ export class Thinker {
     let messages = buildMindMessages(ctx);
     let queries = 0, invalid = 0;
     let knowledgeBytes = 0;
+    // 用这一念开始时的身体快照判断：水里低氧时不再升级到更慢的一轮，只把事实和“先给决定”的提示交给模型，选什么仍由它定。
+    const lowAir = ctx.state.inWater && ctx.state.oxygen < LOW_AIR_OXYGEN;
+    const lowAirHint = '现在人在水里、氧气不够，完整想一轮回来之前可能已经没气：先根据已有信息马上给出决定；想深一点等出水或氧气恢复后再说。';
+    const suppressEscalation = (why: string) => this.bus.publish('llm_escalate_suppressed', 'P3', `水位低氧，先不升级成认真想：${why}`, { reason: ctx.reason, oxygen: ctx.state.oxygen });
     const knowledgeExhausted = JSON.stringify({ error: '本次思考的知识查询预算已用完，请根据已读资料作决定。' });
     const knowledgeReserve = Buffer.byteLength(knowledgeExhausted, 'utf8');
     const query = async (kind: string, raw: Record<string, unknown>) => {
@@ -335,23 +345,35 @@ export class Thinker {
           messages.push({ role: 'assistant', content: c.text.slice(0, 400) }, { role: 'user', content: '你已经有完整信息了，请直接给出决定。' });
           continue;
         }
-        if (tier === 'glance') {
+        if (tier === 'glance' && !lowAir) {
           tier = 'deliberate';
           this.planner.stats.tiers.escalated++;
           this.bus.publish('llm_escalate', 'P3', `抬头一看觉得需要好好想想：${String(raw.reason ?? ask).slice(0, 80)}`);
           messages = buildMindMessages({ ...ctx, tier });
           if (ask === 'deliberate' || ask === 'need_full_context') continue;
         }
+        // 水位低氧时升级会再等一轮慢思考，来不及：留在瞥一眼这一轮，让它就地给出决定
+        if (tier === 'glance' && lowAir && (ask === 'deliberate' || ask === 'need_full_context')) {
+          suppressEscalation('模型要求更完整的思考');
+          messages.push({ role: 'assistant', content: c.text.slice(0, 400) }, { role: 'user', content: lowAirHint });
+          continue;
+        }
       }
       if (QUERY_KINDS.includes(ask)) {
         if (queries >= 3) { messages.push({ role: 'assistant', content: c.text.slice(0, 400) }, { role: 'user', content: '这次的查询次数用完了，请根据已知信息给出决定。' }); continue; }
         queries++;
         const result = await query(ask, raw);
-        messages.push({ role: 'assistant', content: c.text.slice(0, 600) }, { role: 'user', content: `查询结果（只读，不是现场事实）：${result}\n剩余查询 ${3 - queries} 次。请继续：可以再查，或给出决定。` });
+        if (lowAir && HEAVY_QUERY_KINDS.includes(ask)) suppressEscalation(`模型要查 ${ask}`);
+        messages.push({ role: 'assistant', content: c.text.slice(0, 600) }, { role: 'user', content: `查询结果（只读，不是现场事实）：${result}\n剩余查询 ${3 - queries} 次。请继续：可以再查，或给出决定。${lowAir ? `\n${lowAirHint}` : ''}` });
         continue;
       }
       // 瞥一眼时把“想深一点”写成了动作：照它的意思转成认真想
       if (tier === 'glance' && wantsDeliberate(raw)) {
+        if (lowAir) {
+          suppressEscalation('把“想深一点”写成了动作');
+          messages.push({ role: 'assistant', content: c.text.slice(0, 400) }, { role: 'user', content: lowAirHint });
+          continue;
+        }
         tier = 'deliberate';
         this.planner.stats.tiers.escalated++;
         this.bus.publish('llm_escalate', 'P3', '抬头一看觉得需要好好想想（把 deliberate 写成了动作）');
@@ -362,15 +384,18 @@ export class Thinker {
       const embedded = embeddedQuery(raw);
       if (embedded && queries < 3) {
         if (tier === 'glance' && ['knowledge', 'passages'].includes(embedded.kind)) {
-          tier = 'deliberate';
-          this.planner.stats.tiers.escalated++;
-          this.bus.publish('llm_escalate', 'P3', `抬头一看觉得需要好好想想（把 ${embedded.kind} 查询写成了动作）`);
-          messages = buildMindMessages({ ...ctx, tier });
+          if (lowAir) suppressEscalation(`把 ${embedded.kind} 查询写成了动作`);
+          else {
+            tier = 'deliberate';
+            this.planner.stats.tiers.escalated++;
+            this.bus.publish('llm_escalate', 'P3', `抬头一看觉得需要好好想想（把 ${embedded.kind} 查询写成了动作）`);
+            messages = buildMindMessages({ ...ctx, tier });
+          }
         }
         queries++;
         const result = await query(embedded.kind, embedded.args);
         messages.push({ role: 'assistant', content: c.text.slice(0, 1500) },
-          { role: 'user', content: `${embedded.kind} 是思考时的查询，不是身体的动作，不能写进 steps。已经替你查了：${result}\n请据此给出决定（steps 里只写动作）。` });
+          { role: 'user', content: `${embedded.kind} 是思考时的查询，不是身体的动作，不能写进 steps。已经替你查了：${result}\n请据此给出决定（steps 里只写动作）。${lowAir ? `\n${lowAirHint}` : ''}` });
         continue;
       }
       if (firstDraft && raw?.keep === true) { this.planner.stats.ok++; return { ...firstDraft, source: 'llm', tier, requestedAt }; }

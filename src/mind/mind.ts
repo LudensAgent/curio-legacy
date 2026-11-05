@@ -30,7 +30,7 @@ import type { ParsedGameMessage } from '../memory/game-messages.ts';
 import { NEAR_END_REASON, type MindContext } from './prompt.ts';
 import { cleanPlanStep, moodWords, PLAN_REVISION_MIN, SelfModel } from './self.ts';
 import type { LedgerView } from './ledger.ts';
-import type { Thinker } from './thinker.ts';
+import { LOW_AIR_OXYGEN, type Thinker } from './thinker.ts';
 import type { Activity, ActivityDraft, ActivityEnd, ActivityOutcome, ActivityRecord, MindDecision, Noticing } from './types.ts';
 
 export interface MindDeps {
@@ -433,11 +433,15 @@ export class Mind {
     if (Date.now() < this.backoffUntil) return;
     const urgentNow = this.attention.highest() >= URGENT;
     const danger = this.attention.peek().some((n) => n.key.startsWith('danger:'));
+    // 水位低氧时认真想也会被 think() 降成瞥一眼；这里照样算出来，免得“瞥一眼升级成认真想”的分支
+    // 每一拍都把刚发出的瞥一眼撤掉再重发，没等回答就自己转个不停。
+    const s = this.d.adapter.state();
+    const lowAir = s.inWater && s.oxygen < LOW_AIR_OXYGEN;
     if (this.thinking) {
       // 要命的时候不等慢慢想完：撤掉正在想的，马上快想一次
       if (danger && this.thinking.reason !== Mind.DANGER_REASON) { this.cancelThinking('danger'); this.staleDropped++; }
-      // 正在“瞥一眼”时出了要紧的事：改成认真想
-      else if (urgentNow && !danger && this.thinking.tier === 'glance') { this.cancelThinking('urgent'); this.staleDropped++; }
+      // 正在“瞥一眼”时出了要紧的事：改成认真想（水位低氧时升级不了，继续等这一次瞥一眼）
+      else if (urgentNow && !danger && !lowAir && this.thinking.tier === 'glance') { this.cancelThinking('urgent'); this.staleDropped++; }
       else return;
     }
     if (danger) return this.think(Mind.DANGER_REASON, 'glance');
@@ -1119,6 +1123,11 @@ export class Mind {
     if (this.thinking || this.paused) return;
     const state = this.d.adapter.state();
     if (!observationReady(state)) return;
+    // 身体在水里、氧气不足时，所有前景思考都只走“瞥一眼”：完整认真想的延迟按秒计（实机中位约 9 秒、
+    // 长尾几十秒），而水下氧气从 10 掉到 0 往往也在这几秒内，等回答回来可能已经溺死。瞥一眼只是更快地
+    // 看见现状和可选做法，想什么、做什么仍由心智决定；这里不选动作、不触发救援，只把调度延迟压下来。
+    // 放在 think() 统一处理，pendingReason、urgentNow、没活在身、上一段刚结束、最后一步提前想这些路径都覆盖到。
+    if (tier === 'deliberate' && state.inWater && state.oxygen < LOW_AIR_OXYGEN) tier = 'glance';
     let percept: Percept;
     try { percept = this.d.perception.update(); } catch { return; }
     this.trackTrip(percept, state);
