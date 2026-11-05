@@ -35,6 +35,13 @@ test('WorldMemory 在附着空间后端后从 fragments/nodes/ledger 读写语�
   first.putPlaced(at(6, 64, 6), 'torch');
   first.visit(D, at(16, 64, 16));
   first.syncSpatial();
+  const revisions = { fragments: history.revision, topology: topology.revision, ledger: ledger.revision };
+  first.syncSpatial();
+  assert.deepEqual(
+    { fragments: history.revision, topology: topology.revision, ledger: ledger.revision },
+    revisions,
+    're-saving an unchanged semantic snapshot must not churn revisions',
+  );
 
   assert.equal(history.getFragment('psg_1')?.metadata?.curio && (history.getFragment('psg_1')!.metadata!.curio as any).dug, 2);
   const landmarkNode = topology.nodes({ limit: 100 }).items.find((node) => node.id === first.landmarks().find((l) => l.kind === 'resource')!.id);

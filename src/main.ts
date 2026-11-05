@@ -90,19 +90,35 @@ const adapter = new MineflayerAdapter(config, bus);
 let spatial: SharedSpatialSession;
 try {
   mkdirSync(path.dirname(config.spatial.databasePath), { recursive: true });
+  // 同一类工作集缺口在 5 秒内只发布一条，附上被合并的条数。诊断不是世界证据，
+  // 但也不能被连续重试刷成日志流；后续事件在下一个窗口带着总数再报。
+  const wsDiagLast = new Map<string, number>();
+  const wsDiagSuppressed = new Map<string, number>();
   spatial = await SharedSpatialSession.open({
     worldId: adapter.state().worldId,
     databasePath: config.spatial.databasePath,
     voxelLoading: config.spatial.voxelLoading,
-    // manual 模式下容量/未就绪/丢弃/取消事件只进入有界日志；摘要本身已由服务
-    // 限制 keys 与消息字节，不在这里重新放大。
+    ...(config.spatial.voxelLoading === 'manual'
+      ? { residencyLimits: { maxResidentBytes: config.spatial.maxResidentBytes } }
+      : {}),
     onWorkingSetDiagnostic: (diagnostic) => {
+      const now = Date.now();
+      const key = diagnostic.kind;
+      const last = wsDiagLast.get(key) ?? 0;
+      if (now - last < 5000) {
+        wsDiagSuppressed.set(key, (wsDiagSuppressed.get(key) ?? 0) + 1);
+        return;
+      }
+      const suppressed = wsDiagSuppressed.get(key) ?? 0;
+      wsDiagSuppressed.set(key, 0);
+      wsDiagLast.set(key, now);
       bus.publish('spatial_working_set', diagnostic.kind === 'discarded' ? 'P3' : 'P2', diagnostic.message, {
         kind: diagnostic.kind,
         count: diagnostic.count,
         keys: diagnostic.keys,
         observedAtMin: diagnostic.observedAtMin,
         observedAtMax: diagnostic.observedAtMax,
+        ...(suppressed > 0 ? { suppressed } : {}),
         ...(diagnostic.kind === 'discarded' ? { reason: diagnostic.reason } : {}),
       });
     },

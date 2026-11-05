@@ -47,6 +47,13 @@ export const MAX_PENDING_OBSERVATIONS = 256;
 /** 宿主侧待加载原始 JSON 载荷的 UTF8 字节预算；与库内驻留字节上限相互独立。 */
 export const MAX_PENDING_OBSERVATION_BYTES = 1024 * 1024;
 
+/**
+ * 工作集容量失败后的有界退避。新证据仍会入 pending，但不会每条观测都重新
+ * prepare；显式 drain 可以立即重试。这样容量缺口只报告一次，不在同一状态下
+ * 反复刷诊断/占用主线程。
+ */
+const CAPACITY_RETRY_BACKOFF_MS = 5000;
+
 /** 诊断摘要里保留的 Section 键上限；超出只保留总数事实，不累积历史键。 */
 const MAX_DIAGNOSTIC_KEYS = 32;
 
@@ -387,6 +394,8 @@ export class SharedSpatialSession {
   private loadTask: Promise<void> | null = null;
   /** 上次真实加载以容量/未就绪/忙碌/硬失败停下；新证据或显式 drain 才再试一次。 */
   private loadBlocked = false;
+  /** 容量失败后的重试时间下限；pending 保留，仅限制自动重试频率。 */
+  private loadRetryNotBefore = 0;
   private lastGap: SharedSpatialGap | null = null;
   private discarded: SharedSpatialDiscarded | null = null;
   /** 已丢弃批次的累计不同 Section 数；用于保留“已存键/总数”事实。 */
@@ -880,6 +889,7 @@ export class SharedSpatialSession {
         // 显式 drain 最多对上次容量/未就绪/忙碌结果再试一次；没有循环轮询。
         if (!this.closingFlag && state.reason === null && this.hasLoadablePending()) {
           this.loadBlocked = false;
+          this.loadRetryNotBefore = 0;
           if (this.session.busy) {
             const current = this.pending.filter((record) => this.isCurrent(record));
             this.recordGap(
@@ -1225,6 +1235,7 @@ export class SharedSpatialSession {
   private requestLoadAttempt(): void {
     if (this.coordinator === null || this.closingFlag) return;
     if (this.loadTask !== null || this.loadBlocked) return;
+    if (Date.now() < this.loadRetryNotBefore) return;
     if (!this.hasLoadablePending()) return;
 
     const task = this.runLoadAttempt();
@@ -1352,6 +1363,7 @@ export class SharedSpatialSession {
       if (result.status === 'failed') {
         this.loadBlocked = true;
         const capacity = result.result.capacity;
+        if (capacity !== null) this.loadRetryNotBefore = Date.now() + CAPACITY_RETRY_BACKOFF_MS;
         const kind = capacity === null ? 'load_failed' : capacityGapKind(capacity.kind);
         const current = this.currentObservations();
         if (current.length > 0) {
@@ -1437,6 +1449,7 @@ export class SharedSpatialSession {
   private clearLoadFailure(): void {
     this.loadFailure = null;
     this.loadFailureGeneration = this.pendingGeneration;
+    this.loadRetryNotBefore = 0;
   }
 
   /**

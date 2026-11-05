@@ -57,6 +57,13 @@ if (voxelLoadingRaw !== 'eager' && voxelLoadingRaw !== 'manual') {
   throw new Error(`SPATIAL_VOXEL_LOADING 必须为 eager 或 manual，收到：${voxelLoadingRaw}`);
 }
 const voxelLoading: 'eager' | 'manual' = voxelLoadingRaw;
+// manual 工作集的字节上限。residentBytes 是库的解码体素估算，不是进程 RSS；
+// 32MiB 在已被探索的密集矿道里会长期贴边，只比上限高一点也永远腾不出空间。
+const maxResidentMb = num('SPATIAL_MAX_RESIDENT_MB', 64);
+if (!Number.isFinite(maxResidentMb) || maxResidentMb <= 0 || maxResidentMb > 1024) {
+  throw new Error(`SPATIAL_MAX_RESIDENT_MB 必须是 (0,1024] 内的数字，收到：${maxResidentMb}`);
+}
+const maxResidentBytes = Math.round(maxResidentMb * 1024 * 1024);
 
 const observer = str('OBSERVER_PLAYER');
 const configuredMode = str('CURIO_MODE', 'local');
@@ -155,6 +162,9 @@ export const config = {
      * 进程 RSS，也不是整个系统的内存上限。
      */
     voxelLoading,
+    /** manual 工作集的 residentBytes 上限；默认 64MiB，可用 SPATIAL_MAX_RESIDENT_MB 调整。 */
+    maxResidentMb,
+    maxResidentBytes,
   },
   /** 心智层：像真人一样一段一段地玩、边做边想 */
   mind: {

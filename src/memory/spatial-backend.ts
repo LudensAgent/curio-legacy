@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import type {
   FragmentChanges,
   FragmentStore,
@@ -281,6 +282,7 @@ function recordFromNode<T>(node: SpatialNode): T | undefined {
  */
 export class SpatialMemoryBackend {
   private worldId: string;
+  private lastSavedSignature = '';
   private readonly placedSource = new Map<string, 'legacy' | 'live'>();
   /** Passage IDs loaded from the store; they stay `legacy` when re-saved. New IDs are `traversal`. */
   private readonly legacyPassageIds = new Set<string>();
@@ -378,6 +380,8 @@ export class SpatialMemoryBackend {
   /** Persist the complete semantic projection. Records absent from the snapshot are removed. */
   save(snapshot: SemanticSnapshot): void {
     if (snapshot.worldId !== this.worldId) throw new Error(`semantic snapshot world mismatch: ${snapshot.worldId} != ${this.worldId}`);
+    const signature = JSON.stringify(snapshot);
+    if (signature === this.lastSavedSignature) return;
 
     const live = new Map(snapshot.passages.map((rec) => [rec.id, rec]));
     const archive = new Map(snapshot.passageArchive.map((rec) => [rec.id, rec]));
@@ -388,9 +392,10 @@ export class SpatialMemoryBackend {
     }
     for (const [id, rec] of desiredFragments) {
       const source = this.legacyPassageIds.has(id) ? 'legacy' : 'traversal';
+      const desired = fragmentFor(rec, this.worldId, source);
       const existing = this.session.history.getFragment(id);
-      if (!existing) this.session.history.saveFragment(fragmentFor(rec, this.worldId, source));
-      else this.session.history.updateFragment(id, fragmentChanges(rec, source));
+      if (!existing) this.session.history.saveFragment(desired);
+      else if (!isDeepStrictEqual(existing, desired)) this.session.history.updateFragment(id, fragmentChanges(rec, source));
     }
 
     const desiredNodes = new Map<string, SpatialNode>();
@@ -411,7 +416,7 @@ export class SpatialMemoryBackend {
     }
     desiredNodes.set('curio:meta', nodeFor(this.worldId, 'meta', 'curio:meta', { chestOps: snapshot.chestOps }, {
       kind: 'place', source: 'program', label: 'curio meta', dim: 'overworld',
-      location: { kind: 'exact', pos: { x: 0, y: 0, z: 0 } }, observedAt: Date.now(),
+      location: { kind: 'exact', pos: { x: 0, y: 0, z: 0 } },
     }));
 
     for (const node of allNodes(this.session.topology)) {
@@ -421,6 +426,7 @@ export class SpatialMemoryBackend {
     for (const [id, desired] of desiredNodes) {
       const existing = this.session.topology.getNode(id);
       if (!existing) { this.session.topology.saveNode(desired); continue; }
+      if (isDeepStrictEqual(existing, desired)) continue;
       if (existing.source !== desired.source) {
         this.session.topology.forgetNode(id);
         this.session.topology.saveNode(desired);
@@ -477,13 +483,26 @@ export class SpatialMemoryBackend {
         source: prior?.source ?? 'live' as const,
       }];
     });
-    const ledger: LedgerSnapshot = {
-      worldId: this.worldId,
-      placed: desiredPlaced,
-      visits: desiredVisits,
-      traversals: current.traversals,
-    };
-    this.session.ledger.restoreSnapshot(ledger);
+    const placedSame = desiredPlaced.length === current.placed.length
+      && desiredPlaced.every((record) => {
+        const prior = currentPlaced.get(posKey(record.pos));
+        return prior !== undefined && isDeepStrictEqual(prior, record);
+      });
+    const visitsSame = desiredVisits.length === current.visits.length
+      && desiredVisits.every((record) => {
+        const prior = currentVisits.get(record.key);
+        return prior !== undefined && isDeepStrictEqual(prior, record);
+      });
+    if (!placedSame || !visitsSame) {
+      const ledger: LedgerSnapshot = {
+        worldId: this.worldId,
+        placed: desiredPlaced,
+        visits: desiredVisits,
+        traversals: current.traversals,
+      };
+      this.session.ledger.restoreSnapshot(ledger);
+    }
+    this.lastSavedSignature = signature;
   }
 
   counts(): { fragments: number; nodes: number; placed: number; visits: number } {
