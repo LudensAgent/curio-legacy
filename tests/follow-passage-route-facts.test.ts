@@ -17,38 +17,30 @@ const detour: Vec3Like[] = [
   { x: -11, y: 70, z: 0 }, { x: -12, y: 74, z: 0 }, { x: -12, y: 79, z: 0 },
 ];
 
-test('回入口的路线要先下潜再爬回时，开走前停下并给出路线事实与备选', async (t) => {
+test('回入口的绕行没有更便宜出口时照常走，并在回执里给出路线事实', async (t) => {
   const w = new TestWorld();
   w.pos = { x: 0.5, y: 77, z: 0.5 };
   const memory = new WorldMemory(null);
   memory.setWorld(w.worldId);
   save(memory, w, 'psg_detour', detour, { x: -12, y: 81, z: 0 });
-  // 同分量另有一条更长但不下潜的记录出口：作为备选，代价更高。
+  // 同分量另有一条更长但不下潜的记录出口：代价明显更高，不值得为它中断。
   const flat: Vec3Like[] = [];
   for (let x = 0; x <= 70; x += 5) flat.push({ x, y: 77, z: 0 });
   save(memory, w, 'psg_flat', flat, { x: 70, y: 77, z: 0 });
   const ctx = makeCtx(w, { memory });
   t.after(() => memory.close());
-  const moves = t.mock.method(w, 'moveTo', async () => { throw new Error('不应开走'); });
+  const moves = t.mock.method(w, 'moveTo', async (goal: any) => { if (goal.kind === 'near') w.pos = { ...goal.pos }; });
 
   const result = await followPassage.run(ctx as never, { to: 'entrance' });
 
-  assert.equal(result.status, 'failed');
-  assert.equal(result.failureCode, 'PATH_NOT_FOUND');
-  assert.equal(moves.mock.callCount(), 0, '绕行路线不应在 agent 决定前开走');
-  assert.match(result.summary, /不是直接回地表/);
-  assert.match(result.summary, /最低到 y=50/);
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.ok(moves.mock.callCount() > 0, '没有明显更便宜的出口时应该沿这条记录走');
   const facts = result.data?.routeFacts as { segments: number; dip: number; minY: number; pathLength: number };
   assert.ok(facts.segments >= 8);
-  assert.ok(facts.pathLength >= 24, '提前中止的门槛是路长 >=24 且下潜 >=8');
+  assert.ok(facts.pathLength >= 24, '路线事实的门槛是路长 >=24 且下潜 >=8');
   assert.equal(facts.minY, 50);
   assert.equal(facts.dip, 27);
-  const alternatives = result.data?.alternatives as { pos: Vec3Like; cost: number; ids: string[] }[];
-  assert.equal(alternatives.length, 1, '当前绕行入口不重复列进备选');
-  assert.deepEqual(alternatives[0]!.pos, { x: 70, y: 77, z: 0 });
-  assert.equal(alternatives[0]!.ids[0], 'psg_flat');
-  assert.ok(alternatives[0]!.cost >= facts.pathLength, '备选要带图上的实际代价');
-  assert.deepEqual(result.data?.resolvedIds, ['psg_detour'], '给出可用来强制走当前这条的记录 ID');
+  assert.equal(result.data?.alternatives, undefined, '没有中断就不给中止回执');
 });
 
 test('显式指定 id 时尊重 agent 的选择，不因绕行提前停下', async (t) => {
@@ -197,7 +189,7 @@ test('显式 id 仍然能读到会被导航去重掉的重复记录', async (t) 
   assert.ok(visited.length > 0);
 });
 
-test('长途 hop 仍保留 15 秒预算，不被短 hop 的收紧误伤', async (t) => {
+test('长途 hop 保留原来的 20 秒预算，不被短 hop 的收紧误伤', async (t) => {
   const w = new TestWorld();
   w.pos = { x: 0.5, y: 40, z: 0.5 };
   const memory = new WorldMemory(null);
@@ -214,7 +206,7 @@ test('长途 hop 仍保留 15 秒预算，不被短 hop 的收紧误伤', async 
   const result = await followPassage.run(ctx as never, { to: 'entrance' });
 
   assert.equal(result.status, 'succeeded', result.summary);
-  assert.ok(budgets.some((ms) => ms >= 15000), `6 格的 hop 应拿到 15s 预算：${budgets}`);
+  assert.ok(budgets.some((ms) => ms >= 20000), `6 格的 hop 应拿到 20s 预算：${budgets}`);
 });
 
 test('短途路点用更短的 moveTo 预算，不留给 A* 10 秒', async (t) => {

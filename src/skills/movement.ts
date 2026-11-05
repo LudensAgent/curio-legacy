@@ -594,7 +594,7 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
 /** 沿自己记下的旧矿道（把全部通道连成网的脚点）逐段走：entrance 回记录入口（不一定是传送门/基地），deepest 下到最深处。 */
 export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig?: boolean }> = {
   name: 'follow_passage',
-  description: '沿旧矿道回记录入口（不一定是传送门/基地）；to:"entrance" 取当前连通分量里靠近地表、且沿记录网实际路长最短的记录入口锚点（不是 y 最高或直线最近），要找特定传送门/基地用 goto 或 travel_portal；to:"deepest" 下到最深处；可选 id 只选一条已知通道（含历史归档），不选则走去重后的全部记录连成的网。每段用步行寻路，dig:true 才允许挖开挡路、垫方块；走不通就停在原地并说明走到第几段、离目标还差多少，接不上时给出 connectionGap 两端。回入口的路线如果明显绕远（路长 ≥24 格且先降到两端以下 8 格以上），会在开走前停下，给出同分量的备选出口和代价；要强制走指定记录就带 id。完成条件：走完记录脚点后离入口/最深处锚点三维 ≤2 格才算 arrived；后端 pathfinder_waypoints；只认 to、id 与 dig，不提供 place/tower 施工权限',
+  description: '沿旧矿道回记录入口（不一定是传送门/基地）；to:"entrance" 取当前连通分量里靠近地表、且沿记录网实际路长最短的记录入口锚点（不是 y 最高或直线最近），要找特定传送门/基地用 goto 或 travel_portal；to:"deepest" 下到最深处；可选 id 只选一条已知通道（含历史归档），不选则走去重后的全部记录连成的网。每段用步行寻路，dig:true 才允许挖开挡路、垫方块；走不通就停在原地并说明走到第几段、离目标还差多少，接不上时给出 connectionGap 两端。回入口的路线如果明显绕远（路长 ≥24 格且比两端低 ≥8 格）、同时同分量有便宜得多的备选出口（≤0.7× 当前路长）时，会在开走前停下给出备选和代价；否则照常走。要强制走指定记录就带 id。完成条件：走完记录脚点后离入口/最深处锚点三维 ≤2 格才算 arrived；后端 pathfinder_waypoints；只认 to、id 与 dig，不提供 place/tower 施工权限',
   argsDoc: '{"to":"entrance"|"deepest", "id"?:string, "dig"?:boolean}',
   timeoutMs: 600000,
   movement: true,
@@ -696,6 +696,7 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
             const startComp = componentOf(startNode);
             const targetComp = componentOf(targetNode);
             // 同一分量（只是锚点自身离脚点 >6 格）时 pair 保持 null，下面按 start→最近脚点说明。
+            // 只报“起点这团 ↔ 目标这团”的最近一对：附近别的孤立碎片与能否到目标无关，不能当成确定断口。
             if ([...startComp].every((i) => !targetComp.has(i))) {
               let bd = Infinity;
               for (const i of startComp) for (const j of targetComp) {
@@ -746,26 +747,27 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
           ratio: straight > 0.01 ? Math.round((pathLength / straight) * 10) / 10 : null,
         };
       })();
-      // 回入口却要先降到两端都低 8 格以上、而且路够长：这不是“回到地表”，而是一段穿过旧矿道的绕行。
-      // 太短的下探（一两次台阶）不值得打断。显式给了 id（agent 自己选的记录）时不拦；
-      // 没有记录入口、目标只是“最高脚点”时也不拦——那不是 agent 要回的地表口，也没有可指定的 id。
-      // 其余情况在开走前把事实和备选出口交回去，由 agent 决定。
+      // 回入口却要先降到两端都低 8 格以上、而且路够长：这是一段穿过旧矿道的绕行。
+      // 只有同分量确实存在明显更便宜的备选出口（≤0.7× 当前路长）时才在开走前停下、把事实交回去；
+      // 否则这条绕行就是当前记录网里最好的走法，照常走。显式 id、或目标只是“最高脚点”回退时都不拦。
       if (chosenExit && !args.id && back && routeFacts.pathLength >= 24 && routeFacts.dip >= 8) {
         const candidates = passageSurfaceCandidates(recs, start, { limit: 4 });
-        const resolvedIds = chosenExit?.recordIds.length
-          ? chosenExit.recordIds
-          : candidates.find((c) => dist3(c.anchor, target!) <= 3)?.recordIds ?? [];
         const alternatives = candidates
           .filter((c) => dist3(c.anchor, target!) > 0.5)
           .map((c) => ({
             pos: { x: Math.round(c.anchor.x), y: Math.round(c.anchor.y), z: Math.round(c.anchor.z) },
             cost: Math.round(c.cost), ids: c.recordIds,
           }));
-        const alt = alternatives.length
-          ? `；同分量的备选出口：${alternatives.map((a) => `(${a.pos.x},${a.pos.y},${a.pos.z}) 约 ${a.cost} 格${a.ids.length ? `〔${a.ids.slice(0, 2).join('、')}〕` : ''}`).join('；')}`
-          : '；同分量没有别的记录出口';
-        const force = resolvedIds.length ? `；要强制走当前这条就带 id〔${resolvedIds.slice(0, 2).join('、')}〕` : '';
-        return receipt(fail('PATH_NOT_FOUND', `沿${kind}回记录入口的路线不是直接回地表：共 ${routeFacts.segments} 段约 ${routeFacts.pathLength} 格，最低到 y=${routeFacts.minY}（比两端低 ${routeFacts.dip} 格），要先下潜再爬回来${alt}。没有沿这条记录继续走${force}；要自己挖/走由你定`, { position: start, routeFacts, alternatives, resolvedTarget: target, resolvedIds, decisionRequired: true }));
+        // 只有同分量确实存在明显更便宜的出口时才中断；否则这条绕行就是当前记录网里最好的走法，直接走。
+        // （锚点本身已按路长选过，所以这里通常不会命中；命中时说明预走接回网后换了一个更好的起点。）
+        if (alternatives.some((a) => a.cost <= routeFacts.pathLength * 0.7)) {
+          const resolvedIds = chosenExit.recordIds.length
+            ? chosenExit.recordIds
+            : candidates.find((c) => dist3(c.anchor, target!) <= 3)?.recordIds ?? [];
+          const alt = `；同分量的备选出口：${alternatives.map((a) => `(${a.pos.x},${a.pos.y},${a.pos.z}) 约 ${a.cost} 格${a.ids.length ? `〔${a.ids.slice(0, 2).join('、')}〕` : ''}`).join('；')}`;
+          const force = resolvedIds.length ? `；要强制走当前这条就带 id〔${resolvedIds.slice(0, 2).join('、')}〕` : '';
+          return receipt(fail('PATH_NOT_FOUND', `沿${kind}回记录入口的路线不是直接回地表：共 ${routeFacts.segments} 段约 ${routeFacts.pathLength} 格，最低到 y=${routeFacts.minY}（比两端低 ${routeFacts.dip} 格），要先下潜再爬回来${alt}。没有沿这条记录继续走${force}；要自己挖/走由你定`, { position: start, routeFacts, alternatives, resolvedTarget: target, resolvedIds, decisionRequired: true }));
+        }
       }
       ctx.progress(0, `沿${kind}${back ? `回记录入口 ${anchor}` : `下最深 ${anchor}`}，共 ${route.length} 段${routeFacts.dip >= 4 ? `（先降到 y=${routeFacts.minY}，比两端低 ${routeFacts.dip} 格）` : ''}`);
       let last = start;
@@ -798,7 +800,7 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
         // 短途路点（1–4 格）不该给 A* 10 秒：想这么久还没结果，通常说明这个记录点现在不可达。
         // 用 moveTo 的整体预算封顶（寻路 + 移动），比等满 thinkTimeout 再走 partial path 快得多。
         const hop = dist3(last, wp);
-        const moveOpts = { signal, timeoutMs: Math.max(2000, Math.min(ctx.deadline - Date.now(), hop <= 4 ? 5000 : 15000)), allowSwimming: false, ...terrainPermission };
+        const moveOpts = { signal, timeoutMs: Math.max(2000, Math.min(ctx.deadline - Date.now(), hop <= 4 ? 5000 : 20000)), allowSwimming: false, ...terrainPermission };
         try {
           await adapter.moveTo({ kind: 'near', pos: wp, range: 1.2 }, moveOpts);
         } catch (e) {
