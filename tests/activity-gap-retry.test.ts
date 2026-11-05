@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { afterStep, createActivity, nextStep } from '../src/mind/activity.ts';
+import { afterStep, beginStep, createActivity, describeActivity, nextStep } from '../src/mind/activity.ts';
 import { climbUp } from '../src/skills/body.ts';
 import { fail } from '../src/skills/types.ts';
 import { FakeAdapter } from './fake-adapter.ts';
@@ -115,4 +115,114 @@ test('18+18：climb 重试沿用剩余高度账本，不重新获得完整额度
   assert.equal(result.status, 'succeeded', result.summary);
   assert.equal(moves, 9, '只补剩余 9 格，不是再从 0 爬 18 格');
   assert.equal(activity.climb![key].spent, 18);
+});
+
+test('自动重试沿用原动作期限；新的 Agent 委托重新起算', (t) => {
+  let now = 1_700_000_000_000;
+  t.mock.method(Date, 'now', () => now);
+  const { adapter, activity } = activityOf([{ skill: 'dig', args: { dir: 'down', blocks: 1 } }]);
+  const firstStep = nextStep(activity)!;
+  const template = activity.steps[0];
+  const first = beginStep(activity, template, adapter.state());
+  assert.equal(first.continuation, false);
+  activity.stepStart = { pos: { x: 99, y: 64, z: 99 } };
+  now += 58_000;
+  const gap = { targetCell: { x: 0, y: 63, z: 0 }, position: { x: 0, y: 64, z: 0 } };
+  assert.equal(afterStep(activity, firstStep, fail('PATH_NOT_FOUND', '路被挡住', gap), 100, adapter.state()).kind, 'continue');
+
+  const secondStep = nextStep(activity)!;
+  const carried = beginStep(activity, activity.steps[0], adapter.state());
+  assert.equal(carried.continuation, true);
+  assert.equal(carried.deadlineMs, first.deadlineMs, '重试没有换一个新的绝对期限');
+  assert.ok(carried.remainingMs <= 2000);
+
+  now += 3_000;
+  const verdict = afterStep(activity, secondStep, fail('PATH_NOT_FOUND', '路被挡住', { ...gap, targetCell: { x: 1, y: 63, z: 0 } }), 100, adapter.state());
+  assert.equal(verdict.kind, 'stuck');
+  assert.match(verdict.why, /期限/);
+
+  // 新的显式 Agent 委托（新的一段活）重新获得完整预算。
+  const other = activityOf([{ skill: 'dig', args: { dir: 'down', blocks: 1 } }]);
+  const fresh = beginStep(other.activity, other.activity.steps[0], other.adapter.state());
+  assert.equal(fresh.continuation, false);
+  assert.ok(fresh.deadlineMs > first.deadlineMs);
+});
+
+test('place_at 暂时性服务器拒绝在期限/材料额度内有限重试，确定性拒绝立即停止', () => {
+  const { adapter, activity } = activityOf([{ skill: 'place_at', args: { at: [0, 0, 0], item: 'cobblestone' } }]);
+  adapter.inv.set('cobblestone', 4);
+  const server = () => fail('EFFECT_NOT_CONFIRMED', '原地垫高没成：服务器拒绝', { pillarFailure: 'NOT_PLACED:Server rejected the place' });
+
+  let step = nextStep(activity)!;
+  beginStep(activity, activity.steps[0], adapter.state());
+  assert.equal(afterStep(activity, step, server(), 50, adapter.state()).kind, 'continue', '暂时拒绝允许一次复验');
+  step = nextStep(activity)!;
+  beginStep(activity, activity.steps[0], adapter.state());
+  assert.equal(afterStep(activity, step, server(), 50, adapter.state()).kind, 'continue', '第二次仍在有界范围内');
+  step = nextStep(activity)!;
+  beginStep(activity, activity.steps[0], adapter.state());
+  assert.equal(afterStep(activity, step, server(), 50, adapter.state()).kind, 'stuck', '两次之后停止');
+  assert.equal(activity.adaptations.filter((item) => item.startsWith('pillar-retry:')).length, 2);
+
+  const deterministic = activityOf([{ skill: 'place_at', args: { at: [0, 0, 0], item: 'cobblestone' } }]);
+  const detStep = nextStep(deterministic.activity)!;
+  beginStep(deterministic.activity, deterministic.activity.steps[0], deterministic.adapter.state());
+  const det = afterStep(deterministic.activity, detStep, fail('PATH_NOT_FOUND', '原地垫高没成：脚下没有支撑', { pillarFailure: 'NO_REFERENCE' }), 50, deterministic.adapter.state());
+  assert.equal(det.kind, 'stuck', '确定性拒绝立即停止');
+  assert.ok(!deterministic.activity.adaptations.some((item) => item.startsWith('pillar-retry:')), '确定性拒绝不领取重试额度');
+});
+
+test('自动重试不能超出原委托的材料额度', () => {
+  // place_at：一次放置最多花 1 个指定方块；已经用掉一个但效果未确认时不再自动重放。
+  const place = activityOf([{ skill: 'place_at', args: { at: [0, 0, 0], item: 'cobblestone' } }]);
+  place.adapter.inv.set('cobblestone', 3);
+  const placeStep = nextStep(place.activity)!;
+  beginStep(place.activity, place.activity.steps[0], place.adapter.state());
+  place.adapter.inv.set('cobblestone', 2);
+  const placeVerdict = afterStep(place.activity, placeStep, fail('EFFECT_NOT_CONFIRMED', '没确认', { pillarFailure: 'NOT_PLACED:Server rejected' }), 50, place.adapter.state());
+  assert.equal(placeVerdict.kind, 'stuck');
+  assert.match(placeVerdict.why, /材料额度/);
+
+  // climb_up：height 就是最多消耗的垫脚方块数；已花光时不再重试。
+  const climb = activityOf([{ skill: 'climb_up', args: { height: 3, untilSky: false } }]);
+  climb.adapter.inv.set('dirt', 10);
+  const climbStep = nextStep(climb.activity)!;
+  beginStep(climb.activity, climb.activity.steps[0], climb.adapter.state());
+  climb.activity.stepStart = { pos: { x: 99, y: 64, z: 99 } };
+  climb.activity.climb![climbStep.id!].spent = 1;
+  climb.adapter.inv.set('dirt', 7);
+  const climbVerdict = afterStep(climb.activity, climbStep, fail('STUCK', '往上爬了 1 格后停下', { climbed: 1, spent: 1, goalReached: false }), 50, climb.adapter.state());
+  assert.equal(climbVerdict.kind, 'stuck');
+  assert.match(climbVerdict.why, /材料额度/);
+  assert.equal(climb.activity.climb![climbStep.id!].spent, 1, '已确认的高度进展仍保留');
+});
+
+test('导航阶段按技能实际报告记录，没有报告的不编造', () => {
+  const walk = activityOf([{ skill: 'walk_to', args: { to: [1, 64, 1], arrival: { kind: 'exact' } } }]);
+  const walkStep = nextStep(walk.activity)!;
+  afterStep(walk.activity, walkStep, fail('PATH_NOT_FOUND', '被挡住', { nav: { outcome: 'BLOCKED', message: 'x', trace: [] }, position: { x: 0.5, y: 64, z: 0.5 } }), 100, walk.adapter.state());
+  assert.equal((walk.activity.results.at(-1) as { stage?: string }).stage, 'BLOCKED');
+  const described = describeActivity(walk.activity, walk.adapter.state());
+  assert.equal(described.last_nav_stage, 'BLOCKED');
+  assert.ok(described.recent[0].includes('阶段 BLOCKED'));
+
+  const plain = activityOf([{ skill: 'dig', args: { dir: 'up', blocks: 1 } }]);
+  const plainStep = nextStep(plain.activity)!;
+  afterStep(plain.activity, plainStep, fail('PATH_NOT_FOUND', '没成', { position: { x: 0, y: 64, z: 0 } }), 100, plain.adapter.state());
+  assert.equal((plain.activity.results.at(-1) as { stage?: string }).stage, undefined);
+  assert.equal(describeActivity(plain.activity, plain.adapter.state()).last_nav_stage, undefined);
+});
+
+test('climb_up 采纳自动续跑的绝对期限：到期后不再执行', async () => {
+  const adapter = new FakeAdapter();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  adapter.inv.set('dirt', 8);
+  let moves = 0;
+  adapter.moveTo = async () => { moves++; adapter.pos = { ...adapter.pos, y: adapter.pos.y + 1 }; };
+  const ctx = { adapter, signal: new AbortController().signal, deadline: Date.now() + 60_000, senses: { refresh() {} }, make: false };
+  const result = await climbUp.run(ctx as never, { height: 3, untilSky: false, deadlineMs: Date.now() - 1 });
+  assert.equal(result.status, 'failed');
+  assert.equal(moves, 0, '原动作期限已过，不再垫/爬');
+  const validated = climbUp.validate({ height: 2, untilSky: false, deadlineMs: Date.now() + 1000 }, adapter);
+  assert.ok(validated.ok);
 });

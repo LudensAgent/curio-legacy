@@ -26,6 +26,7 @@ import type {
   MoveExecutor,
   NavResult,
   WalkRouteRequest,
+  WalkRouteStatus,
 } from 'curio-minecraft-3d-memory';
 
 const EMPTY: CollisionShape = { boxes: [], supportFaces: [] };
@@ -54,6 +55,14 @@ export const walkCollisionProvider: CollisionShapeProvider = {
   },
 };
 
+/**
+ * 宿主控制归属：身体桥创建时绑定当时的 action epoch。宿主换主（stopAll、
+ * 断线重连、换 bot）后 `owns()` 返回 false，旧执行不得再写控制或释放新任务的控制。
+ */
+export interface WalkControlOwnership {
+  owns(): boolean;
+}
+
 /** 身体桥需要的最小接口：只控制前向与朝向、可读取实体状态。 */
 export interface WalkBody {
   setControlState(name: string, value: boolean): void;
@@ -66,6 +75,8 @@ export interface WalkBody {
     onGround: boolean;
     isInWater: boolean;
   };
+  /** 可选：适配器提供的宿主控制归属；离线夹具不提供时不做宿主归属检查。 */
+  controlOwnership?: WalkControlOwnership;
 }
 
 /**
@@ -162,6 +173,8 @@ export async function awaitFrame(
 export class WalkMoveExecutor implements MoveExecutor {
   private frameSink: ((entity: WalkBody['entity']) => void) | null = null;
   private activeExecutionId: string | null = null;
+  /** 创建时绑定的宿主控制归属；不提供时保持纯离线夹具的既有行为。 */
+  private readonly hostOwnership: WalkControlOwnership | undefined;
 
   constructor(
     private readonly body: WalkBody,
@@ -172,13 +185,20 @@ export class WalkMoveExecutor implements MoveExecutor {
     private readonly onLifecycleBroken?: (detail: string) => void,
     private readonly runSignal?: AbortSignal,
     private readonly onMoveRequest?: (move: WalkMoveRequestObservation) => void,
-  ) {}
+  ) {
+    this.hostOwnership = body.controlOwnership;
+  }
 
   /** 宿主在帧回调里构造样本（掌握单调序号与生命周期），再喂给库。 */
   setFrameSink(fn: (entity: WalkBody['entity']) => void) { this.frameSink = fn; }
 
   private aborted(request: ExecutableMove): boolean {
     return request.signal.aborted || this.parentSignal.aborted || this.runSignal?.aborted === true;
+  }
+
+  /** 仍持有宿主控制权：换主后的旧执行既不能写控制，也不能释放新任务的键。 */
+  private ownsHost(): boolean {
+    return this.hostOwnership === undefined || this.hostOwnership.owns();
   }
 
   async move(request: ExecutableMove): Promise<ExecutableMoveResult> {
@@ -189,15 +209,15 @@ export class WalkMoveExecutor implements MoveExecutor {
       worldId: request.worldId, dim: request.dim, sessionId: request.sessionId,
       from: { ...from }, to: { ...to },
     });
-    // 控制前先检查取消与期限：已取消/已到期的请求不得写任何控制。
-    if (this.aborted(request)) return { failure: { kind: 'cancelled' } };
+    // 控制前先检查取消、期限与宿主归属：已取消/已到期/已换主的请求不得写任何控制。
+    if (this.aborted(request) || !this.ownsHost()) return { failure: { kind: 'cancelled' } };
     // 每段有效期限：总期限与单段 timeout 的较小者，不能靠单段拖过总期限。
     const moveDeadline = Math.min(request.deadlineMs, this.now() + request.timeoutMs);
     if (this.now() >= moveDeadline) return { failure: { kind: 'timed_out' } };
 
     await this.body.look(Math.atan2(-(to.x - from.x), -(to.z - from.z)), WALK_GAZE_PITCH);
-    // 转头后重新检查取消/期限：转头等待期间可能被抢占或到期。
-    if (this.aborted(request)) return { failure: { kind: 'cancelled' } };
+    // 转头后重新检查取消/期限/归属：转头等待期间可能被抢占、到期或换主。
+    if (this.aborted(request) || !this.ownsHost()) return { failure: { kind: 'cancelled' } };
     if (this.now() >= moveDeadline) return { failure: { kind: 'timed_out' } };
     // 启动该段前检查生命周期与作用域：已断线/死亡/观测未就绪/换会话时不得写前进键，直接取消本委托。
     const lc = this.lifecycle?.();
@@ -205,6 +225,8 @@ export class WalkMoveExecutor implements MoveExecutor {
       this.onLifecycleBroken?.(`alive=${lc.alive} connected=${lc.connected} observationReady=${lc.observationReady} scope=${lc.worldId}/${lc.dim}/${lc.sessionId}`);
       return { failure: { kind: 'cancelled' } };
     }
+    // 换主检查之后才写控制；此后同一同步块内不会跨 await，写入都属于本执行。
+    if (!this.ownsHost()) return { failure: { kind: 'cancelled' } };
     this.body.clearControlStates();
     this.body.setControlState('forward', true);
     this.activeExecutionId = request.executionId;
@@ -224,12 +246,12 @@ export class WalkMoveExecutor implements MoveExecutor {
     let prevPos: { x: number; z: number } | null = null;
     let prevTime: number | null = null;
     for (let i = 0; i < 400; i++) {
-      if (this.aborted(request)) { this.releaseIf(request.executionId); return { failure: { kind: 'cancelled' } }; }
+      if (this.aborted(request) || !this.ownsHost()) { this.releaseIf(request.executionId); return { failure: { kind: 'cancelled' } }; }
       if (this.now() >= moveDeadline) { this.releaseIf(request.executionId); return { failure: { kind: 'timed_out' } }; }
       const e = await awaitFrame(this.tick, moveDeadline, this.now, request.signal, this.parentSignal, ...(this.runSignal ? [this.runSignal] : []));
       // 每次异步等待返回后，在写控制或提交样本之前，复核取消/期限/归属：旧段迟到恢复不能
       // 松开新段的键、提交旧样本；到期帧也不能再写控制。
-      if (this.aborted(request)) { this.releaseIf(request.executionId); return { failure: { kind: 'cancelled' } }; }
+      if (this.aborted(request) || !this.ownsHost()) { this.releaseIf(request.executionId); return { failure: { kind: 'cancelled' } }; }
       if (this.now() >= moveDeadline) { this.releaseIf(request.executionId); return { failure: { kind: 'timed_out' } }; }
       if (e === null) {
         // 无帧：取消与期限已在上方排除。null 是帧源结束/取消的结果，不是重试授权——
@@ -293,18 +315,20 @@ export class WalkMoveExecutor implements MoveExecutor {
 
   stop(executionId: string): void {
     if (executionId !== this.activeExecutionId) return; // 旧段不能清理新段的控制
+    // 结束本次执行的控制权：迟到收尾（releaseIf）再也不能操作身体。
+    this.activeExecutionId = null;
+    // 宿主已换主时，这些键属于新任务；旧执行只放弃自己的归属，不写任何控制。
+    if (!this.ownsHost()) return;
     this.body.setControlState('forward', false);
     this.body.clearControlStates();
-    // 结束旧执行的控制权：迟到收尾（releaseIf）再也不能操作身体。
-    this.activeExecutionId = null;
   }
 
   private releaseIf(executionId: string): void {
     // 归属检查必须同时保护松键与清空归属：旧段的迟到收尾不能清掉新段的归属。
     if (executionId !== this.activeExecutionId) return;
-    // 释放当前执行用到的全部移动键（前进/倒退/潜行），再撤销归属，函数返回前不留任何按键。
-    this.body.clearControlStates();
     this.activeExecutionId = null;
+    // 释放当前执行用到的全部移动键（前进/倒退/潜行）；换主后新任务的键不归旧执行释放。
+    if (this.ownsHost()) this.body.clearControlStates();
   }
 }
 
@@ -312,6 +336,8 @@ export class WalkMoveExecutor implements MoveExecutor {
 export interface ActiveWalkLoop {
   observe(report: ChangeReport, budget: number): void;
   cancel(by: 'lifecycle', reason: string): void;
+  /** Read-only progress projection; never advances or mutates the delegation. */
+  status(): WalkRouteStatus | null;
 }
 
 /**
@@ -394,6 +420,7 @@ export async function runWalkRoute(opts: {
     unbindActive = opts.bindActive?.({
       observe: (report, budget) => { loop.observe(report, budget); },
       cancel: (by, reason) => { cancelRun(by, reason); },
+      status: () => loop.status(),
     }) ?? null;
     const executionId = loop.status()!.delegationId;
 

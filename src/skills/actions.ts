@@ -2,7 +2,7 @@ import { DIRS } from '../perception/perception.ts';
 import { AbortedError, dist3, sleep, throwIfAborted } from '../util.ts';
 import type { DriveKeys, EntityInfo, Vec3Like } from '../adapter/types.ts';
 import { sighted, yawOfDir } from './movement.ts';
-import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillResult } from './types.ts';
+import { cancelledNav, clampInt, codeFromError, fail, isAbort, navReceipt, obj, ok, type NavOutcome, type Skill, type SkillResult } from './types.ts';
 import { resolveItemAlias } from './work.ts';
 import { isStation, rememberStation } from './stations.ts';
 import { openWater, planBoatRoute, type BoatRoute } from './vehicles.ts';
@@ -356,7 +356,7 @@ export const hitEntity: Skill<{ entity: string | number; hits: number }> = {
 // ------------------------------------------------------------------ dismount
 export const dismount: Skill<{ toward?: { x: number; y: number; z: number } }> = {
   name: 'dismount',
-  description: '从正在乘坐的东西上下来',
+  description: '从正在乘坐的东西上下来。完成条件：实际乘骑状态确认已不在乘坐（disembarked:true）；底层报 ok 但仍显示乘坐算失败',
   argsDoc: '{"toward"?: [x,y,z]（下船时朝向的落脚处）}',
   timeoutMs: 8000,
   movement: false,
@@ -372,11 +372,12 @@ export const dismount: Skill<{ toward?: { x: number; y: number; z: number } }> =
     if (!before.riding) return fail('BAD_ARGS', '现在没有在乘坐任何东西');
     const r = await ctx.adapter.dismount(ctx.signal, args);
     const after = ctx.adapter.state();
-    if (!r.ok) return fail('ERROR', `下不来：${r.reason}`, { riding: after.riding ?? null, stillRiding: !!after.riding, disembarked: false, position: { ...after.pos } });
+    const measuredAt = Date.now();
+    if (!r.ok) return fail('ERROR', `下不来：${r.reason}`, { riding: after.riding ?? null, stillRiding: !!after.riding, disembarked: false, position: { ...after.pos }, measuredAt });
     // 下乘以实际乘骑状态确认，不能只看底层返回 ok；停船/靠岸仍保持乘坐是另一件事。
-    if (after.riding) return fail('EFFECT_NOT_CONFIRMED', `下乘未确认：仍显示在乘坐 ${after.riding}`, { riding: after.riding, stillRiding: true, disembarked: false, position: { ...after.pos } });
+    if (after.riding) return fail('EFFECT_NOT_CONFIRMED', `下乘未确认：仍显示在乘坐 ${after.riding}`, { riding: after.riding, stillRiding: true, disembarked: false, position: { ...after.pos }, measuredAt });
     const at = `(${after.pos.x.toFixed(2)},${after.pos.y.toFixed(2)},${after.pos.z.toFixed(2)})`;
-    return ok(`已从 ${before.riding} 下来，现在站在 ${at}`, { riding: null, stillRiding: false, disembarked: true, from: before.riding, position: { ...after.pos }, ...(args.toward ? { toward: { ...args.toward } } : {}) });
+    return ok(`已从 ${before.riding} 下来，现在站在 ${at}`, { riding: null, stillRiding: false, disembarked: true, from: before.riding, position: { ...after.pos }, measuredAt, ...(args.toward ? { toward: { ...args.toward } } : {}) });
   },
 };
 
@@ -384,7 +385,7 @@ export const dismount: Skill<{ toward?: { x: number; y: number; z: number } }> =
 export const ride: Skill<{ direction?: string; to?: { x: number; z: number }; distance: number; until?: string }> = {
   name: 'ride',
   outcomeBoundary: true,
-  description: '驾驶当前载具；船沿水面寻路并考虑船宽，陆上目标停靠可上岸处；遇障碍或 until 即停，保持乘坐',
+  description: '驾驶载具；船沿水面寻路并考虑船宽，陆上目标停靠可上岸处；遇障碍或 until 即停，保持乘坐。arrived 仅指原目标，docked 只是停靠；后端 vehicle_ride',
   argsDoc: '{"direction"?: "N|NE|E|SE|S|SW|W|NW", "to"?: "x,z"|{"x","z"}, "distance"?: 8-240, "until"?: "<方块/生物>"}',
   timeoutMs: 120000,
   movement: true,
@@ -403,6 +404,9 @@ export const ride: Skill<{ direction?: string; to?: { x: number; z: number }; di
       to = { x, z };
     }
     if (!direction && !to) return { ok: false, error: '需要 direction 或 to' };
+    for (const flag of ['dig', 'place', 'tower'] as const) if (a[flag] !== undefined) {
+      return { ok: false, error: `ride 不认 ${flag}：驾驶载具不会挖、放或搭柱；要施工先下船后用 dig_at/place_at/climb_up，下乘用 dismount` };
+    }
     const until = typeof a.until === 'string' && a.until.trim() ? a.until.trim().toLowerCase().slice(0, 80) : undefined;
     return { ok: true, args: { ...(direction ? { direction } : {}), ...(to ? { to } : {}), distance: clampInt(a.distance, 8, 240, 48), ...(until ? { until } : {}) } };
   },
@@ -418,18 +422,35 @@ export const ride: Skill<{ direction?: string; to?: { x: number; z: number }; di
       distance: args.distance, ...(args.until ? { until: args.until } : {}),
     };
     // 到达只由身体返回的 arrived + 原目标决定；停靠是另一件事，不能把靠近岸当成到达。
-    const receipt = (r: SkillResult): SkillResult => ({
-      ...r,
-      data: { ...(r.data ?? {}), originalRequest: request, resolvedTarget: { x: target.x, z: target.z }, backend: 'vehicle_ride' },
-    });
+    // 完成条件写明模式（到点/停靠/停下），下乘仍保持乘坐时单独记录。
+    const trace: Vec3Like[] = [{ ...s.pos }];
+    const receipt = (r: SkillResult): SkillResult => {
+      const data = (r.data ?? {}) as Record<string, unknown>;
+      const position = (data.position as Vec3Like | undefined) ?? trace.at(-1) ?? null;
+      const arrived = data.arrived === true, docked = data.docked === true;
+      const arrival = position ? {
+        mode: docked ? 'docked' as const : arrived ? 'near_radius' as const : 'stopped' as const,
+        required: { target: { x: target.x, z: target.z }, metric: 'horizontal', arriveWithin: 0.8 },
+        measured: { position }, satisfied: arrived,
+        stillRiding: data.stillRiding === true, disembarked: data.stillRiding === false,
+      } : undefined;
+      const outcome: NavOutcome = arrived ? 'ARRIVED'
+        : r.status === 'failed' ? (r.failureCode === 'TIMEOUT' ? 'TIMEOUT' : data.blocked === true ? 'BLOCKED' : 'NO_PATH') : 'PARTIAL';
+      return navReceipt(r, {
+        backend: 'vehicle_ride', originalRequest: request, outcome,
+        resolvedTarget: { x: target.x, z: target.z }, position, trace, ...(arrival ? { arrival } : {}),
+      });
+    };
     let seen: { what: string; dist: number } | null = null;
     const isBoat = /(^|_)(boat|raft)$/.test(s.riding);
     const avoid = new Set<string>();
     let route: BoatRoute | null = null, moved = 0;
+    const record = () => { trace.push({ ...adapter.state().pos }); if (trace.length > 24) trace.splice(0, trace.length - 24); };
     try {
       let r = { ok: true, arrived: false, blocked: false, reason: '' };
       for (let attempt = 0; attempt < (isBoat ? 4 : 1); attempt++) {
         const here = adapter.state().pos;
+        record();
         route = isBoat ? planBoatRoute(ctx, here, target, { avoid }) : null;
         if (isBoat && !route) return receipt(fail('PATH_NOT_FOUND', '当前位置没有可确认的水面航线，仍保持乘坐', { moved, arrived: false, position: here, riding: adapter.state().riding }));
         const end = route ? route.waypoints[route.waypoints.length - 1] : target;
@@ -439,6 +460,7 @@ export const ride: Skill<{ direction?: string; to?: { x: number; z: number }; di
           ...(route ? { via: route.waypoints.slice(0, -1), arriveWithin: 0.8 } : {}),
         });
         moved += result.moved;
+        record();
         r = { ok: result.ok, arrived: result.arrived, blocked: result.blocked ?? false, reason: result.reason ?? '' };
         if (seen || !r.ok || !r.blocked || !route) break;
         // 被岸边挡住时不再把“离终点 ≤1.8”改写为 arrived；只记下重新规划方向。
@@ -484,7 +506,11 @@ export const ride: Skill<{ direction?: string; to?: { x: number; z: number }; di
       if (r.arrived) return receipt(ok(`乘坐 ${s.riding} 到了目标附近（${moved} 格），保持乘坐`, data));
       return receipt(ok(`乘坐 ${s.riding} 前进 ${moved} 格${r.blocked ? '后靠岸/受阻' : ''}，停下并保持乘坐`, data));
     } catch (e) {
-      if (isAbort(e)) throw e;
+      record();
+      if (isAbort(e)) throw cancelledNav(e, {
+        backend: 'vehicle_ride', originalRequest: request, resolvedTarget: { x: target.x, z: target.z },
+        position: trace.at(-1) ?? null, trace,
+      });
       return receipt(fail(codeFromError(e), `乘坐出错：${(e as Error).message}`, { moved: Math.round(moved), arrived: false, position: { ...adapter.state().pos }, riding: adapter.state().riding, stillRiding: !!adapter.state().riding, stopReason: 'failed' }));
     }
   },

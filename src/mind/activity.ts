@@ -5,6 +5,7 @@ import { feetCell } from '../perception/local.ts';
 import { evaluateCondition } from '../projects/conditions.ts';
 import { SKILLS } from '../skills/index.ts';
 import { STANCE_MOVES } from '../skills/stance.ts';
+import { PLACEABLE } from '../skills/survival.ts';
 import type { SkillResult } from '../skills/types.ts';
 import { shortId } from '../util.ts';
 import type { Activity, ActivityDraft, ActivityOutcome, ActivityRecord, ActivityStep } from './types.ts';
@@ -15,6 +16,9 @@ export const inventoryOf = (s: Pick<AgentState, 'inventory'>): Record<string, nu
   return out;
 };
 
+/** 物品名在技能参数里可能带 `minecraft:` 前缀，背包账本用不带前缀的名字。 */
+const itemBaseName = (name: string) => name.replace(/^minecraft:/, '');
+
 export function diffInventory(before: Record<string, number>, after: Record<string, number>) {
   const gained: Record<string, number> = {}, lost: Record<string, number> = {};
   for (const k of new Set([...Object.keys(before), ...Object.keys(after)])) {
@@ -22,6 +26,122 @@ export function diffInventory(before: Record<string, number>, after: Record<stri
     if (d > 0) gained[k] = d; else if (d < 0) lost[k] = -d;
   }
   return { gained, lost };
+}
+
+/**
+ * 同一逻辑动作的原始派发额度：绝对期限与开工背包。
+ * 自动重试/续跑沿用这份账本；新的一段活（新的 Agent 委托）重新起算，不设全局配额。
+ * 只放在内存里，随 Activity 一起被回收。
+ */
+type StepLedger = {
+  deadline: number;
+  resume: boolean;
+  /** Inventory snapshot at the previous dispatch, so consumption accumulates per attempt. */
+  last: Record<string, number>;
+  /** Normalized item name -> units lost across attempts. Pickups cannot erase prior spend. */
+  spent: Record<string, number>;
+};
+const ledgers = new WeakMap<Activity, Map<string, StepLedger>>();
+const stepKeyOf = (step: Step) => step.id ?? `${step.skill}:${JSON.stringify(step.args ?? {})}`;
+
+function ledgerOf(a: Activity) {
+  let map = ledgers.get(a);
+  if (!map) {
+    map = new Map();
+    ledgers.set(a, map);
+  }
+  return map;
+}
+
+/** 派发前读取这个逻辑动作的期限与材料基线；只有被标记为自动续跑的动作沿用旧账本。 */
+export function beginStep(a: Activity, step: Step, state: Pick<AgentState, 'inventory'>) {
+  const map = ledgerOf(a);
+  const key = stepKeyOf(step);
+  const previous = map.get(key);
+  const continuation = previous?.resume === true;
+  const inventory = inventoryOf(state);
+  if (!previous || !continuation) {
+    map.set(key, {
+      deadline: Date.now() + (SKILLS[step.skill]?.timeoutMs ?? 0),
+      resume: false,
+      last: inventory,
+      spent: {},
+    });
+  } else {
+    previous.resume = false;
+    const { lost } = diffInventory(previous.last, inventory);
+    for (const [name, count] of Object.entries(lost)) {
+      const base = itemBaseName(name);
+      previous.spent[base] = (previous.spent[base] ?? 0) + count;
+    }
+    previous.last = inventory;
+  }
+  const ledger = map.get(key)!;
+  return { deadlineMs: ledger.deadline, remainingMs: ledger.deadline - Date.now(), continuation };
+}
+
+/** 标记下一次派发是同一逻辑动作的自动重试/续跑，而不是新的独立动作。 */
+export function markContinuation(a: Activity, step: Step | undefined) {
+  if (!step) return;
+  const ledger = ledgerOf(a).get(stepKeyOf(step));
+  if (ledger) ledger.resume = true;
+}
+
+/** 新一轮 routine 是同一段活里的再次执行，按新一次派发重新起算，不继承上一轮的期限与耗材。 */
+function resetStepBudgets(a: Activity) {
+  ledgers.delete(a);
+}
+
+/**
+ * 原委托声明的材料额度。当前 schema 里只有这两处能表达数量：
+ * - climb_up 的 height：每确认升高一格最多消耗一个垫脚方块；
+ * - place_at 的一次放置：最多花 1 个指定物品。
+ * 通用 make 只是 boolean，没有数量，不能在这里假装有额度。
+ */
+function materialAllowance(a: Activity, step: Step, state: AgentState) {
+  const args = (step.args ?? {}) as Record<string, unknown>;
+  const climbKey = step.id ?? JSON.stringify(step.args ?? {});
+  const height = a.climb?.[climbKey]?.height
+    ?? (typeof args.height === 'number' ? args.height : Number(args.height));
+  const item = typeof args.item === 'string' && args.item !== 'any' ? itemBaseName(args.item) : null;
+  const declared = step.skill === 'climb_up'
+    ? { max: Number.isFinite(height) ? height : 0, names: null as Set<string> | null }
+    : step.skill === 'place_at'
+      ? { max: 1, names: item === null ? null : new Set([item]) }
+      : undefined;
+  if (!declared || declared.max <= 0) return undefined;
+  const ledger = ledgerOf(a).get(stepKeyOf(step));
+  if (!ledger) return undefined;
+  // Consumption accumulates across attempts; a later pickup of the same item
+  // must not erase earlier spend. Include the loss since the last dispatch so a
+  // just-finished attempt is counted before the next beginStep folds it in.
+  const { lost } = diffInventory(ledger.last, inventoryOf(state));
+  const spent: Record<string, number> = { ...ledger.spent };
+  for (const [name, count] of Object.entries(lost)) {
+    const base = itemBaseName(name);
+    spent[base] = (spent[base] ?? 0) + count;
+  }
+  const consumed = Object.entries(spent).reduce((n, [name, count]) =>
+    n + ((declared.names ? declared.names.has(itemBaseName(name)) : PLACEABLE.includes(itemBaseName(name))) ? count : 0), 0);
+  return { max: declared.max, consumed, remaining: Math.max(0, declared.max - consumed) };
+}
+
+/** 自动重试前检查原委托的期限与材料额度；返回停止原因，未超限时返回 undefined。 */
+function continuationGuard(a: Activity, step: Step | undefined, state: AgentState) {
+  if (!step) return undefined;
+  const ledger = ledgerOf(a).get(stepKeyOf(step));
+  if (ledger && Date.now() >= ledger.deadline) return `「${step.skill}」的自动重试沿用的是原动作期限，现在已经到期；不再拿一个新的超时重来`;
+  const material = materialAllowance(a, step, state);
+  if (material && material.remaining <= 0) return `「${step.skill}」的自动重试不能超出原委托的材料额度：已消耗 ${material.consumed}，额度 ${material.max}；不再自动花材料`;
+  return undefined;
+}
+
+/** 技能回执里明确报告的导航阶段（walk_to/walk_known_route/walk_route 等）；没有报告就不编。 */
+function reportedStage(result: SkillResult): string | undefined {
+  const text = (value: unknown) => typeof value === 'string' && value ? value : undefined;
+  const data = result.data;
+  const nav = data?.nav && typeof data.nav === 'object' ? data.nav as Record<string, unknown> : undefined;
+  return text(nav?.stage) ?? text(nav?.outcome) ?? text(data?.stage);
 }
 
 /** 做法的“签名”：技能 + 主要对象，用来认出“同一套做法”，修正窍门的成败次数 */
@@ -57,9 +177,11 @@ const GAP_EVIDENCE_FIELDS = [
 
 function gapEvidence(result: SkillResult): string {
   const data = result.data;
-  if (!data) return '';
+  const stage = reportedStage(result);
+  if (!data) return stage ? `{"navStage":${JSON.stringify(stage)}}` : '';
   const picked: Record<string, unknown> = {};
   for (const key of GAP_EVIDENCE_FIELDS) if (data[key] !== undefined) picked[key] = data[key];
+  if (stage) picked.navStage = stage;
   const text = JSON.stringify(picked);
   return text.length > 240 ? text.slice(0, 240) : text;
 }
@@ -111,6 +233,7 @@ export function nextStep(a: Activity): (Step & { id?: string }) | null {
     a.iteration++;
     a.index = 0;
     a.climb = {}; // 新一轮：重置额度账本，从原始目标开始。
+    resetStepBudgets(a);
   }
   const step = a.steps[a.index++];
   if (!step) return null;
@@ -167,7 +290,14 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   const baseline = previous?.pos ? previous : a.stepStart;
   const previousPosition = a.results.at(-1)?.pos;
   if (previousPosition && JSON.stringify(feetCell(previousPosition)) !== JSON.stringify(feetCell(state.pos))) delete a.airDigs;
-  a.results.push({ skill: step.skill, args: step.args, status: result.status, failureCode: result.failureCode, summary: result.summary.slice(0, 160), at: Date.now(), durationMs, pos: { ...state.pos }, ...(view !== undefined ? { view } : {}) });
+  // 只记录技能明确报告过的阶段（walk_to/walk_known_route 的 nav.outcome、walk_route 的 nav.outcome、
+  // 水面技能的 data.stage）；没有报告的技能保持没有，不由耗时或位置臆造阶段。
+  const navStage = reportedStage(result);
+  const recorded: Activity['results'][number] & { stage?: string } = {
+    skill: step.skill, args: step.args, status: result.status, failureCode: result.failureCode, summary: result.summary.slice(0, 160), at: Date.now(), durationMs, pos: { ...state.pos }, ...(view !== undefined ? { view } : {})
+  };
+  if (navStage) recorded.stage = navStage;
+  a.results.push(recorded);
   if (a.results.length > 16) a.results = a.results.slice(-16);
   // climb_up 的统一结算与续跑决策：账本已在 climbUp.run 里结算（成功/失败/取消/嵌套都计入），这里只判断完成/继续/耗尽。
   if (step.skill === 'climb_up') {
@@ -281,6 +411,8 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     const authorizedBy = { skill: step.skill, ...(own?.id ? { stepId: own.id } : {}), args: step.args };
     a.steps.splice(Math.max(0, a.index - 1), 0, ...cells.map((c) => ({ skill: 'dig_at', args: { at: c.at, ...(c.facing ? { facing: c.facing } : {}) }, id: shortId('st_'), origin: 'execution_helper' as const, authorizedBy })));
     a.index = Math.max(0, a.index - 1);
+    // 清障后回放同一个 climb_up：它仍是同一次委托，沿用原期限/高度/材料账本。
+    markContinuation(a, own);
     return { kind: 'continue', adapted: `头顶被挡，先把 ${cells.length} 格障碍挖开再走（climb_up 已授权清障；只消耗工具耐久，不消耗背包方块）` };
   }
   // goto 是「委托寻路」：头顶被挡是路线事实，不替 Agent 决定挖哪一格——挖开、绕行还是退回去由它定。
@@ -293,9 +425,25 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   if (step.skill === 'place_at' && typeof data?.pillarFailure === 'string' && data.pillarFailure.startsWith('BLOCKED:')) {
     return { kind: 'stuck', why: result.summary.slice(0, 160) };
   }
-  // 4) 脚下没有实心地面（悬空/水里/梯子上）或服务器拒放：原地垫高垫不了，别白重试，把事实交回脑子
-  if (step.skill === 'place_at' && (data?.pillarFailure === 'NO_REFERENCE' || typeof data?.pillarFailure === 'string' && data.pillarFailure.startsWith('NOT_PLACED:Server'))) {
+  // 4) 脚下没有实心地面（悬空/水里/梯子上）：确定性缺支撑，原地垫高垫不了，别白重试。
+  if (step.skill === 'place_at' && data?.pillarFailure === 'NO_REFERENCE') {
     return { kind: 'stuck', why: result.summary.slice(0, 160) };
+  }
+  // 服务器暂时拒绝/尚未站稳不是“没有附着面”：在同一个父委托的期限和材料额度内有限重试（最多两次）。
+  // 这些是暂时条件（服务器确认延迟/身体还没落稳），不是同一确定性缺口的原样重试；确定性拒绝已在上面的分支停止。
+  if (step.skill === 'place_at' && typeof data?.pillarFailure === 'string' && /^NOT_PLACED(?::|$)/.test(data.pillarFailure)) {
+    const own = ownStep(a, step);
+    const scope = `pillar-retry:${digest(JSON.stringify(step.args ?? {}))}`;
+    const attempts = a.adaptations.filter((item) => item.startsWith(`${scope}:`)).length;
+    const mark = `${scope}:${digest(gapEvidence(result))}`;
+    // 服务器拒绝/尚未站稳是有界的暂时条件：最多两次；确定性拒绝已在上面的分支立即停止。
+    if (attempts >= 2) return { kind: 'stuck', why: result.summary.slice(0, 160) };
+    const guard = continuationGuard(a, own, state);
+    if (guard) return { kind: 'stuck', why: guard };
+    a.adaptations.push(mark);
+    markContinuation(a, own);
+    a.index = Math.max(0, a.index - 1);
+    return { kind: 'continue', adapted: `${step.skill} 被服务器暂时拒绝或身体尚未落稳（${data.pillarFailure.slice(0, 60)}）；沿用原委托期限和材料额度再确认一次` };
   }
   // 5) 同一技能+错误+原参数+同一证据版本不原样重试。首次重试要求身体实际移动（相关进展）；
   //    之后只有失败回执里的支撑/净空/目标/进度等事实变了才允许复验，且最多两次。
@@ -306,7 +454,10 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   const physicallyMoved = !!baseline?.pos && Math.hypot(state.pos.x - baseline.pos.x, state.pos.y - baseline.pos.y, state.pos.z - baseline.pos.z) >= 0.5;
   if (RETRYABLE.has(code) && !(step.skill === 'goto' && code === 'PATH_NOT_FOUND')
     && !a.adaptations.includes(retryMark) && retries < 2 && (retries > 0 || physicallyMoved)) {
+    const guard = continuationGuard(a, ownStep(a, step), state);
+    if (guard) return { kind: 'stuck', why: guard };
     a.adaptations.push(retryMark);
+    markContinuation(a, ownStep(a, step));
     a.index = Math.max(0, a.index - 1);
     return { kind: 'continue', adapted: `${step.skill} 没成；相关事实有变化，再试一次` };
   }
@@ -341,6 +492,8 @@ export function argsLabel(step: Step): string {
 /** 把一段活压成一行给模型看 */
 export function describeActivity(a: Activity, state: AgentState, percept?: Percept) {
   const done = a.doneWhen ? evaluateCondition(a.doneWhen, state, state.worldId, [], percept) : null;
+  const stageOf = (r: Activity['results'][number]) => (r as { stage?: unknown }).stage;
+  const lastStage = [...a.results].reverse().find((r) => typeof stageOf(r) === 'string');
   return {
     what: a.what, why: a.why, kind: a.kind,
     ...(a.facing ? { facing: a.facing } : {}),
@@ -351,7 +504,12 @@ export function describeActivity(a: Activity, state: AgentState, percept?: Perce
     ...(a.failures ? { failures: a.failures } : {}),
     ...(a.adaptations.length ? { body_adapted: a.adaptations } : {}),
     ...(a.dropped?.length ? { not_done_rejected: a.dropped } : {}),
-    recent: a.results.slice(-3).map((r) => `${r.skill} → ${r.status}${r.failureCode ? `(${r.failureCode})` : ''}：${r.summary.slice(0, 80)}`),
+    // 只在技能真的报告阶段时带上；没报告的步骤不补一个假阶段。
+    ...(lastStage ? { last_nav_stage: stageOf(lastStage) } : {}),
+    recent: a.results.slice(-3).map((r) => {
+      const stage = stageOf(r);
+      return `${r.skill} → ${r.status}${r.failureCode ? `(${r.failureCode})` : ''}${typeof stage === 'string' ? `〔阶段 ${stage}〕` : ''}：${r.summary.slice(0, 80)}`;
+    }),
     ...(a.expect ? { my_expectation: a.expect } : {}),
     ...(a.hypothesis ? { hypothesis: a.hypothesis } : {}),
   };

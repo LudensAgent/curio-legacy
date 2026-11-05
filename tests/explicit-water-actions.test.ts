@@ -35,6 +35,37 @@ test('unstuck in water reports the missing action without choosing to swim', asy
   } finally { ctx.memory.close(); }
 });
 
+test('unstuck reports pillar construction spend by stage instead of hiding it inside movement', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  // 四面脚下被封住、正上方也被挡（climb_up 会先挖开）：surroundings 判定 enclosed。
+  // 头顶用玻璃（不是可垫方块），挖开的掉落不会抵消垫柱的背包净差。
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) w.setBlock({ x: dx, y: 64, z: dz }, 'stone');
+  w.setBlock({ x: 0, y: 66, z: 0 }, 'glass');
+  w.inv.set('cobblestone', 2);
+  t.mock.method(w, 'moveTo', async (target: any) => {
+    // climb_up 的原地向上一步：模拟真实垫柱消耗一块可垫方块，然后站上新高度。
+    if (target.kind === 'xyz') {
+      w.inv.set('cobblestone', (w.inv.get('cobblestone') ?? 1) - 1);
+      w.setBlock({ x: 0, y: 64, z: 0 }, 'cobblestone');
+      w.pos = { x: 0.5, y: target.y, z: 0.5 };
+    }
+  });
+  const ctx = makeCtx(w);
+  try {
+    const result = await unstuck.run(ctx, {});
+    assert.equal(result.status, 'succeeded', result.summary);
+    const construction = result.data?.construction as { attempted: boolean; stage: string; blocksPlaced: number; boundary: string; placedByStage: { stage: string; blocks: { name: string; count: number }[] }[] };
+    assert.equal(construction.attempted, true);
+    assert.equal(construction.stage, 'pillar_up');
+    assert.equal(construction.blocksPlaced, 1, '实际背包减少的可垫方块数');
+    assert.deepEqual(construction.placedByStage, [{ stage: 'pillar_up', blocks: [{ name: 'cobblestone', count: 1 }] }]);
+    assert.match(construction.boundary, /净减少.*不区分搭柱\/梯子/);
+    assert.match(result.summary, /垫了 1 块.*cobblestone×1/);
+    assert.equal(w.inv.get('cobblestone'), 1);
+  } finally { ctx.memory.close(); }
+});
+
 test('gather reports entering water instead of automatically swimming to shore', async () => {
   const w = new TestWorld();
   w.setBlock({ x: 8, y: 64, z: 0 }, 'oak_log');

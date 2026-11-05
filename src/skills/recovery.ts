@@ -8,8 +8,8 @@ type NavArrival = { kind: 'exact' } | { kind: 'near'; radius: number };
 
 export type RecoveryContext = { skill: string; args: Record<string, unknown>; target?: Vec3Like; position?: Vec3Like; entityId?: number; allowPlace?: boolean; allowDig?: boolean; climb?: { height: number; spent: number; startY: number }; arrival?: NavArrival; fragmentId?: string; deadlineMs?: number };
 
-/** 恢复时只有这两个动作能继承/重做同一导航委托；其他动作不能静默替换目标或完成条件。 */
-const NAVIGATION_SKILLS = new Set(['walk_to', 'walk_known_route']);
+/** 恢复时只有这三个库入口能继承/重做同一导航委托；其他动作不能静默替换目标或完成条件。 */
+const NAVIGATION_SKILLS = new Set(['walk_route', 'walk_to', 'walk_known_route']);
 /**
  * 新导航恢复不能用其他直接移动/导航动作绕过原后端、目标与手段。
  * 一个显式有限集合：旧寻路/单步/按键/旧路线，以及会直接改变身体位置或移动方式的
@@ -135,6 +135,24 @@ export function recoveryContext(value: unknown): RecoveryContext | { error: stri
     navTarget = to;
     deadlineMs = deadline.value;
     args = { ...args, to, arrival, ...(deadlineMs !== undefined ? { deadlineMs } : {}) };
+  } else if (skill === 'walk_route') {
+    // walk_route 的目标就是调用者给定的路线末点；原请求的点列必须整条保留，
+    // 恢复不能重选路线、缩短点列或把末点换成当前位置。
+    if (!Array.isArray(args.points)) return { error: 'failure.args.points 必须是 walk_route 的原路线点列' };
+    const parsed = args.points.map(readPoint);
+    const badIndex = parsed.findIndex((point) => point === null);
+    if (badIndex >= 0) return { error: `failure.args.points[${badIndex}] 必须是有限世界坐标` };
+    const points = parsed.filter((point): point is Vec3Like => point !== null);
+    const last = points[points.length - 1];
+    if (last === undefined) return { error: 'failure.args.points 至少需要一个点' };
+    const deadline = recoveryDeadline(args.deadlineMs);
+    if (!deadline.ok) return { error: deadline.error };
+    if (providedTarget && !pointEquals(providedTarget, last)) {
+      return { error: 'failure.target 必须与 walk_route 原路线末点一致，不能替换目标' };
+    }
+    navTarget = last;
+    deadlineMs = deadline.value;
+    args = { ...args, points, ...(deadlineMs !== undefined ? { deadlineMs } : {}) };
   } else if (skill === 'walk_known_route') {
     if (typeof args.fragmentId !== 'string' || args.fragmentId.length === 0) return { error: 'failure.args.fragmentId 必须是原路线 ID' };
     const deadline = recoveryDeadline(args.deadlineMs);
@@ -175,11 +193,23 @@ export function constrainRecoveryAction(ctx: SkillCtx, name: string, values: Rec
   if (original.make === false) args.make = false;
   // 新导航恢复必须沿用同一原语：既不能换成旧寻路/单步/按键，也不能从旧动作
   // 静默切进新导航（后者的目标/完成条件不等价）。普通非恢复调用不受影响。
-  if (NAVIGATION_SKILLS.has(scope.skill) && NAVIGATION_BYPASS.has(name)) {
+  if (NAVIGATION_SKILLS.has(scope.skill) && NAVIGATION_BYPASS.has(name) && name !== scope.skill) {
     throw new Error(`恢复「${scope.skill}」必须沿用原导航动作，不能用 ${name} 绕过原后端、目标或手段`);
   }
-  if ((name === 'walk_to' || name === 'walk_known_route') && name !== scope.skill) {
+  if (NAVIGATION_SKILLS.has(name) && name !== scope.skill) {
     throw new Error(`恢复「${scope.skill}」不能改用 ${name}：缺少等价的原始目标与完成条件`);
+  }
+  if (name === 'walk_route') {
+    if (scope.skill !== 'walk_route') throw new Error('恢复 walk_route 只能沿用原导航委托');
+    const originalPoints = Array.isArray(original.points) ? original.points.map(readPoint) : [];
+    const points = Array.isArray(args.points) ? args.points.map(readPoint) : [];
+    const same = originalPoints.length > 0 && points.length === originalPoints.length
+      && points.every((point, index) => point !== null && pointEquals(point, originalPoints[index] ?? undefined));
+    if (!same) throw new Error('恢复 walk_route 必须保留原路线点列与末点，不能重选路线或替换目标');
+    if (scope.deadlineMs !== undefined) {
+      if (args.deadlineMs === undefined) args.deadlineMs = scope.deadlineMs;
+      else if (typeof args.deadlineMs !== 'number' || args.deadlineMs > scope.deadlineMs) throw new Error('恢复 walk_route 不能延长原绝对期限');
+    }
   }
   if (name === 'walk_to') {
     const to = readPoint(args.to);
@@ -250,7 +280,9 @@ export function constrainRecoveryAction(ctx: SkillCtx, name: string, values: Rec
   if (scope.skill === 'press_keys' && RAW_INPUT_SKILLS.has(name)) {
     const extra = activeKeys(name === 'move' ? args : args.keys).filter((key) => !activeKeys(original.keys).includes(key));
     if (extra.length) throw new Error(`恢复按键不能新增原委托没有的 ${extra.join('、')}`);
-    if (name === 'press_keys' && finite(original.ms) && finite(args.ms) && args.ms > original.ms) throw new Error('恢复按键不能超过原按压时长');
+    // press_keys 与 api.move 上限不同（50–10000 vs 50–1000），但恢复都只能缩短、
+    // 不能超过原委托的按压时长；api.move 自己的入口校验再应用 1000ms 上限。
+    if (finite(original.ms) && finite(args.ms) && args.ms > original.ms) throw new Error('恢复按键不能超过原按压时长');
   }
   const terrain = ['goto', 'step', 'explore'].includes(scope.skill) && original.dig === true;
   const placement = scope.skill === 'goto' ? (original.place ?? terrain) === true : terrain || scope.allowPlace === true;

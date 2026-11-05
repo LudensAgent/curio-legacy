@@ -580,6 +580,8 @@ test('walk_to near 正向：真实公开搜索找到候选并由真实公共执�
     assert.ok(distance3d(position, target) <= 0.5, `实测末位应在原 near 半径内，实际 ${distance3d(position, target)}`);
     assert.deepEqual(position, nav.lastPosition);
     assert.deepEqual(result.data?.target, target);
+    assert.deepEqual(result.data?.resolvedTarget, target);
+    assert.equal(result.data?.backend, 'library_walk_route_search');
     assert.deepEqual(result.data?.originalRequest, { to: target, arrival: { kind: 'near', radius: 0.5 } });
     assert.ok(fixture.fixture.entity.position.x > START.x + 1, '应实际发生位移，而不是只返回 FOUND');
     assert.ok(fixture.frames() > 0);
@@ -805,6 +807,11 @@ test('walk_to 搜索批次让出宏任务：父取消可及时终止且不启动
       const result = await runSkill(c.ctx, walkTo, { to: { x: 560.54, y: 0, z: 0.52 }, arrival: { kind: 'near', radius: 0.4 } });
       assert.equal(result.status, 'cancelled');
       assert.equal(result.data?.stage, 'CANCELLED');
+      // 搜索阶段取消也要保留原请求、解析目标与唯一后端；还没有库 NavResult 时不伪造 data.nav。
+      assert.deepEqual(result.data?.originalRequest, { to: { x: 560.54, y: 0, z: 0.52 }, arrival: { kind: 'near', radius: 0.4 } });
+      assert.deepEqual(result.data?.resolvedTarget, { x: 560.54, y: 0, z: 0.52 });
+      assert.equal(result.data?.backend, 'library_walk_route_search');
+      assert.equal(result.data?.nav, undefined);
       const snap = searchOf(result);
       assert.equal(snap.state, 'CANCELLED');
       assert.ok(snap.counters.edgesEvaluated <= 32, `批次取消后不应继续评估，实际 ${snap.counters.edgesEvaluated}`);
@@ -1017,6 +1024,11 @@ test('walk_to 零边负例：不稳定/无帧/取消均有界结束且零按键'
       assert.equal(cancelled.status, 'cancelled');
       assert.equal(cancelled.data?.stage, 'CANCELLED');
       assert.equal(cancelled.data?.noop, undefined, '取消不得伪报 noop 成功');
+      // 取消时父委托外壳与库 NavResult 都必须保留。
+      assert.deepEqual(cancelled.data?.originalRequest, { to: { ...START }, arrival: { kind: 'exact' } });
+      assert.deepEqual(cancelled.data?.resolvedTarget, { ...START });
+      assert.equal(cancelled.data?.backend, 'library_walk_route_search');
+      assert.deepEqual(cancelled.data?.nav, navOf(cancelled));
       assert.equal(hanging.writes(), 0);
       const cancelNav = navOf(cancelled);
       assert.ok(cancelNav.outcome === 'CANCELLED');

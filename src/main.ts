@@ -29,6 +29,7 @@ import { attachLogger, JsonlWriter } from './log.ts';
 import { WorldMemory } from './memory/store.ts';
 import { EpisodicMemory } from './memory/episodic.ts';
 import { SharedSpatialSession, type ShutdownResult } from './spatial/shared-session.ts';
+import { createTaskJournalProducer } from './spatial/journal-producer.ts';
 import { startSpatialCheckpointScheduler } from './spatial/checkpoint-scheduler.ts';
 import { classifySpatialShutdown, errorFacts, spatialShutdownDiagnostics } from './spatial/host-shutdown.ts';
 import { HindsightBackend } from './memory/hindsight.ts';
@@ -137,10 +138,35 @@ const stopSpatialCheckpoints = startSpatialCheckpointScheduler(spatial, (fact) =
 });
 const memory = new WorldMemory(path.join(config.dataDir, 'world-memory.json'));
 const vision = new Vision(adapter, config.vision, spatial);
-// WP7 journal 生产者接缝：Arbiter 支持可选的 taskFactProducer，但默认不存在。
-// 当前任务结算事实还没有可确认的 subActions/observedChanges 证据来源，注入后
-// 只能得到结构化缺口而不会写入；因此运行时明确不注入，准备模块尚未上线。
-const arbiter = new Arbiter(adapter, memory, bus, vision, spatial);
+// WP7 journal 生产者接缝：默认关闭（SPATIAL_TASK_JOURNAL=false）。开启时只注入
+// 一个显式生产者：没有完整实测证据的任务只会得到有界结构化缺口，不会写入空记录；
+// 关闭时 Arbiter 完全不执行这条路径。报告只保留状态、计数与前 8 个缺口代码。
+const taskJournalProducer = config.spatial.taskJournal
+  ? createTaskJournalProducer({
+    sink: { journal: spatial.session.journal },
+    report: (outcome, fact) => bus.publish(
+      'spatial_task_journal',
+      outcome.status === 'rejected' ? 'P2' : 'P3',
+      `任务级空间 journal（${fact.task.skill}）：${outcome.status}`,
+      {
+        taskId: fact.task.id,
+        skill: fact.task.skill,
+        status: outcome.status,
+        gaps: outcome.gaps.slice(0, 8).map((gap) => gap.code),
+        ...(outcome.status === 'accepted_pending_checkpoint'
+          ? {
+            accepted: outcome.accepted,
+            duplicates: outcome.duplicates,
+            revision: outcome.revision,
+            pendingRecords: outcome.pendingRecords,
+            pendingBytes: outcome.pendingBytes,
+          }
+          : {}),
+      },
+    ),
+  })
+  : undefined;
+const arbiter = new Arbiter(adapter, memory, bus, vision, spatial, taskJournalProducer);
 const perception = new Perception(adapter, memory, bus, vision);
 // 区分“在自家屋里”和“在坑里”：围着自己的墙是不是自己盖的房子
 perception.ownBuilt = (pos, block) => { const st = adapter.state(); return ownBuildingAt(memory, { worldId: st.worldId, dim: st.dim }, pos, block); };

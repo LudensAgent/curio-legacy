@@ -88,11 +88,14 @@ export const descend: Skill<{ target: Vec3Like }> = {
       senses.refresh();
       throwIfAborted(signal);
       const verified = actual.connected && actual.alive && actual.observationReady;
+      const settled = arrived();
       const data = { target, support: option.support, surface: option.surface, drop, estimatedDamageUpperBound,
-        position: { ...actual.pos }, inWater: actual.inWater, hp: actual.hp,
+        position: { ...actual.pos }, inWater: actual.inWater, hp: actual.hp, measuredAt: Date.now(),
+        arrival: { mode: 'exact_cell', required: { target: { ...target }, surface: option.surface },
+          measured: { position: { ...actual.pos }, onGround: actual.onGround, inWater: actual.inWater }, satisfied: settled },
         effectEvidence: { verified, changed: verified && actual.pos.y < initial.pos.y - 0.25,
           reasons: [`实际脚位 ${initial.pos.y} → ${actual.pos.y}`, ...(actual.inWater ? ['当前实测已进入水中'] : [])] } };
-      if (!arrived()) return fail('EFFECT_NOT_CONFIRMED', '下行寻路已结束，但没有确认在所选落点接触地面或进入水中', data);
+      if (!settled) return fail('EFFECT_NOT_CONFIRMED', '下行寻路已结束，但没有确认在所选落点接触地面或进入水中', data);
       return ok(option.surface === 'water' ? '已进入选择的水面落点，尚未确认上岸' : '已落在选择的地面落点', data);
     } catch (error) {
       if (isAbort(error)) throw error;
