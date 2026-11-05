@@ -435,3 +435,17 @@ test('surface under a stone ceiling returns budget-exhausted with the blocker in
   assert.equal(r.blockedAbove?.name, 'stone', 'the stone ceiling is reported with the timeout');
   assert.equal(calls, 3, 'must stop before starting a wait shorter than the minimum window');
 });
+
+test('surface stops early when a solid ceiling blocks the ascent and reports it', async (t) => {
+  const data = scriptedSwimmer(t, {
+    start: { x: 2.5, y: 61.2, z: 2.5 }, onGround: false, inWater: true,
+    blockAt: (cell) => (cell.y >= 63 ? 'stone' : cell.y >= 60 ? 'water' : 'stone'),
+    onTick: () => {},
+  });
+  const begun = Date.now();
+  const r = await data.adapter.swimTo(null, new AbortController().signal, { timeoutMs: 8000 });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'SWIM_NO_PROGRESS');
+  assert.equal(r.blockedAbove?.name, 'stone', 'the ceiling is reported before the full budget is spent');
+  assert.ok(Date.now() - begun < 3000, `must report the ceiling early: ${Date.now() - begun}ms`);
+});

@@ -4256,14 +4256,17 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     });
     // 失败时把“为什么过不去”的实测事实交回：头顶挡块、附近开阔水面、目标相对偏移。
     // 只报告，不选路、不挖不垫；下一步由调用方决定。
+    const blockedAboveAt = (p: any) => {
+      const headY = Math.floor(p.y + (b.entity.eyeHeight ?? 1.62));
+      for (let y = headY; y <= headY + 3; y++) {
+        const blk = b.blockAt(new Vec3(p.x, y, p.z));
+        if (blk && !AIR_BLOCKS.has(blk.name) && !fluid(blk)) return { x: Math.floor(p.x), y, z: Math.floor(p.z), name: blk.name };
+      }
+      return null;
+    };
     const obstacleFacts = () => {
       const p = b.entity.position;
-      const headY = Math.floor(p.y + (b.entity.eyeHeight ?? 1.62));
-      let blockedAbove: { x: number; y: number; z: number; name: string } | null = null;
-      for (let y = headY; y <= headY + 3 && !blockedAbove; y++) {
-        const blk = b.blockAt(new Vec3(p.x, y, p.z));
-        if (blk && !AIR_BLOCKS.has(blk.name) && !fluid(blk)) blockedAbove = { x: Math.floor(p.x), y, z: Math.floor(p.z), name: blk.name };
-      }
+      const blockedAbove = blockedAboveAt(p);
       const open = (blk: any) => !!blk && (AIR_BLOCKS.has(blk.name) || water(blk));
       const dirs: [string, number, number][] = [['E', 1, 0], ['W', -1, 0], ['S', 0, 1], ['N', 0, -1], ['SE', 1, 1], ['SW', -1, 1], ['NE', 1, -1], ['NW', -1, -1]];
       const fx = Math.floor(p.x), fy = Math.floor(p.y), fz = Math.floor(p.z);
@@ -4318,6 +4321,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         lastOwned = { pos: { x: p.x, y: p.y, z: p.z }, oxygen: ownOxygen(b), surfaced: surfacedNow(), observedAt: Date.now(), stage };
         // 垂直上浮模式（无目标）：头稳定离开流体就算已浮出水面，不要求上岸；短暂露头不算。
         if (goal === 'surface_ascent' && surfacedNow()) return { ok: true, landed: false, surfaced: true, oxygen: ownOxygen(b), ...facts('surfaced') };
+        // 纯上浮时头顶被实心方块封住：按 jump 不会让头穿过方块。约 1.2 秒仍没浮出就尽快交回
+        // 阻挡事实，别把整段上浮预算耗在不可能的上浮上；挖开/换方向由调用方决定。
+        if (goal === 'surface_ascent' && Date.now() - lastProgress >= 1200) {
+          const blocked = blockedAboveAt(p);
+          if (blocked) return { ok: false, reason: 'SWIM_NO_PROGRESS', landed: false, surfaced: surfacedNow(), oxygen: ownOxygen(b), ...facts(stage), ...obstacleFacts() };
+        }
         // 只在需要上升时按跳：目标在水里且不高于脚时松开，身体才会沉到目标深度；无目标（上浮）保持上浮。
         // 人出水但还没落稳时不按，避免落地那一刻又起跳。只在需要爬岸（目标在上方）时保持向前借撞岸上抬。
         const needUp = !destination || destination.y > p.y + 0.35;

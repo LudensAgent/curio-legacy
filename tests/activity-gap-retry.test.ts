@@ -325,3 +325,15 @@ test('climb_up 采纳自动续跑的绝对期限：到期后不再执行', async
   const validated = climbUp.validate({ height: 2, untilSky: false, deadlineMs: Date.now() + 1000 }, adapter);
   assert.ok(validated.ok);
 });
+
+test('surface 头顶被封不原样重放，把阻挡事实交回心智', () => {
+  const { adapter, activity } = activityOf([{ skill: 'surface' }]);
+  const step = nextStep(activity)!;
+  activity.stepStart = { pos: { x: 1, y: 64, z: 1 } };
+  const verdict = afterStep(activity, step, fail('STUCK', '上浮没动；头顶 (1,65,1) 是 grass_block', {
+    reason: 'SWIM_NO_PROGRESS', blockedAbove: { x: 1, y: 65, z: 1, name: 'grass_block' },
+  }), 1200, adapter.state());
+  assert.equal(verdict.kind, 'stuck');
+  assert.match(verdict.why, /surface 只按跳不能挖/);
+  assert.equal(activity.adaptations.filter((item) => item.startsWith('retry:')).length, 0, '不消耗自动重试额度');
+});

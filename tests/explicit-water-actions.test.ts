@@ -366,6 +366,7 @@ test('swim_to follows an observed water detour and still verifies the caller tar
 
 test('surface failure reports the overhead blocker and nearest open water, not only a timeout', async () => {
   const w = new TestWorld();
+  w.pos = { x: 3.5, y: 61.2, z: 2.5 };
   w.inWater = true; w.oxygen = 0;
   w.swimTo = async () => ({
     ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, surfaced: false, oxygen: 0,
@@ -379,7 +380,7 @@ test('surface failure reports the overhead blocker and nearest open water, not o
     assert.equal(r.status, 'failed');
     assert.equal(r.failureCode, 'TIMEOUT');
     assert.match(r.summary, /上浮时间到，尚未确认完成/);
-    assert.match(r.summary, /头顶 \(3,63,2\) 是 stone（surface 只按跳，不能挖开）/);
+    assert.match(r.summary, /头顶 \(3,63,2\) 是 stone（相对脚部 \[0,2,0\]；surface 只按跳，不能挖开）/);
     assert.match(r.summary, /最近的开阔水面在 E 1 格 \(4,61,2\)/);
     assert.deepEqual(r.data?.blockedAbove, { x: 3, y: 63, z: 2, name: 'stone' });
     assert.deepEqual(r.data?.openWater, { x: 4, y: 61, z: 2, dir: 'E', dist: 1 });

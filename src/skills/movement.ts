@@ -1002,7 +1002,7 @@ export const surface: Skill<{ timeoutMs?: number }> = {
     const why = r.reason === 'WATER_ESCAPE_TIMEOUT' ? '上浮时间到，尚未确认完成' : r.reason === 'SWIM_NO_PROGRESS' ? '上浮没动' : r.reason;
     // 把身体实测到的阻挡交给调用方：surface 只按跳，挖开头顶、横游找空气或持续踩水由它自己决定。
     const blockers = [
-      ...(r.blockedAbove ? [`头顶 (${r.blockedAbove.x},${r.blockedAbove.y},${r.blockedAbove.z}) 是 ${r.blockedAbove.name}（surface 只按跳，不能挖开）`] : []),
+      ...(r.blockedAbove ? [`头顶 (${r.blockedAbove.x},${r.blockedAbove.y},${r.blockedAbove.z}) 是 ${r.blockedAbove.name}（相对脚部 [0,${r.blockedAbove.y - Math.floor(s.pos.y)},0]；surface 只按跳，不能挖开）`] : []),
       ...(r.openWater ? [`最近的开阔水面在 ${r.openWater.dir} ${r.openWater.dist} 格 (${r.openWater.x},${r.openWater.y},${r.openWater.z})`] : []),
     ].join('；');
     const code = r.reason === 'WATER_ESCAPE_TIMEOUT' ? 'TIMEOUT' : 'STUCK';

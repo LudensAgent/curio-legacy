@@ -493,6 +493,10 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   if (step.skill === 'swim_to' && data?.reason === 'SWIM_NO_PROGRESS') {
     return { kind: 'stuck', why: `${clipFeedback(result.summary)}；同一目标在同样的地形里重放不会改变结果，交回心智换路线或换手段` };
   }
+  // surface 头顶被实心方块封住是确定性失败：surface 只按跳、不会挖开；原样重放不会把方块弄掉。
+  if (step.skill === 'surface' && data?.blockedAbove) {
+    return { kind: 'stuck', why: `${clipFeedback(result.summary)}；头顶被 ${data.blockedAbove.name} 封住，surface 只按跳不能挖，原样重放不会改变结果，交回心智` };
+  }
   if (RETRYABLE.has(code) && !(step.skill === 'goto' && code === 'PATH_NOT_FOUND')
     && !a.adaptations.includes(retryMark) && retries < 2 && (retries > 0 || physicallyMoved)) {
     const guard = continuationGuard(a, ownStep(a, step), state);
