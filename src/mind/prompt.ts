@@ -448,6 +448,18 @@ export function situationalReminders(ctx: MindContext): string[] {
     for (const t of tunnels) {
       out.push(`记得自己${t.text}`);
     }
+    // live 工作集只留最近用过的少量通道，长/深的旧矿道可能已被归档；不显出来，
+    // Agent 会以为附近只有刚挖出来的浅 stub（2026-11-05 现场：主矿道 y-61 在归档，提示只给了 2 点的 y71 stub）。
+    const liveIds = new Set(ctx.memory.passages(p.self.dim).map((r) => r.id));
+    const archivedTunnels = ctx.memory.archivedPassages(p.self.dim)
+      .filter((r) => !liveIds.has(r.id) && (!r.worldId || r.worldId === s.worldId) && (r.kind ?? 'dug') !== 'bridge')
+      .map((r) => ({ r, dist: Math.min(...[...r.path, ...r.entrances].map((q) => Math.hypot(q.x - here.x, q.z - here.z))) }))
+      .filter((x) => x.dist <= 160)
+      .sort((a, b) => a.r.deepestY - b.r.deepestY || b.r.path.length - a.r.path.length)
+      .slice(0, 2);
+    if (archivedTunnels.length) {
+      out.push(`附近还有历史归档的旧矿道（不在当前工作集）：${archivedTunnels.map(({ r }) => `${r.id}（最低 y${r.deepestY}，${r.path.length} 个脚点）`).join('；')}；用 query passages 看历史脚点，follow_passage {"to":"deepest","id":"<记录ID>"} 可显式跟随`);
+    }
     // 想下更深时：有旧矿道就给出朝最深处走的下一步（和回入口的下一步对称）
     // 但要回地面/回入口时方向优先：活动文字里常同时出现「旧矿道」和「回地面」，两个方向不能一起给
     if (!SURFACE_INTENT.test(intent)) {
