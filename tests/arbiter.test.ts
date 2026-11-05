@@ -126,6 +126,107 @@ test('参数不合法的步骤被拒绝，不会启动', () => {
   assert.ok('error' in r2);
 });
 
+test('moveTo 合并调用方子信号：子信号取消中止动作，任务信号仍存活', async () => {
+  const { adapter, arbiter, next } = setup();
+  adapter.speed = 0.2; // 50 格需要 250 秒：只有真实取消才能让这次移动结束
+  const segment = new AbortController();
+  const taskSignals: AbortSignal[] = [];
+  SKILLS.test_segment_cancel = {
+    name: 'test_segment_cancel', description: '', argsDoc: '{}', timeoutMs: 2500, movement: true,
+    validate: () => ({ ok: true, args: {} }),
+    async run(ctx) {
+      taskSignals.push(ctx.signal);
+      try {
+        await ctx.adapter.moveTo({ kind: 'xyz', x: 50, y: 64, z: 0 }, { signal: segment.signal, timeoutMs: 2000 });
+        return { status: 'succeeded', summary: '不应走到' };
+      } catch (e) {
+        return { status: 'cancelled', summary: (e as Error).message };
+      }
+    },
+  };
+  try {
+    const done = next();
+    arbiter.start({ skill: 'test_segment_cancel' }, 'llm');
+    const beganAt = Date.now();
+    while (!adapter.actions.some((a) => a.startsWith('moveTo:'))) {
+      if (Date.now() - beganAt > 2000) assert.fail('moveTo 未开始');
+      await sleep(10);
+    }
+    segment.abort('segment cancelled');
+    const o = await done;
+    assert.equal(o.result.status, 'cancelled');
+    assert.match(o.result.summary, /segment cancelled/, '调用方子信号的中止原因必须传给 moveTo');
+    assert.equal(taskSignals.length, 1);
+    assert.equal(taskSignals[0]?.aborted, false, '子信号取消不得改写任务信号');
+  } finally {
+    delete SKILLS.test_segment_cancel;
+  }
+});
+
+test('moveTo 合并任务信号：任务取消仍中止调用方的动作', async () => {
+  const { adapter, arbiter, next } = setup();
+  adapter.speed = 0.2;
+  const segment = new AbortController();
+  SKILLS.test_task_cancel = {
+    name: 'test_task_cancel', description: '', argsDoc: '{}', timeoutMs: 2500, movement: true,
+    validate: () => ({ ok: true, args: {} }),
+    async run(ctx) {
+      try {
+        await ctx.adapter.moveTo({ kind: 'xyz', x: 50, y: 64, z: 0 }, { signal: segment.signal, timeoutMs: 60_000 });
+        return { status: 'succeeded', summary: '不应走到' };
+      } catch (e) {
+        return { status: 'cancelled', summary: (e as Error).message };
+      }
+    },
+  };
+  try {
+    const done = next();
+    arbiter.start({ skill: 'test_task_cancel' }, 'llm');
+    const beganAt = Date.now();
+    while (!adapter.actions.some((a) => a.startsWith('moveTo:'))) {
+      if (Date.now() - beganAt > 2000) assert.fail('moveTo 未开始');
+      await sleep(10);
+    }
+    arbiter.cancel('replan');
+    const o = await done;
+    assert.equal(o.result.status, 'cancelled');
+    assert.match(o.result.summary, /replan/, '任务取消的原因必须经合并信号传给 moveTo');
+    assert.equal(segment.signal.aborted, false, '任务取消不得中止调用方自己的子信号');
+  } finally {
+    delete SKILLS.test_task_cancel;
+  }
+});
+
+test('moveTo 合并信号在动作落定后移除调用方监听', async () => {
+  const { arbiter, next } = setup();
+  const listeners = new Set<() => void>();
+  let added = 0;
+  const caller = {
+    aborted: false,
+    reason: undefined,
+    addEventListener: (_type: string, fn: () => void) => { added++; listeners.add(fn); },
+    removeEventListener: (_type: string, fn: () => void) => { listeners.delete(fn); },
+  } as unknown as AbortSignal;
+  SKILLS.test_segment_cleanup = {
+    name: 'test_segment_cleanup', description: '', argsDoc: '{}', timeoutMs: 2000, movement: true,
+    validate: () => ({ ok: true, args: {} }),
+    async run(ctx) {
+      await ctx.adapter.moveTo({ kind: 'xyz', x: 0, y: 64, z: 0 }, { signal: caller, timeoutMs: 500 });
+      return { status: 'succeeded', summary: '到了' };
+    },
+  };
+  try {
+    const done = next();
+    arbiter.start({ skill: 'test_segment_cleanup' }, 'llm');
+    const o = await done;
+    assert.equal(o.result.status, 'succeeded');
+    assert.equal(added, 1, '调用方信号应被合并监听一次');
+    assert.equal(listeners.size, 0, '动作落定后必须移除调用方信号上的监听');
+  } finally {
+    delete SKILLS.test_segment_cleanup;
+  }
+});
+
 test('技能完成后记录统计与结果', async () => {
   const { adapter, arbiter, memory, next } = setup();
   adapter.blocks = [{ name: 'oak_log', pos: { x: 3, y: 64, z: 0 } }, { name: 'oak_log', pos: { x: 4, y: 65, z: 1 } }];

@@ -250,8 +250,17 @@ export class Arbiter extends EventEmitter {
             // These older primitives did not expose a signal. Bind task ownership
             // here so their internal post-await checks also observe cancellation.
             const signalIndex: Record<string, number> = { dig: 1, placeBlockAt: 2, placeBlockStateAt: 3, equipItem: 2, tossItem: 2, arrangeHotbar: 2, useGui: 2, tradeWith: 3, useBlockAt: 2, useItem: 1, rangedAttack: 1, enterPortalAt: 1, collectNearbyDrops: 0, craft: 2, sleepInBed: 0, smelt: 3, useChest: 3, till: 1, plant: 2, eat: 0, equipWeapon: 0, attack: 1, look: 2, jump: 1, swimTo: 1, diveTo: 1, pillarUp: 1, drive: 2, raiseShield: 1, startDraw: 1, releaseDraw: 0, signText: 1, editBook: 2, fish: 0, useItemOn: 2, useBucketAt: 2, interactEntity: 2, ride: 1, dismount: 0, emptyFurnace: 1 };
-            if (prop === 'moveTo') args[1] = { ...(args[1] as object), signal };
-            else if (String(prop) in signalIndex) args[signalIndex[String(prop)]] = signal;
+            if (prop === 'moveTo') {
+              const opts = args[1] as { signal?: AbortSignal } | undefined;
+              const caller = opts?.signal;
+              // 调用方（路段/父委托）信号与任务信号合并，而不是覆盖任一方：
+              // 任一取消都以其 reason 中止这次移动。落定后移除监听，长任务不累积。
+              const merged = caller && caller !== signal ? mergeAbortSignals(caller, signal) : null;
+              args[1] = { ...(opts as object), signal: merged?.signal ?? signal };
+              const pending = v.apply(t, args) as Promise<void>;
+              return merged ? pending.finally(merged.dispose) : pending;
+            }
+            if (String(prop) in signalIndex) args[signalIndex[String(prop)]] = signal;
             return v.apply(t, args);
           };
         }
@@ -469,6 +478,31 @@ export class Arbiter extends EventEmitter {
     t.controller.abort(reason);
     this.adapter.stopAll();
   }
+}
+
+/**
+ * 合并调用方信号与任务信号：任一方中止都以它的 reason 中止合并信号。
+ * `dispose` 移除来源监听；调用方在动作落定后调用，避免长任务上累积监听。
+ */
+function mergeAbortSignals(a: AbortSignal, b: AbortSignal) {
+  const controller = new AbortController();
+  const dispose = () => {
+    a.removeEventListener('abort', onAbort);
+    b.removeEventListener('abort', onAbort);
+  };
+  const onAbort = (event: Event) => {
+    dispose();
+    controller.abort((event.target as AbortSignal).reason);
+  };
+  a.addEventListener('abort', onAbort, { once: true });
+  b.addEventListener('abort', onAbort, { once: true });
+  // 装好监听后复核：任何在装监听前就已中止的来源都不会再派发事件。
+  const alreadyAborted = a.aborted ? a : b.aborted ? b : null;
+  if (alreadyAborted) {
+    dispose();
+    controller.abort(alreadyAborted.reason);
+  }
+  return { signal: controller.signal, dispose };
 }
 
 function originOfSource(source: TaskSource): TaskOrigin {
