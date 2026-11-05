@@ -1,0 +1,21 @@
+{
+  "package": {
+    "name": "curio-minecraft-3d-memory",
+    "version": "0.9.0"
+  },
+  "sourceHEAD": "9668ad49c2f37f96c0e3173a67a525dc5006fa67",
+  "artifactSHA256": "54e688590690a5cfc9ae36da1bbd977ecd7d47d2ca9a73334fd2cfe7053fd424",
+  "npmIntegrity": "sha512-e9XEI2kyb1/OyLq0N+dVsPeCNIm8aOMt44oW0l2jCGT0NZVxWVJQ1mi1pLa25NS8KZEUvodKjciXe8uYXQMK1w==",
+  "verification": {
+    "unitTests": {
+      "status": "PASS",
+      "command": "vitest run --exclude acceptance/**",
+      "passed": 955,
+      "failed": 0
+    },
+    "typecheck": "PASS",
+    "consumerRuntime": "PASS",
+    "consumerNodeNextTypes": "PASS"
+  },
+  "notes": "The 0.7.7 acceptance-runner scenarios (positive / early-release-pin / skip-final-checkpoint) were not re-run for 0.9.0 and are not claimed here. No real Minecraft/mineflayer integration was run for this artifact."
+}
