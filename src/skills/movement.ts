@@ -844,11 +844,12 @@ export const surface: Skill<{ timeoutMs?: number }> = {
     }
     const s = a.state();
     const at = `现在在 (${s.pos.x.toFixed(1)},${s.pos.y.toFixed(1)},${s.pos.z.toFixed(1)})，氧气 ${s.oxygen}/20`;
-    if (r.ok && r.landed) return ok(`上浮后已站稳干地，氧气 ${s.oxygen}/20`, { landed: true, surfaced: r.surfaced, pos: s.pos, oxygen: s.oxygen });
-    if (r.ok && r.surfaced) return ok(`结束时头已露出流体（氧气 ${s.oxygen}/20），还没上岸；松开控制后是否继续浮着、是否持续换气不保证`, { landed: false, surfaced: true, pos: s.pos, oxygen: s.oxygen });
+    const facts = { ...(r.goal ? { goal: r.goal } : {}), ...(r.stage ? { stage: r.stage } : {}), ...(r.enteredWater !== undefined ? { enteredWater: r.enteredWater } : {}) };
+    if (r.ok && r.landed) return ok(`上浮后已站稳干地，氧气 ${s.oxygen}/20`, { landed: true, surfaced: r.surfaced, pos: s.pos, oxygen: s.oxygen, ...facts });
+    if (r.ok && r.surfaced) return ok(`结束时头已露出流体（氧气 ${s.oxygen}/20），还没上岸；松开控制后是否继续浮着、是否持续换气不保证`, { landed: false, surfaced: true, pos: s.pos, oxygen: s.oxygen, ...facts });
     // 时间到只说明预算耗尽，不证明身体卡住，也不断言头一定没露出来；surfaced 以实际返回为准。
     const why = r.reason === 'WATER_ESCAPE_TIMEOUT' ? '上浮时间到，尚未确认完成' : r.reason === 'SWIM_NO_PROGRESS' ? '上浮没动' : r.reason;
     const code = r.reason === 'WATER_ESCAPE_TIMEOUT' ? 'TIMEOUT' : 'STUCK';
-    return fail(code, `${why}；${at}`, { landed: false, surfaced: r.surfaced, pos: s.pos, oxygen: s.oxygen, reason: r.reason });
+    return fail(code, `${why}；${at}`, { landed: false, surfaced: r.surfaced, pos: s.pos, oxygen: s.oxygen, reason: r.reason, ...facts });
   },
 };
