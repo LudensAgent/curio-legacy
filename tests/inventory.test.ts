@@ -260,7 +260,7 @@ test('inspect_inventory keeps separate same-name tools and readable potion, book
 });
 
 test('hold_item sourceSlot chooses a different same-name tool even when that name is already held or worn', async (t) => {
-  const adapter = new FakeAdapter(), ctx = makeCtx(adapter), calls: { item: string | null; to: string; sourceSlot?: number }[] = [];
+  const adapter = new FakeAdapter(), ctx = makeCtx(adapter), calls: { item: string | null; to: string; sourceSlot?: number; explicit?: boolean }[] = [];
   t.after(() => ctx.memory.close());
   const original = adapter.state();
   adapter.state = () => ({ ...original, held: 'diamond_pickaxe', equipment: [{ slot: 'head', name: 'diamond_helmet' }] });
@@ -270,8 +270,8 @@ test('hold_item sourceSlot chooses a different same-name tool even when that nam
   assert.equal(held.status, 'succeeded', held.summary);
   assert.equal(worn.status, 'succeeded', worn.summary);
   assert.deepEqual(calls, [
-    { item: 'diamond_pickaxe', to: 'hand', sourceSlot: 9 },
-    { item: 'diamond_helmet', to: 'head', sourceSlot: 10 },
+    { item: 'diamond_pickaxe', to: 'hand', sourceSlot: 9, explicit: true },
+    { item: 'diamond_helmet', to: 'head', sourceSlot: 10, explicit: true },
   ]);
 });
 

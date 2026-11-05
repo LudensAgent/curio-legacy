@@ -2199,7 +2199,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     });
   }
 
-  async equipItem(name: string | null, destination: 'hand' | 'off-hand' | 'head' | 'torso' | 'legs' | 'feet', signal: AbortSignal, opts: { sourceSlot?: number } = {}): Promise<ActionResult> {
+  async equipItem(name: string | null, destination: 'hand' | 'off-hand' | 'head' | 'torso' | 'legs' | 'feet', signal: AbortSignal, opts: { sourceSlot?: number; explicit?: boolean } = {}): Promise<ActionResult> {
     const check = this.actionCheckpoint(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
     await this.interactionReady();
@@ -2218,7 +2218,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         await this.syncInventory(check);
         const actual = destination === 'hand' ? b.heldItem : b.inventory.slots?.[slot];
         if (!actual) {
-          if (destination === 'hand') this.noteHandChoice(null);
+          if (destination === 'hand' && opts.explicit) this.noteHandChoice(null);
           return { ok: true };
         }
         return { ok: false, reason: 'UNEQUIP_NOT_CONFIRMED' };
@@ -2233,7 +2233,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       await this.syncInventory(check);
       const slot = this.bot.getEquipmentDestSlot?.(destination);
       const actual = destination === 'hand' ? this.bot.heldItem : this.bot.inventory.slots?.[slot];
-      if (destination === 'hand' && actual?.name === name) this.noteHandChoice(name);
+      if (destination === 'hand' && actual?.name === name && opts.explicit) this.noteHandChoice(name);
       return actual?.name === name && (opts.sourceSlot === undefined || JSON.stringify([actual.type, actual.metadata, actual.nbt ?? null]) === identity) ? { ok: true } : { ok: false, reason: 'EQUIP_NOT_CONFIRMED' };
     });
   }

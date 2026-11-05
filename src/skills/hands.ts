@@ -124,7 +124,7 @@ export const holdItem: Skill<{ item: string | null; to: Dest; slot?: number; sou
     if (args.item === null) {
       if (!adapter.equipItem) return fail('ERROR', '当前适配器没有装备接口');
       try {
-        const result = await adapter.equipItem(null, args.to, signal);
+        const result = await adapter.equipItem(null, args.to, signal, { explicit: true });
         if (!result.ok) return fail('ERROR', `清空${SLOT_ZH[args.to]}失败：${result.reason}`);
         const after = adapter.state();
         return ok(`${SLOT_ZH[args.to]}已清空`, { held: after.held, equipment: after.equipment });
@@ -147,7 +147,7 @@ export const holdItem: Skill<{ item: string | null; to: Dest; slot?: number; sou
         return ok(`${args.item} 放在快捷栏第 ${args.slot} 格并拿在主手`, { hotbar: adapter.state().hotbar });
       }
       if (!adapter.equipItem) return fail('ERROR', '当前适配器没有装备接口');
-      const r = await adapter.equipItem(args.item, args.to, signal, args.sourceSlot === undefined ? undefined : { sourceSlot: args.sourceSlot });
+      const r = await adapter.equipItem(args.item, args.to, signal, { ...(args.sourceSlot === undefined ? {} : { sourceSlot: args.sourceSlot }), explicit: true });
       if (!r.ok) return fail('ERROR', `把 ${args.item} 放到${SLOT_ZH[args.to]}失败：${r.reason}`);
       const after = adapter.state();
       const swapped = args.to !== 'hand' && worn && worn !== args.item ? `，换下的 ${worn} 回到背包` : '';

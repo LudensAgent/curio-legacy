@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { GameAdapter, Vec3Like } from '../src/adapter/types.ts';
@@ -183,4 +183,16 @@ test('WorldMemory：lastHand 立即落盘，重开仍能读回', (t) => {
   const b = new WorldMemory(file);
   assert.equal(b.lastHand(), 'stone_pickaxe');
   b.close();
+});
+
+test('WorldMemory：旧版自动换手写下的 lastHand 没有 explicit 标记，不当作它的选择', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'curio-hand-legacy-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, 'world-memory.json');
+  writeFileSync(file, JSON.stringify({ version: 4, lastHand: 'iron_pickaxe' }));
+  const m = new WorldMemory(file);
+  assert.equal(m.lastHand(), null, '旧版自动装备的记录不能恢复');
+  m.setLastHand('stone_pickaxe');
+  assert.equal(m.lastHand(), 'stone_pickaxe');
+  m.close();
 });

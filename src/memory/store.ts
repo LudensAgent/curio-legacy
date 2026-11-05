@@ -209,6 +209,8 @@ interface MemoryData {
   worldId: string;
   /** 它最后一次亲手拿到主手的东西（跨进程重启恢复；不替它重新挑工具） */
   lastHand?: string | null;
+  /** lastHand 是否来自“亲手选择”。旧版把自动换手也写进来，没有这个标记的值一律不恢复 */
+  lastHandExplicit?: boolean;
   preferences: Preference[];
   intents: Intent[];
   decisions: Decision[];
@@ -1367,10 +1369,11 @@ export class WorldMemory {
   // Durable choices, specifications and factual evidence are separate records.
   preferences(): Preference[] { return structuredClone(this.data.preferences); }
 
-  /** 最后一次亲手拿到主手的东西：重启/重连后由上层恢复，而不是让身体按“最快工具”重新挑 */
-  lastHand(): string | null { return this.data.lastHand ?? null; }
+  /** 最后一次亲手拿到主手的东西：重启/重连后由上层恢复，而不是让身体按“最快工具”重新挑。
+   *  只有带 explicit 标记的值才算；旧版自动换手写进来的值不能当它的选择。 */
+  lastHand(): string | null { return this.data.lastHandExplicit ? this.data.lastHand ?? null : null; }
   /** 立刻落盘：它刚换完手就可能重启，不能等 10 秒的周期 flush */
-  setLastHand(name: string | null) { this.data.lastHand = name; this.checkpoint(); }
+  setLastHand(name: string | null) { this.data.lastHand = name; this.data.lastHandExplicit = true; this.checkpoint(); }
   intents(): Intent[] { return structuredClone(this.data.intents); }
   decisions(): Decision[] { return structuredClone(this.data.decisions); }
   projects(): Project[] { return structuredClone(this.data.projects); }
