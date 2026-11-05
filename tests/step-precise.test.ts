@@ -1,106 +1,53 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { placeAt, primitiveSkills, stepTo } from '../src/skills/primitives.ts';
-import { DEFAULT_VISION, Vision } from '../src/perception/vision.ts';
-import { makeBridge } from '../src/codeskills/bridge.ts';
+import { stepTo } from '../src/skills/primitives.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx, observeAllBlocks } from './survival-helpers.ts';
 
-test('a downward step reports the selected support cell without revealing an unseen block', async (t) => {
+test('a downward step finds a safe lower landing without vision confirmation', async (t) => {
   const w = new FakeAdapter();
   w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.speed = 100000;
   w.removed.add('1,63,0');
   w.removed.add('1,62,0');
-  let seeFloor = false;
-  const ctx = makeCtx(w, { senses: { observeBlocks: (positions) => positions.filter((pos) => seeFloor || pos.y !== 62).map((pos) => ({
-    name: w.blockAt(pos), pos, properties: {}, worldId: w.worldId, sessionId: w.sessionId,
-    dimension: w.dim, observationId: 1, observedAt: Date.now(), source: 'vision' as const,
-  })) } });
-  t.after(() => ctx.memory.close());
-  const originalMove = w.moveTo.bind(w);
-  const move = t.mock.method(w, 'moveTo', async () => {});
-  const bridge = makeBridge(ctx);
-  const hidden = await bridge('stepTo', [1, 63, 0]) as { ok: boolean; summary: string; data: { landingSupport: { pos: unknown; observed: string | null } } };
-  assert.equal(hidden.ok, false);
-  assert.match(hidden.summary, /脚下 \(1,62,0\) 是 未看清的格子/);
-  assert.deepEqual(hidden.data.landingSupport, { pos: { x: 1, y: 62, z: 0 }, at: [0, -2, 1], placeAtInRange: true, observed: null, reference: 'observed' });
-  assert.doesNotMatch(hidden.summary, /超出 place_at/);
-  assert.match(hidden.summary, /脚部目标格 \[0,-1,1\] 须留空/);
-  assert.equal(move.mock.callCount(), 0);
-
-  seeFloor = true;
-  const visible = await stepTo.run(ctx, { at: [1, -1, 0], facing: 'E' });
-  assert.match(visible.summary, /脚下 \(1,62,0\) 是 air/);
-  assert.deepEqual(visible.data?.landingSupport, { pos: { x: 1, y: 62, z: 0 }, at: [1, -2, 0], placeAtInRange: true, observed: 'air', reference: 'observed' });
-  assert.doesNotMatch(visible.summary, /超出 place_at/);
-  // y=-2 的下一级支撑在 place_at 范围内：先显式补支撑，才可能迈下这一级。
-  assert.equal(placeAt.validate({ at: [1, -2, 0], facing: 'E', item: 'cobblestone' }, w).ok, true);
-  assert.equal(primitiveSkills.find((skill) => skill.name === 'place_at')!.validate({ xyz: [1, 62, 0], item: 'cobblestone' }, w).ok, true,
-    'the reported placement range also applies to absolute targets');
-  assert.equal(move.mock.callCount(), 0);
   w.inv.set('cobblestone', 1);
-  const placed = await placeAt.run(ctx, { at: [1, -2, 0], facing: 'E', item: 'cobblestone' });
-  assert.equal(placed.status, 'succeeded', placed.summary);
-  assert.equal(w.blockAt({ x: 1, y: 62, z: 0 }), 'cobblestone');
-  assert.equal(w.inv.get('cobblestone'), 0);
-  move.mock.mockImplementation(originalMove);
-  const descended = await stepTo.run(ctx, { at: [1, -1, 0], facing: 'E' });
-  assert.equal(descended.status, 'succeeded', descended.summary);
-  assert.deepEqual(w.pos, { x: 1.5, y: 63, z: 0.5 });
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const r = await stepTo.run(ctx, { at: [1, -1, 0], facing: 'E' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.deepEqual(w.pos, { x: 1.5, y: 62, z: 0.5 });
+  assert.match(r.summary, /下落 2 格/);
+  assert.equal(w.inv.get('cobblestone'), 1, 'walking does not spend blocks');
 });
 
-test('support feedback identifies the floor to fill while keeping the selected foot cell empty', async (t) => {
+test('step with explicit fill bridges a one-block gap and spends one block', async (t) => {
+  const w = new FakeAdapter();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.speed = 100000;
+  w.removed.add('0,63,-1'); // 一格空腔：目标格脚下是空气、再下面一格是实心
+  w.inv.set('cobblestone', 1);
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const r = await stepTo.run(ctx, { at: [1, 0, 0], facing: 'N', fill: 'cobblestone' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.deepEqual(w.pos, { x: 0.5, y: 64, z: -0.5 });
+  assert.equal(w.blockAt({ x: 0, y: 63, z: -1 }), 'cobblestone');
+  assert.equal(w.inv.get('cobblestone'), 0);
+});
+
+test('step without fill drops into a one-block gap without spending blocks', async (t) => {
   const w = new FakeAdapter();
   w.pos = { x: 0.5, y: 64, z: 0.5 };
   w.speed = 100000;
   w.removed.add('0,63,-1');
-  w.removed.add('0,62,-1');
   w.inv.set('cobblestone', 1);
-  const ctx = makeCtx(w, { senses: { observeBlocks: (positions) => positions.map((pos) => ({
-    name: w.blockAt(pos), pos, properties: {}, worldId: w.worldId, sessionId: w.sessionId,
-    dimension: w.dim, observationId: 1, observedAt: Date.now(), source: 'vision' as const,
-  })) } });
+  const ctx = makeCtx(w);
   t.after(() => ctx.memory.close());
-  const blocked = await stepTo.run(ctx, { at: [1, 0, 0], facing: 'N' });
-  assert.equal(blocked.status, 'failed');
-  assert.deepEqual(blocked.data?.landingSupport, { pos: { x: 0, y: 63, z: -1 }, at: [1, -1, 0], placeAtInRange: true, observed: 'air', reference: 'observed' });
-  assert.match(blocked.summary, /支撑格 \[1,-1,0\]；脚部目标格 \[1,0,0\] 须留空/);
-  assert.deepEqual(w.actions, [], 'reporting a missing floor does not move or spend blocks');
-  assert.equal(w.inv.get('cobblestone'), 1);
-  const placed = await placeAt.run(ctx, { at: [1, -1, 0], facing: 'N', item: 'cobblestone' });
-  assert.equal(placed.status, 'succeeded', placed.summary);
-  const wrongHeight = await stepTo.run(ctx, { at: [1, -1, 0], facing: 'N' });
-  assert.equal(wrongHeight.status, 'failed');
-  assert.match(wrongHeight.summary, /目标格是 cobblestone/);
-  const entered = await stepTo.run(ctx, { at: [1, 0, 0], facing: 'N' });
-  assert.equal(entered.status, 'succeeded', entered.summary);
-  assert.deepEqual(w.pos, { x: 0.5, y: 64, z: -0.5 });
-});
-
-test('step does not auto-fill a shallow air gap; it reports the missing support without spending blocks', async (t) => {
-  const w = new FakeAdapter();
-  w.pos = { x: 0.5, y: 64, z: 0.5 };
-  w.speed = 100000;
-  w.removed.add('0,63,-1'); // 浅坑：目标格脚下是空气、再下面一格是实心
-  w.inv.set('cobblestone', 1);
-  const ctx = makeCtx(w, { senses: { observeBlocks: (positions) => positions.map((pos) => ({
-    name: w.blockAt(pos), pos, properties: {}, worldId: w.worldId, sessionId: w.sessionId,
-    dimension: w.dim, observationId: 1, observedAt: Date.now(), source: 'vision' as const,
-  })) } });
-  t.after(() => ctx.memory.close());
-  const blocked = await stepTo.run(ctx, { at: [1, 0, 0], facing: 'N' });
-  assert.equal(blocked.status, 'failed', blocked.summary);
-  assert.equal(blocked.data?.movementNotAttempted, true);
-  assert.match(blocked.summary, /无已确认支撑/);
-  assert.deepEqual(w.actions, [], 'pure step must not place a scaffold or move');
-  assert.equal(w.inv.get('cobblestone'), 1, 'pure step must not spend blocks');
-  // 显式 place_at 之后，step 才迈得过去
-  const placed = await placeAt.run(ctx, { at: [1, -1, 0], facing: 'N', item: 'cobblestone' });
-  assert.equal(placed.status, 'succeeded', placed.summary);
-  const stepped = await stepTo.run(ctx, { at: [1, 0, 0], facing: 'N' });
-  assert.equal(stepped.status, 'succeeded', stepped.summary);
-  assert.deepEqual(w.pos, { x: 0.5, y: 64, z: -0.5 });
-  assert.equal(w.inv.get('cobblestone'), 0, 'the explicit place_at spends the block');
+  const r = await stepTo.run(ctx, { at: [1, 0, 0], facing: 'N' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.deepEqual(w.pos, { x: 0.5, y: 63, z: -0.5 });
+  assert.match(r.summary, /下落 1 格/);
+  assert.equal(w.inv.get('cobblestone'), 1, 'walking does not spend blocks');
 });
 
 test('step rejects partial diagonal movement and reports actual location', async (t) => {
@@ -132,40 +79,21 @@ test('step confirms position even when movement resolves or rejects', async (t) 
   await assert.rejects(stepTo.run(ctx, { at: [1, 0, 0], facing: 'E' }), { name: 'AbortedError' });
 });
 
-test('step looks at the selected obstruction without changing the target or digging', async (t) => {
+test('step auto-steps onto a one-block obstruction without looking or digging', async (t) => {
   const w = new FakeAdapter();
   w.pos = { x: 0.5, y: 64, z: 0.5 };
-  w.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 0 } });
-  let looked = false;
-  const ctx = makeCtx(w, { senses: { observeBlocks: (positions) => looked ? positions.map((pos) => ({
-    name: w.blockAt(pos), pos, properties: {}, worldId: w.worldId, sessionId: w.sessionId,
-    dimension: w.dim, observationId: 1, observedAt: Date.now(), source: 'vision' as const,
-  })) : [] } });
-  t.after(() => ctx.memory.close());
-  const look = t.mock.method(w, 'look', async () => { looked = true; });
-  const move = t.mock.method(w, 'moveTo', async () => {});
-  const dig = t.mock.method(w, 'dig', async () => ({ ok: true }));
-  const r = await stepTo.run(ctx, { at: [1, 0, 0], facing: 'E' });
-  assert.equal(r.status, 'failed');
-  assert.match(r.summary, /stone/);
-  assert.deepEqual(r.data?.targetCell, { x: 1, y: 64, z: 0 });
-  // 有界补看会对这次判定用到的几格各试一次（脚部目标/支撑/头格），不是只转头一次。
-  assert.ok(look.mock.callCount() >= 1 && look.mock.callCount() <= 6, `转头次数应有界，实际 ${look.mock.callCount()}`);
-  assert.equal(move.mock.callCount(), 0);
-  assert.equal(dig.mock.callCount(), 0);
-});
-
-test('step keeps an obstructed target unknown if looking does not reveal it', async (t) => {
-  const w = new FakeAdapter();
-  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.speed = 100000;
   w.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 0 } });
   const ctx = makeCtx(w, { senses: { observeBlocks: () => [] } });
   t.after(() => ctx.memory.close());
   const look = t.mock.method(w, 'look', async () => {});
+  const dig = t.mock.method(w, 'dig', async () => ({ ok: true }));
   const r = await stepTo.run(ctx, { at: [1, 0, 0], facing: 'E' });
-  assert.equal(r.status, 'failed');
-  assert.doesNotMatch(r.summary, /stone/);
-  assert.ok(look.mock.callCount() >= 1 && look.mock.callCount() <= 6, `转头次数应有界，实际 ${look.mock.callCount()}`);
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.deepEqual(r.data?.targetCell, { x: 1, y: 64, z: 0 });
+  assert.deepEqual(w.pos, { x: 1.5, y: 65, z: 0.5 });
+  assert.equal(look.mock.callCount(), 0, '不再靠转头补看');
+  assert.equal(dig.mock.callCount(), 0, '没有授权挖掘');
 });
 
 test('ladder step rejects a higher position in a different column', async (t) => {
@@ -197,131 +125,39 @@ test('water step does not claim to land on the selected bank when it lands adjac
   assert.deepEqual(r.data?.position, { x: 1.5, y: 64, z: 1.5 });
 });
 
-test('an upward step turns to confirm its own head space before moving', async (t) => {
+test('an upward step moves without turning to scan its own head space', async (t) => {
   const w = new FakeAdapter();
   w.pos = { x: 0.5, y: 64, z: 0.5 };
   w.speed = 100000;
   w.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 0 } }); // 目标脚格下方可站立的支撑
-  const vision = new Vision(w);
-  const ownHead = { x: 0, y: 66, z: 0 };
-  const observations: { positions: { x: number; y: number; z: number }[]; out: ReturnType<Vision['observeBlocks']> }[] = [];
-  const looks: { yaw: number; pitch: number }[] = [];
-  let sawOwnHead = false, ownHeadBeforeMove = false;
-  const ctx = makeCtx(w, { senses: {
-    refresh: () => vision.refresh(),
-    markSweep: () => vision.markSweep(),
-    observeBlocks: (positions) => {
-      const out = vision.observeBlocks(positions);
-      observations.push({ positions: positions.map((p) => ({ ...p })), out });
-      if (out.some((b) => b.pos.x === ownHead.x && b.pos.y === ownHead.y && b.pos.z === ownHead.z)) sawOwnHead = true;
-      return out;
-    },
-  } });
+  const ctx = makeCtx(w, { senses: { observeBlocks: () => [] } });
   t.after(() => ctx.memory.close());
-  assert.deepEqual(vision.observeBlocks([ownHead]), [], 'own head starts outside the actual view cone');
-  const originalLook = w.look.bind(w);
-  t.mock.method(w, 'look', async (yaw: number, pitch: number) => {
-    looks.push({ yaw, pitch });
-    return originalLook(yaw, pitch);
-  });
-  const moves: unknown[] = [];
-  const originalMove = w.moveTo.bind(w);
-  t.mock.method(w, 'moveTo', async (target, opts) => {
-    ownHeadBeforeMove = sawOwnHead;
-    moves.push(target);
-    return originalMove(target, opts);
-  });
+  const look = t.mock.method(w, 'look', async () => {});
+  const dig = t.mock.method(w, 'dig', async () => ({ ok: true }));
   const r = await stepTo.run(ctx, { at: [1, 1, 0], facing: 'E' });
   assert.equal(r.status, 'succeeded', r.summary);
   assert.deepEqual(r.data?.targetCell, { x: 1, y: 65, z: 0 });
   assert.deepEqual(w.pos, { x: 1.5, y: 65, z: 0.5 });
-  assert.equal(moves.length, 1, 'the step moved once to the selected cell');
-  assert.ok(sawOwnHead, 'the step actually observed its own overhead cell');
-  assert.ok(ownHeadBeforeMove, 'that observation happened before movement');
-  assert.ok(looks.some((l) => l.pitch > 1.2), 'the step turned upward to look at its own head space');
-  const read = observations.find((o) => o.positions.length === 1 && o.positions[0].x === ownHead.x && o.positions[0].y === ownHead.y && o.positions[0].z === ownHead.z);
-  assert.ok(read, 'the upward turn was followed by a bounded reread of that cell');
-  assert.deepEqual(read.out.map((b) => b.name), ['air']);
-  assert.deepEqual(w.actions.filter((a) => a.startsWith('dig')), []);
-});
-
-test('an upward step stays unknown when the overhead turn reveals nothing', async (t) => {
-  const w = new FakeAdapter();
-  w.pos = { x: 0.5, y: 64, z: 0.5 };
-  w.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 0 } });
-  const vision = new Vision(w);
-  const ownHead = { x: 0, y: 66, z: 0 };
-  const observations: { positions: { x: number; y: number; z: number }[]; out: ReturnType<Vision['observeBlocks']> }[] = [];
-  const ctx = makeCtx(w, { senses: {
-    refresh: () => vision.refresh(),
-    markSweep: () => vision.markSweep(),
-    observeBlocks: (positions) => {
-      const out = vision.observeBlocks(positions);
-      observations.push({ positions: positions.map((p) => ({ ...p })), out });
-      return out;
-    },
-  } });
-  t.after(() => ctx.memory.close());
-  assert.deepEqual(vision.observeBlocks([ownHead]), [], 'own head starts outside the actual view cone');
-  let overheadLookAttempted = false;
-  const originalLook = w.look.bind(w);
-  t.mock.method(w, 'look', async (yaw: number, pitch: number) => {
-    if (pitch > 1.2) { overheadLookAttempted = true; return; } // 只压制竖直头顶这一转，其余目标转头照常生效
-    return originalLook(yaw, pitch);
-  });
-  const move = t.mock.method(w, 'moveTo', async () => {});
-  const dig = t.mock.method(w, 'dig', async () => ({ ok: true }));
-  const r = await stepTo.run(ctx, { at: [1, 1, 0], facing: 'E' });
-  assert.equal(r.status, 'failed');
-  assert.equal(r.failureCode, 'PATH_NOT_FOUND');
-  assert.match(r.summary, /未看清的格子/);
-  assert.match(r.summary, /无法确认跳跃空间/);
-  assert.ok(overheadLookAttempted, 'the step actually tried to turn upward');
-  const read = observations.find((o) => o.positions.length === 1 && o.positions[0].x === ownHead.x && o.positions[0].y === ownHead.y && o.positions[0].z === ownHead.z);
-  assert.ok(read, 'the step reread its own head cell after the turn');
-  assert.deepEqual(read.out, [], 'actual Vision still returns nothing for it');
-  assert.equal(move.mock.callCount(), 0);
+  assert.equal(look.mock.callCount(), 0, '不再转头补看');
   assert.equal(dig.mock.callCount(), 0);
-  assert.deepEqual(w.actions, []);
-  assert.doesNotMatch(r.summary, /头顶上方是 (air|stone)/);
 });
 
-test('an observed solid overhead blocker stops the upward step with its actual name', async (t) => {
+test('a real overhead blocker still stops an upward step without naming unobserved blocks', async (t) => {
   const w = new FakeAdapter();
   w.pos = { x: 0.5, y: 64, z: 0.5 };
   w.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 0 } });
-  w.blocks.push({ name: 'stone', pos: { x: 0, y: 66, z: 0 } }); // 只有转头后才会进入实际视野的头顶实心块
-  // 收窄水平视锥：目标列抬头时不会顺带看到头顶块的近角，必须单独竖直转头才能看见。
-  const vision = new Vision(w, { ...DEFAULT_VISION, hFov: 60 });
-  const ownHead = { x: 0, y: 66, z: 0 };
-  const observations: { positions: { x: number; y: number; z: number }[]; out: ReturnType<Vision['observeBlocks']> }[] = [];
-  const ctx = makeCtx(w, { senses: {
-    refresh: () => vision.refresh(),
-    markSweep: () => vision.markSweep(),
-    observeBlocks: (positions) => {
-      const out = vision.observeBlocks(positions);
-      observations.push({ positions: positions.map((p) => ({ ...p })), out });
-      return out;
-    },
-  } });
+  w.blocks.push({ name: 'stone', pos: { x: 0, y: 66, z: 0 } }); // 自己头顶的实心块
+  const ctx = makeCtx(w, { senses: { observeBlocks: () => [] } });
   t.after(() => ctx.memory.close());
-  assert.deepEqual(vision.observeBlocks([ownHead]), [], 'own head starts outside the actual view cone');
-  let turnedUp = false;
-  const originalLook = w.look.bind(w);
-  t.mock.method(w, 'look', async (yaw: number, pitch: number) => {
-    if (pitch > 1.2) turnedUp = true;
-    return originalLook(yaw, pitch);
-  });
+  const look = t.mock.method(w, 'look', async () => {});
   const move = t.mock.method(w, 'moveTo', async () => {});
   const dig = t.mock.method(w, 'dig', async () => ({ ok: true }));
   const r = await stepTo.run(ctx, { at: [1, 1, 0], facing: 'E' });
   assert.equal(r.status, 'failed');
   assert.equal(r.failureCode, 'PATH_NOT_FOUND');
-  assert.match(r.summary, /头顶上方是 stone/);
-  assert.ok(turnedUp, 'the step turned toward its own head before reporting the blocker');
-  const read = observations.find((o) => o.positions.length === 1 && o.positions[0].x === ownHead.x && o.positions[0].y === ownHead.y && o.positions[0].z === ownHead.z);
-  assert.ok(read, 'the step reread its own head cell after the turn');
-  assert.deepEqual(read.out.map((b) => b.name), ['stone']);
+  assert.match(r.summary, /头顶上方是 实心方块/);
+  assert.doesNotMatch(r.summary, /stone/);
+  assert.equal(look.mock.callCount(), 0, '不再靠转头才知道头顶被挡');
   assert.equal(move.mock.callCount(), 0);
   assert.equal(dig.mock.callCount(), 0);
   assert.deepEqual(w.actions, []);

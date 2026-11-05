@@ -40,18 +40,16 @@ test('moveTo 停在整数格（不是半砖真实脚高）时不报到达', asyn
   assert.match(r.summary, /脚高 64\.00 与目标脚高 64\.50 不符/);
 });
 
-test('上半砖占住目标格：平走被挡，不能把半格顶面当成自己这格能站', async (t) => {
+test('上半砖不再当成挡路格：按实际顶面自动迈上一格', async (t) => {
   const w = level(new TestWorld());
   w.setBlock({ x: 0, y: 64, z: -1 }, 'oak_slab');
   w.blockProperties.set('0,64,-1', { type: 'top' });
   const c = ctx(w);
   t.after(() => c.memory.close());
-  const move = t.mock.method(w, 'moveTo', async () => {});
+  const move = t.mock.method(w, 'moveTo', async () => { w.pos = { x: 0.5, y: 65, z: -0.5 }; });
   const r = await stepTo.run(c, { at: [1, 0, 0], facing: 'N' });
-  assert.equal(r.status, 'failed', r.summary);
-  assert.equal(r.failureCode, 'PATH_NOT_FOUND');
-  assert.match(r.summary, /目标格是 oak_slab/);
-  assert.equal(move.mock.callCount(), 0);
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(move.mock.callCount(), 1);
 });
 
 test('脚高 64、头格 65 有下半砖时身体会撞到，不能只查终点净空', async (t) => {
@@ -165,19 +163,17 @@ test('绝对 step xyz 也能沿梯子往上爬（与相对 [0,1,0] 一致）', a
   assert.equal(r.status, 'succeeded', r.summary);
 });
 
-test('半砖净空要确认三层：逐个补看直到看清，不只补看第一个未知格', async (t) => {
+test('步行的身体净空按已加载方块判断，不再为每格做补看', async (t) => {
   const w = level(new TestWorld());
   w.setBlock({ x: 0, y: 64, z: -1 }, 'oak_slab');
   w.blockProperties.set('0,64,-1', { type: 'bottom' });
-  const revealed = new Set<string>();
-  const revealQueue = ['0,64,-1', '0,65,-1', '0,66,-1'];
-  const c = makeCtx(w, { senses: { observeBlocks: (positions) => positions.filter((p) => revealed.has(`${p.x},${p.y},${p.z}`)).map((p) => ({ name: w.blockAt(p) ?? 'air', pos: p, properties: w.blockStateAt?.(p)?.properties ?? {}, worldId: w.worldId, sessionId: w.sessionId, dimension: w.dim, observationId: 1, observedAt: Date.now(), source: 'vision' as const })) } });
+  const c = makeCtx(w);
   t.after(() => c.memory.close());
-  const look = t.mock.method(w, 'look', async () => { const next = revealQueue.shift(); if (next) revealed.add(next); });
+  const look = t.mock.method(w, 'look', async () => {});
   t.mock.method(w, 'moveTo', async () => { w.pos = { x: 0.5, y: 64.5, z: -0.5 }; });
   const r = await stepTo.run(c, { at: [1, 0, 0], facing: 'N' });
   assert.equal(r.status, 'succeeded', r.summary);
-  assert.ok(look.mock.callCount() >= 2, `补看了 ${look.mock.callCount()} 次，应不止一次`);
+  assert.equal(look.mock.callCount(), 0, '迈步不再转头补看周边');
 });
 
 test('平走到耕地（0.0625 落差）停在原平台不报成功', async (t) => {

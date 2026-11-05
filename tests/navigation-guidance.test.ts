@@ -14,29 +14,21 @@ const start = () => {
   return adapter;
 };
 
-test('goto follows observed short waypoints and reports its verified final position', async (t) => {
+test('goto sends pathfinder straight to the target without vision waypoints', async (t) => {
   const adapter = start();
-  const points = [4.5, 8.5, 10.5].map((x) => ({ x, y: 64, z: 0.5 }));
   const moves: MoveTarget[] = [];
-  const ctx = makeCtx(adapter, { senses: { navigationWaypoint: (target, maxDistance, excluded) => {
-    assert.deepEqual(target, { x: 10, y: 64, z: 0 });
-    assert.equal(maxDistance, 12);
-    assert.ok(excluded.length >= 1);
-    return points[moves.length] ?? null;
-  } } });
+  const ctx = makeCtx(adapter, { senses: { navigationWaypoint: () => { throw new Error('vision waypoint must not be used for walking'); } } });
   t.after(() => ctx.memory.close());
   t.mock.method(adapter, 'moveTo', async (target, opts) => {
     moves.push(target);
     assert.equal(opts.allowTerrainChanges, undefined);
     assert.equal(target.kind, 'near');
-    if (target.kind === 'near') { assert.equal(target.range, 0.7); adapter.pos = { ...target.pos }; }
+    if (target.kind === 'near') adapter.pos = { ...target.pos };
   });
   const result = await goTo.run(ctx, { target: '10,64,0' });
   assert.equal(result.status, 'succeeded', result.summary);
-  assert.equal(moves.length, 3);
-  assert.deepEqual(result.data?.position, points[2]);
-  assert.deepEqual(adapter.pos, points[2]);
-  assert.ok(Math.hypot(Math.floor(adapter.pos.x) - 10, Math.floor(adapter.pos.z)) <= 1);
+  assert.equal(moves.length, 1);
+  assert.deepEqual(adapter.pos, { x: 10, y: 64, z: 0 });
 });
 
 test('a pathfinder resolution without movement cannot claim arrival', async (t) => {
@@ -51,29 +43,24 @@ test('a pathfinder resolution without movement cannot claim arrival', async (t) 
   assert.deepEqual(result.data?.position, adapter.pos);
 });
 
-test('an observed closed wooden door is opened without digging before walking through', async (t) => {
+test('goto walks through a closed wooden door via the pathfinder, without digging', async (t) => {
   const adapter = start(), door = { x: 2, y: 64, z: 0 };
   adapter.setBlock(door, 'oak_door');
   adapter.blockProperties.set('2,64,0', { open: false, half: 'lower' });
-  let opened = false;
-  const ctx = makeCtx(adapter, { senses: {
-    knownBlocks: (names) => names.includes('oak_door') ? [{ name: 'oak_door', pos: door, dist: 2 }] : [],
-    navigationWaypoint: () => opened ? { x: 6.5, y: 64, z: 0.5 } : null,
-  } });
+  const ctx = makeCtx(adapter);
   t.after(() => ctx.memory.close());
-  t.mock.method(adapter, 'resolveBlockNames', (name) => name === 'door' ? ['oak_door', 'iron_door'] : [name]);
   t.mock.method(adapter, 'moveTo', async (target) => {
-    if (target.kind === 'near' && target.range < 1) adapter.pos = { ...target.pos };
+    // Installed Pathfinder opens the door as part of walking; emulate that here.
+    if (target.kind === 'near') {
+      adapter.blockProperties.set('2,64,0', { open: true, half: 'lower' });
+      adapter.pos = { ...target.pos };
+    }
   });
-  const use = t.mock.method(adapter, 'useBlockAt', async (pos, item) => {
-    assert.deepEqual(pos, door); assert.equal(item, '');
-    opened = true; adapter.blockProperties.set('2,64,0', { open: true, half: 'lower' });
-    return { ok: true };
-  });
+  const use = t.mock.method(adapter, 'useBlockAt', async () => { throw new Error('door should not be toggled separately'); });
   const dig = t.mock.method(adapter, 'dig', async () => { throw new Error('walking must not dig'); });
   const result = await goTo.run(ctx, { target: '6,64,0' });
   assert.equal(result.status, 'succeeded', result.summary);
-  assert.equal(use.mock.callCount(), 1);
+  assert.equal(use.mock.callCount(), 0);
   assert.equal(dig.mock.callCount(), 0);
   assert.equal(adapter.blockAt(door), 'oak_door');
 });
@@ -144,23 +131,16 @@ test('real wooden-door state shapes reveal ground through an opened narrow doorw
   assert.ok(open && open.x > 3, 'open door geometry exposes a real foothold inside');
 });
 
-test('goto does not toggle a door again when the native approach has already opened it', async (t) => {
+test('goto does not toggle a door again when the pathfinder already opened it', async (t) => {
   const adapter = start(), door = { x: 2, y: 64, z: 0 };
   adapter.setBlock(door, 'oak_door');
   adapter.blockProperties.set('2,64,0', { open: false, half: 'lower' });
-  let opened = false;
-  const ctx = makeCtx(adapter, { senses: {
-    knownBlocks: (names) => names.includes('oak_door') ? [{ name: 'oak_door', pos: door, dist: 2 }] : [],
-    navigationWaypoint: () => opened ? { x: 6.5, y: 64, z: 0.5 } : null,
-  } });
+  const ctx = makeCtx(adapter);
   t.after(() => ctx.memory.close());
-  t.mock.method(adapter, 'resolveBlockNames', (name) => name === 'door' ? ['oak_door'] : [name]);
   t.mock.method(adapter, 'moveTo', async (target) => {
     if (target.kind !== 'near') return;
-    if (target.range >= 1) {
-      opened = true;
-      adapter.blockProperties.set('2,64,0', { open: true, half: 'lower' });
-    } else adapter.pos = { ...target.pos };
+    adapter.blockProperties.set('2,64,0', { open: true, half: 'lower' });
+    adapter.pos = { ...target.pos };
   });
   const use = t.mock.method(adapter, 'useBlockAt', async () => { throw new Error('door would close again'); });
   const result = await goTo.run(ctx, { target: '6,64,0' });
@@ -234,19 +214,17 @@ test('with no visible way forward, remembered footprints lead back along the pat
   assert.notDeepEqual(excluded, back, 'a footprint that failed is skipped');
 });
 
-test('goto falls back to remembered footprints when nothing visible leads toward the target', async (t) => {
+test('goto walks directly even when only remembered footprints exist', async (t) => {
   const adapter = start();
   adapter.pos = { x: 20.5, y: 64, z: 0.5 };
-  const trail = [{ x: 12.5, y: 64, z: 0.5 }, { x: 4.5, y: 64, z: 0.5 }];
   const ctx = makeCtx(adapter, { senses: {
     navigationWaypoint: () => null,
-    rememberedWaypoint: (target: Vec3Like, _max: number, excluded: Vec3Like[]) => trail.find((p) => !excluded.some((e) => Math.hypot(e.x - p.x, e.z - p.z) < 1.5)
-      && Math.hypot(p.x - target.x, p.z - target.z) < Math.hypot(adapter.pos.x - target.x, adapter.pos.z - target.z) - 1) ?? null,
+    rememberedWaypoint: () => { throw new Error('remembered footprints must not gate walking'); },
   } });
   t.after(() => ctx.memory.close());
   const moves: MoveTarget[] = [];
   t.mock.method(adapter, 'moveTo', async (target: MoveTarget) => { moves.push(target); if (target.kind === 'near') adapter.pos = { ...target.pos }; });
   const result = await goTo.run(ctx, { target: '4,64,0' });
   assert.equal(result.status, 'succeeded', result.summary);
-  assert.deepEqual(moves.map((m) => m.kind === 'near' ? m.pos.x : null), [12.5, 4.5], 'walked back along the remembered trail');
+  assert.deepEqual(moves.map((m) => m.kind === 'near' ? m.pos.x : null), [4], 'pathfinder goes straight to the target');
 });

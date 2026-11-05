@@ -50,6 +50,7 @@ test('blocked steps identify the target without claiming that the body reached i
   const { world, ctx } = setup();
   t.after(() => ctx.memory.close());
   world.setBlock({ x: 0, y: 64, z: -1 }, 'stone');
+  world.setBlock({ x: 0, y: 65, z: -1 }, 'stone');
   const parsed = step.validate({ to: [1, 0, 0], facing: 'N' }, world);
   assert.ok(parsed.ok);
   const result = await step.run(ctx, parsed.args);

@@ -262,7 +262,7 @@ test('follow_passage cancellation preserves the measured partial position and it
   assert.ok((partial.nav.trace as unknown[]).length >= 2);
 });
 
-test('goto cannot use old passage points to bypass missing visual navigation', async (t) => {
+test('goto tries pathfinder even when vision exposes no waypoint', async (t) => {
   const w = new TestWorld();
   w.pos = { x: 0.5, y: 40, z: 0.5 };
   const ctx = makeCtx(w, { senses: { navigationWaypoint: () => null, rememberedWaypoint: () => null } });
@@ -272,9 +272,6 @@ test('goto cannot use old passage points to bypass missing visual navigation', a
   const move = t.mock.method(w, 'moveTo', w.moveTo.bind(w));
 
   const result = await goTo.run(ctx, { target: '12,40,12' });
-  assert.equal(result.status, 'failed');
-  assert.equal(result.failureCode, 'PATH_NOT_FOUND');
-  assert.match(result.summary, /眼前没有可确认的通路/);
-  assert.equal(move.mock.callCount(), 0);
-  assert.deepEqual(result.data?.position, { x: 0.5, y: 40, z: 0.5 });
+  assert.ok(move.mock.callCount() >= 1, 'no visual waypoint must not prevent a pathfinder attempt');
+  assert.equal(result.status, 'succeeded', result.summary);
 });

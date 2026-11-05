@@ -81,7 +81,8 @@ test('原子动作如实回报做不到的原因，不替模型做决定', async
   t.after(() => ctx.memory.close());
   const step = await stepTo.run(ctx, { at: [1, 0, 0], facing: 'N' });
   assert.equal(step.status, 'failed');
-  assert.match(step.summary, /目标格是 未看清的格子/, 'physical obstruction does not identify an unobserved block');
+  assert.match(step.summary, /实心方块/, 'physical obstruction stays unnamed when it was not observed');
+  assert.doesNotMatch(step.summary, /stone/);
   ctx.senses.observeBlocks = visibleTargets(w);
   w.blocks.push({ name: 'water', pos: { x: 0, y: 62, z: -1 } });
   const wet = await digAt.run(ctx, { at: [1, 1, 0], facing: 'N' });
@@ -137,25 +138,32 @@ test('原子动作认模型常用的几种坐标写法：at / to / pos、字符�
   assert.ok(!bad.ok && /"at":\[前,上,右\]/.test(bad.error));
 });
 
-test('step 保持指定高度，显式选择下一级才下行，也能踩上厚雪', async (t) => {
+test('step 允许 1–4 格安全落差，5 格以上才拒绝，也能踩上厚雪', async (t) => {
   const w = new FakeAdapter();
   w.pos = { x: 0.5, y: 64, z: 0.5 };
   (w as any).removed.add('0,63,-1');
   const ctx = makeCtx(w, { senses: { observeBlocks: observeAllBlocks(w) } });
   t.after(() => ctx.memory.close());
-  const move = t.mock.method(w, 'moveTo', w.moveTo.bind(w));
   const r = await stepTo.run(ctx, { at: [1, 0, 0], facing: 'N' });
-  assert.equal(r.status, 'failed');
-  assert.equal(r.failureCode, 'PATH_NOT_FOUND');
-  assert.equal(move.mock.callCount(), 0, '无目标高度支撑时不向低处改选落点');
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.deepEqual(w.pos, { x: 0.5, y: 63, z: -0.5 });
+  assert.match(r.summary, /下落 1 格/);
+
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
   (w as any).removed.add('0,62,-1');
   const deeper = await stepTo.run(ctx, { at: [1, -1, 0], facing: 'N' });
-  assert.equal(deeper.failureCode, 'PATH_NOT_FOUND', '指定下一级也不能自动改成下两级');
-  assert.equal(move.mock.callCount(), 0);
-  (w as any).removed.delete('0,62,-1');
-  const down = await stepTo.run(ctx, { at: [1, -1, 0], facing: 'N' });
-  assert.equal(down.status, 'succeeded', down.summary);
-  assert.equal(Math.floor(w.pos.y), 63);
+  assert.equal(deeper.status, 'succeeded', deeper.summary);
+  assert.deepEqual(w.pos, { x: 0.5, y: 62, z: -0.5 });
+  assert.match(deeper.summary, /下落 2 格/);
+
+  const w3 = new FakeAdapter();
+  w3.pos = { x: 0.5, y: 64, z: 0.5 };
+  for (const y of [63, 62, 61, 60, 59]) (w3 as any).removed.add(`0,${y},-1`);
+  const ctx3 = makeCtx(w3, { senses: { observeBlocks: observeAllBlocks(w3) } });
+  t.after(() => ctx3.memory.close());
+  const tooDeep = await stepTo.run(ctx3, { at: [1, 0, 0], facing: 'N' });
+  assert.equal(tooDeep.status, 'failed', tooDeep.summary);
+  assert.equal(tooDeep.data?.movementNotAttempted, true);
 
   const w2 = new FakeAdapter();
   w2.pos = { x: 0.5, y: 64, z: 0.5 };

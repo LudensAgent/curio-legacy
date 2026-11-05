@@ -13,7 +13,7 @@ test('step 拒绝空腔时给出下一落点和支撑格的世界坐标', async 
   const r = await stepTo.run(c, { at: [1, 1, 0], facing: 'N' });
   assert.equal(r.status, 'failed', r.summary);
   assert.match(r.summary, /目标格脚下 \(0,64,-1\) 是 air/);
-  assert.match(r.summary, /支撑格 \[1,0,0\]/);
+  assert.match(r.summary, /要补支撑就是 \[1,0,0\]/);
   const support = r.data?.landingSupport as { pos: unknown; at: unknown; observed: unknown } | undefined;
   assert.deepEqual(support?.pos, { x: 0, y: 64, z: -1 });
   assert.deepEqual(support?.at, [1, 0, 0]);

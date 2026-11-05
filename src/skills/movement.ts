@@ -235,7 +235,7 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
 // ------------------------------------------------------------------ goto
 export const goTo: Skill<{ target: string; dig?: boolean; place?: boolean; tower?: boolean; sprint?: boolean; avoid?: string[]; lead?: string; headingOrigin?: Vec3Like }> = {
   name: 'goto',
-  description: '步行去地标或坐标；普通步行按可见或近期亲历的落脚点引导，明确三维坐标尽量进入指定格，进不去时停在相邻格并说明差多少。完成条件：坐标按指定格精确验收（相邻格只算部分进展，arrived:false），地标/方向按目标附近 2 格验收；后端 pathfinder。遇到已观察的木门会开门。默认不挖墙、不放方块；dig:true 兼容旧行为，允许挖掘、垫路，并默认允许原地搭柱爬坡（可 tower:false 关闭）。place:false 可禁止放置，tower:false 可禁止原地搭柱；也可单独设 place:true 授权垫路、tower:true 授权搭柱。搭建消耗方块，可能在水面架桥。lead 可带指定生物走。',
+  description: '步行去地标或坐标；直接交给寻路按真实方块判断台阶、绕行和最多 4 格安全落差，不再先用视线挑选“看得见的落脚点”。明确三维坐标尽量进入指定格，进不去时停在相邻格并说明差多少。完成条件：坐标按指定格精确验收（相邻格只算部分进展，arrived:false），地标/方向按目标附近 2 格验收；后端 pathfinder。遇到木门会开门。默认不挖墙、不放方块；dig:true 兼容旧行为，允许挖掘、垫路，并默认允许原地搭柱爬坡（可 tower:false 关闭）。place:false 可禁止放置，tower:false 可禁止原地搭柱；也可单独设 place:true 授权垫路、tower:true 授权搭柱。搭建消耗方块，可能在水面架桥。lead 可带指定生物走。',
   argsDoc: '{"target":"<地标、坐标或方向如 E 200>" 或 {"x":数字,"y":数字,"z":数字}, "dig"?:boolean, "place"?:boolean（允许垫路，默认继承 dig）, "tower"?:boolean（允许原地搭柱；dig:true 时默认开启，可 tower:false 关闭）, "sprint"?:boolean, "avoid"?:["方块名"], "lead"?:"生物名"}；方向写法单次最多 200 格，超出会明确拒绝而不是缩短目标',
   timeoutMs: 600000,
   movement: true,
@@ -500,8 +500,7 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
       return `；沿途垫了 ${placed} 块（${used.map(([n, d]) => `${n}×${d}`).join('、') || '—'}）${onBridge ? '，现在脚下是垫在水上的方块、四周是水——这一路多半是在水面上架桥，不是陆地' : ''}`;
     };
     const startDist = distance(s.pos), alreadyHere = arrived(s.pos);
-    const visited: Vec3Like[] = [s.pos];
-    let bestDistance = startDist, detours = 0, memoryHops = 0;
+    let bestDistance = startDist, detours = 0;
     const prog = setInterval(() => ctx.progress(1 - Math.min(1, distance(adapter.state().pos) / Math.max(1, startDist))), 1000);
     // 稀疏历史脚点不是当前连通路线；本次只围绕指定目标选择落脚点。
     try {
@@ -509,7 +508,6 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
       for (let hops = 0; !arrived(adapter.state().pos) && hops < (args.lead ? 400 : 160); hops++) {
         if (!inScope()) return fail('WRONG_DIMENSION', '途中世界或会话已改变，需要重新规划');
         if (Date.now() >= ctx.deadline) return fail('TIMEOUT', '步行时间已用完，按当前位置重新选择路线');
-        await face();
         const cur = adapter.state().pos;
         // 带着走：每一小段之前先看它跟上没有，掉队就停下等；等不来就说清楚它最后在哪
         if (args.lead) {
@@ -529,25 +527,10 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
           if (f.dist > LEAD_CLOSE) { leadWaited++; if (leadWaited >= 3) return fail('TARGET_GONE', `带着走的 ${args.lead} 一直落在 ${f.dist.toFixed(0)} 格外不肯跟（手里拿的是 ${adapter.state().held ?? '空手'}）；人在 (${cur.x.toFixed(1)},${cur.y.toFixed(1)},${cur.z.toFixed(1)})，离目标还有 ${distance(cur).toFixed(0)} 格`, { ...measured(cur), lead: args.lead, leadPos: f.pos }); }
           else leadWaited = 0;
         }
-        // dig：不找“看得见的落脚点”，直接让寻路朝目标走，挡路的土石挖开、坡坎垫方块（真人赶路也是这样）
-        let waypoint = args.dig || allowPlace || args.lead ? null : ctx.senses.navigationWaypoint?.(pos, 12, visited);
-        let fromMemory = false;
-        if (ctx.senses.navigationWaypoint && !waypoint && !args.dig && !allowPlace && !args.lead) {
-          if (await tryDoor()) continue;
-          await glance(ctx);
-          if (ctx.senses.navigationWaypoint(pos, 12, visited)) continue;
-          // 眼前找不到路：像人一样沿着来时走过的地方往回挪（只用亲身站过的位置）
-          const remembered = memoryHops < 12 ? ctx.senses.rememberedWaypoint?.(pos, 24, visited) : null;
-          if (remembered) { waypoint = remembered; fromMemory = true; memoryHops++; }
-        }
-        if (ctx.senses.navigationWaypoint && !waypoint && !args.dig && !allowPlace && !args.lead) {
-          const water = waterNear();
-          return fail('PATH_NOT_FOUND', `前往 ${label}：眼前没有可确认的${water ? '陆地落脚点，附近有水' : '通路'}；没有挖墙或搭柱（可加 place:true 或 dig:true 授权垫路）`, { ...measured(cur), waterAhead: water });
-        }
+        // 不再先用视线挑选“看得见的落脚点”：直接让寻路朝目标走。寻路按真实方块判断台阶、绕行和
+        // 最多 4 格安全落差；只有显式 dig/place 授权时才挖/垫。眼前看不到路不等于走不过去。
         const dxz = Math.hypot(pos.x - cur.x, pos.z - cur.z);
-        const target = waypoint ? { kind: 'near' as const, pos: waypoint, range: fromMemory ? 1.2 : 0.7 }
-          // 带着走：一次只挪几格，免得把它甩开
-          : args.lead && dxz > LEAD_HOP ? { kind: 'xz' as const, x: cur.x + (pos.x - cur.x) * LEAD_HOP / dxz, z: cur.z + (pos.z - cur.z) * LEAD_HOP / dxz, range: 1.5 }
+        const target = args.lead && dxz > LEAD_HOP ? { kind: 'xz' as const, x: cur.x + (pos.x - cur.x) * LEAD_HOP / dxz, z: cur.z + (pos.z - cur.z) * LEAD_HOP / dxz, range: 1.5 }
           : dxz > 32 ? { kind: 'xz' as const, x: cur.x + (pos.x - cur.x) * 24 / dxz, z: cur.z + (pos.z - cur.z) * 24 / dxz, range: 2 }
           : flat ? { kind: 'xz' as const, x: pos.x, z: pos.z, range } : { kind: 'near' as const, pos, range };
         try {
@@ -556,14 +539,11 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
           record();
           if (isAbort(e) || (e as Error).name === 'PillarClearanceError') throw e;
           if (await tryDoor()) continue;
-          // 记忆里的落脚点走不过去（被挡住、地形变了）：记下，换下一个
-          if (fromMemory) { visited.push(waypoint!); continue; }
           throw e;
         }
         if (!inScope()) return fail('WRONG_DIMENSION', '途中世界或会话已改变，需要重新规划');
         const after = adapter.state().pos;
         record();
-        if (fromMemory && dist3(cur, after) < 0.3 && !arrived(after)) { visited.push(waypoint!); continue; }
         if (arrived(after)) continue;
         if (dist3(cur, after) < 0.3 && !arrived(after)) {
           if (nextTo(after)) return failedNear(after, '没有取得进展');
@@ -573,7 +553,6 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
         }
         if (distance(after) < bestDistance - 0.5) { bestDistance = distance(after); detours = 0; }
         else if (++detours >= (args.dig || allowPlace ? 6 : 4)) return nextTo(after) ? arrivedNearby(after, '绕了几次也没走进那一格') : fail('PATH_NOT_FOUND', `绕行后仍未接近 ${label}`, measured(after));
-        visited.push(waypoint ?? after);
       }
       if (!inScope()) return fail('WRONG_DIMENSION', '途中世界或会话已改变，需要重新规划');
       const end = adapter.state().pos;
@@ -598,7 +577,8 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
           : failedNear(now, `寻路报“${(e as Error).message}”，那一格没走进去`, code);
       }
       const water = waterNear();
-      return fail(codeFromError(e), `前往 ${label} 失败：${(e as Error).message}${water ? '；附近有水，尚未确认干燥步行通路' : ''}`, {
+      const placeHint = allowPlace ? '' : '；没有挖墙/垫路权限，要架桥或垫脚可显式加 place:true（会消耗方块）';
+      return fail(codeFromError(e), `前往 ${label} 失败：${(e as Error).message}${water ? '；附近有水，尚未确认干燥步行通路' : ''}${placeHint}`, {
         ...measured(), waterAhead: water,
         ...((e as Error).name === 'PillarClearanceError' ? { pillarClearance: true } : {}),
       });
@@ -723,13 +703,22 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
           }
         }
         ctx.progress(i / route.length, `沿${kind}${back ? '回入口' : '下最深'}：第 ${i}/${route.length - 1} 段`);
+        const moveOpts = { signal, timeoutMs: Math.max(2000, Math.min(20000, ctx.deadline - Date.now())), allowSwimming: false, ...terrainPermission };
         try {
-          await adapter.moveTo({ kind: 'near', pos: wp, range: 1.2 }, { signal, timeoutMs: Math.max(2000, Math.min(20000, ctx.deadline - Date.now())), allowSwimming: false, ...terrainPermission });
+          await adapter.moveTo({ kind: 'near', pos: wp, range: 1.2 }, moveOpts);
         } catch (e) {
           trace.push({ ...adapter.state().pos });
           if (isAbort(e)) throw e;
-          const now = adapter.state().pos;
-          return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段卡住：下一路点 (${Math.round(wp.x)},${Math.round(wp.y)},${Math.round(wp.z)}) 过不去（${(e as Error).message.slice(0, 50)}）。人停在 (${now.x.toFixed(1)},${now.y.toFixed(1)},${now.z.toFixed(1)})，离${goal}约 ${Math.round(dist3(now, target))} 格${allowDig ? '' : '；可加 dig:true 授权挖开挡路'}`, { position: now, reachedWaypoint: i, totalWaypoints: route.length - 1, remaining: Math.round(dist3(now, target)), target }));
+          // 记录脚点的 y 可能已因地形/旧数据偏差 1–4 格；先按同一列的 x/z 再走一次，
+          // 让寻路用真实支撑和安全落差，而不是因为精确 y 对不上就停在原地。
+          try {
+            await adapter.moveTo({ kind: 'xz', x: wp.x, z: wp.z, range: 1.2 }, moveOpts);
+          } catch (e2) {
+            trace.push({ ...adapter.state().pos });
+            if (isAbort(e2)) throw e2;
+            const now = adapter.state().pos;
+            return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段卡住：下一路点 (${Math.round(wp.x)},${Math.round(wp.y)},${Math.round(wp.z)}) 过不去（${(e2 as Error).message.slice(0, 50)}）。人停在 (${now.x.toFixed(1)},${now.y.toFixed(1)},${now.z.toFixed(1)})，离${goal}约 ${Math.round(dist3(now, target))} 格${allowDig ? '' : '；可加 dig:true 授权挖开挡路'}`, { position: now, reachedWaypoint: i, totalWaypoints: route.length - 1, remaining: Math.round(dist3(now, target)), target }));
+          }
         }
         last = adapter.state().pos;
         trace.push({ ...last });

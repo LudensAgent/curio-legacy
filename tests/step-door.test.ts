@@ -38,13 +38,15 @@ test('step treats an open door as passable and a closed or unknown door as block
   assert.match(blockedRoute.summary, /route blocked/);
 });
 
-test('step does not call an unseen cell an obstruction to dig', async (t) => {
+test('step reports a real loaded blocker without digging or guessing from vision', async (t) => {
   const world = new FakeAdapter();
   world.pos = { x: 0.5, y: 60, z: 0.5 };
   const ctx = makeCtx(world, { senses: { observeBlocks: () => [] } });
   t.after(() => ctx.memory.close());
+  const dig = t.mock.method(world, 'dig', async () => ({ ok: true }));
   const result = await stepTo.run(ctx, { at: [1, 0, 0], facing: 'N' });
   assert.equal(result.status, 'failed');
-  assert.match(result.summary, /未看清的格子.*无法确认/);
-  assert.doesNotMatch(result.summary, /dig_at|会碰头/);
+  assert.match(result.summary, /实心方块|会碰头|身体被占住/);
+  assert.doesNotMatch(result.summary, /未看清/);
+  assert.equal(dig.mock.callCount(), 0);
 });

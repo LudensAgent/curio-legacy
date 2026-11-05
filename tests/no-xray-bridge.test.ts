@@ -173,7 +173,7 @@ test('failed blind digging cannot identify hidden ore through its error summary'
 
 test('failed step and placement expose absolute recovery targets without map feedback', async (t) => {
   const adapter = new FakeAdapter();
-  adapter.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 0 } });
+  adapter.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 0 } }, { name: 'stone', pos: { x: 1, y: 65, z: 0 } });
   const ctx = makeCtx(adapter);
   t.after(() => ctx.memory.close());
   for (const [skill, args] of [['step', { to: [1, 0, 0], facing: 'E' }], ['place_at', { at: [1, 0, 0], facing: 'E', item: 'dirt' }]] as const) {
@@ -187,7 +187,7 @@ test('failed step and placement expose absolute recovery targets without map fee
 
 test('step, occupied placement and climb summaries cannot identify unobserved neighboring ore', async (t) => {
   const adapter = new FakeAdapter();
-  adapter.blocks.push({ name: 'diamond_ore', pos: { x: 1, y: 64, z: 0 } });
+  adapter.blocks.push({ name: 'diamond_ore', pos: { x: 1, y: 64, z: 0 } }, { name: 'diamond_ore', pos: { x: 1, y: 65, z: 0 } });
   adapter.inv.set('dirt', 2);
   const ctx = makeCtx(adapter, { senses: { observeBlocks: () => [] } });
   t.after(() => ctx.memory.close());

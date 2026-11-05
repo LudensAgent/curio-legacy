@@ -26,21 +26,20 @@ const ctxFor = (w: FakeAdapter, vision: Vision) => makeCtx(w, { senses: {
   refresh: () => vision.refresh(),
 } });
 
-test('step 补看要逐格覆盖：支撑格是空气时如实报 air，而不是永远“未看清”', async (t) => {
+test('step 不再为上游目标做视线补看，支撑格是空气就直接报缺口', async (t) => {
   const { w, vision } = edgeWorld();
   const ctx = ctxFor(w, vision);
   t.after(() => ctx.memory.close());
+  const look = t.mock.method(w, 'look', async () => {});
   const r = await stepTo.run(ctx, { at: [1, 1, 0], facing: 'N' });
   assert.equal(r.status, 'failed');
-  assert.match(r.summary, /是 air，无已确认支撑/);
-  assert.doesNotMatch(r.summary, /是 未看清的格子，无法确认支撑/);
+  assert.match(r.summary, /是 air.*没有可站立支撑/);
+  assert.doesNotMatch(r.summary, /未看清的格子/);
   assert.equal(r.data?.movementNotAttempted, true);
-  // 补看结束后视线回到移动方向、瞄在脚部目标与其支撑之间，回执里的方块图仍看得到脚下这一层。
-  assert.ok(w.pitch < -0.5 && w.pitch > -1.0, `视线应朝向目标列下方，实际 pitch=${w.pitch}`);
-  assert.ok(Math.abs(w.yaw) < 1e-6, `视线应转回目标方向，实际 yaw=${w.yaw}`);
+  assert.equal(look.mock.callCount(), 0, '迈步不再转头补看');
 });
 
-test('step 只补看、不自动垫方块：没有 fill 时世界和背包都不变', async (t) => {
+test('step 没有 fill 时不耗材料：世界和背包都不变', async (t) => {
   const { w, vision } = edgeWorld();
   w.inv.set('cobblestone', 3);
   const ctx = ctxFor(w, vision);
