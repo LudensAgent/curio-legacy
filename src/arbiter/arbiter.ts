@@ -59,6 +59,32 @@ export interface TaskOutcome {
   gentle?: boolean;
 }
 
+/** 派发/结算时实测到的作用域与位置；读取失败时整段为 null，不用默认值补齐。 */
+export interface TaskScopeMeasurement {
+  worldId: string;
+  dim: string;
+  sessionId: string;
+  /** 这次测量发生的真实时间（不是任务开始/结束时间本身）。 */
+  at: number;
+  pos: Vec3Like;
+}
+
+/**
+ * 一次已结算任务的实测事实，仅交给显式注入的生产者接缝（默认不存在）。
+ * `startScope` 是派发时读到的真实状态；`endScope` 只有结束回调仍拥有该
+ * planVersion 时才有测量，迟到回调为 null，绝不拿新任务的现场补旧任务。
+ */
+export interface TaskCompletionFact {
+  task: TaskInfo;
+  result: SkillResult;
+  endedAt: number;
+  durationMs: number;
+  startScope: TaskScopeMeasurement | null;
+  endScope: TaskScopeMeasurement | null;
+  lateCompletion: boolean;
+  preemptedBy?: TaskSource;
+}
+
 /** Emitted synchronously after control transfers, before either skill can finish. */
 export interface TaskPreemption {
   task: TaskInfo;
@@ -120,7 +146,15 @@ export class Arbiter extends EventEmitter {
     this.adapter.stopAll();
   }
 
-  constructor(private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private senses: Senses, private spatial?: SharedSpatialSession) {
+  constructor(
+    private adapter: GameAdapter,
+    private memory: WorldMemory,
+    private bus: EventBus,
+    private senses: Senses,
+    private spatial?: SharedSpatialSession,
+    /** 可选的生产者接缝；不注入时不读作用域外状态、不写 journal、不创建任何异步资源。 */
+    private taskFactProducer?: (fact: TaskCompletionFact) => void,
+  ) {
     super();
     if (this.spatial) {
       // 真实会话身份变化只通知共享服务中断；此时绝不回调 adapter.state()（换维会再次触发 newSession）。
@@ -338,6 +372,7 @@ export class Arbiter extends EventEmitter {
         // 当前 adapter 状态和背包才还能归给这个任务；否则保留结果数据里的实测事实，末状态记 null。
         const stillOwned = this.version === task.planVersion;
         const endState = stillOwned ? readState(this.adapter) : null;
+        const endScope = stillOwned ? scopeOf(endState, endedAt) : null;
         const invAfter = endState ? countsOf(endState.inventory) : null;
         const resultData = result.data && typeof result.data === 'object' ? result.data as Record<string, unknown> : undefined;
         const measured = resultData ? lastPositionOf(resultData) : null;
@@ -378,7 +413,7 @@ export class Arbiter extends EventEmitter {
           },
           scope: {
             start: startedScope,
-            end: stillOwned ? scopeOf(endState, endedAt) : null,
+            end: endScope,
           },
           lateCompletion: !stillOwned,
           // 只报实测位置，绝不拿目标或请求坐标补齐。
@@ -395,6 +430,26 @@ export class Arbiter extends EventEmitter {
           ...(result.status === 'succeeded' && result.data?.expect ? { expect: result.data.expect } : {}),
         });
         const { controller: _c, cancelCode: _cc, cancelReason: _cr, preemptedBy, gentle, ...info } = task;
+        // 可选的生产者接缝：默认未注入时这里完全不执行。生产者只收到实际测到的
+        // 开始/结束作用域和已结算结果；它不能反过来改写 result/task 或关停流程。
+        if (this.taskFactProducer) {
+          try {
+            this.taskFactProducer({
+              task: info,
+              result,
+              endedAt,
+              durationMs,
+              startScope: startedScope,
+              endScope,
+              lateCompletion: !stillOwned,
+              ...(preemptedBy !== undefined ? { preemptedBy } : {}),
+            });
+          } catch (error) {
+            this.bus.publish('spatial_journal_producer_failed', 'P1',
+              `任务事实生产者失败：${error instanceof Error ? error.message : String(error)}`,
+              { taskId: task.id, skill: task.skill });
+          }
+        }
         this.emit('done', { task: info, result, durationMs, preemptedBy, gentle } satisfies TaskOutcome);
       });
 
@@ -425,7 +480,7 @@ function readState(adapter: GameAdapter): AgentState | null {
   try { return adapter.state(); } catch { return null; }
 }
 
-function scopeOf(state: AgentState | null, at: number) {
+function scopeOf(state: AgentState | null, at: number): TaskScopeMeasurement | null {
   return state ? { worldId: state.worldId, dim: state.dim, sessionId: state.sessionId, at, pos: { ...state.pos } } : null;
 }
 

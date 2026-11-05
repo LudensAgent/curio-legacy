@@ -137,6 +137,9 @@ const stopSpatialCheckpoints = startSpatialCheckpointScheduler(spatial, (fact) =
 });
 const memory = new WorldMemory(path.join(config.dataDir, 'world-memory.json'));
 const vision = new Vision(adapter, config.vision, spatial);
+// WP7 journal 生产者接缝：Arbiter 支持可选的 taskFactProducer，但默认不存在。
+// 当前任务结算事实还没有可确认的 subActions/observedChanges 证据来源，注入后
+// 只能得到结构化缺口而不会写入；因此运行时明确不注入，准备模块尚未上线。
 const arbiter = new Arbiter(adapter, memory, bus, vision, spatial);
 const perception = new Perception(adapter, memory, bus, vision);
 // 区分“在自家屋里”和“在坑里”：围着自己的墙是不是自己盖的房子
