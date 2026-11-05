@@ -24,6 +24,32 @@ test('live cap moves the oldest passage into the archive instead of dropping it'
   assert.equal(memory.passages(D).some((p) => p.id === 'p1'), false);
 });
 
+test('live eviction keeps a long/deep dug mine over bridges and short stubs', () => {
+  const memory = new WorldMemory(null);
+  memory.setWorld(W);
+  const deep = {
+    ...record('deep-mine', 8, 1),
+    path: Array.from({ length: 30 }, (_, i) => ({ x: 8 + i, y: 50 - i, z: 0 })),
+    deepestY: 21,
+  };
+  memory.savePassage(deep);
+  for (let i = 0; i < PASSAGE_LIVE_CAP; i++) memory.savePassage({ ...record(`bridge-${i}`, i * 2, 100 + i), kind: 'bridge' as const });
+
+  assert.equal(memory.passages(D).length, PASSAGE_LIVE_CAP);
+  assert.equal(memory.passages(D).some((p) => p.id === 'deep-mine'), true, '主矿道不能被桥挤进归档');
+  assert.equal(memory.passages(D).some((p) => p.id === `bridge-${PASSAGE_LIVE_CAP - 1}`), true, '刚保存的记录不能被自己挤掉');
+  assert.ok(memory.archivedPassages(D).some((p) => p.kind === 'bridge'), '先淘汰 bridge');
+
+  // 再用短 stub 填满：主矿道仍在，淘汰的是 stub
+  const memory2 = new WorldMemory(null);
+  memory2.setWorld(W);
+  memory2.savePassage(deep);
+  for (let i = 0; i < PASSAGE_LIVE_CAP; i++) memory2.savePassage(record(`stub-${i}`, 100 + i * 4, 100 + i));
+  assert.equal(memory2.passages(D).some((p) => p.id === 'deep-mine'), true, '主矿道不能被短 stub 挤进归档');
+  assert.equal(memory2.passages(D).some((p) => p.id === `stub-${PASSAGE_LIVE_CAP - 1}`), true);
+  assert.ok(memory2.archivedPassages(D).some((p) => p.id.startsWith('stub-')), '淘汰短 stub');
+});
+
 test('re-saving an archived record restores it to live and does not duplicate it in allPassages', () => {
   const memory = new WorldMemory(null);
   memory.setWorld(W);

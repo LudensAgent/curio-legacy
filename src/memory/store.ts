@@ -1223,11 +1223,23 @@ export class WorldMemory {
     if (archive && ai >= 0) archive.splice(ai, 1);
     const mine = all.filter((p) => this.inWorld(p));
     if (mine.length > PASSAGE_LIVE_CAP) {
-      // 满了先移走"走过的路"（最久没走过的），再轮到最久没走过的"我挖的通道"
-      const walked = mine.filter((p) => p.kind === 'walked').sort((a, b) => a.lastUsedAt - b.lastUsedAt)[0];
-      const victim = walked ?? mine.sort((a, b) => a.lastUsedAt - b.lastUsedAt)[0];
-      all.splice(all.indexOf(victim), 1);
-      this.archivePassage(victim);
+      // 淘汰顺序：可重推的 bridge → 走过的天然洞穴 → 短脚点的 dug stub → 其余最久没用的。
+      // 长/深的 dug 矿道最后才动：否则一条几千条 links 的主矿道会被刚挖出来的两点 stub 挤进归档，
+      // 提示里就只剩浅记录，Agent 会以为附近没有可走的旧矿道。刚保存的这条不参与淘汰。
+      const rank = (p: PassageRecord) => {
+        const kind = p.kind ?? 'dug';
+        const protectedDug = kind === 'dug' && (p.path.length >= 24 || p.deepestY <= -16) ? 1 : 0;
+        return [protectedDug, kind === 'bridge' ? 0 : kind === 'walked' ? 1 : 2, p.path.length, p.lastUsedAt];
+      };
+      const victim = mine.filter((p) => p.id !== copy.id).sort((a, b) => {
+        const ka = rank(a), kb = rank(b);
+        for (let k = 0; k < ka.length; k++) if (ka[k] !== kb[k]) return ka[k]! - kb[k]!;
+        return 0;
+      })[0];
+      if (victim) {
+        all.splice(all.indexOf(victim), 1);
+        this.archivePassage(victim);
+      }
     }
     this.spatial?.savePassageNow(structuredClone({ ...copy, worldId: copy.worldId ?? this.worldId }));
     this.touch();
