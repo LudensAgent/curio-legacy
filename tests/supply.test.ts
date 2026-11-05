@@ -130,10 +130,11 @@ test('toolTierFact：铁镐 + 有可用石镐也要报事实（不再因为它�
   const f = toolTierFact({ inventory: inv, digging: true })!;
   assert.ok(f);
   assert.match(f.text, /铁镐×1（耐久 250\/250）/);
-  assert.match(f.text, /石镐×1（耐久 100\/131）/);
-  assert.match(f.text, /铁锭只剩 0 个（做一把新的要 3 个）/);
+  assert.match(f.text, /石镐×1（耐久 100\/131，合计还能挖约 100 格）/);
+  assert.match(f.text, /铁锭只剩 0 个，现在做不出新的铁镐（做一把新的要 3 个）/);
   assert.match(f.text, /石镐能挖石头\/煤\/铜\/铁\/青金石/);
   assert.match(f.text, /红石\/金\/钻石\/绿宝石才必须铁镐/);
+  assert.match(f.text, /铁镐坏了做不出新的；石镐坏了能再做/);
   assert.match(f.text, /要用现有石镐就先 hold_item stone_pickaxe；excavate_path 使用主手工具/);
   assert.match(f.text, /换不换、做不做由你定/);
   assert.match(f.key, /tier:iron/);
@@ -163,7 +164,7 @@ test('toolTierFact：便宜镐快坏了，报做一把的真实缺口（木棍/�
   const f = toolTierFact({ inventory, digging: true })!;
   assert.match(f.text, /包里的石镐×1（耐久 18\/131）剩余都不足 15%，合计还能挖约 18 格/);
   assert.match(f.text, /要用现有石镐就先 hold_item stone_pickaxe/);
-  assert.match(f.text, /要再做一把石镐：做 stone_pickaxe×1/);
+  assert.match(f.text, /再做一把石镐：做 stone_pickaxe×1/);
   // 1 根原木够做木棍 → 报材料够，并顺带列出中间品
   assert.match(f.text, /材料已经够了/);
   assert.match(f.text, /stick/);
@@ -177,7 +178,7 @@ test('toolTierFact：没有便宜镐、也做不出便宜镐时仍报真实缺�
   const f = toolTierFact({ inventory: [item('iron_pickaxe', 1), item('iron_ingot', 0)], digging: true })!;
   assert.ok(f, '线上“石镐没补”的场景不能因为没有现成便宜镐就不提');
   assert.match(f.text, /包里没有石镐/);
-  assert.match(f.text, /要再做一把石镐：做 stone_pickaxe×1 还差/);
+  assert.match(f.text, /再做一把石镐：做 stone_pickaxe×1 还差/);
   assert.match(f.text, /圆石|原木/);
   assert.match(f.key, /craft:/);
 });
@@ -214,8 +215,8 @@ test('toolTierFact：钻石镐档次下，便宜铁镐可用也报事实', () =>
     digging: true,
   })!;
   assert.match(f.text, /钻石镐×1（耐久 1000\/1561）/);
-  assert.match(f.text, /铁镐×1（耐久 200\/250）/);
-  assert.match(f.text, /钻石只剩 0 个（做一把新的要 3 个）/);
+  assert.match(f.text, /铁镐×1（耐久 200\/250，合计还能挖约 200 格）/);
+  assert.match(f.text, /钻石只剩 0 个，现在做不出新的钻石镐（做一把新的要 3 个）/);
   assert.match(f.text, /只有远古残骸\/黑曜石才必须钻石镐/);
   assert.match(f.text, /hold_item iron_pickaxe/);
   assert.match(f.key, /tier:diamond/);
@@ -240,7 +241,7 @@ test('toolTierFact：稀缺材料按箱子账本合计，held 进 key', () => {
     digging: true,
   })!;
   assert.match(f.text, /铁锭只剩 1 个/);
-  assert.match(f.text, /要再做一把石镐：做 stone_pickaxe×1/);
+  assert.match(f.text, /再做一把石镐：做 stone_pickaxe×1/);
   assert.match(f.key, /held:pickaxe/);
   assert.match(f.key, /mat:1/);
 });
