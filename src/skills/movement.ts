@@ -990,12 +990,22 @@ export const surface: Skill<{ timeoutMs?: number }> = {
     }
     const s = a.state();
     const at = `现在在 (${s.pos.x.toFixed(1)},${s.pos.y.toFixed(1)},${s.pos.z.toFixed(1)})，氧气 ${s.oxygen}/20`;
-    const facts = { ...(r.goal ? { goal: r.goal } : {}), ...(r.stage ? { stage: r.stage } : {}), ...(r.enteredWater !== undefined ? { enteredWater: r.enteredWater } : {}) };
+    const facts = {
+      ...(r.goal ? { goal: r.goal } : {}), ...(r.stage ? { stage: r.stage } : {}),
+      ...(r.enteredWater !== undefined ? { enteredWater: r.enteredWater } : {}),
+      ...(r.blockedAbove ? { blockedAbove: r.blockedAbove } : {}),
+      ...(r.openWater ? { openWater: r.openWater } : {}),
+    };
     if (r.ok && r.landed) return ok(`上浮后已站稳干地，氧气 ${s.oxygen}/20`, { landed: true, surfaced: r.surfaced, pos: s.pos, oxygen: s.oxygen, ...facts });
-    if (r.ok && r.surfaced) return ok(`结束时头已露出流体（氧气 ${s.oxygen}/20），还没上岸；松开控制后是否继续浮着、是否持续换气不保证`, { landed: false, surfaced: true, pos: s.pos, oxygen: s.oxygen, ...facts });
+    if (r.ok && r.surfaced) return ok(`结束时头已露出流体（氧气 ${s.oxygen}/20），还没上岸；松开 jump 后会重新下沉，要持续浮着需自己按住 jump（press_keys）或交给会持续上浮/挖开头顶的做法`, { landed: false, surfaced: true, pos: s.pos, oxygen: s.oxygen, ...facts });
     // 时间到只说明预算耗尽，不证明身体卡住，也不断言头一定没露出来；surfaced 以实际返回为准。
     const why = r.reason === 'WATER_ESCAPE_TIMEOUT' ? '上浮时间到，尚未确认完成' : r.reason === 'SWIM_NO_PROGRESS' ? '上浮没动' : r.reason;
+    // 把身体实测到的阻挡交给调用方：surface 只按跳，挖开头顶、横游找空气或持续踩水由它自己决定。
+    const blockers = [
+      ...(r.blockedAbove ? [`头顶 (${r.blockedAbove.x},${r.blockedAbove.y},${r.blockedAbove.z}) 是 ${r.blockedAbove.name}（surface 只按跳，不能挖开）`] : []),
+      ...(r.openWater ? [`最近的开阔水面在 ${r.openWater.dir} ${r.openWater.dist} 格 (${r.openWater.x},${r.openWater.y},${r.openWater.z})`] : []),
+    ].join('；');
     const code = r.reason === 'WATER_ESCAPE_TIMEOUT' ? 'TIMEOUT' : 'STUCK';
-    return fail(code, `${why}；${at}`, { landed: false, surfaced: r.surfaced, pos: s.pos, oxygen: s.oxygen, reason: r.reason, ...facts });
+    return fail(code, `${why}；${at}${blockers ? `；${blockers}` : ''}`, { landed: false, surfaced: r.surfaced, pos: s.pos, oxygen: s.oxygen, reason: r.reason, ...facts });
   },
 };

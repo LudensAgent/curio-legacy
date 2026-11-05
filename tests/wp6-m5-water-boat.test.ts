@@ -51,7 +51,7 @@ function scriptedSwimmer(t: TestContext, opts: {
   };
   const adapter = new MineflayerAdapter(config, new EventBus());
   adapter.bot = bot; adapter.mcData = {}; Reflect.set(adapter, 'connectedFlag', true);
-  return { adapter, bot, controls, ticks: () => tick };
+  return { adapter, bot, controls, ticks: () => tick, advance: (ms: number) => { now += ms; } };
 }
 
 /** Water spans 0 <= x < 6 at y<=63; stone shores on both sides; a dry island at x=3. */
@@ -413,4 +413,25 @@ test('rising toward an overhead water target counts as progress instead of a hor
   assert.equal(r.ok, true, `${r.reason} @ y=${data.bot.entity.position.y}`);
   assert.equal(r.goal, 'surface_target');
   assert.ok(data.bot.entity.position.y >= 68.5, `must be allowed to ascend for more than 2.5s: y=${data.bot.entity.position.y}`);
+});
+
+test('surface under a stone ceiling returns budget-exhausted with the blocker instead of a tiny timeout', async (t) => {
+  const data = scriptedSwimmer(t, {
+    start: { x: 2.5, y: 61.2, z: 2.5 }, onGround: false, inWater: true,
+    blockAt: (cell) => (cell.y >= 63 ? 'stone' : cell.y >= 60 ? 'water' : 'stone'),
+    onTick: () => {},
+  });
+  // 前三段等待各消耗 60ms（剩 200/140/80ms）；剩 20ms 时旧实现会启动一个 20ms 的
+  // raceAbort，定时器先于永不返回的 tick 触发，把最后一小段预算抛成 “timeout after 20ms”。
+  let calls = 0;
+  data.bot.waitForTicks = () => {
+    calls++;
+    data.advance(60);
+    return calls < 4 ? Promise.resolve() : new Promise<void>(() => {});
+  };
+  const r = await data.adapter.swimTo(null, new AbortController().signal, { timeoutMs: 200 });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'WATER_ESCAPE_TIMEOUT');
+  assert.equal(r.blockedAbove?.name, 'stone', 'the stone ceiling is reported with the timeout');
+  assert.equal(calls, 3, 'must stop before starting a wait shorter than the minimum window');
 });

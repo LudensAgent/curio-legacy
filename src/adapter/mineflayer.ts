@@ -4211,6 +4211,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     };
     // 真正的剩余预算：每次等待前都检查是否仍为正；为 0/负说明预算已耗尽，不能再触发新的等待或写入动作。
     const remaining = () => end - Date.now();
+    // 小于这个余量时不再启动新的等待：raceAbort 的定时器会先于 tick 触发，抛出的
+    // “timeout after 24ms” 只是最后一小段预算，不是真实失败原因。直接按预算耗尽返回。
+    const MIN_WAIT_MS = 50;
     const facts = (at: SwimStage) => ({
       goal, stage: at, enteredWater, targetInWater,
       advanced: Math.round(Math.hypot(b.entity.position.x - start.x, b.entity.position.z - start.z) * 100) / 100,
@@ -4291,10 +4294,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         const needForward = !!destination && (distance > 0.35 || (!dry && destination.y > p.y + 0.5));
         if (needForward) {
           const rem = remaining();
-          if (rem <= 0) break;
+          if (rem < MIN_WAIT_MS) break;
           await this.afterAction(() => raceAbort(b.look(Math.atan2(p.x - destination!.x, p.z - destination!.z), 0, true), signal, rem, () => {}), check);
           // 转头可能刚好把预算耗尽：不写 forward、不进入下一段等待，按超时结束。
-          if (remaining() <= 0) break;
+          if (remaining() < MIN_WAIT_MS) break;
           b.setControlState('forward', true);
         } else b.setControlState('forward', false);
         // 进度按三维距离是否更接近目标计算：目标在上方时，沿水柱上升是真实推进；上下浮动不会刷新最近距离。
@@ -4310,14 +4313,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         if (destination && !inCompletionState && Date.now() - lastProgress >= (climbingBank ? 5000 : 2500)) {
           return { ok: false, reason: 'SWIM_NO_PROGRESS', landed: false, surfaced: surfacedNow(), oxygen: ownOxygen(b), ...facts(stage), ...obstacleFacts() };
         }
-        // 每次等待前都确认预算仍为正：为 0/负时不要传进 raceAbort（会禁用超时定时器，让未完成的 tick 永久挂起）。
+        // 每次等待前都确认预算仍够一次有意义的等待：太短的 raceAbort 会先于 tick 触发，
+        // 抛出 “timeout after Nms”，把最后一点剩余预算误报成失败原因。直接按预算耗尽返回，
+        // 让调用方看到 obstacleFacts 里的真实阻挡事实。
         if (typeof b.waitForTicks === 'function') {
           const rem = remaining();
-          if (rem <= 0) break;
+          if (rem < MIN_WAIT_MS) break;
           await this.afterAction(() => raceAbort(b.waitForTicks(2), signal, Math.min(2000, rem), () => {}), check);
         } else {
           const rem = remaining();
-          if (rem <= 0) break;
+          if (rem < MIN_WAIT_MS) break;
           await this.afterAction(() => raceAbort(sleep(Math.min(100, rem), signal), signal, rem, () => {}), check);
         }
       }

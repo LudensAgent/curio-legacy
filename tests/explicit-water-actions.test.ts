@@ -363,3 +363,38 @@ test('swim_to follows an observed water detour and still verifies the caller tar
     assert.ok(route && route.waypoints.length >= 1, 'the route is reported back as executed assistance');
   } finally { ctx.memory.close(); }
 });
+
+test('surface failure reports the overhead blocker and nearest open water, not only a timeout', async () => {
+  const w = new TestWorld();
+  w.inWater = true; w.oxygen = 0;
+  w.swimTo = async () => ({
+    ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, surfaced: false, oxygen: 0,
+    goal: 'surface_ascent', stage: 'swimming',
+    blockedAbove: { x: 3, y: 63, z: 2, name: 'stone' },
+    openWater: { x: 4, y: 61, z: 2, dir: 'E', dist: 1 },
+  });
+  const ctx = makeCtx(w);
+  try {
+    const r = await surface.run(ctx, { timeoutMs: 6000 });
+    assert.equal(r.status, 'failed');
+    assert.equal(r.failureCode, 'TIMEOUT');
+    assert.match(r.summary, /上浮时间到，尚未确认完成/);
+    assert.match(r.summary, /头顶 \(3,63,2\) 是 stone（surface 只按跳，不能挖开）/);
+    assert.match(r.summary, /最近的开阔水面在 E 1 格 \(4,61,2\)/);
+    assert.deepEqual(r.data?.blockedAbove, { x: 3, y: 63, z: 2, name: 'stone' });
+    assert.deepEqual(r.data?.openWater, { x: 4, y: 61, z: 2, dir: 'E', dist: 1 });
+  } finally { ctx.memory.close(); }
+});
+
+test('surface success says releasing jump sinks again and how to stay up', async () => {
+  const w = new TestWorld();
+  w.inWater = true; w.oxygen = 3;
+  w.swimTo = async () => ({ ok: true, landed: false, surfaced: true, oxygen: 3, goal: 'surface_ascent', stage: 'surfaced' });
+  const ctx = makeCtx(w);
+  try {
+    const r = await surface.run(ctx, {});
+    assert.equal(r.status, 'succeeded');
+    assert.match(r.summary, /松开 jump 后会重新下沉/);
+    assert.match(r.summary, /press_keys|持续浮着/);
+  } finally { ctx.memory.close(); }
+});
