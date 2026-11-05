@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import type { ActionResult, AgentState, BlockHit, BossDeathObservation, DriveKeys, DriveOptions, DriveResult, EntityInfo, Eye, GameAdapter, InvItem, MoveOpts, MoveTarget, Optics, Vec3Like } from '../src/adapter/types.ts';
-import { portalStance as computePortalStance } from '../src/perception/portal.ts';
+import { bodyOverlapsPortal, PORTAL_KINDS, portalStance as computePortalStance } from '../src/perception/portal.ts';
 import { dist3, raceAbort, sleep, throwIfAborted } from '../src/util.ts';
 
 /** 离线测试用的模拟游戏：没有 Minecraft 也能验证仲裁、反射、规划与连贯性。 */
@@ -18,6 +18,10 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
   blockProperties = new Map<string, Record<string, string | number | boolean>>();
   equipped = new Map<string, string>();
   portalDestinations = new Map<string, { dim: string; pos: Vec3Like; arrivalPortal?: boolean }>();
+  /** 模拟真实服务器的观察：身体已在门方块里时，继续等不会重新触发，必须先离开再进 */
+  portalNeedsExit = false;
+  /** 模拟一次“身体在门方块里连续停留”的毫秒数 */
+  portalInsideMs = 1500;
   dragonDeath: BossDeathObservation | null = null;
   inv = new Map<string, number>();
   blocks: { name: string; pos: Vec3Like }[] = [];
@@ -87,7 +91,9 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
       worldId: this.worldId, sessionId: this.sessionId, observationId: ++this.observationId,
       username: 'FakeBot', pos: { ...this.pos }, dim: this.dim,
       hp: this.hp, food: this.food, oxygen: this.oxygen, timeOfDay: this.isDay ? 1000 : 15000, isDay: this.isDay, biome: 'plains', onGround: this.onGround,
-      inWater: this.inWater, inLava: this.inLava, inventory: [...this.inv].map(([name, count]) => ({ name, count })), emptySlots: 30, held: null, riding: this.riding,
+      inWater: this.inWater, inLava: this.inLava,
+      bodyPortal: this.portalAt(this.pos),
+      inventory: [...this.inv].map(([name, count]) => ({ name, count })), emptySlots: 30, held: null, riding: this.riding,
       equipment: [...this.equipped].map(([slot, name]) => ({ slot, name })),
     };
   }
@@ -173,13 +179,24 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
     return { ok: true };
   }
   bossStatus() { return { dragonDeath: this.dragonDeath && this.dragonDeath.worldId === this.worldId && this.dragonDeath.dim === this.dim && this.dragonDeath.sessionId === this.sessionId ? this.dragonDeath : null }; }
+  /** 身体 AABB 现在压着的门方块；触觉事实，和真实适配器同一个判定。 */
+  portalAt(pos: Vec3Like): string | null {
+    return [...PORTAL_KINDS].find((kind) => bodyOverlapsPortal((p) => this.blockAt(p), pos, [kind])) ?? null;
+  }
   async enterPortalAt(pos: Vec3Like, signal: AbortSignal, expectedDim?: string) {
     throwIfAborted(signal);
     const from = this.state();
     const kind = this.blockAt(pos);
     if (!['nether_portal', 'end_portal'].includes(kind)) return { ok: false, reason: 'NO_PORTAL' };
+    const startedInPortal = this.portalAt(from.pos) !== null;
     const destination = this.portalDestinations.get(`${this.worldId}:${this.dim}:${this.k(pos.x, pos.y, pos.z)}`);
-    if (!destination) return { ok: false, reason: 'PORTAL_TRANSITION_TIMEOUT' };
+    // 已在门方块里时继续等不会重新触发：如实回超时和时间线，不假装换维度。
+    if (!destination || (this.portalNeedsExit && startedInPortal)) {
+      return {
+        ok: false, reason: 'PORTAL_TRANSITION_TIMEOUT',
+        transition: { startedInPortal, exitMs: null, outsideMs: null, insideMs: startedInPortal ? this.portalInsideMs : 0, endDim: this.dim },
+      };
+    }
     await sleep(20, signal);
     this.dim = destination.dim;
     this.pos = { ...destination.pos };
@@ -188,7 +205,14 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
     if (destination.arrivalPortal !== false && this.blockAt(destination.pos) !== kind) this.blocks.push({ name: kind, pos: { ...destination.pos } });
     this.actions.push(`portal:${from.dim}->${this.dim}`);
     const to = this.state();
-    return expectedDim && to.dim !== expectedDim ? { ok: false, reason: 'WRONG_DIMENSION', from, to } : { ok: true, from, to };
+    const transition = {
+      startedInPortal,
+      exitMs: startedInPortal ? 50 : null,
+      outsideMs: startedInPortal ? 100 : null,
+      insideMs: this.portalInsideMs,
+      endDim: destination.dim,
+    };
+    return expectedDim && to.dim !== expectedDim ? { ok: false, reason: 'WRONG_DIMENSION', from, to, transition } : { ok: true, from, to, transition };
   }
   resolveBlockNames(q: string) {
     if (q === 'log') return ['oak_log'];

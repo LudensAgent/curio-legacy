@@ -139,6 +139,25 @@ test('portal travel records observed coordinates in both dimensions and verifies
   assert.ok(final.routes.every((r) => r.returnVerified));
 });
 
+test('already inside a portal: timeout carries the in-portal timeline', async () => {
+  const { adapter, memory, run } = setup();
+  const sourcePos = { x: 3, y: 64, z: 0 };
+  adapter.blocks.push({ name: 'nether_portal', pos: sourcePos }, { name: 'nether_portal', pos: { x: 3, y: 65, z: 0 } });
+  adapter.blocks.push({ name: 'obsidian', pos: { x: 3, y: 63, z: 0 } });
+  adapter.portalDestinations.set('fake-world:overworld:3,64,0', { dim: 'the_nether', pos: { x: 8, y: 64, z: 0 } });
+  adapter.pos = { x: 3.5, y: 64, z: 0.5 };
+  adapter.portalNeedsExit = true;
+  adapter.portalInsideMs = 30000;
+  const source = travelStore(memory).observe(adapter.state(), sourcePos, 'nether_portal');
+  const outcome = await run('travel_portal', { portalId: source.id });
+  assert.equal(outcome.result.status, 'failed');
+  assert.equal(outcome.result.failureCode, 'ERROR');
+  assert.match(outcome.result.summary, /开始时身体已在门方块里/);
+  assert.match(outcome.result.summary, /在门方块里连续 30\.0s/);
+  assert.match(outcome.result.summary, /维度 overworld/);
+  assert.equal(adapter.dim, 'overworld', '没有实际换维度，不能改状态');
+});
+
 test('End arrival without a portal does not invent a usable return route', async () => {
   const { adapter, memory, run } = setup();
   const source = { x: 3, y: 64, z: 0 };

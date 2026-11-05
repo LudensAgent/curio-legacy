@@ -337,3 +337,16 @@ test('surface 头顶被封不原样重放，把阻挡事实交回心智', () => 
   assert.match(verdict.why, /surface 只按跳不能挖/);
   assert.equal(activity.adaptations.filter((item) => item.startsWith('retry:')).length, 0, '不消耗自动重试额度');
 });
+
+test('已在门方块里等到超时：不原样重放同一个 travel_portal，把时间线交回心智', () => {
+  const { adapter, activity } = activityOf([{ skill: 'travel_portal', args: { portalId: 'portal_test' } }]);
+  // 起点与当前状态相差很远：仅按“身体动过 >= 0.5 格”的旧规则会允许一次自动重试。
+  activity.stepStart = { pos: { x: 99, y: 64, z: 99 } };
+  const step = nextStep(activity)!;
+  const verdict = afterStep(activity, step, fail('ERROR', '传送未验收（PORTAL_TRANSITION_TIMEOUT）：开始时身体已在门方块里；在门方块里连续 30.0s；维度 the_nether', {
+    transition: { startedInPortal: true, exitMs: 260, outsideMs: 320, insideMs: 30000, endDim: 'the_nether' },
+  }), 30816, adapter.state());
+  assert.equal(verdict.kind, 'stuck');
+  assert.match(verdict.why, /同一次等待原样重放不会改变结果/);
+  assert.equal(activity.adaptations.filter((item) => item.startsWith('retry:')).length, 0, '不消耗自动重试额度');
+});
