@@ -1205,13 +1205,16 @@ export class Mind {
     const order = this.order, orderWasNew = order?.status === 'new';
     this.d.bus.publish('llm_request', 'P3', `${tier === 'glance' ? '抬头看一眼' : '认真想想'}：${reason}`, { tier, reason });
     this.idle();
+    // 这一念被取消/丢弃/失败时，工具事实并没有真正送达：撤回去重状态，下一次还能再提
+    const dropToolFact = () => { if (toolFact) { this.toolFactKey = null; this.toolFactAt = 0; } };
     this.d.thinker.think(ctx, controller.signal).then((decision) => {
-      if (this.thinking?.controller !== controller) { this.staleDropped++; return; }
+      if (this.thinking?.controller !== controller) { this.staleDropped++; dropToolFact(); return; }
       this.thinking = null;
-      if (generation !== this.generation || this.paused) { this.staleDropped++; return; }
+      if (generation !== this.generation || this.paused) { this.staleDropped++; dropToolFact(); return; }
       // 绕路完成后可能已经恢复了另一段活；绕路时提前想的决定不能改写那段活或它的下一段。
       if (reason === Mind.NEAR_END_REASON && activityId && this.activity && this.activity.id !== activityId) {
         this.staleDropped++;
+        dropToolFact();
         for (const n of noticed) {
           if (!this.attention.peek().some((pending) => pending.key === n.key)) this.attention.notice(n.key, n.what, n.salience, 0);
         }
@@ -1231,6 +1234,7 @@ export class Mind {
       if (!followsOperator && decision.kind === 'adjust' && completedDuringThought && first && thoughtRunning && first.skill === thoughtRunning.skill
         && isDeepStrictEqual(first.args ?? {}, thoughtRunning.args ?? {})) {
         this.staleDropped++;
+        dropToolFact();
         this.resumeCheck = activityId;
         this.requestThink(`思考期间 ${completedDuringThought.skill} 已经成功：${completedDuringThought.summary}；刚才的调整以同一动作开头，请根据实际结果决定是否还要重复`, 'deliberate');
         for (const notice of noticed) if (!this.attention.peek().some((pending) => pending.key === notice.key)) this.attention.notice(notice.key, notice.what, notice.salience, 0);
@@ -1264,6 +1268,7 @@ export class Mind {
       if (this.thinking?.controller !== controller) return;
       this.thinking = null;
       if (controller.signal.aborted || generation !== this.generation) return;
+      dropToolFact();
       this.errors++;
       this.backoffUntil = Date.now() + Math.min(this.timing.maxBackoffMs, 3000 * 2 ** (this.errors - 1));
       for (const n of noticed) this.attention.notice(`${n.key}:again`, n.what, n.salience * 0.8, 0); // 没想成，注意到的事别丢

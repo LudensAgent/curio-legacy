@@ -134,12 +134,20 @@ test('toolTierFact：铁镐 + 有可用石镐也要报事实（不再因为它�
   assert.match(f.text, /铁锭只剩 0 个（做一把新的要 3 个）/);
   assert.match(f.text, /石镐能挖石头\/煤\/铜\/铁\/青金石/);
   assert.match(f.text, /红石\/金\/钻石\/绿宝石才必须铁镐/);
-  assert.match(f.text, /要换就先 hold_item stone_pickaxe；excavate_path 使用主手工具/);
-  assert.match(f.text, /换不换由你定/);
+  assert.match(f.text, /要用现有石镐就先 hold_item stone_pickaxe；excavate_path 使用主手工具/);
+  assert.match(f.text, /换不换、做不做由你定/);
   assert.match(f.key, /tier:iron/);
   assert.match(f.key, /cheap:stone:1:ok/);
-  // 主手状态、便宜镐耐久变化都要反映到 key，供上层去重
-  assert.match(toolTierFact({ inventory: inv, held: 'stone_pickaxe', digging: true })!.key, /held:stone_pickaxe/);
+  // 主手拿着便宜镐时不要再叫它去拿；主手是否拿镐进 key，但两把镐之间换手不改 key（避免重播同一句）
+  const heldCheap = toolTierFact({ inventory: inv, held: 'stone_pickaxe', digging: true })!;
+  assert.match(heldCheap.text, /主手就是石镐/);
+  assert.doesNotMatch(heldCheap.text, /要换就先 hold_item stone_pickaxe/);
+  assert.match(heldCheap.key, /held:pickaxe/);
+  assert.equal(
+    toolTierFact({ inventory: inv, held: 'iron_pickaxe', digging: true })!.key,
+    heldCheap.key,
+    '铁镐/石镐之间换手不改变 key，最多等 30 秒冷却',
+  );
   assert.notEqual(
     toolTierFact({ inventory: [item('iron_pickaxe', 1), item('stone_pickaxe', 1, { durability: { left: 1, max: 131 } }), item('iron_ingot', 0)], digging: true })!.key,
     f.key,
@@ -153,7 +161,8 @@ test('toolTierFact：便宜镐快坏了，报做一把的真实缺口（木棍/�
     item('cobblestone', 30), item('stick', 0), item('oak_log', 1), item('iron_ingot', 0),
   ];
   const f = toolTierFact({ inventory, digging: true })!;
-  assert.match(f.text, /包里的石镐×1（耐久 18\/131）剩余都不足 15%/);
+  assert.match(f.text, /包里的石镐×1（耐久 18\/131）剩余都不足 15%，合计还能挖约 18 格/);
+  assert.match(f.text, /要用现有石镐就先 hold_item stone_pickaxe/);
   assert.match(f.text, /要再做一把石镐：做 stone_pickaxe×1/);
   // 1 根原木够做木棍 → 报材料够，并顺带列出中间品
   assert.match(f.text, /材料已经够了/);
@@ -232,6 +241,6 @@ test('toolTierFact：稀缺材料按箱子账本合计，held 进 key', () => {
   })!;
   assert.match(f.text, /铁锭只剩 1 个/);
   assert.match(f.text, /要再做一把石镐：做 stone_pickaxe×1/);
-  assert.match(f.key, /held:iron_pickaxe/);
+  assert.match(f.key, /held:pickaxe/);
   assert.match(f.key, /mat:1/);
 });

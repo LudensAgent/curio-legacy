@@ -6,7 +6,7 @@ import { EventBus } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { createActivity } from '../src/mind/activity.ts';
 import { Mind } from '../src/mind/mind.ts';
-import { situationalReminders, type MindContext } from '../src/mind/prompt.ts';
+import { buildMindMessages, situationalReminders, type MindContext } from '../src/mind/prompt.ts';
 import { SelfModel } from '../src/mind/self.ts';
 import type { Thinker } from '../src/mind/thinker.ts';
 import { Perception } from '../src/perception/perception.ts';
@@ -130,16 +130,24 @@ test('excavate_path.tool：指定工具挖不了某一格 → TOOL_MISSING 并�
   assert.equal(world.moves.length, 0);
 });
 
-test('提示词：ctx.toolFact 存在时进入【此刻要留意】，不存在时不出现', () => {
+test('提示词：工具事实不占 5 条提醒配额，真实挖掘上下文里也能进入 user 消息', () => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
-  const base: MindContext = { tier: 'glance', reason: '测试', percept: perception.update(), state: adapter.state(), self: new SelfModel(null),
+  const base: MindContext = { tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(), self: new SelfModel(null),
     memory, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' };
+  const activity = createActivity({
+    what: '沿矿道横着挖到 y12 以下，找钻石露头', why: '测试', kind: 'gather', repeat: 1,
+    steps: [{ skill: 'excavate_path', args: { entry: 'current', mode: 'stairs', direction: 'east', steps: 4 } }],
+  }, '', 'llm', adapter.state());
   const fact = '工具分级事实：铁镐耐久快见底，石镐还能挖普通方块';
-  const shown = situationalReminders({ ...base, toolFact: fact });
-  assert.ok(shown.includes(fact), shown.join('\n'));
-  const hidden = situationalReminders({ ...base, toolFact: null });
-  assert.ok(!hidden.some((reminder) => reminder.includes(fact)));
+  const ctx = { ...base, activity, toolFact: fact };
+  const reminders = situationalReminders(ctx);
+  assert.ok(reminders.length <= 5);
+  assert.ok(!reminders.includes(fact), '工具事实不能放在会被 slice(0,5) 截掉的提醒里');
+  const user = buildMindMessages(ctx).find((m) => m.role === 'user')!.content;
+  assert.ok(user.includes(fact), '切片后单独追加，工具事实必须真正进入 user 消息');
+  const hidden = buildMindMessages({ ...ctx, toolFact: null }).find((m) => m.role === 'user')!.content;
+  assert.ok(!hidden.includes(fact));
   memory.close();
 });
 

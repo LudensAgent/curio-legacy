@@ -273,8 +273,8 @@ type PickTier = typeof PICK_TIERS[number];
 const PICK_ZH: Record<PickTier, string> = { wooden: '木镐', stone: '石镐', iron: '铁镐', diamond: '钻石镐' };
 
 /**
- * 工具分级事实：最高档是铁/钻石镐、对应材料稀缺（≤6）且备着能挖普通方块的便宜镐时，
- * 把「高阶镐还剩多少、便宜镐有没有/还能不能做、哪些方块其实不用高阶镐」摆成事实。
+ * 工具分级事实：最高档是铁/钻石镐、对应材料稀缺（≤6）时，把「高阶镐还剩多少、
+ * 便宜镐有没有/还能不能做/还能挖多少、哪些方块其实不用高阶镐」摆成事实。
  * 换不换、做不做由 Agent 定；只在挖掘时投放。key 供上层状态签名去重。
  */
 export function toolTierFact(input: {
@@ -348,27 +348,30 @@ export function toolTierFact(input: {
         : '红石/金/钻石/绿宝石至少要铁镐，远古残骸/黑曜石才必须钻石镐',
   ].filter(Boolean).join('；');
   const heldPick = held?.endsWith('_pickaxe') ? held : null;
+  const alreadyHeld = heldPick === cheapName;
   const parts = [`你包里有${highZh}×${highItem.count}（${durText(highItem)}），${high === 'iron' ? '铁锭' : '钻石'}只剩 ${scarce} 个（做一把新的要 3 个）`];
   if (choice.item) {
+    const left = levelsOf(choice.item).reduce((a, b) => a + b, 0);
     parts.push(usable(choice.item)
       ? `包里还有${cheapZh}×${choice.item.count}（${durText(choice.item)}）`
-      : `包里的${cheapZh}×${choice.item.count}（${durText(choice.item)}）剩余都不足 15%`);
+      : `包里的${cheapZh}×${choice.item.count}（${durText(choice.item)}）剩余都不足 15%，合计还能挖约 ${left} 格`);
   } else parts.push(`包里没有${cheapZh}`);
   if (heldPick) parts.push(`现在主手是 ${heldPick}`);
   if (!choice.item || !usable(choice.item)) parts.push(`要再做一把${cheapZh}：${describePlan(choice.plan)}`);
   parts.push(scope);
-  parts.push(choice.item && usable(choice.item)
-    ? `要换就先 hold_item ${cheapName}；excavate_path 使用主手工具。换不换由你定`
+  // 已经有便宜镐（哪怕快坏）时也把“怎么用现有这把”说清；主手已经是它就别再叫它去拿
+  parts.push(choice.item
+    ? `${alreadyHeld ? `主手就是${cheapZh}，直接开挖即可` : `要用现有${cheapZh}就先 hold_item ${cheapName}`}；excavate_path 使用主手工具。换不换、做不做由你定`
     : '做不做由你定');
 
-  // key 只收“会改变建议”的粗状态：held 只在主手确实是镐时算（否则换火把也会触发重发）；
-  // 缺口只记缺哪些原料而不记数量，避免每捡一块圆石就重发一次同一句话。
+  // key 只收“会改变建议”的粗状态：held 只区分“主手是不是镐”而不记具体名字，
+  // 避免铁镐/石镐来回换手时同一句提示反复重发；缺口只记缺哪些原料而不记数量。
   const gap = !choice.item || !usable(choice.item)
     ? (choice.plan.enough ? 'ready' : choice.plan.raw.map((r) => (r.anyWood ? '*log' : r.item)).sort().join(',') || 'unknown')
     : 'held';
   const key = [
     `tier:${high}`,
-    `held:${heldPick ?? 'none'}`,
+    `held:${heldPick ? 'pickaxe' : 'none'}`,
     `cheap:${choice.tier}:${choice.item?.count ?? 0}:${bucket(choice.item)}`,
     `high:${highItem.count}:${bucket(highItem)}`,
     `mat:${scarce}`,
