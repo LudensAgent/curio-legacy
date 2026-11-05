@@ -643,18 +643,22 @@ export class Mind {
       this.finishActivity('stuck', `「${step.skill}」的自动重试沿用原动作期限，现在已经到期；没有用新的超时重来，下一步由你决定`);
       return;
     }
-    // 自动续跑把剩余绝对期限带进参数，只有实际支持 deadlineMs 的技能会采纳；其余技能至少由下面的计时器约束。
+    // 自动续跑把剩余绝对期限同时交给技能参数和调度预算：支持 deadlineMs 的技能直接采纳，
+    // Arbiter 也按 meta.deadlineMs 收窄 ctx.deadline；下面的计时器是最后兜底。
     const dispatch = budget?.continuation
       ? { ...step, args: { ...(step.args && typeof step.args === 'object' && !Array.isArray(step.args) ? step.args as Record<string, unknown> : {}), deadlineMs: budget.deadlineMs } }
       : step;
     const climb = step.skill === 'climb_up' ? this.activity.climb?.[step.id ?? JSON.stringify(step.args ?? {})] : undefined;
-    const r = this.d.arbiter.start(dispatch, this.activity.source === 'rule' ? 'rule' : 'llm', {
+    // 额外的 deadlineMs 只在自动续跑时出现；新的显式委托不传，Arbiter 仍按技能自身 timeout 起算。
+    const schedule: Parameters<Arbiter['start']>[2] & { deadlineMs?: number } = {
       planId: this.activity.id,
       ...(step.id ? { stepId: step.id } : {}),
       ...(step.origin ? { origin: step.origin } : {}),
       ...(step.authorizedBy ? { authorizedBy: step.authorizedBy } : {}),
       ...(climb ? { climb } : {}),
-    });
+      ...(budget?.continuation ? { deadlineMs: budget.deadlineMs } : {}),
+    };
+    const r = this.d.arbiter.start(dispatch, this.activity.source === 'rule' ? 'rule' : 'llm', schedule);
     if ('error' in r) this.handleStepResult(step, { status: 'failed', failureCode: 'BAD_ARGS', summary: r.error }, 0);
     else if (budget?.continuation) this.watchStepDeadline(r.id, step.skill, budget.deadlineMs);
   }
