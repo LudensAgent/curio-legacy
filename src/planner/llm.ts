@@ -75,7 +75,8 @@ export class OpenAICompatibleProvider implements LlmProvider {
 
   /** 小决策关闭“先长篇思考”：它占了小决策大部分耗时，想得越久，决定落地时信息越旧。
    *  实测 deepseek-flash：瞥一眼、写代码、建筑设计关思考正确率不降、延迟降 4-7.6 倍；
-   *  但「认真想」关思考会想得浅、活的执行质量差（参数/维度错、频繁卡住），故认真想保留 low。 */
+   *  但「认真想」关思考会想得浅、活的执行质量差（参数/维度错、频繁卡住），故认真想保留 low。
+   *  技能总结/生成/改进默认带显式 reasoningEffort（low），不会被这里的放大输出分支关掉。 */
   private noThinking(hint: unknown): boolean {
     if (this.thinkingParamRejected) return false;
     const want = (hint as any)?.reasoningEffort as string | undefined;

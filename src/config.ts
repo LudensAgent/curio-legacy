@@ -128,15 +128,17 @@ export const config = {
     baseUrl: str('CODER_LLM_BASE_URL').replace(/\/+$/, ''),
     apiKey: str('CODER_LLM_API_KEY'),
     /**
-     * 写代码的推理力度（DeepSeek：low|high|max）。实测 reasoning 越长写出的技能反而越差（见 docs/llm-effort-testing-2026-11-01.md），
-     * 故写代码类默认关思考（由 llm.ts 的 noThinking 统一处理），此配置只在显式指定 reasoningEffort 的覆盖时生效。
-     * 三类调用可以分别覆盖：CODER_LLM_REASONING_EFFORT_FORGE（总结新技能）/ _IMPROVE（改进）/ _CURATE（整理技能库）。
+     * 技能总结/生成/改进的推理力度（DeepSeek：low|high|max；off/none 关闭）。
+     * 这三类调用不赶时间，默认开启 low 思考：关闭思考时总结和生成过于简略，
+     * 难以从失败里提炼可执行技能。仍可按类别覆盖；设为 off 才恢复旧行为。
+     * 实测写代码的 reasoning 并非越长越好（docs/llm-effort-testing-2026-11-01.md），
+     * 因此默认 low，不默认 high/max。
      */
     reasoningEffort: str('CODER_LLM_REASONING_EFFORT', 'low').toLowerCase(),
     reasoningEffortBy: {
-      forge: str('CODER_LLM_REASONING_EFFORT_FORGE').toLowerCase(),
-      improve: str('CODER_LLM_REASONING_EFFORT_IMPROVE').toLowerCase(),
-      curate: str('CODER_LLM_REASONING_EFFORT_CURATE').toLowerCase(),
+      forge: str('CODER_LLM_REASONING_EFFORT_FORGE', 'low').toLowerCase(),
+      improve: str('CODER_LLM_REASONING_EFFORT_IMPROVE', 'low').toLowerCase(),
+      curate: str('CODER_LLM_REASONING_EFFORT_CURATE', 'low').toLowerCase(),
     } as Record<string, string>,
     maxTokens: num('CODER_LLM_MAX_TOKENS', 32768),
     timeoutMs: num('CODER_LLM_TIMEOUT_MS', 300000),
