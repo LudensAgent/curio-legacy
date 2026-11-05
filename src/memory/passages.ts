@@ -195,9 +195,19 @@ export class PassageTracker {
 
   /** 把 drop 并进 keep：合并脚点、入口、挖格、矿、最深处和次数，drop 不再单列 */
   private mergeInto(keep: PassageRecord, drop: PassageRecord) {
+    // 两条都有 links 时，取两串链接链之间最近的一对脚点：单步相邻（Chebyshev ≤1）就补一条边。
+    // 不补，并成一条 record 后两串仍是互不相连的岛，passageRoute 会卡在只差一格的缺口上；隔得更远可能是两条真支道，不硬连。
+    // 只有一边有 links 时没有链端点可补，沿用既有机制（无 links 一侧的 path 点不参与 links 图），这里不改变。
+    const endpoints = (r: PassageRecord) => (r.links ?? []).flatMap((l) => [l.a, l.b]);
+    let bridge: [Vec3Like, Vec3Like] | null = null, bd = Infinity;
+    for (const a of endpoints(keep)) for (const b of endpoints(drop)) {
+      const d = d3(a, b);
+      if (d < bd) { bd = d; bridge = [a, b]; }
+    }
     for (const e of drop.entrances) this.addEntrance(keep, e);
     for (const q of drop.path) if (!keep.path.some((o) => d3(o, q) < STEP)) keep.path.push(q);
     for (const l of drop.links ?? []) this.addLink(keep, l.a, l.b);
+    if (bridge && adjacent(bridge[0], bridge[1])) this.addLink(keep, bridge[0], bridge[1]);
     keep.dug += drop.dug;
     for (const [n, c] of Object.entries(drop.ores)) keep.ores[n] = (keep.ores[n] ?? 0) + c;
     keep.deepestY = Math.min(keep.deepestY, drop.deepestY);
@@ -247,7 +257,7 @@ export function passageLevels(rec: Pick<PassageRecord, 'path'>): number[] {
  * 返回从离自己最近的点到离目标最近的点的连接；未验证点间通行或当前地形，不能作为自动导航路线。
  * 两头离通道太远、或者连不上，就返回 null。
  */
-/** 通道脚点 + 真实边走成的无向图：节点是脚点（path 或 links 端点），边是 links（或旧数据的时间相邻脚点）+ 跨 record 的碎片自愈。 */
+/** 通道脚点 + 真实边走成的无向图：节点是脚点（path 或 links 端点），边是 links（或旧数据的时间相邻脚点）+ 跨 record 的碎片自愈 + 同 record 的 1 格缺口自愈。 */
 export function passageGraph(recs: Pick<PassageRecord, 'path' | 'links'>[], opts: { hop?: number; link?: number } = {}): { nodes: Vec3Like[]; owner: number[]; edges: Map<number, Set<number>> } {
   const hop = opts.hop ?? 7, link = opts.link ?? PASSAGE_LINK;
   const nodes: Vec3Like[] = [];
@@ -263,7 +273,7 @@ export function passageGraph(recs: Pick<PassageRecord, 'path' | 'links'>[], opts
   };
   recs.forEach((r, recIdx) => {
     if (r.links?.length) {
-      // 有真实边：只沿亲自走过的相邻格对连，不做同一条内部的几何硬连（那会穿墙/穿落差）
+      // 有真实边：只沿亲自走过的相邻格对连，不按几何距离抄近道（那会穿墙/穿落差）；只差一步的相邻缺口在后面统一补
       for (const { a, b } of r.links) add(indexOf(a, recIdx), indexOf(b, recIdx));
     } else {
       // 旧数据没有 links：退回时间相邻脚点的推断（原行为）
@@ -275,8 +285,14 @@ export function passageGraph(recs: Pick<PassageRecord, 'path' | 'links'>[], opts
       }
     }
   });
-  // 碎片自愈只跨 record：不同 record 之间挨得近的点连起来，同一条 record 内部不靠几何距离硬连
-  for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) if (owner[i] !== owner[j] && d3(nodes[i], nodes[j]) <= link) add(i, j);
+  for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
+    // 跨 record：挨得近的点连起来（碎片自愈）。
+    if (owner[i] !== owner[j]) { if (d3(nodes[i], nodes[j]) <= link) add(i, j); continue; }
+    // 同一条 record：只补「两个已记录脚点水平正交相邻（|Δy|≤1）」这一个缺口——它们本来就是一步之遥的落脚点，
+    // 旧数据里漏记这一步会把一条道断成两团。不按 ≤link 的几何距离硬连，也不补 2 格以上的缺口或斜角缺口。
+    const a = nodes[i], b = nodes[j];
+    if (Math.abs(a.y - b.y) <= 1 && Math.abs(a.x - b.x) + Math.abs(a.z - b.z) === 1) add(i, j);
+  }
   return { nodes, owner, edges };
 }
 

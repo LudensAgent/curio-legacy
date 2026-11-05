@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { PassageTracker, bridgeRuns, passageEntranceDescent, passageLevels, passageRoute } from '../src/memory/passages.ts';
+import { PassageTracker, bridgeRuns, passageEntranceDescent, passageGraph, passageLevels, passageRoute } from '../src/memory/passages.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { describePassage, myFacilities } from '../src/mind/facilities.ts';
 
@@ -106,6 +106,32 @@ test('两条已记下的通道，从一条走进另一条时并成一条（碎�
   const ps = m.passages(D);
   assert.equal(ps.length, 1, '并成一条');
   assert.ok(ps[0].path.some((q) => q.x <= 1) && ps[0].path.some((q) => q.x >= 19), '脚点覆盖两头');
+  m.close();
+});
+
+test('合并两条都有 links 的通道：链接链端点单步相邻时补桥，并成一条后图仍连通', () => {
+  const m = new WorldMemory(null); m.setWorld(W);
+  const base = { worldId: W, dim: D, kind: 'dug' as const, entrances: [], deepestY: 40, dug: 30, ores: {}, createdAt: 0, lastUsedAt: 0 };
+  const chain = (x0: number, z: number, n: number) => Array.from({ length: n }, (_, i) => ({ a: at(x0 + i, 40, z), b: at(x0 + i + 1, 40, z) }));
+  // A 到 x=4 @z0；B 从 x=5 起 @z1。最近端点 (4,40,0)/(5,40,1) 是斜向单步：正交缺口自愈不会连它，只能靠合并时补桥。
+  m.savePassage({ ...base, id: 'A', uses: 3, path: [at(0, 40, 0)], links: chain(0, 0, 4) });
+  m.savePassage({ ...base, id: 'B', uses: 1, path: [at(5, 40, 1)], links: chain(5, 1, 5) });
+  const tr = new PassageTracker(m, () => 'new');
+  // 站在 (8,40,0)：离 A 的 (4,40,0) 有 4 格（进不去 beginBridge），离 B 的 (8,40,1) 1 格；
+  // A 靠手上挖开的那格 (4,40,0) 被认出来，接着 B 也被脚下位置认出来，两条并成一条。
+  tr.observe({ worldId: W, dim: D, pos: at(8, 40, 0), place: 'underground' }, [{ pos: at(4, 40, 0), name: 'stone', ts: 1000 }], 1000);
+  const ps = m.passages(D);
+  assert.equal(ps.length, 1, '并成一条');
+  const p = ps[0];
+  const has = (u: { x: number; y: number; z: number }, v: { x: number; y: number; z: number }) => p.links!.some((l) =>
+    (l.a.x === u.x && l.a.y === u.y && l.a.z === u.z && l.b.x === v.x && l.b.y === v.y && l.b.z === v.z)
+    || (l.a.x === v.x && l.a.y === v.y && l.a.z === v.z && l.b.x === u.x && l.b.y === u.y && l.b.z === u.z));
+  assert.ok(has(at(4, 40, 0), at(5, 40, 1)), '合并时给最近的两个链端点补了一条边');
+  const { nodes, edges } = passageGraph([p]);
+  const seen = new Set<number>([0]);
+  const stack = [0];
+  while (stack.length) for (const v of edges.get(stack.pop()!) ?? []) if (!seen.has(v)) { seen.add(v); stack.push(v); }
+  assert.equal(seen.size, nodes.length, '合并后的 links 不是两团互不相连的岛');
   m.close();
 });
 
