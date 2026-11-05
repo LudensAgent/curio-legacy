@@ -1,6 +1,6 @@
 import type { Vec3Like } from '../adapter/types.ts';
 import { FACINGS, facingOfYaw, feetCell, localMap, supportCell, toWorld, type Facing } from '../perception/local.ts';
-import { attachmentFaces, dropBelow, isSaplingItem, isSoftBlock, LIQUID_BLOCKS, SAPLING_SOIL, surroundings } from '../perception/surroundings.ts';
+import { attachmentFaces, dropBelow, isSoftBlock, isTreeSaplingItem, LIQUID_BLOCKS, saplingSoilFor, saplingSoilText, surroundings } from '../perception/surroundings.ts';
 import { blockCollidesBody, bodyBoxAt, bodyCells, estimatedFallDamage, footSurfaceY, hasAnyCollision, isReplaceable, placementReference, shapeKnown, supportTop, type BlockProps } from '../perception/geometry.ts';
 import { AbortedError, sleep, throwIfAborted } from '../util.ts';
 import { breakCell, why } from './body.ts';
@@ -540,7 +540,7 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
     // 相对 [0,0,0] 的实心块是“原地垫高”搭柱；绝对 xyz 落到脚这一格仍按普通放置，不套搭柱。
     const pos = args.xyz !== undefined ? { x: args.xyz.x, y: args.xyz.y, z: args.xyz.z } : toWorld(feet, args.facing, args.at);
     const attachable = args.item !== 'any' && attachmentFaces(args.item);
-    const sapling = args.item !== 'any' && isSaplingItem(args.item);
+    const sapling = args.item !== 'any' && isTreeSaplingItem(args.item);
     const neighbors = [{ x: 1, y: 0, z: 0 }, { x: -1, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }, { x: 0, y: -1, z: 0 }, { x: 0, y: 0, z: 1 }, { x: 0, y: 0, z: -1 }]
       .map((d) => ({ x: pos.x + d.x, y: pos.y + d.y, z: pos.z + d.z }));
     const seen = visibleStates(ctx, [pos, { ...feet, y: feet.y + 2 }, ...neighbors]);
@@ -574,9 +574,10 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
     if (!pillar && sapling) {
       const supportPos = { x: pos.x, y: pos.y - 1, z: pos.z };
       const support = stateAt(supportPos)?.name ?? a.blockAt(supportPos);
+      const soil = saplingSoilFor(args.item);
       if (support === null) return fail('NOT_FOUND', `[${args.at}] 正下方 (${supportPos.x},${supportPos.y},${supportPos.z}) 未加载，无法确认树苗的土壤，没有放置`, { supportPos, ...after(ctx, args.facing, pos) });
-      if (!SAPLING_SOIL.has(support)) {
-        return fail('BAD_ARGS', `[${args.at}] 种不了树苗：正下方 (${supportPos.x},${supportPos.y},${supportPos.z}) 是 ${support}，树苗（含红树苗 mangrove_propagule）只能种在草方块/泥土/砂土/灰化土/菌丝体/苔藓块/缠根泥土/泥/沾泥的红树根上；换一格下方是土的，或先把下面换成泥土/草方块`, { support, supportPos, expectedSupport: [...SAPLING_SOIL], ...after(ctx, args.facing, pos) });
+      if (!soil.has(support)) {
+        return fail('BAD_ARGS', `[${args.at}] 种不了 ${args.item}：正下方 (${supportPos.x},${supportPos.y},${supportPos.z}) 是 ${support}，${args.item} 只能种在${saplingSoilText(args.item)}上；换一格下方是土的，或先把下面换成泥土/草方块`, { support, supportPos, expectedSupport: [...soil], ...after(ctx, args.facing, pos) });
       }
     }
     // 旁边已经有一个工作台/熔炉还要再放：多半是没注意到它（合成/烧东西会自己走过去用）。真要再放一个写 extra:true
@@ -626,9 +627,7 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
     // 附着面：已看清六个方向却没有可贴面的方块，就不必再调一个必然失败的放置；
     // 还有方向没看清时只报未知，交给适配器按真实视线/距离尝试。
     const reference = placementReference(pos, stateAt, attachable || null);
-    // 树苗下方是有效土壤时已经由适配器确认过支撑；这里不抢在适配器前面报“悬空”，
-    // 让放置失败能带回“有相邻面但视线被挡/超出 4.4 格”这类具体细节。
-    if (reference === 'none' && !sapling) {
+    if (reference === 'none') {
       return fail('PATH_NOT_FOUND', `[${args.at}] 四周已看清，没有可贴面的方块；${
         attachable === 'side' ? `${args.item} 只能挂在实心方块侧面` : attachable === 'floor_or_side' ? `${args.item} 要立在实心方块顶面或挂在侧面` : '悬空处放不了方块'}；先走近别的面或换个位置`, { reference, ...after(ctx, args.facing, pos) });
     }

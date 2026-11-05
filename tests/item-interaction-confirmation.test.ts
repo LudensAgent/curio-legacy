@@ -137,3 +137,38 @@ test('cancelled boat placement aborts without reporting a spawned boat', async (
   await assert.rejects(pending, { name: 'AbortedError' });
   resume(); await flush();
 });
+
+test('tree sapling use_item confirms placement on valid soil and rejects non-soil before placing', async (t) => {
+  const advance = clock(t);
+  // 草方块顶面：真实 placeItemAgainst 选顶面，确认目标格出现树苗且背包减少。
+  const ok = fixture('oak_sapling');
+  const pending = ok.adapter.useItemOn('oak_sapling', { kind: 'block', pos: ok.ground }, new AbortController().signal);
+  await advance();
+  const placed = await pending;
+  assert.equal(placed.ok, true, placed.reason);
+  assert.deepEqual(placed.placed, { x: 2, y: 64, z: 0 });
+  assert.equal(placed.effectEvidence?.changed, true);
+  assert.equal(ok.count(), 3);
+  assert.equal(ok.placements(), 1);
+
+  // 非土壤/仅红树苗可用的黏土：在发送放置前就报 BAD_SUPPORT，普通树苗不会误放。
+  for (const [item, soil] of [['oak_sapling', 'stone'], ['oak_sapling', 'clay'], ['mangrove_propagule', 'stone']] as const) {
+    const bad = fixture(item);
+    bad.put(soil, bad.ground);
+    const r = await bad.adapter.useItemOn(item, { kind: 'block', pos: bad.ground }, new AbortController().signal);
+    assert.equal(r.ok, false, `${item}/${soil}`);
+    assert.match(r.reason ?? '', /^BAD_SUPPORT/, `${item}/${soil}: ${r.reason}`);
+    assert.match(r.reason ?? '', new RegExp(soil));
+    assert.equal(bad.placements(), 0, `${item}/${soil} 不应发送放置`);
+  }
+
+  // 红树苗可以种在黏土上。
+  const mangrove = fixture('mangrove_propagule');
+  mangrove.put('clay', mangrove.ground);
+  const mangrovePending = mangrove.adapter.useItemOn('mangrove_propagule', { kind: 'block', pos: mangrove.ground }, new AbortController().signal);
+  await advance();
+  const mangroveResult = await mangrovePending;
+  assert.equal(mangroveResult.ok, true, mangroveResult.reason);
+  assert.deepEqual(mangroveResult.placed, { x: 2, y: 64, z: 0 });
+  assert.equal(mangrove.count(), 3);
+});

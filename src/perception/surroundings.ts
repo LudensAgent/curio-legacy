@@ -10,11 +10,20 @@ const AIR = new Set(['air', 'cave_air', 'void_air']);
 const SOFT = /^(air|cave_air|void_air|nether_portal|end_portal|end_gateway|ladder|short_grass|grass|tall_grass|fern|large_fern|dead_bush|snow|torch|wall_torch|.*_torch|.*_flower|dandelion|poppy|.*_tulip|azure_bluet|oxeye_daisy|cornflower|lily_of_the_valley|allium|blue_orchid|.*_sapling|.*_mushroom|sugar_cane|vine|.*_carpet|rail|.*_rail|redstone_wire|.*_button|lever|tripwire|.*_pressure_plate|sweet_berry_bush|seagrass|tall_seagrass|kelp|kelp_plant)$/;
 const LIQUID = new Set(['water', 'lava', 'bubble_column']);
 
-/** 1.20.1 原版能种下树苗的土壤（树苗目标格的正下方必须是其中一种）。 */
+/** 1.20.1 原版能种下普通树苗的土壤（目标格正下方必须是其中一种）。 */
 export const SAPLING_SOIL = new Set(['grass_block', 'dirt', 'coarse_dirt', 'podzol', 'mycelium', 'moss_block', 'rooted_dirt', 'mud', 'muddy_mangrove_roots']);
 
-/** 树苗类物品：普通树苗 *_sapling，以及红树苗 mangrove_propagule（注册名不含 _sapling）。 */
-export const isSaplingItem = (name: string) => /_sapling$/.test(name) || name === 'mangrove_propagule';
+/** 树苗类物品：树木树苗 *_sapling 与红树苗 mangrove_propagule；不含 azalea 等灌木。 */
+export const isTreeSaplingItem = (name: string) => /_sapling$/.test(name) || name === 'mangrove_propagule';
+
+/** 按物品取可种土壤：红树苗在普通树苗土壤外多认 clay（1.20.1），普通树苗不能种在黏土上。 */
+const MANGROVE_SOIL = new Set([...SAPLING_SOIL, 'clay']);
+export const saplingSoilFor = (item: string) => item === 'mangrove_propagule' ? MANGROVE_SOIL : SAPLING_SOIL;
+
+/** 给错误信息用的土壤说明（红树苗与普通树苗口径不同）。 */
+export const saplingSoilText = (item: string) => item === 'mangrove_propagule'
+  ? '草方块/泥土/砂土/灰化土/菌丝体/苔藓块/缠根泥土/泥/沾泥的红树根/黏土'
+  : '草方块/泥土/砂土/灰化土/菌丝体/苔藓块/缠根泥土/泥/沾泥的红树根（普通树苗不能种在黏土上）';
 
 /** 贴墙放的东西能挂在哪一面：梯子只能挂在实心方块的侧面；火把、告示牌、杠杆可以立在地上或挂墙；其余整块方块哪面都行（null） */
 export function attachmentFaces(name: string): 'side' | 'floor_or_side' | null {

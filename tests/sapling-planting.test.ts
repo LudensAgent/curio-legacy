@@ -75,6 +75,33 @@ test('place_at 把红树苗 mangrove_propagule 按树苗规则种在泥上', asy
   assert.equal(w.blockAt({ x: 0, y: 64, z: -1 }), 'mangrove_propagule');
 });
 
+test('place_at 红树苗可以种在黏土上（clay 只对红树苗有效）', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.inv.set('mangrove_propagule', 1);
+  w.setBlock({ x: 0, y: 63, z: -1 }, 'clay');
+  const c = makeCtx(w, { senses: { observeBlocks: observeAllBlocks(w) } });
+  t.after(() => c.memory.close());
+  const r = await placeAt.run(c, { at: [1, 0, 0], facing: 'N', item: 'mangrove_propagule' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(w.blockAt({ x: 0, y: 64, z: -1 }), 'mangrove_propagule');
+});
+
+test('place_at 普通树苗在黏土上仍失败并明确报支撑', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.inv.set('oak_sapling', 1);
+  w.setBlock({ x: 0, y: 63, z: -1 }, 'clay');
+  const c = makeCtx(w, { senses: { observeBlocks: observeAllBlocks(w) } });
+  t.after(() => c.memory.close());
+  const r = await placeAt.run(c, { at: [1, 0, 0], facing: 'N', item: 'oak_sapling' });
+  assert.equal(r.status, 'failed');
+  assert.equal(r.failureCode, 'BAD_ARGS');
+  assert.match(r.summary, /正下方 \(0,63,-1\) 是 clay/);
+  assert.match(r.summary, /普通树苗不能种在黏土上/);
+  assert.equal(w.inv.get('oak_sapling'), 1);
+});
+
 test('place_at 红树苗种在石头下同样明确报支撑错误', async (t) => {
   const w = new TestWorld();
   w.pos = { x: 0.5, y: 64, z: 0.5 };
@@ -113,7 +140,7 @@ test('place_at 拒绝种在空气/石头下方，并明确报出下方方块', a
 /** 下方土壤有效，但放置面看不见/够不到：模拟真实适配器返回具体细节。 */
 class NoFaceWorld extends TestWorld {
   override async placeBlockAt(): Promise<ActionResult> {
-    return { ok: false, reason: 'NO_REFERENCE', detail: '(0,64,-1) 有 1 个相邻实心方块，但从当前眼睛位置到这些面的视线被挡或超出 4.4 格；先退后一步或侧移换个角度，让目标格和相邻方块的面进入视野再放' };
+    return { ok: false, reason: 'NO_REFERENCE', detail: '(0,64,-1) 有 1 个相邻实心方块，但从当前眼睛位置到这些面的视线被挡或超出 4.4 格；调整站位（靠近或侧移）让目标面和相邻方块进入视野/交互距离再放' };
   }
 }
 
@@ -127,7 +154,8 @@ test('place_at 土壤有效但看不到/够不到面时保留适配器细节，�
   assert.equal(r.status, 'failed');
   assert.equal(r.failureCode, 'PATH_NOT_FOUND');
   assert.match(r.summary, /视线被挡或超出 4\.4 格/);
-  assert.match(r.summary, /退后一步或侧移/);
+  assert.match(r.summary, /调整站位（靠近或侧移）/);
+  assert.match(r.summary, /交互距离/);
   assert.doesNotMatch(r.summary, /四周已看清|悬空/);
 });
 
@@ -194,4 +222,27 @@ test('use_item 对坐标种红树苗同样给出树苗指引', async (t) => {
   assert.match(r.summary, /place_at/);
   assert.match(r.summary, /mangrove_propagule/);
   assert.equal(w.inv.get('mangrove_propagule'), 1);
+});
+
+/** 模拟适配器对非土壤目标的确定性拒绝（真实适配器在 placeItemAgainst 之前做同样检查）。 */
+class BadSupportWorld extends TestWorld {
+  override async useItemOn(
+    item: string,
+    _target: { kind: 'block'; pos: Vec3Like } | { kind: 'self' },
+  ): Promise<ActionResult> {
+    return { ok: false, reason: `BAD_SUPPORT:${item} 不能种在 stone 上，只能种在草方块/泥土等土壤上`, effectEvidence: { verified: true, changed: false, reasons: [] } };
+  }
+}
+
+test('use_item 把适配器的 BAD_SUPPORT 反馈成 BAD_ARGS 而不是泛化执行错误', async (t) => {
+  const w = new BadSupportWorld();
+  w.inv.set('oak_sapling', 1);
+  w.setBlock({ x: 0, y: 63, z: -1 }, 'stone');
+  const c = makeCtx(w);
+  t.after(() => c.memory.close());
+  const r = await useItem.run(c, { item: 'oak_sapling', on: 'stone' });
+  assert.equal(r.status, 'failed');
+  assert.equal(r.failureCode, 'BAD_ARGS');
+  assert.match(r.summary, /BAD_SUPPORT/);
+  assert.match(r.summary, /stone/);
 });
