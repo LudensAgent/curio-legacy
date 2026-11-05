@@ -647,7 +647,7 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
       const back = args.to === 'entrance';
       // 入口解析同时记下这条出口所属的记录 ID：绕行预检要给 agent 一个“强制走这条”的 id。
       const chosenExit = back ? passageSurfaceCandidates(recs, here, { limit: 1 })[0] : undefined;
-      target = back ? (chosenExit?.anchor ?? passageSurfaceAnchor(recs, here)) : passageDeepestAnchor(recs, here);
+      target = back ? (chosenExit?.anchor ?? passageSurfaceAnchor(recs, here, { allowUnreachable: !!args.dig })) : passageDeepestAnchor(recs, here);
       if (!target) return receipt(fail('NOT_FOUND', '旧矿道里没有可用的目标点'));
       resolved = target;
       const anchor = `(${Math.round(target.x)},${Math.round(target.y)},${Math.round(target.z)})`;

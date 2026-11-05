@@ -591,9 +591,16 @@ export function passageSurfaceCandidates(recs: (Pick<PassageRecord, 'path' | 'en
  * 不能只按水平距离取最近的入口——归档里的旧入口可能在脚下方几十格，
  * 选中它会让 follow_passage 在“深处入口”报到达，然后另一个动作再挖上去。
  * 兜底也不能只按 y 取最高点：反向没有证据的落差（有向禁行）之外的更高点到不了，返回它只会让路由 null。 */
-export function passageSurfaceAnchor(recs: Pick<PassageRecord, 'path' | 'entrances' | 'links'>[], here: Vec3Like): Vec3Like | null {
+export function passageSurfaceAnchor(recs: Pick<PassageRecord, 'path' | 'entrances' | 'links'>[], here: Vec3Like,
+  opts: { allowUnreachable?: boolean } = {}): Vec3Like | null {
   const best = passageSurfaceCandidates(recs, here, { limit: 1 })[0];
   if (best) return best.anchor;
+  // 带施工权限时，目标可以是记录里更高的不可达出口：follow_passage 的 dig:true 会先尝试接上小断口。
+  // 不带施工权限时只给有向可达的点，避免拿一个当前根本到不了的锚点当目标。
+  if (opts.allowUnreachable) {
+    const { pool } = surfacePool(recs, here);
+    return [...pool.flatMap((r) => r.path)].sort((a, b) => b.y - a.y)[0] ?? null;
+  }
   const { nodes, edges, blocked } = passageGraph(recs);
   // 起点按三维距离取最近脚点（竖直井里同一 x/z 的上下点不能混为一谈）；离网远时 follow_passage 会先走过去。
   let origin = -1, bd = Infinity;
