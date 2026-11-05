@@ -52,22 +52,24 @@ const stateAt = (adapter: SkillCtx['adapter']): StateAt => (pos) => {
  */
 function supportProblem(ctx: SkillCtx, cell: Vec3Like, expectedFoot: number, label: string): ExcavationStop | null {
   const state: ObservedState | null = stateAt(ctx.adapter)(cell);
-  if (state === null) return new ExcavationStop('NOT_FOUND', `${label}支撑格未加载/未知，不能确认支撑`);
-  if (hazard(state.name)) return new ExcavationStop('ERROR', `${label}是 ${state.name}（${hazardLabel(state.name)}），不能冒险下落`);
-  if (PORTAL_BLOCKS.has(state.name)) return new ExcavationStop('ERROR', `${label}是 ${state.name}（传送门，不能承重），不能作为站立支撑`);
-  if (!shapeKnown(state.name, state.properties ?? {})) return new ExcavationStop('NOT_FOUND', `${label}的 ${state.name} 状态未确认（缺少 blockstate），不能确认支撑顶面`);
+  const at = `(${cell.x},${cell.y},${cell.z})`;
+  const landing = `(${cell.x},${expectedFoot},${cell.z})`;
+  if (state === null) return new ExcavationStop('NOT_FOUND', `${label}${landing}的支撑格 ${at} 未加载/未知，不能确认支撑`);
+  if (hazard(state.name)) return new ExcavationStop('ERROR', `${label}${landing}的支撑格 ${at} 是 ${state.name}（${hazardLabel(state.name)}），不能冒险下落`);
+  if (PORTAL_BLOCKS.has(state.name)) return new ExcavationStop('ERROR', `${label}${landing}的支撑格 ${at} 是 ${state.name}（传送门，不能承重），不能作为站立支撑`);
+  if (!shapeKnown(state.name, state.properties ?? {})) return new ExcavationStop('NOT_FOUND', `${label}${landing}的支撑格 ${at} 是 ${state.name}，状态未确认（缺少 blockstate），不能确认支撑顶面`);
   const top = supportTop(state.name, state.properties ?? {});
   if (top === null) {
     if (AIR.has(state.name)) {
-      const gap = new ExcavationStop('ERROR', `${label}下面是空的（${state.name}）：前面脚下是个坑/洞穴`);
+      const gap = new ExcavationStop('ERROR', `${label}${landing}的支撑格 ${at} 是 ${state.name}：下一落点下面是空的，没有可站立支撑`);
       gap.nextLanding = { ...cell, y: expectedFoot };
       return gap;
     }
-    return new ExcavationStop('ERROR', `${label}的 ${state.name} 没有水平承重顶面，不能作为落点支撑`);
+    return new ExcavationStop('ERROR', `${label}${landing}的支撑格 ${at} 是 ${state.name}，没有水平承重顶面，不能作为落点支撑`);
   }
   const surface = cell.y + top;
   if (Math.abs(surface - expectedFoot) > 0.01) {
-    return new ExcavationStop('ERROR', `${label}支撑面在 y=${surface.toFixed(2)}（${state.name}），与本次期望脚高 y=${expectedFoot.toFixed(2)} 不符；当前整格开挖未实现半格/非整块脚高转换`, true);
+    return new ExcavationStop('ERROR', `${label}${landing}的支撑格 ${at} 支撑面在 y=${surface.toFixed(2)}（${state.name}），与期望脚高 y=${expectedFoot.toFixed(2)} 不符；当前整格开挖未实现半格/非整块脚高转换`, true);
   }
   return null;
 }
@@ -301,7 +303,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       : /没有水平承重顶面|传送门/.test(msg) ? '（这一格不是能站的水平承重面：换方向，或先用 dig_at / place_at 改变这一格）'
       : /下落方块/.test(msg) ? '（下面是沙子/沙砾这类下落方块，换方向或先堵住再挖）'
       : /未知|未加载/.test(msg) ? '（先照亮/转头看清那一格再挖，或换方向）'
-      : cavity ? '（已附当前可见落点事实 cavity；要补支撑得自己显式 place_at，或换方向，或选落点用 descend；本次开挖没有自动垫/挖/下落）'
+      : cavity ? `（下一落点 (${cavity.nextLanding.x},${cavity.nextLanding.y},${cavity.nextLanding.z}) 的支撑格 (${cavity.supportCell.x},${cavity.supportCell.y},${cavity.supportCell.z}) 是空的；要补支撑得自己显式 place_at 这一格，或换方向，或选落点用 descend；本次开挖没有自动垫/挖/下落）`
       : /下面是空的|洞穴|虚空/.test(msg) ? '（前面脚下是空的：要补支撑得自己显式 place_at，或换方向、下去探这个洞；这不是本次开挖自动做的）'
       : /支撑面在|半格|整格脚高/.test(msg) ? '（落点实际支撑顶面与所选脚高不符；可确认落点高度、换一格/换方向，或改用 step 明确落脚）'
       : /身体空间|干燥|站稳/.test(msg) ? '（先挖开落点那两格的脚/头空间，或换方向）'

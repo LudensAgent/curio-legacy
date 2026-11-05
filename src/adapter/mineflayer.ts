@@ -1897,7 +1897,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const refs = faces.map((f) => ({ f, ref: b.blockAt(target.plus(f)) }))
       .filter((x) => x.ref && (x.ref.boundingBox === 'block' || (fluidRef && (x.ref.name === 'lava' || x.ref.name === 'water'))))
       .sort((x, y) => Number(OPENS_ON_CLICK.test(x.ref.name)) - Number(OPENS_ON_CLICK.test(y.ref.name)));
-    if (!refs.length && attach) return { ok: false, reason: attach === 'side' ? 'NO_WALL' : 'NO_FLOOR_OR_WALL' };
+    const at = `(${target.x},${target.y},${target.z})`;
+    if (!refs.length && attach) return { ok: false, reason: attach === 'side' ? 'NO_WALL' : 'NO_FLOOR_OR_WALL', detail: `${at} 四周没有已加载的实心方块面` };
     for (const { f, ref } of refs) {
       if (!this.canClickPlacementFace(ref, f.scaled(-1))) continue;
       const sneak = OPENS_ON_CLICK.test(ref.name);
@@ -1931,7 +1932,13 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         }
       }
     }
-    return { ok: false, reason: 'NO_REFERENCE' };
+    return {
+      ok: false,
+      reason: 'NO_REFERENCE',
+      detail: refs.length
+        ? `${at} 有 ${refs.length} 个相邻实心方块，但从当前眼睛位置到这些面的视线被挡或超出 4.4 格`
+        : `${at} 四周没有相邻实心方块（悬空），从当前站位没有可贴的面`,
+    };
   }
 
   /**
