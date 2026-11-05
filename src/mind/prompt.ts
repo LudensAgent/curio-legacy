@@ -25,7 +25,7 @@ import { foodNote } from '../skills/food.ts';
 import { isResourceBlock, oreSpotsByKind, oreSpotsNear } from '../memory/ore-spots.ts';
 import { oreLayerFacts } from '../knowledge/ore-layers.ts';
 import { husbandryFacts, villagerFacts } from '../knowledge/husbandry.ts';
-import type { HuntTally } from './ledger.ts';
+import { MATERIAL_FAMILIES, type HuntTally, type MaterialTally } from './ledger.ts';
 import { FOOD_ANIMAL_NAMES } from '../skills/movement.ts';
 import { config } from '../config.ts';
 import { creatureSpotsByKind, creatureSpotsNear } from '../memory/creature-spots.ts';
@@ -85,6 +85,8 @@ export interface MindContext {
   trip?: { minutes: number; gained: Record<string, number>; nearEnd: boolean };
   /** 打猎的账（给“肉快打光了”这种事实） */
   hunting?: HuntTally | null;
+  /** 材料账：木料/矿石各跑过几段活、一共多少、走了多远（给重复跑腿的事实，不替 Agent 决定备多少） */
+  materials?: { wood: MaterialTally; ore: MaterialTally } | null;
   /** 主目标和清单 */
   plan?: FocusPlan | null;
   /** 阶段回顾：情绪或回想提醒它停下来看这一阶段在做什么（有这一项时才允许换主目标） */
@@ -326,6 +328,9 @@ const MINING_INTENT = /下矿|矿道|矿洞|找铁|挖铁|找矿|挖矿|粗铁|�
 /** 打算里说要从地下回地面 */
 const SURFACE_INTENT = /回地面|回到地面|回前哨|回基地|回入口|退回入口|回地表|见天|爬出|挖出去|出矿|上地面|上到地面|往上爬|往上走|往上挖|挖(阶梯|台阶).{0,8}上/;
 
+/** 打算里说木头/砍树/原木（材料账只在相关时出现，避免每念都提） */
+const WOOD_INTENT = /木|树|砍|log|_wood/;
+
 /** 沿来路回入口的下一步：把全部记下的通道连成网（碎片也接得上），取朝地表锚点走的下一个路点，核对下一步那两格（脚下+头顶）现在是否还通，给出「可走/被堵」的当前事实。 */
 function passageWayBack(ctx: MindContext): string | null {
   const p = ctx.percept, s = ctx.state;
@@ -418,10 +423,10 @@ function intentText(ctx: MindContext): string {
 }
 
 /**
- * 不占 5 条提醒配额的决策事实：下矿的账、顺手采集、挖掘规模。
+ * 不占 5 条提醒配额的决策事实：下矿的账、木料/矿石的账、顺手采集、挖掘规模。
  * 地下挖掘时静态说明常已占满 situationalReminders 的 5 个位置，这些事实按 push 顺序排在后面会被 slice 截掉
  * （2026-11-06 线上：388 个地下 prompt 里“下矿的账/顺手采集”0 次送达，ore_opportunity 却打了 231 次日志）。
- * 这里只把已有事实换个送达位置；采不采、收不收工仍由 Agent 决定。
+ * 这里只把已有事实换个送达位置；采不采、收不收工、备多少仍由 Agent 决定。
  */
 export function decisionReminders(ctx: MindContext): string[] {
   const out: string[] = [];
@@ -441,6 +446,22 @@ export function decisionReminders(ctx: MindContext): string[] {
     const picks = durabilityFacts(s.inventory, ['pickaxe'], p.storage?.stock);
     const back = passageWayBack(ctx);
     out.push(`下矿的账：${got.length ? `挖到 ${got.join(' ')}` : '还没挖到矿'}；背包空 ${p.emptySlots} 格${picks.length ? `；${picks.join('、')}` : ''}；身边${seen.length ? `看得见 ${seen.join('、')}` : '没看见矿'}${remembered ? `，48 格内记得 ${remembered} 处矿点` : ''}${back ? `；${back}` : ''}。清单后面几项还要不要这些料，一起掂量再决定收不收工`);
+  }
+  // 木料/矿石的账：同一类材料反复跑了好几趟时，把趟数、总量、走过的距离和手头现有量摆成事实。
+  // 只报事实；多备、换做法、种不种树都由 Agent 决定，这里不推荐任何一种做法。
+  const materials = ctx.materials;
+  if (materials) {
+    const stockNow = (re: RegExp) => s.inventory.filter((i) => re.test(i.name)).reduce((n, i) => n + i.count, 0)
+      + (p.storage?.stock ?? []).filter((r) => re.test(r.item)).reduce((n, r) => n + r.inChests, 0);
+    const gatheringWood = ctx.activity?.kind === 'gather' && WOOD_INTENT.test(JSON.stringify(ctx.activity.steps));
+    if (materials.wood.trips >= 2 && (WOOD_INTENT.test(intent) || gatheringWood)) {
+      const t = materials.wood;
+      out.push(`木料的账：最近 ${t.trips} 段活拿到 ${t.units} 个原木/木块，共走了 ${t.walked} 格（最近平均每趟 ${t.recentWalked ?? '?'} 格）；现在背包/箱子里有 ${stockNow(MATERIAL_FAMILIES.wood)} 个。要不要多备、要不要换做法由你定。`);
+    }
+    if (materials.ore.trips >= 2 && MINING_INTENT.test(intent)) {
+      const t = materials.ore;
+      out.push(`矿石的账：最近 ${t.trips} 段活拿到 ${t.units} 个矿石/粗矿，共走了 ${t.walked} 格（最近平均每趟 ${t.recentWalked ?? '?'} 格）；现在背包/箱子里有 ${stockNow(MATERIAL_FAMILIES.ore)} 个。要不要多备、要不要换做法由你定。`);
+    }
   }
   // 顺手采集与不可替代工具：把「看见什么矿 + 现在这类料有多少 + 能做什么」摆成事实，让它在路过矿石时能自己掂量要不要顺手采；
   // 只报事实，采不采、做不做备用工具都由它定（不替它写 gather 或 craft）

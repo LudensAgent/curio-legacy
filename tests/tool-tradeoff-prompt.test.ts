@@ -181,6 +181,31 @@ test('提示词：下矿的账/顺手采集/挖掘规模不占 5 条提醒配额
   memory.close();
 });
 
+test('提示词：木料的账只在木料相关且跑过 2 趟以上时送达，不打扰挖矿/无关场景', () => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  adapter.inv.set('oak_log', 24);
+  adapter.inv.set('birch_log', 8);
+  const perception = new Perception(adapter, memory, bus, new Vision(adapter));
+  const base: MindContext = { tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(), self: new SelfModel(null),
+    memory, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' };
+  const tally = (trips: number, units: number, walked: number, recentWalked: number) => ({ trips, units, walked, recentWalked, lastAt: trips ? 1_000 : null });
+  const woodActivity = createActivity({ what: '砍树收集原木', why: '测试', kind: 'gather', repeat: 1, steps: [{ skill: 'gather', args: { block: 'oak_log' } }] }, '', 'llm', adapter.state());
+  const user = buildMindMessages({ ...base, activity: woodActivity, materials: { wood: tally(7, 30, 795, 114), ore: tally(1, 5, 90, 90) } }).find((m) => m.role === 'user')!.content;
+  assert.match(user, /木料的账：最近 7 段活拿到 30 个原木\/木块，共走了 795 格（最近平均每趟 114 格）；现在背包\/箱子里有 32 个。要不要多备、要不要换做法由你定。/);
+  assert.ok(!user.includes('种树'), '只报事实，不推荐种树');
+  const once = buildMindMessages({ ...base, activity: woodActivity, materials: { wood: tally(1, 3, 40, 40), ore: tally(0, 0, 0, 0) } }).find((m) => m.role === 'user')!.content;
+  assert.ok(!once.includes('木料的账'), '只跑过 1 趟不出现');
+  // 挖矿意图：木料的账不出现；矿石没到 2 趟也不出现，到了才出现
+  const miningActivity = createActivity({ what: '沿矿道往下挖，找钻石', why: '测试', kind: 'gather', repeat: 1, steps: [{ skill: 'excavate_path', args: { entry: 'current', mode: 'stairs', direction: 'east', steps: 4 } }] }, '', 'llm', adapter.state());
+  const mining = buildMindMessages({ ...base, activity: miningActivity, materials: { wood: tally(7, 30, 795, 114), ore: tally(1, 5, 90, 90) } }).find((m) => m.role === 'user')!.content;
+  assert.ok(!mining.includes('木料的账'), '挖矿时木料的账不该出现');
+  assert.ok(!mining.includes('矿石的账'), '矿石只跑过 1 趟不出现');
+  const oreCtx = buildMindMessages({ ...base, activity: miningActivity, materials: { wood: tally(7, 30, 795, 114), ore: tally(3, 12, 260, 80) } }).find((m) => m.role === 'user')!.content;
+  assert.match(oreCtx, /矿石的账：最近 3 段活拿到 12 个矿石\/粗矿，共走了 260 格（最近平均每趟 80 格）/);
+  assert.ok(!oreCtx.includes('木料的账'));
+  memory.close();
+});
+
 test('mind：同一 key 的工具事实不每念重复，key 变化后再说', () => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   adapter.inv.set('iron_pickaxe', 1);

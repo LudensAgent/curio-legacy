@@ -8,7 +8,7 @@ import { SkillSmith } from '../src/codeskills/smith.ts';
 import { EventBus } from '../src/events.ts';
 import { BUILTIN_SKILLS_DIR, SkillBook } from '../src/knowledge/skillbook.ts';
 import { BehaviorEngine } from '../src/mind/behaviors.ts';
-import { describeDist, Ledger } from '../src/mind/ledger.ts';
+import { describeDist, Ledger, type Episode } from '../src/mind/ledger.ts';
 import { recallLocal } from '../src/mind/recall.ts';
 import { SelfModel } from '../src/mind/self.ts';
 import { FakeAdapter } from './fake-adapter.ts';
@@ -31,6 +31,33 @@ test('收获账本：不针对哪种东西，按“得到的东西”记每个�
   assert.match(st.best[0].signature, /goto forest/, '最省的做法排前面');
   assert.match(ledger.describe('oak_log'), /在变省.*最省的做法：「去森林边砍」/);
   assert.match(ledger.digest().join('\n'), /什么也没得到/, '白忙的比例也算进去');
+});
+
+test('材料的账：木料/矿石各跑了几段活、拿了多少、走了多远、最近平均每趟', () => {
+  const ledger = new Ledger(null, new EventBus(), () => { throw new Error('不用状态'); });
+  const ep = (at: number, walked: number, gained: Record<string, number>): Episode =>
+    ({ at, what: '采集', kind: 'gather', signature: 's', outcome: 'done', sec: 60, actions: 1, failures: 0, walked, hpLost: 0, gained });
+  ledger.data.episodes = [
+    ep(1_000, 100, { oak_log: 6, stick: 2 }),
+    ep(2_000, 200, { birch_log: 8 }),
+    ep(3_000, 300, { spruce_wood: 10, dirt: 4 }),
+    ep(4_000, 90, { raw_iron: 2, iron_ore: 3 }),
+    ep(5_000, 70, { stone: 32 }),
+  ];
+  const wood = ledger.materialTally('wood');
+  assert.equal(wood.trips, 3);
+  assert.equal(wood.units, 24, '只数木料这一族，木棍和泥土不算');
+  assert.equal(wood.walked, 600);
+  assert.equal(wood.recentWalked, 200, '最近 3 段平均');
+  assert.equal(wood.lastAt, 3_000);
+  const ore = ledger.materialTally('ore');
+  assert.equal(ore.trips, 1);
+  assert.equal(ore.units, 5);
+  assert.equal(ore.walked, 90);
+  assert.equal(ore.lastAt, 4_000);
+  ledger.data.episodes.push(ep(6_000, 30, { coal_ore: 1 }));
+  assert.equal(ledger.materialTally('ore').trips, 2);
+  assert.equal(ledger.materialTally('ore').recentWalked, 60, '最近 3 段变两段');
 });
 
 test('东西出现在哪：看见的和拿到的按高度、群系记成分布，同一格方块只记一次', () => {

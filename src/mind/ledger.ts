@@ -37,10 +37,15 @@ export interface LedgerSignal { item: string; direction: 'slow' | 'fast'; ratio:
 export interface ConsumeSignal { item: string; perBlock: number; usualPerBlock: number; episode: Episode }
 
 /** 心智和造技能的看到的账（只读） */
-export interface LedgerView { names(): string[]; describe(name: string): string; digest(n?: number): string[]; skillEffect(name: string): string; aliases(name: string): string[]; huntTally(): HuntTally }
+export interface LedgerView { names(): string[]; describe(name: string): string; digest(n?: number): string[]; skillEffect(name: string): string; aliases(name: string): string[]; huntTally(): HuntTally; materialTally(family: MaterialFamily): MaterialTally }
 
 /** 打猎的账：为了肉走了多远、打了多少 */
 export interface HuntTally { trips: number; animals: number; walked: number; recentWalked: number | null; lastAt: number | null }
+/** 一类材料的账：有几段活拿到了它、一共多少、为了它走了多远（最近 3 段平均每趟） */
+export interface MaterialTally { trips: number; units: number; walked: number; recentWalked: number | null; lastAt: number | null }
+/** 材料分类：按物品名归类，不枚举具体种类（木料、矿石各一族） */
+export const MATERIAL_FAMILIES = { wood: /_log$|_wood$/, ore: /_ore$|raw_/ } as const;
+export type MaterialFamily = keyof typeof MATERIAL_FAMILIES;
 /** 动物身上掉的生肉：一块肉算一只（鸡掉 1，牛猪羊 1–3 都按 1 只估，宁可少算） */
 const RAW_MEAT = new Set(['beef', 'porkchop', 'mutton', 'chicken', 'rabbit']);
 /** 照明类可消耗资源：放了就没了，插得密不密直接反映在「每走一格用多少」上（垫料/食物不算浪费，不盯） */
@@ -356,6 +361,16 @@ export class Ledger implements LedgerView {
     const recent = hunts.slice(-3);
     return { trips: hunts.length, animals, walked: hunts.reduce((n, e) => n + e.walked, 0),
       recentWalked: recent.length ? Math.round(recent.reduce((n, e) => n + e.walked, 0) / recent.length) : null, lastAt: hunts.at(-1)?.at ?? null };
+  }
+
+  /** 一类材料的账：哪几段活拿到了这类东西、一共多少、为了它走了多远（复用 Episode.walked/gained，不另记） */
+  materialTally(family: MaterialFamily): MaterialTally {
+    const re = MATERIAL_FAMILIES[family];
+    const trips = this.data.episodes.filter((e) => Object.keys(e.gained).some((k) => re.test(k)));
+    const units = trips.reduce((n, e) => n + Object.entries(e.gained).filter(([k]) => re.test(k)).reduce((m, [, v]) => m + v, 0), 0);
+    const recent = trips.slice(-3);
+    return { trips: trips.length, units, walked: trips.reduce((n, e) => n + e.walked, 0),
+      recentWalked: recent.length ? Math.round(recent.reduce((n, e) => n + e.walked, 0) / recent.length) : null, lastAt: trips.at(-1)?.at ?? null };
   }
 
   /** 给控制台看 */
