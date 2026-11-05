@@ -67,6 +67,23 @@ test('a partial downward dig reports its real stopping point and repeated stops 
   }
 });
 
+test('downward digging targets the actual support cell when standing on a half slab', async (t) => {
+  const world = new TestWorld();
+  world.setBlock({ x: 0, y: 63, z: 0 }, 'air'); // 半砖下面是空气，再下面 y62 是石头
+  world.setBlock({ x: 0, y: 64, z: 0 }, 'oak_slab');
+  world.blockProperties.set('0,64,0', { type: 'bottom' });
+  world.pos = { x: 0.5, y: 64.5, z: 0.5 }; // 站在下半砖上
+  const ctx = makeCtx(world);
+  t.after(() => ctx.memory.close());
+  const result = await dig.run(ctx, { dir: 'down', blocks: 1 });
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.deepEqual(result.data?.dug, ['oak_slab'], '挖的是脚下面的半砖，不是它下面的空气');
+  assert.ok(world.actions.includes('dig:oak_slab'));
+  assert.equal(world.blockAt({ x: 0, y: 64, z: 0 }), 'air');
+  assert.equal(result.data?.walked, 1);
+  assert.equal(world.pos.y, 63, '实际落到 y62 石头上的脚高 63');
+});
+
 test('downward digging falls 2-3 blocks when the drop is within the safe margin', async (t) => {
   const world = new TestWorld();
   // 挖掉 y=62 后脚下 y=61 是空气、y=60 是石头：会掉 2 格，落在 y=60 上，不掉血

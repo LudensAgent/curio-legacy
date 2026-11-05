@@ -2,7 +2,7 @@ import minecraftData from 'minecraft-data';
 import type { AgentState, Vec3Like } from '../adapter/types.ts';
 import { config } from '../config.ts';
 import { AbortedError, dist3, sleep, throwIfAborted } from '../util.ts';
-import { isSoftBlock } from '../perception/surroundings.ts';
+import { bodyCells, bodyProbe, footSurfaceY, shapeKnown, supportTop, type ObservedState, type StateAt } from '../perception/geometry.ts';
 import { codeFromError, fail, isAbort, obj, ok, type FailureCode, type Skill, type SkillCtx } from './types.ts';
 import { EXCAVATION_WAYPOINT_CAP } from '../memory/store.ts';
 
@@ -19,8 +19,6 @@ const HAZARDS = new Set(['water', 'lava', 'bubble_column', 'powder_snow', 'fire'
 const PROTECTED = new Set(['end_portal_frame', 'end_portal', 'nether_portal', 'end_gateway', 'chest', 'trapped_chest', 'barrel', 'spawner', 'crafting_table', 'furnace', 'blast_furnace', 'smoker']);
 /** 传送门方块：软块（薄片、可穿过），不是「半砖/台阶」这类能站但不稳的方块，也不是液体/坑 */
 const PORTAL_BLOCKS = new Set(['nether_portal', 'end_portal', 'end_gateway']);
-/** 垫空腔坑用的支撑方块：就地用背包里现成的建材，不制造、不另选玩法 */
-const SCAFFOLD_BLOCKS = ['cobblestone', 'dirt', 'netherrack', 'cobbled_deepslate', 'stone', 'deepslate', 'andesite', 'granite', 'diorite', 'tuff'];
 const DIRECTIONS = { north: { x: 0, z: -1 }, east: { x: 1, z: 0 }, south: { x: 0, z: 1 }, west: { x: -1, z: 0 } };
 const YAW = { north: 0, east: -Math.PI / 2, south: Math.PI, west: Math.PI / 2 };
 export const EXCAVATION_ENTRY_LABEL = '实际开挖入口';
@@ -34,27 +32,38 @@ const hazardLabel = (name: string) => name === 'water' || name === 'lava' || nam
 const voxel = (pos: Vec3Like): Vec3Like => ({ x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z) });
 
 class ExcavationStop extends Error {
-  constructor(public code: FailureCode, message: string) { super(message); }
+  constructor(public code: FailureCode, message: string, public unsupportedGeometry = false) { super(message); }
 }
 
-/** 地板可站性判定：null=未加载、hazard=液体/下落方块、非整块=能站但不稳定。三类分别报对症消息，
- * 否则日志与 Agent 分不清「未加载」和「真水」，hint 一律说避液体。注册表几何是材质知识，绝不对世界位置做查询。 */
-function floorProblem(name: string | null): ExcavationStop | null {
-  if (name === null) return new ExcavationStop('NOT_FOUND', '下一落点地板未加载/未知，不能确认支撑');
-  if (hazard(name)) return new ExcavationStop('ERROR', `下一落点地板是 ${name}（${hazardLabel(name)}），不能冒险下落`);
-  // 空腔/虚空和「半砖这类不完整方块」是两码事：前者说明这条阶梯到头了、下面是洞穴，别在原地反复试；
-  // 后者才是「能站但不稳」。分开报，Agent 才知道是换方向还是确认落点高度。
-  if (AIR.has(name)) return new ExcavationStop('ERROR', `下一落点下面是空的（${name}）：前面脚下是个坑/洞穴`);
-  // 传送门是可穿过、不能承重的方块：不能作为站立支撑。它和「半砖/台阶」不同，但同样不能当落点地板。
-  if (PORTAL_BLOCKS.has(name)) return new ExcavationStop('ERROR', `下一落点地板是 ${name}（传送门，不能承重），不能作为站立支撑`);
-  const collisions = (registry as any).blockCollisionShapes;
-  const shapes = collisions?.blocks[name];
-  const ids = Array.isArray(shapes) ? shapes : [shapes];
-  const full = ids.length > 0 && ids.every((id: number) => {
-    const boxes = collisions.shapes[id];
-    return boxes?.length === 1 && boxes[0].length === 6 && boxes[0].every((value: number, index: number) => value === (index < 3 ? 0 : 1));
-  });
-  return full ? null : new ExcavationStop('ERROR', `下一落点地板是 ${name}（半砖/台阶等不完整方块，站不稳），不能冒险下落`);
+/** 读当前方块状态：适配器提供 blockstate 时用真实状态；只有名字时碰撞形状按“未确认”处理，不拿默认状态冒充。 */
+const stateAt = (adapter: SkillCtx['adapter']): StateAt => (pos) => {
+  const state = adapter.blockStateAt?.(pos);
+  if (state?.name) return state;
+  const name = adapter.blockAt(pos);
+  return name === null ? null : { name, properties: {} };
+};
+
+/**
+ * 落点支撑判定：用与 step 相同的碰撞顶面，而不是方块名猜“整块/不完整”。
+ * 支撑面必须等于本次要落到的脚高；半格顶面会报出实际高度并明确“整格开挖未实现半格转换”，
+ * 不再说游戏里“半砖站不稳”。未知/未加载单独返回，不当作空气。
+ */
+function supportProblem(ctx: SkillCtx, cell: Vec3Like, expectedFoot: number, label: string): ExcavationStop | null {
+  const state: ObservedState | null = stateAt(ctx.adapter)(cell);
+  if (state === null) return new ExcavationStop('NOT_FOUND', `${label}支撑格未加载/未知，不能确认支撑`);
+  if (hazard(state.name)) return new ExcavationStop('ERROR', `${label}是 ${state.name}（${hazardLabel(state.name)}），不能冒险下落`);
+  if (PORTAL_BLOCKS.has(state.name)) return new ExcavationStop('ERROR', `${label}是 ${state.name}（传送门，不能承重），不能作为站立支撑`);
+  if (!shapeKnown(state.name, state.properties ?? {})) return new ExcavationStop('NOT_FOUND', `${label}的 ${state.name} 状态未确认（缺少 blockstate），不能确认支撑顶面`);
+  const top = supportTop(state.name, state.properties ?? {});
+  if (top === null) {
+    if (AIR.has(state.name)) return new ExcavationStop('ERROR', `${label}下面是空的（${state.name}）：前面脚下是个坑/洞穴`);
+    return new ExcavationStop('ERROR', `${label}的 ${state.name} 没有水平承重顶面，不能作为落点支撑`);
+  }
+  const surface = cell.y + top;
+  if (Math.abs(surface - expectedFoot) > 0.01) {
+    return new ExcavationStop('ERROR', `${label}支撑面在 y=${surface.toFixed(2)}（${state.name}），与本次期望脚高 y=${expectedFoot.toFixed(2)} 不符；当前整格开挖未实现半格/非整块脚高转换`, true);
+  }
+  return null;
 }
 
 function assertSession(ctx: SkillCtx, origin: AgentState) {
@@ -68,22 +77,30 @@ function assertSession(ctx: SkillCtx, origin: AgentState) {
 }
 
 function standingCell(ctx: SkillCtx, feet: Vec3Like) {
-  const { adapter } = ctx;
-  const problem = floorProblem(adapter.blockAt({ ...feet, y: feet.y - 1 }));
-  if (problem) throw problem;
-  for (const level of [0, 1]) {
-    const n = adapter.blockAt({ ...feet, y: feet.y + level });
-    if (n === null) throw new ExcavationStop('NOT_FOUND', '落点身体空间未加载/未知，不能确认两格干燥身体空间');
-    if (!AIR.has(n) && !isSoftBlock(n)) throw new ExcavationStop('ERROR', '落点没有已确认的两格干燥身体空间');
+  const states = stateAt(ctx.adapter);
+  const cell = { x: Math.floor(feet.x), y: Math.floor(feet.y + 0.05), z: Math.floor(feet.z) };
+  const surface = footSurfaceY(cell, states);
+  if (surface === null) {
+    const below = states({ ...cell, y: cell.y - 1 });
+    if (below === null) throw new ExcavationStop('NOT_FOUND', '落点支撑未加载/未知，不能确认支撑');
+    throw new ExcavationStop('ERROR', `落点脚下是 ${below.name}，没有已确认的承重顶面`);
   }
+  if (Math.abs(surface - feet.y) > 0.01) {
+    throw new ExcavationStop('ERROR', `落点支撑面在 y=${surface.toFixed(2)}，与脚高 y=${feet.y.toFixed(2)} 不符，没有把身体当成站稳`, true);
+  }
+  const probe = bodyProbe(feet.y, cell.x, cell.z, states);
+  if (probe.unknown.length) throw new ExcavationStop('NOT_FOUND', '落点身体空间未加载/未知，不能确认两格干燥身体空间');
+  for (const pos of bodyCells(feet.y, cell.x, cell.z)) {
+    const state = states(pos);
+    if (state && hazard(state.name)) throw new ExcavationStop('ERROR', `落点身体空间是 ${state.name}（${hazardLabel(state.name)}）`);
+  }
+  if (probe.blockers.length) throw new ExcavationStop('ERROR', '落点没有已确认的两格干燥身体空间');
 }
 
 /** Only this adjacent work column and its touching hazard boundaries are read.
  * These reads never discover structures or choose an underground direction. */
 function preflightColumn(ctx: SkillCtx, feet: Vec3Like, height: number) {
   const { adapter } = ctx;
-  const problem = floorProblem(adapter.blockAt({ ...feet, y: feet.y - 1 }));
-  if (problem) throw problem;
   const cells = Array.from({ length: height }, (_, level) => ({ ...feet, y: feet.y + level }));
   for (const pos of cells) {
     const name = adapter.blockAt(pos);
@@ -141,8 +158,11 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
     if (!Number.isInteger(args.steps) || args.steps < 1 || args.steps > 8 || !Object.hasOwn(DIRECTIONS, args.direction) || !['stairs', 'stairs_up', 'tunnel'].includes(args.mode)) throw new ExcavationStop('BAD_ARGS', '开挖必须显式指定方向与模式，每次最多8步');
     assertSession(ctx, origin);
     const initial = voxel(origin.pos);
-    if (!origin.onGround || Math.abs(origin.pos.y - initial.y) > 0.1) throw new ExcavationStop('ERROR', '需要先在已知干燥地板上站稳');
-    standingCell(ctx, initial);
+    if (!origin.onGround) throw new ExcavationStop('ERROR', '需要先在已知干燥地板上站稳');
+    standingCell(ctx, origin.pos);
+    if (Math.abs(origin.pos.y - Math.round(origin.pos.y)) > 0.01) {
+      throw new ExcavationStop('BAD_ARGS', `当前脚高 y=${origin.pos.y.toFixed(2)}，站在半格/非整块支撑上；整格阶梯/通道会挖掉这层支撑，未实现半格脚高转换，未开始`, true);
+    }
     ctx.memory.setWorld(origin.worldId);
     if (args.entry !== 'current') {
       const entry = trustedExcavationEntry(ctx, args.entry);
@@ -181,25 +201,16 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
     const direction = DIRECTIONS[args.direction];
     for (let step = 0; step < args.steps; step++) {
       const current = assertSession(ctx, origin), here = voxel(current.pos);
-      if (!current.onGround || Math.abs(current.pos.y - here.y) > 0.1) throw new ExcavationStop('ERROR', '尚未站稳，不能继续开挖下一格');
-      standingCell(ctx, here);
-      const next = { x: here.x + direction.x, y: here.y + (args.mode === 'stairs' ? -1 : args.mode === 'stairs_up' ? 1 : 0), z: here.z + direction.z };
-      // 破碎空腔地形里「下一落脚下面是空气」很常见：若是「一格空气、再下面有实心」的可垫坑，先垫一块支撑再继续，
-      // 别让有界开挖在每个小洞里都停一次（这和 Agent 手工「先垫一块圆石再迈」是同一件事）。只垫能垫的浅坑，深洞照旧停下。
-      if (args.mode !== 'stairs_up') {
-        const support = { x: next.x, y: next.y - 1, z: next.z };
-        if (AIR.has(adapter.blockAt(support) ?? '')) {
-          const under = adapter.blockAt({ x: support.x, y: support.y - 1, z: support.z });
-          const material = adapter.state().inventory.find((i) => SCAFFOLD_BLOCKS.includes(i.name) && i.count > 0)?.name;
-          if (material && under !== null && !AIR.has(under) && !hazard(under)) {
-            await adapter.moveTo({ kind: 'place_block', pos: support }, { signal, timeoutMs: 10000, constructionSafe: true });
-            assertSession(ctx, origin);
-            const placed = await adapter.placeBlockAt(support, [material], signal);
-            assertSession(ctx, origin);
-            if (!placed.ok) throw new ExcavationStop('ERROR', `给下一落脚垫支撑失败：${placed.reason}`);
-          }
-        }
+      if (!current.onGround) throw new ExcavationStop('ERROR', '尚未站稳，不能继续开挖下一格');
+      standingCell(ctx, current.pos);
+      if (Math.abs(current.pos.y - Math.round(current.pos.y)) > 0.01) {
+        throw new ExcavationStop('BAD_ARGS', `脚高 y=${current.pos.y.toFixed(2)} 站在半格/非整块支撑上；整格开挖未实现半格脚高转换`, true);
       }
+      const next = { x: here.x + direction.x, y: here.y + (args.mode === 'stairs' ? -1 : args.mode === 'stairs_up' ? 1 : 0), z: here.z + direction.z };
+      // 下一落脚要落在 next.y。先按碰撞顶面确认脚下支撑：空气/未知/半格顶面都在挖掘前报缺口，
+      // 不自动消耗背包材料垫块；补支撑是 Agent 显式选择 place_at 的组合动作。
+      const supportProblemNow = supportProblem(ctx, { x: next.x, y: next.y - 1, z: next.z }, next.y, `[${args.direction}] 下一落点`);
+      if (supportProblemNow) throw supportProblemNow;
       const height = args.mode === 'stairs' ? 3 : 2;
       const cells = preflightColumn(ctx, next, height).reverse();
       // A one-block jump needs extra clearance above the current head before
@@ -253,11 +264,12 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
     const hint = /液体|水|lava|water/.test(msg) ? '（先换方向避开液体，或先 place_at 堵上再挖）'
       : /下落方块/.test(msg) ? '（下面是沙子/沙砾这类下落方块，换方向或先堵住再挖）'
       : /未知|未加载/.test(msg) ? '（先照亮/转头看清那一格再挖，或换方向）'
-      : /下面是空的|洞穴|虚空/.test(msg) ? '（前面脚下是空的：先 place_at 垫一块支撑方块再往前走，或下去探这个洞；别原地反复重试）'
-      : /不完整方块|半砖|台阶|站不稳/.test(msg) ? '（下面是半砖/台阶这类不完整方块，确认落点高度或换方向）'
+      : /下面是空的|洞穴|虚空/.test(msg) ? '（前面脚下是空的：要补支撑得自己显式 place_at，或换方向、下去探这个洞；这不是本次开挖自动做的）'
+      : /支撑面在|半格|整格脚高/.test(msg) ? '（落点实际支撑顶面与所选脚高不符；可确认落点高度、换一格/换方向，或改用 step 明确落脚）'
       : /身体空间|干燥|站稳/.test(msg) ? '（先挖开落点那两格的脚/头空间，或换方向）'
       : '';
-    return fail(error instanceof ExcavationStop ? error.code : codeFromError(error), `有界开挖停止：${msg}${hint}`, details());
+    const unsupported = error instanceof ExcavationStop && error.unsupportedGeometry ? { unsupportedGeometry: true } : {};
+    return fail(error instanceof ExcavationStop ? error.code : codeFromError(error), `有界开挖停止：${msg}${hint}`, { ...details(), ...unsupported });
   }
 }
 

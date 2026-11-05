@@ -422,6 +422,115 @@ test('place_at does not treat an unobserved block as already satisfied', async (
   assert.equal(r.data?.placed, undefined);
 });
 
+test('place_at separates torch, snow, carpet, slab and door occupancy instead of calling them empty', async (t) => {
+  const cases: [{ name: string; properties: Record<string, string | number | boolean> }, RegExp][] = [
+    [{ name: 'torch', properties: {} }, /火把（无碰撞、不承重）/],
+    [{ name: 'snow', properties: { layers: 1 } }, /雪层（1 层，无碰撞）/],
+    [{ name: 'red_carpet', properties: {} }, /地毯（薄层，顶面 0\.0625）/],
+    [{ name: 'oak_slab', properties: { type: 'bottom' } }, /下半砖（顶面 0\.5）/],
+    [{ name: 'oak_door', properties: { open: true } }, /门（下半，打开）/],
+  ];
+  for (const [{ name, properties }, shape] of cases) {
+    const w = new FakeAdapter();
+    w.pos = { x: 0.5, y: 64, z: 0.5 };
+    w.blocks.push({ name, pos: { x: 0, y: 64, z: -1 } });
+    w.blockProperties.set('0,64,-1', properties);
+    w.inv.set('dirt', 1);
+    const ctx = makeCtx(w, { senses: { observeBlocks: observeAllBlocks(w) } });
+    t.after(() => ctx.memory.close());
+    const r = await placeAt.run(ctx, { at: [1, 0, 0], facing: 'N', item: 'dirt' });
+    assert.equal(r.status, 'failed', `${name}: ${r.summary}`);
+    assert.equal(r.failureCode, 'PATH_NOT_FOUND', name);
+    assert.match(r.summary, shape, name);
+    assert.match(r.summary, /占据/, name);
+    assert.equal(w.inv.get('dirt'), 1, `${name} 没有消耗材料`);
+    assert.deepEqual(w.actions, [], `${name} 没有放置动作`);
+  }
+});
+
+test('place_at same slab is idempotent without material; missing material and unknown targets are real gaps', async (t) => {
+  const same = new FakeAdapter();
+  same.pos = { x: 0.5, y: 64, z: 0.5 };
+  same.blocks.push({ name: 'oak_slab', pos: { x: 0, y: 64, z: -1 } });
+  same.blockProperties.set('0,64,-1', { type: 'bottom' });
+  const ctx = makeCtx(same, { senses: { observeBlocks: observeAllBlocks(same) } });
+  t.after(() => ctx.memory.close());
+  const idempotent = await placeAt.run(ctx, { at: [1, 0, 0], facing: 'N', item: 'oak_slab' });
+  assert.equal(idempotent.status, 'succeeded', idempotent.summary);
+  assert.equal(idempotent.data?.noop, true);
+  assert.equal(idempotent.data?.alreadyShape, '下半砖（顶面 0.5）');
+  assert.deepEqual(same.actions, []);
+
+  const empty = new FakeAdapter();
+  empty.pos = { x: 0.5, y: 64, z: 0.5 };
+  const emptyCtx = makeCtx(empty, { senses: { observeBlocks: visibleTargets(empty) } });
+  t.after(() => emptyCtx.memory.close());
+  const missing = await placeAt.run(emptyCtx, { at: [1, 0, 0], facing: 'N', item: 'dirt' });
+  assert.equal(missing.failureCode, 'MISSING_MATERIALS');
+  assert.deepEqual(empty.actions, []);
+
+  const unloaded = new FakeAdapter();
+  unloaded.pos = { x: 0.5, y: 64, z: 0.5 };
+  unloaded.inv.set('dirt', 1);
+  const read = unloaded.blockAt.bind(unloaded);
+  unloaded.blockAt = ((pos) => pos.x === 0 && pos.y === 64 && pos.z === -1 ? null : read(pos)) as unknown as typeof unloaded.blockAt;
+  const unloadedCtx = makeCtx(unloaded, { senses: { observeBlocks: () => [] } });
+  t.after(() => unloadedCtx.memory.close());
+  const unknown = await placeAt.run(unloadedCtx, { at: [1, 0, 0], facing: 'N', item: 'dirt' });
+  assert.equal(unknown.failureCode, 'NOT_FOUND');
+  assert.equal(unloaded.inv.get('dirt'), 1);
+  assert.deepEqual(unloaded.actions, [], '未加载的目标格没有被当成空气');
+});
+
+test('place_at does not attempt a placement when all adjacent faces are observed non-references', async (t) => {
+  const w = new FakeAdapter();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.inv.set('dirt', 1);
+  const ctx = makeCtx(w, { senses: { observeBlocks: visibleTargets(w) } });
+  t.after(() => ctx.memory.close());
+  const r = await placeAt.run(ctx, { at: [1, 2, 0], facing: 'N', item: 'dirt' }); // 悬空高处的空气格
+  assert.equal(r.status, 'failed', r.summary);
+  assert.match(r.summary, /没有可贴面的方块/);
+  assert.equal(w.inv.get('dirt'), 1);
+  assert.deepEqual(w.actions, []);
+});
+
+test('absolute place_at at the current foot cell is a normal placement, never the pillar special case', async (t) => {
+  const w = new FakeAdapter();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.inv.set('cobblestone', 1);
+  const pillar = t.mock.method(w, 'pillarUp', async () => ({ ok: true, y: 65 }));
+  const place = t.mock.method(w, 'placeBlockAt', w.placeBlockAt.bind(w));
+  const ctx = makeCtx(w, { senses: { observeBlocks: visibleTargets(w) } });
+  t.after(() => ctx.memory.close());
+  const skill = primitiveSkills.find((s) => s.name === 'place_at')!;
+  const parsed = skill.validate({ xyz: [0, 64, 0], item: 'cobblestone' }, w);
+  assert.ok(parsed.ok, !parsed.ok ? parsed.error : '');
+  const r = await skill.run(ctx, parsed.args);
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(pillar.mock.callCount(), 0, '绝对 xyz 的脚格不套搭柱');
+  assert.equal(place.mock.callCount(), 1);
+  assert.deepEqual(place.mock.calls[0].arguments[0], { x: 0, y: 64, z: 0 });
+  assert.equal(w.blockAt({ x: 0, y: 64, z: 0 }), 'cobblestone');
+});
+
+test('place_at fails when the actual placed block is not the requested item', async (t) => {
+  const w = new FakeAdapter();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.inv.set('dirt', 1);
+  t.mock.method(w, 'placeBlockAt', async () => {
+    w.blocks.push({ name: 'stone', pos: { x: 0, y: 64, z: -1 } });
+    return { ok: true };
+  });
+  const ctx = makeCtx(w, { senses: { observeBlocks: visibleTargets(w) } });
+  t.after(() => ctx.memory.close());
+  const r = await placeAt.run(ctx, { at: [1, 0, 0], facing: 'N', item: 'dirt' });
+  assert.equal(r.status, 'failed', r.summary);
+  assert.equal(r.failureCode, 'EFFECT_NOT_CONFIRMED');
+  assert.match(r.summary, /实际出现的是 stone/);
+  assert.equal(r.data?.placed, 'stone');
+});
+
 test('place_at [0,0,0] on a half-slab still pillars instead of short-circuiting', async (t) => {
   const w = new FakeAdapter();
   w.groundY = 62;

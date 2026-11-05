@@ -46,3 +46,18 @@ test('descend requires fresh local geometry, sufficient health or observed water
   assert.equal(wet.status, 'succeeded'); assert.equal(wet.data?.inWater, true); assert.match(wet.summary, /尚未确认上岸/);
   assert.equal(water.calls[0].opts.maxDropDown, 7); assert.equal(water.calls[0].opts.allowSwimming, true);
 });
+
+test('descend verifies the selected ground support with the shared collision shape, not an integer foot guess', async () => {
+  const state = { connected: true, alive: true, observationReady: true, observationId: 5, sessionId: 'session', worldId: 'world', dim: 'overworld',
+    pos: { x: 0.5, y: 70, z: 0.5 }, hp: 20, onGround: true, inWater: false, inLava: false } as AgentState;
+  const option: LandingOption = { target: { x: 1.5, y: 64, z: 0.5 }, support: { pos: { x: 1, y: 63, z: 0 }, name: 'oak_slab' },
+    surface: 'ground', surfaceY: 64, drop: 6, horizontalDistance: 1, clearance: 'clear', corridor: 'clear', approach: 'adjacent', waterDepth: 'unknown', unknowns: [],
+    receipt: { worldId: state.worldId, sessionId: state.sessionId, dimension: state.dim, observationId: 6, at: Date.now(), from: { ...state.pos } } };
+  let calls = 0;
+  const ctx = { adapter: { state: () => structuredClone(state), blockStateAt: () => ({ name: 'oak_slab', properties: { type: 'bottom' } }),
+    async moveTo() { calls++; } }, senses: { refresh() {}, landingOptions: () => [option] }, signal: new AbortController().signal, deadline: Date.now() + 3000 } as unknown as SkillCtx;
+  const result = await descend.run(ctx, { target: option.target });
+  assert.equal(result.status, 'failed', result.summary);
+  assert.match(result.summary, /支撑面按碰撞形状在 y=63\.50/);
+  assert.equal(calls, 0, '没有按整数 64 假着陆');
+});
