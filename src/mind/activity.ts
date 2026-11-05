@@ -461,6 +461,12 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   const retryMark = `retry:${retryScope}:${digest(gapEvidence(result))}`;
   const retries = a.adaptations.filter((item) => item.startsWith(`retry:${retryScope}:`)).length;
   const physicallyMoved = !!baseline?.pos && Math.hypot(state.pos.x - baseline.pos.x, state.pos.y - baseline.pos.y, state.pos.z - baseline.pos.z) >= 0.5;
+  // 相对 step 只有“前/上/右”偏移，没有固定世界目标。失败后身体已经换位时，自动重试会
+  // 用新站位重新解释同一个 [1,-1,0]，实际变成下一格（空腔里会一路下沉/换列）。这不是
+  // 同一个逻辑动作的复验，交回心智按实测位置重新选择；绝对 step/xyz 仍可按原目标复验。
+  if (step.skill === 'step' && (step.args as Record<string, unknown> | undefined)?.xyz === undefined && physicallyMoved) {
+    return { kind: 'stuck', why: `${result.summary.slice(0, 140)}；相对 step 失败后身体已换位，自动重试会用新站位重算落点，交回心智重新选择` };
+  }
   if (RETRYABLE.has(code) && !(step.skill === 'goto' && code === 'PATH_NOT_FOUND')
     && !a.adaptations.includes(retryMark) && retries < 2 && (retries > 0 || physicallyMoved)) {
     const guard = continuationGuard(a, ownStep(a, step), state);

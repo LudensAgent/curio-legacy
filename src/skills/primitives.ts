@@ -363,7 +363,8 @@ export const stepTo: Skill<CellArgs> = {
       problems.push(`目标格是 ${describe(target)}，无法确认通行空间`);
     } else if (blocksBodyCell(targetBlock.name, targetBlock.properties)) {
       const dn = targetBlock.name;
-      problems.push(`目标格是 ${dn}${dn.endsWith('_door') ? '（门的状态或碰撞形状阻碍通行）' : LIQUID_BLOCKS.has(dn) ? '' : /chest|barrel|furnace|crafting_table|_bed$/.test(dn) ? '（是用得着的东西，绕过去，别挖）' : `（要过去先 dig_at [${args.at}] 挖开）`}`);
+      // 事实与缺口，而不是把“dig 再 step”写成下一步指令：实心目标格不是下行落点。
+      problems.push(`目标格是 ${dn}${dn.endsWith('_door') ? '（门的状态或碰撞形状阻碍通行）' : LIQUID_BLOCKS.has(dn) ? '' : /chest|barrel|furnace|crafting_table|_bed$/.test(dn) ? '（是用得着的东西，绕过去，别挖）' : '（实心格，不是可用的脚部落点；如要开挖，须显式 dig_at 后重新确认下方支撑与落点，再另发 step）'}`);
     } else {
       // 目标格能站：按实际顶面算脚高；无支撑则报缺口。
       const actualFoot = footSurfaceY(target, observed);
@@ -452,6 +453,13 @@ export const stepTo: Skill<CellArgs> = {
       const ab = new AbortedError(String(ctx.signal.reason ?? 'aborted'));
       (ab as Error & { partial?: Record<string, unknown> }).partial = partialFacts({ targetFoot });
       throw ab;
+    }
+    // moveTo 可能在身体仍在下落时返回（尤其空腔边缘/一格落差）；先有界等待真实落地，
+    // 不能拿空中的瞬时位置判“身体没有站稳”并让下一次相对 step 从这个空中位置重算目标。
+    const settleBy = Date.now() + 2000;
+    while (!a.state().onGround && Date.now() < settleBy) {
+      throwIfAborted(ctx.signal);
+      await sleep(50, ctx.signal);
     }
     // 用实际身体状态确认到达：站稳、列一致、实际脚高与目标脚高相符；不能只凭整数脚格或 moveTo 返回成功。
     const state = a.state();

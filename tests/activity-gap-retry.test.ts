@@ -23,6 +23,16 @@ test('52ms→7ms：有界开挖的确定性预检失败，不因身体或视角�
   assert.ok(!activity.adaptations.some((item) => item.startsWith('retry:')), '不做第二次相同缺口调用');
 });
 
+test('相对 step 失败且身体已换位：不自动重试，避免用新站位重算 [1,-1,0]', () => {
+  const { adapter, activity } = activityOf([{ skill: 'step', args: { at: [1, -1, 0], facing: 'S' } }]);
+  const step = nextStep(activity)!;
+  activity.stepStart = { pos: { x: 99, y: 64, z: 99 } };
+  const verdict = afterStep(activity, step, fail('PATH_NOT_FOUND', '没有站到 [1,-1,0]：身体没有站稳', { targetCell: { x: 1, y: 63, z: 0 }, position: { x: 0, y: 64, z: 0 } }), 100, adapter.state());
+  assert.equal(verdict.kind, 'stuck');
+  assert.match(verdict.why, /相对 step 失败后身体已换位/);
+  assert.equal(activity.adaptations.filter((item) => item.startsWith('retry:')).length, 0);
+});
+
 test('同一缺口只重试一次：视角或无关资源变化不能再要一次重试额度', () => {
   const { adapter, activity } = activityOf([gather]);
   let step = nextStep(activity)!;
