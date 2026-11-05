@@ -470,7 +470,7 @@ test('place_at separates torch, snow, carpet, slab and door occupancy instead of
 });
 
 test('place_at replaces replaceable ground plants instead of reporting them as occupancy', async (t) => {
-  for (const name of ['grass', 'dandelion', 'oak_sapling', 'dead_bush']) {
+  for (const name of ['grass', 'dandelion', 'oak_sapling', 'dead_bush', 'crimson_roots', 'warped_roots', 'nether_sprouts', 'crimson_fungus', 'warped_fungus']) {
     const w = new TestWorld();
     w.pos = { x: 0.5, y: 64, z: 0.5 };
     w.setBlock({ x: 0, y: 64, z: -1 }, name);

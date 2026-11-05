@@ -238,8 +238,8 @@ async function stepOutOfWater(ctx: SkillCtx, args: CellArgs, feet: Vec3Like) {
 
 export const stepTo: Skill<StepArgs> = {
   name: 'step',
-  description: '迈到身边相邻的一格（[前,上,右]）：可以平走、上一级台阶（上+1，会跳）、下一级（上-1）；脚下是梯子时 [0,1,0] 沿梯子爬一格。落点按实际碰撞顶面计算（整块、半砖、雪层、地毯都能站，脚高可为分数）；目标列没有同层支撑时，向下找到精确落点：4 格以内自动走并报告实际落差和预计摔伤，更大的落差不会自动跳，会返回精确落点、高度和预计伤害由你判断。不再逐格做视线预检，也不再因为支撑格是 air 就原地报错；身体空间被占住或向下找不到已加载落点才拒绝，并给出挖掘坐标/精确高度或要补的支撑格。泡在水里时朝岸那边迈（[1,0,0] 就行），身体会游过去、贴着岸爬上去（岸比脚高一两格也行）。可选 fill 写一种背包方块名：目标脚格下方的支撑格是空的时，先只往那一格补一块再迈（消耗 1 块）；不写就不垫',
-  argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W", "fill"?:方块名（目标脚下空时先补这一格，可搭桥）}（前后/左右 ±1，上下 -1..1；[1,0,0] 平走，也会自动迈上相邻一格台阶或处理 4 格以内落差，更大落差会返回精确高度；[1,1,0] 明确上一级；[1,-1,0] 明确下一级；更深落差用 descend）',
+  description: '迈到身边相邻的一格（[前,上,右]）：可以平走、上一级台阶（上+1，会跳）、下一级（上-1）；脚下是梯子时 [0,1,0] 沿梯子爬一格。落点按实际碰撞顶面计算（整块、半砖、雪层、地毯都能站，脚高可为分数）；目标列没有同层支撑时向下扫到第一处可站立面：4 格内自动走并报告落差和摔伤，更大落差返回精确落点、高度和伤害由你判断。显式上 1 格只接受至少高半格的目标面；持平或更低时回报实际脚高/下一落点，不会自动改平走。不做逐格视线预检，也不因支撑格是 air 就报错；身体被占住或扫完 64 格无落点才拒绝，并给出挖掘坐标、精确高度或要补的支撑格。泡在水里时朝岸迈（[1,0,0]），身体会游过去、贴岸爬上去（岸比脚高一两格也行）。可选 fill：支撑格是空气或可替换植物时先只补那一格再迈（消耗 1 块）；不写就不垫',
+  argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W", "fill"?:方块名（目标脚下空或可替换时先补这一格，可搭桥）}（前后/左右 ±1，上下 -1..1；[1,0,0] 平走，也会自动迈上相邻一格台阶或处理 4 格以内落差，更大落差会返回精确高度；[1,1,0] 明确上一级，目标列没有高半格的面时只回报实际脚高/下一落点，不自动改平走；[1,-1,0] 明确下一级；更深落差用 descend）',
   timeoutMs: 8000,
   movement: true,
   validate(raw, adapter) {
@@ -305,17 +305,19 @@ export const stepTo: Skill<StepArgs> = {
     const requestedFoot = absolute ? args.xyz!.y : feet.y + args.at[1];
     // 直接落点优先（含半砖顶面、一格台阶）；站不住时一直向下找，拿到精确落点和落差。
     // 4 格以内仍自动走（不卡在微小落差上）；更大的落差把精确高度和预计摔伤交回给 Agent 判断。
-    const scanLanding = (): { foot: number; drop: number } | null => {
-      if (absolute) return { foot: requestedFoot, drop: start.y - requestedFoot };
+    // 向上迈也扫同一列：扫描结果用于如实回报这一列的真实脚高，不能把“没扫过”写成“64 格空腔”。
+    const scanLanding = (): { direct: number | null; foot: number | null; drop: number; unknown: number } => {
+      if (absolute) return { direct: requestedFoot, foot: requestedFoot, drop: start.y - requestedFoot, unknown: 0 };
       const direct = rawFoot(target);
-      if (args.at[1] > 0) return direct !== null && direct >= feet.y + 0.5 ? { foot: direct, drop: start.y - direct } : null;
-      if (direct !== null) return { foot: direct, drop: start.y - direct };
+      if (direct !== null) return { direct, foot: direct, drop: start.y - direct, unknown: 0 };
+      let unknown = 0;
       for (let depth = 1; depth <= 64; depth++) {
         const cell = { x: target.x, y: target.y - depth, z: target.z };
+        if (a.blockAt(cell) === null) unknown++;
         const foot = rawFoot(cell);
-        if (foot !== null && Math.abs(foot - cell.y) <= 0.95) return { foot, drop: start.y - foot };
+        if (foot !== null && Math.abs(foot - cell.y) <= 0.95) return { direct: null, foot, drop: start.y - foot, unknown };
       }
-      return null;
+      return { direct: null, foot: null, drop: 0, unknown };
     };
     // 泡在水里：脚下那格是水、岸往往比脚高一两格，平地上的“上下 ±1”对不上。像玩家一样朝那边游、贴着岸按住跳爬上去。
     // 这项“邻列内多高度选出口”的辅助只属于相对 step；绝对 xyz/stepTo 保持所选脚高，不套用多高度搜索。
@@ -361,7 +363,7 @@ export const stepTo: Skill<StepArgs> = {
     const corners = args.at[0] !== 0 && args.at[2] !== 0
       ? [{ x: target.x, z: feet.z }, { x: feet.x, z: target.z }]
       : [];
-    let landing = scanLanding();
+    let scan = scanLanding();
     const support = { x: target.x, y: target.y - 1, z: target.z };
     const supportAt = toRel(feet, args.facing, support);
     const landingSupport = {
@@ -380,7 +382,7 @@ export const stepTo: Skill<StepArgs> = {
     const fills: { pos: Vec3Like; at: [number, number, number]; item: string }[] = [];
     // 只有 agent 显式写了 fill 才补支撑：选哪种材料、要不要垫仍由 agent 决定；这里只负责把这一块放到
     // 脚部目标格正下方，然后按实际方块重算落点，不额外改落点或方向。
-    if (args.fill && AIR.has(rawState(support)?.name ?? '') && landingSupport.placeAtInRange) {
+    if (args.fill && isReplaceable(rawState(support)?.name ?? '') && landingSupport.placeAtInRange) {
       const placed = await placeAt.run(ctx, { at: supportAt, facing: args.facing, item: args.fill });
       if (placed.status !== 'succeeded') {
         return fail(placed.failureCode ?? 'PATH_NOT_FOUND',
@@ -388,12 +390,34 @@ export const stepTo: Skill<StepArgs> = {
           { movementNotAttempted: true, fill: { at: supportAt, item: args.fill, pos: support }, ...after(ctx, args.facing, target) });
       }
       fills.push({ pos: support, at: supportAt, item: args.fill });
-      landing = scanLanding();
+      scan = scanLanding();
     }
-    if (landing === null) {
-      return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：目标格脚下 (${support.x},${support.y},${support.z}) 是 ${describe(support)}；目标格 (${target.x},${target.y},${target.z}) 下方已检查 64 格仍没有已加载的站立面（不是“air 就禁止”，是还没找到落点）；脚部目标格 [${args.at}] 须留空——要补支撑就是 [${supportAt}] 这一格（step 写 fill:"<方块名>" 会先补这里；也可先 place_at）；未执行迈步`,
-        { problems: [`目标格脚下 (${support.x},${support.y},${support.z}) 是 ${describe(support)}，64 格内无落点`], targetCell: target, landingSupport, scannedDepth: 64, movementNotAttempted: true, ...after(ctx, args.facing, target) });
+    // 显式上 1 格：只接受至少高半格的目标面。不接受时也要把这一列的真实脚高/下一落点说清楚，
+    // 不能拿“没往下扫”冒充“64 格空腔”；也不把 Agent 要求的向上迈偷偷改成平走。
+    const upStep = !absolute && args.at[1] > 0;
+    if (upStep && !(scan.direct !== null && scan.direct >= feet.y + 0.5)) {
+      const supportName = describe(support);
+      const footText = scan.foot === null ? null : scan.foot.toFixed(2);
+      const height = scan.foot === null ? null
+        : Math.abs(scan.foot - start.y) <= 0.01 ? '与当前脚高相同'
+        : scan.foot > start.y ? `只比当前脚高 ${(scan.foot - start.y).toFixed(2)} 格`
+        : `比当前脚低 ${(start.y - scan.foot).toFixed(2)} 格`;
+      const fact = footText === null
+        ? `目标列下方已扫 64 格${scan.unknown ? `（其中 ${scan.unknown} 格未加载/未知）` : ''}没有可站立面，上不去`
+        : `这一列的可站立面在 y=${footText}（${height}），不是上 1 格`;
+      return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：目标格脚下 (${support.x},${support.y},${support.z}) 是 ${supportName}；${fact}。脚部目标格 [${args.at}] 须留空——要补支撑就是 [${supportAt}] 这一格（step 写 fill:"<方块名>" 可先补这里；也可先 place_at）；要平走请把上分量改成 0；未执行迈步`,
+        {
+          problems: [`目标格脚下 (${support.x},${support.y},${support.z}) 是 ${supportName}，${footText === null ? '下方 64 格内无落点' : `这一列可站立面 y=${footText}，不是上 1 格`}`],
+          targetCell: target, landingSupport,
+          ...(footText === null ? { scannedDepth: 64, unknownCells: scan.unknown } : { landing: { x: target.x, y: scan.foot, z: target.z, drop: scan.drop } }),
+          movementNotAttempted: true, ...after(ctx, args.facing, target),
+        });
     }
+    if (scan.foot === null) {
+      return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：目标格脚下 (${support.x},${support.y},${support.z}) 是 ${describe(support)}；目标格 (${target.x},${target.y},${target.z}) 下方已扫 64 格${scan.unknown ? `（其中 ${scan.unknown} 格未加载/未知）` : ''}没有可站立面（不是“air 就禁止”，是还没找到落点）；脚部目标格 [${args.at}] 须留空——要补支撑就是 [${supportAt}] 这一格（step 写 fill:"<方块名>" 可先补这里，支撑格是空气或可替换植物时会先补；也可先 place_at）；未执行迈步`,
+        { problems: [`目标格脚下 (${support.x},${support.y},${support.z}) 是 ${describe(support)}，64 格内无落点`], targetCell: target, landingSupport, scannedDepth: 64, unknownCells: scan.unknown, movementNotAttempted: true, ...after(ctx, args.facing, target) });
+    }
+    const landing = { foot: scan.foot, drop: scan.drop };
     if (!absolute && landing.drop > 4.01) {
       const drop = landing.drop, damage = estimatedFallDamage(drop);
       const dropText = drop.toFixed(Number.isInteger(drop) ? 0 : 2);

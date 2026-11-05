@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { ActionResult, Vec3Like } from '../src/adapter/types.ts';
 import { Vision } from '../src/perception/vision.ts';
 import { stepTo } from '../src/skills/primitives.ts';
+import { throwIfAborted } from '../src/util.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx, observeAllBlocks, TestWorld } from './survival-helpers.ts';
 
@@ -26,15 +28,18 @@ const ctxFor = (w: FakeAdapter, vision: Vision) => makeCtx(w, { senses: {
   refresh: () => vision.refresh(),
 } });
 
-test('step 不再为上游目标做视线补看，支撑格是空气就直接报缺口', async (t) => {
+test('step 向上迈遇同高地面时回报实际脚高，不再声称扫了 64 格', async (t) => {
   const { w, vision } = edgeWorld();
   const ctx = ctxFor(w, vision);
   t.after(() => ctx.memory.close());
   const look = t.mock.method(w, 'look', async () => {});
   const r = await stepTo.run(ctx, { at: [1, 1, 0], facing: 'N' });
   assert.equal(r.status, 'failed');
-  assert.match(r.summary, /是 air.*64 格仍没有已加载的站立面/);
+  assert.match(r.summary, /是 air；这一列的可站立面在 y=64\.00（与当前脚高相同），不是上 1 格/);
+  assert.doesNotMatch(r.summary, /64 格/, '没有向下扫就不能说 64 格');
   assert.doesNotMatch(r.summary, /未看清的格子/);
+  assert.deepEqual(r.data?.landing, { x: 0, y: 64, z: -1, drop: 0 });
+  assert.equal(r.data?.scannedDepth, undefined);
   assert.equal(r.data?.movementNotAttempted, true);
   assert.equal(look.mock.callCount(), 0, '迈步不再转头补看');
 });
@@ -61,6 +66,31 @@ test('step 显式 fill 后先把支撑格补实再迈，并报告实际消耗', 
   assert.equal(w.blockAt({ x: 0, y: 64, z: -1 }), 'cobblestone', '补的是目标脚格正下方这一格');
   assert.equal(w.inv.get('cobblestone'), 2);
   assert.equal(Math.floor(w.pos.y), 65);
+});
+
+class ReplaceWorld extends TestWorld {
+  override async placeBlockAt(pos: Vec3Like, names: string[], signal: AbortSignal): Promise<ActionResult> {
+    throwIfAborted(signal);
+    const name = names.find((n) => (this.inv.get(n) ?? 0) > 0);
+    if (!name) return { ok: false, reason: 'NO_ITEM' };
+    this.setBlock(pos, name);
+    this.inv.set(name, (this.inv.get(name) ?? 1) - 1);
+    this.actions.push(`place:${name}`);
+    return { ok: true };
+  }
+}
+
+test('step fill 能把可替换的下界根须换成支撑块再迈上去', async (t) => {
+  const w = new ReplaceWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.setBlock({ x: 0, y: 64, z: -1 }, 'crimson_roots');
+  w.inv.set('cobblestone', 3);
+  const ctx = makeCtx(w, { senses: { observeBlocks: observeAllBlocks(w) } });
+  t.after(() => ctx.memory.close());
+  const r = await stepTo.run(ctx, { at: [1, 1, 0], facing: 'N', fill: 'cobblestone' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(w.blockAt({ x: 0, y: 64, z: -1 }), 'cobblestone');
+  assert.deepEqual(r.data?.fills, [{ pos: { x: 0, y: 64, z: -1 }, at: [1, 0, 0], item: 'cobblestone' }]);
 });
 
 test('相对迈步前先等身体落地：不在半空位置算 [前,上,右]', async (t) => {
