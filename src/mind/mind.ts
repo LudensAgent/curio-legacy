@@ -643,11 +643,9 @@ export class Mind {
       this.finishActivity('stuck', `「${step.skill}」的自动重试沿用原动作期限，现在已经到期；没有用新的超时重来，下一步由你决定`);
       return;
     }
-    // 自动续跑把剩余绝对期限同时交给技能参数和调度预算：支持 deadlineMs 的技能直接采纳，
-    // Arbiter 也按 meta.deadlineMs 收窄 ctx.deadline；下面的计时器是最后兜底。
-    const dispatch = budget?.continuation
-      ? { ...step, args: { ...(step.args && typeof step.args === 'object' && !Array.isArray(step.args) ? step.args as Record<string, unknown> : {}), deadlineMs: budget.deadlineMs } }
-      : step;
+    // 自动续跑的绝对期限只走调度预算 meta.deadlineMs，不改写技能参数：
+    // 参数注入会被 use_skill 等严格校验器当成未知字段拒绝，也不该混进动作记录。
+    const dispatch = step;
     const climb = step.skill === 'climb_up' ? this.activity.climb?.[step.id ?? JSON.stringify(step.args ?? {})] : undefined;
     // 额外的 deadlineMs 只在自动续跑时出现；新的显式委托不传，Arbiter 仍按技能自身 timeout 起算。
     const schedule: Parameters<Arbiter['start']>[2] & { deadlineMs?: number } = {

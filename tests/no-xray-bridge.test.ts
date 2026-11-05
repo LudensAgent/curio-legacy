@@ -191,10 +191,11 @@ test('step, occupied placement and climb summaries cannot identify unobserved ne
   adapter.inv.set('dirt', 2);
   const ctx = makeCtx(adapter, { senses: { observeBlocks: () => [] } });
   t.after(() => ctx.memory.close());
-  const api = makeBridge(ctx);
   for (const [skill, args] of [['step', { to: [1, 0, 0], facing: 'E' }], ['place_at', { at: [1, 0, 0], facing: 'E', item: 'dirt' }],
     ['climb_up', { until_exit: true }]] as const) {
-    const result = await api('act', [skill, args]);
+    // Fresh bridge per skill: this test checks feedback disclosure, not the
+    // intentional stance dependency between a failed move and a relative at.
+    const result = await makeBridge(ctx)('act', [skill, args]);
     assert.doesNotMatch(JSON.stringify(result), /diamond_ore/, skill);
   }
   assert.deepEqual(adapter.actions, [], 'feedback reads must not perform extra actions');

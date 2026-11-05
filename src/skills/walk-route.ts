@@ -64,7 +64,9 @@ export function unsupportedNavOption(skill: string, options: Record<string, unkn
     const value = options[key];
     const empty = value === undefined || value === null || (Array.isArray(value) && value.length === 0);
     if ((key === 'avoid' || key === 'materials') && empty) continue;
-    if ((key === 'dig' || key === 'place' || key === 'tower') && value !== true) continue;
+    // 只有显式关闭（false/缺省）才算“不请求该手段”；"yes"、1、对象等
+    // 不能悄悄当成未开启，否则调用者会误以为施工或额度已生效。
+    if ((key === 'dig' || key === 'place' || key === 'tower') && (value === false || empty)) continue;
     const shown = typeof value === 'string' ? value.slice(0, 40) : (JSON.stringify(value) ?? String(value)).slice(0, 80);
     const capability = key === 'avoid' ? '（本入口不会另选绕行路线）'
       : key === 'dig' || key === 'place' || key === 'tower' || key === 'materials' ? '（本入口不做挖掘、放置、搭柱或耗材）' : '';
@@ -259,8 +261,8 @@ export async function executeWalkRoute(
   const nav = await runWalkRoute({
     map: opts.map, body: opts.body, request: opts.request, tick: opts.tick, signal: ctx.signal, observe,
     onMoveRequest: (move) => {
+      // 只记录库实际发出的段请求；请求在取消/期限/换主检查前发出，不能当作进度。
       moveRequests.push(move);
-      reportProgress(moveRequests.length / totalSegments, `步行：已开始第 ${moveRequests.length}/${totalSegments} 段（库已用实测样本确认该段起点）`);
     },
     // 真实 ready 丢失（同一 sessionId 下区块消失）可能先被步行生命周期看到、且之后
     // 没有下一帧/下一次 Vision 调用；readObservedState 把已经知道的实际边界交给共享
@@ -282,7 +284,22 @@ export async function executeWalkRoute(
         cancel: () => loop.cancel('lifecycle', 'shared spatial session interrupted the active walk'),
         ...(opts.protectedSections !== undefined ? { protectedSections: opts.protectedSections } : {}),
       });
-      return () => spatial.detach(token);
+      // 进度只按库已实测确认到达的点推进：nextPointIndex 只在身体样本满足该点
+      // 的完成条件后前进，按键写入或段请求本身不会让它变大。
+      const timer = setInterval(() => {
+        const status = loop.status();
+        if (!status || status.result !== null) return;
+        const confirmedPoints = Math.max(1, status.nextPointIndex);
+        reportProgress(
+          (confirmedPoints - 1) / totalSegments,
+          `步行：实测确认第 ${Math.max(0, confirmedPoints - 1)}/${totalSegments} 段`,
+        );
+      }, 100);
+      timer.unref();
+      return () => {
+        clearInterval(timer);
+        spatial.detach(token);
+      };
     },
   });
   // 到达由库的实测条件确认；取消/超时/失效只保留已确认段对应的进度，不虚报到 1。
@@ -387,7 +404,7 @@ export async function executeWalkRoute(
 export const walkRoute: Skill<WalkRouteArgs> = {
   name: 'walk_route',
   description: '走一条显式给定的同高、无施工短路线（普通干燥整块、沿 X/Z）。由你提供点列，代码稳定执行到每个点；出发前会有限次转头（≤12 次）观察路线支撑/身体/净空格，移动中每段会低头看向该段路径的支撑格，途中只依据可见格更新；转头观察不使用任何物品',
-  argsDoc: '{"points":[[x,y,z],...]}（2~32 个点，脚高 y 相同，相邻沿 X/Z 一格）,"deadlineMs"?:正有限毫秒；只接受这两个参数，avoid/dig/place/tower/materials 等未贯通的选项会被明确拒绝，不会静默忽略',
+  argsDoc: '{"points":[[x,y,z],...]}（2~32 个点，脚高 y 相同，相邻沿 X/Z 一格）,"deadlineMs"?:可选绝对 epoch 毫秒（不能晚于本次任务 ctx.deadline）；只接受这两个参数，avoid/dig/place/tower/materials 等未贯通的选项会被明确拒绝，不会静默忽略',
   timeoutMs: 30000,
   movement: true,
   validate(raw, _adapter) {
@@ -416,7 +433,7 @@ export const walkRoute: Skill<WalkRouteArgs> = {
 
     const rawDeadline = a.deadlineMs === undefined ? undefined : Number(a.deadlineMs);
     const deadlineMs = rawDeadline !== undefined && Number.isFinite(rawDeadline) && rawDeadline > 0 ? rawDeadline : undefined;
-    if (rawDeadline !== undefined && deadlineMs === undefined) return { ok: false, error: 'deadlineMs 必须是正有限数字（毫秒）' };
+    if (rawDeadline !== undefined && deadlineMs === undefined) return { ok: false, error: 'deadlineMs 必须是正的绝对 epoch 毫秒，且不能晚于本次任务期限' };
     return { ok: true, args: { points: parsed, ...(deadlineMs !== undefined ? { deadlineMs } : {}) } };
   },
   async run(ctx, args) {

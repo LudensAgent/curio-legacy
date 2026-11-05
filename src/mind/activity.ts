@@ -16,6 +16,9 @@ export const inventoryOf = (s: Pick<AgentState, 'inventory'>): Record<string, nu
   return out;
 };
 
+/** 物品名在技能参数里可能带 `minecraft:` 前缀，背包账本用不带前缀的名字。 */
+const itemBaseName = (name: string) => name.replace(/^minecraft:/, '');
+
 export function diffInventory(before: Record<string, number>, after: Record<string, number>) {
   const gained: Record<string, number> = {}, lost: Record<string, number> = {};
   for (const k of new Set([...Object.keys(before), ...Object.keys(after)])) {
@@ -30,7 +33,14 @@ export function diffInventory(before: Record<string, number>, after: Record<stri
  * 自动重试/续跑沿用这份账本；新的一段活（新的 Agent 委托）重新起算，不设全局配额。
  * 只放在内存里，随 Activity 一起被回收。
  */
-type StepLedger = { deadline: number; resume: boolean; baseline: Record<string, number> };
+type StepLedger = {
+  deadline: number;
+  resume: boolean;
+  /** Inventory snapshot at the previous dispatch, so consumption accumulates per attempt. */
+  last: Record<string, number>;
+  /** Normalized item name -> units lost across attempts. Pickups cannot erase prior spend. */
+  spent: Record<string, number>;
+};
 const ledgers = new WeakMap<Activity, Map<string, StepLedger>>();
 const stepKeyOf = (step: Step) => step.id ?? `${step.skill}:${JSON.stringify(step.args ?? {})}`;
 
@@ -49,10 +59,22 @@ export function beginStep(a: Activity, step: Step, state: Pick<AgentState, 'inve
   const key = stepKeyOf(step);
   const previous = map.get(key);
   const continuation = previous?.resume === true;
+  const inventory = inventoryOf(state);
   if (!previous || !continuation) {
-    map.set(key, { deadline: Date.now() + (SKILLS[step.skill]?.timeoutMs ?? 0), resume: false, baseline: inventoryOf(state) });
+    map.set(key, {
+      deadline: Date.now() + (SKILLS[step.skill]?.timeoutMs ?? 0),
+      resume: false,
+      last: inventory,
+      spent: {},
+    });
   } else {
     previous.resume = false;
+    const { lost } = diffInventory(previous.last, inventory);
+    for (const [name, count] of Object.entries(lost)) {
+      const base = itemBaseName(name);
+      previous.spent[base] = (previous.spent[base] ?? 0) + count;
+    }
+    previous.last = inventory;
   }
   const ledger = map.get(key)!;
   return { deadlineMs: ledger.deadline, remainingMs: ledger.deadline - Date.now(), continuation };
@@ -79,17 +101,28 @@ function resetStepBudgets(a: Activity) {
 function materialAllowance(a: Activity, step: Step, state: AgentState) {
   const args = (step.args ?? {}) as Record<string, unknown>;
   const climbKey = step.id ?? JSON.stringify(step.args ?? {});
+  const height = a.climb?.[climbKey]?.height
+    ?? (typeof args.height === 'number' ? args.height : Number(args.height));
+  const item = typeof args.item === 'string' && args.item !== 'any' ? itemBaseName(args.item) : null;
   const declared = step.skill === 'climb_up'
-    ? { max: a.climb?.[climbKey]?.height ?? (typeof args.height === 'number' ? args.height : 0), names: null as Set<string> | null }
+    ? { max: Number.isFinite(height) ? height : 0, names: null as Set<string> | null }
     : step.skill === 'place_at'
-      ? { max: 1, names: typeof args.item === 'string' && args.item !== 'any' ? new Set([args.item]) : null }
+      ? { max: 1, names: item === null ? null : new Set([item]) }
       : undefined;
   if (!declared || declared.max <= 0) return undefined;
   const ledger = ledgerOf(a).get(stepKeyOf(step));
   if (!ledger) return undefined;
-  const { lost } = diffInventory(ledger.baseline, inventoryOf(state));
-  const consumed = Object.entries(lost).reduce((n, [name, count]) =>
-    n + ((declared.names ? declared.names.has(name) : PLACEABLE.includes(name)) ? count : 0), 0);
+  // Consumption accumulates across attempts; a later pickup of the same item
+  // must not erase earlier spend. Include the loss since the last dispatch so a
+  // just-finished attempt is counted before the next beginStep folds it in.
+  const { lost } = diffInventory(ledger.last, inventoryOf(state));
+  const spent: Record<string, number> = { ...ledger.spent };
+  for (const [name, count] of Object.entries(lost)) {
+    const base = itemBaseName(name);
+    spent[base] = (spent[base] ?? 0) + count;
+  }
+  const consumed = Object.entries(spent).reduce((n, [name, count]) =>
+    n + ((declared.names ? declared.names.has(itemBaseName(name)) : PLACEABLE.includes(itemBaseName(name))) ? count : 0), 0);
   return { max: declared.max, consumed, remaining: Math.max(0, declared.max - consumed) };
 }
 

@@ -339,8 +339,9 @@ export class Arbiter extends EventEmitter {
       authorizedBy: task.authorizedBy ?? null,
     });
 
-    // 照旧在期限后留 2000ms 收尾宽限；父委托期限已过则不新起计时，立即中止。
-    const timeoutGraceEnd = task.deadline + 2000;
+    // 父委托期限是绝对预算，不再向后放宽；只有技能自身 timeoutMs 才保留
+    // 2000ms 收尾宽限。期限已过则不新起计时，立即中止。
+    const timeoutGraceEnd = meta.deadlineMs === undefined ? task.deadline + 2000 : task.deadline;
     const timeout = timeoutGraceEnd <= Date.now()
       ? (controller.abort('TIMEOUT'), null)
       : setTimeout(() => controller.abort('TIMEOUT'), timeoutGraceEnd - Date.now());
@@ -372,7 +373,8 @@ export class Arbiter extends EventEmitter {
       })
       .then((result) => {
         if (timeout !== null) clearTimeout(timeout);
-        if (controller.signal.reason === 'TIMEOUT' && result.status === 'cancelled') {
+        if (controller.signal.reason === 'TIMEOUT' && (result.status === 'cancelled' || result.status === 'succeeded')) {
+          // 已过期限的执行不能因为技能忽略 abort 或恰好收尾就改报成功；保留已发生的数据。
           result = { status: 'failed', failureCode: 'TIMEOUT', summary: `${skill.name} 超时`, ...(result.data ? { data: result.data } : {}) };
         }
         if (controller.signal.aborted && controller.signal.reason !== 'TIMEOUT' && result.status === 'succeeded') {

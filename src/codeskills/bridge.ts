@@ -110,9 +110,10 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
     return observed;
   };
   // 与宏步骤相同的站位依赖：一次 step/导航段失败后，紧接着的相对 at 挖掘/放置会按
-  // 错误站位解析。只读动作不消耗这条事实；任何实际执行的非只读动作都会先清掉它，
-  // 若该动作本身也是未到达的移动，则重新记录该步的实际末位。
+  // 错误站位解析。只有确实改变或确认站位的移动入口才清掉它；转头、攻击、装备等
+  // 不解决站位缺口的动作不能把提示吞掉。
   let pendingStance: { skill: string; pos: Vec3Like | undefined } | null = null;
+  const isStanceMove = (name: string) => STANCE_MOVES.has(name) || NAVIGATION_ACTIONS.has(name);
   const runSkill = async (name: string, args: unknown) => {
     const skill = SKILLS[name];
     if (!skill || LLM_HIDDEN.has(name) || name === 'use_skill') throw new Error(`没有 "${name}" 这个动作（代码里不能再调用 use_skill）`);
@@ -124,12 +125,13 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
         : '（没有保留失败回执位置）';
       throw new Error(`上一步 ${pendingStance.skill} 没到新站位${where}；${name} 使用相对 at，会按错误站位解析。先确认实际站位，或改用带绝对 xyz 的目标`);
     }
-    // 只读观察不移动，不会消除未解决的移动缺口；其他动作执行后由自己的结果重新判定。
-    if (SKILLS[name]?.readOnly !== true) pendingStance = null;
     throwIfAborted(ctx.signal);
     const r = await executeSkill({ ...ctx, senses: actionSenses, deadline: Math.min(ctx.deadline, Date.now() + skill.timeoutMs), progress: () => {} }, skill, constrainRecoveryAction(ctx, name, v.args));
     if (r.status === 'cancelled') throw Object.assign(new Error('task cancelled'), { name: 'AbortedError', ...(r.data ? { partial: r.data } : {}) });
-    if (r.status === 'failed' && STANCE_MOVES.has(name)) {
+    if (r.status === 'succeeded' && isStanceMove(name)) {
+      // 成功迈步或导航已把站位带到新位置，旧的“未到达”缺口随之解除。
+      pendingStance = null;
+    } else if (r.status === 'failed' && isStanceMove(name)) {
       const nav = r.data?.nav as { lastPosition?: unknown } | undefined;
       // 导航动作优先用该步真实回执里的末位，不事后重读现场覆盖旧回执；
       // 旧动作没有统一回执时用刚失败时的站位。
@@ -267,6 +269,8 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
           const avoid = constrained.avoid as string[];
           await ctx.adapter.moveTo({ kind: 'near', pos: p, range }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(30_000, ctx.deadline - Date.now())), ...(sprint ? { sprint: true } : {}), ...(avoid.length ? { avoid } : {}) });
         } catch (e) { if ((e as Error)?.name === 'AbortedError') throw e; return { ok: false, error: String((e as Error)?.message ?? e).slice(0, 160), pos: ctx.adapter.state().pos }; }
+        // 寻路到点成功会把身体带到新站位，旧的未到达缺口不再适用于后续相对动作。
+        pendingStance = null;
         return { ok: true, pos: ctx.adapter.state().pos };
       }
       case 'look': await ctx.adapter.look(Number(a[0]) || 0, Number(a[1]) || 0, ctx.signal); return { ok: true };

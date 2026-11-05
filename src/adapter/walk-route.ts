@@ -26,6 +26,7 @@ import type {
   MoveExecutor,
   NavResult,
   WalkRouteRequest,
+  WalkRouteStatus,
 } from 'curio-minecraft-3d-memory';
 
 const EMPTY: CollisionShape = { boxes: [], supportFaces: [] };
@@ -335,6 +336,8 @@ export class WalkMoveExecutor implements MoveExecutor {
 export interface ActiveWalkLoop {
   observe(report: ChangeReport, budget: number): void;
   cancel(by: 'lifecycle', reason: string): void;
+  /** Read-only progress projection; never advances or mutates the delegation. */
+  status(): WalkRouteStatus | null;
 }
 
 /**
@@ -417,6 +420,7 @@ export async function runWalkRoute(opts: {
     unbindActive = opts.bindActive?.({
       observe: (report, budget) => { loop.observe(report, budget); },
       cancel: (by, reason) => { cancelRun(by, reason); },
+      status: () => loop.status(),
     }) ?? null;
     const executionId = loop.status()!.delegationId;
 
