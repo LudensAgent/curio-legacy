@@ -721,6 +721,12 @@ const dashboard = startDashboard(config.dashboard.host, config.dashboard.port, b
     try { rmSync(path.join(config.dataDir, 'skills', name), { recursive: true, force: true }); } catch (e) { return { ok: false, error: `删除文件失败：${(e as Error).message}` }; }
     return { ok: true };
   },
+  forgetPlace: (id) => {
+    const removed = memory.forgetLandmark(id);
+    if (!removed) return { ok: false, error: '记忆里没有这个地点（可能已经删了）' };
+    bus.publish('memory', 'P2', `控制台移除了地点记忆：${removed.label} (${removed.pos.x}, ${removed.pos.y}, ${removed.pos.z})`, { id: removed.id, kind: removed.kind, dim: removed.dim });
+    return { ok: true, place: removed };
+  },
   clearSkills: async () => {
     const skillsDir = path.join(config.dataDir, 'skills');
     const names = new Set(skillBook.list().filter((k) => k.source === 'self').map((k) => k.name));

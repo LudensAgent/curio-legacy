@@ -61,6 +61,32 @@ test('dashboard retains shared notes and goals without presenting another dimens
   assert.equal(snapshot.facingYaw, null);
 });
 
+test('manual forget removes a recorded hut or base and hands home over to another base', (t) => {
+  const memory = new WorldMemory(null);
+  t.after(() => memory.close());
+  memory.setWorld('w');
+  const home = memory.setBase('overworld', { x: 0, y: 64, z: 0 }, '小屋');
+  const away = memory.setBase('overworld', { x: 40, y: 64, z: 40 }, '新家');
+  memory.setBase('overworld', { x: -40, y: 64, z: -40 }, '前哨');
+  memory.selectBase(away.id);
+  const hut = memory.addLandmark('discovery', '我的小屋', 'overworld', { x: 0, y: 64, z: 0 });
+  assert.ok(hut);
+
+  const removed = memory.forgetLandmark(away.id);
+  assert.equal(removed?.label, '新家');
+  assert.equal(memory.landmarks().some((l) => l.id === away.id), false);
+  assert.equal(memory.landmarks().some((l) => l.id === home.id), true);
+  // 首选基地被人工删掉后，同维度剩下的基地里恰好有一个接替
+  assert.equal(memory.bases('overworld').filter((base) => base.primary).length, 1);
+
+  assert.equal(memory.forgetLandmark(hut.id)?.label, '我的小屋');
+  assert.equal(memory.landmarks().some((l) => l.id === hut.id), false);
+  assert.equal(memory.forgetLandmark(away.id), null);
+
+  memory.setWorld('other');
+  assert.equal(memory.forgetLandmark(home.id), null);
+});
+
 test('dashboard clears spatial records when the Agent world differs from the loaded memory', (t) => {
   const memory = new WorldMemory(null);
   t.after(() => memory.close());

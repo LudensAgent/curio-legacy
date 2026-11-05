@@ -51,6 +51,8 @@ export interface DashboardHandlers {
   deleteSkill?(name: string): { ok: boolean; error?: string };
   /** 清除所有自学技能（内置技能不受影响，只能禁用） */
   clearSkills?(): Promise<{ ok: boolean; error?: string; cleared?: number }>;
+  /** 从记忆里移除一个地点（含基地）；只动记忆，不改世界里的方块 */
+  forgetPlace?(id: string): { ok: boolean; error?: string; place?: { id: string; kind: string; label: string; dim: string; pos: { x: number; y: number; z: number } } };
   /** 切换自动旁观（附着到 Bot / 自由旁观） */
   spectate?(on: boolean): Promise<unknown> | unknown;
   /** 弹幕存档：?dates=1 列出有存档的日期；否则按 date / q / questions / blocked / limit 查询 */
@@ -255,6 +257,14 @@ export function startDashboard(
         } catch (error) {
           return send(res, 500, JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }));
         }
+      }
+      if (p === '/api/memory/forget') {
+        if (!h.forgetPlace) return send(res, 404, '{"ok":false,"error":"当前运行不支持移除地点记忆"}');
+        const body = await readBody(req);
+        const id = String(body?.id ?? '').trim();
+        if (!id) return send(res, 400, '{"ok":false,"error":"id 不能为空"}');
+        const r = h.forgetPlace(id);
+        return send(res, r.ok ? 200 : 400, JSON.stringify(r));
       }
       if (p === '/api/skills/clear') {
         if (!h.clearSkills) return send(res, 404, '{"ok":false,"error":"当前运行不支持清除所有技能"}');
