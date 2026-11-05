@@ -13,7 +13,7 @@ import type { EventBus } from '../events.ts';
 import { AbortedError, raceAbort, shortId, sleep, throwIfAborted, TimeoutError } from '../util.ts';
 import { installClientGuard } from './click-guard.ts';
 import { cornerSafe } from './corner-safe.ts';
-import { AIR_BLOCKS, attachmentFaces, SAPLING_SOIL } from '../perception/surroundings.ts';
+import { AIR_BLOCKS, attachmentFaces, isSaplingItem, SAPLING_SOIL } from '../perception/surroundings.ts';
 import { feetCell, facingOfYaw } from '../perception/local.ts';
 import { bodyOverlapsPortal, PORTAL_KINDS, portalApproach as computePortalApproach, portalStance as computePortalStance } from '../perception/portal.ts';
 import type { WalkBody, WalkTick } from './walk-route.ts';
@@ -1943,7 +1943,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const cur = b.blockAt(target);
     if (cur && cur.boundingBox === 'block') return { ok: true }; // 已经有方块了
     // 树苗只能种在草地/泥土类方块上：先查目标格下方，种不了就报清楚（别让服务器拒绝后只回一句 still air）
-    if (/_sapling$/.test(item.name)) {
+    if (isSaplingItem(item.name)) {
       const below = b.blockAt(target.offset(0, -1, 0));
       if (!below) return { ok: false, reason: `BAD_SUPPORT:目标格 (${target.x},${target.y},${target.z}) 正下方未加载，无法确认树苗的土壤` };
       if (!SAPLING_SOIL.has(below.name)) {
@@ -2002,7 +2002,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       reason: 'NO_REFERENCE',
       detail: refs.length
         ? `${at} 有 ${refs.length} 个相邻实心方块，但从当前眼睛位置到这些面的视线被挡或超出 4.4 格；先退后一步或侧移换个角度，让目标格和相邻方块的面进入视野再放`
-        : `${at} 四周没有相邻实心方块（悬空），从当前站位没有可贴的面${/_sapling$/.test(item.name) ? '；即使下面有土，也要先站到能看见目标格相邻面的位置' : ''}`,
+        : `${at} 四周没有相邻实心方块（悬空），从当前站位没有可贴的面${isSaplingItem(item.name) ? '；即使下面有土，也要先站到能看见目标格相邻面的位置' : ''}`,
     };
   }
 
