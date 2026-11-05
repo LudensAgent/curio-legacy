@@ -101,7 +101,7 @@ test('正常回入口的路线把段数/路长/下潜幅度写进回执', async 
   assert.equal(result.data?.rescueCount, 0);
 });
 
-test('同列兜底到达的高度差太多时停下，不把路线挪到另一层', async (t) => {
+test('同列兜底到达的高度差太多时停下，并说清是上方落差与可用动作', async (t) => {
   const w = new TestWorld();
   w.pos = { x: 0.5, y: 40, z: 0.5 };
   const memory = new WorldMemory(null);
@@ -117,9 +117,33 @@ test('同列兜底到达的高度差太多时停下，不把路线挪到另一�
   const result = await followPassage.run(ctx as never, { to: 'entrance' });
 
   assert.equal(result.status, 'failed');
-  assert.match(result.summary, /高度差 10 格/);
-  assert.match(result.summary, /这条记录和当前地形对不上/);
+  assert.match(result.summary, /高度差 10 格（记录点在你上方 10 格）/);
+  assert.match(result.summary, /climb_up/);
+  assert.match(result.summary, /加 dig:true/);
   assert.ok(result.data?.staleWaypoint);
+});
+
+test('记录点在下方的竖直落差：提示 descend 或 dig:true，而不是只说记录失配', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 40, z: 0.5 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  save(memory, w, 'flat', [{ x: 0, y: 40, z: 0 }, { x: 4, y: 40, z: 0 }, { x: 8, y: 40, z: 0 }], { x: 8, y: 41, z: 0 });
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  // 同列兜底落到记录点上方 6 格：这一列只能到 y46，记录点在 y40 的竖井下面
+  t.mock.method(w, 'moveTo', async (goal: any) => {
+    if (goal.kind === 'near') throw new Error('No path');
+    w.pos = { x: goal.x, y: 46, z: goal.z };
+  });
+
+  const result = await followPassage.run(ctx as never, { to: 'entrance' });
+
+  assert.equal(result.status, 'failed');
+  assert.match(result.summary, /记录点在你下方 6 格/);
+  assert.match(result.summary, /竖直落差/);
+  assert.match(result.summary, /assess_landings \+ descend/);
+  assert.match(result.summary, /加 dig:true/);
 });
 
 test('系统性 3 格 y 偏差仍能走完：兜底成功只记次数，不中止', async (t) => {

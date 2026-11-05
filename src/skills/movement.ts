@@ -819,11 +819,19 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
             const now = adapter.state().pos;
             return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段卡住：下一路点 (${Math.round(wp.x)},${Math.round(wp.y)},${Math.round(wp.z)}) 过不去（${(e2 as Error).message.slice(0, 50)}）。人停在 (${now.x.toFixed(1)},${now.y.toFixed(1)},${now.z.toFixed(1)})，离${goal}约 ${Math.round(dist3(now, target))} 格${allowDig ? '' : '；可加 dig:true 授权挖开挡路'}`, { position: now, reachedWaypoint: i, totalWaypoints: route.length - 1, remaining: Math.round(dist3(now, target)), target, routeFacts }));
           }
-          // 同列兜底必须核对高度：只差 4 格以内算记录偏差；差得多说明记录和现在的地形对不上，
-          // 继续走会把整条路线悄悄挪到另一层隧道上。
+          // 同列兜底必须核对高度：只差 4 格以内算记录偏差；差得多可能是记录里的一段竖直落差/爬升，
+          // 不能假装走过去了（会把整条路线悄悄挪到另一层隧道上），但要把方向、落差和能用的基础动作说清楚。
           const got = adapter.state().pos;
           if (Math.abs(got.y - wp.y) > 4) {
-            return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段：记录路点在 (${Math.round(wp.x)},${Math.round(wp.y)},${Math.round(wp.z)})，同列只到得了 (${got.x.toFixed(1)},${got.y.toFixed(1)},${got.z.toFixed(1)})，高度差 ${Math.round(Math.abs(got.y - wp.y))} 格。这条记录和当前地形对不上，没有继续往下走；换条路或自己过去（由你定）`, { position: got, reachedWaypoint: i, totalWaypoints: route.length - 1, staleWaypoint: { wp, at: got }, routeFacts }));
+            const gap = Math.round(Math.abs(got.y - wp.y));
+            const below = wp.y < got.y; // 记录点在人下方
+            const sameColumn = Math.abs(wp.x - got.x) < 1.5 && Math.abs(wp.z - got.z) < 1.5;
+            const how = sameColumn
+              ? below
+                ? `这一段像是记录里的竖直落差。要沿记录下去：assess_landings + descend 选落点${allowDig ? '，或自己 dig_at / place_at 开台阶' : '，或加 dig:true 让我挖/垫台阶'}`
+                : `这一段像是记录里的竖直爬升。要沿记录上去：climb_up / step${allowDig ? '，或自己 dig_at / place_at 垫高' : '，或加 dig:true 让我挖/垫'}`
+              : '同列只到得了另一个高度；要接上可用 climb_up / descend，或自己挖/垫';
+            return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段：记录路点在 (${Math.round(wp.x)},${Math.round(wp.y)},${Math.round(wp.z)})，同列只到得了 (${got.x.toFixed(1)},${got.y.toFixed(1)},${got.z.toFixed(1)})，高度差 ${gap} 格（记录点在你${below ? '下' : '上'}方 ${gap} 格）。${how}；换条路也由你定`, { position: got, reachedWaypoint: i, totalWaypoints: route.length - 1, staleWaypoint: { wp, at: got }, routeFacts }));
           }
           // 兜底成功就是这一段走通了；只记下次数，不把“用了兜底”当成中止理由。
           rescueCount++;
