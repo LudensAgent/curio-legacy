@@ -322,8 +322,10 @@ export class Mind {
     const travelling = !!task && ['travel_portal', 'recall_portal'].includes(task.skill);
     if (travelling && !observationReady(state)) return; // 传送技能自己等落地
     if (!observationReady(state)) {
-      // 首次启动还没刷出生命值（alive 仍是 false）不算死亡：不打扰，等 spawn 后直接接着上次的议程
-      if (this.seenAlive) this.suspend(state.alive ? 'disconnected' : 'death');
+      // 首次启动还没刷出生命值（alive 仍是 false）不算死亡：不打扰，等 spawn 后直接接着上次的议程。
+      // 连着的时候观测暂时不可用（换维度、区块没加载完）不是断线：连接还在，等世界就绪后按实际变化继续判断。
+      if (this.seenAlive && !state.connected) this.suspend('disconnected');
+      else if (this.seenAlive && !state.alive) this.suspend('death');
       return;
     }
     this.seenAlive = true;

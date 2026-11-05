@@ -1587,3 +1587,26 @@ test('修订稿的必需步骤无效时不会回退执行旧稿', async (t) => {
   await w.reply(2, { decision: 'new', activity: { what: '重新决定', steps: [step(1)] } });
   assert.equal(w.mind.activity?.what, '重新决定');
 });
+
+test('换维度时观测暂时不可用不算断线，落地后按换了地方继续想', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { decision: 'new', activity: { what: '走近下界门', steps: [step()] } });
+  await w.tick();
+  assert.equal(w.mind.activity?.what, '走近下界门');
+  // 穿门：连接和生命都还在，只是新维度和区块还没观测就绪
+  w.adapter.dim = 'the_nether';
+  w.adapter.sessionId = 'session-after-portal';
+  w.adapter.observationReady = false;
+  await w.tick();
+  await w.tick();
+  assert.ok(w.bus.recent().every((e) => e.type !== 'attempt_end' || !/断线了/.test(e.msg)), '换维度不应把这段活记成断线');
+  assert.ok(w.bus.recent().every((e) => e.type !== 'llm_request' || !/重新连上了/.test(e.msg)), '换维度不应让它以为重连了');
+  assert.equal(w.mind.activity?.what, '走近下界门', '世界还没就绪时先不打断手上的活');
+  w.adapter.observationReady = true;
+  await w.tick();
+  const request = w.bus.recent().filter((e) => e.type === 'llm_request').at(-1);
+  assert.match(request?.msg ?? '', /换了个地方|第一次来到/);
+  const ended = w.bus.recent().filter((e) => e.type === 'attempt_end').at(-1);
+  assert.match(ended?.msg ?? '', /换了世界\/维度/);
+});
