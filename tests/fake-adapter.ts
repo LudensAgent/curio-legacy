@@ -33,6 +33,7 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
   light = 15;
   oxygen = 20;
   inWater = false;
+  onGround = true;
   /** 正在乘坐的东西（boat/horse…） */
   riding: string | null = null;
   private ridingId: number | null = null;
@@ -84,7 +85,7 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
       connected: this.connected, alive: this.hp > 0, observationReady: this.observationReady && this.connected && this.hp > 0,
       worldId: this.worldId, sessionId: this.sessionId, observationId: ++this.observationId,
       username: 'FakeBot', pos: { ...this.pos }, dim: this.dim,
-      hp: this.hp, food: this.food, oxygen: this.oxygen, timeOfDay: this.isDay ? 1000 : 15000, isDay: this.isDay, biome: 'plains', onGround: true,
+      hp: this.hp, food: this.food, oxygen: this.oxygen, timeOfDay: this.isDay ? 1000 : 15000, isDay: this.isDay, biome: 'plains', onGround: this.onGround,
       inWater: this.inWater, inLava: this.inLava, inventory: [...this.inv].map(([name, count]) => ({ name, count })), emptySlots: 30, held: null, riding: this.riding,
       equipment: [...this.equipped].map(([slot, name]) => ({ slot, name })),
     };

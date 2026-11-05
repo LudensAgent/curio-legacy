@@ -79,6 +79,14 @@ test('self and equipment predicates read actual state; missing fields and foreig
   assert.equal(evaluateCondition(block, state, state.worldId, [{ ...receipt, sessionId: 'old' }]).status, 'unknown');
   assert.equal(evaluateCondition(block, state, state.worldId, [{ ...receipt, observedAt: Date.now() - 1001 }]).status, 'unknown');
   assert.throws(() => validateCondition({ type: 'self_state', field: 'hp', equals: 'boat' }, w.adapter, w.memory, state));
+
+  const dry = validateCondition({ type: 'self_state', field: 'inWater', equals: false }, w.adapter, w.memory, w.adapter.state());
+  w.state.inWater = false;
+  w.state.onGround = false;
+  assert.equal(evaluateCondition(dry, w.adapter.state()).status, 'unsatisfied', '水面浮动的瞬时 inWater=false 不算离开水');
+  assert.match(String((evaluateCondition(dry, w.adapter.state()) as { reason?: string }).reason), /没有触地/);
+  w.state.onGround = true;
+  assert.equal(evaluateCondition(dry, w.adapter.state()).status, 'satisfied');
 });
 
 test('position_y validates an explicit height range and evaluates the observed position', (t) => {

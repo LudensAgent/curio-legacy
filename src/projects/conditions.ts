@@ -125,6 +125,15 @@ export function evaluateCondition(condition: Condition, state: AgentState, world
   if (condition.type === 'self_state') {
     const actual = state[condition.field];
     if (actual === undefined) return { status: 'unknown', actual: null, reason: '适配器没有提供该自身状态' };
+    // 水面上下浮动时 isInWater 会瞬时变 false，但身体并未离开水/站稳。
+    // 只有同时触地，才把 inWater=false 当成离开水的完成证据；否则如实报告未确认。
+    if (condition.field === 'inWater' && condition.equals === false && actual === false && !state.onGround) {
+      return {
+        status: 'unsatisfied',
+        actual: { field: 'inWater', value: false, expected: false, onGround: false },
+        reason: 'inWater=false 但没有触地；可能只是水面浮动的瞬时状态，未确认上岸/离开水',
+      };
+    }
     return { status: actual === condition.equals ? 'satisfied' : 'unsatisfied', actual: { field: condition.field, value: actual, expected: condition.equals } };
   }
   if (condition.type === 'position_y') {

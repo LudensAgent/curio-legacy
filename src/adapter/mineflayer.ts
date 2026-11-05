@@ -760,12 +760,24 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     }
     let biome: string | null = null;
     let chunkReady = false;
-    try { const block = b.blockAt(e.position); chunkReady = !!block; biome = block?.biome?.name ?? null; } catch { /* ignore */ }
+    let feetName: string | undefined;
+    let feetWaterlogged = false;
+    try {
+      const block = b.blockAt(e.position);
+      chunkReady = !!block;
+      biome = block?.biome?.name ?? null;
+      feetName = block?.name;
+      feetWaterlogged = String((block as { getProperties?: () => Record<string, unknown> } | null)?.getProperties?.().waterlogged) === 'true';
+    } catch { /* ignore */ }
     const observationReady = this.spawned && chunkReady && (b.health ?? 0) > 0 && dim !== 'unknown';
     const worldAgeTicks = b.time?.age;
     const DIFFICULTY = ['peaceful', 'easy', 'normal', 'hard'] as const;
     const difficulty = typeof b.game?.difficulty === 'string' && (DIFFICULTY as readonly string[]).includes(b.game.difficulty) ? b.game.difficulty as typeof DIFFICULTY[number] : undefined;
     const gamerules = b.game?.rules && typeof b.game.rules === 'object' ? { ...b.game.rules } as Record<string, string | number | boolean> : undefined;
+    // mineflayer 的 isInWater 会在水面上下浮动时瞬时变 false；脚格本身仍是水时不能报成离开水。
+    // 这是身体事实校正，不改变“水/岩浆是否危险”的游戏规则。
+    const inWater = !b.vehicle && (!!e.isInWater || feetName === 'water' || feetName === 'bubble_column' || feetWaterlogged);
+    const inLava = !b.vehicle && (!!e.isInLava || feetName === 'lava');
     return {
       connected: true,
       alive: (b.health ?? 0) > 0,
@@ -788,8 +800,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       isDay: b.time?.isDay ?? true,
       biome,
       onGround: !!e.onGround,
-      inWater: !b.vehicle && !!e.isInWater,
-      inLava: !!e.isInLava,
+      inWater,
+      inLava,
       inventory: [...inv.values()],
       ...(this.effectsOf(b).length ? { effects: this.effectsOf(b) } : {}),
       ...(b.experience ? { xp: { level: b.experience.level ?? 0, progress: Math.round((b.experience.progress ?? 0) * 100) / 100 } } : {}),

@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { afterStep, beginStep, createActivity, describeActivity, nextStep } from '../src/mind/activity.ts';
+import type { Condition } from '../src/projects/types.ts';
 import { climbUp } from '../src/skills/body.ts';
-import { fail } from '../src/skills/types.ts';
+import { fail, ok } from '../src/skills/types.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 
 const gather = { skill: 'gather', args: { block: 'stone', count: 3 } };
 
-function activityOf(steps: { skill: string; args?: unknown }[], repeat = 1) {
+function activityOf(steps: { skill: string; args?: unknown }[], repeat = 1, doneWhen?: Condition) {
   const adapter = new FakeAdapter();
-  return { adapter, activity: createActivity({ what: '测试', why: '', kind: 'other', steps, repeat }, '', 'llm', adapter.state()) };
+  return { adapter, activity: createActivity({ what: '测试', why: '', kind: 'other', steps, repeat, ...(doneWhen ? { doneWhen } : {}) }, '', 'llm', adapter.state()) };
 }
 
 test('52ms→7ms：有界开挖的确定性预检失败，不因身体或视角变化再原样重试', () => {
@@ -21,6 +22,17 @@ test('52ms→7ms：有界开挖的确定性预检失败，不因身体或视角�
   const verdict = afterStep(activity, step, fail('ERROR', '有界开挖停止：下一落点下面是空的（air）：前面脚下是个坑/洞穴', { completedSteps: 0, excavatedBlocks: 0 }), 7, adapter.state(), percept as never);
   assert.equal(verdict.kind, 'stuck');
   assert.ok(!activity.adaptations.some((item) => item.startsWith('retry:')), '不做第二次相同缺口调用');
+});
+
+test('surface 只浮起、未触地时，inWater=false 的收工条件不能算完成', () => {
+  const { adapter, activity } = activityOf([{ skill: 'surface' }], 1, { type: 'self_state', field: 'inWater', equals: false });
+  adapter.inWater = false;
+  adapter.onGround = false;
+  const step = nextStep(activity)!;
+  const verdict = afterStep(activity, step, ok('结束时头已露出流体，还没上岸', { surfaced: true, landed: false }), 100, adapter.state());
+  assert.equal(verdict.kind, 'done');
+  assert.equal((verdict as { met: boolean }).met, false, '水面浮动的瞬时 inWater=false 不能把活动标成完成');
+  assert.match((verdict as { why: string }).why, /没有触地|未确认/);
 });
 
 test('相对 step 失败且身体已换位：不自动重试，避免用新站位重算 [1,-1,0]', () => {
