@@ -445,11 +445,26 @@ if (memory.patched.length) bus.publish('memory', 'P1', `套用了人工记忆修
 let lastHurt = 0;
 /** 最近一次挨打时观察到的身体/附近实体事实；死亡播报没有点名来源时用它补上下文。 */
 let lastHurtContext = '';
+// 它亲手拿到主手的东西（工具、火把、食物都算）：记下来，进程重启/重连后恢复。
+// 只恢复它自己的选择，不按“最快工具”替它重挑。
+adapter.on('hand_choice', (name: string | null) => memory.setLastHand(name));
 adapter.on('spawn', () => {
   executive.onSpawn();
   attachObserver();
   const s = adapter.state();
   memory.setWorld(s.worldId);
+  // 重启后客户端会把快捷栏选回默认格；这时按记忆恢复它上次亲手拿的主手，
+  // 避免“刚选好的石镐被重启冲掉，又退回铁镐/最快工具”。
+  const lastHand = memory.lastHand();
+  if (lastHand && s.inventory.some((i) => i.name === lastHand && i.count > 0)) {
+    setTimeout(() => {
+      const now = adapter.state();
+      if (now.held === lastHand || !now.inventory.some((i) => i.name === lastHand && i.count > 0)) return;
+      void adapter.equipItem(lastHand, 'hand', new AbortController().signal).then((r) => {
+        if (r.ok) bus.publish('notice', 'P3', `恢复上次亲手拿的主手：${lastHand}`, { level: 'note', salience: 0.3, kind: 'hand_restored' });
+      }, () => {});
+    }, 500);
+  }
   if (awaitingRespawnLoss) {
     // 复活后比较背包：开了 keepInventory 就什么都没丢
     awaitingRespawnLoss = false;

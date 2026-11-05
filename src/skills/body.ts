@@ -25,15 +25,15 @@ const liquidNeighbours = (ctx: SkillCtx, c: Vec3Like) => [[1, 0, 0], [-1, 0, 0],
   .map(([dx, dy, dz]) => ctx.adapter.blockAt({ x: c.x + dx, y: c.y + dy, z: c.z + dz }))
   .filter((name): name is string => name !== null && LIQUID_BLOCKS.has(name));
 
-export async function breakCell(ctx: SkillCtx, c: Vec3Like, exact = false, info?: { noDrop?: boolean; ms?: number }, opts: { allowWater?: boolean; allowLava?: boolean } = {}): Promise<string | null> {
+export async function breakCell(ctx: SkillCtx, c: Vec3Like, exact = false, info?: { noDrop?: boolean; ms?: number }, opts: { allowWater?: boolean; allowLava?: boolean; tool?: string } = {}): Promise<string | null> {
   const name = ctx.adapter.blockAt(c);
   if (!exact && isSoftBlock(name)) return null;
   if (name && LIQUID_BLOCKS.has(name)) throw new Error(`LIQUID:${name}`);
   if (name === 'bedrock') throw new Error('BEDROCK');
   const wet = liquidNeighbours(ctx, c).find((name) => /lava/.test(name) ? !opts.allowLava : !opts.allowWater);
   if (wet) throw new Error(`LIQUID_NEAR:${wet}`);
-  // 只有 make:true 才能在身边工作台准备木镐；默认直接用现有工具或空手挖。
-  if (ctx.make === true && !ctx.adapter.canHarvest(c) && findStation(ctx, ['crafting_table'], 4)) await ensureToolFor(ctx, c);
+  // 只有 make:true 才能在身边工作台准备木镐；默认直接用现有工具或空手挖。指定了工具就不替它造/换。
+  if (!opts.tool && ctx.make === true && !ctx.adapter.canHarvest(c) && findStation(ctx, ['crafting_table'], 4)) await ensureToolFor(ctx, c);
   if (exact && ctx.adapter.blockAt(c) !== name) throw new Error('TARGET_CHANGED：目标方块已经改变，停止拆除');
   const origin = ctx.adapter.state();
   const affected = [c], properties = ctx.adapter.blockStateAt?.(c)?.properties ?? {};
@@ -42,7 +42,7 @@ export async function breakCell(ctx: SkillCtx, c: Vec3Like, exact = false, info?
     const sign = properties.part === 'head' ? -1 : 1;
     affected.push({ x: c.x + facing[0] * sign, y: c.y, z: c.z + facing[1] * sign });
   } else if (name?.endsWith('_door') && ['lower', 'upper'].includes(String(properties.half))) affected.push({ ...c, y: c.y + (properties.half === 'lower' ? 1 : -1) });
-  const r = await ctx.adapter.dig(c, ctx.signal).finally(() => {
+  const r = await ctx.adapter.dig(c, ctx.signal, opts.tool ? { tool: opts.tool } : undefined).finally(() => {
     if (!name || ctx.memory.worldId !== origin.worldId || ctx.adapter.state().dim !== origin.dim) return;
     const removed = affected.filter((pos) => { const after = ctx.adapter.blockAt(pos); return after !== null && after !== name; });
     if (removed.length) {
@@ -61,6 +61,7 @@ export const why = (e: unknown) => {
   if (m.startsWith('LIQUID:')) return `那边是 ${m.slice(7)}`;
   if (m === 'BEDROCK') return '碰到基岩，挖不动';
   if (m.startsWith('NEED_TOOL:')) return m.slice(10);
+  if (m.startsWith('TOOL_MISSING:')) return m.slice('TOOL_MISSING:'.length).trim();
   if (m === 'TOOL_MISSING') return '适配器报告当前工具条件不足；检查具体方块、工具和动作时间预算';
   return m;
 };

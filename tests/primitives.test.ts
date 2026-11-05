@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import type { Vec3Like } from '../src/adapter/types.ts';
 import { facingOfYaw, localMap, toWorld } from '../src/perception/local.ts';
 import { digAt, placeAt, primitiveSkills, stepTo } from '../src/skills/primitives.ts';
-import { dig } from '../src/skills/body.ts';
+import { breakCell, dig } from '../src/skills/body.ts';
 import { makeBridge } from '../src/codeskills/bridge.ts';
 import { afterStep, createActivity, nextStep } from '../src/mind/activity.ts';
 import { FakeAdapter } from './fake-adapter.ts';
@@ -591,4 +591,25 @@ test('place_at [0,0,0] on a half-slab still pillars instead of short-circuiting'
   const r = await placeAt.run(ctx, { at: [0, 0, 0], facing: 'N', item: 'any' });
   assert.equal(r.status, 'succeeded', r.summary);
   assert.equal(pillar.mock.callCount(), 1, '搭柱被调用，而非被幂等检查截断');
+});
+
+test('dig_at 可选 tool：校验物品名形态并原样透传，不替模型换别的工具', () => {
+  const w = pocket();
+  const v = digAt.validate({ at: [1, 0, 0], facing: 'N', tool: 'stone_pickaxe' }, w);
+  assert.deepEqual(v, { ok: true, args: { at: [1, 0, 0], facing: 'N', tool: 'stone_pickaxe' } });
+  assert.equal(digAt.validate({ at: [1, 0, 0], facing: 'N', tool: 'Stone Pickaxe' }, w).ok, false);
+  assert.equal(digAt.validate({ at: [1, 0, 0], facing: 'N', tool: 5 }, w).ok, false);
+});
+
+test('breakCell 指定工具时把 tool 透传给适配器；不指定时不传第三参数', async (t) => {
+  const w = pocket();
+  const pos = { x: 0, y: 60, z: -1 };
+  w.blocks.push({ name: 'stone', pos });
+  const calls: any[] = [];
+  (w as any).dig = async (_p: Vec3Like, _s: AbortSignal, opts?: { tool?: string }) => { calls.push(opts); return { ok: true }; };
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  await breakCell(ctx, pos, true, undefined, { tool: 'stone_pickaxe' });
+  await breakCell(ctx, pos, true);
+  assert.deepEqual(calls, [{ tool: 'stone_pickaxe' }, undefined]);
 });

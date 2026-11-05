@@ -20,6 +20,8 @@ import { findStation, isStation, rememberStation } from './stations.ts';
 type Rel = [number, number, number];
 interface CellArgs { at: Rel; facing: Facing; own?: boolean; wet?: boolean; lava?: boolean; fall?: boolean; xyz?: Vec3Like }
 interface StepArgs extends CellArgs { fill?: string }
+/** dig_at 可选指定本轮用哪把工具；只挖这一格，不改变后面的自动换手偏好之外的东西 */
+interface DigAtArgs extends CellArgs { tool?: string }
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 
 /** 模型常用的几种写法都认：at / to / pos / offset / rel / cell，数组 [1,1,0]、字符串 "1,1,0"、对象 {"f":1,"u":1,"r":0} */
@@ -80,10 +82,10 @@ const toRel = (feet: Vec3Like, facing: Facing, p: Vec3Like): [number, number, nu
 /** 挖下来是要带走的东西（挖下来的方块就是同名物品）：挖完核对有没有真进背包 */
 const KEEPSAKE = /_bed$|^(crafting_table|furnace|smoker|blast_furnace|chest|barrel|anvil|jukebox|ender_chest|enchanting_table|brewing_stand|cartography_table|smithing_table|loom|stonecutter|grindstone)$|_door$|shulker_box$/;
 
-export const digAt: Skill<CellArgs> = {
+export const digAt: Skill<DigAtArgs> = {
   name: 'dig_at',
-  description: '挖掉身边指定的一格；目标不在视野时先转头看向它，仍看不见则返回未知，不挖其他位置。手上有能挖、也不比空手慢的工具就用，不能挖或更慢才换背包里更合适的（优先上次亲手选的同种工具，否则最快的）；不自动造工具。液体邻格默认不挖；wet:true 接受进水，lava:true 接受进岩浆，分别显式选择。挖脚下支撑块若下方有落差/液体会默认拦住，fall:true 才接受坠落风险照挖（风险已如实报告，挖不挖由你定）。只挖不走，不能挖基岩。斜下格 [1,-1,0] 在正前方那格后面，看不见也挖不到；往下挖 [0,-1,0] 挖的是脚下支撑块（半砖、耕地这类矮方块就在脚这一格，挖空后自己会落下）',
-  argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "own"?:true, "wet"?:true（允许进水）, "lava"?:true（允许进岩浆）, "fall"?:true（接受挖脚下后的坠落风险）}（前后/左右 ±2，上下 -1..3；facing 定义相对坐标的方向，执行时可能转头观察固定的目标格；例：[1,1,0] 前方高一格，[0,2,0] 头顶上方（往上挖用这个；[0,1,0] 是自己站的头那格、本来就空），[0,-1,0] 脚下的支撑块（半砖等矮方块就在脚这一格））',
+  description: '挖掉身边指定的一格；目标不在视野时先转头看向它，仍看不见则返回未知，不挖其他位置。手上有能挖、也不比空手慢的工具就用，不能挖或更慢才换背包里更合适的（优先上次亲手选的同种工具，否则最快的）；不自动造工具。可用 tool 明确指定这一格用哪件工具：指定后只装备这一把，挖不动/不在背包返回 TOOL_MISSING，不自动改用别的。液体邻格默认不挖；wet:true 接受进水，lava:true 接受进岩浆，分别显式选择。挖脚下支撑块若下方有落差/液体会默认拦住，fall:true 才接受坠落风险照挖（风险已如实报告，挖不挖由你定）。只挖不走，不能挖基岩。斜下格 [1,-1,0] 在正前方那格后面，看不见也挖不到；往下挖 [0,-1,0] 挖的是脚下支撑块（半砖、耕地这类矮方块就在脚这一格，挖空后自己会落下）',
+  argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "tool"?:"物品注册名，如 stone_pickaxe", "own"?:true, "wet"?:true（允许进水）, "lava"?:true（允许进岩浆）, "fall"?:true（接受挖脚下后的坠落风险）}（前后/左右 ±2，上下 -1..3；facing 定义相对坐标的方向，执行时可能转头观察固定的目标格；例：[1,1,0] 前方高一格，[0,2,0] 头顶上方（往上挖用这个；[0,1,0] 是自己站的头那格、本来就空），[0,-1,0] 脚下的支撑块（半砖等矮方块就在脚这一格））',
   timeoutMs: 30000,
   movement: false,
   validate(raw, adapter) {
@@ -92,8 +94,10 @@ export const digAt: Skill<CellArgs> = {
     if (typeof at === 'string') return { ok: false, error: at };
     const facing = facingArg(a.facing, adapter);
     if (!FACINGS.includes(facing as Facing)) return { ok: false, error: facing };
+    const tool = a.tool;
+    if (tool !== undefined && (typeof tool !== 'string' || !/^[a-z0-9_]{1,80}$/.test(tool))) return { ok: false, error: 'tool 为可选物品注册名（小写字母、数字、下划线，如 stone_pickaxe）' };
     // [0,0,0]/[0,1,0] 是自己站的两格，本来就空：照样接受（执行时说明一下），不当成写错丢掉
-    return { ok: true, args: { at, facing: facing as Facing, ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}), ...(a.fall === true ? { fall: true } : {}) } };
+    return { ok: true, args: { at, facing: facing as Facing, ...(tool !== undefined ? { tool } : {}), ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}), ...(a.fall === true ? { fall: true } : {}) } };
   },
   async run(ctx, args) {
     throwIfAborted(ctx.signal);
@@ -175,11 +179,11 @@ export const digAt: Skill<CellArgs> = {
     const countOf = (n: string) => ctx.adapter.state().inventory.filter((i) => i.name === n).reduce((a, i) => a + i.count, 0);
     const had = keepsake ? countOf(keepsake) : 0;
     try {
-      await breakCell(ctx, pos, true, how, { allowWater: args.wet, allowLava: args.lava });
+      await breakCell(ctx, pos, true, how, { allowWater: args.wet, allowLava: args.lava, ...(args.tool ? { tool: args.tool } : {}) });
     } catch (e) {
       if (isAbort(e)) throw e;
       const m = String((e as Error).message);
-      const code = m.startsWith('NEED_TOOL') || m === 'TOOL_MISSING' ? 'TOOL_MISSING' : codeFromError(e);
+      const code = m.startsWith('NEED_TOOL') || m.startsWith('TOOL_MISSING') ? 'TOOL_MISSING' : codeFromError(e);
       return fail(code, seenBefore ? `挖 [${args.at}] 的 ${seenBefore} 没成：${why(e)}` : `挖 [${args.at}] 没成（${code}）；未触碰或看清目标，不能确认方块名称`, { ...after(ctx, args.facing, pos), ...fallFacts });
     }
     const now = ctx.adapter.blockAt(pos);

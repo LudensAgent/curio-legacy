@@ -366,7 +366,7 @@ export function toolTierFact(input: {
   if (scarce < 3) parts.push(`${highZh}坏了做不出新的；${cheapZh}坏了能再做`);
   // 已经有便宜镐（哪怕快坏）时也把“怎么用现有这把”说清；主手已经是它就别再叫它去拿
   parts.push(choice.item
-    ? `${alreadyHeld ? `主手就是${cheapZh}，直接开挖即可` : `要用现有${cheapZh}就先 hold_item ${cheapName}`}；excavate_path 使用主手工具。换不换、做不做由你定`
+    ? `${alreadyHeld ? `主手就是${cheapZh}，直接开挖即可` : `要用现有${cheapZh}就先 hold_item ${cheapName}，或给 dig_at / excavate_path 写 tool:"${cheapName}"`}。换不换、做不做由你定`
     : '做不做由你定');
 
   // key 只收“会改变建议”的粗状态：held 只区分“主手是不是镐”而不记具体名字，
