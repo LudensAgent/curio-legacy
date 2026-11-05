@@ -27,7 +27,7 @@ export function dashboardMemory(memory: WorldMemory, state: Pick<AgentState, 'wo
         creatures: places.filter((l) => l.kind === 'herd').length,
         chests: chests.filter((c) => c.dim === dim).length,
         passages: passages.filter((p) => p.dim === dim).length,
-        facilities: memory.worldId === state.worldId ? myFacilities(memory, { ...state, dim }).filter((f) => f.kind !== 'passage').length : 0,
+        facilities: memory.worldId === state.worldId ? myFacilities(memory, { ...state, dim }, ['chest', 'station', 'bed']).length : 0,
         hazards: hazards.filter((h) => h.dim === dim).length + places.filter((l) => l.kind === 'danger').length,
       };
     });

@@ -35,13 +35,14 @@ function myStations(memory: Pick<WorldMemory, 'landmarks'>, s: State): Landmark[
 
 /** 历史通道记录：地表参考点、曾到达的高度以及附近记忆，不推断当前通路。 */
 export function describePassage(rec: PassageRecord, here: Vec3Like, stations: Landmark[] = [], resources: Landmark[] = []): { text: string; entrance: Vec3Like; dist: number; inside: boolean; next?: Vec3Like; nextDown?: Vec3Like } {
+  const recs = [rec]; // 入口/最深两个方向共用一张图，避免同一份记录建两次
   // 桥/路：没有挖矿专属字段，只给两端、长度和沿桥回近端的下一步
   if (rec.kind === 'bridge') {
     const ends = rec.path.length ? [rec.path[0], rec.path[rec.path.length - 1]] : rec.entrances;
     const entrance = [...ends].sort((a, b) => flat(a, here) - flat(b, here))[0];
     const dist = flat(entrance, here);
     const inside = rec.path.some((p) => d3(p, here) <= 2);
-    const route = passageRoute([rec], here, entrance, { near: 6 });
+    const route = passageRoute(recs, here, entrance, { near: 6 });
     const next = route && route.length > 1 ? route[1] : undefined;
     const otherEnd = ends.find((e) => d3(e, entrance) > 1);
     const text = `我搭的桥${ends.length >= 2 ? `，两端 ${at(ends[0])} 和 ${at(ends[1])}` : ''}${inside ? '，你正站在桥上' : `，近端 ${at(entrance)}（水平 ${dist} 格外）`}，桥面约 ${rec.path.length} 格${next ? `，沿桥往近端的下一步 ${at(next)}` : ''}${otherEnd ? `，另一端 ${at(otherEnd)}` : ''}；桥块被拆/被炸会自己清掉`;
@@ -55,11 +56,11 @@ export function describePassage(rec: PassageRecord, here: Vec3Like, stations: La
   const dist = flat(entrance, here);
   const inside = rec.path.some((p) => d3(p, here) <= 3);
   // 站在旧矿道里时，沿它从脚下回到入口的几何路线（只给方向，未验证点间通行或当前地形）
-  const route = passageRoute([rec], here, entrance, { near: 6 });
+  const route = passageRoute(recs, here, entrance, { near: 6 });
   const next = route && route.length > 1 ? route[1] : undefined;
   // 下行方向：朝这条通道记下的最深脚点走（想下更深时给下一步；已在最深点下面则不给）
   const deepest = [...rec.path].sort((a, b) => a.y - b.y)[0];
-  const routeDown = passageRoute([rec], here, deepest, { near: 6 });
+  const routeDown = passageRoute(recs, here, deepest, { near: 6 });
   const nextDown = routeDown && routeDown.length > 1 ? routeDown[1] : undefined;
   const levels = passageLevels(rec).filter((y) => y !== entrance.y);
   const ores = Object.entries(rec.ores).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([n, c]) => `${n}×${c}`);

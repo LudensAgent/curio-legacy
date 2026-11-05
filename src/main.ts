@@ -626,27 +626,12 @@ adapter.on('chat', (user: string, message: string) => {
 });
 
 // ------------------------------------------------------------ 启动
-function snapshot() {
-  const state = adapter.state();
+/** 仪表盘快照里变化慢、构建又贵的部分：设施描述会为每条通道跑 passageRoute，记忆/学习/统计也都要遍历。
+ *  这些字段每 10 秒重建一次；现场（位置、感知、任务、表达）仍然每秒重建，避免把同步计算压到主线程。 */
+let heavyAt = 0;
+let heavyCache: ReturnType<typeof heavySnapshot> | null = null;
+function heavySnapshot(state: ReturnType<typeof adapter.state>) {
   return {
-    now: Date.now(),
-    runtime,
-    config: {
-      bot: config.mc.username,
-      server: `${config.mc.host}:${config.mc.port}`,
-      version: config.mc.version,
-      llm: provider.name,
-      fakeDelayMs: config.llm.fakeDelayMs,
-      observer: config.observer.player || null,
-    },
-    state,
-    percept: perception.snapshot(),
-    supply: supplyReading(state.inventory, { stock: perception.snapshot()?.storage?.stock, torchEvery: selfModel.habits().torch_every, difficulty: state.difficulty }),
-    vision: vision.frame,
-    task: arbiter.info(),
-    planVersion: arbiter.planVersion,
-    exec: executive.snapshot(),
-    expression: actionChat.snapshot(),
     travel: travelStore(memory).snapshot(state.worldId),
     methods: { definitions: methods.list().slice(-12), gaps: methods.abilityGaps().slice(-8) },
     episodicMemory: episodic.snapshot(),
@@ -666,9 +651,6 @@ function snapshot() {
       forging: smith.busy ? { kind: smith.busy.kind, sinceSec: Math.round((Date.now() - smith.busy.startedAt) / 1000) } : null,
       forged: smith.history.slice(-6), curating: curator.busy, curated: curator.history.slice(-4) },
     learning: { ...scorecard.summary(), ledger: ledger.summary() },
-    spectator: spectator.status,
-    live: live ? { status: live.status(), audience: audience?.stats() } : null,
-    llmSpend: currentSpend(),
     memory: {
       ...dashboardMemory(memory, state, adapter.eye()?.yaw ?? null),
       objective: memory.objective(),
@@ -685,6 +667,39 @@ function snapshot() {
       seen: memory.seenCount(),
       visitedChunks: memory.visitedChunkCount,
     },
+  };
+}
+
+function snapshot() {
+  const state = adapter.state();
+  const now = Date.now();
+  if (!heavyCache || now - heavyAt >= 10_000) {
+    heavyAt = now;
+    heavyCache = heavySnapshot(state);
+  }
+  return {
+    now,
+    runtime,
+    config: {
+      bot: config.mc.username,
+      server: `${config.mc.host}:${config.mc.port}`,
+      version: config.mc.version,
+      llm: provider.name,
+      fakeDelayMs: config.llm.fakeDelayMs,
+      observer: config.observer.player || null,
+    },
+    state,
+    percept: perception.snapshot(),
+    supply: supplyReading(state.inventory, { stock: perception.snapshot()?.storage?.stock, torchEvery: selfModel.habits().torch_every, difficulty: state.difficulty }),
+    vision: vision.frame,
+    task: arbiter.info(),
+    planVersion: arbiter.planVersion,
+    exec: executive.snapshot(),
+    expression: actionChat.snapshot(),
+    spectator: spectator.status,
+    live: live ? { status: live.status(), audience: audience?.stats() } : null,
+    llmSpend: currentSpend(),
+    ...heavyCache,
   };
 }
 
