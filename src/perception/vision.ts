@@ -742,8 +742,12 @@ export class Vision {
     this.lastSweepAt = Date.now();
   }
 
-  /** 最近的“可站立的陆地”（见过的地表方块，且上方是空气，不是海底） */
-  nearestLand(here: Vec3Like, excluded: Vec3Like[] = []): { dir: string; dist: number; pos: Vec3Like } | null {
+  /**
+   * 最近的“可站立的陆地”（见过的地表方块，且上方是空气，不是海底）。
+   * 岸附近看到过露出空气的水面时，附带岸脚到水面的高度；只报高度和可见性，
+   * 路径是否被挡仍未确认。未加载的方块不参与判断。
+   */
+  nearestLand(here: Vec3Like, excluded: Vec3Like[] = []): { dir: string; dist: number; pos: Vec3Like; climbableFromWater?: boolean; waterTop?: number; heightAboveWater?: number } | null {
     if (!this.syncScope().observationReady) return null;
     let best: { d: number; score: number; pos: Vec3Like } | null = null;
     for (const v of this.known.values()) {
@@ -760,7 +764,25 @@ export class Vision {
       const score = d + Math.max(0, v.pos.y - here.y) * 2;
       if (!best || score < best.score) best = { d, score, pos: v.pos };
     }
-    return best ? { dir: dirOfYaw(yawTo(best.pos.x - here.x, best.pos.z - here.z)), dist: Math.round(best.d), pos: best.pos } : null;
+    if (!best) return null;
+    // 找岸格附近（水平 2 格内）观察到的最高的开阔水面顶。上方是水说明还没到水面，
+    // 未加载（null）或实心遮挡不当作可见水面；都不猜。
+    let waterTop: number | undefined;
+    const now = Date.now();
+    for (const v of this.known.values()) {
+      if (now - v.lastSeen > RESOURCE_MEMORY_TTL_MS || catOf(v.name) !== 'water') continue;
+      if (Math.abs(v.pos.x - best.pos.x) > 2 || Math.abs(v.pos.z - best.pos.z) > 2 || Math.abs(v.pos.y - best.pos.y) > 8) continue;
+      const above = this.adapter.blockOptics(v.pos.x, v.pos.y + 1, v.pos.z);
+      if (!above || above.kind === 'water' || above.kind === 'solid') continue;
+      const top = v.pos.y + 1;
+      waterTop = waterTop === undefined ? top : Math.max(waterTop, top);
+    }
+    return {
+      dir: dirOfYaw(yawTo(best.pos.x - here.x, best.pos.z - here.z)), dist: Math.round(best.d), pos: best.pos,
+      ...(waterTop !== undefined
+        ? { waterTop, heightAboveWater: best.pos.y + 1 - waterTop, climbableFromWater: best.pos.y + 1 - waterTop <= 1 }
+        : {}),
+    };
   }
 
   knownCount() {
@@ -1003,8 +1025,9 @@ export class Vision {
           dir: l.dir, dist: l.dist,
           foot: { x: l.pos.x, y: l.pos.y + 1, z: l.pos.z },
           relative_height: l.pos.y + 1 - Math.floor(here.y),
+          ...(l.waterTop !== undefined ? { climbable_from_water: l.climbableFromWater, water_surface_y: l.waterTop, height_above_water: l.heightAboveWater } : {}),
           path_confirmed: false,
-          note: '候选落脚点（脚部目标格，由可见地表估计）；尚未确认能沿直线游过去，地下顶板、高岸或墙体可能挡住',
+          note: '候选落脚点（脚部目标格，由可见地表估计）；尚未确认能沿直线游过去，地下顶板或墙体可能挡住；从水里直接爬上岸最多高 1 格，更高的岸需要垫方块或挖台阶（由你决定）',
         };
       })(),
       last_look_around_s: this.lastSweepAt ? Math.round((now - this.lastSweepAt) / 1000) : null,

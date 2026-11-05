@@ -622,6 +622,12 @@ export const swimTo: Skill<{ xyz: { x: number; y: number; z: number }; timeoutMs
     // 路点只是执行手段：最后一段仍用调用方给的原始坐标验收。
     const route = s0.inWater ? planWaterRoute((p) => a.blockAt(p), s0.pos, args.xyz) : null;
     const routeCells = route?.cells ?? [];
+    // 目标干岸比观察到的水面高过 1 格：水里爬不上去，先别开游白耗预算；把高度和机制交给 Agent 决定下一步。
+    if (route?.reason === 'SHORE_TOO_HIGH' && route.climbNeeded !== undefined) {
+      return fail('PATH_NOT_FOUND',
+        `没有开游：目标脚位比水面高 ${route.climbNeeded} 格（水面顶 y=${route.waterTop}，目标脚 y=${route.targetY}）；从水里直接爬上岸最多高 1 格。需要垫方块/挖台阶/改选更低的岸（由你决定）；现在在 (${s0.pos.x.toFixed(1)},${s0.pos.y.toFixed(1)},${s0.pos.z.toFixed(1)})，氧气 ${s0.oxygen}/20`,
+        { landed: false, target: { ...args.xyz }, reason: route.reason, targetY: route.targetY, waterTop: route.waterTop, climbNeeded: route.climbNeeded, pos: s0Snapshot.pos, oxygen: s0Snapshot.oxygen, observedAt: s0Snapshot.observedAt });
+    }
     const routeFacts = route ? { route: { waypoints: routeCells.map((c) => ({ x: c.x + 0.5, y: c.y, z: c.z + 0.5 })), ...(route.why ? { why: route.why } : {}) } } : {};
     let lastLeg: number | null = null;
     let legBlocked = false;

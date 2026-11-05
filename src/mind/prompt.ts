@@ -389,7 +389,7 @@ export function waterCrossingHint(p: Percept, s: AgentState): string | null {
   const shore = p.self.inWater
     ? '；在水里要上岸用 swim_to {"xyz":[脚坐标]}：会沿已看到的水路绕行（不挖不垫），找不到就直游；站在方块 (bx,by,bz) 顶上时写 [bx+0.5, by+1, bz+0.5]'
     : '';
-  return `过水可用的材料：${blocks ? `能垫路的方块 ${blocks} 块` : '没有能垫路的方块'}；${boat ? `背包有船 ${boat} 只` : planks >= 5 ? `木板 ${planks} 块（够造一只船）` : '没有船，木板也不够造（要 5 块木板）'}${shore}`;
+  return `过水可用的材料：${blocks ? `能垫路的方块 ${blocks} 块` : '没有能垫路的方块'}；${boat ? `背包有船 ${boat} 只` : planks >= 5 ? `木板 ${planks} 块（够造一只船）` : '没有船，木板也不够造（要 5 块木板）'}${shore}；从水里直接爬上岸，岸顶最多比水面高 1 格；更高的岸要先垫方块或挖台阶（由你决定）`;
 }
 
 /** 主目标清单观察在线没进展、最近几段活还卡/没做成：提示可以改清单（不动主目标、不删做完的项、不重写已勾掉的项） */

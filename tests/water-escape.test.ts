@@ -137,6 +137,64 @@ test('known water surfaces and plants are never classified as dry shoreline', ()
   assert.equal(vision.nearestLand(adapter.pos), null, 'an expired historical bank is not fresh escape evidence');
 });
 
+/** 只把已知方块塞进视觉记忆：水格 y=62（水面顶 63）+ 岸方块 y=bankY。 */
+function shoreMemory(adapter: FakeAdapter, bankY: number) {
+  adapter.groundY = -64;
+  adapter.pos = { x: 0.5, y: 60, z: 0.5 };
+  adapter.blocks = [
+    { name: 'water', pos: { x: 2, y: 62, z: 0 } },
+    { name: 'stone', pos: { x: 3, y: bankY, z: 0 } },
+  ];
+  const vision = new Vision(adapter);
+  vision.scan();
+  const known = (vision as any).known;
+  known.clear();
+  for (const block of adapter.blocks) known.set(`${block.pos.x},${block.pos.y},${block.pos.z}`, { ...block, lastSeen: Date.now() });
+  return vision;
+}
+
+test('nearest land reports the observed water surface and the climb height to it', () => {
+  const adapter = new FakeAdapter();
+  const vision = shoreMemory(adapter, 64);
+  const land = vision.nearestLand(adapter.pos);
+  assert.deepEqual(land?.pos, { x: 3, y: 64, z: 0 });
+  assert.equal(land?.waterTop, 63);
+  assert.equal(land?.heightAboveWater, 2);
+  assert.equal(land?.climbableFromWater, false);
+  const near = vision.summary(adapter.pos).nearest_land;
+  assert.ok(near);
+  if (!near) return;
+  assert.equal(near.water_surface_y, 63);
+  assert.equal(near.height_above_water, 2);
+  assert.equal(near.climbable_from_water, false);
+  assert.equal(near.path_confirmed, false);
+  assert.match(near.note, /最多高 1 格/);
+  assert.match(near.note, /垫方块或挖台阶/);
+});
+
+test('nearest land marks a bank within one block of the water as climbable', () => {
+  const adapter = new FakeAdapter();
+  const vision = shoreMemory(adapter, 63);
+  const land = vision.nearestLand(adapter.pos);
+  assert.equal(land?.heightAboveWater, 1);
+  assert.equal(land?.climbableFromWater, true);
+});
+
+test('nearest land does not guess climb height when the block above the water is unloaded', () => {
+  const adapter = new FakeAdapter();
+  const vision = shoreMemory(adapter, 64);
+  const optics = adapter.blockOptics.bind(adapter);
+  adapter.blockOptics = (x, y, z) => x === 2 && y === 63 && z === 0 ? null : optics(x, y, z);
+  const land = vision.nearestLand(adapter.pos);
+  assert.ok(land, 'the bank itself is still usable evidence');
+  assert.equal(land?.waterTop, undefined, '未加载的水面上方不能当成水面');
+  assert.equal(land?.climbableFromWater, undefined);
+  const near = vision.summary(adapter.pos).nearest_land;
+  assert.ok(near);
+  if (!near) return;
+  assert.equal('climbable_from_water' in near, false);
+});
+
 test('surface delegates exactly one bounded ascent and reports surfaced without landing', async (t) => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   let now = 100000, calls = 0;
