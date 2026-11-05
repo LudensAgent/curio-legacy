@@ -98,6 +98,20 @@ test('downward digging falls 2-3 blocks when the drop is within the safe margin'
   assert.deepEqual(result.data?.dug, ['grass_block', 'stone']);
 });
 
+test('downward digging lands on the thin block surface above the solid floor', async (t) => {
+  const world = new TestWorld();
+  world.setBlock({ x: 0, y: 62, z: 0 }, 'red_carpet');
+  const ctx = makeCtx(world);
+  t.after(() => ctx.memory.close());
+  t.mock.method(world, 'dig', async (pos) => { world.setBlock(pos, 'air'); return { ok: true }; });
+  // 模拟真实身体落在 y=62 地毯顶面（62.0625），而不是更下方实心块的顶面 62.00。
+  t.mock.method(world, 'moveTo', async () => { world.pos = { x: 0.5, y: 62.0625, z: 0.5 }; });
+  const result = await dig.run(ctx, { dir: 'down', blocks: 1 });
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(result.data?.walked, 1);
+  assert.equal((result.data?.position as { y: number }).y, 62.0625);
+});
+
 test('partial downward digs at new locations do not count as the same repeated stop', () => {
   const world = new TestWorld();
   const a = createActivity({ what: '下矿', why: '', kind: 'explore', repeat: 4, steps: [{ skill: 'dig', args: { dir: 'down', blocks: 6 } }] }, '', 'llm', world.state());
