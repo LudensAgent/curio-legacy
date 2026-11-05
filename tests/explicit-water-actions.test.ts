@@ -163,6 +163,31 @@ test('surface refuses only when no positive time remains', async (t) => {
   } finally { ctx.memory.close(); }
 });
 
+test('swim_to failure surfaces the measured obstacle facts instead of only 游不动', async () => {
+  const w = new TestWorld();
+  w.inWater = true;
+  w.swimTo = async () => ({
+    ok: false, reason: 'SWIM_NO_PROGRESS', landed: false, surfaced: false, oxygen: 11,
+    goal: 'dry_shore', stage: 'swimming',
+    blockedAbove: { x: 2, y: 63, z: 2, name: 'netherrack' },
+    openWater: { x: 3, y: 61, z: 2, dir: 'E', dist: 1 },
+    targetOnEdge: true, targetDelta: { x: 0.4, y: 2.8, z: 0.5 }, targetCellName: 'stone',
+  });
+  const ctx = makeCtx(w);
+  try {
+    const r = await swimTo.run(ctx, { xyz: { x: 2, y: 64, z: 2 } });
+    assert.equal(r.status, 'failed');
+    assert.match(r.summary, /头顶 \(2,63,2\) 是 netherrack/);
+    assert.match(r.summary, /最近的开阔水面在 E 1 格 \(3,61,2\)/);
+    assert.match(r.summary, /目标相对脚下 0\.4, 2\.8, 0\.5/);
+    assert.match(r.summary, /方块边界.*bx\+0\.5, by\+1, bz\+0\.5/);
+    assert.match(r.summary, /目标格是 stone（实心方块）/);
+    assert.deepEqual(r.data?.blockedAbove, { x: 2, y: 63, z: 2, name: 'netherrack' });
+    assert.deepEqual(r.data?.openWater, { x: 3, y: 61, z: 2, dir: 'E', dist: 1 });
+    assert.equal(r.data?.targetOnEdge, true);
+  } finally { ctx.memory.close(); }
+});
+
 test('swim_to success reports surfaced and landed as separate facts', async () => {
   const w = new TestWorld();
   w.inWater = false;

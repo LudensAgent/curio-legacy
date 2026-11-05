@@ -301,6 +301,16 @@ export interface SwimFacts {
   advanced?: number;
   /** The caller's target cell was observed to be water. */
   targetInWater?: boolean;
+  /** The caller's x or z is an integer, i.e. a block boundary rather than a block center. */
+  targetOnEdge?: boolean;
+  /** Observed block name at the caller's target feet cell. */
+  targetCellName?: string | null;
+  /** First non-air/non-fluid block above the head when the body stalls. */
+  blockedAbove?: { x: number; y: number; z: number; name: string };
+  /** Nearest observed water column with open space above, relative to the stalled body. */
+  openWater?: { x: number; y: number; z: number; dir: string; dist: number };
+  /** Target minus body position, measured when the body stalls. */
+  targetDelta?: { x: number; y: number; z: number };
 }
 
 export interface BlockState {

@@ -630,14 +630,32 @@ export const swimTo: Skill<{ xyz: { x: number; y: number; z: number }; timeoutMs
     }
     const s = a.state();
     const at = `现在在 (${s.pos.x.toFixed(1)},${s.pos.y.toFixed(1)},${s.pos.z.toFixed(1)})，氧气 ${r.oxygen}/20`;
-    const facts = { ...(r.goal ? { goal: r.goal } : {}), ...(r.stage ? { stage: r.stage } : {}), ...(r.enteredWater !== undefined ? { enteredWater: r.enteredWater } : {}), ...(r.advanced !== undefined ? { advanced: r.advanced } : {}), ...(r.targetInWater !== undefined ? { targetInWater: r.targetInWater } : {}) };
+    const facts = {
+      ...(r.goal ? { goal: r.goal } : {}), ...(r.stage ? { stage: r.stage } : {}),
+      ...(r.enteredWater !== undefined ? { enteredWater: r.enteredWater } : {}), ...(r.advanced !== undefined ? { advanced: r.advanced } : {}),
+      ...(r.targetInWater !== undefined ? { targetInWater: r.targetInWater } : {}),
+      ...(r.targetOnEdge !== undefined ? { targetOnEdge: r.targetOnEdge } : {}),
+      ...(r.targetCellName !== undefined ? { targetCellName: r.targetCellName } : {}),
+      ...(r.blockedAbove ? { blockedAbove: r.blockedAbove } : {}),
+      ...(r.openWater ? { openWater: r.openWater } : {}),
+      ...(r.targetDelta ? { targetDelta: r.targetDelta } : {}),
+    };
     if (r.ok && r.landed) return ok(`游到了 (${args.xyz.x},${args.xyz.y},${args.xyz.z}) 并站稳，${at}`, { landed: true, surfaced: r.surfaced, pos: s.pos, oxygen: r.oxygen, ...facts });
     // 目标本身就在水里：到点即完成，不强制上岸；landed 仍为 false，不把入水/露头写成上岸。
     if (r.ok && r.stage === 'surface_reached') return ok(`游到了指定的水中点 (${args.xyz.x},${args.xyz.y},${args.xyz.z})，仍在水里（未上岸），${at}`, { landed: false, surfaced: r.surfaced, pos: s.pos, oxygen: r.oxygen, ...facts });
     const why = r.reason === 'WATER_ESCAPE_TIMEOUT' ? '游了一阵还没到' : r.reason === 'SWIM_NO_PROGRESS' ? '游不动' : r.reason;
+    // 把身体实测到的阻挡事实交给调用方：目标偏差、头顶挡块、最近开口水面、目标坐标是否落在方块边界。
+    // 只报事实，不替调用方改目标或挖/垫。
+    const obstacles = [
+      ...(r.blockedAbove ? [`头顶 (${r.blockedAbove.x},${r.blockedAbove.y},${r.blockedAbove.z}) 是 ${r.blockedAbove.name}`] : []),
+      ...(r.openWater ? [`最近的开阔水面在 ${r.openWater.dir} ${r.openWater.dist} 格 (${r.openWater.x},${r.openWater.y},${r.openWater.z})`] : []),
+      ...(r.targetDelta ? [`目标相对脚下 ${r.targetDelta.x}, ${r.targetDelta.y}, ${r.targetDelta.z}`] : []),
+      ...(r.targetOnEdge && r.goal === 'dry_shore' ? ['目标 x/z 落在方块边界上；要站到方块 (bx,by,bz) 顶上，脚坐标用 (bx+0.5, by+1, bz+0.5)'] : []),
+      ...(r.targetCellName && !AIRISH.has(r.targetCellName) && !/water|bubble_column|kelp|seagrass/.test(r.targetCellName) ? [`目标格是 ${r.targetCellName}（实心方块），不是脚所在的空气格`] : []),
+    ].join('；');
     // 预算耗尽不等于没有路：只有真正的物理无进展才归为 PATH_NOT_FOUND。
     const code = r.reason === 'WATER_ESCAPE_TIMEOUT' ? 'TIMEOUT' : 'PATH_NOT_FOUND';
-    return fail(code, `${why}；${at}`, { landed: false, surfaced: r.surfaced, pos: s.pos, oxygen: r.oxygen, reason: r.reason, ...facts });
+    return fail(code, `${why}；${at}${obstacles ? `；${obstacles}` : ''}`, { landed: false, surfaced: r.surfaced, pos: s.pos, oxygen: r.oxygen, reason: r.reason, ...facts });
   },
 };
 

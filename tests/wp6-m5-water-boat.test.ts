@@ -149,7 +149,7 @@ test('cancelled swimming releases exactly jump/forward/sprint and a late tick ca
   let release!: () => void;
   data.bot.waitForTicks = () => new Promise<void>((resolve) => { release = resolve; });
   const controller = new AbortController();
-  const pending = data.adapter.swimTo({ x: 20.5, y: 62.4, z: 2.5 }, controller.signal, { timeoutMs: 5000 });
+  const pending = data.adapter.swimTo({ x: 20.5, y: 64.4, z: 2.5 }, controller.signal, { timeoutMs: 5000 });
   await flush();
   assert.equal(data.controls.jump, true, 'buoyancy was pressed');
   assert.equal(data.controls.forward, true, 'forward was pressed');
@@ -171,7 +171,7 @@ test('session reset clears swim controls and a late physics wait cannot resume t
   });
   let release!: () => void;
   data.bot.waitForTicks = () => new Promise<void>((resolve) => { release = resolve; });
-  const pending = data.adapter.swimTo({ x: 20.5, y: 62.4, z: 2.5 }, new AbortController().signal, { timeoutMs: 5000 });
+  const pending = data.adapter.swimTo({ x: 20.5, y: 64.4, z: 2.5 }, new AbortController().signal, { timeoutMs: 5000 });
   await flush();
   (data.adapter as unknown as { newSession(): void }).newSession(); // a real `end`/respawn path calls this
   release(); await Promise.resolve();
@@ -356,4 +356,61 @@ test('travel with no swim controller fails the water leg instead of walking acro
   assert.match(result.summary, /NO_SWIM|没到指定岸/);
   assert.ok(a.pos.x < 10.5, `must not silently walk into the river: x=${a.pos.x}`);
   assert.ok(!a.actions.some((action) => action.startsWith('swim:')), 'no swim controller was available');
+});
+
+test('in-water target does not overshoot to the surface once jump is no longer needed', async (t) => {
+  let ctrl: Record<string, boolean> = {};
+  const data = scriptedSwimmer(t, {
+    start: { x: 2.5, y: 60.5, z: 2.5 }, onGround: false, inWater: true,
+    blockAt: (cell) => (cell.y >= 63 ? 'air' : cell.y >= 60 ? 'water' : 'stone'),
+    onTick: (bot) => {
+      bot.entity.position.y += ctrl.jump ? 0.5 : -0.15;
+      bot.entity.isInWater = bot.entity.position.y < 62.8;
+    },
+  });
+  ctrl = data.controls;
+  const r = await data.adapter.swimTo({ x: 2.5, y: 62, z: 2.5 }, new AbortController().signal, { timeoutMs: 5000 });
+  assert.equal(r.ok, true, `${r.reason} @ y=${data.bot.entity.position.y}`);
+  assert.equal(r.goal, 'surface_target');
+  assert.equal(r.stage, 'surface_reached');
+  assert.ok(data.bot.entity.position.y < 62.8, `must stay in water instead of floating through the target: y=${data.bot.entity.position.y}`);
+  assert.equal(data.controls.jump, false, 'no buoyancy key stays pressed after arrival');
+});
+
+test('blocked above reports the ceiling and the nearest open water column', async (t) => {
+  const data = scriptedSwimmer(t, {
+    start: { x: 2.5, y: 61.2, z: 2.5 }, onGround: false, inWater: true,
+    blockAt: (cell) => {
+      if (cell.x === 2 && cell.z === 2 && cell.y === 63) return 'netherrack';
+      if (cell.x >= 3 && cell.x <= 3 && cell.z === 2 && cell.y >= 63) return 'air';
+      if (cell.y >= 63) return 'air';
+      return cell.y >= 60 ? 'water' : 'stone';
+    },
+    onTick: () => {},
+  });
+  const r = await data.adapter.swimTo({ x: 2, y: 64, z: 2 }, new AbortController().signal, { timeoutMs: 5000 });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'SWIM_NO_PROGRESS');
+  assert.deepEqual(r.blockedAbove, { x: 2, y: 63, z: 2, name: 'netherrack' }, 'the overhead block is reported, not hidden behind 游不动');
+  assert.equal(r.openWater?.dir, 'E');
+  assert.equal(r.openWater?.x, 3);
+  assert.equal(r.openWater?.dist, 1, 'the open column next to the body is reported');
+  assert.equal(r.targetOnEdge, true, 'integer x/z is reported as a block-boundary target');
+});
+
+test('rising toward an overhead water target counts as progress instead of a horizontal stall', async (t) => {
+  let ctrl: Record<string, boolean> = {};
+  const data = scriptedSwimmer(t, {
+    start: { x: 2.5, y: 58.5, z: 2.5 }, onGround: false, inWater: true,
+    blockAt: (cell) => (cell.y >= 71 ? 'air' : cell.y >= 58 ? 'water' : 'stone'),
+    onTick: (bot) => {
+      bot.entity.position.y += ctrl.jump ? 0.12 : -0.03;
+      bot.entity.isInWater = bot.entity.position.y < 70.8;
+    },
+  });
+  ctrl = data.controls;
+  const r = await data.adapter.swimTo({ x: 2.5, y: 70, z: 2.5 }, new AbortController().signal, { timeoutMs: 20000 });
+  assert.equal(r.ok, true, `${r.reason} @ y=${data.bot.entity.position.y}`);
+  assert.equal(r.goal, 'surface_target');
+  assert.ok(data.bot.entity.position.y >= 68.5, `must be allowed to ascend for more than 2.5s: y=${data.bot.entity.position.y}`);
 });
