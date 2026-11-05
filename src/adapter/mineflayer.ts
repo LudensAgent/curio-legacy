@@ -1761,6 +1761,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (kind) this.toolChoice.set(kind, name);
   }
 
+  /** 它亲手拿到主手的东西（不只是工具）：外层用它跨进程重启恢复，避免重启后退回“最快工具” */
+  private noteHandChoice(name: string | null) {
+    if (name) this.noteToolChoice(name);
+    this.emit('hand_choice', name);
+  }
+
   private async equipBestTool(block: any, signal: AbortSignal, forced?: string | null): Promise<ActionResult> {
     const check = this.actionCheckpoint(signal);
     const b = this.bot;
@@ -1775,7 +1781,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (b.heldItem?.type !== pick.type) await this.afterAction(() => b.equip(pick, 'hand'), check);
       // 指定工具必须真的在主手才开挖；装备没落到主手就不能拿原主手继续挖
       if (b.heldItem?.name !== forced) return { ok: false, reason: `EQUIP_NOT_CONFIRMED: ${forced} 没有装备到主手，未挖 ${block.name}` };
-      this.noteToolChoice(forced);
+      this.noteHandChoice(forced);
       return { ok: true };
     }
     let best: any = null;
@@ -2211,7 +2217,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         await this.afterAction(() => b.unequip(destination), check);
         await this.syncInventory(check);
         const actual = destination === 'hand' ? b.heldItem : b.inventory.slots?.[slot];
-        return !actual ? { ok: true } : { ok: false, reason: 'UNEQUIP_NOT_CONFIRMED' };
+        if (!actual) {
+          if (destination === 'hand') this.noteHandChoice(null);
+          return { ok: true };
+        }
+        return { ok: false, reason: 'UNEQUIP_NOT_CONFIRMED' };
       });
     }
     const item = opts.sourceSlot === undefined ? this.bestInvItem(name) : b.inventory.slots?.[opts.sourceSlot];
@@ -2223,7 +2233,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       await this.syncInventory(check);
       const slot = this.bot.getEquipmentDestSlot?.(destination);
       const actual = destination === 'hand' ? this.bot.heldItem : this.bot.inventory.slots?.[slot];
-      if (destination === 'hand' && actual?.name === name) this.noteToolChoice(name);
+      if (destination === 'hand' && actual?.name === name) this.noteHandChoice(name);
       return actual?.name === name && (opts.sourceSlot === undefined || JSON.stringify([actual.type, actual.metadata, actual.nbt ?? null]) === identity) ? { ok: true } : { ok: false, reason: 'EQUIP_NOT_CONFIRMED' };
     });
   }
@@ -2679,7 +2689,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (opts.sourceSlot !== undefined && JSON.stringify([b.inventory.slots[target].type, b.inventory.slots[target].metadata, b.inventory.slots[target].nbt ?? null]) !== identity) return { ok: false, reason: 'HOTBAR_NOT_CONFIRMED' };
     b.setQuickBarSlot(index);
     if (b.heldItem?.name !== name) return { ok: false, reason: 'HOTBAR_NOT_CONFIRMED' };
-    this.noteToolChoice(name);
+    this.noteHandChoice(name);
     return { ok: true };
   }
 

@@ -135,7 +135,7 @@ test('toolTierFact：铁镐 + 有可用石镐也要报事实（不再因为它�
   assert.match(f.text, /石镐能挖石头\/煤\/铜\/铁\/青金石/);
   assert.match(f.text, /红石\/金\/钻石\/绿宝石才必须铁镐/);
   assert.match(f.text, /铁镐坏了做不出新的；石镐坏了能再做/);
-  assert.match(f.text, /要用现有石镐就先 hold_item stone_pickaxe；excavate_path 使用主手工具/);
+  assert.match(f.text, /要用现有石镐就先 hold_item stone_pickaxe，或给 dig_at \/ excavate_path 写 tool:"stone_pickaxe"/);
   assert.match(f.text, /换不换、做不做由你定/);
   assert.match(f.key, /tier:iron/);
   assert.match(f.key, /cheap:stone:1:ok/);
