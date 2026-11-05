@@ -13,7 +13,7 @@ import { evaluateCondition, observationReady } from '../projects/conditions.ts';
 import { SKILLS } from '../skills/index.ts';
 import { worldPoint } from '../skills/recovery.ts';
 import { causeName } from '../brain/habits.ts';
-import { consumptionSummary } from '../brain/supply.ts';
+import { consumptionSummary, toolTierFact } from '../brain/supply.ts';
 import { pickFuel } from '../skills/economy.ts';
 import { pickVariant } from '../skills/work.ts';
 import { afterStep, argsLabel, beginStep, clipFeedback, markContinuation, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, nextStep, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
@@ -30,7 +30,7 @@ import type { ParsedGameMessage } from '../memory/game-messages.ts';
 import { NEAR_END_REASON, type MindContext } from './prompt.ts';
 import { cleanPlanStep, moodWords, PLAN_REVISION_MIN, SelfModel } from './self.ts';
 import type { LedgerView } from './ledger.ts';
-import type { Thinker } from './thinker.ts';
+import { LOW_AIR_OXYGEN, type Thinker } from './thinker.ts';
 import type { Activity, ActivityDraft, ActivityEnd, ActivityOutcome, ActivityRecord, MindDecision, Noticing } from './types.ts';
 
 export interface MindDeps {
@@ -66,6 +66,11 @@ const reasonKey = (summary: string) => summary.replace(/-?\d+(\.\d+)?/g, '#').sl
 
 /** 本来就是在应对怪的动作：挨打时不用叫停 */
 const COMBAT = new Set(['defend', 'flee', 'hunt', 'ranged_defend', 'shelter', 'eat', 'use_skill']);
+/** 正在做/接着要做这类动作时，工具分级事实才和眼下有关（climb_up 只垫不挖，不算） */
+const DIGGING_SKILLS = new Set(['gather', 'dig', 'dig_at', 'excavate_path', 'search_structure', 'build_portal', 'shelter', 'unstuck', 'goto', 'travel', 'build']);
+
+/** 人在水里时靠这些动作出水/换气：停下就是下沉，不能像砌墙那样被挨打叫停 */
+const WATER_ESCAPE = new Set(['surface', 'swim_to', 'dive', 'travel', 'ride', 'press_keys', 'move']);
 
 export const DEFAULT_TIMING = {
   /** 一段活做了这么久还没抬头想过，就看一眼 */
@@ -234,6 +239,12 @@ export class Mind {
   /** 这一趟下地：从哪一刻起头顶没了天空、当时背包有什么。回到地面就清掉（给“下矿的账”算这趟花了多久、挖到了什么） */
   private trip: { since: number; inventory: Record<string, number> } | null = null;
   private skillOpenedAt = new Map<string, number>();
+  /** 上次展示的工具分级事实签名与时间：同状态不每念重复，状态变了或过了 10 分钟才再说 */
+  private toolFactKey: string | null = null;
+  private toolFactAt = 0;
+  static readonly TOOL_FACT_REPEAT_MS = 10 * 60_000;
+  /** 两次投放之间的最小间隔：状态签名来回跳（例如主手在镐/斧之间换）时不至于每念重发 */
+  static readonly TOOL_FACT_MIN_GAP_MS = 30_000;
 
   constructor(private d: MindDeps) {
     this.timing = { ...DEFAULT_TIMING, ...(d.timing ?? {}) };
@@ -430,11 +441,15 @@ export class Mind {
     if (Date.now() < this.backoffUntil) return;
     const urgentNow = this.attention.highest() >= URGENT;
     const danger = this.attention.peek().some((n) => n.key.startsWith('danger:'));
+    // 水位低氧时认真想也会被 think() 降成瞥一眼；这里照样算出来，免得“瞥一眼升级成认真想”的分支
+    // 每一拍都把刚发出的瞥一眼撤掉再重发，没等回答就自己转个不停。
+    const s = this.d.adapter.state();
+    const lowAir = s.inWater && s.oxygen < LOW_AIR_OXYGEN;
     if (this.thinking) {
       // 要命的时候不等慢慢想完：撤掉正在想的，马上快想一次
       if (danger && this.thinking.reason !== Mind.DANGER_REASON) { this.cancelThinking('danger'); this.staleDropped++; }
-      // 正在“瞥一眼”时出了要紧的事：改成认真想
-      else if (urgentNow && !danger && this.thinking.tier === 'glance') { this.cancelThinking('urgent'); this.staleDropped++; }
+      // 正在“瞥一眼”时出了要紧的事：改成认真想（水位低氧时升级不了，继续等这一次瞥一眼）
+      else if (urgentNow && !danger && !lowAir && this.thinking.tier === 'glance') { this.cancelThinking('urgent'); this.staleDropped++; }
       else return;
     }
     if (danger) return this.think(Mind.DANGER_REASON, 'glance');
@@ -888,10 +903,10 @@ export class Mind {
       }
       return;
     }
-    this.handleStepResult({ skill: o.task.skill, args: o.task.args }, o.result, o.durationMs);
+    this.handleStepResult({ skill: o.task.skill, args: o.task.args }, o.result, o.durationMs, o.task.id);
   }
 
-  private handleStepResult(step: Step, result: { status: 'succeeded' | 'failed' | 'cancelled'; failureCode?: any; summary: string; data?: Record<string, unknown>; caveat?: string }, durationMs: number) {
+  private handleStepResult(step: Step, result: { status: 'succeeded' | 'failed' | 'cancelled'; failureCode?: any; summary: string; data?: Record<string, unknown>; caveat?: string }, durationMs: number, taskId?: string) {
     const a = this.activity;
     if (!a) return;
     if (this.recoverySkipped(a, step, result)) return;
@@ -960,10 +975,25 @@ export class Mind {
     // 步骤做完但收工条件未达到时，保留既有的重新思考流程；满足条件则遵守 Agent 的后续选择。
     const nextToReview = verdict.kind === 'done' && !verdict.met ? this.queuedNext : null;
     if (nextToReview) this.queuedNext = null;
-    const unmet = verdict.kind === 'done' && !verdict.met && a.doneWhen ? {
+    // 收工条件只看一次同一个快照：既给出交回心智的 known 标记，也用来判断调用方是否否决了刚完成的这次技能成功。
+    const unmetCondition = a.doneWhen;
+    const callerEvidence = verdict.kind === 'done' && !verdict.met && unmetCondition
+      ? evaluateCondition(unmetCondition, state, state.worldId, [], percept) : null;
+    const unmet = callerEvidence ? {
       reason: nextToReview ? `「${a.what}」${verdict.why}；提前想好的「${nextToReview.draft.what}」先不接着做，请根据实际结果决定是否继续。` : `「${a.what}」收工条件未满足：${verdict.why}`,
-      known: evaluateCondition(a.doneWhen, state, state.worldId, [], percept).status === 'unsatisfied',
+      known: callerEvidence.status === 'unsatisfied',
     } : undefined;
+    // 技能自述做完、自己的 verify 也通过了，但调用方明确的收工条件未满足（比如只浮在水面、没有站上干地）：
+    // 撤销这次“成功”记账——执行完毕不等于调用方要的结果。只在明确 unsatisfied 时降级；
+    // stuck、可选步骤、多步活动的后续失败都不改这份技能的账。
+    // 恢复步骤（args.failure）的成败由 creditRecovery 按“重做的那一步有没有成”结算，不由调用方收工条件改判。
+    if (callerEvidence?.status === 'unsatisfied' && unmetCondition && taskId && step.skill === 'use_skill'
+      && !(step.args as { failure?: unknown } | undefined)?.failure
+      && result.status === 'succeeded' && result.data?.verified === true && this.d.behaviors) {
+      const name = String((step.args as { name?: unknown } | undefined)?.name ?? '');
+      const behaviors = this.d.behaviors;
+      if (name) this.safe(() => behaviors.callerUnmet(name, taskId, `调用方收工条件未满足：实际 ${JSON.stringify(callerEvidence.actual)}；条件 ${JSON.stringify(unmetCondition)}${callerEvidence.reason ? `；原因：${callerEvidence.reason}` : ''}`), undefined);
+    }
     this.finishActivity(verdict.kind === 'done' ? verdict.met ? 'done' : 'unmet' : 'stuck', verdict.why, unmet);
   }
 
@@ -1044,6 +1074,7 @@ export class Mind {
   /**
    * 正在做跟打架无关的事（盖房、挖、走、原地等）时挨了打，而且身边有怪：
    * 给身体的技能一点时间接手；没有技能接手，就停下手上的事、马上认真想。怎么应对由它自己定，这里只保证它不会边挨打边继续砌墙。
+   * 人在水里做水面动作时例外：停下来就是下沉，保留它自己选的出水/换气，只把事实交回去，并用快速档思考。
    */
   private hurtAt = 0;
   private hurtWhileBusy() {
@@ -1052,17 +1083,31 @@ export class Mind {
     this.hurtAt = now;
     setTimeout(() => {
       const cur = this.d.arbiter.info();
-      if (!cur || (cur.source !== 'llm' && cur.source !== 'rule') || COMBAT.has(cur.skill)) return;
+      if (!cur || (cur.source !== 'llm' && cur.source !== 'rule')) return;
+      const state = this.d.adapter.state();
+      // use_skill 里包着的水面技能（比如自己写的爬岸技能）也要按它实际在做的事判断。
+      const acting = cur.skill === 'use_skill' ? String((cur.args as { name?: unknown } | undefined)?.name ?? '') : cur.skill;
+      const waterEscape = state.inWater && WATER_ESCAPE.has(acting);
+      if (!waterEscape && COMBAT.has(cur.skill)) return;
       const hostiles = this.safe(() => this.d.perception.snapshot().nearby.hostile.filter((h) => h.dist <= 8), []);
       if (!hostiles.length) return;
-      const hp = Math.round(this.d.adapter.state().hp * 10) / 10;
+      const hp = Math.round(state.hp * 10) / 10;
+      const hostileText = hostiles.slice(0, 3).map((h) => `${h.name} ${Math.round(h.dist)}格`).join('、');
+      // 人在水里时停下来就是下沉：保留 Agent 自己选的出水/换气动作，只把挨打事实和怪的位置交给它。
+      // 思考走 glance——缺氧时再排一次十几秒的 deliberate，命已经没了。
+      if (waterEscape) {
+        this.requestThink(`正在 ${cur.skill} 时挨打了（血 ${hp}），人在水里，先把出水/换气动作做完`, 'glance');
+        const n = this.attention.notice('hurt_busy_water', `正在 ${cur.skill} 时挨打了（血 ${hp}，${hostileText}），人在水里，动作没停`, 0.9, 0);
+        if (n) this.d.bus.publish('notice', 'P1', `注意到：${n.what}`, { salience: n.salience, level: n.level });
+        return;
+      }
       // 停下的那一步算没做（想完要是接着做，从这一步重新来）
       if (this.activity && cur.planId === this.activity.id) this.activity.index = Math.max(0, this.activity.index - 1);
       this.d.arbiter.cancel('挨打了');
       // 想好之前别又把刚停下的那一步接着做
       if (this.activity) this.resumeCheck = this.activity.id;
       this.requestThink(`正在 ${cur.skill} 时挨打了（血 ${hp}）`, 'deliberate');
-      const n = this.attention.notice('hurt_busy', `正在 ${cur.skill} 时挨打了（血 ${hp}，${hostiles.slice(0, 3).map((h) => `${h.name} ${Math.round(h.dist)}格`).join('、')}），手上的事先停了`, 0.9, 0);
+      const n = this.attention.notice('hurt_busy', `正在 ${cur.skill} 时挨打了（血 ${hp}，${hostileText}），手上的事先停了`, 0.9, 0);
       if (n) this.d.bus.publish('notice', 'P1', `注意到：${n.what}`, { salience: n.salience, level: n.level });
     }, 700).unref?.();
   }
@@ -1101,6 +1146,11 @@ export class Mind {
     if (this.thinking || this.paused) return;
     const state = this.d.adapter.state();
     if (!observationReady(state)) return;
+    // 身体在水里、氧气不足时，所有前景思考都只走“瞥一眼”：完整认真想的延迟按秒计（实机中位约 9 秒、
+    // 长尾几十秒），而水下氧气从 10 掉到 0 往往也在这几秒内，等回答回来可能已经溺死。瞥一眼只是更快地
+    // 看见现状和可选做法，想什么、做什么仍由心智决定；这里不选动作、不触发救援，只把调度延迟压下来。
+    // 放在 think() 统一处理，pendingReason、urgentNow、没活在身、上一段刚结束、最后一步提前想这些路径都覆盖到。
+    if (tier === 'deliberate' && state.inWater && state.oxygen < LOW_AIR_OXYGEN) tier = 'glance';
     let percept: Percept;
     try { percept = this.d.perception.update(); } catch { return; }
     this.trackTrip(percept, state);
@@ -1140,6 +1190,26 @@ export class Mind {
     const nearbyCaveats = this.recentActionCaveats.filter((c) => Date.now() - c.at < Mind.SAME_FAIL_MS
       && c.worldId === state.worldId && c.sessionId === state.sessionId && c.dim === state.dim
       && Math.hypot(c.pos.x - state.pos.x, c.pos.y - state.pos.y, c.pos.z - state.pos.z) <= 8).slice(-6);
+    // 手上正在做/接着要做的那一步（activity.index 指向下一待执行步，前一步是正在跑的），以及已经想好的下一段
+    const plannedDig = [
+      ...(this.activity ? this.activity.steps.slice(Math.max(0, this.activity.index - 1), this.activity.index + 1) : []),
+      ...(this.queuedNext?.draft.steps ?? []),
+    ].some((st) => DIGGING_SKILLS.has(st.skill));
+    // 寻路/自写技能也会挖：最近 5 秒真有挖掘事件时也算“在挖”，别让铁镐在无名路径上悄悄掉耐久
+    const recentDig = this.safe(() => (this.d.adapter.recentDug?.(Date.now() - 5_000)?.length ?? 0) > 0, false);
+    const tierFact = this.safe(() => toolTierFact({
+      inventory: state.inventory, stock: percept.storage?.stock, held: state.held, digging: plannedDig || recentDig,
+    }), null);
+    // 同一状态签名不每念重复；状态变了、换了世界/会话/维度，或过了 10 分钟才再说；两次投放至少隔 30 秒
+    const factNow = Date.now();
+    const scoped = tierFact ? `${state.worldId}:${state.sessionId}:${state.dim}:${tierFact.key}` : null;
+    const changed = scoped !== this.toolFactKey || factNow - this.toolFactAt > Mind.TOOL_FACT_REPEAT_MS;
+    const toolFact = scoped && changed && factNow - this.toolFactAt >= Mind.TOOL_FACT_MIN_GAP_MS ? tierFact : null;
+    if (toolFact) {
+      this.toolFactKey = scoped; this.toolFactAt = factNow;
+      // 只在真正投放时打一次点；buildMindMessages 可能因升层/重试被调用多次，不能放在提示词构建里重复发
+      this.d.bus.publish('notice', 'P3', toolFact.text, { level: 'note', salience: 0.3, kind: 'tool_tradeoff' });
+    }
     const ctx: MindContext = {
       tier, reason: reflect ? `${reason}；做完了好几段活，顺便回头看看哪些办法好用、哪些该改` : reason,
       percept, state, self: this.d.self, memory: this.d.memory, blockAt: (p) => this.d.adapter.blockAt(p), activity: this.activity, suspended: this.suspended,
@@ -1163,6 +1233,7 @@ export class Mind {
       ...(reviewing ? { stageReview: this.safe(() => this.stageReviewFacts(), { why: this.review?.why ?? '' }) } : {}),
       ...(this.d.behaviors && tier === 'deliberate' ? { learnedSkills: this.safe(() => this.d.behaviors!.overview().filter((l) => !/已收起|已停用/.test(l)), []), instincts: this.safe(() => instinctNote(), '') } : {}),
       ...(this.d.thinker.designing ? { designing: { brief: this.d.thinker.designing.brief, minutes: Math.round((Date.now() - this.d.thinker.designing.startedAt) / 60_000) } } : {}),
+      toolFact: toolFact?.text ?? null,
       repeatedFailures: [...this.failuresByTarget].filter(([key, f]) => f.n >= 2 && !nearbyFailKeys.has(key))
         .sort((a, b) => b[1].n - a[1].n).slice(0, 10).map(([key, f]) => `${key.replace(':', ' ')} ×${f.n}（10 现实分钟内）`),
       recentActionFailures: nearbyFailures.map((f) => {
@@ -1176,13 +1247,16 @@ export class Mind {
     const order = this.order, orderWasNew = order?.status === 'new';
     this.d.bus.publish('llm_request', 'P3', `${tier === 'glance' ? '抬头看一眼' : '认真想想'}：${reason}`, { tier, reason });
     this.idle();
+    // 这一念被取消/丢弃/失败时，工具事实并没有真正送达：撤回去重状态，下一次还能再提
+    const dropToolFact = () => { if (toolFact) { this.toolFactKey = null; this.toolFactAt = 0; } };
     this.d.thinker.think(ctx, controller.signal).then((decision) => {
-      if (this.thinking?.controller !== controller) { this.staleDropped++; return; }
+      if (this.thinking?.controller !== controller) { this.staleDropped++; dropToolFact(); return; }
       this.thinking = null;
-      if (generation !== this.generation || this.paused) { this.staleDropped++; return; }
+      if (generation !== this.generation || this.paused) { this.staleDropped++; dropToolFact(); return; }
       // 绕路完成后可能已经恢复了另一段活；绕路时提前想的决定不能改写那段活或它的下一段。
       if (reason === Mind.NEAR_END_REASON && activityId && this.activity && this.activity.id !== activityId) {
         this.staleDropped++;
+        dropToolFact();
         for (const n of noticed) {
           if (!this.attention.peek().some((pending) => pending.key === n.key)) this.attention.notice(n.key, n.what, n.salience, 0);
         }
@@ -1202,6 +1276,7 @@ export class Mind {
       if (!followsOperator && decision.kind === 'adjust' && completedDuringThought && first && thoughtRunning && first.skill === thoughtRunning.skill
         && isDeepStrictEqual(first.args ?? {}, thoughtRunning.args ?? {})) {
         this.staleDropped++;
+        dropToolFact();
         this.resumeCheck = activityId;
         this.requestThink(`思考期间 ${completedDuringThought.skill} 已经成功：${completedDuringThought.summary}；刚才的调整以同一动作开头，请根据实际结果决定是否还要重复`, 'deliberate');
         for (const notice of noticed) if (!this.attention.peek().some((pending) => pending.key === notice.key)) this.attention.notice(notice.key, notice.what, notice.salience, 0);
@@ -1235,6 +1310,7 @@ export class Mind {
       if (this.thinking?.controller !== controller) return;
       this.thinking = null;
       if (controller.signal.aborted || generation !== this.generation) return;
+      dropToolFact();
       this.errors++;
       this.backoffUntil = Date.now() + Math.min(this.timing.maxBackoffMs, 3000 * 2 ** (this.errors - 1));
       for (const n of noticed) this.attention.notice(`${n.key}:again`, n.what, n.salience * 0.8, 0); // 没想成，注意到的事别丢

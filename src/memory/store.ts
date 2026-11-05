@@ -952,6 +952,25 @@ export class WorldMemory {
   }
 
   /**
+   * 人工从控制台移除一个地点记忆（含基地）。与内部的 removeLandmark 分开：
+   * 内部淘汰不能悄悄丢掉基地，但开发者明确点名删除时要允许，否则旧小屋会一直留着。
+   * 删掉首选基地时把首选交给同维度最近确认的基地；立即落盘，避免下次写回又把它带回来。
+   */
+  forgetLandmark(id: string): Landmark | null {
+    const index = this.data.landmarks.findIndex((l) => this.inWorld(l) && l.id === id);
+    if (index < 0) return null;
+    const [removed] = this.data.landmarks.splice(index, 1);
+    if (removed.kind === 'base' && removed.primary) {
+      const next = this.data.landmarks
+        .filter((l) => this.inWorld(l) && l.kind === 'base' && l.dim === removed.dim)
+        .sort((a, b) => b.ts - a.ts)[0];
+      if (next) next.primary = true;
+    }
+    this.checkpoint();
+    return structuredClone(removed);
+  }
+
+  /**
    * 不主动攻击的生物（羊、牛、狼、村民……）在哪一带出没：同一种 32 格内只记一处，再看见就挪到这回看见的中心、刷新数量和时间。
    * 每个世界最多记 40 处，满了先忘最久没见的。
    */

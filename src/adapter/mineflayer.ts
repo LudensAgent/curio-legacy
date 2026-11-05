@@ -463,11 +463,20 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         this.emit('recollected', { item: di.name, count: di.count ?? 1 });
       } catch { /* ignore */ }
     });
-    // 自己挖掉的每一格（不管是哪个动作、代码技能还是寻路挖的）：记自己挖过的通道用
+    // 自己挖掉的每一格（不管是哪个动作、代码技能还是寻路挖的）：记自己挖过的通道和挖掘耗时用
     bot.on('diggingCompleted', (block: any) => {
       try {
         if (!block?.position) return;
-        this.dugLog.push({ pos: { x: block.position.x, y: block.position.y, z: block.position.z }, name: String(block.name ?? ''), ts: Date.now() });
+        const now = Date.now();
+        const started = this.digStart;
+        const matched = started && started.pos.x === block.position.x && started.pos.y === block.position.y && started.pos.z === block.position.z;
+        this.dugLog.push({
+          pos: { x: block.position.x, y: block.position.y, z: block.position.z }, name: String(block.name ?? ''), ts: now,
+          // 用开挖前的实际手持工具：最后一格把镐用坏时，完成瞬间 heldItem 可能已经是空手。
+          // 寻路/外部挖的没有本次动作的开始时间，只能用完成时主手；ms 记 0 表示“没有实测”。
+          tool: matched ? started.tool : this.bot?.heldItem?.name ?? null,
+          ms: matched ? now - started.ts : 0,
+        });
         if (this.dugLog.length > 512) this.dugLog.splice(0, this.dugLog.length - 512);
       } catch { /* ignore */ }
     });
@@ -1752,10 +1761,23 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (kind) this.toolChoice.set(kind, name);
   }
 
-  private async equipBestTool(block: any, signal: AbortSignal): Promise<ActionResult> {
+  private async equipBestTool(block: any, signal: AbortSignal, forced?: string | null): Promise<ActionResult> {
     const check = this.actionCheckpoint(signal);
     const b = this.bot;
     const e = b.entity;
+    // 指定了工具：只装这一把。软方块没有 harvestTools（任何工具都挖得动），照样照它说的用，
+    // 不因为别的工具更快就换成别的，也不因为手上工具挖得慢就退回空手。
+    if (forced) {
+      const it = b.inventory.items().find((i: any) => i.name === forced);
+      if (!it) return { ok: false, reason: `TOOL_MISSING: 背包里没有 ${forced}，无法挖 ${block.name}` };
+      if (block.harvestTools && !block.harvestTools[it.type]) return { ok: false, reason: `TOOL_MISSING: ${forced} 挖不动 ${block.name}` };
+      const pick = this.bestInvItem(forced) ?? it;
+      if (b.heldItem?.type !== pick.type) await this.afterAction(() => b.equip(pick, 'hand'), check);
+      // 指定工具必须真的在主手才开挖；装备没落到主手就不能拿原主手继续挖
+      if (b.heldItem?.name !== forced) return { ok: false, reason: `EQUIP_NOT_CONFIRMED: ${forced} 没有装备到主手，未挖 ${block.name}` };
+      this.noteToolChoice(forced);
+      return { ok: true };
+    }
     let best: any = null;
     let bestTime = Infinity;
     const timeFor = (type: number | null, ench: any[] = []) => {
@@ -1798,7 +1820,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return { ok: true };
   }
 
-  async dig(pos: Vec3Like, signal: AbortSignal): Promise<ActionResult> {
+  async dig(pos: Vec3Like, signal: AbortSignal, opts: { tool?: string | null } = {}): Promise<ActionResult> {
     const check = this.actionCheckpoint(signal);
     throwIfAborted(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
@@ -1810,7 +1832,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // 清路、脱困只要把这一格挖开，用不着镐；要拿到圆石、矿石才得用镐（gather 自己会先检查）。
     // 以前这里一律拒绝（TOOL_MISSING），它就学成了“没镐石头动不了”，镐快断时宁可困在洞里也不敢挖
     const harvest = this.canHarvest(pos);
-    const tool = await this.afterAction(() => this.equipBestTool(block, signal), check);
+    const tool = await this.afterAction(() => this.equipBestTool(block, signal, opts.tool), check);
     if (!tool.ok) return tool;
     throwIfAborted(signal);
     if (!b.canDigBlock(block)) return { ok: false, reason: 'OUT_OF_REACH' };
@@ -1819,11 +1841,18 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     try { ms = block.digTime(b.heldItem?.type ?? null, false, !!e?.isInWater, !e?.onGround, b.heldItem?.enchants ?? [], e?.effects ?? {}); } catch { ms = 0; }
     // Long legal hand digs exceed this bounded action's execution budget.
     if (!harvest && (!Number.isFinite(ms) || ms > HAND_DIG_MAX_MS)) return { ok: false, reason: 'HAND_DIG_TIMEOUT:预计挖掘时间超过本次身体动作预算；这不代表游戏禁止空手挖掘' };
-    const t0 = Date.now();
-    await this.afterAction(() => raceAbort(b.dig(block, true), signal, Math.max(20000, (Number.isFinite(ms) ? ms : 0) + 5000), () => {
-      try { b.stopDigging(); } catch { /* ignore */ }
-    }), check);
-    return harvest ? { ok: true } : { ok: true, noDrop: true, digMs: Date.now() - t0 };
+    // 记下本次目标、开始时间和实际手持工具，供 diggingCompleted 回调填实测耗时；同一时刻只有一挖
+    const started = { pos: { x: block.position.x, y: block.position.y, z: block.position.z }, ts: Date.now(), tool: b.heldItem?.name ?? null };
+    this.digStart = started;
+    // 取消/异常时清掉，免得下一次挖掘把这次的开始时间当成自己的（被中途打断的挖掘没有实测耗时）
+    try {
+      await this.afterAction(() => raceAbort(b.dig(block, true), signal, Math.max(20000, (Number.isFinite(ms) ? ms : 0) + 5000), () => {
+        try { b.stopDigging(); } catch { /* ignore */ }
+      }), check);
+    } finally {
+      if (this.digStart === started) this.digStart = null;
+    }
+    return harvest ? { ok: true } : { ok: true, noDrop: true, digMs: Date.now() - started.ts };
   }
 
   async collectNearbyDrops(signal: AbortSignal, radius: number, timeoutMs: number): Promise<number> {
@@ -4280,6 +4309,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     let wetSince: number | null = null;
     let surfacedSince: number | null = null;
     let lastProgress = Date.now();
+    // “换气”至少要看到氧气实际回升：头刚碰到空气就松手，下一次思考的几秒里又沉回去耗光。
+    // 起点已接近满氧时按现有值；低于 12 时至少补到 12，其余在起点基础上多补 4 格。
+    const breathTarget = Math.min(19, Math.max(12, ownOxygen(b) + 4));
     let enteredWater = false;
     let stage: SwimStage = 'approach';
     const destination = target;
@@ -4329,11 +4361,15 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     });
     // 失败时把“为什么过不去”的实测事实交回：头顶挡块、附近开阔水面、目标相对偏移。
     // 只报告，不选路、不挖不垫；下一步由调用方决定。
+    // 封顶只认「头部往上到第一个实心块之间连一格空气都没有」：桥下的空气间隙能让头浮上去换气，
+    // 不能因为上方几格有个桥面就判成封顶。
     const blockedAboveAt = (p: any) => {
       const headY = Math.floor(p.y + (b.entity.eyeHeight ?? 1.62));
       for (let y = headY; y <= headY + 3; y++) {
         const blk = b.blockAt(new Vec3(p.x, y, p.z));
-        if (blk && !AIR_BLOCKS.has(blk.name) && !fluid(blk)) return { x: Math.floor(p.x), y, z: Math.floor(p.z), name: blk.name };
+        if (!blk) return null; // 未加载不能证明封顶
+        if (AIR_BLOCKS.has(blk.name)) return null;
+        if (!fluid(blk)) return { x: Math.floor(p.x), y, z: Math.floor(p.z), name: blk.name };
       }
       return null;
     };
@@ -4392,10 +4428,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         }
         // 冻结本次仍拥有控制权时观察到的位置/氧气/露头状态（在后续 await 之前，避免迟到重采样读到新主人状态）。
         lastOwned = { pos: { x: p.x, y: p.y, z: p.z }, oxygen: ownOxygen(b), surfaced: surfacedNow(), observedAt: Date.now(), stage };
-        // 垂直上浮模式（无目标）：头稳定离开流体就算已浮出水面，不要求上岸；短暂露头不算。
-        if (goal === 'surface_ascent' && surfacedNow()) return { ok: true, landed: false, surfaced: true, oxygen: ownOxygen(b), ...facts('surfaced') };
-        // 纯上浮时头顶被实心方块封住：按 jump 不会让头穿过方块。约 1.2 秒仍没浮出就尽快交回
-        // 阻挡事实，别把整段上浮预算耗在不可能的上浮上；挖开/换方向由调用方决定。
+        // 垂直上浮模式（无目标）：头稳定离开流体、并且憋气已实际回升到可用的程度才算完成换气；
+        // 只露一下头就返回会松开 jump 重新下沉，下一次思考的几秒又耗光。仍未上岸由 landed:false 如实表达。
+        if (goal === 'surface_ascent' && surfacedNow() && ownOxygen(b) >= breathTarget) return { ok: true, landed: false, surfaced: true, oxygen: ownOxygen(b), ...facts('surfaced') };
+        // 纯上浮时头顶连一格空气都没有（blockedAboveAt 只认真封顶）：按 jump 不会让头穿过方块。
+        // 约 1.2 秒仍没浮出就尽快交回阻挡事实，别把整段上浮预算耗在不可能的上浮上；挖开/换方向由调用方决定。
         if (goal === 'surface_ascent' && Date.now() - lastProgress >= 1200) {
           const blocked = blockedAboveAt(p);
           if (blocked) return { ok: false, reason: 'SWIM_NO_PROGRESS', landed: false, surfaced: surfacedNow(), oxygen: ownOxygen(b), ...facts(stage), ...obstacleFacts() };
@@ -4714,7 +4751,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   }
   forgetDiscarded(item: string) { this.discarded = this.discarded.filter((d) => d.name !== item.replace(/^item:/, '')); }
 
-  private dugLog: { pos: Vec3Like; name: string; ts: number }[] = [];
+  /** 正在进行的 dig()：目标与开始时间；完成回调按位置匹配后填实测 ms，其它挖法拿不到它 */
+  private digStart: { pos: Vec3Like; ts: number; tool: string | null } | null = null;
+  private dugLog: { pos: Vec3Like; name: string; ts: number; tool: string | null; ms: number }[] = [];
   recentDug(since: number) { return this.dugLog.filter((d) => d.ts > since); }
 
   private placedLog: { pos: Vec3Like; name: string; ts: number }[] = [];

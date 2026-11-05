@@ -65,7 +65,8 @@ export interface Senses {
   /** 立即重新看一眼（转头之后调用） */
   refresh(): void;
   markSweep(): void;
-  nearestLand?(here: Vec3Like, excluded?: Vec3Like[]): { dir: string; dist: number; pos: Vec3Like } | null;
+  /** 最近的候选干岸；岸附近看到过露出空气的水面时附带岸脚到水面的高度（不知道水面时这些字段省略，不猜）。 */
+  nearestLand?(here: Vec3Like, excluded?: Vec3Like[]): { dir: string; dist: number; pos: Vec3Like; climbableFromWater?: boolean; waterTop?: number; heightAboveWater?: number } | null;
   /** 刚亲眼看到的落脚点；只给出短程引导，未观察的地形不能当作已知路。 */
   navigationWaypoint?(target: Vec3Like, maxDistance: number, excluded: Vec3Like[]): Vec3Like | null;
   /** 自己走过的落脚点里更靠近目标的一个（来时的路）；只用亲身到过的位置 */

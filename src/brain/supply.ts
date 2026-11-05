@@ -1,4 +1,4 @@
-import type { AgentState } from '../adapter/types.ts';
+import type { AgentState, InvItem } from '../adapter/types.ts';
 import type { StockRow } from '../memory/chest-memory.ts';
 import { fuelBurn } from '../methods/fuel.ts';
 import { describePlan, materialPlan } from '../methods/shortfall.ts';
@@ -267,34 +267,115 @@ export function oreOpportunityFact(
   return `顺手采集：${parts.join('；')}（采不采、采多少由你按当前目标和余力权衡）`;
 }
 
-/** 有铁/钻石镐、材料又不够再做一把（< 3），且没有「还耐用」的更便宜镐：把工具分级的事实摆出来，做不做备用由 Agent 定。 */
-export function toolBackupFact(
-  inventory: readonly { name: string; count: number; durability?: { left: number; max: number }; durabilities?: number[] }[],
-  stock: readonly StockRow[] | undefined,
-): string | null {
-  const have = (name: string) => {
-    const row = stock?.find((s) => s.item === name);
-    if (row) return row.total;
-    return inventory.filter((i) => i.name === name).reduce((n, i) => n + i.count, 0);
+/** 镐的档次从低到高；不同档次能挖的方块不同，材料稀缺时先看更便宜的替代。 */
+const PICK_TIERS = ['wooden', 'stone', 'iron', 'diamond'] as const;
+type PickTier = typeof PICK_TIERS[number];
+const PICK_ZH: Record<PickTier, string> = { wooden: '木镐', stone: '石镐', iron: '铁镐', diamond: '钻石镐' };
+
+/**
+ * 工具分级事实：最高档是铁/钻石镐、对应材料稀缺（≤6）时，把「高阶镐还剩多少、
+ * 便宜镐有没有/还能不能做/还能挖多少、哪些方块其实不用高阶镐」摆成事实。
+ * 换不换、做不做由 Agent 定；只在挖掘时投放。key 供上层状态签名去重。
+ */
+export function toolTierFact(input: {
+  inventory: AgentState['inventory'];
+  stock?: readonly StockRow[];
+  held?: string | null;
+  digging: boolean;
+}): { text: string; key: string } | null {
+  if (!input.digging) return null;
+  const { inventory: inv, stock, held } = input;
+
+  const pickAt = (tier: PickTier) => inv.find((i) => i.name === `${tier}_pickaxe` && i.count > 0);
+  const high = [...PICK_TIERS].reverse().find((t) => pickAt(t));
+  if (high !== 'iron' && high !== 'diamond') return null;
+
+  // 稀缺材料：箱子账本有这一行就用它（含背包部分），否则按背包合计
+  const mat = high === 'iron' ? 'iron_ingot' : 'diamond';
+  const scarce = stock?.find((s) => s.item === mat)?.total
+    ?? inv.filter((i) => i.name === mat).reduce((n, i) => n + i.count, 0);
+  if (scarce > 6) return null; // ≤6 与 frugal 的稀缺线一致
+
+  // durabilities 已按从好到差排列；没有耐久信息时当作可用，避免误报
+  const levelsOf = (it: InvItem) => it.durabilities?.length ? it.durabilities : it.durability ? [it.durability.left] : [];
+  const maxOf = (it: InvItem) => it.durability?.max ?? 0;
+  const usable = (it: InvItem) => {
+    const max = maxOf(it), levels = levelsOf(it);
+    return !max || !levels.length || Math.max(...levels) >= max * 0.15;
   };
-  // 有一把「还耐用」的便宜镐（最好那件耐久 ≥ 15%）：不算没得用，别啰嗦；1 点耐久的等于没有
-  const hasUsable = (...tiers: string[]) => tiers.some((t) => inventory.some((i) => {
-    if (i.name !== `${t}_pickaxe`) return false;
-    const d = i.durability;
-    if (!d || !d.max) return true; // 没耐久信息：默认当它可用，避免误报
-    const best = i.durabilities?.length ? Math.max(...i.durabilities) : d.left;
-    return best >= d.max * 0.15;
-  }));
-  for (const [t, mat, zh, cheap, need] of [
-    ['diamond', 'diamond', '钻石', '铁镐或石镐', '远古残骸/黑曜石'] as const,
-    ['iron', 'iron_ingot', '铁锭', '石镐（3 圆石 + 2 木棍）', '红石/金/钻石/绿宝石'] as const,
-  ]) {
-    const owned = inventory.some((i) => i.name === `${t}_pickaxe`);
-    if (!owned) continue;
-    const n = have(mat);
-    if (n > 6) continue; // 材料宽裕（>6），不算紧缺；≤6 与 frugal 的稀缺线一致
-    if (t === 'diamond' ? hasUsable('iron', 'stone', 'wooden') : hasUsable('stone', 'wooden')) continue;
-    return `你包里有${t === 'iron' ? '铁镐' : '钻石镐'}，而${zh}只剩 ${n} 个（做一把新的要 3 个）：挖石头/煤/铜/铁/青金石用石镐就够，只有${need}才必须${t === 'iron' ? '铁镐' : '钻石镐'}。要不要先做把${cheap}挖普通方块、把${t === 'iron' ? '铁镐' : '钻石镐'}耐久留给${need}，由你定`;
-  }
-  return null;
+  const durText = (it: InvItem) => {
+    const max = maxOf(it), levels = levelsOf(it);
+    if (!max || !levels.length) return '耐久未知';
+    const best = levels[0], worst = levels.at(-1)!;
+    return best === worst ? `耐久 ${best}/${max}` : `耐久最好 ${best}/${max}、最差 ${worst}/${max}`;
+  };
+  const bucket = (it: InvItem | undefined) => {
+    if (!it) return 'none';
+    const max = maxOf(it), levels = levelsOf(it);
+    if (!max || !levels.length) return 'ok';
+    const ratio = Math.max(...levels) / max;
+    return ratio < 0.15 ? '<15%' : ratio < 0.5 ? '<50%' : 'ok';
+  };
+
+  const highItem = pickAt(high)!;
+  const highZh = PICK_ZH[high];
+  const candidates = PICK_TIERS.slice(0, PICK_TIERS.indexOf(high)).reverse();
+  const combined = withChests(inv, stock);
+  const alternatives = candidates.map((tier) => {
+    const item = pickAt(tier);
+    // 问的是「再做一把」：先把手上同名的（可能快坏的）镐从料池里拿掉，否则 materialPlan 会把
+    // 已有那把当成“目标已经够了”，报不出做一把的真实缺口。
+    const plan = materialPlan(`${tier}_pickaxe`, 1, combined.filter((i) => i.name !== `${tier}_pickaxe`));
+    return { tier, item, plan };
+  });
+  // 优先用手上还能用的便宜镐；没有就找能现做的一档；手上有快坏的也先摆它；
+  // 都没有就默认石镐/铁镐最低档，把“还差什么”如实摆出来——这正是线上“石镐没补”的场景，不能沉默。
+  const choice = alternatives.find((a) => a.item && usable(a.item))
+    ?? alternatives.find((a) => a.plan.enough)
+    ?? alternatives.find((a) => a.item)
+    ?? alternatives[0];
+
+  const cheapZh = PICK_ZH[choice.tier];
+  const cheapName = `${choice.tier}_pickaxe`;
+  // 原版 1.20.1 的镐档：木=石/煤；石=+铜/铁/青金石；铁=+红石/金/钻石/绿宝石；钻石=+远古残骸/黑曜石
+  const scope = [
+    choice.tier === 'wooden' ? '木镐能挖石头/煤'
+      : choice.tier === 'stone' ? '石镐能挖石头/煤/铜/铁/青金石'
+        : '铁镐能挖石头/煤/铜/铁/金/青金石/红石/绿宝石/钻石',
+    choice.tier === 'wooden' ? '铜/铁/青金石至少要石镐' : null,
+    high === 'iron' ? '红石/金/钻石/绿宝石才必须铁镐'
+      : choice.tier === 'iron' ? '只有远古残骸/黑曜石才必须钻石镐'
+        : '红石/金/钻石/绿宝石至少要铁镐，远古残骸/黑曜石才必须钻石镐',
+  ].filter(Boolean).join('；');
+  const heldPick = held?.endsWith('_pickaxe') ? held : null;
+  const alreadyHeld = heldPick === cheapName;
+  const parts = [`你包里有${highZh}×${highItem.count}（${durText(highItem)}），${high === 'iron' ? '铁锭' : '钻石'}只剩 ${scarce} 个（做一把新的要 3 个）`];
+  if (choice.item) {
+    const left = levelsOf(choice.item).reduce((a, b) => a + b, 0);
+    parts.push(usable(choice.item)
+      ? `包里还有${cheapZh}×${choice.item.count}（${durText(choice.item)}）`
+      : `包里的${cheapZh}×${choice.item.count}（${durText(choice.item)}）剩余都不足 15%，合计还能挖约 ${left} 格`);
+  } else parts.push(`包里没有${cheapZh}`);
+  if (heldPick) parts.push(`现在主手是 ${heldPick}`);
+  if (!choice.item || !usable(choice.item)) parts.push(`要再做一把${cheapZh}：${describePlan(choice.plan)}`);
+  parts.push(scope);
+  // 已经有便宜镐（哪怕快坏）时也把“怎么用现有这把”说清；主手已经是它就别再叫它去拿
+  parts.push(choice.item
+    ? `${alreadyHeld ? `主手就是${cheapZh}，直接开挖即可` : `要用现有${cheapZh}就先 hold_item ${cheapName}`}；excavate_path 使用主手工具。换不换、做不做由你定`
+    : '做不做由你定');
+
+  // key 只收“会改变建议”的粗状态：held 只区分“主手是不是镐”而不记具体名字，
+  // 避免铁镐/石镐来回换手时同一句提示反复重发；缺口只记缺哪些原料而不记数量。
+  const gap = !choice.item || !usable(choice.item)
+    ? (choice.plan.enough ? 'ready' : choice.plan.raw.map((r) => (r.anyWood ? '*log' : r.item)).sort().join(',') || 'unknown')
+    : 'held';
+  const key = [
+    `tier:${high}`,
+    `held:${heldPick ? 'pickaxe' : 'none'}`,
+    `cheap:${choice.tier}:${choice.item?.count ?? 0}:${bucket(choice.item)}`,
+    `high:${highItem.count}:${bucket(highItem)}`,
+    `mat:${scarce}`,
+    `craft:${gap}`,
+  ].join('|');
+  return { text: parts.join('；'), key };
 }

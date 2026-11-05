@@ -1013,7 +1013,7 @@ export const unstuck: Skill<{}> = {
 /** 一次有界上浮委托：只往上浮出水面换气，不找岸、不找气穴、不挖不垫、不换目标。 */
 export const surface: Skill<{ timeoutMs?: number }> = {
   name: 'surface',
-  description: '只做一次有界上浮：按住上浮让头露出流体换气；不找岸、不找气穴、不挖不垫。surfaced 只表示结束时头已露出流体（空气），不保证松开控制后继续浮着或持续换气；landed 表示站稳干地，两者分开报告，未浮出会如实说清位置与氧气',
+  description: '有界上浮：按住上浮让头露出流体并持续换气到氧气明显回升或 timeout；不找岸、不找气穴、不挖不垫。surfaced 表示头已露出空气、氧气是实际值；松开 jump 仍会下沉；landed 表示站稳干地，未浮出会如实说清位置与氧气',
   argsDoc: '{"timeoutMs"?: 1000-20000（毫秒，本次上浮最多持续多久，可选）}',
   timeoutMs: 25000,
   movement: true,
@@ -1054,7 +1054,7 @@ export const surface: Skill<{ timeoutMs?: number }> = {
       ...(r.openWater ? { openWater: r.openWater } : {}),
     };
     if (r.ok && r.landed) return ok(`上浮后已站稳干地，氧气 ${s.oxygen}/20`, { landed: true, surfaced: r.surfaced, pos: s.pos, oxygen: s.oxygen, ...facts });
-    if (r.ok && r.surfaced) return ok(`结束时头已露出流体（氧气 ${s.oxygen}/20），还没上岸；松开 jump 后会重新下沉，要持续浮着需自己按住 jump（press_keys）或交给会持续上浮/挖开头顶的做法`, { landed: false, surfaced: true, pos: s.pos, oxygen: s.oxygen, ...facts });
+    if (r.ok && r.surfaced) return ok(`已持续换气到氧气 ${s.oxygen}/20（还没上岸）；松开 jump 后会重新下沉，要一直浮着需自己按住 jump（press_keys）或交给会持续上浮/挖开头顶的做法`, { landed: false, surfaced: true, pos: s.pos, oxygen: s.oxygen, ...facts });
     // 时间到只说明预算耗尽，不证明身体卡住，也不断言头一定没露出来；surfaced 以实际返回为准。
     const why = r.reason === 'WATER_ESCAPE_TIMEOUT' ? '上浮时间到，尚未确认完成' : r.reason === 'SWIM_NO_PROGRESS' ? '上浮没动' : r.reason;
     // 把身体实测到的阻挡交给调用方：surface 只按跳，挖开头顶、横游找空气或持续踩水由它自己决定。

@@ -76,6 +76,31 @@ test('water route finds water just above a body whose feet cell reads air/stone'
   assert.ok(route.cells.every((c) => blockAt(c) === 'water'), 'every waypoint is observed water');
 });
 
+test('water route reports SHORE_TOO_HIGH with the observed heights when the bank is above the 1-block climb limit', () => {
+  // 水面顶 y=63，岸脚 y=66：从水里直接上岸要爬 3 格，超过 1 格的上限。
+  const blockAt = waterWorld({ '1,65,0': 'stone' });
+  const route = planWaterRoute(blockAt, { x: 0.5, y: 61, z: 0.5 }, { x: 1.5, y: 66, z: 0.5 });
+  assert.ok(route);
+  if (!route) return;
+  assert.equal(route.cells.length, 0);
+  assert.equal(route.reason, 'SHORE_TOO_HIGH');
+  assert.equal(route.targetY, 66);
+  assert.equal(route.waterTop, 63);
+  assert.equal(route.climbNeeded, 3);
+  assert.match(route.why ?? '', /高 3 格/);
+  assert.match(route.why ?? '', /最多高 1 格/);
+});
+
+test('water route still plans when the bank is within the 1-block climb limit', () => {
+  // 水面顶 y=63，岸脚 y=63（岸方块在 y=62）：直接爬 0 格。
+  const blockAt = waterWorld({ '1,62,0': 'stone' });
+  const route = planWaterRoute(blockAt, { x: 0.5, y: 61, z: 0.5 }, { x: 1.5, y: 63, z: 0.5 });
+  assert.ok(route);
+  if (!route) return;
+  assert.equal(route.reason, undefined);
+  assert.ok(route.cells.length >= 1, route.why);
+});
+
 test('water route does not treat lava as a landing support', () => {
   const blockAt = waterWorld({ '1,63,0': 'lava' });
   const route = planWaterRoute(blockAt, { x: 0.5, y: 61, z: 0.5 }, { x: 1.5, y: 64, z: 0.5 });

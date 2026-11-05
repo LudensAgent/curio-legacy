@@ -126,6 +126,7 @@ test('应急来源按已验证替代收起：目标未验收拒绝、验收晋�
   assert.equal(w.engine.inactive('rescue-b'), false, '目标未验收时保护应急来源');
   // 候选 rescue-a v2 获得三次 verified 晋升为稳定可执行版
   for (let i = 0; i < 3; i++) w.engine.recordInvocation('rescue-a', { status: 'succeeded', summary: '观测确认危险解除', data: { version: 2, verified: true } });
+  await Promise.resolve(); // 晋级检查延后一个微任务，好让调用方先否决这次成功
   assert.equal(w.engine.get('rescue-a')?.version, 2, 'rescue-a v2 已晋升稳定');
   assert.equal(w.engine.handlesNow('rescue-a'), null, 'rescue-a v2 当前可执行');
   // 验收后按替代收起：放行冗余应急来源

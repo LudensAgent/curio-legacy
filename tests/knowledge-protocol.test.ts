@@ -57,7 +57,7 @@ ${body}
     assert.equal(path.dirname(directory), path.resolve(os.tmpdir()));
     fs.rmSync(directory, { recursive: true, force: true });
   });
-  return { adapter, memory, bus, self, planner, knowledge, calls, think: () => thinker.think(ctx, new AbortController().signal) };
+  return { adapter, memory, bus, self, planner, knowledge, calls, ctx, think: () => thinker.think(ctx, new AbortController().signal) };
 }
 
 test('knowledge search and section reading inform a decision without executing actions or changing personal memory and skills', async (t) => {
@@ -110,6 +110,65 @@ test('knowledge and existing queries share the three-query budget', async (t) =>
   assert.match(w.calls[2].at(-1)!.content, /use_item/);
   assert.match(w.calls[4].at(-1)!.content, /查询次数用完了/);
   assert.equal(w.bus.recent().filter((e) => e.type === 'knowledge_query').length, 2);
+});
+
+test('low air underwater suppresses the glance-to-deliberate upgrade and still returns a decision', async (t) => {
+  const w = fixture(t, [{ kind: 'deliberate', reason: '想深一点' }, decision], 'glance');
+  Object.assign(w.ctx.state, { inWater: true, oxygen: 8 });
+  const result = await w.think();
+  assert.equal(result.tier, 'glance');
+  assert.equal(w.calls.length, 2, '只跑瞥一眼那两轮，不再发 full tier 调用');
+  assert.equal(w.bus.recent().filter((e) => e.type === 'llm_escalate').length, 0);
+  assert.equal(w.bus.recent().filter((e) => e.type === 'llm_escalate_suppressed').length, 1);
+  assert.match(w.calls[1].at(-1)!.content, /氧气不够/);
+  assert.deepEqual(w.planner.stats.tiers, { light: 2, full: 0, escalated: 0 });
+});
+
+test('the same request still upgrades to a deliberate thought when the body has air', async (t) => {
+  const w = fixture(t, [{ kind: 'deliberate', reason: '想深一点' }, decision], 'glance');
+  const result = await w.think();
+  assert.equal(result.tier, 'deliberate');
+  assert.equal(w.calls.length, 2);
+  assert.equal(w.bus.recent().filter((e) => e.type === 'llm_escalate').length, 1);
+  assert.deepEqual(w.planner.stats.tiers, { light: 1, full: 1, escalated: 1 });
+});
+
+test('low air underwater treats "think harder" written as a step as a request for an immediate decision', async (t) => {
+  const w = fixture(t, [{ decision: 'new', activity: { what: '想深一点', steps: [{ skill: 'deliberate', args: { reason: '需要更多上下文' } }] } }, decision], 'glance');
+  Object.assign(w.ctx.state, { inWater: true, oxygen: 8 });
+  const result = await w.think();
+  assert.equal(result.tier, 'glance');
+  assert.equal(result.activity?.steps[0].skill, 'look_around');
+  assert.equal(w.calls.length, 2);
+  assert.match(w.calls[1].at(-1)!.content, /氧气不够/);
+  assert.equal(w.bus.recent().filter((e) => e.type === 'llm_escalate').length, 0);
+  assert.deepEqual(w.planner.stats.tiers, { light: 2, full: 0, escalated: 0 });
+});
+
+test('low air underwater keeps a heavy knowledge query inside the glance round', async (t) => {
+  const w = fixture(t, [{ kind: 'knowledge', query: '床的使用条件' }, decision], 'glance');
+  Object.assign(w.ctx.state, { inWater: true, oxygen: 8 });
+  const result = await w.think();
+  assert.equal(result.tier, 'glance');
+  assert.equal(w.calls.length, 2);
+  assert.match(w.calls[1].at(-1)!.content, /查询结果/);
+  assert.match(w.calls[1].at(-1)!.content, /"action":"search"/);
+  assert.match(w.calls[1].at(-1)!.content, /氧气不够/);
+  assert.equal(w.bus.recent().filter((e) => e.type === 'llm_escalate').length, 0);
+  assert.deepEqual(w.planner.stats.tiers, { light: 2, full: 0, escalated: 0 });
+});
+
+test('low air underwater reads a knowledge query embedded in a step without escalating', async (t) => {
+  const w = fixture(t, [{ decision: 'new', activity: { what: '查床的资料', steps: [{ skill: 'knowledge', args: { id: 'fixture-topic', section: 'effects' } }] } }, decision], 'glance');
+  Object.assign(w.ctx.state, { inWater: true, oxygen: 8 });
+  const result = await w.think();
+  assert.equal(result.tier, 'glance');
+  assert.equal(result.activity?.steps[0].skill, 'look_around');
+  assert.equal(w.calls.length, 2);
+  assert.match(w.calls[1].at(-1)!.content, /查询不代表已经使用床或学会了操作/);
+  assert.match(w.calls[1].at(-1)!.content, /氧气不够/);
+  assert.equal(w.bus.recent().filter((e) => e.type === 'llm_escalate').length, 0);
+  assert.deepEqual(w.planner.stats.tiers, { light: 2, full: 0, escalated: 0 });
 });
 
 test('knowledge reading obeys one cumulative byte budget, reports pagination or exhaustion and resets for the next thought', async (t) => {

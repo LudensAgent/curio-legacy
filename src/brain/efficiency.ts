@@ -32,14 +32,16 @@ const BLOCK_FAMILY = (b: string) => (b.endsWith('_log') ? 'log' : b.replace(/^de
 const tierOf = (tool: string) => TIERS.findIndex((t) => tool.startsWith(t));
 
 export function efficiencyInsights(adapter: GameAdapter, memory: WorldMemory, inventory: InvItem[]): EfficiencyInsight[] {
-  const digs = memory.recentDigs();
-  const groups = new Map<string, { block: string; times: number[]; tools: Map<string, number> }>();
+  // 寻路/外部挖的方块没有实测耗时（ms<=0），不参与效率估算；分组键带上工具，
+  // 否则同族里 iron@500 与 stone@750 会混在一起，用“多数工具”配“混合中位”，算错快慢倍数。
+  const digs = memory.recentDigs().filter((d) => d.ms > 0);
+  const groups = new Map<string, { block: string; tool: string; times: number[] }>();
   for (const d of digs) {
-    const fam = BLOCK_FAMILY(d.block);
-    const g = groups.get(fam) ?? { block: d.block, times: [], tools: new Map<string, number>() };
+    const tool = d.tool ?? '空手';
+    const key = `${BLOCK_FAMILY(d.block)}|${tool}`;
+    const g = groups.get(key) ?? { block: d.block, tool, times: [] };
     g.times.push(d.ms);
-    g.tools.set(d.tool ?? '空手', (g.tools.get(d.tool ?? '空手') ?? 0) + 1);
-    groups.set(fam, g);
+    groups.set(key, g);
   }
   const has = (n: string) => inventory.some((i) => i.name === n);
   const out: EfficiencyInsight[] = [];
@@ -51,7 +53,7 @@ export function efficiencyInsights(adapter: GameAdapter, memory: WorldMemory, in
     const sorted = [...g.times].sort((a, b) => a - b);
     const mid = Math.floor(sorted.length / 2);
     const avg = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-    const tool = [...g.tools].sort((a, b) => b[1] - a[1])[0][0];
+    const tool = g.tool;
     // 快慢倍数按「理论耗时比」算：当前工具的 estCur 与候选 est 同为理论值，延迟相互抵消，
     // 不把网络/走位延迟算进「快多少倍」。空手/挖不动时退回实测中位。
     const estCur = adapter.digTimeEstimate(g.block, tool === '空手' ? null : tool) ?? avg;

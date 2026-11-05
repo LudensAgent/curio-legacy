@@ -11,6 +11,8 @@ export interface ExcavationArgs {
   mode: 'stairs' | 'stairs_up' | 'tunnel';
   direction: 'north' | 'east' | 'south' | 'west';
   steps: number;
+  /** Agent 明确选择的本轮主手工具（物品注册名）；不给时沿用身体现有的换工具规则 */
+  tool?: string;
 }
 
 const registry = minecraftData(config.mc.version);
@@ -139,7 +141,7 @@ function standingCell(ctx: SkillCtx, feet: Vec3Like) {
 
 /** Only this adjacent work column and its touching hazard boundaries are read.
  * These reads never discover structures or choose an underground direction. */
-function preflightColumn(ctx: SkillCtx, feet: Vec3Like, height: number) {
+function preflightColumn(ctx: SkillCtx, feet: Vec3Like, height: number, tool?: string) {
   const { adapter } = ctx;
   const cells = Array.from({ length: height }, (_, level) => ({ ...feet, y: feet.y + level }));
   for (const pos of cells) {
@@ -151,9 +153,14 @@ function preflightColumn(ctx: SkillCtx, feet: Vec3Like, height: number) {
       // 工作面只要求「可挖、非保护、非危险」：火把/梯子/告示牌这类透明方块不是完整立方，却一样能瞬挖通过，
       // 不能再拿整块判定（完整立方）去卡它，否则 agent 自己插的火把会反过来堵死开挖通道
       if (PROTECTED.has(name) || name.endsWith('_bed') || !block?.diggable || !Number.isFinite(block.hardness) || block.hardness! < 0) throw new ExcavationStop('ERROR', `工作面 ${name} 不能作为普通安全通道挖除`);
-      const tools = Object.keys(block.harvestTools ?? {});
-      const held = adapter.state().inventory.some((item) => item.count > 0 && tools.includes(String(registry.itemsByName[item.name]?.id)));
-      if (!adapter.canHarvest(pos) || tools.length && !held) throw new ExcavationStop('TOOL_MISSING', `缺少实际可采掘 ${name} 的工具`);
+      // 指定了工具：每一格都必须能用这件工具挖；哪一格挖不了就报哪一格，不自动改用别的工具
+      if (tool) {
+        if (adapter.digTimeEstimate(name, tool) === null) throw new ExcavationStop('TOOL_MISSING', `指定的 ${tool} 挖不了工作格 (${pos.x},${pos.y},${pos.z}) 的 ${name}`);
+      } else {
+        const tools = Object.keys(block.harvestTools ?? {});
+        const held = adapter.state().inventory.some((item) => item.count > 0 && tools.includes(String(registry.itemsByName[item.name]?.id)));
+        if (!adapter.canHarvest(pos) || tools.length && !held) throw new ExcavationStop('TOOL_MISSING', `缺少实际可采掘 ${name} 的工具`);
+      }
     }
     for (const offset of [{ x: 1, y: 0, z: 0 }, { x: -1, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }, { x: 0, y: 0, z: -1 }, { x: 0, y: 1, z: 0 }]) {
       const neighbor = adapter.blockAt({ x: pos.x + offset.x, y: pos.y + offset.y, z: pos.z + offset.z });
@@ -216,6 +223,11 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
   try {
     if (!Number.isInteger(args.steps) || args.steps < 1 || args.steps > 8 || !Object.hasOwn(DIRECTIONS, args.direction) || !['stairs', 'stairs_up', 'tunnel'].includes(args.mode)) throw new ExcavationStop('BAD_ARGS', '开挖必须显式指定方向与模式，每次最多8步');
     assertSession(ctx, origin);
+    // Agent 明确指定了本轮工具：先做无副作用的校验；真正换手放到其它校验都通过之后
+    if (args.tool) {
+      if (!origin.inventory.some((item) => item.name === args.tool && item.count > 0)) throw new ExcavationStop('TOOL_MISSING', `背包里没有 ${args.tool}（数量为 0 也算没有），不能按指定工具开挖`);
+      if (!adapter.equipItem) throw new ExcavationStop('ERROR', '当前适配器没有装备接口，不能把指定工具装备到主手；未开挖');
+    }
     const initial = voxel(origin.pos);
     if (!origin.onGround) throw new ExcavationStop('ERROR', '需要先在已知干燥地板上站稳');
     standingCell(ctx, origin.pos);
@@ -232,6 +244,11 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       pruneExcavationWaypoints(ctx);
       const landmark = ctx.memory.addLandmark('waypoint', EXCAVATION_ENTRY_LABEL, origin.dim, initial, 1);
       entryId = landmark?.id ?? ctx.memory.landmarks().find((item) => item.kind === 'waypoint' && item.dim === origin.dim && item.label === EXCAVATION_ENTRY_LABEL && dist3(item.pos, initial) < 1)?.id;
+    }
+    // 其它校验都过了再真正换手：失败在这个动作里不会留下“已经换了主手”的副作用
+    if (args.tool) {
+      const equipped = await adapter.equipItem!(args.tool, 'hand', signal);
+      if (!equipped.ok) throw new ExcavationStop('ERROR', `无法把指定工具 ${args.tool} 装备到主手：${equipped.reason}；未开挖`);
     }
     path.push({ pos: { ...origin.pos }, observationId: origin.observationId });
     const peek = async (direction: 'north' | 'east' | 'south' | 'west') => {
@@ -271,22 +288,24 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       const supportProblemNow = supportProblem(ctx, { x: next.x, y: next.y - 1, z: next.z }, next.y, `[${args.direction}] 下一落点`);
       if (supportProblemNow) throw supportProblemNow;
       const height = args.mode === 'stairs' ? 3 : 2;
-      const cells = preflightColumn(ctx, next, height).reverse();
+      const cells = preflightColumn(ctx, next, height, args.tool).reverse();
       // A one-block jump needs extra clearance above the current head before
       // moving. Its floor and the next step block are never dug out.
-      const workCheck = () => { preflightColumn(ctx, next, height); if (args.mode === 'stairs_up') preflightColumn(ctx, here, 3); };
+      const workCheck = () => { preflightColumn(ctx, next, height, args.tool); if (args.mode === 'stairs_up') preflightColumn(ctx, here, 3, args.tool); };
       workCheck();
       if (args.mode === 'stairs_up') cells.unshift({ ...here, y: here.y + 2 });
       for (const pos of cells) {
         assertSession(ctx, origin);
         workCheck();
         if (AIR.has(adapter.blockAt(pos) ?? '')) continue;
-        const result = await adapter.dig(pos, signal);
+        // 指定了工具就交给适配器：只装备这一把、挖不动就返回 TOOL_MISSING，不自动换别的工具
+        const result = await adapter.dig(pos, signal, args.tool ? { tool: args.tool } : undefined);
         // 先确认这一格是否真的挖空，再检查会话/期限：已经发生的挖掘要计进部分效果，
         // 取消/超时不能把它报成“没挖过”。
         if (!result.ok) {
           assertSession(ctx, origin);
-          throw new ExcavationStop(result.reason === 'TOOL_MISSING' ? 'TOOL_MISSING' : 'ERROR', `安全通道开挖失败：${result.reason}`);
+          // 适配器返回的 TOOL_MISSING（可能带前缀说明）原样报出，不吞成笼统的 ERROR
+          throw new ExcavationStop(result.reason?.startsWith('TOOL_MISSING') ? 'TOOL_MISSING' : 'ERROR', `安全通道开挖失败：${result.reason}`);
         }
         if (!AIR.has(adapter.blockAt(pos) ?? '')) {
           assertSession(ctx, origin);
@@ -307,7 +326,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
         if (Date.now() >= landedBy) throw new ExcavationStop('PATH_NOT_FOUND', '移动回执未对应实际站稳的下一落点');
         await sleep(50, signal);
       }
-      preflightColumn(ctx, next, height);
+      preflightColumn(ctx, next, height, args.tool);
       standingCell(ctx, next);
       completed++;
       path.push({ pos: { ...landed.pos }, observationId: landed.observationId });
@@ -351,12 +370,13 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
 
 export const excavationSkill: Skill<ExcavationArgs> = {
   name: 'excavate_path',
-  description: '显式选择后，从实际当前位置或附近可信入口开挖单条有界下降/上升阶梯或水平通道；每次最多8格，逐格确认工具、地板、跳跃头部空间、干燥和真实落地。只报告实际路线，不保证覆盖地下、登塔或找到结构。',
-  argsDoc: '{"entry":"current|<waypointId>","mode"?:"stairs|stairs_up|tunnel","direction":"north|east|south|west","steps"?:1-8}', timeoutMs: 180000, movement: true,
+  description: '显式选择后，从实际当前位置或附近可信入口开挖单条有界下降/上升阶梯或水平通道；每次最多8格，逐格确认工具、地板、跳跃头部空间、干燥和真实落地。可加 tool 明确本轮用哪件工具（先装备到主手）；指定后不会自动改用别的工具，该工具不在背包或挖不了某一格时返回 TOOL_MISSING。只报告实际路线，不保证覆盖地下、登塔或找到结构。',
+  argsDoc: '{"entry":"current|<waypointId>","mode"?:"stairs|stairs_up|tunnel","direction":"north|east|south|west","steps"?:1-8,"tool"?:"物品注册名，如 iron_pickaxe"}', timeoutMs: 180000, movement: true,
   validate(raw) {
-    const value = obj(raw), mode = value.mode ?? 'stairs', steps = value.steps ?? 4;
+    const value = obj(raw), mode = value.mode ?? 'stairs', steps = value.steps ?? 4, tool = value.tool;
     if (typeof value.entry !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(value.entry) || !['stairs', 'stairs_up', 'tunnel'].includes(mode) || typeof value.direction !== 'string' || !Object.hasOwn(DIRECTIONS, value.direction) || !Number.isInteger(steps) || steps < 1 || steps > 8) return { ok: false, error: 'entry 为 current 或可信入口ID；mode=stairs|stairs_up|tunnel；direction=north|east|south|west；steps 为1-8整数' };
-    return { ok: true, args: { entry: value.entry, mode, direction: value.direction as ExcavationArgs['direction'], steps } };
+    if (tool !== undefined && (typeof tool !== 'string' || !/^[a-z0-9_]{1,80}$/.test(tool))) return { ok: false, error: 'tool 为可选物品注册名（小写字母、数字、下划线，如 iron_pickaxe）；不写则沿用身体自己的换工具规则' };
+    return { ok: true, args: { entry: value.entry, mode, direction: value.direction as ExcavationArgs['direction'], steps, ...(tool !== undefined ? { tool } : {}) } };
   },
   run: excavatePath,
 };

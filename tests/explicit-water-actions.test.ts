@@ -114,6 +114,35 @@ test('swim_to preserves fractional and negative coordinates exactly and only suc
   } finally { ctx.memory.close(); }
 });
 
+test('swim_to fails before moving when the chosen shore is more than one block above the observed water', async () => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 61, z: 0.5 };
+  w.inWater = true;
+  // 水面顶 y=63（水格 y=62，上面是空气），岸脚 y=66：要爬 3 格上岸。
+  w.setBlock({ x: 0, y: 61, z: 0 }, 'water');
+  w.setBlock({ x: 0, y: 62, z: 0 }, 'water');
+  w.setBlock({ x: 0, y: 63, z: 0 }, 'air');
+  w.setBlock({ x: 1, y: 65, z: 0 }, 'stone');
+  let swimCalls = 0;
+  w.swimTo = async () => { swimCalls++; return { ok: false, reason: 'SWIM_NO_PROGRESS', landed: false, surfaced: false, oxygen: 15 }; };
+  const ctx = makeCtx(w);
+  try {
+    const r = await swimTo.run(ctx, { xyz: { x: 1.5, y: 66, z: 0.5 } });
+    assert.equal(r.status, 'failed', r.summary);
+    assert.equal(r.failureCode, 'PATH_NOT_FOUND');
+    assert.match(r.summary, /没有开游/);
+    assert.match(r.summary, /比水面高 3 格/);
+    assert.match(r.summary, /从水里直接爬上岸最多高 1 格/);
+    assert.match(r.summary, /垫方块\/挖台阶\/改选更低的岸（由你决定）/);
+    assert.equal(r.data?.reason, 'SHORE_TOO_HIGH');
+    assert.equal(r.data?.climbNeeded, 3);
+    assert.equal(r.data?.waterTop, 63);
+    assert.equal(r.data?.targetY, 66);
+    assert.equal(r.data?.landed, false);
+    assert.equal(swimCalls, 0, '高岸应在任何游泳动作前快速失败');
+  } finally { ctx.memory.close(); }
+});
+
 test('swim_to from a dry shore still swims toward the chosen target (no blanket in-water refusal)', async () => {
   const w = new TestWorld();
   w.inWater = false; // 站在干岸上也要能先走进水里再游向目标

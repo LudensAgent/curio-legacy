@@ -1,6 +1,6 @@
 import type { AgentState } from '../adapter/types.ts';
 import { effortFacts } from '../brain/efficiency.ts';
-import { durabilityFacts, fuelFacts, oreOpportunityFact, supplyFacts, toolBackupFact } from '../brain/supply.ts';
+import { durabilityFacts, fuelFacts, oreOpportunityFact, supplyFacts } from '../brain/supply.ts';
 import type { AudienceContext } from '../live/audience.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { dirName, durationText, realSecondsToTicks, sunText, type Percept } from '../perception/perception.ts';
@@ -93,6 +93,8 @@ export interface MindContext {
   learnedSkills?: string[];
   /** 本能现状：哪些身体会自己做（躲苦力怕、还手这些现在可能没开） */
   instincts?: string;
+  /** 工具分级事实：同状态签名已由 Mind 去重，这里只负责展示；null 表示这一念不重复 */
+  toolFact?: string | null;
 }
 
 /**
@@ -389,7 +391,7 @@ export function waterCrossingHint(p: Percept, s: AgentState): string | null {
   const shore = p.self.inWater
     ? '；在水里要上岸用 swim_to {"xyz":[脚坐标]}：会沿已看到的水路绕行（不挖不垫），找不到就直游；站在方块 (bx,by,bz) 顶上时写 [bx+0.5, by+1, bz+0.5]'
     : '';
-  return `过水可用的材料：${blocks ? `能垫路的方块 ${blocks} 块` : '没有能垫路的方块'}；${boat ? `背包有船 ${boat} 只` : planks >= 5 ? `木板 ${planks} 块（够造一只船）` : '没有船，木板也不够造（要 5 块木板）'}${shore}`;
+  return `过水可用的材料：${blocks ? `能垫路的方块 ${blocks} 块` : '没有能垫路的方块'}；${boat ? `背包有船 ${boat} 只` : planks >= 5 ? `木板 ${planks} 块（够造一只船）` : '没有船，木板也不够造（要 5 块木板）'}${shore}；从水里直接爬上岸，岸顶最多比水面高 1 格；更高的岸要先垫方块或挖台阶（由你决定）`;
 }
 
 /** 主目标清单观察在线没进展、最近几段活还卡/没做成：提示可以改清单（不动主目标、不删做完的项、不重写已勾掉的项） */
@@ -488,9 +490,8 @@ export function situationalReminders(ctx: MindContext): string[] {
     const ore = oreOpportunityFact(p.nearby.resources, p.storage?.stock, s.inventory);
     if (ore) { out.push(ore); ctx.log?.(ore, { kind: 'ore_opportunity' }); }
   }
-  // 工具备份：铁镐 + 铁锭不足 + 没有耐用石镐，这个状态快反应（glance）时也该知道，别等停下来想才说
-  const backup = toolBackupFact(s.inventory, p.storage?.stock);
-  if (backup) { out.push(backup); ctx.log?.(backup, { kind: 'tool_backup' }); }
+  // 工具分级事实不在这里追加：这里末尾只保留 5 条，挖掘场景前面常已有 3–8 条，
+  // 放在这里会被 slice 截掉；由 buildMindMessages 在切片后单独追加，确保真的送达。
   // 养动物、村民交易：打算里提到了才把机制摆出来（模型对这些的记忆常是含糊或老版本的）
   const husbandry = husbandryFacts(intent);
   if (husbandry) out.push(husbandry);
@@ -579,7 +580,7 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
   const digging = !!step && ['gather', 'dig', 'climb_up'].includes(step.skill);
   const material = String((step?.args as Record<string, unknown> | undefined)?.block ?? '');
   const tool = /stone|ore|coal|iron|copper|deepslate/.test(material) ? 'pickaxe' : /dirt|grass|sand|gravel|clay/.test(material) ? 'shovel' : /log|wood/.test(material) ? 'axe' : undefined;
-  // 挖的时候身体会自动换上背包里最快的工具；要提醒的是“背包里根本没有合适的工具”
+  // 挖的时候手上有能挖的工具就不换；不能挖才按上次亲手选的同种工具、否则最快的工具换背包里能挖的；要提醒的是“背包里根本没有合适的工具”
   const ownsTool = tool ? [...inv.keys()].some((n) => n.endsWith(`_${tool}`)) : true;
   const wornBySlot = new Map((s.equipment ?? []).map((e) => [e.slot, e]));
   const ARMOR_SLOT: Record<string, string> = { helmet: 'head', chestplate: 'torso', leggings: 'legs', boots: 'feet' };
@@ -818,6 +819,8 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
   const advanced = p.self.dim !== 'overworld' || s.inventory.some((i) => /ender_(eye|pearl)|obsidian|blaze/.test(i.name));
   const system = glance ? glanceSystem(ctx.persona, ctx.skills ?? []) : deliberateSystem(ctx.persona, ctx.skills ?? []);
   const reminders = situationalReminders(ctx);
+  // 工具分级事实不占 5 条提醒配额：挖掘场景前面的提醒常已满 5 条，必须在切片后单独追加才能送达。
+  if (ctx.toolFact) reminders.push(ctx.toolFact);
   // 进阶动作（下界/末地或已有末影物品才出现）和当前活动用到、目录里没给完整参数的动作：作为提醒补在 user 消息里，
   // system 目录保持字节稳定以命中前缀缓存（见 movesCatalog 注释）。
   if (!glance && advanced) {
