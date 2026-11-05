@@ -27,6 +27,7 @@ import { config, envFile } from './config.ts';
 import { EventBus } from './events.ts';
 import { attachLogger, JsonlWriter } from './log.ts';
 import { WorldMemory } from './memory/store.ts';
+import { SpatialMemoryBackend } from './memory/spatial-backend.ts';
 import { EpisodicMemory } from './memory/episodic.ts';
 import { SharedSpatialSession, type ShutdownResult } from './spatial/shared-session.ts';
 import { startSpatialCheckpointScheduler } from './spatial/checkpoint-scheduler.ts';
@@ -136,6 +137,19 @@ const stopSpatialCheckpoints = startSpatialCheckpointScheduler(spatial, (fact) =
       closing: spatial.closing, unconfirmedCheckpointId: fact.state.unconfirmedCheckpointId, state: fact.state });
 });
 const memory = new WorldMemory(path.join(config.dataDir, 'world-memory.json'));
+// 空间库是空间语义的唯一落盘权威：启动时装载，之后 WorldMemory 的语义变更写回
+// fragments/nodes/ledger；world-memory.json 只保留非空间事实。
+try {
+  memory.attachSpatial(new SpatialMemoryBackend(spatial.session, adapter.state().worldId));
+} catch (error) {
+  writeSync(2, JSON.stringify({
+    event: 'spatial_cutover_required',
+    worldId: adapter.state().worldId,
+    databasePath: config.spatial.databasePath,
+    error: { name: error instanceof Error ? error.name : typeof error, message: error instanceof Error ? error.message : String(error) },
+  }) + '\n');
+  process.exit(1);
+}
 const vision = new Vision(adapter, config.vision, spatial);
 // Task-level journal wiring remains an explicit seam in Arbiter. It is not
 // injected in production until a real evidence source exists; the previous

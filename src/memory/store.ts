@@ -6,6 +6,7 @@ import { reservationsFor } from '../projects/reservations.ts';
 import type { Decision, Intent, Preference } from '../intentions/types.ts';
 import type { Evidence, PauseReason, Project } from '../projects/types.ts';
 import { applyContents, chestLocation, isContainerLandmark, migrateChest, recall, type ChestRecall, type ChestRecord, type ChestContents, type ChestUse, type Clock } from './chest-memory.ts';
+import type { SemanticSnapshot, SpatialMemoryBackend } from './spatial-backend.ts';
 
 export type { ChestRecord, ChestRecall, ChestContents, ChestUse } from './chest-memory.ts';
 
@@ -278,6 +279,8 @@ export class WorldMemory {
   private placedClock = 0;
   private placedDirty = false;
   private placedTimer: NodeJS.Timeout | null = null;
+  /** Production semantic persistence; when present, JSON keeps only non-spatial facts. */
+  private spatial: SpatialMemoryBackend | null = null;
 
   constructor(private file: string | null) {
     this.data = empty();
@@ -361,8 +364,107 @@ export class WorldMemory {
   get dataDirectory(): string | null { return this.file ? path.dirname(this.file) : null; }
   get worldId(): string { return this.data.worldId; }
 
+  /**
+   * Bind semantic persistence to the spatial store. From this point the spatial
+   * store is the authority at rest: load its records now, and write every later
+   * change back through it instead of the JSON file.
+   */
+  attachSpatial(backend: SpatialMemoryBackend, opts: { allowEmptyStore?: boolean } = {}) {
+    const snapshot = backend.load();
+    const storeRecords = snapshot.passages.length + snapshot.passageArchive.length + snapshot.landmarks.length
+      + Object.keys(snapshot.chests).length + Object.keys(snapshot.furnaces).length + snapshot.farms.length
+      + snapshot.hazards.length + snapshot.gone.length + snapshot.placed.length + Object.keys(snapshot.visitedChunks).length;
+    const legacyRecords = (this.data.passages?.length ?? 0) + (this.data.passageArchive?.length ?? 0) + this.data.landmarks.length
+      + Object.keys(this.data.chests ?? {}).length + Object.keys(this.data.furnaces ?? {}).length + this.data.farms.length
+      + this.data.hazards.length + (this.data.gone?.length ?? 0) + this.placedByPos.size + Object.keys(this.data.visitedChunks).length;
+    if (!opts.allowEmptyStore && storeRecords === 0 && legacyRecords > 0) {
+      throw new Error('空间记忆库为空，但本地 JSON 仍有空间数据；先运行空间迁移，不能静默丢弃旧数据');
+    }
+    this.spatial = backend;
+    this.applySemanticSnapshot(snapshot);
+    // Force one JSON rewrite so old spatial keys are removed from the local file.
+    this.dirty = true;
+  }
+
+  /** Test/diagnostic seam: the attached semantic backend, if any. */
+  get spatialBackend(): SpatialMemoryBackend | null { return this.spatial; }
+
+  /** Write the current semantic projection through the attached backend now. */
+  syncSpatial() {
+    if (this.spatial) this.spatial.save(this.semanticSnapshot());
+  }
+
+  private applySemanticSnapshot(snapshot: SemanticSnapshot) {
+    this.data.worldId = snapshot.worldId;
+    this.data.passages = snapshot.passages;
+    this.data.passageArchive = snapshot.passageArchive;
+    this.data.landmarks = snapshot.landmarks;
+    this.data.chests = snapshot.chests;
+    this.data.chestOps = snapshot.chestOps;
+    this.data.furnaces = snapshot.furnaces;
+    this.data.gone = snapshot.gone;
+    this.data.farms = snapshot.farms;
+    this.data.hazards = snapshot.hazards;
+    this.data.visitedChunks = snapshot.visitedChunks;
+    this.placedByPos.clear();
+    this.placedByCell.clear();
+    this.placedClock = 0;
+    for (const entry of snapshot.placed) {
+      const key = this.placedKey(entry.pos.x, entry.pos.y, entry.pos.z);
+      this.placedByPos.set(key, { name: entry.name, at: entry.at });
+      this.placedInsert(key, this.placedCell(entry.pos.x, entry.pos.y, entry.pos.z));
+      this.placedClock = Math.max(this.placedClock, entry.at);
+    }
+    this.lastChunk = '';
+    this.dirty = false;
+    this.placedDirty = false;
+  }
+
+  private semanticSnapshot(): SemanticSnapshot {
+    return {
+      worldId: this.worldId,
+      passages: structuredClone(this.data.passages ?? []),
+      passageArchive: structuredClone(this.data.passageArchive ?? []),
+      landmarks: structuredClone(this.data.landmarks),
+      chests: structuredClone(this.data.chests ?? {}),
+      chestOps: this.data.chestOps ?? 0,
+      furnaces: structuredClone(this.data.furnaces ?? {}),
+      gone: structuredClone(this.data.gone ?? []),
+      farms: structuredClone(this.data.farms ?? []),
+      hazards: structuredClone(this.data.hazards ?? []),
+      placed: [...this.placedByPos].map(([key, value]) => {
+        const [x, y, z] = key.split(',').map(Number);
+        return { pos: { x, y, z }, name: value.name, at: value.at };
+      }),
+      visitedChunks: { ...this.data.visitedChunks },
+    };
+  }
+
+  private diskData(): MemoryData {
+    if (!this.spatial) return this.data;
+    return {
+      ...this.data,
+      passages: [],
+      passageArchive: [],
+      landmarks: [],
+      chests: {},
+      chestOps: 0,
+      furnaces: {},
+      gone: [],
+      farms: [],
+      hazards: [],
+      visitedChunks: {},
+    };
+  }
+
   setWorld(worldId: string) {
     if (!worldId || worldId === this.data.worldId) return;
+    if (this.spatial) {
+      this.spatial.selectWorld(worldId);
+      this.applySemanticSnapshot(this.spatial.load());
+      this.dirty = true;
+      return;
+    }
     if (this.data.worldId === 'default') {
       for (const l of this.data.landmarks) l.worldId ??= worldId;
       for (const c of Object.values(this.data.chests)) c.worldId ??= worldId;
@@ -520,8 +622,9 @@ export class WorldMemory {
 
   flush() {
     if (!this.file || !this.dirty || this.transactionDepth) return;
+    this.syncSpatial();
     const tmp = this.file + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(this.data, null, 1));
+    fs.writeFileSync(tmp, JSON.stringify(this.diskData(), null, 1));
     fs.renameSync(tmp, this.file);
     this.dirty = false;
   }
@@ -587,6 +690,7 @@ export class WorldMemory {
   }
 
   private flushPlaced() {
+    if (this.spatial) return; // placed ledger is saved through the spatial store
     if (!this.file || !this.placedDirty) return;
     const byPos: Record<string, { name: string; at: number }> = {};
     for (const [key, v] of this.placedByPos) byPos[key] = v;
@@ -1059,6 +1163,7 @@ export class WorldMemory {
     const i = archive.findIndex((p) => p.id === copy.id && this.inWorld(p));
     if (i >= 0) archive[i] = copy; else archive.push(copy);
     this.trimPassageArchive();
+    this.spatial?.savePassageNow(copy);
     this.touch();
   }
 
@@ -1101,6 +1206,7 @@ export class WorldMemory {
       all.splice(all.indexOf(victim), 1);
       this.archivePassage(victim);
     }
+    this.spatial?.savePassageNow(structuredClone({ ...copy, worldId: copy.worldId ?? this.worldId }));
     this.touch();
   }
 
@@ -1112,7 +1218,10 @@ export class WorldMemory {
     const archive = this.data.passageArchive;
     const ai = archive?.findIndex((p) => p.id === id && this.inWorld(p)) ?? -1;
     if (archive && ai >= 0) archive.splice(ai, 1);
-    if (i >= 0 || ai >= 0) this.touch();
+    if (i >= 0 || ai >= 0) {
+      this.spatial?.forgetPassageNow(id);
+      this.touch();
+    }
   }
 
   // ------------------------------------------------ 仓储

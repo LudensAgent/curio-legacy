@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { AgentState, Vec3Like } from '../adapter/types.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { dist3, shortId } from '../util.ts';
+import { SpatialTravelStore } from './spatial-store.ts';
 
 export interface PortalEndpoint {
   id: string;
@@ -91,9 +92,18 @@ export class TravelStore {
   }
 }
 
-const stores = new WeakMap<WorldMemory, TravelStore>();
-export function travelStore(memory: WorldMemory) {
+const stores = new WeakMap<WorldMemory, TravelStore | SpatialTravelStore>();
+export function travelStore(memory: WorldMemory): TravelStore | SpatialTravelStore {
+  const backend = memory.spatialBackend;
+  if (backend) {
+    let store = stores.get(memory);
+    if (!(store instanceof SpatialTravelStore) || store.world !== memory.worldId) {
+      store = new SpatialTravelStore(backend.stores, memory.worldId);
+      stores.set(memory, store);
+    }
+    return store;
+  }
   let store = stores.get(memory);
-  if (!store) { store = new TravelStore(memory.dataDirectory ? path.join(memory.dataDirectory, 'travel-memory.json') : null); stores.set(memory, store); }
+  if (!(store instanceof TravelStore)) { store = new TravelStore(memory.dataDirectory ? path.join(memory.dataDirectory, 'travel-memory.json') : null); stores.set(memory, store); }
   return store;
 }
