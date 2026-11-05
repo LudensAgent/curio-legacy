@@ -126,7 +126,7 @@ test('新环境：第一次到下界是新环境（老存档里的主世界不�
   const book = new SkillBook(BUILTIN_SKILLS_DIR, tmp());
   const engine = new BehaviorEngine(book, adapter, null, bus, noSenses);
   assert.ok(engine.write({ name: 'nether-lava-care', description: '下界里血少时贴墙走', when: { dim: 'the_nether', hp_below: 10 }, code: 'return 1;' }).ok);
-  assert.ok(engine.write({ name: 'old-trick', description: '饿了先吃背包里的面包', when: { food_below: 8 }, code: 'return 1;' }).ok);
+  assert.ok(engine.write({ name: 'old-trick', description: '按委托完成旧办法', code: 'return 1;' }).ok);
   const curator = new SkillCurator({ autonomous: false } as any, engine, book, bus, { unusedDays: 1 });
   curator.dim = () => adapter.dim;
   curator.observe({ ...adapter.state(), worldAgeTicks: 0 }, false, 0);

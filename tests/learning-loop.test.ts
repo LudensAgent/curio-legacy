@@ -113,6 +113,8 @@ test('整理技能：长期用不上的收起；说同一件事的后台合并�
   for (const n of ['run-away', 'flee-from-mobs', 'pillar-up']) assert.ok(mk(n).ok);
   // 实际成功过的可用稳定应急版不按闲置收；未验证的应急候选没有这种保护。
   assert.ok(engine.write({ name: 'never-used', description: '饿了先吃背包里的面包', when: { food_below: 8 }, code: 'return 1;' }).ok);
+  // 对照：普通手动技能没有主动维护保护，长期没用上照常收起。
+  assert.ok(engine.write({ name: 'unused-manual', description: '按委托做一件旧事', code: 'return 1;' }).ok);
   // 成功率影响选择：同优先级下成功多的分更高
   (engine as any).stats['run-away'] = { fired: 6, ok: 5, fail: 1, lastAt: Date.now(), byVersion: { '1': { ok: 5, fail: 1 } } };
   (engine as any).stats['flee-from-mobs'] = { fired: 6, ok: 1, fail: 5, lastAt: Date.now(), byVersion: { '1': { ok: 1, fail: 5 } } };
@@ -129,7 +131,8 @@ test('整理技能：长期用不上的收起；说同一件事的后台合并�
   curator.observe({ ...adapter.state(), worldAgeTicks: 0 }, false, 0);
   curator.observe({ ...adapter.state(), worldAgeTicks: 24_000 }, false, 1000);
   const r = await curator.check(now);
-  assert.equal(engine.statsOf('never-used')?.retired?.includes('没用上'), true);
+  assert.equal(engine.statsOf('never-used')?.retired, undefined, '没失败过的主动维护技能不按闲置收起');
+  assert.equal(engine.statsOf('unused-manual')?.retired?.includes('没用上'), true);
   assert.equal(asked, 1);
   assert.match(r!, /run-away/);
   assert.match(engine.statsOf('flee-from-mobs')!.retired!, /当前版本用了/);

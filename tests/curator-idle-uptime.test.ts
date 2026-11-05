@@ -182,3 +182,52 @@ test('已验证的稳定应急版仍免闲置和容量淘汰；未验证的应�
   assert.equal(w.engine.executionError(definition.name), null);
   assert.deepEqual(w.engine.currentStats(definition.name), { ok: 1, fail: 0 });
 });
+
+test('主动维护技能没有失败证据时不按闲置收起，有失败证据的主动/恢复技能仍照常收', (t) => {
+  const w = setup(t);
+  const proactive = { ...definition, name: 'top-up-torches', description: '火把少了就补到箱子里', when: { food_below: 8 } };
+  const failedProactive = { ...definition, name: 'plant-surplus-saplings', description: '树苗多了就种到附近空地', when: { food_below: 7 } };
+  const failedRecovery = { ...definition, name: 'retry-goto-after-path-failure', when: { after_failure: { skill: ['goto'], code: ['PATH_NOT_FOUND'] } } };
+  for (const skill of [proactive, failedProactive, failedRecovery]) assert.ok(w.engine.write(skill).ok, skill.name);
+  assert.equal(w.engine.get(proactive.name)?.mode, 'auto');
+  assert.equal(w.engine.get(failedRecovery.name)?.mode, 'recover');
+  w.observe();
+  for (let i = 0; i < 3; i++) w.engine.recordInvocation(failedProactive.name, { status: 'failed', summary: '种下去没活', data: { version: 1 } });
+  for (let i = 0; i < 2; i++) w.engine.recordInvocation(failedRecovery.name, { status: 'failed', summary: '重试后路仍不通', data: { version: 1 } });
+  w.observe();
+  w.observe(8 * day);
+  const retired = w.curator.retireUnused();
+  assert.deepEqual(new Set(retired), new Set([failedProactive.name, failedRecovery.name]));
+  assert.ok(!retired.includes(proactive.name), '没触发过也没失败的主动维护技能免闲置收起');
+  assert.equal(w.engine.statsOf(proactive.name)?.retired, undefined);
+  assert.equal(w.engine.statsOf(failedProactive.name)?.retired !== undefined, true);
+  assert.equal(w.engine.statsOf(failedRecovery.name)?.retired !== undefined, true);
+});
+
+test('容量压力先收有失败证据的，从没用过的主动维护技能排在后面', (t) => {
+  const w = setup(t, { maxActive: 1 });
+  const proactive = { ...definition, name: 'top-up-torches', description: '火把少了就补到箱子里', when: { food_below: 8 } };
+  const failedManual = { ...definition, name: 'failed-manual-work' };
+  assert.ok(w.engine.write(proactive).ok);
+  assert.ok(w.engine.write(failedManual).ok);
+  for (let i = 0; i < 2; i++) w.engine.recordInvocation(failedManual.name, { status: 'failed', summary: '没有完成委托', data: { version: 1 } });
+  w.observe();
+  w.observe(day);
+  const out = w.curator.retireLowValue();
+  assert.ok(out.includes(failedManual.name), '有失败证据的先收');
+  assert.ok(!out.includes(proactive.name), '没证据的主动维护技能不先被容量挤掉');
+  assert.equal(w.engine.statsOf(proactive.name)?.retired, undefined);
+});
+
+test('只剩没证据的主动维护技能时容量上限仍执行，已验证的稳定应急版不受影响', (t) => {
+  const w = setup(t, { maxActive: 0 });
+  const emergency = { ...definition, name: 'escape-lava', when: { hp_below: 8 } };
+  const proactive = { ...definition, name: 'top-up-torches', description: '火把少了就补到箱子里', when: { food_below: 8 } };
+  assert.ok(w.engine.write(emergency).ok);
+  w.engine.recordInvocation(emergency.name, { status: 'succeeded', summary: '实际躲开危险', data: { version: 1, verified: true } });
+  assert.ok(w.engine.write(proactive).ok);
+  w.observe();
+  w.observe(day);
+  assert.deepEqual(w.curator.retireLowValue(), [proactive.name], '容量上限仍有界；应急版不占容量也不被收');
+  assert.equal(w.engine.statsOf(emergency.name)?.retired, undefined);
+});
