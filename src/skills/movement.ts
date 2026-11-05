@@ -676,7 +676,7 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
           trace.push({ ...adapter.state().pos });
           if (isAbort(e)) throw e;
           const now = adapter.state().pos;
-          return receipt(fail('PATH_NOT_FOUND', `先走到最近的旧矿道脚点 (${np}) 没成（${(e as Error).message.slice(0, 50)}）。人停在 (${now.x.toFixed(1)},${now.y.toFixed(1)},${now.z.toFixed(1)})；${digFact}`, { position: now, initialPosition: here }));
+          return receipt(fail('PATH_NOT_FOUND', `先走到最近的旧矿道脚点 (${np}) 没成（${(e as Error).message.slice(0, 50)}）。人停在 (${now.x.toFixed(1)},${now.y.toFixed(1)},${now.z.toFixed(1)})；${digFact}`, { position: now, initialPosition: here, segmentStart: { ...start } }));
         }
         start = adapter.state().pos;
         trace.push({ ...start });
@@ -766,7 +766,8 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
         }
       }
       // 出发前入口：人可能站在通道上方的地表/别的层，而 route 起点在下方 >2 格。
-      // 先走到 24 格内的地表入口锚点（只走路，不带 dig/place），再从实际位置重算 route；
+      // 回入口（to:'entrance'）才走向 24 格内的地表入口锚点；下最深（to:'deepest'）只走向最近的记录节点，
+      // 不能反向爬去地表。两者都只走路，不带 dig/place，再从实际位置重算 route；
       // 没有可用锚点就不强走，保留原 route 并把入口缺口写进回执。这里不自动挖/垫。
       const flatDist = (a: Vec3Like, b: Vec3Like) => Math.hypot(a.x - b.x, a.z - b.z);
       const inPassage = recs.some((r) =>
@@ -774,25 +775,28 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
         || (r.links ?? []).some((l) => dist3(l.a, start) <= 3 || dist3(l.b, start) <= 3));
       if (!inPassage && Math.abs(route[0]!.y - start.y) > 2) {
         const routeStart = { ...route[0]! };
-        const entrance = passageSurfaceCandidates(recs, start)
-          .filter((c) => flatDist(c.anchor, start) <= 24)
-          .sort((a, b) => flatDist(a.anchor, start) - flatDist(b.anchor, start))[0]?.anchor;
-        if (!entrance) {
+        const approach = back
+          ? passageSurfaceCandidates(recs, start)
+            .filter((c) => flatDist(c.anchor, start) <= 24)
+            .sort((a, b) => flatDist(a.anchor, start) - flatDist(b.anchor, start))[0]?.anchor
+          : passageNearestNode(recs, start) ?? undefined;
+        const approachLabel = back ? '地表入口锚点' : '最近的记录节点';
+        if (!approach) {
           approachGap = {
-            note: `人不在通道内，路线起点 (${Math.round(routeStart.x)},${Math.round(routeStart.y)},${Math.round(routeStart.z)}) 与人 (${start.x.toFixed(1)},${start.y.toFixed(1)},${start.z.toFixed(1)}) 高差 ${Math.round(Math.abs(routeStart.y - start.y))} 格；24 格内没有可用的地表入口锚点，仍按原路线走，第一段可能接不上`,
+            note: `人不在通道内，路线起点 (${Math.round(routeStart.x)},${Math.round(routeStart.y)},${Math.round(routeStart.z)}) 与人 (${start.x.toFixed(1)},${start.y.toFixed(1)},${start.z.toFixed(1)}) 高差 ${Math.round(Math.abs(routeStart.y - start.y))} 格；${back ? '24 格内没有可用的地表入口锚点' : '没有可用的记录节点'}，仍按原路线走，第一段可能接不上`,
             body: { ...start }, routeStart, verticalGap: Math.round(Math.abs(routeStart.y - start.y)),
           };
         } else {
-          const ep = `(${Math.round(entrance.x)},${Math.round(entrance.y)},${Math.round(entrance.z)})`;
-          ctx.progress(0, `先走到地表入口锚点 ${ep}`);
+          const ep = `(${Math.round(approach.x)},${Math.round(approach.y)},${Math.round(approach.z)})`;
+          ctx.progress(0, `先走到${approachLabel} ${ep}`);
           try {
             // 只走路：不传 terrainPermission，不挖、不垫。
-            await adapter.moveTo({ kind: 'near', pos: entrance, range: 2 }, { signal, timeoutMs: Math.max(2000, Math.min(20000, ctx.deadline - Date.now())), allowSwimming: false });
+            await adapter.moveTo({ kind: 'near', pos: approach, range: 2 }, { signal, timeoutMs: Math.max(2000, Math.min(20000, ctx.deadline - Date.now())), allowSwimming: false });
           } catch (e) {
             trace.push({ ...adapter.state().pos });
             if (isAbort(e)) throw e;
             const now = adapter.state().pos;
-            return receipt(fail('PATH_NOT_FOUND', `人不在通道内，先走到地表入口锚点 ${ep} 没成（${(e as Error).message.slice(0, 50)}）。人停在 (${now.x.toFixed(1)},${now.y.toFixed(1)},${now.z.toFixed(1)})；${digFact}；也可自己下/上去接上通道`, { position: now, initialPosition: { ...start }, blockedWaypoint: { ...entrance }, remaining: Math.round(dist3(now, target)), target }));
+            return receipt(fail('PATH_NOT_FOUND', `人不在通道内，先走到${approachLabel} ${ep} 没成（${(e as Error).message.slice(0, 50)}）。人停在 (${now.x.toFixed(1)},${now.y.toFixed(1)},${now.z.toFixed(1)})；${digFact}；也可自己下/上去接上通道`, { position: now, initialPosition: here, segmentStart: { ...start }, blockedWaypoint: { ...approach }, remaining: Math.round(dist3(now, target)), target }));
           }
           start = adapter.state().pos;
           trace.push({ ...start });
@@ -800,7 +804,7 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
           if (!route || route.length < 2) {
             // 已经站到目标锚点附近时，记录路线只剩这一个点也是走通；否则如实报接不上。
             if (dist3(start, target) <= 2) route = [{ ...target }];
-            else return receipt(fail('PATH_NOT_FOUND', `先走到地表入口锚点 ${ep} 后仍连不到${goal}；人停在 (${start.x.toFixed(1)},${start.y.toFixed(1)},${start.z.toFixed(1)})；${digFact}；可自己接上通道或换路`, { position: start, initialPosition: here, remaining: Math.round(dist3(start, target)), target }));
+            else return receipt(fail('PATH_NOT_FOUND', `先走到${approachLabel} ${ep} 后仍连不到${goal}；人停在 (${start.x.toFixed(1)},${start.y.toFixed(1)},${start.z.toFixed(1)})；${digFact}；可自己接上通道或换路`, { position: start, initialPosition: here, segmentStart: { ...start }, remaining: Math.round(dist3(start, target)), target }));
           }
         }
       }
@@ -852,27 +856,96 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
       const nearWaypoint = (p: Vec3Like, wp: Vec3Like) => Math.hypot(p.x - wp.x, p.z - wp.z) <= 1.5 && Math.abs(p.y - wp.y) <= 1;
       const skippedData = () => skippedWaypoints.length ? { skippedWaypoints: skippedWaypoints.map((p) => ({ ...p })) } : {};
       // 只把实际观测到的方块当作阻塞依据：未知（null）不阻塞，交给 moveTo 实测。
-      // 脚/头只有观测到实心才算堵；支撑只有观测到非实心（空气/软方块/液体）才算不可站。
-      const observedSolid = (b: string | null) => b !== null && !AIR_BLOCKS.has(b) && !isSoftBlock(b) && !LIQUID_BLOCKS.has(b);
-      // 短 hop 预检：只读脚格/头格/支撑格，不调用 moveTo，也不自动挖/放。
-      const hopBlocker = (wp: Vec3Like) => {
+      // 可攀（梯子/藤蔓/脚手架）、可开（门/栅栏门/活板门）、半格顶面（半砖/楼梯/床/地毯/雪层）
+      // 都不能按“实心=堵”一刀切；可站立/可占用由名称 allowlist + blockStateAt 属性判断。
+      const blockNameAt = (p: Vec3Like) => adapter.blockAt(p)?.replace(/^minecraft:/, '') ?? null;
+      const blockPropsAt = (p: Vec3Like) => adapter.blockStateAt?.(p)?.properties ?? {};
+      const CLIMBABLE = /^(ladder|vine|scaffolding|cave_vines|cave_vines_plant|twisting_vines|twisting_vines_plant|weeping_vines|weeping_vines_plant|.*_vines)$/;
+      const OPENABLE = /(_door|_fence_gate|_trapdoor)$/;
+      // 非满高但顶面可站：半砖/楼梯/床/地毯/雪层，以及碰撞高 <1 的箱子/耕地/土径/灵魂沙。
+      const PARTIAL_FLOOR = /(_slab|_stairs|_bed|_carpet)$|^(snow|chest|trapped_chest|ender_chest|farmland|dirt_path|soul_sand)$/;
+      // blockOptics 有碰撞盒时用最高顶面判断：undefined=没有形状信息，null=空形状，数字=顶面高度。
+      const shapeTop = (p: Vec3Like): number | null | undefined => {
+        const shapes = adapter.blockOptics?.(p.x, p.y, p.z)?.shapes;
+        if (!shapes) return undefined;
+        return shapes.length ? Math.max(...shapes.map((s) => s[4])) : null;
+      };
+      // 脚/头格：true=可占用，false=已观测为占不了，null=未知。
+      const occupiableCell = (p: Vec3Like): boolean | null => {
+        const name = blockNameAt(p);
+        if (name === null) return null;
+        if (LIQUID_BLOCKS.has(name)) return false;
+        if (isSoftBlock(name) && !PARTIAL_FLOOR.test(name)) return true;
+        if (CLIMBABLE.test(name) || OPENABLE.test(name)) return true;
+        if (PARTIAL_FLOOR.test(name)) {
+          // 半砖/楼梯的 top/upper 状态决定脚格是否被上半格占住，不能只看碰撞盒最高点。
+          if (name.endsWith('_slab') || name.endsWith('_stairs')) {
+            const props = blockPropsAt(p);
+            if (name.endsWith('_slab') && props.type === 'double') return false;
+            const top = name.endsWith('_slab') ? props.type === 'top' : props.half === 'top';
+            return !top;
+          }
+          const top = shapeTop(p);
+          if (top !== undefined) return top !== null && top < 0.999;
+          return true;
+        }
+        const top = shapeTop(p);
+        if (top !== undefined) return top !== null && top < 0.999;
+        return false; // 没有形状信息的观测整块实心
+      };
+      // 支撑格：true=可站立/可攀，false=已观测为不可站，null=未知。
+      const standableCell = (p: Vec3Like): boolean | null => {
+        const name = blockNameAt(p);
+        if (name === null) return null;
+        if (LIQUID_BLOCKS.has(name)) return false;
+        if (CLIMBABLE.test(name) || OPENABLE.test(name)) return true;
+        if (isSoftBlock(name) && !PARTIAL_FLOOR.test(name)) return false;
+        const top = shapeTop(p);
+        if (PARTIAL_FLOOR.test(name)) {
+          if (top !== undefined) return top !== null && top > 0;
+          return true;
+        }
+        if (top !== undefined) return top !== null && top > 0;
+        return true; // 没有形状信息：观测到的整块实心按可站处理
+      };
+      const blockersAt = (wp: Vec3Like, opts: { includeHead: boolean }) => {
         const feet = feetCell(wp);
-        const cells = [
-          { role: '脚格', cell: feet },
-          { role: '头格', cell: { x: feet.x, y: feet.y + 1, z: feet.z } },
-          { role: '支撑格', cell: { x: feet.x, y: feet.y - 1, z: feet.z } },
-        ].map((c) => ({ ...c, block: adapter.blockAt(c.cell) }));
-        return cells.filter((c) => c.role === '支撑格' ? c.block !== null && !observedSolid(c.block) : observedSolid(c.block));
+        const head = { x: feet.x, y: feet.y + 1, z: feet.z };
+        const support = { x: feet.x, y: feet.y - 1, z: feet.z };
+        const blocked = (role: string, pos: Vec3Like) => [{ role, cell: pos, block: blockNameAt(pos) }];
+        return [
+          ...(occupiableCell(feet) === false ? blocked('脚格', feet) : []),
+          ...(opts.includeHead && occupiableCell(head) === false ? blocked('头格', head) : []),
+          ...(standableCell(support) === false ? blocked('支撑格', support) : []),
+        ];
       };
       // 没有取得进展（未 offRoute）时的共同回执：停在第一个坏点，不把跳过尝试冒充进展。
       const stuckAt = (index: number, waypoint: Vec3Like, before: Vec3Like, got: Vec3Like, errText: string, extra: string) =>
         receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${index}/${route.length - 1} 段卡住：从 ${posText(before)} 到记录点 ${atText(waypoint)} 没有取得进展（${errText}）。人停在 ${posText(got)}，离${goal}约 ${Math.round(dist3(got, target!))} 格；${digFact}；可选 descend/climb_up 或换路${extra}${skippedWaypoints.length ? `；已跳过 ${skippedWaypoints.map(atText).join('、')}` : ''}`, {
-          position: got, initialPosition: { ...before }, blockedWaypoint: { ...waypoint }, waypointIndex: index, totalWaypoints: route.length - 1,
+          position: got, initialPosition: here, segmentStart: { ...before }, blockedWaypoint: { ...waypoint }, waypointIndex: index, totalWaypoints: route.length - 1,
           remaining: Math.round(dist3(got, target!)), target, routeFacts, ...skippedData(),
         }));
+      // 每个路点允许的“沿记录段局部推进”次数；超过就按有进展但没到点失败，不写 offRoute、也不跳过该点。
+      const partialProgress = new Map<number, number>();
+      const segmentGap = (p: Vec3Like, a: Vec3Like, b: Vec3Like) => {
+        const abx = b.x - a.x, aby = b.y - a.y, abz = b.z - a.z;
+        const len2 = abx * abx + aby * aby + abz * abz;
+        const t = len2 > 0 ? Math.max(0, Math.min(1, ((p.x - a.x) * abx + (p.y - a.y) * aby + (p.z - a.z) * abz) / len2)) : 0;
+        return { horizontal: Math.hypot(p.x - (a.x + abx * t), p.z - (a.z + abz * t)), vertical: Math.abs(p.y - (a.y + aby * t)) };
+      };
+      // 终点是否还贴着记录段：当前段、必要时看前后相邻段；只有离开记录段才算 offRoute。
+      const onRecordedSegment = (p: Vec3Like, index: number, before: Vec3Like, waypoint: Vec3Like) => {
+        const segments: [Vec3Like, Vec3Like][] = [[before, waypoint]];
+        if (index + 1 < route.length) segments.push([waypoint, route[index + 1]!]);
+        if (index > 0) segments.push([route[index - 1]!, before]);
+        return segments.some(([a, b]) => {
+          const gap = segmentGap(p, a, b);
+          return gap.horizontal <= 1.5 && gap.vertical <= 1.5;
+        });
+      };
       for (let i = 0; i < route.length; i++) {
         throwIfAborted(signal);
-        if (Date.now() >= ctx.deadline) return receipt(fail('TIMEOUT', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段时间用完；人停在 (${last.x.toFixed(1)},${last.y.toFixed(1)},${last.z.toFixed(1)})，离目标约 ${Math.round(dist3(last, target))} 格；${digFact}`, { position: last, reachedWaypoint: i, totalWaypoints: route.length - 1, initialPosition: here, ...skippedData() }));
+        if (Date.now() >= ctx.deadline) return receipt(fail('TIMEOUT', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段时间用完；人停在 (${last.x.toFixed(1)},${last.y.toFixed(1)},${last.z.toFixed(1)})，离目标约 ${Math.round(dist3(last, target))} 格；${digFact}`, { position: last, reachedWaypoint: i, totalWaypoints: route.length - 1, initialPosition: here, segmentStart: { ...last }, ...skippedData() }));
         const wp = route[i]!;
         if (dist3(last, wp) <= 1.2) continue;
         const hop = dist3(last, wp);
@@ -881,17 +954,11 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
         if (wp.y === lc.y + 1 && Math.abs(wp.x - lc.x) <= 1 && Math.abs(wp.z - lc.z) <= 1) {
           // 清障之前先只读核对这级台阶本身能不能站：脚格已观测为实心、或支撑格已观测为非实心时，
           // 挖头顶也走不上去；先返回事实，不消耗工具耐久、不移动。未知（null）不阻塞，交给 moveTo 实测。
-          const stepFeet = feetCell(wp);
-          const stepSupport = { x: stepFeet.x, y: stepFeet.y - 1, z: stepFeet.z };
-          const stepFeetBlock = adapter.blockAt(stepFeet), stepSupportBlock = adapter.blockAt(stepSupport);
-          const stepBlocked = [
-            ...(observedSolid(stepFeetBlock) ? [{ role: '脚格', cell: stepFeet, block: stepFeetBlock }] : []),
-            ...(stepSupportBlock !== null && !observedSolid(stepSupportBlock) ? [{ role: '支撑格', cell: stepSupport, block: stepSupportBlock }] : []),
-          ];
+          const stepBlocked = blockersAt(wp, { includeHead: false });
           if (stepBlocked.length) {
             const detail = stepBlocked.map((c) => `${c.role} ${atText(c.cell)} 是 ${c.block}`).join('、');
             return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段：下一路点 ${atText(wp)} 是 1 格上台阶，但${detail}，这级台阶已观测为不可站，未清障、未调用寻路（人仍在 ${posText(last)}）。${digFact}；或 descend/climb_up；或换路`, {
-              position: last, initialPosition: { ...here }, blockedWaypoint: { ...wp }, waypointIndex: i, totalWaypoints: route.length - 1,
+              position: last, initialPosition: here, segmentStart: { ...last }, blockedWaypoint: { ...wp }, waypointIndex: i, totalWaypoints: route.length - 1,
               blockedCells: stepBlocked.map((c) => ({ role: c.role, cell: { ...c.cell }, block: c.block })),
               remaining: Math.round(dist3(last, target!)), target, routeFacts, ...skippedData(),
             }));
@@ -900,14 +967,14 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
             const b = adapter.blockAt(h);
             if (b === null || AIR_BLOCKS.has(b) || isSoftBlock(b) || LIQUID_BLOCKS.has(b)) continue;
             if (!allowDig) {
-              return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段：下一路点 ${atText(wp)} 是 1 格上台阶，头顶 (${h.x},${h.y},${h.z}) 是 ${b}，两格高隧道里跳不上去；${digFact}；或自己 dig_at 阶梯`, { position: last, initialPosition: here, reachedWaypoint: i, totalWaypoints: route.length - 1, blockedHead: h, ...skippedData() }));
+              return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段：下一路点 ${atText(wp)} 是 1 格上台阶，头顶 (${h.x},${h.y},${h.z}) 是 ${b}，两格高隧道里跳不上去；${digFact}；或自己 dig_at 阶梯`, { position: last, initialPosition: here, segmentStart: { ...last }, reachedWaypoint: i, totalWaypoints: route.length - 1, blockedHead: h, ...skippedData() }));
             }
             try {
               await breakCell(ctx, h);
             } catch (e) {
               if (isAbort(e)) throw e;
               const now = adapter.state().pos;
-              return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段：要挖开头顶 (${h.x},${h.y},${h.z}) 迈上台阶，没成（${why(e)}）。人停在 (${now.x.toFixed(1)},${now.y.toFixed(1)},${now.z.toFixed(1)})；${digFact}`, { position: now, initialPosition: here, reachedWaypoint: i, totalWaypoints: route.length - 1, blockedHead: h, ...skippedData() }));
+              return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段：要挖开头顶 (${h.x},${h.y},${h.z}) 迈上台阶，没成（${why(e)}）。人停在 (${now.x.toFixed(1)},${now.y.toFixed(1)},${now.z.toFixed(1)})；${digFact}`, { position: now, initialPosition: here, segmentStart: { ...last }, reachedWaypoint: i, totalWaypoints: route.length - 1, blockedHead: h, ...skippedData() }));
             }
           }
         }
@@ -915,11 +982,11 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
         // 短 hop 先看目标脚格/头格/支撑格：走不进去就不交给全局寻路，避免它为到达 x/z 从矿道爬去地表。
         // 上台阶需要挖开的新头已在上面按 dig:true 授权处理；这里仍不自动挖/放。
         if (hop <= 4 && Math.abs(wp.y - last.y) <= 2) {
-          const blocked = hopBlocker(wp);
+          const blocked = blockersAt(wp, { includeHead: true });
           if (blocked.length) {
             const detail = blocked.map((c) => `${c.role} ${atText(c.cell)} 是 ${c.block}`).join('、');
             return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段：下一路点 ${atText(wp)} 的${detail}，目标格被堵或脚下没有可站立实心，未调用寻路（人仍在 ${posText(last)}）。可选：${digFact}；或 descend/climb_up；或换路${skippedWaypoints.length ? `；已跳过 ${skippedWaypoints.map(atText).join('、')}` : ''}`, {
-              position: last, initialPosition: { ...here }, blockedWaypoint: { ...wp }, waypointIndex: i, totalWaypoints: route.length - 1,
+              position: last, initialPosition: here, segmentStart: { ...last }, blockedWaypoint: { ...wp }, waypointIndex: i, totalWaypoints: route.length - 1,
               blockedCells: blocked.map((c) => ({ role: c.role, cell: { ...c.cell }, block: c.block })),
               remaining: Math.round(dist3(last, target!)), target, routeFacts, ...skippedData(),
             }));
@@ -945,24 +1012,39 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
           continue;
         }
         const errText = moveError ? `寻路报“${moveError.message.slice(0, 60)}”` : '寻路返回了，但没走到记录点';
-        const moved = dist3(before, got);
+        // 按“离记录段多远”判断，而不是按“移动了多少”：沿 before→wp 的一段推进仍算在路线上。
+        const onSegment = onRecordedSegment(got, i, before, wp);
+        const closer = dist3(got, wp) < dist3(before, wp) - 0.05;
+        if (onSegment && closer) {
+          const count = partialProgress.get(i) ?? 0;
+          if (count < 2) {
+            partialProgress.set(i, count + 1);
+            last = got;
+            i--; // 重试同一个路点，不能把没走到的点当成已经走过
+            continue;
+          }
+          return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段：从 ${posText(before)} 到记录点 ${atText(wp)} 只推进到 ${posText(got)}（仍在记录段上，离记录点 ${dist3(got, wp).toFixed(1)} 格），${count} 次有界局部推进后仍未到达；不写偏离记录路线。${errText}；${digFact}；可选 descend/climb_up 或换路`, {
+            position: got, initialPosition: here, segmentStart: { ...before }, blockedWaypoint: { ...wp }, waypointIndex: i, totalWaypoints: route.length - 1,
+            partialProgress: count, remaining: Math.round(dist3(got, target!)), target, routeFacts, ...skippedData(),
+          }));
+        }
         const sameColumn = Math.hypot(got.x - wp.x, got.z - wp.z) <= 1.5;
-        // 身体被寻路带离记录点（动过 >0.5 格）：如实报 offRoute，不把它写成记录点本身的高度差。
-        if (moved > 0.5) {
+        // 确实离开记录段：才如实报 offRoute，不把沿路线的部分推进误报成偏离。
+        if (!onSegment) {
           const how = sameColumn
             ? `同一列只到得了另一个高度（记录点 y=${Math.round(wp.y)}，实际 y=${got.y.toFixed(1)}）；要接上可用 descend/climb_up，或换路`
             : '要接上可用 descend/climb_up，或换路';
           return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段：从 ${posText(before)} 到记录点 ${atText(wp)} 没走到；寻路把我带到 ${posText(got)}（偏离记录路线）。${errText}；${digFact}；${how}${skippedWaypoints.length ? `；已跳过 ${skippedWaypoints.map(atText).join('、')}` : ''}`, {
-            offRoute: true, initialPosition: { ...before }, position: got, blockedWaypoint: { ...wp }, waypointIndex: i, totalWaypoints: route.length - 1,
+            offRoute: true, initialPosition: here, segmentStart: { ...before }, position: got, blockedWaypoint: { ...wp }, waypointIndex: i, totalWaypoints: route.length - 1,
             remaining: Math.round(dist3(got, target!)), target, routeFacts,
             ...(sameColumn ? { sameColumnReachedAt: { ...got } } : {}), ...skippedData(),
           }));
         }
-        // 没动：身体还在路线附近（未 offRoute）。最多尝试一次跳到下一个路点，失败就以第一个坏点返回。
+        // 仍在记录段上但没有更接近记录点（未 offRoute）。最多尝试一次跳到下一个路点，失败就以第一个坏点返回。
         const next = route[i + 1];
         if (!skipUsed && next && dist3(got, next) <= 6 && Math.abs(next.y - got.y) <= 2) {
           skipUsed = true;
-          const nextBlocked = dist3(got, next) <= 4 ? hopBlocker(next) : [];
+          const nextBlocked = dist3(got, next) <= 4 ? blockersAt(next, { includeHead: true }) : [];
           if (!nextBlocked.length) {
             let skipError: Error | null = null;
             try {

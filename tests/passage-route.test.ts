@@ -293,8 +293,9 @@ test('1 格上台阶的脚格已观测为实心：dig:true 也不先清障，返
   memory.setWorld(w.worldId);
   const stepPath = [{ x: 0, y: 40, z: 0 }, { x: 1, y: 41, z: 0 }];
   carve(w, stepPath);
-  // 目标脚格本身是石头：挖开头顶也站不上去。
+  // 目标脚格本身是石头：挖开头顶也站不上去；头顶也显式是石头，证明预检发生在清障之前。
   w.setBlock({ x: 1, y: 41, z: 0 }, 'stone');
+  w.setBlock({ x: 1, y: 42, z: 0 }, 'stone');
   memory.savePassage({
     id: 'p1', worldId: w.worldId, dim: w.dim, kind: 'dug',
     entrances: [{ x: 1, y: 42, z: 0 }],

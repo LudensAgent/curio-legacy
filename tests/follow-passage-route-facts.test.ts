@@ -364,6 +364,127 @@ test('短 hop 的目标格未观测（null）时不当成阻塞，交给 moveTo 
   assert.doesNotMatch(result.summary, /未加载/);
 });
 
+test('梯子/藤蔓列不被当成实心阻塞，仍交给 moveTo', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 40, z: 0.5 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  save(memory, w, 'climbable', [{ x: 0, y: 40, z: 0 }, { x: 4, y: 40, z: 0 }, { x: 8, y: 40, z: 0 }], { x: 8, y: 41, z: 0 });
+  // 第一个短 hop 的支撑格是梯子；第二个的脚格是藤蔓。都不能按“实心=堵”处理。
+  w.setBlock({ x: 4, y: 39, z: 0 }, 'ladder');
+  w.setBlock({ x: 8, y: 40, z: 0 }, 'vine');
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  const moves: Vec3Like[] = [];
+  t.mock.method(w, 'moveTo', async (goal: any) => { if (goal.kind === 'near') { moves.push(goal.pos); w.pos = { ...goal.pos }; } });
+
+  const result = await followPassage.run(ctx as never, { to: 'entrance' });
+
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.ok(moves.some((p) => p.x === 4 && p.y === 40), '支撑格是梯子时不应预检拦截');
+  assert.ok(moves.some((p) => p.x === 8 && p.y === 40), '脚格是藤蔓时不应预检拦截');
+  assert.equal(result.data?.blockedWaypoint, undefined);
+});
+
+test('下半砖脚格、关着的门/栅栏门不误报阻塞', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 40, z: 0.5 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  save(memory, w, 'walkable-blocks', [{ x: 0, y: 40, z: 0 }, { x: 4, y: 40, z: 0 }, { x: 8, y: 40, z: 0 }, { x: 12, y: 40, z: 0 }], { x: 12, y: 41, z: 0 });
+  // 下半砖当脚格：可站在它的上半格；门和栅栏门可被 adapter 打开。
+  w.setBlock({ x: 4, y: 40, z: 0 }, 'stone_slab');
+  w.blockProperties.set('4,40,0', { type: 'bottom' });
+  w.setBlock({ x: 8, y: 40, z: 0 }, 'oak_door');
+  w.setBlock({ x: 8, y: 41, z: 0 }, 'oak_door');
+  w.blockProperties.set('8,40,0', { half: 'lower' });
+  w.blockProperties.set('8,41,0', { half: 'upper' });
+  w.setBlock({ x: 12, y: 40, z: 0 }, 'oak_fence_gate');
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  const moves: Vec3Like[] = [];
+  t.mock.method(w, 'moveTo', async (goal: any) => { if (goal.kind === 'near') { moves.push(goal.pos); w.pos = { ...goal.pos }; } });
+
+  const result = await followPassage.run(ctx as never, { to: 'entrance' });
+
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.ok(moves.some((p) => p.x === 4 && p.y === 40), '下半砖脚格应允许');
+  assert.ok(moves.some((p) => p.x === 8 && p.y === 40), '门格应允许（adapter 可开门）');
+  assert.ok(moves.some((p) => p.x === 12 && p.y === 40), '栅栏门格应允许');
+  assert.equal(result.data?.blockedWaypoint, undefined);
+});
+
+test('站在箱子上、记录脚格=chest 时不误报并调用 moveTo', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 40, z: 0.5 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  save(memory, w, 'chest-floor', [{ x: 0, y: 40, z: 0 }, { x: 4, y: 40, z: 0 }, { x: 8, y: 40, z: 0 }], { x: 8, y: 41, z: 0 });
+  // 箱子碰撞高约 0.875：站在上面时 floor(feet.y) 就是箱子格本身。
+  w.setBlock({ x: 4, y: 40, z: 0 }, 'chest');
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  const moves: Vec3Like[] = [];
+  t.mock.method(w, 'moveTo', async (goal: any) => { if (goal.kind === 'near') { moves.push(goal.pos); w.pos = { ...goal.pos }; } });
+
+  const result = await followPassage.run(ctx as never, { to: 'entrance' });
+
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.ok(moves.some((p) => p.x === 4 && p.y === 40), 'chest 脚格不应预检拦截');
+  assert.equal(result.data?.blockedWaypoint, undefined);
+});
+
+test('blockOptics 的 bottom slab 形状让非 allowlist 脚格放行', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 40, z: 0.5 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  save(memory, w, 'shape-floor', [{ x: 0, y: 40, z: 0 }, { x: 4, y: 40, z: 0 }, { x: 8, y: 40, z: 0 }, { x: 12, y: 40, z: 0 }], { x: 12, y: 41, z: 0 });
+  w.setBlock({ x: 4, y: 40, z: 0 }, 'stone_slab');
+  w.blockProperties.set('4,40,0', { type: 'bottom' });
+  // composter 不在名称 allowlist 里，靠 blockOptics 的 0.5 高顶面放行。
+  w.setBlock({ x: 8, y: 40, z: 0 }, 'composter');
+  const originalOptics = w.blockOptics.bind(w);
+  t.mock.method(w, 'blockOptics', (x: number, y: number, z: number) => {
+    if (x === 8 && y === 40 && z === 0) return { name: 'composter', kind: 'solid' as const, shapes: [[0, 0, 0, 1, 0.5, 1]] as const };
+    return originalOptics(x, y, z);
+  });
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  const moves: Vec3Like[] = [];
+  t.mock.method(w, 'moveTo', async (goal: any) => { if (goal.kind === 'near') { moves.push(goal.pos); w.pos = { ...goal.pos }; } });
+
+  const result = await followPassage.run(ctx as never, { to: 'entrance' });
+
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.ok(moves.some((p) => p.x === 4 && p.y === 40), 'bottom slab 脚格应允许');
+  assert.ok(moves.some((p) => p.x === 8 && p.y === 40), 'blockOptics 显示半高顶面时应允许');
+  assert.equal(result.data?.blockedWaypoint, undefined);
+});
+
+test('blockOptics 显示满块顶面时不被名字放行', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 40, z: 0.5 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  save(memory, w, 'full-shape', [{ x: 0, y: 40, z: 0 }, { x: 4, y: 40, z: 0 }, { x: 8, y: 40, z: 0 }], { x: 8, y: 41, z: 0 });
+  w.setBlock({ x: 4, y: 40, z: 0 }, 'composter');
+  const originalOptics = w.blockOptics.bind(w);
+  t.mock.method(w, 'blockOptics', (x: number, y: number, z: number) => {
+    if (x === 4 && y === 40 && z === 0) return { name: 'composter', kind: 'solid' as const, shapes: [[0, 0, 0, 1, 1, 1]] as const };
+    return originalOptics(x, y, z);
+  });
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  const moves = t.mock.method(w, 'moveTo', async (goal: any) => { if (goal.kind === 'near') w.pos = { ...goal.pos }; });
+
+  const result = await followPassage.run(ctx as never, { to: 'entrance' });
+
+  assert.equal(result.status, 'failed');
+  assert.match(result.summary, /脚格 \(4,40,0\) 是 composter/);
+  assert.equal(moves.mock.callCount(), 0);
+});
+
 test('第 1 个路点不可达、第 2 个可达：跳过一次并记录 skippedWaypoints', async (t) => {
   const w = new TestWorld();
   w.pos = { x: 0.5, y: 40, z: 0.5 };
@@ -419,4 +540,130 @@ test('人不在通道内、路线起点在下方：先走到地表入口锚点�
   assert.equal(calls[0]?.opts.allowTerrainChanges, undefined, '接入口只走路，不带 dig');
   assert.equal(calls[0]?.opts.allowPlace, undefined, '接入口只走路，不带 place');
   assert.ok(calls.some((c) => c.goal.pos?.x === E1.x && c.goal.pos?.y === E1.y), '重算路线最终走向原目标');
+});
+
+test('4 格平路只推进一半就 TIMEOUT：仍在记录段上，不报 offRoute 并重试同一路点', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 40, z: 0.5 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  save(memory, w, 'partial', [0, 4, 8].map((x) => ({ x, y: 40, z: 0 })), { x: 8, y: 41, z: 0 });
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  let calls = 0;
+  t.mock.method(w, 'moveTo', async (goal: any) => {
+    if (goal.kind !== 'near') return;
+    calls++;
+    // 每次都沿 before→(4,40,0) 的记录段推进一点点，然后超时；第三次仍离记录点 >1.5 格。
+    w.pos = calls === 1 ? { x: 1.0, y: 40, z: 0 } : calls === 2 ? { x: 1.5, y: 40, z: 0 } : { x: 2.0, y: 40, z: 0 };
+    throw new Error('timeout');
+  });
+
+  const result = await followPassage.run(ctx as never, { to: 'entrance' });
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.data?.offRoute, undefined, '沿记录段推进不是 offRoute');
+  assert.equal(result.data?.partialProgress, 2, '每个路点最多 2 次局部推进');
+  assert.deepEqual(result.data?.segmentStart, { x: 1.5, y: 40, z: 0 });
+  assert.deepEqual(result.data?.initialPosition, { x: 0.5, y: 40, z: 0.5 });
+  assert.match(result.summary, /仍在记录段上/);
+  assert.doesNotMatch(result.summary, /（偏离记录路线）/);
+  assert.equal(calls, 3, '两次局部推进都重试同一路点，没有跳到下一个点');
+});
+
+test('offRoute 时 initialPosition 是整趟起点，segmentStart 是失败分段起点', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 40, z: 0.5 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  save(memory, w, 'progress-then-off', [0, 4, 8].map((x) => ({ x, y: 40, z: 0 })), { x: 8, y: 41, z: 0 });
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  t.mock.method(w, 'moveTo', async (goal: any) => {
+    if (goal.kind !== 'near') return;
+    if (goal.pos.x === 4) { w.pos = { x: 4, y: 40, z: 0 }; return; }
+    if (goal.pos.x === 8) { w.pos = { x: 8, y: 44, z: 0 }; throw new Error('No path'); }
+  });
+
+  const result = await followPassage.run(ctx as never, { to: 'entrance' });
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.data?.offRoute, true);
+  assert.deepEqual(result.data?.initialPosition, { x: 0.5, y: 40, z: 0.5 }, '整趟起点');
+  assert.deepEqual(result.data?.segmentStart, { x: 4, y: 40, z: 0 }, '失败分段起点');
+});
+
+test("to:'deepest' 不在通道内时只走向最近记录节点，不去地表入口", async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 64, z: 3.5 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  const p = (x: number, y: number, z: number) => ({ x, y, z });
+  const A = p(0, 60, 0), N1 = p(8, 64, 0), E1 = p(20, 64, 0), D = p(0, 40, 0);
+  const link = (a: Vec3Like, b: Vec3Like) => ({ a, b });
+  memory.savePassage({
+    id: 'deepest-mine', worldId: w.worldId, dim: w.dim, kind: 'dug', entrances: [E1], deepestY: 40, dug: 20, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1,
+    path: [A, N1, E1, D], links: [link(A, N1), link(N1, E1), link(A, D)],
+  });
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  const calls: { goal: any; opts: any }[] = [];
+  t.mock.method(w, 'moveTo', async (goal: any, opts: any) => {
+    calls.push({ goal, opts });
+    if (goal.kind === 'near') w.pos = { ...goal.pos };
+  });
+
+  const result = await followPassage.run(ctx as never, { to: 'deepest' });
+
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.deepEqual(result.data?.resolvedTarget, D);
+  assert.deepEqual(calls[0]?.goal.pos, A, '下最深时只走向最近的记录节点');
+  assert.ok(!calls.some((c) => c.goal.pos?.x === E1.x && c.goal.pos?.y === E1.y), '不得反向走到地表入口');
+  assert.equal(calls[0]?.opts.allowTerrainChanges, undefined, '接回通道只走路');
+  assert.equal(result.data?.approachGap, undefined);
+});
+
+test('回入口没有 24 格内的地表锚点时保留原路线并报告 approachGap', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 64, z: 3.5 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  const A = { x: 0, y: 60, z: 0 }, N1 = { x: 8, y: 64, z: 0 };
+  memory.savePassage({
+    id: 'no-anchor', worldId: w.worldId, dim: w.dim, kind: 'dug', entrances: [], deepestY: 60, dug: 20, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1,
+    path: [A, N1], links: [{ a: A, b: N1 }],
+  });
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  t.mock.method(w, 'moveTo', async (goal: any) => { if (goal.kind === 'near') w.pos = { ...goal.pos }; });
+
+  const result = await followPassage.run(ctx as never, { to: 'entrance' });
+
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.ok(result.data?.approachGap, '没有可用锚点也要把入口缺口交回');
+  assert.match(result.summary, /出发前入口缺口/);
+  assert.match(result.summary, /24 格内没有可用的地表入口锚点/);
+});
+
+test('记录点格变实心但相邻一格可站：当前仍保守地停在坏点（不自动改到相邻格）', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 40, z: 0.5 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  save(memory, w, 'adjacent', [0, 4, 8].map((x) => ({ x, y: 40, z: 0 })), { x: 8, y: 41, z: 0 });
+  w.setBlock({ x: 4, y: 40, z: 0 }, 'stone');
+  // 相邻的 (5,40,0) 是可站格，但预检不替 Agent 改选落点。
+  w.setBlock({ x: 5, y: 40, z: 0 }, 'air');
+  w.setBlock({ x: 5, y: 41, z: 0 }, 'air');
+  w.setBlock({ x: 5, y: 39, z: 0 }, 'stone');
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  const moves = t.mock.method(w, 'moveTo', async (goal: any) => { if (goal.kind === 'near') w.pos = { ...goal.pos }; });
+
+  const result = await followPassage.run(ctx as never, { to: 'entrance' });
+
+  assert.equal(result.status, 'failed');
+  assert.match(result.summary, /脚格 \(4,40,0\) 是 stone/);
+  assert.equal(moves.mock.callCount(), 0, '不自动把记录点改到相邻可站格');
+  assert.deepEqual(result.data?.blockedWaypoint, { x: 4, y: 40, z: 0 });
 });
