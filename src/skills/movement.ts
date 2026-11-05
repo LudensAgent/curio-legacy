@@ -683,7 +683,16 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; dig?: boolean }>
           const tgtNode = passageNearestNode(recs, target);
           const tgtStr = tgtNode ? `(${Math.round(tgtNode.x)},${Math.round(tgtNode.y)},${Math.round(tgtNode.z)})` : '未知位置';
           const gap = tgtNode ? Math.round(dist3(start, tgtNode)) : null;
-          return receipt(fail('PATH_NOT_FOUND', `到了脚点 (${np}) 附近，但仍连不到${back ? '地表入口' : '最深处'}：离${goal}最近的旧矿道脚点在 ${tgtStr}，从你脚下直线约 ${gap ?? '未知'} 格（通道在这中间断开；可朝它垫/挖过去接上，或改走别的路）`, { position: start }));
+          const connectionGap = tgtNode ? {
+            from: { x: start.x, y: start.y, z: start.z },
+            to: { x: tgtNode.x, y: tgtNode.y, z: tgtNode.z },
+            distance: dist3(start, tgtNode),
+            sameLevel: Math.abs(start.y - tgtNode.y) <= 0.01,
+            horizontal: Math.hypot(start.x - tgtNode.x, start.z - tgtNode.z),
+            vertical: Math.abs(start.y - tgtNode.y),
+            note: '两段旧几何之间没有已记录的实际连接；这是缺口端点，不是自动补边或当前可通行证明',
+          } : null;
+          return receipt(fail('PATH_NOT_FOUND', `到了脚点 (${np}) 附近，但仍连不到${back ? '地表入口' : '最深处'}：离${goal}最近的旧矿道脚点在 ${tgtStr}，从你脚下直线约 ${gap ?? '未知'} 格（通道在这中间断开；可朝它垫/挖过去接上，或改走别的路）`, { position: start, ...(connectionGap ? { connectionGap } : {}) }));
         }
       }
       ctx.progress(0, `沿${kind}${back ? '回入口' : '下最深'}，共 ${route.length} 段`);

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { PASSAGE_LIVE_CAP, WorldMemory } from '../src/memory/store.ts';
+import { PASSAGE_BRIDGE_ARCHIVE_CAP, PASSAGE_LIVE_CAP, WorldMemory } from '../src/memory/store.ts';
 
 const W = 'archive-world', D = 'overworld';
 const record = (id: string, x: number, lastUsedAt: number) => ({
@@ -43,6 +43,18 @@ test('explicit forget removes the record from both live and archive', () => {
   memory.forgetPassage('p1');
   assert.equal(memory.archivedPassages(D).some((p) => p.id === 'p1'), false);
   assert.equal(memory.allPassages(D).some((p) => p.id === 'p1'), false);
+});
+
+test('bridge archive churn cannot evict a walked/dig mine record', () => {
+  const memory = new WorldMemory(null);
+  memory.setWorld(W);
+  memory.archivePassage(record('mine', 8, 1));
+  for (let i = 0; i < PASSAGE_BRIDGE_ARCHIVE_CAP + 40; i++) {
+    memory.archivePassage({ ...record(`bridge-${i}`, i * 2, 100 + i), kind: 'bridge' });
+  }
+  const archived = memory.archivedPassages(D);
+  assert.equal(archived.some((p) => p.id === 'mine'), true);
+  assert.ok(archived.filter((p) => p.kind === 'bridge').length <= PASSAGE_BRIDGE_ARCHIVE_CAP);
 });
 
 test('archived passages stay scoped to their world and dimension', () => {

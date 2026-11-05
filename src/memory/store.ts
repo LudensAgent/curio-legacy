@@ -226,6 +226,8 @@ export const EXCAVATION_WAYPOINT_CAP = 8;
 export const PASSAGE_LIVE_CAP = 24;
 /** 历史通道归档上限：足够保留一个世界的旧矿道，同时避免 JSON 无界增长 */
 export const PASSAGE_ARCHIVE_CAP = 512;
+/** 归档里的 bridge 是程序从放置方块推导出来的，数量会随每次搭桥膨胀；单独限量，避免挤掉真正走过的旧矿道 */
+export const PASSAGE_BRIDGE_ARCHIVE_CAP = 64;
 /** 自己放置的方块（路、桥、门框、脚手架…）LRU 上限：环境变量可调；超出淘汰最久未用的 */
 const PLACED_BLOCKS_CAP = (() => {
   const raw = process.env.PLACED_BLOCKS_CAP;
@@ -288,6 +290,7 @@ export class WorldMemory {
         this.dropBedBases();
         this.recoverProjects();
         this.applyPatch(file);
+        this.trimPassageArchive();
       } catch {
         fs.copyFileSync(file, file + '.corrupt-' + Date.now());
         this.data = empty();
@@ -1060,10 +1063,23 @@ export class WorldMemory {
   }
 
   private trimPassageArchive() {
-    const archive = this.data.passageArchive;
-    if (!archive || archive.length <= PASSAGE_ARCHIVE_CAP) return;
-    archive.sort((a, b) => a.lastUsedAt - b.lastUsedAt);
-    archive.splice(0, archive.length - PASSAGE_ARCHIVE_CAP);
+    let archive = this.data.passageArchive;
+    if (!archive) return;
+    let changed = false;
+    // bridge 是可从 placedBlocks 重新推导的施工记录，不能因数量大而把 dug/walked 旧矿道挤出归档。
+    const bridges = archive.filter((p) => p.kind === 'bridge').sort((a, b) => b.lastUsedAt - a.lastUsedAt);
+    if (bridges.length > PASSAGE_BRIDGE_ARCHIVE_CAP) {
+      const keep = new Set(bridges.slice(0, PASSAGE_BRIDGE_ARCHIVE_CAP));
+      archive = archive.filter((p) => p.kind !== 'bridge' || keep.has(p));
+      this.data.passageArchive = archive;
+      changed = true;
+    }
+    if (archive.length > PASSAGE_ARCHIVE_CAP) {
+      archive.sort((a, b) => a.lastUsedAt - b.lastUsedAt);
+      archive.splice(0, archive.length - PASSAGE_ARCHIVE_CAP);
+      changed = true;
+    }
+    if (changed) this.touch();
   }
 
   /** 新记或更新一条通道；live 工作集最多留 PASSAGE_LIVE_CAP 条，满了移入历史归档而不是丢弃 */
