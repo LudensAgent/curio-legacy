@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { afterStep, beginStep, createActivity, describeActivity, nextStep } from '../src/mind/activity.ts';
+import { afterStep, beginStep, clipFeedback, createActivity, describeActivity, nextStep } from '../src/mind/activity.ts';
 import type { Condition } from '../src/projects/types.ts';
 import { climbUp } from '../src/skills/body.ts';
 import { fail, ok } from '../src/skills/types.ts';
@@ -246,6 +246,70 @@ test('导航阶段按技能实际报告记录，没有报告的不编造', () =>
   afterStep(plain.activity, plainStep, fail('PATH_NOT_FOUND', '没成', { position: { x: 0, y: 64, z: 0 } }), 100, plain.adapter.state());
   assert.equal((plain.activity.results.at(-1) as { stage?: string }).stage, undefined);
   assert.equal(describeActivity(plain.activity, plain.adapter.state()).last_nav_stage, undefined);
+});
+
+test('follow_passage 报出确定图断口时不原样重试，并保留断口两端', () => {
+  const { adapter, activity } = activityOf([{ skill: 'follow_passage', args: { to: 'entrance' } }]);
+  const step = nextStep(activity)!;
+  // 身体确实移动过（否则通用分支本来就不会重试）；这里验证的是 connectionGap 例外先于 RETRYABLE。
+  activity.stepStart = { pos: { x: 99, y: 64, z: 99 } };
+  const from = { x: -2, y: 84, z: -52 }, to = { x: -2, y: 84, z: -51 };
+  const verdict = afterStep(activity, step, fail('PATH_NOT_FOUND', '通道在 (-2,84,-52) 和 (-2,84,-51) 之间断开，相距 1 格', {
+    position: { x: -2, y: 84, z: -52 }, connectionGap: { from, to, distance: 1, sameLevel: true, horizontal: 1, vertical: 0, note: '旧几何缺口' },
+  }), 445, adapter.state());
+  assert.equal(verdict.kind, 'stuck');
+  assert.match(verdict.why, /\(-2,84,-52\)/);
+  assert.match(verdict.why, /\(-2,84,-51\)/);
+  assert.match(verdict.why, /确定断口/);
+  assert.equal(activity.adaptations.filter((item) => item.startsWith('retry:')).length, 0, '确定断口不领取重试额度');
+});
+
+test('嵌套 use_skill 带回 connectionGap 时也按数据字段停止重试', () => {
+  const { adapter, activity } = activityOf([{ skill: 'use_skill', args: { name: 'mine-back-macro' } }]);
+  const step = nextStep(activity)!;
+  activity.stepStart = { pos: { x: 99, y: 64, z: 99 } };
+  const verdict = afterStep(activity, step, fail('PATH_NOT_FOUND', '技能「mine-back-macro」第 2 步 follow_passage 没成：通道断开', {
+    position: { x: -2, y: 84, z: -52 }, connectionGap: { from: { x: -2, y: 84, z: -52 }, to: { x: -2, y: 84, z: -51 }, distance: 1 },
+  }), 445, adapter.state());
+  assert.equal(verdict.kind, 'stuck');
+  assert.match(verdict.why, /确定断口/);
+  assert.equal(activity.adaptations.filter((item) => item.startsWith('retry:')).length, 0, '嵌套 follow_passage 也不原样重试');
+});
+
+test('clipFeedback 在极小上限下也不超过上限', () => {
+  for (const max of [0, 1, 3, 4, 5, 6]) {
+    const out = clipFeedback('abcdefghijklmnopqrstuvwxyz', max);
+    assert.ok(out.length <= max, `max=${max} 得到 ${out.length} 字：${out}`);
+  }
+});
+
+test('长失败反馈保留可执行尾部，短反馈保持原文', () => {
+  const tail = '→ dig_at {"at":[-1,2,0],"facing":"N"}';
+  const long = `${'前、上、右三格净空检查：脚下有支撑，前方两格是空气，'.repeat(14)}${tail}`;
+  assert.ok(long.length > 320);
+  const { adapter, activity } = activityOf([{ skill: 'excavate_path', args: { entry: 'current', mode: 'stairs', direction: 'east', steps: 3 } }]);
+  const step = nextStep(activity)!;
+  const verdict = afterStep(activity, step, fail('ERROR', long, { completedSteps: 0, excavatedBlocks: 0 }), 50, adapter.state());
+  assert.equal(verdict.kind, 'stuck');
+  assert.ok(verdict.why.includes('…'), '中间省略');
+  assert.ok(verdict.why.endsWith(tail), '尾部的可执行事实没有被切掉');
+  assert.ok(verdict.why.length <= 320, '截断后仍有长度上限');
+
+  const short = activityOf([{ skill: 'excavate_path', args: { entry: 'current', mode: 'stairs', direction: 'east', steps: 3 } }]);
+  const shortStep = nextStep(short.activity)!;
+  const shortVerdict = afterStep(short.activity, shortStep, fail('ERROR', '短消息', { completedSteps: 0, excavatedBlocks: 0 }), 50, short.adapter.state());
+  assert.equal(shortVerdict.kind, 'stuck');
+  assert.equal(shortVerdict.why, '短消息');
+});
+
+test('current_activity 的最近结果也保留可执行尾巴', () => {
+  const tail = '→ dig_at {"at":[-1,2,0],"facing":"N"}';
+  const long = `${'前、上、右三格净空检查：脚下有支撑，前方两格是空气，'.repeat(14)}${tail}`;
+  const { adapter, activity } = activityOf([{ skill: 'excavate_path', args: { entry: 'current', mode: 'stairs', direction: 'east', steps: 3 } }]);
+  const step = nextStep(activity)!;
+  afterStep(activity, step, fail('ERROR', long, { completedSteps: 0, excavatedBlocks: 0 }), 50, adapter.state());
+  const recent = describeActivity(activity, adapter.state()).recent[0];
+  assert.ok(recent.endsWith(tail), `最近结果应保留尾部动作：${recent}`);
 });
 
 test('climb_up 采纳自动续跑的绝对期限：到期后不再执行', async () => {

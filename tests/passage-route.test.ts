@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { MoveTarget, Vec3Like } from '../src/adapter/types.ts';
-import { passageDeepestAnchor, passageNext, passageRoute, passageSurfaceAnchor } from '../src/memory/passages.ts';
+import { passageDeepestAnchor, passageGraph, passageNext, passageRoute, passageSurfaceAnchor } from '../src/memory/passages.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { followPassage, goTo } from '../src/skills/movement.ts';
 import { AbortedError } from '../src/util.ts';
@@ -30,6 +30,47 @@ test('有 links 的通道：路由只沿真实走过的边，不因 ≤3.5 而�
   // (0,40,0) 和 (3,40,0) 直线相距 3（≤ link=3.5），但没走过这条边：路由应沿 0→1→2→3，不抄近道
   const r = passageRoute([rec], { x: 0, y: 40, z: 0 }, { x: 3, y: 40, z: 0 });
   assert.deepEqual(r!.map((p) => `${p.x},${p.z}`), ['0,0', '1,0', '2,0', '3,0']);
+});
+
+/** 图里从任意一个点出发能走到的节点数；等于总节点数说明只有一个连通分量。 */
+const connected = (recs: Parameters<typeof passageGraph>[0]) => {
+  const { nodes, edges } = passageGraph(recs);
+  const seen = new Set<number>([0]);
+  const stack = [0];
+  while (stack.length) {
+    const u = stack.pop()!;
+    for (const v of edges.get(u) ?? []) if (!seen.has(v)) { seen.add(v); stack.push(v); }
+  }
+  return seen.size === nodes.length;
+};
+
+test('旧记录漏了一步：同一条 record 里正交相邻的两个脚点补上边，路线跨过 1 格缺口', () => {
+  // 现场 psg_la3ozu 的形状：一条 record 的三段 links，(-2,84,-51) 与 (-2,84,-52) 之间漏了那一步
+  const rec = {
+    path: [] as Vec3Like[],
+    links: [
+      { a: { x: -2, y: 84, z: -51 }, b: { x: -2, y: 84, z: -50 } },
+      { a: { x: -3, y: 84, z: -48 }, b: { x: -2, y: 84, z: -49 } },
+      { a: { x: -2, y: 84, z: -52 }, b: { x: -2, y: 84, z: -53 } },
+    ],
+  };
+  assert.equal(connected([rec]), true, '补上相邻缺口后是一条连通的道');
+  const route = passageRoute([rec], { x: -0.3, y: 82, z: -54.5 }, { x: -2, y: 84, z: -51 });
+  assert.deepEqual(route?.map((p) => `${p.x},${p.y},${p.z}`), ['-2,84,-53', '-2,84,-52', '-2,84,-51'], '路线跨过 (-2,84,-51)-(-2,84,-52)');
+});
+
+test('同一条 record 只补正交的 1 格缺口：2 格缺口和斜角缺口都不连', () => {
+  const rec = (links: { a: Vec3Like; b: Vec3Like }[]) => ({ path: [] as Vec3Like[], links });
+  const gap2 = rec([
+    { a: { x: 0, y: 40, z: 0 }, b: { x: 1, y: 40, z: 0 } },
+    { a: { x: 3, y: 40, z: 0 }, b: { x: 4, y: 40, z: 0 } },
+  ]);
+  assert.equal(connected([gap2]), false, '隔 2 格不补');
+  const diagonal = rec([
+    { a: { x: 0, y: 40, z: 0 }, b: { x: 1, y: 40, z: 0 } },
+    { a: { x: 2, y: 40, z: 1 }, b: { x: 2, y: 40, z: 2 } },
+  ]);
+  assert.equal(connected([diagonal]), false, '斜角缺口不补');
 });
 
 test('goto does not detour through historical passage points to reach a nearby lower target', async (t) => {

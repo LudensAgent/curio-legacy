@@ -16,7 +16,7 @@ import { causeName } from '../brain/habits.ts';
 import { consumptionSummary } from '../brain/supply.ts';
 import { pickFuel } from '../skills/economy.ts';
 import { pickVariant } from '../skills/work.ts';
-import { afterStep, argsLabel, beginStep, markContinuation, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, nextStep, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
+import { afterStep, argsLabel, beginStep, clipFeedback, markContinuation, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, nextStep, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
 import { relativeCellAction } from '../skills/stance.ts';
 import { instinctNote, type BehaviorEngine } from './behaviors.ts';
 import { recallLocal } from './recall.ts';
@@ -105,7 +105,7 @@ export function failureFor(step: { skill: string; args?: unknown }, result: { fa
   const blockTarget = d.blockTarget && typeof d.blockTarget === 'object' ? d.blockTarget as Record<string, unknown> : {};
   const target = worldPoint(d.resolvedTarget) ?? worldPoint(d.targetCell) ?? worldPoint(d.target) ?? worldPoint(blockTarget.pos) ?? (step.skill === 'dig' ? worldPoint(d.pos) : undefined);
   return {
-    skill: step.skill, args: step.args ?? {}, code: result.failureCode ?? null, summary: result.summary.slice(0, 160),
+    skill: step.skill, args: step.args ?? {}, code: result.failureCode ?? null, summary: clipFeedback(result.summary),
     ...(target ? { target, coordinateFrame: 'world' } : {}),
     ...(Number.isSafeInteger(d.targetId ?? d.entityId) ? { entityId: Number(d.targetId ?? d.entityId) } : {}),
     position: worldPoint(d.position) ?? { ...pos },
@@ -783,7 +783,7 @@ export class Mind {
     if (a.kind === 'rest') this.d.self.feel({ type: 'rest', seconds: record.durationSec });
     const exp = this.d.self.experimentFor(a.id);
     if (exp?.status === 'running') this.d.self.concludeExperiment(exp.id, 'unclear', `${outcome}：${summary}；得到 ${JSON.stringify(record.gained)}`);
-    if (outcome === 'stuck') this.lastStuck = { what: a.what, why: summary.slice(0, 100), pos: { ...state.pos }, at: Date.now(), ...(failed ? { skill: failed.skill, code: failed.failureCode } : {}) };
+    if (outcome === 'stuck') this.lastStuck = { what: a.what, why: clipFeedback(summary, 240), pos: { ...state.pos }, at: Date.now(), ...(failed ? { skill: failed.skill, code: failed.failureCode } : {}) };
     else if (outcome === 'done' && record.completion !== 'condition' && this.lastStuck && Date.now() - this.lastStuck.at < 8 * 60_000
       && Math.hypot(state.pos.x - this.lastStuck.pos.x, state.pos.y - this.lastStuck.pos.y, state.pos.z - this.lastStuck.pos.z) <= 24 && a.what !== this.lastStuck.what) {
       this.learnFrom = { stuck: this.lastStuck, solved: { what: a.what, routine: a.steps.slice(0, 6).map((st) => `${st.skill} ${argsLabel(st)}`) } };
@@ -899,7 +899,7 @@ export class Mind {
     if (result.status === 'failed' && !observationMiss) {
       this.lastFailure = { skill: step.skill, code: result.failureCode, summary: result.summary };
       const failedState = this.d.adapter.state();
-      this.recentActionFailures.push({ step: structuredClone(step), code: result.failureCode ?? null, summary: result.summary.slice(0, 240),
+      this.recentActionFailures.push({ step: structuredClone(step), code: result.failureCode ?? null, summary: clipFeedback(result.summary),
         pos: { ...failedState.pos }, worldId: failedState.worldId, sessionId: failedState.sessionId, dim: failedState.dim, at: Date.now() });
       this.recentActionFailures = this.recentActionFailures.filter((f) => Date.now() - f.at < Mind.SAME_FAIL_MS).slice(-30);
       this.pruneFailures();
@@ -909,7 +909,7 @@ export class Mind {
       this.failuresByTarget.set(key, entry);
       const sig = exactSig(step), why = reasonKey(result.summary), prev = this.sameFails.get(sig);
       const same = prev && prev.code === String(result.failureCode ?? '') && prev.why === why && Date.now() - prev.last < Mind.SAME_FAIL_MS;
-      this.sameFails.set(sig, { n: same ? prev!.n + 1 : 1, last: Date.now(), code: String(result.failureCode ?? ''), why, summary: result.summary.slice(0, 120) });
+      this.sameFails.set(sig, { n: same ? prev!.n + 1 : 1, last: Date.now(), code: String(result.failureCode ?? ''), why, summary: clipFeedback(result.summary, 200) });
     } else if (result.status === 'succeeded') {
       this.sameFails.delete(exactSig(step));
       if (result.caveat) {
@@ -999,7 +999,7 @@ export class Mind {
     // 没有别的办法：别白白重做那一步，直接把它原来的失败交给心智
     if (retry && retry.skill === failure.skill) a.steps.splice(a.index, 1);
     this.d.bus.publish('body_adapt', 'P3', `${why}，没有别的学会的做法，交给心智`, { planId: a.id, skill: name });
-    this.finishActivity('stuck', `${failure.skill} 没成：${String(failure.summary ?? '').slice(0, 140)}；${why}：${result.summary.slice(0, 140)}`);
+    this.finishActivity('stuck', `${failure.skill} 没成：${clipFeedback(String(failure.summary ?? ''), 200)}；${why}：${clipFeedback(result.summary, 200)}`);
     return true;
   }
 

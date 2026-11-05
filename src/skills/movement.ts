@@ -9,7 +9,7 @@ import type { EntityInfo, Vec3Like } from '../adapter/types.ts';
 import { feetCell } from '../perception/local.ts';
 import { cancelledNav, clampInt, codeFromError, fail, isAbort, navReceipt, obj, ok, type FailureCode, type NavOutcome, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 import { HEADING_TARGET, MAX_HEADING_DISTANCE, planTravel } from './overland.ts';
-import { passageDeepestAnchor, passageNearestNode, passageRoute, passageSurfaceAnchor } from '../memory/passages.ts';
+import { passageDeepestAnchor, passageGraph, passageNearestNode, passageRoute, passageSurfaceAnchor } from '../memory/passages.ts';
 
 // ------------------------------------------------------------------ 寻找与张望（人眼式：不透视，只是转头看）
 /** 朝 (dx,dz) 方向的 yaw（0 = 北/-Z，正值向左/西） */
@@ -591,10 +591,10 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
 }
 
 // ------------------------------------------------------------------ follow_passage
-/** 沿自己记下的旧矿道（把全部通道连成网的脚点）逐段走：entrance 回地表入口，deepest 下到最深处。 */
+/** 沿自己记下的旧矿道（把全部通道连成网的脚点）逐段走：entrance 回记录入口（不一定是传送门/基地），deepest 下到最深处。 */
 export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig?: boolean }> = {
   name: 'follow_passage',
-  description: '沿自己记下的旧矿道（全部通道连成网的脚点）逐段走：to:"entrance" 回地表入口，to:"deepest" 下到最深处；可选 id 只选一条已知通道（含历史归档），不选则走全部记录连成的网。每段用步行寻路，dig:true 才允许挖开挡路、垫方块；走不通就停在原地并说明走到第几段、离目标还差多少，接不上时给出 connectionGap 两端。完成条件：走完记录脚点后离入口/最深处锚点三维 ≤2 格才算 arrived；后端 pathfinder_waypoints；只认 to、id 与 dig，不提供 place/tower 施工权限',
+  description: '沿旧矿道回记录入口（不一定是传送门/基地）；to:"entrance" 是当前连通分量里最高的记录入口锚点，要找特定传送门/基地用 goto 或 travel_portal；to:"deepest" 下到最深处；可选 id 只选一条已知通道（含历史归档），不选则走全部记录连成的网。每段用步行寻路，dig:true 才允许挖开挡路、垫方块；走不通就停在原地并说明走到第几段、离目标还差多少，接不上时给出 connectionGap 两端。完成条件：走完记录脚点后离入口/最深处锚点三维 ≤2 格才算 arrived；后端 pathfinder_waypoints；只认 to、id 与 dig，不提供 place/tower 施工权限',
   argsDoc: '{"to":"entrance"|"deepest", "id"?:string, "dig"?:boolean}',
   timeoutMs: 600000,
   movement: true,
@@ -641,6 +641,11 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
       target = back ? passageSurfaceAnchor(recs, here) : passageDeepestAnchor(recs, here);
       if (!target) return receipt(fail('NOT_FOUND', '旧矿道里没有可用的目标点'));
       resolved = target;
+      const anchor = `(${Math.round(target.x)},${Math.round(target.y)},${Math.round(target.z)})`;
+      // 一开始就把解析到的记录锚点亮出来：entrance 只是记下的入口，不一定是 agent 想去的传送门/基地。
+      ctx.progress(0, back
+        ? `目标：记录的通道地表入口锚点 ${anchor}（是记下的入口，不一定是想去的传送门/基地；指定目标请用 goto 或 travel_portal）`
+        : `目标：记录的通道最深处锚点 ${anchor}`);
       const kind = recs.some((r) => r.kind === 'dug') ? '挖过的旧矿道' : recs.some((r) => r.kind === 'bridge') ? '我搭的桥' : '走过的路';
       const allowDig = !!args.dig;
       const terrainPermission = { ...(allowDig ? { allowTerrainChanges: true } : {}), allowPlace: allowDig, allowTower: allowDig };
@@ -665,21 +670,65 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
         route = passageRoute(recs, start, target, { near: 6 });
         if (!route || route.length < 2) {
           const tgtNode = passageNearestNode(recs, target);
-          const tgtStr = tgtNode ? `(${Math.round(tgtNode.x)},${Math.round(tgtNode.y)},${Math.round(tgtNode.z)})` : '未知位置';
-          const gap = tgtNode ? Math.round(dist3(start, tgtNode)) : null;
-          const connectionGap = tgtNode ? {
-            from: { x: start.x, y: start.y, z: start.z },
-            to: { x: tgtNode.x, y: tgtNode.y, z: tgtNode.z },
-            distance: dist3(start, tgtNode),
-            sameLevel: Math.abs(start.y - tgtNode.y) <= 0.01,
-            horizontal: Math.hypot(start.x - tgtNode.x, start.z - tgtNode.z),
-            vertical: Math.abs(start.y - tgtNode.y),
+          const at = (p: Vec3Like) => `(${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)})`;
+          // 「agent 离最近脚点的距离」不是通道断口：按连通分量找实际最近的跨分量节点对。
+          const graph = passageGraph(recs);
+          const nearestIndex = (p: Vec3Like) => {
+            let best = -1, bd = Infinity;
+            graph.nodes.forEach((q, i) => { const d = dist3(q, p); if (d < bd) { bd = d; best = i; } });
+            return best;
+          };
+          const componentOf = (index: number) => {
+            const seen = new Set<number>([index]);
+            const stack = [index];
+            while (stack.length) for (const v of graph.edges.get(stack.pop()!) ?? []) if (!seen.has(v)) { seen.add(v); stack.push(v); }
+            return seen;
+          };
+          const startNode = nearestIndex(start), targetNode = nearestIndex(target);
+          // 空图或没有可用节点时不做分量比较，回退到简单说明，也不伪造 connectionGap。
+          const comparable = startNode >= 0 && targetNode >= 0;
+          let pair: { from: Vec3Like; to: Vec3Like } | null = null;
+          if (comparable) {
+            const startComp = componentOf(startNode);
+            const targetComp = componentOf(targetNode);
+            // 同一分量（只是锚点自身离脚点 >6 格）时 pair 保持 null，下面按 start→最近脚点说明。
+            if ([...startComp].every((i) => !targetComp.has(i))) {
+              let bd = Infinity;
+              for (const i of startComp) for (const j of targetComp) {
+                const d = dist3(graph.nodes[i]!, graph.nodes[j]!);
+                if (d < bd) { bd = d; pair = { from: graph.nodes[i]!, to: graph.nodes[j]! }; }
+              }
+            }
+          }
+          const from = pair?.from ?? start;
+          const to = pair?.to ?? tgtNode;
+          const horizontal = to ? Math.hypot(from.x - to.x, from.z - to.z) : null;
+          const vertical = to ? Math.abs(from.y - to.y) : null;
+          const gapDistance = to && horizontal !== null && vertical !== null ? Math.hypot(horizontal, vertical) : null;
+          // 只有找到真实的跨分量节点对时才报 connectionGap；同分量回退里的 from=start 仍是走动距离，
+          // 不能当成确定断口去压掉可能有用的重试。
+          const connectionGap = pair && to && gapDistance !== null ? {
+            from: { x: from.x, y: from.y, z: from.z },
+            to: { x: to.x, y: to.y, z: to.z },
+            distance: gapDistance,
+            sameLevel: vertical! <= 0.01,
+            horizontal: horizontal!,
+            vertical: vertical!,
             note: '两段旧几何之间没有已记录的实际连接；这是缺口端点，不是自动补边或当前可通行证明',
           } : null;
-          return receipt(fail('PATH_NOT_FOUND', `到了脚点 (${np}) 附近，但仍连不到${back ? '地表入口' : '最深处'}：离${goal}最近的旧矿道脚点在 ${tgtStr}，从你脚下直线约 ${gap ?? '未知'} 格（通道在这中间断开；可朝它垫/挖过去接上，或改走别的路）`, { position: start, ...(connectionGap ? { connectionGap } : {}) }));
+          // 缺口 ≤2 格时只说明可用的基础动作，补/不补由 agent 决定；不自动挖、不自动放。
+          const joinHint = pair
+            ? gapDistance! <= 2
+              ? '；这两格之间没有已记录的连接，要接上可以自己 step / dig_at / place_at，或用 goto 选路（由你决定）'
+              : '；可朝断口垫/挖过去接上，或改走别的路（不会自动补边）'
+            : '；这是旧几何的现状，不会自动补边';
+          const why = pair && to && gapDistance !== null
+            ? `通道在 ${at(from)} 和 ${at(to)} 之间断开，相距 ${Math.round(gapDistance)} 格（水平 ${Math.round(horizontal!)}、垂直 ${Math.round(vertical!)}），仍连不到${goal}${joinHint}`
+            : `到了脚点 (${np}) 附近，但仍连不到${goal}：${tgtNode ? `离${goal}锚点最近的旧矿道脚点在 ${at(tgtNode)}，锚点本身接不上一条可走的路` : '没有可用的目标脚点'}${joinHint}`;
+          return receipt(fail('PATH_NOT_FOUND', why, { position: start, ...(connectionGap ? { connectionGap } : {}) }));
         }
       }
-      ctx.progress(0, `沿${kind}${back ? '回入口' : '下最深'}，共 ${route.length} 段`);
+      ctx.progress(0, `沿${kind}${back ? `回记录入口 ${anchor}` : `下最深 ${anchor}`}，共 ${route.length} 段`);
       let last = start;
       for (let i = 0; i < route.length; i++) {
         throwIfAborted(signal);
