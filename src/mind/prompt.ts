@@ -638,7 +638,7 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
       return `${name}×${count}${/_sapling$/.test(name) ? '（可种）' : ''}${it?.stackSize ? `（每叠上限 ${it.stackSize}${multi}${stacks}）` : ''}${durabilityText(it)}${it?.enchanted ? '（附魔）' : ''}`;
     }), empty_slots: `${s.emptySlots} 个空槽（每槽放一叠，不是一件）`,
     ...(wearables.length ? { wearables_in_backpack: `背包里的护甲/盾（穿到对应槽才生效）：${wearables.join('；')}` } : {}),
-    ...(mergeable.length ? { mergeable_gear: `${mergeable.join('；')}。同名同材质装备可在工作台两两合成一件（耐久相加再加满耐久的 5%，普通附魔会被移除）；穿在身上的那件不在背包里，不能直接放进合成格。` } : {}),
+    ...(mergeable.length ? { mergeable_gear: `${mergeable.join('；')}。同名同材质装备可在工作台/砂轮合成修理：结果耐久 = min(满耐久, 两件耐久之和 + 满耐久5%)；铁砧是 +满耐久12%（耗经验、保留普通附魔）。两件耐久之和超过满耐久时，多出的耐久会被丢掉、合计耐久反而下降，只换来一个空槽；合不合由你定。穿在身上的那件不在背包里，不能直接放进合成格。` } : {}),
     // 精确账本的总表（箱子+背包合计）：供"物资充足/稀缺"量化；箱子部分是最后打开时记的，之后世界可能变化
     ...(p.storage?.stock?.length ? { stored_stock: `${p.storage.stored}；以上是「箱子+背包」合计，按最后一次打开各箱子时记录（之后世界可能变化，重新打开才更新）` } : {}),
     ...(s.connected && s.emptySlots <= 5 ? { inventory_space: s.emptySlots > 0

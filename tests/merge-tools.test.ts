@@ -6,18 +6,35 @@ import { mergeTools } from '../src/skills/merge.ts';
 import { validateSkill } from '../src/skills/types.ts';
 import { TestWorld, makeCtx } from './survival-helpers.ts';
 
-/** 模拟合并：ops 含 put 和 take 时，把对应工具的把数减一（两把 → 一把） */
+const MAX: Record<string, number> = { iron_pickaxe: 250, stone_pickaxe: 131 };
+const maxOf = (name: string) => MAX[name] ?? 100;
+
+/** 模拟合并：按 sourceSlot 取两件，按工作台规则（两件之和 + 满耐久5%）算产物；把数两把 → 一把 */
 class MergeWorld extends TestWorld {
   mergeCalls = 0;
+  gears: { name: string; left: number; slot: number }[] = [];
+  add(name: string, left: number) {
+    const slot = Array.from({ length: 36 }, (_, i) => 9 + i).find((s) => !this.gears.some((g) => g.slot === s))!;
+    this.gears.push({ name, left, slot });
+    this.inv.set(name, (this.inv.get(name) ?? 0) + 1);
+  }
+  inventorySlots() {
+    return this.gears.map((g) => ({ slot: g.slot, name: g.name, count: 1, durability: { left: g.left, max: maxOf(g.name) } }));
+  }
   async useGui(_target: GuiTarget, ops: GuiOp[], signal: AbortSignal): Promise<GuiResult> {
     throwIfAborted(signal);
-    const put = ops.find((o): o is Extract<GuiOp, { put: unknown }> => 'put' in o);
-    const take = ops.find((o): o is Extract<GuiOp, { take: unknown }> => 'take' in o);
-    if (!put || !take) return { ok: false, reason: 'NO_MERGE_OPS', done: [] };
-    const item = put.put.item;
-    this.inv.set(item, (this.inv.get(item) ?? 0) - 1);
+    const puts = ops.filter((o): o is Extract<GuiOp, { put: unknown }> => 'put' in o);
+    const take = ops.find((o) => 'take' in o);
+    if (puts.length !== 2 || !take) return { ok: false, reason: 'NO_MERGE_OPS', done: [] };
+    const picked = puts.map((o) => this.gears.find((g) => g.name === o.put.item && g.slot === o.put.sourceSlot! - 1));
+    if (picked.some((g) => !g)) return { ok: false, reason: 'NO_ITEM', done: [] };
+    const [a, b] = picked as { name: string; left: number; slot: number }[];
+    this.gears = this.gears.filter((g) => g !== a && g !== b);
+    const max = maxOf(a.name);
+    this.gears.push({ name: a.name, left: Math.min(max, a.left + b.left + Math.floor(max * 5 / 100)), slot: a.slot });
+    this.inv.set(a.name, (this.inv.get(a.name) ?? 0) - 1);
     this.mergeCalls++;
-    return { ok: true, done: [`merge:${item}`] };
+    return { ok: true, done: [`merge:${a.name}`] };
   }
 }
 
@@ -41,7 +58,9 @@ test('validate 解析 station 默认值、别名和 count 上限', () => {
 
 test('三把同名工具合并到只剩一把', async () => {
   const world = new MergeWorld();
-  world.inv.set('iron_pickaxe', 3);
+  world.add('iron_pickaxe', 50);
+  world.add('iron_pickaxe', 40);
+  world.add('iron_pickaxe', 30);
   world.setBlock({ x: 1, y: 64, z: 0 }, 'crafting_table');
   const r = await mergeTools.run(makeCtx(world), { item: 'iron_pickaxe', station: 'crafting_table', count: 1 });
   assert.equal(r.status, 'succeeded');
@@ -53,7 +72,7 @@ test('三把同名工具合并到只剩一把', async () => {
 
 test('保留多把时合并到指定把数', async () => {
   const world = new MergeWorld();
-  world.inv.set('stone_pickaxe', 5);
+  [10, 15, 20, 25, 30].forEach((left) => world.add('stone_pickaxe', left));
   world.setBlock({ x: 1, y: 64, z: 0 }, 'crafting_table');
   const r = await mergeTools.run(makeCtx(world), { item: 'stone_pickaxe', station: 'crafting_table', count: 2 });
   assert.equal(r.status, 'succeeded');

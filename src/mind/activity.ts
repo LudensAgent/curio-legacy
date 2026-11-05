@@ -270,12 +270,12 @@ export function remainingSteps(a: Activity): number {
 }
 
 /** 顺手的步骤遇到这些失败，再做几轮也一样：直接从这段活里去掉 */
-const OPTIONAL_HOPELESS = new Set(['TARGET_GONE', 'BAD_ARGS', 'UNKNOWN_ITEM', 'WRONG_DIMENSION']);
+const OPTIONAL_HOPELESS = new Set(['TARGET_GONE', 'BAD_ARGS', 'UNKNOWN_ITEM', 'WRONG_DIMENSION', 'WOULD_WASTE']);
 
 /** 失败了值得原样再试一次的情况（路被挡、东西跑了、偶发错误） */
 const RETRYABLE = new Set(['TIMEOUT', 'STUCK', 'PATH_NOT_FOUND', 'TARGET_GONE', 'ERROR', 'EFFECT_NOT_CONFIRMED']);
 /** 不想清楚就没法继续的失败（缺材料、缺工具、背包满…） */
-const NEEDS_THOUGHT = new Set(['MISSING_MATERIALS', 'NO_CRAFTING_TABLE', 'TOOL_MISSING', 'UNKNOWN_ITEM', 'BAD_ARGS', 'INVENTORY_FULL', 'NO_FOOD', 'WRONG_DIMENSION', 'LOW_HP']);
+const NEEDS_THOUGHT = new Set(['MISSING_MATERIALS', 'WOULD_WASTE', 'NO_CRAFTING_TABLE', 'TOOL_MISSING', 'UNKNOWN_ITEM', 'BAD_ARGS', 'INVENTORY_FULL', 'NO_FOOD', 'WRONG_DIMENSION', 'LOW_HP']);
 
 export type StepVerdict =
   | { kind: 'continue'; adapted?: string }
