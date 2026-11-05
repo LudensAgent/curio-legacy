@@ -610,10 +610,10 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
 
 // ------------------------------------------------------------------ follow_passage
 /** 沿自己记下的旧矿道（把全部通道连成网的脚点）逐段走：entrance 回地表入口，deepest 下到最深处。 */
-export const followPassage: Skill<{ to: 'entrance' | 'deepest'; dig?: boolean }> = {
+export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig?: boolean }> = {
   name: 'follow_passage',
-  description: '沿自己记下的旧矿道（全部通道连成网的脚点）逐段走：to:"entrance" 回地表入口，to:"deepest" 下到最深处。每段用步行寻路，dig:true 才允许挖开挡路、垫方块；走不通就停在原地并说明走到第几段、离目标还差多少。完成条件：走完记录脚点后离入口/最深处锚点三维 ≤2 格才算 arrived；后端 pathfinder_waypoints；只认 to 与 dig，不提供 place/tower 施工权限',
-  argsDoc: '{"to":"entrance"|"deepest", "dig"?:boolean}',
+  description: '沿自己记下的旧矿道（全部通道连成网的脚点）逐段走：to:"entrance" 回地表入口，to:"deepest" 下到最深处；可选 id 只选一条已知通道（含历史归档），不选则走全部记录连成的网。每段用步行寻路，dig:true 才允许挖开挡路、垫方块；走不通就停在原地并说明走到第几段、离目标还差多少，接不上时给出 connectionGap 两端。完成条件：走完记录脚点后离入口/最深处锚点三维 ≤2 格才算 arrived；后端 pathfinder_waypoints；只认 to、id 与 dig，不提供 place/tower 施工权限',
+  argsDoc: '{"to":"entrance"|"deepest", "id"?:string, "dig"?:boolean}',
   timeoutMs: 600000,
   movement: true,
   outcomeBoundary: true,
@@ -621,14 +621,15 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; dig?: boolean }>
     const a = obj(raw);
     const to = a.to === 'deepest' ? 'deepest' : a.to === 'entrance' ? 'entrance' : null;
     if (!to) return { ok: false, error: 'to 必须是 entrance（回入口）或 deepest（下最深）' };
+    if (a.id !== undefined && (typeof a.id !== 'string' || !/^[a-zA-Z0-9:_-]{1,100}$/.test(a.id))) return { ok: false, error: 'id 需要一条已知通道的非空 ID（可用 query passages 查看）' };
     if (a.dig !== undefined && typeof a.dig !== 'boolean') return { ok: false, error: 'dig 需要布尔值' };
     for (const flag of ['place', 'tower'] as const) if (a[flag] !== undefined) return { ok: false, error: `follow_passage 不认 ${flag}：这条入口只有 dig:true 授权沿旧矿道挖开阻挡/垫方块；要单独放置用 place_at，要搭柱用 climb_up` };
-    return { ok: true, args: { to, ...(a.dig === true ? { dig: true } : {}) } };
+    return { ok: true, args: { to, ...(typeof a.id === 'string' ? { id: a.id } : {}), ...(a.dig === true ? { dig: true } : {}) } };
   },
   async run(ctx, args) {
     const { adapter, memory, signal } = ctx;
     // 指定历史路线保留原请求与后端；失败时不改用 goto/travel 的另一条路线。
-    const request = { to: args.to, ...(args.dig ? { dig: true } : {}) };
+    const request = { to: args.to, ...(args.id ? { id: args.id } : {}), ...(args.dig ? { dig: true } : {}) };
     const trace: Vec3Like[] = [];
     let resolved: Vec3Like | null = null, target: Vec3Like | null = null;
     const outcome = (r: SkillResult): NavOutcome => r.status === 'succeeded' ? (r.data?.arrived === true ? 'ARRIVED' : 'PARTIAL')
@@ -650,9 +651,10 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; dig?: boolean }>
       trace.push({ ...s.pos });
       if (!s.connected) return receipt(fail('NOT_CONNECTED', '未连接'));
       const here = { x: s.pos.x, y: s.pos.y, z: s.pos.z };
-      const recs = memory.allPassages(s.dim).filter((r) => !r.worldId || r.worldId === s.worldId);
+      const allRecs = memory.allPassages(s.dim).filter((r) => !r.worldId || r.worldId === s.worldId);
+      const recs = args.id ? allRecs.filter((r) => r.id === args.id) : allRecs;
       const archivedCount = recs.filter((r) => r.archivedAt !== undefined).length;
-      if (!recs.length) return receipt(fail('NOT_FOUND', '没有记下的旧矿道；要先下矿走过/挖过一段，或改用 goto / excavate_path'));
+      if (!recs.length) return receipt(fail('NOT_FOUND', args.id ? `没有找到通道 ${args.id}；用 query passages 核对 ID，或省略 id 走全部旧矿道` : '没有记下的旧矿道；要先下矿走过/挖过一段，或改用 goto / excavate_path'));
       const back = args.to === 'entrance';
       target = back ? passageSurfaceAnchor(recs, here) : passageDeepestAnchor(recs, here);
       if (!target) return receipt(fail('NOT_FOUND', '旧矿道里没有可用的目标点'));

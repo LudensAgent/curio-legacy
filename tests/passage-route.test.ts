@@ -123,11 +123,15 @@ test('follow_passage can follow a record that has moved to the historical archiv
   t.mock.method(w, 'moveTo', async (goal: MoveTarget) => {
     if (goal.kind === 'near') { visited.push(goal.pos); w.pos = { x: goal.pos.x, y: goal.pos.y, z: goal.pos.z }; }
   });
-  const result = await followPassage.run(ctx, { to: 'entrance' });
+  const result = await followPassage.run(ctx, { to: 'entrance', id: 'old-mine' });
   assert.equal(result.status, 'succeeded', result.summary);
   assert.deepEqual(visited[visited.length - 1], { x: 8, y: 40, z: 0 });
   assert.equal(result.data?.archivedCount, 1);
   assert.match(result.summary, /历史归档/);
+  const missing = await followPassage.run(ctx, { to: 'entrance', id: 'missing' });
+  assert.equal(missing.status, 'failed');
+  assert.equal(missing.failureCode, 'NOT_FOUND');
+  assert.match(missing.summary, /没有找到通道 missing/);
 });
 
 test('follow_passage 离矿道远时先走到最近脚点接回网里，再沿路由走', async (t) => {
