@@ -27,9 +27,14 @@ export type StateAt = (pos: Vec3Like) => ObservedState | null;
 
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 const REPLACEABLE = new Set(['air', 'cave_air', 'void_air', 'water', 'lava', 'bubble_column']);
+/** 原版放置时可被方块替换的地面植物与火：1.20.1 的草、花、树苗、蘑菇、枯灌木等。 */
+const REPLACEABLE_PLANT = /^(short_grass|grass|tall_grass|fern|large_fern|dead_bush|dandelion|poppy|blue_orchid|allium|azure_bluet|red_tulip|orange_tulip|white_tulip|pink_tulip|oxeye_daisy|cornflower|lily_of_the_valley|wither_rose|torchflower|pitcher_plant|.*_sapling|mangrove_propagule|.*_mushroom|fire|soul_fire)$/;
 
-/** 放方块时这一格能否被替换：只有空气和流体可以；火把、雪层、地毯、半砖、门等都算已占用。 */
-export const isReplaceable = (name: string): boolean => REPLACEABLE.has(name);
+/**
+ * 放方块时这一格能否被替换：空气、流体，以及原版可被方块直接替换的地面植物/火。
+ * 火把、雪层、地毯、半砖、门等沿用 WP3 的“已占用”口径，不在这里放宽。
+ */
+export const isReplaceable = (name: string): boolean => REPLACEABLE.has(name) || REPLACEABLE_PLANT.test(name);
 
 /** 打开的（非铁）门可以让身体通过；关闭或状态未知的门按碰撞形状处理。 */
 export const isPassableDoor = (name: string, properties: BlockProps = {}): boolean =>

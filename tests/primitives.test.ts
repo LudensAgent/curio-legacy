@@ -7,7 +7,7 @@ import { dig } from '../src/skills/body.ts';
 import { makeBridge } from '../src/codeskills/bridge.ts';
 import { afterStep, createActivity, nextStep } from '../src/mind/activity.ts';
 import { FakeAdapter } from './fake-adapter.ts';
-import { makeCtx, observeAllBlocks } from './survival-helpers.ts';
+import { makeCtx, observeAllBlocks, TestWorld } from './survival-helpers.ts';
 
 /** 地下 60 层挖出一个刚够站人的小空腔 */
 function pocket() {
@@ -445,6 +445,29 @@ test('place_at separates torch, snow, carpet, slab and door occupancy instead of
     assert.match(r.summary, /占据/, name);
     assert.equal(w.inv.get('dirt'), 1, `${name} 没有消耗材料`);
     assert.deepEqual(w.actions, [], `${name} 没有放置动作`);
+  }
+});
+
+test('place_at replaces replaceable ground plants instead of reporting them as occupancy', async (t) => {
+  for (const name of ['grass', 'dandelion', 'oak_sapling', 'dead_bush']) {
+    const w = new TestWorld();
+    w.pos = { x: 0.5, y: 64, z: 0.5 };
+    w.setBlock({ x: 0, y: 64, z: -1 }, name);
+    w.inv.set('dirt', 1);
+    const ctx = makeCtx(w, { senses: { observeBlocks: observeAllBlocks(w) } });
+    t.after(() => ctx.memory.close());
+    t.mock.method(w, 'placeBlockAt', async (pos: Vec3Like, names: string[]) => {
+      const placed = names.find((n) => (w.inv.get(n) ?? 0) > 0)!;
+      w.setBlock(pos, 'air');
+      w.setBlock(pos, placed);
+      w.inv.set(placed, (w.inv.get(placed) ?? 1) - 1);
+      w.actions.push(`place:${placed}`);
+      return { ok: true };
+    });
+    const r = await placeAt.run(ctx, { at: [1, 0, 0], facing: 'N', item: 'dirt' });
+    assert.equal(r.status, 'succeeded', `${name}: ${r.summary}`);
+    assert.equal(w.blockAt({ x: 0, y: 64, z: -1 }), 'dirt', name);
+    assert.equal(w.inv.get('dirt'), 0, `${name}: 放置后消耗材料`);
   }
 });
 

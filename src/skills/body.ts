@@ -1,7 +1,7 @@
 import { DIRS } from '../perception/perception.ts';
 import { supportCell } from '../perception/local.ts';
 import { DIR_OFFSETS, dropBelow, isSoftBlock, LIQUID_BLOCKS, surroundings } from '../perception/surroundings.ts';
-import { supportTop } from '../perception/geometry.ts';
+import { footSurfaceY, supportTop, type StateAt } from '../perception/geometry.ts';
 import { dirOfYaw, interactiveName } from '../perception/vision.ts';
 import { isContainerLandmark } from '../memory/chest-memory.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
@@ -230,6 +230,13 @@ export const dig: Skill<DigArgs> = {
       const reasons = [...(dug.length ? [`已挖 ${dug.join('、')}`] : []), ...(moved > 0.01 ? [`实际位移 ${moved.toFixed(2)} 格`] : [])];
       return { verified: true, changed: reasons.length > 0, reasons };
     };
+    // 落点脚高按实际观察状态算；只有名字时属性未知，不能拿默认状态冒充。
+    const stateAt: StateAt = (pos) => {
+      const state = adapter.blockStateAt?.(pos);
+      if (state?.name) return state;
+      const name = adapter.blockAt(pos);
+      return name === null ? null : { name, properties: {} };
+    };
     try {
       if (args.dir === 'up') {
         const me = floor(adapter.state().pos);
@@ -260,11 +267,17 @@ export const dig: Skill<DigArgs> = {
           }
           const n = await breakCell(ctx, c, false, undefined, { allowWater: args.wet, allowLava: args.lava });
           if (n) dug.push(n);
-          // 落到 drop 格下方第一个实心落点的实际顶面：半砖/台阶按碰撞顶面（可为分数），不再只认整数脚格。
-          const landPos = { x: c.x, y: c.y - drop, z: c.z };
-          const landState = adapter.blockStateAt?.(landPos);
-          const landTop = landState ? supportTop(landState.name, landState.properties ?? {}) : null;
-          const expectedFoot = landTop !== null ? landPos.y + landTop : landPos.y + 1;
+          // 落到 drop 格下方第一个实心落点：脚高按落点脚格的实际支撑顶面算。
+          // 落点脚格可能还铺着地毯/雪/压力板等薄层（dropBelow 会跳过它们），
+          // 不能只用更下方实心块的顶面，否则会把 62.06 的实际脚高误判成 62.00。
+          const footCell = { x: c.x, y: c.y - drop + 1, z: c.z };
+          const surface = footSurfaceY(footCell, stateAt);
+          if (surface === null) {
+            const position = adapter.state().pos;
+            return fail('NOT_FOUND', `已挖掉 ${dug.length} 格，确认到达下一级 ${walked} 次；落点脚格 (${footCell.x},${footCell.y},${footCell.z}) 的支撑面未确认，未继续移动`,
+              { dug, walked, targetCell: c, drop, position: { ...position }, effectEvidence: effectEvidence(position) });
+          }
+          const expectedFoot = surface;
           let moveError: unknown;
           try { await adapter.moveTo({ kind: 'xyz', x: c.x, y: expectedFoot, z: c.z }, { signal, timeoutMs: 4000 }); }
           catch (e) { if (isAbort(e)) throw e; moveError = e; }
