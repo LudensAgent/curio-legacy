@@ -1,0 +1,19 @@
+{
+  "package": {
+    "name": "curio-minecraft-3d-memory",
+    "version": "0.8.2"
+  },
+  "sourceHEAD": "1dce396b86ad5732928e896881ab48fb7d041ad8",
+  "artifactSHA256": "0659926d5e564377171cfcb4ad023f1bab27238ad82a2f9f6494d88a0e73349a",
+  "npmIntegrity": "sha512-C38mO57iqjAqA44tMWQ6TaO+EKkE/YO+IzmQDYmkSrZZQVMQEG0KOYEfLr5QTYxIbR2YddG5HbYeoj/XzAhunA==",
+  "sourceBinding": {
+    "clean": true,
+    "head": "1dce396b86ad5732928e896881ab48fb7d041ad8"
+  },
+  "checks": {
+    "build": "PASS",
+    "tests": "837 passed (837); 3 acceptance/*.test.mjs load noise is pre-existing",
+    "typecheck": "PASS (exit 0)",
+    "consumer": "fresh install; runtime import root 36 exports + water 2; strict NodeNext typecheck PASS"
+  }
+}
