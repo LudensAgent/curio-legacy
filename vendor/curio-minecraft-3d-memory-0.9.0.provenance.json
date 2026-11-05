@@ -6,6 +6,10 @@
   "sourceHEAD": "9668ad49c2f37f96c0e3173a67a525dc5006fa67",
   "artifactSHA256": "54e688590690a5cfc9ae36da1bbd977ecd7d47d2ca9a73334fd2cfe7053fd424",
   "npmIntegrity": "sha512-e9XEI2kyb1/OyLq0N+dVsPeCNIm8aOMt44oW0l2jCGT0NZVxWVJQ1mi1pLa25NS8KZEUvodKjciXe8uYXQMK1w==",
+  "sourceBinding": {
+    "clean": true,
+    "head": "9668ad49c2f37f96c0e3173a67a525dc5006fa67"
+  },
   "verification": {
     "unitTests": {
       "status": "PASS",

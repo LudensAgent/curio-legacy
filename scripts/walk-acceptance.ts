@@ -1026,7 +1026,11 @@ export function checkSpatialReopen(witness: SpatialWitness, readback: CellEviden
   if (!readback.observed) return { ok: false, reason: '重开后 witness 格无证据' };
   if (readback.freshness !== 'STALE') return { ok: false, reason: `重开后 freshness=${readback.freshness ?? 'missing'} 不是 STALE` };
   if (readback.name !== witness.name) return { ok: false, reason: '重开后 state 名称变化' };
-  if (JSON.stringify(readback.properties ?? {}) !== JSON.stringify(witness.properties)) return { ok: false, reason: '重开后 properties 变化' };
+  // Block-state property order is not semantic (the palette canonicalizes it),
+  // so compare the key/value set rather than insertion order.
+  const canonical = (properties: Record<string, string> | undefined) =>
+    JSON.stringify(Object.entries(properties ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+  if (canonical(readback.properties) !== canonical(witness.properties)) return { ok: false, reason: '重开后 properties 变化' };
   if (readback.observedAt !== witness.observedAt) return { ok: false, reason: '重开后 observedAt 变化' };
   if (readback.sequence !== witness.sequence) return { ok: false, reason: '重开后 sequence 变化' };
   if (readback.sessionId !== witness.sessionId) return { ok: false, reason: '重开后 session 变化' };
