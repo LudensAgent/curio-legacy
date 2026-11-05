@@ -67,6 +67,9 @@ const reasonKey = (summary: string) => summary.replace(/-?\d+(\.\d+)?/g, '#').sl
 /** 本来就是在应对怪的动作：挨打时不用叫停 */
 const COMBAT = new Set(['defend', 'flee', 'hunt', 'ranged_defend', 'shelter', 'eat', 'use_skill']);
 
+/** 人在水里时靠这些动作出水/换气：停下就是下沉，不能像砌墙那样被挨打叫停 */
+const WATER_ESCAPE = new Set(['surface', 'swim_to', 'dive', 'travel', 'ride', 'press_keys', 'move']);
+
 export const DEFAULT_TIMING = {
   /** 一段活做了这么久还没抬头想过，就看一眼 */
   checkInMs: 100_000,
@@ -1044,6 +1047,7 @@ export class Mind {
   /**
    * 正在做跟打架无关的事（盖房、挖、走、原地等）时挨了打，而且身边有怪：
    * 给身体的技能一点时间接手；没有技能接手，就停下手上的事、马上认真想。怎么应对由它自己定，这里只保证它不会边挨打边继续砌墙。
+   * 人在水里做水面动作时例外：停下来就是下沉，保留它自己选的出水/换气，只把事实交回去，并用快速档思考。
    */
   private hurtAt = 0;
   private hurtWhileBusy() {
@@ -1052,17 +1056,31 @@ export class Mind {
     this.hurtAt = now;
     setTimeout(() => {
       const cur = this.d.arbiter.info();
-      if (!cur || (cur.source !== 'llm' && cur.source !== 'rule') || COMBAT.has(cur.skill)) return;
+      if (!cur || (cur.source !== 'llm' && cur.source !== 'rule')) return;
+      const state = this.d.adapter.state();
+      // use_skill 里包着的水面技能（比如自己写的爬岸技能）也要按它实际在做的事判断。
+      const acting = cur.skill === 'use_skill' ? String((cur.args as { name?: unknown } | undefined)?.name ?? '') : cur.skill;
+      const waterEscape = state.inWater && WATER_ESCAPE.has(acting);
+      if (!waterEscape && COMBAT.has(cur.skill)) return;
       const hostiles = this.safe(() => this.d.perception.snapshot().nearby.hostile.filter((h) => h.dist <= 8), []);
       if (!hostiles.length) return;
-      const hp = Math.round(this.d.adapter.state().hp * 10) / 10;
+      const hp = Math.round(state.hp * 10) / 10;
+      const hostileText = hostiles.slice(0, 3).map((h) => `${h.name} ${Math.round(h.dist)}格`).join('、');
+      // 人在水里时停下来就是下沉：保留 Agent 自己选的出水/换气动作，只把挨打事实和怪的位置交给它。
+      // 思考走 glance——缺氧时再排一次十几秒的 deliberate，命已经没了。
+      if (waterEscape) {
+        this.requestThink(`正在 ${cur.skill} 时挨打了（血 ${hp}），人在水里，先把出水/换气动作做完`, 'glance');
+        const n = this.attention.notice('hurt_busy_water', `正在 ${cur.skill} 时挨打了（血 ${hp}，${hostileText}），人在水里，动作没停`, 0.9, 0);
+        if (n) this.d.bus.publish('notice', 'P1', `注意到：${n.what}`, { salience: n.salience, level: n.level });
+        return;
+      }
       // 停下的那一步算没做（想完要是接着做，从这一步重新来）
       if (this.activity && cur.planId === this.activity.id) this.activity.index = Math.max(0, this.activity.index - 1);
       this.d.arbiter.cancel('挨打了');
       // 想好之前别又把刚停下的那一步接着做
       if (this.activity) this.resumeCheck = this.activity.id;
       this.requestThink(`正在 ${cur.skill} 时挨打了（血 ${hp}）`, 'deliberate');
-      const n = this.attention.notice('hurt_busy', `正在 ${cur.skill} 时挨打了（血 ${hp}，${hostiles.slice(0, 3).map((h) => `${h.name} ${Math.round(h.dist)}格`).join('、')}），手上的事先停了`, 0.9, 0);
+      const n = this.attention.notice('hurt_busy', `正在 ${cur.skill} 时挨打了（血 ${hp}，${hostileText}），手上的事先停了`, 0.9, 0);
       if (n) this.d.bus.publish('notice', 'P1', `注意到：${n.what}`, { salience: n.salience, level: n.level });
     }, 700).unref?.();
   }
