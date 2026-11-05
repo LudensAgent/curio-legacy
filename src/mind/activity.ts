@@ -491,7 +491,7 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   // swim_to 的 SWIM_NO_PROGRESS 是同一目标、同一地形下的物理停滞：身体在失败前动过，不代表路线变了。
   // 原样重放同一个目标只会再耗一次时间与氧气；换路线、换手段交回心智决定。
   if (step.skill === 'swim_to' && data?.reason === 'SWIM_NO_PROGRESS') {
-    return { kind: 'stuck', why: `${result.summary.slice(0, 140)}；同一目标在同样的地形里重放不会改变结果，交回心智换路线或换手段` };
+    return { kind: 'stuck', why: `${clipFeedback(result.summary)}；同一目标在同样的地形里重放不会改变结果，交回心智换路线或换手段` };
   }
   if (RETRYABLE.has(code) && !(step.skill === 'goto' && code === 'PATH_NOT_FOUND')
     && !a.adaptations.includes(retryMark) && retries < 2 && (retries > 0 || physicallyMoved)) {
