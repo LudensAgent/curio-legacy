@@ -36,6 +36,7 @@ import type {
   MoveOpts,
   MoveTarget,
   Vec3Like,
+  PortalTransitionFacts,
   BossDeathObservation,
   SwimOptions,
   SwimFacts,
@@ -2918,7 +2919,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return { connected: true, alive, dim, sessionId: this.sessionId, observationReady: this.spawned && chunkReady && alive && dim !== 'unknown' };
   }
 
-  async enterPortalAt(pos: Vec3Like, signal: AbortSignal, expectedDim?: string): Promise<ActionResult & { from?: AgentState; to?: AgentState; stand?: AgentState; leftPortal?: boolean }> {
+  async enterPortalAt(pos: Vec3Like, signal: AbortSignal, expectedDim?: string): Promise<ActionResult & { from?: AgentState; to?: AgentState; stand?: AgentState; leftPortal?: boolean; transition?: PortalTransitionFacts }> {
     const check = this.actionCheckpoint(signal);
     const from = this.state();
     if (!from.observationReady) return { ok: false, reason: 'NOT_CONNECTED' };
@@ -2928,12 +2929,42 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // （pathfinder 不会为 nether_portal 生成节点，GoalNear(range:0) 永远无解）。
     // 末地门：横铺一层、脚下常是岩浆/虚空，退回「走到门附近再短促前进」，让身体落进门格。
     const approach = computePortalApproach((p) => this.blockAt(p), pos);
+    // 如实记录身体到底经历了什么：开始时是否已在门里、退出去多久、在门里连续待了多久。
+    // 这些是判断“要不要先出门”的依据，不能只回一个超时码让心智去猜。
+    const startedAt = Date.now();
+    const startedInPortal = this.bodyInPortal(name);
+    let exitedAt: number | null = null;
+    let enteredAt: number | null = startedInPortal ? startedAt : null;
+    const markEntered = () => { if (enteredAt === null) enteredAt = Date.now(); };
+    const facts = (endDim: string): PortalTransitionFacts => ({
+      startedInPortal,
+      exitMs: exitedAt === null ? null : exitedAt - startedAt,
+      outsideMs: exitedAt !== null && enteredAt !== null ? enteredAt - exitedAt : null,
+      insideMs: enteredAt === null ? 0 : Date.now() - enteredAt,
+      endDim,
+    });
+    const trace = (transition: PortalTransitionFacts) => {
+      const p = this.bot?.entity?.position;
+      this.bus.publish('portal_trace', 'P3', `穿门时间线：${transition.startedInPortal ? '开始就在门方块里' : '开始不在门里'}；退出门 ${transition.exitMs ?? '-'}ms；门外 ${transition.outsideMs ?? '-'}ms；门内连续 ${transition.insideMs}ms；维度 ${transition.endDim}`, {
+        kind: name,
+        portal: { x: pos.x, y: pos.y, z: pos.z },
+        ...transition,
+        ...(p ? { pos: { x: p.x, y: p.y, z: p.z } } : {}),
+        ...(this.bot?.time?.age !== undefined ? { worldAgeTicks: this.bot.time.age } : {}),
+      });
+    };
     this.inPortalTransition = true;
     try {
       // 已经站在门方块里（重连出生在门旁、或刚穿过来）：先真正退出门，再重新踏入。
       // 门块不参与寻路，站在门里 moveTo 起步不了，只能 drive；退不出去就如实失败，不耗到超时。
-      if (this.bodyInPortal(name) && !(await this.driveOutOfPortal(name, signal, 5000))) {
-        return { ok: false, reason: 'PORTAL_EXIT_BLOCKED' };
+      if (startedInPortal) {
+        if (!(await this.driveOutOfPortal(name, signal, 5000))) {
+          const transition = facts(from.dim);
+          trace(transition);
+          return { ok: false, reason: 'PORTAL_EXIT_BLOCKED', transition };
+        }
+        exitedAt = Date.now();
+        enteredAt = null; // 重新计时：只有真正重新进门才算
       }
       if (approach) {
         await this.moveTo({ kind: 'near', pos: approach.cell, range: 0.5 }, { signal, timeoutMs: 20000 });
@@ -2943,7 +2974,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           const cur = this.transitionProbe();
           if (!cur.connected || !cur.alive) return { ok: false, reason: 'TRANSITION_INTERRUPTED' };
           // 身体压上门方块就算「进到门里」：停止前进，交给下面的落地等待，别在门面上继续顶
-          if (cur.dim !== from.dim || this.bodyInPortal(name)) break;
+          if (cur.dim !== from.dim || this.bodyInPortal(name)) { markEntered(); break; }
           await this.drive({ forward: true }, 350, signal, { facePoint: approach.center });
         }
       } else {
@@ -2955,7 +2986,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           throwIfAborted(signal);
           const cur = this.transitionProbe();
           if (!cur.connected || !cur.alive) return { ok: false, reason: 'TRANSITION_INTERRUPTED' };
-          if (cur.dim !== from.dim || this.bodyInPortal(name)) break;
+          if (cur.dim !== from.dim || this.bodyInPortal(name)) { markEntered(); break; }
           await this.drive({ forward: true }, 350, signal, { facePoint: center });
         }
       }
@@ -2967,18 +2998,30 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         if (probe.dim !== from.dim && probe.sessionId !== from.sessionId && probe.observationReady) {
           // 只在确认跨维度成功后取一次完整 state（给上层返回真实出生观察），平时只用轻量探针
           const to = this.state();
-          if (expectedDim && to.dim !== expectedDim) return { ok: false, reason: `WRONG_DIMENSION:${to.dim}`, from, to };
+          const transition = facts(to.dim);
+          if (expectedDim && to.dim !== expectedDim) {
+            trace(transition);
+            return { ok: false, reason: `WRONG_DIMENSION:${to.dim}`, from, to, transition };
+          }
           // 到达后尽量把身体移出目的地门方块：留在门里既走不动，冷却结束后也容易再次被传送。
           // 移不出去不改变“已到达”的事实，把 leftPortal:false 如实交给上层。
           const leftPortal = name !== 'nether_portal' || await this.driveOutOfPortal(name, signal, 4000);
-          return { ok: true, from, to, stand: this.state(), leftPortal };
+          trace(transition);
+          return { ok: true, from, to, stand: this.state(), leftPortal, transition };
         }
         // No further world action is issued after the dimension changes. Loading
         // and the fresh spawn observation are the only evidence of arrival.
-        if (probe.dim === from.dim) check();
+        if (probe.dim === from.dim) {
+          // 等待期间身体可能被推离门面：只有此刻仍压着门方块才继续累计“连续停留”。
+          if (this.bodyInPortal(name)) markEntered();
+          else enteredAt = null;
+          check();
+        }
         await sleep(200, signal);
       }
-      return { ok: false, reason: 'PORTAL_TRANSITION_TIMEOUT' };
+      const transition = facts(this.transitionProbe().dim);
+      trace(transition);
+      return { ok: false, reason: enteredAt === null ? 'PORTAL_NOT_ENTERED' : 'PORTAL_TRANSITION_TIMEOUT', transition };
     } finally {
       this.inPortalTransition = false;
     }

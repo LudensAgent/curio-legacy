@@ -176,7 +176,18 @@ async function traverse(ctx: SkillCtx, endpoint: PortalEndpoint) {
     ctx.setStationaryWait?.(true);
     const result = await adapter.enterPortalAt(endpoint.pos, signal);
     throwIfAborted(signal);
-    if (!result.ok || !result.from || !result.to) return fail('ERROR', `传送未验收：${result.reason}`);
+    // 把身体实际经历的时间线写给心智：它需要知道“开始就在门里 / 出去多久 / 在门里待了多久”，
+    // 才能判断该不该先离开门再进，而不是只看到一个超时码。
+    const timeline = result.transition
+      ? [
+          result.transition.startedInPortal ? '开始时身体已在门方块里' : '开始时不在门方块里',
+          ...(result.transition.exitMs !== null ? [`退出门 ${(result.transition.exitMs / 1000).toFixed(1)}s`] : []),
+          ...(result.transition.outsideMs !== null ? [`门外停留 ${(result.transition.outsideMs / 1000).toFixed(1)}s 后重新进入`] : []),
+          result.transition.insideMs > 0 ? `在门方块里连续 ${(result.transition.insideMs / 1000).toFixed(1)}s` : '没有进入门方块',
+          `维度 ${result.transition.endDim}`,
+        ].join('；')
+      : '';
+    if (!result.ok || !result.from || !result.to) return fail('ERROR', `传送未验收（${result.reason}）${timeline ? `：${timeline}` : ''}`, { ...(result.transition ? { transition: result.transition } : {}) });
     const to = result.to;
     if (!to.observationReady || to.dim === state.dim || to.worldId !== state.worldId || to.sessionId === state.sessionId) return fail('ERROR', '没有获得新维度的有效观察');
     // Arrival is a fact; a nearby return portal still requires fresh sight.
@@ -199,7 +210,8 @@ async function traverse(ctx: SkillCtx, endpoint: PortalEndpoint) {
       : leftPortal ? `传送到达 ${destination.id} 门外站位` : `传送到达 ${destination.id}（仍在门方块里）`;
     ctx.memory.addLandmark('waypoint', waypointLabel, to.dim, waypoint, 3);
     const settleNote = leftPortal === undefined ? '' : leftPortal ? '；已离开门口' : '；到达后仍在门方块里';
-    return ok(`已通过实际传送到达 ${to.dim}，记录两端位置；返程入口 ${destination.id}${observed ? '' : ' 尚需寻找'}${roundTripVerified ? '；往返已验证' : ''}${settleNote}`, { fromId: endpoint.id, toId: destination.id, from: result.from, to, stand: result.stand, leftPortal, transition: true, roundTripVerified });
+    const dwellNote = result.transition && result.transition.insideMs > 0 ? `；门内停留 ${(result.transition.insideMs / 1000).toFixed(1)}s 后切换` : '';
+    return ok(`已通过实际传送到达 ${to.dim}，记录两端位置；返程入口 ${destination.id}${observed ? '' : ' 尚需寻找'}${roundTripVerified ? '；往返已验证' : ''}${dwellNote}${settleNote}`, { fromId: endpoint.id, toId: destination.id, from: result.from, to, stand: result.stand, leftPortal, transition: result.transition, roundTripVerified });
   } catch (error) { if (isAbort(error)) throw error; return fail(codeFromError(error), `传送失败：${(error as Error).message}（门离你约 ${Math.round(dist3(state.pos, endpoint.pos))} 格，在 ${endpoint.pos.x},${endpoint.pos.y},${endpoint.pos.z}）`); } finally { ctx.setStationaryWait?.(false); }
 }
 

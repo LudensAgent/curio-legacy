@@ -96,6 +96,20 @@ export interface InventorySlot {
   nbt?: unknown;
 }
 
+/** 一次穿门尝试里身体实际经历的时间线；失败时用它如实说明“人有没有进门、在门里待了多久”。 */
+export interface PortalTransitionFacts {
+  /** 开始时身体是否已经压在门方块上 */
+  startedInPortal: boolean;
+  /** 从开始到真正退出门方块的毫秒数；开始时不在门里为 null */
+  exitMs: number | null;
+  /** 退出门后到身体重新压回门方块的毫秒数；没有重新进入为 null */
+  outsideMs: number | null;
+  /** 最后一次进入门方块后连续停留的毫秒数；从未进入为 0 */
+  insideMs: number;
+  /** 结束时实际观察到的维度 */
+  endDim: string;
+}
+
 export interface AgentState {
   connected: boolean;
   alive: boolean;
@@ -424,7 +438,7 @@ export interface GameAdapter {
   releaseDraw?(signal: AbortSignal, aim?: Vec3Like): Promise<ActionResult & { chargedMs: number }>;
   /** 身体此刻的战斗相关状态：手上是否在用东西（举盾/拉弓）、副手拿着什么 */
   combatState?(): { usingItem: boolean; offHand: string | null; drawingSinceMs: number | null };
-  enterPortalAt?(pos: Vec3Like, signal: AbortSignal, expectedDim?: string): Promise<ActionResult & { from?: AgentState; to?: AgentState; stand?: AgentState; leftPortal?: boolean }>;
+  enterPortalAt?(pos: Vec3Like, signal: AbortSignal, expectedDim?: string): Promise<ActionResult & { from?: AgentState; to?: AgentState; stand?: AgentState; leftPortal?: boolean; transition?: PortalTransitionFacts }>;
   /** 门外安全站位（格中心）；不知道门结构时返回 null。普通走路用它避免把“门厅”当成门方块本身。 */
   portalStance?(pos: Vec3Like): Vec3Like | null;
   bossStatus?(): { dragonDeath: BossDeathObservation | null };
