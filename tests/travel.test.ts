@@ -146,6 +146,7 @@ test('already inside a portal: timeout carries the in-portal timeline', async ()
   adapter.blocks.push({ name: 'obsidian', pos: { x: 3, y: 63, z: 0 } });
   adapter.portalDestinations.set('fake-world:overworld:3,64,0', { dim: 'the_nether', pos: { x: 8, y: 64, z: 0 } });
   adapter.pos = { x: 3.5, y: 64, z: 0.5 };
+  adapter.bodyPortal = 'nether_portal';
   adapter.portalNeedsExit = true;
   adapter.portalInsideMs = 30000;
   const source = travelStore(memory).observe(adapter.state(), sourcePos, 'nether_portal');
