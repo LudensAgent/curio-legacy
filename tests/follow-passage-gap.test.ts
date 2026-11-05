@@ -69,6 +69,58 @@ test('断口在 near 范围内时，走到最近的可达脚点并如实报告�
   assert.equal(result.data?.connectionGap, undefined, '断口在 near 内时走最近的脚点，不算确定断口');
 });
 
+test('dig:true 时先尝试接上小断口，再接回记录路线', async (t) => {
+  const adapter = new TestWorld();
+  adapter.pos = { x: 0.5, y: 40, z: 0.5 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(adapter.worldId);
+  // 一条记录被 4 格竖直断口分成两团：A (0,40)/(2,40)，B (0,44)/(0,48)，入口在 B 顶。
+  memory.savePassage({
+    id: 'gap-mine', worldId: adapter.worldId, dim: adapter.dim, kind: 'dug',
+    entrances: [{ x: 0, y: 48, z: 0 }], deepestY: 48, dug: 20, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1,
+    path: [{ x: 0, y: 40, z: 0 }, { x: 2, y: 40, z: 0 }, { x: 0, y: 44, z: 0 }, { x: 0, y: 48, z: 0 }],
+    links: [{ a: { x: 0, y: 40, z: 0 }, b: { x: 2, y: 40, z: 0 } }, { a: { x: 0, y: 44, z: 0 }, b: { x: 0, y: 48, z: 0 } }],
+  });
+  const ctx = makeCtx(adapter, { memory });
+  t.after(() => memory.close());
+  const crossing: { goal: { pos: Vec3Like }; opts: { allowPlace?: boolean } }[] = [];
+  t.mock.method(adapter, 'moveTo', async (goal: any, opts: any) => {
+    if (goal.kind !== 'near') return;
+    if (opts?.allowPlace === true && goal.pos.y === 44) crossing.push({ goal, opts });
+    adapter.pos = { ...goal.pos };
+  });
+
+  const result = await followPassage.run(ctx as never, { to: 'entrance', dig: true });
+
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(crossing.length, 1, '带 dig:true 时尝试跨断口');
+  assert.deepEqual(crossing[0]!.goal.pos, { x: 0, y: 44, z: 0 }, '跨到断口远端');
+  assert.equal(result.data?.connectionGap, undefined, '接上后不再报断口');
+});
+
+test('断口没有被 dig:true 授权时，提示可以加 dig:true', async (t) => {
+  const adapter = new TestWorld();
+  adapter.pos = { x: 0.5, y: 40, z: 0.5 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(adapter.worldId);
+  memory.savePassage({
+    id: 'gap-mine', worldId: adapter.worldId, dim: adapter.dim, kind: 'dug',
+    entrances: [{ x: 0, y: 48, z: 0 }], deepestY: 48, dug: 20, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1,
+    path: [{ x: 0, y: 40, z: 0 }, { x: 2, y: 40, z: 0 }, { x: 0, y: 44, z: 0 }, { x: 0, y: 48, z: 0 }],
+    links: [{ a: { x: 0, y: 40, z: 0 }, b: { x: 2, y: 40, z: 0 } }, { a: { x: 0, y: 44, z: 0 }, b: { x: 0, y: 48, z: 0 } }],
+  });
+  const ctx = makeCtx(adapter, { memory });
+  t.after(() => memory.close());
+  t.mock.method(adapter, 'moveTo', async (goal: any) => { if (goal.kind === 'near') adapter.pos = { ...goal.pos }; });
+
+  const result = await followPassage.run(ctx as never, { to: 'entrance' });
+
+  assert.equal(result.status, 'failed');
+  assert.match(result.summary, /相距 4 格（水平 0、垂直 4）/);
+  assert.match(result.summary, /加 dig:true/);
+  assert.ok(result.data?.connectionGap);
+});
+
 test('同一条通道的锚点离脚点太远时，不伪造跨分量 connectionGap', async () => {
   const adapter = new TestWorld();
   adapter.pos = { x: 0.5, y: 64, z: 10.5 };

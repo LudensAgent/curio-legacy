@@ -594,7 +594,7 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
 /** 沿自己记下的旧矿道（把全部通道连成网的脚点）逐段走：entrance 回记录入口（不一定是传送门/基地），deepest 下到最深处。 */
 export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig?: boolean }> = {
   name: 'follow_passage',
-  description: '沿旧矿道回记录入口（不一定是传送门/基地）；to:"entrance" 取当前连通分量里靠近地表、且沿记录网实际路长最短的记录入口锚点（不是 y 最高或直线最近），要找特定传送门/基地用 goto 或 travel_portal；to:"deepest" 下到最深处；可选 id 只选一条已知通道（含历史归档），不选则走去重后的全部记录连成的网。每段用步行寻路，dig:true 才允许挖开挡路、垫方块；走不通就停在原地并说明走到第几段、离目标还差多少，接不上时给出 connectionGap 两端。回入口的路线如果明显绕远（路长 ≥24 格且比两端低 ≥8 格）、同时同分量有便宜得多的备选出口（≤0.7× 当前路长）时，会在开走前停下给出备选和代价；否则照常走。要强制走指定记录就带 id。完成条件：走完记录脚点后离入口/最深处锚点三维 ≤2 格才算 arrived；后端 pathfinder_waypoints；只认 to、id 与 dig，不提供 place/tower 施工权限',
+  description: '沿旧矿道回记录入口（不一定是传送门/基地）；to:"entrance" 取当前连通分量里靠近地表、且沿记录网实际路长最短的记录入口锚点（不是 y 最高或直线最近），要找特定传送门/基地用 goto 或 travel_portal；to:"deepest" 下到最深处；可选 id 只选一条已知通道（含历史归档），不选则走去重后的全部记录连成的网。每段用步行寻路，dig:true 才允许挖开挡路、垫方块（会消耗方块和工具耐久）；记录网断成两团时，dig:true 会先尝试接上 ≤8 格的小断口，再接回记录路线（接不上会说明尝试结果）。走不通就停在原地并说明走到第几段、离目标还差多少，接不上时给出 connectionGap 两端。回入口的路线如果明显绕远（路长 ≥24 格且比两端低 ≥8 格）、同时同分量有便宜得多的备选出口（≤0.7× 当前路长）时，会在开走前停下给出备选和代价；否则照常走。要强制走指定记录就带 id。完成条件：走完记录脚点后离入口/最深处锚点三维 ≤2 格才算 arrived；后端 pathfinder_waypoints；只认 to、id 与 dig，不提供 place/tower 施工权限',
   argsDoc: '{"to":"entrance"|"deepest", "id"?:string, "dig"?:boolean}',
   timeoutMs: 600000,
   movement: true,
@@ -710,27 +710,50 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
           const horizontal = to ? Math.hypot(from.x - to.x, from.z - to.z) : null;
           const vertical = to ? Math.abs(from.y - to.y) : null;
           const gapDistance = to && horizontal !== null && vertical !== null ? Math.hypot(horizontal, vertical) : null;
-          // 只有找到真实的跨分量节点对时才报 connectionGap；同分量回退里的 from=start 仍是走动距离，
-          // 不能当成确定断口去压掉可能有用的重试。
-          const connectionGap = pair && to && gapDistance !== null ? {
-            from: { x: from.x, y: from.y, z: from.z },
-            to: { x: to.x, y: to.y, z: to.z },
-            distance: gapDistance,
-            sameLevel: vertical! <= 0.01,
-            horizontal: horizontal!,
-            vertical: vertical!,
-            note: '两段旧几何之间没有已记录的实际连接；这是缺口端点，不是自动补边或当前可通行证明',
-          } : null;
-          // 缺口 ≤2 格时只说明可用的基础动作，补/不补由 agent 决定；不自动挖、不自动放。
-          const joinHint = pair
-            ? gapDistance! <= 2
-              ? '；这两格之间没有已记录的连接，要接上可以自己 step / dig_at / place_at，或用 goto 选路（由你决定）'
-              : '；可朝断口垫/挖过去接上，或改走别的路（不会自动补边）'
-            : '；这是旧几何的现状，不会自动补边';
-          const why = pair && to && gapDistance !== null
-            ? `通道在 ${at(from)} 和 ${at(to)} 之间断开，相距 ${Math.round(gapDistance)} 格（水平 ${Math.round(horizontal!)}、垂直 ${Math.round(vertical!)}），仍连不到${goal}${joinHint}`
-            : `到了脚点 (${np}) 附近，但仍连不到${goal}：${tgtNode ? `离${goal}锚点最近的旧矿道脚点在 ${at(tgtNode)}，锚点本身接不上一条可走的路` : '没有可用的目标脚点'}${joinHint}`;
-          return receipt(fail('PATH_NOT_FOUND', why, { position: start, ...(connectionGap ? { connectionGap } : {}) }));
+          // dig:true 是对“沿这条矿道挖开/垫过去”的授权，断口也属于这项委托：小断口先让实时寻路接上，
+          // 接上就继续沿记录走；接不上再把断口事实交回。大断口要耗很多方块/耐久，交给 Agent 决定。
+          let bridgeError: string | null = null;
+          if (allowDig && pair && gapDistance !== null && gapDistance <= 8) {
+            try {
+              // 先走到断口的近端（只走路），再带施工权限跨到远端。
+              await adapter.moveTo({ kind: 'near', pos: pair.from, range: 2 }, { signal, timeoutMs: Math.max(3000, Math.min(10000, ctx.deadline - Date.now())), allowSwimming: false });
+              trace.push({ ...adapter.state().pos });
+              await adapter.moveTo({ kind: 'near', pos: pair.to, range: 2 }, { signal, timeoutMs: Math.max(4000, Math.min(20000, ctx.deadline - Date.now())), allowSwimming: false, ...terrainPermission });
+              start = adapter.state().pos;
+              trace.push({ ...start });
+              route = passageRoute(recs, start, target, { near: 6 });
+              if (!route || route.length < 2) bridgeError = '接过去后仍连不上记录路线';
+            } catch (e) {
+              trace.push({ ...adapter.state().pos });
+              start = adapter.state().pos;
+              if (isAbort(e)) throw e;
+              bridgeError = (e as Error).message.slice(0, 60);
+            }
+          }
+          if (!route || route.length < 2) {
+            // 只有找到真实的跨分量节点对时才报 connectionGap；同分量回退里的 from=start 仍是走动距离，
+            // 不能当成确定断口去压掉可能有用的重试。
+            const connectionGap = pair && to && gapDistance !== null ? {
+              from: { x: from.x, y: from.y, z: from.z },
+              to: { x: to.x, y: to.y, z: to.z },
+              distance: gapDistance,
+              sameLevel: vertical! <= 0.01,
+              horizontal: horizontal!,
+              vertical: vertical!,
+              note: '两段旧几何之间没有已记录的实际连接；这是缺口端点，不是自动补边或当前可通行证明',
+            } : null;
+            const joinHint = pair
+              ? allowDig
+                ? `；已按 dig:true 尝试沿断口挖/垫过去${bridgeError ? `，没成（${bridgeError}）` : ''}；可自己过去或改走别的路`
+                : gapDistance! <= 2
+                  ? '；这两格之间没有已记录的连接；可加 dig:true 让我挖/垫过去，或自己 step / dig_at / place_at（由你决定）'
+                  : '；可加 dig:true 让我沿断口挖/垫过去接上，或改走别的路（不会自动补边）'
+              : '；这是旧几何的现状，不会自动补边';
+            const why = pair && to && gapDistance !== null
+              ? `通道在 ${at(from)} 和 ${at(to)} 之间断开，相距 ${Math.round(gapDistance)} 格（水平 ${Math.round(horizontal!)}、垂直 ${Math.round(vertical!)}），仍连不到${goal}${joinHint}`
+              : `到了脚点 (${np}) 附近，但仍连不到${goal}：${tgtNode ? `离${goal}锚点最近的旧矿道脚点在 ${at(tgtNode)}，锚点本身接不上一条可走的路` : '没有可用的目标脚点'}${joinHint}`;
+            return receipt(fail('PATH_NOT_FOUND', why, { position: start, ...(connectionGap ? { connectionGap } : {}) }));
+          }
         }
       }
       // 出发前把这条路的实际形状算出来：段数、路长、最低点、和两端的高差。
