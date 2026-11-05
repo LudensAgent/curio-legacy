@@ -1,6 +1,6 @@
 import type { AgentState } from '../adapter/types.ts';
 import { effortFacts } from '../brain/efficiency.ts';
-import { durabilityFacts, fuelFacts, oreOpportunityFact, supplyFacts, toolBackupFact } from '../brain/supply.ts';
+import { durabilityFacts, fuelFacts, oreOpportunityFact, supplyFacts } from '../brain/supply.ts';
 import type { AudienceContext } from '../live/audience.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { dirName, durationText, realSecondsToTicks, sunText, type Percept } from '../perception/perception.ts';
@@ -93,6 +93,8 @@ export interface MindContext {
   learnedSkills?: string[];
   /** 本能现状：哪些身体会自己做（躲苦力怕、还手这些现在可能没开） */
   instincts?: string;
+  /** 工具分级事实：同状态签名已由 Mind 去重，这里只负责展示；null 表示这一念不重复 */
+  toolFact?: string | null;
 }
 
 /**
@@ -483,9 +485,8 @@ export function situationalReminders(ctx: MindContext): string[] {
     const ore = oreOpportunityFact(p.nearby.resources, p.storage?.stock, s.inventory);
     if (ore) { out.push(ore); ctx.log?.(ore, { kind: 'ore_opportunity' }); }
   }
-  // 工具备份：铁镐 + 铁锭不足 + 没有耐用石镐，这个状态快反应（glance）时也该知道，别等停下来想才说
-  const backup = toolBackupFact(s.inventory, p.storage?.stock);
-  if (backup) { out.push(backup); ctx.log?.(backup, { kind: 'tool_backup' }); }
+  // 工具分级事实：Mind 已按状态签名去重（同状态不每念重复，状态变了或过了 10 分钟才再说），这里只负责展示
+  if (ctx.toolFact) out.push(ctx.toolFact);
   // 养动物、村民交易：打算里提到了才把机制摆出来（模型对这些的记忆常是含糊或老版本的）
   const husbandry = husbandryFacts(intent);
   if (husbandry) out.push(husbandry);
@@ -574,7 +575,7 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
   const digging = !!step && ['gather', 'dig', 'climb_up'].includes(step.skill);
   const material = String((step?.args as Record<string, unknown> | undefined)?.block ?? '');
   const tool = /stone|ore|coal|iron|copper|deepslate/.test(material) ? 'pickaxe' : /dirt|grass|sand|gravel|clay/.test(material) ? 'shovel' : /log|wood/.test(material) ? 'axe' : undefined;
-  // 挖的时候身体会自动换上背包里最快的工具；要提醒的是“背包里根本没有合适的工具”
+  // 挖的时候手上有能挖的工具就不换；不能挖才按上次亲手选的同种工具、否则最快的工具换背包里能挖的；要提醒的是“背包里根本没有合适的工具”
   const ownsTool = tool ? [...inv.keys()].some((n) => n.endsWith(`_${tool}`)) : true;
   const wornBySlot = new Map((s.equipment ?? []).map((e) => [e.slot, e]));
   const ARMOR_SLOT: Record<string, string> = { helmet: 'head', chestplate: 'torso', leggings: 'legs', boots: 'feet' };

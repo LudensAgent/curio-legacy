@@ -191,7 +191,10 @@ export class Perception {
   inPassage?: (pos: Vec3Like) => boolean;
   /** 跟着身体记自己挖过的通道（矿道、台阶井） */
   private passages: PassageTracker;
+  /** 效率账本的挖掘游标：不依赖 where，任何环境都能推进 */
   private lastDugAt = 0;
+  /** 空间记账（矿点失效、通道、放置方块移除）的挖掘游标：where 未知时先不消费，等能判断环境再补 */
+  private lastSpaceDugAt = 0;
   private lastPlacedAt = 0;
   /** 最近一次从 placed 里扫桥/路的时间：节流扫描，桥搭完几秒内被升格 */
   private bridgeScanAt = 0;
@@ -729,10 +732,16 @@ export class Perception {
     const overhead = s.connected && s.alive && s.observationReady ? this.overheadInfo(s) : null;
     // 树冠下天光也会很弱，但人一抬头就知道是树叶，不会以为自己在地下
     const where = overhead && contact ? whereAmI(this.adapter, s, overhead, { ownBuilt: this.ownBuilt, inPassage: this.inPassage }) : null;
-    if (where) {
-      try {
-        const dug = this.adapter.recentDug?.(this.lastDugAt) ?? [];
-        if (dug.length) this.lastDugAt = dug[dug.length - 1].ts;
+    try {
+      // 效率账本不依赖环境判断：寻路挖穿、辅助开挖也是真实发生的挖掘
+      const effDug = this.adapter.recentDug?.(this.lastDugAt) ?? [];
+      if (effDug.length) this.lastDugAt = effDug[effDug.length - 1].ts;
+      // ms=0 表示没有实测耗时（寻路/外部挖的）：不进效率账，免得挤占 300 条上限、淘汰真实样本
+      for (const d of effDug) if ((d.ms ?? 0) > 0) this.memory.recordDig(d.name, d.tool ?? null, d.ms!);
+      if (where) {
+        // 空间记账需要知道所处环境；where 未知时先不推进游标，等下一拍能判断时再补
+        const dug = this.adapter.recentDug?.(this.lastSpaceDugAt) ?? [];
+        if (dug.length) this.lastSpaceDugAt = dug[dug.length - 1].ts;
         this.forgetMinedOre(s, dug);
         this.noteExposedNeighbors(s, dug);
         const place = where.kind === 'surface' || where.kind === 'indoors' ? 'surface' : where.kind === 'underground' ? 'underground' : 'other';
@@ -745,8 +754,8 @@ export class Perception {
         }
         for (const d of dug) this.memory.removePlaced(d.pos);
         this.maybeSyncBridges(s);
-      } catch { /* 记不下来不影响感知 */ }
-    }
+      }
+    } catch { /* 记不下来不影响感知 */ }
     if (light && overhead && (overhead.covered === 'canopy' || overhead.covered === 'open')) {
       light.underground = false;
       // 白天头顶露天或只隔着树叶：天光至少 13–15。读到很暗，多半是客户端的天光数据没更新（刚加载的区块、刚挖开的格子），

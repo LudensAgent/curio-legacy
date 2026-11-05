@@ -448,13 +448,17 @@ export interface GameAdapter {
   /** 门外安全站位（格中心）；不知道门结构时返回 null。普通走路用它避免把“门厅”当成门方块本身。 */
   portalStance?(pos: Vec3Like): Vec3Like | null;
   bossStatus?(): { dragonDeath: BossDeathObservation | null };
-  dig(pos: Vec3Like, signal: AbortSignal): Promise<ActionResult>;
+  /**
+   * 挖一格。opts.tool 给具体物品名时只准用这一把：背包没有或它挖不动这块 → TOOL_MISSING，
+   * 不换别的工具、不退回空手；不传（或 null）沿用自动换手：手上能挖就用，不能才按上次亲手选的同种工具→最快工具。
+   */
+  dig(pos: Vec3Like, signal: AbortSignal, opts?: { tool?: string | null }): Promise<ActionResult>;
   /** 这个掉落物是不是自己几分钟前扔掉的（只是事实，捡不捡由心智和技能自己定） */
   isDiscarded?(item: string, pos: Vec3Like): boolean;
   /** 改主意了（指名要捡回某样扔掉的东西）：不再当它是扔掉的，捡回来也不算“又捡回来了” */
   forgetDiscarded?(item: string): void;
-  /** 自己挖掉的方块（动作、代码技能、寻路挖穿的都算），since 之后的；用来记自己挖过的通道 */
-  recentDug?(since: number): { pos: Vec3Like; name: string; ts: number }[];
+  /** 自己挖掉的方块（动作、代码技能、寻路挖穿的都算），since 之后的；用来记自己挖过的通道和挖掘耗时 */
+  recentDug?(since: number): { pos: Vec3Like; name: string; ts: number; tool?: string | null; ms?: number }[];
   /** 自己放置的方块（placeBlockAt 成功才算），since 之后的；用来记自己放过哪些格 */
   recentPlaced?(since: number): { pos: Vec3Like; name: string; ts: number }[];
   collectNearbyDrops(signal: AbortSignal, radius: number, timeoutMs: number): Promise<number>;

@@ -313,10 +313,8 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
       try {
         ctx.progress(dug / args.count, `前往 ${target.name}（${Math.round(target.dist)} 格）`);
         await moveWithWatchdog(ctx, target.pos, args.dig === true);
-        const t0 = Date.now();
         const r = await adapter.dig(target.pos, signal);
         if (!r.ok) throw new Error(r.reason ?? 'DIG_FAILED');
-        ctx.memory.recordDig(target.name, adapter.state().held, Date.now() - t0);
       } catch (e) {
         if (isAbort(e)) throw e;
         skip.add(key(target.pos));
