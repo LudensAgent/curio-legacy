@@ -815,7 +815,8 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
   const system = glance ? glanceSystem(ctx.persona, ctx.skills ?? []) : deliberateSystem(ctx.persona, ctx.skills ?? []);
   const reminders = situationalReminders(ctx);
   // 工具分级事实不占 5 条提醒配额：挖掘场景前面的提醒常已满 5 条，必须在切片后单独追加才能送达。
-  if (ctx.toolFact) reminders.push(ctx.toolFact);
+  // 放在最前面：这是正在发生的工具消耗，比后面的环境提醒更该先看到。
+  if (ctx.toolFact) reminders.unshift(ctx.toolFact);
   // 进阶动作（下界/末地或已有末影物品才出现）和当前活动用到、目录里没给完整参数的动作：作为提醒补在 user 消息里，
   // system 目录保持字节稳定以命中前缀缓存（见 movesCatalog 注释）。
   if (!glance && advanced) {
