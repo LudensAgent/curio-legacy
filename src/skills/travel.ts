@@ -144,9 +144,9 @@ export const observePortal: Skill<{}> = {
       ?? visiblePortal(ctx, ctx.senses.knownBlocks(kinds, 8).map((block) => block.pos), kinds)
       ?? touching[0];
     if (!portal) return fail('NOT_FOUND', '附近没有已观察并能核对的传送门');
-    // 身体占据的两格（脚/头）才是“我在门里”的触觉事实；旁边一格只是发现门，不等于人已进门。
-    // end_gateway 不靠身体接触触发，不列进“正压在门方块上”的提示。
-    const bodyPortal = [feet, { ...feet, y: feet.y + 1 }]
+    // 身体 AABB 压着的门方块才是“我在门里”的触觉事实；旁边一格只是发现门，不等于人已进门。
+    // 优先用适配器按 AABB 算出的字段，拿不到时退回脚/头两格（end_gateway 不靠身体接触触发，不算）。
+    const bodyPortal = state.bodyPortal ?? [feet, { ...feet, y: feet.y + 1 }]
       .map((pos) => ctx.adapter.blockAt(pos))
       .find((name): name is string => name === 'nether_portal' || name === 'end_portal');
     const endpoint = travelStore(ctx.memory).observe(state, portal.pos, portal.name as PortalEndpoint['kind']);
