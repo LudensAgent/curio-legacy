@@ -11,6 +11,16 @@ import { makeCtx, TestWorld } from './survival-helpers.ts';
 const main = { path: [{ x: 0, y: 40, z: 0 }, { x: 3, y: 40, z: 0 }, { x: 6, y: 40, z: 0 }, { x: 9, y: 40, z: 0 }, { x: 12, y: 40, z: 0 }, { x: 12, y: 40, z: 3 }, { x: 12, y: 40, z: 6 }, { x: 12, y: 40, z: 9 }, { x: 12, y: 40, z: 12 }] };
 const branch = { path: [{ x: 14, y: 40, z: 6 }, { x: 17, y: 40, z: 6 }, { x: 20, y: 40, z: 6 }] };
 
+/** 把记录脚点变成可站的通道：脚/头是空气、下方是实心，供 follow_passage 短 hop 预检读取。 */
+const carve = (w: TestWorld, path: Vec3Like[]) => {
+  for (const p of path) {
+    const x = Math.floor(p.x), y = Math.floor(p.y), z = Math.floor(p.z);
+    w.setBlock({ x, y: y + 1, z }, 'air');
+    w.setBlock({ x, y, z }, 'air');
+    w.setBlock({ x, y: y - 1, z }, 'stone');
+  }
+};
+
 test('沿记下的脚下点找路：同一条里前后相邻、不同条挨得近的点连起来', () => {
   const r = passageRoute([main, branch], { x: 0.5, y: 40, z: 0.5 }, { x: 20, y: 40, z: 6 })!;
   assert.deepEqual(r.map((p) => `${p.x},${p.z}`), ['0,0', '3,0', '6,0', '9,0', '12,0', '12,3', '12,6', '14,6', '17,6', '20,6']);
@@ -180,8 +190,11 @@ test('follow_passage 沿旧矿道逐段走回入口（碎片连成网）', async
   const save = (id: string, entrances: Vec3Like[], path: Vec3Like[]) =>
     memory.savePassage({ id, worldId: w.worldId, dim: w.dim, kind: 'dug', entrances, deepestY: Math.min(...path.map((p) => p.y)), dug: 30, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1, path });
   // 主竖井（地表→深）+ 支巷（井底岔出、没记入口）
-  save('shaft', [{ x: 0, y: 66, z: 0 }], [{ x: 0, y: 64, z: 0 }, { x: 0, y: 60, z: 0 }, { x: 0, y: 56, z: 0 }, { x: 0, y: 52, z: 0 }, { x: 0, y: 48, z: 0 }, { x: 0, y: 44, z: 0 }, { x: 0, y: 40, z: 0 }, { x: 0, y: 36, z: 0 }, { x: 0, y: 32, z: 0 }]);
-  save('branch', [], [{ x: 2, y: 40, z: 0 }, { x: 6, y: 40, z: 0 }, { x: 10, y: 40, z: 0 }]);
+  const shaftPath = [{ x: 0, y: 64, z: 0 }, { x: 0, y: 60, z: 0 }, { x: 0, y: 56, z: 0 }, { x: 0, y: 52, z: 0 }, { x: 0, y: 48, z: 0 }, { x: 0, y: 44, z: 0 }, { x: 0, y: 40, z: 0 }, { x: 0, y: 36, z: 0 }, { x: 0, y: 32, z: 0 }];
+  const branchPath = [{ x: 2, y: 40, z: 0 }, { x: 6, y: 40, z: 0 }, { x: 10, y: 40, z: 0 }];
+  carve(w, [...shaftPath, ...branchPath]);
+  save('shaft', [{ x: 0, y: 66, z: 0 }], shaftPath);
+  save('branch', [], branchPath);
   const ctx = makeCtx(w, { memory });
   t.after(() => memory.close());
   const visited: Vec3Like[] = [];
@@ -201,9 +214,11 @@ test('follow_passage can follow a record that has moved to the historical archiv
   w.pos = { x: 0.5, y: 40, z: 0.5 };
   const memory = new WorldMemory(null);
   memory.setWorld(w.worldId);
+  const oldPath = [{ x: 0, y: 40, z: 0 }, { x: 4, y: 40, z: 0 }, { x: 8, y: 40, z: 0 }];
+  carve(w, oldPath);
   memory.archivePassage({ id: 'old-mine', worldId: w.worldId, dim: w.dim, kind: 'dug', entrances: [{ x: 8, y: 41, z: 0 }],
     deepestY: 40, dug: 12, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1,
-    path: [{ x: 0, y: 40, z: 0 }, { x: 4, y: 40, z: 0 }, { x: 8, y: 40, z: 0 }] });
+    path: oldPath });
   const ctx = makeCtx(w, { memory });
   t.after(() => memory.close());
   const visited: Vec3Like[] = [];
@@ -227,7 +242,9 @@ test('follow_passage 离矿道远时先走到最近脚点接回网里，再沿�
   const memory = new WorldMemory(null);
   memory.setWorld(w.worldId);
   // 只有一条孤立支巷，且 agent 站得离它很远（超过 near）
-  memory.savePassage({ id: 'branch', worldId: w.worldId, dim: w.dim, kind: 'dug', entrances: [], deepestY: 40, dug: 4, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1, path: [{ x: 2, y: 40, z: 0 }, { x: 6, y: 40, z: 0 }, { x: 10, y: 40, z: 0 }] });
+  const lonePath = [{ x: 2, y: 40, z: 0 }, { x: 6, y: 40, z: 0 }, { x: 10, y: 40, z: 0 }];
+  carve(w, lonePath);
+  memory.savePassage({ id: 'branch', worldId: w.worldId, dim: w.dim, kind: 'dug', entrances: [], deepestY: 40, dug: 4, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1, path: lonePath });
   const ctx = makeCtx(w, { memory });
   t.after(() => memory.close());
   const visited: Vec3Like[] = [];
@@ -246,12 +263,15 @@ test('follow_passage dig:true 在上台阶时先挖开头顶再迈', async (t) =
   w.pos = { x: 0, y: 40, z: 0 };
   const memory = new WorldMemory(null);
   memory.setWorld(w.worldId);
-  // 一条 1 格上台阶的旧矿道：links 记真实相邻格对，入口在台阶顶
+  // 一条 1 格上台阶的旧矿道：links 记真实相邻格对，入口在台阶顶；新头 (1,42,0) 是实心，需要先挖开
+  const stepPath = [{ x: 0, y: 40, z: 0 }, { x: 1, y: 41, z: 0 }];
+  carve(w, stepPath);
+  w.setBlock({ x: 1, y: 42, z: 0 }, 'stone');
   memory.savePassage({
     id: 'p1', worldId: w.worldId, dim: w.dim, kind: 'dug',
     entrances: [{ x: 1, y: 42, z: 0 }],
     deepestY: 40, dug: 30, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1,
-    path: [{ x: 0, y: 40, z: 0 }, { x: 1, y: 41, z: 0 }],
+    path: stepPath,
     links: [{ a: { x: 0, y: 40, z: 0 }, b: { x: 1, y: 41, z: 0 } }],
   });
   const ctx = makeCtx(w, { memory });
@@ -266,16 +286,92 @@ test('follow_passage dig:true 在上台阶时先挖开头顶再迈', async (t) =
   assert.ok(digs.some((d) => d.x === 1 && d.y === 42 && d.z === 0), `挖了新头 (1,42,0)：${JSON.stringify(digs)}`);
 });
 
+test('1 格上台阶的脚格已观测为实心：dig:true 也不先清障，返回不可站事实', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0, y: 40, z: 0 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  const stepPath = [{ x: 0, y: 40, z: 0 }, { x: 1, y: 41, z: 0 }];
+  carve(w, stepPath);
+  // 目标脚格本身是石头：挖开头顶也站不上去。
+  w.setBlock({ x: 1, y: 41, z: 0 }, 'stone');
+  memory.savePassage({
+    id: 'p1', worldId: w.worldId, dim: w.dim, kind: 'dug',
+    entrances: [{ x: 1, y: 42, z: 0 }],
+    deepestY: 40, dug: 30, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1,
+    path: stepPath,
+    links: [{ a: { x: 0, y: 40, z: 0 }, b: { x: 1, y: 41, z: 0 } }],
+  });
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  const digs: Vec3Like[] = [];
+  const moves: Vec3Like[] = [];
+  t.mock.method(w, 'dig', async (pos: Vec3Like) => { digs.push(pos); w.setBlock(pos, 'air'); return { ok: true }; });
+  t.mock.method(w, 'moveTo', async (goal: any) => { if (goal.kind === 'near') { moves.push(goal.pos); w.pos = { ...goal.pos }; } });
+
+  const result = await followPassage.run(ctx, { to: 'entrance', dig: true });
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.failureCode, 'PATH_NOT_FOUND');
+  assert.equal(result.data?.offRoute, undefined);
+  assert.match(result.summary, /脚格 \(1,41,0\) 是 stone/);
+  assert.match(result.summary, /未清障、未调用寻路/);
+  assert.match(result.summary, /dig:true/);
+  assert.deepEqual(result.data?.blockedWaypoint, { x: 1, y: 41, z: 0 });
+  const cells = result.data?.blockedCells as { role: string; cell: Vec3Like; block: string }[];
+  assert.ok(cells.some((c) => c.role === '脚格' && c.cell.x === 1 && c.cell.y === 41 && c.block === 'stone'));
+  assert.equal(digs.length, 0, '可执行性预检失败时不得清障');
+  assert.equal(moves.length, 0, '可执行性预检失败时不得移动');
+  assert.deepEqual(w.pos, { x: 0, y: 40, z: 0 });
+});
+
+test('1 格上台阶的脚格/支撑未观测（null）不阻塞：仍清头并走上去', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0, y: 40, z: 0 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  const stepPath = [{ x: 0, y: 40, z: 0 }, { x: 1, y: 41, z: 0 }];
+  carve(w, stepPath);
+  w.setBlock({ x: 1, y: 42, z: 0 }, 'stone');
+  memory.savePassage({
+    id: 'p1', worldId: w.worldId, dim: w.dim, kind: 'dug',
+    entrances: [{ x: 1, y: 42, z: 0 }],
+    deepestY: 40, dug: 30, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1,
+    path: stepPath,
+    links: [{ a: { x: 0, y: 40, z: 0 }, b: { x: 1, y: 41, z: 0 } }],
+  });
+  // 目标脚格/支撑格未观测：未知不是“已确认不可站”，应继续交给清头与 moveTo 实测。
+  const original = w.blockAt.bind(w);
+  t.mock.method(w, 'blockAt', (pos: Vec3Like) => pos.x === 1 && (pos.y === 40 || pos.y === 41) ? null : original(pos));
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  const digs: Vec3Like[] = [];
+  const moves: Vec3Like[] = [];
+  t.mock.method(w, 'dig', async (pos: Vec3Like) => { digs.push(pos); w.setBlock(pos, 'air'); return { ok: true }; });
+  t.mock.method(w, 'moveTo', async (goal: any) => { if (goal.kind === 'near') { moves.push(goal.pos); w.pos = { ...goal.pos }; } });
+
+  const result = await followPassage.run(ctx, { to: 'entrance', dig: true });
+
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.ok(digs.some((d) => d.x === 0 && d.y === 42 && d.z === 0), '仍要清起跳头顶');
+  assert.ok(digs.some((d) => d.x === 1 && d.y === 42 && d.z === 0), '仍要清新头');
+  assert.ok(moves.some((p) => p.x === 1 && p.y === 41), '未知格交给 moveTo 实测');
+  assert.equal(result.data?.blockedWaypoint, undefined);
+});
+
 test('follow_passage 无 dig 在上台阶被头顶挡时停下并提示 dig:true', async (t) => {
   const w = new TestWorld();
   w.pos = { x: 0, y: 40, z: 0 };
   const memory = new WorldMemory(null);
   memory.setWorld(w.worldId);
+  const stepPath = [{ x: 0, y: 40, z: 0 }, { x: 1, y: 41, z: 0 }];
+  carve(w, stepPath);
+  w.setBlock({ x: 1, y: 42, z: 0 }, 'stone');
   memory.savePassage({
     id: 'p1', worldId: w.worldId, dim: w.dim, kind: 'dug',
     entrances: [{ x: 1, y: 42, z: 0 }],
     deepestY: 40, dug: 30, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1,
-    path: [{ x: 0, y: 40, z: 0 }, { x: 1, y: 41, z: 0 }],
+    path: stepPath,
     links: [{ a: { x: 0, y: 40, z: 0 }, b: { x: 1, y: 41, z: 0 } }],
   });
   const ctx = makeCtx(w, { memory });
@@ -308,9 +404,11 @@ test('follow_passage cancellation preserves the measured partial position and it
   w.pos = { x: 0.5, y: 40, z: 0.5 };
   const memory = new WorldMemory(null);
   memory.setWorld(w.worldId);
+  const flatPath = [{ x: 0, y: 40, z: 0 }, { x: 4, y: 40, z: 0 }, { x: 8, y: 40, z: 0 }];
+  carve(w, flatPath);
   memory.savePassage({ id: 'flat', worldId: w.worldId, dim: w.dim, kind: 'dug', entrances: [{ x: 8, y: 41, z: 0 }],
     deepestY: 40, dug: 8, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1,
-    path: [{ x: 0, y: 40, z: 0 }, { x: 4, y: 40, z: 0 }, { x: 8, y: 40, z: 0 }] });
+    path: flatPath });
   const ctx = makeCtx(w, { memory });
   t.after(() => memory.close());
   let cancelledAt: Vec3Like | undefined;

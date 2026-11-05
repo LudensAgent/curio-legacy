@@ -97,6 +97,16 @@ function allNodes(topology: TopologyStore): SpatialNode[] {
 function fragmentRecord(fragment: PathFragment): PassageRecord {
   const meta = metaOf(fragment.metadata);
   const curio = meta?.type === 'passage' ? meta : undefined;
+  // 库的 fragment.links 只保留 a/b；方向证据在 metadata.curio.linkMeta 里（按 link 下标）。
+  const linkMeta = new Map<number, { cut?: boolean; reverse?: boolean }>();
+  if (Array.isArray(curio?.linkMeta)) {
+    for (const item of curio.linkMeta) {
+      if (!item || typeof item !== 'object') continue;
+      const { i, cut, reverse } = item as { i?: unknown; cut?: unknown; reverse?: unknown };
+      if (typeof i !== 'number') continue;
+      linkMeta.set(i, { ...(cut === true ? { cut: true } : {}), ...(reverse === true ? { reverse: true } : {}) });
+    }
+  }
   return {
     id: fragment.id,
     worldId: fragment.worldId,
@@ -104,7 +114,7 @@ function fragmentRecord(fragment: PathFragment): PassageRecord {
     kind: fragment.kind === 'built' ? 'dug' : fragment.kind,
     entrances: fragment.entrances.map(nodePoint),
     path: fragment.polyline.map(nodePoint),
-    ...(fragment.links ? { links: fragment.links.map((link) => ({ a: nodePoint(link.a), b: nodePoint(link.b) })) } : {}),
+    ...(fragment.links ? { links: fragment.links.map((link, i) => ({ a: nodePoint(link.a), b: nodePoint(link.b), ...(linkMeta.get(i) ?? {}) })) } : {}),
     deepestY: fragment.deepestY,
     dug: typeof curio?.dug === 'number' ? curio.dug : 0,
     ores: curio?.ores && typeof curio.ores === 'object' ? (curio.ores as Record<string, number>) : {},
@@ -112,6 +122,26 @@ function fragmentRecord(fragment: PathFragment): PassageRecord {
     lastUsedAt: fragment.lastUsedAt,
     uses: fragment.uses,
     ...(typeof curio?.archivedAt === 'number' ? { archivedAt: curio.archivedAt } : {}),
+  };
+}
+
+/** 库的 PathFragment.links（cloneFragment）只保留 a/b，额外字段保存时会被剥掉。
+ *  方向判定依赖的 cut/reverse 因此按 link 下标放进不透明 metadata.curio.linkMeta，重启后由 fragmentRecord 还原。
+ *  run 只影响漏采样补桥，且每条 link 都有一个、会超过 metadata 16 KiB 上限，所以不持久化；
+ *  缺失时建图退回更保守的 legacyStep（不新增错误连接，只会少补一点缺口）。 */
+function passageMetadata(rec: PassageRecord) {
+  const linkMeta = rec.links?.flatMap((link, i) => link.cut || link.reverse
+    ? [{ i, ...(link.cut ? { cut: true } : {}), ...(link.reverse ? { reverse: true } : {}) }]
+    : []);
+  return {
+    curio: {
+      v: 1,
+      type: 'passage',
+      dug: rec.dug,
+      ores: rec.ores,
+      ...(rec.archivedAt !== undefined ? { archivedAt: rec.archivedAt } : {}),
+      ...(linkMeta?.length ? { linkMeta } : {}),
+    },
   };
 }
 
@@ -130,15 +160,7 @@ function fragmentFor(rec: PassageRecord, worldId: string, geometrySource: PathFr
     lastUsedAt: rec.lastUsedAt,
     uses: rec.uses,
     externalRef: rec.id,
-    metadata: {
-      curio: {
-        v: 1,
-        type: 'passage',
-        dug: rec.dug,
-        ores: rec.ores,
-        ...(rec.archivedAt !== undefined ? { archivedAt: rec.archivedAt } : {}),
-      },
-    },
+    metadata: passageMetadata(rec),
   };
 }
 
@@ -153,15 +175,7 @@ function fragmentChanges(rec: PassageRecord, geometrySource: PathFragment['geome
     lastUsedAt: rec.lastUsedAt,
     uses: rec.uses,
     externalRef: rec.id,
-    metadata: {
-      curio: {
-        v: 1,
-        type: 'passage',
-        dug: rec.dug,
-        ores: rec.ores,
-        ...(rec.archivedAt !== undefined ? { archivedAt: rec.archivedAt } : {}),
-      },
-    },
+    metadata: passageMetadata(rec),
   };
 }
 
