@@ -96,6 +96,22 @@ export interface InventorySlot {
   nbt?: unknown;
 }
 
+/** 一次穿门尝试里身体实际经历的时间线；失败时用它如实说明“人有没有进门、在门里待了多久”。 */
+export interface PortalTransitionFacts {
+  /** 开始时身体是否已经压在门方块上 */
+  startedInPortal: boolean;
+  /** 这次尝试期间身体是否真的与门方块重叠过（进入后又离开也算 true） */
+  entered: boolean;
+  /** 从开始到真正退出门方块的毫秒数；开始时不在门里为 null */
+  exitMs: number | null;
+  /** 退出门后到身体重新压回门方块的毫秒数；没有重新进入为 null */
+  outsideMs: number | null;
+  /** 结束时身体连续停留在门方块里的毫秒数；此刻不在门里为 0（曾经进入过看 entered） */
+  insideMs: number;
+  /** 结束时实际观察到的维度 */
+  endDim: string;
+}
+
 export interface AgentState {
   connected: boolean;
   alive: boolean;
@@ -132,6 +148,8 @@ export interface AgentState {
   onGround: boolean;
   inWater: boolean;
   inLava: boolean;
+  /** 身体 AABB 当前压着的门方块名（nether_portal/end_portal）；不在门里为 null。触觉事实，不受视野限制。 */
+  bodyPortal?: string | null;
   inventory: InvItem[];
   emptySlots: number;
   held: string | null;
@@ -422,7 +440,13 @@ export interface GameAdapter {
   releaseDraw?(signal: AbortSignal, aim?: Vec3Like): Promise<ActionResult & { chargedMs: number }>;
   /** 身体此刻的战斗相关状态：手上是否在用东西（举盾/拉弓）、副手拿着什么 */
   combatState?(): { usingItem: boolean; offHand: string | null; drawingSinceMs: number | null };
-  enterPortalAt?(pos: Vec3Like, signal: AbortSignal, expectedDim?: string): Promise<ActionResult & { from?: AgentState; to?: AgentState }>;
+  /**
+   * 走进门并等待真实维度切换。到达后（仅下界门）会尝试把身体移出目的地门方块：
+   * leftPortal 如实报告是否移出，undefined = 这种门没有检查；移出失败或过程中再次换维度会如实返回。
+   */
+  enterPortalAt?(pos: Vec3Like, signal: AbortSignal, expectedDim?: string): Promise<ActionResult & { from?: AgentState; to?: AgentState; stand?: AgentState; leftPortal?: boolean; transition?: PortalTransitionFacts }>;
+  /** 门外安全站位（格中心）；不知道门结构时返回 null。普通走路用它避免把“门厅”当成门方块本身。 */
+  portalStance?(pos: Vec3Like): Vec3Like | null;
   bossStatus?(): { dragonDeath: BossDeathObservation | null };
   dig(pos: Vec3Like, signal: AbortSignal): Promise<ActionResult>;
   /** 这个掉落物是不是自己几分钟前扔掉的（只是事实，捡不捡由心智和技能自己定） */
