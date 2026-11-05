@@ -23,6 +23,10 @@ test('回入口的路线要先下潜再爬回时，开走前停下并给出路�
   const memory = new WorldMemory(null);
   memory.setWorld(w.worldId);
   save(memory, w, 'psg_detour', detour, { x: -12, y: 81, z: 0 });
+  // 同分量另有一条更长但不下潜的记录出口：作为备选，代价更高。
+  const flat: Vec3Like[] = [];
+  for (let x = 0; x <= 70; x += 5) flat.push({ x, y: 77, z: 0 });
+  save(memory, w, 'psg_flat', flat, { x: 70, y: 77, z: 0 });
   const ctx = makeCtx(w, { memory });
   t.after(() => memory.close());
   const moves = t.mock.method(w, 'moveTo', async () => { throw new Error('不应开走'); });
@@ -34,11 +38,16 @@ test('回入口的路线要先下潜再爬回时，开走前停下并给出路�
   assert.equal(moves.mock.callCount(), 0, '绕行路线不应在 agent 决定前开走');
   assert.match(result.summary, /不是直接回地表/);
   assert.match(result.summary, /最低到 y=50/);
-  const facts = result.data?.routeFacts as { segments: number; dip: number; minY: number };
+  const facts = result.data?.routeFacts as { segments: number; dip: number; minY: number; pathLength: number };
   assert.ok(facts.segments >= 8);
+  assert.ok(facts.pathLength >= 24, '提前中止的门槛是路长 >=24 且下潜 >=8');
   assert.equal(facts.minY, 50);
   assert.equal(facts.dip, 27);
-  assert.ok(Array.isArray(result.data?.alternatives));
+  const alternatives = result.data?.alternatives as { pos: Vec3Like; cost: number; ids: string[] }[];
+  assert.equal(alternatives.length, 1, '当前绕行入口不重复列进备选');
+  assert.deepEqual(alternatives[0]!.pos, { x: 70, y: 77, z: 0 });
+  assert.equal(alternatives[0]!.ids[0], 'psg_flat');
+  assert.ok(alternatives[0]!.cost >= facts.pathLength, '备选要带图上的实际代价');
   assert.deepEqual(result.data?.resolvedIds, ['psg_detour'], '给出可用来强制走当前这条的记录 ID');
 });
 
@@ -121,7 +130,7 @@ test('同列兜底到达的高度差太多时停下，不把路线挪到另一�
   assert.ok(result.data?.staleWaypoint);
 });
 
-test('连续 3 段只能靠同列兜底时停下并报过时', async (t) => {
+test('系统性 3 格 y 偏差仍能走完：兜底成功只记次数，不中止', async (t) => {
   const w = new TestWorld();
   w.pos = { x: 0.5, y: 40, z: 0.5 };
   const memory = new WorldMemory(null);
@@ -129,16 +138,42 @@ test('连续 3 段只能靠同列兜底时停下并报过时', async (t) => {
   save(memory, w, 'flat', [0, 4, 8, 12, 16].map((x) => ({ x, y: 40, z: 0 })), { x: 16, y: 41, z: 0 });
   const ctx = makeCtx(w, { memory });
   t.after(() => memory.close());
+  // 记录点的 y 总是差 3 格（在 4 格容差内），near 每次都失败、同列兜底每次都能到。
   t.mock.method(w, 'moveTo', async (goal: any) => {
     if (goal.kind === 'near') throw new Error('No path');
-    w.pos = { x: goal.x, y: 40, z: goal.z };
+    w.pos = { x: goal.x, y: 37, z: goal.z };
   });
 
   const result = await followPassage.run(ctx as never, { to: 'entrance' });
 
-  assert.equal(result.status, 'failed');
-  assert.match(result.summary, /连续 3 段只能靠同列兜底/);
-  assert.equal(result.data?.rescueCount, 3);
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(result.data?.rescueCount, 4, '每段都记一次兜底，但路线照常走完');
+  assert.equal((result.data?.arrival as { satisfied: boolean }).satisfied, false, '偏了 3 格时不能报 arrived');
+});
+
+test('没有记录入口、只能退回最高脚点时不提前中止（也没有可指定的 id）', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 77, z: 0.5 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  // U 形记录：从 y70 下到 y50 再爬回 y70，最后折到 y79；没有 entrances。
+  save(memory, w, 'u-shape', [
+    { x: 0, y: 70, z: 0 }, { x: 0, y: 66, z: 0 }, { x: 0, y: 62, z: 0 }, { x: 0, y: 58, z: 0 },
+    { x: 0, y: 54, z: 0 }, { x: 0, y: 50, z: 0 }, { x: 0, y: 54, z: 0 }, { x: 0, y: 58, z: 0 },
+    { x: 0, y: 62, z: 0 }, { x: 0, y: 66, z: 0 }, { x: 0, y: 70, z: 0 }, { x: 5, y: 74, z: 0 },
+    { x: 10, y: 78, z: 0 }, { x: 10, y: 79, z: 0 },
+  ], { x: 10, y: 79, z: 0 });
+  // 抹掉入口记录：目标只能退回最高脚点。
+  memory.savePassage({ ...memory.passages(w.dim).find((r) => r.id === 'u-shape')!, entrances: [] });
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  const moves = t.mock.method(w, 'moveTo', async (goal: any) => { if (goal.kind === 'near') w.pos = { ...goal.pos }; });
+
+  const result = await followPassage.run(ctx as never, { to: 'entrance' });
+
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.ok(moves.mock.callCount() > 0, '没有记录入口时要照常沿记录走，而不是拦下');
+  assert.deepEqual(result.data?.resolvedIds ?? [], []);
 });
 
 test('显式 id 仍然能读到会被导航去重掉的重复记录', async (t) => {

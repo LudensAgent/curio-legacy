@@ -748,8 +748,9 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
       })();
       // 回入口却要先降到两端都低 8 格以上、而且路够长：这不是“回到地表”，而是一段穿过旧矿道的绕行。
       // 太短的下探（一两次台阶）不值得打断。显式给了 id（agent 自己选的记录）时不拦；
-      // 否则在开走前把事实和备选出口交回去，由 agent 决定。
-      if (!args.id && back && routeFacts.pathLength >= 24 && routeFacts.dip >= 8) {
+      // 没有记录入口、目标只是“最高脚点”时也不拦——那不是 agent 要回的地表口，也没有可指定的 id。
+      // 其余情况在开走前把事实和备选出口交回去，由 agent 决定。
+      if (chosenExit && !args.id && back && routeFacts.pathLength >= 24 && routeFacts.dip >= 8) {
         const candidates = passageSurfaceCandidates(recs, start, { limit: 4 });
         const resolvedIds = chosenExit?.recordIds.length
           ? chosenExit.recordIds
@@ -768,13 +769,13 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
       }
       ctx.progress(0, `沿${kind}${back ? `回记录入口 ${anchor}` : `下最深 ${anchor}`}，共 ${route.length} 段${routeFacts.dip >= 4 ? `（先降到 y=${routeFacts.minY}，比两端低 ${routeFacts.dip} 格）` : ''}`);
       let last = start;
-      // 连续多少段只能靠同列兜底：记录点和现状对不上时不要闷头磨完整条。
-      let rescued = 0, rescueCount = 0;
+      // 同列兜底的次数只作为事实回执：兜底成功说明这段仍能走通，不能因为它“不是精确 y”就中止。
+      let rescueCount = 0;
       for (let i = 0; i < route.length; i++) {
         throwIfAborted(signal);
         if (Date.now() >= ctx.deadline) return receipt(fail('TIMEOUT', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段时间用完；人停在 (${last.x.toFixed(1)},${last.y.toFixed(1)},${last.z.toFixed(1)})，离目标约 ${Math.round(dist3(last, target))} 格`, { position: last, reachedWaypoint: i, totalWaypoints: route.length - 1 }));
         const wp = route[i];
-        if (dist3(last, wp) <= 1.2) { rescued = 0; continue; }
+        if (dist3(last, wp) <= 1.2) continue;
         // 上 1 格台阶：两格高隧道里跳不起来。先把「起跳头顶」「新头」两格挖开（dig:true 才授权挖），再迈。
         const lc = feetCell(last);
         if (wp.y === lc.y + 1 && Math.abs(wp.x - lc.x) <= 1 && Math.abs(wp.z - lc.z) <= 1) {
@@ -800,7 +801,6 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
         const moveOpts = { signal, timeoutMs: Math.max(2000, Math.min(ctx.deadline - Date.now(), hop <= 4 ? 5000 : 15000)), allowSwimming: false, ...terrainPermission };
         try {
           await adapter.moveTo({ kind: 'near', pos: wp, range: 1.2 }, moveOpts);
-          rescued = 0;
         } catch (e) {
           trace.push({ ...adapter.state().pos });
           if (isAbort(e)) throw e;
@@ -823,10 +823,8 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
           if (Math.abs(got.y - wp.y) > 4) {
             return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段：记录路点在 (${Math.round(wp.x)},${Math.round(wp.y)},${Math.round(wp.z)})，同列只到得了 (${got.x.toFixed(1)},${got.y.toFixed(1)},${got.z.toFixed(1)})，高度差 ${Math.round(Math.abs(got.y - wp.y))} 格。这条记录和当前地形对不上，没有继续往下走；换条路或自己过去（由你定）`, { position: got, reachedWaypoint: i, totalWaypoints: route.length - 1, staleWaypoint: { wp, at: got }, routeFacts }));
           }
-          rescued++; rescueCount++;
-          if (rescued >= 3) {
-            return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}连续 ${rescued} 段只能靠同列兜底（记录点的 y 与现状有偏差），停在 (${got.x.toFixed(1)},${got.y.toFixed(1)},${got.z.toFixed(1)})；这条记录可能已经过时，没有继续磨完整条。换条路或自己过去（由你定）`, { position: got, reachedWaypoint: i, totalWaypoints: route.length - 1, rescueCount, routeFacts }));
-          }
+          // 兜底成功就是这一段走通了；只记下次数，不把“用了兜底”当成中止理由。
+          rescueCount++;
         }
         last = adapter.state().pos;
         trace.push({ ...last });
