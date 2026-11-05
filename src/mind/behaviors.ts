@@ -1106,11 +1106,10 @@ export class BehaviorEngine {
     // 让 callerUnmet 能精确降级这一条，而不是按“同名技能最近一次”去猜。
     if (okRun && taskId) this.lastCredit = { name, version: v, dim, taskId, entry };
     if (b.candidate) {
-      const per = this.stats[name]?.byVersion?.[this.versionOf(b)];
-      if (!this.executionError(name, true) && this.candidates.get(name)?.version === b.version && per && per.ok >= BehaviorEngine.MIN_EVIDENCE && per.ok >= per.fail * 2 && this.book?.promote(name, currentStable?.version)) {
-        this.touch(name, (st) => { st.disabled = false; delete st.retired; delete st.retiredAt; delete st.disabledAt; delete st.candidatePermit; delete st.lastError; });
-        this.bus.publish('skill_promoted', 'P2', `候选技能 ${name} v${b.version} 已通过 ${per.ok} 次实际验收，启用其原定模式`, { name, version: b.version });
-      } else if (!okRun && b.code && this.get(name, true)?.version === b.version) this.improve?.(name, 'failures');
+      // 晋级判定延后一个微任务：同一个 done 事件里，心智还会用调用方的收工条件复核这次成功（callerUnmet）。
+      // 先让它把假成功降级，再按降级后的 per.ok/per.fail 决定是否真的够格晋级。
+      queueMicrotask(() => this.considerPromotion(name, b, currentStable?.version));
+      if (!okRun && b.code && this.get(name, true)?.version === b.version) this.improve?.(name, 'failures');
       return;
     }
     if (rollback) {
@@ -1118,6 +1117,15 @@ export class BehaviorEngine {
       const r = this.rollback(name, to, `v${from} 比 v${to} 差`);
       if (r?.ok) this.bus.publish('skill_rollback', 'P2', `代码技能「${name}」的 v${from} 不如 v${to}，退回旧代码（现在是 v${r.version}）`, { name, from, to });
     } else if (b.code && !okRun && isCurrentStable) this.improve?.(name, 'failures');
+  }
+
+  /** 候选晋级：延后到微任务再看账本，留出同一 done 事件里调用方否决这次成功（callerUnmet）的时机。 */
+  private considerPromotion(name: string, b: Behavior, stableVersion?: number) {
+    const per = this.stats[name]?.byVersion?.[this.versionOf(b)];
+    if (this.executionError(name, true) || this.candidates.get(name)?.version !== b.version || !per
+      || per.ok < BehaviorEngine.MIN_EVIDENCE || per.ok < per.fail * 2 || !this.book?.promote(name, stableVersion)) return;
+    this.touch(name, (st) => { st.disabled = false; delete st.retired; delete st.retiredAt; delete st.disabledAt; delete st.candidatePermit; delete st.lastError; });
+    this.bus.publish('skill_promoted', 'P2', `候选技能 ${name} v${b.version} 已通过 ${per.ok} 次实际验收，启用其原定模式`, { name, version: b.version });
   }
 
   /**

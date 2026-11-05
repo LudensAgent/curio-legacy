@@ -978,7 +978,9 @@ export class Mind {
     // 技能自述做完、自己的 verify 也通过了，但调用方明确的收工条件未满足（比如只浮在水面、没有站上干地）：
     // 撤销这次“成功”记账——执行完毕不等于调用方要的结果。只在明确 unsatisfied 时降级；
     // stuck、可选步骤、多步活动的后续失败都不改这份技能的账。
+    // 恢复步骤（args.failure）的成败由 creditRecovery 按“重做的那一步有没有成”结算，不由调用方收工条件改判。
     if (callerEvidence?.status === 'unsatisfied' && unmetCondition && taskId && step.skill === 'use_skill'
+      && !(step.args as { failure?: unknown } | undefined)?.failure
       && result.status === 'succeeded' && result.data?.verified === true && this.d.behaviors) {
       const name = String((step.args as { name?: unknown } | undefined)?.name ?? '');
       const behaviors = this.d.behaviors;
