@@ -67,13 +67,45 @@ test('actual 1.20.1 physics demonstrates the adjacent ceiling obstruction', () =
 });
 
 test('explicit pillar refuses an obstructed jump before toggling jump or placing', async () => {
-  const w = fixture(); w.put(1, 66, 0, 'stone');
+  const w = fixture(0.5); w.put(0, 66, 0, 'stone');
   const result = await w.adapter.pillarUp(['cobblestone'], new AbortController().signal);
   assert.equal(result.reason, 'NOT_PLACED:头顶跳跃空间受阻');
-  assert.match(result.clearanceDetail!, /x=0\.\.1, y=65\.\.66, z=0\.\.0/);
-  assert.match(result.clearanceDetail!, /要跳起来得先把这几格都挖空（方块名未确认）：\(1,66,0\).*dig_at/);
+  assert.match(result.clearanceDetail!, /x=0\.\.0, y=65\.\.66, z=0\.\.0/);
+  assert.match(result.clearanceDetail!, /要跳起来得先把这几格都挖空（方块名未确认）：\(0,66,0\).*dig_at/);
   assert.doesNotMatch(result.clearanceDetail!, /stone/);
   assert.notEqual(w.controls.jump, true);
+});
+
+test('straddling detection follows the 0.6-wide body and requires solid support below', () => {
+  const w = fixture(0.7);
+  assert.equal((w.adapter as any).spanningCell(), null, '0.2 offset still fits inside one column');
+  w.bot.entity.position.x = 0.7001;
+  assert.deepEqual((w.adapter as any).spanningCell(), { x: 0, z: 0 });
+  w.bot.entity.position.x = 0.5;
+  assert.equal((w.adapter as any).spanningCell(), null, 'a centred stance needs no correction');
+  w.bot.entity.position.x = 0.8;
+  w.put(0, 63, 0, 'air');
+  assert.equal((w.adapter as any).spanningCell(), null, 'no solid support below the centre cell');
+});
+
+test('a body straddling two columns sneaks to the centre cell before checking pillar clearance', async () => {
+  const w = fixture(); w.put(1, 66, 0, 'stone');
+  const steadied: { x: number; z: number }[] = [];
+  (w.adapter as any).steady = async (cell: { x: number; z: number }) => {
+    steadied.push(cell);
+    w.bot.entity.position.x = cell.x + 0.5;
+    w.bot.entity.position.z = cell.z + 0.5;
+  };
+  // 模拟起跳：跳到鞋底离地后才允许放置；成功后落回同一格。
+  w.bot.setControlState = (key: string, value: boolean) => {
+    w.controls[key] = value;
+    if (key === 'jump' && value) w.bot.entity.position.y = 65.02;
+  };
+  w.bot.placeBlock = async () => { w.put(0, 64, 0, 'cobblestone'); };
+  const result = await w.adapter.pillarUp(['cobblestone'], new AbortController().signal);
+  assert.deepEqual(steadied, [{ x: 0, z: 0 }], 'straddling x=0.8 is recentred before the jump');
+  assert.equal(w.bot.entity.position.x, 0.5);
+  assert.equal(result.ok, true, result.reason ?? result.clearanceDetail);
 });
 
 test('goto stops a blocked Pathfinder tower after its planned digging and before the next physics step', async () => {

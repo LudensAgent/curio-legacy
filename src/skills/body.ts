@@ -402,6 +402,14 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
       const equipped = await adapter.equipItem(block.name, 'hand', signal);
       return equipped.ok;
     };
+    // Pathfinder 报错或只是返回却没真正站高时，改用适配器显式的跳起垫块一次；
+    // 它报告真实的净空与放置事实，避免把“寻路结束”当成已经爬上去。
+    const tryPillarUp = async (fromY: number) => {
+      const names = adapter.state().inventory.filter((item) => item.count > 0 && PLACEABLE.includes(item.name)).map((item) => item.name);
+      if (names.length === 0 || typeof adapter.pillarUp !== 'function') return false;
+      const fallback = await adapter.pillarUp(names, signal);
+      return fallback.ok === true && await waitForLanding(fromY);
+    };
     let climbedThisRun = 0;
     const total = () => (budget ? budget.spent : climbedThisRun);
     const reached = (around: ReturnType<typeof surroundings>) => (!args.untilSky || around.sky) && (!args.untilExit || around.exits.length > 0);
@@ -467,9 +475,15 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
           const name = e instanceof Error ? e.name : undefined;
           if (name !== 'PillarClearanceError') {
             // The pathfinder can return while the jump/placement is still settling.
+            const climbedBefore = climbedThisRun;
             await waitForLanding(before.y);
             settlePending();
-            return finish(why(e));
+            if (climbedThisRun > climbedBefore) return finish(why(e));
+            // 寻路确实报错、身体也没有升高：先用显式垫高尝试一次，再决定失败。
+            if (!(await tryPillarUp(before.y))) return finish(why(e));
+            settlePending();
+            ctx.senses.refresh();
+            continue;
           }
           // 搭柱被头顶/侧上方挡住：适配器报告具体那一格，把它挖开再垫一次；挖不动（基岩、近液体）由 breakCell 抛错如实停下
           const blocked = (e as { block?: { pos: Vec3Like } }).block?.pos;
@@ -493,17 +507,11 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
           }
         }
         throwIfAborted(signal);
-        if (!(await waitForLanding(before.y))) {
-          // Pathfinder can resolve mid-jump without placing a block. Fall back to
-          // the adapter's explicit jump-and-place once; it reports real clearance
-          // and placement facts instead of assuming a path result is a climb.
-          const names = adapter.state().inventory.filter((item) => item.count > 0 && PLACEABLE.includes(item.name)).map((item) => item.name);
-          const fallback = names.length > 0 && typeof adapter.pillarUp === 'function'
-            ? await adapter.pillarUp(names, signal)
-            : null;
-          if (fallback === null || fallback.ok !== true || !(await waitForLanding(before.y))) {
-            return finish('移动已结束，但脚下没有实际站高');
-          }
+        // Pathfinder can resolve mid-jump without placing a block. Fall back to
+        // the adapter's explicit jump-and-place once; it reports real clearance
+        // and placement facts instead of assuming a path result is a climb.
+        if (!(await waitForLanding(before.y)) && !(await tryPillarUp(before.y))) {
+          return finish('移动已结束，但脚下没有实际站高');
         }
         climbedThisRun++;
         if (budget) budget.spent++;

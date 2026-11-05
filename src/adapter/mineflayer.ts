@@ -1265,26 +1265,42 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return touching ? { x: cx, z: cz } : null;
   }
 
-  private async steady(cell: { x: number; z: number }, opts: MoveOpts, check: () => void): Promise<void> {
+  /**
+   * 身体 AABB 宽 0.6、格子宽 1.0：中心离格中线超过 0.2 时身体已经压到相邻一列。
+   * 返回中心所在格的格子，供潜行归位；中心下方不是实心方块或不在站立状态时不处理。
+   */
+  private spanningCell(): { x: number; z: number } | null {
+    const b = this.bot, e = b?.entity;
+    if (!e?.onGround || e.isInWater || e.isInLava || b.vehicle || typeof b.blockAt !== 'function' || typeof b.setControlState !== 'function') return null;
+    const p = e.position, cell = p.floored();
+    const offX = Math.abs(p.x - (cell.x + 0.5)), offZ = Math.abs(p.z - (cell.z + 0.5));
+    if (offX <= 0.2 + 1e-6 && offZ <= 0.2 + 1e-6) return null;
+    const below = b.blockAt(cell.offset(0, -1, 0));
+    if (!below || below.boundingBox !== 'block') return null;
+    return { x: cell.x, z: cell.z };
+  }
+
+  private async steady(cell: { x: number; z: number }, signal: AbortSignal, check: () => void): Promise<void> {
     const b = this.bot, e = b.entity, p = e.position;
     const epoch = this.actionEpoch;
     const ownsControls = () => epoch === this.actionEpoch && b === this.bot;
     const tx = cell.x + 0.5, tz = cell.z + 0.5;
     check();
-    if (typeof b.look === 'function') await this.afterAction(() => raceAbort(b.look(Math.atan2(-(tx - p.x), -(tz - p.z)), e.pitch ?? 0, true), opts.signal, 1000, () => {}), check);
+    if (typeof b.look === 'function') await this.afterAction(() => raceAbort(b.look(Math.atan2(-(tx - p.x), -(tz - p.z)), e.pitch ?? 0, true), signal, 1000, () => {}), check);
     b.clearControlStates?.();
     b.setControlState('sneak', true);
     b.setControlState('forward', true);
     try {
       for (let t = 0; t < 900; t += 50) {
-        await this.afterAction(() => sleep(50, opts.signal), check);
+        await this.afterAction(() => sleep(50, signal), check);
         const q = b.entity.position;
-        if (Math.hypot(tx - q.x, tz - q.z) < 0.22) break;
+        // 两轴都进入 0.15 才算归位：以欧氏距离 0.22 收尾时单轴仍可能压线，身体还跨在两列上。
+        if (Math.abs(tx - q.x) < 0.15 && Math.abs(tz - q.z) < 0.15) break;
       }
     } finally {
       if (ownsControls()) { b.setControlState('forward', false); b.setControlState('sneak', false); }
     }
-    this.bus.publish('path_steady', 'P3', `站在方块边缘，先挪回脚下那一格中心再走`);
+    this.bus.publish('path_steady', 'P3', `身体没对准格心，先潜行挪回脚下那一格中心`);
   }
 
   /** Check the actual player's head sweep before jumping high enough to place a block underfoot. */
@@ -1321,8 +1337,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     let corrections = 0, recoveryOrigin = b.entity?.position?.clone?.() ?? null;
     for (;;) {
       check();
+      // 允许原地搭柱的寻路会从当前站位起跳：身体压在两列上时，跳跃净空会把相邻
+      // 那一列也算进来。先潜行归位到中心所在格的格心，再让 Pathfinder 从格心起步。
+      const place = opts.allowPlace ?? !!opts.allowTerrainChanges;
+      const towers = !opts.constructionSafe && place && (opts.allowTower ?? place);
       const edge = this.edgeSupport() ?? (corrections === 0 && !attempted.has('recentre') ? this.hugging() : null);
-      if (edge) { if (!this.edgeSupport()) attempted.add('recentre'); await this.steady(edge, opts, check); check(); }
+      if (edge) { if (!this.edgeSupport()) attempted.add('recentre'); await this.steady(edge, opts.signal, check); check(); }
+      else if (towers && !attempted.has('align')) {
+        const centre = this.spanningCell();
+        if (centre) { attempted.add('align'); await this.steady(centre, opts.signal, check); check(); }
+      }
       let stalled = false, blockedPillar: PillarClearance | null = null;
       let last = b.entity?.position?.clone?.() ?? null, since = Date.now();
       let groundedY = b.entity?.onGround ? last?.y ?? null : null;
@@ -1411,6 +1435,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         ? 'No path: 当前在水中，寻路没有取得进展，未另选上岸位置'
         : 'No path: 附近没有可确认安全的调整空间，换条路线');
       corrections++;
+      // nudge 会横挪半格左右、可能重新压线；下一次规划前允许再归位一次。
+      attempted.delete('align');
       this.bus.publish('path_nudge', 'P3', `走路被挡住，第 ${corrections} 次调整：${action}`);
     }
   }
@@ -3857,6 +3883,14 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // 站稳了再跳
     for (let i = 0; i < 20 && !b.entity.onGround; i++) await this.afterAction(() => sleep(25, signal), check);
     if (!b.entity.onGround) return { ok: false, reason: 'NOT_PLACED:尚未站稳' };
+    // 身体 AABB 压在两列上时先潜行归位到中心所在格的格心：中心下方已有实心方块（上面的
+    // below 检查已确认），归位不会踩空；否则跳跃净空会把相邻那一列也算进来，每次垫高多清一格。
+    const centre = this.spanningCell();
+    if (centre) {
+      await this.steady(centre, signal, check);
+      // steady 会把视线摆平；放置前的俯视状态保持不变。
+      await this.afterAction(() => b.look(b.entity.yaw, -Math.PI / 2, true), check);
+    }
     const clearance = this.pillarClearance();
     if (clearance) return { ok: false, reason: `NOT_PLACED:头顶跳跃空间${clearance.kind === 'blocked' ? '受阻' : '未加载'}`, clearanceDetail: describePillarClearance(clearance), clearance: clearance.kind === 'blocked' && clearance.blocks.length ? { at: clearance.blocks[0].rel, facing: clearance.blocks[0].facing, cells: clearance.blocks.flatMap((blk) => (blk.rel && blk.facing ? [{ at: blk.rel, facing: blk.facing }] : [])) } : undefined };
     let placed = false, lastError = '';
