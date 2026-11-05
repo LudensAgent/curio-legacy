@@ -510,7 +510,7 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     a.adaptations.push(retryMark);
     markContinuation(a, ownStep(a, step));
     a.index = Math.max(0, a.index - 1);
-    return { kind: 'continue', adapted: `${step.skill} 没成；身体位置或失败回执证据有更新，按原委托再确认一次` };
+    return { kind: 'continue', adapted: `${step.skill} 没成；身体位置或失败回执证据有更新，按原委托再试一次` };
   }
   return { kind: 'stuck', why: clipFeedback(result.summary) };
 }

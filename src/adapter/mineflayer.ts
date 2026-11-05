@@ -2878,7 +2878,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   /** 身体 AABB 此刻压着的门方块名；不在门里为 null。触觉事实，不受视野限制。 */
   private bodyPortalKind(): string | null {
     const p = this.bot?.entity?.position;
-    if (!p) return null;
+    // 部分测试夹具只给 state() 需要的字段（没有 bot.blockAt）：读不到方块时如实返回未知，
+    // 不把“身体不在门里”当成已确认事实。
+    if (!p || typeof this.bot?.blockAt !== 'function') return null;
     return [...PORTAL_KINDS].find((kind) => bodyOverlapsPortal((q) => this.blockAt(q), p, [kind])) ?? null;
   }
 

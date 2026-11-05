@@ -179,7 +179,7 @@ export function moveDetails(names: string[]): string {
 }
 
 const CONDITIONS = `done_when 的写法（可选，写错会被忽略）：
-{"type":"inventory_min","item":"oak_log","count":20}｜{"type":"location_near","dimension":"overworld","pos":{"x":0,"y":64,"z":0},"radius":4}（坐标要来自观察或地标）｜{"type":"self_state","field":"inWater|inLava|onGround","equals":false}｜{"type":"self_state","field":"held|riding","equals":"物品名或 null"}｜{"type":"self_state","field":"dim","equals":"overworld|the_nether|the_end"}（真的换了维度）｜{"type":"sky_visible","equals":true}｜{"type":"underground","equals":false}｜{"type":"equipment","slot":"hand","item":"stone_pickaxe"}｜{"type":"inventory_full","free_slots":2}（背包只剩 2 格空）｜{"type":"all_of","conditions":[…]}｜{"type":"any_of","conditions":[…]}（哪个先到就收工：“铁够 24 个，或背包装满”）
+{"type":"inventory_min","item":"oak_log","count":20}｜{"type":"location_near","dimension":"overworld","pos":{"x":0,"y":64,"z":0},"radius":4}（坐标要来自观察或地标）｜{"type":"self_state","field":"inWater|inLava|onGround","equals":false}｜{"type":"self_state","field":"held|riding","equals":"物品名或 null"}｜{"type":"self_state","field":"dim","equals":"the_nether"}｜{"type":"sky_visible","equals":true}｜{"type":"underground","equals":false}｜{"type":"equipment","slot":"hand","item":"stone_pickaxe"}｜{"type":"inventory_full","free_slots":2}（背包只剩 2 格空）｜{"type":"all_of","conditions":[…]}｜{"type":"any_of","conditions":[…]}（哪个先到就收工：“铁够 24 个，或背包装满”）
 清包验收：{"type":"inventory_space_min","free_slots":5} 表示至少腾出 5 格空位（空位 ≥ 5）；inventory_full 表示空位 ≤ 指定数量，用于采集到近满，不能用来确认腾出空位。
 高度范围：{"type":"position_y","max":30}（脚的位置 y ≤ 30），也可写 min 或同时写 min、max。
 身体状态仅表示当前快照：inWater=false 只表示采样时身体未接触水，不证明已上岸、持续站稳或完成换气；onGround=true 只表示当前触地，也可能在水底。氧气恢复程度看 oxygen 数值；条件及其组合由你按实际目标选择。
@@ -235,7 +235,7 @@ const CHOOSE = `【选动作】
 - 坐船过水：船是实体，用 use_item {"item":"…_boat","on":"water"} 放到水面（别用 place_at），再 interact {"entity":"boat"} 上船；ride {"direction":"SW"} 划（ride 必须给 direction 或 to）。travel 提供步行和游泳寻路，已乘船时沿水路导航；吃 → eat（背包有吃的）/ hunt / forage / fish；做东西 → craft、smelt（会自己放下背包里的工作台/熔炉；拿不准查 recipes）
 - 从箱子取/存东西 → 先 find_item {"item":"…"} 查它在哪个箱子，再 take_items / store_items 指定那只箱子（target 写坐标或容器地标 ID）
 - 在坑里或地下想上去 → 看【身边】local 和背包，用 dig_at / step / place_at 自己想办法（怎么上去由你定，背包里有什么用什么）；目标脚下是空腔时，step 可写 fill:"方块名" 先补这一格搭桥，或先 place_at 补支撑；想往下深挖 → 有稳定辅助 excavate_path {"entry":"current","mode":"stairs"} 或 assess_landings + descend（手工 dig_at+step 阶梯要自己处理下一级的支撑格）
-- 穿下界门/末地门 → 先 observe_portal 拿 portalId，再 travel_portal {"portalId":"…"} 穿过去；travel_portal 不行时，自己走到门面正前那一格、面向门面走进去（走进紫色门面后要连续停留约 4 秒才会换维度；身体已经在门方块里时继续前进不会重新触发，先看 body_in_portal/身体所在格；portal 方块站不住也挖不掉，所以别用 step/dig 去动它）
+- 穿下界门/末地门 → 先 observe_portal 拿 portalId，再 travel_portal {"portalId":"…"} 穿过去；travel_portal 不行时，自己走到门面正前那一格、面向门面走进去（进门后要连续停留约 4 秒；已在门方块里时前进不会重新触发，先看 body_in_portal；portal 方块站不住也挖不掉，别用 step/dig）
 - design 请建筑师画图纸，再 build（新盖 {"draft":"图纸ID"}，续建 {"projectId":"作品ID"}）；不要自己画图纸
 - goto 默认不挖墙、不垫路、不搭柱；dig:true 才额外允许挖掘、垫路和搭柱；place:false 禁止放置，tower:false 禁止原地搭柱。`;
 
@@ -615,6 +615,8 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
     // 血量保留一位小数：半颗心四舍五入成 0 会让模型以为自己已经死了
     hp: Math.round(p.self.hp * 10) / 10, food: p.self.food,
     ...(p.self.inWater ? { inWater: true, oxygen: s.oxygen } : {}), ...(p.self.inLava ? { inLava: true } : {}), ...(p.self.riding ? { riding: p.self.riding } : {}),
+    // 触觉事实：身体 AABB 正压着的门方块（不受视野限制）；不在此格时省略，避免每念都占字数
+    ...(p.self.body_in_portal ? { body_in_portal: p.self.body_in_portal } : {}),
     ...(s.dim === 'overworld' ? { time: sunText(p.time.timeOfDay) } : { time: `${DIM_ZH[s.dim] ?? '这里'}没有昼夜（光照恒定）` }),
     ...(s.dim === 'overworld' && p.time.can_sleep === false ? { can_sleep: '还不能睡：要等天黑后（雷雨时随时能睡）' } : {}),
     ...(p.time.weather ? { weather: p.time.weather } : {}),
