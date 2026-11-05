@@ -784,6 +784,8 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
           }
         }
       }
+      // 上面的分支要么返回失败，要么把 route 赋成非空；这里只需要给类型收窄。
+      if (!route) return receipt(fail('PATH_NOT_FOUND', `旧矿道连不到${goal}；${digFact}`));
       // 出发前入口：人可能站在通道上方的地表/别的层，而 route 起点在下方 >2 格。
       // 回入口（to:'entrance'）才走向 24 格内的地表入口锚点；下最深（to:'deepest'）只走向最近的记录节点，
       // 不能反向爬去地表。两者都只走路，不带 dig/place，再从实际位置重算 route；
@@ -827,6 +829,8 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
           }
         }
       }
+      // 接入口重算后仍可能为空（虽然上面的分支会返回）；给类型收窄。
+      if (!route) return receipt(fail('PATH_NOT_FOUND', `旧矿道连不到${goal}；${digFact}`));
       // 出发前把这条路的实际形状算出来：段数、路长、最低点、和两端的高差。
       // 记录网的「最高入口」只保证接近地表；看着 y 高 2 格，实际可能要下潜 20 多格再爬回来。
       const routeFacts = (() => {
