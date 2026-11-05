@@ -3,18 +3,18 @@
     "name": "curio-minecraft-3d-memory",
     "version": "0.9.0"
   },
-  "sourceHEAD": "c7707b6567ec054062a2693d6391db494e45bd0a",
-  "artifactSHA256": "bf598df5600d41cc6889784d28b1c106b378c8a3a45f61111be741c5f75de774",
-  "npmIntegrity": "sha512-bNWCqqMfa/g63imFE/Ekv3tA+6TVnm7t7B5Y+hJcCuOkFbe80uiQpBSlEp4Co7Bocemmt0GnfpRcQ9oJgj/Oyw==",
+  "sourceHEAD": "76157f1d5612fc04cf28ff15a6b0c81b302e20ba",
+  "artifactSHA256": "962ee3172de99df2fc815021051684fd60f61424916ccf360ed359488f9202d2",
+  "npmIntegrity": "sha512-yjyea8wjk2T1RXiWGy+XZ7fcr3PL+QxfSuOojfDejUZpWTAqFX95fv/YHNt0HFeScdlpWqdpzFsL6l/qQi9bvg==",
   "sourceBinding": {
     "clean": true,
-    "head": "c7707b6567ec054062a2693d6391db494e45bd0a"
+    "head": "76157f1d5612fc04cf28ff15a6b0c81b302e20ba"
   },
   "verification": {
     "unitTests": {
       "status": "PASS",
       "command": "vitest run --exclude acceptance/**",
-      "passed": 956,
+      "passed": 959,
       "failed": 0
     },
     "typecheck": "PASS",
