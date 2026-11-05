@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { InvItem } from '../src/adapter/types.ts';
 import type { StockRow } from '../src/memory/chest-memory.ts';
-import { consumptionSummary, durabilityFacts, fuelFacts, oreOpportunityFact, supplyFacts, supplyReading, toolBackupFact, torchCraftable } from '../src/brain/supply.ts';
+import { consumptionSummary, durabilityFacts, fuelFacts, oreOpportunityFact, supplyFacts, supplyReading, toolTierFact, torchCraftable } from '../src/brain/supply.ts';
 
 const item = (name: string, count: number, extra?: Partial<InvItem>): InvItem => ({ name, count, ...extra });
 const row = (item: string, inChests: number): StockRow => ({ item, total: inChests, inChests, chestCount: 1, inBackpack: 0 });
@@ -121,28 +121,117 @@ test('oreOpportunityFact：看见矿 + 现有存量 + 用途，采不采由它�
   assert.ok(!two!.includes('gold_ore'), '只报最近的两块矿');
 });
 
-test('toolBackupFact：铁镐 + 铁锭不足（≤6）+ 没有耐用石镐时才提醒，做不做备用由它定', () => {
-  // 有铁镐、铁锭 0、没有石镐 → 提醒
-  const f = toolBackupFact([item('iron_pickaxe', 1), item('iron_ingot', 0)], undefined);
-  assert.match(f!, /你包里有铁镐/);
-  assert.match(f!, /铁锭只剩 0 个/);
-  assert.match(f!, /石镐（3 圆石 \+ 2 木棍）/);
-  assert.match(f!, /红石\/金\/钻石\/绿宝石/);
-  assert.match(f!, /由你定/);
-  // 铁锭 3、6 仍算紧缺（≤6，与 frugal 稀缺线一致）→ 提醒
-  assert.match(toolBackupFact([item('iron_pickaxe', 1), item('iron_ingot', 3)], undefined)!, /铁锭只剩 3 个/);
-  assert.match(toolBackupFact([item('iron_pickaxe', 1), item('iron_ingot', 6)], undefined)!, /铁锭只剩 6 个/);
-  // 铁锭 7 → 宽裕，不提醒
-  assert.equal(toolBackupFact([item('iron_pickaxe', 1), item('iron_ingot', 7)], undefined), null);
-  // 有耐用的石镐（耐久 100/131）→ 不提醒
-  assert.equal(toolBackupFact([item('iron_pickaxe', 1), item('stone_pickaxe', 1, { durability: { left: 100, max: 131 } }), item('iron_ingot', 0)], undefined), null);
-  // 石镐快坏了（耐久 1/131）→ 等于没有，提醒
-  assert.match(toolBackupFact([item('iron_pickaxe', 1), item('stone_pickaxe', 1, { durability: { left: 1, max: 131 } }), item('iron_ingot', 0)], undefined)!, /你包里有铁镐/);
-  // 没耐久信息的石镐默认当可用 → 不误报
-  assert.equal(toolBackupFact([item('iron_pickaxe', 1), item('stone_pickaxe', 1), item('iron_ingot', 0)], undefined), null);
-  // 箱子里的铁锭也算
-  assert.equal(toolBackupFact([item('iron_pickaxe', 1)], [row('iron_ingot', 7)]), null);
-  assert.match(toolBackupFact([item('iron_pickaxe', 1)], [row('iron_ingot', 1)])!, /铁锭只剩 1 个/);
-  // 没有铁镐 → null
-  assert.equal(toolBackupFact([item('stone_pickaxe', 1)], undefined), null);
+test('toolTierFact：铁镐 + 有可用石镐也要报事实（不再因为它能用就沉默）', () => {
+  const inv = [
+    item('iron_pickaxe', 1, { durability: { left: 250, max: 250 } }),
+    item('stone_pickaxe', 1, { durability: { left: 100, max: 131 } }),
+    item('iron_ingot', 0),
+  ];
+  const f = toolTierFact({ inventory: inv, digging: true })!;
+  assert.ok(f);
+  assert.match(f.text, /铁镐×1（耐久 250\/250）/);
+  assert.match(f.text, /石镐×1（耐久 100\/131）/);
+  assert.match(f.text, /铁锭只剩 0 个（做一把新的要 3 个）/);
+  assert.match(f.text, /石镐能挖石头\/煤\/铜\/铁\/青金石/);
+  assert.match(f.text, /红石\/金\/钻石\/绿宝石才必须铁镐/);
+  assert.match(f.text, /要换就先 hold_item stone_pickaxe；excavate_path 使用主手工具/);
+  assert.match(f.text, /换不换由你定/);
+  assert.match(f.key, /tier:iron/);
+  assert.match(f.key, /cheap:stone:1:ok/);
+  // 主手状态、便宜镐耐久变化都要反映到 key，供上层去重
+  assert.match(toolTierFact({ inventory: inv, held: 'stone_pickaxe', digging: true })!.key, /held:stone_pickaxe/);
+  assert.notEqual(
+    toolTierFact({ inventory: [item('iron_pickaxe', 1), item('stone_pickaxe', 1, { durability: { left: 1, max: 131 } }), item('iron_ingot', 0)], digging: true })!.key,
+    f.key,
+  );
+});
+
+test('toolTierFact：便宜镐快坏了，报做一把的真实缺口（木棍/原木这类嵌套也报）', () => {
+  const inventory = [
+    item('iron_pickaxe', 1),
+    item('stone_pickaxe', 1, { durability: { left: 18, max: 131 } }),
+    item('cobblestone', 30), item('stick', 0), item('oak_log', 1), item('iron_ingot', 0),
+  ];
+  const f = toolTierFact({ inventory, digging: true })!;
+  assert.match(f.text, /包里的石镐×1（耐久 18\/131）剩余都不足 15%/);
+  assert.match(f.text, /要再做一把石镐：做 stone_pickaxe×1/);
+  // 1 根原木够做木棍 → 报材料够，并顺带列出中间品
+  assert.match(f.text, /材料已经够了/);
+  assert.match(f.text, /stick/);
+  // 没有原木 → 缺口一路追到原木
+  const noLog = toolTierFact({ inventory: inventory.filter((i) => i.name !== 'oak_log'), digging: true })!;
+  assert.match(noLog.text, /做 stone_pickaxe×1 还差：原木×1（哪种都行）/);
+  assert.match(noLog.key, /craft:/);
+});
+
+test('toolTierFact：没有便宜镐、也做不出便宜镐时仍报真实缺口，不沉默', () => {
+  const f = toolTierFact({ inventory: [item('iron_pickaxe', 1), item('iron_ingot', 0)], digging: true })!;
+  assert.ok(f, '线上“石镐没补”的场景不能因为没有现成便宜镐就不提');
+  assert.match(f.text, /包里没有石镐/);
+  assert.match(f.text, /要再做一把石镐：做 stone_pickaxe×1 还差/);
+  assert.match(f.text, /圆石|原木/);
+  assert.match(f.key, /craft:/);
+});
+
+test('toolTierFact：木镐是最便宜候选时，不宣称它能挖铜/铁/青金石', () => {
+  const f = toolTierFact({
+    inventory: [item('iron_pickaxe', 1), item('oak_log', 4), item('iron_ingot', 0)],
+    digging: true,
+  })!;
+  assert.ok(f);
+  assert.match(f.text, /木镐能挖石头\/煤/);
+  assert.match(f.text, /铜\/铁\/青金石至少要石镐/);
+  assert.doesNotMatch(f.text, /木镐能挖石头\/煤\/铜/);
+});
+
+test('toolTierFact：钻石镐 + 只有石镐可用时，补上“红石/金/钻石/绿宝石要铁镐”这一层', () => {
+  const f = toolTierFact({
+    inventory: [item('diamond_pickaxe', 1), item('stone_pickaxe', 1), item('diamond', 0)],
+    digging: true,
+  })!;
+  assert.ok(f);
+  assert.match(f.text, /石镐能挖石头\/煤\/铜\/铁\/青金石/);
+  assert.match(f.text, /红石\/金\/钻石\/绿宝石至少要铁镐/);
+  assert.match(f.text, /远古残骸\/黑曜石才必须钻石镐/);
+});
+
+test('toolTierFact：钻石镐档次下，便宜铁镐可用也报事实', () => {
+  const f = toolTierFact({
+    inventory: [
+      item('diamond_pickaxe', 1, { durability: { left: 1000, max: 1561 } }),
+      item('iron_pickaxe', 1, { durability: { left: 200, max: 250 } }),
+      item('diamond', 0),
+    ],
+    digging: true,
+  })!;
+  assert.match(f.text, /钻石镐×1（耐久 1000\/1561）/);
+  assert.match(f.text, /铁镐×1（耐久 200\/250）/);
+  assert.match(f.text, /钻石只剩 0 个（做一把新的要 3 个）/);
+  assert.match(f.text, /只有远古残骸\/黑曜石才必须钻石镐/);
+  assert.match(f.text, /hold_item iron_pickaxe/);
+  assert.match(f.key, /tier:diamond/);
+  assert.match(f.key, /cheap:iron:1:ok/);
+});
+
+test('toolTierFact：材料宽裕 / 没在挖 / 最高档只有石镐时返回 null', () => {
+  // 铁锭 7 → 宽裕
+  assert.equal(toolTierFact({ inventory: [item('iron_pickaxe', 1), item('iron_ingot', 7), item('stone_pickaxe', 1)], digging: true }), null);
+  // 没在挖 → 投放门控在函数自身也生效
+  assert.equal(toolTierFact({ inventory: [item('iron_pickaxe', 1), item('stone_pickaxe', 1), item('iron_ingot', 0)], digging: false }), null);
+  // 最高档只有石镐 → 不是一个需要换便宜镐的场景
+  assert.equal(toolTierFact({ inventory: [item('stone_pickaxe', 1), item('wooden_pickaxe', 1)], digging: true }), null);
+});
+
+test('toolTierFact：稀缺材料按箱子账本合计，held 进 key', () => {
+  assert.equal(toolTierFact({ inventory: [item('iron_pickaxe', 1)], stock: [row('iron_ingot', 7)], digging: true }), null);
+  const f = toolTierFact({
+    inventory: [item('iron_pickaxe', 1), item('cobblestone', 3), item('oak_log', 1)],
+    stock: [row('iron_ingot', 1)],
+    held: 'iron_pickaxe',
+    digging: true,
+  })!;
+  assert.match(f.text, /铁锭只剩 1 个/);
+  assert.match(f.text, /要再做一把石镐：做 stone_pickaxe×1/);
+  assert.match(f.key, /held:iron_pickaxe/);
+  assert.match(f.key, /mat:1/);
 });

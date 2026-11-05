@@ -13,7 +13,7 @@ import { evaluateCondition, observationReady } from '../projects/conditions.ts';
 import { SKILLS } from '../skills/index.ts';
 import { worldPoint } from '../skills/recovery.ts';
 import { causeName } from '../brain/habits.ts';
-import { consumptionSummary } from '../brain/supply.ts';
+import { consumptionSummary, toolTierFact } from '../brain/supply.ts';
 import { pickFuel } from '../skills/economy.ts';
 import { pickVariant } from '../skills/work.ts';
 import { afterStep, argsLabel, beginStep, clipFeedback, markContinuation, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, nextStep, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
@@ -66,6 +66,8 @@ const reasonKey = (summary: string) => summary.replace(/-?\d+(\.\d+)?/g, '#').sl
 
 /** 本来就是在应对怪的动作：挨打时不用叫停 */
 const COMBAT = new Set(['defend', 'flee', 'hunt', 'ranged_defend', 'shelter', 'eat', 'use_skill']);
+/** 正在做/接着要做这类动作时，工具分级事实才和眼下有关（climb_up 只垫不挖，不算） */
+const DIGGING_SKILLS = new Set(['gather', 'dig', 'dig_at', 'excavate_path', 'search_structure', 'build_portal', 'shelter', 'unstuck', 'goto', 'travel', 'build']);
 
 /** 人在水里时靠这些动作出水/换气：停下就是下沉，不能像砌墙那样被挨打叫停 */
 const WATER_ESCAPE = new Set(['surface', 'swim_to', 'dive', 'travel', 'ride', 'press_keys', 'move']);
@@ -237,6 +239,12 @@ export class Mind {
   /** 这一趟下地：从哪一刻起头顶没了天空、当时背包有什么。回到地面就清掉（给“下矿的账”算这趟花了多久、挖到了什么） */
   private trip: { since: number; inventory: Record<string, number> } | null = null;
   private skillOpenedAt = new Map<string, number>();
+  /** 上次展示的工具分级事实签名与时间：同状态不每念重复，状态变了或过了 10 分钟才再说 */
+  private toolFactKey: string | null = null;
+  private toolFactAt = 0;
+  static readonly TOOL_FACT_REPEAT_MS = 10 * 60_000;
+  /** 两次投放之间的最小间隔：状态签名来回跳（例如主手在镐/斧之间换）时不至于每念重发 */
+  static readonly TOOL_FACT_MIN_GAP_MS = 30_000;
 
   constructor(private d: MindDeps) {
     this.timing = { ...DEFAULT_TIMING, ...(d.timing ?? {}) };
@@ -1182,6 +1190,26 @@ export class Mind {
     const nearbyCaveats = this.recentActionCaveats.filter((c) => Date.now() - c.at < Mind.SAME_FAIL_MS
       && c.worldId === state.worldId && c.sessionId === state.sessionId && c.dim === state.dim
       && Math.hypot(c.pos.x - state.pos.x, c.pos.y - state.pos.y, c.pos.z - state.pos.z) <= 8).slice(-6);
+    // 手上正在做/接着要做的那一步（activity.index 指向下一待执行步，前一步是正在跑的），以及已经想好的下一段
+    const plannedDig = [
+      ...(this.activity ? this.activity.steps.slice(Math.max(0, this.activity.index - 1), this.activity.index + 1) : []),
+      ...(this.queuedNext?.draft.steps ?? []),
+    ].some((st) => DIGGING_SKILLS.has(st.skill));
+    // 寻路/自写技能也会挖：最近 5 秒真有挖掘事件时也算“在挖”，别让铁镐在无名路径上悄悄掉耐久
+    const recentDig = this.safe(() => (this.d.adapter.recentDug?.(Date.now() - 5_000)?.length ?? 0) > 0, false);
+    const tierFact = this.safe(() => toolTierFact({
+      inventory: state.inventory, stock: percept.storage?.stock, held: state.held, digging: plannedDig || recentDig,
+    }), null);
+    // 同一状态签名不每念重复；状态变了、换了世界/会话/维度，或过了 10 分钟才再说；两次投放至少隔 30 秒
+    const factNow = Date.now();
+    const scoped = tierFact ? `${state.worldId}:${state.sessionId}:${state.dim}:${tierFact.key}` : null;
+    const changed = scoped !== this.toolFactKey || factNow - this.toolFactAt > Mind.TOOL_FACT_REPEAT_MS;
+    const toolFact = scoped && changed && factNow - this.toolFactAt >= Mind.TOOL_FACT_MIN_GAP_MS ? tierFact : null;
+    if (toolFact) {
+      this.toolFactKey = scoped; this.toolFactAt = factNow;
+      // 只在真正投放时打一次点；buildMindMessages 可能因升层/重试被调用多次，不能放在提示词构建里重复发
+      this.d.bus.publish('notice', 'P3', toolFact.text, { level: 'note', salience: 0.3, kind: 'tool_tradeoff' });
+    }
     const ctx: MindContext = {
       tier, reason: reflect ? `${reason}；做完了好几段活，顺便回头看看哪些办法好用、哪些该改` : reason,
       percept, state, self: this.d.self, memory: this.d.memory, blockAt: (p) => this.d.adapter.blockAt(p), activity: this.activity, suspended: this.suspended,
@@ -1205,6 +1233,7 @@ export class Mind {
       ...(reviewing ? { stageReview: this.safe(() => this.stageReviewFacts(), { why: this.review?.why ?? '' }) } : {}),
       ...(this.d.behaviors && tier === 'deliberate' ? { learnedSkills: this.safe(() => this.d.behaviors!.overview().filter((l) => !/已收起|已停用/.test(l)), []), instincts: this.safe(() => instinctNote(), '') } : {}),
       ...(this.d.thinker.designing ? { designing: { brief: this.d.thinker.designing.brief, minutes: Math.round((Date.now() - this.d.thinker.designing.startedAt) / 60_000) } } : {}),
+      toolFact: toolFact?.text ?? null,
       repeatedFailures: [...this.failuresByTarget].filter(([key, f]) => f.n >= 2 && !nearbyFailKeys.has(key))
         .sort((a, b) => b[1].n - a[1].n).slice(0, 10).map(([key, f]) => `${key.replace(':', ' ')} ×${f.n}（10 现实分钟内）`),
       recentActionFailures: nearbyFailures.map((f) => {
