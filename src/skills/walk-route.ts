@@ -37,6 +37,54 @@ interface WalkRouteArgs {
   deadlineMs?: number;
 }
 
+/**
+ * walk_route 的父委托外壳：原请求、经校验的解析目标与唯一执行后端。
+ * 成功、失败、取消、限期都保留同一份外壳；库的 NavResult 另放 data.nav。
+ */
+export interface WalkRouteBase {
+  originalRequest: { points: Vec3Like[]; deadlineMs?: number };
+  resolvedTarget: Vec3Like;
+  backend: 'library_walk_route';
+}
+
+/** 终态 top-level stage：路由证据失效优先于泛化的 FAILED/BLOCKED 结局。 */
+export function navStage(nav: NavResult): string {
+  return nav.problem?.kind === 'route_invalidated' ? 'route_invalidated' : nav.outcome;
+}
+
+/**
+ * 导航入口的参数边界：未知选项必须显式拒绝，不能静默丢弃。
+ * 本轮只执行调用者给定的同高、无施工步行路线；`avoid`/`dig`/`place`/`tower`/
+ * `materials` 等能力尚未贯通到这里，给了非空值就如实报缺口。显式的空 `avoid`/
+ * `materials` 或不开启的 dig/place/tower 不请求额外手段，按无操作接受。
+ */
+export function unsupportedNavOption(skill: string, options: Record<string, unknown>, allowed: readonly string[]): string | null {
+  for (const key of Object.keys(options)) {
+    if (allowed.includes(key)) continue;
+    const value = options[key];
+    const empty = value === undefined || value === null || (Array.isArray(value) && value.length === 0);
+    if ((key === 'avoid' || key === 'materials') && empty) continue;
+    if ((key === 'dig' || key === 'place' || key === 'tower') && value !== true) continue;
+    const shown = typeof value === 'string' ? value.slice(0, 40) : (JSON.stringify(value) ?? String(value)).slice(0, 80);
+    const capability = key === 'avoid' ? '（本入口不会另选绕行路线）'
+      : key === 'dig' || key === 'place' || key === 'tower' || key === 'materials' ? '（本入口不做挖掘、放置、搭柱或耗材）' : '';
+    return `${skill} 不支持参数 ${key}=${shown}${capability}；请移除该参数，或改用明确授权这些手段的入口`;
+  }
+  return null;
+}
+
+/** 每个结果都带同一份父委托外壳；resolvedTarget 是已校验路线的末点。 */
+function walkRouteBase(args: WalkRouteArgs): WalkRouteBase {
+  return {
+    originalRequest: {
+      points: args.points.map((point) => ({ x: point.x, y: point.y, z: point.z })),
+      ...(args.deadlineMs !== undefined ? { deadlineMs: args.deadlineMs } : {}),
+    },
+    resolvedTarget: { ...args.points[args.points.length - 1]! },
+    backend: 'library_walk_route',
+  };
+}
+
 /** 本轮能力上限：短路线，单轴相邻一格。 */
 const MAX_POINTS = 32;
 
@@ -140,9 +188,10 @@ export function historyFields(execution: WalkRouteExecution): Record<string, unk
   };
 }
 
-function navToResult(nav: NavResult, execution: WalkRouteExecution): SkillResult {
+function navToResult(nav: NavResult, execution: WalkRouteExecution, base: WalkRouteBase): SkillResult {
   const summary = nav.message;
-  const data = { nav, ...historyFields(execution) };
+  // 终态原因（含 route_invalidated）放在 top-level stage；库的完整 NavResult 原样保留在 data.nav。
+  const data = { ...base, stage: navStage(nav), nav, ...historyFields(execution) };
   if (nav.outcome === 'ARRIVED') return ok(summary, data);
   // 取消是取消，不包装成普通 STUCK；部分位移随 nav.lastPosition/trace 保留在 data。
   if (nav.outcome === 'CANCELLED') return { status: 'cancelled', summary, data };
@@ -181,6 +230,8 @@ export async function executeWalkRoute(
     /** 本次执行实际依赖、由调用方 prepare 后持有的 Sections；附着生命周期用。 */
     protectedSections?: readonly SectionKey[];
     starter?: (loop: WalkRouteExecutor, request: WalkRouteRequest) => KnownWalkRouteStart;
+    /** 进度映射区间：搜索入口把搜索前的阶段计入，路线段再映射到 [from,to]。 */
+    progressRange?: { from: number; to: number };
   },
 ): Promise<WalkRouteExecution> {
   // 每次真实执行自己的唯一调用标识：库的 delegationId/executionId 会在新的 loop 里
@@ -190,11 +241,27 @@ export async function executeWalkRoute(
   // 只有终态 trace 中已确认的前缀才与这些请求配对写历史。
   const moveRequests: WalkMoveRequestObservation[] = [];
 
+  // 进度只按库已用实测样本确认起点的段数推进：库发来单段请求时身体已在该段起点，
+  // 因此这不是按键次数或墙钟估算。原地跳/物理抖动不会产生新段，也就不会报进度。
+  const range = opts.progressRange ?? { from: 0, to: 1 };
+  const totalSegments = Math.max(1, opts.request.points.length - 1);
+  let progressAt = Math.max(0, Math.min(1, range.from));
+  const reportProgress = (fraction: number, note: string) => {
+    const next = Math.max(0, Math.min(1, range.from + (range.to - range.from) * Math.max(0, Math.min(1, fraction))));
+    if (next <= progressAt) return;
+    progressAt = next;
+    ctx.progress(next, note);
+  };
+  ctx.progress(progressAt, '开始执行已选定的步行路线');
+
   // 移动中持续更新身体周边格（视锥随身体朝向移动而更新），有界 3×3×4。
   const observe = () => observeCells(ctx, opts.map, bodyLocalCells(ctx.adapter.state().pos));
   const nav = await runWalkRoute({
     map: opts.map, body: opts.body, request: opts.request, tick: opts.tick, signal: ctx.signal, observe,
-    onMoveRequest: (move) => { moveRequests.push(move); },
+    onMoveRequest: (move) => {
+      moveRequests.push(move);
+      reportProgress(moveRequests.length / totalSegments, `步行：已开始第 ${moveRequests.length}/${totalSegments} 段（库已用实测样本确认该段起点）`);
+    },
     // 真实 ready 丢失（同一 sessionId 下区块消失）可能先被步行生命周期看到、且之后
     // 没有下一帧/下一次 Vision 调用；readObservedState 把已经知道的实际边界交给共享
     // 服务一次，服务仅在实际准入时 interrupt，重复读取不会重复中断。
@@ -218,6 +285,8 @@ export async function executeWalkRoute(
       return () => spatial.detach(token);
     },
   });
+  // 到达由库的实测条件确认；取消/超时/失效只保留已确认段对应的进度，不虚报到 1。
+  if (nav.outcome === 'ARRIVED') ctx.progress(1, '已按库的实测到达条件确认到达');
 
   // 已确认段 = 终态 trace 的前缀，且每一段都有库实际发出的请求可供归属。
   // 未确认的当前半段不会进入 trace，也不会被补写成 traversal。
@@ -318,11 +387,13 @@ export async function executeWalkRoute(
 export const walkRoute: Skill<WalkRouteArgs> = {
   name: 'walk_route',
   description: '走一条显式给定的同高、无施工短路线（普通干燥整块、沿 X/Z）。由你提供点列，代码稳定执行到每个点；出发前会有限次转头（≤12 次）观察路线支撑/身体/净空格，移动中每段会低头看向该段路径的支撑格，途中只依据可见格更新；转头观察不使用任何物品',
-  argsDoc: '{"points":[[x,y,z],...]}（2~32 个点，脚高 y 相同，相邻沿 X/Z 一格）',
+  argsDoc: '{"points":[[x,y,z],...]}（2~32 个点，脚高 y 相同，相邻沿 X/Z 一格）,"deadlineMs"?:正有限毫秒；只接受这两个参数，avoid/dig/place/tower/materials 等未贯通的选项会被明确拒绝，不会静默忽略',
   timeoutMs: 30000,
   movement: true,
   validate(raw, _adapter) {
     const a = (raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}) as Record<string, unknown>;
+    const unsupported = unsupportedNavOption('walk_route', a, ['points', 'deadlineMs']);
+    if (unsupported !== null) return { ok: false, error: unsupported };
     const points = a.points;
     if (!Array.isArray(points) || points.length < 2) return { ok: false, error: 'walk_route 需要 {"points":[[x,y,z],...]}，至少 2 个点' };
     if (points.length > MAX_POINTS) return { ok: false, error: `walk_route 本轮最多 ${MAX_POINTS} 个点` };
@@ -349,11 +420,12 @@ export const walkRoute: Skill<WalkRouteArgs> = {
     return { ok: true, args: { points: parsed, ...(deadlineMs !== undefined ? { deadlineMs } : {}) } };
   },
   async run(ctx, args) {
+    const base = walkRouteBase(args);
     const spatial = ctx.spatial;
-    if (!spatial) return fail('ERROR', 'walk_route 需要宿主共享空间会话（ctx.spatial），当前未接线');
+    if (!spatial) return fail('ERROR', 'walk_route 需要宿主共享空间会话（ctx.spatial），当前未接线', { ...base });
     const body = ctx.adapter.walkBody?.();
     const tick = ctx.adapter.walkTick?.();
-    if (!body || !tick) return fail('ERROR', '当前适配器没有 walk 身体桥（walkBody/walkTick）');
+    if (!body || !tick) return fail('ERROR', '当前适配器没有 walk 身体桥（walkBody/walkTick）', { ...base });
 
     const state = ctx.adapter.state();
     // 共享步行只读宿主服务持有的地图；缺失/关闭时显式失败，绝不自建 VoxelMap 兜底。
@@ -375,7 +447,7 @@ export const walkRoute: Skill<WalkRouteArgs> = {
       );
       if (residency.status !== 'ready') {
         const summary = `walk_route 空间依赖未准备好：${residency.message}`;
-        const data = { stage: 'residency', ...residencyFacts(residency) };
+        const data = { ...base, stage: 'residency', ...residencyFacts(residency) };
         if (residency.reason === 'cancelled') {
           if (ctx.signal.aborted || spatial.closing || spatial.paused) {
             return { status: 'cancelled', summary, data: { ...data, cancelBy: 'lifecycle' } };
@@ -389,21 +461,21 @@ export const walkRoute: Skill<WalkRouteArgs> = {
       // prepare 是真实异步等待：期间可能换 scope、暂停、关闭或身体/观测失效。
       // 预扫前必须重新读取当前状态，不能沿用 prepare 前的 state；失败仍走 finally 释放 lease。
       if (ctx.signal.aborted) {
-        return { status: 'cancelled', summary: 'walk_route 预扫前被父任务取消', data: { stage: 'CANCELLED', cancelBy: 'parent', ...residencyFacts(residency) } };
+        return { status: 'cancelled', summary: 'walk_route 预扫前被父任务取消', data: { ...base, stage: 'CANCELLED', cancelBy: 'parent', ...residencyFacts(residency) } };
       }
       if (Date.now() >= effectiveDeadline) {
-        return fail('TIMEOUT', 'walk_route 预扫前到达期限', { stage: 'TIMEOUT', ...residencyFacts(residency) });
+        return fail('TIMEOUT', 'walk_route 预扫前到达期限', { ...base, stage: 'TIMEOUT', ...residencyFacts(residency) });
       }
       const preparedState = ctx.adapter.state();
       if (!preparedState.alive || !preparedState.connected || !preparedState.observationReady) {
-        return { status: 'cancelled', summary: 'walk_route 准备期间身体/观测失效，未开始预扫', data: { stage: 'CANCELLED', cancelBy: 'lifecycle', ...residencyFacts(residency) } };
+        return { status: 'cancelled', summary: 'walk_route 准备期间身体/观测失效，未开始预扫', data: { ...base, stage: 'CANCELLED', cancelBy: 'lifecycle', ...residencyFacts(residency) } };
       }
       if (preparedState.worldId !== state.worldId || preparedState.dim !== state.dim
         || preparedState.sessionId !== state.sessionId || preparedState.worldId !== spatial.worldId) {
-        return { status: 'cancelled', summary: 'walk_route 准备期间作用域变化，未开始预扫', data: { stage: 'CANCELLED', cancelBy: 'scope_changed', ...residencyFacts(residency) } };
+        return { status: 'cancelled', summary: 'walk_route 准备期间作用域变化，未开始预扫', data: { ...base, stage: 'CANCELLED', cancelBy: 'scope_changed', ...residencyFacts(residency) } };
       }
       if (spatial.closing || spatial.paused) {
-        return { status: 'cancelled', summary: 'walk_route 准备期间共享会话失效，未开始预扫', data: { stage: 'CANCELLED', cancelBy: 'lifecycle', ...residencyFacts(residency) } };
+        return { status: 'cancelled', summary: 'walk_route 准备期间共享会话失效，未开始预扫', data: { ...base, stage: 'CANCELLED', cancelBy: 'lifecycle', ...residencyFacts(residency) } };
       }
 
       // 预扫：有限次合法转头（4 个朝向 × 3 个俯仰）覆盖验证所需的支撑、身体与净空竖列。
@@ -422,21 +494,21 @@ export const walkRoute: Skill<WalkRouteArgs> = {
         }
       }
       if (ctx.signal.aborted) {
-        return { status: 'cancelled', summary: '预扫阶段被取消', data: { stage: 'CANCELLED', cancelBy: 'parent', ...residencyFacts(residency) } };
+        return { status: 'cancelled', summary: '预扫阶段被取消', data: { ...base, stage: 'CANCELLED', cancelBy: 'parent', ...residencyFacts(residency) } };
       }
       if (Date.now() >= effectiveDeadline) {
-        return fail('TIMEOUT', '预扫阶段到达期限', { stage: 'TIMEOUT', ...residencyFacts(residency) });
+        return fail('TIMEOUT', '预扫阶段到达期限', { ...base, stage: 'TIMEOUT', ...residencyFacts(residency) });
       }
       const executionState = ctx.adapter.state();
       if (!executionState.alive || !executionState.connected || !executionState.observationReady) {
-        return { status: 'cancelled', summary: '预扫期间身体/观测失效，未开始移动', data: { stage: 'CANCELLED', cancelBy: 'lifecycle', ...residencyFacts(residency) } };
+        return { status: 'cancelled', summary: '预扫期间身体/观测失效，未开始移动', data: { ...base, stage: 'CANCELLED', cancelBy: 'lifecycle', ...residencyFacts(residency) } };
       }
       if (executionState.worldId !== preparedState.worldId || executionState.dim !== preparedState.dim
         || executionState.sessionId !== preparedState.sessionId || executionState.worldId !== spatial.worldId) {
-        return { status: 'cancelled', summary: '预扫期间作用域变化，未开始移动', data: { stage: 'CANCELLED', cancelBy: 'scope_changed', ...residencyFacts(residency) } };
+        return { status: 'cancelled', summary: '预扫期间作用域变化，未开始移动', data: { ...base, stage: 'CANCELLED', cancelBy: 'scope_changed', ...residencyFacts(residency) } };
       }
       if (spatial.closing || spatial.paused) {
-        return { status: 'cancelled', summary: '预扫期间共享会话失效，未开始移动', data: { stage: 'CANCELLED', cancelBy: 'lifecycle', ...residencyFacts(residency) } };
+        return { status: 'cancelled', summary: '预扫期间共享会话失效，未开始移动', data: { ...base, stage: 'CANCELLED', cancelBy: 'lifecycle', ...residencyFacts(residency) } };
       }
 
       const request = {
@@ -453,9 +525,9 @@ export const walkRoute: Skill<WalkRouteArgs> = {
       const nav = execution.nav;
       // 父任务已取消但库以其它终态返回（期限/失效先到）：以取消返回，保留部分位移。
       if (ctx.signal.aborted && nav.outcome !== 'CANCELLED') {
-        return { status: 'cancelled', summary: nav.message, data: { nav, ...historyFields(execution), ...residencyFacts(residency) } };
+        return { status: 'cancelled', summary: nav.message, data: { ...base, stage: 'CANCELLED', cancelBy: 'parent', nav, ...historyFields(execution), ...residencyFacts(residency) } };
       }
-      return navToResult(nav, execution);
+      return navToResult(nav, execution, base);
     } finally {
       // 无论成功、取消、期限、异常还是关停，都只释放本次 lease 一次。
       releaseRouteResidency(spatial, residency);

@@ -41,7 +41,7 @@ import {
   sectionsForCells,
 } from '../spatial/skill-residency.ts';
 import type { RouteResidency } from '../spatial/skill-residency.ts';
-import { executeWalkRoute, historyFields, observeCells, readObservedState, readPoint, routeCells } from './walk-route.ts';
+import { executeWalkRoute, historyFields, navStage, observeCells, readObservedState, readPoint, routeCells, unsupportedNavOption } from './walk-route.ts';
 import type { WalkRouteExecution } from './walk-route.ts';
 import { fail, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 
@@ -89,7 +89,10 @@ type WalkToArgs = {
 
 type WalkToBase = {
   originalRequest: { to: Vec3Like; arrival: WalkToArrival; deadlineMs?: number };
+  /** 兼容既有回执的 target 字段；新契约统一用 resolvedTarget。 */
   target: Vec3Like;
+  /** 经校验的绝对目标；与 originalRequest.to 相同，不投影、不取整。 */
+  resolvedTarget: Vec3Like;
   /** 本入口唯一使用的执行后端；失败时不降级到旧 goto/travel。 */
   backend: 'library_walk_route_search';
 };
@@ -348,7 +351,8 @@ function executionResult(
   const nav = execution.nav;
   const data = {
     ...base,
-    stage: nav.outcome,
+    // 路由证据失效是终态原因时优先放在 top-level stage；完整 NavResult 仍在 data.nav。
+    stage: navStage(nav),
     candidate,
     search: snapshot,
     nav,
@@ -370,11 +374,13 @@ function executionResult(
 export const walkTo: Skill<WalkToArgs> = {
   name: 'walk_to',
   description: '按给定目的地做一次显式有界步行搜索并执行：只支持同高、从当前连续脚位沿整数 X/Z 格、普通干燥整块的路线；不含挖掘、放置、跳跃、游泳或绕行改造。搜索前会以当前身体脚格为中心做固定水平半径 4（9×9×4 格：支撑/脚/头/净空）的有限转头观察，至多 12 次真实 look；范围不随目标或搜索前沿扩张，转头观察不使用任何物品。执行中每段会朝行进方向俯视该段支撑格，移动中只观察身体周边 3×3×4 格。搜索预算固定（512 节点/2048 边），找到的只是候选，最终到达由真实身体闭环与实测位置确认。exact 目标必须落在当前脚位的整数 XZ 格上（沿用既有 grounded 物理容差），near 使用原半径的完整 XYZ 距离；输入不支持会明确报告能力限制，不代表世界无路。',
-  argsDoc: '{"to":[x,y,z],"arrival":{"kind":"exact"} 或 {"kind":"near","radius":>0的有限数字},"deadlineMs":可选绝对epoch毫秒}',
+  argsDoc: '{"to":[x,y,z],"arrival":{"kind":"exact"} 或 {"kind":"near","radius":>0的有限数字},"deadlineMs":可选绝对epoch毫秒}；只接受这些参数，avoid/dig/place/tower/materials 等未贯通的选项会被明确拒绝，不会静默忽略',
   timeoutMs: 30000,
   movement: true,
   validate(raw, _adapter) {
     const a = (raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}) as Record<string, unknown>;
+    const unsupported = unsupportedNavOption('walk_to', a, ['to', 'arrival', 'deadlineMs']);
+    if (unsupported !== null) return { ok: false, error: unsupported };
     const to = readPoint(a.to);
     if (to === null) return { ok: false, error: 'walk_to 需要 {"to":[x,y,z],...}，坐标为 ±30000000 内的有限数字（保留负数与小数）' };
     const rawArrival = a.arrival;
@@ -412,6 +418,7 @@ export const walkTo: Skill<WalkToArgs> = {
         ...(args.deadlineMs !== undefined ? { deadlineMs: args.deadlineMs } : {}),
       },
       target: { ...args.to },
+      resolvedTarget: { ...args.to },
       backend: 'library_walk_route_search',
     };
     const spatial = ctx.spatial;
@@ -480,6 +487,8 @@ export const walkTo: Skill<WalkToArgs> = {
     }
 
     try {
+    // 搜索/准备阶段只报一个阶段标记；候选搜索本身不是身体进度。
+    ctx.progress(0.02, 'walk_to：局部观察并搜索候选路线');
     const search = new WalkRouteSearch(map, { now: Date.now, ...SEARCH_LIMITS });
     let snapshot: WalkSearchSnapshot | null = null;
     let searchToken: number | null = null;
@@ -729,6 +738,8 @@ export const walkTo: Skill<WalkToArgs> = {
       const execution = await executeWalkRoute(ctx, spatial, {
         map, body, tick, request, deadlineMs: effectiveDeadline,
         protectedSections: routeResidency.lease?.keys ?? routeResidency.sections,
+        // 路线段按库测得的新段起点推进到 0.98；原到达条件确认后 executeWalkRoute 再报 1。
+        progressRange: { from: 0.05, to: 0.98 },
       });
       const nav = execution.nav;
 
@@ -794,7 +805,10 @@ type WalkKnownRouteArgs = {
 
 type WalkKnownBase = {
   originalRequest: { fragmentId: string; deadlineMs?: number };
+  /** 兼容既有回执；选中的历史路线终点。 */
   target?: Vec3Like;
+  /** 新契约的统一解析目标；只在真正读到 fragment 几何后给出，不由当前站位臆造。 */
+  resolvedTarget?: Vec3Like;
   /** 本入口唯一使用的执行后端；历史几何只作路线来源，不降级到旧 follow_passage。 */
   backend: 'library_known_walk_route';
 };
@@ -802,11 +816,13 @@ type WalkKnownBase = {
 export const walkKnownRoute: Skill<WalkKnownRouteArgs> = {
   name: 'walk_known_route',
   description: '按 fragmentId 读取共享空间历史中的一条已存路线，并在当前世界中重新验证后执行：历史几何只作为选定路线，不证明现在可通行或由本 Agent 走过；每段都按当前合法观测重新判定 OPEN，实际身体位置由物理样本与既有 grounded 稳定窗口确认，不从历史点传送或改写起点。支持同高、沿 X/Z 单轴相邻一格、2~32 点的普通干燥整块路线；出发前对选定点做有限转头观察（至多 12 次真实 look），移动中只观察身体周边 3×3×4 格；不含搜索、挖掘、放置、跳跃、游泳或旧 moveTo 兜底。',
-  argsDoc: '{"fragmentId":"历史片段ID（非空字符串）","deadlineMs":可选绝对epoch毫秒}',
+  argsDoc: '{"fragmentId":"历史片段ID（非空字符串）","deadlineMs":可选绝对epoch毫秒}；只接受这些参数，avoid/dig/place/tower/materials 等未贯通的选项会被明确拒绝，不会静默忽略',
   timeoutMs: 30000,
   movement: true,
   validate(raw, _adapter) {
     const a = (raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}) as Record<string, unknown>;
+    const unsupported = unsupportedNavOption('walk_known_route', a, ['fragmentId', 'deadlineMs']);
+    if (unsupported !== null) return { ok: false, error: unsupported };
     const fragmentId = a.fragmentId;
     if (typeof fragmentId !== 'string' || fragmentId.length === 0) {
       return { ok: false, error: 'walk_known_route 需要非空字符串 fragmentId' };
@@ -866,7 +882,7 @@ export const walkKnownRoute: Skill<WalkKnownRouteArgs> = {
     const fragment = history.getFragment(args.fragmentId);
     const points = fragment === null ? [] : fragment.polyline.map((p) => ({ x: p.x, y: p.y, z: p.z }));
     const target = points.length > 0 ? { ...points[points.length - 1]! } : undefined;
-    const baseWithTarget: WalkKnownBase = target !== undefined ? { ...base, target } : base;
+    const baseWithTarget: WalkKnownBase = target !== undefined ? { ...base, target, resolvedTarget: { ...target } } : base;
 
     // 准备边界与 walk_to 相同：父取消/期限优先；实际读取 state 后若同 session 的
     // observationReady 丢失，readObservedState 把已知边界交给共享服务一次。
@@ -1006,7 +1022,8 @@ export const walkKnownRoute: Skill<WalkKnownRouteArgs> = {
 
     const data = {
       ...baseWithTarget,
-      stage: nav.outcome,
+      // 路由证据失效是终态原因时优先放在 top-level stage；完整 NavResult 仍在 data.nav。
+      stage: navStage(nav),
       ...(nav.lastPosition !== undefined ? { position: { ...nav.lastPosition } } : {}),
       nav,
       // body.feet 是路线几何参考，不是实测样本；实际位置只来自 nav.lastPosition/物理样本。

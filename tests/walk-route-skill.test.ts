@@ -8,6 +8,7 @@ import { Vec3 } from 'vec3';
 import { SKILLS } from '../src/skills/index.ts';
 import { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import { walkRoute } from '../src/skills/walk-route.ts';
+import { walkKnownRoute, walkTo } from '../src/skills/spatial-navigation.ts';
 import { runSkill } from '../src/skills/types.ts';
 import type { BlockObservation, GameAdapter } from '../src/adapter/types.ts';
 
@@ -22,6 +23,75 @@ test('walk_route 已注册并可校验点列', () => {
   assert.ok(v.ok);
   const bad = walkRoute.validate({ points: [[0.5, 0, 0.5], [1.5, 1, 0.5]] }, {} as never);
   assert.ok(!bad.ok, '同高要求');
+});
+
+test('walk_route 失败也保留原请求、解析目标与唯一后端', async () => {
+  const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }];
+  const ctx = {
+    adapter: { walkBody: () => undefined },
+    senses: {}, deadline: Date.now() + 1000, signal: new AbortController().signal, taskId: 'no-spatial', progress() {},
+  };
+  const result = await runSkill(ctx as never, walkRoute, { points });
+  assert.equal(result.status, 'failed');
+  assert.deepEqual(result.data?.originalRequest, { points });
+  assert.deepEqual(result.data?.resolvedTarget, points[1]);
+  assert.equal(result.data?.backend, 'library_walk_route');
+});
+
+test('walk_route 取消也保留原请求、解析目标与唯一后端，不伪造 NavResult', async () => {
+  const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }];
+  const controller = new AbortController();
+  controller.abort();
+  const ctx = {
+    adapter: {
+      state: () => ({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: { x: 0.5, y: 0, z: 0.5 } }),
+      walkBody: () => ({}), walkTick: () => async () => null,
+    },
+    senses: {},
+    spatial: { closing: false, paused: false, worldId: 'w', session: { voxel: { worldId: 'w' }, voxelLoading: 'eager' } },
+    deadline: Date.now() + 1000, signal: controller.signal, taskId: 'cancelled', progress() {},
+  };
+  const result = await runSkill(ctx as never, walkRoute, { points });
+  assert.equal(result.status, 'cancelled');
+  assert.equal(result.data?.stage, 'CANCELLED');
+  assert.deepEqual(result.data?.originalRequest, { points });
+  assert.deepEqual(result.data?.resolvedTarget, points[1]);
+  assert.equal(result.data?.backend, 'library_walk_route');
+  // 库执行尚未开始：没有真实 NavResult，不能拿请求坐标拼一个。
+  assert.equal(result.data?.nav, undefined);
+});
+
+test('三个导航入口显式拒绝未贯通选项，空值/未开启的手段不误报', () => {
+  const routePoints = [[0.5, 0, 0.5], [1.5, 0, 0.5]] as const;
+  const route = walkRoute.validate({ points: routePoints }, {} as never);
+  assert.ok(route.ok);
+
+  for (const [skill, validate, base] of [
+    ['walk_route', walkRoute.validate, { points: routePoints }],
+    ['walk_to', walkTo.validate, { to: [1.5, 0, 0.5], arrival: { kind: 'exact' } }],
+    ['walk_known_route', walkKnownRoute.validate, { fragmentId: 'frag-1' }],
+  ] as const) {
+    const rejected = [
+      { avoid: ['lava'] },
+      { dig: true },
+      { place: true },
+      { tower: true },
+      { materials: [{ name: 'cobblestone', count: 8 }] },
+      { arbitraryKey: 1 },
+    ];
+    for (const extra of rejected) {
+      const v = validate({ ...base, ...extra } as never, {} as never);
+      assert.equal(v.ok, false, `${skill} 必须拒绝 ${JSON.stringify(extra)}`);
+      if (!v.ok) assert.match(v.error, new RegExp(`${skill} 不支持参数`));
+    }
+    // 显式空 avoid/materials 或关闭的 dig/place/tower 不请求额外手段。
+    const accepted = validate({ ...base, avoid: [], materials: [], dig: false, place: false, tower: false } as never, {} as never);
+    assert.equal(accepted.ok, true, `${skill} 应接受不请求额外手段的空值`);
+  }
+
+  // 非空标量也算“给了选项”，不能静默丢弃。
+  const scalar = walkTo.validate({ to: [1.5, 0, 0.5], arrival: { kind: 'exact' }, avoid: 'lava' } as never, {} as never);
+  assert.equal(scalar.ok, false);
 });
 
 test('walk_route 通过真实身体桥离线走通三段转弯', { timeout: 45000 }, async () => {
@@ -72,10 +142,21 @@ test('walk_route 通过真实身体桥离线走通三段转弯', { timeout: 4500
     },
   };
   try {
-    const ctx = { adapter, senses, spatial: svc, deadline: Date.now() + 30000, signal: new AbortController().signal, taskId: 't', progress() {} };
-    const result = await runSkill(ctx as never, walkRoute, { points: [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 1.5 }, { x: 2.5, y: 0, z: 1.5 }] });
+    const reported: number[] = [];
+    const ctx = { adapter, senses, spatial: svc, deadline: Date.now() + 30000, signal: new AbortController().signal, taskId: 't', progress(p: number) { reported.push(p); } };
+    const points = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 1.5 }, { x: 2.5, y: 0, z: 1.5 }];
+    const result = await runSkill(ctx as never, walkRoute, { points });
     assert.equal(result.status, 'succeeded', result.summary);
     assert.equal((result.data?.nav as { outcome: string }).outcome, 'ARRIVED');
+    // 父委托外壳在成功时也必须完整，不光有 data.nav。
+    assert.deepEqual(result.data?.originalRequest, { points });
+    assert.deepEqual(result.data?.resolvedTarget, points[points.length - 1]);
+    assert.equal(result.data?.backend, 'library_walk_route');
+    assert.equal(result.data?.stage, 'ARRIVED');
+    // 进度按库实测确认的新段推进，不靠墙钟；成功终点为 1。
+    assert.ok(reported.some((p) => p > 0 && p < 1), `应报告中间进度，实际 ${reported.join(',')}`);
+    assert.ok(reported.every((p, i) => i === 0 || p >= reported[i - 1]!), '进度必须单调不减');
+    assert.equal(reported.at(-1), 1);
   } finally {
     const result = await svc.shutdown();
     assert.equal(result.error, null);

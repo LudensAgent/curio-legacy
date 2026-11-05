@@ -2,7 +2,8 @@
  * journal 生产者接缝：把 Arbiter 已结算的任务事实准备成 `journal.recordBatch`
  * 可接受的记录。
  *
- * 状态：**准备/接缝模块。默认未在 `src/main.ts` 注入，运行时未上线。**
+ * 状态：**默认关闭的接缝模块。** `src/main.ts` 只在 `SPATIAL_TASK_JOURNAL=true`
+ * 时创建并注入生产者（默认 `false`，不改变现有运行时行为）。
  * - Arbiter 只在调用方显式传入 `taskFactProducer` 时调用它；不注入时这条路径
  *   完全不存在（不读 journal、不加载库、不创建定时器/Worker）。
  * - 本模块本身是纯准备 + 显式 sink 调用，模块加载无副作用。只有 `createTaskJournalProducer`

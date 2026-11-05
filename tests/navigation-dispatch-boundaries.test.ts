@@ -75,6 +75,37 @@ test('代码技能取消时把原始 SkillResult.data 保留为 AbortedError.par
   assert.deepEqual((error as Error & { partial?: Record<string, unknown> }).partial, thrownPartial);
 });
 
+test('代码技能中失败的 stepTo/step 后，相对 at 的 dig/place 不得按原计划执行', async (t) => {
+  const adapter = new FakeAdapter();
+  const memory = new WorldMemory(null);
+  const originalStep = SKILLS.step;
+  // 模拟一次“身体没有换到新站位”的失败步骤；不改真实 step 的校验/执行实现。
+  SKILLS.step = {
+    name: 'step', description: '测试失败步骤', argsDoc: '{}', timeoutMs: 1000, movement: true,
+    validate: () => ({ ok: true, args: {} }),
+    async run(): Promise<SkillResult> {
+      return { status: 'failed', failureCode: 'PATH_NOT_FOUND', summary: '没有换到新站位', data: { position: { x: 0.5, y: 64, z: 0.5 } } };
+    },
+  };
+  t.after(() => {
+    SKILLS.step = originalStep;
+    memory.close();
+  });
+  const bridge = makeBridge(makeCtx(adapter, { memory }));
+
+  // 绝对 api.stepTo 失败后，相对 at 的挖掘/放置仍按当前（未换）站位解析，必须拒绝。
+  const stepped = await bridge('stepTo', [1, 64, 0]) as { ok: boolean };
+  assert.equal(stepped.ok, false);
+  await assert.rejects(bridge('act', ['dig_at', { at: [1, -1, 0], facing: 'N' }]), /没到新站位/);
+  await assert.rejects(bridge('act', ['place_at', { at: [1, -1, 0], item: 'dirt', facing: 'N' }]), /没到新站位/);
+
+  // 通过 api.act 调用相对/绝对 step 同样记录未到达缺口。
+  const viaAct = await bridge('act', ['step', { to: [1, 0, 0], facing: 'N' }]) as { ok: boolean };
+  assert.equal(viaAct.ok, false);
+  await assert.rejects(bridge('act', ['dig_at', { at: [1, -1, 0], facing: 'N' }]), /没到新站位/);
+  assert.equal(adapter.actions.length, 0, '被拒绝的相对动作不能在身体上执行');
+});
+
 test('组合技能的子动作经过共享校验与恢复约束，不能绕过原目标或地形授权', async (t) => {
   const adapter = new FakeAdapter();
   const memory = new WorldMemory(null);

@@ -151,6 +151,29 @@ test('恢复不能开启未授权的 make、不能换 dig 目标，也不能自�
   assert.throws(() => constrainRecoveryAction(ctx, 'hit_entity', { entity: 8 }), /原实体/);
 });
 
+test('walk_route 恢复保留原路线点列与末点，不能换入口或重选路线', () => {
+  const parsed = recoveryContext({ skill: 'walk_route', args: { points: [[0, 64, 0], [1, 64, 0]] } });
+  assert.ok(!('error' in parsed));
+  if ('error' in parsed) return;
+  assert.deepEqual(parsed.target, { x: 1, y: 64, z: 0 });
+  assert.deepEqual(parsed.args.points, [{ x: 0, y: 64, z: 0 }, { x: 1, y: 64, z: 0 }]);
+
+  const mismatch = recoveryContext({ skill: 'walk_route', args: { points: [[0, 64, 0], [1, 64, 0]] }, target: { x: 2, y: 64, z: 0 } });
+  assert.ok('error' in mismatch, 'failure.target 不能替换 walk_route 的路线末点');
+
+  const { memory, ctx } = scopeCtx({ skill: 'walk_route', args: { points: [[0, 64, 0], [1, 64, 0]] }, target: { x: 1, y: 64, z: 0 } });
+  try {
+    const same = constrainRecoveryAction(ctx, 'walk_route', { points: [{ x: 0, y: 64, z: 0 }, { x: 1, y: 64, z: 0 }] });
+    assert.deepEqual(same.points, [{ x: 0, y: 64, z: 0 }, { x: 1, y: 64, z: 0 }]);
+    assert.throws(() => constrainRecoveryAction(ctx, 'walk_route', { points: [{ x: 0, y: 64, z: 0 }, { x: 2, y: 64, z: 0 }] }), /原路线点列/);
+    assert.throws(() => constrainRecoveryAction(ctx, 'walk_route', { points: [{ x: 0, y: 64, z: 0 }] }), /原路线点列/);
+    assert.throws(() => constrainRecoveryAction(ctx, 'walk_to', { to: { x: 1, y: 64, z: 0 }, arrival: { kind: 'exact' } }), /不能改用/);
+    assert.throws(() => constrainRecoveryAction(ctx, 'goto', { target: '1,64,0' }), /绕过/);
+  } finally {
+    memory.close();
+  }
+});
+
 test('Agent 新的显式委托不受恢复上下文约束', () => {
   const adapter = new FakeAdapter();
   const values = { to: { x: 9, y: 64, z: 9 }, arrival: { kind: 'exact' } };
@@ -166,6 +189,26 @@ test('失败交接会校验高度账本并忽略伪造的 allowPlace/allowDig', 
   if ('error' in forged) return;
   assert.equal(forged.allowPlace, undefined);
   assert.equal(forged.allowDig, undefined);
+});
+
+test('api.move 时长按自身 50–1000 上限校验，恢复不能超过原按键时长', async (t) => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null);
+  const ctx: SkillCtx = { adapter, memory, senses: new Vision(adapter), bus: new EventBus(), signal: new AbortController().signal,
+    deadline: Date.now() + 10000, taskId: 'move-duration', progress() {} };
+  t.after(() => memory.close());
+  const bridge = makeBridge(ctx);
+  for (const ms of [1001, 49, 100.5]) {
+    await assert.rejects(bridge('move', [{ forward: true }, ms]), /50 到 1000 的整数毫秒/, `api.move 应拒绝 ${ms}`);
+  }
+  assert.equal(adapter.actions.length, 0, '非法时长不能在身体上执行');
+  const withinOwnLimit = await bridge('move', [{ forward: true }, 150]) as { ok: boolean };
+  assert.equal(withinOwnLimit.ok, true);
+
+  // 恢复用 api.move 做身体纠偏时，仍受原 press_keys 时长的上限约束。
+  ctx.recovery = { skill: 'press_keys', args: { keys: { forward: true }, ms: 200 } };
+  await assert.rejects(makeBridge(ctx)('move', [{ forward: true }, 300]), /按压时长/);
+  const shortened = await makeBridge(ctx)('move', [{ forward: true }, 150]) as { ok: boolean };
+  assert.equal(shortened.ok, true);
 });
 
 test('嵌套技能的取消向自己的版本记一次调用，并继续向父层传递取消', async (t) => {

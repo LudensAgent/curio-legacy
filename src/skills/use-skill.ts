@@ -4,7 +4,7 @@ import { evalPredicate, senseNow, type Predicate } from '../mind/predicate.ts';
 import { throwIfAborted } from '../util.ts';
 import { dirName } from '../perception/perception.ts';
 import { SKILLS } from './index.ts';
-import { relativeCellAction, STANCE_MOVES } from './stance.ts';
+import { NAVIGATION_ACTIONS, relativeCellAction, STANCE_MOVES } from './stance.ts';
 import { constrainRecoveryAction, recoveryContext, worldPoint, type RecoveryContext } from './recovery.ts';
 import { fail, isAbort, obj, ok, runSkill, validateSkill, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 
@@ -16,12 +16,8 @@ export interface BehaviorLookup {
   recordInvocation?(name: string, result: SkillResult): void;
 }
 const OBSERVATION_ACTIONS = new Set(['look', 'look_around', 'wait', 'inspect_block', 'assess_landings']);
-/**
- * 导航动作：代码技能里失败时保留真实回执；可选步骤没到新站位时据此读取该步的实测末位。
- * 旧外壳 goto/travel/follow_passage/ride 现在也在每个结果里带 originalRequest/position，
- * 因此与库入口共用同一份回执，不靠新 taskId 或当前 state 猜测。
- */
-const NAVIGATION_ACTIONS = new Set(['walk_to', 'walk_known_route', 'goto', 'travel', 'follow_passage', 'ride']);
+// NAVIGATION_ACTIONS/STANCE_MOVES 由 stance.ts 统一维护：walk_route、walk_to、
+// walk_known_route 与旧外壳共用同一份“失败后未到达就约束相对坐标动作”的判断。
 /** 步骤结果只保留有界的最近条目，避免代码/宏把整段历史都塞进失败回执。 */
 const MAX_STEP_RESULTS = 8;
 let registry: BehaviorLookup | null = null;
