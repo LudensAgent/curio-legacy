@@ -37,7 +37,9 @@ test('主目标清单观察在线没进展且最近反复卡住：提示改清�
     audience: null, notes: [], mySkills: [], persona: 'P' });
   assert.match(user.content, /主目标「挖够粗铁做装备」的清单已观察到 15 在线分钟没勾掉一项/);
   assert.match(user.content, /主目标不用换（换目标要等阶段回顾）/);
-  assert.match(user.content, /清单可以改/);
+  assert.match(user.content, /清单可以按实际情况改/);
+  assert.match(user.content, /不再强制写 switch_reason/);
+  assert.doesNotMatch(user.content, /删项要在 plan 里写/);
   assert.match(user.content, /「下到 y16 找铁」）保留，别写成新步骤/);
 });
 

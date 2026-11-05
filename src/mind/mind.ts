@@ -28,7 +28,7 @@ import { myBed } from '../skills/stations.ts';
 import { StrategyLog } from './strategy.ts';
 import type { ParsedGameMessage } from '../memory/game-messages.ts';
 import { NEAR_END_REASON, type MindContext } from './prompt.ts';
-import { cleanPlanStep, moodWords, SelfModel } from './self.ts';
+import { cleanPlanStep, moodWords, PLAN_REVISION_MIN, SelfModel } from './self.ts';
 import type { LedgerView } from './ledger.ts';
 import type { Thinker } from './thinker.ts';
 import type { Activity, ActivityDraft, ActivityEnd, ActivityOutcome, ActivityRecord, MindDecision, Noticing } from './types.ts';
@@ -1565,6 +1565,7 @@ export class Mind {
     const p = decision.plan;
     if (!p) return;
     const cur = this.d.self.plan();
+    let autonomousRevision = false;
     if (p.steps?.length) {
       const focus = p.focus ?? cur?.agendaId ?? this.d.self.activeAgenda()?.id ?? p.goal;
       // 想把主目标换成另一件事：先看当前的阶段目标是不是还在推进（眼前的事不该顶替它）
@@ -1582,11 +1583,23 @@ export class Mind {
         const next = p.steps.map((t) => cleanPlanStep(t)).filter(Boolean);
         if (next.join('|') === cur.steps.map((st) => st.text).join('|')) return this.applyPlanDone(decision); // 原样重写：什么都不用做
         const dropped = cur.steps.filter((st) => !st.done && !next.includes(st.text)).map((st) => st.text);
-        if (dropped.length && !(decision.tier === 'deliberate' && p.switchReason)) {
-          const why = decision.tier === 'glance' ? '瞥一眼时不改清单' : '要删改没做完的项得在 plan 里写 "switch_reason" 说为什么（比如这一项做不成、换了更好的做法）';
-          decision.notes.push(`清单没改：「${dropped.slice(0, 3).join('」「')}」还没做完，${why}。眼前的事（脱困、回地面、补工具、过夜）写成 activity 或 detour，做完会回到清单；新冒出来的必要步骤可以加在后面，不用删旧的`);
-          this.d.bus.publish('plan_rewrite_refused', 'P3', `主目标「${cur.goal}」的清单没改：没做完的「${dropped.slice(0, 3).join('」「')}」不随眼前的事删掉`, { dropped, tier: decision.tier });
-          return this.applyPlanDone(decision);
+        if (dropped.length) {
+          // 主目标不变；清单是执行计划。停滞后由 agent 按实际结果自主增删，不再强制 switch_reason；
+          // 未停滞时仍要求认真想过并写理由，避免刚定下的清单被眼前的临时事顶掉。
+          const stalledMin = this.d.self.planStalledMin();
+          const withReason = decision.tier === 'deliberate' && !!p.switchReason;
+          // 停滞时间是保护门；不按 tier 再拦：瞥一眼也可以按实际结果改，改清单提示只在认真想时出现。
+          const canRevise = stalledMin >= PLAN_REVISION_MIN;
+          if (!withReason && !canRevise) {
+            const why = decision.tier === 'glance' ? '瞥一眼时不改清单' : `要删改没做完的项得在 plan 里写 "switch_reason" 说为什么（比如这一项做不成、换了更好的做法）；清单观察停滞 ${PLAN_REVISION_MIN} 分钟后可以直接按实际结果改`;
+            decision.notes.push(`清单没改：「${dropped.slice(0, 3).join('」「')}」还没做完，${why}。眼前的事（脱困、回地面、补工具、过夜）写成 activity 或 detour，做完会回到清单；新冒出来的必要步骤可以加在后面，不用删旧的`);
+            this.d.bus.publish('plan_rewrite_refused', 'P3', `主目标「${cur.goal}」的清单没改：没做完的「${dropped.slice(0, 3).join('」「')}」不随眼前的事删掉`, { dropped, tier: decision.tier });
+            return this.applyPlanDone(decision);
+          }
+          if (!withReason) {
+            autonomousRevision = true;
+            decision.notes.push(`清单按已观察 ${Math.round(stalledMin)} 分钟无进展自主调整：删掉了「${dropped.slice(0, 3).join('」「')}」；主目标「${cur.goal.slice(0, 30)}」不变`);
+          }
         }
       }
       // 模型自己写了 focus（不是沿用手上的活或议程）：它挑中的点子可以升成目标
@@ -1601,11 +1614,11 @@ export class Mind {
           : 'plan 没定下来：focus 写议程里某个目标的 id，或者直接写一句话的目标（会新建一个目标）；还要有 steps（清单至少一项）');
       }
     }
-    this.applyPlanDone(decision);
+    this.applyPlanDone(decision, { skipGoalCompletion: autonomousRevision });
   }
 
-  /** 勾掉清单里做完的项；全勾掉就算主目标完成 */
-  private applyPlanDone(decision: MindDecision) {
+  /** 勾掉清单里做完的项；全勾掉就算主目标完成。自主删项的那一念不能顺手把主目标标完成。 */
+  private applyPlanDone(decision: MindDecision, opts: { skipGoalCompletion?: boolean } = {}) {
     const p = decision.plan;
     if (!p) return;
     if (p.done?.length) {
@@ -1615,7 +1628,7 @@ export class Mind {
       if (checked.length) this.d.bus.publish('plan_check', 'P3', `勾掉：${checked.join('、')}`);
       if (refused.length) decision.notes.push(`没勾掉「${refused.join('、')}」：它的 done_when 条件实际还没达到`);
       const now = this.d.self.plan();
-      if (now && now.steps.length && now.steps.every((st) => st.done)) {
+      if (!opts.skipGoalCompletion && now && now.steps.length && now.steps.every((st) => st.done)) {
         this.d.self.setAgendaStatus(now.agendaId, 'done');
         this.d.self.think(`「${now.goal}」的清单都做完了`, 'outcome');
         this.d.bus.publish('plan_done', 'P2', `主目标完成：${now.goal}`);

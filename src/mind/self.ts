@@ -176,6 +176,9 @@ function lessonContext(text: string): string | undefined {
   return context?.replace(/\s+/g, '').toLowerCase();
 }
 
+/** 清单已观察停滞多久后，由 agent 按实际情况自主增删；主目标不随之变更 */
+export const PLAN_REVISION_MIN = 15;
+
 /** 持久化的“我”：性格、情绪、议程、窍门、实验、日记、最近的念头。重启后接着上次的心思玩。 */
 export class SelfModel {
   data: SelfData;

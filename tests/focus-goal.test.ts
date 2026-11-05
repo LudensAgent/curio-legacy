@@ -2,9 +2,24 @@ import { Mind } from '../src/mind/mind.ts';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Attention } from '../src/mind/attention.ts';
-import { SelfModel } from '../src/mind/self.ts';
+import { PLAN_REVISION_MIN, SelfModel } from '../src/mind/self.ts';
 
 const reflection = (agendaDrop: string[]) => ({ rewrite: [], merge: [], drop: [], add: [], agendaDrop });
+
+/** applyPlan 的最小心智壳：只接 self/bus，让测试直接检查清单改写的实际结果。 */
+const applyPlanHarness = (self: SelfModel) => {
+  const events: string[] = [];
+  const bus = { publish: (type: string) => { events.push(type); } };
+  const mind = Object.create(Mind.prototype) as any;
+  mind.d = { self, bus, adapter: { state: () => ({}) }, perception: { snapshot: () => undefined } };
+  mind.safe = (f: () => unknown) => f();
+  const apply = (plan: object, tier: 'glance' | 'deliberate' = 'deliberate') => {
+    const d = { plan, tier, notes: [] as string[] };
+    mind.applyPlan(d);
+    return d;
+  };
+  return { apply, events };
+};
 
 test('回想不能顺手收掉正在推进的主目标：留着、说出来；重复的点子照常收掉', () => {
   const self = new SelfModel(null);
@@ -69,7 +84,7 @@ test('主目标是阶段成果：还在推进时，眼前的事顶替不了它�
   assert.equal(self.goalSwitchRefusal(night, { deliberate: false }), null);
 });
 
-test('清单不随眼前的事改：没做完的项不能被顶掉；认真想写了理由才改；加项、原样重写都行，改写不算推进', () => {
+test('清单在停滞前不随眼前的事改；认真想写了理由可改；停滞达到阈值后由 agent 自主增删，改写不算推进', () => {
   const self = new SelfModel(null), events: string[] = [];
   const bus = { publish: (type: string) => { events.push(type); } };
   const mind = Object.create(Mind.prototype) as any;
@@ -99,8 +114,76 @@ test('清单不随眼前的事改：没做完的项不能被顶掉；认真想�
   apply({ steps: ['在 y-10 深板岩层推平巷', '挖到 3 块粗铁', '回地面冶炼'], switchReason: 'y30 这一片挖了 40 格没见铁，换到更深的层' });
   assert.equal(self.plan()!.steps[0].text, '在 y-10 深板岩层推平巷');
   assert.equal(self.plan()!.agendaId, id);
+  // 清单观察停滞达到阈值：按实际情况自主增删，不再需要 switch_reason；主目标不变
+  self.setOnline(true, Date.now());
+  self.data.plan!.stalledOnlineMs = PLAN_REVISION_MIN * 60_000;
+  self.data.plan!.stalledObservedSince = Date.now() - PLAN_REVISION_MIN * 60_000;
+  self.data.plan!.stalledHistoryUnknown = false;
+  const refusedBefore = events.filter((e) => e === 'plan_rewrite_refused').length;
+  d = apply({ steps: ['拿到石镐走出矿道', '回地面冶炼'] }, 'glance');
+  assert.deepEqual(self.plan()!.steps.map((s) => s.text), ['拿到石镐走出矿道', '回地面冶炼'], '停滞后瞥一眼也能按实际结果改清单');
+  assert.equal(self.plan()!.agendaId, id, '主目标不变');
+  assert.match(d.notes.join(), /自主调整/);
+  assert.equal(events.filter((e) => e === 'plan_rewrite_refused').length, refusedBefore, '停滞后不再拒绝');
+  assert.equal(self.plan()!.progressAt, stale, '改写清单仍不算推进');
   // 勾项照常
   apply({ done: [1] }, 'glance');
   assert.equal(self.plan()!.steps[1].done, true);
   assert.notEqual(self.plan()!.progressAt, stale, '勾掉一项才算推进');
+});
+
+test('停滞后自主删项不会顺手把主目标标完成', () => {
+  const self = new SelfModel(null);
+  const plan = self.setPlan('修好矿道', ['修好入口', '清理碎石'])!;
+  self.checkPlan([0]);
+  self.setOnline(true, Date.now());
+  self.data.plan!.stalledOnlineMs = PLAN_REVISION_MIN * 60_000;
+  self.data.plan!.stalledObservedSince = Date.now() - PLAN_REVISION_MIN * 60_000;
+  self.data.plan!.stalledHistoryUnknown = false;
+  const { apply, events } = applyPlanHarness(self);
+  const d = apply({ steps: ['修好入口'], done: [0] });
+  assert.equal(self.activeAgenda()?.id, plan.agendaId, '主目标仍在推进');
+  assert.ok(self.plan(), '主目标清单还在');
+  assert.match(d.notes.join(), /自主调整/);
+  assert.ok(!events.includes('plan_done'), '没有因删项自动收工');
+});
+
+test('自主删项不完成主目标；普通勾完、写理由删项仍可完成', () => {
+  // 普通勾完：两条都勾掉，正常 plan_done
+  const normal = new SelfModel(null);
+  normal.setPlan('修好矿道', ['修好入口', '清理碎石']);
+  const normalHarness = applyPlanHarness(normal);
+  normalHarness.apply({ done: [0, 1] });
+  assert.ok(normalHarness.events.includes('plan_done'), '普通勾完要能完成主目标');
+  assert.equal(normal.plan(), null);
+
+  // 写理由删项 + 勾掉剩余项：仍按显式理由完成
+  const reasoned = new SelfModel(null);
+  reasoned.setPlan('修好矿道', ['修好入口', '清理碎石']);
+  reasoned.checkPlan([0]);
+  reasoned.data.plan!.stalledOnlineMs = PLAN_REVISION_MIN * 60_000;
+  reasoned.data.plan!.stalledObservedSince = Date.now() - PLAN_REVISION_MIN * 60_000;
+  reasoned.data.plan!.stalledHistoryUnknown = false;
+  const reasonedHarness = applyPlanHarness(reasoned);
+  reasonedHarness.apply({ steps: ['修好入口'], done: [0], switchReason: '碎石这条已经证明不必要，改做入口加固' });
+  assert.ok(reasonedHarness.events.includes('plan_done'), '写理由删项仍可完成主目标');
+  assert.equal(reasoned.plan(), null);
+});
+
+test('清单自主改写的门槛按在线观察时间：14 分 59 秒仍拒绝，到 15 分钟放开', () => {
+  const self = new SelfModel(null);
+  const plan = self.setPlan('修好矿道', ['修好入口', '清理碎石'])!;
+  const { apply, events } = applyPlanHarness(self);
+  self.data.plan!.stalledOnlineMs = PLAN_REVISION_MIN * 60_000 - 1000;
+  self.data.plan!.stalledObservedSince = Date.now() - PLAN_REVISION_MIN * 60_000;
+  self.data.plan!.stalledHistoryUnknown = false;
+  apply({ steps: ['修好入口'] }, 'glance');
+  assert.deepEqual(self.plan()!.steps.map((s) => s.text), ['修好入口', '清理碎石'], '不到阈值不改清单');
+  assert.ok(events.includes('plan_rewrite_refused'));
+  const refused = events.filter((e) => e === 'plan_rewrite_refused').length;
+  self.data.plan!.stalledOnlineMs = PLAN_REVISION_MIN * 60_000;
+  apply({ steps: ['修好入口'] }, 'glance');
+  assert.deepEqual(self.plan()!.steps.map((s) => s.text), ['修好入口'], '到阈值后按实际结果改清单');
+  assert.equal(events.filter((e) => e === 'plan_rewrite_refused').length, refused, '到阈值后不再拒绝');
+  assert.equal(self.plan()!.agendaId, plan.agendaId, '主目标不变');
 });
