@@ -223,10 +223,18 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
         workCheck();
         if (AIR.has(adapter.blockAt(pos) ?? '')) continue;
         const result = await adapter.dig(pos, signal);
-        assertSession(ctx, origin);
-        if (!result.ok) throw new ExcavationStop(result.reason === 'TOOL_MISSING' ? 'TOOL_MISSING' : 'ERROR', `安全通道开挖失败：${result.reason}`);
-        if (!AIR.has(adapter.blockAt(pos) ?? '')) throw new ExcavationStop('ERROR', '挖掘回执没有对应的实际空气方块');
+        // 先确认这一格是否真的挖空，再检查会话/期限：已经发生的挖掘要计进部分效果，
+        // 取消/超时不能把它报成“没挖过”。
+        if (!result.ok) {
+          assertSession(ctx, origin);
+          throw new ExcavationStop(result.reason === 'TOOL_MISSING' ? 'TOOL_MISSING' : 'ERROR', `安全通道开挖失败：${result.reason}`);
+        }
+        if (!AIR.has(adapter.blockAt(pos) ?? '')) {
+          assertSession(ctx, origin);
+          throw new ExcavationStop('ERROR', '挖掘回执没有对应的实际空气方块');
+        }
         excavated++;
+        assertSession(ctx, origin);
       }
       workCheck();
       standingCell(ctx, next);
@@ -258,7 +266,11 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
     }
     return ok(`实际探索 ${completed} 格${args.mode === 'stairs' ? '下降阶梯' : args.mode === 'stairs_up' ? '上升阶梯' : '水平通道'}，保留下一入口；尚未证明找到结构`, details());
   } catch (error) {
-    if (isAbort(error)) throw error;
+    if (isAbort(error)) {
+      // 取消/超时也要保留已经实际挖掉的格数与路径；不足一步的移动不算完成，不伪造入口。
+      (error as Error & { partial?: Record<string, unknown> }).partial = details();
+      throw error;
+    }
     const msg = (error as Error).message;
     // 拒绝时把「为什么 + 能怎么办」一起报，别只留一句 ERROR 让它盲试
     const hint = /液体|水|lava|water/.test(msg) ? '（先换方向避开液体，或先 place_at 堵上再挖）'

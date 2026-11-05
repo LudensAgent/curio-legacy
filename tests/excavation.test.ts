@@ -199,11 +199,28 @@ test('cancelled or replaced excavation sessions cannot dig another cell, move or
   for (const mode of ['cancel', 'session']) {
     const world = new ExcavationWorld(), controller = new AbortController(), ctx = context(world, { signal: controller.signal });
     world.afterDig = () => { if (mode === 'cancel') controller.abort('paused'); else world.sessionId = 'replacement-session'; };
-    await assert.rejects(excavationSkill.run(ctx, args()), { name: 'AbortedError' });
+    await assert.rejects(excavationSkill.run(ctx, args()), (error: { name?: string; partial?: Record<string, unknown> }) => {
+      assert.equal(error.name, 'AbortedError', mode);
+      assert.equal(error.partial?.excavatedBlocks, 1, `${mode}: 取消保留已经实际挖掉的格数`);
+      assert.equal(error.partial?.completedSteps, 0, `${mode}: 未迈步不能报成完成一段`);
+      return true;
+    });
     assert.equal(world.digs.length, 1);
     assert.equal(world.moves.length, 0);
     assert.ok(!ctx.memory.landmarks().some((landmark) => landmark.label.startsWith(EXCAVATION_CHECKPOINT_LABEL)));
   }
+});
+
+test('a bounded excavation timeout keeps the blocks actually dug and never invents a landing', async () => {
+  const world = new ExcavationWorld(), ctx = context(world);
+  world.afterDig = () => { ctx.deadline = Date.now() - 1; };
+  const result = await excavationSkill.run(ctx, args({ steps: 1 }));
+  assert.equal(result.status, 'failed');
+  assert.equal(result.failureCode, 'TIMEOUT');
+  assert.equal(result.data?.excavatedBlocks, 1, '超时前实际挖掉的方块保留在结果里');
+  assert.equal(result.data?.completedSteps, 0, '没有迈到下一级就不算完成');
+  assert.equal(world.moves.length, 0);
+  assert.ok(!ctx.memory.landmarks().some((landmark) => landmark.label.startsWith(EXCAVATION_CHECKPOINT_LABEL)));
 });
 
 test('structure continuation requires the actual scoped descent or explored entry and never starts from arbitrary labels', async () => {

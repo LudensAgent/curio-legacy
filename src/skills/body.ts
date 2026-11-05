@@ -361,7 +361,10 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
     // 结构化效果回执：区分本次/净进展（climbed）、累计消耗（spent）与目标是否达成（goalReached），成功/失败/取消共用。
     const currentFacts = (failureCause?: 'PILLAR_CLEARANCE') => {
       const state = adapter.state(), around = surroundings(adapter);
-      const climbed = isParentContinuation ? netFromStart() : climbedThisRun;
+      // 父动作续跑时按净高度报进展；但取消/超时可能停在半空，未站稳时不能把瞬时高度
+      // 算成已确认爬升——以累计确认额度为上界，避免伪造未发生的效果。
+      const climbed = !isParentContinuation ? climbedThisRun
+        : landed() ? netFromStart() : Math.min(netFromStart(), budget!.spent);
       const goalReached = args.untilSky || args.untilExit ? reached(around) : isParentContinuation ? landed() && netFromStart() >= budget!.height : climbedThisRun >= args.height;
       return { climbed, spent: total(), height: budget?.height ?? args.height, sky: around.sky, exits: around.exits, goalReached, position: { ...state.pos }, ...(failureCause ? { failureCause } : {}),
         effectEvidence: { verified: true, changed: climbedThisRun > 0, reasons: [`实际高度 ${start} → ${state.pos.y}`] } };
