@@ -61,7 +61,8 @@ export function validateCondition(raw: unknown, adapter: Pick<GameAdapter, 'isKn
   if (raw.type === 'self_state') {
     if (raw.field === 'sky_visible' || raw.field === 'underground') return validateCondition({ type: raw.field, equals: raw.equals }, adapter, memory, state, depth);
     if (['inWater', 'inLava', 'onGround'].includes(raw.field) && typeof raw.equals === 'boolean') return { type: 'self_state', field: raw.field, equals: raw.equals };
-    if (raw.field === 'dim' && typeof raw.equals === 'string' && /^[a-z0-9_:-]{1,80}$/.test(raw.equals)) return { type: 'self_state', field: 'dim', equals: raw.equals };
+    // 原版 1.20.1 只有这三个维度；写错维度名会让收工条件永远不成立，宁可当场拒绝。
+    if (raw.field === 'dim' && typeof raw.equals === 'string' && ['overworld', 'the_nether', 'the_end'].includes(raw.equals)) return { type: 'self_state', field: 'dim', equals: raw.equals };
     if (['held', 'riding'].includes(raw.field) && (raw.equals === null || typeof raw.equals === 'string' && /^[a-z0-9_:-]{1,80}$/.test(raw.equals))) {
       if (raw.field === 'held' && raw.equals !== null && !adapter.isKnownItem(raw.equals)) throw new Error('手持验收包含未知物品');
       return { type: 'self_state', field: raw.field, equals: raw.equals };

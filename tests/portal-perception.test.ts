@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { WorldMemory } from '../src/memory/store.ts';
 import { localMap } from '../src/perception/local.ts';
-import { bodyOverlapsPortal } from '../src/perception/portal.ts';
+import { bodyOverlapsPortal, portalStance } from '../src/perception/portal.ts';
 import { surroundings } from '../src/perception/surroundings.ts';
 import { evaluateCondition, validateCondition } from '../src/projects/conditions.ts';
 import { FakeAdapter } from './fake-adapter.ts';
@@ -57,6 +57,23 @@ test('local 地图不再用 Y 遮住身体所在的门方块', () => {
   assert.deepEqual(plain.body, { feet: null, head: null });
 });
 
+test('门外站位要求空气脚格与实心非液体支撑，不落在门里/岩浆上', () => {
+  const portal = new Set(['0,64,0', '1,64,0', '0,65,0', '1,65,0', '0,66,0', '1,66,0']);
+  const frame = new Set(['0,63,0', '1,63,0', '-1,64,0', '-1,65,0', '-1,66,0', '2,64,0', '2,65,0', '2,66,0', '0,67,0', '1,67,0']);
+  const blockAt = (support: string) => (p: { x: number; y: number; z: number }) => {
+    const key = `${p.x},${p.y},${p.z}`;
+    if (portal.has(key)) return 'nether_portal';
+    if (frame.has(key)) return 'obsidian';
+    if (p.y === 63 && p.z === 1 && (p.x === 0 || p.x === 1)) return support;
+    return 'air';
+  };
+  const stance = portalStance(blockAt('stone'), { x: 0, y: 64, z: 0 });
+  assert.ok(stance, '门南侧有实心地面时应给出站位');
+  assert.equal(stance.z, 1.5, '站位在门方块外侧一格');
+  assert.equal(blockAt('stone')({ x: Math.floor(stance.x), y: Math.floor(stance.y), z: Math.floor(stance.z) }), 'air');
+  assert.equal(portalStance(blockAt('lava'), { x: 0, y: 64, z: 0 }), null, '岩浆上的格不能当门外站位');
+});
+
 test('收工条件可以直接验收维度变化', () => {
   const adapter = new FakeAdapter();
   const memory = new WorldMemory(null);
@@ -68,4 +85,5 @@ test('收工条件可以直接验收维度变化', () => {
   assert.equal(met.status, 'satisfied');
   assert.deepEqual(met.actual, { field: 'dim', value: 'the_nether', expected: 'the_nether' });
   assert.throws(() => validateCondition({ type: 'self_state', field: 'dim', equals: 7 }, adapter, memory, adapter.state()), /self_state/);
+  assert.throws(() => validateCondition({ type: 'self_state', field: 'dim', equals: 'nether' }, adapter, memory, adapter.state()), /self_state/, '写错的维度名当场拒绝');
 });

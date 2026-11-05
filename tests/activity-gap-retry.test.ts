@@ -344,9 +344,20 @@ test('已在门方块里等到超时：不原样重放同一个 travel_portal，
   activity.stepStart = { pos: { x: 99, y: 64, z: 99 } };
   const step = nextStep(activity)!;
   const verdict = afterStep(activity, step, fail('ERROR', '传送未验收（PORTAL_TRANSITION_TIMEOUT）：开始时身体已在门方块里；在门方块里连续 30.0s；维度 the_nether', {
-    transition: { startedInPortal: true, exitMs: 260, outsideMs: 320, insideMs: 30000, endDim: 'the_nether' },
+    portalReason: 'PORTAL_TRANSITION_TIMEOUT',
+    transition: { startedInPortal: true, entered: true, exitMs: 260, outsideMs: 320, insideMs: 30000, endDim: 'the_nether' },
   }), 30816, adapter.state());
   assert.equal(verdict.kind, 'stuck');
-  assert.match(verdict.why, /同一次等待原样重放不会改变结果/);
+  assert.match(verdict.why, /自动续跑不再原样重放/);
   assert.equal(activity.adaptations.filter((item) => item.startsWith('retry:')).length, 0, '不消耗自动重试额度');
+});
+
+test('其它技能数据里的 transition 不会被当成穿门失败', () => {
+  const { adapter, activity } = activityOf([gather]);
+  activity.stepStart = { pos: { x: 99, y: 64, z: 99 } };
+  const step = nextStep(activity)!;
+  const verdict = afterStep(activity, step, fail('PATH_NOT_FOUND', '路被挡住', {
+    transition: { startedInPortal: true, entered: true, exitMs: null, outsideMs: null, insideMs: 30000, endDim: 'overworld' },
+  }), 100, adapter.state());
+  assert.equal(verdict.kind, 'continue', '没有 portalReason 的 transition 不触发穿门规则');
 });

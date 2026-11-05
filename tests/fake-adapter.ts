@@ -191,7 +191,7 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
     if (!destination || (this.portalNeedsExit && startedInPortal)) {
       return {
         ok: false, reason: 'PORTAL_TRANSITION_TIMEOUT',
-        transition: { startedInPortal, exitMs: null, outsideMs: null, insideMs: startedInPortal ? this.portalInsideMs : 0, endDim: this.dim },
+        transition: { startedInPortal, entered: startedInPortal, exitMs: null, outsideMs: null, insideMs: startedInPortal ? this.portalInsideMs : 0, endDim: this.dim },
       };
     }
     await sleep(20, signal);
@@ -204,6 +204,7 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
     const to = this.state();
     const transition = {
       startedInPortal,
+      entered: true,
       exitMs: startedInPortal ? 50 : null,
       outsideMs: startedInPortal ? 100 : null,
       insideMs: this.portalInsideMs,

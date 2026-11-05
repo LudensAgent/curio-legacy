@@ -235,7 +235,7 @@ const CHOOSE = `【选动作】
 - 坐船过水：船是实体，用 use_item {"item":"…_boat","on":"water"} 放到水面（别用 place_at），再 interact {"entity":"boat"} 上船；ride {"direction":"SW"} 划（ride 必须给 direction 或 to）。travel 提供步行和游泳寻路，已乘船时沿水路导航；吃 → eat（背包有吃的）/ hunt / forage / fish；做东西 → craft、smelt（会自己放下背包里的工作台/熔炉；拿不准查 recipes）
 - 从箱子取/存东西 → 先 find_item {"item":"…"} 查它在哪个箱子，再 take_items / store_items 指定那只箱子（target 写坐标或容器地标 ID）
 - 在坑里或地下想上去 → 看【身边】local 和背包，用 dig_at / step / place_at 自己想办法（怎么上去由你定，背包里有什么用什么）；目标脚下是空腔时，step 可写 fill:"方块名" 先补这一格搭桥，或先 place_at 补支撑；想往下深挖 → 有稳定辅助 excavate_path {"entry":"current","mode":"stairs"} 或 assess_landings + descend（手工 dig_at+step 阶梯要自己处理下一级的支撑格）
-- 穿下界门/末地门 → 先 observe_portal 拿 portalId，再 travel_portal {"portalId":"…"} 穿过去；travel_portal 不行时，自己走到门面正前那一格、面向门面走进去（进门后要连续停留约 4 秒；已在门方块里时前进不会重新触发，先看 body_in_portal；portal 方块站不住也挖不掉，别用 step/dig）
+- 穿下界门/末地门 → 先 observe_portal 拿 portalId，再 travel_portal {"portalId":"…"} 穿过去；travel_portal 不行时，自己走到门面正前那一格、面向门面走进去（进入门方块后要连续停留约 4 秒；先看 body_in_portal/身体所在格确认自己是否已在门里；portal 方块站不住也挖不掉，别用 step/dig）
 - design 请建筑师画图纸，再 build（新盖 {"draft":"图纸ID"}，续建 {"projectId":"作品ID"}）；不要自己画图纸
 - goto 默认不挖墙、不垫路、不搭柱；dig:true 才额外允许挖掘、垫路和搭柱；place:false 禁止放置，tower:false 禁止原地搭柱。`;
 
@@ -662,9 +662,8 @@ function surroundingsOf(p: Percept, tier: 'glance' | 'deliberate', memory: World
   return {
     ...(p.self.local ? { local: p.self.local } : {}),
     ...(p.self.around ? { around: p.self.around } : {}),
-    // 身体占据格是触觉事实（不受视野限制）：站在门方块/水里时，脚格不是支撑格，别只报“脚下”。
+    // 身体占据的两格是触觉事实（不受视野限制）：站在门方块/水里时，别只报“脚下”的支撑格。
     ...(p.self.contacts ? { body_cells: {
-      support: p.self.contacts.support.block,
       feet: p.self.contacts.feet.block,
       head: p.self.contacts.head.block,
     } } : {}),

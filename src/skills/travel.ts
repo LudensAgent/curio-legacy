@@ -134,29 +134,27 @@ export const observePortal: Skill<{}> = {
     const feet = { x: Math.floor(here.x), y: Math.floor(here.y), z: Math.floor(here.z) };
     const around = [-2, -1, 0, 1, 2].flatMap((dx) => [-1, 0, 1].flatMap((dy) => [-2, -1, 0, 1, 2].map((dz) =>
       ({ x: Math.floor(here.x) + dx, y: Math.floor(here.y) + dy, z: Math.floor(here.z) + dz }))));
-    // 刚传送到门里时，门方块就在脚下/身上，视锥可能正好看不到它；身体实际接触的这几格可以核对。
-    const touching = [feet, { ...feet, y: feet.y + 1 },
-      { x: feet.x + 1, y: feet.y, z: feet.z }, { x: feet.x - 1, y: feet.y, z: feet.z },
-      { x: feet.x, y: feet.y, z: feet.z + 1 }, { x: feet.x, y: feet.y, z: feet.z - 1 }]
+    // 刚传送到门里时，门方块就在脚下/身上，视锥可能正好看不到它；只核对身体真正占据的脚/头两格，
+    // 不把旁边一格的方块当“亲眼见过”（那会绕过视觉边界）。
+    const touching = [feet, { ...feet, y: feet.y + 1 }]
       .map((pos) => ({ pos, name: ctx.adapter.blockAt(pos) }))
       .filter((b): b is { pos: Vec3Like; name: string } => !!b.name && kinds.includes(b.name));
     const portal = visiblePortal(ctx, around, kinds)
       ?? visiblePortal(ctx, ctx.senses.knownBlocks(kinds, 8).map((block) => block.pos), kinds)
       ?? touching[0];
     if (!portal) return fail('NOT_FOUND', '附近没有已观察并能核对的传送门');
-    // 身体 AABB 压着的门方块才是“我在门里”的触觉事实；旁边一格只是发现门，不等于人已进门。
-    // 优先用适配器按 AABB 算出的字段，拿不到时退回脚/头两格（end_gateway 不靠身体接触触发，不算）。
+    // 身体 AABB 压着的门方块才是“我在门里”的触觉事实；优先用适配器按 AABB 算出的字段，
+    // 拿不到时退回脚/头两格（end_gateway 不靠身体接触触发，不算）。
     const bodyPortal = state.bodyPortal ?? [feet, { ...feet, y: feet.y + 1 }]
       .map((pos) => ctx.adapter.blockAt(pos))
       .find((name): name is string => name === 'nether_portal' || name === 'end_portal');
     const endpoint = travelStore(ctx.memory).observe(state, portal.pos, portal.name as PortalEndpoint['kind']);
     // 也记进常规记忆（地标），让 recall / places 能找回来，不只是 travelStore 里的一份；下界门在下界这一端尤其要靠它记住
     ctx.memory.addLandmark('discovery', `${PORTAL_LABEL[endpoint.kind]} ${endpoint.id}`, state.dim, endpoint.pos, 4);
-    // 另记一个“门外站位”：门方块本身是传送触发区，把它当门厅/集合点走过去会直接换维度。
+    // 门外站位是按门几何算出来的候选点（没站过、没验证），只作为事实回报给心智，不替它写进地标记忆。
     const stance = ctx.adapter.portalStance?.(portal.pos);
-    if (stance) ctx.memory.addLandmark('waypoint', `${PORTAL_LABEL[endpoint.kind]} ${endpoint.id} 门外站位`, state.dim, stance, 3);
-    const bodyNote = bodyPortal ? `；你身体所在格现在是 ${bodyPortal}，正压在门方块上` : '';
-    const stanceNote = stance ? `；门外站位 (${stance.x},${stance.y},${stance.z})` : '';
+    const bodyNote = bodyPortal ? `；身体现在与门方块 ${bodyPortal} 重叠` : '';
+    const stanceNote = stance ? `；按门几何算出的门外站位 (${stance.x},${stance.y},${stance.z})，未站过` : '';
     return ok(`记录传送门 ${endpoint.id}${bodyNote}${stanceNote}`, { portalId: endpoint.id, endpoint, ...(stance ? { stance } : {}), ...(bodyPortal ? { bodyPortal } : {}) });
   },
 };
@@ -184,11 +182,13 @@ async function traverse(ctx: SkillCtx, endpoint: PortalEndpoint) {
           result.transition.startedInPortal ? '开始时身体已在门方块里' : '开始时不在门方块里',
           ...(result.transition.exitMs !== null ? [`退出门 ${(result.transition.exitMs / 1000).toFixed(1)}s`] : []),
           ...(result.transition.outsideMs !== null ? [`门外停留 ${(result.transition.outsideMs / 1000).toFixed(1)}s 后重新进入`] : []),
-          result.transition.insideMs > 0 ? `在门方块里连续 ${(result.transition.insideMs / 1000).toFixed(1)}s` : '没有进入门方块',
+          result.transition.entered
+            ? (result.transition.insideMs > 0 ? `在门方块里连续 ${(result.transition.insideMs / 1000).toFixed(1)}s` : '进入过门方块，结束时已不在门里')
+            : '没有进入门方块',
           `维度 ${result.transition.endDim}`,
         ].join('；')
       : '';
-    if (!result.ok || !result.from || !result.to) return fail('ERROR', `传送未验收（${result.reason}）${timeline ? `：${timeline}` : ''}`, { ...(result.transition ? { transition: result.transition } : {}) });
+    if (!result.ok || !result.from || !result.to) return fail('ERROR', `传送未验收（${result.reason}）${timeline ? `：${timeline}` : ''}`, { ...(result.transition ? { transition: result.transition } : {}), portalReason: result.reason });
     const to = result.to;
     if (!to.observationReady || to.dim === state.dim || to.worldId !== state.worldId || to.sessionId === state.sessionId) return fail('ERROR', '没有获得新维度的有效观察');
     // Arrival is a fact; a nearby return portal still requires fresh sight.
@@ -203,13 +203,12 @@ async function traverse(ctx: SkillCtx, endpoint: PortalEndpoint) {
     ctx.memory.setWorld(to.worldId);
     const stand = result.stand ?? to;
     const leftPortal = result.leftPortal;
-    // 到达后如果身体已经离开门方块，就把“门外站位”记成可回来的门厅点；仍在门里时只记事实，
-    // 不把门方块本身标成安全落脚点（那会让下一次“回门厅”直接换维度）。
-    const waypoint = leftPortal === false ? to.pos : stand.pos;
-    const waypointLabel = leftPortal === undefined
-      ? `传送到达 ${destination.id}`
-      : leftPortal ? `传送到达 ${destination.id} 门外站位` : `传送到达 ${destination.id}（仍在门方块里）`;
-    ctx.memory.addLandmark('waypoint', waypointLabel, to.dim, waypoint, 3);
+    // 只有确认身体已离开门方块（或适配器不检查）才记“门外站位”地标；仍在门里时不写 waypoint，
+    // 避免把门方块本身标成可回去的落脚点。事实文字仍如实说明“到达后仍在门方块里”。
+    if (leftPortal !== false) {
+      const waypointLabel = leftPortal === undefined ? `传送到达 ${destination.id}` : `传送到达 ${destination.id} 门外站位`;
+      ctx.memory.addLandmark('waypoint', waypointLabel, to.dim, stand.pos, 3);
+    }
     const settleNote = leftPortal === undefined ? '' : leftPortal ? '；已离开门口' : '；到达后仍在门方块里';
     const dwellNote = result.transition && result.transition.insideMs > 0 ? `；门内停留 ${(result.transition.insideMs / 1000).toFixed(1)}s 后切换` : '';
     return ok(`已通过实际传送到达 ${to.dim}，记录两端位置；返程入口 ${destination.id}${observed ? '' : ' 尚需寻找'}${roundTripVerified ? '；往返已验证' : ''}${dwellNote}${settleNote}`, { fromId: endpoint.id, toId: destination.id, from: result.from, to, stand: result.stand, leftPortal, transition: result.transition, roundTripVerified });
@@ -217,7 +216,7 @@ async function traverse(ctx: SkillCtx, endpoint: PortalEndpoint) {
 }
 
 export const travelPortal: Skill<{ portalId: string }> = {
-  name: 'travel_portal', description: '进入一个已观察的传送门，等待实际维度切换和新出生观察后记录真实出口。', argsDoc: '{"portalId":"portal_id"}', timeoutMs: 100000, movement: true,
+  name: 'travel_portal', description: '进入一个已观察的传送门，等待实际维度切换和新出生观察后记录真实出口；到达下界另一侧后会尝试把身体挪出目的地门方块（最多约 4 秒，leftPortal 如实报告）。', argsDoc: '{"portalId":"portal_id"}', timeoutMs: 100000, movement: true,
   validate(raw) { const portalId = String(obj(raw).portalId ?? '').trim(); return portalId ? { ok: true, args: { portalId } } : { ok: false, error: '缺少 portalId' }; },
   async run(ctx, args) { const store = travelStore(ctx.memory); const worldId = ctx.adapter.state().worldId; const endpoint = store.get(args.portalId, worldId); return endpoint ? traverse(ctx, endpoint) : fail('NOT_FOUND', `没有传送门 ${args.portalId}；当前世界记得的门：${knownPortals(store, worldId)}`); },
 };

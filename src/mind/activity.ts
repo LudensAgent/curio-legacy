@@ -497,11 +497,12 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   if (step.skill === 'surface' && data?.blockedAbove) {
     return { kind: 'stuck', why: `${clipFeedback(result.summary)}；头顶被 ${data.blockedAbove.name} 封住，surface 只按跳不能挖，原样重放不会改变结果，交回心智` };
   }
-  // 穿门失败回执带了“身体在门方块里连续停留了多久”的时间线：同一次物理状态原样重放
-  // 只会再等一次同样的超时，不会产生新事实；先离开门、换门还是放弃交回心智决定。
+  // 穿门等待超时且身体此刻仍在门方块里：这次失败没有新的身体事实可复验，自动续跑不再
+  // 原样重放同一次 30 秒等待；先离开门、换门还是放弃交回心智决定。
+  // 只认 travel/recall 回执里明确标注的 portalReason，避免把其它技能数据里的 transition 当成门。
   const portalInsideMs = typeof data?.transition?.insideMs === 'number' ? data.transition.insideMs : 0;
-  if (portalInsideMs >= 1000) {
-    return { kind: 'stuck', why: `${clipFeedback(result.summary)}；身体在门方块里连续停留 ${(portalInsideMs / 1000).toFixed(1)}s 维度仍未变，同一次等待原样重放不会改变结果，交回心智` };
+  if (data?.portalReason === 'PORTAL_TRANSITION_TIMEOUT' && portalInsideMs >= 1000) {
+    return { kind: 'stuck', why: `${clipFeedback(result.summary)}；这次失败没有新的身体事实可复验，自动续跑不再原样重放，交回心智` };
   }
   if (RETRYABLE.has(code) && !(step.skill === 'goto' && code === 'PATH_NOT_FOUND')
     && !a.adaptations.includes(retryMark) && retries < 2 && (retries > 0 || physicallyMoved)) {

@@ -1,10 +1,12 @@
 import type { Vec3Like } from '../adapter/types.ts';
+import { isSoftBlock } from './surroundings.ts';
 
 type BlockAt = (pos: Vec3Like) => string | null;
 
 /** 会被身体走进而切换维度的方块。 */
 export const PORTAL_KINDS = new Set(['nether_portal', 'end_portal']);
 const AIR = new Set(['air', 'cave_air', 'void_air']);
+const LIQUID = new Set(['water', 'lava', 'bubble_column']);
 
 export interface PortalOpening {
   kind: 'nether_portal' | 'end_portal';
@@ -69,14 +71,17 @@ export function portalOpening(blockAt: BlockAt, pos: Vec3Like): PortalOpening | 
   };
 }
 
-/** 门外可站的格：脚和头都是空气/未加载，脚下实心；不把另一格门方块当站位。 */
+/**
+ * 门外可站的格：脚和头都必须看清是空气，脚下是实心、非液体、非软方块。
+ * 未加载/未知不当作可站；不把另一格门方块或岩浆/水当站位。
+ */
 function standable(blockAt: BlockAt, cell: Vec3Like): boolean {
   const foot = blockAt(cell);
-  if (foot !== null && !AIR.has(foot)) return false;
+  if (foot === null || !AIR.has(foot)) return false;
   const head = blockAt({ ...cell, y: cell.y + 1 });
-  if (head !== null && !AIR.has(head)) return false;
+  if (head === null || !AIR.has(head)) return false;
   const below = blockAt({ ...cell, y: cell.y - 1 });
-  return below !== null && !AIR.has(below) && !isPortal(blockAt, { ...cell, y: cell.y - 1 });
+  return below !== null && !AIR.has(below) && !LIQUID.has(below) && !isSoftBlock(below) && !isPortal(blockAt, { ...cell, y: cell.y - 1 });
 }
 
 /**
