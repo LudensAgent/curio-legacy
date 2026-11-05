@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { GameAdapter, Vec3Like } from '../src/adapter/types.ts';
 import { MineflayerAdapter } from '../src/adapter/mineflayer.ts';
 import { efficiencyInsights } from '../src/brain/efficiency.ts';
@@ -167,4 +170,17 @@ test('dig(opts.tool)：软方块（泥土）照指定用铁镐，不被换成更
   const auto = digBot(dirt(), items);
   await adapterWith(auto.bot).dig({ x: 1, y: 64, z: 0 }, new AbortController().signal);
   assert.deepEqual(auto.used, ['iron_shovel'], '不传 tool 时保持原有自动换手');
+});
+
+test('WorldMemory：lastHand 立即落盘，重开仍能读回', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'curio-hand-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, 'world-memory.json');
+  const a = new WorldMemory(file);
+  a.setWorld('w');
+  a.setLastHand('stone_pickaxe');
+  a.close();
+  const b = new WorldMemory(file);
+  assert.equal(b.lastHand(), 'stone_pickaxe');
+  b.close();
 });
