@@ -19,11 +19,14 @@ const PASS = new Set(['air', 'cave_air', 'void_air', 'short_grass', 'grass', 'ta
 
 const isWater = (name: string | null) => name !== null && WATER.has(name);
 const isPass = (name: string | null) => name !== null && PASS.has(name);
-/** 已观察到的实心支撑；null（未加载）不算支撑，避免把未知地形当成岸。 */
-const isSolid = (name: string | null) => name !== null && !isPass(name) && !isWater(name);
-/** 脚能站在 air 里、下面是实心支撑：这是“上岸”的落脚格。 */
+/** 能呼吸/能站人的空格；水草/海带虽然可穿过，但本身在水里，不算“露头空气”。 */
+const isBreathable = (name: string | null) => isPass(name) && !isWater(name);
+/** 已观察到的实心支撑；null（未加载）、岩浆、火、门等空心方块都不算支撑。 */
+const NO_SUPPORT = new Set(['lava', 'fire', 'soul_fire', 'cobweb', 'nether_portal', 'end_portal', 'end_gateway', 'bubble_column']);
+const isSolid = (name: string | null) => name !== null && !isPass(name) && !isWater(name) && !NO_SUPPORT.has(name);
+/** 脚能站在空气里、下面是实心支撑：这是“上岸”的落脚格。 */
 const isDryFooting = (blockAt: BlockAt, cell: Vec3Like) =>
-  isPass(blockAt(cell)) && isPass(blockAt({ x: cell.x, y: cell.y + 1, z: cell.z })) && isSolid(blockAt({ x: cell.x, y: cell.y - 1, z: cell.z }));
+  isBreathable(blockAt(cell)) && isPass(blockAt({ x: cell.x, y: cell.y + 1, z: cell.z })) && isSolid(blockAt({ x: cell.x, y: cell.y - 1, z: cell.z }));
 
 const key = (x: number, y: number, z: number) => `${x},${y},${z}`;
 
@@ -152,7 +155,7 @@ function dryLaunch(blockAt: BlockAt, to: Vec3Like, toCell: Vec3Like): boolean {
 /** 这个水格能否作为最后一段：是水面（上方两格可呼吸）且目标不高于水面 1 格、是真实落脚格。 */
 function canLaunchTo(blockAt: BlockAt, c: Vec3Like, to: Vec3Like, toCell: Vec3Like): boolean {
   if (!isWater(blockAt(c))) return false;
-  if (!isPass(blockAt({ x: c.x, y: c.y + 1, z: c.z })) || !isPass(blockAt({ x: c.x, y: c.y + 2, z: c.z }))) return false;
+  if (!isBreathable(blockAt({ x: c.x, y: c.y + 1, z: c.z })) || !isPass(blockAt({ x: c.x, y: c.y + 2, z: c.z }))) return false;
   if (Math.hypot(c.x + 0.5 - to.x, c.z + 0.5 - to.z) > 2) return false;
   // 从水里上岸：岸脚最多比水面（水格上方）高 1 格；目标本身必须是能站的空气格。
   if (toCell.y - (c.y + 1) > 1) return false;
@@ -165,7 +168,7 @@ function canLaunchTo(blockAt: BlockAt, c: Vec3Like, to: Vec3Like, toCell: Vec3Li
 function approachClear(blockAt: BlockAt, from: Vec3Like, toCell: Vec3Like): boolean {
   const dx = toCell.x - from.x, dz = toCell.z - from.z;
   const steps = Math.max(1, Math.ceil(Math.hypot(dx, dz) * 2));
-  for (const y of [toCell.y, toCell.y + 1]) {
+  for (const y of [toCell.y, toCell.y + 1, from.y + 1]) {
     for (let i = 1; i < steps; i++) {
       const t = i / steps;
       const x = Math.round(from.x + dx * t), z = Math.round(from.z + dz * t);

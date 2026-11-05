@@ -75,3 +75,9 @@ test('water route finds water just above a body whose feet cell reads air/stone'
   assert.ok(route.cells.length >= 1, route.why);
   assert.ok(route.cells.every((c) => blockAt(c) === 'water'), 'every waypoint is observed water');
 });
+
+test('water route does not treat lava as a landing support', () => {
+  const blockAt = waterWorld({ '1,63,0': 'lava' });
+  const route = planWaterRoute(blockAt, { x: 0.5, y: 61, z: 0.5 }, { x: 1.5, y: 64, z: 0.5 });
+  assert.equal(route, null, 'lava has no support surface; the caller keeps its own risk decision');
+});
