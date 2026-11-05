@@ -47,7 +47,7 @@ const MAX_POINTS = 160;
  *  动作内的数组引用作为缓存键，动作结束后数组被回收，图随之释放。 */
 const graphCache = new WeakMap<object, {
   hop: number; link: number; points: number; links: number;
-  graph: { nodes: Vec3Like[]; owner: number[]; edges: Map<number, Set<number>> };
+  graph: { nodes: Vec3Like[]; owner: number[]; edges: Map<number, Set<number>>; blocked: Map<number, Set<number>> };
 }>();
 
 /** 这一下站的位置、或刚挖开的格子，落在另一条通道脚点附近（亲身的证据，不是臆造）。
@@ -244,7 +244,7 @@ export class PassageTracker {
     for (const e of drop.entrances) this.addEntrance(keep, e);
     for (const q of drop.path) if (!keep.path.some((o) => d3(o, q) < STEP)) keep.path.push(q);
     const beforeLinks = keep.links?.length ?? 0;
-    for (const l of drop.links ?? []) this.addLink(keep, l.a, l.b);
+    for (const l of drop.links ?? []) this.addLink(keep, l.a, l.b, { ...(l.cut ? { cut: true } : {}), ...(l.reverse ? { reverse: true } : {}) });
     // 拼接进来的第一条是新的连续段起点：建图不能把它和前一条当成一次连续观测。
     if ((keep.links?.length ?? 0) > beforeLinks && keep.links) keep.links[beforeLinks] = { ...keep.links[beforeLinks]!, cut: true };
     if (bridge && adjacent(bridge[0], bridge[1])) this.addLink(keep, bridge[0], bridge[1], { cut: true });
@@ -255,12 +255,17 @@ export class PassageTracker {
     this.memory.forgetPassage?.(drop.id);
   }
 
-  /** 记一条亲自走过的边（无向、去重）。run 标记同一段连续观测；合并/重进旧道补的桥用 cut 切断连续性。 */
-  private addLink(rec: PassageRecord, a: Vec3Like, b: Vec3Like, mark: { run?: number; cut?: boolean } = {}) {
+  /** 记一条亲自走过的边（无向、去重）。run 标记同一段连续观测；合并/重进旧道补的桥用 cut 切断连续性。
+   *  同一对格子后来反方向走过时标 reverse：第一次记录的顺序不再能证明“只能按这个方向走”。 */
+  private addLink(rec: PassageRecord, a: Vec3Like, b: Vec3Like, mark: { run?: number; cut?: boolean; reverse?: boolean } = {}) {
     const links = (rec.links ??= []);
     const same = (u: Vec3Like, v: Vec3Like) => u.x === v.x && u.y === v.y && u.z === v.z;
-    if (links.some((l) => (same(l.a, a) && same(l.b, b)) || (same(l.a, b) && same(l.b, a)))) return;
-    links.push({ a, b, ...(mark.run !== undefined ? { run: mark.run } : {}), ...(mark.cut ? { cut: true } : {}) });
+    const existing = links.find((l) => (same(l.a, a) && same(l.b, b)) || (same(l.a, b) && same(l.b, a)));
+    if (existing) {
+      if (!existing.reverse && same(existing.a, b) && same(existing.b, a)) existing.reverse = true;
+      return;
+    }
+    links.push({ a, b, ...(mark.run !== undefined ? { run: mark.run } : {}), ...(mark.cut ? { cut: true } : {}), ...(mark.reverse ? { reverse: true } : {}) });
   }
 
   /** 并进/重进旧道时，把当下脚点和旧道里相邻的脚点连起来：不补这条边，合并后的 links 就是两团互不相连的岛，passageRoute 走不通 */
@@ -297,9 +302,11 @@ export function passageLevels(rec: Pick<PassageRecord, 'path'>): number[] {
  * 返回从离自己最近的点到离目标最近的点的连接；未验证点间通行或当前地形，不能作为自动导航路线。
  * 两头离通道太远、或者连不上，就返回 null。
  */
-/** 通道脚点 + 真实边走成的无向图：节点是脚点（path 或 links 端点），边是 links（或旧数据的时间相邻脚点）
- *  + 跨 record 的碎片自愈 + 同一段连续观测（run 相同）里漏采样的小缺口；merge/dedupe 的 cut 边界不跨。 */
-export function passageGraph(recs: Pick<PassageRecord, 'path' | 'links'>[], opts: { hop?: number; link?: number } = {}): { nodes: Vec3Like[]; owner: number[]; edges: Map<number, Set<number>> } {
+/** 通道脚点 + 真实边走成的图：节点是脚点（path 或 links 端点），边是 links（或旧数据的时间相邻脚点）
+ *  + 跨 record 的碎片自愈 + 同一段连续观测（run 相同）里漏采样的小缺口；merge/dedupe 的 cut 边界不跨。
+ *  边仍按无向存储（碎片化/分量判断需要）；`blocked` 只标出「反向没有证据」的有向禁行：
+ *  显式 link 的 a→b 记录顺序是向下掉（a 高、b 低、差 ≥2）时，只证明 a→b，反向 climb 不可走。 */
+export function passageGraph(recs: Pick<PassageRecord, 'path' | 'links'>[], opts: { hop?: number; link?: number } = {}): { nodes: Vec3Like[]; owner: number[]; edges: Map<number, Set<number>>; blocked: Map<number, Set<number>> } {
   const hop = opts.hop ?? 7, link = opts.link ?? PASSAGE_LINK;
   let points = 0, linkCount = 0;
   for (const r of recs) { points += r.path.length; linkCount += r.links?.length ?? 0; }
@@ -309,6 +316,11 @@ export function passageGraph(recs: Pick<PassageRecord, 'path' | 'links'>[], opts
   const nodes: Vec3Like[] = [];
   const owner: number[] = [];
   const edges = new Map<number, Set<number>>();
+  const blocked = new Map<number, Set<number>>();
+  /** 同一对脚点上的方向证据：任一 link 能双向走（水平/向上爬/ cut / 反向走过）就覆盖单向落差。 */
+  const oneWay = new Map<string, [number, number]>();
+  const twoWay = new Set<string>();
+  const pairKey = (a: number, b: number) => a < b ? `${a},${b}` : `${b},${a}`;
   const index = new Map<string, number>();
   const add = (a: number, b: number) => { if (a === b) return; (edges.get(a) ?? edges.set(a, new Set()).get(a)!).add(b); (edges.get(b) ?? edges.set(b, new Set()).get(b)!).add(a); };
   const indexOf = (p: Vec3Like, recIdx: number) => {
@@ -324,7 +336,16 @@ export function passageGraph(recs: Pick<PassageRecord, 'path' | 'links'>[], opts
   recs.forEach((r, recIdx) => {
     if (r.links?.length) {
       // 有真实边：只沿亲自走过的边连，不按几何距离抄近道（那会穿墙/穿落差）；只差一步的相邻缺口在后面统一补
-      for (const { a, b } of r.links) add(indexOf(a, recIdx), indexOf(b, recIdx));
+      for (const l of r.links) {
+        const u = indexOf(l.a, recIdx), v = indexOf(l.b, recIdx);
+        add(u, v);
+        if (u === v) continue;
+        // 只有显式 link 有方向证据：记录顺序 a→b 是向下掉（差 ≥2）时反向爬没有证据；
+        // 水平、向上爬、cut（方向不确定）保持双向。path 推断边和跨 record 几何连边不参与判向。
+        const key = pairKey(u, v), dy = l.b.y - l.a.y;
+        if (l.cut || l.reverse || Math.abs(dy) <= 1 || dy >= 2) twoWay.add(key);
+        else oneWay.set(key, [u, v]);
+      }
       // 同一段连续观测（同一个 run）里相邻两条 link 之间漏采了中间步时补上，不然走过的一条道会断成多团。
       // merge/dedupe 拼进来的那条带 cut：数组相邻不代表连续行程，不能跨过去补。旧记录没有 run：
       // 只按更保守的 legacyStep 补，避免把历史上的拼接边界接成假边。
@@ -371,7 +392,8 @@ export function passageGraph(recs: Pick<PassageRecord, 'path' | 'links'>[], opts
       }
     }
   }
-  const graph = { nodes, owner, edges };
+  for (const [key, [u, v]] of oneWay) if (!twoWay.has(key)) (blocked.get(v) ?? blocked.set(v, new Set()).get(v)!).add(u);
+  const graph = { nodes, owner, edges, blocked };
   graphCache.set(recs, { hop, link, points, links: linkCount, graph });
   return graph;
 }
@@ -401,8 +423,9 @@ export function passageFragmentation(recs: Pick<PassageRecord, 'path' | 'links'>
 }
 
 /** 图上单源最短路（正权；二叉堆 + 惰性删除，几千节点下比每次线性扫最小值的 O(n²) 快一个量级）。
+ *  edges 按无向拓扑存储；blocked 给出有向禁行（记录顺序只证明掉下去、没证明能爬回去）。
  *  stopAt 给定时算到它为止。 */
-function graphShortest(nodes: Vec3Like[], edges: Map<number, Set<number>>, origin: number, stopAt = -1): { dist: number[]; prev: number[] } {
+function graphShortest(nodes: Vec3Like[], edges: Map<number, Set<number>>, origin: number, stopAt = -1, blocked?: Map<number, Set<number>>): { dist: number[]; prev: number[] } {
   const n = nodes.length;
   const dist = new Array<number>(n).fill(Infinity), prev = new Array<number>(n).fill(-1), done = new Uint8Array(n);
   dist[origin] = 0;
@@ -442,8 +465,9 @@ function graphShortest(nodes: Vec3Like[], edges: Map<number, Set<number>>, origi
     if (done[u]) continue;
     done[u] = 1;
     if (u === stopAt) break;
+    const blockedFrom = blocked?.get(u);
     for (const v of edges.get(u) ?? []) {
-      if (done[v]) continue;
+      if (done[v] || blockedFrom?.has(v)) continue;
       const nd = du + d3(nodes[u]!, nodes[v]!);
       if (nd < dist[v]!) { dist[v] = nd; prev[v] = u; push(v, nd); }
     }
@@ -454,7 +478,7 @@ function graphShortest(nodes: Vec3Like[], edges: Map<number, Set<number>>, origi
 export function passageRoute(recs: Pick<PassageRecord, 'path' | 'links'>[], from: Vec3Like, to: Vec3Like,
   opts: { near?: number; hop?: number; link?: number } = {}): Vec3Like[] | null {
   const near = opts.near ?? 5, hop = opts.hop ?? 7, link = opts.link ?? PASSAGE_LINK;
-  const { nodes, edges } = passageGraph(recs, { hop, link });
+  const { nodes, edges, blocked } = passageGraph(recs, { hop, link });
   const closest = (p: Vec3Like) => {
     let best = -1, bd = Infinity;
     nodes.forEach((q, i) => { const d = d3(q, p); if (d < bd) { bd = d; best = i; } });
@@ -463,12 +487,12 @@ export function passageRoute(recs: Pick<PassageRecord, 'path' | 'links'>[], from
   const a = closest(from), b = closest(to);
   if (a < 0 || b < 0) return null;
   if (a === b) return [nodes[a]];
-  let { dist, prev } = graphShortest(nodes, edges, a, b);
+  let { dist, prev } = graphShortest(nodes, edges, a, b, blocked);
   // 最近的那个节点可能落在另一团互不相连的通道里。先按它走（常见路径可提前结束 Dijkstra），
   // 走不到就在同 near 范围内换一个真正可达的节点——否则一个几何上更近却断开的碎片会让整条路失效。
   let target = b;
   if (dist[target] === Infinity) {
-    ({ dist, prev } = graphShortest(nodes, edges, a));
+    ({ dist, prev } = graphShortest(nodes, edges, a, -1, blocked));
     let bd = Infinity;
     target = -1;
     nodes.forEach((q, i) => { const d = d3(q, to); if (dist[i] < Infinity && d <= near && d < bd) { bd = d; target = i; } });
@@ -481,7 +505,7 @@ export function passageRoute(recs: Pick<PassageRecord, 'path' | 'links'>[], from
 
 /** 从 here 连得上的通道分量（here 水平离网 >6 格时退回全部记录）。 */
 function surfacePool(recs: (Pick<PassageRecord, 'path' | 'entrances' | 'links'> & { id?: string })[], here: Vec3Like, near = 6) {
-  const { nodes, owner, edges } = passageGraph(recs);
+  const { nodes, owner, edges, blocked } = passageGraph(recs);
   let start = -1, bd = near;
   nodes.forEach((q, i) => { const d = flat(q, here); if (d < bd) { bd = d; start = i; } });
   let pool = recs;
@@ -492,12 +516,15 @@ function surfacePool(recs: (Pick<PassageRecord, 'path' | 'entrances' | 'links'> 
     while (stack.length) {
       const u = stack.pop()!;
       owners.add(owner[u]!);
-      for (const v of edges.get(u) ?? []) if (!seen.has(v)) { seen.add(v); stack.push(v); }
+      for (const v of edges.get(u) ?? []) {
+        if (seen.has(v) || blocked.get(u)?.has(v)) continue;
+        seen.add(v); stack.push(v);
+      }
     }
     // start 自己所属的 record 一定在 owners 里，所以过滤结果不会是空。
     pool = recs.filter((_, i) => owners.has(i));
   }
-  return { nodes, edges, start, pool };
+  return { nodes, edges, blocked, start, pool };
 }
 
 /**
@@ -511,7 +538,7 @@ export function passageSurfaceCandidates(recs: (Pick<PassageRecord, 'path' | 'en
   opts: { band?: number; near?: number; limit?: number } = {}): { anchor: Vec3Like; cost: number; recordIds: string[] }[] {
   // band 与“入口离本 record 最高点 ≤6 格才算地表”保持一致：便宜且合法的地表出口不能因为低 5–6 格就被筛掉。
   const band = opts.band ?? 6, near = opts.near ?? 6, limit = opts.limit ?? 3;
-  const { nodes, edges, start, pool } = surfacePool(recs, here, near);
+  const { nodes, edges, blocked, start, pool } = surfacePool(recs, here, near);
   const hits: { anchor: Vec3Like; recordIds: string[] }[] = [];
   for (const r of pool) {
     const surfaceY = r.path.length ? Math.max(...r.path.map((p) => p.y)) : Math.max(...r.entrances.map((e) => e.y));
@@ -531,7 +558,7 @@ export function passageSurfaceCandidates(recs: (Pick<PassageRecord, 'path' | 'en
     nodes.forEach((q, i) => { const d = flat(q, here); if (d < bd) { bd = d; origin = i; } });
   }
   if (origin < 0) return [];
-  const { dist } = graphShortest(nodes, edges, origin);
+  const { dist } = graphShortest(nodes, edges, origin, -1, blocked);
   // 代价和 passageRoute 用同一口径：取入口 near 范围内所有节点里**可达**的那条最短路。
   // 不能只看几何最近的那个节点——它可能属于另一团互不相连的通道，会把可达出口误判成 Infinity。
   const costOf = (p: Vec3Like) => {
@@ -570,7 +597,7 @@ export function passageSurfaceAnchor(recs: Pick<PassageRecord, 'path' | 'entranc
  * 推断边，拼 path 会改变路网，所以不参与去重。被合并记录的 links/entrances 并进代表记录，
  * 不能像“直接丢掉”那样删掉唯一的桥。
  */
-export function dedupePassages<T extends { path: Vec3Like[]; links?: { a: Vec3Like; b: Vec3Like; run?: number; cut?: boolean }[]; entrances?: Vec3Like[]; lastUsedAt?: number; archivedAt?: number }>(
+export function dedupePassages<T extends { path: Vec3Like[]; links?: { a: Vec3Like; b: Vec3Like; run?: number; cut?: boolean; reverse?: boolean }[]; entrances?: Vec3Like[]; lastUsedAt?: number; archivedAt?: number }>(
   recs: T[], opts: { cover?: number; near?: number } = {},
 ): T[] {
   const cover = opts.cover ?? 0.8, near = opts.near ?? 1.5;
@@ -647,7 +674,7 @@ export function passageDeepestAnchor(recs: Pick<PassageRecord, 'path' | 'links'>
   if (!all.length) return null;
   const globalDeepest = () => [...all].sort((a, b) => a.y - b.y)[0]!;
   if (!here) return globalDeepest();
-  const { nodes, edges } = passageGraph(recs);
+  const { nodes, edges, blocked } = passageGraph(recs);
   const near = opts.near ?? 6;
   let start = -1, bd = near;
   nodes.forEach((q, i) => { const d = d3(q, here); if (d < bd) { bd = d; start = i; } });
@@ -656,7 +683,10 @@ export function passageDeepestAnchor(recs: Pick<PassageRecord, 'path' | 'links'>
   const stack = [start];
   while (stack.length) {
     const u = stack.pop()!;
-    for (const v of edges.get(u) ?? []) if (!seen.has(v)) { seen.add(v); stack.push(v); }
+    for (const v of edges.get(u) ?? []) {
+      if (seen.has(v) || blocked.get(u)?.has(v)) continue;
+      seen.add(v); stack.push(v);
+    }
   }
   let best: Vec3Like | null = null;
   for (let i = 0; i < nodes.length; i++) if (seen.has(i) && (!best || nodes[i].y < best.y)) best = nodes[i];
