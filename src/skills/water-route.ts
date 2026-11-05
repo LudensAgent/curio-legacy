@@ -43,9 +43,9 @@ export function planWaterRoute(blockAt: BlockAt, from: Vec3Like, to: Vec3Like, o
   const toCell = { x: Math.floor(to.x), y: Math.floor(to.y), z: Math.floor(to.z) };
   const targetInWater = isWater(blockAt(toCell));
   const startCell = { x: Math.floor(from.x), y: Math.floor(from.y), z: Math.floor(from.z) };
-  // 起点只认身体所在的水格；脚刚好在水面空气里时，向下找一格水（浮在水面时脚仍在水格内，通常直接命中）。
+  // 起点只认身体所在的水格；脚刚好在水面空气里/流动水里时，就近找一格水（上下各两格）。
   const start = isWater(blockAt(startCell)) ? startCell
-    : [0, -1, -2].map((dy) => ({ ...startCell, y: startCell.y + dy })).find((c) => isWater(blockAt(c)));
+    : [0, 1, 2, -1, -2].map((dy) => ({ ...startCell, y: startCell.y + dy })).find((c) => isWater(blockAt(c)));
   if (!start) return null;
   // 目标不临水（干岸离水太远）：交回直游，不把“走到内陆”伪装成水路。
   if (!targetInWater && !dryLaunch(blockAt, to, toCell)) return null;
@@ -131,8 +131,8 @@ export function planWaterRoute(blockAt: BlockAt, from: Vec3Like, to: Vec3Like, o
   for (let i = 0; i < path.length - 1;) {
     let j = path.length - 1;
     while (j > i + 1 && !clear(path[i], path[j])) j--;
-    // 起点已经在身体所在格：不需要为它再下一道游泳委托。
-    if (i > 0 || Math.hypot(path[j].x + 0.5 - from.x, path[j].z + 0.5 - from.z) >= 0.6) cells.push(path[j]);
+    // 起点已经在身体所在格（三维都近）：不需要为它再下一道游泳委托。
+    if (i > 0 || Math.hypot(path[j].x + 0.5 - from.x, path[j].y - from.y, path[j].z + 0.5 - from.z) >= 0.6) cells.push(path[j]);
     i = j;
   }
   return { cells };

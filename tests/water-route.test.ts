@@ -66,3 +66,12 @@ test('water route reports why when observed water cannot connect to the target b
   assert.equal(route.cells.length, 0);
   assert.match(route.why ?? '', /水路|上岸|封住/);
 });
+
+test('water route finds water just above a body whose feet cell reads air/stone', () => {
+  // 实机日志里身体脚格是 air（流动水/体素观测差一格），水在正上方；不能因此判“不在水里”。
+  const blockAt = waterWorld({ '1,63,0': 'netherrack' });
+  const route = planWaterRoute(blockAt, { x: 0.5, y: 59.6, z: 0.5 }, { x: 1.5, y: 64, z: 0.5 });
+  assert.ok(route, 'the nearby water column is used as the start');
+  assert.ok(route.cells.length >= 1, route.why);
+  assert.ok(route.cells.every((c) => blockAt(c) === 'water'), 'every waypoint is observed water');
+});
