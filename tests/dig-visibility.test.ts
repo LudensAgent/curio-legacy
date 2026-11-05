@@ -7,24 +7,27 @@ import { deliberateSystem, glanceSystem } from '../src/mind/prompt.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
 
-test('digging an already-empty cell is tolerated as a no-op even when unseen', async (t) => {
+test('unseen air is unknown, not a no-op success', async (t) => {
   const adapter = new FakeAdapter();
   const ctx = makeCtx(adapter, { senses: { observeBlocks: () => [] } });
   t.after(() => ctx.memory.close());
   const args = { at: [1, 0, 0] as [number, number, number], facing: 'E' as const };
   const result = await digAt.run(ctx, args);
-  assert.equal(result.status, 'succeeded');
+  assert.equal(result.status, 'failed');
+  assert.equal(result.failureCode, 'NOT_FOUND');
   assert.equal(result.data?.noop, true);
-  assert.equal(result.data?.was, 'air');
-  assert.match(result.summary, /本来就是空的/);
-  assert.doesNotMatch(result.summary, /没有发生挖掘|未在当前视野/);
+  assert.equal(result.data?.obscured, true);
+  assert.equal(result.data?.unknown, true);
+  assert.equal(result.data?.was, undefined);
+  assert.match(result.summary, /状态未确认/);
+  assert.doesNotMatch(result.summary, /本来就是空的/);
   assert.deepEqual(result.data?.targetCell, { x: 1, y: 64, z: 0 });
   const nested = await makeBridge(ctx)('act', ['dig_at', args]) as { ok: boolean };
-  assert.equal(nested.ok, true, 'code skills receive the tolerant no-op success');
+  assert.equal(nested.ok, false, 'code skills no longer receive a tolerant unseen-air success');
   assert.deepEqual(adapter.actions, []);
 });
 
-test('an already-empty cell is confirmed as a no-op without turning to look', async (t) => {
+test('an unseen empty cell is confirmed by turning and observing, not by raw world data', async (t) => {
   const adapter = new FakeAdapter();
   adapter.pos = { x: 0.5, y: 64, z: 0.5 };
   adapter.yaw = -Math.PI / 2;
@@ -37,8 +40,8 @@ test('an already-empty cell is confirmed as a no-op without turning to look', as
   assert.equal(result.status, 'succeeded', result.summary);
   assert.equal(result.data?.noop, true);
   assert.equal(result.data?.was, 'air');
+  assert.equal(result.data?.evidence, 'vision');
   assert.deepEqual(result.data?.targetCell, pos);
-  assert.equal(adapter.yaw, -Math.PI / 2, 'a cell already known to be air needs no turn');
   assert.deepEqual(adapter.actions, [], 'observing empty air must not dig');
 });
 
@@ -81,8 +84,8 @@ test('a visible-after-looking solid target is dug at its original world position
   assert.deepEqual(adapter.actions, ['dig:stone']);
 });
 
-test('an occluded empty cell is tolerated as empty; an occluded ore is not revealed', async (t) => {
-  // Already-dug (air) cell behind an intact wall: synced world data confirms it is empty, so it is a no-op.
+test('an occluded cell is unknown; an occluded ore is not revealed', async (t) => {
+  // An air cell behind an intact wall is not observed, so it is unknown rather than a no-op.
   {
     const adapter = new FakeAdapter();
     adapter.pos = { x: 0.5, y: 64, z: 0.5 };
@@ -91,10 +94,12 @@ test('an occluded empty cell is tolerated as empty; an occluded ore is not revea
     ctx.senses = new Vision(adapter);
     t.after(() => ctx.memory.close());
     const result = await digAt.run(ctx, { at: [2, 1, 0], facing: 'E' });
-    assert.equal(result.status, 'succeeded');
-    assert.equal(result.data?.noop, true);
-    assert.equal(result.data?.was, 'air');
-    assert.match(result.summary, /本来就是空的/);
+    assert.equal(result.status, 'failed');
+    assert.equal(result.failureCode, 'NOT_FOUND');
+    assert.equal(result.data?.unknown, true);
+    assert.equal(result.data?.was, undefined);
+    assert.match(result.summary, /状态未确认/);
+    assert.doesNotMatch(result.summary, /本来就是空的/);
     assert.deepEqual(adapter.actions, []);
   }
   // A hidden ore behind the wall must never be claimed as empty or revealed by name.
@@ -108,7 +113,7 @@ test('an occluded empty cell is tolerated as empty; an occluded ore is not revea
     t.after(() => ctx.memory.close());
     const result = await digAt.run(ctx, { at: [2, 1, 0], facing: 'E' });
     assert.equal(result.failureCode, 'NOT_FOUND');
-    assert.match(result.summary, /转头也看不见|被前面的方块挡住/);
+    assert.match(result.summary, /状态未确认|被遮挡/);
     assert.doesNotMatch(result.summary, /diamond_ore|本来就是空/);
     assert.deepEqual(adapter.actions, []);
   }

@@ -109,19 +109,15 @@ export const digAt: Skill<CellArgs> = {
     const pos = args.xyz !== undefined
       ? { x: args.xyz.x, y: args.xyz.y, z: args.xyz.z }
       : digsSupport ? support : toWorld(feet, args.facing, args.at);
-    const physical = ctx.adapter.blockAt(pos);
-    // 自己站的两格通常是空的；但也可能有火把、花、雪层、蜘蛛网这类东西，那就照样拿掉
-    if (physical === null) return fail('NOT_FOUND', `[${args.at}] 那一格还没加载（区块没载入），看不见也没法挖`, { ...after(ctx, args.facing, pos) });
-    if (args.at[0] === 0 && args.at[2] === 0 && (args.at[1] === 0 || args.at[1] === 1) && AIR.has(physical)) return ok(`[${args.at}] 是${args.at[1] === 0 ? '自己站的脚' : '自己的头'}，本来就空着，别挖这里；往上挖是 [0,2,0]`, { ...after(ctx, args.facing, pos), noop: true });
-    // 感知边界取舍：目标格已加载且 blockAt（服务器同步的世界数据，非透视）确认是 air 时，直接当“已经挖空”，
-    // 不再强求 raycast 视线亲眼确认——挖阶梯时斜下格 [1,-1,0] 被正前方那格挡住、永远看不见，却常常已经是空气，
-    // 硬报 NOT_FOUND 会让整段阶梯卡死。只认“已加载 + 确实是空气”这一种；未加载(null)仍报 NOT_FOUND，
-    // 矿石/实心格仍走视线确认、不泄露方块名，也不替 Agent 选目标或改手段。
-    if (AIR.has(physical)) return ok(`[${args.at}] 本来就是空的，不用挖`, { cell: [...args.at], was: 'air', ...after(ctx, args.facing, pos), noop: true });
-    const key = `${pos.x},${pos.y},${pos.z}`;
-    // 自己站的那格（脚/头）谈不上“看不见”——人就在里面，火把、雪层这类东西直接够得着，不用走视线确认
+    // 只把 blockAt 当作“是否加载”的物理提示，绝不再拿它冒充“已经看见是空气”。
+    const loaded = ctx.adapter.blockAt(pos);
+    // 自己站的两格是接触证据：人就在里面，火把、花、雪层这类东西直接够得着。
     const ownCell = args.at[0] === 0 && args.at[2] === 0 && (args.at[1] === 0 || args.at[1] === 1);
-    let seenBefore = ownCell ? physical : visibleCells(ctx, [pos]).get(key);
+    if (loaded === null) return fail('NOT_FOUND', `[${args.at}] 那一格还没加载（区块没载入），看不见也没法挖`, { ...after(ctx, args.facing, pos), noop: true, obscured: true });
+    if (ownCell && AIR.has(loaded)) return ok(`[${args.at}] 是${args.at[1] === 0 ? '自己站的脚' : '自己的头'}，本来就空着，别挖这里；往上挖是 [0,2,0]`, { ...after(ctx, args.facing, pos), noop: true });
+    const key = `${pos.x},${pos.y},${pos.z}`;
+    // 非自身格必须由本次视线确认；未观察 = 未知，不把墙后/斜下格的 raw 数据当成空气。
+    let seenBefore: string | undefined = ownCell ? loaded ?? undefined : visibleCells(ctx, [pos]).get(key);
     if (!seenBefore && !ownCell && ctx.senses.observeBlocks) {
       await glanceAt(ctx, pos);
       throwIfAborted(ctx.signal);
@@ -133,12 +129,13 @@ export const digAt: Skill<CellArgs> = {
       const hint = diagonalDown
         ? `；斜下格在正前方/侧方那格后面，本来就看不见也挖不到——先挖 [${df},0,${dr}] 让这格露出来，再挖 [${df},-1,${dr}]，或直接往下挖 [0,-1,0]`
         : '';
-      return fail('NOT_FOUND', `[${args.at}] 没有发生挖掘：目标格 (${pos.x},${pos.y},${pos.z}) 不是空气，但转头也看不见它朝你的那一面（被前面的方块挡住），没法下镐；换个站位或先挖掉挡着的那一格${hint}`, { ...after(ctx, args.facing, pos), noop: true });
+      return fail('NOT_FOUND', `[${args.at}] 没有发生挖掘：目标格 (${pos.x},${pos.y},${pos.z}) 状态未确认（视野外/被遮挡/未加载），不把未看见当作空气；换个站位或先挖掉挡着的那一格${hint}`, {
+        ...after(ctx, args.facing, pos), targetCell: { ...pos }, cell: [...args.at], noop: true, obscured: true, unknown: true,
+      });
     }
-    const before = ctx.adapter.blockAt(pos);
-    if (before !== seenBefore) return fail('TARGET_GONE', `[${args.at}] 目标格在观察后已改变或尚未加载，没有执行挖掘`, { ...after(ctx, args.facing, pos), noop: true });
-    if (AIR.has(before)) return ok(`[${args.at}] 本来就是空的，不用挖`, { cell: [...args.at], was: 'air', ...after(ctx, args.facing, pos), noop: true });
-    if (LIQUID_BLOCKS.has(before)) return fail('BAD_ARGS', `[${args.at}] ${seenBefore ? `是 ${seenBefore}` : '未看清目标，当前不能挖掘'}，挖不了`, after(ctx, args.facing, pos));
+    const before = seenBefore;
+    if (AIR.has(before)) return ok(`[${args.at}] 本来就是空的，不用挖`, { cell: [...args.at], was: 'air', evidence: 'vision', ...after(ctx, args.facing, pos), noop: true });
+    if (LIQUID_BLOCKS.has(before)) return fail('BAD_ARGS', `[${args.at}] 是 ${seenBefore}，挖不了`, after(ctx, args.facing, pos));
     // 挖开会进水/进岩浆：默认不挖，但说清是哪几格、能怎么办（像人一样先堵上，或者认了让水流进来）
     const wets = wetNeighbours(ctx, pos);
     const blocked = wets.filter((w) => /lava/.test(w.name) ? !args.lava : !args.wet);
