@@ -314,7 +314,7 @@ const SURFACE_INTENT = /回地面|回到地面|回前哨|回基地|回入口|退
 function passageWayBack(ctx: MindContext): string | null {
   const p = ctx.percept, s = ctx.state;
   const here = { x: p.self.pos[0], y: p.self.pos[1], z: p.self.pos[2] };
-  const recs = ctx.memory.passages(s.dim).filter((r) => !r.worldId || r.worldId === s.worldId);
+  const recs = ctx.memory.allPassages(s.dim).filter((r) => !r.worldId || r.worldId === s.worldId);
   const to = passageSurfaceAnchor(recs, here);
   if (!to) return null;
   const g = passageNext(recs, here, to);
@@ -337,7 +337,7 @@ function passageWayBack(ctx: MindContext): string | null {
 function passageWayDown(ctx: MindContext): string | null {
   const p = ctx.percept, s = ctx.state;
   const here = { x: p.self.pos[0], y: p.self.pos[1], z: p.self.pos[2] };
-  const recs = ctx.memory.passages(s.dim).filter((r) => !r.worldId || r.worldId === s.worldId);
+  const recs = ctx.memory.allPassages(s.dim).filter((r) => !r.worldId || r.worldId === s.worldId);
   const to = passageDeepestAnchor(recs, here);
   if (!to) return null;
   const g = passageNext(recs, here, to);

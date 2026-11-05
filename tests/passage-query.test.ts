@@ -74,6 +74,22 @@ test('passages lists only this world and dimension, sorts by nearest historical 
   assert.deepEqual(w.adapter.actions, []);
 });
 
+test('passages lists archived records with an archive marker and reads their stored path', async (t) => {
+  const old = passage({ id: 'old', path: [{ x: 4, y: 50, z: 0 }, { x: 5, y: 50, z: 0 }], deepestY: 50 });
+  const w = fixture(t, [{ kind: 'passages' }, { kind: 'passages', id: 'old' }, decision]);
+  w.memory.archivePassage(old);
+  await w.think();
+  const listed = queryResult(w.calls, 1);
+  const records = listed.records as Array<Record<string, unknown>>;
+  assert.equal(records.find((record) => record.id === 'old')?.archived, true);
+  assert.equal(records.find((record) => record.id === 'shaft')?.archived, undefined, 'live records keep the existing shape');
+  const read = queryResult(w.calls, 2);
+  assert.equal(read.id, 'old');
+  assert.equal(read.archived, true);
+  assert.deepEqual(read.path, old.path);
+  assert.deepEqual(w.memory.passages(), [passage()], 'read-only query leaves live memory unchanged');
+});
+
 test('passages reads every original point across pages, with record timestamps and a global nearest point index', async (t) => {
   const path = Array.from({ length: 70 }, (_, index) => ({ x: 69 - index, y: 64, z: index % 3 }));
   const record = passage({ path });

@@ -650,7 +650,8 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; dig?: boolean }>
       trace.push({ ...s.pos });
       if (!s.connected) return receipt(fail('NOT_CONNECTED', '未连接'));
       const here = { x: s.pos.x, y: s.pos.y, z: s.pos.z };
-      const recs = memory.passages(s.dim).filter((r) => !r.worldId || r.worldId === s.worldId);
+      const recs = memory.allPassages(s.dim).filter((r) => !r.worldId || r.worldId === s.worldId);
+      const archivedCount = recs.filter((r) => r.archivedAt !== undefined).length;
       if (!recs.length) return receipt(fail('NOT_FOUND', '没有记下的旧矿道；要先下矿走过/挖过一段，或改用 goto / excavate_path'));
       const back = args.to === 'entrance';
       target = back ? passageSurfaceAnchor(recs, here) : passageDeepestAnchor(recs, here);
@@ -732,7 +733,8 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; dig?: boolean }>
       // 走完记录的路点 ≠ 到达参考点：按实测位置和三维距离分别报告。
       const arrived = dist3(end, target) <= 2;
       const place = arrived ? `到达${goal}参考点附近` : `离${goal}参考点约 ${remaining} 格`;
-      return receipt(ok(`沿${kind}${back ? '回入口' : '下最深'}走完了记下的 ${route.length} 个脚点，现在站在 (${end.x.toFixed(1)},${end.y.toFixed(1)},${end.z.toFixed(1)})，${place}（再往前没有记过的路，剩下的自己看）${deeper}`, { position: end, remaining, target, arrived, walkedWaypoints: route.length }));
+      const archiveNote = archivedCount ? `；其中 ${archivedCount} 条来自历史归档，只算旧几何，沿途已按当前方块逐段尝试` : '';
+      return receipt(ok(`沿${kind}${back ? '回入口' : '下最深'}走完了记下的 ${route.length} 个脚点，现在站在 (${end.x.toFixed(1)},${end.y.toFixed(1)},${end.z.toFixed(1)})，${place}（再往前没有记过的路，剩下的自己看）${archiveNote}${deeper}`, { position: end, remaining, target, arrived, walkedWaypoints: route.length, archivedCount }));
     } catch (e) {
       // 取消仍抛 AbortedError，但已测到的最后位置、原请求、锚点与后端随 partial 保留。
       if (isAbort(e)) throw cancelledNav(e, {

@@ -430,15 +430,16 @@ export class Thinker {
         const offset = (raw.offset ?? 0) as number;
         if (id === undefined && raw.offset !== undefined) return 'offset 需要与 id 一起使用；不指定 id 时列出矿道记录';
         const context = { worldId: ctx.state.worldId, dim: ctx.state.dim, historical: true, connectivity: 'unknown',
-          note: '历史脚点已稀疏采样、去重或合并，不代表连续顺序或双向可走；地表参考点也不保证现在是入口。' };
-        const records = this.memory.passages(ctx.state.dim).filter((rec) => (rec.worldId ?? 'default') === ctx.state.worldId).map((rec) => {
+          note: '历史脚点已稀疏采样、去重或合并，不代表连续顺序或双向可走；地表参考点也不保证现在是入口。archive 标记的记录来自历史归档，不在当前工作集。' };
+        const records = this.memory.allPassages(ctx.state.dim).filter((rec) => (rec.worldId ?? 'default') === ctx.state.worldId).map((rec) => {
           const nearest = rec.path.reduce<{ index: number; distance: number } | null>((best, point, index) => {
             const distance = Math.hypot(point.x - ctx.state.pos.x, point.y - ctx.state.pos.y, point.z - ctx.state.pos.z);
             return !best || distance < best.distance ? { index, distance } : best;
           }, null);
           return { rec, summary: { id: rec.id, kind: rec.kind ?? 'dug', surfaceReferences: rec.entrances, deepestY: rec.deepestY, createdAt: rec.createdAt,
             lastUsedAt: rec.lastUsedAt, dug: rec.dug, ores: rec.ores, pointCount: rec.path.length,
-            nearestPointIndex: nearest?.index ?? null, distance: nearest?.distance ?? null } };
+            nearestPointIndex: nearest?.index ?? null, distance: nearest?.distance ?? null,
+            ...(rec.archivedAt !== undefined ? { archived: true } : {}) } };
         }).sort((a, b) => (a.summary.distance ?? Infinity) - (b.summary.distance ?? Infinity));
         if (id === undefined) return JSON.stringify({ ...context, action: 'list', records: records.map(({ summary }) => summary) });
         const record = records.find(({ rec }) => rec.id === id.trim());

@@ -578,15 +578,17 @@ interface Cli {
   worldId: string | null;
   report: string | null;
   backup: string | null;
+  includeArchive: boolean;
   execute: boolean;
 }
 
 export function parseCli(argv: readonly string[]): { ok: true; cli: Cli } | { ok: true; help: true } | { ok: false; error: string } {
   if (argv.includes('--help') || argv.includes('-h')) return { ok: true, help: true };
   const values = new Map<string, string>();
-  let execute = false;
+  let execute = false, includeArchive = false;
   for (const arg of argv) {
     if (arg === '--execute') { execute = true; continue; }
+    if (arg === '--include-archive') { includeArchive = true; continue; }
     const match = /^--([a-z-]+)=(.+)$/.exec(arg);
     if (match === null) return { ok: false, error: `unknown argument: ${arg}` };
     if (values.has(match[1]!)) return { ok: false, error: `duplicate argument: ${match[1]}` };
@@ -608,6 +610,7 @@ export function parseCli(argv: readonly string[]): { ok: true; cli: Cli } | { ok
       worldId: values.get('world-id') ?? null,
       report: values.get('report') ?? null,
       backup: values.get('backup') ?? null,
+      includeArchive,
       execute,
     },
   };
@@ -624,6 +627,7 @@ function usage(): string {
     '  --travel-memory=<path>  可选，travel-memory.json（只导入 endpoints；traversals 不导入）',
     '  --placed=<path>         可选，world-memory.json.placed（只审计，不导入）',
     '  --world-id=<id>         可选，默认取来源根 worldId；必须与目标库一致',
+    '  --include-archive       同时把 world-memory.json 的 passageArchive 作为 passages 导入',
     '  --report=<path>         可选，报告 JSON；execute 时默认放在 DB 同目录',
     '  --backup=<path>         可选，备份路径；默认 <database>.pre-legacy-import-<ts>.sqlite',
     '  --execute               真正写入；默认只计划',
@@ -680,8 +684,15 @@ async function main(): Promise<number> {
   const sourceFiles: SourceFile[] = [fileFact('world-memory', cli.worldMemory)];
   if (cli.travelMemory !== null) sourceFiles.push(fileFact('travel-memory', cli.travelMemory));
   if (cli.placed !== null) sourceFiles.push(fileFact('placed', cli.placed));
+  const sourceRoot = readJson(cli.worldMemory);
+  const archive = cli.includeArchive && isRecord(sourceRoot) && Array.isArray(sourceRoot.passageArchive) ? sourceRoot.passageArchive : [];
+  const livePassages = isRecord(sourceRoot) && Array.isArray(sourceRoot.passages) ? sourceRoot.passages : [];
+  const liveIds = new Set(livePassages.flatMap((record) => isRecord(record) && typeof record.id === 'string' ? [record.id] : []));
+  const worldMemory = archive.length
+    ? { ...sourceRoot as Record<string, unknown>, passages: [...livePassages, ...archive.filter((record) => !(isRecord(record) && typeof record.id === 'string' && liveIds.has(record.id)))] }
+    : sourceRoot;
   const plan = planLegacyImport({
-    worldMemory: readJson(cli.worldMemory),
+    worldMemory,
     ...(cli.travelMemory === null ? {} : { travelMemory: readJson(cli.travelMemory) }),
     ...(cli.placed === null ? {} : { placed: readJson(cli.placed) }),
     sourceFiles,

@@ -72,6 +72,8 @@ export interface PassageRecord {
   createdAt: number;
   lastUsedAt: number;
   uses: number;
+  /** 被当前工作集淘汰、移入历史归档的时间；live 记录没有这个字段 */
+  archivedAt?: number;
 }
 
 /**
@@ -192,6 +194,8 @@ interface MemoryData {
   /** 亲眼看到已经没了的资源/危险点：别处的文字记忆（窍门、议程、回想）里还写着那个坐标时，要能指出来 */
   gone?: GoneSpot[];
   passages?: PassageRecord[];
+  /** 超过 live 工作集上限后保留的历史通道；显式查询/路由可读，不参与每 tick 的通行扫描 */
+  passageArchive?: PassageRecord[];
   farms: FarmRecord[];
   lessons: Lesson[];
   hazards: Hazard[];
@@ -218,6 +222,10 @@ const LANDMARK_CAP = 200;
 const DISCOVERY_LABEL_CAP = 8;
 /** 开挖入口/进度 waypoint 上限：恢复点只留最近几个，避免每次开挖都净增两条 */
 export const EXCAVATION_WAYPOINT_CAP = 8;
+/** live 通道工作集上限：每 tick/提示词只处理最近用过的这些，历史记录移入 archive */
+export const PASSAGE_LIVE_CAP = 24;
+/** 历史通道归档上限：足够保留一个世界的旧矿道，同时避免 JSON 无界增长 */
+export const PASSAGE_ARCHIVE_CAP = 512;
 /** 自己放置的方块（路、桥、门框、脚手架…）LRU 上限：环境变量可调；超出淘汰最久未用的 */
 const PLACED_BLOCKS_CAP = (() => {
   const raw = process.env.PLACED_BLOCKS_CAP;
@@ -457,14 +465,14 @@ export class WorldMemory {
   /**
    * 运行中改不了记忆文件（进程会定时写回、覆盖掉）：要人工纠正时，把改动写进同目录的 memory-patch.json，
    * 下次启动读记忆时套用一次，然后改名成 memory-patch.applied-<时间>.json。
-   * 格式：{"removeLandmarks":["id"…], "removeChests":["键"…], "setChests":[箱子记录…], "removeFurnaces":["键"…], "markGone":[{label,dim,pos,now}…], "selectBase":"基地 id"（改首选基地/家）}
+   * 格式：{"removeLandmarks":["id"…], "removeChests":["键"…], "setChests":[箱子记录…], "removeFurnaces":["键"…], "markGone":[{label,dim,pos,now}…], "selectBase":"基地 id"（改首选基地/家）, "archivePassages":[历史通道记录…]}
    */
   patched: string[] = [];
   private applyPatch(file: string) {
     const pf = path.join(path.dirname(file), 'memory-patch.json');
     if (!fs.existsSync(pf)) return;
     try {
-      const p = JSON.parse(fs.readFileSync(pf, 'utf8')) as { removeLandmarks?: string[]; removeChests?: string[]; setChests?: (Partial<ChestRecord> & { items?: { name: string; count: number }[] })[]; removeFurnaces?: string[]; markGone?: { label: string; dim: string; pos: Vec3Like; now?: string }[]; selectBase?: string };
+      const p = JSON.parse(fs.readFileSync(pf, 'utf8')) as { removeLandmarks?: string[]; removeChests?: string[]; setChests?: (Partial<ChestRecord> & { items?: { name: string; count: number }[] })[]; removeFurnaces?: string[]; markGone?: { label: string; dim: string; pos: Vec3Like; now?: string }[]; selectBase?: string; archivePassages?: PassageRecord[] };
       const ids = new Set(p.removeLandmarks ?? []);
       const before = this.data.landmarks.length;
       this.data.landmarks = this.data.landmarks.filter((l) => !ids.has(l.id));
@@ -486,6 +494,17 @@ export class WorldMemory {
           this.patched.push(`首选基地（家）改成 ${target.label}`);
         } else this.patched.push(`没找到基地 ${p.selectBase}，首选没改`);
       }
+      let archived = 0;
+      for (const rec of p.archivePassages ?? []) {
+        if (!rec || typeof rec.id !== 'string' || typeof rec.dim !== 'string' || !Array.isArray(rec.path) || rec.path.length === 0
+          || !rec.path.every((v) => v && [v.x, v.y, v.z].every((n) => typeof n === 'number' && Number.isFinite(n)))) {
+          this.patched.push('跳过一条格式不完整的历史通道归档记录');
+          continue;
+        }
+        this.archivePassage(rec);
+        archived++;
+      }
+      if (archived) this.patched.push(`归档 ${archived} 条历史通道`);
       this.touch();
       fs.renameSync(pf, path.join(path.dirname(file), `memory-patch.applied-${Date.now()}.json`));
     } catch (e) {
@@ -1018,18 +1037,53 @@ export class WorldMemory {
     return structuredClone((this.data.passages ?? []).filter((p) => this.inWorld(p) && (!dim || p.dim === dim)));
   }
 
-  /** 新记或更新一条通道；每个世界最多留 24 条，满了先忘最久没走过的 */
+  /** 被 live 工作集淘汰的历史通道；显式查询和旧路导航可读。 */
+  archivedPassages(dim?: string): PassageRecord[] {
+    return structuredClone((this.data.passageArchive ?? []).filter((p) => this.inWorld(p) && (!dim || p.dim === dim)));
+  }
+
+  /** live 工作集 + 历史归档；同 ID 以 live 为准。调用方必须把归档点当历史几何，不能当当前可通行。 */
+  allPassages(dim?: string): PassageRecord[] {
+    const live = this.passages(dim);
+    const ids = new Set(live.map((p) => p.id));
+    return [...live, ...this.archivedPassages(dim).filter((p) => !ids.has(p.id))];
+  }
+
+  /** 把一条旧通道放进历史归档（回填或 live 淘汰时用）。 */
+  archivePassage(rec: PassageRecord) {
+    const copy = structuredClone({ ...rec, worldId: rec.worldId ?? this.worldId, archivedAt: Date.now() });
+    const archive = (this.data.passageArchive ??= []);
+    const i = archive.findIndex((p) => p.id === copy.id && this.inWorld(p));
+    if (i >= 0) archive[i] = copy; else archive.push(copy);
+    this.trimPassageArchive();
+    this.touch();
+  }
+
+  private trimPassageArchive() {
+    const archive = this.data.passageArchive;
+    if (!archive || archive.length <= PASSAGE_ARCHIVE_CAP) return;
+    archive.sort((a, b) => a.lastUsedAt - b.lastUsedAt);
+    archive.splice(0, archive.length - PASSAGE_ARCHIVE_CAP);
+  }
+
+  /** 新记或更新一条通道；live 工作集最多留 PASSAGE_LIVE_CAP 条，满了移入历史归档而不是丢弃 */
   savePassage(rec: PassageRecord) {
     const all = (this.data.passages ??= []);
     const i = all.findIndex((p) => p.id === rec.id);
     const copy = structuredClone({ ...rec, worldId: rec.worldId ?? this.worldId });
+    delete copy.archivedAt;
     if (i >= 0) all[i] = copy; else all.push(copy);
+    // 同一条记录重新进入 live 工作集后，归档里的旧副本不再参与读取。
+    const archive = this.data.passageArchive;
+    const ai = archive?.findIndex((p) => p.id === copy.id && this.inWorld(p)) ?? -1;
+    if (archive && ai >= 0) archive.splice(ai, 1);
     const mine = all.filter((p) => this.inWorld(p));
-    if (mine.length > 24) {
-      // 满了先忘"走过的路"（最久没走过的），再轮到最久没走过的"我挖的通道"
+    if (mine.length > PASSAGE_LIVE_CAP) {
+      // 满了先移走"走过的路"（最久没走过的），再轮到最久没走过的"我挖的通道"
       const walked = mine.filter((p) => p.kind === 'walked').sort((a, b) => a.lastUsedAt - b.lastUsedAt)[0];
       const victim = walked ?? mine.sort((a, b) => a.lastUsedAt - b.lastUsedAt)[0];
       all.splice(all.indexOf(victim), 1);
+      this.archivePassage(victim);
     }
     this.touch();
   }
@@ -1038,7 +1092,11 @@ export class WorldMemory {
   forgetPassage(id: string) {
     const all = this.data.passages ?? [];
     const i = all.findIndex((p) => p.id === id && this.inWorld(p));
-    if (i >= 0) { all.splice(i, 1); this.touch(); }
+    if (i >= 0) all.splice(i, 1);
+    const archive = this.data.passageArchive;
+    const ai = archive?.findIndex((p) => p.id === id && this.inWorld(p)) ?? -1;
+    if (archive && ai >= 0) archive.splice(ai, 1);
+    if (i >= 0 || ai >= 0) this.touch();
   }
 
   // ------------------------------------------------ 仓储

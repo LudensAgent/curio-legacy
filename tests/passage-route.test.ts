@@ -109,6 +109,27 @@ test('follow_passage 沿旧矿道逐段走回入口（碎片连成网）', async
   assert.deepEqual(visited[visited.length - 1], { x: 0, y: 64, z: 0 }, '最后走到竖井顶部');
 });
 
+test('follow_passage can follow a record that has moved to the historical archive', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 40, z: 0.5 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  memory.archivePassage({ id: 'old-mine', worldId: w.worldId, dim: w.dim, kind: 'dug', entrances: [{ x: 8, y: 41, z: 0 }],
+    deepestY: 40, dug: 12, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1,
+    path: [{ x: 0, y: 40, z: 0 }, { x: 4, y: 40, z: 0 }, { x: 8, y: 40, z: 0 }] });
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  const visited: Vec3Like[] = [];
+  t.mock.method(w, 'moveTo', async (goal: MoveTarget) => {
+    if (goal.kind === 'near') { visited.push(goal.pos); w.pos = { x: goal.pos.x, y: goal.pos.y, z: goal.pos.z }; }
+  });
+  const result = await followPassage.run(ctx, { to: 'entrance' });
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.deepEqual(visited[visited.length - 1], { x: 8, y: 40, z: 0 });
+  assert.equal(result.data?.archivedCount, 1);
+  assert.match(result.summary, /历史归档/);
+});
+
 test('follow_passage 离矿道远时先走到最近脚点接回网里，再沿路由走', async (t) => {
   const w = new TestWorld();
   w.pos = { x: 50, y: 30, z: 0 };
