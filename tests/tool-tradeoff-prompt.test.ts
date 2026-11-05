@@ -202,15 +202,21 @@ test('提示词：木料历史账只报事实、区分背包实时与箱子旧�
   assert.ok(!userOf({ ...ctx, tier: 'glance' }).includes('木料的历史账'), '瞥一眼不重复物料账');
   assert.ok(!userOf({ ...ctx, materials: null }).includes('木料的历史账'), '没有账本数据时不说');
   assert.ok(!userOf({ ...ctx, materials: { wood: tally(1, 3, 40, 40), ore: tally(0, 0, 0, 0) } }).includes('木料的历史账'), '只跑过 1 段活不出现');
+  const old = { wood: { ...tally(7, 30, 795, 114), lastAt: Date.now() - 3 * 86_400_000 }, ore: tally(0, 0, 0, 0) };
+  assert.match(userOf({ ...ctx, materials: old }), /最近一次 3 天前/, '超过 48 小时用天');
   // 用木镐挖铁：木镐不是木料采集意图，不该触发木料账
   const pickaxeMining = createActivity({ what: '挖铁矿', why: '用木镐挖铁', kind: 'gather', repeat: 1, steps: [{ skill: 'dig_at', args: { at: [1, -1, 0] } }] }, '', 'llm', adapter.state());
   assert.ok(!userOf({ ...base, activity: pickaxeMining, materials }).includes('木料的历史账'), '“用木镐挖铁”不触发木料账');
+  // dialog 不是 log：词边界不能被随意子串触发
+  const dialog = createActivity({ what: 'read dialog', why: '看公告牌', kind: 'explore', repeat: 1, steps: [{ skill: 'look', args: {} }] }, '', 'llm', adapter.state());
+  assert.ok(!userOf({ ...base, activity: dialog, materials }).includes('木料的历史账'), 'dialog 不触发 log');
   memory.close();
 });
 
 test('提示词：矿石历史账含锭的现有量但不把锭算成矿石，且与这一趟的下矿账不重复', () => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   adapter.inv.set('iron_ingot', 64);
+  adapter.inv.set('raw_iron_block', 8);
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
   const base: MindContext = { tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(), self: new SelfModel(null),
     memory, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' };
@@ -218,7 +224,8 @@ test('提示词：矿石历史账含锭的现有量但不把锭算成矿石，�
   const miningActivity = createActivity({ what: '沿矿道往下挖，找钻石', why: '测试', kind: 'gather', repeat: 1, steps: [{ skill: 'excavate_path', args: { entry: 'current', mode: 'stairs', direction: 'east', steps: 4 } }] }, '', 'llm', adapter.state());
   const materials = { wood: tally(7, 30, 795, 114), ore: tally(3, 12, 260, 80) };
   const user = buildMindMessages({ ...base, activity: miningActivity, materials }).find((m) => m.role === 'user')!.content;
-  assert.match(user, /矿石的历史账（最近 3 段活）：拿到 12 个矿石\/粗矿\/矿物，一共走了 260 格（最近平均每段活 80 格；最近一次 2 分钟前）；现在背包里有 64 个矿石\/粗矿\/锭（实时）/);
+  assert.match(user, /矿石的历史账（最近 3 段活）：拿到 12 个矿石\/粗矿\/矿物，一共走了 260 格（最近平均每段活 80 格；最近一次 2 分钟前）；现在背包里有 72 个矿石\/粗矿\/锭（实时）/);
+  assert.match(user, /其中粗矿块 8 个按块计，未折算成粗铁/, '粗矿块计入现有量但不装作粗铁');
   assert.ok(!user.includes('木料的历史账'), '挖矿意图不触发木料账');
   // 这一趟的下矿账已经在说当前所见，历史聚合不重复
   const withTrip = { ...base, activity: miningActivity, materials, trip: { minutes: 10, gained: { diamond: 1 }, nearEnd: true } };
@@ -234,9 +241,9 @@ test('mind：材料账由 ledger 的 materialTally 传入 MindContext', () => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   const ledger = new Ledger(null, bus, () => adapter.state());
   ledger.data.episodes = [
-    { at: Date.now(), what: '砍树', kind: 'gather', signature: 's', outcome: 'done', sec: 60, actions: 1, failures: 0, walked: 100, hpLost: 0, gained: { oak_log: 6 } },
-    { at: Date.now(), what: '再去砍树', kind: 'gather', signature: 's', outcome: 'done', sec: 60, actions: 1, failures: 0, walked: 80, hpLost: 0, gained: { oak_log: 4 } },
-    { at: Date.now(), what: '挖铁矿', kind: 'gather', signature: 's', outcome: 'done', sec: 60, actions: 1, failures: 0, walked: 50, hpLost: 0, gained: { raw_iron: 3 } },
+    { at: Date.now(), what: '砍树', kind: 'gather', signature: 'gather:oak_log', outcome: 'done', sec: 60, actions: 1, failures: 0, walked: 100, hpLost: 0, gained: { oak_log: 6 } },
+    { at: Date.now(), what: '再去砍树', kind: 'gather', signature: 'gather:oak_log', outcome: 'done', sec: 60, actions: 1, failures: 0, walked: 80, hpLost: 0, gained: { oak_log: 4 } },
+    { at: Date.now(), what: '挖铁矿', kind: 'gather', signature: 'gather:raw_iron', outcome: 'done', sec: 60, actions: 1, failures: 0, walked: 50, hpLost: 0, gained: { raw_iron: 3 } },
   ];
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
   const captured: MindContext[] = [];

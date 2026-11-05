@@ -33,42 +33,49 @@ test('收获账本：不针对哪种东西，按“得到的东西”记每个�
   assert.match(ledger.digest().join('\n'), /什么也没得到/, '白忙的比例也算进去');
 });
 
-test('材料的账：木料/矿石按族和趟活过滤，顺手捡到和取物不算整趟', () => {
+test('材料的账：按真实 routine 判断采集趟，取物/顺手捡到不算；审计给出的活名逐个覆盖', () => {
   const ledger = new Ledger(null, new EventBus(), () => { throw new Error('不用状态'); });
-  const ep = (at: number, walked: number, gained: Record<string, number>, what = '采集'): Episode =>
-    ({ at, what, kind: 'gather', signature: 's', outcome: 'done', sec: 60, actions: 1, failures: 0, walked, hpLost: 0, gained });
+  const ep = (at: number, walked: number, gained: Record<string, number>, what: string, signature: string, kind = 'gather'): Episode =>
+    ({ at, what, kind, signature, outcome: 'done', sec: 60, actions: 1, failures: 0, walked, hpLost: 0, gained });
   ledger.data.episodes = [
-    ep(1_000, 100, { oak_log: 6, stick: 2 }, '砍树'),
-    ep(2_000, 200, { birch_log: 8 }, '去森林伐木'),
-    ep(3_000, 300, { spruce_wood: 10, dirt: 4 }, '砍下云杉木头'),
-    ep(4_000, 90, { raw_iron: 2, iron_ore: 3 }, '挖铁矿石'),
-    ep(5_000, 70, { stone: 32 }, '挖石头'),
-    // 挖矿顺手捡到原木：活名不是木料采集，不算一趟木料
-    ep(6_000, 0, { oak_log: 1 }, '挖铁矿'),
-    // 取物：拿了很多原木但没走木料采集的趟
-    ep(7_000, 0, { oak_log: 64 }, 'take_items 从箱子取东西'),
-    // raw_iron_block 不是 raw_iron，也不算矿石
-    ep(8_000, 30, { raw_iron_block: 64 }, '整理粗铁块'),
-    ep(9_000, 20, { bamboo_block: 3, crimson_stem: 2, warped_hyphae: 2, nether_wart_block: 1 }, '砍竹子与菌柄'),
+    // 真实木料采集：signature 有 gather + 木料参数
+    ep(1_000, 100, { oak_log: 6, stick: 2 }, '收集木材', 'gather:oak_log'),
+    ep(2_000, 200, { oak_wood: 8 }, '采集橡木', 'gather:oak_wood'),
+    ep(3_000, 300, { oak_log: 3 }, 'gather wood', 'gather block log'),
+    ep(4_000, 50, { oak_log: 4 }, 'collect wood logs', 'gather:oak_log'),
+    ep(5_000, 20, { stripped_bamboo_block: 2, crimson_stem: 2, warped_hyphae: 2, nether_wart_block: 1 }, '砍竹子与菌柄', 'gather:stripped_bamboo_block>gather:crimson_stem>gather:warped_hyphae'),
+    // 取物/顺手捡到：活名里有木头字样也不算采集趟
+    ep(6_000, 0, { oak_log: 8 }, 'take_items 从箱子取木头', 'take_items:oak_log'),
+    ep(7_000, 0, { oak_log: 64 }, '从箱子取原木', 'take_items:oak_log'),
+    ep(8_000, 0, { oak_log: 1 }, '挖铁矿时顺手捡了一根原木', 'gather:iron_ore>pickup_items'),
+    // 真实矿石采集：gather 参数含矿石，或 excavate/dig
+    ep(9_000, 90, { raw_iron: 2, iron_ore: 3 }, '挖铁矿', 'gather:iron_ore'),
+    ep(10_000, 40, { lapis_lazuli: 5 }, '采集青金石', 'gather:lapis_lazuli'),
+    ep(11_000, 30, { quartz: 4 }, '收集石英', 'gather:quartz'),
+    ep(12_000, 60, { diamond: 1 }, '挖钻石', 'excavate_path:east'),
+    // 取物矿石 / 粗矿块
+    ep(13_000, 0, { iron_ore: 64 }, 'take_items 取铁矿', 'take_items:iron_ore'),
+    ep(14_000, 30, { raw_iron_block: 64 }, '整理粗铁块', 'gather:raw_iron_block'),
   ];
   const wood = ledger.materialTally('wood');
-  assert.equal(wood.trips, 4, '三段砍树 + 一段菌柄/竹子；顺手捡到和取物不算');
-  assert.equal(wood.units, 31, '只数原木/木块/菌柄，木棍和泥土不算');
-  assert.equal(wood.walked, 620);
-  assert.equal(wood.recentWalked, 173, '最近 3 段平均');
-  assert.equal(wood.lastAt, 9_000);
+  assert.equal(wood.trips, 5, '收集木材/采集橡木/gather wood/collect wood logs/菌柄竹子；取物与顺手捡到不算');
+  assert.equal(wood.units, 27, '只数原木类方块，木棍和泥土不算');
+  assert.equal(wood.walked, 670);
+  assert.equal(wood.recentWalked, 123, '最近 3 段平均');
+  assert.equal(wood.lastAt, 5_000);
   const ore = ledger.materialTally('ore');
-  assert.equal(ore.trips, 1);
-  assert.equal(ore.units, 5);
-  assert.equal(ore.walked, 90);
-  assert.equal(ore.lastAt, 4_000);
+  assert.equal(ore.trips, 4);
+  assert.equal(ore.units, 15);
+  assert.equal(ore.walked, 220);
+  assert.equal(ore.lastAt, 12_000);
   // 10 段 diamond/coal 挖矿后，矿石族不能因为漏掉成品矿物而为 0
-  for (let i = 0; i < 10; i++) ledger.data.episodes.push(ep(10_000 + i * 1_000, 50, i % 2 ? { diamond: 1 } : { coal: 2 }, i % 2 ? '挖钻石' : '挖煤'));
+  for (let i = 0; i < 10; i++) ledger.data.episodes.push(ep(15_000 + i * 1_000, 50, i % 2 ? { diamond: 1 } : { coal: 2 }, i % 2 ? '挖钻石' : '挖煤', i % 2 ? 'gather:diamond_ore' : 'gather:coal_ore'));
   const mined = ledger.materialTally('ore');
-  assert.equal(mined.trips, 11);
-  assert.equal(mined.units, 20, '5 块粗铁/铁矿石 + 5 个钻石 + 10 个煤');
+  assert.equal(mined.trips, 14);
+  assert.equal(mined.units, 30, '5 块粗铁/铁矿石 + 5 青金石 + 4 石英 + 1 钻石 + 5 钻石 + 10 煤');
+  assert.equal(mined.walked, 720);
   assert.equal(mined.recentWalked, 50);
-  assert.equal(mined.lastAt, 19_000);
+  assert.equal(mined.lastAt, 24_000);
 });
 
 test('东西出现在哪：看见的和拿到的按高度、群系记成分布，同一格方块只记一次', () => {

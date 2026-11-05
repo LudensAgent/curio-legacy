@@ -22,7 +22,9 @@ const MAX_SEEN_KEYS = 12_000;
 
 export interface Dist { n: number; y: Record<string, number>; biome: Record<string, number>; dim: Record<string, number>; via?: Record<string, number>; last: number }
 export interface Episode {
-  at: number; what: string; kind: string; signature: string; outcome: string;
+  at: number; what: string; kind: string; outcome: string;
+  /** 真实执行的 routine（`skill:参数` 用 `>` 连接）；材料账按它区分采集趟和取物/顺手捡到 */
+  signature: string;
   sec: number; actions: number; failures: number; walked: number; hpLost: number; gained: Record<string, number>;
   /** 这段活里从背包减少的可消耗资源（火把、食物、垫料…）：投入的另一半，和 gained 对称 */
   consumed?: Record<string, number>;
@@ -45,17 +47,58 @@ export interface HuntTally { trips: number; animals: number; walked: number; rec
 export interface MaterialTally { trips: number; units: number; walked: number; recentWalked: number | null; lastAt: number | null }
 /** 矿石的取得：挖到的矿石方块、三种粗矿、以及挖矿直接掉落的成品矿物 */
 const ORE_GAIN = /_ore$|^raw_(iron|gold|copper)$|^(coal|diamond|redstone|lapis_lazuli|emerald|quartz|amethyst_shard|ancient_debris|gold_nugget)$/;
-/** 矿石的现有量：取得口径再加上锭/碎屑（展示时要能和“矿石/粗矿”分开说清） */
-const ORE_STOCK = /_ore$|^raw_(iron|gold|copper)$|^(coal|diamond|redstone|lapis_lazuli|emerald|quartz|amethyst_shard|ancient_debris|gold_nugget|iron_ingot|gold_ingot|copper_ingot|netherite_scrap)$/;
+/** 矿石的现有量：取得口径再加上锭/碎屑/粗矿块（粗矿块展示时另注按块计） */
+const ORE_STOCK = /_ore$|^raw_(iron|gold|copper)(_block)?$|^(coal|diamond|redstone|lapis_lazuli|emerald|quartz|amethyst_shard|ancient_debris|gold_nugget|iron_ingot|gold_ingot|copper_ingot|netherite_scrap)$/;
 /** 原木类：包含下界菌柄与竹子方块；木板/木棍不算原木 */
-const WOOD_GAIN = /_log$|_wood$|_stem$|_hyphae$|^bamboo_block$/;
+const WOOD_GAIN = /_log$|_wood$|_stem$|_hyphae$|^(stripped_)?bamboo_block$/;
+
+/** 取物/存物/查找/整理不是采集趟（按真实 routine 的步骤名排除） */
+const TAKE_STORE_STEP = /^(take_items|store_items|find_item)(?::|\s|$)/;
+const isTakeStore = (e: Pick<Episode, 'kind' | 'signature'>) =>
+  e.kind === 'tidy' || e.signature.split('>').some((s) => TAKE_STORE_STEP.test(s.trim()));
+const stepsOf = (signature: string) => signature.split('>').map((s) => s.trim()).filter(Boolean);
+const stepTokens = (step: string) => step.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+const keyOfStep = (step: string) => { const i = step.indexOf(':'); return i >= 0 ? step.slice(i + 1) : step; };
+const isGatherStep = (step: string) => /^(gather|collect)(?::|$|\s)/.test(step);
+const WOOD_STEP_TOKENS = new Set(['log', 'wood', 'stem', 'hyphae', 'bamboo']);
+const hasWoodStepKey = (step: string) => stepTokens(step).some((t) => WOOD_STEP_TOKENS.has(t));
+const hasOreStepKey = (step: string) => ORE_GAIN.test(keyOfStep(step)) || stepTokens(step).includes('ore');
+const MINING_STEP = /^(excavate_path|dig_at|dig)(?::|\s|$)/;
+/** what 只作代码技能/旧数据的兜底；必须明确是木料，且不是挖矿、取物或顺手捡到 */
+const WOOD_WHAT = /砍|伐|原木|木头|树干|找树|木料|木材|橡木|\bwood\b|\blogs?\b|\bchop\b|\btree\b/;
+const MINING_WHAT = /矿|挖|钻石|铁|煤|红石|青金石|石英|\b(mine|mining|dig|ore|redstone|diamond|iron|coal|lapis|quartz)\b/;
+const TAKE_WHAT = /取|拿|存|放|箱子|背包|捡|\b(take|store|find|pickup)\b/;
+const skillTokens = (name: string) => name.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+/** 代码技能名（Episode.skills）明确是砍树/木材；参数在 signature 里看不到时用名字兜底 */
+const WOOD_SKILL_TOKENS = new Set(['chop', 'tree', 'wood', 'log', 'logs']);
+const MINING_SKILL_TOKENS = new Set(['mine', 'mining', 'dig', 'digging', 'ore', 'excavate', 'excavation']);
+const woodTrip = (e: Episode) => {
+  if (isTakeStore(e)) return false;
+  const steps = stepsOf(e.signature);
+  if (steps.some((s) => isGatherStep(s) && hasWoodStepKey(s))) return true;
+  if (e.skills?.some((n) => skillTokens(n).some((t) => WOOD_SKILL_TOKENS.has(t)))) return true;
+  // use_skill 的 routine 不带参数；没有 signature 的旧数据也只能看活名。两种情况都排除挖矿/取物。
+  if (steps.some((s) => /^use_skill(?::|\s|$)/.test(s)) || !e.signature)
+    return WOOD_WHAT.test(e.what) && !MINING_WHAT.test(e.what) && !TAKE_WHAT.test(e.what);
+  return false;
+};
+const oreTrip = (e: Episode) => {
+  if (isTakeStore(e)) return false;
+  const steps = stepsOf(e.signature);
+  if (steps.some((s) => isGatherStep(s) && hasOreStepKey(s))) return true;
+  if (steps.some((s) => MINING_STEP.test(s))) return true;
+  if (e.skills?.some((n) => skillTokens(n).some((t) => MINING_SKILL_TOKENS.has(t)))) return true;
+  // use_skill/旧数据兜底：活名要说清是挖掘，且不是取物
+  if (steps.some((s) => /^use_skill(?::|\s|$)/.test(s)) || !e.signature) return MINING_WHAT.test(e.what) && !TAKE_WHAT.test(e.what);
+  return false;
+};
 /**
- * 材料分类：趟数只算「活名本身是这类采集」的段活（顺手捡到、取物不算一整趟）；
- * 取得与现有量用各自口径（现有量的矿石族包含锭，展示时另标）。
+ * 材料分类：趟数按真实 routine（signature）判断，取物/存物/顺手捡到不算一整趟；
+ * 取得与现有量用各自口径（现有量的矿石族包含锭/粗矿块，展示时另标）。
  */
 export const MATERIAL_FAMILIES = {
-  wood: { trip: /砍|伐|原木|木头|树干|找树|木料|_log\b|log\b|_wood/, gain: WOOD_GAIN, stock: WOOD_GAIN },
-  ore: { trip: /矿|挖|钻石|铁|煤|红石|redstone|ore|mine/, gain: ORE_GAIN, stock: ORE_STOCK },
+  wood: { trip: woodTrip, gain: WOOD_GAIN, stock: WOOD_GAIN },
+  ore: { trip: oreTrip, gain: ORE_GAIN, stock: ORE_STOCK },
 } as const;
 export type MaterialFamily = keyof typeof MATERIAL_FAMILIES;
 /** 动物身上掉的生肉：一块肉算一只（鸡掉 1，牛猪羊 1–3 都按 1 只估，宁可少算） */
@@ -375,10 +418,10 @@ export class Ledger implements LedgerView {
       recentWalked: recent.length ? Math.round(recent.reduce((n, e) => n + e.walked, 0) / recent.length) : null, lastAt: hunts.at(-1)?.at ?? null };
   }
 
-  /** 一类材料的账：只统计活名和产出都对得上的段活（复用 Episode.what/walked/gained，不另记） */
+  /** 一类材料的账：只统计真实 routine 是这类采集、且产出对得上的段活（复用 Episode 已有字段，不另记） */
   materialTally(family: MaterialFamily): MaterialTally {
     const { trip, gain } = MATERIAL_FAMILIES[family];
-    const trips = this.data.episodes.filter((e) => trip.test(e.what) && Object.keys(e.gained).some((k) => gain.test(k)));
+    const trips = this.data.episodes.filter((e) => trip(e) && Object.keys(e.gained).some((k) => gain.test(k)));
     const units = trips.reduce((n, e) => n + Object.entries(e.gained).filter(([k]) => gain.test(k)).reduce((m, [, v]) => m + v, 0), 0);
     const recent = trips.slice(-3);
     return { trips: trips.length, units, walked: trips.reduce((n, e) => n + e.walked, 0),

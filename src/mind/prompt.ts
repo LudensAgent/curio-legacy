@@ -328,8 +328,8 @@ const MINING_INTENT = /下矿|矿道|矿洞|找铁|挖铁|找矿|挖矿|粗铁|�
 /** 打算里说要从地下回地面 */
 const SURFACE_INTENT = /回地面|回到地面|回前哨|回基地|回入口|退回入口|回地表|见天|爬出|挖出去|出矿|上地面|上到地面|往上爬|往上走|往上挖|挖(阶梯|台阶).{0,8}上/;
 
-/** 打算里说木头/砍树/原木（材料账只在相关时出现；和账本的趟数过滤共用一套口径） */
-const WOOD_INTENT = MATERIAL_FAMILIES.wood.trip;
+/** 打算里说木头/砍树/原木（材料账只在相关意图出现；前导非字母避免 dialog 之类误匹配） */
+const WOOD_INTENT = /砍|伐|原木|木头|树干|找树|木料|木材|橡木|(^|[^a-z])(log|wood|stem|hyphae|bamboo)s?\b|\bchop\b|\btree\b/;
 
 /** 沿来路回入口的下一步：把全部记下的通道连成网（碎片也接得上），取朝地表锚点走的下一个路点，核对下一步那两格（脚下+头顶）现在是否还通，给出「可走/被堵」的当前事实。 */
 function passageWayBack(ctx: MindContext): string | null {
@@ -458,7 +458,7 @@ export function decisionReminders(ctx: MindContext): string[] {
     const lastAgo = (at: number | null) => {
       if (at === null) return '';
       const minutes = Math.floor((Date.now() - at) / 60_000);
-      return `；最近一次 ${minutes < 1 ? '不到 1 分钟前' : minutes < 90 ? `${minutes} 分钟前` : `${Math.round(minutes / 60)} 小时前`}`;
+      return `；最近一次 ${minutes < 1 ? '不到 1 分钟前' : minutes < 90 ? `${minutes} 分钟前` : minutes < 48 * 60 ? `${Math.round(minutes / 60)} 小时前` : `${Math.round(minutes / 1440)} 天前`}`;
     };
     const gatheringWood = ctx.activity?.kind === 'gather' && WOOD_INTENT.test(JSON.stringify(ctx.activity.steps));
     if (materials.wood.trips >= 2 && (WOOD_INTENT.test(intent) || gatheringWood)) {
@@ -470,7 +470,8 @@ export function decisionReminders(ctx: MindContext): string[] {
     if (!tripShown && materials.ore.trips >= 2 && MINING_INTENT.test(intent)) {
       const t = materials.ore, ore = MATERIAL_FAMILIES.ore.stock;
       const inv = backpack(ore), chest = chestStock(ore);
-      out.push(`矿石的历史账（最近 ${t.trips} 段活）：拿到 ${t.units} 个矿石/粗矿/矿物，一共走了 ${t.walked} 格（最近平均每段活 ${t.recentWalked} 格${lastAgo(t.lastAt)}）；现在背包里有 ${inv} 个矿石/粗矿/锭（实时）${chest ? `；记得的箱子（上次打开时）还有 ${chest} 个矿石/粗矿/锭` : ''}`);
+      const rawBlocks = backpack(/^raw_(iron|gold|copper)_block$/) + chestStock(/^raw_(iron|gold|copper)_block$/);
+      out.push(`矿石的历史账（最近 ${t.trips} 段活）：拿到 ${t.units} 个矿石/粗矿/矿物，一共走了 ${t.walked} 格（最近平均每段活 ${t.recentWalked} 格${lastAgo(t.lastAt)}）；现在背包里有 ${inv} 个矿石/粗矿/锭（实时）${chest ? `；记得的箱子（上次打开时）还有 ${chest} 个矿石/粗矿/锭` : ''}${rawBlocks ? `；其中粗矿块 ${rawBlocks} 个按块计，未折算成粗铁` : ''}`);
     }
   }
   // 顺手采集与不可替代工具：把「看见什么矿 + 现在这类料有多少 + 能做什么」摆成事实，让它在路过矿石时能自己掂量要不要顺手采；
