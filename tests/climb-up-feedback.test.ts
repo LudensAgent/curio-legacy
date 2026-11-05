@@ -78,3 +78,22 @@ test('climb_up says plainly when its stop condition already holds instead of rep
   assert.equal(result.data?.alreadySatisfied, true);
   assert.match(result.summary, /"height":2/);
 });
+
+test('climb_up falls back to explicit pillar placement when pathfinder reports completion without an ascent', async () => {
+  let pos = { x: 0.5, y: 64, z: 0.5 };
+  let moves = 0;
+  let pillars = 0;
+  const adapter = {
+    state: () => ({ pos: { ...pos }, onGround: true, inventory: [{ name: 'dirt', count: 8 }] }),
+    blockAt: () => 'air', lightAt: () => ({ block: 0, sky: 15 }),
+    async moveTo() { moves++; },
+    async pillarUp() { pillars++; pos = { ...pos, y: pos.y + 1 }; return { ok: true, y: pos.y }; },
+  } as unknown as GameAdapter;
+  const ctx = { adapter, signal: new AbortController().signal, deadline: Date.now() + 10_000, senses: { refresh() {} } } as unknown as SkillCtx;
+  const result = await climbUp.run(ctx, { height: 1, untilSky: false });
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(moves, 1, 'pathfinder was asked once');
+  assert.equal(pillars, 1, 'explicit pillar placement is the bounded fallback');
+  assert.equal(result.data?.climbed, 1);
+  assert.equal(pos.y, 65);
+});

@@ -5,13 +5,13 @@ import { footSurfaceY, supportTop, type StateAt } from '../perception/geometry.t
 import { dirOfYaw, interactiveName } from '../perception/vision.ts';
 import { isContainerLandmark } from '../memory/chest-memory.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
-import { hasPlaceable } from './survival.ts';
+import { hasPlaceable, PLACEABLE } from './survival.ts';
 import { ensureToolFor } from './work.ts';
 import { findStation, forgetStationAt } from './stations.ts';
 import { classifyBlock, MAN_MADE_NOTE, OWN_BUILDING_HINT, ownBuildingAt, storedChestAt } from './build.ts';
 import { noteEdit } from '../mind/edits.ts';
 import type { Vec3Like } from '../adapter/types.ts';
-import { dist3, throwIfAborted } from '../util.ts';
+import { dist3, sleep, throwIfAborted } from '../util.ts';
 
 /**
  * 身体的基本动作：对着某个方向挖（玩家按住左键）、原地垫方块往上爬（跳起来往脚下放方块）。
@@ -376,6 +376,32 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
     };
     // 确认一次单级转换真正完成：身体在有效支撑上且净高度确实升高，不把空中的瞬时高度当落点。
     const confirmedAscent = (fromY: number) => landed() && Math.floor(adapter.state().pos.y + 0.05) > Math.floor(fromY) && adapter.state().pos.y > fromY + 0.05;
+    // moveTo 可能在上跳过程中返回（甚至报 no path）；此时身体还在空中，不能立即判失败。
+    // 有界等待真实落地，再按“是否站高”结算；超时仍未落地则如实失败。
+    const waitForLanding = async (fromY: number, timeoutMs = 1500) => {
+      const until = Date.now() + timeoutMs;
+      while (Date.now() < until) {
+        throwIfAborted(signal);
+        if (confirmedAscent(fromY)) return true;
+        if (adapter.state().onGround) return false;
+        await sleep(50, signal);
+      }
+      return confirmedAscent(fromY);
+    };
+    // Pathfinder only towers with a placeable block in hand. A preceding dig may
+    // leave a tool selected, so switch back before each ascent attempt.
+    const ensureScaffoldHeld = async () => {
+      if (onLadder()) return true;
+      const held = adapter.state().held;
+      if (held !== null && PLACEABLE.includes(held)) return true;
+      const block = adapter.state().inventory.find((item) => item.count > 0 && PLACEABLE.includes(item.name));
+      if (block === undefined) return false;
+      // Adapters without an explicit equip surface let Pathfinder select the
+      // scaffold item itself; do not turn that capability gap into a hard stop.
+      if (typeof adapter.equipItem !== 'function') return true;
+      const equipped = await adapter.equipItem(block.name, 'hand', signal);
+      return equipped.ok;
+    };
     let climbedThisRun = 0;
     const total = () => (budget ? budget.spent : climbedThisRun);
     const reached = (around: ReturnType<typeof surroundings>) => (!args.untilSky || around.sky) && (!args.untilExit || around.exits.length > 0);
@@ -431,12 +457,17 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
           if (isAbort(e)) throw e;
           return finish(why(e));
         }
+        if (!(await ensureScaffoldHeld())) {
+          return finish('背包里没有可垫脚方块，或无法切换到手持方块');
+        }
         try {
           await moveUp();
         } catch (e) {
           if (isAbort(e)) throw e;
           const name = e instanceof Error ? e.name : undefined;
           if (name !== 'PillarClearanceError') {
+            // The pathfinder can return while the jump/placement is still settling.
+            await waitForLanding(before.y);
             settlePending();
             return finish(why(e));
           }
@@ -449,16 +480,31 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
             if (isAbort(e2)) throw e2;
             return finish(why(e2), 'PILLAR_CLEARANCE');
           }
+          if (!(await ensureScaffoldHeld())) {
+            return finish('背包里没有可垫脚方块，或无法切换到手持方块', 'PILLAR_CLEARANCE');
+          }
           try {
             await moveUp();
           } catch (e2) {
             if (isAbort(e2)) throw e2;
+            await waitForLanding(before.y);
             settlePending();
             return finish(why(e2), e2 instanceof Error && e2.name === 'PillarClearanceError' ? 'PILLAR_CLEARANCE' : undefined);
           }
         }
         throwIfAborted(signal);
-        if (!confirmedAscent(before.y)) return finish('移动已结束，但脚下没有实际站高');
+        if (!(await waitForLanding(before.y))) {
+          // Pathfinder can resolve mid-jump without placing a block. Fall back to
+          // the adapter's explicit jump-and-place once; it reports real clearance
+          // and placement facts instead of assuming a path result is a climb.
+          const names = adapter.state().inventory.filter((item) => item.count > 0 && PLACEABLE.includes(item.name)).map((item) => item.name);
+          const fallback = names.length > 0 && typeof adapter.pillarUp === 'function'
+            ? await adapter.pillarUp(names, signal)
+            : null;
+          if (fallback === null || fallback.ok !== true || !(await waitForLanding(before.y))) {
+            return finish('移动已结束，但脚下没有实际站高');
+          }
+        }
         climbedThisRun++;
         if (budget) budget.spent++;
         lastBeforeY = undefined;
