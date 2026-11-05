@@ -329,7 +329,7 @@ export const travel: Skill<TravelArgs> = {
             const footing = exit
               ? { x: exit.x + 0.5, y: exit.y, z: exit.z + 0.5 }
               : { x: lastWater.x + 0.5, y: lastWater.y + 0.5, z: lastWater.z + 0.5 };
-            const r = adapter.swimTo ? await adapter.swimTo(footing, signal, { timeoutMs: Math.min(20000, 3000 + leg.cells.length * 1500) }) : { ok: false, reason: 'NO_SWIM', landed: false, oxygen: 20 };
+            const r = adapter.swimTo ? await adapter.swimTo(footing, signal, { timeoutMs: Math.min(20000, 3000 + leg.cells.length * 1500) }) : { ok: false, reason: 'NO_SWIM', landed: false, surfaced: false, oxygen: 20, stage: undefined };
             const after = adapter.state().pos;
             const moved = dist3(before, after);
             swum += moved;
@@ -337,10 +337,11 @@ export const travel: Skill<TravelArgs> = {
             const within = exit
               ? Math.hypot(after.x - footing.x, after.z - footing.z) <= 2.5 && Math.abs(after.y - exit.y) <= 1
               : Math.hypot(after.x - footing.x, after.z - footing.z) <= 2.5 && Math.abs(after.y - footing.y) <= 1.5;
-            const reachedExit = r.ok && (exit ? r.landed : true) && within;
+            // 指定岸必须是离水站稳（landed）；水段终点可以停在指定水里（surface_reached）。露头/水里到点都不能冒充走上岸。
+            const reachedExit = r.ok && within && (exit ? r.landed && r.stage !== 'surface_reached' : r.landed || r.stage === 'surface_reached');
             if (!reachedExit) {
               const where = exit ? `没到指定岸 (${exit.x},${exit.y},${exit.z})` : '没到水段终点';
-              lastErr = `游过 ${leg.cells.length} 格水${where}（${r.reason ?? '没站稳'}）`;
+              lastErr = `游过 ${leg.cells.length} 格水${where}（阶段 ${r.stage ?? '未知'}，${r.reason ?? '没站稳'}）`;
               avoid.add(`${(exit ?? lastWater).x},${(exit ?? lastWater).z}`);
             }
             failed = true; // 过完一段水就按新位置重新规划（岸那边的路这时才看得清）

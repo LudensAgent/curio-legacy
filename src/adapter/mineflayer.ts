@@ -37,6 +37,9 @@ import type {
   Vec3Like,
   BossDeathObservation,
   SwimOptions,
+  SwimFacts,
+  SwimGoal,
+  SwimStage,
   UseItemOptions,
   GuiOp,
   GuiSlot,
@@ -4108,25 +4111,39 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     }
   }
 
-  async swimTo(target: Vec3Like | null, signal: AbortSignal, opts: SwimOptions = {}): Promise<ActionResult & { landed: boolean; surfaced: boolean; oxygen: number }> {
+  async swimTo(target: Vec3Like | null, signal: AbortSignal, opts: SwimOptions = {}): Promise<ActionResult & SwimFacts & { landed: boolean; surfaced: boolean; oxygen: number }> {
     const check = this.actionCheckpoint(signal);
-    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', landed: false, surfaced: false, oxygen: 0 };
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED', landed: false, surfaced: false, oxygen: 0, goal: 'surface_ascent', stage: 'approach', enteredWater: false, advanced: 0 };
     const b = this.bot, epoch = this.actionEpoch;
     const end = Date.now() + Math.min(20000, opts.timeoutMs ?? 10000);
+    const start = b.entity.position.clone();
     let drySince: number | null = null;
+    let wetSince: number | null = null;
     let surfacedSince: number | null = null;
     let lastProgress = Date.now(), anchor = b.entity.position.clone();
+    let enteredWater = false;
+    let stage: SwimStage = 'approach';
     const destination = target;
     // 流体包含水和岩浆：岩浆不能被当成「非流体」或「干地」。
     const fluid = (block: any) => !!block && (['water', 'lava', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass'].includes(block.name) || String(block.getProperties?.().waterlogged) === 'true');
+    const water = (block: any) => !!block && (['water', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass'].includes(block.name) || String(block.getProperties?.().waterlogged) === 'true');
     const headUnder = () => fluid(b.blockAt(b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0)));
     // 头格已知且是可呼吸的空气才算真正露头；岩浆/实心方块/未观察（null）都不算能呼吸。
     const headOut = () => { const h = b.blockAt(b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0)); return !!h && ['air', 'cave_air', 'void_air'].includes(h.name); };
+    const feetInWater = () => !!b.entity.isInWater || water(b.blockAt(b.entity.position));
     const dryFooting = () => {
       const p = b.entity.position;
       const support = b.blockAt(p.offset(0, -0.05, 0));
       const head = b.blockAt(p.offset(0, b.entity.eyeHeight ?? 1.62, 0));
       return !!b.entity.onGround && !b.entity.isInWater && !b.entity.isInLava && !!head && ['air', 'cave_air', 'void_air'].includes(head.name) && support?.boundingBox === 'block' && !fluid(support);
+    };
+    // 目标格已被观察为水时，这是“到水里某个点”的目标；未知（null）不当作水，仍要求可靠干地支撑。
+    const targetInWater = !!destination && water(b.blockAt(new Vec3(destination.x, destination.y, destination.z)));
+    const goal: SwimGoal = !destination ? 'surface_ascent' : targetInWater ? 'surface_target' : 'dry_shore';
+    const atTarget = () => {
+      if (!destination) return false;
+      const p = b.entity.position;
+      return Math.hypot(destination.x - p.x, destination.z - p.z) <= 1.0 && Math.abs(destination.y - p.y) <= 1.5;
     };
     // 头此刻稳定露头（结束后重采样，不读陈旧样本；头一旦沉下，surfacedSince 立即归零）。
     const surfacedNow = () => {
@@ -4135,9 +4152,13 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     };
     // 真正的剩余预算：每次等待前都检查是否仍为正；为 0/负说明预算已耗尽，不能再触发新的等待或写入动作。
     const remaining = () => end - Date.now();
+    const facts = (at: SwimStage) => ({
+      goal, stage: at, enteredWater, targetInWater,
+      advanced: Math.round(Math.hypot(b.entity.position.x - start.x, b.entity.position.z - start.z) * 100) / 100,
+    });
     // 最后一次仍属于本动作的冻结样本（克隆坐标，不保留可变 Vec 引用；observedAt 记录本次采样的真实时刻）。
     // 取消/超时后不能再读 b.entity——替换任务或新连接可能已经更新它，把它当作旧动作的 partial 会把新主人的位置/氧气张冠李戴。
-    let lastOwned = { pos: { x: b.entity.position.x, y: b.entity.position.y, z: b.entity.position.z }, oxygen: ownOxygen(b), surfaced: false, observedAt: Date.now() };
+    let lastOwned: { pos: { x: number; y: number; z: number }; oxygen: number; surfaced: boolean; observedAt: number; stage: SwimStage } = { pos: { x: b.entity.position.x, y: b.entity.position.y, z: b.entity.position.z }, oxygen: ownOxygen(b), surfaced: false, observedAt: Date.now(), stage };
     check();
     b.pathfinder?.setGoal(null);
     b.clearControlStates();
@@ -4146,21 +4167,31 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         check();
         const p = b.entity.position;
         const distance = destination ? Math.hypot(destination.x - p.x, destination.z - p.z) : 0;
-        const vertical = destination ? Math.abs(destination.y - p.y) : 0;
         const dry = dryFooting();
-        // 指定目标时必须抵达目标附近（dry 且水平/高度都在容差内）才算上岸；只比水平距离会把高处目标也误判成抵达。
-        const arrived = !destination || (distance <= 1.0 && vertical <= 1.5);
-        if (dry && arrived && ownOxygen(b) >= 18) {
-          drySince ??= Date.now();
-          if (Date.now() - drySince >= 600) return { ok: true, landed: true, surfaced: true, oxygen: ownOxygen(b) };
-        } else drySince = null;
+        const wet = feetInWater();
+        if (wet || headUnder()) enteredWater = true;
         // 头稳定露出空气（不管有没有指定目标）：这是本次已观察到的部分事实，未到岸/超时也要保留。
         if (headOut()) surfacedSince ??= Date.now();
         else surfacedSince = null;
+        // 阶段只描述身体现在在哪一步（进水前的接近、已入水、离水但未确认上岸）；到达仍由目标本身的完成条件确认。
+        stage = dry && enteredWater ? 'exiting' : enteredWater ? 'swimming' : 'approach';
+        if (goal === 'dry_shore') {
+          // 指定干岸：必须在目标容差内、离水后站稳并持续稳定；途中任意干地/浅滩不算。
+          if (dry && atTarget()) {
+            drySince ??= Date.now();
+            if (Date.now() - drySince >= 600) return { ok: true, landed: true, surfaced: surfacedNow(), oxygen: ownOxygen(b), ...facts('landed') };
+          } else drySince = null;
+        } else if (goal === 'surface_target') {
+          // 指定水中点：到点且仍在水里并持续稳定即可完成；不强制上岸，也不把露头当到达。
+          if (wet && atTarget()) {
+            wetSince ??= Date.now();
+            if (Date.now() - wetSince >= 600) return { ok: true, landed: false, surfaced: surfacedNow(), oxygen: ownOxygen(b), ...facts('surface_reached') };
+          } else wetSince = null;
+        }
         // 冻结本次仍拥有控制权时观察到的位置/氧气/露头状态（在后续 await 之前，避免迟到重采样读到新主人状态）。
-        lastOwned = { pos: { x: p.x, y: p.y, z: p.z }, oxygen: ownOxygen(b), surfaced: surfacedNow(), observedAt: Date.now() };
+        lastOwned = { pos: { x: p.x, y: p.y, z: p.z }, oxygen: ownOxygen(b), surfaced: surfacedNow(), observedAt: Date.now(), stage };
         // 垂直上浮模式（无目标）：头稳定离开流体就算已浮出水面，不要求上岸；短暂露头不算。
-        if (!destination && surfacedNow()) return { ok: true, landed: false, surfaced: true, oxygen: ownOxygen(b) };
+        if (goal === 'surface_ascent' && surfacedNow()) return { ok: true, landed: false, surfaced: true, oxygen: ownOxygen(b), ...facts('surfaced') };
         // 只在水里按跳（上浮、借撞岸的那一下爬上去）。人已经出水、只是还没落稳时还按着，落地那一刻又起跳，
         // 就会在岸上一下一下地跳个不停，一直跳到超时
         b.setControlState('jump', !dry && (!!b.entity.isInWater || headUnder()));
@@ -4174,10 +4205,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           if (remaining() <= 0) break;
           b.setControlState('forward', true);
         } else b.setControlState('forward', false);
-        if (p.distanceTo(anchor) >= 0.3) { lastProgress = Date.now(); anchor = p.clone(); }
+        // 进度只按水平位移计算：贴岸上下浮动/原地浮沉不是推进。
+        if (Math.hypot(p.x - anchor.x, p.z - anchor.z) >= 0.3) { lastProgress = Date.now(); anchor = p.clone(); }
         // 贴着岸往上爬时水平位置本来就不动（靠水里撞墙的上抬一点点爬上去）：多给点时间，别刚贴上岸就算没进展
         const climbingBank = !!b.entity.isCollidedHorizontally && distance <= 1.6;
-        if (!dry && destination && Date.now() - lastProgress >= (climbingBank ? 5000 : 2500)) return { ok: false, reason: 'SWIM_NO_PROGRESS', landed: false, surfaced: surfacedNow(), oxygen: ownOxygen(b) };
+        if (!dry && destination && Date.now() - lastProgress >= (climbingBank ? 5000 : 2500)) return { ok: false, reason: 'SWIM_NO_PROGRESS', landed: false, surfaced: surfacedNow(), oxygen: ownOxygen(b), ...facts(stage) };
         // 每次等待前都确认预算仍为正：为 0/负时不要传进 raceAbort（会禁用超时定时器，让未完成的 tick 永久挂起）。
         if (typeof b.waitForTicks === 'function') {
           const rem = remaining();
@@ -4189,15 +4221,15 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           await this.afterAction(() => raceAbort(sleep(Math.min(100, rem), signal), signal, rem, () => {}), check);
         }
       }
-      return { ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, surfaced: surfacedNow(), oxygen: ownOxygen(b) };
+      return { ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, surfaced: surfacedNow(), oxygen: ownOxygen(b), ...facts(stage) };
     } catch (e) {
       // 取消/超时（AbortedError/TimeoutError）也要带回最后一次拥有的冻结样本，不重读可能已被替换的 b.entity。
       if (e instanceof Error && (e.name === 'AbortedError' || e.name === 'TimeoutError')) {
-        (e as Error & { partial?: Record<string, unknown> }).partial = { landed: false, surfaced: lastOwned.surfaced, pos: lastOwned.pos, oxygen: lastOwned.oxygen, observedAt: lastOwned.observedAt };
+        (e as Error & { partial?: Record<string, unknown> }).partial = { landed: false, surfaced: lastOwned.surfaced, pos: lastOwned.pos, oxygen: lastOwned.oxygen, observedAt: lastOwned.observedAt, goal, stage: lastOwned.stage, enteredWater, targetInWater };
       }
       throw e;
     } finally {
-      // A replaced task owns the controls now; stopAll already released ours.
+      // 取消/超时后只释放本动作拥有的 3 个控制键（jump、forward、sprint）；替换任务已由 stopAll 接管。
       if (epoch === this.actionEpoch && b === this.bot) {
         b.setControlState('jump', false); b.setControlState('forward', false); b.setControlState('sprint', false);
       }
@@ -4494,7 +4526,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   async dismount(signal: AbortSignal, opts: { toward?: Vec3Like } = {}): Promise<ActionResult> {
     const check = this.actionCheckpoint(signal);
     const b = this.bot;
-    if (!this.ready || !b.vehicle) return { ok: false, reason: 'NOT_MOUNTED' };
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
+    if (!b.vehicle) return { ok: false, reason: 'NOT_MOUNTED' };
     if (opts.toward && b.entity?.position) {
       // 原版 Boat.getDismountLocationForPassenger 沿乘客的朝向找落点（船身一侧约 1.3 格），找不到才把人放到船顶上。
       // 坐船时物理关着，mineflayer 不会自己发转头包：这里直接发，等一刻让服务器收到再下船
@@ -4522,6 +4555,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (gone || apart) { this.clearStaleVehicle(b, v); ok = true; }
     }
     if (!ok && !b.vehicle) ok = true;
+    // 下乘只以实际乘骑状态确认：事件/兜底都不能在 b.vehicle 仍指向原载具时报成功。
+    if (ok && b.vehicle === v) ok = false;
     if (ok) b.physicsEnabled = true;
     return ok ? { ok: true } : { ok: false, reason: 'DISMOUNT_FAILED' };
   }
@@ -4583,6 +4618,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const releaseControls = () => {
       if (released || !ownsControls() || b.vehicle && b.vehicle !== v) return;
       released = true;
+      // 只释放本载具实际用到的键：船是 2 个桨（leftPaddle/rightPaddle）；其他坐骑是
+      // player_input 的 4 个方向键（forward/backward/left/right）。水面游泳另有 3 键
+      // （jump/forward/sprint，见 swimTo 的 finally）：非船坐骑 4 + 游泳 3 共 7 个输入位。
       this.actionContext.exit(() => {
         if (isBoat) {
           try { b._client.write('steer_boat', { leftPaddle: false, rightPaddle: false }); } catch { /* ignore */ }

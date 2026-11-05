@@ -270,8 +270,35 @@ export interface TradeView {
   disabled: boolean;
 }
 
+/** What the caller's target was observed to be: dry footing, an in-water point, or no target (bounded ascent). */
+export type SwimGoal = 'dry_shore' | 'surface_target' | 'surface_ascent';
+/**
+ * Observed body stage during one delegated swim. `landed` is a dry, stable
+ * support result; `surface_reached` is reaching a caller-selected in-water
+ * point; `surfaced` is the breathing-only ascent goal. They are not
+ * interchangeable.
+ */
+export type SwimStage = 'approach' | 'swimming' | 'exiting' | 'landed' | 'surface_reached' | 'surfaced';
+
 export interface SwimOptions {
   timeoutMs?: number;
+}
+
+/**
+ * Facts the swim controller reports in addition to the legacy landed/surfaced/oxygen fields.
+ * These are measured host body facts. The library land/water route evaluators are
+ * `geometry_only` / `executable:false` and are never translated into execution
+ * success or arrival evidence here.
+ */
+export interface SwimFacts {
+  goal?: SwimGoal;
+  stage?: SwimStage;
+  /** Water contact was observed at least once during this delegation. */
+  enteredWater?: boolean;
+  /** Horizontal blocks moved since the delegation started (vertical bobbing is not progress). */
+  advanced?: number;
+  /** The caller's target cell was observed to be water. */
+  targetInWater?: boolean;
 }
 
 export interface BlockState {
@@ -420,8 +447,12 @@ export interface GameAdapter {
   attack(entityId: number, signal?: AbortSignal): Promise<boolean>;
   look(yaw: number, pitch: number, signal?: AbortSignal): Promise<void>;
   jump(ms: number, signal: AbortSignal): Promise<void>;
-  /** Swim toward an observed shore, retaining buoyancy until dry footing is verified. */
-  swimTo?(target: Vec3Like | null, signal: AbortSignal, opts?: SwimOptions): Promise<ActionResult & { landed: boolean; surfaced: boolean; oxygen: number }>;
+  /**
+   * Swim toward an observed shore, retaining buoyancy until dry footing is verified.
+   * A target whose cell is observed water is an in-water goal: reaching it reports
+   * `landed:false` / `stage:'surface_reached'` instead of forcing a landing.
+   */
+  swimTo?(target: Vec3Like | null, signal: AbortSignal, opts?: SwimOptions): Promise<ActionResult & SwimFacts & { landed: boolean; surfaced: boolean; oxygen: number }>;
   /** 在水里朝一格游过去（往下潜或往上游）：到了、气不够了（oxygen ≤ minOxygen）、出了水或超时就停 */
   diveTo?(target: Vec3Like, signal: AbortSignal, opts?: { minOxygen?: number; timeoutMs?: number }): Promise<ActionResult & { reached: boolean; oxygen: number }>;
 

@@ -49,6 +49,8 @@ test('ride follows a bending water route and stays mounted at a water destinatio
   const result = await run('ride', { to: '20,-28' });
   assert.equal(result.status, 'succeeded', result.summary);
   assert.equal(result.data?.arrived, true);
+  assert.equal(result.data?.stopReason, 'arrived');
+  assert.equal(result.data?.stillRiding, true, '到达水上目标仍保持乘坐，不等于下船');
   assert.equal(a.riding, 'boat');
   assert.ok(a.pos.z < -24, JSON.stringify(a.pos));
   assert.ok(a.ridePaths[0].length >= 2, JSON.stringify(a.ridePaths));
@@ -65,12 +67,16 @@ test('ride docks at a low bank without dismounting; dismount is a separate direc
   assert.equal(result.status, 'succeeded', result.summary);
   assert.equal(result.data?.arrived, false, 'docking is not arrival at the land destination');
   assert.equal(result.data?.docked, true);
+  assert.equal(result.data?.stopReason, 'docked', 'docking is reported separately from arrival');
+  assert.equal(result.data?.stillRiding, true, 'docking does not dismount');
   assert.equal(a.riding, 'boat');
   assert.equal(a.dismountToward, null);
   const landing = result.data?.landing as { x: number; y: number; z: number };
   assert.ok(landing.z >= 1, JSON.stringify(landing));
   const off = await run('dismount', { toward: [landing.x + 0.5, landing.y, landing.z + 0.5] });
   assert.equal(off.status, 'succeeded', off.summary);
+  assert.equal(off.data?.disembarked, true);
+  assert.equal(off.data?.stillRiding, false);
   assert.equal(a.riding, null);
   assert.deepEqual(a.dismountToward, { x: landing.x + 0.5, y: landing.y, z: landing.z + 0.5 });
 });
@@ -102,6 +108,8 @@ test('ride reports a timeout after progress as failure and preserves the mounted
   assert.equal(result.failureCode, 'TIMEOUT');
   assert.equal(result.data?.moved, 10);
   assert.equal(result.data?.arrived, false);
+  assert.equal(result.data?.stopReason, 'timeout');
+  assert.equal(result.data?.stillRiding, true);
   assert.equal(a.riding, 'boat');
 });
 

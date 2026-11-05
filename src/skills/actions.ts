@@ -372,11 +372,11 @@ export const dismount: Skill<{ toward?: { x: number; y: number; z: number } }> =
     if (!before.riding) return fail('BAD_ARGS', '现在没有在乘坐任何东西');
     const r = await ctx.adapter.dismount(ctx.signal, args);
     const after = ctx.adapter.state();
-    if (!r.ok) return fail('ERROR', `下不来：${r.reason}`, { riding: after.riding ?? null, position: { ...after.pos } });
+    if (!r.ok) return fail('ERROR', `下不来：${r.reason}`, { riding: after.riding ?? null, stillRiding: !!after.riding, disembarked: false, position: { ...after.pos } });
     // 下乘以实际乘骑状态确认，不能只看底层返回 ok；停船/靠岸仍保持乘坐是另一件事。
-    if (after.riding) return fail('EFFECT_NOT_CONFIRMED', `下乘未确认：仍显示在乘坐 ${after.riding}`, { riding: after.riding, position: { ...after.pos } });
+    if (after.riding) return fail('EFFECT_NOT_CONFIRMED', `下乘未确认：仍显示在乘坐 ${after.riding}`, { riding: after.riding, stillRiding: true, disembarked: false, position: { ...after.pos } });
     const at = `(${after.pos.x.toFixed(2)},${after.pos.y.toFixed(2)},${after.pos.z.toFixed(2)})`;
-    return ok(`已从 ${before.riding} 下来，现在站在 ${at}`, { riding: null, from: before.riding, position: { ...after.pos }, ...(args.toward ? { toward: { ...args.toward } } : {}) });
+    return ok(`已从 ${before.riding} 下来，现在站在 ${at}`, { riding: null, stillRiding: false, disembarked: true, from: before.riding, position: { ...after.pos }, ...(args.toward ? { toward: { ...args.toward } } : {}) });
   },
 };
 
@@ -454,16 +454,26 @@ export const ride: Skill<{ direction?: string; to?: { x: number; z: number }; di
       const lastXZ = route?.waypoints[route.waypoints.length - 1];
       const dockDistance = lastXZ ? Math.hypot(lastXZ.x - p.x, lastXZ.z - p.z) : Infinity;
       const docked = isBoat && route?.reach === 'shore' && !!route.landing && (r.arrived || (r.blocked && dockDistance <= DOCK_WITHIN));
+      const found = seen as { what: string; dist: number } | null;
+      // 到点、停靠、靠岸/受阻、看见 until、被下船、超时分别记录；仍乘坐是独立事实，不因停下就改成下船。
+      const stopReason = !r.ok
+        ? r.reason === 'DISMOUNTED' ? 'dismounted' : r.reason === 'TIMEOUT' ? 'timeout' : 'failed'
+        : found ? 'observed'
+        : route?.reach === 'partial' ? 'partial'
+        : docked ? 'docked'
+        : r.arrived && (!route || route.reach === 'water') ? 'arrived'
+        : r.blocked ? 'blocked'
+        : 'stopped';
       const data = {
         moved, position: { ...p }, riding: adapter.state().riding,
+        stillRiding: !!adapter.state().riding, goal: 'vehicle_ride', stopReason,
         arrived: r.arrived && (!route || route.reach === 'water'),
         ...(route ? { route: route.reach } : {}),
-        ...(docked ? { docked: true, stillRiding: !!adapter.state().riding, landing: route!.landing } : {}),
+        ...(docked ? { docked: true, landing: route!.landing } : {}),
         ...(route?.reach === 'shore' && !docked ? { dockUnconfirmed: true } : {}),
         ...(r.blocked ? { blocked: true } : {}),
       };
       if (!r.ok) return receipt(fail(r.reason === 'TIMEOUT' ? 'TIMEOUT' : 'ERROR', `乘坐 ${s.riding} 前进失败：${r.reason}（走了 ${moved} 格）`, data));
-      const found = seen as { what: string; dist: number } | null;
       if (found) return receipt(ok(`乘坐 ${s.riding} 前进 ${moved} 格，看见 ${found.what}（${found.dist} 格外），停下并保持乘坐`, { ...data, found: found.what }));
       if (route?.reach === 'partial') return receipt(fail('PATH_NOT_FOUND', `水路尚不能到达目标，前进 ${moved} 格后停船，仍保持乘坐`, data));
       if (docked) {
@@ -472,10 +482,10 @@ export const ride: Skill<{ direction?: string; to?: { x: number; z: number }; di
         return receipt(ok(`划了 ${moved} 格，停靠在可上岸处，仍保持乘坐；岸上落脚处 (${route!.landing!.x},${route!.landing!.y},${route!.landing!.z})`, data));
       }
       if (r.arrived) return receipt(ok(`乘坐 ${s.riding} 到了目标附近（${moved} 格），保持乘坐`, data));
-      return receipt(ok(`乘坐 ${s.riding} 前进 ${moved} 格${r.blocked ? '后遇到障碍' : ''}，停下并保持乘坐`, data));
+      return receipt(ok(`乘坐 ${s.riding} 前进 ${moved} 格${r.blocked ? '后靠岸/受阻' : ''}，停下并保持乘坐`, data));
     } catch (e) {
       if (isAbort(e)) throw e;
-      return receipt(fail(codeFromError(e), `乘坐出错：${(e as Error).message}`, { moved: Math.round(moved), arrived: false, position: { ...adapter.state().pos }, riding: adapter.state().riding }));
+      return receipt(fail(codeFromError(e), `乘坐出错：${(e as Error).message}`, { moved: Math.round(moved), arrived: false, position: { ...adapter.state().pos }, riding: adapter.state().riding, stillRiding: !!adapter.state().riding, stopReason: 'failed' }));
     }
   },
 };
@@ -551,8 +561,8 @@ export const dive: Skill<{ xyz: { x: number; y: number; z: number }; min_oxygen:
 /** 朝调用方指定的世界坐标游过去：保持这个目标不变，到目标附近站稳才算到，否则如实报告位置与氧气。 */
 export const swimTo: Skill<{ xyz: { x: number; y: number; z: number }; timeoutMs?: number }> = {
   name: 'swim_to',
-  description: '从当前位置朝调用方指定的世界坐标游过去并保持这个目标不换（站在干岸上也会先走进水里再游）；到目标附近站稳（干地）才算到，未到岸如实报告位置、氧气与未到原因',
-  argsDoc: '{"xyz":[x,y,z], "timeoutMs"?: 1000-20000（毫秒，可选）}；xyz 是游过去后脚所在的世界坐标（可含小数/负值），原样传给底层，不改写、不取整',
+  description: '从当前位置朝调用方指定的世界坐标游过去并保持这个目标不换（站在干岸上也会先走进水里再游）；目标格是水就到点停在水里（不强制上岸），是干岸/未知就要在目标附近离水站稳才算到；未到时如实报告位置、氧气、阶段与原因',
+  argsDoc: '{"xyz":[x,y,z], "timeoutMs"?: 1000-20000（毫秒，可选）}；xyz 是游过去后脚所在的世界坐标（可含小数/负值），原样传给底层，不改写、不取整；目标格已被观察为水时按水中点验收，否则按干岸验收',
   timeoutMs: 25000,
   movement: true,
   validate(raw) {
@@ -573,6 +583,10 @@ export const swimTo: Skill<{ xyz: { x: number; y: number; z: number }; timeoutMs
     const s0 = a.state();
     // 委托前就冻结自己的位置/氧气/观测时刻：state().pos 可能是可变引用，不克隆会被底层动作改成新主人的状态。
     const s0Snapshot = { pos: { ...s0.pos }, oxygen: s0.oxygen, observedAt: Date.now() };
+    // 目标格已观察为岩浆：swim_to 只有水面控制，明确拒绝而不是把身体开进岩浆；风险事实交给 Agent 决定下一步。
+    if (a.blockAt(args.xyz) === 'lava') {
+      return fail('BAD_ARGS', `(${args.xyz.x},${args.xyz.y},${args.xyz.z}) 是岩浆：swim_to 只做水面游泳，不执行进入岩浆；如果确实要靠近，风险与做法由你选择`, { landed: false, target: { ...args.xyz }, unsupportedTarget: 'lava', pos: s0Snapshot.pos, oxygen: s0Snapshot.oxygen, observedAt: s0Snapshot.observedAt });
+    }
     // 预算耗尽（remaining <= 0）才拒绝，不强行开游；剩余不足时用真实剩余时间，不把父级预算拉长。
     const timeoutMs = Math.min(args.timeoutMs ?? 20000, ctx.deadline - Date.now());
     if (timeoutMs <= 0) return fail('TIMEOUT', `游向目标的预算已用完，未执行；现在在 (${s0.pos.x.toFixed(1)},${s0.pos.y.toFixed(1)},${s0.pos.z.toFixed(1)})，氧气 ${s0.oxygen}/20`, { landed: false, pos: s0Snapshot.pos, oxygen: s0Snapshot.oxygen, observedAt: s0Snapshot.observedAt });
@@ -590,11 +604,14 @@ export const swimTo: Skill<{ xyz: { x: number; y: number; z: number }; timeoutMs
     }
     const s = a.state();
     const at = `现在在 (${s.pos.x.toFixed(1)},${s.pos.y.toFixed(1)},${s.pos.z.toFixed(1)})，氧气 ${r.oxygen}/20`;
-    if (r.ok && r.landed) return ok(`游到了 (${args.xyz.x},${args.xyz.y},${args.xyz.z}) 并站稳，${at}`, { landed: true, surfaced: r.surfaced, pos: s.pos, oxygen: r.oxygen });
+    const facts = { ...(r.goal ? { goal: r.goal } : {}), ...(r.stage ? { stage: r.stage } : {}), ...(r.enteredWater !== undefined ? { enteredWater: r.enteredWater } : {}), ...(r.advanced !== undefined ? { advanced: r.advanced } : {}), ...(r.targetInWater !== undefined ? { targetInWater: r.targetInWater } : {}) };
+    if (r.ok && r.landed) return ok(`游到了 (${args.xyz.x},${args.xyz.y},${args.xyz.z}) 并站稳，${at}`, { landed: true, surfaced: r.surfaced, pos: s.pos, oxygen: r.oxygen, ...facts });
+    // 目标本身就在水里：到点即完成，不强制上岸；landed 仍为 false，不把入水/露头写成上岸。
+    if (r.ok && r.stage === 'surface_reached') return ok(`游到了指定的水中点 (${args.xyz.x},${args.xyz.y},${args.xyz.z})，仍在水里（未上岸），${at}`, { landed: false, surfaced: r.surfaced, pos: s.pos, oxygen: r.oxygen, ...facts });
     const why = r.reason === 'WATER_ESCAPE_TIMEOUT' ? '游了一阵还没到' : r.reason === 'SWIM_NO_PROGRESS' ? '游不动' : r.reason;
     // 预算耗尽不等于没有路：只有真正的物理无进展才归为 PATH_NOT_FOUND。
     const code = r.reason === 'WATER_ESCAPE_TIMEOUT' ? 'TIMEOUT' : 'PATH_NOT_FOUND';
-    return fail(code, `${why}；${at}`, { landed: false, surfaced: r.surfaced, pos: s.pos, oxygen: r.oxygen, reason: r.reason });
+    return fail(code, `${why}；${at}`, { landed: false, surfaced: r.surfaced, pos: s.pos, oxygen: r.oxygen, reason: r.reason, ...facts });
   },
 };
 
