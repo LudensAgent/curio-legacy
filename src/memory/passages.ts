@@ -320,6 +320,23 @@ export function passageFragmentation(recs: Pick<PassageRecord, 'path' | 'links'>
   return { records: recs.length, points: nodes.length, components: pieces.length, pieces };
 }
 
+/** 图上单源最短路（正权；节点数千，朴素 O(n²) 就够）；stopAt 给定时算到它为止。 */
+function graphShortest(nodes: Vec3Like[], edges: Map<number, Set<number>>, origin: number, stopAt = -1): { dist: number[]; prev: number[] } {
+  const dist = new Array<number>(nodes.length).fill(Infinity), prev = new Array<number>(nodes.length).fill(-1), done = new Set<number>();
+  dist[origin] = 0;
+  for (;;) {
+    let u = -1;
+    for (let i = 0; i < nodes.length; i++) if (!done.has(i) && dist[i] < Infinity && (u < 0 || dist[i] < dist[u])) u = i;
+    if (u < 0 || u === stopAt) break;
+    done.add(u);
+    for (const v of edges.get(u) ?? []) {
+      const nd = dist[u]! + d3(nodes[u]!, nodes[v]!);
+      if (nd < dist[v]!) { dist[v] = nd; prev[v] = u; }
+    }
+  }
+  return { dist, prev };
+}
+
 export function passageRoute(recs: Pick<PassageRecord, 'path' | 'links'>[], from: Vec3Like, to: Vec3Like,
   opts: { near?: number; hop?: number; link?: number } = {}): Vec3Like[] | null {
   const near = opts.near ?? 5, hop = opts.hop ?? 7, link = opts.link ?? PASSAGE_LINK;
@@ -332,34 +349,26 @@ export function passageRoute(recs: Pick<PassageRecord, 'path' | 'links'>[], from
   const a = closest(from), b = closest(to);
   if (a < 0 || b < 0) return null;
   if (a === b) return [nodes[a]];
-  // 最短路（点不多，朴素 Dijkstra 就够）
-  const dist = new Array<number>(nodes.length).fill(Infinity), prevOf = new Array<number>(nodes.length).fill(-1), done = new Set<number>();
-  dist[a] = 0;
-  for (;;) {
-    let u = -1;
-    for (let i = 0; i < nodes.length; i++) if (!done.has(i) && dist[i] < Infinity && (u < 0 || dist[i] < dist[u])) u = i;
-    if (u < 0 || u === b) break;
-    done.add(u);
-    for (const v of edges.get(u) ?? []) {
-      const nd = dist[u] + d3(nodes[u], nodes[v]);
-      if (nd < dist[v]) { dist[v] = nd; prevOf[v] = u; }
-    }
+  let { dist, prev } = graphShortest(nodes, edges, a, b);
+  // 最近的那个节点可能落在另一团互不相连的通道里。先按它走（常见路径可提前结束 Dijkstra），
+  // 走不到就在同 near 范围内换一个真正可达的节点——否则一个几何上更近却断开的碎片会让整条路失效。
+  let target = b;
+  if (dist[target] === Infinity) {
+    ({ dist, prev } = graphShortest(nodes, edges, a));
+    let bd = Infinity;
+    target = -1;
+    nodes.forEach((q, i) => { const d = d3(q, to); if (dist[i] < Infinity && d <= near && d < bd) { bd = d; target = i; } });
+    if (target < 0) return null;
   }
-  if (dist[b] === Infinity) return null;
   const route: Vec3Like[] = [];
-  for (let v = b; v >= 0; v = prevOf[v]) route.unshift(nodes[v]);
+  for (let v = target; v >= 0; v = prev[v]) route.unshift(nodes[v]);
   return route;
 }
 
-/**
- * 想回地面时，从**从 here 连得上的通道分量**里挑地表锚点：
- * 先要够得着，再取最高（最接近地表）的入口；没有有效入口就取该分量最高的脚点。
- * 不能只按水平距离取最近的入口——归档里的旧入口可能在脚下方几十格，
- * 选中它会让 follow_passage 在“深处入口”报到达，然后另一个动作再挖上去。
- */
-export function passageSurfaceAnchor(recs: Pick<PassageRecord, 'path' | 'entrances' | 'links'>[], here: Vec3Like): Vec3Like | null {
+/** 从 here 连得上的通道分量（here 离网 >6 格时退回全部记录）。 */
+function surfacePool(recs: (Pick<PassageRecord, 'path' | 'entrances' | 'links'> & { id?: string })[], here: Vec3Like, near = 6) {
   const { nodes, owner, edges } = passageGraph(recs);
-  let start = -1, bd = 6;
+  let start = -1, bd = near;
   nodes.forEach((q, i) => { const d = flat(q, here); if (d < bd) { bd = d; start = i; } });
   let pool = recs;
   if (start >= 0) {
@@ -374,14 +383,123 @@ export function passageSurfaceAnchor(recs: Pick<PassageRecord, 'path' | 'entranc
     const reachable = recs.filter((_, i) => owners.has(i));
     if (reachable.length) pool = reachable;
   }
-  const anchors: Vec3Like[] = [];
+  return { nodes, edges, start, pool };
+}
+
+/**
+ * 想回地面时的地表出口候选：从**从 here 连得上的分量**里，取靠近地表（最高入口以下 band 格内）的入口，
+ * 按沿记录网的实际路长排序，而不是按 y 高或水平直线距离。
+ * 「最高 y」只是“接近地表”的代理：多个入口都在地表时，y 高 2 格可能要多绕几十格、先下潜再爬回；
+ * 水平最近也可能是脚下方很深的旧入口。两者都不能单独当判据，代价才行。
+ * 同一个出口被多条记录重复记成相距 ≤3 格的几个点时只算一个候选，recordIds 给出可用的记录 ID。
+ */
+export function passageSurfaceCandidates(recs: (Pick<PassageRecord, 'path' | 'entrances' | 'links'> & { id?: string })[], here: Vec3Like,
+  opts: { band?: number; near?: number; limit?: number } = {}): { anchor: Vec3Like; cost: number; recordIds: string[] }[] {
+  // band 与“入口离本 record 最高点 ≤6 格才算地表”保持一致：便宜且合法的地表出口不能因为低 5–6 格就被筛掉。
+  const band = opts.band ?? 6, near = opts.near ?? 6, limit = opts.limit ?? 3;
+  const { nodes, edges, start, pool } = surfacePool(recs, here, near);
+  const hits: { anchor: Vec3Like; recordIds: string[] }[] = [];
   for (const r of pool) {
     const surfaceY = r.path.length ? Math.max(...r.path.map((p) => p.y)) : Math.max(...r.entrances.map((e) => e.y));
-    for (const e of r.entrances) if (surfaceY - e.y <= 6) anchors.push(e);
+    for (const e of r.entrances) {
+      if (surfaceY - e.y > 6) continue;
+      // 同一个出口：保留先遇到的点，但把记录 ID 都带上，方便 agent 用 id 指定。
+      const same = hits.find((h) => d3(h.anchor, e) <= 3);
+      if (same) { if (r.id && !same.recordIds.includes(r.id)) same.recordIds.push(r.id); }
+      else hits.push({ anchor: e, recordIds: r.id ? [r.id] : [] });
+    }
   }
-  if (anchors.length) return [...anchors].sort((a, b) => b.y - a.y || flat(a, here) - flat(b, here))[0] ?? null;
+  if (!hits.length) return [];
+  // 先从 here 最近的可达节点出发做一次最短路；here 离网太远时用最近脚点（follow_passage 会先走过去）。
+  let origin = start;
+  if (origin < 0) {
+    let bd = Infinity;
+    nodes.forEach((q, i) => { const d = flat(q, here); if (d < bd) { bd = d; origin = i; } });
+  }
+  if (origin < 0) return [];
+  const { dist } = graphShortest(nodes, edges, origin);
+  // 代价和 passageRoute 用同一口径：取入口 near 范围内所有节点里**可达**的那条最短路。
+  // 不能只看几何最近的那个节点——它可能属于另一团互不相连的通道，会把可达出口误判成 Infinity。
+  const costOf = (p: Vec3Like) => {
+    let best = Infinity;
+    nodes.forEach((q, i) => { if (d3(q, p) <= near) best = Math.min(best, dist[i]!); });
+    return best;
+  };
+  // 先去掉走不到的候选，再按可达候选的最高 y 划地表带：否则远处一个接不上的高入口
+  // 会把地表带整体抬高，把真正够得着的地表出口全筛掉。
+  const priced = hits.map((h) => ({ ...h, cost: costOf(h.anchor) })).filter((h) => h.cost < Infinity);
+  if (!priced.length) return [];
+  const top = Math.max(...priced.map((h) => h.anchor.y));
+  return priced
+    .filter((h) => top - h.anchor.y <= band)
+    .sort((a, b) => a.cost - b.cost || b.anchor.y - a.anchor.y || flat(a.anchor, here) - flat(b.anchor, here))
+    .slice(0, limit);
+}
+
+/** 想回地面时取代价最小的地表出口；没有有效入口就取该分量最高的脚点（保持旧行为）。
+ * 不能只按水平距离取最近的入口——归档里的旧入口可能在脚下方几十格，
+ * 选中它会让 follow_passage 在“深处入口”报到达，然后另一个动作再挖上去。 */
+export function passageSurfaceAnchor(recs: Pick<PassageRecord, 'path' | 'entrances' | 'links'>[], here: Vec3Like): Vec3Like | null {
+  const best = passageSurfaceCandidates(recs, here, { limit: 1 })[0];
+  if (best) return best.anchor;
+  const { pool } = surfacePool(recs, here);
   // 没有入口记录时退回该分量最高的脚点；同高保持记录顺序，不按水平距离改变旧目标。
   return [...pool.flatMap((r) => r.path)].sort((a, b) => b.y - a.y)[0] ?? null;
+}
+
+/**
+ * 同一段路被重复记成多条 record（点只差 0–2 格）时，导航只留一条代表：
+ * 重复记录会在图上形成并行的伪岔路，让“最短路径”在两团几乎相同的点之间来回穿。
+ * 只影响本次读取，不改存储。live 优先于归档，links/点数多的优先，最近用过的优先。
+ * 两个方向的重合度都要达标：一条长巷里包含另一条短巷时，短巷反向覆盖不了长巷，不会被误删。
+ * 只合并带 links 的记录：它们的边全在 links 里，合并后可原样保留；没有 links 的旧记录靠 path
+ * 推断边，拼 path 会改变路网，所以不参与去重。被合并记录的 links/entrances 并进代表记录，
+ * 不能像“直接丢掉”那样删掉唯一的桥。
+ */
+export function dedupePassages<T extends { path: Vec3Like[]; links?: { a: Vec3Like; b: Vec3Like }[]; entrances?: Vec3Like[]; lastUsedAt?: number; archivedAt?: number }>(
+  recs: T[], opts: { cover?: number; near?: number } = {},
+): T[] {
+  const cover = opts.cover ?? 0.8, near = opts.near ?? 1.5;
+  // path 是稀疏采样（多则 160 点）；只有 links 的旧记录才退回边的端点，均匀抽样，避免 O(点数²) 爆炸。
+  const sample = (r: T): Vec3Like[] => r.path.length ? r.path : (() => {
+    const pts = [...new Map((r.links ?? []).flatMap((l) => [l.a, l.b]).map((p) => [`${p.x},${p.y},${p.z}`, p])).values()];
+    const step = Math.max(1, Math.ceil(pts.length / 64));
+    return pts.filter((_, i) => i % step === 0);
+  })();
+  const eligible = recs.map((r, i) => ({ r, i })).filter(({ r }) => (r.links?.length ?? 0) > 0);
+  if (eligible.length < 2) return [...recs];
+  const ptsOf = new Map(eligible.map(({ r, i }) => [i, sample(r)]));
+  const boxOf = (pts: Vec3Like[]) => pts.length ? {
+    min: { x: Math.min(...pts.map((p) => p.x)), y: Math.min(...pts.map((p) => p.y)), z: Math.min(...pts.map((p) => p.z)) },
+    max: { x: Math.max(...pts.map((p) => p.x)), y: Math.max(...pts.map((p) => p.y)), z: Math.max(...pts.map((p) => p.z)) },
+  } : null;
+  const boxes = new Map(eligible.map(({ i }) => [i, boxOf(ptsOf.get(i)!)]));
+  const overlaps = (i: number, j: number) => { const a = boxes.get(i), b = boxes.get(j); return !!a && !!b
+    && a.min.x - near <= b.max.x && b.min.x - near <= a.max.x
+    && a.min.y - near <= b.max.y && b.min.y - near <= a.max.y
+    && a.min.z - near <= b.max.z && b.min.z - near <= a.max.z; };
+  const covered = (a: Vec3Like[], b: Vec3Like[]) => a.length > 0 && b.length > 0
+    && a.filter((p) => b.some((q) => d3(p, q) <= near)).length / a.length >= cover;
+  const rank = eligible.map(({ r, i }) => ({ i, key: [r.archivedAt === undefined ? 0 : 1, -(r.links?.length ?? 0), -(r.lastUsedAt ?? 0), -r.path.length] }));
+  rank.sort((a, b) => { for (let k = 0; k < a.key.length; k++) if (a.key[k] !== b.key[k]) return a.key[k]! - b.key[k]!; return a.i - b.i; });
+  const clusters: { rep: number; members: number[] }[] = [];
+  for (const { i } of rank) {
+    const pts = ptsOf.get(i)!;
+    const c = clusters.find((c) => overlaps(i, c.rep) && covered(pts, ptsOf.get(c.rep)!) && covered(ptsOf.get(c.rep)!, pts));
+    if (c) c.members.push(i); else clusters.push({ rep: i, members: [] });
+  }
+  const merged = new Map<number, T>(), dropped = new Set<number>();
+  for (const c of clusters) {
+    if (!c.members.length) continue;
+    const rep = recs[c.rep]!;
+    const links = [...(rep.links ?? []), ...c.members.flatMap((m) => recs[m]!.links ?? [])];
+    const entrances = [...(rep.entrances ?? []), ...c.members.flatMap((m) => recs[m]!.entrances ?? [])]
+      .filter((e, i, all) => all.findIndex((q) => d3(q, e) < 0.5) === i);
+    merged.set(c.rep, { ...rep, links, entrances } as T);
+    for (const m of c.members) dropped.add(m);
+  }
+  if (!merged.size) return [...recs];
+  return recs.flatMap((r, i) => merged.has(i) ? [merged.get(i)!] : dropped.has(i) ? [] : [r]);
 }
 
 /** 洞口正下方、离它最近的一个下降脚点：洞口还空着时，用它往里一步验证通道地板是否还在（被炸成坑时地板会一起没了）。
