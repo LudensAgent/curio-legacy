@@ -19,6 +19,7 @@ import { findStation, isStation, rememberStation } from './stations.ts';
  */
 type Rel = [number, number, number];
 interface CellArgs { at: Rel; facing: Facing; own?: boolean; wet?: boolean; lava?: boolean; fall?: boolean; xyz?: Vec3Like }
+interface StepArgs extends CellArgs { fill?: string }
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 
 /** 模型常用的几种写法都认：at / to / pos / offset / rel / cell，数组 [1,1,0]、字符串 "1,1,0"、对象 {"f":1,"u":1,"r":0} */
@@ -238,10 +239,10 @@ async function stepOutOfWater(ctx: SkillCtx, args: CellArgs, feet: Vec3Like) {
   return fail('EFFECT_NOT_CONFIRMED', `从水里朝 [${rel}] 的岸爬了，没有站到指定落脚格（岸边落脚处比脚高 ${dy} 格；${res.ok ? '' : `游泳：${res.reason}；`}现在${s.inWater ? '还在水里' : s.onGround ? '已离水并站稳' : '不在水里但没站稳'}，实际在 (${end.x},${end.y},${end.z})）`, { stand: rel, ...after(ctx, args.facing, stand) });
 }
 
-export const stepTo: Skill<CellArgs> = {
+export const stepTo: Skill<StepArgs> = {
   name: 'step',
-  description: '迈到身边相邻的一格（[前,上,右]）：可以平走、上一级台阶（上+1，会跳）、下一级（上-1）；脚下是梯子时 [0,1,0] 沿梯子爬一格。目标格和头顶需要有身体通行空间、脚下要有支撑（按碰撞形状：整块、半砖、雪层、地毯都能站，脚高按实际顶面，不取整）；上台阶时自己头顶上方也要空；不确定时可能先转头确认这次迈步所需的空间。陆上只走指定高度的一格，不会自动下坎；更深的落点可用 assess_landings 查看并用 descend 明确选择。泡在水里时朝岸那边迈（[1,0,0] 就行），身体会游过去、贴着岸爬上去（岸比脚高一两格也行）',
-  argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W"}（前后/左右 ±1，上下 -1..1；to 是脚部目标格，须留空，支撑在它下面一格；例：[1,-1,0] 下一级，支撑在 [1,-2,0]）',
+  description: '迈到身边相邻的一格（[前,上,右]）：可以平走、上一级台阶（上+1，会跳）、下一级（上-1）；脚下是梯子时 [0,1,0] 沿梯子爬一格。目标格和头顶需要有身体通行空间、脚下要有支撑（按碰撞形状：整块、半砖、雪层、地毯都能站，脚高按实际顶面，不取整）；上台阶时自己头顶上方也要空；不确定时可能先转头确认这次迈步所需的空间。陆上只走指定高度的一格，不会自动下坎；更深的落点可用 assess_landings 查看并用 descend 明确选择。泡在水里时朝岸那边迈（[1,0,0] 就行），身体会游过去、贴着岸爬上去（岸比脚高一两格也行）。可选 fill 写一种背包方块名：目标脚格下方的支撑格是空的时，先只往那一格补一块再迈（消耗 1 块）；不写就不垫，只报告缺口',
+  argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W", "fill"?:方块名}（前后/左右 ±1，上下 -1..1；to 是脚部目标格，须留空，支撑在它下面一格；例：[1,-1,0] 下一级，支撑在 [1,-2,0]；上台阶 [1,1,0] 的支撑格是 [1,0,0]）',
   timeoutMs: 8000,
   movement: true,
   validate(raw, adapter) {
@@ -255,11 +256,28 @@ export const stepTo: Skill<CellArgs> = {
     }
     const facing = facingArg(a.facing, adapter);
     if (!FACINGS.includes(facing as Facing)) return { ok: false, error: facing };
-    return { ok: true, args: { at: to, facing: facing as Facing } };
+    const rawFill = a.fill ?? a.support;
+    let fill: string | undefined;
+    if (rawFill !== undefined && rawFill !== null) {
+      fill = String(rawFill).trim().replace(/^minecraft:/, '');
+      if (!/^[a-z0-9_]{1,80}$/.test(fill) || !adapter.isKnownItem(fill)) return { ok: false, error: `fill 需要已知的方块名（例如 cobblestone），收到 ${String(rawFill)}` };
+      if (/_(boat|raft)$/.test(fill)) return { ok: false, error: `${fill} 是船/筏（实体，不是方块），不能用来补支撑` };
+    }
+    return { ok: true, args: { at: to, facing: facing as Facing, ...(fill ? { fill } : {}) } };
   },
   async run(ctx, args) {
     throwIfAborted(ctx.signal);
     const a = ctx.adapter;
+    // 相对坐标必须从真实的落脚状态量：上一动作的跳跃/下落还没结束时，脚格、支撑和净空都是空中的瞬时值，
+    // 算出来的 [1,1,0] 会对不上地面。有界等身体真正触地再继续；水里、岩浆里和梯子上本来就不算“在跳”。
+    const s0 = a.state();
+    if (!s0.onGround && !s0.inWater && !s0.inLava && !s0.riding && a.blockAt(feetCell(s0.pos)) !== 'ladder') {
+      const settleBy = Date.now() + Math.min(800, Math.max(0, ctx.deadline - Date.now()));
+      while (!a.state().onGround && Date.now() < settleBy) {
+        throwIfAborted(ctx.signal);
+        await sleep(50, ctx.signal);
+      }
+    }
     const start = a.state().pos, feet = feetCell(start);
     const target = toWorld(feet, args.facing, args.at);
     // 取消/中断时保留已发生位移与最后位置：Arbiter 经 AbortedError.partial 拿到。所有执行模式（平走/梯子/水中）共用。
@@ -283,12 +301,14 @@ export const stepTo: Skill<CellArgs> = {
       return null;
     };
     // 有界补看：逐个转头看清未观察的格子，直到看清或到期。半砖脚高要确认三层空间，不能只补看第一个未知格。
+    // 每次转头后先单独重读这一格（有界确认），再批量重读整组：同一视锥里的其它格顺带看清，少转几次头。
     const glanceAll = async (positions: Vec3Like[]) => {
       if (!ctx.senses.observeBlocks) return;
       for (const p of positions) {
         if (!isUnseen(p) || Date.now() >= ctx.deadline) continue;
         await glanceAt(ctx, p);
         observe([p]);
+        observe(positions);
       }
     };
     // 泡在水里：脚下那格是水、岸往往比脚高一两格，平地上的“上下 ±1”对不上。像玩家一样朝那边游、贴着岸按住跳爬上去。
@@ -342,100 +362,134 @@ export const stepTo: Skill<CellArgs> = {
       ? [{ x: target.x, z: feet.z }, { x: feet.x, z: target.z }]
       : [];
     const cornerCells = corners.flatMap((c) => [{ x: c.x, y: target.y, z: c.z }, { x: c.x, y: target.y + 1, z: c.z }]);
-    // 未看清的目标格先转头看一眼，再看不清就如实报“无法确认”，不拿 blockAt 的墙后数据报障碍名称。
-    const glanceCells = [target, { ...target, y: target.y - 1 }, { ...target, y: target.y + 1 }, { ...target, y: target.y + 2 }, ownHead, ...cornerCells];
-    const unseenFirst = glanceCells.find((p) => isUnseen(p) && ctx.senses.observeBlocks);
-    if (unseenFirst && ctx.senses.observeBlocks) {
-      await glanceAt(ctx, unseenFirst);
-      observe(glanceCells);
-    }
-    const targetBlock = observed(target);
-    // 目标格是否被整块/窄条挡住（打开的木门可穿，门板贴边不挡中心）。
+    // 逐格有界补看，而不是只看第一个未知格：脚部目标格在眼睛附近、支撑格在脚下很陡的角度，
+    // 只看向脚目标时，脚下支撑格（尤其是空气格只有一个中心采样点）会落在垂直视锥外，
+    // 之后每一步都报“未看清”且怎么重试都一样。看清与否必须逐格尝试。
+    // 只补看这次判定实际要用的格：脚部目标、它的支撑、目标处的头格（上一级时就是自己的头顶），以及斜步的角落。
+    const glanceCells = [target, { ...target, y: target.y - 1 }, { ...target, y: target.y + 1 }, ...cornerCells];
     const blocksBodyCell = (name: string, props: Record<string, string | number | boolean>) => {
       if (isPassableDoor(name, props)) return false;
       const top = supportTop(name, props);
       return top !== null ? top >= 1 - 1e-6 : hasAnyCollision(name, props);
     };
-    let landingSupport: { pos: Vec3Like; at: [number, number, number]; placeAtInRange: boolean; observed: string | null; reference: ReturnType<typeof placementReference> } | undefined;
-    let targetFoot: number | null = null;
-    const problems: string[] = [];
-    if (targetBlock === null) {
-      problems.push(`目标格是 ${describe(target)}，无法确认通行空间`);
-    } else if (blocksBodyCell(targetBlock.name, targetBlock.properties)) {
-      const dn = targetBlock.name;
-      // 事实与缺口，而不是把“dig 再 step”写成下一步指令：实心目标格不是下行落点。
-      problems.push(`目标格是 ${dn}${dn.endsWith('_door') ? '（门的状态或碰撞形状阻碍通行）' : LIQUID_BLOCKS.has(dn) ? '' : /chest|barrel|furnace|crafting_table|_bed$/.test(dn) ? '（是用得着的东西，绕过去，别挖）' : '（实心格，不是可用的脚部落点；如要开挖，须显式 dig_at 后重新确认下方支撑与落点，再另发 step）'}`);
-    } else {
-      // 目标格能站：按实际顶面算脚高；无支撑则报缺口。
-      const actualFoot = footSurfaceY(target, observed);
-      if (actualFoot === null) {
-        const floor = { ...target, y: target.y - 1 };
-        const supportAt = toRel(feet, args.facing, floor);
-        // 下一级 [1,-1,0] 的支撑在 [1,-2,0]：feet 下两格仍在真实交互距离内；能放与否还要看有没有已观察的贴面。
-        const placeAtInRange = supportAt[1] >= -2 && supportAt[1] <= 3;
-        const neighbors = [{ x: 1, y: 0, z: 0 }, { x: -1, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }, { x: 0, y: -1, z: 0 }, { x: 0, y: 0, z: 1 }, { x: 0, y: 0, z: -1 }]
-          .map((d) => ({ x: floor.x + d.x, y: floor.y + d.y, z: floor.z + d.z }));
-        observe(neighbors);
-        const reference = placementReference(floor, observed);
-        landingSupport = { pos: floor, at: supportAt, placeAtInRange, observed: observed(floor)?.name ?? null, reference };
-        const dn = describe(floor);
-        const gap = isUnseen(floor) ? `${dn}，无法确认支撑` : `${dn}，无已确认支撑`;
-        const placeNote = !placeAtInRange ? '（超出 place_at 上下 -2..3 范围）'
-          : reference === 'unknown' ? '（在 place_at 范围内；贴面未看清）'
-          : reference === 'none' ? '（在 place_at 范围内；未观察到可贴面的方块，直接放可能失败）' : '';
-        problems.unshift(`目标格脚下 (${floor.x},${floor.y},${floor.z}) 是 ${gap}；支撑格 [${supportAt}]${placeNote}；脚部目标格 [${args.at}] 须留空；未执行迈步`);
+    /** 按当前已看清的格子算这次迈步的问题与落脚；可在补支撑后重跑。 */
+    const inspect = async () => {
+      // 先按当前视线重读一遍（补支撑后世界变了，旧的“空气”观测不能继续沿用），再补看还没看清的格子。
+      observe(glanceCells);
+      if (ctx.senses.observeBlocks) await glanceAll(glanceCells);
+      const targetBlock = observed(target);
+      let landingSupport: { pos: Vec3Like; at: [number, number, number]; placeAtInRange: boolean; observed: string | null; reference: ReturnType<typeof placementReference> } | undefined;
+      let targetFoot: number | null = null;
+      const problems: string[] = [];
+      if (targetBlock === null) {
+        problems.push(`目标格是 ${describe(target)}，无法确认通行空间`);
+      } else if (blocksBodyCell(targetBlock.name, targetBlock.properties)) {
+        const dn = targetBlock.name;
+        // 事实与缺口，而不是把“dig 再 step”写成下一步指令：实心目标格不是下行落点。
+        problems.push(`目标格是 ${dn}${dn.endsWith('_door') ? '（门的状态或碰撞形状阻碍通行）' : LIQUID_BLOCKS.has(dn) ? '' : /chest|barrel|furnace|crafting_table|_bed$/.test(dn) ? '（是用得着的东西，绕过去，别挖）' : '（实心格，不是可用的脚部落点；如要开挖，须显式 dig_at 后重新确认下方支撑与落点，再另发 step）'}`);
       } else {
-        targetFoot = absolute ? args.xyz!.y : actualFoot;
-        // 相对目标是“脚格”偏移，基准必须是整数脚格 feet.y，而不是当前实际支撑顶面：
-        // 站在箱子（顶面 0.875）、床等非整块支撑上时，拿 support top + 1 会把
-        // 0.125 的真实抬升误算成 0.875 的落差并拒绝合法迈步。绝对目标仍按请求脚高精确核对。
-        const expected = absolute ? targetFoot : feet.y + args.at[1];
-        // 绝对目标要求支撑面与请求脚高一致（几何值是精确的 0.5/0.875 等，容差只吸收浮点）；
-        // 相对目标按格子差换算，允许一步内所有非整块顶面（床 9/16、灵魂沙 7/8、土径 15/16 等），
-        // 但整格 1.0 的落差仍需显式用 [1,±1,0]。
-        if (Math.abs(actualFoot - expected) > (absolute ? 0.01 : RELATIVE_FOOT_TOLERANCE)) {
-          problems.unshift(absolute
-            ? `目标支撑面在 y=${actualFoot.toFixed(2)}，与绝对脚高 ${targetFoot.toFixed(2)} 不符；未执行迈步`
-            : `目标支撑面在 y=${actualFoot.toFixed(2)}，与本次${args.at[1] > 0 ? '上一级' : args.at[1] < 0 ? '下一级' : '平走'}期望脚高 y=${expected.toFixed(2)} 不符；未执行迈步`);
+        // 目标格能站：按实际顶面算脚高；无支撑则报缺口。
+        const actualFoot = footSurfaceY(target, observed);
+        if (actualFoot === null) {
+          const floor = { ...target, y: target.y - 1 };
+          const supportAt = toRel(feet, args.facing, floor);
+          // 下一级 [1,-1,0] 的支撑在 [1,-2,0]：feet 下两格仍在真实交互距离内；能放与否还要看有没有已观察的贴面。
+          const placeAtInRange = supportAt[1] >= -2 && supportAt[1] <= 3;
+          const neighbors = [{ x: 1, y: 0, z: 0 }, { x: -1, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }, { x: 0, y: -1, z: 0 }, { x: 0, y: 0, z: 1 }, { x: 0, y: 0, z: -1 }]
+            .map((d) => ({ x: floor.x + d.x, y: floor.y + d.y, z: floor.z + d.z }));
+          observe(neighbors);
+          const reference = placementReference(floor, observed);
+          landingSupport = { pos: floor, at: supportAt, placeAtInRange, observed: observed(floor)?.name ?? null, reference };
+          const dn = describe(floor);
+          const gap = isUnseen(floor) ? `${dn}，无法确认支撑` : `${dn}，无已确认支撑`;
+          // 支撑格就是脚部目标格正下方那一格；再下一格只是它的下方，垫在后者补不上这一层。
+          const below = `[${supportAt[0]},${supportAt[1] - 1},${supportAt[2]}]`;
+          const placeNote = !placeAtInRange ? '（超出 place_at 上下 -2..3 范围）'
+            : reference === 'unknown' ? '（在 place_at 范围内；贴面未看清）'
+            : reference === 'none' ? '（在 place_at 范围内；未观察到可贴面的方块，直接放可能失败）' : '';
+          problems.unshift(`目标格脚下 (${floor.x},${floor.y},${floor.z}) 是 ${gap}；支撑格 [${supportAt}]${placeNote}；脚部目标格 [${args.at}] 须留空——要补支撑就是 [${supportAt}] 这一格（脚部目标格正下方），再下一格 ${below} 不是它；未执行迈步`);
         } else {
-          // 净空：转头看清身体实际占据的几格（脚高 targetFoot 起 1.8 高），再查 0.6×1.8 身体盒是否与方块相交。
-          const need: Vec3Like[] = [];
-          for (let y = Math.floor(targetFoot); y <= Math.floor(targetFoot + 1.8 - 1e-6); y++) need.push({ x: target.x, y, z: target.z });
-          await glanceAll(need);
-          const blocker = clearanceBlocker(targetFoot, target.x, target.z);
-          if (blocker) {
-            const dn = describe(blocker);
-            const atCell = blocker.y === target.y;
-            // 挖掘坐标从实际 blocker 格换算，不用固定的 args.at[1]+1——半砖脚高可能把头顶障碍抬到 target.y+2。
-            const digRel = toRel(feet, args.facing, blocker);
-            problems.push(isUnseen(blocker) ? `${atCell ? '目标格' : '目标格上方'}是 ${dn}，无法确认${atCell ? '通行' : '头部'}空间`
-              : atCell ? `目标格是 ${dn}（身体被占住，先 dig_at [${digRel}] 挖开）`
-              : `目标格上方是 ${dn}${dn.endsWith('_door') ? '（门的状态或碰撞形状阻碍通行）' : `（会碰头${LIQUID_BLOCKS.has(dn) ? '' : `；先 dig_at [${digRel}]`}）`}`);
+          targetFoot = absolute ? args.xyz!.y : actualFoot;
+          // 相对目标是“脚格”偏移，基准必须是整数脚格 feet.y，而不是当前实际支撑顶面：
+          // 站在箱子（顶面 0.875）、床等非整块支撑上时，拿 support top + 1 会把
+          // 0.125 的真实抬升误算成 0.875 的落差并拒绝合法迈步。绝对目标仍按请求脚高精确核对。
+          const expected = absolute ? targetFoot : feet.y + args.at[1];
+          // 绝对目标要求支撑面与请求脚高一致（几何值是精确的 0.5/0.875 等，容差只吸收浮点）；
+          // 相对目标按格子差换算，允许一步内所有非整块顶面（床 9/16、灵魂沙 7/8、土径 15/16 等），
+          // 但整格 1.0 的落差仍需显式用 [1,±1,0]。
+          if (Math.abs(actualFoot - expected) > (absolute ? 0.01 : RELATIVE_FOOT_TOLERANCE)) {
+            problems.unshift(absolute
+              ? `目标支撑面在 y=${actualFoot.toFixed(2)}，与绝对脚高 ${targetFoot.toFixed(2)} 不符；未执行迈步`
+              : `目标支撑面在 y=${actualFoot.toFixed(2)}，与本次${args.at[1] > 0 ? '上一级' : args.at[1] < 0 ? '下一级' : '平走'}期望脚高 y=${expected.toFixed(2)} 不符；未执行迈步`);
           } else {
-            const unseen2 = need.find((p) => isUnseen(p));
-            if (unseen2) problems.push(`${unseen2.y === target.y ? '目标格' : '目标格上方'}是 ${describe(unseen2)}，无法确认${unseen2.y === target.y ? '通行' : '头部'}空间`);
-          }
-          // 斜向角落净空
-          for (const c of corners) {
-            const cb = clearanceBlocker(targetFoot, c.x, c.z);
-            if (cb) problems.push(isUnseen(cb) ? `斜向迈步的角落 ${describe(cb)}，无法确认通行空间` : `斜向迈步会撞到角落 ${describe(cb)}`);
-            else {
-              const cu = [{ x: c.x, y: target.y, z: c.z }, { x: c.x, y: target.y + 1, z: c.z }].find((p) => isUnseen(p));
-              if (cu) problems.push(`斜向迈步的角落 ${describe(cu)}，无法确认通行空间`);
+            // 净空：转头看清身体实际占据的几格（脚高 targetFoot 起 1.8 高），再查 0.6×1.8 身体盒是否与方块相交。
+            const need: Vec3Like[] = [];
+            for (let y = Math.floor(targetFoot); y <= Math.floor(targetFoot + 1.8 - 1e-6); y++) need.push({ x: target.x, y, z: target.z });
+            await glanceAll(need);
+            const blocker = clearanceBlocker(targetFoot, target.x, target.z);
+            if (blocker) {
+              const dn = describe(blocker);
+              const atCell = blocker.y === target.y;
+              // 挖掘坐标从实际 blocker 格换算，不用固定的 args.at[1]+1——半砖脚高可能把头顶障碍抬到 target.y+2。
+              const digRel = toRel(feet, args.facing, blocker);
+              problems.push(isUnseen(blocker) ? `${atCell ? '目标格' : '目标格上方'}是 ${dn}，无法确认${atCell ? '通行' : '头部'}空间`
+                : atCell ? `目标格是 ${dn}（身体被占住，先 dig_at [${digRel}] 挖开）`
+                : `目标格上方是 ${dn}${dn.endsWith('_door') ? '（门的状态或碰撞形状阻碍通行）' : `（会碰头${LIQUID_BLOCKS.has(dn) ? '' : `；先 dig_at [${digRel}]`}）`}`);
+            } else {
+              const unseen2 = need.find((p) => isUnseen(p));
+              if (unseen2) problems.push(`${unseen2.y === target.y ? '目标格' : '目标格上方'}是 ${describe(unseen2)}，无法确认${unseen2.y === target.y ? '通行' : '头部'}空间`);
+            }
+            // 斜向角落净空
+            for (const c of corners) {
+              const cb = clearanceBlocker(targetFoot, c.x, c.z);
+              if (cb) problems.push(isUnseen(cb) ? `斜向迈步的角落 ${describe(cb)}，无法确认通行空间` : `斜向迈步会撞到角落 ${describe(cb)}`);
+              else {
+                const cu = [{ x: c.x, y: target.y, z: c.z }, { x: c.x, y: target.y + 1, z: c.z }].find((p) => isUnseen(p));
+                if (cu) problems.push(`斜向迈步的角落 ${describe(cu)}，无法确认通行空间`);
+              }
             }
           }
         }
       }
+      if (args.at[1] === 1 && targetFoot !== null) {
+        // 按实际目标脚高判断起跳净空：半格上步是走上去（脚高只抬 0.5），不是整格跳跃，不能按当前脚高+1 假想跳高一格。
+        await glanceAll([ownHead]);
+        const oh = clearanceBlocker(targetFoot, feet.x, feet.z);
+        if (oh && oh.y > feet.y) problems.push(`往上跳时自己头顶上方是 ${describe(oh)}（跳不起来；先 dig_at [0,2,0]）`);
+        else if (isUnseen(ownHead)) problems.push(`往上跳时自己头顶上方是 ${describe(ownHead)}，无法确认跳跃空间`);
+      }
+      return { targetBlock, landingSupport, targetFoot, problems };
+    };
+    let check = await inspect();
+    const fills: { pos: Vec3Like; at: [number, number, number]; item: string }[] = [];
+    // 只有 agent 显式写了 fill 才补支撑：选哪种材料、要不要垫仍由 agent 决定；这里只负责把这一块可靠地放到
+    // 脚部目标格正下方（即 place_at 的支撑格 [supportAt]），然后重新确认，不额外改落点或方向。
+    if (args.fill && check.landingSupport?.placeAtInRange) {
+      const support = check.landingSupport;
+      const placed = await placeAt.run(ctx, { at: support.at, facing: args.facing, item: args.fill });
+      if (placed.status !== 'succeeded') {
+        return fail(placed.failureCode ?? 'PATH_NOT_FOUND',
+          `迈不到 [${args.at}]：先往支撑格 [${support.at}] 补 ${args.fill} 没成——${placed.summary}`,
+          { problems: check.problems, movementNotAttempted: true, fill: { at: support.at, item: args.fill, pos: support.pos }, ...after(ctx, args.facing, target) });
+      }
+      fills.push({ pos: support.pos, at: support.at, item: args.fill });
+      // 刚补上的那一格必须重新看一次：它在上一轮已记为空气，不再是“未看清”，补看逻辑会跳过它。
+      await glanceAt(ctx, support.pos);
+      observe([support.pos]);
+      check = await inspect();
     }
-    if (args.at[1] === 1 && targetFoot !== null) {
-      // 按实际目标脚高判断起跳净空：半格上步是走上去（脚高只抬 0.5），不是整格跳跃，不能按当前脚高+1 假想跳高一格。
-      await glanceAll([ownHead]);
-      const oh = clearanceBlocker(targetFoot, feet.x, feet.z);
-      if (oh && oh.y > feet.y) problems.push(`往上跳时自己头顶上方是 ${describe(oh)}（跳不起来；先 dig_at [0,2,0]）`);
-      else if (isUnseen(ownHead)) problems.push(`往上跳时自己头顶上方是 ${describe(ownHead)}，无法确认跳跃空间`);
+    // 补看会把视线留在最后看清的格子（常常是头顶/角落）。转回目标列、瞄在脚部目标格和它支撑格之间，
+    // 两格都落回视锥，回执里的身边方块图对着要迈的方向和落点，而不是天花板。
+    const eye = ctx.adapter.eye();
+    if (eye) {
+      const dx = target.x + 0.5 - eye.x, dz = target.z + 0.5 - eye.z, horizontal = Math.hypot(dx, dz);
+      try { await ctx.adapter.look(Math.atan2(-dx, -dz), Math.atan2(target.y - eye.y, horizontal), ctx.signal); }
+      catch (e) { if (isAbort(e)) throw e; }
     }
+    const { landingSupport, targetFoot, problems } = check;
     if (problems.length) return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：${problems.join('；')}`, { problems, movementNotAttempted: true, obscured: problems.every((p) => p.includes('未看清') || p.includes('未加载')),
       ...(landingSupport ? { landingSupport } : {}),
+      ...(fills.length ? { fills } : {}),
       ...after(ctx, args.facing, target) });
     let movementError: unknown;
     try {
@@ -474,9 +528,9 @@ export const stepTo: Skill<CellArgs> = {
       const why = !state.onGround ? '身体没有站稳'
         : end.x !== target.x || end.z !== target.z ? `实际列 (${end.x},${end.z}) 与目标不符`
         : `实际脚高 ${state.pos.y.toFixed(2)} 与目标脚高 ${foot.toFixed(2)} 不符`;
-      return fail(movementError ? codeFromError(movementError) : 'EFFECT_NOT_CONFIRMED', `没有站到 [${args.at}]：${why}；实际在 (${end.x},${end.y},${end.z})${movementError ? `；${(movementError as Error).message}` : ''}`, after(ctx, args.facing, target));
+      return fail(movementError ? codeFromError(movementError) : 'EFFECT_NOT_CONFIRMED', `没有站到 [${args.at}]：${why}；实际在 (${end.x},${end.y},${end.z})${movementError ? `；${(movementError as Error).message}` : ''}`, { ...(fills.length ? { fills } : {}), ...after(ctx, args.facing, target) });
     }
-    return ok(`站到了 [${args.at}]${Math.abs(foot - Math.floor(foot)) > 0.01 ? `（脚高 ${foot.toFixed(2)}）` : ''}`, { moved: [...args.at], ...after(ctx, args.facing, target) });
+    return ok(`站到了 [${args.at}]${Math.abs(foot - Math.floor(foot)) > 0.01 ? `（脚高 ${foot.toFixed(2)}）` : ''}${fills.length ? `（先垫了 ${fills.map((f) => `${f.item} 在 [${f.at}]`).join('、')}）` : ''}`, { moved: [...args.at], ...(fills.length ? { fills } : {}), ...after(ctx, args.facing, target) });
   },
 };
 

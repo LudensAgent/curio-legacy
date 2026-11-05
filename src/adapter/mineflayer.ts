@@ -735,6 +735,14 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       };
     }
     const e = b.entity;
+    // 物理模拟只在坐船时被关掉（船的位置由 ride 自行推进）。下船事件可能因死亡、断开或服务器没发包而漏掉，
+    // 没有载具却仍关着物理时，身体会停在最后位置、onGround=false，之后每次迈步都报“没站稳”。
+    // 这里恢复物理，不让悬空状态无限延续；不替 agent 移动或改落点。
+    const vehicle = b.vehicle;
+    if (b.physicsEnabled === false && !(vehicle && /boat|raft/.test(String(vehicle.name ?? '')))) {
+      b.physicsEnabled = true;
+      this.bus.publish('body_adapt', 'P2', '身体物理模拟已恢复：没有乘船却仍关闭着物理（此前可能悬空不落地）', { physics: 'restored' });
+    }
     const inv = new Map<string, InvItem>();
     for (const it of b.inventory.items()) {
       const stackSize = this.mcData.itemsByName?.[it.name]?.stackSize;

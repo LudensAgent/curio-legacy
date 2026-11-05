@@ -296,7 +296,9 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
     const msg = (error as Error).message;
     const cavity = error instanceof ExcavationStop && error.nextLanding ? cavityGap(ctx, error.nextLanding) : null;
     // 拒绝时把「为什么 + 能怎么办」一起报，别只留一句 ERROR 让它盲试
-    const hint = /液体|水|lava|water/.test(msg) ? '（先换方向避开液体，或先 place_at 堵上再挖）'
+    // 用「液体」标记和方块名判断，不能用单个「水」字：它会把「没有水平承重顶面」误判成液体提示。
+    const hint = /液体|lava|water|岩浆/.test(msg) ? '（先换方向避开液体，或先 place_at 堵上再挖）'
+      : /没有水平承重顶面|传送门/.test(msg) ? '（这一格不是能站的水平承重面：换方向，或先用 dig_at / place_at 改变这一格）'
       : /下落方块/.test(msg) ? '（下面是沙子/沙砾这类下落方块，换方向或先堵住再挖）'
       : /未知|未加载/.test(msg) ? '（先照亮/转头看清那一格再挖，或换方向）'
       : cavity ? '（已附当前可见落点事实 cavity；要补支撑得自己显式 place_at，或换方向，或选落点用 descend；本次开挖没有自动垫/挖/下落）'

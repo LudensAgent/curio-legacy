@@ -313,6 +313,17 @@ test('explicit stairs_up clears jump transitions and ascends real supported step
   assert.equal(result.data?.structureVerified, false, 'climbing is not evidence of a discovered structure or a cleared cage');
 });
 
+test('a non-load-bearing next landing reports its own reason, not the liquid hint', async () => {
+  const world = new ExcavationWorld(); tower(world);
+  world.setBlock({ x: 1, y: 64, z: 0 }, 'wall_torch');
+  const result = await excavationSkill.run(context(world), args({ mode: 'stairs_up', steps: 1 }));
+  assert.equal(result.status, 'failed');
+  assert.match(result.summary, /没有水平承重顶面/);
+  assert.match(result.summary, /不是能站的水平承重面/, '落点不能承重要给对应的处理方向');
+  assert.doesNotMatch(result.summary, /避开液体/, '「没有水平承重顶面」不能被单个「水」字误判成液体');
+  assert.equal(world.moves.length, 0);
+});
+
 test('ascending excavation rejects an unbreakable or falling jump ceiling and an inadequate real obsidian tool before mutation', async () => {
   for (const mode of ['bedrock', 'gravel', 'tool']) {
     const world = new ExcavationWorld(); tower(world);

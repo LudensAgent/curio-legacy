@@ -149,7 +149,8 @@ test('step looks at the selected obstruction without changing the target or digg
   assert.equal(r.status, 'failed');
   assert.match(r.summary, /stone/);
   assert.deepEqual(r.data?.targetCell, { x: 1, y: 64, z: 0 });
-  assert.equal(look.mock.callCount(), 1);
+  // 有界补看会对这次判定用到的几格各试一次（脚部目标/支撑/头格），不是只转头一次。
+  assert.ok(look.mock.callCount() >= 1 && look.mock.callCount() <= 6, `转头次数应有界，实际 ${look.mock.callCount()}`);
   assert.equal(move.mock.callCount(), 0);
   assert.equal(dig.mock.callCount(), 0);
 });
@@ -164,7 +165,7 @@ test('step keeps an obstructed target unknown if looking does not reveal it', as
   const r = await stepTo.run(ctx, { at: [1, 0, 0], facing: 'E' });
   assert.equal(r.status, 'failed');
   assert.doesNotMatch(r.summary, /stone/);
-  assert.equal(look.mock.callCount(), 1);
+  assert.ok(look.mock.callCount() >= 1 && look.mock.callCount() <= 6, `转头次数应有界，实际 ${look.mock.callCount()}`);
 });
 
 test('ladder step rejects a higher position in a different column', async (t) => {
