@@ -382,7 +382,12 @@ export function waterCrossingHint(p: Percept, s: AgentState): string | null {
   const boat = inv.filter((i) => /(^|_)(boat|raft)$/.test(i.name)).reduce((n, i) => n + i.count, 0);
   const planks = inv.filter((i) => /_planks$/.test(i.name)).reduce((n, i) => n + i.count, 0);
   const blocks = inv.filter((i) => /^(cobblestone|cobbled_deepslate|deepslate|stone|dirt|sand|gravel|netherrack|.*_planks)$/.test(i.name)).reduce((n, i) => n + i.count, 0);
-  return `过水可用的材料：${blocks ? `能垫路的方块 ${blocks} 块` : '没有能垫路的方块'}；${boat ? `背包有船 ${boat} 只` : planks >= 5 ? `木板 ${planks} 块（够造一只船）` : '没有船，木板也不够造（要 5 块木板）'}`;
+  // 在水里时，上岸动作的委托写法和坐标口径贴在现场：swim_to 会沿看到的水路绕行，
+  // 但目标仍由 Agent 选；给方块顶上的脚坐标要用中心（+0.5），整数 x/z 会卡在方块交界。
+  const shore = p.self.inWater
+    ? '；在水里要上岸用 swim_to {"xyz":[脚坐标]}：会沿已看到的水路绕行（不挖不垫），找不到就直游；站在方块 (bx,by,bz) 顶上时写 [bx+0.5, by+1, bz+0.5]'
+    : '';
+  return `过水可用的材料：${blocks ? `能垫路的方块 ${blocks} 块` : '没有能垫路的方块'}；${boat ? `背包有船 ${boat} 只` : planks >= 5 ? `木板 ${planks} 块（够造一只船）` : '没有船，木板也不够造（要 5 块木板）'}${shore}`;
 }
 
 /** 主目标清单观察在线没进展、最近几段活还卡/没做成：提示可以改清单（不动主目标、不删做完的项、不重写已勾掉的项） */

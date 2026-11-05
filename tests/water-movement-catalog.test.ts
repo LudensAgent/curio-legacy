@@ -15,6 +15,8 @@ test('both thinking tiers expose direction and water movement tools with their e
     assert.match(dive, /"xyz".*min_oxygen.*停下回报/);
     assert.match(surface, /只做一次有界上浮.*不找岸.*不挖不垫/);
     assert.match(swimTo, /"xyz".*保持这个目标不换|"xyz".*游过去/);
+    assert.match(swimTo, /沿已观察到的水格.*绕开岩檐.*不挖、不垫、不换目标/, 'the catalog must not promise straight-line-only behavior');
+    assert.match(swimTo, /bx\+0\.5.*by\+1.*bz\+0\.5/, 'the foot-coordinate convention for standing on a block top is part of the contract');
     assert.match(travel, /步行、游泳.*不制造或切换载具/);
   }
 });
