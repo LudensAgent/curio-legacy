@@ -660,6 +660,12 @@ function surroundingsOf(p: Percept, tier: 'glance' | 'deliberate', memory: World
   return {
     ...(p.self.local ? { local: p.self.local } : {}),
     ...(p.self.around ? { around: p.self.around } : {}),
+    // 身体占据格是触觉事实（不受视野限制）：站在门方块/水里时，脚格不是支撑格，别只报“脚下”。
+    ...(p.self.contacts ? { body_cells: {
+      support: p.self.contacts.support.block,
+      feet: p.self.contacts.feet.block,
+      head: p.self.contacts.head.block,
+    } } : {}),
     exits: p.self.exits ?? null,
     hostile: p.nearby.hostile.slice(0, 5), passive: p.nearby.passive.slice(0, 6), players: p.nearby.players,
     see_now: p.nearby.resources.filter((r) => r.seen === 'now').slice(0, n).map((r) => `${r.block}×${r.count} ${r.dir ?? ''}${r.nearest}格`),

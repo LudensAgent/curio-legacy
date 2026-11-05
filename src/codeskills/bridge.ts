@@ -20,7 +20,7 @@ export const READ_RADIUS = 48;
 /** 给模型看的 api 说明（写代码技能、后台改进时都用这一份） */
 export const API_DOC = `代码是一个 async 函数体，参数 api 和 args 已经给好（args 是 use_skill 的 args；恢复时 args.failure = {skill,args,code,summary,target?,position} 是刚失败的那一步：target 是那一步实际要去/要动的坐标（动作算出来的，比如 goto "NW 20" 的落点），position 是失败时人在哪）。所有 api 调用都要 await，返回普通 JSON。
 恢复的 target 是世界坐标，不是相对 at/to；原目标、实体ID、dig/avoid/make 和液体/坠落风险限制会传给步骤与嵌套技能。不能自行换目标或增加挖掘、合成和探索；超出原委托还需放方块或挖方块时，先交回心智显式调用 use_skill args.allowPlace:true 或 args.allowDig:true。缺少绝对目标就报告缺口，不能拿当前位置猜。
-- api.state() → {pos, feet:{x,y,z}, hp, food, oxygen, onGround, inWater, inLava, isDay, dim, yaw, facing, held, riding（载具名或 null）, inventory:[{name,count}]}
+- api.state() → {pos, feet:{x,y,z}, feetBlock, headBlock, bodyPortal, hp, food, oxygen, onGround, inWater, inLava, isDay, dim, yaw, facing, held, riding（载具名或 null）, inventory:[{name,count}]}；feetBlock/headBlock/bodyPortal 是触觉事实（adapter 直接读身体占据格，不受视野限制，站在门方块里时为 nether_portal）
 - api.blockAt(x,y,z) → {name, kind}；kind = open（无整身碰撞盒：空气、草、雪层、地毯等）| solid | liquid | unknown；open 不等于空格：雪层、地毯仍占据该格，并可能提供较低的站立顶面；只读取身边 48 格内当前视野可见的格子。遮挡、视野外、黑暗或未加载时返回 {name:null,kind:"unknown"}，不透露隐藏的矿、液体或洞穴；先用 api.lookAt 转头，再读取。unknown 不能当空气或实心。要挖/迈身边的格子，直接用 digAt/stepTo（它们自己会转头、处理遮挡、如实回报），别先 blockAt 预检再因为 unknown 就 throw——紧邻格没转头时 blockAt 常返回 unknown，只代表还没看清，不代表没法处理
 - api.region(x1,y1,z1,x2,y2,z2) → {min, size:[sx,sy,sz], palette:[名字或"?"], kinds:[同上], data:[下标]}；第 i 格：i = (y-min.y)*sx*sz + (z-min.z)*sx + (x-min.x)；最多 40000 格；与 blockAt 共用当前可见观测，未知格为 "?"/unknown，记忆不能冒充当前观测
 - api.entities(半径≤32) → 看见的实体 [{id,name,kind,dist,pos,how:"seen",fusing?}]（kind=item 的是掉落物，name 形如 item:cobblestone）；只听见的返回 {name,kind,how:"heard",dir,dist,fusing?}，没有精确位置或实体id，距离约两格精度，只能据此决定转头或搜索。挥击、射击、跟踪和 api.act 的实体动作只能选择当前看见的目标。when.hostile 同样匹配听见的怪——按位置/ID 行动时 when 写 seen:true，或在代码里处理 heard
@@ -158,7 +158,10 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
           const left = d ? Math.max(0, Math.round((d.ts + 300_000 - Date.now()) / 1000)) : 0;
           if (d && d.lost.length) deathDrop = { pos: d.pos, dim: d.dim, items: d.lost.map((i) => ({ name: i.name, count: i.count })), secondsLeft: left };
         } catch { /* 记忆暂不可用 */ }
-        return { pos: s.pos, feet: feetCell(s.pos), hp: Math.round(s.hp * 10) / 10, food: s.food, oxygen: s.oxygen, onGround: s.onGround !== false, inWater: s.inWater, inLava: s.inLava,
+        const feet = feetCell(s.pos);
+        return { pos: s.pos, feet, feetBlock: ctx.adapter.blockAt(feet), headBlock: ctx.adapter.blockAt({ x: feet.x, y: feet.y + 1, z: feet.z }),
+          bodyPortal: s.bodyPortal ?? null,
+          hp: Math.round(s.hp * 10) / 10, food: s.food, oxygen: s.oxygen, onGround: s.onGround !== false, inWater: s.inWater, inLava: s.inLava,
           isDay: s.isDay, dim: s.dim, yaw: eye?.yaw ?? null, pitch: eye?.pitch ?? null, facing: eye ? facingOfYaw(eye.yaw) : null, held: s.held, riding: s.riding ?? null,
           offHand: combat.offHand, armor: (s.equipment ?? []).filter((e) => e.slot !== 'off-hand').map((e) => ({ slot: e.slot, name: e.name })),
           usingItem: combat.usingItem, drawingMs: combat.drawingSinceMs, hurtAgoMs: hurt ? Date.now() - hurt : null, deathDrop,

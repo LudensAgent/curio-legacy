@@ -144,13 +144,19 @@ export const observePortal: Skill<{}> = {
       ?? visiblePortal(ctx, ctx.senses.knownBlocks(kinds, 8).map((block) => block.pos), kinds)
       ?? touching[0];
     if (!portal) return fail('NOT_FOUND', '附近没有已观察并能核对的传送门');
+    // 身体占据的两格（脚/头）才是“我在门里”的触觉事实；旁边一格只是发现门，不等于人已进门。
+    const bodyPortal = [feet, { ...feet, y: feet.y + 1 }]
+      .map((pos) => ctx.adapter.blockAt(pos))
+      .find((name): name is string => !!name && kinds.includes(name));
     const endpoint = travelStore(ctx.memory).observe(state, portal.pos, portal.name as PortalEndpoint['kind']);
     // 也记进常规记忆（地标），让 recall / places 能找回来，不只是 travelStore 里的一份；下界门在下界这一端尤其要靠它记住
     ctx.memory.addLandmark('discovery', `${PORTAL_LABEL[endpoint.kind]} ${endpoint.id}`, state.dim, endpoint.pos, 4);
     // 另记一个“门外站位”：门方块本身是传送触发区，把它当门厅/集合点走过去会直接换维度。
     const stance = ctx.adapter.portalStance?.(portal.pos);
     if (stance) ctx.memory.addLandmark('waypoint', `${PORTAL_LABEL[endpoint.kind]} ${endpoint.id} 门外站位`, state.dim, stance, 3);
-    return ok(`记录传送门 ${endpoint.id}`, { portalId: endpoint.id, endpoint, ...(stance ? { stance } : {}) });
+    const bodyNote = bodyPortal ? `；你身体所在格现在是 ${bodyPortal}，正压在门方块上` : '';
+    const stanceNote = stance ? `；门外站位 (${stance.x},${stance.y},${stance.z})` : '';
+    return ok(`记录传送门 ${endpoint.id}${bodyNote}${stanceNote}`, { portalId: endpoint.id, endpoint, ...(stance ? { stance } : {}), ...(bodyPortal ? { bodyPortal } : {}) });
   },
 };
 

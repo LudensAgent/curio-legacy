@@ -15,7 +15,7 @@ import { installClientGuard } from './click-guard.ts';
 import { cornerSafe } from './corner-safe.ts';
 import { AIR_BLOCKS, attachmentFaces } from '../perception/surroundings.ts';
 import { feetCell, facingOfYaw } from '../perception/local.ts';
-import { bodyOverlapsPortal, portalApproach as computePortalApproach, portalStance as computePortalStance } from '../perception/portal.ts';
+import { bodyOverlapsPortal, PORTAL_KINDS, portalApproach as computePortalApproach, portalStance as computePortalStance } from '../perception/portal.ts';
 import type { WalkBody, WalkTick } from './walk-route.ts';
 
 import type {
@@ -803,6 +803,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       onGround: !!e.onGround,
       inWater,
       inLava,
+      bodyPortal: this.bodyPortalKind(),
       inventory: [...inv.values()],
       ...(this.effectsOf(b).length ? { effects: this.effectsOf(b) } : {}),
       ...(b.experience ? { xp: { level: b.experience.level ?? 0, progress: Math.round((b.experience.progress ?? 0) * 100) / 100 } } : {}),
@@ -2871,6 +2872,13 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   private bodyInPortal(kind?: string): boolean {
     const p = this.bot?.entity?.position;
     return !!p && bodyOverlapsPortal((q) => this.blockAt(q), p, kind ? [kind] : undefined);
+  }
+
+  /** 身体 AABB 此刻压着的门方块名；不在门里为 null。触觉事实，不受视野限制。 */
+  private bodyPortalKind(): string | null {
+    const p = this.bot?.entity?.position;
+    if (!p) return null;
+    return [...PORTAL_KINDS].find((kind) => bodyOverlapsPortal((q) => this.blockAt(q), p, [kind])) ?? null;
   }
 
   /**

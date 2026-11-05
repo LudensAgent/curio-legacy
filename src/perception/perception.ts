@@ -38,6 +38,8 @@ export interface Percept {
   /** can_sleep：只有夜里（或雷雨）才能上床睡觉，白天 sleep 会失败 */
   time: { timeOfDay: number; phase: 'day' | 'dusk' | 'night' | 'dawn'; isDay?: boolean; can_sleep?: boolean; day?: number; weather?: string };
   self: { pos: [number, number, number]; dim: string; hp: number; food: number; biome: string | null; inWater: boolean; inLava: boolean; held: string | null; onGround?: boolean; riding?: string | null; equipment?: { slot: string; name: string }[]; around?: string;
+    /** 身体 AABB 正压着的门方块名（触觉事实）；不在门里时不出现 */
+    body_in_portal?: string;
     contacts?: Pick<ReturnType<typeof surroundings>, 'support' | 'feet' | 'head'>;
     sky_visible?: boolean | null; depth_below_surface?: number | null; exits?: ExitOptions;
     /** 地下时四个水平方向哪边更早出现天光（可能更接近洞口/地表；未验证可通行） */
@@ -772,6 +774,7 @@ export class Perception {
         biome: s.biome,
         inWater: s.inWater,
         inLava: s.inLava,
+        ...(s.bodyPortal ? { body_in_portal: s.bodyPortal } : {}),
         held: s.held,
         onGround: s.onGround,
         ...(s.riding !== undefined ? { riding: s.riding } : {}),

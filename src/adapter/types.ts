@@ -132,6 +132,8 @@ export interface AgentState {
   onGround: boolean;
   inWater: boolean;
   inLava: boolean;
+  /** 身体 AABB 当前压着的门方块名（nether_portal/end_portal）；不在门里为 null。触觉事实，不受视野限制。 */
+  bodyPortal?: string | null;
   inventory: InvItem[];
   emptySlots: number;
   held: string | null;

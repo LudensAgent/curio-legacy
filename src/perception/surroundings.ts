@@ -92,8 +92,13 @@ export function surroundings(adapter: GameAdapter, pos: Vec3Like = adapter.state
     } else if (exitOptions[d].step_up) exits.push(`${d}↑`); // 跳上一格
     else blocked.push(`${d} ${[feet, head].filter((n) => !soft(n)).join('/')}`);
   }
+  const feetBlock = at(0, 0, 0), headBlock = at(0, 1, 0);
+  // 身体占据的两格：软方块（传送门、水）不挡路，单看“脚下支撑”会以为站在普通地板上；
+  // 把这两格实际是什么直接说出来，避免站在门方块里还以为自己在门旁。
+  const bodyCells = [...new Set([feetBlock, headBlock].filter((n): n is string => !!n && !AIR.has(n)))];
   const parts = [
     `脚下 ${below ?? '?'}`,
+    ...(bodyCells.length ? [`身体所在格 ${bodyCells.join('/')}`] : []),
     ...(drop ? [drop.depth > 0 ? `悬空，向下 ${drop.depth} 格是 ${drop.block}` : '悬空，向下超过 3 格看不清落点'] : []),
     soft(above) ? '头顶空着' : `头顶上方 ${above}`,
     sky ? '看得见天空' : '看不见天空',
@@ -101,8 +106,8 @@ export function surroundings(adapter: GameAdapter, pos: Vec3Like = adapter.state
     ...(blocked.length ? [`挡住：${blocked.join('，')}`] : []),
   ];
   return { text: parts.join('｜'), enclosed: exits.length === 0, exits, exitOptions, sky, below, above, drop,
-    support: { block: below, pos: supportPos }, feet: { block: at(0, 0, 0), pos: { x, y, z } },
-    head: { block: at(0, 1, 0), pos: { x, y: y + 1, z } } };
+    support: { block: below, pos: supportPos }, feet: { block: feetBlock, pos: { x, y, z } },
+    head: { block: headBlock, pos: { x, y: y + 1, z } } };
 }
 
 export { AIR as AIR_BLOCKS, LIQUID as LIQUID_BLOCKS, soft as isSoftBlock };
