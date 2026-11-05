@@ -45,6 +45,19 @@ test('相对 step 失败且身体已换位：不自动重试，避免用新站�
   assert.equal(activity.adaptations.filter((item) => item.startsWith('retry:')).length, 0);
 });
 
+test('swim_to 游不动的物理停滞不原样重放，即使失败前身体移动过', () => {
+  const { adapter, activity } = activityOf([{ skill: 'swim_to', args: { xyz: { x: -482, y: 64, z: -231 } } }]);
+  const step = nextStep(activity)!;
+  // 起点与当前状态相差很远：仅按“身体动过 >= 0.5 格”旧规则会允许重试。
+  activity.stepStart = { pos: { x: -479.5, y: 59.6, z: -230.5 } };
+  const verdict = afterStep(activity, step, fail('PATH_NOT_FOUND', '游不动；现在在 (-482.1,61.2,-231.0)，氧气 15/20', {
+    reason: 'SWIM_NO_PROGRESS', position: { x: -482.1, y: 61.2, z: -231.0 }, goal: 'dry_shore', stage: 'swimming',
+  }), 5012, adapter.state());
+  assert.equal(verdict.kind, 'stuck');
+  assert.match(verdict.why, /重放不会改变结果/);
+  assert.equal(activity.adaptations.filter((item) => item.startsWith('retry:')).length, 0, '不消耗自动重试额度');
+});
+
 test('同一缺口只重试一次：视角或无关资源变化不能再要一次重试额度', () => {
   const { adapter, activity } = activityOf([gather]);
   let step = nextStep(activity)!;
