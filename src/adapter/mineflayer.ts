@@ -1542,14 +1542,21 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     this.scheduleRepair('动作被打断', 250);
   }
 
-  /** walk_route 身体桥：只暴露前向控制与实测实体，不暴露寻路/挖掘等。 */
+  /**
+   * walk_route 身体桥：只暴露前向控制与实测实体，不暴露寻路/挖掘等。
+   * 控制归属绑定创建时的 action epoch：stopAll/换 bot 之后，旧执行即使还持有这个
+   * 身体桥，也不能再写按键或释放新任务的控制。
+   */
   walkBody(): WalkBody {
     const bot = this.bot;
+    const epoch = this.actionEpoch;
+    const owns = () => epoch === this.actionEpoch && bot === this.bot;
     return {
-      setControlState: (name, value) => bot.setControlState(name, value),
-      clearControlStates: () => bot.clearControlStates(),
-      look: (yaw, pitch) => bot.look(yaw, pitch, true),
+      setControlState: (name, value) => { if (owns()) bot.setControlState(name, value); },
+      clearControlStates: () => { if (owns()) bot.clearControlStates(); },
+      look: (yaw, pitch) => (owns() ? bot.look(yaw, pitch, true) : undefined),
       entity: bot.entity,
+      controlOwnership: { owns },
     };
   }
 

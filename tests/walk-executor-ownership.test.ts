@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ExecutableMove } from 'curio-minecraft-3d-memory';
+import { MineflayerAdapter } from '../src/adapter/mineflayer.ts';
 import { WalkMoveExecutor } from '../src/adapter/walk-route.ts';
+import { config } from '../src/config.ts';
+import { EventBus } from '../src/events.ts';
 
 function recordingBody() {
   const controls: string[] = [];
@@ -56,6 +59,91 @@ test('旧段迟到的 releaseIf 不清新段归属，新段 stop 仍能释放', 
   assert.ok(controls.includes('set:forward:false'), '旧段 releaseIf 清掉新段归属会导致 stop 失效');
   sig.abort();
   await p;
+});
+
+/** 宿主 epoch 绑定的身体桥：控制写入只在创建它的 epoch 内生效。 */
+function epochBody(host: { epoch: number }, control: Record<string, boolean>) {
+  const entity = { position: { x: 0, y: 0, z: 0 }, velocity: { x: 0, y: 0, z: 0 }, onGround: true, isInWater: false };
+  const epoch = host.epoch;
+  const owns = () => host.epoch === epoch;
+  return {
+    setControlState(name: string, value: boolean) { if (owns()) control[name] = value; },
+    clearControlStates() { if (owns()) for (const k of Object.keys(control)) control[k] = false; },
+    look() {},
+    entity,
+    controlOwnership: { owns },
+  };
+}
+
+/** 挂起的物理帧：只在信号中止时结束，避免移动循环自行跑完。 */
+const stalledTick = (signal: AbortSignal) => new Promise<null>((resolve) => {
+  if (signal.aborted) { resolve(null); return; }
+  signal.addEventListener('abort', () => resolve(null), { once: true });
+});
+
+test('宿主换主后，旧执行的迟到 stop/releaseIf 不清新任务的控制，新 stop 仍释放', async () => {
+  const control: Record<string, boolean> = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
+  const host = { epoch: 1 };
+  const oldParent = new AbortController();
+  const oldReq = new AbortController();
+  const oldExec = new WalkMoveExecutor(epochBody(host, control), stalledTick, oldParent.signal, () => 0);
+  const oldMove = oldExec.move({ executionId: 'old', worldId: 'w', dim: 'd', sessionId: 's', from: { x: 0, y: 0, z: 0 }, to: { x: 10, y: 0, z: 0 }, deadlineMs: 100000, timeoutMs: 100000, signal: oldReq.signal });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(control.forward, true, '旧执行先取得前进控制');
+
+  // 新任务接管：宿主动作换主，旧身体桥整体失效。
+  host.epoch = 2;
+  const newParent = new AbortController();
+  const newReq = new AbortController();
+  const newBody = epochBody(host, control);
+  const newExec = new WalkMoveExecutor(newBody, stalledTick, newParent.signal, () => 0);
+  const newMove = newExec.move({ executionId: 'new', worldId: 'w', dim: 'd', sessionId: 's', from: { x: 0, y: 0, z: 0 }, to: { x: -10, y: 0, z: 0 }, deadlineMs: 100000, timeoutMs: 100000, signal: newReq.signal });
+  await new Promise((r) => setImmediate(r));
+  newBody.setControlState('sneak', true); // 新任务自己的附加控制
+
+  // 旧执行迟到收尾：不得松开新任务的前进/潜行。
+  oldExec.stop('old');
+  (Reflect.get(oldExec, 'releaseIf') as (id: string) => void).call(oldExec, 'old');
+  assert.equal(control.forward, true, '旧 stop/releaseIf 不得清掉新任务的前进键');
+  assert.equal(control.sneak, true, '旧 stop/releaseIf 不得清掉新任务的潜行键');
+
+  // 新执行自己的 stop 仍能释放全部控制。
+  newExec.stop('new');
+  assert.equal(control.forward, false, '新 stop 必须释放前进键');
+  assert.equal(control.sneak, false, '新 stop 必须释放潜行键');
+
+  oldReq.abort();
+  newReq.abort();
+  await Promise.all([oldMove, newMove]);
+});
+
+test('MineflayerAdapter.walkBody 绑定 action epoch：stopAll 后旧身体桥不能再写控制', () => {
+  const adapter = new MineflayerAdapter(config, new EventBus());
+  const control: Record<string, boolean> = { forward: false, sneak: false };
+  const bot = {
+    entity: { position: { x: 0, y: 64, z: 0 }, velocity: { x: 0, y: 0, z: 0 }, onGround: true, isInWater: false },
+    inventory: { slots: [] },
+    setControlState(name: string, value: boolean) { control[name] = value; },
+    clearControlStates() { for (const k of Object.keys(control)) control[k] = false; },
+    look() {},
+    pathfinder: { stop() {}, setGoal() {} },
+    deactivateItem() {},
+    targetDigBlock: null,
+    currentWindow: null,
+    isSleeping: false,
+  };
+  adapter.bot = bot;
+  const old = adapter.walkBody();
+  adapter.stopAll(); // 换主：actionEpoch 递增
+  old.setControlState('forward', true);
+  old.clearControlStates();
+  assert.equal(control.forward, false, '旧身体桥换主后不得写控制');
+  assert.equal(old.controlOwnership?.owns(), false);
+
+  const fresh = adapter.walkBody();
+  fresh.setControlState('sneak', true);
+  assert.equal(control.sneak, true, '新身体桥应能写控制');
+  assert.equal(fresh.controlOwnership?.owns(), true);
 });
 
 test('releaseIf 释放全部移动键（forward/back/sneak），不残留倒退或潜行', () => {

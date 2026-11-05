@@ -250,8 +250,17 @@ export class Arbiter extends EventEmitter {
             // These older primitives did not expose a signal. Bind task ownership
             // here so their internal post-await checks also observe cancellation.
             const signalIndex: Record<string, number> = { dig: 1, placeBlockAt: 2, placeBlockStateAt: 3, equipItem: 2, tossItem: 2, arrangeHotbar: 2, useGui: 2, tradeWith: 3, useBlockAt: 2, useItem: 1, rangedAttack: 1, enterPortalAt: 1, collectNearbyDrops: 0, craft: 2, sleepInBed: 0, smelt: 3, useChest: 3, till: 1, plant: 2, eat: 0, equipWeapon: 0, attack: 1, look: 2, jump: 1, swimTo: 1, diveTo: 1, pillarUp: 1, drive: 2, raiseShield: 1, startDraw: 1, releaseDraw: 0, signText: 1, editBook: 2, fish: 0, useItemOn: 2, useBucketAt: 2, interactEntity: 2, ride: 1, dismount: 0, emptyFurnace: 1 };
-            if (prop === 'moveTo') args[1] = { ...(args[1] as object), signal };
-            else if (String(prop) in signalIndex) args[signalIndex[String(prop)]] = signal;
+            if (prop === 'moveTo') {
+              const opts = args[1] as { signal?: AbortSignal } | undefined;
+              const caller = opts?.signal;
+              // 调用方（路段/父委托）信号与任务信号合并，而不是覆盖任一方：
+              // 任一取消都以其 reason 中止这次移动。落定后移除监听，长任务不累积。
+              const merged = caller && caller !== signal ? mergeAbortSignals(caller, signal) : null;
+              args[1] = { ...(opts as object), signal: merged?.signal ?? signal };
+              const pending = v.apply(t, args) as Promise<void>;
+              return merged ? pending.finally(merged.dispose) : pending;
+            }
+            if (String(prop) in signalIndex) args[signalIndex[String(prop)]] = signal;
             return v.apply(t, args);
           };
         }
@@ -270,6 +279,8 @@ export class Arbiter extends EventEmitter {
     origin?: TaskOrigin;
     authorizedBy?: StepAuthorization;
     gentle?: boolean;
+    /** 同一逻辑步骤的自动重试/续跑共享的绝对期限（epoch ms）；只提前，不延后。 */
+    deadlineMs?: number;
     climb?: { height: number; spent: number; startY: number };
   } = {}): TaskInfo | { error: string } {
     if (this.pausedFlag) return { error: 'Agent 已暂停' };
@@ -286,6 +297,10 @@ export class Arbiter extends EventEmitter {
     const skill = SKILLS[step.skill];
     const controller = new AbortController();
     const now = Date.now();
+    // 父委托给的绝对期限只能缩短本任务，不能延长；未传时保持 skill 自己的 timeoutMs。
+    const deadline = meta.deadlineMs === undefined
+      ? now + skill.timeoutMs
+      : Math.min(now + skill.timeoutMs, meta.deadlineMs);
     // 开始作用域/位置与背包在派发这一刻实测；结束事实只在没有更新任务时才能归给本任务。
     const startState = readState(this.adapter);
     const startedScope = scopeOf(startState, now);
@@ -302,7 +317,7 @@ export class Arbiter extends EventEmitter {
       ...(meta.stepId ? { stepId: meta.stepId } : {}),
       ...(meta.authorizedBy ? { authorizedBy: meta.authorizedBy } : {}),
       startedAt: now,
-      deadline: now + skill.timeoutMs,
+      deadline,
       progress: 0,
       note: '',
       movement: skill.movement,
@@ -324,7 +339,11 @@ export class Arbiter extends EventEmitter {
       authorizedBy: task.authorizedBy ?? null,
     });
 
-    const timeout = setTimeout(() => controller.abort('TIMEOUT'), skill.timeoutMs + 2000);
+    // 照旧在期限后留 2000ms 收尾宽限；父委托期限已过则不新起计时，立即中止。
+    const timeoutGraceEnd = task.deadline + 2000;
+    const timeout = timeoutGraceEnd <= Date.now()
+      ? (controller.abort('TIMEOUT'), null)
+      : setTimeout(() => controller.abort('TIMEOUT'), timeoutGraceEnd - Date.now());
     const ctx = {
       adapter: this.guard(controller.signal),
       senses: this.senses,
@@ -352,7 +371,7 @@ export class Arbiter extends EventEmitter {
         return { status: 'failed', failureCode: 'ERROR', summary: String(e?.message ?? e) };
       })
       .then((result) => {
-        clearTimeout(timeout);
+        if (timeout !== null) clearTimeout(timeout);
         if (controller.signal.reason === 'TIMEOUT' && result.status === 'cancelled') {
           result = { status: 'failed', failureCode: 'TIMEOUT', summary: `${skill.name} 超时`, ...(result.data ? { data: result.data } : {}) };
         }
@@ -469,6 +488,31 @@ export class Arbiter extends EventEmitter {
     t.controller.abort(reason);
     this.adapter.stopAll();
   }
+}
+
+/**
+ * 合并调用方信号与任务信号：任一方中止都以它的 reason 中止合并信号。
+ * `dispose` 移除来源监听；调用方在动作落定后调用，避免长任务上累积监听。
+ */
+function mergeAbortSignals(a: AbortSignal, b: AbortSignal) {
+  const controller = new AbortController();
+  const dispose = () => {
+    a.removeEventListener('abort', onAbort);
+    b.removeEventListener('abort', onAbort);
+  };
+  const onAbort = (event: Event) => {
+    dispose();
+    controller.abort((event.target as AbortSignal).reason);
+  };
+  a.addEventListener('abort', onAbort, { once: true });
+  b.addEventListener('abort', onAbort, { once: true });
+  // 装好监听后复核：任何在装监听前就已中止的来源都不会再派发事件。
+  const alreadyAborted = a.aborted ? a : b.aborted ? b : null;
+  if (alreadyAborted) {
+    dispose();
+    controller.abort(alreadyAborted.reason);
+  }
+  return { signal: controller.signal, dispose };
 }
 
 function originOfSource(source: TaskSource): TaskOrigin {
