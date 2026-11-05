@@ -443,6 +443,8 @@ if (memory.patched.length) bus.publish('memory', 'P1', `套用了人工记忆修
 
 // ------------------------------------------------------------ 游戏事件
 let lastHurt = 0;
+/** 最近一次挨打时观察到的身体/附近实体事实；死亡播报没有点名来源时用它补上下文。 */
+let lastHurtContext = '';
 adapter.on('spawn', () => {
   executive.onSpawn();
   attachObserver();
@@ -523,9 +525,17 @@ adapter.on('death', () => {
   sampleVitals();
   const told = recentDeathMessage();
   const guessed = deathCause(vitals, lastHurt);
-  const cause = told?.parsed.cause && told.parsed.cause !== 'unknown' ? told.parsed.cause : 'unknown';
+  // “went up in flames / burned to death”本身只说明火焰，不说明火源。
+  // 若死前没有岩浆接触、但观察到 ghast/fireball/arrow 等远程实体，保留这些事实并归为 mob，
+  // 不把“被恶魂火球点燃”笼统写成“岩浆”。
+  const fireOnly = !!told && /flames|burn|fire|crisp/i.test(told.text) && !vitals.some((v) => v.inLava);
+  const rangedSource = fireOnly ? lastHurtContext.match(/\b(ghast|blaze|fireball|arrow|trident|wither_skull|dragon_fireball)\b/i)?.[0] : undefined;
+  const inferredRanged = !!rangedSource && !vitals.some((v) => v.inLava);
+  const cause = inferredRanged ? 'mob' : told?.parsed.cause && told.parsed.cause !== 'unknown' ? told.parsed.cause : 'unknown';
   const causeSource = told ? 'game_message' : guessed !== 'unknown' ? 'state_inference' : 'unknown';
-  const causeText = told ? `游戏播报：${told.text}` : guessed !== 'unknown' ? `状态推测死因：${guessed}（未经游戏播报确认）` : '死因未确认';
+  const causeText = told
+    ? `游戏播报：${told.text}${inferredRanged ? `；死前记录：${lastHurtContext}（未见岩浆接触，火焰来自远程攻击）` : ''}`
+    : guessed !== 'unknown' ? `状态推测死因：${guessed}（未经游戏播报确认）` : '死因未确认';
   const during = vitals.at(-1)?.task ?? lastWork;
   vitals = [];
   let hazard: ReturnType<typeof memory.addHazard> | null = null;
@@ -537,7 +547,12 @@ adapter.on('death', () => {
   memory.addLandmark('death', '死亡地点', s.dim, s.pos, 4);
   memory.setDeath({ ts: Date.now(), dim: s.dim, pos: s.pos, lost: invSnapshot, cause: causeText, ...(told ? { message: told.text } : {}) });
   awaitingRespawnLoss = true;
-  bus.publish('death', 'P0', `死亡 @ (${Math.round(s.pos.x)}, ${Math.round(s.pos.y)}, ${Math.round(s.pos.z)})，${causeText}${during ? `（在做 ${during}）` : ''}`, { cause, causeSource, ...(causeSource === 'state_inference' ? { suspectedCause: guessed } : {}), during, ...(told ? { message: told.text } : {}) });
+  bus.publish('death', 'P0', `死亡 @ (${Math.round(s.pos.x)}, ${Math.round(s.pos.y)}, ${Math.round(s.pos.z)})，${causeText}${during ? `（在做 ${during}）` : ''}`, {
+    cause, causeSource, ...(causeSource === 'state_inference' ? { suspectedCause: guessed } : {}), during,
+    ...(told ? { message: told.text } : {}),
+    ...(lastHurtContext ? { lastHurtContext } : {}),
+    ...(inferredRanged ? { fireSourceObserved: rangedSource } : {}),
+  });
   executive.onDeath({ cause: causeText, hazard, during, ...(told ? { message: told.text } : {}) });
 });
 // 盾挡下了一击：副手盾的耐久掉了而人没挨打。这是举盾有用的直接反馈（给心智和学技能的看）
@@ -553,6 +568,7 @@ setInterval(() => {
 adapter.on('hurt', (cause?: string) => {
   if (Date.now() - lastHurt < 1000) return;
   lastHurt = Date.now();
+  lastHurtContext = cause ?? '';
   // entityHurt 先于生命值更新到达，稍等再读
   // 挨打那一刻盾举没举（只记事实；举不举、什么时候举由它自己学）
   const combat = adapter.combatState?.();

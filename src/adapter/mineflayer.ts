@@ -137,7 +137,7 @@ const HOSTILE = new Set([
   'vex', 'ravager', 'silverfish', 'endermite', 'blaze', 'ghast', 'wither_skeleton', 'guardian',
   'elder_guardian', 'hoglin', 'zoglin', 'piglin_brute', 'warden', 'shulker', 'ender_dragon',
 ]);
-const NEUTRAL = new Set(['enderman', 'zombified_piglin', 'piglin', 'wolf', 'bee', 'iron_golem', 'llama', 'panda', 'polar_bear', 'dolphin', 'goat']);
+const NEUTRAL = new Set(['enderman', 'zombified_piglin', 'wolf', 'bee', 'iron_golem', 'llama', 'panda', 'polar_bear', 'dolphin', 'goat']);
 const BAD_FOOD = new Set(['rotten_flesh', 'spider_eye', 'poisonous_potato', 'pufferfish', 'suspicious_stew', 'chorus_fruit']);
 const WEAPON_ORDER = ['netherite', 'diamond', 'iron', 'stone', 'golden', 'wooden'];
 /**
@@ -862,6 +862,15 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return out.length ? out.join('、') : undefined;
   }
 
+  /** 猪灵中立条件：玩家穿着任意一件金盔甲。只读当前装备，不推断未观察状态。 */
+  private wearsGoldArmor(): boolean {
+    const b = this.bot as any;
+    if (!b) return false;
+    return ['head', 'torso', 'legs', 'feet'].some((slot) => /^golden_(helmet|chestplate|leggings|boots)$/.test(
+      String(b.inventory?.slots?.[b.getEquipmentDestSlot?.(slot)]?.name ?? ''),
+    ));
+  }
+
   private classify(ent: any): EntityKind {
     const name = String(ent.name ?? '');
     if (ent.type === 'player') return 'player';
@@ -870,6 +879,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const keys: string[] = this.mcData?.entitiesByName?.enderman?.metadataKeys ?? [];
       if (['creepy', 'stared_at'].some((key) => keys.indexOf(key) >= 0 && ent.metadata?.[keys.indexOf(key)] === true)) return 'hostile';
     }
+    // 猪灵只有玩家穿着金盔甲时才是中立；没有金甲时会主动攻击，不能当成 passive，
+    // 否则 defend/attack 和技能里的 entities(kind:hostile) 都看不到它。
+    if (name === 'piglin') return this.wearsGoldArmor() ? 'passive' : 'hostile';
     if (HOSTILE.has(name)) return 'hostile';
     if (NEUTRAL.has(name)) return 'passive';
     if (ent.type === 'hostile') return 'hostile';
@@ -968,6 +980,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (b.entity.onFire || (b.entity.metadata?.[0] & 1)) out.push('身上着火');
     const near = this.nearbyEntities(5).filter((e) => e.kind === 'hostile' || /arrow|fireball|trident/.test(e.name)).slice(0, 2);
     for (const e of near) out.push(`${e.name} 在 ${e.dist.toFixed(1)} 格`);
+    // 远程攻击的发射者/弹体常在 5 格外：只报客户端已同步的实体事实，不据此断言是谁造成的。
+    const ranged = this.nearbyEntities(32)
+      .filter((e) => /^(ghast|blaze|fireball|arrow|trident|small_fireball|large_fireball|wither_skull|dragon_fireball)$/.test(e.name))
+      .filter((e) => !near.some((n) => n.id === e.id))
+      .slice(0, 2);
+    for (const e of ranged) out.push(`${e.name} 在 ${e.dist.toFixed(1)} 格`);
     if (ownOxygen(b) <= 0) out.push('没气了');
     if ((b.food ?? 20) <= 0) out.push('饿着');
     return out.slice(0, 4).join('、');
