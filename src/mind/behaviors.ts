@@ -37,7 +37,7 @@ export interface Behavior {
   /** use_skill 调用时必须给的参数：名字 → 说明（恢复时由失败的那一步提供，不检查） */
   needs?: Record<string, string>;
 }
-export interface RunRecord { at: number; ok: boolean; version?: number; summary: string; line?: number; trace?: string[]; logs?: string[]; args?: string }
+export interface RunRecord { at: number; ok: boolean; version?: number; summary: string; line?: number; trace?: string[]; logs?: string[]; args?: string; /** 技能自述做完并通过了 verify，但调用方的收工条件判定这次没有达成目标 */ callerUnmet?: boolean }
 export interface BehaviorStats {
   fired: number; ok: number; fail: number; lastAt: number; disabled?: boolean; lastError?: string;
   /** 最近一次写下（新写或改写）的时刻 */
@@ -168,7 +168,7 @@ export function emergencyKind(b: { when?: Predicate; overrides?: string[] }): st
 }
 
 /** 代码技能必须带判定时的说明（写技能、改技能时都用这一句） */
-export const VERIFY_REQUIRED = 'skill.verify：代码技能要同时写 verify——一段 JavaScript 函数体，做完以后看一眼世界确认真的做成了。参数 api 和 args：args.before 是开工前的 api.state()，args.result 是 code 的返回值，args.args 是调用参数（目标要拿它核对，别拿 args.result 里代码自己算的值）；只能用 api.state/blockAt/region/entities/nearestLand；做成了 return true，没做成 return "原因"（比如 const s = await api.state(); return s.inWater ? "还在水里" : true）';
+export const VERIFY_REQUIRED = 'skill.verify：代码技能要同时写 verify——一段 JavaScript 函数体，做完以后看一眼世界确认真的做成了。参数 api 和 args：args.before 是开工前的 api.state()，args.result 是 code 的返回值，args.args 是调用参数（目标要拿它核对，别拿 args.result 里代码自己算的值）；只能用 api.state/blockAt/region/entities/nearestLand；做成了 return true，没做成 return "原因"（比如把一个人从水里弄出来，不能只看一次瞬时的 inWater=false——水面上下浮动时它也会是 false；要确认已经站稳、脚下有支撑，如 const s = await api.state(); return s.inWater ? "还在水里" : s.onGround ? true : "漂在水面上，没有落脚"）';
 
 const MAX_STEPS = 8;
 type Validated = { name: string; description: string; body: string; behavior: Record<string, unknown>; disable?: boolean };
@@ -314,6 +314,8 @@ export class BehaviorEngine {
   /** 自动技能做完后要看“结果”：十几秒后还活着、没再掉多少血才算管用 */
   private aftermath = new Map<string, { taskId: string; behavior: Behavior; hp: number; at: number; summary?: string; data?: Record<string, unknown>; context: string; pos?: { x: number; y: number; z: number }; interrupted?: string; nearest?: number }>();
   private recoveries = new Map<string, { behavior: Behavior; data?: Record<string, unknown>; ignored?: boolean; invocationRecorded?: boolean }>();
+  /** 最近一次记成成功的运行身份（技能、版本、维度、arbiter 任务 id）：调用方事后判定收工条件未满足时，只降级这一条。 */
+  private lastCredit: { name: string; version: string; dim: string; taskId: string; entry: RunRecord } | null = null;
   static readonly AFTERMATH_MS = 12_000;
   /** 代码技能失败或心智要求改进时调用（main 接到后台改进器） */
   improve: ImproveHook | null = null;
@@ -878,7 +880,7 @@ export class BehaviorEngine {
   }
 
   /** 嵌套调用也保留子技能自己的版本证据；顶层由 arbiter 的 done 事件记账。resolved 供 onDone 在回执缺版本时传入按 trial 归属的行为。 */
-  recordInvocation(name: string, result: SkillResult, resolved?: Behavior) {
+  recordInvocation(name: string, result: SkillResult, resolved?: Behavior, taskId?: string) {
     const b = resolved ?? this.completed(name, result.data?.version);
     if (result.status === 'cancelled') { this.noteInvocation(name, resolved || result.data?.version !== undefined ? b : undefined, result); return; }
     if (!b) return;
@@ -886,7 +888,7 @@ export class BehaviorEngine {
     // 统一目标达成未知的记账：失败才算失败、verify 通过才算成功；没写/没通过 verify 的“跑完了”只记使用、不记成败。
     const okRun = this.runOutcome(result);
     if (okRun === null) return;
-    this.record(b, okRun, result.summary, result.data ?? {});
+    this.record(b, okRun, result.summary, result.data ?? {}, taskId);
   }
 
   /** 一次运行的成败：失败算失败，verify 通过算成功；其余是目标达成未知（只记使用）。恢复技能不看 verify。 */
@@ -1009,7 +1011,7 @@ export class BehaviorEngine {
       // 代码本身出错（参数、异常）才不等事后观测：马上记失败；其余保留 aftermath 供 judge 补记死亡、掉血、处境等事实。
       if (okRun === false && ['ERROR', 'BAD_ARGS'].includes(String(o.result.failureCode))) this.aftermath.delete(name);
     }
-    if (b.candidate) { this.recordInvocation(name, o.result, b); return; }
+    if (b.candidate) { this.recordInvocation(name, o.result, b, o.task.id); return; }
     const skipped = this.noteInvocation(name, b, o.result);
     if (recoveryRun) {
       recovery.behavior = b;
@@ -1027,7 +1029,7 @@ export class BehaviorEngine {
     if (recoveryRun && okRun) return;
     // 跑完了但没有 verify 判定：目标达成未知——只记使用与经过，不记成败（不把“运行完成”冒充成“成功证据”）。
     if (okRun === null) return;
-    this.record(b, okRun, o.result.summary, (o.result.data ?? {}) as Record<string, any>);
+    this.record(b, okRun, o.result.summary, (o.result.data ?? {}) as Record<string, any>, o.task.id);
   }
 
   /** 反射技能触发后什么都没做：记 idle（整理技能的据此收窄 when）、歇一会儿，怪更近或挨打时照常接手 */
@@ -1065,25 +1067,26 @@ export class BehaviorEngine {
       { name, version, taskId: a.taskId, died, lost: Math.round(lost), still, context: a.context });
   }
 
-  private record(b: Behavior, okRun: boolean, summary: string, data: Record<string, any>) {
+  private record(b: Behavior, okRun: boolean, summary: string, data: Record<string, any>, taskId?: string) {
     const name = b.name;
     const currentStable = this.get(name);
     const isCurrentStable = !b.candidate && !currentStable?.candidate && currentStable?.version === b.version;
     let rollback: { from: number; to: number } | null = null;
     let dim = 'unknown';
     try { dim = this.adapter.state().dim; } catch { /* 状态暂不可用 */ }
+    const v = this.versionOf(b);
+    const entry: RunRecord = { at: Date.now(), ok: okRun, version: Number(v), summary: summary.slice(0, 200),
+      ...(typeof data.line === 'number' ? { line: data.line } : {}), ...(Array.isArray(data.trace) ? { trace: data.trace.slice(-12) } : {}),
+      ...(Array.isArray(data.logs) ? { logs: data.logs.slice(-6) } : {}), ...(data.args ? { args: String(data.args).slice(0, 200) } : {}) };
     this.touch(name, (st) => {
       if (!st.byVersion) st.byVersion = currentStable && !currentStable.candidate
         ? { [this.versionOf(currentStable)]: { ok: st.ok, fail: st.fail } } : {};
       if (okRun) st.ok++; else { st.fail++; st.lastError = summary.slice(0, 120); }
       const pd = (st.byDim ??= {})[dim] ??= { ok: 0, fail: 0 };
       if (okRun) pd.ok++; else pd.fail++;
-      const v = this.versionOf(b);
       const per = (st.byVersion ??= {})[v] ??= { ok: 0, fail: 0 };
       if (okRun) per.ok++; else per.fail++;
-      st.recent = [...(st.recent ?? []), { at: Date.now(), ok: okRun, version: Number(v), summary: summary.slice(0, 200),
-          ...(typeof data.line === 'number' ? { line: data.line } : {}), ...(Array.isArray(data.trace) ? { trace: data.trace.slice(-12) } : {}),
-          ...(Array.isArray(data.logs) ? { logs: data.logs.slice(-6) } : {}), ...(data.args ? { args: String(data.args).slice(0, 200) } : {}) }].slice(-6);
+      st.recent = [...(st.recent ?? []), entry].slice(-6);
       if (b.code && isCurrentStable) {
         // 新版本跑了几次明显比上一版差：退回上一版（真人改坏了也会改回去）
         const prev = st.byVersion[String((b.version ?? 1) - 1)];
@@ -1099,12 +1102,14 @@ export class BehaviorEngine {
         this.bus.publish('skill_disabled', 'P1', `技能「${name}」这一版用了 ${per.ok + per.fail} 次只成了 ${per.ok} 次，先停用；最近一次：${st.lastError ?? ''}`, { name, by: 'stats' });
       }
     });
+    // 同一个 done 事件里，心智还可能判定调用方的收工条件没有达成。先记下这次成功的身份，
+    // 让 callerUnmet 能精确降级这一条，而不是按“同名技能最近一次”去猜。
+    if (okRun && taskId) this.lastCredit = { name, version: v, dim, taskId, entry };
     if (b.candidate) {
-      const per = this.stats[name]?.byVersion?.[this.versionOf(b)];
-      if (!this.executionError(name, true) && this.candidates.get(name)?.version === b.version && per && per.ok >= BehaviorEngine.MIN_EVIDENCE && per.ok >= per.fail * 2 && this.book?.promote(name, currentStable?.version)) {
-        this.touch(name, (st) => { st.disabled = false; delete st.retired; delete st.retiredAt; delete st.disabledAt; delete st.candidatePermit; delete st.lastError; });
-        this.bus.publish('skill_promoted', 'P2', `候选技能 ${name} v${b.version} 已通过 ${per.ok} 次实际验收，启用其原定模式`, { name, version: b.version });
-      } else if (!okRun && b.code && this.get(name, true)?.version === b.version) this.improve?.(name, 'failures');
+      // 晋级判定延后一个微任务：同一个 done 事件里，心智还会用调用方的收工条件复核这次成功（callerUnmet）。
+      // 先让它把假成功降级，再按降级后的 per.ok/per.fail 决定是否真的够格晋级。
+      queueMicrotask(() => this.considerPromotion(name, b, currentStable?.version));
+      if (!okRun && b.code && this.get(name, true)?.version === b.version) this.improve?.(name, 'failures');
       return;
     }
     if (rollback) {
@@ -1112,6 +1117,42 @@ export class BehaviorEngine {
       const r = this.rollback(name, to, `v${from} 比 v${to} 差`);
       if (r?.ok) this.bus.publish('skill_rollback', 'P2', `代码技能「${name}」的 v${from} 不如 v${to}，退回旧代码（现在是 v${r.version}）`, { name, from, to });
     } else if (b.code && !okRun && isCurrentStable) this.improve?.(name, 'failures');
+  }
+
+  /** 候选晋级：延后到微任务再看账本，留出同一 done 事件里调用方否决这次成功（callerUnmet）的时机。 */
+  private considerPromotion(name: string, b: Behavior, stableVersion?: number) {
+    const per = this.stats[name]?.byVersion?.[this.versionOf(b)];
+    if (this.executionError(name, true) || this.candidates.get(name)?.version !== b.version || !per
+      || per.ok < BehaviorEngine.MIN_EVIDENCE || per.ok < per.fail * 2 || !this.book?.promote(name, stableVersion)) return;
+    this.touch(name, (st) => { st.disabled = false; delete st.retired; delete st.retiredAt; delete st.disabledAt; delete st.candidatePermit; delete st.lastError; });
+    this.bus.publish('skill_promoted', 'P2', `候选技能 ${name} v${b.version} 已通过 ${per.ok} 次实际验收，启用其原定模式`, { name, version: b.version });
+  }
+
+  /**
+   * 调用方判定这次调用没有达成目标：技能自述做完了、自己声明的 verify 也过了，但它所在的活动的收工条件明确未满足
+   * （例如只浮到水面、没有站上干地）。把刚记下的这一次成功降级成失败——执行完毕不等于调用方要的结果。
+   * 只认同一技能、同一 arbiter 任务、且是最近一次记成成功的那一条；taskId 不匹配（别的运行、别的技能）时不动账。
+   * 停用/回退/候选晋级等启发式不在这里重算，避免对这次降级凭空追加别的判断。
+   */
+  callerUnmet(name: string, taskId: string, reason: string): boolean {
+    const credit = this.lastCredit;
+    if (!credit || credit.name !== name || credit.taskId !== taskId) return false;
+    this.lastCredit = null;
+    const why = reason.slice(0, 120);
+    this.touch(name, (st) => {
+      st.ok = Math.max(0, st.ok - 1);
+      st.fail++;
+      st.lastError = why;
+      const per = (st.byVersion ??= {})[credit.version];
+      if (per) { per.ok = Math.max(0, per.ok - 1); per.fail++; }
+      const pd = (st.byDim ??= {})[credit.dim];
+      if (pd) { pd.ok = Math.max(0, pd.ok - 1); pd.fail++; }
+      // 原地改判最近这条运行记录：保留时间与过程证据（trace/logs/args），只把成败和原因改过来。
+      credit.entry.ok = false;
+      credit.entry.callerUnmet = true;
+      credit.entry.summary = reason.slice(0, 200);
+    });
+    return true;
   }
 
   /** 做完的事过一会儿被自己打破（比如扔掉的东西又捡回来）：那一次“成功”其实是假阳性，记成一次失败，让停用/整理按真实成败来 */

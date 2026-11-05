@@ -68,7 +68,7 @@ test('稳定版七日和候选三日分别计时，同名两侧的实际使用�
   assert.deepEqual(w.engine.currentStats('candidate-used', true), { ok: 2, fail: 1 });
 });
 
-test('候选改写、跳过和取消不续命，晋升后的新候选获得独立观察期', (t) => {
+test('候选改写、跳过和取消不续命，晋升后的新候选获得独立观察期', async (t) => {
   // 晋升后的稳定版会在整段测试里持续闲置（超过 13 天）：把稳定版门槛放宽到足够大，让本测试聚焦候选的独立观察期
   const w = setup(t, { unusedDays: 60 });
   for (const name of ['rewritten-candidate', 'skipped-candidate', 'cancelled-candidate']) {
@@ -95,6 +95,7 @@ test('候选改写、跳过和取消不续命，晋升后的新候选获得独�
   w.observe();
   w.observe(2 * day);
   for (let i = 0; i < 3; i++) w.engine.recordInvocation(rescue.name, { status: 'succeeded', summary: '实际验收危险已解除', data: { version: 1, verified: true } });
+  await Promise.resolve(); // 晋级检查延后一个微任务，好让调用方先否决这次成功
   assert.equal(w.engine.get(rescue.name)?.candidate, undefined);
   w.observe();
   w.observe(5 * day);
