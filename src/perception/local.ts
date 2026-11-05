@@ -1,7 +1,7 @@
 import type { GameAdapter, Vec3Like } from '../adapter/types.ts';
 import { config } from '../config.ts';
 import { isSoftBlock, LIQUID_BLOCKS } from './surroundings.ts';
-import { bodyProbe, footSurfaceY, hasAnyCollision, isPassableDoor, isReplaceable, placementReference, supportTop, type ObservedState } from './geometry.ts';
+import { bodyProbe, footSurfaceY, hasAnyCollision, isPassableDoor, isReplaceable, placementReference, RELATIVE_FOOT_TOLERANCE, supportTop, type ObservedState } from './geometry.ts';
 
 /**
  * 以身体为原点的局部坐标：[前, 上, 右]，前 = 指定的朝向（N/E/S/W）。
@@ -98,8 +98,8 @@ export function localMap(_adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like, 
     if (!state || blocksEntry(state)) continue;
     const foot = footSurfaceY(cell, stateAtWorld);
     if (foot === null) continue;
-    // 和 step 的相对目标一致：只列相对脚格 ±0.51 内的实际支撑面。
-    if (Math.abs(foot - (feet.y + u)) > 0.51) continue;
+    // 和 step 的相对目标一致：列一步内所有非整块顶面（床/灵魂沙/土径等），整格落差仍按 ±1 层列出。
+    if (Math.abs(foot - (feet.y + u)) > RELATIVE_FOOT_TOLERANCE) continue;
     const probe = bodyProbe(foot, cell.x, cell.z, stateAtWorld);
     if (probe.unknown.length || probe.blockers.length) continue;
     const offset = Math.abs(foot - (feet.y + u)) > 0.01 ? `（脚高 ${foot.toFixed(2)}）` : '';

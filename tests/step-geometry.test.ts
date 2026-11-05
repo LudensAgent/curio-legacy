@@ -290,3 +290,26 @@ test('站在箱子等非整块支撑上，按格子差上一步不应被高度�
   const r = await stepTo.run(c, { at: [1, 1, 0], facing: 'N' });
   assert.equal(r.status, 'succeeded', r.summary);
 });
+
+test('平走踩上床：9/16 顶面是同一脚格，不应被相对高度检查误拒', async (t) => {
+  const w = level(new TestWorld());
+  w.setBlock({ x: 0, y: 64, z: -1 }, 'white_bed');
+  w.blockProperties.set('0,64,-1', { part: 'foot', facing: 'east' }); // 顶面 64.5625
+  const c = ctx(w);
+  t.after(() => c.memory.close());
+  t.mock.method(w, 'moveTo', async () => { w.pos = { x: 0.5, y: 64.5625, z: -0.5 }; });
+  const r = await stepTo.run(c, { at: [1, 0, 0], facing: 'N' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.match(r.summary, /脚高 64\.56/);
+});
+
+test('平走踩上灵魂沙：7/8 顶面不应被相对高度检查误拒', async (t) => {
+  const w = level(new TestWorld());
+  w.setBlock({ x: 0, y: 64, z: -1 }, 'soul_sand'); // 顶面 64.875
+  const c = ctx(w);
+  t.after(() => c.memory.close());
+  t.mock.method(w, 'moveTo', async () => { w.pos = { x: 0.5, y: 64.875, z: -0.5 }; });
+  const r = await stepTo.run(c, { at: [1, 0, 0], facing: 'N' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.match(r.summary, /脚高 64\.88/);
+});

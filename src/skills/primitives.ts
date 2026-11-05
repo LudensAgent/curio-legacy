@@ -1,7 +1,7 @@
 import type { Vec3Like } from '../adapter/types.ts';
 import { FACINGS, facingOfYaw, feetCell, localMap, supportCell, toWorld, type Facing } from '../perception/local.ts';
 import { attachmentFaces, dropBelow, isSoftBlock, LIQUID_BLOCKS, surroundings } from '../perception/surroundings.ts';
-import { blockCollidesBody, bodyBoxAt, bodyCells, footSurfaceY, hasAnyCollision, isPassableDoor, isReplaceable, placementReference, shapeKnown, supportTop, type BlockProps } from '../perception/geometry.ts';
+import { blockCollidesBody, bodyBoxAt, bodyCells, footSurfaceY, hasAnyCollision, isPassableDoor, isReplaceable, placementReference, RELATIVE_FOOT_TOLERANCE, shapeKnown, supportTop, type BlockProps } from '../perception/geometry.ts';
 import { AbortedError, sleep, throwIfAborted } from '../util.ts';
 import { breakCell, why } from './body.ts';
 import { classifyBlock, MAN_MADE_NOTE, OWN_BUILDING_HINT, ownBuildingAt, storedChestAt } from './build.ts';
@@ -390,8 +390,9 @@ export const stepTo: Skill<CellArgs> = {
         // 0.125 的真实抬升误算成 0.875 的落差并拒绝合法迈步。绝对目标仍按请求脚高精确核对。
         const expected = absolute ? targetFoot : feet.y + args.at[1];
         // 绝对目标要求支撑面与请求脚高一致（几何值是精确的 0.5/0.875 等，容差只吸收浮点）；
-        // 相对目标按格子差换算，允许目标半砖/雪层的 ±0.51 落差。
-        if (Math.abs(actualFoot - expected) > (absolute ? 0.01 : 0.51)) {
+        // 相对目标按格子差换算，允许一步内所有非整块顶面（床 9/16、灵魂沙 7/8、土径 15/16 等），
+        // 但整格 1.0 的落差仍需显式用 [1,±1,0]。
+        if (Math.abs(actualFoot - expected) > (absolute ? 0.01 : RELATIVE_FOOT_TOLERANCE)) {
           problems.unshift(absolute
             ? `目标支撑面在 y=${actualFoot.toFixed(2)}，与绝对脚高 ${targetFoot.toFixed(2)} 不符；未执行迈步`
             : `目标支撑面在 y=${actualFoot.toFixed(2)}，与本次${args.at[1] > 0 ? '上一级' : args.at[1] < 0 ? '下一级' : '平走'}期望脚高 y=${expected.toFixed(2)} 不符；未执行迈步`);

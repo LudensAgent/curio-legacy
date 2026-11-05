@@ -68,6 +68,22 @@ test('局部地图的 stand 按碰撞顶面给出分数脚高，与 step 的半�
   assert.ok(map.spots.stand.includes('[1,0,0] 前（脚高 64.50）'), `半砖顶面按 64.5 列出：${map.spots.stand}`);
 });
 
+test('局部地图把床等 9/16 顶面列进同一脚格的 stand，与 step 可走一致', () => {
+  const pos = { x: 0, y: 64, z: 0 };
+  const adapter = { blockAt: () => { throw new Error('不能用隐藏世界补全视觉'); } };
+  const observed = new Map<string, { name: string; properties?: Record<string, string | number | boolean> }>([
+    ['0,64,-1', { name: 'white_bed', properties: { part: 'foot', facing: 'east' } }],
+    ['0,63,-1', { name: 'grass_block', properties: {} }],
+    ['0,65,-1', { name: 'air', properties: {} }],
+    ['0,66,-1', { name: 'air', properties: {} }],
+  ]);
+  const map = localMap(adapter, pos, 'N', (positions) => positions.flatMap((cell) => {
+    const state = observed.get(`${cell.x},${cell.y},${cell.z}`);
+    return state ? [{ pos: cell, ...state }] : [];
+  }));
+  assert.ok(map.spots.stand.includes('[1,0,0] 前（脚高 64.56）'), `床顶面按 64.56 列出：${map.spots.stand}`);
+});
+
 test('下一级支撑未知、是液体或身体空间被挡时，局部地图不声称能站', () => {
   const pos = { x: 0, y: 64, z: 0 };
   const adapter = { blockAt: () => { throw new Error('不能用隐藏世界补全视觉'); } };

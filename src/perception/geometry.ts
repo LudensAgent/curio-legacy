@@ -117,6 +117,13 @@ function supportSurfaceTop(cell: Vec3Like, state: ObservedState | null): number 
 }
 
 /**
+ * 相对 step/localMap 的脚高容差：一步之内可站立的非整块顶面都算进所请求的脚格，
+ * 覆盖床/切石机 9/16、灵魂沙/箱子/讲台 7/8、土径/耕地 15/16 等；整格 1.0 的落差
+ * 仍留给 [1,±1,0]，不能靠平走冒充。step 与 localMap 必须共用同一个值。
+ */
+export const RELATIVE_FOOT_TOLERANCE = 0.95;
+
+/**
  * 站在这列时的实际脚高（世界 Y）：优先取脚格里薄层（半砖/雪/地毯/床）的顶面，
  * 否则取脚下一格的支撑顶面。没有已观察的承重面返回 null。
  */
