@@ -23,6 +23,8 @@ import { ObservedGameClock } from './game-clock.ts';
 export interface CuratorOptions { checkMs: number; unusedDays: number; candidateUnusedDays: number; disabledDays: number; gapMs: number; minSkills: number; /** 同时留着的自己写的技能最多几份：多了就收起最没用的 */ maxActive: number }
 export const DEFAULT_CURATOR: CuratorOptions = { checkMs: 60_000, unusedDays: 60, candidateUnusedDays: 15, disabledDays: 5, gapMs: 0, minSkills: 4, maxActive: 24 };
 const DAY_TICKS = 24_000;
+/** fired 在触发瞬间就加，执行结果要等结束（或取消）才记；刚触发的技能不能当成“触发过却什么都没做”。 */
+const FIRED_GRACE_MS = 10 * 60_000;
 type Lifetime = { world: string; name: string; candidate: boolean; version: number; clock: number; age: number; idle: number; disabled: number;
   activity: string; restoredAt: number; disabledAt: number; retired: boolean };
 
@@ -251,6 +253,40 @@ export class SkillCurator {
     return b.candidate ? ok : this.engine.enabled(b) && ok;
   }
 
+  /** 主动维护型：自己写的稳定 auto 行为，条件成立时主动补漏（补火把、种树苗），不是接失败的恢复技能。
+   * 这类技能可能很多个有效游戏日才用上一次；学习由失败驱动，收起后不会自己再学回来，所以只按闲置收不合理。
+   * 但本版已经失败或触发过却一次没成（noop/skip、没有 verify 的“跑完了”）、或有过拉锯/拆台/抢手/只提醒的负面证据、
+   * 或被已验证的合并目标替代时不保护；候选仍有自己的试用观察期；应急技能走 protectedEmergency；停用版按停用天数处理。 */
+  private protectedProactive(b: Behavior) {
+    if (b.candidate || b.mode !== 'auto' || !b.when || isEmergency(b)) return false;
+    const st = this.engine.statsOf(b.name);
+    if (st?.disabled) return false;
+    const cur = this.engine.currentStats(b.name);
+    // 触发过却 0 成 0 败：跳过（noop/skip）或有没被取消的实际执行（没写 verify 的“跑完了”）都说明条件与代码对不上，
+    // 不算“还没机会证明”。只触发后被取消（心智改主意、断线、更高优先级抢占）不记成负面证据。
+    // usageByVersion 按版本记，重写后的新版本从零判断；只有完全没有按版本拆分的老统计才退回终身 skipped/uses/fired，
+    // 此时接受“历史证据取消保护”的保守取舍（老统计没有取消归属）。
+    // fired 只在完全没有 uses 计数器的更老数据里使用，且要过了宽限期：触发瞬间 fired 就加了，结果要等执行结束才回来，
+    // 刚触发的技能正在跑，不能因为 fired=1 被中途收起。有 uses 时取消豁免优先于 fired。
+    const usage = st?.usageByVersion?.[this.engine.versionOf(b)];
+    const triggered = st?.usageByVersion !== undefined
+      ? (usage?.skipped ?? 0) > 0 || (usage?.uses ?? 0) - (usage?.cancelled ?? 0) > 0
+      : (st?.skipped ?? 0) > 0 || (st?.uses ?? 0) - (st?.cancelled ?? 0) > 0
+        || (st?.uses === undefined && (st?.fired ?? 0) > 0 && Date.now() - (st?.lastAt ?? 0) > FIRED_GRACE_MS);
+    // idleInterrupts 只有终身计数，重写后不清：历史上白触发过的技能继续保守地不按闲置保护。
+    const triggeredNothing = cur.ok === 0 && (triggered || (st?.idleInterrupts ?? 0) > 0);
+    // conflicts/loops/undid/undoneBy 也是终身计数，重写后不清；有这些历史证据时保守地不保护，留给模型整理或容量淘汰。
+    const conflicts = Object.values(st?.conflicts ?? {}).reduce((n, v) => n + v, 0);
+    if (cur.fail > 0 || triggeredNothing || conflicts > 0 || (st?.loops?.length ?? 0) > 0 || Object.keys(st?.undid ?? {}).length > 0
+      || Object.keys(st?.undoneBy ?? {}).length > 0 || !!st?.advisory) return false;
+    const sub = this.substitutions.get(b.name);
+    if (sub && sub.into !== b.name && sub.fromVersion === Number(this.engine.versionOf(b))) {
+      const stable = this.engine.get(sub.into);
+      if (stable && !stable.candidate && Number(this.engine.versionOf(stable)) === sub.version && this.engine.handlesNow(sub.into) === null) return false;
+    }
+    return true;
+  }
+
   private active() {
     return [...this.engine.list().filter((b) => !b.candidate), ...this.engine.list(true)]
       .filter((b) => b.source === 'self' && (!this.engine.statsOf(b.name)?.retired || b.candidate && !this.engine.executionError(b.name, true))
@@ -280,6 +316,8 @@ export class SkillCurator {
     this.syncLifetimes(dim);
     for (const b of this.active()) {
       if (this.protectedEmergency(b)) continue;
+      // 主动维护型技能本来就很少触发，且不会被失败驱动重新学回来；只在容量压力或模型整理时再评估。
+      if (this.protectedProactive(b)) continue;
       // 只在别的维度生效的技能（比如下界专用的）：人不在那儿时用不上是正常的，不算“长期不用”
       if (b.when?.dim && dim && !b.when.dim.includes(dim)) continue;
       const life = this.lifetime(b);
@@ -304,6 +342,9 @@ export class SkillCurator {
    * 收起不值得留的（不需要模型）：
    * - 与执行端停用一致：当前版本至少 4 次有效执行、成功不到 25%，不让停用版卡在另一套门槛；
    * - 技能太多（超过 maxActive）时，最没用的那些：从没成功过的、用得最少的、最久没用的先收。
+   *   从没用过也没失败过的主动维护技能（ok*3-fail 恰为 0）排在有失败证据的技能之后，不单凭这个公式先被挤掉；
+   *   只有双方都过了 settled 观察期时这种排序才成立：刚写/刚换版本的失败技能不参与本轮容量排序，
+   *   干净的主动维护技能仍可能被选中，这是既有的观察期规则。其他受害者仍按原顺序收，容量上限照常执行。
    * 容量整理给新版本观察期；明确失败证据不因刚写或当前处于别的维度而永久挂起。
    */
   retireLowValue(_now = Date.now()): string[] {
@@ -322,7 +363,11 @@ export class SkillCurator {
     const over = left.length - this.opts.maxActive;
     if (over > 0) {
       const value = (b: Behavior) => { const st = this.engine.currentStats(b.name, !!b.candidate); return st.ok * 3 - st.fail; };
-      const victims = left.filter((b) => this.settled(b, dim)).sort((a, b) => value(a) - value(b) || (this.lifetime(b)?.idle ?? 0) - (this.lifetime(a)?.idle ?? 0)).slice(0, over);
+      // 从没用过、也没有负面证据的主动维护技能放到最后：容量仍会按上限收，但不让它只因为 value=0 先于有失败证据的技能被挤掉。
+      const unusedProactive = (b: Behavior) => this.protectedProactive(b) && this.engine.currentStats(b.name, !!b.candidate).ok === 0;
+      const victims = left.filter((b) => this.settled(b, dim))
+        .sort((a, b) => (unusedProactive(a) ? 1 : 0) - (unusedProactive(b) ? 1 : 0) || value(a) - value(b) || (this.lifetime(b)?.idle ?? 0) - (this.lifetime(a)?.idle ?? 0))
+        .slice(0, over);
       for (const b of victims) {
         const st = this.engine.currentStats(b.name, !!b.candidate);
         if (this.retire(b, `技能太多（${left.length} 份），它最少派上用场（当前版本成 ${st.ok} 败 ${st.fail}）`)) out.push(b.name);

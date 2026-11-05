@@ -59,7 +59,8 @@ test('成功过的稳定应急技能不因闲置或容量收起，一再失败�
   curator.observe({ ...adapter.state(), worldAgeTicks: 24_000 }, false, 1000);
   const later = Date.now() + 5 * 3600_000;
   const unused = curator.retireUnused(later);
-  assert.ok(unused.includes('eat-when-hungry'));
+  assert.ok(!unused.includes('eat-when-hungry'), '没失败过的主动维护技能不因闲置收起');
+  assert.ok(unused.some((n) => n.startsWith('tool-')), '普通手动技能仍按闲置收起');
   assert.ok(!unused.some((n) => ['dig-out-when-buried', 'swim-up-for-air', 'flee-creeper'].includes(n)), JSON.stringify(unused));
   curator.retireLowValue(later);
   for (const n of ['dig-out-when-buried', 'swim-up-for-air', 'flee-creeper']) assert.equal(engine.statsOf(n)?.retired, undefined, `${n} 不因技能太多被挤掉`);
