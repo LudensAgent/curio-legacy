@@ -237,7 +237,8 @@ export class Reflex {
     const supported = this.trail.filter((p) => p.supported);
     const raised = supported.length ? Math.max(...supported.map((p) => Math.abs(p.y - supported[0].y))) : 0;
     const moved = horizontal + raised;
-    // 原地连续挖同一棵树/往下挖时位置不怎么变，但进度在涨，不算卡死
+    // task.progress 是已确认的执行段进度（由技能实测推进上报），不是墙钟，也不按数值高低判卡死。
+    // 进度在涨说明仍有确认推进；进度值低或暂时不动本身不判卡死，只有连确认进度都不涨、也没有位移/有效升降时才停。
     const progressed = Math.max(...this.trail.map((p) => p.progress)) - Math.min(...this.trail.map((p) => p.progress)) > 0.001;
     if (moved < 1.5 && !progressed) {
       this.stuckCount++;
