@@ -71,13 +71,18 @@ export function describePassage(rec: PassageRecord, here: Vec3Like, stations: La
   const opening = [...rec.path].filter((p) => flat(p, entrance) <= 6).sort((a, b) => b.y - a.y)[0];
   const depthHint = opening && entrance.y - opening.y >= 2 ? `，通道脚点最高 y${opening.y}（比入口低 ${entrance.y - opening.y} 格，从地表往下挖）` : '';
   const where = `${validEntrances.length ? `入口 ${at(entrance)}` : `历史路线最高记录点 ${at(entrance)}`}${depthHint}${inside ? '，你正沿着这条旧矿道' : `（水平 ${dist} 格外）`}${next ? `，沿旧矿道回入口的下一个路点 ${at(next)}` : ''}`;
-  // 记录里的 deepestY 可能是另一团互不相连的旧段：只把从 here 连得上的分量能到的最深点报成“现在能到”，
-  // 两段之间差得多时把记录最低点单独注明，免得它以为能一路走到 y-61。
+  // 只报从 here 真的走得到的深度：here 离网太远或目标走不到时 passageRoute 返回 null，不猜。
+  // 两侧同源比较脚点表里的最低 y（pathLow）；deepestY 可能来自抽稀前的观测，单独说明，不断言在哪一段。
   const reach = passageDeepestAnchor(recs, here);
-  const reachNote = reach && reach.y > rec.deepestY + 2
-    ? `；从你现在连通的一段能到 y${reach.y}，记录里更低的 y${rec.deepestY} 在另一段，两段之间还没接上`
+  const reached = (reach ? passageRoute(recs, here, reach, { near: 6 }) : null)?.at(-1) ?? null;
+  const pathLow = rec.path.length ? Math.min(...rec.path.map((p) => p.y)) : rec.deepestY;
+  const reachNote = reached && reached.y > pathLow + 2
+    ? `；从你现在的位置沿记录方向能到 y${reached.y}；记录里更低的脚点 y${pathLow} 这次走不到（可能是反向落差或另一段，尚未验证）`
     : '';
-  const text = `${where}，曾到达最低 y${rec.deepestY}${reachNote}`
+  const observedNote = rec.path.length > 0 && rec.deepestY < pathLow - 2
+    ? `；记录里还有更低的观测点 y${rec.deepestY}，脚点表未保留/没在这一段`
+    : '';
+  const text = `${where}，曾到达最低 y${rec.deepestY}${reachNote}${observedNote}`
     + `${levels.length ? `，历史脚点较多的高度有 y${levels.join('、y')}` : ''}${ores.length ? `，挖到过 ${ores.join('、')}` : ''}`
     + `${seen.length ? `，历史路线附近记得见过 ${seen.join('、')}` : ''}${things.length ? `，历史路线附近记得有${things.join('、')}` : ''}${validEntrances.length ? '；洞口可能被堵或地形变了，走到附近再确认' : '；当前路线是否可通尚未确认'}`;
   return { text, entrance, dist, inside, ...(next ? { next } : {}), ...(nextDown ? { nextDown } : {}) };
