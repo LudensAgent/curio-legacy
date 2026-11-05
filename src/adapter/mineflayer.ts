@@ -4280,6 +4280,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     let wetSince: number | null = null;
     let surfacedSince: number | null = null;
     let lastProgress = Date.now();
+    // “换气”至少要看到氧气实际回升：头刚碰到空气就松手，下一次思考的几秒里又沉回去耗光。
+    // 起点已接近满氧时按现有值；低于 12 时至少补到 12，其余在起点基础上多补 4 格。
+    const breathTarget = Math.min(19, Math.max(12, ownOxygen(b) + 4));
     let enteredWater = false;
     let stage: SwimStage = 'approach';
     const destination = target;
@@ -4329,11 +4332,15 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     });
     // 失败时把“为什么过不去”的实测事实交回：头顶挡块、附近开阔水面、目标相对偏移。
     // 只报告，不选路、不挖不垫；下一步由调用方决定。
+    // 封顶只认「头部往上到第一个实心块之间连一格空气都没有」：桥下的空气间隙能让头浮上去换气，
+    // 不能因为上方几格有个桥面就判成封顶。
     const blockedAboveAt = (p: any) => {
       const headY = Math.floor(p.y + (b.entity.eyeHeight ?? 1.62));
       for (let y = headY; y <= headY + 3; y++) {
         const blk = b.blockAt(new Vec3(p.x, y, p.z));
-        if (blk && !AIR_BLOCKS.has(blk.name) && !fluid(blk)) return { x: Math.floor(p.x), y, z: Math.floor(p.z), name: blk.name };
+        if (!blk) return null; // 未加载不能证明封顶
+        if (AIR_BLOCKS.has(blk.name)) return null;
+        if (!fluid(blk)) return { x: Math.floor(p.x), y, z: Math.floor(p.z), name: blk.name };
       }
       return null;
     };
@@ -4392,10 +4399,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         }
         // 冻结本次仍拥有控制权时观察到的位置/氧气/露头状态（在后续 await 之前，避免迟到重采样读到新主人状态）。
         lastOwned = { pos: { x: p.x, y: p.y, z: p.z }, oxygen: ownOxygen(b), surfaced: surfacedNow(), observedAt: Date.now(), stage };
-        // 垂直上浮模式（无目标）：头稳定离开流体就算已浮出水面，不要求上岸；短暂露头不算。
-        if (goal === 'surface_ascent' && surfacedNow()) return { ok: true, landed: false, surfaced: true, oxygen: ownOxygen(b), ...facts('surfaced') };
-        // 纯上浮时头顶被实心方块封住：按 jump 不会让头穿过方块。约 1.2 秒仍没浮出就尽快交回
-        // 阻挡事实，别把整段上浮预算耗在不可能的上浮上；挖开/换方向由调用方决定。
+        // 垂直上浮模式（无目标）：头稳定离开流体、并且憋气已实际回升到可用的程度才算完成换气；
+        // 只露一下头就返回会松开 jump 重新下沉，下一次思考的几秒又耗光。仍未上岸由 landed:false 如实表达。
+        if (goal === 'surface_ascent' && surfacedNow() && ownOxygen(b) >= breathTarget) return { ok: true, landed: false, surfaced: true, oxygen: ownOxygen(b), ...facts('surfaced') };
+        // 纯上浮时头顶连一格空气都没有（blockedAboveAt 只认真封顶）：按 jump 不会让头穿过方块。
+        // 约 1.2 秒仍没浮出就尽快交回阻挡事实，别把整段上浮预算耗在不可能的上浮上；挖开/换方向由调用方决定。
         if (goal === 'surface_ascent' && Date.now() - lastProgress >= 1200) {
           const blocked = blockedAboveAt(p);
           if (blocked) return { ok: false, reason: 'SWIM_NO_PROGRESS', landed: false, surfaced: surfacedNow(), oxygen: ownOxygen(b), ...facts(stage), ...obstacleFacts() };

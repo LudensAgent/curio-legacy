@@ -15,15 +15,19 @@ const require = createRequire(import.meta.url);
 const data = require('minecraft-data')('1.20.1');
 const Vec3 = require('vec3').Vec3;
 
-function pond(t: TestContext) {
+function pond(t: TestContext, opts: { waterTop?: number; bridgeAtY?: number; freeze?: boolean } = {}) {
   const { Physics, PlayerState } = require('prismarine-physics');
   const Block = require('prismarine-block')(data);
+  const waterTop = opts.waterTop ?? 63;
   let now = 100000, ticks = 0;
   t.mock.method(Date, 'now', () => now);
   const controls: Record<string, boolean> = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
   const world = { getBlock(position: any) {
     const p = position.floored();
-    const name = p.y <= 59 || p.x >= 6 && p.y <= 63 ? 'stone' : p.x < 6 && p.y <= 63 ? 'water' : 'air';
+    const name = p.y <= 59 || p.x >= 6 && p.y <= 63 ? 'stone'
+      : p.x < 6 && p.y <= waterTop ? 'water'
+      : opts.bridgeAtY !== undefined && p.y === opts.bridgeAtY ? 'cobblestone'
+      : 'air';
     const block = Block.fromStateId(data.blocksByName[name].defaultState, 0);
     block.position = p; return block;
   } };
@@ -40,7 +44,7 @@ function pond(t: TestContext) {
     async look(yaw: number, pitch: number) { bot.entity.yaw = yaw; bot.entity.pitch = pitch; },
     async waitForTicks(count: number) {
       for (let i = 0; i < count; i++) {
-        physics.simulatePlayer(new PlayerState(bot, controls), world).apply(bot);
+        if (!opts.freeze) physics.simulatePlayer(new PlayerState(bot, controls), world).apply(bot);
         const head = world.getBlock(bot.entity.position.offset(0, 1.62, 0));
         bot.oxygenLevel = head.name === 'water' ? Math.max(0, bot.oxygenLevel - 0.05) : Math.min(20, bot.oxygenLevel + 0.5);
         now += 50; ticks++;
@@ -74,6 +78,34 @@ test('vertical ascent reports surfaced without claiming a landing when no shore 
   assert.equal(controls.jump, false); assert.equal(controls.forward, false);
   await bot.waitForTicks(40);
   assert.equal(bot.entity.isInWater, true, 'surfaced 不等于离水站稳');
+});
+
+test('vertical ascent keeps breathing until oxygen recovers instead of dropping on first head-out', async (t) => {
+  const { adapter, bot } = pond(t);
+  bot.oxygenLevel = 2;
+  const result = await adapter.swimTo(null, new AbortController().signal, { timeoutMs: 9000 });
+  assert.equal(result.ok, true, `${result.reason}; pos=${bot.entity.position}; oxygen=${result.oxygen}`);
+  assert.equal(result.surfaced, true);
+  assert.ok(result.oxygen >= 12, `换气应持续到氧气可用，实际回来时氧气 ${result.oxygen}`);
+  assert.equal(bot.entity.isInWater, true, '持续换气不等于上岸');
+});
+
+test('a bridge with an air gap above the head is not reported as a ceiling', async (t) => {
+  // 头在 y=60 的水里，上方 y=62 是空气、y=63 才是桥面：能浮到空气里换气，不能按「封顶」早退。
+  const { adapter, bot } = pond(t, { waterTop: 61, bridgeAtY: 63, freeze: true });
+  bot.oxygenLevel = 0;
+  const result = await adapter.swimTo(null, new AbortController().signal, { timeoutMs: 2600 });
+  assert.equal(result.reason, 'WATER_ESCAPE_TIMEOUT', `有空气间隙的桥面不能当成封顶：${result.reason}`);
+  assert.equal(result.blockedAbove, undefined);
+});
+
+test('a solid block directly over the head is reported as a ceiling', async (t) => {
+  // 水面上方 y=62 直接是实心方块：头没有任何空气可去，应尽快交回封顶事实。
+  const { adapter, bot } = pond(t, { waterTop: 61, bridgeAtY: 62, freeze: true });
+  bot.oxygenLevel = 0;
+  const result = await adapter.swimTo(null, new AbortController().signal, { timeoutMs: 5000 });
+  assert.equal(result.reason, 'SWIM_NO_PROGRESS');
+  assert.equal(result.blockedAbove?.y, 62);
 });
 
 test('cancelled swimming releases controls and a late physics wait cannot restart them', async (t) => {
