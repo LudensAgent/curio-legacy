@@ -409,6 +409,12 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     const at = (p?: AgentState['pos']) => p ? `(${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)})` : '未知位置';
     return { kind: 'stuck', why: `${clipFeedback(result.summary, 220)}；connectionGap ${at(gap.from)} ↔ ${at(gap.to)}（相距 ${typeof gap.distance === 'number' ? Math.round(gap.distance) : '未知'} 格）是记录几何里的确定断口，原样重试不会接上` };
   }
+  // follow_passage（含 use_skill 嵌套结果）明确报告身体被寻路带离记录路线时，这段位移不是进展：
+  // 原样重试不会回到记录点，也不把它当自动重试的依据。
+  const nestedNavData = data?.lastNavigationFailure as { result?: { data?: Record<string, unknown> } } | undefined;
+  if (data?.offRoute === true || nestedNavData?.result?.data?.offRoute === true) {
+    return { kind: 'stuck', why: `${clipFeedback(result.summary, 220)}；寻路把身体带离了记录路线（offRoute），这段位移不算进展，原样重试不会回到记录点` };
+  }
   // 确定性预检拒绝先于任何自动照明/清障处理：暗处未知支撑、预检一步未推进，交回事实，不自动耗火把或原样重试。
   if (step.skill === 'step' && data?.movementNotAttempted === true) return { kind: 'stuck', why: clipFeedback(result.summary) };
   if (step.skill === 'excavate_path' && data?.completedSteps === 0 && (data?.excavatedBlocks ?? 0) === 0) return { kind: 'stuck', why: clipFeedback(result.summary) };
