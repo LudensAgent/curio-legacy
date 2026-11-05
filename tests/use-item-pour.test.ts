@@ -198,6 +198,47 @@ test('collection reports only current observations after use, without reading a 
   assert.match(r.summary, /后续状态未知/);
 });
 
+test('use_item skips a remembered water cell that is no longer water and uses the live one', async (t) => {
+  const w = new TestWorld(), stale = { x: 0, y: 64, z: 1 }, fresh = { x: 0, y: 64, z: 3 };
+  w.inv.set('oak_boat', 1);
+  for (const p of [fresh, { x: 1, y: 64, z: 3 }, { x: -1, y: 64, z: 3 }, { x: 0, y: 64, z: 4 }]) w.setBlock(p, 'water');
+  const used: { x: number; y: number; z: number }[] = [];
+  w.useItemOn = async (item, target) => {
+    if (target.kind !== 'block' || !target.pos) return { ok: false, reason: 'BAD_TARGET' };
+    used.push(target.pos);
+    return w.nameAt(target.pos.x, target.pos.y, target.pos.z) === 'water'
+      ? { ok: true, spawned: 'boat', effectEvidence: { verified: true, changed: true, reasons: ['目标格是 water'] } }
+      : { ok: false, reason: 'NOT_WATER' };
+  };
+  const ctx = makeCtx(w, { senses: { knownBlocks: () => [
+    { name: 'water', pos: stale, dist: 1 },
+    { name: 'water', pos: fresh, dist: 3 },
+  ] as any } });
+  t.after(() => ctx.memory.close());
+  const r = await useItem.run(ctx, { item: 'oak_boat', on: 'water' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.deepEqual(used, [fresh], '只对仍然存在的目标格使用，旧的记忆位置不参与');
+});
+
+test('use_item reports stale memory instead of aiming at an old water cell', async (t) => {
+  const w = new TestWorld(), stale = { x: 0, y: 64, z: 1 };
+  w.inv.set('oak_boat', 1);
+  // 记忆里这里是水，实际已经变成别的方块；失败回执不能泄露这个当前方块的名字
+  w.setBlock(stale, 'diamond_block');
+  let uses = 0;
+  w.useItemOn = async () => { uses++; return { ok: true }; };
+  const ctx = makeCtx(w, { senses: { knownBlocks: () => [
+    { name: 'water', pos: stale, dist: 1 },
+  ] as any } });
+  t.after(() => ctx.memory.close());
+  const r = await useItem.run(ctx, { item: 'oak_boat', on: 'water' });
+  assert.equal(r.status, 'failed');
+  assert.equal(r.failureCode, 'NOT_FOUND');
+  assert.match(r.summary, /记忆过期/);
+  assert.doesNotMatch(r.summary, /diamond/);
+  assert.equal(uses, 0, '旧位置不再发送 use_item');
+});
+
 test('collection requires both sides of the expected container conversion and preserves partial changes', async (t) => {
   for (const mode of ['spent-only', 'filled-only', 'wrong-fluid', 'water-refilled', 'water-flowing', 'lava']) {
     const w = new TestWorld(), pos = { x: 0, y: 64, z: 2 };

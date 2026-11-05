@@ -1997,11 +1997,31 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         }
       }
     }
+    // 放置面全被拒时把每一面的实际原因带回去：是太远、还是被哪一格挡住。只说一句
+    // “视线被挡或超出 4.4 格”，心智无法判断该靠近、侧移还是先挖开挡住的那一格。
+    const explainFace = ({ f, ref }: { f: any; ref: any }) => {
+      const face = f.scaled(-1);
+      const from = b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0);
+      const to = ref.position.offset(0.5 + face.x * 0.5, 0.5 + face.y * 0.5, 0.5 + face.z * 0.5);
+      const dir = to.minus(from), distance = dir.norm();
+      const where = `(${ref.position.x},${ref.position.y},${ref.position.z})`;
+      if (distance < 0.01) return `${where} 眼睛几乎贴着参照面，无法确认交互方向`;
+      if (distance > 4.4) return `${where} 距眼睛 ${distance.toFixed(1)} 格（超过 4.4）`;
+      if (typeof b.world?.raycast !== 'function') return `${where} 没有可用的视线射线`;
+      const hit = b.world.raycast(from, dir.normalize(), distance + 0.05);
+      if (!hit?.position) return `${where} 的射线没有命中任何方块`;
+      if (!hit.position.equals(ref.position)) {
+        const blocker = b.blockAt(hit.position);
+        return `${where} 被 ${blocker?.name ?? '未加载方块'} (${hit.position.x},${hit.position.y},${hit.position.z}) 挡住`;
+      }
+      return `${where} 命中的不是请求的那一面（可能斜穿）`;
+    };
+    const why = refs.slice(0, 2).map(explainFace).join('；');
     return {
       ok: false,
       reason: 'NO_REFERENCE',
       detail: refs.length
-        ? `${at} 有 ${refs.length} 个相邻实心方块，但从当前眼睛位置到这些面的视线被挡或超出 4.4 格；调整站位（靠近或侧移）让目标面和相邻方块进入视野/交互距离再放`
+        ? `${at} 有 ${refs.length} 个相邻实心方块，但从当前眼睛位置到这些面的视线被挡或超出 4.4 格${why ? `：${why}` : ''}；调整站位（靠近或侧移）让目标面和相邻方块进入视野/交互距离再放`
         : `${at} 四周没有相邻实心方块（悬空），从当前站位没有可贴的面${isTreeSaplingItem(item.name) ? '；即使下面有土，也要先站到能看见目标格相邻面的位置' : ''}`,
     };
   }
@@ -4362,8 +4382,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // 真正的剩余预算：每次等待前都检查是否仍为正；为 0/负说明预算已耗尽，不能再触发新的等待或写入动作。
     const remaining = () => end - Date.now();
     // 小于这个余量时不再启动新的等待：raceAbort 的定时器会先于 tick 触发，抛出的
-    // “timeout after 24ms” 只是最后一小段预算，不是真实失败原因。直接按预算耗尽返回。
+    // “timeout after 73ms” 只是最后一小段预算，不是真实失败原因。直接按预算耗尽返回。
     const MIN_WAIT_MS = 50;
+    // waitForTicks(2) 本身要等两个刻（约 100ms）。余量不够一次两刻等待时只等一刻，
+    // 并且把这段末预算里的超时当作预算耗尽返回，不把 “timeout after 73ms” 当真实失败。
+    const MIN_TICK_WAIT_MS = 150;
     const facts = (at: SwimStage) => ({
       goal, stage: at, enteredWater, targetInWater,
       advanced: Math.round(Math.hypot(b.entity.position.x - start.x, b.entity.position.z - start.z) * 100) / 100,
@@ -4459,7 +4482,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         if (needForward) {
           const rem = remaining();
           if (rem < MIN_WAIT_MS) break;
-          await this.afterAction(() => raceAbort(b.look(Math.atan2(p.x - destination!.x, p.z - destination!.z), 0, true), signal, rem, () => {}), check);
+          try {
+            await this.afterAction(() => raceAbort(b.look(Math.atan2(p.x - destination!.x, p.z - destination!.z), 0, true), signal, rem, () => {}), check);
+          } catch (e) {
+            if (e instanceof TimeoutError && rem < MIN_TICK_WAIT_MS) break;
+            throw e;
+          }
           // 转头可能刚好把预算耗尽：不写 forward、不进入下一段等待，按超时结束。
           if (remaining() < MIN_WAIT_MS) break;
           b.setControlState('forward', true);
@@ -4483,11 +4511,20 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         if (typeof b.waitForTicks === 'function') {
           const rem = remaining();
           if (rem < MIN_WAIT_MS) break;
-          await this.afterAction(() => raceAbort(b.waitForTicks(2), signal, Math.min(2000, rem), () => {}), check);
+          // 余量只够一个刻时不要硬等两个刻：100ms 的等待只剩 73ms，raceAbort 先触发，
+          // 会把最后一点预算误报成“timeout after 73ms”。末预算里只等一刻，超时按预算耗尽返回。
+          const ticks = rem < MIN_TICK_WAIT_MS ? 1 : 2;
+          try {
+            await this.afterAction(() => raceAbort(b.waitForTicks(ticks), signal, Math.min(2000, rem), () => {}), check);
+          } catch (e) {
+            if (e instanceof TimeoutError && rem < MIN_TICK_WAIT_MS) break;
+            throw e;
+          }
         } else {
           const rem = remaining();
           if (rem < MIN_WAIT_MS) break;
-          await this.afterAction(() => raceAbort(sleep(Math.min(100, rem), signal), signal, rem, () => {}), check);
+          // sleep 本身已经按 rem 截断并响应取消，不再叠一个同长的 raceAbort 定时器抢跑。
+          await this.afterAction(() => sleep(Math.min(100, rem), signal), check);
         }
       }
       return { ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, surfaced: surfacedNow(), oxygen: ownOxygen(b), ...facts(stage), ...obstacleFacts() };

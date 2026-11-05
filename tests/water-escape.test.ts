@@ -437,6 +437,32 @@ test('swimTo does not hang or write forward when budget exhausts during look bef
   assert.equal(forwardWrites, 0, '预算耗尽后不得再写 forward');
 });
 
+test('swimTo treats a tiny final tick wait as budget exhaustion, not a thrown timeout', { timeout: 5000 }, async (t) => {
+  // 只留 140ms 时 waitForTicks(2) 没有足够余量：只等一刻，且末预算里的超时按预算耗尽返回，
+  // 不能等 raceAbort 先触发、把最后一点预算报成“timeout after Nms”。
+  let now = 100000;
+  t.mock.method(Date, 'now', () => now);
+  const controls: Record<string, boolean> = {};
+  let lookCalls = 0, tickCalls = 0;
+  const bot = {
+    game: { dimension: 'overworld' },
+    entity: { position: new Vec3(2.5, 61, 2.5), velocity: new Vec3(0, 0, 0), eyeHeight: 1.62, onGround: false, isInWater: true, isInLava: false, isCollidedHorizontally: false },
+    oxygenLevel: 10,
+    pathfinder: { setGoal() {} },
+    setControlState() {}, clearControlStates() {},
+    blockAt: (p: { y: number }) => ({ name: p.y >= bot.entity.position.y + 1.0 ? 'air' : 'water', getProperties: () => ({}) as Record<string, string | number | boolean>, boundingBox: 'block' }),
+    async look() { lookCalls++; now += 160; },
+    waitForTicks() { tickCalls++; return new Promise<void>(() => {}); },
+  };
+  const adapter = new MineflayerAdapter(config, new EventBus());
+  adapter.bot = bot; adapter.mcData = data; Reflect.set(adapter, 'connectedFlag', true);
+  const result = await adapter.swimTo({ x: 6.5, y: 64, z: 2.5 }, new AbortController().signal, { timeoutMs: 300 });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'WATER_ESCAPE_TIMEOUT');
+  assert.equal(lookCalls, 1);
+  assert.equal(tickCalls, 1, '只发起一次一刻等待，不硬等两个刻');
+});
+
 test('swimTo without waitForTicks falls back to a bounded sleep', { timeout: 5000 }, async () => {
   // 无 waitForTicks 时走 sleep 回退：用真实时钟（不 mock Date.now），否则 now 永不前进、循环永不结束。
   const controls: Record<string, boolean> = {};

@@ -162,7 +162,13 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
       // 空桶装水/装岩浆只能从源方块（level=0）取，流动的取不了；放船不挑源。
       // 收集不要求源格上方是空气：侧面可接触、顶部有遮挡的源仍可由交互射线确认命中，不应在这里被排除。
       const collectSource = fluid && args.item === 'bucket';
-      let hits = senses.knownBlocks([...names], 32)
+      // 记忆是线索，不是当前事实：目标格必须现在仍是请求的方块。已变掉的位置不能拿来用，
+      // 否则放船/装水会对着记忆里的旧水面发 use_item，背包不动、实体不出现，只剩一句失败。
+      const remembered = senses.knownBlocks([...names], 32);
+      const liveName = (pos: Vec3Like) => adapter.blockAt(pos);
+      const stale = remembered.filter((h) => !names.has(liveName(h.pos) ?? ''));
+      let hits = remembered
+        .filter((h) => names.has(liveName(h.pos) ?? ''))
         .filter((h) => !fluid || !boat || AIRISH.has(adapter.blockAt({ x: h.pos.x, y: h.pos.y + 1, z: h.pos.z }) ?? 'air'))
         .filter((h) => !fluid || !boat || openWater(ctx, h.pos, 2) >= 4)
         .filter((h) => dirOk(args.dir, s.pos, h.pos));
@@ -180,6 +186,10 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
         const creature = !fluid && senses.perceivedEntities(32).some((e) => e.kind !== 'item' && e.perception !== 'heard' && matchesEntity(e.name, on));
         if (creature) return interact.run(ctx, { entity: on, with: args.item });
         if (collectSource && hadSurface) return fail('NOT_FOUND', `附近能看见的 ${args.on} 都是流动的，没有源方块（空桶只能从源方块取）；去源头装，或自己倒一桶水先造源`);
+        if (stale.length) {
+          const at = stale.slice(0, 3).map((h) => `(${h.pos.x},${h.pos.y},${h.pos.z})`).join('、');
+          return fail('NOT_FOUND', `记得的 ${args.on} 已经不是当前方块了（记忆过期）：${at}${stale.length > 3 ? ` 等 ${stale.length} 处` : ''}；没有对着旧位置使用，先重新看见或换一处`, { stale: stale.slice(0, 8).map((h) => ({ ...h.pos })) });
+        }
         return fail('NOT_FOUND', `看不见可以对着用的 ${args.on}${args.dir ? `（${args.dir} 方向）` : ''}${fluid ? '' : '（on 只认方块；对生物用东西写 interact {"entity":…,"with":…}）'}`);
       }
       if (dist3(adapter.state().pos, target.pos) > 4.2) {

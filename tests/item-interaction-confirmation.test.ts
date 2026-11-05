@@ -60,6 +60,26 @@ test('use_item places one block on a real face and confirms world, paired blocks
   }
 });
 
+test('placement failure names the actual blocked face instead of only saying line of sight failed', async () => {
+  // 近处有可贴面，但视线先碰到另一格：失败回执要说出挡住的方块和坐标。
+  {
+    const w = fixture(), target = new Vec3(2, 64, 0);
+    w.put('stone', new Vec3(1, 64, 0));
+    w.bot.world = { raycast: () => ({ position: new Vec3(1, 64, 0), face: 5 }) };
+    const result = await w.adapter.placeBlockAt(target, ['cobblestone'], new AbortController().signal);
+    assert.equal(result.ok, false);
+    assert.match(result.detail ?? '', /被 stone \(1,64,0\) 挡住/);
+  }
+  // 唯一可贴面太远：要报出实际距离，便于心智决定靠近或换面。
+  {
+    const w = fixture(), target = new Vec3(20, 64, 0);
+    w.put('stone', new Vec3(20, 63, 0));
+    const result = await w.adapter.placeBlockAt(target, ['cobblestone'], new AbortController().signal);
+    assert.equal(result.ok, false);
+    assert.match(result.detail ?? '', /距眼睛 [\d.]+ 格（超过 4\.4）/);
+  }
+});
+
 test('empty-hand door use requires an observed open-state change and refuses a packet with no effect', async (t) => {
   const advance = clock(t);
   for (const changes of [true, false]) {
