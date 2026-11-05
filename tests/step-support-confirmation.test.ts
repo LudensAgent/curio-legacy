@@ -33,7 +33,7 @@ test('step 不再为上游目标做视线补看，支撑格是空气就直接报
   const look = t.mock.method(w, 'look', async () => {});
   const r = await stepTo.run(ctx, { at: [1, 1, 0], facing: 'N' });
   assert.equal(r.status, 'failed');
-  assert.match(r.summary, /是 air.*没有可站立支撑/);
+  assert.match(r.summary, /是 air.*64 格仍没有已加载的站立面/);
   assert.doesNotMatch(r.summary, /未看清的格子/);
   assert.equal(r.data?.movementNotAttempted, true);
   assert.equal(look.mock.callCount(), 0, '迈步不再转头补看');

@@ -1,7 +1,7 @@
 import type { Vec3Like } from '../adapter/types.ts';
 import { FACINGS, facingOfYaw, feetCell, localMap, supportCell, toWorld, type Facing } from '../perception/local.ts';
 import { attachmentFaces, dropBelow, isSoftBlock, LIQUID_BLOCKS, surroundings } from '../perception/surroundings.ts';
-import { blockCollidesBody, bodyBoxAt, bodyCells, footSurfaceY, hasAnyCollision, isReplaceable, placementReference, shapeKnown, supportTop, type BlockProps } from '../perception/geometry.ts';
+import { blockCollidesBody, bodyBoxAt, bodyCells, estimatedFallDamage, footSurfaceY, hasAnyCollision, isReplaceable, placementReference, shapeKnown, supportTop, type BlockProps } from '../perception/geometry.ts';
 import { AbortedError, sleep, throwIfAborted } from '../util.ts';
 import { breakCell, why } from './body.ts';
 import { classifyBlock, MAN_MADE_NOTE, OWN_BUILDING_HINT, ownBuildingAt, storedChestAt } from './build.ts';
@@ -238,8 +238,8 @@ async function stepOutOfWater(ctx: SkillCtx, args: CellArgs, feet: Vec3Like) {
 
 export const stepTo: Skill<StepArgs> = {
   name: 'step',
-  description: '迈到身边相邻的一格（[前,上,右]）：可以平走、上一级台阶（上+1，会跳）、下一级（上-1）；脚下是梯子时 [0,1,0] 沿梯子爬一格。落点按实际碰撞顶面计算（整块、半砖、雪层、地毯都能站，脚高可为分数）；目标列没有同层支撑时，由寻路在下方最多 4 格内找落点（1–3 格不摔伤，4 格只受少量伤害；不致命），不再逐格做视线预检，也不再因为支撑格是 air 就原地报错。身体空间被方块占住、或下方 4 格内都没有支撑时才拒绝，并给出挖掘坐标或要补的支撑格。更深的落点用 assess_landings 查看并用 descend 明确选择。泡在水里时朝岸那边迈（[1,0,0] 就行），身体会游过去、贴着岸爬上去（岸比脚高一两格也行）。可选 fill 写一种背包方块名：目标脚格下方的支撑格是空的时，先只往那一格补一块再迈（消耗 1 块）；不写就不垫',
-  argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W", "fill"?:方块名（目标脚下空时先补这一格，可搭桥）}（前后/左右 ±1，上下 -1..1；[1,0,0] 平走，也会自动迈上相邻一格台阶或下落到 4 格内的安全落点；[1,1,0] 明确上一级；[1,-1,0] 明确下一级；更深落差用 descend）',
+  description: '迈到身边相邻的一格（[前,上,右]）：可以平走、上一级台阶（上+1，会跳）、下一级（上-1）；脚下是梯子时 [0,1,0] 沿梯子爬一格。落点按实际碰撞顶面计算（整块、半砖、雪层、地毯都能站，脚高可为分数）；目标列没有同层支撑时，向下找到精确落点：4 格以内自动走并报告实际落差和预计摔伤，更大的落差不会自动跳，会返回精确落点、高度和预计伤害由你判断。不再逐格做视线预检，也不再因为支撑格是 air 就原地报错；身体空间被占住或向下找不到已加载落点才拒绝，并给出挖掘坐标/精确高度或要补的支撑格。泡在水里时朝岸那边迈（[1,0,0] 就行），身体会游过去、贴着岸爬上去（岸比脚高一两格也行）。可选 fill 写一种背包方块名：目标脚格下方的支撑格是空的时，先只往那一格补一块再迈（消耗 1 块）；不写就不垫',
+  argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W", "fill"?:方块名（目标脚下空时先补这一格，可搭桥）}（前后/左右 ±1，上下 -1..1；[1,0,0] 平走，也会自动迈上相邻一格台阶或处理 4 格以内落差，更大落差会返回精确高度；[1,1,0] 明确上一级；[1,-1,0] 明确下一级；更深落差用 descend）',
   timeoutMs: 8000,
   movement: true,
   validate(raw, adapter) {
@@ -303,16 +303,17 @@ export const stepTo: Skill<StepArgs> = {
     const blockerLabel = (p: Vec3Like) => visibleName(p) ?? '实心方块';
     const absolute = args.xyz !== undefined;
     const requestedFoot = absolute ? args.xyz!.y : feet.y + args.at[1];
-    // 直接落点优先（含半砖顶面、一格台阶）；站不住时向下找最多 4 格：1–3 格不摔伤，4 格只受少量伤害。
-    const chooseLanding = (): number | null => {
-      if (absolute) return requestedFoot;
+    // 直接落点优先（含半砖顶面、一格台阶）；站不住时一直向下找，拿到精确落点和落差。
+    // 4 格以内仍自动走（不卡在微小落差上）；更大的落差把精确高度和预计摔伤交回给 Agent 判断。
+    const scanLanding = (): { foot: number; drop: number } | null => {
+      if (absolute) return { foot: requestedFoot, drop: start.y - requestedFoot };
       const direct = rawFoot(target);
-      if (args.at[1] > 0) return direct !== null && direct >= feet.y + 0.5 ? direct : null;
-      if (direct !== null) return direct;
-      for (let drop = 1; drop <= 4; drop++) {
-        const cell = { x: target.x, y: target.y - drop, z: target.z };
+      if (args.at[1] > 0) return direct !== null && direct >= feet.y + 0.5 ? { foot: direct, drop: start.y - direct } : null;
+      if (direct !== null) return { foot: direct, drop: start.y - direct };
+      for (let depth = 1; depth <= 64; depth++) {
+        const cell = { x: target.x, y: target.y - depth, z: target.z };
         const foot = rawFoot(cell);
-        if (foot !== null && Math.abs(foot - cell.y) <= 0.95) return foot;
+        if (foot !== null && Math.abs(foot - cell.y) <= 0.95) return { foot, drop: start.y - foot };
       }
       return null;
     };
@@ -360,7 +361,7 @@ export const stepTo: Skill<StepArgs> = {
     const corners = args.at[0] !== 0 && args.at[2] !== 0
       ? [{ x: target.x, z: feet.z }, { x: feet.x, z: target.z }]
       : [];
-    let targetFoot = chooseLanding();
+    let landing = scanLanding();
     const support = { x: target.x, y: target.y - 1, z: target.z };
     const supportAt = toRel(feet, args.facing, support);
     const landingSupport = {
@@ -387,13 +388,20 @@ export const stepTo: Skill<StepArgs> = {
           { movementNotAttempted: true, fill: { at: supportAt, item: args.fill, pos: support }, ...after(ctx, args.facing, target) });
       }
       fills.push({ pos: support, at: supportAt, item: args.fill });
-      targetFoot = chooseLanding();
+      landing = scanLanding();
     }
-    if (targetFoot === null) {
-      return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：目标格脚下 (${support.x},${support.y},${support.z}) 是 ${describe(support)}，${args.at[1] > 0 ? '上一级' : ''}没有可站立支撑，下方 4 格内也没有；脚部目标格 [${args.at}] 须留空——要补支撑就是 [${supportAt}] 这一格（step 写 fill:"<方块名>" 会先补这里；也可先 place_at）；未执行迈步`,
-        { problems: [`目标格脚下 (${support.x},${support.y},${support.z}) 是 ${describe(support)}，4 格内无支撑`], targetCell: target, landingSupport, movementNotAttempted: true, ...after(ctx, args.facing, target) });
+    if (landing === null) {
+      return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：目标格脚下 (${support.x},${support.y},${support.z}) 是 ${describe(support)}；目标格 (${target.x},${target.y},${target.z}) 下方已检查 64 格仍没有已加载的站立面（不是“air 就禁止”，是还没找到落点）；脚部目标格 [${args.at}] 须留空——要补支撑就是 [${supportAt}] 这一格（step 写 fill:"<方块名>" 会先补这里；也可先 place_at）；未执行迈步`,
+        { problems: [`目标格脚下 (${support.x},${support.y},${support.z}) 是 ${describe(support)}，64 格内无落点`], targetCell: target, landingSupport, scannedDepth: 64, movementNotAttempted: true, ...after(ctx, args.facing, target) });
     }
-    const foot = targetFoot!;
+    if (!absolute && landing.drop > 4.01) {
+      const drop = landing.drop, damage = estimatedFallDamage(drop);
+      const dropText = drop.toFixed(Number.isInteger(drop) ? 0 : 2);
+      const fall = { drop, damage, landing: { x: target.x, y: landing.foot, z: target.z } };
+      return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：目标列下方 ${dropText} 格才有可站立面 (${target.x},${landing.foot.toFixed(2)},${target.z})，落差约 ${dropText} 格${damage ? `，按当前生命预计约 ${damage} 点摔伤（未计护甲/摔落保护）` : ''}；step 只自动处理 4 格以内，未执行迈步。要下去可用 assess_landings + descend 选这个落点，或 place_at/step fill 补支撑，或换方向`,
+        { problems: [`落差 ${dropText} 格，超过 step 自动处理的 4 格`], targetCell: target, landingSupport, fall, movementNotAttempted: true, ...after(ctx, args.facing, target) });
+    }
+    const foot = landing.foot;
     // 往上迈要真的跳：先确认自己头顶/起跳扫过的身体空间；这是身体与方块的碰撞事实，不靠视线扫。
     if (foot > start.y + 0.5) {
       const jump = bodyProblem(foot, feet.x, feet.z);
@@ -457,8 +465,9 @@ export const stepTo: Skill<StepArgs> = {
       return fail(movementError ? codeFromError(movementError) : 'EFFECT_NOT_CONFIRMED', `没有站到 [${args.at}]：${why}；实际在 (${end.x},${end.y},${end.z})${movementError ? `；${(movementError as Error).message}` : ''}`, { ...(fills.length ? { fills } : {}), ...after(ctx, args.facing, target) });
     }
     const drop = start.y - foot;
-    const dropNote = drop > 0.01 ? `，下落 ${drop.toFixed(Number.isInteger(drop) ? 0 : 2)} 格` : '';
-    return ok(`站到了 [${args.at}]${Math.abs(foot - Math.floor(foot)) > 0.01 ? `（脚高 ${foot.toFixed(2)}）` : ''}${dropNote}${fills.length ? `（先垫了 ${fills.map((f) => `${f.item} 在 [${f.at}]`).join('、')}）` : ''}`, { moved: [...args.at], ...(drop > 0.01 ? { drop } : {}), ...(fills.length ? { fills } : {}), ...after(ctx, args.facing, target) });
+    const damage = drop > 0 ? estimatedFallDamage(drop) : 0;
+    const dropNote = drop > 0.01 ? `，下落 ${drop.toFixed(Number.isInteger(drop) ? 0 : 2)} 格${damage ? `（预计约 ${damage} 点摔伤，未计护甲/摔落保护）` : ''}` : '';
+    return ok(`站到了 [${args.at}]${Math.abs(foot - Math.floor(foot)) > 0.01 ? `（脚高 ${foot.toFixed(2)}）` : ''}${dropNote}${fills.length ? `（先垫了 ${fills.map((f) => `${f.item} 在 [${f.at}]`).join('、')}）` : ''}`, { moved: [...args.at], ...(drop > 0.01 ? { drop, fall: { drop, damage } } : {}), ...(fills.length ? { fills } : {}), ...after(ctx, args.facing, target) });
   },
 };
 

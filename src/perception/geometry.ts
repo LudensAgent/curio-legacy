@@ -124,6 +124,14 @@ function supportSurfaceTop(cell: Vec3Like, state: ObservedState | null): number 
 export const RELATIVE_FOOT_TOLERANCE = 0.95;
 
 /**
+ * 坠落伤害的粗估（生命点，2 点 = 1 颗心）：原版超过 3 格开始受伤，
+ * 之后约每多 1 格多 1 点；这里只给决策参考，不把护甲/摔落保护算进去。
+ */
+export function estimatedFallDamage(drop: number): number {
+  return drop > 3 ? Math.ceil(drop - 3) : 0;
+}
+
+/**
  * 站在这列时的实际脚高（世界 Y）：优先取脚格里薄层（半砖/雪/地毯/床）的顶面，
  * 否则取脚下一格的支撑顶面。没有已观察的承重面返回 null。
  */
