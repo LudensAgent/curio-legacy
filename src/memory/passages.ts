@@ -42,6 +42,14 @@ const STEP = 3;
 export const PASSAGE_LINK = 3.5;
 const MAX_POINTS = 160;
 
+/** 同一份 records 在一次动作里会被 passageRoute / passageSurfaceCandidates / 调用方反复建图。
+ *  图只由 path/links 的数量决定（uses、lastUsedAt 等字段不影响拓扑），用计数做失效信号；
+ *  动作内的数组引用作为缓存键，动作结束后数组被回收，图随之释放。 */
+const graphCache = new WeakMap<object, {
+  hop: number; link: number; points: number; links: number;
+  graph: { nodes: Vec3Like[]; owner: number[]; edges: Map<number, Set<number>> };
+}>();
+
 /** 这一下站的位置、或刚挖开的格子，落在另一条通道脚点附近（亲身的证据，不是臆造）。
  * 脚点既看稀疏的 path、也看亲手一步步走过的 links 端点：path 每隔几格才记一个，大矿道里大片走过的地方没有 path 点，
  * 只看 path 会把重进同一段矿道误判成新矿道、越记越碎。 */
@@ -293,16 +301,25 @@ export function passageLevels(rec: Pick<PassageRecord, 'path'>): number[] {
  *  + 跨 record 的碎片自愈 + 同一段连续观测（run 相同）里漏采样的小缺口；merge/dedupe 的 cut 边界不跨。 */
 export function passageGraph(recs: Pick<PassageRecord, 'path' | 'links'>[], opts: { hop?: number; link?: number } = {}): { nodes: Vec3Like[]; owner: number[]; edges: Map<number, Set<number>> } {
   const hop = opts.hop ?? 7, link = opts.link ?? PASSAGE_LINK;
+  let points = 0, linkCount = 0;
+  for (const r of recs) { points += r.path.length; linkCount += r.links?.length ?? 0; }
+  const hit = graphCache.get(recs);
+  if (hit && hit.hop === hop && hit.link === link && hit.points === points && hit.links === linkCount) return hit.graph;
+
   const nodes: Vec3Like[] = [];
   const owner: number[] = [];
   const edges = new Map<number, Set<number>>();
+  const index = new Map<string, number>();
   const add = (a: number, b: number) => { if (a === b) return; (edges.get(a) ?? edges.set(a, new Set()).get(a)!).add(b); (edges.get(b) ?? edges.set(b, new Set()).get(b)!).add(a); };
   const indexOf = (p: Vec3Like, recIdx: number) => {
-    const i = nodes.findIndex((q) => q.x === p.x && q.y === p.y && q.z === p.z);
-    if (i >= 0) return i;
+    const key = `${p.x},${p.y},${p.z}`;
+    const i = index.get(key);
+    if (i !== undefined) return i;
+    const id = nodes.length;
     nodes.push(p);
     owner.push(recIdx);
-    return nodes.length - 1;
+    index.set(key, id);
+    return id;
   };
   recs.forEach((r, recIdx) => {
     if (r.links?.length) {
@@ -328,15 +345,35 @@ export function passageGraph(recs: Pick<PassageRecord, 'path' | 'links'>[], opts
       }
     }
   });
-  for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
-    // 跨 record：挨得近的点连起来（碎片自愈）。
-    if (owner[i] !== owner[j]) { if (d3(nodes[i], nodes[j]) <= link) add(i, j); continue; }
-    // 同一条 record：只补「两个已记录脚点水平正交相邻（|Δy|≤1）」这一个缺口——它们本来就是一步之遥的落脚点，
-    // 旧数据里漏记这一步会把一条道断成两团。不按 ≤link 的几何距离硬连，也不补 2 格以上的缺口或斜角缺口。
-    const a = nodes[i], b = nodes[j];
-    if (Math.abs(a.y - b.y) <= 1 && Math.abs(a.x - b.x) + Math.abs(a.z - b.z) === 1) add(i, j);
+  // 跨 record 连网 + 同 record 正交缺口：按 link 大小分桶只查相邻桶，
+  // 不再对全部节点做 O(N²) 两两比较（线上 9000 节点时约从 450ms 降到几十 ms）。
+  const size = Math.max(link, 1);
+  const grid = new Map<string, number[]>();
+  const cellKey = (p: Vec3Like, ox: number, oy: number, oz: number) =>
+    `${Math.floor(p.x / size) + ox},${Math.floor(p.y / size) + oy},${Math.floor(p.z / size) + oz}`;
+  for (let i = 0; i < nodes.length; i++) {
+    const key = cellKey(nodes[i]!, 0, 0, 0);
+    const bucket = grid.get(key);
+    if (bucket) bucket.push(i); else grid.set(key, [i]);
   }
-  return { nodes, owner, edges };
+  for (let i = 0; i < nodes.length; i++) {
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+      const bucket = grid.get(cellKey(nodes[i]!, dx, dy, dz));
+      if (!bucket) continue;
+      for (const j of bucket) {
+        if (j <= i) continue;
+        const a = nodes[i]!, b = nodes[j]!;
+        // 跨 record：挨得近的点连起来（碎片自愈）。
+        if (owner[i] !== owner[j]) { if (d3(a, b) <= link) add(i, j); continue; }
+        // 同一条 record：只补「两个已记录脚点水平正交相邻（|Δy|≤1）」这一个缺口——它们本来就是一步之遥的落脚点，
+        // 旧数据里漏记这一步会把一条道断成两团。不按 ≤link 的几何距离硬连，也不补 2 格以上的缺口或斜角缺口。
+        if (Math.abs(a.y - b.y) <= 1 && Math.abs(a.x - b.x) + Math.abs(a.z - b.z) === 1) add(i, j);
+      }
+    }
+  }
+  const graph = { nodes, owner, edges };
+  graphCache.set(recs, { hop, link, points, links: linkCount, graph });
+  return graph;
 }
 
 /** 通道网的碎片化：所有脚点按真实边连起来，数有几个连通分量（碎片）；>1 说明有互不相连的旧矿道岛。 */
@@ -363,18 +400,52 @@ export function passageFragmentation(recs: Pick<PassageRecord, 'path' | 'links'>
   return { records: recs.length, points: nodes.length, components: pieces.length, pieces };
 }
 
-/** 图上单源最短路（正权；节点数千，朴素 O(n²) 就够）；stopAt 给定时算到它为止。 */
+/** 图上单源最短路（正权；二叉堆 + 惰性删除，几千节点下比每次线性扫最小值的 O(n²) 快一个量级）。
+ *  stopAt 给定时算到它为止。 */
 function graphShortest(nodes: Vec3Like[], edges: Map<number, Set<number>>, origin: number, stopAt = -1): { dist: number[]; prev: number[] } {
-  const dist = new Array<number>(nodes.length).fill(Infinity), prev = new Array<number>(nodes.length).fill(-1), done = new Set<number>();
+  const n = nodes.length;
+  const dist = new Array<number>(n).fill(Infinity), prev = new Array<number>(n).fill(-1), done = new Uint8Array(n);
   dist[origin] = 0;
-  for (;;) {
-    let u = -1;
-    for (let i = 0; i < nodes.length; i++) if (!done.has(i) && dist[i] < Infinity && (u < 0 || dist[i] < dist[u])) u = i;
-    if (u < 0 || u === stopAt) break;
-    done.add(u);
+  const ids: number[] = [origin], keys: number[] = [0];
+  const push = (id: number, key: number) => {
+    ids.push(id); keys.push(key);
+    let i = ids.length - 1;
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (keys[p]! <= key) break;
+      ids[i] = ids[p]!; keys[i] = keys[p]!;
+      i = p;
+    }
+    ids[i] = id; keys[i] = key;
+  };
+  const pop = () => {
+    const id = ids[0]!, key = keys[0]!;
+    const lastId = ids.pop()!, lastKey = keys.pop()!;
+    if (ids.length) {
+      let i = 0;
+      const len = ids.length;
+      for (;;) {
+        const l = i * 2 + 1, r = l + 1;
+        let c = -1;
+        if (l < len && keys[l]! < lastKey) c = l;
+        if (r < len && keys[r]! < (c < 0 ? lastKey : keys[c]!)) c = r;
+        if (c < 0) break;
+        ids[i] = ids[c]!; keys[i] = keys[c]!;
+        i = c;
+      }
+      ids[i] = lastId; keys[i] = lastKey;
+    }
+    return { id, key };
+  };
+  while (ids.length) {
+    const { id: u, key: du } = pop();
+    if (done[u]) continue;
+    done[u] = 1;
+    if (u === stopAt) break;
     for (const v of edges.get(u) ?? []) {
-      const nd = dist[u]! + d3(nodes[u]!, nodes[v]!);
-      if (nd < dist[v]!) { dist[v] = nd; prev[v] = u; }
+      if (done[v]) continue;
+      const nd = du + d3(nodes[u]!, nodes[v]!);
+      if (nd < dist[v]!) { dist[v] = nd; prev[v] = u; push(v, nd); }
     }
   }
   return { dist, prev };

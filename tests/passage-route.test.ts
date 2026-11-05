@@ -347,3 +347,27 @@ test('goto tries pathfinder even when vision exposes no waypoint', async (t) => 
   assert.ok(move.mock.callCount() >= 1, 'no visual waypoint must not prevent a pathfinder attempt');
   assert.equal(result.status, 'succeeded', result.summary);
 });
+
+test('同一份 records 复用图缓存；links 增加后缓存失效', () => {
+  const rec = {
+    path: [{ x: 0, y: 40, z: 0 }],
+    links: [
+      { a: { x: 0, y: 40, z: 0 }, b: { x: 1, y: 40, z: 0 } },
+      { a: { x: 1, y: 40, z: 0 }, b: { x: 2, y: 40, z: 0 } },
+    ],
+  };
+  const recs = [rec];
+  const first = passageGraph(recs);
+  assert.equal(passageGraph(recs), first, '同一份数组复用已建好的图');
+  rec.links.push({ a: { x: 2, y: 40, z: 0 }, b: { x: 3, y: 40, z: 0 } });
+  const next = passageGraph(recs);
+  assert.notEqual(next, first, 'links 数量变化后必须重建');
+  assert.ok(next.edges.get(2)?.has(3), '新加的 link 进入新图');
+});
+
+test('大图：几千节点的直道仍能完整路由（空间分桶不漏边）', () => {
+  const path: Vec3Like[] = Array.from({ length: 5400 }, (_, x) => ({ x, y: 40, z: 0 }));
+  const links = path.slice(1).map((b, i) => ({ a: path[i]!, b }));
+  const route = passageRoute([{ path: [], links }], path[0]!, path[path.length - 1]!, { near: 6 });
+  assert.equal(route?.length, path.length);
+});
