@@ -279,6 +279,8 @@ export class Arbiter extends EventEmitter {
     origin?: TaskOrigin;
     authorizedBy?: StepAuthorization;
     gentle?: boolean;
+    /** 同一逻辑步骤的自动重试/续跑共享的绝对期限（epoch ms）；只提前，不延后。 */
+    deadlineMs?: number;
     climb?: { height: number; spent: number; startY: number };
   } = {}): TaskInfo | { error: string } {
     if (this.pausedFlag) return { error: 'Agent 已暂停' };
@@ -295,6 +297,10 @@ export class Arbiter extends EventEmitter {
     const skill = SKILLS[step.skill];
     const controller = new AbortController();
     const now = Date.now();
+    // 父委托给的绝对期限只能缩短本任务，不能延长；未传时保持 skill 自己的 timeoutMs。
+    const deadline = meta.deadlineMs === undefined
+      ? now + skill.timeoutMs
+      : Math.min(now + skill.timeoutMs, meta.deadlineMs);
     // 开始作用域/位置与背包在派发这一刻实测；结束事实只在没有更新任务时才能归给本任务。
     const startState = readState(this.adapter);
     const startedScope = scopeOf(startState, now);
@@ -311,7 +317,7 @@ export class Arbiter extends EventEmitter {
       ...(meta.stepId ? { stepId: meta.stepId } : {}),
       ...(meta.authorizedBy ? { authorizedBy: meta.authorizedBy } : {}),
       startedAt: now,
-      deadline: now + skill.timeoutMs,
+      deadline,
       progress: 0,
       note: '',
       movement: skill.movement,
@@ -333,7 +339,11 @@ export class Arbiter extends EventEmitter {
       authorizedBy: task.authorizedBy ?? null,
     });
 
-    const timeout = setTimeout(() => controller.abort('TIMEOUT'), skill.timeoutMs + 2000);
+    // 照旧在期限后留 2000ms 收尾宽限；父委托期限已过则不新起计时，立即中止。
+    const timeoutGraceEnd = task.deadline + 2000;
+    const timeout = timeoutGraceEnd <= Date.now()
+      ? (controller.abort('TIMEOUT'), null)
+      : setTimeout(() => controller.abort('TIMEOUT'), timeoutGraceEnd - Date.now());
     const ctx = {
       adapter: this.guard(controller.signal),
       senses: this.senses,
@@ -361,7 +371,7 @@ export class Arbiter extends EventEmitter {
         return { status: 'failed', failureCode: 'ERROR', summary: String(e?.message ?? e) };
       })
       .then((result) => {
-        clearTimeout(timeout);
+        if (timeout !== null) clearTimeout(timeout);
         if (controller.signal.reason === 'TIMEOUT' && result.status === 'cancelled') {
           result = { status: 'failed', failureCode: 'TIMEOUT', summary: `${skill.name} 超时`, ...(result.data ? { data: result.data } : {}) };
         }

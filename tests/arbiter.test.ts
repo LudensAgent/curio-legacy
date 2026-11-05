@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Arbiter, type TaskOutcome } from '../src/arbiter/arbiter.ts';
-import { EventBus } from '../src/events.ts';
+import { EventBus, type AgentEvent } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { Vision } from '../src/perception/vision.ts';
 import { SKILLS } from '../src/skills/index.ts';
@@ -224,6 +224,83 @@ test('moveTo 合并信号在动作落定后移除调用方监听', async () => {
     assert.equal(listeners.size, 0, '动作落定后必须移除调用方信号上的监听');
   } finally {
     delete SKILLS.test_segment_cleanup;
+  }
+});
+
+test('meta.deadlineMs 只缩短任务期限，ctx.deadline 与 task_end 预算报告同一绝对期限', async () => {
+  const { bus, arbiter, next } = setup();
+  let ctxDeadline = 0;
+  SKILLS.test_deadline_budget = {
+    name: 'test_deadline_budget', description: '', argsDoc: '{}', timeoutMs: 60_000, movement: false,
+    validate: () => ({ ok: true, args: {} }),
+    async run(ctx) {
+      ctxDeadline = ctx.deadline;
+      return { status: 'succeeded', summary: 'ok' };
+    },
+  };
+  try {
+    const ends: AgentEvent[] = [];
+    bus.on('event', (e: AgentEvent) => { if (e.type === 'task_end') ends.push(e); });
+    const limit = Date.now() + 500;
+    const info = arbiter.start({ skill: 'test_deadline_budget' }, 'rule', { deadlineMs: limit });
+    assert.ok(!('error' in info));
+    if ('error' in info) return;
+    assert.ok(info.deadline <= limit, `任务期限应被父委托期限限制，实际 ${info.deadline} > ${limit}`);
+    assert.ok(info.deadline > info.startedAt, '期限不得被推到开始之前');
+    const o = await next();
+    assert.equal(o.result.status, 'succeeded');
+    assert.equal(ctxDeadline, info.deadline, 'ctx.deadline 必须报告收窄后的期限');
+    const endData = ends[0]!.data as { deadline: number; budget: { deadline: number } };
+    assert.equal(endData.deadline, info.deadline);
+    assert.equal(endData.budget.deadline, info.deadline, 'task_end 预算沿用同一条绝对期限');
+  } finally {
+    delete SKILLS.test_deadline_budget;
+  }
+});
+
+test('已超过收尾宽限的 meta.deadlineMs 立即以 TIMEOUT 结束，不重新计时', async () => {
+  const { arbiter, next } = setup();
+  SKILLS.test_deadline_past = {
+    name: 'test_deadline_past', description: '', argsDoc: '{}', timeoutMs: 60_000, movement: false,
+    validate: () => ({ ok: true, args: {} }),
+    async run(ctx) {
+      await sleep(5, ctx.signal); // 已中止的信号应立刻打断，而不是等 skill 自己的期限
+      return { status: 'succeeded', summary: '不应走到' };
+    },
+  };
+  try {
+    const done = next();
+    const info = arbiter.start({ skill: 'test_deadline_past' }, 'rule', { deadlineMs: Date.now() - 5000 });
+    assert.ok(!('error' in info));
+    const o = await done;
+    assert.equal(o.result.status, 'failed');
+    assert.equal(o.result.failureCode, 'TIMEOUT');
+  } finally {
+    delete SKILLS.test_deadline_past;
+  }
+});
+
+test('meta.deadlineMs 晚于 skill 自身期限时不延长任务', async () => {
+  const { arbiter, next } = setup();
+  SKILLS.test_deadline_long = {
+    name: 'test_deadline_long', description: '', argsDoc: '{}', timeoutMs: 1000, movement: false,
+    validate: () => ({ ok: true, args: {} }),
+    async run(ctx) {
+      await sleep(5000, ctx.signal);
+      return { status: 'succeeded', summary: '不应走到' };
+    },
+  };
+  try {
+    const info = arbiter.start({ skill: 'test_deadline_long' }, 'rule', { deadlineMs: Date.now() + 60_000 });
+    assert.ok(!('error' in info));
+    if ('error' in info) return;
+    assert.ok(info.deadline <= info.startedAt + 1000, '父委托期限不能把任务延长到 skill 自身超时之外');
+    const done = next();
+    arbiter.cancel('cleanup');
+    const o = await done;
+    assert.equal(o.result.status, 'cancelled');
+  } finally {
+    delete SKILLS.test_deadline_long;
   }
 });
 
