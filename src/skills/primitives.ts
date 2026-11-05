@@ -1,6 +1,6 @@
 import type { Vec3Like } from '../adapter/types.ts';
 import { FACINGS, facingOfYaw, feetCell, localMap, supportCell, toWorld, type Facing } from '../perception/local.ts';
-import { attachmentFaces, dropBelow, isSoftBlock, LIQUID_BLOCKS, surroundings } from '../perception/surroundings.ts';
+import { attachmentFaces, dropBelow, isSoftBlock, LIQUID_BLOCKS, SAPLING_SOIL, surroundings } from '../perception/surroundings.ts';
 import { blockCollidesBody, bodyBoxAt, bodyCells, estimatedFallDamage, footSurfaceY, hasAnyCollision, isReplaceable, placementReference, shapeKnown, supportTop, type BlockProps } from '../perception/geometry.ts';
 import { AbortedError, sleep, throwIfAborted } from '../util.ts';
 import { breakCell, why } from './body.ts';
@@ -546,6 +546,7 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
     const stateAt = (p: Vec3Like) => seen.get(`${p.x},${p.y},${p.z}`) ?? null;
     // 搭柱是“站高一格”的动作模式，目标不是“把方块放进这一格”，不做普通放置的“已满足”幂等判断。
     const pillar = args.xyz === undefined && args.at[0] === 0 && args.at[1] === 0 && args.at[2] === 0 && !attachable;
+    const sapling = /_sapling$/.test(args.item);
     if (!pillar) {
       // 普通放置：只有亲眼看见同一物品才算已满足。半砖/雪层/地毯/门/火把都占着这一格，
       // 不能因为“看起来是实心”就把错误材料当成功。
@@ -568,6 +569,15 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
     const inv = a.state().inventory;
     const names = args.item === 'any' ? PLACEABLE.filter((n) => inv.some((i) => i.name === n && i.count > 0)) : [args.item];
     if (!names.length || !inv.some((i) => names.includes(i.name) && i.count > 0)) return fail('MISSING_MATERIALS', `背包里没有 ${args.item === 'any' ? '能垫的方块（泥土/圆石/木板…）' : args.item}`, after(ctx, args.facing, pos));
+    // 树苗的落点由正下方的土壤决定：先报清楚下面是什么，别让放置失败落进“悬空/看不见那个面”的泛化反馈。
+    if (!pillar && sapling) {
+      const supportPos = { x: pos.x, y: pos.y - 1, z: pos.z };
+      const support = stateAt(supportPos)?.name ?? a.blockAt(supportPos);
+      if (support === null) return fail('NOT_FOUND', `[${args.at}] 正下方 (${supportPos.x},${supportPos.y},${supportPos.z}) 未加载，无法确认树苗的土壤，没有放置`, { supportPos, ...after(ctx, args.facing, pos) });
+      if (!SAPLING_SOIL.has(support)) {
+        return fail('BAD_ARGS', `[${args.at}] 种不了树苗：正下方 (${supportPos.x},${supportPos.y},${supportPos.z}) 是 ${support}，树苗只能种在草方块/泥土/砂土/灰化土/菌丝体/苔藓块/缠根泥土/泥/沾泥的红树根上；换一格下方是土的，或先把下面换成泥土/草方块`, { support, supportPos, expectedSupport: [...SAPLING_SOIL], ...after(ctx, args.facing, pos) });
+      }
+    }
     // 旁边已经有一个工作台/熔炉还要再放：多半是没注意到它（合成/烧东西会自己走过去用）。真要再放一个写 extra:true
     if ((args.item === 'crafting_table' || args.item === 'furnace') && !args.extra) {
       const near = findStation(ctx, [args.item], 8);
@@ -615,7 +625,9 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
     // 附着面：已看清六个方向却没有可贴面的方块，就不必再调一个必然失败的放置；
     // 还有方向没看清时只报未知，交给适配器按真实视线/距离尝试。
     const reference = placementReference(pos, stateAt, attachable || null);
-    if (reference === 'none') {
+    // 树苗下方是有效土壤时已经由适配器确认过支撑；这里不抢在适配器前面报“悬空”，
+    // 让放置失败能带回“有相邻面但视线被挡/超出 4.4 格”这类具体细节。
+    if (reference === 'none' && !sapling) {
       return fail('PATH_NOT_FOUND', `[${args.at}] 四周已看清，没有可贴面的方块；${
         attachable === 'side' ? `${args.item} 只能挂在实心方块侧面` : attachable === 'floor_or_side' ? `${args.item} 要立在实心方块顶面或挂在侧面` : '悬空处放不了方块'}；先走近别的面或换个位置`, { reference, ...after(ctx, args.facing, pos) });
     }

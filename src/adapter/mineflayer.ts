@@ -13,7 +13,7 @@ import type { EventBus } from '../events.ts';
 import { AbortedError, raceAbort, shortId, sleep, throwIfAborted, TimeoutError } from '../util.ts';
 import { installClientGuard } from './click-guard.ts';
 import { cornerSafe } from './corner-safe.ts';
-import { AIR_BLOCKS, attachmentFaces } from '../perception/surroundings.ts';
+import { AIR_BLOCKS, attachmentFaces, SAPLING_SOIL } from '../perception/surroundings.ts';
 import { feetCell, facingOfYaw } from '../perception/local.ts';
 import { bodyOverlapsPortal, PORTAL_KINDS, portalApproach as computePortalApproach, portalStance as computePortalStance } from '../perception/portal.ts';
 import type { WalkBody, WalkTick } from './walk-route.ts';
@@ -1945,8 +1945,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // 树苗只能种在草地/泥土类方块上：先查目标格下方，种不了就报清楚（别让服务器拒绝后只回一句 still air）
     if (/_sapling$/.test(item.name)) {
       const below = b.blockAt(target.offset(0, -1, 0));
-      if (!below || !/^(grass_block|dirt|coarse_dirt|podzol|mycelium|moss_block|rooted_dirt|mud|muddy_mangrove_roots)$/.test(below.name)) {
-        return { ok: false, reason: `BAD_SUPPORT:树苗要种在草方块/泥土/灰化土等上面，下面是 ${below?.name ?? '未加载的方块'}` };
+      if (!below) return { ok: false, reason: `BAD_SUPPORT:目标格 (${target.x},${target.y},${target.z}) 正下方未加载，无法确认树苗的土壤` };
+      if (!SAPLING_SOIL.has(below.name)) {
+        return { ok: false, reason: `BAD_SUPPORT:树苗要种在草方块/泥土/砂土/灰化土等上面，目标格 (${target.x},${target.y},${target.z}) 正下方 (${target.x},${target.y - 1},${target.z}) 是 ${below.name}` };
       }
     }
     // 贴墙的东西（梯子、火把、按钮……）要以它能挂住的那一面为参照：梯子只能挂在实心墙的侧面，火把可以立在地上或挂在墙上；
@@ -2000,8 +2001,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       ok: false,
       reason: 'NO_REFERENCE',
       detail: refs.length
-        ? `${at} 有 ${refs.length} 个相邻实心方块，但从当前眼睛位置到这些面的视线被挡或超出 4.4 格`
-        : `${at} 四周没有相邻实心方块（悬空），从当前站位没有可贴的面`,
+        ? `${at} 有 ${refs.length} 个相邻实心方块，但从当前眼睛位置到这些面的视线被挡或超出 4.4 格；先退后一步或侧移换个角度，让目标格和相邻方块的面进入视野再放`
+        : `${at} 四周没有相邻实心方块（悬空），从当前站位没有可贴的面${/_sapling$/.test(item.name) ? '；即使下面有土，也要先站到能看见目标格相邻面的位置' : ''}`,
     };
   }
 
