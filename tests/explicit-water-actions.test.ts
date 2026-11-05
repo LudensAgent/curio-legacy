@@ -326,3 +326,40 @@ test('swim_to refuses only when no positive time remains', async (t) => {
     assert.equal(r.data?.oxygen, 10);
   } finally { ctx.memory.close(); }
 });
+
+test('swim_to follows an observed water detour and still verifies the caller target', async () => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 61.2, z: 0.5 };
+  w.inWater = true;
+  // 清空一块 7×7 的地表，做成 y60-62 是水、y63 是岩盖的水窝。
+  for (let x = -2; x <= 4; x++) for (let z = -2; z <= 4; z++) {
+    w.setBlock({ x, y: 63, z }, 'air');
+    for (let y = 60; y <= 62; y++) w.setBlock({ x, y, z }, 'water');
+  }
+  for (let x = 0; x <= 1; x++) for (let z = 0; z <= 2; z++) w.setBlock({ x, y: 63, z }, 'netherrack');
+  w.setBlock({ x: 1, y: 63, z: 0 }, 'netherrack'); // 目标脚下的岸
+  const target = { x: 1.5, y: 64, z: 0.5 };
+  const calls: { x: number; y: number; z: number }[] = [];
+  w.swimTo = async (t: Vec3Like | null) => {
+    if (!t) return { ok: false, reason: 'NO_TARGET', landed: false, surfaced: false, oxygen: 20 };
+    calls.push({ ...t });
+    const final = t.x === target.x && t.y === target.y && t.z === target.z;
+    w.pos = { ...t };
+    w.inWater = !final;
+    return final
+      ? { ok: true, landed: true, surfaced: true, oxygen: 20, goal: 'dry_shore' as const, stage: 'landed' as const }
+      : { ok: true, landed: false, surfaced: true, oxygen: 20, goal: 'surface_target' as const, stage: 'surface_reached' as const };
+  };
+  const ctx = makeCtx(w);
+  try {
+    const r = await swimTo.run(ctx, { xyz: target });
+    assert.equal(r.status, 'succeeded', r.summary);
+    assert.ok(calls.length >= 2, `should swim via a water waypoint then the target: ${JSON.stringify(calls)}`);
+    assert.deepEqual(calls.at(-1), target, 'the last leg keeps the caller target unchanged');
+    const detour = calls[0];
+    assert.ok(detour.x !== target.x || detour.z !== target.z, 'the detour is a water waypoint, not the dry target');
+    assert.match(r.summary, /沿观察到的水路/);
+    const route = r.data?.route as { waypoints: { x: number; y: number; z: number }[] } | undefined;
+    assert.ok(route && route.waypoints.length >= 1, 'the route is reported back as executed assistance');
+  } finally { ctx.memory.close(); }
+});

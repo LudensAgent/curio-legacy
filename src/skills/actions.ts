@@ -6,6 +6,7 @@ import { cancelledNav, clampInt, codeFromError, fail, isAbort, navReceipt, obj, 
 import { resolveItemAlias } from './work.ts';
 import { isStation, rememberStation } from './stations.ts';
 import { openWater, planBoatRoute, type BoatRoute } from './vehicles.ts';
+import { planWaterRoute } from './water-route.ts';
 
 /**
  * 通用基础动作：相当于玩家的“右键”和“方向键”。
@@ -616,9 +617,34 @@ export const swimTo: Skill<{ xyz: { x: number; y: number; z: number }; timeoutMs
     // 预算耗尽（remaining <= 0）才拒绝，不强行开游；剩余不足时用真实剩余时间，不把父级预算拉长。
     const timeoutMs = Math.min(args.timeoutMs ?? 20000, ctx.deadline - Date.now());
     if (timeoutMs <= 0) return fail('TIMEOUT', `游向目标的预算已用完，未执行；现在在 (${s0.pos.x.toFixed(1)},${s0.pos.y.toFixed(1)},${s0.pos.z.toFixed(1)})，氧气 ${s0.oxygen}/20`, { landed: false, pos: s0Snapshot.pos, oxygen: s0Snapshot.oxygen, observedAt: s0Snapshot.observedAt });
+    const end = Date.now() + timeoutMs;
+    // 起点在水里时先按已观察到的水格找一条水路（不挖、不垫、不改目标）；没有水路就照旧直游。
+    // 路点只是执行手段：最后一段仍用调用方给的原始坐标验收。
+    const route = s0.inWater ? planWaterRoute((p) => a.blockAt(p), s0.pos, args.xyz) : null;
+    const routeCells = route?.cells ?? [];
+    const routeFacts = route ? { route: { waypoints: routeCells.map((c) => ({ x: c.x + 0.5, y: c.y, z: c.z + 0.5 })), ...(route.why ? { why: route.why } : {}) } } : {};
+    let lastLeg: number | null = null;
     let r;
     try {
-      r = await a.swimTo(args.xyz, ctx.signal, { timeoutMs });
+      for (let i = 0; i < routeCells.length; i++) {
+        const cell = routeCells[i];
+        const wp = { x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5 };
+        const rem = end - Date.now();
+        if (rem <= 0) return fail('TIMEOUT', `游向目标的水路预算已用完，走到第 ${i}/${routeCells.length} 个水点；现在在 (${a.state().pos.x.toFixed(1)},${a.state().pos.y.toFixed(1)},${a.state().pos.z.toFixed(1)})`, { landed: false, pos: a.state().pos, oxygen: a.state().oxygen, route: routeFacts.route });
+        // 给最后一段干岸保留预算；水路段均分剩余时间，避免第一段吃掉全部。
+        const reserve = Math.min(4000, Math.max(1200, Math.floor(rem * 0.25)));
+        const legMs = Math.max(800, Math.min(rem, Math.floor((rem - reserve) / (routeCells.length - i))));
+        r = await a.swimTo(wp, ctx.signal, { timeoutMs: legMs });
+        if (r.ok) continue;
+        // 底层没确认稳定，但身体已到水点附近：继续下一段；离得远就按失败回执交回。
+        const p = a.state().pos;
+        if (Math.hypot(p.x - wp.x, p.y - wp.y, p.z - wp.z) > 1.8) { lastLeg = i + 1; break; }
+      }
+      if (!r || r.ok) {
+        const rem = end - Date.now();
+        if (rem <= 0) return fail('TIMEOUT', '水路段走到了，但留给最后一段的预算已用完', { ...routeFacts, pos: a.state().pos, oxygen: a.state().oxygen });
+        r = await a.swimTo(args.xyz, ctx.signal, { timeoutMs: Math.min(rem, ctx.deadline - Date.now()) });
+      }
     } catch (e) {
       // 取消/超时：保留底层带回的冻结 partial（真实动作效果）；无则用委托前的 s0 兜底。绝不重读 a.state()，
       // 否则替换任务或新连接已经更新的位置/氧气会被算到这次旧动作头上。
@@ -639,10 +665,13 @@ export const swimTo: Skill<{ xyz: { x: number; y: number; z: number }; timeoutMs
       ...(r.blockedAbove ? { blockedAbove: r.blockedAbove } : {}),
       ...(r.openWater ? { openWater: r.openWater } : {}),
       ...(r.targetDelta ? { targetDelta: r.targetDelta } : {}),
+      ...routeFacts,
+      ...(lastLeg !== null ? { routeLeg: lastLeg } : {}),
     };
-    if (r.ok && r.landed) return ok(`游到了 (${args.xyz.x},${args.xyz.y},${args.xyz.z}) 并站稳，${at}`, { landed: true, surfaced: r.surfaced, pos: s.pos, oxygen: r.oxygen, ...facts });
+    const routed = routeCells.length ? `；沿观察到的水路走了 ${routeCells.length} 段` : '';
+    if (r.ok && r.landed) return ok(`游到了 (${args.xyz.x},${args.xyz.y},${args.xyz.z}) 并站稳，${at}${routed}`, { landed: true, surfaced: r.surfaced, pos: s.pos, oxygen: r.oxygen, ...facts });
     // 目标本身就在水里：到点即完成，不强制上岸；landed 仍为 false，不把入水/露头写成上岸。
-    if (r.ok && r.stage === 'surface_reached') return ok(`游到了指定的水中点 (${args.xyz.x},${args.xyz.y},${args.xyz.z})，仍在水里（未上岸），${at}`, { landed: false, surfaced: r.surfaced, pos: s.pos, oxygen: r.oxygen, ...facts });
+    if (r.ok && r.stage === 'surface_reached') return ok(`游到了指定的水中点 (${args.xyz.x},${args.xyz.y},${args.xyz.z})，仍在水里（未上岸），${at}${routed}`, { landed: false, surfaced: r.surfaced, pos: s.pos, oxygen: r.oxygen, ...facts });
     const why = r.reason === 'WATER_ESCAPE_TIMEOUT' ? '游了一阵还没到' : r.reason === 'SWIM_NO_PROGRESS' ? '游不动' : r.reason;
     // 把身体实测到的阻挡事实交给调用方：目标偏差、头顶挡块、最近开口水面、目标坐标是否落在方块边界。
     // 只报事实，不替调用方改目标或挖/垫。
@@ -653,9 +682,11 @@ export const swimTo: Skill<{ xyz: { x: number; y: number; z: number }; timeoutMs
       ...(r.targetOnEdge && r.goal === 'dry_shore' ? ['目标 x/z 落在方块边界上；要站到方块 (bx,by,bz) 顶上，脚坐标用 (bx+0.5, by+1, bz+0.5)'] : []),
       ...(r.targetCellName && !AIRISH.has(r.targetCellName) && !/water|bubble_column|kelp|seagrass/.test(r.targetCellName) ? [`目标格是 ${r.targetCellName}（实心方块），不是脚所在的空气格`] : []),
     ].join('；');
+    const legNote = lastLeg !== null ? `水路第 ${lastLeg}/${routeCells.length} 段没到；` : '';
+    const routeNote = route?.why ? `水路没规划出来：${route.why}；` : '';
     // 预算耗尽不等于没有路：只有真正的物理无进展才归为 PATH_NOT_FOUND。
     const code = r.reason === 'WATER_ESCAPE_TIMEOUT' ? 'TIMEOUT' : 'PATH_NOT_FOUND';
-    return fail(code, `${why}；${at}${obstacles ? `；${obstacles}` : ''}`, { landed: false, surfaced: r.surfaced, pos: s.pos, oxygen: r.oxygen, reason: r.reason, ...facts });
+    return fail(code, `${legNote}${why}；${at}${routeNote}${obstacles ? `；${obstacles}` : ''}`, { landed: false, surfaced: r.surfaced, pos: s.pos, oxygen: r.oxygen, reason: r.reason, ...facts });
   },
 };
 
