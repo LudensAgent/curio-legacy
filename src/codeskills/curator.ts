@@ -253,15 +253,25 @@ export class SkillCurator {
 
   /** 主动维护型：自己写的稳定 auto 行为，条件成立时主动补漏（补火把、种树苗），不是接失败的恢复技能。
    * 这类技能可能很多个有效游戏日才用上一次；学习由失败驱动，收起后不会自己再学回来，所以只按闲置收不合理。
-   * 但本版已经失败、或有过拉锯/拆台/抢手/只提醒的负面证据、或被已验证的合并目标替代时不保护；
-   * 候选仍有自己的试用观察期；应急技能走 protectedEmergency；停用版按停用天数处理。 */
+   * 但本版已经失败或触发过却一次没成（noop/skip、没有 verify 的“跑完了”）、或有过拉锯/拆台/抢手/只提醒的负面证据、
+   * 或被已验证的合并目标替代时不保护；候选仍有自己的试用观察期；应急技能走 protectedEmergency；停用版按停用天数处理。 */
   private protectedProactive(b: Behavior) {
     if (b.candidate || b.mode !== 'auto' || !b.when || isEmergency(b)) return false;
     const st = this.engine.statsOf(b.name);
     if (st?.disabled) return false;
     const cur = this.engine.currentStats(b.name);
+    // 触发过却 0 成 0 败：跳过（noop/skip）或只记使用（没写 verify）都说明条件与代码对不上，不算“还没机会证明”。
+    // usageByVersion 按版本记，重写后的新版本从零判断；只有完全没有按版本拆分的老统计才退回终身 uses/skipped，
+    // 此时接受“历史 skip 取消保护”的保守取舍（无法从旧数据里区分版本）。
+    const usage = st?.usageByVersion?.[this.engine.versionOf(b)];
+    const triggered = st?.usageByVersion !== undefined
+      ? (usage?.uses ?? 0) > 0 || (usage?.skipped ?? 0) > 0
+      : (st?.uses ?? 0) > 0 || (st?.skipped ?? 0) > 0;
+    // idleInterrupts 只有终身计数，重写后不清：历史上白触发过的技能继续保守地不按闲置保护。
+    const triggeredNothing = cur.ok === 0 && (triggered || (st?.idleInterrupts ?? 0) > 0);
+    // conflicts/loops/undid/undoneBy 也是终身计数，重写后不清；有这些历史证据时保守地不保护，留给模型整理或容量淘汰。
     const conflicts = Object.values(st?.conflicts ?? {}).reduce((n, v) => n + v, 0);
-    if (cur.fail > 0 || conflicts > 0 || (st?.loops?.length ?? 0) > 0 || Object.keys(st?.undid ?? {}).length > 0
+    if (cur.fail > 0 || triggeredNothing || conflicts > 0 || (st?.loops?.length ?? 0) > 0 || Object.keys(st?.undid ?? {}).length > 0
       || Object.keys(st?.undoneBy ?? {}).length > 0 || !!st?.advisory) return false;
     const sub = this.substitutions.get(b.name);
     if (sub && sub.into !== b.name && sub.fromVersion === Number(this.engine.versionOf(b))) {
@@ -327,7 +337,8 @@ export class SkillCurator {
    * - 与执行端停用一致：当前版本至少 4 次有效执行、成功不到 25%，不让停用版卡在另一套门槛；
    * - 技能太多（超过 maxActive）时，最没用的那些：从没成功过的、用得最少的、最久没用的先收。
    *   从没用过也没失败过的主动维护技能（ok*3-fail 恰为 0）排在有失败证据的技能之后，不单凭这个公式先被挤掉；
-   *   其他受害者仍按原顺序收，容量上限照常执行。
+   *   只有双方都过了 settled 观察期时这种排序才成立：刚写/刚换版本的失败技能不参与本轮容量排序，
+   *   干净的主动维护技能仍可能被选中，这是既有的观察期规则。其他受害者仍按原顺序收，容量上限照常执行。
    * 容量整理给新版本观察期；明确失败证据不因刚写或当前处于别的维度而永久挂起。
    */
   retireLowValue(_now = Date.now()): string[] {

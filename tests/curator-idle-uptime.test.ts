@@ -204,6 +204,28 @@ test('主动维护技能没有失败证据时不按闲置收起，有失败证�
   assert.equal(w.engine.statsOf(failedRecovery.name)?.retired !== undefined, true);
 });
 
+test('主动维护技能触发过却只 skip、0 成 0 败时不算无负面证据', (t) => {
+  const w = setup(t);
+  const noop = { ...definition, name: 'plant-surplus-saplings', description: '树苗多了就种到附近空地', when: { food_below: 8 } };
+  const clean = { ...definition, name: 'top-up-torches', description: '火把少了就补到箱子里', when: { food_below: 7 } };
+  const worked = { ...definition, name: 'refill-torch-box', description: '火把少了就补满箱子', when: { food_below: 6 } };
+  for (const skill of [noop, clean, worked]) assert.ok(w.engine.write(skill).ok, skill.name);
+  w.observe();
+  // 真实 no-op 路径：noteInvocation 记 uses/skipped，不记 ok/fail，也不刷新闲置活动。
+  for (let i = 0; i < 5; i++) w.engine.recordInvocation(noop.name, { status: 'succeeded', summary: '当前不适用，未执行', data: { version: 1, noop: true } });
+  w.engine.recordInvocation(worked.name, { status: 'succeeded', summary: '实际补满了火把箱', data: { version: 1, verified: true } });
+  assert.deepEqual(w.engine.currentStats(noop.name), { ok: 0, fail: 0 });
+  assert.equal(w.engine.statsOf(noop.name)?.uses, 5);
+  assert.equal(w.engine.statsOf(noop.name)?.skipped, 5);
+  w.observe();
+  w.observe(8 * day);
+  const retired = w.curator.retireUnused();
+  assert.ok(retired.includes(noop.name), '触发过却一次没成的主动技能照常按闲置收起');
+  assert.ok(!retired.includes(clean.name), '从未触发、也没有 skip 的主动技能仍受保护');
+  assert.ok(!retired.includes(worked.name), '已有成功证据的主动技能仍受保护');
+  assert.deepEqual(w.engine.currentStats(worked.name), { ok: 1, fail: 0 });
+});
+
 test('容量压力先收有失败证据的，从没用过的主动维护技能排在后面', (t) => {
   const w = setup(t, { maxActive: 1 });
   const proactive = { ...definition, name: 'top-up-torches', description: '火把少了就补到箱子里', when: { food_below: 8 } };
