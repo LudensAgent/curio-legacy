@@ -349,16 +349,21 @@ export function toolTierFact(input: {
   ].filter(Boolean).join('；');
   const heldPick = held?.endsWith('_pickaxe') ? held : null;
   const alreadyHeld = heldPick === cheapName;
-  const parts = [`你包里有${highZh}×${highItem.count}（${durText(highItem)}），${high === 'iron' ? '铁锭' : '钻石'}只剩 ${scarce} 个（做一把新的要 3 个）`];
+  const matZh = high === 'iron' ? '铁锭' : '钻石';
+  const parts = [`你包里有${highZh}×${highItem.count}（${durText(highItem)}），${matZh}只剩 ${scarce} 个${scarce < 3 ? `，现在做不出新的${highZh}` : ''}（做一把新的要 3 个）`];
   if (choice.item) {
     const left = levelsOf(choice.item).reduce((a, b) => a + b, 0);
     parts.push(usable(choice.item)
-      ? `包里还有${cheapZh}×${choice.item.count}（${durText(choice.item)}）`
+      ? `包里还有${cheapZh}×${choice.item.count}（${durText(choice.item)}，合计还能挖约 ${left} 格）`
       : `包里的${cheapZh}×${choice.item.count}（${durText(choice.item)}）剩余都不足 15%，合计还能挖约 ${left} 格`);
   } else parts.push(`包里没有${cheapZh}`);
   if (heldPick) parts.push(`现在主手是 ${heldPick}`);
-  if (!choice.item || !usable(choice.item)) parts.push(`要再做一把${cheapZh}：${describePlan(choice.plan)}`);
+  // 便宜镐能不能补、补一把要什么，是和高阶镐“坏了没得补”对照的关键事实；即使现有便宜镐还可用也报，
+  // 否则很容易被理解成“石镐是稀缺备份，留着别用”。
+  parts.push(`再做一把${cheapZh}：${describePlan(choice.plan)}`);
   parts.push(scope);
+  // 稀缺材料 < 3 时高阶镐是不可补的；把“哪把坏了没得补、哪把能补”直接对照出来
+  if (scarce < 3) parts.push(`${highZh}坏了做不出新的；${cheapZh}坏了能再做`);
   // 已经有便宜镐（哪怕快坏）时也把“怎么用现有这把”说清；主手已经是它就别再叫它去拿
   parts.push(choice.item
     ? `${alreadyHeld ? `主手就是${cheapZh}，直接开挖即可` : `要用现有${cheapZh}就先 hold_item ${cheapName}`}；excavate_path 使用主手工具。换不换、做不做由你定`
@@ -366,9 +371,8 @@ export function toolTierFact(input: {
 
   // key 只收“会改变建议”的粗状态：held 只区分“主手是不是镐”而不记具体名字，
   // 避免铁镐/石镐来回换手时同一句提示反复重发；缺口只记缺哪些原料而不记数量。
-  const gap = !choice.item || !usable(choice.item)
-    ? (choice.plan.enough ? 'ready' : choice.plan.raw.map((r) => (r.anyWood ? '*log' : r.item)).sort().join(',') || 'unknown')
-    : 'held';
+  const refill = choice.plan.enough ? 'ready' : choice.plan.raw.map((r) => (r.anyWood ? '*log' : r.item)).sort().join(',') || 'unknown';
+  const gap = `${choice.item && usable(choice.item) ? 'usable' : 'worn'}:${refill}`;
   const key = [
     `tier:${high}`,
     `held:${heldPick ? 'pickaxe' : 'none'}`,
