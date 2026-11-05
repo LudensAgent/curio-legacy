@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
+import type { Vec3Like } from '../src/adapter/types.ts';
 import { PassageTracker, bridgeRuns, passageEntranceDescent, passageGraph, passageLevels, passageRoute } from '../src/memory/passages.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { describePassage, myFacilities } from '../src/mind/facilities.ts';
@@ -326,6 +327,30 @@ test('通道：亲自一步步走过的相邻格记成 link，反复走不重复
   // 再从 (1,63,0) 走回 (2,62,0)：这条边已经记过，去重不新增
   tr.observe({ worldId: W, dim: D, pos: at(2, 62, 0), place: 'underground' }, [], t + 101000);
   assert.equal(m.passages(D)[0].links?.length, 4, '反复走同一条边不重复');
+  m.close();
+});
+
+test('通道：两次观测之间走了几格也记成走过的边；竖直落差、瞬移不连', () => {
+  const m = new WorldMemory(null); m.setWorld(W);
+  const tr = new PassageTracker(m, () => 'p1');
+  let t = 0;
+  tr.observe({ worldId: W, dim: D, pos: at(0, 64, 0), place: 'surface' }, [], t);
+  // 第一次地下观测起一段；随后一次观测间隔里身体走了 4 格同层——这是真实位移，不能因为不是单步就丢掉
+  tr.observe({ worldId: W, dim: D, pos: at(0, 64, 0), place: 'underground' }, [], t += 1000);
+  tr.observe({ worldId: W, dim: D, pos: at(4, 64, 0), place: 'underground' }, [], t += 1000);
+  tr.observe({ worldId: W, dim: D, pos: at(8, 64, 0), place: 'underground' }, [], t += 1000);
+  const has = (a: Vec3Like, b: Vec3Like) => (m.passages(D)[0].links ?? []).some((l) =>
+    (l.a.x === a.x && l.a.y === a.y && l.a.z === a.z && l.b.x === b.x && l.b.y === b.y && l.b.z === b.z)
+    || (l.a.x === b.x && l.a.y === b.y && l.a.z === b.z && l.b.x === a.x && l.b.y === a.y && l.b.z === a.z));
+  assert.ok(has(at(0, 64, 0), at(4, 64, 0)), '4 格同层位移要记边');
+  const before = m.passages(D)[0].links?.length ?? 0;
+  // 观测间隔里掉下去 4 格：不能当成可走的边（往上不一定回得去）
+  tr.observe({ worldId: W, dim: D, pos: at(8, 60, 0), place: 'underground' }, [], t += 1000);
+  assert.equal(m.passages(D)[0].links?.length, before, '4 格竖直落差不在 observedStep 内');
+  // 原地不动（思考时很常见）不写自环
+  const sameSpot = m.passages(D)[0].links?.length ?? 0;
+  tr.observe({ worldId: W, dim: D, pos: at(8, 60, 0), place: 'underground' }, [], t += 1000);
+  assert.equal(m.passages(D)[0].links?.length, sameSpot, '原地连续观测不新增 link');
   m.close();
 });
 

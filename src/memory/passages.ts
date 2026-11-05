@@ -16,8 +16,24 @@ export interface DugBlock { pos: Vec3Like; name: string; ts: number }
 const flat = (a: Vec3Like, b: Vec3Like) => Math.hypot(a.x - b.x, a.z - b.z);
 const d3 = (a: Vec3Like, b: Vec3Like) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 const cell = (p: Vec3Like): Vec3Like => ({ x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) });
-/** 两个脚点是否 Chebyshev 相邻（单步/斜步/上下一格）；link 只记这种亲自走过的单步边，不把冲刺跨格或绕墙的位移误当直边 */
+/** 两条记录并成一条时补桥用：Chebyshev ≤1 才算单步相邻。
+ *  记录走过的边用 observedStep（允许观测间隔漏掉中间步），两者口径不同，不要混用。 */
 const adjacent = (a: Vec3Like, b: Vec3Like) => Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y), Math.abs(a.z - b.z)) <= 1 && d3(a, b) > 0;
+
+/** 两次观测之间身体真实发生过的位移，算一条“走过的边”：
+ *  同层最多 10 格（正常步行/被击退时观测会漏掉中间步），或 3.5 格内带 ≤2 格高差。
+ *  这不是几何抄近道——两端都是同一段行程里亲脚到过的点；更远的瞬移已在 observe 里按 >24 格换段。 */
+const observedStep = (a: Vec3Like, b: Vec3Like) => {
+  const d = d3(a, b), dy = Math.abs(a.y - b.y);
+  if (d <= 0) return false;
+  return (d <= PASSAGE_LINK && dy <= 2) || (d <= 10 && dy <= 1);
+};
+
+/** 旧记录没有 run 标记：建图补漏时不假设它们属于同一段连续行程，只补更保守的小缺口。 */
+const legacyStep = (a: Vec3Like, b: Vec3Like) => {
+  const d = d3(a, b), dy = Math.abs(a.y - b.y);
+  return d > 0 && ((d <= PASSAGE_LINK && dy <= 2) || (d <= 6 && dy <= 1));
+};
 
 /** 自己挖掉至少这么多格，才算“我挖的通道”（走进天然洞穴不算） */
 export const MIN_DUG = 4;
@@ -65,6 +81,8 @@ export class PassageTracker {
   private dugBlocks: DugBlock[] = [];
   /** 并进/重进旧道时脚下还没挨到旧脚点：接下来几步里一旦挨到就补一条连接边，让 links 连成一体（不是两团互不相连的岛） */
   private pendingBridge: { dim: string; worldId: string; steps: number } | null = null;
+  /** 当前这段连续观测的编号：只有同一段里相邻的 link 才允许在建图时补漏采的小缺口 */
+  private run = 0;
 
   constructor(private memory: Pick<WorldMemory, 'passages' | 'savePassage'> & Partial<Pick<WorldMemory, 'forgetPassage'>>, private newId: () => string = () => `psg_${Math.random().toString(36).slice(2, 8)}`) {}
 
@@ -94,13 +112,16 @@ export class PassageTracker {
     const belowSurface = !this.lastSurface || pos.y <= this.lastSurface.pos.y - 2;
     const inShaft = s.place === 'other' && digging && (!!this.active || belowSurface);
     if (s.place !== 'underground' && !inShaft) {
-      // 坑里、水里：不开始也不结束，但手上挖的照样算在这一段里
+      // 坑里、水里：不开始也不结束，但手上挖的照样算在这一段里。
+      // 这段位移没有被当作通道观测，回来时不能用旧的 lastPassage 直连，否则会把中间没看过的一段接成假边。
       if (this.active) this.count(this.active.rec, pos, dug);
+      this.lastPassage = null;
       return;
     }
     this.lastBelow = { pos, ts: now };
 
     if (!this.active) {
+      this.run++;
       const old = this.memory.passages(s.dim).find((p) => p.worldId === s.worldId && touchesPassage(p, pos, dug));
       if (old) {
         old.uses += 1;
@@ -122,17 +143,19 @@ export class PassageTracker {
       this.mergeInto(keep, keep === neighbor ? this.active!.rec : neighbor);
       this.active = { rec: keep, existing: true };
       this.beginBridge(keep, pos, s.dim, s.worldId);
+      this.run++;
     }
     const rec = this.active.rec;
-    // 记「亲自走过的相邻格对」：和上一次通道脚点 Chebyshev 相邻且无瞬移，就是一条真实可走的边
-    if (this.lastPassage && this.lastPassage.dim === s.dim && this.lastPassage.worldId === s.worldId && adjacent(this.lastPassage.pos, pos)) {
-      this.addLink(rec, this.lastPassage.pos, pos);
+    // 记「亲自走过的边」：上一次观测到这里没有瞬移，且位移在合理的观测间隔内。
+    // 只记严格相邻单步会把正常步行/下落时漏采的中间步全丢掉，一条走过的路会在图里断成几十团。
+    if (this.lastPassage && this.lastPassage.dim === s.dim && this.lastPassage.worldId === s.worldId && observedStep(this.lastPassage.pos, pos)) {
+      this.addLink(rec, this.lastPassage.pos, pos, { run: this.run });
     }
     this.lastPassage = { pos, dim: s.dim, worldId: s.worldId };
     // 上一步并进/重进旧道、脚下还没挨到旧脚点：现在挨到了就补连接边，让 links 连成一体；几步还没挨到就放弃
     if (this.pendingBridge && this.pendingBridge.dim === s.dim && this.pendingBridge.worldId === s.worldId) {
       const bridge = bridgeNode(rec, pos);
-      if (bridge) { this.addLink(rec, bridge, pos); this.pendingBridge = null; }
+      if (bridge) { this.addLink(rec, bridge, pos, { cut: true }); this.pendingBridge = null; }
       else if (--this.pendingBridge.steps <= 0) this.pendingBridge = null;
     }
     const last = rec.path[rec.path.length - 1];
@@ -206,8 +229,11 @@ export class PassageTracker {
     }
     for (const e of drop.entrances) this.addEntrance(keep, e);
     for (const q of drop.path) if (!keep.path.some((o) => d3(o, q) < STEP)) keep.path.push(q);
+    const beforeLinks = keep.links?.length ?? 0;
     for (const l of drop.links ?? []) this.addLink(keep, l.a, l.b);
-    if (bridge && adjacent(bridge[0], bridge[1])) this.addLink(keep, bridge[0], bridge[1]);
+    // 拼接进来的第一条是新的连续段起点：建图不能把它和前一条当成一次连续观测。
+    if ((keep.links?.length ?? 0) > beforeLinks && keep.links) keep.links[beforeLinks] = { ...keep.links[beforeLinks]!, cut: true };
+    if (bridge && adjacent(bridge[0], bridge[1])) this.addLink(keep, bridge[0], bridge[1], { cut: true });
     keep.dug += drop.dug;
     for (const [n, c] of Object.entries(drop.ores)) keep.ores[n] = (keep.ores[n] ?? 0) + c;
     keep.deepestY = Math.min(keep.deepestY, drop.deepestY);
@@ -215,18 +241,18 @@ export class PassageTracker {
     this.memory.forgetPassage?.(drop.id);
   }
 
-  /** 记一条亲自走过的相邻格对（无向、去重）。反复走同一条走廊不会新增，links 只随真正走过的新格子增长，天然有界。 */
-  private addLink(rec: PassageRecord, a: Vec3Like, b: Vec3Like) {
+  /** 记一条亲自走过的边（无向、去重）。run 标记同一段连续观测；合并/重进旧道补的桥用 cut 切断连续性。 */
+  private addLink(rec: PassageRecord, a: Vec3Like, b: Vec3Like, mark: { run?: number; cut?: boolean } = {}) {
     const links = (rec.links ??= []);
     const same = (u: Vec3Like, v: Vec3Like) => u.x === v.x && u.y === v.y && u.z === v.z;
     if (links.some((l) => (same(l.a, a) && same(l.b, b)) || (same(l.a, b) && same(l.b, a)))) return;
-    links.push({ a, b });
+    links.push({ a, b, ...(mark.run !== undefined ? { run: mark.run } : {}), ...(mark.cut ? { cut: true } : {}) });
   }
 
   /** 并进/重进旧道时，把当下脚点和旧道里相邻的脚点连起来：不补这条边，合并后的 links 就是两团互不相连的岛，passageRoute 走不通 */
   private beginBridge(rec: PassageRecord, pos: Vec3Like, dim: string, worldId: string) {
     const n = bridgeNode(rec, pos);
-    if (n) { this.addLink(rec, n, pos); this.pendingBridge = null; }
+    if (n) { this.addLink(rec, n, pos, { cut: true }); this.pendingBridge = null; }
     else this.pendingBridge = { dim, worldId, steps: 8 };
   }
 
@@ -257,7 +283,8 @@ export function passageLevels(rec: Pick<PassageRecord, 'path'>): number[] {
  * 返回从离自己最近的点到离目标最近的点的连接；未验证点间通行或当前地形，不能作为自动导航路线。
  * 两头离通道太远、或者连不上，就返回 null。
  */
-/** 通道脚点 + 真实边走成的无向图：节点是脚点（path 或 links 端点），边是 links（或旧数据的时间相邻脚点）+ 跨 record 的碎片自愈 + 同 record 的 1 格缺口自愈。 */
+/** 通道脚点 + 真实边走成的无向图：节点是脚点（path 或 links 端点），边是 links（或旧数据的时间相邻脚点）
+ *  + 跨 record 的碎片自愈 + 同一段连续观测（run 相同）里漏采样的小缺口；merge/dedupe 的 cut 边界不跨。 */
 export function passageGraph(recs: Pick<PassageRecord, 'path' | 'links'>[], opts: { hop?: number; link?: number } = {}): { nodes: Vec3Like[]; owner: number[]; edges: Map<number, Set<number>> } {
   const hop = opts.hop ?? 7, link = opts.link ?? PASSAGE_LINK;
   const nodes: Vec3Like[] = [];
@@ -273,8 +300,18 @@ export function passageGraph(recs: Pick<PassageRecord, 'path' | 'links'>[], opts
   };
   recs.forEach((r, recIdx) => {
     if (r.links?.length) {
-      // 有真实边：只沿亲自走过的相邻格对连，不按几何距离抄近道（那会穿墙/穿落差）；只差一步的相邻缺口在后面统一补
+      // 有真实边：只沿亲自走过的边连，不按几何距离抄近道（那会穿墙/穿落差）；只差一步的相邻缺口在后面统一补
       for (const { a, b } of r.links) add(indexOf(a, recIdx), indexOf(b, recIdx));
+      // 同一段连续观测（同一个 run）里相邻两条 link 之间漏采了中间步时补上，不然走过的一条道会断成多团。
+      // merge/dedupe 拼进来的那条带 cut：数组相邻不代表连续行程，不能跨过去补。旧记录没有 run：
+      // 只按更保守的 legacyStep 补，避免把历史上的拼接边界接成假边。
+      for (let i = 0; i + 1 < r.links.length; i++) {
+        const prev = r.links[i]!, next = r.links[i + 1]!;
+        if (next.cut) continue;
+        const from = prev.b, to = next.a;
+        const sameRun = prev.run !== undefined && prev.run === next.run;
+        if (sameRun ? observedStep(from, to) : legacyStep(from, to)) add(indexOf(from, recIdx), indexOf(to, recIdx));
+      }
     } else {
       // 旧数据没有 links：退回时间相邻脚点的推断（原行为）
       let prev = -1;
@@ -456,7 +493,7 @@ export function passageSurfaceAnchor(recs: Pick<PassageRecord, 'path' | 'entranc
  * 推断边，拼 path 会改变路网，所以不参与去重。被合并记录的 links/entrances 并进代表记录，
  * 不能像“直接丢掉”那样删掉唯一的桥。
  */
-export function dedupePassages<T extends { path: Vec3Like[]; links?: { a: Vec3Like; b: Vec3Like }[]; entrances?: Vec3Like[]; lastUsedAt?: number; archivedAt?: number }>(
+export function dedupePassages<T extends { path: Vec3Like[]; links?: { a: Vec3Like; b: Vec3Like; run?: number; cut?: boolean }[]; entrances?: Vec3Like[]; lastUsedAt?: number; archivedAt?: number }>(
   recs: T[], opts: { cover?: number; near?: number } = {},
 ): T[] {
   const cover = opts.cover ?? 0.8, near = opts.near ?? 1.5;
@@ -502,7 +539,13 @@ export function dedupePassages<T extends { path: Vec3Like[]; links?: { a: Vec3Li
   for (const c of clusters) {
     if (!c.members.length) continue;
     const rep = recs[c.rep]!;
-    const links = [...(rep.links ?? []), ...c.members.flatMap((m) => recs[m]!.links ?? [])];
+    // 拼接进来的每组第一条是新的连续段起点：建图不能把它和前一条当成一次连续观测。
+    const links = [...(rep.links ?? [])];
+    for (const m of c.members) {
+      const start = links.length;
+      links.push(...(recs[m]!.links ?? []));
+      if (links.length > start) links[start] = { ...links[start]!, cut: true };
+    }
     const entrances = [...(rep.entrances ?? []), ...c.members.flatMap((m) => recs[m]!.entrances ?? [])]
       .filter((e, i, all) => all.findIndex((q) => d3(q, e) < 0.5) === i);
     merged.set(c.rep, { ...rep, links, entrances } as T);

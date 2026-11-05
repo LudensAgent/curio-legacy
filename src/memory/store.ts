@@ -63,8 +63,10 @@ export interface PassageRecord {
   entrances: Vec3Like[];
   /** 沿途脚下的点，每隔几格记一个 */
   path: Vec3Like[];
-  /** 亲自一步步走过的相邻格对（无瞬移、Chebyshev 相邻）：真实可走的边，passageRoute 优先沿这些边走，有它就不用 hop/link 几何推断 */
-  links?: { a: Vec3Like; b: Vec3Like }[];
+  /** 亲自走过的边（无瞬移；相邻单步或一次观测间隔内的位移）：真实可走的边，passageRoute 优先沿这些边走。
+   *  run = 同一段连续观测的编号，建图只在这一段内部补漏采的小缺口；
+   *  cut = 这一段从这条边开始（合并/去重拼接的边界），不能把数组前一条当成连续行程。 */
+  links?: { a: Vec3Like; b: Vec3Like; run?: number; cut?: boolean }[];
   deepestY: number;
   /** 这条通道里自己挖掉了多少格 */
   dug: number;

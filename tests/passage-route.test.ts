@@ -59,18 +59,49 @@ test('旧记录漏了一步：同一条 record 里正交相邻的两个脚点补
   assert.deepEqual(route?.map((p) => `${p.x},${p.y},${p.z}`), ['-2,84,-53', '-2,84,-52', '-2,84,-51'], '路线跨过 (-2,84,-51)-(-2,84,-52)');
 });
 
-test('同一条 record 只补正交的 1 格缺口：2 格缺口和斜角缺口都不连', () => {
-  const rec = (links: { a: Vec3Like; b: Vec3Like }[]) => ({ path: [] as Vec3Like[], links });
-  const gap2 = rec([
+test('同一条 record 的连续记录之间按 observedStep 补桥：小缺口接上，大缺口/落差/非连续抄近道不连', () => {
+  const rec = (links: { a: Vec3Like; b: Vec3Like; run?: number; cut?: boolean }[]) => ({ path: [] as Vec3Like[], links });
+  // 连续两条 link 之间漏采了中间步（2 格同层）：身体确实从 (1,40,0) 走到 (3,40,0)，补上
+  const sampled = rec([
     { a: { x: 0, y: 40, z: 0 }, b: { x: 1, y: 40, z: 0 } },
     { a: { x: 3, y: 40, z: 0 }, b: { x: 4, y: 40, z: 0 } },
   ]);
-  assert.equal(connected([gap2]), false, '隔 2 格不补');
-  const diagonal = rec([
+  assert.equal(connected([sampled]), true, '连续记录之间的 2 格同层缺口要补');
+  // 连续两条之间是 12 格：不是观测间隔内的正常移动，不补
+  const far = rec([
     { a: { x: 0, y: 40, z: 0 }, b: { x: 1, y: 40, z: 0 } },
-    { a: { x: 2, y: 40, z: 1 }, b: { x: 2, y: 40, z: 2 } },
+    { a: { x: 13, y: 40, z: 0 }, b: { x: 14, y: 40, z: 0 } },
   ]);
-  assert.equal(connected([diagonal]), false, '斜角缺口不补');
+  assert.equal(connected([far]), false, '连续记录之间的 12 格缺口不补');
+  // 连续两条之间是 4 格落差：不能当成可走的边
+  const drop = rec([
+    { a: { x: 0, y: 64, z: 0 }, b: { x: 1, y: 64, z: 0 } },
+    { a: { x: 1, y: 60, z: 0 }, b: { x: 2, y: 60, z: 0 } },
+  ]);
+  assert.equal(connected([drop]), false, '连续记录之间的 4 格落差不当成可走边');
+  // 两条不相邻的 link 端点离得近，但记录顺序相隔很远：不按几何硬连
+  const shortcut = rec([
+    { a: { x: 0, y: 40, z: 0 }, b: { x: 1, y: 40, z: 0 } },
+    { a: { x: 20, y: 40, z: 0 }, b: { x: 21, y: 40, z: 0 } },
+    { a: { x: 1, y: 40, z: 2 }, b: { x: 2, y: 40, z: 2 } },
+  ]);
+  assert.equal(connected([shortcut]), false, '非连续记录之间不按几何距离抄近道');
+
+  // merge/dedupe 拼接进来的 cut 边界：数组顺序不代表连续行程，不能跨过去补边
+  const chain = (x0: number, z: number, n: number) => Array.from({ length: n }, (_, i) => ({
+    a: { x: x0 + i, y: 40, z }, b: { x: x0 + i + 1, y: 40, z },
+  }));
+  const merged = rec([
+    ...chain(0, 0, 4),
+    ...chain(5, 1, 4).map((l, i) => i === 0 ? { ...l, cut: true } : l),
+    { a: { x: 4, y: 40, z: 0 }, b: { x: 5, y: 40, z: 1 }, cut: true },
+  ]);
+  const { nodes, edges } = passageGraph([merged]);
+  const idx = (x: number, z: number) => nodes.findIndex((p) => p.x === x && p.y === 40 && p.z === z);
+  const a = idx(9, 1), b = idx(4, 0);
+  assert.ok(a >= 0 && b >= 0, '两端节点都在图里');
+  // 不标 cut 时，(9,40,1) 会和 (4,40,0) 相距 ~5.1 被 legacyStep 接成跨段假边。
+  assert.equal(edges.get(a)?.has(b), false, 'cut 边界两侧不能补出跨段假边');
 });
 
 test('goto does not detour through historical passage points to reach a nearby lower target', async (t) => {
