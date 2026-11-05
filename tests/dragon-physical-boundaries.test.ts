@@ -34,6 +34,20 @@ test('equip_armor 装备最好材质的护甲并核对装备栏', async () => {
   assert.equal(adapter.equipped.get('head'), 'diamond_helmet');
 });
 
+test('equip_armor 同材质也选背包里更耐久的，不把快报废的当最优', async () => {
+  const worn = { slot: 'torso', name: 'iron_chestplate', durabilityRemaining: 15, durabilityMax: 240 };
+  const equipped: string[] = [];
+  const adapter = {
+    state: () => ({ inventory: [{ name: 'iron_chestplate', count: 1, durability: { left: 200, max: 240 }, durabilities: [200] }],
+      equipment: equipped.includes('torso') ? [{ ...worn, durabilityRemaining: 200 }] : [worn] }),
+    equipItem: async (name: string, slot: string) => { equipped.push(slot); return { ok: true, reason: '' }; },
+  };
+  const ctx = { adapter, signal: new AbortController().signal } as any;
+  const result = await equipArmor.run(ctx, {});
+  assert.equal(result.status, 'succeeded');
+  assert.deepEqual(equipped, ['torso'], '背包里 200 耐久的铁胸甲该换掉身上 15 耐久的');
+});
+
 test('a cage with no clear ballistic path cannot draw or spend an arrow', async () => {
   const adapter = new MineflayerAdapter(config, new EventBus());
   const events: string[] = [];

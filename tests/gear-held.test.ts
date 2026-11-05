@@ -11,6 +11,8 @@ test('已经有同类、等级不低、还经用的剑 → 不再做；快坏了
   assert.equal(gearAlreadyHeld('iron_pickaxe', [{ name: 'iron_pickaxe', count: 1, durability: { left: 200, max: 250 }, durabilities: [200] }]), null, '镐可以多带一把备用');
   assert.ok(gearAlreadyHeld('stone_pickaxe', [{ name: 'stone_pickaxe', count: 2, durability: { left: 100, max: 131 }, durabilities: [120, 100] }]));
   assert.ok(gearAlreadyHeld('iron_helmet', [], [{ slot: 'head', name: 'iron_helmet', durabilityRemaining: 150 } as any]));
+  assert.ok(gearAlreadyHeld('iron_helmet', [], [{ slot: 'head', name: 'iron_helmet', durabilityRemaining: 150, durabilityMax: 240 } as any]));
+  assert.equal(gearAlreadyHeld('iron_helmet', [], [{ slot: 'head', name: 'iron_helmet', durabilityRemaining: 15, durabilityMax: 240 } as any]), null, '身上那件快报废了，不算“还经用”');
   assert.equal(gearAlreadyHeld('torch', swords), null);
 });
 

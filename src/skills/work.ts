@@ -463,7 +463,7 @@ function gearKind(name: string): { kind: string; tier: number } | null {
  * 要做的工具/武器/护甲，手上已经有同类、等级不低、还经用（剩四分之一以上耐久）的了：多半是忘了自己有。
  * 镐、斧、锹允许多带一把备用；剑、锄、护甲、盾有一件就够。返回说明，没问题返回 null
  */
-export function gearAlreadyHeld(item: string, inv: InvItem[], worn: { name: string; durabilityRemaining?: number }[] = []): string | null {
+export function gearAlreadyHeld(item: string, inv: InvItem[], worn: { name: string; durabilityRemaining?: number; durabilityMax?: number }[] = []): string | null {
   const want = gearKind(item);
   if (!want) return null;
   const have: string[] = [];
@@ -480,8 +480,11 @@ export function gearAlreadyHeld(item: string, inv: InvItem[], worn: { name: stri
   for (const e of worn) {
     const g = gearKind(e.name);
     if (!g || g.kind !== want.kind || g.tier < want.tier) continue;
+    // 穿在身上的也要看耐久：快报废的护甲不能当作“还有件经用的”，否则会挡住修补/更换的决定
+    const left = e.durabilityRemaining, max = e.durabilityMax;
+    if (left !== undefined && max && left / max < 0.25) continue;
     usable++;
-    have.push(`身上穿着的 ${e.name}`);
+    have.push(`身上穿着的 ${e.name}${left !== undefined && max ? `（耐久 ${left}/${max}）` : ''}`);
   }
   const limit = ['pickaxe', 'axe', 'shovel'].includes(want.kind) ? 2 : 1;
   return usable >= limit ? `已经有 ${have.join('、')}，还经用` : null;
@@ -506,7 +509,7 @@ const GEAR_ZH: [string, string][] = (() => {
  * 一段清单/想法文字里提到的装备，哪些其实已经拿在手上或穿在身上（同级或更好、还经用）。
  * 给「清单里写着要做铁剑、身上却有钻石剑」这类忘了自己有什么的情况做交叉核对。返回一句话说明，没有返回 null。
  */
-export function gearAlreadyHeldInText(text: string, inv: InvItem[], worn: { name: string; durabilityRemaining?: number }[] = []): string | null {
+export function gearAlreadyHeldInText(text: string, inv: InvItem[], worn: { name: string; durabilityRemaining?: number; durabilityMax?: number }[] = []): string | null {
   const ids = new Set<string>();
   let i = 0;
   while (i < text.length) {
@@ -560,7 +563,8 @@ export const craft: Skill<{ item: string; count: number; batchSize?: number; ext
     if (!args.extra && !interruptedCrafts.has(args.item)) {
       const s = ctx.adapter.state();
       const held = gearAlreadyHeld(args.item, s.inventory, s.equipment);
-      if (held) return fail('BAD_ARGS', `${held}，不用再做 ${args.item}：打架、干活时会自己拿出最好的那件用；真要再做一把（备用、给别处）写 {"item":"${args.item}","extra":true}`);
+      const armor = /_(helmet|chestplate|leggings|boots)$/.test(args.item);
+      if (held) return fail('BAD_ARGS', `${held}，不用再做 ${args.item}${armor ? '（背包里的护甲要 hold_item 穿到对应槽才生效）' : '：打架、干活时会自己拿出最好的那件用'}；真要再做（备用、给别处）写 {"item":"${args.item}","extra":true}`);
     }
     args = { ...args, item: pickVariant(args.item, ctx.adapter.state().inventory) };
     // 刚被打断的同一样合成：先等它落地，做成了就算进这次的数量

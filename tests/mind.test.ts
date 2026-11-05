@@ -1475,11 +1475,28 @@ test('提示词：【身体】写出身上穿戴的盔甲和副手（不在背�
     noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', skills: [], tier: 'deliberate' as const };
   const body = (state: any) => buildMindMessages({ ...base, state } as any)[1].content.match(/【身体】(.*)/)![1];
   const bare = JSON.parse(body({ ...adapter.state(), equipment: [] }));
-  assert.equal(bare.wearing, '没穿盔甲，副手空着');
+  assert.deepEqual(bare.wearing, { 头: '空', 胸: '空', 腿: '空', 脚: '空', 副手: '空' });
   const dressed = JSON.parse(body({ ...adapter.state(), equipment: [
-    { slot: 'head', name: 'iron_helmet', durabilityRemaining: 165 }, { slot: 'torso', name: 'iron_chestplate', durabilityRemaining: 240 },
-    { slot: 'legs', name: 'iron_leggings' }, { slot: 'feet', name: 'iron_boots', durabilityRemaining: 195 }] }));
-  assert.deepEqual(dressed.wearing, { 头: 'iron_helmet（耐久剩 165）', 胸: 'iron_chestplate（耐久剩 240）', 腿: 'iron_leggings', 脚: 'iron_boots（耐久剩 195）' });
+    { slot: 'head', name: 'iron_helmet', durabilityRemaining: 165, durabilityMax: 165 }, { slot: 'torso', name: 'iron_chestplate', durabilityRemaining: 240, durabilityMax: 240 },
+    { slot: 'legs', name: 'iron_leggings' }, { slot: 'feet', name: 'iron_boots', durabilityRemaining: 195, durabilityMax: 195 }] }));
+  assert.deepEqual(dressed.wearing, { 头: 'iron_helmet（耐久 165/165）', 胸: 'iron_chestplate（耐久 240/240）', 腿: 'iron_leggings', 脚: 'iron_boots（耐久 195/195）', 副手: '空' });
+});
+
+test('提示词：背包里的护甲和空槽并列写出，避免把背包里的护甲当成已穿戴', () => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  const perception = new Perception(adapter, memory, bus, new Vision(adapter));
+  const self = new SelfModel(null);
+  const state = { ...adapter.state(), equipment: [{ slot: 'torso', name: 'iron_chestplate', durabilityRemaining: 15, durabilityMax: 240 }],
+    inventory: [{ name: 'iron_boots', count: 1, durability: { left: 20, max: 195 }, durabilities: [20] },
+      { name: 'iron_chestplate', count: 1, durability: { left: 4, max: 240 }, durabilities: [4] }] };
+  const [, user] = buildMindMessages({ reason: '测试', percept: perception.update(), state, self, memory, activity: null, suspended: [], lastRecord: null,
+    noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', skills: [], tier: 'deliberate' } as any);
+  const body = JSON.parse(user.content.match(/【身体】(.*)/)![1]);
+  assert.equal(body.wearing['脚'], '空');
+  assert.match(body.wearables_in_backpack, /iron_boots（耐久 20\/195，快坏了），脚槽空着/);
+  assert.match(body.wearables_in_backpack, /iron_chestplate（耐久 4\/240，快坏了），胸槽现穿着 iron_chestplate（耐久 15\/240）/);
+  assert.match(body.mergeable_gear, /iron_chestplate 2 件（背包 4\/240、身上 15\/240）/);
+  memory.close();
 });
 
 test('提示词区分背包空槽与物品的堆叠上限', () => {
@@ -1492,8 +1509,8 @@ test('提示词区分背包空槽与物品的堆叠上限', () => {
   const body = JSON.parse(user.content.match(/【身体】(.*)/)![1]);
   assert.equal(body.empty_slots, '4 个空槽（每槽放一叠，不是一件）');
   assert.deepEqual(body.inventory, ['raw_iron×4（每叠上限 64）', 'bucket×2（每叠上限 16）']);
-  assert.match(body.inventory_space, /空格数是空槽位数量，不是可携带物品数量/);
-  assert.match(body.inventory_space, /同名物品的属性不同时也不一定能合并/);
+  assert.match(body.inventory_space, /4 个空槽由所有物品共用/);
+  assert.match(body.inventory_space, /64 个铁矿石只占 1 个空槽/);
   memory.close();
 });
 

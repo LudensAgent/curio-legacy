@@ -25,8 +25,8 @@ const STATION_ZH: Record<'crafting_table' | 'grindstone' | 'anvil', string> = {
 
 export const mergeTools: Skill<{ item: string; station: 'crafting_table' | 'grindstone' | 'anvil'; count: number }> = {
   name: 'merge_tools',
-  description: '把背包里同名同材质的工具两两合并耐久（相加 +5% 上限满耐久）；默认工作台（免费、移除普通附魔），station 可指定砂轮（返经验、也移除普通附魔）或铁砧（保留附魔、消耗经验）。不制造工作站',
-  argsDoc: '{"item":"<工具名，如 iron_pickaxe>","station"?:"crafting_table|grindstone|anvil","count"?:合并后保留几把（默认 1，合并到只剩一把）}',
+  description: '把背包里同名同材质的工具/武器/护甲两两合并耐久（相加 +5% 上限满耐久）；默认工作台（免费、移除普通附魔），station 可指定砂轮（返经验、也移除普通附魔）或铁砧（保留附魔、消耗经验）。不制造工作站。穿在身上的那件要先 hold_item 脱进背包',
+  argsDoc: '{"item":"<装备名，如 iron_pickaxe、iron_chestplate>","station"?:"crafting_table|grindstone|anvil","count"?:合并后保留几件（默认 1，合并到只剩一件）}',
   timeoutMs: 120000,
   movement: true,
   outcomeBoundary: true,
@@ -46,8 +46,14 @@ export const mergeTools: Skill<{ item: string; station: 'crafting_table' | 'grin
     if (!adapter.useGui) return fail('ERROR', '当前适配器不支持界面操作');
     const countOf = () => adapter.state().inventory.find((i) => i.name === args.item)?.count ?? 0;
     const cur = countOf();
-    if (cur < 2) return fail('MISSING_MATERIALS', `背包里 ${args.item} 不足两把（现有 ${cur} 把），没有可合并的`);
+    const worn = adapter.state().equipment?.filter((e) => e.name === args.item) ?? [];
+    if (cur + worn.length < 2) return fail('MISSING_MATERIALS', `${args.item} 不足两件（背包 ${cur} 件、身上 ${worn.length} 件），没有可合并的`);
     if (!isGear(args.item)) return fail('BAD_ARGS', `${args.item} 不是有耐久的工具/武器/护甲，不能合并`);
+    // 穿在身上的不能直接放进合成格：先把缺口说清楚，脱不脱由它决定
+    if (cur < 2) {
+      const slots = [...new Set(worn.map((e) => e.slot))];
+      return fail('MISSING_MATERIALS', `${args.item} 有 ${worn.length} 件穿在身上（${slots.join('、')}）、背包里 ${cur} 件：穿着的不能直接放进合成格；先用 hold_item {"item":null,"to":"${slots[0]}"} 脱进背包，再合并`);
+    }
 
     const zh = STATION_ZH[args.station];
     const found = findStation(ctx, STATION_KINDS[args.station], 48);

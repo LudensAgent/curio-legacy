@@ -798,7 +798,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         const item = b.inventory.slots?.[b.getEquipmentDestSlot?.(slot)];
         if (!item) return [];
         const max = this.mcData.itemsByName?.[item.name]?.maxDurability;
-        return [{ slot, name: item.name, durabilityRemaining: max ? max - (item.durabilityUsed ?? 0) : undefined }];
+        return [{ slot, name: item.name, durabilityRemaining: max ? max - (item.durabilityUsed ?? 0) : undefined, ...(max ? { durabilityMax: max } : {}) }];
       }),
     };
   }

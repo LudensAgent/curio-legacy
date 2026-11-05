@@ -70,6 +70,18 @@ test('不足两把直接报 MISSING_MATERIALS，不调界面', async () => {
   assert.equal(world.mergeCalls, 0);
 });
 
+test('一件穿在身上、一件在背包：说清要先脱下来才能合并，不调界面', async () => {
+  const world = new MergeWorld();
+  world.inv.set('iron_chestplate', 1);
+  world.equipped.set('torso', 'iron_chestplate');
+  const r = await mergeTools.run(makeCtx(world), { item: 'iron_chestplate', station: 'crafting_table', count: 1 });
+  assert.equal(r.status, 'failed');
+  assert.equal(r.failureCode, 'MISSING_MATERIALS');
+  assert.match(r.summary, /穿在身上（torso）/);
+  assert.match(r.summary, /hold_item \{"item":null,"to":"torso"\}/);
+  assert.equal(world.mergeCalls, 0);
+});
+
 test('附近没有工作站报 NOT_FOUND', async () => {
   const world = new MergeWorld();
   world.inv.set('iron_pickaxe', 3);

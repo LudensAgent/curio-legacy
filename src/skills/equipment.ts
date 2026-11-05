@@ -2,23 +2,33 @@ import { sleep } from '../util.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill } from './types.ts';
 
 export const equipArmor: Skill<{}> = {
-  name: 'equip_armor', description: '装备当前持有的最好材质护甲及盾牌，并核对真实装备栏；不会凭背包中有护甲就当作已穿戴。', argsDoc: '{}', timeoutMs: 30000, movement: false,
+  name: 'equip_armor', description: '装备当前持有的最好护甲及盾牌（材质优先，同材质选耐久高的），并核对真实装备栏；不会凭背包中有护甲就当作已穿戴。', argsDoc: '{}', timeoutMs: 30000, movement: false,
   validate: () => ({ ok: true, args: {} }),
   async run(ctx) {
     if (!ctx.adapter.equipItem) return fail('ERROR', '适配器没有装备接口');
     const state = ctx.adapter.state();
     const materials = ['netherite', 'diamond', 'iron', 'chainmail', 'golden', 'leather'];
+    const tier = new Map(materials.map((m, i) => [m, materials.length - i]));
     const slots = [['head', 'helmet'], ['torso', 'chestplate'], ['legs', 'leggings'], ['feet', 'boots']] as const;
     const changed: string[] = [];
     for (const [slot, suffix] of slots) {
-      const equipped = state.equipment?.find((e) => e.slot === slot)?.name;
-      const selected = materials.map((m) => `${m}_${suffix}`).find((name) => equipped === name || state.inventory.some((i) => i.name === name && i.count > 0));
-      if (!selected || selected === equipped) continue;
-      const result = await ctx.adapter.equipItem(selected, slot, ctx.signal);
-      if (!result.ok) return fail('ERROR', `装备 ${selected} 失败：${result.reason}`);
-      changed.push(selected);
+      const worn = state.equipment?.find((e) => e.slot === slot);
+      const fromBag = state.inventory.filter((i) => i.name.endsWith(`_${suffix}`) && i.count > 0).flatMap((i) =>
+        (i.durabilities?.length ? i.durabilities : [i.durability?.left]).map((left) => ({ name: i.name, left, tier: tier.get(i.name.split('_')[0]) ?? -1, from: 'bag' })));
+      const candidates = [
+        ...fromBag,
+        ...(worn && worn.name.endsWith(`_${suffix}`) ? [{ name: worn.name, left: worn.durabilityRemaining, tier: tier.get(worn.name.split('_')[0]) ?? -1, from: 'worn' }] : []),
+      ].filter((c) => c.tier >= 0);
+      const best = candidates.sort((a, b) => b.tier - a.tier || (b.left ?? -1) - (a.left ?? -1))[0];
+      // 最好的那件就是身上这件：不脱了重穿；背包里同材质但更耐久的会排到前面
+      if (!best || best.from === 'worn') continue;
+      const result = await ctx.adapter.equipItem(best.name, slot, ctx.signal);
+      if (!result.ok) return fail('ERROR', `装备 ${best.name} 失败：${result.reason}`);
+      changed.push(best.name);
     }
-    if (state.inventory.some((i) => i.name === 'shield' && i.count > 0)) {
+    const shieldInBag = state.inventory.find((i) => i.name === 'shield' && i.count > 0);
+    const wornShield = state.equipment?.find((e) => e.slot === 'off-hand' && e.name === 'shield');
+    if (shieldInBag && (!wornShield || (shieldInBag.durabilities?.[0] ?? -1) > (wornShield.durabilityRemaining ?? -1))) {
       const result = await ctx.adapter.equipItem('shield', 'off-hand', ctx.signal);
       if (!result.ok) return fail('ERROR', `装备盾牌失败：${result.reason}`);
       changed.push('shield');

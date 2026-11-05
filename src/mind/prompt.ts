@@ -103,10 +103,10 @@ export interface MindContext {
 
 /** 常用动作：给完整参数；其余只列名字和一句用途，需要时用 {"kind":"moves"} 查完整参数 */
 export const COMMON_MOVES = ['dig_at', 'step', 'place_at', 'defend', 'gather', 'goto', 'explore', 'look', 'look_around', 'dive', 'surface', 'swim_to', 'craft', 'smelt', 'collect_furnace', 'eat', 'hunt', 'forage', 'fish', 'farm', 'collect_seeds',
-  'pickup_items', 'store_items', 'take_items', 'find_item', 'place_torch', 'shelter', 'sleep', 'wait', 'dig', 'excavate_path', 'follow_passage', 'climb_up', 'press_keys', 'build', 'travel', 'inspect_block', 'interact_block', 'use_item', 'use_skill'];
+  'pickup_items', 'store_items', 'take_items', 'find_item', 'place_torch', 'shelter', 'sleep', 'wait', 'dig', 'excavate_path', 'follow_passage', 'climb_up', 'press_keys', 'build', 'travel', 'inspect_block', 'interact_block', 'use_item', 'use_skill', 'merge_tools'];
 
-/** 远行、传送门、末地这些只在用得上时列出来，平时是噪音 */
-const ADVANCED = /portal|end_|dragon|stronghold|search_structure|reservations|base_memory|building_archive|building_review|ranged_defend|equip_armor/;
+/** 远行、传送门、末地这些只在用得上时列出来，平时是噪音；穿装备是日常动作，留在常驻目录里 */
+const ADVANCED = /portal|end_|dragon|stronghold|search_structure|reservations|base_memory|building_archive|building_review|ranged_defend/;
 
 /** 描述取第一句话，太长就在逗号处截断（不截在半个词上） */
 function briefOf(d: string, n: number): string {
@@ -139,7 +139,7 @@ export function movesCatalog(chars = 40, core: Set<string> = new Set(COMMON_MOVE
 /** 瞥一眼时给完整参数的常用动作；其余只列名字 + 用途，参数按需用 moves 查 */
 const GLANCE_CORE = ['dig_at', 'step', 'place_at', 'gather', 'goto', 'craft', 'eat', 'sleep', 'wait', 'look', 'look_around', 'defend', 'hunt', 'place_torch', 'dive', 'surface', 'swim_to', 'travel', 'press_keys'];
 /** 瞥一眼时只列名字 + 用途的动作（完整参数按需查） */
-const GLANCE_SECONDARY = ['explore', 'forage', 'pickup_items', 'shelter', 'build', 'smelt', 'store_items', 'climb_up', 'use_skill', 'excavate_path', 'descend', 'assess_landings', 'spatial_query', 'walk_to', 'walk_known_route'];
+const GLANCE_SECONDARY = ['explore', 'forage', 'pickup_items', 'shelter', 'build', 'smelt', 'store_items', 'climb_up', 'use_skill', 'excavate_path', 'descend', 'assess_landings', 'spatial_query', 'walk_to', 'walk_known_route', 'equip_armor'];
 
 /** 抬头看（glance）的动作目录：只列少数完整参数 + 常用名字，隐藏长尾，保持轻量 */
 export function glanceCatalog(): string {
@@ -557,6 +557,39 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
   const tool = /stone|ore|coal|iron|copper|deepslate/.test(material) ? 'pickaxe' : /dirt|grass|sand|gravel|clay/.test(material) ? 'shovel' : /log|wood/.test(material) ? 'axe' : undefined;
   // 挖的时候身体会自动换上背包里最快的工具；要提醒的是“背包里根本没有合适的工具”
   const ownsTool = tool ? [...inv.keys()].some((n) => n.endsWith(`_${tool}`)) : true;
+  const wornBySlot = new Map((s.equipment ?? []).map((e) => [e.slot, e]));
+  const ARMOR_SLOT: Record<string, string> = { helmet: 'head', chestplate: 'torso', leggings: 'legs', boots: 'feet' };
+  // 背包里的护甲/盾不会自己生效：把槽位现状和这件并排写出来（穿哪件、要不要换由它定）
+  const wearables = s.inventory.flatMap((it) => {
+    const slot = it.name === 'shield' ? 'off-hand' : it.name === 'elytra' ? 'torso' : ARMOR_SLOT[it.name.split('_').at(-1) ?? ''];
+    if (!slot || it.count <= 0) return [];
+    const worn = wornBySlot.get(slot);
+    const now = worn
+      ? `现穿着 ${worn.name}${worn.durabilityRemaining !== undefined ? `（耐久 ${worn.durabilityRemaining}${worn.durabilityMax ? `/${worn.durabilityMax}` : ''}）` : ''}`
+      : '空着';
+    return [`${it.name}${durabilityText(it)}，${WEAR_SLOT[slot]}槽${now}`];
+  });
+  // 空槽少时，说清哪些未满的同类堆还能继续接收：0 个空槽不等于什么都捡不起来
+  const stackRoom = s.inventory.flatMap((it) => {
+    const size = it.stackSize;
+    if (!size || size <= 1 || !it.stacks?.length) return [];
+    const free = it.stacks.reduce((n, st) => n + Math.max(0, size - st.count), 0);
+    return free > 0 ? [{ name: it.name, free }] : [];
+  }).sort((a, b) => b.free - a.free);
+  const roomText = `${stackRoom.slice(0, 6).map((r) => `${r.name} 还能装 ${r.free} 个`).join('、')}${stackRoom.length > 6 ? ` 等 ${stackRoom.length} 种` : ''}`;
+  // 同名同材质装备有两件以上：工作台能合成修理；穿在身上的那件不在背包里，不能直接放进合成格
+  const gearPieces = new Map<string, string[]>();
+  for (const it of s.inventory) {
+    if (!it.durability) continue;
+    const parts = (it.durabilities?.length ? it.durabilities : [it.durability.left]).map((left) => `背包 ${left}/${it.durability!.max}`);
+    gearPieces.set(it.name, [...(gearPieces.get(it.name) ?? []), ...parts]);
+  }
+  for (const e of s.equipment ?? []) {
+    if (e.durabilityRemaining === undefined) continue;
+    gearPieces.set(e.name, [...(gearPieces.get(e.name) ?? []), `身上 ${e.durabilityRemaining}${e.durabilityMax ? `/${e.durabilityMax}` : ''}`]);
+  }
+  const mergeable = [...gearPieces].filter(([, parts]) => parts.length >= 2).slice(0, 4)
+    .map(([name, parts]) => `${name} ${parts.length} 件（${parts.slice(0, 4).join('、')}${parts.length > 4 ? '…' : ''}）`);
   return {
     ...(p.self.where ? { where: p.self.where.text } : p.self.overhead ? { overhead: p.self.overhead.block ? `头顶 ${p.self.overhead.up} 格是 ${p.self.overhead.block}` : '头顶一直空着' } : {}),
     pos: pos3(p.self.pos), dim: `${DIM_ZH[p.self.dim] ?? p.self.dim}（${p.self.dim}）`, biome: p.self.biome, sky_visible: p.self.sky_visible ?? null,
@@ -568,10 +601,11 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
     ...(p.time.weather ? { weather: p.time.weather } : {}),
     ...(p.light ? { light: `${{ bright: '亮', dim: '有点暗', dark: '很暗' }[p.light.level] ?? p.light.level}${p.light.mob_spawn_risk ? '，会刷怪' : ''}` } : {}),
     held: p.self.held ? `${p.self.held}${s.heldDurability ? `（耐久 ${s.heldDurability.left}/${s.heldDurability.max}${s.heldDurability.left / s.heldDurability.max < 0.15 ? `，快坏了${spareNote(s.inventory.find((i) => i.name === p.self.held), s.heldDurability)}` : ''}）` : ''}` : p.self.held,
-    // 身上穿戴的（盔甲、副手）：不在背包里，不写出来它就以为自己什么都没穿
-    wearing: s.equipment?.length
-      ? Object.fromEntries(s.equipment.map((e) => [WEAR_SLOT[e.slot] ?? e.slot, `${e.name}${e.durabilityRemaining !== undefined ? `（耐久剩 ${e.durabilityRemaining}）` : ''}`]))
-      : '没穿盔甲，副手空着',
+    // 身上穿戴的（盔甲、副手）：不在背包里，空槽也写出来，不写它就以为自己还穿着
+    wearing: Object.fromEntries(['head', 'torso', 'legs', 'feet', 'off-hand'].map((slot) => {
+      const e = wornBySlot.get(slot);
+      return [WEAR_SLOT[slot], e ? `${e.name}${e.durabilityRemaining !== undefined ? `（耐久 ${e.durabilityRemaining}${e.durabilityMax ? `/${e.durabilityMax}` : ''}）` : ''}` : '空'];
+    })),
     ...(digging && tool && !ownsTool ? { tool_note: `正在挖 ${material}，背包里没有 ${tool}（只能空手挖，很慢）` } : {}),
     // 效率/抠门的双面事实：最近挖了很多，更快/更省的工具各是什么（只给事实，换不换由它定）
     ...(p.efficiency?.length ? { dig_effort: p.efficiency.slice(0, 2).map((e) => effortFacts(e, s.inventory, p.storage?.stock).join('；')) } : {}),
@@ -584,9 +618,13 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
         ? `；${it.stacks.map((stack) => `槽${stack.slot} ${stack.count}/${stackSize}，该叠可再放 ${stackSize - stack.count} 个数据相同的物品`).join('；')}` : '';
       return `${name}×${count}${/_sapling$/.test(name) ? '（可种）' : ''}${it?.stackSize ? `（每叠上限 ${it.stackSize}${multi}${stacks}）` : ''}${durabilityText(it)}${it?.enchanted ? '（附魔）' : ''}`;
     }), empty_slots: `${s.emptySlots} 个空槽（每槽放一叠，不是一件）`,
+    ...(wearables.length ? { wearables_in_backpack: `背包里的护甲/盾（穿到对应槽才生效）：${wearables.join('；')}` } : {}),
+    ...(mergeable.length ? { mergeable_gear: `${mergeable.join('；')}。同名同材质装备可在工作台两两合成一件（耐久相加再加满耐久的 5%，普通附魔会被移除）；穿在身上的那件不在背包里，不能直接放进合成格。` } : {}),
     // 精确账本的总表（箱子+背包合计）：供"物资充足/稀缺"量化；箱子部分是最后打开时记的，之后世界可能变化
     ...(p.storage?.stock?.length ? { stored_stock: `${p.storage.stored}；以上是「箱子+背包」合计，按最后一次打开各箱子时记录（之后世界可能变化，重新打开才更新）` } : {}),
-    ...(s.connected && s.emptySlots <= 5 ? { inventory_space: `空格数是空槽位数量，不是可携带物品数量；${s.emptySlots} 个空槽全部用来放同一种且数据相同的物品时，每叠上限为 64、16、1 的物品分别可放 ${s.emptySlots * 64}、${s.emptySlots * 16}、${s.emptySlots} 个。这些空槽由所有物品共用，并非各物品各有这些空间；当前空间可能随物品变化。已有未满堆的剩余空间只适用于与该堆数据相同的物品，同名物品的属性不同时也不一定能合并。` } : {}),
+    ...(s.connected && s.emptySlots <= 5 ? { inventory_space: s.emptySlots > 0
+      ? `空槽是能新放一整叠的位置，${s.emptySlots} 个空槽由所有物品共用（例如 64 个铁矿石只占 1 个空槽）${roomText ? `；未满的同类堆还能继续装：${roomText}` : '；现有物品堆都已满'}`
+      : `没有空槽${roomText ? `，但未满的同类堆还能继续装：${roomText}——这些同类掉落物捡得起来` : '，现有物品堆都满了——新物品捡不进来，先腾空槽或把同类未满堆并起来'}` } : {}),
     ...(s.effects?.length ? { effects: s.effects.map((e) => `${e.name}${e.level > 1 ? ` ${e.level} 级` : ''}，${e.seconds > 0 ? `剩余时间按正常速度估算为${durationText(realSecondsToTicks(e.seconds))}现实时间` : '剩余时长未知或接近结束'}`) } : {}),
     ...(s.xp ? { xp_level: s.xp.level } : {}),
     // 背包里的食物各值多少（生的顺带说烤熟后值多少）：只给事实，吃不吃、烤不烤由它自己定

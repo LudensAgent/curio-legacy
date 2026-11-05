@@ -142,7 +142,7 @@ export interface AgentState {
   hotbarSelected?: number;
   /** 正在乘坐的载具/坐骑（boat、minecart、horse…），没有为 null */
   riding?: string | null;
-  equipment?: { slot: string; name: string; durabilityRemaining?: number }[];
+  equipment?: { slot: string; name: string; durabilityRemaining?: number; durabilityMax?: number }[];
 }
 
 export type MoveTarget =
