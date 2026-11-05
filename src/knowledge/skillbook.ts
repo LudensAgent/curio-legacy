@@ -52,7 +52,7 @@ export function modeOf(behavior: unknown): SkillMode | undefined {
   return JSON.stringify(when).includes('"after_failure"') ? 'recover' : 'auto';
 }
 
-const MODE_LABEL: Record<SkillMode, string> = { auto: '条件成立自动做', recover: '动作失败时先试', manual: '用 use_skill 调用' };
+const MODE_LABEL: Record<SkillMode, string> = { auto: '自动', recover: '动作失败时先试', manual: '手动' };
 
 export class SkillBook {
   private skills = new Map<string, KnowSkill>();
@@ -161,26 +161,28 @@ export class SkillBook {
     if (!r.ok) return false;
     return true;
   }
-  /** 提示词里的索引：每份一行 */
+  /** 提示词里的索引：每份一行，只留名字、能否直接用和一句用途；完整说明与失败细节按需用 skill 查询。 */
   index(skip?: (name: string) => boolean, executionError?: (name: string, trial: boolean) => string | null, autoNote?: (name: string) => string | null): string[] {
     return this.list().filter((s) => !skip?.(s.name)).map((s) => {
       const candidate = this.candidates.get(s.name);
       const status: string[] = [];
       if (s !== candidate) {
-        if (s.behavior === undefined) status.push(/```behavior(?:\s|$)/.test(s.body)
-          ? '行为定义格式无效，不能用 use_skill 直接执行' : '仅文字记录，先阅读，不能用 use_skill 直接执行');
-        else if (!executionError) status.push(`未确认是否可执行${s.mode ? `，声明方式：${MODE_LABEL[s.mode]}` : ''}`);
+        if (s.behavior === undefined) status.push(/```behavior(?:\s|$)/.test(s.body) ? '定义无效' : '文字');
+        else if (!executionError) status.push(`未确认可执行${s.mode ? `·${MODE_LABEL[s.mode]}` : ''}`);
         else {
-          const error = executionError(s.name, false);
-          const note = autoNote?.(s.name);
-          status.push(error ? `不可执行：${error}` : `可执行${s.mode ? `，${MODE_LABEL[s.mode]}` : ''}${note ? `，但${note}` : ''}`);
+          // 失败原因和“为什么不自动接手”可能很长；索引只留结论，细节用 skill 查询
+          const note = autoNote?.(s.name)?.replace(/（.*?）/, '');
+          status.push(executionError(s.name, false) ? '不可执行'
+            : `可执行${s.mode ? `·${MODE_LABEL[s.mode]}` : ''}${note ? `，但${note}` : ''}`);
         }
       }
       if (candidate) {
-        const error = executionError?.(s.name, true);
-        status.push(!executionError ? '候选，尚未确认能否试用' : error ? `候选不可试用：${error}` : '候选，用 use_skill trial:true 试用');
+        status.push(!executionError ? '候选未确认'
+          : executionError(s.name, true) ? '候选不可用' : '候选可试');
       }
-      return `${s.name}${s.source === 'self' ? '（我自己写的）' : ''}：［${status.join('；')}］${s.description}`;
+      // 说明只留第一句：整句太长会占掉索引，完整内容按需读
+      const first = s.description.replace(/\s+/g, ' ').split(/[。；;]/)[0];
+      return `${s.name}${s.source === 'self' ? '（自写）' : ''}：［${status.join('；')}］${first.length > 40 ? `${first.slice(0, 40)}…` : first}`;
     });
   }
 

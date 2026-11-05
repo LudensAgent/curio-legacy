@@ -42,7 +42,7 @@ test('技能书：读出内置技能和自己写的技能；索引只放一行�
   assert.ok(w.ok && w.skill.name === 'hillside-homes');
   const again = new SkillBook(BUILTIN_SKILLS_DIR, self);
   assert.equal(again.get('hillside-homes')?.source, 'self');
-  assert.ok(again.index().some((l) => l.includes('（我自己写的）')));
+  assert.ok(again.index().some((l) => l.includes('（自写）')));
 });
 
 test('设计手册里的参考作品都能直接施工，而且有坡顶/屋檐、柱子、窗户和光', () => {

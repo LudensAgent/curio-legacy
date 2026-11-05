@@ -14,7 +14,7 @@ import { EventBus } from '../src/events.ts';
 import { SkillBook } from '../src/knowledge/skillbook.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { BehaviorEngine } from '../src/mind/behaviors.ts';
-import { glanceCatalog, moveDetails, movesCatalog } from '../src/mind/prompt.ts';
+import { moveDetails, movesCatalog } from '../src/mind/prompt.ts';
 import { Vision } from '../src/perception/vision.ts';
 import { SKILLS, skillCatalog } from '../src/skills/index.ts';
 import { SkillLibrary } from '../src/skills/library.ts';
@@ -68,11 +68,8 @@ test('spatial_query：真实注册、只读分发、查询数据保留且不产�
   const catalog = skillCatalog();
   assert.match(catalog, /- spatial_query /);
   assert.equal(movesCatalog(), movesCatalog(), '静态完整目录保持稳定');
-  assert.equal(glanceCatalog(), glanceCatalog(), '静态瞥一眼目录保持稳定');
   assert.match(movesCatalog(), /spatial_query（/, '完整目录只给名字 + 用途');
   assert.doesNotMatch(movesCatalog(), /"kind":"cells"/, '完整目录不塞入查询参数 schema');
-  assert.match(glanceCatalog(), /spatial_query（/);
-  assert.doesNotMatch(glanceCatalog(), /"kind":"cells"/);
   assert.match(moveDetails(['spatial_query']), /"kind":"cells"/, '按需查询才给完整参数');
 
   const dir = mkdtempSync(join(tmpdir(), 'spatial-query-integration-'));

@@ -152,16 +152,16 @@ test('技能目录按行为引擎状态区分文字、可执行、候选和无�
   assert.ok(book.write('bad-action', '一个失效动作', text, { steps: [{ skill: 'no_such_action' }] }).ok);
   assert.ok(book.write('ready-action', '待试用的新版本', text, valid, { candidate: true }).ok);
   const index = book.index(undefined, (name, trial) => engine.executionError(name, trial));
-  assert.match(index.find((line) => line.startsWith('notes-only'))!, /仅文字记录.*不能用 use_skill/);
-  assert.match(index.find((line) => line.startsWith('ready-action'))!, /可执行.*候选，用 use_skill trial:true/);
-  assert.match(index.find((line) => line.startsWith('candidate-action'))!, /候选，用 use_skill trial:true/);
+  assert.match(index.find((line) => line.startsWith('notes-only'))!, /［文字］/);
+  assert.match(index.find((line) => line.startsWith('ready-action'))!, /可执行.*候选可试/);
+  assert.match(index.find((line) => line.startsWith('candidate-action'))!, /［候选可试］/);
   assert.match(index.find((line) => line.startsWith('bad-action'))!, /不可执行/);
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
   const [system] = buildMindMessages({ tier: 'glance', reason: '测试', percept: perception.update(), state: adapter.state(), self: new SelfModel(null),
     memory, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '测试', skills: index });
-  assert.match(system.content, /notes-only[^\n]*仅文字记录/);
-  assert.match(system.content, /candidate-action[^\n]*候选，用 use_skill trial:true/);
+  assert.match(system.content, /notes-only[^\n]*［文字］/);
+  assert.match(system.content, /candidate-action[^\n]*［候选可试］/);
   assert.doesNotMatch(system.content, /一份文字做法/);
   memory.close();
   engine.dispose();

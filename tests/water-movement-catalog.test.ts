@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { deliberateSystem, glanceCatalog, glanceSystem, moveDetails } from '../src/mind/prompt.ts';
+import { deliberateSystem, glanceSystem, moveDetails } from '../src/mind/prompt.ts';
 
 test('both thinking tiers expose direction and water movement tools with their effects and limits', () => {
   for (const system of [deliberateSystem(''), glanceSystem('')]) {
@@ -22,8 +22,6 @@ test('both thinking tiers expose direction and water movement tools with their e
 test('active uncommon tools like ride get full args on demand, and hidden tools stay out of the catalogs', () => {
   // 当前活动用到的、目录里没给完整参数的动作（如 ride）由 user 提醒用 moveDetails 给完整参数
   assert.match(moveDetails(['ride']), /^- ride .*"direction".*"to"/m);
-  // 静态 glance 目录不暴露隐藏动作，也不把非常用动作塞进来
-  assert.doesNotMatch(glanceCatalog(), /^- (?:glance|wander|ride) /m);
 });
 
 test('both thinking tiers distinguish current water contact, ground contact, and oxygen', () => {

@@ -96,8 +96,11 @@ export interface MindContext {
 
 /**
  * 提示词的组织（针对注意力容易被“手边的格式”和“最后看到的内容”带走的模型，如 DeepSeek）：
- * - 系统提示词短而稳定：身份 → 原则 → 先查再做（技能书、建筑师）→ 决定 → 输出 → 例子 → 动作；固定内容在前，便于缓存。
+ * - 系统提示词短而稳定，并分成三层：两级共用的静态前缀（身份 → 操作者 → 读法 → 原则 → 选动作 → 决定 → 输出 → 动作目录）→
+ *   档位专属尾段（瞥一眼的说明，或认真想的步骤、专注、查找、技能和精确操作）→ 变动最勤的技能书索引。
+ *   前缀逐字相同，瞥一眼和认真想交替时仍能命中服务端前缀缓存。
  * - 规则贴在用的地方：动作说明自己写清“新房子用图纸”，常用动作给完整参数，冷门动作只列名字（需要时 moves 查）。
+ * - 技能索引每条只留名字、状态和一句用途；完整说明用 skill 查询，避免长尾目录占满提示词、拖累缓存。
  * - 用户消息末尾按情境追加 2–4 条“此刻要留意”的提醒，只说和眼下有关的。
  */
 
@@ -134,21 +137,6 @@ export function movesCatalog(chars = 40, core: Set<string> = new Set(COMMON_MOVE
   const onDemand = visible.filter((s) => !core.has(s.name)).map((s) => `${s.name}（${briefOf(s.description, 14)}）`);
   const demandLine = onDemand.length ? `\n其他动作（用 {"kind":"moves","names":["…"]} 查完整参数）：${onDemand.join('、')}` : '';
   return `${detailed.join('\n')}${demandLine}\n缺工具、熔炉、船、火把等默认报告缺口；加 "make":true 才允许顺手制造/准备并消耗材料，加 "make":false 则禁止本动作及嵌套准备`;
-}
-
-/** 瞥一眼时给完整参数的常用动作；其余只列名字 + 用途，参数按需用 moves 查 */
-const GLANCE_CORE = ['dig_at', 'step', 'place_at', 'gather', 'goto', 'craft', 'eat', 'sleep', 'wait', 'look', 'look_around', 'defend', 'hunt', 'place_torch', 'dive', 'surface', 'swim_to', 'travel', 'press_keys'];
-/** 瞥一眼时只列名字 + 用途的动作（完整参数按需查） */
-const GLANCE_SECONDARY = ['explore', 'forage', 'pickup_items', 'shelter', 'build', 'smelt', 'store_items', 'climb_up', 'use_skill', 'excavate_path', 'descend', 'assess_landings', 'spatial_query', 'walk_to', 'walk_known_route', 'equip_armor'];
-
-/** 抬头看（glance）的动作目录：只列少数完整参数 + 常用名字，隐藏长尾，保持轻量 */
-export function glanceCatalog(): string {
-  const core = new Set(GLANCE_CORE);
-  const visible = Object.values(SKILLS).filter((s) => !LLM_HIDDEN.has(s.name) && (GLANCE_CORE.includes(s.name) || GLANCE_SECONDARY.includes(s.name)));
-  const detailed = visible.filter((s) => core.has(s.name)).map((s) => `- ${s.name} ${s.argsDoc}${descOf(s, 0) ? `：${descOf(s, 0)}` : ''}`);
-  const onDemand = visible.filter((s) => !core.has(s.name)).map((s) => `${s.name}（${briefOf(s.description, 14)}）`);
-  const demandLine = onDemand.length ? `\n其他动作（用 {"kind":"moves","names":["…"]} 查完整参数）：${onDemand.join('、')}` : '';
-  return `${detailed.join('\n')}${demandLine}`;
 }
 
 /** 进阶动作（portal/end_/dragon/…）：不进静态目录，按需作为 user 提醒给出，避免平时噪音、也不破坏 system 前缀缓存 */
@@ -194,14 +182,16 @@ const SKILLS_DOC = () => `【技能】把做法写进 skill 会保存候选：{"
 
 const PASSAGES_QUERY = `{"kind":"passages"} 查当前世界和维度的矿道记录；加 "id":"记录ID","offset":0 分页读历史脚点，每页最多32点。脚点不代表连续或双向可走，当前通路需现场确认。`;
 
-const QUERIES = (skills: string[]) => `【先查再做】需要时先输出一个查询 JSON（查询本身不执行身体动作，但等待期间世界仍在运行、身体可能继续动作，每次思考最多 3 次；拿到结果后以最新状态为准），再决定：
+const QUERIES = `【先查再做】需要时先输出一个查询 JSON（查询本身不执行身体动作，但等待期间世界仍在运行、身体可能继续动作，每次思考最多 3 次；拿到结果后以最新状态为准），再决定：
 - {"kind":"skill","query":"关键词"} 查技能（空查询浏览目录，offset 分页，含收起和停用）；{"kind":"skill","name":"技能名"} 读技能及版本记录，加 "version":30 读历史版本；读取不代表启用或验证｜{"kind":"design","brief":"用途、多大、风格","where":"here|base|x,y,z"} 请建筑师画图纸：房子、前哨、仓库、畜栏、塔等要长期用的建筑（where：脚下、家旁或坐标）；传送门/末地门不是建筑，用 build_portal 立框点燃，别让建筑师画
 - {"kind":"recipes","item":"物品名","count":1} 看配方和缺口（"uses":"物品" 反查用途）｜{"kind":"moves","names":["动作名"]} 看动作参数
 - {"kind":"recall","query":"关键词"} 回想以前的经历、日记、教训和技能｜{"kind":"mechanics","query":"…"} 查底层操作接口
 - ${PASSAGES_QUERY}
 - {"kind":"knowledge","query":"问题"} 搜索 Wiki 候选；再用 {"kind":"knowledge","id":"文档id"} 看章节目录，加 "section":"章节id" 读正文，续页按 nextCursor 传 cursor。空查询浏览目录，目录续页传 offset。摘录不等于读完或学会；资料不代表现场事实，做法自行判断。`;
-/** 技能书目录放在系统提示词最后：它变得最勤（写、改、收起），放在前面会让后面不变的大段内容每次都缓存不中 */
-const SKILL_INDEX = (skills: string[]) => skills.length ? `\n\n【技能书】\n${skills.map((x) => `- ${x}`).join('\n')}` : '';
+/** 技能书目录放在系统提示词最后：它变得最勤（写、改、收起），放在前面会让后面不变的大段内容每次都缓存不中。
+ *  每条只留名字、状态和一句用途；状态用图例说明，瞥一眼连用途也省掉，按需用 skill 查。 */
+const SKILL_INDEX = (skills: string[], brief = false) => skills.length
+  ? `\n\n【技能书】每份一行：名字（自写＝你自己写的）［状态］一句用途。状态：文字＝只能读、不能 use_skill；可执行＝能调用（use_skill 或直接写成一步，自动/动作失败时先试/手动是触发方式）；候选可试＝use_skill trial:true 试用；不可执行、定义无效、候选不可用/未确认＝用 {"kind":"skill","name":"…"} 看原因。\n${skills.map((x) => `- ${brief ? x.replace(/］.*$/, '］') : x}`).join('\n')}` : '';
 
 /** 用户消息分块：越往后越要紧（模型对末尾注意力最强） */
 const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。往某方向走直接写 goto {"target":"E 20"}，别自己算坐标；[前,上,右] 按指定 facing 换算。
@@ -238,7 +228,11 @@ const PRECISE = `【精确操作】local 以脚部占据格为原点：[前,上,
 repeat 每轮重做整套 steps；子步骤继承 activity.facing，每步相对坐标按当前位置重算。done_when 写可观察结果。照明可选 place_torch 或空闲习惯 habits.torch_every。挖前看清目标格。
 - 机械性失败身体会就地应变再重试：太暗先插火把、脚下无支撑先垫一块、头顶被挡先挖开（会消耗方块/火把）；应变不动才交给你决定。`;
 
-export function deliberateSystem(persona: string, skills: string[] = []): string {
+/**
+ * 两级思考共用的系统前缀：身份、操作者、读法、原则、选动作、决定、输出格式和动作目录逐字相同、顺序固定。
+ * 瞥一眼和认真想交替发生，前缀一致时切换档位仍能命中服务端缓存；档位专属的内容放在后面各自的尾段。
+ */
+function systemCore(persona: string): string {
   return `${persona}
 
 游戏版本：Minecraft Java Edition ${config.mc.version}。
@@ -249,56 +243,51 @@ ${OPERATOR}
 
 ${READING}
 
-${ROUTINE_OF_THINKING}
-
 ${PRINCIPLES}
 
 ${CHOOSE}
 
+【决定】${DECISIONS}
+
+【输出】${OUTPUT}
+${CONDITIONS}
+
+【动作】参数必须合法：
+${movesCatalog(28)}`;
+}
+
+/** 瞥一眼的专属说明；放在共用前缀之后，避免改动它时打碎前面的缓存 */
+const GLANCE_GUIDE = `这次只是抬头看一眼，不必把每个细节重新铺开：
+- 先看【此刻】：没什么要紧的、手上的活还顺，就 continue（独白可以很短）。
+- 手上没活：直接 new 一段，接着【最近】的结果和议程往下玩；边做边想下一段可写 next，当前动作仍在执行、结果未知。小改用 adjust，插一件事用 detour，彻底换事用 switch/new。
+- 看【身体】where 和【身边】local 确认地形；地形分类不代表受困或需要离开，按当前目标和实际反馈选择动作，身边一格的操作写确切坐标。
+- 要翻技能书、请建筑师、查配方/游戏资料或想得更深：直接输出查询，如 {"kind":"knowledge","query":"问题"}、{"kind":"design","brief":"…"}、{"kind":"skill","name":"…"}、{"kind":"deliberate","reason":"…"}（转成认真想）。knowledge 先搜候选再读章节，摘录不等于读完或学会；资料不代表现场事实。
+- ${PASSAGES_QUERY}
+- 盖新房子先 design 拿图纸，再 build {"draft":"图纸ID"}；不要自己画图纸。
+- 有【专注】的主目标时，可用 detour 暂时插一段并自动回来；明确决定放下当前活动用 switch，想立即改做法用 adjust。做完清单一项写 "plan":{"done":[序号]}。
+- 技能书在文末：需要时先用 skill 查询；文字做法不能用 use_skill 直接执行，只有已注册的可执行技能或可试用候选才能调用。
+- 刚从卡住里找到办法、想把它变成身体的习惯：转成认真想（{"kind":"deliberate","reason":"写技能"}）。`;
+
+export function deliberateSystem(persona: string, skills: string[] = []): string {
+  return `${systemCore(persona)}
+
+${ROUTINE_OF_THINKING}
+
 ${FOCUS}
 
-${QUERIES(skills)}
+${QUERIES}
 
 ${SKILLS_DOC()}
 
-【决定】${DECISIONS}
-
-【输出】${OUTPUT}
-${CONDITIONS}
-
 ${PRECISE}
 
-${liveAudience.enabled && liveAudience.inPrompt !== false ? `\n${AUDIENCE_RULES}\n` : ''}
-【动作】参数必须合法：
-${movesCatalog(28)}${SKILL_INDEX(skills)}`;
+${liveAudience.enabled && liveAudience.inPrompt !== false ? `\n${AUDIENCE_RULES}\n` : ''}${SKILL_INDEX(skills)}`;
 }
 
 export function glanceSystem(persona: string, skills: string[] = []): string {
-  return `${persona}
+  return `${systemCore(persona)}
 
-游戏版本：Minecraft Java Edition ${config.mc.version}。
-
-你在连续地玩 Minecraft，这次只是抬头看一眼。
-${OPERATOR}
-${READING}
-- 先看【此刻】：没什么要紧的、手上的活还顺，就 continue（独白可以很短）。
-- 手上没活：直接 new 一段，接着【最近】的结果和议程往下玩；边做边想下一段可写 next，当前动作仍在执行、结果未知。小改用 adjust，插一件事用 detour，彻底换事用 switch/new。
-- 看【身体】where 和【身边】local 确认地形；地形分类不代表受困或需要离开，按当前目标和实际反馈选择动作，用 dig_at / step / place_at 写确切坐标。
-- 要翻技能书、请建筑师、查配方/游戏资料或想得更深：直接输出查询，如 {"kind":"knowledge","query":"问题"}、{"kind":"design","brief":"…"}、{"kind":"skill","name":"…"}、{"kind":"deliberate","reason":"…"}（转成认真想）。knowledge 先搜候选再读章节，摘录不等于读完或学会；资料不代表现场事实。
-- ${PASSAGES_QUERY}
-${skills.length ? `技能书：${skills.map((x) => x.replace(/］.*$/, '］')).join('、')}。需要时先用 skill 查询；文字做法不能用 use_skill 直接执行，只有已注册的可执行技能或可试用候选才能调用。` : ''}盖新房子先 design 拿图纸，再 build {"draft":"图纸ID"}；不要自己画图纸。
-- 有【专注】的主目标时，可用 detour 暂时插一段并自动回来；明确决定放下当前活动用 switch，想立即改做法用 adjust，瞥一眼也能选择。系统可能提示打断的影响，但不会把 switch/adjust 改成其它决定。做完清单一项写 "plan":{"done":[序号]}。
-- 刚从卡住里找到办法、想把它变成身体的习惯：转成认真想（{"kind":"deliberate","reason":"写技能"}）。
-
-${CHOOSE}
-
-【决定】${DECISIONS}
-
-【输出】${OUTPUT}
-${CONDITIONS}
-
-【常用动作】
-${glanceCatalog()}`;
+${GLANCE_GUIDE}${SKILL_INDEX(skills, true)}`;
 }
 
 /** 打算里说要下矿、往下挖 */
@@ -679,7 +668,9 @@ function worldKnowledge(ctx: MindContext) {
   const bed = myBed(m, { dim: p.self.dim, worldId: s.worldId, pos: here }, ctx.blockAt);
   const portalSnapshot = travelStore(m).snapshot(s.worldId);
   const portals = portalSnapshot.endpoints.slice(-4).map((e) => {
-    const leadsTo = portalSnapshot.routes.filter((r) => r.fromId === e.id).map((r) => ({ to: r.toId, return_verified: r.returnVerified }));
+    // 同一目的地的路线可能被重复登记：只按「目的地 + 回程是否验证过」列一次
+    const leadsTo = [...new Map(portalSnapshot.routes.filter((r) => r.fromId === e.id)
+      .map((r) => [`${r.toId}:${r.returnVerified}`, { to: r.toId, return_verified: r.returnVerified }])).values()];
     const nowBlock = ctx.blockAt?.(e.pos) ?? null;
     const now = nowBlock === e.kind ? '亮着'
       : nowBlock === null ? '未加载(未知)'
@@ -789,7 +780,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
   // system 目录保持字节稳定以命中前缀缓存（见 movesCatalog 注释）。
   if (!glance && advanced) reminders.push(advancedMovesLine());
   else if (glance) {
-    const active = [...new Set((ctx.activity?.steps ?? []).map((st) => st.skill))].filter((n) => !GLANCE_CORE.includes(n) && !GLANCE_SECONDARY.includes(n));
+    const active = [...new Set((ctx.activity?.steps ?? []).map((st) => st.skill))].filter((n) => !COMMON_MOVES.includes(n));
     if (active.length) reminders.push(`正在用的动作参数：\n${moveDetails(active)}`);
   }
   // 操作者的指令放在最前面，最后的提醒里再说一遍（开头和结尾模型最不容易忽略）
