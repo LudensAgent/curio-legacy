@@ -490,8 +490,8 @@ export function situationalReminders(ctx: MindContext): string[] {
     const ore = oreOpportunityFact(p.nearby.resources, p.storage?.stock, s.inventory);
     if (ore) { out.push(ore); ctx.log?.(ore, { kind: 'ore_opportunity' }); }
   }
-  // 工具分级事实：Mind 已按状态签名去重（同状态不每念重复，状态变了或过了 10 分钟才再说），这里只负责展示
-  if (ctx.toolFact) out.push(ctx.toolFact);
+  // 工具分级事实不在这里追加：这里末尾只保留 5 条，挖掘场景前面常已有 3–8 条，
+  // 放在这里会被 slice 截掉；由 buildMindMessages 在切片后单独追加，确保真的送达。
   // 养动物、村民交易：打算里提到了才把机制摆出来（模型对这些的记忆常是含糊或老版本的）
   const husbandry = husbandryFacts(intent);
   if (husbandry) out.push(husbandry);
@@ -819,6 +819,8 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
   const advanced = p.self.dim !== 'overworld' || s.inventory.some((i) => /ender_(eye|pearl)|obsidian|blaze/.test(i.name));
   const system = glance ? glanceSystem(ctx.persona, ctx.skills ?? []) : deliberateSystem(ctx.persona, ctx.skills ?? []);
   const reminders = situationalReminders(ctx);
+  // 工具分级事实不占 5 条提醒配额：挖掘场景前面的提醒常已满 5 条，必须在切片后单独追加才能送达。
+  if (ctx.toolFact) reminders.push(ctx.toolFact);
   // 进阶动作（下界/末地或已有末影物品才出现）和当前活动用到、目录里没给完整参数的动作：作为提醒补在 user 消息里，
   // system 目录保持字节稳定以命中前缀缓存（见 movesCatalog 注释）。
   if (!glance && advanced) {
