@@ -616,13 +616,18 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
     let resolved: Vec3Like | null = null, target: Vec3Like | null = null;
     // 出发前身体不在通道内、又没有可用地表入口可走时，把缺口随回执交出；不擅自挖/垫。
     let approachGap: { note: string; body: Vec3Like; routeStart: Vec3Like; verticalGap: number } | undefined;
+    /** 回入口但记录入口不在当前可达段时，仍把“记录入口在哪、还没接上”作为事实交回；不把它当执行目标。 */
+    let entranceGapNote: string | null = null;
     const outcome = (r: SkillResult): NavOutcome => r.status === 'succeeded' ? (r.data?.arrived === true ? 'ARRIVED' : 'PARTIAL')
       : r.failureCode === 'PATH_NOT_FOUND' ? 'NO_PATH' : r.failureCode === 'TIMEOUT' ? 'TIMEOUT' : 'FAILED';
     // 成功/失败/取消共用同一份回执；完成条件按实际锚点与实测位置计算，不把走完路点当成到达。
     const receipt = (r: SkillResult): SkillResult => {
-      const out = approachGap
+      const withApproach = approachGap
         ? { ...r, summary: `${r.summary}；出发前入口缺口：${approachGap.note}`, data: { ...(r.data ?? {}), approachGap } }
         : r;
+      const out = entranceGapNote
+        ? { ...withApproach, summary: `${withApproach.summary}${entranceGapNote}`, data: { ...(withApproach.data ?? {}), entranceGapNote } }
+        : withApproach;
       const position = (out.data?.position as Vec3Like | undefined) ?? trace.at(-1) ?? null;
       const arrival = position && target ? {
         mode: 'near_radius' as const, required: { radius: 2, metric: '3d', frame: 'recorded_waypoints' },
@@ -663,10 +668,22 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
         : '可加 dig:true 授权挖开挡路/垫方块（会消耗背包方块和工具耐久）';
       const terrainPermission = { ...(allowDig ? { allowTerrainChanges: true } : {}), allowPlace: allowDig, allowTower: allowDig };
       const goal = back ? '入口' : '最深处';
+      // 有可达地表候选时不需要这条；没有候选、但记录里确实记过入口时，把“入口在哪、还没接上”作为事实保留。
+      // 这只是回执事实，不改变 target，也不替 Agent 决定要不要挖过去。
+      if (back && !chosenExit) {
+        const recordedEntrances = recs.flatMap((r) => r.entrances);
+        const nearestEntrance = recordedEntrances.length
+          ? [...recordedEntrances].sort((a, b) => dist3(a, here) - dist3(b, here))[0]!
+          : null;
+        if (nearestEntrance && !passageRoute(recs, here, nearestEntrance, { near: 6 })) {
+          entranceGapNote = `；记录的入口 (${Math.round(nearestEntrance.x)},${Math.round(nearestEntrance.y)},${Math.round(nearestEntrance.z)}) 与当前可达段之间还没接上（直线约 ${Math.round(dist3(here, nearestEntrance))} 格，不是已确认的断口宽度）；${digFact}`;
+        }
+      }
       let route = passageRoute(recs, here, target, { near: 6 });
+      if ((!route || route.length < 2) && dist3(here, target) <= 2) route = [{ ...target }];
       let start = here;
       // 离矿道网太远连不上：先走到最近的脚点把 agent 接回网里，再沿路由走；dig:true 才授权挖开挡路
-      if (!route || route.length < 2) {
+      if ((!route || route.length < 2) && dist3(here, target) > 2) {
         const nearest = passageNearestNode(recs, start);
         if (!nearest) return receipt(fail('PATH_NOT_FOUND', `旧矿道连不到${back ? '地表入口' : '最深处'}（没有可接的脚点）；改走别的路；${digFact}`));
         const np = `${Math.round(nearest.x)},${Math.round(nearest.y)},${Math.round(nearest.z)}`;
@@ -681,7 +698,9 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
         start = adapter.state().pos;
         trace.push({ ...start });
         route = passageRoute(recs, start, target, { near: 6 });
-        if (!route || route.length < 2) {
+        // 已经走到锚点旁边：route 只剩 1 个节点不是“接不上”，按到达处理。
+        if ((!route || route.length < 2) && dist3(start, target) <= 2) route = [{ ...target }];
+        else if (!route || route.length < 2) {
           const tgtNode = passageNearestNode(recs, target);
           const at = (p: Vec3Like) => `(${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)})`;
           // 「agent 离最近脚点的距离」不是通道断口：按连通分量找实际最近的跨分量节点对。
@@ -908,6 +927,11 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
         if (top !== undefined) return top !== null && top > 0;
         return true; // 没有形状信息：观测到的整块实心按可站处理
       };
+      // 下半格/床/箱子这类可站顶面：站上去时记录 cell 就是这块方块本身，支撑在脚格里，不在 y-1。
+      const footSelfSupport = (feet: Vec3Like) => {
+        const name = blockNameAt(feet);
+        return name !== null && PARTIAL_FLOOR.test(name) && occupiableCell(feet) === true;
+      };
       const blockersAt = (wp: Vec3Like, opts: { includeHead: boolean }) => {
         const feet = feetCell(wp);
         const head = { x: feet.x, y: feet.y + 1, z: feet.z };
@@ -916,7 +940,7 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
         return [
           ...(occupiableCell(feet) === false ? blocked('脚格', feet) : []),
           ...(opts.includeHead && occupiableCell(head) === false ? blocked('头格', head) : []),
-          ...(standableCell(support) === false ? blocked('支撑格', support) : []),
+          ...(footSelfSupport(feet) ? [] : standableCell(support) === false ? blocked('支撑格', support) : []),
         ];
       };
       // 没有取得进展（未 offRoute）时的共同回执：停在第一个坏点，不把跳过尝试冒充进展。

@@ -667,3 +667,43 @@ test('记录点格变实心但相邻一格可站：当前仍保守地停在坏�
   assert.equal(moves.mock.callCount(), 0, '不自动把记录点改到相邻可站格');
   assert.deepEqual(result.data?.blockedWaypoint, { x: 4, y: 40, z: 0 });
 });
+
+test('下半砖搭在空气上时脚格自带支撑，不误报支撑格 air', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 40, z: 0.5 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  save(memory, w, 'slab-over-air', [{ x: 0, y: 40, z: 0 }, { x: 4, y: 40, z: 0 }, { x: 8, y: 40, z: 0 }], { x: 8, y: 41, z: 0 });
+  // 记录脚格就是下半砖本身；它下面可以是空气（半砖自己就是落脚面）。
+  w.setBlock({ x: 4, y: 40, z: 0 }, 'stone_slab');
+  w.setBlock({ x: 4, y: 39, z: 0 }, 'air');
+  w.blockProperties.set('4,40,0', { type: 'bottom' });
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  const moves: Vec3Like[] = [];
+  t.mock.method(w, 'moveTo', async (goal: any) => { if (goal.kind === 'near') { moves.push(goal.pos); w.pos = { ...goal.pos }; } });
+
+  const result = await followPassage.run(ctx as never, { to: 'entrance' });
+
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.ok(moves.some((p) => p.x === 4 && p.y === 40), '下半砖脚格不应被 y-1 的 air 判成没有支撑');
+  assert.equal(result.data?.blockedWaypoint, undefined);
+});
+
+test('已经站在入口旁调用 follow_passage 按到达处理，不误报锚点接不上', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 8.5, y: 40, z: 0.5 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  save(memory, w, 'at-entrance', [{ x: 0, y: 40, z: 0 }, { x: 4, y: 40, z: 0 }, { x: 8, y: 40, z: 0 }], { x: 8, y: 40, z: 0 });
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  const moves = t.mock.method(w, 'moveTo', async (goal: any) => { if (goal.kind === 'near') w.pos = { ...goal.pos }; });
+
+  const result = await followPassage.run(ctx as never, { to: 'entrance' });
+
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal((result.data?.arrival as { satisfied: boolean }).satisfied, true, '已在入口 2 格内应确认到达');
+  assert.doesNotMatch(result.summary, /锚点本身接不上/);
+  assert.ok(moves.mock.callCount() <= 1);
+});

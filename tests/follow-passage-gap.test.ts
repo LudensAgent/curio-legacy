@@ -40,15 +40,14 @@ test('没有入口记录时，不把另一团更高的不可达点当目标', as
   const ctx = makeCtx(adapter, { memory });
   const result = await followPassage.run(ctx as never, { to: 'entrance' });
 
-  assert.equal(result.status, 'failed');
-  assert.equal(result.failureCode, 'PATH_NOT_FOUND');
-  // 目标只能是这里连得上的那团（0,64,0），不能是 y 更高的不可达团。
+  // 走到可达的最高脚点就算到达；不能拿 y 更高的不可达团当目标。
+  assert.equal(result.status, 'succeeded', result.summary);
   assert.deepEqual(result.data?.resolvedTarget, { x: 0, y: 64, z: 0 });
-  assert.match(result.summary, /锚点本身接不上一条可走的路/);
+  assert.equal((result.data?.arrival as { satisfied: boolean }).satisfied, true);
   assert.equal(result.data?.connectionGap, undefined, '没有把另一团当成已选目标，就不伪造 connectionGap');
 });
 
-test('没有可用入口时停在可达脚点，如实报锚点接不上而不是跨分量断口', async () => {
+test('没有可用入口时到达可达脚点，不伪造跨分量断口', async () => {
   const adapter = new TestWorld();
   adapter.pos = { x: 0.5, y: 64, z: 10.5 };
   const memory = new WorldMemory(null);
@@ -59,8 +58,8 @@ test('没有可用入口时停在可达脚点，如实报锚点接不上而不�
   const ctx = makeCtx(adapter, { memory });
   const result = await followPassage.run(ctx as never, { to: 'entrance' });
 
-  assert.equal(result.status, 'failed');
-  assert.match(result.summary, /锚点本身接不上一条可走的路/);
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal((result.data?.arrival as { satisfied: boolean }).satisfied, true);
   assert.equal(result.data?.connectionGap, undefined, '没有把另一团当成已选目标，就不伪造 connectionGap');
 });
 
@@ -93,7 +92,7 @@ test('dig:true 时先尝试接上小断口，再接回记录路线', async (t) =
   assert.equal(result.data?.connectionGap, undefined, '接上后不再报断口');
 });
 
-test('断口没有被 dig:true 授权时，提示可以加 dig:true', async (t) => {
+test('没有 dig 授权时到达可达脚点，并把记录入口未接上的事实交回', async (t) => {
   const adapter = new TestWorld();
   adapter.pos = { x: 0.5, y: 40, z: 0.5 };
   const memory = new WorldMemory(null);
@@ -110,14 +109,15 @@ test('断口没有被 dig:true 授权时，提示可以加 dig:true', async (t) 
 
   const result = await followPassage.run(ctx as never, { to: 'entrance' });
 
-  assert.equal(result.status, 'failed');
-  // 没有 dig 授权时只给有向可达的锚点；不会为了更高但不可达的入口伪造跨分量断口。
-  assert.match(result.summary, /锚点本身接不上一条可走的路/);
+  // 没有 dig 授权时只到有向可达的脚点，但记录入口和“还没接上”的事实仍要交回。
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal((result.data?.arrival as { satisfied: boolean }).satisfied, true);
+  assert.match(result.summary, /记录的入口 \(0,48,0\).*还没接上/);
   assert.match(result.summary, /加 dig:true/);
   assert.equal(result.data?.connectionGap, undefined);
 });
 
-test('同一条通道的锚点离脚点太远时，不伪造跨分量 connectionGap', async () => {
+test('同一条通道的锚点离脚点太远时，到达可达脚点且不伪造跨分量 connectionGap', async () => {
   const adapter = new TestWorld();
   adapter.pos = { x: 0.5, y: 64, z: 10.5 };
   const memory = new WorldMemory(null);
@@ -128,9 +128,8 @@ test('同一条通道的锚点离脚点太远时，不伪造跨分量 connection
   const ctx = makeCtx(adapter, { memory });
   const result = await followPassage.run(ctx as never, { to: 'entrance' });
 
-  assert.equal(result.status, 'failed');
-  assert.equal(result.failureCode, 'PATH_NOT_FOUND');
+  assert.equal(result.status, 'succeeded', result.summary);
   assert.equal(result.data?.connectionGap, undefined, '同分量/无跨分量节点对时不应伪造断口');
   assert.doesNotMatch(result.summary, /通道在/);
-  assert.match(result.summary, /锚点本身接不上一条可走的路/);
+  assert.match(result.summary, /记录的入口 \(50,64,0\).*还没接上/);
 });
