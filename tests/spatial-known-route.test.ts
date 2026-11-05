@@ -507,6 +507,13 @@ test('known 合法观察变化撤销在飞段：不冒充 OPEN，保留已确认
     assert.equal(result.status, 'failed', result.summary);
     const nav = navOf(result);
     assert.notEqual(nav.outcome, 'ARRIVED', '注入的 typed observation 不得冒充到达');
+    // 终态原因是路由失效时，top-level stage 也要显式给出，同时保留完整 data.nav。
+    assert.equal(nav.problem?.kind, 'route_invalidated');
+    assert.equal(result.data?.stage, 'route_invalidated');
+    assert.equal(result.data?.nav, nav, 'data.nav 必须原样保留');
+    assert.equal(result.data?.backend, 'library_known_walk_route');
+    assert.deepEqual(result.data?.originalRequest, { fragmentId: 'changed-route' });
+    assert.deepEqual(result.data?.resolvedTarget, THREE_POINTS[THREE_POINTS.length - 1]);
     assert.equal(nav.trace.length, 1, '只保留变化前已确认的首段');
     assert.ok(nav.lastPosition, '保留实际部分位移');
     assert.ok(nav.lastPosition.x < 2.5 - 0.12, '未确认的第二段不得伪报到达末点');
