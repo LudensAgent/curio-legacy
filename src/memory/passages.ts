@@ -84,7 +84,7 @@ export class PassageTracker {
   /** 当前这段连续观测的编号：只有同一段里相邻的 link 才允许在建图时补漏采的小缺口 */
   private run = 0;
 
-  constructor(private memory: Pick<WorldMemory, 'passages' | 'savePassage'> & Partial<Pick<WorldMemory, 'forgetPassage'>>, private newId: () => string = () => `psg_${Math.random().toString(36).slice(2, 8)}`) {}
+  constructor(private memory: Pick<WorldMemory, 'passages' | 'archivedPassages' | 'savePassage'> & Partial<Pick<WorldMemory, 'forgetPassage'>>, private newId: () => string = () => `psg_${Math.random().toString(36).slice(2, 8)}`) {}
 
   observe(s: PassageSample, dug: DugBlock[], now = Date.now()) {
     const pos = cell(s.pos);
@@ -122,7 +122,13 @@ export class PassageTracker {
 
     if (!this.active) {
       this.run++;
-      const old = this.memory.passages(s.dim).find((p) => p.worldId === s.worldId && touchesPassage(p, pos, dug));
+      // 先找 live；没有再找归档。归档记录被重进时也要接着它记，并在下次 savePassage 时升回 live，
+      // 否则每次走进旧矿道都会另起一条新记录，归档原记录永远回不到工作集。
+      // 归档里常有同一段的重复/桥记录；命中多条时取最完整的一条（links/脚点多），别随便认一条 stub。
+      const old = this.memory.passages(s.dim).find((p) => p.worldId === s.worldId && touchesPassage(p, pos, dug))
+        ?? this.memory.archivedPassages(s.dim)
+          .filter((p) => p.worldId === s.worldId && touchesPassage(p, pos, dug))
+          .sort((a, b) => (b.links?.length ?? 0) - (a.links?.length ?? 0) || b.path.length - a.path.length || b.uses - a.uses)[0];
       if (old) {
         old.uses += 1;
         old.lastUsedAt = now;

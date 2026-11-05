@@ -372,6 +372,27 @@ test('重进大矿道：只挨着 links 端点、离 path 脚点远，也接着�
   m.close();
 });
 
+test('重进归档里的旧矿道时接着它记，并升回 live，而不是另起一条', () => {
+  const m = new WorldMemory(null); m.setWorld(W);
+  m.archivePassage({
+    id: 'archived-mine', worldId: W, dim: D, kind: 'dug',
+    entrances: [{ x: 0, y: 66, z: 0 }], deepestY: 40, dug: 30, ores: {}, createdAt: 1, lastUsedAt: 1, uses: 5,
+    path: [{ x: 0, y: 60, z: 0 }, { x: 4, y: 60, z: 0 }, { x: 8, y: 60, z: 0 }],
+    links: [{ a: { x: 0, y: 60, z: 0 }, b: { x: 4, y: 60, z: 0 } }, { a: { x: 4, y: 60, z: 0 }, b: { x: 8, y: 60, z: 0 } }],
+  });
+  const tr = new PassageTracker(m, () => 'new-record');
+  let t = 0;
+  tr.observe({ worldId: W, dim: D, pos: at(1, 60, 0), place: 'underground' }, [{ pos: at(1, 60, 0), name: 'stone', ts: 1 }], t += 1000);
+  tr.observe({ worldId: W, dim: D, pos: at(2, 60, 0), place: 'underground' }, [], t += 1000);
+
+  const live = m.passages(D);
+  assert.deepEqual(live.map((p) => p.id), ['archived-mine'], '接着归档那条记，不另起 new-record');
+  assert.equal(live[0]!.uses, 6, 'uses 加一');
+  assert.equal(live[0]!.archivedAt, undefined, '升回 live 后不带 archivedAt');
+  assert.equal(m.archivedPassages(D).some((p) => p.id === 'archived-mine'), false, '归档副本已删除');
+  m.close();
+});
+
 test('重进旧道脚下挨着旧脚点时补一条连接边，links 连成一体、passageRoute 能走通', () => {
   const m = new WorldMemory(null); m.setWorld(W);
   // 旧道 links 只到 x=5；重进站在 x=6（挨着 x=5），再往前走一步到 x=7
