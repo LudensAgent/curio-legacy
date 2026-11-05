@@ -7,7 +7,7 @@ versions: ["1.20.1"]
 aliases: ["下界", "地狱", "末地", "传送门", "地狱门", "重生锚", "nether_portal", "end_portal", "obsidian", "crying_obsidian", "eye_of_ender", "respawn_anchor"]
 sources: [{"url":"https://minecraft.wiki/w/Nether_Portal","title":"Minecraft Wiki: Nether Portal"},{"url":"https://minecraft.wiki/w/Crying_obsidian","title":"Minecraft Wiki: Crying Obsidian"},{"url":"https://minecraft.wiki/w/End_portal","title":"Minecraft Wiki: End portal"},{"url":"https://minecraft.wiki/w/Eye_of_ender","title":"Minecraft Wiki: Eye of Ender"},{"url":"https://minecraft.wiki/w/Bed","title":"Minecraft Wiki: Bed"},{"url":"https://minecraft.wiki/w/Respawn_anchor","title":"Minecraft Wiki: Respawn Anchor"},{"url":"https://www.minecraft.net/en-us/article/spawning-and-dying","title":"Minecraft: Spawning and dying in Minecraft"}]
 versionNote: "适用于原版 Java 1.20.1；不采用后续版本新增的传送等待时间游戏规则，也不推定自定义维度行为。"
-reviewedAt: "2026-10-28"
+reviewedAt: "2026-11-05"
 ---
 
 ## nether-portals | 下界门的结构与连接
@@ -15,6 +15,14 @@ reviewedAt: "2026-10-28"
 下界门连接主世界和下界，由竖直的黑曜石矩形框构成，外框至少宽四格、高五格，最大二十三乘二十三格；四个角可省略。哭泣的黑曜石不能替代框架中的普通黑曜石，框内出现火焰可激活有效框架。主世界与下界之间的水平坐标比例为八比一，只有横向两个坐标缩放，高度不缩放。传送时游戏会查找附近已有门，找不到才生成出口；高度和已有门的位置会影响连接。因此比例换算只能说明对应区域，不能单凭计算断定实际出口，也不能保证来回连接同一扇门。
 
 来源：[下界门](https://minecraft.wiki/w/Nether_Portal)、[哭泣的黑曜石](https://minecraft.wiki/w/Crying_obsidian)。
+
+## portal-transit | 玩家通过下界门的时机
+
+在 Java 1.20.1 中，玩家身体与下界门方块重叠后开始累计停留时间：生存模式要求连续停留 80 game ticks（20 TPS 下为 4 秒）才切换维度，创造模式为 1 game tick。停留途中离开门方块会中止这次传送；资料未说明已经累计的停留时间是否保留。
+
+非玩家实体穿过下界门后有 300 game ticks（20 TPS 下为 15 秒）的冷却，冷却期间不能再次使用下界门；资料把这条冷却写在非玩家实体名下。调整玩家停留时间的 `playersNetherPortalDefaultDelay` 和 `playersNetherPortalCreativeDelay` 游戏规则是 Java 1.20.3 才加入的，1.20.1 没有这两个规则。
+
+来源：[下界门](https://minecraft.wiki/w/Nether_Portal)。
 
 ## end-portals | 末地门与末影之眼
 
