@@ -15,7 +15,7 @@ import { travelStore } from '../travel/store.ts';
 import { describeActivity } from './activity.ts';
 import { describeBuild, homeOf, myBuilds } from './home.ts';
 import { FACILITY_LABELS, myFacilities } from './facilities.ts';
-import { passageDeepestAnchor, passageNext, passageSurfaceAnchor } from '../memory/passages.ts';
+import { dedupePassages, passageDeepestAnchor, passageNext, passageSurfaceAnchor } from '../memory/passages.ts';
 import { activeDrafts } from '../building/drafts.ts';
 import { cleanLesson, moodWords, PLAN_REVISION_MIN, type SelfModel } from './self.ts';
 import type { Activity, ActivityRecord, Noticing } from './types.ts';
@@ -328,7 +328,8 @@ const SURFACE_INTENT = /回地面|回到地面|回前哨|回基地|回入口|退
 function passageWayBack(ctx: MindContext): string | null {
   const p = ctx.percept, s = ctx.state;
   const here = { x: p.self.pos[0], y: p.self.pos[1], z: p.self.pos[2] };
-  const recs = ctx.memory.allPassages(s.dim).filter((r) => !r.worldId || r.worldId === s.worldId);
+  // 和 follow_passage 用同一份去重后的网：重复记录形成的伪岔路不能污染“下一步”。
+  const recs = dedupePassages(ctx.memory.allPassages(s.dim).filter((r) => !r.worldId || r.worldId === s.worldId));
   const to = passageSurfaceAnchor(recs, here);
   if (!to) return null;
   const g = passageNext(recs, here, to);
@@ -351,7 +352,8 @@ function passageWayBack(ctx: MindContext): string | null {
 function passageWayDown(ctx: MindContext): string | null {
   const p = ctx.percept, s = ctx.state;
   const here = { x: p.self.pos[0], y: p.self.pos[1], z: p.self.pos[2] };
-  const recs = ctx.memory.allPassages(s.dim).filter((r) => !r.worldId || r.worldId === s.worldId);
+  // 和 follow_passage 用同一份去重后的网：重复记录形成的伪岔路不能污染“下一步”。
+  const recs = dedupePassages(ctx.memory.allPassages(s.dim).filter((r) => !r.worldId || r.worldId === s.worldId));
   const to = passageDeepestAnchor(recs, here);
   if (!to) return null;
   const g = passageNext(recs, here, to);
@@ -445,8 +447,11 @@ export function situationalReminders(ctx: MindContext): string[] {
       out.push(`记得自己${t.text}`);
     }
     // 想下更深时：有旧矿道就给出朝最深处走的下一步（和回入口的下一步对称）
-    const down = passageWayDown(ctx);
-    if (down) out.push(down);
+    // 但要回地面/回入口时方向优先：活动文字里常同时出现「旧矿道」和「回地面」，两个方向不能一起给
+    if (!SURFACE_INTENT.test(intent)) {
+      const down = passageWayDown(ctx);
+      if (down) out.push(down);
+    }
     // 消耗品预算：下矿前把火把够不够、还能做多少摆出来（只报事实，备多少由它定）
     out.push(...supplyFacts({ inv: s.inventory, torchEvery: ctx.self.habits().torch_every, only: new Set(['torch']), difficulty: s.difficulty, gamerules: s.gamerules, stock: p.storage?.stock }));
     // 世界规则事实：keepInventory 开着时死亡不掉落（只是事实，怎么备仍由它定）
