@@ -1172,7 +1172,8 @@ export class Mind {
     const query = [plan?.goal, ...(plan?.steps.filter((st) => !st.done).slice(0, 2).map((st) => st.text) ?? []), this.activity?.what, this.activity?.why,
       this.lastRecord?.what, this.lastRecord?.outcome === 'stuck' ? this.lastRecord.summary : '', this.lastFailure?.summary, ...noticed.map((n) => n.what), reason].filter(Boolean).join(' ');
     const book = this.d.thinker.skillBook;
-    const recalled = this.safe(() => recallLocal(query, { self: this.d.self, memory: this.d.memory, book, ledger: this.d.ledger }, { n: tier === 'glance' ? 3 : 6, exclude: ['know_how'], excludeRefs: this.d.self.history(5).map((r) => r.id) }), []);
+    const ledger = this.d.ledger;
+    const recalled = this.safe(() => recallLocal(query, { self: this.d.self, memory: this.d.memory, book, ledger }, { n: tier === 'glance' ? 3 : 6, exclude: ['know_how'], excludeRefs: this.d.self.history(5).map((r) => r.id) }), []);
     const hindsightMemories = tier === 'deliberate' ? this.freshHindsightMemories() : null;
     if (tier === 'deliberate') void this.prefetchHindsight(query, percept, generation);
     let openedSkill: MindContext['openedSkill'];
@@ -1232,6 +1233,7 @@ export class Mind {
         this.d.behaviors ? (name) => this.d.behaviors!.autoNote(name) : undefined) ?? [], []),
       recalled, ...(hindsightMemories ? { hindsightMemories } : {}), ...(openedSkill ? { openedSkill } : {}), ...(learnFrom ? { learnFrom } : {}), plan,
       hunting: this.safe(() => this.d.ledger?.huntTally() ?? null, null),
+      materials: ledger ? this.safe(() => ({ wood: ledger.materialTally('wood'), ore: ledger.materialTally('ore') }), null) : null,
       ...(this.trip ? { trip: { minutes: (Date.now() - this.trip.since) / 60_000, gained: diffInventory(this.trip.inventory, inventoryOf(state)).gained, nearEnd: reason === Mind.NEAR_END_REASON } } : {}),
       ...(reviewing ? { stageReview: this.safe(() => this.stageReviewFacts(), { why: this.review?.why ?? '' }) } : {}),
       ...(this.d.behaviors && tier === 'deliberate' ? { learnedSkills: this.safe(() => this.d.behaviors!.overview().filter((l) => !/已收起|已停用/.test(l)), []), instincts: this.safe(() => instinctNote(), '') } : {}),

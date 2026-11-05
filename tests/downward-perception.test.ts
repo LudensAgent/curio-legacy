@@ -18,6 +18,11 @@ test('传送门方块算可通行：isSoftBlock 认下界门，surroundings 不�
   assert.ok(around.exits.includes('N'), `下界门应该能走进去：${around.text}`);
 });
 
+test('红树胎生苗也是可通行的小植物，不挡路/不挡视线', () => {
+  assert.equal(isSoftBlock('mangrove_propagule'), true);
+  assert.equal(isSoftBlock('oak_sapling'), true);
+});
+
 test('localMap 半径可配置：默认 9×9，传 radius 可调大调小', () => {
   const pos = { x: 0, y: 64, z: 0 };
   const adapter = { blockAt: () => { throw new Error('不能用隐藏世界补全视觉'); } };

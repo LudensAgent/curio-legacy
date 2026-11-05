@@ -5,6 +5,7 @@ import type { GameAdapter, MoveOpts, MoveTarget, Vec3Like } from '../src/adapter
 import { EventBus } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { createActivity } from '../src/mind/activity.ts';
+import { Ledger } from '../src/mind/ledger.ts';
 import { Mind } from '../src/mind/mind.ts';
 import { buildMindMessages, decisionReminders, situationalReminders, type MindContext } from '../src/mind/prompt.ts';
 import { SelfModel } from '../src/mind/self.ts';
@@ -178,6 +179,81 @@ test('提示词：下矿的账/顺手采集/挖掘规模不占 5 条提醒配额
   assert.ok(user.includes('下矿的账'), '下矿的账必须真正进入 user 消息');
   assert.ok(user.includes('顺手采集'), '顺手采集必须真正进入 user 消息');
   assert.ok(user.includes('要下矿先想好'), '挖掘规模提醒必须真正进入 user 消息');
+  memory.close();
+});
+
+test('提示词：木料历史账只报事实、区分背包实时与箱子旧账，且只在相关意图/认真想时出现', () => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  adapter.inv.set('oak_log', 24);
+  adapter.inv.set('birch_log', 8);
+  const perception = new Perception(adapter, memory, bus, new Vision(adapter));
+  const base: MindContext = { tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(), self: new SelfModel(null),
+    memory, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' };
+  const tally = (trips: number, units: number, walked: number, recentWalked: number) => ({ trips, units, walked, recentWalked, lastAt: trips ? Date.now() - 5 * 60_000 : null });
+  const userOf = (ctx: MindContext) => buildMindMessages(ctx).find((m) => m.role === 'user')!.content;
+  const materials = { wood: tally(7, 30, 795, 114), ore: tally(1, 5, 90, 90) };
+  const woodActivity = createActivity({ what: '砍树收集原木', why: '测试', kind: 'gather', repeat: 1, steps: [{ skill: 'gather', args: { block: 'oak_log' } }] }, '', 'llm', adapter.state());
+  const ctx = { ...base, activity: woodActivity, materials };
+  (ctx.percept as any).storage = { chests: 1, nearest: 3, stored: '箱子', stock: [{ item: 'oak_log', total: 40, inChests: 40, chestCount: 1, inBackpack: 0 }] };
+  const user = userOf(ctx);
+  assert.match(user, /木料的历史账（最近 7 段活）：拿到 30 个原木类方块（不含木板\/木棍），一共走了 795 格（最近平均每段活 114 格；最近一次 5 分钟前）；现在背包里有 32 个原木类方块（实时，不含木板\/木棍）；记得的箱子（上次打开时）还有 40 个原木类方块/);
+  assert.ok(!user.includes('现在背包/箱子里'), '箱子记录不是当前事实，不能写成现在');
+  for (const word of ['多备', '换做法', '种树', '囤']) assert.ok(!user.includes(word), `不出现策略暗示：${word}`);
+  assert.ok(!userOf({ ...ctx, tier: 'glance' }).includes('木料的历史账'), '瞥一眼不重复物料账');
+  assert.ok(!userOf({ ...ctx, materials: null }).includes('木料的历史账'), '没有账本数据时不说');
+  assert.ok(!userOf({ ...ctx, materials: { wood: tally(1, 3, 40, 40), ore: tally(0, 0, 0, 0) } }).includes('木料的历史账'), '只跑过 1 段活不出现');
+  const old = { wood: { ...tally(7, 30, 795, 114), lastAt: Date.now() - 3 * 86_400_000 }, ore: tally(0, 0, 0, 0) };
+  assert.match(userOf({ ...ctx, materials: old }), /最近一次 3 天前/, '超过 48 小时用天');
+  // 用木镐挖铁：木镐不是木料采集意图，不该触发木料账
+  const pickaxeMining = createActivity({ what: '挖铁矿', why: '用木镐挖铁', kind: 'gather', repeat: 1, steps: [{ skill: 'dig_at', args: { at: [1, -1, 0] } }] }, '', 'llm', adapter.state());
+  assert.ok(!userOf({ ...base, activity: pickaxeMining, materials }).includes('木料的历史账'), '“用木镐挖铁”不触发木料账');
+  // dialog 不是 log：词边界不能被随意子串触发
+  const dialog = createActivity({ what: 'read dialog', why: '看公告牌', kind: 'explore', repeat: 1, steps: [{ skill: 'look', args: {} }] }, '', 'llm', adapter.state());
+  assert.ok(!userOf({ ...base, activity: dialog, materials }).includes('木料的历史账'), 'dialog 不触发 log');
+  memory.close();
+});
+
+test('提示词：矿石历史账含锭的现有量但不把锭算成矿石，且与这一趟的下矿账不重复', () => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  adapter.inv.set('iron_ingot', 64);
+  adapter.inv.set('raw_iron_block', 8);
+  const perception = new Perception(adapter, memory, bus, new Vision(adapter));
+  const base: MindContext = { tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(), self: new SelfModel(null),
+    memory, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' };
+  const tally = (trips: number, units: number, walked: number, recentWalked: number) => ({ trips, units, walked, recentWalked, lastAt: Date.now() - 2 * 60_000 });
+  const miningActivity = createActivity({ what: '沿矿道往下挖，找钻石', why: '测试', kind: 'gather', repeat: 1, steps: [{ skill: 'excavate_path', args: { entry: 'current', mode: 'stairs', direction: 'east', steps: 4 } }] }, '', 'llm', adapter.state());
+  const materials = { wood: tally(7, 30, 795, 114), ore: tally(3, 12, 260, 80) };
+  const user = buildMindMessages({ ...base, activity: miningActivity, materials }).find((m) => m.role === 'user')!.content;
+  assert.match(user, /矿石的历史账（最近 3 段活）：拿到 12 个矿石\/粗矿\/矿物，一共走了 260 格（最近平均每段活 80 格；最近一次 2 分钟前）；现在背包里有 72 个矿石\/粗矿\/锭（实时）/);
+  assert.match(user, /粗矿块 8 个（背包\+记得的箱子合计）按块计，未折算成粗铁/, '粗矿块计入现有量但不装作粗铁');
+  assert.ok(!user.includes('木料的历史账'), '挖矿意图不触发木料账');
+  // 这一趟的下矿账已经在说当前所见，历史聚合不重复
+  const withTrip = { ...base, activity: miningActivity, materials, trip: { minutes: 10, gained: { diamond: 1 }, nearEnd: true } };
+  (withTrip.percept.self as any).where = { kind: 'underground', text: '在地下' };
+  (withTrip.percept.self as any).sky_visible = false;
+  const tripUser = buildMindMessages(withTrip).find((m) => m.role === 'user')!.content;
+  assert.ok(tripUser.includes('下矿的账'), '这一趟的账仍在');
+  assert.ok(!tripUser.includes('矿石的历史账'), '同一口径不叠两遍');
+  memory.close();
+});
+
+test('mind：材料账由 ledger 的 materialTally 传入 MindContext', () => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  const ledger = new Ledger(null, bus, () => adapter.state());
+  ledger.data.episodes = [
+    { at: Date.now(), what: '砍树', kind: 'gather', signature: 'gather:oak_log', outcome: 'done', sec: 60, actions: 1, failures: 0, walked: 100, hpLost: 0, gained: { oak_log: 6 } },
+    { at: Date.now(), what: '再去砍树', kind: 'gather', signature: 'gather:oak_log', outcome: 'done', sec: 60, actions: 1, failures: 0, walked: 80, hpLost: 0, gained: { oak_log: 4 } },
+    { at: Date.now(), what: '挖铁矿', kind: 'gather', signature: 'gather:raw_iron', outcome: 'done', sec: 60, actions: 1, failures: 0, walked: 50, hpLost: 0, gained: { raw_iron: 3 } },
+  ];
+  const perception = new Perception(adapter, memory, bus, new Vision(adapter));
+  const captured: MindContext[] = [];
+  const thinker = { think(ctx: MindContext) { captured.push(ctx); return new Promise(() => {}); } };
+  const arbiter = { info: () => null, start: () => ({ id: 'noop' }) };
+  const mind = new Mind({ adapter, arbiter: arbiter as unknown as Arbiter, perception, memory, bus,
+    self: new SelfModel(null), persona: 'P', thinker: thinker as unknown as Thinker, ledger });
+  (mind as any).think('测试', 'glance');
+  assert.equal(captured[0]?.materials?.wood.trips, 2, '木料账从账本传入');
+  assert.equal(captured[0]?.materials?.ore.trips, 1, '矿石账从账本传入');
   memory.close();
 });
 

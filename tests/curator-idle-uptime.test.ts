@@ -182,3 +182,149 @@ test('已验证的稳定应急版仍免闲置和容量淘汰；未验证的应�
   assert.equal(w.engine.executionError(definition.name), null);
   assert.deepEqual(w.engine.currentStats(definition.name), { ok: 1, fail: 0 });
 });
+
+test('主动维护技能没有失败证据时不按闲置收起，有失败证据的主动/恢复技能仍照常收', (t) => {
+  const w = setup(t);
+  const proactive = { ...definition, name: 'top-up-torches', description: '火把少了就补到箱子里', when: { food_below: 8 } };
+  const failedProactive = { ...definition, name: 'plant-surplus-saplings', description: '树苗多了就种到附近空地', when: { food_below: 7 } };
+  const failedRecovery = { ...definition, name: 'retry-goto-after-path-failure', when: { after_failure: { skill: ['goto'], code: ['PATH_NOT_FOUND'] } } };
+  for (const skill of [proactive, failedProactive, failedRecovery]) assert.ok(w.engine.write(skill).ok, skill.name);
+  assert.equal(w.engine.get(proactive.name)?.mode, 'auto');
+  assert.equal(w.engine.get(failedRecovery.name)?.mode, 'recover');
+  w.observe();
+  for (let i = 0; i < 3; i++) w.engine.recordInvocation(failedProactive.name, { status: 'failed', summary: '种下去没活', data: { version: 1 } });
+  for (let i = 0; i < 2; i++) w.engine.recordInvocation(failedRecovery.name, { status: 'failed', summary: '重试后路仍不通', data: { version: 1 } });
+  w.observe();
+  w.observe(8 * day);
+  const retired = w.curator.retireUnused();
+  assert.deepEqual(new Set(retired), new Set([failedProactive.name, failedRecovery.name]));
+  assert.ok(!retired.includes(proactive.name), '没触发过也没失败的主动维护技能免闲置收起');
+  assert.equal(w.engine.statsOf(proactive.name)?.retired, undefined);
+  assert.equal(w.engine.statsOf(failedProactive.name)?.retired !== undefined, true);
+  assert.equal(w.engine.statsOf(failedRecovery.name)?.retired !== undefined, true);
+});
+
+test('主动维护技能触发过却只 skip、0 成 0 败时不算无负面证据', (t) => {
+  const w = setup(t);
+  const noop = { ...definition, name: 'plant-surplus-saplings', description: '树苗多了就种到附近空地', when: { food_below: 8 } };
+  const clean = { ...definition, name: 'top-up-torches', description: '火把少了就补到箱子里', when: { food_below: 7 } };
+  const worked = { ...definition, name: 'refill-torch-box', description: '火把少了就补满箱子', when: { food_below: 6 } };
+  for (const skill of [noop, clean, worked]) assert.ok(w.engine.write(skill).ok, skill.name);
+  w.observe();
+  // 真实 no-op 路径：noteInvocation 记 uses/skipped，不记 ok/fail，也不刷新闲置活动。
+  for (let i = 0; i < 5; i++) w.engine.recordInvocation(noop.name, { status: 'succeeded', summary: '当前不适用，未执行', data: { version: 1, noop: true } });
+  w.engine.recordInvocation(worked.name, { status: 'succeeded', summary: '实际补满了火把箱', data: { version: 1, verified: true } });
+  assert.deepEqual(w.engine.currentStats(noop.name), { ok: 0, fail: 0 });
+  assert.equal(w.engine.statsOf(noop.name)?.uses, 5);
+  assert.equal(w.engine.statsOf(noop.name)?.skipped, 5);
+  w.observe();
+  w.observe(8 * day);
+  const retired = w.curator.retireUnused();
+  assert.ok(retired.includes(noop.name), '触发过却一次没成的主动技能照常按闲置收起');
+  assert.ok(!retired.includes(clean.name), '从未触发、也没有 skip 的主动技能仍受保护');
+  assert.ok(!retired.includes(worked.name), '已有成功证据的主动技能仍受保护');
+  assert.deepEqual(w.engine.currentStats(worked.name), { ok: 1, fail: 0 });
+});
+
+test('主动维护技能只触发后被取消不算负面证据，真实 no-op 和成功证据仍按原口径', (t) => {
+  const w = setup(t);
+  const cancelled = { ...definition, name: 'rare-torch-top-up', description: '火把少了就补到箱子里', when: { food_below: 8 } };
+  const noop = { ...definition, name: 'plant-surplus-saplings', description: '树苗多了就种到附近空地', when: { food_below: 7 } };
+  const worked = { ...definition, name: 'refill-torch-box', description: '火把少了就补满箱子', when: { food_below: 6 } };
+  for (const skill of [cancelled, noop, worked]) assert.ok(w.engine.write(skill).ok, skill.name);
+  w.observe();
+  w.engine.recordInvocation(cancelled.name, { status: 'cancelled', summary: '被更高优先级任务取消', data: { version: 1 } });
+  w.engine.recordInvocation(noop.name, { status: 'succeeded', summary: '当前不适用，未执行', data: { version: 1, noop: true } });
+  w.engine.recordInvocation(worked.name, { status: 'succeeded', summary: '实际补满了火把箱', data: { version: 1, verified: true } });
+  const cancelledUsage = w.engine.statsOf(cancelled.name)?.usageByVersion?.['1'];
+  assert.equal(cancelledUsage?.uses, 1);
+  assert.equal(cancelledUsage?.cancelled, 1);
+  assert.equal(cancelledUsage?.skipped, 0);
+  w.observe();
+  w.observe(8 * day);
+  const retired = w.curator.retireUnused();
+  assert.ok(!retired.includes(cancelled.name), '只触发后被取消不算“没有实际执行”');
+  assert.ok(retired.includes(noop.name), '真实 no-op 仍取消保护');
+  assert.ok(!retired.includes(worked.name), '已有成功证据的仍受保护');
+});
+
+test('重写成新版本后，主动维护技能从新版本重新判断', (t) => {
+  const w = setup(t);
+  const skill = { ...definition, name: 'rewritten-torch-top-up', description: '火把少了就补到箱子里', when: { food_below: 8 } };
+  assert.ok(w.engine.write(skill).ok);
+  w.observe();
+  for (let i = 0; i < 5; i++) w.engine.recordInvocation(skill.name, { status: 'succeeded', summary: '当前不适用，未执行', data: { version: 1, noop: true } });
+  assert.ok(w.engine.write({ ...skill, code: 'return {revised:true};' }).ok);
+  assert.equal(w.engine.get(skill.name)?.version, 2);
+  w.observe();
+  w.observe(8 * day);
+  assert.deepEqual(w.curator.retireUnused(), [], '新版本还没触发过，不被旧版本的 skip 连坐');
+  assert.equal(w.engine.statsOf(skill.name)?.retired, undefined);
+});
+
+test('没有按版本统计的老存档：fired/uses/skipped 也取消主动保护', (t) => {
+  const w = setup(t);
+  const firedOnly = { ...definition, name: 'legacy-fired-torch-top-up', description: '火把少了就补到箱子里', when: { food_below: 8 } };
+  const legacyUsage = { ...definition, name: 'legacy-used-torch-top-up', description: '火把少了就补满箱子', when: { food_below: 7 } };
+  for (const skill of [firedOnly, legacyUsage]) assert.ok(w.engine.write(skill).ok, skill.name);
+  const stats = (w.engine as any).stats;
+  stats[firedOnly.name] = { fired: 5, ok: 0, fail: 0, lastAt: Date.now() - 11 * 60_000 };
+  stats[legacyUsage.name] = { fired: 5, uses: 5, skipped: 5, ok: 0, fail: 0, lastAt: Date.now() };
+  w.observe();
+  w.observe(8 * day);
+  assert.deepEqual(new Set(w.curator.retireUnused()), new Set([firedOnly.name, legacyUsage.name]));
+});
+
+test('老存档刚触发还没结果时，不把 fired 当成负面证据', (t) => {
+  const w = setup(t);
+  const skill = { ...definition, name: 'legacy-fresh-torch-top-up', description: '火把少了就补到箱子里', when: { food_below: 8 } };
+  assert.ok(w.engine.write(skill).ok);
+  const stats = (w.engine as any).stats;
+  stats[skill.name] = { fired: 1, ok: 0, fail: 0, lastAt: Date.now() };
+  w.observe();
+  w.observe(8 * day);
+  assert.deepEqual(w.curator.retireUnused(), [], '触发宽限期内不能把执行中的技能收起');
+  stats[skill.name].lastAt = Date.now() - 11 * 60_000;
+  assert.deepEqual(w.curator.retireUnused(), [skill.name], '过了宽限期仍是 0 成 0 败才按负面证据收起');
+});
+
+test('老存档有 uses 时取消豁免优先，不再被 fired 覆盖', (t) => {
+  const w = setup(t);
+  const cancelled = { ...definition, name: 'legacy-cancelled-torch-top-up', description: '火把少了就补到箱子里', when: { food_below: 8 } };
+  const executed = { ...definition, name: 'legacy-executed-torch-top-up', description: '火把少了就补满箱子', when: { food_below: 7 } };
+  for (const skill of [cancelled, executed]) assert.ok(w.engine.write(skill).ok, skill.name);
+  const stats = (w.engine as any).stats;
+  stats[cancelled.name] = { fired: 5, uses: 5, cancelled: 5, skipped: 0, ok: 0, fail: 0, lastAt: Date.now() - 11 * 60_000 };
+  stats[executed.name] = { fired: 5, uses: 5, cancelled: 0, skipped: 0, ok: 0, fail: 0, lastAt: Date.now() - 11 * 60_000 };
+  w.observe();
+  w.observe(8 * day);
+  assert.deepEqual(w.curator.retireUnused(), [executed.name], '有 uses 时只看未取消的实际执行，fired 不再覆盖取消豁免');
+});
+
+test('容量压力先收有失败证据的，从没用过的主动维护技能排在后面', (t) => {
+  const w = setup(t, { maxActive: 1 });
+  const proactive = { ...definition, name: 'top-up-torches', description: '火把少了就补到箱子里', when: { food_below: 8 } };
+  const failedManual = { ...definition, name: 'failed-manual-work' };
+  assert.ok(w.engine.write(proactive).ok);
+  assert.ok(w.engine.write(failedManual).ok);
+  for (let i = 0; i < 2; i++) w.engine.recordInvocation(failedManual.name, { status: 'failed', summary: '没有完成委托', data: { version: 1 } });
+  w.observe();
+  w.observe(day);
+  const out = w.curator.retireLowValue();
+  assert.ok(out.includes(failedManual.name), '有失败证据的先收');
+  assert.ok(!out.includes(proactive.name), '没证据的主动维护技能不先被容量挤掉');
+  assert.equal(w.engine.statsOf(proactive.name)?.retired, undefined);
+});
+
+test('只剩没证据的主动维护技能时容量上限仍执行，已验证的稳定应急版不受影响', (t) => {
+  const w = setup(t, { maxActive: 0 });
+  const emergency = { ...definition, name: 'escape-lava', when: { hp_below: 8 } };
+  const proactive = { ...definition, name: 'top-up-torches', description: '火把少了就补到箱子里', when: { food_below: 8 } };
+  assert.ok(w.engine.write(emergency).ok);
+  w.engine.recordInvocation(emergency.name, { status: 'succeeded', summary: '实际躲开危险', data: { version: 1, verified: true } });
+  assert.ok(w.engine.write(proactive).ok);
+  w.observe();
+  w.observe(day);
+  assert.deepEqual(w.curator.retireLowValue(), [proactive.name], '容量上限仍有界；应急版不占容量也不被收');
+  assert.equal(w.engine.statsOf(emergency.name)?.retired, undefined);
+});

@@ -42,7 +42,7 @@ const replaceable = (name: string) => AIR.has(name) || PLANTS.has(name);
 /** 留空表示能通行，不要求拆掉后来布置的薄设施；门、栅栏、积雪、液体等不在其中。 */
 const clearanceFixture = (name: string) => /^(?:(?:soul_|redstone_)?(?:wall_)?torch|(?:[a-z_]+_)?carpet|(?:powered_|detector_|activator_)?rail|[a-z_]+_button|[a-z_]+_pressure_plate|lever|redstone_wire)$/.test(name);
 /** 整地时可以清掉的自然东西：植物、树、雪，以及会被铲平的泥土石头；自己插的火把也可以拿掉 */
-const VEGETATION = /(_leaves|_log|_wood|_stem|_sapling|_flower|_tulip|_mushroom|_carpet|grass|fern|bush|vine|vines|dandelion|poppy|orchid|allium|bluet|daisy|cornflower|lily_of_the_valley|peony|lilac|rose_bush|sunflower|sugar_cane|bamboo|azalea|cactus|snow|cobweb|lily_pad|hanging_roots|spore_blossom|glow_lichen|moss_block)$/;
+const VEGETATION = /(_leaves|_log|_wood|_stem|_sapling|mangrove_propagule|_flower|_tulip|_mushroom|_carpet|grass|fern|bush|vine|vines|dandelion|poppy|orchid|allium|bluet|daisy|cornflower|lily_of_the_valley|peony|lilac|rose_bush|sunflower|sugar_cane|bamboo|azalea|cactus|snow|cobweb|lily_pad|hanging_roots|spore_blossom|glow_lichen|moss_block)$/;
 // 不含圆石、耕地、土径：那些多半是自己或别人做出来的（墙、农田、小路），留给验收报告
 const LEVELABLE = new Set(['grass_block', 'dirt', 'coarse_dirt', 'podzol', 'mycelium', 'rooted_dirt', 'stone', 'deepslate', 'netherrack', 'end_stone', 'sand', 'red_sand', 'gravel', 'clay', 'andesite', 'granite', 'diorite', 'tuff', 'calcite', 'sandstone', 'red_sandstone', 'terracotta', 'snow_block', 'mud', 'moss_block']);
 export const siteClearable = (name: string) => !name.endsWith('grass_block') && VEGETATION.test(name) || LEVELABLE.has(name) || clearanceFixture(name);

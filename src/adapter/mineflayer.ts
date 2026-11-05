@@ -13,7 +13,7 @@ import type { EventBus } from '../events.ts';
 import { AbortedError, raceAbort, shortId, sleep, throwIfAborted, TimeoutError } from '../util.ts';
 import { installClientGuard } from './click-guard.ts';
 import { cornerSafe } from './corner-safe.ts';
-import { AIR_BLOCKS, attachmentFaces } from '../perception/surroundings.ts';
+import { AIR_BLOCKS, attachmentFaces, isTreeSaplingItem, saplingSoilFor, saplingSoilText } from '../perception/surroundings.ts';
 import { feetCell, facingOfYaw } from '../perception/local.ts';
 import { bodyOverlapsPortal, PORTAL_KINDS, portalApproach as computePortalApproach, portalStance as computePortalStance } from '../perception/portal.ts';
 import type { WalkBody, WalkTick } from './walk-route.ts';
@@ -1495,7 +1495,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       finally { if (ownsControls()) for (const k of keys) b.setControlState(k, false); }
     };
     if (!opts.constructionSafe) {
-      const soft = /(_leaves|grass|fern|vine|bush|_sapling|snow|flower|tulip|dandelion|poppy|azalea|cobweb)$/;
+      const soft = /(_leaves|grass|fern|vine|bush|_sapling|mangrove_propagule|snow|flower|tulip|dandelion|poppy|azalea|cobweb)$/;
       for (const block of opts.allowTerrainChanges ? bodyBlocks(p.offset(fx * 0.75, 0, fz * 0.75)) : []) {
         if (!block || !soft.test(block.name) || !b.canDigBlock?.(block)) continue;
         const key = `dig:${block.position}`;
@@ -1943,10 +1943,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const cur = b.blockAt(target);
     if (cur && cur.boundingBox === 'block') return { ok: true }; // 已经有方块了
     // 树苗只能种在草地/泥土类方块上：先查目标格下方，种不了就报清楚（别让服务器拒绝后只回一句 still air）
-    if (/_sapling$/.test(item.name)) {
+    if (isTreeSaplingItem(item.name)) {
       const below = b.blockAt(target.offset(0, -1, 0));
-      if (!below || !/^(grass_block|dirt|coarse_dirt|podzol|mycelium|moss_block|rooted_dirt|mud|muddy_mangrove_roots)$/.test(below.name)) {
-        return { ok: false, reason: `BAD_SUPPORT:树苗要种在草方块/泥土/灰化土等上面，下面是 ${below?.name ?? '未加载的方块'}` };
+      if (!below) return { ok: false, reason: `BAD_SUPPORT:目标格 (${target.x},${target.y},${target.z}) 正下方未加载，无法确认树苗的土壤` };
+      if (!saplingSoilFor(item.name).has(below.name)) {
+        return { ok: false, reason: `BAD_SUPPORT:${item.name} 只能种在${saplingSoilText(item.name)}上，目标格 (${target.x},${target.y},${target.z}) 正下方 (${target.x},${target.y - 1},${target.z}) 是 ${below.name}` };
       }
     }
     // 贴墙的东西（梯子、火把、按钮……）要以它能挂住的那一面为参照：梯子只能挂在实心墙的侧面，火把可以立在地上或挂在墙上；
@@ -2000,8 +2001,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       ok: false,
       reason: 'NO_REFERENCE',
       detail: refs.length
-        ? `${at} 有 ${refs.length} 个相邻实心方块，但从当前眼睛位置到这些面的视线被挡或超出 4.4 格`
-        : `${at} 四周没有相邻实心方块（悬空），从当前站位没有可贴的面`,
+        ? `${at} 有 ${refs.length} 个相邻实心方块，但从当前眼睛位置到这些面的视线被挡或超出 4.4 格；调整站位（靠近或侧移）让目标面和相邻方块进入视野/交互距离再放`
+        : `${at} 四周没有相邻实心方块（悬空），从当前站位没有可贴的面${isTreeSaplingItem(item.name) ? '；即使下面有土，也要先站到能看见目标格相邻面的位置' : ''}`,
     };
   }
 
@@ -4582,6 +4583,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       }
       const block = b.blockAt(this.vec(target.pos));
       if (!block) return { ok: false, reason: 'NO_BLOCK' };
+      // 树苗右键的落点由命中方块的顶面/侧面决定：先按物品确认目标方块是可种土壤（黏土只对红树苗有效），
+      // 不是土壤就直接报 BAD_SUPPORT，不要发出去后只收到泛化的 PLACEMENT_NOT_CONFIRMED。
+      if (isTreeSaplingItem(item) && !saplingSoilFor(item).has(block.name)) {
+        return { ok: false, reason: `BAD_SUPPORT:${item} 不能种在 ${block.name} 上，只能种在${saplingSoilText(item)}上`, effectEvidence: { verified: true, changed: false, reasons: [`目标方块 ${block.name} 不是 ${item} 的可种土壤，未发送放置动作`] } };
+      }
       if (this.mcData.blocksByName?.[item]) return await this.placeItemAgainst(item, block, check);
       if (/_boat$|_raft$/.test(item)) {
         // 放船/筏：船/筏是实体不是方块，服务器只认“右键用物品”（use_item）才落船，发 block_place（放方块）对它无效，

@@ -10,7 +10,7 @@ import { rotatePosition, type BuildingSpec, type Rotation } from './spec.ts';
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 const LIQUID = new Set(['water', 'lava', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass', 'powder_snow']);
 /** 地表上可以清掉、不算地面的东西：草、花、树、雪层…… */
-const COVER = /(^air$|^cave_air$|_leaves$|_log$|_wood$|_stem$|_sapling$|_flower$|_tulip$|_mushroom$|^short_grass$|^grass$|^tall_grass$|fern$|bush$|vine|^dandelion$|^poppy$|orchid$|allium$|bluet$|daisy$|cornflower$|lily_of_the_valley$|peony$|lilac$|^rose_bush$|^sunflower$|^snow$|^sugar_cane$|^torch$|^wall_torch$)/;
+const COVER = /(^air$|^cave_air$|_leaves$|_log$|_wood$|_stem$|_sapling$|^mangrove_propagule$|_flower$|_tulip$|_mushroom$|^short_grass$|^grass$|^tall_grass$|fern$|bush$|vine|^dandelion$|^poppy$|orchid$|allium$|bluet$|daisy$|cornflower$|lily_of_the_valley$|peony$|lilac$|^rose_bush$|^sunflower$|^snow$|^sugar_cane$|^torch$|^wall_torch$)/;
 const NATURAL = new Set(['grass_block', 'dirt', 'coarse_dirt', 'podzol', 'mycelium', 'rooted_dirt', 'stone', 'deepslate', 'andesite', 'granite', 'diorite', 'tuff', 'calcite', 'gravel', 'sand', 'red_sand', 'clay', 'sandstone', 'red_sandstone', 'terracotta', 'snow_block', 'mud', 'moss_block', 'netherrack', 'end_stone']);
 const TREE = /_log$|_wood$|_stem$/;
 
