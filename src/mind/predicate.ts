@@ -219,8 +219,14 @@ export function evalPredicate(p: Predicate, s: Sense): boolean {
     && (p.hostile!.fusing === undefined || !!h.fusing === p.hostile!.fusing)
     && (p.hostile!.seen === undefined || (h.perception === 'seen') === p.hostile!.seen))) return false;
   if (p.no_hostile_within !== undefined && s.hostiles.some((h) => h.dist <= p.no_hostile_within!)) return false;
-  if (p.has && st.inventory.filter((i) => glob(p.has!.item, i.name)).reduce((n, i) => n + i.count, 0) < p.has.count) return false;
-  if (p.lacks && st.inventory.some((i) => i.count > 0 && glob(p.lacks!, i.name))) return false;
+  if (p.has || p.lacks) {
+    // 穿戴/副手（盾、护甲）不在背包里，但“身上有没有这个东西”算持有
+    const carried = (pattern: string) =>
+      st.inventory.filter((i) => glob(pattern, i.name)).reduce((n, i) => n + i.count, 0)
+      + (st.equipment ?? []).filter((e) => glob(pattern, e.name)).length;
+    if (p.has && carried(p.has.item) < p.has.count) return false;
+    if (p.lacks && carried(p.lacks) > 0) return false;
+  }
   if (p.doing && !(s.doing && p.doing.includes(s.doing))) return false;
   if (p.not_doing && s.doing && p.not_doing.includes(s.doing)) return false;
   if (p.cell && !p.cell.every((c) => { const n = s.cell(c.at); return (Array.isArray(c.is) ? c.is : [c.is]).some((is) => cellIs(n, is)); })) return false;

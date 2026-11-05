@@ -33,3 +33,15 @@ test('validatePredicate 接受 seen 字段、拒绝非法值', () => {
   assert.ok(!('error' in validatePredicate({ hostile: { within: 8, seen: true } })));
   assert.match((validatePredicate({ hostile: { within: 8, seen: 'yes' } }) as { error: string }).error, /seen/);
 });
+
+test('has/lacks 把副手和护甲算作持有（盾装在副手时也满足）', () => {
+  const base = (state: Record<string, unknown>): Sense => ({
+    state: { hp: 20, food: 20, oxygen: 20, inWater: false, inLava: false, onGround: true, isDay: true, dim: 'overworld', inventory: [], ...state } as never,
+    hostiles: [], lightLevel: 15, facing: 'N', doing: null, hurtAgoMs: Infinity, cover: 'open', cell: () => 'air',
+  });
+  const shieldInHand = base({ equipment: [{ slot: 'off-hand', name: 'shield' }] });
+  assert.equal(evalPredicate({ has: { item: 'shield', count: 1 } }, shieldInHand), true, '副手的盾算持有');
+  assert.equal(evalPredicate({ lacks: 'shield' }, shieldInHand), false);
+  assert.equal(evalPredicate({ has: { item: 'shield', count: 1 } }, base({})), false, '没有盾时仍不满足');
+  assert.equal(evalPredicate({ has: { item: 'iron_helmet', count: 1 } }, base({ equipment: [{ slot: 'head', name: 'iron_helmet' }] })), true, '穿在头上的护甲也算');
+});

@@ -130,6 +130,30 @@ test('救命类候选技能在要命条件下也会自动接手（以 trial 试�
   } finally { engine.dispose(); }
 });
 
+test('副手装备的盾会让贴身防御候选自动接管（has 不再只数背包）', () => {
+  const adapter = new FakeAdapter(), bus = new EventBus();
+  const zombie: Senses = { ...noSenses, perceivedEntities: () => [{ id: 3, name: 'zombie', kind: 'hostile', dist: 1.3, perception: 'seen', pos: { x: 1.3, y: 64, z: 0 } } as EntityInfo] };
+  const starts: Step[] = [];
+  const current = { id: 'task', planVersion: 1, skill: 'dig_at', args: {}, source: 'llm', progress: 0, note: '', startedAt: Date.now(), deadline: Date.now() + 30000, movement: false } as TaskInfo;
+  const arbiter = { paused: false, info: () => current, on() {}, off() {},
+    start: (step: Step, source: TaskSource) => { starts.push(step); return { ...current, id: 'learned', skill: step.skill, args: step.args, source }; } } as unknown as Arbiter;
+  const book = new SkillBook(null, tmp());
+  book.write('shield-melee-defense', '近战怪贴身时举盾还手', '候选', {
+    when: { hostile: { within: 4, seen: true }, has: { item: 'shield', count: 1 } }, steps: [{ skill: 'look_around' }],
+  }, { candidate: true });
+  const engine = new BehaviorEngine(book, adapter, arbiter, bus, zombie);
+  try {
+    const reflex = new Reflex(adapter, arbiter, bus, zombie, { instincts: 'skills', routineCare: false, behaviors: engine });
+    reflex.tick();
+    assert.equal(starts.length, 0, '没有盾时不启动');
+    adapter.equipped.set('off-hand', 'shield');
+    reflex.tick();
+    assert.equal(starts.at(-1)?.skill, 'use_skill');
+    assert.equal((starts.at(-1)?.args as { name: string }).name, 'shield-melee-defense');
+    assert.equal((starts.at(-1)?.args as { trial?: boolean }).trial, true, '候选以 trial 试用');
+  } finally { engine.dispose(); }
+});
+
 test('样本技能读取：恢复类、调用类与写技能说明可用，引用隐藏动作的旧样本拒绝启用', () => {
   const book = new SkillBook(BUILTIN_SKILLS_DIR, FIXTURES);
   const engine = new BehaviorEngine(book, new FakeAdapter(), null, new EventBus(), noSenses);

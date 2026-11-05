@@ -376,7 +376,7 @@ export class Mind {
   /**
    * 眼下要命的处境：只说身体此刻感觉得到的事实和能做的选择，不替它做决定。
    * - 头那一格是实心方块、刚掉过血：窒息
-   * - 近战怪贴身（3 格内）、刚挨过打、血不多：被围攻
+   * - 近战怪贴身（3 格内）、刚挨过打：被围攻（已经在战斗动作里时，血不多才再报）
    * - 在水下、氧气快没了：溺水
    */
   private sensedDanger(p: Percept): { key: string; what: string }[] {
@@ -388,8 +388,11 @@ export class Mind {
       out.push({ key: 'danger:suffocate', what: `头被 ${head} 埋住了，正在窒息掉血（血 ${hp}）` });
     }
     if (s.inWater && s.oxygen <= 5) out.push({ key: 'danger:drown', what: `在水下快没气了（氧气 ${s.oxygen}/20，血 ${hp}）` });
+    // 已经在打/逃/躲的时候不必每 4 秒再打断一次；其余时候被贴身打本身就是该马上知道的事实
+    const cur = this.d.arbiter.info();
+    const handling = !!cur && ['defend', 'guard', 'flee', 'ranged_defend', 'hunt', 'shelter'].includes(cur.skill);
     const close = p.nearby.hostile.filter((h) => h.dist <= 3 && h.name !== 'creeper');
-    if (close.length && hurtRecently && hp <= 12) {
+    if (close.length && hurtRecently && (!handling || hp <= 12)) {
       out.push({ key: 'danger:melee', what: `被 ${close.map((h) => `${h.name} ${h.dist}格`).join('、')} 贴身打（血 ${hp}）` });
     }
     return out;
