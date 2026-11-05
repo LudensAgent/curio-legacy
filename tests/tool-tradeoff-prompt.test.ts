@@ -225,7 +225,7 @@ test('提示词：矿石历史账含锭的现有量但不把锭算成矿石，�
   const materials = { wood: tally(7, 30, 795, 114), ore: tally(3, 12, 260, 80) };
   const user = buildMindMessages({ ...base, activity: miningActivity, materials }).find((m) => m.role === 'user')!.content;
   assert.match(user, /矿石的历史账（最近 3 段活）：拿到 12 个矿石\/粗矿\/矿物，一共走了 260 格（最近平均每段活 80 格；最近一次 2 分钟前）；现在背包里有 72 个矿石\/粗矿\/锭（实时）/);
-  assert.match(user, /其中粗矿块 8 个按块计，未折算成粗铁/, '粗矿块计入现有量但不装作粗铁');
+  assert.match(user, /粗矿块 8 个（背包\+记得的箱子合计）按块计，未折算成粗铁/, '粗矿块计入现有量但不装作粗铁');
   assert.ok(!user.includes('木料的历史账'), '挖矿意图不触发木料账');
   // 这一趟的下矿账已经在说当前所见，历史聚合不重复
   const withTrip = { ...base, activity: miningActivity, materials, trip: { minutes: 10, gained: { diamond: 1 }, nearEnd: true } };
