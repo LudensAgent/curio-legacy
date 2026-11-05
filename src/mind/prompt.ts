@@ -158,9 +158,11 @@ export function moveDirectory(): string {
   const core = visible.filter((s) => COMMON_MOVES.includes(s.name)).map((s) => s.name);
   const rest = visible.filter((s) => !COMMON_MOVES.includes(s.name)).map((s) => {
     const args = s.argsDoc && s.argsDoc !== '{}' ? s.argsDoc : '';
-    return `- ${s.name}${args ? ` ${args}` : ''}：${briefOf(s.description, 60)}`;
+    const purpose = s.description.replace(/\s+/g, ' ');
+    const short = purpose.length > 70 ? `${purpose.slice(0, 70)}…` : purpose;
+    return `- ${s.name}${args ? ` ${args}` : ''}：${short}`;
   });
-  return `常用动作（system 目录已给完整参数）：${core.join('、')}\n其余动作（完整参数）：\n${rest.join('\n')}`;
+  return `常用动作（system 目录已给完整参数和用途）：${core.join('、')}\n其余动作（参数和一句用途；完整副作用用 {"kind":"moves","names":["…"]} 再查）：\n${rest.join('\n')}`;
 }
 
 /** 完整参数（moves 查询用）；最多 12 个，多出来的明确提示分开查，不静默丢掉。 */
@@ -171,7 +173,7 @@ export function moveDetails(names: string[]): string {
   return shown.map((n) => {
     const s = SKILLS[n];
     if (LLM_HIDDEN.has(n)) return `- ${n}：不是可主动规划的动作`;
-    if (isSkillDisabled(n)) return `- ${n}：已禁用，先在面板启用`;
+    if (isSkillDisabled(n)) return `- ${n}：当前已禁用，不能调用`;
     return s ? `- ${s.name} ${s.argsDoc}：${s.description.replace(/\s+/g, ' ')}` : `- ${n}：没有这个动作`;
   }).join('\n') + more;
 }
@@ -801,8 +803,10 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
   const reminders = situationalReminders(ctx);
   // 进阶动作（下界/末地或已有末影物品才出现）和当前活动用到、目录里没给完整参数的动作：作为提醒补在 user 消息里，
   // system 目录保持字节稳定以命中前缀缓存（见 movesCatalog 注释）。
-  if (!glance && advanced) reminders.push(advancedMovesLine());
-  else if (glance) {
+  if (!glance && advanced) {
+    const line = advancedMovesLine();
+    if (line) reminders.push(line);
+  } else if (glance) {
     const active = [...new Set((ctx.activity?.steps ?? []).map((st) => st.skill))].filter((n) => !COMMON_MOVES.includes(n));
     if (active.length) reminders.push(`正在用的动作参数：\n${moveDetails(active)}`);
   }
