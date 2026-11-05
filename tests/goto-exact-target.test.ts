@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { goTo } from '../src/skills/movement.ts';
+import { AbortedError } from '../src/util.ts';
 import { makeCtx, TestWorld } from './survival-helpers.ts';
 
 test('goto accepts coordinate objects without turning them into landmark names', async (t) => {
@@ -69,6 +70,29 @@ test('an adjacent goto reports a freshly observed target door without claiming w
   assert.equal(result.status, 'succeeded');
   assert.match(result.summary, /目标格看到 oak_door，门目前打开，尚未确认它是否挡住路线/);
   assert.equal((result.data?.observedDoor as { properties: { open: boolean } }).properties.open, true);
+});
+
+test('goto cancellation keeps the measured partial position, request, resolved target and backend', async (t) => {
+  const adapter = new TestWorld();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  const ctx = makeCtx(adapter);
+  t.after(() => ctx.memory.close());
+  t.mock.method(adapter, 'moveTo', async () => {
+    adapter.pos = { x: 2.5, y: 64, z: 0.5 };
+    throw new AbortedError('task cancelled');
+  });
+  let caught: (Error & { partial?: { nav: Record<string, unknown>; originalRequest: unknown; backend: string } }) | undefined;
+  try { await goTo.run(ctx, { target: '10,64,0', dig: true }); } catch (e) { caught = e as typeof caught; }
+  assert.ok(caught, '取消仍向上抛 AbortedError，不伪造成功/失败结果');
+  const partial = caught.partial!;
+  assert.equal(partial.nav.outcome, 'CANCELLED');
+  assert.equal(partial.nav.confirmed, false);
+  assert.deepEqual(partial.nav.lastPosition, { x: 2.5, y: 64, z: 0.5 }, '保留取消前实测的最后位置');
+  assert.deepEqual(partial.nav.resolvedTarget, { x: 10, y: 64, z: 0 }, '解析目标不被取消改写');
+  assert.deepEqual(partial.originalRequest, { target: '10,64,0', dig: true });
+  assert.equal(partial.nav.backend, 'pathfinder');
+  assert.equal(partial.backend, 'pathfinder');
+  assert.ok((partial.nav.trace as unknown[]).length >= 2, '实际测到的分段位置作为 trace 保留');
 });
 
 test('goto cannot report arrival when pathfinding resolves without reaching the adjacent cell', async (t) => {

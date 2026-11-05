@@ -10,9 +10,11 @@ import { Vision } from '../src/perception/vision.ts';
 import { equipmentSkills } from '../src/skills/equipment.ts';
 import { SKILLS } from '../src/skills/index.ts';
 import { travelSkills, useEndGateway } from '../src/skills/travel.ts';
+import { travel } from '../src/skills/overland.ts';
 import { TravelStore, travelStore } from '../src/travel/store.ts';
-import { sleep } from '../src/util.ts';
+import { AbortedError, sleep } from '../src/util.ts';
 import { FakeAdapter } from './fake-adapter.ts';
+import { makeCtx, TestWorld } from './survival-helpers.ts';
 
 Object.assign(SKILLS, travelSkills, equipmentSkills);
 const setup = () => {
@@ -243,6 +245,42 @@ test('End gateway records actual same-session displacement and only verifies ret
   assert.equal((await run('use_end_gateway', { portalId: destination.id })).result.status, 'succeeded');
   assert.ok(travelStore(memory).snapshot(adapter.worldId).gateways.every((r) => r.returnVerified));
   assert.equal(adapter.inv.get('ender_pearl'), 0);
+});
+
+test('travel cancellation keeps the measured partial position, request, resolved target and backend', async (t) => {
+  const a = new TestWorld();
+  a.pos = { x: 0.5, y: 64, z: 0.5 };
+  const ctx = makeCtx(a);
+  t.after(() => ctx.memory.close());
+  t.mock.method(a, 'moveTo', async () => {
+    a.pos = { x: 2.5, y: 64, z: 0.5 };
+    throw new AbortedError('task cancelled');
+  });
+  let caught: (Error & { partial?: { nav: Record<string, unknown>; originalRequest: unknown; backend: string } }) | undefined;
+  try { await travel.run(ctx, { to: '10,64,0' }); } catch (e) { caught = e as typeof caught; }
+  assert.ok(caught, '取消仍保留 AbortedError 语义');
+  const partial = caught.partial!;
+  assert.equal(partial.nav.outcome, 'CANCELLED');
+  assert.equal(partial.nav.confirmed, false);
+  assert.deepEqual(partial.nav.lastPosition, { x: 2.5, y: 64, z: 0.5 });
+  assert.deepEqual(partial.nav.resolvedTarget, { x: 10, y: 64, z: 0 });
+  assert.deepEqual(partial.originalRequest, { to: '10,64,0' });
+  assert.equal(partial.nav.backend, 'land_water_plan');
+  assert.ok((partial.nav.trace as unknown[]).length >= 2);
+});
+
+test('travel does not substitute same-XZ/different-Y for a three-dimensional target', async (t) => {
+  const a = new TestWorld();
+  a.pos = { x: 0.5, y: 64, z: 0.5 };
+  const ctx = makeCtx(a);
+  t.after(() => ctx.memory.close());
+  const result = await travel.run(ctx, { to: '0,60,0' });
+  assert.equal(result.status, 'failed', result.summary);
+  assert.match(result.summary, /目标高度 60/);
+  assert.equal(result.data?.arrived, false);
+  assert.equal((result.data?.arrival as { satisfied: boolean }).satisfied, false);
+  assert.equal((result.data?.nav as { outcome: string }).outcome, 'NO_PATH');
+  assert.deepEqual(result.data?.resolvedTarget, { x: 0, y: 60, z: 0 }, '原三维目标不被水平接近替换');
 });
 
 test('a pearl use without observed teleport cannot become an outer-island success', async () => {
