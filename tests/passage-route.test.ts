@@ -4,6 +4,7 @@ import type { MoveTarget, Vec3Like } from '../src/adapter/types.ts';
 import { passageDeepestAnchor, passageNext, passageRoute, passageSurfaceAnchor } from '../src/memory/passages.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { followPassage, goTo } from '../src/skills/movement.ts';
+import { AbortedError } from '../src/util.ts';
 import { makeCtx, TestWorld } from './survival-helpers.ts';
 
 // 一条 L 形矿道：从 (0,40,0) 往东到 (12,40,0)，再往南到 (12,40,12)；另一条从 (12,40,6) 往东岔出去
@@ -188,6 +189,37 @@ test('follow_passage 接不到矿道（moveTo 过不去）时报失败', async (
   const result = await followPassage.run(ctx, { to: 'entrance' });
   assert.equal(result.status, 'failed');
   assert.equal(result.failureCode, 'PATH_NOT_FOUND');
+});
+
+test('follow_passage cancellation preserves the measured partial position and its own backend', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 40, z: 0.5 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  memory.savePassage({ id: 'flat', worldId: w.worldId, dim: w.dim, kind: 'dug', entrances: [{ x: 8, y: 41, z: 0 }],
+    deepestY: 40, dug: 8, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1,
+    path: [{ x: 0, y: 40, z: 0 }, { x: 4, y: 40, z: 0 }, { x: 8, y: 40, z: 0 }] });
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  let cancelledAt: Vec3Like | undefined;
+  t.mock.method(w, 'moveTo', async (goal: { kind: string; pos?: Vec3Like }) => {
+    if (goal.kind === 'near' && goal.pos) {
+      cancelledAt = { x: goal.pos.x + 0.5, y: goal.pos.y, z: goal.pos.z + 0.5 };
+      w.pos = cancelledAt;
+      throw new AbortedError('task cancelled');
+    }
+  });
+  let caught: (Error & { partial?: { nav: Record<string, unknown>; originalRequest: unknown; backend: string } }) | undefined;
+  try { await followPassage.run(ctx, { to: 'entrance' }); } catch (e) { caught = e as typeof caught; }
+  assert.ok(caught, '取消仍抛出 AbortedError');
+  const partial = caught.partial!;
+  assert.equal(partial.nav.outcome, 'CANCELLED');
+  assert.equal(partial.nav.confirmed, false);
+  assert.deepEqual(partial.nav.lastPosition, cancelledAt, '保留取消前实测位置');
+  assert.deepEqual(partial.originalRequest, { to: 'entrance' });
+  assert.equal(partial.nav.backend, 'pathfinder_waypoints');
+  assert.ok(partial.nav.resolvedTarget, '旧矿道锚点作为解析目标保留');
+  assert.ok((partial.nav.trace as unknown[]).length >= 2);
 });
 
 test('goto cannot use old passage points to bypass missing visual navigation', async (t) => {

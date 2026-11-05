@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { EventBus } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
+import { ride } from '../src/skills/actions.ts';
 import { planBoatRoute } from '../src/skills/vehicles.ts';
+import { AbortedError } from '../src/util.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
 
@@ -25,6 +27,29 @@ test('planBoatRoute treats a 1-wide gap as impassable instead of a costly shortc
   assert.ok(route, '起点在水上，应能规划出路线');
   assert.ok(route.waypoints.every((w) => !(Math.floor(w.x) === 10 && Math.floor(w.z) === 0)), '不应穿过 1 格宽的缝');
   assert.equal(route.reach, 'partial', '缝挤不过去，水路到不了对岸，应如实报 partial');
+});
+
+test('ride cancellation keeps the measured partial position and original boat request', async (t) => {
+  const a = new FakeAdapter();
+  walledLake(a);
+  a.pos = { x: 5.5, y: 63.9, z: 0.5 };
+  a.riding = 'oak_boat';
+  const ctx = makeCtx(a);
+  t.after(() => ctx.memory.close());
+  t.mock.method(a, 'ride', async () => {
+    a.pos = { x: 7.5, y: 63.9, z: 0.5 };
+    throw new AbortedError('task cancelled');
+  });
+  let caught: (Error & { partial?: { nav: Record<string, unknown>; originalRequest: unknown; backend: string } }) | undefined;
+  try { await ride.run(ctx, { to: { x: 15.5, z: 0.5 }, distance: 48 }); } catch (e) { caught = e as typeof caught; }
+  assert.ok(caught, '取消仍抛出 AbortedError');
+  const partial = caught.partial!;
+  assert.equal(partial.nav.outcome, 'CANCELLED');
+  assert.equal(partial.nav.confirmed, false);
+  assert.deepEqual(partial.nav.lastPosition, { x: 7.5, y: 63.9, z: 0.5 });
+  assert.deepEqual(partial.nav.resolvedTarget, { x: 15.5, z: 0.5 });
+  assert.deepEqual(partial.originalRequest, { to: { x: 15.5, z: 0.5 }, distance: 48 });
+  assert.equal(partial.nav.backend, 'vehicle_ride');
 });
 
 test('planBoatRoute still crosses a 2-wide channel', () => {

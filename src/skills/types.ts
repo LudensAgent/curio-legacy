@@ -155,6 +155,66 @@ export function runSkill<A>(ctx: SkillCtx, skill: Skill<A>, args: A & { make?: b
   });
 }
 
+/** 导航结局沿用库的分类；具体地形/能力缺口另放字段，不混成一个大枚举。 */
+export type NavOutcome = 'ARRIVED' | 'PARTIAL' | 'NO_PATH' | 'BLOCKED' | 'CANCELLED' | 'TIMEOUT' | 'FAILED';
+
+/** 到点类入口共用的验收事实：原请求、选定后端、解析目标、实际测量与完成条件。 */
+type NavFacts = {
+  backend: string;
+  originalRequest: Record<string, unknown>;
+  resolvedTarget?: { x: number; y?: number; z: number };
+  outcome: NavOutcome;
+  /** 最后实测位置；取消时也不能用请求坐标冒充。 */
+  position?: Vec3Like | null;
+  measuredAt?: number;
+  trace?: Vec3Like[];
+  arrival?: Record<string, unknown>;
+};
+
+/**
+ * 统一导航回执：成功、失败、部分进展都带同一份 data.nav，确认状态由结局推导。
+ * 只整理调用方已测到的事实，不推断未见地形或补齐坐标。
+ */
+export function navReceipt(result: SkillResult, nav: NavFacts): SkillResult {
+  const position = nav.position ? { ...nav.position } : undefined;
+  const resolvedTarget = nav.resolvedTarget ? { ...nav.resolvedTarget } : undefined;
+  const measuredAt = nav.measuredAt ?? Date.now();
+  return {
+    ...result,
+    data: {
+      ...(result.data ?? {}),
+      originalRequest: nav.originalRequest,
+      ...(resolvedTarget ? { resolvedTarget } : {}),
+      backend: nav.backend,
+      ...(position ? { position } : {}),
+      ...(nav.arrival ? { arrival: nav.arrival } : {}),
+      nav: {
+        outcome: nav.outcome,
+        confirmed: nav.outcome === 'ARRIVED',
+        backend: nav.backend,
+        originalRequest: nav.originalRequest,
+        ...(resolvedTarget ? { resolvedTarget } : {}),
+        ...(position ? { lastPosition: position } : {}),
+        measuredAt,
+        ...(nav.arrival ? { arrival: nav.arrival } : {}),
+        ...(nav.trace?.length ? { trace: nav.trace.slice(-24).map((p) => ({ ...p })) } : {}),
+      },
+    },
+  };
+}
+
+/**
+ * 取消时把已测到的部分事实挂到 AbortError.partial；Arbiter/use_skill 会把它变成
+ * cancelled 结果的数据，仍保留取消语义，不伪造成功或当前站位。
+ */
+export function cancelledNav(error: unknown, nav: Omit<NavFacts, 'outcome'>): unknown {
+  const target = error as Error & { partial?: Record<string, unknown> };
+  const receipt = navReceipt({ status: 'cancelled', summary: '' }, { ...nav, outcome: 'CANCELLED' });
+  const previous = target.partial && typeof target.partial === 'object' ? target.partial : {};
+  target.partial = { ...previous, ...(receipt.data ?? {}) };
+  return target;
+}
+
 export const ok = (summary: string, data?: Record<string, unknown>, caveat?: string): SkillResult => ({ status: 'succeeded', summary, data, ...(caveat ? { caveat } : {}) });
 export const fail = (failureCode: FailureCode, summary: string, data?: Record<string, unknown>): SkillResult => ({
   status: 'failed',
