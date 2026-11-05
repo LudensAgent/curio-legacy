@@ -4,7 +4,7 @@ import { durabilityFacts, fuelFacts, oreOpportunityFact, supplyFacts } from '../
 import type { AudienceContext } from '../live/audience.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { dirName, durationText, realSecondsToTicks, sunText, type Percept } from '../perception/perception.ts';
-import { isSoftBlock } from '../perception/surroundings.ts';
+import { isSoftBlock, LIQUID_BLOCKS } from '../perception/surroundings.ts';
 import { audienceBlock, AUDIENCE_RULES, exploredAround, liveAudience, type MySkillInfo } from '../planner/prompt.ts';
 import type { ChatMessage } from '../planner/llm.ts';
 import { isSkillDisabled } from '../skills/disabled.ts';
@@ -326,6 +326,15 @@ const MINING_INTENT = /下矿|矿道|矿洞|找铁|挖铁|找矿|挖矿|粗铁|�
 /** 打算里说要从地下回地面 */
 const SURFACE_INTENT = /回地面|回到地面|回前哨|回基地|回入口|退回入口|回地表|见天|爬出|挖出去|出矿|上地面|上到地面|往上爬|往上走|往上挖|挖(阶梯|台阶).{0,8}上/;
 
+/** 支撑格是实心：站在这里不会马上掉下去；未观测（null）不当作空气。 */
+const solidSupport = (n: string | null) => n !== null && !isSoftBlock(n) && !LIQUID_BLOCKS.has(n);
+/** 脚/头两格可走时，按下方支撑格给出「能直接走/要垫或下落/未观测」的当前事实。 */
+function stepSupportFact(support: string | null): string {
+  if (solidSupport(support)) return '，可以直接走过去';
+  if (support === null) return '，下方支撑格未观测';
+  return `；下一步落脚点下方是 ${support}，走过去需要垫或下落（由你定）`;
+}
+
 /** 沿来路回入口的下一步：把全部记下的通道连成网（碎片也接得上），取朝地表锚点走的下一个路点，核对下一步那两格（脚下+头顶）现在是否还通，给出「可走/被堵」的当前事实。 */
 function passageWayBack(ctx: MindContext): string | null {
   const p = ctx.percept, s = ctx.state;
@@ -344,8 +353,11 @@ function passageWayBack(ctx: MindContext): string | null {
   const pos = `${Math.round(next.x)},${Math.round(next.y)},${Math.round(next.z)}`;
   const kind = g.kind === 'walked' ? '走过的路' : g.kind === 'bridge' ? '我搭的桥' : '自己挖过的旧矿道';
   const along = g.inside ? `你正沿着${kind}` : `附近有${kind}，朝它回入口的方向走`;
-  const follow = g.inside ? '；也可以 follow_passage {"to":"entrance"} 让我沿这条旧矿道带路' : '；也可以 follow_passage {"to":"entrance","dig":true} 让我挖开挡路、接回旧矿道带路';
-  if (open(foot) && open(head)) return `${along}；沿它回入口的下一步 (${pos}) 现在仍是 2 格高的空走廊，可以直接走过去${follow}`;
+  const follow = g.inside ? '；也可以 follow_passage {"to":"entrance"} 让我沿这条旧矿道带路' : '；也可以 follow_passage {"to":"entrance","dig":true} 让我挖开挡路、接回旧矿道带路（dig:true 会消耗方块和工具耐久）';
+  if (open(foot) && open(head)) {
+    const support = at(next.x, next.y - 1, next.z);
+    return `${along}；沿它回入口的下一步 (${pos}) 现在仍是 2 格高的空走廊${stepSupportFact(support)}${follow}`;
+  }
   const reason = !open(foot) ? `脚下那格现在是 ${foot ?? '未加载'}` : `头顶那格现在是 ${head ?? '未加载'}`;
   return `${along}；沿它回入口的下一步 (${pos}) 被堵了：${reason}。挖开这一格、还是改走别的路，由你定${follow}`;
 }
@@ -368,8 +380,11 @@ function passageWayDown(ctx: MindContext): string | null {
   const pos = `${Math.round(next.x)},${Math.round(next.y)},${Math.round(next.z)}`;
   const kind = g.kind === 'walked' ? '走过的路' : g.kind === 'bridge' ? '我搭的桥' : '自己挖过的旧矿道';
   const along = g.inside ? `你正沿着${kind}` : `附近有${kind}，朝它最深处走`;
-  const follow = g.inside ? '；也可以 follow_passage {"to":"deepest"} 让我沿这条旧矿道带路' : '；也可以 follow_passage {"to":"deepest","dig":true} 让我挖开挡路、接回旧矿道带路';
-  if (open(foot) && open(head)) return `${along}；沿它往最深处走的下一步 (${pos}) 现在仍是 2 格高的空走廊，可以直接走过去${follow}`;
+  const follow = g.inside ? '；也可以 follow_passage {"to":"deepest"} 让我沿这条旧矿道带路' : '；也可以 follow_passage {"to":"deepest","dig":true} 让我挖开挡路、接回旧矿道带路（dig:true 会消耗方块和工具耐久）';
+  if (open(foot) && open(head)) {
+    const support = at(next.x, next.y - 1, next.z);
+    return `${along}；沿它往最深处走的下一步 (${pos}) 现在仍是 2 格高的空走廊${stepSupportFact(support)}${follow}`;
+  }
   const reason = !open(foot) ? `脚下那格现在是 ${foot ?? '未加载'}` : `头顶那格现在是 ${head ?? '未加载'}`;
   return `${along}；沿它往最深处走的下一步 (${pos}) 被堵了：${reason}。挖开这一格、还是改走别的路，由你定${follow}`;
 }
@@ -482,7 +497,7 @@ export function situationalReminders(ctx: MindContext): string[] {
     if (layers) out.push(layers);
     // 往下挖有稳定辅助：手工 dig_at[1,-1,0]+step 的斜下格支撑超出 place_at 范围，容易卡住
     const stairFails = (ctx.recentActionFailures ?? []).filter((f) => (f.skill === 'step' || f.skill === 'dig_at') && f.failure_code === 'PATH_NOT_FOUND');
-    out.push(`下矿有稳定下行辅助：excavate_path {"entry":"current","mode":"stairs","direction":"…","steps":4}（逐格确认工具、地板、头部空间、干燥和真实落地，遇水/岩浆/沙砾不冒险）或 assess_landings + descend${stairFails.length >= 2 ? '；刚才 step/dig_at 连续走不通——这是手工阶梯的固有限制：斜下格支撑超出 place_at 范围，容易卡住' : ''}`);
+    out.push(`下矿有稳定下行辅助：excavate_path {"entry":"current","mode":"stairs","direction":"…","steps":4}（逐格确认工具、地板、头部空间、干燥和真实落地，遇水/岩浆/沙砾不冒险）或 assess_landings + descend${stairFails.length >= 2 ? '；刚才 step/dig_at 连续走不通——这是手工阶梯的固有限制：斜下格支撑超出 place_at 范围，容易卡住' : ''}；旧矿道可用时 follow_passage 也是现成路线；follow_passage 只有带 dig:true 才会沿线挖开/垫（会消耗方块和工具耐久），也可以自己 dig_at / place_at`);
     const tunnels = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).filter((f) => f.dist <= 160).slice(0, 2);
     for (const t of tunnels) {
       out.push(`记得自己${t.text}`);
