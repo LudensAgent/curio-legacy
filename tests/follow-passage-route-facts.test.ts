@@ -434,57 +434,6 @@ test('站在箱子上、记录脚格=chest 时不误报并调用 moveTo', async 
   assert.equal(result.data?.blockedWaypoint, undefined);
 });
 
-test('blockOptics 的 bottom slab 形状让非 allowlist 脚格放行', async (t) => {
-  const w = new TestWorld();
-  w.pos = { x: 0.5, y: 40, z: 0.5 };
-  const memory = new WorldMemory(null);
-  memory.setWorld(w.worldId);
-  save(memory, w, 'shape-floor', [{ x: 0, y: 40, z: 0 }, { x: 4, y: 40, z: 0 }, { x: 8, y: 40, z: 0 }, { x: 12, y: 40, z: 0 }], { x: 12, y: 41, z: 0 });
-  w.setBlock({ x: 4, y: 40, z: 0 }, 'stone_slab');
-  w.blockProperties.set('4,40,0', { type: 'bottom' });
-  // composter 不在名称 allowlist 里，靠 blockOptics 的 0.5 高顶面放行。
-  w.setBlock({ x: 8, y: 40, z: 0 }, 'composter');
-  const originalOptics = w.blockOptics.bind(w);
-  t.mock.method(w, 'blockOptics', (x: number, y: number, z: number) => {
-    if (x === 8 && y === 40 && z === 0) return { name: 'composter', kind: 'solid' as const, shapes: [[0, 0, 0, 1, 0.5, 1]] as const };
-    return originalOptics(x, y, z);
-  });
-  const ctx = makeCtx(w, { memory });
-  t.after(() => memory.close());
-  const moves: Vec3Like[] = [];
-  t.mock.method(w, 'moveTo', async (goal: any) => { if (goal.kind === 'near') { moves.push(goal.pos); w.pos = { ...goal.pos }; } });
-
-  const result = await followPassage.run(ctx as never, { to: 'entrance' });
-
-  assert.equal(result.status, 'succeeded', result.summary);
-  assert.ok(moves.some((p) => p.x === 4 && p.y === 40), 'bottom slab 脚格应允许');
-  assert.ok(moves.some((p) => p.x === 8 && p.y === 40), 'blockOptics 显示半高顶面时应允许');
-  assert.equal(result.data?.blockedWaypoint, undefined);
-});
-
-test('blockOptics 显示满块顶面时不被名字放行', async (t) => {
-  const w = new TestWorld();
-  w.pos = { x: 0.5, y: 40, z: 0.5 };
-  const memory = new WorldMemory(null);
-  memory.setWorld(w.worldId);
-  save(memory, w, 'full-shape', [{ x: 0, y: 40, z: 0 }, { x: 4, y: 40, z: 0 }, { x: 8, y: 40, z: 0 }], { x: 8, y: 41, z: 0 });
-  w.setBlock({ x: 4, y: 40, z: 0 }, 'composter');
-  const originalOptics = w.blockOptics.bind(w);
-  t.mock.method(w, 'blockOptics', (x: number, y: number, z: number) => {
-    if (x === 4 && y === 40 && z === 0) return { name: 'composter', kind: 'solid' as const, shapes: [[0, 0, 0, 1, 1, 1]] as const };
-    return originalOptics(x, y, z);
-  });
-  const ctx = makeCtx(w, { memory });
-  t.after(() => memory.close());
-  const moves = t.mock.method(w, 'moveTo', async (goal: any) => { if (goal.kind === 'near') w.pos = { ...goal.pos }; });
-
-  const result = await followPassage.run(ctx as never, { to: 'entrance' });
-
-  assert.equal(result.status, 'failed');
-  assert.match(result.summary, /脚格 \(4,40,0\) 是 composter/);
-  assert.equal(moves.mock.callCount(), 0);
-});
-
 test('第 1 个路点不可达、第 2 个可达：跳过一次并记录 skippedWaypoints', async (t) => {
   const w = new TestWorld();
   w.pos = { x: 0.5, y: 40, z: 0.5 };

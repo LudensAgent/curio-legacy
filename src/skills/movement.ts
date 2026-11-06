@@ -899,13 +899,8 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
       const OPENABLE = /(_door|_fence_gate|_trapdoor)$/;
       // 非满高但顶面可站：半砖/楼梯/床/地毯/雪层，以及碰撞高 <1 的箱子/耕地/土径/灵魂沙。
       const PARTIAL_FLOOR = /(_slab|_stairs|_bed|_carpet)$|^(snow|chest|trapped_chest|ender_chest|farmland|dirt_path|soul_sand)$/;
-      // blockOptics 有碰撞盒时用最高顶面判断：undefined=没有形状信息，null=空形状，数字=顶面高度。
-      const shapeTop = (p: Vec3Like): number | null | undefined => {
-        const shapes = adapter.blockOptics?.(p.x, p.y, p.z)?.shapes;
-        if (!shapes) return undefined;
-        return shapes.length ? Math.max(...shapes.map((s) => s[4])) : null;
-      };
       // 脚/头格：true=可占用，false=已观测为占不了，null=未知。
+      // 只用 blockAt/blockStateAt 这类允许的感官接口；blockOptics 是禁用的透视接口，技能里不能调用。
       const occupiableCell = (p: Vec3Like): boolean | null => {
         const name = blockNameAt(p);
         if (name === null) return null;
@@ -913,35 +908,24 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
         if (isSoftBlock(name) && !PARTIAL_FLOOR.test(name)) return true;
         if (CLIMBABLE.test(name) || OPENABLE.test(name)) return true;
         if (PARTIAL_FLOOR.test(name)) {
-          // 半砖/楼梯的 top/upper 状态决定脚格是否被上半格占住，不能只看碰撞盒最高点。
+          // 半砖/楼梯的 top/upper 状态决定脚格是否被上半格占住。
           if (name.endsWith('_slab') || name.endsWith('_stairs')) {
             const props = blockPropsAt(p);
             if (name.endsWith('_slab') && props.type === 'double') return false;
             const top = name.endsWith('_slab') ? props.type === 'top' : props.half === 'top';
             return !top;
           }
-          const top = shapeTop(p);
-          if (top !== undefined) return top !== null && top < 0.999;
           return true;
         }
-        const top = shapeTop(p);
-        if (top !== undefined) return top !== null && top < 0.999;
-        return false; // 没有形状信息的观测整块实心
+        return false; // 观测到的整块实心
       };
       // 支撑格：true=可站立/可攀，false=已观测为不可站，null=未知。
       const standableCell = (p: Vec3Like): boolean | null => {
         const name = blockNameAt(p);
         if (name === null) return null;
         if (LIQUID_BLOCKS.has(name)) return false;
-        if (CLIMBABLE.test(name) || OPENABLE.test(name)) return true;
-        if (isSoftBlock(name) && !PARTIAL_FLOOR.test(name)) return false;
-        const top = shapeTop(p);
-        if (PARTIAL_FLOOR.test(name)) {
-          if (top !== undefined) return top !== null && top > 0;
-          return true;
-        }
-        if (top !== undefined) return top !== null && top > 0;
-        return true; // 没有形状信息：观测到的整块实心按可站处理
+        if (CLIMBABLE.test(name) || OPENABLE.test(name) || PARTIAL_FLOOR.test(name)) return true;
+        return !isSoftBlock(name);
       };
       // 下半格/床/箱子这类可站顶面：站上去时记录 cell 就是这块方块本身，支撑在脚格里，不在 y-1。
       const footSelfSupport = (feet: Vec3Like) => {
