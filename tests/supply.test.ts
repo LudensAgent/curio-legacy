@@ -174,6 +174,20 @@ test('toolTierFact：便宜镐快坏了，报做一把的真实缺口（木棍/�
   assert.match(noLog.key, /craft:/);
 });
 
+test('toolTierFact：材料只在箱子里时，不说“背包里已经够了”', () => {
+  const inv = [item('diamond_pickaxe', 1), item('diamond', 0), item('stick', 1)];
+  const f = toolTierFact({
+    inventory: inv,
+    stock: [row('cobblestone', 156), row('stick', 8)],
+    digging: true,
+  })!;
+  assert.ok(f);
+  assert.match(f.text, /箱子里够，但背包里还差/);
+  assert.match(f.text, /cobblestone×3/);
+  assert.match(f.text, /先 take_items 取回再合成/);
+  assert.doesNotMatch(f.text, /再做一把石镐：做 stone_pickaxe×1 的材料已经够了/);
+});
+
 test('toolTierFact：没有便宜镐、也做不出便宜镐时仍报真实缺口，不沉默', () => {
   const f = toolTierFact({ inventory: [item('iron_pickaxe', 1), item('iron_ingot', 0)], digging: true })!;
   assert.ok(f, '线上“石镐没补”的场景不能因为没有现成便宜镐就不提');

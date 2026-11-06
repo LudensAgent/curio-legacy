@@ -301,7 +301,11 @@ export const goTo: Skill<{ target: string; dig?: boolean; place?: boolean; tower
         const here = ctx.adapter.state().pos;
         const plan = planTravel((p) => ctx.adapter.blockAt(p), here, d.target, { canBoat: false, maxNodes: 8000, margin: 16 });
         if (plan && !plan.reached && plan.why) {
-          const climbHint = plan.climbed && args.place !== true && args.dig !== true ? '；可加 dig:true 授权挖墙和垫方块爬坡' : '';
+          const towerAllowed = (args.place ?? !!args.dig) && (args.tower ?? !!args.dig);
+          const climbHint = !plan.climbed || towerAllowed ? ''
+            : args.dig === true ? '；已允许挖墙/垫路，但 tower:false 关闭了原地搭柱；要爬 2 格以上可去掉 tower:false 或改 tower:true'
+              : args.place === true ? '；已允许垫路；要爬 2 格以上还需加 tower:true 原地搭柱（会消耗方块）'
+                : '；可加 dig:true 授权挖墙和垫方块爬坡，或 place:true+tower:true 原地搭柱';
           r = { ...r, summary: `${r.summary}（看地形：${plan.why}${climbHint}）` };
         }
       } catch { /* 诊断不了就照原样 */ }
@@ -1245,9 +1249,11 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest' | 'farthest'; id?
       // 走完记录的路点 ≠ 到达参考点：按实测位置和三维距离分别报告。
       const arrived = dist3(end, target) <= 2;
       const place = arrived ? `到达${goal}参考点附近` : `离${goal}参考点约 ${remaining} 格`;
+      // 回入口成功时再提醒一次：记录入口只是当前连通分量的锚点，不一定是 Agent 想去的门厅/传送门。
+      const entranceCaveat = back ? '；这是当前连通分量的记录入口，不一定是门厅/传送门；要回具体地点用 goto/travel_portal' : '';
       const archiveNote = archivedCount ? `；其中 ${archivedCount} 条来自历史归档，只算旧几何，沿途已按当前方块逐段尝试` : '';
       const adjustedNote = supportAdjusted.length ? `；支撑修正 ${supportAdjusted.length} 处（记录点悬空/装饰方块，已落到实际楼面）` : '';
-      return receipt(ok(`沿${kind}${back ? '回入口' : '下最深'}走完了记下的 ${route.length} 个脚点，现在站在 (${end.x.toFixed(1)},${end.y.toFixed(1)},${end.z.toFixed(1)})，${place}（再往前没有记过的路，剩下的自己看）${archiveNote}${deeper}${skippedWaypoints.length ? `；跳过了不可达路点 ${skippedWaypoints.map(atText).join('、')}` : ''}${adjustedNote}`, { position: end, remaining, target, arrived, walkedWaypoints: route.length, archivedCount, routeFacts, rescueCount, ...skippedData(), ...adjustedData() }));
+      return receipt(ok(`沿${kind}${back ? '回入口' : '下最深'}走完了记下的 ${route.length} 个脚点，现在站在 (${end.x.toFixed(1)},${end.y.toFixed(1)},${end.z.toFixed(1)})，${place}（再往前没有记过的路，剩下的自己看）${entranceCaveat}${archiveNote}${deeper}${skippedWaypoints.length ? `；跳过了不可达路点 ${skippedWaypoints.map(atText).join('、')}` : ''}${adjustedNote}`, { position: end, remaining, target, arrived, walkedWaypoints: route.length, archivedCount, routeFacts, rescueCount, ...skippedData(), ...adjustedData() }));
     } catch (e) {
       // 取消仍抛 AbortedError，但已测到的最后位置、原请求、锚点与后端随 partial 保留。
       if (isAbort(e)) throw cancelledNav(e, {

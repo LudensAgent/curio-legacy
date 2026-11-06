@@ -360,7 +360,14 @@ export function toolTierFact(input: {
   if (heldPick) parts.push(`现在主手是 ${heldPick}`);
   // 便宜镐能不能补、补一把要什么，是和高阶镐“坏了没得补”对照的关键事实；即使现有便宜镐还可用也报，
   // 否则很容易被理解成“石镐是稀缺备份，留着别用”。
-  parts.push(`再做一把${cheapZh}：${describePlan(choice.plan)}`);
+  // 背包和箱子分开算：箱子里有材料不等于现在能做；否则会提示“材料已经够了”，
+  // 而 craft 立刻报缺料，Agent 在箱子和合成之间来回空转。
+  const bagPlan = materialPlan(`${choice.tier}_pickaxe`, 1, inv.filter((i) => i.name !== `${choice.tier}_pickaxe`));
+  const bagGap = bagPlan.raw.map((r) => r.anyWood ? `原木×${r.count}（哪种都行）` : `${r.item}×${r.count}`).join('、');
+  const pickPlanText = bagPlan.enough ? describePlan(choice.plan)
+    : choice.plan.enough ? `箱子里够，但背包里还差 ${bagGap}；先 take_items 取回再合成`
+      : describePlan(choice.plan);
+  parts.push(`再做一把${cheapZh}：${pickPlanText}`);
   parts.push(scope);
   // 稀缺材料 < 3 时高阶镐是不可补的；把“哪把坏了没得补、哪把能补”直接对照出来
   if (scarce < 3) parts.push(`${highZh}坏了做不出新的；${cheapZh}坏了能再做`);
